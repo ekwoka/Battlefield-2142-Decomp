@@ -1,0 +1,1082 @@
+// Bots: AIDLL.dll's behaviour selection, sensing, aiming and strategy
+// (src/AI/Behaviour, src/AI/Strategy, src/Game/Bots), checked against
+// values derived from the decompilation; and, where $BF2142_GAME_DIR is
+// set, the game's own AI scripts and a round on Cerbere_Landing (gpm_sp).
+#include "AI/Behaviour.h"
+#include "AI/NavMesh.h"
+#include "AI/PathFollower.h"
+#include "AI/Strategy.h"
+#include "Console/Console.h"
+#include "Console/ConsoleBinding.h"
+#include "Game/Bots.h"
+#include "Game/GameWorld.h"
+#include "IO/File/FileManager.h"
+#include "Physics/CollisionTemplateManager.h"
+#include "Terrain/Heightmap.h"
+#include "TestMain.h"
+#include "World/Object.h"
+#include "World/ObjectTemplateManager.h"
+#include "World/TemplateFiles.h"
+#include "World/WorldConsole.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+using namespace dice::hfe;
+
+namespace {
+
+bool near(float a, float b, float eps = 1e-4f) { return std::fabs(a - b) <= eps; }
+
+// The bot manager's frames for a while: a bot runs its plan on about half
+// of them, thinks after 0.3 s (0.5 s with a plan) of them and senses when
+// its turn comes (0x100c91c0, 0x100c95f0, 0x100c9980).
+void settle(game::BotManager& bots, float seconds, game::GameWorld* world = nullptr)
+{
+	for (int tick = 0; tick < static_cast<int>(seconds * 30); ++tick) {
+		bots.update(1 / 30.0f);
+		if (world) {
+			world->tick(1 / 30.0f);
+		}
+	}
+}
+
+// The Infantery set and modifier sets of AI/AIBehaviours.ai.
+game::BotSettings scriptedSettings(Console& console)
+{
+	game::BotSettings settings;
+	game::registerBotConsoleMethods(console, settings);
+	std::string out;
+	for (const char* line : {"aiSettings.createBehaviourModifiers UnitWeights", "aiSettings.setBehaviourModifier Idle 1.0",
+			 "aiSettings.createBehaviourModifiers StandardWeights", "aiSettings.setBehaviourModifier Avoid 1.0",
+			 "aiSettings.setBehaviourModifier MoveTo 1.0", "aiSettings.setBehaviourModifier Idle 0.1",
+			 "aiSettings.setBehaviourModifier Fire 7.5", "aiSettings.setBehaviourModifier Change 1.9",
+			 "aiSettings.setBehaviourModifier Revive 3.0", "aiSettings.createBehaviourModifiers AvoidInhibit",
+			 "aiSettings.setBehaviourModifier MoveTo 0.3", "aiSettings.setBehaviourModifier MedicAssist 0.5",
+			 "aiSettings.createUCConstant UCUnion 1.0", "aiSettings.createUCLinear UCFire -0.22 1.3",
+			 "aiSettings.createUCXInverse UCScout 2.5 0.9 1.0 0.5",
+			 "aiSettings.setVehicleBehaviour Infantery Avoid BBAvoid BBPAvoidCollisionInfantery 1 UCUnion AvoidInhibit",
+			 "aiSettings.setVehicleBehaviour Infantery MoveTo BBMoveTo BBPGotoWaypointInfantery 4 UCUnion UnitWeights",
+			 "aiSettings.setVehicleBehaviour Infantery Idle BBIdle BBPIdleInfantery 5 UCUnion UnitWeights",
+			 "aiSettings.setVehicleBehaviour Infantery Fire BBFireInfantery BBPFireInfantery 4 UCFire UnitWeights",
+			 "aiSettings.setVehicleDefaultBehaviour Infantery Idle"}) {
+		console.execute(line, out);
+	}
+	return settings;
+}
+
+// scriptedSettings plus the Infantery set's assist behaviours and
+// StandardWeights' MedicAssist 3 (AI/AIBehaviours.ai).
+game::BotSettings assistSettings(Console& console)
+{
+	game::BotSettings settings = scriptedSettings(console);
+	std::string out;
+	for (const char* line : {"aiSettings.setVehicleBehaviour Infantery MedicAssist BBMedicAssist BBPMedicAssist 10 UCUnion UnitWeights",
+			 "aiSettings.setVehicleBehaviour Infantery AmmoAssist BBAmmoAssist BBPAmmoAssist 12 UCUnion UnitWeights",
+			 "aiSettings.setVehicleBehaviour Infantery RepairVehicle BBRepairVehicle BBPRepairVehicle 10 UCUnion UnitWeights",
+			 "aiSettings.setVehicleBehaviour Infantery c4 BBC4 BBPC4 11 UCUnion UnitWeights"}) {
+		console.execute(line, out);
+	}
+	settings.modifiers["StandardWeights"]["MedicAssist"] = 3;
+	return settings;
+}
+
+// Flat ground, a control point per team 200 m apart (PAC's at +x), rifles
+// that kill in three hits, and bots placed where a test wants them.
+struct Field {
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	io::FileManager files;
+	physics::CollisionTemplateManager collisionTemplates;
+	std::unique_ptr<game::GameWorld> world;
+	std::vector<std::string> events;
+
+	Field()
+	{
+		templates.registerType(3, "Soldier");
+		for (const char* name : {"us_light_soldier", "pac_light_soldier"}) {
+			templates.create("Soldier", name)->settings()["armor.maxHitPoints"] = "100";
+		}
+		for (const char* name : {"eu_ar_rifle", "as_ar_rifle"}) {
+			world::ObjectTemplate* rifle = templates.create("GenericFireArm", name);
+			rifle->settings()["itemIndex"] = "3";
+			rifle->settings()["projectileTemplate"] = "bullet";
+			rifle->settings()["velocity"] = "300";
+			rifle->settings()["fire.roundsPerMinute"] = "600";
+			rifle->settings()["ammo.magSize"] = "30";
+			rifle->settings()["ammo.nrOfMags"] = "50";
+		}
+		templates.create("GenericProjectile", "bullet")->settings()["damage"] = "40";
+		for (int team = 1; team <= 2; ++team) {
+			world::ObjectTemplate* point = templates.create("ControlPoint", team == 1 ? "cp_pac" : "cp_eu");
+			point->settings()["controlPointId"] = std::to_string(team);
+			point->settings()["team"] = std::to_string(team);
+			point->settings()["unableToChangeTeam"] = "1";
+			objects.create(point, {team == 1 ? 100.0f : -100.0f, 0, 0});
+		}
+		world::ObjectTemplate* spawn = templates.create("SpawnPoint", "sp");
+		objects.create(spawn, {0, 0, 20}, {90, 0, 0})->setControlPointId(1);
+		objects.create(spawn, {0, 0, 0}, {0, 0, 0})->setControlPointId(2);
+		world = std::make_unique<game::GameWorld>(templates, objects);
+		world->enablePhysics(files, collisionTemplates,
+			{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
+				 normal = {0, 1, 0};
+				 return 0.0f;
+			 }});
+		world->setEventSink([this](const std::string& event, const game::ScriptArgs&) { events.push_back(event); });
+		world->autoRespawn = false;
+		world->startRound();
+	}
+	int soldier(int team, bool ai, float x, float z)
+	{
+		const int id = world->addPlayer(team == 1 ? "Pac" : "Eu", team, ai);
+		world->spawnSoldier(id);
+		game::GameWorld::PlayerInfo info;
+		world->playerInfo(id, info);
+		world->setSoldierPosition(info.soldier, {x, 0, z});
+		return id;
+	}
+	void move(int player, float x, float z)
+	{
+		game::GameWorld::PlayerInfo info;
+		world->playerInfo(player, info);
+		world->setSoldierPosition(info.soldier, {x, 0, z});
+	}
+	int fired(int player) { const auto r = world->playerRounds(player, false, false); return r.empty() ? 0 : r[0].count; }
+	int hits(int player) { const auto r = world->playerRounds(player, true, false); return r.empty() ? 0 : r[0].count; }
+};
+
+} // namespace
+
+TEST(Bots_UrgencyCurves)
+{
+	// aiSettings.createUCLinear UCFire -0.22 1.3 (0x10087ef0): max(0, -0.22 t + 1.3).
+	const ai::UrgencyCurve fire {ai::UrgencyCurve::Kind::Linear, -0.22f, 1.3f, 0, 0};
+	CHECK(near(fire.value(0), 1.3f) && near(fire.value(5), 0.2f) && fire.value(6) == 0);
+	// createUCXInverse UCScout 2.5 0.9 1.0 0.5 (0x10087f50): 2.5 / (t + 0.9) + 0.5.
+	const ai::UrgencyCurve scout {ai::UrgencyCurve::Kind::XInverse, 2.5f, 0.9f, 1.0f, 0.5f};
+	CHECK(near(scout.value(0), 2.5f / 0.9f + 0.5f) && near(scout.value(4.1f), 1.0f));
+	const ai::UrgencyCurve unit {ai::UrgencyCurve::Kind::Constant, 1.0f, 0, 0, 0};
+	CHECK(unit.value(100) == 1);
+}
+
+TEST(Bots_FuzzyTable)
+{
+	// DAT_10139530 (built at 0x100cb6f0), read at round(x * 100).
+	CHECK(ai::fuzzy(0) == 0 && ai::fuzzy(-1) == 0 && ai::fuzzy(2) == 1);
+	CHECK(near(ai::fuzzy(0.1f), 0.292421f) && near(ai::fuzzy(0.18f), 0.5263579f));
+	CHECK(near(ai::fuzzy(0.5f), 0.8947369f) && near(ai::fuzzy(1.0f), 0.9989368f)); // 100 reads entry 99
+}
+
+TEST(Bots_WeightsInhibitorsAndCurves)
+{
+	Console console;
+	const game::BotSettings settings = scriptedSettings(console);
+	const ai::VehicleSetup& infantry = settings.vehicle("Infantery");
+	CHECK(infantry.behaviours.size() == 4 && infantry.defaultBehaviour == "Idle");
+	const auto& personality = settings.modifiers.at("StandardWeights");
+	ai::Arbitration state;
+	// Before the first plan: the personality alone.
+	std::vector<float> w = ai::behaviourWeights(infantry.behaviours, state, 0, personality, settings.modifiers, settings.curves);
+	CHECK(w[0] == 1 && w[1] == 1 && near(w[2], 0.1f) && near(w[3], 7.5f));
+	// Avoiding: AvoidInhibit holds MoveTo to 0.3.
+	state.running = 0;
+	state.replan = false;
+	w = ai::behaviourWeights(infantry.behaviours, state, 0.1f, personality, settings.modifiers, settings.curves);
+	CHECK(near(w[1], 0.3f) && near(w[3], 7.5f));
+	// Firing: UCFire on the time since the last think (a tick).
+	state.running = 3;
+	w = ai::behaviourWeights(infantry.behaviours, state, 1 / 30.0f, personality, settings.modifiers, settings.curves);
+	CHECK(near(w[3], 7.5f * (1.3f - 0.22f / 30)) && w[1] == 1);
+}
+
+TEST(Bots_ArbiterHysteresis)
+{
+	ai::Arbitration state;
+	state.urgency = {0, 1.0f, 0.1f, 0};
+	CHECK(ai::arbitrate(state, 2) == 1); // MoveTo
+	// Within [0.87, 1.15] of the latched value nothing is picked anew.
+	state.urgency = {0, 0.9f, 0.1f, 0};
+	CHECK(ai::arbitrate(state, 2) == 1 && near(state.latched[1], 1.0f));
+	state.urgency = {0, 0.9f, 1.02f, 0}; // Idle rises 10x: a new pick
+	CHECK(ai::arbitrate(state, 2) == 2);
+	// Fire appearing (0 -> 50) always picks again.
+	state.urgency = {0, 0.9f, 1.02f, 50};
+	CHECK(ai::arbitrate(state, 2) == 3);
+	// Ties go to the first in the set; nothing above 0 runs the default.
+	ai::Arbitration ties;
+	ties.urgency = {0, 2, 2, 0};
+	CHECK(ai::arbitrate(ties, 2) == 1);
+	ai::Arbitration nothing;
+	nothing.urgency = {0, 0, 0, 0};
+	CHECK(ai::arbitrate(nothing, 2) == 2);
+	CHECK(ai::urgencyChanged(1, 0.87f) == false && ai::urgencyChanged(1, 0.86f) && ai::urgencyChanged(1, 1.16f));
+	CHECK(ai::urgencyChanged(0, 0) == false && ai::urgencyChanged(0, 0.1f) && ai::urgencyChanged(0.1f, 0));
+}
+
+TEST(Bots_GotoUrgency)
+{
+	// 0x1008aaa0: r = max(ceil(radius), bot radius + 1); 0 inside r; else
+	// clamp(d2 / (1.5 r^2), 0.1, 1) x the area's factor.
+	bool arrived = false;
+	const ai::GoalArea plain;
+	CHECK(ai::gotoUrgency(1.0f, 0, 0.5f, plain, arrived) == 0 && arrived);
+	CHECK(near(ai::gotoUrgency(2.5f, 0, 0.5f, plain, arrived), 2.5f / 3.375f) && !arrived);
+	CHECK(near(ai::gotoUrgency(2.3f, 0, 0.5f, plain, arrived), 2.3f / 3.375f));
+	CHECK(ai::gotoUrgency(400, 0, 0.5f, plain, arrived) == 1);
+	CHECK(near(ai::gotoUrgency(2501, 50, 0.5f, plain, arrived), 2501 / 3750.0f)); // just outside a 50 m order
+	ai::GoalArea attack;
+	attack.exists = true;
+	attack.teamHolds = false;
+	CHECK(ai::gotoUrgency(400, 0, 0.5f, attack, arrived) == 2);
+	ai::GoalArea held;
+	held.exists = true;
+	held.inside = true;
+	held.radius = 50;
+	CHECK(ai::gotoUrgency(400, 0, 0.5f, held, arrived) == 0);
+	held.inside = false;
+	CHECK(near(ai::gotoUrgency(60 * 60, 0, 0.5f, held, arrived), 1.0f));
+	CHECK(near(ai::gotoUrgency(2500.2f, 0, 0.5f, held, arrived), 0.1f)); // d2 - 50^2 is next to nothing
+}
+
+TEST(Bots_StrategyConditionsAndValues)
+{
+	ai::StrategySettings s;
+	s.addDefaults();
+	ai::SideStatus mine, theirs;
+	// basicAttackEnemy: +-20 for each of "the enemy holds a point" and
+	// "an area is neutral" (Crisp, Advisory).
+	theirs.controlPoints = 1;
+	mine.neutralAreas = 1;
+	CHECK(ai::prerequisiteValue(s, "basicEnemyPrereq", mine, theirs) == 40);
+	mine.neutralAreas = 0;
+	CHECK(ai::prerequisiteValue(s, "basicEnemyPrereq", mine, theirs) == 0);
+	theirs.controlPoints = 0;
+	CHECK(ai::prerequisiteValue(s, "basicEnemyPrereq", mine, theirs) == -40);
+	// basicGuard: 4 only with no enemy point and no neutral area (Required).
+	CHECK(ai::prerequisiteValue(s, "guardPrereq", mine, theirs) == 4);
+	theirs.controlPoints = 2;
+	CHECK(ai::prerequisiteValue(s, "guardPrereq", mine, theirs) == 0);
+	// Fuzzy conditions give the difference, FuzzySqr its signed square.
+	ai::StrategyCondition fuzzy;
+	fuzzy.conditional = ai::StrategyCondition::Conditional::FuzzySqr;
+	fuzzy.compare = ai::StrategyCondition::Compare::EqualGreater;
+	fuzzy.side = 1;
+	fuzzy.type = 14;
+	fuzzy.constant = 5;
+	CHECK(ai::conditionValue(fuzzy, mine, theirs) == -9);
+	// The pick sticks while no weight moves by 17 % down or 20 % up.
+	CHECK(!ai::strategyWeightsChanged({40, 0}, {40, 0}) && !ai::strategyWeightsChanged({40, 0}, {35, 0}));
+	CHECK(ai::strategyWeightsChanged({40, 0}, {48.5f, 0}) && ai::strategyWeightsChanged({40, 0}, {0, 4}));
+	// Required strength: 2 x max(enemies, 1), x1.25 for areas not owned.
+	CHECK(ai::requiredStrength(0, true) == 2 && ai::requiredStrength(3, true) == 6 && ai::requiredStrength(0, false) == 3);
+	// basicAttackEnemy's modifiers: hostile points x10, neutral x12.
+	const ai::Strategy& attack = s.strategies.at("basicAttackEnemy");
+	CHECK(ai::modifiedTemperature(attack, 50, ai::AreaStatus::Hostile, true, false) == 500);
+	CHECK(ai::modifiedTemperature(attack, 50, ai::AreaStatus::Neutral, true, false) == 600);
+	CHECK(ai::modifiedTemperature(attack, 50, ai::AreaStatus::Owned, true, true) == 50);
+	// Attack value: 100 v / d - 1.5 (frac + 1) x the enemies' strategic strength.
+	ai::AreaState area;
+	area.status = ai::AreaStatus::Hostile;
+	area.temperature = 500;
+	area.ownedNeighbour = area.hostileNeighbour = true;
+	area.squadDistance = 100;
+	CHECK(near(ai::attackValue(area), 500 - 1.5f));
+	area.hostileNeighbour = false;
+	area.neutralNeighbour = true;
+	CHECK(near(ai::attackValue(area), 750 - 1.5f));
+	area.ownedNeighbour = false;
+	CHECK(ai::attackValue(area) == 0);
+	ai::AreaState own;
+	own.status = ai::AreaStatus::Owned;
+	own.temperature = 500;
+	own.enemyStrength = 8;
+	own.hostileNeighbour = true;
+	CHECK(near(ai::defenceValue(own), (8 + 500) * 2 * 1.5f));
+	// The best n, then up to 2n with 0.8 of the n-th's value.
+	const std::vector<int> picked = ai::selectAreas({{10, 0}, {100, 1}, {85, 2}, {50, 3}, {60, 4}}, 2, 0.8f);
+	CHECK((picked == std::vector<int> {1, 2}));
+	const std::vector<int> more = ai::selectAreas({{10, 0}, {100, 1}, {85, 2}, {70, 3}, {69, 4}}, 2, 0.8f);
+	CHECK((more == std::vector<int> {1, 2, 3, 4}));
+}
+
+TEST(Bots_ScriptsFillTheSettings)
+{
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	std::string out;
+	for (const char* line : {"weaponTemplate.create eu_sni", "weaponTemplate.weaponType Sniper", "weaponTemplate.minRange 30.0",
+			 "weaponTemplate.maxRange 125.0", "weaponTemplate.optimalRangePercentage 90", "weaponTemplate.setFiringPose Lying",
+			 "weaponTemplate.setStrength Infantry 6.0", "aiStrategy.createConstantCondition c Fuzzy EqualGreater Enemy Ticket 3",
+			 "aiStrategy.setConditionStrength AdvisoryPositive", "aiStrategy.createPrerequisite p", "aiStrategy.addCondition c 2",
+			 "aiStrategy.createStrategy hold", "aiStrategy.NumberOfDefences 2", "aiStrategy.setStrategicObjectsModifier ControlPoint 10.0 Owned",
+			 "aiStrategy.setStrategicObjectsModifier Front 3", "aiStrategy.setPrerequisite p", "ai.addSAIStrategy 2 hold",
+			 "aiStrategicArea.createFromControlPoint A 301 50", "aiStrategicArea.layer 4",
+			 "aiStrategicArea.createFromControlPoint B 302 50", "aiStrategicArea.setActive A",
+			 "AIStrategicArea.addNeighbour B", "aiStrategicArea.addObjectTypeFlag ControlPoint",
+			 "AIStrategicArea.setOrderPosition Infantry 19.7761/106.928/189.227", "aiStrategicArea.setSide 0",
+			 "aiStrategicArea.addWayPoint -26.8967/95.053/148.488 Infantry A B"}) {
+		console.execute(line, out);
+	}
+	const game::WeaponAi sniper = settings.weapon("EU_SNI");
+	CHECK(sniper.type == game::WeaponAi::Sniper && sniper.minRange == 30 && sniper.maxRange == 125);
+	CHECK(near(sniper.optimal, 0.9f) && sniper.firingPose == 3 && sniper.strength[0] == 6 && sniper.deviation == 14);
+	CHECK(settings.weapon("Unl_Defibrillator").type == game::WeaponAi::Revive);
+	const ai::StrategySettings& s = settings.strategy;
+	CHECK(s.conditions.at("c").conditional == ai::StrategyCondition::Conditional::Fuzzy);
+	CHECK(s.conditions.at("c").strength == ai::StrategyCondition::Strength::AdvisoryPositive && s.conditions.at("c").type == 13);
+	const ai::Strategy& hold = s.strategies.at("hold");
+	CHECK(hold.defences == 2 && hold.modifiers[0][ai::kTypeControlPoint] == 10 && hold.modifiers[1][ai::kTypeControlPoint] == 1);
+	CHECK(hold.modifiers[0][ai::kTypeFront] == 3 && hold.modifiers[2][ai::kTypeFront] == 3 && hold.prerequisite == "p");
+	CHECK(s.sideStrategies.at(2) == std::vector<std::string> {"hold"});
+	CHECK(s.areas.size() == 2 && s.areas[0].layer == 4 && s.areas[0].neighbours == std::vector<std::string> {"B"});
+	CHECK(s.areas[0].controlPointFlag && s.areas[0].hasOrderPosition[0] && near(s.areas[0].orderPosition[0][2], 189.227f, 1e-3f));
+	CHECK(s.waypoints.size() == 1 && s.waypoints[0].from == "A" && s.waypoints[0].to == "B");
+}
+
+// The objects' AI templates (Objects/**/ai/Objects.ai): plug-ins made
+// first, then the template that lists them; a seat's PlayerControlObject
+// names its template (ObjectTemplate.aiTemplate).
+TEST(Bots_AiTemplatesFillTheSettings)
+{
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	std::string out;
+	for (const char* line : {"aiTemplatePlugIn.create Mobile AS_FAV_Mobile", "aiTemplatePlugIn.setPathfindingMap Vehicle",
+			 "aiTemplatePlugIn.maxSpeed 30.0", "aiTemplatePlugIn.speedAtZeroSpace 3", "aiTemplatePlugIn.backingSpeed 7",
+			 "aiTemplatePlugIn.brakeDistance 25", "aiTemplatePlugIn.lookAheadTime 1.5",
+			 "aiTemplatePlugIn.angleSlowDownScale 1.8", "aiTemplatePlugIn.create Physical AS_FAV_Physical",
+			 "aiTemplatePlugIn.setStrType LightArmour", "aiTemplatePlugIn.create Unit AS_FAV_Unit",
+			 "aiTemplatePlugIn.equipmentTypeName Car", "aiTemplatePlugIn.create ControlInfo AS_FAV_Ctrl",
+			 "aiTemplatePlugIn.yawScale 2.0", "aiTemplate.create AS_FAV", "aiTemplate.addType ITGround",
+			 "aiTemplate.basicTemp 8", "aiTemplate.addPlugIn AS_FAV_Mobile", "aiTemplate.addPlugIn AS_FAV_Physical",
+			 "aiTemplate.addPlugIn AS_FAV_Ctrl", "aiTemplate.addPlugIn AS_FAV_Unit"}) {
+		console.execute(line, out);
+	}
+	const game::AiPlugin* unit = settings.plugin("as_fav", "Unit");
+	CHECK(unit && unit->equipmentType == "Car");
+	const game::AiPlugin* mobile = settings.plugin("AS_FAV", "mobile");
+	CHECK(mobile && mobile->maxSpeed == 30 && mobile->speedAtZeroSpace == 3 && mobile->backingSpeed == 7);
+	CHECK(mobile && mobile->brakeDistance == 25 && near(mobile->lookAheadTime, 1.5f) && near(mobile->angleSlowDownScale, 1.8f));
+	CHECK(mobile && mobile->pathfindingMap == "Vehicle");
+	const game::AiPlugin* physical = settings.plugin("AS_FAV", "Physical");
+	CHECK(physical && physical->strengthType == 1);
+	const game::AiPlugin* control = settings.plugin("AS_FAV", "ControlInfo");
+	CHECK(control && near(control->yawScale, 2.0f));
+	CHECK(settings.aiTemplates.at("as_fav").basicTemp == 8 && !settings.plugin("AS_FAV", "Armament"));
+}
+
+// Sensing (0x100ed700, 0x100ee430): seen within viewDistance x cos(50)
+// in the 100 degree frustum; remembered 60 s out of sight, then forgotten.
+TEST(Bots_SensingAndForgetting)
+{
+	Field field;
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	game::BotManager bots(*field.world, settings);
+	const int bot = field.soldier(2, true, 0, 0); // facing +z
+	const int enemy = field.soldier(1, false, 0, 70);
+	settle(bots, 1.5f);
+	CHECK(bots.knows(bot, enemy) && bots.behaviour(bot) == "Fire" && bots.target(bot) == enemy);
+	// 120 cos 50 = 77 m: not at 80 m, nor behind, nor 60 degrees aside.
+	game::BotManager fresh(*field.world, settings);
+	field.move(enemy, 0, 80);
+	settle(fresh, 0.5f);
+	CHECK(!fresh.knows(bot, enemy));
+	field.move(enemy, 0, -20);
+	settle(fresh, 0.5f);
+	CHECK(!fresh.knows(bot, enemy));
+	field.move(enemy, 20 * std::sin(1.05f), 20 * std::cos(1.05f));
+	settle(fresh, 0.5f);
+	CHECK(!fresh.knows(bot, enemy));
+	field.move(enemy, 20 * std::sin(0.8f), 20 * std::cos(0.8f)); // 46 degrees: inside
+	settle(fresh, 0.5f);
+	CHECK(fresh.knows(bot, enemy));
+	// Out of sight (300 m off): still known for 60 s, then forgotten.
+	field.move(enemy, 0, 300);
+	for (int i = 0; i < 59; ++i) {
+		bots.update(1.0f);
+	}
+	CHECK(bots.knows(bot, enemy));
+	for (int i = 0; i < 8; ++i) {
+		bots.update(1.0f); // sensed, then a think drops the target (a lone bot runs every other frame)
+	}
+	CHECK(!bots.knows(bot, enemy) && bots.target(bot) == -1);
+	// Cloaked enemies only within discoverCloakedEnemiesDistance (3 m) is
+	// covered by the GameWorld camouflage test; skill does not change sensing.
+}
+
+// The reaction time (0x100777a0): (1 - skill)(1.5 + U[0,1]) s before the
+// first round at a new target; and no round within 0.8 s of a pose
+// change (Trigger 0x1008f1e0): the rifle's firing pose is Crouching, which
+// the bot takes as soon as it stands still.
+TEST(Bots_ReactionTimeBySkill)
+{
+	for (const float skill : {0.4f, 1.0f}) {
+		Field field;
+		Console console;
+		game::BotSettings settings = scriptedSettings(console);
+		settings.skill = skill;
+		game::BotManager bots(*field.world, settings);
+		const int bot = field.soldier(2, true, 0, 0);
+		const int enemy = field.soldier(1, false, 0, 20);
+		game::GameWorld::PlayerInfo info;
+		field.world->playerInfo(enemy, info);
+		field.world->setHitPoints(info.soldier, 1e6f);
+		// From the think that takes the target to the first round.
+		int first = -1, acquired = -1;
+		for (int tick = 0; tick < 30 * 5 && first < 0; ++tick) {
+			bots.update(1 / 30.0f);
+			field.world->tick(1 / 30.0f);
+			if (acquired < 0 && bots.target(bot) == enemy) {
+				acquired = tick;
+			}
+			if (field.fired(bot) > 0) {
+				first = tick;
+			}
+		}
+		CHECK(acquired >= 0);
+		first -= acquired;
+		const float seconds = static_cast<float>(first) / 30;
+		if (skill < 1) {
+			CHECK(first > 0 && seconds >= (1 - skill) * 1.5f - 0.05f && seconds <= (1 - skill) * 2.5f + 0.5f);
+		} else {
+			CHECK(first >= 0 && seconds >= 0.75f && seconds < 1.0f);
+		}
+	}
+}
+
+// fuzzy (0x100cbce0) truncates x * 100 (the FPU set to chop) and takes
+// the table's entry; scurve (0x100cc930) interpolates its own table.
+TEST(Bots_FuzzyTruncatesAndSCurve)
+{
+	CHECK(near(ai::fuzzy(0.019f), ai::fuzzy(0.01f)) && near(ai::fuzzy(0.01f), 0.02924211f));
+	CHECK(near(ai::fuzzy(0.999f), ai::fuzzy(0.99f)));
+	CHECK(near(ai::scurve(0.5f), 0.5f) && near(ai::scurve(0.1f), 0.0171289f) && near(ai::scurve(0.75f), 0.912744f, 1e-5f));
+	CHECK(near(ai::scurve(0.105f), 0.5f * (0.0171289f + 0.0196096f), 1e-5f));
+	CHECK(ai::scurve(-1) == 0 && ai::scurve(2) == 1 && ai::scurve(std::nanf("")) == 0);
+}
+
+// The string-pull (0x10093610): a waypoint 5 m or more from the bot moves
+// onto its portal where the line from the previous point to the next
+// crosses it, kept max(1, 0.8 radius) from the portal's ends; then a last
+// pass without the margin where that line crosses the portal itself.
+TEST(Bots_PathSmoothingOnPortals)
+{
+	// A path bending round a corner: portals across the corridor x 0..4 at
+	// z 10, then x 0..4 at z 20, the goal off to the side at (30, 0, 30).
+	std::vector<ai::Waypoint> path(3);
+	path[0].a = {0, 0, 10};
+	path[0].b = {4, 0, 10};
+	path[0].p = {2, 0, 10};
+	path[0].portal = true;
+	path[1].a = {0, 0, 20};
+	path[1].b = {4, 0, 20};
+	path[1].p = {2, 0, 20};
+	path[1].portal = true;
+	path[2].p = {30, 0, 30};
+	ai::smoothWaypoints(path, {2, 0, 0}, 0.5f);
+	// The second portal: the line from the first point to the goal crosses
+	// beyond its end; kept 1 m from it, then the last pass (which only
+	// moves points whose line crosses inside the portal) leaves it there.
+	CHECK(near(path[1].p.x, 3, 1e-3f) && near(path[1].p.z, 20));
+	// The first: on the line from the bot to the second point.
+	CHECK(near(path[0].p.z, 10) && near(path[0].p.x, 2.5f, 1e-3f));
+	// Near the bot (within 5 m) a waypoint isn't moved by the margin passes.
+	std::vector<ai::Waypoint> close(2);
+	close[0].a = {0, 0, 3};
+	close[0].b = {4, 0, 3};
+	close[0].p = {2, 0, 3};
+	close[0].portal = true;
+	close[1].p = {40, 0, 3.5f};
+	ai::smoothWaypoints(close, {2, 0, 0}, 0.5f);
+	CHECK(near(close[0].p.x, 2) && near(close[0].p.z, 3));
+}
+
+// The vehicles' driving (0x100e9d40, 0x100e0540, 0x100e8170): steering
+// towards the error less the turn rate, the throttle towards the speed
+// wanted; slowing for bends (angleSlowDownScale) and the path's end
+// (brakeDistance); backing towards a goal far behind; a stationary tank
+// does not steer.
+TEST(Bots_DriveControl)
+{
+	ai::DriveSettings car; // the FAV's Mobile plug-in, maxSpeed 15
+	car.yawScale = 2;
+	ai::DriveState state;
+	ai::DriveSense sense;
+	sense.error = 0.1f;
+	sense.goalDistance = 100;
+	sense.speed = 10;
+	sense.remaining = 200;
+	ai::DriveOutput out = ai::driveControl(car, state, sense);
+	CHECK(near(out.turn, 0.6f, 1e-4f) && out.direction == 1 && state.state == 0);
+	CHECK(near(out.targetSpeed, 15) && out.throttle > 0.9f);
+	sense.yawRate = 0.5f; // already turning: less
+	CHECK(near(ai::driveControl(car, state, sense).turn, 0.1f, 1e-4f));
+	// A bend of 0.6 rad ahead: 1 - 0.8 min(1, 1.8 (0.6 - 0.2)) = 0.424 of top speed.
+	sense.yawRate = 0;
+	sense.maxBend = 0.6f;
+	CHECK(near(ai::driveControl(car, state, sense).targetSpeed, 0.424f * 15, 1e-3f));
+	// 10 m of path left at 10 m/s: space 7 m of 25: max(0.2, 0.0784)^2 = 0.04.
+	sense.maxBend = 0;
+	sense.remaining = 10;
+	CHECK(near(ai::driveControl(car, state, sense).targetSpeed, 0.04f * 15, 1e-4f));
+	// The goal far behind with room behind: backing towards it, the error
+	// mirrored (pi - |e|).
+	sense.remaining = 200;
+	sense.speed = 0;
+	sense.error = 3.0f;
+	out = ai::driveControl(car, state, sense);
+	CHECK(state.state == 8 && out.direction == -1 && out.throttle < 0);
+	CHECK(near(out.turn, std::clamp(3 * 2 * (3.14159265f - 3.0f), -1.0f, 1.0f), 1e-4f));
+	// Close by, behind: turning on the spot (forward at full lock first).
+	ai::DriveState turning;
+	sense.goalDistance = 10;
+	out = ai::driveControl(car, turning, sense);
+	CHECK(turning.state == 9 && out.direction == 1 && out.turn == 1);
+	// A tank at a standstill does not steer.
+	ai::DriveSettings tank = car;
+	tank.tank = true;
+	ai::DriveState ahead;
+	sense.error = 0.5f;
+	sense.goalDistance = 100;
+	CHECK(ai::driveControl(tank, ahead, sense).turn == 0);
+}
+
+// A level without AIPathFinding has no bots in the original (no ai.init,
+// ai.addBot refused): with a null mesh the manager runs none.
+TEST(Bots_NoNavigationMeshNoBots)
+{
+	Field field;
+	Console console;
+	game::BotManager bots(*field.world, scriptedSettings(console));
+	bots.setNavMesh(nullptr);
+	const int bot = field.soldier(2, true, 0, 0);
+	field.soldier(1, false, 0, 30);
+	settle(bots, 2, field.world.get());
+	CHECK(!bots.enabled() && bots.behaviour(bot).empty() && field.fired(bot) == 0);
+}
+
+// MedicAssist (0x10070200, plan 0x10070da0): a medic with the hub near a
+// wounded human teammate of its squad goes to them, takes the hub and (in
+// the rewrite, where hubs heal once thrown) throws it; they heal.
+TEST(Bots_MedicAssistHealsATeammate)
+{
+	Field field;
+	world::ObjectTemplate* hub = field.templates.create("GenericFireArm", "test_hub_medic");
+	hub->settings()["itemIndex"] = "4";
+	hub->settings()["ammo.replenishingType"] = "RTHeal";
+	hub->settings()["ammo.abilityRadius"] = "4";
+	hub->settings()["ammo.abilityStrength"] = "20";
+	hub->settings()["projectileTemplate"] = "test_hub_object";
+	hub->settings()["fire.roundsPerMinute"] = "60";
+	field.templates.create("SimpleObject", "test_hub_object");
+	world::ObjectTemplate* kit = field.templates.create("Kit", "test_medic_kit");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	kit->children().push_back({"test_hub_medic", {}, {}});
+	Console console;
+	game::BotManager bots(*field.world, assistSettings(console));
+	const int medic = field.world->addPlayer("Medic", 2, true);
+	field.world->setKit(medic, "test_medic_kit", "us_light_soldier");
+	field.world->joinSquad(medic, 1);
+	field.world->spawnSoldier(medic);
+	field.move(medic, -90, 0);
+	const int patient = field.world->addPlayer("Patient", 2, false);
+	field.world->joinSquad(patient, 1);
+	field.world->spawnSoldier(patient);
+	field.move(patient, -90, 10);
+	game::GameWorld::PlayerInfo info;
+	field.world->playerInfo(patient, info);
+	field.world->setHitPoints(info.soldier, 40);
+	bool assisted = false;
+	for (int tick = 0; tick < 30 * 15; ++tick) {
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+		assisted = assisted || bots.behaviour(medic) == "MedicAssist";
+	}
+	CHECK(assisted);
+	CHECK(!field.world->supplyObjects().empty());
+	CHECK(field.world->hitPoints(info.soldier) > 60);
+}
+
+// c4 (0x10083750, plan 0x10083ae0): with a charge in the kit, standing in
+// a control point its team holds uncontested: 100, the charge in hand,
+// 0.7 s, one press of fire; then the bot carries on.
+TEST(Bots_C4InItsOwnControlPoint)
+{
+	Field field;
+	world::ObjectTemplate* c4 = field.templates.create("GenericFireArm", "test_c4");
+	c4->settings()["itemIndex"] = "5";
+	c4->settings()["projectileTemplate"] = "bullet";
+	c4->settings()["ammo.magSize"] = "2";
+	c4->settings()["ammo.nrOfMags"] = "1";
+	world::ObjectTemplate* kit = field.templates.create("Kit", "test_recon_kit");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	kit->children().push_back({"test_c4", {}, {}});
+	Console console;
+	game::BotManager bots(*field.world, assistSettings(console));
+	const int recon = field.world->addPlayer("Recon", 2, true);
+	field.world->setKit(recon, "test_recon_kit", "us_light_soldier");
+	field.world->joinSquad(recon, 1);
+	field.world->spawnSoldier(recon);
+	field.move(recon, -100, 3); // EU's point at x -100, radius 10
+	bool placing = false;
+	int placedAt = -1;
+	for (int tick = 0; tick < 30 * 6 && placedAt < 0; ++tick) {
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+		placing = placing || bots.behaviour(recon) == "c4";
+		const auto rounds = field.world->playerRounds(recon, false, false);
+		for (const auto& r : rounds) {
+			if (r.weapon == "test_c4" && r.count > 0) {
+				placedAt = tick;
+			}
+		}
+	}
+	CHECK(placing && placedAt > 0);
+	settle(bots, 2, field.world.get());
+	CHECK(bots.behaviour(recon) != "c4");
+}
+
+// The goal list of an order (0x10060300): from the area the bot is in to
+// the target over the areas' neighbours, a waypoint of the pair
+// (aiStrategicArea.addWayPoint) when it lies ahead and closer to the
+// target; then a point in each area on the way, then the goal.
+TEST(Bots_StrategicWaypointsOnTheWay)
+{
+	Field field;
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	std::string out;
+	for (const char* line : {"aiStrategicArea.createFromControlPoint pac 1 50", "aiStrategicArea.addNeighbour eu",
+			 "aiStrategicArea.addObjectTypeFlag ControlPoint", "aiStrategicArea.createFromControlPoint eu 2 50",
+			 "aiStrategicArea.addNeighbour pac", "aiStrategicArea.addObjectTypeFlag ControlPoint",
+			 "aiStrategicArea.addWayPoint 0/0/40 Infantry pac eu", "aiStrategicArea.addWayPoint 0/0/-40 Vehicle eu pac"}) {
+		console.execute(line, out);
+	}
+	game::BotManager bots(*field.world, settings);
+	const int bot = field.world->addPlayer("Eu", 2, true);
+	field.world->joinSquad(bot, 1);
+	field.world->spawnSoldier(bot);
+	field.move(bot, -100, 0); // in EU's area, ordered to PAC's at x 100
+	settle(bots, 1, field.world.get());
+	const std::vector<physics::Vec3> route = bots.route(bot);
+	CHECK(route.size() == 2 && near(route[0].x, 0) && near(route[0].z, 40)); // the infantry waypoint, either direction
+	CHECK(route.size() == 2 && route[1].x > 85);
+}
+
+// The AI deviation (BF2142.exe 0x00892b70): (1 - skill) x 14 at a new
+// target. A perfect bot hits nearly every round at 40 m, an unskilled one
+// rarely.
+TEST(Bots_AimErrorBySkill)
+{
+	float ratio[2] = {};
+	int index = 0;
+	for (const float skill : {1.0f, 0.0f}) {
+		Field field;
+		Console console;
+		game::BotSettings settings = scriptedSettings(console);
+		settings.skill = skill;
+		game::BotManager bots(*field.world, settings);
+		const int bot = field.soldier(2, true, 0, 0);
+		const int enemy = field.soldier(1, false, 0, 40);
+		game::GameWorld::PlayerInfo info;
+		field.world->playerInfo(enemy, info);
+		field.world->setHitPoints(info.soldier, 1e6f);
+		for (int tick = 0; tick < 30 * 6; ++tick) {
+			bots.update(1 / 30.0f);
+			field.world->tick(1 / 30.0f);
+		}
+		const int fired = field.fired(bot);
+		CHECK(fired > 10);
+		ratio[index++] = fired > 0 ? static_cast<float>(field.hits(bot)) / static_cast<float>(fired) : 0;
+	}
+	CHECK(ratio[0] > 0.8f && ratio[1] < 0.35f);
+}
+
+// MoveTo and the SAI: two EU squads on a field where PAC holds a point and
+// one is neutral. The side runs basicAttackEnemy (enemy point and a
+// neutral area: 40), orders its squads to attack, and they walk there
+// (urgency 2: an area the team does not hold).
+TEST(Bots_StrategyOrdersSquadsToAttack)
+{
+	Field field;
+	world::ObjectTemplate* neutral = field.templates.create("ControlPoint", "cp_mid");
+	neutral->settings()["controlPointId"] = "3";
+	neutral->settings()["team"] = "0";
+	neutral->settings()["radius"] = "10";
+	field.objects.create(neutral, {0, 0, 60});
+	field.world = std::make_unique<game::GameWorld>(field.templates, field.objects);
+	field.world->enablePhysics(field.files, field.collisionTemplates,
+		{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
+			 normal = {0, 1, 0};
+			 return 0.0f;
+		 }});
+	field.world->autoRespawn = false;
+	field.world->startRound();
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	game::BotManager bots(*field.world, settings);
+	std::vector<int> team;
+	for (int i = 0; i < 4; ++i) {
+		const int id = field.world->addPlayer("Eu", 2, true);
+		field.world->joinSquad(id, i < 2 ? 1 : 2);
+		field.world->spawnSoldier(id);
+		team.push_back(id);
+	}
+	settle(bots, 1);
+	CHECK(bots.strategy(2) == "basicAttackEnemy");
+	for (int squad = 1; squad <= 2; ++squad) {
+		const game::GameWorld::SquadOrder* order = field.world->squadOrder(2, squad);
+		CHECK(order && order->type == game::GameWorld::OrderType::Attack && order->accepted);
+		CHECK(order && (near(order->position.z, 60) || near(order->position.x, 100)));
+	}
+	CHECK(bots.behaviour(team[0]) == "MoveTo");
+	for (int tick = 0; tick < 30 * 8; ++tick) {
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+	}
+	// Walking to the neutral point at z 60 or PAC's at x 100.
+	int closer = 0;
+	for (int id : team) {
+		game::GameWorld::PlayerInfo info;
+		field.world->playerInfo(id, info);
+		closer += info.position.z > 15 || info.position.x > 15;
+	}
+	CHECK(closer == 4);
+}
+
+namespace {
+
+// A round on Cerbere_Landing (gpm_sp, 16) with the game's own AI scripts:
+// the real terrain, navigation mesh, control points and strategic areas;
+// four bots a side in squads. With `staticObjects`, also the level's static
+// objects (all of Objects/' templates, then StaticObjects.con) for soldiers
+// to collide with, as `bf2142 +level` loads them.
+struct CerbereLanding {
+	io::FileManager files;
+	Console console {&files};
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	terrain::HeightmapCluster heightmaps;
+	game::BotSettings settings;
+	physics::CollisionTemplateManager collisionTemplates;
+	std::unique_ptr<game::GameWorld> world;
+	std::optional<ai::NavMesh> mesh;
+	std::unique_ptr<game::BotManager> bots;
+	std::vector<int> players;
+	size_t weaponScripts = 0;
+	bool loaded = false;
+
+	CerbereLanding(const char* gameDir, bool staticObjects)
+	{
+		files.setRootPath(gameDir);
+		files.addSearchPath("mods/bf2142");
+		files.setMountingAllowed(true);
+		const std::string level = "Levels/Cerbere_Landing/";
+		CHECK(files.mountArchive(level + "server.zip", level));
+		std::string out;
+		if (staticObjects) {
+			bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+				[this](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+			CHECK(console.run("ServerArchives.con", {}, out));
+		} else {
+			CHECK(files.mountArchive("Objects/Weapons_server.zip", "Objects\\Weapons"));
+		}
+		files.setMountingAllowed(false);
+		world::registerWorldConsoleMethods(console, templates, objects);
+		world::registerUntypedTemplateProperties(console, templates,
+			{"controlPointId", "team", "radius", "unableToChangeTeam", "setControlPointId", "timeToGetControl",
+				"timeToLoseControl", "areaValueTeam1", "areaValueTeam2", "collisionMesh", "hasMobilePhysics"});
+		terrain::registerTerrainConsoleMethods(console, heightmaps, files);
+		physics::registerCollisionConsoleMethods(console, collisionTemplates);
+		game::registerBotConsoleMethods(console, settings);
+		for (const std::string& script : {std::string("AI/AIBehaviours.ai"), std::string("AI/AIDefaultStrategies.ai"),
+				 std::string("AI/AIDefaultStrategiesAdd.ai"), level + "GameModes/gpm_sp/16/ai/StrategicAreas.ai"}) {
+			CHECK(console.run(script, {}, out));
+		}
+		for (const std::string& script : world::templateScripts(files, "Objects/Weapons/", true)) {
+			if (script.size() > 3 && script.compare(script.size() - 3, 3, ".ai") == 0) {
+				console.run(script, {}, out);
+				++weaponScripts;
+			}
+		}
+		if (staticObjects) {
+			templates.setLoading(true);
+			world::loadObjectTemplates(console, files, "Objects/", false);
+			templates.setLoading(false);
+			console.run(level + "StaticObjects.con", {}, out);
+		}
+
+		// The level: terrain, control points and spawn points.
+		console.run(level + "Heightdata.con", {}, out);
+		console.run(level + "GameModes/gpm_sp/16/GamePlayObjects.con", {"host"}, out);
+		const terrain::Heightmap* ground = heightmaps.primary();
+		CHECK(ground && ground->loaded());
+		if (!ground || !ground->loaded()) {
+			return;
+		}
+		for (const char* name : {"us_light_soldier", "pac_light_soldier"}) {
+			world::ObjectTemplate* soldier = templates.find(name) ? templates.find(name) : templates.create("Soldier", name);
+			soldier->settings()["armor.maxHitPoints"] = "100";
+		}
+		for (const char* name : {"eu_ar_rifle", "as_ar_rifle"}) {
+			world::ObjectTemplate* gun = templates.find(name) ? templates.find(name) : templates.create("GenericFireArm", name);
+			gun->settings()["projectileTemplate"] = "test_bullet";
+			gun->settings()["velocity"] = "300";
+			gun->settings()["fire.roundsPerMinute"] = "600";
+			gun->settings()["ammo.magSize"] = "30";
+			gun->settings()["ammo.nrOfMags"] = "50";
+		}
+		templates.create("GenericProjectile", "test_bullet")->settings()["damage"] = "34";
+		world = std::make_unique<game::GameWorld>(templates, objects);
+		physics::Ground surface;
+		surface.height = [ground](float x, float z) { return ground->heightAt(x, z); };
+		surface.heightAndNormal = [ground](float x, float z, physics::Vec3& normal) {
+			const float step = ground->scale()[0];
+			const float dx = ground->heightAt(x + step, z) - ground->heightAt(x - step, z);
+			const float dz = ground->heightAt(x, z + step) - ground->heightAt(x, z - step);
+			const float length = std::sqrt(dx * dx + 4 * step * step + dz * dz);
+			normal = {-dx / length, 2 * step / length, -dz / length};
+			return ground->heightAt(x, z);
+		};
+		world->enablePhysics(files, collisionTemplates, std::move(surface));
+		world->startRound();
+		std::vector<uint8_t> qtr, clb;
+		if (files.readFile(level + "AIPathFinding/Infantry.qtr", qtr) && files.readFile(level + "AIPathFinding/Infantry.clb", clb)) {
+			mesh = ai::parseNavMesh(qtr, clb);
+		}
+		CHECK(mesh.has_value());
+		bots = std::make_unique<game::BotManager>(*world, settings);
+		bots->setNavMesh(mesh ? &*mesh : nullptr);
+		for (int team = 1; team <= 2; ++team) {
+			for (int i = 0; i < 4; ++i) {
+				const int id = world->addPlayer(team == 1 ? "Pac" : "Eu", team, true);
+				world->joinSquad(id, world->openSquad(team));
+				CHECK(world->spawnSoldier(id));
+				players.push_back(id);
+			}
+		}
+		loaded = true;
+	}
+
+	physics::Vec3 position(int id) const
+	{
+		game::GameWorld::PlayerInfo info;
+		world->playerInfo(id, info);
+		return info.position;
+	}
+	int fired(int id) const
+	{
+		const auto rounds = world->playerRounds(id, false, false);
+		return rounds.empty() ? 0 : rounds[0].count;
+	}
+	void run(float seconds)
+	{
+		for (int tick = 0; tick < static_cast<int>(seconds * 30); ++tick) {
+			bots->update(1 / 30.0f);
+			world->tick(1 / 30.0f);
+		}
+	}
+};
+
+} // namespace
+
+// The scripts' settings, the first orders, and a minute: the bots head off
+// and meet.
+TEST(Bots_CerbereLanding)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	CerbereLanding round(gameDir, false);
+	game::BotSettings& settings = round.settings;
+	// AIBehaviours.ai: 13 infantry behaviours; Fire on UCFire.
+	const ai::VehicleSetup& infantry = settings.vehicle("Infantery");
+	CHECK(infantry.behaviours.size() == 13 && settings.modifier("Fire") == 7.5f && settings.modifier("Idle") == 0.1f);
+	CHECK(settings.curves.count("UCFire") && near(settings.curves.at("UCFire").a, -0.22f));
+	CHECK(settings.vehicle("Tank").behaviours.size() == 7 && settings.vehicle("Car").behaviours.size() == 7);
+	// Weapons.ai: the rifles, the sniper rifle and the defibrillator.
+	CHECK(round.weaponScripts > 40);
+	const game::WeaponAi rifle = settings.weapon("eu_ar_rifle");
+	CHECK(rifle.maxRange == 72 && near(rifle.optimal, 0.35f) && rifle.strength[0] == 5 && rifle.firingPose == 2);
+	CHECK(settings.weapon("Unl_Defibrillator").type == game::WeaponAi::Revive && settings.weapon("Unl_Defibrillator").maxRange == 60);
+	// The strategies and the level's areas.
+	CHECK(settings.strategy.strategies.count("basicAttackEnemy") && settings.strategy.strategies.count("basicGuard"));
+	CHECK((settings.strategy.sideStrategies[1] == std::vector<std::string> {"basicAttackEnemy", "basicGuard"}));
+	CHECK(settings.strategy.areas.size() == 4 && settings.strategy.waypoints.size() == 12);
+	if (!round.loaded) {
+		return;
+	}
+	game::GameWorld& world = *round.world;
+	game::BotManager& bots = *round.bots;
+	CHECK(world.controlPointList().size() == 4);
+	bots.update(1 / 30.0f);
+	// Both sides attack (the enemy holds points, none is neutral: weight 0
+	// for both strategies, the first added runs). PAC (South Offices, 301)
+	// goes for its neighbours Roadblock Area or South Town Center; EU for
+	// South Offices, the one area next to its own that it doesn't hold.
+	CHECK(bots.strategy(1) == "basicAttackEnemy" && bots.strategy(2) == "basicAttackEnemy");
+	const auto orderedTo = [&](int team, float x, float z) {
+		for (int squad = 1; squad <= 9; ++squad) {
+			const game::GameWorld::SquadOrder* order = world.squadOrder(team, squad);
+			if (order && order->type == game::GameWorld::OrderType::Attack && near(order->position.x, x, 0.01f)
+				&& near(order->position.z, z, 0.01f)) {
+				return true;
+			}
+		}
+		return false;
+	};
+	CHECK(orderedTo(1, 19.5134f, 83.7731f) || orderedTo(1, 6.79578f, -38.4976f));
+	CHECK(orderedTo(2, 58.1218f, -122.23f));
+	CHECK(!orderedTo(1, 19.7761f, 189.227f)); // the Command Center has no PAC neighbour
+	// A minute: they head off and meet.
+	std::vector<physics::Vec3> start;
+	for (int id : round.players) {
+		start.push_back(round.position(id));
+	}
+	round.run(60);
+	int moved = 0, fired = 0;
+	for (size_t i = 0; i < round.players.size(); ++i) {
+		game::GameWorld::PlayerInfo info;
+		world.playerInfo(round.players[i], info);
+		moved += !info.alive || physics::lengthSquared(info.position - start[i]) > 20 * 20;
+		fired += round.fired(round.players[i]);
+	}
+	CHECK(moved >= 6);
+	CHECK(fired > 0);
+}
+
+// The same round among the level's static objects (houses, walls, rocks,
+// bushes): the bots must still get through. They used to wedge a few metres
+// from their spawns: soldiers collided with collision LODs that are not
+// theirs (a bush's projectile-only LOD; 0x006e4880 files LODs by collision
+// type), and spheres whose centre lay behind a face were pushed through it
+// (0x006c3890 drops those contacts).
+TEST(Bots_CerbereLandingAmongStaticObjects)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	CerbereLanding round(gameDir, true);
+	CHECK(round.loaded);
+	if (!round.loaded) {
+		return;
+	}
+	CHECK(round.world->staticCollision().triangles() > 10000);
+	std::vector<physics::Vec3> start;
+	for (int id : round.players) {
+		start.push_back(round.position(id));
+	}
+	// Every 10 s, how far each bot walking to its goal got in the last 10 s:
+	// tens of metres when it walks; one wedged in geometry gets nowhere.
+	std::vector<physics::Vec3> last = start;
+	int walking = 0, stuck = 0;
+	for (int interval = 0; interval < 6; ++interval) {
+		round.run(10);
+		for (size_t i = 0; i < round.players.size(); ++i) {
+			game::GameWorld::PlayerInfo info;
+			round.world->playerInfo(round.players[i], info);
+			if (info.alive && !info.vehicle && round.bots->behaviour(info.id) == "MoveTo") {
+				++walking;
+				stuck += physics::lengthSquared(info.position - last[i]) < 6 * 6;
+			}
+			last[i] = info.position;
+		}
+	}
+	int moved = 0, fired = 0;
+	for (size_t i = 0; i < round.players.size(); ++i) {
+		game::GameWorld::PlayerInfo info;
+		round.world->playerInfo(round.players[i], info);
+		moved += !info.alive || info.vehicle || physics::lengthSquared(info.position - start[i]) > 20 * 20;
+		fired += round.fired(round.players[i]);
+	}
+	std::printf("  %d of %d bots moved over 20 m, %d of %d walking samples stuck, %d rounds fired\n", moved,
+		static_cast<int>(round.players.size()), stuck, walking, fired);
+	CHECK(moved >= 6);
+	CHECK(stuck * 4 <= walking);
+	CHECK(fired > 0);
+}
+
+// The path follower (0x10095fc0, 0x10095720, 0x10092bc0) on Cerbere_Landing's
+// infantry mesh: a path to the Command Center whose waypoints lie on the
+// portals they cross; a walker at 5 m/s reaching each within 0.5 m gets
+// there; one that pushes and doesn't move fails after 10 s.
+TEST(Bots_PathFollowerOnCerbereLanding)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	CerbereLanding round(gameDir, false);
+	CHECK(round.loaded && round.mesh.has_value());
+	if (!round.loaded || !round.mesh) {
+		return;
+	}
+	const ai::NavMesh& mesh = *round.mesh;
+	const physics::Vec3 start = round.position(round.players[0]);
+	const ai::Vec3 from {start.x, start.y, start.z};
+	const ai::Vec3 to {19.7761f, 106.928f, 189.227f}; // the Command Center's order position
+	ai::PathFollower follower;
+	ai::FollowerSettings settings;
+	follower.request(mesh, from, to, settings, 0);
+	CHECK(follower.planned() && !follower.failed() && follower.waypoints().size() > 3);
+	int onPortal = 0, portals = 0;
+	for (const ai::Waypoint& w : follower.waypoints()) {
+		if (!w.portal) {
+			continue;
+		}
+		++portals;
+		const float ex = w.b.x - w.a.x, ez = w.b.z - w.a.z;
+		const float cross = std::fabs(ex * (w.p.z - w.a.z) - ez * (w.p.x - w.a.x)) / std::max(std::sqrt(ex * ex + ez * ez), 1e-4f);
+		const float t = ((w.p.x - w.a.x) * ex + (w.p.z - w.a.z) * ez) / std::max(ex * ex + ez * ez, 1e-6f);
+		onPortal += cross < 0.01f && t >= -1e-3f && t <= 1.001f;
+	}
+	CHECK(portals > 0 && onPortal == portals);
+	// Walk it: 1/6 m a tick, the height from the mesh.
+	ai::Vec3 at = from;
+	bool arrived = false;
+	float now = 0;
+	for (int tick = 0; tick < 30 * 120 && !arrived; ++tick) {
+		now += 1 / 30.0f;
+		const ai::PathFollower::Steer steer = follower.steer(mesh, at, now);
+		CHECK(steer.ok);
+		if (!steer.ok) {
+			break;
+		}
+		arrived = steer.arrived;
+		const float dx = steer.point.x - at.x, dz = steer.point.z - at.z;
+		const float d = std::sqrt(dx * dx + dz * dz);
+		const float step = std::min(d, 5.0f / 30);
+		if (d > 1e-4f) {
+			at.x += dx / d * step;
+			at.z += dz / d * step;
+		}
+		const int32_t polygon = mesh.findPolygon(at, 5.0f);
+		if (polygon >= 0) {
+			at.y = mesh.planeHeight(static_cast<uint32_t>(polygon), at);
+		}
+		follower.progress(at, 1, now);
+	}
+	CHECK(arrived);
+	CHECK(std::sqrt((at.x - to.x) * (at.x - to.x) + (at.z - to.z) * (at.z - to.z)) < 1);
+	// Stuck: pushing without moving fails after 10 s, not before.
+	ai::PathFollower stuck;
+	stuck.request(mesh, from, to, settings, 0);
+	for (float t = 0; t < 9.5f; t += 0.1f) {
+		stuck.progress(from, 1, t);
+	}
+	CHECK(!stuck.failed());
+	for (float t = 9.5f; t < 10.5f; t += 0.1f) {
+		stuck.progress(from, 1, t);
+	}
+	CHECK(stuck.failed() && !stuck.steer(mesh, from, 10.5f).ok);
+}
