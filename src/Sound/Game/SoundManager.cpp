@@ -298,6 +298,14 @@ void SoundManager::playSound(const std::string& name)
 	}
 }
 
+void SoundManager::playSoundAt(const std::string& name, float x, float y, float z)
+{
+	if (ISound* sound = findSound(name)) {
+		const Vec3 at {x, y, z};
+		sound->playAt(&at);
+	}
+}
+
 void SoundManager::stopSound(const std::string& name)
 {
 	if (ISound* sound = findSound(name)) {

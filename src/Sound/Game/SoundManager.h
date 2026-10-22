@@ -41,6 +41,8 @@ public:
 	// Game sounds (slot 0x4c): from the template "S_Game_<name>".
 	void addSound(const std::string& name);
 	void playSound(const std::string& name);
+	// The same at a point of the world (a 3-D sound's position).
+	void playSoundAt(const std::string& name, float x, float y, float z);
 	void stopSound(const std::string& name);
 	void fadeOutSound(const std::string& name, int ticks);
 

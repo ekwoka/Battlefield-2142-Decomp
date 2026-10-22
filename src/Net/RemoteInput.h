@@ -5,10 +5,10 @@
 // The original fills PlayerInput from the control maps (0x00696db0, run
 // for each player map with the last winning): a mouse axis is the device's
 // delta times the map's mouse sensitivity, with the aspect correction and
-// Y invert (0x006802c0). How many degrees the server's soldier turns per
-// mouse-look unit lives in its input code (0x00565180), which isn't traced
-// here, so `turn` and `aimPitch` are passed as they are: that scale is
-// the one open question.
+// Y invert (0x006802c0). The server's soldier turns 5 degrees per
+// PIMouseLook unit and tick (0x0058a6d0: *0x00a68e4c and *0x00a68f24 are
+// both 5.0), so the local turn and the change of pitch are sent in those
+// units; up is negative.
 #pragma once
 
 #include "Game/SoldierControl.h"
@@ -16,13 +16,16 @@
 
 namespace dice::hfe::net {
 
-inline PlayerInput playerInputFrom(const game::SoldierInput& in)
+constexpr float kDegreesPerMouseLookUnit = 5.0f;
+
+// `previousAimPitch`: the aim pitch the last move carried (degrees).
+inline PlayerInput playerInputFrom(const game::SoldierInput& in, float previousAimPitch = 0)
 {
 	PlayerInput out;
 	out.set(kPIThrottle, in.throttle);
 	out.set(kPIYaw, in.strafe); // on foot PIYaw strafes
-	out.set(kPIMouseLookX, in.turn);
-	out.set(kPIMouseLookY, in.aimPitch);
+	out.set(kPIMouseLookX, in.turn / kDegreesPerMouseLookUnit);
+	out.set(kPIMouseLookY, -(in.aimPitch - previousAimPitch) / kDegreesPerMouseLookUnit);
 	out.set(kPISprint, in.sprint ? 1.0f : 0.0f);
 	out.set(kPICrouch, in.pose == game::SoldierPose::Crouch ? 1.0f : 0.0f);
 	out.set(kPILie, in.pose == game::SoldierPose::Prone ? 1.0f : 0.0f);

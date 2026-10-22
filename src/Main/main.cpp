@@ -2396,7 +2396,8 @@ int runGame(Options& options, Session& session)
 				view = {p.x, p.y, p.z, 0};
 				return true;
 			};
-			viewer.onPlayerInput = [&session, &scoreboardHeld, &options](const ViewerOptions::PlayerInput& in) {
+			viewer.onPlayerInput = [&session, &scoreboardHeld, &options, lastAimPitch = 0.0f](
+										 const ViewerOptions::PlayerInput& in) mutable {
 				scoreboardHeld = options.scoreboard || in.scoreboard;
 				if (!session.client) {
 					return;
@@ -2413,7 +2414,8 @@ int runGame(Options& options, Session& session)
 				input.fire = in.fire;
 				input.altFire = in.altFire;
 				input.use = in.use;
-				session.client->setInput(net::playerInputFrom(input));
+				session.client->setInput(net::playerInputFrom(input, lastAimPitch));
+				lastAimPitch = input.aimPitch;
 			};
 			viewer.wantsPointer = [&session] { return session.client && !session.client->world().hasControlObject(); };
 			viewer.onClick = [&session, &hudManager](float x, float y) {
@@ -2512,6 +2514,10 @@ int runGame(Options& options, Session& session)
 		viewer.onTicks = [&](int ticks) {
 			for (int i = 0; i < ticks; ++i) {
 				step();
+				// The game's sounds this tick (ragdoll impacts), where they happen.
+				for (const auto& sound : round.takeSounds()) {
+					sounds.playSoundAt(sound.sound, sound.position.x, sound.position.y, sound.position.z);
+				}
 				if (gameLogic.ended()) {
 					sinceEnd += 1.0f / 30.0f;
 					showEndOfRound();
