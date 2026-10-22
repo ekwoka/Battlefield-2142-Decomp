@@ -67,13 +67,17 @@ bool GameClient::update()
 		return false;
 	}
 	const auto now = std::chrono::steady_clock::now();
-	const auto tick = std::chrono::microseconds(1000000 / std::max(1, m_options.ticksPerSecond));
+	const auto tick = std::chrono::microseconds(1000000 / clientSendRate(m_options.connectionType));
 	if (now - m_lastTick >= tick) {
 		m_lastTick = now;
 		sendTick();
 	}
-	// No pings of our own (provisional: the server pings us and our pongs
-	// carry our acknowledgements; GameConnection::ping() is there to try).
+	// 0x0068f280: once connected a ping (type 7, 0x0068dc40 -> 0x006a9bb0)
+	// every 3000 ms; the pong gives the round trip.
+	if (now - m_lastPing >= std::chrono::milliseconds(3000)) {
+		m_lastPing = now;
+		m_connection.ping();
+	}
 	return true;
 }
 
@@ -300,6 +304,15 @@ uint32_t u8(int v) { return static_cast<uint32_t>(v) & 0xff; }
 
 } // namespace
 
+int clientSendRate(uint32_t connectionType)
+{
+	if (connectionType == 0) {
+		return kConnectionRates[0].clientPacketsPerSecond;
+	}
+	const ConnectionRates& rates = kConnectionRates[std::min<uint32_t>(connectionType, 5)];
+	return std::max(rates.clientPacketsPerSecond, 30);
+}
+
 void GameClient::joinSquad(int squad)
 {
 	const RemotePlayer* me = m_world.player(m_world.localPlayer());
@@ -328,7 +341,9 @@ void GameClient::setSquadLeader(int player, int squad)
 void GameClient::setSquadName(int squad, const std::string& name)
 {
 	const RemotePlayer* me = m_world.player(m_world.localPlayer());
-	sendEvent(eventOf(kEvChangeSquadName, {u8(squad), u8(me ? me->team : 0), 0}, {name.substr(0, 255)}));
+	// 0x0050d960: squad, team, the player (the server joins it to a new
+	// squad), the name's length (at most 31) and the name.
+	sendEvent(eventOf(kEvChangeSquadName, {u8(squad), u8(me ? me->team : 0), u8(m_world.localPlayer())}, {name.substr(0, 31)}));
 }
 
 void GameClient::setPrivateSquad(int squad, bool isPrivate)
@@ -364,10 +379,11 @@ void GameClient::castVote(int type, int target, int choice)
 	sendEvent(eventOf(kEvVote, {u8(target), u8(choice), 0, u8(target), 0, 0, me, 4, u8(type), 0}));
 }
 
-void GameClient::radioMessage(int index, int channel, int a, int b, int c, int d)
+void GameClient::radioMessage(int index, int channel, int a, int c)
 {
+	// 0x004b3020: the channel also in the byte after it, the last field 0.
 	sendEvent(eventOf(kEvRadioMessage, {static_cast<uint32_t>(index) & 0xffff, u8(a), static_cast<uint32_t>(channel) & 3,
-		u8(b), static_cast<uint32_t>(std::clamp(c, 0, 0x12)), static_cast<uint32_t>(std::clamp(d, 0, 4))}));
+		u8(channel), static_cast<uint32_t>(std::clamp(c, 0, 0x12)), 0}));
 }
 
 void GameClient::toggleFreeCamera()

@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <random>
 #include <thread>
 
@@ -150,7 +151,63 @@ TEST(NetGame_TypedEvents)
 	player.name = "Sol";
 	player.profileId = -1;
 	net::CreatePlayerInfo p;
-	CHECK(net::parseCreatePlayer(net::makeCreatePlayer(player), p) && p.id == 9 && p.name == "Sol" && !p.remote);
+	CHECK(net::parseCreatePlayer(net::makeCreatePlayer(player), p) && p.id == 9 && p.name == "Sol" && !p.remote && !p.ai);
+	// 0x0050a7c0: team 3, the spawn group 4, remote 1, id 8, object 16,
+	// 16, then the bot bit (player vtable 0x68).
+	player.remote = true;
+	player.ai = true;
+	player.spawnGroup = 5;
+	{
+		net::BitWriter w;
+		CHECK(net::writeGameEvent(w, net::makeCreatePlayer(player)));
+		net::BitReader r(w.data().data(), w.data().size());
+		CHECK(r.read(7) == net::kEvCreatePlayer && r.read(3) == 1 && r.read(4) == 5 && r.read(1) == 1 && r.read(8) == 9);
+		r.read(32);
+		CHECK(r.read(1) == 1);
+		net::BitReader again(w.data().data(), w.data().size());
+		net::GameEvent ev;
+		CHECK(net::readGameEvent(again, ev) && net::parseCreatePlayer(ev, p) && p.ai && p.remote && p.spawnGroup == 5);
+	}
+
+	// KilledBy as 0x0050d750 writes it: the attacker, the victim, has
+	// attacker, an id, two template values, the armor byte, the position
+	// (mode 0: three floats), the damage in 10 bits.
+	{
+		net::BitWriter w;
+		w.write(net::kEvKilledBy, 7);
+		w.write(5, 8);
+		w.write(2, 8);
+		w.write(1, 1);
+		w.write(300, 16);
+		w.write(0x1111, 32);
+		w.write(0x2222, 32);
+		w.write(7, 8);
+		w.write(0, 2);
+		for (float f : {10.0f, 20.0f, -30.0f}) {
+			uint32_t bits;
+			std::memcpy(&bits, &f, 4);
+			w.write(bits, 32);
+		}
+		w.write(1023, 10);
+		net::BitReader r(w.data().data(), w.data().size());
+		net::GameEvent ev;
+		net::KilledByInfo k;
+		CHECK(net::readGameEvent(r, ev) && net::parseKilledBy(ev, k));
+		CHECK(k.attacker == 5 && k.victim == 2 && k.hasAttacker && k.object == 300 && k.value1 == 0x1111 && k.value2 == 0x2222);
+		CHECK(k.armorValue == 7 && k.position.x == 10.0f && k.position.z == -30.0f && std::fabs(k.damage - 100.0f) < 0.01f);
+	}
+
+	// The move's last bit (0x00590650): pitch and roll from a device axis.
+	{
+		net::PlayerInput input;
+		CHECK(input.toMove(1).axisPitchRoll);
+		input.axisPitchRoll = false;
+		CHECK(!input.toMove(1).axisPitchRoll);
+	}
+	// Connection types (0x00928408, 0x004b3df0): 10 packets a second for
+	// type 0, a tick's 30 for the others.
+	CHECK(net::clientSendRate(0) == 10 && net::clientSendRate(1) == 30 && net::clientSendRate(4) == 30);
+	CHECK(net::kConnectionRates[5].serverMaxBytes == 640 && net::kConnectionRates[2].serverPacketsPerSecond == 10);
 
 	net::PostRemoteInfo post;
 	CHECK(net::parsePostRemote(net::makePostRemote(6, net::kNeSelectSpawnGroup, net::int32Payload(4)), post));
@@ -212,6 +269,26 @@ TEST(NetGame_GhostBlockRoundTrip)
 		CHECK(back.updates[0].state[2] == 0x03 && back.updates[1].kind == 3 && back.updates[1].ghost == 301);
 	}
 	CHECK(in.position() == out.bits());
+
+	// The state length: 11 bits on a live connection (0x00582a50 with kind
+	// 0), 13 in demos.
+	net::GhostBlock big;
+	big.present = true;
+	net::GhostUpdate full;
+	full.kind = 1;
+	full.ghost = 5;
+	full.state.assign(256, 0x5a);
+	full.stateBits = 2047;
+	big.updates.push_back(full);
+	for (unsigned bits : {net::kGhostStateLengthBits, net::kDemoGhostStateLengthBits}) {
+		net::BitWriter w;
+		net::writeGhostBlock(w, big, bits);
+		CHECK(w.bits() == 1 + 32 + 8 + 1 + 2 + 16 + 1 + bits + 2047);
+		net::BitReader r(w.data().data(), w.data().size());
+		net::GhostBlock b;
+		CHECK(net::readGhostBlock(r, b, bits) && b.updates.size() == 1 && b.updates[0].stateBits == 2047);
+	}
+	CHECK(net::kGhostStateLengthBits == 11);
 }
 
 TEST(NetGame_RemoteWorldFromEvents)
@@ -230,6 +307,15 @@ TEST(NetGame_RemoteWorldFromEvents)
 	other.name = "Other";
 	world.apply(net::makeCreatePlayer(other));
 	CHECK(world.localPlayer() == 2 && world.playerList().size() == 2);
+	// HandlePickup (0x0050bfd0): player, the kit, the soldier (0x004bb350
+	// asks the third for the kit holder interface 0xc49d).
+	{
+		net::GameEvent pickup;
+		pickup.type = net::kEvHandlePickup;
+		pickup.values = {2, 50, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+		world.apply(pickup);
+		CHECK(world.player(2)->soldierGhost == 60 && world.player(2)->alive);
+	}
 
 	net::CreateObjectInfo tank;
 	tank.templateId = 7;
@@ -601,6 +687,7 @@ TEST(NetGame_LoopbackSession)
 	client.applyForCommander();
 	client.startVote(2, 5);
 	client.radioMessage(12, 1);
+	client.createSquad(4, "an overly long squad name of over 31 bytes");
 	CHECK(runUntil(client, server, [&] {
 		server.send({});
 		return countType(server.received, net::kEvRadioMessage) == 1;
@@ -619,9 +706,15 @@ TEST(NetGame_LoopbackSession)
 			CHECK(e.u(0) == 5 && e.u(6) == 3 && e.u(7) == 0 && e.u(8) == 2);
 		}
 		if (e.type == net::kEvRadioMessage) {
-			CHECK(e.u(0) == 12 && e.u(2) == 1);
+			// 0x004b3020: the channel again in the byte after it, the last field 0.
+			CHECK(e.u(0) == 12 && e.u(2) == 1 && e.u(3) == 1 && e.u(5) == 0);
+		}
+		if (e.type == net::kEvChangeSquadName) {
+			// 0x0050d960: squad, team, our player id (the server joins it), at most 31 bytes.
+			CHECK(e.u(0) == 4 && e.u(1) == 1 && e.u(2) == 3 && e.text(0) == "an overly long squad name of ov");
 		}
 	}
+	CHECK(countType(server.received, net::kEvChangeSquadName) == 1);
 	CHECK(countType(server.received, net::kEvJoinSquad) == 1 && countType(server.received, net::kEvCommander) == 1);
 	CHECK(countType(server.received, net::kEvVote) == 1 && countType(server.received, net::kEvSetPrivateSquad) == 1);
 
@@ -791,10 +884,10 @@ TEST(NetGame_NetworkableRoundTrips)
 		net::NetworkableState s;
 		s.mask = 0x3f;
 		s.team = 2;
-		s.cpFlag = true;
+		s.cpNeutralStart = true;
 		s.cpValues[0] = 0.5f;
 		s.cpValues[1] = -1.0f;
-		s.cpTeam1Flag = true;
+		s.cpAllowTeam1 = true;
 		s.cpValue = -1;
 		net::BitWriter out;
 		net::encodeNetworkable(out, h, nullptr, s);
@@ -802,8 +895,8 @@ TEST(NetGame_NetworkableRoundTrips)
 		net::BitReader in(out.data().data(), out.data().size());
 		net::NetworkableState back;
 		CHECK(net::decodeNetworkable(in, h, ref, back) && back.complete);
-		CHECK(back.team == 2 && back.cpFlag && near(back.cpValues[0], 0.5f, 0.001f) && near(back.cpValues[1], -1, 0.001f));
-		CHECK(back.cpTeam1Flag && !back.cpTeam2Flag && back.cpValue == -1);
+		CHECK(back.team == 2 && back.cpNeutralStart && near(back.cpValues[0], 0.5f, 0.001f) && near(back.cpValues[1], -1, 0.001f));
+		CHECK(back.cpAllowTeam1 && !back.cpAllowTeam2 && back.cpValue == -1);
 	}
 	{
 		net::NetworkableHints h;
@@ -844,9 +937,48 @@ TEST(NetGame_NetworkableRoundTrips)
 		CHECK(p.alive && p.spawnGroup == 3 && p.score == -12 && p.kills == 25 && p.deaths == 7);
 		CHECK(p.teamwork == 14 && p.teamKills == 1 && p.ping == 87 && p.team == 2);
 	}
+	{ // Player, 0x00596100's other fields: the kit (0x1000), the squad
+	  // (0x2000, 5 bits), rank + 1 (0x4000, 6 bits), the spawn tick and
+	  // man-down (0x20), the flag holder (0x400000), the squad leader (always)
+	  // and the commander (0x8000000; then 6 bits and 4 bytes).
+		net::NetworkableHints h;
+		h.kind = net::NetworkableKind::Player;
+		net::NetworkableState s;
+		s.mask = 0x20 | 0x800 | 0x1000 | 0x2000 | 0x4000 | 0x400000 | 0x8000000;
+		s.player.kit = 4;
+		s.player.squad = 9;
+		s.player.rank = 0; // sent as 1
+		s.player.value294 = 200;
+		s.player.spawnTick = 123456;
+		s.player.manDown = true;
+		s.player.flagHolder = true;
+		s.player.squadLeader = true;
+		s.player.commander = false;
+		net::BitWriter out;
+		net::encodeNetworkable(out, h, nullptr, s);
+		// 30 mask, flag holder 1, spawn tick 32 + 1, 0x800 9, kit 5, squad 5,
+		// rank 6, squad leader 1, commander 1 + 6 + 32 (a leader), the last bit.
+		CHECK(out.bits() == 30 + 1 + 33 + 9 + 5 + 5 + 6 + 1 + 1 + 6 + 32 + 1);
+		net::BitReader in(out.data().data(), out.data().size());
+		net::NetworkableState back;
+		CHECK(net::decodeNetworkable(in, h, ref, back) && back.complete && in.position() == out.bits());
+		const net::PlayerNetState& p = back.player;
+		CHECK(p.kit == 4 && p.squad == 9 && p.rank == 0 && p.value294 == 200);
+		CHECK(p.hasSpawnTick && p.spawnTick == 123456 && p.manDown && p.hasFlagHolder && p.flagHolder);
+		CHECK(p.squadLeader && p.hasCommander && !p.commander);
+		// The rank goes out plus one (the reader takes one off, 0x005981a0).
+		net::BitReader raw(out.data().data(), out.data().size());
+		raw.read(31);
+		raw.read(32);
+		raw.read(20);
+		CHECK(raw.read(6) == 1);
+	}
 	CHECK(net::networkableKindForTemplateType("PlayerControlObject") == net::NetworkableKind::SimpleObject);
 	CHECK(net::networkableKindForTemplateType("PlayerControlObject", true) == net::NetworkableKind::PlayerControlObject);
 	CHECK(net::networkableKindForTemplateType("Soldier") == net::NetworkableKind::Soldier);
+	// 0x005bf200: hasMobilePhysics turns a DestroyableObject into a SimpleObject.
+	CHECK(net::networkableKindForTemplateType("DestroyableObject") == net::NetworkableKind::DestroyableObject);
+	CHECK(net::networkableKindForTemplateType("DestroyableObject", false, true) == net::NetworkableKind::SimpleObject);
 }
 
 TEST(NetGame_RemoteWorldMovesGhosts)
@@ -1089,15 +1221,15 @@ TEST(NetGame_PartNetworkablesRoundTrip)
 	{ // A seat with weapons: the active weapons; without: the occupant's soldier state.
 		net::NetworkableHints h;
 		h.kind = net::NetworkableKind::PlayerControlObject;
-		h.seatWeapons = 2;
+		h.seatCameras = 2;
 		net::NetworkableState s;
 		s.mask = 0x1 | 0x2 | 0x8;
 		s.seatWeapon[0] = 1;
 		s.seatWeapon[1] = -1;
-		s.seatFlag = true;
+		s.seatDucking = true;
 		net::NetworkableState b = roundTrip(h, s, ref, &bits);
-		CHECK(bits == 4 + 4 + 4 + 1 && b.seatWeapon[0] == 1 && b.seatWeapon[1] == -1 && b.seatFlag);
-		h.seatWeapons = 0;
+		CHECK(bits == 4 + 4 + 4 + 1 && b.seatWeapon[0] == 1 && b.seatWeapon[1] == -1 && b.seatDucking);
+		h.seatCameras = 0;
 		auto soldier = std::make_shared<net::NetworkableState>();
 		soldier->mask = 0x2 | 0x10 | 0x40;
 		soldier->yaw = -45;
@@ -1150,14 +1282,14 @@ TEST(NetGame_PartNetworkablesRoundTrip)
 		s.seatWeapon[0] = 0;
 		s.seatWeapon[2] = 4;
 		s.vehicleValue = 9;
-		s.vehicleActive = true;
+		s.ducking = true;
 		s.childDamage = {5, 0};
 		s.responseFlag = true;
 		const net::NetworkableState b = roundTrip(h, s, ref, &bits);
 		CHECK(bits == 26 + (2 + 3 * 20) + 11 + 4 + 8 + 2 + 4 + 4 + 5 + 1 + 4 + 1 + 1);
 		CHECK(b.health == -40 && b.empLevel == 7 && b.changePoints == 200 && b.spawnTeam == 2);
 		CHECK(b.seatWeapon[0] == 0 && b.seatWeapon[1] == -1 && b.seatWeapon[2] == 4 && b.vehicleValue == 9);
-		CHECK(b.vehicleActive && !b.vehicleFlag && b.childDamage == std::vector<int>({5, 0}) && b.responseFlag);
+		CHECK(b.ducking && !b.vehicleFlag && b.childDamage == std::vector<int>({5, 0}) && b.responseFlag);
 		// A parachute: its state instead of the weapons.
 		h.parachute = true;
 		s.mask = 0x8000;
@@ -1243,7 +1375,7 @@ net::GhostTemplateNode buggy()
 	base.children = {barrel};
 	net::GhostTemplateNode seat = node(20, "buggy_gunner", K::PlayerControlObject, {base});
 	seat.controlObject = true;
-	seat.hints.seatWeapons = 1;
+	seat.hints.seatCameras = 1;
 	net::GhostTemplateNode camera = node(30, "buggy_camera", K::RotationalBundle);
 	camera.groupKey = "rotationalbundle|turret"; // a Camera with the turret base's settings
 	net::GhostTemplateNode sound = node(40, "buggy_sound", K::Unknown);
@@ -1255,6 +1387,61 @@ net::GhostTemplateNode buggy()
 
 // 0x0067c690: ghosts per PlayerControlObject, groups in pre-order with
 // identical non-unique objects sharing one, and every group read in turn.
+// The template settings the reader's hints come from: the physics node
+// that moves (0x005f6ba0), the ResponsePhysics grip deciding a newCar2
+// spring's extra field (0x00604f10), a seat's cameras (0x0058bdb0) and a
+// mobile DestroyableObject's SimpleObject networkable (0x005bf200).
+TEST(NetGame_PhysicsHints)
+{
+	dice::hfe::world::ObjectTemplateManager templates;
+	auto make = [&](const char* type, const char* name, std::vector<std::pair<const char*, const char*>> settings,
+					std::vector<const char*> children = {}) {
+		dice::hfe::world::ObjectTemplate* t = templates.create(type, name);
+		t->settings()["networkableInfo"] = "Info";
+		for (const auto& [key, value] : settings) {
+			t->settings()[key] = value;
+		}
+		for (const char* child : children) {
+			t->children().push_back({child, {}, {}});
+		}
+		return t;
+	};
+	make("Spring", "w8", {{"hasCollisionPhysics", "1"}, {"hasMobilePhysics", "1"}, {"physicsType", "Mesh"}, {"grip", "8"}});
+	make("Spring", "w128", {{"hasCollisionPhysics", "1"}, {"hasMobilePhysics", "1"}, {"physicsType", "3"}, {"grip", "128"}});
+	make("Spring", "wdefault", {{"hasCollisionPhysics", "1"}, {"hasMobilePhysics", "1"}, {"physicsType", "3"}});
+	make("Spring", "wloose", {{"hasMobilePhysics", "1"}, {"physicsType", "3"}, {"grip", "8"}});
+	make("Engine", "eng", {{"engineType", "c_ETNewCar2"}}, {"w8", "w128", "wdefault", "wloose"});
+	make("Camera", "cam", {});
+	make("PlayerControlObject", "inner", {});
+	make("PlayerControlObject", "seat", {}, {"inner", "cam"});
+	make("PlayerControlObject", "bare", {});
+	make("RotationalBundle", "nav", {{"hasMobilePhysics", "1"}});
+	make("DestroyableObject", "crate", {{"hasMobilePhysics", "1"}});
+	make("DestroyableObject", "wall", {{"hasMobilePhysics", "0"}});
+	dice::hfe::world::ObjectTemplate* car = make("PlayerControlObject", "car",
+		{{"hasCollisionPhysics", "1"}, {"hasMobilePhysics", "1"}, {"physicsType", "3"}}, {"eng", "seat", "bare", "nav"});
+
+	const net::GhostTemplateNode tree = net::ghostTemplateFrom(templates, *car);
+	CHECK(tree.hints.mobile && tree.hints.kind == net::NetworkableKind::SimpleObject);
+	std::map<std::string, const net::GhostTemplateNode*> nodes;
+	std::function<void(const net::GhostTemplateNode&)> walk = [&](const net::GhostTemplateNode& n) {
+		nodes[n.name] = &n;
+		for (const net::GhostTemplateNode& c : n.children) {
+			walk(c);
+		}
+	};
+	walk(tree);
+	CHECK(nodes.size() == 11);
+	CHECK(nodes["w8"]->hints.springExtra && nodes["w8"]->hints.responseGrip == 8);
+	CHECK(!nodes["w128"]->hints.springExtra && nodes["w128"]->hints.responseGrip == 128);
+	CHECK(!nodes["wdefault"]->hints.springExtra && nodes["wdefault"]->hints.responseGrip == 2); // ContactGrip
+	CHECK(!nodes["wloose"]->hints.springExtra && nodes["wloose"]->hints.responseGrip == 0);   // no collision: no ResponsePhysics
+	CHECK(!nodes["nav"]->hints.mobile); // mobile physics without collision makes no physics node
+	CHECK(nodes["seat"]->hints.seatCameras == 1 && nodes["inner"]->hints.seatCameras == 0 && nodes["bare"]->hints.seatCameras == 0);
+	CHECK(net::networkableHintsFrom(templates, *templates.find("crate"), false).kind == net::NetworkableKind::SimpleObject);
+	CHECK(net::networkableHintsFrom(templates, *templates.find("wall"), false).kind == net::NetworkableKind::DestroyableObject);
+}
+
 TEST(NetGame_GhostLayoutGroups)
 {
 	const std::vector<net::GhostPartLayout> layout = net::buildGhostLayout(buggy());
@@ -1493,7 +1680,7 @@ TEST(NetGame_GhostLayoutFromGameTemplates)
 	dice::hfe::world::registerWorldConsoleMethods(console, templates, objects);
 	dice::hfe::world::registerUntypedTemplateProperties(console, templates,
 		{"networkableInfo", "hasMobilePhysics", "armor.maxHitPoints", "armor.wreckHitPoints", "maxSpeed", "minRotation",
-			"maxRotation", "engineType", "numberOfGears", "maxAngleOfAttack"});
+			"maxRotation", "engineType", "numberOfGears", "maxAngleOfAttack", "hasCollisionPhysics", "physicsType", "grip"});
 	console.registerConstant("c_ETNewCar2", "194"); // symbols/BF2142.exe.constants.csv
 	std::string out;
 	console.run("Objects/Vehicles/as_fav/as_fav.con", {}, out);
@@ -1514,8 +1701,8 @@ TEST(NetGame_GhostLayoutFromGameTemplates)
 		return;
 	}
 	CHECK(layout[1].name == "AS_FAV_SecondPosition" && layout[1].groups.size() == 3);
-	CHECK(layout[1].groups[0].hints.kind == net::NetworkableKind::PlayerControlObject && layout[1].groups[0].hints.seatWeapons > 0);
-	CHECK(layout[2].name == "as_fav_openPosition" && layout[2].groups.size() == 1 && layout[2].groups[0].hints.seatWeapons == 0);
+	CHECK(layout[1].groups[0].hints.kind == net::NetworkableKind::PlayerControlObject && layout[1].groups[0].hints.seatCameras > 0);
+	CHECK(layout[2].name == "as_fav_openPosition" && layout[2].groups.size() == 1 && layout[2].groups[0].hints.seatCameras == 0);
 	size_t springs = 0, engines = 0;
 	for (const net::GhostGroupLayout& g : layout[0].groups) {
 		springs += g.hints.kind == net::NetworkableKind::Spring ? 1 : 0;
@@ -1532,4 +1719,31 @@ TEST(NetGame_GhostLayoutFromGameTemplates)
 		}
 	}
 	std::printf("  as_fav: %zu + %zu + %zu groups\n", layout[0].groups.size(), layout[1].groups.size(), layout[2].groups.size());
+
+	// eu_apc: the wheels with a networkable have grip 8 (EngineGrip), so
+	// their ResponsePhysics has flag 8 and 0x00604f10 reads the extra
+	// field; the middle ones have grip 128 (EngineDummyGrip) and no
+	// networkableInfo, so no networkable at all.
+	console.run("Objects/Vehicles/eu_apc/eu_apc.con", {}, out);
+	const dice::hfe::world::ObjectTemplate* apc = templates.find("eu_apc");
+	CHECK(apc != nullptr);
+	if (!apc) {
+		return;
+	}
+	int extra = 0;
+	std::function<void(const net::GhostTemplateNode&)> walk = [&](const net::GhostTemplateNode& n) {
+		if (n.hints.kind == net::NetworkableKind::Spring) {
+			CHECK(n.hints.springExtra && n.hints.responseGrip == 8);
+			++extra;
+		}
+		for (const net::GhostTemplateNode& c : n.children) {
+			walk(c);
+		}
+	};
+	walk(net::ghostTemplateFrom(templates, *apc));
+	CHECK(extra == 4);
+	if (const dice::hfe::world::ObjectTemplate* middle = templates.find("EU_APC_Wheel_LM")) {
+		const net::NetworkableHints h = net::networkableHintsFrom(templates, *middle, true);
+		CHECK(h.kind == net::NetworkableKind::Unknown);
+	}
 }

@@ -153,14 +153,24 @@ struct ChannelSelection {
 		return mode == o.mode && alternateSet == o.alternateSet && multiSets == o.multiSets;
 	}
 };
-// What Bf2VoipClient picks (0x0043bd10, 0x0043be40, 0x0043cd40): squad
-// members talk to their squad; squad leaders to their squad, or to the
+// What Bf2VoipClient picks (0x0043bd10 dispatches on the player: squad
+// leaders to 0x0043be40, the commander to 0x0043cd40): squad members talk
+// to their squad (the default set); squad leaders to their squad, or to the
 // commander while the leader-channel key is held (alternate set 1); the
-// commander to all squad leaders while it is held, else to the squads
-// selected on the commander screen (provisional: with none selected the
-// commander talks to all leaders).
-ChannelSelection selectChannels(bool commander, bool squadLeader, bool leaderKeyHeld,
-	const std::vector<int>& selectedSquads = {});
+// commander to all squad leaders while it is held (the default set). With
+// the key up the commander talks to the squads (1-9) selected on the
+// commander screen (HUD 0x00b2d148 vtable 0x228 == 0x10; vtable 0x2c4's
+// +0x34 per squad), as a multi set. With none selected and the screen open
+// the commander is held back (+0xc0, cleared by 0x0043c8d0 once the screen
+// closes or the player stops commanding); with the screen closed the
+// selection doesn't change.
+struct ChannelChoice {
+	bool keep = false;   // the current selection stays
+	bool silent = false; // the commander is held back (+0xc0)
+	ChannelSelection channels;
+};
+ChannelChoice selectChannels(bool commander, bool squadLeader, bool leaderKeyHeld,
+	const std::vector<int>& selectedSquads = {}, bool commanderScreenOpen = false);
 
 // Voice from a client: the payload (frames and their sequence number),
 // the channel choice, the session id, the type.
@@ -210,8 +220,14 @@ struct ServerVoipSettings {
 	uint16_t clientPort = 55123;
 	int quality = 3;
 };
-// Provisional: the flags' order around voipEnabled follows the writer; a
-// live server's block has not been checked against it.
+// The seven flags (0x00515bc0 writes them, 0x00516230 reads them back in
+// the same order): bit 0 the writer's argument (+0x30), bit 1 voipEnabled
+// (game logic slot 0x254 reads +0x1cc, the reader stores it with slot 0x250,
+// and 0x004cbe40 starts the voice client on it), bits 2-6 the server
+// settings at 0x00a201c0 +0xfa, +0xfb, +0x148, +0xf8, +0xf9. Then the
+// address (32 bits, +0x1d0), the server port (16, +0x1d4), the client port
+// (16, +0x1d6) and the quality (sign + 31, +0x1dc); the fields after those
+// aren't needed here.
 bool parseServerVoipSettings(const std::string& settingsBlock, ServerVoipSettings& out);
 std::string buildServerVoipSettingsBlock(const std::string& serverName, const ServerVoipSettings& settings); // for tests
 

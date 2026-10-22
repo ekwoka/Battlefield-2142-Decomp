@@ -69,7 +69,10 @@ public:
 	// --- Each frame
 
 	// The local player's place: who may talk and to whom.
-	void setRole(bool commander, bool squadLeader, int squad, const std::vector<int>& selectedSquads = {});
+	// `selectedSquads` and `commanderScreenOpen`: the commander screen
+	// (0x0043cd40 reads the selection only while it is open).
+	void setRole(bool commander, bool squadLeader, int squad, const std::vector<int>& selectedSquads = {},
+		bool commanderScreenOpen = false);
 	// c_GIVoipPushToTalk and c_GIVoipUseLeaderChannel held.
 	void setKeys(bool pushToTalk, bool leaderChannel);
 	void update(double now);
@@ -104,11 +107,14 @@ private:
 	ServerVoipSettings m_server;
 	std::string m_gameServerHost;
 	uint16_t m_session = 0;
+	bool m_haveSession = false; // 0 is a valid session id (0x0057ce10)
 
 	bool m_commander = false, m_squadLeader = false;
 	int m_squad = 0;
 	std::vector<int> m_selectedSquads;
 	bool m_leaderKey = false;
+	bool m_commanderScreen = false;
+	bool m_commanderSilent = false; // Bf2VoipClient +0xc0
 	std::map<int, bool> m_voipOn;
 };
 

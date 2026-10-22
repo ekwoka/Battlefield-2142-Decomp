@@ -173,6 +173,34 @@ int engineTypeOf(const std::string& text)
 	return std::atoi(text.c_str());
 }
 
+// ObjectTemplate.physicsType (template +0xf4; 0x006bf540 / 0x006bf5d0
+// take None 0, Point 1, RotationalPoint 2, Mesh 3, MechLegs 4 or a digit;
+// 0 by default, 0x005f7d90). hasPointPhysics, hasRotationalPointPhysics and
+// hasResponsePhysics set it too (0x005f6e20: 1, 2, 3).
+int physicsTypeOf(const world::ObjectTemplate& t)
+{
+	const std::string type = lower(setting(t, "physicsType"));
+	if (!type.empty()) {
+		static const char* const kNames[] = {"none", "point", "rotationalpoint", "mesh", "mechlegs"};
+		for (int i = 0; i < 5; ++i) {
+			if (type == kNames[i]) {
+				return i;
+			}
+		}
+		return std::atoi(type.c_str());
+	}
+	if (std::atoi(setting(t, "hasResponsePhysics").c_str()) != 0) {
+		return 3;
+	}
+	if (std::atoi(setting(t, "hasRotationalPointPhysics").c_str()) != 0) {
+		return 2;
+	}
+	if (std::atoi(setting(t, "hasPointPhysics").c_str()) != 0) {
+		return 1;
+	}
+	return 0;
+}
+
 bool contains(const std::vector<std::string>& list, const std::string& name)
 {
 	const std::string l = lower(name);
@@ -185,9 +213,12 @@ bool hasComponent(const world::ObjectTemplate& t, const char* name)
 	return std::any_of(t.components().begin(), t.components().end(), [&](const std::string& c) { return lower(c) == l; });
 }
 
-// 0x0060ec00 pushes every armored object below the root onto the root's
-// list (object vtable 0x148), each after its own children (provisional:
-// post-order), with its armor.fullChildSync.
+// 0x0060ec00 (template slot 64, run first by the object init 0x0063d720)
+// makes each child of the template's list (+0x248, in addTemplate order),
+// runs the child's init (which makes the grandchildren) and only then
+// pushes it onto the root's list (object vtable 0x148) when it has armor
+// (+0x48): post-order, children in template order, nested seats included,
+// the root left out. Each with its armor.fullChildSync.
 void collectArmored(const GhostTemplateNode& node, std::vector<bool>& out)
 {
 	for (const GhostTemplateNode& child : node.children) {
@@ -219,9 +250,11 @@ GhostTemplateNode build(const world::ObjectTemplateManager& templates, const wor
 	node.fullChildSync = std::atoi(setting(t, "armor.fullChildSync").c_str()) != 0;
 	if (node.hints.kind == NetworkableKind::Spring) {
 		// 0x00604f10: an extra field when the spring's engine (the nearest
-		// Engine ancestor, 0x0064f7b0) is a newCar2 one (provisional: the
-		// physics node's flag 8 is assumed set for those).
-		node.hints.springExtra = (ancestorEngineType & 0x80) != 0;
+		// Engine ancestor, 0x0064f7b0; engine vtable 0x1a8 < 0) is a newCar2
+		// one and the spring's physics (object +0x54, vtable 0x7c) has flag 8:
+		// only ResponsePhysics keeps flags (0x006ba350), set from the
+		// template's grip (+0xfc), and 8 is EngineGrip.
+		node.hints.springExtra = (ancestorEngineType & 0x80) != 0 && (node.hints.responseGrip & 8) != 0;
 	}
 	// 0x00678070: RotationalBundles (and Cameras) with the same rotation
 	// settings share a group even when their templates differ.
@@ -258,8 +291,24 @@ NetworkableHints networkableHintsFrom(const world::ObjectTemplateManager& templa
 	if (setting(t, "networkableInfo").empty() && lower(t.typeName()) != "soldier") {
 		return h;
 	}
-	h.kind = networkableKindForTemplateType(t.typeName(), hasParent);
-	h.mobile = std::atoi(setting(t, "hasMobilePhysics").c_str()) != 0;
+	const bool collisionPhysics = std::atoi(setting(t, "hasCollisionPhysics").c_str()) != 0; // template +0xf1 bit 4
+	const bool mobilePhysics = std::atoi(setting(t, "hasMobilePhysics").c_str()) != 0;       // template +0xf1 bit 2
+	const int physicsType = physicsTypeOf(t);
+	h.kind = networkableKindForTemplateType(t.typeName(), hasParent, mobilePhysics);
+	// The physics node (object +0x50, made by template slot 29, 0x005f6ba0):
+	// with collision and mobile physics, Point / RotationalPoint / Mesh give
+	// nodes that move (0x006c5e70, 0x006c6480, 0x006c70c0: vtable 0x164
+	// 0x006a10e0 returns 1); otherwise none, or Mesh's static one
+	// (0x006c5500, whose 0x164 returns 0).
+	h.mobile = collisionPhysics && mobilePhysics && physicsType >= 1 && physicsType <= 3;
+	// The other physics (object +0x54, template slot 31, 0x005f6a60): with
+	// collision and mobile physics, Mesh gives ResponsePhysics (0x006ba0d0),
+	// whose flags (vtable 0x7c / 0x80) are the template's grip (2 by
+	// default: ContactGrip; 8 EngineGrip, 0x80 EngineDummyGrip, 0x0051aed0).
+	if (collisionPhysics && mobilePhysics && physicsType == 3) {
+		const std::string grip = setting(t, "grip");
+		h.responseGrip = grip.empty() ? 2 : std::atoi(grip.c_str());
+	}
 	h.hasArmor = hasComponent(t, "Armor") || !setting(t, "armor.maxHitPoints").empty();
 	h.hasTeamChange = hasComponent(t, "TeamChange");
 	h.parachute = lower(t.typeName()) == "parachute";
@@ -281,9 +330,16 @@ NetworkableHints networkableHintsFrom(const world::ObjectTemplateManager& templa
 	}
 	h.overheadRange = static_cast<float>(std::atof(setting(t, "speed").c_str()));
 	if (h.kind == NetworkableKind::PlayerControlObject) {
-		// The seat's weapons (PCO interface +0x2c, provisional): the
-		// GenericFireArms below it, other seats' subtrees left out.
-		int weapons = 0;
+		// 0x00605b00 asks the seat's PCO interface (vtable 0x0096dcb8) slot
+		// 0x40 (0x0058cc60) for a map whose size (+0x2c) picks the layout.
+		// The root PCO's init (0x005cd4f0 -> 0x0058dde0) fills each seat's
+		// with 0x0058bdb0: a walk of the seat's whole subtree, nested seats
+		// included, taking the objects answering 0xc367 whose pcoId
+		// (slot 0x48) is the seat's: Camera, FreeCamera and OverheadCamera.
+		// A seat's pcoId is ObjectTemplate.setPcoId (+0x3a0, -1 by default)
+		// and a camera's falls back to its nearest PCO's; the shipped data
+		// sets neither, so every camera below the seat counts.
+		int cameras = 0;
 		std::function<void(const world::ObjectTemplate&, int)> count = [&](const world::ObjectTemplate& at, int depth) {
 			for (const world::ChildTemplate& child : at.children()) {
 				const world::ObjectTemplate* c = templates.find(child.name);
@@ -291,15 +347,14 @@ NetworkableHints networkableHintsFrom(const world::ObjectTemplateManager& templa
 					continue;
 				}
 				const std::string type = lower(c->typeName());
-				if (type == "genericfirearm") {
-					++weapons;
-				} else if (type != "playercontrolobject" && type != "parachute") {
-					count(*c, depth + 1);
+				if (type == "camera" || type == "freecamera" || type == "overheadcamera") {
+					++cameras;
 				}
+				count(*c, depth + 1);
 			}
 		};
 		count(t, 0);
-		h.seatWeapons = weapons;
+		h.seatCameras = cameras;
 	}
 	return h;
 }

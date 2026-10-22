@@ -10,8 +10,8 @@
 //   3. the ghost block (0x00581290 reads): object replication, sent by
 //      servers; clients write a single 0 bit.
 //
-// Everything is a bit stream (BitStream.h). Parts that are only partly
-// understood are marked "provisional".
+// Everything is a bit stream (BitStream.h). Fields whose meaning could not
+// be found offline say so where they are declared.
 #pragma once
 
 #include "BitStream.h"
@@ -74,13 +74,20 @@ enum PlayerInputId : int {
 //   32 bits + 11 bits: trigger bits, bit (id - 8) for the inputs in the table
 //                      at 0x009653a8 that are above 0.5 (ids 8-50; the
 //                      high part keeps only 11 bits);
-//   1 bit: PlayerInput +0x110 (provisional: unknown flag).
+//   1 bit: PlayerInput +0x110: pitch and roll come from a device axis.
+//          0x00696db0 fills PlayerInput from a control map: the bit starts
+//          at 1 and, for inputs 1 and 2 when the map binds them (ControlMap
+//          slot 0x20), is ANDed with slot 0x6c (0x00681fc0: the mapping's
+//          +0xb0, set by 0x00680dc0 when the active binding is an
+//          axis-to-axis one, kind 1). So 1 on foot (unbound) and with the
+//          mouse (Land, Air, Helicopter maps); 0 when keys drive them (the
+//          Sea map's arrow keys).
 struct PlayerMove {
 	int32_t index = 0; // counts up per frame (0x005836b0); not sent per move
 	std::array<int16_t, 6> axes {};
 	uint32_t triggersLow = 0;  // inputs 8..39
 	uint32_t triggersHigh = 0; // inputs 40..50 (11 bits)
-	bool flag = false;
+	bool axisPitchRoll = true;
 
 	float axis(int input) const { return axes[static_cast<size_t>(input)] * 0.01f; }
 	bool trigger(int input) const;
@@ -94,7 +101,7 @@ const std::vector<int>& movedTriggerInputs();
 // A player's 64 input values (the engine's PlayerInput floats).
 struct PlayerInput {
 	std::array<float, kPINumInputs> values {};
-	bool flag = false; // see PlayerMove::flag
+	bool axisPitchRoll = true; // see PlayerMove::axisPitchRoll
 
 	void set(int input, float value) { values[static_cast<size_t>(input)] = value; }
 	float get(int input) const { return values[static_cast<size_t>(input)]; }
@@ -103,7 +110,7 @@ struct PlayerInput {
 
 // The input block: 1 bit present; 4 bits move count; 9 bits the client's
 // view delay in ms for lag compensation (0x0057b040: the networkable
-// manager's 100 ms plus 1000 x the interpolation time of 0x006b4e70; the
+// manager's +0x50, 200 ms from the rate table, plus 1000 x the interpolation time of 0x006b4e70; the
 // server's player vtable slot 100 keeps it at +0xf4, capped at 512); if there are moves, the
 // first move's index (sign + 31 bits) and the moves. Clients keep and resend
 // their last three moves (0x00590450).
@@ -138,7 +145,7 @@ enum GameEventType : uint32_t {
 	kEvExitVehicle = 0x0a,        // s->c
 	kEvPostRemote = 0x0b,         // both: a message for the other side's event manager
 	kEvChangePlayerName = 0x0c,   // both
-	kEvHandleDrop = 0x0d,         // s->c (provisional name: registered apart)
+	kEvHandleDrop = 0x0d,         // s->c ("HandleDropEvent", registered by 0x0042d980)
 	kEvHandlePickup = 0x0e,       // s->c
 	kEvStringBlock = 0x0f,        // both: chat text in chunks
 	kEvJoinSquad = 0x10,          // c->s
@@ -239,13 +246,12 @@ bool readEventBlock(BitReader& in, bool& present, ReliableEventBlock& block);
 // Typed views and builders of the events a client needs.
 struct CreatePlayerInfo { // kEvCreatePlayer (0x0050a4c0, handled 0x0050a8c0)
 	int team = 0;          // 3 bits (player vtable +0xf4)
-	int kind = 0;          // 4 bits (not used by the client handler; provisional)
+	int spawnGroup = 0;    // 4 bits: player vtable 0x18c (+0xe8; the client handler ignores it)
 	bool remote = false;   // 0: the receiving client's own player
-	bool ai = false;       // player vtable +0x64 (provisional)
 	int id = 0;            // 8 bits
 	uint16_t object = 0;   // 16 bits: the ghost id of the player's networkable (interface 0x58165ffe, registered by 0x0067d3d0)
-	uint16_t value16 = 0;  // 16 bits (unused by the client handler)
-	bool flag = false;
+	uint16_t value16 = 0;  // 16 bits (always 0 from the builder 0x0050a7c0)
+	bool ai = false;       // a bot: the builder reads player vtable 0x68 (+0xd4); the handler sets it with 0x64 on remote players
 	std::string name;      // 32 bytes
 	int32_t profileId = 0; // sign + 31 bits (player vtable +0x328)
 	int32_t flags = 0;     // sign + 3 bits: bit 0 vtable +0x3b0, bit 2 +0x3a8
@@ -261,7 +267,8 @@ struct CreateObjectInfo { // kEvCreateObject (0x0050b150, built 0x0050b0f0, hand
 	uint32_t count = 1;      // >1: that many ghosts from `ghost` on, at the origin
 	bool hasPosition = false, hasRotation = false;
 	Vec3f position;
-	Vec3f rotation;          // as the server's createObject got it (0x004ab8a0 negates it into a matrix; provisional: radians yaw/pitch/roll)
+	Vec3f rotation;          // degrees, yaw/pitch/roll: 0x004ab8a0 builds the matrix with 0x006adb30(-z, -y, -x), which
+	                         // takes degrees (x pi/180, 0x00a065c8); the late-join replay makes it with 0x00568c30 -> 0x006ad2a0
 };
 bool parseCreateObject(const GameEvent& e, CreateObjectInfo& out);
 GameEvent makeCreateObject(const CreateObjectInfo& info);
@@ -328,9 +335,33 @@ GameEvent makeDataBlockChunk(const std::string& bytes);
 // takes a client's line only with source 2 and a channel other than 0xc
 // and 0xd (server messages); it posts the result as a chat message
 // (0x004a5460: player +0x28, channel +0x34, source +0x38).
+// The channels (chat message +0x34), as 0x004ab6b0 names them for the
+// scripts' ChatMessage handler. A server's lines to a channel 12 or 13
+// carry player 0xff.
+enum ChatChannel : uint32_t {
+	kChatGlobal = 0,
+	kChatTeam = 1,
+	kChatCommander = 2,
+	kChatSquad = 3,
+	kChatSquadLeader = 4,
+	kChatSquadId = 5,
+	kChatLocalTeamMedic = 6,
+	kChatLocalGroundVehicle = 7,
+	kChatLocalAirVehicle = 8,
+	kChatLocal = 9,
+	kChatLocalTeam = 10,
+	kChatVehicle = 11,
+	kChatServerMessage = 12,
+	kChatServerTeamMessage = 13,
+	kChatPlayer = 14,
+	kChatLocalRevive = 15, // 16 is named the same
+	kChatTeamAndLocalEnemies = 17,
+	kChatSquadAndLocalEnemies = 18,
+	kChatInvalid = 19,
+};
 struct ChatMessage {
-	uint32_t channel = 0; // provisional: 0 all, 1 team, 2 squad...; 0xc server
-	uint32_t source = 2;  // 2: typed by a player
+	uint32_t channel = kChatGlobal; // ChatChannel
+	uint32_t source = 2;  // the scripts' "type" (GameLogic slot 37, 0x004a5ec0): 1 from a server, 2 typed by a player
 	int player = -1;
 	uint8_t b9 = 0, b10 = 0;
 	std::string text;
@@ -340,15 +371,18 @@ bool decodeChat(const std::string& block, ChatMessage& out);
 // The StringBlock events carrying a block: the start, then 63-byte chunks.
 std::vector<GameEvent> stringBlockEvents(const std::string& block);
 
-struct KilledByInfo { // kEvKilledBy (0x0050d620, handled 0x0050d520)
-	int victim = 0;   // 8 bits (provisional: the receiving player)
-	int attacker = 0; // 8 bits: looked up as a player
-	bool flag = false;
-	uint16_t object = 0;
+struct KilledByInfo { // kEvKilledBy (0x0050d620 reads, 0x0050d750 writes; built by 0x005b7680 -> 0x005b7130, handled 0x0050d520)
+	int attacker = 0;      // 8 bits: the attacker's player id (vtable 0x58), when hasAttacker
+	int victim = 0;        // 8 bits: the player hit (the receiving client's own)
+	bool hasAttacker = false;
+	uint16_t object = 0;   // 16 bits: an id the caller passes
+	// The damage source's template values (template vtable 0x40): the
+	// weapon or projectile (unless the caller says not to), then the
+	// attacker's vehicle when it is in one, else the source's root object.
 	uint32_t value1 = 0, value2 = 0;
-	int weapon = 0;   // 8 bits (provisional)
-	Vec3f position;   // where the damage came from
-	float damage = 0; // 10 bits scaled to 0-100
+	int armorValue = 0;    // 8 bits: the victim's armor vtable 0xdc (the HUD's slot 0xd8 gets it)
+	Vec3f position;        // armor vtable 0xe4: where the damage came from
+	float damage = 0;      // 10 bits: armor vtable 0xec x 0.01, 0..1, as 0-100
 };
 bool parseKilledBy(const GameEvent& e, KilledByInfo& out);
 
@@ -378,16 +412,23 @@ GameEvent makeConnectionType(uint32_t type);
 // (x 1/30 s); 8 bits update count; 1 bit a control-object record follows
 // (0x00580cd0); then the updates (0x0057fce0), each 2 bits kind and a 16-bit
 // ghost id:
-//   kind 1: an update: 1 bit (full), the state's length (13 bits, the
-//           ghost manager's +0x2140 when built with a connection type,
-//           0x00582a50) and that many bits of networkable state, read by
+//   kind 1: an update: 1 bit (full), the state's length (the ghost
+//           manager's +0x2140, kGhostStateLengthBits) and that many bits of networkable state, read by
 //           the ghost's networkables (vtable slot 0x30, 0x0057f670); left
 //           undecoded here (per-template layouts: e.g. the soldier's
 //           0x00602070 reads a 12-bit mask, then rotations, velocities
 //           and a 3 x 14-bit vector);
 //   kind 3: the ghost is removed (0x0067a010);
 //   kind 0: nothing; kind 2: invalid.
-constexpr unsigned kGhostStateLengthBits = 13; // provisional: 11 for a connection type 0 manager
+// The state length's bits: the ghost manager's +0x2140 (0x00582a50: 11,
+// or 13 when built with a non-zero kind). ServerConnection 0x0057b3f0
+// builds it with its kind (+0x170): a client connecting to a server uses
+// kind 0 (0x004b4d10), and a server's per-client managers too (0x004ac920:
+// 0x0057cec0(id == 0x81)); only demo recording (connection id 0x81,
+// 0x004afcc0) and playback (kind 2, 0x004b4a80) use 13. The reader
+// 0x0057fce0 and the writer 0x0057fbc0 both take it from +0x2140.
+constexpr unsigned kGhostStateLengthBits = 11;
+constexpr unsigned kDemoGhostStateLengthBits = 13;
 
 // The control-object record (the client's own soldier or vehicle, for its
 // prediction): 12 bits length (of the rest), the last move the server took
@@ -420,8 +461,8 @@ struct GhostBlock {
 	std::optional<ControlObjectRecord> control;
 	std::vector<GhostUpdate> updates;
 };
-bool readGhostBlock(BitReader& in, GhostBlock& block);
-void writeGhostBlock(BitWriter& out, const GhostBlock& block);
+bool readGhostBlock(BitReader& in, GhostBlock& block, unsigned lengthBits = kGhostStateLengthBits);
+void writeGhostBlock(BitWriter& out, const GhostBlock& block, unsigned lengthBits = kGhostStateLengthBits);
 
 // ---------------------------------------------------------------------------
 // Whole payloads

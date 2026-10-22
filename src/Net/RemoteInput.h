@@ -2,10 +2,13 @@
 // (PlayerInput, GameProtocol.h). Header-only so the Net library doesn't
 // link the game.
 //
-// Provisional: the original fills PlayerInput from the control map (the
-// keys' and mouse's values per c_PI input) and the server's soldier turns
-// by the mouse-look inputs; the scale of those (degrees per unit) is not
-// worked out, so `turn` and `aimPitch` are passed as they are.
+// The original fills PlayerInput from the control maps (0x00696db0, run
+// for each player map with the last winning): a mouse axis is the device's
+// delta times the map's mouse sensitivity, with the aspect correction and
+// Y invert (0x006802c0). How many degrees the server's soldier turns per
+// mouse-look unit lives in its input code (0x00565180), which isn't traced
+// here, so `turn` and `aimPitch` are passed as they are: that scale is
+// the one open question.
 #pragma once
 
 #include "Game/SoldierControl.h"

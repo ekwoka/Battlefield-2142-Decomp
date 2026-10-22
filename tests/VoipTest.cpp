@@ -31,6 +31,12 @@ namespace {
 
 constexpr double kTwoPi = 6.283185307179586;
 
+// The channels a player picks, the commander screen open.
+ChannelSelection channelsFor(bool commander, bool leader, bool leaderKey, const std::vector<int>& squads = {})
+{
+	return selectChannels(commander, leader, leaderKey, squads, true).channels;
+}
+
 std::vector<int16_t> sine(double frequency, double amplitude, size_t samples, size_t start = 0)
 {
 	std::vector<int16_t> out(samples);
@@ -146,7 +152,7 @@ struct Session {
 		settings.pushToTalk = true;
 		p->client.setSettings(settings);
 		p->client.setSession(p->data.session);
-		p->client.setChannels(selectChannels(commander, leader, false));
+		p->client.setChannels(channelsFor(commander, leader, false));
 		players.push_back(std::move(p));
 		return *players.back();
 	}
@@ -193,7 +199,7 @@ struct Session {
 	std::vector<double> talk(size_t who, bool leaderKey = false, const std::vector<int>& squads = {})
 	{
 		Player& p = *players[who];
-		p.client.setChannels(selectChannels(p.data.commander, p.data.squadLeader, leaderKey, squads));
+		p.client.setChannels(channelsFor(p.data.commander, p.data.squadLeader, leaderKey, squads));
 		const std::vector<size_t> from = marks();
 		p.device.talking = true;
 		p.client.setPushToTalk(true);
@@ -338,12 +344,114 @@ TEST(Voip_ChannelPlans)
 	member.squad = 10;
 	CHECK(!planChannels(member, plan));
 
-	CHECK(selectChannels(false, false, true).mode == kVoiceDefaultChannelSet);
-	const ChannelSelection toCommander = selectChannels(false, true, true);
-	CHECK(toCommander.mode == kVoiceAlternateChannelSet && toCommander.alternateSet == 1);
-	CHECK(selectChannels(true, false, true).mode == kVoiceDefaultChannelSet);
-	const ChannelSelection squads = selectChannels(true, false, false, {2, 4});
-	CHECK(squads.mode == kVoiceMultiChannelSet && squads.multiSets == std::vector<uint8_t>({2, 4}));
+	CHECK(selectChannels(false, false, true).channels.mode == kVoiceDefaultChannelSet);
+	const ChannelChoice toCommander = selectChannels(false, true, true);
+	CHECK(!toCommander.keep && toCommander.channels.mode == kVoiceAlternateChannelSet && toCommander.channels.alternateSet == 1);
+	CHECK(selectChannels(true, false, true).channels.mode == kVoiceDefaultChannelSet);
+	// 0x0043cd40 with the key up: the squads selected on the open commander
+	// screen; none there holds the commander back; the screen closed keeps
+	// the last selection.
+	const ChannelChoice squads = selectChannels(true, false, false, {2, 4}, true);
+	CHECK(!squads.keep && squads.channels.mode == kVoiceMultiChannelSet && squads.channels.multiSets == std::vector<uint8_t>({2, 4}));
+	const ChannelChoice none = selectChannels(true, false, false, {}, true);
+	CHECK(none.keep && none.silent);
+	const ChannelChoice closed = selectChannels(true, false, false, {2, 4}, false);
+	CHECK(closed.keep && !closed.silent);
+}
+
+// 0x0057ce10: rand() % 256^2 with the CRT's 15-bit rand(), 1-500 on from a clash.
+TEST(Voip_SessionIds)
+{
+	std::mt19937 random(7);
+	std::vector<uint16_t> inUse;
+	for (int i = 0; i < 64; ++i) {
+		const uint16_t id = VoipServerConnection::newSessionId(random, inUse);
+		CHECK(std::find(inUse.begin(), inUse.end(), id) == inUse.end());
+		inUse.push_back(id);
+	}
+	// Without a clash the id is the draw itself: 0-32767.
+	for (int i = 0; i < 1000; ++i) {
+		CHECK(VoipServerConnection::newSessionId(random, {}) <= 0x7fff);
+	}
+	// Every id the draw can give in use: it steps past them.
+	std::vector<uint16_t> all;
+	for (int id = 0; id <= 0x7fff; ++id) {
+		all.push_back(static_cast<uint16_t>(id));
+	}
+	const uint16_t past = VoipServerConnection::newSessionId(random, all);
+	CHECK(past > 0x7fff && past <= 0x7fff + 500);
+}
+
+// GameSpy Voice 2's source list (0x00737710, 0x00737630, 0x007378c0): a
+// first packet plays 10 frames after it arrives; duplicates and frames
+// behind the play clock are dropped; an offset more than 10 above its
+// average drops a frame; 8 sources at most; a drained source is freed.
+TEST(Voip_SourceList)
+{
+	MemoryDevice device;
+	VoipClient client;
+	client.setDevice(&device);
+	VoiceSettings settings;
+	settings.pushToTalk = true;
+	client.setSettings(settings);
+	SpeexEncoder encoder(speexQualityFor(3));
+	auto frames = [&](int count) {
+		std::vector<uint8_t> out;
+		for (int i = 0; i < count; ++i) {
+			const std::vector<int16_t> tone = sine(1000.0, 8000, kFrameSamples, static_cast<size_t>(i) * kFrameSamples);
+			encoder.encode(tone.data(), out);
+		}
+		return out;
+	};
+	auto packet = [&](int speaker, uint16_t sequence, int count) {
+		ForwardedVoice v;
+		v.speaker = static_cast<uint16_t>(speaker);
+		v.sequence = sequence;
+		v.frames = frames(count);
+		return v;
+	};
+	client.update(10.0); // the play clock starts: 0
+	int mixed = 0;
+	auto mix = [&](int count) {
+		for (int i = 0; i < count; ++i) {
+			client.update(10.0 + ++mixed * 0.02 + 0.005); // one frame each
+		}
+	};
+
+	client.deliver(packet(5, 100, 1)); // at clock 0: plays at 10
+	client.deliver(packet(5, 130, 1)); // plays at 40
+	client.deliver(packet(5, 130, 1)); // the same stamp: dropped
+	CHECK(client.counters().framesLate == 1);
+	CHECK(client.sources() == 1);
+	mix(10);
+	CHECK(device.played.size() == 10 * kFrameSamples);
+	CHECK(device.loudestSince(0) < 1.0);
+	mix(1);
+	CHECK(rms(device.played.data() + 10 * kFrameSamples, kFrameSamples) > kHeard / 4);
+	CHECK(client.counters().framesDecoded == 1);
+	mix(9); // clock 20
+	client.deliver(packet(5, 105, 1)); // its stamp (15) is behind the clock
+	CHECK(client.counters().framesLate == 2);
+	mix(21); // 40 played, the source drained and past its end
+	CHECK(client.counters().framesDecoded == 2);
+	CHECK(client.sources() == 0);
+
+	// A speaker arriving 400 frames early: the average drops by 12.5, more
+	// than 10 under the offset, so the offset goes down by one and the
+	// packet's first frame is dropped.
+	client.deliver(packet(6, 1000, 1));
+	const size_t late = client.counters().framesLate;
+	client.deliver(packet(6, 1400, 2));
+	CHECK(client.counters().framesLate == late + 1);
+
+	// Eight sources hold frames: a ninth speaker is refused.
+	for (int speaker = 10; speaker < 17; ++speaker) {
+		client.deliver(packet(speaker, 0, 1));
+	}
+	CHECK(client.sources() == 8);
+	client.deliver(packet(20, 0, 1));
+	CHECK(client.sources() == 8);
+	CHECK(client.counters().framesLate == late + 2);
 }
 
 TEST(Voip_ServerSettingsBlock)
@@ -392,7 +500,7 @@ TEST(Voip_LoopbackSession)
 	CHECK(heard[1] > kHeard && heard[3] > kHeard);
 	CHECK(heard[0] < kHeard && heard[4] < kHeard && heard[5] < kHeard && heard[2] < kHeard);
 	CHECK(leader1.client.counters().framesDecoded > 20);
-	CHECK(member1b.client.counters().framesConcealed < 10);
+	CHECK(member1b.client.counters().framesLate < 10);
 	// The voice is the tone that was said (through the filter and Speex).
 	{
 		const auto& played = member1b.device.played;
@@ -454,15 +562,22 @@ TEST(Voip_LoopbackSession)
 	heard = s.talk(4);
 	CHECK(heard[1] > kHeard && heard[2] > kHeard && heard[3] > kHeard);
 
-	// Talking for over 10 s: held back for 5 s.
+	// Talking for over 10 s (0x0043c140): held back while the talk goes on,
+	// lifted once 0.5 s passed without voice (0x0043c8d0).
 	Player& talker = member1;
 	talker.device.talking = true;
 	talker.client.setPushToTalk(true);
-	s.step(560);
+	s.step(510);
 	CHECK(talker.client.blocked());
+	const size_t sent = talker.client.counters().packetsSent;
+	s.step(300); // 6 s more: still held back, nothing sent
+	CHECK(talker.client.blocked());
+	CHECK(talker.client.counters().packetsSent == sent);
 	talker.device.talking = false;
 	talker.client.setPushToTalk(false);
-	s.step(300);
+	s.step(20);
+	CHECK(talker.client.blocked());
+	s.step(10);
 	CHECK(!talker.client.blocked());
 	(void)commander;
 }

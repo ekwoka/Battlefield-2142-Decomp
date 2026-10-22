@@ -272,7 +272,7 @@ const char* networkableKindName(NetworkableKind kind)
 	}
 }
 
-NetworkableKind networkableKindForTemplateType(const std::string& templateType, bool hasParent)
+NetworkableKind networkableKindForTemplateType(const std::string& templateType, bool hasParent, bool hasMobilePhysics)
 {
 	// Each object class's slot-94 function makes its networkable with the
 	// class id it passes to 0x006fa2a0 (an index into 0x00918d88), traced
@@ -297,9 +297,10 @@ NetworkableKind networkableKindForTemplateType(const std::string& templateType, 
 		return NetworkableKind::ControlPoint; // 0x005bb950
 	}
 	if (t == "destroyableobject") {
-		// 0x005bf200: SimpleObject when the template answers interface
-		// 0x9985e8's vtable 0x34 (not traced; provisional).
-		return NetworkableKind::DestroyableObject;
+		// 0x005bf200: the template's interface 0xc368 (template +0x68)
+		// slot 0x34 (0x005049e8) is hasMobilePhysics; set: the SimpleObject
+		// networkable (0x9858), else the DestroyableObject one (0x9876).
+		return hasMobilePhysics ? NetworkableKind::SimpleObject : NetworkableKind::DestroyableObject;
 	}
 	if (t == "destroyablewindowsbundle") {
 		return NetworkableKind::DestroyableWindowsBundle; // 0x005be670
@@ -336,7 +337,17 @@ NetworkableKind networkableKindForTemplateType(const std::string& templateType, 
 			return NetworkableKind::Unknown;
 		}
 	}
-	return NetworkableKind::SimpleObject; // the default (0x0063c3f0): SimpleObject, Bundle, SupplyObject...
+	// The default (0x0063c3f0, or SupplyObject's 0x005d0af0; both only with
+	// a networkableInfo): every other type that makes an object, traced
+	// from the template's create slot to the object's slot 94: SimpleObject,
+	// Bundle, DynamicBundle, AnimatedBundle, ItemContainer, KitPart,
+	// Obstacle, UAVVehicle, SupplyObject, SupplyDepot, AreaObject,
+	// AmbientEffectArea, AntennaObject, DestroyableWindow, Emitter,
+	// EntryPoint, LookAtObject, ObjectSpawner, (Turnable)RemoteControlledObject,
+	// Rotor, Trigger, GroundEffectBundle, and the effect bundles (Effect-,
+	// AirDraft-, WheelEffectBundle), which a dedicated server doesn't make
+	// (0x0042b800). Particle systems, decals and trails make no object.
+	return NetworkableKind::SimpleObject;
 }
 
 // ---------------------------------------------------------------------------
@@ -400,7 +411,7 @@ bool readSimpleObject(BitReader& in, const NetworkableHints& h, const Vec3f& ref
 		s.changePoints = static_cast<int>(in.read(8));
 	}
 	if (m & 0x1000) {
-		s.spawnTeam = static_cast<int>(in.read(2)); // object +0x168 (provisional: the spawner's team)
+		s.spawnTeam = static_cast<int>(in.read(2)); // object +0x168 (base object vtable 0x1a8)
 	}
 	// 0x00600560: with a PlayerControlObject on the parent chain.
 	if (h.inVehicle) {
@@ -419,7 +430,7 @@ bool readSimpleObject(BitReader& in, const NetworkableHints& h, const Vec3f& ref
 				s.vehicleValue = static_cast<int>(readRanged(in, 16)); // PCO +0x190
 			}
 			if (m & 0x100000) {
-				s.vehicleActive = in.read(1) == 1; // PCO +0x18c (vtable 0x12c)
+				s.ducking = in.read(1) == 1; // PCO +0x18c (vtable 0x12c)
 			}
 			if (m & 0x200000) {
 				s.vehicleFlag = in.read(1) == 1; // PCO +0x2be
@@ -500,7 +511,7 @@ bool readSoldier(BitReader& in, const NetworkableHints& h, const Vec3f& referenc
 		s.aimPitch = readSnorm(in, 12, 90.0f);
 	}
 	s.weaponZoom = static_cast<int>(readRanged(in, 4));      // the weapon's DefaultZoomComp +0xc
-	s.weaponFireState = static_cast<int>(readRanged(in, 2)); // its fire comp (provisional: fire mode)
+	s.weaponFireState = static_cast<int>(readRanged(in, 2)); // the fire comp mode (ExplosivesFireComp 0x005e6350)
 	for (int i = 0; i < 3; ++i) {
 		s.soldierBits |= (in.read(1) == 1 ? 2u : 0u) << i;   // +0x328, +0x30c, +0x3e9
 	}
@@ -512,7 +523,7 @@ bool readSoldier(BitReader& in, const NetworkableHints& h, const Vec3f& referenc
 	}
 	s.responseFlag = in.read(1) == 1;
 	if (m & 0x8000) {
-		s.stamina = static_cast<float>(in.read(5)) / 31.0f; // PCO vtable 0x10c (provisional: sprint)
+		s.stamina = static_cast<float>(in.read(5)) / 31.0f; // sprint stamina (PCO vtable 0x10c)
 	}
 	if (m & 0x2000) {
 		if (h.soldierItemSlots < 0) {
@@ -564,7 +575,7 @@ bool readProjectile(BitReader& in, const NetworkableHints& h, const Vec3f& refer
 		if (in.read(1) == 1) {
 			in.readSigned(16);
 			s.hasVelocity = true;
-			s.velocity = readDelta(in, DeltaTable::Narrow, 0.01f, kZero); // provisional: reference 0x006ac600 taken as zero
+			s.velocity = readDelta(in, DeltaTable::Narrow, 0.01f, kZero); // 0x006ac600: a zeroed static vector (0x00a82458)
 			if (in.read(1) == 1) {
 				in.read(16);
 			}
@@ -591,17 +602,17 @@ bool readControlPoint(BitReader& in, NetworkableState& s)
 		s.team = in.readSigned(4); // the team component (+0x184 slot 0x18)
 	}
 	if (s.mask & 2) {
-		s.cpFlag = in.read(1) == 1;
+		s.cpNeutralStart = in.read(1) == 1;
 	}
 	if (s.mask & 4) {
 		s.cpValues[0] = readSnorm(in, 16, 1.25f);
 		s.cpValues[1] = readSnorm(in, 16, 1.25f);
 	}
 	if (s.mask & 8) {
-		s.cpTeam1Flag = in.readSigned(4) != 0;
+		s.cpAllowTeam1 = in.readSigned(4) != 0;
 	}
 	if (s.mask & 0x10) {
-		s.cpTeam2Flag = in.readSigned(4) != 0;
+		s.cpAllowTeam2 = in.readSigned(4) != 0;
 	}
 	if (s.mask & 0x20) {
 		s.cpValue = in.readSigned(4);
@@ -856,10 +867,10 @@ bool readWindows(BitReader& in, const NetworkableHints& h, NetworkableState& s)
 // 0x00605b00 (PlayerControlObject with a parent: a seat)
 bool readSeat(BitReader& in, const NetworkableHints& h, const Vec3f& reference, NetworkableState& s)
 {
-	if (h.seatWeapons < 0) {
+	if (h.seatCameras < 0) {
 		return false;
 	}
-	if (h.seatWeapons == 0) {
+	if (h.seatCameras == 0) {
 		// The occupant's Soldier state; 0x00605b00 only parses it with a
 		// soldier in the seat (vtable 0x148) and skips it otherwise.
 		s.occupantBits = in.read(11);
@@ -884,7 +895,7 @@ bool readSeat(BitReader& in, const NetworkableHints& h, const Vec3f& reference, 
 		}
 	}
 	if (s.mask & 8) {
-		s.seatFlag = in.read(1) == 1;
+		s.seatDucking = in.read(1) == 1;
 	}
 	s.complete = !in.bad();
 	return s.complete;
@@ -910,10 +921,11 @@ bool readPlayer(BitReader& in, NetworkableState& s)
 		p.kills = static_cast<int>(readRanged(in, 0x800));
 		p.teamwork = in.readSigned(12);
 		p.teamKills = static_cast<int>(readRanged(in, 0x800));
-		p.value1c = static_cast<int>(readRanged(in, 0x800));
+		p.value104 = static_cast<int>(readRanged(in, 0x800));
 	}
 	if (m & 0x400000) {
-		in.read(1);
+		p.hasFlagHolder = true;
+		p.flagHolder = in.read(1) == 1;
 	}
 	if (m & 0x10) {
 		in.read(1);
@@ -944,21 +956,22 @@ bool readPlayer(BitReader& in, NetworkableState& s)
 		p.ping = static_cast<int>(in.read(bitsFor(0x400)));
 	}
 	if (m & 0x20) {
-		p.raw[0] = in.read(32);
-		in.read(1);
+		p.hasSpawnTick = true;
+		p.spawnTick = in.read(32);
+		p.manDown = in.read(1) == 1;
 	}
 	if (m & 0x200) {
 		p.team = static_cast<int>(in.read(bitsFor(4))) - 1;
 	}
 	if (m & 0x400) {
-		p.raw[1] = in.read(bitsFor(9));
+		p.value400 = in.read(bitsFor(9));
 		in.read(1);
 	}
 	if (m & 0x800) {
-		p.rank = static_cast<int>(in.read(bitsFor(0x100)));
+		p.value294 = static_cast<int>(in.read(bitsFor(0x100)));
 	}
 	if (m & 0x1000) {
-		p.squad = static_cast<int>(in.read(bitsFor(0x10)));
+		p.kit = static_cast<int>(in.read(bitsFor(0x10)));
 	}
 	if (m & 0x10000000) {
 		for (int i = 0; i < 4; ++i) {
@@ -971,10 +984,10 @@ bool readPlayer(BitReader& in, NetworkableState& s)
 		}
 	}
 	if (m & 0x2000) {
-		p.raw[2] = in.read(bitsFor(0x10));
+		p.squad = static_cast<int>(in.read(bitsFor(0x10)));
 	}
 	if (m & 0x4000) {
-		p.raw[3] = in.read(bitsFor(0x31));
+		p.rank = static_cast<int>(in.read(bitsFor(0x31))) - 1;
 	}
 	if (m & 0x8000) {
 		in.read(1);
@@ -989,8 +1002,11 @@ bool readPlayer(BitReader& in, NetworkableState& s)
 		in.read(bitsFor(0x10001));
 	}
 	const bool b38 = in.read(1) == 1;
+	p.squadLeader = b38;
 	if (m & 0x8000000) {
 		const bool b39 = in.read(1) == 1;
+		p.hasCommander = true;
+		p.commander = b39;
 		if (b39 || b38) {
 			for (int i = 0; i < 6; ++i) {
 				in.read(1);
@@ -1105,7 +1121,7 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 					writeRanged(out, static_cast<uint32_t>(std::clamp(s.vehicleValue, 0, 15)), 16);
 				}
 				if (m & 0x100000) {
-					out.write(s.vehicleActive ? 1 : 0, 1);
+					out.write(s.ducking ? 1 : 0, 1);
 				}
 				if (m & 0x200000) {
 					out.write(s.vehicleFlag ? 1 : 0, 1);
@@ -1234,7 +1250,7 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 			out.writeSigned(s.team, 4);
 		}
 		if (m & 2) {
-			out.write(s.cpFlag ? 1 : 0, 1);
+			out.write(s.cpNeutralStart ? 1 : 0, 1);
 		}
 		if (m & 4) {
 			// The writer scales by 0.8 into 16 bits, the reader back by 1.25.
@@ -1242,10 +1258,10 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 			writeSnorm(out, s.cpValues[1], 16, 1.25f);
 		}
 		if (m & 8) {
-			out.writeSigned(s.cpTeam1Flag ? 1 : 0, 4);
+			out.writeSigned(s.cpAllowTeam1 ? 1 : 0, 4);
 		}
 		if (m & 0x10) {
-			out.writeSigned(s.cpTeam2Flag ? 1 : 0, 4);
+			out.writeSigned(s.cpAllowTeam2 ? 1 : 0, 4);
 		}
 		if (m & 0x20) {
 			out.writeSigned(s.cpValue, 4);
@@ -1283,10 +1299,10 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 			writeRanged(out, static_cast<uint32_t>(p.kills), 0x800);
 			out.writeSigned(p.teamwork, 12);
 			writeRanged(out, static_cast<uint32_t>(p.teamKills), 0x800);
-			writeRanged(out, static_cast<uint32_t>(p.value1c), 0x800);
+			writeRanged(out, static_cast<uint32_t>(p.value104), 0x800);
 		}
 		if (m & 0x400000) {
-			out.write(0, 1);
+			out.write(p.flagHolder ? 1 : 0, 1);
 		}
 		if (m & 0x10) {
 			out.write(0, 1);
@@ -1315,21 +1331,21 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 			out.write(static_cast<uint32_t>(std::clamp(p.ping, 0, 1023)), bitsFor(0x400));
 		}
 		if (m & 0x20) {
-			out.write(p.raw[0], 32);
-			out.write(0, 1);
+			out.write(p.spawnTick, 32);
+			out.write(p.manDown ? 1 : 0, 1);
 		}
 		if (m & 0x200) {
 			out.write(static_cast<uint32_t>(p.team + 1), bitsFor(4));
 		}
 		if (m & 0x400) {
-			out.write(p.raw[1], bitsFor(9));
+			out.write(p.value400, bitsFor(9));
 			out.write(0, 1);
 		}
 		if (m & 0x800) {
-			out.write(static_cast<uint32_t>(std::max(0, p.rank)), bitsFor(0x100));
+			out.write(static_cast<uint32_t>(std::max(0, p.value294)), bitsFor(0x100));
 		}
 		if (m & 0x1000) {
-			out.write(static_cast<uint32_t>(std::max(0, p.squad)), bitsFor(0x10));
+			out.write(static_cast<uint32_t>(std::max(0, p.kit)), bitsFor(0x10));
 		}
 		if (m & 0x10000000) {
 			out.write(0, 32);
@@ -1338,10 +1354,10 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 			out.write(0, 32);
 		}
 		if (m & 0x2000) {
-			out.write(p.raw[2], bitsFor(0x10));
+			out.write(static_cast<uint32_t>(std::max(0, p.squad)), bitsFor(0x10));
 		}
 		if (m & 0x4000) {
-			out.write(p.raw[3], bitsFor(0x31));
+			out.write(static_cast<uint32_t>(std::max(0, p.rank + 1)), bitsFor(0x31)); // rank + 1
 		}
 		if (m & 0x8000) {
 			out.write(0, 1);
@@ -1355,11 +1371,15 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 		if (m & 0x2000000) {
 			out.write(0, bitsFor(0x10001));
 		}
-		out.write(0, 1);
+		out.write(p.squadLeader ? 1 : 0, 1);
 		if (m & 0x8000000) {
-			out.write(0, 1);
+			out.write(p.commander ? 1 : 0, 1);
+			if (p.commander || p.squadLeader) {
+				out.write(0, 6); // player +0x10e..+0x113
+				out.write(0, 32); // four 0..1 floats in 8 bits (+0x114..+0x120)
+			}
 		}
-		out.write(0, 1);
+		out.write(0, 1); // player +0x1c0
 		break;
 	}
 	case NetworkableKind::RotationalBundle: { // 0x006015a0
@@ -1513,7 +1533,7 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 		}
 		break;
 	case NetworkableKind::PlayerControlObject: // 0x00605650
-		if (h.seatWeapons <= 0) {
+		if (h.seatCameras <= 0) {
 			// 11 bits of length, patched after the soldier's state.
 			if (!s.occupant) {
 				out.write(0, 11);
@@ -1534,7 +1554,7 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 			}
 		}
 		if (m & 8) {
-			out.write(s.seatFlag ? 1 : 0, 1);
+			out.write(s.seatDucking ? 1 : 0, 1);
 		}
 		break;
 	default:

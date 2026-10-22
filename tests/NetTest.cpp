@@ -158,6 +158,12 @@ TEST(Net_NotifySequences)
 	CHECK(net::readConnectedPacket(pong, packet));
 	CHECK(static_cast<int>(packet.type) == 8 && packet.acknowledged == 5 && packet.mask == 0x12);
 	CHECK(!packet.sequenced && packet.time == 1000 && packet.echo == 2000);
+	// A ping (0x006a9bb0) is sequenced once we have sent data, as a pong is.
+	CHECK(net::readConnectedPacket(net::pingPacket(3, state, 777), packet));
+	CHECK(static_cast<int>(packet.type) == 7 && !packet.sequenced && packet.time == 777);
+	state.sendSequence = 9;
+	CHECK(net::readConnectedPacket(net::pingPacket(3, state, 778), packet));
+	CHECK(packet.sequenced && packet.sequence == 9 && packet.time == 778);
 }
 
 TEST(Net_Md5)

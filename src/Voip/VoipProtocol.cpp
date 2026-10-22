@@ -246,29 +246,36 @@ bool planChannels(const PlayerData& player, ChannelPlan& out)
 	return true;
 }
 
-ChannelSelection selectChannels(bool commander, bool squadLeader, bool leaderKeyHeld, const std::vector<int>& selectedSquads)
+ChannelChoice selectChannels(bool commander, bool squadLeader, bool leaderKeyHeld, const std::vector<int>& selectedSquads,
+	bool commanderScreenOpen)
 {
-	ChannelSelection selection;
+	ChannelChoice choice;
 	if (commander) {
-		if (!leaderKeyHeld && !selectedSquads.empty()) {
-			selection.mode = kVoiceMultiChannelSet;
+		// 0x0043cd40.
+		if (leaderKeyHeld) {
+			return choice; // vtable 0x40(1, 0): the default set, +0xc0 cleared
+		}
+		if (commanderScreenOpen) {
 			for (int squad : selectedSquads) {
 				if (squad >= 1 && squad <= 9) {
-					selection.multiSets.push_back(static_cast<uint8_t>(squad));
+					choice.channels.multiSets.push_back(static_cast<uint8_t>(squad));
 				}
 			}
-			if (!selection.multiSets.empty()) {
-				return selection;
-			}
-			selection.mode = kVoiceDefaultChannelSet;
 		}
-		return selection;
+		if (!choice.channels.multiSets.empty()) {
+			choice.channels.mode = kVoiceMultiChannelSet; // vtable 0x44
+			return choice;
+		}
+		choice.keep = true;
+		choice.silent = commanderScreenOpen;
+		return choice;
 	}
 	if (squadLeader && leaderKeyHeld) {
-		selection.mode = kVoiceAlternateChannelSet;
-		selection.alternateSet = 1;
+		// 0x0043be40: vtable 0x40(2, 1).
+		choice.channels.mode = kVoiceAlternateChannelSet;
+		choice.channels.alternateSet = 1;
 	}
-	return selection;
+	return choice;
 }
 
 std::vector<uint8_t> buildVoicePacket(const std::vector<uint8_t>& payload, const ChannelSelection& channels, uint16_t session)

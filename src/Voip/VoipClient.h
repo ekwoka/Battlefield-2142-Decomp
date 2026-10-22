@@ -10,8 +10,11 @@
 //   20 frames of hang-over, 0x007210f0) or push-to-talk (the threshold
 //   drops to 0 while the key is held, 0x0043bdd0), Speex, a 16-bit frame
 //   sequence. Frames go out with the channel choice and the session id.
-// - Playback: a jitter buffer per speaker, Speex decoding, mixing at the
-//   playback volume. Muted speakers are dropped on arrival (0x0043c0b0).
+// - Playback: GameSpy Voice 2's source list (0x00737710): up to 8
+//   speakers, each frame placed on a 16-bit play clock 10 frames (200 ms)
+//   after it would play on arrival, the speaker's clock offset following a
+//   running average of its arrival; Speex decoding, mixing at the playback
+//   volume. Muted speakers are dropped on arrival (0x0043c0b0).
 // - The mic test (0x007115e0) loops capture through the codec to playback
 //   without the network.
 //
@@ -52,7 +55,7 @@ struct VoiceSettings {
 	float playbackVolume = 1.0f;   // voipPlaybackVolume, 0-1
 	float captureVolume = 1.0f;    // voipCaptureVolume, 0-1
 	float captureThreshold = 0.1f; // voipCaptureThreshold, 0-1 of full scale (GameSpy Voice's default 0.1)
-	bool boost = false;            // voipBoostEnabled (provisional: +12 dB; the original sets the OS mixer's mic boost)
+	bool boost = false;            // voipBoostEnabled (the original switches the OS mixer's mic boost: see kBoostGain)
 	bool pushToTalk = true;        // voipUsePushToTalk
 };
 
@@ -71,7 +74,7 @@ public:
 	bool running() const { return m_running; }
 	uint16_t localPort() const { return m_socket.port(); }
 
-	// The session id from the game server's VoipSession event.
+	// The session id from the game server's VoipSession event (0 is one).
 	void setSession(uint16_t session);
 	uint16_t session() const { return m_session; }
 
@@ -102,6 +105,9 @@ public:
 
 	// Receives, captures, sends and plays what is due. `now` in seconds.
 	void update(double now);
+	// A forwarded voice packet as receive() takes it from the voice server
+	// (muted speakers dropped, then the source list).
+	void deliver(const ForwardedVoice& voice);
 
 	// --- State
 
@@ -109,20 +115,27 @@ public:
 	bool transmitting() const { return m_transmitting; }
 	// The last captured frame's peak, 0-1.
 	float captureLevel() const { return m_captureLevel; }
-	// Talked for 10 s: held back for 5 s (0x0043c140, provisional timing of the release).
-	bool blocked() const { return m_blockedUntil > m_now; }
+	// Talked for more than 10 s (+0xa8): held back until the talk ends (0.5 s
+	// without voice, player +0x398) and lifted on the next update
+	// (0x0043c140 blocks, 0x0043c8d0 releases; the 5 s at +0xb8 is stored
+	// but never read).
+	bool blocked() const { return m_blocked; }
 	// Players heard in the last 500 ms (0x80: 500 ms).
 	bool talking(int player) const;
 	std::vector<int> talkers() const;
 
 	struct Counters {
 		size_t packetsSent = 0, framesSent = 0, keepAlives = 0;
-		size_t packetsReceived = 0, framesReceived = 0, framesDecoded = 0, framesConcealed = 0, framesLate = 0, mutedDropped = 0;
+		size_t packetsReceived = 0, framesReceived = 0, framesDecoded = 0, framesLate = 0, mutedDropped = 0;
 	};
 	const Counters& counters() const { return m_counters; }
 
 	// The talker id the mic test plays as.
 	static constexpr int kLoopbackTalker = 0xffff;
+	// GameSpy Voice's sources (0x00737590: 8 slots of 0x24 bytes).
+	static constexpr int kMaxSources = 8;
+	// Speakers with a source.
+	size_t sources() const;
 
 private:
 	struct Talker;
@@ -132,6 +145,8 @@ private:
 	void processFrame(int16_t* frame);
 	void flush();
 	void addVoice(int speaker, uint16_t sequence, const std::vector<uint8_t>& frames);
+	void storeFrames(Talker& talker, uint16_t stamp, const uint8_t* data, size_t count, size_t frameBytes);
+	Talker* newSource(int speaker);
 	void play();
 	void mixFrame(int16_t* out);
 
@@ -139,6 +154,7 @@ private:
 	net::UdpServerSocket::Address m_server;
 	bool m_running = false;
 	uint16_t m_session = 0;
+	bool m_haveSession = false;
 	double m_now = 0;
 	double m_nextKeepAlive = 0;
 
@@ -163,10 +179,15 @@ private:
 	bool m_transmitting = false;
 	bool m_sentThisUpdate = false;
 	float m_captureLevel = 0;
-	double m_talkStart = -1, m_lastSent = -1, m_blockedUntil = -1;
+	double m_lastSent = -1;
+	// The talk limit (Bf2VoipClient +0x61 talking, +0x70 start, +0x78 the
+	// last voice, +0xa3 blocked).
+	bool m_talking = false, m_blocked = false;
+	double m_talkStart = -1, m_lastVoice = -1;
 
 	// Playback.
-	std::map<int, std::unique_ptr<Talker>> m_talkers;
+	std::array<std::unique_ptr<Talker>, kMaxSources> m_talkers;
+	uint16_t m_playClock = 0; // frames mixed
 	std::map<int, double> m_lastHeard;
 	double m_playStart = -1;
 	int64_t m_framesPlayed = 0;

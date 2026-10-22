@@ -92,6 +92,7 @@ bool VoiceChat::handleEvent(const net::GameEvent& event, int localPlayer)
 	case net::kEvVoipSession:
 		// 0x00512250 / 0x00512320: our session id.
 		m_session = static_cast<uint16_t>(event.u(0));
+		m_haveSession = true;
 		m_client.setSession(m_session);
 		tryStart();
 		return true;
@@ -113,7 +114,7 @@ bool VoiceChat::handleEvent(const net::GameEvent& event, int localPlayer)
 
 void VoiceChat::tryStart()
 {
-	if (m_client.running() || !m_haveServer || m_session == 0 || !m_server.enabled || !m_settings.enabled) {
+	if (m_client.running() || !m_haveServer || !m_haveSession || !m_server.enabled || !m_settings.enabled) {
 		return;
 	}
 	// 0x0043c630: address 1 is the game server's own (127.0.0.1 when we host).
@@ -141,12 +142,15 @@ void VoiceChat::leave()
 	m_haveServer = false;
 	m_lastBlock.clear();
 	m_session = 0;
+	m_haveSession = false;
 	m_voipOn.clear();
 }
 
-void VoiceChat::setRole(bool commander, bool squadLeader, int squad, const std::vector<int>& selectedSquads)
+void VoiceChat::setRole(bool commander, bool squadLeader, int squad, const std::vector<int>& selectedSquads,
+	bool commanderScreenOpen)
 {
 	std::lock_guard<std::recursive_mutex> lock(m_mutex);
+	m_commanderScreen = commanderScreenOpen;
 	m_commander = commander;
 	m_squadLeader = squadLeader;
 	m_squad = squad;
@@ -164,9 +168,20 @@ void VoiceChat::setKeys(bool pushToTalk, bool leaderChannel)
 
 void VoiceChat::applyChannels()
 {
+	const ChannelChoice choice = selectChannels(m_commander, m_squadLeader, m_leaderKey, m_selectedSquads, m_commanderScreen);
+	if (!choice.keep) {
+		m_client.setChannels(choice.channels);
+		m_commanderSilent = false;
+	} else if (choice.silent) {
+		m_commanderSilent = true;
+	}
+	// 0x0043c8d0: +0xc0 is cleared once the commander screen closes or the
+	// player stops commanding.
+	if (!m_commander || !m_commanderScreen) {
+		m_commanderSilent = false;
+	}
 	// 0x0043c8d0: only the commander and squad members talk.
-	m_client.setTransmitAllowed(m_commander || (m_squad >= 1 && m_squad <= 9));
-	m_client.setChannels(selectChannels(m_commander, m_squadLeader, m_leaderKey, m_selectedSquads));
+	m_client.setTransmitAllowed((m_commander || (m_squad >= 1 && m_squad <= 9)) && !m_commanderSilent);
 }
 
 void VoiceChat::update(double now)

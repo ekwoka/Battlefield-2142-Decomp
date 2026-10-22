@@ -34,14 +34,32 @@
 
 namespace dice::hfe::net {
 
+// The rates per connection type (0x00928408, six ints a row; 0x004b48a0
+// applies a client's, 0x004a6160 a server's per client; type 6 is
+// ignored). The last two (200, 200) go to the networkable manager's +0x50
+// and +0x54.
+struct ConnectionRates {
+	int clientPacketsPerSecond, serverPacketsPerSecond;
+	int clientMaxBytes, serverMaxBytes;
+	int lagMs, value54;
+};
+constexpr ConnectionRates kConnectionRates[6] = {
+	{10, 4, 160, 260, 200, 200}, {10, 4, 160, 260, 200, 200}, {30, 10, 160, 350, 200, 200},
+	{30, 20, 320, 400, 200, 200}, {30, 20, 320, 512, 200, 200}, {30, 20, 320, 640, 200, 200}};
+// How often a client sends: its table rate, and 0x004b3df0 also sends
+// after each simulated tick (30 a second) for types other than 0.
+int clientSendRate(uint32_t connectionType);
+
 struct GameClientOptions {
 	std::string cdKey = "XXXX-XXXX-XXXX-XXXX"; // answers the challenge; a real server checks it with GameSpy
 	uint32_t profileId = 0xffffffff;           // -1 without an account login
 	uint32_t connectionType = 4;               // 0-6 (event 3), an index into the rate settings
 	std::string password;
 	bool punkBuster = false;
-	int ticksPerSecond = 30;                   // provisional: the client's send rate
-	uint32_t lagCompensationMs = 100;          // the input block's 9-bit value (0x0057b040)
+	// The input block's 9-bit value (0x0057b040): the networkable manager's
+	// +0x50 (the rate table's 200 ms) plus 1000 x 0x006b4e70's
+	// interpolation time (from settings at 0x00a83e4c-0x00a83e54, taken as 0).
+	uint32_t lagCompensationMs = 200;
 };
 
 class GameClient {
@@ -72,16 +90,21 @@ public:
 	void selectSpawnGroup(int group);          // PostRemote 6/6 (0x004c1d50)
 	void selectKit(int kit, const std::array<int32_t, 4>& unlocks = {-1, -1, -1, -1}); // SelectKit (0x3f)
 	void suicide();                            // PostRemote 6/0xc (0x004c22e0)
-	void say(const std::string& text, uint32_t channel = 0); // a StringBlock chat line (provisional channels)
+	void say(const std::string& text, uint32_t channel = 0); // a StringBlock chat line (channel: ChatChannel)
 	void toggleFreeCamera();                   // ToggleFreeCamera (0x28)
 	// Squads (SquadManager): the team is our player's, the player us unless
-	// given. A squad must exist to be joined (0x004c6450 looks it up;
-	// provisional: a new squad is an empty squad number joined).
+	// given. A squad must exist to be joined (0x004c6450 looks it up). A
+	// squad is made by naming one without a leader (createSquad).
 	void joinSquad(int squad);                                    // JoinSquad (0x10; sent by 0x004c9bf0): team, player, squad
 	void leaveSquad(int squad, int player = -1, bool flag = false); // LeaveSquad (0x11; 0x004c9c50); another player: the leader kicks
 	void invite(int player, int squad, bool fromLeader = true);   // Invite (0x19; server 0x0050e700)
 	void setSquadLeader(int player, int squad);                   // SetSquadLeader (0x1c)
-	void setSquadName(int squad, const std::string& name);        // ChangeSquadName (0x16; leader only)
+	void setSquadName(int squad, const std::string& name);        // ChangeSquadName (0x16): squad, team, our id, name (at most 31)
+	// A new squad: ChangeSquadName for an empty squad (0x0050da80 ->
+	// 0x004c6720: the squad must exist and have no members and the name be
+	// unused, else PostRemote 2/0xf). The server names it, joins us to it
+	// (0x004c7290), broadcasts the name and answers PostRemote 2/0xe.
+	void createSquad(int squad, const std::string& name) { setSquadName(squad, name); }
 	void setPrivateSquad(int squad, bool isPrivate);              // SetPrivateSquad (0x17; leader only)
 	void squadRequest(int type);                                  // Request (0x32): 0-3, to the commander (leader only)
 	// Commander (0x13; 0x0050c8f0): a kind (0-8), our team, our player id.
@@ -90,15 +113,22 @@ public:
 	void commander(int kind);
 	void applyForCommander() { commander(kCommanderApply); }  // HUD "commanderApply" (SquadManager 0x60)
 	void resignCommander() { commander(kCommanderResign); }   // HUD "commanderResign"
-	// Votes (0x27; writer 0x005113c0): type 1 map (target a map-list
-	// index), 2 kick (a player), 3 mutiny (the commander); phase 0 starts
-	// one, 4 casts our choice.
+	// Votes (0x27; writer 0x005113c0, server 0x00590230): target, choice,
+	// top count, target again, top choice, votes needed, voter, phase,
+	// type, a 32-bit value (0 from every builder). Types: 0 internal, 1 map
+	// (target a map-list index), 2 kick (a player), 3 mutiny (the
+	// commander). Phases: 0 start, 1 failed, 2 progress / ended, 3 passed,
+	// 4 cast, 5 bad target, 6 refused (one running or too soon), 7 too many
+	// votes from this player.
 	void startVote(int type, int target);
 	void castVote(int type, int target, int choice);
-	// A radio / commo-rose message (0x14; sent by 0x004b3020): the index in
-	// the game logic's radio table, then fields of provisional meaning
-	// (a byte, a 2-bit channel, a byte, 0..0x12, 0..4).
-	void radioMessage(int index, int channel = 0, int a = 0, int b = 0, int c = 0, int d = 0);
+	// A radio / commo-rose message (0x14; sent by 0x004b3020, written by
+	// 0x0050d1f0): the index in the game logic's radio table (16 bits), a
+	// byte `a`, a 2-bit channel, a byte, 0..0x12 `c`, 0..4. The client puts
+	// the channel in the byte after it too and 0 in the last field; what
+	// `a` and `c` carry comes from GameLogic slot 23's callers, which go
+	// through the scripts and weren't traced.
+	void radioMessage(int index, int channel = 0, int a = 0, int c = 0);
 	// Answers the original client gives by itself (all on by default):
 	// PostRemote 6/2 (LoadComplete) for each level block (data block 2),
 	// echoes of 6/4 (DatabaseComplete) and 6/5 (Reset, the networkable
@@ -148,7 +178,7 @@ private:
 	std::deque<PlayerMove> m_moves; // the last three
 	int32_t m_moveIndex = 0;
 	std::chrono::steady_clock::time_point m_lastTick;
-	std::chrono::steady_clock::time_point m_lastPing;
+	std::chrono::steady_clock::time_point m_lastPing; // 0x0068f280 pings every 3 s
 
 	size_t m_packetsReceived = 0, m_packetsSent = 0, m_eventsReceived = 0, m_undecoded = 0, m_blocksResent = 0;
 	std::vector<uint8_t> m_lastUndecoded;

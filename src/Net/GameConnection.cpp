@@ -87,7 +87,7 @@ std::vector<uint8_t> pingPacket(uint8_t connection, const NotifyState& state, ui
 	out.write(static_cast<uint32_t>(state.sendSequence) & 0x3f, 6);
 	out.write(state.lastReceived & 0x3f, 6);
 	out.write(state.receivedMask, 32);
-	out.write(0, 1); // unsequenced
+	out.write(state.sendSequence != -1 ? 1 : 0, 1); // 0x006a9bb0: sequenced once data went out
 	out.write(now, 32);
 	return out.data();
 }

@@ -140,13 +140,19 @@ RoutingTable VoipServerConnection::routingTableFor(const std::vector<PlayerData>
 
 uint16_t VoipServerConnection::newSessionId(std::mt19937& random, const std::vector<uint16_t>& inUse)
 {
-	std::uniform_int_distribution<int> any(1, 0xffff);
-	for (;;) {
-		const auto id = static_cast<uint16_t>(any(random));
-		if (std::find(inUse.begin(), inUse.end(), id) == inUse.end()) {
-			return id;
+	// 0x0057ce10: (rand() & 0xffff) % (int)pow(256.0, 2.0), the CRT's rand()
+	// giving 0-0x7fff; while a player (PlayerManager 0x00a85228, vtable
+	// 0x40; player vtable 0x2e8) has it, 1 + rand() % 500 more and the
+	// players are checked again from the first.
+	std::uniform_int_distribution<int> crtRand(0, 0x7fff);
+	int id = (crtRand(random) & 0xffff) % 65536;
+	for (bool clash = true; clash;) {
+		clash = std::find(inUse.begin(), inUse.end(), static_cast<uint16_t>(id)) != inUse.end();
+		if (clash) {
+			id += 1 + crtRand(random) % 500;
 		}
 	}
+	return static_cast<uint16_t>(id);
 }
 
 std::string VoipServerConnection::makeLocalPassword(std::mt19937& random)

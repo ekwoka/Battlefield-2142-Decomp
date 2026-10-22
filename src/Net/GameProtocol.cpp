@@ -57,7 +57,7 @@ PlayerMove PlayerInput::toMove(int32_t index) const
 		}
 	}
 	move.triggersHigh &= 0x7ff; // only 11 bits travel
-	move.flag = flag;
+	move.axisPitchRoll = axisPitchRoll;
 	return move;
 }
 
@@ -72,7 +72,7 @@ void writeMove(BitWriter& out, const PlayerMove& move)
 	}
 	out.write(move.triggersLow, 32);
 	out.write(move.triggersHigh, 11);
-	out.write(move.flag ? 1 : 0, 1);
+	out.write(move.axisPitchRoll ? 1 : 0, 1);
 }
 
 void readMove(BitReader& in, PlayerMove& move)
@@ -84,7 +84,7 @@ void readMove(BitReader& in, PlayerMove& move)
 	}
 	move.triggersLow = in.read(32);
 	move.triggersHigh = in.read(11);
-	move.flag = in.read(1) == 1;
+	move.axisPitchRoll = in.read(1) == 1;
 }
 
 } // namespace
@@ -814,12 +814,12 @@ bool parseCreatePlayer(const GameEvent& e, CreatePlayerInfo& out)
 		return false;
 	}
 	out.team = e.i(0);
-	out.kind = e.i(1);
+	out.spawnGroup = e.i(1);
 	out.remote = e.u(2) != 0;
 	out.id = e.i(3);
 	out.object = static_cast<uint16_t>(e.u(4));
 	out.value16 = static_cast<uint16_t>(e.u(5));
-	out.flag = e.u(6) != 0;
+	out.ai = e.u(6) != 0;
 	out.name = trimmed(e.text(0));
 	out.profileId = e.i(7);
 	out.flags = e.i(8);
@@ -831,8 +831,8 @@ GameEvent makeCreatePlayer(const CreatePlayerInfo& info)
 {
 	GameEvent e;
 	e.type = kEvCreatePlayer;
-	e.values = {static_cast<uint32_t>(info.team), static_cast<uint32_t>(info.kind), info.remote ? 1u : 0u,
-		static_cast<uint32_t>(info.id), info.object, info.value16, info.flag ? 1u : 0u,
+	e.values = {static_cast<uint32_t>(info.team), static_cast<uint32_t>(info.spawnGroup), info.remote ? 1u : 0u,
+		static_cast<uint32_t>(info.id), info.object, info.value16, info.ai ? 1u : 0u,
 		static_cast<uint32_t>(info.profileId), static_cast<uint32_t>(info.flags), info.flag2 ? 1u : 0u};
 	e.bytes = {info.name};
 	return e;
@@ -1038,19 +1038,23 @@ bool parseKilledBy(const GameEvent& e, KilledByInfo& out)
 	if (e.type != kEvKilledBy || e.values.size() < 12) {
 		return false;
 	}
-	out.victim = e.i(0);
-	out.attacker = e.i(1);
-	out.flag = e.u(2) != 0;
+	out.attacker = e.i(0);
+	out.victim = e.i(1);
+	out.hasAttacker = e.u(2) != 0;
 	out.object = static_cast<uint16_t>(e.u(3));
 	out.value1 = e.u(4);
 	out.value2 = e.u(5);
-	out.weapon = e.i(6);
+	out.armorValue = e.i(6);
 	const uint32_t mode = e.u(7);
 	if (mode == 0) {
 		out.position = e.vec(8);
 	} else {
 		// Scaled by 1000 from the stream's reference (0x006876c0 is passed
-		// 1000.0); provisional: the reference taken as the origin.
+		// 1000.0). The writer (0x0050d5b0) delta-codes only while the
+		// stream has a reference, and 0x0057b040 resets the stream to the
+		// origin without one (0x00687460) before each packet's events; the
+		// ghost block sets it later. So servers send raw floats, and a
+		// delta would be from the origin.
 		out.position = {e.i(8) * 1000.0f, e.i(9) * 1000.0f, e.i(10) * 1000.0f};
 	}
 	out.damage = static_cast<float>(e.u(11)) * 0.0009775171f * 100.0f;
@@ -1125,7 +1129,7 @@ void writeBits(BitWriter& out, const std::vector<uint8_t>& data, size_t bits)
 
 } // namespace
 
-bool readGhostBlock(BitReader& in, GhostBlock& block)
+bool readGhostBlock(BitReader& in, GhostBlock& block, unsigned lengthBits)
 {
 	block = {};
 	block.present = in.read(1) == 1;
@@ -1164,7 +1168,7 @@ bool readGhostBlock(BitReader& in, GhostBlock& block)
 		update.ghost = static_cast<uint16_t>(in.read(16));
 		if (update.kind == 1) {
 			update.full = in.read(1) == 1;
-			update.stateBits = in.read(kGhostStateLengthBits);
+			update.stateBits = in.read(lengthBits);
 			copyBits(in, update.stateBits, update.state);
 		} else if (update.kind == 2) {
 			return false; // the engine flags the connection (0x0057fce0)
@@ -1174,7 +1178,7 @@ bool readGhostBlock(BitReader& in, GhostBlock& block)
 	return !in.bad();
 }
 
-void writeGhostBlock(BitWriter& out, const GhostBlock& block)
+void writeGhostBlock(BitWriter& out, const GhostBlock& block, unsigned lengthBits)
 {
 	if (!block.present) {
 		out.write(0, 1);
@@ -1211,7 +1215,7 @@ void writeGhostBlock(BitWriter& out, const GhostBlock& block)
 		out.write(u.ghost, 16);
 		if (u.kind == 1) {
 			out.write(u.full ? 1 : 0, 1);
-			out.write(static_cast<uint32_t>(u.stateBits), kGhostStateLengthBits);
+			out.write(static_cast<uint32_t>(u.stateBits), lengthBits);
 			writeBits(out, u.state, u.stateBits);
 		}
 	}

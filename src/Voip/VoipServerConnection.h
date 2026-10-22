@@ -53,8 +53,9 @@ public:
 	const std::string& sessionString() const { return m_sessionString; }
 	size_t packetsSent() const { return m_sent; }
 
-	// A new session id for a player, unlike the ones in use (0x0057ce10,
-	// provisional: the original draws from a power-of-two range).
+	// A new session id for a player, unlike the ones in use (0x0057ce10):
+	// 0-32767 (the CRT's rand() % 256^2; 0 included), stepping 1-500 on
+	// from a clash.
 	static uint16_t newSessionId(std::mt19937& random, const std::vector<uint16_t>& inUse);
 	// The built-in voice server's password (0x0057c600).
 	static std::string makeLocalPassword(std::mt19937& random);

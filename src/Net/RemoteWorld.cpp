@@ -254,11 +254,17 @@ bool RemoteWorld::apply(const GameEvent& event)
 			it->second.vehicleGhost = 0;
 		}
 		return true;
-	case kEvHandlePickup: // 0x0050bfd0: the game logic's slot 60 (spawn point / kit object, player, object)
-	case kEvHandleDrop:   // 0x0050c1c0: slot 61, then the object moves to the position
+	case kEvHandlePickup: // 0x0050bfd0: the game logic's slot 60 (the kit, the player, the soldier)
+	case kEvHandleDrop:   // 0x0050c1c0: slot 61, then the kit moves to the position
+		// (player 8, kit 16, soldier 16): the soldier is the one asked for
+		// interface 0xc49d (0x004bb350; the soldier's QueryInterface
+		// 0x00585af0 answers it at +0x188), the kit's template is checked
+		// for Kit (0x9496).
 		if (auto it = m_players.find(event.i(0)); it != m_players.end()) {
-			it->second.soldierGhost = static_cast<uint16_t>(event.u(1));
-			it->second.alive = true;
+			it->second.soldierGhost = static_cast<uint16_t>(event.u(2));
+			if (event.type == kEvHandlePickup) {
+				it->second.alive = true;
+			}
 		}
 		if (event.type == kEvHandleDrop) {
 			if (auto it = m_objects.find(static_cast<uint16_t>(event.u(1))); it != m_objects.end()) {
@@ -304,9 +310,9 @@ bool RemoteWorld::apply(const GameEvent& event)
 			return false;
 		}
 		KillReport report;
-		report.victim = m_localPlayer;
-		report.attacker = info.attacker;
-		report.weapon = info.weapon;
+		report.victim = info.victim;
+		report.attacker = info.hasAttacker ? info.attacker : -1;
+		report.weapon = info.armorValue;
 		report.from = info.position;
 		m_kills.push_back(report);
 		return true;
@@ -404,6 +410,13 @@ void RemoteWorld::apply(const GhostBlock& ghosts)
 				}
 				if (n.squad >= 0) {
 					p.squad = n.squad;
+				}
+				p.squadLeader = n.squadLeader;
+				if (n.hasCommander) {
+					p.commander = n.commander;
+				}
+				if (n.kit >= 0) {
+					p.kit = n.kit;
 				}
 				if (n.rank >= 0) {
 					p.rank = n.rank;
@@ -557,7 +570,7 @@ void RemoteWorld::applyParts(RemoteObject& o, const GhostPartLayout& layout, con
 				}
 			}
 			if (root.mask & 8) {
-				o.seatFlag = root.seatFlag;
+				o.seatDucking = root.seatDucking;
 			}
 		}
 		if (root.occupant) {
@@ -780,15 +793,15 @@ bool RemoteWorld::decodeSettings(const std::string& data, ServerSettings& s)
 		}
 		s.welcome.push_back(piece);
 	}
-	bool* flags[7] = {&s.flags30, &s.ranked, &s.allowNoseCam, &s.hitIndicator, &s.tkPunishByDefault, &s.allowFreeCam,
+	bool* flags[7] = {&s.initial, &s.voipEnabled, &s.allowNoseCam, &s.hitIndicator, &s.tkPunishByDefault, &s.allowFreeCam,
 		&s.allowExternalViews};
 	for (bool* f : flags) {
 		*f = in.read(1) == 1;
 	}
-	s.value38 = in.read(32);
-	s.value3c = in.read(16);
-	s.value3e = in.read(16);
-	s.value40 = in.readSigned(32);
+	s.voipServerAddress = in.read(32);
+	s.voipServerPort = in.read(16);
+	s.voipClientPort = in.read(16);
+	s.voipQuality = in.readSigned(32);
 	s.gameSpyPort = in.read(16);
 	s.gamePort = in.read(16);
 	s.radioSpamInterval = in.readSigned(32);
@@ -811,14 +824,14 @@ std::string RemoteWorld::encodeSettings(const ServerSettings& s)
 	for (const std::string& piece : s.welcome) {
 		writeString(out, piece);
 	}
-	for (bool f : {s.flags30, s.ranked, s.allowNoseCam, s.hitIndicator, s.tkPunishByDefault, s.allowFreeCam,
+	for (bool f : {s.initial, s.voipEnabled, s.allowNoseCam, s.hitIndicator, s.tkPunishByDefault, s.allowFreeCam,
 			 s.allowExternalViews}) {
 		out.write(f ? 1 : 0, 1);
 	}
-	out.write(s.value38, 32);
-	out.write(s.value3c, 16);
-	out.write(s.value3e, 16);
-	out.writeSigned(s.value40, 32);
+	out.write(s.voipServerAddress, 32);
+	out.write(s.voipServerPort, 16);
+	out.write(s.voipClientPort, 16);
+	out.writeSigned(s.voipQuality, 32);
 	out.write(s.gameSpyPort, 16);
 	out.write(s.gamePort, 16);
 	out.writeSigned(s.radioSpamInterval, 32);

@@ -58,7 +58,7 @@ struct RemoteObject {
 	bool kit = false;         // a dropped kit (CreateKit)
 	bool hasPosition = false;
 	Vec3f position;
-	Vec3f rotation;           // provisional units (see CreateObjectInfo)
+	Vec3f rotation;           // degrees, yaw/pitch/roll (see CreateObjectInfo)
 	float health = -1;        // -1: unknown; soldiers: a fraction of maxHitPoints, others: hit points
 	NetworkableKind kind = NetworkableKind::Unknown; // the ghost's root networkable
 	bool hasOrientation = false;
@@ -84,11 +84,11 @@ struct RemoteObject {
 	std::vector<RemotePart> parts; // this ghost's objects in pre-order (parts[0] the ghost's root)
 	const RemotePart* findPart(const std::string& name) const;
 	int occupant = -1;        // the player in this seat (EnterVehicle / ExitVehicle)
-	// A seat with weapons: its active weapon per group (-1 none), a flag
-	// (provisional: the alternate mode). Without: the occupant's soldier
+	// A seat with weapons: its active weapon per group (-1 none) and
+	// whether it ducks (PCO +0x310). Without: the occupant's soldier
 	// state (angles, health) as the seat's state carries it.
 	int seatWeapon[3] {-1, -1, -1};
-	bool seatFlag = false;
+	bool seatDucking = false;
 	bool hasOccupantState = false;
 	NetworkableState occupantState;
 	// Soldiers: the selected weapon (mask 0x2000) and, in a vehicle, the seat.
@@ -107,16 +107,18 @@ struct RemotePlayer {
 	bool ai = false;
 	int32_t profileId = 0;
 	bool alive = false;
-	uint16_t soldierGhost = 0; // from spawn and pickup events (provisional)
+	uint16_t soldierGhost = 0; // the soldier of HandlePickup / HandleDrop (or the control object)
 	uint16_t vehicleGhost = 0;
 	int kills = 0, deaths = 0; // counted from kill messages (PythonCommand type 100)
 	int score = 0;             // from the player's networkable (mask 8), as are these
 	int teamwork = 0, teamKills = 0;
-	int ping = -1;             // provisional (player +0xf0)
+	int ping = -1;             // ms (player +0xf0, the networkable's mask 0x100)
 	uint16_t networkableGhost = 0; // the player's own ghost (CreatePlayer)
-	int squad = 0;
-	bool squadLeader = false;
-	int rank = -1;
+	int squad = 0;             // the networkable's mask 0x2000 (or squad events)
+	bool squadLeader = false;  // its always-sent bit (player +0x10d)
+	bool commander = false;    // mask 0x8000000 (player +0x10c)
+	int kit = -1;              // mask 0x1000: the selected kit
+	int rank = -1;             // mask 0x4000
 };
 
 struct ChatLine {
@@ -128,7 +130,7 @@ struct ChatLine {
 
 struct KillReport {
 	int victim = -1, attacker = -1;
-	int weapon = -1;
+	int weapon = -1; // KilledBy: its armor byte (KilledByInfo::armorValue)
 	Vec3f from;
 };
 
@@ -212,15 +214,22 @@ public:
 	std::vector<MapEntry> mapList() const;
 	int currentMapIndex() const; // -1 without a map list
 	// The server settings (data block 0; 0x00516230 reads, 0x00515bc0
-	// writes; provisional names for the flags after the welcome message).
+	// writes, from the settings at 0x00a201c0 and the game logic).
 	struct ServerSettings {
 		std::string name;
 		std::vector<std::string> welcome; // up to 3 pieces of up to 256 bytes
-		bool flags30 = false, ranked = false, allowNoseCam = false, hitIndicator = false, tkPunishByDefault = false,
+		bool initial = false, voipEnabled = false, allowNoseCam = false, hitIndicator = false, tkPunishByDefault = false,
 			 allowFreeCam = false, allowExternalViews = false;
-		uint32_t value38 = 0; // game logic values (slot 0x254; provisional: backend info)
-		uint32_t value3c = 0, value3e = 0;
-		int32_t value40 = 0;
+		// initial: the writer's argument (1 for the send on connecting,
+		// 0x004a7ce0; 0 when resent after a change, 0x004b1c90). The voice
+		// fields come from game logic slot 0x254 (0x004cbdf0; filled by
+		// 0x0057c250): inet_addr(sv.voipServerRemoteIP) when
+		// sv.voipServerRemote, else 1 (the game server's own), the ports
+		// sv.voipServerPort and sv.voipBFClientPort, and sv.voipQuality.
+		// The flags after voipEnabled: settings +0xfa, +0xfb, +0x148, +0xf8, +0xf9.
+		uint32_t voipServerAddress = 0;
+		uint32_t voipServerPort = 0, voipClientPort = 0;
+		int32_t voipQuality = 0;
 		uint32_t gameSpyPort = 0, gamePort = 0;
 		int32_t radioSpamInterval = 0, radioMaxSpamFlagCount = 0, radioBlockedDurationTime = 0;
 		bool contentCheck = false;

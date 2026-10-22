@@ -101,7 +101,8 @@ bool readConnectedPacket(const std::vector<uint8_t>& datagram, ConnectedPacket& 
 // Type 8, the answer to a ping (0x006a9c30): our notify header, whether it
 // is sequenced, the ping's time and our clock.
 std::vector<uint8_t> pongPacket(uint8_t connection, const NotifyState& state, uint32_t pingTime, uint32_t now);
-// Type 7, a ping (0x0068e050 answers it): the notify header, unsequenced, our clock.
+// Type 7, a ping (0x006a9bb0 writes it, 0x0068e050 answers it): the notify
+// header, sequenced (1 bit) once we have sent data, our clock.
 std::vector<uint8_t> pingPacket(uint8_t connection, const NotifyState& state, uint32_t now);
 // Type 15 with the notify header and a payload (what sendData sends).
 std::vector<uint8_t> dataPacket(uint8_t connection, uint32_t sequence, const NotifyState& state,
