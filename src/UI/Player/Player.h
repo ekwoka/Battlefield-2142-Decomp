@@ -27,12 +27,11 @@
 // through the file reader, as gameswf did: the clip shows the image at its
 // origin from the call on, so scripts can size it right away.
 //
-// Masks (setMask and timeline clip depths) cut what they cover to the
-// mask's bounding box on the stage, which is exact for the menus'
-// rectangular scroll masks; mask layers themselves are not drawn. Not
-// done: sounds, device fonts (fields without outlines draw with the
-// movie's first outline font), HTML formatting beyond line breaks,
-// selection highlighting and text scrolling by mouse.
+// Masks (setMask and timeline clip depths) work as the game's stencil
+// masks (Stencil.h). Text fields draw with the engine's bitmap fonts, as
+// SwiffPlayer.dll had RendDX9.dll draw them (Drawer::layoutText). Not
+// done: sounds, HTML formatting beyond line breaks, selection highlighting
+// and text scrolling by mouse.
 #pragma once
 
 #include "Natives.h"

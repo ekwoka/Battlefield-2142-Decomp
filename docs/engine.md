@@ -257,8 +257,16 @@ do. Gun heat isn't modelled yet. The vehicle HUD gets its
 icon, its armour, the gunner's `GuiIndex` (from the firearm's
 `weaponHud.guiIndex`) and the turret's angle. Compass nodes scroll a strip
 texture by a heading variable (`VehicleAngle`, `MinimapDelayedMapAngle`).
-RendDX9.dll draws them, so the 360° strip centred on the value is
-provisional.
+They are BF2142.exe's `Bf2CompassNode` (render `0x007e9560`; RendDX9.dll
+only draws the quads): the strip (`setCompassNodeTextureSize`) sits at the
+node's corner, slid back by `floor(value / 360 * (length - border) +
+offset)` pixels (along y for direction 0, x for 3; the exe's radians are
+scaled by 57.29578, `0x00a0d138`) and cut to the node. Wrapping nodes
+(`createCompassNode`'s first flag) take headings in [-180, 180) (as the exe
+wraps the map angle, `0x0078fc80`) and draw a second copy a period away to
+fill the gap; snapping ones (the weapon HUDs' movement arrows) stop at the
+node's edge less the snap offsets and swap in the snap textures; tilt
+values slide the strip sideways.
 
 ## Animation systems
 
@@ -1345,13 +1353,34 @@ from list nodes. Each node names a data source with `setListNodeData`:
 
 The engine sets the team names (`HUD_TEXT_MENU_SPAWN_ARMY_MEC` and
 `_USMC`) and the flags, at `Ingame/Flags/Icons/Hud/Score/<team
-name>/scoreBoard_Flag.tga`. RendDX9.dll draws the lists, and that code isn't
-decompiled. Our layout is read off the scripts:
+name>/scoreBoard_Flag.tga`. The lists are BF2142.exe's
+`Bf2NewListBoxNode` (render `0x007de7d0`; RendDX9.dll only draws quads):
 
-- The first `setListNodeBorder` value is the header band where the column
-  headers go.
+- `setListNodeBorder top bottom left right` (`0x007add90`) also turns the
+  border on. The background colour fills the node; the border colour's
+  bands go top (across), right, bottom (up to the right band) and left.
+  The top band is where the column headers go.
+- Rows start at the top border plus the row spacing and go a row height
+  plus the spacing apart while one fits above the bottom border. A
+  selectable list (`createListNode`'s last argument) fills the selected
+  row in the select colour (default (1, 1, 1, 0.5)) less the side borders.
+- A cell's text sits at its column: left, centred, or right-aligned to the
+  column's end (its x plus its width, else the node less the right
+  border, 6 pixels in or clear of the scroll bar, `0x007dd800`); it is
+  centred in the row by its glyphs' extent and stops at the glyph that
+  leaves the column. `§n` switches to font n (0..3, `setListNodeFont`),
+  `|c` toggles the highlight colour (0.996, 0.639, 0.169); outlined lists
+  (`setListNodeOutline`) draw each glyph eight times one pixel around in
+  (0.15, 0.15, 0.15) first.
+- With more rows than fit, the scroll bar (`setListNodeScrollbar width
+  margin`): its track down the right inside the borders, its thumb the
+  shown share of the track less two rows (at least 4 pixels).
 - The cells sit under `scoreboard_icons.tga`: score, teamwork, kills,
   deaths, ping.
+- The text colour is the list data's per cell (`0x007ddb90`); the code
+  that fills the scoreboard's data sources is reached only through the HUD
+  manager's interface (slot `0x214`) and wasn't found, so the rows are
+  drawn black (`HudManager::setListTextColor` changes it).
 - Rows are sorted by the scripts' score.
 
 Tab shows the scoreboard in play; `--scoreboard` forces it on.
@@ -1391,9 +1420,26 @@ with its kit's soldier template and the kit's primary weapon: its
 `GenericFireArm` child with `itemIndex` 3 (1 is the knife, 2 the sidearm).
 Bots take the kits in turn.
 
-The map itself is drawn by RendDX9.dll, so
-the minimap's window (a third of the level round the player), the marker
-sizes and the colours are provisional. The soldier carries every `GenericFireArm` of the kit by slot, and keys
+The map is BF2142.exe's `Bf2MenuMapNode` (render `0x00795620`). The
+node is the minimap's or the big map's rectangle; the map texture is the
+node's size times 2.3 to the power of a zoom level (`0x0077b7b0`), divided
+by the shown area's share of the map, placed with the player at the
+node's centre and pushed back to keep the shown area covering the node,
+then cut to it. The level eases (1 - e^(-6 dt) a frame) to its target by
+the zoom index (1 at start): minimap 0.5/1.5/2.5 on foot, 0/1/2 in a
+vehicle, times 1/2/2.3 inside a Titan; the big map 0. The shown area is
+the combat area's bounds in the big map's pixels, 20 pixels wider a side,
+made square and kept on the map (`0x0078b490`); without one, the whole
+map. Markers keep their pixel size at every zoom (`0x0077c610`: the
+rectangle is floored, turned by the marker's yaw, cut to the node). The
+exe's own sizes and tints (set where its markers are made): control
+points 32 px, soldiers 15 or 16 px, squad leaders 32 px, the commander
+16 px (`0x0077d9f0`, `0x0077dbf0`); players are tinted by side from the
+table at `0x00b3be30` (no team (1, 1, 1), either team (0.7, 0.7, 0.7)).
+Which markers to show and their sizes come from the game
+(`HudManager::setMapMarkers`).
+
+The soldier carries every `GenericFireArm` of the kit by slot, and keys
 1–9 take the slot's weapon in hand. Each keeps its own magazine; the held
 object, the muzzle effect and the weapon's animation system change with
 it. Gadgets work through abilities (`ammo.replenishingType`: RTHeal or
@@ -2440,9 +2486,85 @@ interactive object and every interactive parent.
 The natives live in `Natives.h`. Every object and member exists with its
 decompiled name and slot type; the game binds real behaviour with
 `setFunction`, `setValue` and `setListRows`, and unbound calls are logged.
-Provisional: masks are applied as the mask's bounding box (exact for the
-menus' scroll masks); there's no sound; device fonts fall back to the first
-embedded font.
+There's no sound in the player itself (the menus call `dice.bf2.Sound`).
+
+### Text fields
+
+SwiffPlayer.dll never draws an edit text with its SWF glyphs: its display
+(0x100c01a0) only draws the background, the border and one RendDX9.dll
+text object per line, in the engine's bitmap fonts. Fonts get names when
+the movie is read (0x100b9000): an exported font's id maps to its export
+name, and every font that isn't exported takes the export name of the
+exported font with the same font name. The menus export fonts 1-4 as
+`StandardTextBold`, `StandardText`, `DynamicText` and `Titles`, so the
+device fonts "Helvetica" and "Helvetica Condensed" draw as `DynamicText`
+and `StandardText`. A field whose font has an export name gets text objects
+(0x100c1700); the rest (mainMenu's "TradeGothic LT BdCondTwenty" fields)
+draw no text at all. A text object's font is FontSystem's
+`<name>_<round(height / 20)>` (0x101172f0), read from
+`Fonts/<language>/<res>/` and then `Fonts/<res>/` (0x10185e90), where
+`<res>` is `800` for an 800-pixel-wide window and empty from 1024 pixels
+up (scaled by width / 1024). The menu stage is 1024 wide, so the player
+takes the 1024 fonts at their own size. English lacks `Titles_*`, so
+`Titles` text doesn't show in English.
+
+The layout (0x100bfd00):
+
+- `\r`, `\n` (not straight after `\r`) and `|L` end a line. `|` is dropped.
+- With word wrap, a line ends once its text reaches the field's width (times
+  the world x scale) less the right margin and 2 pixels. It ends at the last
+  space or bullet, which is dropped, or else before the character that
+  didn't fit. Setting `multiline` turns word wrap on.
+- Unless the field sizes itself, lines starting below its height (times the
+  world y scale) are dropped.
+- Lines are leading + font height twips apart.
+- Line `i` goes at the field's origin (its world translation, not its
+  bounds) plus max(0, indent + left margin) + 40 twips across, and
+  30 + i x step twips down. The scale and rotation are dropped.
+  `drawText` (0x101190b0) rounds that to pixels as round(v + 0.5).
+- The text object adds its alignment (0x10183570): for right, the field's
+  width less the text (not below 0); for centre, half of that. The
+  margins don't narrow the field. Then it floors the position
+  (0x10182430).
+- Each character goes where RendDX9.dll lays it (0x10183240). The pen moves
+  by the pair's kerning, and the glyph goes at floor(pen + before + 0.5).
+  The pen then moves by width + after. A character the font lacks takes
+  the previous one's place.
+
+`textHeight` is the value 0x100bd740 gets: round((font leading + leading +
+height) / 20), or with autoSize round((font leading + height + the last
+line's offset) / 20). The font leading is the SWF font's, in unscaled EM
+units. It is 666 for a field without text objects. A field shorter than
+that grows downwards. autoSize is only a flag (a non-empty string such as
+`"none"` sets it). `Locale.getTextboxWidth` (0x1003a9d0) is the end of
+the first line. SwiffPlayer has no `textWidth` member, so we answer with
+the widest line.
+
+### Masks
+
+Masks use the stencil buffer, as gameswf's display list drives it
+(0x100dfdd0). A mask layer (clip depth) is drawn between
+`begin_submit_mask` and `end_submit_mask`. The objects above it show
+through it until the first object above its clip depth, which first calls
+`disable_mask`. A clip with `setMask` draws its mask the same way, then
+itself, then calls `disable_mask`. `setMask` arguments aren't drawn.
+RendDX9.dll (0x10118920, 0x10118a10, 0x10118aa0) works like this:
+
+- `begin_submit_mask` clears the stencil at the first level and raises the
+  level. It turns colour writes off and tests GREATER against the level,
+  incrementing on pass and replacing on fail.
+- `end_submit_mask` turns colour writes back on and draws where the
+  stencil EQUALs the level.
+- `disable_mask` turns the test off and lowers the level.
+
+So a nested mask shows the intersection, and after it ends the outer mask
+no longer applies. Everything a mask draws counts, strokes and transparent
+parts included. `Stencil` keeps the stencil as disjoint convex polygons
+with their values and cuts the triangles drawn under the test to those
+whose value is the level. The result is the stencil's, with no stencil
+buffer in the renderer.
+
+### Name matching and method targets
 
 Two behaviours of DICE's gameswf that the menus depend on:
 

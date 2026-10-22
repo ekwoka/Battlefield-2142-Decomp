@@ -92,7 +92,7 @@ struct RoundSummary {
 	bool levelLoaded = false;  // the level is up and the player may join (see setLevelLoaded)
 	bool firstLoad = true;     // the first level since joining (Logic.isFirstTimeLoading)
 	float loadProgress = 0;    // 0..1 (Client.getLoadProgress)
-	int roundsLeft = 0;        // on this map (Logic.getNumRoundsLeft)
+	int roundsLeft = 999;      // on this map (Logic.getNumRoundsLeft): 999 for a game started here (0x004d3450)
 	bool optimizingShaders = false;
 
 	// --- The level loading or played next
@@ -177,9 +177,10 @@ public:
 	void setSummary(RoundSummary summary);
 	const RoundSummary& summary() const { return m_summary; }
 	// Shortcuts for the loading screen: a level loads (progress 0..1), or
-	// it is up. The movie shows JOIN GAME only when it is not loading, its
+	// it is up (not loading, progress back to 0, as 0x004cbea0 leaves the
+	// host). The movie shows JOIN GAME only when it is not loading, its
 	// progress is under 0.95 and Logic.getNumRoundsLeft() > 0 (root frame
-	// 1, loadProgress): a loaded level answers so (levelLoaded).
+	// 1, loadProgress).
 	void setLoading(float progress);
 	void setLevelLoaded();
 

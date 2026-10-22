@@ -438,6 +438,17 @@ void DisplayObject::draw(Drawer& drawer, const swf::Matrix& world, const swf::Co
 	}
 }
 
+void DisplayObject::drawMask(Drawer& drawer, const swf::Matrix& world, std::vector<MenuBatch>& out)
+{
+	const bool wasMask = isMask;
+	const uint16_t depth = clipDepth;
+	isMask = false;
+	clipDepth = 0;
+	draw(drawer, world, {}, out);
+	isMask = wasMask;
+	clipDepth = depth;
+}
+
 Clip* DisplayObject::root()
 {
 	DisplayObject* top = this;
@@ -509,37 +520,44 @@ void TextField::setText(Interpreter& vm, const std::string& text, bool html)
 	applyAutoSize();
 }
 
+// SwiffPlayer.dll keeps autoSize as a flag (0x100c1340 stores the value as
+// a boolean in the definition's autoSize): it lets lines run below the
+// field and counts them all in textHeight. After each layout the field
+// grows downwards (its y scale, 0x100bd740) when its height is less than
+// textHeight; here the bounds grow instead. Nothing changes sideways.
 void TextField::applyAutoSize()
 {
-	field.autoSize = autoSize != "none";
-	if (!field.autoSize) {
+	const swf::Matrix world = worldMatrix();
+	const Drawer::TextLayout layout = player.drawer().layoutText(field, value, world.a, world.d);
+	if (!layout.font) {
 		return;
 	}
-	swf::EditText measure = field;
-	if (!field.wordWrap) {
-		measure.bounds.xMax = measure.bounds.xMin + 1000000;
-	}
-	const Drawer::TextLayout layout = player.drawer().layoutText(measure, plainText().empty() ? std::string(" ") : value);
-	const int32_t height = static_cast<int32_t>(std::ceil(layout.textHeight)) + 80;
-	field.bounds.yMax = field.bounds.yMin + height;
-	if (field.wordWrap) {
-		return;
-	}
-	const int32_t width = static_cast<int32_t>(std::ceil(layout.textWidth)) + 80 + field.leftMargin + field.rightMargin;
-	if (autoSize == "right") {
-		field.bounds.xMin = field.bounds.xMax - width;
-	} else if (autoSize == "center") {
-		const int32_t middle = (field.bounds.xMin + field.bounds.xMax) / 2;
-		field.bounds.xMin = middle - width / 2;
-		field.bounds.xMax = field.bounds.xMin + width;
-	} else {
-		field.bounds.xMax = field.bounds.xMin + width;
+	const int32_t needed = layout.textHeight * static_cast<int32_t>(kTwips);
+	if (field.bounds.yMax - field.bounds.yMin < needed) {
+		field.bounds.yMax = field.bounds.yMin + needed;
 	}
 }
 
-float TextField::textWidth() const { return player.drawer().layoutText(field, value).textWidth / kTwips; }
+float TextField::textWidth() const
+{
+	const swf::Matrix world = worldMatrix();
+	return player.drawer().layoutText(field, value, world.a, world.d).textWidth;
+}
 
-float TextField::textHeight() const { return player.drawer().layoutText(field, value).textHeight / kTwips; }
+int TextField::textHeight() const
+{
+	const swf::Matrix world = worldMatrix();
+	return player.drawer().layoutText(field, value, world.a, world.d).textHeight;
+}
+
+// The end of the first line's text object (its character position at the
+// text's length).
+float TextField::firstLineWidth() const
+{
+	const swf::Matrix world = worldMatrix();
+	const Drawer::TextLayout layout = player.drawer().layoutText(field, value, world.a, world.d);
+	return layout.lines.empty() ? 0.0f : layout.lines.front().end;
+}
 
 bool TextField::specialMember(Interpreter& vm, const std::string& member, Value& out)
 {
@@ -570,7 +588,7 @@ bool TextField::specialMember(Interpreter& vm, const std::string& member, Value&
 	} else if (member == "textWidth") {
 		out = Value(std::round(textWidth()));
 	} else if (member == "textHeight") {
-		out = Value(std::round(textHeight()));
+		out = Value(textHeight());
 	} else if (member == "password") {
 		out = Value(field.password);
 	} else if (member == "border") {
@@ -588,8 +606,8 @@ bool TextField::specialMember(Interpreter& vm, const std::string& member, Value&
 	} else if (member == "maxscroll" || member == "bottomScroll") {
 		const Drawer::TextLayout layout = player.drawer().layoutText(field, value);
 		const int lines = static_cast<int>(layout.lines.size());
-		const int shown = layout.lineHeight > 0
-			? std::max(1, static_cast<int>((field.bounds.yMax - field.bounds.yMin - 80) / layout.lineHeight))
+		const int shown = layout.lineStep > 0
+			? std::max(1, static_cast<int>((field.bounds.yMax - field.bounds.yMin) / layout.lineStep))
 			: 1;
 		out = Value(member == "maxscroll" ? std::max(1, lines - shown + 1) : std::min(lines, scroll + shown - 1));
 	} else if (member == "hscroll" || member == "maxhscroll") {
@@ -626,11 +644,13 @@ bool TextField::setSpecialMember(Interpreter& vm, const std::string& member, con
 		} else {
 			autoSize = "none";
 		}
+		field.autoSize = avm1::toBoolean(v); // a string is true when not empty, "none" too
 		applyAutoSize();
 	} else if (member == "maxChars") {
 		maxChars = v.isNullish() ? 0 : static_cast<int>(vm.toNumber(v));
 	} else if (member == "multiline") {
 		field.multiline = avm1::toBoolean(v);
+		field.wordWrap = true; // SwiffPlayer.dll sets word wrap with multiline (0x100c1340)
 	} else if (member == "wordWrap") {
 		field.wordWrap = avm1::toBoolean(v);
 		applyAutoSize();
@@ -692,27 +712,12 @@ void TextField::draw(Drawer& drawer, const swf::Matrix& world, const swf::ColorT
 	}
 	float scrollY = 0;
 	if (scroll > 1) {
-		scrollY = drawer.layoutText(field, value).lineHeight * static_cast<float>(scroll - 1);
+		scrollY = drawer.layoutText(field, value).lineStep * static_cast<float>(scroll - 1);
 	}
 	drawer.editText(field, value, at, c, out, scrollY);
 	// A caret blinking at the end of the focused input field's text.
 	if (input && player.focus() == this && (player.currentTick() / 15) % 2 == 0) {
-		const Drawer::TextLayout layout = drawer.layoutText(field, value.empty() ? std::string(" ") : value);
-		float x = layout.left, y = field.bounds.yMin + 40.0f;
-		if (!layout.lines.empty() && !value.empty()) {
-			const Drawer::TextLine& line = layout.lines.back();
-			x += line.width;
-			if (field.align == swf::EditText::Align::Right) {
-				x += layout.width - line.width;
-			} else if (field.align == swf::EditText::Align::Center) {
-				x += (layout.width - line.width) / 2;
-			}
-			y += layout.lineHeight * static_cast<float>(layout.lines.size() - 1);
-		}
-		const float height = layout.lineHeight > 0 ? layout.lineHeight : field.fontHeight;
-		drawer.rectangle({static_cast<int32_t>(x), static_cast<int32_t>(x + 20), static_cast<int32_t>(y),
-							 static_cast<int32_t>(y + height)},
-			field.textColor, at, c, out);
+		drawer.textCaret(field, value, at, c, out);
 	}
 }
 
@@ -860,8 +865,8 @@ void Clip::draw(Drawer& drawer, const swf::Matrix& world, const swf::ColorTransf
 	}
 	const swf::Matrix at = multiply(world, matrix);
 	const swf::ColorTransform c = combine(tint, colour);
-	if (c.mult[3] <= 0 && c.add[3] <= 0) {
-		return; // fully transparent
+	if (c.mult[3] <= 0 && c.add[3] <= 0 && !drawer.stencil().submitting()) {
+		return; // fully transparent (a mask still marks the stencil)
 	}
 	if (image) {
 		drawer.image(image, at, c, out);
@@ -873,37 +878,46 @@ void Clip::draw(Drawer& drawer, const swf::Matrix& world, const swf::ColorTransf
 		}
 		drawer.dynamicShape(drawing, drawingMesh, reinterpret_cast<uintptr_t>(this) & 0xffffffffffu, at, c, out);
 	}
-	// Mask layers (clip depths) and setMask() cut what they cover to their
-	// bounding box on the stage.
-	struct Layer {
-		int lastDepth;
-		swf::Rect box; // stage twips
-	};
-	std::vector<Layer> layers;
-	const size_t begin = out.size();
+	// The display list as gameswf draws it (0x100dfdd0): a mask layer (clip
+	// depth) is drawn into the stencil, what lies above it up to its clip
+	// depth shows where it drew, and the mask goes off at the first object
+	// above that depth; a clip with setMask() draws its mask into the
+	// stencil, itself through it, then turns masks off. setMask()
+	// arguments and invisible objects are skipped.
+	Stencil& stencil = drawer.stencil();
+	bool masked = false;
+	int highest = 0;
 	for (const auto& [d, child] : children) {
-		layers.erase(std::remove_if(layers.begin(), layers.end(), [d = d](const Layer& l) { return d > l.lastDepth; }), layers.end());
-		if (child->clipDepth != 0) {
-			swf::Rect box;
-			if (child->boundsIn(multiply(at, child->matrix), box)) {
-				layers.push_back({child->clipDepth, box});
-			} else {
-				layers.push_back({child->clipDepth, {0, 0, 0, 0}});
-			}
+		if (!child->visible || child->isMask) {
 			continue;
 		}
-		const size_t first = out.size();
-		child->draw(drawer, at, c, out);
-		for (const Layer& layer : layers) {
-			clipBatches(out, first, layer.box.xMin / kTwips, layer.box.yMin / kTwips, layer.box.xMax / kTwips, layer.box.yMax / kTwips);
+		if (masked && d > highest) {
+			masked = false;
+			stencil.disable(out);
+		}
+		const bool layer = child->clipDepth != 0;
+		auto* clip = child->kind == Kind::Clip ? static_cast<Clip*>(child.get()) : nullptr;
+		auto* itsMask = clip ? dynamic_cast<DisplayObject*>(clip->mask.get()) : nullptr;
+		if (layer) {
+			stencil.beginSubmit(out);
+			child->drawMask(drawer, at, out);
+		} else if (!itsMask) {
+			child->draw(drawer, at, c, out);
+		} else {
+			stencil.beginSubmit(out);
+			itsMask->drawMask(drawer, itsMask->parent ? itsMask->parent->worldMatrix() : swf::Matrix {}, out);
+			stencil.endSubmit(out);
+			child->draw(drawer, at, c, out);
+			stencil.disable(out);
+		}
+		if (layer) {
+			stencil.endSubmit(out);
+			masked = true;
+			highest = child->clipDepth;
 		}
 	}
-	if (auto* m = dynamic_cast<DisplayObject*>(mask.get())) {
-		swf::Rect box;
-		if (!m->boundsIn(m->worldMatrix(), box)) {
-			box = {0, 0, 0, 0};
-		}
-		clipBatches(out, begin, box.xMin / kTwips, box.yMin / kTwips, box.xMax / kTwips, box.yMax / kTwips);
+	if (masked) {
+		stencil.disable(out);
 	}
 }
 

@@ -192,6 +192,15 @@ bool Player::load(std::vector<uint8_t> bytes, std::string* error)
 		m_exportNames.emplace(id, name);
 	}
 	m_drawer = std::make_unique<Drawer>(m_dictionary);
+	// The engine's fonts, from the game's root ("/Fonts/...").
+	m_drawer->setFontReader([this](const std::string& path, std::string& text) {
+		std::vector<uint8_t> bytes;
+		if (!m_reader || !m_reader("/" + path, bytes)) {
+			return false;
+		}
+		text.assign(bytes.begin(), bytes.end());
+		return true;
+	});
 	m_vm = std::make_unique<Interpreter>(static_cast<avm1::Host*>(this));
 	m_rootTimeline = std::make_unique<Timeline>(Timeline::fromTags(m_movie.tags, m_swf));
 	installBuiltins();
@@ -1408,7 +1417,9 @@ MenuFrame Player::frame()
 	frame.width = m_stageWidth;
 	frame.height = m_stageHeight;
 	if (m_root) {
+		m_drawer->stencil().reset();
 		m_root->draw(*m_drawer, {}, {}, frame.batches);
+		m_drawer->stencil().flush(frame.batches);
 	}
 	return frame;
 }
@@ -1727,10 +1738,11 @@ void Player::installDefaults()
 	n.setDefaultFunction("dice.bf2.Locale", "convertToWide", [arg](Interpreter& vm, const std::vector<Value>& args) {
 		return Value(vm.toString(arg(args, 0)));
 	});
-	// 0x1003a9d0: the width of a text field's text.
+	// 0x1003a9d0: the width of a text field's text (its first line's text
+	// object, measured at the text's length).
 	n.setDefaultFunction("dice.bf2.Locale", "getTextboxWidth", [arg](Interpreter&, const std::vector<Value>& args) {
 		auto* field = dynamic_cast<TextField*>(arg(args, 0).object().get());
-		return Value(field ? static_cast<double>(field->textWidth()) : 0.0);
+		return Value(field ? static_cast<double>(field->firstLineWidth()) : 0.0);
 	});
 	// Nothing to report: 0 is "started normally" (the menu shows a message
 	// for the other reasons, 1 kicked, 2 banned, ...).

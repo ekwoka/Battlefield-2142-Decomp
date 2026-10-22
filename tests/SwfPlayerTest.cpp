@@ -7,6 +7,7 @@
 #include "UI/Dfm.h"
 #include "UI/Player/Draw.h"
 #include "UI/Player/Player.h"
+#include "UI/Player/Stencil.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -432,6 +433,90 @@ TEST(SwfPlayer_MaskClipping)
 	}
 	CHECK(std::abs(area - 2500) < 0.5);
 	CHECK(uvFollow);
+}
+
+namespace {
+
+MenuBatch quad(float x0, float y0, float x1, float y1)
+{
+	const auto v = [](float x, float y) {
+		MenuVertex m {x, y, x / 100, y / 100, {1, 1, 1, 1}, {0, 0, 0, 0}};
+		return m;
+	};
+	MenuBatch b;
+	b.vertices = {v(x0, y0), v(x1, y0), v(x1, y1), v(x0, y0), v(x1, y1), v(x0, y1)};
+	return b;
+}
+
+double area(const std::vector<MenuBatch>& batches)
+{
+	double a = 0;
+	for (const MenuBatch& batch : batches) {
+		const auto& v = batch.vertices;
+		for (size_t i = 0; i + 2 < v.size(); i += 3) {
+			a += std::abs((v[i + 1].x - v[i].x) * (v[i + 2].y - v[i].y) - (v[i + 2].x - v[i].x) * (v[i + 1].y - v[i].y)) / 2;
+		}
+	}
+	return a;
+}
+
+} // namespace
+
+// Masks as the game's stencil (begin/end submit, disable): what a mask
+// draws is not shown, what follows shows only where the stencil equals the
+// level, by the mask's shape and not its box.
+TEST(SwfPlayer_StencilMasks)
+{
+	Stencil stencil;
+	std::vector<MenuBatch> out;
+	stencil.reset();
+	// A triangular mask (drawn twice: overlap does not count twice at level 1).
+	stencil.beginSubmit(out);
+	MenuBatch triangle;
+	triangle.vertices = {{0, 0, 0, 0, {1, 1, 1, 1}, {}}, {100, 0, 0, 0, {1, 1, 1, 1}, {}}, {0, 100, 0, 0, {1, 1, 1, 1}, {}}};
+	out.push_back(triangle);
+	out.push_back(triangle);
+	stencil.endSubmit(out);
+	CHECK(out.empty()); // colour writes off
+	out.push_back(quad(0, 0, 100, 100));
+	stencil.disable(out);
+	CHECK(std::abs(area(out) - 5000) < 0.5);
+	bool uvFollow = true;
+	for (const MenuVertex& v : out[0].vertices) {
+		uvFollow &= std::abs(v.u - v.x / 100) < 1e-4f && v.x + v.y <= 100.01f;
+	}
+	CHECK(uvFollow);
+	// After disable nothing is cut.
+	out.clear();
+	stencil.flush(out);
+	out.push_back(quad(0, 0, 100, 100));
+	stencil.flush(out);
+	CHECK(std::abs(area(out) - 10000) < 0.5);
+	// Nested: the inner level shows where both masks drew; after the inner
+	// disable the test is off (as RendDX9.dll leaves it) and the level drops.
+	out.clear();
+	stencil.reset();
+	stencil.beginSubmit(out);
+	out.push_back(quad(0, 0, 100, 100));
+	stencil.endSubmit(out);
+	stencil.beginSubmit(out);
+	out.push_back(quad(50, 50, 150, 150));
+	stencil.endSubmit(out);
+	CHECK(stencil.level() == 2);
+	out.push_back(quad(0, 0, 200, 200));
+	stencil.disable(out);
+	CHECK(std::abs(area(out) - 2500) < 0.5);
+	out.push_back(quad(0, 0, 10, 10));
+	stencil.disable(out);
+	CHECK(stencil.level() == 0 && std::abs(area(out) - 2600) < 0.5);
+	// A new first level clears the stencil.
+	out.clear();
+	stencil.beginSubmit(out);
+	out.push_back(quad(300, 300, 310, 310));
+	stencil.endSubmit(out);
+	out.push_back(quad(0, 0, 200, 200));
+	stencil.disable(out);
+	CHECK(out.empty());
 }
 
 TEST(SwfPlayer_Natives)

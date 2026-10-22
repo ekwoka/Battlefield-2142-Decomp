@@ -395,7 +395,7 @@ void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 	const int chosen = round.spawnChoice(me.id);
 	for (const auto& point : round.controlPointList()) {
 		hud::HudManager::MapMarker flag {"Ingame/Flags/Icons/Minimap/" + folder(point.team) + "/miniMap_CP.tga",
-			point.position.x, point.position.z, spawning ? 24.0f : 16.0f};
+			point.position.x, point.position.z, 32};
 		markers.push_back(flag);
 		if (spawning && std::find(spawnable.begin(), spawnable.end(), point.id) != spawnable.end()) {
 			hud::HudManager::MapMarker spawn {std::string("Ingame/Minimap/Icons/") +
@@ -412,7 +412,7 @@ void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 				&& !player.vehicle) {
 				hud::HudManager::MapMarker leader {"Ingame/Player/Icons/Minimap/SquadLeaders/mini_Squad_" + std::to_string(me.squad) +
 						"_small.dds",
-					player.position.x, player.position.z, 28};
+					player.position.x, player.position.z, 32};
 				leader.id = kMarkerLeader;
 				markers.push_back(leader);
 			}
@@ -429,9 +429,9 @@ void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 		if (!player.alive || player.team != me.team || player.id == me.id) {
 			continue;
 		}
-		hud::HudManager::MapMarker mate {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", player.position.x, player.position.z, 10};
-		mate.color[0] = 0.4f;
-		mate.color[2] = 0.4f;
+		// Players: 16 px, tinted 0.7 grey (table 0x00b3be30).
+		hud::HudManager::MapMarker mate {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", player.position.x, player.position.z, 16};
+		mate.color[0] = mate.color[1] = mate.color[2] = 0.7f;
 		markers.push_back(mate);
 	}
 	// The commanders' work: the UAV's ring, strikes on their way, supply
@@ -473,14 +473,17 @@ void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 		game::GameWorld::PlayerInfo enemy;
 		if (round.playerInfo(id, enemy) && enemy.alive) {
 			hud::HudManager::MapMarker spotted {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", enemy.position.x,
-				enemy.position.z, 10};
+				enemy.position.z, 16};
 			spotted.color[1] = 0.3f;
 			spotted.color[2] = 0.3f;
 			markers.push_back(spotted);
 		}
 	}
+	hud.setMapInVehicle(me.alive && me.vehicle != 0);
 	if (me.alive) {
-		hud::HudManager::MapMarker arrow {"Ingame/Player/Icons/Minimap/mini_headingArrow.dds", me.position.x, me.position.z, 14,
+		// The player's own icon and its heading arrow, 32 px (0x00792980).
+		markers.push_back({"Ingame/Player/Icons/Minimap/mini_LocalArrow2.tga", me.position.x, me.position.z, 32, me.yaw});
+		hud::HudManager::MapMarker arrow {"Ingame/Player/Icons/Minimap/mini_headingArrow.dds", me.position.x, me.position.z, 32,
 			me.yaw};
 		markers.push_back(arrow);
 		hud.setMapFocus(me.position.x, me.position.z);
@@ -661,7 +664,7 @@ dice::hfe::menu::RoundSummary roundSummary(const Options& options, const game::G
 	summary.mapSize = summary.previousMapSize = options.mapSize;
 	summary.maxPlayers = options.maxPlayers;
 	summary.serverName = serverName;
-	summary.roundsLeft = 1;
+	summary.roundsLeft = 999; // a local game's (0x004d3450)
 	for (int team = 1; team <= 2; ++team) {
 		if (!logic.team(team).name.empty()) {
 			summary.teamNames[static_cast<size_t>(team - 1)] = logic.team(team).name;
@@ -1593,7 +1596,7 @@ int runGame(Options& options, Session& session)
 		summary.gameMode = options.gameMode;
 		summary.mapSize = options.mapSize;
 		summary.maxPlayers = options.maxPlayers;
-		summary.roundsLeft = 1;
+		summary.roundsLeft = 999; // a local game's (0x004d3450)
 		std::string desc;
 		if (files.readText("Levels/" + options.level + "/Info/" + options.level + ".desc", desc)) {
 			const dice::hfe::menu::LevelDescription level =

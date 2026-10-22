@@ -49,7 +49,7 @@ public:
 	swf::ColorTransform colour;
 	float ratio = 0;
 	std::string name;
-	uint16_t clipDepth = 0; // a mask layer over depths up to this (applied as its bounding box)
+	uint16_t clipDepth = 0; // a mask layer over depths up to this (drawn into the stencil, Stencil.h)
 	bool visible = true;
 	bool placedByTimeline = false;
 	bool scriptTransformed = false; // script set _x & co.: timeline moves no longer apply
@@ -90,6 +90,9 @@ public:
 	// The same for a point in this object's own space.
 	virtual bool hitLocal(swf::Point local, bool shape, bool includeHidden);
 	virtual void draw(Drawer& drawer, const swf::Matrix& world, const swf::ColorTransform& colour, std::vector<MenuBatch>& out);
+	// Draws this object as a mask (into the stencil): as draw(), though it
+	// is a mask layer or a setMask() argument.
+	void drawMask(Drawer& drawer, const swf::Matrix& world, std::vector<MenuBatch>& out);
 
 	std::string targetPath() const; // "_level0.a.b"
 	std::string slashPath() const;  // "/a/b"
@@ -121,8 +124,9 @@ public:
 	// Sets the text the way scripts do (and the bound variable).
 	void setText(avm1::Interpreter& vm, const std::string& text, bool html);
 	void applyAutoSize();
-	float textWidth() const;  // pixels
-	float textHeight() const; // pixels
+	float textWidth() const;  // pixels, the widest line
+	int textHeight() const;   // pixels, as SwiffPlayer.dll reports it (0x100c2a60)
+	float firstLineWidth() const; // pixels: Locale.getTextboxWidth (0x1003a9d0)
 
 	bool hasOwnMember(const std::string& name) const override;
 	bool specialMember(avm1::Interpreter& vm, const std::string& name, avm1::Value& out) override;
@@ -168,7 +172,7 @@ public:
 	bool drawingDirty = false;
 	uint32_t drawingFill = 0, drawingLine = 0; // current 1-based styles
 	swf::Point pen;
-	avm1::ObjectRef mask; // setMask(): the clip is cut to this object's stage bounding box
+	avm1::ObjectRef mask; // setMask(): the clip shows only where this object draws (Stencil.h)
 
 	int frameCount() const { return static_cast<int>(timeline->frames.size()); }
 	DisplayObject* childNamed(const std::string& name) const;

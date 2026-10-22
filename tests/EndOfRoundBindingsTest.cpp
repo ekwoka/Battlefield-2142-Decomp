@@ -170,10 +170,12 @@ TEST(EndOfRoundBindings_LevelDescription)
 namespace {
 
 // endOfRound.dfm with its images: "images/..." from Menu_client.zip, "$/..."
-// and "/..." from the mod's folder (the levels' map pictures).
+// and "/..." from the mod's folder (the levels' map pictures), "/Fonts/..."
+// (the text fields' engine fonts) from Fonts_client.zip.
 struct EorMovie {
 	Player player;
 	std::shared_ptr<io::ZipArchive> client;
+	std::shared_ptr<io::ZipArchive> fonts;
 	io::Localization strings;
 	std::string mod;
 	std::vector<std::string> missing;
@@ -183,6 +185,7 @@ struct EorMovie {
 		mod = gameDir + "/mods/bf2142/";
 		const auto server = io::ZipArchive::open(mod + "Menu_server.zip");
 		client = io::ZipArchive::open(mod + "Menu_client.zip");
+		fonts = io::ZipArchive::open(mod + "Fonts_client.zip");
 		std::vector<uint8_t> dfm;
 		if (!server || !client || !server->read("External/FlashMenu/endOfRound.dfm", dfm)) {
 			return false;
@@ -197,6 +200,11 @@ struct EorMovie {
 		player.setFileReader([this](const std::string& url, std::vector<uint8_t>& out) {
 			std::string path = url[0] == '$' ? url.substr(1) : url;
 			bool found = false;
+			if (path.rfind("/Fonts/", 0) == 0) {
+				// A font the game lacks (no Fonts/English/DynamicText_11.dif)
+				// is looked for again in Fonts/, as RendDX9.dll does.
+				return fonts && fonts->read(path.substr(7), out);
+			}
 			if (path[0] == '/') {
 				std::ifstream in(mod + path.substr(1), std::ios::binary);
 				out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());

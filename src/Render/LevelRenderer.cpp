@@ -1,5 +1,7 @@
 #include "LevelRenderer.h"
 
+#include <array>
+
 #include "Geometry/GeometryTemplateManager.h"
 #include "Geometry/MeshFile.h"
 #include "Geometry/RoadFile.h"
@@ -923,26 +925,62 @@ void LevelRenderer::buildOverlay()
 		}
 		const float cx = (q.x0 + q.x1) * 0.5f, cy = (q.y0 + q.y1) * 0.5f;
 		const float c = std::cos(q.rotation * 3.14159265f / 180.0f), s = std::sin(q.rotation * 3.14159265f / 180.0f);
-		const float corners[6][4] = {{q.x0, q.y0, q.u0, q.v0}, {q.x1, q.y0, q.u1, q.v0}, {q.x1, q.y1, q.u1, q.v1},
-			{q.x0, q.y0, q.u0, q.v0}, {q.x1, q.y1, q.u1, q.v1}, {q.x0, q.y1, q.u0, q.v1}};
-		const uint32_t first = static_cast<uint32_t>(vertices.size());
-		for (const auto& corner : corners) {
-			Vertex v {};
+		// The quad's corners (x, y, u, v), turned about its centre, then cut
+		// to its clip rectangle when it has one (Sutherland-Hodgman).
+		std::vector<std::array<float, 4>> polygon;
+		for (const auto& corner : {std::array<float, 4> {q.x0, q.y0, q.u0, q.v0}, {q.x1, q.y0, q.u1, q.v0},
+				 {q.x1, q.y1, q.u1, q.v1}, {q.x0, q.y1, q.u0, q.v1}}) {
 			const float dx = corner[0] - cx, dy = corner[1] - cy;
-			v.position[0] = cx + dx * c - dy * s;
-			v.position[1] = cy + dx * s + dy * c;
-			v.texCoord[0] = corner[2];
-			v.texCoord[1] = corner[3];
-			v.normal[0] = q.color[0];
-			v.normal[1] = q.color[1];
-			v.normal[2] = q.color[2];
-			v.weight = q.color[3];
-			vertices.push_back(v);
+			polygon.push_back({cx + dx * c - dy * s, cy + dx * s + dy * c, corner[2], corner[3]});
 		}
+		if (q.clipped) {
+			for (int edge = 0; edge < 4 && !polygon.empty(); ++edge) {
+				const int axis = edge % 2;
+				const float limit = q.clip[edge];
+				const bool low = edge < 2;
+				const auto inside = [&](const std::array<float, 4>& p) { return low ? p[axis] >= limit : p[axis] <= limit; };
+				std::vector<std::array<float, 4>> kept;
+				for (size_t i = 0; i < polygon.size(); ++i) {
+					const auto& a = polygon[i];
+					const auto& b = polygon[(i + 1) % polygon.size()];
+					if (inside(a)) {
+						kept.push_back(a);
+					}
+					if (inside(a) != inside(b)) {
+						const float t = (limit - a[axis]) / (b[axis] - a[axis]);
+						std::array<float, 4> p;
+						for (int k = 0; k < 4; ++k) {
+							p[k] = a[k] + (b[k] - a[k]) * t;
+						}
+						kept.push_back(p);
+					}
+				}
+				polygon = std::move(kept);
+			}
+		}
+		if (polygon.size() < 3) {
+			continue;
+		}
+		const uint32_t first = static_cast<uint32_t>(vertices.size());
+		for (size_t i = 1; i + 1 < polygon.size(); ++i) {
+			for (const auto& corner : {polygon[0], polygon[i], polygon[i + 1]}) {
+				Vertex v {};
+				v.position[0] = corner[0];
+				v.position[1] = corner[1];
+				v.texCoord[0] = corner[2];
+				v.texCoord[1] = corner[3];
+				v.normal[0] = q.color[0];
+				v.normal[1] = q.color[1];
+				v.normal[2] = q.color[2];
+				v.weight = q.color[3];
+				vertices.push_back(v);
+			}
+		}
+		const uint32_t count = static_cast<uint32_t>(vertices.size()) - first;
 		if (!m_overlayGroups.empty() && m_overlayGroups.back().texture == image) {
-			m_overlayGroups.back().vertexCount += 6;
+			m_overlayGroups.back().vertexCount += count;
 		} else {
-			m_overlayGroups.push_back({image, first, 6});
+			m_overlayGroups.push_back({image, first, count});
 		}
 	}
 	if (vertices.empty()) {

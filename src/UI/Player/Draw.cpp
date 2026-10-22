@@ -1,5 +1,7 @@
 #include "Draw.h"
 
+#include "Hud/HudFont.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -88,15 +90,6 @@ std::vector<uint32_t> codePoints(const std::string& text, bool html)
 		i += length;
 	}
 	return codes;
-}
-
-size_t utf8Length(const std::string& s)
-{
-	size_t n = 0;
-	for (const char c : s) {
-		n += (static_cast<unsigned char>(c) & 0xc0) != 0x80;
-	}
-	return n;
 }
 
 void pushVertex(std::vector<MenuVertex>& out, const swf::Matrix& world, swf::Point p, float u, float v, const float mult[4],
@@ -290,100 +283,196 @@ void Drawer::morphShape(uint16_t id, float ratio, const swf::Matrix& world, cons
 	drawMesh(shape, swf::tessellateShape(shape), (uint64_t {1} << 40) | (uint64_t {id} << 8) | step, world, colour, out);
 }
 
-const swf::Font* Drawer::outlineFont(uint16_t fontId) const
-{
-	const swf::Font* font = m_dictionary.font(fontId);
-	if (font && !font->isDeviceFont()) {
-		return font;
-	}
-	for (const auto& [id, character] : m_dictionary.characters()) {
-		if (const auto* candidate = std::get_if<swf::Font>(&character); candidate && !candidate->isDeviceFont()) {
-			return candidate;
-		}
-	}
-	return nullptr;
-}
+Drawer::~Drawer() = default;
 
-const swf::ShapeMesh& Drawer::glyphMesh(const swf::Font& font, size_t glyph)
+// SwiffPlayer.dll names fonts once the movie is read (0x100b9000): each
+// exported font's name maps to its export name, and every font that is not
+// exported takes the export name of the exported font with its name (the
+// menus' device fonts "Helvetica" and "Helvetica Condensed" become
+// DynamicText and StandardText). An edit_text_character asks for its font
+// id's name when made (0x100c1700, the definition's slot 0x3c, 0x100b67a0).
+std::string Drawer::engineFontName(uint16_t fontId) const
 {
-	auto it = m_glyphs.find({font.id, glyph});
-	if (it == m_glyphs.end()) {
-		swf::TessellateOptions options;
-		options.curveTolerance = 4; // EM units (1024 a glyph)
-		it = m_glyphs.emplace(std::make_pair(font.id, glyph), swf::tessellateShape(font.glyphs[glyph].shape, options)).first;
-	}
-	return it->second;
-}
-
-// Layout (provisional, simpler than Flash's): lines break at newlines and,
-// with word wrap, at the last space that fits; each line is aligned in the
-// field's width less its margins; the first baseline is two pixels plus
-// the ascent below the top.
-Drawer::TextLayout Drawer::layoutText(const swf::EditText& field, const std::string& text) const
-{
-	TextLayout layout;
-	layout.font = outlineFont(field.fontId);
-	const swf::Font* font = layout.font;
-	if (!font) {
-		return layout;
-	}
-	layout.scale = field.fontHeight / 1024.0f; // twips per EM unit
-	const float scale = layout.scale;
-	layout.codes = codePoints(field.password ? std::string(utf8Length(text), '*') : text, field.html);
-	const std::vector<uint32_t>& codes = layout.codes;
-	layout.left = field.bounds.xMin + 40.0f + field.leftMargin + field.indent;
-	layout.width = static_cast<float>(field.bounds.xMax - field.bounds.xMin) - 80.0f - field.leftMargin - field.rightMargin;
-	const auto advance = [&](uint32_t code) { return glyphAdvance(*font, scale, code); };
-	size_t start = 0;
-	float lineWidth = 0;
-	size_t lastSpace = std::string::npos;
-	const auto endLine = [&](size_t from, size_t to) {
-		TextLine line {from, to, 0};
-		for (size_t i = from; i < to; ++i) {
-			line.width += advance(codes[i]);
+	if (!m_fontNamesBuilt) {
+		m_fontNamesBuilt = true;
+		std::map<std::string, std::string> byFontName;
+		for (const auto& [name, id] : m_dictionary.exports()) {
+			if (const swf::Font* font = m_dictionary.font(id)) {
+				m_fontNames[id] = name;
+				byFontName[font->name] = name;
+			}
 		}
-		layout.lines.push_back(line);
-	};
-	for (size_t i = 0; i < codes.size(); ++i) {
-		if (codes[i] == '\n' || codes[i] == '\r') {
-			endLine(start, i);
-			start = i + 1;
-			lineWidth = 0;
-			lastSpace = std::string::npos;
-			continue;
-		}
-		lineWidth += advance(codes[i]);
-		if (codes[i] == ' ') {
-			lastSpace = i;
-		}
-		if (field.wordWrap && lineWidth > layout.width && lastSpace != std::string::npos && lastSpace > start) {
-			endLine(start, lastSpace);
-			start = lastSpace + 1;
-			lastSpace = std::string::npos;
-			lineWidth = 0;
-			for (size_t j = start; j <= i; ++j) {
-				lineWidth += advance(codes[j]);
+		for (const auto& [id, character] : m_dictionary.characters()) {
+			const auto* font = std::get_if<swf::Font>(&character);
+			if (font && !m_fontNames.count(id)) {
+				const auto it = byFontName.find(font->name);
+				if (it != byFontName.end()) {
+					m_fontNames[id] = it->second;
+				}
 			}
 		}
 	}
-	endLine(start, codes.size());
-	layout.lineHeight = (font->ascent + font->descent) * scale + field.leading;
-	layout.ascent = font->ascent * scale;
-	for (const TextLine& line : layout.lines) {
-		layout.textWidth = std::max(layout.textWidth, line.width);
-	}
-	layout.textHeight = layout.lineHeight * static_cast<float>(layout.lines.size());
-	return layout;
+	const auto it = m_fontNames.find(fontId);
+	return it == m_fontNames.end() ? std::string() : it->second;
 }
 
-float Drawer::glyphAdvance(const swf::Font& font, float scale, uint32_t code)
+// The text object's font (RendDX9.dll 0x101172f0: FontSystem's
+// "<name>_<size>"; 0x10185e90 finds its .dif in "Fonts/<language>/<res>/"
+// then "Fonts/<res>/"). <res> is "800" at an 800-pixel-wide window and
+// empty from 1024 on, where the font is scaled by width / 1024; the menu
+// stage is 1024 wide, so the fonts here are the 1024 ones at their own
+// size, one font pixel a stage pixel. The language is the menu's (English).
+const hud::HudFont* Drawer::engineFont(const std::string& name, int pixels) const
 {
-	const int glyph = font.glyphIndex(static_cast<uint16_t>(code));
-	if (glyph < 0) {
-		return code == ' ' ? 256 * scale : 0.0f;
+	if (name.empty()) {
+		return nullptr;
 	}
-	const swf::FontGlyph& g = font.glyphs[static_cast<size_t>(glyph)];
-	return (font.hasLayout ? g.advance : static_cast<float>(g.shape.bounds.xMax)) * scale;
+	const std::string key = name + "_" + std::to_string(pixels);
+	auto [it, added] = m_engineFonts.try_emplace(key);
+	if (added && m_fontReader) {
+		for (const std::string& path : {"Fonts/English/" + key + ".dif", "Fonts/" + key + ".dif"}) {
+			std::string text;
+			if (m_fontReader(path, text)) {
+				if (auto font = hud::parseHudFont(text)) {
+					it->second = std::make_unique<hud::HudFont>(std::move(*font));
+					it->second->name = path.substr(0, path.size() - 4); // the .dds beside it
+				}
+				break;
+			}
+		}
+	}
+	return it->second && !it->second->glyphs.empty() ? it->second.get() : nullptr;
+}
+
+namespace {
+
+// RendDX9.dll 0x10183240: the boxes of a line's characters. A character
+// the font lacks repeats the previous box.
+Drawer::TextLine layoutLine(const hud::HudFont& font, std::vector<uint32_t> codes)
+{
+	Drawer::TextLine line;
+	Drawer::GlyphBox box;
+	float pen = 0;
+	for (size_t i = 0; i < codes.size(); ++i) {
+		const uint32_t code = codes[i] == 0xa0 ? ' ' : codes[i];
+		if (const hud::Glyph* g = font.glyph(code)) {
+			const float start = pen;
+			if (i > 0) {
+				pen += font.kern(codes[i - 1], codes[i]);
+			}
+			const float x = std::floor(g->before + pen + 0.5f);
+			box.x = x;
+			box.left = std::min(std::floor(start), x);
+			pen = g->width + g->after + x;
+			box.right = std::ceil(pen);
+			box.top = std::floor(static_cast<float>(g->top));
+		}
+		line.boxes.push_back(box);
+	}
+	line.codes = std::move(codes);
+	// The position after the last character (0x10182e60 at the length).
+	line.end = line.boxes.empty() ? 0.0f : line.boxes.back().right;
+	return line;
+}
+
+} // namespace
+
+Drawer::TextLayout Drawer::layoutText(const swf::EditText& field, const std::string& text, float scaleX, float scaleY) const
+{
+	TextLayout layout;
+	layout.lineStep = static_cast<float>(field.leading) + field.fontHeight;
+	// FUN_100bf280 makes text objects at round(height * 0.05) pixels.
+	layout.font = engineFont(engineFontName(field.fontId), static_cast<int>(std::nearbyint(field.fontHeight * 0.05f)));
+	if (!layout.font) {
+		return layout; // gameswf's own glyph layout (0x100c06a0) runs instead; edit text never draws it
+	}
+	const hud::HudFont& font = *layout.font;
+	std::vector<uint32_t> codes = codePoints(text, field.html);
+	codes.push_back(0); // the loop reads the terminating NUL as a character too
+	const float width = static_cast<float>(field.bounds.xMax - field.bounds.xMin) * 0.05f * scaleX;
+	const float height = static_cast<float>(field.bounds.yMax - field.bounds.yMin) * scaleY; // twips
+	const float wrapAt = width - field.rightMargin * 0.05f - 2.0f;
+	std::vector<TextLine>& objects = layout.lines;
+	// FUN_100bf280: a line's text object (made on first use) gets the text
+	// up to its first NUL; a password field shows as many '*'.
+	const auto setLine = [&](int index, const std::vector<uint32_t>& line) {
+		std::vector<uint32_t> shown;
+		for (const uint32_t c : line) {
+			if (c == 0) {
+				break;
+			}
+			shown.push_back(field.password ? '*' : c);
+		}
+		if (index >= static_cast<int>(objects.size())) {
+			objects.resize(static_cast<size_t>(index) + 1);
+		}
+		objects[static_cast<size_t>(index)] = layoutLine(font, std::move(shown));
+	};
+	std::vector<uint32_t> current;
+	int index = 0;
+	float y = 0; // twips, the line's top
+	int breakAt = -1;
+	uint32_t previous = 0;
+	bool cut = false;
+	for (const uint32_t c : codes) {
+		if (height < y && !field.autoSize) {
+			--index;
+			cut = c != 0; // the last line is kept even when empty
+			break;
+		}
+		const auto nextLine = [&] {
+			++index;
+			y += layout.lineStep;
+		};
+		if (c == '\n' || c == '\r' || (previous == '|' && c == 'L')) {
+			if (!(c == '\n' && previous == '\r')) {
+				setLine(index, current);
+				current.clear();
+				breakAt = -1;
+				nextLine();
+			}
+		} else if (c != '|') {
+			if (c == ' ' || c == 0x2022) {
+				breakAt = static_cast<int>(current.size());
+			}
+			current.push_back(c);
+			setLine(index, current);
+			if (field.wordWrap && wrapAt <= objects[static_cast<size_t>(index)].end) {
+				if (breakAt < 0) {
+					current.pop_back();
+					setLine(index, current);
+					current.assign(1, c);
+				} else {
+					std::vector<uint32_t> rest(current.begin() + breakAt + 1, current.end());
+					current.resize(static_cast<size_t>(breakAt));
+					setLine(index, current);
+					current = std::move(rest);
+					breakAt = -1;
+				}
+				nextLine();
+			}
+		}
+		previous = c;
+	}
+	if (!cut && current.empty()) {
+		--index;
+	}
+	const int count = static_cast<int>(objects.size());
+	if (count <= index && 0 < index) {
+		index = count - 1;
+	}
+	objects.resize(static_cast<size_t>(std::clamp(index + 1, 0, count)));
+	for (const TextLine& line : objects) {
+		layout.textWidth = std::max(layout.textWidth, line.end);
+	}
+	// The field's textHeight (0x100bd740's argument): the font's own
+	// leading (EM units, unscaled) plus one line, or with autoSize down to
+	// the last line.
+	const swf::Font* swfFont = m_dictionary.font(field.fontId);
+	const float fontLeading = swfFont && swfFont->hasLayout ? static_cast<float>(swfFont->leading) : 0.0f;
+	const float textHeight = field.autoSize ? fontLeading + field.fontHeight + y : fontLeading + field.leading + field.fontHeight;
+	layout.textHeight = static_cast<int>(std::nearbyint(textHeight * 0.05f));
+	return layout;
 }
 
 void Drawer::editText(uint16_t id, const std::string& text, const swf::Matrix& world, const swf::ColorTransform& colour,
@@ -394,59 +483,99 @@ void Drawer::editText(uint16_t id, const std::string& text, const swf::Matrix& w
 	}
 }
 
+namespace {
+
+// Where the display puts line `i` (0x100c01a0): the field's origin (its
+// world translation, not its bounds) plus the indent and left margin
+// (not below 0) and 40 twips across, 30 twips plus the line steps down,
+// unscaled; RendDX9.dll's drawText (0x101190b0) rounds that to pixels
+// (round(v + 0.5)) and its text object adds the alignment offset
+// (0x10183570: right, the field's width less the text, not below 0;
+// centre, half of it) and floors (0x10182430).
+struct LinePlace {
+	float x, y;
+};
+
+LinePlace placeLine(const swf::EditText& field, const Drawer::TextLayout& layout, size_t i, const swf::Matrix& world,
+	float scrollY)
+{
+	const float indent = std::max(0.0f, static_cast<float>(static_cast<int16_t>(field.indent)) + field.leftMargin);
+	const float x = std::nearbyint((world.tx + indent + 40.0f) * 0.05f + 0.5f);
+	const float y = std::nearbyint((world.ty + 30.0f + layout.lineStep * static_cast<float>(i) - scrollY) * 0.05f + 0.5f);
+	const float width = std::nearbyint(static_cast<float>(field.bounds.xMax - field.bounds.xMin) * 0.05f * world.a + 0.5f);
+	const float end = layout.lines[i].end;
+	float offset = 0;
+	if (field.align == swf::EditText::Align::Right) {
+		offset = std::max(0.0f, width - end);
+	} else if (field.align == swf::EditText::Align::Center) {
+		offset = (width - end) * 0.5f;
+	}
+	return {std::floor(x + offset + 0.5f), std::floor(y)};
+}
+
+} // namespace
+
+// Each line's glyphs at their boxes, unscaled and unrotated (the display
+// passes the world matrix with its scale set to 1), in the field's text
+// colour under the colour transform. Texels are sampled 0.01 in, as
+// RendDX9.dll does for unscaled fonts (0x10181f10); its half-pixel shift
+// is Direct3D 9's and has no counterpart here.
 void Drawer::editText(const swf::EditText& field, const std::string& text, const swf::Matrix& world,
 	const swf::ColorTransform& colour, std::vector<MenuBatch>& out, float scrollY)
 {
-	if (text.empty()) {
+	const TextLayout layout = layoutText(field, text, world.a, world.d);
+	if (!layout.font) {
 		return;
 	}
-	const TextLayout layout = layoutText(field, text);
-	const swf::Font* font = layout.font;
-	if (!font) {
-		return;
-	}
+	const hud::HudFont& font = *layout.font;
 	const swf::Rgba c = field.textColor;
 	const float mult[4] = {colour.mult[0] * c.r / 255.0f, colour.mult[1] * c.g / 255.0f, colour.mult[2] * c.b / 255.0f,
 		colour.mult[3] * c.a / 255.0f};
 	const float add[4] = {colour.add[0] / 255.0f, colour.add[1] / 255.0f, colour.add[2] / 255.0f, colour.add[3] / 255.0f};
+	const float tw = static_cast<float>(std::max(font.textureWidth, 1));
+	const float th = static_cast<float>(std::max(font.textureHeight, 1));
 	MenuBatch batch;
-	batch.image = m_white;
-	float baseline = field.bounds.yMin + 40.0f + layout.ascent - scrollY;
-	for (const TextLine& line : layout.lines) {
-		if (baseline - layout.ascent >= field.bounds.yMin - 1 || field.autoSize) {
-			float pen = layout.left;
-			if (field.align == swf::EditText::Align::Right) {
-				pen += layout.width - line.width;
-			} else if (field.align == swf::EditText::Align::Center) {
-				pen += (layout.width - line.width) / 2;
+	batch.texture = font.name + ".dds";
+	for (size_t i = 0; i < layout.lines.size(); ++i) {
+		const TextLine& line = layout.lines[i];
+		const LinePlace at = placeLine(field, layout, i, world, scrollY);
+		for (size_t k = 0; k < line.codes.size(); ++k) {
+			const hud::Glyph* g = font.glyph(line.codes[k] == 0xa0 ? ' ' : line.codes[k]);
+			if (!g || g->x1 <= g->x0 || g->y1 <= g->y0) {
+				continue;
 			}
-			for (size_t i = line.from; i < line.to; ++i) {
-				const uint32_t code = layout.codes[i];
-				const int glyph = font->glyphIndex(static_cast<uint16_t>(code));
-				if (glyph >= 0) {
-					const swf::ShapeMesh& mesh = glyphMesh(*font, static_cast<size_t>(glyph));
-					const swf::Matrix place {layout.scale, 0, 0, layout.scale, pen, baseline};
-					const swf::Matrix toStage = multiply(world, place);
-					for (const swf::MeshBatch& part : mesh.batches) {
-						if (part.kind != swf::MeshBatch::Kind::Fill) {
-							continue;
-						}
-						for (const swf::Point& p : part.triangles) {
-							pushVertex(batch.vertices, toStage, p, 0.5f, 0.5f, mult, add);
-						}
-					}
-				}
-				pen += glyphAdvance(*font, layout.scale, code);
+			const float x0 = at.x + line.boxes[k].x, y0 = at.y + line.boxes[k].top;
+			const float x1 = x0 + static_cast<float>(g->x1 - g->x0), y1 = y0 + static_cast<float>(g->y1 - g->y0);
+			const float u0 = (static_cast<float>(g->x0) + 0.01f) / tw, v0 = (static_cast<float>(g->y0) + 0.01f) / th;
+			const float u1 = (static_cast<float>(g->x1) + 0.01f) / tw, v1 = (static_cast<float>(g->y1) + 0.01f) / th;
+			const MenuVertex corners[4] = {{x0, y0, u0, v0, {mult[0], mult[1], mult[2], mult[3]}, {add[0], add[1], add[2], add[3]}},
+				{x1, y0, u1, v0, {mult[0], mult[1], mult[2], mult[3]}, {add[0], add[1], add[2], add[3]}},
+				{x1, y1, u1, v1, {mult[0], mult[1], mult[2], mult[3]}, {add[0], add[1], add[2], add[3]}},
+				{x0, y1, u0, v1, {mult[0], mult[1], mult[2], mult[3]}, {add[0], add[1], add[2], add[3]}}};
+			for (int v : {0, 1, 2, 0, 2, 3}) {
+				batch.vertices.push_back(corners[v]);
 			}
-		}
-		baseline += layout.lineHeight;
-		if (baseline - layout.ascent > field.bounds.yMax && !field.autoSize) {
-			break; // past the field
 		}
 	}
 	if (!batch.vertices.empty()) {
 		out.push_back(std::move(batch));
 	}
+}
+
+void Drawer::textCaret(const swf::EditText& field, const std::string& text, const swf::Matrix& world,
+	const swf::ColorTransform& colour, std::vector<MenuBatch>& out)
+{
+	const TextLayout layout = layoutText(field, text, world.a, world.d);
+	if (!layout.font || layout.lines.empty()) {
+		return;
+	}
+	const size_t last = layout.lines.size() - 1;
+	const LinePlace at = placeLine(field, layout, last, world, 0);
+	const float x = at.x + layout.lines[last].end;
+	const float height = std::nearbyint(field.fontHeight * 0.05f);
+	const swf::Rect r {static_cast<int32_t>(x * kTwips), static_cast<int32_t>((x + 1) * kTwips), static_cast<int32_t>(at.y * kTwips),
+		static_cast<int32_t>((at.y + height) * kTwips)};
+	rectangle(r, field.textColor, {}, colour, out);
 }
 
 void Drawer::rectangle(const swf::Rect& rect, swf::Rgba fill, const swf::Matrix& world, const swf::ColorTransform& colour,

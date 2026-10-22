@@ -118,11 +118,14 @@ void EndOfRoundBindings::setLoading(float progress)
 	m_summary.loadProgress = progress;
 }
 
+// The level is up (0x004cbea0, event 8): the loading flag drops and the
+// progress tracker is finished and reset (0x006655e0), so the progress
+// reads 0 again.
 void EndOfRoundBindings::setLevelLoaded()
 {
 	m_summary.loading = false;
 	m_summary.levelLoaded = true;
-	m_summary.loadProgress = 1;
+	m_summary.loadProgress = 0;
 }
 
 std::string EndOfRoundBindings::localized(const std::string& key) const
@@ -328,13 +331,22 @@ void EndOfRoundBindings::bindLogic()
 {
 	ui::NativeRegistry& n = m_natives;
 	const RoundSummary& s = m_summary;
-	// A loaded level: not loading, no progress and a round to play (the
-	// movie's condition for JOIN GAME; the game's own values provisional).
+	// BF2142.exe's SwiffHost (vtable 0x00924d50) answers these from its
+	// fields: getIsLoading (0x1003c9e0) is its loading flag 0x7b4 (slot
+	// 0xe4; set when a level starts loading, 0x004cbb70, cleared when it
+	// is up, 0x004cbea0 event 8) or its connecting flag 0xd7c (slot 0x2e0;
+	// set while joining a server, 0x0040bd90, cleared at 0x00487020);
+	// isFirstTimeLoading (0x1003c970) is 0x7b5 (slot 0xec; cleared by
+	// readyToPlay's event 0x10, 0x0040bd90); getNumRoundsLeft (0x1003c3d0)
+	// is 0xe4c (slot 0x390): 999 for a game the player starts
+	// (0x004d3450), the server's count otherwise (0x00511870).
+	// endOfRound.dfm's root shows JOIN GAME when the progress is under
+	// 0.95, getIsLoading is false and getNumRoundsLeft is above 0 (or on a
+	// first load at progress 1, which the 0.95 test above it never lets
+	// through).
 	n.setFunction(kLogic, "getIsLoading", [&s](Interpreter&, const Args&) { return Value(s.loading && !s.levelLoaded); });
 	n.setFunction(kLogic, "isFirstTimeLoading", [&s](Interpreter&, const Args&) { return Value(s.firstLoad); });
-	n.setFunction(kLogic, "getNumRoundsLeft", [&s](Interpreter&, const Args&) {
-		return Value(s.levelLoaded ? std::max(1, s.roundsLeft) : s.roundsLeft);
-	});
+	n.setFunction(kLogic, "getNumRoundsLeft", [&s](Interpreter&, const Args&) { return Value(s.roundsLeft); });
 	n.setFunction(kLogic, "isAbortLoadLevel", [](Interpreter&, const Args&) { return Value(false); });
 	n.setFunction(kLogic, "isLoadingDemo", [](Interpreter&, const Args&) { return Value(false); });
 	n.setFunction(kLogic, "getModVersion", [](Interpreter&, const Args&) { return Value("1.51"); });
@@ -374,7 +386,7 @@ void EndOfRoundBindings::bindLogic()
 		return Value();
 	});
 	n.setFunction("dice.bf2.Client", "getLoadProgress", [&s](Interpreter&, const Args&) { // 0x100147b0
-		return Value(s.levelLoaded ? 0.0 : std::clamp(static_cast<double>(s.loadProgress), 0.0, 1.0));
+		return Value(std::clamp(static_cast<double>(s.loadProgress), 0.0, 1.0));
 	});
 	n.setFunction("dice.bf2.VideoSettings", "isOptimzingShaders", [&s](Interpreter&, const Args&) { // 0x1005d140
 		return Value(s.optimizingShaders);

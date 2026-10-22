@@ -8,6 +8,7 @@
 #include "TestMain.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 
@@ -212,20 +213,58 @@ TEST(Hud_CompassScrolls)
 		 }) {
 		console.execute(line, out);
 	}
-	// Facing east: a quarter of the strip, centred on 90 degrees.
+	// 0x007e9560: the strip slides back by floor(value / 360 * 360): facing
+	// east its pixels 90..180 show.
 	manager.set("VehicleAngle", 90);
 	auto quads = manager.frame(0);
 	CHECK(quads.size() == 1);
 	if (quads.size() == 1) {
-		CHECK(std::abs(quads[0].u0 - 0.125f) < 1e-5f && std::abs(quads[0].u1 - 0.375f) < 1e-5f);
+		CHECK(quads[0].x0 == 100 && quads[0].x1 == 190);
+		CHECK(std::abs(quads[0].u0 - 0.25f) < 1e-5f && std::abs(quads[0].u1 - 0.5f) < 1e-5f);
 	}
-	// Facing north the window wraps: two pieces.
-	manager.set("VehicleAngle", 0);
+	// 300 degrees is -60: the strip starts 60 pixels in and a copy a period
+	// to the left fills the gap.
+	manager.set("VehicleAngle", 300);
 	quads = manager.frame(0);
 	CHECK(quads.size() == 2);
 	if (quads.size() == 2) {
-		CHECK(std::abs(quads[0].u0 - 0.875f) < 1e-5f && quads[0].u1 == 1 && quads[1].u0 == 0);
-		CHECK(std::abs(quads[0].x1 - 145) < 1e-3f && quads[1].x1 == 190);
+		CHECK(quads[0].x0 == 160 && quads[0].x1 == 190 && quads[0].u0 == 0);
+		CHECK(std::abs(quads[0].u1 - 30 / 360.0f) < 1e-5f);
+		CHECK(quads[1].x0 == 100 && quads[1].x1 == 160 && std::abs(quads[1].u0 - 300 / 360.0f) < 1e-5f && quads[1].u1 == 1);
+	}
+}
+
+TEST(Hud_CompassSnaps)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createCompassNode Global Arrow 0 316 246 8 107 0 1",
+			 "hudBuilder.setCompassNodeTexture 1 arrow.tga",
+			 "hudBuilder.setCompassNodeTextureSize 8 107",
+			 "hudBuilder.setCompassNodeSnapTexture 1 high.tga",
+			 "hudBuilder.setCompassNodeValueVariable PlayerForwardMovement",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+		 }) {
+		console.execute(line, out);
+	}
+	// Snapping past the high end (the node's height less the snap offset,
+	// 107 - 60): c stops at 47 and the snap texture shows.
+	console.execute("hudBuilder.setCompassNodeSnapOffset 0 60 0 0", out);
+	manager.set("PlayerForwardMovement", 200);
+	auto quads = manager.frame(0);
+	CHECK(quads.size() == 1 && quads[0].texture == "Menu/HUD/Texture/high.tga");
+	if (!quads.empty()) {
+		CHECK(quads[0].y0 == 246 && quads[0].y1 == 246 - 47 + 107 && std::abs(quads[0].v0 - 47 / 107.0f) < 1e-5f);
+	}
+	// Within: slid up by floor(10 / 360 * 107) = 2 pixels.
+	manager.set("PlayerForwardMovement", 10);
+	quads = manager.frame(0);
+	CHECK(quads.size() == 1 && quads[0].texture == "Menu/HUD/Texture/arrow.tga" && quads[0].y0 == 246 && quads[0].y1 == 351);
+	if (!quads.empty()) {
+		CHECK(std::abs(quads[0].v0 - 2 / 107.0f) < 1e-5f);
 	}
 }
 
@@ -256,18 +295,77 @@ TEST(Hud_MapAndMarkers)
 	CHECK(quads.size() == 2);
 	if (quads.size() == 2) {
 		CHECK(quads[0].x0 == 278 && quads[0].y0 == 29 && quads[0].x1 == 790 && quads[0].u1 == 1);
-		// 3/4 across, 1/4 down the big map.
-		CHECK(std::abs((quads[1].x0 + quads[1].x1) / 2 - (278 + 384)) < 1e-3f);
-		CHECK(std::abs((quads[1].y0 + quads[1].y1) / 2 - (29 + 128)) < 1e-3f);
+		// 3/4 across, 1/4 down the big map, 32 pixels.
+		CHECK(quads[1].x0 == 278 + 384 - 16 && quads[1].x1 == 278 + 384 + 16);
+		CHECK(quads[1].y0 == 29 + 128 - 16 && quads[1].y1 == 29 + 128 + 16);
 	}
 	CHECK(manager.mapMarkerAt(278 + 384, 29 + 128) == 7 && manager.mapMarkerAt(300, 400) == -1);
-	// The minimap: a third of the level round the focus (kept inside).
+	// The minimap eases to its zoom (level 1.5 on foot: 2.3^1.5) round the
+	// focus, kept covering the node: in the level's south-west corner the
+	// map's corner sits at the node's.
 	manager.set("MapFullSize", 0);
 	manager.setMapFocus(-500, -500);
-	quads = manager.frame(0);
-	CHECK(!quads.empty() && quads[0].x0 == 645 && quads[0].y0 == 9);
+	for (int i = 0; i < 20; ++i) {
+		quads = manager.frame(1);
+	}
+	CHECK(!quads.empty() && quads[0].x0 == 645 && quads[0].y0 == 9 && quads[0].x1 == 791 && quads[0].y1 == 155);
 	if (!quads.empty()) {
-		CHECK(quads[0].u0 == 0 && std::abs(quads[0].v1 - 1) < 1e-5f && std::abs(quads[0].u1 - 1 / 3.0f) < 1e-5f);
+		const float span = 1 / std::pow(2.3f, 1.5f);
+		CHECK(std::abs(quads[0].u0) < 1e-5f && std::abs(quads[0].v1 - 1) < 1e-5f && std::abs(quads[0].u1 - span) < 1e-4f);
 	}
 	CHECK(quads.size() == 1); // the spawn point is outside the window
+	// A combat area of the level's middle half: the big map shows it
+	// (widened by 20 of 512 pixels a side) filling the node.
+	manager.setMapArea(-256, -256, 256, 256);
+	manager.set("MapFullSize", 1);
+	for (int i = 0; i < 20; ++i) {
+		quads = manager.frame(1);
+	}
+	CHECK(!quads.empty());
+	if (!quads.empty()) {
+		const float u0 = (128 - 20) / 512.0f, u1 = (384 + 20) / 512.0f;
+		CHECK(std::abs(quads[0].u0 - u0) < 1e-4f && std::abs(quads[0].u1 - u1) < 1e-4f);
+		CHECK(std::abs(quads[0].v0 - u0) < 1e-4f && std::abs(quads[0].v1 - u1) < 1e-4f);
+	}
+}
+
+
+TEST(Hud_ListBordersSelectionScrollbar)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createListNode Global Scores 10 10 200 100 19 1",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+			 "hudBuilder.setListNodeData 2",
+			 "hudBuilder.setListNodeBorder 20 22 3 8",
+			 "hudBuilder.setListNodeBorderColor 0 0 1 1",
+			 "hudBuilder.setListNodeSelectColor 1 0 0 1",
+			 "hudBuilder.setListNodeScrollbar 10 3",
+			 "hudBuilder.setListNodeScrollbarColor 0 1 0 1",
+			 "hudBuilder.setListNodeScrollbarBackgroundColor 0 1 1 1",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.setListColumns(2, {{8, 100, 0}});
+	// Rows from y 30, 19 apart, while one fits above 110 - 22: rows at 30,
+	// 49 and 68 (87 + 19 > 88), of five: a scroll bar.
+	manager.setList(2, {{""}, {""}, {""}, {""}, {""}});
+	manager.setListSelection(2, 1);
+	const auto quads = manager.frame(0);
+	// The top band, then the right, bottom and left bands (0x007de7d0),
+	// the selection, the bar's track and thumb.
+	CHECK(quads.size() == 7);
+	if (quads.size() == 7) {
+		CHECK(quads[0].y0 == 10 && quads[0].y1 == 30 && quads[0].x1 == 210);
+		CHECK(quads[1].x0 == 202 && quads[1].y0 == 30 && quads[1].y1 == 110);
+		CHECK(quads[2].y0 == 88 && quads[2].x1 == 202);
+		CHECK(quads[3].x1 == 13 && quads[3].y0 == 30);
+		CHECK(quads[4].color[0] == 1 && quads[4].x0 == 13 && quads[4].x1 == 202 && quads[4].y0 == 49 && quads[4].y1 == 68);
+		CHECK(quads[5].x0 == 197 && quads[5].x1 == 207 && quads[5].y0 == 30 && quads[5].y1 == 88);
+		// The thumb: 3 of 5 of the track less two rows, (58 - 38) * 0.6.
+		CHECK(quads[6].y0 == 30 && std::abs(quads[6].y1 - 42) < 1e-4f);
+	}
 }

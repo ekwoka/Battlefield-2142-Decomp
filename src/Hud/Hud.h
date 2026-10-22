@@ -18,14 +18,17 @@
 // under Menu/HUD/Texture/. Nodes fade in and out over their in/out times
 // when they have an alpha show effect.
 //
-// What is approximate: the corner roots' positions (the engine places
-// them by the screen size), and node types drawn as their plain parts only
-// (compass, object markers, lists, maps and the spawn menu are kept but not
-// drawn yet).
+// The node types are BF2142.exe's dice::meme nodes (the exe lays them out;
+// RendDX9.dll only draws the quads they make): compasses
+// (Bf2CompassNode, 0x007e9560), lists (Bf2NewListBoxNode, 0x007de7d0) and
+// the map (Bf2MenuMapNode, 0x00795620) as the exe draws them. What is
+// approximate: the corner roots' positions (the engine places them by the
+// screen size), and object markers and the spawn menu, kept but not drawn.
 #pragma once
 
 #include "HudFont.h"
 
+#include <array>
 #include <functional>
 #include <map>
 #include <memory>
@@ -44,6 +47,10 @@ struct HudQuad {
 	float u0, v0, u1, v1;
 	float color[4];
 	float rotation = 0;  // degrees, about the quad's centre
+	// Drawn only inside this rectangle (the exe's clip rectangle,
+	// 0x0077af80) when clipped is set.
+	bool clipped = false;
+	float clip[4] = {0, 0, 0, 0}; // x0, y0, x1, y1
 };
 
 class HudManager {
@@ -73,26 +80,41 @@ public:
 	// centre).
 	struct ListColumn {
 		float x;
-		float width;
-		int alignment;
+		float width;   // > 0: the column ends there (else at the next column)
+		int alignment; // 0 left, 1 right, 2 centre
 	};
 	void setList(int data, std::vector<std::vector<std::string>> rows);
 	void setListColumns(int data, std::vector<ListColumn> columns);
-	// The map node (createMapNode): the level's map (a texture covering the
-	// terrain from originX/originZ, width by depth metres, north up) and
-	// what to mark on it, in world coordinates. MapFullSize picks the big
-	// map (the spawn screen) over the minimap, which shows a window of a
-	// third of the level round `focus`.
+	// The cells' text colour (the list data's cells carry it, 0x007ddb90;
+	// black unless set) and the selected row (-1: none).
+	void setListTextColor(int data, float r, float g, float b, float a);
+	void setListSelection(int data, int row) { m_listSelection[data] = row; }
+	// The map node (createMapNode, Bf2MenuMapNode): the level's map (a
+	// texture covering the terrain from originX/originZ, width by depth
+	// metres, north up) and what to mark on it, in world coordinates.
+	// MapFullSize picks the big map (the spawn screen) over the minimap.
+	// The map is zoomed by 2.3 to the power of a zoom level and centred on
+	// `focus`, kept covering the node; see drawMap.
 	struct MapMarker {
 		std::string texture; // under Menu/HUD/Texture/
 		float x, z;          // world position
-		float size;          // pixels
+		float size;          // pixels (fixed: icons don't scale with the zoom)
 		float yaw = 0;       // degrees, clockwise (0 points north)
 		float color[4] = {1, 1, 1, 1};
 		int id = -1;         // >= 0: clickable (mapMarkerAt returns it)
 	};
 	void setMap(const std::string& texture, float originX, float originZ, float width, float depth);
 	void setMapFocus(float x, float z) { m_mapFocus[0] = x; m_mapFocus[1] = z; }
+	// The zoom (0x00779600: an index into the zoom levels, 1 at start), the
+	// player's seat (a vehicle's minimap levels are lower) and whether the
+	// camera is inside a Titan (its levels are multiplied).
+	void setMapZoom(int index) { m_mapZoomIndex = index < 0 ? 0 : index > 2 ? 2 : index; }
+	void setMapInVehicle(bool inVehicle) { m_mapInVehicle = inVehicle; }
+	void setMapInsideTitan(bool inside) { m_mapInsideTitan = inside; }
+	// The combat area's bounds (world): the map is kept showing only this
+	// (made square, with a margin; 0x0078b490). Unset: the whole level.
+	void setMapArea(float minX, float minZ, float maxX, float maxZ);
+	void clearMapArea() { m_mapAreaSet = false; }
 	void setMapMarkers(std::vector<MapMarker> markers) { m_mapMarkers = std::move(markers); }
 	// The clickable marker at a point of the 800 x 600 screen, as last
 	// drawn; -1 for none.
@@ -119,12 +141,23 @@ private:
 	void drawString(const std::string& font, const std::string& text, float x, float y, float width, int alignment,
 		const float color[4], std::vector<HudQuad>& out);
 	void drawList(const Node& node, float x, float y, const float color[4], std::vector<HudQuad>& out);
+	void drawCell(const Node& node, const std::string& text, float x, float rowY, const ListColumn& column, float columnEnd,
+		const float textColor[4], float alpha, std::vector<HudQuad>& out);
+	void drawCompass(const Node& node, float x, float y, const float color[4], std::vector<HudQuad>& out);
 	std::map<int, std::vector<std::vector<std::string>>> m_lists;
 	std::map<int, std::vector<ListColumn>> m_listColumns;
+	std::map<int, std::array<float, 4>> m_listTextColors;
+	std::map<int, int> m_listSelection;
 	std::function<std::string(const std::string&)> m_localize;
 	size_t m_parentStart = 0; // where the drawing node's parent's quads began
-	void drawMap(const Node& node, float alpha, std::vector<HudQuad>& out);
+	void drawMap(const Node& node, float alpha, float seconds, std::vector<HudQuad>& out);
 	std::string m_mapTexture;
+	int m_mapZoomIndex = 1;
+	bool m_mapInVehicle = false, m_mapInsideTitan = false;
+	float m_mapLevel = 0;       // the zoom level as eased (0x714)
+	bool m_mapLevelSet = false;
+	bool m_mapAreaSet = false;
+	float m_mapArea[4] = {0, 0, 0, 0}; // world minX, minZ, maxX, maxZ
 	float m_mapOrigin[2] = {0, 0}, m_mapSize[2] = {1, 1};
 	float m_mapFocus[2] = {0, 0};
 	std::vector<MapMarker> m_mapMarkers;
@@ -133,11 +166,12 @@ private:
 		int id;
 	};
 	std::vector<Hit> m_mapHits;
-	// The map as last drawn: its screen rectangle and texture window.
+	// The map as last drawn: the node's rectangle and where the whole map
+	// texture went.
 	struct MapView {
 		bool drawn = false;
 		float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
-		float u0 = 0, v0 = 0, span = 1;
+		float mapX = 0, mapY = 0, mapW = 1, mapH = 1;
 	} m_mapView;
 	struct ButtonHit {
 		float x0, y0, x1, y1;

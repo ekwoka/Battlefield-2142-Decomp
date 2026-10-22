@@ -1,6 +1,6 @@
 // Turning SWF characters into the renderer's menu batches (MenuDraw.h):
-// shapes and morph shapes from their tessellated meshes, text fields from
-// their fonts' glyph outlines. Fills become textures:
+// shapes and morph shapes from their tessellated meshes, text fields with
+// the engine's bitmap fonts (see layoutText). Fills become textures:
 //   solid    a white texel tinted per vertex
 //   gradient a small image of the gradient (256 x 1 linear, 128 x 128
 //            radial), sampled in the gradient's ±16384-twip square
@@ -10,14 +10,20 @@
 // Meshes and images are made once per character and kept.
 #pragma once
 
+#include "Stencil.h"
 #include "UI/Characters/CharacterDictionary.h"
 #include "UI/Characters/Tessellate.h"
 #include "UI/MenuDraw.h"
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
 #include <vector>
+
+namespace dice::hfe::hud {
+struct HudFont;
+}
 
 namespace dice::hfe::ui {
 
@@ -26,7 +32,7 @@ swf::Matrix inverse(const swf::Matrix& m);
 swf::ColorTransform combine(const swf::ColorTransform& outer, const swf::ColorTransform& inner);
 // Cuts the triangles of batches[from...] to the stage rectangle
 // (pixels), interpolating texture coordinates and colours; batches left
-// empty are removed. How masks are applied (as their bounding boxes).
+// empty are removed.
 void clipBatches(std::vector<MenuBatch>& batches, size_t from, float x0, float y0, float x1, float y1);
 // Is `local` inside one of the mesh's triangles?
 bool hitMesh(const swf::ShapeMesh& mesh, swf::Point local);
@@ -34,6 +40,7 @@ bool hitMesh(const swf::ShapeMesh& mesh, swf::Point local);
 class Drawer {
 public:
 	explicit Drawer(const swf::CharacterDictionary& dictionary);
+	~Drawer();
 
 	// `world` takes the character's twips to stage twips (the batches come
 	// out in stage pixels).
@@ -47,6 +54,10 @@ public:
 	// bounds...). `scrollY` (twips) moves the text up.
 	void editText(const swf::EditText& field, const std::string& text, const swf::Matrix& world,
 		const swf::ColorTransform& colour, std::vector<MenuBatch>& out, float scrollY = 0);
+	// An input field's caret: one pixel wide, the font's size high, after
+	// the last line's text.
+	void textCaret(const swf::EditText& field, const std::string& text, const swf::Matrix& world,
+		const swf::ColorTransform& colour, std::vector<MenuBatch>& out);
 	// A solid rectangle (text field borders and backgrounds), in twips.
 	void rectangle(const swf::Rect& rect, swf::Rgba fill, const swf::Matrix& world, const swf::ColorTransform& colour,
 		std::vector<MenuBatch>& out);
@@ -58,45 +69,73 @@ public:
 	void dynamicShape(const swf::Shape& shape, const swf::ShapeMesh& mesh, uint64_t cacheKey, const swf::Matrix& world,
 		const swf::ColorTransform& colour, std::vector<MenuBatch>& out);
 
-	// How a field lays `text` out: lines as ranges of code points, sizes in twips.
+	// Text fields draw with the engine's fonts, as SwiffPlayer.dll did: a
+	// field whose font has the name of an exported font (fonts 1-4 export
+	// as StandardTextBold, StandardText, DynamicText and Titles) gets one
+	// RendDX9.dll text object per line, in the bitmap font
+	// "Fonts/<language>/<export name>_<round(height / 20)>.dif" (else
+	// "Fonts/..."). A field without one draws no text. How a field lays its
+	// text out (0x100bfd00):
+	//   - '\r', '\n' (not after '\r') and "|L" end a line; '|' is dropped;
+	//   - with word wrap, once a line's text reaches the field's width
+	//     (times the world x scale) less its right margin and 2 pixels, the
+	//     line ends at its last space or bullet (the space dropped), or
+	//     before the character that did not fit;
+	//   - unless the field sizes itself, lines that start below its height
+	//     are dropped;
+	//   - lines are leading + font height twips apart.
+	// A line's characters sit where RendDX9.dll puts them (0x10183240):
+	// the pen moves by the kerning, the glyph goes at
+	// floor(pen + before + 0.5) and the pen moves on by width + after.
+	struct GlyphBox {
+		float left = 0, right = 0; // the character's extent (positions and widths)
+		float x = 0, top = 0;      // where its glyph goes
+	};
 	struct TextLine {
-		size_t from = 0, to = 0;
-		float width = 0;
+		std::vector<uint32_t> codes; // as shown (passwords as '*')
+		std::vector<GlyphBox> boxes;
+		float end = 0; // after the last character, pixels (0 when empty)
 	};
 	struct TextLayout {
-		const swf::Font* font = nullptr;
-		float scale = 0; // twips per EM unit
-		std::vector<uint32_t> codes;
+		const hud::HudFont* font = nullptr; // null: the field draws no text
 		std::vector<TextLine> lines;
-		float left = 0, width = 0; // where lines go
-		float ascent = 0, lineHeight = 0;
-		float textWidth = 0, textHeight = 0;
+		float lineStep = 0;   // twips from one line to the next
+		int textHeight = 666; // the field's textHeight, pixels (666 until laid out: 0x100c1700)
+		float textWidth = 0;  // the widest line, pixels
 	};
-	TextLayout layoutText(const swf::EditText& field, const std::string& text) const;
+	// `scaleX` and `scaleY` are the field's world scale (the world matrix's a and d).
+	TextLayout layoutText(const swf::EditText& field, const std::string& text, float scaleX = 1, float scaleY = 1) const;
+	// The exported font name a field's font draws with, or empty.
+	std::string engineFontName(uint16_t fontId) const;
+	// Reads the engine's fonts (.dif text, by game path, e.g. "Fonts/x.dif").
+	using FontReader = std::function<bool(const std::string& path, std::string& text)>;
+	void setFontReader(FontReader reader) { m_fontReader = std::move(reader); }
+	const hud::HudFont* engineFont(const std::string& name, int pixels) const;
+
+	// The mask state of the frame being drawn (Stencil.h).
+	Stencil& stencil() { return m_stencil; }
 
 	// The tessellated shape (made once), or null.
 	const swf::ShapeMesh* shapeMesh(uint16_t id);
 	// Is `local` (shape twips) inside the filled or stroked area of shape `id`?
 	bool hitShape(uint16_t id, swf::Point local);
 
-	// The font a field draws with: its own, or for device fonts (no
-	// outlines) the movie's first font that has them.
-	const swf::Font* outlineFont(uint16_t fontId) const;
-
 private:
-	static float glyphAdvance(const swf::Font& font, float scale, uint32_t code);
 	void drawMesh(const swf::Shape& shape, const swf::ShapeMesh& mesh, uint64_t cacheKey, const swf::Matrix& world,
 		const swf::ColorTransform& colour, std::vector<MenuBatch>& out);
 	std::shared_ptr<const MenuImage> bitmapImage(uint16_t id);
 	std::shared_ptr<const MenuImage> gradientImage(uint64_t key, const swf::FillStyle& style);
-	const swf::ShapeMesh& glyphMesh(const swf::Font& font, size_t glyph);
 
 	const swf::CharacterDictionary& m_dictionary;
 	std::shared_ptr<MenuImage> m_white;
 	std::map<uint16_t, swf::ShapeMesh> m_meshes;
 	std::map<uint16_t, std::shared_ptr<const MenuImage>> m_bitmaps;
 	std::map<uint64_t, std::shared_ptr<const MenuImage>> m_gradients;
-	std::map<std::pair<uint16_t, size_t>, swf::ShapeMesh> m_glyphs;
+	FontReader m_fontReader;
+	mutable bool m_fontNamesBuilt = false;
+	mutable std::map<uint16_t, std::string> m_fontNames;                     // font id -> export name
+	mutable std::map<std::string, std::unique_ptr<hud::HudFont>> m_engineFonts; // "name_size" (null: missing)
+	Stencil m_stencil;
 };
 
 } // namespace dice::hfe::ui
