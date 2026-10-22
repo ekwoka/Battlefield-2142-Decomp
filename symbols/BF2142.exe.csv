@@ -1,0 +1,33 @@
+# Known symbols for BF2142.exe v1.51 (PE timestamp 0x4D525173, 2011-02-09).
+# Applied to the Ghidra project by tools/ghidra/scripts/ApplyKnownSymbols.java.
+# Format: address,kind,name,comment   (kind = function | label | comment)
+#
+# Sources:
+#   [openspy] https://github.com/openspy/bf2142_rendhook (Source.cpp, FESL_impl.cpp)
+#   Names marked "guess" are our own and should be refined as the code is understood.
+address,kind,name,comment
+
+# --- GameSpy hostnames rewritten to *.openspy.net at runtime [openspy] ---
+0x00A081A0,label,s_gamestats_hostname,"gamestats.gamespy.com" [openspy]
+0x00A08BC0,label,s_gpsp_hostname,"gpsp.gamespy.com" [openspy]
+0x00A08B80,label,s_gpcm_hostname,"gpcm.gamespy.com" [openspy]
+0x0099F57C,label,s_qr_master_fmt,"%s.master.gamespy.com" (query/report) [openspy]
+0x0099F2E8,label,s_available_fmt,"%s.available.gamespy.com" [openspy]
+0x009A0208,label,s_serverbrowser_fmt,"%s.ms%d.gamespy.com" [openspy]
+0x009645C4,label,s_stella_hostname,"stella.prod.gamespy.com" (stats) [openspy]
+0x009645A4,label,s_stella_url,"http://stella.prod.gamespy.com/" [openspy]
+0x00925424,label,s_gamespy_online_check,"gamespy.com" connectivity check [openspy]
+
+# --- FESL (EA login backend) over SSL; replaced by OpenSSL in the rendhook [openspy] ---
+# The state machine (2=resolve 3=connect 4=init ssl 5=handshake 30=connected,
+# 4097/4099=errors) looks like EA DirtySock ProtoSSL. Names are guesses.
+0x00861190,function,ProtoSSL_Update,guess: SSL state-machine tick; detoured to SSL_LogicThread [openspy]
+0x00861560,function,ProtoSSL_Send,guess: detoured to fesl_SSL_Send [openspy]
+0x00861600,function,ProtoSSL_Recv,guess: detoured to fesl_SSL_recv [openspy]
+0x009C5BE0,label,vtbl_FeslConnection,guess: 3-slot vtable; slot 2 replaced by OpenSpy [openspy]
+0x008340F0,function,FeslConnection_SetConnectionDetails,guess: (hostname port flags) [openspy]
+0x008341C0,function,FeslConnection_BuildHostname,guess: OpenSpy forces fesl.openspy.net:18301 [openspy]
+
+# --- Bug fixes applied by OpenSpy (must be carried into the recompiled code) ---
+0x00833F7F,comment,OPENSPY_FIX_ERROR_NEG206,OpenSpy patches 3 bytes here to EB 2E 90 (jmp) to bypass login error -206
+0x0069F7CD,comment,OPENSPY_FIX_DELETE_SOLDIER_HANG,OpenSpy NOPs this 6-byte jnz: FindNextFile loop hangs when deleting a soldier profile

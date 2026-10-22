@@ -1,0 +1,2450 @@
+object,method,kind,access,min,max,return,args,constructor,registry
+SwiffHost,addAward,method,2,4,4,void,int int int int,0040ece5,00a18960
+SwiffHost,addGameMode,method,2,2,2,void,std::string std::string,0040eedc,00a18960
+SwiffHost,addCredit,method,2,2,2,void,std::string int,0040f098,00a18960
+SwiffHost,loadImage,method,2,1,1,bool,std::string,0040f21e,00a18960
+SwiffHost,setScrollFadeSpeed,method,2,1,1,void,int,0040f346,00a18960
+SwiffHost,setScrollSpeed,method,2,1,1,void,float,0040f428,00a18960
+SwiffHost,enableScroller,method,2,1,1,void,bool,0040f50d,00a18960
+SwiffHost,setScrollerRect,method,2,4,4,void,int int int int,0040f5f9,00a18960
+SwiffHost,joinServer,method,2,3,3,bool,std::string int int,0040f7f0,00a18960
+SwiffHost,disconnectGame,method,2,0,0,bool,,0040f9d0,
+SwiffHost,setLatestGameVersion,method,2,1,1,void,std::string,0040fa40,00a18960
+LocalProfile,setName,property,1,0,1,std::string,std::string,0040fb74,00a18960
+LocalProfile,setGamespyNick,property,1,0,1,std::string,std::string,0040fce0,00a18960
+LocalProfile,setEmail,property,1,0,1,std::string,std::string,0040fe4c,00a18960
+LocalProfile,setEAOnlineMasterAccount,property,1,0,1,std::string,std::string,0040ffb8,00a18960
+LocalProfile,setEAOnlineSubAccount,property,1,0,1,std::string,std::string,00410124,00a18960
+LocalProfile,setNumTimesLoggedIn,property,1,0,1,int,int,00410290,00a18960
+LocalProfile,setRank,property,1,0,1,int,int,00410397,00a18960
+LocalProfile,setCareerPoints,property,1,0,1,int,int,0041049e,00a18960
+LocalProfile,setLastBaseUpdate,property,1,0,1,time_t,time_t,004105a5,00a18960
+LocalProfile,setCurrentProfileLatestAwards,method,1,1,3,void,std::string std::string std::string,00410708,00a18960
+LocalProfile,setCurrentProfileMuted,method,1,1,1,void,int,00410a18,00a18960
+LocalProfile,save,method,1,0,0,bool,,00410af9,
+LocalProfile,addDemoBookmark,method,1,4,4,void,std::string std::string std::string time_t,00410b76,00a18960
+LocalProfile,setTotalPlayedTime,method,1,1,1,void,float,00410e2e,00a18960
+LocalProfile,setCurrentProfileKitSetting,method,1,4,4,void,int int int int,00410f13,00a18960
+LocalProfile,setCurrentProfileHeavyArmor,method,1,3,3,void,int int bool,0041110a,00a18960
+AudioSettings,voipEnabled,property,2,0,1,bool,bool,004112c0,00a18960
+AudioSettings,voipPlaybackVolume,property,2,0,1,float,float,004113cf,00a18960
+AudioSettings,voipCaptureVolume,property,2,0,1,float,float,004114d6,00a18960
+AudioSettings,voipCaptureThreshold,property,2,0,1,float,float,004115dd,00a18960
+AudioSettings,voipBoostEnabled,property,2,0,1,bool,bool,004116e4,00a18960
+AudioSettings,voipUsePushToTalk,property,2,0,1,bool,bool,004117f3,00a18960
+AudioSettings,provider,property,2,0,1,std::string,std::string,00411902,00a18960
+AudioSettings,soundQuality,property,2,0,1,std::string,std::string,00411a7b,00a18960
+AudioSettings,effectsVolume,property,2,0,1,float,float,00411bf4,00a18960
+AudioSettings,musicVolume,property,2,0,1,float,float,00411cfb,00a18960
+AudioSettings,helpVoiceVolume,property,2,0,1,float,float,00411e08,00a18960
+AudioSettings,englishOnlyVoices,property,2,0,1,bool,bool,00411f15,00a18960
+AudioSettings,enableEAX,property,2,0,1,bool,bool,0041202a,00a18960
+AudioSettings,alwaysAllowSystemOpenAL,property,2,0,1,bool,bool,0041213f,00a18960
+AudioSettings,forceNumberOfVoices,property,2,0,1,int,int,00412254,00a18960
+VideoSettings,setTerrainQuality,method,2,1,1,void,int,0041236a,00a18960
+VideoSettings,setGeometryQuality,method,2,1,1,void,int,00412449,00a18960
+VideoSettings,setLightingQuality,method,2,1,1,void,int,00412528,00a18960
+VideoSettings,setDynamicLightingQuality,method,2,1,1,void,int,00412607,00a18960
+VideoSettings,setDynamicShadowsQuality,method,2,1,1,void,int,004126e6,00a18960
+VideoSettings,setEffectsQuality,method,2,1,1,void,int,004127c5,00a18960
+VideoSettings,setTextureQuality,method,2,1,1,void,int,004128a4,00a18960
+VideoSettings,setTextureFilteringQuality,method,2,1,1,void,int,00412983,00a18960
+VideoSettings,setResolution,method,2,1,1,void,std::string,00412a62,00a18960
+VideoSettings,setAntialiasing,method,2,1,1,void,std::string,00412b9a,00a18960
+VideoSettings,setViewDistanceScale,method,2,1,1,void,float,00412cd2,00a18960
+VideoSettings,setUseBloom,method,2,1,1,void,bool,00412db7,00a18960
+VideoSettings,setVideoOptionScheme,method,2,1,1,void,int,00412ea3,00a18960
+GeneralSettings,addFavouriteServer,method,2,4,4,void,std::string int std::string int,00412f91,00a18960
+GeneralSettings,addServerHistory,method,2,4,4,void,std::string int std::string int,0041320a,00a18960
+GeneralSettings,setPlayedVOHelp,method,2,1,1,void,std::string,00413483,00a18960
+GeneralSettings,setSortKey,method,2,1,1,void,std::string,004135ab,00a18960
+GeneralSettings,setSortOrder,method,2,1,1,void,int,004136e0,00a18960
+GeneralSettings,setNumRoundsPlayed,method,2,1,1,void,int,004137bf,00a18960
+GeneralSettings,setServerFilter,method,2,1,1,void,std::string,0041389e,00a18960
+GeneralSettings,setHUDTransparency,method,2,1,1,void,float,004139d3,00a18960
+GeneralSettings,setCrosshairColor,method,2,4,4,void,int int int int,00413ab5,00a18960
+GeneralSettings,setBuddytagColor,method,2,3,3,void,int int int,00413ca9,00a18960
+GeneralSettings,setSquadtagColor,method,2,3,3,void,int int int,00413e41,00a18960
+GeneralSettings,setMinimapRotate,method,2,1,1,void,bool,00413fd9,00a18960
+GeneralSettings,setMinimapTransparency,method,2,1,1,void,float,004140c2,00a18960
+GeneralSettings,setViewIntroMovie,method,2,1,1,void,bool,004141a7,00a18960
+GeneralSettings,setOutOfVoting,method,2,1,1,void,bool,00414293,00a18960
+GeneralSettings,setBFTVSaveDirectory,method,2,1,1,void,std::string,0041437f,00a18960
+GeneralSettings,setConfirmQuit,method,2,1,1,void,bool,004144b7,00a18960
+GeneralSettings,setMapIconAlphaTransparency,method,2,1,1,void,float,004145a3,00a18960
+GeneralSettings,setMaxBots,method,2,1,1,void,int,00414688,00a18960
+GeneralSettings,setMaxBotsIncludeHumans,method,2,1,1,void,bool,0041476a,00a18960
+GeneralSettings,setAllowPunkBuster,method,2,1,1,void,bool,00414856,00a18960
+GeneralSettings,setItemSelectionReverseItems,method,2,1,1,void,bool,00414942,00a18960
+GeneralSettings,setToggleFilters,method,2,1,1,void,int,00414a2e,00a18960
+GeneralSettings,setAutoReload,method,2,1,1,void,bool,00414b10,00a18960
+GeneralSettings,setConnectionType,method,2,1,1,void,int,00414bfc,00a18960
+GeneralSettings,setAutoScreenshot,method,2,1,1,void,int,00414cde,00a18960
+GeneralSettings,setIgnoreBuddyRequests,method,2,1,1,void,int,00414dc5,00a18960
+GeneralSettings,setCameraShake,method,2,1,1,void,int,00414eac,00a18960
+GeneralSettings,setColorBlindFriendly,method,2,1,1,void,int,00414f93,00a18960
+GeneralSettings,setHelpPopups,method,2,1,1,void,int,0041508d,00a18960
+GeneralSettings,setKillMessagesFilter,method,2,1,1,void,int,00415174,00a18960
+GeneralSettings,setRadioMessagesFilter,method,2,1,1,void,int,00415256,00a18960
+GeneralSettings,setChatMessagesFilter,method,2,1,1,void,int,00415338,00a18960
+GeneralSettings,setConfirmLaunchEADownloader,method,2,1,1,void,bool,0041541a,00a18960
+GeneralSettings,setConfirmLaunchBFWeb,method,2,1,1,void,bool,00415506,00a18960
+GeneralSettings,setConfirmDuplicateKey,method,2,1,1,void,bool,004155f2,00a18960
+GeneralSettings,setConfirmLogout,method,2,1,1,void,bool,004156b0,00a18960
+GeneralSettings,setConfirmDiscardBuddyMessages,method,2,1,1,void,bool,0041579c,00a18960
+GeneralSettings,setConfirmDuplicateKey,method,2,1,1,void,bool,00415888,00a18960
+GeneralSettings,setConfirmInstantAction,method,2,1,1,void,bool,00415974,00a18960
+GeneralSettings,setConfirmReservedSlotsWarning,method,2,1,1,void,bool,00415a60,00a18960
+GlobalSettings,setDefaultUser,method,1,1,1,void,std::string,00415b58,00a18960
+GlobalSettings,setLastOnlineUser,method,1,1,1,void,std::string,00415c8d,00a18960
+GlobalSettings,setEncryptedLogin,method,1,1,1,void,std::string,00415dc2,00a18960
+GlobalSettings,setNamePrefix,method,1,1,1,void,std::string,00415ef7,00a18960
+MenuTeamManager,addTeam,method,2,2,2,void,std::string std::string,00416038,00a18960
+MenuTeamManager,addKit,method,2,1,1,void,std::string,004161f1,00a18960
+MenuTeamManager,addWeapon,method,2,4,4,void,std::string int int int,00416316,00a18960
+GameServerSettings,setServerName,method,2,1,1,void,std::string,0041655b,00a18960
+GameServerSettings,setPassword,method,2,1,1,void,std::string,004166dc,00a18960
+GameServerSettings,setInternet,method,2,1,1,void,bool,00416811,00a18960
+GameServerSettings,setBandwidthChoke,method,2,1,1,void,int,004168fa,00a18960
+GameServerSettings,setMaxPlayers,method,2,1,1,void,int,004169d9,00a18960
+GameServerSettings,setGameMode,method,2,1,1,void,std::string,00416ab8,00a18960
+GameServerSettings,setStartDelay,method,2,1,1,void,int,00416bed,00a18960
+GameServerSettings,setEndDelay,method,2,1,1,void,int,00416ccc,00a18960
+GameServerSettings,setSpawnTime,method,2,1,1,void,float,00416dab,00a18960
+GameServerSettings,setManDownTime,method,2,1,1,void,float,00416e8d,00a18960
+GameServerSettings,setTicketRatio,method,2,1,1,void,int,00416f6f,00a18960
+GameServerSettings,setRoundsPerMap,method,2,1,1,void,int,0041704e,00a18960
+GameServerSettings,setTimeLimit,method,2,1,1,void,int,0041712d,00a18960
+GameServerSettings,setScoreLimit,method,2,1,1,void,int,0041720f,00a18960
+GameServerSettings,setSoldierFF,method,2,1,1,void,int,004172f1,00a18960
+GameServerSettings,setVehicleFF,method,2,1,1,void,int,004173d3,00a18960
+GameServerSettings,setSoldierSplashFF,method,2,1,1,void,int,004174b5,00a18960
+GameServerSettings,setVehicleSplashFF,method,2,1,1,void,int,00417597,00a18960
+GameServerSettings,setPunishTeamKills,method,2,1,1,void,bool,00417679,00a18960
+GameServerSettings,setVoteTime,method,2,1,1,void,int,00417765,00a18960
+GameServerSettings,setMinPlayersForVoting,method,2,1,1,void,int,00417847,00a18960
+GameServerSettings,setVoipEnabled,method,2,1,1,void,bool,00417929,00a18960
+GameServerSettings,setVoipQuality,method,2,1,1,void,int,00417a15,00a18960
+GameServerSettings,setVoipServerRemote,method,2,1,1,void,bool,00417af7,00a18960
+GameServerSettings,setVoipServerRemoteIP,method,2,1,1,void,std::string,00417be3,00a18960
+GameServerSettings,setVoipServerPort,method,2,1,1,void,int,00417d1b,00a18960
+GameServerSettings,setVoipBFClientPort,method,2,1,1,void,int,00417dfd,00a18960
+GameServerSettings,setVoipBFServerPort,method,2,1,1,void,int,00417edf,00a18960
+GameServerSettings,setVoipSharedPassword,method,2,1,1,void,std::string,00417fc1,00a18960
+GameServerSettings,setGameSpyPort,method,2,1,1,void,int,004180f9,00a18960
+GameServerSettings,setAllowNATNegotation,method,2,1,1,void,bool,004181db,00a18960
+GameServerSettings,setInterfaceIP,method,2,1,1,void,std::string,004182c7,00a18960
+GameServerSettings,setAutoRecord,method,2,1,1,void,bool,004183ff,00a18960
+GameServerSettings,setTimeBeforeRestartMap,method,2,1,1,void,float,004184eb,00a18960
+GameServerSettings,setDemoIndexURL,method,2,1,1,void,std::string,004185d0,00a18960
+GameServerSettings,setDemoDownloadURL,method,2,1,1,void,std::string,00418708,00a18960
+GameServerSettings,setDemoHook,method,2,1,1,void,std::string,00418840,00a18960
+GameServerSettings,setAdminScript,method,2,1,1,void,std::string,00418978,00a18960
+GameServerSettings,setSponsorText,method,2,1,1,void,std::string,00418ab0,00a18960
+GameServerSettings,setSponsorLogoURL,method,2,1,1,void,std::string,00418be8,00a18960
+GameServerSettings,setCommunityLogoURL,method,2,1,1,void,std::string,00418d20,00a18960
+GameServerSettings,setSvPunkBuster,method,2,1,1,void,bool,00418e58,00a18960
+GameServerSettings,setAutoBalanceTeam,method,2,1,1,void,bool,00418f44,00a18960
+GameServerSettings,setAutoRecordRounds,method,2,1,1,void,int,00419030,00a18960
+GameServerSettings,setTeamRatio,method,2,1,1,void,float,00419112,00a18960
+SquadManager,joinSquad,method,2,1,1,void,int,00419203,00a18960
+SquadManager,leaveSquad,method,2,1,1,void,int,004192e5,00a18960
+SquadManager,makeMeCommander,method,2,0,0,void,,004193c7,
+SquadManager,popNextCommanderApplicant,method,2,1,1,void,int,00419437,00a18960
+SquadManager,changeSquadName,method,2,2,2,void,std::string bool,00419519,00a18960
+SquadManager,listSquadMembers,method,2,2,2,std::string,int int,004196a4,00a18960
+SquadManager,listSquads,method,2,1,1,std::string,int,00419819,00a18960
+renderer,listScreenModes,method,2,0,0,void,,0041993e,
+renderer,screenMode,property,2,0,1,int,int,004199ab,00a18960
+pythonHost,reinitialize,method,2,0,0,bool,,00419abb,
+pythonHost,sendCommand,method,2,1,9,bool,std::string std::string std::string std::string std::string std::string std::string std::string std::string,00419b37,00a18960
+reservedSlots,load,method,1,0,0,bool,,0041aa21,
+reservedSlots,save,method,1,0,0,bool,,0041aabf,
+reservedSlots,configFile,property,1,0,1,std::string,std::string,0041ab3b,00a18960
+reservedSlots,addNick,method,1,1,1,void,std::string,0041ac99,00a18960
+reservedSlots,removeNick,method,1,1,1,void,std::string,0041adbf,00a18960
+reservedSlots,clear,method,1,0,0,void,,0041aee5,
+reservedSlots,list,method,1,0,0,std::string,,0041af53,
+sv,load,method,1,0,0,bool,,0041b003,
+sv,save,method,1,0,0,bool,,0041b0a1,
+sv,configFile,property,1,0,1,std::string,std::string,0041b11d,00a18960
+sv,serverName,property,1,0,1,std::string,std::string,0041b275,00a18960
+sv,password,method,1,0,1,std::string,std::string,0041b3d1,00a18960
+sv,internet,method,1,0,1,std::string,bool,0041b59b,00a18960
+sv,bandwidthChoke,property,1,0,1,int,int,0041b721,00a18960
+sv,maxConnectionType,property,1,0,1,ConnectionType,ConnectionType,0041b823,00a18960
+sv,welcomeMessage,property,1,0,1,std::string,std::string,0041b97d,00a18960
+sv,serverIP,property,1,0,1,std::string,std::string,0041bad7,00a18960
+sv,serverPort,method,1,0,1,std::string,int,0041bc33,00a18960
+sv,allowFreeCam,property,1,0,1,bool,bool,0041bdb6,00a18960
+sv,allowExternalViews,property,1,0,1,bool,bool,0041bec8,00a18960
+sv,allowNoseCam,property,1,0,1,bool,bool,0041bfda,00a18960
+sv,allowSpectators,method,1,0,1,std::string,bool,0041c0ec,00a18960
+sv,hitIndicator,property,1,0,1,bool,bool,0041c293,00a18960
+sv,maxPlayers,method,1,0,1,std::string,int,0041c3a5,00a18960
+sv,numReservedSlots,method,1,0,1,std::string,int,0041c528,00a18960
+sv,maxRank,method,1,0,1,std::string,bool,0041c6ab,00a18960
+sv,numPlayersNeededToStart,property,1,0,1,int,int,0041c834,00a18960
+sv,notEnoughPlayersRestartDelay,property,1,0,1,float,float,0041c93a,00a18960
+sv,startDelay,property,1,0,1,int,int,0041ca4b,00a18960
+sv,endDelay,property,1,0,1,int,int,0041cb53,00a18960
+sv,spawnTime,property,1,0,1,float,float,0041cc5b,00a18960
+sv,manDownTime,property,1,0,1,float,float,0041cd6b,00a18960
+sv,endOfRoundDelay,property,1,0,1,int,int,0041ce7b,00a18960
+sv,ticketRatio,property,1,0,1,int,int,0041cf81,00a18960
+sv,roundsPerMap,property,1,0,1,int,int,0041d086,00a18960
+sv,timeLimit,property,1,0,1,int,int,0041d18e,00a18960
+sv,scoreLimit,property,1,0,1,int,int,0041d296,00a18960
+sv,soldierFriendlyFire,property,1,0,1,int,int,0041d39e,00a18960
+sv,vehicleFriendlyFire,property,1,0,1,int,int,0041d4b6,00a18960
+sv,soldierSplashFriendlyFire,property,1,0,1,int,int,0041d5ce,00a18960
+sv,vehicleSplashFriendlyFire,property,1,0,1,int,int,0041d6e6,00a18960
+sv,friendlyFireWithMines,property,1,0,1,bool,bool,0041d7fe,00a18960
+sv,tkPunishEnabled,property,1,0,1,bool,bool,0041d921,00a18960
+sv,tkNumPunishToKick,property,1,0,1,int,int,0041da29,00a18960
+sv,tkPunishByDefault,property,1,0,1,bool,bool,0041db31,00a18960
+sv,votingEnabled,property,1,0,1,bool,bool,0041dc43,00a18960
+sv,voteTime,property,1,0,1,int,int,0041dd55,00a18960
+sv,minPlayersForVoting,property,1,0,1,int,int,0041de5d,00a18960
+sv,voipEnabled,property,1,0,1,bool,bool,0041df65,00a18960
+sv,voipServerRemote,property,1,0,1,bool,bool,0041e06d,00a18960
+sv,voipServerRemoteIP,property,1,0,1,std::string,std::string,0041e175,00a18960
+sv,voipServerPort,property,1,0,1,int,int,0041e2d6,00a18960
+sv,voipBFClientPort,property,1,0,1,int,int,0041e3de,00a18960
+sv,voipBFServerPort,property,1,0,1,int,int,0041e4e6,00a18960
+sv,voipSharedPassword,property,1,0,1,std::string,std::string,0041e5ee,00a18960
+sv,voipQuality,property,1,0,1,int,int,0041e77b,00a18960
+sv,gameSpyPort,property,1,0,1,int,int,0041e883,00a18960
+sv,allowNATNegotiation,property,1,0,1,bool,bool,0041e98b,00a18960
+sv,interfaceIP,property,1,0,1,std::string,std::string,0041ea93,00a18960
+sv,timeBeforeRestartMap,property,1,0,1,float,float,0041ebf4,00a18960
+sv,autoBalanceTeam,property,1,0,1,bool,bool,0041ed05,00a18960
+sv,teamRatioPercent,property,1,0,1,float,float,0041ee0d,00a18960
+sv,maxUnlockLevel,method,1,0,1,std::string,int,0041ef1d,00a18960
+sv,minUnlockLevel,method,1,0,1,std::string,int,0041f0a0,00a18960
+sv,autoRecord,property,1,0,1,bool,bool,0041f223,00a18960
+sv,demoIndexURL,property,1,0,1,std::string,std::string,0041f32b,00a18960
+sv,demoDownloadURL,property,1,0,1,std::string,std::string,0041f48c,00a18960
+sv,autoDemoHook,property,1,0,1,std::string,std::string,0041f5ed,00a18960
+sv,demoQuality,property,1,0,1,int,int,0041f74e,00a18960
+sv,adminScript,property,1,0,1,std::string,std::string,0041f868,00a18960
+sv,sponsorText,property,1,0,1,std::string,std::string,0041f9c9,00a18960
+sv,sponsorLogoURL,property,1,0,1,std::string,std::string,0041fb2a,00a18960
+sv,communityLogoURL,property,1,0,1,std::string,std::string,0041fc8b,00a18960
+sv,customMapURL,property,1,0,1,std::string,std::string,0041fdf8,00a18960
+sv,radioSpamInterval,property,1,0,1,int,int,0041ff5b,00a18960
+sv,radioMaxSpamFlagCount,property,1,0,1,int,int,00420063,00a18960
+sv,radioBlockedDurationTime,property,1,0,1,int,int,0042016b,00a18960
+sv,useGlobalRank,property,1,0,1,bool,bool,00420273,00a18960
+sv,useGlobalUnlocks,property,1,0,1,bool,bool,00420379,00a18960
+sv,botSkill,property,1,0,1,float,float,0042047f,00a18960
+sv,allowTitanMovement,property,1,0,1,bool,bool,00420588,00a18960
+sv,ranked,property,2,0,1,bool,bool,00420697,00a18960
+sv,punkBuster,property,2,0,1,bool,bool,004207a8,00a18960
+rankSettings,setRank,method,2,2,2,void,int int,004208ae,00a18960
+rankSettings,save,method,2,0,0,bool,,00420a17,
+awards,setData,method,2,2,9,void,std::string std::string std::string std::string std::string std::string std::string std::string std::string,00420a85,00a18960
+maplist,load,method,1,0,0,bool,,0042154a,
+maplist,save,method,1,0,0,bool,,004215d4,
+maplist,configFile,property,1,0,1,std::string,std::string,0042165c,00a18960
+maplist,mapCount,method,1,0,0,int,,004217bf,
+maplist,currentMap,method,1,0,0,int,,0042183b,
+maplist,clear,method,1,0,0,bool,,004218b7,
+maplist,remove,method,1,1,1,int,int,00421935,00a18960
+maplist,list,method,1,0,0,std::string,,00421a27,
+maplist,append,method,1,2,3,bool,std::string std::string int,00421acd,00a18960
+maplist,insert,method,1,3,4,bool,int std::string std::string int,00421d50,00a18960
+misc,getBuildNr,method,1,0,0,std::string,,00422035,
+Game,radioMessage,method,2,2,2,void,TargetChannel std::string,00423d83,00a1b934
+Game,simulationRate,property,2,0,1,int,int,00423f6b,00a1b934
+Game,sayAll,method,1,1,1,void,std::string,0042407c,00a1b934
+Game,sayTeam,method,1,2,2,void,int std::string,004241be,00a1b934
+Game,crash,method,1,0,0,void,,00424347,
+Game,lockFps,property,1,0,1,int,int,004243b1,00a1b934
+Vars,set,method,2,2,2,void,std::string std::string,004244c1,00a1b934
+demo,recordDemo,method,1,1,1,void,std::string,0042468a,00a1b934
+demo,stopRecording,method,1,0,0,void,,004247af,
+demo,shutdownDemo,method,1,0,0,void,,0042481c,
+demo,adjustDemoFov,method,1,1,1,void,float,00424889,00a1b934
+demo,restartDemo,method,2,0,0,void,,0042496b,
+demo,togglePlayerDemo,method,2,1,1,void,bool,004249e5,00a1b934
+demo,toggleCameraDemo,method,2,0,0,void,,00424acf,
+demo,toggleDemoPauseOrPlay,method,2,0,0,void,,00424b3d,
+bf2Engine,playMovie,method,2,2,2,void,std::string int,00424bab,00a1b934
+GameLogic,togglePause,method,1,0,0,void,,0042529c,
+GameLogic,maximumLevelViewDistance,property,2,0,1,float,float,00425359,00a1c4c0
+GameLogic,extraUAVVehicleFlightHeight,property,2,0,1,float,float,00425468,00a1c4c0
+GameLogic,reset,method,2,0,0,void,,00425577,
+GameLogic,radialLevelIndex,property,2,0,1,int,int,00425612,00a1c4c0
+GameLogic,setTeamLanguage,method,2,2,2,void,int std::string,0042571e,00a1c4c0
+GameLogic,getTeamLanguage,method,2,1,1,std::string,int,004258a6,00a1c4c0
+GameLogic,setTeamName,method,2,2,2,void,int std::string,004259ac,00a1c4c0
+GameLogic,getTeamName,method,2,1,1,std::string,int,00425b31,00a1c4c0
+GameLogic,setTeamFlag,method,2,2,2,void,int std::string,00425c34,00a1c4c0
+GameLogic,becomeSquadLeader,method,2,1,1,bool,bool,00425dbc,00a1c4c0
+GameLogic,enableVoHelp,property,2,0,1,bool,bool,00425eb8,00a1c4c0
+GameLogic,supplyDropHeight,property,2,0,1,float,float,00425fcc,00a1c4c0
+GameLogic,supplyDropNumSecsToLive,property,2,0,1,float,float,004260db,00a1c4c0
+GameLogic,satelliteScanReloadTime,property,2,0,1,float,float,004261ea,00a1c4c0
+GameLogic,uavReloadTime,property,2,0,1,float,float,004262f9,00a1c4c0
+GameLogic,orbitalBombardmentHeight,property,2,0,1,float,float,00426408,00a1c4c0
+GameLogic,messages.setVolumes,method,2,2,2,void,float float,00426517,00a1c4c0
+GameLogic,messages.addMessage,method,2,1,1,int,std::string,00426659,00a1c4c0
+GameLogic,messages.addRadioVoice,method,2,3,5,int,std::string std::string std::string std::string int,0042678d,00a1c4c0
+GameLogic,messages.addEmoteTrigger,method,2,1,1,void,std::string,00426baa,00a1c4c0
+GameLogic,messages.addRadioFilter,method,2,2,2,int,std::string std::string,00426cd0,00a1c4c0
+GameLogic,messages.addHelpMessage,method,2,2,2,int,std::string std::string,00426e97,00a1c4c0
+GameLogic,setKit,method,2,5,5,void,int KitType std::string std::string std::string,0042706a,00a1c4c0
+GameLogic,remoteCommand,method,2,1,5,bool,int int int int int,0042737f,00a1c4c0
+GameLogic,createObject,method,2,1,1,void,std::string,004276aa,00a1c4c0
+GameLogic,spawnAtCameraPosition,property,2,0,1,bool,bool,004277db,00a1c4c0
+GameLogic,setBeforeSpawnCamera,method,2,2,2,void,Vec3 Vec3,004278ef,00a1c4c0
+GameLogic,setDefaultNumberOfTickets,method,2,2,2,void,U32 U32,00427b08,00a1c4c0
+GameLogic,getDefaultNumberOfTickets,method,2,1,1,U32,U32,00427c47,00a1c4c0
+GameLogic,useColdBreath,property,2,0,1,bool,bool,00427d38,00a1c4c0
+GameLogic,setDefaultNumberOfTicketsEx,method,2,3,3,void,U32 U32 U32,00427e4f,00a1c4c0
+GameLogic,getDefaultNumberOfTicketsEx,method,2,2,2,U32,U32 U32,00427fea,00a1c4c0
+GameLogic,setNumberOfTickets,method,2,2,2,void,U32 U32,00428135,00a1c4c0
+GameLogic,getNumberOfTickets,method,2,1,1,U32,U32,00428270,00a1c4c0
+GameLogic,defaultTimeToNextAIWave,property,2,0,1,float,float,004283b6,00a1c4c0
+GameLogic,setTicketLossAtEndPerMin,method,2,1,1,void,float,004284c5,00a1c4c0
+GameLogic,getTicketLossAtEndPerMin,method,2,0,0,float,,004285aa,
+GameLogic,setTicketLossPerMin,method,2,2,2,void,U32 float,0042862a,00a1c4c0
+GameLogic,getTicketLossPerMin,method,2,1,1,float,U32,0042876f,00a1c4c0
+GameLogic,spawnObjectSpeed,property,2,0,1,float,float,00428862,00a1c4c0
+Player,moveTo,method,2,1,1,std::string,Vec3,00428973,00a1c4c0
+CombatArea,create,method,2,1,1,void,std::string,00428af8,00a1c4c0
+CombatArea,deleteActiveCombatArea,method,2,0,0,void,,00428c1d,
+CombatArea,active,method,2,1,1,void,std::string,00428c8a,00a1c4c0
+CombatArea,getActiveCombatAreaName,method,2,0,0,std::string,,00428daf,
+CombatArea,layer,property,2,0,1,int,int,00428e52,00a1c4c0
+CombatArea,team,property,2,0,1,int,int,00428f4d,00a1c4c0
+CombatArea,min,property,2,0,1,Vec2,Vec2,00429048,00a1c4c0
+CombatArea,max,property,2,0,1,Vec2,Vec2,004291f4,00a1c4c0
+CombatArea,vehicles,property,2,0,1,int,int,00429332,00a1c4c0
+CombatArea,usedByPathFinding,property,2,0,1,bool,bool,0042942d,00a1c4c0
+CombatArea,addAreaPoint,method,2,1,1,void,Vec2,00429528,00a1c4c0
+CombatAreaManager,use,method,2,1,1,void,bool,00429644,00a1c4c0
+CombatAreaManager,addVehicleDamage,method,2,2,2,void,world::VehicleCategory float,00429720,00a1c4c0
+CombatAreaManager,addVehicleTimer,method,2,2,2,void,world::VehicleCategory float,00429862,00a1c4c0
+CombatAreaManager,damage,property,2,0,1,float,float,004299a4,00a1c4c0
+CombatAreaManager,timeAllowedOutside,property,2,0,1,float,float,00429aa9,00a1c4c0
+admin,runNextLevel,method,1,0,0,void,,00429bba,
+admin,currentLevel,method,1,0,0,int,,00429c28,
+admin,nextLevel,property,1,0,1,int,int,00429ca4,00a1c4c0
+admin,restartMap,method,1,0,0,void,,00429dab,
+admin,runLevel,method,1,3,3,void,std::string std::string int,00429e19,00a1c4c0
+admin,banPlayer,method,1,1,2,std::string,std::string std::string,0042a04a,00a1c4c0
+admin,banPlayerKey,method,1,1,2,std::string,std::string std::string,0042a27d,00a1c4c0
+admin,addAddressToBanList,method,1,1,2,void,std::string std::string,0042a4b0,00a1c4c0
+admin,addKeyToBanList,method,1,1,2,void,std::string std::string,0042a6a0,00a1c4c0
+admin,removeAddressFromBanList,method,1,1,1,void,std::string,0042a890,00a1c4c0
+admin,removeKeyFromBanList,method,1,1,1,void,std::string,0042a9b6,00a1c4c0
+admin,clearBanList,method,1,0,0,void,,0042aadc,
+admin,listBannedAddresses,method,1,0,0,std::string,,0042ab4a,
+admin,listBannedKeys,method,1,0,0,std::string,,0042abee,
+admin,kickPlayer,method,1,1,1,std::string,std::string,0042ac9e,00a1c4c0
+admin,listPlayers,method,1,0,0,std::string,,0042adfc,
+Renderer,fogStartEndAndBase,property,2,0,1,Vec4,Vec4,0042aeb1,00a1c4c0
+Object,setControlPointId,method,2,1,1,void,int,004ddfb0,00a2ab78
+Object,setVisibleTeam,method,2,1,1,void,int,004de0d3,00a2ab78
+Object,getVisibleTeam,method,2,0,0,int,,004de1b9,
+ObjectTemplate,skeleton1P,method,2,1,1,void,std::string,004de23f,00a2ab78
+ObjectTemplate,skeleton3P,method,2,1,1,void,std::string,004de37d,00a2ab78
+ObjectTemplate,animationSystem1P,property,2,0,1,std::string,std::string,004de4a9,00a2ab78
+ObjectTemplate,animationSystem3P,property,2,0,1,std::string,std::string,004de620,00a2ab78
+ObjectTemplate,poseCameraPosition,method,2,2,2,void,int Vec3,004de797,00a2ab78
+ObjectTemplate,inventorySize,property,2,0,1,U32,U32,004de91c,00a2ab78
+ObjectTemplate,setSkeletonCollisionBone,method,2,5,5,void,std::string int Vec3 float float,004dea35,00a2ab78
+ObjectTemplate,soundFilter,property,2,0,1,std::string,std::string,004ded1d,00a2ab78
+ObjectTemplate,manDownCameraOffsetInDof,property,2,0,1,float,float,004dee87,00a2ab78
+ObjectTemplate,manDownCameraOffsetInUp,property,2,0,1,float,float,004defb0,00a2ab78
+ObjectTemplate,sprintRecoverTime,property,2,0,1,float,float,004df0d9,00a2ab78
+ObjectTemplate,sprintDissipationTime,property,2,0,1,float,float,004df1f6,00a2ab78
+ObjectTemplate,sprintLimit,property,2,0,1,float,float,004df313,00a2ab78
+ObjectTemplate,sprintLossAtJump,property,2,0,1,float,float,004df4ff,00a2ab78
+ObjectTemplate,ragdollLandedDelay,property,2,0,1,float,float,004df61c,00a2ab78
+ObjectTemplate,breathEffect,property,2,0,1,std::string,std::string,004df739,00a2ab78
+ObjectTemplate,skeleton,method,2,1,1,void,std::string,004df8c2,00a2ab78
+ObjectTemplate,animationSystem1P,property,2,0,1,std::string,std::string,004df9ee,00a2ab78
+ObjectTemplate,animationSystem3P,property,2,0,1,std::string,std::string,004dfb65,00a2ab78
+ObjectTemplate,antenna.skeleton,property,2,0,1,std::string,std::string,004dfcee,00a2ab78
+ObjectTemplate,antenna.maxSwayAngle,property,2,0,1,Vec2,Vec2,004dfe58,00a2ab78
+ObjectTemplate,antenna.stiffness,property,2,0,1,float,float,004dffe1,00a2ab78
+ObjectTemplate,antenna.damping,property,2,0,1,float,float,004e00fe,00a2ab78
+ObjectTemplate,antenna.accelerationFactor,property,2,0,1,float,float,004e021b,00a2ab78
+ObjectTemplate,team,property,2,0,1,int,int,004e0338,00a2ab78
+ObjectTemplate,unlockLevel,property,2,0,1,int,int,004e0467,00a2ab78
+ObjectTemplate,unlockBranch,property,2,0,1,UnlockBranch,UnlockBranch,004e057b,00a2ab78
+ObjectTemplate,replaceItem,method,2,1,1,void,std::string,004e06e7,00a2ab78
+ObjectTemplate,replaceWithoutEquip,property,2,0,1,bool,bool,004e0813,00a2ab78
+ObjectTemplate,isFirearmReplacement,property,2,0,1,bool,bool,004e0927,00a2ab78
+ObjectTemplate,firearmReplacement,property,2,0,1,std::string,std::string,004e0a3b,00a2ab78
+ObjectTemplate,isRetailReplacement,property,2,0,1,bool,bool,004e0bd4,00a2ab78
+ObjectTemplate,isDogtagReplacement,property,2,0,1,bool,bool,004e0ce8,00a2ab78
+ObjectTemplate,projectileTemplate,property,2,0,1,std::string,std::string,004e0e0e,00a2ab78
+ObjectTemplate,keepProjectiles,property,2,0,1,float,float,004e0f84,00a2ab78
+ObjectTemplate,velocity,property,2,0,1,float,float,004e10a1,00a2ab78
+ObjectTemplate,itemIndex,property,2,0,1,int,int,004e11be,00a2ab78
+ObjectTemplate,altItemIndex,property,2,0,1,int,int,004e12dd,00a2ab78
+ObjectTemplate,pickupEnabled,property,2,0,1,bool,bool,004e13f1,00a2ab78
+ObjectTemplate,heatAddWhenFire,property,2,0,1,float,float,004e150a,00a2ab78
+ObjectTemplate,coolDownPerSec,property,2,0,1,float,float,004e1627,00a2ab78
+ObjectTemplate,overheatPenalty,property,2,0,1,float,float,004e1744,00a2ab78
+ObjectTemplate,inheritHeatFromPrimary,property,2,0,1,bool,bool,004e185b,00a2ab78
+ObjectTemplate,delayToUse,property,2,0,1,float,float,004e196f,00a2ab78
+ObjectTemplate,isSelectable,property,2,0,1,bool,bool,004e1a86,00a2ab78
+ObjectTemplate,allowEmoteAnimation,property,2,0,1,bool,bool,004e1b9a,00a2ab78
+ObjectTemplate,blockInputOnRotBundle,property,2,0,1,std::string,std::string,004e1cae,00a2ab78
+ObjectTemplate,minimumSquadSizeForSelection,property,2,0,1,int,int,004e1e1b,00a2ab78
+ObjectTemplate,allowZoomOnHeat,property,2,0,1,bool,bool,004e1f2f,00a2ab78
+ObjectTemplate,setIfTitanChangeToWeapon,method,2,2,2,void,std::string float,004e2043,00a2ab78
+ObjectTemplate,setCheckObstruction,method,2,3,3,void,float float float,004e21f5,00a2ab78
+ObjectTemplate,fire.roundsPerMinute,property,2,0,1,int,int,004e23f5,00a2ab78
+ObjectTemplate,fire.fireStartDelay,property,2,0,1,RandomDistribution,RandomDistribution,004e2512,00a2ab78
+ObjectTemplate,fire.fireLaunchDelay,property,2,0,1,float,float,004e269c,00a2ab78
+ObjectTemplate,fire.fireInput,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,004e27bc,00a2ab78
+ObjectTemplate,fire.altFireInput,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,004e28d6,00a2ab78
+ObjectTemplate,fire.ignoreFireButton,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,004e29f0,00a2ab78
+ObjectTemplate,fire.firesThroughHudSystem,property,2,0,1,bool,bool,004e2b3c,00a2ab78
+ObjectTemplate,fire.batchSize,property,2,0,1,int,int,004e2c5c,00a2ab78
+ObjectTemplate,fire.burstSize,property,2,0,1,int,int,004e2d76,00a2ab78
+ObjectTemplate,fire.addFireRate,method,2,1,1,void,int,004e2ea8,00a2ab78
+ObjectTemplate,fire.projectileStartPosition,property,2,0,1,Vec3,Vec3,004e2f66,00a2ab78
+ObjectTemplate,fire.fireInCameraDof,property,2,0,1,bool,bool,004e30e6,00a2ab78
+ObjectTemplate,fire.fireInCameraDofLocked,property,2,0,1,bool,bool,004e3200,00a2ab78
+ObjectTemplate,fire.maxProjectilesInWorld,property,2,0,1,int,int,004e331a,00a2ab78
+ObjectTemplate,fire.destroyProjectilesOnDestroy,property,2,0,1,bool,bool,004e3434,00a2ab78
+ObjectTemplate,fire.noMovementAfterFireTime,property,2,0,1,float,float,004e3554,00a2ab78
+ObjectTemplate,fire.maximumVehicleTiltForFire,property,2,0,1,float,float,004e3677,00a2ab78
+ObjectTemplate,fire.surpressEffectOnFireStart,property,2,0,1,int,int,004e379a,00a2ab78
+ObjectTemplate,fire.showWeaponAfterReloadDelay,property,2,0,1,float,float,004e38ba,00a2ab78
+ObjectTemplate,fire.dropWeaponAfterReloadDelay,property,2,0,1,float,float,004e39f3,00a2ab78
+ObjectTemplate,fire.hideWeaponAfterReloadDelay,property,2,0,1,float,float,004e3b14,00a2ab78
+ObjectTemplate,fire.dropLod,property,2,0,1,int,int,004e3c35,00a2ab78
+ObjectTemplate,fire.hideLod,property,2,0,1,int,int,004e3d55,00a2ab78
+ObjectTemplate,fire.busyUntilButtonRelease,property,2,0,1,bool,bool,004e3e75,00a2ab78
+ObjectTemplate,fire.onlyFireWhenProne,property,2,0,1,bool,bool,004e3f95,00a2ab78
+ObjectTemplate,fire.useDistanceCounter,property,2,0,1,bool,bool,004e40b5,00a2ab78
+ObjectTemplate,fire.distanceStep,property,2,0,1,int,int,004e41d5,00a2ab78
+ObjectTemplate,fire.minimumDistance,property,2,0,1,int,int,004e42f5,00a2ab78
+ObjectTemplate,fire.allowZoomOnROF,property,2,0,1,bool,bool,004e4415,00a2ab78
+ObjectTemplate,fire.addBarrelName,method,2,1,1,void,std::string,004e4535,00a2ab78
+ObjectTemplate,fire.isBarrel,method,2,1,1,bool,std::string,004e4667,00a2ab78
+ObjectTemplate,fire.useDummyProjectiles,property,2,0,1,bool,bool,004e47a7,00a2ab78
+ObjectTemplate,fire.radioMessageDelay,property,2,0,1,float,float,004e48df,00a2ab78
+ObjectTemplate,fire.fireLaunchDelaySoft,property,2,0,1,float,float,004e4a1a,00a2ab78
+ObjectTemplate,fire.pullbackTime,property,2,0,1,float,float,004e4b3d,00a2ab78
+ObjectTemplate,fire.showWeaponAfterReloadDelay,property,2,0,1,float,float,004e4c60,00a2ab78
+ObjectTemplate,fire.projectileStartRotation,property,2,0,1,Vec3,Vec3,004e4d83,00a2ab78
+ObjectTemplate,fire.randomRotationSpeed,property,2,0,1,float,float,004e4f31,00a2ab78
+ObjectTemplate,fire.useDoubleClick,property,2,0,1,bool,bool,004e5072,00a2ab78
+ObjectTemplate,fire.isPodLauncher,property,2,0,1,bool,bool,004e5192,00a2ab78
+ObjectTemplate,fire.hasAlternateOrigin,property,2,0,1,bool,bool,004e52b2,00a2ab78
+ObjectTemplate,spawn.spawnVehicle,property,2,0,1,std::string,std::string,004e53d2,00a2ab78
+ObjectTemplate,spawn.spawnInPod,property,2,0,1,bool,bool,004e558f,00a2ab78
+ObjectTemplate,fire.detonatorObject,property,2,0,1,std::string,std::string,004e56af,00a2ab78
+ObjectTemplate,fire.showWeaponAfterReloadDelay,property,2,0,1,float,float,004e586c,00a2ab78
+ObjectTemplate,ammo.autoReload,property,2,0,1,bool,bool,004e598f,00a2ab78
+ObjectTemplate,ammo.instantReloadOnEnable,property,2,0,1,bool,bool,004e5aa9,00a2ab78
+ObjectTemplate,ammo.ammoType,property,2,0,1,int,int,004e5bc3,00a2ab78
+ObjectTemplate,ammo.magSize,property,2,0,1,int,int,004e5cdd,00a2ab78
+ObjectTemplate,ammo.nrOfMags,property,2,0,1,int,int,004e5df7,00a2ab78
+ObjectTemplate,ammo.reloadAmount,property,2,0,1,int,int,004e5f11,00a2ab78
+ObjectTemplate,ammo.reloadTime,property,2,0,1,float,float,004e602b,00a2ab78
+ObjectTemplate,ammo.firstShotExtraTime,property,2,0,1,float,float,004e614b,00a2ab78
+ObjectTemplate,ammo.lastShotExtraTime,property,2,0,1,float,float,004e626b,00a2ab78
+ObjectTemplate,ammo.changeMagAt,property,2,0,1,float,float,004e638b,00a2ab78
+ObjectTemplate,ammo.magLinkWeapon,property,2,0,1,std::string,std::string,004e64ab,00a2ab78
+ObjectTemplate,ammo.minimumTimeUntilReload,property,2,0,1,float,float,004e664b,00a2ab78
+ObjectTemplate,ammo.toggleWhenNoAmmo,property,2,0,1,bool,bool,004e676b,00a2ab78
+ObjectTemplate,ammo.reloadWithoutPlayer,property,2,0,1,bool,bool,004e6885,00a2ab78
+ObjectTemplate,ammo.allowReplenish,property,2,0,1,bool,bool,004e699f,00a2ab78
+ObjectTemplate,ammo.allowReloadWithFullMag,property,2,0,1,bool,bool,004e6ab9,00a2ab78
+ObjectTemplate,ammo.forceSoundPostReloadOnReload,property,2,0,1,bool,bool,004e6bd3,00a2ab78
+ObjectTemplate,ammo.abilityDrain,property,2,0,1,float,float,004e6d05,00a2ab78
+ObjectTemplate,ammo.abilityCost,property,2,0,1,float,float,004e6e3d,00a2ab78
+ObjectTemplate,ammo.abilityMaterial,property,2,0,1,int,int,004e6f60,00a2ab78
+ObjectTemplate,ammo.abilityRadius,property,2,0,1,float,float,004e707a,00a2ab78
+ObjectTemplate,ammo.abilityStrength,property,2,0,1,float,float,004e71a3,00a2ab78
+ObjectTemplate,ammo.replenishingType,property,2,0,1,ReplenishingType,ReplenishingType,004e72c3,00a2ab78
+ObjectTemplate,ammo.onlyActiveWhileFiring,property,2,0,1,bool,bool,004e7407,00a2ab78
+ObjectTemplate,ammo.protectionRadius,property,2,0,1,float,float,004e7527,00a2ab78
+ObjectTemplate,ammo.detonateMaterial,property,2,0,1,int,int,004e764a,00a2ab78
+ObjectTemplate,pulse.fov,property,2,0,1,float,float,004e777c,00a2ab78
+ObjectTemplate,pulse.viewDistance,property,2,0,1,float,float,004e789f,00a2ab78
+ObjectTemplate,pulse.revealTime,property,2,0,1,int,int,004e79da,00a2ab78
+ObjectTemplate,deviation.setFireDev,method,2,3,3,void,float float float,004e7af4,00a2ab78
+ObjectTemplate,deviation.minDev,property,2,0,1,float,float,004e7cb8,00a2ab78
+ObjectTemplate,deviation.subProjectileDev,property,2,0,1,float,float,004e7ddb,00a2ab78
+ObjectTemplate,deviation.devModZoom,property,2,0,1,float,float,004e7efe,00a2ab78
+ObjectTemplate,deviation.minDevModZoom,property,2,0,1,float,float,004e8039,00a2ab78
+ObjectTemplate,deviation.radius,property,2,0,1,float,float,004e815c,00a2ab78
+ObjectTemplate,deviation.setTurnDev,method,2,4,4,void,float float float float,004e8297,00a2ab78
+ObjectTemplate,deviation.setSpeedDev,method,2,4,4,void,float float float float,004e84b8,00a2ab78
+ObjectTemplate,deviation.setMiscDev,method,2,3,3,void,float float float,004e86c1,00a2ab78
+ObjectTemplate,deviation.devModStand,property,2,0,1,float,float,004e886d,00a2ab78
+ObjectTemplate,deviation.devModCrouch,property,2,0,1,float,float,004e8990,00a2ab78
+ObjectTemplate,deviation.devModLie,property,2,0,1,float,float,004e8ab3,00a2ab78
+ObjectTemplate,deviation.devModZoom,property,2,0,1,float,float,004e8bd6,00a2ab78
+ObjectTemplate,deviation.minDevModZoom,property,2,0,1,float,float,004e8cf9,00a2ab78
+ObjectTemplate,sway.gunSwayUseZoom,property,2,0,1,bool,bool,004e8e1c,00a2ab78
+ObjectTemplate,sway.gunSwayZoomModifier,property,2,0,1,float,float,004e8f4e,00a2ab78
+ObjectTemplate,sway.gunSwayPitchSteps,property,2,0,1,float,float,004e9071,00a2ab78
+ObjectTemplate,sway.gunSwayPitchFactor,property,2,0,1,float,float,004e9194,00a2ab78
+ObjectTemplate,sway.gunSwayPitchMax,property,2,0,1,float,float,004e92b7,00a2ab78
+ObjectTemplate,sway.gunSwayPitchUpdateRate,property,2,0,1,float,float,004e93da,00a2ab78
+ObjectTemplate,sway.gunSwayPitchDirModifier,property,2,0,1,float,float,004e94fd,00a2ab78
+ObjectTemplate,sway.gunSwayPitchDirThreshold,property,2,0,1,float,float,004e9620,00a2ab78
+ObjectTemplate,sway.gunSwayPitchRandomMin,property,2,0,1,float,float,004e9743,00a2ab78
+ObjectTemplate,sway.gunSwayPitchRandomMax,property,2,0,1,float,float,004e9866,00a2ab78
+ObjectTemplate,sway.gunSwayLrDirModifier,property,2,0,1,float,float,004e9989,00a2ab78
+ObjectTemplate,sway.gunSwayLrDirThreshold,property,2,0,1,float,float,004e9aac,00a2ab78
+ObjectTemplate,sway.gunSwayLrSteps,property,2,0,1,float,float,004e9bcf,00a2ab78
+ObjectTemplate,sway.gunSwayLrFactor,property,2,0,1,float,float,004e9cf2,00a2ab78
+ObjectTemplate,sway.gunSwayLrMax,property,2,0,1,float,float,004e9e15,00a2ab78
+ObjectTemplate,sway.gunSwayLrUpdateRate,property,2,0,1,float,float,004e9f38,00a2ab78
+ObjectTemplate,sway.gunSwayLrRandomMin,property,2,0,1,float,float,004ea05b,00a2ab78
+ObjectTemplate,sway.gunSwayLrRandomMax,property,2,0,1,float,float,004ea17e,00a2ab78
+ObjectTemplate,sway.gunSwayPitchSmoothFactor,property,2,0,1,float,float,004ea2a1,00a2ab78
+ObjectTemplate,sway.gunSwayPitchSmoothMax,property,2,0,1,float,float,004ea3c4,00a2ab78
+ObjectTemplate,sway.gunSwayPitchSmoothThreshold,property,2,0,1,float,float,004ea4e7,00a2ab78
+ObjectTemplate,sway.gunSwayLrSmoothFactor,property,2,0,1,float,float,004ea60a,00a2ab78
+ObjectTemplate,sway.gunSwayLrSmoothMax,property,2,0,1,float,float,004ea72d,00a2ab78
+ObjectTemplate,sway.gunSwayLrSmoothThreshold,property,2,0,1,float,float,004ea850,00a2ab78
+ObjectTemplate,sway.stabilityRecoverTime,property,2,0,1,float,float,004ea973,00a2ab78
+ObjectTemplate,sway.stabilityDuration,property,2,0,1,float,float,004eaa96,00a2ab78
+ObjectTemplate,sway.stabilityTime,property,2,0,1,float,float,004eabb9,00a2ab78
+ObjectTemplate,sway.stabilityDurationRecoverTime,property,2,0,1,float,float,004eacdc,00a2ab78
+ObjectTemplate,zoom.zoomWhenBusy,property,2,0,1,bool,bool,004eadff,00a2ab78
+ObjectTemplate,zoom.preventZoomWhen3P,property,2,0,1,bool,bool,004eaf19,00a2ab78
+ObjectTemplate,zoom.addZoomFactor,method,2,1,1,void,float,004eb04b,00a2ab78
+ObjectTemplate,zoom.zoomDelay,property,2,0,1,float,float,004eb13a,00a2ab78
+ObjectTemplate,zoom.zoomLod,property,2,0,1,int,int,004eb25a,00a2ab78
+ObjectTemplate,zoom.changeFovDelay,property,2,0,1,float,float,004eb374,00a2ab78
+ObjectTemplate,zoom.zoomOutAfterFire,property,2,0,1,bool,bool,004eb494,00a2ab78
+ObjectTemplate,zoom.mouseSpeedMod,property,2,0,1,float,float,004eb5b2,00a2ab78
+ObjectTemplate,zoom.disableMuzzleWhenZoomed,property,2,0,1,bool,bool,004eb6d5,00a2ab78
+ObjectTemplate,zoom.zoomFineTuneSteps,property,2,0,1,int,int,004eb7ef,00a2ab78
+ObjectTemplate,zoom.useZoomFineTuning,property,2,0,1,bool,bool,004eb909,00a2ab78
+ObjectTemplate,zoom.zoomFineTuningNeedsUnlock,property,2,0,1,bool,bool,004eba23,00a2ab78
+ObjectTemplate,zoom.zoomOutOnReload,property,2,0,1,bool,bool,004ebb3d,00a2ab78
+ObjectTemplate,zoom.changeCameraId,property,2,0,1,int,int,004ebc6f,00a2ab78
+ObjectTemplate,zoom.changeCameraViewMode,property,2,0,1,CameraViewMode,CameraViewMode,004ebd8c,00a2ab78
+ObjectTemplate,zoom.startCameraId,property,2,0,1,int,int,004ebefe,00a2ab78
+ObjectTemplate,zoom.startCameraViewMode,property,2,0,1,CameraViewMode,CameraViewMode,004ec018,00a2ab78
+ObjectTemplate,zoom.useProjectileCamera,property,2,0,1,bool,bool,004ec24b,00a2ab78
+ObjectTemplate,zoom.allowUntoggledFire,property,2,0,1,bool,bool,004ec365,00a2ab78
+ObjectTemplate,recoil.hasRecoilForce,property,2,0,1,bool,bool,004ec497,00a2ab78
+ObjectTemplate,recoil.goBackOnRecoil,property,2,0,1,bool,bool,004ec5c9,00a2ab78
+ObjectTemplate,recoil.recoilForceUp,property,2,0,1,RandomDistribution,RandomDistribution,004ec6f0,00a2ab78
+ObjectTemplate,recoil.recoilForceLeftRight,property,2,0,1,RandomDistribution,RandomDistribution,004ec87a,00a2ab78
+ObjectTemplate,recoil.zoomModifier,property,2,0,1,float,float,004eca04,00a2ab78
+ObjectTemplate,recoil.recoilGraphFrameCount,property,2,0,1,int,int,004ecb27,00a2ab78
+ObjectTemplate,recoil.recoilGraphExponent,property,2,0,1,float,float,004ecc44,00a2ab78
+ObjectTemplate,recoil.recoilGraphTotalMovement,property,2,0,1,float,float,004ecea1,00a2ab78
+ObjectTemplate,recoil.recoilSize,property,2,0,1,float,float,004ecfc1,00a2ab78
+ObjectTemplate,recoil.recoilSpeed,property,2,0,1,float,float,004ed0e4,00a2ab78
+ObjectTemplate,recoil.recoilSpeedGB,property,2,0,1,float,float,004ed204,00a2ab78
+ObjectTemplate,recoil.recoilForce,property,2,0,1,float,float,004ed324,00a2ab78
+ObjectTemplate,recoil.cameraRecoilSpeed,property,2,0,1,float,float,004ed45f,00a2ab78
+ObjectTemplate,recoil.cameraRecoilSize,property,2,0,1,float,float,004ed582,00a2ab78
+ObjectTemplate,animation.useShiftAnimation,property,2,0,1,bool,bool,004ed6a5,00a2ab78
+ObjectTemplate,animation.shiftDelay,property,2,0,1,float,float,004ed7e8,00a2ab78
+ObjectTemplate,animation.loopingFire,property,2,0,1,float,float,004ed917,00a2ab78
+ObjectTemplate,target.onLockChangeToWeapon,method,2,2,2,void,bool std::string,004eda5f,00a2ab78
+ObjectTemplate,target.targetSystem,property,2,0,1,TargetSystem,TargetSystem,004edc17,00a2ab78
+ObjectTemplate,target.maxDistance,property,2,0,1,float,float,004edea8,00a2ab78
+ObjectTemplate,target.setTargetAtMaxDistance,property,2,0,1,bool,bool,004edfcb,00a2ab78
+ObjectTemplate,target.connectionEffect,property,2,0,1,std::string,std::string,004ee0e5,00a2ab78
+ObjectTemplate,target.connectionEffectOnlyWhenZoomed,property,2,0,1,bool,bool,004ee285,00a2ab78
+ObjectTemplate,target.useCameraDirectionToTarget,property,2,0,1,bool,bool,004ee399,00a2ab78
+ObjectTemplate,target.lockDelay,property,2,0,1,float,float,004ee4ad,00a2ab78
+ObjectTemplate,target.loseLockDelay,property,2,0,1,float,float,004ee5e8,00a2ab78
+ObjectTemplate,target.lockAngle,property,2,0,1,float,float,004ee70b,00a2ab78
+ObjectTemplate,target.notifyProjectileOnLostTarget,property,2,0,1,bool,bool,004ee834,00a2ab78
+ObjectTemplate,target.targetObjectTemplate,property,2,0,1,std::string,std::string,004ee954,00a2ab78
+ObjectTemplate,target.disableFireWhenActiveMissile,property,2,0,1,bool,bool,004eeaee,00a2ab78
+ObjectTemplate,target.disableGuidanceOnReload,property,2,0,1,bool,bool,004eec0e,00a2ab78
+ObjectTemplate,target.wireGuidedLookAheadDistance,property,2,0,1,float,float,004eed2e,00a2ab78
+ObjectTemplate,target.dontLooseGuidanceOnObstruction,property,2,0,1,bool,bool,004eee57,00a2ab78
+ObjectTemplate,sound.noisy,property,2,0,1,bool,bool,004eef77,00a2ab78
+ObjectTemplate,sound.muteOnFire,property,2,0,1,bool,bool,004ef091,00a2ab78
+ObjectTemplate,sound.addReloadTimeSound,method,2,2,2,void,int int,004ef1c3,00a2ab78
+ObjectTemplate,hasOnTimeEffect,property,2,0,1,bool,bool,004ef322,00a2ab78
+ObjectTemplate,timeToLive,property,2,0,1,RandomDistribution,RandomDistribution,004ef448,00a2ab78
+ObjectTemplate,minDamage,property,2,0,1,float,float,004ef5d1,00a2ab78
+ObjectTemplate,damage,property,2,0,1,float,float,004ef6ed,00a2ab78
+ObjectTemplate,percentDamage,property,2,0,1,float,float,004ef80a,00a2ab78
+ObjectTemplate,damageMandownSoldiers,property,2,0,1,bool,bool,004ef927,00a2ab78
+ObjectTemplate,distToStartLoseDamage,property,2,0,1,float,float,004efa4e,00a2ab78
+ObjectTemplate,distToMinDamage,property,2,0,1,float,float,004efb6b,00a2ab78
+ObjectTemplate,damageOwner,property,2,0,1,bool,bool,004efc88,00a2ab78
+ObjectTemplate,localPredictOnClient,property,2,0,1,bool,bool,004efd9c,00a2ab78
+ObjectTemplate,hasDirection,property,2,0,1,bool,bool,004efec3,00a2ab78
+ObjectTemplate,tracerTemplate,property,2,0,1,std::string,std::string,004effd7,00a2ab78
+ObjectTemplate,tracerInterval,property,2,0,1,int,int,004f0149,00a2ab78
+ObjectTemplate,tracerScaler,property,2,0,1,float,float,004f0268,00a2ab78
+ObjectTemplate,maxTracerScaler,property,2,0,1,float,float,004f0385,00a2ab78
+ObjectTemplate,minTracerScaler,property,2,0,1,float,float,004f04a2,00a2ab78
+ObjectTemplate,tracerSizeModifier,property,2,0,1,float,float,004f05bf,00a2ab78
+ObjectTemplate,tracerConvergeDistance,property,2,0,1,float,float,004f06dc,00a2ab78
+ObjectTemplate,armingDelay,property,2,0,1,float,float,004f07f9,00a2ab78
+ObjectTemplate,startDelay,property,2,0,1,float,float,004f0910,00a2ab78
+ObjectTemplate,visibleOn3dMap,property,2,0,1,bool,bool,004f0a2d,00a2ab78
+ObjectTemplate,acceleration,property,2,0,1,float,float,004f0c55,00a2ab78
+ObjectTemplate,deAcceleration,property,2,0,1,float,float,004f0d72,00a2ab78
+ObjectTemplate,maxSpeed,property,2,0,1,float,float,004f0e8f,00a2ab78
+ObjectTemplate,useProjectileCamera,property,2,0,1,bool,bool,004f0fac,00a2ab78
+ObjectTemplate,activeDefenseEnabled,property,2,0,1,bool,bool,004f10c0,00a2ab78
+ObjectTemplate,hitImpactModifier,property,2,0,1,float,float,004f11d4,00a2ab78
+ObjectTemplate,detonateDelay,property,2,0,1,float,float,004f12ff,00a2ab78
+ObjectTemplate,dudMaterial,property,2,0,1,int,int,004f141c,00a2ab78
+ObjectTemplate,onlyDetonateOnMaterial,property,2,0,1,int,int,004f1530,00a2ab78
+ObjectTemplate,onlyDetonateOnMaterialTimeLimit,property,2,0,1,float,float,004f1644,00a2ab78
+ObjectTemplate,increaseRadius,property,2,0,1,bool,bool,004f1761,00a2ab78
+ObjectTemplate,projectileSubGeom,property,2,0,1,int,int,004f1875,00a2ab78
+ObjectTemplate,useObjectCollision,property,2,0,1,bool,bool,004f1989,00a2ab78
+ObjectTemplate,noInitialCollisionWithLauncher,property,2,0,1,bool,bool,004f1ab0,00a2ab78
+ObjectTemplate,collision.hasCollisionEffect,property,2,0,1,bool,bool,004f1bd5,00a2ab78
+ObjectTemplate,collision.bouncing,property,2,0,1,bool,bool,004f1cef,00a2ab78
+ObjectTemplate,collision.hasCollisionEffect,property,2,0,1,bool,bool,004f1e21,00a2ab78
+ObjectTemplate,collision.bouncing,property,2,0,1,bool,bool,004f1f3b,00a2ab78
+ObjectTemplate,collision.hasCollisionEffect,property,2,0,1,bool,bool,004f206d,00a2ab78
+ObjectTemplate,collision.bouncing,property,2,0,1,bool,bool,004f2187,00a2ab78
+ObjectTemplate,collision.resurrectDamage,property,2,0,1,float,float,004f22a1,00a2ab78
+ObjectTemplate,collision.restoreHP,property,2,0,1,float,float,004f23c4,00a2ab78
+ObjectTemplate,collision.hasCollisionEffect,property,2,0,1,bool,bool,004f24ff,00a2ab78
+ObjectTemplate,collision.bouncing,property,2,0,1,bool,bool,004f2619,00a2ab78
+ObjectTemplate,collision.maxStickAngle,property,2,0,1,float,float,004f2733,00a2ab78
+ObjectTemplate,collision.stickToTerrain,property,2,0,1,bool,bool,004f2862,00a2ab78
+ObjectTemplate,collision.stickToStaticObjects,property,2,0,1,bool,bool,004f297c,00a2ab78
+ObjectTemplate,collision.stickToVehicles,property,2,0,1,bool,bool,004f2a96,00a2ab78
+ObjectTemplate,penetrate.allowSolidPenetration,property,2,0,1,bool,bool,004f2bc8,00a2ab78
+ObjectTemplate,penetrate.allowLiquidPenetration,property,2,0,1,bool,bool,004f2ce2,00a2ab78
+ObjectTemplate,detonation.explosionMaterial,property,2,0,1,int,int,004f2e14,00a2ab78
+ObjectTemplate,detonation.explosionRadius,property,2,0,1,float,float,004f2f2e,00a2ab78
+ObjectTemplate,detonation.explosionConeAngle,property,2,0,1,float,float,004f3051,00a2ab78
+ObjectTemplate,detonation.explosionYMod,property,2,0,1,float,float,004f3171,00a2ab78
+ObjectTemplate,detonation.explosionForce,property,2,0,1,float,float,004f3294,00a2ab78
+ObjectTemplate,detonation.explosionDamage,property,2,0,1,float,float,004f33b7,00a2ab78
+ObjectTemplate,detonation.detectionRadius,property,2,0,1,float,float,004f34da,00a2ab78
+ObjectTemplate,detonation.showMineIndicationIcon,property,2,0,1,bool,bool,004f3621,00a2ab78
+ObjectTemplate,detonation.detonateDistanceToTarget,property,2,0,1,float,float,004f375f,00a2ab78
+ObjectTemplate,detonation.endEffectTemplate,property,2,0,1,std::string,std::string,004f3882,00a2ab78
+ObjectTemplate,detonation.useMMOnEndEffect,property,2,0,1,bool,bool,004f39f6,00a2ab78
+ObjectTemplate,detonation.triggerRadius,property,2,0,1,float,float,004f3b10,00a2ab78
+ObjectTemplate,detonation.triggerType,property,2,0,1,RadiusTriggerType,RadiusTriggerType,004f3c33,00a2ab78
+ObjectTemplate,detonation.triggerVictimMinSpeed,property,2,0,1,float,float,004f3dd7,00a2ab78
+ObjectTemplate,detonation.detonateOnWaterCollision,property,2,0,1,bool,bool,004f3efa,00a2ab78
+ObjectTemplate,detonation.useCollisionNormal,property,2,0,1,bool,bool,004f4014,00a2ab78
+ObjectTemplate,detonation.triggerAngle,property,2,0,1,float,float,004f412e,00a2ab78
+ObjectTemplate,detonation.maxDepthForExplosion,property,2,0,1,float,float,004f424e,00a2ab78
+ObjectTemplate,detonation.radiusDetonateWithAirVehicles,property,2,0,1,bool,bool,004f4371,00a2ab78
+ObjectTemplate,detonation.isEMPWeapon,property,2,0,1,bool,bool,004f44ca,00a2ab78
+ObjectTemplate,detonation.allowFriendlyFireDetonation,property,2,0,1,bool,bool,004f45e4,00a2ab78
+ObjectTemplate,detonation.preventDetonationFromDestroyedParent,property,2,0,1,bool,bool,004f46fe,00a2ab78
+ObjectTemplate,detonation.replenishingType,property,2,0,1,ReplenishingType,ReplenishingType,004f4818,00a2ab78
+ObjectTemplate,detonation.replenishingStrength,property,2,0,1,float,float,004f49a8,00a2ab78
+ObjectTemplate,seek.maxAngleLock,property,2,0,1,float,float,004f4ad1,00a2ab78
+ObjectTemplate,seek.maxDistLock,property,2,0,1,float,float,004f4c0a,00a2ab78
+ObjectTemplate,seek.distLoseLock,property,2,0,1,float,float,004f4d2d,00a2ab78
+ObjectTemplate,seek.trackingDelay,property,2,0,1,float,float,004f4e50,00a2ab78
+ObjectTemplate,seek.reLockTime,property,2,0,1,float,float,004f4f70,00a2ab78
+ObjectTemplate,seek.ignoreFriendly,property,2,0,1,bool,bool,004f5090,00a2ab78
+ObjectTemplate,seek.targetType,property,2,0,1,TargetType,TargetType,004f51aa,00a2ab78
+ObjectTemplate,seek.directionBonus,property,2,0,1,float,float,004f531c,00a2ab78
+ObjectTemplate,seek.trackingDelay,property,2,0,1,float,float,004f54a6,00a2ab78
+ObjectTemplate,seek.targetType,property,2,0,1,TargetType,TargetType,004f55c6,00a2ab78
+ObjectTemplate,follow.maxYaw,property,2,0,1,float,float,004f56f8,00a2ab78
+ObjectTemplate,follow.maxPitch,property,2,0,1,float,float,004f581b,00a2ab78
+ObjectTemplate,follow.changeYaw,property,2,0,1,float,float,004f593e,00a2ab78
+ObjectTemplate,follow.changePitch,property,2,0,1,float,float,004f5a61,00a2ab78
+ObjectTemplate,follow.minDist,property,2,0,1,float,float,004f5b84,00a2ab78
+ObjectTemplate,follow.predictionFactor,property,2,0,1,float,float,004f5cbf,00a2ab78
+ObjectTemplate,follow.magneticBehaviour,property,2,0,1,bool,bool,004f5de2,00a2ab78
+ObjectTemplate,follow.targetActivation,property,2,0,1,bool,bool,004f5efc,00a2ab78
+ObjectTemplate,follow.useTargetSpeed,property,2,0,1,float,float,004f6055,00a2ab78
+ObjectTemplate,follow.speedModifier,property,2,0,1,float,float,004f6192,00a2ab78
+ObjectTemplate,follow.armingSpeed,property,2,0,1,float,float,004f62b5,00a2ab78
+ObjectTemplate,follow.followTime,property,2,0,1,float,float,004f63d8,00a2ab78
+ObjectTemplate,respawnDelay,property,2,0,1,float,float,004f64fb,00a2ab78
+ObjectTemplate,usedByAi,property,2,0,1,bool,bool,004f662a,00a2ab78
+ObjectTemplate,initiallyWalkable,property,2,0,1,bool,bool,004f673e,00a2ab78
+ObjectTemplate,minCorner,property,2,0,1,Vec3,Vec3,004f6852,00a2ab78
+ObjectTemplate,maxCorner,property,2,0,1,Vec3,Vec3,004f69f0,00a2ab78
+ObjectTemplate,respawnDelay,property,2,0,1,float,float,004f6b8e,00a2ab78
+ObjectTemplate,effectTemplateBaseName,property,2,0,1,std::string,std::string,004f6cbd,00a2ab78
+ObjectTemplate,clientHitDetection,property,2,0,1,bool,bool,004f6e40,00a2ab78
+ObjectTemplate,setNumWindows,method,2,1,1,void,int,004f6f54,00a2ab78
+ObjectTemplate,setObjectTemplate,method,2,2,2,void,int std::string,004f703a,00a2ab78
+ObjectTemplate,timeToLive,property,2,0,1,float,float,004f71eb,00a2ab78
+ObjectTemplate,distance,property,2,0,1,float,float,004f7316,00a2ab78
+ObjectTemplate,team,property,2,0,1,U32,U32,004f7441,00a2ab78
+ObjectTemplate,nrOfObjectToSpawn,property,2,0,1,int,int,004f7560,00a2ab78
+ObjectTemplate,maxNrOfObjectSpawned,property,2,0,1,U32,U32,004f767f,00a2ab78
+ObjectTemplate,radius,property,2,0,1,float,float,004f779e,00a2ab78
+ObjectTemplate,maxSpawnDelay,property,2,0,1,float,float,004f78c9,00a2ab78
+ObjectTemplate,minSpawnDelay,property,2,0,1,float,float,004f79f4,00a2ab78
+ObjectTemplate,useButtonRadius,property,2,0,1,float,float,004f7b1f,00a2ab78
+ObjectTemplate,holdObject,property,2,0,1,bool,bool,004f7c4a,00a2ab78
+ObjectTemplate,teamOnVehicle,property,2,0,1,bool,bool,004f7d77,00a2ab78
+ObjectTemplate,controlPointId,property,2,0,1,int,int,004f7ea4,00a2ab78
+ObjectTemplate,forwardTeamChangeToSpawnedVehicles,property,2,0,1,bool,bool,004f7fb8,00a2ab78
+ObjectTemplate,activateOnEvent,property,2,0,1,int,int,004f80e5,00a2ab78
+ObjectTemplate,deActivateOnEvent,property,2,0,1,int,int,004f820a,00a2ab78
+ObjectTemplate,timeToLiveAfterDeath,property,2,0,1,float,float,004f832f,00a2ab78
+ObjectTemplate,kitType,property,2,0,1,hfe::KitType,hfe::KitType,004f845e,00a2ab78
+ObjectTemplate,unlockIndex,property,2,0,1,int,int,004f85c8,00a2ab78
+ObjectTemplate,sprintStaminaDissipationFactor,property,2,0,1,float,float,004f86dc,00a2ab78
+ObjectTemplate,geometry.kit,property,2,0,1,int,int,004f87f9,00a2ab78
+ObjectTemplate,geometry.dropGeom,property,2,0,1,int,int,004f8966,00a2ab78
+ObjectTemplate,abilityRestoreRate,property,2,0,1,float,float,004f8a7a,00a2ab78
+ObjectTemplate,dropHeadwear,property,2,0,1,std::string,std::string,004f8b91,00a2ab78
+ObjectTemplate,abilityInVehicleRadius,property,2,0,1,float,float,004f8cf9,00a2ab78
+ObjectTemplate,abilityInVehicleStrength,property,2,0,1,float,float,004f8e16,00a2ab78
+ObjectTemplate,abilityInVehicleMaterial,property,2,0,1,int,int,004f8f33,00a2ab78
+ObjectTemplate,kitCustomPic,property,2,0,1,std::string,std::string,004f9047,00a2ab78
+ObjectTemplate,dogTagRewardTemplate,property,2,0,1,std::string,std::string,004f91b2,00a2ab78
+ObjectTemplate,dogTagExchangeTemplate,property,2,0,1,std::string,std::string,004f934b,00a2ab78
+ObjectTemplate,disableBreathEffect,property,2,0,1,bool,bool,004f94e4,00a2ab78
+ObjectTemplate,radius,property,2,0,1,float,float,004f95f8,00a2ab78
+ObjectTemplate,team,property,2,0,1,int,int,004f9715,00a2ab78
+ObjectTemplate,addVehicleType,method,2,4,4,void,std::string int float float,004f9829,00a2ab78
+ObjectTemplate,workOnVehicles,property,2,0,1,bool,bool,004f9a80,00a2ab78
+ObjectTemplate,workOnSoldiers,property,2,0,1,bool,bool,004f9b94,00a2ab78
+ObjectTemplate,radius,property,2,0,1,float,float,004f9cba,00a2ab78
+ObjectTemplate,team,property,2,0,1,int,int,004f9dd7,00a2ab78
+ObjectTemplate,workOnVehicles,property,2,0,1,bool,bool,004f9eeb,00a2ab78
+ObjectTemplate,workOnSoldiers,property,2,0,1,bool,bool,004f9fff,00a2ab78
+ObjectTemplate,healSpeed,property,2,0,1,float,float,004fa113,00a2ab78
+ObjectTemplate,damageSpeed,property,2,0,1,float,float,004fa230,00a2ab78
+ObjectTemplate,refillAmmoSpeed,property,2,0,1,float,float,004fa34d,00a2ab78
+ObjectTemplate,healStorageSize,property,2,0,1,float,float,004fa46a,00a2ab78
+ObjectTemplate,ammoStorageSize,property,2,0,1,float,float,004fa587,00a2ab78
+ObjectTemplate,sharedStorageSize,property,2,0,1,float,float,004fa6a4,00a2ab78
+ObjectTemplate,destroyWhenEmptyStorage,property,2,0,1,bool,bool,004fa7c1,00a2ab78
+ObjectTemplate,teamFromClosestCP,property,2,0,1,bool,bool,004fa8d5,00a2ab78
+ObjectTemplate,visibleOn3dMap,property,2,0,1,bool,bool,004fa9e9,00a2ab78
+ObjectTemplate,barIcon,property,2,0,1,int,int,004fac11,00a2ab78
+ObjectTemplate,addVehicleType,method,2,1,1,void,VehicleCategory,004fad25,00a2ab78
+ObjectTemplate,damage,property,2,0,1,float,float,004fadf5,00a2ab78
+ObjectTemplate,seatAnimationSystem,property,2,0,1,std::string,std::string,004faf24,00a2ab78
+ObjectTemplate,seatInformation,method,2,3,3,void,std::string Vec3 Vec3,004fb09c,00a2ab78
+ObjectTemplate,seatInformation,method,2,3,3,void,std::string Vec3 Vec3,004fb2fb,00a2ab78
+ObjectTemplate,seatLeftRotationLimit,property,2,0,1,float,float,004fb4dd,00a2ab78
+ObjectTemplate,seatRightRotationLimit,property,2,0,1,float,float,004fb60e,00a2ab78
+ObjectTemplate,hasRestrictedExit,property,2,0,1,bool,bool,004fb73f,00a2ab78
+ObjectTemplate,destroyWhenOutsideCombatArea,property,2,0,1,bool,bool,004fb853,00a2ab78
+ObjectTemplate,autoControllerTemplateName,property,2,0,1,std::string,std::string,004fb980,00a2ab78
+ObjectTemplate,altSoldierExitPosition,property,2,0,1,Vec3,Vec3,004fbaf8,00a2ab78
+ObjectTemplate,exitSpeedMod,property,2,0,1,float,float,004fbc96,00a2ab78
+ObjectTemplate,disableSpawnPointsOnEnter,property,2,0,1,bool,bool,004fbdb3,00a2ab78
+ObjectTemplate,dontClearTeamOnExit,property,2,0,1,bool,bool,004fbf06,00a2ab78
+ObjectTemplate,lockToTeam,property,2,0,1,bool,bool,004fc01a,00a2ab78
+ObjectTemplate,setTeamOnSpawn,property,2,0,1,bool,bool,004fc12e,00a2ab78
+ObjectTemplate,enterOnSpawn,property,2,0,1,bool,bool,004fc25b,00a2ab78
+ObjectTemplate,disableCloseSpawnPoints,property,2,0,1,bool,bool,004fc388,00a2ab78
+ObjectTemplate,destroyOnExit,property,2,0,1,bool,bool,004fc4af,00a2ab78
+ObjectTemplate,dontAllowExit,property,2,0,1,bool,bool,004fc5c3,00a2ab78
+ObjectTemplate,setSoldierExitLocation,method,2,2,2,void,Vec3 Vec3,004fc6d7,00a2ab78
+ObjectTemplate,soldierExitPosition,property,2,0,1,Vec3,Vec3,004fc895,00a2ab78
+ObjectTemplate,soldierExitRotation,property,2,0,1,Vec3,Vec3,004fca13,00a2ab78
+ObjectTemplate,soldierExitSpeed,property,2,0,1,Vec3,Vec3,004fcb91,00a2ab78
+ObjectTemplate,toggleWeapon,property,2,0,1,bool,bool,004fcd0f,00a2ab78
+ObjectTemplate,cockpitLod,property,2,0,1,U32,U32,004fce23,00a2ab78
+ObjectTemplate,cockpitSubGeom,property,2,0,1,U32,U32,004fcf37,00a2ab78
+ObjectTemplate,soundFilter,property,2,0,1,std::string,std::string,004fd04b,00a2ab78
+ObjectTemplate,regulateYaw,property,2,0,1,Vec2,Vec2,004fd1c3,00a2ab78
+ObjectTemplate,regulatePitch,property,2,0,1,Vec2,Vec2,004fd33a,00a2ab78
+ObjectTemplate,regulateRoll,property,2,0,1,Vec2,Vec2,004fd4b1,00a2ab78
+ObjectTemplate,regulateYawInput,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,004fd628,00a2ab78
+ObjectTemplate,regulatePitchInput,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,004fd760,00a2ab78
+ObjectTemplate,regulateRollInput,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,004fd874,00a2ab78
+ObjectTemplate,regulateVerticalPos,property,2,0,1,Vec2,Vec2,004fda4b,00a2ab78
+ObjectTemplate,regulateVerticalPosInput,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,004fdbc2,00a2ab78
+ObjectTemplate,maxVertRegAngle,property,2,0,1,float,float,004fdcd6,00a2ab78
+ObjectTemplate,noVertRegAngle,property,2,0,1,float,float,004fde04,00a2ab78
+ObjectTemplate,addTargetObjectTypeToWatch,method,2,1,1,void,int,004fdf21,00a2ab78
+ObjectTemplate,shakeFactor,property,2,0,1,float,float,004fe007,00a2ab78
+ObjectTemplate,sprintRecoverTime,property,2,0,1,float,float,004fe124,00a2ab78
+ObjectTemplate,sprintDissipationTime,property,2,0,1,float,float,004fe257,00a2ab78
+ObjectTemplate,sprintLimit,property,2,0,1,float,float,004fe38a,00a2ab78
+ObjectTemplate,sprintFactor,property,2,0,1,float,float,004fe4c0,00a2ab78
+ObjectTemplate,allowDucking,property,2,0,1,bool,bool,004fe5f3,00a2ab78
+ObjectTemplate,specialToggleWeaponInput,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,004fe707,00a2ab78
+ObjectTemplate,listenerObstruction,property,2,0,1,float,float,004fe81b,00a2ab78
+ObjectTemplate,groundContactVolume,property,2,0,1,float,float,004fe94c,00a2ab78
+ObjectTemplate,damagedAmbientSoundLimit,property,2,0,1,float,float,004fea82,00a2ab78
+ObjectTemplate,crewKitIndex,property,2,0,1,int,int,004febb8,00a2ab78
+ObjectTemplate,autoUseAbility,property,2,0,1,int,int,004feccc,00a2ab78
+ObjectTemplate,maintainCameraOnExitToOtherVehicle,property,2,0,1,bool,bool,004fede6,00a2ab78
+ObjectTemplate,maintainCameraOnExit,property,2,0,1,bool,bool,004fef13,00a2ab78
+ObjectTemplate,maintainCameraOnEnter,property,2,0,1,bool,bool,004ff040,00a2ab78
+ObjectTemplate,copySoldierRotationOnEnter,property,2,0,1,bool,bool,004ff16d,00a2ab78
+ObjectTemplate,neverDrawAs1p,property,2,0,1,bool,bool,004ff29a,00a2ab78
+ObjectTemplate,exitThroughPodLauncher,property,2,0,1,bool,bool,004ff3c7,00a2ab78
+ObjectTemplate,allowTogglePosition,property,2,0,1,bool,bool,004ff4f4,00a2ab78
+ObjectTemplate,abilityInVehicleStrengthModifier,property,2,0,1,float,float,004ff621,00a2ab78
+ObjectTemplate,scaleInputOnCriticalDamage,property,2,0,1,bool,bool,004ff752,00a2ab78
+ObjectTemplate,criticalDamageScaleModifier,property,2,0,1,float,float,004ff87f,00a2ab78
+ObjectTemplate,isMissileSilo,property,2,0,1,bool,bool,004ff9b0,00a2ab78
+ObjectTemplate,noSoldierCollisionTimer,property,2,0,1,float,float,004ffae8,00a2ab78
+ObjectTemplate,noInitialCollisionWithLauncher,property,2,0,1,bool,bool,004ffc19,00a2ab78
+ObjectTemplate,autoExitTimeDelay,property,2,0,1,float,float,004ffd46,00a2ab78
+ObjectTemplate,boundingRadiusModifierWhenOccupied,property,2,0,1,float,float,004ffe77,00a2ab78
+ObjectTemplate,lookAtClosestTitanOnEnter,property,2,0,1,float,float,004fff94,00a2ab78
+ObjectTemplate,seatAnimationSystem,property,2,0,1,std::string,std::string,005000c7,00a2ab78
+ObjectTemplate,isPod,property,2,0,1,bool,bool,00500243,00a2ab78
+ObjectTemplate,targetType,property,2,0,1,TargetType,TargetType,00500369,00a2ab78
+ObjectTemplate,timeToLive,property,2,0,1,float,float,0050047d,00a2ab78
+ObjectTemplate,disableWhenEmptyVehicle,property,2,0,1,bool,bool,00500594,00a2ab78
+ObjectTemplate,disableWhenEmptyVehicleDelay,property,2,0,1,float,float,005006a8,00a2ab78
+ObjectTemplate,disableWhenWreck,property,2,0,1,bool,bool,005007c5,00a2ab78
+ObjectTemplate,playerOnEnable,property,2,0,1,bool,bool,005008d9,00a2ab78
+ObjectTemplate,overrideArmingSpeed,property,2,0,1,bool,bool,005009ed,00a2ab78
+ObjectTemplate,switchPlayerOnLock,property,2,0,1,bool,bool,00500b01,00a2ab78
+ObjectTemplate,activeOnCreate,property,2,0,1,bool,bool,00500c15,00a2ab78
+ObjectTemplate,rcType,property,2,0,1,RemoteControlledObjectType,RemoteControlledObjectType,00500d3b,00a2ab78
+ObjectTemplate,minTimeBetweenActivation,property,2,0,1,float,float,00500fc0,00a2ab78
+ObjectTemplate,uavVehicleTemplate,property,2,0,1,std::string,std::string,005010dd,00a2ab78
+ObjectTemplate,uavVehicleSpeed,property,2,0,1,float,float,00501276,00a2ab78
+ObjectTemplate,uavVehicleRadius,property,2,0,1,float,float,00501393,00a2ab78
+ObjectTemplate,uavVehicleFlightHeight,property,2,0,1,float,float,005014b0,00a2ab78
+ObjectTemplate,uavVehicleSampleResolution,property,2,0,1,float,float,005015cd,00a2ab78
+ObjectTemplate,turnVelocity,property,2,0,1,float,float,005016fc,00a2ab78
+ObjectTemplate,radius,property,2,0,1,float,float,0050182b,00a2ab78
+ObjectTemplate,triggerId,property,2,0,1,int,int,00501948,00a2ab78
+ObjectTemplate,playAtEventPosition,property,2,0,1,bool,bool,00501a5c,00a2ab78
+ObjectTemplate,projectOnHeightmap,property,2,0,1,bool,bool,00501b70,00a2ab78
+ObjectTemplate,numNetworkedEffects,property,2,0,1,int,int,00501c84,00a2ab78
+ObjectTemplate,linkedEffectContainer,property,2,0,1,std::string,std::string,00501d98,00a2ab78
+ObjectTemplate,radius,property,2,0,1,float,float,00501f43,00a2ab78
+ObjectTemplate,triggerId,property,2,0,1,int,int,00502060,00a2ab78
+ObjectTemplate,events,property,2,0,1,int,int,00502174,00a2ab78
+ObjectTemplate,chance,property,2,0,1,float,float,00502288,00a2ab78
+ObjectTemplate,averageTimeBetweenTests,property,2,0,1,float,float,0050239f,00a2ab78
+ObjectTemplate,minimumTimeBetweenTriggering,property,2,0,1,float,float,005024bc,00a2ab78
+ObjectTemplate,triggerForEachActivatingPlayer,property,2,0,1,bool,bool,005025d9,00a2ab78
+ObjectTemplate,radius,property,2,0,1,float,float,005026ff,00a2ab78
+ObjectTemplate,team,method,2,1,1,void,int,0050282a,00a2ab78
+ObjectTemplate,timeToGetControl,property,2,0,1,float,float,00502916,00a2ab78
+ObjectTemplate,timeToLoseControl,property,2,0,1,float,float,00502a41,00a2ab78
+ObjectTemplate,loseControlWhenEnemyClose,property,2,0,1,bool,bool,00502b6c,00a2ab78
+ObjectTemplate,areaValueTeam1,property,2,0,1,U32,U32,00502c93,00a2ab78
+ObjectTemplate,areaValueTeam2,property,2,0,1,U32,U32,00502db8,00a2ab78
+ObjectTemplate,unableToChangeTeam,property,2,0,1,bool,bool,00502edd,00a2ab78
+ObjectTemplate,onlyTakeableByTeam,property,2,0,1,U32,U32,00503004,00a2ab78
+ObjectTemplate,controlPointName,property,2,0,1,std::string,std::string,00503123,00a2ab78
+ObjectTemplate,controlPointId,property,2,0,1,int,int,005032a4,00a2ab78
+ObjectTemplate,isVisible,property,2,0,1,bool,bool,005033c3,00a2ab78
+ObjectTemplate,showOnMinimap,property,2,0,1,bool,bool,005034f0,00a2ab78
+ObjectTemplate,playCaptureMessage,property,2,0,1,bool,bool,0050361d,00a2ab78
+ObjectTemplate,isHemisphere,property,2,0,1,bool,bool,0050374a,00a2ab78
+ObjectTemplate,supplyGroupId,property,2,0,1,int,int,00503877,00a2ab78
+ObjectTemplate,supplyValueNeededTeam1,property,2,0,1,int,int,0050399c,00a2ab78
+ObjectTemplate,supplyValueNeededTeam2,property,2,0,1,int,int,00503ab0,00a2ab78
+ObjectTemplate,supplyValueTeam1,property,2,0,1,int,int,00503bc4,00a2ab78
+ObjectTemplate,supplyValueTeam2,property,2,0,1,int,int,00503cd8,00a2ab78
+ObjectTemplate,supplyGroupNeeded,method,2,2,3,void,int int bool,00503dec,00a2ab78
+ObjectTemplate,vehicleCategory,property,2,0,1,dice::hfe::world::VehicleCategory,dice::hfe::world::VehicleCategory,00503fe3,00a2ab78
+ObjectTemplate,controlsCategory,property,2,0,1,dice::hfe::world::VehicleCategory,dice::hfe::world::VehicleCategory,005041f7,00a2ab78
+ObjectTemplate,setVehicleType,method,2,1,1,void,dice::hfe::world::VehicleType,0050436e,00a2ab78
+Material,active,property,2,0,1,unsigned int,unsigned int,00518ac7,00a406c8
+Material,name,property,2,0,1,std::string,std::string,00518bd7,00a406c8
+Material,type,property,2,0,1,int,int,00518d4e,00a406c8
+Material,friction,property,2,0,1,float,float,00518e65,00a406c8
+Material,elasticity,property,2,0,1,float,float,00518f88,00a406c8
+Material,resistance,property,2,0,1,float,float,005190ab,00a406c8
+Material,multiplyFriction,property,2,0,1,bool,bool,005191ce,00a406c8
+Material,projectileCollisionHardness,property,2,0,1,float,float,005192ed,00a406c8
+Material,damageLoss,property,2,0,1,float,float,00519410,00a406c8
+Material,minDamageLoss,property,2,0,1,float,float,00519533,00a406c8
+Material,maxDamageLoss,property,2,0,1,float,float,00519668,00a406c8
+Material,penetrationDeviation,property,2,0,1,float,float,0051978b,00a406c8
+Material,overrideNeverPenetrate,property,2,0,1,bool,bool,005198ae,00a406c8
+Material,hasWaterPhysics,property,2,0,1,bool,bool,005199cd,00a406c8
+Material,isOneSided,property,2,0,1,bool,bool,00519aec,00a406c8
+Material,isSeeThrough,property,2,0,1,bool,bool,00519c0e,00a406c8
+Material,triggerRadio,property,2,0,1,bool,bool,00519d33,00a406c8
+Material,pythonEvent,property,2,0,1,int,int,00519e52,00a406c8
+MaterialManager,createCell,method,2,2,2,void,unsigned int unsigned int,00519f6f,00a406c8
+MaterialManager,damageMod,property,2,0,1,float,float,0051a0ab,00a406c8
+MaterialManager,setDecalTemplate,method,2,2,2,void,unsigned int IObjectTemplate_ptrproxy,0051a1e0,00a406c8
+MaterialManager,setEffectTemplate,method,2,2,2,void,unsigned int IObjectTemplate_ptrproxy,0051a351,00a406c8
+MaterialManager,setSoundTemplate,method,2,2,2,void,unsigned int IObjectTemplate_ptrproxy,0051a4b0,00a406c8
+MaterialManager,setRadioMessage,method,2,3,3,void,unsigned int std::string double,0051a60f,00a406c8
+ObjectTemplate,cullRadiusScale,property,2,0,1,float,float,0051b230,00a4194c
+ObjectTemplate,networkableInfo,property,2,0,1,std::string,std::string,0051b353,00a4194c
+ObjectTemplate,createComponent,method,2,1,1,void,std::string,0051b4c3,00a4194c
+ObjectTemplate,deleteComponent,method,2,1,1,void,std::string,0051b5ef,00a4194c
+ObjectTemplate,geometry,property,2,0,1,std::string,std::string,0051b71b,00a4194c
+ObjectTemplate,geometryPart,property,2,0,1,int,int,0051b887,00a4194c
+ObjectTemplate,collisionPart,property,2,0,1,int,int,0051b99d,00a4194c
+ObjectTemplate,aiTemplate,property,2,0,1,std::string,std::string,0051bab3,00a4194c
+ObjectTemplate,destroyableWindowsTemplate,property,2,0,1,std::string,std::string,0051bc36,00a4194c
+ObjectTemplate,hasGlow,property,2,0,1,bool,bool,0051bdb0,00a4194c
+ObjectTemplate,glowFrequency,property,2,0,1,float,float,0051bec4,00a4194c
+ObjectTemplate,glowType,property,2,0,1,int,int,0051bf82,00a4194c
+ObjectTemplate,glowOffset,property,2,0,1,float,float,0051c040,00a4194c
+ObjectTemplate,hasGlow,property,2,0,1,bool,bool,0051c0fe,00a4194c
+ObjectTemplate,glowFrequency,property,2,0,1,float,float,0051c1bc,00a4194c
+ObjectTemplate,glowType,property,2,0,1,int,int,0051c2d9,00a4194c
+ObjectTemplate,glowOffset,property,2,0,1,float,float,0051c3ed,00a4194c
+ObjectTemplate,setCollisionMesh,method,2,1,1,void,std::string,0051c50a,00a4194c
+ObjectTemplate,collisionMesh,method,2,1,1,void,std::string,0051c639,00a4194c
+ObjectTemplate,mapMaterial,method,2,3,3,void,uint std::string uint,0051c71f,00a4194c
+ObjectTemplate,handleCollisionSpeed,property,2,0,1,float,float,0051c90a,00a4194c
+ObjectTemplate,anchor,property,2,0,1,Vec3,Vec3,0051ca27,00a4194c
+ObjectTemplate,anchorOffset,property,2,0,1,Vec3,Vec3,0051cb92,00a4194c
+ObjectTemplate,isOvergrowth,property,2,0,1,bool,bool,0051cd0e,00a4194c
+ObjectTemplate,relativePositionOffset,property,2,0,1,Vec3,Vec3,0051ce33,00a4194c
+ObjectTemplate,boneIndex,property,2,0,1,int,int,0051cfaf,00a4194c
+ObjectTemplate,nameToLookAt,property,2,0,1,std::string,std::string,0051d0cc,00a4194c
+ObjectTemplate,offsetToLookAt,property,2,0,1,Vec3,Vec3,0051d239,00a4194c
+ObjectTemplate,hasMobilePhysics,property,2,0,1,bool,bool,0051d3e9,00a4194c
+ObjectTemplate,hasCollisionPhysics,property,2,0,1,bool,bool,0051d50a,00a4194c
+ObjectTemplate,hasPointPhysics,method,2,1,1,void,bool,0051d62d,00a4194c
+ObjectTemplate,hasRotationalPointPhysics,method,2,1,1,void,bool,0051d724,00a4194c
+ObjectTemplate,collisionGroups,property,2,0,1,U32,U32,0051d81b,00a4194c
+ObjectTemplate,hasResponsePhysics,method,2,1,1,void,bool,0051d92f,00a4194c
+ObjectTemplate,treeCollisionDiameter,property,2,0,1,float,float,0051da26,00a4194c
+ObjectTemplate,physicsType,property,2,0,1,PhysicsType,PhysicsType,0051db3b,00a4194c
+ObjectTemplate,physicsFrequency,property,2,0,1,int,int,0051dd3f,00a4194c
+ObjectTemplate,drag,property,2,0,1,float,float,0051de53,00a4194c
+ObjectTemplate,dragOffset,property,2,0,1,Vec3,Vec3,0051df6a,00a4194c
+ObjectTemplate,dragModifier,property,2,0,1,Vec3,Vec3,0051e103,00a4194c
+ObjectTemplate,mass,property,2,0,1,float,float,0051e2a1,00a4194c
+ObjectTemplate,centerOfMassOffset,property,2,0,1,Vec3,Vec3,0051e3be,00a4194c
+ObjectTemplate,centerOfCollisionOffset,property,2,0,1,Vec3,Vec3,0051e55c,00a4194c
+ObjectTemplate,inertiaModifier,property,2,0,1,Vec3,Vec3,0051e6fa,00a4194c
+ObjectTemplate,inertiaModifierForWreck,property,2,0,1,Vec3,Vec3,0051e898,00a4194c
+ObjectTemplate,gravityModifier,property,2,0,1,float,float,0051ea36,00a4194c
+ObjectTemplate,isSleeping,property,2,0,1,bool,bool,0051eb53,00a4194c
+ObjectTemplate,floaterMod,property,2,0,1,float,float,0051ec72,00a4194c
+ObjectTemplate,otherCollisionLod,property,2,0,1,int,int,0051ed8f,00a4194c
+ObjectTemplate,isMajorActor,property,2,0,1,bool,bool,0051eea3,00a4194c
+ObjectTemplate,grip,property,2,0,1,PhysicsGripFlags,PhysicsGripFlags,0051efb7,00a4194c
+ObjectTemplate,animatedUVTranslation,property,2,0,1,bool,bool,0051f24d,00a4194c
+ObjectTemplate,animatedUVTranslationSpeed,property,2,0,1,Vec2,Vec2,0051f361,00a4194c
+ObjectTemplate,animatedUVTranslationSize,property,2,0,1,Vec2,Vec2,0051f4c2,00a4194c
+ObjectTemplate,animatedUVTranslationMax,property,2,0,1,Vec2,Vec2,0051f639,00a4194c
+ObjectTemplate,animatedUVTranslationIndex,property,2,0,1,int,int,0051f7b0,00a4194c
+ObjectTemplate,animatedUVTranslationReverse,property,2,0,1,bool,bool,0051f8c4,00a4194c
+ObjectTemplate,animatedUVRotation,property,2,0,1,int,int,0051f9d8,00a4194c
+ObjectTemplate,animatedUVRotationIndex,property,2,0,1,int,int,0051faf2,00a4194c
+ObjectTemplate,animatedUVRotationScale,property,2,0,1,Vec2,Vec2,0051fc06,00a4194c
+ObjectTemplate,animatedUVRotationRadius,property,2,0,1,float,float,0051fd7d,00a4194c
+ObjectTemplate,animatedUVRotationReverse,property,2,0,1,bool,bool,0051fe9a,00a4194c
+ObjectTemplate,rotateAsAnimatedUV,property,2,0,1,bool,bool,0051ffae,00a4194c
+ObjectTemplate,rotateAsAnimatedUVObject,property,2,0,1,std::string,std::string,005200c2,00a4194c
+ObjectTemplate,rotateAsAnimatedUVReverse,property,2,0,1,bool,bool,0052022f,00a4194c
+ObjectTemplate,teamSpecificVisibility,property,2,0,1,int,int,00520343,00a4194c
+ObjectTemplate,bundleSkeleton,property,2,0,1,std::string,std::string,00520457,00a4194c
+ObjectTemplate,bundleAnimationSystem,property,2,0,1,std::string,std::string,005205e5,00a4194c
+ObjectTemplate,material,property,2,0,1,int,int,00520763,00a4194c
+ObjectTemplate,isPortalPassing,property,2,0,1,bool,bool,00520880,00a4194c
+ObjectTemplate,portalPassingPosition,property,2,0,1,Vec3,Vec3,00520994,00a4194c
+ObjectTemplate,listTemplates,method,2,0,0,std::string,,00520b44,
+ObjectTemplate,clearTemplateList,method,2,0,0,void,,00520bee,
+ObjectTemplate,getTemplate,method,2,0,1,std::string,int,00520c62,00a4194c
+ObjectTemplate,addTemplate,method,2,1,1,void,std::string,00520dd2,00a4194c
+ObjectTemplate,removeTemplate,method,2,1,1,void,int,00520f02,00a4194c
+ObjectTemplate,setActiveTemplate,method,2,1,1,void,int,00520fee,00a4194c
+ObjectTemplate,setPosition,method,2,1,2,void,Math::Vec3 int,005210d4,00a4194c
+ObjectTemplate,setRotation,method,2,1,2,void,Math::Vec3 int,0052128a,00a4194c
+ObjectTemplate,getPosition,method,2,0,1,Math::Vec3,int,00521440,00a4194c
+ObjectTemplate,getRotation,method,2,0,1,Math::Vec3,int,0052157c,00a4194c
+ObjectTemplate,setExplodePartAtDestroy,method,2,1,1,void,bool,005216b8,00a4194c
+ObjectTemplate,respawnDelay,property,2,0,1,float,float,005217b0,00a4194c
+ObjectTemplate,minRotation,property,2,0,1,Math::Vec3,Math::Vec3,005218df,00a4194c
+ObjectTemplate,maxRotation,property,2,0,1,Math::Vec3,Math::Vec3,00521ad5,00a4194c
+ObjectTemplate,PivotPosition,property,2,0,1,Math::Vec3,Math::Vec3,00521c73,00a4194c
+ObjectTemplate,maxSpeed,property,2,0,1,Math::Vec3,Math::Vec3,00521e11,00a4194c
+ObjectTemplate,maxResetSpeed,property,2,0,1,Math::Vec3,Math::Vec3,00521fab,00a4194c
+ObjectTemplate,acceleration,property,2,0,1,Math::Vec3,Math::Vec3,00522149,00a4194c
+ObjectTemplate,deAcceleration,property,2,0,1,Math::Vec3,Math::Vec3,005222bf,00a4194c
+ObjectTemplate,continousRotationSpeed,property,2,0,1,Math::Vec3,Math::Vec3,00522459,00a4194c
+ObjectTemplate,inputToYaw,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,005225f7,00a4194c
+ObjectTemplate,inputToPitch,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,00522709,00a4194c
+ObjectTemplate,inputToRoll,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,0052281b,00a4194c
+ObjectTemplate,automaticReset,property,2,0,1,bool,bool,0052292d,00a4194c
+ObjectTemplate,snapToZeroOnNoInput,property,2,0,1,bool,bool,00522a4b,00a4194c
+ObjectTemplate,useDeAcceleration,property,2,0,1,bool,bool,00522b5f,00a4194c
+ObjectTemplate,rememberExcessInput,property,2,0,1,bool,bool,00522c73,00a4194c
+ObjectTemplate,lesserYawAtSpeed,property,2,0,1,float,float,00522d90,00a4194c
+ObjectTemplate,automaticYawStabilization,property,2,0,1,bool,bool,00522ea5,00a4194c
+ObjectTemplate,automaticPitchStabilization,property,2,0,1,bool,bool,00522fb9,00a4194c
+ObjectTemplate,startAutoRotateOnEnter,property,2,0,1,bool,bool,005230cd,00a4194c
+ObjectTemplate,debugAutoRotate,property,2,0,1,bool,bool,005231e1,00a4194c
+ObjectTemplate,regulateVector,property,2,0,1,Vec3,Vec3,005232f5,00a4194c
+ObjectTemplate,regulateFromParent,property,2,0,1,int,int,005234b3,00a4194c
+ObjectTemplate,regulateFromParentPos,property,2,0,1,int,int,005235c7,00a4194c
+ObjectTemplate,regulateYawFactor,property,2,0,1,float,float,005236db,00a4194c
+ObjectTemplate,regulatePitchFactor,property,2,0,1,float,float,005237f8,00a4194c
+ObjectTemplate,regulateRollFactor,property,2,0,1,float,float,00523915,00a4194c
+ObjectTemplate,offset,property,2,0,1,Vec3,Vec3,00523a32,00a4194c
+ObjectTemplate,multiply,property,2,0,1,float,float,00523bf4,00a4194c
+ObjectTemplate,restoreRotationOnExit,property,2,0,1,bool,bool,00523d11,00a4194c
+ObjectTemplate,ignoreParentRotation,property,2,0,1,Vec3,Vec3,00523e25,00a4194c
+ObjectTemplate,ignoreParentRotationAlways,property,2,0,1,bool,bool,00523fc3,00a4194c
+ObjectTemplate,surpressPlayerInputVector,property,2,0,1,Vec3,Vec3,005240d7,00a4194c
+ObjectTemplate,capMaxSpeed,property,2,0,1,bool,bool,00524271,00a4194c
+ObjectTemplate,maxSpeedMod,property,2,0,1,float,float,00524385,00a4194c
+ObjectTemplate,setHasTarget,method,2,1,1,void,bool,005244b4,00a4194c
+ObjectTemplate,pcoId,property,2,0,1,int,int,005245a4,00a4194c
+ObjectTemplate,cameraId,property,2,0,1,int,int,005246b8,00a4194c
+ObjectTemplate,CVMInside,property,2,0,1,bool,bool,005247cc,00a4194c
+ObjectTemplate,CVMNose,property,2,0,1,bool,bool,005248e0,00a4194c
+ObjectTemplate,CVMChase,property,2,0,1,bool,bool,005249f4,00a4194c
+ObjectTemplate,CVMFrontChase,property,2,0,1,bool,bool,00524b08,00a4194c
+ObjectTemplate,CVMFlyBy,property,2,0,1,bool,bool,00524c1c,00a4194c
+ObjectTemplate,CVMTrace,property,2,0,1,bool,bool,00524d30,00a4194c
+ObjectTemplate,CVMExternTrace,property,2,0,1,bool,bool,00524e44,00a4194c
+ObjectTemplate,toggleMouseLook,property,2,0,1,bool,bool,00524f58,00a4194c
+ObjectTemplate,nosePos,property,2,0,1,Vec3,Vec3,0052506c,00a4194c
+ObjectTemplate,followStiffness,property,2,0,1,float,float,0052520e,00a4194c
+ObjectTemplate,chaseDistance,property,2,0,1,float,float,0052532b,00a4194c
+ObjectTemplate,chaseAngle,property,2,0,1,float,float,00525448,00a4194c
+ObjectTemplate,chaseOffset,property,2,0,1,Vec3,Vec3,00525565,00a4194c
+ObjectTemplate,chaseParentIndex,property,2,0,1,int,int,00525727,00a4194c
+ObjectTemplate,cameraSwayRodLength,property,2,0,1,float,float,0052583b,00a4194c
+ObjectTemplate,cameraSwaySensitivity,property,2,0,1,float,float,00525958,00a4194c
+ObjectTemplate,cameraSwayDofMin,property,2,0,1,float,float,00525a75,00a4194c
+ObjectTemplate,cameraSwayDofMax,property,2,0,1,float,float,00525b9e,00a4194c
+ObjectTemplate,cameraSwayRightMin,property,2,0,1,float,float,00525cc7,00a4194c
+ObjectTemplate,cameraSwayRightMax,property,2,0,1,float,float,00525df0,00a4194c
+ObjectTemplate,cameraSwaySpringStrength,property,2,0,1,float,float,00525f19,00a4194c
+ObjectTemplate,cameraSwaySpringDamping,property,2,0,1,float,float,00526036,00a4194c
+ObjectTemplate,cameraShakeSensitivity,property,2,0,1,float,float,00526153,00a4194c
+ObjectTemplate,cameraShakeStartSpeed,property,2,0,1,float,float,00526270,00a4194c
+ObjectTemplate,cameraShakeMaxSpeed,property,2,0,1,float,float,0052638d,00a4194c
+ObjectTemplate,bounceLength,property,2,0,1,float,float,005264aa,00a4194c
+ObjectTemplate,bounceSensitivity,property,2,0,1,float,float,005265c7,00a4194c
+ObjectTemplate,bounceStrength,property,2,0,1,float,float,005266e4,00a4194c
+ObjectTemplate,bounceDamping,property,2,0,1,float,float,00526801,00a4194c
+ObjectTemplate,worldFOV,property,2,0,1,float,float,0052691e,00a4194c
+ObjectTemplate,insideFOV,property,2,0,1,float,float,00526a3b,00a4194c
+ObjectTemplate,allowInsideDynamicLights,property,2,0,1,bool,bool,00526b58,00a4194c
+ObjectTemplate,allowInsideStaticSun,property,2,0,1,bool,bool,00526c6c,00a4194c
+ObjectTemplate,insideStaticSunDirection,property,2,0,1,Vec3,Vec3,00526d80,00a4194c
+ObjectTemplate,insideStaticSunColor,property,2,0,1,Vec3ColorFloatIntensity,Vec3ColorFloatIntensity,00526f1e,00a4194c
+ObjectTemplate,insideStaticSunDamageColor,property,2,0,1,Vec3ColorFloatIntensity,Vec3ColorFloatIntensity,005270bc,00a4194c
+ObjectTemplate,insideDamageFrequency,property,2,0,1,float,float,0052725a,00a4194c
+ObjectTemplate,insideDamageThreshold,property,2,0,1,float,float,00527377,00a4194c
+ObjectTemplate,insideStaticSunAmbientColor,property,2,0,1,Vec3ColorFloatIntensity,Vec3ColorFloatIntensity,00527494,00a4194c
+ObjectTemplate,takeOverInput,property,2,0,1,bool,bool,00527632,00a4194c
+ObjectTemplate,cockpitLod,property,2,0,1,int,int,00527746,00a4194c
+ObjectTemplate,cockpitSubGeom,property,2,0,1,int,int,0052785a,00a4194c
+ObjectTemplate,insideViewInterpolate,property,2,0,1,float,float,0052796e,00a4194c
+ObjectTemplate,colorTransform,property,2,0,1,Vec3,Vec3,00527a8b,00a4194c
+ObjectTemplate,saturation,property,2,0,1,float,float,00527c29,00a4194c
+ObjectTemplate,useColorTransform,property,2,0,1,bool,bool,00527d46,00a4194c
+ObjectTemplate,worldFOV,property,2,0,1,float,float,00527e6c,00a4194c
+ObjectTemplate,insideFOV,property,2,0,1,float,float,00527f89,00a4194c
+ObjectTemplate,fOV,property,2,0,1,float,float,005280b8,00a4194c
+ObjectTemplate,speed,property,2,0,1,float,float,005281d5,00a4194c
+ObjectTemplate,height,property,2,0,1,float,float,005282f2,00a4194c
+ObjectTemplate,entryRadius,property,2,0,1,float,float,00528421,00a4194c
+ObjectTemplate,windType,property,2,0,1,std::string,std::string,00528550,00a4194c
+ObjectTemplate,windIsDynamic,property,2,0,1,bool,bool,005286ba,00a4194c
+ObjectTemplate,windBlowTime,property,2,0,1,float,float,005287d9,00a4194c
+ObjectTemplate,windDirection,property,2,0,1,Vec3,Vec3,005288fc,00a4194c
+ObjectTemplate,windFalloff,property,2,0,1,float,float,00528a72,00a4194c
+ObjectTemplate,windRadialFalloff,property,2,0,1,float,float,00528b95,00a4194c
+ObjectTemplate,windSpeed,property,2,0,1,float,float,00528cb8,00a4194c
+ObjectTemplate,geometry,property,2,0,1,std::string,std::string,00528ded,00a4194c
+ObjectTemplate,lightType,property,2,0,1,std::string,std::string,00528f5a,00a4194c
+ObjectTemplate,affectingType,property,2,0,1,int,int,005290ca,00a4194c
+ObjectTemplate,isDynamic,property,2,0,1,bool,bool,005291e7,00a4194c
+ObjectTemplate,castsStaticShadow,property,2,0,1,bool,bool,0052930c,00a4194c
+ObjectTemplate,castsDynamicShadow,property,2,0,1,bool,bool,00529431,00a4194c
+ObjectTemplate,selfLights,property,2,0,1,bool,bool,00529556,00a4194c
+ObjectTemplate,selfShadows,property,2,0,1,bool,bool,0052967b,00a4194c
+ObjectTemplate,supportsPerVertex,property,2,0,1,bool,bool,005297a0,00a4194c
+ObjectTemplate,supportsPerPixel,property,2,0,1,bool,bool,005298c5,00a4194c
+ObjectTemplate,supportsGlow,property,2,0,1,bool,bool,005299ea,00a4194c
+ObjectTemplate,supportsEmitter,property,2,0,1,bool,bool,00529b0f,00a4194c
+ObjectTemplate,affectLightmappedObjects,property,2,0,1,bool,bool,00529c34,00a4194c
+ObjectTemplate,attenuationRange1,property,2,0,1,float,float,00529d59,00a4194c
+ObjectTemplate,attenuationRange2,property,2,0,1,float,float,00529e82,00a4194c
+ObjectTemplate,color,property,2,0,1,Vec3ColorFloatIntensity,Vec3ColorFloatIntensity,00529fab,00a4194c
+ObjectTemplate,speccolor,property,2,0,1,Vec3ColorFloatIntensity,Vec3ColorFloatIntensity,0052a127,00a4194c
+ObjectTemplate,HDRIntensity,property,2,0,1,float,float,0052a2a3,00a4194c
+ObjectTemplate,coneAngle1,property,2,0,1,float,float,0052a3cc,00a4194c
+ObjectTemplate,coneAngle2,property,2,0,1,float,float,0052a4f5,00a4194c
+ObjectTemplate,direction,property,2,0,1,Vec3,Vec3,0052a61e,00a4194c
+ObjectTemplate,projectorTexture,property,2,0,1,std::string,std::string,0052a79a,00a4194c
+ObjectTemplate,projectorFov,property,2,0,1,float,float,0052a90a,00a4194c
+ObjectTemplate,projectorAspect,property,2,0,1,float,float,0052aa33,00a4194c
+ObjectTemplate,projectorNear,property,2,0,1,float,float,0052ab5c,00a4194c
+ObjectTemplate,projectorFar,property,2,0,1,float,float,0052ac85,00a4194c
+ObjectTemplate,projectorApplyMask,property,2,0,1,bool,bool,0052adae,00a4194c
+ObjectTemplate,enabled,property,2,0,1,bool,bool,0052aed3,00a4194c
+ObjectTemplate,fov,property,2,0,1,float,float,0052aff8,00a4194c
+ObjectTemplate,intensity,property,2,0,1,float,float,0052b121,00a4194c
+ObjectTemplate,shadowIntensity,property,2,0,1,float,float,0052b24a,00a4194c
+ObjectTemplate,softness,property,2,0,1,float,float,0052b373,00a4194c
+ObjectTemplate,objectShadows,property,2,0,1,bool,bool,0052b49c,00a4194c
+ObjectTemplate,flicker,property,2,0,1,float,float,0052b5c1,00a4194c
+ObjectTemplate,scale,property,2,0,1,Vec3,Vec3,0052b6ea,00a4194c
+ObjectTemplate,ik.positionLeft,property,2,0,1,Vec3,Vec3,0052b878,00a4194c
+ObjectTemplate,ik.rotationLeft,property,2,0,1,Vec3,Vec3,0052b9ee,00a4194c
+ObjectTemplate,ik.poleVectorLeft,property,2,0,1,Vec3,Vec3,0052bb68,00a4194c
+ObjectTemplate,ik.positionRight,property,2,0,1,Vec3,Vec3,0052bcde,00a4194c
+ObjectTemplate,ik.rotationRight,property,2,0,1,Vec3,Vec3,0052be54,00a4194c
+ObjectTemplate,ik.poleVectorRight,property,2,0,1,Vec3,Vec3,0052bfce,00a4194c
+ObjectTemplate,isStatic,property,2,0,1,bool,bool,0052cb64,00a4c174
+ObjectTemplate,isStatic,property,2,0,1,bool,bool,0052cc93,00a4c174
+ObjectTemplate,decalTextureName,property,2,0,1,std::string,std::string,0052cdb0,00a4c174
+ObjectTemplate,decalNormalMapName,property,2,0,1,std::string,std::string,0052cf1a,00a4c174
+ObjectTemplate,randomColorIntensity,property,2,0,1,float,float,0052d084,00a4c174
+ObjectTemplate,color,property,2,0,1,Vec3ColorFloat,Vec3ColorFloat,0052d199,00a4c174
+ObjectTemplate,randomSize,property,2,0,1,float,float,0052d302,00a4c174
+ObjectTemplate,size,property,2,0,1,float,float,0052d417,00a4c174
+ObjectTemplate,randomRotation,property,2,0,1,float,float,0052d52c,00a4c174
+ObjectTemplate,rotation,property,2,0,1,float,float,0052d641,00a4c174
+ObjectTemplate,animationEnable,property,2,0,1,bool,bool,0052d756,00a4c174
+ObjectTemplate,animationSpeed,property,2,0,1,float,float,0052d873,00a4c174
+ObjectTemplate,animationFrameWidth,property,2,0,1,int,int,0052d988,00a4c174
+ObjectTemplate,animationFrameHeight,property,2,0,1,int,int,0052da9a,00a4c174
+ObjectTemplate,setAnimationFrameWidthRelative,method,2,1,1,void,float,0052dbac,00a4c174
+ObjectTemplate,setAnimationFrameHeightRelative,method,2,1,1,void,float,0052dc95,00a4c174
+ObjectTemplate,animationRandomizedStartFrame,property,2,0,1,bool,bool,0052dd7e,00a4c174
+ObjectTemplate,animationFrameCount,property,2,0,1,int,int,0052de9b,00a4c174
+ObjectTemplate,animationFrameCountX,property,2,0,1,int,int,0052dfad,00a4c174
+ObjectTemplate,startAtCreation,property,2,0,1,bool,bool,0052e0d1,00a4c174
+ObjectTemplate,addEmitterSpeed,property,2,0,1,bool,bool,0052e1e5,00a4c174
+ObjectTemplate,emitterSpeedScale,property,2,0,1,float,float,0052e2f9,00a4c174
+ObjectTemplate,lodDistance,property,2,0,1,float,float,0052e416,00a4c174
+ObjectTemplate,delay,property,2,0,1,RandomDistribution,RandomDistribution,0052e533,00a4c174
+ObjectTemplate,timeToLive,property,2,0,1,RandomDistribution,RandomDistribution,0052e6b7,00a4c174
+ObjectTemplate,intensity,property,2,0,1,RandomDistribution,RandomDistribution,0052e83b,00a4c174
+ObjectTemplate,relativePositionInDof,property,2,0,1,RandomDistribution,RandomDistribution,0052e9bf,00a4c174
+ObjectTemplate,relativePositionInUp,property,2,0,1,RandomDistribution,RandomDistribution,0052eb43,00a4c174
+ObjectTemplate,relativePositionInRight,property,2,0,1,RandomDistribution,RandomDistribution,0052ecc7,00a4c174
+ObjectTemplate,positionalSpeedInDof,property,2,0,1,RandomDistribution,RandomDistribution,0052ee4b,00a4c174
+ObjectTemplate,positionalSpeedInUp,property,2,0,1,RandomDistribution,RandomDistribution,0052efcf,00a4c174
+ObjectTemplate,positionalSpeedInRight,property,2,0,1,RandomDistribution,RandomDistribution,0052f153,00a4c174
+ObjectTemplate,rotationalSpeedInDof,property,2,0,1,RandomDistribution,RandomDistribution,0052f2d7,00a4c174
+ObjectTemplate,rotationalSpeedInUp,property,2,0,1,RandomDistribution,RandomDistribution,0052f45b,00a4c174
+ObjectTemplate,rotationalSpeedInRight,property,2,0,1,RandomDistribution,RandomDistribution,0052f5df,00a4c174
+ObjectTemplate,startRotation,property,2,0,1,RandomDistribution,RandomDistribution,0052f763,00a4c174
+ObjectTemplate,zRotation,property,2,0,1,RandomDistribution,RandomDistribution,0052f8e7,00a4c174
+ObjectTemplate,zRotationSnap,property,2,0,1,float,float,0052fa6b,00a4c174
+ObjectTemplate,noPhysics,property,2,0,1,bool,bool,0052fb9a,00a4c174
+ObjectTemplate,showInFirstPerson,property,2,0,1,bool,bool,0052fcae,00a4c174
+ObjectTemplate,showInThirdPerson,property,2,0,1,bool,bool,0052fdc2,00a4c174
+ObjectTemplate,showInZoomedMode,property,2,0,1,bool,bool,0052fed6,00a4c174
+ObjectTemplate,addChild,property,2,0,1,bool,bool,0052ffea,00a4c174
+ObjectTemplate,template,property,2,0,1,std::string,std::string,005300fe,00a4c174
+ObjectTemplate,alternateTemplate0,property,2,0,1,std::string,std::string,0053026b,00a4c174
+ObjectTemplate,alternateTemplate1,property,2,0,1,std::string,std::string,005303e1,00a4c174
+ObjectTemplate,alternateTemplate2,property,2,0,1,std::string,std::string,00530557,00a4c174
+ObjectTemplate,alternateTemplate3,property,2,0,1,std::string,std::string,005306cd,00a4c174
+ObjectTemplate,alternateTemplate4,property,2,0,1,std::string,std::string,00530843,00a4c174
+ObjectTemplate,geometry,property,2,0,1,std::string,std::string,005309cb,00a4c174
+ObjectTemplate,geometryPart,property,2,0,1,int,int,00530b37,00a4c174
+ObjectTemplate,usedOnTransparentSurface,property,2,0,1,bool,bool,00530c50,00a4c174
+ObjectTemplate,collisionMesh,property,2,0,1,std::string,std::string,00530d64,00a4c174
+ObjectTemplate,collisionPart,property,2,0,1,int,int,00530ed4,00a4c174
+ObjectTemplate,collisionEffectName,property,2,0,1,std::string,std::string,00530fed,00a4c174
+ObjectTemplate,hasMobilePhysics,property,2,0,1,bool,bool,0053115a,00a4c174
+ObjectTemplate,hasCollisionPhysics,property,2,0,1,bool,bool,0053126e,00a4c174
+ObjectTemplate,hasResponsePhysics,method,2,1,1,void,bool,00531382,00a4c174
+ObjectTemplate,physicsType,property,2,0,1,PhysicsType,PhysicsType,0053146f,00a4c174
+ObjectTemplate,physicsType,property,2,0,1,PhysicsType,PhysicsType,00531585,00a4c174
+ObjectTemplate,collisionGroups,property,2,0,1,U32,U32,005316a2,00a4c174
+ObjectTemplate,timeToLive,property,2,0,1,RandomDistribution,RandomDistribution,005317b6,00a4c174
+ObjectTemplate,size,property,2,0,1,RandomDistribution,RandomDistribution,0053193a,00a4c174
+ObjectTemplate,gravityModifier,property,2,0,1,RandomDistribution,RandomDistribution,00531b16,00a4c174
+ObjectTemplate,drag,property,2,0,1,RandomDistribution,RandomDistribution,00531c9a,00a4c174
+ObjectTemplate,mass,property,2,0,1,float,float,00531e1e,00a4c174
+ObjectTemplate,centerOfCollisionOffset,property,2,0,1,Vec3,Vec3,00531f3b,00a4c174
+ObjectTemplate,inertiaModifier,property,2,0,1,Vec3,Vec3,005320de,00a4c174
+ObjectTemplate,isSleeping,property,2,0,1,bool,bool,0053227c,00a4c174
+ObjectTemplate,floaterMod,property,2,0,1,float,float,0053239e,00a4c174
+ObjectTemplate,otherCollisionLod,property,2,0,1,int,int,005324bb,00a4c174
+ObjectTemplate,Transparency,property,2,0,1,RandomDistribution,RandomDistribution,005325cf,00a4c174
+ObjectTemplate,transparencyGraph,property,2,0,1,Vec4,Vec4,00532753,00a4c174
+ObjectTemplate,sizeModifier,property,2,0,1,Vec3,Vec3,005328c5,00a4c174
+ObjectTemplate,mapMaterial,method,2,3,3,void,uint std::string uint,00532a3f,00a4c174
+ObjectTemplate,emitterType,property,2,0,1,std::string,std::string,00532c3e,00a4c174
+ObjectTemplate,isLocalSystem,property,2,0,1,bool,bool,00532dae,00a4c174
+ObjectTemplate,noRotationFromParent,property,2,0,1,bool,bool,00532ec7,00a4c174
+ObjectTemplate,emitFrequency,property,2,0,1,float,float,00532fe0,00a4c174
+ObjectTemplate,emitTime,property,2,0,1,float,float,005330e9,00a4c174
+ObjectTemplate,emitDelay,property,2,0,1,float,float,005331f2,00a4c174
+ObjectTemplate,isLooping,property,2,0,1,bool,bool,005332fb,00a4c174
+ObjectTemplate,isStaticSystem,property,2,0,1,bool,bool,0053340c,00a4c174
+ObjectTemplate,nearCullingEnable,property,2,0,1,bool,bool,00533531,00a4c174
+ObjectTemplate,emitPrio,property,2,0,1,std::string,std::string,0053364e,00a4c174
+ObjectTemplate,LodDistance,property,2,0,1,std::string,std::string,005337b9,00a4c174
+ObjectTemplate,QualityLevel,property,2,0,1,std::string,std::string,00533924,00a4c174
+ObjectTemplate,preWarmTime,property,2,0,1,float,float,00533a8f,00a4c174
+ObjectTemplate,randomSpeed,property,2,0,1,float,float,00533b98,00a4c174
+ObjectTemplate,emitSpeed,property,2,0,1,float,float,00533ca1,00a4c174
+ObjectTemplate,emitSpeedGraph,property,2,0,1,Vec4,Vec4,00533daa,00a4c174
+ObjectTemplate,emitDirection,property,2,0,1,Vec3,Vec3,00533f10,00a4c174
+ObjectTemplate,randomDirectionAngle,property,2,0,1,Vec3,Vec3,0053407e,00a4c174
+ObjectTemplate,emitRangeX,property,2,0,1,RandomDistribution,RandomDistribution,005341ec,00a4c174
+ObjectTemplate,emitRangeY,property,2,0,1,RandomDistribution,RandomDistribution,00534366,00a4c174
+ObjectTemplate,emitRangeZ,property,2,0,1,RandomDistribution,RandomDistribution,005344e0,00a4c174
+ObjectTemplate,emitRadius,property,2,0,1,Vec3,Vec3,0053465a,00a4c174
+ObjectTemplate,radialDirection,property,2,0,1,float,float,005347d2,00a4c174
+ObjectTemplate,randomRadialDirection,property,2,0,1,float,float,005348ef,00a4c174
+ObjectTemplate,showInFirstPerson,property,2,0,1,bool,bool,00534a0c,00a4c174
+ObjectTemplate,showInThirdPerson,property,2,0,1,bool,bool,00534b14,00a4c174
+ObjectTemplate,showInZoomedMode,property,2,0,1,bool,bool,00534c1c,00a4c174
+ObjectTemplate,blendMode,property,2,0,1,std::string,std::string,00534d24,00a4c174
+ObjectTemplate,drawOrder,property,2,0,1,std::string,std::string,00534ea1,00a4c174
+ObjectTemplate,writeZ,property,2,0,1,bool,bool,0053501e,00a4c174
+ObjectTemplate,particleType,property,2,0,1,std::string,std::string,0053513b,00a4c174
+ObjectTemplate,drawOrder,property,2,0,1,std::string,std::string,005352b8,00a4c174
+ObjectTemplate,textureName,property,2,0,1,std::string,std::string,00535435,00a4c174
+ObjectTemplate,particleShaderType,property,2,0,1,int,int,0053559f,00a4c174
+ObjectTemplate,particleShaderType,property,2,0,1,int,int,005356b1,00a4c174
+ObjectTemplate,textureName,property,2,0,1,std::string,std::string,005357c3,00a4c174
+ObjectTemplate,textureName,property,2,0,1,std::string,std::string,0053592d,00a4c174
+ObjectTemplate,numPlanes,property,2,0,1,int,int,00535a97,00a4c174
+ObjectTemplate,textureTileFactor,property,2,0,1,float,float,00535ba9,00a4c174
+ObjectTemplate,textureOffsetVelocity,property,2,0,1,float,float,00535cbe,00a4c174
+ObjectTemplate,particleShaderType,property,2,0,1,int,int,00535dd3,00a4c174
+ObjectTemplate,geometry,property,2,0,1,std::string,std::string,00535ee5,00a4c174
+ObjectTemplate,particleSystemTemplate,property,2,0,1,std::string,std::string,00536055,00a4c174
+ObjectTemplate,animationEnable,property,2,0,1,bool,bool,005361c5,00a4c174
+ObjectTemplate,animationPlayOnce,property,2,0,1,bool,bool,005362e2,00a4c174
+ObjectTemplate,animationSpeed,property,2,0,1,float,float,005363ff,00a4c174
+ObjectTemplate,animationFrameWidth,property,2,0,1,int,int,00536514,00a4c174
+ObjectTemplate,animationFrameHeight,property,2,0,1,int,int,00536626,00a4c174
+ObjectTemplate,setAnimationFrameWidthRelative,method,2,1,1,void,float,00536738,00a4c174
+ObjectTemplate,setAnimationFrameHeightRelative,method,2,1,1,void,float,00536821,00a4c174
+ObjectTemplate,animationRandomizedStartFrame,property,2,0,1,bool,bool,0053690a,00a4c174
+ObjectTemplate,animationFrameCount,property,2,0,1,int,int,00536a27,00a4c174
+ObjectTemplate,animationFrameCountX,property,2,0,1,int,int,00536b39,00a4c174
+ObjectTemplate,animationEnable,property,2,0,1,bool,bool,00536c4b,00a4c174
+ObjectTemplate,animationSpeed,property,2,0,1,float,float,00536d68,00a4c174
+ObjectTemplate,animationFrameWidth,property,2,0,1,int,int,00536e7d,00a4c174
+ObjectTemplate,animationFrameHeight,property,2,0,1,int,int,00536f8f,00a4c174
+ObjectTemplate,setAnimationFrameWidthRelative,method,2,1,1,void,float,005370a1,00a4c174
+ObjectTemplate,setAnimationFrameHeightRelative,method,2,1,1,void,float,0053718a,00a4c174
+ObjectTemplate,animationFrameCount,property,2,0,1,int,int,00537273,00a4c174
+ObjectTemplate,animationFrameCountX,property,2,0,1,int,int,00537385,00a4c174
+ObjectTemplate,animationEnable,property,2,0,1,bool,bool,00537497,00a4c174
+ObjectTemplate,animationPlayOnce,property,2,0,1,bool,bool,005375b4,00a4c174
+ObjectTemplate,animationSpeed,property,2,0,1,float,float,005376d1,00a4c174
+ObjectTemplate,animationFrameWidth,property,2,0,1,int,int,005377e6,00a4c174
+ObjectTemplate,animationFrameHeight,property,2,0,1,int,int,005378f8,00a4c174
+ObjectTemplate,setAnimationFrameWidthRelative,method,2,1,1,void,float,00537a0a,00a4c174
+ObjectTemplate,setAnimationFrameHeightRelative,method,2,1,1,void,float,00537af3,00a4c174
+ObjectTemplate,animationRandomizedStartFrame,property,2,0,1,bool,bool,00537bdc,00a4c174
+ObjectTemplate,animationFrameCount,property,2,0,1,int,int,00537cf9,00a4c174
+ObjectTemplate,animationFrameCountX,property,2,0,1,int,int,00537e0b,00a4c174
+ObjectTemplate,timeToLive,property,2,0,1,float,float,00537f1d,00a4c174
+ObjectTemplate,randomTimeToLive,property,2,0,1,float,float,00538026,00a4c174
+ObjectTemplate,color1,property,2,0,1,Vec3ColorFloatIntensity,Vec3ColorFloatIntensity,0053812f,00a4c174
+ObjectTemplate,color2,property,2,0,1,Vec3ColorFloatIntensity,Vec3ColorFloatIntensity,0053829d,00a4c174
+ObjectTemplate,colorBlendGraph,property,2,0,1,Vec4,Vec4,0053840b,00a4c174
+ObjectTemplate,transparencyGraph,property,2,0,1,Vec4,Vec4,00538571,00a4c174
+ObjectTemplate,transparencyGraph,property,2,0,1,Vec4,Vec4,005386d7,00a4c174
+ObjectTemplate,fadeInFactor,property,2,0,1,float,float,00538849,00a4c174
+ObjectTemplate,fadeOutFactor,property,2,0,1,float,float,0053895e,00a4c174
+ObjectTemplate,minTrailVelocity,property,2,0,1,float,float,00538a73,00a4c174
+ObjectTemplate,randomIntensity,property,2,0,1,float,float,00538b9a,00a4c174
+ObjectTemplate,selfShadowIntensity,property,2,0,1,float,float,00538ca3,00a4c174
+ObjectTemplate,selfShadowIntensity,property,2,0,1,float,float,00538db8,00a4c174
+ObjectTemplate,lightMapIntensityOffset,property,2,0,1,float,float,00538ecd,00a4c174
+ObjectTemplate,alphaCull,property,2,0,1,float,float,00538fd6,00a4c174
+ObjectTemplate,ParticleMaxSize,property,2,0,1,float,float,005390df,00a4c174
+ObjectTemplate,randomSize,property,2,0,1,float,float,005391e8,00a4c174
+ObjectTemplate,sizeGraph,property,2,0,1,Vec4,Vec4,005392f1,00a4c174
+ObjectTemplate,directionalScale,property,2,0,1,float,float,00539457,00a4c174
+ObjectTemplate,alignRotationToSpeed,property,2,0,1,bool,bool,0053956c,00a4c174
+ObjectTemplate,randomRotationSpeed,property,2,0,1,Vec3,Vec3,0053967d,00a4c174
+ObjectTemplate,rotationSpeed,property,2,0,1,Vec3,Vec3,0053980f,00a4c174
+ObjectTemplate,randomRotationSpeed,property,2,0,1,Vec3,Vec3,005399a1,00a4c174
+ObjectTemplate,rotationSpeed,property,2,0,1,Vec3,Vec3,00539b33,00a4c174
+ObjectTemplate,randomRotationSpeed,property,2,0,1,float,float,00539cc5,00a4c174
+ObjectTemplate,rotationSpeed,property,2,0,1,float,float,00539dda,00a4c174
+ObjectTemplate,randomRotation,property,2,0,1,Vec3,Vec3,00539eef,00a4c174
+ObjectTemplate,randomRotation,property,2,0,1,Vec3,Vec3,0053a093,00a4c174
+ObjectTemplate,randomRotationSpeed,property,2,0,1,float,float,0053a225,00a4c174
+ObjectTemplate,rotationSpeed,property,2,0,1,float,float,0053a33a,00a4c174
+ObjectTemplate,randomRotation,property,2,0,1,float,float,0053a44f,00a4c174
+ObjectTemplate,pivotOffset,property,2,0,1,Vec2,Vec2,0053a564,00a4c174
+ObjectTemplate,randomRotation,property,2,0,1,float,float,0053a72e,00a4c174
+ObjectTemplate,pivotOffset,property,2,0,1,Vec2,Vec2,0053a843,00a4c174
+ObjectTemplate,rotationGraph,property,2,0,1,Vec4,Vec4,0053a9b5,00a4c174
+ObjectTemplate,gravity,property,2,0,1,float,float,0053ab1b,00a4c174
+ObjectTemplate,gravityGraph,property,2,0,1,Vec4,Vec4,0053ac24,00a4c174
+ObjectTemplate,airResistance,property,2,0,1,float,float,0053ad8a,00a4c174
+ObjectTemplate,airResistanceGraph,property,2,0,1,Vec4,Vec4,0053ae93,00a4c174
+ObjectTemplate,windAffectionFactor,property,2,0,1,float,float,0053b051,00a4c174
+ObjectTemplate,speedFromParticle,property,2,0,1,float,float,0053b15a,00a4c174
+ObjectTemplate,collisionEnable,property,2,0,1,bool,bool,0053b295,00a4c174
+ObjectTemplate,collisionSpeedAlongNormal,property,2,0,1,float,float,0053b3a6,00a4c174
+ObjectTemplate,collisionSpeedAlongPlane,property,2,0,1,float,float,0053b4af,00a4c174
+ObjectTemplate,forceToWaterSurface,property,2,0,1,bool,bool,0053b5b8,00a4c174
+ObjectTemplate,waterSurfaceOffset,property,2,0,1,float,float,0053b6c9,00a4c174
+ObjectTemplate,startDistance,property,2,0,1,float,float,0053b7d2,00a4c174
+ObjectTemplate,maxDistance,property,2,0,1,float,float,0053b8ef,00a4c174
+ObjectTemplate,engineInfluence,property,2,0,1,float,float,0053ba0c,00a4c174
+ObjectTemplate,engineName,property,2,0,1,std::string,std::string,0053bb29,00a4c174
+ObjectTemplate,maxTriggerDistance,property,2,0,1,float,float,0053bd04,00a4c174
+ObjectTemplate,timeToLive,property,2,0,1,RandomDistribution,RandomDistribution,0053be33,00a4c174
+ObjectTemplate,randomAgeFactor,property,2,0,1,RandomDistribution,RandomDistribution,0053bfb7,00a4c174
+ObjectTemplate,addWorkOnMaterial,method,2,1,1,void,int,0053c13b,00a4c174
+ObjectTemplate,startOnEffects,property,2,0,1,int,int,0053c1f9,00a4c174
+ObjectTemplate,stopOnEffects,property,2,0,1,int,int,0053c30d,00a4c174
+ObjectTemplate,startAtCreation,property,2,0,1,bool,bool,0053c421,00a4c174
+ObjectTemplate,speedFromPhysics,property,2,0,1,bool,bool,0053c535,00a4c174
+ObjectTemplate,emitDirectionZFromSpeedDof,property,2,0,1,bool,bool,0053c649,00a4c174
+ObjectTemplate,cameraShake,property,2,0,1,bool,bool,0053c780,00a4c174
+ObjectTemplate,cameraShakeRadius,property,2,0,1,float,float,0053c894,00a4c174
+ObjectTemplate,cameraShakeForce,property,2,0,1,float,float,0053c9b1,00a4c174
+ObjectTemplate,alphaIntensityRange,property,2,0,1,Vec2,Vec2,0053cace,00a4c174
+ObjectTemplate,alphaIntensityUsed,property,2,0,1,bool,bool,0053cc2e,00a4c174
+ObjectTemplate,alphaIntensityFromSpeed,property,2,0,1,Vec2,Vec2,0053cd41,00a4c174
+ObjectTemplate,alphaIntensityFromSpeedInDof,property,2,0,1,Vec2,Vec2,0053cea1,00a4c174
+ObjectTemplate,alphaIntensityFromRotationalSpeed,property,2,0,1,Vec2,Vec2,0053d001,00a4c174
+ObjectTemplate,alphaIntensityFromAltitude,property,2,0,1,Vec2,Vec2,0053d161,00a4c174
+ObjectTemplate,alphaIntensityFromEngine,property,2,0,1,Vec2,Vec2,0053d2c1,00a4c174
+ObjectTemplate,emitScaleFactorRange,property,2,0,1,Vec2,Vec2,0053d421,00a4c174
+ObjectTemplate,emitScaleFactorUsed,property,2,0,1,bool,bool,0053d581,00a4c174
+ObjectTemplate,emitScaleFactorFromSpeed,property,2,0,1,Vec2,Vec2,0053d694,00a4c174
+ObjectTemplate,emitScaleFactorFromSpeedInDof,property,2,0,1,Vec2,Vec2,0053d7f4,00a4c174
+ObjectTemplate,emitScaleFactorFromAltitude,property,2,0,1,Vec2,Vec2,0053d95a,00a4c174
+ObjectTemplate,emitSpeedScaleRange,property,2,0,1,Vec2,Vec2,0053dabd,00a4c174
+ObjectTemplate,emitSpeedScaleUsed,property,2,0,1,bool,bool,0053dc23,00a4c174
+ObjectTemplate,emitSpeedScaleFromSpeed,property,2,0,1,Vec2,Vec2,0053dd3c,00a4c174
+ObjectTemplate,emitSpeedScaleFromSpeedInDof,property,2,0,1,Vec2,Vec2,0053dea2,00a4c174
+ObjectTemplate,emitSpeedScaleFromRotationalSpeed,property,2,0,1,Vec2,Vec2,0053e008,00a4c174
+ObjectTemplate,emitSpeedScaleFromAcceleration,property,2,0,1,Vec2,Vec2,0053e16e,00a4c174
+ObjectTemplate,emitSpeedScaleFromAltitude,property,2,0,1,Vec2,Vec2,0053e2d4,00a4c174
+ObjectTemplate,emitSpeedScaleFromEngine,property,2,0,1,Vec2,Vec2,0053e43a,00a4c174
+ObjectTemplate,startAgeRange,property,2,0,1,Vec2,Vec2,0053e5a0,00a4c174
+ObjectTemplate,startAgeUsed,property,2,0,1,bool,bool,0053e706,00a4c174
+ObjectTemplate,startAgeFromSpeed,property,2,0,1,Vec2,Vec2,0053e81f,00a4c174
+ObjectTemplate,soundIntensityRange,property,2,0,1,Vec2,Vec2,0053e985,00a4c174
+ObjectTemplate,soundIntensityUsed,property,2,0,1,bool,bool,0053eaeb,00a4c174
+ObjectTemplate,soundIntensityFromSpeed,property,2,0,1,Vec2,Vec2,0053ec04,00a4c174
+ObjectTemplate,AgeScaleFactorRange,property,2,0,1,Vec2,Vec2,0053ed6a,00a4c174
+ObjectTemplate,AgeScaleFactorUsed,property,2,0,1,bool,bool,0053eed0,00a4c174
+ObjectTemplate,AgeScaleFactorFromSpeed,property,2,0,1,Vec2,Vec2,0053efe9,00a4c174
+ObjectTemplate,minDistanceUnderWaterSurface,property,2,0,1,float,float,0053f15b,00a4c174
+ObjectTemplate,maxDistanceUnderWaterSurface,property,2,0,1,float,float,0053f278,00a4c174
+ObjectTemplate,lodDistance,property,2,0,1,float,float,0053f395,00a4c174
+ObjectTemplate,engineType,property,2,0,1,int,int,0053fec4,00a55bbc
+ObjectTemplate,torque,property,2,0,1,float,float,0053ffe3,00a55bbc
+ObjectTemplate,differential,property,2,0,1,float,float,00540116,00a55bbc
+ObjectTemplate,numberOfGears,property,2,0,1,int,int,00540233,00a55bbc
+ObjectTemplate,gearUp,property,2,0,1,float,float,00540359,00a55bbc
+ObjectTemplate,gearDown,property,2,0,1,float,float,00540476,00a55bbc
+ObjectTemplate,gearChangeTime,property,2,0,1,float,float,00540593,00a55bbc
+ObjectTemplate,setGearRatios,method,2,5,5,void,float float float float float,005406d1,00a55bbc
+ObjectTemplate,noPropellerEffectAtSpeed,property,2,0,1,float,float,00540931,00a55bbc
+ObjectTemplate,heatIncrement,property,2,0,1,float,float,00540a4e,00a55bbc
+ObjectTemplate,coolingFactor,property,2,0,1,float,float,00540b6b,00a55bbc
+ObjectTemplate,inverseHeatBar,property,2,0,1,bool,bool,00540c88,00a55bbc
+ObjectTemplate,setHeatBarType,method,2,1,1,void,heatBarType,00540d9c,00a55bbc
+ObjectTemplate,getHeatBarType,method,2,0,0,int,,00540e82,
+ObjectTemplate,pureRotational,property,2,0,1,bool,bool,00540eef,00a55bbc
+ObjectTemplate,horizontalSpeedMagnifier,property,2,0,1,float,float,00541016,00a55bbc
+ObjectTemplate,defaultAngleOfAttack,property,2,0,1,float,float,00541141,00a55bbc
+ObjectTemplate,maxAngleOfAttack,property,2,0,1,float,float,0054126c,00a55bbc
+ObjectTemplate,attackSpeed,property,2,0,1,float,float,00541397,00a55bbc
+ObjectTemplate,horizontalDampAngle,property,2,0,1,float,float,005414b4,00a55bbc
+ObjectTemplate,horizontalDampAngleFactor,property,2,0,1,float,float,005415d1,00a55bbc
+ObjectTemplate,spinWhenNoEngineInAir,property,2,0,1,float,float,005416ee,00a55bbc
+ObjectTemplate,dampHorizontalVel,property,2,0,1,float,float,0054180b,00a55bbc
+ObjectTemplate,dampHorizontalVelFactor,property,2,0,1,float,float,00541928,00a55bbc
+ObjectTemplate,decreaseAngleToZero,property,2,0,1,bool,bool,00541a45,00a55bbc
+ObjectTemplate,decreaseAngleToZeroVerticalVel,property,2,0,1,float,float,00541b59,00a55bbc
+ObjectTemplate,airFlowAffect,property,2,0,1,float,float,00541c76,00a55bbc
+ObjectTemplate,noEffectAtPerpSpeed,property,2,0,1,float,float,00541d93,00a55bbc
+ObjectTemplate,canReverse,property,2,0,1,bool,bool,00541eb0,00a55bbc
+ObjectTemplate,trackTurnAcceleration,property,2,0,1,float,float,00541fc4,00a55bbc
+ObjectTemplate,trackTurnSpeed,property,2,0,1,float,float,005420e1,00a55bbc
+ObjectTemplate,audio.newStyleAudio,property,2,0,1,bool,bool,005421fe,00a55bbc
+ObjectTemplate,audio.transformationRelativeRoot,property,2,0,1,bool,bool,00542312,00a55bbc
+ObjectTemplate,newCar2.minRpm,property,2,0,1,float,float,00542426,00a55bbc
+ObjectTemplate,newCar2.maxRpm,property,2,0,1,float,float,00542543,00a55bbc
+ObjectTemplate,newCar2.useClutchedTorque,property,2,0,1,bool,bool,00542660,00a55bbc
+ObjectTemplate,newCar2.wheelInertia,property,2,0,1,float,float,00542793,00a55bbc
+ObjectTemplate,newCar2.engineFeedbackMod,property,2,0,1,float,float,005428b0,00a55bbc
+ObjectTemplate,newCar2.brakeTorque,property,2,0,1,float,float,005429cd,00a55bbc
+ObjectTemplate,newCar2.engineBrakeTorque,property,2,0,1,float,float,00542aea,00a55bbc
+ObjectTemplate,newCar2.frictionTorque,property,2,0,1,float,float,00542c07,00a55bbc
+ObjectTemplate,newCar2.frictionMod,property,2,0,1,float,float,00542d24,00a55bbc
+ObjectTemplate,newCar2.slopeTorqueMod,property,2,0,1,float,float,00542e41,00a55bbc
+ObjectTemplate,newCar2.wheelLongFrictionMod,property,2,0,1,float,float,00542f5e,00a55bbc
+ObjectTemplate,newCar2.wheelLongDriveFrictionMod,property,2,0,1,float,float,0054307b,00a55bbc
+ObjectTemplate,newCar2.wheelLongPeakAt,property,2,0,1,float,float,00543198,00a55bbc
+ObjectTemplate,newCar2.wheelLongMinDynamicFriction,property,2,0,1,float,float,005432b5,00a55bbc
+ObjectTemplate,newCar2.wheelLongScale,property,2,0,1,float,float,005433d2,00a55bbc
+ObjectTemplate,newCar2.wheelLatFrictionMod,property,2,0,1,float,float,005434ef,00a55bbc
+ObjectTemplate,newCar2.wheelLatDriveFrictionMod,property,2,0,1,float,float,0054360c,00a55bbc
+ObjectTemplate,newCar2.wheelLatPeakAt,property,2,0,1,float,float,00543729,00a55bbc
+ObjectTemplate,newCar2.wheelLatMinDynamicFriction,property,2,0,1,float,float,00543846,00a55bbc
+ObjectTemplate,newCar2.wheelLatScale,property,2,0,1,float,float,00543963,00a55bbc
+ObjectTemplate,friLatBrakeMod,property,2,0,1,float,float,00543a80,00a55bbc
+ObjectTemplate,noPowerWhenUpsideDown,property,2,0,1,bool,bool,00543b9d,00a55bbc
+ObjectTemplate,strength,property,2,0,1,float,float,00543cc3,00a55bbc
+ObjectTemplate,damping,property,2,0,1,float,float,00543dd8,00a55bbc
+ObjectTemplate,rotateUV,property,2,0,1,bool,bool,00543eed,00a55bbc
+ObjectTemplate,fixAxisSpring,property,2,0,1,bool,bool,00544001,00a55bbc
+ObjectTemplate,waterHeight,property,2,0,1,float,float,00544127,00a55bbc
+ObjectTemplate,hullHeight,property,2,0,1,float,float,00544244,00a55bbc
+ObjectTemplate,floatMaxLift,property,2,0,1,float,float,00544361,00a55bbc
+ObjectTemplate,floatMinLift,property,2,0,1,float,float,0054447e,00a55bbc
+ObjectTemplate,dragModifier,property,2,0,1,float,float,0054459b,00a55bbc
+ObjectTemplate,gearDownHeight,property,2,0,1,float,float,005446ca,00a55bbc
+ObjectTemplate,gearUpHeight,property,2,0,1,float,float,005447e7,00a55bbc
+ObjectTemplate,gearDownSpeed,property,2,0,1,float,float,00544904,00a55bbc
+ObjectTemplate,gearUpSpeed,property,2,0,1,float,float,00544a21,00a55bbc
+ObjectTemplate,gearDownDelay,property,2,0,1,float,float,00544b3e,00a55bbc
+ObjectTemplate,gearUpDelay,property,2,0,1,float,float,00544c5b,00a55bbc
+ObjectTemplate,invertGear,property,2,0,1,bool,bool,00544d78,00a55bbc
+ObjectTemplate,debugForceGearUp,property,2,0,1,bool,bool,00544e8c,00a55bbc
+ObjectTemplate,changeLodAt,property,2,0,1,float,float,00544fb0,00a55bbc
+ObjectTemplate,tolerance,property,2,0,1,float,float,005450cd,00a55bbc
+ObjectTemplate,engineName,property,2,0,1,std::string,std::string,005451f2,00a55bbc
+ObjectTemplate,rotationSpeedMod,property,2,0,1,float,float,0054535f,00a55bbc
+ObjectTemplate,rotationSpeedModBlur,property,2,0,1,float,float,0054547c,00a55bbc
+ObjectTemplate,rotationAxle,property,2,0,1,int,int,00545599,00a55bbc
+ObjectTemplate,listTemplates,method,2,0,0,std::string,,005456bf,
+ObjectTemplate,pitchOffset,property,2,0,1,float,float,00545769,00a55bbc
+ObjectTemplate,positionOffset,property,2,0,1,Math::Vec3,Math::Vec3,00545886,00a55bbc
+ObjectTemplate,wingLift,property,2,0,1,float,float,00545a05,00a55bbc
+ObjectTemplate,flapLift,property,2,0,1,float,float,00545b22,00a55bbc
+ObjectTemplate,liftRegulated,property,2,0,1,bool,bool,00545c3f,00a55bbc
+ObjectTemplate,regulateToLift,property,2,0,1,float,float,00545d53,00a55bbc
+ObjectTemplate,wingToRegulatorRatio,property,2,0,1,float,float,00545e6a,00a55bbc
+ObjectTemplate,startDelay,property,2,0,1,float,float,00545f81,00a55bbc
+ObjectTemplate,length,property,2,0,1,float,float,005460b0,00a55bbc
+ObjectTemplate,stepHeight,property,2,0,1,float,float,005461d9,00a55bbc
+ObjectTemplate,spacing,property,2,0,1,float,float,00546302,00a55bbc
+ObjectTemplate,footWidth,property,2,0,1,float,float,0054642b,00a55bbc
+ObjectTemplate,footLength,property,2,0,1,float,float,00546554,00a55bbc
+ObjectTemplate,testCount,property,2,0,1,uint,uint,0054667d,00a55bbc
+ObjectTemplate,legEnableMask,property,2,0,1,uint,uint,005467ac,00a55bbc
+ObjectTemplate,radius,property,2,0,1,float,float,005468c9,00a55bbc
+ObjectTemplate,input,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,005469f2,00a55bbc
+ObjectTemplate,force,property,2,0,1,float,float,00546b06,00a55bbc
+ObjectTemplate,rotationalForce,property,2,0,1,Vec3,Vec3,00546c23,00a55bbc
+ObjectTemplate,constantForce,property,2,0,1,float,float,00546de1,00a55bbc
+ObjectTemplate,useAbsoluteDirection,property,2,0,1,bool,bool,00546efe,00a55bbc
+ObjectTemplate,onlyWhenOccupied,property,2,0,1,bool,bool,00547024,00a55bbc
+ObjectTemplate,startDelay,property,2,0,1,float,float,00547138,00a55bbc
+ObjectTemplate,regulatePitch,property,2,0,1,Vec2,Vec2,00547255,00a55bbc
+ObjectTemplate,regulateRoll,property,2,0,1,Vec2,Vec2,005473b7,00a55bbc
+ObjectTemplate,regulatePosX,property,2,0,1,Vec2,Vec2,00547519,00a55bbc
+ObjectTemplate,regulatePosY,property,2,0,1,Vec2,Vec2,0054767b,00a55bbc
+ObjectTemplate,regulatePosZ,property,2,0,1,Vec2,Vec2,005477dd,00a55bbc
+ObjectTemplate,targetPosition,property,2,0,1,Vec3,Vec3,0054793f,00a55bbc
+ObjectTemplate,regulationTolerance,property,2,0,1,float,float,00547abb,00a55bbc
+ObjectTemplate,keepUp,property,2,0,1,bool,bool,00547be4,00a55bbc
+ObjectTemplate,destroyWhenTargetLost,property,2,0,1,bool,bool,00547d09,00a55bbc
+ObjectTemplate,enableOnStartMessage,property,2,0,1,bool,bool,00547e42,00a55bbc
+ObjectTemplate,relativeYCollisionGroupInverse,property,2,0,1,uint,uint,00547f7b,00a55bbc
+ObjectTemplate,positionToleranceXZ,property,2,0,1,float,float,00548098,00a55bbc
+ObjectTemplate,minHeightAdjustDistance,property,2,0,1,float,float,005481c1,00a55bbc
+ObjectTemplate,warningDistance,property,2,0,1,float,float,005482ea,00a55bbc
+ObjectTemplate,destroyDistance,property,2,0,1,float,float,00548407,00a55bbc
+ObjectTemplate,stopRegulateWhenUnoccupied,property,2,0,1,bool,bool,00548524,00a55bbc
+ObjectTemplate,maxForceOnObject,property,2,0,1,float,float,00548649,00a55bbc
+ObjectTemplate,armor.wreckHitPoints,property,2,0,1,float,float,00548afe,00a5abdc
+ObjectTemplate,armor.hitPoints,property,2,0,1,float,float,00548c33,00a5abdc
+ObjectTemplate,armor.maxHitPoints,property,2,0,1,float,float,00548d56,00a5abdc
+ObjectTemplate,armor.attackDamage,property,2,0,1,float,float,00548e79,00a5abdc
+ObjectTemplate,armor.angleMod,property,2,0,1,float,float,00548f9c,00a5abdc
+ObjectTemplate,armor.defaultMaterial,property,2,0,1,int,int,005490bf,00a5abdc
+ObjectTemplate,armor.explosionRadius,property,2,0,1,float,float,005491dc,00a5abdc
+ObjectTemplate,armor.explosionDamage,property,2,0,1,float,float,00549305,00a5abdc
+ObjectTemplate,armor.explosionMaterial,property,2,0,1,int,int,0054942e,00a5abdc
+ObjectTemplate,armor.explosionForce,property,2,0,1,float,float,0054954b,00a5abdc
+ObjectTemplate,armor.explosionForceMax,property,2,0,1,float,float,00549674,00a5abdc
+ObjectTemplate,armor.explosionForceMod,property,2,0,1,float,float,0054979d,00a5abdc
+ObjectTemplate,armor.parentDamageWreck,property,2,0,1,float,float,005498c6,00a5abdc
+ObjectTemplate,armor.parentDamageAlive,property,2,0,1,float,float,005499e9,00a5abdc
+ObjectTemplate,armor.takeDamageFromOwnTeam,property,2,0,1,float,float,00549b0c,00a5abdc
+ObjectTemplate,armor.destroyOnParentDamageLevel,property,2,0,1,float,float,00549c48,00a5abdc
+ObjectTemplate,armor.destroyOnRootParentDamageLevel,property,2,0,1,float,float,00549d6b,00a5abdc
+ObjectTemplate,armor.onlyDamageFromChildrenLevel,property,2,0,1,float,float,00549e8e,00a5abdc
+ObjectTemplate,armor.mirrorParentDamageLevel,property,2,0,1,bool,bool,00549fb4,00a5abdc
+ObjectTemplate,armor.wreckExplosionRadius,property,2,0,1,float,float,0054a0d9,00a5abdc
+ObjectTemplate,armor.wreckExplosionDamage,property,2,0,1,float,float,0054a202,00a5abdc
+ObjectTemplate,armor.wreckExplosionMaterial,property,2,0,1,int,int,0054a32b,00a5abdc
+ObjectTemplate,armor.wreckExplosionForce,property,2,0,1,float,float,0054a448,00a5abdc
+ObjectTemplate,armor.wreckExplosionForceMax,property,2,0,1,float,float,0054a571,00a5abdc
+ObjectTemplate,armor.wreckExplosionForceMod,property,2,0,1,float,float,0054a69a,00a5abdc
+ObjectTemplate,armor.hpLostWhileCriticalDamage,property,2,0,1,float,float,0054a7c3,00a5abdc
+ObjectTemplate,armor.hpLostWhileUpSideDown,property,2,0,1,float,float,0054a8ec,00a5abdc
+ObjectTemplate,armor.hpLostWhileInWater,property,2,0,1,float,float,0054aa15,00a5abdc
+ObjectTemplate,armor.hpLostWhileInDeepWater,property,2,0,1,float,float,0054ab3e,00a5abdc
+ObjectTemplate,armor.waterDamageDelay,property,2,0,1,float,float,0054ac67,00a5abdc
+ObjectTemplate,armor.deepWaterDamageDelay,property,2,0,1,float,float,0054ad90,00a5abdc
+ObjectTemplate,armor.waterLevel,property,2,0,1,float,float,0054aeb9,00a5abdc
+ObjectTemplate,armor.deepWaterLevel,property,2,0,1,float,float,0054afe2,00a5abdc
+ObjectTemplate,armor.canBeRepaired,property,2,0,1,bool,bool,0054b10b,00a5abdc
+ObjectTemplate,armor.canBeRepairedWhenWreck,property,2,0,1,bool,bool,0054b230,00a5abdc
+ObjectTemplate,armor.criticalDamage,property,2,0,1,float,float,0054b355,00a5abdc
+ObjectTemplate,armor.timeToStayAsWreck,property,2,0,1,float,float,0054b47e,00a5abdc
+ObjectTemplate,armor.timeToStayAfterDestroyed,property,2,0,1,float,float,0054b5a7,00a5abdc
+ObjectTemplate,armor.alignLastEffectToHitDirection,property,2,0,1,bool,bool,0054b6d0,00a5abdc
+ObjectTemplate,armor.wreckDelay,property,2,0,1,float,float,0054b7f5,00a5abdc
+ObjectTemplate,armor.hideChildrenOnSpectacularDeath,property,2,0,1,bool,bool,0054b91e,00a5abdc
+ObjectTemplate,armor.destroyOnSpectacularDeath,property,2,0,1,bool,bool,0054ba43,00a5abdc
+ObjectTemplate,armor.canBeDestroyed,property,2,0,1,bool,bool,0054bb68,00a5abdc
+ObjectTemplate,armor.showDamageAsDirt,property,2,0,1,float,float,0054bc8d,00a5abdc
+ObjectTemplate,armor.holdsSlBeacon,property,2,0,1,bool,bool,0054bdb6,00a5abdc
+ObjectTemplate,armor.dontUseWreck,property,2,0,1,bool,bool,0054bedb,00a5abdc
+ObjectTemplate,armor.takesEmpDamage,property,2,0,1,bool,bool,0054c000,00a5abdc
+ObjectTemplate,armor.empLevelTime,property,2,0,1,float,float,0054c125,00a5abdc
+ObjectTemplate,armor.empDamageStepSize,property,2,0,1,float,float,0054c24e,00a5abdc
+ObjectTemplate,armor.empDamageNumStep,property,2,0,1,int,int,0054c377,00a5abdc
+ObjectTemplate,armor.empDamageIgnoreRadius,property,2,0,1,bool,bool,0054c494,00a5abdc
+ObjectTemplate,armor.empDamageIgnoreRadiusModifier,property,2,0,1,float,float,0054c5b9,00a5abdc
+ObjectTemplate,armor.disableInputOnDestroy,property,2,0,1,bool,bool,0054c6e2,00a5abdc
+ObjectTemplate,armor.addNametagOnDestroy,property,2,0,1,bool,bool,0054c823,00a5abdc
+ObjectTemplate,armor.damagePointOnDestroy,property,2,0,1,bool,bool,0054c948,00a5abdc
+ObjectTemplate,armor.fullChildSync,property,2,0,1,bool,bool,0054ca6d,00a5abdc
+ObjectTemplate,armor.hudRepairCellNo,property,2,0,1,int,int,0054cb92,00a5abdc
+ObjectTemplate,armor.addArmorEffect,method,2,4,4,void,int std::string Vec3 Vec3,0054ccaf,00a5abdc
+ObjectTemplate,armor.addArmorEffectSpectacular,method,2,4,4,void,int std::string Vec3 Vec3,0054cf5b,00a5abdc
+ObjectTemplate,armor.addWreckArmorEffect,method,2,4,4,void,int std::string Vec3 Vec3,0054d219,00a5abdc
+ObjectTemplate,ability.hasHealingAbility,property,2,0,1,bool,bool,0054d4d7,00a5abdc
+ObjectTemplate,ability.hasRepairingAbility,property,2,0,1,bool,bool,0054d608,00a5abdc
+ObjectTemplate,ability.hasAmmoAbility,property,2,0,1,bool,bool,0054d727,00a5abdc
+ObjectTemplate,ability.showPlayers,property,2,0,1,bool,bool,0054d846,00a5abdc
+ObjectTemplate,ability.showVehicles,property,2,0,1,bool,bool,0054d965,00a5abdc
+ObjectTemplate,ability.radialRadar,property,2,0,1,bool,bool,0054da84,00a5abdc
+ObjectTemplate,ability.radarRadius,property,2,0,1,int,int,0054dba3,00a5abdc
+ObjectTemplate,ability.hasZoomUpgradeAbility,property,2,0,1,bool,bool,0054dcba,00a5abdc
+ObjectTemplate,ability.hasScopeStabilizerAbility,property,2,0,1,bool,bool,0054dddf,00a5abdc
+ObjectTemplate,ability.increasedRepairAbility,property,2,0,1,float,float,0054df04,00a5abdc
+ObjectTemplate,ability.sprintRechargeModifier,property,2,0,1,float,float,0054e02d,00a5abdc
+ObjectTemplate,ability.beaconSpawnTimeMod,property,2,0,1,float,float,0054e156,00a5abdc
+ObjectTemplate,ability.sprintUseModifier,property,2,0,1,float,float,0054e27f,00a5abdc
+ObjectTemplate,ability.networkableHudRevealTime,property,2,0,1,int,int,0054e3a8,00a5abdc
+ObjectTemplate,ability.networkableHudShowKit,property,2,0,1,bool,bool,0054e4bf,00a5abdc
+ObjectTemplate,ability.networkableHudShowVehicle,property,2,0,1,bool,bool,0054e5de,00a5abdc
+ObjectTemplate,ability.networkableHudShowCloaked,property,2,0,1,bool,bool,0054e6fd,00a5abdc
+ObjectTemplate,ability.setOverheatMod,method,2,2,2,void,std::string float,0054e81f,00a5abdc
+ObjectTemplate,ability.setMaterialDamageMod,method,2,2,2,void,int float,0054e9c4,00a5abdc
+ObjectTemplate,ability.addExtraAmmoItem,method,2,4,4,void,std::string int int bool,0054eb1d,00a5abdc
+ObjectTemplate,ability.addExtraAmmoItemToKit,method,2,5,5,void,std::string int int bool bool,0054ed83,00a5abdc
+ObjectTemplate,radio.failMessage,property,2,0,1,std::string,std::string,0054f046,00a5abdc
+ObjectTemplate,radio.useMessage,property,2,0,1,std::string,std::string,0054f1cc,00a5abdc
+ObjectTemplate,radio.damageMessage,property,2,0,1,std::string,std::string,0054f352,00a5abdc
+ObjectTemplate,radio.destroyedMessage,property,2,0,1,std::string,std::string,0054f4d8,00a5abdc
+ObjectTemplate,radio.friendlyDestroyedMessage,property,2,0,1,std::string,std::string,0054f65e,00a5abdc
+ObjectTemplate,radio.enemyDestroyedMessage,property,2,0,1,std::string,std::string,0054f7e4,00a5abdc
+ObjectTemplate,radio.repairedMessage,property,2,0,1,std::string,std::string,0054f96a,00a5abdc
+ObjectTemplate,radio.spottedMessage,property,2,0,1,std::string,std::string,0054faf0,00a5abdc
+ObjectTemplate,radio.friendlyFireMessage,property,2,0,1,std::string,std::string,0054fc76,00a5abdc
+ObjectTemplate,radio.enemyFireMessage,property,2,0,1,std::string,std::string,0054fdfc,00a5abdc
+ObjectTemplate,radio.friendlyTeamChangeMessage,property,2,0,1,std::string,std::string,0054ff82,00a5abdc
+ObjectTemplate,radio.enemyTeamChangeMessage,property,2,0,1,std::string,std::string,0055010b,00a5abdc
+ObjectTemplate,radio.neutralTeamChangeMessage,property,2,0,1,std::string,std::string,00550297,00a5abdc
+ObjectTemplate,radio.friendlyTakeableMessage,property,2,0,1,std::string,std::string,00550423,00a5abdc
+ObjectTemplate,radio.enemyTakeableMessage,property,2,0,1,std::string,std::string,005505af,00a5abdc
+ObjectTemplate,radio.friendlyNotTakeableMessage,property,2,0,1,std::string,std::string,0055073b,00a5abdc
+ObjectTemplate,radio.enemyNotTakeableMessage,property,2,0,1,std::string,std::string,005508d9,00a5abdc
+ObjectTemplate,radio.destroyedGameEvent,property,2,0,1,int,int,00550a65,00a5abdc
+ObjectTemplate,radio.indicationDistance2D,property,2,0,1,bool,bool,00550b82,00a5abdc
+ObjectTemplate,radio.closeToIndicationDist,property,2,0,1,int,int,00550ca7,00a5abdc
+ObjectTemplate,radio.closeToIndicationType,property,2,0,1,int,int,00550dc4,00a5abdc
+ObjectTemplate,radio.friendlySpawnMessage,property,2,0,1,std::string,std::string,00550ee1,00a5abdc
+ObjectTemplate,radio.enemySpawnMessage,property,2,0,1,std::string,std::string,0055106d,00a5abdc
+ObjectTemplate,radio.delay,property,2,0,1,int,int,005511f9,00a5abdc
+ObjectTemplate,teamChange.changePoints,property,2,0,1,float,float,00551316,00a5abdc
+ObjectTemplate,teamChange.maxChangePoints,property,2,0,1,float,float,0055144b,00a5abdc
+ObjectTemplate,teamChange.defaultMaterial,property,2,0,1,int,int,0055156e,00a5abdc
+ObjectTemplate,python.onDamageEvent,property,2,0,1,int,int,00551685,00a5abdc
+ObjectTemplate,python.onDestroyEvent,property,2,0,1,int,int,005517ae,00a5abdc
+ObjectTemplate,python.onRepairEvent,property,2,0,1,int,int,005518c5,00a5abdc
+ObjectTemplate,python.onSpawnEvent,property,2,0,1,int,int,005519dc,00a5abdc
+ObjectTemplate,setSpawnPositionOffset,method,2,1,1,void,Math::Vec3,00551d53,00a5ff3c
+ObjectTemplate,group,property,2,0,1,U32,U32,00551e74,00a5ff3c
+ObjectTemplate,ControlPointId,property,2,0,1,U32,U32,00551f8d,00a5ff3c
+ObjectTemplate,setAIEnterOnSpawn,method,2,1,1,void,bool,005520a6,00a5ff3c
+ObjectTemplate,setEnterOnSpawn,method,2,1,1,void,bool,00552197,00a5ff3c
+ObjectTemplate,setScatterSpawnPositions,method,2,1,1,void,bool,00552288,00a5ff3c
+ObjectTemplate,setOnlyForAI,method,2,1,1,void,bool,00552379,00a5ff3c
+ObjectTemplate,setOnlyForHuman,method,2,1,1,void,bool,0055246a,00a5ff3c
+ObjectTemplate,setAllowSpawnCloseToVehicle,method,2,1,1,void,bool,0055255b,00a5ff3c
+ObjectTemplate,podSpawnVehicle,property,2,0,1,std::string,std::string,0055264c,00a5ff3c
+ObjectTemplate,spawnInPod,property,2,0,1,bool,bool,005527ec,00a5ff3c
+ObjectTemplate,disablePodControls,property,2,0,1,bool,bool,00552913,00a5ff3c
+ObjectTemplate,postProcess.tvInterference,property,2,0,1,float,float,00552d66,00a62814
+ObjectTemplate,postProcess.tvDistortionRoll,property,2,0,1,float,float,00552e89,00a62814
+ObjectTemplate,postProcess.tvDistortionFreq,property,2,0,1,float,float,00552fac,00a62814
+ObjectTemplate,postProcess.tvDistortionScale,property,2,0,1,float,float,005530cf,00a62814
+ObjectTemplate,vehicleHud.guiIndex,property,2,0,1,int,int,00553204,00a62814
+ObjectTemplate,vehicleHud.hudName,property,2,0,1,std::string,std::string,0055331b,00a62814
+ObjectTemplate,vehicleHud.vehicleIcon,property,2,0,1,std::string,std::string,005534a1,00a62814
+ObjectTemplate,vehicleHud.addVehicleIcon,method,2,1,1,void,std::string,0055360d,00a62814
+ObjectTemplate,vehicleHud.AbilityIcon,property,2,0,1,std::string,std::string,00553739,00a62814
+ObjectTemplate,vehicleHud.addAbilityIcon,method,2,1,1,void,std::string,005538a5,00a62814
+ObjectTemplate,vehicleHud.miniMapReloadIconOffset,property,2,0,1,Vec2,Vec2,005539d1,00a62814
+ObjectTemplate,vehicleHud.miniMapIconOffset,property,2,0,1,Vec2,Vec2,00553b37,00a62814
+ObjectTemplate,vehicleHud.miniMapIconOffsetInside,property,2,0,1,Vec2,Vec2,00553c9d,00a62814
+ObjectTemplate,vehicleHud.vehicleIconPos,property,2,0,1,Vec2,Vec2,00553e03,00a62814
+ObjectTemplate,vehicleHud.usePlayerIcon,property,2,0,1,bool,bool,00553f69,00a62814
+ObjectTemplate,vehicleHud.useChildHud,property,2,0,1,bool,bool,00554088,00a62814
+ObjectTemplate,vehicleHud.useChildArmor,property,2,0,1,bool,bool,005541aa,00a62814
+ObjectTemplate,vehicleHud.standardHelpEnabled,property,2,0,1,bool,bool,005542e1,00a62814
+ObjectTemplate,vehicleHud.hasTurretIcon,property,2,0,1,bool,bool,00554406,00a62814
+ObjectTemplate,vehicleHud.showCrossHair,property,2,0,1,bool,bool,0055452b,00a62814
+ObjectTemplate,vehicleHud.isCoDriver,property,2,0,1,bool,bool,0055464a,00a62814
+ObjectTemplate,vehicleHud.showInfo,property,2,0,1,bool,bool,0055476f,00a62814
+ObjectTemplate,vehicleHud.disableOnSprint,property,2,0,1,bool,bool,00554894,00a62814
+ObjectTemplate,vehicleHud.enablePostProcessingOnGuiIndex,property,2,0,1,bool,bool,005549b3,00a62814
+ObjectTemplate,vehicleHud.miniMapBackgroundIcon,property,2,0,1,std::string,std::string,00554ad8,00a62814
+ObjectTemplate,vehicleHud.miniMapReloadIcon,property,2,0,1,std::string,std::string,00554c64,00a62814
+ObjectTemplate,vehicleHud.miniMapIcon,property,2,0,1,std::string,std::string,00554df0,00a62814
+ObjectTemplate,vehicleHud.miniMapIconInside,property,2,0,1,std::string,std::string,00554f7c,00a62814
+ObjectTemplate,vehicleHud.miniMapIconSize,property,2,0,1,Vec2,Vec2,00555108,00a62814
+ObjectTemplate,vehicleHud.miniMapIconSizeInside,property,2,0,1,Vec2,Vec2,0055527a,00a62814
+ObjectTemplate,vehicleHud.miniMapIconLeaderSize,property,2,0,1,std::string,std::string,005553ec,00a62814
+ObjectTemplate,vehicleHud.miniMapInfo,property,2,0,1,std::string,std::string,00555578,00a62814
+ObjectTemplate,vehicleHud.spottedIcon,property,2,0,1,std::string,std::string,00555704,00a62814
+ObjectTemplate,vehicleHud.spottedIconSize,property,2,0,1,int,int,00555881,00a62814
+ObjectTemplate,vehicleHud.maxClimbSpeed,property,2,0,1,int,int,0055599e,00a62814
+ObjectTemplate,vehicleHud.showOnCamMode,writeonly,2,1,1,int,int,00555abb,00a62814
+ObjectTemplate,vehicleHud.getShowOnCamMode,method,2,1,1,bool,int,00555ba9,00a62814
+ObjectTemplate,vehicleHud.addShowOnCamMode,method,2,1,1,void,int,00555ca6,00a62814
+ObjectTemplate,vehicleHud.vehicleType,property,2,0,1,int,int,00555d91,00a62814
+ObjectTemplate,vehicleHud.typeIcon,property,2,0,1,std::string,std::string,00555eae,00a62814
+ObjectTemplate,vehicleHud.useSelectionIcons,property,2,0,1,bool,bool,0055603a,00a62814
+ObjectTemplate,vehicleHud.canBeSpotted,property,2,0,1,bool,bool,0055615f,00a62814
+ObjectTemplate,vehicleHud.displaySelectionOnEnter,property,2,0,1,bool,bool,00556284,00a62814
+ObjectTemplate,vehicleHud.useVehicleCommRose,property,2,0,1,bool,bool,005563a9,00a62814
+ObjectTemplate,vehicleHud.sendDestroyedHudEvent,property,2,0,1,bool,bool,005564ce,00a62814
+ObjectTemplate,vehicleHud.pantingSound,property,2,0,1,std::string,std::string,005565f3,00a62814
+ObjectTemplate,vehicleHud.injurySound,property,2,0,1,std::string,std::string,0055677f,00a62814
+ObjectTemplate,vehicleHud.useVehicleCameraRotation,property,2,0,1,bool,bool,0055690b,00a62814
+ObjectTemplate,vehicleHud.showOnEnemyMinimap,property,2,0,1,bool,bool,00556a30,00a62814
+ObjectTemplate,vehicleHud.alwaysShowOnMinimap,property,2,0,1,bool,bool,00556b55,00a62814
+ObjectTemplate,vehicleHud.zoomOnMinimap,property,2,0,1,bool,bool,00556c7a,00a62814
+ObjectTemplate,vehicleHud.showOneSecondaryGunnerAngle,property,2,0,1,bool,bool,00556d9f,00a62814
+ObjectTemplate,weaponHud.guiIndex,property,2,0,1,int,int,00556ec4,00a62814
+ObjectTemplate,weaponHud.altGuiIndex,property,2,0,1,int,int,00556fed,00a62814
+ObjectTemplate,weaponHud.hudName,property,2,0,1,std::string,std::string,00557104,00a62814
+ObjectTemplate,weaponHud.enableMouse,property,2,0,1,bool,bool,0055728a,00a62814
+ObjectTemplate,weaponHud.crosshairIcon,property,2,0,1,std::string,std::string,005573a9,00a62814
+ObjectTemplate,weaponHud.crosshairIconSize,property,2,0,1,int,int,00557532,00a62814
+ObjectTemplate,weaponHud.altCrosshairIcon,property,2,0,1,std::string,std::string,0055764f,00a62814
+ObjectTemplate,weaponHud.renderedPicture,property,2,0,1,std::string,std::string,005577db,00a62814
+ObjectTemplate,weaponHud.clipIcon,property,2,0,1,std::string,std::string,00557967,00a62814
+ObjectTemplate,weaponHud.ammoIcon,property,2,0,1,std::string,std::string,00557af3,00a62814
+ObjectTemplate,weaponHud.ammoBarFrontIcon,property,2,0,1,std::string,std::string,00557c7f,00a62814
+ObjectTemplate,weaponHud.ammoBarBackIcon,property,2,0,1,std::string,std::string,00557e0b,00a62814
+ObjectTemplate,weaponHud.weaponIcon,property,2,0,1,std::string,std::string,00557f97,00a62814
+ObjectTemplate,weaponHud.altWeaponIcon,property,2,0,1,std::string,std::string,0055811d,00a62814
+ObjectTemplate,weaponHud.unlockIcon,property,2,0,1,std::string,std::string,005582a3,00a62814
+ObjectTemplate,weaponHud.selectIcon,property,2,0,1,std::string,std::string,00558429,00a62814
+ObjectTemplate,weaponHud.specialAbilityIcon,property,2,0,1,std::string,std::string,005585af,00a62814
+ObjectTemplate,weaponHud.hasMag,property,2,0,1,bool,bool,00558735,00a62814
+ObjectTemplate,weaponHud.showAmmo,property,2,0,1,bool,bool,0055885a,00a62814
+ObjectTemplate,weaponHud.ShowClips,property,2,0,1,bool,bool,0055897f,00a62814
+ObjectTemplate,weaponHud.hasFireRate,property,2,0,1,bool,bool,00558aa4,00a62814
+ObjectTemplate,weaponHud.hasRangeFinder,property,2,0,1,bool,bool,00558bc9,00a62814
+ObjectTemplate,weaponHud.switchGuiOnCamera,property,2,0,1,bool,bool,00558cee,00a62814
+ObjectTemplate,weaponHud.showInfo,property,2,0,1,bool,bool,00558e13,00a62814
+ObjectTemplate,weaponHud.disableOnSprint,property,2,0,1,bool,bool,00558f38,00a62814
+ObjectTemplate,weaponHud.displaySelectOnActivation,property,2,0,1,bool,bool,0055905d,00a62814
+ObjectTemplate,weaponHud.deviationFactor,property,2,0,1,int,int,00559182,00a62814
+ObjectTemplate,weaponHud.maxVisualDeviation,property,2,0,1,int,int,0055929f,00a62814
+ObjectTemplate,weaponHud.minVisualDeviation,property,2,0,1,int,int,005593bc,00a62814
+ObjectTemplate,weaponHud.enablePostProcessingOnGuiIndex,property,2,0,1,int,int,005594d9,00a62814
+ObjectTemplate,weaponHud.firstLockSound,property,2,0,1,std::string,std::string,005595f6,00a62814
+ObjectTemplate,weaponHud.secondLockSound,property,2,0,1,std::string,std::string,00559782,00a62814
+ObjectTemplate,weaponHud.overheatSound,property,2,0,1,std::string,std::string,0055990e,00a62814
+ObjectTemplate,weaponHud.showOnCamMode,writeonly,2,1,1,int,int,00559a9a,00a62814
+ObjectTemplate,weaponHud.descrString,property,2,0,1,std::string,std::string,00559b88,00a62814
+ObjectTemplate,weaponHud.getShowOnCamMode,method,2,1,1,bool,int,00559d14,00a62814
+ObjectTemplate,weaponHud.addShowOnCamMode,method,2,1,1,void,int,00559e11,00a62814
+ObjectTemplate,weaponHud.hasDistanceCounter,property,2,0,1,bool,bool,00559efc,00a62814
+ObjectTemplate,weaponHud.hasScanProgress,property,2,0,1,bool,bool,0055a021,00a62814
+ObjectTemplate,weaponHud.ignoreTargetDistance,property,2,0,1,bool,bool,0055a146,00a62814
+ObjectTemplate,weaponHud.showBatteryIconInHud,property,2,0,1,bool,bool,0055a26b,00a62814
+ObjectTemplate,abilityHud.healingSound,property,2,0,1,std::string,std::string,0055a390,00a62814
+ObjectTemplate,abilityHud.repairingSound,property,2,0,1,std::string,std::string,0055a528,00a62814
+ObjectTemplate,abilityHud.ammoSound,property,2,0,1,std::string,std::string,0055a6ae,00a62814
+ObjectTemplate,warningHud.getWarningType,method,2,1,1,bool,TargetType,0055a834,00a62814
+ObjectTemplate,warningHud.setWarningType,method,2,2,2,void,TargetType bool,0055a940,00a62814
+ObjectTemplate,warningHud.getFirstWarningSound,method,2,1,1,std::string,TargetType,0055aa92,00a62814
+ObjectTemplate,warningHud.setFirstWarningSound,method,2,2,2,void,TargetType std::string,0055abb3,00a62814
+ObjectTemplate,warningHud.getSecondWarningSound,method,2,1,1,std::string,TargetType,0055ad4e,00a62814
+ObjectTemplate,warningHud.setSecondWarningSound,method,2,2,2,void,TargetType std::string,0055ae6f,00a62814
+ObjectTemplate,warningHud.getWarningIcon,method,2,1,1,std::string,TargetType,0055b00a,00a62814
+ObjectTemplate,warningHud.setWarningIcon,method,2,2,2,void,TargetType std::string,0055b12b,00a62814
+ObjectTemplate,helpHud.helpStringKey,property,2,0,1,std::string,std::string,0055b2c6,00a62814
+ObjectTemplate,helpHud.helpSoundKey,property,2,0,1,std::string,std::string,0055b45e,00a62814
+ObjectTemplate,helpHud.altHelpStringKey,property,2,0,1,std::string,std::string,0055b5e4,00a62814
+ObjectTemplate,helpHud.altHelpSoundKey,property,2,0,1,std::string,std::string,0055b76a,00a62814
+ObjectTemplate,helpHud.closeToHelpStringKeyNeutral,property,2,0,1,std::string,std::string,0055b8f0,00a62814
+ObjectTemplate,helpHud.closeToHelpSoundKeyNeutral,property,2,0,1,std::string,std::string,0055ba76,00a62814
+ObjectTemplate,helpHud.closeToHelpStringKeyFriendly,property,2,0,1,std::string,std::string,0055bbfc,00a62814
+ObjectTemplate,helpHud.closeToHelpSoundKeyFriendly,property,2,0,1,std::string,std::string,0055bd85,00a62814
+ObjectTemplate,helpHud.closeToHelpStringKeyEnemy,property,2,0,1,std::string,std::string,0055bf11,00a62814
+ObjectTemplate,helpHud.closeToHelpSoundKeyEnemy,property,2,0,1,std::string,std::string,0055c09d,00a62814
+ObjectTemplate,helpHud.closeToDistance,property,2,0,1,int,int,0055c229,00a62814
+ObjectTemplate,helpHud.lowArmorHelpStringKey,property,2,0,1,std::string,std::string,0055c346,00a62814
+ObjectTemplate,helpHud.lowArmorHelpSoundKey,property,2,0,1,std::string,std::string,0055c4cc,00a62814
+ObjectTemplate,helpHud.lowAmmoHelpStringKey,property,2,0,1,std::string,std::string,0055c652,00a62814
+ObjectTemplate,helpHud.lowAmmoHelpSoundKey,property,2,0,1,std::string,std::string,0055c7d8,00a62814
+ObjectTemplate,strategicObject.strategicObjectName,property,2,0,1,std::string,std::string,0055c95e,00a62814
+ObjectTemplate,strategicObject.destroyedIcon,property,2,0,1,std::string,std::string,0055cae9,00a62814
+ObjectTemplate,strategicObject.intactIcon,property,2,0,1,std::string,std::string,0055cc62,00a62814
+ObjectTemplate,strategicObject.part,property,2,0,1,int,int,0055cddb,00a62814
+ObjectTemplate,strategicObject.3dMapIcon,property,2,0,1,int,int,0055cef2,00a62814
+ObjectTemplate,strategicObject.isOnePiece,property,2,0,1,bool,bool,0055d009,00a62814
+ObjectTemplate,nametag.3dMapIcon,property,2,0,1,int,int,0055d128,00a62814
+ObjectTemplate,nametag.secondary3dMapIcon,property,2,0,1,int,int,0055d251,00a62814
+ObjectTemplate,nametag.3dMapIconOffset,property,2,0,1,Vec3,Vec3,0055d368,00a62814
+ObjectTemplate,nametag.selected3dMapIcon,property,2,0,1,int,int,0055d4df,00a62814
+ObjectTemplate,nametag.healthActivationLevel,property,2,0,1,float,float,0055d5f6,00a62814
+ObjectTemplate,nametag.color,property,2,0,1,int,int,0055d719,00a62814
+ObjectTemplate,nametag.useBoundingRadius,property,2,0,1,bool,bool,0055d836,00a62814
+ObjectTemplate,nametag.showItem,property,2,0,1,bool,bool,0055d95b,00a62814
+ObjectTemplate,nametag.showIcon,property,2,0,1,bool,bool,0055da7d,00a62814
+ObjectTemplate,nametag.showName,property,2,0,1,bool,bool,0055db9f,00a62814
+ObjectTemplate,nametag.showDistance,property,2,0,1,bool,bool,0055dcc1,00a62814
+ObjectTemplate,nametag.show3dIcon,property,2,0,1,bool,bool,0055dde3,00a62814
+ObjectTemplate,nametag.glueToEdge,property,2,0,1,bool,bool,0055df05,00a62814
+ObjectTemplate,nametag.useStrategicObj,property,2,0,1,bool,bool,0055e027,00a62814
+ObjectTemplate,nametag.teamSpecific,property,2,0,1,bool,bool,0055e149,00a62814
+ObjectTemplate,nametag.inverseTeamSpecific,property,2,0,1,bool,bool,0055e26b,00a62814
+ObjectTemplate,nametag.showIconOnTracker,property,2,0,1,bool,bool,0055e38d,00a62814
+ObjectTemplate,nametag.maxDistance,property,2,0,1,float,float,0055e4af,00a62814
+ObjectTemplate,nametag.maxEnemyDistance,property,2,0,1,float,float,0055e5d8,00a62814
+ObjectTemplate,nametag.showInside,property,2,0,1,bool,bool,0055e701,00a62814
+ObjectTemplate,nametag.showOutside,property,2,0,1,bool,bool,0055e823,00a62814
+ObjectTemplate,nametag.selectable,property,2,0,1,bool,bool,0055e948,00a62814
+ObjectTemplate,nametag.useTeamColor,property,2,0,1,bool,bool,0055ea6d,00a62814
+ObjectTemplate,Nametag.useAliveArmor,property,2,0,1,bool,bool,0055eb92,00a62814
+ObjectTemplate,Nametag.showArmor,property,2,0,1,bool,bool,0055ecb7,00a62814
+ObjectTemplate,Nametag.showSupply,property,2,0,1,bool,bool,0055eddc,00a62814
+Console,getArgumentTypes,method,2,2,2,std::string,std::string std::string,0066b6f0,00a7e76c
+Console,getEnumName,method,2,3,3,std::string,std::string std::string int,0066b8c9,00a7e76c
+Console,getRange,method,2,2,2,std::string,std::string std::string,0066bb03,00a7e76c
+Console,getReturnType,method,2,2,2,std::string,std::string std::string,0066bcdc,00a7e76c
+Console,getDelta,method,2,2,2,std::string,std::string std::string,0066beb5,00a7e76c
+Console,hasBundledType,method,2,2,2,std::string,std::string std::string,0066c08e,00a7e76c
+Console,getTypeDescription,method,2,2,2,std::string,std::string std::string,0066c267,00a7e76c
+Console,isDynamic,method,2,2,2,std::string,std::string std::string,0066c440,00a7e76c
+Console,isSetGet,method,2,2,2,std::string,std::string std::string,0066c624,00a7e76c
+Console,hasRange,method,2,2,2,std::string,std::string std::string,0066c808,00a7e76c
+Console,getCategory,method,2,2,2,std::string,std::string std::string,0066c9ec,00a7e76c
+Console,getActiveMethods,method,2,1,1,std::string,std::string,0066cbd0,00a7e76c
+Console,useRelativePaths,property,2,0,1,bool,bool,0066ccc0,00a7e76c
+Console,allowMultipleFileLoad,property,2,0,1,bool,bool,0066cdcf,00a7e76c
+SettingsManager,stringSet,method,1,2,2,bool,std::string std::string,0066cee1,00a7e76c
+SettingsManager,boolSet,method,1,2,2,bool,std::string bool,0066d143,00a7e76c
+SettingsManager,intSet,method,1,2,2,bool,std::string int,0066d2d4,00a7e76c
+SettingsManager,floatSet,method,1,2,2,bool,std::string float,0066d4e4,00a7e76c
+SettingsManager,U32Set,method,1,2,2,bool,std::string U32,0066d703,00a7e76c
+SettingsManager,stringGet,method,1,1,1,std::string,std::string,0066d913,00a7e76c
+SettingsManager,boolGet,method,1,1,1,bool,std::string,0066dacd,00a7e76c
+SettingsManager,intGet,method,1,1,1,int,std::string,0066dc43,00a7e76c
+SettingsManager,floatGet,method,1,1,1,float,std::string,0066ddb9,00a7e76c
+SettingsManager,U32Get,method,1,1,1,U32,std::string,0066df35,00a7e76c
+ControlMap,create,method,1,1,1,void,std::string,0066e0aa,00a7e76c
+ControlMap,setActive,method,1,1,1,void,std::string,0066e1db,00a7e76c
+ControlMap,addAxisToAxisMapping,method,1,4,5,void,int InputDeviceFlags InputDeviceAxes bool bool,0066e300,00a7e76c
+ControlMap,addKeysToAxisMapping,method,1,4,5,void,int InputDeviceFlags InputDeviceKeys InputDeviceKeys bool,0066e5b7,00a7e76c
+ControlMap,addButtonToTriggerMapping,method,1,4,5,void,int InputDeviceFlags InputDeviceButtons float bool,0066e862,00a7e76c
+ControlMap,AddKeyToTriggerMapping,method,1,4,5,void,int InputDeviceFlags InputDeviceKeys float bool,0066eb0c,00a7e76c
+ControlMap,setYawFactor,method,1,1,1,void,float,0066edb6,00a7e76c
+ControlMap,setPitchFactor,method,1,1,1,void,float,0066ee9c,00a7e76c
+ControlMap,addAxisToTriggerMapping,method,1,4,5,void,int int InputDeviceFlags InputDeviceAxes bool,0066ef82,00a7e76c
+ControlMap,InvertMouse,property,1,0,1,bool,bool,0066f24a,00a7e76c
+ControlMap,mouseSensitivity,property,1,0,1,float,float,0066f363,00a7e76c
+ControlMap,keyboardSensitivity,property,1,0,1,float,float,0066f475,00a7e76c
+FileManager,mountArchive,method,2,2,2,void,std::string std::string,0066f587,00a7e76c
+FileManager,mountArchive,method,2,2,3,void,std::string std::string bool,0066f74e,00a7e76c
+NetworkableInfo,createNewInfo,method,2,1,1,void,std::string,0067de4c,00a7fe60
+NetworkableInfo,setPredictionMode,method,2,1,1,void,PredictionMode,0067df7d,00a7fe60
+NetworkableInfo,setBasePriority,method,2,1,1,void,float,0067e06b,00a7fe60
+NetworkableInfo,setIsUnique,method,2,1,1,void,bool,0067e14e,00a7fe60
+NetworkableInfo,setForceNetworkableId,method,2,1,1,void,bool,0067e238,00a7fe60
+NetworkableInfo,saveStats,method,2,0,0,void,,0067e322,
+NetworkableInfo,makeStatisticsMark,method,2,0,0,void,,0067e39c,
+NetworkableInfo,dumpNetworkDescriptors,method,2,0,0,void,,0067e40a,
+NetworkableInfo,dumpScopableDescriptors,method,2,0,0,void,,0067e478,
+Physics,gravity,property,2,0,1,float,float,006b2792,00a8286c
+Physics,airDensityZeroAtHeight,property,2,0,1,float,float,006b2899,00a8286c
+heightmapcluster,create,method,2,1,1,void,std::string,006b29ac,00a8286c
+heightmapcluster,setClusterSize,method,2,1,1,void,int,006b2aca,00a8286c
+heightmapcluster,setHeightmapSize,method,2,1,1,void,int,006b2ba9,00a8286c
+heightmapcluster,addHeightmap,method,2,3,3,void,std::string int int,006b2c88,00a8286c
+heightmapcluster,setSeaWaterLevel,method,2,1,1,void,float,006b2e71,00a8286c
+heightmapcluster,debugCheckMaterials,method,2,0,0,void,,006b2f53,
+heightmapcluster,importSurroundingRawHeightMap,method,2,1,1,bool,std::string,006b2fc3,00a8286c
+heightmapcluster,smoothEdges,method,2,3,3,void,int float float,006b3104,00a8286c
+heightmapcluster,stitchEdges,method,2,0,0,void,,006b32a7,
+heightmapcluster,simulateWater,property,2,0,1,bool,bool,006b3315,00a8286c
+heightmapcluster,simulatedWaterDepth,property,2,0,1,float,float,006b3428,00a8286c
+heightmap,setSize,method,2,2,2,void,int int,006b3534,00a8286c
+heightmap,setScale,method,2,1,1,void,Vec3,006b367f,00a8286c
+heightmap,setBitResolution,method,2,1,1,void,int,006b3799,00a8286c
+heightmap,loadHeightData,method,2,1,1,void,std::string,006b387b,00a8286c
+heightmap,setModified,method,2,1,1,void,bool,006b39a1,00a8286c
+heightmap,setMaterialScale,method,2,1,1,void,int,006b3a8b,00a8286c
+heightmap,loadMaterialData,method,2,1,1,void,std::string,006b3b6d,00a8286c
+collisionManager,createTemplate,method,2,1,1,void,std::string,006b3c93,00a8286c
+collisionManager,useDeferredLoading,property,2,0,1,bool,bool,006b3db1,00a8286c
+collisionManager,create,method,2,1,1,void,std::string,006b3ec0,00a8286c
+collisionManager,setActiveLod,method,2,1,1,void,int,006b3fe5,00a8286c
+collisionManager,drawMeshes,method,2,1,1,void,bool,006b40c4,00a8286c
+collisionManager,drawBoundingBoxes,method,2,1,1,void,bool,006b41ad,00a8286c
+collisionManager,drawPivots,method,2,1,1,void,bool,006b4296,00a8286c
+collisionManager,drawSoldierMesh,method,2,1,1,void,bool,006b437f,00a8286c
+collisionManager,drawPrimitives,method,2,1,1,void,bool,006b4468,00a8286c
+collisionManager,getNameOfObjectInFocus,method,2,0,0,void,,006b4551,
+collisionManager,identityRotateObjectInFocus,method,2,0,0,void,,006b45c1,
+collisionManager,rotateObjectInFocusAroundAxis,method,2,2,2,void,uint float,006b4631,00a8286c
+collisionManager,rotateObjectInFocusAroundVector,method,2,2,2,void,Vec3 float,006b4776,00a8286c
+collisionManager,attachActiveToObjectInFocus,method,2,0,0,void,,006b48fa,
+collisionManager,buildDebugCollisionMeshes,method,2,0,0,void,,006b496a,
+responsePhysicsManager,dumpLists,method,2,0,0,void,,006b49e6,
+WindManager,globalWindSpeed,property,2,0,1,float,float,006ebec1,00a8562c
+WindManager,globalWindDirection,property,2,0,1,Vec3,Vec3,006ebfc8,00a8562c
+ObjectManager,drawStats,property,2,0,1,int,int,006ec12b,00a8562c
+ObjectManager,printNetStatsForAllTypeOfObjects,method,2,0,0,void,,006ec22f,
+Object,direction,property,2,0,1,Vec3,Vec3,006ec29f,00a8562c
+Object,scale,property,2,0,1,Vec3,Vec3,006ec43f,00a8562c
+Object,attenuationRange1,property,2,0,1,float,float,006ec5af,00a8562c
+Object,attenuationRange2,property,2,0,1,float,float,006ec6cc,00a8562c
+Object,color,property,2,0,1,Vec3,Vec3,006ec7e9,00a8562c
+Object,HDRIntensity,property,2,0,1,float,float,006ec959,00a8562c
+Object,coneAngle1,property,2,0,1,float,float,006eca76,00a8562c
+Object,coneAngle2,property,2,0,1,float,float,006ecb93,00a8562c
+Object,fov,property,2,0,1,float,float,006eccb0,00a8562c
+Object,setAsSkyLight,method,2,0,0,void,,006ecdcd,
+Object,togglePause,method,2,0,0,void,,006ece4a,
+Object,template,readonly,2,0,0,const IObjectTemplate*,,006ecef4,
+Object,name,property,2,0,1,std::string,std::string,006ecf7a,00a8562c
+Object,absolutePosition,property,2,0,1,Vec3,Vec3,006ed0ea,00a8562c
+Object,absolutePositionSecondary,property,2,0,1,Vec3,Vec3,006ed388,00a8562c
+Object,isOvergrowth,property,2,0,1,bool,bool,006ed5bb,00a8562c
+Object,notInAI,property,2,0,1,bool,bool,006ed6e6,00a8562c
+Object,setLightSourceMask,method,2,1,1,void,int,006ed811,00a8562c
+Object,getLightSourceMask,method,2,0,0,int,,006ed8ff,
+Object,disableChildren,property,2,0,1,bool,bool,006ed98a,00a8562c
+Object,setIsInTweakModeRecursive,method,2,1,1,void,bool,006edab5,00a8562c
+Object,rotation,property,2,0,1,Vec3,Vec3,006edbad,00a8562c
+Object,rotationSecondary,property,2,0,1,Vec3,Vec3,006edd86,00a8562c
+Object,absoluteTransformation,property,2,0,1,Mat4,Mat4,006ee05b,00a8562c
+Object,initGrid,method,2,4,4,void,Vec2 Vec2 int Vec3,006ee282,00a8562c
+Object,isVisible,property,2,0,1,bool,bool,006ee524,00a8562c
+Object,hasUpdate,property,2,0,1,bool,bool,006ee6ad,00a8562c
+Object,hasCollision,property,2,0,1,bool,bool,006ee82d,00a8562c
+Object,isInGrid,property,2,0,1,bool,bool,006ee9ad,00a8562c
+Object,isSaveable,property,2,0,1,bool,bool,006eeb2d,00a8562c
+Object,setIsInTweakModeRecursive,method,2,1,1,void,bool,006eec82,00a8562c
+Object,setIsVisibleRecursive,method,2,1,1,void,bool,006eedb3,00a8562c
+Object,setIsSaveableRecursive,method,2,1,1,void,bool,006eeee4,00a8562c
+Object,setIsDisabledRecursive,method,2,1,1,void,bool,006ef015,00a8562c
+Object,hasGlow,property,2,0,1,bool,bool,006ef143,00a8562c
+Object,glowFrequency,property,2,0,1,float,float,006ef283,00a8562c
+Object,glowType,property,2,0,1,int,int,006ef3d0,00a8562c
+Object,glowOffset,property,2,0,1,float,float,006ef511,00a8562c
+ObjectTemplate,writeBinary,method,2,1,1,void,std::string,006ef6bb,00a8562c
+ObjectTemplate,readBinary,method,2,1,1,void,std::string,006ef7e0,00a8562c
+ObjectTemplate,name,readonly,2,0,0,std::string,,006ef911,
+ObjectTemplate,create,method,2,2,2,IObjectTemplate*,std::string std::string,006ef9bd,00a8562c
+ObjectTemplate,listTemplateClasses,method,2,0,0,std::string,,006efbdb,
+ObjectTemplate,saveInSeparateFile,property,2,0,1,bool,bool,006efc39,00a8562c
+ObjectTemplate,createNotInGrid,property,2,0,1,bool,bool,006efdea,00a8562c
+ObjectTemplate,createInvisible,property,2,0,1,bool,bool,006eff57,00a8562c
+ObjectTemplate,createVisibleInEditor,property,2,0,1,bool,bool,006f00c4,00a8562c
+ObjectTemplate,isNotSaveable,property,2,0,1,bool,bool,006f0231,00a8562c
+ObjectTemplate,templateHasBeenUsed,property,2,0,1,bool,bool,006f039e,00a8562c
+ObjectTemplate,createdInEditor,property,2,0,1,bool,bool,006f050b,00a8562c
+ObjectTemplate,isDestructable,property,2,0,1,bool,bool,006f0678,00a8562c
+ObjectTemplate,castsDynamicShadow,property,2,0,1,bool,bool,006f07e5,00a8562c
+ObjectTemplate,hasRelativeOffset,property,2,0,1,bool,bool,006f0952,00a8562c
+ObjectTemplate,preCacheObject,property,2,0,1,bool,bool,006f0abf,00a8562c
+ObjectTemplate,forcePreCacheObject,property,2,0,1,bool,bool,006f0bdd,00a8562c
+Player,create,method,2,2,2,IPlayer*,std::string std::string,006f0d36,00a8562c
+Player,active,property,2,0,1,IPlayer*,IPlayer*,006f0f55,00a8562c
+Player,listPlayerClasses,method,2,0,0,std::string,,006f105f,
+Player,list,method,2,0,0,std::string,,006f10bd,
+Player,saveAll,method,2,0,1,bool,std::string,006f1158,00a8562c
+Player,isAi,property,2,0,1,bool,bool,006f12c1,00a8562c
+Player,isNetwork,property,2,0,1,bool,bool,006f14b1,00a8562c
+Player,name,readonly,2,0,0,std::string,,006f1645,
+Player,vehicle,property,2,0,1,IObject_ptrproxy,IObject_ptrproxy,006f16f7,00a8562c
+Player,setVehicleWithInputId,method,2,2,2,bool,IObject_ptrproxy int,006f1833,00a8562c
+ObjectTemplate,networkableInfo,property,2,0,1,std::string,std::string,006f371e,
+ObjectTemplate,cullRadiusScale,property,2,0,1,float,float,006f38b6,
+Object,create,method,2,0,3,world::IObject_ptrproxy,world::IObjectTemplate_ptrproxy Vec3 Vec3,006f3a15,00a88c48
+Object,active,property,2,0,1,world::IObject_ptrproxy,world::IObject_ptrproxy,006f3d18,00a88c48
+Object,list,method,2,0,0,std::string,,006f3e39,
+Object,listObjectsOfTemplate,method,2,0,1,std::string,world::IObjectTemplate_ptrproxy,006f3eda,00a88c48
+Object,forceStart,method,2,0,1,void,world::IObject_ptrproxy,006f4025,00a88c48
+Object,forceStop,method,2,0,1,void,world::IObject_ptrproxy,006f4137,00a88c48
+ObjectTemplate,active,property,2,0,1,world::IObjectTemplate_ptrproxy,world::IObjectTemplate_ptrproxy,006f4249,00a88c48
+ObjectTemplate,activeSafe,method,2,2,2,void,std::string world::IObjectTemplate_ptrproxy,006f43bf,00a88c48
+ObjectTemplate,delete,method,2,0,1,void,world::IObjectTemplate_ptrproxy,006f4558,00a88c48
+ObjectTemplate,list,method,2,0,1,std::string,std::string,006f4667,00a88c48
+ObjectTemplate,save,method,2,0,1,bool,world::IObjectTemplate_ptrproxy,006f4802,00a88c48
+Editor,listObjectsOfTemplate,method,2,0,1,std::string,world::IObjectTemplate_ptrproxy,006f4976,00a88c48
+HudManager,setPointerSize,method,2,2,2,bool,int int,0075e732,00b33150
+HudManager,setMouseTextureEmpty,method,2,1,1,bool,std::string,0075e87f,00b33150
+HudManager,setMouseTextureFull,method,2,1,1,bool,std::string,0075e9c7,00b33150
+HudManager,setMouseTextureArtillery,method,2,1,1,bool,std::string,0075eb0f,00b33150
+HudManager,setMouseTextureUAV,method,2,1,1,bool,std::string,0075ec57,00b33150
+HudManager,setMouseTextureSupply,method,2,1,1,bool,std::string,0075ed9f,00b33150
+HudManager,setMouseTextureMoveTitan,method,2,1,1,bool,std::string,0075eee7,00b33150
+HudManager,setMouseTextureOrbitalStrike,method,2,1,1,bool,std::string,0075f02f,00b33150
+HudManager,setCommMouseSensitivity,method,2,1,1,bool,int,0075f177,00b33150
+HudManager,setPointerMouseSensitivity,method,2,1,1,bool,int,0075f268,00b33150
+HudManager,setCommSize,method,2,2,2,bool,int int,0075f359,00b33150
+HudManager,setCommPos,method,2,2,2,bool,int int,0075f4a6,00b33150
+HudManager,setCommMousePos,method,2,2,2,bool,int int,0075f5f3,00b33150
+HudManager,setSpottedMenuSize,method,2,2,2,bool,int int,0075f740,00b33150
+HudManager,setSpottedMenuPos,method,2,2,2,bool,int int,0075f88d,00b33150
+HudManager,setSpottedMousePos,method,2,2,2,bool,int int,0075f9da,00b33150
+HudManager,setSpottedAngle,method,2,1,1,void,float,0075fb27,00b33150
+HudManager,enableSayAllChatBox,method,2,1,1,void,bool,0075fc0c,00b33150
+HudManager,enableSayTeamChatBox,method,2,1,1,void,bool,0075fcf8,00b33150
+HudManager,enableSaySquadChatBox,method,2,1,1,void,bool,0075fde4,00b33150
+HudManager,enableSayPlayerChatBox,method,2,1,1,void,bool,0075fed0,00b33150
+HudManager,setMaximumNrOfCPs,method,2,1,1,void,int,0075ffbc,00b33150
+HudManager,setPaint,method,2,1,1,void,bool,0076009e,00b33150
+HudManager,setUpdate,method,2,1,1,void,bool,00760187,00b33150
+HudManager,setDone,method,2,1,1,void,bool,00760270,00b33150
+HudManager,addTextureAtlas,method,2,1,1,void,std::string,0076035e,00b33150
+HudManager,setDisplayControlpoints,method,2,1,1,void,bool,00760486,00b33150
+HudManager,setDisplayTickets,method,2,1,1,void,bool,0076056f,00b33150
+HudManager,setMapStatic,method,2,1,1,void,bool,007606b8,00b33150
+HudManager,setTargetTop,method,2,1,1,void,float,007607ab,00b33150
+HudManager,addFavouriteServer,method,2,1,1,void,bool,007608c9,00b33150
+ItemSelection,setReverseItems,method,2,1,1,void,bool,007609b5,00b33150
+HudBuilder,createMapNode,method,2,2,2,bool,std::string std::string,00760ab0,00b33150
+HudBuilder,createMiniMapNode,method,2,6,6,bool,std::string std::string int int int int,00760c96,00b33150
+HudBuilder,setMiniSize,method,2,1,1,bool,Vec2,00760ff1,00b33150
+HudBuilder,setMiniPos,method,2,1,1,bool,Vec2,0076114b,00b33150
+HudBuilder,setMaxiSize,method,2,1,1,bool,Vec2,007612a0,00b33150
+HudBuilder,setMaxiPos,method,2,1,1,bool,Vec2,007613d2,00b33150
+HudBuilder,setCommanderSize,method,2,1,1,bool,Vec2,00761504,00b33150
+HudBuilder,setCommanderPos,method,2,1,1,bool,Vec2,00761636,00b33150
+HudBuilder,setZoomIcons,method,2,1,1,bool,bool,00761768,00b33150
+HudBuilder,setCPFont,method,2,1,1,void,std::string,00761863,00b33150
+HudBuilder,setCPFontColor,method,2,4,4,void,float float float float,007619d9,00b33150
+HudBuilder,setModifyer,method,2,1,1,void,float,00761c05,00b33150
+HudBuilder,setAlphaMask,method,2,1,1,void,std::string,00761cf7,00b33150
+HudBuilder,createListNode,method,2,8,8,bool,std::string std::string int int int int int bool,00761e88,00b33150
+HudBuilder,setListNodeData,method,2,1,1,bool,int,007622ab,00b33150
+HudBuilder,setListNodeConCmd,method,2,2,2,bool,int std::string,007623a3,00b33150
+HudBuilder,setListNodeBackgroundColor,method,2,4,4,bool,float float float float,0076254a,00b33150
+HudBuilder,setListNodeSelectColor,method,2,4,4,bool,float float float float,0076275e,00b33150
+HudBuilder,setListNodeBorderColor,method,2,4,4,bool,float float float float,00762972,00b33150
+HudBuilder,setListNodeBorder,method,2,4,4,bool,int int int int,00762b86,00b33150
+HudBuilder,setListNodeScrollbar,method,2,2,2,bool,int int,00762d90,00b33150
+HudBuilder,setListNodeRowSpacing,method,2,1,1,bool,int,00762ee2,00b33150
+HudBuilder,setListNodeScrollbarColor,method,2,4,4,bool,float float float float,00762fda,00b33150
+HudBuilder,setListNodeScrollbarBackgroundColor,method,2,4,4,bool,float float float float,007631ee,00b33150
+HudBuilder,setListNodeFont,method,2,2,2,bool,std::string int,00763402,00b33150
+HudBuilder,setListNodeOutline,method,2,1,1,bool,bool,007635c7,00b33150
+HudBuilder,createSliderNode,method,2,6,6,bool,std::string std::string float float float float,007636c8,00b33150
+HudBuilder,setSliderNodeData,method,2,1,1,bool,std::string,00763a2d,00b33150
+HudBuilder,setSliderNodeChild,method,2,1,1,bool,std::string,00763b75,00b33150
+HudBuilder,createTransformNode,method,2,6,6,int,std::string std::string int int int int,00763cbd,00b33150
+HudBuilder,createSplitNode,method,2,2,2,bool,std::string std::string,00764017,00b33150
+HudBuilder,createTransformListNode,method,2,7,7,bool,std::string std::string int int int int int,007641fd,00b33150
+HudBuilder,addTransformListNode,method,2,1,1,bool,std::string,007645b4,00b33150
+HudBuilder,setTranformListNodePosVariable,method,2,2,2,bool,int std::string,007646fc,00b33150
+HudBuilder,setTranformListNodeOffset,method,2,2,2,bool,int int,007648a3,00b33150
+HudBuilder,createTileNode,method,2,6,6,bool,std::string std::string int int int int,007649f5,00b33150
+HudBuilder,setTileNodeOptions,method,2,3,3,bool,int int int,00764d50,00b33150
+HudBuilder,createEditNode,method,2,6,6,bool,std::string std::string int int int int,00764efe,00b33150
+HudBuilder,setEditNodeData,method,2,1,1,bool,int,00765259,00b33150
+HudBuilder,setEditNodeString,method,2,1,1,bool,int,00765351,00b33150
+HudBuilder,setEditNodeMaxLength,method,2,1,1,bool,int,00765449,00b33150
+HudBuilder,setEditNodeColor,method,2,4,4,bool,float float float float,00765541,00b33150
+HudBuilder,setEditNodeFont,method,2,2,2,bool,std::string bool,00765755,00b33150
+HudBuilder,createOccupiedNode,method,2,7,7,bool,std::string std::string int int int int int,007658fb,00b33150
+HudBuilder,setOccupiedNodeData,method,2,1,1,bool,int,00765cb2,00b33150
+HudBuilder,setOccupiedNodePosVariable,method,2,2,2,bool,int std::string,00765daa,00b33150
+HudBuilder,createObjectMarkerNode,method,2,6,6,bool,std::string std::string int int int int,00765f51,00b33150
+HudBuilder,setObjectMarkerNodeTexture,method,2,2,2,bool,int std::string,007662ac,00b33150
+HudBuilder,setObjectMarkerNodeTextureSize,method,2,3,3,bool,int int int,00766453,00b33150
+HudBuilder,setObjectMarkerNodeObjects,method,2,1,1,bool,int,00766601,00b33150
+HudBuilder,setObjectMarkerNodeLockText,method,2,2,2,bool,bool std::string,007666f9,00b33150
+HudBuilder,setObjectMarkerNodeLockTextOffset,method,2,2,2,bool,int int,007668a1,00b33150
+HudBuilder,addObjectMarkerNodeLockTextNode,method,2,1,1,bool,std::string,007669f3,00b33150
+HudBuilder,setObjectMarkerNodeLockOnType,method,2,1,1,bool,int,00766b3b,00b33150
+HudBuilder,setObjectMarkerNodeWeapon,method,2,1,1,bool,int,00766c33,00b33150
+HudBuilder,setObjectMarkerNodeRC,method,2,1,1,bool,int,00766d2b,00b33150
+HudBuilder,createHoverNode,method,2,6,6,bool,std::string std::string int int int int,00766e23,00b33150
+HudBuilder,setHoverInMiddlePos,method,2,2,2,bool,int int,0076717e,00b33150
+HudBuilder,setHoverMaxValue,method,2,1,1,bool,float,007672d0,00b33150
+HudBuilder,setHoverWidthLength,method,2,2,2,bool,float float,007673cb,00b33150
+HudBuilder,createObjectSelectionNode,method,2,6,6,bool,std::string std::string int int int int,00767524,00b33150
+HudBuilder,setObjectSelectionNodePointerSize,method,2,2,2,bool,int int,0076787f,00b33150
+HudBuilder,createAnimationNode,method,2,6,6,bool,std::string std::string int int int int,007679d1,00b33150
+HudBuilder,setAnimationNodeFrames,method,2,1,1,bool,int,00767d2c,00b33150
+HudBuilder,setAnimationNodeSpeed,method,2,1,1,bool,int,00767e24,00b33150
+HudBuilder,setAnimationNodeLooping,method,2,1,1,bool,bool,00767f1c,00b33150
+HudBuilder,createPictureNode,method,2,6,6,bool,std::string std::string int int int int,0076801d,00b33150
+HudBuilder,setPictureNodeTexture,method,2,1,1,bool,std::string,00768378,00b33150
+HudBuilder,setPictureNodeAlphaMask,method,2,1,1,bool,std::string,007684c0,00b33150
+HudBuilder,setPictureNodeVariableTexture,method,2,1,1,bool,std::string,00768608,00b33150
+HudBuilder,setPictureNodeRotateVariable,method,2,1,1,bool,std::string,00768750,00b33150
+HudBuilder,setPictureNodeRotation,method,2,1,1,bool,int,00768898,00b33150
+HudBuilder,setPictureNodeCenterPoint,method,2,2,2,bool,int int,00768990,00b33150
+HudBuilder,setPictureNodeBorder,method,2,4,4,bool,int int int int,00768ae2,00b33150
+HudBuilder,setPictureNodeBorderColor,method,2,4,4,bool,float float float float,00768d01,00b33150
+HudBuilder,createBarNode,method,2,7,7,bool,std::string std::string int int int int int,00768f15,00b33150
+HudBuilder,setBarNodeTexture,method,2,2,2,bool,int std::string,007692cc,00b33150
+HudBuilder,setBarNodeVariableTexture,method,2,2,2,bool,int std::string,00769473,00b33150
+HudBuilder,setBarNodeBorder,method,2,4,4,bool,int int int int,0076961a,00b33150
+HudBuilder,setBarNodeSnap,method,2,1,1,bool,int,007697d6,00b33150
+HudBuilder,setBarNodeSnapDir,method,2,1,1,bool,bool,007698ce,00b33150
+HudBuilder,setBarNodeInverse,method,2,1,1,bool,bool,007699cf,00b33150
+HudBuilder,setBarNodeValueVariable,method,2,1,1,bool,std::string,00769ad0,00b33150
+HudBuilder,setBarNodeEffect,method,2,5,5,bool,int int int int int,00769c18,00b33150
+HudBuilder,setBarNodeIncreaseShow,method,2,1,1,bool,int,00769e87,00b33150
+HudBuilder,setBarNodeMove,method,2,1,1,bool,int,00769f7f,00b33150
+HudBuilder,setBarNodeAnim,method,2,3,3,bool,int int int,0076a077,00b33150
+HudBuilder,setBarNodeSpanValues,method,2,2,2,bool,float float,0076a225,00b33150
+HudBuilder,setBarNodeRound,method,2,3,3,bool,int float float,0076a37e,00b33150
+HudBuilder,createCompassNode,method,2,9,9,bool,std::string std::string int int int int int bool bool,0076a536,00b33150
+HudBuilder,setCompassNodeTexture,method,2,2,2,bool,int std::string,0076a9b5,00b33150
+HudBuilder,setCompassNodeVariableTexture,method,2,2,2,bool,int std::string,0076ab5c,00b33150
+HudBuilder,setCompassNodeBorder,method,2,4,4,bool,int int int int,0076ad03,00b33150
+HudBuilder,setCompassNodeSnapOffset,method,2,4,4,bool,int int int int,0076af0d,00b33150
+HudBuilder,setCompassNodeSnapTexture,method,2,2,2,bool,bool std::string,0076b117,00b33150
+HudBuilder,setCompassNodeValueVariable,method,2,1,1,bool,std::string,0076b2bf,00b33150
+HudBuilder,setCompassNodeOffset,method,2,1,1,bool,int,0076b407,00b33150
+HudBuilder,setCompassNodeTextureSize,method,2,2,2,bool,int int,0076b4ff,00b33150
+HudBuilder,setCompassNodeTiltValues,method,2,2,2,bool,int int,0076b651,00b33150
+HudBuilder,createButtonNode,method,2,6,6,bool,std::string std::string int int int int,0076b7a3,00b33150
+HudBuilder,setButtonNodeTexture,method,2,2,2,bool,int std::string,0076bafe,00b33150
+HudBuilder,setButtonNodeMouseArea,method,2,4,4,bool,int int int int,0076bca5,00b33150
+HudBuilder,setButtonNodeMouseOverColor,method,2,4,4,bool,float float float float,0076beaf,00b33150
+HudBuilder,setButtonNodeConCmd,method,2,2,2,bool,std::string int,0076c0c3,00b33150
+HudBuilder,setButtonNodeAltConCmd,method,2,2,2,bool,std::string int,0076c268,00b33150
+HudBuilder,setButtonNodeFunction,method,2,2,2,bool,std::string int,0076c40d,00b33150
+HudBuilder,setButtonNodeDebug,method,2,1,1,bool,bool,0076c5b2,00b33150
+HudBuilder,createMouseOverNode,method,2,6,6,bool,std::string std::string int int int int,0076c6b3,00b33150
+HudBuilder,setMouseOverNodeTexture,method,2,2,2,bool,int std::string,0076ca0e,00b33150
+HudBuilder,setMouseOverNodeConCmd,method,2,2,2,bool,std::string int,0076cbb5,00b33150
+HudBuilder,createTextNode,method,2,6,6,bool,std::string std::string int int int int,0076cd5a,00b33150
+HudBuilder,setTextNodeString,method,2,1,1,bool,std::string,0076d0b5,00b33150
+HudBuilder,setTextNodeStyle,method,2,2,2,bool,std::string int,0076d1fd,00b33150
+HudBuilder,setTextNodeOutLine,method,2,1,1,bool,std::string,0076d3a2,00b33150
+HudBuilder,setTextNodeOutLineOffset,method,2,2,2,bool,float float,0076d4ea,00b33150
+HudBuilder,setTextNodeStringVariable,method,2,1,1,bool,std::string,0076d643,00b33150
+HudBuilder,setTruncate,method,2,1,1,bool,bool,0076d78b,00b33150
+HudBuilder,setNodeShowVariable,method,2,1,1,bool,std::string,0076d88c,00b33150
+HudBuilder,setNodeShowConCmd,method,2,2,2,bool,std::string int,0076d9d4,00b33150
+HudBuilder,addNodeAlphaShowEffect,method,2,0,0,bool,,0076db79,
+HudBuilder,addNodeMoveShowEffect,method,2,2,2,bool,float int,0076dbfe,00b33150
+HudBuilder,addNodeBlendEffect,method,2,2,2,bool,int int,0076dd58,00b33150
+HudBuilder,addNodeVariableMoveShowEffect,method,2,2,2,bool,std::string std::string,0076deaa,00b33150
+HudBuilder,setNodeLogicShowVariable,method,2,3,3,bool,std::string std::string int,0076e090,00b33150
+HudBuilder,setNodeAlphaVariable,method,2,1,1,bool,std::string,0076e2d7,00b33150
+HudBuilder,setNodeRGBVariables,method,2,3,3,bool,std::string std::string std::string,0076e41f,00b33150
+HudBuilder,setNodeColor,method,2,4,4,bool,float float float float,0076e6a9,00b33150
+HudBuilder,setNodePos,method,2,2,2,bool,int int,0076e8bd,00b33150
+HudBuilder,setNodeOffset,method,2,2,2,bool,int int,0076ea0f,00b33150
+HudBuilder,setNodePosVariable,method,2,2,2,bool,int std::string,0076eb61,00b33150
+HudBuilder,setNodeTimesBlink,method,2,2,2,bool,int int,0076ed08,00b33150
+HudBuilder,setNodeIntervalBlink,method,2,1,1,bool,float,0076ee5a,00b33150
+HudBuilder,setNodeInTime,method,2,1,1,bool,float,0076ef55,00b33150
+HudBuilder,setNodeOutTime,method,2,1,1,bool,float,0076f050,00b33150
+HudBuilder,setNodeSize,method,2,2,2,bool,int int,0076f14b,00b33150
+HudBuilder,deleteNode,method,2,0,0,bool,,0076f29d,
+HudBuilder,searchNodes,method,2,2,2,meme::Node*,std::string std::string,0076f322,00b33150
+HudBuilder,setActiveObject,method,2,2,2,bool,std::string std::string,0076f508,00b33150
+HudBuilder,newLayer,method,2,0,0,bool,,0076f6ee,
+Minimap,setPaintKit,method,2,1,1,void,int,0076f773,00b33150
+Minimap,setPaintAllKits,method,2,0,0,void,,0076f871,
+Minimap,setPaintVehicle,method,2,1,1,void,int,0076f8e8,00b33150
+Minimap,setPaintAllVehicles,method,2,0,0,void,,0076f9d1,
+Minimap,setCurrOrderList,method,2,1,1,void,int,0076fa48,00b33150
+Minimap,setZoom,method,2,0,0,void,,0076fb31,
+Minimap,setFullScreenZoom,method,2,1,1,void,int,0076fba8,00b33150
+Minimap,toggleShowKits,method,2,0,0,void,,0076fc93,
+Minimap,setCommanderOffset,method,2,1,1,void,Vec2,0076fd10,00b33150
+Minimap,setSourceBlend,method,2,1,1,void,int,0076fe45,00b33150
+Minimap,setDestinationBlend,method,2,1,1,void,int,0076ff2e,00b33150
+Minimap,setFilterColor,method,2,4,4,void,float float float float,00770017,00b33150
+HudItems,setBool,method,2,2,2,void,std::string bool,0077024e,00b33150
+HudItems,setString,method,2,2,2,void,std::string std::string,007703ef,00b33150
+HudItems,setFloat,method,2,2,2,void,std::string float,007705cc,00b33150
+SquadLeader,sendOrder,method,2,2,2,void,int bool,00770771,00b33150
+SquadLeader,sendRequest,method,2,2,2,void,int bool,007708d4,00b33150
+SquadLeader,sendRequestForOrder,method,2,0,0,void,,00770a2c,
+SquadLeader,addRemoveCP,method,2,0,0,void,,00770a9c,
+SquadLeader,issueSquadRequest,method,2,0,0,void,,00770b0d,
+Commander,commanderApply,method,2,0,0,void,,00770b7d,
+Commander,commanderResign,method,2,0,0,void,,00770bed,
+Commander,commanderMutiny,method,2,0,0,void,,00770c5d,
+Commander,sendOrder,method,2,2,2,void,int bool,00770ccd,00b33150
+Commander,toggleArtilleryState,method,2,0,0,void,,00770de5,
+Commander,toggleUAVState,method,2,0,0,void,,00770e55,
+Commander,toggleSupplyState,method,2,0,0,void,,00770ec5,
+Commander,toggleMoveTitanState,method,2,0,0,void,,00770f35,
+Commander,toggleOrbitalStrikeState,method,2,0,0,void,,00770fa5,
+Commander,orbitalStrike,method,2,0,0,void,,00771015,
+Commander,orbitalStrikeZoom,method,2,0,0,void,,00771085,
+Commander,defendOrbitalStrike,method,2,0,0,void,,007710f5,
+Commander,artillery,method,2,0,0,void,,00771165,
+Commander,moveTitan,method,2,0,0,void,,007711d5,
+Commander,satellite,method,2,0,0,bool,,00771245,
+Commander,uav,method,2,0,0,bool,,007712c5,
+Commander,supplies,method,2,0,0,bool,,0077135c,
+Commander,accept,method,2,1,1,void,bool,007713f3,00b33150
+Commander,commRoseAccept,method,2,1,1,void,bool,007714df,00b33150
+Commander,detailedView,method,2,0,0,void,,007715cb,
+Commander,zoomCommander,method,2,0,0,bool,,0077163b,
+Commander,artilleryZoom,method,2,0,0,void,,007716b9,
+Commander,defendArtillery,method,2,0,0,void,,00771729,
+Commander,satelliteZoom,method,2,0,0,void,,00771799,
+Commander,defendSatellite,method,2,0,0,void,,00771809,
+Commander,uavZoom,method,2,0,0,void,,00771879,
+Commander,defendUAV,method,2,0,0,void,,007718e9,
+Commander,moveTitanZoom,method,2,0,0,void,,00771959,
+Commander,defendMoveTitan,method,2,0,0,void,,007719c9,
+Commander,issueOrder,method,2,0,0,void,,00771a39,
+Commander,spottedMouseOver,method,2,1,1,void,int,00771aa9,00b33150
+Squad,leaveSquad,method,2,0,0,void,,00771b8b,
+CommanderMenu,singleClick,method,2,0,0,void,,00771bfb,
+CommanderMenu,rightClick,method,2,0,0,void,,00771c87,
+CommanderMenu,doubleClick,method,2,0,0,void,,00771cfe,
+CommanderMenu,deselect,method,2,0,0,void,,00771d75,
+CommanderMenu,toggleSquadTab,method,2,0,0,void,,00771dec,
+CommanderMenu,toggleMapTab,method,2,0,0,void,,00771e63,
+CommanderMenu,toggleCommanderToolsTab,method,2,0,0,void,,00771eda,
+CommanderMenu,sendRadioMessage,method,2,2,2,void,std::string TargetChannel,00771f51,00b33150
+SquadMenu,doubleClickNew,method,2,0,0,void,,007720e9,
+SquadMenu,singleClickNew,method,2,0,0,void,,00772160,
+SquadMenu,createSquad,method,2,0,0,void,,007721d7,
+SquadMenu,setSquadCreateSelect,method,2,1,1,void,bool,0077224e,00b33150
+SquadMenu,squadCreateLockToggle,method,2,0,0,void,,00772341,
+SquadMenu,setSquadNameSelect,method,2,0,0,void,,007723b8,
+SquadMenu,setShowInviteList,method,2,1,1,void,bool,0077242f,00b33150
+SquadMenu,applyInviteList,method,2,0,0,void,,00772522,
+SquadMenu,doubleClickInvite,method,2,0,0,void,,00772599,
+SquadMenu,singleClickInvite,method,2,0,0,void,,007725eb,
+SquadLeaderInterface,selectOrder,method,2,1,1,bool,std::string,00772677,00b33150
+SquadLeaderInterface,setStringMap,method,2,3,3,void,std::string std::string std::string,007727b4,00b33150
+SquadLeaderInterface,setVariableMap,method,2,3,3,void,std::string std::string std::string,00772a35,00b33150
+SquadInterface,selectOrder,method,2,1,1,bool,std::string,00772ccb,00b33150
+SquadInterface,setStringMap,method,2,3,3,void,std::string std::string std::string,00772e08,00b33150
+SquadInterface,setVariableMap,method,2,3,3,void,std::string std::string std::string,00773089,00b33150
+CommanderInterface,selectOrder,method,2,1,1,bool,std::string,0077331f,00b33150
+CommanderInterface,setStringMap,method,2,3,3,void,std::string std::string std::string,0077345c,00b33150
+CommanderInterface,setVariableMap,method,2,3,3,void,std::string std::string std::string,007736dd,00b33150
+RadioInterface,selectOrder,method,2,1,1,bool,std::string,00773973,00b33150
+RadioInterface,mouseOver,method,2,1,1,bool,int,00773ab0,00b33150
+RadioInterface,setStringMap,method,2,3,3,void,std::string std::string std::string,00773bad,00b33150
+RadioInterface,setVariableMap,method,2,3,3,void,std::string std::string std::string,00773e43,00b33150
+RadioVehicleInterface,selectOrder,method,2,1,1,bool,std::string,007740c4,00b33150
+RadioVehicleInterface,setStringMap,method,2,3,3,void,std::string std::string std::string,00774216,00b33150
+RadioVehicleInterface,setVariableMap,method,2,3,3,void,std::string std::string std::string,00774497,00b33150
+DemoCameraInterface,selectOrder,method,2,1,1,bool,std::string,00774718,00b33150
+DemoCameraInterface,setStringMap,method,2,3,3,void,std::string std::string std::string,00774855,00b33150
+DemoCameraInterface,setVariableMap,method,2,3,3,void,std::string std::string std::string,00774ad6,00b33150
+DemoRecorderInterface,selectOrder,method,2,1,1,bool,std::string,00774d6c,00b33150
+DemoRecorderInterface,setStringMap,method,2,3,3,void,std::string std::string std::string,00774ebe,00b33150
+DemoRecorderInterface,setVariableMap,method,2,3,3,void,std::string std::string std::string,0077513f,00b33150
+CameraInterface,selectOrder,method,2,1,1,bool,std::string,007753c0,00b33150
+CameraInterface,setStringMap,method,2,3,3,void,std::string std::string std::string,00775512,00b33150
+CameraInterface,setVariableMap,method,2,3,3,void,std::string std::string std::string,00775793,00b33150
+Radio,sendKitMessage,method,2,0,0,void,,00775a14,
+Radio,sendSpottedMessage,method,2,2,2,void,bool world::VehicleType,00775a84,00b33150
+Radio,setSpottedMenuActive,method,2,0,0,void,,00775bd0,
+Radio,callForMedic,method,2,0,0,void,,00775c40,
+Radio,callForAmmo,method,2,0,0,void,,00775cb0,
+Radio,callForRepair,method,2,0,0,void,,00775d20,
+Radio,answer,method,2,1,1,void,bool,00775d90,00b33150
+SpawnManager,setPlayerTeam,method,2,1,1,void,int,00775e98,00b33150
+SpawnManager,setPlayerKit,method,2,1,1,void,int,00775f83,00b33150
+SpawnManager,commitSuicide,method,2,0,0,void,,0077606c,
+SpawnManager,toggleMembers,method,2,1,1,void,bool,007760e3,00b33150
+UnlockInterface,selectNextUnlock,method,2,4,4,bool,int UnlockBranch int bool,007761eb,00b33150
+UnlockInterface,spendFieldUnlock,method,2,2,2,void,int UnlockBranch,0077640b,00b33150
+UnlockInterface,changeToKit,method,2,1,1,void,int,00776554,00b33150
+UnlockInterface,selectUnlockItem,method,2,4,4,void,int UnlockBranch int bool,0077663d,00b33150
+UnlockInterface,showUnlockInterface,method,2,1,1,void,int,00776852,00b33150
+UnlockInterface,setInformationString,method,2,2,2,void,int UnlockBranch,0077693b,00b33150
+UnlockInterface,resetInformationString,method,2,1,1,void,int,00776a84,00b33150
+UnlockInterface,setFieldUnlock,method,2,2,2,void,int UnlockBranch,00776b82,00b33150
+UnlockInterface,selectUnlock,method,2,1,1,void,int,00776ccb,00b33150
+KitInterface,closeCustomInterface,method,2,1,1,void,int,00776db4,00b33150
+KitInterface,chooseKitSelection,method,2,2,2,void,int int,00776eb2,00b33150
+KitInterface,chooseKitCustom,method,2,2,2,void,int int,00776ff6,00b33150
+KitInterface,selectDroppedItem,method,2,1,1,void,int,0077713a,00b33150
+KitInterface,resetMousePic,method,2,1,1,void,int,00777223,00b33150
+KitInterface,setInformationString,method,2,2,2,void,int int,0077730c,00b33150
+KitInterface,resetInformationString,method,2,1,1,void,int,00777450,00b33150
+KitInterface,setHeavyArmor,method,2,1,1,void,int,00777539,00b33150
+Chat,sayTeam,method,2,1,1,void,std::string,00777622,00b33150
+Chat,sayAll,method,2,1,1,void,std::string,0077775a,00b33150
+Scoreboard,setToggleShow,method,2,1,1,void,int,00777892,00b33150
+Scoreboard,singleClick,method,2,1,1,void,int,0077797b,00b33150
+LevelsList,setVoteMapShow,method,2,1,1,void,int,00777a79,00b33150
+LevelsList,singleClick,method,2,1,1,void,int,00777b62,00b33150
+IngameHelp,showIngameHelp,method,2,2,2,void,std::string float,00777c60,00b33150
+FreeCam,togglePlayer,method,2,1,1,void,bool,00777df9,00b33150
+FreeCam,toggleCamera,method,2,0,0,void,,00777ee7,
+FreeCam,changeTeam,method,2,1,1,void,int,00777f5a,00b33150
+ObjectTemplate,soundFilename,property,2,0,1,std::string,std::string,007f1f80,
+ObjectTemplate,volumeEnvelope,property,2,0,1,std::string,std::string,007f2180,
+ObjectTemplate,pitchEnvelope,property,2,0,1,std::string,std::string,007f2380,
+ObjectTemplate,loopCount,property,2,0,1,int,int,007f2580,
+ObjectTemplate,minDistance,property,2,0,1,float,float,007f28f0,
+ObjectTemplate,halfVolumeDistance,property,2,0,1,float,float,007f2c50,
+ObjectTemplate,volume,property,2,0,1,float,float,007f2f60,
+ObjectTemplate,pitch,property,2,0,1,float,float,007f3150,
+ObjectTemplate,reverbLevel,property,2,0,1,float,float,007f3460,
+ObjectTemplate,soundRadius,property,2,0,1,float,float,007f36f0,
+ObjectTemplate,isTitanAmbient,property,2,0,1,bool,bool,007f38b0,
+ObjectTemplate,lowSamples,property,2,0,1,int,int,007f3a70,
+ObjectTemplate,mediumSamples,property,2,0,1,int,int,007f3cb0,
+ObjectTemplate,randomMode,property,2,0,1,int,int,007f3e60,
+ObjectTemplate,is3dSound,property,2,0,1,bool,bool,007f4010,
+ObjectTemplate,stopType,property,2,0,1,int,int,007f4200,
+ObjectTemplate,pan,property,2,0,1,float,float,007f43e0,
+ObjectTemplate,position,property,2,0,1,Vec3,Vec3,007f45d0,
+ObjectTemplate,coneDirection,property,2,0,1,Vec3,Vec3,007f4870,
+ObjectTemplate,coneInnerAngle,property,2,0,1,float,float,007f4b40,
+ObjectTemplate,coneOuterAngle,property,2,0,1,float,float,007f4db0,
+ObjectTemplate,coneOuterVolume,property,2,0,1,float,float,007f50c0,
+ObjectTemplate,globalEffectLevel,property,2,0,1,float,float,007f5300,
+ObjectTemplate,volumeGroup,property,2,0,1,int,int,007f5540,
+Sound,masterVolume,property,2,0,1,float,float,007f5750,
+Sound,listenerReverb,property,2,0,1,float,float,007f5930,
+Sound,dopplerEffect,property,2,0,1,float,float,007f5b10,
+Sound,removeAllTriggers,method,2,0,0,void,,007f5d60,
+Sound,interactiveMode,property,2,0,1,bool,bool,007f5e20,
+Sound,initialize,method,2,3,3,SoundInitResult,int std::string int,007f6060,
+Sound,addSound,method,2,1,1,void,std::string,007f6330,
+Sound,addMenuSound,method,2,2,5,void,std::string std::string float bool bool,007f64f0,
+Sound,playSound,method,2,1,1,void,std::string,007f69f0,
+Sound,stopSound,method,2,1,1,void,std::string,007f6bb0,
+Sound,tinnitusSetup,method,2,5,5,void,std::string float float float float,007f6d70,
+Sound,windSetup,method,2,2,2,void,std::string float,007f7150,
+Sound,addTrigger,method,2,1,1,void,std::string,007f7390,
+Sound,showStats,property,2,0,1,bool,bool,007f7550,
+Sound,showSoundSources,property,2,0,1,bool,bool,007f7700,
+Sound,setProperty,method,2,2,2,void,std::string float,007f78b0,
+Sound,getProperty,method,2,1,1,std::string,std::string,007f7b10,
+Sound,setReverb,method,2,1,1,void,std::string,007f7cd0,
+Sound,getAllSoundTemplates,method,2,0,0,std::string,,007f7e90,
+Sound,tweakTemplate,method,2,7,7,void,std::string float float float float float float,007f8020,
+Sound,loadMusic,method,2,1,1,bool,std::string,007f8520,
+Sound,playMusic,method,2,0,0,bool,,007f86e0,
+Sound,stopMusic,method,2,1,1,bool,float,007f87d0,
+Sound,setVolumeForGroup,method,2,2,2,void,int float,007f8960,
+Sound,getVolumeForGroup,method,2,1,1,float,int,007f8b90,
+Sound,setMuteLevel,method,2,2,2,void,int float,007f8d10,
+AITemplate,create,method,2,1,1,std::string,std::string,0088261e,00b4af38
+AITemplate,active,property,2,0,1,std::string,std::string,0088278a,00b4af38
+AITemplate,types,property,2,0,1,int,int,00882900,00b4af38
+AITemplate,degeneration,property,2,0,1,float,float,00882a0e,00b4af38
+AITemplate,allowedTimeDiff,property,2,0,1,float,float,00882b19,00b4af38
+AITemplate,basicTemp,property,2,0,1,float,float,00882c24,00b4af38
+AITemplate,commonKnowledge,property,2,0,1,bool,bool,00882d2f,00b4af38
+AITemplate,secondary,property,2,0,1,bool,bool,00882e31,00b4af38
+AITemplate,addType,method,2,1,1,void,ai::InformationType,00882f33,00b4af38
+AITemplate,addPlugIn,method,2,1,1,std::string,std::string,0088301b,00b4af38
+AITemplatePlugIn,create,method,2,2,2,std::string,std::string std::string,0088317b,00b4af38
+AITemplatePlugIn,active,property,2,0,1,std::string,std::string,00883383,00b4af38
+AITemplatePlugIn,vehicleNumber,property,2,0,1,int,int,008834f9,00b4af38
+AITemplatePlugIn,setPathfindingMap,method,2,1,1,void,std::string,00883601,00b4af38
+AITemplatePlugIn,maxSpeed,property,2,0,1,float,float,0088372a,00b4af38
+AITemplatePlugIn,setSoundSphereRadius,method,2,2,2,void,float float,0088383b,00b4af38
+AITemplatePlugIn,setHearingProbability,method,2,2,2,void,float float,00883980,00b4af38
+AITemplatePlugIn,spaceNeededTweak,property,2,0,1,float,float,00883ac5,00b4af38
+AITemplatePlugIn,speedAtZeroSpace,property,2,0,1,float,float,00883bd6,00b4af38
+AITemplatePlugIn,backingSpeed,property,2,0,1,float,float,00883ce7,00b4af38
+AITemplatePlugIn,brakeDistance,property,2,0,1,float,float,00883df8,00b4af38
+AITemplatePlugIn,maxBrakePercentage,property,2,0,1,float,float,00883f18,00b4af38
+AITemplatePlugIn,lookAheadTime,property,2,0,1,float,float,00884029,00b4af38
+AITemplatePlugIn,minSpeedForLookAhead,property,2,0,1,float,float,0088413a,00b4af38
+AITemplatePlugIn,minAngleDiffForSlowDown,property,2,0,1,float,float,0088424b,00b4af38
+AITemplatePlugIn,angleSlowDownScale,property,2,0,1,float,float,0088435c,00b4af38
+AITemplatePlugIn,maxAngleDiffSlowDown,property,2,0,1,float,float,0088446d,00b4af38
+AITemplatePlugIn,setStrType,method,2,1,1,void,CombatStrengthType,0088457e,00b4af38
+AITemplatePlugIn,setIsAntiAircraft,method,2,1,1,void,int,0088466d,00b4af38
+AITemplatePlugIn,cullDistance,property,2,0,1,float,float,0088475a,00b4af38
+AITemplatePlugIn,equipmentTypeName,property,2,0,1,std::string,std::string,00884874,00b4af38
+AITemplatePlugIn,setBattleStrength,method,2,2,2,void,int float,008849d8,00b4af38
+AITemplatePlugIn,setStrategicStrength,method,2,2,2,void,int int,00884b31,00b4af38
+AITemplatePlugIn,selectKey,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,00884c82,00b4af38
+AITemplatePlugIn,setUseNoPathfindingToGetToObject,method,2,1,1,void,bool,00884df1,00b4af38
+AITemplatePlugIn,setHasExposedSoldier,method,2,1,1,void,bool,00884ed1,00b4af38
+AITemplatePlugIn,driveControls,readonly,2,0,0,u64,,00884fb1,
+AITemplatePlugIn,aimControls,readonly,2,0,0,u64,,00885068,
+AITemplatePlugIn,lookControls,readonly,2,0,0,u64,,0088514d,
+AITemplatePlugIn,proportionalConstant,property,2,0,1,float,float,008851d3,00b4af38
+AITemplatePlugIn,derivativeConstant,property,2,0,1,float,float,008852ea,00b4af38
+AITemplatePlugIn,angleSpeedConstant,property,2,0,1,float,float,00885401,00b4af38
+AITemplatePlugIn,yawScale,property,2,0,1,float,float,00885512,00b4af38
+AITemplatePlugIn,driveThrottleControl,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,00885623,00b4af38
+AITemplatePlugIn,driveTurnControl,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,0088573b,00b4af38
+AITemplatePlugIn,aimVerticalControl,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,00885853,00b4af38
+AITemplatePlugIn,aimHorizontalControl,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,0088596b,00b4af38
+AITemplatePlugIn,lookVerticalControl,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,00885a83,00b4af38
+AITemplatePlugIn,lookHorizontalControl,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,00885b9b,00b4af38
+AITemplatePlugIn,setCameraRelativeDofRotationOffsetDeg,method,2,1,1,void,float,00885cb3,00b4af38
+AITemplatePlugIn,setCameraRelativeMinRotationDeg,method,2,1,1,void,hfe::Vec3,00885da2,00b4af38
+AITemplatePlugIn,setCameraRelativeMaxRotationDeg,method,2,1,1,void,hfe::Vec3,00885ebf,00b4af38
+AITemplatePlugIn,maxClimbAngle,property,2,0,1,float,float,00885fe1,00b4af38
+AITemplatePlugIn,maxRollAngle,property,2,0,1,float,float,008860f2,00b4af38
+AITemplatePlugIn,driveRollControl,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,00886212,00b4af38
+AITemplatePlugIn,drivePitchControl,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,0088632a,00b4af38
+AITemplatePlugIn,aimThrottleControl,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,00886442,00b4af38
+AITemplatePlugIn,aimRollControl,property,2,0,1,io::PlayerInputMap,io::PlayerInputMap,0088655a,00b4af38
+AITemplatePlugIn,isFloating,property,2,0,1,bool,bool,00886672,00b4af38
+weaponTemplate,create,method,2,1,1,std::string,std::string,00886780,00b4af38
+weaponTemplate,active,property,2,0,1,std::string,std::string,008868e0,00b4af38
+weaponTemplate,deviation,property,2,0,1,float,float,00886a62,00b4af38
+weaponTemplate,indirect,property,2,0,1,bool,bool,00886b6d,00b4af38
+weaponTemplate,minRange,property,2,0,1,float,float,00886c6d,00b4af38
+weaponTemplate,maxRange,property,2,0,1,float,float,00886d78,00b4af38
+weaponTemplate,weaponActivate,property,2,0,1,hfe::io::PlayerInputMap,hfe::io::PlayerInputMap,00886e83,00b4af38
+weaponTemplate,weaponFire,property,2,0,1,hfe::io::PlayerInputMap,hfe::io::PlayerInputMap,00886f85,00b4af38
+weaponTemplate,isThrown,property,2,0,1,bool,bool,00887087,00b4af38
+weaponTemplate,soundSphereRadius,property,2,0,1,float,float,00887198,00b4af38
+weaponTemplate,setStrength,method,2,2,2,void,CombatStrengthType float,008872a3,00b4af38
+weaponTemplate,fireRate,property,2,0,1,int,int,008873ed,00b4af38
+weaponTemplate,firingPose,property,2,0,1,SoldierPose,SoldierPose,008874ef,00b4af38
+weaponTemplate,optimalRangePercentage,property,2,0,1,float,float,00887649,00b4af38
+weaponTemplate,explosionRadius,property,2,0,1,float,float,00887754,00b4af38
+weaponTemplate,allowedDeviation,property,2,0,1,float,float,0088785f,00b4af38
+weaponTemplate,firesThroughTransparent,property,2,0,1,bool,bool,0088796a,00b4af38
+weaponTemplate,isEmpWeapon,property,2,0,1,bool,bool,00887a6c,00b4af38
+weaponTemplate,explodesOnImpact,property,2,0,1,bool,bool,00887b6e,00b4af38
+weaponTemplate,weaponType,property,2,0,1,WeaponType,WeaponType,00887c70,00b4af38
+weaponTemplate,shouldRearm,property,2,0,1,bool,bool,00887dca,00b4af38
+weaponTemplate,isAntiAirWeapon,property,2,0,1,bool,bool,00887ecc,00b4af38
+kitTemplate,create,method,2,2,2,std::string,std::string KitType,00887fdd,00b4af38
+kitTemplate,active,property,2,0,1,std::string,std::string,0088819a,00b4af38
+kitTemplate,getStrategicStrength,method,2,1,1,int,int,0088831c,00b4af38
+kitTemplate,setStrategicStrength,method,2,2,2,void,int int,00888408,00b4af38
+kitTemplate,getBattleStrength,method,2,1,1,int,CombatStrengthType,00888546,00b4af38
+kitTemplate,setBattleStrength,method,2,2,2,void,CombatStrengthType float,0088862a,00b4af38
+kitTemplate,getType,method,2,0,0,KitType,,0088877c,
+aiComm,addAIRadioMessage,method,2,4,4,void,std::string float float float,00888853,00b4af38
+RagDoll,reset,method,2,0,0,void,,008ae503,
+RagDoll,save,method,2,0,0,void,,008ae56e,
+RagDoll,active,method,2,1,1,void,bool,008ae5db,00b4d8dc
+RagDoll,drawConstraints,method,2,1,1,void,bool,008ae6b7,00b4d8dc
+RagDoll,gravity,method,2,1,1,void,float,008ae792,00b4d8dc
+RagDoll,skeleton,method,2,1,1,void,std::string,008ae871,00b4d8dc
+RagDoll,addParticle,method,2,2,2,void,int float,008ae996,00b4d8dc
+RagDoll,addBone,method,2,2,2,void,int int,008aead8,00b4d8dc
+RagDoll,lockBone,method,2,2,2,void,int int,008aebeb,00b4d8dc
+RagDoll,toSkeleton,method,2,3,3,void,int int int,008aed25,00b4d8dc
+RagDoll,linkMode,method,2,2,2,void,int int,008aeebb,00b4d8dc
+RagDoll,addConstraint,method,2,2,2,void,int int,008aeff6,00b4d8dc
+RagDoll,addCapsuleCollision,method,2,2,2,void,int int,008af130,00b4d8dc
+RagDoll,addAngularConstraint,method,2,4,4,void,int int int float,008af26a,00b4d8dc
+RagDoll,addDihedralAngleConstraint,method,2,5,5,void,int int int int float,008af466,00b4d8dc
+RagDoll,removeConstraint,method,2,2,2,void,int int,008af6be,00b4d8dc
+RagDoll,addForce,method,2,2,2,void,int Vec3,008af7f8,00b4d8dc
+RagDoll,setParticleCollisionCriteria,method,2,2,2,void,float float,008af973,00b4d8dc
+RagDoll,addJointConstraint,method,2,2,2,void,int int,008afab4,00b4d8dc
+RagDoll,addDistanceLessThanConstraint,method,2,3,3,void,int int float,008afbee,00b4d8dc
+AnimationSystem,create,method,2,1,1,void,std::string,008afd9a,00b4d8dc
+AnimationSystem,active,property,2,0,1,std::string,std::string,008afebf,00b4d8dc
+AnimationSystem,list,method,2,0,0,std::string,,008b001b,
+AnimationSystem,playbackModifier,property,2,0,1,float,float,008b00be,00b4d8dc
+AnimationSystem,saveActive,method,2,0,0,void,,008b01c5,
+AnimationSystem,save,method,2,1,1,void,std::string,008b024b,00b4d8dc
+AnimationSystem,reloadScript,method,2,0,0,void,,008b0377,
+AnimationSystem,createBundle,method,2,1,1,anim::Bundle*,std::string,008b03eb,00b4d8dc
+AnimationSystem,deleteActiveBundle,method,2,0,0,void,,008b053e,
+AnimationSystem,createTrigger,method,2,2,2,anim::Trigger*,std::string std::string,008b05ac,00b4d8dc
+AnimationSystem,deleteActiveTrigger,method,2,0,0,void,,008b0792,
+AnimationSystem,listTriggerTypes,method,2,0,0,std::string,,008b0800,
+AnimationSystem,activeBundle,property,2,0,1,std::string,std::string,008b089b,00b4d8dc
+AnimationSystem,listBundles,method,2,0,0,std::string,,008b09f9,
+AnimationSystem,activeTrigger,property,2,0,1,std::string,std::string,008b0aa9,00b4d8dc
+AnimationSystem,listTriggers,method,2,0,0,std::string,,008b0c28,
+AnimationSystem,hide,method,2,0,0,void,,008b0cd8,
+AnimationSystem,createAnimation,method,2,1,1,anim::BoneAnimation*,std::string,008b0d51,00b4d8dc
+AnimationSystem,listAnimations,method,2,0,0,std::string,,008b0e84,
+AnimationSystem,activeAnimation,property,2,0,1,std::string,std::string,008b0f27,00b4d8dc
+AnimationSystem,createValueHolder,method,2,1,1,void,std::string,008b108f,00b4d8dc
+AnimationSystem,listValueHolders,method,2,0,0,std::string,,008b11b4,
+AnimationSystem,saveValueHolders,method,2,0,0,void,,008b1257,
+AnimationSystem,activeValueHolder,property,2,0,1,std::string,std::string,008b12c4,00b4d8dc
+AnimationSystem,cameraSpring.use,property,2,0,1,bool,bool,008b142c,00b4d8dc
+AnimationSystem,cameraSpring.amplitude,property,2,0,1,Vec3,Vec3,008b1549,00b4d8dc
+AnimationSystem,cameraSpring.zoomDamping,property,2,0,1,Vec3,Vec3,008b16bb,00b4d8dc
+AnimationSystem,cameraSpring.stiffness,property,2,0,1,Vec3,Vec3,008b1848,00b4d8dc
+AnimationSystem,cameraSpring.look,property,2,0,1,Vec2,Vec2,008b19c9,00b4d8dc
+AnimationSystem,cameraSpring.move,property,2,0,1,Vec3,Vec3,008b1b2a,00b4d8dc
+AnimationSystem,cameraSpring.hit,property,2,0,1,Vec3,Vec3,008b1cab,00b4d8dc
+AnimationSystem,cameraSpring.fire,property,2,0,1,Vec3,Vec3,008b1e2c,00b4d8dc
+AnimationValueHolder,getFilename,method,2,0,0,std::string,,008b1fad,
+AnimationValueHolder,values,method,2,3,3,void,float float float,008b203b,00b4d8dc
+AnimationValueHolder,min,property,2,0,1,float,float,008b21f6,00b4d8dc
+AnimationValueHolder,normal,property,2,0,1,float,float,008b2300,00b4d8dc
+AnimationValueHolder,max,property,2,0,1,float,float,008b241a,00b4d8dc
+AnimationValueHolder,clamp,property,2,0,1,Vec2,Vec2,008b2526,00b4d8dc
+AnimationValueHolder,passOnMessage,property,2,0,1,unsigned int,unsigned int,008b266e,00b4d8dc
+AnimationValueHolder,stopOnMessage,property,2,0,1,unsigned int,unsigned int,008b2779,00b4d8dc
+AnimationManager,length,property,2,0,1,float,float,008b289a,00b4d8dc
+AnimationManager,originalLength,readonly,2,0,0,float,,008b29ae,
+AnimationManager,looping,property,2,0,1,bool,bool,008b2a2c,00b4d8dc
+AnimationManager,fadeInTime,property,2,0,1,float,float,008b2b4d,00b4d8dc
+AnimationManager,ignoreMotherOrientation,property,2,0,1,int,int,008b2c59,00b4d8dc
+AnimationManager,noiceFreq,property,2,0,1,int,int,008b2d64,00b4d8dc
+AnimationManager,noiceAmplitude,property,2,0,1,float,float,008b2e6f,00b4d8dc
+AnimationBundle,length,property,2,0,1,float,float,008b2f7b,00b4d8dc
+AnimationBundle,playBackward,property,2,0,1,bool,bool,008b30a8,00b4d8dc
+AnimationBundle,jumpToLastAnimationAtStop,property,2,0,1,bool,bool,008b31aa,00b4d8dc
+AnimationBundle,playForever,property,2,0,1,bool,bool,008b32ac,00b4d8dc
+AnimationBundle,isLooping,property,2,0,1,bool,bool,008b33ae,00b4d8dc
+AnimationBundle,abruptPlayback,property,2,0,1,bool,bool,008b34b0,00b4d8dc
+AnimationBundle,useSpeedAsTime,property,2,0,1,bool,bool,008b35b2,00b4d8dc
+AnimationBundle,fadeInTime,property,2,0,1,float,float,008b36b4,00b4d8dc
+AnimationBundle,fadeOutTime,property,2,0,1,float,float,008b37bf,00b4d8dc
+AnimationBundle,stickAround,property,2,0,1,float,float,008b38ca,00b4d8dc
+AnimationBundle,useNewSystem,property,2,0,1,bool,bool,008b39d5,00b4d8dc
+AnimationBundle,blockInput,property,2,0,1,bool,bool,008b3ad7,00b4d8dc
+AnimationBundle,forceStopPoints,property,2,0,1,std::string,std::string,008b3c18,00b4d8dc
+AnimationBundle,speedKeyPoints,property,2,0,1,std::string,std::string,008b3d88,00b4d8dc
+AnimationBundle,fadeOutSpeedKeyPoints,property,2,0,1,std::string,std::string,008b3ef8,00b4d8dc
+AnimationBundle,fadeInSpeedKeyPoints,property,2,0,1,std::string,std::string,008b406a,00b4d8dc
+AnimationBundle,listAnimations,method,2,0,0,std::string,,008b41dc,
+AnimationBundle,addAnimation,method,2,1,1,void,std::string,008b4280,00b4d8dc
+AnimationBundle,removeAnimation,method,2,1,1,void,std::string,008b43a6,00b4d8dc
+AnimationBundle,setAnimationStartTime,method,2,2,2,void,std::string float,008b44cc,00b4d8dc
+AnimationBundle,getAnimationStartTime,method,2,1,1,float,std::string,008b4653,00b4d8dc
+AnimationBundle,setAnimationLength,method,2,2,2,void,std::string float,008b4787,00b4d8dc
+AnimationBundle,getAnimationLength,method,2,1,1,float,std::string,008b490e,00b4d8dc
+AnimationBundle,listEvents,method,2,0,0,std::string,,008b4a42,
+AnimationBundle,addEvent,method,2,1,1,void,std::string,008b4ae6,00b4d8dc
+AnimationBundle,removeEvent,method,2,1,1,void,std::string,008b4c0c,00b4d8dc
+AnimationBundle,setEventStartTime,method,2,2,2,void,std::string float,008b4d32,00b4d8dc
+AnimationBundle,getEventStartTime,method,2,1,1,float,std::string,008b4eb9,00b4d8dc
+AnimationTrigger,getTypeName,method,2,0,0,std::string,,008b4fed,
+AnimationTrigger,listBundles,method,2,0,0,std::string,,008b50a5,
+AnimationTrigger,fadeInTime,property,2,0,1,float,float,008b515d,00b4d8dc
+AnimationTrigger,addChild,method,2,1,1,void,std::string,008b5290,00b4d8dc
+AnimationTrigger,removeChild,method,2,1,1,void,std::string,008b53c8,00b4d8dc
+AnimationTrigger,addBundle,method,2,1,1,void,std::string,008b5521,00b4d8dc
+AnimationTrigger,removeBundle,method,2,1,1,void,std::string,008b5659,00b4d8dc
+AnimationTrigger,overridePrio,property,2,0,1,int,int,008b5791,00b4d8dc
+AnimationTrigger,message,property,2,0,1,int,int,008b58bb,00b4d8dc
+AnimationTrigger,valueHolder,property,2,0,1,std::string,std::string,008b5a06,00b4d8dc
+AnimationTrigger,useDirection,property,2,0,1,bool,bool,008b5b88,00b4d8dc
+AnimationTrigger,triggerOnAcceleration,property,2,0,1,bool,bool,008b5cbf,00b4d8dc
+AnimationTrigger,clearValueHolder,method,2,0,0,void,,008b5e17,
+AnimationTrigger,idleTime,property,2,0,1,Vec2,Vec2,008b5e97,00b4d8dc
+AnimationTrigger,count,property,2,0,1,uint,uint,008b6044,00b4d8dc
+AnimationTrigger,switchId,property,2,0,1,uint,uint,008b618f,00b4d8dc
