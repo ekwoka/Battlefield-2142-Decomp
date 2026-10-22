@@ -182,11 +182,40 @@ plus `friLatBrakeMod` at `0x79c`; defaults in `0x006291d0`). Per tick:
   between keys at 0.2 ... 1 that `setGearRatios` sets (`0x00629590`,
   `0x0061ecf0`).
 
-Rewritten in `src/Game/Vehicle`. Still provisional: the steering speed,
-the clutch and gear-change timing, when the engine brakes, wheel spin in
-the air, the wheel radius (taken from the depth of the wheel's collision
-triangle), and how the hull collides with static objects (its collision
-points as small spheres against their vehicle LOD).
+- Steering: the `RotationalBundle` axis update (`0x00563bd0`). The debug
+  variable `rot-use-old` is 1 (`0x008de9e0`), which selects the branch in
+  which an `automaticReset` axis (the FAV's `nav` bundles) moves its angle
+  straight to `input × maxRotation` at `|acceleration|` degrees a second
+  (100: full lock in 0.32 s); other axes move a speed towards `input ×
+  maxSpeed` at `|acceleration|` and turn by it. `snapToZeroOnNoInput` puts
+  the angle to 0 when the input drops under 0.05 towards its side;
+  `capMaxSpeed` and `maxSpeedMod` cap the target; the limits clamp it.
+  The values are per second as written: the getters (`0x006147c0`,
+  `0x00613ca0`) only scale by 30 while `0x00a73a1c` is 0, and it is 1.
+- Braking (`0x0064e810`, dead zone 0.04 for newCar2): the throttle
+  against the way the engine turns, or no throttle while it is nearly
+  still.
+- The clutch and gears (`0x0064e920`): the clutch starts out and comes in
+  at `2 / gearChangeTime` a second; it goes out as fast while a change is
+  under way or while braking, and a change takes effect once it is out
+  (under 0.05). Braking with the clutch out and the rpm under 0.1 selects
+  first. Up above `gearUp` with the clutch in (over 0.95), except while
+  climbing (nose over 0.174, `0x00a78ffc`) and moving forward; down when
+  the rpm in the lower gear would be under 0.55. Nearly still, first and
+  reverse change by the throttle (under −0.5, over −0.05). The rpm is the
+  wheels' blended with the old by the clutch, and an rpm the throttle no
+  longer holds decays (×0.9 braking, then ×0.96 without throttle or ×0.99
+  with: `engine-inertia3`, `engine-inertia2`). The engine's torque (slot
+  `0x1a4`) is scaled by the clutch only with `useClutchedTorque`.
+
+Rewritten in `src/Game/Vehicle` (`rotationAxisStep`,
+`Vehicle::updateEngine`). Not decoded yet: wheel spin of wheels off the
+ground (the wheel node `0x006b7910`'s branch; 0.99 a tick here) and the
+wheel radius (taken from the depth of the wheel's collision triangle).
+The hull collides with static objects as its collision points, each a
+0.2 m sphere where it ends up; the engine's mesh test (`0x006e2350`)
+sweeps a sphere along the tick's motion, and the radius its rigid-body
+caller passes is not traced.
 
 ### Seats and vehicle weapons
 
@@ -222,9 +251,9 @@ above the skeleton's root (at death `0x005f0a00` poses the skeleton at
 cockpits) keeps its soldier hidden, and a seated soldier's handheld weapon
 is put away. Rewritten in `GameWorld::poseSeated`.
 
-Rewritten in `GameWorld` (`vehicleLayout`, `seatPlayer`, `stepGunner`). Two
-things are provisional: child placements add up their offsets but leave out
-their rotations, and gun heat isn't modelled. The vehicle HUD gets its
+Rewritten in `GameWorld` (`vehicleLayout`, `seatPlayer`, `stepGunner`). Child
+placements turn their offsets by their parents' rotations, as the wheels'
+do. Gun heat isn't modelled yet. The vehicle HUD gets its
 icon, its armour, the gunner's `GuiIndex` (from the firearm's
 `weaponHud.guiIndex`) and the turret's angle. Compass nodes scroll a strip
 texture by a heading variable (`VehicleAngle`, `MinimapDelayedMapAngle`).
@@ -376,21 +405,30 @@ Locked bones follow their parents.
 
 Rewritten in `src/Animation/RagDoll` (`RagDollTemplate`, `RagDoll`,
 `loadRagDoll`; `AnimationSystems::ragDoll` loads and keeps it) and
-`GameWorld` (`startRagDoll`, `stepRagDoll`). Some parts are provisional:
+`GameWorld` (`startRagDoll`, `stepRagDoll`). What is open:
 
-- Nothing in the executable names `ragDollInit.con`, so what runs it is
-  unknown. `GameWorld` loads it from the soldiers' animation directory.
+- Nothing in the executable names `ragDollInit.con` (it names only
+  `ragDollConstraints.inc`, which `0x008a8650` writes), and no shipped
+  `.con`/`.inc`/`.tweak`/`.py` includes it, so what runs it is not
+  determinable. `GameWorld` loads it from the soldiers' animation
+  directory.
 - The explosion's push is a stand-in: 10 at the centre, falling off over
   the radius, from the blast and a little up. The engine's force
   (`0x005a66e0`) isn't traced.
 - Ragdolls collide only with the terrain and the static objects' soldier
-  LOD. The capsules test a sphere at their middle.
+  LOD. The engine's object list (`0x008ab6b0`, each step) is every object
+  with collision within `ragdoll_completeCollRadius` (1.5 m) of the middle
+  particle whose LOD 2 mesh comes within that radius (`0x006aec10`),
+  vehicles included. The capsules (`0x008abf20`, with
+  `ragdoll_useCapsuleCollision`) sweep particle a's sphere to b through
+  each object's mesh (object slot `0x7c`) and push both ends out by every
+  contact; the rewrite tests one sphere at the capsule's middle, deepest
+  contact only, as there is no swept-sphere query yet.
 
 Not rewritten yet:
 
 - the network side (`ragdoll_net_*`, `0x008acce0`);
 - the level of detail by distance to the camera (`0x008ae120`);
-- waking a sleeping body when something moves near it (`0x008ab6b0`);
 - the impact sounds (`setParticleCollisionCriteria`,
   `S_Soldier_RagDoll_Impact`);
 - `ragdollLandedDelay`.
@@ -519,7 +557,7 @@ table built at start-up ("ChallengeEvent", "CreatePlayerEvent"...). All
 | 0xc | ChangePlayerName | player id, 32 bytes |
 | 0xd, 0xe | HandleDrop, HandlePickup | player id, two ghost ids, a position or eight kit bytes |
 | 0xf | StringBlock | like DataBlock: chat text |
-| 0x15 | KilledBy | ids, a delta-coded position (`0x006876c0`), damage (10 bits) |
+| 0x15 | KilledBy | attacker, victim, has attacker, an id, two template values, the armor's byte, the position, damage (10 bits) |
 | 0x1f | CreateKit | template id, ghost id, position, 4 bits, four item bytes |
 | 0x31 | PythonCommand | type (32), 8 bits, a count (4) of 32-bit arguments |
 | 0x3f | SelectKit | kit (4), four unlock bytes (value + 1), 1 bit |
@@ -557,12 +595,12 @@ PostRemotes:
 | 0x11 | LeaveSquad | team, player, squad, 1 bit (`0x004c9c50`; another player: the leader kicks) |
 | 0x19 | Invite | team, player, squad, 1 bit set for the leader's invitation (`0x0050e700`) |
 | 0x1c | SetSquadLeader | as JoinSquad |
-| 0x16 | ChangeSquadName | squad, team, a byte, 8-bit length + name (leader only) |
+| 0x16 | ChangeSquadName | squad, team, the sender's player id, 8-bit length + name of at most 31 (`0x0050d960`). Naming an empty squad creates it: the server (`0x0050da80` → `0x004c6720`) needs the squad empty and the name unused (else PostRemote 2/0xf), names it, joins the sender (`0x004c7290`) and answers 2/0xe |
 | 0x17 | SetPrivateSquad | team, squad, 1 bit (`0x0050db90`) |
 | 0x13 | Commander | kind (0-8 in 4 bits), team, player (sign + 15; must be the sender): 0 step down, 1 withdraw, 2 resign, 3 set (s→c), 4 apply, 6 / 7 leave / enter the commander screen |
-| 0x27 | Vote | target, choice, a byte, target, two bytes, voter, phase, type (bytes), 32 bits (`0x005113c0`): phase 0 starts, 4 votes; type 1 map, 2 kick, 3 mutiny |
+| 0x27 | Vote | target, choice, top count, target, top choice, votes needed, voter, phase, type (bytes), 32 bits (`0x005113c0`, server `0x00590230`): phases 0 start, 1 failed, 2 progress / ended, 3 passed, 4 cast, 5 bad target, 6 refused, 7 too many votes; types 0 internal, 1 map, 2 kick, 3 mutiny |
 | 0x32 | Request | squad, team, 0-3 (the leader asks the commander; forwarded as PostRemote 2/0x19) |
-| 0x14 | RadioMessage | the radio table index (16 bits), a byte, 2 bits (channel), a byte, 0..0x12, 0..4 (`0x004b3020`) |
+| 0x14 | RadioMessage | the radio table index (16 bits), a byte, 2 bits (channel), a byte, 0..0x12, 0..4 (`0x004b3020`, written by `0x0050d1f0`). A client puts the channel in the byte after it too, and 0 in the last field. The first byte and the 0..0x12 value come from GameLogic slot 23's callers, which go through the scripts and weren't traced |
 
 Squad refusals come back as PostRemote category 2 (0xb full, 0xc
 private, 0x11 asks the leader). A squad is looked up before it is joined
@@ -572,12 +610,52 @@ Chat goes as a StringBlock (queued by `0x00643370`, sent by `0x006431c0`,
 put back together by `0x006430c0`): the text, then a 12-byte header
 (channel and source as 32-bit numbers, the player id and two bytes). A
 server only takes a client's line with source 2 and a channel other than
-0xc and 0xd, which are its own messages. Which channel is team or squad
-is not checked yet.
+0xc and 0xd, which are its own messages. The source is the scripts'
+"type" (GameLogic slot 37, `0x004a5ec0`): 1 from a server, 2 typed by a
+player. The channels, as `0x004ab6b0` names them for the scripts:
+
+| Channel | Name | Channel | Name |
+|---|---|---|---|
+| 0 | Global | 10 | LocalTeam |
+| 1 | Team | 11 | Vehicle |
+| 2 | Commander | 12 | ServerMessage (player 0xff) |
+| 3 | Squad | 13 | ServerTeamMessage (player 0xff) |
+| 4 | SquadLeader | 14 | Player |
+| 5 | SquadId | 15, 16 | LocalRevive |
+| 6 | LocalTeamMedic | 17 | TeamAndLocalEnemies |
+| 7 | LocalGroundVehicle | 18 | SquadAndLocalEnemies |
+| 8 | LocalAirVehicle | 19 | Invalid |
+| 9 | Local | | |
 
 Kills reach the HUD as PythonCommand type 100, with the arguments (kind,
 victim, attacker...): kind 2 goes to the victim, 0 and 1 to the attacker
-(`0x00511ba0`). KilledBy tells the victim where the damage came from.
+(`0x00511ba0`). KilledBy tells the victim where the damage came from
+(built by `0x005b7680` → `0x005b7130`, written by `0x0050d750`, handled by
+`0x0050d520`). Byte 0 is the attacker and byte 1 the victim. The two
+template values are the weapon or projectile's, then the attacker's
+vehicle's (or the source's root object's). The armor's vtable `0xdc`
+gives the byte, `0xe4` the position and `0xec` the damage. The position
+writer (`0x0050d5b0`) delta-codes only while the stream has a reference.
+`0x0057b040` clears the reference before each packet's events, and only
+the ghost block sets one, so servers send three raw floats.
+
+CreatePlayer (`0x0050a4c0`, built by `0x0050a7c0`) carries the team (3
+bits), the spawn group (4 bits, player `+0xe8`; the client handler
+ignores it), remote (1), the id (8), the player's networkable ghost (16),
+16 bits that are always 0, and then the bot bit. The builder reads the bot
+bit through player vtable `0x68` (`+0xd4`), and the handler sets it with
+`0x64` on remote players. The name, profile id and flags follow.
+
+CreateObject's rotation is in degrees (yaw, pitch, roll). `0x004ab8a0`
+builds the matrix with `0x006adb30(-z, -y, -x)`, which converts degrees
+(`× π/180`). The late-join replay produces the vector with `0x00568c30` →
+`0x006ad2a0`.
+
+HandlePickup and HandleDrop (`0x0050bfd0`, `0x0050c1c0`) carry the player,
+the kit's ghost and the soldier's ghost. The server's handler
+(`0x004bb350`) asks the third for the kit holder interface `0xc49d`; the
+soldier's QueryInterface (`0x00585af0`) answers it at `+0x188`. A drop
+then moves the kit to the position.
 
 **Ghosts** (server to client): 1 bit present, the server's tick (32 bits,
 1/30 s), 8 bits the update count, 1 bit a control-object record follows.
@@ -589,9 +667,15 @@ victim, attacker...): kind 2 goes to the victim, 0 and 1 to the attacker
   optional second ghost and vehicle, then networkable state. A client
   without that object skips it by the length.
 - Each update (`0x0057fce0`) has 2 bits kind and a 16-bit ghost id. Kind
-  1 updates: 1 bit (full), a 13-bit length (the ghost manager's `+0x2140`,
-  11 for connection type 0; provisional) and that much state. Kind 3
+  1 updates: 1 bit (full), the state's length and that much state. Kind 3
   removes the ghost; kind 0 does nothing; kind 2 is an error.
+- The length's width is the ghost manager's `+0x2140`, which both the
+  reader (`0x0057fce0`) and the writer (`0x0057fbc0`) use. It is 11 bits,
+  or 13 when the manager is built with a non-zero kind (`0x00582a50`).
+  ServerConnection `0x0057b3f0` passes its own kind. A client connecting
+  to a server uses kind 0 (`0x004b4d10`), and so do a server's per-client
+  managers (`0x004ac920`). Only demo recording (connection id `0x81`) and
+  demo playback (kind 2, `0x004b4a80`) use 13 bits.
 
 ### Ghost state
 
@@ -608,7 +692,7 @@ one only when the template has a `networkableInfo`
 
 | Template types | Networkable | Writer / reader |
 |---|---|---|
-| SimpleObject, Bundle, SupplyObject... (the default `0x0063c3f0`); a root PlayerControlObject or Parachute (`0x005c77f0`) | SimpleObject | `0x005ff5d0` / `0x005ffec0` |
+| SimpleObject and every other type that makes an object (the default `0x0063c3f0`, or SupplyObject's `0x005d0af0`; see below); a root PlayerControlObject or Parachute (`0x005c77f0`); a DestroyableObject with `hasMobilePhysics` | SimpleObject | `0x005ff5d0` / `0x005ffec0` |
 | Soldier (`0x005882f0`) | Soldier | `0x005fb8c0` / `0x005fcdb0` |
 | PlayerControlObject or Parachute with a parent (a seat) | PlayerControlObject | `0x00605650` / `0x00605b00` |
 | RotationalBundle, Camera, Wing, FloatingBundle, LandingGear (`0x005656c0`) | RotationalBundle | `0x006015a0` / `0x00602070` |
@@ -620,7 +704,7 @@ one only when the template has a `networkableInfo`
 | GenericProjectile | GenericProjectile | `0x006067c0` / `0x00606f20` |
 | Kit | Kit | `0x00605f90` / `0x00606030` |
 | ControlPoint | ControlPoint | `0x006082b0` / `0x006084b0` |
-| DestroyableObject (`0x005bf200`) | DestroyableObject | `0x006044e0` / `0x006048c0` |
+| DestroyableObject without `hasMobilePhysics` (`0x005bf200`: template interface `0xc368` slot `0x34`, `0x005049e8`) | DestroyableObject | `0x006044e0` / `0x006048c0` |
 | DestroyableWindowsBundle | DestroyableWindowsBundle | `0x00604d70` / `0x00604e00` |
 | FreeCamera, OverheadCamera | their own | `0x00602b70` / `0x00602c50`, `0x006037a0` / `0x00603980` |
 | player (`+0xc`) | (the player's) | `0x00596100` / `0x005981a0` |
@@ -628,6 +712,18 @@ one only when the template has a `networkableInfo`
 GenericFireArm, LightSource, ForceObject, Ladder, SpawnPoint and the
 particles make none (slot 94 is `0x0058cc40`, a return), whatever their
 networkableInfo: a vehicle's guns have no state of their own.
+
+Each remaining type was traced from the template's create slot to its
+object's slot 94, and all of them get the default. The list: Bundle,
+DynamicBundle, AnimatedBundle, ItemContainer, KitPart, Obstacle,
+UAVVehicle, SupplyObject, SupplyDepot, AreaObject, AmbientEffectArea,
+AntennaObject, DestroyableWindow, Emitter, EntryPoint, LookAtObject,
+ObjectSpawner, RemoteControlledObject and TurnableRemoteControlledObject,
+Rotor, Trigger and GroundEffectBundle.
+
+The effect bundles (Effect, AirDraft and WheelEffectBundle) get the
+default too, but a dedicated server never creates them (`0x0042b800`).
+Particle systems, decals and trails create no object at all.
 
 A ghost covers a subtree of objects (`0x0067c690`, cached per template):
 
@@ -672,9 +768,14 @@ SimpleObject (25-bit mask, then a flag that drops the physics fields; it
 is set for an object held by `0x00a67410`'s singleton):
 
 - position (2, 0.5 mm steps from the reference);
-- with a moving physics node (`hasMobilePhysics`; node vtable 0x164) and
-  no flag: the velocity (4, 1 mm) and the angular velocity (8, 3-bit
-  mode, 0.01);
+- with a moving physics node and no flag: the velocity (4, 1 mm) and the
+  angular velocity (8, 3-bit mode, 0.01). The node is object `+0x50`
+  (node vtable 0x164), made by template slot 29 (`0x005f6ba0`). It moves
+  when the template has `hasCollisionPhysics`, `hasMobilePhysics` and a
+  physicsType of Point, RotationalPoint or Mesh. PhysicsType is template
+  `+0xf4`, 0 (None) by default, or set by `hasPointPhysics`,
+  `hasRotationalPointPhysics` and `hasResponsePhysics`. Without mobile
+  physics only a Mesh gets a node, a static one;
 - the rotation (1, 14-bit quaternion);
 - physics again: two vectors (0x10000), four of 0.1 mm (0x80, 0x100,
   0x400, 0x800), whether the node sleeps (0x200) and a SupplyObject's bit
@@ -685,15 +786,19 @@ is set for an object held by `0x00a67410`'s singleton):
   armor `+0x27c`, falling every `armor.empLevelTime`);
 - with a TeamChange component (`+0x5c`): its changePoints rounded up
   (0x40, 8 bits);
-- 2 bits at `+0x168` (0x1000; set by an ObjectSpawner; provisional: its
-  team);
+- 2 bits at `+0x168` (0x1000; base object vtable `0x1a8` sets it and
+  `0x1ac` reads it). Which server code sets it wasn't found among the
+  vtable's many indirect callers, so its meaning is open;
 - with a PlayerControlObject on the parent chain (`0x00600560`): on a
   Parachute its state (0x8000, 0-7); else the selected weapon of weapon
   groups 0-2 as index + 1 in 0..8 (0x2000, 0x4000, 0x80000), a value
-  0-15 at PCO `+0x190` (0x40000), PCO `+0x18c` (0x100000; provisional:
-  engine on) and `+0x2be` (0x200000);
+  0-15 at PCO `+0x190` (0x40000), PCO `+0x18c` (0x100000) and `+0x2be`
+  (0x200000). PCO `+0x18c` is ducking (object `+0x310`, setter
+  `0x005c7cf0`), which `0x005ca2e0` sets from kPICrouch when the template
+  has `allowDucking`;
 - the armored objects below the root (0x800000): the root's list (object
-  vtable 0x14c), filled by `0x0060ec00` with every armored descendant;
+  vtable 0x14c), filled by `0x0060ec00` with every armored descendant in
+  post-order, each child pushed after its own init made its children;
   per object its hit points in eighths (4 bits, `armor.fullChildSync`)
   or whether it is intact (1 bit);
 - a ResponsePhysics bit (0x1000000).
@@ -710,9 +815,12 @@ Soldier (21-bit mask):
 - yaw, pitch, roll and aim, each 12 bits of ±360, ±90, ±180 and ±90
   degrees (2, 4, 8, 0x10);
 - always: the weapon's zoom level (0-3; its DefaultZoomComp), its fire
-  comp's state (0-1) and three bits;
+  comp's mode (0-1; only ExplosivesFireComp's `0x005e6350` uses it) and
+  three bits;
 - two leans of ±50 (0x800, 0x1000, 10 bits), a ResponsePhysics bit, a
-  5-bit 0..1 (0x8000; provisional: sprint);
+  5-bit 0..1 (0x8000): sprint stamina (soldier `+0x378`; PCO vtable
+  `0x108`/`0x10c`). In the control-object record (mode 3) it is 7 bits
+  plus a sprinting bit;
 - the active item (0x2000): index + 1 in `0..inventorySize + 1`
   (template `inventorySize`);
 - 2 bits (0x4000); the ladder (0x20000: its id in 9 bits, then 12 bits
@@ -728,44 +836,72 @@ Vehicle parts:
   as 0 (`0x00593c70`).
 - **Engine** (11-bit mask): the gear (2; `0..numberOfGears`), rotation
   speeds z and x (4, 8; 16 bits of 1.25 x the rotation limit), a target
-  (0x10), three inputs of ±1.25 (0x20-0x80, 12 bits), a helicopter's
+  (0x10), three values of ±1.25 (0x20-0x80, 12 bits): the throttle that
+  came out (`+0x25c`), the rotation over the template's `+0x2a4`
+  (`+0x26c`) and the frame's averaged input (`+0x260`), a helicopter's
   angle of attack (0x100), a direction (0x200, 2 bits) and newCar2's rpm,
   clutch and gear (0x400). The engineType adds the last fields.
 - **Spring** (unique): 1 bit, then the offset and velocity (narrow
-  deltas of 2 mm), and for a newCar2 engine's springs whose physics node
-  has flag 8 a value of ±256 (provisional: taken as all newCar2 springs).
-- **PlayerControlObject** (a seat): with weapons (the seat interface's
-  `+0x2c`), a 4-bit mask: the active weapon of groups 0-2 (index + 1, 4
-  bits) and a flag (provisional: alternate mode); without, an 11-bit
-  length and the occupant soldier's Soldier state.
+  deltas of 2 mm). A value of ±256 follows for some springs
+  (`0x00604f10`): those whose engine (the nearest Engine ancestor) is a
+  newCar2 one, and whose other physics (object `+0x54`) has flag 8. That
+  physics is made by template slot 31 (`0x005f6a60`), and only
+  ResponsePhysics keeps flags. It is made for a Mesh with collision and
+  mobile physics, and its flags are the template's `grip`: 2 by default,
+  8 EngineGrip, 0x80 EngineDummyGrip (`0x0051aed0`).
+- **PlayerControlObject** (a seat) works from the seat's PCO map
+  (interface `+0x2c`):
+  - With a non-empty map: a 4-bit mask, the active weapon of groups 0-2
+    (index + 1, 4 bits), and ducking (8; PCO `+0x310`).
+  - With an empty map: an 11-bit length and the occupant soldier's
+    Soldier state.
+  - The root PCO's init fills the map (`0x005cd4f0` → `0x0058dde0` →
+    `0x0058bdb0`). It takes the cameras (Camera, FreeCamera,
+    OverheadCamera) of the seat's whole subtree, nested seats included,
+    whose pcoId matches. The shipped data sets no `setPcoId`, so every
+    camera counts.
 - **MechLegs**: 3-bit mask, 4 bits and two flags. **TargetObject**: 5-bit
   mask, a position, a flag and a byte. **Item**: 5-bit mask, a position,
   a signed 9-bit value, a flag, a signed 5-bit unlock. **FreeCamera**:
-  position, 16-bit quaternion, a value. **OverheadCamera**: two pan
-  speeds, a position, a value, a flag. **DestroyableWindowsBundle**: a bit
-  per window (`numWindows`), no mask. **DestroyableObject**: hit points,
+  position, 16-bit quaternion, a value. **OverheadCamera**: the pan
+  velocity (two values of -1..1 times the template's speed), a position,
+  a value, a flag. **DestroyableWindowsBundle**: a bit per window
+  (`numWindows`), no mask, set while the window is intact (`0x005be010`
+  breaks the cleared ones). **DestroyableObject**: hit points,
   a position and a 0-100 value (10 bits), a bit per armored part.
 - **Kit:** a bit, then the position.
 - **GenericProjectile:** a 6-bit mask, the position (0.01), a 12-bit
   quaternion, then a speed block and hit points.
-- **ControlPoint:** a 6-bit mask, the team (sign + 3 bits), a flag (cp
-  `+0x1a0`), the flag's height (the capture progress, 0..1) and its rate
-  per second (two 16-bit values of ±1.25), per-team flags (cp `+0x1b4`,
-  `+0x1b5`) and whose flag is raised (0-2).
+- **ControlPoint:** a 6-bit mask, the team (sign + 3 bits), and a flag
+  (cp `+0x1a0`). Reset (`0x005bb980`) sets that flag when the point starts
+  with team 0. Then come the flag's height (the capture progress, 0..1)
+  and its rate per second (takeOverChangePerSecond), as two 16-bit values
+  of ±1.25. Then allowCaptureByTeam for teams 1 and 2 (cp `+0x1b4`,
+  `+0x1b5`), and the scripts' "flag", whose flag is raised (0-2).
 
 The player's networkable (30-bit mask; CreatePlayer gives its ghost id) is
 fully decoded:
 
-- alive (1);
+- alive (1; player `+0xd5`, the scripts' "alive");
 - the selected spawn group (2, 0-255; player `+0xe8`, which the spawn
   code reads);
-- the stats (8): score and teamwork as sign + 11 bits; deaths, kills,
-  team kills and one more value as 12 bits. They go to the stats the
-  scripts read: score, rplScore, deaths, kills, TKs;
+- the stats (8): score, deaths, kills, rplScore, TKs and player `+0x104`.
+  Score and rplScore are sign + 11 bits, the others 12 bits. They go to
+  the stats the scripts read (`0x0056b6f0`);
+- the flag holder (0x400000, player `+0x154`);
 - three kit slots;
-- 11 bits at player `+0xf0` (0x100; provisional: the ping);
+- the ping in ms (0x100; 11 bits, 0-1023, player `+0xf0`). The server
+  sets it from the connection's round trip (`0x0057ab30`);
+- the spawn tick and man-down (0x20; player `+0xdc`, `+0xe0`);
 - the team (0x200; the value + 1 in 3 bits);
-- and more flags.
+- the float at player `+0x294` (0x800; 9 bits);
+- the selected kit (0x1000; player `+0x58`, vtable `0x1a0`);
+- the kit's unlocks (0x10000000, 0x20000000);
+- the squad (0x2000; 5 bits, player `+0x108`, setter vtable `0x11c`);
+- the rank + 1 (0x4000; 6 bits, stats `+0x20`);
+- always the squad-leader bit (player `+0x10d`), then with 0x8000000 the
+  commander bit (`+0x10c`). For a leader or commander, 6 bits and four
+  0..1 bytes follow. A last bit (player `+0x1c0`) ends the state.
 
 `src/Net/Networkables` has readers and writers following these,
 `GhostLayout` splits a template tree into ghosts and groups (and builds
@@ -773,10 +909,35 @@ the tree and the `NetworkableHints` from the client's templates), and
 `RemoteWorld` applies every group: the parts' rotations, springs and
 engine, a seat's weapons and occupant.
 
-The input block's 9-bit value is `100 + 1000 x` the client's interpolation
-time in ms (`0x0057b040`: the networkable manager's `+0x50` and
-`0x006b4e70`). The server keeps it at the player's `+0xf4` for lag
+The input block's 9-bit value is `200 + 1000 ×` the client's
+interpolation time (`0x0057b040`). The 200 is the networkable manager's
+`+0x50`, which the rate table sets. The interpolation time comes from
+`0x006b4e70`, from settings at `0x00a83e4c`-`0x00a83e54`; the rewrite
+takes it as 0. The server keeps the value at the player's `+0xf4` for lag
 compensation.
+
+A move's last bit is PlayerInput `+0x110`: whether pitch and roll come
+from a device axis. `0x00696db0` fills PlayerInput from the control maps.
+The bit starts at 1 and is cleared when a bound pitch or roll isn't an
+axis-to-axis mapping (`0x00681fc0`, `0x00680dc0`). So it is 1 on foot and
+with the mouse, and 0 where keys drive them (the Sea map).
+
+The connection type picks a row of rates (`0x00928408`). `0x004b48a0`
+applies a client's columns, and `0x004a6160` applies a server's for each
+client:
+
+| Type | Client packets/s | Server packets/s | Client bytes | Server bytes |
+|---|---|---|---|---|
+| 0, 1 | 10 | 4 | 160 | 260 |
+| 2 | 30 | 10 | 160 | 350 |
+| 3 | 30 | 20 | 320 | 400 |
+| 4 | 30 | 20 | 320 | 512 |
+| 5 | 30 | 20 | 320 | 640 |
+
+Type 6 is ignored. For every type but 0, a client also sends after each
+simulated tick (`0x004b3df0`), which comes to 30 a second. Once
+connected, a client pings every 3 s (`0x0068f280`). The ping's sequenced
+bit (`0x006a9bb0`) is set once data has gone out, as it is in a pong.
 
 ### Joining
 
@@ -809,14 +970,22 @@ Data blocks are bit streams; strings are a 16-bit length and the bytes
 
 - **0, settings** (`0x00516230` / `0x00515bc0`): the server's name; a
   16-bit count of welcome-message pieces (up to 3 of up to 256 bytes);
-  7 bits (`+0x30`; ranked, provisional; allowNoseCam, hitIndicator,
-  tkPunishByDefault, allowFreeCam, allowExternalViews); 32, 16, 16 bits
-  and a signed 32 (game logic values, provisional); the GameSpy port and
+  7 bits: the writer's argument (`+0x30`; 1 for the send on connecting,
+  `0x004a7ce0`, and 0 when resent after a change, `0x004b1c90`),
+  voipEnabled, then allowNoseCam, hitIndicator, tkPunishByDefault,
+  allowFreeCam and allowExternalViews (settings `+0xfa`, `+0xfb`,
+  `+0x148`, `+0xf8`, `+0xf9`). Next come the voice server's address (32
+  bits), sv.voipServerPort and sv.voipBFClientPort (16 each) and
+  sv.voipQuality (signed 32). These are game logic slot `0x254`'s values,
+  filled by `0x0057c250`. The address is inet_addr(sv.voipServerRemoteIP)
+  when sv.voipServerRemote is set, else 1 (the game server's own). Then
+  the GameSpy port and
   the game port (16 bits); radioSpamInterval, radioMaxSpamFlagCount and
   radioBlockedDurationTime (signed 32); content check required, voting
   enabled (bits); the players needed to start (16); friendly fire with
-  mines and allowTitanMovement (bits). Field names are from the order of
-  the `sv.*` settings (provisional).
+  mines and allowTitanMovement (bits). The players needed to start is
+  `0x004316b0` (settings `+0x100`, at least 6 or 8 when `0x00430a00`
+  holds).
 - **5, map list** (`0x00441e40` / `0x00441410`): a 16-bit count, the
   16-bit index of the current map (maplist `+0x1c`), then per map the
   name, the game mode and a 16-bit size. It is sent again when the list
@@ -927,8 +1096,11 @@ The game server sends SET_PLAYER_DATA when a player changes. A player who
 is neither commander nor in a squad gets REMOVE_PLAYER_DATA instead
 (`0x0057c8a0`). The whole table goes out every 5 s (`0x0057cbe0`), so a
 voice server that restarted, or a game server that was just authenticated,
-catches up. Session ids are random 16-bit numbers unique among the players
-(`0x0057ce10`). The game server sends each player's own in the VoipSession
+catches up. A session id is `(rand() & 0xffff) % (int)pow(256, 2)`
+(`0x0057ce10`). The CRT's `rand()` only reaches 32767, so ids are 0-32767.
+If another player already has the id, 1 + `rand() % 500` is added and the
+players are checked again. Id 0 is possible, and the voice server refuses
+it (`0x10005720`), as in the original. The game server sends each player's own in the VoipSession
 event (0x36, 16 bits).
 
 ### The voice server's table and channels
@@ -983,10 +1155,17 @@ How the Bf2VoipClient picks its sets:
   commander (`0x0043be40`).
 - A commander holding it talks to all squad leaders. Otherwise the
   commander talks to the squads selected on the commander screen, as a
-  multi-set packet (`0x0043cd40`).
+  multi-set packet (`0x0043cd40`). The selection is read only while that
+  screen is open. If the screen is open and no squad is selected, the
+  commander is held back (`+0xc0`); `0x0043c8d0` clears that once the
+  screen closes. If the screen is closed, the last selection stays.
 - Only commanders and squad members may talk (`0x0043c8d0`).
-- After 10 s of continuous talk the client holds back for 5 s
-  (`0x0043c140`; the exact release is provisional).
+- After more than 10 s of talk (`+0xa8`, counted from the first captured
+  packet, sent or not) the client is blocked (`0x0043c140` ->
+  `0x0043c290(1)`; player `+0x388`) and sends nothing. A talk ends after
+  0.5 s without voice (player `+0x398`). The block is lifted on the next
+  update after that (`0x0043c8d0`). The 5 s stored at `+0xb8` is never
+  read, so talking on keeps the block.
 
 ### Codec and audio
 
@@ -1017,16 +1196,41 @@ The capture path (`0x007210f0`):
    `0x0043bb60`).
 5. Speex encodes the frame.
 
-`voipBoostEnabled` switches the OS mixer's microphone boost
-(`0x0070ff50`). The rewrite adds 12 dB, which is provisional.
+`voipBoostEnabled` never scales samples. `0x0070ff50` finds the
+microphone line on the OS mixer's two destinations: component type
+`0x1003`, or a name containing "Mic" (`0x0070fa90`). It switches that
+line's LOUDNESS control (`0x20010004`), or its ONOFF control
+(`0x20010001`), with `mixerSetControlDetails`. How much this adds depends
+on the sound card driver, so it can't be known from the binary. The usual
+case is AC'97's "Mic +20 dB". The rewrite adds those 20 dB itself.
 
 The mic test (`0x007115e0`) loops the encoded frames straight into
 playback.
 
-On playback, GameSpy Voice keeps a source per speaker with its own clock
-(`0x00737710`). The rewrite's jitter buffer is provisional: it buffers 60
-ms before a speaker starts, conceals up to 3 lost frames, and mixes at the
-playback volume. A speaker counts as talking for 500 ms after a packet.
+On playback the rewrite follows GameSpy Voice 2's source list
+(`0x00737710` adds a packet, `0x00737630` stores its frames, `0x00737590`
+makes a source, `0x007378c0` mixes):
+
+- There are up to 8 sources. A new speaker takes a free source, or else
+  the first source whose frames have all played; failing both, the packet
+  is dropped.
+- Frames are stamped on a 16-bit play clock that counts mixed frames. A
+  speaker's first packet gets the offset `clock - sequence + 10`, so it
+  plays 200 ms later (`DAT_00b2d084`).
+- Every later packet's offset feeds a running average
+  (`avg × 31/32 + offset/32`, unwrapped by `0xffff`). If the source's
+  offset is more than 10 above the average, it goes down by one and the
+  packet's first frame is dropped. If it is more than 5 below, it goes up
+  by one.
+- A packet whose first frame is already behind the clock is dropped, as is
+  one whose stamp is already in the list.
+- Mixing decodes the frames stamped with the current clock and drops older
+  ones. Nothing is concealed: a missing frame plays as silence. A source
+  is freed once it is drained and past its last frame.
+- The rewrite paces mixing by the wall clock, capped by the device's queue.
+  This stands in for DirectSound's write cursor.
+
+A speaker counts as talking for 500 ms after a packet.
 
 ### How a client starts
 
@@ -1197,22 +1401,58 @@ RTAmmo, `abilityRadius`, `abilityStrength`, `abilityMaterial`). The medic
 and ammo hubs are thrown out as their stationary projectile objects, one
 per owner and gadget, and treat the team within their radius. The repair
 tool (`onlyActiveWhileFiring`) works round the soldier's hands while the
-trigger is held. The material table's `damageMod` doubles as the
+trigger is held; a gadget without that flag (the hubs) works there while
+it is in hand (the ReplenishingAmmoComp's tick, `0x005d8740`). The material table's `damageMod` doubles as the
 ability's factor per target: the medic material 73 is 1 on soldiers'
 materials and 0 elsewhere, and the repair material 84 has factors on
-vehicles' materials. Provisional: the rate (strength × factor per second)
-and the ammo hubs' magazines (one per 10 strength).
+vehicles' materials. Not traced: the rate (strength × factor per second)
+and the ammo hubs' magazines (one per 10 strength); the ammo component's
+fields are known (`abilityMaterial` `0x7c`, `abilityRadius` `0x80`,
+`replenishingType` `0x84`) but the update that reads them wasn't found.
 
-Projectiles with `detonation.*` settings explode where they hit. The
-explosion damage falls off linearly to `explosionRadius`, measured to a
-soldier's nearest capsule or to a body's centre. It is scaled by the cell
-of `explosionMaterial` against the target's `armor.defaultMaterial`, and
-`endEffectTemplate` plays at the impact. The engine's explosion code isn't
-traced yet, so the falloff and the distances are provisional.
+Projectiles with a detonation component (`DefaultDetonationComp`,
+template `0x953b`) explode where they hit. Its constructor (`0x005e9df0`)
+sets the defaults: `explosionMaterial` −1, `explosionForce` 150,
+`explosionYMod` 1, `explosionRadius` 10 (so C4, which sets none, reaches
+10 m), `explosionDamage` 500. The detonation (`0x005e9300`) hands the
+blast to the server game logic (vtable `0x009294e8`): slot `0xe8`
+(`0x004ba7a0` → `0x005a9090`) for a blast, slot `0xec` (`0x004ba830` →
+`0x005a7ab0`) for an EMP (`isEMPWeapon`, `+0x5f`). With material −1 both do
+nothing (the car horns' detonations); `endEffectTemplate` plays either way.
+Rewritten in `GameWorld::explode`, `blastShare` and `empBlast`;
+`GameWorld::detonate` sets one off at a point.
+
+- **Distance:** to the object's position (a soldier's physics origin, a
+  metre over its feet; a vehicle's centre), the height difference times
+  `explosionYMod`.
+- **Falloff** (`0x005a61a0`): 1 within a fifth of the radius
+  (`0x00a6aab4`), then linear to 0 at the radius.
+- **Soldiers' share** (`0x005a7530`): the head (bone 47) is worth 0.5,
+  bone 11 0.35 and bone 3 0.15 (`0x00a01750`), each when a ray from the
+  blast reaches it, or one from a point min(0.02 × radius, 0.5) m beside the
+  blast (below, left, right, then above; each point used only when the
+  blast sees it). A directional charge reaches only soldiers inside
+  `explosionConeAngle` (`0x005a6370`).
+- **Damage** (`0x005a8900`): `explosionDamage` × falloff × share × the cell
+  of `explosionMaterial` against the target's material; 0.1 or less is
+  dropped.
+- **Push** (`0x005a66e0`): `explosionForce` × falloff × share × the target
+  armour's `explosionForceMod` (default 1; soldiers 25), at most its
+  `explosionForceMax` (default 10; soldiers 1000), for a soldier times
+  0.8 + 0.005 × (rand % 100) and with its speed counting against the
+  maximum. It points along the soldier's axis nearest the line from the
+  blast plus that line made a unit with 5 added upwards (`0x00a6aac0`).
+  `0x005ee4d0` keeps it for 0.5 s for the ragdoll, times `rd_expForceMod`.
+- Not in the rewrite: the ray test for other objects (blocked: half the
+  damage, or none when the object's vtable `0x90` value, not identified,
+  is below a fifth of the radius), a bone hidden only by an object the same
+  blast destroys counting half, the push's 0.1 for airborne soldiers
+  (physics node `0x144`) and the push on vehicles (node `0xa4`).
 
 Thrown weapons: projectiles with `physicsType` RotationalPoint or Mesh (grenades, mines, C4; rounds and missiles are Points) bounce. Each bounce
 keeps 0.4 of the speed, with the part along the surface normal reversed,
-and they lie still below 1 m/s (provisional). They go off when their time
+and they lie still below 1 m/s (not traced: a stand-in for the physics
+nodes' contact response). They go off when their time
 to live runs out (frag grenades: 2.8 s, 140 damage over 9 m), not on
 impact.
 
@@ -1222,15 +1462,26 @@ impact.
   only `explosionConeAngle` of that facing.
 - **C4:** it has neither a trigger nor a fuse to speak of (9999 s), so its
   owner sets it off with alternate fire (the right mouse button). It has
-  no radius of its own; 10 m is assumed.
+  no radius of its own: the detonation's default, 10 m.
 
 Vehicles take damage through their armour settings:
 
-- **EMP:** an EMP blast (`detonation.isEMPWeapon`: the EMP grenade and
-  mine) shuts down vehicles that take it (`armor.takesEmpDamage`). It sets
-  `empDamageNumStep` steps of `empLevelTime` seconds (FAV: 3 × 1.75 s), and
-  while it lasts the engine and the guns are dead. Soldiers are unharmed.
-  Provisional: whether a blast adds a step or sets all of them.
+- **EMP:** an EMP blast (`detonation.isEMPWeapon`: the EMP grenade, mine
+  and launchers, the commander's EMP strike) hurts nobody (`0x005a7ab0`).
+  Every armoured object within the radius takes EMP damage `explosionDamage`
+  × (1 − distance / radius) (`0x005a6500`; with `armor.empDamageIgnoreRadius`
+  × `empDamageIgnoreRadiusModifier`, default 0.1; 0.1 or less is dropped).
+  The armour (vtable `0x00988cb8`, slot `0x148` = `0x00652980`) adds it in
+  steps: level = min(`empDamageNumStep`, ceil(level + damage /
+  `empDamageStepSize`)), and the level falls by one every `empLevelTime`
+  seconds (`0x00652910`; defaults at the armor template's `0x180`-`0x188`:
+  5 s, 120, 3 steps); slot `0x14c` (`0x00652a00`) gives it rounded up. The
+  EMP grenade's default 500 at its centre fills every step. A vehicle that
+  takes it (`armor.takesEmpDamage`) has its engine and guns dead while its
+  level is above 0. Not applied yet: the PlayerControlObject's input
+  handling (`0x005ca2e0`) scales a driver's inputs by 1 − level /
+  `empDamageNumStep`, or (with a template string at `+0x298` slot `0x110`
+  set, not identified) cuts them all above level 1.
 - **Critical damage:** below `armor.criticalDamage` a vehicle burns down at
   `hpLostWhileCriticalDamage` a second (FAV: 18 below 151, out in 5.6 s from
   100).
@@ -1281,12 +1532,18 @@ works like this:
   unit a second and turn at 2 rad/s (Y: −0.5/1.75).
 - The drone turns to face the way it moves.
 
-Provisional: the engine applies the force through the physics node (slot
-`0xa0`, times 30 over the mass), which isn't traced. Here the force over
-the mass is the acceleration and gravity is left out. The drone holds the
-target's height plus the launch height (1.75 m), because our soldier's
-object stands at its feet. Losing the squad's lead also counts as losing
-the target.
+The force goes to the physics node's slot `0xa0` (`0x006c7b10`: added to
+the acceleration, its moment to the torque) times 30 over the mass, so a
+30 Hz tick changes the velocity by 2a·v + (a² + b²)(goal − p); the node's
+step adds gravity and damps by 0.99. The drones sit about 0.15 m under the
+goal against gravity. The target's position is the soldier's physics
+origin, a metre over its feet, which is the height held. While the
+drone's armour has an EMP level (rounded up) above 1, the update stops
+before the force (and the height held becomes the drone's own), so the
+drone falls until the level drops (an EMP grenade: 3 levels, 5 s each).
+The target is lost when the ParentTargetComp's handle (`0x1b0`) empties;
+the rewrite takes the owner's death for that (whether a downed soldier
+still holds it isn't settled by `0x0062b750`).
 
 The drones' guns are run by auto controllers (`AI/AutoControllers.ai`):
 
@@ -1306,12 +1563,15 @@ The drones' guns are run by auto controllers (`AI/AutoControllers.ai`):
   `discoverCloakedEnemiesDistance` (8 m) and never targets its deployer.
   The rounds go through the ordinary projectile path (10 damage, falling
   to 5 from 15 to 40 m) and spread by `deviation.minDev`. Kills count for
-  the owner. Provisional: the controller's scanning (`fov` 90,
-  `scanningSpeed`) and `onlyAttackNetworkBattlefieldObjects` (only what the
-  squad has spotted) are left out, and the gun turns at once.
+  the owner. The gun turns at once. Left out, as what they need isn't in
+  the rewrite: `onlyAttackNetworkBattlefieldObjects` (template `0x39`;
+  AIDLL `0x100ea470` lets an enemy count only when the owner's squad knows
+  of it, `0x100bea30`, from the squad's battlefield objects that spotting
+  fills) and the scan (`fov` 90, `scanningSpeed` 0.13 turning the gun's
+  bundle; AIDLL's auto controller isn't decoded).
 
-An EMP blast stops a drone's pulses and gun for `empDamageNumStep` ×
-`empLevelTime`, which is provisional. Bots that lead a squad send out the
+What an EMP does to the drones' guns is up to AIDLL's auto controller,
+which isn't decoded; they keep firing. Bots that lead a squad send out the
 sentry drone at infantry 20 to 100 m off, following its weapon template
 `SentryDroneDetonator` (FireAndForget).
 
@@ -1329,8 +1589,11 @@ Seeking projectiles (`seek.*`, `follow.*`):
 - **TTMagnet (the motion mine):** after `trackingDelay` (1.5 s) it locks
   onto the closest enemy vehicle within `maxDistLock` (20 m), keeps the
   lock out to `distLoseLock` (24 m), and chases it. Its speed is
-  `armingSpeed × speedModifier` (provisional), and it goes off within 2.5 m
-  of its target (provisional).
+  `armingSpeed × speedModifier`, and it goes off within 2.5 m of its
+  target. Both are the rewrite's: the follow component's update isn't
+  traced (its fields are known from the accessors at `0x004f6500`-`0x004f7500`:
+  `speedModifier` `0x28`, `armingSpeed` `0x2c`, `magneticBehaviour`
+  `0x24`, ..., but no code reading them was found).
 
 Unlocks are the kits' `ItemContainer` children, one per branch and level
 (`unlockLevel`). An unlocked container adds its items to free slots: the
@@ -1497,11 +1760,20 @@ state, input, kills, deaths and team kills.
   shocks still find it.
 - **Revives:** while a soldier is down, a teammate's defibrillator shock
   (projectiles with `damageMandownSoldiers`; material 89,
-  "Soldier_resurrection") revives it with a quarter of its hit points
-  (provisional), and the scripts get `PlayerRevived`. The soldier gets up
-  where the ragdoll lies, playing the `reviveOnBack` or `reviveOnStomach`
-  trigger of its animation system (chosen by which way the body faces;
-  provisional). An enemy's shock finishes the body off.
+  "Soldier_resurrection") revives it. The shock's `ResurrectCollisionComp`
+  (`0x005e7a70`) hands its `collision.resurrectDamage` (20000) and
+  `collision.restoreHP` (120) to the game logic (`0x004c1960`): the
+  resurrect damage times the material cell brings the armour back up, and
+  hit points under `restoreHP` are raised to it through the armour's
+  setter (`0x00655460`), which clamps to `maxHitPoints`: the soldier is
+  back at its full 100. The scripts get
+  `PlayerRevived`, and the medic says `get_up` (radio event 9). The soldier
+  stands up where the ragdoll lies with no get-up animation: BF2142.exe
+  never names the `reviveOnBack`/`reviveOnStomach` triggers (its named
+  trigger lookups, `0x008c0e70`, are the prone transitions), it only leaves
+  ragdoll mode (`0x005f0f20`). An enemy's shock finishes the body off (a
+  team test of the rewrite's: `0x004c1960`'s man-down branch reads none,
+  and its caller `0x005a3bd0` is not traced that far).
 - **Final death:** at the end of man down, or when the player respawns
   (after `sv.spawnTime`, 15 s), the scripts get `PlayerDeath` and the body
   goes. With the real `bf2/stats` and game-mode scripts, this is when the
@@ -1519,7 +1791,10 @@ at the leader's spawn beacon. The beacon is the `beacon` gadget, slot 8,
 whose `spawn_beacon` has `armor.holdsSlBeacon`; the leader sets it down a
 metre ahead, one per squad. On the spawn screen both are clickable
 markers. Bots join squads with room and spawn on their leader when they
-can. Provisional: the engine's search for a free spot near the leader.
+can. The engine spawns them through a `SquadLeaderSpawnPoint` child of the
+leader's soldier (`0x004c7f10`; a SpawnPoint with
+`setScatterSpawnPositions 1`); its scattering is not traced, so the
+rewrite puts them a metre behind the leader.
 Not in yet: the squad menus (invites, names).
 
 ## Commander
@@ -1531,15 +1806,27 @@ slot `0x64` pops the next applicant (`0x004c4fb0`). The game modes turn the
 commander on with `host.sh_setEnableCommander(1)` (`0x00568640`, event
 `0x47`); squad deathmatch turns it off.
 
-- **Applying:** `Commander.commanderApply` puts a player on the team's
-  list of applicants. The applicant with the highest rank wins, and the
-  first of equal ranks.
+- **Applying:** `Commander.commanderApply` (HUD `0x007d7050`; the
+  Commander event's kind 4, slot `0x60` → `0x004c7160`) puts a player on
+  the team's list of applicants. The first application while nobody is
+  being offered command starts the apply period: event 7 after the
+  SquadManager's `+0x14` (15 s, constructor `0x004c96c0`). Then
+  `0x004c5070` takes the applicant with the highest rank (player slot
+  `0x1a8` `+0x20`), the first of equal ranks (`0x004c4fb0`), off the list
+  and offers it command (PostRemote 0x23). Its answer is kind 0 (slot
+  `0x68`, `0x004c8c20`: it becomes commander) or kind 1 (slot `0x6c`: the
+  next is offered at once). The client bars an applicant for minutes
+  after a mutiny (player slots `0x140`, `0x148`).
 - **Taking over:** the new commander leaves its squad (`0x004c7bb0`) and
-  gets the commander flag (player slot `0x124`). The scripts hear
+  gets the commander flag (player slot `0x124`); the other applicants hear
+  `HUD_COMMANDERAPPLY_POSFILLED` (PostRemote 0x22) and the list is
+  cleared. The scripts hear
   `ChangedCommander` (event 10: team, old commander, new commander). The
   player parameter `commander` is that flag (player slot `0x128`).
-- **Resigning:** `Commander.commanderResign` clears the commander (slot
-  `0x68`), and the next applicant is asked (`0x004c5070`).
+- **Resigning:** `Commander.commanderResign` (kind 2, slot `0x70` →
+  `0x004c8a60`) clears the commander (PostRemote 0x25); with applicants
+  waiting, the next is offered command after the SquadManager's `+0x18`
+  (10 s).
 
 The commander's tools are the HUD's `Commander.orbitalStrike`,
 `.artillery`, `.uav`, `.satellite` and `.supplies`. All but the supply
@@ -1567,8 +1854,11 @@ and takes the largest `minTimeBetweenActivation`.
   team's commander. `0x005a11c0` puts the target on the ground (the higher
   of the terrain and the water). `0x005a0bf0` moves the asset's firearm
   `orbitalBombardmentHeight` (500 m) over it. The delay is the firearm's
-  launch delay in whole seconds (slot 300). `0x005a0e50` then fires the
-  firearm straight down for its burst. `0x005a1270` refuses a use until
+  launch delay in whole seconds: `fire.fireLaunchDelay` (the fire
+  component's slot 300, `0x005f16f0`, template `+0x1c`), rounded, times 30
+  ticks. `0x005a0e50` then fires the firearm straight down `(0, -1, 0)`
+  for its burst. The ballistic solution `0x005a0750` only turns an
+  artillery asset's barrels. `0x005a1270` refuses a use until
   `minTimeBetweenActivation` has passed since the last.
   - The orbital strike's firearm has `fireLaunchDelay` 1.5 (2 s) and one
     round. Its projectile leaves at 100 m/s with five times gravity, hits
@@ -1582,55 +1872,78 @@ and takes the largest `minTimeBetweenActivation`.
 - **UAV and satellite scan** (`DAT_00a6a390`, `0x005a23b0` and
   `0x005a2450`): with a standing asset, the UAV stays over its point for
   30 s (gameLogic `0x228`). It is ready again `uavReloadTime` (5 s) after
-  that. Its ring on the minimap is 100 m (`0x230`). The scan runs 11 s
-  (`0x238`), then `satelliteScanReloadTime` (16 s).
+  that. Its radius is 100 m (`0x230`, gameLogic slot `0x28c`). The scan
+  runs 11 s (`0x238`), then `satelliteScanReloadTime` (16 s). They reveal
+  through the server's choice of what each client hears of
+  (`0x0057dc90`, `0x0057cfb0`): with the UAV up, every player of the team
+  gets the enemies (their soldier or vehicle) within the radius of the
+  UAV's point, in 3-D; with the scan running, the team's commander, and
+  only the commander, gets every enemy. The UAV itself is a flying object
+  (`UAVControlObject`: `uavVehicleTemplate` eu_drone, speed 14, radius 40,
+  70 m up; `0x005a1f70`), which the rewrite doesn't fly.
 - **Supply drop** (`0x0043d6d0`): every `SupplyDrop-Reload-Time` (60 s,
   less 0.1) per team, without an asset. `0x0043d510` creates a
   `supply_crate` at the ground's height plus `gameLogic.supplyDropHeight`
   (50). `0x0043d880` removes it after `supplyDropNumSecsToLive` (300). The
-  crate is a `SupplyObject`: within 5 m it heals by `healSpeed` 3 and
-  refills ammunition by `refillAmmoSpeed` 7, vehicles too
-  (`workOnVehicles`). It draws on 500 of shared storage and goes when that
-  is spent.
+  crate is a `SupplyObject` (template `0x005d1940`), updated every 0.2 s
+  (timer event 0x1d, `0x005d1710`). Its team's soldiers, and vehicles
+  (`workOnVehicles`), within its radius (5) plus their own (`0x005d0e80`)
+  are healed by `healSpeed` × 0.2 (3 a second) through gameLogic slot
+  `0x108` (`0x004cc380`: scaled by the material cell for 73 and 24, the
+  same for every target) and their weapons get `refillAmmoSpeed` × 0.2 per
+  cent of a magazine (7 % a second; the ammo component's slot `0xa8`,
+  `0x005f5110`). Both draw on 500 of shared storage, and the crate goes
+  when that is spent (`destroyWhenEmptyStorage`).
 
 The gameLogic defaults come from its constructor (`0x004d69d0`);
 `GameLogicInit.con` sets the supply drop's height and time to live.
 
-Orders: `Commander.sendOrder <type> 1` and `Commander.issueOrder` give a
-squad an order with a marker. The squad leader accepts or rejects it
-(`Commander.commRoseAccept`). The scripts read `orderPosition`,
-`orderRadius` and `ifAcceptedAttackDefendOrder` (player slots `0x15c`,
-`0x164`, `0x16c`) to give extra points near the marker. The minimap's
-order icons are loaded in the order move, attack, defend, repair,
-destroy, mine (`0x00780000`'s `orderMoveCommander.tga` and the rest).
+Orders: `SquadLeader.sendOrder <kind> <bool>` and `Commander.sendOrder
+<kind> <bool>` both run HudManager slot `0x3f4` (`0x007d6ab0`) with the
+order armed on the map. The kind is a byte on the wire (event `0x0050dfe0`):
+0 move, 1 attack, 2 defend, 3 repair from the issue-order menu
+(`HudElementsIssueOrders.con`), and 4 move, 5 attack, 6 defend, 7 repair
+placed on the map (the right-click menus' `sendOrder 4 1` .. `7 1`; a map
+click arms 4, or 5 on an enemy and 6 on a friendly object, `0x00753c90`).
+A kind of 10 or more drops the armed order. The bool adds the minimap
+cursor as the order's next point (`0x00780820`; up to three). A squad
+leader's order goes to his own squad, accepted (SquadManager slot `0x48`,
+`0x004c5360`: the squad's leader order at `+0x30`); the commander's goes
+to each selected squad with members (slot `0x4c`, `0x004c5530`: the
+commander order at `+0x120`), whose leader accepts or rejects it
+(`Commander.commRoseAccept`; a rejected order goes, `0x004c2f60`). The
+scripts' `orderPosition`, `orderRadius` and `ifAcceptedAttackDefendOrder`
+(player slots `0x15c`, `0x164`, `0x16c`) read the leader's order (squad
+slot `0x10`, `0x004c2ee0`); only kinds 5 and 6 count as attack or defend
+(`0x00592160`), and `orderRadius` is the player's own 80 (`+0x144`, set by
+`0x0059c010`).
 
-AIDLL.dll has a commander of its own: it calls the game's `IBFCommander`.
-Every 10 s it looks for a target and fires a ready strike at it, and then
-leaves that tool alone for 120 s (`0x1009c050`).
+AIDLL.dll's commander is not a player: bots never apply. For a team
+with bots (IAIPlayerFactory slot `0x2c`) and no commander it calls the
+game's `IBFCommander` (`0x009d6618`). Every 10 s it looks for a point of
+its own being taken and shells it with the artillery (slot `0x20`,
+`0x00896f00`: the tool event with rcType 1 and no sender, which
+`0x0050ee10` lets through), then waits 120 s (`0x1009c050`). The orbital
+strike (90 s), supply drop (35 s) and UAV (60 s) answer its squads'
+requests (`0x1009e200`, `0x1009e3e0`, `0x1009e500`).
 
 Rewritten in `src/Game/Commander.cpp` (`GameWorld::setCommander`,
-`applyForCommander`, `resignCommander`, `abilityState`, `commanderAction`,
-`issueOrder`, `acceptOrder`). Bots follow their squad's order (the control
-point it lies on, or the marker), and a team without a commander gets a
-bot that strikes points being taken from its team (AIDLL 0x1009c050),
-sends the UAV over the next point and orders squads the strategic AI left
-without an order to attack (see "Bots"). Provisional:
+`applyForCommander`, `answerCommanderOffer`, `resignCommander`,
+`abilityState`, `commanderAction`, `issueOrder`, `issueSquadLeaderOrder`,
+`acceptOrder`) and `BotManager::command`. Bots follow their squad's
+commander order (the control point it lies on, or the marker). Not
+rewritten:
 
-- The first applicant wins (there are no ranks without stats), at once
-  (the apply period isn't traced), and a human applicant replaces a bot.
-- The launch delay is taken to be `fire.fireLaunchDelay`. The shells
-  stray from straight down by up to `subProjectileDev` degrees. The
-  artillery's ballistic aim (`0x005a0750`) is left out; from 500 m its
-  shells fall almost straight anyway.
-- The UAV reveals enemies inside its minimap ring, and the satellite scan
-  reveals every enemy while it runs. The UAV's drone (`eu_drone`,
-  `uavVehicleSpeed` 14, radius 40, 70 m up) isn't flown.
-- Without a body the crate comes down at 5 m/s (its parachute isn't
-  simulated). Its units are hit points, and a magazine for every 10 as
-  with the ammo hubs.
-- The order types follow the icons' order. The order radius is 50 m.
-- The bot commander's strike tool, and its UAV, scan and orders (not
-  in AIDLL's commander check).
+- The batch's spread is the firearm's `SimpleDeviationComp`
+  (`subProjectileDev`, template `+0x18`), whose object code isn't
+  rewritten; the shells stray uniformly within that many degrees.
+- The UAV's drone isn't flown. Without a body the crate comes down at
+  5 m/s (its parachute's Wing and ForceObject only act on a rigid body);
+  a soldier's own radius in the crate's reach is taken as 0.
+- The bots don't send squad requests, so the AI commander's answers
+  (orbital strike, supplies, UAV) never run.
+- Which order kind the minimap draws with which icon (it loads move,
+  attack, defend, repair, destroy, mine) isn't traced.
 
 In `bf2142` the commander's HUD buttons run console commands:
 `Commander.commanderApply` / `commanderResign`, the tool toggles
@@ -1639,8 +1952,13 @@ In `bf2142` the commander's HUD buttons run console commands:
 `supplies`) arm a tool that the next click on the map uses there
 (`HudManager::mapWorldAt` turns the click into a world point),
 `satellite` scans at once, `sendOrder` / `issueOrder` arm an order for the
-squad whose leader is nearest the click (provisional), and
-`commRoseAccept` answers one. Caps Lock opens the commander's screen (the
+squad whose leader is nearest the click (the commander screen's squad
+selection, HudManager `+0xe4` slot `0x34`, isn't drawn yet), and
+`commRoseAccept` answers one. `SquadLeader.sendOrder` and `Commander.sendOrder
+<kind> <add>` share one handler (0x00770889): the squad leader's order goes to
+his own squad, the commander's to the squad whose leader is nearest the click
+(the screen's squad selection is not drawn yet). `Commander.accept 0/1`
+answers the offer of command that follows the 15 s apply period. Caps Lock opens the commander's screen (the
 full map and `CommanderShow`); the tools' `CommanderNo*Show`, `*Armor`,
 `*Reloading`, `*TimeUntilReloaded` and `*ShowFullStatus` come from
 `abilityState`, and the minimap shows the UAV, strikes on their way,
@@ -1676,9 +1994,11 @@ not model the CPU budgets; each slice runs to its count:
 
 - **Plan execution** (0x100c91c0): about half the bots a frame, round
   robin: N/2 + 1 and N/2 on alternate frames for an odd N, N/2 + 1 for an
-  even one. A bot skipped while moving keeps its movement for up to 16
-  frames (0x10098c00). Provisional: which input bits are cleared; here the
-  turn, use and selection are, the trigger is kept.
+  even one. A bot skipped while moving keeps its last input for up to 15
+  more frames, but for PIFire, PIAltFire, PIReload and PILie (0x10098c00);
+  after that, or standing, 0x10097e60 clears the movement, the look and
+  the buttons, and a driver brakes (PIThrottle −clamp(0.5 v·forward,
+  ±0.4)).
 - **Thinking** (0x100c95f0): a bot gathers the time of the frames it
   executed. With a plan it thinks again after 0.5 s of them
   (`setPlannedDecisionMakingThreshold`), without one after 0.3 s
@@ -1752,9 +2072,10 @@ The urgencies:
 - **Plans:**
   - MedicAssist/AmmoAssist (0x10070da0, 0x100724e0): walk to the target,
     look at it, take the hub within half its abilityRadius plus the two
-    radii. The bot itself: crouch and take the hub. Nothing presses fire;
-    the rewrite's hubs heal only once thrown, so a bot holding the hub there
-    throws it, at most every 20 s (provisional).
+    radii. The bot itself: crouch and take the hub. Nothing presses fire:
+    a hub (no `onlyActiveWhileFiring`) works round its holder while in
+    hand (the ReplenishingAmmoComp's tick, BF2142.exe 0x005d8740), so
+    holding it heals or resupplies.
   - RepairVehicle (0x10073da0): walk to the vehicle's radius, take the
     tool, hold the trigger while facing it (dot above 0.1). Crouch when it
     is more than 0.5 m lower.
@@ -1834,8 +2155,10 @@ The urgencies:
   control point's radius when its team does not hold the point. Otherwise
   it heads for `order + U × 0.8W − 0.5W`. It is re-ordered 35 s (20 s for
   a leader) after arriving.
-- **Bot commander** (0x1009c050): it strikes the first held point whose
-  flag is below 0.75, at most every 120 s and not before 120 s.
+- **AI commander** (0x1009c050; not a player, see "Commander"): for a
+  team with bots and no commander it shells the first held point whose
+  flag is below 0.75 with the artillery, at most every 120 s and not
+  before 120 s.
 
 ### Following paths (src/AI/PathFollower)
 
@@ -1883,16 +2206,41 @@ changes (0x100966c0 → 0x10095fc0).
     - bend = 1 − maxAngleDiffSlowDown × min(1, angleSlowDownScale × (a −
       minAngleDiffForSlowDown)). a is the sharpest bend within max(3,
       speed × lookAheadTime) m ahead (0x10093c00), or the heading error.
-  - **Space** (state machine 0x100e8170): mesh rays to radius + 10 m
-    ahead, behind and to the sides. The speed is capped from maxSpeed down
-    to speedAtZeroSpace as the space ahead closes (backingSpeed when it is
-    under 95 % free).
-  - **States:** a goal more than 10 radii behind with room behind is
-    backed towards (state 8). Otherwise a turn on the spot alternates
-    forward and back at full lock until facing within cos 0.9.
-  - **Car** (0x100e9d40): turn = 3 × yawScale × error − turn rate;
-    throttle = target / 15 + min(1, (target − speed) / 3). Full throttle
-    when off the line (under 1.5 m/s).
+  - **Size:** the AI object's box (0x100fe990): radius r = its farthest
+    corner from the origin (vt+0x28), the centre radius (vt+0x30), width
+    and length. The rewrite takes the box of the vehicle collision LOD's
+    points.
+  - **Space** (0x100e8170): mesh rays to r + 10 m ahead and along the
+    box's diagonals (forward × length ± right × width), behind and its
+    diagonals, and to either side. The rays behind are cut short by other
+    vehicles' spheres (0x100fbdb0). The speed is capped from maxSpeed down
+    to speedAtZeroSpace as the space ahead closes (backingSpeed below 95 %;
+    in the backing states from the space behind).
+  - **States** (one change per time stamp, 0x100973b0): from 0, a goal
+    behind within 10 r with room behind is backed towards (8); behind and
+    no room to turn (2.7 r across and lengthwise) backs out straight (12);
+    otherwise 9/11 (back at the opposite lock) and 2/3 (ahead at full
+    lock), alternating with the space ahead and behind, until facing
+    within cos 0.9. Boxed in (no space either way): ahead at half speed,
+    or backing in state 8.
+  - **Other vehicles** (0x100fbff0): the one in the way (within the
+    forward speed + max(r, 5) + both radii, the forward line crossing its
+    sphere) is passed in state 6 on a side chosen by the room beside it
+    (mesh rays from it, cut by other vehicles) or by which side of the way
+    it is on: heading for the tangent of 0.8 × its radius + r seen from
+    a quarter second ahead. Touching it, states 13/14 back off and 4/5 come
+    round. A side that flips stops the avoiding: the driver drives on
+    behind it. An obstacle on the goal next to the driver ends the move
+    (666). Behind another vehicle within 15 m the speed is capped at its
+    speed along the way less 1, at least 2 (0x100fc660); one closing at
+    over 10 m/s brakes fully and swerves (error −2). Not rewritten: the
+    other driver being told (its +0x28 calls) and the horn for friendly
+    soldiers in front (0x100a5c00).
+  - **Car** (0x100e9d40): the error mirrored when moving against the
+    direction wanted; turn = 3 × yawScale × error − turn rate; the target
+    speed lowered on a tilt and capped (keeping the cap's sign); throttle =
+    target / 15 + min(1, (target − speed) / 3). Full throttle when off the
+    line (under 1.5 m/s).
   - **Tank** (0x100e0540): no steering below 1 m/s, the error × min(1,
     speed / 2)²; the throttle term squared.
 - **Strategic waypoints** (0x10060300): an order's goal list. From the
@@ -1918,57 +2266,74 @@ load silently as no trees (0x100ae4e0); `ai.init` never fails
 (0x10056b20). `BotManager::setNavMesh(nullptr)` does the same:
 `enabled()` turns false and the manager runs no bots.
 
-### Provisional
+- **View distance:** `aiSettings.setViewDistance`, else (−1, AIDLL
+  settings +0x1c) the game's at the AI's start on the level (0x10056b20:
+  IAIGame vt+0x58, BF2142.exe 0x008959f0): the distance into the fog
+  (`Renderer.fogStartEndAndBase`) where its density t × base (below w,
+  else t³ + w) reaches 0.8, t in steps of 0.01, at most
+  `GameLogic.maximumLevelViewDistance` and 300 m (2142_Shipment: 30 m).
+  `BotSettings::levelFog` must be handed the level's fog.
+- **Strategy conditions** (0x100a9620, 0x1005cce0, 0x1005ce20): a
+  constant condition reads the friendly side's value for Friendly and the
+  enemy's for anything else (Both included); the compares test v − k
+  (Equal…, Difference…) or v / k (Quotient…) against 0. The route's cost
+  factors read the neighbour's per-side status (+0x70, 0x1005f210: 0 held,
+  1 the enemy's, 2 neutral or its own point with the flag below 0.9).
+- **Goal spots:** order + U × W × 0.8 − W / 2 on each axis with W twice
+  the area's radius (0x10063460, 0x10063de0).
 
-- **Scheduling:** the CPU budgets (every slice runs to its count), which
-  input bits a skipped bot keeps, and the whole path searched at once
-  (the original searches three clusters at a time).
-- **Stale urgencies:** each think evaluates every behaviour (no budget
-  runs out).
-- **Aim units:** the controller output is turned into 90°/s per unit.
-- **Deviation spread:** uniform over ± half the deviation on each axis.
-- **Trigger mode:** a weapon holds the trigger (automatic) at 200 rounds
-  a minute or more.
-- **Equipment types:** without AI templates, a driver is a Tank when its
-  seat has a gun and a Car otherwise; other seats are Fixed. Mech and
-  FloatingTank drive with the tank's controller (their own interpreters,
-  MechMoveTo and FloatingTankMoveTo, are not decoded).
+### Not decoded, and the rewrite's stand-ins
+
+- **Scheduling:** the CPU budgets (every slice runs to its count; the SAI
+  runs once a second), and the whole path searched at once (the original
+  searches three clusters at a time). Each think evaluates every behaviour.
+- **Aim units:** the soldier's handling of PIMouseLookX/Y in BF2142.exe
+  isn't located; the controller output is turned into 90°/s per unit.
+- **Deviation:** the AI deviation (0x00892b70) widens the weapon's own
+  deviation through the soldier (vt+0xf4); the rewrite's hand-held
+  firearms have no deviation model, so the bot spreads its aim uniformly
+  over ± half of it on each axis.
+- **Trigger mode:** which of Trigger and TriggerContinously the fire plan
+  (0x100795a0) builds isn't decoded: 200 rounds a minute or more hold.
+- **Soldier radius:** the game object's size through the AI adaptor
+  (vt+0xdc → 0x008a3d40 → the object's vt+0x90), not identified: 0.5 m.
+- **Runs without the AI scripts** (tests): a driver is a Tank when its
+  seat has a gun and a Car otherwise, other seats are Fixed, vehicles
+  count as LightArmour, and vehicle guns reach 100 m. Every shipped
+  vehicle and weapon has its `ai/*.ai`. Levels without
+  `StrategicAreas.ai` (three of the 46 with a mesh) leave the original's
+  SAI without areas; the rewrite deviates and makes one per control point.
+- **Interpreters:** MechMoveTo and FloatingTankMoveTo drive with the
+  tank's controller; BBPFlee's plan (0x10085d90) and the idle look are the
+  rewrite's.
 - **Change:** seat values (0x100d3e70 is not decoded in full), and a
   50 m search radius.
-- **Strategy:** area temperatures (soldier 1, vehicle 20), strengths (8
-  per unit), the per-area box (the control point's radius), a SAI cadence
-  of 1 s, and the area route's cost factors (x1.1 neutral, x5 hostile).
+- **Strategy:** area temperatures (soldier 1, vehicle 20) and strengths
+  (8 per unit; a vehicle's own battle strengths are not read).
 - **Revive:** the time left uses the respawn countdown, or 15 s. The
   squad factor the original multiplies in is not.
-- **Flee:** the camouflage counts as charged.
+- **Flee:** the rewrite's camouflage has no charge; carried counts as
+  charged.
 - **Commander:** which tool it strikes with. The UAV, the satellite scan
   and orders for squads the SAI left without one are not from AIDLL's
   commander.
-- **View distance:** 120 m unless `aiSettings.setViewDistance` sets it.
-  The original falls back to the game's view distance.
-- **Path follower:**
-  - the look-ahead ray's width (two more rays half a width aside);
-  - the nearest polygon to a start or goal off the mesh (rings out to
-    3 m, 10 m for vehicles);
-  - a moving target re-planned when it moves 2 m (at most once a second).
-  - The jump is not in the rewrite's soldiers: a second's back step to one
-    side stands in.
-  - The dynamic-obstacle sidestep (0x100e63c0) is not rewritten.
-- **Driving:**
-  - the vehicles' radius (2.5 m);
-  - the diagonal probe rays (±15°);
-  - the state machine's transitions (states 4–6, 12–14 for vehicles in the
-    way, and the dynamic objects' cap 0x100fc660, are not decoded).
-  - A driver pushing at 0.9 or more for 1.5 s under 0.5 m/s reads the side
-    it pushes against as no space for 3 s.
-  - A driver that fails the 20 s progress check gets out. The original
-    hands a stuck bot to the game (0x100c91c0, game vt+0x24, not traced).
-- **Assists:** the hubs thrown (see the plans); the radio requests ("medic!",
-  "ammo!") and the squads' order types the factors read are not modelled;
-  basicTemp is read as the AI object's +0x14.
-- **Avoid:** the vehicles' radius, the look-ahead time (2 s; ×2 prone,
-  ×1.5 crouched) and the size factor (1). The grenade warning (1000 for
-  2.8 s after an explosion in front, 0x1004eab0) is not rewritten.
+- **Path follower:** the look-ahead ray's width goes to the pathfinder's
+  ray (vslot 0x84), not decoded (two more rays half a width aside); the
+  nearest polygon to a point off the mesh (vslot 0x38, not decoded; rings
+  out to 3 m, 10 m for vehicles); a moving target re-planned when it
+  moves 2 m. The jump (a PIJump press) is not in the rewrite's soldiers:
+  a second's back step to one side stands in. The dynamic-obstacle
+  sidestep on foot (0x100e63c0) is not rewritten.
+- **Stuck drivers:** after the 20 s progress check the move fails and
+  the behaviour plans again; what 0x100c91c0 then hands the game
+  (IAIGameEffector vt+0x24 → 0x0089e940) isn't rewritten.
+- **Assists:** the radio requests ("medic!", "ammo!") and the squads'
+  order types the factors read are not modelled; basicTemp is read as the
+  AI object's +0x14.
+- **Avoid:** r is the vehicle's AI radius; the look-ahead time (2 s; ×2
+  prone, ×1.5 crouched) and the size factor (1) come from the game's side
+  of the AI object, not traced. The grenade warning (1000 for 2.8 s after
+  an explosion in front, 0x1004eab0) is not rewritten.
 - **Keeping distance:** while the Fire pattern walks the bot towards its
   target, the aim keeps the view's pitch (walking otherwise levels it).
 
@@ -1986,8 +2351,9 @@ in `src/AI/NavMesh`:
 
 - Ported: the parser, point lookup, the polygon and cluster A* with the
   original's costs and heuristics.
-- Provisional: how the two searches combine (the cluster path as a corridor
-  for the polygon search). The waypoints are smoothed by the path follower.
+- Not decoded: how the bots combine the two searches (the cluster path as
+  a corridor for the polygon search is the rewrite's). The waypoints are
+  smoothed by the path follower.
 
 On minsk_coop's infantry mesh (76,605 polygons, 2,154 clusters), a 639 m
 query gives a continuous 853 m path.
@@ -2150,8 +2516,11 @@ ask whether it's done.
   ("Off", "2Samples"... with `VIDEOSETTINGS_` texts); the select boxes
   show the list their first argument names (`displayModes`: the display's
   modes as "1280x720@60Hz", 0x10065360). Applied, the resolution sizes the
-  window, the effects volume sets sound group 3 (music and voice-over
-  groups 2 and 4 are provisional), and the mouse sensitivity (0.5 the
+  window; the volumes set the master volume to 1 and the sound groups
+  (0x00496830): effects groups 0, 3 (menu sounds) and 4 (first-person
+  weapon sounds), music group 1 (the music and the interface menu
+  sounds), voice-over (`helpVoiceVolume`) group 2 (the voice messages);
+  and the mouse sensitivity (0.5 the
   default) and inversion steer the soldier's look. The menus' SWF version
   matches names without regard to case, and so do the natives (the video
   page calls `getTexturequality`).
@@ -2166,12 +2535,14 @@ ask whether it's done.
   The input names are engine constants: 0x00669baf registers the player
   inputs `c_PI…` and the game inputs `c_GI…`, each counted from 0
   (`c_PIYaw` 0, `c_PIPitch` 1, `c_PIRoll` 2, `c_PIThrottle` 3…). The
-  viewer reads the soldier's keys from the infantry map on foot and the
-  land map while driving. The controls page asks
+  viewer reads the soldier's keys from the infantry map on foot and, in a
+  vehicle, the map of its `vehicleCategory` (0x004b141a: VCLand, VCSea,
+  VCAir, VCHelicopter). The controls page asks
   `ControlSettings.getMappedString(input number, secondary, negative)` for
   a key's name and binds the key pressed last with `mapInput(input number,
-  secondary, negative, superceed)`; `setActiveControlMap(0..4)` picks the
-  map (in Controls.con's order: provisional). Applying the page writes the
+  secondary, negative, superceed)`; `setActiveControlMap(n)` picks the
+  map from SwiffPlayer's table (0x100f7b50: infantry, land, air,
+  helicopter, sea, the game's, the common player map). Applying the page writes the
   maps in Controls.con's format to `<config dir>/bf2142-recomp/controls.con`,
   which later runs read instead of the game's.
 - **Scripted input:** `--input-script` feeds timed SDL events (keys, clicks,
@@ -2295,9 +2666,10 @@ answers the menu itself; nothing is sent.
   the booster (`hasBoosterPack`, `0x1004a8e0`: offline, or the account's
   flag; `hasBoosterPatch` is always true). The credits were the server's
   (`Avcred`, the unlock info's `+0x18`, `getUnlocksCountUnselected`
-  `0x10049a40`); here a soldier has one per rank, less the unlocks chosen
-  (the published game's rule; the server's code is not available, so
-  provisional). `selectUnlock(id, newRequest)` (`0x1004b250`) answers 0
+  `0x10049a40`); here a soldier has one per rank, less the unlocks chosen.
+  That is the published game's rule: the client only reads the count, and
+  the code that worked it out was GameSpy's stats back end (the `.aspx`
+  pages), which was never shipped. `selectUnlock(id, newRequest)` (`0x1004b250`) answers 0
   (done), 1 (not available), 302 (invalid or Northern Strike without the
   booster), 303 (selected already) or 304 (no credits), at once here (the
   menu would poll on -1). `getUnlocksCountTotal` (`0x1004b190`) is 40 or
@@ -2315,12 +2687,14 @@ answers the menu itself; nothing is sent.
   the other categories stay empty. The progress tab's chart
   (`Logic.setActiveDiagram`) is drawn by the game and is not in.
 - **The server's answers** (parsed, not used): `0x005752b0` splits the
-  text at tabs and newlines; it starts with `O` (`E` on errors), then `H`
-  header and `D` data lines, and `$ <length> $` ends it. For the unlocks,
-  the 6th token after `O` is the pid and the 12th the credits (`Avcred`),
-  then a `UnlockID` block of ids. `stats::parseStatsResponse` and
-  `parseUnlocksInfo` read that (the length check counts the characters
-  other than tabs and newlines: provisional).
+  text into tokens at runs of tabs and newlines (no empty fields); it
+  starts with `O` (anything else failed), then `H` header and `D` data
+  lines, and `$ <length> $` ends it. An answer without the `$` failed; the
+  length is never checked. For the unlocks (`0x0045c030`, mode 1) the
+  reading is by position: the 6th token after `O` is the pid, the 12th the
+  credits (`Avcred`), and from the next `H` on each `D` row's first value
+  is an id (none for pid 0). `stats::parseStatsResponse` and
+  `parseUnlocksInfo` do the same.
 
 `bf2142 --menu [mainMenu|endOfRound]` runs a menu. Add `--view` for a
 window that takes the mouse and keyboard, or `--screenshot out.png
