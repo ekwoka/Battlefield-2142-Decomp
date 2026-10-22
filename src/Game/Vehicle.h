@@ -165,7 +165,8 @@ class Vehicle {
 public:
 	struct Wheel {
 		Vec3 mount;          // the wheel's centre at rest, object space
-		float radius = 0.5f;
+		float radius = 0.5f;     // how far its vehicle-LOD triangle reaches below the centre (the ground probe)
+		float spinRadius = 0.5f; // the engine's (0x006cad60): its LOD 0 box's height, at least 0.1
 		float strength = 0;  // Spring template 0x2b4
 		float damping = 0;   // 0x2b0
 		float maxSteer = 0;  // degrees; 0 for wheels that do not steer

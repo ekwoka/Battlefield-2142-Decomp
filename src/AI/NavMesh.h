@@ -218,6 +218,20 @@ struct PathStep {
 std::vector<uint16_t> findClusterPath(const NavMesh& mesh, uint32_t startPolygon, const Vec3& from,
 	uint32_t goalPolygon, const Vec3& to, const PathOptions& options = {});
 
+// The same path as the follower keeps it (+0x90 +0x14: {u16 cluster, u16
+// entry}): each cluster with the link it is entered by, as an index among
+// that cluster's links (0xffff for the first).
+struct ClusterStep {
+	uint16_t cluster = 0;
+	uint16_t entry = 0xffff;
+};
+std::vector<ClusterStep> findClusterRoute(const NavMesh& mesh, uint32_t startPolygon, const Vec3& from,
+	uint32_t goalPolygon, const Vec3& to, const PathOptions& options = {});
+
+// The link a step enters its cluster by (0x10092250 -> 0x100b0550:
+// links[firstLink + entry]), or null for the first step.
+const ClusterLink* entryLink(const NavMesh& mesh, const ClusterStep& step);
+
 // The A* over polygons (0x10041800 + the polygon search space). Neighbours
 // are crossed at edge midpoints; the cost is distance times the cost
 // class's multiplier and a slope factor (0x100bc300); the heuristic is the
@@ -233,14 +247,11 @@ std::vector<PathStep> findPolygonPath(const NavMesh& mesh, uint32_t startPolygon
 // polygon edge crossed, the goal point. Empty when either point is off the
 // mesh or there is no path.
 //
-// The rewrite's composition (not decoded): the original runs the cluster and polygon
-// searches as separate bot-manager requests ("tryClusterPath", "tryPath")
-// and the bots' code that combines them (what it puts in the polygon
-// search's goal set +0x2c and allowed-cluster set +0x30) isn't rewritten
-// yet. Here a cluster corridor (when useClusters) bounds one polygon
-// search to the goal, retried on the whole mesh if that fails. The
-// original's path list also stops at the midpoint into the goal polygon;
-// the goal point is appended here.
+// A convenience for tools and tests: a cluster corridor (when useClusters)
+// bounds one polygon search to the goal, retried on the whole mesh if that
+// fails. The bots plan as the original does, in rolling segments of three
+// clusters (PathFollower, 0x100962e0). The original's path list also stops
+// at the midpoint into the goal polygon; the goal point is appended here.
 std::vector<Vec3> findPath(const NavMesh& mesh, const Vec3& from, const Vec3& to, const PathOptions& options = {});
 
 } // namespace dice::hfe::ai

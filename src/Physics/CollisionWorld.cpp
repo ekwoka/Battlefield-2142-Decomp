@@ -140,6 +140,7 @@ bool CollisionWorld::raycast(const Vec3& from, const Vec3& to, Hit& hit) const
 				hit.fraction = fraction;
 				hit.point = from + direction * fraction;
 				hit.normal = dot(direction, t.normal) > 0 ? -t.normal : t.normal;
+				hit.faceNormal = t.normal;
 				hit.material = t.material;
 				hit.owner = t.owner;
 				found = true;
@@ -198,6 +199,128 @@ void CollisionWorld::querySphere(const Vec3& center, float radius, std::vector<S
 					depth = length - radius;
 				}
 				contacts.push_back({closest, normal, depth, t.material});
+			}
+		}
+	}
+}
+
+bool CollisionWorld::segmentContact(const Vec3& from, const Vec3& to, SphereContact& contact) const
+{
+	Hit hit;
+	if (!raycast(from, to, hit) || dot(to - from, hit.faceNormal) >= 0) {
+		return false; // nothing crossed, or a face crossed from behind
+	}
+	contact.point = hit.point;
+	contact.normal = hit.faceNormal;
+	contact.depth = std::min(dot(to - hit.point, hit.faceNormal), 0.0f);
+	contact.material = hit.material;
+	return true;
+}
+
+namespace {
+
+Vec3 closestOnSegment(const Vec3& p, const Vec3& a, const Vec3& b)
+{
+	const Vec3 ab = b - a;
+	const float length2 = dot(ab, ab);
+	const float t = length2 > 0 ? std::clamp(dot(p - a, ab) / length2, 0.0f, 1.0f) : 0.0f;
+	return a + ab * t;
+}
+
+} // namespace
+
+// The distance from the segment's point to the edge is convex along the
+// line: at most two crossings.
+int segmentCapsuleCrossings(const Vec3& a, const Vec3& b, const Vec3& e0, const Vec3& e1, float radius, float roots[2])
+{
+	const auto f = [&](float t) {
+		const Vec3 p = a + (b - a) * t;
+		return std::sqrt(lengthSquared(p - closestOnSegment(p, e0, e1))) - radius;
+	};
+	float lo = 0, hi = 1;
+	for (int i = 0; i < 40; ++i) {
+		const float m1 = lo + (hi - lo) / 3, m2 = hi - (hi - lo) / 3;
+		(f(m1) < f(m2) ? hi : lo) = f(m1) < f(m2) ? m2 : m1;
+	}
+	const float tMin = (lo + hi) * 0.5f;
+	if (f(tMin) >= 0) {
+		return 0;
+	}
+	const auto bisect = [&](float inside, float outside) {
+		for (int i = 0; i < 40; ++i) {
+			const float mid = (inside + outside) * 0.5f;
+			(f(mid) < 0 ? inside : outside) = mid;
+		}
+		return (inside + outside) * 0.5f;
+	};
+	int n = 0;
+	if (f(0) > 0) {
+		roots[n++] = bisect(tMin, 0);
+	}
+	if (f(1) > 0) {
+		roots[n++] = bisect(tMin, 1);
+	}
+	return n;
+}
+
+void CollisionWorld::capsuleEdgeContacts(const Vec3& a, const Vec3& b, float radius, std::vector<SphereContact>& contacts) const
+{
+	++m_stamp;
+	const int x0 = static_cast<int>(std::floor((std::min(a.x, b.x) - radius) / kCell));
+	const int x1 = static_cast<int>(std::floor((std::max(a.x, b.x) + radius) / kCell));
+	const int z0 = static_cast<int>(std::floor((std::min(a.z, b.z) - radius) / kCell));
+	const int z1 = static_cast<int>(std::floor((std::max(a.z, b.z) + radius) / kCell));
+	for (int x = x0; x <= x1; ++x) {
+		for (int z = z0; z <= z1; ++z) {
+			const auto cell = m_cells.find(cellKey(x, z));
+			if (cell == m_cells.end()) {
+				continue;
+			}
+			for (uint32_t index : cell->second) {
+				const Triangle& t = m_triangles[index];
+				if (t.stamp == m_stamp) {
+					continue;
+				}
+				t.stamp = m_stamp;
+				const Vec3 corners[3] = {t.a, t.b, t.c};
+				bool have = false;
+				float best = 2;
+				Vec3 candidate, e0, e1;
+				for (int k = 0; k < 3; ++k) {
+					float roots[2];
+					const int n = segmentCapsuleCrossings(a, b, corners[k], corners[(k + 1) % 3], radius, roots);
+					if (n == 2) {
+						candidate = (a + (b - a) * roots[0] + a + (b - a) * roots[1]) * 0.5f;
+						best = roots[0];
+					} else if (n == 1 && roots[0] < best) {
+						candidate = a + (b - a) * roots[0];
+						best = roots[0];
+					} else {
+						continue;
+					}
+					have = true;
+					e0 = corners[k];
+					e1 = corners[(k + 1) % 3];
+				}
+				if (!have) {
+					continue;
+				}
+				const Vec3 nearest = closestOnSegment(candidate, e0, e1);
+				const Vec3 d = candidate - nearest;
+				const float length = std::sqrt(lengthSquared(d));
+				if (length < 1e-6f) {
+					continue;
+				}
+				SphereContact contact;
+				contact.normal = d * (1 / length);
+				contact.depth = length - radius;
+				if (contact.normal.y < 0) {
+					contact.normal = contact.normal * -1.0f;
+					contact.depth = length;
+				}
+				contact.point = nearest;
+				contact.material = t.material;
+				contacts.push_back(contact);
 			}
 		}
 	}

@@ -441,8 +441,7 @@ TEST(Bots_SensingAndForgetting)
 
 // The reaction time (0x100777a0): (1 - skill)(1.5 + U[0,1]) s before the
 // first round at a new target; and no round within 0.8 s of a pose
-// change (Trigger 0x1008f1e0): the rifle's firing pose is Crouching, which
-// the bot takes as soon as it stands still.
+// change (Trigger 0x1008f1e0): the bot stands from its idle crouch.
 TEST(Bots_ReactionTimeBySkill)
 {
 	for (const float skill : {0.4f, 1.0f}) {
@@ -471,6 +470,7 @@ TEST(Bots_ReactionTimeBySkill)
 		CHECK(acquired >= 0);
 		first -= acquired;
 		const float seconds = static_cast<float>(first) / 30;
+		std::printf("  skill %.1f: first round %.2f s after the target\n", skill, seconds);
 		if (skill < 1) {
 			CHECK(first > 0 && seconds >= (1 - skill) * 1.5f - 0.05f && seconds <= (1 - skill) * 2.5f + 0.5f);
 		} else {
@@ -556,12 +556,92 @@ TEST(Bots_DriveControl)
 	CHECK(near(ai::driveControl(car, state, sense).targetSpeed, 0.04f * 15, 1e-4f));
 	// A tank at a standstill does not steer.
 	ai::DriveSettings tank = car;
-	tank.tank = true;
+	tank.driver = ai::Driver::Tank;
 	ai::DriveState ahead;
 	sense.speed = 0;
 	sense.error = 0.5f;
 	sense.remaining = 200;
 	CHECK(ai::driveControl(tank, ahead, sense).turn == 0);
+}
+
+// MechMoveTo (0x1008d250, machine 0x100e1f20, controller 0x100e3c00):
+// the walker turns on the spot (15/16) until facing within cos 0.9, then
+// walks at full throttle, steering at full lock; at its top speed it
+// sprints. Stopping lets go of everything (0x100e3f00).
+TEST(Bots_MechDrive)
+{
+	ai::DriveSettings mech; // US_HeavyMech's Mobile plug-in
+	mech.driver = ai::Driver::Mech;
+	mech.maxSpeed = 8;
+	mech.spaceNeededTweak = 0.91f;
+	mech.backingSpeed = 6;
+	mech.brakeDistance = 7;
+	mech.maxBrakePercentage = 0;
+	mech.minSpeedForLookAhead = 3;
+	mech.minAngleDiffForSlowDown = 0.35f;
+	mech.angleSlowDownScale = 2.5f;
+	mech.maxAngleDiffSlowDown = 0.7f;
+	mech.yawScale = 15;
+	ai::DriveState state;
+	ai::DriveSense sense;
+	sense.goalDistance = 100;
+	sense.remaining = 200;
+	sense.error = 1.0f; // to the right, cos 0.54: not facing it
+	ai::DriveOutput out = ai::driveControl(mech, state, sense);
+	CHECK(state.state == 16 && out.direction == 0 && out.throttle == 0 && out.turn == 1);
+	sense.now = 0.1f;
+	out = ai::driveControl(mech, state, sense);
+	CHECK(state.state == 16 && out.direction == 0 && out.throttle == 0 && out.turn == 1);
+	// Nearly facing it: back to 0, then ahead at full throttle and lock.
+	sense.error = 0.05f;
+	sense.now = 0.2f;
+	ai::driveControl(mech, state, sense);
+	CHECK(state.state == 0);
+	sense.now = 0.3f;
+	out = ai::driveControl(mech, state, sense);
+	CHECK(out.direction == 1 && out.throttle == 1 && out.turn == 1 && !out.sprint);
+	// At 7 m/s on a straight: maxSpeed wanted, over 0.7 of it: sprint.
+	sense.error = 0;
+	sense.speed = 7;
+	sense.now = 0.4f;
+	out = ai::driveControl(mech, state, sense);
+	CHECK(out.sprint && out.throttle == 1 && out.turn == 0 && near(out.targetSpeed, 8));
+}
+
+// FloatingTankMoveTo (0x1008c7c0, controller 0x100de350): the hover tank
+// strafes. From a standstill it pushes 10 (clamped to 1) along the way on
+// both axes; at speed the loop is 3 x (wanted - current - acceleration).
+// The speed wanted is at least backingSpeed. The tank's stop (0x100e0930).
+TEST(Bots_FloatingTankDrive)
+{
+	ai::DriveSettings hover; // as_tank's Mobile plug-in
+	hover.maxSpeed = 15;
+	hover.backingSpeed = 4;
+	hover.brakeDistance = 14;
+	hover.maxBrakePercentage = 80;
+	hover.lookAheadTime = 2.5f;
+	hover.minSpeedForLookAhead = 3;
+	hover.minAngleDiffForSlowDown = 0.35f;
+	hover.angleSlowDownScale = 2;
+	hover.maxAngleDiffSlowDown = 0.6f;
+	ai::DriveSense sense;
+	sense.remaining = 200;
+	const float h = std::sqrt(0.5f);
+	ai::FloatingTankOutput out = ai::floatingTankControl(hover, sense, {h, 0, h}, {});
+	CHECK(out.throttle == 1 && out.strafe == 1 && near(out.targetSpeed, 15));
+	// Moving at 14 m/s straight ahead, the way straight ahead: 3 x (15 - 14).
+	sense.velocity = {0, 0, 14};
+	sense.speed = 14;
+	out = ai::floatingTankControl(hover, sense, {0, 0, 1}, {});
+	CHECK(out.throttle == 1 && out.strafe == 0);
+	sense.velocity = {0, 0, 14.9f};
+	out = ai::floatingTankControl(hover, sense, {0, 0, 1}, {});
+	CHECK(near(out.throttle, 0.3f, 1e-4f));
+	// 1 m of path left: max(0.2, 0)^2 x 15 = 0.6, floored at backingSpeed 4.
+	sense.remaining = 1;
+	CHECK(near(ai::floatingTankControl(hover, sense, {0, 0, 1}, {}).targetSpeed, 4));
+	CHECK(ai::tankStopThrottle(0.03f) == 0 && ai::tankStopThrottle(0.2f) == -0.4f && near(ai::tankStopThrottle(0.5f), -0.5f)
+		&& near(ai::tankStopThrottle(5), -0.7f));
 }
 
 // The state machine (0x100e8170): a goal far behind with room to turn:
@@ -1215,4 +1295,99 @@ TEST(Bots_StrategyConditions)
 	c.compare = C::Compare::DifferenceSmaller;
 	c.conditional = C::Conditional::FuzzySqr; // -(3 - 1) squared, signed
 	CHECK(ai::conditionValue(c, friendly, enemy) == -4);
+}
+
+// BBPFlee's plan (0x10085fc0, 0x10085de0): under 30 % health with the
+// camouflage, the bot takes it in hand, runs to a point 50 m (+-20 m)
+// away from the enemy while holding the camouflage for 4 s, and the plan
+// is locked until both are done.
+TEST(Bots_FleeRunsFiftyMetresAway)
+{
+	Field field;
+	world::ObjectTemplate* camo = field.templates.create("GenericFireArm", "test_camo");
+	camo->settings()["itemIndex"] = "5";
+	world::ObjectTemplate* kit = field.templates.create("Kit", "test_recon_kit");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	kit->children().push_back({"test_camo", {}, {}});
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	std::string out;
+	console.execute("aiSettings.setVehicleBehaviour Infantery Flee BBFlee BBPFlee 7 UCUnion UnitWeights", out);
+	settings.modifiers["StandardWeights"]["Flee"] = 1;
+	game::BotManager bots(*field.world, settings);
+	const int bot = field.world->addPlayer("Recon", 2, true);
+	field.world->setKit(bot, "test_recon_kit", "us_light_soldier");
+	field.world->spawnSoldier(bot);
+	field.move(bot, 0, 0);
+	const int enemy = field.soldier(1, false, 0, 400);
+	settle(bots, 11, field.world.get()); // more than 10 s since spawning
+	game::GameWorld::PlayerInfo info;
+	field.world->playerInfo(bot, info);
+	field.world->setHitPoints(info.soldier, 20);
+	game::GameWorld::PlayerInfo enemyInfo;
+	field.world->playerInfo(enemy, enemyInfo);
+	field.world->setHitPoints(enemyInfo.soldier, 1e6f);
+	field.move(enemy, 25, 0); // ahead: the bot walks to the control point at +x
+	field.move(bot, 0, 0);
+	bool fled = false, camoOn = false;
+	for (int tick = 0; tick < 30 * 8; ++tick) {
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+		fled = fled || bots.behaviour(bot) == "Flee";
+		game::GameWorld::PlayerInfo now;
+		field.world->playerInfo(bot, now);
+		camoOn = camoOn || now.cloaked;
+	}
+	field.world->playerInfo(bot, info);
+	std::printf("  fled to (%.1f, %.1f), camouflage %s\n", info.position.x, info.position.z, camoOn ? "on" : "off");
+	CHECK(fled);
+	CHECK(info.position.x < -15); // away from the enemy
+}
+
+// Tap or hold (0x100777a0): the trigger is held only for a weapon whose
+// fire mode is 2, the first fire.addFireRate (kept in order as
+// fire.addFireRate.list); as_ar_rifle's [2, 0] holds, a single-shot [0]
+// taps.
+TEST(Bots_FireRateListKeptInOrder)
+{
+	Console console;
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	world::registerWorldConsoleMethods(console, templates, objects);
+	world::registerUntypedTemplateProperties(console, templates, {"fire.addFireRate", "fire.roundsPerMinute"});
+	std::string out;
+	for (const char* line : {"ObjectTemplate.create GenericFireArm test_rifle", "ObjectTemplate.fire.addFireRate 2",
+			 "ObjectTemplate.fire.addFireRate 0", "ObjectTemplate.fire.roundsPerMinute 600"}) {
+		console.execute(line, out);
+	}
+	const world::ObjectTemplate* rifle = templates.find("test_rifle");
+	CHECK(rifle && rifle->settings().at("fire.addFireRate.list") == "2 0");
+	CHECK(rifle && rifle->settings().count("fire.roundsPerMinute.list") == 0);
+}
+
+// The seat value (0x100d3e70) of the bot's own soldier: health x (its
+// weapons' strengths against the objects it knows + 0.3 x the soldier's
+// maxSpeed 5 x 1.5 x 0.5). The rifle (strength 5 against infantry)
+// counts once an enemy soldier is known.
+TEST(Bots_SeatValueOfTheSoldier)
+{
+	Field field;
+	Console console;
+	game::BotManager bots(*field.world, scriptedSettings(console));
+	world::ObjectTemplate* kit = field.templates.create("Kit", "test_rifle_kit");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	const int bot = field.world->addPlayer("Rifleman", 2, true);
+	field.world->setKit(bot, "test_rifle_kit", "us_light_soldier");
+	field.world->spawnSoldier(bot);
+	field.move(bot, 0, 0); // facing +z
+	settle(bots, 0.5f);
+	CHECK(near(bots.seatValueFor(bot, 0, 0), 1.125f));
+	const int enemy = field.soldier(1, false, 0, 20);
+	settle(bots, 1.0f);
+	CHECK(bots.knows(bot, enemy));
+	CHECK(near(bots.seatValueFor(bot, 0, 0), 5 + 1.125f));
+	game::GameWorld::PlayerInfo info;
+	field.world->playerInfo(bot, info);
+	field.world->setHitPoints(info.soldier, 50);
+	CHECK(near(bots.seatValueFor(bot, 0, 0), 0.5f * (5 + 1.125f)));
 }

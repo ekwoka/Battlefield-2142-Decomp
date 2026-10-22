@@ -240,3 +240,28 @@ TEST(Vehicle_CarSettlesDrivesTurnsAndBrakes)
 	CHECK(car.forwardSpeed() < before - 2);
 	CHECK(car.vehicle->braking() || car.vehicle->gear() == 0);
 }
+
+// Off the ground the driven wheel still runs (0x006b8230 -> 0x006b7910
+// with zero contact sums): no tyre force, but the engine spins the wheels
+// up (no 0.99 decay) and their rpm still counts; with the throttle off
+// the friction and engine brake torques slow them.
+TEST(Vehicle_WheelsSpinInTheAir)
+{
+	Car car;
+	if (!car.vehicle) {
+		return;
+	}
+	car.ground.height = [](float, float) { return -100.0f; };
+	car.ground.heightAndNormal = [](float, float, Vec3& normal) {
+		normal = {0, 1, 0};
+		return -100.0f;
+	};
+	car.body.gravityModifier = 0; // held in the air
+	car.run(30, {1, 0});
+	const float spun = car.vehicle->wheels()[2].spin;
+	std::fprintf(stderr, "  in the air: spin %.2f rad/s, rpm %.2f, gear %d\n", spun, car.vehicle->rpm(), car.vehicle->gear());
+	CHECK(!car.vehicle->wheels()[2].contact && spun > 1);
+	CHECK(std::fabs(car.body.velocity.z) < 1e-3f); // no tyre force
+	car.run(30, {0, 0});
+	CHECK(car.vehicle->wheels()[2].spin < spun);
+}

@@ -367,6 +367,13 @@ void registerUntypedTemplateProperties(Console& console, ObjectTemplateManager& 
 				return it == settings.end() ? std::string() : it->second;
 			}
 			settings[property] = args[0];
+			// List adders (fire.addFireRate, ...) also keep every value in
+			// order, as "<property>.list".
+			const size_t dot = property.rfind('.');
+			if (property.compare(dot == std::string::npos ? 0 : dot + 1, 3, "add") == 0) {
+				std::string& list = settings[property + ".list"];
+				list += (list.empty() ? "" : " ") + args[0];
+			}
 			return {};
 		};
 		console.registerMethod(std::move(method));

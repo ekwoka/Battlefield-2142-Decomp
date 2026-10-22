@@ -245,6 +245,13 @@ TEST(Drones_ReconPulseRevealsEnemies)
 	CHECK(field.world->isRevealed(enemy, 2));
 }
 
+static game::GameWorld::PlayerInfo me(Field& field, int player)
+{
+	game::GameWorld::PlayerInfo info;
+	field.world->playerInfo(player, info);
+	return info;
+}
+
 TEST(Drones_SentryShootsEnemies)
 {
 	Field field;
@@ -258,9 +265,15 @@ TEST(Drones_SentryShootsEnemies)
 	CHECK(field.world->spawnSoldier(mate));
 	field.launch();
 	CHECK(field.world->drone(leader) != 0);
+	// onlyAttackNetworkBattlefieldObjects (AIDLL 0x100ea470): the leader's
+	// squad must have had the enemy reported in the last 3 s.
+	game::GameWorld::PlayerInfo info;
+	field.run(1.5f);
+	CHECK(field.world->playerInfo(enemy, info) && info.deaths == 0 && field.world->hitPoints(info.soldier) == 100);
+	field.world->reportBattlefieldObjects(leader, {enemy});
+	CHECK(field.world->squadKnows(2, me(field, leader).squad, enemy));
 	// 600 a minute at 10 (15 m) to 5 (40 m) a round: 100 hit points go
 	// within a couple of seconds; the kill is the owner's.
-	game::GameWorld::PlayerInfo info;
 	field.run(2.5f);
 	CHECK(field.world->playerInfo(enemy, info) && info.deaths == 1);
 	game::GameWorld::PlayerInfo me;

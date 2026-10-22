@@ -10,11 +10,13 @@
 #include "Game/GameWorld.h"
 #include "IO/File/FileManager.h"
 #include "Physics/CollisionTemplateManager.h"
+#include "Physics/CollisionWorld.h"
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -196,6 +198,7 @@ TEST(RagDoll_KilledSoldierFallsToRestAndGetsUpWhenRevived)
 	game.world->setHitPoints(soldier, 0);
 	const anim::RagDoll* ragDoll = game.world->ragDoll(soldier);
 	CHECK(ragDoll != nullptr);
+	CHECK(!game.world->bodyLanded(bot)); // ragdollLandedDelay (4 s) to go
 	if (!ragDoll) {
 		return;
 	}
@@ -230,6 +233,8 @@ TEST(RagDoll_KilledSoldierFallsToRestAndGetsUpWhenRevived)
 	std::fprintf(stderr, "  ragdoll asleep after %.2f s; lowest particle %.3f m, worst stretch %.1f%%\n", ticks / 30.0f,
 		lowest, worstStretch * 100);
 	CHECK(ragDoll->sleeping());
+	game.run(1);
+	CHECK(ragDoll->touched() && game.world->bodyLanded(bot));
 	CHECK(lowest > -0.02f);
 	CHECK(worstStretch < 0.25f); // landing jolts it (two passes a step, as the game)
 	CHECK(connected(0.05f) == 0);
@@ -371,4 +376,178 @@ TEST(RagDoll_SeatedSoldierTakesTheSeatsPose)
 	CHECK(game.world->playerVehicle() == nullptr);
 	const auto after = game.world->playingAnimations(soldier);
 	CHECK(std::find(after.begin(), after.end(), "still") == after.end());
+}
+
+// Killed in a seat with a die bundle (0x005cea00 with died = 1): the
+// seat's system plays "die" and the body stays in the seat, posed by it
+// (no ragdoll), until someone takes the seat or the vehicle goes.
+TEST(RagDoll_KilledInASeatSlumpsThere)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	game.collisionTemplates.create("as_fav", "Objects/Vehicles/as_fav/");
+	world::ObjectTemplate* car = game.templates.create("PlayerControlObject", "car");
+	car->settings()["hasMobilePhysics"] = "1";
+	car->settings()["physicsType"] = "Mesh";
+	car->settings()["collisionMesh"] = "as_fav";
+	car->settings()["seatInformation"] = "car 0/0.5/0.4 0/0/0";
+	car->settings()["seatAnimationSystem"] = "Objects/Vehicles/AS_FAV/3p_as_fav_driver_animSys.inc";
+	car->settings()["armor.maxHitPoints"] = "500";
+	car->children().push_back({"car_entry", {-1.5f, 0, 0}, {}});
+	game.templates.registerType(9, "Engine");
+	game.templates.registerType(10, "Spring");
+	car->settings()["mass"] = "1800";
+	world::ObjectTemplate* engine = game.templates.create("Engine", "car_engine");
+	engine->settings()["engineType"] = "194";
+	world::ObjectTemplate* wheel = game.templates.create("Spring", "car_wheel");
+	wheel->settings()["strength"] = "40";
+	wheel->settings()["damping"] = "8";
+	car->children().push_back({"car_engine", {0, -0.44f, 0}, {}});
+	for (float x : {-0.95f, 0.95f}) {
+		for (float z : {-1.4f, 1.6f}) {
+			engine->children().push_back({"car_wheel", {x, -0.15f, z}, {}});
+		}
+	}
+	game.templates.create("EntryPoint", "car_entry")->settings()["entryRadius"] = "3";
+	game.start();
+	const uint32_t vehicle = game.objects.create(car, {3, 1.2f, 0}, {30, 0, 0})->id();
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	game.run(3);
+	const uint32_t soldier = game.world->playerObject();
+	const anim::Skeleton* skeleton = game.systems.skeleton("Objects/Soldiers/Common/Animations/3p_setup.ske");
+	game::SoldierInput input;
+	input.use = true;
+	game.world->setPlayerInput(input);
+	game.world->tick(1 / 30.0f);
+	game.world->setPlayerInput({});
+	game.run(0.5f);
+	CHECK(game.world->playerVehicle() && game.world->playerVehicle()->id() == vehicle);
+	std::vector<anim::Matrix> seated, slumped;
+	CHECK(skeleton && game.world->skeletonPose(soldier, *skeleton, seated));
+	game.world->setHitPoints(soldier, 0);
+	CHECK(game.world->seatCorpse(vehicle, 0) == soldier);
+	game.run(1.0f);
+	const world::Object* body = game.objects.find(soldier);
+	CHECK(body && !body->hidden());
+	CHECK(skeleton && game.world->skeletonPose(soldier, *skeleton, slumped));
+	if (seated.size() > 47 && slumped.size() > 47) {
+		const float moved = std::fabs(seated[47][12] - slumped[47][12]) + std::fabs(seated[47][13] - slumped[47][13])
+			+ std::fabs(seated[47][14] - slumped[47][14]);
+		std::fprintf(stderr, "  the head moved %.2f m slumping\n", moved);
+		CHECK(moved > 0.05f); // the die bundle's pose, not the seat's still one
+	}
+	// Still there a while on, gone with the vehicle.
+	game.run(5.0f);
+	CHECK(game.world->seatCorpse(vehicle, 0) == soldier && game.objects.find(soldier));
+	game.objects.remove(vehicle);
+	game.run(0.1f);
+	CHECK(game.world->seatCorpse(vehicle, 0) == 0 && !game.objects.find(soldier));
+}
+
+// A body dropped on flat ground (the setup pose 0.5 m up): its impacts
+// meet ragDollInit.con's setParticleCollisionCriteria (0.05 m a step, 1 s
+// apart: 0x008a7a20, 0x008a79f0) and it touches down (+0x63); asleep, it
+// wakes when something near it moves (every 1/30 s, 0x008a79d0) and rides
+// along with what it lies on (0x008add10: velocity x 1/30 s a frame).
+// Its capsules are pushed out of an edge they lie across (0x006e2ee0).
+TEST(RagDoll_ImpactsWakingAndRidingAlong)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	const anim::RagDollTemplate* t = game.systems.ragDoll(kRagDollScript);
+	const anim::Skeleton* skeleton = game.systems.skeleton("Objects/Soldiers/Common/Animations/3p_setup.ske");
+	CHECK(t && skeleton);
+	if (!t || !skeleton) {
+		return;
+	}
+	CHECK(std::abs(t->collisionMinSpeed() - 0.05f) < 1e-6f && std::abs(t->collisionMinDelay() - 1) < 1e-6f);
+	std::vector<anim::Matrix> pose = anim::worldMatrices(*skeleton, anim::setupPose(*skeleton));
+	for (anim::Matrix& m : pose) {
+		m[13] += 0.5f;
+	}
+	anim::RagDoll body;
+	body.start(*t, pose, {0, -3, 0});
+	anim::RagDollWorld world;
+	world.ground = [](float, float, anim::Vec& normal) {
+		normal = {0, 1, 0};
+		return 0.0f;
+	};
+	CHECK(!body.touched());
+	int impacts = 0;
+	float hardest = 0;
+	for (int i = 0; i < 30 * 8 && !body.sleeping(); ++i) {
+		body.update(1 / 30.0f, world);
+		float speed = 0;
+		uint32_t material = 1;
+		if (body.takeImpact(speed, material)) {
+			++impacts;
+			hardest = std::max(hardest, speed);
+			CHECK(material == 0 && speed >= 0.05f);
+		}
+	}
+	std::fprintf(stderr, "  %d impact sounds, the hardest %.3f m a step\n", impacts, hardest);
+	CHECK(body.touched() && impacts >= 1 && impacts <= 9);
+	CHECK(body.sleeping());
+	// Nothing moving: asleep. Something moving near: awake.
+	world.movingNear = [](const anim::Vec&, float) { return false; };
+	body.update(1 / 30.0f, world);
+	CHECK(body.sleeping());
+	world.movingNear = [](const anim::Vec&, float) { return true; };
+	body.update(1 / 30.0f, world);
+	CHECK(!body.sleeping());
+	// Carried at 3 m/s along x: 0.1 m a frame.
+	world.movingNear = {};
+	world.carriedBy = [](const anim::Vec&, anim::Vec& velocity) {
+		velocity = {3, 0, 0};
+		return true;
+	};
+	const float before = body.middle()[0];
+	for (int i = 0; i < 10; ++i) {
+		body.update(1 / 30.0f, world);
+	}
+	CHECK(std::abs(body.middle()[0] - before - 1.0f) < 0.05f);
+}
+
+// The capsule edge test (collision-mesh slot 25, per face 0x006be990): a
+// capsule lying across a box's top edge is pushed up and out of it; one
+// below a face's edge with the normal pointing down is turned up without a
+// push.
+TEST(CollisionWorld_CapsuleAgainstEdges)
+{
+	physics::CollisionMeshFile mesh;
+	physics::CollisionLod lod;
+	const auto add = [&](std::array<float, 3> a, std::array<float, 3> b, std::array<float, 3> c) {
+		const uint16_t i = static_cast<uint16_t>(lod.vertices.size());
+		lod.vertices.push_back(a);
+		lod.vertices.push_back(b);
+		lod.vertices.push_back(c);
+		lod.faces.push_back({{i, static_cast<uint16_t>(i + 1), static_cast<uint16_t>(i + 2)}, 0});
+	};
+	add({0, 1, 0}, {2, 1, 2}, {0, 1, 2}); // the top at y = 1, x 0..2, z 0..2
+	physics::CollisionSubGeometry part;
+	part.lods = {lod, lod, lod};
+	physics::CollisionGeometry geometry;
+	geometry.subGeometries = {part};
+	mesh.geometries = {geometry};
+	physics::CollisionWorld world;
+	world.addMesh(mesh, physics::CollisionUser::Soldier, {}, {});
+	std::vector<physics::SphereContact> contacts;
+	// Across the edge x = 0 (from (0,1,0) to (0,1,2)), 0.05 m over it, radius 0.1.
+	world.capsuleEdgeContacts({-0.5f, 1.05f, 1}, {0.5f, 1.05f, 1}, 0.1f, contacts);
+	CHECK(contacts.size() == 1);
+	if (!contacts.empty()) {
+		CHECK(contacts[0].normal.y > 0.99f && std::abs(contacts[0].depth + 0.05f) < 1e-3f);
+	}
+	contacts.clear();
+	world.capsuleEdgeContacts({-0.5f, 0.95f, 1}, {0.5f, 0.95f, 1}, 0.1f, contacts);
+	CHECK(contacts.size() == 1 && contacts[0].normal.y > 0.99f && contacts[0].depth > 0);
+	contacts.clear();
+	world.capsuleEdgeContacts({-0.5f, 1.5f, 1}, {0.5f, 1.5f, 1}, 0.1f, contacts);
+	CHECK(contacts.empty());
 }

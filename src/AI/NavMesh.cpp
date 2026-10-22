@@ -705,6 +705,16 @@ float clusterEstimate(const NavMesh& mesh, const ClusterNode& node, const Vec3& 
 std::vector<uint16_t> findClusterPath(const NavMesh& mesh, uint32_t startPolygon, const Vec3& from, uint32_t goalPolygon,
 	const Vec3& to, const PathOptions& options)
 {
+	std::vector<uint16_t> clusters;
+	for (const ClusterStep& step : findClusterRoute(mesh, startPolygon, from, goalPolygon, to, options)) {
+		clusters.push_back(step.cluster);
+	}
+	return clusters;
+}
+
+std::vector<ClusterStep> findClusterRoute(const NavMesh& mesh, uint32_t startPolygon, const Vec3& from,
+	uint32_t goalPolygon, const Vec3& to, const PathOptions& options)
+{
 	if (startPolygon >= mesh.polygons.size() || goalPolygon >= mesh.polygons.size() || mesh.clusters.empty()) {
 		return {};
 	}
@@ -715,9 +725,9 @@ std::vector<uint16_t> findClusterPath(const NavMesh& mesh, uint32_t startPolygon
 	OpenList open;
 
 	auto build = [&](uint32_t last) {
-		std::vector<uint16_t> path;
+		std::vector<ClusterStep> path;
 		for (uint32_t n = last; n != kNone; n = nodes[n].parent) {
-			path.push_back(nodes[n].cluster);
+			path.push_back({nodes[n].cluster, nodes[n].entry});
 		}
 		std::reverse(path.begin(), path.end());
 		return path;
@@ -813,6 +823,15 @@ std::vector<uint16_t> findClusterPath(const NavMesh& mesh, uint32_t startPolygon
 		}
 	}
 	return {};
+}
+
+const ClusterLink* entryLink(const NavMesh& mesh, const ClusterStep& step)
+{
+	if (step.cluster >= mesh.clusters.size() || step.entry == 0xffff) {
+		return nullptr;
+	}
+	const size_t link = mesh.clusters[step.cluster].firstLink + static_cast<size_t>(step.entry);
+	return link < mesh.links.size() ? &mesh.links[link] : nullptr;
 }
 
 std::vector<Vec3> findPath(const NavMesh& mesh, const Vec3& from, const Vec3& to, const PathOptions& options)

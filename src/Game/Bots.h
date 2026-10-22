@@ -16,8 +16,10 @@
 //   Revive  (BBRevive 0x10082760): 100 while a downed teammate within the
 //           defibrillator's range can be reached before it bleeds out;
 //   Flee    (BBFlee 0x100859d0): 100 below 30 % health with the
-//           camouflage over 70 % charged, 10 s after spawning;
-//   Change  (BBChange 0x1006c520): best seat / current seat x weight x 10.
+//           camouflage over 70 % charged, 10 s after spawning (its plan
+//           0x10085fc0: a locked run 50 m away with the camouflage on);
+//   Change  (BBChange 0x1006c520): best seat / current seat x weight x 10
+//           (seat values 0x100d3e70), less with distance.
 //   MedicAssist (0x10070200), AmmoAssist (0x10071a10), RepairVehicle
 //           (0x10073360): the best teammate (human players only for ammo)
 //           or vehicle in reach by need over distance, x the squad
@@ -42,7 +44,9 @@
 //
 // Aiming (MouseTurretAimAt 0x1008e940, controller 0x100e5820): the
 // ControlInfo plugin's PID gains steer the look towards the lead point;
-// the trigger holds while the aim is inside the weapon's
+// the output is PIMouseLookX/Y, 5 degrees a 1/30 s tick per unit
+// (BF2142.exe 0x0058a6d0); the trigger (held for a fire mode 2 weapon,
+// tapped otherwise, 0x100777a0) goes while the aim is inside the weapon's
 // allowedDeviation (0x100d9090) after a reaction time of
 // (1 - skill)(1.5 + U[0,1]) s (0x100777a0); the rounds stray by the AI
 // deviation (1 - acc)(1 - t/2) x deviation (BF2142.exe 0x00892b70).
@@ -112,6 +116,8 @@ struct AiPlugin {
 	float lookAheadTime = 0, minSpeedForLookAhead = 0;
 	float minAngleDiffForSlowDown = 0, angleSlowDownScale = 0, maxAngleDiffSlowDown = 0;
 	bool floating = false;
+	// Unit: setHasExposedSoldier (+0x16; the seat value's armour bonus).
+	bool exposedSoldier = false;
 	// ControlInfo.
 	float proportional = 0, derivative = 0, angleSpeed = 0, yawScale = 1;
 	bool hasGains = false;
@@ -199,6 +205,9 @@ public:
 	// What a bot does now (for tests and debugging): the running
 	// behaviour's name (MoveTo, Idle, Fire, Change, Revive, Flee, ...).
 	std::string behaviour(int player) const;
+	// A bot's value of a seat (0x100d3e70; `vehicle` 0 for its soldier), as
+	// BBChange weighs it; 0 for no such bot.
+	float seatValueFor(int player, uint32_t vehicle, int seat) const;
 	int target(int player) const; // the enemy player it fights, -1 for none
 	// The equipment type whose behaviours it runs (Infantery, Tank, ...).
 	std::string equipment(int player) const;
@@ -240,6 +249,8 @@ private:
 		float pitch = 0;          // the look's pitch, degrees
 		float devYaw = 0, devPitch = 0; // the aim deviation applied (degrees)
 		bool tapped = false;      // Trigger: pressed last tick
+		bool heatStop = false;
+		bool reportedFiring = false; // the fire report's last state    // the heat condition (0x100d9040) in its cooling state
 		float poseRequested = -10;
 		SoldierPose pose = SoldierPose::Stand;
 		// Goal (MoveTo).
@@ -253,8 +264,13 @@ private:
 		uint32_t vehicleTarget = 0;
 		uint32_t lastVehicle = 0;
 		float leftVehicleAt = -1e9f;
-		// Flee.
+		// Flee (BBPFlee's plan 0x10085fc0).
 		physics::Vec3 fleeDirection;
+		bool planLocked = false;     // bot+0x7c: the plan runs to its end, no arbitration
+		bool fleePlanned = false;
+		bool fleeRun = false;        // a point was found: running to it
+		physics::Vec3 fleePoint;
+		float fleeCamoFrom = -1;     // the camouflage's 4 s, from when it is in hand
 		// Movement: the path follower on foot and at the wheel.
 		ai::PathFollower follower;
 		int followId = -1;           // what it follows (a goal id)
@@ -265,6 +281,7 @@ private:
 		ai::DriveState drive;
 		float lastYaw = 0;           // the vehicle's, for its turn rate
 		float lastYawAt = -1;
+		physics::Vec3 lastVelocity;  // the hover tank's, for its acceleration (FloatingTankMoveTo +0x3c)
 		// Strategic waypoints and areas on the way to the goal (0x10060300).
 		struct Via {
 			physics::Vec3 position;
@@ -327,6 +344,8 @@ private:
 	float moveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight);
 	float reviveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players);
 	float changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight);
+	// A seat's value (0x100d3e70): `vehicle` 0 for the bot's own soldier.
+	float seatValue(const Bot& bot, const GameWorld::PlayerInfo& self, uint32_t vehicle, int seat, bool other) const;
 	float idleUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight, const std::vector<GameWorld::PlayerInfo>& players);
 	float fleeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players);
 	float medicUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight, bool ammo);
@@ -408,6 +427,8 @@ private:
 	float m_time = 0;
 	uint32_t m_random = 0x2545f491;
 	float random(); // 0..1
+	void flee(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
+	void idle(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
 };
 
 // aiSettings.* (skill, bots, behaviours and modifiers, the equipment types'

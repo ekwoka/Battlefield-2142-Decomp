@@ -432,9 +432,10 @@ TEST(GameWorld_WeaponSwitching)
 
 TEST(GameWorld_GadgetsHealAndResupply)
 {
-	// unl_hub_medic: thrown out (slot 4), it heals the team round it, 3 a
-	// second within 4 m; a second one replaces the first. An ammo hub
-	// hands out magazines.
+	// unl_hub_medic: thrown out (slot 4), it heals the team round it, 3 per
+	// cent of their maximum a second within 4 m (0x005d8ac0 -> 0x00655a00);
+	// a second one replaces the first. An ammo hub hands out magazines,
+	// strength per cent of one a second (0x005f5110).
 	Range range;
 	range.templates.registerType(6, "Kit");
 	for (const char* name : {"unl_hub_medic", "unl_hub_ammo"}) {
@@ -496,7 +497,7 @@ TEST(GameWorld_GadgetsHealAndResupply)
 	CHECK(range.world->supplyObjects().size() == 1);
 
 	// Ammo: empty a magazine (into the air) and reload, then throw an ammo
-	// hub (20 strength: 2 magazines a second) to get it back.
+	// hub (20 strength: a fifth of a magazine a second) to get it back.
 	press(rifle);
 	const int magsBefore = range.world->playerWeapon()->magsLeft();
 	game::SoldierInput spray;
@@ -513,7 +514,11 @@ TEST(GameWorld_GadgetsHealAndResupply)
 	press(fire);
 	CHECK(range.world->supplyObjects().size() == 2); // the medic hub stays
 	press(rifle);
-	for (int i = 0; i < 30; ++i) {
+	for (int i = 0; i < 30 * 4; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->playerWeapon()->magsLeft() == magsBefore - 1); // 0.8 of it after 4 s
+	for (int i = 0; i < 30 * 2; ++i) {
 		range.world->tick(1 / 30.0f);
 	}
 	CHECK(range.world->playerWeapon()->magsLeft() == magsBefore);
@@ -835,7 +840,12 @@ TEST(GameWorld_SquadsLeadersAndBeacons)
 	range.world->setSpawnChoice(eu[1], game::GameWorld::kSpawnOnLeader);
 	CHECK(range.world->spawnSoldier(eu[1]));
 	range.world->playerInfo(eu[1], info);
-	CHECK(std::abs(info.position.x - 30) < 1.5f && std::abs(info.position.z - 30) < 1.5f);
+	// Scattered (0x005b2200): 3 to 9 m off (or half that), facing the leader.
+	const float dx = info.position.x - 30, dz = info.position.z - 30;
+	const float off = std::sqrt(dx * dx + dz * dz);
+	std::printf("  spawned on the leader %.2f m off, facing %.0f\n", off, info.yaw);
+	CHECK(off >= 1.5f - 1e-3f && off <= 9 + 1e-3f && std::abs(info.position.y) < 0.05f);
+	CHECK(std::abs(std::remainder(info.yaw - std::atan2(-dx, -dz) * 57.29578f, 360.0f)) < 1);
 
 	// The leader sets down a beacon (slot 8) at (30, 31); a member spawns there.
 	game::SoldierInput input;
@@ -1007,4 +1017,81 @@ TEST(GameWorld_GuidedMissileFollowsTheAim)
 		// About a second of turning at 0.45 rad/s, short of the 30 degrees (0.52).
 		CHECK(heading > 0.35f && heading < 0.5f);
 	}
+}
+
+// A deployed hub carrying a SupplyObject (unl_hub_medic_stationary's
+// Unl_Hub_Medic_Supply: radius 5, healSpeed 4, sharedStorageSize 300)
+// works as the supply crates do (0x005d1710, every 0.2 s): 4 per cent of
+// the maximum a second, from its storage, not by the gadget's ability.
+TEST(GameWorld_HubSupplyObject)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "SupplyObject");
+	world::ObjectTemplate* hub = range.templates.create("GenericFireArm", "unl_hub_medic");
+	hub->settings()["itemIndex"] = "4";
+	hub->settings()["projectileTemplate"] = "unl_hub_medic_stationary";
+	hub->settings()["ammo.replenishingType"] = "RTHeal";
+	hub->settings()["ammo.abilityRadius"] = "4";
+	hub->settings()["ammo.abilityStrength"] = "3";
+	hub->settings()["ammo.magSize"] = "1";
+	hub->settings()["fire.roundsPerMinute"] = "60";
+	world::ObjectTemplate* stationary = range.templates.create("GenericProjectile", "unl_hub_medic_stationary");
+	stationary->children().push_back({"Unl_Hub_Medic_Supply", {}, {}});
+	world::ObjectTemplate* supply = range.templates.create("SupplyObject", "Unl_Hub_Medic_Supply");
+	supply->settings()["radius"] = "5";
+	supply->settings()["healSpeed"] = "4";
+	supply->settings()["sharedStorageSize"] = "300";
+	supply->settings()["destroyWhenEmptyStorage"] = "1";
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	kit->children().push_back({"unl_hub_medic", {}, {}});
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const uint32_t soldier = range.world->playerObject();
+	range.world->setHitPoints(soldier, 40);
+	const auto press = [&](game::SoldierInput input) {
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		range.world->setPlayerInput({});
+		range.world->tick(1 / 30.0f);
+	};
+	game::SoldierInput take;
+	take.selectItem = 4;
+	press(take);
+	game::SoldierInput fire;
+	fire.fire = true;
+	press(fire);
+	CHECK(range.world->supplyObjects().size() == 1);
+	game::SoldierInput rifle;
+	rifle.selectItem = 3;
+	press(rifle);
+	const float before = range.world->hitPoints(soldier);
+	for (int i = 0; i < 60; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	std::printf("  hub supply: %.1f -> %.1f in 2 s\n", before, range.world->hitPoints(soldier));
+	CHECK(std::abs(range.world->hitPoints(soldier) - (before + 8)) < 1.0f); // 2 s at 4 a second
+}
+
+// The driver's inputs (0x005ca2e0): x (1 - EMP level / empDamageNumStep),
+// all gone above level 1 for an auto-controlled one; x
+// criticalDamageScaleModifier below criticalDamage with
+// scaleInputOnCriticalDamage.
+TEST(GameWorld_DriverInputUnderEmp)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "PlayerControlObject");
+	world::ObjectTemplate* car = templates.create("PlayerControlObject", "car");
+	car->settings()["armor.takesEmpDamage"] = "1";
+	car->settings()["armor.criticalDamage"] = "150";
+	CHECK(game::GameWorld::driverInputScale(0, 500, *car) == 1);
+	CHECK(game::GameWorld::driverInputScale(3, 500, *car) == 0);
+	CHECK(std::abs(game::GameWorld::driverInputScale(1.5f, 500, *car) - 1.0f / 3) < 1e-6f); // level 2
+	CHECK(std::abs(game::GameWorld::driverInputScale(0.2f, 500, *car) - 2.0f / 3) < 1e-6f);
+	car->settings()["scaleInputOnCriticalDamage"] = "1";
+	car->settings()["criticalDamageScaleModifier"] = "0.5";
+	CHECK(game::GameWorld::driverInputScale(0, 100, *car) == 0.5f && game::GameWorld::driverInputScale(0, 200, *car) == 1);
+	car->settings()["autoControllerTemplateName"] = "SentryGun";
+	CHECK(game::GameWorld::driverInputScale(1, 500, *car) == 1 && game::GameWorld::driverInputScale(2, 500, *car) == 0);
 }

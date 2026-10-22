@@ -1,9 +1,8 @@
 #include "Weapons.h"
 
-#include <algorithm>
-
 #include "World/ObjectTemplate.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -66,7 +65,17 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 		s.loseDistance = number(t, "seek.distLoseLock", s.lockDistance);
 		s.maxYawRate = number(t, "follow.maxYaw", 1);
 		s.maxPitchRate = number(t, "follow.maxPitch", 1);
-		s.chaseSpeed = number(t, "follow.armingSpeed", 7) * number(t, "follow.speedModifier", 1);
+		s.armingDelay = number(t, "armingDelay", 0);
+		s.armingSpeed = number(t, "follow.armingSpeed", 0);
+		s.speedModifier = number(t, "follow.speedModifier", 1);
+		s.predictionFactor = number(t, "follow.predictionFactor", 0);
+		s.useTargetSpeed = number(t, "follow.useTargetSpeed", 0) != 0;
+		s.magneticBehaviour = number(t, "follow.magneticBehaviour", 0) != 0;
+		s.acceleration = number(t, "acceleration", 0);
+		s.deAcceleration = number(t, "deAcceleration", 0);
+		s.maxSpeed = number(t, "maxSpeed", 0);
+		s.maxAngleLock = number(t, "seek.maxAngleLock", 360);
+		s.ignoreFriendly = number(t, "seek.ignoreFriendly", 1) != 0;
 	}
 	s.triggerRadius = number(t, "detonation.triggerRadius", 0);
 	s.triggerAngle = number(t, "detonation.triggerAngle", 180);
@@ -188,6 +197,70 @@ bool FireArm::tick(float seconds, bool trigger)
 		m_reloadLeft = m_settings.reloadTime;
 	}
 	return true;
+}
+
+float Gaussian::next(Random& random)
+{
+	if (m_has) {
+		m_has = false;
+		return m_kept;
+	}
+	float u = 0, v = 0, s = 0;
+	do {
+		u = random.unit() * 2 - 1;
+		v = random.unit() * 2 - 1;
+		s = u * u + v * v;
+	} while (s > 1 || s == 0);
+	const float f = std::sqrt(-2 * std::log(s) / s);
+	m_kept = f * v;
+	m_has = true;
+	return f * u;
+}
+
+physics::Vec3 deviateVelocity(const physics::Vec3& velocity, const physics::Vec3& right, const physics::Vec3& up, float speed,
+	float deviation, float alongUp, float alongRight)
+{
+	if (deviation <= 0.01f) { // 0x0091f9e0, also the scale
+		return velocity;
+	}
+	const float scale = speed * 0.01f * deviation;
+	return velocity + up * (scale * alongUp) + right * (scale * alongRight);
+}
+
+void followMagnet(Projectile& p, const physics::Vec3& aim, const physics::Vec3& targetVelocity, float seconds)
+{
+	const ProjectileSettings& s = *p.settings;
+	const float targetSpeed = std::sqrt(physics::lengthSquared(targetVelocity));
+	if (targetSpeed > p.targetTopSpeed || (targetSpeed < s.armingSpeed && !p.armed)) {
+		p.targetTopSpeed = targetSpeed;
+	}
+	p.armed = p.targetTopSpeed > s.armingSpeed;
+	const float ownSpeed = std::sqrt(physics::lengthSquared(p.velocity));
+	physics::Vec3 point = aim;
+	if (ownSpeed > 0) {
+		point = point + targetVelocity * (std::sqrt(physics::lengthSquared(aim - p.position)) / ownSpeed * s.predictionFactor);
+	}
+	physics::Vec3 direction = point - p.position;
+	const float length = std::sqrt(physics::lengthSquared(direction));
+	direction = length > 1e-4f ? direction * (1 / length) : physics::Vec3 {};
+	float cap = s.maxSpeed;
+	if (s.useTargetSpeed) {
+		cap = (p.armed ? s.speedModifier : 1.0f) * p.targetTopSpeed; // 0x005ec770, 0x005ec7a0
+	}
+	if (ownSpeed >= cap) {
+		if (ownSpeed > 0.01f) {
+			p.velocity = p.velocity - p.velocity * (std::min(s.deAcceleration * seconds, ownSpeed) / ownSpeed);
+		}
+	} else {
+		p.velocity = p.velocity + direction * (s.acceleration * seconds);
+		p.resting = false;
+	}
+}
+
+physics::Vec3 bounceVelocity(const physics::Vec3& velocity, const physics::Vec3& normal, float elasticity, float friction)
+{
+	const physics::Vec3 normalPart = normal * physics::dot(velocity, normal);
+	return (velocity - normalPart) * (1 - std::min(friction, 1.0f)) - normalPart * elasticity;
 }
 
 void moveProjectile(Projectile& p, float seconds, float gravity)

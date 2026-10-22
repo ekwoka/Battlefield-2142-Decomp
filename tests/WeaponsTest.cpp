@@ -146,3 +146,73 @@ TEST(Weapons_ExplosionFalloffAndEmpSteps)
 	CHECK(game::addEmpDamage(0.4f, 100, 120, 3) == 2);
 	CHECK(game::addEmpDamage(0, 0.2f, 120, 2) == 1);
 }
+
+// A frag grenade (Grenade_hand: friction 0.25, elasticity 0.5) landing on
+// grass (friction 0.8, elasticity 0): elasticity (0.5 + 0) / 2 = 0.25 of
+// its speed into the ground comes back, and 1 - (0.25 + 0.8) / 2 = 0.475
+// of its slide is kept (0x006c0d00); friction over 1 stops the slide.
+TEST(Weapons_GrenadeBounce)
+{
+	const physics::Vec3 v = game::bounceVelocity({4, -8, 0}, {0, 1, 0}, 0.25f, 0.525f);
+	CHECK(std::fabs(v.x - 4 * 0.475f) < 1e-5f && std::fabs(v.y - 2) < 1e-5f && v.z == 0);
+	const physics::Vec3 stairs = game::bounceVelocity({4, -8, 0}, {0, 1, 0}, 0.25f, 2.6f);
+	CHECK(stairs.x == 0 && std::fabs(stairs.y - 2) < 1e-5f);
+}
+
+// The motion mine's follow (Unl_Mine_Motion: acceleration 60, deAcceleration
+// 50, armingSpeed 7.2, speedModifier 2, useTargetSpeed): a parked vehicle
+// gives no speed to chase at; one at 5 m/s is chased up to 5 m/s; once it
+// has gone over 7.2 m/s, at twice its top speed.
+TEST(Weapons_MotionMineFollow)
+{
+	game::ProjectileSettings s;
+	s.seek = game::ProjectileSettings::Seek::Magnet;
+	s.acceleration = 60;
+	s.deAcceleration = 50;
+	s.maxSpeed = 300;
+	s.armingSpeed = 7.2f;
+	s.speedModifier = 2;
+	s.predictionFactor = 0.1f;
+	s.useTargetSpeed = true;
+	game::Projectile mine;
+	mine.settings = &s;
+	mine.resting = true;
+	game::followMagnet(mine, {10, 0, 0}, {0, 0, 0}, 1 / 30.0f);
+	CHECK(mine.resting && physics::lengthSquared(mine.velocity) == 0); // parked: never chased
+	game::followMagnet(mine, {10, 0, 0}, {0, 0, 5}, 1 / 30.0f);
+	CHECK(!mine.resting && std::fabs(mine.velocity.x - 2) < 1e-4f && !mine.armed);
+	for (int i = 0; i < 30; ++i) {
+		game::followMagnet(mine, {10, 0, 0}, {0, 0, 5}, 1 / 30.0f);
+	}
+	const float capped = std::sqrt(physics::lengthSquared(mine.velocity));
+	CHECK(capped <= 5 + 2 && capped >= 5 - 2);
+	game::followMagnet(mine, {10, 0, 0}, {0, 0, 9}, 1 / 30.0f);
+	CHECK(mine.armed && std::fabs(mine.targetTopSpeed - 9) < 1e-4f);
+	for (int i = 0; i < 60; ++i) {
+		game::followMagnet(mine, {10, 0, 0}, {0, 0, 4}, 1 / 30.0f); // slower now: still chased at 18
+	}
+	const float armed = std::sqrt(physics::lengthSquared(mine.velocity));
+	CHECK(armed > 16 && armed < 20);
+}
+
+// The deviation components' spread (0x005b28d0, 0x005f5540): normal(0, 1)
+// numbers; a round deviating by `dev` moves dev x 0.01 x the firearm's
+// velocity per unit along its up and right axes; 0.01 or less is none.
+TEST(Weapons_DeviationIsNormal)
+{
+	game::Random random;
+	game::Gaussian gaussian;
+	double sum = 0, squares = 0;
+	constexpr int kCount = 20000;
+	for (int i = 0; i < kCount; ++i) {
+		const double g = gaussian.next(random);
+		sum += g;
+		squares += g * g;
+	}
+	const double mean = sum / kCount, deviation = std::sqrt(squares / kCount - mean * mean);
+	CHECK(std::fabs(mean) < 0.03 && std::fabs(deviation - 1) < 0.03);
+	const physics::Vec3 v = game::deviateVelocity({0, -10, 0}, {1, 0, 0}, {0, 0, 1}, 10, 45, 1, -2);
+	CHECK(std::fabs(v.z - 4.5f) < 1e-4f && std::fabs(v.x + 9) < 1e-4f && v.y == -10);
+	const physics::Vec3 none = game::deviateVelocity({0, -10, 0}, {1, 0, 0}, {0, 0, 1}, 10, 0.01f, 1, 1);
+	CHECK(none.x == 0 && none.z == 0);
+}

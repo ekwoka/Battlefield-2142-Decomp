@@ -23,10 +23,8 @@
 // middle particle (the right hip), in world axes.
 //
 // Not rewritten yet: the network side (ragdoll_net_*: particles driven by
-// the server, 0x008acce0), the level of detail by distance to the camera
-// (0x008ae120: dT * 1.5 past the second ragdoll, no leg capsules), waking
-// a sleeping body when something moves near it, and the impact sounds
-// (setParticleCollisionCriteria, 0x008a7a20).
+// the server, 0x008acce0) and the level of detail by distance to the
+// camera (0x008ae120: dT * 1.5 past the second ragdoll, no leg capsules).
 #pragma once
 
 #include "AnimationFiles.h"
@@ -152,6 +150,13 @@ private:
 	std::vector<Link> m_links;
 	std::vector<bool> m_locked;
 	float m_collisionMinSpeed = -1, m_collisionMinDelay = 0;
+
+public:
+	// setParticleCollisionCriteria (+0xbc, +0xc0): an impact sound needs a
+	// particle hitting at minSpeed (metres a step; -1: none) and minDelay
+	// seconds since the last.
+	float collisionMinSpeed() const { return m_collisionMinSpeed; }
+	float collisionMinDelay() const { return m_collisionMinDelay; }
 };
 
 // Loads a ragdoll script (ragDollInit.con and what it includes) through
@@ -160,15 +165,26 @@ bool loadRagDoll(RagDollTemplate& ragDoll, const std::string& path,
 	const std::function<bool(const std::string& path, std::vector<uint8_t>& data)>& read,
 	const std::function<const Skeleton*(const std::string& path)>& skeleton);
 
-// What a ragdoll collides with, in world space.
+// What a ragdoll collides with, in world space: the terrain and the
+// objects of its list (0x008ab6b0: those with collision whose soldier LOD
+// comes within ragdoll_completeCollRadius of the middle particle, moving
+// ones included).
 struct RagDollWorld {
 	// The terrain's height and normal under a point; empty for none.
 	std::function<float(float x, float z, Vec& normal)> ground;
-	// The first object face the segment passes through (point and normal).
-	std::function<bool(const Vec& from, const Vec& to, Vec& point, Vec& normal)> raycast;
-	// Faces a sphere touches: the deepest one's normal and depth (negative
-	// inside); false for none.
-	std::function<bool(const Vec& center, float radius, Vec& normal, float& depth)> sphere;
+	// The first object, in list order, whose mesh the segment crosses
+	// moving into a face (collision-mesh slot 22): the crossing, the face's
+	// normal and material.
+	std::function<bool(const Vec& from, const Vec& to, Vec& point, Vec& normal, uint32_t& material)> raycast;
+	// A capsule against each object's mesh edges (slot 25): every contact's
+	// normal and depth (negative: into it).
+	std::function<void(const Vec& a, const Vec& b, float radius, std::vector<std::pair<Vec, float>>& contacts)> capsule;
+	// Whether an object of the list near `middle` moves (its physics not
+	// at rest and over 0.001 m/s: 0x008a79d0), which wakes a sleeping body.
+	std::function<bool(const Vec& middle, float reach)> movingNear;
+	// The velocity of the object 2 m or less straight under `from` (the ray
+	// 0x006f2250; its physics node's point velocity), false for none.
+	std::function<bool(const Vec& from, Vec& velocity)> carriedBy;
 };
 
 // One body (an instance, 0x68 bytes: 0x008abc00).
@@ -205,6 +221,12 @@ public:
 
 	const Vec& middle() const;
 	bool sleeping() const { return !m_awake; }
+	// The impact to sound (0x008a79f0): the fastest hit since the last one
+	// taken, once (speed in metres a step, the surface's material).
+	bool takeImpact(float& speed, uint32_t& material);
+	// A particle has hit something (+0x63): with ragdollLandedDelay since
+	// the death, the body has landed (0x005eda20).
+	bool touched() const { return m_touched; }
 	const std::vector<Particle>& particles() const { return m_particles; }
 	const RagDollTemplate* ragDollTemplate() const { return m_template; }
 	// The body's facing: the normal of the hips and right shoulder (0x008a9ae0);
@@ -223,6 +245,7 @@ private:
 	void legCollision();                  // 0x008a8ac0
 	void collide(const RagDollWorld& world); // 0x008ac200
 	void capsuleCollision(const RagDollWorld& world); // 0x008abf20
+	void impact(const Particle& p, const Vec& normal, uint32_t material); // 0x008a7a20
 	Vec hipAxis() const;                  // 0x008a9bd0
 	Particle* particleOfBone(int bone);
 	const Particle* particleOfBone(int bone) const;
@@ -236,6 +259,13 @@ private:
 	float m_accumulated = 0;   // 0x4c
 	float m_gravityRamp = 0;   // 0x50
 	float m_gravityTime = 0;   // 0x54
+	// Impacts: the speed and material of the hardest hit waiting (0x3c,
+	// 0x40, 0x44) and the time since the last one taken (0x48).
+	float m_impactSpeed = 0;
+	uint32_t m_impactMaterial = 0;
+	bool m_impactPending = false;
+	float m_sinceImpact = 0;
+	bool m_touched = false;    // 0x63
 };
 
 } // namespace dice::hfe::anim

@@ -64,7 +64,17 @@ struct ProjectileSettings {
 	float lockDistance = 0;
 	float loseDistance = 0;
 	float maxYawRate = 0, maxPitchRate = 0;
-	float chaseSpeed = 0; // follow.armingSpeed × speedModifier (see GameWorld::steerSeeker)
+	// The magnet's chase (GameWorld::steerSeeker): armingDelay (template
+	// +0x2fc), follow.armingSpeed, speedModifier, predictionFactor,
+	// useTargetSpeed, magneticBehaviour; the projectile's acceleration
+	// (+0x31c), deAcceleration and maxSpeed; seek.maxAngleLock (degrees)
+	// and ignoreFriendly.
+	float armingDelay = 0;
+	float armingSpeed = 0, speedModifier = 1, predictionFactor = 0;
+	bool useTargetSpeed = false, magneticBehaviour = false;
+	float acceleration = 0, deAcceleration = 0, maxSpeed = 0;
+	float maxAngleLock = 360;
+	bool ignoreFriendly = true;
 	// Mines: an enemy inside triggerRadius and triggerAngle (degrees either
 	// side of the mine's facing) moving faster than triggerVictimMinSpeed
 	// sets it off; the blast reaches explosionConeAngle either side of the
@@ -145,10 +155,51 @@ struct Projectile {
 	bool resting = false; // a grenade lying still
 	float age = 0;
 	uint32_t lockedOn = 0; // the vehicle a seeker chases
+	// A magnet's follow state (0x005ecb30): chasing from when (the seek's
+	// trackingDelay after the lock), the fastest the target has gone
+	// (+0x90) and whether that armed it (+0x95).
+	float followFrom = -1;
+	float targetTopSpeed = 0;
+	bool armed = false;
 	int team = 0;         // the thrower's (mines spare their own side unless allowFriendlyFireDetonation)
 	float yaw = 0;        // the facing it was thrown with (mines' cones)
 	bool alive = true;
 };
+
+// A RotationalPoint projectile's velocity after a contact (0x006c0d00):
+// the part along the normal reversed times `elasticity` (the mean of the
+// two materials'), the sliding part times 1 - `friction` (at most 1).
+physics::Vec3 bounceVelocity(const physics::Vec3& velocity, const physics::Vec3& normal, float elasticity, float friction);
+
+// A magnet's follow and thrust for a tick (0x005ecb30, 0x005b3e60): the
+// target's top speed arms it past armingSpeed; it heads for `aim` plus
+// the target's velocity x (distance / own speed) x predictionFactor,
+// accelerating while under the cap (maxSpeed, or with useTargetSpeed the
+// top speed, x speedModifier once armed) and braking along its velocity
+// at it.
+void followMagnet(Projectile& projectile, const physics::Vec3& aim, const physics::Vec3& targetVelocity, float seconds);
+
+// A normal(0, 1) number (0x005b28d0: Marsaglia's polar method on the
+// engine's generator, the second of each pair kept for the next call).
+// The deviation components fill a table of 1024 of them once
+// (0x005f5750) and read it at (Game slot 0x68 + the round's index) & 1023.
+class Gaussian {
+public:
+	float next(Random& random);
+
+private:
+	bool m_has = false;
+	float m_kept = 0;
+};
+
+// A round's deviation (the deviation components' apply, 0x005f5540): two
+// normal(0, 1) numbers times `deviation` (minDev with the firing's
+// build-up for the main round, subProjectileDev for each sub-projectile),
+// each times 0.01 x the firearm's velocity, along the projectile's up and
+// right axes. Not a cone in degrees: deviation 1 is 0.57 degrees, one
+// standard deviation, on each axis.
+physics::Vec3 deviateVelocity(const physics::Vec3& velocity, const physics::Vec3& right, const physics::Vec3& up, float speed,
+	float deviation, float alongUp, float alongRight);
 
 // One tick of point physics (0x006c6170 / 0x006c57a0) for a projectile.
 void moveProjectile(Projectile& projectile, float seconds, float gravity = physics::tuning::kGravity);

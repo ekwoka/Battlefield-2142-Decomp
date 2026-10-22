@@ -25,7 +25,6 @@ constexpr int kLoadExponent = 3;              // 0x00a83e9c
 constexpr float kGripScale = 1;               // 0x00a83e90
 constexpr float kSlopeInFirstGear = 0;        // 0x00a83ef4
 constexpr float kBrakeLatSpeed = 1.5f;        // 0x00a83ef8
-constexpr float kAirSpinDamping = 0.99f;      // not decoded: the wheel node 0x006b7910 off the ground
 
 const std::string* setting(const world::ObjectTemplate& t, const char* name)
 {
@@ -68,6 +67,25 @@ float wheelRadius(const physics::CollisionMeshFile* mesh, int part)
 		}
 		if (!sub.lods.empty()) {
 			return std::max(0.1f, (sub.lods[0].boundsMax[1] - sub.lods[0].boundsMin[1]) * 0.5f);
+		}
+	}
+	return 0.5f;
+}
+
+// The radius the engine turns the wheel with (the Spring node's
+// 0x006cad60): the height (max y - min y, the box's +0x28 from 0x006aeda0)
+// of the wheel object's collision box at LOD 0 (projectiles'), plus the
+// object's slot 0x94 (0 for the base Object, 0x005b6b80), at least 0.1.
+// For as_fav's wheels that is 0.97 m, the wheel's full height: the spin
+// and slope torques work with it as the exe has it.
+float wheelSpinRadius(const physics::CollisionMeshFile* mesh, int part)
+{
+	if (!mesh || part < 0 || static_cast<size_t>(part) >= mesh->geometries.size()) {
+		return 0.5f;
+	}
+	for (const auto& sub : mesh->geometries[static_cast<size_t>(part)].subGeometries) {
+		if (!sub.lods.empty()) {
+			return std::max(0.1f, sub.lods[0].boundsMax[1] - sub.lods[0].boundsMin[1]);
 		}
 	}
 	return 0.5f;
@@ -241,6 +259,7 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 				Wheel wheel;
 				wheel.mount = position;
 				wheel.radius = wheelRadius(mesh, static_cast<int>(number(t, "collisionPart", -1)));
+				wheel.spinRadius = wheelSpinRadius(mesh, static_cast<int>(number(t, "collisionPart", -1)));
 				wheel.strength = number(t, "strength", 0);
 				wheel.damping = number(t, "damping", 0);
 				wheel.maxSteer = steering.maxSteer;
@@ -430,23 +449,33 @@ void Vehicle::updateWheel(Wheel& wheel, physics::RigidBody& body, const physics:
 		body.addForce(centre - body.position, {0, push, 0});
 	}
 
-	if (!wheel.contact) {
-		wheel.spin *= kAirSpinDamping;
-	} else {
-		const Vec3 point {bottom.x, groundHeight, bottom.z};
-		Vec3 velocity = body.pointVelocity(point);
-		velocity.y += gravity * kTick;
-		const Vec3 groundVelocity = velocity - normal * physics::dot(velocity, normal);
+	// The driven wheel (0x006b7910) runs whether it touches or not
+	// (0x006b8230 hands newCar2 wheels to it before its contact test). Off
+	// the ground its contact sums are zero: no normal, the ground velocity
+	// gravity's tick alone, so no tyre force and no feedback, while the
+	// engine and gravity along the wheel still turn it, and its rpm still
+	// counts towards the engine's. (The Spring node then scales the spin by
+	// 1.0 for newCar2, 0x00a84c20; 0.9 in water.)
+	{
+		const Vec3 point {bottom.x, wheel.contact ? groundHeight : bottom.y, bottom.z};
+		Vec3 groundVelocity {0, gravity * kTick, 0};
+		Vec3 contactNormal {};
+		if (wheel.contact) {
+			Vec3 velocity = body.pointVelocity(point);
+			velocity.y += gravity * kTick;
+			groundVelocity = velocity - normal * physics::dot(velocity, normal);
+			contactNormal = normal;
+		}
 		TyreContact contact;
 		contact.grip = grip;
-		contact.normalY = normal.y;
+		contact.normalY = contactNormal.y;
 		const Vec3 engine = body.position + body.rotation.transform(m_engineOffset);
 		contact.drive = physics::dot(point - engine, body.rotation.rows[2]) < 0;
 		contact.brakeLatMod = m_braking && std::fabs(m_input.throttle) > 0.01f
 			&& std::fabs(physics::dot(body.velocity, right)) < kBrakeLatSpeed;
 
 		// Driven wheel (0x006b7910): spin from the engine and the slope.
-		const Vec3 driveDirection = normalized(forward - normal * physics::dot(forward, normal));
+		const Vec3 driveDirection = normalized(forward - contactNormal * physics::dot(forward, contactNormal));
 		const float quarterMass = m_mass * 0.25f;
 		const float ratio = m_engine.gearRatio(m_gear);
 		float throttle = m_input.throttle;
@@ -458,12 +487,13 @@ void Vehicle::updateWheel(Wheel& wheel, physics::RigidBody& body, const physics:
 		const float engineTorque = m_engine.torque * throttle * (m_engine.useClutchedTorque ? m_clutch : 1.0f);
 		const float driveTorque = engineTorque * m_engine.differential * ratio * kDriveTorqueScale;
 		// 0x006b7460: the downhill part of the wheel's share of the weight,
-		// along the wheel, times the radius.
+		// along the wheel, times the radius (all of it along the wheel off
+		// the ground).
 		const float weight = gravity * quarterMass;
-		const float intoGround = weight * normal.y;
-		const float downhill = (-intoGround * normal.x) * forward.x + (weight - intoGround * normal.y) * forward.y
-			+ (-intoGround * normal.z) * forward.z;
-		const float slopeTorque = downhill * wheel.radius * m_engine.slopeTorqueMod
+		const float intoGround = weight * contactNormal.y;
+		const float downhill = (-intoGround * contactNormal.x) * forward.x + (weight - intoGround * contactNormal.y) * forward.y
+			+ (-intoGround * contactNormal.z) * forward.z;
+		const float slopeTorque = downhill * wheel.spinRadius * m_engine.slopeTorqueMod
 			* (m_gear == 1 ? kSlopeInFirstGear : 1.0f);
 		float resistance = m_engine.frictionTorque;
 		if (m_input.throttle == 0) {
@@ -474,11 +504,11 @@ void Vehicle::updateWheel(Wheel& wheel, physics::RigidBody& body, const physics:
 		}
 		const float inertia = m_engine.wheelInertia + m_engine.wheelInertia;
 		const float spun = wheelSpinStep(wheel.spin, slopeTorque + driveTorque, resistance, inertia, kTick);
-		const Vec3 slip = driveDirection * (spun * wheel.radius) - groundVelocity;
-		Vec3 force = tyreForce(m_engine, contact, slip, forward, right) * m_engine.frictionMod;
+		const Vec3 slip = driveDirection * (spun * wheel.spinRadius) - groundVelocity;
+		const Vec3 force = wheel.contact ? tyreForce(m_engine, contact, slip, forward, right) * m_engine.frictionMod : Vec3 {};
 
 		// The tyre's grip turns the wheel back.
-		const float feedback = wheel.radius * physics::dot(force, forward) * m_engine.engineFeedbackMod * quarterMass
+		const float feedback = wheel.spinRadius * physics::dot(force, forward) * m_engine.engineFeedbackMod * quarterMass
 			* -kTicksPerSecond;
 		float spin = wheelSpinStep(wheel.spin, feedback + slopeTorque + driveTorque, resistance, inertia, kTick);
 		const float toRpm = ratio * m_engine.differential * kRpmScale;
@@ -492,7 +522,9 @@ void Vehicle::updateWheel(Wheel& wheel, physics::RigidBody& body, const physics:
 		wheel.spin = spin;
 		m_wheelRpmSum += rpm;
 		++m_wheelRpmCount;
-		body.addFriction(point, force * kTicksPerSecond);
+		if (wheel.contact) {
+			body.addFriction(point, force * kTicksPerSecond);
+		}
 	}
 	// 0x006cace0: the wheel's turn, kept within +-pi.
 	wheel.angle += wheel.spin * seconds;

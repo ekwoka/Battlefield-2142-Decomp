@@ -1,14 +1,18 @@
 // AIDLL.dll's path follower (the bot's +0xd8 object, 0x178 bytes,
 // constructor 0x10094f10) and the drivers that turn its steering point into
 // input (the interpreter entries InfanteryMoveTo 0x1008fc90, CarMoveTo
-// 0x10091050, TankMoveTo 0x10091b40), rewritten.
+// 0x10091050, TankMoveTo 0x10091b40, MechMoveTo 0x1008d250,
+// FloatingTankMoveTo 0x1008c7c0), rewritten.
 //
 // The BBPGotoWaypoint patterns plan Turn(0.5) then MoveToFinding (0x100d11c0)
 // to the goal (radius: the goal's; half of it at the wheel, 0x10068980).
 // MoveToFinding asks the follower for a path when the goal changes
 // (0x100966c0 -> 0x10095fc0):
-//   - a straight walk over the mesh first, under 200 m and at most five
-//     polygons (0x100952c0); otherwise the cluster and polygon searches;
+//   - a straight walk over the mesh first, under 200 m, the ray not
+//     entering cost class 5 (0x100952c0); otherwise over 100 m the cluster
+//     search, then polygon searches in segments of three clusters
+//     (0x100962e0, see planSegment); 100 m or less one polygon search in
+//     the start's and the goal's clusters;
 //   - the polygon path's portals become waypoints (0x10095b20), smoothed
 //     onto the portals keeping max(1, 0.8 radius) from their ends
 //     (0x10093610, below).
@@ -18,17 +22,20 @@
 //   - a waypoint is reached within 3 m (soldier) / 5 m (vehicle) of height
 //     and 0.5 m (soldier) / max(1, approach) m (vehicle; the last one also
 //     within the vehicle's radius) horizontally (0x10094050);
+//   - the next segment while the cluster path goes on (0x10095720);
 //   - look-ahead (0x10093420): within 10 m (20 m) of the waypoint the
 //     follower skips to the next while the mesh ray to it is clear (one
-//     waypoint a tick on foot, up to four at the wheel); when not even the
-//     waypoint itself can be seen, it is blocked, and blocked for 2 s
-//     (0.5 s) the path is planned again from where the bot is (0x10095470);
+//     waypoint a tick on foot, up to four at the wheel); when none was
+//     skipped and the waypoint itself can't be seen, it is blocked, and
+//     blocked for 2 s (0.5 s) the path is planned again from where the bot
+//     is (0x10095470);
 //   - progress (0x10092bc0): a bot that pushes its controls and doesn't get
 //     2 m (4 m) further for 10 s (20 s) fails; the move ends and the
 //     behaviour plans again. A soldier standing still half a second jumps.
-// Not rewritten: the search windows of three clusters (the whole path is
-// searched at once), the dynamic-obstacle sidestep (0x100e63c0), and the
-// jump (the rewrite's soldiers can't jump).
+// Not rewritten: the time-slicing of the searches (a segment a tick here),
+// the re-route from the bot's cluster when blocked (0x10095470 plans anew
+// here), the dynamic-obstacle sidestep (0x100e63c0), and the jump (the
+// rewrite's soldiers can't jump).
 #pragma once
 
 #include "NavMesh.h"
@@ -38,19 +45,21 @@
 
 namespace dice::hfe::ai {
 
-// A ray over the mesh (the pathfinder's vslot 0x84): walks the polygons the
-// segment crosses seen from above, at most `maxPolygons` of them. False
-// when it leaves the mesh, enters a polygon the profile can't walk on or
-// runs out of polygons; `reached` gets how far it got (metres, x/z).
+// A ray over the mesh (the pathfinder's vslot 0x84, 0x1003f930 ->
+// 0x1003ce50): from the start polygon, polygon by polygon where the ray
+// (x/z, from `from` towards `to`) leaves each one, at most `maxPolygons`
+// (-1: 1000). True once the exit point is within 0.05 m of the end (3-D)
+// or 0.16 m of it across; false when it leaves the mesh, enters a polygon
+// the profile can't walk on or of the cost class `stopClass` (5 and 6 stop
+// at 7 too; 0 for none), runs out of polygons, or (with a `width`) crosses
+// an edge with less than `width` beside the crossing point on either side.
+// `reached` gets how far it got (metres, x/z). The original also fails a
+// climb steeper than the tree's slope limit (tree +0x24 -> +0xc) by more
+// than the step height (0.35 on the infantry tree, the vehicle tree's own
+// through vt+0x2c); those limits are not in the .qtr/.clb files the
+// rewrite reads, so that test is left out.
 bool meshRaycast(const NavMesh& mesh, const Vec3& from, const Vec3& to, const CostProfile* profile, int maxPolygons,
-	float* reached = nullptr, int32_t startPolygon = -1);
-
-// The polygon under a point, else the nearest within `reach` metres
-// (rings a metre apart, 16 directions; the original's lookup through the
-// pathfinder's vslot 0x38 is not decoded; this search is the rewrite's),
-// -1 for none.
-// `at` gets the point on it.
-int32_t nearestPolygon(const NavMesh& mesh, const Vec3& point, float reach, const CostProfile* profile, Vec3* at = nullptr);
+	float* reached = nullptr, int32_t startPolygon = -1, float width = 0, uint8_t stopClass = 0);
 
 // A waypoint (0x28 bytes): the portal it crosses (a, b), where the bot
 // steers (p) and the polygon it enters.
@@ -114,6 +123,7 @@ public:
 
 private:
 	void plan(const NavMesh& mesh, const Vec3& from, float now);
+	bool planSegment(const NavMesh& mesh, const Vec3& position, float now);
 	bool resync(const NavMesh& mesh, const Vec3& position);
 	void lookAhead(const NavMesh& mesh, const Vec3& position, float now);
 	int rayPolygons() const { return m_settings.soldier ? 8 : 30; }
@@ -123,10 +133,14 @@ private:
 	bool m_failed = false;  // +0xd8
 	Vec3 m_goal;            // +0x2c
 	std::vector<Waypoint> m_waypoints; // +0x78
-	int32_t m_startPolygon = -1;
+	int32_t m_startPolygon = -1;       // +0x14
+	int32_t m_goalPolygon = -1;        // +0x24
+	Vec3 m_requestFrom;                // +0x18
+	std::vector<ClusterStep> m_clusterPath; // +0x90 +0x14
+	size_t m_cursor = 0;                    // +0x90 +0
 	size_t m_current = 0;              // +0x88
 	bool m_blocked = false;            // +0xda
-	float m_blockedSince = 0;
+	float m_lastClear = 0;
 	// Progress.
 	float m_lastInput = 0;    // +0xb0
 	float m_lastProgress = 0; // +0xa8
@@ -139,9 +153,14 @@ private:
 	float m_bend = 0;
 };
 
-// The ground vehicles' driving (CarMoveTo 0x10091050 / TankMoveTo
-// 0x10091b40, their controllers 0x100e9d40 / 0x100e0540 and the state
-// machine 0x100e8170) from the Mobile and ControlInfo plug-ins.
+// The ground vehicles' driving from the Mobile and ControlInfo plug-ins:
+// CarMoveTo 0x10091050 (state machine 0x100e8170, controller 0x100e9d40),
+// TankMoveTo 0x10091b40 (0x100de8a0, 0x100e0540) and MechMoveTo 0x1008d250
+// (0x100e1f20, 0x100e3c00). The tank's and the mech's machines are the
+// car's with differences (see driveControl). FloatingTankMoveTo has no
+// machine: floatingTankControl.
+enum class Driver { Car, Tank, Mech };
+
 struct DriveSettings {
 	float maxSpeed = 15;
 	float spaceNeededTweak = 0.94f;
@@ -161,7 +180,7 @@ struct DriveSettings {
 	float radius = 2.5f;
 	float centreRadius = 2.5f;
 	float width = 2, length = 4;
-	bool tank = false; // TankMoveTo's controller
+	Driver driver = Driver::Car;
 };
 
 // Another object in the bots' world list (the AI objects of the driver's
@@ -230,9 +249,29 @@ struct DriveOutput {
 	float turn = 0; // PIYaw, + right
 	int direction = 1; // +1 ahead, -1 backing
 	float targetSpeed = 0;
+	bool sprint = false; // PISprint (input 13): flat out near the top speed
 	bool stop = false; // an obstacle sits on the goal: brake, the move is over
 };
 
 DriveOutput driveControl(const DriveSettings& settings, DriveState& state, const DriveSense& sense);
+
+// The tank's reset (0x100e0930, TankMoveTo's and FloatingTankMoveTo's stop):
+// a throttle against the speed along the heading, t = -clamp(speed, +-0.7):
+// none within 0.05, 0.4 within 0.4, else t; no turning.
+float tankStopThrottle(float forwardSpeed);
+
+// FloatingTankMoveTo (0x1008c7c0): the hover tank strafes to its steering
+// point with a velocity loop (0x100de350) and never turns its hull (its
+// turn control, PIRoll, is the look's). `direction` is the unit 2-D way to
+// the steering point (the infantry steering 0x100ce860, without the
+// dynamic-obstacle sidestep 0x100e63c0, which is not rewritten),
+// `acceleration` the change of velocity since the last call over its time.
+struct FloatingTankOutput {
+	float throttle = 0; // PIThrottle
+	float strafe = 0;   // PIYaw (input 0, hard-coded): sideways on the hover tank
+	float targetSpeed = 0;
+};
+FloatingTankOutput floatingTankControl(const DriveSettings& settings, const DriveSense& sense, const Vec3& direction,
+	const Vec3& acceleration);
 
 } // namespace dice::hfe::ai

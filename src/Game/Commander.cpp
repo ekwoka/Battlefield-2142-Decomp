@@ -411,6 +411,7 @@ bool GameWorld::commanderAction(int team, CommanderAbility ability, float x, flo
 	}
 	case CommanderAbility::Uav:
 		side.uavAt = target;
+		launchUavDrone(team, target);
 		break;
 	case CommanderAbility::Satellite:
 		break;
@@ -442,6 +443,123 @@ bool GameWorld::commanderAction(int team, CommanderAbility ability, float x, flo
 	side.minTime[index] = commanderRecharge(team, ability);
 	side.lastUse[index] = m_time;
 	return true;
+}
+
+// The UAV's drone (the UAV manager, ctor 0x005a1a00, vtable 0x00967f68).
+// The RC object's activation (0x0050eb90) raises ECGameLogicGLUAV; the
+// manager (0x005a20a0 -> 0x005a1e40) looks up the template named
+// "UAVControlObject" (whatever the asset) and creates its
+// uavVehicleTemplate (eu_drone) for the team, unturned, then places it
+// (0x005a1a40): R = uavVehicleRadius (40; 0.1 at most 0), N =
+// uavVehicleSampleResolution (60), v = uavVehicleSpeed (14). Its turn
+// rate is asin(v / (30 R)) x 57.29578 x -0.5263158 (0x00967f6c), in
+// radians a second (-0.3518 for 14 m/s on 40 m), so it circles at
+// v / |rate| = 39.8 m. The height is the highest of the ground (or the
+// water) at the point and along four lines out from it (x +-sqrt((R + 5)^2
+// + i), z +-(i / N)(R + 5), i < N: "+ i" as the exe has it), plus
+// uavVehicleFlightHeight (70) and gameLogic's extraUAVVehicleFlightHeight.
+// It starts at x + R. ECGameLogicGLUAVVehicleCreated follows.
+void GameWorld::launchUavDrone(int team, const physics::Vec3& at)
+{
+	removeUavDrone(team);
+	const world::ObjectTemplate* control = m_templates.find("UAVControlObject");
+	if (!control) {
+		return;
+	}
+	const auto vehicle = control->settings().find("uavVehicleTemplate");
+	world::ObjectTemplate* drone = vehicle == control->settings().end() ? nullptr : m_templates.find(vehicle->second);
+	if (!drone) {
+		return;
+	}
+	float radius = number(*control, "uavVehicleRadius", 0);
+	if (radius <= 0) {
+		radius = 0.1f;
+	}
+	float samples = number(*control, "uavVehicleSampleResolution", 0);
+	if (samples <= 0) {
+		samples = 1;
+	}
+	const float speed = number(*control, "uavVehicleSpeed", 0);
+	const float rate = std::asin(std::clamp(speed / (radius * 30), -1.0f, 1.0f)) * 57.29578f * -0.5263158f;
+	const auto ground = [this](float x, float z) {
+		float h = m_ground.height ? m_ground.height(x, z) : 0.0f;
+		return m_hasWater ? std::max(h, m_waterLevel) : h;
+	};
+	float height = ground(at.x, at.z);
+	const float out = radius + 5; // 0x00967a48
+	for (const float sx : {1.0f, -1.0f}) {
+		for (const float sz : {1.0f, -1.0f}) {
+			for (int i = 0; i < static_cast<int>(samples); ++i) {
+				const float x = at.x + sx * std::sqrt(out * out + static_cast<float>(i));
+				const float z = at.z + sz * (static_cast<float>(i) / samples) * out;
+				height = std::max(height, ground(x, z));
+			}
+		}
+	}
+	height += number(*control, "uavVehicleFlightHeight", 0) + commanderSettings.extraUAVVehicleFlightHeight;
+	world::Object* placed = m_objects.create(drone, {at.x + radius, height, at.z}, {0, 0, 0});
+	if (!placed) {
+		return;
+	}
+	placed->setTeam(team);
+	if (drone->settings().count("armor.maxHitPoints")) {
+		m_hitPoints[placed->id()] = number(*drone, "armor.maxHitPoints", 1000);
+	}
+	CommanderTeam& side = m_commanders[team];
+	side.uavDrone = placed->id();
+	side.uavTurnRate = std::fabs(rate);
+	side.uavCircle = side.uavTurnRate > 0 ? speed / side.uavTurnRate : 0;
+	side.uavCentre = {at.x + radius - side.uavCircle, height, at.z};
+	side.uavAngle = 0;
+}
+
+// Each game-logic tick (0x004c0da0 -> 0x005a20c0 -> 0x005a1f70) a drone
+// is set a yaw rate and its forward x v as its velocity: plain
+// kinematics, round the circle from +x towards +z. It goes (0x005a1d90:
+// ECGameLogicGLUAVVehicleDestroyed, the object deleted) when the UAV's
+// time is up (uavTime) or the team's RCUav assets are wrecked (their hit
+// points over their maxima, 0x005a2850; 1 without any), and when it is
+// shot down (the team's HUD hears ECHudHEUAVVehicleDestroyed,
+// 0x005a1c90). The reveal is round the point either way (0x005a27c0).
+void GameWorld::flyUavDrones(float seconds)
+{
+	for (int team = 1; team <= 2; ++team) {
+		CommanderTeam& side = m_commanders[team];
+		if (!side.uavDrone) {
+			continue;
+		}
+		world::Object* drone = m_objects.find(side.uavDrone);
+		float hp = 0, maxHp = 0;
+		bool anyAsset = false;
+		for (const CommanderAsset& asset : m_assets) {
+			const world::Object* object = m_objects.find(asset.object);
+			if (asset.ability != CommanderAbility::Uav || !object || object->team() != team) {
+				continue;
+			}
+			anyAsset = true;
+			hp += std::max(0.0f, hitPoints(asset.object));
+			maxHp += number(*object->objectTemplate(), "armor.maxHitPoints", 0);
+		}
+		const bool assetsStand = !anyAsset || maxHp <= 0 || hp > 0;
+		if (!drone || drone->destroyed() || !abilityState(team, CommanderAbility::Uav).active || !assetsStand) {
+			removeUavDrone(team);
+			continue;
+		}
+		side.uavAngle += side.uavTurnRate * seconds;
+		const float c = std::cos(side.uavAngle), s = std::sin(side.uavAngle);
+		drone->setPosition({side.uavCentre.x + side.uavCircle * c, side.uavCentre.y, side.uavCentre.z + side.uavCircle * s});
+		drone->setRotation({std::atan2(-s, c) * 57.29578f, 0, 0}); // along (-sin, cos)
+	}
+}
+
+void GameWorld::removeUavDrone(int team)
+{
+	CommanderTeam& side = m_commanders[team];
+	if (side.uavDrone) {
+		m_hitPoints.erase(side.uavDrone);
+		m_objects.remove(side.uavDrone);
+		side.uavDrone = 0;
+	}
 }
 
 bool GameWorld::uavArea(int team, physics::Vec3& at, float& radius) const
@@ -511,16 +629,36 @@ void GameWorld::fireStrike(Strike& strike, StrikeFire& fire)
 	}
 	const ProjectileSettings* projectile = fixed.get();
 	const int batch = std::max(1, integer(*t, "fire.batchSize", 1));
-	const float spread = number(*t, "deviation.subProjectileDev", 0) * 3.14159265f / 180.0f;
 	const physics::Vec3 from = strike.target + physics::Vec3 {0, commanderSettings.orbitalBombardmentHeight, 0};
+	// The batch (0x005c3cb0): round 0 the main one, the rest sub-projectiles
+	// (batchSize - 1 of them). Each strays by the deviation component
+	// (0x005f5540): normal numbers times subProjectileDev for a sub (kept),
+	// minDev plus the last sub's offset for the main one, x 0.01 x the
+	// velocity along the round's up (here +z: it points down) and right.
+	// The firing's build-up (setFireDev) is left out: the scripts' three
+	// numbers are not kept by the rewrite's templates.
+	const float subDev = number(*t, "deviation.subProjectileDev", 0);
+	const float minDev = number(*t, "deviation.minDev", 0);
 	for (int i = 0; i < batch; ++i) {
-		const float tilt = spread * m_random.unit();
-		const float around = 2 * 3.14159265f * m_random.unit();
-		const physics::Vec3 direction {std::sin(tilt) * std::cos(around), -std::cos(tilt), std::sin(tilt) * std::sin(around)};
+		const bool sub = i >= 1;
+		float up = 0, right = 0;
+		const float deviation = sub ? subDev : minDev;
+		if (deviation > 0.01f) {
+			up = m_gaussian.next(m_random);
+			right = m_gaussian.next(m_random);
+		}
+		float scaledUp = up * deviation, scaledRight = right * deviation;
+		if (sub) {
+			fire.subUp = scaledUp;
+			fire.subRight = scaledRight;
+		} else {
+			scaledUp += fire.subUp;
+			scaledRight += fire.subRight;
+		}
 		Projectile p;
 		p.origin = from;
 		p.position = from;
-		p.velocity = direction * settings.velocity;
+		p.velocity = deviateVelocity({0, -settings.velocity, 0}, {1, 0, 0}, {0, 0, 1}, settings.velocity, 1, scaledUp, scaledRight);
 		p.settings = projectile;
 		p.timeLeft = projectile->timeToLive.sample(m_random);
 		p.player = fire.player;
@@ -568,6 +706,7 @@ void GameWorld::stepCommander(float seconds)
 			++i;
 		}
 	}
+	flyUavDrones(seconds);
 	for (int team = 1; team <= 2; ++team) {
 		physics::Vec3 at;
 		float radius = 0;
@@ -606,8 +745,9 @@ void GameWorld::stepCommander(float seconds)
 //   distance between the objects' positions against object slot 0x90 +
 //   radius; a soldier's radius is taken as 0 here, a vehicle's as its
 //   farthest collision point) is
-// - healed or repaired by healSpeed x 0.2 (0x005d0970: gameLogic slot
-//   0x108, 0x004bc410/0x004cc380, scaled by the material table's cell for
+// - healed or repaired by healSpeed x 0.2 per cent of its maximum hit
+//   points (0x005d0970: gameLogic slot 0x108, 0x004bc410/0x004cc380 ->
+//   armour slot 0x48 0x00655a00, scaled by the material table's cell for
 //   materials 73 and 24, the same for every target), taking that much
 //   from the storage when it took any, while the heal storage isn't spent
 //   (0x005d0650: healSpeed x 0.2 left in it or the shared storage);
@@ -616,6 +756,10 @@ void GameWorld::stepCommander(float seconds)
 //   magSize x amount / 100 rounds, the fraction kept), the amount taken
 //   from the storage while the weapon isn't full.
 // With destroyWhenEmptyStorage it goes once both storages are spent.
+// Deployed hubs (unl_hub_*_stationary) carry such a SupplyObject child
+// (Unl_Hub_Medic_Supply: radius 5, healSpeed 4, sharedStorage 300;
+// Unl_Hub_Ammo_Supply: radius 6, refillAmmoSpeed 8, workOnVehicles,
+// sharedStorage 500; both destroyWhenEmptyStorage) and work the same way.
 // Without a body it comes down at 5 m/s: its parachute (supply_parachute's
 // Wing lift and supply_ParachuteForceDown's constantForce 5 on the rigid
 // body) is only simulated when physics runs.
@@ -634,7 +778,7 @@ void GameWorld::stepCrates(float seconds)
 			it = m_crates.erase(it);
 			continue;
 		}
-		const world::ObjectTemplate* t = object->objectTemplate();
+		const world::ObjectTemplate* t = crate.settings ? crate.settings : object->objectTemplate();
 		world::Vec3 p = object->position();
 		if (!findBody(crate.object)) {
 			const float ground = m_ground.height ? m_ground.height(p.x, p.z) : 0.0f;
@@ -662,7 +806,9 @@ void GameWorld::stepCrates(float seconds)
 			if (heal <= 0 || healSpent() || left < 0 || left >= most) {
 				return;
 			}
-			m_hitPoints[target] = std::min(most, left + heal * factor);
+			// gameLogic slot 0x108 -> the armour's slot 0x48 (0x00655a00):
+			// per cent of the maximum.
+			m_hitPoints[target] = std::min(most, left + heal * factor * 0.01f * most);
 			crate.storage -= heal;
 		};
 		const auto refill = [&](FireArm* weapon) {

@@ -209,13 +209,36 @@ plus `friLatBrakeMod` at `0x79c`; defaults in `0x006291d0`). Per tick:
   `0x1a4`) is scaled by the clutch only with `useClutchedTorque`.
 
 Rewritten in `src/Game/Vehicle` (`rotationAxisStep`,
-`Vehicle::updateEngine`). Not decoded yet: wheel spin of wheels off the
-ground (the wheel node `0x006b7910`'s branch; 0.99 a tick here) and the
-wheel radius (taken from the depth of the wheel's collision triangle).
-The hull collides with static objects as its collision points, each a
-0.2 m sphere where it ends up; the engine's mesh test (`0x006e2350`)
-sweeps a sphere along the tick's motion, and the radius its rigid-body
-caller passes is not traced.
+`Vehicle::updateEngine`).
+
+- **Wheels off the ground:** there is no separate branch. The wheel node
+  (`0x006b8230`, vtable `0x00992cb8` slot `0x34`) hands newCar2 wheels to
+  `0x006b7910` before its own contact test, so the driven-wheel code runs
+  every tick with the contact sums at zero: no normal, the ground
+  velocity gravity's tick alone. The tyre force (scaled by the normal's
+  y) and the feedback are 0; the engine torque and the slope torque (all
+  of the weight along the wheel, `0x006b7460`) still turn it, through the
+  same friction, engine-brake and brake torques; its rpm still counts in
+  the engine's mean. The Spring node then multiplies the spin by
+  `*0x00a84c20` = 1.0 for newCar2 (0.99 is the other engine types', 0.9
+  in water).
+- **Wheel radius** (`0x006cad60`): the height (max y − min y, the box's
+  `+0x28` set by `0x006aeda0`) of the wheel object's collision box at
+  LOD 0, plus the object's slot `0x94` (0 for the base Object), at least
+  0.1. For as_fav's wheels that is 0.97 m, the wheel's full height; the
+  spin, slope and feedback torques use it (the FAV's top gear then tops
+  out near 35 m/s, its AI `maxSpeed` being 30). The rewrite keeps the
+  depth of the vehicle-LOD triangle (0.485 m) for its own ground probe.
+- **Hull against static objects:** the mobile mesh physics
+  (ResponsePhysics, vtable `0x00992cb8`, slot 9 `0x006bb050`) runs each
+  LOD-1 vertex as a segment from where it was at the last pose to where it
+  is through the other mesh's segment test (collision-mesh slot 22,
+  `0x006e5920` → `0x006de850`): no radius. A crossing gives a contact
+  with the face's normal, as deep as the end lies behind the face
+  (`CollisionWorld::segmentContact`). The swept-sphere test `0x006e2350`
+  (slot 24) is the soldiers' (`0x006c3890`, LOD 2) and `0x006cec60`'s.
+  Not rewritten: the later passes over the mesh's edges (slot `0x70`
+  lists) and the vertical segment of a mesh with under 4 vertices.
 
 ### Seats and vehicle weapons
 
@@ -242,8 +265,20 @@ camera follows the gun, and the renderer turns the bundles through
 
 Seated soldiers are posed by the seat's `seatAnimationSystem` (for
 example `3p_as_fav_driver_animSys.inc`, whose `root` trigger plays the
-`still` bundle and whose `die` trigger the death; the death isn't used
-yet). The soldier is placed at the seat's `seatInformation` position and
+`still` bundle and whose `die` trigger the death: `die` fades in over
+0.4 s and plays forever). A soldier killed in a seat of a vehicle that
+still stands leaves by the seat's "occupant died" exit (interface
+`0xc4c5` slot 10 → `0x005cea00` with died = 1): the seat's system plays
+`die` (`0x008b9790`), the soldier keeps it as its dead seat (`+0x244`,
+`0x005c7790`; `0x005ed890` sets `+0x2ea`) and is posed by it from then on
+(`0x005ef250`), slumped in the seat with no ragdoll. A seat without a
+die bundle ejects the body at its exit with a ragdoll pushed forward by
+`rd_dieInVehicleForce` (100); the rewrite's bodies don't outlive the
+player's death, so that one goes at once. In a destroyed vehicle the
+occupants die and are deleted (`0x005cacf0`). The rewrite keeps the
+slumped body (`GameWorld::seatCorpse`) until the vehicle is wrecked or
+gone or someone takes the seat; how long the engine keeps it is not
+traced. The soldier is placed at the seat's `seatInformation` position and
 rotation in the vehicle's frame, with its skeleton a metre below that
 point. The engine keeps a soldier's object at its physics origin, a metre
 above the skeleton's root (at death `0x005f0a00` poses the skeleton at
@@ -387,7 +422,46 @@ A frame (`0x008add10`) scales its time by `ragdoll_slowMotion` and runs
    (`0x008abf20`).
 
 Once the middle particle moves less than `ragdoll_sleepDelta` a frame for
-`ragdoll_sleep` seconds, the instance sleeps.
+`ragdoll_sleep` seconds, the instance sleeps. Asleep, every 1/30 s it
+rebuilds its object list and wakes (`0x008a79d0`) on the first object
+whose physics isn't at rest and moves at 0.001 m/s or more. `addForce`
+also wakes it, but only the first force counts (`+0x1c` is never
+cleared), so a later explosion's push neither moves nor wakes a settled
+body. Each awake frame, whatever lies under the middle particle (a ray 2 m
+down, `0x006f2250`) carries every particle and its previous position by
+its point velocity × 1/30 s (`0x008add10`).
+
+**The object list** (`0x008ab6b0`, each solve): the objects with
+collision for soldiers whose physics flags lack `0x10` and whose soldier
+LOD box comes within `ragdoll_completeCollRadius` (1.5 m) of the middle
+particle (`0x006aec10`): static objects and vehicles. A particle's
+segment goes through each in list order (collision-mesh slot 22 at LOD
+2); the first face it moves into stops it. The capsules (`0x008abf20`,
+with `ragdoll_useCapsuleCollision`) go through each object's slot 25
+(`0x006e2ee0`, per face `0x006be990`), which tests the segment a→b with
+a's radius against the faces' edges only: for each edge, where the
+segment comes within the radius (`0x006bde70`), two crossings giving
+their midpoint, one taken when earlier; the contact's normal runs from
+the edge to it, its depth is that distance less the radius, and a normal
+pointing down is turned up without a push. Every contact moves both ends
+out and stops them.
+
+**Impact sounds:** `setParticleCollisionCriteria` (template `+0xbc`
+minimum speed, −1 for none; `+0xc0` minimum delay; ragDollInit.con: 0.05
+and 1) and each hit (`0x008a7a20`): the particle's speed into the face is
+its last step's displacement against the normal (metres a step), counted
+when the delay has passed since the last sound; the hardest waits. The
+soldier's tick takes it (`0x008a79f0`) and plays the material manager's
+sound for it (`0x007fd780`, slot `0x74` with key `0x157c`): the cell of
+Human_body (24) and the surface (`S_Soldier_RagDoll_Impact`; water
+`S_Water_Splash`). How the key maps to material 24 is read from the data.
+
+**ragdollLandedDelay** (Soldier template `+0x3bc`, 4): `0x005eda20` says
+the body has landed when it has no ragdoll, or a particle has touched
+something (`+0x63`) and `ragdollLandedDelay` seconds have passed since
+the death. The armour's corpse countdown (`0x00652380`) waits for it (or
+60 s); on the server a GameLogic slot `0xf4` call in `0x0058d350` waits
+too (not identified).
 
 The pose (`0x008acde0`) is relative to the middle particle, in world axes;
 the soldier's object sits there, unturned. Each `toSkeleton` entry
@@ -423,23 +497,22 @@ Rewritten in `src/Animation/RagDoll` (`RagDollTemplate`, `RagDoll`,
 - The explosion's push is a stand-in: 10 at the centre, falling off over
   the radius, from the blast and a little up. The engine's force
   (`0x005a66e0`) isn't traced.
-- Ragdolls collide only with the terrain and the static objects' soldier
-  LOD. The engine's object list (`0x008ab6b0`, each step) is every object
-  with collision within `ragdoll_completeCollRadius` (1.5 m) of the middle
-  particle whose LOD 2 mesh comes within that radius (`0x006aec10`),
-  vehicles included. The capsules (`0x008abf20`, with
-  `ragdoll_useCapsuleCollision`) sweep particle a's sphere to b through
-  each object's mesh (object slot `0x7c`) and push both ends out by every
-  contact; the rewrite tests one sphere at the capsule's middle, deepest
-  contact only, as there is no swept-sphere query yet.
+- The object list: the static objects are one merged mesh in the
+  rewrite, first in the list; the bodies (vehicles) follow, each in its
+  own frame. The terrain's material under a particle is not known to the
+  rewrite (0; the engine's heightmap ray returns it, and deep water,
+  material 1, would not count).
+- The impact sounds are queued (`GameWorld::takeSounds`) for the sound
+  layer; nothing plays them yet. `GameWorld::bodyLanded` answers
+  `ragdollLandedDelay`; the rewrite's bodies go at `PlayerDeath`, so
+  nothing waits on it.
 
 Not rewritten yet:
 
 - the network side (`ragdoll_net_*`, `0x008acce0`);
-- the level of detail by distance to the camera (`0x008ae120`);
-- the impact sounds (`setParticleCollisionCriteria`,
-  `S_Soldier_RagDoll_Impact`);
-- `ragdollLandedDelay`.
+- the level of detail by distance to the camera (`0x008ae120`: dT × 1.5
+  past LOD 0, no leg collisions or capsules, the particles of bones 2, 7,
+  16, 32 and 47 skipped from LOD 2).
 
 ## Server browsing (GameSpy, via OpenSpy)
 
@@ -1452,10 +1525,37 @@ trigger is held; a gadget without that flag (the hubs) works there while
 it is in hand (the ReplenishingAmmoComp's tick, `0x005d8740`). The material table's `damageMod` doubles as the
 ability's factor per target: the medic material 73 is 1 on soldiers'
 materials and 0 elsewhere, and the repair material 84 has factors on
-vehicles' materials. Not traced: the rate (strength × factor per second)
-and the ammo hubs' magazines (one per 10 strength); the ammo component's
-fields are known (`abilityMaterial` `0x7c`, `abilityRadius` `0x80`,
-`replenishingType` `0x84`) but the update that reads them wasn't found.
+vehicles' materials.
+
+The component's update (object vtable `0x00970b10` slot 6, `0x005d8ac0`;
+template constructor `0x005d7f50`: abilityDrain `0x68` (a tick's at
+`0x6c`), abilityStrength `0x70` (a tick's, × 0.033333, at `0x74`),
+abilityMaterial `0x7c`, abilityRadius `0x80`, replenishingType `0x84`,
+onlyActiveWhileFiring `0x88`) rescans its targets every second while it
+has none and every two seconds while it has some (`*0x00a6db70` 1,
+`*0x00a6db68` 0.5 a second): a sphere of abilityRadius round the holder
+(`0x005d8740`), or with onlyActiveWhileFiring a ray of it along the
+holder's forward (`0x005d84a0`); held targets are treated in between even
+out of reach. Only the holder's team or team 0 for RTHeal and RTAmmo,
+only enemies for RTTeam (`0x005d7d40`). Each tick each target gets the
+tick's strength × the cell (`0x005d7a40`):
+
+- **RTHeal** (gameLogic slot `0x108` → `0x004cc380` → armour slot `0x48`,
+  `0x00655a00`): that many per cent of its maximum hit points, when it
+  can be repaired, is alive and not full;
+- **RTAmmo** (slot `0x10c` → `0x004cf7b0`): min(100, it) per cent of a
+  magazine for each weapon (`0x005f5110`, the fraction kept a second).
+
+Each target treated takes the tick's abilityDrain from the holder's
+battery (soldier component `0xc4d7` slots `0x90`/`0x98`); with less left
+nothing is treated. Not rewritten: the battery (its range isn't
+identified), RTTeam and the holder's modifier (player slot `0x2a0`
+`+0x48`). A thrown hub (`unl_hub_*_stationary`) carries a `SupplyObject`
+child (`Unl_Hub_Medic_Supply`: radius 5, healSpeed 4, sharedStorageSize
+300; `Unl_Hub_Ammo_Supply`: radius 6, refillAmmoSpeed 8, workOnVehicles,
+sharedStorageSize 500; both destroyWhenEmptyStorage) and works as the
+supply crates do (see [Commander](#commander)), not by the gadget's
+ability.
 
 Projectiles with a detonation component (`DefaultDetonationComp`,
 template `0x953b`) explode where they hit. Its constructor (`0x005e9df0`)
@@ -1496,12 +1596,48 @@ Rewritten in `GameWorld::explode`, `blastShare` and `empBlast`;
   blast destroys counting half, the push's 0.1 for airborne soldiers
   (physics node `0x144`) and the push on vehicles (node `0xa4`).
 
-Thrown weapons: projectiles with `physicsType` RotationalPoint or Mesh (grenades, mines, C4; rounds and missiles are Points) bounce. Each bounce
-keeps 0.4 of the speed, with the part along the surface normal reversed,
-and they lie still below 1 m/s (not traced: a stand-in for the physics
-nodes' contact response). They go off when their time
-to live runs out (frag grenades: 2.8 s, 140 damage over 9 m), not on
-impact.
+Thrown weapons: projectiles with `physicsType` RotationalPoint or Mesh
+(grenades, mines, C4; rounds and missiles are Points) bounce. The
+template makes the node and response by physicsType (`0x005f6ba0`,
+`0x005f6a60`); RotationalPoint's response (`0x006c0cb0`, vtable
+`0x00993018`) finds the deepest ground contact (`0x006c0f90`: the
+heightmap's height, normal and material under the node's centre of
+collision, or the water) and object contacts (`0x006c1220`) and solves
+them (`0x006c0d00`): pushed out by the depth, the velocity's part along
+the normal reversed times the mean of the two materials' elasticity
+(slot `0x80`), the part along the surface times 1 − their friction (slot
+`0x88`, at most 1); nothing on a water material. A frag grenade
+(Grenade_hand: friction 0.25, elasticity 0.5) keeps 0.25 of its speed
+into grass and 0.475 of its slide. There is no rest speed: only the spin
+stops, under |v|² 0.1. The rewrite's projectiles lie still (for the
+mines' triggers) under that on a face turned up, and Mesh projectiles,
+rigid bodies in the engine (ResponsePhysics), bounce the same way here;
+the terrain's material is not known to the rewrite (0). They go off when
+their time to live runs out (frag grenades: 2.8 s, 140 damage over 9 m),
+not on impact.
+
+**Deviation** (the deviation components: `SimpleDeviationComp`, template
+`0x005df040`, object `0x005defc0`; the shared base `0x005f5750` also
+serves `SoldierDeviationComp`). The template keeps `setFireDev a b c` (the
+build-up's maximum `+0x10`, a round's addition `+0x08`, an update's
+decay `+0x0c`), `minDev` `+0x14`, `subProjectileDev` `+0x18`. A firing
+(`0x005c3cb0`) makes `batchSize` projectiles, the first the main round
+and the rest sub-projectiles; for each the component updates once a tick
+(`0x005dedb0`: the build-up decays; the deviation is minDev plus it, 0
+while zoomed) and applies (`0x005f5540`): with a deviation over 0.01, two
+normal(0, 1) numbers from a table of 1024 (filled once by `0x005b28d0`,
+Marsaglia's polar method on the engine's shared generator, at the first
+component's construction; read at Game slot `0x68` + the round's index)
+times the deviation (`subProjectileDev` for a sub, kept; the main round's
+adds the last sub's), each × 0.01 × the firearm's velocity (`0x005c1ac0`),
+added to the projectile's velocity along its up and right axes. Every
+round adds to the build-up, to its maximum. So deviation 1 is 0.57°, one
+standard deviation on each axis; 45 is 24°. The rewrite applies it to
+the strikes' shells and the sentry drone's rounds with its own generator
+(the table's contents depend on the shared generator's state at the time,
+which the rewrite can't reproduce); the build-up is left out (the
+rewrite's templates keep only the first of `setFireDev`'s numbers), and
+hand-held firearms have no deviation model yet.
 
 - **Mines:** a mine fires when an enemy faster than
   `triggerVictimMinSpeed` (3.6 m/s: walking past is safe) comes within its
@@ -1523,12 +1659,18 @@ Vehicles take damage through their armour settings:
   `empDamageStepSize`)), and the level falls by one every `empLevelTime`
   seconds (`0x00652910`; defaults at the armor template's `0x180`-`0x188`:
   5 s, 120, 3 steps); slot `0x14c` (`0x00652a00`) gives it rounded up. The
-  EMP grenade's default 500 at its centre fills every step. A vehicle that
-  takes it (`armor.takesEmpDamage`) has its engine and guns dead while its
-  level is above 0. Not applied yet: the PlayerControlObject's input
-  handling (`0x005ca2e0`) scales a driver's inputs by 1 − level /
-  `empDamageNumStep`, or (with a template string at `+0x298` slot `0x110`
-  set, not identified) cuts them all above level 1.
+  EMP grenade's default 500 at its centre fills every step. The
+  PlayerControlObject's input filter (`0x005ca2e0`) scales the driver's
+  throttle, yaw, pitch and roll by 1 − level / `empDamageNumStep` (0, 1/3
+  and 2/3 at levels 3, 2 and 1 with 3 steps), mouse look left alone; a
+  seat whose own armour is a child's (not the root's) scales mouse look
+  too. With `autoControllerTemplateName` (template `+0x298` slot `0x110`)
+  it cuts every input above level 1. With `scaleInputOnCriticalDamage`,
+  below the armour's `criticalDamage` the inputs are scaled by
+  `criticalDamageScaleModifier`. The level falls continuously, at
+  1 / `empLevelTime` a second. The rewrite keeps a vehicle's guns dead
+  while the level is above 0 (what an EMP does to a firearm is not
+  traced).
 - **Critical damage:** below `armor.criticalDamage` a vehicle burns down at
   `hpLostWhileCriticalDamage` a second (FAV: 18 below 151, out in 5.6 s from
   100).
@@ -1609,16 +1751,38 @@ The drones' guns are run by auto controllers (`AI/AutoControllers.ai`):
   (100 m) and in line of sight. It sees cloaked soldiers only within
   `discoverCloakedEnemiesDistance` (8 m) and never targets its deployer.
   The rounds go through the ordinary projectile path (10 damage, falling
-  to 5 from 15 to 40 m) and spread by `deviation.minDev`. Kills count for
-  the owner. The gun turns at once. Left out, as what they need isn't in
-  the rewrite: `onlyAttackNetworkBattlefieldObjects` (template `0x39`;
-  AIDLL `0x100ea470` lets an enemy count only when the owner's squad knows
-  of it, `0x100bea30`, from the squad's battlefield objects that spotting
-  fills) and the scan (`fov` 90, `scanningSpeed` 0.13 turning the gun's
-  bundle; AIDLL's auto controller isn't decoded).
+  to 5 from 15 to 40 m) and stray by the gun's deviation component (see
+  Deviation below). Kills count for the owner. Its auto controller
+  (AIDLL; an ordinary Bot, `0x100c8d20`):
+  - **Scan** (ScanForEnemies, `0x100f9a90`/`0x100f9cf0`): without a target
+    the gun's yaw turns by `scanningSpeed` × 30 radians a second (0.13:
+    3.9 rad/s); the camera bundle has no yaw limits, so it goes round one
+    way (a limited bundle ping-pongs between its limits).
+  - **Sight:** a frustum of `fov` (90°: ±45° each way about the gun) out
+    to `viewDistance` / cos(fov / 2) (141 m, `0x100feea0`); a target out
+    of sight for `targetLostTimeout` (0.25 s) is dropped. While tracking,
+    the yaw input is limited to `maxTrackingInput` (1) × the bundle's 250°
+    a second. The rewrite fires once the gun points within 2°.
+  - **Only what the squad reported** (`onlyAttackNetworkBattlefieldObjects`,
+    template `0x39`; `0x100ea470`): with an owner in a squad, an enemy
+    counts only when the owner's squad had it reported in the last 3 s
+    (`0x100bea30`: a table keyed by team × 100 + squad, then object id,
+    filled by `0x100bf000` through IAIEventCourier vt+0xe0). An owner
+    without a squad lets it attack anyone.
+  - **The reports** (BF2142.exe event `0x41`, server `0x005088f0`): a recon
+    drone's pulse (`0x005d9cf0`, the drone's owner reporting those inside
+    it), a bot in a squad as its trigger goes down and comes up at its
+    target (AIDLL `0x1009a1d0`, `0x1009a2a0` → IAIGame vt+0x6c,
+    `0x008958a0`; 30 s and 3 s on the squad's minimap), and active
+    camouflage going on or off (`0x005d92c0`: each enemy squad leader
+    reports the cloaker). Each reported enemy and the occupants of its
+    vehicle count from then. The radio's "spotted" (SpottedEvent `0x1d`,
+    `0x0050e910`) only tells the team's players; it never reaches the
+    AI. The minimap side (the client's `0x00508590`) isn't rewritten.
 
-What an EMP does to the drones' guns is up to AIDLL's auto controller,
-which isn't decoded; they keep firing. Bots that lead a squad send out the
+What an EMP does to the drones' guns is up to AIDLL's auto controller
+(its "flip out" at `flipOutAtHealth` spins the gun and holds both
+triggers; the EMP's part is not traced); they keep firing. Bots that lead a squad send out the
 sentry drone at infantry 20 to 100 m off, following its weapon template
 `SentryDroneDetonator` (FireAndForget).
 
@@ -1633,14 +1797,28 @@ Seeking projectiles (`seek.*`, `follow.*`):
 
 - **TTUnique (the AV missile):** follows its shooter's aim, turning at most
   `follow.maxYaw` and `maxPitch` radians a second (0.45 and 0.85).
-- **TTMagnet (the motion mine):** after `trackingDelay` (1.5 s) it locks
-  onto the closest enemy vehicle within `maxDistLock` (20 m), keeps the
-  lock out to `distLoseLock` (24 m), and chases it. Its speed is
-  `armingSpeed × speedModifier`, and it goes off within 2.5 m of its
-  target. Both are the rewrite's: the follow component's update isn't
-  traced (its fields are known from the accessors at `0x004f6500`-`0x004f7500`:
-  `speedModifier` `0x28`, `armingSpeed` `0x2c`, `magneticBehaviour`
-  `0x24`, ..., but no code reading them was found).
+- **TTMagnet (the motion mine,** `Unl_Mine_Motion`; the projectile's
+  update `0x005b3e60`, seek component `+0x1a0` (0xc555), follow `+0x1a4`
+  (0xc559)): once `armingDelay` (3.5 s, template `+0x2fc`) and
+  `seek.trackingDelay` (1.5 s) have passed since the throw it looks for a
+  target (`0x005ec260` → gameLogic slot `0x1c8`, `0x004cf290`): the
+  registered TTMagnet targets (the vehicles' `MagneticObject` children,
+  aimed at; `disableWhenEmptyVehicle` turns one off 3 s after the vehicle
+  empties, wrecks stay), not of its side (`ignoreFriendly`), within
+  `maxDistLock` (20 m) and `maxAngleLock` of its facing, in line of sight
+  (terrain and objects), the nearest. A held target is kept out to
+  `distLoseLock` (24 m). The chase starts `trackingDelay` after the lock
+  (`0x005b2c10`). The follow (`0x005ed1a0` → `0x005ecb30`) aims at the
+  target plus its velocity × (distance / own speed) × `predictionFactor`
+  (0.1); the target's top speed so far arms it once over `armingSpeed`
+  (7.2 m/s). The thrust: `acceleration` (60 m/s²) towards that while
+  under the cap, `deAcceleration` (50) against the velocity at it; the cap
+  is `maxSpeed` (300), or with `useTargetSpeed` the target's top speed,
+  × `speedModifier` (2) once armed (`0x005ec770`, `0x005ec7a0`). A parked
+  vehicle is never chased. It goes off on hitting the vehicle (its
+  collision, gameLogic slot `0xf8`). Not traced: the detonation
+  component's 0.05 m MTYVehicle trigger test, its `ForceObjectHoverTest`
+  and `drag`.
 
 Unlocks are the kits' `ItemContainer` children, one per branch and level
 (`unlockLevel`). An unlocked container adds its items to free slots: the
@@ -1793,12 +1971,21 @@ state, input, kills, deaths and team kills.
   scripts get `PickupKit` and then `PlayerSpawn`.
 - **Hits:** soldiers are hit through their bones' capsules. In the soldier
   template, `setSkeletonCollisionBone bone material offset radius length`
-  places a capsule in the bone's frame, running from `offset` to `offset -
-  length * y` (bones run along y, and the lengths carry the opposite sign of
-  the child bone's offset). The capsule's material (25 head, 77 limbs, 24
-  body) selects the projectile's damage modifier. The engine's hit test
-  against these capsules isn't decompiled; ours counts the path's nearest
-  approach within the radius.
+  (`0x004deb29` → `0x005c0930` → `0x008b7db0` → `0x008b7d40`: 0x24-byte
+  records, offset `+0xc`, signed length `+0x18`, radius `+0x1c`, material
+  `+0x20`) places a capsule in a frame of its own (`0x008b6fb0`):
+  translate(ox, oy, ∓oz) × Rx(±90°) × the bone, by the length's sign. In
+  the bone's frame it starts at (ox, oz, oy), or (ox, oz, −oy) for a
+  negative length, and runs `length` along the bone's −y. The capsule's
+  material (25 head, 77 limbs, 24 body) selects the projectile's damage
+  modifier. The hit test (`0x006fb4xx` for class 0x9493): the ray is cut to
+  the soldier's bounding sphere (`0x006fa7f0`), then `0x008b75c0` tries the
+  capsules in the records' order and the first one the segment enters
+  (`0x006bde70`: the segments' distance against the radius, then the
+  exact crossings of the cylinder and its end spheres, a root strictly
+  inside the segment) is the hit, not the nearest. Its normal is the hit's
+  offset from the axis. Across objects the nearest hit counts. The rewrite
+  takes the roots along the tick's whole segment.
 - **Death:** when the armour (`armor.maxHitPoints`, 100 for soldiers) runs
   out, the scripts get `PlayerKilled` (victim, attacker, weapon, assists,
   soldier) and `DropKit`, and the soldier goes man down. Its body lies
@@ -1824,7 +2011,8 @@ state, input, kills, deaths and team kills.
 - **Final death:** at the end of man down, or when the player respawns
   (after `sv.spawnTime`, 15 s), the scripts get `PlayerDeath` and the body
   goes. With the real `bf2/stats` and game-mode scripts, this is when the
-  team loses its ticket. A soldier killed in a vehicle dies at once.
+  team loses its ticket. A soldier killed in a vehicle dies at once (its
+  body slumped in the seat when the seat has a die bundle, see Seats).
 
 ## Squads
 
@@ -1833,15 +2021,30 @@ when a leader leaves the next member takes over. The scripts get
 `PlayerChangedSquad (player, old squad, new squad)` and read `sqid` and
 `isql` for the player.
 
-Members may spawn on a living leader who is on foot (a metre behind it) or
+Members may spawn on a living leader who is on foot (scattered round it,
+below) or
 at the leader's spawn beacon. The beacon is the `beacon` gadget, slot 8,
 whose `spawn_beacon` has `armor.holdsSlBeacon`; the leader sets it down a
 metre ahead, one per squad. On the spawn screen both are clickable
 markers. Bots join squads with room and spawn on their leader when they
 can. The engine spawns them through a `SquadLeaderSpawnPoint` child of the
 leader's soldier (`0x004c7f10`; a SpawnPoint with
-`setScatterSpawnPositions 1`); its scattering is not traced, so the
-rewrite puts them a metre behind the leader.
+`setScatterSpawnPositions 1`: the setter `0x005b1c80` stores it at the
+template's `+0x90`). Its position (`0x005b2200`), for a soldier parent:
+from the soldier's origin less 0.875, a heading of the leader's ± 70°
+(140 × U − 70) and a distance of `spawnpoint-scatter-mindist` + (maxdist
+− mindist) × U (3 to 9 m, drawn once), five tries turning on by 0, 72,
+144, 216 and 288° more (cumulative, so the last two repeat the first two
+directions), each behind the leader. A try (`0x005b1e70`) at the full
+distance and then half: the terrain's height and a ray 4 m down from the
+point at the leader's height through the objects; the member stands on the higher of
+the two plus `spawnpoint-terrain-offset` (1.01), when that is within the
+probe, and the way from the leader's point to it is clear
+(`0x006f2d20`). The member faces the leader (`0x005b1d30`). Not
+rewritten: the stance checks (the soldier fitting standing, else spawning
+prone, slot `0x14`) and an extra test some callers ask for
+(`DAT_00b4bb94` slot `0xc`). When no try fits, the rewrite puts the
+member a metre behind the leader.
 Not in yet: the squad menus (invites, names).
 
 ## Commander
@@ -1914,8 +2117,9 @@ and takes the largest `minTimeBetweenActivation`.
     shuts down vehicles.
   - The artillery's firearm fires 16 rounds at 60 a minute. Each round is
     `fire.batchSize` shells (5; 3 for `_16`, 7 for `_64`) at 10 m/s, spread by
-    `deviation.subProjectileDev` (35, 25, 45). Each shell hits for 150
-    and explodes for 30 over 8 m.
+    `deviation.subProjectileDev` (35, 25, 45; see Deviation below: 45 is
+    4.5 m/s, one standard deviation, on each axis across the fall). Each
+    shell hits for 150 and explodes for 30 over 8 m.
 - **UAV and satellite scan** (`DAT_00a6a390`, `0x005a23b0` and
   `0x005a2450`): with a standing asset, the UAV stays over its point for
   30 s (gameLogic `0x228`). It is ready again `uavReloadTime` (5 s) after
@@ -1925,9 +2129,29 @@ and takes the largest `minTimeBetweenActivation`.
   (`0x0057dc90`, `0x0057cfb0`): with the UAV up, every player of the team
   gets the enemies (their soldier or vehicle) within the radius of the
   UAV's point, in 3-D; with the scan running, the team's commander, and
-  only the commander, gets every enemy. The UAV itself is a flying object
-  (`UAVControlObject`: `uavVehicleTemplate` eu_drone, speed 14, radius 40,
-  70 m up; `0x005a1f70`), which the rewrite doesn't fly.
+  only the commander, gets every enemy.
+- **The UAV's drone** (the UAV manager, `DAT_00a6a090`, constructor
+  `0x005a1a00`, vtable `0x00967f68`): the RC object's activation
+  (`0x0050eb90`) raises ECGameLogicGLUAV; the manager (`0x005a20a0` →
+  `0x005a1e40`) looks up the template named `UAVControlObject` (whatever
+  the asset) and creates its `uavVehicleTemplate` (eu_drone: mass 500,
+  1000 hit points) for the team, unturned, then places it (`0x005a1a40`):
+  R = `uavVehicleRadius` (40), v = `uavVehicleSpeed` (14), a turn rate of
+  asin(v / 30R) × 57.29578 × −0.5263158 (`0x00967f6c`) radians a second
+  (−0.3518), so a circle of v / |rate| = 39.8 m. It starts at x + R, at
+  the highest ground or water at the point and along four lines out from
+  it (x ± √((R + 5)² + i), z ± (i / N)(R + 5), i < N =
+  `uavVehicleSampleResolution`: "+ i" as the exe has it) plus
+  `uavVehicleFlightHeight` (70) and gameLogic's
+  `extraUAVVehicleFlightHeight` (`+0x234`, 0). Each game-logic tick
+  (`0x005a1f70`) sets its yaw rate and its forward × v as its velocity:
+  round the circle from +x towards +z, a lap in 17.9 s. It goes
+  (`0x005a1d90`, ECGameLogicGLUAVVehicleDestroyed) when the UAV's time is
+  up or the team's RCUav assets are wrecked (their hit points over their
+  maxima, `0x005a2850`; 1 without any), and when shot down (the team's
+  HUD hears ECHudHEUAVVehicleDestroyed, `0x005a1c90`). The reveal stays
+  round the point either way. The rewrite flies it kinematically
+  (`GameWorld::uavDrone`); the events aren't raised.
 - **Supply drop** (`0x0043d6d0`): every `SupplyDrop-Reload-Time` (60 s,
   less 0.1) per team, without an asset. `0x0043d510` creates a
   `supply_crate` at the ground's height plus `gameLogic.supplyDropHeight`
@@ -1935,9 +2159,10 @@ and takes the largest `minTimeBetweenActivation`.
   crate is a `SupplyObject` (template `0x005d1940`), updated every 0.2 s
   (timer event 0x1d, `0x005d1710`). Its team's soldiers, and vehicles
   (`workOnVehicles`), within its radius (5) plus their own (`0x005d0e80`)
-  are healed by `healSpeed` × 0.2 (3 a second) through gameLogic slot
-  `0x108` (`0x004cc380`: scaled by the material cell for 73 and 24, the
-  same for every target) and their weapons get `refillAmmoSpeed` × 0.2 per
+  are healed by `healSpeed` × 0.2 per cent of their maximum (3 a second
+  for a soldier) through gameLogic slot `0x108` (`0x004cc380` → the
+  armour's slot `0x48`, `0x00655a00`: scaled by the material cell for 73
+  and 24, the same for every target) and their weapons get `refillAmmoSpeed` × 0.2 per
   cent of a magazine (7 % a second; the ammo component's slot `0xa8`,
   `0x005f5110`). Both draw on 500 of shared storage, and the crate goes
   when that is spent (`destroyWhenEmptyStorage`).
@@ -1981,10 +2206,9 @@ Rewritten in `src/Game/Commander.cpp` (`GameWorld::setCommander`,
 commander order (the control point it lies on, or the marker). Not
 rewritten:
 
-- The batch's spread is the firearm's `SimpleDeviationComp`
-  (`subProjectileDev`, template `+0x18`), whose object code isn't
-  rewritten; the shells stray uniformly within that many degrees.
-- The UAV's drone isn't flown. Without a body the crate comes down at
+- The firing's build-up of deviation (`setFireDev`): the rewrite's
+  templates keep one argument of the scripts' three.
+- Without a body the crate comes down at
   5 m/s (its parachute's Wing and ForceObject only act on a rigid body);
   a soldier's own radius in the crate's reach is taken as 0.
 - The bots don't send squad requests, so the AI commander's answers
@@ -2097,8 +2321,8 @@ The urgencies:
 | Idle (0x10069f50) | The weight. A passenger gets 0.5. A driver with free seats gets 30 while a teammate within 40 m heads for it (70 when that teammate faces the vehicle within 0.85), for up to 10 s. |
 | Fire (0x10075fb0) | 50 while a known enemy scores above 0. The weight only gates it. |
 | Revive (0x10082760) | 100 for a downed teammate within the Revive weapon's maxRange. Each candidate scores 1 − min(1, d / speed / time left). |
-| Flee (0x100859d0) | 100 below 30 % health, with the camouflage over 70 % charged, 10 s after spawning. The bot runs from known enemies (×3 for players, ×2 for bots targeting it). |
-| Change (0x1006c520) | best seat / current seat × weight × 10. A wreck gives 10000 × weight (out). Seats left less than 7 s ago are skipped. |
+| Flee (0x100859d0) | 100 below 30 % health, with the camouflage over 70 % charged (0x10085920: its ammo over its maximum), 10 s after spawning. 0x10085d90 keeps the way out: the sum of the directions away from known enemies (×3 for players, ×2 for bots targeting it). |
+| Change (0x1006c520) | best seat / current seat × weight × 10 (best × weight with the current worth nothing), ÷ (1 + 14 clamp((d − 10) / 60, 0, 1)) for the distance to it (0x1006bc50), 0 for a seat another bot reserved (0x1006f320). See Seat values. |
 | MedicAssist (0x10070200) | Teammates on foot within the hub's maxRange (70 m) below 75 % health (99 % for a human), the bot itself unless it holds the hub. Score basicTemp / (fuzzy(1 − health) × distance), distance 1 for itself. fuzzy(best) × weight × 2, × 10 for a human; × the squad factor. |
 | AmmoAssist (0x10071a10) | Human players only. A weapon (FireArm, Sniper, C4) with ceil(rounds / magSize) / magazines below 0.6 (0.99 while the bot holds the hub). Score basicTemp / (scurve(ratio) × distance). fuzzy(best) × weight × 4 × the squad factor. |
 | RepairVehicle (0x10073360) | Vehicles within the tool's maxRange (50 m) between 0 and 60 % health. Score basicTemp / (f × distance), f = fuzzy(1 − health), or 1 for the one it repairs. fuzzy(best) × weight × 10 with a human aboard, × 2 otherwise; × the squad factor. |
@@ -2137,6 +2361,21 @@ The urgencies:
   - Avoid (0x10065360): walk 10 m from a wreck (straight away, else to
     either side, by mesh rays), or 10 m across a vehicle's motion on the
     bot's side. It ends after the time it allows or within 2 m.
+  - Flee (0x10085fc0; the point 0x10085de0): ChangeWeapon(camouflage),
+    LockPlan(on) (0x100ce070: bot+0x7c, so 0x100cd090 keeps the plan with
+    no arbitration), then side by side a sprinting MoveToFinding to 50 m
+    along the way out plus U[−20, 20) m on x and z (ten tries for a point
+    on the mesh; none: no run) and While(camouflage not empty and under
+    4 s) TriggerContinously(its fire); when both end, the slot 2 weapon's
+    select key, LockPlan(off). The rewrite's camouflage has no charge, so
+    only the 4 s end it.
+  - Idle (BBPIdleInfantery 0x1006a480, plan 0x1006a500): Parallel(Idle)
+    under While(True). The Idle statement (0x1008f840 → 0x100e6120) lets
+    go of the move and the trigger, gives no yaw and levels the pitch: an
+    idle soldier never turns. Within its own strategic area (its order
+    position's radius + 2 m, 0x10034a10) it crouches (SoldierPose 2) and
+    taps its weapon's alternate key once (the weapon adaptor's vt+0x68,
+    on when vt+0x70; not in the rewrite's weapons).
   - The assist plans and DefuseMines never end on their own; the urgency
     drops them.
 
@@ -2169,11 +2408,33 @@ The urgencies:
   max(0.2, skill) × U[0.8, 1.2] (0x100795a0).
 - **Firing pose:** taken when standing still, at most once a second, with
   no fire for 0.8 s after (Trigger 0x1008f1e0).
+- **Tap or hold** (0x100777a0): TriggerContinously (0x1008ecd0, held while
+  its conditions hold) only for a weapon whose fire mode is 2 (aiWeapon
+  slot 0x104 → BF2142.exe 0x00892650: the fire component's `+0x18`, which
+  starts at the first `fire.addFireRate`, or 2 without one, 0x005f28a0;
+  the bots never toggle it). Anything else gets Trigger (0x1008f1e0, once):
+  pressed on one plan execution, let go on the next. Fire rate and
+  distance play no part. So the assault rifles, machine guns and the like
+  hold; pistols, shotguns, snipers, rockets and tank guns tap.
+- **Heat** (0x100d9000, 0x100d9040): with `heatAddWhenFire` over 0, the
+  trigger stops at heat 0.8 and starts again at 0.5.
+- **Teammates:** a teammate crossing the line of fire within 5 m holds
+  the trigger for 1 s (0x100dad90) for firearms and snipers that aren't
+  thrown.
+- **Reports:** a bot in a squad reports its target to its squad as its
+  trigger goes down and comes up (0x1009a1d0, 0x1009a2a0), which the
+  sentry drones' filter reads (see the drones).
 - **Reaction time:** (1 − skill)(1.5 + U[0, 1]) s at a new target
   (0x100777a0).
 - **Aim:** the PID controller of the ControlInfo plugin (0x100e5820:
   proportional −7, derivative −0.01, angle speed 0.4 on the lead point;
-  yaw limited to 3 × skill + 1). The trigger holds while the aim lies
+  yaw limited to 3 × skill + 1). Its output is PIMouseLookX/Y, which the
+  soldier (BF2142.exe 0x0058a6d0) turns into 5° per unit a call
+  (`*0x00a68e4c`, `*0x00a68f24`, 5.0 each; no time step, so 150° a
+  second at 30 calls), scaled down by the field of view when zoomed
+  (0x00586420), under 0.001 none; the pitch is clamped to ±85°
+  (0x005890a0). Standing still, the head turns up to ±40° before the body
+  follows at 4° a call (the rewrite's soldiers turn the body at once). The trigger holds while the aim lies
   within allowedDeviation at the target, plus an angle check
   (0x100d9090). It does not fire while a teammate is in the line of fire.
 - **Deviation:** each round strays by (1 − acc)(1 − t/2) × deviation,
@@ -2216,10 +2477,30 @@ follower (bot +0xd8, constructor 0x10094f10) for a path when the goal
 changes (0x100966c0 → 0x10095fc0).
 
 - **Path:**
-  - First a straight walk over the mesh, under 200 m and through at most
-    five polygons (0x100952c0).
-  - Otherwise the cluster and polygon searches. Each portal crossed becomes
-    a waypoint (0x10095b20), then the goal.
+  - First a straight walk over the mesh (0x100952c0): under 200 m, the
+    mesh ray to the goal (up to 1000 polygons, no width) not entering cost
+    class 5 (or 7).
+  - Otherwise the start and the goal on the mesh (vslot 0x38, 0x1003f2d0:
+    the polygon each stands on, a height tolerance of 2.5 m for bot kind 3
+    and 5 m for the others; none fails the request, 0x100966c0; there is
+    no search nearby). Over 100 m (+0x8c) the cluster search runs first
+    (0x10095620, vslot 0x24) and keeps {cluster, entry link} per step.
+  - Then polygon searches in segments (0x100962e0, vslot 0x20): from the
+    last waypoint (the start for the first) to the link into the cluster
+    two steps on along the cluster path (0x10092250: links[firstLink +
+    entry], its position and polygon), or the goal when there is none.
+    The search may enter only the start's cluster, the cluster path's next
+    three from the cursor and the segment goal's cluster (vslot 0xb4: the
+    successors 0x100bcbb0 refuse any other); a trip of 100 m or less only
+    the start's and the goal's clusters. Each node becomes a waypoint
+    (0x10095b20, the first replacing the last one kept), the goal on the
+    last segment; then the string-pull, the look-ahead twice and the
+    cursor on. While the cluster path goes on (0x10095720) the waypoints
+    are cut to ten past the current one and the next segment is searched
+    from the last. The rewrite searches a segment a tick (the original's
+    are time-sliced), and where a segment's search fails (the original
+    fails the move; any 100 m trip over more than its two end clusters
+    does) it searches the whole mesh.
 - **String-pull** (0x10093610), twice, for waypoints 5 m or more from the
   bot: where the line from the previous waypoint to the next crosses the
   portal, kept max(1, 0.8 radius) (at most half the portal) from its ends.
@@ -2232,18 +2513,38 @@ changes (0x100966c0 → 0x10095fc0).
     0.5 m horizontally on foot; in a vehicle max(1, approach), the last
     one also within its radius.
   - **Look-ahead** (0x10093420): within 10 m (20 m) of the waypoint,
-    skip to the next while the mesh ray to it is clear (one a tick on
-    foot, up to four at the wheel). When the waypoint itself can't be
-    seen it is blocked. Blocked for 2 s (0.5 s), the path is planned anew
-    from where the bot is (0x10095470).
+    skip to the next while the mesh ray to it is clear (8 polygons on
+    foot, 30 at the wheel, stopping at cost class 5 or 7; one a tick on
+    foot, up to four at the wheel). When none was skipped, the ray to the
+    waypoint itself (1000 polygons) says whether it is blocked (+0xda,
+    until planned again). Blocked for 2 s (0.5 s) since last clear, the
+    path is planned anew from where the bot is (0x10095470; the original
+    first looks for the bot's cluster or one next to it on the cluster
+    path and carries on from there).
+  - **The mesh ray** (vslot 0x84 0x1003f930 → 0x1003ce50, the edge step
+    0x100b82a0): from the bot's polygon, across the x/z plane from the
+    bot's position each time, the edge each polygon is left by (not the
+    one back; a crossing within 0.001 of a vertex only when heading out;
+    else the nearest miss under 0.001, with no edge to leave by). It is
+    clear once the exit point lies within 0.05 m of the end (3-D) or
+    0.16 m across. It fails off the mesh, into a polygon the profile can't
+    walk, into the stop class, past its polygon count, or (with a width:
+    0.5 on foot, `0x101287a8`; 0 at the wheel) where an edge leaves less
+    than the width beside the crossing (the original also compares twice
+    that with a local it never sets; the edge's length is meant). It also
+    fails a climb steeper than the tree's slope limit by more than the
+    step height (0.35 on the infantry tree); those limits aren't in the
+    files the rewrite reads, so that test is left out.
   - **Progress** (0x10092bc0): a bot pushing its controls that doesn't get
     2 m (4 m) further in 10 s (20 s) fails; the move ends and the behaviour
     plans again. A soldier that hasn't moved for half a second jumps.
 - **Infantry** (InfanteryMoveTo 0x1008fc90): the look turned to the
   steering point 5 m ahead (the aim controller turns the soldier), the
   throttle at the order's speed over maxSpeed (0x100e6060), no strafing.
-- **Vehicles** (CarMoveTo 0x10091050, TankMoveTo 0x10091b40), from the
-  Mobile plug-in (FAV: maxSpeed 30, speedAtZeroSpace 3, backingSpeed 7,
+- **Vehicles** (the Unit plug-in's equipment picks the interpreter:
+  CarMoveTo 0x10091050 for Car and ArmedCar, MechMoveTo 0x1008d250,
+  FloatingTankMoveTo 0x1008c7c0, TankMoveTo 0x10091b40 for the rest),
+  from the Mobile plug-in (FAV: maxSpeed 30, speedAtZeroSpace 3, backingSpeed 7,
   brakeDistance 25, maxBrakePercentage 80, lookAheadTime 1.5,
   minAngleDiffForSlowDown 0.2, angleSlowDownScale 1.8,
   maxAngleDiffSlowDown 0.8, spaceNeededTweak 0.94):
@@ -2288,8 +2589,41 @@ changes (0x100966c0 → 0x10095fc0).
     speed lowered on a tilt and capped (keeping the cap's sign); throttle =
     target / 15 + min(1, (target − speed) / 3). Full throttle when off the
     line (under 1.5 m/s).
-  - **Tank** (0x100e0540): no steering below 1 m/s, the error × min(1,
-    speed / 2)²; the throttle term squared.
+  - **Car** sprints (PISprint, input 13) at full throttle over 0.8
+    maxSpeed.
+  - **Tank** (machine 0x100de8a0, controller 0x100e0540): the car's
+    machine with a goal behind within 5 r (not 10 r), driving on from
+    cos 0 (not −0.2), round an obstacle at ∓0.2 × min(1, speed) (not ±2)
+    and on ahead while touching it unless it is straight ahead (dot 0.8),
+    the obstacle seen from half a second ahead; the brake's percentage
+    not scaled and nothing squared, the bend alone. No steering below
+    1 m/s across the ground, the error × min(1, speed / 2)²; the throttle
+    term squared. Stopping (0x100e0930): a throttle against the speed
+    along the heading, t = −clamp(v, ±0.7): none within 0.05, 0.4 within
+    0.4, else t.
+  - **Mech** (MechMoveTo 0x1008d250, machine 0x100e1f20, controller
+    0x100e3c00; the mechs' Mobile: maxSpeed 8, maxBrakePercentage 0,
+    yawScale 15): the tank's machine with each tick starting on the spot
+    (direction 0, not ahead), diagonal rays along forward × (length + 1)
+    ± right × (width − 1), no side rays (no state 12), and its own
+    default: ahead only facing within cos 0.6, else states 15/16 turning
+    on the spot until facing within cos 0.9 (states 2/3 turn on the spot
+    too). The controller steers at full lock (yawScale × error raised to
+    1; on the spot yawScale × its sign) and holds the throttle at the
+    direction: no speed regulation, the speed wanted only says when to
+    sprint (at maxSpeed and over 0.7 of it). The bend counts the
+    machine's error too. Stopping (0x100e3f00) lets go of everything.
+  - **Hover tank** (FloatingTankMoveTo 0x1008c7c0, controller
+    0x100de350): no machine, no mesh rays, no avoidance. The way to the
+    steering point comes from the infantry steering (0x100ce860; its
+    sidestep 0x100e63c0 isn't rewritten). The speed wanted is max(min(
+    brake², bend) × maxSpeed, backingSpeed), the brake with the percentage
+    × 0.01 at any speed. A velocity loop in the frame the hull will have
+    half a second on: along its forward and right axes, ((wanted −
+    current) × 1 − acceleration) × 3, or 10 towards the way wanted while
+    moving against it, to PIThrottle and to PIYaw, which strafes the
+    hover tank; the hull is turned by its PIRoll, the look's. The original
+    writes them unclamped; the rewrite's inputs are clamped to ±1.
 - **Strategic waypoints** (0x10060300): an order's goal list. From the
   area the bot is in (else the one it last headed for), the areas' route
   goes to the target over neighbours (0x10061d30). For each step of it,
@@ -2329,19 +2663,55 @@ load silently as no trees (0x100ae4e0); `ai.init` never fails
 - **Goal spots:** order + U × W × 0.8 − W / 2 on each axis with W twice
   the area's radius (0x10063460, 0x10063de0).
 
+### Seat values (0x100d3e70) and Change
+
+A seat's value is health × (k × weapons + move), k 2 for a vehicle seat
+with an Armament plug-in, else 1:
+
+- **Refused (0):** a seat another bot reserved (+0x2c/+0x30); with
+  `other`, one whose driver's seat is taken; a vehicle whose Unit team is
+  not 0 or the bot's; below 0.3 health (AIMain +0xdc; × 0.3 for the
+  vehicle the bot drives); a root its team left under 7 s ago (Unit
+  vt+0x60, a per-team stamp whose setter isn't traced: the rewrite keys
+  it to the vehicle the bot itself left); more than 8 m over the
+  terrain (not in the rewrite).
+- **Weapons** (0x100d3b80): for each of the seat's guns (on foot the
+  kit's), its strength against each object the bot knows (by its
+  CombatStrengthType), plus at a vehicle seat with Mobile its eight
+  strengths summed; then, not for the bot's own soldier and not 0, +4 for
+  light armour, naval, helicopters and planes, +10 for heavy armour (+2
+  and +5 with `setHasExposedSoldier`).
+- **Move** (0x100d39a0) × 0.3, with a Mobile plug-in on the root: its
+  maxSpeed × 0.5 × 1.5 at the root's seat; at another, × 5 behind a
+  driver of the bot's squad, × 1 of its group, 0 without a driver.
+- × 1.15 for the seat the bot reserved itself.
+- Not rewritten: transport (the SAI order's areas, 0x100d3730,
+  0x1005d840).
+
+Change (0x1006c520): the vehicles within 75 m (IAIInformationEnvironment
+0x100ca9e0; one without Mobile within 75/√2 m), on the vehicle mesh, each
+seat at its value × max(0, min(0.5, (R² − 0.8 d²) / R²) + 0.5), × 5 for a
+soldier under a quarter of its health within 20 m. On foot the current
+value is 1.2 × the soldier's own; in a vehicle 2 × the seat's (250 at the
+driver's seat with others aboard), and the way out is the soldier's own
+value, or 10000 for a wreck or a vehicle more than 4 m off the vehicle
+mesh (0x100880e0). Not rewritten: changing seats inside a vehicle, the
+seat factors of the AI object's flag bits 1 and 3 (0x1006b910: 0.5,
+0.77; not identified) and the type-0/1 order multipliers.
+
 ### Not decoded, and the rewrite's stand-ins
 
 - **Scheduling:** the CPU budgets (every slice runs to its count; the SAI
   runs once a second), and the whole path searched at once (the original
   searches three clusters at a time). Each think evaluates every behaviour.
-- **Aim units:** the soldier's handling of PIMouseLookX/Y in BF2142.exe
-  isn't located; the controller output is turned into 90°/s per unit.
+- **Aim:** the rewrite's soldiers turn their body at once (no head twist
+  ahead of the body); bots don't zoom.
 - **Deviation:** the AI deviation (0x00892b70) widens the weapon's own
   deviation through the soldier (vt+0xf4); the rewrite's hand-held
   firearms have no deviation model, so the bot spreads its aim uniformly
   over ± half of it on each axis.
-- **Trigger mode:** which of Trigger and TriggerContinously the fire plan
-  (0x100795a0) builds isn't decoded: 200 rounds a minute or more hold.
+- **Fire plan:** the explosives' start conditions (0x100d8800,
+  0x100d8400) aren't decoded.
 - **Soldier radius:** the game object's size through the AI adaptor
   (vt+0xdc → 0x008a3d40 → the object's vt+0x90), not identified: 0.5 m.
 - **Runs without the AI scripts** (tests): a driver is a Tank when its
@@ -2350,27 +2720,24 @@ load silently as no trees (0x100ae4e0); `ai.init` never fails
   vehicle and weapon has its `ai/*.ai`. Levels without
   `StrategicAreas.ai` (three of the 46 with a mesh) leave the original's
   SAI without areas; the rewrite deviates and makes one per control point.
-- **Interpreters:** MechMoveTo and FloatingTankMoveTo drive with the
-  tank's controller; BBPFlee's plan (0x10085d90) and the idle look are the
-  rewrite's.
-- **Change:** seat values (0x100d3e70 is not decoded in full), and a
-  50 m search radius.
+- **Interpreters:** the sidestep round moving obstacles on foot and in the
+  hover tank (0x100e63c0).
 - **Strategy:** area temperatures (soldier 1, vehicle 20) and strengths
   (8 per unit; a vehicle's own battle strengths are not read).
 - **Revive:** the time left uses the respawn countdown, or 15 s. The
   squad factor the original multiplies in is not.
 - **Flee:** the rewrite's camouflage has no charge; carried counts as
-  charged.
+  charged, and only the plan's 4 s end the camouflage.
+- **Idle:** the weapon's alternate-key tap in the bot's own area (the
+  rewrite's weapons have no such state).
 - **Commander:** which tool it strikes with. The UAV, the satellite scan
   and orders for squads the SAI left without one are not from AIDLL's
   commander.
-- **Path follower:** the look-ahead ray's width goes to the pathfinder's
-  ray (vslot 0x84), not decoded (two more rays half a width aside); the
-  nearest polygon to a point off the mesh (vslot 0x38, not decoded; rings
-  out to 3 m, 10 m for vehicles); a moving target re-planned when it
-  moves 2 m. The jump (a PIJump press) is not in the rewrite's soldiers:
-  a second's back step to one side stands in. The dynamic-obstacle
-  sidestep on foot (0x100e63c0) is not rewritten.
+- **Path follower:** a moving target re-planned when it moves 2 m; the
+  segment searches' fallback to the whole mesh; a blocked bot planning
+  anew rather than carrying on from its cluster (0x10095470). The jump (a
+  PIJump press) is not in the rewrite's soldiers: a second's back step to
+  one side stands in.
 - **Stuck drivers:** after the 20 s progress check the move fails and
   the behaviour plans again; what 0x100c91c0 then hands the game
   (IAIGameEffector vt+0x24 → 0x0089e940) isn't rewritten.
@@ -2398,9 +2765,9 @@ in `src/AI/NavMesh`:
 
 - Ported: the parser, point lookup, the polygon and cluster A* with the
   original's costs and heuristics.
-- Not decoded: how the bots combine the two searches (the cluster path as
-  a corridor for the polygon search is the rewrite's). The waypoints are
-  smoothed by the path follower.
+- How the bots combine the two searches is in "Following paths" above
+  (rolling segments of three clusters); `findPath` (tools, tests) keeps
+  a cluster corridor for one polygon search.
 
 On minsk_coop's infantry mesh (76,605 polygons, 2,154 clusters), a 639 m
 query gives a continuous 853 m path.

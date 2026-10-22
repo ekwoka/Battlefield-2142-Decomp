@@ -42,8 +42,78 @@ float signedAngle(const Vec3& forward, const Vec3& direction)
 
 } // namespace
 
+namespace {
+
+// Where a ray leaves a polygon (0x100b82a0), on the x/z plane: the line
+// from `origin` along `dir` (always from the ray's origin, not from where
+// it entered) against each edge but the one back into `previous` (none
+// skipped for -1). A crossing ahead (t >= 0) within the edge is taken when
+// clear of its ends (0.001 < s < 0.999), or near an end when the ray heads
+// out of the polygon (dot(dir, (e.z, -e.x)) < 0, e = b - a). Otherwise the
+// edge missed by the least (|t| behind, -s or s - 1 off its ends) under
+// 0.001 (0x10128e30) gives the point, with no edge to leave by
+// (`edge` = the vertex count). `clearance` gets min(s, 1 - s) x the edge's
+// length (x/z): the room beside the crossing point.
+bool exitPoint(const NavMesh& mesh, uint32_t polygon, int32_t previous, const Vec3& origin, const Vec3& dir, Vec3& exit,
+	uint32_t& edge, float& clearance)
+{
+	const Polygon& p = mesh.polygons[polygon];
+	const Vec3 end {origin.x + dir.x, origin.y, origin.z + dir.z};
+	float bestMiss = 9999; // 0x47c34f80
+	bool nearMiss = false;
+	Vec3 nearA, nearB;
+	float nearS = 0;
+	for (uint32_t k = 0; k < p.vertexCount; ++k) {
+		if (previous != -1 && mesh.neighbour(polygon, k) == previous) {
+			continue;
+		}
+		const Vec3& a = mesh.vertex(polygon, k);
+		const Vec3& b = mesh.vertex(polygon, (k + 1) % p.vertexCount);
+		// 0x100a8300: t along the ray, s along the edge.
+		const float dx = end.x - origin.x, dz = end.z - origin.z;
+		const float ex = b.x - a.x, ez = b.z - a.z;
+		const float denom = cross2(dx, dz, ex, ez);
+		if (std::fabs(denom) < 1e-12f) {
+			continue;
+		}
+		const float t = cross2(a.x - origin.x, a.z - origin.z, ex, ez) / denom;
+		const float sOn = cross2(a.x - origin.x, a.z - origin.z, dx, dz) / denom;
+		if (t >= 0 && sOn >= 0 && sOn <= 1) {
+			const bool inside = sOn > 0.001f && sOn < 0.999f;
+			if (inside || dir.x * ez + dir.z * -ex < 0) {
+				exit = lerp(a, b, sOn);
+				edge = k;
+				clearance = std::min(sOn, 1 - sOn) * std::sqrt(ex * ex + ez * ez);
+				return true;
+			}
+			continue;
+		}
+		float miss = t < 0 ? std::fabs(t) : 9999.0f;
+		if (sOn < 0) {
+			miss = std::min(miss, -sOn);
+		} else if (sOn > 1) {
+			miss = std::min(miss, sOn - 1);
+		}
+		if (miss < 0.001f && miss < bestMiss) {
+			bestMiss = miss;
+			nearMiss = true;
+			nearA = a;
+			nearB = b;
+			nearS = sOn;
+		}
+	}
+	if (nearMiss) {
+		exit = lerp(nearA, nearB, std::clamp(nearS, 0.0f, 1.0f));
+		edge = p.vertexCount;
+	}
+	return false;
+}
+
+} // namespace
+
+// 0x1003f930 -> 0x1003ce50 (with the edge step 0x100b82a0).
 bool meshRaycast(const NavMesh& mesh, const Vec3& from, const Vec3& to, const CostProfile* profile, int maxPolygons,
-	float* reached, int32_t startPolygon)
+	float* reached, int32_t startPolygon, float width, uint8_t stopClass)
 {
 	if (reached) {
 		*reached = 0;
@@ -52,84 +122,61 @@ bool meshRaycast(const NavMesh& mesh, const Vec3& from, const Vec3& to, const Co
 	if (current < 0) {
 		return false;
 	}
-	const float length = lengthXZ(from, to);
-	const float dx = to.x - from.x, dz = to.z - from.z;
-	float t = 0;
-	for (int step = 0; step <= maxPolygons; ++step) {
-		if (mesh.containsXZ(static_cast<uint32_t>(current), to)) {
-			if (reached) {
-				*reached = length;
-			}
-			return true;
+	if (maxPolygons == -1) {
+		maxPolygons = 1000;
+	}
+	const Vec3 d = to - from;
+	const float length = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+	const float flat = lengthXZ(from, to);
+	if (length <= 1e-6f) { // 0x10114118
+		return true;
+	}
+	const Vec3 dir = d * (1 / length);
+	Vec3 out = from;
+	const auto done = [&](bool clear) {
+		if (reached) {
+			*reached = clear ? flat : lengthXZ(from, out);
 		}
-		if (step == maxPolygons) {
-			break;
+		return clear;
+	};
+	int32_t previous = -1;
+	for (int n = 0;; ++n) {
+		if (n >= maxPolygons) {
+			return done(false);
 		}
-		// The edge the segment leaves the polygon through: the crossing
-		// furthest along it.
-		const Polygon& polygon = mesh.polygons[static_cast<size_t>(current)];
-		float best = -1;
-		int exit = -1;
-		for (uint32_t k = 0; k < polygon.vertexCount; ++k) {
-			const Vec3& a = mesh.vertex(static_cast<uint32_t>(current), k);
-			const Vec3& b = mesh.vertex(static_cast<uint32_t>(current), (k + 1) % polygon.vertexCount);
-			const float ex = b.x - a.x, ez = b.z - a.z;
-			const float denom = cross2(dx, dz, ex, ez);
-			if (std::fabs(denom) < 1e-12f) {
-				continue;
-			}
-			const float along = cross2(a.x - from.x, a.z - from.z, ex, ez) / denom;
-			const float onEdge = cross2(a.x - from.x, a.z - from.z, dx, dz) / denom;
-			if (onEdge >= -1e-4f && onEdge <= 1 + 1e-4f && along > best) {
-				best = along;
-				exit = static_cast<int>(k);
-			}
+		Vec3 exit = out;
+		uint32_t edge = 0;
+		float clearance = 1e9f;
+		const bool ok = exitPoint(mesh, static_cast<uint32_t>(current), previous, from, dir, exit, edge, clearance);
+		out = exit;
+		if (!ok) {
+			return done(previous == -1); // the end inside the first polygon
 		}
-		if (exit < 0 || best < t - 1e-4f) {
-			break;
+		previous = current;
+		const Vec3 e = exit - from;
+		if (std::sqrt(e.x * e.x + e.y * e.y + e.z * e.z) + 0.05f >= length // 0x1011390c
+			|| distance2XZ(to, exit) <= 0.025f) {                             // 0x10114110
+			return done(true);
 		}
-		t = std::max(t, best);
-		if (t >= 1) {
-			if (reached) {
-				*reached = length;
-			}
-			return true; // the end lies on the edge
+		// The room beside the crossing (the original compares 2 x clearance
+		// with a local it never sets as well; the edge's length is meant,
+		// which always passes).
+		if (width != 0 && clearance < width) {
+			return done(false);
 		}
-		const int32_t next = mesh.neighbour(static_cast<uint32_t>(current), static_cast<uint32_t>(exit));
-		if (next < 0 || (profile && profile->cost(mesh.polygons[static_cast<size_t>(next)].costClass) < 0)) {
-			break;
+		const int32_t next = mesh.neighbour(static_cast<uint32_t>(current), edge);
+		if (next < 0) {
+			return done(false);
+		}
+		const uint8_t costClass = mesh.polygons[static_cast<size_t>(next)].costClass;
+		if (profile && profile->cost(costClass) < 0) {
+			return done(false);
+		}
+		if (stopClass != 0 && (costClass == stopClass || ((stopClass == 5 || stopClass == 6) && costClass == 7))) {
+			return done(false);
 		}
 		current = next;
 	}
-	if (reached) {
-		*reached = std::clamp(t, 0.0f, 1.0f) * length;
-	}
-	return false;
-}
-
-int32_t nearestPolygon(const NavMesh& mesh, const Vec3& point, float reach, const CostProfile* profile, Vec3* at)
-{
-	int32_t polygon = mesh.findPolygon(point, 5.0f, profile);
-	if (polygon >= 0 || reach <= 0) {
-		if (at) {
-			*at = point;
-		}
-		return polygon;
-	}
-	for (float r = 1; r <= reach; r += 1) {
-		for (int k = 0; k < 16; ++k) {
-			const float a = static_cast<float>(k) * kPi / 8;
-			const Vec3 p {point.x + std::sin(a) * r, point.y, point.z + std::cos(a) * r};
-			polygon = mesh.findPolygon(p, 5.0f, profile);
-			if (polygon >= 0) {
-				if (at) {
-					*at = p;
-				}
-				return polygon;
-			}
-		}
-	}
-	return -1;
 }
 
 std::vector<Waypoint> pathWaypoints(const NavMesh& mesh, const std::vector<PathStep>& steps, const Vec3& to)
@@ -225,53 +272,131 @@ void PathFollower::plan(const NavMesh& mesh, const Vec3& from, float now)
 	m_blocked = false;
 	m_current = 0;
 	m_waypoints.clear();
+	m_clusterPath.clear();
+	m_cursor = 0;
 	// Timers (0x100923a0).
 	m_lastInput = m_lastProgress = now;
 	m_progressAt = from;
 	m_bendAt = -100;
-	// A straight walk first: under 200 m over at most five polygons (0x100952c0).
-	if (distance2XZ(from, m_goal) < 200.0f * 200.0f && meshRaycast(mesh, from, m_goal, &m_settings.options.profile, 5)) {
+	m_lastClear = now;
+	const Vec3 d = m_goal - from;
+	const float distance2 = d.x * d.x + d.y * d.y + d.z * d.z;
+	const CostProfile* profile = &m_settings.options.profile;
+	// A straight walk first (0x100952c0): under 200 m (0x101287b0), the
+	// mesh ray to the goal not entering cost class 5 (or 7).
+	if (distance2 < 40000 && meshRaycast(mesh, from, m_goal, profile, -1, nullptr, -1, 0, 5)) {
 		Waypoint w;
 		w.p = m_goal;
-		w.polygon = mesh.findPolygon(m_goal, m_settings.options.heightTolerance, &m_settings.options.profile);
+		w.polygon = mesh.findPolygon(m_goal, m_settings.options.heightTolerance, profile);
 		m_waypoints.push_back(w);
-		m_startPolygon = mesh.findPolygon(from, m_settings.options.heightTolerance, &m_settings.options.profile);
+		m_startPolygon = mesh.findPolygon(from, m_settings.options.heightTolerance, profile);
 		return;
 	}
-	Vec3 begin = from, end = m_goal;
-	const float reach = m_settings.soldier ? 3.0f : 10.0f;
-	const int32_t start = nearestPolygon(mesh, from, reach, &m_settings.options.profile, &begin);
-	const int32_t goal = nearestPolygon(mesh, m_goal, reach, &m_settings.options.profile, &end);
+	// The start and the goal on the mesh (vslot 0x38, 0x1003f2d0: the
+	// polygon each stands on; none fails the request, 0x100966c0).
+	const int32_t start = mesh.findPolygon(from, m_settings.options.heightTolerance, profile);
+	const int32_t goal = mesh.findPolygon(m_goal, m_settings.options.heightTolerance, profile);
 	if (start < 0 || goal < 0) {
 		m_failed = true;
 		return;
 	}
 	m_startPolygon = start;
-	std::vector<PathStep> steps;
-	if (m_settings.options.useClusters && !mesh.clusters.empty()) {
-		const std::vector<uint16_t> corridor = findClusterPath(mesh, static_cast<uint32_t>(start), begin,
-			static_cast<uint32_t>(goal), end, m_settings.options);
-		if (!corridor.empty()) {
-			std::vector<bool> allowed(mesh.clusters.size(), false);
-			for (uint16_t c : corridor) {
-				allowed[c] = true;
-			}
-			steps = findPolygonPath(mesh, static_cast<uint32_t>(start), begin, static_cast<uint32_t>(goal), end,
-				m_settings.options, &allowed);
+	m_goalPolygon = goal;
+	m_requestFrom = from;
+	// Over 100 m (+0x8c): the cluster search first (0x10095620).
+	if (distance2 > 10000 && m_settings.options.useClusters && !mesh.clusters.empty()) {
+		m_clusterPath = findClusterRoute(mesh, static_cast<uint32_t>(start), from, static_cast<uint32_t>(goal), m_goal,
+			m_settings.options);
+		if (m_clusterPath.empty()) {
+			m_failed = true;
+			return;
 		}
 	}
-	if (steps.empty()) {
-		steps = findPolygonPath(mesh, static_cast<uint32_t>(start), begin, static_cast<uint32_t>(goal), end, m_settings.options);
+	planSegment(mesh, from, now);
+}
+
+// One polygon search (0x100962e0, its result taken by 0x10095b20): from
+// the last waypoint (the request's start for the first) to the link into
+// the cluster two steps on along the cluster path (0x10092250), or to the
+// goal when there is none (the last segment). The search may only enter
+// the start's cluster, the cluster path's next three from the cursor and
+// the segment goal's cluster (+0xb4: the successors 0x100bcbb0 refuse any
+// other). A trip of 100 m or less has no cluster path: only the start's
+// and the goal's clusters. Each node of the path becomes a waypoint (the
+// first replacing the last one kept); the goal is added on the last
+// segment. Then the smoothing, the look-ahead twice and the cursor on.
+bool PathFollower::planSegment(const NavMesh& mesh, const Vec3& position, float now)
+{
+	Vec3 from = m_requestFrom;
+	int32_t fromPolygon = m_startPolygon;
+	if (!m_waypoints.empty()) {
+		from = m_waypoints.back().p;
+		fromPolygon = m_waypoints.back().polygon;
+	}
+	Vec3 to = m_goal;
+	int32_t toPolygon = m_goalPolygon;
+	bool last = true;
+	if (m_cursor + 2 < m_clusterPath.size()) {
+		if (const ClusterLink* link = entryLink(mesh, m_clusterPath[m_cursor + 2])) {
+			to = link->position;
+			toPolygon = static_cast<int32_t>(link->polygon);
+			last = false;
+		}
+	}
+	if (fromPolygon < 0 || toPolygon < 0) {
+		m_failed = true;
+		return false;
+	}
+	std::vector<bool> allowed(mesh.clusters.size(), false);
+	const auto allow = [&](size_t cluster) {
+		if (cluster < allowed.size()) {
+			allowed[cluster] = true;
+		}
+	};
+	allow(mesh.polygons[static_cast<size_t>(fromPolygon)].cluster);
+	for (size_t i = 0; i < 3 && m_cursor + i < m_clusterPath.size(); ++i) {
+		allow(m_clusterPath[m_cursor + i].cluster);
+	}
+	allow(mesh.polygons[static_cast<size_t>(toPolygon)].cluster);
+	std::vector<PathStep> steps = findPolygonPath(mesh, static_cast<uint32_t>(fromPolygon), from,
+		static_cast<uint32_t>(toPolygon), to, m_settings.options, mesh.clusters.empty() ? nullptr : &allowed);
+	if (steps.empty() && !mesh.clusters.empty()) {
+		// The original fails the move here (0x10095120), which a trip of
+		// 100 m or less over more than its two end clusters always does;
+		// the rewrite deviates and searches the whole mesh.
+		steps = findPolygonPath(mesh, static_cast<uint32_t>(fromPolygon), from, static_cast<uint32_t>(toPolygon), to,
+			m_settings.options);
 	}
 	if (steps.empty()) {
 		m_failed = true;
-		return;
+		return false;
 	}
-	m_waypoints = pathWaypoints(mesh, steps, end);
-	smoothWaypoints(m_waypoints, from, m_settings.radius);
-	// The look-ahead runs after each search (twice: one window and the next).
-	lookAhead(mesh, from, now);
-	lookAhead(mesh, from, now);
+	std::vector<Waypoint> segment = pathWaypoints(mesh, steps, to);
+	segment.pop_back(); // the segment's end point: the goal only on the last
+	Waypoint first;
+	first.p = steps.front().position;
+	first.a = first.b = first.p;
+	first.polygon = static_cast<int32_t>(steps.front().polygon);
+	if (m_waypoints.empty()) {
+		m_waypoints.push_back(first);
+	} else {
+		m_waypoints.back() = first;
+	}
+	m_waypoints.insert(m_waypoints.end(), segment.begin(), segment.end());
+	if (last) {
+		Waypoint goal;
+		goal.p = m_goal;
+		goal.polygon = m_goalPolygon;
+		m_waypoints.push_back(goal);
+		m_clusterPath.clear();
+		m_cursor = 0;
+	} else {
+		++m_cursor;
+	}
+	smoothWaypoints(m_waypoints, position, m_settings.radius);
+	lookAhead(mesh, position, now);
+	lookAhead(mesh, position, now);
+	return true;
 }
 
 // Back onto the path when the bot strayed (0x10093a20): fine on the
@@ -301,48 +426,34 @@ bool PathFollower::resync(const NavMesh& mesh, const Vec3& position)
 	return m_current == 0;
 }
 
-// The look-ahead (0x10093420).
+// The look-ahead (0x10093420): within 10 m (20 m at the wheel) of the
+// waypoint, skip to the next while the mesh ray to it is clear (8 polygons
+// on foot, 30 at the wheel, not into cost class 5 or 7); when none was
+// skipped, the ray to the waypoint itself (1000 polygons) says whether the
+// bot is blocked. On foot the rays need 0.5 m (0x101287a8) beside each
+// edge they cross; at the wheel the width (0x10139514, never set) is 0.
 void PathFollower::lookAhead(const NavMesh& mesh, const Vec3& position, float now)
 {
 	if (m_current >= m_waypoints.size()) {
 		return;
 	}
 	const float trigger = m_settings.soldier ? 10.0f : 20.0f;
-	if (distance2XZ(position, m_waypoints[m_current].p) >= trigger * trigger) {
-		return;
-	}
 	const int most = m_settings.soldier ? 1 : 4;
-	// The ray's width (0x101287a8 0.5 on foot, 0x10139514 0 at the wheel)
-	// goes to the pathfinder's ray (vslot 0x84), whose use of it isn't
-	// decoded; here two more rays half a width to either side.
 	const float width = m_settings.soldier ? 0.5f : 0.0f;
-	const auto clear = [&](const Vec3& to) {
-		if (!meshRaycast(mesh, position, to, &m_settings.options.profile, rayPolygons())) {
-			return false;
-		}
-		if (width <= 0) {
-			return true;
-		}
-		const float length = std::max(lengthXZ(position, to), 1e-3f);
-		const Vec3 side {(to.z - position.z) / length * width * 0.5f, 0, -(to.x - position.x) / length * width * 0.5f};
-		for (const Vec3& offset : {side, side * -1.0f}) {
-			if (mesh.findPolygon(position + offset, 5.0f, &m_settings.options.profile) >= 0
-				&& !meshRaycast(mesh, position + offset, to + offset, &m_settings.options.profile, rayPolygons())) {
-				return false;
-			}
-		}
-		return true;
-	};
+	const CostProfile* profile = &m_settings.options.profile;
 	int skipped = 0;
-	while (skipped < most && m_current + 1 < m_waypoints.size() && clear(m_waypoints[m_current + 1].p)) {
-		++m_current;
-		++skipped;
+	if (distance2XZ(position, m_waypoints[m_current].p) < trigger * trigger) {
+		while (skipped < most && m_current + 1 < m_waypoints.size()
+			&& meshRaycast(mesh, position, m_waypoints[m_current + 1].p, profile, rayPolygons(), nullptr, -1, width, 5)) {
+			++m_current;
+			++skipped;
+		}
 	}
-	const bool blocked = skipped == 0 && !clear(m_waypoints[m_current].p);
-	if (blocked && !m_blocked) {
-		m_blockedSince = now;
+	if (skipped == 0 && !meshRaycast(mesh, position, m_waypoints[m_current].p, profile, -1, nullptr, -1, width, 0)) {
+		m_blocked = true; // +0xda: until the path is planned again
+	} else {
+		m_lastClear = now;
 	}
-	m_blocked = blocked;
 }
 
 PathFollower::Steer PathFollower::steer(const NavMesh& mesh, const Vec3& position, float now)
@@ -354,6 +465,17 @@ PathFollower::Steer PathFollower::steer(const NavMesh& mesh, const Vec3& positio
 	if (!resync(mesh, position)) {
 		plan(mesh, position, now);
 		if (m_failed) {
+			return out;
+		}
+	}
+	// The next segment while the cluster path goes on (0x10095720): the
+	// waypoints cut to ten past the current one and the search from the
+	// last (one segment a tick here; the original's searches are
+	// time-sliced, and it skips this under a condition not decoded,
+	// +0x14c >= 30 with a cluster test).
+	if (!m_clusterPath.empty() && m_cursor + 1 <= m_clusterPath.size()) {
+		m_waypoints.resize(std::min(m_waypoints.size(), m_current + 10));
+		if (!planSegment(mesh, position, now)) {
 			return out;
 		}
 	}
@@ -380,7 +502,7 @@ PathFollower::Steer PathFollower::steer(const NavMesh& mesh, const Vec3& positio
 	}
 	lookAhead(mesh, position, now);
 	// Blocked too long: a new path from here (0x10095470).
-	if (m_blocked && now - m_blockedSince > (m_settings.soldier ? 2.0f : 0.5f)) {
+	if (m_blocked && now - m_lastClear > (m_settings.soldier ? 2.0f : 0.5f)) {
 		plan(mesh, position, now);
 		if (m_failed) {
 			return out;
@@ -649,7 +771,9 @@ ObstacleView findObstacle(const DriveSettings& s, DriveState& st, const DriveSen
 	const Vec3& offset, float pointDistance, float motion, int side)
 {
 	ObstacleView v;
-	const float k = 0.25f; // the velocity look-ahead (0.5 when called without the flag; CarMoveTo sets it)
+	// The velocity look-ahead: 0.25 s with the flag CarMoveTo passes, 0.5 s
+	// without it (TankMoveTo, MechMoveTo).
+	const float k = s.driver == Driver::Car ? 0.25f : 0.5f;
 	int chosen = -1;
 	float best = 99999;
 	for (const DriveObstacle& o : in.obstacles) {
@@ -733,10 +857,15 @@ ObstacleView findObstacle(const DriveSettings& s, DriveState& st, const DriveSen
 // The free space round the vehicle (0x100e8170): mesh rays out to radius
 // + 10 m ahead, along the box's diagonals ahead (forward x length +-
 // right x width), behind and its diagonals, and to either side. The rays
-// behind are cut short by other vehicles (0x100fbdb0).
+// behind are cut short by other vehicles (0x100fbdb0). The mech's
+// (0x100e1f20) diagonals go along forward x (length + 1) +- right x
+// (width - 1), and its side rays' results are never stored.
 void freeSpace(const DriveSettings& s, const DriveSense& in, float reach, float& front, float& back, float& left,
 	float& right)
 {
+	const bool mech = s.driver == Driver::Mech;
+	const float length = mech ? s.length + 1 : s.length;
+	const float width = mech ? s.width - 1 : s.width;
 	if (!in.ray) {
 		front = in.freeFront;
 		back = in.freeBack;
@@ -746,8 +875,8 @@ void freeSpace(const DriveSettings& s, const DriveSense& in, float reach, float&
 		const Vec3 p = in.position;
 		const auto along = [&](const Vec3& d) { return in.ray(p, p + d * reach); };
 		const auto distance = [&](const DriveRay& r) { return r.clear ? reach : r.distance; };
-		Vec3 frontLeft = in.forward * s.length - in.right * s.width;
-		Vec3 frontRight = in.forward * s.length + in.right * s.width;
+		Vec3 frontLeft = in.forward * length - in.right * width;
+		Vec3 frontRight = in.forward * length + in.right * width;
 		frontLeft = frontLeft * (1 / std::max(length3(frontLeft), 1e-6f));
 		frontRight = frontRight * (1 / std::max(length3(frontRight), 1e-6f));
 		front = distance(along(in.forward));
@@ -769,8 +898,8 @@ void freeSpace(const DriveSettings& s, const DriveSense& in, float reach, float&
 	}
 	float unused = 0;
 	clipByObstacles(in, in.position, in.forward, unused, back, -1);
-	Vec3 frontLeft = in.forward * s.length - in.right * s.width;
-	Vec3 frontRight = in.forward * s.length + in.right * s.width;
+	Vec3 frontLeft = in.forward * length - in.right * width;
+	Vec3 frontRight = in.forward * length + in.right * width;
 	frontLeft = frontLeft * (1 / std::max(length3(frontLeft), 1e-6f));
 	frontRight = frontRight * (1 / std::max(length3(frontRight), 1e-6f));
 	clipByObstacles(in, in.position, frontLeft, unused, back, -1);
@@ -785,6 +914,11 @@ DriveOutput driveControl(const DriveSettings& s, DriveState& st, const DriveSens
 	const float r = s.radius;
 	const float probe = r + 10;
 	const float needed = s.spaceNeededTweak * r;
+	const bool car = s.driver == Driver::Car;
+	const bool mech = s.driver == Driver::Mech;
+	// How close behind a goal must be to back towards it: 10 radii for the
+	// car, 5 for the tank and the mech (0x100de8a0, 0x100e1f20).
+	const float behind = (car ? 10.0f : 5.0f) * r;
 	float error = in.error;
 	const float c = std::cos(error);  // local_44: dot(forward, way to the point)
 	const bool pointLeft = error < 0; // bVar3
@@ -796,7 +930,9 @@ DriveOutput driveControl(const DriveSettings& s, DriveState& st, const DriveSens
 	const float speed3 = hasVelocity ? length3(in.velocity) : std::fabs(in.speed);
 	bool swerve = false;
 	const float obstacleCap = obstacleSpeedCap(s, st, in, speed3 * motion, swerve);
-	int direction = 1;
+	// The mech's machine starts each tick at 0 (turn on the spot) where the
+	// car's and the tank's start at 1 (ahead).
+	int direction = mech ? 0 : 1;
 	float front = 0, back = 0, left = 0, right = 0;
 	freeSpace(s, in, probe, front, back, left, right);
 	const float remaining = in.remaining;
@@ -940,17 +1076,22 @@ DriveOutput driveControl(const DriveSettings& s, DriveState& st, const DriveSens
 		}
 	};
 	const bool angleLeft = view.angle < 0; // bVar5
+	// Round an obstacle (4/5, 13/14): the car steers at +-2; the tank and
+	// the mech at 0.2 x min(1, speed), and they keep going ahead while
+	// touching it as long as it is not straight ahead (dot 0.8).
+	const float roundError = car ? 2.0f : 0.2f * std::min(1.0f, std::fabs(in.speed));
 	switch (switchState) {
 	case 1:
 	case 7:
 	case 10:
 		break;
-	case 2: // ahead, turning right
+	case 2: // ahead (the mech: on the spot), turning right
 		if (pointLeft) {
 			set(c <= 0 ? 9 : 3);
 		} else if (c <= 0.9f) {
 			if (front >= needed && (view.ahead <= 0.5f || !have || view.clearAhead || st.avoiding)) {
 				error = std::fabs(error);
+				direction = mech ? 0 : 1;
 			} else {
 				set(11);
 			}
@@ -958,12 +1099,13 @@ DriveOutput driveControl(const DriveSettings& s, DriveState& st, const DriveSens
 			set(0);
 		}
 		break;
-	case 3: // ahead, turning left
+	case 3: // ahead (the mech: on the spot), turning left
 		if (pointLeft) {
 			if (c > 0.9f) {
 				set(0);
 			} else if (front >= needed && (view.ahead <= 0.5f || !have || view.clearAhead || st.avoiding)) {
 				error = -std::fabs(error);
+				direction = mech ? 0 : 1;
 			} else {
 				set(9);
 			}
@@ -974,18 +1116,20 @@ DriveOutput driveControl(const DriveSettings& s, DriveState& st, const DriveSens
 	case 4:
 		if (!have || (view.clearAhead && !angleLeft)) {
 			set(6);
-		} else if (front >= needed && !view.touching) {
-			error = -2;
+		} else if (front >= needed && (!view.touching || (!car && view.ahead <= 0.8f))) {
+			direction = 1;
+			error = -roundError;
 		} else {
 			set(13);
 		}
 		break;
 	case 5:
 		if (have && (!view.clearAhead || !angleLeft)) {
-			if (front < needed || view.touching) {
+			if (front < needed || (view.touching && (car || view.ahead > 0.8f))) {
 				set(14);
 			} else {
-				error = 2;
+				direction = 1;
+				error = roundError;
 			}
 		} else {
 			set(6);
@@ -1018,7 +1162,7 @@ DriveOutput driveControl(const DriveSettings& s, DriveState& st, const DriveSens
 		if (boxed) {
 			error = -error;
 			fold();
-		} else if (c > -0.5f || remaining > 10 * r + 5 || back < needed) {
+		} else if (c > -0.5f || remaining > behind + 5 || back < needed) {
 			set(0);
 		} else if (view.ahead >= -0.6f || !have) {
 			fold();
@@ -1050,10 +1194,13 @@ DriveOutput driveControl(const DriveSettings& s, DriveState& st, const DriveSens
 			set(2);
 		}
 		break;
-	case 12: // backing out of a narrow spot
+	case 12: // backing out of a narrow spot (not the mech's)
+		if (mech) {
+			break;
+		}
 		if (c > 0) {
 			set(0);
-		} else if (remaining <= 10 * r && c < -0.6f && back > needed) {
+		} else if (remaining <= behind && c < -0.6f && back > needed) {
 			set(8);
 		} else if (!wide) {
 			fold();
@@ -1070,7 +1217,7 @@ DriveOutput driveControl(const DriveSettings& s, DriveState& st, const DriveSens
 			set(6);
 		}
 		direction = -1;
-		error = 2;
+		error = roundError;
 		break;
 	case 14:
 		if (!have || (view.clearAhead && angleLeft)) {
@@ -1079,19 +1226,46 @@ DriveOutput driveControl(const DriveSettings& s, DriveState& st, const DriveSens
 			set(5);
 		}
 		direction = -1;
-		error = -2;
+		error = -roundError;
+		break;
+	case 15: // the mech: turning left on the spot
+	case 16: // and right
+		if (!mech) {
+			break;
+		}
+		if (c <= 0.9f) {
+			direction = 0;
+			error = switchState == 15 ? -std::fabs(error) : std::fabs(error);
+		} else {
+			set(0);
+		}
 		break;
 	default:
-		if (switchState > 14) {
+		if (switchState > 16) {
 			break;
 		}
 		if (boxed) {
+			direction = 1;
 			cap = s.maxSpeed * 0.5f;
-		} else if (c >= -0.2f && front >= needed) {
+		} else if (mech) {
+			// 0x100e1f20: drives on only nearly facing the point (cos 0.6),
+			// else turns on the spot (15/16) or backs (9/11).
+			if (found && !st.avoiding && c >= 0) {
+				set(6);
+			} else if (c >= 0.6f && front >= needed) {
+				direction = 1;
+			} else if (c < 0 && remaining <= behind && c < -0.6f && back > needed) {
+				set(8);
+			} else if (!pointLeft) {
+				set(front >= needed ? 16 : 11);
+			} else {
+				set(front >= needed ? 15 : 9);
+			}
+		} else if (c >= (car ? -0.2f : 0.0f) && front >= needed) {
 			if (found && !st.avoiding) {
 				set(6);
 			}
-		} else if (remaining <= 10 * r && c < -0.6f && back > needed) {
+		} else if (remaining <= behind && c < -0.6f && back > needed) {
 			set(8);
 		} else if (c < 0 && !roomy) {
 			set(12);
@@ -1113,8 +1287,10 @@ DriveOutput driveControl(const DriveSettings& s, DriveState& st, const DriveSens
 		const float space = std::max(0.0f, remaining - s.centreRadius - 0.5f);
 		if (space * space < s.brakeDistance * s.brakeDistance) {
 			const float ratio = space * space / (s.brakeDistance * s.brakeDistance);
-			if (s.tank) {
-				brake = std::max(1 - s.maxBrakePercentage, ratio); // TankMoveTo, as decompiled
+			if (!car) {
+				// TankMoveTo and MechMoveTo, as decompiled: the percentage
+				// not scaled, nothing squared.
+				brake = std::max(1 - s.maxBrakePercentage, ratio);
 			} else {
 				const float f = std::max(1 - s.maxBrakePercentage * 0.01f, ratio);
 				brake = f * f;
@@ -1123,7 +1299,10 @@ DriveOutput driveControl(const DriveSettings& s, DriveState& st, const DriveSens
 	}
 	float angle = 1;
 	if (speed > s.minSpeedForLookAhead) {
-		const float a = s.tank ? std::fabs(in.maxBend) : std::max(std::fabs(in.maxBend), std::fabs(in.error));
+		// The tank looks at the bend alone; the car at the heading error as
+		// well, the mech at the error its machine left (0x1008d250).
+		const float a = s.driver == Driver::Tank ? std::fabs(in.maxBend)
+			: std::max(std::fabs(in.maxBend), std::fabs(mech ? error : in.error));
 		angle = 1 - s.maxAngleDiffSlowDown * std::min(1.0f, s.angleSlowDownScale * std::max(a - s.minAngleDiffForSlowDown, 0.0f));
 	}
 	const float targetSpeed = std::min(brake, angle) * s.maxSpeed;
@@ -1133,12 +1312,34 @@ DriveOutput driveControl(const DriveSettings& s, DriveState& st, const DriveSens
 	// (over 1 m/s); the speed wanted signed by the way, capped (keeping the
 	// cap's sign: a negative cap brakes).
 	const float speed2 = hasVelocity ? std::sqrt(in.velocity.x * in.velocity.x + in.velocity.z * in.velocity.z) : speed;
-	if (static_cast<float>(direction) != motion && speed2 > 1) {
+	if (direction != 0 && static_cast<float>(direction) != motion && speed2 > 1) {
 		error = -error;
 	}
 	float target = targetSpeed * static_cast<float>(direction);
 	float throttle = 0;
-	if (!s.tank) {
+	if (mech) {
+		// The mech's controller (0x100e3c00): full lock (yawScale x error,
+		// raised to at least 1; turning on the spot, yawScale x its sign)
+		// and the throttle at the direction, no speed regulation and no cap:
+		// the speed wanted only says when to sprint (at maxSpeed and over 0.7
+		// of it). The original writes yawScale (15 for the mechs) unclamped;
+		// the rewrite's inputs are clamped to +-1.
+		if (direction == 0) {
+			out.turn = std::clamp(s.yawScale * sign(error), -1.0f, 1.0f);
+			throttle = 0;
+		} else {
+			float y = s.yawScale * error;
+			if (y != 0 && std::fabs(y) < 1) {
+				y = sign(y);
+			}
+			out.turn = std::clamp(y, -1.0f, 1.0f);
+			throttle = static_cast<float>(direction);
+			if (targetSpeed == s.maxSpeed && in.speed > 0.7f * s.maxSpeed) {
+				out.sprint = true;
+				throttle = 1;
+			}
+		}
+	} else if (car) {
 		// The car's controller (0x100e9d40).
 		out.turn = std::clamp(3 * s.yawScale * error - static_cast<float>(direction) * in.yawRate, -1.0f, 1.0f);
 		if (in.tilt > 0.25f) {
@@ -1150,27 +1351,90 @@ DriveOutput driveControl(const DriveSettings& s, DriveState& st, const DriveSens
 		throttle = std::clamp(target / 15 + std::min(1.0f, (target - in.speed) / 3), -1.0f, 1.0f);
 		if (target == s.maxSpeed && speed > 0.8f * s.maxSpeed) {
 			throttle = 1;
+			out.sprint = true; // PISprint (input 13)
 		} else if (throttle != 0 && speed < 1.5f) {
 			throttle = sign(throttle); // a kick off the line
 		}
 	} else {
-		// The tank's (0x100e0540): no turning below 1 m/s, less below 2 m/s.
+		// The tank's (0x100e0540): no turning below 1 m/s across the ground,
+		// less below 2 m/s.
 		float e = 0;
-		if (speed >= 1) {
-			const float k = std::min(1.0f, speed / 2.0f);
+		if (speed2 >= 1) {
+			const float k = std::min(1.0f, speed2 / 2.0f);
 			e = error * k * k;
 		}
 		out.turn = std::clamp(3 * e, -1.0f, 1.0f);
 		if (cap < std::fabs(target)) {
 			target = sign(target) * cap;
 		}
-		const float x = std::min(1.0f, (target - in.speed) / 3);
+		const float x = std::min(1.0f, (target - speed2 * motion) / 3);
 		throttle = std::clamp(target / 15 + sign(x) * x * x, -1.0f, 1.0f);
-		if (throttle != 0 && speed < 1.5f) {
+		if (throttle != 0 && speed2 < 1.5f) {
 			throttle = sign(throttle);
 		}
 	}
 	out.throttle = throttle;
+	return out;
+}
+
+float tankStopThrottle(float forwardSpeed)
+{
+	const float t = -std::clamp(forwardSpeed, -0.7f, 0.7f); // 0x1012abf8
+	if (std::fabs(t) <= 0.05f) {
+		return 0;
+	}
+	return std::fabs(t) <= 0.4f ? 0.4f * sign(t) : t;
+}
+
+// 0x1008c7c0 and its controller 0x100de350. The speed wanted: the bend's
+// slowing as the car's (|maxBend| only, above minSpeedForLookAhead), the
+// brake for the path's end as the car's (the percentage x 0.01, squared)
+// but at any speed, and backingSpeed as the floor. The loop runs in the
+// frame the tank will have half a second on (turning over 0.5 rad/s):
+// along its forward and right axes, (wanted - current) x 1 - acceleration,
+// x 3; 10 towards the way wanted while moving against it (the sign of 0
+// is 0). The original writes them unclamped; the rewrite's inputs are
+// clamped to +-1.
+FloatingTankOutput floatingTankControl(const DriveSettings& s, const DriveSense& in, const Vec3& direction,
+	const Vec3& acceleration)
+{
+	FloatingTankOutput out;
+	float bend = 1;
+	if (std::fabs(in.speed) > s.minSpeedForLookAhead) {
+		bend = 1 - s.maxAngleDiffSlowDown
+				* std::min(1.0f, s.angleSlowDownScale * std::max(std::fabs(in.maxBend) - s.minAngleDiffForSlowDown, 0.0f));
+	}
+	float brake = 1;
+	const float space = std::max(0.0f, in.remaining - s.centreRadius - 0.5f);
+	if (s.brakeDistance > 0 && space * space < s.brakeDistance * s.brakeDistance) {
+		brake = std::max(1 - 0.01f * s.maxBrakePercentage, space * space / (s.brakeDistance * s.brakeDistance));
+	}
+	const float want = std::max(std::min(brake * brake, bend) * s.maxSpeed, s.backingSpeed);
+	out.targetSpeed = want;
+	Vec3 f = in.forward;
+	Vec3 v = in.velocity;
+	Vec3 a = acceleration;
+	if (std::fabs(in.yawRate) > 0.5f) {
+		const float turn = 0.5f * in.yawRate; // 0x1012ab98: half a second
+		const float cs = std::cos(turn), sn = std::sin(turn);
+		const auto rotate = [&](const Vec3& p) { return Vec3 {p.x * cs + p.z * sn, p.y, -p.x * sn + p.z * cs}; };
+		f = rotate(f);
+		v = rotate(v);
+		a = rotate(a);
+	}
+	const Vec3 r {f.z, 0, -f.x}; // 0x100a8290
+	const float wantF = dot2(f, direction) * want, wantR = dot2(r, direction) * want;
+	const float curF = dot2(f, v), curR = dot2(r, v);
+	float throttle = ((wantF - curF) * 1.0f - dot2(f, a)) * 3.0f; // 0x1012ab94, 0x1012ab90
+	float strafe = ((wantR - curR) * 1.0f - dot2(r, a)) * 3.0f;
+	if (sign(curF) != sign(wantF)) {
+		throttle = 10 * sign(wantF);
+	}
+	if (sign(curR) != sign(wantR)) {
+		strafe = 10 * sign(wantR);
+	}
+	out.throttle = std::clamp(throttle, -1.0f, 1.0f);
+	out.strafe = std::clamp(strafe, -1.0f, 1.0f);
 	return out;
 }
 

@@ -26,6 +26,12 @@ struct SphereContact {
 	uint32_t material;
 };
 
+// Where the segment a-b comes within `radius` of the segment e0-e1 (a
+// capsule), as parameters along a-b strictly between 0 and 1, in order:
+// at most two (0x006bde70: the distance against the capsule's cylinder
+// and end spheres).
+int segmentCapsuleCrossings(const Vec3& a, const Vec3& b, const Vec3& e0, const Vec3& e1, float radius, float roots[2]);
+
 // LODs of BF2 collision meshes by user.
 enum class CollisionUser { Projectile = 0, Vehicle = 1, Soldier = 2 };
 
@@ -49,12 +55,29 @@ public:
 	struct Hit {
 		float fraction; // along the segment, 0..1
 		Vec3 point;
-		Vec3 normal;
+		Vec3 normal; // facing the segment's start
 		uint32_t material;
 		uint32_t owner;
+		Vec3 faceNormal {}; // the face's own (out of its object)
 	};
 	// The first face the segment from `from` to `to` passes through.
 	bool raycast(const Vec3& from, const Vec3& to, Hit& hit) const;
+	// A moving mesh vertex against the faces (the mobile mesh physics'
+	// first pass, 0x006bb050 -> collision-mesh slot 22 0x006e5920): the
+	// vertex's segment from its last pose to now. The first face it
+	// crosses from the front gives a contact at the crossing with the
+	// face's normal, as deep as the end lies behind the face (<= 0).
+	bool segmentContact(const Vec3& from, const Vec3& to, SphereContact& contact) const;
+	// A capsule (segment a-b, radius) against the faces' edges only
+	// (collision-mesh slot 25, 0x006e5a50 -> 0x006e2ee0, per face
+	// 0x006be990; the ragdoll's capsules). At most one contact a face: for
+	// each edge, where the segment comes within the radius of it
+	// (0x006bde70): two crossings give their midpoint (taken over any
+	// earlier edge), one is taken if it comes earlier along a-b. The
+	// contact's normal runs from the edge's nearest point to it, its depth
+	// is that distance less the radius; a normal pointing down is turned up
+	// and the contact made no push (depth the distance).
+	void capsuleEdgeContacts(const Vec3& a, const Vec3& b, float radius, std::vector<SphereContact>& contacts) const;
 
 private:
 	struct Triangle {

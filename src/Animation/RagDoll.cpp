@@ -431,6 +431,9 @@ void RagDoll::start(const RagDollTemplate& ragDoll, const std::vector<Matrix>& p
 	m_forced = false;
 	m_awake = true;
 	m_sleepLeft = s.sleep;
+	m_touched = false;
+	m_impactPending = false;
+	m_sinceImpact = 2 * ragDoll.collisionMinDelay(); // 0x008abc00
 	m_accumulated = 0;
 	m_gravityRamp = s.gravityOverTime;
 	m_gravityTime = 0;
@@ -686,9 +689,12 @@ void RagDoll::collide(const RagDollWorld& world)
 		for (Particle& p : m_particles) {
 			p.hitObject = false;
 			Vec from, direction, to, point, normal;
+			uint32_t material = 0;
 			segment(p, from, direction, to);
-			if (world.raycast(from, to, point, normal) && -dot(normal, direction) > 0) {
+			if (world.raycast(from, to, point, normal, material) && -dot(normal, direction) > 0) {
 				p.hitObject = true;
+				m_touched = true;
+				impact(p, normal, material);
 				p.position -= normal * dot(to - point, normal);
 				p.previous = p.position;
 			}
@@ -715,6 +721,11 @@ void RagDoll::collide(const RagDollWorld& world)
 				}
 				Vec point = from + (to - from) * hi;
 				point[1] = world.ground(point[0], point[2], normal);
+				m_touched = true;
+				// The terrain's material at the point (the heightmap's ray,
+				// slot 0x8c) is not known to the rewrite: 0. Deep water
+				// (material 1) would not count.
+				impact(p, normal, 0);
 				p.position -= normal * dot(to - point, normal);
 				p.previous = p.position;
 			} else {
@@ -732,31 +743,64 @@ void RagDoll::collide(const RagDollWorld& world)
 
 // The body's capsules (addCapsuleCollision) against objects, while
 // ragdoll_useCapsuleCollision is set (0x008abf20): for each object in the
-// body's list (see GameWorld::ragDollWorld) and each capsule, the object
-// sweeps particle a's sphere (a's radius) from a to b through its mesh
-// (object slot 0x7c, the collision mesh's swept-sphere test 0x006e2350 at
-// LOD 2); every contact deeper than 0 moves both ends out by its depth
-// along its normal and stops them (previous = position). Not rewritten:
-// the sweep (the collision world has no swept-sphere query yet), so this
-// tests a sphere of a's radius at the capsule's middle and takes the
-// deepest contact only.
+// body's list and each capsule, the object's mesh tests the segment from
+// particle a to b with a's radius against its faces' edges (object slot
+// 0x64 -> collision-mesh slot 25 0x006e2ee0; faces are left to the
+// particles); every contact with a depth below 0, in order, moves both
+// ends out by it along its normal and stops them (previous = position).
 void RagDoll::capsuleCollision(const RagDollWorld& world)
 {
-	if (!m_template->settings.useCapsuleCollision || !world.sphere) {
+	if (!m_template->settings.useCapsuleCollision || !world.capsule) {
 		return;
 	}
+	std::vector<std::pair<Vec, float>> contacts;
 	for (const RagDollTemplate::Pair& c : m_template->capsules()) {
 		Particle& a = m_particles[static_cast<size_t>(c.a)];
 		Particle& b = m_particles[static_cast<size_t>(c.b)];
-		Vec normal;
-		float depth = 0;
-		if (world.sphere((a.position + b.position) * 0.5f, a.radius, normal, depth) && depth < 0) {
+		contacts.clear();
+		world.capsule(a.position, b.position, a.radius, contacts);
+		for (const auto& [normal, depth] : contacts) {
+			if (depth >= 0) {
+				continue;
+			}
 			for (Particle* p : {&a, &b}) {
 				p->position += normal * -depth;
 				p->previous = p->position;
 			}
 		}
 	}
+}
+
+// 0x008a7a20, on every particle's hit: its speed into the surface (its
+// last step's displacement against the normal: metres a step, so 0.05 at
+// 1/90 s is 4.5 m/s) counts when minDelay has passed since the last sound
+// and it is at least minSpeed; the hardest waits to be taken.
+void RagDoll::impact(const Particle& p, const Vec& normal, uint32_t material)
+{
+	const float speed = -dot(p.lastMove, normal);
+	if (m_sinceImpact < m_template->collisionMinDelay() || speed < m_template->collisionMinSpeed()) {
+		return;
+	}
+	if (!m_impactPending) {
+		m_impactSpeed = 0;
+		m_impactPending = true;
+	}
+	if (speed > m_impactSpeed) {
+		m_impactSpeed = speed;
+		m_impactMaterial = material;
+	}
+}
+
+bool RagDoll::takeImpact(float& speed, uint32_t& material)
+{
+	if (!m_template || m_template->collisionMinSpeed() < 0 || !m_impactPending) {
+		return false;
+	}
+	m_impactPending = false;
+	m_sinceImpact = 0;
+	speed = m_impactSpeed;
+	material = m_impactMaterial;
+	return true;
 }
 
 void RagDoll::solve(const RagDollWorld& world)
@@ -782,9 +826,24 @@ const Vec& RagDoll::update(float seconds, const RagDollWorld& world)
 	const RagDollSettings& s = m_template->settings;
 	const float step = s.dT;
 	seconds *= s.slowMotion;
-	if (seconds < 0 || !m_awake) {
+	if (seconds < 0) {
 		return middle();
 	}
+	if (!m_awake) {
+		// Asleep: every 1/30 s, woken by an object of its list that moves
+		// (0x008ab6b0, 0x008a79d0).
+		m_accumulated += seconds;
+		if (m_accumulated < 0.033333335f) {
+			return middle();
+		}
+		m_accumulated = 0;
+		if (!world.movingNear || !world.movingNear(middle(), s.completeCollRadius)) {
+			return middle();
+		}
+		m_awake = true;
+		m_sleepLeft = s.sleep;
+	}
+	m_sinceImpact += seconds;
 	m_accumulated += seconds;
 	if (step > 0 && m_accumulated >= step) {
 		const int steps = static_cast<int>(std::nearbyint(m_accumulated / step));
@@ -796,6 +855,16 @@ const Vec& RagDoll::update(float seconds, const RagDollWorld& world)
 			accumulate();
 			integrate(step);
 			solve(world);
+		}
+	}
+	// Carried by what it lies on (0x008add10): the object 2 m or less under
+	// the middle particle moves every particle and its previous position by
+	// its velocity over a fixed 1/30 s.
+	Vec carried {};
+	if (world.carriedBy && world.carriedBy(middle(), carried)) {
+		for (Particle& p : m_particles) {
+			p.position += carried * 0.033333335f;
+			p.previous += carried * 0.033333335f;
 		}
 	}
 	// Asleep after ragdoll_sleep seconds of moving less than sleepDelta a frame.

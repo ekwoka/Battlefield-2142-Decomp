@@ -244,3 +244,36 @@ TEST(SoldierPhysics_OnlyFrontFacesPush)
 	CHECK(walker.position.z > 10);
 	CHECK(std::fabs(walker.position.y - 1) < 0.1f);
 }
+
+// A vehicle's collision vertex against static objects (0x006bb050 ->
+// slot 22): its segment from the last pose crosses the box top from above:
+// a contact at the crossing, normal up, as deep as the end lies below;
+// from below (behind the face) nothing.
+TEST(CollisionWorld_VertexSegmentContact)
+{
+	physics::CollisionWorld world;
+	world.addMesh(testMesh(), physics::CollisionUser::Vehicle, {}, {});
+	physics::SphereContact contact;
+	CHECK(world.segmentContact({10, 1.2f, 0}, {10, 0.9f, 0}, contact));
+	CHECK(std::fabs(contact.point.y - 1) < 1e-4f && contact.normal.y > 0.99f && std::fabs(contact.depth + 0.1f) < 1e-4f);
+	CHECK(!world.segmentContact({10, 0.9f, 0}, {10, 1.2f, 0}, contact));
+	CHECK(!world.segmentContact({10, 1.3f, 0}, {10, 1.1f, 0}, contact));
+}
+
+// A round against a bone's capsule (0x006bde70): the segment's crossings
+// of the capsule (cylinder and end spheres), strictly inside the segment:
+// in and out through it, only out from inside, none past it.
+TEST(CollisionWorld_SegmentCapsuleCrossings)
+{
+	float roots[2];
+	// The capsule along y from 0 to 1, radius 0.1; a round along x at y 0.5.
+	CHECK(physics::segmentCapsuleCrossings({-1, 0.5f, 0}, {1, 0.5f, 0}, {0, 0, 0}, {0, 1, 0}, 0.1f, roots) == 2);
+	CHECK(std::fabs(roots[0] - 0.45f) < 1e-4f && std::fabs(roots[1] - 0.55f) < 1e-4f);
+	// Over the top: the end sphere.
+	CHECK(physics::segmentCapsuleCrossings({-1, 1.05f, 0}, {1, 1.05f, 0}, {0, 0, 0}, {0, 1, 0}, 0.1f, roots) == 2);
+	CHECK(std::fabs(roots[0] - (1 - std::sqrt(0.1f * 0.1f - 0.05f * 0.05f)) / 2) < 1e-4f);
+	CHECK(physics::segmentCapsuleCrossings({0, 0.5f, 0}, {1, 0.5f, 0}, {0, 0, 0}, {0, 1, 0}, 0.1f, roots) == 1);
+	CHECK(std::fabs(roots[0] - 0.1f) < 1e-4f);
+	CHECK(physics::segmentCapsuleCrossings({-1, 1.2f, 0}, {1, 1.2f, 0}, {0, 0, 0}, {0, 1, 0}, 0.1f, roots) == 0);
+	CHECK(physics::segmentCapsuleCrossings({-1, 0.5f, 0}, {-0.2f, 0.5f, 0}, {0, 0, 0}, {0, 1, 0}, 0.1f, roots) == 0);
+}

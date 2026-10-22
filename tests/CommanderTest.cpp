@@ -13,6 +13,7 @@
 #include "World/ObjectTemplateManager.h"
 #include "World/WorldConsole.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <memory>
@@ -46,7 +47,8 @@ struct Field {
 			if (files.mountArchive("Objects/Weapons_server.zip", "Objects\\Weapons")) {
 				world::registerWorldConsoleMethods(console, templates, objects);
 				world::registerUntypedTemplateProperties(console, templates,
-					{"rcType", "minTimeBetweenActivation", "uavVehicleTemplate", "armor.maxHitPoints", "armor.hitPoints",
+					{"rcType", "minTimeBetweenActivation", "uavVehicleTemplate", "uavVehicleSpeed", "uavVehicleRadius",
+						"uavVehicleFlightHeight", "uavVehicleSampleResolution", "armor.maxHitPoints", "armor.hitPoints",
 						"armor.defaultMaterial", "armor.takesEmpDamage", "physicsType", "hasMobilePhysics",
 						"fire.roundsPerMinute", "fire.burstSize", "fire.batchSize", "fire.fireLaunchDelay",
 						"deviation.subProjectileDev", "ammo.magSize", "ammo.nrOfMags", "velocity", "projectileTemplate",
@@ -331,8 +333,25 @@ TEST(Commander_Artillery)
 	CHECK(world.strikes().size() == 1 && world.strikes()[0].salvosLeft == 16);
 	field.run(0.1f);
 	CHECK(world.strikes()[0].salvosLeft == 15 && world.projectilesInFlight() == 7);
+	// Each shell strays (SimpleDeviationComp, 0x005f5540): subProjectileDev
+	// 45 x 0.01 x the firearm's velocity 10 = 4.5 m/s, one standard
+	// deviation on each axis across its fall (the main one by the last
+	// sub's); the barrage lands round the point.
+	game::GameWorld::PlayerInfo info;
+	field.world->playerInfo(target, info);
+	const uint32_t soldier = info.soldier;
 	field.run(20);
-	CHECK(world.strikes().empty() && !field.alive(target));
+	std::vector<float> landed; // the last 64 (the world keeps that many)
+	for (const auto& impact : world.impacts()) {
+		landed.push_back(std::sqrt(impact.point.x * impact.point.x + (impact.point.z + 60) * (impact.point.z + 60)));
+	}
+	std::sort(landed.begin(), landed.end());
+	const float median = landed.empty() ? -1 : landed[landed.size() / 2];
+	std::printf("  the last %zu shells landed a median %.1f m from the point, the nearest %.1f m\n", landed.size(), median,
+		landed.empty() ? -1.0f : landed.front());
+	CHECK(world.strikes().empty() && landed.size() == 64);
+	CHECK(median > 3 && median < 60);
+	CHECK(!field.alive(target) || world.hitPoints(soldier) < 100);
 	CHECK(std::fabs(world.abilityState(1, Ability::Artillery).timeUntilReady - (85 - 20.1f)) < 0.2f);
 }
 
@@ -349,17 +368,37 @@ TEST(Commander_UavAndScanReveal)
 	const int outside = field.soldier(1, 300, 450);
 	CHECK(!world.commanderAction(2, Ability::Uav, 300, 300)); // no UAV trailer
 	field.place("commander_uav_drone_control", 2, -200, -200);
+	if (!field.templates.find("eu_drone")) {
+		field.templates.registerType(9, "UAVVehicle");
+		field.templates.create("UAVVehicle", "eu_drone")->settings()["armor.maxHitPoints"] = "1000";
+	}
 	CHECK(world.commanderAction(2, Ability::Uav, 300, 300));
-	field.run(0.1f);
+	// UAVControlObject: eu_drone at x + 40 (uavVehicleRadius), 70 m up
+	// (uavVehicleFlightHeight over flat ground), circling at 14 m/s with
+	// asin(14 / 1200) x 57.29578 x 0.5263158 = 0.3518 rad/s: 39.8 m round.
+	const uint32_t drone = world.uavDrone(2);
+	const world::Object* flying = field.objects.find(drone);
+	CHECK(drone != 0 && flying && std::fabs(flying->position().x - 340) < 1e-3f && std::fabs(flying->position().y - 70) < 1e-3f);
+	field.run(5);
+	flying = field.objects.find(drone);
+	if (flying) {
+		const float rate = std::asin(14.0f / 1200) * 57.29578f * 0.5263158f;
+		const float circle = 14 / rate;
+		const float dx = flying->position().x - (340 - circle), dz = flying->position().z - 300;
+		CHECK(std::fabs(std::sqrt(dx * dx + dz * dz) - circle) < 0.01f && std::fabs(circle - 39.79f) < 0.05f);
+		CHECK(dz > 0); // round from +x towards +z
+		CHECK(std::fabs(std::atan2(dz, dx) - rate * 5.0f) < 0.02f);
+	}
 	physics::Vec3 at;
 	float radius = 0;
 	CHECK(world.uavArea(2, at, radius) && at.x == 300 && radius == 100);
 	CHECK(world.isRevealed(inside, 2) && !world.isRevealed(outside, 2) && !world.isRevealed(inside, 1));
 	// It stays 30 s and is ready again 5 s later.
-	field.run(29);
-	CHECK(world.isRevealed(inside, 2));
+	field.run(24);
+	CHECK(world.isRevealed(inside, 2) && world.uavDrone(2) == drone);
 	field.run(1.5f);
 	CHECK(!world.isRevealed(inside, 2) && !world.uavArea(2, at, radius) && !world.abilityReady(2, Ability::Uav));
+	CHECK(world.uavDrone(2) == 0 && !field.objects.find(drone)); // gone with the UAV's time
 	field.run(5);
 	CHECK(world.abilityReady(2, Ability::Uav));
 	// The satellite scan (commander_movement_analyst) shows everyone for

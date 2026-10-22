@@ -25,6 +25,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace dice::hfe::io {
@@ -131,6 +132,22 @@ public:
 	void startRound();
 	// One simulation tick.
 	void tick(float seconds);
+	// A body left slumped in a vehicle seat (the seat's die bundle), 0 for
+	// none.
+	uint32_t seatCorpse(uint32_t vehicle, int seat) const;
+	// Whether a dead player's body has landed (0x005eda20): no ragdoll, or
+	// one a particle of which has hit something, ragdollLandedDelay (the
+	// soldier template's +0x3bc, 4 s) after the death. The engine holds the
+	// corpse's removal countdown (the armour's, 0x00652380) until then, or
+	// 60 s; the rewrite's bodies go at PlayerDeath (man down's end).
+	bool bodyLanded(int player) const;
+	// Sounds the game asks for (to be played by the sound layer), taken
+	// once: a ragdoll's impact (S_Soldier_RagDoll_Impact and the like).
+	struct SoundEvent {
+		std::string sound;
+		physics::Vec3 position;
+	};
+	std::vector<SoundEvent> takeSounds() { return std::exchange(m_sounds, {}); }
 
 	RoundState state() const { return m_state; }
 	const std::vector<ControlPoint>& controlPoints() const { return m_controlPoints; }
@@ -179,6 +196,7 @@ public:
 		physics::Vec3 velocity;
 		std::vector<std::pair<int, std::string>> carried; // (slot, weapon template)
 		int inHandSlot = 0;
+		float heat = 0; // the weapon in hand's (or the seat's gun's), 0..1
 	};
 	std::vector<PlayerInfo> playerList() const;
 	bool playerInfo(int player, PlayerInfo& info) const;
@@ -359,6 +377,15 @@ public:
 		physics::Vec3 boxMin, boxMax;
 	};
 	std::vector<VehicleInfo> vehicleList();
+	// The battlefield-objects report (BF2142.exe event 0x41, server
+	// 0x005088f0 -> IAIEventCourier vt+0xe0, AIDLL 0x1004e5e0 -> 0x100bf000):
+	// `reporter`'s squad now knows of the enemy `players` (and the
+	// occupants of their vehicles). The bots send one as their trigger
+	// presses or lets go at their target (AIDLL 0x1009a1d0, 0x1009a2a0).
+	void reportBattlefieldObjects(int reporter, const std::vector<int>& players);
+	// Whether a team's squad had a player reported within the last 3 s
+	// (0x100bea30).
+	bool squadKnows(int team, int squad, int player) const;
 	// A player's carried weapons' ammunition (for the bots' AmmoAssist):
 	// rounds left in all, the magazine size and the kit's magazines.
 	struct WeaponAmmo {
@@ -373,6 +400,9 @@ public:
 	bool detonate(const std::string& projectileTemplate, const physics::Vec3& at, int attacker = -1);
 	// A vehicle's or drone's EMP level (0: running) and whether it is a wreck.
 	int empLevel(uint32_t vehicle) const;
+	// What a vehicle's driver inputs are scaled by (0x005ca2e0): EMP and
+	// critical damage; see GameWorld.cpp.
+	static float driverInputScale(float empLevel, float hitPoints, const world::ObjectTemplate& vehicle);
 	// Deployed hubs (their objects).
 	std::vector<uint32_t> supplyObjects() const;
 	// Squad leaders' drones (a detonator whose projectile carries a
@@ -466,7 +496,10 @@ public:
 		float satelliteScanTime = 11;         // 0x238
 		float satelliteScanReloadTime = 16;   // 0x23c
 		float orbitalBombardmentHeight = 500; // 0x254
+		float extraUAVVehicleFlightHeight = 0; // 0x234 (slots 0xc8/0xcc; no shipped script sets it)
 	};
+	// The team's UAV drone in the air (eu_drone), 0 for none.
+	uint32_t uavDrone(int team) const { return team == 1 || team == 2 ? m_commanders[team].uavDrone : 0; }
 	CommanderSettings commanderSettings;
 	// Orders to squads. The HUD's SquadLeader.sendOrder <kind> <bool> and
 	// Commander.sendOrder <kind> <bool> both run HudManager slot 0x3f4
@@ -537,6 +570,7 @@ private:
 	world::ObjectTemplateManager& m_templates;
 	world::ObjectManager& m_objects;
 	Random m_random;
+	Gaussian m_gaussian; // the deviation components' normal numbers
 	RoundState m_state = RoundState::BeforeStart;
 	std::vector<ControlPoint> m_controlPoints;
 	std::vector<std::unique_ptr<ObjectSpawner>> m_spawners;
@@ -551,9 +585,11 @@ private:
 		physics::ContactResponse response;
 		std::vector<physics::Vec3> points; // vehicle collision LOD
 		std::shared_ptr<physics::CollisionWorld> projectileMesh; // object space, projectile LOD
+		std::shared_ptr<physics::CollisionWorld> soldierMesh;    // object space, soldier LOD (ragdolls)
 		std::unique_ptr<Vehicle> vehicle; // engines and wheels
 		// Seats: who sits in each (player id, -1 for nobody) and the guns.
 		std::vector<int> occupants;
+		double occupiedAt = -1e9; // when someone last sat in it (MagneticObject's disableWhenEmptyVehicle)
 		struct Gun {
 			std::unique_ptr<FireArm> weapon;
 			const ProjectileSettings* projectile = nullptr;
@@ -570,10 +606,11 @@ private:
 	void destroyVehicle(Body& body, int attacker);
 	void stepVehicleDamage(float seconds);
 	bool disabled(const Body& body) const { return body.empLevel > 0 || body.wreckTime >= 0; }
+
 	void seatPlayer(Player& player, Body& body, int seat);
 	void stepGunner(Player& player, Body& body, float seconds);
 	Body* findBody(uint32_t object);
-	void collideWithStatics(Body& body);
+	void collideWithStatics(Body& body, const physics::Vec3& lastPosition, const physics::Mat3& lastRotation);
 	void addBodies();
 	void stepPhysics(float seconds);
 	const io::FileManager* m_files = nullptr;
@@ -628,6 +665,7 @@ private:
 		bool cloaked = false;       // CamouflageAmmoComp held with the trigger down
 		bool manDown = false;       // killed, the body lying (sv.manDownTime)
 		float manDownLeft = 0;
+		double diedAt = 0;          // soldier +0x290: the death's time
 		uint32_t object = 0;
 		physics::SoldierBody body;
 		SoldierControl control;
@@ -667,7 +705,7 @@ private:
 	void stepAnimation(Player& player, float seconds);
 	bool startRagDoll(Player& victim);
 	void stepRagDoll(Player& player, float seconds);
-	anim::RagDollWorld ragDollWorld() const;
+	anim::RagDollWorld ragDollWorld(const anim::Vec& middle, float reach) const;
 	void poseSeated(Player& player, world::Object& soldier, const Body& body, const SeatLayout& seat, float seconds);
 	void stepControlPoints(float seconds);
 	ScriptEventSink m_events;
@@ -707,10 +745,19 @@ private:
 		int team;
 		Ability ability;
 		std::string gadget; // fire.maxProjectilesInWorld 1: one per owner and gadget
+		bool crate = false; // works as a SupplyObject (m_crates), not by the gadget's ability
 	};
+	// The in-hand ability's targets (0x005d8ac0): rescanned every second
+	// with none, every two with some, and treated in between.
+	struct AbilityScan {
+		float timer = 0;
+		std::vector<uint32_t> targets;
+	};
+	std::map<int, AbilityScan> m_abilityScans;
 	std::vector<Supply> m_supplies;
 	std::map<uint32_t, float> m_resupply; // ammo owed to soldiers (fractions of a magazine)
-	void applyAbility(const Ability& ability, const physics::Vec3& at, int team, float seconds, uint32_t skip);
+	void applyAbility(const Ability& ability, const physics::Vec3& at, int team, float seconds, uint32_t skip,
+		AbilityScan* scan = nullptr);
 	void stepAbilities(float seconds);
 	void stepProjectiles(float seconds);
 	void steerSeeker(Projectile& projectile, float seconds);
@@ -724,7 +771,7 @@ private:
 	Player* soldierPlayer(uint32_t object) const;
 	world::Object* spawnSoldier(Player& player);
 	void kill(Player& victim, Player* attacker, uint32_t weapon);
-	void finishDeath(Player& victim);
+	void finishDeath(Player& victim, bool keepBody = false);
 	void revive(Player& victim, Player* medic, float restoreHitPoints);
 	Player* downedPlayer(uint32_t object) const;
 	void shockDowned(Player& victim, const ProjectileSettings& shock, float amount, uint32_t surfaceMaterial, int attacker);
@@ -732,6 +779,7 @@ private:
 	std::map<std::pair<int, int>, uint32_t> m_beacons; // (team, squad) -> beacon object
 	std::vector<int> squadMembers(int team, int squad) const;
 	bool spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& position, float& yaw);
+	bool scatterOnLeader(const Player& leader, physics::Vec3& feet, float& yaw);
 	float m_waterLevel = 0;
 	bool m_hasWater = false;
 	void stepPlayers(float seconds);
@@ -759,6 +807,11 @@ private:
 		uint32_t object = 0;
 		int owner = -1;
 		int team = 0;
+		// The sentry's auto controller: the gun's heading (radians), its
+		// target and when it was last seen.
+		float gunYaw = 0;
+		int target = -1;
+		float targetSeenAt = 0;
 		ForceSettings force;
 		float hoverHeight = 0; // the target's physics origin over its feet (see stepDrones)
 		physics::Vec3 position, velocity;
@@ -776,7 +829,24 @@ private:
 		float empLevel = 0;      // its armour's EMP level (see empBlast)
 	};
 	std::vector<Drone> m_drones;
+	// Soldiers killed in a seat that has a die bundle: the body stays,
+	// slumped by the seat's animation system (0x005cea00, 0x005ed890).
+	struct SeatCorpse {
+		uint32_t object = 0;
+		uint32_t vehicle = 0;
+		int seat = -1;
+		std::unique_ptr<anim::AnimationState> animation;
+		const anim::Skeleton* skeleton = nullptr;
+		anim::LocalPose pose;
+		std::vector<anim::Matrix> worldPose;
+	};
+	std::vector<SeatCorpse> m_seatCorpses;
+	std::vector<SoundEvent> m_sounds;
+	void stepSeatCorpses(float seconds);
 	std::map<std::pair<int, int>, float> m_revealed; // (player, team) -> seconds left
+	// The squads' battlefield objects (AIDLL 0x100bf000, 0x100bea30): per
+	// (team, squad), when each enemy player was last reported.
+	std::map<std::pair<int, int>, std::map<int, double>> m_squadKnowledge;
 	world::ObjectTemplate* droneTemplate(const world::ObjectTemplate* weapon) const;
 	void launchDrone(Player& player, const world::ObjectTemplate& detonator, world::ObjectTemplate& drone);
 	void stepDrones(float seconds);
@@ -800,7 +870,15 @@ private:
 		double lastUse[kCommanderAbilities] = {-1e9, -1e9, -1e9, -1e9, -1e9}; // when each tool was used
 		float minTime[kCommanderAbilities] = {};  // its recharge then (minTimeBetweenActivation...)
 		physics::Vec3 uavAt;
+		// The UAV's drone (the UAV manager DAT_00a6a090, slots +4/+8): its
+		// object and the circle it flies.
+		uint32_t uavDrone = 0;
+		physics::Vec3 uavCentre;
+		float uavCircle = 0, uavTurnRate = 0, uavAngle = 0;
 	};
+	void launchUavDrone(int team, const physics::Vec3& at);
+	void flyUavDrones(float seconds);
+	void removeUavDrone(int team);
 	CommanderTeam m_commanders[3];
 	std::map<std::pair<int, int>, SquadOrder> m_orders;       // (team, squad): the commander's
 	std::map<std::pair<int, int>, SquadOrder> m_leaderOrders; // (team, squad): the leader's
@@ -818,6 +896,7 @@ private:
 	struct StrikeFire {
 		std::string fireArm;
 		int player = -1; // the commander who called it (the kills are its)
+		float subUp = 0, subRight = 0; // the last sub-projectile's offset (deviation +0xc, +0x10)
 	};
 	std::vector<StrikeFire> m_strikeFire; // alongside m_strikes
 	struct Crate {
@@ -827,6 +906,9 @@ private:
 		float timeLeft = 0;  // supplyDropNumSecsToLive
 		float tick = 0;  // to the next of its 0.2 s updates (event 0x1d)
 		std::map<const FireArm*, float> owed; // magazines' fractions refilled
+		// The SupplyObject's template when it is a child of the object (a
+		// deployed hub's Unl_Hub_*_Supply); null: the object's own.
+		const world::ObjectTemplate* settings = nullptr;
 	};
 	std::vector<Crate> m_crates;
 	const CommanderAsset* intactAsset(int team, CommanderAbility ability) const;
