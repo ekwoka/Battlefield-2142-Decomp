@@ -121,7 +121,8 @@ build/native/src/Main/bf2142 --game "source/Battlefield 2142" \
 # Instant Action or a playlist; the chosen map loads with the menu's bots
 # and settings; the playlist goes on map after map, Esc shows the menu over
 # the game (Disconnect leaves it). --offline skips the account service;
-# --console "<command>" runs a console command once the round has started;
+# --console "<command>" runs a console command once the round has started
+# ("<seconds>:<command>" once the round is that old);
 # --menu-script drives
 # the menu without a window ("wait:<s> click:<x>,<y> type:<text>"), e.g.
 #   bf2142 --game "source/Battlefield 2142" --menu --view --offline

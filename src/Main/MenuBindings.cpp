@@ -1495,12 +1495,12 @@ std::string MenuBindings::text(const std::string& name) const
 void MenuBindings::bindControls()
 {
 	ui::NativeRegistry& n = m_natives;
-	// The page's maps by number (setControlMap 0..4): on foot, land
-	// vehicles, aircraft, helicopters, ships (provisional: Controls.con's
-	// order).
+	// The page's maps by number (0x100173a0 indexes the table that
+	// 0x100f7b50 fills): on foot, land vehicles, aircraft, helicopters,
+	// ships, the game's map and the player inputs common to all.
 	static const char* kMaps[] = {input::ControlMaps::kInfantry, input::ControlMaps::kLand, input::ControlMaps::kAir,
-		input::ControlMaps::kHelicopter, input::ControlMaps::kSea};
-	const auto mapName = [this] { return std::string(kMaps[std::clamp(m_controlMap, 0, 4)]); };
+		input::ControlMaps::kHelicopter, input::ControlMaps::kSea, input::ControlMaps::kGame, input::ControlMaps::kPlayer};
+	const auto mapName = [this] { return std::string(kMaps[std::clamp(m_controlMap, 0, 6)]); };
 	n.setFunction(kControlSettings, "setActiveControlMap", [this](Interpreter& vm, const Args& args) {
 		m_controlMap = static_cast<int>(vm.toNumber(arg(args, 0)));
 		return Value();

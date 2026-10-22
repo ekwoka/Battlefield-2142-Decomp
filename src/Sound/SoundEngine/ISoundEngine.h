@@ -190,7 +190,7 @@ public:
 	virtual void stopAllSounds() = 0;                                     // 6
 	virtual void setMasterVolume(float volume) = 0;                       // 7
 	virtual float masterVolume() = 0;                                     // 8
-	virtual void setVolume(int group, float volume) = 0;                  // 9 (0 effects, 1 music, ...)
+	virtual void setVolume(int group, float volume) = 0;                  // 9 (0, 3, 4 effects; 1 music; 2 voice messages)
 	virtual float volume(int group) = 0;                                  // 10
 	virtual void setListenerPosition(const Vec3* position) = 0;           // 11
 	virtual const Vec3* listenerPosition() = 0;                           // 12

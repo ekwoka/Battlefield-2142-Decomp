@@ -401,8 +401,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 			const bool* keys = shown.keyboard();
 			const auto pressed = [keys](SDL_Scancode code) { return keys[code] ? 1.0f : 0.0f; };
 			if (playing && options.onPlayerInput && options.controls) {
-				// The control maps: the vehicle's map while driving (land;
-				// provisional: aircraft and ships use theirs too), else on foot's.
+				// The control maps (0x004b141a): on foot the infantry map, in a
+				// vehicle the map of its category.
 				const Uint32 buttons = shown.mouseButtons();
 				const input::ControlMaps::IsDown down = [keys, buttons, pointer](const std::string& control) {
 					if (control.compare(0, 9, "IDButton_") == 0) {
@@ -414,7 +414,11 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				};
 				ViewerOptions::PlayerView view;
 				const bool driving = options.playerView && options.playerView(view) && view.driving;
-				const std::string map = driving ? input::ControlMaps::kLand : input::ControlMaps::kInfantry;
+				static const char* kVehicleMaps[] = {input::ControlMaps::kLand, input::ControlMaps::kSea,
+					input::ControlMaps::kAir, input::ControlMaps::kHelicopter};
+				const std::string map = !driving ? input::ControlMaps::kInfantry
+					: view.vehicleCategory >= 0 && view.vehicleCategory < 4 ? kVehicleMaps[view.vehicleCategory]
+																			 : input::ControlMaps::kLand;
 				const input::ControlMaps& c = *options.controls;
 				ViewerOptions::PlayerInput input;
 				input.throttle = c.value(map, "c_PIThrottle", down);

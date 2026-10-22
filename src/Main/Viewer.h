@@ -47,6 +47,9 @@ struct ViewerOptions {
 		float x = 0, y = 0, z = 0; // the soldier's feet
 		float yawDegrees = 0;
 		bool driving = false; // the position and yaw are the vehicle's
+		// The vehicle's ObjectTemplate.vehicleCategory: 0 VCLand, 1 VCSea,
+		// 2 VCAir, 3 VCHelicopter (its control map, 0x004b141a).
+		int vehicleCategory = 0;
 	};
 	std::function<void(const PlayerInput&)> onPlayerInput;
 	std::function<bool(PlayerView&)> playerView; // false without a player

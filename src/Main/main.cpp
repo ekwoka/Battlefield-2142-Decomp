@@ -456,13 +456,20 @@ void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 	}
 	if (const auto* order = me.squad ? round.squadOrder(me.team, me.squad) : nullptr) {
 		using Order = game::GameWorld::OrderType;
-		const char* icon = order->type == Order::Attack ? "orderAttackCommander.tga"
-			: order->type == Order::Defend              ? "orderDefendCommander.tga"
-														: "orderMoveCommander.tga";
+		const bool attack = order->type == Order::Attack || order->type == Order::MapAttack;
+		const bool defend = order->type == Order::Defend || order->type == Order::MapDefend;
+		const char* icon = attack ? "orderAttackCommander.tga" : defend ? "orderDefendCommander.tga" : "orderMoveCommander.tga";
 		markers.push_back({std::string("Ingame/Minimap/Icons/") + icon, order->position.x, order->position.z, 24});
 	}
 	// Enemies a recon drone's pulse revealed to the team, in red.
-	for (const int id : round.revealedPlayers(me.team)) {
+	// The satellite scan's enemies, shown to the commander only (0x0057cfb0).
+	std::vector<int> revealed = round.revealedPlayers(me.team);
+	for (const int id : round.scannedPlayers(me.id)) {
+		if (std::find(revealed.begin(), revealed.end(), id) == revealed.end()) {
+			revealed.push_back(id);
+		}
+	}
+	for (const int id : revealed) {
 		game::GameWorld::PlayerInfo enemy;
 		if (round.playerInfo(id, enemy) && enemy.alive) {
 			hud::HudManager::MapMarker spotted {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", enemy.position.x,
@@ -1291,8 +1298,15 @@ int runGame(Options& options, Session& session)
 		session.voice->setSettings(voice);
 	};
 	// The options pages' applied values, now and whenever applied again:
-	// the volumes (effects are group 3 as the game's sounds; music 2 and
-	// voice-overs 4 are provisional) and the window's size.
+	// the volumes and the window's size. AudioSettings' apply (0x00496830)
+	// sets the master volume to 1, then the sound manager's groups (slot
+	// 45, 0x007f9a80, clamps to 0..1): effectsVolume (+0xf8, console
+	// property 0x00411bf4) to groups 0, 4 (first-person weapon sounds,
+	// 0x005db760) and 3 (other menu sounds); musicVolume (+0xfc,
+	// 0x00411cfb) to group 1 (the music and interface menu sounds,
+	// 0x007fb2f0); helpVoiceVolume (+0x100, the page's VoiceOverVolume) to
+	// group 2 (Sound/VoiceMessages.con's voice messages, 0x004d8f00). The
+	// VOIP values go to Bf2VoipClient directly, not through groups.
 	const auto applySettings = [&] {
 		if (!session.menuBindings) {
 			return;
@@ -1302,9 +1316,13 @@ int runGame(Options& options, Session& session)
 		if (!controls.maps().empty() && !controlsFile().empty()) {
 			std::ofstream(controlsFile()) << controls.script();
 		}
-		sounds.setVolumeForGroup(3, static_cast<float>(settings.setting("AudioSettings.EffectsVolume", 1)));
-		sounds.setVolumeForGroup(2, static_cast<float>(settings.setting("AudioSettings.MusicVolume", 1)));
-		sounds.setVolumeForGroup(4, static_cast<float>(settings.setting("AudioSettings.VoiceOverVolume", 1)));
+		const auto effects = static_cast<float>(settings.setting("AudioSettings.EffectsVolume", 1));
+		sounds.setMasterVolume(1);
+		for (const int group : {0, 4, 3}) {
+			sounds.setVolumeForGroup(group, effects);
+		}
+		sounds.setVolumeForGroup(1, static_cast<float>(settings.setting("AudioSettings.MusicVolume", 1)));
+		sounds.setVolumeForGroup(2, static_cast<float>(settings.setting("AudioSettings.VoiceOverVolume", 1)));
 #if BF2142_HAS_RENDERER
 		int width = 0, height = 0;
 		const std::string resolution = settings.text("VideoSettings.Resolution");
@@ -1459,9 +1477,8 @@ int runGame(Options& options, Session& session)
 			options.bots);
 	}
 	// A game on a server: connect, answer the challenge, and wait for the
-	// server's map list; its level (the browser's, else the list's first:
-	// provisional, the current map's index is not decoded) loads here as
-	// for a local game, and the server's objects come in as ghosts.
+	// server's level block (data block 2); that level loads here as for a
+	// local game, and the server's objects come in as ghosts.
 	if (!options.connect.empty() && !session.client) {
 		const size_t colon = options.connect.rfind(':');
 		const std::string host = options.connect.substr(0, colon);
@@ -1711,6 +1728,8 @@ int runGame(Options& options, Session& session)
 		// Start the round: spawners take their control points' teams and
 		// put their vehicles out on the first tick.
 		game::GameWorld round(templates, objects);
+		// The bots see as far as the level's fog lets them (AIDLL 0x10056b20).
+		botSettings.levelFog = lights.fogStartEndAndBase;
 		game::BotManager bots(round, botSettings);
 		round.unlockAllByDefault = options.unlockAll;
 		if (heightmaps.hasSea()) {
@@ -1752,16 +1771,26 @@ int runGame(Options& options, Session& session)
 		}
 		bindMethod(console, "Commander.satellite", ConsoleAccess::Anyone,
 			[&] { round.commanderAction(myTeam(), Ability::Satellite, 0, 0); });
-		// sendOrder <type> <1>: order types as GameWorld::OrderType (1 move,
-		// 2 attack, 3 defend...; provisional).
-		bindMethod(console, "Commander.sendOrder", ConsoleAccess::Anyone, [&](int type, int) {
-			armedOrder = static_cast<game::GameWorld::OrderType>(std::clamp(type, 1, 6));
+		// sendOrder <kind> <add>: the order kind (0..3 move, attack, defend,
+		// repair from the issue-order menu, 4..7 the same placed on the map,
+		// 10 or more drops it), sent where the map is clicked next. Both the
+		// squad leader's and the commander's run the same handler
+		// (0x00770889 → 0x007d6ab0). The commander's goes to the squad whose
+		// leader is nearest the click (the screen's squad selection is not
+		// drawn); the squad leader's to his own squad.
+		bool leaderOrder = false;
+		const auto armOrder = [&](int kind, bool leader) {
+			const game::GameWorld::OrderType type = game::GameWorld::orderTypeFromKind(kind);
+			armedOrder = type == game::GameWorld::OrderType::None ? std::nullopt : std::optional(type);
+			leaderOrder = leader;
 			armedTool.reset();
-		});
-		bindMethod(console, "Commander.issueOrder", ConsoleAccess::Anyone, [&] {
-			armedOrder = game::GameWorld::OrderType::Attack;
-			armedTool.reset();
-		});
+		};
+		bindMethod(console, "Commander.sendOrder", ConsoleAccess::Anyone, [&armOrder](int kind, int) { armOrder(kind, false); });
+		bindMethod(console, "SquadLeader.sendOrder", ConsoleAccess::Anyone, [&armOrder](int kind, int) { armOrder(kind, true); });
+		bindMethod(console, "Commander.issueOrder", ConsoleAccess::Anyone, [&armOrder] { armOrder(4, false); });
+		// The offer of command after applying (0x004c8c20 accepts it).
+		bindMethod(console, "Commander.accept", ConsoleAccess::Anyone,
+			[&](int accept) { round.answerCommanderOffer(round.localPlayer(), accept != 0); });
 		bindMethod(console, "Commander.commRoseAccept", ConsoleAccess::Anyone,
 			[&](int accept) { round.acceptOrder(round.localPlayer(), accept != 0); });
 		// A click on the map with a tool or order armed: used there.
@@ -1773,19 +1802,21 @@ int runGame(Options& options, Session& session)
 			if (armedTool) {
 				round.commanderAction(myTeam(), *armedTool, worldX, worldZ);
 			} else {
-				// The order goes to the nearest squad's leader's squad (provisional:
-				// the screen's squad list is not drawn yet).
-				int squad = 0;
-				float best = 1e30f;
-				for (const auto& player : round.playerList()) {
-					const float dx = player.position.x - worldX, dz = player.position.z - worldZ;
-					if (player.team == myTeam() && player.squadLeader && player.squad && dx * dx + dz * dz < best) {
-						best = dx * dx + dz * dz;
-						squad = player.squad;
+				if (leaderOrder) {
+					round.issueSquadLeaderOrder(round.localPlayer(), *armedOrder, worldX, worldZ);
+				} else {
+					int squad = 0;
+					float best = 1e30f;
+					for (const auto& player : round.playerList()) {
+						const float dx = player.position.x - worldX, dz = player.position.z - worldZ;
+						if (player.team == myTeam() && player.squadLeader && player.squad && dx * dx + dz * dz < best) {
+							best = dx * dx + dz * dz;
+							squad = player.squad;
+						}
 					}
-				}
-				if (squad) {
-					round.issueOrder(myTeam(), squad, *armedOrder, worldX, worldZ, round.localPlayer());
+					if (squad) {
+						round.issueOrder(myTeam(), squad, *armedOrder, worldX, worldZ, round.localPlayer());
+					}
 				}
 			}
 			armedTool.reset();
@@ -1868,7 +1899,26 @@ int runGame(Options& options, Session& session)
 			});
 		}
 		std::map<uint16_t, uint32_t> ghostObjects; // ghost -> object
+		struct TimedCommand {
+			float at;
+			std::string command;
+		};
+		std::vector<TimedCommand> timedConsole;
+		const auto runTimedConsole = [&] {
+			for (auto it = timedConsole.begin(); it != timedConsole.end();) {
+				if (gameLogic.elapsed < it->at) {
+					++it;
+					continue;
+				}
+				std::string output;
+				console.execute(it->command, output, ConsoleAccess::Anyone);
+				std::printf("console at %.0f s: %s%s%s\n", gameLogic.elapsed, it->command.c_str(), output.empty() ? "" : " -> ",
+					output.c_str());
+				it = timedConsole.erase(it);
+			}
+		};
 		const auto remoteStep = [&] {
+			runTimedConsole();
 			if (!session.client) {
 				return;
 			}
@@ -1920,7 +1970,7 @@ int runGame(Options& options, Session& session)
 					session.voice->handleEvent(event, client.world().localPlayer());
 				}
 				if (const net::RemotePlayer* me = client.world().player(client.world().localPlayer())) {
-					session.voice->setRole(false, me->squadLeader, me->squad); // provisional: no commander flag yet
+					session.voice->setRole(me->commander, me->squadLeader, me->squad);
 				}
 			}
 			// A new level block: the server changed maps (the connection stays).
@@ -2187,7 +2237,15 @@ int runGame(Options& options, Session& session)
 				std::fprintf(stderr, "no spawn point for team %d\n", options.playTeam);
 			}
 		}
+		// --console "<command>" runs now, "<seconds>:<command>" once the round
+		// is that old.
 		for (const std::string& command : options.console) {
+			const size_t colon = command.find(':');
+			if (colon != std::string::npos && colon > 0 &&
+				command.find_first_not_of("0123456789.", 0) == colon) {
+				timedConsole.push_back({static_cast<float>(std::atof(command.c_str())), command.substr(colon + 1)});
+				continue;
+			}
 			std::string output;
 			console.execute(command, output, ConsoleAccess::Anyone);
 			std::printf("console: %s%s%s\n", command.c_str(), output.empty() ? "" : " -> ", output.c_str());
@@ -2421,6 +2479,15 @@ int runGame(Options& options, Session& session)
 					round.gunAim(vehicle->id(), me.seat, gunYaw, gunPitch);
 					view = {vehicle->position().x, vehicle->position().y, vehicle->position().z, vehicle->rotation().x + gunYaw};
 					view.driving = true;
+					// Its category (VCNoVehicleCategory: the root vehicle's).
+					static const char* kCategories[] = {"VCLand", "VCSea", "VCAir", "VCHelicopter"};
+					const auto& settings = vehicle->objectTemplate()->settings();
+					const auto category = settings.find("vehicleCategory");
+					for (int i = 0; i < 4 && category != settings.end(); ++i) {
+						if (category->second == kCategories[i]) {
+							view.vehicleCategory = i;
+						}
+					}
 				}
 				return true;
 			};
