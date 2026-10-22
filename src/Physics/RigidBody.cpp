@@ -1,0 +1,256 @@
+#include "RigidBody.h"
+
+#include <algorithm>
+#include <cmath>
+
+namespace dice::hfe::physics {
+
+namespace {
+
+// The original zeroes components below 1e-6 after most updates.
+float flush(float v) { return std::fabs(v) < 1e-6f ? 0.0f : v; }
+Vec3 flush(const Vec3& v) { return {flush(v.x), flush(v.y), flush(v.z)}; }
+
+// Scales `v` down to `limit` when longer (0x005f1310).
+Vec3 clampLength(const Vec3& v, float limit)
+{
+	const float squared = lengthSquared(v);
+	if (squared > limit * limit && squared > 0) {
+		return v * (limit / std::sqrt(squared));
+	}
+	return v;
+}
+
+// The projection of `v` onto `axis` (0x005a2ba0).
+Vec3 project(const Vec3& v, const Vec3& axis)
+{
+	const float squared = lengthSquared(axis);
+	if (squared <= 1.1920929e-07f) {
+		return {};
+	}
+	return axis * (dot(v, axis) / squared);
+}
+
+} // namespace
+
+float dot(const Vec3& a, const Vec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+Vec3 cross(const Vec3& a, const Vec3& b)
+{
+	return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+float lengthSquared(const Vec3& v) { return dot(v, v); }
+
+Vec3 Mat3::transform(const Vec3& v) const { return rows[0] * v.x + rows[1] * v.y + rows[2] * v.z; }
+
+Mat3 Mat3::operator*(const Mat3& o) const
+{
+	Mat3 r;
+	for (int i = 0; i < 3; ++i) {
+		r.rows[static_cast<size_t>(i)] = o.transform(rows[static_cast<size_t>(i)]);
+	}
+	return r;
+}
+
+// Rotation about a unit axis for row vectors (v * M).
+Mat3 Mat3::axisAngle(const Vec3& a, float radians)
+{
+	const float c = std::cos(radians), s = std::sin(radians), t = 1 - c;
+	Mat3 m;
+	m.rows[0] = {t * a.x * a.x + c, t * a.x * a.y + s * a.z, t * a.x * a.z - s * a.y};
+	m.rows[1] = {t * a.x * a.y - s * a.z, t * a.y * a.y + c, t * a.y * a.z + s * a.x};
+	m.rows[2] = {t * a.x * a.z + s * a.y, t * a.y * a.z - s * a.x, t * a.z * a.z + c};
+	return m;
+}
+
+Mat3 Mat3::fromYawPitchRoll(const Vec3& degrees)
+{
+	constexpr float toRadians = 3.14159265358979f / 180.0f;
+	const float cy = std::cos(degrees.x * toRadians), sy = std::sin(degrees.x * toRadians);
+	const float cp = std::cos(degrees.y * toRadians), sp = std::sin(degrees.y * toRadians);
+	const float cr = std::cos(degrees.z * toRadians), sr = std::sin(degrees.z * toRadians);
+	Mat3 m;
+	m.rows[0] = {cr * cy + sr * sp * sy, sr * cp, -cr * sy + sr * sp * cy};
+	m.rows[1] = {-sr * cy + cr * sp * sy, cr * cp, sr * sy + cr * sp * cy};
+	m.rows[2] = {cp * sy, -sp, cp * cy};
+	return m;
+}
+
+Vec3 Mat3::yawPitchRoll() const
+{
+	constexpr float toDegrees = 180.0f / 3.14159265358979f;
+	const float sinPitch = std::clamp(-rows[2].y, -1.0f, 1.0f);
+	return {std::atan2(rows[2].x, rows[2].z) * toDegrees, std::asin(sinPitch) * toDegrees,
+		std::atan2(rows[0].y, rows[1].y) * toDegrees};
+}
+
+void RigidBody::setBounds(const Vec3& h)
+{
+	const float x = h.x * h.x, y = h.y * h.y, z = h.z * h.z;
+	inverseBoxInertia = {3.0f / std::max(z + y, 1e-6f), 3.0f / std::max(z + x, 1e-6f), 3.0f / std::max(y + x, 1e-6f)};
+}
+
+// 0x006c59e0.
+void RigidBody::addVelocity(const Vec3& change)
+{
+	velocity = clampLength(flush(velocity + change), tuning::kMaxSpeed);
+}
+
+// 0x006c95b0.
+void RigidBody::addAngularVelocity(const Vec3& change) { angularVelocity = flush(angularVelocity + change); }
+
+// 0x006c8ca0.
+void RigidBody::applyImpulse(const Vec3& offset, const Vec3& change)
+{
+	impulse = flush(impulse + change);
+	const Vec3 arm = offset - rotation.transform(centerOfMass);
+	angularImpulse = flush(angularImpulse + cross(arm, change));
+}
+
+void RigidBody::addForce(const Vec3& offset, const Vec3& force)
+{
+	acceleration += force;
+	torque += cross(offset - rotation.transform(centerOfMass), force);
+}
+
+void RigidBody::addFriction(const Vec3& worldPoint, const Vec3& force)
+{
+	const float n = static_cast<float>(frictionCount);
+	const float mean = 1.0f / static_cast<float>(frictionCount + 1);
+	frictionAcceleration = (frictionAcceleration * n + force) * mean;
+	frictionTorque = (frictionTorque * n + cross(worldPoint - worldCenterOfMass(), force)) * mean;
+	++frictionCount;
+}
+
+Vec3 RigidBody::pointVelocity(const Vec3& worldPoint) const
+{
+	return velocity + cross(angularVelocity, worldPoint - worldCenterOfMass());
+}
+
+void RigidBody::stepAngular(float seconds)
+{
+	torque = clampLength(torque, tuning::kMaxAcceleration);
+	frictionTorque = clampLength(frictionTorque, tuning::kMaxAcceleration);
+	// Per body axis: the impulse's part along it, over the inertia.
+	const auto perAxis = [this](const Vec3& v) {
+		Vec3 result;
+		const float scale[3] = {inverseBoxInertia.x / (tuning::kInertiaScale * inertiaModifier.x),
+			inverseBoxInertia.y / (tuning::kInertiaScale * inertiaModifier.y),
+			inverseBoxInertia.z / (tuning::kInertiaScale * inertiaModifier.z)};
+		for (int i = 2; i >= 0; --i) {
+			result += project(v, rotation.rows[static_cast<size_t>(i)]) * scale[i];
+		}
+		return result;
+	};
+	addAngularVelocity(perAxis(angularImpulse));
+	addAngularVelocity(perAxis(torque + frictionTorque) * seconds);
+	const Vec3 previous = angularVelocity;
+	angularVelocity = angularVelocity * tuning::kAngularDamping;
+	// Turn by the tick's average angular velocity about the centre of mass.
+	const Vec3 average = flush((previous + angularVelocity) * 0.5f);
+	const float speedSquared = lengthSquared(average);
+	if (speedSquared > 1.0000001e-06f) {
+		const float speed = std::sqrt(speedSquared);
+		const Vec3 axis = average * (1.0f / speed);
+		const Vec3 pivot = worldCenterOfMass();
+		rotation = rotation * Mat3::axisAngle(axis, speed * seconds);
+		position = pivot - rotation.transform(centerOfMass);
+	}
+	torque = {};
+	angularImpulse = {};
+	frictionTorque = {};
+}
+
+void RigidBody::stepLinear(float seconds)
+{
+	acceleration = clampLength(acceleration, tuning::kMaxAcceleration);
+	frictionAcceleration = clampLength(frictionAcceleration, tuning::kMaxAcceleration);
+	impulse.y *= tuning::kVerticalImpulseScale;
+	addVelocity(impulse);
+	const Vec3 previous = velocity;
+	addVelocity((frictionAcceleration + acceleration) * seconds);
+	velocity = flush(velocity * tuning::kLinearDamping);
+	const Vec3 average = flush((previous + velocity) * 0.5f);
+	position += average * seconds;
+	acceleration = {};
+	impulse = {};
+	frictionAcceleration = {};
+	frictionCount = 0;
+}
+
+void RigidBody::step(float seconds, float gravity)
+{
+	stepAngular(seconds);
+	stepLinear(seconds);
+	// Gravity acts in the next tick.
+	acceleration.y += gravity * gravityModifier;
+}
+
+void ContactResponse::addContact(const Vec3& offset, const Vec3& pointVelocity, const Vec3& normal, float depth,
+	const ContactMaterial& material)
+{
+	m_contacts.push_back({offset, normal, -pointVelocity, -dot(pointVelocity, normal), material.elasticity,
+		material.friction});
+	// The push out keeps the largest magnitude per axis (0x006b6bd0).
+	const Vec3 push = normal * -depth;
+	const auto larger = [](float a, float b) { return std::fabs(b) > std::fabs(a) ? b : a; };
+	m_pushOut = {larger(m_pushOut.x, push.x), larger(m_pushOut.y, push.y), larger(m_pushOut.z, push.z)};
+}
+
+void ContactResponse::solve(RigidBody& body)
+{
+	if (m_contacts.empty() && lengthSquared(m_pushOut) == 0) {
+		return;
+	}
+	body.position += m_pushOut;
+	// Contacts share the response by how fast they approach.
+	float total = 0;
+	for (const Contact& c : m_contacts) {
+		total += std::max(c.approachSpeed, 0.0f);
+	}
+	const float inverse = total > 0.0001f ? 1.0f / total : total;
+	for (const Contact& c : m_contacts) {
+		const float weight = std::max(c.approachSpeed, 0.0f) * inverse;
+		const Vec3 weighted = c.awayVelocity * weight;
+		const float normalPart = weight * c.approachSpeed;
+		// Friction along the sliding direction, less when hitting head on.
+		Vec3 sliding = weighted - c.normal * normalPart;
+		float friction = c.friction;
+		const float slidingSquared = lengthSquared(sliding);
+		if (slidingSquared <= 0.001f) {
+			sliding = {};
+		} else {
+			sliding = sliding * (1.0f / std::sqrt(slidingSquared));
+			const float length = std::sqrt(std::max(lengthSquared(weighted), 1e-12f));
+			const float cosine = dot(weighted * (1.0f / length), c.normal);
+			friction = (1.0f - cosine * cosine * cosine) * friction * tuning::kFrictionScale;
+		}
+		const float strength = (c.elasticity * tuning::kElasticityScale + 1.0f) * normalPart;
+		const Vec3 change = clampLength((c.normal + sliding * friction) * strength, tuning::kMaxContactImpulse);
+		body.applyImpulse(c.offset, change);
+	}
+	m_contacts.clear();
+	m_pushOut = {};
+}
+
+void collideWithGround(RigidBody& body, ContactResponse& response, const std::vector<Vec3>& points,
+	const Ground& ground, const ContactMaterial& material)
+{
+	// An object below the ground is lifted onto it first.
+	const float floor = ground.height(body.position.x, body.position.z);
+	if (body.position.y < floor) {
+		body.position.y = floor;
+	}
+	for (const Vec3& point : points) {
+		const Vec3 world = body.position + body.rotation.transform(point);
+		Vec3 normal {0, 1, 0};
+		const float groundHeight = ground.heightAndNormal(world.x, world.z, normal);
+		const float depth = world.y - groundHeight;
+		// Few-point objects only take contacts deeper than the push so far.
+		if (depth < 0 && (points.size() > 3 || response.pushOut().y < -depth)) {
+			const Vec3 contactPoint {world.x, groundHeight, world.z};
+			response.addContact(contactPoint - body.position, body.pointVelocity(contactPoint), normal, depth, material);
+		}
+	}
+}
+
+} // namespace dice::hfe::physics
