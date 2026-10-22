@@ -530,11 +530,8 @@ void GameWorld::stepVehicleDamage(float seconds)
 		}
 		const world::ObjectTemplate& t = *object->objectTemplate();
 		if (body.empLevel > 0) {
-			body.empTime -= seconds;
-			if (body.empTime <= 0) {
-				--body.empLevel;
-				body.empTime = number(t, "armor.empLevelTime", 1.75f);
-			}
+			// 0x00652910: one step every empLevelTime (default 5 s).
+			body.empLevel = std::max(0.0f, body.empLevel - seconds / number(t, "armor.empLevelTime", 5));
 			body.vehicle->setInput({});
 		}
 		if (body.wreckTime >= 0) {
@@ -594,7 +591,16 @@ std::vector<GameWorld::VehicleInfo> GameWorld::vehicleList()
 		}
 		const bool driverFree = !layout.seats.empty() && (body.occupants.empty() || body.occupants[0] < 0);
 		list.push_back({body.object, body.body.position, body.body.rotation.yawPitchRoll().x, free, driverFree, !disabled(body),
-			body.body.velocity, body.body.angularVelocity, body.body.rotation.rows[2], body.body.rotation.rows[0]});
+			body.body.velocity, body.body.angularVelocity, body.body.rotation.rows[2], body.body.rotation.rows[0], {}, {}});
+		if (!body.points.empty()) {
+			physics::Vec3& lo = list.back().boxMin;
+			physics::Vec3& hi = list.back().boxMax;
+			lo = hi = body.points.front();
+			for (const physics::Vec3& p : body.points) {
+				lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+				hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+			}
+		}
 	}
 	return list;
 }
@@ -628,26 +634,38 @@ std::vector<GameWorld::WeaponAmmo> GameWorld::weaponAmmo(int id) const
 
 int GameWorld::empLevel(uint32_t vehicle) const
 {
+	for (const Drone& drone : m_drones) {
+		if (drone.object == vehicle) {
+			return static_cast<int>(std::ceil(drone.empLevel));
+		}
+	}
 	for (const Body& body : m_bodies) {
 		if (body.object == vehicle) {
-			return body.empLevel;
+			return static_cast<int>(std::ceil(body.empLevel)); // 0x00652a00
 		}
 	}
 	return 0;
 }
 
-// A shock that reaches downed soldiers (damageMandownSoldiers): a
-// teammate's revives, an enemy's finishes the body off.
-void GameWorld::shockDowned(Player& victim, float amount, uint32_t projectileMaterial, uint32_t surfaceMaterial, int attacker)
+// A shock that reaches downed soldiers (damageMandownSoldiers): one with
+// a ResurrectCollisionComp (collision.resurrectDamage, the
+// defibrillator's) revives a teammate when its resurrect damage times the
+// material cell is above 0 (0x004c1960); otherwise, and from an enemy, it
+// finishes the body off. (0x004c1960's man-down branch reads no team; the
+// team test is the rewrite's, as the caller's 0x005a3bd0 side of it is not
+// traced.)
+void GameWorld::shockDowned(Player& victim, const ProjectileSettings& shock, float amount, uint32_t surfaceMaterial,
+	int attacker)
 {
-	const float mod = m_materials ? m_materials->damageMod(projectileMaterial, surfaceMaterial) : 1.0f;
-	if (amount * mod <= 0) {
+	const float mod = m_materials ? m_materials->damageMod(static_cast<uint32_t>(shock.material), surfaceMaterial) : 1.0f;
+	Player* medic = findPlayer(attacker);
+	if (shock.resurrect && medic && medic->team == victim.team) {
+		if (shock.resurrectDamage * mod > 0) {
+			revive(victim, medic, shock.restoreHitPoints);
+		}
 		return;
 	}
-	Player* medic = findPlayer(attacker);
-	if (medic && medic->team == victim.team) {
-		revive(victim, medic);
-	} else {
+	if (amount * mod > 0) {
 		finishDeath(victim);
 	}
 }
@@ -732,11 +750,52 @@ physics::Vec3 transformPoint(const anim::Matrix& m, const physics::Vec3& v)
 
 } // namespace
 
-// An explosion (provisional: the engine's code for it is not decompiled):
-// soldiers on foot and armoured bodies within the radius take the
-// explosion damage falling off linearly with the distance (to the nearest
-// of a soldier's capsules, to a body's centre), times the cell of the
-// explosion's material and their armour's default material.
+// An explosion: the projectile's detonation hands it to the server game
+// logic (serverGameLogic vtable 0x009294e8), slot 0xe8 (0x004ba7a0 ->
+// 0x005a9090) for a blast and slot 0xec (0x004ba830 -> 0x005a7ab0) for an
+// EMP (detonation.isEMPWeapon, read at 0x005e9300). Both do nothing but
+// the end effect for explosionMaterial -1 (the detonation's default).
+//
+// A blast (0x005a9090) finds the objects within explosionRadius:
+// - Soldiers (0x005a7530): three of the skeleton's bones are looked for
+//   from the blast, the head (47) worth 0.5, bone 11 0.35 and bone 3
+//   0.15 (table 0x00a01750); a bone is seen when the ray to it is clear,
+//   or one from a point min(0.02 radius, 0.5) m beside the blast (below,
+//   left, right, above; itself in sight of the blast). The sum is the
+//   soldier's share. A directional charge reaches only soldiers in its
+//   cone (0x005a6370).
+// - Other armoured objects take a share of 1, measured to their centre.
+// Damage (0x005a8900) = explosionDamage x falloff x share, x the cell of
+// the explosion's material against the target's material in damage();
+// 0.1 or less is dropped. The distance is the shorter of the two to the
+// object's position (the soldier's physics origin, a metre over its
+// feet), its height difference times explosionYMod; the falloff
+// (0x005a61a0) is 1 within 0.2 of the radius (0x00a6aab4) and falls
+// linearly to 0 at the radius.
+// The push (0x005a66e0): explosionForce x falloff x share x the armour's
+// explosionForceMod (armor.explosionForceMod, default 1 at the armor
+// template's 0x10c; the soldiers' 25), at most explosionForceMax (0x110,
+// default 10; the soldiers' 1000); a soldier's is then times 0.8 + 0.005
+// x (rand % 100), and its speed counts against the maximum. Its way is
+// the soldier's axis (right, up or forward) most along the line from the
+// blast plus that line, made a unit, with 5 (0x00a6aac0) added upwards.
+// 0x005ee4d0 keeps a soldier's push for 0.5 s for its ragdoll (times
+// rd_expForceMod).
+// Not applied here: the ray test for other objects (blocked: half the
+// damage, or none when the object's vtable 0x90 value, not identified,
+// is below a fifth of the radius), a bone hidden only by an object this
+// blast destroys counting half, the 0.1 for airborne soldiers (physics
+// node 0x144) and the push on vehicles' physics (node 0xa4).
+bool GameWorld::detonate(const std::string& projectileTemplate, const physics::Vec3& at, int attacker)
+{
+	const ProjectileSettings* settings = projectileFor(projectileTemplate);
+	if (!settings || !settings->detonates) {
+		return false;
+	}
+	explode(at, *settings, attacker);
+	return true;
+}
+
 void GameWorld::explode(const physics::Vec3& at, const ProjectileSettings& settings, int attacker, float facing)
 {
 	// A directional charge (claymore-like mines) reaches only its cone.
@@ -750,110 +809,235 @@ void GameWorld::explode(const physics::Vec3& at, const ProjectileSettings& setti
 	if (!settings.endEffect.empty()) {
 		m_effects.spawn(settings.endEffect, at, physics::Mat3 {});
 	}
-	const float radius = settings.explosionRadius;
-	if (settings.emp) {
-		// EMP: vehicles that take it shut down (armor.empDamageNumStep steps
-		// of armor.empLevelTime); soldiers are unharmed.
-		for (Body& body : m_bodies) {
-			const world::Object* object = m_objects.find(body.object);
-			const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
-			if (!t || !body.vehicle || integer(*t, "armor.takesEmpDamage", 0) == 0
-				|| physics::lengthSquared(body.body.position - at) > radius * radius) {
-				continue;
-			}
-			body.empLevel = std::max(body.empLevel, integer(*t, "armor.empDamageNumStep", 1));
-			body.empTime = number(*t, "armor.empLevelTime", 1.75f);
-		}
-		// Drones that take it (armor.takesEmpDamage) stop pulsing and
-		// shooting for as long (provisional: what EMP does to a drone is
-		// not traced; its ForceObject keeps it in the air).
-		for (Drone& drone : m_drones) {
-			const world::Object* object = m_objects.find(drone.object);
-			const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
-			if (t && integer(*t, "armor.takesEmpDamage", 0) != 0 && physics::lengthSquared(drone.position - at) <= radius * radius) {
-				drone.empTime = integer(*t, "armor.empDamageNumStep", 1) * number(*t, "armor.empLevelTime", 1.75f);
-			}
-		}
-		// An EMP blast with damage of its own (the commander's orbital
-		// strike: 1666 over 15 m) hurts as well; the EMP grenade's has none.
-		if (settings.explosionDamage <= 0) {
-			return;
-		}
+	if (settings.explosionMaterial < 0) {
+		return;
 	}
-	const auto falloff = [&](float distance) { return settings.explosionDamage * std::max(0.0f, 1 - distance / radius); };
-	std::vector<std::pair<uint32_t, float>> hits;
+	const float radius = settings.explosionRadius;
+	const float yMod = settings.explosionYMod;
+	const auto distanceTo = [&](const physics::Vec3& p) {
+		const physics::Vec3 d = p - at;
+		return std::sqrt(d.x * d.x + d.y * yMod * d.y * yMod + d.z * d.z);
+	};
+	if (settings.emp) {
+		empBlast(at, settings, distanceTo);
+		return;
+	}
+	const auto falloff = [&](float distance) { return explosionFalloff(radius, distance); };
+	struct Hit {
+		uint32_t object;
+		float amount;
+	};
+	std::vector<Hit> hits;
 	for (const auto& owned : m_players) {
-		const Player& target = *owned;
-		if (!target.alive || target.vehicle || !inCone(target.body.position)) {
+		Player& target = *owned;
+		const world::Object* soldier = m_objects.find(target.object);
+		if (!target.alive || target.vehicle || !soldier || !inCone(target.body.position)) {
 			continue;
 		}
-		float nearest = radius;
-		for (const Capsule& capsule : soldierCapsules(target.object)) {
-			float distanceSquared = 0;
-			closestApproach(at, at, capsule.a, capsule.b, distanceSquared);
-			nearest = std::min(nearest, std::max(0.0f, std::sqrt(distanceSquared) - capsule.radius));
+		const physics::Vec3 origin {soldier->position().x, soldier->position().y + 1, soldier->position().z};
+		const float distance = distanceTo(origin);
+		if (distance >= radius) {
+			continue;
 		}
-		if (nearest < radius) {
-			hits.emplace_back(target.object, falloff(nearest));
+		const float share = blastShare(at, target, std::min(radius * 0.02f, 0.5f));
+		if (share <= 0) {
+			continue;
+		}
+		const float amount = falloff(distance) * share * settings.explosionDamage;
+		if (amount > 0.1f) {
+			hits.push_back({target.object, amount});
+		}
+		// The push, kept for the ragdoll.
+		const world::ObjectTemplate* t = soldier->objectTemplate();
+		const float forceMod = t ? number(*t, "armor.explosionForceMod", 1) : 1;
+		const float forceMax = t ? number(*t, "armor.explosionForceMax", 10) : 10;
+		float force = std::min(forceMax, falloff(distance) * forceMod * settings.explosionForce * share);
+		force *= 0.8f + static_cast<float>(m_random.next() % 100) * 0.005f;
+		const float speed = std::sqrt(physics::lengthSquared(target.body.velocity));
+		if (forceMax < force + speed) {
+			force = forceMax - speed;
+		}
+		physics::Vec3 line = origin - at;
+		line.y *= yMod;
+		const float yaw = target.body.yawDegrees * 3.14159265f / 180.0f;
+		const physics::Vec3 axes[3] = {{std::cos(yaw), 0, -std::sin(yaw)}, {0, 1, 0}, {std::sin(yaw), 0, std::cos(yaw)}};
+		physics::Vec3 way = axes[1];
+		float best = -1;
+		for (const physics::Vec3& axis : axes) {
+			const float along = physics::dot(axis, line);
+			if (std::fabs(along) > best) {
+				best = std::fabs(along);
+				way = along < 0 ? axis * -1.0f : axis;
+			}
+		}
+		const float length = std::sqrt(physics::lengthSquared(line));
+		line = length > 0 ? line * (1 / length) : physics::Vec3 {};
+		line.y += 5; // 0x00a6aac0
+		way = way + line;
+		way = way * (1 / std::sqrt(physics::lengthSquared(way)));
+		physics::Vec3 push = way * force;
+		for (float* c : {&push.x, &push.y, &push.z}) {
+			if (std::fabs(*c) < 0.001f) {
+				*c = 0;
+			}
+		}
+		if (physics::lengthSquared(push) >= 0.01f * 0.01f) {
+			target.ragDollForce = push;
+			target.ragDollForceAt = m_time;
 		}
 	}
 	for (const Body& body : m_bodies) {
-		const float distance = std::sqrt(physics::lengthSquared(body.body.position - at));
+		const float distance = distanceTo(body.body.position);
 		if (distance < radius && hitPoints(body.object) >= 0 && inCone(body.body.position)) {
-			hits.emplace_back(body.object, falloff(distance));
+			hits.push_back({body.object, falloff(distance) * settings.explosionDamage});
 		}
 	}
 	for (const Drone& drone : m_drones) {
 		if (findBody(drone.object)) {
 			continue; // counted with the bodies
 		}
-		const float distance = std::sqrt(physics::lengthSquared(drone.position - at));
+		const float distance = distanceTo(drone.position);
 		if (distance < radius && inCone(drone.position)) {
-			hits.emplace_back(drone.object, falloff(distance));
+			hits.push_back({drone.object, falloff(distance) * settings.explosionDamage});
 		}
 	}
 	// The commander's assets (static, without bodies): by their position.
 	for (const CommanderAsset& asset : m_assets) {
 		const world::Object* object = m_objects.find(asset.object);
 		if (!object || findBody(asset.object)
-			|| std::any_of(hits.begin(), hits.end(), [&](const auto& hit) { return hit.first == asset.object; })) {
+			|| std::any_of(hits.begin(), hits.end(), [&](const Hit& hit) { return hit.object == asset.object; })) {
 			continue;
 		}
 		const physics::Vec3 p {object->position().x, object->position().y, object->position().z};
-		const float distance = std::sqrt(physics::lengthSquared(p - at));
+		const float distance = distanceTo(p);
 		if (distance < radius && hitPoints(asset.object) > 0 && inCone(p)) {
-			hits.emplace_back(asset.object, falloff(distance));
+			hits.push_back({asset.object, falloff(distance) * settings.explosionDamage});
 		}
 	}
-	// Soldiers keep the blast's push for their ragdoll (0x005a66e0 hands it
-	// to 0x005ee4d0, times rd_expForceMod). Provisional: the push's size
-	// (the blast's force falling off with distance) is not traced; 10 at
-	// the centre, along the way from the blast and a little up.
-	for (const auto& owned : m_players) {
-		Player& target = *owned;
-		if (!target.alive || target.vehicle || !std::any_of(hits.begin(), hits.end(), [&](const auto& hit) {
-				return hit.first == target.object;
-			})) {
+	for (const Hit& hit : hits) {
+		if (hit.amount <= 0.1f) {
 			continue;
 		}
-		physics::Vec3 away = target.body.position - at;
-		const float distance = std::sqrt(physics::lengthSquared(away));
-		away = distance > 1e-3f ? away * (1 / distance) : physics::Vec3 {0, 1, 0};
-		away.y += 0.5f;
-		target.ragDollForce = away * (10.0f * std::max(0.0f, 1 - distance / std::max(radius, 0.01f)));
-	}
-	for (const auto& [object, amount] : hits) {
-		const world::Object* target = m_objects.find(object);
+		const world::Object* target = m_objects.find(hit.object);
 		const world::ObjectTemplate* t = target ? target->objectTemplate() : nullptr;
 		const uint32_t material = t ? static_cast<uint32_t>(integer(*t, "armor.defaultMaterial", 0)) : 0;
-		damage(object, amount, static_cast<uint32_t>(settings.explosionMaterial), material, attacker);
+		damage(hit.object, hit.amount, static_cast<uint32_t>(settings.explosionMaterial), material, attacker);
 	}
 }
 
-// Seekers (provisional rates and speeds where the settings are unclear):
-// a magnet locks onto the closest enemy vehicle in reach once armed and
-// heads straight for it at its chase speed; an aimed missile turns
-// towards where its shooter looks, at most its follow rates.
+// How much of a soldier a blast reaches (0x005a7530): the head (bone 47)
+// 0.5, bone 11 0.35 and bone 3 0.15 (0x00a01750), each when a ray from
+// the blast reaches it, or one from a point `beside` metres off the blast
+// across the line to it (below, then left, right, then above when the
+// point below isn't in the blast's sight; each point used only when the
+// blast sees it). Without a skeleton the bones sit at 1.7, 1.1 and 0.1 m
+// over the feet.
+float GameWorld::blastShare(const physics::Vec3& at, const Player& target, float beside) const
+{
+	const world::Object* soldier = m_objects.find(target.object);
+	if (!soldier) {
+		return 0;
+	}
+	constexpr int kBones[3] = {47, 11, 3};
+	constexpr float kWeights[3] = {0.5f, 0.35f, 0.15f};
+	constexpr float kHeights[3] = {1.7f, 1.1f, 0.1f};
+	const physics::Vec3 feet {soldier->position().x, soldier->position().y, soldier->position().z};
+	const physics::Vec3 origin = feet + physics::Vec3 {0, 1, 0};
+	physics::Vec3 line = origin - at;
+	const float length = std::sqrt(physics::lengthSquared(line));
+	line = length > 0 ? line * (1 / length) : physics::Vec3 {0, 0, 1};
+	const physics::Vec3 side = physics::Vec3 {-line.z, 0, line.x} * beside;
+	const physics::Vec3 below = physics::Vec3 {line.x * line.y, -line.z * line.z - line.x * line.x, line.y * line.z} * beside;
+	// Which of the points beside the blast it can see (asked once).
+	int seen[4] = {-1, -1, -1, -1};
+	const physics::Vec3 points[4] = {at + below, at - side, at + side, at - below};
+	const auto usable = [&](int i) {
+		if (seen[i] < 0) {
+			seen[i] = lineOfSight(at, points[i], target.object) ? 1 : 0;
+		}
+		return seen[i] == 1;
+	};
+	float share = 0;
+	for (int i = 0; i < 3; ++i) {
+		physics::Vec3 bone = feet + physics::Vec3 {0, kHeights[i], 0};
+		const size_t node = static_cast<size_t>(kBones[i]);
+		if (node < target.worldPose.size()) {
+			bone = modelToWorld(*soldier, transformPoint(target.worldPose[node], {0, 0, 0}));
+		}
+		bool visible = lineOfSight(at, bone, target.object);
+		for (int j = 0; j < 4 && !visible; ++j) {
+			if (j == 3 && usable(0)) {
+				break; // the point above only when the one below is out of sight
+			}
+			visible = usable(j) && lineOfSight(points[j], bone, target.object);
+		}
+		if (visible) {
+			share += kWeights[i];
+		}
+	}
+	return share;
+}
+
+// An EMP (0x005a7ab0, per object 0x005a6500): every armoured object
+// within explosionRadius, measured to its centre with the height times
+// explosionYMod, takes explosionDamage x (1 - distance / radius) of EMP
+// damage, or x armor.empDamageIgnoreRadiusModifier (default 0.1) with
+// armor.empDamageIgnoreRadius; 0.1 or less is dropped. Nothing is hurt.
+// The armour (0x00652980) turns it into steps: level = min(empDamageNumStep,
+// ceil(level + amount / empDamageStepSize)), the level falling by one
+// every empLevelTime seconds (0x00652910; the defaults at the armor
+// template's 0x180-0x188: 5 s, 120, 3 steps); its level is that, rounded
+// up (0x00652a00). Only objects with armor.takesEmpDamage feel it.
+void GameWorld::empBlast(const physics::Vec3& at, const ProjectileSettings& settings,
+	const std::function<float(const physics::Vec3&)>& distanceTo)
+{
+	const float radius = settings.explosionRadius;
+	const auto amountFor = [&](const world::ObjectTemplate& t, const physics::Vec3& p) {
+		const float distance = distanceTo(p);
+		const bool ignoreRadius = integer(t, "armor.empDamageIgnoreRadius", 0) != 0;
+		if (distance >= radius && !ignoreRadius) {
+			return 0.0f;
+		}
+		const float factor = ignoreRadius ? number(t, "armor.empDamageIgnoreRadiusModifier", 0.1f) : 1 - distance / radius;
+		const float amount = factor * settings.explosionDamage;
+		return amount > 0.1f ? amount : 0.0f;
+	};
+	const auto add = [&](float& level, const world::ObjectTemplate& t, float amount) {
+		level = addEmpDamage(level, amount, number(t, "armor.empDamageStepSize", 120), integer(t, "armor.empDamageNumStep", 3));
+	};
+	for (Body& body : m_bodies) {
+		const world::Object* object = m_objects.find(body.object);
+		const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
+		if (!t || findDrone(body.object) || integer(*t, "armor.takesEmpDamage", 0) == 0) {
+			continue; // drones below
+		}
+		if (const float amount = amountFor(*t, body.body.position); amount > 0) {
+			add(body.empLevel, *t, amount);
+		}
+	}
+	for (Drone& drone : m_drones) {
+		const world::Object* object = m_objects.find(drone.object);
+		const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
+		if (!t || integer(*t, "armor.takesEmpDamage", 0) == 0) {
+			continue;
+		}
+		if (const float amount = amountFor(*t, drone.position); amount > 0) {
+			add(drone.empLevel, *t, amount);
+		}
+	}
+}
+
+// Seekers: a magnet locks onto the closest enemy vehicle in reach once
+// armed and heads straight for it at its chase speed; an aimed missile
+// turns towards where its shooter looks, at most its follow rates. Not
+// traced: the follow component's update (its template fields are known,
+// from the property accessors at 0x004f6500-0x004f7500: maxYaw 0x0c,
+// maxPitch 0x10, changeYaw 0x14, changePitch 0x18, minDist 0x1c,
+// predictionFactor 0x20, magneticBehaviour 0x24, useTargetSpeed 0x25,
+// speedModifier 0x28, armingSpeed 0x2c, followTime 0x30,
+// targetActivation 0x34, but no reader of them was found), so the chase
+// speed (armingSpeed x speedModifier) and the 2.5 m at which a magnet
+// goes off are this rewrite's.
 void GameWorld::steerSeeker(Projectile& p, float seconds)
 {
 	if (!p.settings || p.settings->seek == ProjectileSettings::Seek::None || p.age < p.settings->seekDelay) {
@@ -1025,8 +1209,12 @@ void GameWorld::stepProjectiles(float seconds)
 				hitObject = body.object;
 			}
 		}
-		// Soldiers on foot: their bones' capsules (provisional: the nearest
-		// approach of the path within a capsule counts as the hit).
+		// Soldiers on foot: their bones' capsules, the soldier template's
+		// setSkeletonCollisionBone records (bone, material, offset, radius,
+		// length; 0x004deb29 stores them through 0x008b7db0 as 0x54-byte
+		// entries). Not traced: the engine's test of a projectile against
+		// them; here the path's nearest approach within a capsule's radius
+		// counts as the hit.
 		for (const auto& owned : m_players) {
 			const Player& target = *owned;
 			const bool downed = target.manDown && p.settings->damageMandown;
@@ -1075,9 +1263,11 @@ void GameWorld::stepProjectiles(float seconds)
 			}
 		}
 		if (best <= 1.0f && p.settings->bounces) {
-			// A grenade: it rebounds, losing most of its speed (provisional:
-			// 0.4 of it, the part along the normal reversed), and lies still
-			// once slower than 1 m/s.
+			// A grenade: it rebounds, losing most of its speed, and lies
+			// still once slower than 1 m/s. Not traced: the 0.4 kept (the
+			// part along the normal reversed) and the 1 m/s stand in for
+			// the RotationalPoint/Mesh physics nodes' contact response,
+			// which isn't decoded.
 			const physics::Vec3 n = hit.normal;
 			const float along = physics::dot(p.velocity, n);
 			p.velocity = (p.velocity - n * (2 * along)) * 0.4f;
@@ -1097,7 +1287,7 @@ void GameWorld::stepProjectiles(float seconds)
 					++shooter->roundsHit; // bulletsGivingDamage
 				}
 				if (Player* downed = downedPlayer(hitObject)) {
-					shockDowned(*downed, amount, static_cast<uint32_t>(p.settings->material), hit.material, p.player);
+					shockDowned(*downed, *p.settings, amount, hit.material, p.player);
 				} else {
 					damage(hitObject, amount, static_cast<uint32_t>(p.settings->material), hit.material, p.player);
 				}
@@ -1420,8 +1610,12 @@ uint32_t GameWorld::squadBeacon(int team, int squad) const
 }
 
 // Spawning with the squad: at the beacon, or a metre behind a living
-// leader on foot (provisional: the engine's search for a free spot is not
-// rewritten).
+// leader on foot. In the engine the leader's soldier carries a
+// SquadLeaderSpawnPoint child (0x004c7f10 creates it, Common.con: a
+// SpawnPoint with setScatterSpawnPositions 1 and no offset), and members
+// spawn through it; the SpawnPoint's scattering of positions (its
+// template's sub-object +0x68, slot 0x60) is not traced, so the metre
+// behind is the rewrite's.
 bool GameWorld::spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& position, float& yaw)
 {
 	if (player.squad == 0 || (player.spawnChoice != kSpawnOnLeader && player.spawnChoice != kSpawnOnBeacon)) {
@@ -1875,9 +2069,17 @@ void GameWorld::finishDeath(Player& victim)
 	victim.object = 0;
 }
 
-// A medic's shock brings a downed soldier back where it lies, with a
-// quarter of its hit points (provisional), its kit and weapon again.
-void GameWorld::revive(Player& victim, Player* medic)
+// A medic's shock brings a downed soldier back where it lies (the
+// server's game logic 0x004c1960, reached from the projectile's
+// ResurrectCollisionComp 0x005e7a70 through 0x005a3bd0): the shock's
+// collision.resurrectDamage times the material cell goes to the downed
+// soldier's armour, which is up again; then its hit points are raised to
+// the shock's collision.restoreHP when lower (the defibrillator's: 120)
+// through the armour's setter (slot 0x38, 0x00655780 -> 0x00655460),
+// which clamps to the template's maxHitPoints (template +0xc8, getter
+// 0x00630370): a revived soldier is back at its full 100. Its kit and
+// weapon come back.
+void GameWorld::revive(Player& victim, Player* medic, float restoreHitPoints)
 {
 	if (!victim.manDown) {
 		return;
@@ -1891,13 +2093,15 @@ void GameWorld::revive(Player& victim, Player* medic)
 	victim.respawnIn = 0;
 	if (victim.ragDoll) {
 		// Up where the body lies (its middle particle, over the ground),
-		// facing along it; the soldier's system plays the get-up from the
-		// back or the stomach (the specialMoves reviveOnBack /
-		// reviveOnStomach triggers; provisional: the choice by the body's
-		// normal is not traced).
+		// facing from it towards the head. The soldier only leaves its
+		// ragdoll mode (0x005f0f20 with 0, from the soldier's update
+		// 0x0058d3xx once its armour is no longer man down): BF2142.exe
+		// never names the 3p system's reviveOnBack / reviveOnStomach (or
+		// specialMoves) triggers, and its named trigger lookups (0x008c0e70)
+		// are only the prone transitions (0x008b9840), so no get-up
+		// animation plays. The medic is heard saying "get_up" (radio
+		// event 9, 0x004c1960).
 		const anim::Vec mid = victim.ragDoll->middle();
-		const anim::Vec normal = victim.ragDoll->bodyNormal();
-		const bool onBack = normal[1] >= 0;
 		const anim::RagDoll::Particle* head = nullptr;
 		for (const anim::RagDoll::Particle& particle : victim.ragDoll->particles()) {
 			if (particle.bone == 47) {
@@ -1905,8 +2109,7 @@ void GameWorld::revive(Player& victim, Player* medic)
 			}
 		}
 		if (head) {
-			victim.body.yawDegrees =
-				std::atan2(head->position[0] - mid[0], head->position[2] - mid[2]) * 57.29578f + (onBack ? 180 : 0);
+			victim.body.yawDegrees = std::atan2(head->position[0] - mid[0], head->position[2] - mid[2]) * 57.29578f;
 		}
 		const float ground = m_ground.height ? m_ground.height(mid[0], mid[2]) : mid[1] - 0.2f;
 		victim.body.position = {mid[0], std::max(ground, mid[1] - 0.3f) + 1.0f, mid[2]};
@@ -1917,12 +2120,12 @@ void GameWorld::revive(Player& victim, Player* medic)
 		if (victim.skeleton) {
 			victim.pose = anim::setupPose(*victim.skeleton);
 		}
-		if (victim.bodyAnimation) {
-			victim.bodyAnimation->play(onBack ? "reviveOnBack" : "reviveOnStomach");
-		}
 	}
-	const world::ObjectTemplate* t = body->objectTemplate();
-	m_hitPoints[victim.object] = 0.25f * (t ? number(*t, "armor.maxHitPoints", 100) : 100);
+	float& hitPoints = m_hitPoints[victim.object];
+	hitPoints = std::max(hitPoints, restoreHitPoints);
+	if (const world::ObjectTemplate* t = body->objectTemplate(); t && number(*t, "armor.maxHitPoints", 0) > 0) {
+		hitPoints = std::min(hitPoints, number(*t, "armor.maxHitPoints", 0));
+	}
 	victim.body.velocity = {};
 	if (world::ObjectTemplate* kit = m_templates.find(victim.kitTemplate.empty() ? (victim.team == 1 ? "Pac_Assault" : "EU_Assault") : victim.kitTemplate)) {
 		if (world::Object* worn = m_objects.create(kit, body->position(), body->rotation())) {
@@ -1949,8 +2152,11 @@ GameWorld::Player* GameWorld::downedPlayer(uint32_t object) const
 }
 
 
-// The ragdoll's script. Provisional: what runs it in the game is not
-// traced (no code names it); it sits with the soldiers' animations.
+// The ragdoll's script, with the soldiers' animations. Not determinable:
+// what runs it. No string in BF2142.exe names it (the exe only names
+// ragDollConstraints.inc, which 0x008a8650 writes the constraints to), and no
+// .con, .inc, .tweak or .py file in the shipped archives includes it, so
+// the loader is not in anything shipped that names the file.
 constexpr const char* kRagDollScript = "Objects/Soldiers/Common/Animations/ragDollInit.con";
 
 // At death (0x005f0a00): the skeleton's last pose in world space (the model
@@ -1981,11 +2187,15 @@ bool GameWorld::startRagDoll(Player& victim)
 	victim.ragDoll = std::make_unique<anim::RagDoll>();
 	const physics::Vec3& v = victim.body.velocity;
 	victim.ragDoll->start(*ragDoll, pose, {v.x, v.y, v.z});
-	const physics::Vec3 push = victim.ragDollForce * ragDoll->settings.expForceMod;
+	// 0x005ee4d0 keeps the push for 0.5 s.
+	const physics::Vec3 push = victim.ragDollForceAt >= 0 && m_time - victim.ragDollForceAt <= 0.5
+		? victim.ragDollForce * ragDoll->settings.expForceMod
+		: physics::Vec3 {};
 	if (physics::lengthSquared(push) > 0) {
 		victim.ragDoll->addForce(-2, {push.x, push.y, push.z});
 	}
 	victim.ragDollForce = {};
+	victim.ragDollForceAt = -1;
 	const anim::Vec mid = victim.ragDoll->middle();
 	for (anim::Matrix& m : pose) {
 		m[12] -= mid[0];
@@ -1999,9 +2209,13 @@ bool GameWorld::startRagDoll(Player& victim)
 	return true;
 }
 
-// The terrain, and the static objects' soldier collision LOD (provisional:
-// the game also tests moving objects within ragdoll_completeCollRadius,
-// 0x008ab6b0).
+// The terrain, and the static objects' soldier collision LOD. The game's
+// list of objects (0x008ab6b0, each step) is every object with collision
+// (slot 0xc4 with 2) the object manager finds (slot 0x44) within
+// ragdoll_completeCollRadius (1.5 m) of the middle particle, kept when its
+// collision mesh's LOD 2 comes within that radius in its own space
+// (0x006aec10); vehicles and other moving objects among them are not
+// tested here (the rewrite's world has no moving soldier-LOD meshes).
 anim::RagDollWorld GameWorld::ragDollWorld() const
 {
 	anim::RagDollWorld world;
@@ -2370,12 +2584,16 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 		}
 	}
 	// Gadgets: a hub is thrown out when "fired"; the repair tool works
-	// while the trigger is held.
+	// while the trigger is held. A gadget without onlyActiveWhileFiring
+	// (the hubs) works round its holder while it is in hand, as the
+	// ReplenishingAmmoComp's update does (0x005d8740 from the comp's tick
+	// when the template's +0x88 flag is off; the flag's own path
+	// 0x005d84a0 runs while firing).
 	Ability ability;
 	bool whileFiring = false;
 	world::ObjectTemplate* inHand = player.weaponTemplate.empty() ? nullptr : m_templates.find(player.weaponTemplate);
 	const bool gadget = inHand && abilityOf(*inHand, ability, whileFiring);
-	player.abilityActive = gadget && whileFiring && input.fire;
+	player.abilityActive = gadget && (!whileFiring || input.fire);
 	if (player.weapon && player.weapon->tick(seconds, input.fire)) {
 		if (gadget && !whileFiring) {
 			for (auto it = m_supplies.begin(); it != m_supplies.end();) {
@@ -2455,8 +2673,13 @@ void GameWorld::followSoldier(const Player& player, const world::Object& soldier
 }
 
 // Vehicle collision points against the static objects' vehicle LOD: each
-// point is a small sphere (provisional: the original sweeps the hull's
-// mesh against the other mesh, 0x006e2350).
+// point is a sphere of 0.2 m where it is. The engine's mesh test
+// (0x006e2350, collision-mesh slot 24 0x006e5a00) sweeps a sphere: a point
+// moving by the tick's displacement, the radius x1.5 and from the start
+// when the move is under 0x00a07858, the triangles from the mesh's tree
+// (0x006e6810). Not rewritten: the sweep (here the point is tested only
+// where it ends up) and the radius its rigid-body caller passes (that
+// caller is not traced; 0.2 m here).
 void GameWorld::collideWithStatics(Body& body)
 {
 	constexpr float kPointRadius = 0.2f;
@@ -2575,8 +2798,10 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 	}
 	VehicleLayout& layout = m_layouts[vehicle.name()];
 	// Depth first from the root; `seat` is the seat whose subtree this is.
-	const std::function<void(const world::ObjectTemplate&, physics::Vec3, int, int)> walk =
-		[&](const world::ObjectTemplate& t, physics::Vec3 at, int seat, int depth) {
+	// Each child sits at its offset turned by its parents' rotations, and
+	// adds its own rotation (as Vehicle::fromTemplate places the wheels).
+	const std::function<void(const world::ObjectTemplate&, physics::Vec3, physics::Mat3, int, int)> walk =
+		[&](const world::ObjectTemplate& t, physics::Vec3 at, physics::Mat3 turn, int seat, int depth) {
 			if (depth > 12) {
 				return;
 			}
@@ -2589,7 +2814,7 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 				char position[64] = {};
 				char rotation[64] = {};
 				std::sscanf(info->second.c_str(), "%127s %63s %63s", name, position, rotation);
-				added.position = at + parseVec3(position);
+				added.position = at + turn.transform(parseVec3(position));
 				added.rotation = parseVec3(rotation);
 				const auto animation = settings.find("seatAnimationSystem");
 				if (animation != settings.end()) {
@@ -2597,7 +2822,7 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 				}
 				const auto exit = settings.find("soldierExitLocation");
 				if (exit != settings.end()) {
-					added.exit = at + parseVec3(exit->second);
+					added.exit = at + turn.transform(parseVec3(exit->second));
 					added.hasExit = true;
 				}
 				layout.seats.push_back(added);
@@ -2631,15 +2856,17 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 				if (!c) {
 					continue;
 				}
-				const physics::Vec3 childAt = at + physics::Vec3 {child.position.x, child.position.y, child.position.z};
+				const physics::Vec3 childAt = at + turn.transform({child.position.x, child.position.y, child.position.z});
+				const physics::Mat3 childTurn =
+					physics::Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z}) * turn;
 				if (depth == 0 && c->typeName() == "EntryPoint") {
 					layout.entries.push_back({childAt, number(*c, "entryRadius", 3)});
 					continue;
 				}
-				walk(*c, childAt, seat, depth + 1);
+				walk(*c, childAt, childTurn, seat, depth + 1);
 			}
 		};
-	walk(vehicle, {}, -1, 0);
+	walk(vehicle, {}, physics::Mat3 {}, -1, 0);
 	return layout;
 }
 
@@ -2732,7 +2959,11 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 			heal(target.object, rate(target.object));
 		} else if (target.weapon) {
 			float& owed = m_resupply[target.object];
-			owed += rate(target.object) / 10.0f; // a magazine for every 10 strength (provisional)
+			// A magazine for every 10 strength: not traced (the ammo
+			// component's ability fields are known, abilityMaterial 0x7c,
+			// abilityRadius 0x80, replenishingType 0x84, but the
+			// replenishing update reading them wasn't found).
+			owed += rate(target.object) / 10.0f;
 			while (owed >= 1) {
 				owed -= 1;
 				if (!target.weapon->addMagazine()) {
@@ -3126,7 +3357,7 @@ void GameWorld::launchDrone(Player& player, const world::ObjectTemplate& detonat
 	drone.position = feet + physics::Vec3 {start.x * c + start.z * s, start.y, -start.x * s + start.z * c};
 	drone.velocity = physics::Vec3 {s, 0, c} * number(detonator, "velocity", 0);
 	drone.yaw = player.body.yawDegrees;
-	drone.hoverHeight = start.y;
+	drone.hoverHeight = 1; // the soldier's physics origin over its feet (0x005f0a00)
 	if (const world::ObjectTemplate* force = findInTree(m_templates, t, "ForceObject")) {
 		const char* axes[3] = {"regulatePosX", "regulatePosY", "regulatePosZ"};
 		for (int axis = 0; axis < 3; ++axis) {
@@ -3224,25 +3455,32 @@ std::vector<int> GameWorld::revealedPlayers(int byTeam) const
 // The ForceObject's update (0x0062b750, called from 0x0062c920 each tick)
 // holds a drone by its target, the owner's soldier (the detonator's
 // ParentTargetComp):
-// - Lost target: with destroyWhenTargetLost the drone is destroyed (here:
-//   its owner dead or gone, or no longer leading a squad, provisional).
+// - Lost target: with destroyWhenTargetLost the drone is destroyed once
+//   the target's handle (0x1b0) is empty. The handle is the owner's
+//   soldier; here it counts as gone from the soldier's death, as when its
+//   object goes the ParentTargetComp's handle empties (whether the
+//   original's downed soldier still holds it isn't settled by this code).
 // - The goal: across the ground, the point positionToleranceXZ short of
 //   the target, or where the drone is when it is that near already; in
-//   height, the target's, taken again only while the target is more than
-//   minHeightAdjustDistance off across the ground (0x1a8).
+//   height, the target's position, taken again only while the target is
+//   more than minHeightAdjustDistance off across the ground (0x1a8). The
+//   target's position is the soldier's physics origin, a metre over its
+//   feet (0x005f0a00 poses the skeleton 0/-1/0 from it; our soldier's
+//   object stands at its feet).
 // - Farther than destroyDistance from the goal the drone is destroyed;
 //   past warningDistance the owner hears "uav_warning" (0x1e9 while on).
 // - Each axis has a regulator (0x00667710, set up by 0x0062cf60 with the
 //   object's mass m and regulatePos (a, b)): force = 2am v + (a² + b²) m
-//   (goal - p), which makes the axis a second-order system whose poles
-//   are a ± bi (decaying at a = -0.5 a second, turning at b = 2 rad/s).
+//   (goal - p).
+// - The force goes to the physics node's slot 0xa0 (0x006c7b10: added to
+//   the acceleration, the moment to the torque) times 30 over the mass,
+//   so each 30 Hz tick changes the velocity by 2a v + (a² + b²)(goal - p);
+//   the node's step (0x006c8380) adds gravity (Physics.gravity times
+//   gravityModifier) and damps by 0.99.
+// - EMP: while its armour's level (rounded up) is above 1 the update ends
+//   before any force, so the drone falls (and its height held becomes
+//   where it is).
 // - The drone turns to face where it is going.
-// Provisional: the engine applies the force through the physics node
-// (0xa0, times 30 over the mass; not traced) and the drone's gravity is
-// left out, so here the force over the mass is its acceleration; and the
-// height held is the target's plus the launch height over the feet
-// (fire.projectileStartPosition's 1.75 m), as our soldier's object stands
-// at its feet.
 void GameWorld::stepDrones(float seconds)
 {
 	for (auto it = m_revealed.begin(); it != m_revealed.end();) {
@@ -3253,12 +3491,18 @@ void GameWorld::stepDrones(float seconds)
 	for (Drone& drone : m_drones) {
 		world::Object* object = m_objects.find(drone.object);
 		const Player* owner = findPlayer(drone.owner);
-		const world::Object* target = owner && owner->alive && owner->squadLeader ? m_objects.find(owner->object) : nullptr;
+		const world::Object* target = owner && owner->alive ? m_objects.find(owner->object) : nullptr;
 		if (!object || (!target && drone.force.destroyWhenTargetLost)) {
 			lost.push_back(drone.object);
 			continue;
 		}
+		const world::ObjectTemplate* t = object->objectTemplate();
+		if (drone.empLevel > 0) {
+			drone.empLevel = std::max(0.0f, drone.empLevel - seconds / (t ? number(*t, "armor.empLevelTime", 5) : 5));
+		}
+		const bool stunned = std::ceil(drone.empLevel) > 1;
 		physics::Vec3 goal = drone.position;
+		bool held = true;
 		if (target) {
 			const physics::Vec3 at {target->position().x, target->position().y + drone.hoverHeight, target->position().z};
 			const float dx = at.x - drone.position.x, dz = at.z - drone.position.z;
@@ -3271,27 +3515,42 @@ void GameWorld::stepDrones(float seconds)
 			if (across > drone.force.minHeightAdjustDistance || !drone.hasHeight) {
 				drone.height = at.y;
 				drone.hasHeight = true;
+			} else if (stunned) {
+				drone.height = drone.position.y;
 			}
 			goal.y = drone.height;
-			const float off = physics::lengthSquared(goal - drone.position);
-			const float destroy = drone.force.destroyDistance, warning = drone.force.warningDistance;
-			if (destroy > 0 && off > destroy * destroy) {
-				lost.push_back(drone.object);
-				continue;
+			if (stunned) {
+				held = false;
+			} else {
+				const float off = physics::lengthSquared(goal - drone.position);
+				const float destroy = drone.force.destroyDistance, warning = drone.force.warningDistance;
+				if (destroy > 0 && off > destroy * destroy) {
+					lost.push_back(drone.object);
+					continue;
+				}
+				drone.warning = warning > 0 && off > warning * warning;
 			}
-			drone.warning = warning > 0 && off > warning * warning;
 		}
 		float* p[3] = {&drone.position.x, &drone.position.y, &drone.position.z};
 		float* v[3] = {&drone.velocity.x, &drone.velocity.y, &drone.velocity.z};
 		const float want[3] = {goal.x, goal.y, goal.z};
+		const float gravity = physics::tuning::kGravity * (t ? number(*t, "gravityModifier", 1) : 1);
 		for (int axis = 0; axis < 3; ++axis) {
 			const float a = drone.force.regulatePos[axis][0], b = drone.force.regulatePos[axis][1];
-			const float acceleration = 2 * a * *v[axis] + (a * a + b * b) * (want[axis] - *p[axis]);
-			*v[axis] += acceleration * seconds;
-			*p[axis] += *v[axis] * seconds;
+			float acceleration = held ? 30 * (2 * a * *v[axis] + (a * a + b * b) * (want[axis] - *p[axis])) : 0;
+			if (axis == 1) {
+				acceleration += gravity;
+			}
+			const float previous = *v[axis];
+			*v[axis] = (*v[axis] + acceleration * seconds) * physics::tuning::kLinearDamping;
+			*p[axis] += (previous + *v[axis]) * 0.5f * seconds;
 		}
 		if (m_ground.height) {
-			drone.position.y = std::max(drone.position.y, m_ground.height(drone.position.x, drone.position.z) + 0.5f);
+			const float floor = m_ground.height(drone.position.x, drone.position.z) + 0.5f;
+			if (drone.position.y < floor) {
+				drone.position.y = floor;
+				drone.velocity.y = std::max(drone.velocity.y, 0.0f);
+			}
 		}
 		if (drone.velocity.x * drone.velocity.x + drone.velocity.z * drone.velocity.z > 0.01f * 0.01f) {
 			drone.yaw = std::atan2(drone.velocity.x, drone.velocity.z) * 57.29578f;
@@ -3305,11 +3564,8 @@ void GameWorld::stepDrones(float seconds)
 		}
 		// Its weapon, run by its auto controller: the recon drone's
 		// (ReconDrone: simpleFirePlan) fires all the time; the sentry's
-		// (UAVDrone) at an enemy.
-		if (drone.empTime > 0) {
-			drone.empTime -= seconds;
-			continue;
-		}
+		// (UAVDrone) at an enemy. (Whether the controller stops for EMP is
+		// AIDLL's auto controller, not decoded: the guns keep going.)
 		if (drone.weapon && drone.pulse) {
 			if (drone.weapon->tick(seconds, true)) {
 				pulse(drone);
@@ -3352,10 +3608,14 @@ void GameWorld::pulse(const Drone& drone)
 // of 10 falling to 5 from 15 to 40 m) aimed by its auto controller at the
 // nearest enemy soldier on foot it sees: within the controller's view
 // distance, in line of sight, cloaked ones only up close; never its
-// deployer (neverAttackDeployer). Provisional: the controller's scanning
-// (fov 90, scanningSpeed) and its only attacking what the owner's squad
-// has spotted (onlyAttackNetworkBattlefieldObjects) are left out; it turns
-// at once and the rounds spread by the gun's deviation.minDev.
+// deployer (neverAttackDeployer, template 0x20). It turns at once and
+// the rounds spread by the gun's deviation.minDev. Left out, as the
+// pieces they need aren't in the rewrite: onlyAttackNetworkBattlefieldObjects
+// (template 0x39; AIDLL 0x100ea470: with it, an enemy counts only when the
+// owner's squad knows of it, 0x100bea30, the squad's battlefield objects
+// that spotting fills, which the rewrite doesn't keep) and the scan
+// (fov 90, scanningSpeed 0.13 turning the gun's rotational bundle; the
+// auto controller's state machine in AIDLL isn't decoded).
 void GameWorld::fireSentry(Drone& drone, float seconds)
 {
 	const Player* best = nullptr;

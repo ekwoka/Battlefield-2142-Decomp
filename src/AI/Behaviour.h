@@ -93,7 +93,7 @@ int arbitrate(Arbitration& state, int defaultIndex);
 // it (it is then reached), else 1 with d2' = d2 - areaRadius^2.
 struct GoalArea {
 	bool exists = false;
-	bool teamHolds = true;  // the area's per-team "taken" slot is 0 (provisional reading of +0x70)
+	bool teamHolds = true;  // the area's per-side status (+0x70, 0x1005f210) is 0: its side holds the point
 	bool inside = false;    // the bot inside the area (0x1005ddd0)
 	float radius = 0;       // the area's radius for the bot's team (+0x98)
 };

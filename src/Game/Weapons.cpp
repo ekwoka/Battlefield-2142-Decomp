@@ -29,9 +29,23 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	s.distToMinDamage = number(t, "distToMinDamage", s.distToMinDamage);
 	s.gravityModifier = number(t, "gravityModifier", s.gravityModifier);
 	s.material = static_cast<int>(number(t, "material", 0));
-	s.explosionDamage = number(t, "detonation.explosionDamage", 0);
-	s.explosionRadius = number(t, "detonation.explosionRadius", 0);
-	s.explosionMaterial = static_cast<int>(number(t, "detonation.explosionMaterial", 0));
+	// A detonation component (DefaultDetonationComp, template 0x953b) with
+	// its constructor's defaults (0x005e9df0): explosionMaterial -1,
+	// explosionForce 150, explosionYMod 1, explosionRadius 10,
+	// explosionDamage 500 (fields 0x30, 0x34, 0x38, 0x3c, 0x44).
+	const auto& components = t.components();
+	s.detonates = std::any_of(components.begin(), components.end(), [](const std::string& c) {
+		return c == "DefaultDetonationComp" || c == "ReplenishDetonationComp";
+	}) || std::any_of(t.settings().begin(), t.settings().end(), [](const auto& setting) {
+		return setting.first.rfind("detonation.", 0) == 0;
+	});
+	if (s.detonates) {
+		s.explosionDamage = number(t, "detonation.explosionDamage", 500);
+		s.explosionRadius = number(t, "detonation.explosionRadius", 10);
+		s.explosionMaterial = static_cast<int>(number(t, "detonation.explosionMaterial", -1));
+		s.explosionForce = number(t, "detonation.explosionForce", 150);
+		s.explosionYMod = number(t, "detonation.explosionYMod", 1);
+	}
 	// Thrown objects (grenades, mines, C4, hubs) have physicsType
 	// RotationalPoint or Mesh and a collision mesh of their own; rounds and
 	// missiles are Points (they set hasCollisionPhysics too).
@@ -39,6 +53,9 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 		s.bounces = type->second == "RotationalPoint" || type->second == "Mesh";
 	}
 	s.damageMandown = number(t, "damageMandownSoldiers", 0) != 0;
+	s.resurrect = t.settings().count("collision.resurrectDamage") || t.settings().count("collision.restoreHP");
+	s.resurrectDamage = number(t, "collision.resurrectDamage", 0);
+	s.restoreHitPoints = number(t, "collision.restoreHP", 0.1f);
 	s.emp = number(t, "detonation.isEMPWeapon", 0) != 0;
 	if (const auto seek = t.settings().find("seek.targetType"); seek != t.settings().end()) {
 		s.seek = seek->second == "TTMagnet" ? ProjectileSettings::Seek::Magnet
@@ -55,9 +72,6 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	s.triggerAngle = number(t, "detonation.triggerAngle", 180);
 	s.triggerMinSpeed = number(t, "detonation.triggerVictimMinSpeed", 0);
 	s.coneAngle = number(t, "detonation.explosionConeAngle", 0);
-	if (s.explosionDamage > 0 && s.explosionRadius <= 0 && !s.emp) {
-		s.explosionRadius = 10; // C4 sets none (provisional: the engine's default is not traced)
-	}
 	if (const auto effect = t.settings().find("detonation.endEffectTemplate"); effect != t.settings().end()) {
 		s.endEffect = effect->second;
 	}
@@ -65,7 +79,7 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	if (ttl != t.settings().end()) {
 		s.timeToLive = RandomDistribution::parse(ttl->second);
 	}
-	s.remote = s.explosionDamage > 0 && s.triggerRadius <= 0 && s.timeToLive.a > 1000; // CRD_NONE/9999
+	s.remote = s.explosionMaterial >= 0 && s.explosionDamage > 0 && s.triggerRadius <= 0 && s.timeToLive.a > 1000; // CRD_NONE/9999
 	return s;
 }
 
@@ -79,6 +93,20 @@ float ProjectileSettings::damageAt(float distance) const
 		return least;
 	}
 	return damage - (distance - distToStartLoseDamage) * ((damage - least) / (distToMinDamage - distToStartLoseDamage));
+}
+
+float explosionFalloff(float radius, float distance)
+{
+	const float inner = radius * 0.2f;
+	if (distance < inner) {
+		return 1;
+	}
+	return std::clamp(1 - (distance - inner) / (radius - inner), 0.0f, 1.0f);
+}
+
+float addEmpDamage(float level, float amount, float stepSize, int numSteps)
+{
+	return std::min(static_cast<float>(numSteps), std::ceil(level + amount / stepSize));
 }
 
 FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)

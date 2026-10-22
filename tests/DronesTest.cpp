@@ -141,12 +141,13 @@ TEST(Drones_HoverByTheirOwner)
 	CHECK(field.objects.find(drone)->objectTemplate()->name() == "unl_drone_recon");
 
 	// It settles within positionToleranceXZ (1.5 m) across the ground, at
-	// the launch height (1.75 m over the feet).
+	// the height of its target's position (the soldier's physics origin, a
+	// metre over the feet), held against gravity a little below it.
 	field.run(6);
 	field.world->playerInfo(leader, me);
 	physics::Vec3 hover = field.at(drone);
 	CHECK(across(hover, me.position) < 1.6f);
-	CHECK(std::abs(hover.y - (me.position.y + 1.75f)) < 0.3f);
+	CHECK(std::abs(hover.y - (me.position.y + 1.0f)) < 0.3f);
 	CHECK(!field.world->droneWarning(leader));
 
 	// It follows its owner 8 m off (still inside warningDistance 10).
@@ -184,6 +185,36 @@ TEST(Drones_HoverByTheirOwner)
 	field.world->setHitPoints(me.soldier, 0);
 	field.run(0.1f);
 	CHECK(field.world->drone(leader) == 0);
+}
+
+TEST(Drones_EmpDropsThem)
+{
+	// The EMP grenade's blast (500 at its centre, 120 a step, 3 steps for
+	// the drone's armour): above level 1 the ForceObject stops holding the
+	// drone (0x0062b750) and it falls; a step goes every 5 s
+	// (empLevelTime's default), and below level 2 it climbs back.
+	Field field;
+	if (!field.loaded) {
+		return;
+	}
+	world::ObjectTemplate* emp = field.templates.create("GenericProjectile", "emp_grenade");
+	emp->components().push_back("DefaultDetonationComp");
+	emp->settings()["detonation.isEMPWeapon"] = "1";
+	emp->settings()["detonation.explosionRadius"] = "9";
+	emp->settings()["detonation.explosionMaterial"] = "0";
+	const int leader = field.spawnLeader("unl_drone_recon_detonator");
+	field.launch();
+	const uint32_t drone = field.world->drone(leader);
+	field.run(6);
+	const float held = field.at(drone).y;
+	CHECK(field.world->detonate("emp_grenade", field.at(drone)));
+	CHECK(field.world->empLevel(drone) == 3);
+	field.run(1);
+	CHECK(field.at(drone).y < held - 0.3f && field.world->drone(leader) == drone);
+	field.run(9.5f); // level 3 - 10.5 / 5 = 0.9: held again
+	CHECK(field.world->empLevel(drone) == 1);
+	field.run(4);
+	CHECK(std::fabs(field.at(drone).y - held) < 0.3f);
 }
 
 TEST(Drones_ReconPulseRevealsEnemies)

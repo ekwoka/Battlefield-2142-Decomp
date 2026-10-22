@@ -27,9 +27,11 @@
 // level 5, 516 and 524) need the booster (SwiffPlayer 0x1004e000,
 // 0x1004b250 answers 302 without it). One unlock credit per rank: the menu
 // shows the server's count of unspent credits (+0x18 of the unlock info,
-// getUnlocksCountUnselected 0x10049a40); the rule that a rank is worth one
-// credit is the published game's, the server's own code is not available
-// (provisional).
+// getUnlocksCountUnselected 0x10049a40), which the client only reads
+// (the 12th token of getunlocksinfo.aspx, see parseUnlocksInfo) and never
+// works out. The rule lived in GameSpy's stats back end (the .aspx pages
+// at stella.prod.gamespy.com), which was never shipped, so the published
+// game's rule (a credit per rank reached) stands in for it.
 #pragma once
 
 #include <map>
@@ -193,15 +195,16 @@ std::vector<UnlockContainer> unlockContainers(const world::ObjectTemplateManager
 std::vector<std::string> containersFor(const std::vector<UnlockContainer>& all, const std::vector<int>& unlocks);
 
 // --- The stats server's answers (BF2-style text), for when one can be
-// asked. Not used: there is no account to ask with.
-//   O                       ok (E <code> on an error)
+// asked. Not used: there is no account to ask with. 0x005752b0 reads them
+// as tokens split at tabs and newlines:
+//   O                       ok (anything else failed)
 //   H <tab> key <tab> ...   a header
 //   D <tab> value ...       its rows
-//   $ <tab> <length> <tab> $  the length of the data (provisional: the
-//                           characters other than tabs and newlines)
+//   $ <tab> <length> <tab> $  the end; without it the answer failed. The
+//                           length is not checked by the client.
 struct StatsResponse {
 	bool ok = false;
-	int errorCode = 0;
+	int errorCode = 0; // an "E <code>" answer's (the client ignores it)
 	struct Block {
 		std::vector<std::string> keys;
 		std::vector<std::vector<std::string>> rows;
@@ -209,13 +212,15 @@ struct StatsResponse {
 		std::string value(size_t row, const std::string& key) const;
 	};
 	std::vector<Block> blocks;
-	int declaredLength = -1; // the $ line's, -1 without one
-	int length = 0;          // counted
-	bool complete() const { return declaredLength >= 0 && declaredLength == length; }
+	std::vector<std::string> tokens; // all of them, for the position-based readers
+	bool terminated = false;         // the "$" came
+	int declaredLength = -1;         // the "$" line's, -1 without one
+	bool complete() const { return terminated; }
 };
 StatsResponse parseStatsResponse(const std::string& text);
-// getunlocksinfo.aspx: the unspent credits (Avcred) and the ids owned
-// (UnlockID). Provisional field names.
+// getunlocksinfo.aspx: the unspent credits (Avcred, the 12th token) and
+// the ids owned (each row's first value after it), read by position as
+// 0x0045c030 does.
 struct UnlocksInfo {
 	int credits = 0;
 	std::vector<int> unlocks;

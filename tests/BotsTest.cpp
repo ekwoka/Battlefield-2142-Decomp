@@ -65,7 +65,7 @@ game::BotSettings scriptedSettings(Console& console)
 			 "aiSettings.setVehicleBehaviour Infantery MoveTo BBMoveTo BBPGotoWaypointInfantery 4 UCUnion UnitWeights",
 			 "aiSettings.setVehicleBehaviour Infantery Idle BBIdle BBPIdleInfantery 5 UCUnion UnitWeights",
 			 "aiSettings.setVehicleBehaviour Infantery Fire BBFireInfantery BBPFireInfantery 4 UCFire UnitWeights",
-			 "aiSettings.setVehicleDefaultBehaviour Infantery Idle"}) {
+			 "aiSettings.setVehicleDefaultBehaviour Infantery Idle", "aiSettings.setViewDistance 120"}) {
 		console.execute(line, out);
 	}
 	return settings;
@@ -372,6 +372,33 @@ TEST(Bots_AiTemplatesFillTheSettings)
 	CHECK(settings.aiTemplates.at("as_fav").basicTemp == 8 && !settings.plugin("AS_FAV", "Armament"));
 }
 
+// The view distance (AIDLL 0x10056b20, BF2142.exe 0x008959f0): set by the
+// scripts, or the game's from the level's fog (where it reaches 0.8),
+// within the level's view distance and 300 m.
+TEST(Bots_ViewDistanceFromTheFog)
+{
+	// 2142_Shipment: fog 10/40/2/0.5 (0.5 + t^3 = 0.8 at t = 0.67), 250 m.
+	CHECK(near(game::gameViewDistance({10, 40, 2, 0.5f}, 250), 10 + 30 * 0.67f, 0.05f));
+	// Sidi_Power_Plant: 0/345/0/0 (t^3 = 0.8 at t = 0.93): 321 m, capped at 300.
+	CHECK(near(game::gameViewDistance({0, 345, 0, 0}, 345), 300));
+	CHECK(near(game::gameViewDistance({0, 345, 0, 0}, 200), 200));
+	Field field;
+	Console console;
+	game::BotSettings settings;
+	game::registerBotConsoleMethods(console, settings);
+	std::string out;
+	console.execute("GameLogic.MaximumLevelViewDistance 250", out);
+	settings.levelFog = {10, 40, 2, 0.5f};
+	game::BotManager bots(*field.world, settings);
+	const int bot = field.soldier(2, true, 0, 0);
+	const int near_ = field.soldier(1, false, 0, 20); // 30 cos 50 = 19.4 m: just out
+	settle(bots, 1.0f);
+	CHECK(!bots.knows(bot, near_));
+	field.move(near_, 0, 18);
+	settle(bots, 1.0f);
+	CHECK(bots.knows(bot, near_));
+}
+
 // Sensing (0x100ed700, 0x100ee430): seen within viewDistance x cos(50)
 // in the 100 degree frustum; remembered 60 s out of sight, then forgotten.
 TEST(Bots_SensingAndForgetting)
@@ -502,8 +529,7 @@ TEST(Bots_PathSmoothingOnPortals)
 // The vehicles' driving (0x100e9d40, 0x100e0540, 0x100e8170): steering
 // towards the error less the turn rate, the throttle towards the speed
 // wanted; slowing for bends (angleSlowDownScale) and the path's end
-// (brakeDistance); backing towards a goal far behind; a stationary tank
-// does not steer.
+// (brakeDistance); a stationary tank does not steer.
 TEST(Bots_DriveControl)
 {
 	ai::DriveSettings car; // the FAV's Mobile plug-in, maxSpeed 15
@@ -523,30 +549,110 @@ TEST(Bots_DriveControl)
 	sense.yawRate = 0;
 	sense.maxBend = 0.6f;
 	CHECK(near(ai::driveControl(car, state, sense).targetSpeed, 0.424f * 15, 1e-3f));
-	// 10 m of path left at 10 m/s: space 7 m of 25: max(0.2, 0.0784)^2 = 0.04.
+	// 10 m of path left at 10 m/s: space 10 - 2.5 - 0.5 = 7 m of 25:
+	// max(0.2, 0.0784)^2 = 0.04.
 	sense.maxBend = 0;
 	sense.remaining = 10;
 	CHECK(near(ai::driveControl(car, state, sense).targetSpeed, 0.04f * 15, 1e-4f));
-	// The goal far behind with room behind: backing towards it, the error
-	// mirrored (pi - |e|).
-	sense.remaining = 200;
-	sense.speed = 0;
-	sense.error = 3.0f;
-	out = ai::driveControl(car, state, sense);
-	CHECK(state.state == 8 && out.direction == -1 && out.throttle < 0);
-	CHECK(near(out.turn, std::clamp(3 * 2 * (3.14159265f - 3.0f), -1.0f, 1.0f), 1e-4f));
-	// Close by, behind: turning on the spot (forward at full lock first).
-	ai::DriveState turning;
-	sense.goalDistance = 10;
-	out = ai::driveControl(car, turning, sense);
-	CHECK(turning.state == 9 && out.direction == 1 && out.turn == 1);
 	// A tank at a standstill does not steer.
 	ai::DriveSettings tank = car;
 	tank.tank = true;
 	ai::DriveState ahead;
+	sense.speed = 0;
 	sense.error = 0.5f;
-	sense.goalDistance = 100;
+	sense.remaining = 200;
 	CHECK(ai::driveControl(tank, ahead, sense).turn == 0);
+}
+
+// The state machine (0x100e8170): a goal far behind with room to turn:
+// 11 (the point on the right), backing at the opposite lock; close
+// behind (within 10 radii): 8, backing towards it, the error mirrored
+// (pi - |e|); behind in a narrow spot: 12, backing straight out. One
+// change per time stamp (0x100973b0).
+TEST(Bots_DriveStates)
+{
+	ai::DriveSettings car;
+	car.yawScale = 2;
+	ai::DriveSense sense;
+	sense.goalDistance = 100;
+	sense.remaining = 200;
+	sense.error = 3.0f;
+	ai::DriveState far;
+	ai::DriveOutput out = ai::driveControl(car, far, sense);
+	CHECK(far.state == 11 && out.direction == 1);
+	sense.now = 0.1f;
+	out = ai::driveControl(car, far, sense);
+	CHECK(far.state == 11 && out.direction == -1 && out.turn == -1 && out.throttle < 0);
+	// Close behind.
+	ai::DriveState close;
+	sense.now = 1;
+	sense.remaining = 20;
+	ai::driveControl(car, close, sense);
+	CHECK(close.state == 8);
+	ai::driveControl(car, close, sense); // the same time stamp: no change
+	sense.now = 1.1f;
+	out = ai::driveControl(car, close, sense);
+	CHECK(close.state == 8 && out.direction == -1);
+	CHECK(near(out.turn, 3 * 2 * (3.14159265f - 3.0f), 1e-4f));
+	// Narrow: 1 m either side.
+	ai::DriveState narrow;
+	sense.remaining = 200;
+	sense.freeLeft = sense.freeRight = 1;
+	sense.now = 2;
+	ai::driveControl(car, narrow, sense);
+	CHECK(narrow.state == 12);
+	sense.now = 2.1f;
+	out = ai::driveControl(car, narrow, sense);
+	CHECK(narrow.state == 12 && out.direction == -1);
+	// Facing the goal again: ahead.
+	sense.error = 0;
+	sense.now = 2.2f;
+	ai::driveControl(car, narrow, sense);
+	CHECK(narrow.state == 0);
+}
+
+// Other vehicles (0x100fbff0, 0x100fc660): one standing 8 m ahead, a
+// little to the right, is passed (state 6) on the left: heading for the
+// tangent of its sphere (0.8 of its radius + the driver's, seen from a
+// quarter of a second ahead); and caps the speed behind it at 2 m/s (its
+// speed along the way less 1, at least 2), so the driver brakes.
+TEST(Bots_DriveAroundObstacles)
+{
+	ai::DriveSettings car;
+	ai::DriveSense sense;
+	sense.goalDistance = 100;
+	sense.remaining = 200;
+	sense.goal = {0, 0, 100};
+	ai::DriveObstacle other;
+	other.id = 7;
+	other.position = other.centre = {0.5f, 0, 8};
+	other.radius = other.centreRadius = 2.5f;
+	sense.obstacles.push_back(other);
+	ai::DriveState state;
+	ai::DriveOutput out = ai::driveControl(car, state, sense);
+	CHECK(state.state == 6 && state.avoided == 7 && state.side == 1);
+	sense.now = 0.1f;
+	out = ai::driveControl(car, state, sense);
+	const float toIt = std::atan2(0.5f, 8.0f);
+	const float half = std::asin(4.5f / std::sqrt(0.25f + 64));
+	CHECK(state.state == 6 && near(out.turn, std::clamp(3 * (toIt - half), -1.0f, 1.0f), 1e-3f));
+	// Moving at 10 m/s with it 10 m ahead: capped at 2 m/s.
+	ai::DriveState moving;
+	sense.obstacles[0].position = sense.obstacles[0].centre = {0, 0, 10};
+	sense.velocity = {0, 0, 10};
+	sense.speed = 10;
+	out = ai::driveControl(car, moving, sense);
+	CHECK(moving.brakingFor == 7 && out.throttle == -1);
+	sense.obstacles.clear();
+	ai::DriveState clear;
+	CHECK(ai::driveControl(car, clear, sense).throttle == 1);
+	// Something on the goal next to the driver: the move ends.
+	other.position = other.centre = {0, 0, 6};
+	sense.obstacles.push_back(other);
+	sense.goal = {0, 0, 6.5f};
+	sense.goalDistance = 6.5f;
+	ai::DriveState there;
+	CHECK(ai::driveControl(car, there, sense).stop);
 }
 
 // A level without AIPathFinding has no bots in the original (no ai.init,
@@ -564,8 +670,8 @@ TEST(Bots_NoNavigationMeshNoBots)
 }
 
 // MedicAssist (0x10070200, plan 0x10070da0): a medic with the hub near a
-// wounded human teammate of its squad goes to them, takes the hub and (in
-// the rewrite, where hubs heal once thrown) throws it; they heal.
+// wounded human teammate of its squad goes to them and takes the hub,
+// which heals round its holder; AIDLL never throws it.
 TEST(Bots_MedicAssistHealsATeammate)
 {
 	Field field;
@@ -601,7 +707,7 @@ TEST(Bots_MedicAssistHealsATeammate)
 		assisted = assisted || bots.behaviour(medic) == "MedicAssist";
 	}
 	CHECK(assisted);
-	CHECK(!field.world->supplyObjects().empty());
+	CHECK(field.world->supplyObjects().empty());
 	CHECK(field.world->hitPoints(info.soldier) > 60);
 }
 
@@ -1079,4 +1185,34 @@ TEST(Bots_PathFollowerOnCerbereLanding)
 		stuck.progress(from, 1, t);
 	}
 	CHECK(stuck.failed() && !stuck.steer(mesh, from, 10.5f).ok);
+}
+
+// A constant condition (0x100a9620, 0x1005cce0, 0x1005ce20): the friendly
+// value for Friendly, the enemy's otherwise (Both too), minus the
+// constant (or over it for the Quotient compares) against 0.
+TEST(Bots_StrategyConditions)
+{
+	using C = ai::StrategyCondition;
+	ai::SideStatus friendly, enemy;
+	friendly.controlPoints = 3;
+	enemy.controlPoints = 1;
+	C c;
+	c.type = 14;
+	c.constant = 2;
+	c.compare = C::Compare::EqualGreater;
+	CHECK(ai::conditionValue(c, friendly, enemy) == 1);
+	c.side = 2; // Both: the enemy's
+	CHECK(ai::conditionValue(c, friendly, enemy) == -1);
+	c.side = 0;
+	c.compare = C::Compare::QuotientSmaller; // 3 / 2 <= 0
+	CHECK(ai::conditionValue(c, friendly, enemy) == -1);
+	c.constant = 0;
+	c.compare = C::Compare::QuotientGreater; // no constant: 1
+	CHECK(ai::conditionValue(c, friendly, enemy) == 1);
+	c.conditional = C::Conditional::Fuzzy;
+	CHECK(ai::conditionValue(c, friendly, enemy) == 1000);
+	c.constant = 1;
+	c.compare = C::Compare::DifferenceSmaller;
+	c.conditional = C::Conditional::FuzzySqr; // -(3 - 1) squared, signed
+	CHECK(ai::conditionValue(c, friendly, enemy) == -4);
 }

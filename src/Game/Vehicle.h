@@ -29,12 +29,17 @@
 //    linear between 1 at 0 and the five setGearRatios values at 0.2 ... 1;
 //    reverse is gear 0 at 1.2 times first gear's ratio.
 //
-// What is provisional (not decompiled yet): steering speed (the
-// RotationalBundle update), when the engine changes gears and engages the
-// clutch (0x0064e920 is read only in part: no clutch, no gear-change time),
-// when it brakes (here: throttle against the direction of travel), wheel
-// spin of wheels without contact, and the wheels' radius (the depth of the
-// wheel's vehicle collision triangle below its centre).
+//  - Steering: the RotationalBundle's yaw axis (0x00563bd0, see
+//    rotationAxisStep), driven by PIYaw.
+//
+//  - The engine (0x0064e920 with 0x0064e810 and 0x0064e6f0, see
+//    Vehicle::updateEngine): braking, the clutch, gear changes.
+//
+// Not decoded, so the rewrite's own: wheel spin of wheels without contact
+// (0.99 a tick here; the off-ground branch of the wheel node's update
+// 0x006b7910 is not decoded), and the wheels' radius (the depth of the wheel's vehicle
+// collision triangle below its centre; the Spring node's own radius
+// comes from its collision mesh through code not decoded).
 #pragma once
 
 #include "Physics/RigidBody.h"
@@ -120,6 +125,37 @@ struct TyreContact {
 Vec3 tyreForce(const EngineSettings& engine, const TyreContact& contact, const Vec3& slip, const Vec3& forward,
 	const Vec3& right, float* longitudinal = nullptr, float* lateral = nullptr);
 
+// One axis of a RotationalBundle (template 0x298 minRotation, 0x2a4
+// maxRotation, 0x2bc maxSpeed, 0x2d4 acceleration, 0x2e0 deAcceleration,
+// 0x2ec continousRotationSpeed, 0x304 automaticReset, 0x305
+// snapToZeroOnNoInput, 0x306 useDeAcceleration, 0x360 capMaxSpeed, 0x364
+// maxSpeedMod). The values are per second as written: the getters
+// (0x006147c0, 0x00613ca0, 0x00613d00) would scale them by 30 only while
+// 0x00a73a1c is 0, and it is set to 1 (0x008e91a0).
+struct RotationAxis {
+	float minRotation = 0, maxRotation = 0; // degrees
+	float maxSpeed = 0;     // degrees a second
+	float acceleration = 0; // degrees a second, a second (with automaticReset: degrees a second)
+	float deAcceleration = 0;
+	float continuousSpeed = 0;
+	bool automaticReset = false;
+	bool snapToZero = false;
+	bool useDeAcceleration = false;
+	bool capMaxSpeed = false;
+	float maxSpeedMod = 0;
+};
+// The axis update (0x00563bd0) on the branch the debug variable
+// rot-use-old selects, which is 1 (0x008de9e0): the input times maxSpeed
+// (maxRotation with automaticReset; negated when acceleration is
+// negative, 0 when it is 0) is a target, capped by capMaxSpeed to maxSpeed
+// x 30 (rotationalbundle-max-speed-mod) and by maxSpeedMod to maxSpeed x
+// it. With automaticReset the angle itself moves to the target at
+// |acceleration| a second; otherwise the speed does, and the angle moves
+// by it. The angle then stays within the rotation limits (an unlimited
+// axis wraps within a turn). snapToZeroOnNoInput first puts the angle and
+// speed to 0 when the input is under 0.05 towards the angle's side.
+void rotationAxisStep(const RotationAxis& axis, float input, float seconds, float& angle, float& speed);
+
 struct VehicleInput {
 	float throttle = 0; // PIThrottle
 	float steer = 0;    // PIYaw: right positive
@@ -133,9 +169,10 @@ public:
 		float strength = 0;  // Spring template 0x2b4
 		float damping = 0;   // 0x2b0
 		float maxSteer = 0;  // degrees; 0 for wheels that do not steer
-		float steerSpeed = 1; // degrees per tick (RotationalBundle maxSpeed)
+		RotationAxis steerAxis; // the yaw of the PIYaw RotationalBundle above it
 		// State.
-		float steer = 0;      // degrees
+		float steer = 0;      // degrees (the bundle's rotation, 0x188)
+		float steerRate = 0;  // degrees a second (0x194)
 		float compression = 0; // how far the ground pushes the wheel up
 		float spin = 0;       // rad/s (Spring 0x27c)
 		float angle = 0;      // radians (0x280)
@@ -155,6 +192,7 @@ public:
 	int gear() const { return m_gear; }
 	float rpm() const { return m_rpm; } // normalised: 0 at minRpm, 1 at maxRpm
 	bool braking() const { return m_braking; }
+	float clutch() const { return m_clutch; }
 
 	void setInput(const VehicleInput& input) { m_input = input; }
 	// One tick: suspension and tyre forces on `body`; call before it steps.
@@ -162,7 +200,7 @@ public:
 		float gravity = physics::tuning::kGravity);
 
 private:
-	void updateEngine();
+	void updateEngine(const physics::RigidBody& body, float seconds);
 	void updateWheel(Wheel& wheel, physics::RigidBody& body, const physics::Ground& ground, float seconds,
 		float grip, float gravity);
 
@@ -176,6 +214,8 @@ private:
 	float m_wheelRpmSum = 0; // 0x284
 	int m_wheelRpmCount = 0; // 0x288
 	bool m_braking = false;  // 0x274
+	float m_clutch = 0;      // 0x27c: 0 at the start, engaged at 1
+	int m_shift = 0;         // 0x2a4: a gear change under way, -1 or +1
 };
 
 } // namespace dice::hfe::game

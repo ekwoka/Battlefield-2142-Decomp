@@ -32,15 +32,27 @@ struct ProjectileSettings {
 	RandomDistribution timeToLive {RandomDistribution::Type::None, 1, 0, 0};
 	float gravityModifier = 1;
 	int material = 0;
-	// Detonation (detonation.*): splash damage round the impact.
+	// Detonation (detonation.*): splash damage round the impact. With a
+	// DefaultDetonationComp the template's defaults (0x005e9df0) are
+	// damage 500, radius 10, force 150, yMod 1 and material -1 (no blast:
+	// 0x005a9090 and 0x005a7ab0 skip everything for material -1).
+	bool detonates = false;
 	float explosionDamage = 0;
 	float explosionRadius = 0;
 	int explosionMaterial = 0;
+	float explosionForce = 0;
+	float explosionYMod = 1; // the height difference counts times this
 	std::string endEffect; // detonation.endEffectTemplate
 	// physicsType RotationalPoint or Mesh: it bounces off what it hits
 	// (grenades) and detonates when its time to live runs out, not on impact.
 	bool bounces = false;
 	bool damageMandown = false; // damageMandownSoldiers: it reaches downed soldiers (the defibrillator)
+	// ResurrectCollisionComp (template 0x005e7d20): collision.resurrectDamage
+	// (default 0) and collision.restoreHP (default 0.1), handed to the game
+	// logic's revive 0x004c1960 by 0x005e7a70.
+	bool resurrect = false;
+	float resurrectDamage = 0;
+	float restoreHitPoints = 0.1f;
 	bool emp = false;           // detonation.isEMPWeapon: shuts vehicles down instead
 	// Seeking (seek.*, follow.*): TTMagnet locks onto the closest enemy
 	// vehicle within maxDistLock after trackingDelay and chases it (motion
@@ -52,7 +64,7 @@ struct ProjectileSettings {
 	float lockDistance = 0;
 	float loseDistance = 0;
 	float maxYawRate = 0, maxPitchRate = 0;
-	float chaseSpeed = 0; // follow.armingSpeed × speedModifier (provisional)
+	float chaseSpeed = 0; // follow.armingSpeed × speedModifier (see GameWorld::steerSeeker)
 	// Mines: an enemy inside triggerRadius and triggerAngle (degrees either
 	// side of the mine's facing) moving faster than triggerVictimMinSpeed
 	// sets it off; the blast reaches explosionConeAngle either side of the
@@ -68,6 +80,13 @@ struct ProjectileSettings {
 	// The damage after travelling `distance` metres.
 	float damageAt(float distance) const;
 };
+
+// A blast's falloff with distance (0x005a61a0): 1 within 0.2 of the
+// radius (0x00a6aab4), then falling linearly to 0 at the radius.
+float explosionFalloff(float radius, float distance);
+// An armour's EMP level after `amount` of EMP damage (0x00652980): it goes
+// up in whole steps of `stepSize`, at most `numSteps`.
+float addEmpDamage(float level, float amount, float stepSize, int numSteps);
 
 struct FireArmSettings {
 	int roundsPerMinute = 600;

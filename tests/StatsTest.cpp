@@ -143,7 +143,8 @@ TEST(Stats_ServerResponse)
 	CHECK(response.ok && response.blocks.size() == 3);
 	CHECK(response.blocks[0].value(0, "nick") == "Ghost" && response.blocks[0].value(0, "pid") == "12345");
 	CHECK(response.blocks[0].value(0, "nothing").empty() && response.blocks[0].value(1, "pid").empty());
-	CHECK(response.declaredLength == 68 && response.length == 68 && response.complete());
+	CHECK(response.declaredLength == 68 && response.complete());
+	CHECK(response.tokens.size() > 12 && response.tokens[6] == "12345" && response.tokens[12] == "2");
 	const stats::UnlocksInfo info = stats::parseUnlocksInfo(response);
 	CHECK(info.credits == 2 && info.unlocks == std::vector<int>({111, 112, 211}));
 
@@ -151,6 +152,16 @@ TEST(Stats_ServerResponse)
 	CHECK(!error.ok && error.errorCode == 104);
 	CHECK(!stats::parseStatsResponse("<html>").ok);
 	CHECK(!stats::parseStatsResponse("O\nH\tpid\nD\t1\n").complete()); // cut off
+	// The length after "$" is not checked (0x005752b0), and runs of tabs
+	// and newlines make no empty fields.
+	CHECK(stats::parseStatsResponse("O\n\nH\tpid\t\tnick\nD\t7\tX\n$\t999\t$\n").complete());
+	CHECK(stats::parseStatsResponse("O\n\nH\tpid\t\tnick\nD\t7\tX\n$\t999\t$\n").blocks[0].value(0, "nick") == "X");
+	// The unlocks are read by position (0x0045c030): the 12th token is the
+	// credits whatever its key, and a cut-off answer gives nothing.
+	const stats::UnlocksInfo renamed = stats::parseUnlocksInfo(stats::parseStatsResponse(
+		"O\nH\tpid\tnick\tasof\nD\t5\tGhost\t1\nH\tcredits\nD\t4\nH\tid\nD\t311\n$\t1\t$\n"));
+	CHECK(renamed.credits == 4 && renamed.unlocks == std::vector<int>({311}));
+	CHECK(stats::parseUnlocksInfo(stats::parseStatsResponse(text.substr(0, text.size() - 7))).unlocks.empty());
 }
 
 TEST(Stats_ProfileNatives)

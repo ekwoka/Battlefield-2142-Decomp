@@ -332,6 +332,7 @@ TEST(GameWorld_ExplosionsHurtAround)
 	grenade->settings()["damage"] = "0";
 	grenade->settings()["detonation.explosionDamage"] = "200";
 	grenade->settings()["detonation.explosionRadius"] = "3";
+	grenade->settings()["detonation.explosionMaterial"] = "69";
 	const int bot = range.world->addPlayer("Bot", 1, true);
 	CHECK(range.world->spawnSoldier(bot));
 	CHECK(range.world->spawnPlayer(2) != nullptr);
@@ -348,6 +349,40 @@ TEST(GameWorld_ExplosionsHurtAround)
 	range.world->playerInfo(bot, info);
 	CHECK(!info.alive && info.deaths == 1);
 	CHECK(!range.world->impacts().empty() && range.world->impacts().back().object == 0); // it hit the ground
+}
+
+TEST(GameWorld_BlastsFallOffFromTheSoldiersOrigin)
+{
+	// A bare detonation (DefaultDetonationComp) with 100 damage over 10 m:
+	// measured to the soldier's physics origin (a metre over its feet), the
+	// damage is full within 2 m and half at 6 m (0x005a8900, 0x005a61a0);
+	// all three bones in sight (0x005a7530). With the default material -1
+	// it does nothing; an EMP hurts no one.
+	Range range;
+	world::ObjectTemplate* blast = range.templates.create("GenericProjectile", "blast");
+	blast->components().push_back("DefaultDetonationComp");
+	blast->settings()["detonation.explosionDamage"] = "100";
+	blast->settings()["detonation.explosionMaterial"] = "69";
+	world::ObjectTemplate* dud = range.templates.create("GenericProjectile", "dud");
+	dud->components().push_back("DefaultDetonationComp");
+	world::ObjectTemplate* emp = range.templates.create("GenericProjectile", "emp");
+	emp->components().push_back("DefaultDetonationComp");
+	emp->settings()["detonation.isEMPWeapon"] = "1";
+	emp->settings()["detonation.explosionMaterial"] = "0";
+	const int bot = range.world->addPlayer("Bot", 1, true);
+	CHECK(range.world->spawnSoldier(bot));
+	game::GameWorld::PlayerInfo info;
+	range.world->playerInfo(bot, info);
+	const physics::Vec3 origin = info.position + physics::Vec3 {0, 1, 0};
+	CHECK(range.world->detonate("dud", origin) && range.world->hitPoints(info.soldier) == 100);
+	CHECK(range.world->detonate("emp", origin) && range.world->hitPoints(info.soldier) == 100);
+	CHECK(!range.world->detonate("bullet", origin));
+	CHECK(range.world->detonate("blast", origin + physics::Vec3 {6, 0, 0}));
+	CHECK(std::fabs(range.world->hitPoints(info.soldier) - 50) < 0.01f);
+	CHECK(range.world->detonate("blast", origin + physics::Vec3 {0, 0, 11})); // out of reach
+	CHECK(std::fabs(range.world->hitPoints(info.soldier) - 50) < 0.01f);
+	CHECK(range.world->detonate("blast", origin + physics::Vec3 {0, 0, 1.5f}));
+	CHECK(range.world->playerInfo(bot, info) && !info.alive);
 }
 
 TEST(GameWorld_WeaponSwitching)
@@ -436,11 +471,23 @@ TEST(GameWorld_GadgetsHealAndResupply)
 	fire.fire = true;
 	press(fire);
 	CHECK(range.world->supplyObjects().size() == 1);
+	// The rifle in hand: only the thrown hub heals.
+	game::SoldierInput rifle;
+	rifle.selectItem = 3;
+	press(rifle);
 	const float before = range.world->hitPoints(soldier);
 	for (int i = 0; i < 60; ++i) {
 		range.world->tick(1 / 30.0f);
 	}
 	CHECK(std::abs(range.world->hitPoints(soldier) - (before + 6)) < 0.5f); // 2 s at 3 a second
+	// The hub in hand heals round its holder as well (0x005d8740): 6 a
+	// second with the thrown one.
+	press(take);
+	const float holding = range.world->hitPoints(soldier);
+	for (int i = 0; i < 30; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(std::abs(range.world->hitPoints(soldier) - (holding + 6)) < 0.5f);
 	// Another throw replaces the hub.
 	for (int i = 0; i < 40; ++i) {
 		range.world->tick(1 / 30.0f);
@@ -450,8 +497,6 @@ TEST(GameWorld_GadgetsHealAndResupply)
 
 	// Ammo: empty a magazine (into the air) and reload, then throw an ammo
 	// hub (20 strength: 2 magazines a second) to get it back.
-	game::SoldierInput rifle;
-	rifle.selectItem = 3;
 	press(rifle);
 	const int magsBefore = range.world->playerWeapon()->magsLeft();
 	game::SoldierInput spray;
@@ -492,6 +537,7 @@ TEST(GameWorld_GrenadesBounceAndGoOff)
 	shell->settings()["timeToLive"] = "CRD_NONE/2.8/0/0";
 	shell->settings()["detonation.explosionDamage"] = "140";
 	shell->settings()["detonation.explosionRadius"] = "9";
+	shell->settings()["detonation.explosionMaterial"] = "69"; // Unl_Grenade_Frag's
 	shell->settings()["gravityModifier"] = "0.55";
 	world::ObjectTemplate* container = range.templates.create("ItemContainer", "UnlockEU_AssaultPlayer0");
 	container->children().push_back({"unl_grenade_frag", {}, {}});
@@ -581,6 +627,7 @@ TEST(GameWorld_MinesAndC4)
 		giveGadget(range, "unl_mine_antipersonnel", mine);
 		mine->settings()["detonation.explosionDamage"] = "200";
 		mine->settings()["detonation.explosionRadius"] = "8";
+		mine->settings()["detonation.explosionMaterial"] = "50"; // Unl_Mine_AntiPersonnel's
 		mine->settings()["detonation.explosionConeAngle"] = "45";
 		mine->settings()["detonation.triggerRadius"] = "3";
 		mine->settings()["detonation.triggerAngle"] = "30";
@@ -621,6 +668,7 @@ TEST(GameWorld_MinesAndC4)
 		world::ObjectTemplate* c4 = nullptr;
 		giveGadget(range, "unl_c4", c4);
 		c4->settings()["detonation.explosionDamage"] = "1000";
+		c4->settings()["detonation.explosionMaterial"] = "80"; // Unl_c4's; no radius: 10 by default
 		CHECK(range.world->spawnPlayer(2) != nullptr);
 		throwGadget(range);
 		for (int i = 0; i < 90; ++i) {
@@ -654,6 +702,8 @@ TEST(GameWorld_DefibrillatorRevives)
 	world::ObjectTemplate* shock = range.templates.create("GenericProjectile", "shock");
 	shock->settings()["damage"] = "1000";
 	shock->settings()["damageMandownSoldiers"] = "1";
+	shock->settings()["collision.resurrectDamage"] = "20000"; // its ResurrectCollisionComp
+	shock->settings()["collision.restoreHP"] = "120";
 	shock->settings()["timeToLive"] = "CRD_NONE/0.05/0/0";
 	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
 	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
@@ -683,7 +733,8 @@ TEST(GameWorld_DefibrillatorRevives)
 	}
 	range.world->playerInfo(bot, info);
 	CHECK(info.alive && !info.manDown && range.count("PlayerRevived") == 1 && range.count("PlayerDeath") == 0);
-	CHECK(std::abs(range.world->hitPoints(info.soldier) - 25) < 1e-3f);
+	// Raised to the shock's restoreHP (0x004c1960).
+	CHECK(std::abs(range.world->hitPoints(info.soldier) - 100) < 1e-3f);
 	// Left down, the body goes after the man-down time.
 	range.world->setPlayerInput({});
 	range.world->setManDownTime(1);
@@ -710,6 +761,8 @@ TEST(Bots_ReviveTeammates)
 	world::ObjectTemplate* shock = range.templates.create("GenericProjectile", "shock");
 	shock->settings()["damage"] = "1000";
 	shock->settings()["damageMandownSoldiers"] = "1";
+	shock->settings()["collision.resurrectDamage"] = "20000";
+	shock->settings()["collision.restoreHP"] = "120";
 	shock->settings()["timeToLive"] = "CRD_NONE/0.05/0/0";
 	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
 	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");

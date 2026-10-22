@@ -146,28 +146,51 @@ TEST(Commander_OnePerTeam)
 	// Only once the game mode enables it (sh_setEnableCommander).
 	CHECK(!world.setCommander(2, a) && world.commander(2) == -1);
 	world.setCommanderEnabled(true);
-	// The first applicant takes over; the second waits.
+	// Applications wait out the apply period (15 s), then the
+	// highest-ranked applicant is offered command and answers.
 	world.joinSquad(a, world.openSquad(2));
+	const int d = world.addPlayer("D", 2, false);
+	world.setPlayerRank(d, 3);
+	world.setPlayerRank(a, 3);
 	world.applyForCommander(a);
+	field.run(5);
+	world.applyForCommander(d);
 	world.applyForCommander(b);
-	CHECK(world.commander(2) == a && world.commander(1) == -1);
+	field.run(9.8f);
+	CHECK(world.commander(2) == -1 && world.commanderOffer(2) == -1);
+	field.run(0.3f);
+	CHECK(world.commanderOffer(2) == a && world.commander(2) == -1); // the first of the highest
+	// Declined: the next best at once.
+	world.answerCommanderOffer(a, false);
+	CHECK(world.commanderOffer(2) == d);
+	world.answerCommanderOffer(b, true); // not offered: nothing
+	CHECK(world.commander(2) == -1);
+	world.answerCommanderOffer(d, true);
+	CHECK(world.commander(2) == d && world.commander(1) == -1 && world.commanderOffer(2) == -1);
 	game::GameWorld::PlayerInfo info;
-	CHECK(world.playerInfo(a, info) && info.commander && info.squad == 0); // it left its squad
-	CHECK(!world.joinSquad(a, 1));
+	CHECK(world.playerInfo(d, info) && info.commander);
 	CHECK(!field.events.empty() && field.events.back().first == "ChangedCommander");
 	CHECK(field.events.back().second.size() == 3 && field.events.back().second[0].asInt() == 2
 		&& field.events.back().second[1].kind == game::ScriptValue::Kind::None
-		&& field.events.back().second[2].kind == game::ScriptValue::Kind::Player && field.events.back().second[2].i == a);
+		&& field.events.back().second[2].kind == game::ScriptValue::Kind::Player && field.events.back().second[2].i == d);
+	// The commander leaves its squad.
+	world.setCommander(2, a);
+	CHECK(world.playerInfo(a, info) && info.commander && info.squad == 0);
+	CHECK(!world.joinSquad(a, 1));
 	// Not across teams.
 	CHECK(!world.setCommander(1, a) && world.commander(1) == -1);
 	CHECK(world.setCommander(1, c) && world.commander(1) == c);
-	// Resigning hands it to the next applicant.
+	// Taking command drops the applicants (POSFILLED); after a
+	// resignation the next applicant is offered command 10 s later.
+	world.applyForCommander(b);
 	world.resignCommander(a);
+	CHECK(world.commander(2) == -1 && world.playerInfo(a, info) && !info.commander);
+	field.run(9.9f);
+	CHECK(world.commanderOffer(2) == -1);
+	field.run(0.2f);
+	CHECK(world.commanderOffer(2) == b);
+	world.answerCommanderOffer(b, true);
 	CHECK(world.commander(2) == b);
-	CHECK(world.playerInfo(a, info) && !info.commander);
-	// A human applying takes over from a bot (provisional).
-	world.applyForCommander(a);
-	CHECK(world.commander(2) == a);
 	// Disabled, nobody commands.
 	world.setCommanderEnabled(false);
 	CHECK(world.commander(1) == -1 && world.commander(2) == -1);
@@ -186,11 +209,13 @@ TEST(Commander_OrdersAndBots)
 	world.joinSquad(member, 1);
 	CHECK(world.spawnSoldier(leader) && world.spawnSoldier(member));
 	// Only the commander orders, and only squads that exist.
-	CHECK(!world.issueOrder(2, 1, game::GameWorld::OrderType::Defend, 0, 60, leader));
-	CHECK(!world.issueOrder(2, 4, game::GameWorld::OrderType::Defend, 0, 60, boss));
-	CHECK(world.issueOrder(2, 1, game::GameWorld::OrderType::Defend, 0, 60, boss));
+	// (Beyond the order's 80 m, orderRadius, so they set off.)
+	CHECK(!world.issueOrder(2, 1, game::GameWorld::OrderType::MapDefend, 0, 160, leader));
+	CHECK(!world.issueOrder(2, 4, game::GameWorld::OrderType::MapDefend, 0, 160, boss));
+	CHECK(world.issueOrder(2, 1, game::GameWorld::OrderType::MapDefend, 0, 160, boss));
 	const game::GameWorld::SquadOrder* order = world.squadOrder(2, 1);
-	CHECK(order && order->type == game::GameWorld::OrderType::Defend && order->position.z == 60 && !order->accepted);
+	CHECK(order && order->type == game::GameWorld::OrderType::MapDefend && order->position.z == 160 && !order->accepted
+		&& order->radius == 80);
 	world.acceptOrder(member, true); // not the leader's
 	CHECK(!world.squadOrder(2, 1)->accepted);
 	world.acceptOrder(leader, true);
@@ -212,23 +237,24 @@ TEST(Commander_OrdersAndBots)
 	CHECK(world.squadOrder(2, 1) == nullptr);
 }
 
-TEST(Commander_BotTakesCommand)
+TEST(Commander_BotsNeverApply)
 {
 	Field field;
 	game::GameWorld& world = *field.world;
 	world.setCommanderEnabled(true);
-	const int bot = world.addPlayer("Bot", 1, true);
+	world.addPlayer("Bot", 1, true);
 	const int other = world.addPlayer("Other", 1, true);
 	world.joinSquad(other, 1);
 	Console console;
 	game::BotSettings settings;
 	game::registerBotConsoleMethods(console, settings);
 	game::BotManager bots(world, settings);
-	bots.update(1 / 30.0f);
-	CHECK(world.commander(1) == bot && world.commander(2) == -1);
-	// It sends its squad at the point it doesn't hold.
-	const game::GameWorld::SquadOrder* order = world.squadOrder(1, 1);
-	CHECK(order && order->type == game::GameWorld::OrderType::Attack && order->position.x == -100 && order->accepted);
+	for (int i = 0; i < 30 * 20; ++i) {
+		bots.update(1 / 30.0f);
+		world.tick(1 / 30.0f);
+	}
+	// AIDLL's commander is the team's AI, not a player.
+	CHECK(world.commander(1) == -1 && world.commander(2) == -1 && world.commanderOffer(1) == -1);
 }
 
 TEST(Commander_OrbitalStrike)
@@ -266,10 +292,12 @@ TEST(Commander_OrbitalStrike)
 	field.run(3);
 	CHECK(field.alive(near) && field.alive(edge));
 	field.run(3);
-	CHECK(!field.alive(near) && !field.alive(edge));
-	CHECK(field.alive(far) && field.alive(mate));
+	// Its projectile (damage 3000) kills the soldier it lands on; its blast
+	// is an EMP (detonation.isEMPWeapon: the detonation hands it to the
+	// game logic's EMP, 0x005a7ab0), which hurts nobody.
+	CHECK(!field.alive(near) && field.alive(edge) && field.alive(far) && field.alive(mate));
 	game::GameWorld::PlayerInfo info;
-	CHECK(world.playerInfo(boss, info) && info.kills == 2); // the commander's kills
+	CHECK(world.playerInfo(boss, info) && info.kills == 1); // the commander's kill
 	CHECK(world.strikes().empty());
 	// Ready again after 115 s, not before.
 	field.run(105);
@@ -334,13 +362,16 @@ TEST(Commander_UavAndScanReveal)
 	CHECK(!world.isRevealed(inside, 2) && !world.uavArea(2, at, radius) && !world.abilityReady(2, Ability::Uav));
 	field.run(5);
 	CHECK(world.abilityReady(2, Ability::Uav));
-	// The satellite scan (commander_movement_analyst) shows everyone for 11 s.
+	// The satellite scan (commander_movement_analyst) shows everyone for
+	// 11 s, to the commander only.
 	field.place("commander_movement_analyst", 2, -220, -200);
+	const int mate = field.soldier(2, -300, -300);
 	CHECK(world.commanderAction(2, Ability::Satellite, 0, 0));
 	field.run(0.1f);
-	CHECK(world.isRevealed(inside, 2) && world.isRevealed(outside, 2));
+	const std::vector<int> seen = world.scannedPlayers(world.commander(2));
+	CHECK(seen.size() == 2 && world.scannedPlayers(mate).empty() && !world.isRevealed(outside, 2));
 	field.run(11);
-	CHECK(!world.isRevealed(outside, 2));
+	CHECK(world.scannedPlayers(world.commander(2)).empty());
 	CHECK(std::fabs(world.abilityState(2, Ability::Satellite).timeUntilReady - (27 - 11.1f)) < 0.2f);
 }
 
@@ -382,4 +413,45 @@ TEST(Commander_SupplyDrop)
 	// Gone after supplyDropNumSecsToLive (300 s).
 	field.run(240);
 	CHECK(world.supplyCrates().empty() && field.objects.find(crate) == nullptr);
+}
+
+TEST(Commander_OrderKindsAndLeaderOrders)
+{
+	using Order = game::GameWorld::OrderType;
+	// The engine's kinds (HudManager slot 0x3f4): 0-3 from the issue-order
+	// menu, 4-7 placed on the map, 10 and up drop the armed order.
+	CHECK(game::GameWorld::orderTypeFromKind(0) == Order::Move && game::GameWorld::orderTypeFromKind(1) == Order::Attack
+		&& game::GameWorld::orderTypeFromKind(2) == Order::Defend && game::GameWorld::orderTypeFromKind(7) == Order::MapRepair
+		&& game::GameWorld::orderTypeFromKind(10) == Order::None);
+	// Only 5 and 6 count as attack or defend for the scripts.
+	CHECK(game::GameWorld::isAttackOrDefend(Order::MapAttack) && game::GameWorld::isAttackOrDefend(Order::MapDefend)
+		&& !game::GameWorld::isAttackOrDefend(Order::Attack) && !game::GameWorld::isAttackOrDefend(Order::MapMove));
+	Field field;
+	game::GameWorld& world = *field.world;
+	const int leader = world.addPlayer("Lead", 2, false);
+	const int member = world.addPlayer("Member", 2, true);
+	world.joinSquad(leader, 1);
+	world.joinSquad(member, 1);
+	// A squad leader orders his own squad, accepted at once; a member can't.
+	CHECK(!world.issueSquadLeaderOrder(member, Order::MapAttack, 10, 20));
+	CHECK(world.issueSquadLeaderOrder(leader, Order::MapAttack, 10, 20));
+	const game::GameWorld::SquadOrder* order = world.squadLeaderOrder(2, 1);
+	CHECK(order && order->type == Order::MapAttack && order->accepted && !order->fromCommander && order->position.z == 20);
+	CHECK(world.squadOrder(2, 1) == nullptr); // apart from the commander's
+	CHECK(world.issueSquadLeaderOrder(leader, Order::None, 0, 0) && world.squadLeaderOrder(2, 1) == nullptr);
+}
+
+TEST(Commander_AiUsesToolsWithoutCommander)
+{
+	Field field;
+	if (!field.loaded) {
+		return;
+	}
+	game::GameWorld& world = *field.world;
+	world.setCommanderEnabled(true);
+	field.place("commander_orbital_strike_64", 1, 200, 200);
+	// Nobody commands: a player's request is refused, the game's own
+	// (IBFCommander, no sender) goes through.
+	CHECK(world.commander(1) == -1 && !world.commanderAction(1, Ability::Artillery, 0, -60));
+	CHECK(world.commanderAction(1, Ability::Artillery, 0, -60, true) && world.strikes().size() == 1);
 }

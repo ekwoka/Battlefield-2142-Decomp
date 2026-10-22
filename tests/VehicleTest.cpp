@@ -61,7 +61,11 @@ struct Car {
 		world::ObjectTemplate* steering = templates.create("RotationalBundle", "car_nav");
 		steering->settings()["inputToYaw"] = "PIYaw";
 		steering->settings()["maxRotation"] = "32/0/0";
+		steering->settings()["minRotation"] = "-32/0/0";
 		steering->settings()["maxSpeed"] = "1/0/0";
+		steering->settings()["acceleration"] = "100/0/0";
+		steering->settings()["automaticReset"] = "1";
+		steering->settings()["snapToZeroOnNoInput"] = "1";
 		world::ObjectTemplate* wheel = templates.create("Spring", "car_wheel");
 		wheel->settings()["strength"] = "40";
 		wheel->settings()["damping"] = "8";
@@ -120,6 +124,45 @@ TEST(Vehicle_WheelSpinStep)
 	CHECK(near(game::wheelSpinStep(-2, 0, 24.5f, 24.5f, 1), -1));
 }
 
+TEST(Vehicle_RotationalBundleAxis)
+{
+	// eu_fav's steering (EU_FAV_nav_LF): automaticReset, so the angle heads
+	// for input x maxRotation at |acceleration| (100) degrees a second.
+	game::RotationAxis nav;
+	nav.minRotation = -32;
+	nav.maxRotation = 32;
+	nav.maxSpeed = 1;
+	nav.acceleration = 100;
+	nav.automaticReset = true;
+	nav.snapToZero = true;
+	float angle = 0, speed = 0;
+	game::rotationAxisStep(nav, 1, 0.1f, angle, speed);
+	CHECK(near(angle, 10));
+	for (int i = 0; i < 5; ++i) {
+		game::rotationAxisStep(nav, 1, 0.1f, angle, speed);
+	}
+	CHECK(near(angle, 32)); // at the limit
+	game::rotationAxisStep(nav, 0.5f, 0.1f, angle, speed);
+	CHECK(near(angle, 22)); // back towards half the lock
+	game::rotationAxisStep(nav, 0, 0.1f, angle, speed);
+	CHECK(angle == 0); // snapToZeroOnNoInput
+	game::rotationAxisStep(nav, -1, 0.1f, angle, speed);
+	CHECK(near(angle, -10));
+	game::rotationAxisStep(nav, 1, 0.1f, angle, speed);
+	CHECK(near(angle, 10)); // the other way: snapped to 0 first
+	// Without automaticReset (a turret): the speed heads for input x
+	// maxSpeed at |acceleration|, and the angle moves by it.
+	game::RotationAxis turret;
+	turret.maxSpeed = 90;
+	turret.acceleration = 450;
+	angle = speed = 0;
+	game::rotationAxisStep(turret, 1, 0.1f, angle, speed);
+	CHECK(near(speed, 45) && near(angle, 4.5f));
+	game::rotationAxisStep(turret, 1, 0.1f, angle, speed);
+	game::rotationAxisStep(turret, 1, 0.1f, angle, speed);
+	CHECK(near(speed, 90) && near(angle, 4.5f + 9 + 9));
+}
+
 TEST(Vehicle_GearRatios)
 {
 	game::EngineSettings engine;
@@ -167,8 +210,15 @@ TEST(Vehicle_CarSettlesDrivesTurnsAndBrakes)
 	CHECK(std::fabs(car.body.velocity.y) < 0.05f);
 	CHECK(std::fabs(car.body.position.x) < 0.01f && std::fabs(car.body.position.z) < 0.05f);
 
+	// Standing with no throttle it holds the brake (0x0064e810), and the
+	// clutch, which starts out, stays out while braking.
+	CHECK(car.vehicle->braking() && car.vehicle->clutch() == 0 && car.vehicle->gear() == 1);
+	// Throttle: the clutch comes in at 2 / gearChangeTime a second.
+	car.run(1, {1, 0});
+	CHECK(!car.vehicle->braking() && car.vehicle->clutch() > 0 && car.vehicle->clutch() < 0.2f);
+
 	// Full throttle for three seconds.
-	car.run(90, {1, 0});
+	car.run(89, {1, 0});
 	const float speed = car.forwardSpeed();
 	std::fprintf(stderr, "  after 3 s: %.1f m/s, at z %.1f, gear %d, rpm %.2f\n", speed, car.body.position.z,
 		car.vehicle->gear(), car.vehicle->rpm());

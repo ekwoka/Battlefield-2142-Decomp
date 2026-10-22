@@ -175,6 +175,8 @@ TEST(RagDoll_KilledSoldierFallsToRestAndGetsUpWhenRevived)
 	world::ObjectTemplate* shock = game.templates.create("GenericProjectile", "shock");
 	shock->settings()["damage"] = "1000";
 	shock->settings()["damageMandownSoldiers"] = "1";
+	shock->settings()["collision.resurrectDamage"] = "20000";
+	shock->settings()["collision.restoreHP"] = "120";
 	shock->settings()["timeToLive"] = "CRD_NONE/0.05/0/0";
 	world::ObjectTemplate* kit = game.templates.create("Kit", "EU_Assault");
 	kit->children().push_back({"eu_ar_rifle", {}, {}});
@@ -255,7 +257,8 @@ TEST(RagDoll_KilledSoldierFallsToRestAndGetsUpWhenRevived)
 	}
 	CHECK(game.world->soldierCapsules(soldier).size() > 0); // hit where it lies
 
-	// The medic shocks it back: up where it lay, the get-up animation playing.
+	// The medic shocks it back: up where it lay, out of the ragdoll (no
+	// get-up animation: BF2142.exe never plays reviveOnBack/OnStomach).
 	game::SoldierInput input;
 	input.selectItem = 5;
 	game.world->setPlayerInput(input);
@@ -288,7 +291,8 @@ TEST(RagDoll_KilledSoldierFallsToRestAndGetsUpWhenRevived)
 	for (const std::string& name : playing) {
 		gettingUp = gettingUp || name == "reviveOnBack" || name == "reviveOnStomach";
 	}
-	CHECK(gettingUp);
+	CHECK(!gettingUp);
+	CHECK(std::abs(game.world->hitPoints(soldier) - 100) < 1e-3f);
 }
 
 TEST(RagDoll_SeatedSoldierTakesTheSeatsPose)

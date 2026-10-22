@@ -25,7 +25,7 @@ constexpr int kLoadExponent = 3;              // 0x00a83e9c
 constexpr float kGripScale = 1;               // 0x00a83e90
 constexpr float kSlopeInFirstGear = 0;        // 0x00a83ef4
 constexpr float kBrakeLatSpeed = 1.5f;        // 0x00a83ef8
-constexpr float kAirSpinDamping = 0.99f;      // provisional
+constexpr float kAirSpinDamping = 0.99f;      // not decoded: the wheel node 0x006b7910 off the ground
 
 const std::string* setting(const world::ObjectTemplate& t, const char* name)
 {
@@ -204,7 +204,8 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 	auto vehicle = std::make_unique<Vehicle>();
 	bool haveEngine = false;
 	struct Steering {
-		float maxSteer = 0, speed = 1;
+		float maxSteer = 0;
+		RotationAxis axis;
 		std::string name;
 	};
 	// Depth-first over the tree with each node's offset and rotation.
@@ -222,7 +223,18 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 				const std::string* input = setting(t, "inputToYaw");
 				if (input && *input == "PIYaw") {
 					steering.maxSteer = vector(t, "maxRotation").x;
-					steering.speed = std::max(0.01f, vector(t, "maxSpeed", {1, 0, 0}).x);
+					RotationAxis& a = steering.axis;
+					a.minRotation = vector(t, "minRotation").x;
+					a.maxRotation = steering.maxSteer;
+					a.maxSpeed = vector(t, "maxSpeed").x;
+					a.acceleration = vector(t, "acceleration").x;
+					a.deAcceleration = vector(t, "deAcceleration").x;
+					a.continuousSpeed = vector(t, "continousRotationSpeed").x;
+					a.automaticReset = number(t, "automaticReset", 0) != 0;
+					a.snapToZero = number(t, "snapToZeroOnNoInput", 0) != 0;
+					a.useDeAcceleration = number(t, "useDeAcceleration", 0) != 0;
+					a.capMaxSpeed = number(t, "capMaxSpeed", 0) != 0;
+					a.maxSpeedMod = number(t, "maxSpeedMod", 0);
 					steering.name = t.name();
 				}
 			} else if (type == "Spring") {
@@ -232,7 +244,7 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 				wheel.strength = number(t, "strength", 0);
 				wheel.damping = number(t, "damping", 0);
 				wheel.maxSteer = steering.maxSteer;
-				wheel.steerSpeed = steering.speed;
+				wheel.steerAxis = steering.axis;
 				wheel.spring = t.name();
 				wheel.steering = steering.name;
 				vehicle->m_wheels.push_back(wheel);
@@ -256,57 +268,147 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 	return vehicle;
 }
 
-// The engine's part of 0x0064e920 for newCar2: the rpm from the wheels'
-// mean, direction changes when nearly stopped, and gears by rpm.
-void Vehicle::updateEngine()
+// The engine's update (0x0064e920) for newCar2 (engine flag 0x80):
+// - Braking (0x0064e810, dead zone 0.04): the throttle against the way
+//   the engine turns (rpm beyond +-0.04), or no throttle while it is
+//   nearly still.
+// - The rpm (0x0064e6f0, then the newCar2 part): an rpm the throttle (times
+//   the clutch) no longer holds decays, x0.9 while braking, then x0.96
+//   without throttle (engine-inertia3) or x0.99 with it (engine-inertia2).
+//   Nearly still (|rpm| < 0.05) it changes from first to reverse when the
+//   throttle is under -0.5 and back over -0.05. The new rpm is the wheels'
+//   mean between minRpm and maxRpm, blended by the clutch with the old:
+//   clutch x wheels + (1 - clutch) x |old|, negative in reverse, within
+//   -1 .. 1.2.
+// - The clutch: it comes in at 2 / gearChangeTime a second, and goes out
+//   as fast while a gear change is under way or while braking. Braking
+//   with the clutch out (under 0.05) and the rpm under 0.1 puts it in
+//   first; a change under way takes effect once the clutch is out.
+// - Changes: up above gearUp with the clutch in (over 0.95), below the top
+//   gear, but not while climbing (the nose up more than 0.174, sin 10
+//   degrees, 0x00a78ffc) and moving forward; down when the rpm in the lower
+//   gear would be under 0.55, from second up, with the clutch in.
+void Vehicle::updateEngine(const physics::RigidBody& body, float seconds)
 {
+	constexpr float kDeadZone = 0.04f;  // 0x0064e810 for newCar2 (0.1 otherwise)
+	constexpr float kInertiaOff = 0.96f; // engine-inertia3 (0x00a79000)
+	constexpr float kInertiaOn = 0.99f;  // engine-inertia2 (0x00a79010)
+	constexpr float kClimb = 0.174f;     // 0x00a78ffc
 	const float wheelRpm = m_wheelRpmCount > 0 ? m_wheelRpmSum / static_cast<float>(m_wheelRpmCount) : 0.0f;
 	m_wheelRpmSum = 0;
 	m_wheelRpmCount = 0;
 	const float throttle = m_input.throttle;
+	const float clutched = throttle * m_clutch;
+	// 0x0064e810
+	const int towards = throttle < -kDeadZone ? -1 : throttle > kDeadZone ? 1 : 0;
+	m_braking = m_rpm < -kDeadZone ? towards == 1 : (m_rpm > kDeadZone ? 1 : 0) + towards == 0;
+	// 0x0064e6f0
+	if ((clutched < m_rpm && m_rpm > 0) || (clutched > m_rpm && m_rpm < 0)) {
+		if (m_braking) {
+			m_rpm *= 0.9f;
+		}
+		m_rpm *= std::fabs(throttle) < 0.05f ? kInertiaOff : kInertiaOn;
+	}
 	if (std::fabs(m_rpm) < 0.05f) {
 		if (m_gear == 1 && throttle < -0.5f) {
-			m_gear = 0;
+			m_shift = -1;
 		} else if (m_gear == 0 && throttle > -0.05f) {
-			m_gear = 1;
+			m_shift = 1;
 		}
 	}
-	m_braking = (m_gear >= 1 && throttle < 0) || (m_gear == 0 && throttle > 0);
-	float rpm = std::max(0.0f, (std::fabs(wheelRpm) - m_engine.minRpm) / (m_engine.maxRpm - m_engine.minRpm));
+	const float wheels = std::max(0.0f, (std::fabs(wheelRpm) - m_engine.minRpm) / (m_engine.maxRpm - m_engine.minRpm));
+	float rpm = m_clutch * wheels + (1 - m_clutch) * std::fabs(m_rpm);
 	if (m_gear == 0) {
 		rpm = -rpm;
 	}
 	m_rpm = std::clamp(rpm, -1.0f, 1.2f);
-	if (m_gear >= 1) {
-		if (m_rpm > m_engine.gearUp && m_gear < m_engine.numberOfGears) {
-			++m_gear;
-		} else if (m_gear >= 2
-			&& m_rpm / m_engine.gearRatio(m_gear) * m_engine.gearRatio(m_gear - 1) < 0.55f) {
-			--m_gear;
+	// The clutch.
+	const int shift = m_shift;
+	if (m_clutch < 1 || m_shift != 0 || m_braking) {
+		const float step = 2 * seconds / m_engine.gearChangeTime;
+		if (m_shift == 0 && !m_braking) {
+			m_clutch = std::min(1.0f, m_clutch + step);
+		} else {
+			m_clutch = std::max(0.0f, m_clutch - step);
 		}
+	}
+	if (m_braking && m_clutch < 0.05f && m_rpm < 0.1f) {
+		m_gear = 1;
+	}
+	if (shift != 0 && m_clutch <= 0.05f) {
+		m_gear += shift;
+		m_shift = 0;
+	}
+	// Changes.
+	if (m_rpm > m_engine.gearUp && m_gear < m_engine.numberOfGears && m_clutch > 0.95f) {
+		const Vec3& forward = body.rotation.rows[2];
+		if (forward.y < kClimb || physics::dot(forward, body.velocity) <= 0) {
+			m_shift = 1;
+		}
+	} else if (m_gear >= 2 && m_clutch > 0.95f
+		&& m_rpm / m_engine.gearRatio(m_gear) * m_engine.gearRatio(m_gear - 1) < 0.55f) {
+		m_shift = -1;
 	}
 }
 
 void Vehicle::tick(physics::RigidBody& body, const physics::Ground& ground, float seconds, float grip, float gravity)
 {
-	updateEngine();
+	updateEngine(body, seconds);
 	for (Wheel& wheel : m_wheels) {
 		updateWheel(wheel, body, ground, seconds, grip, gravity);
+	}
+}
+
+void rotationAxisStep(const RotationAxis& axis, float input, float seconds, float& angle, float& speed)
+{
+	constexpr float kMaxSpeedMod = 30; // rotationalbundle-max-speed-mod (0x00a67490)
+	if (axis.acceleration == 0 && axis.continuousSpeed == 0) {
+		return;
+	}
+	if (axis.snapToZero && ((input < 0.05f && angle > 0) || (input > -0.05f && angle < 0))) {
+		angle = 0;
+		speed = 0;
+	}
+	const float scale = axis.automaticReset ? axis.maxRotation : axis.maxSpeed;
+	float target = axis.acceleration > 0 ? input * scale : axis.acceleration < 0 ? -(input * scale) : 0.0f;
+	if (axis.capMaxSpeed) {
+		target = std::clamp(target, -axis.maxSpeed * kMaxSpeedMod, axis.maxSpeed * kMaxSpeedMod);
+	}
+	if (axis.maxSpeedMod != 0) {
+		const float cap = std::fabs(axis.maxSpeed * axis.maxSpeedMod);
+		target = std::clamp(target, -cap, cap);
+	}
+	const float up = std::fabs(axis.acceleration) * seconds;
+	const float down = std::fabs(axis.useDeAcceleration ? axis.deAcceleration : axis.acceleration) * seconds;
+	float& moving = axis.automaticReset ? angle : speed;
+	if (target > moving) {
+		moving = std::min(target, moving + up);
+	} else if (target < moving) {
+		moving = std::max(target, moving - down);
+	}
+	if (!axis.automaticReset) {
+		angle += seconds * speed + seconds * axis.continuousSpeed;
+	}
+	if (axis.maxRotation != 0 || axis.minRotation != 0) {
+		if (angle > axis.maxRotation) {
+			angle = axis.maxRotation;
+		} else if (angle < axis.minRotation) {
+			angle = axis.minRotation;
+		}
+	} else if (angle > 360) {
+		angle -= 360;
+	} else if (angle < -360) {
+		angle += 360;
 	}
 }
 
 void Vehicle::updateWheel(Wheel& wheel, physics::RigidBody& body, const physics::Ground& ground, float seconds,
 	float grip, float gravity)
 {
-	// Steering (provisional: maxSpeed degrees per tick, straight back
-	// without input).
-	if (wheel.maxSteer != 0) {
-		const float target = m_input.steer * wheel.maxSteer;
-		if (m_input.steer == 0) {
-			wheel.steer = 0;
-		} else {
-			wheel.steer += std::clamp(target - wheel.steer, -wheel.steerSpeed, wheel.steerSpeed);
-		}
+	// Steering: the RotationalBundle above the wheel (0x00565a20 runs the
+	// axis while its maxSpeed is not 0).
+	if (wheel.maxSteer != 0 && wheel.steerAxis.maxSpeed != 0) {
+		rotationAxisStep(wheel.steerAxis, m_input.steer, seconds, wheel.steer, wheel.steerRate);
 	}
 	const Mat3 wheelRotation = Mat3::fromYawPitchRoll({wheel.steer, 0, 0}) * body.rotation;
 	const Vec3 right = wheelRotation.rows[0];
@@ -351,7 +453,9 @@ void Vehicle::updateWheel(Wheel& wheel, physics::RigidBody& body, const physics:
 		if ((m_gear < 1 && throttle > 0) || (m_gear >= 1 && throttle <= 0)) {
 			throttle = 0; // slot 0x1a4: only towards the gear's direction
 		}
-		const float engineTorque = m_engine.torque * throttle; // the torque curve is flat (0x374)
+		// Slot 0x1a4: the torque curve (flat, 0x374) times the throttle, times
+		// the clutch with useClutchedTorque.
+		const float engineTorque = m_engine.torque * throttle * (m_engine.useClutchedTorque ? m_clutch : 1.0f);
 		const float driveTorque = engineTorque * m_engine.differential * ratio * kDriveTorqueScale;
 		// 0x006b7460: the downhill part of the wheel's share of the weight,
 		// along the wheel, times the radius.

@@ -356,20 +356,21 @@ ScriptValue ScriptBridge::playerParam(const std::string& name, int index, const 
 	if (name == "commander") {
 		return ScriptValue::integer(player.commander ? 1 : 0);
 	}
-	// The squad's order (player slots 0x15c position, 0x164 radius, 0x16c
-	// accepted attack or defend).
+	// The squad leader's order (squad slot 0x10, 0x004c2ee0; player slots
+	// 0x15c position 0x00593b90, 0x164 radius 0x006766b0, 0x168 accepted
+	// 0x00592120, 0x16c accepted and of kind 5 or 6 0x00592160). The
+	// radius is the player's own (+0x144: 80, an integer), order or not.
 	if (name == "orderPosition" || name == "orderRadius" || name == "ifAcceptedOrder"
 		|| name == "ifAcceptedAttackDefendOrder") {
-		const GameWorld::SquadOrder* order = player.squad ? m_world.squadOrder(player.team, player.squad) : nullptr;
+		const GameWorld::SquadOrder* order = player.squad ? m_world.squadLeaderOrder(player.team, player.squad) : nullptr;
 		if (name == "orderPosition") {
 			return order ? ScriptValue::vec3(order->position.x, order->position.y, order->position.z)
 						 : ScriptValue::vec3(0, 0, 0);
 		}
 		if (name == "orderRadius") {
-			return ScriptValue::number(order ? order->radius : 0.0);
+			return ScriptValue::integer(80);
 		}
-		const bool attackDefend = order
-			&& (order->type == GameWorld::OrderType::Attack || order->type == GameWorld::OrderType::Defend);
+		const bool attackDefend = order && GameWorld::isAttackOrDefend(order->type);
 		return ScriptValue::integer(order && order->accepted && (name == "ifAcceptedOrder" || attackDefend) ? 1 : 0);
 	}
 	if (name == "name") {

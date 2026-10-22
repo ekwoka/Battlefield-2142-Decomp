@@ -52,7 +52,10 @@ struct StrategyCondition {
 	int type = 14; // Ticket 13, ControlPoint 14, Time 15, StartTime 16, Attacks 17, Defences 18,
 	               // NumberOfFriendlyAreas 19, NumberOfNeutralAreas 20, NumberOfHostileAreas 21
 	float constant = 0;
-	Strength strength = Strength::Required; // provisional default (setConditionStrength follows each create in the data)
+	// setConditionStrength follows every createConstantCondition in the
+	// shipped AIDefaultStrategies.ai, so the default never counts; where
+	// the original keeps it was not found.
+	Strength strength = Strength::Required;
 };
 
 struct Strategy {

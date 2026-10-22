@@ -51,9 +51,9 @@
 //
 // Strategy (src/AI/Strategy): each side's SAI picks a strategy and gives
 // squads attack and defend orders on strategic areas; bots go to a spot
-// inside the ordered area (0x10060300). A team without a commander gets a
-// bot for one (when the game mode enables it), which strikes contested
-// points (0x1009c050) and still uses the UAV and scan (provisional).
+// inside the ordered area (0x10060300). A team with bots and without a
+// commander has AIDLL's AI commander (not a player): it shells its own
+// points being taken with the artillery (0x1009c050; BotManager::command).
 //
 // The settings come from the game's own scripts (aiSettings.*, the
 // weaponTemplate.* lines of Objects/**/ai/Weapons.ai, aiStrategy.* and
@@ -136,9 +136,15 @@ struct BotSettings {
 	// setVehicleBehaviour, ...) and the urgency curves (createUC*).
 	std::map<std::string, ai::VehicleSetup> vehicles;
 	std::map<std::string, ai::UrgencyCurve> curves;
-	// aiSettings.setViewDistance; AIDLL falls back to the game's view
-	// distance (IAIGameEffector+0x58, not traced): 120 m here (provisional).
-	float viewDistance = 120;
+	// aiSettings.setViewDistance (AIDLL's settings object +0x1c, -1 at
+	// first). One not set by the scripts takes the game's when the AI
+	// starts on a level (AIDLL 0x10056b20: IAIGame vt+0x58,
+	// BF2142.exe 0x008959f0, see gameViewDistance) from the level's
+	// Renderer.fogStartEndAndBase (the caller hands the level's over; the
+	// default is scene::LightSettings') and GameLogic.maximumLevelViewDistance.
+	float viewDistance = -1;
+	std::array<float, 4> levelFog {10, 100, 1, 0};
+	float levelViewDistance = 300;
 	float fieldOfView = 100; // degrees (AIDLL table 0x1012b074, mode 0)
 	float discoverCloakedDistance = 3; // aiSettings.setDiscoverCloakedEnemiesDistance
 	// weaponTemplate.* by lower-case name.
@@ -257,8 +263,6 @@ private:
 		float unstickUntil = 0;      // the jump's stand-in (see steer)
 		float unstickSide = 1;
 		ai::DriveState drive;
-		float wedgedSince = -1, blockedUntil = 0;
-		bool blockedAhead = true;
 		float lastYaw = 0;           // the vehicle's, for its turn rate
 		float lastYawAt = -1;
 		// Strategic waypoints and areas on the way to the goal (0x10060300).
@@ -280,7 +284,6 @@ private:
 		// vehicle's object for RepairVehicle).
 		int assistTarget = -1;
 		uint32_t repairTarget = 0;
-		float assistFiredAt = -100;
 		// c4 (the bot's charge memory, bot+0x1b8): placed where, at which
 		// area, when (it lapses after 240 s); and the plan's step.
 		bool c4Placed = false;
@@ -391,6 +394,7 @@ private:
 	float m_commandIn = 0; // seconds to the commander's next look
 	float m_firstStrikeAt = 120;
 	float m_lastStrike[3] = {-1e9f, -1e9f, -1e9f};
+	bool m_humanCommander[3] = {}; // the team had a commander at the last look (AIDLL's +0x241)
 	GameWorld& m_world;
 	BotSettings m_settings;
 	std::vector<GameWorld::PlayerInfo> m_players;   // as of this update
@@ -410,5 +414,12 @@ private:
 // behaviour sets), weaponTemplate.*, aiStrategy.*, aiStrategicArea.* and
 // ai.addSAIStrategy into `settings`.
 void registerBotConsoleMethods(Console& console, BotSettings& settings);
+
+// The game's view distance for the bots (IAIGame vt+0x58, BF2142.exe
+// 0x008959f0): the distance into the fog where its density reaches 0.8
+// (t from 0 in steps of 0.01 while density(t) < 0.8, density(t) = t x base
+// below fog.w, else t^3 + fog.w; start + (end - start) t), at most the
+// level's view distance and 300 m.
+float gameViewDistance(const std::array<float, 4>& fogStartEndAndBase, float levelViewDistance);
 
 } // namespace dice::hfe::game

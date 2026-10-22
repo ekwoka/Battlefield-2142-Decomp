@@ -233,7 +233,7 @@ std::vector<PathStep> findPolygonPath(const NavMesh& mesh, uint32_t startPolygon
 // polygon edge crossed, the goal point. Empty when either point is off the
 // mesh or there is no path.
 //
-// PROVISIONAL composition: the original runs the cluster and polygon
+// The rewrite's composition (not decoded): the original runs the cluster and polygon
 // searches as separate bot-manager requests ("tryClusterPath", "tryPath")
 // and the bots' code that combines them (what it puts in the polygon
 // search's goal set +0x2c and allowed-cluster set +0x30) isn't rewritten

@@ -10,6 +10,7 @@
 // 0x005a2450), and the supply drop is 0x0043d6d0.
 #include "GameWorld.h"
 
+#include "Physics/MaterialManager.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
 
@@ -59,11 +60,6 @@ bool abilityOfRcType(const std::string& type, GameWorld::CommanderAbility& abili
 	return true;
 }
 
-float acrossSquared(const physics::Vec3& a, const physics::Vec3& b)
-{
-	return (a.x - b.x) * (a.x - b.x) + (a.z - b.z) * (a.z - b.z);
-}
-
 } // namespace
 
 // sh_setEnableCommander posts event 0x47 (0x00568640); the game modes
@@ -86,8 +82,9 @@ int GameWorld::commander(int team) const
 }
 
 // 0x004c8120: the old commander's flag goes (player slot 0x124), the new
-// one leaves its squad (0x004c7bb0) and takes it, the clients hear of it,
-// and the scripts get ChangedCommander (event 10: team, old, new).
+// one leaves its squad (0x004c7bb0) and takes it, the clients hear of it
+// (event 0x13 kind 3), the applicants are dropped, and the scripts get
+// ChangedCommander (event 10: team, old, new).
 bool GameWorld::setCommander(int team, int player)
 {
 	if (team != 1 && team != 2) {
@@ -107,19 +104,41 @@ bool GameWorld::setCommander(int team, int player)
 	side.commander = player;
 	if (player != -1) {
 		joinSquad(player, 0);
-		side.applicants.erase(std::remove(side.applicants.begin(), side.applicants.end(), player), side.applicants.end());
+		// The other applicants hear HUD_COMMANDERAPPLY_POSFILLED (PostRemote
+		// 0x22) and the list is cleared; nobody is offered command.
+		side.applicants.clear();
+		side.candidate = -1;
+		side.pickAt = -1;
 	}
 	raise("ChangedCommander", {ScriptValue::integer(team), ScriptValue::player(old), ScriptValue::player(player)});
 	return true;
 }
 
-// Commander.commanderApply (HudManager slot 0x31c): the player joins the
-// team's applicants; with no commander the best applicant takes over
-// (0x004c4fb0 picks the highest rank, the first of equals). Provisional:
-// there are no ranks without stats, so the first applicant wins, and at
-// once (the original waits out an apply period,
-// HUD_COMMANDERAPPLY_TIMETOSTART, not traced). The bots' own commander
-// (AIDLL's IBFCommander user) applies only for a team without one.
+// The SquadManager's election timings (its constructor 0x004c96c0):
+// applications wait 15 s (+0x14) before the best applicant is offered
+// command; after a resignation the next is offered it 10 s later (+0x18).
+namespace {
+constexpr double kApplyPeriod = 15;
+constexpr double kAfterResign = 10;
+} // namespace
+
+void GameWorld::setPlayerRank(int player, int rank)
+{
+	if (Player* p = findPlayer(player)) {
+		p->rank = rank;
+	}
+}
+
+// Commander.commanderApply (HudManager slot 0x31c, 0x007d7050; the
+// server's Commander event kind 4, SquadManager slot 0x60 → 0x004c7160):
+// the player joins the team's applicants. The first application while
+// nobody is being offered command starts the apply period (event 7 after
+// SquadManager +0x14, 15 s; HUD_COMMANDERAPPLY_TIMETOSTART counts down to
+// the round's start meanwhile). Not modelled: the client refusing an
+// applicant still barred after a mutiny (player slots 0x140, 0x148,
+// HUD_HUD_COMMANDER_CANNOT_APPLY_FOR_MINUTES); there is no mutiny here.
+// Bots don't apply: AIDLL never calls it (its commander is the team's
+// AI, BotManager::command).
 void GameWorld::applyForCommander(int player)
 {
 	const Player* p = findPlayer(player);
@@ -127,26 +146,69 @@ void GameWorld::applyForCommander(int player)
 		return;
 	}
 	CommanderTeam& side = m_commanders[p->team];
-	if (side.commander == player || std::find(side.applicants.begin(), side.applicants.end(), player) != side.applicants.end()) {
+	if (side.commander == player || side.candidate == player
+		|| std::find(side.applicants.begin(), side.applicants.end(), player) != side.applicants.end()) {
 		return;
+	}
+	if (side.candidate == -1 && side.applicants.empty()) {
+		side.pickAt = m_time + kApplyPeriod;
 	}
 	side.applicants.push_back(player);
-	// Provisional: a bot commanding steps down for a human applicant.
-	const Player* current = findPlayer(side.commander);
-	if (current && current->ai && !p->ai) {
-		setCommander(p->team, player);
+}
+
+// Event 7 (0x004c5070 through SquadManager slot 0x6c): the best applicant
+// (0x004c4fb0: the highest rank, the first of equals) leaves the list and
+// is offered command (PostRemote 2/0x23; the HUD queues the question,
+// 0x0079e440). One no longer on the team stays the candidate unasked, as
+// in the original. The rewrite offers only while the team has no
+// commander.
+void GameWorld::offerCommand(int team)
+{
+	CommanderTeam& side = m_commanders[team];
+	side.pickAt = -1;
+	if (side.commander != -1) {
 		return;
 	}
-	if (side.commander == -1) {
-		const int next = side.applicants.front();
-		setCommander(p->team, next);
+	side.candidate = -1;
+	auto best = side.applicants.end();
+	int bestRank = -2;
+	for (auto it = side.applicants.begin(); it != side.applicants.end(); ++it) {
+		const Player* p = findPlayer(*it);
+		if (p && p->rank > bestRank) {
+			bestRank = p->rank;
+			best = it;
+		}
+	}
+	if (best == side.applicants.end()) {
+		return;
+	}
+	side.candidate = *best;
+	side.applicants.erase(best);
+}
+
+// The candidate's answer: kind 0 (SquadManager slot 0x68, 0x004c8c20)
+// makes it the commander when it is the one offered; kind 1 (slot 0x6c,
+// 0x004c5070) passes the offer to the next applicant at once.
+void GameWorld::answerCommanderOffer(int player, bool accept)
+{
+	for (int team = 1; team <= 2; ++team) {
+		CommanderTeam& side = m_commanders[team];
+		if (side.candidate != player) {
+			continue;
+		}
+		if (accept) {
+			setCommander(team, player);
+		} else {
+			side.candidate = -1;
+			offerCommand(team);
+		}
 	}
 }
 
-// Commander.commanderResign (slot 0x320; SquadManager slot 0x68 clears the
-// commander when it is the one resigning), then the next applicant
-// (0x004c5070). Provisional: the next applicant takes over at once instead
-// of being asked first (event 0x23).
+// Commander.commanderResign (slot 0x320; the server's kind 2, SquadManager
+// slot 0x70 → 0x004c8a60): the commander steps down (PostRemote 0x25) and,
+// with applicants waiting, the next is offered command 10 s later
+// (SquadManager +0x18). An applicant resigning just leaves the list.
 void GameWorld::resignCommander(int player)
 {
 	for (int team = 1; team <= 2; ++team) {
@@ -157,7 +219,7 @@ void GameWorld::resignCommander(int player)
 		}
 		setCommander(team, -1);
 		if (!side.applicants.empty()) {
-			setCommander(team, side.applicants.front());
+			side.pickAt = m_time + kAfterResign;
 		}
 	}
 }
@@ -298,21 +360,24 @@ GameWorld::CommanderAbilityState GameWorld::abilityState(int team, CommanderAbil
 }
 
 // The server's side of the commander's tool event (vtable 0x0091e42c,
-// handler 0x0050ee10): only the team's commander may use them.
+// handler 0x0050ee10): only the team's commander may use them, or the
+// game itself (a sender that is no player: AIDLL's IBFCommander, byAi).
 // - Orbital strike and artillery: 0x005a11c0 puts the target marker on
 //   the ground (the higher of the terrain and the water) and 0x005a0bf0
 //   moves the asset's firearm orbitalBombardmentHeight over it; the delay
-//   is the firearm's launch delay in whole seconds (slot 300, provisional:
-//   fire.fireLaunchDelay, rounded as the x87 does); then 0x005a0e50 fires
-//   it straight down (0, -1, 0) for its burst (fire mode 7).
+//   is the firearm's launch delay in whole seconds (0x005c2220: the fire
+//   component's slot 300, 0x005f16f0, reads fire.fireLaunchDelay at
+//   template +0x1c; rounded as the x87 does, times 30 ticks); then
+//   0x005a0e50 fires it straight down (0, -1, 0) for its burst (fire mode
+//   7).
 // - UAV: the point is kept (0x005a23b0) and the UAV stays uavTime.
 // - Satellite scan: it runs satelliteScanTime.
 // - Supply drop (0x0043d6d0, 0x0043d510): a supply_crate at the ground's
 //   height plus supplyDropHeight; it goes after supplyDropNumSecsToLive
 //   (0x0043d880).
-bool GameWorld::commanderAction(int team, CommanderAbility ability, float x, float z)
+bool GameWorld::commanderAction(int team, CommanderAbility ability, float x, float z, bool byAi)
 {
-	if ((team != 1 && team != 2) || m_commanders[team].commander == -1) {
+	if ((team != 1 && team != 2) || (m_commanders[team].commander == -1 && !byAi)) {
 		return false;
 	}
 	if (m_assetScan <= 0) {
@@ -363,7 +428,12 @@ bool GameWorld::commanderAction(int team, CommanderAbility ability, float x, flo
 		placed->setTeam(team);
 		const float storage = number(*crate, "sharedStorageSize", 0) + number(*crate, "healStorageSize", 0)
 			+ number(*crate, "ammoStorageSize", 0);
-		m_crates.push_back({placed->id(), team, storage, commanderSettings.supplyDropNumSecsToLive});
+		Crate dropped;
+		dropped.object = placed->id();
+		dropped.team = team;
+		dropped.storage = storage;
+		dropped.timeLeft = commanderSettings.supplyDropNumSecsToLive;
+		m_crates.push_back(std::move(dropped));
 		break;
 	}
 	}
@@ -386,6 +456,21 @@ bool GameWorld::uavArea(int team, physics::Vec3& at, float& radius) const
 
 bool GameWorld::satelliteScanActive(int team) const { return abilityState(team, CommanderAbility::Satellite).active; }
 
+std::vector<int> GameWorld::scannedPlayers(int viewer) const
+{
+	std::vector<int> players;
+	const Player* p = findPlayer(viewer);
+	if (!p || (p->team != 1 && p->team != 2) || commander(p->team) != viewer || !satelliteScanActive(p->team)) {
+		return players;
+	}
+	for (const auto& owned : m_players) {
+		if (owned->alive && owned->team != p->team && (owned->team == 1 || owned->team == 2)) {
+			players.push_back(owned->id);
+		}
+	}
+	return players;
+}
+
 std::vector<uint32_t> GameWorld::supplyCrates() const
 {
 	std::vector<uint32_t> objects;
@@ -397,11 +482,14 @@ std::vector<uint32_t> GameWorld::supplyCrates() const
 
 // One round of a strike's burst: fire.batchSize projectiles (the
 // asset's projectileTemplate at its velocity) from orbitalBombardmentHeight
-// over the target, straight down. Provisional: each strays from straight
-// down by up to deviation.subProjectileDev degrees (the engine's spread of
-// sub-projectiles isn't traced), and the artillery's ballistic aim
-// (0x005a0750) is left out: from that height its shells fall almost
-// straight anyway.
+// over the target, straight down (0x005a0e50 hands the firearm the
+// direction (0, -1, 0)). The batch spreads by the firearm's
+// SimpleDeviationComp (deviation.subProjectileDev, template +0x18 of
+// 0x94e2); that component's object code is not rewritten, so here each
+// round strays uniformly within subProjectileDev degrees of straight
+// down. The ballistic solution 0x005a0750 only turns an artillery
+// asset's barrels (mode +0x44 == 1, 0x005a0bf0); it doesn't change the
+// shots' direction, so it is left out.
 void GameWorld::fireStrike(Strike& strike, StrikeFire& fire)
 {
 	const world::ObjectTemplate* t = m_templates.find(fire.fireArm);
@@ -441,18 +529,27 @@ void GameWorld::fireStrike(Strike& strike, StrikeFire& fire)
 	}
 }
 
-// Per tick: the assets are looked through once a second; strikes count
-// down and fire their bursts at the firearm's rate; a UAV reveals the
-// enemies within its radius across the ground to its team while it is up
-// (provisional: what the UAV shows is taken from the minimap's ring,
-// uavRadius); a satellite scan reveals every enemy while it runs
-// (provisional); crates fall and resupply.
+// Per tick: the assets are looked through once a second; an election
+// due offers command; strikes count down and fire their bursts at the
+// firearm's rate; crates fall and resupply. The UAV and the satellite
+// scan reveal through the server's choice of what each client hears of
+// (0x0057dc90's per-client scoping, 0x0057cfb0): while the team's UAV is
+// up every player of the team gets the enemies (their control objects:
+// the soldier, or the vehicle it rides) within uavRadius of the UAV's
+// point, measured in 3-D (0x005a27c0 gives the point, gameLogic slot
+// 0x28c the radius); while the scan runs (0x005a2370) the team's
+// commander, and only the commander, gets every enemy (radius -1).
 void GameWorld::stepCommander(float seconds)
 {
 	m_assetScan -= seconds;
 	if (m_assetScan <= 0) {
 		scanCommanderAssets();
 		m_assetScan = 1;
+	}
+	for (int team = 1; team <= 2; ++team) {
+		if (m_commanders[team].pickAt >= 0 && m_time >= m_commanders[team].pickAt) {
+			offerCommand(team);
+		}
 	}
 	for (size_t i = 0; i < m_strikes.size();) {
 		Strike& strike = m_strikes[i];
@@ -474,9 +571,7 @@ void GameWorld::stepCommander(float seconds)
 	for (int team = 1; team <= 2; ++team) {
 		physics::Vec3 at;
 		float radius = 0;
-		const bool uav = uavArea(team, at, radius);
-		const bool scan = satelliteScanActive(team);
-		if (!uav && !scan) {
+		if (!uavArea(team, at, radius)) {
 			continue;
 		}
 		for (const auto& owned : m_players) {
@@ -489,7 +584,7 @@ void GameWorld::stepCommander(float seconds)
 				continue;
 			}
 			const physics::Vec3 p {object->position().x, object->position().y, object->position().z};
-			if (scan || acrossSquared(p, at) <= radius * radius) {
+			if (physics::lengthSquared(p - at) <= radius * radius) {
 				float& left = m_revealed[{player.id, team}];
 				left = std::max(left, 2 * seconds);
 			}
@@ -498,17 +593,36 @@ void GameWorld::stepCommander(float seconds)
 	stepCrates(seconds);
 }
 
-// A supply crate (SupplyObject supply_crate): within `radius` it heals
-// its team's soldiers by healSpeed and refills their ammunition by
-// refillAmmoSpeed a second (provisional units: hit points, and a magazine
-// for every 10 as with the ammo hubs), and with workOnVehicles mends
-// vehicles by healSpeed; all from its shared storage
-// (sharedStorageSize), and with destroyWhenEmptyStorage it goes once that
-// is spent. Without a body it comes down at 5 m/s (provisional: its
-// parachute, supply_ParachuteForceDown's constantForce 5, isn't
-// simulated).
+// A supply crate (SupplyObject supply_crate; the object's update
+// 0x005d1710 runs every 0.2 s on timer event 0x1d, 0x005d1900). The
+// template (0x005d1940; saved by 0x005d10e0): radius +0x298,
+// workOnVehicles +0x2a0, workOnSoldiers +0x2a1 (default 1), healSpeed
+// +0x2a8, refillAmmoSpeed +0x2ac, healStorageSize +0x2b4 and
+// ammoStorageSize +0x2b8 (-1: none), sharedStorageSize +0x2bc,
+// destroyWhenEmptyStorage +0x2cc. Each update, for its team (or every
+// team when it has none):
+// - every soldier, and with workOnVehicles every vehicle, within the
+//   crate's radius plus the target's own radius (0x005d0e80: the 3-D
+//   distance between the objects' positions against object slot 0x90 +
+//   radius; a soldier's radius is taken as 0 here, a vehicle's as its
+//   farthest collision point) is
+// - healed or repaired by healSpeed x 0.2 (0x005d0970: gameLogic slot
+//   0x108, 0x004bc410/0x004cc380, scaled by the material table's cell for
+//   materials 73 and 24, the same for every target), taking that much
+//   from the storage when it took any, while the heal storage isn't spent
+//   (0x005d0650: healSpeed x 0.2 left in it or the shared storage);
+// - and each of its weapons gets refillAmmoSpeed x 0.2 per cent of a
+//   magazine (0x005d0b20 → the ammo component's slot 0xa8, 0x005f5110:
+//   magSize x amount / 100 rounds, the fraction kept), the amount taken
+//   from the storage while the weapon isn't full.
+// With destroyWhenEmptyStorage it goes once both storages are spent.
+// Without a body it comes down at 5 m/s: its parachute (supply_parachute's
+// Wing lift and supply_ParachuteForceDown's constantForce 5 on the rigid
+// body) is only simulated when physics runs.
 void GameWorld::stepCrates(float seconds)
 {
+	constexpr float kTick = 0.2f;
+	const float factor = m_materials ? m_materials->damageMod(73, 24) : 1.0f;
 	for (auto it = m_crates.begin(); it != m_crates.end();) {
 		Crate& crate = *it;
 		world::Object* object = m_objects.find(crate.object);
@@ -529,55 +643,82 @@ void GameWorld::stepCrates(float seconds)
 				object->setPosition(p);
 			}
 		}
+		crate.tick -= seconds;
+		if (crate.tick > 0) {
+			++it;
+			continue;
+		}
+		crate.tick += kTick;
 		const physics::Vec3 at {p.x, p.y, p.z};
-		const float radius = t ? number(*t, "radius", 5) : 5;
-		const float heal = (t ? number(*t, "healSpeed", 0) : 0) * seconds;
-		const float ammo = (t ? number(*t, "refillAmmoSpeed", 0) : 0) * seconds;
+		const float radius = t ? number(*t, "radius", 2) : 2;
+		const float heal = (t ? number(*t, "healSpeed", 0) : 0) * kTick;
+		const float ammo = (t ? number(*t, "refillAmmoSpeed", 0) : 0) * kTick;
+		// The heal storage is spent once less than a heal is left in it
+		// and in the shared storage (the crate's own two are 0).
+		const auto healSpent = [&] { return crate.storage < heal; };
+		const auto mend = [&](uint32_t target, const world::ObjectTemplate* tt) {
+			const float left = hitPoints(target);
+			const float most = tt ? number(*tt, "armor.maxHitPoints", left) : left;
+			if (heal <= 0 || healSpent() || left < 0 || left >= most) {
+				return;
+			}
+			m_hitPoints[target] = std::min(most, left + heal * factor);
+			crate.storage -= heal;
+		};
+		const auto refill = [&](FireArm* weapon) {
+			if (!weapon || ammo <= 0 || crate.storage <= 0) {
+				return;
+			}
+			float& owed = crate.owed[weapon];
+			owed += ammo / 100.0f; // per cent of a magazine
+			crate.storage -= ammo;
+			while (owed >= 1) {
+				owed -= 1;
+				if (!weapon->addMagazine()) {
+					owed = 0;
+					crate.storage += ammo; // full: nothing taken
+					break;
+				}
+			}
+		};
+		const bool soldiers = !t || integer(*t, "workOnSoldiers", 1) != 0;
 		for (const auto& owned : m_players) {
 			Player& target = *owned;
-			if (!target.alive || target.vehicle || target.team != crate.team || crate.storage <= 0) {
-				continue;
-			}
-			const physics::Vec3 feet = target.body.position - physics::Vec3 {0, 1.0f, 0};
-			if (physics::lengthSquared(feet - at) > radius * radius) {
+			if (!soldiers || !target.alive || target.vehicle || (crate.team != 0 && target.team != crate.team)) {
 				continue;
 			}
 			const world::Object* soldier = m_objects.find(target.object);
-			const world::ObjectTemplate* st = soldier ? soldier->objectTemplate() : nullptr;
-			const float left = hitPoints(target.object);
-			const float most = st ? number(*st, "armor.maxHitPoints", left) : left;
-			if (left >= 0 && left < most) {
-				const float given = std::min({heal, most - left, crate.storage});
-				m_hitPoints[target.object] = left + given;
-				crate.storage -= given;
+			if (!soldier) {
+				continue;
 			}
-			if (target.weapon && ammo > 0) {
-				float& owed = m_resupply[target.object];
-				owed += ammo / 10.0f;
-				while (owed >= 1 && crate.storage > 0) {
-					owed -= 1;
-					if (target.weapon->addMagazine()) {
-						crate.storage -= 10;
-					} else {
-						owed = 0;
-					}
-				}
+			const world::Vec3 sp = soldier->position();
+			if (physics::lengthSquared(physics::Vec3 {sp.x, sp.y, sp.z} - at) > radius * radius) {
+				continue;
+			}
+			mend(target.object, soldier->objectTemplate());
+			refill(target.weapon.get());
+			for (Player::Carried& carried : target.carried) {
+				refill(carried.weapon.get());
 			}
 		}
 		if (t && integer(*t, "workOnVehicles", 0) != 0) {
-			for (const Body& body : m_bodies) {
+			for (Body& body : m_bodies) {
 				const world::Object* vehicle = m_objects.find(body.object);
 				const world::ObjectTemplate* vt = vehicle ? vehicle->objectTemplate() : nullptr;
-				if (!body.vehicle || body.wreckTime >= 0 || !vt || crate.storage <= 0
-					|| physics::lengthSquared(body.body.position - at) > radius * radius) {
+				if (!body.vehicle || body.wreckTime >= 0 || !vt || (crate.team != 0 && vehicle->team() != crate.team)) {
 					continue;
 				}
-				const float left = hitPoints(body.object);
-				const float most = number(*vt, "armor.maxHitPoints", left);
-				if (left >= 0 && left < most) {
-					const float given = std::min({heal, most - left, crate.storage});
-					m_hitPoints[body.object] = left + given;
-					crate.storage -= given;
+				float own = 0; // the body's radius: its farthest collision point
+				for (const physics::Vec3& point : body.points) {
+					own = std::max(own, std::sqrt(physics::lengthSquared(point)));
+				}
+				const float reach = radius + own;
+				if (physics::lengthSquared(body.body.position - at) > reach * reach) {
+					continue;
+				}
+				mend(body.object, vt);
+				for (size_t g = 0; g < body.guns.size(); ++g) {
+					refill(body.guns[g].weapon.get());
 				}
 			}
 		}
@@ -590,10 +731,10 @@ void GameWorld::stepCrates(float seconds)
 	}
 }
 
-// Orders (Commander.sendOrder <type> <bool>, issueOrder; the order
-// marker's position, orderRadius and the leader's acceptance reach the
-// scripts as orderPosition, orderRadius, ifAcceptedOrder and
-// ifAcceptedAttackDefendOrder).
+// The commander's order (Commander.sendOrder; SquadManager slot 0x4c,
+// 0x004c5530 → the squad's commander order, 0x004c3e40): the commander
+// hears HUD_HUD_SQUAD_ORDER_SENT_SQUAD (PostRemote 0x1b), the squad's
+// leader HUD_HUD_SQUAD_RECIEVED_NEW_ORDER_COMMANDER (0x1a) and answers it.
 bool GameWorld::issueOrder(int team, int squad, OrderType type, float x, float z, int from)
 {
 	if ((team != 1 && team != 2) || squadMembers(team, squad).empty()) {
@@ -616,7 +757,8 @@ bool GameWorld::issueOrder(int team, int squad, OrderType type, float x, float z
 }
 
 // Commander.commRoseAccept: the squad leader takes the order, or turns it
-// down (it goes).
+// down: 0x004c2f60 sets the order's accepted flag and its valid flag to
+// the answer, so a refused order goes.
 void GameWorld::acceptOrder(int player, bool accept)
 {
 	const Player* p = findPlayer(player);
@@ -638,6 +780,37 @@ const GameWorld::SquadOrder* GameWorld::squadOrder(int team, int squad) const
 {
 	const auto it = m_orders.find({team, squad});
 	return it != m_orders.end() && !squadMembers(team, squad).empty() ? &it->second : nullptr;
+}
+
+// SquadLeader.sendOrder (SquadManager slot 0x48, 0x004c5360 → the
+// squad's leader order, 0x004c3d90): the leader orders his own squad; the
+// HUD sends it accepted (its +0x2b0 set before the send, 0x007d6ab0); the
+// members hear HUD_HUD_SQUAD_RECIEVED_NEW_ORDER_SQUADLEADER (0x17), the
+// leader HUD_HUD_SQUAD_ORDER_SENT_MEMBERS (0x1c). None drops it.
+bool GameWorld::issueSquadLeaderOrder(int player, OrderType type, float x, float z)
+{
+	const Player* p = findPlayer(player);
+	if (!p || !p->squadLeader || p->squad == 0 || (p->team != 1 && p->team != 2)) {
+		return false;
+	}
+	const auto key = std::make_pair(p->team, p->squad);
+	if (type == OrderType::None) {
+		m_leaderOrders.erase(key);
+		return true;
+	}
+	SquadOrder order;
+	order.type = type;
+	order.position = {x, m_ground.height ? m_ground.height(x, z) : 0.0f, z};
+	order.fromCommander = false;
+	order.accepted = true;
+	m_leaderOrders[key] = order;
+	return true;
+}
+
+const GameWorld::SquadOrder* GameWorld::squadLeaderOrder(int team, int squad) const
+{
+	const auto it = m_leaderOrders.find({team, squad});
+	return it != m_leaderOrders.end() && !squadMembers(team, squad).empty() ? &it->second : nullptr;
 }
 
 } // namespace dice::hfe::game

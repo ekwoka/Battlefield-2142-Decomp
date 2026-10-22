@@ -730,10 +730,16 @@ void RagDoll::collide(const RagDollWorld& world)
 	capsuleCollision(world);
 }
 
-// The body's capsules (addCapsuleCollision) against objects: both ends
-// pushed out of what the capsule touches. Provisional: the game asks the
-// object's mesh for the capsule's contacts; this tests a sphere at the
-// capsule's middle.
+// The body's capsules (addCapsuleCollision) against objects, while
+// ragdoll_useCapsuleCollision is set (0x008abf20): for each object in the
+// body's list (see GameWorld::ragDollWorld) and each capsule, the object
+// sweeps particle a's sphere (a's radius) from a to b through its mesh
+// (object slot 0x7c, the collision mesh's swept-sphere test 0x006e2350 at
+// LOD 2); every contact deeper than 0 moves both ends out by its depth
+// along its normal and stops them (previous = position). Not rewritten:
+// the sweep (the collision world has no swept-sphere query yet), so this
+// tests a sphere of a's radius at the capsule's middle and takes the
+// deepest contact only.
 void RagDoll::capsuleCollision(const RagDollWorld& world)
 {
 	if (!m_template->settings.useCapsuleCollision || !world.sphere) {

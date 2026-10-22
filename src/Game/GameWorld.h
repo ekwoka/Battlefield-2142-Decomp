@@ -354,6 +354,9 @@ public:
 		physics::Vec3 angularVelocity; // radians per second about each axis
 		physics::Vec3 forward;         // its +z
 		physics::Vec3 right;           // its +x
+		// Its box in object space (the vehicle collision LOD's points): the
+		// bots' AI object's box (AIDLL 0x100fe990).
+		physics::Vec3 boxMin, boxMax;
 	};
 	std::vector<VehicleInfo> vehicleList();
 	// A player's carried weapons' ammunition (for the bots' AmmoAssist):
@@ -365,7 +368,10 @@ public:
 		int magazines = 0;
 	};
 	std::vector<WeaponAmmo> weaponAmmo(int player) const;
-	// A vehicle's EMP level (0: running) and whether it is a wreck.
+	// A projectile template's detonation at a point, as if it went off
+	// there (false without one).
+	bool detonate(const std::string& projectileTemplate, const physics::Vec3& at, int attacker = -1);
+	// A vehicle's or drone's EMP level (0: running) and whether it is a wreck.
 	int empLevel(uint32_t vehicle) const;
 	// Deployed hubs (their objects).
 	std::vector<uint32_t> supplyObjects() const;
@@ -391,8 +397,18 @@ public:
 	// Makes a player the team's commander (-1: nobody); false when the
 	// commander is disabled or the player isn't on the team.
 	bool setCommander(int team, int player);
+	// Commander.commanderApply / commanderResign (docs/engine.md,
+	// "Commander"): applications wait for the apply period, then the
+	// highest-ranked applicant is offered command and answers.
 	void applyForCommander(int player);
 	void resignCommander(int player);
+	// The applicant offered command (-1: none) and its answer (the
+	// Commander event's kind 0 accepts, kind 1 declines).
+	int commanderOffer(int team) const { return team == 1 || team == 2 ? m_commanders[team].candidate : -1; }
+	void answerCommanderOffer(int player, bool accept);
+	// The player's rank (the stats' rank, player slot 0x1a8 +0x20) the
+	// applicants are ranked by; 0 until set.
+	void setPlayerRank(int player, int rank);
 	// The commander's tools (Commander.orbitalStrike, .artillery, .uav,
 	// .satellite, .supplies). All but the supply drop need the team's asset
 	// intact: a placed object whose template holds a RemoteControlledObject
@@ -417,10 +433,16 @@ public:
 	// artillery fire their asset's weapon from orbitalBombardmentHeight
 	// over the point; the UAV watches round the point; the satellite scan
 	// covers the map; the supply drop falls from supplyDropHeight.
-	bool commanderAction(int team, CommanderAbility ability, float x, float z);
+	// byAi: the AI commander's use (AIDLL's IBFCommander, sender -1),
+	// which needs no commander.
+	bool commanderAction(int team, CommanderAbility ability, float x, float z, bool byAi = false);
 	// The team's UAV while it is up: where, and how far it reveals.
 	bool uavArea(int team, physics::Vec3& at, float& radius) const;
 	bool satelliteScanActive(int team) const;
+	// The enemies a running satellite scan shows: to the team's commander
+	// only (0x0057dc90), empty for anyone else. (revealedPlayers holds the
+	// UAV's and the drones' for the whole team.)
+	std::vector<int> scannedPlayers(int viewer) const;
 	// Strikes on their way, for the HUD and the map.
 	struct Strike {
 		CommanderAbility ability;
@@ -446,23 +468,56 @@ public:
 		float orbitalBombardmentHeight = 500; // 0x254
 	};
 	CommanderSettings commanderSettings;
-	// Orders to squads (Commander.sendOrder / issueOrder): kept per squad
-	// for the HUD and the bots, until the next one. Provisional: the
-	// order's types are the minimap's order icons in their load order
-	// (0x00780000's orderMove..orderMine); the radius (orderRadius) is 50 m.
-	enum class OrderType { None, Move, Attack, Defend, Repair, Destroy, Mine };
+	// Orders to squads. The HUD's SquadLeader.sendOrder <kind> <bool> and
+	// Commander.sendOrder <kind> <bool> both run HudManager slot 0x3f4
+	// (0x007d6ab0); the kind is the engine's order kind (a byte on the wire,
+	// the order event 0x0050dfe0):
+	// - 0 move, 1 attack, 2 defend, 3 repair: the issue-order menu
+	//   (HudElementsIssueOrders.con: "sendOrder 0" by Move, "1" by Attack,
+	//   "2" by Defend) and the order icons (Ingame/Commander/Orders/
+	//   orderMove..orderRepair at 0x184 + 4 kind, 0x007a0000);
+	// - 4 move, 5 attack, 6 defend, 7 repair: placed on the map (the
+	//   right-click menus' "sendOrder 4 1" .. "7 1"; a map click arms 4, or
+	//   5 on an enemy and 6 on a friendly object, 0x00753c90). Only 5 and 6
+	//   count for the scripts' ifAcceptedAttackDefendOrder (0x00592160).
+	// A kind of 10 or more drops the armed order. The bool takes the
+	// position from the minimap's cursor as the order's next point
+	// (0x00780820, up to three; the 9 floats of the order) instead of the
+	// point already armed. A squad leader's order goes to his own squad
+	// (SquadManager slot 0x48, 0x004c5360: the squad's leader order +0x30,
+	// accepted at once); the commander's to each selected squad with
+	// members (slot 0x4c, 0x004c5530: the squad's commander order +0x120,
+	// for its leader to accept).
+	enum class OrderType { None = -1, Move = 0, Attack = 1, Defend = 2, Repair = 3, MapMove = 4, MapAttack = 5,
+		MapDefend = 6, MapRepair = 7 };
+	// The engine's kind number as an order (None for 10 and more, and for
+	// numbers that are no kind).
+	static OrderType orderTypeFromKind(int kind)
+	{
+		return kind >= 0 && kind <= 7 ? static_cast<OrderType>(kind) : OrderType::None;
+	}
+	static bool isAttackOrDefend(OrderType type) { return type == OrderType::MapAttack || type == OrderType::MapDefend; }
 	struct SquadOrder {
 		OrderType type = OrderType::None;
 		physics::Vec3 position;
-		float radius = 50;
+		// The player's orderRadius (player +0x144, set to 80 by the
+		// constructor 0x0059c010; nothing in the game changes it).
+		float radius = 80;
 		bool fromCommander = true;
 		bool accepted = false; // the squad leader's answer (Commander.commRoseAccept 1)
 	};
-	// False for a squad that doesn't exist or an order from someone else
-	// than the team's commander (-1 for none: the game itself).
+	// The commander's order: false for a squad that doesn't exist or an
+	// order from someone else than the team's commander (-1 for none: the
+	// game itself).
 	bool issueOrder(int team, int squad, OrderType type, float x, float z, int from = -1);
 	void acceptOrder(int player, bool accept);
 	const SquadOrder* squadOrder(int team, int squad) const;
+	// A squad leader's order to his own squad (SquadLeader.sendOrder):
+	// false when the player leads no squad. The scripts' orderPosition,
+	// orderRadius and ifAccepted* read this one (squad slot 0x10,
+	// 0x004c2ee0), not the commander's.
+	bool issueSquadLeaderOrder(int player, OrderType type, float x, float z);
+	const SquadOrder* squadLeaderOrder(int team, int squad) const;
 	// The vehicle model of an object with one.
 	const Vehicle* vehicle(uint32_t object) const;
 	// The input for the next ticks.
@@ -505,11 +560,10 @@ private:
 			float yaw = 0, pitch = 0; // the bundles' rotation, degrees (pitch up positive)
 		};
 		std::vector<Gun> guns;
-		// Armour (armor.*): EMP shuts it down for empLevelTime a step (it
-		// takes empDamageNumStep steps at once); destroyed, it lies as a
-		// wreck for timeToStayAsWreck.
-		int empLevel = 0;
-		float empTime = 0;
+		// Armour (armor.*): the EMP level (armor 0x27c, see empBlast),
+		// falling by one every empLevelTime; destroyed, it lies as a wreck
+		// for timeToStayAsWreck.
+		float empLevel = 0;
 		float wreckTime = -1; // >= 0 while a wreck
 		float wetTime = 0;    // seconds in water
 	};
@@ -548,6 +602,7 @@ private:
 		std::string name;
 		bool ai = false;
 		bool alive = false;
+		int rank = 0; // setPlayerRank (the commander's applicants)
 		float respawnIn = 0;
 		int kills = 0, deaths = 0, teamKills = 0;
 		SoldierInput input;
@@ -569,7 +624,7 @@ private:
 		std::vector<Carried> carried;
 		int inHand = -1; // index into carried
 		bool selectHeld = false;
-		bool abilityActive = false; // a while-firing gadget is working this tick
+		bool abilityActive = false; // the gadget in hand is working this tick
 		bool cloaked = false;       // CamouflageAmmoComp held with the trigger down
 		bool manDown = false;       // killed, the body lying (sv.manDownTime)
 		float manDownLeft = 0;
@@ -602,6 +657,7 @@ private:
 		// killed it (the soldier's 0x2b0, kept by 0x005ee4d0).
 		std::unique_ptr<anim::RagDoll> ragDoll;
 		physics::Vec3 ragDollForce;
+		double ragDollForceAt = -1; // when it came: it lasts 0.5 s (0x2bc)
 		// Seated: the seat's animation system (seatAnimationSystem).
 		std::unique_ptr<anim::AnimationState> seatAnimation;
 		std::string seatAnimationPath;
@@ -630,6 +686,9 @@ private:
 	effects::EffectManager m_effects;
 	void fire(const Player& player, float aimPitch);
 	void explode(const physics::Vec3& at, const ProjectileSettings& settings, int attacker, float facing = 0);
+	float blastShare(const physics::Vec3& at, const Player& target, float beside) const;
+	void empBlast(const physics::Vec3& at, const ProjectileSettings& settings,
+		const std::function<float(const physics::Vec3&)>& distanceTo);
 	// Gadgets' abilities (ammo.replenishingType): a source treats what is
 	// within its radius each tick, by strength times the cell of its
 	// ability material and the target's armour material, per second.
@@ -666,9 +725,9 @@ private:
 	world::Object* spawnSoldier(Player& player);
 	void kill(Player& victim, Player* attacker, uint32_t weapon);
 	void finishDeath(Player& victim);
-	void revive(Player& victim, Player* medic);
+	void revive(Player& victim, Player* medic, float restoreHitPoints);
 	Player* downedPlayer(uint32_t object) const;
-	void shockDowned(Player& victim, float amount, uint32_t projectileMaterial, uint32_t surfaceMaterial, int attacker);
+	void shockDowned(Player& victim, const ProjectileSettings& shock, float amount, uint32_t surfaceMaterial, int attacker);
 	float m_manDownTime = 15;
 	std::map<std::pair<int, int>, uint32_t> m_beacons; // (team, squad) -> beacon object
 	std::vector<int> squadMembers(int team, int squad) const;
@@ -701,7 +760,7 @@ private:
 		int owner = -1;
 		int team = 0;
 		ForceSettings force;
-		float hoverHeight = 0; // over the owner's feet (provisional, see stepDrones)
+		float hoverHeight = 0; // the target's physics origin over its feet (see stepDrones)
 		physics::Vec3 position, velocity;
 		float yaw = 0;
 		float height = 0;      // the height it holds (0x1a8), kept while the owner is near
@@ -714,7 +773,7 @@ private:
 		bool pulse = false;
 		float pulseDistance = 0; // pulse.viewDistance
 		float revealTime = 0;    // pulse.revealTime
-		float empTime = 0;       // shut down by EMP (provisional)
+		float empLevel = 0;      // its armour's EMP level (see empBlast)
 	};
 	std::vector<Drone> m_drones;
 	std::map<std::pair<int, int>, float> m_revealed; // (player, team) -> seconds left
@@ -736,12 +795,15 @@ private:
 	struct CommanderTeam {
 		int commander = -1;
 		std::vector<int> applicants;
+		int candidate = -1;   // offered command, awaiting the answer (+8 of 0x004c4fb0's list)
+		double pickAt = -1;   // when the best applicant is offered command (event 7), -1: not due
 		double lastUse[kCommanderAbilities] = {-1e9, -1e9, -1e9, -1e9, -1e9}; // when each tool was used
 		float minTime[kCommanderAbilities] = {};  // its recharge then (minTimeBetweenActivation...)
 		physics::Vec3 uavAt;
 	};
 	CommanderTeam m_commanders[3];
-	std::map<std::pair<int, int>, SquadOrder> m_orders; // (team, squad)
+	std::map<std::pair<int, int>, SquadOrder> m_orders;       // (team, squad): the commander's
+	std::map<std::pair<int, int>, SquadOrder> m_leaderOrders; // (team, squad): the leader's
 	// An asset: a placed object whose template holds a RemoteControlledObject.
 	struct CommanderAsset {
 		uint32_t object;
@@ -759,16 +821,19 @@ private:
 	};
 	std::vector<StrikeFire> m_strikeFire; // alongside m_strikes
 	struct Crate {
-		uint32_t object;
-		int team;
-		float storage;   // sharedStorageSize left
-		float timeLeft;  // supplyDropNumSecsToLive
+		uint32_t object = 0;
+		int team = 0;
+		float storage = 0;   // sharedStorageSize left
+		float timeLeft = 0;  // supplyDropNumSecsToLive
+		float tick = 0;  // to the next of its 0.2 s updates (event 0x1d)
+		std::map<const FireArm*, float> owed; // magazines' fractions refilled
 	};
 	std::vector<Crate> m_crates;
 	const CommanderAsset* intactAsset(int team, CommanderAbility ability) const;
 	float commanderRecharge(int team, CommanderAbility ability) const;
 	void scanCommanderAssets();
 	void stepCommander(float seconds);
+	void offerCommand(int team);
 	void fireStrike(Strike& strike, StrikeFire& fire);
 	void stepCrates(float seconds);
 	bool isCommanderAsset(uint32_t object) const;

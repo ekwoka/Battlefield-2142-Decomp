@@ -422,70 +422,87 @@ std::string StatsResponse::Block::value(size_t row, const std::string& key) cons
 
 StatsResponse parseStatsResponse(const std::string& text)
 {
+	// 0x005752b0 cuts the text into tokens at runs of tabs and newlines
+	// (0x005761d0, 0x00576210: empty fields vanish).
 	StatsResponse out;
-	std::istringstream in(text);
-	std::string line;
-	bool first = true;
-	while (std::getline(in, line)) {
-		if (!line.empty() && line.back() == '\r') {
-			line.pop_back();
-		}
-		std::vector<std::string> fields;
-		size_t start = 0;
-		while (true) {
-			const size_t tab = line.find('\t', start);
-			fields.push_back(line.substr(start, tab == std::string::npos ? std::string::npos : tab - start));
-			if (tab == std::string::npos) {
-				break;
-			}
-			start = tab + 1;
-		}
-		const std::string& kind = fields[0];
-		if (first) {
-			first = false;
-			// 0x005752b0: the answer starts with "O"; anything else failed.
-			out.ok = kind == "O";
-			if (kind == "E") {
-				out.errorCode = fields.size() > 1 ? std::atoi(fields[1].c_str()) : -1;
-			}
-			if (!out.ok && kind != "E") {
-				return out;
-			}
-			out.length += static_cast<int>(line.size()) - static_cast<int>(fields.size() - 1);
-			continue;
-		}
-		if (kind == "$") {
-			out.declaredLength = fields.size() > 1 ? std::atoi(fields[1].c_str()) : -1;
+	size_t at = 0;
+	while (true) {
+		const size_t start = text.find_first_not_of("\t\n", at);
+		if (start == std::string::npos) {
 			break;
 		}
-		out.length += static_cast<int>(line.size()) - static_cast<int>(fields.size() - 1);
-		if (kind == "H") {
+		at = text.find_first_of("\t\n", start);
+		out.tokens.push_back(text.substr(start, at == std::string::npos ? std::string::npos : at - start));
+		if (at == std::string::npos) {
+			break;
+		}
+	}
+	if (out.tokens.empty()) {
+		return out;
+	}
+	// The answer starts with "O"; anything else failed. (The client reads
+	// nothing more of an "E" answer; its code is kept here for the log.)
+	out.ok = out.tokens[0] == "O";
+	if (out.tokens[0] == "E") {
+		out.errorCode = out.tokens.size() > 1 ? std::atoi(out.tokens[1].c_str()) : -1;
+	}
+	if (!out.ok && out.tokens[0] != "E") {
+		return out;
+	}
+	// "H" starts a block, its keys follow up to the first "D"; each "D"
+	// starts a row whose values fill the keys in order; "$" ends the
+	// answer. Without a "$" the answer counts as failed (0x005752b0 returns
+	// 0); the length between the two "$" is never checked.
+	enum class Reading { Nothing, Keys, Values } reading = Reading::Nothing;
+	for (size_t i = 1; i < out.tokens.size(); ++i) {
+		const std::string& token = out.tokens[i];
+		if (token == "$") {
+			out.terminated = true;
+			out.declaredLength = i + 1 < out.tokens.size() ? std::atoi(out.tokens[i + 1].c_str()) : -1;
+			break;
+		}
+		if (token == "H") {
 			out.blocks.push_back({});
-			out.blocks.back().keys.assign(fields.begin() + 1, fields.end());
-		} else if (kind == "D" && !out.blocks.empty()) {
-			out.blocks.back().rows.emplace_back(fields.begin() + 1, fields.end());
+			reading = Reading::Keys;
+		} else if (token == "D" && reading != Reading::Nothing) {
+			out.blocks.back().rows.emplace_back();
+			reading = Reading::Values;
+		} else if (reading == Reading::Keys) {
+			out.blocks.back().keys.push_back(token);
+		} else if (reading == Reading::Values && out.blocks.back().rows.back().size() < out.blocks.back().keys.size()) {
+			out.blocks.back().rows.back().push_back(token);
 		}
 	}
 	return out;
 }
 
+// 0x0045c030 calls 0x005752b0 in its mode 1, which reads by position, not
+// by key: after the "O" it skips five tokens and takes the sixth as the
+// player's id, five more and the twelfth as the unspent credits (stored at
+// the unlock info's +0x18: Avcred). Then each data row's first value is an
+// unlock id (split into kit, branch and level digits), but only for a
+// non-zero player id.
 UnlocksInfo parseUnlocksInfo(const StatsResponse& response)
 {
 	UnlocksInfo info;
-	if (!response.ok) {
+	if (!response.ok || !response.terminated || response.tokens.size() <= 12) {
 		return info;
 	}
-	for (const StatsResponse::Block& block : response.blocks) {
-		if (!block.value(0, "Avcred").empty()) {
-			info.credits = std::atoi(block.value(0, "Avcred").c_str());
-		}
-		// 0x0045c030: each row's first column is an id.
-		if (!block.keys.empty() && block.keys[0] == "UnlockID") {
-			for (const auto& row : block.rows) {
-				const int id = row.empty() ? 0 : std::atoi(row[0].c_str());
-				if (isUnlockId(id)) {
-					info.unlocks.push_back(id);
-				}
+	info.credits = std::atoi(response.tokens[12].c_str());
+	if (std::atoi(response.tokens[6].c_str()) == 0) {
+		return info;
+	}
+	// The rows after the twelfth token: the parse proper starts at the next
+	// "H", and each "D" row's first value counts.
+	bool inBlock = false;
+	for (size_t i = 13; i < response.tokens.size() && response.tokens[i] != "$"; ++i) {
+		const std::string& token = response.tokens[i];
+		if (token == "H") {
+			inBlock = true;
+		} else if (token == "D" && inBlock && i + 1 < response.tokens.size()) {
+			const int id = std::atoi(response.tokens[i + 1].c_str());
+			if (isUnlockId(id)) {
+				info.unlocks.push_back(id);
 			}
 		}
 	}

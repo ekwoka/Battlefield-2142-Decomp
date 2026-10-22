@@ -85,42 +85,63 @@ float SideStatus::value(int type) const
 
 float conditionValue(const StrategyCondition& condition, const SideStatus& friendly, const SideStatus& enemy)
 {
+	// A constant condition (0x100a9620): the friendly side's value for
+	// Friendly, the enemy's for anything else (Both included), against the
+	// constant k; 0x1005cf90 then compares v - k (Equal*, Difference*) or
+	// v / k (Quotient*) with 0 (the condition's +8, which
+	// createConstantCondition leaves 0).
 	using C = StrategyCondition;
-	float v = 0;
-	if (condition.side == 2) {
-		v = friendly.value(condition.type) + enemy.value(condition.type); // Both: provisional
-	} else {
-		v = (condition.side == 1 ? enemy : friendly).value(condition.type);
-	}
-	const float d = v - condition.constant;
-	// Quotient and Difference compares are not traced: they read as the
-	// plain comparisons here (provisional; the shipped data uses Equal and
-	// EqualGreater only).
+	const float v = (condition.side == 0 ? friendly : enemy).value(condition.type);
+	const float k = condition.constant;
+	const int compare = static_cast<int>(condition.compare);
 	if (condition.conditional == C::Conditional::Crisp) {
-		switch (condition.compare) {
-		case C::Compare::Equal:
-			return d == 0 ? 1.0f : -1.0f;
-		case C::Compare::EqualSmaller:
-		case C::Compare::QuotientSmaller:
-		case C::Compare::DifferenceSmaller:
-			return d <= 0 ? 1.0f : -1.0f;
+		// 0x1005cce0.
+		switch (compare) {
+		case 0:
+		case 6:
+			return v - k == 0 ? 1.0f : -1.0f;
+		case 1:
+		case 7:
+			return 0 <= v - k ? 1.0f : -1.0f;
+		case 2:
+		case 8:
+			return v - k <= 0 ? 1.0f : -1.0f;
+		case 3:
+			return k == 0 ? -1.0f : v / k == 0 ? 1.0f : -1.0f;
+		case 4:
+			return k == 0 || 0 <= v / k ? 1.0f : -1.0f;
+		case 5:
+			return k == 0 ? -1.0f : v / k <= 0 ? 1.0f : -1.0f;
 		default:
-			return d >= 0 ? 1.0f : -1.0f;
+			return 0;
 		}
 	}
+	// 0x1005ce20, squared keeping the sign for FuzzySqr.
 	float f = 0;
-	switch (condition.compare) {
-	case C::Compare::Equal:
-		f = -std::fabs(d);
+	switch (compare) {
+	case 0:
+	case 6:
+		f = -std::fabs(v - k);
 		break;
-	case C::Compare::EqualSmaller:
-	case C::Compare::QuotientSmaller:
-	case C::Compare::DifferenceSmaller:
-		f = -d;
+	case 1:
+	case 7:
+		f = v - k;
+		break;
+	case 2:
+	case 8:
+		f = -(v - k);
+		break;
+	case 3:
+		f = k != 0 ? -std::fabs(v / k) : -1000.0f;
+		break;
+	case 4:
+		f = k != 0 ? v / k : 1000.0f;
+		break;
+	case 5:
+		f = k != 0 ? -(v / k) : -1000.0f;
 		break;
 	default:
-		f = d;
-		break;
+		return 0;
 	}
 	return condition.conditional == C::Conditional::FuzzySqr ? (f < 0 ? -f * f : f * f) : f;
 }

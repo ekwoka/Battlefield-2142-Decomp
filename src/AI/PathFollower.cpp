@@ -312,8 +312,9 @@ void PathFollower::lookAhead(const NavMesh& mesh, const Vec3& position, float no
 		return;
 	}
 	const int most = m_settings.soldier ? 1 : 4;
-	// The ray's width (0x101287a8 0.5 on foot, 0x10139514 0 at the wheel):
-	// here two more rays half a width to either side (provisional).
+	// The ray's width (0x101287a8 0.5 on foot, 0x10139514 0 at the wheel)
+	// goes to the pathfinder's ray (vslot 0x84), whose use of it isn't
+	// decoded; here two more rays half a width to either side.
 	const float width = m_settings.soldier ? 0.5f : 0.0f;
 	const auto clear = [&](const Vec3& to) {
 		if (!meshRaycast(mesh, position, to, &m_settings.options.profile, rayPolygons())) {
@@ -461,72 +462,655 @@ float PathFollower::maxBend(const Vec3& position, const Vec3& forward, float spe
 	return m_bend;
 }
 
-DriveOutput driveControl(const DriveSettings& s, DriveState& state, const DriveSense& in)
+namespace {
+
+float dot3(const Vec3& a, const Vec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+float length3(const Vec3& v) { return std::sqrt(dot3(v, v)); }
+float dot2(const Vec3& a, const Vec3& b) { return a.x * b.x + a.z * b.z; }
+float sign(float v) { return v > 0 ? 1.0f : v < 0 ? -1.0f : 0.0f; }
+
+// The signed angle from a to b across the ground (0x100a8710 and
+// 0x100a87f0): asin of their cross product, folded past a right angle.
+float angleTo(const Vec3& a, const Vec3& b)
+{
+	const float s = std::clamp(a.z * b.x - a.x * b.z, -1.0f, 1.0f);
+	const float angle = std::asin(s);
+	if (dot2(a, b) < 0) {
+		return (angle > 0 ? kPi : angle < 0 ? -kPi : 0.0f) - angle;
+	}
+	return angle;
+}
+
+const DriveObstacle* findObstacleById(const DriveSense& in, int id)
+{
+	for (const DriveObstacle& o : in.obstacles) {
+		if (o.id == id) {
+			return &o;
+		}
+	}
+	return nullptr;
+}
+
+// The bot's state change (0x100973b0): at most one per time stamp.
+void setState(DriveState& st, int state, float now)
+{
+	if (now < st.changedAt) {
+		st.changedAt = -1;
+	}
+	if (now - st.changedAt > 0) {
+		st.changedAt = now;
+		st.state = state;
+	}
+}
+
+// The side to pass an obstacle on (0x10097410): true when it flips from
+// one side to the other after a flip before; 0 clears it.
+bool setSide(DriveState& st, int side)
+{
+	const bool flipped = st.sideFlipped && side != st.side && side != 0;
+	if (side == 0) {
+		st.sideFlipped = false;
+		st.side = 0;
+		return flipped;
+	}
+	if (side != st.side && st.side != 0) {
+		st.sideFlipped = true;
+	}
+	st.side = side;
+	return flipped;
+}
+
+// Avoiding on: the side is cleared (0x1009b2e0).
+void setAvoiding(DriveState& st, bool on)
+{
+	st.avoiding = on;
+	st.side = 0;
+}
+
+// 0x100fbdb0: shortens the free distances ahead of and behind `p` along
+// `dir` to where the line meets another object's sphere (its centre
+// radius about its origin), leaving out `skip`.
+void clipByObstacles(const DriveSense& in, const Vec3& p, const Vec3& dir, float& ahead, float& behind, int skip)
+{
+	for (const DriveObstacle& o : in.obstacles) {
+		if (o.id == skip) {
+			continue;
+		}
+		const float r = o.centreRadius;
+		const Vec3 d = o.position - p;
+		const float along = dot3(d, dir);
+		const float side = length3(d - dir * along);
+		if (along <= 0) {
+			if (r + behind < -along || r < side) {
+				continue;
+			}
+			const float t = -along - std::sqrt(r * r - side * side);
+			if (t <= behind) {
+				behind = t;
+			}
+		} else {
+			if (r + ahead < along || r < side) {
+				continue;
+			}
+			const float t = along - std::sqrt(r * r - side * side);
+			if (t <= ahead) {
+				ahead = t;
+			}
+		}
+	}
+}
+
+// 0x100fc660: the speed allowed behind another object close ahead (or
+// behind, when backing): within 15 m of its sphere, the line of travel
+// through it, nearly straight ahead (dot 0.75), or touching (2 m) and it
+// moving over 2 m/s: its speed along the way less 1, at least 2. Closing
+// at over 10 m/s from a standstill state: -20 (full brake) and the swerve
+// (`swerve`: the error forced to -2). One that moves across the way
+// (dot between -0.75 and 0.6) farther than 8 m, or the one being avoided
+// while avoiding, does not count. Not below 2 m/s of the driver's own
+// speed: 9999 (no cap).
+float obstacleSpeedCap(const DriveSettings& s, DriveState& st, const DriveSense& in, float signedSpeed, bool& swerve)
+{
+	swerve = false;
+	if (signedSpeed <= 2) {
+		return 9999;
+	}
+	const Vec3 forward3 = in.forward;
+	const float motion = sign(dot3(in.velocity, forward3));
+	const Vec3 way = forward3 * motion;
+	float best = 9999;
+	int bestId = -1;
+	for (const DriveObstacle& o : in.obstacles) {
+		Vec3 d = o.centre - in.position;
+		float dist = length3(d);
+		const float r = s.centreRadius + o.centreRadius;
+		if (dist > 1e-5f) {
+			d = d * (1 / dist);
+		}
+		const float gap = dist - r;
+		if (gap > 15) {
+			continue;
+		}
+		const float otherSpeed = length3(o.velocity);
+		const float f = dot3(d, way);
+		const Vec3 nearest = in.position + way * (f * (r + gap));
+		const Vec3 off = nearest - o.centre;
+		if (dot3(off, off) > r * r) {
+			continue;
+		}
+		if (!(f >= 0.75f || (gap < 2 && f > 0 && otherSpeed > 2))) {
+			continue;
+		}
+		Vec3 v = o.velocity;
+		const bool moving = otherSpeed > 0.5f;
+		float cap = std::max(2.0f, dot3(v, way) - 1);
+		if (moving) {
+			v = v * (1 / otherSpeed);
+		}
+		const Vec3 relative = o.velocity - in.velocity;
+		const bool closing = dot3(relative, relative) > 100;
+		if (closing && st.state == 0) {
+			cap = -20;
+			swerve = true;
+		}
+		const float along = dot3(v, way);
+		if ((gap <= 8 || closing) && (!moving || along >= 0.6f || along <= -0.75f || closing)
+			&& (!st.avoiding || st.avoided != o.id || closing)) {
+			if (cap < best) {
+				best = cap;
+				bestId = o.id;
+			}
+		}
+	}
+	st.brakingFor = bestId;
+	return best;
+}
+
+// What 0x100fbff0 finds of the obstacle in the way.
+struct ObstacleView {
+	bool found = false;
+	int id = -1;
+	float ahead = 0;         // dot(direction to it, forward)
+	float angle = 0;         // to it, from the forward axis (or the way, when nearly straight)
+	bool clearAhead = false; // straight on misses it by more than sqrt(0.7) of its reach
+	bool pathClear = false;  // the way to the steering point misses it (or it is behind)
+	bool touching = false;   // within both radii
+	float passAngle = 0;     // where to head to pass it on the side chosen
+	bool listed = false;     // the one being avoided is still in the world list
+};
+
+// 0x100fbff0: the object in the way. Moving ahead (or standing): the
+// vehicles within reach (forward speed + max(radius, 5) + both radii)
+// that are nearer than the steering point or sit on it, ahead, and whose
+// sphere (both radii) the forward line crosses, the most central first;
+// one more than 60 degrees aside only when it is the one being avoided (or
+// none is). Failing that, the one being avoided while it is still about.
+ObstacleView findObstacle(const DriveSettings& s, DriveState& st, const DriveSense& in, const Vec3& dir,
+	const Vec3& offset, float pointDistance, float motion, int side)
+{
+	ObstacleView v;
+	const float k = 0.25f; // the velocity look-ahead (0.5 when called without the flag; CarMoveTo sets it)
+	int chosen = -1;
+	float best = 99999;
+	for (const DriveObstacle& o : in.obstacles) {
+		if (st.avoided != -1 && o.id == st.avoided) {
+			v.listed = true;
+		}
+		if (motion < 0) {
+			continue;
+		}
+		const float r = o.radius + s.radius;
+		const Vec3 d = o.position - in.position;
+		const float d2 = dot3(d, d);
+		const float reach = dot3(in.forward, in.velocity) + std::max(s.radius, 5.0f) + r;
+		const float ox = d.x - offset.x, oz = d.z - offset.z;
+		if (d2 > reach * reach || (d2 > pointDistance * pointDistance && ox * ox + oz * oz > r * r)) {
+			continue;
+		}
+		const float along = dot2(d, in.forward);
+		if (along < 0) {
+			continue;
+		}
+		const float px = d.x - along * in.forward.x, pz = d.z - along * in.forward.z;
+		const float perp2 = px * px + pz * pz;
+		if (perp2 <= r * r && (along / std::sqrt(d.x * d.x + d.z * d.z) >= 0.5f || o.id == st.avoided || st.avoided == -1)
+			&& perp2 < best) {
+			chosen = o.id;
+			best = perp2;
+		}
+	}
+	if (chosen == -1) {
+		if (!v.listed) {
+			return v;
+		}
+		chosen = st.avoided;
+	}
+	const DriveObstacle* o = findObstacleById(in, chosen);
+	if (!o) {
+		return v;
+	}
+	const float reach = o->radius * 0.8f + s.radius; // 0x1012b59c
+	Vec3 u {o->position.x - in.position.x, 0, o->position.z - in.position.z};
+	const float dist = std::sqrt(u.x * u.x + u.z * u.z);
+	if (dist < 1e-5f) {
+		return v; // on top of it (the original leaves its outputs unset here)
+	}
+	u = u * (1 / dist);
+	v.ahead = dot2(u, in.forward);
+	v.touching = dist < o->radius + s.radius;
+	// Seen from a quarter of a second ahead.
+	Vec3 w {o->position.x - (in.position.x + k * in.velocity.x), 0, o->position.z - (in.position.z + k * in.velocity.z)};
+	const float wl = std::sqrt(w.x * w.x + w.z * w.z);
+	w = w * (1 / wl);
+	if (wl >= reach) {
+		const float half = std::asin(std::clamp(reach / wl, -1.0f, 1.0f));
+		const float toIt = angleTo(in.forward, w);
+		v.passAngle = side == 2 ? toIt + half : toIt - half;
+	} else {
+		const Vec3 perp = side == 2 ? Vec3 {w.z, 0, -w.x} : Vec3 {-w.z, 0, w.x};
+		v.passAngle = angleTo(in.forward, perp);
+	}
+	const float qx = in.position.x + v.ahead * in.forward.x * dist - o->position.x;
+	const float qz = in.position.z + v.ahead * in.forward.z * dist - o->position.z;
+	v.clearAhead = reach * reach * 0.7f < qx * qx + qz * qz; // 0x1012b598
+	const float g = dot2(u, dir);
+	const float gx = in.position.x + g * dir.x * dist - o->position.x;
+	const float gz = in.position.z + g * dir.z * dist - o->position.z;
+	v.pathClear = reach * reach < gx * gx + gz * gz || (g < -0.1f && motion > 0);
+	if (g < 0 && dot2(dir, in.forward) > 0) {
+		// Behind the way ahead: forgotten.
+		st.avoided = -1;
+		v.pathClear = true;
+		v.clearAhead = true;
+		return v;
+	}
+	v.angle = std::fabs(dot2(dir, in.forward)) <= 0.85f ? angleTo(in.forward, u) : angleTo(dir, u);
+	v.id = chosen;
+	v.found = true;
+	return v;
+}
+
+// The free space round the vehicle (0x100e8170): mesh rays out to radius
+// + 10 m ahead, along the box's diagonals ahead (forward x length +-
+// right x width), behind and its diagonals, and to either side. The rays
+// behind are cut short by other vehicles (0x100fbdb0).
+void freeSpace(const DriveSettings& s, const DriveSense& in, float reach, float& front, float& back, float& left,
+	float& right)
+{
+	if (!in.ray) {
+		front = in.freeFront;
+		back = in.freeBack;
+		left = in.freeLeft;
+		right = in.freeRight;
+	} else {
+		const Vec3 p = in.position;
+		const auto along = [&](const Vec3& d) { return in.ray(p, p + d * reach); };
+		const auto distance = [&](const DriveRay& r) { return r.clear ? reach : r.distance; };
+		Vec3 frontLeft = in.forward * s.length - in.right * s.width;
+		Vec3 frontRight = in.forward * s.length + in.right * s.width;
+		frontLeft = frontLeft * (1 / std::max(length3(frontLeft), 1e-6f));
+		frontRight = frontRight * (1 / std::max(length3(frontRight), 1e-6f));
+		front = distance(along(in.forward));
+		for (const Vec3& d : {frontLeft, frontRight}) {
+			const DriveRay r = along(d);
+			if (!r.clear) {
+				front = std::min(front, r.distance);
+			}
+		}
+		back = distance(along(in.forward * -1));
+		for (const Vec3& d : {frontLeft * -1, frontRight * -1}) {
+			const DriveRay r = along(d);
+			if (!r.clear) {
+				back = std::min(back, r.distance);
+			}
+		}
+		right = distance(along(in.right));
+		left = distance(along(in.right * -1));
+	}
+	float unused = 0;
+	clipByObstacles(in, in.position, in.forward, unused, back, -1);
+	Vec3 frontLeft = in.forward * s.length - in.right * s.width;
+	Vec3 frontRight = in.forward * s.length + in.right * s.width;
+	frontLeft = frontLeft * (1 / std::max(length3(frontLeft), 1e-6f));
+	frontRight = frontRight * (1 / std::max(length3(frontRight), 1e-6f));
+	clipByObstacles(in, in.position, frontLeft, unused, back, -1);
+	clipByObstacles(in, in.position, frontRight, unused, back, -1);
+}
+
+} // namespace
+
+DriveOutput driveControl(const DriveSettings& s, DriveState& st, const DriveSense& in)
 {
 	DriveOutput out;
 	const float r = s.radius;
 	const float probe = r + 10;
 	const float needed = s.spaceNeededTweak * r;
-	const auto fraction = [&](float free) { return std::clamp((free - needed) / std::max(probe - needed, 0.01f), 0.0f, 1.0f); };
-	const float frontFraction = fraction(in.front);
-	const float backFraction = fraction(in.back);
 	float error = in.error;
-	const float c = std::cos(error);
+	const float c = std::cos(error);  // local_44: dot(forward, way to the point)
+	const bool pointLeft = error < 0; // bVar3
+	const Vec3 dir = in.forward * c + in.right * std::sin(error); // unit, to the steering point
+	// The motion's sign (+1 when standing) and speed; without a velocity
+	// (the tests) the speed along the heading stands for it.
+	const bool hasVelocity = dot3(in.velocity, in.velocity) > 0;
+	const float motion = (hasVelocity ? dot3(in.forward, in.velocity) : in.speed) < 0 ? -1.0f : 1.0f;
+	const float speed3 = hasVelocity ? length3(in.velocity) : std::fabs(in.speed);
+	bool swerve = false;
+	const float obstacleCap = obstacleSpeedCap(s, st, in, speed3 * motion, swerve);
 	int direction = 1;
-	// The state machine (0x100e8170; the transitions are provisional).
-	switch (state.state) {
-	case 8: // backing towards a goal behind
-		if (c >= -0.2f || in.back <= needed) {
-			state.state = 0;
-		}
-		break;
-	case 9:  // turning on the spot: ahead at full lock
-	case 11: // and back at the opposite lock
-		if (c > 0.9f) {
-			state.state = 0;
-		} else if (state.state == 9 && in.front < needed) {
-			state.state = 11;
-		} else if (state.state == 11 && in.back < needed) {
-			state.state = 9;
-		}
-		break;
-	default:
-		if (!(c >= -0.2f && in.front >= needed)) {
-			if (in.goalDistance > 10 * r && c < -0.6f && in.back > needed) {
-				state.state = 8;
-			} else if (c < 0.9f) {
-				state.state = in.front >= needed ? 9 : 11;
+	float front = 0, back = 0, left = 0, right = 0;
+	freeSpace(s, in, probe, front, back, left, right);
+	const float remaining = in.remaining;
+
+	// The obstacle in the way, kept while it stays where it was (within
+	// 1 m, 2.5 m while avoiding).
+	const int side = st.side;
+	int sideWanted = side; // local_58: the side as read, as chosen, or 0 without an obstacle
+	ObstacleView view = findObstacle(s, st, in, dir, dir * in.goalDistance, in.goalDistance, motion, side);
+	bool found = view.found;
+	int avoided = st.avoided;
+	const auto reset = [&] {
+		st.avoided = -1;
+		view.id = -1;
+		avoided = -1;
+	};
+	if (avoided == -1 || view.listed) {
+		if (!found) {
+			reset();
+		} else if (const DriveObstacle* o = findObstacleById(in, view.id)) {
+			const float limit = st.avoiding ? 6.25f : 1.0f;
+			if (view.id == avoided && avoided != -1) {
+				const Vec3 moved = o->position - st.avoidedAt;
+				if (limit < dot3(moved, moved)) {
+					found = false;
+					reset();
+				}
+			} else {
+				st.avoidedAt = o->position;
 			}
 		}
-		break;
+	} else {
+		found = false;
+		reset();
+	}
+	bool noRoom = false; // bVar4: no room on either side of it
+	int switchState = st.state;
+	if (!found) {
+		setSide(st, 0);
+	} else {
+		st.avoided = view.id;
+		avoided = view.id;
+		if (side == 0) {
+			// Choose a side: the one with more room beside the obstacle (mesh
+			// rays from it along the driver's right axis, half its centre
+			// radius + the driver's radius + 0.5 m, cut short by other
+			// vehicles), or when both have room, the side of the way it is on.
+			bool leftward = true;
+			const DriveObstacle* o = findObstacleById(in, avoided);
+			const float half = o->centreRadius * 0.5f + r;
+			const float reach = half + 0.5f;
+			float rightFree = reach, leftFree = reach;
+			if (in.ray) {
+				const auto free = [&](const Vec3& to) {
+					const DriveRay ray = in.ray(o->position, to);
+					return ray.clear ? length3(to - o->position) : ray.distance;
+				};
+				rightFree = free(o->position + in.right * reach);
+				leftFree = free(o->position - in.right * reach);
+			}
+			leftward = rightFree < leftFree;
+			clipByObstacles(in, o->position, in.right, rightFree, leftFree, avoided);
+			const float least = std::min(leftFree, rightFree), most = std::max(leftFree, rightFree);
+			noRoom = most < half;
+			if (least <= half) {
+				if (most >= half * 0.7f) {
+					leftward = leftFree > rightFree;
+				}
+			} else {
+				const Vec3 perp {dir.z, 0, -dir.x};
+				leftward = dot2(o->position - in.position, perp) > 0;
+			}
+			sideWanted = leftward ? 1 : 2;
+			if (setSide(st, sideWanted) && !st.avoiding) {
+				switchState = 0;
+				setState(st, 0, in.now);
+				setAvoiding(st, true);
+			}
+		}
+	}
+	bool have = avoided != -1;
+	if (have) {
+		const DriveObstacle* o = findObstacleById(in, avoided);
+		if (!o) {
+			have = false;
+			avoided = -1;
+		} else {
+			// It sits on the goal and the driver is next to it: stop there.
+			const float gx = in.goal.x - o->position.x, gz = in.goal.z - o->position.z;
+			if (gx * gx + gz * gz < o->radius * o->radius) {
+				const float mx = o->position.x - in.position.x, mz = o->position.z - in.position.z;
+				const float near = o->radius + r + 3;
+				if (mx * mx + mz * mz < near * near) {
+					out.stop = true;
+					out.direction = 1;
+					return out;
+				}
+			}
+		}
+	} else {
+		setSide(st, 0);
+		sideWanted = 0;
+	}
+	// Room to turn (2.7 and 3 radii across and lengthwise).
+	const bool roomy = left + right > 2.7f * r && front + back > 2.7f * r; // local_61
+	const bool wide = left + right > 3 * r && front + back > 3 * r;        // local_62
+	const float frontFraction = (front - needed) / (probe - needed);
+	const float backFraction = (back - needed) / (probe - needed);
+	const bool boxed = front == 0 && back == 0;
+	if (boxed) {
+		switchState = c <= 0 ? 8 : 0;
 	}
 	float cap = 0;
-	if (state.state == 8) {
+	if (st.state > 7) {
+		cap = s.backingSpeed - (1 - backFraction) * (s.backingSpeed - s.speedAtZeroSpace);
+	} else if (frontFraction >= 0.95f) {
+		cap = s.maxSpeed - (1 - frontFraction) * (s.maxSpeed - s.speedAtZeroSpace);
+	} else {
+		cap = s.backingSpeed - (1 - frontFraction) * (s.backingSpeed - s.speedAtZeroSpace);
+	}
+	if (noRoom) {
+		cap = std::min(cap, s.backingSpeed);
+	}
+	if (!have) {
+		setAvoiding(st, false);
+		setSide(st, 0);
+	}
+	// While avoiding (the side flipped), the obstacle states give way to
+	// driving on. (The original also tells the other vehicle's driver,
+	// 0x100e8170's calls through the other's +0x28, and stops avoiding
+	// when that one is not a player's and stands; not rewritten.)
+	if (st.avoiding && (switchState == 4 || switchState == 5 || switchState == 6 || switchState == 13 || switchState == 14)) {
+		setState(st, 0, in.now);
+		switchState = 0;
+	}
+	const auto set = [&](int state) { setState(st, state, in.now); };
+	const auto fold = [&] {
 		direction = -1;
 		if (std::fabs(error) > kPi / 2) {
-			error = (kPi - std::fabs(error)) * (error > 0 ? 1.0f : -1.0f);
+			error = (kPi - std::fabs(error)) * sign(error);
 		}
-	} else if (state.state == 9) {
-		error = error >= 0 ? 2.0f : -2.0f;
-	} else if (state.state == 11) {
+	};
+	const bool angleLeft = view.angle < 0; // bVar5
+	switch (switchState) {
+	case 1:
+	case 7:
+	case 10:
+		break;
+	case 2: // ahead, turning right
+		if (pointLeft) {
+			set(c <= 0 ? 9 : 3);
+		} else if (c <= 0.9f) {
+			if (front >= needed && (view.ahead <= 0.5f || !have || view.clearAhead || st.avoiding)) {
+				error = std::fabs(error);
+			} else {
+				set(11);
+			}
+		} else {
+			set(0);
+		}
+		break;
+	case 3: // ahead, turning left
+		if (pointLeft) {
+			if (c > 0.9f) {
+				set(0);
+			} else if (front >= needed && (view.ahead <= 0.5f || !have || view.clearAhead || st.avoiding)) {
+				error = -std::fabs(error);
+			} else {
+				set(9);
+			}
+		} else {
+			set(c > 0 ? 2 : 11);
+		}
+		break;
+	case 4:
+		if (!have || (view.clearAhead && !angleLeft)) {
+			set(6);
+		} else if (front >= needed && !view.touching) {
+			error = -2;
+		} else {
+			set(13);
+		}
+		break;
+	case 5:
+		if (have && (!view.clearAhead || !angleLeft)) {
+			if (front < needed || view.touching) {
+				set(14);
+			} else {
+				error = 2;
+			}
+		} else {
+			set(6);
+		}
+		break;
+	case 6: // passing the obstacle
+		if (!have || (view.pathClear && view.ahead < 0.3f)) {
+			set(error >= 0 ? 2 : 3);
+		} else if (!view.touching || view.clearAhead || view.ahead <= 0) {
+			if (front >= needed) {
+				error = view.passAngle;
+			} else if (sideWanted == 2) {
+				if (setSide(st, 1) && !st.avoiding) {
+					set(0);
+					setAvoiding(st, true);
+				} else {
+					set(13);
+				}
+			} else if (setSide(st, 2) && !st.avoiding) {
+				set(0);
+				setAvoiding(st, true);
+			} else {
+				set(14);
+			}
+		} else {
+			set(sideWanted != 2 ? 13 : 14);
+		}
+		break;
+	case 8: // backing towards a goal close behind
+		if (boxed) {
+			error = -error;
+			fold();
+		} else if (c > -0.5f || remaining > 10 * r + 5 || back < needed) {
+			set(0);
+		} else if (view.ahead >= -0.6f || !have) {
+			fold();
+		} else {
+			set(angleLeft ? 3 : 2);
+		}
+		break;
+	case 9: // backing, the point on the left
+		if (!pointLeft) {
+			set(c > 0 ? 2 : 11);
+		} else if (c > 0.9f && front > needed) {
+			set(0);
+		} else if (back >= needed) {
+			direction = -1;
+			error = std::fabs(error);
+		} else {
+			set(3);
+		}
+		break;
+	case 11: // backing, the point on the right
+		if (pointLeft) {
+			set(c > 0 ? 3 : 9);
+		} else if (c > 0.9f && front > needed) {
+			set(0);
+		} else if (back >= needed) {
+			direction = -1;
+			error = -std::fabs(error);
+		} else {
+			set(2);
+		}
+		break;
+	case 12: // backing out of a narrow spot
+		if (c > 0) {
+			set(0);
+		} else if (remaining <= 10 * r && c < -0.6f && back > needed) {
+			set(8);
+		} else if (!wide) {
+			fold();
+		} else {
+			set(pointLeft ? 9 : 11);
+		}
+		break;
+	case 13:
+		if (have && (!view.clearAhead || angleLeft)) {
+			if (back < needed) {
+				set(4);
+			}
+		} else {
+			set(6);
+		}
 		direction = -1;
-		error = error >= 0 ? -2.0f : 2.0f;
+		error = 2;
+		break;
+	case 14:
+		if (!have || (view.clearAhead && angleLeft)) {
+			set(6);
+		} else if (back < needed) {
+			set(5);
+		}
+		direction = -1;
+		error = -2;
+		break;
+	default:
+		if (switchState > 14) {
+			break;
+		}
+		if (boxed) {
+			cap = s.maxSpeed * 0.5f;
+		} else if (c >= -0.2f && front >= needed) {
+			if (found && !st.avoiding) {
+				set(6);
+			}
+		} else if (remaining <= 10 * r && c < -0.6f && back > needed) {
+			set(8);
+		} else if (c < 0 && !roomy) {
+			set(12);
+		} else {
+			set(pointLeft ? 9 : 11);
+		}
+		break;
 	}
-	if (direction > 0) {
-		cap = frontFraction >= 0.95f ? s.maxSpeed - (1 - frontFraction) * (s.maxSpeed - s.speedAtZeroSpace)
-									 : s.backingSpeed - (1 - frontFraction) * (s.backingSpeed - s.speedAtZeroSpace);
-	} else {
-		cap = s.backingSpeed - (1 - backFraction) * (s.backingSpeed - s.speedAtZeroSpace);
+	cap = std::min(cap, obstacleCap);
+	if (swerve) {
+		error = -2;
 	}
-	if (in.front <= 0.01f && in.back <= 0.01f) {
-		direction = 1; // boxed in
-		cap = 0.5f * s.maxSpeed;
-	}
-	// The speed wanted: braking for the end of the path, slowing for bends.
+
+	// The speed wanted (CarMoveTo / TankMoveTo): braking for the end of the
+	// path, slowing for bends.
 	const float speed = std::fabs(in.speed);
 	float brake = 1;
 	if (speed > s.backingSpeed && s.brakeDistance > 0) {
-		const float space = std::max(0.0f, in.remaining - r - 0.5f);
+		const float space = std::max(0.0f, remaining - s.centreRadius - 0.5f);
 		if (space * space < s.brakeDistance * s.brakeDistance) {
 			const float ratio = space * space / (s.brakeDistance * s.brakeDistance);
 			if (s.tank) {
@@ -545,22 +1129,29 @@ DriveOutput driveControl(const DriveSettings& s, DriveState& state, const DriveS
 	const float targetSpeed = std::min(brake, angle) * s.maxSpeed;
 	out.direction = direction;
 	out.targetSpeed = targetSpeed;
-	const float motion = in.speed > 0 ? 1.0f : in.speed < 0 ? -1.0f : 0.0f;
-	float target = targetSpeed * static_cast<float>(direction);
-	if (in.tilt > 0.25f) {
-		target *= 1 - 0.5f * std::min(1.0f, (in.tilt - 0.25f) / 0.7f);
+	// The controllers: the error mirrored when moving against the way wanted
+	// (over 1 m/s); the speed wanted signed by the way, capped (keeping the
+	// cap's sign: a negative cap brakes).
+	const float speed2 = hasVelocity ? std::sqrt(in.velocity.x * in.velocity.x + in.velocity.z * in.velocity.z) : speed;
+	if (static_cast<float>(direction) != motion && speed2 > 1) {
+		error = -error;
 	}
-	target = std::clamp(target, -cap, cap);
+	float target = targetSpeed * static_cast<float>(direction);
 	float throttle = 0;
 	if (!s.tank) {
 		// The car's controller (0x100e9d40).
-		if (speed > 1 && motion != 0 && static_cast<float>(direction) != motion) {
-			error = -error;
-		}
 		out.turn = std::clamp(3 * s.yawScale * error - static_cast<float>(direction) * in.yawRate, -1.0f, 1.0f);
+		if (in.tilt > 0.25f) {
+			target *= 1 - 0.5f * std::min(1.0f, (in.tilt - 0.25f) / 0.7f);
+		}
+		if (cap < std::fabs(target)) {
+			target = sign(target) * cap;
+		}
 		throttle = std::clamp(target / 15 + std::min(1.0f, (target - in.speed) / 3), -1.0f, 1.0f);
-		if (targetSpeed >= s.maxSpeed && speed > 0.8f * s.maxSpeed) {
+		if (target == s.maxSpeed && speed > 0.8f * s.maxSpeed) {
 			throttle = 1;
+		} else if (throttle != 0 && speed < 1.5f) {
+			throttle = sign(throttle); // a kick off the line
 		}
 	} else {
 		// The tank's (0x100e0540): no turning below 1 m/s, less below 2 m/s.
@@ -569,16 +1160,15 @@ DriveOutput driveControl(const DriveSettings& s, DriveState& state, const DriveS
 			const float k = std::min(1.0f, speed / 2.0f);
 			e = error * k * k;
 		}
-		if (static_cast<float>(direction) != motion && motion != 0) {
-			e = -e;
-		}
 		out.turn = std::clamp(3 * e, -1.0f, 1.0f);
-		const float x = (target - in.speed) / 3;
-		const float m = std::min(1.0f, std::fabs(x));
-		throttle = std::clamp(target / 15 + (x > 0 ? 1.0f : x < 0 ? -1.0f : 0.0f) * m * m, -1.0f, 1.0f);
-	}
-	if (speed < 1.5f && throttle != 0) {
-		throttle = throttle > 0 ? 1.0f : -1.0f; // a kick off the line
+		if (cap < std::fabs(target)) {
+			target = sign(target) * cap;
+		}
+		const float x = std::min(1.0f, (target - in.speed) / 3);
+		throttle = std::clamp(target / 15 + sign(x) * x * x, -1.0f, 1.0f);
+		if (throttle != 0 && speed < 1.5f) {
+			throttle = sign(throttle);
+		}
 	}
 	out.throttle = throttle;
 	return out;
