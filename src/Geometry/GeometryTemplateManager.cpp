@@ -1,0 +1,76 @@
+#include "GeometryTemplateManager.h"
+
+#include "Console/Console.h"
+#include "Console/ConsoleBinding.h"
+
+#include <algorithm>
+#include <cctype>
+
+namespace dice::hfe::geom {
+
+namespace {
+
+std::string lower(std::string s)
+{
+	std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	return s;
+}
+
+} // namespace
+
+bool GeometryTemplateManager::Less::operator()(const std::string& a, const std::string& b) const
+{
+	return lower(a) < lower(b);
+}
+
+GeometryTemplate* GeometryTemplateManager::create(const std::string& type, const std::string& name,
+	const std::string& scriptDirectory)
+{
+	const std::string kind = lower(type);
+	const char* extension = nullptr;
+	MeshKind meshKind = MeshKind::Static;
+	if (kind == "staticmesh") {
+		extension = ".staticMesh";
+	} else if (kind == "bundledmesh") {
+		extension = ".bundledMesh";
+		meshKind = MeshKind::Bundled;
+	} else if (kind == "skinnedmesh") {
+		extension = ".skinnedMesh";
+		meshKind = MeshKind::Skinned;
+	} else if (kind == "roadcompiled") {
+		meshKind = MeshKind::Road; // each road object loads its own mesh
+	} else {
+		m_active = nullptr;
+		return nullptr;
+	}
+	auto& slot = m_templates[name];
+	if (!slot) {
+		slot = std::make_unique<GeometryTemplate>();
+		slot->name = name;
+		slot->kind = meshKind;
+		slot->path = extension ? scriptDirectory + "Meshes/" + name + extension
+								: scriptDirectory + name + "_compiled.dat";
+	}
+	m_active = slot.get();
+	return m_active;
+}
+
+GeometryTemplate* GeometryTemplateManager::find(const std::string& name) const
+{
+	const auto it = m_templates.find(name);
+	return it == m_templates.end() ? nullptr : it->second.get();
+}
+
+void registerGeometryConsoleMethods(Console& console, GeometryTemplateManager& geometries)
+{
+	bindMethod(console, "GeometryTemplate.create", ConsoleAccess::Anyone,
+		[&console, &geometries](std::string type, std::string name) {
+			const std::string& file = console.currentFile();
+			const size_t slash = file.rfind('/');
+			const std::string directory = slash == std::string::npos ? std::string() : file.substr(0, slash + 1);
+			GeometryTemplate* created = geometries.create(type, name, directory);
+			return created ? created->name : std::string();
+		});
+}
+
+} // namespace dice::hfe::geom
