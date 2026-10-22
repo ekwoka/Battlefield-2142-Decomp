@@ -55,7 +55,6 @@ struct GameClientOptions {
 	uint32_t profileId = 0xffffffff;           // -1 without an account login
 	uint32_t connectionType = 4;               // 0-6 (event 3), an index into the rate settings
 	std::string password;
-	bool punkBuster = false;
 	// The input block's 9-bit value (0x0057b040): the networkable manager's
 	// +0x50 (the rate table's 200 ms) plus 1000 x 0x006b4e70's
 	// interpolation time (from settings at 0x00a83e4c-0x00a83e54, taken as 0).

@@ -259,7 +259,7 @@ MenuServices MenuServices::openSpy()
 		const std::vector<std::string> fields {"hostname", "gamever", "mapname", "gametype", "gamevariant", "numplayers",
 			"maxplayers", "password", "hostport", "bf2142_pure", "bf2142_ranked", "bf2142_ranked_tournament",
 			"bf2142_reservedslots", "bf2142_sponsortext", "bf2142_communitylogo_url", "bf2142_sponsorlogo_url",
-			"bf2142_maxrank", "bf2142_pb"};
+			"bf2142_maxrank"};
 		return net::fetchServerList(net::masterServerHost(net::kGameName), "", fields, 15, error);
 	};
 	services.connectServer = [](const std::string& host, uint16_t port) {
@@ -345,7 +345,6 @@ void MenuBindings::pollJoin()
 		case 0x11: key = "invalidsrvpassword"; break;
 		case 0x16: key = "banned"; break;
 		case 0x1e: key = "serverfull"; break;
-		case 0x1f: key = "srvpunkbuster"; break;
 		default: break;
 		}
 	}
@@ -1061,7 +1060,7 @@ void MenuBindings::bindLists()
 			visible("mcIconFavRemove", false);
 			visible("mcIconInfo", server);
 			visible("mcIconMod", server && !mod.empty() && mod != kModName);
-			visible("mcIconPunkbuster", e && fieldNumber(*e, "bf2142_pb") != 0);
+			visible("mcIconPunkbuster", false); // no anti-cheat in the rewrite
 			visible("mcIconVoIP", false);
 			visible("mcIconRankedServer", e && fieldNumber(*e, "bf2142_ranked") != 0);
 			visible("mcIconRankRestricted", e && fieldNumber(*e, "bf2142_maxrank") != 0);
@@ -1150,7 +1149,7 @@ void MenuBindings::bindLists()
 		const std::string version = field(e, "gamever");
 		const int compare = version.empty() ? 0 : std::string(kGameVersion).compare(version);
 		set("version", Value(compare < 0 ? -1 : compare > 0 ? 1 : 0));
-		set("punkbuster", Value(fieldNumber(e, "bf2142_pb") != 0 ? 1 : 0));
+		set("punkbuster", Value(0));
 		set("maxRank", Value(fieldNumber(e, "bf2142_maxrank") != 0 ? 1 : 0));
 		set("hasReservedSlots", Value(fieldNumber(e, "bf2142_reservedslots") > 0 ? 1 : 0));
 		set("isBoosterPackMap", Value(0));
@@ -1422,6 +1421,16 @@ void MenuBindings::bindServerSettings()
 	n.setFunction(kVideoSettings, "getSelectedResolution", [this](Interpreter&, const Args&) {
 		return m_settings.count("VideoSettings.Resolution") ? m_settings.at("VideoSettings.Resolution") : Value("");
 	});
+	// The anti-cheat (PunkBuster) is not part of the rewrite: always off.
+	for (const auto& [object, member] : std::vector<std::pair<const char*, const char*>> {
+			 {kGeneralSettings, "getAllowPunkBuster"}, {kServerSettings, "getSvPunkBuster"}}) {
+		n.setFunction(object, member, [](Interpreter&, const Args&) { return Value(false); });
+	}
+	for (const auto& [object, member] : std::vector<std::pair<const char*, const char*>> {
+			 {kGeneralSettings, "setAllowPunkBuster"}, {kServerSettings, "setSvPunkBuster"}}) {
+		n.setFunction(object, member, [](Interpreter&, const Args&) { return Value(); });
+	}
+	n.setFunction(kMessages, "getPunkBusterMessage", [](Interpreter&, const Args&) { return Value(""); });
 	// VoIP (no voice chat yet): off, the volumes at half.
 	n.setFunction("dice.bf2.Sound", "voipSetEnable", [](Interpreter&, const Args&) { return Value(); });
 	for (const char* member : {"voipInitialize", "voipStopTest", "voipStartTest", "voipSetBoost", "voipSetTransmitVolume",

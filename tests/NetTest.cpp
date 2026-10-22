@@ -130,8 +130,7 @@ TEST(Net_ConnectReplies)
 	accept.write(123456, 32);
 	accept.write(1, 1);
 	const auto ok = net::readConnectReply(accept.data());
-	CHECK(ok.outcome == net::ConnectResult::Outcome::Accepted && ok.connection == 5 && ok.serverClock == 123456
-		&& ok.punkBuster);
+	CHECK(ok.outcome == net::ConnectResult::Outcome::Accepted && ok.connection == 5 && ok.serverClock == 123456);
 	net::BitWriter refuse;
 	refuse.write(3, 4);
 	refuse.write(0, 8);

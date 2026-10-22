@@ -28,7 +28,8 @@
 //     online logins); with no name it leaves offline mode.
 //   Messages (dice.MessageHandler, 0x1003f7d0): a queue the menu empties
 //     (checkForMessages): type 1 error text, 2 warning text, 3 the key of
-//     a LOCERROR_ string, 4 PunkBuster.
+//     a LOCERROR_ string (type 4, the anti-cheat's, never comes: the
+//     rewrite has none).
 //   Server lists (dice.bf2.List): fillList(true)/refreshList(true) start a
 //     query, (false) is true while it runs; rows (0x10079770) are cell0
 //     name, cell1 "players/max (queue)", cell2 the ping bar (a clip),

@@ -7,18 +7,18 @@
 //
 // Connecting (types):
 //   1 client -> server: 32 bits 0x1002 (the protocol), 32 bits the build
-//     (0x1a007000 for 1.51, 0x00423320), 1 bit PunkBuster on, a 4-byte key,
+//     (0x1a007000 for 1.51, 0x00423320), 1 bit (the anti-cheat's, always 0
+//     here: the rewrite has none), a 4-byte key,
 //     the password (32 bytes) and the mod directory (32 bytes,
 //     "mods/bf2142") (0x0068dd00; checked by 0x00689d30)
 //   2 server -> client: the connection id (8 bits), the server's clock
-//     (32 bits, ms) and whether it runs PunkBuster (1 bit) (0x00689400,
+//     (32 bits, ms) and 1 bit (the anti-cheat's, ignored) (0x00689400,
 //     read by 0x0068e580)
 //   3 server -> client: refused: a reason (32 bits) and, after a 1 bit,
 //     a message (32 bytes) (0x0068de90)
 //   4 client -> server: accepting the connection (0x0068df20)
 //   5 either way: disconnecting, with a reason (32 bits) (0x0068dfa0)
 //   15: game data (0x0068a2b0), 7 and 8: connection upkeep.
-// Datagrams starting "\xff\xff\xff\xffPB_" are PunkBuster's (0x006aa900).
 #pragma once
 
 #include "Socket.h"
@@ -48,7 +48,6 @@ enum class PacketType : uint8_t {
 const char* refusalReason(uint32_t code);
 
 struct ConnectRequest {
-	bool punkBuster = false;
 	std::string key;      // 4 bytes
 	std::string password;
 	std::string modDirectory = "mods/bf2142";
@@ -63,7 +62,6 @@ struct ConnectResult {
 	enum class Outcome { Accepted, Refused, NoAnswer, Error } outcome = Outcome::NoAnswer;
 	uint8_t connection = 0;
 	uint32_t serverClock = 0;
-	bool punkBuster = false;
 	uint32_t reason = 0;
 	std::string message;
 };

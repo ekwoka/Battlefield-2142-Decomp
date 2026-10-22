@@ -28,7 +28,6 @@ const char* refusalReason(uint32_t code)
 	case 0x11: return "wrong password";
 	case 0x16: return "banned";
 	case 0x1e: return "server full";
-	case 0x1f: return "PunkBuster required";
 	case 0x24: return "different mod";
 	default: return "refused";
 	}
@@ -39,7 +38,7 @@ std::vector<uint8_t> connectPacket(const ConnectRequest& request)
 	BitWriter out = header(PacketType::Connect, 0);
 	out.write(kProtocol, 32);
 	out.write(request.build, 32);
-	out.write(request.punkBuster ? 1 : 0, 1);
+	out.write(0, 1); // the anti-cheat's bit: none here
 	out.writeText(request.key, 4);
 	out.writeText(request.password, 32);
 	out.writeText(request.modDirectory, 32);
@@ -58,16 +57,13 @@ std::vector<uint8_t> disconnectPacket(uint8_t connection, uint32_t reason)
 ConnectResult readConnectReply(const std::vector<uint8_t>& datagram)
 {
 	ConnectResult result;
-	if (datagram.size() >= 7 && std::memcmp(datagram.data(), "\xff\xff\xff\xffPB_", 7) == 0) {
-		return result; // PunkBuster's own traffic
-	}
 	BitReader in(datagram.data(), datagram.size());
 	const uint32_t type = in.read(4);
 	in.read(8); // the connection id the header carries
 	if (type == static_cast<uint32_t>(PacketType::Accept)) {
 		result.connection = static_cast<uint8_t>(in.read(8));
 		result.serverClock = in.read(32);
-		result.punkBuster = in.read(1) != 0;
+		in.read(1); // the anti-cheat's bit
 		result.outcome = in.bad() ? ConnectResult::Outcome::Error : ConnectResult::Outcome::Accepted;
 	} else if (type == static_cast<uint32_t>(PacketType::Refuse)) {
 		result.reason = in.read(32);
@@ -162,9 +158,6 @@ uint32_t GameConnection::now() const
 void GameConnection::handleDatagram(const std::vector<uint8_t>& datagram,
 	const std::function<void(const ConnectedPacket&)>& onData)
 {
-	if (datagram.size() >= 7 && std::memcmp(datagram.data(), "\xff\xff\xff\xffPB_", 7) == 0) {
-		return;
-	}
 	ConnectedPacket packet;
 	if (!readConnectedPacket(datagram, packet)) {
 		return;

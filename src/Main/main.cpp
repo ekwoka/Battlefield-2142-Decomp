@@ -937,8 +937,8 @@ int main(int argc, char** argv)
 		const net::ConnectResult result = connection.connect(host, port, {}, 6000);
 		switch (result.outcome) {
 		case net::ConnectResult::Outcome::Accepted: {
-			std::printf("%s:%u accepted us as connection %u (server clock %u ms, PunkBuster %s)\n", host.c_str(), port,
-				result.connection, result.serverClock, result.punkBuster ? "on" : "off");
+			std::printf("%s:%u accepted us as connection %u (server clock %u ms)\n", host.c_str(), port,
+				result.connection, result.serverClock);
 			// Stay connected for a while (answering pings), showing the
 			// game data the server sends.
 			size_t received = 0;

@@ -28,7 +28,6 @@ bool GameClient::connect(const std::string& host, uint16_t port, const GameClien
 	m_levelsAnswered = 0;
 	ConnectRequest request;
 	request.password = options.password;
-	request.punkBuster = options.punkBuster;
 	if (!m_connection.start(host, port, request)) {
 		m_state = State::Failed;
 		return false;

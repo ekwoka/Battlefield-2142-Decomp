@@ -480,13 +480,14 @@ of each byte up (`0x006871b0` reads, `0x00687290` writes). It starts with a
 Connecting takes four steps:
 
 1. The client sends type 1 (`0x0068dd00`): protocol `0x1002`, build
-   `0x1a007000` (`0x00423320`), a PunkBuster bit, a 4-byte key, the password
+   `0x1a007000` (`0x00423320`), the anti-cheat's bit (always 0: PunkBuster is
+   not part of the rewrite), a 4-byte key, the password
    (32 bytes) and the mod directory (32 bytes).
 2. The server checks them (`0x00689d30`). It may refuse with type 3: a
-   reason (password `0x11`, banned `0x16`, full `0x1e`, PunkBuster required
-   `0x1f`, different mod `0x24`...) and an optional message.
+   reason (password `0x11`, banned `0x16`, full `0x1e`, different mod
+   `0x24`...) and an optional message.
 3. Or it accepts with type 2 (`0x00689400`): the connection id, its clock
-   and whether it runs PunkBuster.
+   and the anti-cheat's bit, which the rewrite ignores.
 4. The client confirms with type 4. Type 5 disconnects, with a reason.
 
 Connected packets (types 7 ping, 8 pong, 15 data) carry a Tribes-style
@@ -496,8 +497,8 @@ arrived. A ping carries the sender's clock, and the pong echoes it with
 the replier's clock (`0x0068e050` → `0x006a9c30`). Data payloads start on
 the next byte with a 16-bit length and are queued for the game
 (`0x006a9cd0`). The game's `ServerConnection` (`0x0057b3f0`) reads them.
-Datagrams starting `\\xff\\xff\\xff\\xffPB_` belong to PunkBuster
-(`0x006aa900`).
+PunkBuster is not part of the rewrite: servers that require it are not
+joinable, and its traffic and menu options are left out.
 
 ### Data payloads
 
