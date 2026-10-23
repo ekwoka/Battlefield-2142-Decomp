@@ -14,6 +14,7 @@
 #include "RigidBody.h"
 
 #include <cstdint>
+#include <functional>
 #include <unordered_map>
 #include <vector>
 
@@ -33,7 +34,9 @@ struct SphereContact {
 int segmentCapsuleCrossings(const Vec3& a, const Vec3& b, const Vec3& e0, const Vec3& e1, float radius, float roots[2]);
 
 // LODs of BF2 collision meshes by user.
-enum class CollisionUser { Projectile = 0, Vehicle = 1, Soldier = 2 };
+// Collision type 4 is the trees' and poles' (statics with a trunk: the
+// mobile mesh physics' third pass, 0x006bb050).
+enum class CollisionUser { Projectile = 0, Vehicle = 1, Soldier = 2, Tree = 4 };
 
 class CollisionWorld {
 public:
@@ -85,6 +88,9 @@ public:
 	// is that distance less the radius; a normal pointing down is turned up
 	// and the contact made no push (depth the distance).
 	void capsuleEdgeContacts(const Vec3& a, const Vec3& b, float radius, std::vector<SphereContact>& contacts) const;
+	// Each face with a cell within `radius` of `center` across (x, z), once.
+	void forEachFaceNear(const Vec3& center, float radius,
+		const std::function<void(const Vec3& a, const Vec3& b, const Vec3& c, uint32_t material, uint32_t owner)>& visit) const;
 
 private:
 	struct Triangle {

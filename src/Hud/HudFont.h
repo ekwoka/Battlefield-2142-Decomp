@@ -7,6 +7,8 @@
 // rectangle in the texture), and "kerning" pairs <first> <second> <amount>.
 #pragma once
 
+#include <array>
+#include <bitset>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -33,6 +35,19 @@ struct HudFont {
 	const Glyph* glyph(uint32_t code) const;
 	float kern(uint32_t first, uint32_t second) const;
 	float width(const std::string& text) const;
+
+	// Flat tables for codes under 256 (text is looked up a glyph at a
+	// time, every frame): a copy of their glyphs, and which of them start
+	// a kerning pair. parseHudFont makes them; call again after changing
+	// `glyphs` or `kerning` (they are skipped while the counts differ).
+	void buildIndex();
+
+private:
+	std::array<Glyph, 256> m_ascii {};
+	std::bitset<256> m_asciiPresent;
+	std::bitset<256> m_kernFirst;
+	size_t m_indexedGlyphs = static_cast<size_t>(-1);
+	size_t m_indexedKerning = static_cast<size_t>(-1);
 };
 
 std::optional<HudFont> parseHudFont(const std::string& text);

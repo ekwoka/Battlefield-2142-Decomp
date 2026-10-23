@@ -72,6 +72,61 @@ float Heightmap::heightAt(float worldX, float worldZ) const
 	return top * (1 - ty) + bottom * ty;
 }
 
+bool Heightmap::loadMaterials(const io::FileManager& files, const std::string& path)
+{
+	m_materials.clear();
+	std::vector<uint8_t> data;
+	const size_t count = static_cast<size_t>(m_width) * m_height * m_materialScale * m_materialScale;
+	if (count == 0 || !files.readFile(path, data) || data.size() < count) {
+		return false;
+	}
+	data.resize(count);
+	m_materials = std::move(data);
+	return true;
+}
+
+uint32_t Heightmap::material(int x, int y) const
+{
+	if (m_materials.empty()) {
+		return 0;
+	}
+	// Unsigned, as the engine compares: negative is outside too.
+	const auto ux = static_cast<uint32_t>(x + m_width / 2);
+	const auto uy = static_cast<uint32_t>(y + m_height / 2);
+	if (ux >= static_cast<uint32_t>(m_width) || uy >= static_cast<uint32_t>(m_height)) {
+		return 0;
+	}
+	const size_t s = static_cast<size_t>(m_materialScale);
+	return m_materials[(static_cast<size_t>(m_width) * uy * s + ux) * s];
+}
+
+uint32_t Heightmap::materialAt(float worldX, float worldZ) const
+{
+	// The secondary heightmaps sit a whole primary's extent away (originX).
+	const float x = worldX - m_clusterX * worldWidth();
+	const float z = worldZ - m_clusterY * worldDepth();
+	return material(static_cast<int>(std::floor(x / m_scale[0])), static_cast<int>(std::floor(z / m_scale[2])));
+}
+
+bool Heightmap::covers(float worldX, float worldZ) const
+{
+	const float fx = worldX - originX(), fz = worldZ - originZ();
+	return m_width > 0 && fx >= 0 && fz >= 0 && fx <= worldWidth() && fz <= worldDepth();
+}
+
+uint32_t HeightmapCluster::materialAt(float worldX, float worldZ) const
+{
+	if (const Heightmap* first = primary(); first && first->covers(worldX, worldZ)) {
+		return first->materialAt(worldX, worldZ);
+	}
+	for (const auto& heightmap : m_heightmaps) {
+		if (heightmap->covers(worldX, worldZ)) {
+			return heightmap->materialAt(worldX, worldZ);
+		}
+	}
+	return 0;
+}
+
 Heightmap* HeightmapCluster::addHeightmap(int x, int y)
 {
 	m_heightmaps.push_back(std::make_unique<Heightmap>(x, y));
@@ -120,6 +175,16 @@ void registerTerrainConsoleMethods(Console& console, HeightmapCluster& cluster, 
 	bindMethod(console, "heightmap.loadHeightData", access, [&cluster, &files](std::string path) {
 		if (Heightmap* heightmap = cluster.active()) {
 			heightmap->load(files, path);
+		}
+	});
+	bindMethod(console, "heightmap.setMaterialScale", access, [&cluster](int scale) {
+		if (Heightmap* heightmap = cluster.active()) {
+			heightmap->setMaterialScale(scale);
+		}
+	});
+	bindMethod(console, "heightmap.loadMaterialData", access, [&cluster, &files](std::string path) {
+		if (Heightmap* heightmap = cluster.active()) {
+			heightmap->loadMaterials(files, path);
 		}
 	});
 }

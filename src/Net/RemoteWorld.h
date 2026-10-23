@@ -74,6 +74,12 @@ struct RemoteObject {
 	float captureProgress = 0;
 	float captureRate = 0;
 	int raisedFlag = 0;
+	// Soldiers: the ragdoll group (0x10000) seen; the positions it sent last
+	// (its networked particles, see NetworkableState::ragdollParticles), and
+	// how many such updates came (a new one drives the body: 0x008acce0).
+	bool ragdoll = false;
+	std::vector<Vec3f> ragdollParticles;
+	uint32_t ragdollUpdates = 0;
 	bool decoded = false;     // the last update's root state was read completely
 	bool decodedAll = false;  // ... and every group after it (with a ghost layout)
 	// Ghost layout (setGhostTemplates): a vehicle is a ghost per

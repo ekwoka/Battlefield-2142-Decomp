@@ -23,6 +23,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <functional>
 #include <vector>
 
@@ -160,6 +161,9 @@ private:
 struct Ground {
 	std::function<float(float x, float z)> height;
 	std::function<float(float x, float z, Vec3& normal)> heightAndNormal;
+	// The terrain's physics material under a point (the material map,
+	// HeightmapCluster slot 0x80 / the ray 0x8c); empty: material 0.
+	std::function<uint32_t(float x, float z)> material;
 };
 
 // Slot 0x28: the body's contact points (object space) against the ground.

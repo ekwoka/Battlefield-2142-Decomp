@@ -880,6 +880,7 @@ void LevelRenderer::syncObjects()
 		}
 		instance.world = instance.local * objectWorld;
 		instance.hidden = current->hidden();
+		instance.fade = current->fade();
 		if (!instance.parts.empty() && m_sources->partTransforms) {
 			std::vector<anim::Matrix> placed(instance.parts.size(), anim::Matrix {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});
 			if (m_sources->partTransforms(instance.object, placed)) {
@@ -1325,10 +1326,11 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			lighting(lights, lights.staticSunColor, lights.staticSkyColor, 0.5f, true)},
 	};
 	const GpuMesh* bound = nullptr;
-	for (const Instance& instance : m_instances) {
-		if (instance.hidden) {
-			continue;
-		}
+	// Objects fading out (a corpse's countdown, 0x00652380) go in the
+	// blended bucket, after the opaque ones (RendDX9's skinned mesh draws
+	// with alpha below 1 as transparent, 0x10162070).
+	std::vector<const Instance*> faded;
+	const auto drawInstance = [&](const Instance& instance) {
 		if (instance.mesh != bound) {
 			bound = instance.mesh;
 			SDL_GPUBufferBinding vertexBinding {bound->vertices, 0};
@@ -1367,6 +1369,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			}
 			LightingUniforms uniforms = uniformsFor[lightmapped][submesh.alphaReference > 0];
 			uniforms.material[2] = (submesh.detail ? 1.0f : 0.0f) + (submesh.dirt ? 2.0f : 0.0f) + (submesh.crack ? 4.0f : 0.0f);
+			uniforms.material[3] = instance.fade < 1.0f ? std::max(instance.fade, 1e-3f) : 0.0f;
 			SDL_PushGPUFragmentUniformData(commands, 0, &uniforms, sizeof(uniforms));
 			const auto orWhite = [this](SDL_GPUTexture* t) { return t ? t : m_gpu.whiteTexture(); };
 			SDL_GPUTextureSamplerBinding samplers[5] = {
@@ -1378,6 +1381,22 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			};
 			SDL_BindGPUFragmentSamplers(pass, 0, samplers, 5);
 			SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
+		}
+	};
+	for (const Instance& instance : m_instances) {
+		if (instance.hidden || instance.fade <= 0.0f) {
+			continue;
+		}
+		if (instance.fade < 1.0f) {
+			faded.push_back(&instance);
+			continue;
+		}
+		drawInstance(instance);
+	}
+	if (!faded.empty()) {
+		SDL_BindGPUGraphicsPipeline(pass, m_gpu.fadedMeshPipeline());
+		for (const Instance* instance : faded) {
+			drawInstance(*instance);
 		}
 	}
 	// Particles, after what they are in front of.

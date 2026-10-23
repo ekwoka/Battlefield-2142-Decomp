@@ -163,6 +163,7 @@ private:
 		std::shared_ptr<anim::Skeleton> skeleton; // skinned meshes
 		std::shared_ptr<anim::Animation> animation;
 		bool hidden = false; // its object is hidden
+		float fade = 1;      // its object's fade (below 1: drawn blended, after the opaque ones)
 		const world::ObjectTemplate* partsTemplate = nullptr; // whose children place the parts
 	};
 	struct TerrainPatch {

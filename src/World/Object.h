@@ -51,6 +51,10 @@ public:
 	// Not drawn (a soldier inside a vehicle).
 	bool hidden() const { return m_hidden; }
 	void setHidden(bool hidden) { m_hidden = hidden; }
+	// The game's fade of its geometry (the render instance's +0x28, set
+	// through slot 0x104; a corpse's, 0x00652380): 1 opaque, 0 gone.
+	float fade() const { return m_fade; }
+	void setFade(float fade) { m_fade = fade; }
 
 private:
 	uint32_t m_id;
@@ -63,6 +67,7 @@ private:
 	int m_controlPointId = -1;
 	bool m_destroyed = false;
 	bool m_hidden = false;
+	float m_fade = 1;
 };
 
 class ObjectManager {

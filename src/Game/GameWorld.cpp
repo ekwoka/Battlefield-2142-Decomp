@@ -14,6 +14,13 @@ namespace dice::hfe::game {
 
 namespace {
 
+// The ragdoll's script, with the soldiers' animations. Not determinable:
+// what runs it. No string in BF2142.exe names it (the exe only names
+// ragDollConstraints.inc, which 0x008a8650 writes the constraints to), and no
+// .con, .inc, .tweak or .py file in the shipped archives includes it, so
+// the loader is not in anything shipped that names the file.
+constexpr const char* kRagDollScript = "Objects/Soldiers/Common/Animations/ragDollInit.con";
+
 float number(const world::ObjectTemplate& t, const char* name, float fallback)
 {
 	const auto it = t.settings().find(name);
@@ -273,6 +280,8 @@ void GameWorld::buildStaticCollision()
 	m_collision = {};
 	m_projectileCollision = {};
 	m_vehicleCollision = {};
+	m_treeCollision = {};
+	m_treeRadii.clear();
 	if (!m_files) {
 		return;
 	}
@@ -301,6 +310,24 @@ void GameWorld::addStaticCollision(const world::ObjectTemplate& t, const physics
 			m_collision.addMesh(*mesh, physics::CollisionUser::Soldier, rotation, position, owner, materials);
 			m_projectileCollision.addMesh(*mesh, physics::CollisionUser::Projectile, rotation, position, owner, materials);
 			m_vehicleCollision.addMesh(*mesh, physics::CollisionUser::Vehicle, rotation, position, owner, materials);
+			// A trunk (collision type 4): its radius is the node's +0x18,
+			// treeCollisionDiameter / 2 (0x005f6ba0, set only above 0), or
+			// 0.3 under 0.01 (0x006bb050).
+			bool trunk = false;
+			for (const auto& geometry : mesh->geometries) {
+				for (const auto& part : geometry.subGeometries) {
+					trunk = trunk || physics::collisionLodFor(*mesh, part, 4) != nullptr;
+				}
+			}
+			if (trunk) {
+				float radius = number(t, "treeCollisionDiameter", 0) * 0.5f;
+				if (radius < 0.01f) {
+					radius = 0.3f;
+				}
+				m_treeCollision.addMesh(*mesh, physics::CollisionUser::Tree, rotation, position,
+					static_cast<uint32_t>(m_treeRadii.size()), materials);
+				m_treeRadii.push_back(radius);
+			}
 		}
 	}
 	// Children sit at their offsets in the parent's space.
@@ -384,6 +411,7 @@ void GameWorld::tick(float seconds)
 	stepDrones(seconds);
 	stepSeatCorpses(seconds);
 	stepCorpses(seconds);
+	stepRemoteBodies(seconds);
 	stepAbilities(seconds);
 	stepCommander(seconds);
 	stepVehicleDamage(seconds);
@@ -1318,7 +1346,11 @@ void GameWorld::stepProjectiles(float seconds)
 				const float ground = m_ground.heightAndNormal(at.x, at.z, normal);
 				if (at.y < ground) {
 					best = t;
-					hit = {t, {at.x, ground, at.z}, normal, 0, 0};
+					// Its material from the level's material map (the
+					// heightmap ray 0x8c, 0x006d3210; the grenade's point
+					// query 0x80, 0x006c0f90).
+					const uint32_t material = m_ground.material ? m_ground.material(at.x, at.z) : 0;
+					hit = {t, {at.x, ground, at.z}, normal, material, 0};
 					hitObject = 0;
 					break;
 				}
@@ -1344,7 +1376,7 @@ void GameWorld::stepProjectiles(float seconds)
 			// triggers and the fuse) under that on a face turned up. Mesh
 			// projectiles (C4, mines, hubs) are rigid bodies in the engine
 			// (ResponsePhysics); here they bounce the same way. The
-			// terrain's material is not known to the rewrite: 0.
+			// terrain's material comes from the level's material map.
 			const physics::Vec3 n = hit.normal;
 			const uint32_t own = static_cast<uint32_t>(std::max(p.settings->material, 0));
 			const physics::Material* surface = m_materials ? m_materials->find(hit.material) : nullptr;
@@ -2399,7 +2431,12 @@ void GameWorld::finishDeath(Player& victim, BodyFate fate)
 			corpse.pose = victim.pose;
 			corpse.worldPose = victim.worldPose;
 			corpse.diedAt = victim.diedAt;
-			if (const world::ObjectTemplate* t = victim.soldierTemplate.empty() ? nullptr : m_templates.find(victim.soldierTemplate)) {
+			// The soldier object's own template (its armour's).
+			const world::ObjectTemplate* t = m_objects.find(soldier)->objectTemplate();
+			if (!t && !victim.soldierTemplate.empty()) {
+				t = m_templates.find(victim.soldierTemplate);
+			}
+			if (t) {
 				corpse.landedDelay = number(*t, "ragdollLandedDelay", 4);
 				corpse.stayAsWreck = number(*t, "armor.timeToStayAsWreck", 20);       // 0x00630040: 20
 				corpse.afterDestroyed = number(*t, "armor.timeToStayAfterDestroyed", 0); // and 0
@@ -2423,9 +2460,14 @@ void GameWorld::finishDeath(Player& victim, BodyFate fate)
 // landed (0x005eda20: no ragdoll, or one that touched something
 // ragdollLandedDelay after the death; a body still in a vehicle needn't
 // land), or after 60 s (*0x00a79388) whatever; timeToStayAfterDestroyed
-// later the server removes the object (0x00651db0). (The original also
-// fades the body's geometry out over that time, +0x44 slot 0x104.) The
-// ragdoll keeps stepping meanwhile.
+// later the server removes the object (0x00651db0). Meanwhile the body
+// fades out: its geometry's (+0x44) game alpha (+0x28, slot 0x104 with it
+// times the view-distance fade +0x2c) is the time left over
+// timeToStayAfterDestroyed, clamped to 0..1, for soldiers only (class
+// 0x9493; vehicle wrecks don't fade); the object's fade() here, which the
+// renderer draws blended. Soldiers' armour sets 6 and 1 (the .tweak
+// files): six seconds after landing, gone in a second. The body neither
+// sinks nor shrinks, and the ragdoll keeps stepping meanwhile.
 void GameWorld::stepCorpses(float seconds)
 {
 	for (auto it = m_corpses.begin(); it != m_corpses.end();) {
@@ -2450,12 +2492,118 @@ void GameWorld::stepCorpses(float seconds)
 		if (begin && corpse.fadeFrom < 0) {
 			corpse.fadeFrom = m_time;
 		}
+		if (corpse.fadeFrom >= 0 && corpse.afterDestroyed > 0) {
+			// The fade: linear from 1 to 0 over timeToStayAfterDestroyed
+			// (0x00402dd0 clamps it), the geometry's game alpha (+0x28).
+			const double left = corpse.fadeFrom + corpse.afterDestroyed - m_time;
+			body->setFade(std::clamp(static_cast<float>(left / corpse.afterDestroyed), 0.0f, 1.0f));
+		}
 		if (corpse.fadeFrom >= 0 && corpse.afterDestroyed + corpse.fadeFrom - m_time <= 0) {
 			m_hitPoints.erase(corpse.object);
 			m_objects.remove(corpse.object);
 			it = m_corpses.erase(it);
 			continue;
 		}
+		++it;
+	}
+}
+
+// A remote soldier's body (see GameWorld.h): started from the skeleton's
+// setup pose turned by the object's yaw at its feet (the first update puts
+// the networked particles where the server has them, and the constraints
+// pull the rest along), network-driven from then on.
+bool GameWorld::driveRemoteRagDoll(uint32_t object, const std::vector<physics::Vec3>& particles)
+{
+	world::Object* body = m_objects.find(object);
+	if (!body || particles.empty()) {
+		return false;
+	}
+	std::vector<anim::Vec> targets;
+	for (const physics::Vec3& p : particles) {
+		targets.push_back({p.x, p.y, p.z});
+	}
+	for (RemoteBody& remote : m_remoteBodies) {
+		if (remote.object == object) {
+			remote.ragDoll->receive(targets);
+			return true;
+		}
+	}
+	const anim::RagDollTemplate* ragDoll = m_animationSystems ? m_animationSystems->ragDoll(kRagDollScript) : nullptr;
+	const world::ObjectTemplate* t = body->objectTemplate();
+	if (!ragDoll || !t || !t->settings().count("skeleton3P")) {
+		return false;
+	}
+	const anim::Skeleton* skeleton = m_animationSystems->skeleton(t->settings().at("skeleton3P"));
+	if (!skeleton) {
+		return false;
+	}
+	RemoteBody remote;
+	remote.object = object;
+	remote.skeleton = skeleton;
+	remote.pose = anim::setupPose(*skeleton);
+	std::vector<anim::Matrix> pose = anim::worldMatrices(*skeleton, remote.pose);
+	const float yaw = body->rotation().x * 3.14159265f / 180.0f;
+	const float c = std::cos(yaw), s = std::sin(yaw);
+	for (anim::Matrix& m : pose) {
+		for (int row = 0; row < 4; ++row) {
+			const float x = m[row * 4], z = m[row * 4 + 2];
+			m[row * 4] = x * c + z * s;
+			m[row * 4 + 2] = -x * s + z * c;
+		}
+		m[12] += body->position().x;
+		m[13] += body->position().y;
+		m[14] += body->position().z;
+	}
+	remote.ragDoll = std::make_unique<anim::RagDoll>();
+	remote.ragDoll->start(*ragDoll, pose, {0, 0, 0});
+	remote.ragDoll->setNetworkDriven(true);
+	remote.ragDoll->receive(targets);
+	const anim::Vec mid = remote.ragDoll->middle();
+	for (anim::Matrix& m : pose) {
+		m[12] -= mid[0];
+		m[13] -= mid[1];
+		m[14] -= mid[2];
+	}
+	remote.worldPose = std::move(pose);
+	remote.ragDoll->pose(*skeleton, remote.pose, remote.worldPose);
+	body->setPosition({mid[0], mid[1], mid[2]});
+	body->setRotation({0, 0, 0});
+	m_remoteBodies.push_back(std::move(remote));
+	return true;
+}
+
+void GameWorld::removeRemoteRagDoll(uint32_t object)
+{
+	m_remoteBodies.erase(std::remove_if(m_remoteBodies.begin(), m_remoteBodies.end(),
+							 [object](const RemoteBody& b) { return b.object == object; }),
+		m_remoteBodies.end());
+}
+
+const anim::RagDoll* GameWorld::remoteRagDoll(uint32_t object) const
+{
+	for (const RemoteBody& remote : m_remoteBodies) {
+		if (remote.object == object) {
+			return remote.ragDoll.get();
+		}
+	}
+	return nullptr;
+}
+
+void GameWorld::stepRemoteBodies(float seconds)
+{
+	for (auto it = m_remoteBodies.begin(); it != m_remoteBodies.end();) {
+		world::Object* body = m_objects.find(it->object);
+		if (!body) {
+			it = m_remoteBodies.erase(it);
+			continue;
+		}
+		anim::RagDoll& ragDoll = *it->ragDoll;
+		const anim::RagDollTemplate* t = ragDoll.ragDollTemplate();
+		const anim::Vec mid = ragDoll.update(seconds, ragDollWorld(ragDoll.middle(), t ? t->settings.completeCollRadius : 1.5f));
+		ragDoll.pose(*it->skeleton, it->pose, it->worldPose);
+		playRagDollImpact(ragDoll, mid);
+		body->setPosition({mid[0], mid[1], mid[2]});
+		body->setRotation({0, 0, 0});
 		++it;
 	}
 }
@@ -2479,8 +2627,9 @@ void GameWorld::setCamera(const physics::Vec3& position, const physics::Vec3& fo
 // The ragdolls' levels of detail (the manager's frame 0x008ae120): with a
 // camera, each body's distance to it (its middle particle, +0x20), three
 // times as far when behind it; level 1 for each with three awake bodies
-// nearer (anim::ragDollLevels). The rewrite's bodies are never
-// network-driven, so level 2 (ragdoll_clientMaxUpdateTime) doesn't arise.
+// nearer (anim::ragDollLevels). Level 2 is for network-driven bodies
+// (remote soldiers', driveRemoteRagDoll) updated past
+// ragdoll_clientMaxUpdateTime of the frame, a time budget not rewritten.
 void GameWorld::setRagDollLevels()
 {
 	std::vector<anim::RagDoll*> bodies;
@@ -2493,6 +2642,9 @@ void GameWorld::setRagDollLevels()
 		if (corpse.ragDoll) {
 			bodies.push_back(corpse.ragDoll.get());
 		}
+	}
+	for (RemoteBody& remote : m_remoteBodies) {
+		bodies.push_back(remote.ragDoll.get());
 	}
 	if (!m_hasCamera) {
 		for (anim::RagDoll* body : bodies) {
@@ -2602,12 +2754,6 @@ GameWorld::Player* GameWorld::downedPlayer(uint32_t object) const
 }
 
 
-// The ragdoll's script, with the soldiers' animations. Not determinable:
-// what runs it. No string in BF2142.exe names it (the exe only names
-// ragDollConstraints.inc, which 0x008a8650 writes the constraints to), and no
-// .con, .inc, .tweak or .py file in the shipped archives includes it, so
-// the loader is not in anything shipped that names the file.
-constexpr const char* kRagDollScript = "Objects/Soldiers/Common/Animations/ragDollInit.con";
 
 // At death (0x005f0a00): the skeleton's last pose in world space (the model
 // turned by the soldier's yaw at its feet) starts the ragdoll with the
@@ -2693,6 +2839,9 @@ anim::RagDollWorld GameWorld::ragDollWorld(const anim::Vec& middle, float reach)
 			normal = {0, 1, 0};
 			return m_ground.height(x, z);
 		};
+	}
+	if (m_ground.material) {
+		world.groundMaterial = [this](float x, float z) { return m_ground.material(x, z); };
 	}
 	const physics::Vec3 mid {middle[0], middle[1], middle[2]};
 	auto near = std::make_shared<std::vector<const Body*>>();
@@ -2943,6 +3092,12 @@ bool GameWorld::skeletonPose(uint32_t object, const anim::Skeleton& skeleton, st
 		for (const Corpse& corpse : m_corpses) {
 			if (corpse.object == object && corpse.worldPose.size() == skeleton.nodes.size()) {
 				world = corpse.worldPose;
+				return true;
+			}
+		}
+		for (const RemoteBody& remote : m_remoteBodies) {
+			if (remote.object == object && remote.worldPose.size() == skeleton.nodes.size()) {
+				world = remote.worldPose;
 				return true;
 			}
 		}
@@ -3304,13 +3459,33 @@ void GameWorld::followSoldier(const Player& player, const world::Object& soldier
 // vehicle's origin when that sum is under 0.1 (*0x00a84230). The push is a
 // force of 3 (*0x00a8423c) at the point (node slot 0xa0, 0x006c7b10: an
 // acceleration and its torque about the centre of mass, no contact).
-// Not rewritten: the vertical probe of a part with under 4 vertices in the
-// vertex pass, the third pass (a mover's sphere LOD against a root), and
-// 0x006bb050's early exit for a vehicle whose component 0x9476 has type
-// 0x21 (its node traced along its motion first); the rewrite's vehicles
-// only meet static objects this way.
-void GameWorld::collideWithStatics(Body& body, const physics::Vec3& lastPosition, const physics::Mat3& lastRotation)
+// The wheels' parts (their vehicle LOD three vertices at one height, the
+// springs' and landing gear's) don't run their vertices: the vertex pass
+// with under 4 of them (0x006bb050, 0x6bbbaa) probes down instead, per
+// vertex i: from the part's origin P0 raised by h (|v0.y|: Vehicle::Wheel::
+// radius) and, for i 1 and 2, by 0.1 more and 0.1 forward or back, a
+// segment 2h down along the part's up axis; a part 0.5 m or more to a side
+// of the root (along the root's right axis) starts 0.5 m inwards and ends
+// where it would have. A crossing is a contact as in the vertex pass.
+// The third pass (pass 2: a mesh with collision type 4, the trees, poles
+// and lamp posts of the statics, against a root's LOD box) is
+// collideWithTrees. A vehicle whose first Engine is a helicopter's
+// (c_ETHelicopter: eu_at, as_at, us_ag, as_ag, as_tank, as_hov_light),
+// against a static object (the root's response 0xc430) on the server
+// (gameLogic slot 0x144): its origin's segment from its last stored
+// position to now through the static's vehicle LOD; a crossing ends the
+// passes with no response and a collision notify of material 0x29a both
+// ways, which PlayerControlObject's slot 43 (0x005c72f0) turns into 1e10
+// damage (0x004c0e40): destroyed.
+bool GameWorld::collideWithStatics(Body& body, const physics::Vec3& lastPosition, const physics::Mat3& lastRotation, float seconds)
 {
+	if (body.helicopterEngine && body.wreckTime < 0) {
+		physics::SphereContact hit;
+		if (m_vehicleCollision.segmentContact(lastPosition, body.body.position, hit)) {
+			damage(body.object, 1e10f, 0x29a, 0x29a, -1);
+			return false;
+		}
+	}
 	for (const physics::Vec3& local : body.points) {
 		const physics::Vec3 from = lastPosition + lastRotation.transform(local);
 		const physics::Vec3 to = body.body.position + body.body.rotation.transform(local);
@@ -3326,6 +3501,41 @@ void GameWorld::collideWithStatics(Body& body, const physics::Vec3& lastPosition
 		body.response.addContact(contact.point - body.body.position, body.body.pointVelocity(contact.point), contact.normal,
 			contact.depth, material);
 	}
+	if (body.vehicle) {
+		const physics::Mat3& r = body.body.rotation;
+		const physics::Vec3 right = r.transform({1, 0, 0}), up = r.transform({0, 1, 0}), forward = r.transform({0, 0, 1});
+		for (const Vehicle::Wheel& wheel : body.vehicle->wheels()) {
+			const float h = std::fabs(wheel.radius);
+			const physics::Vec3 mount {wheel.mount.x, wheel.mount.y + wheel.compression, wheel.mount.z};
+			const physics::Vec3 p0 = body.body.position + r.transform(mount);
+			// The part's forward turns with its steering (about its up axis).
+			const float steer = wheel.steer * 3.14159265f / 180.0f;
+			const physics::Vec3 fwd = forward * std::cos(steer) + right * std::sin(steer);
+			const float side = physics::dot(p0 - body.body.position, right);
+			for (int i = 0; i < 3; ++i) {
+				physics::Vec3 start = i == 0 ? p0 + up * h : p0 + up * (h + 0.1f) + fwd * (i == 1 ? 0.1f : -0.1f);
+				physics::Vec3 along = up * (-2 * h);
+				if (side <= -0.5f) {
+					start = start + right * 0.5f;
+					along = along - right * 0.5f;
+				} else if (side >= 0.5f) {
+					start = start - right * 0.5f;
+					along = along + right * 0.5f;
+				}
+				physics::SphereContact contact;
+				if (!m_vehicleCollision.segmentContact(start, start + along, contact)) {
+					continue;
+				}
+				physics::ContactMaterial material;
+				if (m_materials) {
+					material.friction = m_materials->friction(0, contact.material);
+					material.elasticity = m_materials->elasticity(contact.material);
+				}
+				body.response.addContact(contact.point - body.body.position, body.body.pointVelocity(contact.point),
+					contact.normal, contact.depth, material);
+			}
+		}
+	}
 	constexpr float kEdgePush = 3.0f;      // *0x00a8423c (0x008ed730)
 	constexpr float kEdgeMinNormal = 0.1f; // *0x00a84230 (0x008ed750)
 	for (const auto& edge : body.edges) {
@@ -3336,6 +3546,127 @@ void GameWorld::collideWithStatics(Body& body, const physics::Vec3& lastPosition
 			body.body.addForce(point - body.body.position, normal * kEdgePush);
 		}
 	}
+	collideWithTrees(body, seconds);
+	return true;
+}
+
+namespace {
+
+// 0x006ae680: a half-ray from `start` along `direction` against a box
+// (min, max in the frame of `rotation` at `position`): where it enters
+// and the face's outward normal. False when it misses or starts inside.
+bool rayEntersBox(const physics::Vec3& start, const physics::Vec3& direction, const physics::Vec3& low,
+	const physics::Vec3& high, const physics::Mat3& rotation, const physics::Vec3& position, physics::Vec3& point,
+	physics::Vec3& normal)
+{
+	const physics::Vec3 s = rotation.untransform(start - position);
+	const physics::Vec3 d = rotation.untransform(direction);
+	const float so[3] = {s.x, s.y, s.z}, dir[3] = {d.x, d.y, d.z};
+	const float lo[3] = {low.x, low.y, low.z}, hi[3] = {high.x, high.y, high.z};
+	if (so[0] >= lo[0] && so[0] <= hi[0] && so[1] >= lo[1] && so[1] <= hi[1] && so[2] >= lo[2] && so[2] <= hi[2]) {
+		return false;
+	}
+	float enter = 0, leave = 1e30f;
+	int axis = -1;
+	float sign = 0;
+	for (int k = 0; k < 3; ++k) {
+		if (std::fabs(dir[k]) < 1e-12f) {
+			if (so[k] < lo[k] || so[k] > hi[k]) {
+				return false;
+			}
+			continue;
+		}
+		float t0 = (lo[k] - so[k]) / dir[k], t1 = (hi[k] - so[k]) / dir[k];
+		float faceSign = -1;
+		if (t0 > t1) {
+			std::swap(t0, t1);
+			faceSign = 1;
+		}
+		if (t0 > enter) {
+			enter = t0;
+			axis = k;
+			sign = faceSign;
+		}
+		leave = std::min(leave, t1);
+		if (enter > leave) {
+			return false;
+		}
+	}
+	if (axis < 0) {
+		return false;
+	}
+	point = start + direction * enter;
+	physics::Vec3 local {};
+	(axis == 0 ? local.x : axis == 1 ? local.y : local.z) = sign;
+	normal = rotation.transform(local);
+	return true;
+}
+
+} // namespace
+
+// 0x006bb050's third pass (pass 2) for a root body B against the statics'
+// collision type 4 (A: a tree or pole, fixed): each face of A crossing the
+// plane through B's centre of mass across B's up axis (from v0-v1, else
+// v0-v2) gives a point X on it; a half-ray from X less A's motion relative
+// to B this tick (here -B's velocity x dt) towards B's centre of mass
+// (plus that motion) enters B's LOD box at P through a face whose outward
+// normal, flattened (y 0) and turned round, is n; at dist = n.(P - X)
+// within A's radius the contact is at P, along n (into B), r - dist deep,
+// when B moves towards it (pass 2 needs n.(vA - vB) >= 0). A fixed object
+// leaves the whole push to B (0x006b6cc0).
+void GameWorld::collideWithTrees(Body& body, float seconds)
+{
+	if (m_treeRadii.empty()) {
+		return;
+	}
+	const physics::RigidBody& b = body.body;
+	const physics::Vec3 c = b.worldCenterOfMass();
+	const physics::Vec3 up = b.rotation.transform({0, 1, 0});
+	const physics::Vec3 d = b.velocity * -seconds;
+	const physics::Vec3 extent = body.boxMax - body.boxMin;
+	const float reach = std::sqrt(physics::lengthSquared(extent)) + 1.0f;
+	m_treeCollision.forEachFaceNear(c, reach,
+		[&](const physics::Vec3& p0, const physics::Vec3& v1, const physics::Vec3& v2, uint32_t material, uint32_t owner) {
+			const float s0 = physics::dot(p0 - c, up);
+			physics::Vec3 p1 = v1;
+			float s1 = physics::dot(p1 - c, up);
+			if ((s0 < 0) == (s1 < 0)) {
+				p1 = v2;
+				s1 = physics::dot(p1 - c, up);
+				if ((s0 < 0) == (s1 < 0)) {
+					return;
+				}
+			}
+			const float t = s1 / (s1 - s0);
+			const physics::Vec3 x = p1 + (p0 - p1) * t;
+			const physics::Vec3 start = x - d;
+			const physics::Vec3 towards = (c - start) + d;
+			physics::Vec3 point, normal;
+			if (!rayEntersBox(start, towards, body.boxMin, body.boxMax, b.rotation, b.position, point, normal)) {
+				return;
+			}
+			normal.y = 0;
+			const float length = std::sqrt(physics::lengthSquared(normal));
+			if (length < 1e-6f) {
+				return;
+			}
+			normal = normal * (-1.0f / length);
+			const float dist = physics::dot(normal, point - x);
+			const float radius = owner < m_treeRadii.size() ? m_treeRadii[owner] : 0.3f;
+			if (std::fabs(dist) > radius) {
+				return;
+			}
+			const physics::Vec3 velocity = b.pointVelocity(point);
+			if (physics::dot(normal, velocity * -1.0f) < 0) {
+				return;
+			}
+			physics::ContactMaterial contactMaterial;
+			if (m_materials) {
+				contactMaterial.friction = m_materials->friction(0, material);
+				contactMaterial.elasticity = m_materials->elasticity(material);
+			}
+			body.response.addContact(point - b.position, velocity, normal, -(radius - dist), contactMaterial);
+		});
 }
 
 GameWorld::Body* GameWorld::findBody(uint32_t object)
@@ -3908,6 +4239,56 @@ void GameWorld::enablePhysics(const io::FileManager& files, physics::CollisionTe
 // The template setup that creates physics nodes (0x005f6ba0): mobile mesh
 // physics gets a PhysicsNode.Basic with the template's mass, centre of mass,
 // inertia and gravity modifiers.
+namespace {
+
+int engineTypeOf(const std::string& text)
+{
+	// The c_ET constants (symbols/BF2142.exe.constants.csv), or a number.
+	static const std::pair<const char*, int> kTypes[] = {{"c_etcar", 2}, {"c_ethelicopter", 33}, {"c_etnewcar", 66},
+		{"c_etnewcar2", 194}, {"c_etnewtank", 70}, {"c_etplane", 1}, {"c_etrocket", 17}, {"c_etship", 9},
+		{"c_ettank", 6}, {"c_ettorpedo", 25}};
+	std::string l = text;
+	std::transform(l.begin(), l.end(), l.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+	for (const auto& [name, value] : kTypes) {
+		if (l == name) {
+			return value;
+		}
+	}
+	return std::atoi(text.c_str());
+}
+
+// 0x006b6c50 -> 0x005c63b0: the first Engine (ObjectTemplate class 0x9476)
+// of the tree, checking a node, then its next siblings, then its first
+// child's chain: a template's children are all checked before any of
+// theirs. Its engineType (template +0x6e8 through slot 0x1a8), or -1.
+int firstEngineIn(const world::ObjectTemplateManager& templates, const std::vector<world::ChildTemplate>& list, size_t i,
+	int depth)
+{
+	if (i >= list.size() || depth > 8) {
+		return -1;
+	}
+	const world::ObjectTemplate* t = templates.find(list[i].name);
+	if (t && t->typeName() == "Engine") {
+		const auto type = t->settings().find("engineType");
+		return type == t->settings().end() ? 0 : engineTypeOf(type->second);
+	}
+	if (const int found = firstEngineIn(templates, list, i + 1, depth); found >= 0) {
+		return found;
+	}
+	return t ? firstEngineIn(templates, t->children(), 0, depth + 1) : -1;
+}
+
+} // namespace
+
+int GameWorld::firstEngineType(const world::ObjectTemplate& root) const
+{
+	if (root.typeName() == "Engine") {
+		const auto type = root.settings().find("engineType");
+		return type == root.settings().end() ? 0 : engineTypeOf(type->second);
+	}
+	return firstEngineIn(m_templates, root.children(), 0, 0);
+}
+
 void GameWorld::addBodies()
 {
 	for (const auto& owned : m_objects.objects()) {
@@ -3975,6 +4356,9 @@ void GameWorld::addBodies()
 		if (body.points.empty()) {
 			continue;
 		}
+		body.boxMin = low;
+		body.boxMax = high;
+		body.helicopterEngine = firstEngineType(*t) == 33;
 		body.projectileMesh = std::make_shared<physics::CollisionWorld>();
 		body.projectileMesh->addMesh(*mesh, physics::CollisionUser::Projectile, {}, {}, object.id(), materialMap(*t));
 		body.soldierMesh = std::make_shared<physics::CollisionWorld>();
@@ -4015,15 +4399,20 @@ void GameWorld::stepPhysics(float seconds)
 			it->occupiedAt = m_time;
 		}
 		if (it->vehicle) {
-			// The ground's material is not known yet: material 0 on both sides.
-			const float grip = m_materials ? m_materials->friction(0, 0) : 0.8f;
+			// The terrain's material under the vehicle (the level's material
+			// map) against material 0.
+			const uint32_t ground = m_ground.material ? m_ground.material(body.position.x, body.position.z) : 0;
+			const float grip = m_materials ? m_materials->friction(0, ground) : 0.8f;
 			it->vehicle->tick(body, m_ground, seconds, grip);
 		}
 		const physics::Vec3 lastPosition = body.position;
 		const physics::Mat3 lastRotation = body.rotation;
 		body.step(seconds);
 		physics::collideWithGround(body, it->response, it->points, m_ground, {});
-		collideWithStatics(*it, lastPosition, lastRotation);
+		if (!collideWithStatics(*it, lastPosition, lastRotation, seconds)) {
+			++it; // a helicopter that hit a static object: destroyed, no response
+			continue;
+		}
 		it->response.solve(body);
 		object->setPosition({body.position.x, body.position.y, body.position.z});
 		const physics::Vec3 angles = body.rotation.yawPitchRoll();

@@ -296,7 +296,8 @@ bool RagDollTemplate::execute(const std::string& line, std::string* include, std
 			{"ragdoll_legpointforwardfactor", &settings.legPointForwardFactor},
 			{"rd_expforcemod", &settings.expForceMod}, {"rd_dieforce", &settings.dieForce},
 			{"rd_dieinvehicleforce", &settings.dieInVehicleForce},
-			{"ragdoll_clientmaxupdatetime", &settings.clientMaxUpdateTime}};
+			{"ragdoll_clientmaxupdatetime", &settings.clientMaxUpdateTime},
+			{"ragdoll_net_interpolate", &settings.netInterpolate}};
 		for (const Var& v : floats) {
 			if (var == v.name) {
 				*v.number = value;
@@ -321,6 +322,10 @@ bool RagDollTemplate::execute(const std::string& line, std::string* include, std
 		}
 		if (var == "ragdoll_iterations") {
 			settings.iterations = i(1);
+			return true;
+		}
+		if (var == "ragdoll_net_boneenable") {
+			settings.netBoneEnable = i(1);
 			return true;
 		}
 		return false;
@@ -428,8 +433,16 @@ void RagDoll::start(const RagDollTemplate& ragDoll, const std::vector<Matrix>& p
 		particle.bone = p.bone;
 		particle.mass = p.mass;
 		particle.radius = p.radius;
+		// 0x008aca60: networked by bone.
+		const int bits = s.netBoneEnable;
+		particle.networked = (p.bone == 1 && (bits & 1)) || (p.bone == 6 && (bits & 2)) || (p.bone == 15 && (bits & 4))
+			|| (p.bone == 31 && (bits & 8));
+		particle.target = particle.position;
 		m_particles.push_back(particle);
 	}
+	m_netDriven = false;
+	m_firstPending = true;
+	m_netTimer = 0;
 	m_forced = false;
 	m_awake = true;
 	m_sleepLeft = s.sleep;
@@ -502,6 +515,15 @@ void RagDoll::accumulate()
 void RagDoll::integrate(float step)
 {
 	for (Particle& p : m_particles) {
+		if (m_netDriven && p.networked) {
+			// 0x008a8860: pulled ragdoll_net_interpolate of the way to its target.
+			const Vec old = p.position;
+			p.position = old + (p.target - old) * m_template->settings.netInterpolate;
+			p.previous = old;
+			p.acceleration = {};
+			p.force = {};
+			continue;
+		}
 		const Vec move = (p.position - p.previous) + p.acceleration * (step * step);
 		p.previous = p.position;
 		p.position += (move + p.lastMove) * 0.5f;
@@ -721,6 +743,12 @@ void RagDoll::collide(const RagDollWorld& world)
 			segment(p, from, direction, to);
 			const float startHeight = world.ground(from[0], from[2], normal);
 			const float endHeight = world.ground(to[0], to[2], normal);
+			// The heightmap ray's material (0x008ac200 casts the cluster's
+			// ray 0x8c, which reads the material map under the crossing,
+			// 0x006d3210); deep water (material 1) is no hit.
+			const auto materialAt = [&world](const Vec& at) {
+				return world.groundMaterial ? world.groundMaterial(at[0], at[2]) : 0u;
+			};
 			if (from[1] >= startHeight && to[1] < endHeight && -dot(normal, direction) > 0) {
 				// Where the segment enters the ground (bisection).
 				float lo = 0, hi = 1;
@@ -732,11 +760,12 @@ void RagDoll::collide(const RagDollWorld& world)
 				}
 				Vec point = from + (to - from) * hi;
 				point[1] = world.ground(point[0], point[2], normal);
+				const uint32_t material = materialAt(point);
+				if (material == 1) {
+					continue; // the water's push (cluster slot 0x94) is not the terrain's
+				}
 				m_touched = true;
-				// The terrain's material at the point (the heightmap's ray,
-				// slot 0x8c) is not known to the rewrite: 0. Deep water
-				// (material 1) would not count.
-				impact(p, normal, 0);
+				impact(p, normal, material);
 				p.position -= normal * dot(to - point, normal);
 				p.previous = p.position;
 			} else {
@@ -819,6 +848,14 @@ bool RagDoll::takeImpact(float& speed, uint32_t& material)
 void RagDoll::solve(const RagDollWorld& world)
 {
 	const RagDollSettings& s = m_template->settings;
+	// Network-driven: the networked particles are held where the step put
+	// them (saved before, restored after each pass).
+	std::vector<Vec> held;
+	if (m_netDriven) {
+		for (const Particle& p : m_particles) {
+			held.push_back(p.position);
+		}
+	}
 	for (int i = 0; i < s.iterations; ++i) {
 		if (s.useConstraints) {
 			angularConstraints();
@@ -828,7 +865,75 @@ void RagDoll::solve(const RagDollWorld& world)
 			distanceConstraints();
 		}
 		collide(world);
+		if (m_netDriven) {
+			for (size_t k = 0; k < m_particles.size(); ++k) {
+				if (m_particles[k].networked) {
+					m_particles[k].position = held[k];
+					m_particles[k].previous = held[k];
+				}
+			}
+		}
 	}
+}
+
+void RagDoll::setNetworkDriven(bool on)
+{
+	setNetworkDriven(on, RagDollWorld {});
+}
+
+void RagDoll::setNetworkDriven(bool on, const RagDollWorld& world)
+{
+	if (m_netDriven == on || !m_template) {
+		return;
+	}
+	if (!on) {
+		if (!m_firstPending) {
+			for (Particle& p : m_particles) {
+				if (p.networked) {
+					p.previous = p.position;
+					p.position = p.target;
+					p.acceleration = {};
+					p.force = {};
+				}
+			}
+			solve(world); // still driven: they stay put
+		}
+		m_netTimer = 0;
+	}
+	m_netDriven = on;
+}
+
+void RagDoll::receive(const std::vector<Vec>& targets)
+{
+	if (!m_template) {
+		return;
+	}
+	m_netTimer = 0.3f;
+	m_netDriven = true;
+	m_sleepLeft = m_template->settings.sleep;
+	m_awake = true;
+	size_t next = 0;
+	for (Particle& p : m_particles) {
+		if (!p.networked || next >= targets.size()) {
+			continue;
+		}
+		p.target = targets[next++];
+		if (m_firstPending) {
+			p.position = p.target;
+		}
+	}
+	m_firstPending = false;
+}
+
+std::vector<Vec> RagDoll::networkedPositions() const
+{
+	std::vector<Vec> out;
+	for (const Particle& p : m_particles) {
+		if (p.networked) {
+			out.push_back(p.position);
+		}
+	}
+	return out;
 }
 
 const Vec& RagDoll::update(float seconds, const RagDollWorld& world)
@@ -841,6 +946,20 @@ const Vec& RagDoll::update(float seconds, const RagDollWorld& world)
 	seconds *= s.slowMotion;
 	if (seconds < 0) {
 		return middle();
+	}
+	if (m_netDriven) {
+		// 0x008add10: nothing until the first update; 0.3 s without one
+		// and the body is its own.
+		if (m_firstPending) {
+			return middle();
+		}
+		if (m_awake && m_netTimer > 0) {
+			m_netTimer -= seconds;
+			if (m_netTimer <= 0) {
+				m_netTimer = 0;
+				setNetworkDriven(false, world);
+			}
+		}
 	}
 	if (!m_awake) {
 		// Asleep: every 1/30 s, woken by an object of its list that moves

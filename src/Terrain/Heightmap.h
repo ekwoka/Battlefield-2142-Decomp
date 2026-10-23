@@ -7,6 +7,7 @@
 // by row; height = sample * scale.y.
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -49,6 +50,21 @@ public:
 	// Height at a world position, bilinearly filtered; 0 outside.
 	float heightAt(float worldX, float worldZ) const;
 
+	// The material map (0x00676620 stores the scale at +0xd0, 0x006d2f40
+	// reads width * height * scale^2 bytes raw to +0xd4).
+	void setMaterialScale(int scale) { m_materialScale = std::max(scale, 1); }
+	bool loadMaterials(const io::FileManager& files, const std::string& path);
+	bool hasMaterials() const { return !m_materials.empty(); }
+	// The material of sample (x, y) counted from the middle sample
+	// (0x006cfe40: x + width / 2, y + height / 2; 0 outside or without a map).
+	uint32_t material(int x, int y) const;
+	// The material under a world position: the sample at the cell's lower
+	// x / z corner (0x006d2fc0: floor(x / scale.x), floor(z / scale.z),
+	// after 0x006d0630 takes the heightmap's offset off).
+	uint32_t materialAt(float worldX, float worldZ) const;
+	// Does the heightmap cover the world position?
+	bool covers(float worldX, float worldZ) const;
+
 private:
 	int m_clusterX;
 	int m_clusterY;
@@ -57,6 +73,8 @@ private:
 	std::array<float, 3> m_scale {1, 1, 1};
 	int m_bits = 16;
 	std::vector<uint16_t> m_samples;
+	int m_materialScale = 1;
+	std::vector<uint8_t> m_materials;
 };
 
 class HeightmapCluster {
@@ -73,6 +91,9 @@ public:
 	Heightmap* active() const { return m_active; }
 	const Heightmap* primary() const;
 	const std::vector<std::unique_ptr<Heightmap>>& heightmaps() const { return m_heightmaps; }
+	// The terrain's material at a world position (cluster slot 0x80,
+	// 0x006b5430: the heightmap that holds the point; 0 outside them all).
+	uint32_t materialAt(float worldX, float worldZ) const;
 
 private:
 	int m_clusterSize = 1;

@@ -473,15 +473,22 @@ bool readSoldier(BitReader& in, const NetworkableHints& h, const Vec3f& referenc
 	}
 	if (m & 0x10000) {
 		// Dead: the ragdoll (0x008a9ce0 writes it): a 9-bit length, then the
-		// first particle's position as floats and the others as delta3 of
-		// 0.01 from it. Nothing else follows.
+		// networked particles (0x008acce0 reads them by its own flags, the
+		// same on both ends): the first's position as floats, the others as
+		// delta3 of 0.01 from it. Nothing else follows.
 		s.ragdollBits = in.read(9);
 		const size_t start = in.position();
 		if (s.ragdollBits >= 96) {
+			Vec3f first;
+			first.x = in.readFloat();
+			first.y = in.readFloat();
+			first.z = in.readFloat();
+			s.ragdollParticles.push_back(first);
+			while (in.position() + 3 <= start + s.ragdollBits && !in.bad()) {
+				s.ragdollParticles.push_back(readDelta3(in, 0.01f, first));
+			}
 			s.hasPosition = true;
-			s.position.x = in.readFloat();
-			s.position.y = in.readFloat();
-			s.position.z = in.readFloat();
+			s.position = s.ragdollParticles[s.ragdollParticles.size() > 1 ? 1 : 0];
 		}
 		in.seek(start + s.ragdollBits);
 		s.complete = !in.bad();
@@ -1157,11 +1164,21 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 			writeRanged(out, static_cast<uint32_t>(std::clamp(s.soldierValues[1], 0, 4)), 5);
 		}
 		if (m & 0x10000) {
-			// The ragdoll: here only its first particle.
-			out.write(96, 9);
-			out.writeFloat(s.position.x);
-			out.writeFloat(s.position.y);
-			out.writeFloat(s.position.z);
+			// The ragdoll: its networked particles (only `position` when
+			// none are given), the length first.
+			std::vector<Vec3f> particles = s.ragdollParticles;
+			if (particles.empty()) {
+				particles.push_back(s.position);
+			}
+			BitWriter body;
+			body.writeFloat(particles[0].x);
+			body.writeFloat(particles[0].y);
+			body.writeFloat(particles[0].z);
+			for (size_t i = 1; i < particles.size(); ++i) {
+				writeDelta3(body, 0.01f, particles[i], particles[0]);
+			}
+			out.write(static_cast<uint32_t>(body.bits()), 9);
+			out.append(body);
 			break;
 		}
 		if (m & 1) {

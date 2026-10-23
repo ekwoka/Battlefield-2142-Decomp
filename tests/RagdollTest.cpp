@@ -12,6 +12,7 @@
 #include "Physics/CollisionTemplateManager.h"
 #include "Physics/CollisionWorld.h"
 #include "Physics/MaterialManager.h"
+#include "Terrain/Heightmap.h"
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
@@ -516,6 +517,73 @@ TEST(RagDoll_ImpactsWakingAndRidingAlong)
 	CHECK(std::abs(body.middle()[0] - before - 1.0f) < 0.05f);
 }
 
+// The level's terrain material map (heightmap.loadMaterialData,
+// HeightmapPrimary.mat: a byte per sample, the material id, read at the
+// cell's lower corner, 0x006cfe40 / 0x006d2fc0), and a body landing on it
+// takes its material for the impact sound.
+TEST(RagDoll_TerrainMaterialMap)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	files.setMountingAllowed(true);
+	const std::string level = "Levels/Camp_Gibraltar/";
+	CHECK(files.mountArchive(level + "server.zip", level));
+	files.setMountingAllowed(false);
+	Console console {&files};
+	terrain::HeightmapCluster cluster;
+	terrain::registerTerrainConsoleMethods(console, cluster, files);
+	std::string out;
+	CHECK(console.run(level + "Heightdata.con", {}, out));
+	const terrain::Heightmap* primary = cluster.primary();
+	CHECK(primary && primary->loaded() && primary->hasMaterials());
+	if (!primary || !primary->hasMaterials()) {
+		return;
+	}
+	// Materials (materialManagerDefine.con): 8 Dirt, 12 rock; the painted
+	// map is 1024 square, its last row and column 0.
+	CHECK(cluster.materialAt(0, 0) == 8);
+	CHECK(cluster.materialAt(250, -400) == 12);
+	CHECK(primary->material(512, 0) == 0 && primary->material(0, 512) == 0 && primary->material(511, 0) != 0);
+	CHECK(primary->material(-513, 0) == 0 && primary->material(0, 600) == 0);
+	CHECK(cluster.materialAt(0.0f, -1.0f) == primary->material(0, -1)); // floor, not truncation
+	// The secondary heightmaps have no map: 0 beyond the primary.
+	CHECK(cluster.materialAt(3000, 0) == 0);
+
+	// A body falling on rock reports rock.
+	Game game(gameDir);
+	const anim::RagDollTemplate* t = game.systems.ragDoll(kRagDollScript);
+	const anim::Skeleton* skeleton = game.systems.skeleton("Objects/Soldiers/Common/Animations/3p_setup.ske");
+	CHECK(t && skeleton);
+	if (!t || !skeleton) {
+		return;
+	}
+	std::vector<anim::Matrix> pose = anim::worldMatrices(*skeleton, anim::setupPose(*skeleton));
+	anim::RagDoll body;
+	body.start(*t, pose, {0, -3, 0});
+	anim::RagDollWorld world;
+	world.ground = [](float, float, anim::Vec& normal) {
+		normal = {0, 1, 0};
+		return -0.5f;
+	};
+	world.groundMaterial = [](float, float) { return 12u; };
+	int impacts = 0;
+	for (int i = 0; i < 30 * 3; ++i) {
+		body.update(1 / 30.0f, world);
+		float speed = 0;
+		uint32_t material = 0;
+		if (body.takeImpact(speed, material)) {
+			++impacts;
+			CHECK(material == 12);
+		}
+	}
+	CHECK(impacts >= 1);
+}
+
 // The capsule edge test (collision-mesh slot 25, per face 0x006be990): a
 // capsule lying across a box's top edge is pushed up and out of it; one
 // below a face's edge with the normal pointing down is turned up without a
@@ -700,6 +768,320 @@ TEST(RagDoll_ThrownOutOfASeatWithoutADieBundle)
 	CHECK(game.objects.find(soldier) != nullptr);
 	game.run(4);  // past 20 s, landed: gone
 	CHECK(game.objects.find(soldier) == nullptr && game.world->corpses().empty());
+}
+
+// A body on foot after PlayerDeath with the soldiers' shipped armour
+// (timeToStayAsWreck 6, timeToStayAfterDestroyed 1): once landed and six
+// seconds dead, its countdown begins and it fades out linearly over a
+// second (0x00652380: the geometry's alpha the time left over
+// timeToStayAfterDestroyed), then it goes.
+TEST(RagDoll_CorpseFadesOut)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	for (const char* name : {"us_light_soldier", "pac_light_soldier"}) {
+		game.templates.find(name)->settings()["armor.timeToStayAsWreck"] = "6";
+		game.templates.find(name)->settings()["armor.timeToStayAfterDestroyed"] = "1";
+	}
+	game.start();
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	game.run(1);
+	const uint32_t soldier = game.world->playerObject();
+	game.world->setHitPoints(soldier, 0);
+	int ticks = 0;
+	for (; ticks < 30 * 40 && game.count("PlayerDeath") == 0; ++ticks) {
+		game.world->tick(1 / 30.0f);
+	}
+	CHECK(game.count("PlayerDeath") == 1);
+	const world::Object* body = game.objects.find(soldier);
+	CHECK(body != nullptr);
+	if (!body) {
+		return;
+	}
+	// Past six seconds and landed: the first corpse step begins the fade.
+	game.world->tick(1 / 30.0f);
+	CHECK(body->fade() < 1.0f && body->fade() > 0.9f);
+	game.run(0.5f);
+	CHECK(std::abs(body->fade() - 0.47f) < 0.05f);
+	game.run(0.6f);
+	CHECK(game.objects.find(soldier) == nullptr && game.world->corpses().empty());
+}
+
+// The network side: a server's body sends its networked particles (the
+// hips and shoulders: bones 1, 6, 15, 31), a client's network-driven body
+// follows them (0x008acce0: the first update puts them there, then each
+// step pulls them ragdoll_net_interpolate of the way and the constraints
+// hold them), and 0.3 s without an update leaves it to itself. A remote
+// soldier's object in GameWorld gets such a body and its pose.
+TEST(RagDoll_NetworkDrivenBody)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	const anim::RagDollTemplate* t = game.systems.ragDoll(kRagDollScript);
+	const anim::Skeleton* skeleton = game.systems.skeleton("Objects/Soldiers/Common/Animations/3p_setup.ske");
+	CHECK(t && skeleton);
+	if (!t || !skeleton) {
+		return;
+	}
+	CHECK(std::abs(t->settings.netInterpolate - 0.1f) < 1e-6f && t->settings.netBoneEnable == 15);
+	std::vector<anim::Matrix> pose = anim::worldMatrices(*skeleton, anim::setupPose(*skeleton));
+	for (anim::Matrix& m : pose) {
+		m[13] += 1.0f;
+	}
+	anim::RagDollWorld world;
+	world.ground = [](float, float, anim::Vec& normal) {
+		normal = {0, 1, 0};
+		return 0.0f;
+	};
+	anim::RagDoll server, client;
+	server.start(*t, pose, {2, 0, 0});
+	// The client's body starts elsewhere (a guess at the pose); the first
+	// update snaps its networked particles.
+	std::vector<anim::Matrix> guess = pose;
+	for (anim::Matrix& m : guess) {
+		m[12] += 3.0f;
+	}
+	client.start(*t, guess, {0, 0, 0});
+	client.setNetworkDriven(true);
+	CHECK(server.networkedPositions().size() == 4);
+	CHECK(&server.particles()[3] && server.particles()[3].bone == 6 && server.particles()[3].networked);
+	const anim::Vec before = client.middle();
+	client.update(1 / 30.0f, world); // nothing until the first update
+	CHECK(distance(client.middle(), before) < 1e-6f);
+	// Falling, the client trails (a tenth of the way a step); at rest, it
+	// is there.
+	float worst = 0;
+	for (int i = 0; i < 90; ++i) {
+		server.update(1 / 30.0f, world);
+		client.receive(server.networkedPositions());
+		client.update(1 / 30.0f, world);
+		if (i >= 60) {
+			const std::vector<anim::Vec> a = server.networkedPositions(), b = client.networkedPositions();
+			for (size_t k = 0; k < a.size(); ++k) {
+				worst = std::max(worst, distance(a[k], b[k]));
+			}
+		}
+	}
+	std::fprintf(stderr, "  the client's networked particles at most %.3f m from the server's\n", worst);
+	CHECK(client.networkDriven() && worst < 0.05f);
+	CHECK(distance(client.middle(), server.middle()) < 0.05f);
+	// No update for 0.3 s (of ragdoll time, slowMotion 0.75): its own.
+	for (int i = 0; i < 15; ++i) {
+		client.update(1 / 30.0f, world);
+	}
+	CHECK(!client.networkDriven());
+
+	// A remote soldier's object: a body at its middle particle, posed.
+	game.start();
+	world::ObjectTemplate* soldier = game.templates.find("us_light_soldier");
+	const uint32_t ghost = game.objects.create(soldier, {5, 0, 5}, {90, 0, 0})->id();
+	std::vector<physics::Vec3> sent;
+	for (const anim::Vec& p : server.networkedPositions()) {
+		sent.push_back({p[0] + 5, p[1], p[2] + 5});
+	}
+	CHECK(game.world->driveRemoteRagDoll(ghost, sent));
+	const anim::RagDoll* remote = game.world->remoteRagDoll(ghost);
+	CHECK(remote && remote->networkDriven());
+	game.run(0.2f);
+	const world::Object* object = game.objects.find(ghost);
+	CHECK(object && remote && std::abs(object->position().x - remote->middle()[0]) < 1e-4f);
+	CHECK(object && std::abs(object->position().x - sent[1].x) < 0.3f);
+	std::vector<anim::Matrix> posed;
+	CHECK(game.world->skeletonPose(ghost, *skeleton, posed) && posed.size() == skeleton->nodes.size());
+	game.world->removeRemoteRagDoll(ghost);
+	CHECK(game.world->remoteRagDoll(ghost) == nullptr && !game.world->skeletonPose(ghost, *skeleton, posed));
+}
+
+namespace {
+
+// The FAV-like car of RagDoll_ThrownOutOfASeatWithoutADieBundle, at `at`.
+uint32_t makeCar(Game& game, physics::Vec3 at)
+{
+	if (!game.templates.find("car")) {
+		game.collisionTemplates.create("as_fav", "Objects/Vehicles/as_fav/");
+		world::ObjectTemplate* car = game.templates.create("PlayerControlObject", "car");
+		car->settings()["hasMobilePhysics"] = "1";
+		car->settings()["physicsType"] = "Mesh";
+		car->settings()["collisionMesh"] = "as_fav";
+		car->settings()["seatInformation"] = "car 0/0.5/0.4 0/0/0";
+		car->settings()["soldierExitLocation"] = "-2/0/0 0/0/0";
+		car->settings()["armor.maxHitPoints"] = "500";
+		car->children().push_back({"car_entry", {-1.5f, 0, 0}, {}});
+		game.templates.registerType(9, "Engine");
+		game.templates.registerType(10, "Spring");
+		car->settings()["mass"] = "1800";
+		world::ObjectTemplate* engine = game.templates.create("Engine", "car_engine");
+		engine->settings()["engineType"] = "194";
+		world::ObjectTemplate* wheel = game.templates.create("Spring", "car_wheel");
+		wheel->settings()["strength"] = "40";
+		wheel->settings()["damping"] = "8";
+		car->children().push_back({"car_engine", {0, -0.44f, 0}, {}});
+		for (float x : {-0.95f, 0.95f}) {
+			for (float z : {-1.4f, 1.6f}) {
+				engine->children().push_back({"car_wheel", {x, -0.15f, z}, {}});
+			}
+		}
+		game.templates.create("EntryPoint", "car_entry")->settings()["entryRadius"] = "3";
+	}
+	return game.objects.create(game.templates.find("car"), {at.x, at.y, at.z}, {0, 0, 0})->id();
+}
+
+// A pole whose only collision is a type-4 LOD (a trunk: two faces in the
+// x-y plane), 0.6 m across (treeCollisionDiameter).
+void makePole(Game& game, physics::Vec3 at)
+{
+	physics::CollisionLod lod;
+	lod.collisionType = 4;
+	lod.vertices = {{-0.05f, -1, 0}, {0.05f, -1, 0}, {0, 4, 0}};
+	lod.faces = {{{0, 2, 1}, 0}, {{0, 1, 2}, 0}};
+	lod.boundsMin = {-0.05f, -1, 0};
+	lod.boundsMax = {0.05f, 4, 0};
+	physics::CollisionSubGeometry part;
+	part.lods = {lod};
+	physics::CollisionGeometry geometry;
+	geometry.subGeometries = {part};
+	physics::CollisionMeshFile mesh;
+	mesh.version = 10;
+	mesh.geometries = {geometry};
+	game.collisionTemplates.add("pole_mesh", mesh);
+	game.templates.registerType(11, "SimpleObject");
+	world::ObjectTemplate* pole = game.templates.create("SimpleObject", "pole");
+	pole->settings()["collisionMesh"] = "pole_mesh";
+	pole->settings()["treeCollisionDiameter"] = "0.6";
+	game.objects.create(pole, {at.x, at.y, at.z}, {0, 0, 0});
+}
+
+// The car driven forward (+z) for `seconds`: where it ends up.
+float driveCar(Game& game, uint32_t car, float seconds)
+{
+	game::SoldierInput input;
+	input.use = true;
+	game.world->setPlayerInput(input);
+	game.world->tick(1 / 30.0f);
+	game.world->setPlayerInput({});
+	game.run(0.5f);
+	CHECK(game.world->playerVehicle() && game.world->playerVehicle()->id() == car);
+	game::SoldierInput drive;
+	drive.throttle = 1;
+	game.world->setPlayerInput(drive);
+	game.run(seconds);
+	return game.objects.find(car)->position().z;
+}
+
+} // namespace
+
+// Trees and poles (collision type 4) against a vehicle (0x006bb050's
+// third pass): a car driven at a pole stops at its trunk; without the pole
+// it drives on past.
+TEST(Hull_TreeStopsACar)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	float ends[2] = {};
+	for (int withPole = 0; withPole < 2; ++withPole) {
+		Game game(gameDir);
+		const uint32_t car = makeCar(game, {3, 1.2f, 0});
+		if (withPole) {
+			makePole(game, {3, 0, 12});
+		}
+		game.start();
+		CHECK(game.world->spawnPlayer(2) != nullptr);
+		game.run(3);
+		ends[withPole] = driveCar(game, car, 6);
+	}
+	std::fprintf(stderr, "  the car ends at z %.2f without the pole, %.2f with it\n", ends[0], ends[1]);
+	CHECK(ends[0] > 14);
+	CHECK(ends[1] < 12 && ends[1] > 8);
+}
+
+// A vehicle whose first Engine is a helicopter's (c_ETHelicopter) whose
+// origin passes through a static object's vehicle LOD between ticks is
+// destroyed (0x006bb050's early exit: material 0x29a, 1e10 damage); the
+// same with a car's engine is not.
+TEST(Hull_HelicopterHittingAStaticIsDestroyed)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	bool destroyed[2] = {};
+	for (int helicopter = 0; helicopter < 2; ++helicopter) {
+		Game game(gameDir);
+		const uint32_t car = makeCar(game, {3, 3.0f, 0});
+		if (helicopter) {
+			game.templates.find("car_engine")->settings()["engineType"] = "c_ETHelicopter";
+		}
+		// A small plate (both sides) under the car's middle at 1.5 m.
+		physics::CollisionLod lod;
+		lod.collisionType = 1;
+		lod.vertices = {{-0.3f, 0, -0.3f}, {0.3f, 0, -0.3f}, {0.3f, 0, 0.3f}, {-0.3f, 0, 0.3f}};
+		lod.faces = {{{0, 1, 2}, 0}, {{0, 2, 3}, 0}, {{0, 2, 1}, 0}, {{0, 3, 2}, 0}};
+		physics::CollisionSubGeometry part;
+		part.lods = {lod};
+		physics::CollisionGeometry geometry;
+		geometry.subGeometries = {part};
+		physics::CollisionMeshFile mesh;
+		mesh.version = 10;
+		mesh.geometries = {geometry};
+		game.collisionTemplates.add("plate_mesh", mesh);
+		game.templates.registerType(11, "SimpleObject");
+		world::ObjectTemplate* plate = game.templates.create("SimpleObject", "plate");
+		plate->settings()["collisionMesh"] = "plate_mesh";
+		game.objects.create(plate, {3, 1.5f, 0}, {0, 0, 0});
+		game.start();
+		game.run(2);
+		destroyed[helicopter] = game.objects.find(car) && game.objects.find(car)->destroyed();
+	}
+	CHECK(!destroyed[0]);
+	CHECK(destroyed[1]);
+}
+
+// A car on a static platform stands on its wheels' probes (0x006bb050's
+// vertex pass for a part of under 4 vertices: a segment down through the
+// wheel's bottom) as it stands on the terrain on its springs, not on its hull.
+TEST(Hull_WheelsProbeStaticObjects)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	float rest[2] = {};
+	for (int platform = 0; platform < 2; ++platform) {
+		Game game(gameDir);
+		const float base = platform ? 2.0f : 0.0f;
+		const uint32_t car = makeCar(game, {3, base + 1.5f, 0});
+		if (platform) {
+			physics::CollisionLod lod;
+			lod.collisionType = 1;
+			lod.vertices = {{-10, 0, -10}, {10, 0, -10}, {10, 0, 10}, {-10, 0, 10}};
+			lod.faces = {{{0, 1, 2}, 0}, {{0, 2, 3}, 0}, {{0, 2, 1}, 0}, {{0, 3, 2}, 0}};
+			physics::CollisionSubGeometry part;
+			part.lods = {lod};
+			physics::CollisionGeometry geometry;
+			geometry.subGeometries = {part};
+			physics::CollisionMeshFile mesh;
+			mesh.version = 10;
+			mesh.geometries = {geometry};
+			game.collisionTemplates.add("deck_mesh", mesh);
+			game.templates.registerType(11, "SimpleObject");
+			world::ObjectTemplate* deck = game.templates.create("SimpleObject", "deck");
+			deck->settings()["collisionMesh"] = "deck_mesh";
+			game.objects.create(deck, {3, base, 0}, {0, 0, 0});
+		}
+		game.start();
+		game.run(4);
+		rest[platform] = game.objects.find(car)->position().y - base;
+	}
+	std::fprintf(stderr, "  at rest %.3f m over the terrain, %.3f m over the platform\n", rest[0], rest[1]);
+	CHECK(std::abs(rest[0] - rest[1]) < 0.25f);
 }
 
 TEST(RagDoll_ImpactSoundFromTheFootStepsMaterial)

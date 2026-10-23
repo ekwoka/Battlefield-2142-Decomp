@@ -528,7 +528,7 @@ void TextField::setText(Interpreter& vm, const std::string& text, bool html)
 void TextField::applyAutoSize()
 {
 	const swf::Matrix world = worldMatrix();
-	const Drawer::TextLayout layout = player.drawer().layoutText(field, value, world.a, world.d);
+	const Drawer::TextLayout& layout = player.drawer().layoutText(field, value, world.a, world.d);
 	if (!layout.font) {
 		return;
 	}
@@ -555,7 +555,7 @@ int TextField::textHeight() const
 float TextField::firstLineWidth() const
 {
 	const swf::Matrix world = worldMatrix();
-	const Drawer::TextLayout layout = player.drawer().layoutText(field, value, world.a, world.d);
+	const Drawer::TextLayout& layout = player.drawer().layoutText(field, value, world.a, world.d);
 	return layout.lines.empty() ? 0.0f : layout.lines.front().end;
 }
 
@@ -604,7 +604,7 @@ bool TextField::specialMember(Interpreter& vm, const std::string& member, Value&
 	} else if (member == "scroll") {
 		out = Value(scroll);
 	} else if (member == "maxscroll" || member == "bottomScroll") {
-		const Drawer::TextLayout layout = player.drawer().layoutText(field, value);
+		const Drawer::TextLayout& layout = player.drawer().layoutText(field, value);
 		const int lines = static_cast<int>(layout.lines.size());
 		const int shown = layout.lineStep > 0
 			? std::max(1, static_cast<int>((field.bounds.yMax - field.bounds.yMin) / layout.lineStep))

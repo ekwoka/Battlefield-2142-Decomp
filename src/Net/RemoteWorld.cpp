@@ -591,6 +591,14 @@ void RemoteWorld::applyParts(RemoteObject& o, const GhostPartLayout& layout, con
 void RemoteWorld::applyState(RemoteObject& o, const NetworkableState& s)
 {
 	o.decoded = s.complete;
+	if ((s.mask & 0x10000) && s.kind == NetworkableKind::Soldier && !s.ragdollParticles.empty()) {
+		o.ragdoll = true;
+		o.ragdollParticles = s.ragdollParticles;
+		++o.ragdollUpdates;
+	} else if (s.kind == NetworkableKind::Soldier && s.hasHealth && s.health > 0) {
+		o.ragdoll = false; // alive again (revived): the body is gone
+		o.ragdollParticles.clear();
+	}
 	if (s.hasPosition) {
 		o.hasPosition = true;
 		o.position = s.position;

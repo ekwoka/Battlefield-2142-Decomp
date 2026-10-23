@@ -1325,6 +1325,20 @@ TEST(NetGame_PartNetworkablesRoundTrip)
 		s.position = {1, 2, 3};
 		b = roundTrip(h, s, ref, &bits);
 		CHECK(bits == 21 + 9 + 9 + 96 && b.ragdollBits == 96 && b.position.z == 3 && b.health == 0);
+		// The four networked particles (ragdoll_net_boneEnable 15: bones 1,
+		// 6, 15, 31): the first as floats, the others delta3 of 0.01 from
+		// it (here 8-bit, 3 + 3 x 8 each); `position` is the second, the
+		// middle particle.
+		s.ragdollParticles = {{10, 5, 20}, {10.2f, 5.0f, 20.0f}, {10.0f, 5.5f, 20.1f}, {10.2f, 5.5f, 20.1f}};
+		b = roundTrip(h, s, ref, &bits);
+		CHECK(b.ragdollParticles.size() == 4 && b.ragdollBits == 96 + 3 * (3 + 3 * 8));
+		CHECK(bits == 21 + 9 + 9 + b.ragdollBits);
+		for (size_t i = 0; i < b.ragdollParticles.size() && i < 4; ++i) {
+			CHECK(near(b.ragdollParticles[i].x, s.ragdollParticles[i].x, 0.006f)
+				&& near(b.ragdollParticles[i].y, s.ragdollParticles[i].y, 0.006f)
+				&& near(b.ragdollParticles[i].z, s.ragdollParticles[i].z, 0.006f));
+		}
+		CHECK(near(b.position.x, 10.2f, 0.006f) && near(b.position.y, 5.0f, 0.006f));
 	}
 }
 

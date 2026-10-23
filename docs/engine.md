@@ -83,6 +83,32 @@ these globals with their class IDs and classes.
    `GameModes/<mode>/<size>/GamePlayObjects.con` with `v_arg1` = `host`
    (server) or `client`.
 
+## Terrain materials
+
+A level's `Heightdata.con` loads the primary heightmap's material map:
+`heightmap.setMaterialScale 1` (slot `0x70`, `0x00676620`: `+0xd0`) and
+`heightmap.loadMaterialData Levels/<name>/HeightmapPrimary.mat` (slot
+`0x74`, `0x006d2f40`: width × height × scale² bytes, raw, to `+0xd4`).
+Each byte is the physics material's id (`Material.active` in
+`materialManagerDefine.con`: 2 Sand, 3 Gravel, 4 Tarmac, 8 Dirt, 12
+rock...), with no table between; the secondary heightmaps have none (0).
+Every shipped level uses scale 1, the file the heightmap's size (the
+painted map is one sample smaller, its last row and column 0). The lookup
+(`0x006cfe40`, slot `0x7c`): x + width / 2, y + height / 2 (integer
+halves, unsigned, 0 outside or without a map), byte
+`[(width·y·s + x)·s]`; the height query (`0x006d2fc0`, slot `0xb4`) and
+the ray (`0x006d3210`, slot `0xc8`) take floor(x / scale.x),
+floor(z / scale.z) — the cell's lower corner, laid out as the heights, no
+flip — and the ray answers material 1 for a nearer water-table hit. The
+cluster's point query (`0x006b5430`, slot `0x80`) and ray (`0x006b5a90`,
+slot `0x8c`) pass it on: ragdoll particles (`0x008ac200`, material 1 no
+hit), Point projectiles (`0x006c0560`) and RotationalPoint ones
+(`0x006c0f90`, grenades) store it at `+0x80`. Rewritten in
+`terrain::Heightmap::materialAt` / `HeightmapCluster::materialAt` and
+`physics::Ground::material`; vehicles take the material under their
+centre for their tyres' grip (the engine's per-wheel material isn't
+traced).
+
 ## Undergrowth (RendDX9 `UndergrowthSystem`)
 
 Init `0x101100d0` reads `Undergrowth.cfg`, `Undergrowth.dat` (`0x1010fd90`)
@@ -242,9 +268,50 @@ Rewritten in `src/Game/Vehicle` (`rotationAxisStep`,
   `0x006e1430`, kept at load in `Body::edges`) as segments through the
   other mesh: a crossing whose face normal has y at least 0.1
   (`*0x00a84230`) pushes with force 3 (`*0x00a8423c`) through the node's
-  addForce (slot `0xa0`, `0x006c7b10`). Not rewritten: the vertical
-  segment of a mesh with under 4 vertices, the third pass and the early
-  exit for type `0x21`.
+  addForce (slot `0xa0`, `0x006c7b10`).
+- **Slot 9's other parts** (`0x006bb050`, called by `0x006dc7b0` for each
+  mover and grid candidate, both orders when their LOD radii are within a
+  factor of 4):
+  - *The vertical probe* (`0x6bbbaa`–`0x6bbdb2`): a part whose vehicle LOD
+    has under 4 vertices (the wheels', springs' and landing gear's three
+    vertices at one height; 73 shipped parts) runs, for each vertex i, a
+    segment 2h down its up axis from its origin raised by h
+    (h = |v0.y|), for i 1 and 2 raised 0.1 more and 0.1 forward or back; a
+    part 0.5 m or more to a side of the root's centre starts 0.5 m
+    inwards and ends where it would have. A crossing is a contact as in
+    the vertex pass. Rewritten for `Vehicle::Wheel`s (h is the wheel's
+    `radius`, the part at its mount and compression, turned by its steer).
+  - *The third pass* (pass 2, `0x6bb90f`–`0x6bba92`, `0x6bbdf8`–`0x6bc735`):
+    a mesh with collision type 4 (trees, lamp posts, poles, billboard
+    frames, cover: 164 shipped meshes, all statics) against a root B. Each
+    of its faces crossing the plane through B's centre of mass across B's
+    up axis (edge v0-v1, else v0-v2) gives a point X; a half-ray from X
+    less A's motion relative to B this tick towards B's centre of mass
+    enters B's LOD box (`0x006ae680`) at P through a face whose outward
+    normal, flattened and turned round, is n; with dist = n·(P − X) within
+    A's radius (`treeCollisionDiameter` / 2, the node's `+0x18` set by
+    `0x005f6ba0`; 0.3 under 0.01), a contact at P along n, r − dist deep,
+    when B moves towards it. A fixed A leaves the push to B
+    (`0x006b6cc0`). Without a type-4 LOD and with a radius, a trunk line
+    up the LOD-1 box's middle stands in (the Beacon's; not rewritten).
+    `GameWorld::collideWithTrees`, the statics' type-4 faces in
+    `m_treeCollision`.
+  - *The helicopter exit* (`0x6bb5b9`–`0x6bb787`): a root
+    PlayerControlObject against a static object (root response `0xc430`)
+    on the server (`gameLogic` slot `0x144`, `+0x45`), whose first Engine
+    (`0x006b6c50` → `0x005c63b0`: a node, its siblings, then their
+    children) has engineType `c_ETHelicopter` (33; cached at `+0x110`):
+    its origin's segment from its last stored matrix to now through the
+    static's LOD; a crossing ends slot 9 with no response, notifying both
+    with material `0x29a`, which PlayerControlObject's slot 43
+    (`0x005c72f0`) turns into 1e10 damage (`0x004c0e40`). Shipped:
+    eu_at, as_at (TailEngine), us_ag, as_ag (TailThruster), as_tank and
+    as_hov_light (TurnThruster). `Body::helicopterEngine`.
+  - Not matched: for a moving A the engine's vertex segment runs from A's
+    centre of mass a tick ago (`last`) to the vertex now, not from the
+    vertex's last pose; the small-object pre-trace (radius under 0.3) and
+    the contact's mass shares (`0x006b6cc0`'s later terms) aren't
+    rewritten.
 
 ### Seats and vehicle weapons
 
@@ -508,9 +575,9 @@ Rewritten in `src/Animation/RagDoll` (`RagDollTemplate`, `RagDoll`,
   (`0x005a66e0`) isn't traced.
 - The object list: the static objects are one merged mesh in the
   rewrite, first in the list; the bodies (vehicles) follow, each in its
-  own frame. The terrain's material under a particle is not known to the
-  rewrite (0; the engine's heightmap ray returns it, and deep water,
-  material 1, would not count).
+  own frame. The terrain's material under a particle is the level's
+  material map's (see Terrain materials); deep water (material 1) is no
+  hit.
 - The impact sounds are queued (`GameWorld::takeSounds`) for the sound
   layer. `GameWorld::bodyLanded` answers `ragdollLandedDelay`, which the
   corpse countdown waits on (see Final death).
@@ -522,7 +589,32 @@ Rewritten in `src/Animation/RagDoll` (`RagDollTemplate`, `RagDoll`,
   (`+0x61`), which the rewrite has none of. `GameWorld::setCamera` gives
   the camera; bodies behind it count three times as far.
 
-Not rewritten yet: the network side (`ragdoll_net_*`, `0x008acce0`).
+**The network side.** The Soldier networkable's writer (`0x005fb8c0`)
+sends mask `0x10040` (health and the ragdoll) while the body is awake and
+its player still attached (`+0x184` slot `0x18`, soldier `+0x210`), else
+clears `0x10000`. The group (`0x008a9ce0`): a 9-bit length, then the
+networked particles (`+0x54`, set at start by `0x008aca60` from
+`ragdoll_net_boneEnable`, 15: bones 1, 6, 15 and 31, the hips and
+shoulders), the first as three floats and the others as delta3 of 0.01
+from it (`0x006879d0`). The reader (`0x008acce0`) reads by its own flags
+(the length is skipped): each target goes to `+0x30`, and the first update
+puts the particles there; it sets the network timer (`+0x5c`) to 0.3,
+network-driven (`+0x61`), wakes the body and clears `+0x62` (no update
+yet). A client starts a network-driven body at the death for a soldier
+with a player (`0x005f0a00` → `0x008acc00`); a packet with no body is
+skipped (`0x008a7aa0`). Driven, a networked particle's step (`0x008a8860`)
+moves it `ragdoll_net_interpolate` (0.1) of the way to its target, and the
+solve (`0x008ac8f0`) holds them through every pass; the others simulate
+round them. The frame (`0x008add10`) does nothing before the first update
+and, awake, counts the timer down: at 0 `setNetworkDriven(false)` puts the
+networked particles at their targets once, solves, and the body is its
+own. `ragdoll_net_debug` is never read. Rewritten in `RagDoll`
+(`setNetworkDriven`, `receive`, `networkedPositions`), the decoder
+(`NetworkableState::ragdollParticles`, the body's position the middle
+particle), `RemoteObject::ragdoll*` and `GameWorld::driveRemoteRagDoll`
+(the body started on the first update from the setup pose at the ghost).
+Not rewritten: LOD 2 for network-driven bodies (a time budget,
+`ragdoll_clientMaxUpdateTime`).
 
 ## Server browsing (GameSpy, via OpenSpy)
 
@@ -2058,8 +2150,16 @@ state, input, kills, deaths and team kills.
   as a ragdoll, counted down by its armour (`0x00652380`): once landed
   (`0x005eda20`) it waits `timeToStayAsWreck` (`+0x158`, 20 by default,
   `0x00630040`), or 60 s if it never lands (`*0x00a79388`), then
-  `timeToStayAfterDestroyed` (`+0x15c`, 0), and goes. Its fade is not
-  modelled.
+  `timeToStayAfterDestroyed` (`+0x15c`, 0), and goes. Meanwhile it
+  fades (soldiers only, class `0x9493`): the geometry's (`+0x44`) game
+  alpha (`+0x28`, set through slot `0x104` times the view-distance fade
+  `+0x2c`) is the time left over timeToStayAfterDestroyed, clamped to
+  0..1 (`0x00402dd0`), and RendDX9's skinned mesh draws with alpha under 1
+  in the blended bucket (`0x10162070`). It neither sinks nor shrinks.
+  The soldiers' armour (their `.tweak` files) sets 6 and 1: six seconds
+  after landing (or after the player detaches, at PlayerDeath), gone in a
+  second. The rewrite: `world::Object::fade`, drawn by the renderer's
+  faded mesh pipeline after the opaque objects.
 
 ## Squads
 
@@ -2991,6 +3091,16 @@ that grows downwards. autoSize is only a flag (a non-empty string such as
 `"none"` sets it). `Locale.getTextboxWidth` (0x1003a9d0) is the end of
 the first line. SwiffPlayer has no `textWidth` member, so we answer with
 the widest line.
+
+The original keeps a field's text objects and lays them out only when the
+text changes. The rewrite keeps each layout by what it depends on (the
+text, the font, its size, the bounds, right margin, leading, the html,
+password, word-wrap and autoSize flags and the world scale), and the fonts
+look up codes under 256 in flat tables (`HudFont::buildIndex`). With the
+shipped menu after an offline login (`MenuBindings_FrameText`,
+`BF2142_MENU_BENCH=1`), `Player::frame()` went from 3.78 to 0.65 ms in the
+Debug build and from 0.065 to 0.015 ms in a Release one, the frames
+identical.
 
 ### Masks
 

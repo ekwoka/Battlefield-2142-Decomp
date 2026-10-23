@@ -24,6 +24,12 @@ public:
 	void create(const std::string& name, const std::string& scriptDirectory);
 	// The template's mesh, loaded on first use; null if missing or unreadable.
 	const CollisionMeshFile* mesh(const std::string& name, const io::FileManager& files);
+	// A template whose mesh is made in memory (tests, tools).
+	void add(const std::string& name, CollisionMeshFile mesh)
+	{
+		m_paths[name] = std::string();
+		m_meshes[name] = std::make_unique<CollisionMeshFile>(std::move(mesh));
+	}
 	size_t count() const { return m_paths.size(); }
 
 private:

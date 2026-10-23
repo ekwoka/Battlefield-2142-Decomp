@@ -27,7 +27,8 @@ layout(set = 3, binding = 0) uniform Lighting {
 	vec4 skyColor;
 	vec4 fogColor;     // w: fog end distance
 	vec4 material;     // x: alpha reference (0 = off), y: 1 with a lightmap,
-					   // z: layers (1 detail, 2 dirt, 4 crack)
+					   // z: layers (1 detail, 2 dirt, 4 crack), w: the object's
+					   // fade (0 = none; else the alpha it is blended with)
 };
 
 layout(location = 0) out vec4 outColor;
@@ -59,5 +60,5 @@ void main()
 		light = skyColor.rgb + sun;
 	}
 	float fog = clamp(inDepth / fogColor.w, 0.0, 1.0);
-	outColor = vec4(mix(albedo.rgb * light, fogColor.rgb, fog * fog), albedo.a);
+	outColor = vec4(mix(albedo.rgb * light, fogColor.rgb, fog * fog), material.w > 0.0 ? material.w : albedo.a);
 }

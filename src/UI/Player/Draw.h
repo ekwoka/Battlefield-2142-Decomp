@@ -19,6 +19,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace dice::hfe::hud {
@@ -104,12 +105,20 @@ public:
 		float textWidth = 0;  // the widest line, pixels
 	};
 	// `scaleX` and `scaleY` are the field's world scale (the world matrix's a and d).
-	TextLayout layoutText(const swf::EditText& field, const std::string& text, float scaleX = 1, float scaleY = 1) const;
+	// Layouts are kept by everything they depend on (the text, the field's
+	// font, size, bounds, margins, flags and the scale), so a field drawn
+	// again unchanged is not laid out again; the reference lasts until the
+	// next call.
+	const TextLayout& layoutText(const swf::EditText& field, const std::string& text, float scaleX = 1, float scaleY = 1) const;
 	// The exported font name a field's font draws with, or empty.
 	std::string engineFontName(uint16_t fontId) const;
 	// Reads the engine's fonts (.dif text, by game path, e.g. "Fonts/x.dif").
 	using FontReader = std::function<bool(const std::string& path, std::string& text)>;
-	void setFontReader(FontReader reader) { m_fontReader = std::move(reader); }
+	void setFontReader(FontReader reader)
+	{
+		m_fontReader = std::move(reader);
+		m_layouts.clear();
+	}
 	const hud::HudFont* engineFont(const std::string& name, int pixels) const;
 
 	// The mask state of the frame being drawn (Stencil.h).
@@ -125,6 +134,20 @@ private:
 		const swf::ColorTransform& colour, std::vector<MenuBatch>& out);
 	std::shared_ptr<const MenuImage> bitmapImage(uint16_t id);
 	std::shared_ptr<const MenuImage> gradientImage(uint64_t key, const swf::FillStyle& style);
+	TextLayout makeLayout(const swf::EditText& field, const std::string& text, float scaleX, float scaleY) const;
+
+	struct LayoutKey {
+		std::string text;
+		uint16_t fontId = 0, fontHeight = 0, rightMargin = 0;
+		int16_t leading = 0;
+		swf::Rect bounds;
+		uint8_t flags = 0; // html, password, wordWrap, autoSize
+		float scaleX = 1, scaleY = 1;
+		bool operator==(const LayoutKey& o) const;
+	};
+	struct LayoutKeyHash {
+		size_t operator()(const LayoutKey& k) const;
+	};
 
 	const swf::CharacterDictionary& m_dictionary;
 	std::shared_ptr<MenuImage> m_white;
@@ -135,6 +158,7 @@ private:
 	mutable bool m_fontNamesBuilt = false;
 	mutable std::map<uint16_t, std::string> m_fontNames;                     // font id -> export name
 	mutable std::map<std::string, std::unique_ptr<hud::HudFont>> m_engineFonts; // "name_size" (null: missing)
+	mutable std::unordered_map<LayoutKey, TextLayout, LayoutKeyHash> m_layouts;
 	Stencil m_stencil;
 };
 

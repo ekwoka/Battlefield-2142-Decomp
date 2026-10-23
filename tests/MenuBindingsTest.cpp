@@ -10,6 +10,8 @@
 #include "UI/Player/Player.h"
 
 #include <cctype>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <optional>
 #include <string>
@@ -195,9 +197,12 @@ namespace {
 struct Menu {
 	Player player;
 	std::shared_ptr<io::ZipArchive> client;
+	std::shared_ptr<io::ZipArchive> fonts;
 	io::Localization strings;
 
-	bool load(const std::string& gameDir)
+	// `withFonts`: the engine's fonts too ("/Fonts/..." from Fonts_client.zip),
+	// so text fields lay out and draw.
+	bool load(const std::string& gameDir, bool withFonts = false)
 	{
 		const std::string mod = gameDir + "/mods/bf2142/";
 		const auto server = io::ZipArchive::open(mod + "Menu_server.zip");
@@ -218,7 +223,13 @@ struct Menu {
 				strings.load(csv);
 			}
 		}
+		if (withFonts) {
+			fonts = io::ZipArchive::open(mod + "Fonts_client.zip");
+		}
 		player.setFileReader([this](const std::string& path, std::vector<uint8_t>& out) {
+			if (fonts && path.rfind("/Fonts/", 0) == 0) {
+				return fonts->read(path.substr(7), out);
+			}
 			return client->read("External/FlashMenu/" + path, out);
 		});
 		player.natives().setLocalizer([this](const std::string& key) { return strings.text(key); });
@@ -387,6 +398,69 @@ TEST(MenuBindings_StartGame)
 		CHECK(started->maps[0].level == "Camp_Gibraltar_Coop" && started->maps[0].gameMode == "gpm_sp"
 			&& started->maps[0].size == 32);
 		CHECK(started->ticketRatio == 200 && started->bots == 8 && started->botSkill == 0.75f);
+	}
+}
+
+// The shipped menu after an offline login, drawn with the engine's fonts:
+// the frames carry text, and a frame drawn twice is the same. With
+// $BF2142_MENU_BENCH set, prints the time Player::frame() takes.
+TEST(MenuBindings_FrameText)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Fake fake;
+	fake.reachable = false;
+	Menu menu;
+	menu::MenuBindings bindings(menu.player.natives(), fake.services());
+	CHECK(menu.load(gameDir, true));
+	menu.run(3);
+	CHECK(menu.click("login.mcAccountName.mcInput.inputField"));
+	menu.type("tester");
+	CHECK(menu.click("login.btnLogin"));
+	menu.run(0.5);
+	bindings.finishJobs();
+	menu.run(2);
+	CHECK(menu.click("MessageHandler.btnOk"));
+	menu.run(2);
+	CHECK(menu.click("login.ScrollTainer.m_mcContainer.contents.holder_list.holder_list.row0"));
+	CHECK(menu.click("login.btnLogin"));
+	menu.run(5);
+	CHECK(bindings.soldierName() == "tester");
+
+	// A digest of a frame's batches (FNV-1a over textures and vertices).
+	const auto digest = [](const MenuFrame& frame, size_t& textQuads) {
+		uint64_t h = 1469598103934665603ull;
+		const auto mix = [&h](const void* p, size_t n) {
+			for (size_t i = 0; i < n; ++i) {
+				h = (h ^ static_cast<const uint8_t*>(p)[i]) * 1099511628211ull;
+			}
+		};
+		textQuads = 0;
+		for (const MenuBatch& b : frame.batches) {
+			mix(b.texture.data(), b.texture.size());
+			mix(b.vertices.data(), b.vertices.size() * sizeof(MenuVertex));
+			if (b.texture.rfind("Fonts/", 0) == 0) {
+				textQuads += b.vertices.size() / 6;
+			}
+		}
+		return h;
+	};
+	size_t quads = 0, quadsAgain = 0;
+	const uint64_t first = digest(menu.player.frame(), quads);
+	const uint64_t again = digest(menu.player.frame(), quadsAgain);
+	CHECK(quads > 100);
+	CHECK(first == again && quads == quadsAgain);
+	if (std::getenv("BF2142_MENU_BENCH")) {
+		const int frames = 300;
+		const auto start = std::chrono::steady_clock::now();
+		for (int i = 0; i < frames; ++i) {
+			menu.player.frame();
+		}
+		const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+		std::fprintf(stderr, "menu frame: %.3f ms (%zu text quads, digest %016llx)\n", ms / frames, quads,
+			static_cast<unsigned long long>(first));
 	}
 }
 

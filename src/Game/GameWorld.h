@@ -142,6 +142,19 @@ public:
 	bool bodyLanded(int player) const;
 	// The bodies left after PlayerDeath (see stepCorpses): their objects.
 	std::vector<uint32_t> corpses() const;
+	// A joined game's dead soldiers (a ghost's Soldier networkable with its
+	// ragdoll group, 0x10000): `object` (the ghost's, a soldier template
+	// with skeleton3P) gets a network-driven ragdoll on the first update
+	// (0x005f0a00 starts it on a client for a soldier with a player,
+	// 0x008acc00), each update drives its networked particles (`particles`,
+	// as decoded: 0x008acce0), and between updates (and 0.3 s past the
+	// last) it simulates on its own. The object then sits at the middle
+	// particle, unturned, posed by skeletonPose. False when the object or
+	// its skeleton is missing.
+	bool driveRemoteRagDoll(uint32_t object, const std::vector<physics::Vec3>& particles);
+	// The body is gone (the ghost removed, the soldier revived).
+	void removeRemoteRagDoll(uint32_t object);
+	const anim::RagDoll* remoteRagDoll(uint32_t object) const;
 	// Where the camera is and looks (unit), for the ragdolls' levels of
 	// detail (0x008ae120); without one (a server) every body steps at
 	// level 0.
@@ -620,6 +633,13 @@ private:
 		// steeper than 30 degrees (|normal y| at most cos 30), each face's
 		// three in turn (the loader 0x006e12a0 -> 0x006e1430, LOD +0xe4).
 		std::vector<std::array<uint16_t, 2>> edges;
+		// The vehicle LOD's box (object space; the mesh's slot 0x54), which
+		// the third pass tests trees against.
+		physics::Vec3 boxMin, boxMax;
+		// Its first Engine (0x006b6c50: the tree searched siblings first)
+		// is a helicopter's (engineType c_ETHelicopter, 33): hitting a static
+		// object is the end of it (0x006bb050's early exit).
+		bool helicopterEngine = false;
 	};
 	void destroyVehicle(Body& body, int attacker);
 	void stepVehicleDamage(float seconds);
@@ -628,7 +648,10 @@ private:
 	void seatPlayer(Player& player, Body& body, int seat);
 	void stepGunner(Player& player, Body& body, float seconds);
 	Body* findBody(uint32_t object);
-	void collideWithStatics(Body& body, const physics::Vec3& lastPosition, const physics::Mat3& lastRotation);
+	// Returns false when the body was destroyed by it (the helicopter exit).
+	bool collideWithStatics(Body& body, const physics::Vec3& lastPosition, const physics::Mat3& lastRotation, float seconds);
+	void collideWithTrees(Body& body, float seconds);
+	int firstEngineType(const world::ObjectTemplate& root) const;
 	void addBodies();
 	void stepPhysics(float seconds);
 	const io::FileManager* m_files = nullptr;
@@ -639,6 +662,11 @@ private:
 	std::vector<Body> m_bodies;
 	physics::CollisionWorld m_collision; // static objects, soldier LOD
 	physics::CollisionWorld m_projectileCollision; // static objects, projectile LOD
+	// Static objects' collision type 4 (trees, poles, lamp posts: 0x006bb050's
+	// third pass), each mesh's owner an index into m_treeRadii (its
+	// treeCollisionDiameter / 2, or 0.3).
+	physics::CollisionWorld m_treeCollision;
+	std::vector<float> m_treeRadii;
 	physics::CollisionWorld m_vehicleCollision; // static objects, vehicle LOD
 	std::vector<uint32_t> materialMap(const world::ObjectTemplate& objectTemplate) const;
 	void buildStaticCollision();
@@ -901,6 +929,17 @@ private:
 	};
 	std::vector<Corpse> m_corpses;
 	void stepCorpses(float seconds);
+	// Remote soldiers' bodies (driveRemoteRagDoll); no armour countdown:
+	// the server removes the ghost.
+	struct RemoteBody {
+		uint32_t object = 0;
+		std::unique_ptr<anim::RagDoll> ragDoll;
+		const anim::Skeleton* skeleton = nullptr;
+		anim::LocalPose pose;
+		std::vector<anim::Matrix> worldPose;
+	};
+	std::vector<RemoteBody> m_remoteBodies;
+	void stepRemoteBodies(float seconds);
 	bool m_hasCamera = false;
 	physics::Vec3 m_cameraPosition, m_cameraForward {0, 0, 1};
 	void setRagDollLevels();

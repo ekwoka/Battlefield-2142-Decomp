@@ -377,7 +377,54 @@ Drawer::TextLine layoutLine(const hud::HudFont& font, std::vector<uint32_t> code
 
 } // namespace
 
-Drawer::TextLayout Drawer::layoutText(const swf::EditText& field, const std::string& text, float scaleX, float scaleY) const
+bool Drawer::LayoutKey::operator==(const LayoutKey& o) const
+{
+	return text == o.text && fontId == o.fontId && fontHeight == o.fontHeight && rightMargin == o.rightMargin
+		&& leading == o.leading && bounds.xMin == o.bounds.xMin && bounds.xMax == o.bounds.xMax && bounds.yMin == o.bounds.yMin
+		&& bounds.yMax == o.bounds.yMax && flags == o.flags && scaleX == o.scaleX && scaleY == o.scaleY;
+}
+
+size_t Drawer::LayoutKeyHash::operator()(const LayoutKey& k) const
+{
+	size_t h = std::hash<std::string>()(k.text);
+	const auto mix = [&h](uint64_t v) { h ^= std::hash<uint64_t>()(v) + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); };
+	uint32_t sx, sy;
+	std::memcpy(&sx, &k.scaleX, sizeof(sx));
+	std::memcpy(&sy, &k.scaleY, sizeof(sy));
+	mix(static_cast<uint64_t>(k.fontId) | static_cast<uint64_t>(k.fontHeight) << 16 | static_cast<uint64_t>(k.rightMargin) << 32
+		| static_cast<uint64_t>(static_cast<uint16_t>(k.leading)) << 48);
+	mix(static_cast<uint64_t>(static_cast<uint32_t>(k.bounds.xMin)) | static_cast<uint64_t>(static_cast<uint32_t>(k.bounds.xMax)) << 32);
+	mix(static_cast<uint64_t>(static_cast<uint32_t>(k.bounds.yMin)) | static_cast<uint64_t>(static_cast<uint32_t>(k.bounds.yMax)) << 32);
+	mix(static_cast<uint64_t>(sx) | static_cast<uint64_t>(sy) << 32);
+	mix(k.flags);
+	return h;
+}
+
+const Drawer::TextLayout& Drawer::layoutText(const swf::EditText& field, const std::string& text, float scaleX, float scaleY) const
+{
+	LayoutKey key;
+	key.text = text;
+	key.fontId = field.fontId;
+	key.fontHeight = field.fontHeight;
+	key.rightMargin = field.rightMargin;
+	key.leading = field.leading;
+	key.bounds = field.bounds;
+	key.flags = static_cast<uint8_t>((field.html ? 1 : 0) | (field.password ? 2 : 0) | (field.wordWrap ? 4 : 0) | (field.autoSize ? 8 : 0));
+	key.scaleX = scaleX;
+	key.scaleY = scaleY;
+	if (const auto it = m_layouts.find(key); it != m_layouts.end()) {
+		return it->second;
+	}
+	// Text that changes every frame (timers, typing) would grow the table
+	// without end: it starts again past a few thousand layouts.
+	if (m_layouts.size() >= 4096) {
+		m_layouts.clear();
+	}
+	TextLayout layout = makeLayout(field, text, scaleX, scaleY);
+	return m_layouts.emplace(std::move(key), std::move(layout)).first->second;
+}
+
+Drawer::TextLayout Drawer::makeLayout(const swf::EditText& field, const std::string& text, float scaleX, float scaleY) const
 {
 	TextLayout layout;
 	layout.lineStep = static_cast<float>(field.leading) + field.fontHeight;
@@ -523,7 +570,7 @@ LinePlace placeLine(const swf::EditText& field, const Drawer::TextLayout& layout
 void Drawer::editText(const swf::EditText& field, const std::string& text, const swf::Matrix& world,
 	const swf::ColorTransform& colour, std::vector<MenuBatch>& out, float scrollY)
 {
-	const TextLayout layout = layoutText(field, text, world.a, world.d);
+	const TextLayout& layout = layoutText(field, text, world.a, world.d);
 	if (!layout.font) {
 		return;
 	}
@@ -565,7 +612,7 @@ void Drawer::editText(const swf::EditText& field, const std::string& text, const
 void Drawer::textCaret(const swf::EditText& field, const std::string& text, const swf::Matrix& world,
 	const swf::ColorTransform& colour, std::vector<MenuBatch>& out)
 {
-	const TextLayout layout = layoutText(field, text, world.a, world.d);
+	const TextLayout& layout = layoutText(field, text, world.a, world.d);
 	if (!layout.font || layout.lines.empty()) {
 		return;
 	}

@@ -150,6 +150,31 @@ bool CollisionWorld::raycast(const Vec3& from, const Vec3& to, Hit& hit) const
 	return found;
 }
 
+void CollisionWorld::forEachFaceNear(const Vec3& center, float radius,
+	const std::function<void(const Vec3& a, const Vec3& b, const Vec3& c, uint32_t material, uint32_t owner)>& visit) const
+{
+	++m_stamp;
+	const int x0 = static_cast<int>(std::floor((center.x - radius) / kCell));
+	const int x1 = static_cast<int>(std::floor((center.x + radius) / kCell));
+	const int z0 = static_cast<int>(std::floor((center.z - radius) / kCell));
+	const int z1 = static_cast<int>(std::floor((center.z + radius) / kCell));
+	for (int x = x0; x <= x1; ++x) {
+		for (int z = z0; z <= z1; ++z) {
+			const auto cell = m_cells.find(cellKey(x, z));
+			if (cell == m_cells.end()) {
+				continue;
+			}
+			for (uint32_t index : cell->second) {
+				const Triangle& t = m_triangles[index];
+				if (t.stamp != m_stamp) {
+					t.stamp = m_stamp;
+					visit(t.a, t.b, t.c, t.material, t.owner);
+				}
+			}
+		}
+	}
+}
+
 void CollisionWorld::querySphere(const Vec3& center, float radius, std::vector<SphereContact>& contacts) const
 {
 	++m_stamp;

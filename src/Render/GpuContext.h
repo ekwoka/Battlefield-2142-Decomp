@@ -84,7 +84,8 @@ struct LightingUniforms {
 	float skyColor[4];
 	float fogColor[4]; // w: fog end distance
 	float material[4]; // x: alpha reference, 0 for opaque; y: 1 with a lightmap;
-					   // z: mesh layers (1 detail, 2 dirt, 4 crack)
+					   // z: mesh layers (1 detail, 2 dirt, 4 crack);
+					   // w: the object's fade, 0 for none (fadedMeshPipeline)
 };
 
 class GpuContext {
@@ -99,6 +100,9 @@ public:
 	SDL_GPUGraphicsPipeline* terrainPipeline() const { return m_terrainPipeline; }
 	// Mesh shaders without depth test or write, for the sky dome.
 	SDL_GPUGraphicsPipeline* skyPipeline() const { return m_skyPipeline; }
+	// Meshes fading out (LightingUniforms material.w their alpha): blended,
+	// no depth writes.
+	SDL_GPUGraphicsPipeline* fadedMeshPipeline() const { return m_fadedMeshPipeline; }
 	// Alpha-blended, depth-tested but not written.
 	SDL_GPUGraphicsPipeline* waterPipeline() const { return m_waterPipeline; }
 	// Water's blending plus a depth bias, for road decals.
@@ -165,6 +169,7 @@ private:
 	SDL_GPUGraphicsPipeline* m_meshPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_terrainPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_skyPipeline = nullptr;
+	SDL_GPUGraphicsPipeline* m_fadedMeshPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_waterPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_roadPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_undergrowthPipeline = nullptr;

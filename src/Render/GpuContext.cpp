@@ -104,6 +104,7 @@ GpuContext::~GpuContext()
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_meshPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_terrainPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_skyPipeline);
+	SDL_ReleaseGPUGraphicsPipeline(m_device, m_fadedMeshPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_waterPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_roadPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_undergrowthPipeline);
@@ -204,6 +205,8 @@ bool GpuContext::createPipelines(std::string& error)
 	color.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
 	color.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
 	info.depth_stencil_state.enable_depth_write = false;
+	m_fadedMeshPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
+		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, 5, 1, "faded mesh");
 	m_particlePipeline = build(k_particle_vert_spv, k_particle_vert_spv_size, k_particle_vert_msl,
 		k_particle_vert_msl_size, k_particle_frag_spv, k_particle_frag_spv_size, k_particle_frag_msl,
 		k_particle_frag_msl_size, 1, 1, "particle");
@@ -252,7 +255,7 @@ bool GpuContext::createPipelines(std::string& error)
 	info.rasterizer_state.depth_bias_slope_factor = -1.0f;
 	m_roadPipeline = build(k_road_vert_spv, k_road_vert_spv_size, k_road_vert_msl, k_road_vert_msl_size,
 		k_road_frag_spv, k_road_frag_spv_size, k_road_frag_msl, k_road_frag_msl_size, 3, 2, "road");
-	return m_meshPipeline && m_terrainPipeline && m_skyPipeline && m_waterPipeline && m_roadPipeline &&
+	return m_meshPipeline && m_fadedMeshPipeline && m_terrainPipeline && m_skyPipeline && m_waterPipeline && m_roadPipeline &&
 		m_undergrowthPipeline && m_particlePipeline && m_additiveParticlePipeline && m_uiPipeline && m_uiSubmitPipeline &&
 		m_uiTestPipeline && m_uiClearPipeline;
 }

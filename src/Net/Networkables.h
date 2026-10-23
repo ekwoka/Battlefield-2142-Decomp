@@ -173,7 +173,12 @@ struct NetworkableState {
 	float ladderPosition = 0;    // and the position on it, 0..1
 	int soldierValues[3] {};     // Soldier 0x20 (+0x268, +0x26c, 0..4), 0x4000 (+0x284)
 	uint32_t soldierBits = 0;    // Soldier: bit 0 armor +0x21c, bits 1-3 +0x328, +0x30c, +0x3e9
-	size_t ragdollBits = 0;      // Soldier 0x10000: dead, a ragdoll's state (its first particle in `position`)
+	size_t ragdollBits = 0;      // Soldier 0x10000: dead, a ragdoll's state (0x008a9ce0)
+	// Its networked particles (ragdoll_net_boneEnable's: the hips and
+	// shoulders, in particle order), the first as floats, the others delta3
+	// of 0.01 from it; `position` is the second (the middle particle, bone
+	// 6), where the body sits.
+	std::vector<Vec3f> ragdollParticles;
 	int empLevel = -1;           // SimpleObject 0x20, Soldier 0x80: the armor's EMP level 0-15
 	int changePoints = -1;       // SimpleObject 0x40: TeamChange changePoints (rounded up)
 	int spawnTeam = -1;          // SimpleObject 0x1000: 2 bits, object +0x168 (base object vtable 0x1a8 sets, 0x1ac gets;

@@ -30,8 +30,15 @@
 // capsules, and the knees', elbows', a spine bone's and the head's
 // particles skip the objects: 0x008ac200).
 //
-// Not rewritten yet: the network side (ragdoll_net_*: particles driven by
-// the server, 0x008acce0).
+// The network side: a server sends the positions of the networked
+// particles (ragdoll_net_boneEnable: the hips and shoulders) while the body
+// is awake and its player attached (the Soldier networkable's 0x10000
+// group, 0x008a9ce0); a client's body of a soldier with a player is
+// network-driven (0x005f0a00 -> 0x008acc00): those particles are pulled
+// ragdoll_net_interpolate of the way to the received positions each step
+// and held there through the constraints, the others simulated round them
+// (receive, 0x008acce0). After 0.3 s without an update the body is left to
+// itself.
 #pragma once
 
 #include "AnimationFiles.h"
@@ -79,6 +86,12 @@ struct RagDollSettings {
 	// ragdoll_clientMaxUpdateTime (milliseconds, 0x3b03126f): past it in a
 	// frame, the network-driven bodies still to update take level 2.
 	float clientMaxUpdateTime = 0.002f;
+	// ragdoll_net_interpolate (0x00b4cbd0): how far a network-driven
+	// particle moves to its target a step.
+	float netInterpolate = 0.1f;
+	// ragdoll_net_boneEnable (0x00b4cbe0): which bones' particles are
+	// networked (1: bone 1, 2: bone 6, 4: bone 15, 8: bone 31; 0x008aca60).
+	int netBoneEnable = 15;
 };
 
 // The template the console methods build (the manager's half).
@@ -183,6 +196,9 @@ bool loadRagDoll(RagDollTemplate& ragDoll, const std::string& path,
 struct RagDollWorld {
 	// The terrain's height and normal under a point; empty for none.
 	std::function<float(float x, float z, Vec& normal)> ground;
+	// The terrain's material under a point (the level's material map, the
+	// heightmap ray's material, 0x006d3210); empty: material 0.
+	std::function<uint32_t(float x, float z)> groundMaterial;
 	// The first object, in list order, whose mesh the segment crosses
 	// moving into a face (collision-mesh slot 22): the crossing, the face's
 	// normal and material.
@@ -211,6 +227,8 @@ public:
 		float mass;                 // 0x4c
 		float radius;               // 0x50
 		bool hitObject = false;     // 0x55
+		Vec target {};              // 0x30: the server's position (network-driven)
+		bool networked = false;     // 0x54: sent and received (ragdoll_net_boneEnable)
 	};
 
 	// 0x008adc00 / 0x008aca60: particles at the bones of `pose` (world
@@ -247,7 +265,20 @@ public:
 	// up when it lies on its back.
 	Vec bodyNormal() const;
 
+	// The network side. setNetworkDriven (0x008acc00): on, the networked
+	// particles follow what is received; off, they are put at their last
+	// targets once (when one came) and the body simulates on its own.
+	void setNetworkDriven(bool on);
+	bool networkDriven() const { return m_netDriven; }
+	// 0x008acce0: the networked particles' positions, in particle order
+	// (the first is the reference the others are sent against). The first
+	// update puts them there; it wakes the body and gives it 0.3 s.
+	void receive(const std::vector<Vec>& targets);
+	// The networked particles' positions as a server sends them (0x008a9ce0).
+	std::vector<Vec> networkedPositions() const;
+
 private:
+	void setNetworkDriven(bool on, const RagDollWorld& world);
 	void integrate(float step);          // 0x008a8860
 	void accumulate();                    // 0x008a8a10
 	void solve(const RagDollWorld& world); // 0x008ac8f0
@@ -281,6 +312,9 @@ private:
 	float m_sinceImpact = 0;
 	bool m_touched = false;    // 0x63
 	int m_lod = 0;             // 0x58
+	float m_netTimer = 0;      // 0x5c: seconds left without an update
+	bool m_netDriven = false;  // 0x61
+	bool m_firstPending = true; // 0x62: no update yet
 };
 
 // The manager's levels of detail (0x008ae120) for bodies at `distances`

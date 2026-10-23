@@ -26,14 +26,40 @@ std::vector<std::string> fields(const std::string& line)
 
 } // namespace
 
+void HudFont::buildIndex()
+{
+	m_ascii.fill(Glyph {});
+	m_asciiPresent.reset();
+	m_kernFirst.reset();
+	for (const auto& [code, g] : glyphs) {
+		if (code < 256) {
+			m_ascii[code] = g;
+			m_asciiPresent.set(code);
+		}
+	}
+	for (const auto& [pair, amount] : kerning) {
+		if (pair.first < 256) {
+			m_kernFirst.set(pair.first);
+		}
+	}
+	m_indexedGlyphs = glyphs.size();
+	m_indexedKerning = kerning.size();
+}
+
 const Glyph* HudFont::glyph(uint32_t code) const
 {
+	if (code < 256 && m_indexedGlyphs == glyphs.size()) {
+		return m_asciiPresent.test(code) ? &m_ascii[code] : nullptr;
+	}
 	const auto it = glyphs.find(code);
 	return it == glyphs.end() ? nullptr : &it->second;
 }
 
 float HudFont::kern(uint32_t first, uint32_t second) const
 {
+	if (kerning.empty() || (first < 256 && m_indexedKerning == kerning.size() && !m_kernFirst.test(first))) {
+		return 0.0f;
+	}
 	const auto it = kerning.find({first, second});
 	return it == kerning.end() ? 0.0f : it->second;
 }
@@ -90,6 +116,7 @@ std::optional<HudFont> parseHudFont(const std::string& text)
 				static_cast<float>(std::atof(f[2].c_str()));
 		}
 	}
+	font.buildIndex();
 	return font;
 }
 
