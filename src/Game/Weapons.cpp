@@ -115,49 +115,82 @@ float explosionFalloff(float radius, float distance)
 	return std::clamp(1 - (distance - inner) / (radius - inner), 0.0f, 1.0f);
 }
 
-physics::Vec3 blastPush(const BlastPush& blast)
+namespace {
+
+physics::Vec3 unitOf(physics::Vec3 v) // 0x004481a0
 {
-	const auto unit = [](physics::Vec3 v) { // 0x004481a0
-		const float squared = physics::lengthSquared(v);
-		if (std::fabs(squared - 1.0f) < 1.1920929e-07f) {
-			return v;
-		}
-		return squared < 1.1920929e-07f ? physics::Vec3 {} : v * (1.0f / std::sqrt(squared));
-	};
-	float force = blast.falloff * blast.forceMod * blast.explosionForce * blast.share;
-	if (blast.inWater && blast.soldier) {
-		force *= 0.1f;
+	const float squared = physics::lengthSquared(v);
+	if (std::fabs(squared - 1.0f) < 1.1920929e-07f) {
+		return v;
 	}
-	force = std::min(force, blast.forceMax);
+	return squared < 1.1920929e-07f ? physics::Vec3 {} : v * (1.0f / std::sqrt(squared));
+}
+
+// The object's axis nearest the line, signed towards the object (y only
+// when strictly nearest, else x unless z is nearer).
+physics::Vec3 nearestAxis(const BlastPush& blast)
+{
 	const physics::Vec3& x = blast.axes.rows[0];
 	const physics::Vec3& y = blast.axes.rows[1];
 	const physics::Vec3& z = blast.axes.rows[2];
 	const float alongY = physics::dot(blast.line, y), alongX = physics::dot(blast.line, x),
 				alongZ = physics::dot(blast.line, z);
-	physics::Vec3 way;
 	if (std::fabs(alongY) > std::fabs(alongX) && std::fabs(alongY) > std::fabs(alongZ)) {
-		way = alongY < 0 ? -y : y;
-	} else if (std::fabs(alongZ) <= std::fabs(alongX)) {
-		way = alongX < 0 ? -x : x;
-	} else {
-		way = alongZ < 0 ? -z : z;
+		return alongY < 0 ? -y : y;
 	}
-	way = unit(way);
-	physics::Vec3 line = unit(blast.line);
+	if (std::fabs(alongZ) <= std::fabs(alongX)) {
+		return alongX < 0 ? -x : x;
+	}
+	return alongZ < 0 ? -z : z;
+}
+
+} // namespace
+
+float blastPushForce(const BlastPush& blast)
+{
+	// A twist: 1 x 20 instead of the falloff x forceMod (bVar5).
+	float force = blast.twist ? 20.0f * blast.explosionForce * blast.share
+							  : blast.falloff * blast.forceMod * blast.explosionForce * blast.share;
+	if (blast.inWater && blast.soldier) {
+		force *= 0.1f;
+	}
+	force = std::min(force, blast.forceMax);
 	if (blast.soldier) {
-		line.y += 5; // *0x00a6ab78 (0x00a6aac0)
 		force *= blast.soldierRandom;
 	}
 	if (blast.forceMax < force + blast.speed) {
 		force = blast.forceMax - blast.speed;
 	}
-	physics::Vec3 push = unit(way + line) * force;
+	return force;
+}
+
+physics::Vec3 blastPush(const BlastPush& blast)
+{
+	const float force = blastPushForce(blast);
+	physics::Vec3 way = unitOf(nearestAxis(blast));
+	if (!blast.twist) {
+		physics::Vec3 line = unitOf(blast.line);
+		if (blast.soldier) {
+			line.y += 5; // *0x00a6ab78 (0x00a6aac0)
+		}
+		way = way + line; // 0x0043dbd0, skipped for a twist
+	}
+	physics::Vec3 push = unitOf(way) * force;
 	for (float* c : {&push.x, &push.y, &push.z}) {
 		if (std::fabs(*c) < 0.001f) {
 			*c = 0;
 		}
 	}
 	return push;
+}
+
+std::array<BlastForce, 3> blastTwist(const physics::Mat3& axes, const physics::Vec3& line, float force, float width)
+{
+	const physics::Vec3& x = axes.rows[0];
+	const physics::Vec3 a = physics::dot(line, x) >= 0 ? -x : x; // 0x00562dd0 negates
+	const float f = force / 2.9f * std::max(width, 2.0f);          // *0x00a6aa94, *0x00a6aa98
+	return {BlastForce {a, {0, f, 0}}, BlastForce {-a, {0, -0.5f * f, 0}}, // *0x00a6aa8c
+		BlastForce {{}, a * (f * -0.5f)}};                                // *0x00a6aa90
 }
 
 float addEmpDamage(float level, float amount, float stepSize, int numSteps)

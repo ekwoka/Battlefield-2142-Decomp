@@ -32,8 +32,10 @@
 //   - progress (0x10092bc0): a bot that pushes its controls and doesn't get
 //     2 m (4 m) further for 10 s (20 s) fails; the move ends and the
 //     behaviour plans again. A soldier standing still half a second jumps.
-// Not rewritten: the time-slicing of the searches (a segment a tick here)
-// and the jump (the rewrite's soldiers can't jump). A segment search the
+// The jump is the caller's: Steer::jump asks for PIAction (input 9), held
+// for 0.4 s (0x10095720 presses it, 0x10092bc0 lets go).
+// Not rewritten: the time-slicing of the searches (a segment a tick here).
+// A segment search the
 // original fails falls back to the whole mesh here (see planSegment).
 #pragma once
 

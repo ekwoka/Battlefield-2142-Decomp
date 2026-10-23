@@ -26,6 +26,12 @@ struct SphereContact {
 	Vec3 normal;  // away from the surface, towards the sphere centre
 	float depth;  // negative: how far the sphere is inside
 	uint32_t material;
+	// The mesh query's second depth (0x006e2350's fourth list): how far a
+	// swept sphere went on past the crossing (the face's: fraction - 1 of
+	// the way, 0x006bd070; an edge's: minus the distance from the centre
+	// there to the end, 0x006be300); the depth itself for a sphere where
+	// it is.
+	float travel = 0;
 };
 
 // Where the segment a-b comes within `radius` of the segment e0-e1 (a
@@ -79,6 +85,11 @@ public:
 	};
 	// The first face the segment from `from` to `to` passes through.
 	bool raycast(const Vec3& from, const Vec3& to, Hit& hit) const;
+	// The same, leaving out the faces of `ignore`'s object.
+	bool raycast(const Vec3& from, const Vec3& to, Hit& hit, uint32_t ignore) const
+	{
+		return trace(from, to, hit, false, ignore);
+	}
 	// A moving mesh vertex against the faces (the mobile mesh physics'
 	// first pass, 0x006bb050 -> collision-mesh slot 22 0x006e5920): the
 	// vertex's segment from its last pose to now. The first face it
@@ -111,7 +122,7 @@ public:
 		const std::function<void(const Vec3& a, const Vec3& b, const Vec3& c, uint32_t material, uint32_t owner)>& visit) const;
 
 private:
-	bool trace(const Vec3& from, const Vec3& to, Hit& hit, bool frontOnly) const;
+	bool trace(const Vec3& from, const Vec3& to, Hit& hit, bool frontOnly, uint32_t ignore = 0) const;
 	struct Triangle {
 		Vec3 a, b, c;
 		Vec3 normal;

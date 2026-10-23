@@ -12,20 +12,21 @@
 // 0.045, water-limit 1.2, getoff-speed-mod 1.15, soldier-dist 0.6,
 // down-angle-limit 35.
 //
-// Not rewritten: the ray checks that stop the container or put the soldier
-// off on the way (0x0059ed10: rays a step below or above and towards the
-// wall), the bottom's ray down from the top (0x0059d550 lowers the bottom
-// onto what is under the ladder), the jump key that leaves the ladder
-// anywhere (PIAction; the rewrite's soldiers have no jump), the nudge
-// (slot 103), the climbing animation and camera (0x0059f380, 0x0059e730),
-// and the soldier's exact place in the container (the LadderContainer
-// template's seat; here soldier-dist off the ladder on its back side).
+// The rays (0x0059ed10) that stop the container or put the soldier off on
+// the way, the bottom's ray down (0x0059d550), the jump key (PIAction)
+// that leaves the ladder anywhere and the soldier's place in the container
+// (the LadderContainer template's seat, 0/1/0) are rewritten; not the
+// nudge (slot 103), the climbing animation and camera (0x0059f380,
+// 0x0059e730).
 #include "GameWorld.h"
 
+#include "Physics/MaterialManager.h"
 #include "World/Object.h"
+#include "World/ObjectTemplateManager.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 namespace dice::hfe::game {
 
@@ -44,6 +45,10 @@ constexpr float kGetOffSpeed = 1.15f;    // getoff-speed-mod (0x00a69c48)
 constexpr float kSoldierDistance = 0.6f; // soldier-dist (0x00a69c34)
 constexpr float kDownAngle = 35.0f;      // down-angle-limit (0x00a69c00), degrees
 constexpr float kOriginOverFeet = 1.01f; // 0x0059e820's exit height
+constexpr float kDownRay = 0.2f;         // ladder-down-ray-mag (0x00a69c50)
+constexpr float kDownRaySkid = 0.3f;     // ladder-down-ray-mag-skid (0x00a69c28)
+constexpr float kUpRay = 1.7f;           // ladder-up-ray-mag-skid (0x00a69c18)
+constexpr float kGetOffRayMin = 0.3f;    // ladder-getoff-ray-min (0x00a69c38)
 
 float length(const Vec3& v) { return std::sqrt(physics::lengthSquared(v)); }
 
@@ -65,6 +70,93 @@ void GameWorld::measureLadder(Ladder& ladder) const
 	if (m_ground.height) {
 		ladder.bottom = std::max(ladder.bottom, m_ground.height(ladder.position.x, ladder.position.z));
 	}
+	// The ray down where the soldier hangs (soldier-dist behind the
+	// ladder's axis, along -z) from the top to the bottom, against the
+	// objects (collision manager slot 0x68, filter 0x100 / 8; the ladder's
+	// own faces left out): what it meets is the bottom, 0.01 over it; or,
+	// for an object with a water material (its template's flag 2,
+	// 0x005f7ce0), 1.2 under it if that is higher.
+	const Vec3& forward = ladder.rotation.rows[2];
+	const Vec3 at = ladder.position - forward * kSoldierDistance;
+	physics::CollisionWorld::Hit hit {};
+	if (m_collision.raycast({at.x, ladder.top, at.z}, {at.x, ladder.bottom, at.z}, hit, ladder.owner)) {
+		const physics::Material* material = m_materials ? m_materials->find(hit.material) : nullptr;
+		if (material && material->hasWaterPhysics) {
+			ladder.bottom = std::max(ladder.bottom, hit.point.y - kWaterLimit);
+		} else {
+			ladder.bottom = hit.point.y + 0.01f;
+		}
+	}
+}
+
+// Where the soldier sits in the container: the LadderContainer template's
+// seatInformation (0/1/0), in the container's frame (the ladder's
+// rotation, at the container's height).
+Vec3 GameWorld::ladderSeat() const
+{
+	if (const world::ObjectTemplate* container = m_templates.find("LadderContainer")) {
+		const auto info = container->settings().find("seatInformation");
+		if (info != container->settings().end()) {
+			char name[128] = {};
+			Vec3 at;
+			if (std::sscanf(info->second.c_str(), "%127s %f/%f/%f", name, &at.x, &at.y, &at.z) == 4) {
+				return at;
+			}
+		}
+	}
+	return {0, 1, 0};
+}
+
+// 0x0059ed10: rays from `p` (the container's new place, or a soldier
+// getting on: its origin) against the objects (the ladder's own faces
+// left out), `back` 0.75 m (ladder-exit-offset) against the way the ladder
+// (or the soldier) faces. Going down or skidding (or without a
+// container): a ray down 0.2 m (0.3 skidding) from p + back, else one from
+// p along back; either meeting something gives 1 (put off there). Going
+// up (or without a container): a ray up 0.2 m from p + back + 1.7 m
+// (without a container from p + back, 1.9 m), else one from 1.7 m over p
+// along back; either meeting something gives 2 (stay). Otherwise within
+// 1.8 m of the top (soldier-start-getoff): the container's soldier
+// fitting at the top's exit goes on (0); else a ray from the ladder's
+// axis, s = max(0.3, 1 - the way left / 1.8) over the top, forward by
+// 0.75 x s plus 0.75 meeting something gives 2.
+int GameWorld::ladderRays(const Ladder& ladder, const Vec3& p, const Vec3& back, bool container, bool up, bool down,
+	bool skid) const
+{
+	physics::CollisionWorld::Hit hit {};
+	const auto ray = [&](const Vec3& from, const Vec3& way) { return m_collision.raycast(from, from + way, hit, ladder.owner); };
+	int result = 0;
+	if (!container || down || skid) {
+		const float reach = skid ? kDownRaySkid : kDownRay;
+		if (ray(p + back, {0, -reach, 0}) || ray(p, back)) {
+			result = 1;
+		}
+	}
+	if (!container || up) {
+		const Vec3 start = p + back + Vec3 {0, container ? kUpRay : 0.0f, 0};
+		const float reach = container ? 0.2f : kUpRay + 0.2f;
+		const bool blocked = ray(start, {0, reach, 0}) || ray(p + Vec3 {0, kUpRay, 0}, back);
+		if (blocked) {
+			return 2;
+		}
+		const float left = ladder.top - p.y;
+		if (kStartGetOff > 0 && left < kStartGetOff) {
+			const Vec3& forward = ladder.rotation.rows[2];
+			if (container) {
+				Vec3 exit = ladder.position + forward * kExitOffset;
+				exit.y = ladder.top + forward.y * kExitOffset;
+				if (soldierFits(exit + Vec3 {0, kOriginOverFeet, 0}, SoldierPose::Stand, 0)) {
+					return result;
+				}
+			}
+			const float s = std::max(kGetOffRayMin, 1.0f - left / kStartGetOff);
+			const Vec3 from {ladder.position.x, ladder.top + s, ladder.position.z};
+			if (ray(from, forward * (s * kExitOffset) - back)) {
+				result = 2;
+			}
+		}
+	}
+	return result;
 }
 
 // 0x0059fd40: a soldier touching the ladder's box gets on when, above its
@@ -103,6 +195,21 @@ bool GameWorld::tryLadder(Player& player, SoldierInput& input)
 		if (nearTop ? pitch < kDownAngle : pitch >= 0) {
 			continue;
 		}
+		// Under the terrain or 1.2 m under the water there (0x0059e210 with
+		// neither way; not near the top), or the rays (no container) meeting
+		// anything: not on.
+		if (!nearTop && m_ground.height) {
+			float floor = m_ground.height(origin.x, origin.z);
+			if (m_hasWater) {
+				floor = std::max(floor, m_waterLevel - kWaterLimit);
+			}
+			if (origin.y < floor) {
+				continue;
+			}
+		}
+		if (ladderRays(ladder, origin, facing * -kExitOffset, false, false, false, false) != 0) {
+			continue;
+		}
 		const Vec3 side = Vec3 {ladder.position.x, at, ladder.position.z} - forward * kExitOffset
 			+ Vec3 {0, kOriginOverFeet, 0};
 		if (!soldierFits(side, SoldierPose::Stand, 0)) {
@@ -131,6 +238,19 @@ void GameWorld::climbLadder(Player& player, SoldierInput& input, float seconds)
 	}
 	Ladder& ladder = m_ladders[static_cast<size_t>(player.ladder)];
 	measureLadder(ladder);
+	const Vec3& forward = ladder.rotation.rows[2];
+	const auto seat = [&] {
+		if (player.ladder >= 0) {
+			player.body.position = Vec3 {ladder.position.x, player.ladderY, ladder.position.z}
+				+ ladder.rotation.transform(ladderSeat());
+			player.body.yawDegrees = std::atan2(forward.x, forward.z) * 57.29578f;
+		}
+	};
+	// The jump key (the container's +0x460, PIAction): off anywhere, 0.75 m
+	// back, if the soldier fits there.
+	if (input.jump && leaveLadder(player, 3)) {
+		return;
+	}
 	const float pitch = -input.aimPitch;
 	float sign = pitch >= kDownAngle ? -1.0f : 1.0f;
 	float in = std::clamp(input.throttle, -1.0f, 1.0f);
@@ -139,6 +259,7 @@ void GameWorld::climbLadder(Player& player, SoldierInput& input, float seconds)
 		in = kSkidSpeed;
 		sign = -1;
 	}
+	const bool skid = in == kSkidSpeed;
 	const bool up = sign * in > 0, down = sign * in < 0;
 	const float k = player.ladderY > ladder.top - kStartGetOff ? kGetOffSpeed : 1.0f;
 	const float y = player.ladderY + in * sign * kClimbSpeed * seconds * 30.0f * k;
@@ -157,14 +278,19 @@ void GameWorld::climbLadder(Player& player, SoldierInput& input, float seconds)
 	}
 	if (mode != 0) {
 		leaveLadder(player, mode);
-	} else {
+		seat();
+		return;
+	}
+	// The rays (0x0059ed10): 0 the container moves (slot 0x80), 1 the
+	// soldier is put off where it is (mode 3), 2 it stays.
+	const int rays = ladderRays(ladder, {ladder.position.x, y, ladder.position.z}, forward * -kExitOffset, true, up,
+		down, skid);
+	if (rays == 0) {
 		player.ladderY = y;
+	} else if (rays == 1) {
+		leaveLadder(player, 3);
 	}
-	if (player.ladder >= 0) {
-		const Vec3& forward = ladder.rotation.rows[2];
-		player.body.position = Vec3 {ladder.position.x, player.ladderY + 1.0f, ladder.position.z} - forward * kSoldierDistance;
-		player.body.yawDegrees = std::atan2(forward.x, forward.z) * 57.29578f;
-	}
+	seat();
 }
 
 // 0x0059e820 / 0x0059ea20: the ends' exits (1 the top: over it, 0.75 m on

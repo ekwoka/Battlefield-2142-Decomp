@@ -163,6 +163,17 @@ TEST(AnimationSystem_SoldierAndRifle)
 		rifle->bundles().size(), rifle->triggers().size());
 	CHECK(soldier->findTrigger("root") >= 0 && soldier->bundles().size() > 40);
 	CHECK(rifle->findTrigger("completeTree") >= 0);
+	// The jumps: start, loop and landing in sequence, the landing sound.
+	const int jumpIndex = soldier->findBundle("stand_jumpForward");
+	CHECK(jumpIndex >= 0);
+	if (jumpIndex >= 0) {
+		const anim::Bundle& jump = soldier->bundles()[static_cast<size_t>(jumpIndex)];
+		CHECK(jump.hasLoopingClip && jump.abruptPlayback && jump.jumpToLastAnimationAtStop && jump.clips.size() == 3);
+		CHECK(jump.events.size() == 1 && jump.events[0].type == anim::Bundle::SoundEvent && jump.events[0].id == 0);
+		CHECK(jump.clips.size() == 3 && jump.clips[0].startTime == 0 && jump.clips[2].startTime > 2);
+	}
+	const int turnLeft = soldier->findTrigger("stand_turnLeft");
+	CHECK(turnLeft >= 0 && soldier->triggers()[static_cast<size_t>(turnLeft)].type == anim::TriggerType::Turn);
 
 	const anim::Skeleton* skeleton = systems.skeleton("Objects/Soldiers/Common/Animations/3p_setup.ske");
 	CHECK(skeleton != nullptr);
@@ -219,7 +230,7 @@ size_t makeBundle(anim::AnimationSystemTemplate& system, const std::string& name
 	const size_t bundle = system.addBundle(name);
 	for (int i = 0; i < clips; ++i) {
 		const size_t clip = system.addClip(name + std::to_string(i) + ".baf");
-		system.bundles()[bundle].clips.push_back({clip, 0});
+		system.bundles()[bundle].addClip(clip);
 	}
 	return bundle;
 }
@@ -615,4 +626,296 @@ TEST(AnimationSystem_MechWalksToAStop)
 	}
 	std::fprintf(stderr, "  walk gone after %d updates; playing %s\n", updates, playing.c_str());
 	CHECK(updates < 200 && contains(state.playing(), "stand_slope"));
+}
+
+// UpTrigger and TurnTrigger as the factory (0x008c1170) builds them: Up
+// reads the direction's y (or its acceleration) with useDirection's
+// absolute value and signed rate (the ladders' climb), Turn the turn value
+// and restarts the step at the left foot.
+TEST(AnimationSystem_UpAndTurnTriggers)
+{
+	anim::AnimationSystems systems(nullptr);
+	anim::ValueHolder& climb = systems.createValueHolder("climb");
+	climb.min = 0.01f;
+	climb.normal = 1;
+	climb.max = 10;
+	anim::ValueHolder& turnLeft = systems.createValueHolder("turnLeft");
+	turnLeft.min = -0.05f;
+	turnLeft.normal = 1;
+	turnLeft.max = -1000;
+	anim::ValueHolder& braking = systems.createValueHolder("braking");
+	braking.min = -3;
+	braking.normal = 1;
+	braking.max = -5;
+	anim::AnimationSystemTemplate system("up.inc");
+	const size_t climbBundle = makeBundle(system, "climb");
+	const size_t turnBundle = makeBundle(system, "turnLeft");
+	const size_t brakeBundle = makeBundle(system, "brake");
+	const size_t up = makeTrigger(system, anim::TriggerType::Up, "climb", {climbBundle});
+	system.triggers()[up].valueHolder = systems.findValueHolder("climb");
+	system.triggers()[up].useDirection = true;
+	const size_t turn = makeTrigger(system, anim::TriggerType::Turn, "turnLeft", {turnBundle});
+	system.triggers()[turn].valueHolder = systems.findValueHolder("turnLeft");
+	const size_t brake = makeTrigger(system, anim::TriggerType::Forward, "brake", {brakeBundle});
+	system.triggers()[brake].valueHolder = systems.findValueHolder("braking");
+	system.triggers()[brake].triggerOnAcceleration = true;
+	makeTrigger(system, anim::TriggerType::Trigger, "root", {}, {up, turn, brake});
+	finishSystem(system);
+
+	anim::AnimationState state(systems, system);
+	anim::AnimationInput input;
+	input.upSpeed = -0.5f; // climbing down: |y| in range, played backwards
+	input.turn = 5;        // a right turn: not TurnLeft's, and not Up's value
+	state.update(input, kStep);
+	const anim::AnimationState::Instance* climbing = playingBundle(state, system, "climb");
+	CHECK(climbing && near(climbing->rate, -0.5f));
+	CHECK(!playingBundle(state, system, "turnLeft"));
+	// Turning left at 90 degrees a second (0.9 after the soldier's 0.01).
+	input.upSpeed = 0;
+	input.turn = -0.9f;
+	state.update(input, kStep);
+	const anim::AnimationState::Instance* turning = playingBundle(state, system, "turnLeft");
+	CHECK(turning && near(turning->rate, 0.9f));
+	CHECK(near(state.stepPhase(), 0.2f)); // anim_startLeftOffset
+	// Accelerations: the old speed x direction less the new, per second.
+	input.turn = 0;
+	input.forward = 1;
+	input.speed = 2;
+	input.movementSeconds = 0.5f;
+	state.update(input, kStep);
+	CHECK(near(state.acceleration(2), -4));
+	CHECK(playingBundle(state, system, "brake") != nullptr);
+}
+
+// 0x008b9ae0: with a time the direction eases towards the new one by
+// anim_smoothSet, except when it swaps sign past 0.9.
+TEST(AnimationSystem_MovementSmoothing)
+{
+	anim::AnimationSystems systems(nullptr);
+	anim::AnimationSystemTemplate system("smooth.inc");
+	makeTrigger(system, anim::TriggerType::Trigger, "root", {makeBundle(system, "still")});
+	finishSystem(system);
+	anim::AnimationState state(systems, system);
+	anim::AnimationInput input;
+	input.speed = 2;
+	input.forward = 1;
+	input.movementSeconds = 0.05f;
+	state.update(input, 0.05f);
+	CHECK(near(state.direction(2), 1) && near(state.direction(0), 0));
+	input.side = 0.6f;
+	input.forward = 0.8f;
+	state.update(input, 0.05f); // halfway: (0.3, 0.9), normalised
+	const float length = std::sqrt(0.3f * 0.3f + 0.9f * 0.9f);
+	CHECK(near(state.direction(0), 0.3f / length) && near(state.direction(2), 0.9f / length));
+	input.side = 0;
+	input.forward = -1; // reversing: at once
+	state.update(input, 0.05f);
+	CHECK(near(state.direction(2), -1) && near(state.direction(0), 0));
+	input.movementSeconds = 0; // no time: as given
+	input.side = 1;
+	input.forward = 0;
+	state.update(input, 0.05f);
+	CHECK(near(state.direction(0), 1));
+}
+
+// A bundle like the soldier's jumps: the start, a looping middle and the
+// landing by start time, an effect at once and the landing sound late.
+// While queued the middle repeats; once not, abruptPlayback skips past it.
+TEST(AnimationSystem_EventsAndClipSequence)
+{
+	Console console;
+	anim::AnimationSystems systems(nullptr);
+	anim::registerAnimationConsoleMethods(console, systems);
+	anim::ValueHolder& jumpHolder = systems.createValueHolder("jump");
+	jumpHolder.min = 0.25f;
+	jumpHolder.normal = 2.5f;
+	jumpHolder.max = 8;
+	anim::AnimationSystemTemplate* system = systems.get("jump.inc", [&] {
+		run(console, "animationSystem.createAnimation end.baf");
+		run(console, "animationManager.looping 0");
+		run(console, "animationManager.length 0.6");
+		run(console, "animationManager.fadeInTime 0.2");
+		run(console, "animationSystem.createAnimation loop.baf");
+		run(console, "animationManager.length 1");
+		run(console, "animationSystem.createAnimation start.baf");
+		run(console, "animationManager.looping 0");
+		run(console, "animationManager.length 0.5");
+		run(console, "animationSystem.createBundle jump");
+		run(console, "animationBundle.isLooping 0");
+		run(console, "animationBundle.abruptPlayback 1");
+		run(console, "animationBundle.jumpToLastAnimationAtStop 1");
+		run(console, "animationBundle.addAnimation end.baf");
+		run(console, "animationBundle.setAnimationStartTime end.baf 2");
+		run(console, "animationBundle.addAnimation loop.baf");
+		run(console, "animationBundle.setAnimationStartTime loop.baf 0.25");
+		run(console, "animationBundle.addAnimation start.baf");
+		run(console, "animationBundle.addEvent Sound:0_first");
+		run(console, "animationBundle.setEventStartTime sound:0_first 2.4");
+		run(console, "animationBundle.addEvent effect:3");
+		run(console, "animationSystem.createTrigger UpTrigger root");
+		run(console, "animationTrigger.addBundle jump");
+		run(console, "animationTrigger.valueHolder jump");
+	});
+	const anim::Bundle& jump = system->bundles()[0];
+	CHECK(jump.clips.size() == 3);
+	CHECK(system->clips()[jump.clips[0].clip].path == "start.baf");
+	CHECK(system->clips()[jump.clips[1].clip].path == "loop.baf" && near(jump.clips[1].startTime, 0.25f));
+	CHECK(system->clips()[jump.clips[2].clip].path == "end.baf" && near(jump.clips[2].startTime, 2));
+	CHECK(jump.hasLoopingClip && near(jump.length, 2.6f));
+	CHECK(jump.events.size() == 2);
+	CHECK(jump.events[0].name == "effect:3" && jump.events[0].type == anim::Bundle::EffectEvent && jump.events[0].id == 3);
+	CHECK(jump.events[1].name == "sound:0_first" && jump.events[1].type == anim::Bundle::SoundEvent
+		&& jump.events[1].id == 0 && near(jump.events[1].startTime, 2.4f));
+	CHECK(anim::Bundle::parseEvent("x sound:2").type == anim::Bundle::SoundEvent);
+	CHECK(anim::Bundle::parseEvent("x sound:2").id == 0); // sscanf from the start
+	CHECK(anim::Bundle::parseEvent("footstep").type == anim::Bundle::NoEvent);
+
+	anim::AnimationState state(systems, *system);
+	anim::AnimationInput input;
+	input.upSpeed = 1; // in the air
+	float highest = 0;
+	for (int i = 0; i < 20; ++i) {
+		state.update(input, kStep);
+		highest = std::max(highest, state.instances().at(0).time);
+	}
+	CHECK(near(state.instances().at(0).rate, 1)); // not 1 / 2.5: jumpToLastAnimationAtStop
+	CHECK(highest <= 1.25f + 1e-4f);              // the loop repeats from 0.25 to 1.25
+	std::vector<anim::AnimationState::FiredEvent> events = state.takeEvents();
+	CHECK(events.size() == 1 && events[0].type == anim::Bundle::EffectEvent && events[0].id == 3);
+	const float before = state.instances().at(0).time;
+	input.upSpeed = 0; // landed: not queued
+	state.update(input, kStep);
+	CHECK(near(state.instances().at(0).time, 1.25f));
+	CHECK(near(state.instances().at(0).jumpOffset, 1.25f - (before + kStep), 1e-3f));
+	int updates = 0;
+	while (!state.instances().empty() && updates < 40) {
+		state.update(input, kStep);
+		++updates;
+	}
+	events = state.takeEvents();
+	CHECK(state.instances().empty());
+	CHECK(events.size() == 1 && events[0].type == anim::Bundle::SoundEvent && events[0].id == 0);
+}
+
+// abruptPlayback: a one-shot queued again while it plays starts over.
+TEST(AnimationSystem_AbruptPlayback)
+{
+	anim::AnimationSystems systems(nullptr);
+	anim::AnimationSystemTemplate system("fire.inc");
+	const size_t abrupt = makeBundle(system, "abrupt");
+	const size_t smooth = makeBundle(system, "smooth");
+	for (size_t b : {abrupt, smooth}) {
+		system.bundles()[b].isLooping = false;
+		system.bundles()[b].fadeInTime = 0;
+	}
+	system.bundles()[abrupt].abruptPlayback = true;
+	const size_t fire = makeTrigger(system, anim::TriggerType::Message, "fire", {abrupt, smooth});
+	system.triggers()[fire].message = 1;
+	makeTrigger(system, anim::TriggerType::Trigger, "root", {}, {fire});
+	finishSystem(system);
+	anim::AnimationState state(systems, system);
+	anim::AnimationInput input;
+	input.pulses = 1;
+	state.update(input, kStep);
+	input.pulses = 0;
+	state.update(input, kStep);
+	state.update(input, kStep);
+	input.pulses = 1;
+	state.update(input, kStep);
+	CHECK(near(playingBundle(state, system, "abrupt")->time, kStep));
+	CHECK(near(playingBundle(state, system, "smooth")->time, 4 * kStep));
+}
+
+TEST(AnimationSystem_CameraSpring)
+{
+	Console console;
+	anim::AnimationSystems systems(nullptr);
+	anim::registerAnimationConsoleMethods(console, systems);
+	anim::AnimationSystemTemplate* system = systems.get("1p.inc", [&] {
+		run(console, "animationSystem.cameraSpring.amplitude 1/1/1"); // no spring yet: ignored
+		run(console, "animationSystem.cameraSpring.use 1");
+		run(console, "animationSystem.cameraSpring.amplitude 0.02/0.02/0.02");
+		run(console, "animationSystem.cameraSpring.zoomDamping 2.5/2.5/0");
+		run(console, "animationSystem.cameraSpring.stiffness 10/10/10");
+		run(console, "animationSystem.cameraSpring.look 1/1");
+		run(console, "animationSystem.cameraSpring.move 2/2/2");
+		run(console, "animationSystem.cameraSpring.fire 0/0/150");
+	});
+	const anim::CameraSpring* spring = system->cameraSpring();
+	CHECK(spring != nullptr);
+	if (!spring) {
+		return;
+	}
+	CHECK(near(spring->amplitude.x, 0.02f) && near(spring->zoomDamping.x, 2.5f) && near(spring->stiffness.z, 10));
+	CHECK(near(spring->look[1], 1) && near(spring->move.y, 2) && near(spring->fire.z, 150) && spring->hit.zero());
+
+	const float dt = 1 / 30.0f;
+	anim::CameraSpringState state;
+	anim::CameraSpringState::Input kick;
+	kick.recoil = 1; // 150 / 30 = 5: clamped
+	anim::CameraSpring::V offset = state.update(*spring, kick, dt);
+	CHECK(near(state.value[2], 1) && near(offset.z, 0.02f) && near(offset.x, 0));
+	// It settles by value^2 x stiffness x dt.
+	offset = state.update(*spring, {}, dt);
+	CHECK(near(state.value[2], 1 - 10 * dt, 1e-4f));
+	// Turning left 3 degrees in a tick swings it right... by -look x turn x dt.
+	anim::CameraSpringState looking;
+	anim::CameraSpringState::Input turn;
+	turn.yawDelta = 3;
+	looking.update(*spring, turn, dt);
+	CHECK(near(looking.value[0], -0.1f));
+	// Strafing right at 3 m/s: x by move.x, and y dips by 0.3 of it.
+	anim::CameraSpringState strafing;
+	anim::CameraSpringState::Input strafe;
+	strafe.right = 3;
+	strafing.update(*spring, strafe, dt);
+	CHECK(near(strafing.value[0], 0.2f) && near(strafing.value[1], -0.06f));
+	// Zoomed in fully: amplitude / (zoomDamping x 6); 0 damping drops it.
+	anim::CameraSpringState::Input zoomed = kick;
+	zoomed.zoom = 1;
+	anim::CameraSpringState fresh;
+	offset = fresh.update(*spring, zoomed, dt);
+	CHECK(near(offset.z, 0));
+	fresh.value[0] = 1;
+	offset = fresh.update(*spring, zoomed, 0);
+	CHECK(near(offset.x, 0.02f / 15));
+	// A weapon's spring replaces only what it sets.
+	anim::CameraSpring weapon;
+	weapon.fire = {0, 0, 20};
+	anim::CameraSpring merged = *spring;
+	merged.overrideBy(weapon);
+	CHECK(near(merged.fire.z, 20) && near(merged.amplitude.x, 0.02f) && near(merged.look[0], 1));
+}
+
+// 0x005eef80: the soldier's up value through a jump.
+TEST(AnimationSystem_SoldierJumpValue)
+{
+	anim::SoldierJumpAnimation jump;
+	using Sound = anim::SoldierJumpAnimation::Sound;
+	Sound sound;
+	bool groundNear = false;
+	float lastWay[3] = {0, 0, 0};
+	const auto ground = [&](const float way[3]) {
+		std::copy(way, way + 3, lastWay);
+		return groundNear;
+	};
+	const float standing[3] = {0, 0, 0};
+	CHECK(jump.update(true, standing, ground, sound) == 0 && sound == Sound::None);
+	const float slowFall[3] = {0, -0.3f, 0};
+	CHECK(near(jump.update(false, slowFall, ground, sound), -0.3f)); // a step down
+	const float takeOff[3] = {0, 3, 1};
+	CHECK(jump.update(false, takeOff, ground, sound) == 1 && sound == Sound::Jump && jump.jumping);
+	const float top[3] = {0, 0.2f, 1};
+	CHECK(jump.update(false, top, ground, sound) == 1 && sound == Sound::None);
+	const float falling[3] = {0, -5, 0};
+	CHECK(jump.update(false, falling, ground, sound) == 1);
+	CHECK(near(lastWay[1], -1) && near(lastWay[0], 0)); // a metre along the velocity
+	const float slowDrift[3] = {0.5f, -0.6f, 0};
+	jump.update(false, slowDrift, ground, sound);
+	const float length = std::sqrt(0.25f + 1);
+	CHECK(near(lastWay[0], 0.5f / length) && near(lastWay[1], -1 / length)); // under 1 m/s: down
+	groundNear = true;
+	CHECK(jump.update(false, falling, ground, sound) == 0 && sound == Sound::Land && jump.landing);
+	CHECK(jump.update(false, falling, ground, sound) == -5); // landing: the vertical speed
+	CHECK(jump.update(true, falling, ground, sound) == 0 && !jump.landing && !jump.jumping);
 }

@@ -616,13 +616,94 @@ scrubs it by another (`0x008c3d00`; seats and bipods). SlopeTrigger leans a
 five-clip bundle to the side by the smoothed ground slope (`0x008c4f00`;
 the mechs).
 
-Not rewritten: animation events (sounds and effects, `0x008c3030`), camera
-springs, `abruptPlayback`'s restart (`0x008c29d0`) and
-`jumpToLastAnimationAtStop` (decoded, not applied), the per-clip sequencing
-inside a bundle (`0x008c2e50`'s jump offset). By the trigger factory
-(`0x008c1170`) UpTrigger reads the direction's y (or the acceleration's)
-and TurnTrigger `+0x3c`, the other way round from the rewrite's mapping:
-to be checked.
+**What the triggers read.** The object passes its movement to the system's
+setter (`0x008b9ae0`, slot `0x38`): a time, a direction, a speed and one
+more vector. The direction is `(x side, y up, z forward)` (`0x14`), the
+speed `0x20`, the vector `0x38`. Given a time the direction's x and z ease
+towards the new ones by `anim_smoothSet` (10 per second; at once when one
+of them swaps sign past 0.9, or the new direction or speed is nil), and the
+accelerations (`0x2c`) are the old speed × direction less the new, per
+second. By the trigger factory (`0x008c1170`) and the types' vtables,
+ForwardTrigger (`0x009dcd00`, `0x008c48d0`) tests speed × z, SideTrigger
+(`0x008c4920`) speed × x, UpTrigger (`0x009dcde0`, `0x008c4980`) the
+direction's y and TurnTrigger (`0x009dce50`, `0x008c49e0`) the vector's
+second part (`0x3c`); with `triggerOnAcceleration` the first three test the
+acceleration instead, and with `useDirection` Side and Up the absolute
+value. The rates (slot `0x4c`): Forward and Side speed / normal (Side with
+`useDirection` times the direction's y, as in the binary), Up |y / normal|
+signed by y with `useDirection` (the ladders climb down by playing their
+bundle backwards), Turn |turn| / normal, and a turn sets the step phase to
+`anim_startLeftOffset`. The rewrite had Up's and Turn's tests the wrong way
+round; fixed.
+
+The soldier (`0x005ef250`) passes the horizontal velocity relative to what
+it stands on (nil under 0.7 m/s when that moves), its direction in the
+soldier's frame, and as y its jump state (`0x005eef80`): standing (the
+response's `+0xf9`) 0; rising at `anim_startJumpAtSpeed` (2.5 m/s) or more
+starts a jump (`+0x2e9`, the jump sound) that reads 1; falling faster than
+`anim_startLandAtSpeed` (−0.5) a ray from the feet along the velocity,
+`anim_startLandAtHeight` (1 m) long (straight down that far under 1 m/s),
+looks for the ground (objects, then the heightmap; `+0x2e8`, the land
+sound), after which the value is the vertical speed; otherwise the vertical
+speed when falling, else 0. Its vector is its rotational velocity × 0.01:
+degrees per second, at most 1499 (`0x0058a6d0`), so `3p_turnLeft` (−0.05 to
+−1000) starts at 5° a second. `stand_jump` (`3p_jump`, 0.25 to 8) plays
+while the jump reads 1.
+
+**Clip sequences.** A bundle's clips are a list: `addAnimation` puts each
+first, `setAnimationStartTime` moves it before the first starting at or
+after it (`0x008bf1f0`, `0x008bf280`); a bundle's clip index counts from
+the front (`0x008be470`). A bundle with a looping clip (`+0x34`, set when
+the scripts finish, `0x008bea30`) is inactive between updates like a
+looping one. While queued its looping clips repeat; not queued, with
+`abruptPlayback` its time skips to the end of the last looping clip,
+remembering the skip (`+0x40`; `0x008c3360`). Drawing (`0x008c2e50`) goes
+through the clips by start time up to the bundle's time: a running clip (or
+any with `playForever`) is drawn, a finished one only if it loops (shifted
+by the skip), each until the next one has faded in over its own
+`fadeInTime`. The soldier's jumps are such bundles: the start, the looping
+middle from 0.25 s and the landing at 2.29 s; once the UpTrigger stops, the
+middle is skipped and the landing plays. A one-shot without a looping clip
+queued again while it plays restarts with `abruptPlayback` (`0x008c29d0`).
+`jumpToLastAnimationAtStop` plays the bundle at rate 1 whatever its
+trigger's rate (`0x008c2950`; the binary does nothing else with it).
+
+**Events.** `addEvent` (`0x008bf370`, `0x008bde00`) keeps a lower-cased name:
+`effect:N` is effect N, `sound:N...` sound N (N read by `sscanf` from the
+start); `setEventStartTime` sorts them by time (`0x008bf4d0`), and a
+bundle lasts at least to its last event (`0x008be400`). Each update, before
+the time step, every event at or before the bundle's time fires once
+(`0x008c3030`, inline in `0x008c3360`), and a loop starts them over. They
+go to the object's event handler (slot `0x100`) as `0x36 + N` (sounds) or
+`0x2c + N` (effects). The soldier (`0x00587b90`) plays its sound set's
+sound (`+0x324`, `0x007fd970`) for event `0x36`, unless it is only being
+posed (`+0x2ec`): the footstep set loaded for the ground under it
+(`0x007fd840`: the cells of material `0x157c` (Soldier_FootSteps) against
+the ground's material, `0x19c8` on a ladder; templates 0–3), its template
+3, else 0. Its jumps' `sound:0_first` is the landing sound. The weapons'
+and mechs' effect events aren't played yet.
+
+**Camera springs.** `animationSystem.cameraSpring.use 1` gives a system a
+spring (`0x008b9670`, 0x50 bytes, `0x008bbfe0`): amplitude, zoomDamping,
+stiffness, move, hit and fire (x/y/z) and look (x/y). The soldier
+(`0x005ee980`) takes its first-person system's and lets the held weapon's
+override each part the weapon sets (`0x008bc390`), then each tick: the
+three values (`+0x2f4`) relax by value² × stiffness × dt, at least
+`anim-soldier-spring-clamp` (0.001), to 0 under 0.0001 (`0x005edda0`); x
+goes by −look.x × the turn, y by look.y × the pitch (degrees this tick,
+`+0x300`, `+0x304`); the velocity pushes x by its sideways part × move.x
+and y by −0.3 of that, minus the forward part × move.z, plus the upward
+part × move.y; the weapon's recoil (`0x005861a0`) by fire; all × dt and
+clamped to ±1. The first-person skeleton's root is then moved by amplitude
+× value along the view's axes (`0x006acfa0`, `0x008b8880`); zoomed in, each
+amplitude goes towards amplitude / (zoomDamping × 6,
+`anim-soldier-spring-zoom-factor`) by how far the field of view is zoomed.
+The rewrite keeps the springs and their arithmetic (`CameraSpringState`)
+but has no first-person view to apply them to; `hit` is never read by the
+soldier.
+
+Not rewritten: the per-instance time override (system `+0x84`/`+0x88`),
+the weapons' and vehicles' effect events, the first-person systems.
 
 Rewritten in `src/Animation/AnimationSystem` and `AnimationConsole`.
 
@@ -1953,7 +2034,17 @@ Rewritten in `GameWorld::explode`, `blastShare` and `empBlast`;
   blast reaches it, or one from a point min(0.02 × radius, 0.5) m beside the
   blast (below, left, right, then above; each point used only when the
   blast sees it). A directional charge reaches only soldiers inside
-  `explosionConeAngle` (`0x005a6370`).
+  `explosionConeAngle` (`0x005a6370`). A bone out of sight counts half
+  when the object the last blocked ray met (`0x006f2d20`'s out, kept
+  across the rays and bones; it or the first parent with armour, `+0x48`)
+  is destroyed by what the blasts have dealt it so far: `0x005a8900`
+  records each object's damage (after the material cell and `0x005b7290`)
+  in a list that `0x005a8d00` applies and swaps each frame (`0x00a6aadc`,
+  `0x00a6abcc`, index `0x00a6aacc`), and its hit points (armour slot
+  `0x3c`) are at most a recorded amount. The objects are handled before
+  the soldiers (`0x005a9090` puts soldiers, `0x9493`, aside), so a blast
+  that blows a vehicle away also reaches the soldier behind it (the
+  rewrite keeps the one blast's list).
 - **Damage** (`0x005a8900`): `explosionDamage` × falloff × share × the cell
   of `explosionMaterial` against the target's material; 0.1 or less is
   dropped.
@@ -1968,8 +2059,12 @@ Rewritten in `GameWorld::explode`, `blastShare` and `empBlast`;
   (`DAT_00a85220` slot `0x68`); something else first (or the object
   without armour) halves the blast, and stops it when the object's radius
   (slot `0x90`: its geometry's and its children's) is under a fifth of
-  the blast's (`*0x00a6ab24` = 5). The rewrite measures with the vehicle
-  LOD's radius.
+  the blast's (`*0x00a6ab24` = 5). The object's radius (`0x006f6b90`):
+  its collision mesh's (slot `0x74`, `0x006dedb0`: the first part with a
+  LOD, its LOD of the lowest collision type, that LOD's radius `+0xc0`;
+  the instance's own part, `+0x14`, is not read) plus slot `0x94` (0),
+  or, farther, a child's: its offset's length (slot `0xdc`) plus its own
+  radius. `Body::objectRadius`.
 - **The push on objects** (`0x005a66e0`): roots with a node that are not
   major actors (slot `0x1c4`), the blast's own object excepted (its
   armour, `param_6`). Without armour the mod is 10000 / max(mass, 100) and
@@ -1981,10 +2076,25 @@ Rewritten in `GameWorld::explode`, `blastShare` and `empBlast`;
   soldier's node (`0x00993aa0` slot `0xa4` → `0x7c`) takes it as
   acceleration, a tenth of it under water (the node's `+0x5c` over 0, set
   by the ground pass `0x006c28c0`). `game::blastPush`.
-- Not in the rewrite: a bone hidden only by an object the same blast
-  destroys counting half, the torque pair for a projectile with component
-  `0xc54d` (`bVar5`: 20 instead of the falloff × mod), and the
-  lag-compensated positions (`*0x00a6ab48`, node slot `0x178`).
+- **The torque pair** (`0x005a66e0`'s `bVar5`): when the projectile has a
+  detonation component (`0xc54d`, the object's slot `0x50`; the
+  Default/ReplenishDetonationComp at `+0x10`, `0x005e91b0`) whose slot
+  `0x4c` (`0x005e89e0`: the template's `+0x44`, `explosionDamage`) is below
+  0, the force is 1 × 20 × `explosionForce` × share (no falloff, no mod;
+  the tenth in water, the maximum, the soldier's random factor and speed
+  as above), along the nearest axis alone (the line is not added,
+  `0x0043dbd0` skipped). After the wake, instead of the spread push it
+  goes in as three slot `0xa4` calls, unspread: with a the object's x axis
+  (matrix row 0) turned to the blast (negated, `0x00562dd0`, when the line
+  runs along +x) and f = force / 2.9 (`*0x00a6aa94`) × max(the box's width
+  across x, 2) (slot `0x9c` → `0x006f7b10`, the box `0x006f7360` from the
+  mesh's slot `0x78`, `0x006deeb0`: every part's and LOD's boxes; its
+  `+0x24`, `0x00561d30`; `*0x00a6aa98`): (0, f, 0) at a, (0, −0.5 f, 0) at
+  −a (`*0x00a6aa8c`) and a × f × −0.5 at the centre (`*0x00a6aa90`,
+  `0x006ac600`'s zero). No shipped detonation has a negative
+  `explosionDamage`. `game::blastTwist`.
+- Not in the rewrite: the lag-compensated positions (`*0x00a6ab48`, node
+  slot `0x178`).
 
 Thrown weapons: projectiles with `physicsType` RotationalPoint or Mesh
 (grenades, mines, C4; rounds and missiles are Points) bounce. The
@@ -2095,11 +2205,31 @@ Vehicles take damage through their armour settings:
   the spawner holds its last spawn at the spot (its matrix and
   `spawnOffset`; the node's motion stopped, slot `0x148`) until its first
   Engine (`0x005ad420`) turns at 0.1 or more (`+0x25c`); without an Engine
-  or wrecked it lets go at once; letting go puts the node to sleep. Not
-  rewritten: the spawn spot's test (PlayerControlObjects within 10 m
-  overlapping the template's mesh there, `0x006f2e90`, removed after five
-  tries unless a soldier is within 7 m) and its drop onto what is under it
-  (`0x005ad8b0`).
+  or wrecked it lets go at once; letting go puts the node to sleep.
+- **The spawn spot's test** (`0x005aeb80`'s first half): the template's
+  collision mesh (`0x005ad4d0`: the collision manager's, slot `0x28`, by
+  the template's slot `0x90` name) at the spawner's matrix moved by
+  `spawnOffset` (unturned) is tested against the PlayerControlObjects
+  (interface `0xc4c5`) the scene finds within 10 m (`DAT_00a85220` slot
+  `0x44`), less those a global list holds (`0x005628f0` / `0x00561d90`, not
+  identified). One overlaps (`0x006f2e90`) when it isn't being deleted, its
+  response is a mesh one (`0xc42d`, `0xc430`, `0xc431`) and
+  `0x006f2760` finds, for any vertex of the template's vehicle LOD (type
+  1; slots `0x28`, `0x3c`, `0x40`) turned by the matrix, the segment from
+  the spot to it crossing the object's soldier LOD (its slot `0xc4(2)`;
+  the mesh instance's slot 22, `0x006e5920` → `0x006de850`, both sides of
+  the faces). A template with MechLegs (`0x9482`) also probes three
+  segments down by its object's box bottom (the PlayerControlObject
+  template's `+0x4c4`, set by `0x005cd4f0`) from the spot and 1.7 m either
+  side across (`0x006f28e0`), and goes through its legs' objects; not
+  rewritten. An overlapping object in use (the interface's slot `0x18`,
+  `0x005c87b0`: `+0x14`) stops the spawn; otherwise the overlapping ones
+  are counted as a try (`+0x204`) up to five, and on the sixth they are
+  removed (the object manager's slot `0xa4`) unless a soldier (`0xc4d7`) is
+  within 7 m of the spawner. Every one of these returns −1: the update
+  tries again in a second (`0x005af230`). A spawn clears the count.
+  `GameWorld::testSpawnSpot`, `ObjectSpawner::SpotTest`. Not rewritten:
+  the spot's drop onto what is under it (`0x005ad8b0`).
 
 Deployables: a gadget whose projectile has mesh physics and armour, and
 neither explodes nor holds a beacon (`portable_shield`: 600 hit points),
@@ -2356,10 +2486,91 @@ the edges' capsules, `0x006be300`), so a fast soldier doesn't pass a wall
 between ticks. Moving objects (mesh responses) are tested in their own
 frame. Each contact faster than 0 relative to the object calls both
 objects' collision events (see the mesh contacts above: a soldier's fall
-damage, run over by a vehicle). Not rewritten: the solve's eight passes at
-0.999 of the radius with the squash damage and the server's segment test
-(slot 12, `0x006c48c0`), soldiers against soldiers (`0x006c2620`) and the
-push by fast objects (`0x005ee2b0`).
+damage, run over by a vehicle).
+
+**Soldiers against soldiers** (`0x006c2620`, from slot 9 and the solve):
+two soldiers on foot whose heights overlap (each from its feet to its
+stance's height: 1.7, 1.4 crouching or swimming, 0.8 prone) and whose
+origins are within twice the radius × the scale across push each other
+apart by the overlap (no velocity; along z when nearer than 0.01). The
+original adds both soldiers' contacts at once; the rewrite gives each its
+own when it steps.
+
+**The solve** (slot `0x30`, `0x006c48c0`; constants static_init
+`0x008ede60`..`0x008ee020`): the contacts so far push the soldier out,
+their cancelled velocity is kept aside, then up to eight passes
+(`*0x00a84738`) collide again with everything (static objects, moving
+ones, soldiers, the ground) at 0.999 of the size (`*0x00a84abc`: the
+ground points scaled towards the origin, the spheres smaller), each pass's
+contacts pushing out at once (a nested solve: the push only), until a pass
+finds none. In the passes a contact counts 2 / 0.999 times as deep
+(`*0x00a84794`), has no velocity, no collision events and doesn't hold the
+soldier up; the floor and ceiling filter is off (`*0x00a8479c` 0); past the
+first three passes (`*0x00a847a0`) an object's contact pushes back along
+the way the soldier came by how far the sphere went past the face (the
+query's second depth list: the sweep's distance past the crossing,
+`0x006bd070` / `0x006be300`). Free: the kept velocity becomes the impulse
+(× the elasticity + 1, × `*0x00a8478c`), the first contacts' count and
+velocity come back, and the run-over check follows (`0x006c2e50`: a moving
+object of mass 100 or more, awake, whose soldier LOD comes within half a
+radius of a sphere's centre where the soldier is now — from inside its
+hull, where its faces don't push — at over 3 m/s relative kills: 1000
+through the game logic's slot `0xe4`, its owner credited). Still stuck
+after eight passes, the soldier is squashed: node slot `0x148(0)` (no
+velocity, impulse or input; gravity only), standing (`+0xf9`, normal up,
+one contact at no speed), back where it was before the last integration;
+if a heavy object (over 100, awake) moving at it faster than 3 m/s
+(`*0x00a84748`) was near and the deepest contact (objects' in every pass,
+the ground's past the third) is 0.05 deep or more (`*0x00a84754`), the
+soldier is thrown at that object's velocity × 2.5 (`0x006c1db0`) and
+killed (1000, the object's owner credited). Then, on the server, the
+segment test: the origin's way since before the last integration, less
+each moving object's own motion, crossing a face of a soldier LOD from the
+front (mesh slot 22) kills (1000, no one credited) — also a prone soldier
+whose spheres pass under something its origin (a metre up) runs into.
+
+**The push** (`0x005ee2b0`): a hit's velocity × 2.5 (`*0x00a847b4`) kept
+16 ticks on the soldier (`+0x248`, the tick `+0x254`), which its ragdoll
+starts with instead of its own velocity when it dies by then (`0x005f0a00`):
+from slot 9's object contacts faster than 1 m/s relative (between the two
+objects' events: the other's point velocity, none for a static object) and
+from a crush.
+
+Not rewritten: a vehicle ignoring the soldier who just left it
+(`0x006b8da0`, the mover's `+0xf8` / `+0xfc`), projectiles pushed by a
+soldier (class `0x9539`), the node's extra velocity `+0x90`, the parent's
+team filter in the run-over check.
+
+**The jump** (the Soldier's `0x0058a6d0`, PIAction: input 9, mask
+`0x200`): while the action is held, a soldier standing (pose 0), on the
+ground (the response's `+0xf9`), not swimming and without get-up time left
+(`+0x3fc`: a second, `*0x00a68e30`, after rising from prone,
+`0x005889d0`) jumps: the velocity along its heading and across it (y left
+out) × 0.98 (`*0x00a68f14`), at most the current speed index's speed
+(`0x00586df0(7)`) × 0.98, and 6 m/s up (`*0x00a68f18` × 6) becomes the
+node's velocity and acceleration with no impulse (slots `0xc8`, `0x78`,
+`0x5c`; the original's object update comes before the integration, the
+rewrite's step collides first, so it waits for the integration). It sets
+`+0x3f4` 1 s, `+0x3f8` 0.2 s (no lying down, `0x00586f40`), `+0x408` 1 s
+(the stamina's recovery waits), `+0x2e4` 2 s (the air control) and, from
+ground steeper than 0.8, `+0x2e0` 0.5 s (the air control's delay); the
+stamina loses the template's `sprintLossAtJump` (`+0x308`, `0x006c54e0`).
+Held while prone, the action counts as the crouch key (getting up). In the
+air (`0x00588420` with its flag) the input steers while `+0x2e4` runs and
+`+0x2e0` doesn't: the direction × the time left × 0.5 × 2 m/s
+(`*0x00a68eb4`) added to the velocity, the ground speed held to what it
+was when that was over the steering speed and grew. The animation's jump
+is its up value (see the animation systems).
+
+**The sprint's stamina** (the Soldier's `+0x360`; `0x00645790` from the
+template's `sprintDissipationTime`, `sprintRecoverTime`, `sprintLimit` and
+the player's ability modifiers; `0x006457f0` each tick from `0x0058d350`):
+sprinting drains it by the time over the dissipation time and ends when it
+is out, not asked for, crouching, prone or seated; otherwise it recovers by
+the time over the recovery time (none while `+0x408` runs) and a sprint
+asked for (`0x00645760`: the key's press; holding only keeps one going)
+starts at the limit or more. Rewritten in `game::SprintStamina`; the
+ability modifiers are 1.
 
 **Water** (`0x006c28c0`): the feet's depth under the water level is the
 node's `+0x5c`. Deeper than 0.3 m (`0x00975eb8`) the water lifts by gravity
@@ -2385,8 +2596,24 @@ looking down 35° or more, and 4 times down while sprinting (a skid). Past
 the top less 0.36 going up, under the bottom going down, or under the
 ground, the soldier is put off (`0x0059e820`): over the top 0.75 m on, or
 0.75 m back from the bottom or where it is, if it fits. Rewritten in
-`src/Game/Ladders.cpp`; not the rays that stop the climb (`0x0059ed10`) or
-lower the bottom, the jump off, the animation and camera.
+`src/Game/Ladders.cpp`. Since: the soldier sits at the LadderContainer
+template's seat (`seatInformation LadderContainer 0/1/0`, in the
+container's frame: the ladder's, at the container's height); the bottom's
+ray (`0x0059d550`): down from the top to the bottom 0.6 m (soldier-dist)
+behind the ladder's axis against the objects, what it meets is the bottom
+(0.01 over it; 1.2 m under an object with a water material); the jump key
+(the container's `+0x460`, `0x0059f1f0`) puts the soldier off anywhere
+(mode 3); and the rays (`0x0059ed10`) from the container's new place, 0.75 m
+back (ladder-exit-offset): going down or skidding, a ray down 0.2 m (0.3
+skidding) from there or one back from the container meeting anything puts
+the soldier off (1); going up, a ray up 0.2 m from 1.7 m over there or one
+back from 1.7 m over the container meeting anything stops it (2); within
+1.8 m of the top, unless the soldier fits at the top's exit, a ray over the
+top (s = max(0.3, 1 − the way left / 1.8) up, forward 0.75 × s + 0.75)
+stops it; getting on, the same rays from the soldier's origin (back against
+its facing, the up ray 1.9 m) must meet nothing, and it must not be under
+the floor (`0x0059e210`) unless near the top. Not rewritten: the
+animation and camera.
 
 Rewritten in `src/Physics/SoldierPhysics` and `src/Game/SoldierControl`.
 
@@ -2821,23 +3048,39 @@ The urgencies:
 | MoveTo (0x10066a70) | The goal's (0x1008aaa0) × weight. r = max(ceil(radius), bot radius + 1). 0 within r (reached). Otherwise clamp(d² / (1.5 r²), 0.1, 1) × 2 for an area the team does not hold. Inside an area it holds the urgency is 0; outside it, d² − area radius² is used. |
 | Idle (0x10069f50) | The weight. A passenger gets 0.5. A driver with free seats gets 30 while a teammate within 40 m heads for it (70 when that teammate faces the vehicle within 0.85), for up to 10 s. |
 | Fire (0x10075fb0) | 50 while a known enemy scores above 0. The weight only gates it. |
-| Revive (0x10082760) | 100 for a downed teammate within the Revive weapon's maxRange. Each candidate scores 1 − min(1, d / speed / time left). |
+| Revive (0x10082760) | 100 × the squad factor (task 1) for a downed teammate within the Revive weapon's maxRange. Each candidate scores 1 − min(1, d / speed / time left), × 10 for a human's body. |
 | Flee (0x100859d0) | 100 below 30 % health, with the camouflage over 70 % charged (0x10085920: its ammo over its maximum), 10 s after spawning. 0x10085d90 keeps the way out: the sum of the directions away from known enemies (×3 for players, ×2 for bots targeting it). |
 | Change (0x1006c520) | best seat / current seat × weight × 10 (best × weight with the current worth nothing), ÷ (1 + 14 clamp((d − 10) / 60, 0, 1)) for the distance to it (0x1006bc50), 0 for a seat another bot reserved (0x1006f320). See Seat values. |
-| MedicAssist (0x10070200) | Teammates on foot within the hub's maxRange (70 m) below 75 % health (99 % for a human), the bot itself unless it holds the hub. Score basicTemp / (fuzzy(1 − health) × distance), distance 1 for itself. fuzzy(best) × weight × 2, × 10 for a human; × the squad factor. |
-| AmmoAssist (0x10071a10) | Human players only. A weapon (FireArm, Sniper, C4) with ceil(rounds / magSize) / magazines below 0.6 (0.99 while the bot holds the hub). Score basicTemp / (scurve(ratio) × distance). fuzzy(best) × weight × 4 × the squad factor. |
+| MedicAssist (0x10070200) | Teammates on foot within the hub's maxRange (70 m) below 75 % health (99 % for a human), the bot itself unless it holds the hub. Score basicTemp / (fuzzy(1 − health) × distance), distance 1 for itself. fuzzy(best) × weight × 2, × 10 for a human; × the squad factor. A "medic" radio call (see Radio) from the candidate: its score × 3 from a human, × 1.5 from a bot; with a human's call heard and the best a human within 50 m: 100 (× the squad factor). |
+| AmmoAssist (0x10071a10) | Human players only. A weapon (FireArm, Sniper, C4) with ceil(rounds / magSize) / magazines below 0.6 (0.99 while the bot holds the hub). Score basicTemp / (scurve(ratio) × distance). fuzzy(best) × weight × 4 × the squad factor. A candidate that called "need_ammo" needs only a ratio below 1, scores × 70, and makes the urgency × 100. |
 | RepairVehicle (0x10073360) | Vehicles within the tool's maxRange (50 m) between 0 and 60 % health. Score basicTemp / (f × distance), f = fuzzy(1 − health), or 1 for the one it repairs. fuzzy(best) × weight × 10 with a human aboard, × 2 otherwise; × the squad factor. |
 | c4 (0x10083750) | 100 to place a charge inside a point the team holds uncontested; 100 to set it off once that point is contested below 0.75 with no teammate within 15 m of it. A charge lapses after 240 s. The weight is not used. |
 | DefuseMines (0x10086870) | An engineer (Repair weapon) within 35 m of an enemy mine's stand point (0.8 m behind its facing, on the mesh): 42 × weight. |
 | RunOver (0x10087820) | A Car at 10 m/s or more with a known enemy soldier in sight within 50 m, ahead within 0.85, on a clear line over the vehicle mesh: 65 (the weight is not used). |
-| Avoid (0x10064850) | On foot only (the 2d pattern of the vehicles' sets never runs); soldiers are never avoided. A wreck or vehicle below 30 % health within max(r, min(10, r + 4)) adds 100. A vehicle at 2 m/s or more, closing at 3 m/s or more, that will pass within 0.6 (r + own radius) × √1.5 in the look-ahead time adds closing speed / distance × its size factor, which is always 0 (see below). Sum × weight. With a sum of 0: 1000 while a grenade warning lasts (the weight not applied). |
+| Avoid (0x10064850) | On foot only (the 2d pattern of the vehicles' sets never runs); soldiers are never avoided. A wreck or vehicle below 30 % health within max(r, min(10, r + 4)) adds 100. A vehicle at 2 m/s or more, closing at 3 m/s or more, that will pass within 0.6 (r + own radius) × √1.5 in the look-ahead time adds closing speed / distance × its size factor, which is always 0 (see below). Sum × weight, × 2 in the level's first 5 s (see below). With a sum of 0: 1000 while a grenade warning lasts (the weight not applied). |
 | BridgeRepair (0x10084620) | 0: the rewrite has no broken bridges. |
 
 - **Squad factor** (0x10089aa0): 0 outside squads; 1 for the bot's own
   task (Medic 1, Repair 2, Ammo 4). For a target outside squads: 0 when a
   teammate has the task or the bot's squad is more than 141 m away. In the
-  bot's squad: 0 when a squadmate has it. In another squad: 0 when taken
-  or that squad is 31.6 m or more away, else 0.5. ×2 for a human.
+  bot's squad: 0 when a squadmate has it, or (medic and ammo) when the
+  target is a living squadmate with the task's own kit. In another squad:
+  0 when taken or that squad is 31.6 m or more away, else 0.5, or 0.1
+  when that squad has a soldier with the kit (0x100c2830). The kit is the
+  player's KitType (`+0x58`, player vt+0x1a4, through the AI player's
+  slot 0x40; KitType 0x0088f6b0: Recon 0, Assault 1, Support 2, AT 3,
+  Engineer 4, Medic 5, Specops 6, Sniper 7): Medic 5 for heals, Engineer
+  4 for repairs, Support 2 for ammo. No shipped kit is a Medic (Assault
+  heals). ×2 for a human (0x100bf510).
+- **Radio** (the game's event 0x1004e140 → 0x10030b20 → the comm
+  object's 0x100a6fe0): a message said by a player and heard by a bot is
+  kept under its type (BF2142.exe's table at 0x0088f000: bail_out 0,
+  get_in 1, req_pickup 2, medic 3, need_repair 4, roger_that 6, negative
+  7, need_ammo 10, ..., req_new_order 14, defend 15, attack_position 16,
+  move 17) with its sender, a newer one replacing the older, for its
+  receive time to live (`aiComm.addAIRadioMessage`, AI/AIRadioMessages.ai:
+  20 s for medic and need_ammo; 0x100a7130). `BotManager::radio` hands
+  one in; who hears the radio is the game's matter (not traced).
 - **Curves:** `ai::fuzzy` (0x100cbce0, table 0x100cb6f0) takes the entry
   at trunc(100 x); `ai::scurve` (0x100cc930, table 0x100cc350)
   interpolates its own S-shaped table.
@@ -2875,10 +3118,16 @@ The urgencies:
     template's `+0x8`). The constructor (`0x00894450`) zeroes it and
     Physical's only property, `setStrType`, writes `+0x18`: the term is
     always 0, so moving vehicles never raise Avoid in the shipped game.
-    A non-zero sum is also scaled by the bot's vt+0xe0 `+8` when its
-    vt+0x68 and vt+0x64 hold (not traced) and doubled for a soldier within
-    5 s of its comm object's (bot `+0xe0`) `+0x78`, which only its reset
-    (`0x100a7630`) writes, to 0.
+    A non-zero sum is also scaled by the running-behaviour record's `+8`
+    (bot vt+0xe0 → `+0x4c`) when the bot's hint names Avoid (vt+0x68,
+    `+0x9c`) and its `+0x50` holds (vt+0x64): made by `0x100ea3f0` and
+    reset by `0x100ea410` to 1 and never written otherwise, so × 1 (the
+    assists' and Revive's uses alike). It is doubled for a soldier within
+    5 s of its comm object's (vt+0xa4) `+0x78`, which only the comm's
+    reset (`0x100a7630`) writes, to 0: the clock (IAIGame's, BF2142.exe
+    `0x00666070`) counts ticks × 1/30 s from GameLogic's reset
+    (`0x004ce910`, `0x006660b0`), so the sum is doubled in the level's
+    first 5 s (here the bot manager's).
   - **The grenade warning** (`0x1004eab0`, from the same event as the
     rounds passing by, `0x1004ed30`, for every bot): a round whose AI
     weapon's template is thrown (`+2`, `0x0088a650`), has an explosion
@@ -2915,7 +3164,11 @@ The urgencies:
   0x1012b074. This reaches into a square frustum of half-angle 50°.
 - **Rays:** `clamp(round(30 r / d), 1, 10)`. The target is seen if any ray
   is clear.
-- **Sharing:** sightings go to the others in the same vehicle (0x100a8ce0).
+- **Sharing:** sightings go to the others in the same vehicle (0x100a8ce0),
+  and a bot's fire plan tells its squad of its target (0x100795a0 →
+  0x10089b70 → 0x100c1ce0). A memory item learnt so is flagged 8
+  (0x100ed2c0) until the bot sees the target itself; every sighting
+  stamps its `+0x58`.
 - **Shot at:** a round within 10 m makes the bot aware of the shooter in
   every direction for 5 s (0x1004ed30).
 - **Forgetting:** a target out of sight is lost; it is forgotten after
@@ -2956,6 +3209,30 @@ The urgencies:
   sentry drones' filter reads (see the drones).
 - **Reaction time:** (1 − skill)(1.5 + U[0, 1]) s at a new target
   (0x100777a0).
+- **Explosives** (the weapon choice 0x10074ef0, the plan 0x100777a0, the
+  aim 0x100dbd10): a weapon with an explosion radius against a soldier
+  scores × 100 and sets the bot's `+0x249` when (a soldier bot) the target
+  is 5 m away (10 m when not over 3 m higher) up to maxRange (+ 1.25 dh
+  over 5 m higher, not thrown), seen within 10 s and known only from
+  others (flag 8) or over 30 m higher (not snipers or thrown weapons), the
+  plan's condition hasn't failed within 10 s (`+0x1f8`) and the bot's last
+  explosive round (the third last for an automatic weapon not thrown;
+  `0x1004e910` stamps `+0x1e0..`) is over 10 s old; or (in a vehicle)
+  minRange..maxRange, seen within 5 s, not failed within 5 s (`+0x250`);
+  ±1 m with the aim lobbing. With `+0x249` the plan adds a start
+  condition: a soldier's (`0x100d8800`/`0x100d8910`, before the aim's):
+  no teammate within 7 m of the target point, and the throw's way clear
+  (a ray to 3 m along the aim, or with a lob to the arc's top, then to the
+  target), or the first ray stopping within 3.5 m of it; a failure blocks
+  it for 10 s (`+0x1f8`) or, lobbing, until the next sighting (`+0x200`).
+  A vehicle's (`0x100d8400`/`0x100d8450`, after the aim's): the barrel's
+  line to 5 m past the target hits within 3.5 m of it with no teammate
+  within 3.5 m of the hit. The aim lobs (the higher arc, `0x100fa440`)
+  a soldier's explosive at a target known from others or that high,
+  unless a lob failed after the last sighting, and for a weapon not
+  thrown only with the target over 10 m higher or steeper than 0.6;
+  otherwise it aims an explosive at the ground under the target. Such a
+  plan may fire at a target out of the bot's sight.
 - **Aim:** the PID controller of the ControlInfo plugin (0x100e5820:
   proportional −7, derivative −0.01, angle speed 0.4 on the lead point;
   yaw limited to 3 × skill + 1). Its output is PIMouseLookX/Y, which the
@@ -3079,7 +3356,10 @@ changes (0x100966c0 → 0x10095fc0).
     class (class 4: the diagonals ignore it, the sides get full reach).
   - **Progress** (0x10092bc0): a bot pushing its controls that doesn't get
     2 m (4 m) further in 10 s (20 s) fails; the move ends and the behaviour
-    plans again. A soldier that hasn't moved for half a second jumps.
+    plans again. A soldier that hasn't moved for half a second, and hasn't
+    jumped for 2 s, jumps: the stamp `+0xc0` goes to −666, the next tick
+    (0x10095720) presses PIAction (input 9) and stamps the clock, and
+    0x10092bc0 lets go once the stamp is 0.4 s old.
 - **Infantry** (InfanteryMoveTo 0x1008fc90): the look turned to the
   steering point 5 m ahead (the aim controller turns the soldier), the
   throttle at the order's speed over maxSpeed (0x100e6060), no strafing.
@@ -3265,9 +3545,18 @@ ITGround and 0.5 for ITAir. The AI flags are the template's
 ITAir 1, ITHelicopter 2, ITGround 3, ITNaval 4, ITControlpoint 5,
 ITTransportation 6, ITMobile 7, ITStructure 8, ITSoldier 9 (also set
 through 0x0088d070), ITObstructedView 10, ITNoTemperature 11, ITHasWreck
-12, ITObstacle 13, ITHasCarHorn 14; ITBiological sets none. Not
-rewritten: changing seats inside a vehicle and the type-0/1 order
-multipliers.
+12, ITObstacle 13, ITHasCarHorn 14; ITBiological sets none.
+
+In a vehicle the driver's current value is 2 × its seat's (250 with
+others aboard); a passenger starts from the driver's seat as another's.
+Unless it drives an ITAir root, the root's other seats follow × that
+factor (1 for a passenger with the driver's seat taken), the passenger's
+own seat as its current value (× 2); then the way out (see above). A seat
+of the same vehicle is reached by pressing its select key
+(`aiTemplatePlugIn.setSelectKey PIPositionSelectN`, 0x100aa5f0; the plan
+0x1006dac0) and waiting to sit in it; seats are reserved one by one. Not
+rewritten: the type-0/1 order multipliers and, from a vehicle, the other
+vehicles' seats.
 
 ### Not decoded, and the rewrite's stand-ins
 
@@ -3289,20 +3578,24 @@ multipliers.
   deviation through the soldier (vt+0xf4); the rewrite's hand-held
   firearms have no deviation model, so the bot spreads its aim uniformly
   over ± half of it on each axis.
-- **Fire plan:** the explosives' start conditions aren't rewritten. The
-  plan (`0x100777a0`) puts a condition statement round the trigger when
-  the bot's vt+0x264 holds, the weapon has an explosion radius
-  (`0x100a41e0`) and the target is a soldier, and the record the bot's
-  vt+0x88 gives has 8 in `+0x50`, or the target is over 30 m higher (for
-  a weapon `0x100a4270` refuses), or the bot is no soldier:
-  `0x100d8800` (vtable `0x1011aa68`, evaluated by `0x100d8910`) before
-  the trigger, or `0x100d8400` (vtable `0x1011aa30`, `0x100d8450`, with
-  3.5 m) after it when the bot isn't a soldier and the target is.
+- **Explosives:** the weapon choice's other factors (0x10074ef0's own
+  range and ammo weights) are the rewrite's simpler strongest-weapon rule;
+  the explosive bonus's guard for a soldier standing in a strategic area
+  its team doesn't hold with the target inside it (0x10034a10, the area's
+  slot 0x68 not traced) and the bot's `+0x248` (set by fire plans,
+  0x100775f0) are left out; the AI weapon's guidance kind (`+0x6c`, from
+  the weapon's vt+0x154 through 0x008923a0) is taken as 0; the lob's
+  success leaves `+0x209` (vt+0x20c) unset; the rays bisect
+  `GameWorld::lineOfSight`.
 - **Soldier radius:** the object's size through the AI adaptor (vt+0xdc
   → `0x008a3d40` → the object's vt+0x90, for the soldier `0x006f6b90`):
-  its bounding radius, cached at `+0x104`: the geometry's (`+0x4c` slot
-  `0x74`, a RendDX9 skinned-mesh instance) and each child's radius plus
-  its offset. The rewrite has no such radius for the soldier mesh: 0.5 m.
+  its collision mesh's radius (`+0x4c`, interface 0xcaa32, the instance
+  `0x006e5d70` whose slot 0x74 → `0x006dedb0` reads its first LOD's
+  `+0xc0`), plus vt+0x94 (0) and at least each child's radius plus its
+  offset (none for the soldier's). Every soldier names the built-in
+  `Soldier_CollisionMesh` (`0x006d8740` → `0x006e4880` without a file:
+  points within x, z ±0.4 and y −1..0.8), whose box's farthest corner
+  (`0x006aeda0`) is √1.32 = 1.149 m.
 - **Runs without the AI scripts** (tests): a driver is a Tank when its
   seat has a gun and a Car otherwise, other seats are Fixed, vehicles
   count as LightArmour, and vehicle guns reach 100 m. Every shipped
@@ -3312,7 +3605,8 @@ multipliers.
 - **Strategy:** area temperatures (soldier 1, vehicle 20) and strengths
   (8 per unit; a vehicle's own battle strengths are not read).
 - **Revive:** the time left uses the respawn countdown, or 15 s. The
-  squad factor the original multiplies in is not.
+  original also leaves out a body under more than 0.75 m of water and
+  0.5 m below its surface.
 - **Flee:** the rewrite's camouflage has no charge; carried counts as
   charged, and only the plan's 4 s end the camouflage.
 - **Idle:** the weapon's alternate-key tap in the bot's own area (the
@@ -3321,20 +3615,16 @@ multipliers.
   and orders for squads the SAI left without one are not from AIDLL's
   commander.
 - **Path follower:** a moving target re-planned when it moves 2 m; the
-  segment searches' fallback to the whole mesh (see above). The jump (a
-  PIJump press) is not in the rewrite's soldiers (`SoldierInput` has no
-  jump and `SoldierPhysics` no jump impulse): a second's back step to one
-  side stands in until GameWorld has one.
+  segment searches' fallback to the whole mesh (see above).
 - **Stuck drivers:** after the 20 s progress check the move fails and
   the behaviour plans again. 0x100c91c0 also hands the bot to the game
   (IAIGameEffector vt+0x24 → 0x0089e940 → GameLogic slot 0x58), whose
   slot is `0x008924f0`, returning 0: it does nothing in this build.
-- **Assists:** the radio requests ("medic!", "ammo!") and the squads'
-  order types the factors read are not modelled; basicTemp is read as the
-  AI object's +0x14.
-- **Avoid:** r is the vehicle's AI radius. The two factors not traced
-  (see Avoid's values) are left out; the grenade warning's event is
-  checked every tick.
+- **Assists:** basicTemp is read as the AI object's +0x14; the radio's
+  hearers are the caller's (`BotManager::radio`); the rewrite's soldiers
+  have no comm rose that calls it.
+- **Avoid:** r is the vehicle's AI radius; the grenade warning's event
+  is checked every tick.
 - **Keeping distance:** while the Fire pattern walks the bot towards its
   target, the aim keeps the view's pitch (walking otherwise levels it).
 

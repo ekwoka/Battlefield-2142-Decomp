@@ -36,21 +36,29 @@ bool clampTo(Vec3& v, float limit)
 
 } // namespace
 
-void SoldierBody::collideWithGround(const Ground& ground, float gravity)
+// 0x006c28c0 at `scale` (the points scaled towards the origin): each
+// point at or under the ground pushes out along the normal and cancels the
+// velocity into it. In the solve's passes (scale under 1) the depth counts
+// double over the scale (*0x00a84794) and the water is left alone. Returns
+// the deepest point's depth.
+float SoldierBody::collideWithGround(const Ground& ground, float gravity, float scale)
 {
-	m_onGround = false;
-	m_groundNormal = {0, 0, 0};
 	const float c = std::cos(yawDegrees * 3.14159265f / 180), s = std::sin(yawDegrees * 3.14159265f / 180);
 	float lowest = 1e30f;
+	float deepest = 0;
 	for (int i = 0; i < 5; ++i) {
-		const Vec3& p = soldier::kGroundPoints[i];
+		const Vec3 p = soldier::kGroundPoints[i] * scale;
 		const Vec3 world {position.x + p.x * c + p.z * s, position.y + p.y, position.z - p.x * s + p.z * c};
 		lowest = std::min(lowest, world.y);
 		Vec3 normal {0, 1, 0};
 		const float height = ground.heightAndNormal(world.x, world.z, normal);
-		const float depth = world.y - height;
+		float depth = world.y - height;
 		if (depth > 0) {
 			continue;
+		}
+		deepest = std::min(deepest, depth);
+		if (scale < 1) {
+			depth *= soldier::kSolvePush / scale;
 		}
 		// The collision event (object slot 0xac) over |v|^2 0.1 (*0x00a8477c).
 		if (onContact && lengthSquared(velocity) > soldier::kContactSpeed) {
@@ -62,6 +70,9 @@ void SoldierBody::collideWithGround(const Ground& ground, float gravity)
 			m_groundNormal = normal;
 			m_onGround = true;
 		}
+	}
+	if (scale < 1) {
+		return deepest;
 	}
 	// Water (0x6c2bf4-0x6c2dfb): the feet's depth under it; deeper than 0.3
 	// the water lifts by gravity x gravityModifier x -depth^2 (under a metre)
@@ -75,7 +86,7 @@ void SoldierBody::collideWithGround(const Ground& ground, float gravity)
 	if (d >= 0) {
 		waterDepth = 0;
 		m_swim = false;
-		return;
+		return deepest;
 	}
 	waterDepth = -d;
 	if (waterDepth > soldier::kBuoyancyDepth) {
@@ -91,6 +102,7 @@ void SoldierBody::collideWithGround(const Ground& ground, float gravity)
 		m_groundNormal = {0, 1, 0};
 		m_contactVelocity = velocity;
 	}
+	return deepest;
 }
 
 // 0x006c24b0: push out along the normal, stop motion into the surface.
@@ -121,6 +133,14 @@ void SoldierBody::addContact(const Vec3& normal, float depth, const Vec3& relati
 // Prone (one sphere at the feet) a floor contact (y > 0.95, *0x00a84788)
 // pushes straight up. The stack sweeps from its last place when it moved
 // over 0.9 of a radius in the tick (6.75 m/s).
+float soldier::stanceHeight(int stance)
+{
+	if (stance == 1 || stance == 3) {
+		return 1.4f; // *0x00a84798
+	}
+	return stance == 2 ? 0.8f : soldier::kHeight; // *0x00a84778
+}
+
 bool soldierFits(const CollisionWorld& world, const Vec3& origin, int stance, const Mat3& rotation, const Vec3& position)
 {
 	int count = 5;
@@ -147,25 +167,63 @@ bool soldierFits(const CollisionWorld& world, const Vec3& origin, int stance, co
 
 void SoldierBody::collideWithObjects(float seconds)
 {
-	if (world && !collideWithMesh(*world, nullptr, seconds)) {
+	float deepest = 0;
+	if (world && !collideWithMesh(*world, nullptr, seconds, 1, true, deepest)) {
 		return;
 	}
 	for (const Mover& mover : movers) {
-		if (mover.mesh && !collideWithMesh(*mover.mesh, &mover, seconds)) {
+		if (mover.mesh && !collideWithMesh(*mover.mesh, &mover, seconds, 1, true, deepest)) {
 			return;
 		}
 	}
 }
 
-// One object (0x006c3890 on the slot-9 path: the full radius, the
-// normals as found). The stack and the filters' heights are taken where
-// the soldier was before the last integration (the node's saved matrix),
-// less how the object itself moved the soldier's old point; a stack that
-// moved over 0.9 of a radius sweeps each sphere from its old centre (put
-// back by 0.45 of a radius along the way) to its new one, otherwise each
-// is tested where it is now. A moving object's mesh is tested in its own
+// Another soldier (0x006c2620; slot 9 with scale 1, the solve's passes
+// with 0.999): when their heights overlap (each from its feet, a metre
+// under the origin, to its stance's height) and their origins are within
+// twice this soldier's radius x the scale across (x, z), each is pushed
+// away from the other by the overlap with no velocity (0x006c24b0 with
+// material 0x2f); 0.01 apart or nearer, along z. The original gives the
+// other its contact as well; here each soldier takes its own when it
+// steps.
+void SoldierBody::collideWithSoldiers(float scale)
+{
+	const float top = position.y - 1.0f + soldier::stanceHeight(stance);
+	for (const Neighbour& other : soldiers) {
+		const float otherTop = other.position.y - 1.0f + soldier::stanceHeight(other.stance);
+		if (position.y - 1.0f > otherTop || other.position.y - 1.0f > top) {
+			continue;
+		}
+		Vec3 away {other.position.x - position.x, 0, other.position.z - position.z};
+		const float reach = 2 * soldier::kRadius * scale;
+		const float squared = lengthSquared(away);
+		if (squared > reach * reach) {
+			continue;
+		}
+		const float distance = std::sqrt(squared);
+		away = distance >= 0.01f ? away * (1.0f / distance) : Vec3 {0, 0, 1};
+		addContact(away, reach - distance, {});
+	}
+}
+
+// One object (0x006c3890; slot 9 with scale 1 and the contacts' normals).
+// The stack and the filters' heights are taken where the soldier was
+// before the last integration (the node's saved matrix), less how the
+// object itself moved the soldier's old point; a stack that moved over 0.9
+// of a radius sweeps each sphere from its old centre (put back by 0.45 of
+// a radius x the scale along the way) to its new one, otherwise each is
+// tested where it is now. A moving object's mesh is tested in its own
 // frame. False when a collision event vetoed (the loop ends).
-bool SoldierBody::collideWithMesh(const CollisionWorld& mesh, const Mover* mover, float seconds)
+// In the solve's passes (scale 0.999): the spheres are the scale's size,
+// the floor and ceiling filter is off (*0x00a8479c 0), a contact counts
+// double over the scale (*0x00a84794), with no velocity, no collision
+// events and no standing on it; past the first three passes (`normals`
+// false) each pushes back along the way the soldier came (the motion's
+// direction turned round) by how far the sphere went past the face (the
+// mesh query's second depth: the sweep's distance beyond the crossing,
+// 0x006bd070 / 0x006be300; the depth itself when not swept).
+bool SoldierBody::collideWithMesh(const CollisionWorld& mesh, const Mover* mover, float seconds, float scale,
+	bool normals, float& deepest)
 {
 	int count = 5;
 	float height = soldier::kHeight;
@@ -186,7 +244,7 @@ bool SoldierBody::collideWithMesh(const CollisionWorld& mesh, const Mover* mover
 	if (sweep) {
 		way = motion * (1.0f / std::sqrt(lengthSquared(motion)));
 	}
-	const Vec3 back = way * (r * soldier::kSweepFactor * 0.5f);
+	const Vec3 back = way * (r * soldier::kSweepFactor * scale * 0.5f);
 	const float lowest = previous.y + r - 1.0f; // the origin is a metre above the feet
 	const auto toMesh = [mover](const Vec3& p) { return mover ? mover->rotation.untransform(p - mover->position) : p; };
 	std::vector<SphereContact> contacts;
@@ -197,9 +255,9 @@ bool SoldierBody::collideWithMesh(const CollisionWorld& mesh, const Mover* mover
 		const Vec3 end = centre + motion;
 		const size_t before = contacts.size();
 		if (sweep) {
-			mesh.sweepSphere(toMesh(start), toMesh(end), r, contacts);
+			mesh.sweepSphere(toMesh(start), toMesh(end), r * scale, contacts);
 		} else {
-			mesh.querySphere(toMesh(end), r, contacts);
+			mesh.querySphere(toMesh(end), r * scale, contacts);
 		}
 		if (mover) {
 			for (size_t k = before; k < contacts.size(); ++k) {
@@ -218,6 +276,9 @@ bool SoldierBody::collideWithMesh(const CollisionWorld& mesh, const Mover* mover
 	const float upper = lowest + spacing * soldier::kUpperContact;
 	const float top = lowest + spacing * static_cast<float>(count);
 	for (SphereContact& contact : contacts) {
+		if (scale < 1) {
+			break; // *0x00a8479c: not in the passes
+		}
 		bool flattened = false;
 		if (contact.point.y >= upper && contact.normal.y >= soldier::kFlatNormal) {
 			contact.normal.y = 0;
@@ -247,42 +308,215 @@ bool SoldierBody::collideWithMesh(const CollisionWorld& mesh, const Mover* mover
 			nearest = distance;
 		}
 	}
+	Vec3 backward = motion * -1.0f; // the way back (0x004481a0 leaves a zero motion zero)
+	normalize(backward);
 	for (size_t i = 0; i < contacts.size(); ++i) {
 		SphereContact& contact = contacts[i];
 		if (contact.depth >= 0) {
 			continue;
 		}
-		// Prone, a floor counts as level (*0x00a84788, *0x00a84744).
-		if (stance == 2 && contact.normal.y > soldier::kFlatNormal) {
-			contact.normal = {0, 1, 0};
+		deepest = std::min(deepest, contact.depth);
+		Vec3 normal = backward;
+		float depth = contact.travel;
+		if (normals) {
+			normal = contact.normal;
+			depth = contact.depth;
+			// Prone, a floor counts as level (*0x00a84788, *0x00a84744).
+			if (stance == 2 && normal.y > soldier::kFlatNormal) {
+				normal = {0, 1, 0};
+			}
+			if (dot(contact.point - centres[i], normal) > 0) {
+				continue;
+			}
 		}
-		if (dot(contact.point - centres[i], contact.normal) > 0) {
+		if (scale < 1) {
+			addContact(normal, depth * (soldier::kSolvePush / scale), {});
 			continue;
 		}
 		const Vec3 relative = velocity - (mover ? mover->pointVelocity(contact.point) : Vec3 {});
-		if (onContact && lengthSquared(relative) > 0
-			&& !onContact({mover ? mover->owner : 0, relative, contact.normal, contact.point, material, contact.material})) {
-			return false;
+		if (lengthSquared(relative) > 0) {
+			// 0x005ee2b0 between the two objects' events: the other's point
+			// velocity x 2.5 when faster than 1 m/s relative (a static
+			// object's is none).
+			if (onPush && lengthSquared(relative) > 1) {
+				onPush((mover ? mover->pointVelocity(contact.point) : Vec3 {}) * soldier::kPushScale);
+			}
+			if (onContact
+				&& !onContact({mover ? mover->owner : 0, relative, normal, contact.point, material, contact.material})) {
+				return false;
+			}
 		}
-		addContact(contact.normal, contact.depth, relative);
+		addContact(normal, depth, relative);
 		// Something underfoot holds the soldier up like the ground.
-		if (contact.point.y < lowest + soldier::kFloorTolerance && m_groundNormal.y < contact.normal.y) {
-			m_groundNormal = contact.normal;
+		if (contact.point.y < lowest + soldier::kFloorTolerance && m_groundNormal.y < normal.y) {
+			m_groundNormal = normal;
 			m_onGround = true;
 		}
 	}
 	return true;
 }
 
-void SoldierBody::solve()
+// 0x006c48c0: the contacts so far push the soldier out; the velocity into
+// them is cancelled (an impulse) once the soldier is free. Then the passes
+// (at most eight, *0x00a84738): the objects (the static ones, the moving
+// ones, the other soldiers) and the ground again at 0.999 of the size,
+// each pass's contacts pushing out at once (the nested solve: its push
+// only), until a pass finds none. Free: the impulse, then the run-over
+// check (0x006c2e50). Still stuck after eight: squashed (node slot
+// 0x148(0): no velocity, impulse or input; gravity only), standing on
+// flat ground (+0xf9, the normal up, one contact at no speed), back where
+// it was before the last integration (slot 0x48); a heavy object (over
+// 100, awake) moving over 3 m/s against it with the crush 0.05 deep or
+// more (the objects' contacts in every pass, the ground's past the third)
+// throws it at that object's velocity x 2.5 (0x006c1db0 -> 0x005ee2b0)
+// and kills it (1000, the object's owner credited). Then the server's
+// segment test.
+void SoldierBody::solve(float seconds, const Ground& ground, float gravity)
 {
 	position += m_pushOut;
-	if (lengthSquared(m_cancel) > 0) {
-		// The elasticity of the ground (0) plus one, times 0x00a846cc (1).
-		impulse = flush(impulse + m_cancel);
+	const Vec3 cancel = m_cancel;
+	m_pushOut = {};
+	m_cancel = {};
+	m_squashed = false;
+	const Vec3 savedVelocity = m_contactVelocity;
+	const int savedContacts = m_contacts;
+	float deepest = 0;
+	bool heavy = false;
+	uint32_t crusher = 0;
+	Vec3 heavyVelocity;
+	int pass = 0;
+	for (; pass < soldier::kSolvePasses; ++pass) {
+		m_contacts = 0;
+		m_contactVelocity = {};
+		const bool normals = pass < soldier::kNormalPasses;
+		float depth = 0;
+		if (world) {
+			collideWithMesh(*world, nullptr, seconds, soldier::kSolveScale, normals, depth);
+		}
+		for (const Mover& mover : movers) {
+			if (mover.mass > soldier::kHeavyMass && !mover.asleep) {
+				heavy = true;
+				heavyVelocity = mover.velocity;
+				if (lengthSquared(mover.pointVelocity(position) - velocity) > soldier::kCrushSpeed * soldier::kCrushSpeed) {
+					crusher = mover.owner;
+				}
+			}
+			if (mover.mesh) {
+				collideWithMesh(*mover.mesh, &mover, seconds, soldier::kSolveScale, normals, depth);
+			}
+		}
+		collideWithSoldiers(soldier::kSolveScale);
+		deepest = std::min(deepest, depth);
+		const float groundDepth = collideWithGround(ground, gravity, soldier::kSolveScale);
+		if (!normals) {
+			deepest = std::min(deepest, groundDepth);
+		}
+		if (m_contacts == 0) {
+			break;
+		}
+		position += m_pushOut;
+		m_pushOut = {};
+		m_cancel = {};
+	}
+	if (pass < soldier::kSolvePasses) {
+		if (lengthSquared(cancel) > 0) {
+			// The elasticity of the ground (0) plus one, times 0x00a8478c (1).
+			impulse = flush(impulse + cancel * soldier::kCancelScale);
+		}
+		m_contactVelocity = savedVelocity;
+		m_contacts = savedContacts;
+		runOver();
+	} else {
+		m_squashed = true;
+		velocity = {};
+		impulse = {};
+		acceleration = {0, gravity * gravityModifier, 0};
+		m_inputAcceleration = {};
+		m_inputs = 0;
+		m_onGround = true;
+		m_groundNormal = {0, 1, 0};
+		m_contacts = 1;
+		m_contactVelocity = {};
+		position = m_lastPosition;
+		if (heavy && crusher != 0 && deepest <= -soldier::kSquashDepth) {
+			if (onPush) {
+				onPush(heavyVelocity * soldier::kPushScale);
+			}
+			if (onCrushed) {
+				onCrushed(crusher);
+			}
+		}
 	}
 	m_pushOut = {};
 	m_cancel = {};
+	segmentTest(seconds);
+}
+
+// 0x006c2e50: each heavy moving object (mass 100 or more, awake) whose
+// soldier LOD comes within half a radius of a centre of the stance's
+// spheres where the soldier is now, its point velocity there over 3 m/s
+// from the soldier's, runs it over: 1000 damage, its owner credited. (The
+// original spares an owner under 10 in mass of the Particle class, which
+// the 100 already rules out, and leaves out the node's +0x90 velocity,
+// which the rewrite's soldiers don't have.)
+void SoldierBody::runOver()
+{
+	if (!onCrushed) {
+		return;
+	}
+	int count = 5;
+	if (stance == 1 || stance == 3) {
+		count = 3;
+	} else if (stance == 2) {
+		count = 1;
+	}
+	const float r = soldier::kRadius;
+	const float height = soldier::stanceHeight(stance);
+	const float spacing = count > 1 ? (height - 2 * r) / static_cast<float>(count - 1) : 0.0f;
+	std::vector<SphereContact> contacts;
+	for (const Mover& mover : movers) {
+		if (!mover.mesh || mover.mass < soldier::kHeavyMass || mover.asleep) {
+			continue;
+		}
+		for (int i = 0; i < count; ++i) {
+			const Vec3 centre {position.x, position.y + spacing * static_cast<float>(i) + r - 1.0f, position.z};
+			contacts.clear();
+			mover.mesh->querySphere(mover.rotation.untransform(centre - mover.position), r * 0.5f, contacts);
+			if (contacts.empty()) {
+				continue;
+			}
+			if (lengthSquared(mover.pointVelocity(centre) - velocity) > soldier::kCrushSpeed * soldier::kCrushSpeed) {
+				onCrushed(mover.owner);
+				return;
+			}
+		}
+	}
+}
+
+// The server's segment test (0x006c48c0's end, game logic slot 0x144):
+// the origin's way from before the last integration to now, less each
+// moving object's own motion, crossing a face of an object's soldier LOD
+// from the front (collision mesh slot 22 0x006e5920 with LOD 2): the
+// soldier is killed (1000, no one credited).
+void SoldierBody::segmentTest(float seconds)
+{
+	if (!server || !onCrushed) {
+		return;
+	}
+	const Vec3 way = position - m_lastPosition;
+	SphereContact contact;
+	if (world && lengthSquared(way) > 0 && world->segmentContact(m_lastPosition, position, contact)) {
+		onCrushed(0);
+		return;
+	}
+	for (const Mover& mover : movers) {
+		const Vec3 relative = way - mover.pointVelocity(mover.position) * seconds;
+		if (mover.mesh && lengthSquared(relative) > 0
+			&& mover.mesh->segmentContact(m_lastPosition, m_lastPosition + relative, mover.rotation, mover.position, contact)) {
+			onCrushed(0);
+			return;
+		}
+	}
 }
 
 void SoldierBody::move(float gravity)
@@ -335,6 +569,15 @@ void SoldierBody::integrate(float seconds)
 		}
 	};
 	m_lastPosition = position; // slot 0x4c: the matrix before the step
+	if (m_jumping) {
+		// 0x0058a6d0: slot 0xc8 (no impulse), 0x78 (the acceleration) and
+		// 0x5c (the velocity), all the jump's.
+		m_jumping = false;
+		impulse = {};
+		velocity = {};
+		addVelocity(m_jump);
+		acceleration = m_jump;
+	}
 	addVelocity(impulse);
 	const Vec3 previous = velocity;
 	addVelocity((m_inputAcceleration + acceleration) * seconds);
@@ -357,9 +600,12 @@ void SoldierBody::step(float seconds, const Ground& ground, float gravity)
 		m_lastPosition = position; // put there from outside: no motion
 		m_hasLast = true;
 	}
+	m_onGround = false; // the response's +0xf9 and normal, each tick
+	m_groundNormal = {0, 0, 0};
 	collideWithGround(ground, gravity);
 	collideWithObjects(seconds);
-	solve();
+	collideWithSoldiers(1);
+	solve(seconds, ground, gravity);
 	move(gravity);
 	integrate(seconds);
 	acceleration.y += gravity * gravityModifier;

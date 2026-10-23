@@ -844,6 +844,10 @@ TEST(Bots_ReviveTeammates)
 	range.world->autoRespawn = false;
 	const int medic = range.world->addPlayer("Medic", 2, true);
 	const int mate = range.world->addPlayer("Mate", 2, true);
+	// In a squad: Revive's urgency carries the squad factor (0x10089aa0),
+	// 0 outside squads (the game puts every bot in one).
+	range.world->joinSquad(medic, 1);
+	range.world->joinSquad(mate, 1);
 	CHECK(range.world->spawnSoldier(medic) && range.world->spawnSoldier(mate));
 	game::GameWorld::PlayerInfo info;
 	range.world->playerInfo(mate, info);
@@ -1212,4 +1216,242 @@ TEST(GameWorld_SpawnerHoldsItsObject)
 		CHECK(world.spawners()[0]->holding() == (engine == 1));
 		CHECK((tank->position().x == 10) == (engine == 1));
 	}
+}
+
+namespace {
+
+// A collision mesh of one part whose LODs of types 0, 1 and 2 (projectiles,
+// vehicles, soldiers) are all `faces` over `vertices`, boxed by them.
+physics::CollisionMeshFile panelMesh(std::vector<std::array<float, 3>> vertices, std::vector<physics::CollisionFace> faces)
+{
+	physics::CollisionSubGeometry part;
+	for (uint32_t type = 0; type < 3; ++type) {
+		physics::CollisionLod lod;
+		lod.collisionType = type;
+		lod.boundsMin = {1e9f, 1e9f, 1e9f};
+		lod.boundsMax = {-1e9f, -1e9f, -1e9f};
+		for (const auto& v : vertices) {
+			for (size_t k = 0; k < 3; ++k) {
+				lod.boundsMin[k] = std::min(lod.boundsMin[k], v[k]);
+				lod.boundsMax[k] = std::max(lod.boundsMax[k], v[k]);
+			}
+		}
+		lod.vertices = vertices;
+		lod.faces = faces;
+		part.lods.push_back(lod);
+	}
+	physics::CollisionGeometry geometry;
+	geometry.subGeometries = {part};
+	physics::CollisionMeshFile mesh;
+	mesh.version = 10;
+	mesh.geometries = {geometry};
+	return mesh;
+}
+
+// A wall in the x-y plane, `half` wide each way and `height` up, faced both ways.
+physics::CollisionMeshFile wallMesh(float half, float height)
+{
+	return panelMesh({{-half, 0, 0}, {half, 0, 0}, {half, height, 0}, {-half, height, 0}},
+		{{{0, 1, 2}, 0}, {{0, 2, 3}, 0}, {{0, 2, 1}, 0}, {{0, 3, 2}, 0}});
+}
+
+// A closed box `half` each way round the origin (faces wound outwards).
+physics::CollisionMeshFile boxMesh(float half)
+{
+	const float h = half;
+	return panelMesh({{-h, -h, -h}, {h, -h, -h}, {h, h, -h}, {-h, h, -h}, {-h, -h, h}, {h, -h, h}, {h, h, h}, {-h, h, h}},
+		{{{0, 2, 1}, 0}, {{0, 3, 2}, 0}, {{4, 5, 6}, 0}, {{4, 6, 7}, 0}, {{0, 1, 5}, 0}, {{0, 5, 4}, 0},
+			{{3, 6, 2}, 0}, {{3, 7, 6}, 0}, {{0, 4, 7}, 0}, {{0, 7, 3}, 0}, {{1, 2, 6}, 0}, {{1, 6, 5}, 0}});
+}
+
+void makeMobile(world::ObjectTemplate& t, const char* mesh)
+{
+	t.settings()["collisionMesh"] = mesh;
+	t.settings()["hasMobilePhysics"] = "1";
+	t.settings()["physicsType"] = "Mesh";
+}
+
+} // namespace
+
+// The spawn spot's test (0x005aeb80, 0x006f2e90): a PlayerControlObject
+// that the template's mesh placed at the spot overlaps (a segment from the
+// spot to a vertex of its vehicle LOD crossing the other's soldier LOD)
+// holds the spawn back, a try a second; after five tries it is removed (no
+// soldier within 7 m) and the next try spawns.
+TEST(GameWorld_SpawnSpotKeptClear)
+{
+	for (int far = 0; far < 2; ++far) {
+		Level level;
+		io::FileManager files;
+		physics::CollisionTemplateManager collisionTemplates;
+		collisionTemplates.add("tank_mesh", boxMesh(2));
+		collisionTemplates.add("jeep_mesh", boxMesh(1.5f));
+		makeMobile(*level.templates.find("tank_us"), "tank_mesh");
+		world::ObjectTemplate* jeep = level.templates.create("PlayerControlObject", "jeep");
+		makeMobile(*jeep, "jeep_mesh");
+		// On the spot (the spawner at 10/5/20), or 6 m off it (within the
+		// 10 m search, but clear of the tank's box).
+		const uint32_t blocker = level.objects.create(jeep, {far ? 16.0f : 10.5f, 5, 20})->id();
+		game::GameWorld world(level.templates, level.objects);
+		world.enablePhysics(files, collisionTemplates,
+			{[](float, float) { return 3.5f; }, [](float, float, physics::Vec3& normal) {
+				 normal = {0, 1, 0};
+				 return 3.5f;
+			 }});
+		world.tick(1 / 30.0f); // the jeep's body
+		world.startRound();
+		const auto run = [&](float seconds) {
+			for (int i = 0; i < static_cast<int>(seconds * 30); ++i) {
+				world.tick(1 / 30.0f);
+			}
+		};
+		run(0.1f);
+		if (far) {
+			CHECK(level.count("tank_us") == 1 && level.objects.find(blocker));
+			continue;
+		}
+		CHECK(level.count("tank_us") == 0);
+		run(4.5f);
+		CHECK(level.count("tank_us") == 0 && level.objects.find(blocker));
+		CHECK(world.spawners()[0]->blockedTries() == 5);
+		run(2.5f);
+		std::fprintf(stderr, "  blocked %d tries; the jeep %s, %zu tank(s)\n", world.spawners()[0]->blockedTries(),
+			level.objects.find(blocker) ? "stays" : "removed", level.count("tank_us"));
+		CHECK(!level.objects.find(blocker));
+		CHECK(level.count("tank_us") == 1);
+	}
+}
+
+// A blast hidden from an object by something else (0x005a9090) halves, or
+// stops when the object's radius (slot 0x90: its mesh's, or a child's
+// offset plus its own) is under a fifth of the blast's: a 0.4 m crate
+// behind a wall takes nothing from a 10 m blast, the same crate with a
+// child 3 m out half.
+TEST(GameWorld_BlastBehindAWallByTheObjectsRadius)
+{
+	for (int child = 0; child < 2; ++child) {
+		Range range;
+		range.collisionTemplates.add("wall_mesh", wallMesh(2, 3));
+		range.collisionTemplates.add("crate_mesh", boxMesh(0.4f));
+		range.templates.registerType(6, "SimpleObject");
+		range.templates.registerType(7, "PlayerControlObject");
+		world::ObjectTemplate* wall = range.templates.create("SimpleObject", "wall");
+		wall->settings()["collisionMesh"] = "wall_mesh";
+		range.objects.create(wall, {0, 0, 12});
+		world::ObjectTemplate* crate = range.templates.create("PlayerControlObject", "crate");
+		makeMobile(*crate, "crate_mesh");
+		crate->settings()["armor.maxHitPoints"] = "100";
+		if (child) {
+			range.templates.create("PlayerControlObject", "crate_arm")->settings()["collisionPart"] = "0";
+			crate->children().push_back({"crate_arm", {0, 0, 3}, {}});
+		}
+		const uint32_t id = range.objects.create(crate, {0, 0.4f, 15})->id();
+		world::ObjectTemplate* blast = range.templates.create("GenericProjectile", "blast");
+		blast->components().push_back("DefaultDetonationComp");
+		blast->settings()["detonation.explosionDamage"] = "100";
+		blast->settings()["detonation.explosionMaterial"] = "69";
+		range.world->startRound(); // the wall's collision
+		range.world->tick(1 / 30.0f); // the crate's body
+		CHECK(range.world->detonate("blast", {0, 1, 10}));
+		const float left = range.world->hitPoints(id);
+		// 5.1 m off a 10 m blast: falloff 1 - 3.1 / 8, times a half.
+		const physics::Vec3 d = physics::Vec3 {0, 0.4f, 15} - physics::Vec3 {0, 1, 10};
+		const float expected = 100 - 100 * (1 - (std::sqrt(physics::lengthSquared(d)) - 2) / 8) * 0.5f;
+		std::fprintf(stderr, "  with%s a child: %.1f hit points left\n", child ? "" : "out", left);
+		CHECK(child ? std::fabs(left - expected) < 0.5f : left == 100);
+	}
+}
+
+// A soldier's bone hidden only by an object the same blast destroys counts
+// half (0x005a7530 with 0x005a8900's list): a panel between the blast and
+// the bot, with 10 hit points, lets half the blast through; with 1000 none.
+TEST(GameWorld_BlastThroughWhatItDestroys)
+{
+	for (int weak = 0; weak < 2; ++weak) {
+		Range range;
+		range.collisionTemplates.add("panel_mesh", wallMesh(2, 3));
+		range.templates.registerType(7, "PlayerControlObject");
+		world::ObjectTemplate* panel = range.templates.create("PlayerControlObject", "panel");
+		makeMobile(*panel, "panel_mesh");
+		panel->settings()["armor.maxHitPoints"] = weak ? "10" : "1000";
+		const uint32_t id = range.objects.create(panel, {0, 0, 17})->id();
+		world::ObjectTemplate* blast = range.templates.create("GenericProjectile", "blast");
+		blast->components().push_back("DefaultDetonationComp");
+		blast->settings()["detonation.explosionDamage"] = "100";
+		blast->settings()["detonation.explosionMaterial"] = "69";
+		const int bot = range.world->addPlayer("Bot", 1, true);
+		CHECK(range.world->spawnSoldier(bot));
+		range.world->tick(1 / 30.0f); // the panel's body
+		game::GameWorld::PlayerInfo info;
+		range.world->playerInfo(bot, info);
+		const physics::Vec3 origin = info.position + physics::Vec3 {0, 1, 0};
+		CHECK(std::fabs(origin.z - 20) < 0.5f);
+		CHECK(range.world->detonate("blast", {origin.x, 1, 14}));
+		range.world->playerInfo(bot, info);
+		const float left = range.world->hitPoints(info.soldier);
+		const float falloff = 1 - (std::sqrt(physics::lengthSquared(origin - physics::Vec3 {origin.x, 1, 14})) - 2) / 8;
+		std::fprintf(stderr, "  the panel %s; the bot has %.1f hit points\n",
+			range.world->hitPoints(id) <= 0 ? "destroyed" : "stands", left);
+		CHECK(weak ? std::fabs(left - (100 - 100 * falloff * 0.5f)) < 0.5f : left == 100);
+	}
+}
+
+// Ladders (0x0059fd40, 0x0059f6b0, 0x0059ed10): a soldier facing a ladder
+// and looking up gets on and sits at the LadderContainer's seat (0/1/0 on
+// the ladder's axis); climbing stops under a ceiling the up ray (1.7 m over
+// the container, 0.75 m back) meets; the jump key puts it off 0.75 m back.
+TEST(GameWorld_LadderRaysAndJumpingOff)
+{
+	Range range;
+	range.collisionTemplates.add("ladder_mesh",
+		panelMesh({{-0.3f, 0, -0.05f}, {0.3f, 0, -0.05f}, {0.3f, 6, -0.05f}, {-0.3f, 6, -0.05f}},
+			{{{0, 1, 2}, 0}, {{0, 2, 3}, 0}}));
+	// A ceiling at 3.5 m from 0.7 m behind the ladder: over where the up ray
+	// looks (0.75 m back), not where the bottom's ray does (0.6 m back).
+	range.collisionTemplates.add("ceiling_mesh",
+		panelMesh({{-1, 3.5f, -2}, {1, 3.5f, -2}, {1, 3.5f, -0.7f}, {-1, 3.5f, -0.7f}},
+			{{{0, 1, 2}, 0}, {{0, 2, 3}, 0}, {{0, 2, 1}, 0}, {{0, 3, 2}, 0}}));
+	range.templates.registerType(8, "Ladder");
+	range.templates.registerType(6, "SimpleObject");
+	world::ObjectTemplate* ladder = range.templates.create("Ladder", "ladder");
+	ladder->settings()["collisionMesh"] = "ladder_mesh";
+	range.objects.create(ladder, {0, 0, 40});
+	world::ObjectTemplate* ceiling = range.templates.create("SimpleObject", "ceiling");
+	ceiling->settings()["collisionMesh"] = "ceiling_mesh";
+	range.objects.create(ceiling, {0, 0, 40});
+	range.world->startRound(); // the static collision
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int me = range.world->localPlayer();
+	game::GameWorld::PlayerInfo info;
+	range.world->playerInfo(me, info);
+	range.world->setSoldierPosition(info.soldier, {0, 0, 39.5f});
+	game::SoldierInput climb;
+	climb.aimPitch = 20; // looking up
+	climb.throttle = 1;
+	climb.turn = -info.yaw; // face +z, the ladder's way
+	bool on = false;
+	for (int i = 0; i < 30 && !on; ++i) {
+		range.world->setInput(me, climb);
+		climb.turn = 0;
+		range.world->tick(1 / 30.0f);
+		on = range.world->onLadder(me);
+	}
+	CHECK(on);
+	for (int i = 0; i < 150; ++i) {
+		range.world->setInput(me, climb);
+		range.world->tick(1 / 30.0f);
+		range.world->playerInfo(me, info);
+	}
+	range.world->playerInfo(me, info);
+	std::fprintf(stderr, "  on the ladder at %.2f/%.2f/%.2f\n", info.position.x, info.position.y, info.position.z);
+	CHECK(range.world->onLadder(me));
+	CHECK(std::fabs(info.position.z - 40) < 0.01f && std::fabs(info.position.x) < 0.01f); // the seat: on the axis
+	CHECK(info.position.y < 3.5f - 1.9f + 0.1f && info.position.y > 1.0f); // held under the ceiling
+	game::SoldierInput jump;
+	jump.jump = true;
+	range.world->setInput(me, jump);
+	range.world->tick(1 / 30.0f);
+	range.world->playerInfo(me, info);
+	CHECK(!range.world->onLadder(me));
+	CHECK(std::fabs(info.position.z - 39.25f) < 0.05f);
 }

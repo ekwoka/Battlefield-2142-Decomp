@@ -159,6 +159,30 @@ uint32_t ObjectSpawner::spawn(world::ObjectManager& objects, world::ObjectTempla
 	const world::Vec3& at = m_object.position();
 	const world::Vec3 position {at.x + m_settings.spawnOffset.x, at.y + m_settings.spawnOffset.y,
 		at.z + m_settings.spawnOffset.z};
+	// The spot's test (0x005aeb80): an overlapping object in use holds the
+	// spawn back (not counted); overlapping ones wait five tries (+0x204),
+	// then go unless a soldier (interface 0xc4d7) is within 7 m of the
+	// spawner (the object manager's slot 0xa4). Either way nothing spawns
+	// this time: the update tries again in a second.
+	if (m_spotCheck) {
+		const SpotTest test = m_spotCheck(*objectTemplate, position, m_object.rotation(), at);
+		if (test.inUse) {
+			return 0;
+		}
+		if (!test.blockers.empty()) {
+			if (m_blockedTries < 5) {
+				++m_blockedTries;
+				return 0;
+			}
+			if (!test.soldierNear) {
+				for (const uint32_t id : test.blockers) {
+					objects.remove(id);
+				}
+			}
+			return 0;
+		}
+	}
+	m_blockedTries = 0;
 	world::Object* created = objects.create(objectTemplate, position, m_object.rotation());
 	if (!created) {
 		return 0;
@@ -274,6 +298,10 @@ void GameWorld::startRound()
 				settings.controlPointId = object.controlPointId();
 			}
 			auto spawner = std::make_unique<ObjectSpawner>(object, std::move(settings));
+			spawner->setSpotCheck([this](const world::ObjectTemplate& objectTemplate, const world::Vec3& spot,
+									  const world::Vec3& rotation, const world::Vec3& at) {
+				return testSpawnSpot(objectTemplate, spot, rotation, at);
+			});
 			spawner->reset(m_random);
 			m_spawners.push_back(std::move(spawner));
 		}
@@ -995,12 +1023,13 @@ physics::Vec3 transformPoint(const anim::Matrix& m, const physics::Vec3& v)
 // blast plus that line, made a unit, with 5 (0x00a6aac0) added upwards.
 // 0x005ee4d0 keeps a soldier's push for 0.5 s for its ragdoll (times
 // rd_expForceMod).
-// Not applied here: the ray test for other objects (blocked: half the
-// damage, or none when the object's vtable 0x90 value, not identified,
-// is below a fifth of the radius), a bone hidden only by an object this
-// blast destroys counting half, the 0.1 for soldiers in water (physics
-// node slot 0x144: +0x5c, the depth under the surface; no water physics
-// for soldiers here) and the push on other objects' physics (node 0xa4).
+// Other objects (0x005a9090) are hidden by a ray: blocked, half the
+// damage, or none when the object's radius (slot 0x90, Body::objectRadius)
+// is below a fifth of the blast's. The objects come first and the
+// soldiers after (0x9493 is put aside), so a soldier's bone hidden only by
+// an object that this blast's damage destroys counts half (0x005a7530
+// reading 0x005a8900's list). A detonation with a negative
+// explosionDamage pushes as a torque pair (BlastPush::twist).
 bool GameWorld::detonate(const std::string& projectileTemplate, const physics::Vec3& at, int attacker)
 {
 	const ProjectileSettings* settings = projectileFor(projectileTemplate);
@@ -1044,48 +1073,14 @@ void GameWorld::explode(const physics::Vec3& at, const ProjectileSettings& setti
 		float amount;
 	};
 	std::vector<Hit> hits;
-	for (const auto& owned : m_players) {
-		Player& target = *owned;
-		const world::Object* soldier = m_objects.find(target.object);
-		if (!target.alive || target.vehicle || !soldier || !inCone(target.body.position)) {
-			continue;
-		}
-		const physics::Vec3 origin {soldier->position().x, soldier->position().y + 1, soldier->position().z};
-		const float distance = distanceTo(origin);
-		if (distance >= radius) {
-			continue;
-		}
-		const float share = blastShare(at, target, std::min(radius * 0.02f, 0.5f));
-		if (share <= 0) {
-			continue;
-		}
-		const float amount = falloff(distance) * share * settings.explosionDamage;
-		if (amount > 0.1f) {
-			hits.push_back({target.object, amount});
-		}
-		// The push (0x005a66e0): kept for the ragdoll (0x005ee4d0) and given
-		// to the soldier's node (slot 0xa4 -> 0x7c: its acceleration).
-		const world::ObjectTemplate* t = soldier->objectTemplate();
-		BlastPush blast;
-		blast.line = origin - at;
-		blast.line.y *= yMod;
-		blast.axes = physics::Mat3::fromYawPitchRoll({target.body.yawDegrees, 0, 0});
-		blast.falloff = falloff(distance);
-		blast.forceMod = t ? number(*t, "armor.explosionForceMod", 1) : 1;
-		blast.forceMax = t ? number(*t, "armor.explosionForceMax", 10) : 10;
-		blast.explosionForce = settings.explosionForce;
-		blast.share = share;
-		blast.soldier = true;
-		blast.soldierRandom = 0.8f + static_cast<float>(m_random.next() % 100) * 0.005f;
-		blast.inWater = target.body.waterDepth > 0;
-		blast.speed = std::sqrt(physics::lengthSquared(target.body.velocity));
-		const physics::Vec3 push = blastPush(blast);
-		if (physics::lengthSquared(push) >= 0.01f * 0.01f) {
-			target.ragDollForce = push;
-			target.ragDollForceAt = m_time;
-			target.body.acceleration += push * (1.0f / std::max(distance, 1.0f));
-		}
-	}
+	const auto materialOf = [&](uint32_t object) {
+		const world::Object* target = m_objects.find(object);
+		const world::ObjectTemplate* t = target ? target->objectTemplate() : nullptr;
+		return t ? static_cast<uint32_t>(integer(*t, "armor.defaultMaterial", 0)) : 0u;
+	};
+	// The projectile's detonation with a negative explosionDamage: the push
+	// is a torque pair (0x005a66e0's bVar5, see BlastPush).
+	const bool twist = settings.detonates && settings.explosionDamage < 0;
 	for (Body& body : m_bodies) {
 		if (body.object == exclude || findDrone(body.object)) {
 			continue;
@@ -1102,7 +1097,7 @@ void GameWorld::explode(const physics::Vec3& at, const ProjectileSettings& setti
 		float share = 1;
 		uint32_t first = 0;
 		if (firstHit(at, position, first) && (first != body.object || hitPoints(body.object) < 0)) {
-			if (body.radius < radius / 5) {
+			if (body.objectRadius < radius / 5) {
 				continue;
 			}
 			share = 0.5f;
@@ -1134,13 +1129,21 @@ void GameWorld::explode(const physics::Vec3& at, const ProjectileSettings& setti
 		blast.explosionForce = settings.explosionForce;
 		blast.share = share;
 		blast.speed = std::sqrt(physics::lengthSquared(body.body.velocity));
+		blast.twist = twist;
 		const physics::Vec3 push = blastPush(blast);
 		if (physics::lengthSquared(push) >= 0.01f * 0.01f) {
 			// Slot 0xa4 at a point between the object and the blast, both over
-			// max(distance, 1); it wakes the node (slot 0x160).
-			const float spread = 1.0f / std::max(distance, 1.0f);
-			body.body.addForce((at - position) * spread, push * spread);
+			// max(distance, 1); it wakes the node (slot 0x160). A twist: the
+			// torque pair, not spread.
 			wake(body);
+			if (twist) {
+				for (const BlastForce& f : blastTwist(blast.axes, blast.line, blastPushForce(blast), body.boxWidth)) {
+					body.body.addForce(f.at, f.force);
+				}
+			} else {
+				const float spread = 1.0f / std::max(distance, 1.0f);
+				body.body.addForce((at - position) * spread, push * spread);
+			}
 		}
 	}
 	for (const Drone& drone : m_drones) {
@@ -1165,14 +1168,74 @@ void GameWorld::explode(const physics::Vec3& at, const ProjectileSettings& setti
 			hits.push_back({asset.object, falloff(distance) * settings.explosionDamage});
 		}
 	}
+	// The objects come before the soldiers (0x005a9090 puts soldiers,
+	// 0x9493, aside for a second loop): what the blast does to them is
+	// known when the soldiers' bones are looked for.
+	std::vector<std::pair<uint32_t, float>> pending;
+	for (const Hit& hit : hits) {
+		const float mod = m_materials ? m_materials->damageMod(static_cast<uint32_t>(settings.explosionMaterial),
+															  materialOf(hit.object))
+									  : 1.0f;
+		if (hit.amount > 0.1f) {
+			pending.push_back({hit.object, hit.amount * mod});
+		}
+	}
+	for (const auto& owned : m_players) {
+		Player& target = *owned;
+		const world::Object* soldier = m_objects.find(target.object);
+		if (!target.alive || target.vehicle || !soldier || !inCone(target.body.position)) {
+			continue;
+		}
+		const physics::Vec3 origin {soldier->position().x, soldier->position().y + 1, soldier->position().z};
+		const float distance = distanceTo(origin);
+		if (distance >= radius) {
+			continue;
+		}
+		const float share = blastShare(at, target, std::min(radius * 0.02f, 0.5f), pending);
+		if (share <= 0) {
+			continue;
+		}
+		const float amount = falloff(distance) * share * settings.explosionDamage;
+		if (amount > 0.1f) {
+			hits.push_back({target.object, amount});
+		}
+		// The push (0x005a66e0): kept for the ragdoll (0x005ee4d0) and given
+		// to the soldier's node (slot 0xa4 -> 0x7c: its acceleration).
+		const world::ObjectTemplate* t = soldier->objectTemplate();
+		BlastPush blast;
+		blast.line = origin - at;
+		blast.line.y *= yMod;
+		blast.axes = physics::Mat3::fromYawPitchRoll({target.body.yawDegrees, 0, 0});
+		blast.falloff = falloff(distance);
+		blast.forceMod = t ? number(*t, "armor.explosionForceMod", 1) : 1;
+		blast.forceMax = t ? number(*t, "armor.explosionForceMax", 10) : 10;
+		blast.explosionForce = settings.explosionForce;
+		blast.share = share;
+		blast.soldier = true;
+		blast.soldierRandom = 0.8f + static_cast<float>(m_random.next() % 100) * 0.005f;
+		blast.inWater = target.body.waterDepth > 0;
+		blast.speed = std::sqrt(physics::lengthSquared(target.body.velocity));
+		blast.twist = twist;
+		const physics::Vec3 push = blastPush(blast);
+		if (physics::lengthSquared(push) >= 0.01f * 0.01f) {
+			target.ragDollForce = push;
+			target.ragDollForceAt = m_time;
+			if (twist) {
+				// The soldier's node takes each of the pair as acceleration
+				// (slot 0xa4 -> 0x7c); its box is under 2 m across.
+				for (const BlastForce& f : blastTwist(blast.axes, blast.line, blastPushForce(blast), 0)) {
+					target.body.acceleration += f.force;
+				}
+			} else {
+				target.body.acceleration += push * (1.0f / std::max(distance, 1.0f));
+			}
+		}
+	}
 	for (const Hit& hit : hits) {
 		if (hit.amount <= 0.1f) {
 			continue;
 		}
-		const world::Object* target = m_objects.find(hit.object);
-		const world::ObjectTemplate* t = target ? target->objectTemplate() : nullptr;
-		const uint32_t material = t ? static_cast<uint32_t>(integer(*t, "armor.defaultMaterial", 0)) : 0;
-		damage(hit.object, hit.amount, static_cast<uint32_t>(settings.explosionMaterial), material, attacker);
+		damage(hit.object, hit.amount, static_cast<uint32_t>(settings.explosionMaterial), materialOf(hit.object), attacker);
 	}
 }
 
@@ -1183,7 +1246,8 @@ void GameWorld::explode(const physics::Vec3& at, const ProjectileSettings& setti
 // point below isn't in the blast's sight; each point used only when the
 // blast sees it). Without a skeleton the bones sit at 1.7, 1.1 and 0.1 m
 // over the feet.
-float GameWorld::blastShare(const physics::Vec3& at, const Player& target, float beside) const
+float GameWorld::blastShare(const physics::Vec3& at, const Player& target, float beside,
+	const std::vector<std::pair<uint32_t, float>>& pending) const
 {
 	const world::Object* soldier = m_objects.find(target.object);
 	if (!soldier) {
@@ -1202,9 +1266,20 @@ float GameWorld::blastShare(const physics::Vec3& at, const Player& target, float
 	// Which of the points beside the blast it can see (asked once).
 	int seen[4] = {-1, -1, -1, -1};
 	const physics::Vec3 points[4] = {at + below, at - side, at + side, at - below};
+	// The object the last blocked ray met (0x006f2d20's out, local_14: kept
+	// across the rays and the bones, 0 for the terrain).
+	uint32_t blocker = 0;
+	const auto clear = [&](const physics::Vec3& from, const physics::Vec3& to) {
+		uint32_t hit = 0;
+		if (firstHit(from, to, hit, target.object)) {
+			blocker = hit;
+			return false;
+		}
+		return true;
+	};
 	const auto usable = [&](int i) {
 		if (seen[i] < 0) {
-			seen[i] = lineOfSight(at, points[i], target.object) ? 1 : 0;
+			seen[i] = clear(at, points[i]) ? 1 : 0;
 		}
 		return seen[i] == 1;
 	};
@@ -1215,15 +1290,27 @@ float GameWorld::blastShare(const physics::Vec3& at, const Player& target, float
 		if (node < target.worldPose.size()) {
 			bone = modelToWorld(*soldier, transformPoint(target.worldPose[node], {0, 0, 0}));
 		}
-		bool visible = lineOfSight(at, bone, target.object);
+		bool visible = clear(at, bone);
 		for (int j = 0; j < 4 && !visible; ++j) {
 			if (j == 3 && usable(0)) {
 				break; // the point above only when the one below is out of sight
 			}
-			visible = usable(j) && lineOfSight(points[j], bone, target.object);
+			visible = usable(j) && clear(points[j], bone);
 		}
 		if (visible) {
 			share += kWeights[i];
+		} else if (blocker != 0) {
+			// Hidden by an armoured object (the first of it and its parents
+			// with armour, +0x48) that this blast's damage so far destroys
+			// (its hit points, armour slot 0x3c, at most a recorded amount
+			// for the object hit): half the bone's weight.
+			const float left = hitPoints(blocker);
+			const bool destroyed = left >= 0 && std::any_of(pending.begin(), pending.end(), [&](const auto& p) {
+				return p.first == blocker && left <= p.second;
+			});
+			if (destroyed) {
+				share += kWeights[i] * 0.5f;
+			}
 		}
 	}
 	return share;
@@ -2170,7 +2257,94 @@ bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, 
 	return true;
 }
 
+// The spawn spot's test (0x005aeb80 with 0x006f2e90 per object). The
+// template's collision mesh (the collision manager's by the template's
+// slot 0x90 name, 0x005ad4d0) placed at the spot by the spawner's matrix
+// (its position plus spawnOffset, unturned) against the PlayerControlObjects
+// whose bounds come within 10 m of the spot (the scene's slot 0x44 with
+// interface 0xc4c5): one overlaps when it is not being deleted, its
+// response is a mesh one (0xc42d, 0xc430, 0xc431), it has a soldier LOD
+// (slot 0xc4(2)) and a segment from the spot to any vertex of the
+// template's vehicle LOD (type 1) placed there crosses that soldier LOD
+// (0x006f2760: the instance's slot 22, 0x006e5920, both sides of the
+// faces). Not rewritten: the extra probe for templates with MechLegs (the
+// PlayerControlObject template's +0x4c4, its last object's box bottom set by
+// 0x005cd4f0: three segments down from the spot and 1.7 m either side across,
+// 0x006f28e0; walkers alone), their legs' objects (0x006f2e90's loop
+// through the node's slot 0x5c), the objects a global list holds
+// (0x005628f0 / 0x00561d90, not identified) and the spot's drop
+// (0x005ad8b0).
+ObjectSpawner::SpotTest GameWorld::testSpawnSpot(const world::ObjectTemplate& objectTemplate, const world::Vec3& spot,
+	const world::Vec3& rotation, const world::Vec3& spawner) const
+{
+	ObjectSpawner::SpotTest test;
+	const auto meshName = objectTemplate.settings().find("collisionMesh");
+	const physics::CollisionMeshFile* mesh = (!m_files || !m_collisionTemplates || meshName == objectTemplate.settings().end())
+		? nullptr
+		: m_collisionTemplates->mesh(meshName->second, *m_files);
+	if (!mesh || mesh->geometries.empty()) {
+		return test; // 0x005ad4d0 finds none: no test
+	}
+	std::vector<physics::Vec3> vertices;
+	for (const auto& part : mesh->geometries[0].subGeometries) {
+		if (const physics::CollisionLod* lod = physics::collisionLodFor(*mesh, part, 1)) {
+			for (const auto& v : lod->vertices) {
+				vertices.push_back({v[0], v[1], v[2]});
+			}
+		}
+	}
+	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({rotation.x, rotation.y, rotation.z});
+	const physics::Vec3 from {spot.x, spot.y, spot.z};
+	for (const Body& body : m_bodies) {
+		if (!body.controlObject || !body.soldierMesh || body.soldierMesh->triangles() == 0) {
+			continue;
+		}
+		// (A wreck counts: only an object being deleted, +0x14 bit 0, doesn't.)
+		if (!m_objects.find(body.object)) {
+			continue;
+		}
+		if (std::sqrt(physics::lengthSquared(body.body.position - from)) > 10.0f + body.objectRadius) {
+			continue;
+		}
+		const physics::Vec3 localFrom = body.body.rotation.untransform(from - body.body.position);
+		bool overlaps = false;
+		for (const physics::Vec3& v : vertices) {
+			const physics::Vec3 to = from + turn.transform(v);
+			physics::CollisionWorld::Hit hit {};
+			if (body.soldierMesh->raycast(localFrom, body.body.rotation.untransform(to - body.body.position), hit)) {
+				overlaps = true;
+				break;
+			}
+		}
+		if (!overlaps) {
+			continue;
+		}
+		test.blockers.push_back(body.object);
+		if (std::any_of(body.occupants.begin(), body.occupants.end(), [](int id) { return id >= 0; })) {
+			test.inUse = true;
+		}
+	}
+	if (!test.blockers.empty()) {
+		const physics::Vec3 at {spawner.x, spawner.y, spawner.z};
+		for (const auto& owned : m_players) {
+			const world::Object* soldier = m_objects.find(owned->object);
+			if (soldier && !owned->vehicle) {
+				const physics::Vec3 feet {soldier->position().x, soldier->position().y, soldier->position().z};
+				if (std::sqrt(physics::lengthSquared(feet - at)) < 7.0f) {
+					test.soldierNear = true;
+				}
+			}
+		}
+	}
+	return test;
+}
+
 bool GameWorld::firstHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t& object) const
+{
+	return firstHit(from, to, object, 0);
+}
+
+bool GameWorld::firstHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t& object, uint32_t ignore) const
 {
 	float nearest = 2;
 	physics::CollisionWorld::Hit hit {};
@@ -2179,7 +2353,7 @@ bool GameWorld::firstHit(const physics::Vec3& from, const physics::Vec3& to, uin
 		object = hit.owner;
 	}
 	for (const Body& body : m_bodies) {
-		if (!body.projectileMesh) {
+		if (!body.projectileMesh || (ignore != 0 && body.object == ignore)) {
 			continue;
 		}
 		const physics::Vec3 localFrom = body.body.rotation.untransform(from - body.body.position);
@@ -3149,7 +3323,10 @@ bool GameWorld::startRagDoll(Player& victim, bool thrown)
 		m[14] += body->position().z;
 	}
 	victim.ragDoll = std::make_unique<anim::RagDoll>();
-	const physics::Vec3& v = victim.body.velocity;
+	// 0x005f0a00: the soldier's velocity, or the last hit's push (x 2.5)
+	// within 16 ticks of it (0x005ee2b0).
+	const physics::Vec3 v = m_time < victim.hitPushUntil ? victim.hitPush : victim.body.velocity;
+	victim.hitPushUntil = -1;
 	victim.ragDoll->start(*ragDoll, pose, {v.x, v.y, v.z});
 	if (thrown) {
 		// 0x005f0f50: thrown out of its seat, pushed along the object's
@@ -3311,6 +3488,29 @@ void GameWorld::stepRagDoll(Player& player, float seconds)
 	body->setRotation({0, 0, 0});
 }
 
+// The soldier's sound 0 (its sound set +0x324, 0x007fd970): the footstep
+// set's sound loaded for the ground under it (0x007fd840: the cell of
+// material 0x157c against it, templates 0-3; 0x007fda00 picks the
+// ground's material, or 0x19c8 on a ladder): template 3, else 0.
+void GameWorld::playAnimationSound(const Player& player, int)
+{
+	if (!m_materials) {
+		return;
+	}
+	const physics::Vec3& at = player.body.position;
+	const uint32_t surface = player.ladder >= 0 ? 0x19c8u : (m_ground.material ? m_ground.material(at.x, at.z) : 0u);
+	const physics::MaterialCell* cell = m_materials->cell(kSoldierFootStepsMaterial, surface);
+	if (!cell) {
+		return;
+	}
+	for (const size_t index : {size_t {3}, size_t {0}}) {
+		if (cell->soundTemplates.size() > index && !cell->soundTemplates[index].empty()) {
+			m_sounds.push_back({cell->soundTemplates[index], {at.x, at.y - 1, at.z}});
+			return;
+		}
+	}
+}
+
 // The impact sound (polled each soldier tick, 0x0058d350 -> 0x008a79f0;
 // played by 0x007fd780): the material manager's slot 0x74 (0x0060a6d0)
 // with material 0x157c (5500, Soldier_FootSteps) against the surface's,
@@ -3412,10 +3612,30 @@ void GameWorld::stepAnimation(Player& player, float seconds)
 		input.forward = (v.x * std::sin(yaw) + v.z * std::cos(yaw)) / speed;
 		input.side = (v.x * std::cos(yaw) - v.z * std::sin(yaw)) / speed;
 	}
-	input.upSpeed = v.y;
+	// The up value (0x005ef250 / 0x005eef80): the jump state; standing (or
+	// on a ladder) 0. The jump and land sounds are the footstep set's
+	// (0x007fd970, see playAnimationSound).
+	{
+		const float velocity[3] = {v.x, v.y, v.z};
+		const physics::Vec3 feet = player.body.position - physics::Vec3 {0, 1, 0};
+		const uint32_t self = player.object;
+		anim::SoldierJumpAnimation::Sound sound;
+		input.upSpeed = player.jumpAnimation.update(player.body.onGround() || player.ladder >= 0, velocity,
+			[this, feet, self](const float way[3]) {
+				uint32_t hit = 0;
+				return firstHit(feet, feet + physics::Vec3 {way[0], way[1], way[2]}, hit, self);
+			},
+			sound);
+		if (sound != anim::SoldierJumpAnimation::Sound::None) {
+			playAnimationSound(player, 0);
+		}
+	}
+	input.movementSeconds = seconds;
+	// TurnTrigger's value: the soldier's rotational velocity in degrees per
+	// second (at most 1499, 0x0058a6d0) times 0.01 (0x005ef250).
 	float turn = player.body.yawDegrees - player.lastYaw;
 	turn = std::remainder(turn, 360.0f);
-	input.turn = turn * 3.14159265f / 180.0f / seconds;
+	input.turn = std::clamp(turn / seconds, -1499.0f, 1499.0f) * 0.01f;
 	player.lastYaw = player.body.yawDegrees;
 	input.pose = static_cast<int>(player.input.pose);
 	if (player.weapon && player.weapon->reloading()) {
@@ -3428,6 +3648,14 @@ void GameWorld::stepAnimation(Player& player, float seconds)
 	player.bodyAnimation->update(input, seconds);
 	if (player.weaponAnimation) {
 		player.weaponAnimation->update(input, seconds);
+		player.weaponAnimation->takeEvents(); // the weapon's effect events: not played yet
+	}
+	// The body's events go to the soldier's handler (0x00587b90): sound 0
+	// (event 0x36) is the footstep set's sound.
+	for (const anim::AnimationState::FiredEvent& event : player.bodyAnimation->takeEvents()) {
+		if (event.type == anim::Bundle::SoundEvent && event.id == 0) {
+			playAnimationSound(player, 0);
+		}
 	}
 	// The pose, kept for drawing, hits and the weapon's parts.
 	if (const anim::Skeleton* skeleton = player.skeleton) {
@@ -3695,8 +3923,43 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 		mover.angularVelocity = b.body.angularVelocity;
 		mover.centerOfMass = b.body.worldCenterOfMass();
 		mover.owner = b.object;
+		mover.mass = b.mass;
+		mover.asleep = b.sleep.asleep();
 		player.body.movers.push_back(mover);
 	}
+	// The other soldiers near it on foot (0x006c2620: a soldier's response
+	// in the broad phase's list; one with a parent, in a seat or on a
+	// ladder's container, is left out).
+	player.body.soldiers.clear();
+	for (const auto& owned : m_players) {
+		const Player& other = *owned;
+		if (&other == &player || !other.alive || other.manDown || other.vehicle != 0 || other.ladder >= 0) {
+			continue;
+		}
+		const physics::Vec3 d = other.body.position - player.body.position;
+		if (physics::lengthSquared(d) > 3.0f * 3.0f) {
+			continue;
+		}
+		player.body.soldiers.push_back({other.body.position, other.body.stance});
+	}
+	// The hit's push a ragdoll starts with within 16 ticks (0x005ee2b0),
+	// and the solve's crush, run-over and segment kills (1000 through the
+	// game logic, slot 0xe4; the crushing object's driver credited).
+	Player* self = &player;
+	player.body.onPush = [this, self](const physics::Vec3& push) {
+		self->hitPush = push;
+		self->hitPushUntil = m_time + 16 / 30.0;
+	};
+	player.body.onCrushed = [this, self](uint32_t attacker) {
+		if (!self->alive) {
+			return;
+		}
+		int credit = -1;
+		if (Body* crusher = attacker ? findBody(attacker) : nullptr; crusher && !crusher->occupants.empty()) {
+			credit = crusher->occupants[0];
+		}
+		loseHitPoints(self->object, physics::soldier::kCrushDamage, credit);
+	};
 	// The collision events: the ground's and each object's on the soldier
 	// (0x00586a90 -> the base), and the object's own (0x006c3890).
 	const uint32_t soldierId = player.object;
@@ -3709,8 +3972,16 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 	};
 	if (const world::ObjectTemplate* t = object->objectTemplate()) {
 		player.body.material = static_cast<uint32_t>(integer(*t, "material", 0));
+		// The sprint's stamina from the soldier template (0x00645790 on
+		// spawning; the ability modifiers, the player's +0x4c / +0x50, at 1)
+		// and the jump's loss (+0x308).
+		if (!player.control.stamina().configured()) {
+			player.control.stamina().configure(number(*t, "sprintDissipationTime", 0),
+				number(*t, "sprintRecoverTime", 0), number(*t, "sprintLimit", 0));
+			player.control.jumpLoss = number(*t, "sprintLossAtJump", 0);
+		}
 	}
-	player.control.update(input, player.body);
+	player.control.update(input, player.body, seconds);
 	player.body.step(seconds, m_ground);
 	if (!player.alive) {
 		return; // killed by a collision (a fall, a road kill)
@@ -4489,6 +4760,69 @@ int firstEngineIn(const world::ObjectTemplateManager& templates, const std::vect
 	return t ? firstEngineIn(templates, t->children(), 0, depth + 1) : -1;
 }
 
+// A collision mesh's radius (slot 0x74, 0x006dedb0): the first part with a
+// LOD, its LOD of the lowest collision type, that LOD's radius (+0xc0, the
+// box's farthest corner). The part the instance stands for (+0x14) is not
+// read: every instance of the mesh gives geometry 0's first part's.
+float meshRadius(const physics::CollisionMeshFile& mesh)
+{
+	if (mesh.geometries.empty()) {
+		return 0;
+	}
+	for (const physics::CollisionSubGeometry& part : mesh.geometries[0].subGeometries) {
+		for (uint32_t type = 0; type < part.lods.size(); ++type) {
+			if (const physics::CollisionLod* lod = physics::collisionLodFor(mesh, part, type)) {
+				return physics::boxRadius(lod->boundsMin, lod->boundsMax);
+			}
+		}
+	}
+	return 0;
+}
+
+// The width across x of a collision mesh's box (slot 0x78, 0x006deeb0:
+// every part's LODs' boxes together).
+float meshWidth(const physics::CollisionMeshFile& mesh)
+{
+	float low = 1e30f, high = -1e30f;
+	if (!mesh.geometries.empty()) {
+		for (const physics::CollisionSubGeometry& part : mesh.geometries[0].subGeometries) {
+			for (const physics::CollisionLod& lod : part.lods) {
+				low = std::min(low, lod.boundsMin[0]);
+				high = std::max(high, lod.boundsMax[0]);
+			}
+		}
+	}
+	return high > low ? high - low : 0.0f;
+}
+
+// An object's radius (slot 0x90, 0x006f6b90): its mesh's (above; slot
+// 0x94 adds 0) or, when farther, a child's: the length of its offset (slot
+// 0xdc) plus the child's own radius, for children with a radius. A child
+// has the root's mesh when its template names a collisionPart; the rewrite
+// builds the tree from the templates.
+float objectRadiusOf(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& t, bool hasMesh,
+	float radius, int depth)
+{
+	float result = hasMesh ? radius : 0.0f;
+	if (depth > 8) {
+		return result;
+	}
+	for (const world::ChildTemplate& child : t.children()) {
+		const world::ObjectTemplate* ct = templates.find(child.name);
+		if (!ct) {
+			continue;
+		}
+		const bool childMesh = number(*ct, "collisionPart", -1) >= 0;
+		const float own = objectRadiusOf(templates, *ct, childMesh, radius, depth + 1);
+		if (own > 0) {
+			const float offset = std::sqrt(child.position.x * child.position.x + child.position.y * child.position.y
+				+ child.position.z * child.position.z);
+			result = std::max(result, offset + own);
+		}
+	}
+	return result;
+}
+
 } // namespace
 
 int GameWorld::firstEngineType(const world::ObjectTemplate& root) const
@@ -4581,6 +4915,8 @@ void GameWorld::addBodies()
 		body.helicopterEngine = firstEngineType(*t) == 33;
 		// For the mobile mesh physics (MeshCollision.cpp).
 		body.radius = physics::boxRadius({low.x, low.y, low.z}, {high.x, high.y, high.z});
+		body.objectRadius = objectRadiusOf(m_templates, *t, true, meshRadius(*mesh), 0);
+		body.boxWidth = meshWidth(*mesh);
 		body.vehicleMesh = std::make_shared<physics::CollisionWorld>();
 		body.vehicleMesh->addMesh(*mesh, physics::CollisionUser::Vehicle, {}, {}, object.id(), materials);
 		body.mass = number(*t, "mass", 1); // the template's +0x94 (1: 0x005f... ctor)

@@ -15,6 +15,7 @@
 #include "Physics/RigidBody.h"
 #include "Random.h"
 
+#include <array>
 #include <string>
 
 namespace dice::hfe::world {
@@ -112,6 +113,13 @@ float explosionFalloff(float radius, float distance);
 // times `soldierRandom` (0.8 + 0.005 x (rand % 100)). The object's speed
 // counts against forceMax; components under 0.001 are dropped (0x005a6310).
 // The caller applies it when at least 0.01 long.
+// A blast whose projectile has a detonation component (0xc54d, the
+// projectile's slot 0x50) with explosionDamage below 0 (its slot 0x4c: the
+// template's +0x44) is `twist` (0x005a66e0's bVar5): the force is 20 x
+// explosionForce x share (no falloff, no forceMod), it points along the
+// nearest axis alone (the line is not added), and the caller gives it as
+// the torque pair (blastTwist). No shipped detonation has a negative
+// explosionDamage.
 struct BlastPush {
 	physics::Vec3 line;
 	physics::Mat3 axes;
@@ -123,8 +131,24 @@ struct BlastPush {
 	float soldierRandom = 1;
 	bool inWater = false;
 	float speed = 0;
+	bool twist = false;
 };
 physics::Vec3 blastPush(const BlastPush& blast);
+// The push's strength (blastPush's length before the small components are
+// dropped).
+float blastPushForce(const BlastPush& blast);
+// The torque pair of a `twist` blast (0x005a66e0's end, through node slot
+// 0xa4 three times, not spread over the distance): with a the object's x
+// axis (axes row 0) turned to the blast's side (its negative when the line
+// from the blast runs along +x, 0x00562dd0) and f = force / 2.9
+// (*0x00a6aa94) x max(the object's box width across x, 2) (slot 0x9c's
+// +0x24, *0x00a6aa98): (0, f, 0) at a, (0, -0.5 f, 0) at -a (*0x00a6aa8c)
+// and a x f x -0.5 at the centre (*0x00a6aa90, the point 0x006ac600).
+struct BlastForce {
+	physics::Vec3 at;    // relative to the object's position
+	physics::Vec3 force;
+};
+std::array<BlastForce, 3> blastTwist(const physics::Mat3& axes, const physics::Vec3& line, float force, float width);
 // An armour's EMP level after `amount` of EMP damage (0x00652980): it goes
 // up in whole steps of `stepSize`, at most `numSteps`.
 float addEmpDamage(float level, float amount, float stepSize, int numSteps);

@@ -3,6 +3,8 @@
 #include "Physics/SoldierPhysics.h"
 #include "TestMain.h"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 
@@ -504,4 +506,207 @@ TEST(SoldierPhysics_SwimsInDeepWater)
 		dry.step(1 / 30.0f, slope(0));
 	}
 	CHECK(!dry.swimming() && dry.waterDepth == 0);
+}
+
+// The jump (0x0058a6d0): standing on the ground, PIAction sets the velocity
+// to the ground speed x 0.98 and 6 m/s up; crouching it does nothing; it
+// costs the template's sprintLossAtJump of stamina.
+TEST(SoldierControl_Jumps)
+{
+	physics::SoldierBody body;
+	body.position = {0, 1, 0};
+	for (int i = 0; i < 10; ++i) {
+		body.step(1 / 30.0f, slope(0));
+	}
+	game::SoldierControl control;
+	control.stamina().configure(12, 17, 0.1f);
+	control.jumpLoss = 0.25f;
+	game::SoldierInput jump;
+	jump.jump = true;
+	jump.pose = game::SoldierPose::Crouch;
+	control.update(jump, body);
+	CHECK(!control.jumped());
+	jump.pose = game::SoldierPose::Stand;
+	control.update(jump, body);
+	CHECK(control.jumped());
+	CHECK(std::fabs(control.stamina().stamina() - 0.75f) < 1e-4f);
+	body.step(1 / 30.0f, slope(0));
+	CHECK(body.velocity.y > 5.5f);
+	float peak = 0;
+	game::SoldierInput idle;
+	bool landed = false;
+	for (int i = 0; i < 60; ++i) {
+		control.update(idle, body);
+		body.step(1 / 30.0f, slope(0));
+		peak = std::max(peak, body.position.y - 1);
+		landed = landed || body.onGround();
+	}
+	std::printf("  jumped %.2f m high\n", peak);
+	CHECK(peak > 1.2f && peak < 2.0f);
+	CHECK(landed && std::fabs(body.position.y - 1) < 0.1f);
+}
+
+// The sprint's stamina (0x006457f0): it drains over sprintDissipationTime
+// and the sprint ends when it is out; it starts again only from the limit.
+TEST(SoldierControl_SprintStaminaRunsOut)
+{
+	game::SprintStamina stamina;
+	stamina.configure(1, 2, 0.5f);
+	stamina.request(false);
+	stamina.update(false, 0, 1 / 30.0f);
+	CHECK(stamina.sprinting());
+	for (int i = 0; i < 31; ++i) {
+		stamina.request(true);
+		stamina.update(false, 0, 1 / 30.0f);
+	}
+	CHECK(!stamina.sprinting() && stamina.stamina() < 0.02f);
+	stamina.request(false);
+	stamina.update(false, 0, 1 / 30.0f);
+	CHECK(!stamina.sprinting()); // under the limit
+	for (int i = 0; i < 31; ++i) {
+		stamina.update(false, 0, 1 / 30.0f);
+	}
+	stamina.request(false);
+	stamina.update(false, 0, 1 / 30.0f);
+	CHECK(stamina.sprinting());
+	// Crouching (blocked) ends it.
+	stamina.request(true);
+	stamina.update(true, 0, 1 / 30.0f);
+	CHECK(!stamina.sprinting());
+}
+
+// Two soldiers closer than two radii push each other apart (0x006c2620).
+TEST(SoldierPhysics_SoldiersPushApart)
+{
+	physics::SoldierBody a;
+	a.position = {0, 1, 0};
+	a.step(1 / 30.0f, slope(0));
+	a.soldiers = {{{0.3f, 1, 0}, 0}};
+	a.step(1 / 30.0f, slope(0));
+	CHECK(a.position.x < -0.15f);
+	// Lying under the other's feet (heights apart) nothing.
+	physics::SoldierBody b;
+	b.position = {0, 1, 0};
+	b.step(1 / 30.0f, slope(0));
+	b.soldiers = {{{0.3f, 3, 0}, 0}};
+	b.step(1 / 30.0f, slope(0));
+	CHECK(std::fabs(b.position.x) < 1e-4f);
+}
+
+namespace {
+
+// A box from `low` to `high` with its faces out.
+physics::CollisionMeshFile boxMesh(physics::Vec3 low, physics::Vec3 high)
+{
+	physics::CollisionLod lod;
+	const auto quad = [&lod](physics::Vec3 a, physics::Vec3 b, physics::Vec3 c, physics::Vec3 d) {
+		// Faces a b c and a c d: (c - b) x (b - a) points out for a quad
+		// listed clockwise seen from outside.
+		for (const physics::Vec3& v : {a, b, c, d}) {
+			lod.vertices.push_back({v.x, v.y, v.z});
+		}
+		const uint16_t i = static_cast<uint16_t>(lod.vertices.size() - 4);
+		lod.faces.push_back({{i, static_cast<uint16_t>(i + 1), static_cast<uint16_t>(i + 2)}, 0});
+		lod.faces.push_back({{i, static_cast<uint16_t>(i + 2), static_cast<uint16_t>(i + 3)}, 0});
+	};
+	const physics::Vec3 l = low, h = high;
+	quad({l.x, l.y, l.z}, {h.x, l.y, l.z}, {h.x, h.y, l.z}, {l.x, h.y, l.z}); // -z
+	quad({h.x, l.y, h.z}, {l.x, l.y, h.z}, {l.x, h.y, h.z}, {h.x, h.y, h.z}); // +z
+	quad({l.x, l.y, h.z}, {l.x, l.y, l.z}, {l.x, h.y, l.z}, {l.x, h.y, h.z}); // -x
+	quad({h.x, l.y, l.z}, {h.x, l.y, h.z}, {h.x, h.y, h.z}, {h.x, h.y, l.z}); // +x
+	quad({l.x, h.y, l.z}, {h.x, h.y, l.z}, {h.x, h.y, h.z}, {l.x, h.y, h.z}); // +y
+	physics::CollisionSubGeometry part;
+	part.lods = {lod, lod, lod};
+	physics::CollisionGeometry geometry;
+	geometry.subGeometries = {part};
+	physics::CollisionMeshFile mesh;
+	mesh.geometries = {geometry};
+	return mesh;
+}
+
+} // namespace
+
+// The solve (0x006c48c0): a soldier caught between a wall and a heavy
+// moving object closer than its width can't be pushed out in eight
+// passes: it is put back where it was and, the object moving at it faster
+// than 3 m/s with the crush 0.05 m deep, killed with the object's velocity
+// x 2.5 for its ragdoll.
+TEST(SoldierPhysics_HeavyObjectsCrush)
+{
+	physics::CollisionWorld wall;
+	wall.addMesh(boxMesh({-2, 0, 0.15f}, {2, 3, 1.15f}), physics::CollisionUser::Soldier, {}, {});
+	physics::CollisionWorld slab;
+	slab.addMesh(boxMesh({-2, 0, -1.15f}, {2, 3, -0.15f}), physics::CollisionUser::Soldier, {}, {});
+	physics::SoldierBody body;
+	body.position = {0, 1, 0};
+	body.step(1 / 30.0f, slope(0));
+	body.world = &wall;
+	physics::SoldierBody::Mover tank;
+	tank.mesh = &slab;
+	tank.velocity = {0, 0, 4};
+	tank.centerOfMass = {0, 1, -0.65f};
+	tank.owner = 7;
+	tank.mass = 20000;
+	body.movers = {tank};
+	uint32_t crushedBy = 0;
+	physics::Vec3 push;
+	body.onCrushed = [&crushedBy](uint32_t by) { crushedBy = by; };
+	body.onPush = [&push](const physics::Vec3& p) { push = p; };
+	body.step(1 / 30.0f, slope(0));
+	CHECK(body.squashed());
+	CHECK(crushedBy == 7);
+	CHECK(std::fabs(push.z - 10) < 1e-3f);
+	CHECK(std::fabs(body.position.z) < 0.05f);
+	// Light (100 or less), it only squashes.
+	crushedBy = 0;
+	body.movers[0].mass = 100;
+	body.step(1 / 30.0f, slope(0));
+	CHECK(crushedBy == 0 && body.squashed());
+}
+
+// After a free solve, a heavy object's soldier LOD within half a radius of
+// a sphere's centre (from inside it, where its faces don't push) at over
+// 3 m/s runs the soldier over (0x006c2e50).
+TEST(SoldierPhysics_RunOver)
+{
+	physics::CollisionWorld hull;
+	hull.addMesh(boxMesh({-0.1f, 0, -1}, {2, 3, 1}), physics::CollisionUser::Soldier, {}, {});
+	physics::SoldierBody body;
+	body.position = {0, 1, 0};
+	body.step(1 / 30.0f, slope(0));
+	physics::SoldierBody::Mover car;
+	car.mesh = &hull;
+	car.velocity = {0, 0, -5}; // along its side
+	car.owner = 3;
+	car.mass = 1500;
+	uint32_t by = 0;
+	body.onCrushed = [&by](uint32_t who) { by = who; };
+	body.movers = {car};
+	body.step(1 / 30.0f, slope(0));
+	CHECK(by == 3 && !body.squashed());
+	by = 0;
+	body.movers[0].velocity = {0, 0, -2}; // slower than 3 m/s
+	body.step(1 / 30.0f, slope(0));
+	CHECK(by == 0);
+}
+
+// The server's segment test (0x006c48c0): the origin's way crossing a face
+// of a soldier LOD from the front kills, even where the spheres pass (a
+// prone soldier under a wall 0.6 m up).
+TEST(SoldierPhysics_SegmentThroughAMeshKills)
+{
+	physics::CollisionWorld world;
+	world.addMesh(wallFrom(0.6f), physics::CollisionUser::Soldier, {}, {});
+	physics::SoldierBody body;
+	body.position = {0, 1, 2.8f};
+	body.stance = 2;
+	body.world = &world;
+	body.step(1 / 30.0f, slope(0));
+	int killed = 0;
+	body.onCrushed = [&killed](uint32_t by) { killed += by == 0 ? 1 : 100; };
+	body.velocity = {0, 0, 10};
+	for (int i = 0; i < 10 && killed == 0; ++i) {
+		body.step(1 / 30.0f, slope(0));
+	}
+	CHECK(killed == 1);
 }

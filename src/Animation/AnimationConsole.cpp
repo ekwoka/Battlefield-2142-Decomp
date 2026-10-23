@@ -48,12 +48,45 @@ void registerAnimationConsoleMethods(Console& console, AnimationSystems& systems
 	});
 	bindMethod(console, "AnimationSystem.createValueHolder", kAccess,
 		[s](std::string name) { s->createValueHolder(name); });
-	for (const char* name : {"cameraSpring.use", "cameraSpring.amplitude", "cameraSpring.zoomDamping",
-			 "cameraSpring.stiffness", "cameraSpring.look", "cameraSpring.move", "cameraSpring.hit",
-			 "cameraSpring.fire", "playbackModifier"}) {
-		// Kept by the original for first-person cameras; not used yet.
-		bindMethod(console, std::string("AnimationSystem.") + name, kAccess, [](std::string) {}, 0);
-	}
+	bindMethod(console, "AnimationSystem.playbackModifier", kAccess, [](std::string) {}, 0);
+	// The camera spring (0x008b142c...): "use 1" makes one (0x008b9670),
+	// "use 0" drops it; the others set its parts while there is one.
+	bindProperty<bool>(console, "AnimationSystem.cameraSpring.use", kAccess,
+		[system] { return system() && system()->cameraSpring(); },
+		[system](const bool& v) {
+			if (AnimationSystemTemplate* t = system()) {
+				t->useCameraSpring(v);
+			}
+		});
+	const auto springPart = [&console, system](const char* name, CameraSpring::V CameraSpring::*field) {
+		bindProperty<ConsoleVec3>(console, std::string("AnimationSystem.cameraSpring.") + name, kAccess,
+			[system, field] {
+				const CameraSpring* c = system() ? system()->cameraSpring() : nullptr;
+				return c ? ConsoleVec3 {(c->*field).x, (c->*field).y, (c->*field).z} : ConsoleVec3 {};
+			},
+			[system, field](const ConsoleVec3& v) {
+				if (CameraSpring* c = system() ? system()->cameraSpring() : nullptr) {
+					c->*field = {v.x, v.y, v.z};
+				}
+			});
+	};
+	springPart("amplitude", &CameraSpring::amplitude);
+	springPart("zoomDamping", &CameraSpring::zoomDamping);
+	springPart("stiffness", &CameraSpring::stiffness);
+	springPart("move", &CameraSpring::move);
+	springPart("hit", &CameraSpring::hit);
+	springPart("fire", &CameraSpring::fire);
+	bindProperty<ConsoleVec2>(console, "AnimationSystem.cameraSpring.look", kAccess,
+		[system] {
+			const CameraSpring* c = system() ? system()->cameraSpring() : nullptr;
+			return c ? ConsoleVec2 {c->look[0], c->look[1]} : ConsoleVec2 {};
+		},
+		[system](const ConsoleVec2& v) {
+			if (CameraSpring* c = system() ? system()->cameraSpring() : nullptr) {
+				c->look[0] = v.x;
+				c->look[1] = v.y;
+			}
+		});
 
 	// AnimationManager.*: the clip created last.
 	bindProperty<bool>(console, "AnimationManager.looping", kAccess,
@@ -144,7 +177,7 @@ void registerAnimationConsoleMethods(Console& console, AnimationSystems& systems
 		AnimationSystemTemplate* t = system();
 		Bundle* b = bundle();
 		if (t && b) {
-			b->clips.push_back({t->addClip(path), 0});
+			b->addClip(t->addClip(path));
 		}
 	});
 	bindMethod(console, "AnimationBundle.setAnimationStartTime", kAccess,
@@ -153,11 +186,7 @@ void registerAnimationConsoleMethods(Console& console, AnimationSystems& systems
 			Bundle* b = bundle();
 			const int index = t ? t->findClip(path) : -1;
 			if (b && index >= 0) {
-				for (Bundle::Entry& entry : b->clips) {
-					if (entry.clip == static_cast<size_t>(index)) {
-						entry.startTime = start;
-					}
-				}
+				b->setClipStart(static_cast<size_t>(index), start);
 			}
 		});
 	bindMethod(console, "AnimationBundle.setAnimationLength", kAccess, [system](std::string path, float length) {
@@ -167,10 +196,22 @@ void registerAnimationConsoleMethods(Console& console, AnimationSystems& systems
 			t->clips()[static_cast<size_t>(index)].length = length;
 		}
 	});
-	for (const char* name : {"addEvent", "removeEvent", "removeAnimation"}) {
-		bindMethod(console, std::string("AnimationBundle.") + name, kAccess, [](std::string) {}); // events: not yet
-	}
-	bindMethod(console, "AnimationBundle.setEventStartTime", kAccess, [](std::string, float) {});
+	bindMethod(console, "AnimationBundle.removeAnimation", kAccess, [](std::string) {});
+	bindMethod(console, "AnimationBundle.addEvent", kAccess, [bundle](std::string name) {
+		if (Bundle* b = bundle()) {
+			b->addEvent(name);
+		}
+	});
+	bindMethod(console, "AnimationBundle.removeEvent", kAccess, [bundle](std::string name) {
+		if (Bundle* b = bundle()) {
+			b->removeEvent(name);
+		}
+	});
+	bindMethod(console, "AnimationBundle.setEventStartTime", kAccess, [bundle](std::string name, float start) {
+		if (Bundle* b = bundle()) {
+			b->setEventStart(name, start);
+		}
+	});
 
 	// AnimationTrigger.*
 	bindMethod(console, "AnimationTrigger.addChild", kAccess, [system, trigger](std::string name) {

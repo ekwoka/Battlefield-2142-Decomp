@@ -49,9 +49,21 @@
 // still. Their speed key points give a factor the object multiplies into
 // its movement (0x008ba420).
 //
-// Not rewritten yet: animation events (sounds and effects, 0x008c3030),
-// camera springs, the per-clip sequencing of bundles whose clips start one
-// after another, abruptPlayback and jumpToLastAnimationAtStop.
+// A bundle's clips are kept as the original's list: each added first, then
+// moved by its start time (0x008bf1f0, 0x008bf280). A bundle with a
+// looping clip (0x34) plays its clips one after another: while queued the
+// looping clip repeats, and once no longer queued abruptPlayback skips to
+// that clip's end (0x008c3360); each clip is drawn until the next has
+// faded in (0x008c2e50). Events ("sound:N", "effect:N" at a time in the
+// bundle, 0x008bde00) fire as the bundle's time passes them (0x008c3030)
+// and go to the object's event handler (slot 0x100) as 0x36 + N or
+// 0x2c + N. abruptPlayback restarts a one-shot queued again while it plays
+// (0x008c29d0); jumpToLastAnimationAtStop plays the bundle at its own speed
+// whatever the trigger's rate (0x008c2950).
+//
+// A system may have a camera spring (animationSystem.cameraSpring.*,
+// 0x008b9670), which the soldier runs for the first-person view
+// (0x005ee980: CameraSpringState).
 #pragma once
 
 #include "AnimationFiles.h"
@@ -63,6 +75,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace dice::hfe::anim {
@@ -99,8 +112,24 @@ struct Bundle {
 		size_t clip;          // index into the system's clips
 		float startTime = 0;
 	};
+	// 0x008bde00: "effect:N" (type 2) or "sound:N" (type 1), N read by
+	// sscanf after the prefix ("sound:0_first" is sound 0); anything else
+	// is type 0 and fires nothing. Names are kept lower case (0x0065b190).
+	struct Event {
+		std::string name;
+		int type = 0;
+		int id = 0;
+		float startTime = 0;
+	};
+	enum EventType { NoEvent = 0, SoundEvent = 1, EffectEvent = 2 };
 	std::string name;
-	std::vector<Entry> clips; // in script order
+	// The original's list (0x4): addClip puts a clip first, setClipStart
+	// moves it before the first one starting at or after it, so the list is
+	// by start time and a bundle's clip index (0x008be470) counts from the
+	// front: the last one added is 0.
+	std::vector<Entry> clips;
+	std::vector<Event> events; // 0x10, by start time the same way
+	bool hasLoopingClip = false; // 0x34: set by finish
 	float length = 1;         // 0x1c: computed from the clips
 	float fadeInTime = 0.2f;  // 0x20
 	float fadeOutTime = 0.1f; // 0x24
@@ -125,6 +154,58 @@ struct Bundle {
 	KeyPoints speedKeyPoints;        // 0x64 / 0xb8: over the length
 	KeyPoints fadeOutSpeedKeyPoints; // 0x80 / 0xc8: over the fade out
 	KeyPoints fadeInSpeedKeyPoints;  // 0x9c / 0xd8: over the fade in
+
+	void addClip(size_t clip);                       // 0x008bf1f0
+	void setClipStart(size_t clip, float startTime); // 0x008bf280
+	void addEvent(const std::string& name);          // 0x008bf370
+	void removeEvent(const std::string& name);       // 0x008bf420
+	void setEventStart(const std::string& name, float startTime); // 0x008bf4d0
+	static Event parseEvent(const std::string& name); // 0x008bde00
+};
+
+// animationSystem.cameraSpring.* (0x008bbfe0, 0x50 bytes): per axis of the
+// view (x right, y up, z forward) how far the first-person rig may swing,
+// how much a zoom damps it, how fast it settles, and what pushes it.
+struct CameraSpring {
+	struct V {
+		float x = 0, y = 0, z = 0;
+		bool zero() const { return x == 0 && y == 0 && z == 0; }
+	};
+	V amplitude;   // 0x00: metres at a full swing
+	V zoomDamping; // 0x0c
+	V stiffness;   // 0x18
+	V move;        // 0x24: by the soldier's velocity
+	V hit;         // 0x30: kept, not read by the soldier's spring
+	V fire;        // 0x3c: by the weapon's recoil
+	float look[2] = {0, 0}; // 0x48: by the turn and the pitch
+	// 0x008bc390: a weapon's spring over the soldier's: each part the
+	// weapon sets (non-zero) replaces the soldier's.
+	void overrideBy(const CameraSpring& other);
+};
+
+// The soldier's first-person spring (0x005ee980, state at soldier +0x2f4):
+// three values in -1..1 that relax by the stiffness (0x005edda0: by
+// value^2 x stiffness x dt, at least anim-soldier-spring-clamp 0.001, to
+// 0 under 0.0001), pushed by the look, the movement and the recoil. The
+// first-person skeleton's root is moved by amplitude x value along the
+// view's axes (0x006acfa0, 0x008b8880).
+struct CameraSpringState {
+	float value[3] = {0, 0, 0};
+	struct Input {
+		float yawDelta = 0;    // degrees turned this tick (soldier +0x300)
+		float pitchDelta = 0;  // degrees pitched this tick (soldier +0x304)
+		// The velocity relative to what the soldier stands on (zero under
+		// 0.7 m/s when that moves) along the soldier's right, up and
+		// forward.
+		float right = 0, up = 0, forward = 0;
+		float recoil = 0;      // the weapon's kick this tick (0x005861a0)
+		// How far the view is zoomed: 0 not, 1 fully (the player's field of
+		// view between the default and the weapon's zoomed one).
+		float zoom = 0;
+	};
+	// One tick; returns the rig's offset in view space (x right, y up,
+	// z forward).
+	CameraSpring::V update(const CameraSpring& spring, const Input& input, float seconds);
 };
 
 // 0x008bffe0: split at ';' (empty pieces skipped), each piece read by atof.
@@ -189,8 +270,13 @@ public:
 	const std::vector<Bundle>& bundles() const { return m_bundles; }
 	std::vector<Trigger>& triggers() { return m_triggers; }
 	const std::vector<Trigger>& triggers() const { return m_triggers; }
+	// The camera spring (+0xc), null without cameraSpring.use 1.
+	const CameraSpring* cameraSpring() const { return m_cameraSpring.get(); }
+	CameraSpring* cameraSpring() { return m_cameraSpring.get(); }
+	void useCameraSpring(bool use); // 0x008b9670
 
-	// After loading: bundle lengths from their clips (0x008be400, needs the
+	// After loading (0x008bea30): whether each bundle has a looping clip,
+	// bundle lengths from their clips and events (0x008be400, needs the
 	// clips' lengths) and trigger priorities (0x008c0f50).
 	void finish(const std::function<float(const Clip&)>& clipLength);
 
@@ -199,25 +285,38 @@ private:
 	std::vector<Clip> m_clips;
 	std::vector<Bundle> m_bundles;
 	std::vector<Trigger> m_triggers;
+	std::unique_ptr<CameraSpring> m_cameraSpring;
 };
 
 // What triggers look at (the object's state, 0x008b9..: pose at 0x4,
-// messages at 0x8, direction at 0x14, speed at 0x20, vertical speed at
-// 0x3c).
+// messages at 0x8; from the movement setter 0x008b9ae0 (slot 0x38) the
+// direction at 0x14 (x side, y up, z forward), the speed at 0x20, the
+// accelerations at 0x2c and the last vector at 0x38).
 struct AnimationInput {
 	int pose = 0;            // 0 stand, 1 crouch, 2 prone, 3 swim
 	uint32_t messages = 0;   // held: 1 fire, 2 reload, 4 zoom...
 	uint32_t pulses = 0;     // for one update only
-	float side = 0;          // movement direction, right positive
-	float turn = 0;          // turning, radians per second, right positive
-	float forward = 0;       // movement direction, forward positive
-	float speed = 0;         // m/s
-	float upSpeed = 0;       // m/s
-	// The first two parts of the vector an object passes last to the
-	// system's movement setter (0x008b9ae0, kept at 0x38 and 0x3c):
+	float side = 0;          // movement direction (0x14), right positive
+	float forward = 0;       // movement direction (0x1c), forward positive
+	float speed = 0;         // m/s (0x20)
+	// The direction's y (0x18), which UpTrigger reads (0x008c4980): not
+	// part of the normalised direction. The soldier passes its jump state
+	// (0x005eef80, SoldierJumpAnimation): 1 rising in a jump, its vertical
+	// speed falling, 0 landing.
+	float upSpeed = 0;
+	// The time the object passes with its movement (0x008b9ae0's first
+	// argument). Over 0 the direction's x and z are smoothed by
+	// anim_smoothSet (10 per second, unless one of them swaps sign over
+	// 0.9) and the accelerations are taken; 0 sets the direction as given.
+	float movementSeconds = 0;
+	// The vector an object passes last to the movement setter (0x38, 0x3c,
+	// 0x40). TurnTrigger reads the second part (0x008c49e0): the soldier
+	// passes its rotational velocity, degrees per second (at most 1499,
+	// 0x0058a6d0), times 0.01 (0x005ef250), right positive.
 	// LookAroundTrigger blends by the first and plays to a time by the
-	// second (0x008c3d00). Seats and stationary weapons use it for where
-	// the occupant looks; what each object passes there isn't decoded.
+	// second (0x008c3d00); seats and stationary weapons use it for where
+	// the occupant looks (what they pass isn't decoded).
+	float turn = 0;
 	float lookAroundX = 0;
 	float lookAroundY = 0;
 	// The ground's slope under the object (slot 0x3c, 0x008b9970, kept at
@@ -295,6 +394,20 @@ public:
 	// the next one starts from (0x008c46d0).
 	float stepPhase() const { return m_phase; }
 
+	// The events the bundles passed since the last call (0x008c3030), in
+	// order: what the original hands the object's event handler (slot
+	// 0x100) as 0x36 + id for sounds and 0x2c + id for effects.
+	struct FiredEvent {
+		int type = 0; // Bundle::SoundEvent or Bundle::EffectEvent
+		int id = 0;
+		size_t bundle = 0;
+	};
+	std::vector<FiredEvent> takeEvents() { return std::exchange(m_events, {}); }
+	// The direction the triggers see after smoothing (0x14, 0x18, 0x1c)
+	// and the accelerations (0x2c, 0x30, 0x34).
+	float direction(int axis) const { return m_direction[axis]; }
+	float acceleration(int axis) const { return m_acceleration[axis]; }
+
 	struct Instance {
 		size_t bundle;           // 0x18
 		size_t trigger;          // 0x1c
@@ -317,9 +430,11 @@ public:
 		float fadeOutLeft = 0;   // 0x8
 		float fadeInLeft = 0;    // 0xc
 		bool still = false;      // 0x65: advanced by no time this update
-		// 0x68: clips by index (from the end) with their weights, drawn
-		// instead of the bundle's clips (SlopeTrigger's layers).
+		// 0x68: clips by index with their weights, drawn instead of the
+		// bundle's clips (SlopeTrigger's layers).
 		std::vector<std::pair<int, float>> layers;
+		size_t nextEvent = 0;    // 0x14: the first event not yet fired
+		float jumpOffset = 0;    // 0x40: how far abruptPlayback skipped
 	};
 	const std::vector<Instance>& instances() const { return m_instances; }
 	// Bundle names playing, by priority (for checks and debugging).
@@ -332,6 +447,8 @@ private:
 	bool advance(Instance& instance, float seconds);
 	bool advanceNew(Instance& instance, float seconds);
 	void setDirection(Instance& instance, float blend, int strafe, int forwardOrBack) const;
+	void setMovement(const AnimationInput& input); // 0x008b9ae0
+	void fireEvents(Instance& instance);           // 0x008c3030
 	void setFadingTrigger(size_t trigger);
 	const Clip* bundleClip(const Bundle& bundle, int index) const;
 	int priorityOf(const Trigger& trigger) const;
@@ -348,12 +465,41 @@ private:
 	float m_fadeLeft = 0;    // 0x74
 	int m_fadingTrigger = -1; // 0x7c
 	float m_phase = 0;       // 0x4c
+	float m_direction[3] = {0, 0, 0};    // 0x14
+	float m_speed = 0;                   // 0x20
+	float m_acceleration[3] = {0, 0, 0}; // 0x2c
+	std::vector<FiredEvent> m_events;
 	float m_slopeForward = 0, m_slopeSide = 0; // 0x24, 0x28
 	std::map<uint32_t, bool> m_switches; // 0x98 (CountTrigger: key 1)
 	float m_idleTime = 0;    // 0x44: time with one bundle playing
 	std::map<size_t, float> m_idleNext; // IdleTrigger 0x3c, per trigger
 	uint32_t m_random = 0x759dc150;
 	uint32_t nextRandom();
+};
+
+// The soldier's up value for its system (0x005ef250 with 0x005eef80; the
+// state at soldier +0x2e8 and +0x2e9). Standing on something (the
+// response's +0xf9) clears it and gives 0. In the air: rising at
+// anim_startJumpAtSpeed (2.5 m/s) or more starts a jump (the jump sound),
+// which reads 1 until the landing is seen; falling faster than
+// anim_startLandAtSpeed (-0.5 m/s) a ray from the feet (a metre under the
+// origin) along the velocity, anim_startLandAtHeight (1 m) long (straight
+// down that far when slower than 1 m/s), looks for the ground (objects,
+// then the heightmap); found, the landing starts (the land sound) and from
+// then on the value is the vertical speed. Otherwise the value is the
+// vertical speed while falling, else 0.
+struct SoldierJumpAnimation {
+	static constexpr float kStartJumpAtSpeed = 2.5f;  // anim_startJumpAtSpeed
+	static constexpr float kStartLandAtSpeed = -0.5f; // anim_startLandAtSpeed
+	static constexpr float kStartLandAtHeight = 1.0f; // anim_startLandAtHeight
+	bool landing = false; // +0x2e8
+	bool jumping = false; // +0x2e9
+	enum class Sound { None, Jump, Land };
+	// `ground(way)`: whether the segment from the feet along `way` meets
+	// the ground. `sound`: what the soldier's sound set plays (both are
+	// 0x007fd970's sound; the landing's only for 0x007fdcd0's player check).
+	float update(bool onGround, const float velocity[3], const std::function<bool(const float way[3])>& ground,
+		Sound& sound);
 };
 
 } // namespace dice::hfe::anim

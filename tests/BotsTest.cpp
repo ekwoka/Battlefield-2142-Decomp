@@ -1669,3 +1669,365 @@ TEST(Bots_HornTarget)
 	players[1].team = 2;
 	CHECK(game::hornTarget(centre, {0, 0, -1}, 2.5f, 2, 0, players) == 3); // backing: the one behind
 }
+
+// The soldier's AI radius (BF2142.exe 0x006f6b90 through the AI adaptor's
+// vt+0xdc): the built-in Soldier_CollisionMesh's box (0x006e4880: x and z
+// +-0.4, y -1..0.8), its farthest corner from the origin (0x006aeda0).
+TEST(Bots_SoldierAiRadius)
+{
+	CHECK(near(game::soldierAiRadius(), std::sqrt(1.32f)));
+	CHECK(near(game::soldierAiRadius(), 1.1489f, 1e-3f));
+}
+
+// KitType (0x0088f6b0), the AI radio messages' types (BF2142.exe's table
+// in 0x0088f000) and their times to live (aiComm.addAIRadioMessage), and a
+// seat's select key (aiTemplatePlugIn.setSelectKey).
+TEST(Bots_KitTypesRadioAndSelectKeys)
+{
+	CHECK(game::kitTypeIndex("Recon") == 0 && game::kitTypeIndex("KTAssault") == 1 && game::kitTypeIndex("Support") == 2);
+	CHECK(game::kitTypeIndex("AT") == 3 && game::kitTypeIndex("Engineer") == 4 && game::kitTypeIndex("5") == 5);
+	CHECK(game::kitTypeIndex("Sniper") == 7 && game::kitTypeIndex("Anti-Vehicle") == -1);
+	CHECK(game::radioMessageType("bail_out") == 0 && game::radioMessageType("medic") == 3);
+	CHECK(game::radioMessageType("need_repair") == 4 && game::radioMessageType("need_ammo") == 10);
+	CHECK(game::radioMessageType("req_new_order") == 14 && game::radioMessageType("move") == 17);
+	CHECK(game::radioMessageType("COMMSL_COMRADIO_divide") == 21 && game::radioMessageType("hello") == -1);
+	Console console;
+	game::BotSettings settings;
+	game::registerBotConsoleMethods(console, settings);
+	CHECK(near(settings.radioLifeOf(3), 20) && near(settings.radioLifeOf(14), 1));
+	std::string out;
+	for (const char* line : {"aiComm.addAIRadioMessage \"medic\" 10 20 7", "aiTemplatePlugIn.create Unit Gunner",
+			 "aiTemplatePlugIn.setSelectKey PIPositionSelect2"}) {
+		console.execute(line, out);
+	}
+	CHECK(near(settings.radioLifeOf(3), 7));
+	CHECK(settings.aiPlugins["gunner"].selectKey == 2);
+}
+
+// The explosive's lob (0x100fa440): the higher arc; a round thrown along it
+// comes down on the target point.
+TEST(Bots_LobDirection)
+{
+	const float g = -14.73f, v = 20;
+	for (const physics::Vec3& d : {physics::Vec3 {15, 0, 5}, physics::Vec3 {-8, 3, 12}, physics::Vec3 {20, -4, 0}}) {
+		physics::Vec3 dir;
+		CHECK(game::lobDirection(d, v, g, dir));
+		CHECK(near(physics::lengthSquared(dir), 1, 1e-4f));
+		const float across = std::sqrt(d.x * d.x + d.z * d.z);
+		const float horizontal = std::sqrt(dir.x * dir.x + dir.z * dir.z);
+		CHECK(dir.y > horizontal * (across > 0 ? std::fabs(d.y) / across : 0)); // above the line of sight
+		const float t = across / (v * horizontal);
+		CHECK(near(v * dir.y * t + 0.5f * g * t * t, d.y, 0.02f));
+		CHECK(near(dir.x / horizontal, d.x / across, 1e-4f) && near(dir.z / horizontal, d.z / across, 1e-4f));
+		CHECK(std::atan2(dir.y, horizontal) > 3.14159265f / 4); // the high arc
+	}
+	physics::Vec3 dir;
+	CHECK(!game::lobDirection({40, 0, 0}, v, g, dir)); // beyond v^2 / g = 27 m
+}
+
+// The explosive bonus of the weapon choice (0x10074ef0).
+TEST(Bots_ExplosivePick)
+{
+	game::ExplosivePick base;
+	base.explosionRadius = 9;
+	base.thrown = true;
+	base.maxRange = 30;
+	base.distance = 20;
+	base.now = 100;
+	base.seen = true;
+	base.secondHand = true;
+	base.seenAt = 99;
+	CHECK(game::explosivePick(base));
+	game::ExplosivePick p = base;
+	p.secondHand = false; // seen by the bot itself
+	CHECK(!game::explosivePick(p));
+	p.heightAbove = 31; // high, but thrown
+	CHECK(!game::explosivePick(p));
+	p.thrown = false; // a launcher: over 30 m higher counts (the range grows by 1.25 dh)
+	CHECK(game::explosivePick(p));
+	p = base;
+	p.distance = 9; // within 10 m when not more than 3 m higher
+	CHECK(!game::explosivePick(p));
+	p.heightAbove = 3.5f; // 5 m then
+	CHECK(game::explosivePick(p));
+	p = base;
+	p.lobbing = true;
+	p.distance = 9.5f; // the lob widens it by 1 m
+	CHECK(game::explosivePick(p));
+	p = base;
+	p.distance = 31;
+	CHECK(!game::explosivePick(p));
+	p = base;
+	p.seenAt = 89; // seen more than 10 s ago
+	CHECK(!game::explosivePick(p));
+	p = base;
+	p.conditionFailedAt = 95; // the plan's condition failed within 10 s
+	CHECK(!game::explosivePick(p));
+	p = base;
+	p.explosiveShots[0] = 92; // its last explosive round within 10 s
+	CHECK(!game::explosivePick(p));
+	p.thrown = false;
+	p.fireMode2 = true; // automatic: the third last counts
+	CHECK(game::explosivePick(p));
+	p = base;
+	p.targetSoldier = false;
+	CHECK(!game::explosivePick(p));
+	// In a vehicle: minRange up, seen within 5 s, the vehicle's stamp.
+	p = base;
+	p.soldierBot = false;
+	p.secondHand = false;
+	p.minRange = 25;
+	CHECK(!game::explosivePick(p));
+	p.minRange = 2;
+	p.distance = 3;
+	CHECK(game::explosivePick(p));
+	p.seenAt = 94;
+	CHECK(!game::explosivePick(p));
+	p.seenAt = 99;
+	p.vehicleFailedAt = 96;
+	CHECK(!game::explosivePick(p));
+}
+
+// A bot's fire plan tells its squad of the target (0x100795a0 ->
+// 0x10089b70 -> 0x100c1ce0); a squadmate that can't see the target knows
+// it then, from others (flag 8), and lobs its grenade at it: the weapon
+// choice's bonus (0x10074ef0), the high arc (0x100fa440) and the start
+// condition (0x100d8910).
+TEST(Bots_SquadTargetAndGrenadeLob)
+{
+	Field field;
+	world::ObjectTemplate* frag = field.templates.create("GenericFireArm", "test_frag");
+	frag->settings()["itemIndex"] = "4";
+	frag->settings()["projectileTemplate"] = "test_frag_shell";
+	frag->settings()["velocity"] = "20";
+	frag->settings()["ammo.magSize"] = "1";
+	frag->settings()["ammo.nrOfMags"] = "3";
+	world::ObjectTemplate* shell = field.templates.create("GenericProjectile", "test_frag_shell");
+	shell->settings()["physicsType"] = "RotationalPoint";
+	shell->settings()["timeToLive"] = "CRD_NONE/3/0/0";
+	shell->settings()["detonation.explosionDamage"] = "1";
+	shell->settings()["detonation.explosionRadius"] = "9";
+	world::ObjectTemplate* kit = field.templates.create("Kit", "test_grenadier_kit");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	kit->children().push_back({"test_frag", {}, {}});
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	std::string out;
+	for (const char* line : {"aiSettings.setViewDistance 15", "weaponTemplate.create test_frag", "weaponTemplate.isThrown 1",
+			 "weaponTemplate.setExplosionRadius 9", "weaponTemplate.maxRange 40", "weaponTemplate.setStrength Infantry 1",
+			 "weaponTemplate.create eu_ar_rifle", "weaponTemplate.maxRange 100", "weaponTemplate.setStrength Infantry 1"}) {
+		console.execute(line, out);
+	}
+	game::BotManager bots(*field.world, settings);
+	const int spotter = field.world->addPlayer("Spotter", 2, true);
+	const int grenadier = field.world->addPlayer("Grenadier", 2, true);
+	field.world->setKit(grenadier, "test_grenadier_kit", "us_light_soldier");
+	for (int id : {spotter, grenadier}) {
+		field.world->joinSquad(id, 1);
+		field.world->spawnSoldier(id);
+	}
+	const int enemy = field.soldier(1, false, 0, 50);
+	field.move(spotter, 0, 42);   // 8 m from the enemy: within the 9.6 m it sees
+	field.move(grenadier, 0, 30); // 20 m: out of its sight
+	bool knew = false, picked = false, threw = false;
+	for (int tick = 0; tick < 30 * 12 && !threw; ++tick) {
+		field.move(enemy, 0, 50);
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+		knew = knew || bots.knows(grenadier, enemy);
+		picked = picked || bots.explosive(grenadier);
+		for (const game::Projectile& p : field.world->projectiles()) {
+			threw = threw || (p.player == grenadier && p.settings && p.settings->bounces);
+		}
+	}
+	CHECK(knew);
+	CHECK(picked);
+	CHECK(threw);
+}
+
+// MedicAssist and the radio (0x10070200): a human squadmate's "medic"
+// (type 3) heard and the best a human within 50 m: urgency 100 (the squad
+// factor 1 for the bot's own task). A squadmate with a Medic kit (KitType 5)
+// is left to itself (0x100c28e0).
+TEST(Bots_MedicRadioAndKitTypes)
+{
+	for (bool medicKit : {false, true}) {
+		Field field;
+		world::ObjectTemplate* hub = field.templates.create("GenericFireArm", "test_hub_medic");
+		hub->settings()["itemIndex"] = "4";
+		hub->settings()["ammo.replenishingType"] = "RTHeal";
+		hub->settings()["projectileTemplate"] = "test_hub_object";
+		field.templates.create("SimpleObject", "test_hub_object");
+		world::ObjectTemplate* kit = field.templates.create("Kit", "test_medic_kit");
+		kit->children().push_back({"eu_ar_rifle", {}, {}});
+		kit->children().push_back({"test_hub_medic", {}, {}});
+		world::ObjectTemplate* patientKit = field.templates.create("Kit", "test_patient_kit");
+		patientKit->settings()["kitType"] = medicKit ? "Medic" : "Assault";
+		patientKit->children().push_back({"eu_ar_rifle", {}, {}});
+		Console console;
+		game::BotSettings settings = assistSettings(console);
+		std::string out;
+		console.execute("weaponTemplate.create test_hub_medic", out);
+		console.execute("weaponTemplate.weaponType Healing", out);
+		console.execute("weaponTemplate.maxRange 70", out);
+		game::BotManager bots(*field.world, settings);
+		const int medic = field.world->addPlayer("Medic", 2, true);
+		field.world->setKit(medic, "test_medic_kit", "us_light_soldier");
+		const int patient = field.world->addPlayer("Patient", 2, false);
+		field.world->setKit(patient, "test_patient_kit", "us_light_soldier");
+		for (int id : {medic, patient}) {
+			field.world->joinSquad(id, 1);
+			field.world->spawnSoldier(id);
+		}
+		field.move(medic, -90, 0);
+		field.move(patient, -90, 30);
+		game::GameWorld::PlayerInfo info;
+		field.world->playerInfo(patient, info);
+		field.world->setHitPoints(info.soldier, 90);
+		settle(bots, 1.0f);
+		const float before = bots.lastUrgency(medic, "MedicAssist");
+		bots.radio(patient, "medic");
+		settle(bots, 1.0f);
+		const float after = bots.lastUrgency(medic, "MedicAssist");
+		if (medicKit) {
+			CHECK(before == 0 && after == 0);
+		} else {
+			CHECK(before > 0 && before < 100);
+			CHECK(near(after, 100, 1e-3f)); // the bot's own task by then: factor 1
+		}
+	}
+}
+
+// Changing seats inside a vehicle (BBChange 0x1006c520 in a vehicle, the
+// plan 0x1006dac0): the driver alone weighs its seat x2 (9), the gunner's
+// seat as another's x0.77 (an ITGround root with Mobile, the bot driving:
+// 0x1006b910): 2 x 8 x 0.77 = 12.3, and presses that seat's select key
+// (setSelectKey PIPositionSelect2).
+TEST(Bots_ChangesSeatInsideAVehicle)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	Console console {&files};
+	bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+		[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+	std::string out;
+	console.run("ServerArchives.con", {}, out);
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	physics::CollisionTemplateManager collisionTemplates;
+	templates.registerType(1, "ControlPoint");
+	templates.registerType(2, "SpawnPoint");
+	templates.registerType(3, "Soldier");
+	templates.registerType(7, "PlayerControlObject");
+	templates.registerType(8, "EntryPoint");
+	templates.registerType(9, "Engine");
+	templates.registerType(10, "Spring");
+	templates.registerType(11, "RotationalBundle");
+	templates.registerType(12, "GenericFireArm");
+	templates.create("Soldier", "us_light_soldier")->settings()["armor.maxHitPoints"] = "100";
+	world::ObjectTemplate* point = templates.create("ControlPoint", "cp_eu");
+	point->settings()["controlPointId"] = "2";
+	point->settings()["team"] = "2";
+	point->settings()["unableToChangeTeam"] = "1";
+	objects.create(point, {-100, 0, 0});
+	objects.create(templates.create("SpawnPoint", "sp"), {0, 0, 0})->setControlPointId(2);
+	collisionTemplates.create("as_fav", "Objects/Vehicles/as_fav/");
+	world::ObjectTemplate* car = templates.create("PlayerControlObject", "car");
+	car->settings()["hasMobilePhysics"] = "1";
+	car->settings()["physicsType"] = "Mesh";
+	car->settings()["collisionMesh"] = "as_fav";
+	car->settings()["seatInformation"] = "car 0/0.5/0.4 0/0/0";
+	car->settings()["mass"] = "1800";
+	car->settings()["aiTemplate"] = "TestCar";
+	car->children().push_back({"car_entry", {-1.5f, 0, 0}, {}});
+	car->children().push_back({"car_second", {0, 0, -0.5f}, {}});
+	world::ObjectTemplate* second = templates.create("PlayerControlObject", "car_second");
+	second->settings()["seatInformation"] = "car_second 0/0.5/-0.5 0/0/0";
+	second->settings()["aiTemplate"] = "TestGunner";
+	second->children().push_back({"car_base", {0, 0.8f, 0}, {}});
+	world::ObjectTemplate* base = templates.create("RotationalBundle", "car_base");
+	base->settings()["inputToYaw"] = "PIMouseLookX";
+	base->children().push_back({"car_firearm", {0, 0.1f, 0}, {}});
+	templates.create("GenericFireArm", "car_firearm")->settings()["projectileTemplate"] = "bullet";
+	world::ObjectTemplate* engine = templates.create("Engine", "car_engine");
+	engine->settings()["engineType"] = "194";
+	world::ObjectTemplate* wheel = templates.create("Spring", "car_wheel");
+	wheel->settings()["strength"] = "40";
+	wheel->settings()["damping"] = "8";
+	car->children().push_back({"car_engine", {0, -0.44f, 0}, {}});
+	for (float x : {-0.95f, 0.95f}) {
+		for (float z : {-1.4f, 1.6f}) {
+			engine->children().push_back({"car_wheel", {x, -0.15f, z}, {}});
+		}
+	}
+	templates.create("EntryPoint", "car_entry")->settings()["entryRadius"] = "3";
+	game::BotSettings settings;
+	game::registerBotConsoleMethods(console, settings);
+	for (const char* line : {"aiTemplatePlugIn.create Mobile TestCar_Mobile", "aiTemplatePlugIn.maxSpeed 20",
+			 "aiTemplate.create TestCar", "aiTemplate.addType ITGround", "aiTemplate.addPlugIn TestCar_Mobile",
+			 "aiTemplatePlugIn.create Unit TestGunner_Unit", "aiTemplatePlugIn.equipmentTypeName Fixed",
+			 "aiTemplatePlugIn.setSelectKey PIPositionSelect2", "aiTemplate.create TestGunner",
+			 "aiTemplate.addPlugIn TestGunner_Unit", "weaponTemplate.create car_firearm",
+			 "weaponTemplate.setStrength Infantry 2", "weaponTemplate.setStrength LightArmour 2",
+			 "weaponTemplate.setStrength HeavyArmour 2", "weaponTemplate.setStrength Helicopter 2",
+			 "aiSettings.createBehaviourModifiers UnitWeights", "aiSettings.setBehaviourModifier Idle 1.0",
+			 "aiSettings.createBehaviourModifiers StandardWeights", "aiSettings.setBehaviourModifier Idle 0.1",
+			 "aiSettings.setBehaviourModifier Change 1.9", "aiSettings.createUCConstant UCUnion 1.0",
+			 "aiSettings.setVehicleBehaviour Car Change BBChange BBPChange 3 UCUnion UnitWeights",
+			 "aiSettings.setVehicleBehaviour Car Idle BBIdle BBPIdle2d 5 UCUnion UnitWeights",
+			 "aiSettings.setVehicleDefaultBehaviour Car Idle",
+			 "aiSettings.setVehicleBehaviour Fixed Idle BBIdle BBPIdle2d 5 UCUnion UnitWeights",
+			 "aiSettings.setVehicleDefaultBehaviour Fixed Idle"}) {
+		console.execute(line, out);
+	}
+	CHECK(near(settings.weapon("car_firearm").strength[0], 2));
+	game::GameWorld world(templates, objects);
+	world.enablePhysics(files, collisionTemplates,
+		{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
+			 normal = {0, 1, 0};
+			 return 0.0f;
+		 }});
+	world.autoRespawn = false;
+	world.startRound();
+	const uint32_t vehicle = objects.create(car, {3, 1.2f, 0}, {30, 0, 0})->id();
+	const int bot = world.addPlayer("Bot", 2, true);
+	CHECK(world.spawnSoldier(bot));
+	game::GameWorld::PlayerInfo info;
+	world.playerInfo(bot, info);
+	world.setSoldierPosition(info.soldier, {0, 0, 0});
+	for (int tick = 0; tick < 90; ++tick) {
+		world.tick(1 / 30.0f); // the car settles
+	}
+	game::SoldierInput input;
+	input.use = true;
+	world.setInput(bot, input);
+	world.tick(1 / 30.0f);
+	world.setInput(bot, {});
+	world.playerInfo(bot, info);
+	CHECK(info.vehicle == vehicle && info.seat == 0);
+	CHECK(world.vehicleSeats(vehicle).size() == 2);
+	game::BotManager bots(world, settings);
+	bool changing = false;
+	for (int tick = 0; tick < 30 * 5 && info.seat != 1; ++tick) {
+		bots.update(1 / 30.0f);
+		world.tick(1 / 30.0f);
+		changing = changing || bots.behaviour(bot) == "Change";
+		world.playerInfo(bot, info);
+	}
+	CHECK(changing);
+	CHECK(info.vehicle == vehicle && info.seat == 1);
+	CHECK(near(bots.seatValueFor(bot, vehicle, 0), 4.5f, 0.05f)); // the driver's seat: its move only
+	// Gunning now: its own seat 2 x 16 x 0.77 (the driver's seat empty)
+	// against the driver's seat's 4.5: it stays.
+	for (int tick = 0; tick < 30 * 3; ++tick) {
+		bots.update(1 / 30.0f);
+		world.tick(1 / 30.0f);
+	}
+	world.playerInfo(bot, info);
+	CHECK(info.seat == 1);
+}

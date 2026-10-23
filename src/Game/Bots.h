@@ -120,6 +120,9 @@ struct AiPlugin {
 	bool floating = false;
 	// Unit: setHasExposedSoldier (+0x16; the seat value's armour bonus).
 	bool exposedSoldier = false;
+	// Unit: setSelectKey PIPositionSelectN (read through 0x100aa5f0): the
+	// position key that moves a bot to this seat, N; 0 for none.
+	int selectKey = 0;
 	// ControlInfo.
 	float proportional = 0, derivative = 0, angleSpeed = 0, yawScale = 1;
 	bool hasGains = false;
@@ -168,6 +171,61 @@ bool transportClose(bool own, float botToInfantrySpot2, float vehicleToVehicleSp
 // sets nothing).
 uint32_t informationTypeFlag(const std::string& name);
 
+// The soldier's AI radius (the AI adaptor's vt+0xdc -> BF2142.exe 0x008a3d40
+// -> the soldier object's vt+0x90, 0x006f6b90): its collision mesh's radius
+// (interface 0xcaa32 at +0x4c, the instance 0x006e5d70 whose slot 0x74,
+// 0x006e5ad0 -> 0x006dedb0, reads its first LOD's +0xc0), plus the object's
+// vt+0x94 (0x005b6b80: 0) and at least each child's radius plus its offset
+// (the soldier's children have no collision mesh: 0). Every soldier template
+// names the built-in Soldier_CollisionMesh (0x006d8740 -> 0x006e4880 with no
+// file), whose points span x and z +-0.4 and y -1..0.8: the farthest corner
+// of that box (0x006aeda0), sqrt(0.4^2 + 1 + 0.4^2) = 1.149 m.
+float soldierAiRadius();
+
+// KitType (BF2142.exe 0x0088f6b0: KTRecon/Recon/0, KTAssault 1, KTSupport 2,
+// KTAT 3, KTEngineer 4, KTMedic 5, KTSpecops 6, KTSniper 7, KTExtended1 8,
+// KTExtended2 9), -1 for none. The player's +0x58 (player vt+0x1a4, read
+// by the AI player adaptor's slot 0x40, 0x008a5020) holds its kit's.
+int kitTypeIndex(const std::string& name);
+
+// The AI radio messages (BF2142.exe 0x0088f000's table, the ids the comm
+// object files them under, AIDLL 0x100a6fe0): bail_out 0, get_in 1,
+// req_pickup 2, medic 3, need_repair 4, roger_that 6, negative 7,
+// PLAYER_CONFIRM_thankyou 8, PLAYER_CONFIRM_sorry 9, need_ammo 10,
+// PLAYER_TACTICS_gogogo 11, PLAYER_TACTICS_followme 12, laserpaint 13,
+// req_new_order 14, defend 15, attack_position 16, move 17,
+// COMMSL_COMRADIO_commend 18, rebuke 19, followorders 20, divide 21; -1 for
+// another name.
+int radioMessageType(const std::string& voiceName);
+
+// The lob (AIDLL 0x100fa440, the explosive aim of 0x100dbd10): the launch
+// direction that carries a round of `speed` along `d` (target - muzzle)
+// under `gravity` (negative: down), the higher of the two arcs; false when
+// out of reach.
+bool lobDirection(const physics::Vec3& d, float speed, float gravity, physics::Vec3& direction);
+
+// The explosive bonus of the weapon choice (AIDLL 0x10074ef0, x100 on the
+// weapon's score and the bot's +0x249 set, vt+0x260): see BotManager::fireUrgency.
+struct ExplosivePick {
+	bool soldierBot = true;      // the bot's object is ITSoldier
+	bool targetSoldier = true;   // the target's is
+	float explosionRadius = 0;   // the weapon's +0x20 (0 for none)
+	bool thrown = false, sniper = false;
+	bool fireMode2 = false;      // aiWeapon slot 0x104 (automatic)
+	float minRange = 0, maxRange = 0;
+	float distance = 0;          // to the target
+	float heightAbove = 0;       // the target's height over the bot
+	bool lobbing = false;        // the bot's +0x208 (the aim's lob, vt+0x208)
+	float now = 0;
+	float conditionFailedAt = -1e9f; // +0x1f8 (soldier; 0x100d8910's failure)
+	float vehicleFailedAt = -1e9f;   // +0x250 (vehicle; 0x100d8450's failure)
+	bool seen = false;           // the memory item's flag 2
+	bool secondHand = false;     // its flag 8: known from others, not seen by the bot itself
+	float seenAt = -1e9f;        // its +0x58
+	float explosiveShots[3] = {-1e9f, -1e9f, -1e9f}; // the bot's +0x1e0.. (newest first)
+};
+bool explosivePick(const ExplosivePick& pick);
+
 struct BotSettings {
 	float skill = 0.4f;   // aiSettings.setBotSkill (0..1)
 	int maxBots = 16;     // aiSettings.setMaxNBots
@@ -201,6 +259,11 @@ struct BotSettings {
 	std::map<std::string, AiTemplate> aiTemplates;
 	std::map<std::string, AiPlugin> aiPlugins;
 	std::string editingTemplate, editingPlugin;
+	// aiComm.addAIRadioMessage <voice> <modifier> <max send period> <receive
+	// time to live> (AI/AIRadioMessages.ai; the comm object's +0x54 per
+	// type): the seconds a received message is kept, by type.
+	std::map<int, float> radioLife;
+	float radioLifeOf(int type) const;
 	// The plug-in of a kind an AI template holds (null for none).
 	const AiPlugin* plugin(const std::string& aiTemplate, const std::string& kind) const;
 	// The template's ai::InformationType flags (aiTemplate.addType,
@@ -276,7 +339,16 @@ public:
 	std::string strategy(int team) const;
 	// Whether a driving bot holds its vehicle's horn (PIFire; 0x100a5c00).
 	bool honking(int player) const;
-
+	// Whether the bot's weapon choice gave the explosive bonus (its +0x249).
+	bool explosive(int player) const;
+	// A behaviour's urgency at the bot's last think (0 for none).
+	float lastUrgency(int player, const std::string& behaviour) const;
+	// A radio message (the game's AI event 0x1004e140 -> 0x10030b20 ->
+	// 0x100a6fe0): `voiceName` from AI/AIRadioMessages.ai ("medic",
+	// "need_ammo", ...) said by `sender`, heard by `receiver`, or with -1 by
+	// every bot of the sender's team (who hears the radio is the game's
+	// matter, not traced). A bot doesn't hear itself.
+	void radio(int sender, const std::string& voiceName, int receiver = -1);
 private:
 	// An enemy a bot knows of (the sensing agent's memory item).
 	struct Known {
@@ -285,7 +357,11 @@ private:
 		float seen = -1e9f;     // when it was last seen
 		float lostAt = -1;      // when it went out of sight, -1 while in sight
 		float alertAt = -1e9f;  // a round passed by (360 degree awareness for 5 s)
-		bool everSeen = false;
+		bool everSeen = false;  // the memory item's flag 2
+		// Flag 8 (0x100ed2c0): learnt from another (a squadmate's fire plan,
+		// someone in the same vehicle) and not seen by the bot itself since.
+		bool secondHand = false;
+		float seenAt = -1e9f;   // +0x58: when anyone last saw it
 	};
 	struct Bot {
 		ai::Arbitration arbitration;
@@ -308,7 +384,15 @@ private:
 		float devYaw = 0, devPitch = 0; // the aim deviation applied (degrees)
 		bool tapped = false;      // Trigger: pressed last tick
 		bool heatStop = false;
-		bool reportedFiring = false; // the fire report's last state    // the heat condition (0x100d9040) in its cooling state
+		bool reportedFiring = false;
+		// Explosives (0x10074ef0, 0x100777a0, 0x100d8910, 0x100d8450).
+		bool explosive = false;          // +0x249: the weapon choice's bonus applied
+		bool lobbing = false;            // +0x208: the aim lobs (0x100dbd10)
+		float conditionFailedAt = -1e9f; // +0x1f8
+		float vehicleFailedAt = -1e9f;   // +0x250
+		float lobFailedAt = -1e9f;       // +0x200: a lob's condition failed
+		float explosiveShots[3] = {-1e9f, -1e9f, -1e9f}; // +0x1e0, +0x1e8, +0x1f0
+		int sharedTarget = -1;           // the target the fire plan told the squad of // the fire report's last state    // the heat condition (0x100d9040) in its cooling state
 		float poseRequested = -10;
 		SoldierPose pose = SoldierPose::Stand;
 		// Goal (MoveTo).
@@ -320,6 +404,7 @@ private:
 		physics::Vec3 orderPosition;
 		// Change.
 		uint32_t vehicleTarget = 0;
+		int seatTarget = -1;         // a seat of the bot's own vehicle (-1: any seat of vehicleTarget)
 		// Flee (BBPFlee's plan 0x10085fc0).
 		physics::Vec3 fleeDirection;
 		bool planLocked = false;     // bot+0x7c: the plan runs to its end, no arbitration
@@ -332,8 +417,7 @@ private:
 		int followId = -1;           // what it follows (a goal id)
 		physics::Vec3 followTo;
 		float followAt = -100;
-		float unstickUntil = 0;      // the jump's stand-in (see steer)
-		float unstickSide = 1;
+		float jumpUntil = -1;        // PIAction held (the follower's jump, 0x10095720 / 0x10092bc0)
 		ai::DriveState drive;
 		ai::SidestepState sidestep;  // the move's (0x100ce860 +0x64..+0x80)
 		float lastYaw = 0;           // the vehicle's, for its turn rate
@@ -386,6 +470,15 @@ private:
 		bool hornHeld = false;
 		float waitingSince = -1;  // Idle: a driver waiting for a passenger
 		bool usedLast = false;    // presses: use and the defibrillator want a release between
+		bool switchedLast = false;
+		// The comm object's received radio messages (bot vt+0xa4, +0xc: a
+		// list per type, 0x100a6fe0), each kept for its lifetime (0x100a7130).
+		struct Radio {
+			int type = -1;
+			int sender = -1;
+			float at = 0;
+		};
+		std::vector<Radio> radio;
 		bool firedLast = false;
 	};
 	// The side's strategic AI.
@@ -406,6 +499,7 @@ private:
 	float urgency(Bot& bot, const ai::BehaviourSetup& behaviour, float weight, const GameWorld::PlayerInfo& self,
 		const std::vector<GameWorld::PlayerInfo>& players);
 	float fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players);
+	void pickExplosive(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players);
 	float moveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight);
 	float reviveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players);
 	float changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight);
@@ -430,6 +524,23 @@ private:
 	// take the task (Medic 1, Repair 2, Ammo 4) on a target.
 	float coordination(const GameWorld::PlayerInfo& self, int type, int64_t target, int targetPlayer,
 		const physics::Vec3& at) const;
+	// The fire plan's word to the squad (0x10089b70 -> 0x100c1ce0).
+	void shareTarget(const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& target);
+	// A player's kit's KitType (kitTypeIndex), -1 for none.
+	int kitTypeOf(const GameWorld::PlayerInfo& player) const;
+	// Whether a radio message of `type` from `sender` is held (0x100a6160).
+	bool heard(const Bot& bot, int type, int sender) const;
+	// The explosive start conditions of the fire plan (0x100d8910 and
+	// 0x100d8450; see Bots.cpp): true when the trigger may go.
+	bool explosiveClear(Bot& bot, const GameWorld::PlayerInfo& self, const physics::Vec3& muzzle,
+		const physics::Vec3& aimDirection, const physics::Vec3& targetPoint, const WeaponAi& weapon,
+		const std::string& weaponTemplate, bool soldierBot);
+	// The first point the segment from..to is blocked at (bisecting
+	// GameWorld::lineOfSight), false when it is clear.
+	bool firstBlocked(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore, physics::Vec3& hit) const;
+	// A thrown or fired round's launch speed and gravity (the AI weapon's
+	// +0x28 and +0x2c x the world's gravity).
+	void ballistics(const std::string& weaponTemplate, float& speed, float& gravity) const;
 	// Plans.
 	void assist(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds, bool ammo);
 	void repair(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);

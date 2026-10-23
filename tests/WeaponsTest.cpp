@@ -304,3 +304,33 @@ TEST(Weapons_BlastPush)
 	blast.inWater = true;
 	CHECK(std::fabs(std::sqrt(physics::lengthSquared(game::blastPush(blast))) - 8) < 1e-3f);
 }
+
+// A detonation with a negative explosionDamage (its component 0xc54d's slot
+// 0x4c below 0: 0x005a66e0's bVar5) pushes 20 x explosionForce x share,
+// along the nearest axis alone, and as a torque pair: (0, f, 0) at the x
+// axis turned to the blast, (0, -f/2, 0) opposite and the axis x -f/2 at
+// the centre, f = force / 2.9 x max(width, 2).
+TEST(Weapons_BlastTwist)
+{
+	game::BlastPush blast;
+	blast.line = {3, 0.5f, 0};
+	blast.falloff = 0.25f; // not used
+	blast.forceMod = 16;   // not used
+	blast.forceMax = 1000;
+	blast.explosionForce = 10;
+	blast.twist = true;
+	CHECK(std::fabs(game::blastPushForce(blast) - 200) < 1e-3f);
+	const physics::Vec3 push = game::blastPush(blast);
+	CHECK(std::fabs(push.x - 200) < 1e-3f && push.y == 0 && push.z == 0);
+	blast.forceMax = 150;
+	CHECK(std::fabs(game::blastPushForce(blast) - 150) < 1e-3f);
+	// The blast on the object's -x side: a is -x.
+	const auto pair = game::blastTwist(blast.axes, blast.line, 200, 5);
+	const float f = 200 / 2.9f * 5;
+	CHECK(pair[0].at.x == -1 && std::fabs(pair[0].force.y - f) < 1e-2f);
+	CHECK(pair[1].at.x == 1 && std::fabs(pair[1].force.y + f / 2) < 1e-2f);
+	CHECK(physics::lengthSquared(pair[2].at) == 0 && std::fabs(pair[2].force.x - f / 2) < 1e-2f);
+	// The other side, and a narrow object counts 2 m across.
+	const auto other = game::blastTwist(blast.axes, {-3, 0, 0}, 200, 1);
+	CHECK(other[0].at.x == 1 && std::fabs(other[0].force.y - 200 / 2.9f * 2) < 1e-2f);
+}

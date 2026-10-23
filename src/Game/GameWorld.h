@@ -11,11 +11,12 @@
 // its abandoned-vehicle countdown (0x005c8ba0). With holdObject the spawner
 // holds its last spawn at the spot (the update's +0x1fc branch): GameWorld
 // (holdSpawned) does that part, as it moves bodies.
-// Not rewritten yet: the collision test that keeps a spawn spot clear
-// (0x005aeb80's first half: PlayerControlObjects within 10 m whose meshes
-// overlap the template's at the spot, 0x006f2e90, are removed after five
-// tries unless a soldier is within 7 m), the spawn spot's drop onto what is
-// under it (0x005ad8b0), and activation by events. useButtonRadius (waiting
+// The spawn spot is kept clear (0x005aeb80's first half, 0x006f2e90):
+// PlayerControlObjects within 10 m that the template's mesh overlaps there
+// hold the spawn back, and after five tries they are removed unless a
+// soldier is within 7 m (ObjectSpawner::SpotTest, GameWorld::testSpawnSpot).
+// Not rewritten yet: the spawn spot's drop onto what is under it
+// (0x005ad8b0), and activation by events. useButtonRadius (waiting
 // for a player to use the spawner) is set by no shipped level.
 #pragma once
 
@@ -112,6 +113,22 @@ public:
 	void update(float seconds, world::ObjectManager& objects, world::ObjectTemplateManager& templates,
 		Random& random);
 
+	// The spawn spot's test (0x005aeb80's first half), which the world
+	// answers: of the PlayerControlObjects within 10 m of the spot, those
+	// the template's mesh placed there overlaps (0x006f2e90); whether one of
+	// them is in use (the 0xc4c5 interface's slot 0x18 (0x005c87b0): +0x14);
+	// whether a soldier is within 7 m of the spawner itself.
+	struct SpotTest {
+		std::vector<uint32_t> blockers;
+		bool inUse = false;
+		bool soldierNear = false;
+	};
+	using SpotCheck = std::function<SpotTest(const world::ObjectTemplate& objectTemplate, const world::Vec3& spot,
+		const world::Vec3& rotation, const world::Vec3& spawner)>;
+	void setSpotCheck(SpotCheck check) { m_spotCheck = std::move(check); }
+	// The tries the spot has been blocked (+0x204).
+	int blockedTries() const { return m_blockedTries; }
+
 private:
 	uint32_t spawn(world::ObjectManager& objects, world::ObjectTemplateManager& templates);
 	void startCountdown(Random& random);
@@ -127,6 +144,8 @@ private:
 	std::vector<uint32_t> m_spawned;
 	std::vector<uint32_t> m_justSpawned;
 	bool m_holding = false; // +0x1fc
+	SpotCheck m_spotCheck;
+	int m_blockedTries = 0; // +0x204
 };
 
 struct ControlPoint {
@@ -270,6 +289,9 @@ public:
 	// terrain) lies between two points.
 	// `ignore`: an object (a body) that doesn't count, such as the looker's own.
 	bool lineOfSight(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore = 0) const;
+	// The spawn spot's test for a spawner (see ObjectSpawner::SpotTest).
+	ObjectSpawner::SpotTest testSpawnSpot(const world::ObjectTemplate& objectTemplate, const world::Vec3& spot,
+		const world::Vec3& rotation, const world::Vec3& spawner) const;
 	// Control points with their position, for the bots' strategy.
 	struct ControlPointInfo {
 		int id;
@@ -699,6 +721,15 @@ private:
 		std::shared_ptr<physics::CollisionWorld> vehicleMesh;
 		std::vector<uint32_t> pointMaterials;
 		float radius = 0;
+		// The object's radius (object slot 0x90, 0x006f6b90): its collision
+		// mesh's (slot 0x74, 0x006dedb0: the first part with a LOD, its LOD
+		// of the lowest collision type, that LOD's radius) or, farther, a
+		// child's with one (its offset's length plus its own); and the
+		// width across x of its mesh's box (slot 0x9c's +0x24: every part's
+		// and LOD's box, 0x006deeb0). Explosions use them (0x005a9090,
+		// 0x005a66e0).
+		float objectRadius = 0;
+		float boxWidth = 0;
 		float mass = 1;
 		bool majorActor = false;
 		bool controlObject = false;
@@ -939,11 +970,19 @@ private:
 		uint32_t kitObject = 0;
 		float lastYaw = 0;
 		bool fired = false;
+		// The jump state the animation's up value comes from (soldier
+		// +0x2e8 / +0x2e9, 0x005eef80).
+		anim::SoldierJumpAnimation jumpAnimation;
 		// Dead: the body as a ragdoll, and the push of the explosion that
 		// killed it (the soldier's 0x2b0, kept by 0x005ee4d0).
 		std::unique_ptr<anim::RagDoll> ragDoll;
 		physics::Vec3 ragDollForce;
 		double ragDollForceAt = -1; // when it came: it lasts 0.5 s (0x2bc)
+		// The hit's velocity x 2.5 the ragdoll starts with until 16 ticks
+		// after it (0x005ee2b0: soldier +0x248, the tick +0x254; read by
+		// 0x005f0a00).
+		physics::Vec3 hitPush;
+		double hitPushUntil = -1;
 		// Seated: the seat's animation system (seatAnimationSystem).
 		std::unique_ptr<anim::AnimationState> seatAnimation;
 		std::string seatAnimationPath;
@@ -968,6 +1007,9 @@ private:
 	bool tryLadder(Player& player, SoldierInput& input);
 	void climbLadder(Player& player, SoldierInput& input, float seconds);
 	bool leaveLadder(Player& player, int mode);
+	physics::Vec3 ladderSeat() const;
+	int ladderRays(const Ladder& ladder, const physics::Vec3& p, const physics::Vec3& back, bool container, bool up,
+		bool down, bool skid) const;
 	anim::AnimationSystems* m_animationSystems = nullptr;
 	AnimationLoader m_loadAnimationSystem;
 	void stepAnimation(Player& player, float seconds);
@@ -1003,7 +1045,12 @@ private:
 	// The object a segment meets first (static objects' projectile LOD,
 	// bodies, the terrain as 0); false when nothing is in the way.
 	bool firstHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t& object) const;
-	float blastShare(const physics::Vec3& at, const Player& target, float beside) const;
+	// firstHit passing through `ignore`'s body.
+	bool firstHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t& object, uint32_t ignore) const;
+	// `pending`: the damage (after the material cell) this blast has dealt
+	// objects so far (0x005a8900's list at 0x00a6aadc / 0x00a6abcc).
+	float blastShare(const physics::Vec3& at, const Player& target, float beside,
+		const std::vector<std::pair<uint32_t, float>>& pending = {}) const;
 	void empBlast(const physics::Vec3& at, const ProjectileSettings& settings,
 		const std::function<float(const physics::Vec3&)>& distanceTo);
 	// Gadgets' abilities (ammo.replenishingType): a source treats what is
@@ -1040,6 +1087,7 @@ private:
 	// (the gadget's holder, or the hub's owner); none: no battery.
 	static constexpr uint32_t kSoldierFootStepsMaterial = 5500; // 0x157c
 	void playRagDollImpact(anim::RagDoll& ragDoll, const anim::Vec& at);
+	void playAnimationSound(const Player& player, int sound);
 	void applyAbility(const Ability& ability, const physics::Vec3& at, int team, float seconds, uint32_t skip,
 		AbilityScan* scan = nullptr, Player* holder = nullptr);
 	void stepAbilities(float seconds);

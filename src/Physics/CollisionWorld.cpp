@@ -93,7 +93,7 @@ void CollisionWorld::addMesh(const CollisionMeshFile& mesh, CollisionUser user, 
 
 bool CollisionWorld::raycast(const Vec3& from, const Vec3& to, Hit& hit) const { return trace(from, to, hit, false); }
 
-bool CollisionWorld::trace(const Vec3& from, const Vec3& to, Hit& hit, bool frontOnly) const
+bool CollisionWorld::trace(const Vec3& from, const Vec3& to, Hit& hit, bool frontOnly, uint32_t ignore) const
 {
 	++m_stamp;
 	const Vec3 direction = to - from;
@@ -117,6 +117,9 @@ bool CollisionWorld::trace(const Vec3& from, const Vec3& to, Hit& hit, bool fron
 					continue;
 				}
 				t.stamp = m_stamp;
+				if (ignore != 0 && t.owner == ignore) {
+					continue;
+				}
 				if (frontOnly && dot(direction, t.normal) >= 0) {
 					continue;
 				}
@@ -234,7 +237,7 @@ void CollisionWorld::querySphere(const Vec3& center, float radius, std::vector<S
 					normal = away * (1.0f / length);
 					depth = length - radius;
 				}
-				contacts.push_back({closest, normal, depth, t.material});
+				contacts.push_back({closest, normal, depth, t.material, depth});
 			}
 		}
 	}
@@ -360,7 +363,7 @@ void CollisionWorld::sweepSphere(const Vec3& start, const Vec3& end, float radiu
 		if (lengthSquared(closestOnTriangle(onFace, t->a, t->b, t->c) - onFace) > 1e-8f) {
 			continue;
 		}
-		contacts.push_back({onFace, t->normal, endDistance, t->material});
+		contacts.push_back({onFace, t->normal, endDistance, t->material, (fraction - 1) * std::sqrt(lengthSquared(delta))});
 		faceMet = true;
 	}
 	if (faceMet) {
@@ -395,7 +398,7 @@ void CollisionWorld::sweepSphere(const Vec3& start, const Vec3& end, float radiu
 				}
 				normal = normal * (1.0f / flat);
 			}
-			contacts.push_back({point, normal, depth, t->material});
+			contacts.push_back({point, normal, depth, t->material, -std::sqrt(lengthSquared(end - centre))});
 		}
 	}
 }
