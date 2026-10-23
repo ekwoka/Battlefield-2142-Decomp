@@ -1,5 +1,7 @@
 #include "CollisionMeshFile.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace dice::hfe::physics {
@@ -72,6 +74,16 @@ const CollisionLod* collisionLodFor(const CollisionMeshFile& file, const Collisi
 	return nullptr;
 }
 
+float boxRadius(const std::array<float, 3>& low, const std::array<float, 3>& high)
+{
+	float farthest = 0;
+	for (int i = 0; i < 8; ++i) {
+		const float x = (i & 1) ? high[0] : low[0], y = (i & 2) ? high[1] : low[1], z = (i & 4) ? high[2] : low[2];
+		farthest = std::max(farthest, x * x + y * y + z * z);
+	}
+	return std::sqrt(farthest);
+}
+
 std::optional<CollisionMeshFile> parseCollisionMesh(const std::vector<uint8_t>& data, std::string* error)
 {
 	Reader r(data);
@@ -102,8 +114,7 @@ std::optional<CollisionMeshFile> parseCollisionMesh(const std::vector<uint8_t>& 
 					face.material = r.read<uint16_t>();
 				}
 				r.array(lod.vertices, r.count(12));
-				std::vector<uint16_t> vertexIds;
-				r.array(vertexIds, static_cast<uint32_t>(lod.vertices.size()));
+				r.array(lod.vertexMaterials, static_cast<uint32_t>(lod.vertices.size()));
 				r.bytes(lod.boundsMin.data(), 12);
 				r.bytes(lod.boundsMax.data(), 12);
 				r.read<uint8_t>();

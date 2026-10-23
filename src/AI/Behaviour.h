@@ -50,7 +50,7 @@ struct BehaviourSetup {
 	std::string name;     // the behaviour (MoveTo, Fire, ...)
 	std::string bb;       // its BB class (BBMoveTo, BBFireInfantery, ...)
 	std::string pattern;  // its BBP class (BBPGotoWaypointInfantery, ...)
-	int priority = 0;     // the think queue it is evaluated in (not modelled: all are evaluated every think)
+	int priority = 0;     // the think queue it is evaluated in (the original's think stops at its real-time budget; all are evaluated every think here)
 	std::string curve;    // UCUnion, UCFire, ...
 	std::string inhibitors; // the modifier set applied to the others while it runs
 };

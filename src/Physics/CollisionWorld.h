@@ -1,13 +1,14 @@
 // The static collision meshes of a level, for queries by moving objects.
 //
 // The original keeps each object's collision mesh in object space with a
-// BSP per LOD (0x006e66b0 walks it) and asks the mesh for contacts with a
-// swept sphere (collision mesh slot 0x60, 0x006e2350). This keeps the
-// triangles of one LOD in world space, bucketed in a grid; a query tests the
-// triangles near a sphere and reports where it touches them. The BSP only
-// chooses which faces get tested, so the contacts are the same; the sweep
-// (from the previous position) is not rewritten yet, so fast movers can pass
-// through thin walls.
+// BSP per LOD (0x006e66b0 walks it). This keeps the triangles of one LOD
+// (in world space for the static objects, in object space for a moving
+// one's) bucketed in a grid; a query tests the triangles near a sphere or
+// a segment. The BSP only chooses which faces get tested, so the contacts
+// are the same. The queries: a sphere where it is (querySphere; the
+// soldiers' swept sphere, slot 24 0x006e2350, is SoldierPhysics'), segments
+// (raycast; segmentContact, the mobile mesh physics' slot 22 0x006e5920),
+// and capsules against the edges (capsuleEdgeContacts, slot 25).
 #pragma once
 
 #include "CollisionMeshFile.h"
@@ -71,6 +72,10 @@ public:
 	// crosses from the front gives a contact at the crossing with the
 	// face's normal, as deep as the end lies behind the face (<= 0).
 	bool segmentContact(const Vec3& from, const Vec3& to, SphereContact& contact) const;
+	// segmentContact in a mesh kept in its object's space, placed by
+	// `rotation` and `position` (the segment and the contact in world space).
+	bool segmentContact(const Vec3& from, const Vec3& to, const Mat3& rotation, const Vec3& position,
+		SphereContact& contact) const;
 	// A moving mesh's edge a-b against the faces (0x006bb050's second
 	// pass): segmentContact from a, then from b. Crossed from a only: the
 	// crossing and its face's normal; from both ends: the middle of the two
@@ -93,6 +98,7 @@ public:
 		const std::function<void(const Vec3& a, const Vec3& b, const Vec3& c, uint32_t material, uint32_t owner)>& visit) const;
 
 private:
+	bool trace(const Vec3& from, const Vec3& to, Hit& hit, bool frontOnly) const;
 	struct Triangle {
 		Vec3 a, b, c;
 		Vec3 normal;

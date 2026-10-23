@@ -34,6 +34,11 @@ struct CollisionLod {
 	uint32_t collisionType = 0;
 	std::vector<CollisionFace> faces;
 	std::vector<std::array<float, 3>> vertices;
+	// A material index per vertex (into the template's mapMaterial table,
+	// like the faces'): the LOD's +0xd8, read by the mesh's slot 0x44
+	// (0x006de710), the material of a vertex in the mobile mesh physics'
+	// contacts (0x006bb050).
+	std::vector<uint16_t> vertexMaterials;
 	std::array<float, 3> boundsMin {};
 	std::array<float, 3> boundsMax {};
 	// The BSP that accelerates queries; kept as stored for now.
@@ -61,6 +66,11 @@ struct CollisionMeshFile {
 // version 8 by order) and leaves the other types empty (-1), so a bush with
 // only a projectile LOD does not stop soldiers or vehicles.
 const CollisionLod* collisionLodFor(const CollisionMeshFile& file, const CollisionSubGeometry& part, uint32_t type);
+
+// A LOD's radius (the mesh's slot 0x50, 0x006de7d0: the LOD's +0xc0,
+// copied at load from its box's +0x18, which 0x006aeda0 sets): the
+// farthest of the box's eight corners from the object's origin.
+float boxRadius(const std::array<float, 3>& boundsMin, const std::array<float, 3>& boundsMax);
 
 std::optional<CollisionMeshFile> parseCollisionMesh(const std::vector<uint8_t>& data, std::string* error = nullptr);
 

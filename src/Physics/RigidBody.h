@@ -17,9 +17,11 @@
 // Constants without names in the original (static data at 0x00a84b54...,
 // 0x00a83ea0...) are given names here.
 //
-// Not rewritten yet: drag and buoyancy (dragModifier, floaterMod), sleeping,
-// collisions between objects and the other physics node types (soldier,
-// point, rotational point). Engines and wheels are in Game/Vehicle.
+// Engines and wheels are in Game/Vehicle, the mobile mesh physics between
+// objects (0x006dc7b0, 0x006bb050) in Game/MeshCollision.cpp, soldiers in
+// SoldierPhysics. Not rewritten yet: drag and buoyancy (dragModifier,
+// floaterMod), sleeping (the node's counter +0x68, slots 0x14c / 0x158 /
+// 0x160), and the point and rotational point node types.
 #pragma once
 
 #include <array>
@@ -72,8 +74,9 @@ constexpr float kFrictionScale = 1;             // 0x00a83eb8
 constexpr float kElasticityScale = 1;           // 0x00a83ebc
 } // namespace tuning
 
-// The material properties a contact uses (MaterialManager slots 0x80-0x88;
-// the material table is not rewritten yet).
+// The material properties a contact uses (MaterialManager slots 0x80-0x88:
+// physics::MaterialManager's friction and elasticity; the defaults when a
+// caller has no material manager).
 struct ContactMaterial {
 	float friction = 0.8f;
 	float elasticity = 0.0f;
@@ -89,6 +92,10 @@ public:
 	float gravityModifier = 1;
 
 	Vec3 velocity;        // 0x20
+	// The tick's average velocity (node +0x44, slot 0xb4: the old and new
+	// velocity's mean that moved the position, 0x006c8380): the mobile mesh
+	// physics' motion this tick (0x006bb050).
+	Vec3 averageVelocity;
 	Vec3 acceleration;    // 0x2c, cleared each tick (gravity, forces / mass)
 	Vec3 impulse;         // 0x38, velocity change applied next tick
 	Vec3 angularVelocity; // 0xbc
@@ -165,6 +172,42 @@ struct Ground {
 	// HeightmapCluster slot 0x80 / the ray 0x8c); empty: material 0.
 	std::function<uint32_t(float x, float z)> material;
 };
+
+// The shares of a contact between two objects' nodes (0x006b6cc0, called
+// by the mobile mesh physics 0x006bb050 for each contact it finds between
+// A's and B's meshes). `velocityA` / `velocityB` scale the contact's
+// relative point velocity for A's and B's responses, `depthA` / `depthB`
+// its depth; a share of 0 adds no contact. The node's side:
+struct ShareNode {
+	float mass = 1;          // slot 0x114 (+0x54: the template's mass)
+	bool majorActor = false; // slot 0x1c4 (+0x24a: the template's isMajorActor)
+	bool asleep = false;     // slots 0x14c / 0x158: its sleep counter (+0x68) run out
+};
+struct MassShares {
+	float velocityA = 0, velocityB = 0;
+	float depthA = 0, depthB = 0;
+	bool wakeA = false, wakeB = false; // slot 0x160: the counter set back (woken)
+};
+namespace tuning {
+constexpr float kMassShareLimit = 0.05f;       // *0x00a84240 (0x008ed5f0): the shares kept within 0.05..0.95
+constexpr float kWakeMomentum = 1.0f;          // *0x00a84248 (0x008ed530)
+constexpr float kHardContactSpeed = 10.0f;     // *0x00a84278 (0x008ed610): faster, the depths split 0.5 / -0.5
+} // namespace tuning
+// `approach` is the relative velocity along the contact's normal (negative
+// closing), `particle` whether A or B is a Particle (template class
+// 0x947b: no limit on the shares), `fixedA` / `fixedB` whether the object's
+// response is the non-mobile one (0xc430: static objects).
+MassShares massShares(const ShareNode& a, const ShareNode& b, float approach, bool particle, bool fixedA, bool fixedB);
+
+// The broad phase's tests before two objects' meshes are tested
+// (0x006dc7b0): a sphere against a box (0x006aecc0: the sphere's centre in
+// the box's frame within the box grown by the radius on each axis), and two
+// boxes (0x006aef70: the separating axis test of two oriented boxes). Boxes
+// are given in their object's space with its rotation and position.
+bool sphereTouchesBox(const Vec3& center, float radius, const Vec3& low, const Vec3& high, const Mat3& rotation,
+	const Vec3& position);
+bool boxesOverlap(const Vec3& lowA, const Vec3& highA, const Mat3& rotationA, const Vec3& positionA, const Vec3& lowB,
+	const Vec3& highB, const Mat3& rotationB, const Vec3& positionB);
 
 // Slot 0x28: the body's contact points (object space) against the ground.
 void collideWithGround(RigidBody& body, ContactResponse& response, const std::vector<Vec3>& points,

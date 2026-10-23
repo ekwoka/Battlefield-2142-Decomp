@@ -35,11 +35,15 @@
 //  - The engine (0x0064e920 with 0x0064e810 and 0x0064e6f0, see
 //    Vehicle::updateEngine): braking, the clutch, gear changes.
 //
-// Not decoded, so the rewrite's own: wheel spin of wheels without contact
-// (0.99 a tick here; the off-ground branch of the wheel node's update
-// 0x006b7910 is not decoded), and the wheels' radius (the depth of the wheel's vehicle
-// collision triangle below its centre; the Spring node's own radius
-// comes from its collision mesh through code not decoded).
+//  - A wheel off the ground: no separate branch (the wheel node 0x006b8230
+//    hands newCar2 wheels to 0x006b7910 before its contact test, the
+//    contact sums at zero); the Spring node's spin factor is 1.0 for
+//    newCar2 (*0x00a84c20). See engine.md, "Wheels off the ground".
+//  - The radii: the spin's (wheelSpinRadius, the Spring node's 0x006cad60:
+//    the height of the wheel's LOD-0 box) and the ground's, how far the
+//    wheel's vehicle-LOD vertices (three at one height) lie below its
+//    centre: the h of the vertical probe (0x006bb050, h = |v0.y|) and the
+//    depth of the points the ground contact (slot 0x28) tests.
 #pragma once
 
 #include "Physics/RigidBody.h"
@@ -165,7 +169,8 @@ class Vehicle {
 public:
 	struct Wheel {
 		Vec3 mount;          // the wheel's centre at rest, object space
-		float radius = 0.5f;     // how far its vehicle-LOD triangle reaches below the centre (the ground probe)
+		float radius = 0.5f;     // how far its vehicle-LOD vertices lie below the centre (the probes' h)
+		int collisionPart = -1;  // its geometry in the vehicle's collision mesh (the template's collisionPart)
 		float spinRadius = 0.5f; // the engine's (0x006cad60): its LOD 0 box's height, at least 0.1
 		float strength = 0;  // Spring template 0x2b4
 		float damping = 0;   // 0x2b0

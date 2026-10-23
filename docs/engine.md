@@ -255,63 +255,141 @@ Rewritten in `src/Game/Vehicle` (`rotationAxisStep`,
   spin, slope and feedback torques use it (the FAV's top gear then tops
   out near 35 m/s, its AI `maxSpeed` being 30). The rewrite keeps the
   depth of the vehicle-LOD triangle (0.485 m) for its own ground probe.
-- **Hull against static objects:** the mobile mesh physics
-  (ResponsePhysics, vtable `0x00992cb8`, slot 9 `0x006bb050`) runs each
-  LOD-1 vertex as a segment from where it was at the last pose to where it
-  is through the other mesh's segment test (collision-mesh slot 22,
-  `0x006e5920` → `0x006de850`): no radius. A crossing gives a contact
-  with the face's normal, as deep as the end lies behind the face
-  (`CollisionWorld::segmentContact`). The swept-sphere test `0x006e2350`
-  (slot 24) is the soldiers' (`0x006c3890`, LOD 2) and `0x006cec60`'s.
-  The second pass (`CollisionWorld::edgeContact`) runs the edges of the
-  LOD-1 faces no steeper than 30° off the vertical (|n.y| ≤ 0.866,
-  `0x006e1430`, kept at load in `Body::edges`) as segments through the
-  other mesh: a crossing whose face normal has y at least 0.1
-  (`*0x00a84230`) pushes with force 3 (`*0x00a8423c`) through the node's
-  addForce (slot `0xa0`, `0x006c7b10`).
-- **Slot 9's other parts** (`0x006bb050`, called by `0x006dc7b0` for each
-  mover and grid candidate, both orders when their LOD radii are within a
-  factor of 4):
+- **Objects against objects** (`src/Game/MeshCollision.cpp`): see the
+  next section.
+
+### Mobile meshes against objects (0x006dc7b0, 0x006bb050)
+
+Each moving object with a vehicle LOD is a mover in turn (`0x006dc7b0`).
+Its candidates are the objects' parts in the grid near it, not of its
+own tree; a candidate that was a mover earlier in the frame is left out,
+so each pair is met once. A pair goes on if:
+
+- their origins are within `(|vM| + |vC|) * dt + rM + rC`, `r` being the
+  vehicle LOD's radius (the mesh's slot `0x50`, `0x006de7d0`: the LOD's
+  `+0xc0`, the farthest of its box's corners from the origin,
+  `0x006aeda0`; `physics::boxRadius`);
+- the smaller one's sphere (its radius plus the motion) touches the
+  other's LOD box (`*0x00a8510c` = 1, `0x006aecc0`:
+  `physics::sphereTouchesBox`);
+- while the motion is under both radii and both LODs have over 10
+  vertices (`*0x00a85104`), the two boxes overlap (`*0x00a850f4` = 1,
+  `0x006aef70`, a separating-axis test: `physics::boxesOverlap`);
+- not both have under 4 vertices.
+
+Then the radii choose who goes into whom (the response's slot 9,
+`0x006bb050`, with A's mesh into B's): with `rM / rC` from 1/4 to 4, C
+into M and M into C; over 4, C into M, and M into C too when both are
+mobile (else, C a root and M with a type-4 LOD: M's third pass alone into
+C); under 1/4, M into C (and with M a root and C with a type-4 LOD, C's
+third pass alone into M). So a vehicle's vertices are not tested against
+a static object over four times smaller than it: that one's vertices go
+into the vehicle's mesh instead.
+
+Slot 9, A into B (nothing unless A has a vehicle LOD and B the LOD A asks
+for; segments go through B's mesh by its slot 22, `0x006e5920` →
+`0x006de850` → `0x006e6530` → `0x006e62c0`: the faces crossed from the
+front only, `0x006bd070` with the two-sided flag clear, the earliest of
+them; the contact's depth is how far the end lies behind that face,
+`CollisionWorld::segmentContact`):
+
+- **The motion:** `d = (vA - vB) * dt`, the nodes' average velocities
+  this tick (node slot `0xb4`, `+0x44`: the mean of the old and new
+  velocity that moved the position, `RigidBody::averageVelocity`). A's
+  centre of mass a tick ago is `last = A's origin + R·com - d`.
+- **The small-object pre-trace** (`0x6bb47f`): a mobile A whose LOD radius
+  is under 0.3 (`0x00975eb8`) traces from `last` to its origin; a crossing
+  moves A back along that way by how far it went past the face (node
+  slot `0x64`), and shortens `d` by as much. Shipped meshes under 0.3:
+  rocks, wreck and destruction debris, missiles, small handhelds.
+- **The helicopter exit** (`0x6bb5b9`–`0x6bb787`): a root
+  PlayerControlObject (interface `0xc4c5`) against an object whose root
+  has the non-mobile response (`0xc430`), on the server (`gameLogic` slot
+  `0x144`), whose first Engine (`0x006b6c50` → `0x005c63b0`: a node, its
+  siblings, then their children) has engineType `c_ETHelicopter` (33;
+  cached at `+0x110`): its origin's segment from its last stored matrix to
+  now through B's LOD; a crossing ends slot 9 for the pair, notifying both
+  with material `0x29a`, which PlayerControlObject's slot 43
+  (`0x005c72f0`) turns into 1e10 damage (`0x004c0e40`). Shipped: eu_at,
+  as_at (TailEngine), us_ag, as_ag (TailThruster), as_tank and
+  as_hov_light (TurnThruster). `Body::helicopterEngine`. The same
+  PlayerControlObject root against a static's root also enables the edge
+  pass.
+- **One point** (`local_25`): a static A with at most 20 vertices
+  (`*0x00a84258`), no type-4 LOD and a radius under half of B's is tested
+  as its origin only: each of its vertices runs the origin's way from
+  `last`. A Ladder (class 40000) ends slot 9 instead.
+- **Pass 0, the vertices** (each turned by A's rotation, kept for pass 1):
+  a mobile A's from `last` to the vertex now, a static A's from the vertex
+  now less `d` (plus R·com) to the vertex now. So a moving A's vertex
+  already behind a face still meets it while the centre of mass is in
+  front of it.
   - *The vertical probe* (`0x6bbbaa`–`0x6bbdb2`): a part whose vehicle LOD
     has under 4 vertices (the wheels', springs' and landing gear's three
     vertices at one height; 73 shipped parts) runs, for each vertex i, a
     segment 2h down its up axis from its origin raised by h
     (h = |v0.y|), for i 1 and 2 raised 0.1 more and 0.1 forward or back; a
     part 0.5 m or more to a side of the root's centre starts 0.5 m
-    inwards and ends where it would have. A crossing is a contact as in
-    the vertex pass. Rewritten for `Vehicle::Wheel`s (h is the wheel's
-    `radius`, the part at its mount and compression, turned by its steer).
-  - *The third pass* (pass 2, `0x6bb90f`–`0x6bba92`, `0x6bbdf8`–`0x6bc735`):
-    a mesh with collision type 4 (trees, lamp posts, poles, billboard
-    frames, cover: 164 shipped meshes, all statics) against a root B. Each
-    of its faces crossing the plane through B's centre of mass across B's
-    up axis (edge v0-v1, else v0-v2) gives a point X; a half-ray from X
-    less A's motion relative to B this tick towards B's centre of mass
-    enters B's LOD box (`0x006ae680`) at P through a face whose outward
-    normal, flattened and turned round, is n; with dist = n·(P − X) within
-    A's radius (`treeCollisionDiameter` / 2, the node's `+0x18` set by
-    `0x005f6ba0`; 0.3 under 0.01), a contact at P along n, r − dist deep,
-    when B moves towards it. A fixed A leaves the push to B
-    (`0x006b6cc0`). Without a type-4 LOD and with a radius, a trunk line
-    up the LOD-1 box's middle stands in (the Beacon's; not rewritten).
-    `GameWorld::collideWithTrees`, the statics' type-4 faces in
-    `m_treeCollision`.
-  - *The helicopter exit* (`0x6bb5b9`–`0x6bb787`): a root
-    PlayerControlObject against a static object (root response `0xc430`)
-    on the server (`gameLogic` slot `0x144`, `+0x45`), whose first Engine
-    (`0x006b6c50` → `0x005c63b0`: a node, its siblings, then their
-    children) has engineType `c_ETHelicopter` (33; cached at `+0x110`):
-    its origin's segment from its last stored matrix to now through the
-    static's LOD; a crossing ends slot 9 with no response, notifying both
-    with material `0x29a`, which PlayerControlObject's slot 43
-    (`0x005c72f0`) turns into 1e10 damage (`0x004c0e40`). Shipped:
-    eu_at, as_at (TailEngine), us_ag, as_ag (TailThruster), as_tank and
-    as_hov_light (TurnThruster). `Body::helicopterEngine`.
-  - Not matched: for a moving A the engine's vertex segment runs from A's
-    centre of mass a tick ago (`last`) to the vertex now, not from the
-    vertex's last pose; the small-object pre-trace (radius under 0.3) and
-    the contact's mass shares (`0x006b6cc0`'s later terms) aren't
-    rewritten.
+    inwards and ends where it would have; `d` is zeroed. A static part of
+    under 4 vertices then has no way at all. Rewritten for
+    `Vehicle::Wheel`s as movers of their own (`GameWorld::wheelProbes`:
+    h is the wheel's `radius`, the part at its mount and compression,
+    turned by its steer; its radius its geometry's LOD radius).
+- **Pass 1, the edges** (A a PlayerControlObject root, B's root static,
+  `*0x00a84214` = 1): the edges of A's LOD-1 faces no steeper than 30° off
+  the vertical (|n.y| ≤ 0.866, `0x006e1430`, kept at load in
+  `Body::edges`), at the current pose, through B's mesh from either end
+  (`CollisionWorld::edgeContact`). Crossed from its first end only: a push
+  at that crossing along the face's normal; from both: at the middle of
+  the two crossings, along their normals' sum flattened (y 0) and
+  normalised, or from the crossing towards A's origin when that sum is
+  under 0.1 (`*0x00a84230`). The push is a force of 3 (`*0x00a8423c`) at
+  the point (node slot `0xa0`, `0x006c7b10`: an acceleration and its
+  torque about the centre of mass, no contact).
+- **Pass 2, the trunks** (`0x6bb90f`–`0x6bba92`, `0x6bbdf8`–`0x6bc735`; B a
+  root): A with a type-4 LOD (trees, lamp posts, poles, billboard
+  frames, cover: 164 shipped meshes, all statics, all with a vehicle LOD
+  too), or with a radius (`treeCollisionDiameter` / 2, the node's
+  `+0x198` set by `0x005f6ba0`) and a vehicle LOD: then one face, a trunk
+  line up the LOD box's middle across x at z 0: `(cx, min y, 0)`,
+  `(cx, max y, 0)`, `(cx + 0.05, min y, 0)` (`local_114`..`local_2a8`).
+  Shipped with a radius and no type-4 LOD: `brick_pillarjba` (jbcustom3,
+  a static); the handheld Beacon (`treeCollisionDiameter 0.7`) has its
+  mesh's LODs only in geometries 1-3, geometry 0's two parts being empty. Each face crossing the plane through B's centre of mass
+  across B's up axis (edge v0-v1, else v0-v2) gives a point X; a half-ray
+  from X - d towards B's centre of mass (plus d) enters B's LOD box
+  (`0x006ae680`) at P through a face whose outward normal, flattened and
+  turned round, is n; with dist = n·(P − X) within the radius (0.3 under
+  0.01 with a type-4 LOD), a contact at P along n, r − dist deep, when B
+  comes towards it (v·n ≥ 0 below).
+- **Each contact** (`0x6bc764` on): the relative point velocity
+  v = vA − vB at it (node slot `0xac`); the shares (`0x006b6cc0`,
+  `physics::massShares`); then A's response gets (point, v × its share, n,
+  depth × its depth share) and B's the same with B's (slot `0x2c`,
+  `0x006ba4c0`): the friction of the cell of A's vertex material (the
+  mesh's slot `0x44`, `0x006de710`: a material index per vertex,
+  `CollisionLod::vertexMaterials`) and B's face's, the elasticity their
+  mean. The solve's approach weights (`0x006ba7d0`) are never negative,
+  so B's side, whose velocity share is negative, only pushes out.
+- **The shares** (`0x006b6cc0`): a major actor (`isMajorActor`, template
+  `+0xf0` → node `+0x24a`, slot `0x1c4`) is not moved by a minor one (the
+  other takes 1 or −1, waking it when asleep unless fixed); a sleeping
+  node (slot `0x14c`) is not moved; two awake ones share by mass,
+  A taking mB / (mA + mB) and B that less 1, kept within 0.05..0.95
+  (`*0x00a84240`) unless one is a Particle (class `0x947b`). Then (not
+  for Particles) a sleeping A (slot `0x158` 0) not fixed, hit with
+  −mB·(v·n) over mA·1 (`*0x00a84248`), wakes (slot `0x160`) and takes the
+  mass share; else a sleeping B likewise. Finally, with |v·n| over 10
+  (`*0x00a84278`) and neither fixed, the depth shares are 0.5 and −0.5.
+  A static object takes nothing, the mobile one everything.
+
+Not modelled: the collision callbacks each contact calls on both objects
+(object slot `0xac`: the game logic's collision damage and its veto of the
+response), the effects (`0x006b75d0`), sleeping (no node sleeps here, so
+the shares' sleeping terms never apply), the collision groups (response
+slot `0x50`), a wheel's own part as B (a static's vertices into its
+three-vertex LOD), and the wheels' contacts go to the vehicle's response,
+not the wheel's node (whose spring reads the ground only).
 
 ### Seats and vehicle weapons
 
@@ -570,9 +648,9 @@ Rewritten in `src/Animation/RagDoll` (`RagDollTemplate`, `RagDoll`,
   `.con`/`.inc`/`.tweak`/`.py` includes it, so what runs it is not
   determinable. `GameWorld` loads it from the soldiers' animation
   directory.
-- The explosion's push is a stand-in: 10 at the centre, falling off over
-  the radius, from the blast and a little up. The engine's force
-  (`0x005a66e0`) isn't traced.
+- The explosion's push is the blast's (`0x005a66e0`, see Explosions):
+  `0x005ee4d0` keeps it for 0.5 s and the ragdoll's start applies it
+  (bone −2) times `rd_expForceMod`.
 - The object list: the static objects are one merged mesh in the
   rewrite, first in the list; the bodies (vehicles) follow, each in its
   own frame. The terrain's material under a particle is the level's
@@ -586,8 +664,15 @@ Rewritten in `src/Animation/RagDoll` (`RagDollTemplate`, `RagDoll`,
   `anim::ragDollLevels`): past LOD 0 a step is dT × 1.5; LOD 2 also skips
   the leg collisions, capsules and the object pass for the particles of
   bones 2, 7, 16, 32 and 47. LOD 2 is only for network-driven bodies
-  (`+0x61`), which the rewrite has none of. `GameWorld::setCamera` gives
-  the camera; bodies behind it count three times as far.
+  (`+0x61`): the frame updates the bodies nearest first, reading the
+  performance counter (`0x004423f0`) before the first; a network-driven
+  body whose turn comes after `ragdoll_clientMaxUpdateTime` milliseconds
+  (0.002, `0x00b4cc10`) takes level 2. With 2 µs, in practice every
+  network-driven body after the first updated one. `GameWorld::setCamera`
+  gives the camera; bodies behind it count three times as far;
+  `GameWorld::setClock` the counter (the steady clock by default).
+  A client's bodies are all remote ones, which `stepRemoteBodies` updates
+  in that order.
 
 **The network side.** The Soldier networkable's writer (`0x005fb8c0`)
 sends mask `0x10040` (health and the ragdoll) while the body is awake and
@@ -613,8 +698,20 @@ own. `ragdoll_net_debug` is never read. Rewritten in `RagDoll`
 (`NetworkableState::ragdollParticles`, the body's position the middle
 particle), `RemoteObject::ragdoll*` and `GameWorld::driveRemoteRagDoll`
 (the body started on the first update from the setup pose at the ghost).
-Not rewritten: LOD 2 for network-driven bodies (a time budget,
-`ragdoll_clientMaxUpdateTime`).
+
+**A client's corpse countdown.** The client runs the armour's countdown
+from the networked health as the server does: the reader (`0x005fcdb0`)
+sets the hit points (8 bits of `maxHitPoints`) through the armour's setter
+(slot `0x38` → `0x00655460` → `0x00654120`), which at 0 or less makes the
+armour a wreck at the client's own time (`+0x15`, `+0x60`), and the
+armour's update (`0x00654d80` → `0x00652380`) has no server test before
+the removal: the countdown begins once the body has landed, no player is
+attached (the PlayerControlObject's slot `0x10`) and `timeToStayAsWreck`
+has passed (or after 60 s), and the soldier fades over
+`timeToStayAfterDestroyed`. Only the removal (`0x00651db0`) is behind the
+server test (`gameLogic` slot `0x144`): a client's body stays, faded,
+until the server removes the ghost. Health back above 0 (a revive) makes
+it whole (fade 1, the times cleared). `GameWorld::setRemoteHealth`.
 
 ## Server browsing (GameSpy, via OpenSpy)
 
@@ -1707,8 +1804,13 @@ Rewritten in `GameWorld::explode`, `blastShare` and `empBlast`;
 - Not in the rewrite: the ray test for other objects (blocked: half the
   damage, or none when the object's vtable `0x90` value, not identified,
   is below a fifth of the radius), a bone hidden only by an object the same
-  blast destroys counting half, the push's 0.1 for airborne soldiers
-  (physics node `0x144`) and the push on vehicles (node `0xa4`).
+  blast destroys counting half, the push's 0.1 for a soldier in water
+  (its physics node's slot `0x144`, `+0x5c`: how deep it is under the
+  surface, which `0x006c9060`'s buoyancy divides by the box's height; the
+  rewrite's soldiers have no water physics yet) and the push on other
+  objects' physics (node slot `0xa4` at the point, with 10000 /
+  max(mass, 100) and at most 500 for an object without armour, and a
+  torque pair for one with component `0xc54d`).
 
 Thrown weapons: projectiles with `physicsType` RotationalPoint or Mesh
 (grenades, mines, C4; rounds and missiles are Points) bounce. The
@@ -1726,7 +1828,8 @@ into grass and 0.475 of its slide. There is no rest speed: only the spin
 stops, under |v|² 0.1. The rewrite's projectiles lie still (for the
 mines' triggers) under that on a face turned up, and Mesh projectiles,
 rigid bodies in the engine (ResponsePhysics), bounce the same way here;
-the terrain's material is not known to the rewrite (0). They go off when
+the terrain's material is the level's material map's (see Terrain
+materials). They go off when
 their time to live runs out (frag grenades: 2.8 s, 140 damage over 9 m),
 not on impact.
 
@@ -2412,8 +2515,14 @@ object's `aiTemplate` (Unl_Hub_Medic is MedicHub).
 ### Scheduling (BotManager::update 0x100ca590)
 
 AIMain::update (0x100571c0) gives the bots what is left of the frame's
-AI budget after one side's SAI (the sides take turns). The rewrite does
-not model the CPU budgets; each slice runs to its count:
+AI budget after one side's SAI (the sides take turns). The budgets are
+real time: the deadline is the `IBFTimer`'s clock (its slot `0xc`,
+BF2142.exe `0x0089f420` → `0x0089f380`, QueryPerformanceCounter) plus the
+frame's time times AIMain's fraction (`+0x8`), and the bot manager
+(`0x100ca590`) gets what is left of it when the SAI is done. Which slices
+fit before the deadline depends on how fast the machine running the
+server is, so it can't be reproduced from the binaries; the rewrite runs
+each slice to its count, as a machine on which no budget runs out would:
 
 - **Plan execution** (0x100c91c0): about half the bots a frame, round
   robin: N/2 + 1 and N/2 on alternate frames for an odd N, N/2 + 1 for an
@@ -2887,9 +2996,12 @@ multipliers.
 
 ### Not decoded, and the rewrite's stand-ins
 
-- **Scheduling:** the CPU budgets (every slice runs to its count; the SAI
-  runs once a second), and the whole path searched at once (the original
-  searches three clusters at a time). Each think evaluates every behaviour.
+- **Scheduling:** the CPU budgets are real time (see Scheduling: they
+  depend on the machine's speed, so they can't be reproduced; every slice
+  runs to its count, the SAI once a second), and the whole path is
+  searched at once (the original searches three clusters at a time). Each
+  think evaluates every behaviour (the original's think stops at its
+  budget, the same real-time clock, and the rest wait for the next).
 - **Aim:** bots don't zoom. (The head twists before the body for every
   soldier: see `SoldierControl::twist`, 0x0058a6d0.)
 - **Deviation:** the AI deviation (0x00892b70) widens the weapon's own

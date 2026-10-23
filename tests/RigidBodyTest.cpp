@@ -100,3 +100,54 @@ TEST(RigidBody_YawPitchRollRoundTrips)
 	const physics::Mat3 turned = physics::Mat3::fromYawPitchRoll({90, 0, 0});
 	CHECK(std::fabs(turned.transform({0, 0, 1}).x - 1) < 1e-5f);
 }
+
+// The shares of a contact between two nodes (0x006b6cc0).
+TEST(RigidBody_MassShares)
+{
+	using physics::massShares;
+	const physics::ShareNode car {1800, false, false}, crate {200, false, false};
+	// By mass, the lighter taking more, kept within 0.05..0.95.
+	physics::MassShares s = massShares(car, crate, -2, false, false, false);
+	CHECK(std::fabs(s.velocityA - 0.1f) < 1e-6f && std::fabs(s.velocityB + 0.9f) < 1e-6f);
+	CHECK(s.depthA == s.velocityA && s.depthB == s.velocityB);
+	s = massShares({1, false, false}, {1000, false, false}, -2, false, false, false);
+	CHECK(std::fabs(s.velocityA - 0.95f) < 1e-6f && std::fabs(s.velocityB + 0.05f) < 1e-6f);
+	// A Particle's shares are not limited.
+	s = massShares({1, false, false}, {1000, false, false}, -2, true, false, false);
+	CHECK(s.velocityA > 0.99f);
+	// A hard contact (over 10 m/s along the normal) halves the push out each way.
+	s = massShares(car, crate, -12, false, false, false);
+	CHECK(std::fabs(s.velocityA - 0.1f) < 1e-6f && s.depthA == 0.5f && s.depthB == -0.5f);
+	// A static object takes nothing; the mobile one everything.
+	const physics::ShareNode wall {1, false, true};
+	s = massShares(car, wall, -12, false, false, true);
+	CHECK(s.velocityA == 1 && s.velocityB == 0 && s.depthA == 1 && s.depthB == 0);
+	s = massShares(wall, car, -12, false, true, false);
+	CHECK(s.velocityA == 0 && s.velocityB == -1 && s.depthA == 0 && s.depthB == -1);
+	// A major actor (isMajorActor) is not moved by a minor one.
+	s = massShares({1800, true, false}, crate, -2, false, false, false);
+	CHECK(s.velocityA == 0 && s.velocityB == -1);
+	s = massShares(crate, {1800, true, false}, -2, false, false, false);
+	CHECK(s.velocityA == 1 && s.velocityB == 0);
+	// A sleeping node hit hard enough (the other's momentum along the
+	// normal over its mass) wakes and takes its share; else it stays put.
+	s = massShares({200, false, true}, car, -0.5f, false, false, false);
+	CHECK(s.wakeA && std::fabs(s.velocityA - 0.9f) < 1e-6f && s.depthA == 0);
+	s = massShares({200000, false, true}, car, -0.5f, false, false, false);
+	CHECK(!s.wakeA && s.velocityA == 0 && s.velocityB == -1);
+}
+
+// The broad phase's sphere-against-box (0x006aecc0) and box-against-box
+// (0x006aef70) tests.
+TEST(RigidBody_BroadPhaseTests)
+{
+	const physics::Mat3 turned = physics::Mat3::fromYawPitchRoll({45, 0, 0});
+	CHECK(physics::sphereTouchesBox({0, 0, 2.4f}, 0.5f, {-1, -1, -2}, {1, 1, 2}, {}, {}));
+	CHECK(!physics::sphereTouchesBox({0, 0, 2.6f}, 0.5f, {-1, -1, -2}, {1, 1, 2}, {}, {}));
+	// The box turned 45 degrees: its corner reaches out to 1.41 along x.
+	CHECK(physics::sphereTouchesBox({1.6f, 0, 0}, 0.25f, {-1, -1, -1}, {1, 1, 1}, turned, {}));
+	CHECK(!physics::sphereTouchesBox({1.8f, 0, 0}, 0.25f, {-1, -1, -1}, {1, 1, 1}, turned, {}));
+	CHECK(physics::boxesOverlap({-1, -1, -1}, {1, 1, 1}, {}, {}, {-1, -1, -1}, {1, 1, 1}, turned, {2.3f, 0, 0}));
+	CHECK(!physics::boxesOverlap({-1, -1, -1}, {1, 1, 1}, {}, {}, {-1, -1, -1}, {1, 1, 1}, turned, {2.5f, 0, 0}));
+	CHECK(!physics::boxesOverlap({-1, -1, -1}, {1, 1, 1}, {}, {}, {-1, -1, -1}, {1, 1, 1}, {}, {0, 2.1f, 0}));
+}

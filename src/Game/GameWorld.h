@@ -6,8 +6,13 @@
 // spawner is BF2/Game/Objects/Game/ObjectSpawner.cpp (update 0x005af230,
 // spawn 0x005aeb80, team change 0x005ae490, round reset 0x005ae580).
 // Not rewritten yet: the collision test that keeps a spawn spot clear,
-// holding a spawned vehicle in place until it is entered, time to live of
-// abandoned vehicles, and activation by events.
+// holding a spawned vehicle in place until it is entered (holdObject: the
+// update's +0x1fc branch; set by two shipped levels, operation_clean_sweep
+// and the_hell), the time to live of abandoned vehicles (the spawn hands
+// the vehicle's PlayerControlObject interface 0xc4c5 the spawner, slot
+// 0xc0, timeToLive, slot 0xa4, and the time, slot 0xb8; set by most
+// levels' spawners), and activation by events. useButtonRadius (waiting
+// for a player to use the spawner) is set by no shipped level.
 #pragma once
 
 #include "Animation/AnimationSystem.h"
@@ -25,6 +30,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -34,6 +40,7 @@ class FileManager;
 namespace dice::hfe::physics {
 class CollisionTemplateManager;
 class MaterialManager;
+struct CollisionMeshFile;
 }
 
 namespace dice::hfe::world {
@@ -155,10 +162,25 @@ public:
 	// The body is gone (the ghost removed, the soldier revived).
 	void removeRemoteRagDoll(uint32_t object);
 	const anim::RagDoll* remoteRagDoll(uint32_t object) const;
+	// A joined game's soldier ghost's health (its Soldier networkable's 0x40
+	// group: the fraction of maxHitPoints) and whether a player is still
+	// attached to it (a RemotePlayer's soldier ghost). The client runs the
+	// armour's corpse countdown from it as the server does (0x005fcdb0 sets
+	// the hit points through the armour's setter, slot 0x38 -> 0x00655460 ->
+	// 0x00654120: at 0 or less the armour turns wreck at the client's time,
+	// +0x60; the armour's update 0x00654d80 -> 0x00652380 has no server test
+	// up to the fade), so the body fades as on the server (stepRemoteWrecks);
+	// only the removal (0x00651db0) is the server's, which the client sees
+	// as the ghost going. Back above 0 (revived) it is whole again.
+	void setRemoteHealth(uint32_t object, float health, bool playerAttached);
 	// Where the camera is and looks (unit), for the ragdolls' levels of
 	// detail (0x008ae120); without one (a server) every body steps at
 	// level 0.
 	void setCamera(const physics::Vec3& position, const physics::Vec3& forward);
+	// The clock the ragdolls' frame budget (ragdoll_clientMaxUpdateTime)
+	// is measured with, in seconds (by default the steady clock: the
+	// original reads the performance counter, 0x004423f0).
+	void setClock(std::function<double()> clock) { m_clock = std::move(clock); }
 	// Sounds the game asks for (to be played by the sound layer), taken
 	// once: a ragdoll's impact (S_Soldier_RagDoll_Impact and the like).
 	struct SoundEvent {
@@ -640,6 +662,28 @@ private:
 		// is a helicopter's (engineType c_ETHelicopter, 33): hitting a static
 		// object is the end of it (0x006bb050's early exit).
 		bool helicopterEngine = false;
+		// For the mobile mesh physics (0x006bb050, see MeshCollision.cpp):
+		// the vehicle LOD in object space, its vertices' materials, its
+		// radius (the mesh's slot 0x50: the box's farthest corner), the
+		// template's mass (+0x94, 1 by default) and isMajorActor (+0xf0),
+		// whether it is a PlayerControlObject (the edge pass and the
+		// helicopter exit ask for one) or a Particle (0x947b), and its
+		// trunk (a type-4 LOD, or treeCollisionDiameter / 2 above 0).
+		std::shared_ptr<physics::CollisionWorld> vehicleMesh;
+		std::vector<uint32_t> pointMaterials;
+		float radius = 0;
+		float mass = 1;
+		bool majorActor = false;
+		bool controlObject = false;
+		bool particle = false;
+		std::shared_ptr<physics::CollisionWorld> trunk;
+		float trunkRadius = 0;
+		bool trunkFromTypeFour = false;
+		// The position before this tick's step (the helicopter exit's start).
+		physics::Vec3 lastPosition;
+		// The wheels' parts' radius (their vehicle LOD's, slot 0x50), by wheel.
+		std::vector<float> wheelRadii;
+		uint32_t material = 0; // the template's material
 	};
 	void destroyVehicle(Body& body, int attacker);
 	void stepVehicleDamage(float seconds);
@@ -648,9 +692,6 @@ private:
 	void seatPlayer(Player& player, Body& body, int seat);
 	void stepGunner(Player& player, Body& body, float seconds);
 	Body* findBody(uint32_t object);
-	// Returns false when the body was destroyed by it (the helicopter exit).
-	bool collideWithStatics(Body& body, const physics::Vec3& lastPosition, const physics::Mat3& lastRotation, float seconds);
-	void collideWithTrees(Body& body, float seconds);
 	int firstEngineType(const world::ObjectTemplate& root) const;
 	void addBodies();
 	void stepPhysics(float seconds);
@@ -662,12 +703,74 @@ private:
 	std::vector<Body> m_bodies;
 	physics::CollisionWorld m_collision; // static objects, soldier LOD
 	physics::CollisionWorld m_projectileCollision; // static objects, projectile LOD
-	// Static objects' collision type 4 (trees, poles, lamp posts: 0x006bb050's
-	// third pass), each mesh's owner an index into m_treeRadii (its
-	// treeCollisionDiameter / 2, or 0.3).
-	physics::CollisionWorld m_treeCollision;
-	std::vector<float> m_treeRadii;
-	physics::CollisionWorld m_vehicleCollision; // static objects, vehicle LOD
+
+	// The mobile mesh physics between objects (BF2/Physics, see
+	// MeshCollision.cpp): the static objects' parts (each template of a
+	// static object's tree with a collision mesh), in a grid for the
+	// broad phase (0x006dc7b0).
+	struct MeshShape {
+		std::shared_ptr<physics::CollisionWorld> mesh; // the vehicle LOD's faces, object space
+		std::vector<physics::Vec3> points;             // its vertices
+		std::vector<uint32_t> pointMaterials;          // their materials (through mapMaterial)
+		physics::Vec3 boxMin, boxMax;                  // its box (the mesh's slot 0x54)
+		float radius = 0;                              // slot 0x50
+		bool hasVehicleLod = false;
+		std::shared_ptr<physics::CollisionWorld> trunk; // the type-4 faces, or the trunk line
+		bool trunkFromTypeFour = false;
+	};
+	struct StaticPart {
+		uint32_t object = 0;
+		bool root = true;    // the object itself, not a template of its tree
+		bool ladder = false; // template class Ladder (40000: 0x006bb050 leaves it out)
+		physics::Mat3 rotation;
+		physics::Vec3 position;
+		std::shared_ptr<const MeshShape> shape;
+		float trunkRadius = 0; // the node's +0x198: treeCollisionDiameter / 2 (0x005f6ba0), 0.3 under 0.01 with a type-4 LOD
+		uint32_t material = 0; // the template's material
+		uint32_t stamp = 0;
+	};
+	void addStaticPart(StaticPart part);
+	std::vector<StaticPart> m_staticParts;
+	std::unordered_map<int64_t, std::vector<uint32_t>> m_staticGrid; // 16 m cells (x, z) -> parts
+	std::map<std::pair<const physics::CollisionMeshFile*, std::vector<uint32_t>>, std::shared_ptr<const MeshShape>> m_shapes;
+	uint32_t m_staticStamp = 0;
+	std::shared_ptr<const MeshShape> meshShape(const physics::CollisionMeshFile& mesh, const std::vector<uint32_t>& materials);
+	// One side of a pair: a body (mobile, a root) or a static part.
+	struct MeshActor {
+		Body* body = nullptr;
+		const StaticPart* part = nullptr;
+		const std::vector<physics::Vec3>* points = nullptr;      // the vehicle LOD's vertices
+		const std::vector<uint32_t>* pointMaterials = nullptr;
+		const std::vector<std::array<uint16_t, 2>>* edges = nullptr;
+		const physics::CollisionWorld* mesh = nullptr;            // object space
+		const physics::CollisionWorld* trunk = nullptr;           // object space
+		bool trunkFromTypeFour = false;
+		physics::Vec3 boxMin, boxMax;
+		float radius = 0, trunkRadius = 0;
+		physics::Mat3 rotation;
+		physics::Vec3 position;
+		physics::Vec3 centerOfMass;   // object space
+		physics::Vec3 velocity;       // the tick's average (node +0x44)
+		bool fixed = false;           // the non-mobile response (0xc430)
+		bool controlObject = false, helicopter = false, ladder = false, particle = false;
+		uint32_t material = 0; // the template's material (pass 2's B side)
+		physics::ShareNode node;
+		physics::Vec3 pointVelocity(const physics::Vec3& point) const
+		{
+			return body ? body->body.pointVelocity(point) : physics::Vec3 {};
+		}
+	};
+	MeshActor actorOf(Body& body) const;
+	MeshActor actorOf(const StaticPart& part) const;
+	void collideBodies(float seconds);
+	void collideMover(Body& mover, size_t index, float seconds);
+	// Slot 9 of the mobile mesh response (0x006bb050): A's mesh against
+	// B's; `trunkOnly` runs the third pass alone (its last argument).
+	// Returns false when it destroyed A (the helicopter exit).
+	bool meshPair(MeshActor& a, MeshActor& b, float seconds, bool trunkOnly);
+	void wheelProbes(Body& body, MeshActor& b, float seconds);
+	void addMeshContact(MeshActor& a, MeshActor& b, const physics::Vec3& point, const physics::Vec3& normal, float depth,
+		uint32_t materialA, uint32_t materialB, bool trunkPass);
 	std::vector<uint32_t> materialMap(const world::ObjectTemplate& objectTemplate) const;
 	void buildStaticCollision();
 	void addStaticCollision(const world::ObjectTemplate& objectTemplate, const physics::Mat3& rotation,
@@ -940,9 +1043,22 @@ private:
 	};
 	std::vector<RemoteBody> m_remoteBodies;
 	void stepRemoteBodies(float seconds);
+	struct RemoteWreck {
+		double wreckedAt = 0;  // armour +0x60
+		double fadeFrom = -1;  // +0x64: when the countdown began
+		bool attached = false; // a player still on it (the PCO's slot 0x10)
+		bool soldier = false;  // class 0x9493: lands, waits and fades
+		float landedDelay = 4, stayAsWreck = 20, afterDestroyed = 0;
+	};
+	std::map<uint32_t, RemoteWreck> m_remoteWrecks;
+	void stepRemoteWrecks();
+	std::map<uint32_t, double> m_remoteBodyStarted; // when each remote body began (its death on the client)
 	bool m_hasCamera = false;
 	physics::Vec3 m_cameraPosition, m_cameraForward {0, 0, 1};
 	void setRagDollLevels();
+	float ragDollDistance(const anim::RagDoll& body) const;
+	std::function<double()> m_clock;
+	double m_ragDollFrameStart = 0; // the frame's ragdoll updates began (0x008ae120's counter)
 	std::map<std::pair<int, int>, float> m_revealed; // (player, team) -> seconds left
 	// The squads' battlefield objects (AIDLL 0x100bf000, 0x100bea30): per
 	// (team, squad), when each enemy player was last reported.

@@ -258,6 +258,7 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 			} else if (type == "Spring") {
 				Wheel wheel;
 				wheel.mount = position;
+				wheel.collisionPart = static_cast<int>(number(t, "collisionPart", -1));
 				wheel.radius = wheelRadius(mesh, static_cast<int>(number(t, "collisionPart", -1)));
 				wheel.spinRadius = wheelSpinRadius(mesh, static_cast<int>(number(t, "collisionPart", -1)));
 				wheel.strength = number(t, "strength", 0);

@@ -91,7 +91,9 @@ void CollisionWorld::addMesh(const CollisionMeshFile& mesh, CollisionUser user, 
 	}
 }
 
-bool CollisionWorld::raycast(const Vec3& from, const Vec3& to, Hit& hit) const
+bool CollisionWorld::raycast(const Vec3& from, const Vec3& to, Hit& hit) const { return trace(from, to, hit, false); }
+
+bool CollisionWorld::trace(const Vec3& from, const Vec3& to, Hit& hit, bool frontOnly) const
 {
 	++m_stamp;
 	const Vec3 direction = to - from;
@@ -115,6 +117,9 @@ bool CollisionWorld::raycast(const Vec3& from, const Vec3& to, Hit& hit) const
 					continue;
 				}
 				t.stamp = m_stamp;
+				if (frontOnly && dot(direction, t.normal) >= 0) {
+					continue;
+				}
 				// Moller-Trumbore, both sides.
 				const Vec3 e1 = t.b - t.a, e2 = t.c - t.a;
 				const Vec3 p = cross(direction, e2);
@@ -253,14 +258,28 @@ bool CollisionWorld::edgeContact(const Vec3& a, const Vec3& b, const Vec3& origi
 
 bool CollisionWorld::segmentContact(const Vec3& from, const Vec3& to, SphereContact& contact) const
 {
+	// The faces crossed from the front only (0x006bd070 with its two-sided
+	// flag clear: the end behind the face, the start in front, moving
+	// against its normal), the earliest of them (0x006e62c0).
 	Hit hit;
-	if (!raycast(from, to, hit) || dot(to - from, hit.faceNormal) >= 0) {
-		return false; // nothing crossed, or a face crossed from behind
+	if (!trace(from, to, hit, true)) {
+		return false;
 	}
 	contact.point = hit.point;
 	contact.normal = hit.faceNormal;
 	contact.depth = std::min(dot(to - hit.point, hit.faceNormal), 0.0f);
 	contact.material = hit.material;
+	return true;
+}
+
+bool CollisionWorld::segmentContact(const Vec3& from, const Vec3& to, const Mat3& rotation, const Vec3& position,
+	SphereContact& contact) const
+{
+	if (!segmentContact(rotation.untransform(from - position), rotation.untransform(to - position), contact)) {
+		return false;
+	}
+	contact.point = position + rotation.transform(contact.point);
+	contact.normal = rotation.transform(contact.normal);
 	return true;
 }
 

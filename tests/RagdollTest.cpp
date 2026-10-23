@@ -900,6 +900,26 @@ TEST(RagDoll_NetworkDrivenBody)
 
 namespace {
 
+// A collision LOD of `type` with its box from its vertices (as the
+// shipped meshes have it: the box gives the LOD's radius, slot 0x50).
+physics::CollisionLod boxedLod(uint32_t type, std::vector<std::array<float, 3>> vertices,
+	std::vector<physics::CollisionFace> faces)
+{
+	physics::CollisionLod lod;
+	lod.collisionType = type;
+	lod.boundsMin = {1e9f, 1e9f, 1e9f};
+	lod.boundsMax = {-1e9f, -1e9f, -1e9f};
+	for (const auto& v : vertices) {
+		for (int k = 0; k < 3; ++k) {
+			lod.boundsMin[static_cast<size_t>(k)] = std::min(lod.boundsMin[static_cast<size_t>(k)], v[static_cast<size_t>(k)]);
+			lod.boundsMax[static_cast<size_t>(k)] = std::max(lod.boundsMax[static_cast<size_t>(k)], v[static_cast<size_t>(k)]);
+		}
+	}
+	lod.vertices = std::move(vertices);
+	lod.faces = std::move(faces);
+	return lod;
+}
+
 // The FAV-like car of RagDoll_ThrownOutOfASeatWithoutADieBundle, at `at`.
 uint32_t makeCar(Game& game, physics::Vec3 at)
 {
@@ -932,18 +952,17 @@ uint32_t makeCar(Game& game, physics::Vec3 at)
 	return game.objects.create(game.templates.find("car"), {at.x, at.y, at.z}, {0, 0, 0})->id();
 }
 
-// A pole whose only collision is a type-4 LOD (a trunk: two faces in the
-// x-y plane), 0.6 m across (treeCollisionDiameter).
+// A pole with a type-4 LOD (a trunk: two faces in the x-y plane), 0.6 m
+// across (treeCollisionDiameter), and a vehicle LOD (as the shipped trees
+// have: 0x006bb050 tests nothing of a mesh without one) of a thin post.
 void makePole(Game& game, physics::Vec3 at)
 {
-	physics::CollisionLod lod;
-	lod.collisionType = 4;
-	lod.vertices = {{-0.05f, -1, 0}, {0.05f, -1, 0}, {0, 4, 0}};
-	lod.faces = {{{0, 2, 1}, 0}, {{0, 1, 2}, 0}};
-	lod.boundsMin = {-0.05f, -1, 0};
-	lod.boundsMax = {0.05f, 4, 0};
+	const physics::CollisionLod lod = boxedLod(4, {{-0.05f, -1, 0}, {0.05f, -1, 0}, {0, 4, 0}},
+		{{{0, 2, 1}, 0}, {{0, 1, 2}, 0}});
+	const physics::CollisionLod vehicle = boxedLod(1, {{-0.05f, -1, 0}, {0.05f, -1, 0}, {0, 4, 0}},
+		{{{0, 2, 1}, 0}, {{0, 1, 2}, 0}});
 	physics::CollisionSubGeometry part;
-	part.lods = {lod};
+	part.lods = {vehicle, lod};
 	physics::CollisionGeometry geometry;
 	geometry.subGeometries = {part};
 	physics::CollisionMeshFile mesh;
@@ -1019,11 +1038,13 @@ TEST(Hull_HelicopterHittingAStaticIsDestroyed)
 		if (helicopter) {
 			game.templates.find("car_engine")->settings()["engineType"] = "c_ETHelicopter";
 		}
-		// A small plate (both sides) under the car's middle at 1.5 m.
-		physics::CollisionLod lod;
-		lod.collisionType = 1;
-		lod.vertices = {{-0.3f, 0, -0.3f}, {0.3f, 0, -0.3f}, {0.3f, 0, 0.3f}, {-0.3f, 0, 0.3f}};
-		lod.faces = {{{0, 1, 2}, 0}, {{0, 2, 3}, 0}, {{0, 2, 1}, 0}, {{0, 3, 2}, 0}};
+		// A thin bar (both sides) across under the car's middle at 1.5 m,
+		// longer than the car is wide: the car's hull falls round it (no
+		// vertex of either crosses the other's faces), its origin through.
+		// Not over four times smaller than the car (else only the bar's
+		// vertices would go into the car's mesh, 0x006dc7b0).
+		const physics::CollisionLod lod = boxedLod(1, {{-1.5f, 0, -0.05f}, {1.5f, 0, -0.05f}, {1.5f, 0, 0.05f}, {-1.5f, 0, 0.05f}},
+			{{{0, 1, 2}, 0}, {{0, 2, 3}, 0}, {{0, 2, 1}, 0}, {{0, 3, 2}, 0}});
 		physics::CollisionSubGeometry part;
 		part.lods = {lod};
 		physics::CollisionGeometry geometry;
@@ -1059,10 +1080,8 @@ TEST(Hull_WheelsProbeStaticObjects)
 		const float base = platform ? 2.0f : 0.0f;
 		const uint32_t car = makeCar(game, {3, base + 1.5f, 0});
 		if (platform) {
-			physics::CollisionLod lod;
-			lod.collisionType = 1;
-			lod.vertices = {{-10, 0, -10}, {10, 0, -10}, {10, 0, 10}, {-10, 0, 10}};
-			lod.faces = {{{0, 1, 2}, 0}, {{0, 2, 3}, 0}, {{0, 2, 1}, 0}, {{0, 3, 2}, 0}};
+			const physics::CollisionLod lod = boxedLod(1, {{-10, 0, -10}, {10, 0, -10}, {10, 0, 10}, {-10, 0, 10}},
+				{{{0, 1, 2}, 0}, {{0, 2, 3}, 0}, {{0, 2, 1}, 0}, {{0, 3, 2}, 0}});
 			physics::CollisionSubGeometry part;
 			part.lods = {lod};
 			physics::CollisionGeometry geometry;
@@ -1082,6 +1101,271 @@ TEST(Hull_WheelsProbeStaticObjects)
 	}
 	std::fprintf(stderr, "  at rest %.3f m over the terrain, %.3f m over the platform\n", rest[0], rest[1]);
 	CHECK(std::abs(rest[0] - rest[1]) < 0.25f);
+}
+
+namespace {
+
+// A static SimpleObject `name` at `at` whose collision mesh is `lods`.
+world::ObjectTemplate* addStatic(Game& game, const char* name, std::vector<physics::CollisionLod> lods, physics::Vec3 at,
+	physics::Vec3 rotation = {})
+{
+	physics::CollisionSubGeometry part;
+	part.lods = std::move(lods);
+	physics::CollisionGeometry geometry;
+	geometry.subGeometries = {part};
+	physics::CollisionMeshFile mesh;
+	mesh.version = 10;
+	mesh.geometries = {geometry};
+	game.collisionTemplates.add(std::string(name) + "_mesh", mesh);
+	if (!game.templates.find("SimpleObject_type")) {
+		game.templates.registerType(11, "SimpleObject");
+		game.templates.create("SimpleObject", "SimpleObject_type");
+	}
+	world::ObjectTemplate* t = game.templates.create("SimpleObject", name);
+	t->settings()["collisionMesh"] = std::string(name) + "_mesh";
+	game.objects.create(t, {at.x, at.y, at.z}, {rotation.x, rotation.y, rotation.z});
+	return t;
+}
+
+// A wall in the x-y plane (both sides), `half` wide each way, 0 to 4 m up.
+physics::CollisionLod wallLod(float half)
+{
+	return boxedLod(1, {{-half, 0, 0}, {half, 0, 0}, {half, 4, 0}, {-half, 4, 0}},
+		{{{0, 1, 2}, 0}, {{0, 2, 3}, 0}, {{0, 2, 1}, 0}, {{0, 3, 2}, 0}});
+}
+
+} // namespace
+
+// The vertex pass's ways (0x006bb050): a moving A's vertex runs from A's
+// centre of mass a tick ago to where it is now, so a vertex already behind
+// a face still meets it from the front. A car set down with its front
+// through a wall is pushed back out of it (with ways from the vertices'
+// last places, those behind the wall would never cross it).
+TEST(Hull_VertexWaysFromTheCentreOfMass)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	const uint32_t car = makeCar(game, {3, 1.2f, 0});
+	addStatic(game, "wall", {wallLod(6)}, {3, -1, 1.2f});
+	game.start();
+	game.run(2);
+	const float z = game.objects.find(car)->position().z;
+	std::fprintf(stderr, "  the car's origin ends at z %.2f (the wall at 1.2, its front 2.0 m ahead)\n", z);
+	CHECK(z < 1.2f - 1.5f);
+}
+
+// A static with treeCollisionDiameter and a vehicle LOD but no type-4 LOD
+// gets a trunk line up its vehicle LOD's box (0x006bb050's third pass:
+// one face (cx, min y, 0), (cx, max y, 0), (cx + 0.05, min y, 0); the
+// shipped brick_pillarjba). Here the vehicle LOD is three vertices in a
+// line (no face of its own, and under 4 vertices a static's vertex pass
+// does nothing): only the trunk line stops the car.
+TEST(Hull_TrunkLineWithoutATypeFourLod)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	float ends[2] = {};
+	for (int diameter = 0; diameter < 2; ++diameter) {
+		Game game(gameDir);
+		const uint32_t car = makeCar(game, {3, 1.2f, 0});
+		world::ObjectTemplate* post =
+			addStatic(game, "post", {boxedLod(1, {{0, -1, 0}, {0, 1.5f, 0}, {0, 4, 0}}, {{{0, 1, 2}, 0}})}, {3, 0, 12});
+		if (diameter) {
+			post->settings()["treeCollisionDiameter"] = "0.6";
+		}
+		game.start();
+		CHECK(game.world->spawnPlayer(2) != nullptr);
+		game.run(3);
+		ends[diameter] = driveCar(game, car, 6);
+	}
+	std::fprintf(stderr, "  the car ends at z %.2f without a diameter, %.2f with one\n", ends[0], ends[1]);
+	CHECK(ends[0] > 14);
+	CHECK(ends[1] < 12 && ends[1] > 8);
+}
+
+// Object against object (0x006dc7b0 -> 0x006bb050 both ways, shares by
+// mass 0x006b6cc0): a car driven into a parked one pushes it along and
+// doesn't pass through it.
+TEST(Hull_CarPushesAParkedCar)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	const uint32_t car = makeCar(game, {3, 1.2f, 0});
+	const uint32_t parked = game.objects.create(game.templates.find("car"), {3, 1.2f, 9}, {0, 0, 0})->id();
+	game.start();
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	game.run(3);
+	const float parkedAt = game.objects.find(parked)->position().z;
+	const float end = driveCar(game, car, 6);
+	const float pushedTo = game.objects.find(parked)->position().z;
+	std::fprintf(stderr, "  the driven car ends at z %.2f; the parked one from %.2f to %.2f\n", end, parkedAt, pushedTo);
+	CHECK(pushedTo > parkedAt + 1);
+	CHECK(end < pushedTo);
+}
+
+// The small-object pre-trace (0x006bb050, LOD radius under 0.3): a small
+// mobile object's way from its centre of mass a tick ago to its origin
+// stops at the first face it crosses, and the object is put back there.
+// Its vehicle LOD sits 0.15 to 0.25 m over its origin, so its vertices
+// don't reach the deck yet: in the tick its origin falls through the deck
+// (a third of a metre a tick by then) it is put back onto it.
+TEST(Hull_SmallObjectPreTrace)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	std::vector<std::array<float, 3>> corners;
+	for (int i = 0; i < 8; ++i) {
+		corners.push_back({(i & 1) ? 0.05f : -0.05f, (i & 2) ? 0.25f : 0.15f, (i & 4) ? 0.05f : -0.05f});
+	}
+	// Its faces (outward): -y, +y, -x, +x, -z, +z.
+	const std::vector<physics::CollisionFace> faces = {{{0, 1, 5}, 0}, {{0, 5, 4}, 0}, {{2, 6, 7}, 0}, {{2, 7, 3}, 0},
+		{{0, 4, 6}, 0}, {{0, 6, 2}, 0}, {{1, 3, 7}, 0}, {{1, 7, 5}, 0}, {{0, 2, 3}, 0}, {{0, 3, 1}, 0}, {{4, 5, 7}, 0},
+		{{4, 7, 6}, 0}};
+	physics::CollisionSubGeometry part;
+	part.lods = {boxedLod(1, corners, faces)};
+	physics::CollisionMeshFile mesh;
+	mesh.version = 10;
+	mesh.geometries.resize(1);
+	mesh.geometries[0].subGeometries = {part};
+	game.collisionTemplates.add("can_mesh", mesh);
+	game.templates.registerType(12, "SimpleObject");
+	world::ObjectTemplate* can = game.templates.create("SimpleObject", "can");
+	can->settings()["collisionMesh"] = "can_mesh";
+	can->settings()["hasMobilePhysics"] = "1";
+	can->settings()["physicsType"] = "Mesh";
+	const uint32_t object = game.objects.create(can, {3, 6, 0}, {0, 0, 0})->id();
+	addStatic(game, "deck", {boxedLod(1, {{-10, 0, -10}, {10, 0, -10}, {10, 0, 10}, {-10, 0, 10}},
+								 {{{0, 1, 2}, 0}, {{0, 2, 3}, 0}, {{0, 2, 1}, 0}, {{0, 3, 2}, 0}})},
+		{3, 2, 0});
+	game.start();
+	float y = 6;
+	for (int tick = 0; tick < 90 && y > 2.05f; ++tick) {
+		game.world->tick(1 / 30.0f);
+		y = game.objects.find(object)->position().y;
+	}
+	std::fprintf(stderr, "  the small object's origin first under 2.05 at %.3f (the deck at 2)\n", y);
+	CHECK(y > 1.99f && y < 2.01f);
+}
+
+// The segment test of the vertex pass (0x006bd070 / 0x006e62c0): only the
+// faces crossed from the front, the earliest of them.
+TEST(CollisionWorld_SegmentMeetsFacesFromTheFront)
+{
+	physics::CollisionLod lod;
+	lod.collisionType = 1;
+	// Two floors at y 0 and y -1, the upper one facing down, the lower up.
+	lod.vertices = {{-1, 0, -1}, {1, 0, -1}, {1, 0, 1}, {-1, -1, -1}, {1, -1, -1}, {1, -1, 1}};
+	lod.faces = {{{0, 2, 1}, 0}, {{3, 4, 5}, 0}};
+	physics::CollisionSubGeometry part;
+	part.lods = {lod};
+	physics::CollisionMeshFile mesh;
+	mesh.version = 10;
+	mesh.geometries.resize(1);
+	mesh.geometries[0].subGeometries = {part};
+	physics::CollisionWorld world;
+	world.addMesh(mesh, physics::CollisionUser::Vehicle, {}, {});
+	physics::SphereContact contact;
+	// Down through both: the upper face is met from behind, the lower one counts.
+	CHECK(world.segmentContact({0.5f, 1, -0.5f}, {0.5f, -1.5f, -0.5f}, contact));
+	CHECK(std::fabs(contact.point.y + 1) < 1e-5f && contact.normal.y > 0.99f);
+	CHECK(std::fabs(contact.depth + 0.5f) < 1e-5f);
+	// The same mesh turned a quarter and moved to (10, 0, 0): local
+	// (0.5, y, -0.5) is world (9.5, y, -0.5); the contact comes back in
+	// world space.
+	const physics::Mat3 turned = physics::Mat3::fromYawPitchRoll({90, 0, 0});
+	CHECK(world.segmentContact({9.5f, 1, -0.5f}, {9.5f, -1.5f, -0.5f}, turned, {10, 0, 0}, contact));
+	CHECK(std::fabs(contact.point.x - 9.5f) < 1e-4f && std::fabs(contact.point.y + 1) < 1e-5f && contact.normal.y > 0.99f);
+}
+
+// Level 2 for network-driven bodies (0x008ae120): the manager updates the
+// bodies nearest the camera first and gives level 2 to a network-driven
+// one whose turn comes after ragdoll_clientMaxUpdateTime (0.002 ms) of the
+// frame's updates by the performance counter. With a clock that moves
+// 1.5 us a reading, the nearer remote body is in time, the farther not.
+TEST(RagDoll_RemoteBodiesPastTheFrameBudget)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	const anim::RagDollTemplate* t = game.systems.ragDoll(kRagDollScript);
+	CHECK(t && std::abs(t->settings.clientMaxUpdateTime - 0.002f) < 1e-7f);
+	game.start();
+	double now = 100;
+	game.world->setClock([&now] { return now += 1.5e-6; });
+	world::ObjectTemplate* soldier = game.templates.find("us_light_soldier");
+	const uint32_t near = game.objects.create(soldier, {2, 0, 5}, {0, 0, 0})->id();
+	const uint32_t far = game.objects.create(soldier, {2, 0, 40}, {0, 0, 0})->id();
+	for (const uint32_t ghost : {far, near}) {
+		const float z = ghost == near ? 5.0f : 40.0f;
+		CHECK(game.world->driveRemoteRagDoll(ghost, {{2, 1, z}, {2.1f, 1, z}, {1.9f, 1.4f, z}, {2.2f, 1.4f, z}}));
+	}
+	// Without a camera (a server) every body is at level 0.
+	game.world->tick(1 / 30.0f);
+	CHECK(game.world->remoteRagDoll(near)->levelOfDetail() == 0 && game.world->remoteRagDoll(far)->levelOfDetail() == 0);
+	game.world->setCamera({2, 1.5f, 0}, {0, 0, 1});
+	game.world->tick(1 / 30.0f);
+	const int nearLevel = game.world->remoteRagDoll(near)->levelOfDetail();
+	const int farLevel = game.world->remoteRagDoll(far)->levelOfDetail();
+	std::fprintf(stderr, "  levels: the nearer body %d, the farther %d\n", nearLevel, farLevel);
+	CHECK(nearLevel == 0 && farLevel == 2);
+	// A body left to itself (no update for 0.3 s) is not network-driven any
+	// more: back to the distance levels.
+	game.run(0.5f);
+	CHECK(!game.world->remoteRagDoll(far)->networkDriven() && game.world->remoteRagDoll(far)->levelOfDetail() == 0);
+}
+
+// A client runs the armour's corpse countdown from the networked health
+// (0x005fcdb0 -> the armour's setter -> 0x00654120: wreck at 0; 0x00654d80
+// -> 0x00652380 fades the soldier, no server test before the removal):
+// while a player is attached nothing happens; detached and landed,
+// timeToStayAsWreck after the wreck the body fades over
+// timeToStayAfterDestroyed, and stays (the server removes the ghost).
+// Health back above 0 makes it whole.
+TEST(RagDoll_RemoteCorpseFadesFromTheNetworkedHealth)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	world::ObjectTemplate* soldier = game.templates.find("us_light_soldier");
+	soldier->settings()["armor.timeToStayAsWreck"] = "6";
+	soldier->settings()["armor.timeToStayAfterDestroyed"] = "1";
+	game.start();
+	const uint32_t ghost = game.objects.create(soldier, {2, 0, 5}, {0, 0, 0})->id();
+	CHECK(game.world->driveRemoteRagDoll(ghost, {{2, 1, 5}, {2.1f, 1, 5}, {1.9f, 1.4f, 5}, {2.2f, 1.4f, 5}}));
+	game.world->setRemoteHealth(ghost, 0, true);
+	game.run(8);
+	CHECK(game.objects.find(ghost)->fade() == 1); // a player still on it
+	game.world->setRemoteHealth(ghost, 0, false);
+	game.run(0.5f);
+	const float fading = game.objects.find(ghost)->fade();
+	game.run(1);
+	std::fprintf(stderr, "  fade %.2f half a second after the player left, then %.2f\n", fading, game.objects.find(ghost)->fade());
+	CHECK(fading > 0.3f && fading < 0.7f);
+	CHECK(game.objects.find(ghost) && game.objects.find(ghost)->fade() == 0);
+	game.world->setRemoteHealth(ghost, 0.5f, false);
+	CHECK(game.objects.find(ghost)->fade() == 1);
+	// It waits 60 s at most, a player attached or not.
+	const uint32_t other = game.objects.create(soldier, {6, 50, 5}, {0, 0, 0})->id();
+	game.world->setRemoteHealth(other, 0, true);
+	game.run(59);
+	CHECK(game.objects.find(other)->fade() == 1);
+	game.run(2.5f);
+	CHECK(game.objects.find(other)->fade() == 0);
 }
 
 TEST(RagDoll_ImpactSoundFromTheFootStepsMaterial)

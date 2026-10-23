@@ -1946,6 +1946,13 @@ int runGame(Options& options, Session& session)
 			net::GameClient& client = *session.client;
 			client.update();
 			std::set<uint16_t> seen;
+			// Soldiers with a player: their wrecks wait for the player (0x00652380).
+			std::set<uint16_t> attached;
+			for (const net::RemotePlayer& p : client.world().playerList()) {
+				if (p.soldierGhost) {
+					attached.insert(p.soldierGhost);
+				}
+			}
 			for (const net::RemoteObject& ghost : client.world().objectList()) {
 				seen.insert(ghost.ghost);
 				if (ghost.part > 0 || !ghost.hasPosition) {
@@ -1954,6 +1961,11 @@ int runGame(Options& options, Session& session)
 				const world::Vec3 at {ghost.position.x, ghost.position.y, ghost.position.z};
 				const world::Vec3 turned {ghost.rotation.x, ghost.rotation.y, ghost.rotation.z};
 				if (const auto it = ghostObjects.find(ghost.ghost); it != ghostObjects.end()) {
+					// A soldier's networked health: clients run the corpse
+					// countdown and fade themselves (0x005fcdb0 → 0x00655460).
+					if (ghost.kind == net::NetworkableKind::Soldier && ghost.health >= 0) {
+						round.setRemoteHealth(it->second, ghost.health, attached.count(ghost.ghost) > 0);
+					}
 					// A dead soldier's body follows the server's networked
 					// ragdoll particles; GameWorld places it meanwhile.
 					if (ghost.ragdoll) {

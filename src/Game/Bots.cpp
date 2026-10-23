@@ -549,8 +549,10 @@ std::string BotManager::aiTemplateOf(const std::string& objectTemplate) const
 }
 
 // The bot manager's frame (BotManager::update 0x100ca590), with the
-// original's time slicing (its CPU budgets are not modelled: every slice
-// runs to its count):
+// original's time slicing. Its CPU budgets are real time (AIMain 0x100571c0
+// sets the deadline by the IBFTimer, BF2142.exe 0x0089f380:
+// QueryPerformanceCounter), so what fits depends on the machine and can't
+// be reproduced; every slice runs to its count, as when no budget runs out:
 //   - plan execution (0x100c91c0): about half the bots a frame, round
 //     robin (N/2 + 1 and N/2 on alternate frames for an odd N). A bot
 //     skipped while moving keeps its input for up to 15 more frames

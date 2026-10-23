@@ -170,6 +170,7 @@ void RigidBody::stepLinear(float seconds)
 	addVelocity((frictionAcceleration + acceleration) * seconds);
 	velocity = flush(velocity * tuning::kLinearDamping);
 	const Vec3 average = flush((previous + velocity) * 0.5f);
+	averageVelocity = average;
 	position += average * seconds;
 	acceleration = {};
 	impulse = {};
@@ -230,6 +231,106 @@ void ContactResponse::solve(RigidBody& body)
 	}
 	m_contacts.clear();
 	m_pushOut = {};
+}
+
+MassShares massShares(const ShareNode& a, const ShareNode& b, float approach, bool particle, bool fixedA, bool fixedB)
+{
+	MassShares s;
+	const auto limited = [particle](float share) {
+		return particle ? share : std::clamp(share, tuning::kMassShareLimit, 1.0f - tuning::kMassShareLimit);
+	};
+	// A major actor is not moved by a minor one.
+	if (!a.majorActor && b.majorActor) {
+		s.velocityA = s.depthA = 1;
+		s.wakeA = !fixedB && a.asleep;
+		return s;
+	}
+	if (a.majorActor && !b.majorActor) {
+		s.velocityB = s.depthB = -1;
+		s.wakeB = !fixedA && b.asleep;
+		return s;
+	}
+	// A sleeping node is not moved: the other takes it all; else by mass.
+	if (a.asleep) {
+		s.velocityB = -1;
+	} else if (b.asleep) {
+		s.velocityA = 1;
+	} else {
+		s.velocityA = limited(b.mass / (b.mass + a.mass));
+		s.velocityB = s.velocityA - 1;
+	}
+	s.depthA = s.velocityA;
+	s.depthB = s.velocityB;
+	if (particle) {
+		return s;
+	}
+	// A sleeping node hit hard enough (the other's momentum along the
+	// normal over its own mass) wakes and takes its mass share.
+	const auto share = [&] {
+		s.velocityA = limited(b.mass / (a.mass + b.mass));
+		s.velocityB = s.velocityA - 1;
+	};
+	if (a.asleep && !fixedA) {
+		if (-(b.mass * approach) > a.mass * tuning::kWakeMomentum) {
+			s.wakeA = true;
+			share();
+		}
+	} else if (b.asleep && !fixedB) {
+		if (-(a.mass * approach) > b.mass * tuning::kWakeMomentum) {
+			s.wakeB = true;
+			share();
+		}
+	}
+	// A hard contact between two mobile objects: the push out halved each way.
+	if (std::fabs(approach) > tuning::kHardContactSpeed && !fixedA && !fixedB) {
+		s.depthA = 0.5f;
+		s.depthB = -0.5f;
+	}
+	return s;
+}
+
+bool sphereTouchesBox(const Vec3& center, float radius, const Vec3& low, const Vec3& high, const Mat3& rotation,
+	const Vec3& position)
+{
+	const Vec3 p = rotation.untransform(center - position);
+	return p.x >= low.x - radius && p.x <= high.x + radius && p.y >= low.y - radius && p.y <= high.y + radius
+		&& p.z >= low.z - radius && p.z <= high.z + radius;
+}
+
+bool boxesOverlap(const Vec3& lowA, const Vec3& highA, const Mat3& rotationA, const Vec3& positionA, const Vec3& lowB,
+	const Vec3& highB, const Mat3& rotationB, const Vec3& positionB)
+{
+	const Vec3 halfA = (highA - lowA) * 0.5f, halfB = (highB - lowB) * 0.5f;
+	const Vec3 centreA = positionA + rotationA.transform((lowA + highA) * 0.5f);
+	const Vec3 centreB = positionB + rotationB.transform((lowB + highB) * 0.5f);
+	const Vec3 d = centreB - centreA;
+	const float ea[3] = {halfA.x, halfA.y, halfA.z}, eb[3] = {halfB.x, halfB.y, halfB.z};
+	const auto& ra = rotationA.rows;
+	const auto& rb = rotationB.rows;
+	const auto extent = [&](const Vec3& axis) {
+		float r = 0;
+		for (int i = 0; i < 3; ++i) {
+			r += ea[i] * std::fabs(dot(ra[static_cast<size_t>(i)], axis)) + eb[i] * std::fabs(dot(rb[static_cast<size_t>(i)], axis));
+		}
+		return r;
+	};
+	const auto separates = [&](const Vec3& axis) {
+		const float squared = lengthSquared(axis);
+		return squared > 1e-12f && std::fabs(dot(d, axis)) > extent(axis);
+	};
+	for (int i = 0; i < 3; ++i) {
+		if (separates(ra[static_cast<size_t>(i)]) || separates(rb[static_cast<size_t>(i)])) {
+			return false;
+		}
+	}
+	for (int i = 0; i < 3; ++i) {
+		for (int j = 0; j < 3; ++j) {
+			if (separates(cross(ra[static_cast<size_t>(i)], rb[static_cast<size_t>(j)]))) {
+				return false;
+			}
+		}
+	}
+	return true;
 }
 
 void collideWithGround(RigidBody& body, ContactResponse& response, const std::vector<Vec3>& points,
