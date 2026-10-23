@@ -730,6 +730,55 @@ std::function<bool(const std::string&, std::vector<uint8_t>&)> endOfRoundReader(
 	};
 }
 
+// The same for a joined game: the server's players, its end-of-round
+// block (data block 8: each player's kills, deaths and scores) and the
+// winner from its EndOfRound event.
+dice::hfe::menu::RoundSummary remoteRoundSummary(const Options& options, const net::RemoteWorld& world)
+{
+	dice::hfe::menu::RoundSummary summary;
+	summary.validRound = true;
+	summary.mapPath = summary.previousMapPath = options.level;
+	summary.gameMode = summary.previousGameMode = options.gameMode;
+	summary.mapSize = summary.previousMapSize = options.mapSize;
+	summary.serverName = world.serverName();
+	summary.roundsLeft = static_cast<int>(world.endOfRound().roundsLeft);
+	summary.winningTeam = static_cast<int>(world.endOfRound().winner);
+	if (summary.winningTeam == 1 || summary.winningTeam == 2) {
+		summary.victories[static_cast<size_t>(summary.winningTeam - 1)] = 1;
+	}
+	net::RemoteWorld::EndOfRoundData data;
+	const bool haveData = world.endOfRoundData(data);
+	for (const net::RemotePlayer& player : world.playerList()) {
+		dice::hfe::menu::EndOfRoundPlayer row;
+		row.name = player.name;
+		row.team = player.team;
+		row.score = player.score;
+		row.kills = player.kills;
+		row.deaths = player.deaths;
+		row.teamwork = player.teamwork;
+		row.squad = player.squad;
+		row.squadLeader = player.squadLeader;
+		row.commander = player.commander;
+		for (const auto& stats : data.players) {
+			if (haveData && stats.id == player.id) {
+				row.score = stats.score;
+				row.kills = stats.kills;
+				row.deaths = stats.deaths;
+				row.teamwork = stats.teamworkScore;
+			}
+		}
+		if (player.id == world.localPlayer()) {
+			summary.localPlayer = static_cast<int>(summary.players.size());
+			summary.myTeam = player.team == 1 ? 1 : 2;
+			summary.score = row.score;
+			summary.kills = row.kills;
+			summary.deaths = row.deaths;
+		}
+		summary.players.push_back(row);
+	}
+	return summary;
+}
+
 // Plays the menu headless: "wait:<seconds>", "click:<x>,<y>" (stage
 // pixels), "type:<text>", separated by spaces; stops early once `done`.
 void runMenuScript(ui::Player& menu, const std::string& script, const std::function<bool()>& done)
@@ -2106,7 +2155,9 @@ int runGame(Options& options, Session& session)
 				std::fprintf(stderr, "cannot load endOfRound.dfm: %s\n", error.c_str());
 				return;
 			}
-			dice::hfe::menu::RoundSummary summary = roundSummary(options, round, gameLogic, scoreOf, "BF2142 server");
+			dice::hfe::menu::RoundSummary summary = session.client
+				? remoteRoundSummary(options, session.client->world())
+				: roundSummary(options, round, gameLogic, scoreOf, "BF2142 server");
 			if (session.menuBindings) {
 				session.menuBindings->recordRound(summary); // the soldier's stats and rank
 			}
@@ -2303,7 +2354,7 @@ int runGame(Options& options, Session& session)
 		if (options.simulate > 0) {
 			for (int i = 0; i < options.simulate * 30; ++i) {
 				step();
-				if (gameLogic.ended()) {
+				if (gameLogic.ended() || (session.client && session.client->world().roundEnded())) {
 					sinceEnd += 1.0f / 30.0f;
 					showEndOfRound();
 					if (endOfRound.loaded()) {
@@ -2590,7 +2641,7 @@ int runGame(Options& options, Session& session)
 				for (const auto& sound : round.takeSounds()) {
 					sounds.playSoundAt(sound.sound, sound.position.x, sound.position.y, sound.position.z);
 				}
-				if (gameLogic.ended()) {
+				if (gameLogic.ended() || (session.client && session.client->world().roundEnded())) {
 					sinceEnd += 1.0f / 30.0f;
 					showEndOfRound();
 				}
