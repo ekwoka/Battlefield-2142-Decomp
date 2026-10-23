@@ -19,9 +19,9 @@
 //
 // Engines and wheels are in Game/Vehicle, the mobile mesh physics between
 // objects (0x006dc7b0, 0x006bb050) in Game/MeshCollision.cpp, soldiers in
-// SoldierPhysics. Not rewritten yet: drag and buoyancy (dragModifier,
-// floaterMod), sleeping (the node's counter +0x68, slots 0x14c / 0x158 /
-// 0x160), and the point and rotational point node types.
+// SoldierPhysics. Sleeping (SleepState), drag (applyDrag) and buoyancy
+// (applyBuoyancy) are here; the point and rotational point node types are
+// PointBody.
 #pragma once
 
 #include <array>
@@ -171,6 +171,10 @@ struct Ground {
 	// The terrain's physics material under a point (the material map,
 	// HeightmapCluster slot 0x80 / the ray 0x8c); empty: material 0.
 	std::function<uint32_t(float x, float z)> material;
+	// The water's height (HeightmapCluster slot 0x98 -> the heightmap's
+	// slot 0xe4: the sea level, heightmapcluster.setSeaWaterLevel, -10000
+	// without one), for buoyancy and swimming; empty: none.
+	std::function<float(float x, float z)> waterLevel;
 };
 
 // The shares of a contact between two objects' nodes (0x006b6cc0, called
@@ -209,8 +213,102 @@ bool sphereTouchesBox(const Vec3& center, float radius, const Vec3& low, const V
 bool boxesOverlap(const Vec3& lowA, const Vec3& highA, const Mat3& rotationA, const Vec3& positionA, const Vec3& lowB,
 	const Vec3& highB, const Mat3& rotationB, const Vec3& positionB);
 
+// Sleeping (PhysicsNode.Basic, 0x006c9060 and slots 0x14c-0x160). The
+// counter (+0x68) is set to 30 (*0x00a84adc, +0x64) when the node wakes
+// (slot 0x160; the constructors wake it) and counts down a tick at a time
+// while the node is still: the mean of its last three position changes
+// over the tick (+0x1c0, a ring at +0x1cc) under 0.5 m/s (*0x00a84b68, the
+// sum's square against 0.25 x 9) and of its last five angular velocities
+// (+0x174, a ring at +0x180) under 0.5 rad/s (*0x00a84b6c, against 0.25 x
+// 25); either over wakes it. Asleep (slot 0x14c) below 1: the node neither
+// steps, nor feels gravity, drag or contacts (the dispatch 0x006dd0b0 skips
+// it), and its motion is zeroed each tick (slot 0x148 -> 0x006c6080).
+// Putting it to sleep (slot 0x150, 0x006c6de0) clears the history.
+struct SleepState {
+	static constexpr int kReset = 30;          // *0x00a84adc
+	static constexpr float kLinear = 0.5f;     // *0x00a84b68
+	static constexpr float kAngular = 0.5f;    // *0x00a84b6c
+	int counter = kReset;                      // +0x68
+	bool sampled = false;                      // +0x164
+	Vec3 lastPosition;                         // +0x168
+	std::array<Vec3, 3> linear {};             // +0x1cc, index +0x1f0
+	Vec3 linearSum;                            // +0x1c0
+	int linearIndex = 0;
+	std::array<Vec3, 5> angular {};            // +0x180, index +0x1bc
+	Vec3 angularSum;                           // +0x174
+	int angularIndex = 0;
+
+	bool asleep() const { return counter < 1; }
+	// Slot 0x160: true when it was asleep.
+	bool wake()
+	{
+		const bool was = asleep();
+		counter = kReset;
+		return was;
+	}
+	// Slot 0x150.
+	void sleep() { *this = SleepState {}; counter = 0; }
+	// The tick's test (0x006c9060's start): the position now and the
+	// angular velocity; true when it woke the node.
+	bool sample(const Vec3& position, const Vec3& angularVelocity, float seconds);
+};
+
+// Drag of a PhysicsNode.Basic with drag above 0 (in 0x006c9060): the
+// vehicle LOD's box (size) gives the areas of its faces times 0.785
+// (*0x993a7c) and dragModifier per body axis, and the drag is 25 times
+// (0x993410) as strong in water by the part of the box's height under it
+// (`submerged`, the node's +0x5c, 0..1 m). Linear (0x006c7e00): along each
+// body axis, drag / mass x |v| x the area across it, at most the velocity's
+// own component each way in a tick, as a force at the position (slot 0xa4);
+// angular (0x006c8110): the same of the angular velocity with the sums of
+// two areas (the third row reusing the second's), into the torque. Wind
+// (PhysicsSystem slot 0x24) is 0.
+void applyDrag(RigidBody& body, float drag, float mass, const Vec3& dragModifier, const Vec3& boxSize, float submerged);
+
+// Buoyancy (the end of the ground pass 0x006b9260): the vehicle LOD's
+// lowest point under the water's level makes the node `submerged` (its
+// depth, at most 1); a root with floaterMod pushes up by
+// -(gravity x gravityModifier) x floaterMod x the largest weight of the
+// box's corners under the water (each the sum over the body's axes of
+// |axis.y| x min(depth / the box's size along it, 1)), at the corners'
+// weighted mean (slot 0xa4). `entered`: it was dry before (the splash's
+// collision event). Returns the new depth.
+float applyBuoyancy(RigidBody& body, const Vec3& boxMin, const Vec3& boxMax, const std::vector<Vec3>& points,
+	float waterLevel, float floaterMod, float gravity, float submerged, bool root, bool* entered = nullptr);
+
+// The point node types (PhysicsNode.Point, vtable 0x00993418, tick
+// 0x006c6170 / step 0x006c57a0; PhysicsNode.RotationalPoint, vtable
+// 0x00993610, tick 0x006c6b20 with the angular step 0x006c6860), made by
+// physicsType Point (1) and RotationalPoint (2) with hasMobilePhysics
+// (0x005f6ba0): shipped, the projectiles (Point), grenades, mines and
+// debris particles (RotationalPoint). No damping, no sleep test. In water
+// (drag above 0) the drag of a sphere of 0.1 m (0x006c5730: drag / mass x
+// 0.01 x -pi x m, m 25 times as much by min(10 x depth, 1)).
+class PointBody {
+public:
+	Vec3 position;
+	Mat3 rotation;          // RotationalPoint only
+	Vec3 velocity;          // +0x20
+	Vec3 averageVelocity;   // +0x44
+	Vec3 acceleration;      // +0x2c
+	Vec3 impulse;           // +0x38
+	Vec3 angularVelocity;   // +0xb8
+	Vec3 torque;            // +0xd0 (+0xe8 the second)
+	float mass = 1;
+	float drag = 0;
+	float gravityModifier = 1;
+	float submerged = 0;    // +0x5c
+	bool rotational = false;
+
+	void step(float seconds, float gravity = tuning::kGravity);
+};
+
 // Slot 0x28: the body's contact points (object space) against the ground.
+// `touched` hears each contact added (the point's index, the world point,
+// the point's velocity and the ground's normal): the collision events and
+// the contact effects.
+using GroundTouch = std::function<void(size_t index, const Vec3& point, const Vec3& velocity, const Vec3& normal)>;
 void collideWithGround(RigidBody& body, ContactResponse& response, const std::vector<Vec3>& points,
-	const Ground& ground, const ContactMaterial& material);
+	const Ground& ground, const ContactMaterial& material, const GroundTouch& touched = {});
 
 } // namespace dice::hfe::physics

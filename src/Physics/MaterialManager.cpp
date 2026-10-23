@@ -62,8 +62,13 @@ float MaterialManager::resistance(uint32_t id) const
 
 float MaterialManager::damageMod(uint32_t projectile, uint32_t surface) const
 {
-	const MaterialCell* found = cell(projectile, surface);
-	return found ? found->damageMod : 1.0f;
+	for (const uint32_t other : {surface, 0u}) {
+		const MaterialCell* found = cell(projectile, other);
+		if (found && found->damageMod != -1.0f) {
+			return found->damageMod;
+		}
+	}
+	return 1.0f;
 }
 
 void registerMaterialConsoleMethods(Console& console, MaterialManager& materials)
@@ -106,7 +111,7 @@ void registerMaterialConsoleMethods(Console& console, MaterialManager& materials
 		materials.createCell(static_cast<uint32_t>(a), static_cast<uint32_t>(b));
 	});
 	bindProperty<float>(console, "MaterialManager.damageMod", access,
-		[&materials] { return materials.activeCell() ? materials.activeCell()->damageMod : 1.0f; },
+		[&materials] { return materials.activeCell() ? materials.activeCell()->damageMod : -1.0f; },
 		[&materials](const float& value) {
 			if (MaterialCell* cell = materials.activeCell()) {
 				cell->damageMod = value;

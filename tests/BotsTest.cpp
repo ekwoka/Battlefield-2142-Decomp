@@ -1567,3 +1567,105 @@ TEST(Bots_HumanGettingOutKeepsBotsOffForSevenSeconds)
 	run(1.0f);
 	CHECK(near(bots.seatValueFor(bot, vehicle, 0), 4.5f, 0.05f)); // 7.5 s after
 }
+
+// The grenade warning (AIDLL 0x1004eab0, 0x10092960) and BBAvoid's 1000
+// (0x10064850): a teammate's thrown grenade within its explosion radius in
+// front of a bot sends it away (15 m, 0x10065360) until 2.8 s after the
+// thrower took the grenade in hand. A weapon that explodes on impact
+// doesn't warn.
+TEST(Bots_GrenadeWarning)
+{
+	for (bool onImpact : {false, true}) {
+		Field field;
+		world::ObjectTemplate* frag = field.templates.create("GenericFireArm", "test_frag");
+		frag->settings()["itemIndex"] = "4";
+		frag->settings()["projectileTemplate"] = "test_frag_shell";
+		frag->settings()["velocity"] = "6";
+		frag->settings()["ammo.magSize"] = "1";
+		frag->settings()["ammo.nrOfMags"] = "3";
+		world::ObjectTemplate* shell = field.templates.create("GenericProjectile", "test_frag_shell");
+		shell->settings()["physicsType"] = "RotationalPoint";
+		shell->settings()["timeToLive"] = "CRD_NONE/2.8/0/0";
+		shell->settings()["detonation.explosionDamage"] = "1";
+		shell->settings()["detonation.explosionRadius"] = "9";
+		world::ObjectTemplate* kit = field.templates.create("Kit", "test_thrower_kit");
+		kit->children().push_back({"eu_ar_rifle", {}, {}});
+		kit->children().push_back({"test_frag", {}, {}});
+		Console console;
+		game::BotSettings settings = scriptedSettings(console);
+		std::string out;
+		for (const char* line : {"weaponTemplate.create test_frag", "weaponTemplate.isThrown 1",
+				 "weaponTemplate.setExplosionRadius 9"}) {
+			console.execute(line, out);
+		}
+		if (onImpact) {
+			console.execute("weaponTemplate.explodesOnImpact 1", out);
+		}
+		CHECK(settings.weapon("test_frag").thrown && settings.weapon("test_frag").explodesOnImpact == onImpact);
+		game::BotManager bots(*field.world, settings);
+		const int bot = field.soldier(2, true, -90, 0);
+		const int thrower = field.world->addPlayer("Thrower", 2, false);
+		field.world->setKit(thrower, "test_thrower_kit", "us_light_soldier");
+		field.world->spawnSoldier(thrower);
+		settle(bots, 0.2f, field.world.get());
+		game::GameWorld::PlayerInfo info;
+		field.world->playerInfo(bot, info);
+		const float yaw = info.yaw * 3.14159265f / 180;
+		// Three metres in front of the bot, facing it.
+		field.move(thrower, info.position.x + 3 * std::sin(yaw), info.position.z + 3 * std::cos(yaw));
+		game::SoldierInput input;
+		input.selectItem = 4;
+		field.world->setInput(thrower, input);
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+		input = {};
+		input.fire = true;
+		field.world->setInput(thrower, input);
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+		field.world->setInput(thrower, {});
+		bool avoided = false;
+		int ticks = 0;
+		for (; ticks < 30 * 2; ++ticks) {
+			bots.update(1 / 30.0f);
+			field.world->tick(1 / 30.0f);
+			avoided = avoided || bots.behaviour(bot) == "Avoid";
+		}
+		CHECK(avoided != onImpact);
+		settle(bots, 1.5f, field.world.get()); // past 2.8 s after taking it in hand
+		CHECK(bots.behaviour(bot) != "Avoid");
+		if (!onImpact) {
+			game::GameWorld::PlayerInfo now;
+			field.world->playerInfo(bot, now);
+			std::printf("  the bot moved %.1f m\n",
+				std::sqrt(physics::lengthSquared(now.position - info.position)));
+		}
+	}
+}
+
+// The horn's target (0x100fc660 -> 0x100a5c00): a teammate on foot ahead
+// on the line of travel, within 15 m beyond both radii; not an enemy, not
+// one behind, not one off to the side.
+TEST(Bots_HornTarget)
+{
+	std::vector<game::GameWorld::PlayerInfo> players(4);
+	for (int i = 0; i < 4; ++i) {
+		players[static_cast<size_t>(i)].id = i;
+		players[static_cast<size_t>(i)].alive = true;
+		players[static_cast<size_t>(i)].team = 2;
+	}
+	players[0].position = {0, 0, 0}; // the driver (in the car)
+	players[0].vehicle = 99;
+	players[1].position = {0, -1.3f, 12}; // ahead, its chest at the centre's height
+	players[2].position = {6, -1.3f, 8};  // off to the side
+	players[3].position = {0, -1.3f, -8}; // behind
+	const physics::Vec3 centre {0, 0, 0}, way {0, 0, 1};
+	CHECK(game::hornTarget(centre, way, 2.5f, 2, 0, players) == 1);
+	players[1].position.z = 19; // 19 - 3 = 16 m beyond the radii
+	CHECK(game::hornTarget(centre, way, 2.5f, 2, 0, players) == -1);
+	players[1].position.z = 12;
+	players[1].team = 1; // an enemy
+	CHECK(game::hornTarget(centre, way, 2.5f, 2, 0, players) == -1);
+	players[1].team = 2;
+	CHECK(game::hornTarget(centre, {0, 0, -1}, 2.5f, 2, 0, players) == 3); // backing: the one behind
+}

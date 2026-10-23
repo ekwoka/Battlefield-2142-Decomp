@@ -53,21 +53,25 @@
 //    0x44) and B's face's: friction from their cell, elasticity their mean
 //    (0x006ba4c0).
 //
-// Not modelled: the collision callbacks each contact calls on both objects
-// (object slot 0xac: the game logic's collision damage and its veto of the
-// response), the effects (0x006b75d0), sleeping (no node sleeps here, so
-// the shares' sleeping terms never apply), the collision groups (response
-// slot 0x50), a soldier's and a wheel's own part as B (a static's vertices
-// into a wheel's three-vertex LOD), and the wheels' contacts go to the
-// vehicle's response rather than to the wheel's own node.
+// Each contact also calls both objects' collision events (object slot 0xac,
+// collisionEvent: the game logic's collision damage), records a contact
+// effect (0x006b75d0) and wakes sleeping nodes by the shares; pairs sharing
+// a collisionGroups bit don't meet, and a team's PlayerControlObject
+// passes its team's force fields. A wheel's probes go to the wheel's own
+// response (Vehicle::touchObject). Sleeping nodes are no movers.
+//
+// Not modelled: the response's stuck push (+0x11c) scaling the events'
+// velocity, and a static's vertices into a wheel's three-vertex LOD.
 #include "GameWorld.h"
 
 #include "Physics/CollisionWorld.h"
 #include "Physics/MaterialManager.h"
+#include "World/ObjectTemplate.h"
 #include "World/Object.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 namespace dice::hfe::game {
 
@@ -82,6 +86,13 @@ constexpr size_t kDetailedVertices = 10; // *0x00a85104 (0x00a84dd8)
 constexpr float kEdgePush = 3.0f;        // *0x00a8423c (0x008ed730)
 constexpr float kEdgeMinNormal = 0.1f;   // *0x00a84230 (0x008ed750)
 constexpr float kStaticCell = 16.0f;     // the rewrite's grid of static parts
+constexpr uint32_t kKillMaterial = 0x29a;          // the helicopter exit's material (instant kill)
+constexpr float kEventSpeed = 0.1f;                // 0x00920bd8: the events over |v|^2 0.1
+constexpr float kSoldierTerrainSpeed = 9.1f;       // *0x00a6a788 "soldier-terrain-speed-limit"
+constexpr float kImpactSpeed = 4.0f;               // *0x00a6a790 "collision-impact-speed-limit"
+constexpr float kSoldierImpactSpeed = 10.0f;       // *0x00a6a794 "soldier-impact-speed-limit"
+constexpr float kSoldierImpactSpeedFaster = 3.0f;  // *0x00a6a778 "soldier-impact-speed-limit-2"
+constexpr float kSoldierMass = 200.0f;             // 0x005a2ca0: a soldier counts as 200
 
 float length(const Vec3& v) { return std::sqrt(physics::lengthSquared(v)); }
 
@@ -169,7 +180,13 @@ GameWorld::MeshActor GameWorld::actorOf(Body& body) const
 	a.helicopter = body.helicopterEngine;
 	a.particle = body.particle;
 	a.material = body.material;
-	a.node = {body.mass, body.majorActor, false};
+	a.collisionGroups = body.collisionGroups;
+	if (body.controlObject) {
+		if (const world::Object* object = m_objects.find(body.object)) {
+			a.team = object->team();
+		}
+	}
+	a.node = {body.mass, body.majorActor, asleep(body)};
 	return a;
 }
 
@@ -192,6 +209,7 @@ GameWorld::MeshActor GameWorld::actorOf(const StaticPart& part) const
 	a.fixed = true;
 	a.ladder = part.ladder;
 	a.material = part.material;
+	a.collisionGroups = part.collisionGroups;
 	// A static object's node: never a major actor here, and not awake
 	// (0x006b6cc0 then leaves the whole push to the mobile one).
 	a.node = {1, false, true};
@@ -202,8 +220,10 @@ GameWorld::MeshActor GameWorld::actorOf(const StaticPart& part) const
 // (0x006dc7b0), against the static parts near it and the bodies after it.
 void GameWorld::collideBodies(float seconds)
 {
+	// A sleeping node is no mover (the dispatch 0x006dd0b0 skips it) but
+	// stays a candidate for the others.
 	for (size_t i = 0; i < m_bodies.size(); ++i) {
-		if (!findDrone(m_bodies[i].object) && m_objects.find(m_bodies[i].object)) {
+		if (!findDrone(m_bodies[i].object) && m_objects.find(m_bodies[i].object) && !asleep(m_bodies[i])) {
 			collideMover(m_bodies[i], i, seconds);
 		}
 	}
@@ -233,6 +253,10 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 		if (motion < std::min(m.radius, c.radius) && m.points->size() > kDetailedVertices
 			&& c.points->size() > kDetailedVertices
 			&& !physics::boxesOverlap(m.boxMin, m.boxMax, m.rotation, m.position, c.boxMin, c.boxMax, c.rotation, c.position)) {
+			return false;
+		}
+		// collisionGroups (response slot 0x50): pairs sharing a bit don't meet.
+		if (m.collisionGroups & c.collisionGroups) {
 			return false;
 		}
 		return m.points->size() >= 4 || c.points->size() >= 4;
@@ -304,9 +328,12 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 			}
 		}
 	}
-	// The bodies after it (those before were movers already).
-	for (size_t j = index + 1; j < m_bodies.size(); ++j) {
+	// The other bodies but those that were movers already (before it, awake).
+	for (size_t j = 0; j < m_bodies.size(); ++j) {
 		Body& other = m_bodies[j];
+		if (j == index || (j < index && !asleep(other))) {
+			continue;
+		}
 		if (!other.vehicleMesh || other.points.empty() || findDrone(other.object) || !m_objects.find(other.object)) {
 			continue;
 		}
@@ -318,7 +345,9 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 			m = actorOf(mover);
 		}
 		wheelProbes(mover, c, seconds);
-		wheelProbes(other, m, seconds);
+		if (!asleep(other)) {
+			wheelProbes(other, m, seconds);
+		}
 	}
 }
 
@@ -326,6 +355,15 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 bool GameWorld::meshPair(MeshActor& a, MeshActor& b, float seconds, bool trunkOnly)
 {
 	if (!a.mesh || !b.mesh || a.points->empty()) {
+		return true;
+	}
+	// A team's PlayerControlObject passes the other's force fields and
+	// doors (0x006bb050's start: interface 0xc4c5 slot 0x9c, team 1 against
+	// collisionGroups 0x100, team 2 against 0x200; shipped: as_* 256, eu_* 512).
+	const auto passes = [](const MeshActor& pco, const MeshActor& other) {
+		return (pco.team == 1 && (other.collisionGroups & 0x100)) || (pco.team == 2 && (other.collisionGroups & 0x200));
+	};
+	if (passes(a, b) || passes(b, a)) {
 		return true;
 	}
 	const Vec3 motion = (a.velocity - b.velocity) * seconds;
@@ -486,13 +524,34 @@ bool GameWorld::meshPair(MeshActor& a, MeshActor& b, float seconds, bool trunkOn
 // response (slot 0x2c, 0x006ba4c0). Pass 2's `depth` is the push (r - dist,
 // positive along the normal into B); the others' is <= 0 (how far the end
 // lies behind B's face).
-void GameWorld::addMeshContact(MeshActor& a, MeshActor& b, const Vec3& point, const Vec3& normal, float depth,
-	uint32_t materialA, uint32_t materialB, bool trunkPass)
+physics::MassShares GameWorld::addMeshContact(MeshActor& a, MeshActor& b, const Vec3& point, const Vec3& normal,
+	float depth, uint32_t materialA, uint32_t materialB, bool trunkPass, bool toA)
 {
 	const Vec3 relative = a.pointVelocity(point) - b.pointVelocity(point);
 	const float approach = physics::dot(relative, normal);
 	if (trunkPass && approach < 0) {
-		return; // pass 2: only when B comes towards A's trunk
+		return {}; // pass 2: only when B comes towards A's trunk
+	}
+	// The collision events (0x6bc764 on): over |v|^2 0.1, or B's face of
+	// material 0x29a, on both objects (their vetoes are never used in the
+	// shipped game, see collisionEvent).
+	const uint32_t objectA = a.body ? a.body->object : a.part ? a.part->object : 0;
+	const uint32_t objectB = b.body ? b.body->object : b.part ? b.part->object : 0;
+	const float speed = physics::lengthSquared(relative);
+	if (speed > kEventSpeed || materialB == kKillMaterial) {
+		collisionEvent(objectA, objectB, relative, normal, point - a.position, materialA, materialB);
+		collisionEvent(objectB, objectA, -relative, normal, point - b.position, materialB, materialA);
+	}
+	// The contact effect (0x6bcab2), past both nodes' handleCollisionSpeed:
+	// in A's root's response if only A is mobile, B's if A is not, the
+	// first's of two mobile ones.
+	const float hcsA = a.body ? a.body->handleCollisionSpeed : 1.0f;
+	const float hcsB = b.body ? b.body->handleCollisionSpeed : 1.0f;
+	if (hcsA * hcsA <= speed && hcsB * hcsB <= speed) {
+		Body* record = a.body && !b.body ? a.body : !a.body ? b.body : (a.body->object < b.body->object ? a.body : b.body);
+		if (record) {
+			recordContactEffect(*record, materialA, materialB, relative, point, normal);
+		}
 	}
 	const physics::MassShares shares =
 		physics::massShares(a.node, b.node, approach, a.particle || b.particle, a.fixed, b.fixed);
@@ -501,7 +560,17 @@ void GameWorld::addMeshContact(MeshActor& a, MeshActor& b, const Vec3& point, co
 		material.friction = m_materials->friction(materialA, materialB);
 		material.elasticity = (m_materials->elasticity(materialA) + m_materials->elasticity(materialB)) * 0.5f;
 	}
-	if (shares.velocityA != 0 && a.body) {
+	if (shares.wakeA && a.body) {
+		wake(*a.body);
+	}
+	if (shares.wakeB && b.body) {
+		wake(*b.body);
+	}
+	// A lighter object on a heavier mobile one keeps it (+0xf4).
+	if (a.body && b.body && a.body->mass < b.body->mass) {
+		a.body->support = b.body->object;
+	}
+	if (shares.velocityA != 0 && a.body && toA) {
 		a.body->response.addContact(point - a.position, relative * shares.velocityA, normal, depth * shares.depthA,
 			material);
 	}
@@ -509,6 +578,7 @@ void GameWorld::addMeshContact(MeshActor& a, MeshActor& b, const Vec3& point, co
 		b.body->response.addContact(point - b.position, relative * shares.velocityB, normal, depth * shares.depthB,
 			material);
 	}
+	return shares;
 }
 
 // A body's wheels as the parts they are in the original (a Spring each
@@ -568,7 +638,20 @@ void GameWorld::wheelProbes(Body& body, MeshActor& b, float seconds)
 			if (!b.mesh->segmentContact(start, start + along, b.rotation, b.position, hit)) {
 				continue;
 			}
-			addMeshContact(a, b, hit.point, hit.normal, hit.depth, body.material, hit.material, false);
+			// The contact goes to the wheel's own response (its spring and
+			// tyre, Vehicle::touchObject: as deep as its depth share puts it),
+			// the mirror to B's.
+			const physics::MassShares shares =
+				addMeshContact(a, b, hit.point, hit.normal, hit.depth, body.material, hit.material, false, false);
+			if (shares.velocityA != 0) {
+				const float grip = m_materials ? m_materials->friction(body.material, hit.material) : 0.8f;
+				// The solve's Spring branch moves the wheel out along the mean
+				// normal by its push, within 0..1 m (0x006ba7d0): the spring
+				// takes the height that gives it.
+				const float push = std::clamp(-hit.depth * shares.depthA, 0.0f, 1.0f);
+				const float height = (start + along).y + push * hit.normal.y;
+				body.vehicle->touchObject(w, height, hit.normal, b.pointVelocity(hit.point), grip);
+			}
 		}
 	}
 }
@@ -653,5 +736,365 @@ std::shared_ptr<const GameWorld::MeshShape> GameWorld::meshShape(const physics::
 	shape = std::move(made);
 	return shape;
 }
+
+namespace {
+
+
+float lengthOf(const Vec3& v) { return std::sqrt(physics::lengthSquared(v)); }
+
+float number(const world::ObjectTemplate& t, const char* name, float fallback)
+{
+	const auto it = t.settings().find(name);
+	return it == t.settings().end() ? fallback : static_cast<float>(std::atof(it->second.c_str()));
+}
+
+bool sameName(const std::string& a, const std::string& b)
+{
+	const world::CaseInsensitiveLess less;
+	return !less(a, b) && !less(b, a);
+}
+
+} // namespace
+
+void GameWorld::collisionEvent(uint32_t self, uint32_t other, const Vec3& velocity, const Vec3& normal,
+	const Vec3& point, uint32_t ownMaterial, uint32_t otherMaterial)
+{
+	(void)point;
+	const world::Object* object = m_objects.find(self);
+	const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
+	if (!t) {
+		return;
+	}
+	// PlayerControlObject (0x005c72f0): material 0x29a is the helicopter
+	// exit's (MeshCollision's meshPair destroys it), anything else the base.
+	if (otherMaterial == kKillMaterial && sameName(t->typeName(), "PlayerControlObject")) {
+		return;
+	}
+	// The base (0x0063c9e0): the material's veto (slot 0x70) is never set in
+	// the shipped game (0x006a10f0 returns 0); the first armour of the
+	// object (its own here) remembers the pair for a second (0x00653ef0:
+	// by the other's material, the other object and its own material) and
+	// only a new pair reaches the game logic.
+	if (hitPoints(self) < 0) {
+		return;
+	}
+	std::vector<CollisionMemory>& memory = m_collisionMemory[self];
+	for (const CollisionMemory& m : memory) {
+		if (m.other == other && m.ownMaterial == ownMaterial && m.otherMaterial == otherMaterial) {
+			return;
+		}
+	}
+	memory.push_back({other, ownMaterial, otherMaterial, 1.0f});
+	// The server's slot 0x104 (0x004ba3f0) with the velocity turned round.
+	if (other == 0) {
+		groundCollisionDamage(self, -velocity, normal, otherMaterial, ownMaterial);
+	} else {
+		objectCollisionDamage(other, self, -velocity, normal, otherMaterial, ownMaterial);
+	}
+}
+
+// 0x005a3db0: the ground (or nothing) hurting `victim`: the material
+// cell's damageMod (slot 0x64) x speed x speed x the angle (|cos| between
+// the motion and the normal, at least armor.angleMod); a soldier only
+// over 9.1 m/s, and then by the speed over 9.1. No one is credited. (The
+// impact's sound, effect and decal, 0x005a36d0, are left out.)
+void GameWorld::groundCollisionDamage(uint32_t victim, const Vec3& velocity, const Vec3& normal, uint32_t groundMaterial,
+	uint32_t victimMaterial)
+{
+	const world::Object* object = m_objects.find(victim);
+	const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
+	const float speed = lengthOf(velocity);
+	if (!t || speed <= 0) {
+		return;
+	}
+	const bool soldier = soldierPlayer(victim) != nullptr;
+	if (soldier && speed < kSoldierTerrainSpeed) {
+		return;
+	}
+	const float n = lengthOf(normal);
+	float angle = n > 0 ? std::fabs(physics::dot(velocity, normal) / (speed * n)) : 1.0f;
+	angle = std::max(angle, number(*t, "armor.angleMod", 0)); // armor template +0xf0
+	const float mod = m_materials ? m_materials->damageMod(groundMaterial, victimMaterial) : 1.0f;
+	const float amount = mod * (soldier ? speed - kSoldierTerrainSpeed : speed) * speed * angle;
+	if (amount >= 0.1f) { // 0x004c0e40's least
+		loseHitPoints(victim, amount, -1);
+	}
+}
+
+// 0x005a4690: `attacker` running into `victim`. Soldiers deal none; a
+// soldier victim is a road kill. Otherwise the speed over 4 m/s, squared,
+// x cos^2 of the angle x the cell's damageMod x the mass factor (x the
+// armour's +0xf4, 1, which nothing sets), credited to the attacker's
+// driver (0x005a30b0).
+void GameWorld::objectCollisionDamage(uint32_t attacker, uint32_t victim, const Vec3& velocity, const Vec3& normal,
+	uint32_t attackerMaterial, uint32_t victimMaterial)
+{
+	if (soldierPlayer(attacker)) {
+		return;
+	}
+	if (Player* soldier = soldierPlayer(victim)) {
+		roadKill(attacker, *soldier, velocity, attackerMaterial, victimMaterial);
+		return;
+	}
+	if (attacker == victim || hitPoints(victim) < 0) {
+		return;
+	}
+	const float speed = lengthOf(velocity);
+	const float n = lengthOf(normal);
+	const float angle = speed > 0 && n > 0 ? std::fabs(physics::dot(velocity, normal) / (speed * n)) : 0.0f;
+	const float over = std::max(0.0f, speed - kImpactSpeed);
+	const float mod = m_materials ? m_materials->damageMod(attackerMaterial, victimMaterial) : 1.0f;
+	const float amount = mod * collisionMassFactor(attacker, victim) * over * over * angle * angle;
+	if (amount >= 0.1f) {
+		loseHitPoints(victim, amount, collisionCredit(attacker, victim, velocity));
+	}
+}
+
+// 0x005a43c0: a soldier hit by an object. Under 10 m/s nothing (3 m/s when
+// the object is mobile and faster than the soldier); then (speed - that) x
+// speed x the mass factor (the soldier as 200), no material cell (unless
+// 0x29a, then it and 1 for the speed term).
+void GameWorld::roadKill(uint32_t attacker, Player& victim, const Vec3& velocity, uint32_t attackerMaterial,
+	uint32_t victimMaterial)
+{
+	const float speed = lengthOf(velocity);
+	const bool instant = attackerMaterial == kKillMaterial;
+	const Body* body = findBody(attacker);
+	const float limit = body && physics::lengthSquared(victim.body.velocity) < physics::lengthSquared(body->body.velocity)
+		? kSoldierImpactSpeedFaster
+		: kSoldierImpactSpeed;
+	if (speed < limit && !instant) {
+		return;
+	}
+	const float term = instant ? 1.0f : (speed - limit) * speed;
+	const float mod = instant && m_materials ? m_materials->damageMod(attackerMaterial, victimMaterial) : 1.0f;
+	const float amount = mod * collisionMassFactor(attacker, victim.object) * term;
+	if (amount >= 0.1f) {
+		loseHitPoints(victim.object, amount, collisionCredit(attacker, victim.object, velocity));
+	}
+}
+
+// 0x005a2ca0: clamp(attacker's mass / victim's, 0.3, 3) when both are
+// mobile (a soldier weighing 200), else 1.
+float GameWorld::collisionMassFactor(uint32_t attacker, uint32_t victim) const
+{
+	const Body* a = const_cast<GameWorld*>(this)->findBody(attacker);
+	if (!a) {
+		return 1;
+	}
+	float victimMass = 0;
+	if (soldierPlayer(victim)) {
+		victimMass = kSoldierMass;
+	} else if (const Body* b = const_cast<GameWorld*>(this)->findBody(victim)) {
+		victimMass = b->mass;
+	} else {
+		return 1;
+	}
+	return std::clamp(a->mass / std::max(victimMass, 1e-6f), 0.3f, 3.0f);
+}
+
+// 0x005a30b0: the attacker's driver (its PlayerControlObject's player), or
+// nobody when the victim is a teammate who ran into it faster.
+int GameWorld::collisionCredit(uint32_t attacker, uint32_t victim, const Vec3& velocity) const
+{
+	const Body* a = const_cast<GameWorld*>(this)->findBody(attacker);
+	if (!a || a->occupants.empty() || a->occupants[0] < 0) {
+		return -1;
+	}
+	const Player* driver = findPlayer(a->occupants[0]);
+	if (!driver) {
+		return -1;
+	}
+	const Player* hit = soldierPlayer(victim);
+	Vec3 victimVelocity;
+	if (hit) {
+		victimVelocity = hit->body.velocity;
+	} else if (const Body* b = const_cast<GameWorld*>(this)->findBody(victim)) {
+		if (!b->occupants.empty() && b->occupants[0] >= 0) {
+			hit = findPlayer(b->occupants[0]);
+		}
+		victimVelocity = b->body.velocity;
+	}
+	if (hit && hit->team == driver->team) {
+		const float l = lengthOf(velocity);
+		const Vec3 way = l > 0 ? velocity * (1.0f / l) : Vec3 {};
+		if (std::fabs(physics::dot(victimVelocity, way)) > std::fabs(physics::dot(a->body.velocity, way))) {
+			return -1;
+		}
+	}
+	return driver->id;
+}
+
+// 0x006b75d0: a response keeps one contact effect and one contact sound
+// until it has played them and its timer has run out: the material pair's
+// cell (or the first material against 0) with a sound (index 0) records
+// the sound slot, one without the effect slot; a free slot takes a contact
+// faster than the one it holds (in practice the first after a reset).
+void GameWorld::recordContactEffect(Body& body, uint32_t first, uint32_t second, const Vec3& velocity,
+	const Vec3& point, const Vec3& normal)
+{
+	if (!m_materials) {
+		return;
+	}
+	const float strength = physics::lengthSquared(velocity);
+	if (strength <= 0) {
+		return;
+	}
+	std::string sound;
+	for (const uint32_t other : {second, 0u}) {
+		const physics::MaterialCell* cell = m_materials->cell(first, other);
+		if (cell && !cell->soundTemplates.empty() && !cell->soundTemplates[0].empty()) {
+			sound = cell->soundTemplates[0];
+			break;
+		}
+	}
+	Body::ContactEffect& slot = sound.empty() ? body.contactEffect : body.contactSound;
+	if (slot.state != 0 || slot.strongest >= strength) {
+		return;
+	}
+	slot.state = 1;
+	slot.strongest = strength;
+	slot.first = first;
+	slot.second = second;
+	slot.timer = m_contactRandom.unit() + 0.5f;
+	slot.point = point;
+	slot.normal = normal;
+	slot.direction = velocity * (1.0f / std::sqrt(strength));
+	slot.sound = sound;
+}
+
+// The end of the solve (0x006ba7d0): the effect (the cell's effect index
+// 0, 0x006b8c40: at the point, its up the normal and its forward against
+// the motion along the surface); the sound (but not for the tracks' and
+// big wheels' materials, 61 webMat_Tracked and 67 webMat_wheelBig) 0.05
+// out from the point, with the cell's effect. (As the original, playing
+// the sound's effect marks the effect slot, not the sound's.)
+void GameWorld::playContactEffects(Body& body)
+{
+	const auto effectOf = [this](uint32_t first, uint32_t second) -> const std::string* {
+		for (const uint32_t other : {second, 0u}) {
+			const physics::MaterialCell* cell = m_materials->cell(first, other);
+			if (cell && !cell->effectTemplates.empty() && !cell->effectTemplates[0].empty()) {
+				return &cell->effectTemplates[0];
+			}
+		}
+		return nullptr;
+	};
+	const auto spawn = [this](const std::string& name, const Body::ContactEffect& e) {
+		physics::Mat3 frame;
+		if (std::fabs(physics::dot(e.normal, e.direction)) >= 0.0001f) {
+			const Vec3 up = normalised(e.normal);
+			const Vec3 right = normalised(physics::cross(e.direction, up));
+			frame.rows = {right, up, physics::cross(right, up)};
+		}
+		m_effects.spawn(name, e.point, frame);
+	};
+	if (!m_materials) {
+		return;
+	}
+	if (body.contactEffect.state == 1) {
+		if (const std::string* effect = effectOf(body.contactEffect.first, body.contactEffect.second)) {
+			spawn(*effect, body.contactEffect);
+			body.contactEffect.state = 2;
+		}
+	}
+	Body::ContactEffect& s = body.contactSound;
+	if (s.state == 1 && s.first != 0x3d && s.first != 0x43) {
+		if (!s.sound.empty()) {
+			m_sounds.push_back({s.sound, s.point + s.normal * 0.05f});
+			s.state = 2;
+		}
+		if (const std::string* effect = effectOf(s.first, s.second)) {
+			spawn(*effect, s);
+			body.contactEffect.state = 2;
+		}
+	}
+}
+
+// Response slot 0x9c (0x006b74e0, from the object's update): each slot's
+// timer runs down, four times as fast while the response holds no
+// contacts (between solves it never does); out, the slot is free again.
+void GameWorld::coolContactEffects(Body& body, float seconds)
+{
+	for (Body::ContactEffect* slot : {&body.contactEffect, &body.contactSound}) {
+		if (slot->timer > 0) {
+			slot->timer -= seconds * (body.response.contacts().empty() ? 4.0f : 1.0f);
+			if (slot->timer <= 0) {
+				slot->state = 0;
+				slot->strongest = 0;
+			}
+		}
+	}
+}
+
+bool GameWorld::bodyAsleep(uint32_t object) const
+{
+	const Body* body = const_cast<GameWorld*>(this)->findBody(object);
+	return body && asleep(*body);
+}
+
+float GameWorld::bodySubmerged(uint32_t object) const
+{
+	const Body* body = const_cast<GameWorld*>(this)->findBody(object);
+	return body ? body->submerged : 0.0f;
+}
+
+// Slot 0x150 (0x006c6de0): asleep, the history cleared, the motion gone.
+void GameWorld::sleep(Body& body)
+{
+	body.sleep.sleep();
+	physics::RigidBody& r = body.body;
+	r.velocity = r.averageVelocity = r.acceleration = r.impulse = {};
+	r.angularVelocity = r.torque = r.angularImpulse = {};
+	r.frictionAcceleration = r.frictionTorque = {};
+	r.frictionCount = 0;
+}
+
+// Slot 0x160 (0x006c5650): the counter back to 30; a sleeping
+// PlayerControlObject root also wakes the objects round it (0x006bfad0:
+// those a query of its radius, slot 0x90, finds; not major actors).
+void GameWorld::wake(Body& body)
+{
+	if (!body.sleep.wake() || !body.controlObject) {
+		return;
+	}
+	for (Body& other : m_bodies) {
+		if (&other == &body || other.majorActor || !asleep(other)) {
+			continue;
+		}
+		const float reach = body.radius + other.radius;
+		if (physics::lengthSquared(other.body.position - body.body.position) <= reach * reach) {
+			wake(other);
+		}
+	}
+}
+
+// The sleep test of the node's tick (0x006c9060): a still root counts
+// down; asleep, its motion is zeroed (slot 0x148 -> 0x006c6080, gravity
+// waiting in the acceleration), and it wakes when the heavier object it
+// rests on (the response's +0xf4) is gone or awake.
+void GameWorld::stepSleep(Body& body, float seconds)
+{
+	physics::RigidBody& r = body.body;
+	if (body.sleep.counter >= 0) {
+		body.sleep.sample(r.position, r.angularVelocity, seconds);
+	}
+	if (!asleep(body)) {
+		return;
+	}
+	r.velocity = r.averageVelocity = r.acceleration = r.impulse = {};
+	r.angularVelocity = r.torque = r.angularImpulse = {};
+	r.frictionAcceleration = r.frictionTorque = {};
+	r.frictionCount = 0;
+	r.acceleration.y = physics::tuning::kGravity * r.gravityModifier;
+	if (body.support != 0) {
+		const Body* under = findBody(body.support);
+		if (!under || !asleep(*under)) {
+			body.support = 0;
+			wake(body);
+		}
+	}
+}
+
 
 } // namespace dice::hfe::game

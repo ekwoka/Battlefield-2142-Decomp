@@ -31,6 +31,10 @@ struct ProjectileSettings {
 	float distToMinDamage = 0;
 	RandomDistribution timeToLive {RandomDistribution::Type::None, 1, 0, 0};
 	float gravityModifier = 1;
+	// Its Point / RotationalPoint node's drag and mass (template +0x78,
+	// +0x94; 0 and 1 by default): shotgun pellets 18, C4 15, missiles 0.1-10.
+	float drag = 0;
+	float mass = 1;
 	int material = 0;
 	// Detonation (detonation.*): splash damage round the impact. With a
 	// DefaultDetonationComp the template's defaults (0x005e9df0) are
@@ -94,6 +98,33 @@ struct ProjectileSettings {
 // A blast's falloff with distance (0x005a61a0): 1 within 0.2 of the
 // radius (0x00a6aab4), then falling linearly to 0 at the radius.
 float explosionFalloff(float radius, float distance);
+// A blast's push on an object (0x005a66e0), before it is spread over the
+// distance: `line` runs from the blast to the object's position (its height
+// already times explosionYMod), `axes` are the object's rotation (rows: its
+// x, y and z). The force is falloff x forceMod x explosionForce x share
+// (the armour's explosionForceMod, or wreckExplosionForceMod for a wreck;
+// without armour 10000 / max(mass, 100)), times 0.1 for a soldier whose
+// node is under water (slot 0x144, +0x5c, above 0), at most forceMax
+// (explosionForceMax, wreckExplosionForceMax; 500 without armour). It points
+// along the object's axis nearest the line (y only when strictly nearest,
+// else x unless z is nearer), signed towards the object, plus the line made
+// a unit; a soldier's line gets 5 more upwards (*0x00a6ab78) and its force
+// times `soldierRandom` (0.8 + 0.005 x (rand % 100)). The object's speed
+// counts against forceMax; components under 0.001 are dropped (0x005a6310).
+// The caller applies it when at least 0.01 long.
+struct BlastPush {
+	physics::Vec3 line;
+	physics::Mat3 axes;
+	float falloff = 1;
+	float forceMod = 1, forceMax = 10;
+	float explosionForce = 0;
+	float share = 1;
+	bool soldier = false;
+	float soldierRandom = 1;
+	bool inWater = false;
+	float speed = 0;
+};
+physics::Vec3 blastPush(const BlastPush& blast);
 // An armour's EMP level after `amount` of EMP damage (0x00652980): it goes
 // up in whole steps of `stepSize`, at most `numSteps`.
 float addEmpDamage(float level, float amount, float stepSize, int numSteps);

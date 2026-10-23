@@ -334,14 +334,15 @@ bool boxesOverlap(const Vec3& lowA, const Vec3& highA, const Mat3& rotationA, co
 }
 
 void collideWithGround(RigidBody& body, ContactResponse& response, const std::vector<Vec3>& points,
-	const Ground& ground, const ContactMaterial& material)
+	const Ground& ground, const ContactMaterial& material, const GroundTouch& touched)
 {
 	// An object below the ground is lifted onto it first.
 	const float floor = ground.height(body.position.x, body.position.z);
 	if (body.position.y < floor) {
 		body.position.y = floor;
 	}
-	for (const Vec3& point : points) {
+	for (size_t index = 0; index < points.size(); ++index) {
+		const Vec3& point = points[index];
 		const Vec3 world = body.position + body.rotation.transform(point);
 		Vec3 normal {0, 1, 0};
 		const float groundHeight = ground.heightAndNormal(world.x, world.z, normal);
@@ -349,9 +350,166 @@ void collideWithGround(RigidBody& body, ContactResponse& response, const std::ve
 		// Few-point objects only take contacts deeper than the push so far.
 		if (depth < 0 && (points.size() > 3 || response.pushOut().y < -depth)) {
 			const Vec3 contactPoint {world.x, groundHeight, world.z};
-			response.addContact(contactPoint - body.position, body.pointVelocity(contactPoint), normal, depth, material);
+			const Vec3 velocity = body.pointVelocity(contactPoint);
+			if (touched) {
+				touched(index, contactPoint, velocity, normal);
+			}
+			response.addContact(contactPoint - body.position, velocity, normal, depth, material);
 		}
 	}
+}
+
+bool SleepState::sample(const Vec3& position, const Vec3& angularVelocity, float seconds)
+{
+	if (!sampled) {
+		sampled = true;
+		lastPosition = position;
+	}
+	const Vec3 change = (position - lastPosition) * (1.0f / seconds);
+	lastPosition = position;
+	linearSum = linearSum - linear[static_cast<size_t>(linearIndex)] + change;
+	linear[static_cast<size_t>(linearIndex)] = change;
+	linearIndex = (linearIndex + 1) % 3;
+	if (lengthSquared(linearSum) >= kLinear * kLinear * 9.0f) { // 9.0 at 0x00929cbc
+		return wake(), true;
+	}
+	angularSum = angularSum - angular[static_cast<size_t>(angularIndex)] + angularVelocity;
+	angular[static_cast<size_t>(angularIndex)] = angularVelocity;
+	angularIndex = (angularIndex + 1) % 5;
+	if (lengthSquared(angularSum) >= kAngular * kAngular * 25.0f) { // 25.0 at 0x00993410
+		return wake(), true;
+	}
+	if (counter > 0) {
+		--counter; // slot 0x15c
+	}
+	return false;
+}
+
+namespace {
+
+// At most `limit`'s own size each way, per component (the drags' clamp).
+Vec3 notPast(const Vec3& change, const Vec3& limit)
+{
+	const auto one = [](float c, float l) { return l >= 0 ? std::min(c, l) : std::max(c, l); };
+	return {one(change.x, limit.x), one(change.y, limit.y), one(change.z, limit.z)};
+}
+
+} // namespace
+
+void applyDrag(RigidBody& body, float drag, float mass, const Vec3& dragModifier, const Vec3& size, float submerged)
+{
+	if (drag <= 0 || mass <= 0) {
+		return;
+	}
+	const float f = std::fabs(size.y) < 0.01f ? 0.0f : std::min(submerged / size.y, 1.0f);
+	const float water = f * 25.0f + (1.0f - f); // 25 at 0x00993410
+	constexpr float kArea = 0.785f;             // *0x00993a7c
+	const float areaZ = size.x * size.y * kArea * dragModifier.z;
+	const float areaY = size.x * size.z * kArea * dragModifier.y;
+	const float areaX = size.y * size.z * kArea * dragModifier.x;
+	const auto& r = body.rotation.rows;
+	// 0x006c7e00.
+	const Vec3 v = body.velocity * water;
+	const float k = drag / mass * std::sqrt(lengthSquared(v));
+	const Vec3 linear = project(v, r[0]) * (k * areaX) + project(v, r[1]) * (k * areaY) + project(v, r[2]) * (k * areaZ);
+	const Vec3 dv = notPast(linear * 0.033333335f, body.velocity);
+	body.addForce({}, -(dv * 30.0f));
+	// 0x006c8110.
+	const Vec3& w = body.angularVelocity;
+	const float kw = drag / mass * std::sqrt(lengthSquared(w)) * water;
+	const Vec3 turning = project(w, r[0]) * ((areaZ + areaY) * kw) + project(w, r[1]) * ((areaZ + areaX) * kw)
+		+ project(w, r[2]) * ((areaZ + areaX) * kw);
+	const Vec3 dw = notPast(turning * 0.033333335f, w);
+	body.torque += -(dw * 30.0f);
+}
+
+float applyBuoyancy(RigidBody& body, const Vec3& boxMin, const Vec3& boxMax, const std::vector<Vec3>& points,
+	float waterLevel, float floaterMod, float gravity, float submerged, bool root, bool* entered)
+{
+	if (entered) {
+		*entered = false;
+	}
+	if (points.empty()) {
+		return 0;
+	}
+	float lowest = 1e30f;
+	for (const Vec3& p : points) {
+		lowest = std::min(lowest, (body.position + body.rotation.transform(p)).y);
+	}
+	const float depth = lowest - waterLevel;
+	if (depth >= 0) {
+		return 0;
+	}
+	if (entered) {
+		*entered = submerged <= 0;
+	}
+	if (root && std::fabs(floaterMod) >= 1.1920929e-07f) {
+		const Vec3 size = boxMax - boxMin;
+		const auto& r = body.rotation.rows;
+		const float a0 = std::fabs(r[0].y), a1 = std::fabs(r[1].y), a2 = std::fabs(r[2].y);
+		const Vec3 up = body.rotation.untransform({0, 1, 0});
+		const float h0 = body.position.y - waterLevel;
+		const float gg = gravity * body.gravityModifier;
+		const auto part = [](float d, float extent) { return extent > 0 ? std::min(d / extent, 1.0f) : 1.0f; };
+		float most = 0, sum = 0;
+		Vec3 weighted;
+		for (int i = 0; i < 8; ++i) { // 0x006ae570
+			const Vec3 c {(i & 4) ? boxMax.x : boxMin.x, (i & 2) ? boxMax.y : boxMin.y, (i & 1) ? boxMax.z : boxMin.z};
+			const float h = dot(c, up) + h0;
+			if (h > 0) {
+				continue;
+			}
+			const float d = -h;
+			const float weight = part(d, size.x) * a0 + part(d, size.y) * a1 + part(d, size.z) * a2;
+			most = std::max(most, weight);
+			sum += weight;
+			weighted += c * weight;
+		}
+		if (sum > 0.01f) {
+			body.addForce(body.rotation.transform(weighted * (1.0f / sum)), {0, -(most * floaterMod * gg), 0});
+		}
+	}
+	return std::min(-depth, 1.0f);
+}
+
+void PointBody::step(float seconds, float gravity)
+{
+	if (drag > 0 && mass > 0) {
+		// 0x006c5730 with a radius of 0.1.
+		const float f = std::min(submerged * 10.0f, 1.0f);
+		acceleration += velocity * (drag / mass * 0.01f * (f * 25.0f + 1.0f - f) * -3.14159265f);
+	}
+	// 0x006c57a0.
+	const auto add = [](Vec3& v, const Vec3& change) { v = clampLength(flush(v + change), tuning::kMaxSpeed); };
+	add(velocity, impulse);
+	const Vec3 previous = velocity;
+	add(velocity, acceleration * seconds);
+	averageVelocity = flush((previous + velocity) * 0.5f);
+	position += averageVelocity * seconds;
+	if (rotational) {
+		// 0x006c6860: no shape inertia (150 / mass) and no damping; it turns
+		// about the node's origin.
+		Vec3 t = torque;
+		if (lengthSquared(t) > 1e6f) {
+			t = t * (1000.0f / std::sqrt(lengthSquared(t)));
+		}
+		Vec3 dw = t * (seconds / (mass * 0.0066666673f));
+		if (lengthSquared(dw) > 1e6f) {
+			dw = {};
+		}
+		const Vec3 before = angularVelocity;
+		add(angularVelocity, dw);
+		const Vec3 average = flush((before + angularVelocity) * 0.5f);
+		const float speedSquared = lengthSquared(average);
+		if (speedSquared > 1.0000001e-06f) {
+			const float speed = std::sqrt(speedSquared);
+			rotation = rotation * Mat3::axisAngle(average * (1.0f / speed), speed * seconds);
+		}
+		torque = {};
+	}
+	acceleration = {};
+	impulse = {};
+	acceleration.y += gravity * gravityModifier;
 }
 
 } // namespace dice::hfe::physics

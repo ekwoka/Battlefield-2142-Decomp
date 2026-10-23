@@ -42,7 +42,7 @@ struct Material {
 
 // A pair of materials meeting (a projectile's and a surface's, ...).
 struct MaterialCell {
-	float damageMod = 1;
+	float damageMod = -1; // unset (the cell's constructor 0x0060e770: +0x34 -1)
 	// By index ("setEffectTemplate <index> <template>"): index 0 is the
 	// usual one; others are variants (e.g. 1 for small projectiles).
 	std::vector<std::string> decalTemplates;
@@ -66,7 +66,9 @@ public:
 	float elasticity(uint32_t id) const; // slot 0x80
 	float resistance(uint32_t id) const; // slot 0x84
 	// The damage a projectile of material `projectile` does to `surface`
-	// is multiplied by this (1 without a cell).
+	// is multiplied by this (slot 0x64, 0x0060a540): the cell's damageMod,
+	// else the cell of `projectile` against material 0's, else 1 (the
+	// manager's +0x20); a cell's -1 is unset.
 	float damageMod(uint32_t projectile, uint32_t surface) const;
 
 	// The material and cell scripts work on.

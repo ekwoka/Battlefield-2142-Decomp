@@ -2,6 +2,7 @@ add_library(Game STATIC
 	Bots.cpp
 	GameWorld.cpp
 	MeshCollision.cpp
+	Ladders.cpp
 	Commander.cpp
 	SoldierControl.cpp
 	Weapons.cpp

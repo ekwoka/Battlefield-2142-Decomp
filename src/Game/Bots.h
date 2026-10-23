@@ -27,7 +27,8 @@
 //   c4      (0x10083750): 100 to place a charge in a point the team holds,
 //           100 to set it off once that point is contested;
 //   DefuseMines (0x10086870), RunOver (0x10087820), Avoid (0x10064850,
-//           on foot only); BridgeRepair is 0 (no broken bridges here).
+//           on foot only: wrecks, and 1000 for a grenade warning,
+//           0x1004eab0); BridgeRepair is 0 (no broken bridges here).
 //
 // Scheduling (0x100ca590): about half the bots run their plan a frame, at
 // most four think (after 0.3 s / 0.5 s of plan time) and two sense.
@@ -95,8 +96,9 @@ struct WeaponAi {
 	std::array<float, 8> strength {};
 	float deviation = 14;
 	float allowedDeviation = 0.5f;
-	float explosionRadius = 0;
-	bool indirect = false, thrown = false;
+	float explosionRadius = 0;  // +0x20
+	bool indirect = false, thrown = false; // thrown: +2 (0x0088a650)
+	bool explodesOnImpact = false; // +0x4e
 };
 
 // An AI template plug-in (aiTemplatePlugIn.create <kind> <name>; BF2142.exe
@@ -272,6 +274,8 @@ public:
 	std::vector<physics::Vec3> route(int player) const;
 	// The strategy a team's SAI runs ("" before the first update).
 	std::string strategy(int team) const;
+	// Whether a driving bot holds its vehicle's horn (PIFire; 0x100a5c00).
+	bool honking(int player) const;
 
 private:
 	// An enemy a bot knows of (the sensing agent's memory item).
@@ -372,6 +376,14 @@ private:
 		float avoidFor = 0;
 		physics::Vec3 avoidGoal;
 		float avoidUntil = -1;
+		// The grenade warning (the path follower's +0x11c position and
+		// +0x128 stamp, 0x10092920; read by 0x10092960): where, and when
+		// the thrower took the weapon in hand.
+		physics::Vec3 grenadeAt;
+		float grenadeStamp = -1e9f;
+		bool avoidGrenade = false; // the avoided object is -1: a grenade (0x10065360)
+		float hornAt = -1e9f;      // the comm object's +0x80 (0x100a5c00)
+		bool hornHeld = false;
 		float waitingSince = -1;  // Idle: a driver waiting for a passenger
 		bool usedLast = false;    // presses: use and the defibrillator want a release between
 		bool firedLast = false;
@@ -498,12 +510,31 @@ private:
 	// the vehicle each human player was in at the last update.
 	std::map<uint32_t, std::array<float, 3>> m_humanLeftAt;
 	std::map<int, uint32_t> m_humanVehicle;
+	// When each player took its weapon in hand: the AI weapon's +0x20
+	// (BF2142.exe 0x008a6d80 stamps the newly selected weapon with the
+	// clock, slot 0xfc 0x008924d0; read through slot 0x100 0x008924e0).
+	struct InHand {
+		int slot = -1;
+		std::string weapon;
+		float since = 0;
+	};
+	std::map<int, InHand> m_inHand;
+	// The grenade warning (0x1004eab0) and the horn (0x100a5c00).
+	void warnOfGrenades(Bot& bot, const GameWorld::PlayerInfo& self);
+	void horn(Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::VehicleInfo& vehicle, SoldierInput& input);
 	float m_time = 0;
 	uint32_t m_random = 0x2545f491;
 	float random(); // 0..1
 	void flee(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
 	void idle(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
 };
+
+// The soldier a driver would sound the horn at (AIDLL 0x100fc660's scan;
+// see BotManager::horn): of `team` (not `self`), alive and on foot, ahead
+// along `way` (the unit motion direction) within 15 m beyond both radii,
+// on the line of travel; the last one in `players` order, -1 for none.
+int hornTarget(const physics::Vec3& centre, const physics::Vec3& way, float ownRadius, int team, int self,
+	const std::vector<GameWorld::PlayerInfo>& players);
 
 // aiSettings.* (skill, bots, behaviours and modifiers, the equipment types'
 // behaviour sets), weaponTemplate.*, aiStrategy.*, aiStrategicArea.* and

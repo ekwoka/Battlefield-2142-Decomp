@@ -1153,3 +1153,63 @@ TEST(GameWorld_DriverInputUnderEmp)
 	car->settings()["autoControllerTemplateName"] = "SentryGun";
 	CHECK(game::GameWorld::driverInputScale(1, 500, *car) == 1 && game::GameWorld::driverInputScale(2, 500, *car) == 0);
 }
+
+// The abandoned vehicle's time to live (the spawn's PlayerControlObject
+// slots 0xa4/0xb8/0xc0, its check 0x005c8ba0 every half second): by its
+// spawner (within `distance`) the countdown stays full; away from it, it
+// runs down, and then the vehicle loses 25 hit points every half second
+// (0.5 x the spawner's 50 at +0x2f0) until it is destroyed.
+TEST(GameWorld_AbandonedVehiclesTimeOut)
+{
+	Level level;
+	world::ObjectTemplate* spawner = level.templates.find("spawner_tank");
+	spawner->settings()["timeToLive"] = "2";
+	spawner->settings()["distance"] = "5";
+	level.templates.find("tank_us")->settings()["armor.maxHitPoints"] = "100";
+	game::GameWorld world(level.templates, level.objects);
+	world.startRound();
+	world.tick(1 / 30.0f);
+	world::Object* tank = level.objects.objects().back().get();
+	CHECK(tank->objectTemplate()->name() == "tank_us");
+	CHECK(world.timeToLiveLeft(tank->id()) == 2);
+	for (int i = 0; i < 30 * 4; ++i) {
+		world.tick(1 / 30.0f);
+	}
+	CHECK(world.timeToLiveLeft(tank->id()) == 2); // by the spawner
+	tank->setPosition({60, 5, 20});
+	for (int i = 0; i < 30 * 5 + 15; ++i) {
+		world.tick(1 / 30.0f);
+	}
+	// Checked again within 5 s (the spawner's wait), then every half second:
+	// four checks empty it, each one after takes 25.
+	std::fprintf(stderr, "  left %.1f s, %.0f hit points\n", world.timeToLiveLeft(tank->id()), world.hitPoints(tank->id()));
+	CHECK(world.timeToLiveLeft(tank->id()) <= 0);
+	CHECK(world.hitPoints(tank->id()) < 100);
+	for (int i = 0; i < 30 * 3; ++i) {
+		world.tick(1 / 30.0f);
+	}
+	CHECK(!level.objects.find(tank->id()) || level.objects.find(tank->id())->destroyed());
+}
+
+// holdObject (the end of 0x005af230): the spawner holds its last spawn at
+// the spot until its first Engine turns; without an Engine it lets go at once.
+TEST(GameWorld_SpawnerHoldsItsObject)
+{
+	for (int engine = 0; engine < 2; ++engine) {
+		Level level;
+		level.templates.find("spawner_tank")->settings()["holdObject"] = "1";
+		if (engine) {
+			level.templates.registerType(4, "Engine");
+			level.templates.create("Engine", "tank_engine");
+			level.templates.find("tank_us")->children().push_back({"tank_engine", {}, {}});
+		}
+		game::GameWorld world(level.templates, level.objects);
+		world.startRound();
+		world.tick(1 / 30.0f);
+		world::Object* tank = level.objects.objects().back().get();
+		tank->setPosition({40, 5, 20});
+		world.tick(1 / 30.0f);
+		CHECK(world.spawners()[0]->holding() == (engine == 1));
+		CHECK((tank->position().x == 10) == (engine == 1));
+	}
+}

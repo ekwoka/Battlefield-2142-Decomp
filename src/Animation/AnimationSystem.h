@@ -26,16 +26,32 @@
 // drops the finished ones, and idle animations (under an IdleTrigger) once
 // the messages change or anything is queued above them.
 //
-// The pose (0x008b8530) takes, per bone, the first queued animation that
-// moves it and slerps towards each later one by its weight. Movement
+// The pose (0x008b8330) takes, per bone, the first queued animation that
+// moves it and slerps towards each later one by its weight; the result is
+// then slerped from the bone's previous pose by the system's weight, which
+// is below 1 while a trigger with a fadeInTime fades the system in
+// (0x008b9720), times the switch fade of directional bundles. Movement
 // bundles of four clips (forward, backward, strafe right, strafe left, as
 // addAnimation lists them in reverse) blend a strafe clip with the forward
-// or backward one by asin(|forward|) * 2 / pi (0x008c46d0).
+// or backward one by asin(|forward|) * 2 / pi (0x008c46d0), the backward
+// clip half the strafe clip's length ahead (anim_offsetBackwardTime); a
+// movement bundle starts where the last one was in its step (the system's
+// step phase, 0x4c). LookAroundTrigger blends two clips by one look value
+// and plays to a time by another (0x008c3d00); SlopeTrigger leans a
+// five-clip bundle to the side by the ground's slope (0x008c4f00).
+// CountTrigger takes its first child until the bundle on top has played
+// through once, then its second for good (0x008c42b0).
 //
-// Not rewritten yet: the "new system" bundles (useNewSystem, 0x008c30a0:
-// force stop points), animation events (sounds), camera springs, foot-phase
-// matching between movement bundles, LookAroundTrigger's blend, the system
-// weight while a trigger fades in, and CountTrigger.
+// Bundles with useNewSystem (0x008c30a0) fade linearly over their fade
+// times and, once no longer queued, play on to the next of their
+// forceStopPoints before fading out; while one with stop points plays
+// without fading, bundles of other priorities that aren't fading out hold
+// still. Their speed key points give a factor the object multiplies into
+// its movement (0x008ba420).
+//
+// Not rewritten yet: animation events (sounds and effects, 0x008c3030),
+// camera springs, the per-clip sequencing of bundles whose clips start one
+// after another, abruptPlayback and jumpToLastAnimationAtStop.
 #pragma once
 
 #include "AnimationFiles.h"
@@ -89,15 +105,33 @@ struct Bundle {
 	float fadeInTime = 0.2f;  // 0x20
 	float fadeOutTime = 0.1f; // 0x24
 	float stickAround = 0;    // 0x28
-	bool useNewSystem = false;
-	bool useSpeedAsTime = false;
-	bool isLooping = true;
-	bool playBackward = false;
-	bool playForever = false;
-	bool abruptPlayback = false;
-	bool jumpToLastAnimationAtStop = false;
-	bool blockInput = false;
+	bool useNewSystem = false;   // 0x2c
+	bool blockInput = false;     // 0x2d
+	bool jumpToLastAnimationAtStop = false; // 0x2e
+	bool useSpeedAsTime = false; // 0x2f
+	bool abruptPlayback = false; // 0x30
+	bool isLooping = true;       // 0x31
+	bool playBackward = false;   // 0x32
+	bool playForever = false;    // 0x33
+
+	// The new system's key points: a list of numbers separated by ';'
+	// (0x008bffe0 and the three after it), kept with the text it was set
+	// from.
+	struct KeyPoints {
+		std::string text;
+		std::vector<float> values;
+	};
+	KeyPoints forceStopPoints;       // 0x38 / 0x54: fractions of the length
+	KeyPoints speedKeyPoints;        // 0x64 / 0xb8: over the length
+	KeyPoints fadeOutSpeedKeyPoints; // 0x80 / 0xc8: over the fade out
+	KeyPoints fadeInSpeedKeyPoints;  // 0x9c / 0xd8: over the fade in
 };
+
+// 0x008bffe0: split at ';' (empty pieces skipped), each piece read by atof.
+Bundle::KeyPoints parseKeyPoints(const std::string& text);
+// 0x008c2cd0: the key points as a polyline over 0..1 (evenly spaced);
+// 1 with none, the only value with one.
+float keyPointValue(const std::vector<float>& points, float fraction);
 
 enum class TriggerType {
 	Trigger,
@@ -132,7 +166,7 @@ struct Trigger {
 	bool triggerOnAcceleration = false; // 0x38
 	bool useDirection = false; // 0x39
 	float idleMin = 5, idleMax = 10, idleNext = 5; // IdleTrigger 0x34-0x3c
-	uint32_t count = 0;
+	uint32_t count = 0;        // CountTrigger 0x34 (default 1 there): not read
 	uint32_t switchId = 0;
 };
 
@@ -179,6 +213,18 @@ struct AnimationInput {
 	float forward = 0;       // movement direction, forward positive
 	float speed = 0;         // m/s
 	float upSpeed = 0;       // m/s
+	// The first two parts of the vector an object passes last to the
+	// system's movement setter (0x008b9ae0, kept at 0x38 and 0x3c):
+	// LookAroundTrigger blends by the first and plays to a time by the
+	// second (0x008c3d00). Seats and stationary weapons use it for where
+	// the occupant looks; what each object passes there isn't decoded.
+	float lookAroundX = 0;
+	float lookAroundY = 0;
+	// The ground's slope under the object (slot 0x3c, 0x008b9970, kept at
+	// 0x24 and 0x28), which the system smooths by anim_surfaceInterpolate;
+	// SlopeTrigger leans its five-clip bundles by it (0x008c4f00).
+	float slopeForward = 0;
+	float slopeSide = 0;
 };
 
 // The system shared by every object that uses it, plus the global value
@@ -238,6 +284,17 @@ public:
 	// `skeleton`), after anything already applied.
 	void apply(const Skeleton& skeleton, LocalPose& pose, std::vector<bool>& touched) const;
 
+	// 0x008ba420 (slot 0x54): the product of the playing bundles' speed
+	// key points; vehicles multiply their movement by it (0x00650e90) and
+	// divide the speed they give the system by it (0x0063ce30).
+	float speedFactor() const;
+	// 0x78: the weight of the whole system's pose over what was there
+	// before it, below 1 while a trigger with a fadeInTime fades in.
+	float weight() const { return m_weight; }
+	// 0x4c: where in its step the last movement bundle was (0..1), which
+	// the next one starts from (0x008c46d0).
+	float stepPhase() const { return m_phase; }
+
 	struct Instance {
 		size_t bundle;           // 0x18
 		size_t trigger;          // 0x1c
@@ -252,6 +309,17 @@ public:
 		int strafe = -1;         // 0x54: directional clips
 		int forwardOrBack = -1;  // 0x58
 		float blend = 1;         // 0x50
+		float switchFade = 1;    // 0x3c: after the directional clips change
+		int loops = 0;           // 0x5c: times it wrapped or ended
+		// The new system (useNewSystem).
+		bool stopping = false;   // 0x0: playing on to a force stop point
+		float stopAt = 0;        // 0x4: that point, a fraction of the length
+		float fadeOutLeft = 0;   // 0x8
+		float fadeInLeft = 0;    // 0xc
+		bool still = false;      // 0x65: advanced by no time this update
+		// 0x68: clips by index (from the end) with their weights, drawn
+		// instead of the bundle's clips (SlopeTrigger's layers).
+		std::vector<std::pair<int, float>> layers;
 	};
 	const std::vector<Instance>& instances() const { return m_instances; }
 	// Bundle names playing, by priority (for checks and debugging).
@@ -262,6 +330,10 @@ private:
 	void queueBundles(size_t trigger);
 	Instance& queue(size_t bundle, size_t trigger, int priority, float weightTarget, float rate);
 	bool advance(Instance& instance, float seconds);
+	bool advanceNew(Instance& instance, float seconds);
+	void setDirection(Instance& instance, float blend, int strafe, int forwardOrBack) const;
+	void setFadingTrigger(size_t trigger);
+	const Clip* bundleClip(const Bundle& bundle, int index) const;
 	int priorityOf(const Trigger& trigger) const;
 	float value(const Trigger& trigger) const;
 
@@ -271,6 +343,13 @@ private:
 	AnimationInput m_input;
 	uint32_t m_previousMessages = 0;
 	bool m_started = false;
+	bool m_startupPlaying = false; // 0x63
+	float m_weight = 1;      // 0x78
+	float m_fadeLeft = 0;    // 0x74
+	int m_fadingTrigger = -1; // 0x7c
+	float m_phase = 0;       // 0x4c
+	float m_slopeForward = 0, m_slopeSide = 0; // 0x24, 0x28
+	std::map<uint32_t, bool> m_switches; // 0x98 (CountTrigger: key 1)
 	float m_idleTime = 0;    // 0x44: time with one bundle playing
 	std::map<size_t, float> m_idleNext; // IdleTrigger 0x3c, per trigger
 	uint32_t m_random = 0x759dc150;

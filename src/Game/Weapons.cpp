@@ -27,6 +27,8 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	s.distToStartLoseDamage = number(t, "distToStartLoseDamage", s.distToStartLoseDamage);
 	s.distToMinDamage = number(t, "distToMinDamage", s.distToMinDamage);
 	s.gravityModifier = number(t, "gravityModifier", s.gravityModifier);
+	s.drag = number(t, "drag", s.drag);
+	s.mass = std::max(number(t, "mass", s.mass), 0.001f);
 	s.material = static_cast<int>(number(t, "material", 0));
 	// A detonation component (DefaultDetonationComp, template 0x953b) with
 	// its constructor's defaults (0x005e9df0): explosionMaterial -1,
@@ -111,6 +113,51 @@ float explosionFalloff(float radius, float distance)
 		return 1;
 	}
 	return std::clamp(1 - (distance - inner) / (radius - inner), 0.0f, 1.0f);
+}
+
+physics::Vec3 blastPush(const BlastPush& blast)
+{
+	const auto unit = [](physics::Vec3 v) { // 0x004481a0
+		const float squared = physics::lengthSquared(v);
+		if (std::fabs(squared - 1.0f) < 1.1920929e-07f) {
+			return v;
+		}
+		return squared < 1.1920929e-07f ? physics::Vec3 {} : v * (1.0f / std::sqrt(squared));
+	};
+	float force = blast.falloff * blast.forceMod * blast.explosionForce * blast.share;
+	if (blast.inWater && blast.soldier) {
+		force *= 0.1f;
+	}
+	force = std::min(force, blast.forceMax);
+	const physics::Vec3& x = blast.axes.rows[0];
+	const physics::Vec3& y = blast.axes.rows[1];
+	const physics::Vec3& z = blast.axes.rows[2];
+	const float alongY = physics::dot(blast.line, y), alongX = physics::dot(blast.line, x),
+				alongZ = physics::dot(blast.line, z);
+	physics::Vec3 way;
+	if (std::fabs(alongY) > std::fabs(alongX) && std::fabs(alongY) > std::fabs(alongZ)) {
+		way = alongY < 0 ? -y : y;
+	} else if (std::fabs(alongZ) <= std::fabs(alongX)) {
+		way = alongX < 0 ? -x : x;
+	} else {
+		way = alongZ < 0 ? -z : z;
+	}
+	way = unit(way);
+	physics::Vec3 line = unit(blast.line);
+	if (blast.soldier) {
+		line.y += 5; // *0x00a6ab78 (0x00a6aac0)
+		force *= blast.soldierRandom;
+	}
+	if (blast.forceMax < force + blast.speed) {
+		force = blast.forceMax - blast.speed;
+	}
+	physics::Vec3 push = unit(way + line) * force;
+	for (float* c : {&push.x, &push.y, &push.z}) {
+		if (std::fabs(*c) < 0.001f) {
+			*c = 0;
+		}
+	}
+	return push;
 }
 
 float addEmpDamage(float level, float amount, float stepSize, int numSteps)
@@ -297,10 +344,22 @@ physics::Vec3 bounceVelocity(const physics::Vec3& velocity, const physics::Vec3&
 
 void moveProjectile(Projectile& p, float seconds, float gravity)
 {
-	const physics::Vec3 previous = p.velocity;
-	p.velocity += p.acceleration * seconds;
-	p.position += (previous + p.velocity) * (0.5f * seconds);
-	p.acceleration = {0, gravity * (p.settings ? p.settings->gravityModifier : 1.0f), 0};
+	// The Point node's tick (0x006c6170 / 0x006c57a0, physics::PointBody):
+	// its drag, then the mean of the old and new velocity moves it; gravity
+	// for the next tick.
+	physics::PointBody node;
+	node.position = p.position;
+	node.velocity = p.velocity;
+	node.acceleration = p.acceleration;
+	if (p.settings) {
+		node.drag = p.settings->drag;
+		node.mass = p.settings->mass;
+		node.gravityModifier = p.settings->gravityModifier;
+	}
+	node.step(seconds, gravity);
+	p.position = node.position;
+	p.velocity = node.velocity;
+	p.acceleration = node.acceleration;
 	p.timeLeft -= seconds;
 	if (p.timeLeft <= 0) {
 		p.alive = false;

@@ -185,6 +185,20 @@ public:
 		bool contact = false;
 		std::string spring;   // template names, for drawing
 		std::string steering; // the RotationalBundle above it, if any
+		// What an object's mesh gave the wheel's own response last tick (its
+		// vertical probes in 0x006bb050 add to the wheel's response, slot
+		// 0x2c, as the heightmap's points do): the highest crossing, the
+		// mean normal, the mean velocity of what it touched and that
+		// surface's grip. The spring and the tyre read it as the ground
+		// when it is above the terrain.
+		struct ObjectGround {
+			int count = 0;
+			float height = 0;
+			Vec3 normal;
+			Vec3 velocity;
+			float grip = 0.8f;
+		};
+		ObjectGround objectGround;
 	};
 
 	// The vehicle in a template tree with an Engine node whose children
@@ -201,6 +215,10 @@ public:
 	float clutch() const { return m_clutch; }
 
 	void setInput(const VehicleInput& input) { m_input = input; }
+	// A probe of wheel `index` met an object's face at `height` (see
+	// Wheel::objectGround); taken by the next tick.
+	void touchObject(size_t index, float height, const Vec3& normal, const Vec3& velocity, float grip);
+	const VehicleInput& input() const { return m_input; }
 	// One tick: suspension and tyre forces on `body`; call before it steps.
 	void tick(physics::RigidBody& body, const physics::Ground& ground, float seconds, float grip,
 		float gravity = physics::tuning::kGravity);

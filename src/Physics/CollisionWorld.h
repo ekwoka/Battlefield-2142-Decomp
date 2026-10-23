@@ -56,6 +56,19 @@ public:
 	// front.
 	void querySphere(const Vec3& center, float radius, std::vector<SphereContact>& contacts) const;
 
+	// A sphere moving from `start` to `end` (0x006e2350 with a motion over
+	// 0.01, *0x00a85174; the soldiers' swept spheres): each face whose plane
+	// pushed out by the radius the centre crosses from the front, moving
+	// into it, inside the face (0x006be1a0, through 0x006bd070 front only)
+	// gives a contact at the crossing less the radius along the face's
+	// normal, as deep as the end lies behind that plane. Only when no face is
+	// met, the faces' edges (0x006be300): the earliest crossing of the
+	// edge's capsule (0x006bde70) gives the edge's nearest point, the normal
+	// from it to the centre there (flattened when it points down) and the
+	// depth (end - centre there) . normal; kept below 0. A motion under 0.01
+	// is querySphere at the end.
+	void sweepSphere(const Vec3& start, const Vec3& end, float radius, std::vector<SphereContact>& contacts) const;
+
 	struct Hit {
 		float fraction; // along the segment, 0..1
 		Vec3 point;
@@ -106,6 +119,7 @@ private:
 		uint32_t owner;
 		mutable uint32_t stamp = 0;
 	};
+	void forEachFaceIndexNear(const Vec3& center, float radius, const std::function<void(const Triangle&)>& visit) const;
 	static constexpr float kCell = 8.0f;
 	static int64_t cellKey(int x, int z)
 	{

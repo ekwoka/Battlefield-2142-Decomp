@@ -1397,3 +1397,247 @@ TEST(RagDoll_ImpactSoundFromTheFootStepsMaterial)
 	CHECK(!heard.empty());
 	CHECK(std::all_of(heard.begin(), heard.end(), [](const std::string& s) { return s == "S_Soldier_RagDoll_Impact"; }));
 }
+
+// Sleeping (0x006c9060): a parked car stops being stepped once it has been
+// still for 30 ticks; the engine wakes it (0x0064e920) when driven.
+TEST(Physics_ParkedCarSleepsAndWakesWhenDriven)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	const uint32_t car = makeCar(game, {3, 1.2f, 0});
+	game.start();
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	game.run(4);
+	CHECK(game.world->bodyAsleep(car));
+	const float y = game.objects.find(car)->position().y;
+	game.run(1);
+	CHECK(game.objects.find(car)->position().y == y);
+	const float end = driveCar(game, car, 3);
+	CHECK(!game.world->bodyAsleep(car));
+	CHECK(end > 3);
+}
+
+// The push of a blast on an object's node (0x005a66e0: slot 0xa4 at a point
+// between it and the blast, the armour's explosionForceMod and Max): a car
+// beside a blast is shoved away from it and woken; a major actor is not
+// pushed (node slot 0x1c4).
+TEST(Physics_BlastPushesACar)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	float moved[2] = {};
+	for (int major = 0; major < 2; ++major) {
+		Game game(gameDir);
+		const uint32_t car = makeCar(game, {3, 1.2f, 0});
+		world::ObjectTemplate* t = game.templates.find("car");
+		t->settings()["armor.explosionForceMod"] = "16";
+		t->settings()["armor.explosionForceMax"] = "5000";
+		if (major) {
+			t->settings()["isMajorActor"] = "1";
+		}
+		world::ObjectTemplate* blast = game.templates.create("GenericProjectile", "blast");
+		blast->components().push_back("DefaultDetonationComp");
+		blast->settings()["detonation.explosionDamage"] = "1";
+		blast->settings()["detonation.explosionRadius"] = "10";
+		blast->settings()["detonation.explosionForce"] = "40";
+		blast->settings()["detonation.explosionMaterial"] = "69";
+		game.start();
+		game.run(4);
+		CHECK(game.world->bodyAsleep(car));
+		const float x = game.objects.find(car)->position().x;
+		CHECK(game.world->detonate("blast", {0.5f, 1.0f, 0}));
+		game.run(2);
+		moved[major] = game.objects.find(car)->position().x - x;
+	}
+	std::fprintf(stderr, "  pushed %.2f m; a major actor %.2f m\n", moved[0], moved[1]);
+	CHECK(moved[0] > 0.2f);
+	CHECK(std::fabs(moved[1]) < 0.01f);
+}
+
+// collisionGroups (template +0x104, response slot 0x50): two objects
+// sharing a bit don't meet (0x006dc7b0); a team's PlayerControlObject
+// passes through what has its team's bit (0x100 team 1, 0x200 team 2,
+// 0x006bb050's start). A car driven at a wall stops; with the wall in the
+// car's group, or the wall the EU's (0x200) and the car EU's, it drives on.
+TEST(Physics_CollisionGroups)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	float ends[3] = {};
+	for (int c = 0; c < 3; ++c) {
+		Game game(gameDir);
+		const uint32_t car = makeCar(game, {3, 1.2f, 0});
+		world::ObjectTemplate* wall = addStatic(game, "wall", {wallLod(6)}, {3, -1, 12});
+		if (c == 1) {
+			wall->settings()["collisionGroups"] = "4";
+			game.templates.find("car")->settings()["collisionGroups"] = "4";
+		} else if (c == 2) {
+			wall->settings()["collisionGroups"] = "512";
+			game.objects.find(car)->setTeam(2);
+		}
+		game.start();
+		CHECK(game.world->spawnPlayer(2) != nullptr);
+		game.run(3);
+		ends[c] = driveCar(game, car, 6);
+	}
+	std::fprintf(stderr, "  the car ends at z %.2f, %.2f in the wall's group, %.2f through its team's wall\n", ends[0],
+		ends[1], ends[2]);
+	CHECK(ends[0] < 12);
+	CHECK(ends[1] > 14);
+	CHECK(ends[2] > 14);
+}
+
+// The collision events (object slot 0xac -> 0x005a4690): a car driven into
+// a wall takes (speed - 4)^2 x cos^2 x the material cell's damageMod (1
+// here) once for the pair within a second; a soldier standing in its way is
+// run over (0x005a43c0: (speed - 3) x speed x the mass factor, at most 3).
+TEST(Physics_CollisionDamageAndRoadKill)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	{
+		Game game(gameDir);
+		const uint32_t car = makeCar(game, {3, 1.2f, 0});
+		addStatic(game, "wall", {wallLod(6)}, {3, -1, 25});
+		game.start();
+		CHECK(game.world->spawnPlayer(2) != nullptr);
+		game.run(3);
+		CHECK(game.world->hitPoints(car) == 500);
+		driveCar(game, car, 6);
+		std::fprintf(stderr, "  the car has %.1f of 500 hit points after the wall\n", game.world->hitPoints(car));
+		CHECK(game.world->hitPoints(car) < 500);
+	}
+	{
+		Game game(gameDir);
+		const uint32_t car = makeCar(game, {3, 1.2f, 0});
+		game.start();
+		CHECK(game.world->spawnPlayer(2) != nullptr);
+		const int victim = game.world->addPlayer("Victim", 1, false);
+		CHECK(game.world->spawnSoldier(victim));
+		game::GameWorld::PlayerInfo info;
+		game.world->playerInfo(victim, info);
+		CHECK(game.world->setSoldierPosition(info.soldier, {3, 0, 22}));
+		game.run(3);
+		driveCar(game, car, 6);
+		game.world->playerInfo(victim, info);
+		game::GameWorld::PlayerInfo driver;
+		game.world->playerInfo(game.world->localPlayer(), driver);
+		std::fprintf(stderr, "  the soldier in the way: %s, the driver's kills %d\n", info.alive ? "alive" : "dead",
+			driver.kills);
+		CHECK(!info.alive && info.deaths == 1);
+		CHECK(driver.kills == 1);
+	}
+}
+
+// The contact effects (0x006b75d0 -> 0x006ba7d0's end): a car falling on
+// its roof plays its material cell's sound (index 0) once, and again
+// only after the slot's 0.5-1.5 s timer has run out.
+TEST(Physics_ContactSound)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	physics::MaterialManager materials;
+	for (uint32_t m = 0; m < 256; ++m) { // whatever its vertices' materials are, against the terrain's 0
+		materials.createCell(m, 0).soundTemplates = {"S_Crash"};
+	}
+	const uint32_t car = makeCar(game, {3, 3.0f, 0});
+	game.objects.find(car)->setRotation({0, 0, 180}); // landing on its roof, not its springs
+	game.start(&materials);
+	int sounds = 0;
+	for (int i = 0; i < 30; ++i) {
+		game.world->tick(1 / 30.0f);
+		for (const auto& sound : game.world->takeSounds()) {
+			sounds += sound.sound == "S_Crash";
+		}
+	}
+	std::fprintf(stderr, "  %d contact sounds in the first second\n", sounds);
+	CHECK(sounds >= 1 && sounds <= 2);
+}
+
+// Buoyancy (0x006b9260): a box all under the water is lifted as gravity
+// pulls it times floaterMod (1 by default): a car let go 3 m under the
+// surface hangs there, and with floaterMod 0 sinks to the bottom. Its node
+// knows how deep it is (+0x5c, at most 1).
+TEST(Physics_CarFloats)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	float ends[2] = {};
+	for (int sinks = 0; sinks < 2; ++sinks) {
+		Game game(gameDir);
+		const uint32_t car = makeCar(game, {3, 5, 0});
+		if (sinks) {
+			game.templates.find("car")->settings()["floaterMod"] = "0";
+		}
+		game.start();
+		game.world->setWaterLevel(8);
+		game.run(3);
+		ends[sinks] = game.objects.find(car)->position().y;
+		CHECK(game.world->bodySubmerged(car) == 1);
+	}
+	std::fprintf(stderr, "  let go at 5 under water at 8: at %.2f; with floaterMod 0 at %.2f\n", ends[0], ends[1]);
+	CHECK(ends[0] > 4.5f);
+	CHECK(ends[1] < 1.5f);
+}
+
+// Ladders (0x0059fd40, 0x0059f6b0, 0x0059e820): a soldier walking at a
+// ladder looking up gets on, climbs 1.35 m/s by the throttle and is put
+// off over the top.
+TEST(Physics_SoldierClimbsALadder)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	game.templates.registerType(12, "Ladder");
+	{
+		// A ladder 6 m tall: its soldier LOD a quad across x at z 0.
+		const physics::CollisionLod lod = boxedLod(2, {{-0.4f, 0, 0}, {0.4f, 0, 0}, {0.4f, 6, 0}, {-0.4f, 6, 0}},
+			{{{0, 1, 2}, 0}, {{0, 2, 3}, 0}, {{0, 2, 1}, 0}, {{0, 3, 2}, 0}});
+		physics::CollisionSubGeometry part;
+		part.lods = {lod, lod, lod};
+		physics::CollisionGeometry geometry;
+		geometry.subGeometries = {part};
+		physics::CollisionMeshFile mesh;
+		mesh.version = 10;
+		mesh.geometries = {geometry};
+		game.collisionTemplates.add("ladder_mesh", mesh);
+		world::ObjectTemplate* ladder = game.templates.create("Ladder", "ladder");
+		ladder->settings()["collisionMesh"] = "ladder_mesh";
+		game.objects.create(ladder, {0, 0, 4}, {0, 0, 0});
+	}
+	game.start();
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	game.run(1);
+	game::SoldierInput climb;
+	climb.throttle = 1;
+	climb.aimPitch = 30; // looking up
+	game.world->setPlayerInput(climb);
+	bool climbed = false;
+	float highest = 0;
+	for (int i = 0; i < 30 * 10; ++i) {
+		game.world->tick(1 / 30.0f);
+		climbed = climbed || game.world->onLadder(game.world->localPlayer());
+		highest = std::max(highest, game.world->player()->position().y);
+	}
+	std::fprintf(stderr, "  on the ladder: %s; highest feet %.2f; off: %s\n", climbed ? "yes" : "no", highest,
+		game.world->onLadder(game.world->localPlayer()) ? "no" : "yes");
+	CHECK(climbed);
+	CHECK(highest > 5.5f);
+	CHECK(!game.world->onLadder(game.world->localPlayer()));
+}

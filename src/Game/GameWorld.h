@@ -5,13 +5,17 @@
 // game's per-tick update (docs/engine.md, "A simulation tick"); the object
 // spawner is BF2/Game/Objects/Game/ObjectSpawner.cpp (update 0x005af230,
 // spawn 0x005aeb80, team change 0x005ae490, round reset 0x005ae580).
-// Not rewritten yet: the collision test that keeps a spawn spot clear,
-// holding a spawned vehicle in place until it is entered (holdObject: the
-// update's +0x1fc branch; set by two shipped levels, operation_clean_sweep
-// and the_hell), the time to live of abandoned vehicles (the spawn hands
-// the vehicle's PlayerControlObject interface 0xc4c5 the spawner, slot
-// 0xc0, timeToLive, slot 0xa4, and the time, slot 0xb8; set by most
-// levels' spawners), and activation by events. useButtonRadius (waiting
+// The spawn hands a spawned PlayerControlObject root (interface 0xc4c5)
+// the spawner (slot 0xc0, +0x264), the spawner's timeToLive (slot 0xa4,
+// +0x25c and the countdown +0x258) and the time (slot 0xb8): GameWorld runs
+// its abandoned-vehicle countdown (0x005c8ba0). With holdObject the spawner
+// holds its last spawn at the spot (the update's +0x1fc branch): GameWorld
+// (holdSpawned) does that part, as it moves bodies.
+// Not rewritten yet: the collision test that keeps a spawn spot clear
+// (0x005aeb80's first half: PlayerControlObjects within 10 m whose meshes
+// overlap the template's at the spot, 0x006f2e90, are removed after five
+// tries unless a soldier is within 7 m), the spawn spot's drop onto what is
+// under it (0x005ad8b0), and activation by events. useButtonRadius (waiting
 // for a player to use the spawner) is set by no shipped level.
 #pragma once
 
@@ -92,6 +96,13 @@ public:
 	float spawnCountdown() const { return m_countdown; }
 	// Ids of what the spawner's slots hold (0 when empty).
 	const std::vector<uint32_t>& spawned() const { return m_spawned; }
+	// What it spawned since the last call (for the time to live).
+	std::vector<uint32_t> takeSpawned() { return std::exchange(m_justSpawned, {}); }
+	// holdObject (+0x1fc, set from the template's +0x2f8 at each spawn):
+	// the last spawn (+0x1b4) is held at the spot until it is driven.
+	bool holding() const { return m_holding; }
+	void stopHolding() { m_holding = false; }
+	uint32_t lastSpawned() const { return m_lastSpawned; }
 
 	// 0x005ae490.
 	void setTeam(int team, RoundState state);
@@ -114,6 +125,8 @@ private:
 	uint32_t m_lastSpawned = 0; // 0x1b4
 	float m_countdown = 0;      // 0x1b8: spawns when it is not above 0
 	std::vector<uint32_t> m_spawned;
+	std::vector<uint32_t> m_justSpawned;
+	bool m_holding = false; // +0x1fc
 };
 
 struct ControlPoint {
@@ -192,6 +205,9 @@ public:
 	RoundState state() const { return m_state; }
 	const std::vector<ControlPoint>& controlPoints() const { return m_controlPoints; }
 	const std::vector<std::unique_ptr<ObjectSpawner>>& spawners() const { return m_spawners; }
+	// An abandoned vehicle's countdown (0x005c8ba0): seconds of its
+	// spawner's timeToLive left, -1 when it has none.
+	float timeToLiveLeft(uint32_t object) const;
 	// Changes a control point's owner and the teams of its spawners.
 	void setControlPointTeam(int controlPointId, int team);
 	ControlPoint* controlPointOf(uint32_t object);
@@ -303,7 +319,12 @@ public:
 	void setSpawnTime(float seconds) { m_spawnTime = seconds; }
 	// The sea's height (heightmapcluster.setSeaWaterLevel), for vehicles
 	// that drown.
-	void setWaterLevel(float level) { m_waterLevel = level; m_hasWater = true; }
+	void setWaterLevel(float level)
+	{
+		m_waterLevel = level;
+		m_hasWater = true;
+		m_ground.waterLevel = [this](float, float) { return m_waterLevel; };
+	}
 	// How long a killed soldier lies revivable (sv.manDownTime, 15; 0: none).
 	void setManDownTime(float seconds) { m_manDownTime = seconds; }
 	// Respawn on their own when the time is up (no spawn menu yet).
@@ -326,6 +347,12 @@ public:
 	void enablePhysics(const io::FileManager& files, physics::CollisionTemplateManager& collisionTemplates,
 		physics::Ground ground, const physics::MaterialManager* materials = nullptr);
 	size_t physicsBodies() const { return m_bodies.size(); }
+	// Whether a mobile object's node sleeps (PhysicsNode slot 0x14c), and
+	// how deep it is in the water (node +0x5c).
+	bool bodyAsleep(uint32_t object) const;
+	float bodySubmerged(uint32_t object) const;
+	// Whether a player's soldier is on a ladder (its LadderContainer).
+	bool onLadder(int player) const;
 	const physics::CollisionWorld& staticCollision() const { return m_collision; }
 
 	// The local player's soldier: spawned at a spawn point of a control
@@ -684,7 +711,68 @@ private:
 		// The wheels' parts' radius (their vehicle LOD's, slot 0x50), by wheel.
 		std::vector<float> wheelRadii;
 		uint32_t material = 0; // the template's material
+		// Sleeping (the node's counter +0x68 and its history).
+		physics::SleepState sleep;
+		// The response's support (+0xf4, 0x006bb050): a heavier mobile object
+		// it touched; asleep, it wakes when that one is gone or awake.
+		uint32_t support = 0;
+		// Drag and water (the template's drag +0x78, dragModifier +0x88,
+		// floaterMod +0xcc, default 1) and how deep it is (node +0x5c).
+		float drag = 0;
+		physics::Vec3 dragModifier {1, 1, 1};
+		float floaterMod = 1;
+		float submerged = 0;
+		// collisionGroups (template +0x104 -> response +0x1c, slot 0x50).
+		uint32_t collisionGroups = 0;
+		// handleCollisionSpeed (template +0x200, default 1; node +0x14).
+		float handleCollisionSpeed = 1;
+		// The response's contact effect and contact sound (0x006b75d0:
+		// +0x130.. and +0x16c..), played at the end of its solve.
+		struct ContactEffect {
+			int state = 0;        // 0 free, 1 recorded, 2 played
+			float strongest = 0;  // |v|^2
+			uint32_t first = 0, second = 0; // the materials
+			float timer = 0;      // 0.5..1.5 s
+			physics::Vec3 point, normal, direction;
+			std::string sound;
+		};
+		ContactEffect contactEffect, contactSound;
 	};
+	// The collision events (object slot 0xac, BF2142.exe's base
+	// 0x0063c9e0, a Soldier's 0x00586a90): `self` hit `other` (0 the
+	// ground) with `velocity` relative to it. Through the armour's one-second
+	// memory of each pair (0x00653ef0) to the server game logic's slot 0x104
+	// (0x004ba3f0): the ground's damage (0x005a3db0) or an object's
+	// (0x005a4690, a soldier's road kill 0x005a43c0).
+	void collisionEvent(uint32_t self, uint32_t other, const physics::Vec3& velocity, const physics::Vec3& normal,
+		const physics::Vec3& point, uint32_t ownMaterial, uint32_t otherMaterial);
+	void groundCollisionDamage(uint32_t victim, const physics::Vec3& velocity, const physics::Vec3& normal,
+		uint32_t groundMaterial, uint32_t victimMaterial);
+	void objectCollisionDamage(uint32_t attacker, uint32_t victim, const physics::Vec3& velocity,
+		const physics::Vec3& normal, uint32_t attackerMaterial, uint32_t victimMaterial);
+	void roadKill(uint32_t attacker, Player& victim, const physics::Vec3& velocity, uint32_t attackerMaterial,
+		uint32_t victimMaterial);
+	int collisionCredit(uint32_t attacker, uint32_t victim, const physics::Vec3& velocity) const;
+	float collisionMassFactor(uint32_t attacker, uint32_t victim) const;
+	struct CollisionMemory {
+		uint32_t other;
+		uint32_t ownMaterial, otherMaterial;
+		float left;
+	};
+	std::map<uint32_t, std::vector<CollisionMemory>> m_collisionMemory; // by the armoured object
+	// The contact effects (0x006b75d0, 0x006ba7d0's end, 0x006b8c40) and
+	// their cooldown (response slot 0x9c, 0x006b74e0).
+	void recordContactEffect(Body& body, uint32_t first, uint32_t second, const physics::Vec3& velocity,
+		const physics::Vec3& point, const physics::Vec3& normal);
+	void playContactEffects(Body& body);
+	void coolContactEffects(Body& body, float seconds);
+	Random m_contactRandom; // the shared generator's draws (0x00a05b30) for the effects' timers
+	void sleep(Body& body);
+	// Slot 0x160: a sleeping PlayerControlObject root wakes what is round it
+	// (0x006bfad0) as well.
+	void wake(Body& body);
+	static bool asleep(const Body& body) { return body.sleep.asleep(); }
+	void stepSleep(Body& body, float seconds);
 	void destroyVehicle(Body& body, int attacker);
 	void stepVehicleDamage(float seconds);
 	bool disabled(const Body& body) const { return body.empLevel > 0 || body.wreckTime >= 0; }
@@ -728,6 +816,7 @@ private:
 		float trunkRadius = 0; // the node's +0x198: treeCollisionDiameter / 2 (0x005f6ba0), 0.3 under 0.01 with a type-4 LOD
 		uint32_t material = 0; // the template's material
 		uint32_t stamp = 0;
+		uint32_t collisionGroups = 0;
 	};
 	void addStaticPart(StaticPart part);
 	std::vector<StaticPart> m_staticParts;
@@ -754,6 +843,8 @@ private:
 		bool fixed = false;           // the non-mobile response (0xc430)
 		bool controlObject = false, helicopter = false, ladder = false, particle = false;
 		uint32_t material = 0; // the template's material (pass 2's B side)
+		uint32_t collisionGroups = 0;
+		int team = 0; // a PlayerControlObject's (interface 0xc4c5 slot 0x9c)
 		physics::ShareNode node;
 		physics::Vec3 pointVelocity(const physics::Vec3& point) const
 		{
@@ -769,8 +860,8 @@ private:
 	// Returns false when it destroyed A (the helicopter exit).
 	bool meshPair(MeshActor& a, MeshActor& b, float seconds, bool trunkOnly);
 	void wheelProbes(Body& body, MeshActor& b, float seconds);
-	void addMeshContact(MeshActor& a, MeshActor& b, const physics::Vec3& point, const physics::Vec3& normal, float depth,
-		uint32_t materialA, uint32_t materialB, bool trunkPass);
+	physics::MassShares addMeshContact(MeshActor& a, MeshActor& b, const physics::Vec3& point, const physics::Vec3& normal, float depth,
+		uint32_t materialA, uint32_t materialB, bool trunkPass, bool toA = true);
 	std::vector<uint32_t> materialMap(const world::ObjectTemplate& objectTemplate) const;
 	void buildStaticCollision();
 	void addStaticCollision(const world::ObjectTemplate& objectTemplate, const physics::Mat3& rotation,
@@ -856,7 +947,27 @@ private:
 		// Seated: the seat's animation system (seatAnimationSystem).
 		std::unique_ptr<anim::AnimationState> seatAnimation;
 		std::string seatAnimationPath;
+		// On a ladder (its LadderContainer, 0x0059dec0): the ladder (an index
+		// into m_ladders, -1 for none), the container's height.
+		int ladder = -1;
+		float ladderY = 0;
 	};
+	// Ladders (template class Ladder, 0x0059fb00): placed with their
+	// buildings; their soldier LOD's box (mesh slot 0x54(2)) gives the
+	// length and the ends (0x0059d550).
+	struct Ladder {
+		uint32_t owner = 0;
+		physics::Mat3 rotation;
+		physics::Vec3 position;
+		physics::Vec3 boxMin, boxMax; // object space
+		float top = 0, bottom = 0;
+		bool measured = false;
+	};
+	std::vector<Ladder> m_ladders;
+	void measureLadder(Ladder& ladder) const;
+	bool tryLadder(Player& player, SoldierInput& input);
+	void climbLadder(Player& player, SoldierInput& input, float seconds);
+	bool leaveLadder(Player& player, int mode);
 	anim::AnimationSystems* m_animationSystems = nullptr;
 	AnimationLoader m_loadAnimationSystem;
 	void stepAnimation(Player& player, float seconds);
@@ -885,7 +996,13 @@ private:
 	std::map<uint32_t, float> m_hitPoints;
 	effects::EffectManager m_effects;
 	void fire(const Player& player, float aimPitch);
-	void explode(const physics::Vec3& at, const ProjectileSettings& settings, int attacker, float facing = 0);
+	// `exclude`: the object whose own blast it is (its armour, 0x005a9090's
+	// param_6: neither hurt nor pushed by it).
+	void explode(const physics::Vec3& at, const ProjectileSettings& settings, int attacker, float facing = 0,
+		uint32_t exclude = 0);
+	// The object a segment meets first (static objects' projectile LOD,
+	// bodies, the terrain as 0); false when nothing is in the way.
+	bool firstHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t& object) const;
 	float blastShare(const physics::Vec3& at, const Player& target, float beside) const;
 	void empBlast(const physics::Vec3& at, const ProjectileSettings& settings,
 		const std::function<float(const physics::Vec3&)>& distanceTo);
@@ -1128,6 +1245,22 @@ private:
 		const world::ObjectTemplate* settings = nullptr;
 	};
 	std::vector<Crate> m_crates;
+
+	// Spawned PlayerControlObjects' time to live (interface 0xc4c5: +0x258
+	// the countdown, +0x25c timeToLive, +0x264 the spawner), checked every
+	// half second (event 0x1d) or five while in use or watched.
+	struct Abandonment {
+		uint32_t spawner = 0;
+		float timeToLive = 0;
+		float left = 0;
+		double nextCheck = 0;
+	};
+	std::map<uint32_t, Abandonment> m_abandonment;
+	void stepAbandoned();
+	void holdSpawned(ObjectSpawner& spawner);
+	// Hit points lost without a material cell (the game logic's damage,
+	// 0x004c0e40, as the countdown and the impacts call it).
+	void loseHitPoints(uint32_t object, float amount, int attacker);
 	const CommanderAsset* intactAsset(int team, CommanderAbility ability) const;
 	float commanderRecharge(int team, CommanderAbility ability) const;
 	void scanCommanderAssets();

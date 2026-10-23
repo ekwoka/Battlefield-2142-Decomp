@@ -1,5 +1,7 @@
 #include "RemoteWorld.h"
 
+#include <zlib.h>
+
 #include <algorithm>
 #include <cctype>
 #include <utility>
@@ -737,6 +739,71 @@ BitReader readerOf(const std::string& data)
 }
 
 } // namespace
+
+bool RemoteWorld::decodeEndOfRoundData(const std::string& block, EndOfRoundData& out)
+{
+	// 0x0059c740.
+	out = {};
+	BitReader in = readerOf(block);
+	const uint32_t size = in.read(32);
+	const uint32_t compressedSize = in.read(32);
+	if (in.bad() || compressedSize > 0x8000 || in.remaining() < static_cast<size_t>(compressedSize) * 8) {
+		return false;
+	}
+	std::vector<uint8_t> compressed(compressedSize);
+	for (uint8_t& b : compressed) {
+		b = static_cast<uint8_t>(in.read(8));
+	}
+	out.text.resize(size);
+	uLongf length = size;
+	if (size > 0
+		&& (uncompress(reinterpret_cast<Bytef*>(out.text.data()), &length, compressed.data(), compressedSize) != Z_OK
+			|| length != size)) {
+		return false;
+	}
+	out.endOfRoundDelay = in.readSigned(32);
+	const uint32_t count = in.read(8);
+	for (uint32_t i = 0; i < count && !in.bad(); ++i) {
+		EndOfRoundData::Player p;
+		p.id = static_cast<int>(in.read(8));
+		p.kills = in.readSigned(16);
+		p.skillScore = in.readSigned(16);
+		p.deaths = in.readSigned(16);
+		p.score = in.readSigned(16);
+		p.teamworkScore = in.readSigned(16);
+		p.commanderScore = in.readSigned(16);
+		out.players.push_back(p);
+	}
+	return !in.bad();
+}
+
+std::string RemoteWorld::encodeEndOfRoundData(const EndOfRoundData& data)
+{
+	// 0x0059cbc0.
+	uLongf compressedSize = compressBound(static_cast<uLong>(data.text.size()));
+	std::vector<uint8_t> compressed(compressedSize);
+	compress2(compressed.data(), &compressedSize, reinterpret_cast<const Bytef*>(data.text.data()),
+		static_cast<uLong>(data.text.size()), Z_DEFAULT_COMPRESSION);
+	BitWriter out;
+	out.write(static_cast<uint32_t>(data.text.size()), 32);
+	out.write(static_cast<uint32_t>(compressedSize), 32);
+	out.writeBytes(compressed.data(), compressedSize);
+	out.writeSigned(data.endOfRoundDelay, 32);
+	out.write(static_cast<uint32_t>(data.players.size()), 8);
+	for (const EndOfRoundData::Player& p : data.players) {
+		out.write(static_cast<uint32_t>(p.id), 8);
+		for (int v : {p.kills, p.skillScore, p.deaths, p.score, p.teamworkScore, p.commanderScore}) {
+			out.writeSigned(v, 16);
+		}
+	}
+	return bytesOf(out);
+}
+
+bool RemoteWorld::endOfRoundData(EndOfRoundData& out) const
+{
+	const auto it = m_dataBlocks.find(8);
+	return it != m_dataBlocks.end() && decodeEndOfRoundData(it->second, out);
+}
 
 std::vector<RemoteWorld::MapEntry> RemoteWorld::mapList() const
 {

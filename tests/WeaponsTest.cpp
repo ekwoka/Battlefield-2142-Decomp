@@ -271,3 +271,36 @@ TEST(Weapons_DeviationBuildUp)
 	mg.update(false);
 	CHECK(mg.value == 0);
 }
+
+// The push of a blast (0x005a66e0): along the object's axis nearest the line
+// from the blast plus that line made a unit, as strong as falloff x
+// forceMod x explosionForce x share, at most forceMax less the object's
+// speed; a soldier's line gets 5 more upwards; in water a tenth.
+TEST(Weapons_BlastPush)
+{
+	game::BlastPush blast;
+	blast.line = {3, 0.5f, 0};
+	blast.falloff = 0.5f;
+	blast.forceMod = 16;
+	blast.forceMax = 5000;
+	blast.explosionForce = 10;
+	physics::Vec3 push = game::blastPush(blast);
+	// The x axis (nearest) plus the unit line, normalised, times 80.
+	const float l = std::sqrt(9 + 0.25f);
+	physics::Vec3 way {1 + 3 / l, 0.5f / l, 0};
+	const float wl = std::sqrt(physics::lengthSquared(way));
+	CHECK(std::fabs(push.x - way.x / wl * 80) < 1e-3f && std::fabs(push.y - way.y / wl * 80) < 1e-3f);
+	blast.speed = 4990;
+	CHECK(std::fabs(std::sqrt(physics::lengthSquared(game::blastPush(blast))) - 10) < 1e-3f);
+	blast.speed = 0;
+	blast.forceMax = 50;
+	CHECK(std::fabs(std::sqrt(physics::lengthSquared(game::blastPush(blast))) - 50) < 1e-3f);
+	// A soldier: up by 5, the random factor, and a tenth in water.
+	blast.soldier = true;
+	blast.forceMax = 1000;
+	blast.soldierRandom = 1;
+	push = game::blastPush(blast);
+	CHECK(push.y > push.x);
+	blast.inWater = true;
+	CHECK(std::fabs(std::sqrt(physics::lengthSquared(game::blastPush(blast))) - 8) < 1e-3f);
+}

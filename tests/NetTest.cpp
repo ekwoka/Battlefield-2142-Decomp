@@ -5,6 +5,7 @@
 #include "Net/GameConnection.h"
 #include "Net/GameEvents.h"
 #include "Net/Md5.h"
+#include "Net/RemoteWorld.h"
 #include "Net/GameSpyCrypt.h"
 #include "Net/ServerBrowser.h"
 #include "TestMain.h"
@@ -197,6 +198,77 @@ TEST(Net_EventBlocks)
 	CHECK(in.read(7) == net::kCdKeyResponse);
 	CHECK(in.readText(73) == std::string(72, 'a'));
 	CHECK(in.read(32) == 7 && in.read(32) == net::kBuild && in.read(32) == 0xffffffff);
+}
+
+TEST(Net_EventBlockAfterInput)
+{
+	// A client's payload: the input block with two moves, then events the
+	// handshake reader didn't know (a PostRemote, a SelectKit) after a data
+	// block start; all decode now.
+	net::BitWriter out;
+	net::InputBlock input;
+	input.present = true;
+	input.value9 = 200;
+	net::PlayerInput pi;
+	pi.set(net::kPIThrottle, 1);
+	input.moves = {pi.toMove(41), pi.toMove(42)};
+	net::writeInputBlock(out, input);
+	net::ReliableEventBlock events;
+	events.sequence = 5;
+	events.events = {net::makeDataBlockStart(8, 3), net::makePostRemote(net::kMsgNetworkCategory, net::kNeLightRenderReady),
+		net::makeSelectKit(2)};
+	net::writeEventBlock(out, &events);
+	const net::EventBlock block = net::readEventBlock(out.data());
+	CHECK(block.inputPresent && block.input.moves.size() == 2 && block.input.value9 == 200);
+	CHECK(block.present && block.sequence == 5 && block.complete);
+	CHECK(block.events.size() == 3);
+	if (block.events.size() == 3) {
+		CHECK(block.events[0].type == net::kDataTransfer && block.events[0].transferStart);
+		CHECK(block.events[0].transferType == 8 && block.events[0].transferSize == 3);
+		net::PostRemoteInfo post;
+		CHECK(net::parsePostRemote(block.events[1].event, post) && post.category == 6 && post.id == 0x10);
+		CHECK(block.events[2].type == net::kEvSelectKit && block.events[2].event.u(0) == 2);
+	}
+	// A cut payload is incomplete, not misread.
+	std::vector<uint8_t> cut = out.data();
+	cut.resize(cut.size() - 2);
+	CHECK(!net::readEventBlock(cut).complete);
+}
+
+TEST(Net_EndOfRoundData)
+{
+	net::RemoteWorld::EndOfRoundData data;
+	data.text = "eor\tdata\nplayer\t1\t2\t3";
+	data.endOfRoundDelay = 15;
+	data.players = {{3, 12, 40, 7, 1234, -20, 500}, {0, 0, -1, 32767, -32767, 5, 0}};
+	const std::string block = net::RemoteWorld::encodeEndOfRoundData(data);
+	// The sizes lead (0x0059cbc0): the text's, then the compressed one's.
+	net::BitReader in(reinterpret_cast<const uint8_t*>(block.data()), block.size());
+	CHECK(in.read(32) == data.text.size());
+	const uint32_t compressed = in.read(32);
+	CHECK(compressed > 0 && block.size() * 8 >= 64 + compressed * 8 + 32 + 8 + 2 * (8 + 6 * 16));
+	net::RemoteWorld::EndOfRoundData back;
+	CHECK(net::RemoteWorld::decodeEndOfRoundData(block, back));
+	CHECK(back.text == data.text && back.endOfRoundDelay == 15 && back.players.size() == 2);
+	if (back.players.size() == 2) {
+		CHECK(back.players[0].id == 3 && back.players[0].kills == 12 && back.players[0].skillScore == 40);
+		CHECK(back.players[0].deaths == 7 && back.players[0].score == 1234 && back.players[0].teamworkScore == -20);
+		CHECK(back.players[0].commanderScore == 500);
+		CHECK(back.players[1].deaths == 32767 && back.players[1].score == -32767 && back.players[1].skillScore == -1);
+	}
+	// Through the world as data block 8 (start, then 63-byte chunks).
+	net::RemoteWorld world;
+	net::RemoteWorld::EndOfRoundData got;
+	CHECK(!world.endOfRoundData(got));
+	world.apply(net::makeDataBlockStart(8, static_cast<uint32_t>(block.size())));
+	for (size_t at = 0; at < block.size(); at += 63) {
+		world.apply(net::makeDataBlockChunk(block.substr(at, 63)));
+	}
+	CHECK(world.endOfRoundData(got) && got.text == data.text && got.players.size() == 2);
+	// A damaged block doesn't decode.
+	std::string bad = block;
+	bad[9] = static_cast<char>(bad[9] ^ 0x55);
+	CHECK(!net::RemoteWorld::decodeEndOfRoundData(bad, got) || got.text != data.text);
 }
 
 TEST(Net_FeslMessages)

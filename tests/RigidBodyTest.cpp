@@ -151,3 +151,93 @@ TEST(RigidBody_BroadPhaseTests)
 	CHECK(!physics::boxesOverlap({-1, -1, -1}, {1, 1, 1}, {}, {}, {-1, -1, -1}, {1, 1, 1}, turned, {2.5f, 0, 0}));
 	CHECK(!physics::boxesOverlap({-1, -1, -1}, {1, 1, 1}, {}, {}, {-1, -1, -1}, {1, 1, 1}, {}, {0, 2.1f, 0}));
 }
+
+// Sleeping (0x006c9060): a node whose mean motion over three ticks stays
+// under 0.5 m/s (and its turning over five under 0.5 rad/s) counts down
+// from 30 and sleeps at 0; moving again (or slot 0x160) wakes it.
+TEST(RigidBody_SleepsWhenStill)
+{
+	physics::SleepState sleep;
+	CHECK(!sleep.asleep() && sleep.counter == 30);
+	physics::Vec3 position;
+	int ticks = 0;
+	while (!sleep.asleep() && ticks < 100) {
+		position.x += 0.1f / 30; // 0.1 m/s
+		sleep.sample(position, {}, 1 / 30.0f);
+		++ticks;
+	}
+	CHECK(ticks == 30);
+	position.x += 1.0f / 30 * 3; // 3 m/s: the three-tick mean is 1 m/s
+	CHECK(sleep.sample(position, {}, 1 / 30.0f) && !sleep.asleep());
+	// Turning wakes it as well.
+	physics::SleepState spin;
+	for (int i = 0; i < 4; ++i) {
+		CHECK(!spin.sample({}, {0, 0.6f, 0}, 1 / 30.0f) || i >= 4);
+	}
+	CHECK(spin.counter < 30);
+	CHECK(spin.sample({}, {0, 0.6f, 0}, 1 / 30.0f) && spin.counter == 30);
+}
+
+// Drag (0x006c7e00): along each body axis by the area across it; never
+// more than the velocity itself in a tick; 25 times as strong under water.
+TEST(RigidBody_DragAndBuoyancy)
+{
+	physics::RigidBody body;
+	body.velocity = {0, 0, 20};
+	physics::applyDrag(body, 1, 1000, {1, 1, 1}, {2, 1, 4}, 0);
+	// drag / mass x |v| x area (2 x 1 x 0.785) x v = 0.0628 a tick.
+	CHECK(std::fabs(body.acceleration.z + 0.785f * 2 * 20 * 20 / 1000) < 1e-3f);
+	physics::RigidBody wet;
+	wet.velocity = {0, 0, 20};
+	physics::applyDrag(wet, 1, 1000, {1, 1, 1}, {2, 1, 4}, 1);
+	CHECK(std::fabs(wet.acceleration.z + 0.785f * 2 * 500 * 500 / 1000) < 1e-1f); // the velocity counts 25 times
+	physics::RigidBody slow;
+	slow.velocity = {0, 0, 0.5f};
+	physics::applyDrag(slow, 1000, 1, {1, 1, 1}, {2, 1, 4}, 1);
+	CHECK(std::fabs(slow.acceleration.z + 0.5f * 30) < 1e-3f); // no more than the velocity in a tick
+	// Buoyancy (0x006b9260): a box wholly under the water with floaterMod 1
+	// is lifted as hard as gravity pulls it; half in, by half.
+	const std::vector<physics::Vec3> corners = boxCorners();
+	physics::RigidBody under;
+	under.position = {0, -5, 0};
+	bool entered = false;
+	const float depth = physics::applyBuoyancy(under, {-2, -1, -3}, {2, 1, 3}, corners, 0, 1, physics::tuning::kGravity,
+		0, true, &entered);
+	CHECK(depth == 1 && entered);
+	CHECK(std::fabs(under.acceleration.y + physics::tuning::kGravity) < 1e-3f);
+	physics::RigidBody half;
+	half.position = {0, 0, 0};
+	physics::applyBuoyancy(half, {-2, -1, -3}, {2, 1, 3}, corners, 0, 1, physics::tuning::kGravity, 0.5f, true);
+	CHECK(std::fabs(half.acceleration.y + physics::tuning::kGravity * 0.5f) < 1e-3f);
+	physics::RigidBody dry;
+	dry.position = {0, 5, 0};
+	CHECK(physics::applyBuoyancy(dry, {-2, -1, -3}, {2, 1, 3}, corners, 0, 1, physics::tuning::kGravity, 0, true) == 0);
+}
+
+// The point nodes (0x006c57a0, 0x006c6860): no damping, the mean of the
+// old and new velocity moves them; a RotationalPoint turns by its torque
+// over its mass x 150 about its own origin, without damping.
+TEST(RigidBody_PointNodes)
+{
+	physics::PointBody point;
+	point.velocity = {10, 0, 0};
+	point.step(1 / 30.0f);
+	CHECK(point.velocity.x == 10 && std::fabs(point.position.x - 10.0f / 30) < 1e-5f);
+	point.step(1 / 30.0f);
+	CHECK(std::fabs(point.velocity.y - physics::tuning::kGravity / 30) < 1e-5f);
+	physics::PointBody slowed = {};
+	slowed.drag = 18;
+	slowed.velocity = {100, 0, 0};
+	slowed.step(1 / 30.0f);
+	slowed.step(1 / 30.0f);
+	CHECK(slowed.velocity.x < 100 && slowed.velocity.x > 80);
+	physics::PointBody spinner;
+	spinner.rotational = true;
+	spinner.mass = 2;
+	spinner.torque = {0, 1, 0};
+	spinner.step(1 / 30.0f);
+	CHECK(std::fabs(spinner.angularVelocity.y - 1.0f / 30 * 150 / 2) < 1e-4f);
+	spinner.step(1 / 30.0f);
+	CHECK(std::fabs(spinner.angularVelocity.y - 2.5f) < 1e-4f); // kept
+	CHECK(spinner.rotation.rows[0].x < 1);
+}

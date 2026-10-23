@@ -166,6 +166,63 @@ keeps a running mean of the tick's tyre forces and their moments (`0xec`,
 `0xf8`, count `0x11c`), which the steps add to the acceleration and the
 torque.
 
+The node types (`0x005f6ba0`, by `physicsType`: 0 None, 1 Point, 2
+RotationalPoint, 3 Mesh, 4 MechLegs; the string switch `0x006bf540`): with
+`hasMobilePhysics` a Point gets `0x006c5e70` (vtable `0x00993418`), a
+RotationalPoint `0x006c6480` (`0x00993610`), a Mesh the Basic node above;
+MechLegs gets none, and a static Mesh a node without physics (`0x006c5500`).
+Shipped Points with mobile physics are the GenericProjectiles (rounds,
+shells, missiles); RotationalPoints the grenades, mines and debris
+particles. Their tick (`0x006c6170` / `0x006c57a0`, the RotationalPoint's
+`0x006c6b20` with `0x006c6860`) has no damping and no sleep test: the
+impulse, then the acceleration, the mean of the old and new velocity moves
+the position, gravity for the next tick; a RotationalPoint turns about its
+own origin by its torque × dt × 150 / mass (no shape inertia, no damping).
+With `drag` (shotgun pellets 18, C4 15, missiles 0.1–10) they lose
+velocity × drag / mass × 0.01π a tick (a 0.1 m sphere, `0x006c5730`), 25
+times as much in water. Rewritten in `physics::PointBody`; the rewrite's
+projectiles move by it.
+
+**Sleeping** (`0x006c9060`, node slots `0x14c`–`0x160`). The counter
+(`+0x68`) is 30 (`*0x00a84adc`) after a wake (slot `0x160`; the
+constructors wake the node on the server, clients start asleep) and a still
+root counts it down each tick: the mean of its last three position changes
+over the tick under 0.5 m/s (`*0x00a84b68`) and of its last five angular
+velocities under 0.5 rad/s (`*0x00a84b6c`); more wakes it. Asleep (below 1)
+the node is not stepped, feels no gravity or drag, its motion is zeroed
+each tick (slot `0x148` → `0x006c6080`), and the collision dispatch
+(`0x006dd0b0`) skips it: no ground pass, no broad phase as a mover, no
+solve (it stays a candidate for movers, the mass shares deciding). What
+wakes it: the mass shares (the other's momentum), the engine (`0x0064e920`:
+a throttle or rpm ≥ 0.05), a blast's push, a wheel's contact velocity
+(`0x006b7910`), the heavier mobile object it rests on (the response's
+`+0xf4`) going or waking; a sleeping PlayerControlObject root woken wakes
+what lies round it (`0x006bfad0`, not major actors). Rewritten in
+`physics::SleepState` and `GameWorld::stepSleep`.
+
+**Drag and water.** A Basic node with `drag` (vehicles 1–1.2) loses, per
+body axis, drag / mass × |v| × the area across it (the vehicle LOD box's
+faces × 0.785 × `dragModifier`) of the velocity, at most the velocity's own
+component in a tick, as a force at its position (`0x006c7e00`); the
+angular velocity likewise against two areas' sums (`0x006c8110`); 25
+times as strong by the part of the box's height under water. Buoyancy is
+in the ground pass (`0x006b9260`): the LOD's lowest point under the water
+level (the heightmap cluster's slot `0x98`: the sea level) sets the node's
+depth (`+0x5c`, at most 1 m) and a root with `floaterMod` (default 1; tanks
+0.5, the FAV and hovers 0.8) is lifted by −gravity × `floaterMod` × the
+largest weight of the box's corners under the water (each Σ |axis.y| ×
+min(depth / the box's size along it, 1)), at their weighted mean. So a
+fully drowned box with `floaterMod` 1 hangs in the water. Rewritten in
+`physics::applyDrag`, `applyBuoyancy`.
+
+**Collision groups.** `collisionGroups` (template `+0x104`) goes to the
+response (slot `0x48`, read by slot `0x50`). Pairs sharing a bit never meet
+(the broad phases `0x006dc7b0`, `0x006dc430`, `0x006dc640`, the soldiers'
+`0x006dcce0` unless both are soldiers); bit 0 turns off the ground pass;
+and a team's PlayerControlObject passes what has its team's bit (`0x100`
+team 1, `0x200` team 2: the as_* and eu_* force fields and doors;
+`0x006bb050`'s start). Projectiles (8) never meet each other.
+
 ## Ground vehicles (newCar2)
 
 A car is a tree of physics nodes under its body: an `Engine` node and
@@ -383,13 +440,46 @@ them; the contact's depth is how far the end lies behind that face,
   (`*0x00a84278`) and neither fixed, the depth shares are 0.5 and −0.5.
   A static object takes nothing, the mobile one everything.
 
-Not modelled: the collision callbacks each contact calls on both objects
-(object slot `0xac`: the game logic's collision damage and its veto of the
-response), the effects (`0x006b75d0`), sleeping (no node sleeps here, so
-the shares' sleeping terms never apply), the collision groups (response
-slot `0x50`), a wheel's own part as B (a static's vertices into its
-three-vertex LOD), and the wheels' contacts go to the vehicle's response,
-not the wheel's node (whose spring reads the ground only).
+- **The collision events** (object slot `0xac`): before the shares, over
+  |v|² 0.1 (`0x920bd8`) or on B's material `0x29a`, A's and B's callbacks
+  with their velocity relative to the other. The base (`0x0063c9e0`) asks
+  the material's veto (slot `0x70`, which always answers no:
+  `0x006a10f0`), and the object's first armour keeps a second's memory of
+  each (other object, own material, other's material) (`0x00653ef0`); a
+  new pair reaches the server game logic's slot `0x104` (`0x004ba3f0`; the
+  client's is empty): from the ground (`0x005a3db0`) the damage is the
+  material cell's `damageMod` (slot `0x64`: the cell, else the first
+  material's against 0, else 1) × speed² × max(|cos|, `armor.angleMod`),
+  a soldier only over 9.1 m/s and by the speed over it (fall damage);
+  from an object (`0x005a4690`) (speed − 4)² × cos² × the cell × the mass
+  factor (`0x005a2ca0`: clamp(mA / mB, 0.3, 3) for two mobile objects, a
+  soldier weighing 200), credited to the attacker's driver unless a
+  teammate ran into it faster (`0x005a30b0`); soldiers deal none, and a
+  soldier hit is run over (`0x005a43c0`: from 10 m/s, or 3 when the object
+  is mobile and faster, (speed − that) × speed × the mass factor). The
+  ground pass calls the object's callback while |v|² is over
+  `handleCollisionSpeed` (default 1, compared unsquared) and ignores its
+  answer. `GameWorld::collisionEvent`.
+- **The contact effects** (`0x006b75d0`): from handleCollisionSpeed² on (both
+  objects'), one response (A's root if only A moves, B's if A doesn't, the
+  first of two mobile ones) records the contact in one of two slots: with
+  a sound in the material cell (index 0, `0x0060a6d0`) the sound slot,
+  else the effect slot; a free slot takes it. At the end of its solve
+  (`0x006ba7d0`) the effect plays (the cell's effect 0, `0x006b8c40`: at the
+  point, up along the normal, forward against the slide) and the sound
+  0.05 m out, with its effect (not for the materials 61 webMat_Tracked and
+  67 webMat_wheelBig). A slot is free again when its 0.5–1.5 s timer
+  (`0x006b74e0`, four times as fast with no contacts) runs out.
+- **Wheels** on objects: a wheel part's vertical probe contacts go to the
+  wheel's own response, as the heightmap's do; the solve's Spring branch
+  moves the wheel out along their mean normal by its push (0 to 1 m), so
+  its spring and tyre (`0x006b8230`: the response's mean normal, point and
+  velocity) treat another object's mesh as ground moving with it
+  (`Vehicle::touchObject`).
+
+Not modelled: the response's stuck push (`+0x11c`, normally 0) scaling the
+events' velocity, the impact effects and decals of the damage
+(`0x005a36d0`), and B's vertices into a wheel's three-vertex LOD.
 
 ### Seats and vehicle weapons
 
@@ -487,12 +577,52 @@ times. Looping bundles that were not queued again fade out, and finished
 ones are dropped. Instances below an IdleTrigger are also dropped when the
 messages change or something is queued above them.
 
-The pose is built per bone (`0x008b8530`): the first instance that moves
+The pose is built per bone (`0x008b8330`): the first instance that moves
 the bone sets it, and each later one slerps towards its own by its weight.
 A weapon's system goes after the soldier's, so its arm and weapon clips
 lie over the body. Bones nothing moves keep their last pose. The held
 weapon's bundled-mesh parts hang from the skeleton's nodes `mesh1`,
 `mesh2` and so on, which the weapon's clips animate.
+
+Bundles with `useNewSystem` (only the mechs' use it) work differently
+(`0x008c30a0`). They fade linearly over their fade times, counted in the
+bundle's own time. Once one is no longer queued it plays on to the next of
+its `forceStopPoints` (fractions of its length, `"0.3;0.8;"`) before it
+fades out; with no stop points it fades out at once. While a bundle with
+stop points plays without fading, bundles of other priorities that are not
+fading out hold still. `speedKeyPoints`, `fadeInSpeedKeyPoints` and
+`fadeOutSpeedKeyPoints` are polylines over the bundle's length or its fades
+(`0x008c2cd0`). Their product over the playing bundles (`0x008ba420`) is a
+factor the vehicle multiplies into its movement (`0x00650e90`) and divides
+out of the speed it gives the system (`0x0063ce30`).
+
+A trigger with a `fadeInTime` fades the whole system in (`0x008b9720`).
+The system's pose is slerped from what the bones were before by the
+fraction of that time gone, and only a different trigger restarts it.
+Movement bundles keep the soldier's step (`0x008c46d0`). The system
+remembers where the last movement bundle was in its step (0..1). A new
+directional bundle starts there, and side movement past ±0.5 resets it to
+the start offsets (`anim_startLeftOffset` 0.2, `anim_startRightOffset`
+0.7). A MovementTrigger with no value holder and two bundles picks the
+standing foot by that phase. The backward clip plays half the strafe
+clip's length ahead (`anim_offsetBackwardTime`). When the forward/backward
+or strafe clip changes while it dominates, the bundle's pose fades in
+again over its fade-in time.
+
+CountTrigger plays its first child until the bundle on top has played
+through once, then its second for good (`0x008c42b0`; the sentry gun's
+"open"). LookAroundTrigger blends a two-clip bundle by one look value and
+scrubs it by another (`0x008c3d00`; seats and bipods). SlopeTrigger leans a
+five-clip bundle to the side by the smoothed ground slope (`0x008c4f00`;
+the mechs).
+
+Not rewritten: animation events (sounds and effects, `0x008c3030`), camera
+springs, `abruptPlayback`'s restart (`0x008c29d0`) and
+`jumpToLastAnimationAtStop` (decoded, not applied), the per-clip sequencing
+inside a bundle (`0x008c2e50`'s jump offset). By the trigger factory
+(`0x008c1170`) UpTrigger reads the direction's y (or the acceleration's)
+and TurnTrigger `+0x3c`, the other way round from the rewrite's mapping:
+to be checked.
 
 Rewritten in `src/Animation/AnimationSystem` and `AnimationConsole`.
 
@@ -800,7 +930,8 @@ A move (`0x00590570` reads) holds:
   `0x009653a8` that is above 0.5 (fire 8, action 9, use 10, sprint 13,
   weapon 1-9 14-22, seat 1-8 23-30, alt fire 31, reload 32, lie 37, crouch
   38...; the ids are the `c_PI...` constants);
-- 1 bit, PlayerInput `+0x110` (unknown).
+- 1 bit, PlayerInput `+0x110` (see below: whether pitch and roll come
+  from a device axis; the server stores it and nothing reads it).
 
 The client keeps its last three moves and sends them all each time
 (`0x00590450`). It writes no input until it has a player: `0x00590740`
@@ -865,7 +996,7 @@ server `0x004b0690`):
 | 7 | SelectTeam | c→s, 32 bits (`0x004c1dc0`) |
 | 9, 0xa | PlayerSpawned, PlayerDead | s→c, the player id (PlayerDead: and a byte) |
 | 0xc | Suicide | c→s (`0x004c22e0`) |
-| 0x10 | (unknown) | c→s after 6/4 when the byte at `0x00a1fc02` is set |
+| 0xe, 0xf, 0x10 | the distributed lightmap renderer's | c→s: 0x10 (no payload) after the client echoes 6/4, when the byte at `0x00a1fc02` is set (`0x0042b820`); the server (`0x004b0690`) hands the sender to `DistributedLightRenderer` (`0x00a0f7a0`, slots `0x18`, `0x20`; 0xf sends the sender a chat line of type 9). Only command-line option 0x22 sets the byte (`0x00409950`, also capping allocations at 26 MB), and the retail table registers no option 0x22 (`0x004409d0`'s 34 calls), so they are never sent |
 
 Squads, the commander, radio and votes are events of their own, not
 PostRemotes:
@@ -946,7 +1077,15 @@ then moves the kit to the position.
   last move the server took, the position (3 floats; it also becomes the
   reference for delta-coded positions, `0x006874f0`), the ghost id, an
   optional second ghost and vehicle, then networkable state. A client
-  without that object skips it by the length.
+  without that object skips it by the length. With it: 1 bit (recorded
+  for prediction), a 3-bit history slot, every group of the ghost (and
+  the second ghost) in mode 3 (the prediction's mode: the Soldier reader
+  `0x005fcdb0` takes raw floats and 16-bit angles there, RotationalBundle
+  16-bit angles; PlayerControlObject, Engine and Spring differ too), a
+  10-bit length and the control object's own state (its vtable `0x1cc`).
+  The rewrite's client keeps the record's position and leaves the mode-3
+  state undecoded (`ControlObjectRecord::rest`): only prediction of the
+  client's own soldier needs it.
 - Each update (`0x0057fce0`) has 2 bits kind and a 16-bit ghost id. Kind
   1 updates: 1 bit (full), the state's length and that much state. Kind 3
   removes the ghost; kind 0 does nothing; kind 2 is an error.
@@ -1201,7 +1340,13 @@ A move's last bit is PlayerInput `+0x110`: whether pitch and roll come
 from a device axis. `0x00696db0` fills PlayerInput from the control maps.
 The bit starts at 1 and is cleared when a bound pitch or roll isn't an
 axis-to-axis mapping (`0x00681fc0`, `0x00680dc0`). So it is 1 on foot and
-with the mouse, and 0 where keys drive them (the Sea map).
+with the mouse, and 0 where keys drive them (the Sea map). The server
+copies it back into the player's PlayerInput with the move (`0x005838d0`,
+from `0x004ac660`, which passes the PlayerInput by value to the game
+logic and the player). No code in BF2142.exe reads PlayerInput `+0x110`
+after that: of the binary's byte reads at `+0x110`, the others are the
+move writer (`0x00583b50`), the player (`0x0059bd80`) and unrelated
+classes. It changes nothing on the server.
 
 The connection type picks a row of rates (`0x00928408`). `0x004b48a0`
 applies a client's columns, and `0x004a6160` applies a server's for each
@@ -1278,9 +1423,22 @@ Data blocks are bit streams; strings are a 16-bit length and the bytes
   on the same connection: the server broadcasts it (`0x004abbc0(-1)`),
   counts a pending load per connection and waits for each 6/2. The client
   unloads, loads `levelDir + mapName` and answers.
-- **8, end of round** (`gl_sendEndOfRoundData`, parsed by `0x0059c740`): a
-  zlib-compressed text (sizes first), a signed 32, and per player bits of
-  15-bit values (not decoded). 7 is console text, 9 a demo URL.
+- **8, end of round** (EndOfRoundInfo, `src BF2/Game/EndOfRoundInfo.cpp`:
+  written by `0x0059cbc0`, read by `0x0059c740`; the scripts'
+  `gl_sendEndOfRoundData` is `0x00568930`): the text's size and its
+  compressed size (32 bits each), the text compressed with zlib
+  (`compress2` at the default level, `0x0071bd80`; at most 0x8000 bytes),
+  the end-of-round delay (sign + 31 bits, `0x00515350`: sv.endOfRoundDelay,
+  settings `+0x270`, 3..30, or 15 in gpm_ti, `0x00430610`), an 8-bit
+  player count, then per player (the player manager's list, slot `0x40`)
+  its id (8 bits) and six values of a sign and 15 bits from its stats
+  (player vtable `0x1a8`, `0x00840330`: `*(player +0x100)`): kills
+  (`+0x14`), skillScore (`+0x8`), deaths (`+0x10`), score (`+0`), rplScore
+  (`+4`) and cmdScore (`+0xc`), as the scripts' getters name the offsets
+  (`0x0056b6f0`). The reader stores them back into each player's stats.
+  `RemoteWorld::endOfRoundData` decodes it. 7 is console text, 9 a demo
+  URL. With the distributed lightmap renderer on (see PostRemote 6/0x10)
+  block 4 goes to it.
 
 The round: BeginRound (0x38) carries the round's state (0 not started, 1
 waiting for players, 2 the countdown, 3 playing; game logic `+0x204`),
@@ -1356,7 +1514,7 @@ string, then the type (`0x0057c0a0`). The version is
 | 101 | REMOVE_PLAYER_DATA | session (16) |
 | 102 | RESET_PLAYER_ROUTING | none |
 | 103 | FULL_ROUTING_DATA_SET | 65 records of 4 bytes by player id (64: the server's player): flags, 0, session. The flags are 0x80 for team 2, 0x40 commander, 0x20 squad leader, and the squad in the low nibble. |
-| 200 | DEBUG_DATA | 0x659 bytes that switch on the debug logs |
+| 200 | DEBUG_DATA | 0x659 bytes (any other size is refused, `0x10002170`): opens the routing log if it isn't open and keeps the bytes at instance `+0xb34`, the player names the logs print |
 
 Authentication works like this (`0x10001d40`, `0x10002510`, `0x100021f0`):
 
@@ -1414,7 +1572,7 @@ its type:
 | 1 | none | talk into set 0 |
 | 2 | the set's index | talk into another set (`0x00711710`) |
 | 3 | the sets' indices, then their count | talk into several sets (`0x00711c10`) |
-| 4, 5 | none | start or stop logging this player's voice (debug) |
+| 4, 5 | none | start or stop logging this player's voice to `VoiceTraffic_Player_*` (`0x10007060`, `0x10007230`; only while the routing log is open, and 4 only with quality 2) |
 | 6 | none | keep-alive, the whole packet is 3 bytes (`0x00711760`), every 3 s |
 
 There's no login. A packet with a session the game server announced is
@@ -1557,7 +1715,12 @@ The tests run loopback sessions with synthetic tones. They cover:
 - voice activity
 - the mic test
 
-Not rewritten: the DLL's debug logs (`mods/bf2142/Logs/Voip/`).
+Not rewritten: the DLL's debug logs (`mods/bf2142/Logs/Voip/`:
+`VoipServerRouting_Instance_*`, written by `0x10006610` after every game
+server packet once DEBUG_DATA opened it, and `VoiceTraffic_Player_*`).
+Packets 4, 5 and 200 feed nothing but those logs: nothing else reads the
+names DEBUG_DATA stores. The rewrite accepts and drops them
+(`VoipServerInstance::handle`); `onLog` carries the DLL's console lines.
 
 ## HUD
 
@@ -1801,16 +1964,27 @@ Rewritten in `GameWorld::explode`, `blastShare` and `empBlast`;
   maximum. It points along the soldier's axis nearest the line from the
   blast plus that line made a unit with 5 added upwards (`0x00a6aac0`).
   `0x005ee4d0` keeps it for 0.5 s for the ragdoll, times `rd_expForceMod`.
-- Not in the rewrite: the ray test for other objects (blocked: half the
-  damage, or none when the object's vtable `0x90` value, not identified,
-  is below a fifth of the radius), a bone hidden only by an object the same
-  blast destroys counting half, the push's 0.1 for a soldier in water
-  (its physics node's slot `0x144`, `+0x5c`: how deep it is under the
-  surface, which `0x006c9060`'s buoyancy divides by the box's height; the
-  rewrite's soldiers have no water physics yet) and the push on other
-  objects' physics (node slot `0xa4` at the point, with 10000 /
-  max(mass, 100) and at most 500 for an object without armour, and a
-  torque pair for one with component `0xc54d`).
+- **Other objects** (`0x005a9090`): a ray from the blast to the object
+  (`DAT_00a85220` slot `0x68`); something else first (or the object
+  without armour) halves the blast, and stops it when the object's radius
+  (slot `0x90`: its geometry's and its children's) is under a fifth of
+  the blast's (`*0x00a6ab24` = 5). The rewrite measures with the vehicle
+  LOD's radius.
+- **The push on objects** (`0x005a66e0`): roots with a node that are not
+  major actors (slot `0x1c4`), the blast's own object excepted (its
+  armour, `param_6`). Without armour the mod is 10000 / max(mass, 100) and
+  the most 500; a wreck uses `wreckExplosionForceMod` / `Max` (`+0x124`,
+  `+0x128`, defaults 1 and 100). The direction is the object's axis
+  nearest the line plus the line (y only when strictly nearest). It wakes
+  the node and goes in through slot `0xa4` at (blast − object) /
+  max(distance, 1) from the object, itself over max(distance, 1); a
+  soldier's node (`0x00993aa0` slot `0xa4` → `0x7c`) takes it as
+  acceleration, a tenth of it under water (the node's `+0x5c` over 0, set
+  by the ground pass `0x006c28c0`). `game::blastPush`.
+- Not in the rewrite: a bone hidden only by an object the same blast
+  destroys counting half, the torque pair for a projectile with component
+  `0xc54d` (`bVar5`: 20 instead of the falloff × mod), and the
+  lag-compensated positions (`*0x00a6ab48`, node slot `0x178`).
 
 Thrown weapons: projectiles with `physicsType` RotationalPoint or Mesh
 (grenades, mines, C4; rounds and missiles are Points) bounce. The
@@ -1905,6 +2079,27 @@ Vehicles take damage through their armour settings:
 - **Destruction:** a destroyed vehicle explodes with `armor.explosion*`
   (FAV: 300 over 6 m), kills everyone aboard, and stays as a wreck for
   `timeToStayAsWreck`. Its spawner then puts out a new one.
+- **Abandoned vehicles:** the spawn (`0x005aeb80`) hands a spawned
+  PlayerControlObject root (interface `0xc4c5`) its spawner (slot `0xc0`,
+  `+0x264`), the spawner's `timeToLive` (slot `0xa4`: `+0x25c` and the
+  countdown `+0x258`; 60 by default, 30 to 999 in the levels) and the time
+  (slot `0xb8`). On the server a check (`0x005c8ba0`, event `0x1d`) runs
+  half a second on and then: in use (a seat taken) again in 5 s; within
+  the spawner's `distance` of it, again in 5 s with the countdown full; a
+  living soldier on foot within 3 × its `armor.explosionRadius`, again in
+  5 s; otherwise every half second the countdown loses 0.5 and, once out,
+  the vehicle 0.5 × the spawner's `+0x2f0` (50, which nothing sets) hit
+  points (0.5 without the spawner) through the game logic's damage,
+  until it is destroyed. `GameWorld::stepAbandoned`.
+- **holdObject** (`0x005af230`'s end; operation_clean_sweep and the_hell):
+  the spawner holds its last spawn at the spot (its matrix and
+  `spawnOffset`; the node's motion stopped, slot `0x148`) until its first
+  Engine (`0x005ad420`) turns at 0.1 or more (`+0x25c`); without an Engine
+  or wrecked it lets go at once; letting go puts the node to sleep. Not
+  rewritten: the spawn spot's test (PlayerControlObjects within 10 m
+  overlapping the template's mesh there, `0x006f2e90`, removed after five
+  tries unless a soldier is within 7 m) and its drop onto what is under it
+  (`0x005ad8b0`).
 
 Deployables: a gadget whose projectile has mesh physics and armour, and
 neither explodes nor holds a beacon (`portable_shield`: 600 hit points),
@@ -2147,6 +2342,51 @@ original turns the body by the excess and catches up as well, so it
 briefly turns twice, which the rewrite keeps). Moving, the twist catches
 up. Fire, aim and placing use the look (`GameWorld::lookYaw`), not the
 body's heading.
+
+The sphere stack goes by stance (`0x006c1b30`): five to 1.7 m standing,
+three to 1.4 m crouching or swimming, one at the feet prone, where a floor
+(n.y over 0.95, `*0x00a84788`) pushes straight up. Its place and the
+filters' heights are where the soldier was before the last integration
+(the node's saved matrix, slot `0x4c` → `+0xd4`), less what the object
+itself moved that point; over 0.9 of a radius a tick (6.75 m/s,
+`*0x00a84760`) each sphere sweeps from there (backed off 0.45 r along the
+way, `*0x00a8475c`) to where it is now (`0x006e2350`: faces pushed out by
+the radius and crossed from the front, `0x006be1a0`; only without one,
+the edges' capsules, `0x006be300`), so a fast soldier doesn't pass a wall
+between ticks. Moving objects (mesh responses) are tested in their own
+frame. Each contact faster than 0 relative to the object calls both
+objects' collision events (see the mesh contacts above: a soldier's fall
+damage, run over by a vehicle). Not rewritten: the solve's eight passes at
+0.999 of the radius with the squash damage and the server's segment test
+(slot 12, `0x006c48c0`), soldiers against soldiers (`0x006c2620`) and the
+push by fast objects (`0x005ee2b0`).
+
+**Water** (`0x006c28c0`): the feet's depth under the water level is the
+node's `+0x5c`. Deeper than 0.3 m (`0x00975eb8`) the water lifts by gravity
+× `gravityModifier` × −depth² (under a metre) or −depth, level with the
+feet a metre under: the origin at the surface. From 0.99 m (`*0x00a847a4`)
+until under 0.9 (`*0x00a8476c`) the soldier swims (response `+0xfa`): the
+ground counts as flat with friction 1 and the velocity as the contacts', so
+the movement steers along the surface; the damping is 0.9 by the depth. The
+Soldier object (`0x0058a6d0`) then sets pose 3 (swim speeds 2.1 / 3.645),
+ignores the stance keys (`0x005889d0`), stops strafing (`0x00588420`) and
+puts the weapon away (`0x005878b0`); out of the water the pose is standing
+again.
+
+**Ladders** are not the response's. A Ladder (`0x0059fb00`) touching a
+soldier (its callback `0x0059fd40`) seats it in a LadderContainer
+(`0x0059dec0`) when it stands above the ladder's bottom, faces it within
+60° (either side), looks up (or near the top down by 35°) and fits where
+it would be put off. The ladder's top and bottom are its soldier box's
+(`0x0059d550`; the bottom no lower than the terrain or 1.2 m under the
+water). The container climbs by the throttle (`0x0059f6b0`): 0.045 m a
+tick (1.35 m/s), 1.15 times as fast within 1.8 m of the top, the other way
+looking down 35° or more, and 4 times down while sprinting (a skid). Past
+the top less 0.36 going up, under the bottom going down, or under the
+ground, the soldier is put off (`0x0059e820`): over the top 0.75 m on, or
+0.75 m back from the bottom or where it is, if it fits. Rewritten in
+`src/Game/Ladders.cpp`; not the rays that stop the climb (`0x0059ed10`) or
+lower the bottom, the jump off, the animation and camera.
 
 Rewritten in `src/Physics/SoldierPhysics` and `src/Game/SoldierControl`.
 
@@ -2590,7 +2830,7 @@ The urgencies:
 | c4 (0x10083750) | 100 to place a charge inside a point the team holds uncontested; 100 to set it off once that point is contested below 0.75 with no teammate within 15 m of it. A charge lapses after 240 s. The weight is not used. |
 | DefuseMines (0x10086870) | An engineer (Repair weapon) within 35 m of an enemy mine's stand point (0.8 m behind its facing, on the mesh): 42 × weight. |
 | RunOver (0x10087820) | A Car at 10 m/s or more with a known enemy soldier in sight within 50 m, ahead within 0.85, on a clear line over the vehicle mesh: 65 (the weight is not used). |
-| Avoid (0x10064850) | On foot only (the 2d pattern of the vehicles' sets never runs); soldiers are never avoided. A wreck or vehicle below 30 % health within max(r, min(10, r + 4)) adds 100. A vehicle at 2 m/s or more, closing at 3 m/s or more, that will pass within 0.6 (r + own radius) × √1.5 in the look-ahead time adds closing speed / distance. Sum × weight. |
+| Avoid (0x10064850) | On foot only (the 2d pattern of the vehicles' sets never runs); soldiers are never avoided. A wreck or vehicle below 30 % health within max(r, min(10, r + 4)) adds 100. A vehicle at 2 m/s or more, closing at 3 m/s or more, that will pass within 0.6 (r + own radius) × √1.5 in the look-ahead time adds closing speed / distance × its size factor, which is always 0 (see below). Sum × weight. With a sum of 0: 1000 while a grenade warning lasts (the weight not applied). |
 | BridgeRepair (0x10084620) | 0: the rewrite has no broken bridges. |
 
 - **Squad factor** (0x10089aa0): 0 outside squads; 1 for the bot's own
@@ -2619,9 +2859,38 @@ The urgencies:
     so nothing is fired.
   - RunOver (0x100ddd30): steer at the lead point (3 × yawScale × angle −
     turn rate), full throttle.
-  - Avoid (0x10065360): walk 10 m from a wreck (straight away, else to
-    either side, by mesh rays), or 10 m across a vehicle's motion on the
-    bot's side. It ends after the time it allows or within 2 m.
+  - Avoid (0x10065360): walk 10 m from a wreck or 15 m from a grenade
+    (the avoided object −1; straight away, else to either side, by mesh
+    rays), or 10 m across a vehicle's motion on the bot's side. It ends
+    after the time it allows (a grenade: what is left of the warning) or
+    within 2 m.
+  - **Avoid's values:** the look-ahead time is the Mobile part's slot
+    `0x68` (`0x100a44f0` → BF2142.exe's Mobile adaptor, vtable
+    `0x009d6a50` slot `0x68`, `0x008a1830`: the Mobile template's `+0x44`).
+    The template's constructor (`0x008917b0`) sets it to 2 and no
+    `aiTemplatePlugIn` property writes it (`lookAheadTime` is `+0x20`,
+    `0x008840e7`): 2 s, ×2 prone, ×1.5 crouched. The moving vehicle's term
+    is multiplied by its Physical part's slot `0x48` (`0x100aae70` → the
+    Physical adaptor `0x009d7228` slot `0x1c`, `0x008a3f30`: the Physical
+    template's `+0x8`). The constructor (`0x00894450`) zeroes it and
+    Physical's only property, `setStrType`, writes `+0x18`: the term is
+    always 0, so moving vehicles never raise Avoid in the shipped game.
+    A non-zero sum is also scaled by the bot's vt+0xe0 `+8` when its
+    vt+0x68 and vt+0x64 hold (not traced) and doubled for a soldier within
+    5 s of its comm object's (bot `+0xe0`) `+0x78`, which only its reset
+    (`0x100a7630`) writes, to 0.
+  - **The grenade warning** (`0x1004eab0`, from the same event as the
+    rounds passing by, `0x1004ed30`, for every bot): a round whose AI
+    weapon's template is thrown (`+2`, `0x0088a650`), has an explosion
+    radius (`+0x20`) and doesn't explode on impact (`+0x4e`), within that
+    radius of the bot, with the round or its thrower in front (the unit
+    direction to the round, or the raw offset to the thrower, over 0.4
+    along the bot's facing). No team test. The bot's path follower keeps
+    the round's position and the weapon's stamp (`0x10092920`): AI weapon
+    `+0x20`, the clock when it was taken in hand (`0x008a6d80`, slot
+    `0xfc`). The warning lasts until 2.8 s after the stamp (`0x10092960`).
+    BF2142.exe's sender of the event wasn't found: the rewrite checks the
+    rounds in flight every tick, with the thrower's weapon in hand.
   - Flee (0x10085fc0; the point 0x10085de0): ChangeWeapon(camouflage),
     LockPlan(on) (0x100ce070: bot+0x7c, so 0x100cd090 keeps the plan with
     no arbitration), then side by side a sprinting MoveToFinding to 50 m
@@ -2854,9 +3123,15 @@ changes (0x100966c0 → 0x10095fc0).
     behind it. An obstacle on the goal next to the driver ends the move
     (666). Behind another vehicle within 15 m the speed is capped at its
     speed along the way less 1, at least 2 (0x100fc660); one closing at
-    over 10 m/s brakes fully and swerves (error −2). Not rewritten: the
-    other driver being told (its +0x28 calls) and the horn for friendly
-    soldiers in front (0x100a5c00).
+    over 10 m/s brakes fully and swerves (error −2). The same scan finds a
+    teammate on foot ahead (dot above 0) within 15 m beyond both radii on
+    the line of travel; with the vehicle's driver's seat taken
+    (`0x100aa530`) the driver sounds the horn (`0x100a5c00`) at most every
+    5 s (20 s when that soldier is a bot, player slot `0x84`): a vehicle
+    with ITHasCarHorn (the FAVs' `Car_horn`) holds PIFire for 2 s
+    (`0x100a5cf0` lets go); any other sends the radio request
+    (`0x100a5990`: 0xb, 6, 3), which the rewrite's bots don't have. Not
+    rewritten: the other driver being told (its +0x28 calls).
   - **Car** (0x100e9d40): the error mirrored when moving against the
     direction wanted; turn = 3 × yawScale × error − turn rate; the target
     speed lowered on a tilt and capped (keeping the cap's sign); throttle =
@@ -2998,20 +3273,36 @@ multipliers.
 
 - **Scheduling:** the CPU budgets are real time (see Scheduling: they
   depend on the machine's speed, so they can't be reproduced; every slice
-  runs to its count, the SAI once a second), and the whole path is
-  searched at once (the original searches three clusters at a time). Each
-  think evaluates every behaviour (the original's think stops at its
-  budget, the same real-time clock, and the rest wait for the next).
+  runs to its count, the SAI once a second). That holds for the path
+  searches too: the segments of three clusters are rewritten, but
+  `0x100c6ee0` gives the bots waiting for a path (`+0xd9`, `+0x150`)
+  search slices round robin (cursor `+0x100`) while the clock is within a
+  tenth of the frame's budget, hands 0.9 of what is left to the
+  pathfinder (`DAT_101394d4` slot `0xdc`) and completes the finished ones
+  (`0x100f9ce0`); the rewrite finishes each search at once. Each think
+  evaluates every behaviour (the original's think stops at its budget,
+  the same real-time clock, and the rest move up a priority level for the
+  next).
 - **Aim:** bots don't zoom. (The head twists before the body for every
   soldier: see `SoldierControl::twist`, 0x0058a6d0.)
 - **Deviation:** the AI deviation (0x00892b70) widens the weapon's own
   deviation through the soldier (vt+0xf4); the rewrite's hand-held
   firearms have no deviation model, so the bot spreads its aim uniformly
   over ± half of it on each axis.
-- **Fire plan:** the explosives' start conditions (0x100d8800,
-  0x100d8400) aren't decoded.
-- **Soldier radius:** the game object's size through the AI adaptor
-  (vt+0xdc → 0x008a3d40 → the object's vt+0x90), not identified: 0.5 m.
+- **Fire plan:** the explosives' start conditions aren't rewritten. The
+  plan (`0x100777a0`) puts a condition statement round the trigger when
+  the bot's vt+0x264 holds, the weapon has an explosion radius
+  (`0x100a41e0`) and the target is a soldier, and the record the bot's
+  vt+0x88 gives has 8 in `+0x50`, or the target is over 30 m higher (for
+  a weapon `0x100a4270` refuses), or the bot is no soldier:
+  `0x100d8800` (vtable `0x1011aa68`, evaluated by `0x100d8910`) before
+  the trigger, or `0x100d8400` (vtable `0x1011aa30`, `0x100d8450`, with
+  3.5 m) after it when the bot isn't a soldier and the target is.
+- **Soldier radius:** the object's size through the AI adaptor (vt+0xdc
+  → `0x008a3d40` → the object's vt+0x90, for the soldier `0x006f6b90`):
+  its bounding radius, cached at `+0x104`: the geometry's (`+0x4c` slot
+  `0x74`, a RendDX9 skinned-mesh instance) and each child's radius plus
+  its offset. The rewrite has no such radius for the soldier mesh: 0.5 m.
 - **Runs without the AI scripts** (tests): a driver is a Tank when its
   seat has a gun and a Car otherwise, other seats are Fixed, vehicles
   count as LightArmour, and vehicle guns reach 100 m. Every shipped
@@ -3031,8 +3322,9 @@ multipliers.
   commander.
 - **Path follower:** a moving target re-planned when it moves 2 m; the
   segment searches' fallback to the whole mesh (see above). The jump (a
-  PIJump press) is not in the rewrite's soldiers: a second's back step to
-  one side stands in.
+  PIJump press) is not in the rewrite's soldiers (`SoldierInput` has no
+  jump and `SoldierPhysics` no jump impulse): a second's back step to one
+  side stands in until GameWorld has one.
 - **Stuck drivers:** after the 20 s progress check the move fails and
   the behaviour plans again. 0x100c91c0 also hands the bot to the game
   (IAIGameEffector vt+0x24 → 0x0089e940 → GameLogic slot 0x58), whose
@@ -3040,10 +3332,9 @@ multipliers.
 - **Assists:** the radio requests ("medic!", "ammo!") and the squads'
   order types the factors read are not modelled; basicTemp is read as the
   AI object's +0x14.
-- **Avoid:** r is the vehicle's AI radius; the look-ahead time (2 s; ×2
-  prone, ×1.5 crouched) and the size factor (1) come from the game's side
-  of the AI object, not traced. The grenade warning (1000 for 2.8 s after
-  an explosion in front, 0x1004eab0) is not rewritten.
+- **Avoid:** r is the vehicle's AI radius. The two factors not traced
+  (see Avoid's values) are left out; the grenade warning's event is
+  checked every tick.
 - **Keeping distance:** while the Fire pattern walks the bot towards its
   target, the aim keeps the view's pitch (walking otherwise levels it).
 

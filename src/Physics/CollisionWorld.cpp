@@ -158,6 +158,12 @@ bool CollisionWorld::trace(const Vec3& from, const Vec3& to, Hit& hit, bool fron
 void CollisionWorld::forEachFaceNear(const Vec3& center, float radius,
 	const std::function<void(const Vec3& a, const Vec3& b, const Vec3& c, uint32_t material, uint32_t owner)>& visit) const
 {
+	forEachFaceIndexNear(center, radius, [&](const Triangle& t) { visit(t.a, t.b, t.c, t.material, t.owner); });
+}
+
+void CollisionWorld::forEachFaceIndexNear(const Vec3& center, float radius,
+	const std::function<void(const Triangle&)>& visit) const
+{
 	++m_stamp;
 	const int x0 = static_cast<int>(std::floor((center.x - radius) / kCell));
 	const int x1 = static_cast<int>(std::floor((center.x + radius) / kCell));
@@ -173,7 +179,7 @@ void CollisionWorld::forEachFaceNear(const Vec3& center, float radius,
 				const Triangle& t = m_triangles[index];
 				if (t.stamp != m_stamp) {
 					t.stamp = m_stamp;
-					visit(t.a, t.b, t.c, t.material, t.owner);
+					visit(t);
 				}
 			}
 		}
@@ -327,6 +333,71 @@ int segmentCapsuleCrossings(const Vec3& a, const Vec3& b, const Vec3& e0, const 
 		roots[n++] = bisect(tMin, 1);
 	}
 	return n;
+}
+
+void CollisionWorld::sweepSphere(const Vec3& start, const Vec3& end, float radius, std::vector<SphereContact>& contacts) const
+{
+	const Vec3 delta = end - start;
+	if (lengthSquared(delta) <= 0.01f * 0.01f) {
+		querySphere(end, radius, contacts);
+		return;
+	}
+	const Vec3 middle = (start + end) * 0.5f;
+	const float reach = std::sqrt(lengthSquared(delta)) * 0.5f + radius * 1.01f; // *0x00a8517c
+	std::vector<const Triangle*> near;
+	forEachFaceIndexNear(middle, reach, [&](const Triangle& t) { near.push_back(&t); });
+	bool faceMet = false;
+	for (const Triangle* t : near) {
+		const Vec3 offset = t->normal * radius;
+		const float startDistance = dot(start - (t->a + offset), t->normal);
+		const float endDistance = dot(end - (t->a + offset), t->normal);
+		if (startDistance < 0 || endDistance > 0 || dot(delta, t->normal) >= 0) {
+			continue;
+		}
+		const float fraction = startDistance / (startDistance - endDistance);
+		const Vec3 hit = start + delta * fraction;
+		const Vec3 onFace = hit - offset;
+		if (lengthSquared(closestOnTriangle(onFace, t->a, t->b, t->c) - onFace) > 1e-8f) {
+			continue;
+		}
+		contacts.push_back({onFace, t->normal, endDistance, t->material});
+		faceMet = true;
+	}
+	if (faceMet) {
+		return;
+	}
+	for (const Triangle* t : near) {
+		const Vec3 corners[3] = {t->a, t->b, t->c};
+		for (int k = 0; k < 3; ++k) {
+			const Vec3& e0 = corners[k];
+			const Vec3& e1 = corners[(k + 1) % 3];
+			float roots[2];
+			if (segmentCapsuleCrossings(start, end, e0, e1, radius, roots) == 0) {
+				continue;
+			}
+			const Vec3 centre = start + delta * roots[0];
+			const Vec3 point = closestOnSegment(centre, e0, e1);
+			Vec3 normal = centre - point;
+			const float length = std::sqrt(lengthSquared(normal));
+			if (length <= 0) {
+				continue;
+			}
+			normal = normal * (1.0f / length);
+			const float depth = dot(end - centre, normal);
+			if (depth >= 0) {
+				continue;
+			}
+			if (normal.y < 0) {
+				normal.y = 0;
+				const float flat = std::sqrt(lengthSquared(normal));
+				if (flat <= 1.1920929e-07f) {
+					continue;
+				}
+				normal = normal * (1.0f / flat);
+			}
+			contacts.push_back({point, normal, depth, t->material});
+		}
+	}
 }
 
 void CollisionWorld::capsuleEdgeContacts(const Vec3& a, const Vec3& b, float radius, std::vector<SphereContact>& contacts) const

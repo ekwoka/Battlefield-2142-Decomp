@@ -452,6 +452,12 @@ std::vector<physics::Vec3> BotManager::route(int player) const
 
 std::string BotManager::strategy(int team) const { return team == 1 || team == 2 ? m_sides[team].strategy : std::string(); }
 
+bool BotManager::honking(int player) const
+{
+	const auto it = m_bots.find(player);
+	return it != m_bots.end() && it->second.hornHeld;
+}
+
 float BotManager::healthOf(uint32_t object) const
 {
 	const float left = m_world.hitPoints(object);
@@ -577,6 +583,13 @@ void BotManager::update(float seconds)
 	// vt+0x68) and the soldier's root no longer the vehicle's -> the unit
 	// component's vt+0x64 0x008a1b10 with the clock and the player's team).
 	for (const GameWorld::PlayerInfo& player : m_players) {
+		// The weapon in hand's stamp (0x008a6d80, on every change of the
+		// armament's current weapon).
+		InHand& inHand = m_inHand[player.id];
+		const std::string weapon = player.alive ? weaponName(player, player.inHandSlot) : std::string();
+		if (inHand.slot != player.inHandSlot || inHand.weapon != weapon) {
+			inHand = {player.inHandSlot, weapon, m_time};
+		}
 		if (player.ai) {
 			continue;
 		}
@@ -615,6 +628,7 @@ void BotManager::update(float seconds)
 			bot.spawnedAt = m_time;
 		}
 		noticeRounds(bot, self);
+		warnOfGrenades(bot, self);
 		bots.push_back(&self);
 	}
 	if (bots.empty()) {
@@ -761,6 +775,57 @@ void BotManager::noticeRounds(Bot& bot, const GameWorld::PlayerInfo& self)
 		}
 	}
 
+}
+
+// The grenade warning (AIDLL 0x1004eab0, called for every bot by the same
+// event as the rounds above, 0x1004ed30): a round from a weapon whose AI
+// template is thrown (+2), has an explosion radius (+0x20) and doesn't
+// explode on impact (+0x4e) - the hand grenades - within that radius of
+// the bot, with the round or its thrower in front (the direction to the
+// round, or the unnormalised offset to the thrower, over 0.4 along the
+// bot's facing, its matrix +0x20), is stored in the bot's path follower
+// (0x10092920): the round's position and the thrower's weapon's stamp
+// (AI weapon slot 0x100: when it was taken in hand, 0x008a6d80). No team
+// test: a teammate's grenade (or the bot's own) warns too. It lasts until
+// 2.8 s after that stamp (0x10092960); BBAvoid turns it into 1000.
+// BF2142.exe's sender of the event wasn't found; like the rounds above it
+// is checked every tick on the rounds in flight, with the thrower's weapon
+// in hand as the round's weapon.
+void BotManager::warnOfGrenades(Bot& bot, const GameWorld::PlayerInfo& self)
+{
+	if (self.vehicle) {
+		return;
+	}
+	const physics::Vec3 forward {std::sin(self.yaw * kRadians), 0, std::cos(self.yaw * kRadians)};
+	for (const Projectile& round : m_world.projectiles()) {
+		if (round.player < 0) {
+			continue;
+		}
+		GameWorld::PlayerInfo thrower;
+		if (!m_world.playerInfo(round.player, thrower)) {
+			continue;
+		}
+		const auto held = m_inHand.find(round.player);
+		if (held == m_inHand.end() || held->second.weapon.empty()) {
+			continue;
+		}
+		const WeaponAi w = weaponAi(held->second.weapon);
+		if (!w.thrown || w.explosionRadius <= 0 || w.explodesOnImpact) {
+			continue;
+		}
+		physics::Vec3 to = round.position - self.position;
+		const float d = std::sqrt(physics::lengthSquared(to));
+		if (d >= w.explosionRadius || d <= 1e-5f) {
+			continue;
+		}
+		to = to * (1 / d);
+		const physics::Vec3 toThrower = thrower.position - self.position;
+		if (physics::dot(to, forward) <= 0.4f && physics::dot(toThrower, forward) <= 0.4f) {
+			continue;
+		}
+		bot.grenadeAt = round.position;
+		bot.grenadeStamp = held->second.since;
+	}
 }
 
 // Sensing (the soldier's sensing agent, AIDLL 0x100ed700 and 0x100ee430).
@@ -2293,11 +2358,27 @@ float BotManager::runOverUrgency(Bot& bot, const GameWorld::PlayerInfo& self)
 // r + 4)) adds 100; one moving at 2 m/s or more that will pass within
 // 0.6 (r + own radius) x sqrt(1.5) inside the look-ahead time T, closing
 // at 3 m/s or more, adds |closing speed| / distance. Urgency: the sum x
-// weight. The grenade warning (1000 for 2.8 s after an explosion lands
-// in front, 0x1004eab0) isn't modelled. r: the vehicle's AI radius (its
-// box's farthest corner, vt+0x28). T is 2 s (x2 prone, x1.5 crouched) and
-// the size factor (phys +0x48) 1: those two values come from the game's
-// side of the AI object, which isn't traced.
+// weight. r: the vehicle's AI radius (its box's farthest corner, vt+0x28).
+// T, the look-ahead time, is the bot's Mobile part's slot 0x68
+// (0x100a44f0 -> the game's Mobile adaptor, vtable 0x009d6a50 slot 0x68
+// 0x008a1830: the Mobile template's +0x44), which the template's
+// constructor (0x008917b0) sets to 2 and no aiTemplatePlugIn property
+// writes (lookAheadTime is +0x20, the driving's): 2 s, x2 prone, x1.5
+// crouched. The moving vehicle's term is also multiplied by its Physical
+// part's slot 0x48 (0x100aae70 -> the game's Physical adaptor 0x009d7228
+// slot 0x1c 0x008a3f30: the Physical template's +0x8). The Physical
+// template's constructor (0x00894450) zeroes it and its only property
+// (setStrType, +0x18) doesn't touch it, so the term is always 0: in the
+// shipped game moving vehicles never raise Avoid; only wrecks and
+// vehicles below 30 % do. Kept as the size factor 0.
+// With nothing to avoid, the grenade warning (see warnOfGrenades) gives
+// 1000 (the weight not applied) while 2.8 s - (now - stamp) is above 0
+// (0x10092960), and the plan runs from it.
+// Not rewritten: a non-zero sum is also scaled by the bot's vt+0xe0 +8
+// when its vt+0x68 and vt+0x64 hold, and doubled for a soldier within
+// 5 s of its comm object's +0x78 (bot +0xe0); that stamp is only ever
+// reset to 0 (0x100a7630).
+constexpr float kAvoidSizeFactor = 0;
 float BotManager::avoidUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight)
 {
 	if (self.vehicle) {
@@ -2360,7 +2441,7 @@ float BotManager::avoidUrgency(Bot& bot, const GameWorld::PlayerInfo& self, floa
 		if (hit < 0 || hit > lookAhead) {
 			continue;
 		}
-		const float score = std::sqrt(vv) / std::max(distance, 0.1f);
+		const float score = std::sqrt(vv) / std::max(distance, 0.1f) * kAvoidSizeFactor;
 		sum += score;
 		if (score > best) {
 			best = score;
@@ -2370,7 +2451,19 @@ float BotManager::avoidUrgency(Bot& bot, const GameWorld::PlayerInfo& self, floa
 			bot.avoidFor = hit;
 		}
 	}
-	return sum * weight;
+	if (sum != 0) {
+		bot.avoidGrenade = false;
+		return sum * weight;
+	}
+	const float left = 2.8f - (m_time - bot.grenadeStamp);
+	if (left > 0) {
+		bot.avoidGrenade = true;
+		bot.avoidStatic = true;
+		bot.avoidFrom = bot.grenadeAt;
+		bot.avoidFor = left;
+		return 1000;
+	}
+	return 0;
 }
 
 // BBPMedicAssist / BBPAmmoAssist (0x10070da0, 0x100724e0): to the target
@@ -2530,10 +2623,11 @@ void BotManager::runOver(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInp
 }
 
 // BBPAvoidCollisionInfantery (0x10065360): away from a standing wreck
-// (10 m), or aside from a vehicle's path (10 m across its motion, on the
-// side the bot is on), checked by a ray over the mesh (else across it,
-// either way); walked to until the time it allows has passed or within
-// 2 m.
+// (10 m) or a grenade (15 m; the avoided object -1), or aside from a
+// vehicle's path (10 m across its motion, on the side the bot is on),
+// checked by a ray over the mesh (else across it, either way); walked to
+// until the time it allows (for a grenade what is left of its warning)
+// has passed or within 2 m.
 void BotManager::avoid(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds)
 {
 	if (bot.avoidUntil < m_time - 0.5f) {
@@ -2545,9 +2639,10 @@ void BotManager::avoid(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput
 			away = away * (1 / length);
 			const float side = random() < 0.5f ? -1.0f : 1.0f;
 			const physics::Vec3 across {away.z * side, 0, -away.x * side};
-			goal = self.position + away * 10.0f;
+			const float reach = bot.avoidGrenade ? 15.0f : 10.0f;
+			goal = self.position + away * reach;
 			for (const physics::Vec3& d : {away, across, across * -1.0f}) {
-				const physics::Vec3 g = self.position + d * 10.0f;
+				const physics::Vec3 g = self.position + d * reach;
 				if (!m_navMesh || ai::meshRaycast(*m_navMesh, toAi(self.position), toAi(g), nullptr, 8)) {
 					goal = g;
 					break;
@@ -3156,7 +3251,87 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 	input.strafe = out.turn;
 	input.sprint = input.sprint || out.sprint;
 	bot.follower.progress(toAi(at), std::max(std::fabs(out.throttle), std::fabs(out.turn)), m_time);
+	horn(bot, self, *vehicle, input);
 	return true;
+}
+
+// The horn (AIDLL 0x100a5c00, from the end of 0x100fc660's scan of what is
+// ahead; let go by 0x100a5cf0 through 0x100a7af0 every frame). Moving at
+// 2 m/s or more along its motion, the driver looks at the soldiers of the
+// world list (alive, with a Mobile part): one of its own team (slot 0x40)
+// ahead (dot above 0), at most 15 m beyond both radii, whose sphere the
+// line of travel crosses, is the last such one found. Then, with the
+// vehicle's driver's seat taken (0x100aa530), at most every 5 s (20 s
+// when that soldier's player is a bot, player slot 0x84): a vehicle whose
+// AI template has ITHasCarHorn (the FAVs' Car_horn) gets PIFire (input 8,
+// when the input has it) for 2 s; any other sends the radio request
+// (0x100a5990: 0xb, 6, 3, to that player), which the rewrite's bots don't
+// have. The stamp (comm object +0x80) is taken either way.
+void BotManager::horn(Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::VehicleInfo& vehicle, SoldierInput& input)
+{
+	const world::Object* object = m_world.objects().find(vehicle.object);
+	const bool hasHorn = object && object->objectTemplate()
+		&& (m_settings.typeFlags(aiTemplateOf(object->objectTemplate()->name())) & kITHasCarHorn) != 0;
+	physics::Vec3 forward = vehicle.forward;
+	const float speed = physics::dot(vehicle.velocity, forward);
+	const float motion = speed > 0 ? 1.0f : speed < 0 ? -1.0f : 0.0f;
+	bot.hornHeld = false;
+	if (hasHorn && m_time - bot.hornAt <= 2) {
+		input.fire = true; // held until 0x100a5cf0 lets go 2 s on
+		bot.hornHeld = true;
+	}
+	if (std::fabs(speed) < 2) {
+		return;
+	}
+	const VehicleBox box = vehicleBox(vehicle);
+	const physics::Vec3 up {forward.y * vehicle.right.z - forward.z * vehicle.right.y,
+		forward.z * vehicle.right.x - forward.x * vehicle.right.z, forward.x * vehicle.right.y - forward.y * vehicle.right.x};
+	const physics::Vec3 centre = vehicle.position + vehicle.right * box.centre.x + up * box.centre.y + forward * box.centre.z;
+	const int target = hornTarget(centre, forward * motion, box.centreRadius, self.team, self.id, m_players);
+	const GameWorld::PlayerInfo* honked = nullptr;
+	for (const GameWorld::PlayerInfo& other : m_players) {
+		honked = other.id == target ? &other : honked;
+	}
+	if (!honked) {
+		return;
+	}
+	const float interval = honked->ai ? 20.0f : 5.0f;
+	if (m_time - bot.hornAt < interval) {
+		return;
+	}
+	bot.hornAt = m_time;
+	if (hasHorn) {
+		input.fire = true;
+		bot.hornHeld = true;
+	}
+}
+
+int hornTarget(const physics::Vec3& centre, const physics::Vec3& way, float ownRadius, int team, int self,
+	const std::vector<GameWorld::PlayerInfo>& players)
+{
+	int honked = -1;
+	for (const GameWorld::PlayerInfo& other : players) {
+		if (!other.alive || other.vehicle || other.id == self || other.team != team) {
+			continue;
+		}
+		const physics::Vec3 at = other.position + physics::Vec3 {0, kChestHeight, 0};
+		physics::Vec3 d = at - centre;
+		const float dist = std::sqrt(physics::lengthSquared(d));
+		const float r = ownRadius + kSoldierRadius;
+		if (dist > 1e-5f) {
+			d = d * (1 / dist);
+		}
+		if (dist - r > 15) {
+			continue;
+		}
+		const float f = physics::dot(d, way);
+		const physics::Vec3 nearest = centre + way * (f * dist);
+		if (physics::lengthSquared(nearest - at) > r * r || f <= 0) {
+			continue;
+		}
+		honked = other.id; // the last one found
+	}
+	return honked;
 }
 
 int BotManager::areaOfControlPoint(int controlPoint) const
@@ -3870,6 +4045,12 @@ void registerBotConsoleMethods(Console& console, BotSettings& settings)
 	bindMethod(console, "weaponTemplate.isThrown", access, [weapon](bool v) {
 		if (WeaponAi* w = weapon()) {
 			w->thrown = v;
+		}
+	});
+	// explodesOnImpact: the template's +0x4e (0x00887c2c).
+	bindMethod(console, "weaponTemplate.explodesOnImpact", access, [weapon](bool v) {
+		if (WeaponAi* w = weapon()) {
+			w->explodesOnImpact = v;
 		}
 	});
 

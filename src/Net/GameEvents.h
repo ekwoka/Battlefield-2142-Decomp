@@ -3,8 +3,8 @@
 // each with a reader, writer and handler, 0x00508000-0x00515000).
 //
 // A data packet's payload is read by the connection's subsystems in order
-// (0x0057a170): first one led by a presence bit (0x00590990, the player's
-// input), then the event block (0x006447b0):
+// (0x0057a170): first the input block (0x00590990: the player's moves, see
+// GameProtocol.h), then the event block (0x006447b0):
 //   1 bit present; 8 bits count; 5 bits block sequence (blocks are handled
 //   in order, modulo 32); 1 bit; then `count` events, each a 7-bit type
 //   (enough for the event types registered) followed by its fields.
@@ -18,6 +18,7 @@
 #pragma once
 
 #include "BitStream.h"
+#include "GameProtocol.h"
 
 #include <cstdint>
 #include <optional>
@@ -48,14 +49,17 @@ struct ReceivedEvent {
 	bool transferStart = false;
 	uint32_t transferType = 0, transferSize = 0;
 	std::string chunk;
+	// Every field in wire order (GameProtocol.h's layouts), for all types.
+	GameEvent event;
 };
 
 struct EventBlock {
-	bool inputPresent = false; // the first subsystem's block (not decoded yet)
+	bool inputPresent = false; // the input block (a client's moves; servers send a lone 0 bit)
+	InputBlock input;
 	bool present = false;
 	uint32_t sequence = 0;
 	std::vector<ReceivedEvent> events;
-	bool complete = true; // false when an event type is not decoded yet
+	bool complete = true; // false when the payload is cut short or holds an unregistered event type
 };
 
 // Decodes the event block of a data payload (the bytes after the 16-bit

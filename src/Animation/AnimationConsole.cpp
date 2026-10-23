@@ -125,11 +125,21 @@ void registerAnimationConsoleMethods(Console& console, AnimationSystems& systems
 	bundleNumber("fadeInTime", &Bundle::fadeInTime);
 	bundleNumber("fadeOutTime", &Bundle::fadeOutTime);
 	bundleNumber("stickAround", &Bundle::stickAround);
-	for (const char* name : {"forceStopPoints", "speedKeyPoints", "fadeOutSpeedKeyPoints", "fadeInSpeedKeyPoints"}) {
-		// The new system's key points: not used yet.
+	// The new system's key points (0x008bffe0, 0x008bfb30, 0x008bfc70,
+	// 0x008bfdb0): "0.3;0.8;", read back as set.
+	const auto keyPoints = [&console, bundle](const char* name, Bundle::KeyPoints Bundle::*field) {
 		bindProperty<std::string>(console, std::string("AnimationBundle.") + name, kAccess,
-			[] { return std::string(); }, [](const std::string&) {});
-	}
+			[bundle, field] { return bundle() ? (bundle()->*field).text : std::string(); },
+			[bundle, field](const std::string& v) {
+				if (Bundle* b = bundle()) {
+					b->*field = parseKeyPoints(v);
+				}
+			});
+	};
+	keyPoints("forceStopPoints", &Bundle::forceStopPoints);
+	keyPoints("speedKeyPoints", &Bundle::speedKeyPoints);
+	keyPoints("fadeOutSpeedKeyPoints", &Bundle::fadeOutSpeedKeyPoints);
+	keyPoints("fadeInSpeedKeyPoints", &Bundle::fadeInSpeedKeyPoints);
 	bindMethod(console, "AnimationBundle.addAnimation", kAccess, [system, bundle](std::string path) {
 		AnimationSystemTemplate* t = system();
 		Bundle* b = bundle();

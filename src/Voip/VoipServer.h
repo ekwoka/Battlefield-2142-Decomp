@@ -18,9 +18,13 @@
 //   channel of the chosen set(s), except the speaker (0x10008830,
 //   0x100088e0).
 //
-// Not rewritten: the debug logs (mods/bf2142/Logs/Voip/*, packets 4, 5
-// and 200 are accepted and ignored) and the DLL's own thread (the game
-// calls update(); BF2142.exe runs it every 10 ms, 0x00645480).
+// Not rewritten: the debug logs (mods/bf2142/Logs/Voip/*:
+// VoipServerRouting_Instance_* from 0x10006610, VoiceTraffic_Player_* from
+// 0x10007060 / 0x10007230) and the DLL's own thread (the game calls
+// update(); BF2142.exe runs it every 10 ms, 0x00645480). Packets 4 and 5
+// (a client's start and stop of its voice log) and 200 (DEBUG_DATA: 0x659
+// bytes of player names kept at +0xb34 for the logs, 0x10002170) feed
+// nothing else, so they are accepted and dropped.
 #pragma once
 
 #include "Net/Socket.h"

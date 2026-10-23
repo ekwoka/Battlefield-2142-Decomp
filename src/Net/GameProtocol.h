@@ -75,6 +75,11 @@ enum PlayerInputId : int {
 //                      at 0x009653a8 that are above 0.5 (ids 8-50; the
 //                      high part keeps only 11 bits);
 //   1 bit: PlayerInput +0x110: pitch and roll come from a device axis.
+//          The server puts it back into the player's PlayerInput
+//          (0x005838d0) with the rest of the move; no code in BF2142.exe
+//          reads PlayerInput +0x110 after that (every byte read at +0x110
+//          in the binary was checked: the others are other classes'), so
+//          it has no effect on the server.
 //          0x00696db0 fills PlayerInput from a control map: the bit starts
 //          at 1 and, for inputs 1 and 2 when the map binds them (ControlMap
 //          slot 0x20), is ANDed with slot 0x6c (0x00681fc0: the mapping's
@@ -312,6 +317,20 @@ enum NetworkMessage : uint32_t {
 	kNeStringReceived = 0xb,
 	kNeSuicide = 0xc,        // c->s (0x004c22e0)
 	kNeRadioMessageReceived = 0xd,
+	// 0xe-0x10 belong to the distributed lightmap renderer
+	// ("DistributedLightRenderer", 0x00a0f7a0): a mode the byte at
+	// 0x00a1fc02 (0x0042b820) switches on. It is set only by command-line
+	// option 0x22 (0x00409950 case 0x22, which also caps allocations at 26
+	// MB), and the retail option table (0x004409d0's 34 registrations,
+	// 0x00409950) registers no option with that id, so these are never
+	// sent. 0x10 goes c->s, without a payload, after the client echoes 6/4
+	// (0x004b6630 case 4); the server (0x004b0690) hands the sender's
+	// connection to the renderer (slot 0x18). 0xe (slot 0x20) and 0xf (a
+	// chat line of type 9 to the sender) go the same way. In that mode
+	// data block 4 goes to the renderer too (slot 0x24, 0x004b5eb0).
+	kNeLightRenderJob = 0xe,
+	kNeLightRenderMessage = 0xf,
+	kNeLightRenderReady = 0x10,
 	kNeNetworkableDestroyed = 0x11,
 	kNeRemoteConsoleCommand = 0x12,
 	kNeRemoteConsoleFeedback = 0x13,
@@ -435,8 +454,20 @@ constexpr unsigned kDemoGhostStateLengthBits = 13;
 // (sign + 31 bits), the position (3 floats; it becomes the stream's
 // reference for delta positions, 0x006874f0), the object's ghost id, an
 // optional second ghost (1 bit + 16 bits), an optional vehicle check (1 bit,
-// 1 bit + 16 bits), then networkable state (not decoded; skipped by the
-// length).
+// 1 bit + 16 bits), then networkable state, kept undecoded in `rest`. What
+// 0x00580cd0 reads there depends on the client's own copy: only with its
+// control object's ghost (0x00678d70) does it read 1 bit (whether the
+// state is recorded for prediction) and a 3-bit history slot
+// (0x00508340(3)); then every group of the ghost (and of the second ghost)
+// in mode 3, the prediction's mode (0x0057f720 / 0x0057f9f0 -> slot 0x30
+// with 3; the Soldier's reader 0x005fcdb0 then takes raw floats and
+// 16-bit angles where mode 2 has 12 bits, RotationalBundle 0x00602070 16
+// bits an angle, the PCO 0x00605b00 skips a check, Engine 0x00609340 and
+// Spring 0x00605320 differ too), then a 10-bit length and the control
+// object's own state (its vtable 0x1cc), checked against that length.
+// Without the object everything is skipped by the 12-bit length. The
+// mode-3 variants of the readers aren't rewritten: a client predicting its
+// own soldier would need them (the rewrite's client takes the position).
 struct ControlObjectRecord {
 	int32_t lastMove = 0;
 	Vec3f position;

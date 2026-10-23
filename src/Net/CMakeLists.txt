@@ -15,7 +15,7 @@ add_library(Net STATIC
 	TlsSocket.cpp
 )
 target_include_directories(Net PUBLIC ${PROJECT_SOURCE_DIR}/src)
-target_link_libraries(Net PUBLIC World)
+target_link_libraries(Net PUBLIC World PRIVATE zlibstatic)
 if(WIN32)
 	target_link_libraries(Net PUBLIC ws2_32)
 endif()

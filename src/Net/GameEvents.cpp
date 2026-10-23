@@ -18,42 +18,39 @@ EventBlock readEventBlock(const std::vector<uint8_t>& payload)
 {
 	EventBlock block;
 	BitReader in(payload.data(), payload.size());
-	block.inputPresent = in.read(1) == 1;
-	if (block.inputPresent) {
+	// The input block (0x00590990) comes first; a server writes a lone 0 bit.
+	if (!readInputBlock(in, block.input)) {
 		block.complete = false;
 		return block;
 	}
+	block.inputPresent = block.input.present;
 	block.present = in.read(1) == 1;
-	if (!block.present) {
+	if (!block.present || in.bad()) {
+		block.complete = !in.bad();
 		return block;
 	}
 	const uint32_t count = in.read(8);
 	block.sequence = in.read(5);
-	in.read(1);
-	for (uint32_t i = 0; i < count && !in.bad(); ++i) {
+	in.read(1); // resent (0x00509a90)
+	for (uint32_t i = 0; i < count; ++i) {
 		ReceivedEvent event;
-		event.type = in.read(kEventTypeBits);
-		if (event.type == kCdKeyChallenge) { // 0x00509cc0
-			event.challenge = in.readText(10);
-			const uint32_t length = in.read(8);
-			in.readText(length);
-		} else if (event.type == kDataTransfer) {
-			event.transferStart = in.read(1) == 1;
-			if (event.transferStart) {
-				event.transferType = in.read(32);
-				event.transferSize = in.read(32);
-			} else {
-				const uint32_t length = in.read(8);
-				for (uint32_t b = 0; b < length; ++b) {
-					event.chunk.push_back(static_cast<char>(in.read(8)));
-				}
-			}
-		} else {
-			block.events.push_back(event);
+		if (!readGameEvent(in, event.event)) {
 			block.complete = false;
 			break;
 		}
-		block.events.push_back(event);
+		event.type = event.event.type;
+		if (event.type == kCdKeyChallenge) { // 0x00509cc0: 10 bytes, then a counted string
+			const std::string& text = event.event.text(0);
+			event.challenge = text.substr(0, std::min(text.find('\0'), text.size()));
+		} else if (event.type == kDataTransfer) { // 0x0050a1a0
+			DataBlockChunk chunk;
+			parseDataBlock(event.event, chunk);
+			event.transferStart = chunk.start;
+			event.transferType = chunk.type;
+			event.transferSize = chunk.size;
+			event.chunk = chunk.bytes;
+		}
+		block.events.push_back(std::move(event));
 	}
 	return block;
 }

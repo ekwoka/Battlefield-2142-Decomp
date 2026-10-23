@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 
 namespace dice::hfe::anim {
 
@@ -21,6 +22,15 @@ bool same(const std::string& a, const std::string& b) { return lower(a) == lower
 constexpr float kPi = 3.14159265f;
 constexpr int kExclusivePriority = 9000; // queuing above this stops all others (0x008bb770)
 
+// Tweakables (registered at 0x00900a60-0x00900b80) at their defaults.
+constexpr float kSurfaceInterpolate = 0.2f;  // anim_surfaceInterpolate
+constexpr float kOffsetBackwardTime = 0.5f;  // anim_offsetBackwardTime
+constexpr float kStepEdge = 0.25f;           // anim_test
+constexpr float kStartLeftOffset = 0.2f;     // anim_startLeftOffset
+constexpr float kStartRightOffset = 0.7f;    // anim_startRightOffset
+constexpr float kSlopeBaseWeight = 1.0f;     // anim_test2
+constexpr bool kSlopeForward = false;        // anim_test3 (an int, 0)
+
 } // namespace
 
 bool ValueHolder::inRange(float value) const
@@ -32,6 +42,41 @@ bool ValueHolder::inRange(float value) const
 		return min <= value && value <= max;
 	}
 	return max <= value && value <= min;
+}
+
+Bundle::KeyPoints parseKeyPoints(const std::string& text)
+{
+	Bundle::KeyPoints points;
+	points.text = text;
+	size_t start = 0;
+	while (start <= text.size()) {
+		size_t end = text.find(';', start);
+		if (end == std::string::npos) {
+			end = text.size();
+		}
+		if (end > start) {
+			points.values.push_back(static_cast<float>(std::atof(text.substr(start, end - start).c_str())));
+		}
+		start = end + 1;
+	}
+	return points;
+}
+
+float keyPointValue(const std::vector<float>& points, float fraction)
+{
+	if (points.empty()) {
+		return 1;
+	}
+	if (points.size() == 1) {
+		return points[0];
+	}
+	// The original reads one past the end at a fraction of 1 (multiplied by
+	// nothing) and beyond it outside 0..1; here the last segment is
+	// extended instead.
+	const float at = static_cast<float>(points.size() - 1) * fraction;
+	const float whole = std::clamp(std::floor(at), 0.0f, static_cast<float>(points.size() - 2));
+	const size_t i = static_cast<size_t>(whole);
+	return (at - whole) * (points[i + 1] - points[i]) + points[i];
 }
 
 bool parseTriggerType(const std::string& name, TriggerType& type)
@@ -306,7 +351,12 @@ float AnimationState::value(const Trigger& trigger) const
 bool AnimationState::evaluate(size_t index)
 {
 	const Trigger& t = m_system.triggers()[index];
+	// 0x008c3fb0, which every type but Pose, SwitchMessage and Count ends
+	// in: a trigger with a fadeInTime fades the whole system in.
 	const auto base = [&]() {
+		if (t.fadeInTime > 0) {
+			setFadingTrigger(index);
+		}
 		for (size_t child : t.children) {
 			if (!evaluate(child)) {
 				return false;
@@ -377,8 +427,23 @@ bool AnimationState::evaluate(size_t index)
 		}
 		return true;
 	}
-	case TriggerType::Count: // 0x008c42b0 (the count itself is not kept)
-		return t.children.size() == 2 ? evaluate(t.children[0]) : true;
+	case TriggerType::Count: { // 0x008c42b0
+		// The first child until the bundle on top has wrapped or ended
+		// once, then the second for good: the system remembers it under
+		// switch 1 (slots 0x6c, 0x70 and 0x68), shared by every
+		// CountTrigger of the system. The count property isn't read.
+		if (t.children.size() != 2) {
+			return true;
+		}
+		bool second = m_switches[1];
+		if (!second) {
+			second = !m_instances.empty() && m_instances.back().loops != 0;
+			if (second) {
+				m_switches[1] = true;
+			}
+		}
+		return evaluate(t.children[second ? 1 : 0]);
+	}
 	default:
 		return base();
 	}
@@ -429,14 +494,72 @@ void AnimationState::queueBundles(size_t index)
 		}
 		return;
 	case TriggerType::Movement: { // 0x008c46d0: the first bundle, by direction
+		if (!holder && t.bundles.size() == 2) {
+			// Starting to walk: the first bundle if the last movement
+			// bundle was near the start or end of its step, else the
+			// second; the step phase is set to where each starts.
+			const bool first = m_phase < kStepEdge || 1 - kStepEdge < m_phase;
+			m_phase = first ? kStartLeftOffset : kStartRightOffset;
+			queue(t.bundles[first ? 0 : 1], index, priority, -1, 1);
+			return;
+		}
 		const float rate = normal != 0 ? m_input.speed / normal : 1;
 		Instance& instance = queue(t.bundles[0], index, priority, -1, rate);
 		const Bundle& bundle = m_system.bundles()[t.bundles[0]];
 		if (bundle.clips.size() == 4) {
 			const float along = std::clamp(std::fabs(m_input.forward), -1.0f, 1.0f);
-			instance.blend = std::asin(along) * (2.0f / kPi);
-			instance.strafe = m_input.side >= 0.01f ? 2 : 3;
-			instance.forwardOrBack = m_input.forward < -0.01f ? 1 : 0;
+			// Foot-phase matching: a bundle not yet moving by direction
+			// starts where the last one was in its step.
+			if (instance.strafe == -1) {
+				instance.time = bundle.length * m_phase;
+			}
+			setDirection(instance, std::asin(along) * (2.0f / kPi), m_input.side >= 0.01f ? 2 : 3,
+				m_input.forward < -0.01f ? 1 : 0);
+			m_phase = instance.time / bundle.length;
+			if (m_input.side < -0.5f) {
+				m_phase = kStartRightOffset;
+			} else if (m_input.side > 0.5f) {
+				m_phase = kStartLeftOffset;
+			}
+		}
+		return;
+	}
+	case TriggerType::LookAround: { // 0x008c3d00
+		// Bundles of two clips or more blend clip 0 with clip 1 by the
+		// first look value; every bundle plays at a rate of the second
+		// (with useSpeedAsTime, the time in the bundle). Both are mapped
+		// from -1..1 to 0..1.
+		const float x = std::clamp(m_input.lookAroundX, -1.0f, 1.0f);
+		const float y = std::clamp(m_input.lookAroundY, -1.0f, 1.0f);
+		for (size_t b : t.bundles) {
+			Instance& instance = queue(b, index, priority, -1, y * 0.5f + 0.5f);
+			setDirection(instance, x * 0.5f + 0.5f, 0, 1);
+		}
+		return;
+	}
+	case TriggerType::Slope: { // 0x008c4f00
+		// The rate is clamped by the value holder's clamp (0..0 unless
+		// set). Bundles of five clips draw the level clip (index 0) and,
+		// over it, the one leaning to the side by |slope| (1 for a
+		// positive slope, 2 for a negative one). The forward lean (3 and
+		// 4) is behind anim_test3, off by default.
+		float rate = 1;
+		if (holder && holder->normal != 0) {
+			rate = std::max(std::min(m_input.speed / holder->normal, holder->clampMax), holder->clampMin);
+		}
+		for (size_t b : t.bundles) {
+			Instance& instance = queue(b, index, priority, -1, rate);
+			if (m_system.bundles()[b].clips.size() != 5) {
+				continue;
+			}
+			instance.layers.clear();
+			instance.layers.emplace_back(0, kSlopeBaseWeight);
+			if (m_slopeSide != 0) {
+				instance.layers.emplace_back(m_slopeSide > 0 ? 1 : 2, std::fabs(m_slopeSide));
+			}
+			if (kSlopeForward && m_slopeForward != 0) {
+				instance.layers.emplace_back(m_slopeForward > 0 ? 3 : 4, std::fabs(m_slopeForward));
+			}
 		}
 		return;
 	}
@@ -464,7 +587,8 @@ AnimationState::Instance& AnimationState::queue(size_t bundleIndex, size_t trigg
 		fresh.bundle = bundleIndex;
 		fresh.trigger = trigger;
 		fresh.priority = priority;
-		fresh.weight = bundle.fadeInTime > 0 ? 0.0f : 1.0f;
+		fresh.weight = bundle.fadeInTime > 0 ? 0.0f : 1.0f; // 0x008c2c50
+		fresh.fadeInLeft = bundle.fadeInTime;
 		it = m_instances.insert(at, fresh);
 	}
 	Instance& instance = *it;
@@ -478,15 +602,58 @@ AnimationState::Instance& AnimationState::queue(size_t bundleIndex, size_t trigg
 			instance.time = bundle.length;
 		}
 	}
+	instance.stopping = false; // queued again: no longer playing on to a stop
 	instance.active = true;
 	instance.priority = priority;
 	return instance;
+}
+
+// 0x008c2b90: directional clips (bundles of more than one clip). Changing
+// the strafe clip while it dominates (blend under 0.3), or the forward /
+// backward one while that does (over 0.7), fades the bundle's pose in
+// again over its fadeInTime (switchFade, see apply).
+void AnimationState::setDirection(Instance& instance, float blend, int strafe, int forwardOrBack) const
+{
+	const Bundle& bundle = m_system.bundles()[instance.bundle];
+	if (bundle.clips.size() <= 1) {
+		return;
+	}
+	instance.blend = blend;
+	if (instance.strafe != -1
+		&& ((blend > 0.7f && instance.forwardOrBack != forwardOrBack) || (blend < 0.3f && instance.strafe != strafe))
+		&& bundle.fadeInTime > 0) {
+		instance.switchFade = 0;
+	}
+	instance.forwardOrBack = forwardOrBack;
+	instance.strafe = strafe;
+}
+
+// 0x008b9720
+void AnimationState::setFadingTrigger(size_t trigger)
+{
+	if (m_fadingTrigger != static_cast<int>(trigger)) {
+		m_fadingTrigger = static_cast<int>(trigger);
+		m_fadeLeft = m_system.triggers()[trigger].fadeInTime;
+	}
+}
+
+// 0x008be470: a bundle's clip by index, counted from the end of the
+// script's order.
+const Clip* AnimationState::bundleClip(const Bundle& bundle, int index) const
+{
+	if (index < 0 || static_cast<size_t>(index) >= bundle.clips.size()) {
+		return nullptr;
+	}
+	return &m_system.clips()[bundle.clips[bundle.clips.size() - 1 - static_cast<size_t>(index)].clip];
 }
 
 // 0x008c3360: false when the instance has finished.
 bool AnimationState::advance(Instance& instance, float seconds)
 {
 	const Bundle& bundle = m_system.bundles()[instance.bundle];
+	if (bundle.useNewSystem) {
+		return advanceNew(instance, seconds);
+	}
 	if (!instance.active && bundle.stickAround > 0 && instance.stickLeft > 0) {
 		instance.stickLeft -= seconds;
 		return instance.stickLeft >= 0;
@@ -505,16 +672,22 @@ bool AnimationState::advance(Instance& instance, float seconds)
 		instance.time += seconds * instance.rate;
 		if (instance.time > bundle.length) {
 			if (bundle.isLooping) {
+				++instance.loops;
 				instance.time -= bundle.length;
-			} else if (bundle.playForever) {
-				instance.time = bundle.length;
-			} else if (!finished()) {
-				return false;
+			} else {
+				instance.loops = 1;
+				if (bundle.playForever) {
+					instance.time = bundle.length;
+				} else if (!finished()) {
+					return false;
+				}
 			}
 		} else if (instance.time < 0) {
 			if (bundle.isLooping) {
+				++instance.loops;
 				instance.time += bundle.length;
 			} else {
+				instance.loops = 1;
 				instance.time = 0;
 				if (!bundle.playForever && !finished()) {
 					return false;
@@ -546,6 +719,11 @@ bool AnimationState::advance(Instance& instance, float seconds)
 		instance.fade = 0;
 		return false;
 	}
+	// The fade after the directional clips changed (0x3c), linear over the
+	// bundle's fadeInTime.
+	if (bundle.fadeInTime > 0 && instance.switchFade < 1) {
+		instance.switchFade = std::clamp(instance.switchFade + seconds / bundle.fadeInTime, 0.0f, 1.0f);
+	}
 	if (bundle.fadeInTime <= 0 || instance.weight >= 1) {
 		instance.fade = 1;
 		instance.weight = 1;
@@ -556,15 +734,109 @@ bool AnimationState::advance(Instance& instance, float seconds)
 	return true;
 }
 
+// 0x008c30a0: the new system. Fades are linear and timed in the bundle's
+// own time (seconds times the rate); the weight lags the fade timers by
+// one update, as in the original. A bundle no longer queued plays on to
+// the next of its force stop points (a fraction of its length; past the
+// last one, through the end into the next loop) and only then ends; one
+// with none ends at once. Ending (0x008c2a40) holds the last frame with
+// playForever, else starts the fade out, else the stick-around time.
+bool AnimationState::advanceNew(Instance& instance, float seconds)
+{
+	const Bundle& bundle = m_system.bundles()[instance.bundle];
+	instance.still = seconds <= 0;
+	const auto end = [&]() {
+		++instance.loops;
+		if (bundle.playForever) {
+			instance.time = bundle.length;
+			return true;
+		}
+		instance.active = false;
+		if (bundle.fadeOutTime > 0) {
+			instance.fadeOutLeft = bundle.fadeOutTime;
+			return true;
+		}
+		if (bundle.stickAround > 0) {
+			instance.stickLeft = bundle.stickAround;
+			return true;
+		}
+		return false;
+	};
+	if (instance.active || instance.fadeOutLeft > 0 || instance.fadeInLeft > 0 || instance.stickLeft > 0) {
+		if (instance.stopping && instance.active) {
+			// Wanted again on the way to a stop (queuing already clears
+			// the stop, so this is not reached through queue): fade back
+			// in from where the fade out is.
+			if (instance.fadeOutLeft > 0) {
+				instance.fadeInLeft = (1 - instance.fadeOutLeft / bundle.fadeOutTime) * bundle.fadeInTime;
+			}
+			instance.stopping = false;
+		}
+	} else if (!instance.stopping) {
+		const std::vector<float>& points = bundle.forceStopPoints.values;
+		if (points.empty()) {
+			return end();
+		}
+		const float fraction = instance.time / bundle.length;
+		instance.stopAt = fraction;
+		for (float point : points) {
+			if (fraction < point) {
+				instance.stopAt = point;
+				instance.stopping = true;
+				break;
+			}
+		}
+	}
+	// (0x008c3030 fires the bundle's events here: not rewritten.)
+	const float step = seconds * instance.rate;
+	instance.time += step;
+	if (instance.stopping && instance.stopAt < instance.time / bundle.length) {
+		instance.stopping = false;
+		return end();
+	}
+	if (bundle.length < instance.time || instance.time < 0) {
+		if (instance.stopping || !bundle.isLooping) {
+			instance.loops = 1;
+			return end();
+		}
+		++instance.loops;
+		const float sign = instance.rate > 0 ? 1.0f : (instance.rate < 0 ? -1.0f : 0.0f);
+		instance.time -= sign * bundle.length;
+	}
+	if (instance.fadeOutLeft > 0) {
+		instance.weight = instance.fadeOutLeft / bundle.fadeOutTime;
+		instance.fadeOutLeft -= step;
+		return instance.fadeOutLeft > 0;
+	}
+	if (instance.stickLeft > 0) {
+		instance.stickLeft -= step;
+		return instance.stickLeft > 0;
+	}
+	if (instance.fadeInLeft > 0) {
+		instance.weight = 1 - instance.fadeInLeft / bundle.fadeInTime;
+		instance.fadeInLeft -= step;
+		if (instance.fadeInLeft <= 0) {
+			instance.fadeInLeft = 0;
+		}
+		return true;
+	}
+	instance.weight = 1;
+	return true;
+}
+
 void AnimationState::update(const AnimationInput& input, float seconds)
 {
 	m_input = input;
+	// 0x008b9970: the slope is smoothed each time it is set.
+	m_slopeForward += (input.slopeForward - m_slopeForward) * kSurfaceInterpolate;
+	m_slopeSide += (input.slopeSide - m_slopeSide) * kSurfaceInterpolate;
 	const uint32_t messages = input.messages | input.pulses;
 	if (!m_started) {
 		m_started = true;
 		const int startup = m_system.findTrigger("startup");
 		if (startup >= 0) {
 			evaluate(static_cast<size_t>(startup));
+			m_startupPlaying = true;
 		}
 	}
 	for (const char* name : {"root", "postRoot"}) {
@@ -575,14 +847,45 @@ void AnimationState::update(const AnimationInput& input, float seconds)
 	}
 	const bool messagesChanged = messages != m_previousMessages;
 	m_previousMessages = messages;
+	// The system's weight while a trigger with a fadeInTime fades it in
+	// (not while the startup trigger's bundles play).
+	m_weight = 1;
+	if (m_startupPlaying) {
+		m_fadeLeft = 0;
+	} else if (m_fadeLeft > 0 && m_fadingTrigger >= 0) {
+		m_fadeLeft = std::max(m_fadeLeft - seconds, 0.0f);
+		m_weight = 1 - m_fadeLeft / m_system.triggers()[static_cast<size_t>(m_fadingTrigger)].fadeInTime;
+	}
+	// A bundle with force stop points that is neither fading in nor out
+	// holds every instance of another priority that isn't fading out
+	// (the last such bundle by priority; priority 0 counts as none).
+	int stopPriority = 0;
+	for (const Instance& instance : m_instances) {
+		if (!m_system.bundles()[instance.bundle].forceStopPoints.values.empty() && instance.fadeOutLeft <= 0
+			&& instance.fadeInLeft <= 0) {
+			stopPriority = instance.priority;
+		}
+	}
 	m_idleTime = m_instances.size() == 1 ? m_idleTime + seconds : 0.0f;
 	for (size_t i = 0; i < m_instances.size();) {
 		Instance& instance = m_instances[i];
 		const Bundle& bundle = m_system.bundles()[instance.bundle];
 		const bool idle = m_system.triggers()[instance.trigger].underIdle;
 		const bool last = i + 1 == m_instances.size();
-		const bool alive = advance(instance, seconds);
+		// 0x008c2a10: the startup's bundles are done once one isn't queued
+		// or a one-shot reaches its fade out.
+		if (m_startupPlaying
+			&& (!instance.active
+				|| (!bundle.useSpeedAsTime && !bundle.isLooping && bundle.length - bundle.fadeOutTime < instance.time))) {
+			m_startupPlaying = false;
+		}
+		const bool runs = stopPriority == 0 || instance.priority == stopPriority || instance.fadeOutLeft > 0;
+		const bool alive = advance(instance, runs ? seconds : 0.0f);
 		if (!alive || (idle && (messagesChanged || !last))) {
+			if (idle) {
+				m_fadingTrigger = -1;
+			}
+			m_startupPlaying = false;
 			m_instances.erase(m_instances.begin() + static_cast<std::ptrdiff_t>(i));
 			continue;
 		}
@@ -612,11 +915,41 @@ std::vector<std::string> AnimationState::playing() const
 	return names;
 }
 
-// 0x008c2e50 and the per-bone blend of 0x008b8530.
+// 0x008ba420 with 0x008c2d70 per instance: the fade-in key points over the
+// fade in, the fade-out ones over the fade out, else the speed key points
+// over the bundle's length; 1 for instances held still.
+float AnimationState::speedFactor() const
+{
+	float factor = 1;
+	for (const Instance& instance : m_instances) {
+		const Bundle& bundle = m_system.bundles()[instance.bundle];
+		float value;
+		if (instance.still) {
+			value = 1;
+		} else if (instance.fadeInLeft > 0 && !bundle.fadeInSpeedKeyPoints.values.empty()) {
+			value = keyPointValue(bundle.fadeInSpeedKeyPoints.values, 1 - instance.fadeInLeft / bundle.fadeInTime);
+		} else if (instance.fadeOutLeft > 0 && !bundle.fadeOutSpeedKeyPoints.values.empty()) {
+			value = keyPointValue(bundle.fadeOutSpeedKeyPoints.values, 1 - instance.fadeOutLeft / bundle.fadeOutTime);
+		} else {
+			value = keyPointValue(bundle.speedKeyPoints.values, instance.time / bundle.length);
+		}
+		factor *= value;
+	}
+	return factor;
+}
+
+// 0x008c2e50 and the per-bone blend of 0x008b8330.
 void AnimationState::apply(const Skeleton& skeleton, LocalPose& pose, std::vector<bool>& touched) const
 {
 	touched.resize(skeleton.nodes.size(), false);
-	const auto blendInto = [&](size_t node, const Quaternion& rotation, const Position& position, float weight) {
+	// Each bone this system moves is finally blended from what it was
+	// before by the system's weight times the factors of the entries that
+	// moved it (directional clips: their switch fade; others 1).
+	const LocalPose before = pose;
+	std::vector<float> factors(skeleton.nodes.size(), -1.0f);
+	const auto blendInto = [&](size_t node, const Quaternion& rotation, const Position& position, float weight,
+							   float factor) {
+		factors[node] = (factors[node] < 0 ? 1.0f : factors[node]) * factor;
 		if (!touched[node] || weight >= 1) {
 			pose.rotations[node] = rotation;
 			pose.positions[node] = position;
@@ -628,6 +961,24 @@ void AnimationState::apply(const Skeleton& skeleton, LocalPose& pose, std::vecto
 			pose.positions[node][i] += (position[i] - pose.positions[node][i]) * weight;
 		}
 	};
+	const auto drawClip = [&](const Clip& clip, float local, float weight) {
+		const Animation* animation = m_systems.animation(clip.path);
+		if (!animation) {
+			return;
+		}
+		const float fraction = local / m_systems.clipLength(clip);
+		for (const BoneTrack& track : animation->bones) {
+			const size_t node = track.node;
+			if (node >= skeleton.nodes.size()) {
+				continue;
+			}
+			Quaternion r;
+			Position p;
+			if (sampleNode(*animation, node, fraction, clip.looping, r, p)) {
+				blendInto(node, r, p, weight, 1);
+			}
+		}
+	};
 	for (const Instance& instance : m_instances) {
 		const float weight = instance.weight * instance.weightTarget;
 		if (weight <= 0) {
@@ -635,22 +986,44 @@ void AnimationState::apply(const Skeleton& skeleton, LocalPose& pose, std::vecto
 		}
 		const Bundle& bundle = m_system.bundles()[instance.bundle];
 		const float time = bundle.playBackward ? bundle.length - instance.time : instance.time;
-		if (instance.strafe >= 0 && bundle.clips.size() == 4) {
-			// addAnimation puts each clip first: index i is the i-th from the end.
-			const Clip& strafe = m_system.clips()[bundle.clips[3 - static_cast<size_t>(instance.strafe)].clip];
-			const Clip& along = m_system.clips()[bundle.clips[3 - static_cast<size_t>(instance.forwardOrBack)].clip];
-			const Animation* a = m_systems.animation(strafe.path);
-			const Animation* b = m_systems.animation(along.path);
+		if (!instance.layers.empty()) {
+			// SlopeTrigger's layers (0x008c2a90 each, from time 0): none
+			// while held still.
+			if (instance.still) {
+				continue;
+			}
+			for (const auto& [index, layerWeight] : instance.layers) {
+				const Clip* clip = bundleClip(bundle, index);
+				if (clip && weight * layerWeight > 0) {
+					drawClip(*clip, time, std::min(weight * layerWeight, 1.0f));
+				}
+			}
+			continue;
+		}
+		if (instance.strafe >= 0) {
+			// 0x008c2b20: the strafe clip blended with the forward or
+			// backward one; the backward clip runs anim_offsetBackwardTime
+			// of the strafe clip's length ahead (not with useSpeedAsTime).
+			const Clip* strafe = bundleClip(bundle, instance.strafe);
+			const Clip* along = bundleClip(bundle, instance.forwardOrBack);
+			if (!strafe || !along || weight <= 0.001f) {
+				continue;
+			}
+			const Animation* a = m_systems.animation(strafe->path);
+			const Animation* b = m_systems.animation(along->path);
 			if (!a || !b) {
 				continue;
 			}
-			const float fa = time / m_systems.clipLength(strafe);
-			const float fb = time / m_systems.clipLength(along);
+			const float strafeLength = m_systems.clipLength(*strafe);
+			const float offset =
+				!bundle.useSpeedAsTime && instance.forwardOrBack == 1 ? strafeLength * kOffsetBackwardTime : 0.0f;
+			const float fa = time / strafeLength;
+			const float fb = (time + offset) / m_systems.clipLength(*along);
 			for (size_t node = 0; node < skeleton.nodes.size(); ++node) {
 				Quaternion ra, rb;
 				Position pa, pb;
-				const bool hasA = sampleNode(*a, node, fa, strafe.looping, ra, pa);
-				const bool hasB = sampleNode(*b, node, fb, along.looping, rb, pb);
+				const bool hasA = sampleNode(*a, node, fa, strafe->looping, ra, pa);
+				const bool hasB = sampleNode(*b, node, fb, along->looping, rb, pb);
 				if (!hasA && !hasB) {
 					continue;
 				}
@@ -665,36 +1038,37 @@ void AnimationState::apply(const Skeleton& skeleton, LocalPose& pose, std::vecto
 				for (size_t i = 0; i < 3; ++i) {
 					p[i] = pa[i] + (pb[i] - pa[i]) * instance.blend;
 				}
-				blendInto(node, slerp(ra, rb, instance.blend), p, weight);
+				blendInto(node, slerp(ra, rb, instance.blend), p, std::min(weight, 1.0f), instance.switchFade);
 			}
 			continue;
+		}
+		if (instance.still) {
+			continue; // 0x008c2a90 draws nothing for a held new-system bundle
 		}
 		for (const Bundle::Entry& entry : bundle.clips) {
 			if (time < entry.startTime) {
 				continue;
 			}
 			const Clip& clip = m_system.clips()[entry.clip];
-			const Animation* animation = m_systems.animation(clip.path);
-			if (!animation) {
-				continue;
-			}
 			const float local = time - entry.startTime;
 			float clipWeight = weight;
 			if (clip.fadeInTime > 0 && local < clip.fadeInTime) {
 				clipWeight *= local / clip.fadeInTime;
 			}
-			const float fraction = local / m_systems.clipLength(clip);
-			for (const BoneTrack& track : animation->bones) {
-				const size_t node = track.node;
-				if (node >= skeleton.nodes.size()) {
-					continue;
-				}
-				Quaternion r;
-				Position p;
-				if (sampleNode(*animation, node, fraction, clip.looping, r, p)) {
-					blendInto(node, r, p, clipWeight);
-				}
-			}
+			drawClip(clip, local, clipWeight);
+		}
+	}
+	for (size_t node = 0; node < factors.size(); ++node) {
+		if (factors[node] < 0) {
+			continue;
+		}
+		const float k = m_weight * factors[node];
+		if (k >= 1) {
+			continue;
+		}
+		pose.rotations[node] = slerp(before.rotations[node], pose.rotations[node], k);
+		for (size_t i = 0; i < 3; ++i) {
+			pose.positions[node][i] = before.positions[node][i] + (pose.positions[node][i] - before.positions[node][i]) * k;
 		}
 	}
 }

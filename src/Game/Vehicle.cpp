@@ -371,6 +371,21 @@ void Vehicle::updateEngine(const physics::RigidBody& body, float seconds)
 	}
 }
 
+void Vehicle::touchObject(size_t index, float height, const Vec3& normal, const Vec3& velocity, float grip)
+{
+	if (index >= m_wheels.size()) {
+		return;
+	}
+	Wheel::ObjectGround& g = m_wheels[index].objectGround;
+	const float n = static_cast<float>(g.count);
+	const float mean = 1.0f / static_cast<float>(g.count + 1);
+	g.height = g.count == 0 ? height : std::max(g.height, height);
+	g.normal = (g.normal * n + normal) * mean;
+	g.velocity = (g.velocity * n + velocity) * mean;
+	g.grip = grip;
+	++g.count;
+}
+
 void Vehicle::tick(physics::RigidBody& body, const physics::Ground& ground, float seconds, float grip, float gravity)
 {
 	updateEngine(body, seconds);
@@ -437,7 +452,18 @@ void Vehicle::updateWheel(Wheel& wheel, physics::RigidBody& body, const physics:
 	const Vec3 centre = body.position + body.rotation.transform(wheel.mount);
 	const Vec3 bottom = centre - up * wheel.radius;
 	Vec3 normal {0, 1, 0};
-	const float groundHeight = ground.heightAndNormal(bottom.x, bottom.z, normal);
+	float groundHeight = ground.heightAndNormal(bottom.x, bottom.z, normal);
+	// An object under the wheel (a bridge, a deck, another vehicle) is its
+	// ground where it is higher, moving as that object does.
+	Vec3 surfaceVelocity;
+	if (wheel.objectGround.count > 0 && wheel.objectGround.height > groundHeight) {
+		groundHeight = wheel.objectGround.height;
+		const float l = std::sqrt(physics::lengthSquared(wheel.objectGround.normal));
+		normal = l > 1e-6f ? wheel.objectGround.normal * (1.0f / l) : Vec3 {0, 1, 0};
+		surfaceVelocity = wheel.objectGround.velocity;
+		grip = wheel.objectGround.grip;
+	}
+	wheel.objectGround = {};
 	const float compression = std::max(0.0f, groundHeight - bottom.y);
 	wheel.contact = compression > 0;
 
@@ -462,7 +488,7 @@ void Vehicle::updateWheel(Wheel& wheel, physics::RigidBody& body, const physics:
 		Vec3 groundVelocity {0, gravity * kTick, 0};
 		Vec3 contactNormal {};
 		if (wheel.contact) {
-			Vec3 velocity = body.pointVelocity(point);
+			Vec3 velocity = body.pointVelocity(point) - surfaceVelocity;
 			velocity.y += gravity * kTick;
 			groundVelocity = velocity - normal * physics::dot(velocity, normal);
 			contactNormal = normal;

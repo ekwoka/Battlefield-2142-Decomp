@@ -381,3 +381,127 @@ TEST(SoldierPhysics_StanceFitsTheSpot)
 	CHECK(!physics::soldierFits(low, {50 + turned.transform({20, 0, 0}).x, 1, turned.transform({20, 0, 0}).z}, 0, turned,
 		{50, 0, 0}));
 }
+
+namespace {
+
+// A wall in the x-y plane at z = 3 facing -z, from `low` to 3 m up.
+dice::hfe::physics::CollisionMeshFile wallFrom(float low)
+{
+	dice::hfe::physics::CollisionLod lod;
+	lod.vertices = {{-2, low, 3}, {2, 3, 3}, {-2, 3, 3}, {2, low, 3}};
+	lod.faces = {{{0, 1, 2}, 0}, {{0, 3, 1}, 0}};
+	dice::hfe::physics::CollisionSubGeometry part;
+	part.lods = {lod, lod, lod};
+	dice::hfe::physics::CollisionGeometry geometry;
+	geometry.subGeometries = {part};
+	dice::hfe::physics::CollisionMeshFile mesh;
+	mesh.geometries = {geometry};
+	return mesh;
+}
+
+} // namespace
+
+// The swept sphere (0x006e2350 with a motion, 0x006be1a0): a sphere moving
+// through a face from the front meets it where its centre crosses the face
+// pushed out by the radius; one standing behind the face (where a fast
+// one lands) is not pushed back through it.
+TEST(CollisionWorld_SweptSphere)
+{
+	physics::CollisionWorld world;
+	world.addMesh(wallFrom(0), physics::CollisionUser::Soldier, {}, {});
+	std::vector<physics::SphereContact> contacts;
+	world.sweepSphere({0, 1, 2.2f}, {0, 1, 3.1f}, 0.25f, contacts);
+	CHECK(contacts.size() == 1);
+	CHECK(!contacts.empty() && contacts[0].normal.z < -0.99f);
+	// The end lies 0.35 behind the plane pushed out by the radius (z 2.75).
+	CHECK(!contacts.empty() && std::fabs(contacts[0].depth + 0.35f) < 1e-4f);
+	contacts.clear();
+	world.querySphere({0, 1, 3.1f}, 0.25f, contacts);
+	CHECK(contacts.size() == 1 && contacts[0].depth < 0 && contacts[0].point.z == 3); // from behind: the face's normal
+	contacts.clear();
+	world.sweepSphere({0, 1, 3.2f}, {0, 1, 2.2f}, 0.25f, contacts); // from behind: nothing
+	CHECK(contacts.empty());
+}
+
+// Over 0.9 of a radius a tick (6.75 m/s) the soldier's spheres sweep from
+// the last tick's place (0x006c3890): a soldier thrown at a wall at 40 m/s
+// stops at it instead of passing through between two ticks.
+TEST(SoldierPhysics_FastSoldiersDoNotPassWalls)
+{
+	physics::CollisionWorld world;
+	world.addMesh(wallFrom(0), physics::CollisionUser::Soldier, {}, {});
+	physics::SoldierBody body;
+	body.position = {0, 1, 0.3f};
+	body.world = &world;
+	body.step(1 / 30.0f, slope(0));
+	body.velocity = {0, 0, 40};
+	for (int i = 0; i < 30; ++i) {
+		body.step(1 / 30.0f, slope(0));
+	}
+	std::fprintf(stderr, "  the soldier ends at z %.2f (the wall at 3)\n", body.position.z);
+	CHECK(body.position.z < 3);
+}
+
+// Prone the stack is one sphere at the feet (0x006c1b30): a soldier lying
+// down crawls under an overhang 0.6 m up that stops it standing.
+TEST(SoldierPhysics_ProneCrawlsUnderAnOverhang)
+{
+	physics::CollisionWorld world;
+	world.addMesh(wallFrom(0.6f), physics::CollisionUser::Soldier, {}, {});
+	float ends[2] = {};
+	for (int prone = 0; prone < 2; ++prone) {
+		physics::SoldierBody body;
+		body.position = {0, 1, 1.5f};
+		body.world = &world;
+		game::SoldierControl control;
+		game::SoldierInput forward;
+		forward.throttle = 1;
+		forward.pose = prone ? game::SoldierPose::Prone : game::SoldierPose::Stand;
+		body.stance = static_cast<int>(forward.pose);
+		for (int i = 0; i < 120; ++i) {
+			control.update(forward, body);
+			body.step(1 / 30.0f, slope(0));
+		}
+		ends[prone] = body.position.z;
+	}
+	std::fprintf(stderr, "  standing ends at z %.2f, prone at %.2f\n", ends[0], ends[1]);
+	CHECK(ends[0] < 3);
+	CHECK(ends[1] > 3.5f);
+}
+
+// Water (0x006c28c0): deeper than 0.3 m the water lifts the soldier, level
+// with its feet a metre under (its origin at the surface); from 0.99 m it
+// swims (the ground flat, friction 1) until under 0.9 m.
+TEST(SoldierPhysics_SwimsInDeepWater)
+{
+	physics::Ground ground = slope(0);
+	ground.height = [](float, float) { return -5.0f; };
+	ground.heightAndNormal = [](float, float, physics::Vec3& normal) {
+		normal = {0, 1, 0};
+		return -5.0f;
+	};
+	ground.waterLevel = [](float, float) { return 0.0f; };
+	physics::SoldierBody body;
+	body.position = {0, -1, 0};
+	game::SoldierControl control;
+	game::SoldierInput forward;
+	forward.throttle = 1;
+	forward.pose = game::SoldierPose::Swim;
+	for (int i = 0; i < 150; ++i) {
+		control.update(forward, body);
+		body.step(1 / 30.0f, ground);
+	}
+	std::fprintf(stderr, "  the swimmer's origin at %.2f, %.2f m deep, %.2f m/s\n", body.position.y, body.waterDepth,
+		body.velocity.z);
+	CHECK(body.swimming());
+	CHECK(std::fabs(body.position.y) < 0.3f);
+	CHECK(body.velocity.z > 1.5f && body.velocity.z < 2.3f); // swim speed 2.1
+	// On land again, no swimming.
+	body.position = {0, 5, 0};
+	physics::SoldierBody dry;
+	dry.position = {0, 2, 0};
+	for (int i = 0; i < 30; ++i) {
+		dry.step(1 / 30.0f, slope(0));
+	}
+	CHECK(!dry.swimming() && dry.waterDepth == 0);
+}

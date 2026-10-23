@@ -203,6 +203,35 @@ public:
 	};
 	bool roundEnded() const { return m_roundEnded; }
 	const EndOfRoundInfo& endOfRound() const { return m_endOfRound; }
+	// The end-of-round block (data block 8; EndOfRoundInfo, BF2142.exe
+	// src BF2/Game/EndOfRoundInfo.cpp: 0x0059cbc0 writes it, 0x0059c740
+	// reads it). The scripts' gl_sendEndOfRoundData (0x00568930) hands
+	// over the text (the end-of-round screen's data) and the delay comes
+	// from the settings (0x00430610). The layout: the text's size and its
+	// zlib-compressed size (32 bits each; compress2 at the default level,
+	// 0x0071bd80, at most 0x8000 bytes compressed), the compressed bytes,
+	// the delay (sign + 31 bits, 0x00515350), an 8-bit player count, then
+	// per player (the player manager's list, slot 0x40) its id (8 bits)
+	// and six values of sign + 15 bits from its stats (player vtable
+	// 0x1a8, 0x00840330: *(player +0x100)): kills (+0x14), skillScore
+	// (+0x8), deaths (+0x10), score (+0), rplScore (+4) and cmdScore
+	// (+0xc), the offsets the scripts' getters read (0x0056b6f0).
+	struct EndOfRoundData {
+		std::string text;
+		// sv.endOfRoundDelay (settings +0x270, clamped to 3..30 by
+		// 0x00431640, 15 at first), or 15 in gpm_ti.
+		int32_t endOfRoundDelay = 0;
+		struct Player {
+			int id = 0;
+			int kills = 0, skillScore = 0, deaths = 0, score = 0, teamworkScore = 0, commanderScore = 0;
+		};
+		std::vector<Player> players;
+	};
+	// The last block 8 decoded; false before one came (or when it doesn't
+	// decode).
+	bool endOfRoundData(EndOfRoundData& out) const;
+	static std::string encodeEndOfRoundData(const EndOfRoundData& data);
+	static bool decodeEndOfRoundData(const std::string& block, EndOfRoundData& out);
 
 	// Transfers (DataBlock events; the client's handler is 0x004b5eb0). Each
 	// is a bit stream, strings a u16 length and the bytes (0x005155b0).
