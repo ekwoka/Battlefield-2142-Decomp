@@ -468,6 +468,7 @@ double area(const std::vector<MenuBatch>& batches)
 TEST(SwfPlayer_StencilMasks)
 {
 	Stencil stencil;
+	stencil.setCpu(true); // the exact geometry path (the renderer has the GPU one)
 	std::vector<MenuBatch> out;
 	stencil.reset();
 	// A triangular mask (drawn twice: overlap does not count twice at level 1).

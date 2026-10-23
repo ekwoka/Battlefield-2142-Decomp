@@ -110,6 +110,9 @@ GpuContext::~GpuContext()
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_particlePipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_additiveParticlePipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_uiPipeline);
+	SDL_ReleaseGPUGraphicsPipeline(m_device, m_uiSubmitPipeline);
+	SDL_ReleaseGPUGraphicsPipeline(m_device, m_uiTestPipeline);
+	SDL_ReleaseGPUGraphicsPipeline(m_device, m_uiClearPipeline);
 	if (m_window) {
 		SDL_ReleaseWindowFromGPUDevice(m_device, m_window);
 	}
@@ -118,6 +121,10 @@ GpuContext::~GpuContext()
 
 bool GpuContext::createPipelines(std::string& error)
 {
+	m_depthFormat = SDL_GPUTextureSupportsFormat(m_device, SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT, SDL_GPU_TEXTURETYPE_2D,
+						SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET)
+		? SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT
+		: SDL_GPU_TEXTUREFORMAT_D24_UNORM_S8_UINT;
 	SDL_GPUVertexBufferDescription buffer {};
 	buffer.slot = 0;
 	buffer.pitch = sizeof(Vertex);
@@ -153,7 +160,7 @@ bool GpuContext::createPipelines(std::string& error)
 	info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
 	info.target_info.color_target_descriptions = &color;
 	info.target_info.num_color_targets = 1;
-	info.target_info.depth_stencil_format = kDepthFormat;
+	info.target_info.depth_stencil_format = m_depthFormat;
 	info.target_info.has_depth_stencil_target = true;
 
 	const auto build = [&](const unsigned char* vs, size_t vsSize, const unsigned char* vsMsl, size_t vsMslSize,
@@ -209,6 +216,33 @@ bool GpuContext::createPipelines(std::string& error)
 	info.depth_stencil_state.enable_depth_test = false;
 	m_uiPipeline = build(k_ui_vert_spv, k_ui_vert_spv_size, k_ui_vert_msl, k_ui_vert_msl_size, k_ui_frag_spv,
 		k_ui_frag_spv_size, k_ui_frag_msl, k_ui_frag_msl_size, 1, 0, "ui");
+	{
+		const auto stencil = [&](SDL_GPUCompareOp compare, SDL_GPUStencilOp pass, SDL_GPUStencilOp fail, bool colour,
+								 const char* name) {
+			SDL_GPUStencilOpState ops {};
+			ops.compare_op = compare;
+			ops.pass_op = pass;
+			ops.fail_op = fail;
+			ops.depth_fail_op = SDL_GPU_STENCILOP_KEEP;
+			info.depth_stencil_state.enable_stencil_test = true;
+			info.depth_stencil_state.front_stencil_state = ops;
+			info.depth_stencil_state.back_stencil_state = ops;
+			info.depth_stencil_state.compare_mask = 0xff;
+			info.depth_stencil_state.write_mask = 0xff;
+			color.blend_state.enable_color_write_mask = !colour;
+			color.blend_state.color_write_mask = 0;
+			SDL_GPUGraphicsPipeline* pipeline = build(k_ui_vert_spv, k_ui_vert_spv_size, k_ui_vert_msl, k_ui_vert_msl_size,
+				k_ui_frag_spv, k_ui_frag_spv_size, k_ui_frag_msl, k_ui_frag_msl_size, 1, 0, name);
+			info.depth_stencil_state.enable_stencil_test = false;
+			color.blend_state.enable_color_write_mask = false;
+			return pipeline;
+		};
+		m_uiSubmitPipeline = stencil(SDL_GPU_COMPAREOP_GREATER, SDL_GPU_STENCILOP_INCREMENT_AND_CLAMP,
+			SDL_GPU_STENCILOP_REPLACE, false, "ui mask");
+		m_uiTestPipeline = stencil(SDL_GPU_COMPAREOP_EQUAL, SDL_GPU_STENCILOP_KEEP, SDL_GPU_STENCILOP_KEEP, true, "ui masked");
+		m_uiClearPipeline = stencil(SDL_GPU_COMPAREOP_ALWAYS, SDL_GPU_STENCILOP_REPLACE, SDL_GPU_STENCILOP_REPLACE, false,
+			"ui mask clear");
+	}
 	info.depth_stencil_state.enable_depth_test = true;
 	m_waterPipeline = build(k_water_vert_spv, k_water_vert_spv_size, k_water_vert_msl, k_water_vert_msl_size,
 		k_water_frag_spv, k_water_frag_spv_size, k_water_frag_msl, k_water_frag_msl_size, 0, 2, "water");
@@ -219,7 +253,8 @@ bool GpuContext::createPipelines(std::string& error)
 	m_roadPipeline = build(k_road_vert_spv, k_road_vert_spv_size, k_road_vert_msl, k_road_vert_msl_size,
 		k_road_frag_spv, k_road_frag_spv_size, k_road_frag_msl, k_road_frag_msl_size, 3, 2, "road");
 	return m_meshPipeline && m_terrainPipeline && m_skyPipeline && m_waterPipeline && m_roadPipeline &&
-		m_undergrowthPipeline && m_particlePipeline && m_additiveParticlePipeline && m_uiPipeline;
+		m_undergrowthPipeline && m_particlePipeline && m_additiveParticlePipeline && m_uiPipeline && m_uiSubmitPipeline &&
+		m_uiTestPipeline && m_uiClearPipeline;
 }
 
 SDL_GPUCopyPass* GpuContext::copyPass()
@@ -345,7 +380,7 @@ void GpuContext::ensureDepth(Target& target, uint32_t width, uint32_t height)
 	}
 	SDL_GPUTextureCreateInfo info {};
 	info.type = SDL_GPU_TEXTURETYPE_2D;
-	info.format = kDepthFormat;
+	info.format = m_depthFormat;
 	info.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
 	info.width = width;
 	info.height = height;

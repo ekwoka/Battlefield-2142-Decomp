@@ -192,6 +192,7 @@ bool Player::load(std::vector<uint8_t> bytes, std::string* error)
 		m_exportNames.emplace(id, name);
 	}
 	m_drawer = std::make_unique<Drawer>(m_dictionary);
+	m_drawer->stencil().setCpu(m_cpuMasks);
 	// The engine's fonts, from the game's root ("/Fonts/...").
 	m_drawer->setFontReader([this](const std::string& path, std::string& text) {
 		std::vector<uint8_t> bytes;
@@ -1410,6 +1411,14 @@ void Player::keyUp(int code)
 }
 
 // --- Frames
+
+void Player::setCpuMasks(bool cpu)
+{
+	m_cpuMasks = cpu;
+	if (m_drawer) {
+		m_drawer->stencil().setCpu(cpu);
+	}
+}
 
 MenuFrame Player::frame()
 {

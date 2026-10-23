@@ -132,6 +132,12 @@ void Stencil::beginSubmit(std::vector<MenuBatch>& out)
 	flush(out);
 	if (m_level == 0) {
 		m_pieces.clear(); // Clear(D3DCLEAR_STENCIL, 0) at the first level
+		if (!m_cpu) {
+			MenuBatch clear;
+			clear.stencil = MenuBatch::Stencil::Clear;
+			out.push_back(std::move(clear));
+			m_done = out.size();
+		}
 	}
 	++m_level;
 	m_mode = Mode::Submit;
@@ -196,6 +202,17 @@ void Stencil::flush(std::vector<MenuBatch>& out)
 {
 	if (m_done > out.size()) {
 		m_done = out.size();
+	}
+	if (!m_cpu) {
+		const MenuBatch::Stencil state = m_mode == Mode::Submit ? MenuBatch::Stencil::Submit
+			: m_mode == Mode::Test                              ? MenuBatch::Stencil::Test
+																: MenuBatch::Stencil::Off;
+		for (size_t b = m_done; b < out.size(); ++b) {
+			out[b].stencil = state;
+			out[b].stencilLevel = m_level;
+		}
+		m_done = out.size();
+		return;
 	}
 	if (m_mode == Mode::Submit) {
 		// Colour writes off: the mask only marks the stencil.

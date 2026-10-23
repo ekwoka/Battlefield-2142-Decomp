@@ -267,6 +267,8 @@ private:
 		bool repeat;
 		uint32_t firstVertex;
 		uint32_t vertexCount;
+		ui::MenuBatch::Stencil stencil = ui::MenuBatch::Stencil::Off; // its mask state
+		int stencilLevel = 0;
 	};
 	SDL_GPUBuffer* m_menuVertices = nullptr;
 	std::vector<MenuGroup> m_menuGroups;

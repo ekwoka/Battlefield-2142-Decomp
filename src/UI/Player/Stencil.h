@@ -12,12 +12,15 @@
 //   disable_mask       stencil test off; level -= 1
 //
 // What a mask draws (its fills and strokes, any alpha) marks the stencil;
-// what follows is cut to the pixels whose value equals the level. Here the
-// stencil is kept as disjoint convex polygons on the stage, each with its
-// value (the rest is 0), and the triangles drawn while testing are cut to
-// the polygons of the level's value, so the result is the stencil's
-// without a depth buffer. Drawing goes into one batch list; the state
-// applies to the batches added since the last change (flush()).
+// what follows is cut to the pixels whose value equals the level. By
+// default the batches are only tagged with these states (MenuBatch::
+// stencil) and the renderer's stencil buffer does the rest, as the game's
+// did. Without a GPU (headless tools, tests) the stencil can instead be
+// kept as disjoint convex polygons on the stage, each with its value (the
+// rest is 0), with the triangles drawn while testing cut to the polygons
+// of the level's value: exact, but its cost grows with every mask
+// triangle against every piece. Drawing goes into one batch list; the
+// state applies to the batches added since the last change (flush()).
 #pragma once
 
 #include "UI/MenuDraw.h"
@@ -39,6 +42,9 @@ public:
 
 	// Frame start: no mask, the stencil cleared.
 	void reset();
+	// Cut the geometry on the CPU instead of tagging the batches.
+	void setCpu(bool cpu) { m_cpu = cpu; }
+	bool cpu() const { return m_cpu; }
 	void beginSubmit(std::vector<MenuBatch>& out);
 	void endSubmit(std::vector<MenuBatch>& out);
 	void disable(std::vector<MenuBatch>& out);
@@ -54,6 +60,7 @@ private:
 	void submitTriangle(const Point t[3]);
 
 	Mode m_mode = Mode::Off;
+	bool m_cpu = false;
 	int m_level = 0;
 	size_t m_done = 0; // batches before this have had their state applied
 	std::vector<Piece> m_pieces;

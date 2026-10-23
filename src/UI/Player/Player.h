@@ -102,6 +102,9 @@ public:
 	// One tick now.
 	void tick();
 	MenuFrame frame();
+	// Masks cut on the CPU (exact, slow with many masks) instead of tagged
+	// for the renderer's stencil: for tools that draw frames without a GPU.
+	void setCpuMasks(bool cpu);
 
 	double frameRate() const { return m_frameRate; }
 	float stageWidth() const { return m_stageWidth; }
@@ -264,6 +267,7 @@ private:
 	SwfMovie m_movie;
 	swf::CharacterDictionary m_dictionary;
 	std::unique_ptr<Drawer> m_drawer;
+	bool m_cpuMasks = false;
 	std::unique_ptr<avm1::Interpreter> m_vm;
 	std::shared_ptr<player::Clip> m_root;
 	std::map<uint16_t, std::unique_ptr<Timeline>> m_timelines;

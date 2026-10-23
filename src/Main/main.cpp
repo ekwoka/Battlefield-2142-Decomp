@@ -1411,6 +1411,16 @@ int runGame(Options& options, Session& session)
 		const auto over = [&] { return menuQuit || startedGame.has_value() || session.joinRequested; };
 		if (!options.menuScript.empty()) {
 			runMenuScript(menu, options.menuScript, over);
+#if BF2142_HAS_RENDERER
+			if (!options.screenshot.empty() && !over()) {
+				// The menu where the script left it, rendered off screen.
+				render::LevelSources sources {files, templates, objects, geometries, heightmaps, nullptr, lights, sky, water, "", ""};
+				sources.menu = [&menu](float) { return menu.frame(); };
+				ViewerOptions viewer;
+				viewer.screenshot = options.screenshot;
+				return runViewer(sources, viewer);
+			}
+#endif
 		} else {
 #if BF2142_HAS_RENDERER
 			render::LevelSources sources {files, templates, objects, geometries, heightmaps, nullptr, lights, sky, water, "", ""};

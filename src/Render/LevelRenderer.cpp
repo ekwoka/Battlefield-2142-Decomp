@@ -1035,13 +1035,29 @@ void LevelRenderer::buildMenu(float seconds)
 	m_menuSize[0] = frame.width;
 	m_menuSize[1] = frame.height;
 	std::vector<Vertex> vertices;
+	// A stencil clear covers the stage (no colour is written).
+	const auto stageQuad = [&frame] {
+		std::vector<ui::MenuVertex> quad(6);
+		const float corners[6][2] = {{0, 0}, {frame.width, 0}, {frame.width, frame.height}, {0, 0}, {frame.width, frame.height},
+			{0, frame.height}};
+		for (int i = 0; i < 6; ++i) {
+			quad[static_cast<size_t>(i)].x = corners[i][0];
+			quad[static_cast<size_t>(i)].y = corners[i][1];
+		}
+		return quad;
+	};
 	for (const ui::MenuBatch& batch : frame.batches) {
-		SDL_GPUTexture* image = batch.image ? menuTexture(batch.image) : texture(m_sources->files, batch.texture);
-		if (!image || batch.vertices.empty()) {
+		const bool clear = batch.stencil == ui::MenuBatch::Stencil::Clear;
+		SDL_GPUTexture* image = clear ? m_gpu.whiteTexture()
+			: batch.image             ? menuTexture(batch.image)
+									  : texture(m_sources->files, batch.texture);
+		const std::vector<ui::MenuVertex> quad = clear ? stageQuad() : std::vector<ui::MenuVertex>();
+		const std::vector<ui::MenuVertex>& batchVertices = clear ? quad : batch.vertices;
+		if (!image || batchVertices.empty()) {
 			continue;
 		}
 		const uint32_t first = static_cast<uint32_t>(vertices.size());
-		for (const ui::MenuVertex& m : batch.vertices) {
+		for (const ui::MenuVertex& m : batchVertices) {
 			Vertex v {};
 			v.position[0] = m.x;
 			v.position[1] = m.y;
@@ -1057,11 +1073,13 @@ void LevelRenderer::buildMenu(float seconds)
 			v.part2 = m.add[3];
 			vertices.push_back(v);
 		}
-		const uint32_t count = static_cast<uint32_t>(batch.vertices.size());
-		if (!m_menuGroups.empty() && m_menuGroups.back().texture == image && m_menuGroups.back().repeat == batch.repeat) {
+		const uint32_t count = static_cast<uint32_t>(batchVertices.size());
+		const MenuGroup* last = m_menuGroups.empty() ? nullptr : &m_menuGroups.back();
+		if (last && last->texture == image && last->repeat == batch.repeat && last->stencil == batch.stencil &&
+			last->stencilLevel == batch.stencilLevel) {
 			m_menuGroups.back().vertexCount += count;
 		} else {
-			m_menuGroups.push_back({image, batch.repeat, first, count});
+			m_menuGroups.push_back({image, batch.repeat, first, count, batch.stencil, batch.stencilLevel});
 		}
 	}
 	if (vertices.empty()) {
@@ -1173,7 +1191,8 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	depthTarget.clear_depth = 1.0f;
 	depthTarget.load_op = SDL_GPU_LOADOP_CLEAR;
 	depthTarget.store_op = SDL_GPU_STOREOP_DONT_CARE;
-	depthTarget.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+	depthTarget.stencil_load_op = SDL_GPU_LOADOP_CLEAR; // the menus' masks start from 0
+	depthTarget.clear_stencil = 0;
 	depthTarget.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
 	updateUndergrowth(camera);
 	buildParticles(camera);
@@ -1432,7 +1451,19 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		SDL_PushGPUVertexUniformData(commands, 0, stage, sizeof(stage));
 		SDL_GPUBufferBinding vertexBinding {m_menuVertices, 0};
 		SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+		using Stencil = ui::MenuBatch::Stencil;
+		Stencil bound = Stencil::Off;
 		for (const MenuGroup& group : m_menuGroups) {
+			// The mask states (GpuContext::UiStencil): the reference is the
+			// level, 0 for a clear.
+			if (group.stencil != bound) {
+				bound = group.stencil;
+				SDL_BindGPUGraphicsPipeline(pass, m_gpu.uiPipeline(bound == Stencil::Submit ? GpuContext::UiStencil::Submit
+						: bound == Stencil::Test                                            ? GpuContext::UiStencil::Test
+						: bound == Stencil::Clear                                           ? GpuContext::UiStencil::Clear
+																							: GpuContext::UiStencil::Off));
+			}
+			SDL_SetGPUStencilReference(pass, static_cast<Uint8>(group.stencil == Stencil::Clear ? 0 : group.stencilLevel));
 			SDL_GPUTextureSamplerBinding sampler {group.texture, group.repeat ? m_gpu.repeatSampler() : m_gpu.clampSampler()};
 			SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
 			SDL_DrawGPUPrimitives(pass, group.vertexCount, 1, group.firstVertex, 0);

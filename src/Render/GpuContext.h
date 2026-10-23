@@ -107,6 +107,20 @@ public:
 	SDL_GPUGraphicsPipeline* undergrowthPipeline() const { return m_undergrowthPipeline; }
 	// Particles: depth-tested, not written; blended or added.
 	SDL_GPUGraphicsPipeline* uiPipeline() const { return m_uiPipeline; }
+	// The UI with gameswf's mask states (RendDX9.dll 0x10118920 /
+	// 0x10118a10 / 0x10118aa0), the reference being the mask level:
+	// submitting a mask (no colour; where the reference is GREATER than
+	// the stencil it INCRements, elsewhere REPLACEs it), drawing inside one
+	// (only where the stencil EQUALs the reference), and clearing the
+	// stencil to the reference (no colour).
+	enum class UiStencil { Off, Submit, Test, Clear };
+	SDL_GPUGraphicsPipeline* uiPipeline(UiStencil mode) const
+	{
+		return mode == UiStencil::Submit ? m_uiSubmitPipeline
+			: mode == UiStencil::Test    ? m_uiTestPipeline
+			: mode == UiStencil::Clear   ? m_uiClearPipeline
+										 : m_uiPipeline;
+	}
 	SDL_GPUGraphicsPipeline* particlePipeline(bool additive) const
 	{
 		return additive ? m_additiveParticlePipeline : m_particlePipeline;
@@ -116,7 +130,9 @@ public:
 	SDL_GPUTexture* whiteTexture() const { return m_white; }
 	SDL_GPUTexture* blackTexture() const { return m_black; }
 	SDL_GPUTextureFormat colorFormat() const { return m_colorFormat; }
-	static constexpr SDL_GPUTextureFormat kDepthFormat = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+	// Depth with a stencil (the menus' masks): D32_FLOAT_S8_UINT, else
+	// D24_UNORM_S8_UINT (SDL guarantees one of them).
+	SDL_GPUTextureFormat depthFormat() const { return m_depthFormat; }
 
 	// Uploads are recorded into one copy pass and submitted by flushUploads().
 	SDL_GPUBuffer* createBuffer(SDL_GPUBufferUsageFlags usage, const void* data, uint32_t size);
@@ -155,6 +171,10 @@ private:
 	SDL_GPUGraphicsPipeline* m_particlePipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_additiveParticlePipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_uiPipeline = nullptr;
+	SDL_GPUGraphicsPipeline* m_uiSubmitPipeline = nullptr;
+	SDL_GPUGraphicsPipeline* m_uiTestPipeline = nullptr;
+	SDL_GPUGraphicsPipeline* m_uiClearPipeline = nullptr;
+	SDL_GPUTextureFormat m_depthFormat = SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT;
 	SDL_GPUSampler* m_repeatSampler = nullptr;
 	SDL_GPUSampler* m_clampSampler = nullptr;
 	SDL_GPUTexture* m_white = nullptr;

@@ -31,6 +31,11 @@ struct MenuBatch {
 	std::shared_ptr<const MenuImage> image;  // kept alive while drawn; uploaded once per object
 	bool repeat = false;                     // bitmap fills that tile
 	std::vector<MenuVertex> vertices;        // triangles
+	// The mask state it draws with (Stencil.h): Submit marks the stencil
+	// at `stencilLevel` (no colour), Test draws where the stencil equals
+	// it, Clear (no vertices) clears the stencil to 0.
+	enum class Stencil : uint8_t { Off, Submit, Test, Clear } stencil = Stencil::Off;
+	int stencilLevel = 0;
 };
 
 struct MenuFrame {
