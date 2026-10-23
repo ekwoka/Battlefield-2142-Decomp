@@ -40,6 +40,7 @@ struct ViewerOptions {
 		bool commanderScreen = false; // pressed: the commander screen (Caps Lock)
 		bool crouch = false;          // held: crouch (c_PICrouch, left Ctrl)
 		bool lie = false;             // held: lie down (c_PILie, Z)
+		bool jump = false;            // held: jump (c_PIAction, Space)
 		bool voipPushToTalk = false;    // held: c_GIVoipPushToTalk (V)
 		bool voipLeaderChannel = false; // held: c_GIVoipUseLeaderChannel (B)
 		int seat = 0;           // F1..F8 held: that vehicle seat (1-based)

@@ -2562,9 +2562,11 @@ int runGame(Options& options, Session& session)
 					spawnedProne = me.spawnedProne;
 				}
 				wasAlive = alive;
-				if (in.crouch || in.lie) {
+				// Jumping while lying gets up (a crouch press), else jumps.
+				if (in.crouch || in.lie || (in.jump && spawnedProne)) {
 					spawnedProne = false;
 				}
+				input.jump = in.jump && !in.lie;
 				input.pose = in.lie ? game::SoldierPose::Prone
 					: in.crouch     ? game::SoldierPose::Crouch
 					: spawnedProne  ? game::SoldierPose::Prone

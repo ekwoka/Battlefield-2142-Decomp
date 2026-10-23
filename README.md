@@ -100,6 +100,8 @@ build/native/src/Main/bf2142 --game "source/Battlefield 2142" \
     --api symbols/BF2142.exe.console.csv --api symbols/RendDX9_ori.dll.console.csv \
     +level Camp_Gibraltar --view          # or --screenshot shot.png [--camera x/y/z/yaw/pitch]
 # run around as a soldier (team 1 PAC, 2 EU): WASD, shift sprints, the mouse turns,
+# Space jumps, left Ctrl crouches, Z lies down, Caps Lock opens the commander screen,
+# (keys from the game's Settings/Controls.con; rebind them on the Options page),
 # E enters and leaves a vehicle nearby (then W/S drive and brake, A/D steer;
 # F1..F8 change seats: a gunner's seat aims with the mouse and fires;
 # 1..9 take the kit's weapon of that slot: 1 knife, 2 sidearm, 3 primary;
