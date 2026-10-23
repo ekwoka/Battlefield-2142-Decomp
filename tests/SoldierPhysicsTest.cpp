@@ -260,6 +260,36 @@ TEST(CollisionWorld_VertexSegmentContact)
 	CHECK(!world.segmentContact({10, 1.3f, 0}, {10, 1.1f, 0}, contact));
 }
 
+// A vehicle's hull edge against static objects (0x006bb050's edge pass):
+// through the wall from the front only: the crossing, the wall's normal;
+// through a slab (its front and its back): the middle, and with the two
+// normals cancelling, from there towards the vehicle's origin.
+TEST(CollisionWorld_EdgeContact)
+{
+	physics::CollisionWorld world;
+	world.addMesh(testMesh(), physics::CollisionUser::Vehicle, {}, {});
+	physics::Vec3 point, normal;
+	CHECK(world.edgeContact({0, 1, 2}, {0, 1, 4}, {0, 1, 0}, 0.1f, point, normal));
+	CHECK(std::fabs(point.z - 3) < 1e-4f && normal.z < -0.99f);
+	CHECK(!world.edgeContact({0, 1, 4}, {0, 1, 2}, {0, 1, 0}, 0.1f, point, normal)); // from behind
+	CHECK(!world.edgeContact({5, 1, 2}, {5, 1, 4}, {0, 1, 0}, 0.1f, point, normal));  // beside it
+	// A slab: the wall and a back face at z = 3.5 facing +z.
+	physics::CollisionMeshFile slab = testMesh();
+	physics::CollisionLod& lod = slab.geometries[0].subGeometries[0].lods[1];
+	const uint16_t i = static_cast<uint16_t>(lod.vertices.size());
+	for (const std::array<float, 3>& v : {std::array<float, 3> {-2, 0, 3.5f}, {-2, 3, 3.5f}, {2, 3, 3.5f}, {2, 0, 3.5f}}) {
+		lod.vertices.push_back(v);
+	}
+	lod.faces.push_back({{i, static_cast<uint16_t>(i + 1), static_cast<uint16_t>(i + 2)}, 0});
+	lod.faces.push_back({{i, static_cast<uint16_t>(i + 2), static_cast<uint16_t>(i + 3)}, 0});
+	physics::CollisionWorld both;
+	both.addMesh(slab, physics::CollisionUser::Vehicle, {}, {});
+	physics::SphereContact back;
+	CHECK(both.segmentContact({0, 1, 4.5f}, {0, 1, 2}, back) && back.normal.z > 0.99f);
+	CHECK(both.edgeContact({0, 1, 2}, {0, 1, 4.5f}, {0, 1, 0}, 0.1f, point, normal));
+	CHECK(std::fabs(point.z - 3.25f) < 1e-4f && normal.z < -0.99f && std::fabs(normal.y) < 1e-6f);
+}
+
 // A round against a bone's capsule (0x006bde70): the segment's crossings
 // of the capsule (cylinder and end spheres), strictly inside the segment:
 // in and out through it, only out from inside, none past it.
@@ -276,4 +306,78 @@ TEST(CollisionWorld_SegmentCapsuleCrossings)
 	CHECK(std::fabs(roots[0] - 0.1f) < 1e-4f);
 	CHECK(physics::segmentCapsuleCrossings({-1, 1.2f, 0}, {1, 1.2f, 0}, {0, 0, 0}, {0, 1, 0}, 0.1f, roots) == 0);
 	CHECK(physics::segmentCapsuleCrossings({-1, 0.5f, 0}, {-0.2f, 0.5f, 0}, {0, 0, 0}, {0, 1, 0}, 0.1f, roots) == 0);
+}
+
+// The look (0x0058a6d0): standing, a turn twists the head and the body
+// stays until the twist reaches 40 degrees (*0x00a68eb0); then the body
+// catches the twist up at 4 degrees a tick (*0x00a68ee0). Moving (the
+// throttle; strafing doesn't count), any twist is caught up.
+TEST(SoldierControl_HeadTwistsBeforeTheBodyTurns)
+{
+	game::SoldierControl control;
+	physics::SoldierBody body;
+	game::SoldierInput look;
+	look.turn = 10;
+	for (int i = 0; i < 3; ++i) {
+		control.update(look, body);
+	}
+	CHECK(body.yawDegrees == 0 && control.twist() == 30); // the head alone
+	game::SoldierInput still;
+	control.update(still, body);
+	CHECK(body.yawDegrees == 0 && control.twist() == 30); // within the limit it stays twisted
+	look.turn = 15; // 45: past the limit
+	control.update(look, body);
+	CHECK(std::fabs(body.yawDegrees - 19) < 1e-4f && std::fabs(control.twist() - 41) < 1e-4f); // the turn and 4
+	for (int i = 0; i < 20; ++i) {
+		control.update(still, body);
+	}
+	CHECK(std::fabs(control.twist()) < 1e-4f && std::fabs(body.yawDegrees - 60) < 1e-4f); // all caught up
+	// Twisted, then walking forward: caught up at 4 a tick.
+	look.turn = 20;
+	control.update(look, body);
+	CHECK(std::fabs(body.yawDegrees - 60) < 1e-4f && std::fabs(control.twist() - 20) < 1e-4f);
+	game::SoldierInput walk;
+	walk.throttle = 1;
+	control.update(walk, body);
+	CHECK(std::fabs(body.yawDegrees - 64) < 1e-4f && std::fabs(control.twist() - 16) < 1e-4f);
+	game::SoldierInput strafe;
+	strafe.strafe = 1;
+	control.reset();
+	look.turn = 20;
+	control.update(look, body);
+	control.update(strafe, body);
+	CHECK(std::fabs(control.twist() - 20) < 1e-4f); // strafing: still twisted
+}
+
+// The spawn scatter's stance test (0x00585d00 -> 0x006c3340 with the stack
+// of 0x006c1b30): on the box (top at 1 m) a soldier fits standing; sunk in
+// it, not even prone; under a slab 1.2 m over the floor only prone.
+TEST(SoldierPhysics_StanceFitsTheSpot)
+{
+	physics::CollisionWorld world;
+	world.addMesh(testMesh(), physics::CollisionUser::Soldier, {}, {});
+	CHECK(physics::soldierFits(world, {10, 2.01f, 0}, 0));  // feet on the box top
+	CHECK(!physics::soldierFits(world, {10, 1.5f, 0}, 0));  // in it
+	CHECK(!physics::soldierFits(world, {10, 1.5f, 0}, 2));
+	CHECK(physics::soldierFits(world, {0, 1, 0}, 0));       // clear of the wall (z = 3)
+	CHECK(!physics::soldierFits(world, {0, 1, 2.9f}, 0));   // against it
+	// A slab facing down at 1.2 m over a 4 x 4 m floor at x 20.
+	physics::CollisionLod lod;
+	lod.vertices = {{18, 1.2f, -2}, {22, 1.2f, -2}, {22, 1.2f, 2}, {18, 1.2f, 2}};
+	lod.faces = {{{0, 1, 2}, 0}, {{0, 2, 3}, 0}};
+	physics::CollisionSubGeometry part;
+	part.lods = {lod, lod, lod};
+	physics::CollisionGeometry geometry;
+	geometry.subGeometries = {part};
+	physics::CollisionMeshFile slab;
+	slab.geometries = {geometry};
+	physics::CollisionWorld low;
+	low.addMesh(slab, physics::CollisionUser::Soldier, {}, {});
+	CHECK(!physics::soldierFits(low, {20, 1, 0}, 0)); // standing: the upper spheres reach it
+	CHECK(!physics::soldierFits(low, {20, 1, 0}, 1)); // crouching too (1.4 m)
+	CHECK(physics::soldierFits(low, {20, 1, 0}, 2));  // lying fits
+	// The same mesh in a vehicle's frame: turned and moved.
+	const physics::Mat3 turned = physics::Mat3::fromYawPitchRoll({90, 0, 0});
+	CHECK(!physics::soldierFits(low, {50 + turned.transform({20, 0, 0}).x, 1, turned.transform({20, 0, 0}).z}, 0, turned,
+		{50, 0, 0}));
 }

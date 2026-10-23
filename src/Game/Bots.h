@@ -128,7 +128,43 @@ struct AiTemplate {
 	std::vector<std::string> plugins;
 	float basicTemp = 0;
 	bool secondary = false;
+	uint32_t types = 0; // aiTemplate.addType: 1 << ai::InformationType
 };
+
+// ai::InformationType (BF2142.exe 0x0088fbd0): the bits of an AI object's
+// flags (+8) its template's aiTemplate.addType lines set. ITSoldier is also
+// set for a soldier (0x0088d070: an object with interface 0xc4d7).
+enum InformationType : uint32_t {
+	kITUnit = 1u << 0,
+	kITAir = 1u << 1,
+	kITHelicopter = 1u << 2,
+	kITGround = 1u << 3,
+	kITNaval = 1u << 4,
+	kITControlpoint = 1u << 5,
+	kITTransportation = 1u << 6,
+	kITMobile = 1u << 7,
+	kITStructure = 1u << 8,
+	kITSoldier = 1u << 9,
+	kITObstructedView = 1u << 10,
+	kITNoTemperature = 1u << 11,
+	kITHasWreck = 1u << 12,
+	kITObstacle = 1u << 13,
+	kITHasCarHorn = 1u << 14,
+};
+// The factor on a vehicle's seats other than the root's in BBChange
+// (0x1006b910, for a vehicle the bot isn't in): 1 when its driver's seat
+// is taken; else, for a root with a Mobile part that isn't ITNaval, 0.77
+// for ITGround and 0.5 for ITAir; 1 otherwise.
+float otherSeatFactor(bool driverTaken, bool rootMobile, uint32_t rootTypes);
+// The distances of 0x100d3730 (squared): whether the bot's order is close
+// for a vehicle (see BotManager::orderClose), and `noMove` (its param_5).
+// `own`: the bot is in the vehicle.
+bool transportClose(bool own, float botToInfantrySpot2, float vehicleToVehicleSpot2, bool& noMove);
+
+// The flag of an InformationType name, 0 for none (ITBiological, used by
+// some shipped templates, isn't one: the original's parser answers -1 and
+// sets nothing).
+uint32_t informationTypeFlag(const std::string& name);
 
 struct BotSettings {
 	float skill = 0.4f;   // aiSettings.setBotSkill (0..1)
@@ -165,6 +201,24 @@ struct BotSettings {
 	std::string editingTemplate, editingPlugin;
 	// The plug-in of a kind an AI template holds (null for none).
 	const AiPlugin* plugin(const std::string& aiTemplate, const std::string& kind) const;
+	// The template's ai::InformationType flags (aiTemplate.addType,
+	// BF2142.exe 0x00882ff1 with the names of 0x0088fbd0), 0 for none.
+	uint32_t typeFlags(const std::string& aiTemplate) const;
+
+	// The pathfinding maps (aiPathfinding.createMap in AI/AIPathfinding.ai:
+	// Infantry is map 0, Vehicle map 1; aiPathfinding.setActiveMap and
+	// aiPathfinding.map.* in the level's AI/AI.ai). The bots read their
+	// mesh rays' climb test from them (AIDLL map +0x24, 0x100b0440).
+	struct PathfindingMap {
+		std::string name;
+		float maxSlope = 90;                 // degrees (+0xc holds its cosine, 0 at first)
+		float allowedThresholdHeight = 0.35f; // +0x18
+		float headClearance = 2;             // +0x14
+	};
+	std::vector<PathfindingMap> pathfindingMaps;
+	int activeMap = -1;
+	// A map's climb limits (map 0's rays always climb 0.35 m, 0x1003f930).
+	ai::ClimbLimits climbLimits(int map) const;
 
 	float modifier(const std::string& behaviour) const;
 	// The behaviours of an equipment type: the scripts' or, without them,
@@ -262,8 +316,6 @@ private:
 		physics::Vec3 orderPosition;
 		// Change.
 		uint32_t vehicleTarget = 0;
-		uint32_t lastVehicle = 0;
-		float leftVehicleAt = -1e9f;
 		// Flee (BBPFlee's plan 0x10085fc0).
 		physics::Vec3 fleeDirection;
 		bool planLocked = false;     // bot+0x7c: the plan runs to its end, no arbitration
@@ -279,6 +331,7 @@ private:
 		float unstickUntil = 0;      // the jump's stand-in (see steer)
 		float unstickSide = 1;
 		ai::DriveState drive;
+		ai::SidestepState sidestep;  // the move's (0x100ce860 +0x64..+0x80)
 		float lastYaw = 0;           // the vehicle's, for its turn rate
 		float lastYawAt = -1;
 		physics::Vec3 lastVelocity;  // the hover tank's, for its acceleration (FloatingTankMoveTo +0x3c)
@@ -346,6 +399,13 @@ private:
 	float changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight);
 	// A seat's value (0x100d3e70): `vehicle` 0 for the bot's own soldier.
 	float seatValue(const Bot& bot, const GameWorld::PlayerInfo& self, uint32_t vehicle, int seat, bool other) const;
+	// The seat value's transport test (0x100d3730): true when the bot's
+	// order is close (see Bots.cpp).
+	bool orderClose(const Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::VehicleInfo& vehicle,
+		const std::string& rootAi, bool& inArea, bool& noMove) const;
+	// Whether a known enemy's weapons can hurt the bot (the sensing agent's
+	// +0x7c above 0, 0x100ebdd0; the bot's vt+0x9c).
+	bool threatened(const Bot& bot, const GameWorld::PlayerInfo& self) const;
 	float idleUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight, const std::vector<GameWorld::PlayerInfo>& players);
 	float fleeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players);
 	float medicUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight, bool ammo);
@@ -374,8 +434,10 @@ private:
 		bool hasTarget, float projectileSpeed, SoldierInput& input, float seconds);
 	// Walks (InfanteryMoveTo) or drives (CarMoveTo/TankMoveTo) along a path
 	// to `to`; false once it has arrived. `radius` is the goal's.
+	// `object`: a MoveToObject's object (a vehicle to enter or repair),
+	// which the sidestep doesn't step round.
 	bool steer(Bot& bot, const GameWorld::PlayerInfo& self, const physics::Vec3& to, int goalId, float seconds,
-		SoldierInput& input, float radius = 0);
+		SoldierInput& input, float radius = 0, uint32_t object = 0);
 	bool drive(Bot& bot, const GameWorld::PlayerInfo& self, const physics::Vec3& to, int goalId, float seconds,
 		SoldierInput& input, float radius = 0);
 	// The point MoveTo heads for now (the next strategic waypoint or area
@@ -384,6 +446,12 @@ private:
 	bool follow(Bot& bot, const ai::NavMesh& mesh, const physics::Vec3& from, const physics::Vec3& to, int goalId,
 		const ai::FollowerSettings& settings);
 	ai::DriveSettings driveSettings(const GameWorld::PlayerInfo& self) const;
+	// What the infantry steering's sidestep (0x100ce860, 0x100e63c0) sees:
+	// the vehicles of the world list round the bot's controlled object
+	// `own` at `at`.
+	ai::SidestepSense sidestepSense(const Bot& bot, const physics::Vec3& at, uint32_t own, const ai::NavMesh& mesh,
+		const ai::FollowerSettings& settings, const physics::Vec3& steerPoint, const physics::Vec3& goal,
+		uint32_t object) const;
 	std::vector<int> areaRoute(int from, int to, int team) const;
 	void routeVia(Bot& bot, const GameWorld::PlayerInfo& self, int target, int map);
 	bool areaPosition(int area, physics::Vec3& at, float& radius, int& team) const;
@@ -424,6 +492,12 @@ private:
 	std::map<int, std::pair<int, int64_t>> m_tasks;
 	std::map<std::string, float> m_behaviourSeconds;
 	std::map<uint32_t, float> m_driven;
+	// When a human player of each team last got out of a vehicle (the unit
+	// component's per-team stamp, BF2142.exe vt+0x64 0x008a1b10 set by the
+	// exit event 0x00894860, read through vt+0x60 by the seat value), and
+	// the vehicle each human player was in at the last update.
+	std::map<uint32_t, std::array<float, 3>> m_humanLeftAt;
+	std::map<int, uint32_t> m_humanVehicle;
 	float m_time = 0;
 	uint32_t m_random = 0x2545f491;
 	float random(); // 0..1

@@ -406,7 +406,7 @@ bool GameWorld::commanderAction(int team, CommanderAbility ability, float x, flo
 		const float delay = std::nearbyint(number(*fireArm, "fire.fireLaunchDelay", 0));
 		const int burst = std::max(1, integer(*fireArm, "fire.burstSize", 1));
 		m_strikes.push_back({ability, team, target, delay, burst});
-		m_strikeFire.push_back({fireArm->name(), side.commander});
+		m_strikeFire.push_back({fireArm->name(), side.commander, 0, 0, DeviationBuildUp::fromTemplate(*fireArm)});
 		break;
 	}
 	case CommanderAbility::Uav:
@@ -603,9 +603,7 @@ std::vector<uint32_t> GameWorld::supplyCrates() const
 // over the target, straight down (0x005a0e50 hands the firearm the
 // direction (0, -1, 0)). The batch spreads by the firearm's
 // SimpleDeviationComp (deviation.subProjectileDev, template +0x18 of
-// 0x94e2); that component's object code is not rewritten, so here each
-// round strays uniformly within subProjectileDev degrees of straight
-// down. The ballistic solution 0x005a0750 only turns an artillery
+// 0x94e2; see below). The ballistic solution 0x005a0750 only turns an artillery
 // asset's barrels (mode +0x44 == 1, 0x005a0bf0); it doesn't change the
 // shots' direction, so it is left out.
 void GameWorld::fireStrike(Strike& strike, StrikeFire& fire)
@@ -633,16 +631,17 @@ void GameWorld::fireStrike(Strike& strike, StrikeFire& fire)
 	// The batch (0x005c3cb0): round 0 the main one, the rest sub-projectiles
 	// (batchSize - 1 of them). Each strays by the deviation component
 	// (0x005f5540): normal numbers times subProjectileDev for a sub (kept),
-	// minDev plus the last sub's offset for the main one, x 0.01 x the
-	// velocity along the round's up (here +z: it points down) and right.
-	// The firing's build-up (setFireDev) is left out: the scripts' three
-	// numbers are not kept by the rewrite's templates.
+	// minDev with the firing's build-up (DeviationBuildUp: setFireDev, none
+	// on the shipped strike firearms) plus the last sub's offset for the
+	// main one, x 0.01 x the velocity along the round's up (here +z: it
+	// points down) and right; every round adds to the build-up.
 	const float subDev = number(*t, "deviation.subProjectileDev", 0);
-	const float minDev = number(*t, "deviation.minDev", 0);
+	const float mainDev = fire.deviation.deviation();
 	for (int i = 0; i < batch; ++i) {
 		const bool sub = i >= 1;
 		float up = 0, right = 0;
-		const float deviation = sub ? subDev : minDev;
+		const float deviation = sub ? subDev : mainDev;
+		fire.deviation.fired();
 		if (deviation > 0.01f) {
 			up = m_gaussian.next(m_random);
 			right = m_gaussian.next(m_random);
@@ -691,6 +690,7 @@ void GameWorld::stepCommander(float seconds)
 	}
 	for (size_t i = 0; i < m_strikes.size();) {
 		Strike& strike = m_strikes[i];
+		m_strikeFire[i].deviation.update(false); // no one holds its trigger
 		strike.fireIn -= seconds;
 		while (strike.fireIn <= 0 && strike.salvosLeft > 0) {
 			fireStrike(strike, m_strikeFire[i]);

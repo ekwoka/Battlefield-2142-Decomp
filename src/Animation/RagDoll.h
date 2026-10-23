@@ -22,9 +22,16 @@
 // for ragdoll_sleep seconds. The pose (0x008acde0) is relative to the
 // middle particle (the right hip), in world axes.
 //
+// Levels of detail (the manager's frame 0x008ae120 sets each instance's
+// +0x58): with a camera, the bodies in order of their distance to it
+// (three times as far behind it); past the first three awake ones, level 1
+// (steps of 1.5 dT, 0x008add10); a network-driven body (+0x61) updated after
+// ragdoll_clientMaxUpdateTime of the frame, level 2 (also no shin test, no
+// capsules, and the knees', elbows', a spine bone's and the head's
+// particles skip the objects: 0x008ac200).
+//
 // Not rewritten yet: the network side (ragdoll_net_*: particles driven by
-// the server, 0x008acce0) and the level of detail by distance to the
-// camera (0x008ae120: dT * 1.5 past the second ragdoll, no leg capsules).
+// the server, 0x008acce0).
 #pragma once
 
 #include "AnimationFiles.h"
@@ -68,6 +75,10 @@ struct RagDollSettings {
 	bool useCapsuleCollision = true;  // ragdoll_useCapsuleCollision
 	float expForceMod = 1;            // rd_expForceMod: explosions' push on soldiers
 	float dieForce = 0;               // rd_dieForce (unused by the game: "don't use random die force yet")
+	float dieInVehicleForce = 100;    // rd_dieInVehicleForce: the push of a body thrown out of its seat
+	// ragdoll_clientMaxUpdateTime (milliseconds, 0x3b03126f): past it in a
+	// frame, the network-driven bodies still to update take level 2.
+	float clientMaxUpdateTime = 0.002f;
 };
 
 // The template the console methods build (the manager's half).
@@ -229,6 +240,9 @@ public:
 	bool touched() const { return m_touched; }
 	const std::vector<Particle>& particles() const { return m_particles; }
 	const RagDollTemplate* ragDollTemplate() const { return m_template; }
+	// The level of detail (+0x58: 0, 1 or 2), set by the manager each frame.
+	void setLevelOfDetail(int lod) { m_lod = lod; }
+	int levelOfDetail() const { return m_lod; }
 	// The body's facing: the normal of the hips and right shoulder (0x008a9ae0);
 	// up when it lies on its back.
 	Vec bodyNormal() const;
@@ -266,6 +280,12 @@ private:
 	bool m_impactPending = false;
 	float m_sinceImpact = 0;
 	bool m_touched = false;    // 0x63
+	int m_lod = 0;             // 0x58
 };
+
+// The manager's levels of detail (0x008ae120) for bodies at `distances`
+// from the camera (already tripled behind it), awake or not, none of
+// them network-driven: level 1 for each that has three awake ones nearer.
+std::vector<int> ragDollLevels(const std::vector<float>& distances, const std::vector<bool>& awake);
 
 } // namespace dice::hfe::anim

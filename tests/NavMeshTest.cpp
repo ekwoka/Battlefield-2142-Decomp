@@ -2,6 +2,7 @@
 // finding on a small synthetic mesh, then a real level's Infantry mesh when
 // $BF2142_GAME_DIR is set.
 #include "AI/NavMesh.h"
+#include "AI/PathFollower.h"
 #include "IO/File/ZipArchive.h"
 #include "TestMain.h"
 
@@ -538,4 +539,250 @@ TEST(NavMesh_LoadsALevelAndFindsAPath)
 	CHECK(length < ai::distance(from, to) * 10);
 	std::printf("NavMesh: minsk_coop infantry %zu polygons, %zu clusters; path of %zu points, %.0f m (straight %.0f m)\n",
 		m.polygons.size(), m.clusters.size(), points.size(), length, ai::distance(from, to));
+}
+
+namespace {
+
+// Each polygon's unit normal from its vertices, facing up.
+void computeNormals(ai::NavMesh& m)
+{
+	for (uint32_t p = 0; p < m.polygons.size(); ++p) {
+		const Vec3 a = m.vertex(p, 0), b = m.vertex(p, 1), c = m.vertex(p, 2);
+		const Vec3 u = b - a, v = c - a;
+		Vec3 n {u.y * v.z - u.z * v.y, u.z * v.x - u.x * v.z, u.x * v.y - u.y * v.x};
+		const float l = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+		n = n * ((n.y < 0 ? -1.0f : 1.0f) / l);
+		m.polygons[p].normal = n;
+	}
+}
+
+// A corridor of `columns` x 2 squares of `size` m, two triangles a square,
+// clusters of four columns linked along the upper row; the lower row of
+// column `wall` is blocked (cost class 0).
+ai::NavMesh buildCorridor(int columns, float size, int wall)
+{
+	ai::NavMesh m;
+	const int rows = 2;
+	m.minX = 0;
+	m.minZ = 0;
+	m.maxX = columns * size;
+	m.maxZ = rows * size;
+	m.rootSize = m.maxX;
+	for (int z = 0; z <= rows; ++z) {
+		for (int x = 0; x <= columns; ++x) {
+			m.vertices.push_back({x * size, 0, z * size});
+		}
+	}
+	auto vid = [columns](int x, int z) { return static_cast<uint32_t>(z * (columns + 1) + x); };
+	std::vector<std::array<uint32_t, 3>> triangles;
+	for (int z = 0; z < rows; ++z) {
+		for (int x = 0; x < columns; ++x) {
+			triangles.push_back({vid(x, z), vid(x, z + 1), vid(x + 1, z + 1)});
+			triangles.push_back({vid(x, z), vid(x + 1, z + 1), vid(x + 1, z)});
+			for (int t = 0; t < 2; ++t) {
+				ai::Polygon p;
+				p.vertexCount = 3;
+				p.costClass = x == wall && z == 0 ? 0 : 1;
+				p.cluster = static_cast<uint16_t>(x / 4);
+				p.firstEdge = static_cast<uint32_t>(m.edgeVertices.size() + t * 3);
+				p.normal = {0, 1, 0};
+				m.polygons.push_back(p);
+			}
+			for (int t = 0; t < 2; ++t) {
+				for (uint32_t v : triangles[triangles.size() - 2 + t]) {
+					m.edgeVertices.push_back(v);
+				}
+			}
+		}
+	}
+	std::map<std::pair<uint32_t, uint32_t>, std::vector<uint32_t>> edges;
+	for (uint32_t p = 0; p < triangles.size(); ++p) {
+		for (int k = 0; k < 3; ++k) {
+			const uint32_t a = triangles[p][k], b = triangles[p][(k + 1) % 3];
+			edges[{std::min(a, b), std::max(a, b)}].push_back(p);
+		}
+	}
+	for (uint32_t p = 0; p < triangles.size(); ++p) {
+		for (int k = 0; k < 3; ++k) {
+			const uint32_t a = triangles[p][k], b = triangles[p][(k + 1) % 3];
+			int32_t other = -1;
+			for (uint32_t q : edges[{std::min(a, b), std::max(a, b)}]) {
+				other = q != p ? static_cast<int32_t>(q) : other;
+			}
+			m.edgeNeighbours.push_back(other);
+		}
+	}
+	// A root with four leaf quarters, each listing every polygon (as buildGrid).
+	m.nodes.resize(5);
+	m.nodes[0].children = {1, 2, 3, 4};
+	for (int i = 1; i <= 4; ++i) {
+		m.nodes[i].leaf = true;
+		m.nodes[i].polygonCount = static_cast<uint8_t>(std::min<size_t>(m.polygons.size(), 255));
+		m.nodes[i].firstPolygon = static_cast<uint32_t>(m.leafPolygons.size());
+		for (uint32_t p = 0; p < m.polygons.size(); ++p) {
+			m.leafPolygons.push_back(p);
+		}
+	}
+	const int clusters = (columns + 3) / 4;
+	for (int c = 0; c < clusters; ++c) {
+		ai::Cluster cl;
+		cl.firstPolygon = static_cast<uint32_t>(m.clusterPolygons.size());
+		for (uint32_t p = 0; p < m.polygons.size(); ++p) {
+			if (m.polygons[p].cluster == c) {
+				m.clusterPolygons.push_back(p);
+			}
+		}
+		cl.polygonCount = static_cast<uint32_t>(m.clusterPolygons.size()) - cl.firstPolygon;
+		cl.firstLink = static_cast<uint16_t>(m.links.size());
+		cl.firstDistance = static_cast<uint16_t>(m.linkDistances.size());
+		// The upper row's lower-right triangle left of a border.
+		auto border = [&](int x) { return static_cast<uint32_t>((columns + x) * 2 + 1); };
+		if (c > 0) {
+			m.links.push_back({{c * 4 * size, 0, 1.5f * size}, uint16_t(c - 1), border(c * 4 - 1)});
+		}
+		if (c < clusters - 1) {
+			m.links.push_back({{(c * 4 + 4) * size, 0, 1.5f * size}, uint16_t(c + 1), border(c * 4 + 3)});
+		}
+		cl.linkCount = static_cast<uint16_t>(m.links.size()) - cl.firstLink;
+		if (cl.linkCount == 2) {
+			m.linkDistances.push_back(4 * size);
+		}
+		m.clusters.push_back(cl);
+	}
+	return m;
+}
+
+} // namespace
+
+// The climb test of the mesh ray (0x1003ce50 with the map's maxSlope and
+// step, 0x1003c220): a 45 degree ramp up from x = 5 on the grid's top row.
+TEST(PathFollower_MeshRayRefusesASteepClimb)
+{
+	ai::NavMesh m = buildGrid();
+	for (Vec3& v : m.vertices) {
+		v.y = std::max(0.0f, v.x - 5);
+	}
+	for (ai::Polygon& p : m.polygons) {
+		p.costClass = 1;
+	}
+	computeNormals(m);
+	const Vec3 low {1.5f, 0, 4.5f}, high {8.5f, 3.5f, 4.5f};
+	const ai::ClimbLimits steep {35 * 3.14159265f / 180, 0.35f}, gentle {50 * 3.14159265f / 180, 0.35f};
+	// The slope's normal faces the way up across the ground, 45 degrees from up.
+	const int32_t ramp = m.findPolygon({6.5f, 1.5f, 4.5f});
+	CHECK(ramp >= 0);
+	if (ramp < 0) {
+		return;
+	}
+	CHECK(ai::steepAgainst(m.polygons[ramp].normal, high - low, steep.maxSlope));
+	CHECK(!ai::steepAgainst(m.polygons[ramp].normal, low - high, steep.maxSlope)); // downhill
+	CHECK(!ai::steepAgainst(m.polygons[ramp].normal, high - low, gentle.maxSlope));
+	CHECK(!ai::steepAgainst({0, 1, 0}, high - low, 0.1f));
+	CHECK(ai::steepAgainst({0.6f, -0.8f, 0}, {-1, 0, 0}, 1.5f)); // facing down: always
+	// Without the test, or with a gentler limit, the ray climbs; with 35
+	// degrees it stops where the climb begins, unless the step allows 3 m.
+	CHECK(ai::meshRaycast(m, low, high, nullptr, -1));
+	CHECK(ai::meshRaycast(m, low, high, nullptr, -1, nullptr, -1, 0, 0, &gentle));
+	float reached = 0;
+	ai::RayHit hit;
+	CHECK(!ai::meshRaycast(m, low, high, nullptr, -1, &reached, -1, 0, 0, &steep, &hit));
+	CHECK(hit.started && hit.point.x <= 5.5f && reached < 4.1f);
+	const ai::ClimbLimits tall {steep.maxSlope, 4};
+	CHECK(ai::meshRaycast(m, low, high, nullptr, -1, nullptr, -1, 0, 0, &tall));
+	CHECK(ai::meshRaycast(m, high, low, nullptr, -1, nullptr, -1, 0, 0, &steep)); // down is fine
+}
+
+// Blocked for 2 s (0x10095720 -> 0x10095470): with a cluster path the
+// search goes on from the bot's cluster (no new trip from the start, no
+// failure); without one (a trip of 100 m or less) the move fails.
+TEST(PathFollower_BlockedGoesOnFromItsCluster)
+{
+	const ai::NavMesh m = buildCorridor(40, 4, 20); // 160 x 8 m, ten clusters, the wall at x 80-84
+	const Vec3 from {2, 0, 2}, to {158, 0, 2};
+	ai::PathFollower follower;
+	ai::FollowerSettings settings;
+	follower.request(m, from, to, settings, 0);
+	CHECK(follower.planned() && !follower.failed());
+	// The segments follow the bot: with it at the start, more than ten
+	// waypoints and 30 m ahead, the next one waits.
+	float now = 0;
+	for (int i = 0; i < 3; ++i) {
+		now += 0.1f;
+		CHECK(follower.steer(m, from, now).ok);
+	}
+	const size_t planned = follower.waypoints().size();
+	CHECK(planned > 10 && follower.waypoints().back().p.x < 60);
+	// Beyond the wall, out of sight of the current waypoint, in cluster 6.
+	const Vec3 beyond {100, 0, 2};
+	ai::PathFollower::Steer steer;
+	for (int i = 0; i < 25; ++i) {
+		now += 0.1f;
+		steer = follower.steer(m, beyond, now);
+	}
+	CHECK(steer.ok && !follower.failed());
+	CHECK(!follower.waypoints().empty());
+	bool onward = !follower.waypoints().empty();
+	for (const ai::Waypoint& w : follower.waypoints()) {
+		onward = onward && w.p.x > 90; // from the bot's cluster on, not back to the start
+	}
+	CHECK(onward);
+	// A short trip has no cluster path: blocked, the move fails.
+	ai::PathFollower shortTrip;
+	shortTrip.request(m, from, {40, 0, 2}, settings, 0);
+	CHECK(shortTrip.planned() && !shortTrip.failed());
+	const Vec3 behind {90, 0, 2}; // past the wall: the waypoints can't be seen
+	float t = 0;
+	for (int i = 0; i < 25; ++i) {
+		t += 0.1f;
+		shortTrip.steer(m, behind, t);
+	}
+	CHECK(shortTrip.failed());
+}
+
+// The infantry steering's sidestep (0x100ce860, 0x100e63c0) round a
+// vehicle standing on the way: the point on its rim, on the side away from
+// it, and the way bent round it; a wreck keeps more room; a goal inside
+// the room ends the move once the bot is close.
+TEST(PathFollower_SidestepRoundAVehicle)
+{
+	ai::NavMesh m = buildCorridor(40, 4, -1);
+	for (Vec3& v : m.vertices) {
+		v.z *= 6; // 48 m across
+	}
+	m.maxZ *= 6;
+	ai::SidestepSense sense;
+	sense.position = {20, 0, 24};
+	sense.steer = sense.ahead = {60, 0, 24};
+	sense.goal = {150, 0, 24};
+	sense.mesh = &m;
+	ai::SidestepObstacle car;
+	car.id = 7;
+	car.position = {22.5f, 0, 24.5f};
+	car.radius = 2;
+	sense.obstacles.push_back(car);
+	ai::SidestepState state;
+	Vec3 way;
+	CHECK(!ai::sidestepSteer(state, sense, way));
+	CHECK(state.obstacle == 7 && std::fabs(state.radius - 2) < 1e-5f && std::fabs(state.distance - 2) < 1e-4f);
+	// It stands a little to the left (+z) of the way: passed on the right.
+	CHECK(std::fabs(state.point.x - 22.5f) < 1e-4f && std::fabs(state.point.z - 22.5f) < 1e-4f);
+	CHECK(way.x > 0.5f && way.z < -0.3f && std::fabs(way.x * way.x + way.z * way.z - 1) < 1e-4f);
+	// Nothing in the way: straight for the point.
+	ai::SidestepState clear;
+	ai::SidestepSense open = sense;
+	open.obstacles.clear();
+	CHECK(!ai::sidestepSteer(clear, open, way) && clear.obstacle == -1 && std::fabs(way.x - 1) < 1e-5f);
+	// A wreck (below 0.3 of its health): max(r, min(10, r + 4)) x 1.3 of room.
+	ai::SidestepSense wreck = sense;
+	wreck.obstacles[0].health = 0.2f;
+	ai::SidestepState wrecked;
+	ai::sidestepSteer(wrecked, wreck, way);
+	CHECK(wrecked.obstacle == 7 && wrecked.still && std::fabs(wrecked.radius - 7.8f) < 1e-4f);
+	// The goal beside the car: the move ends once the bot is close.
+	ai::SidestepSense near = sense;
+	near.goal = near.steer = {23, 0, 24.5f};
+	ai::SidestepState s2;
+	CHECK(!ai::sidestepSteer(s2, near, way)); // 3 m from the goal
+	near.position = {21, 0, 24};
+	CHECK(ai::sidestepSteer(s2, near, way));
 }

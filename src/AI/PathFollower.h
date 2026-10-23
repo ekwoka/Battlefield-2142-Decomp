@@ -27,15 +27,14 @@
 //     follower skips to the next while the mesh ray to it is clear (one
 //     waypoint a tick on foot, up to four at the wheel); when none was
 //     skipped and the waypoint itself can't be seen, it is blocked, and
-//     blocked for 2 s (0.5 s) the path is planned again from where the bot
-//     is (0x10095470);
+//     blocked for 2 s (0.5 s) the search goes on from the bot's cluster on
+//     the cluster path, or else the move fails (0x10095470);
 //   - progress (0x10092bc0): a bot that pushes its controls and doesn't get
 //     2 m (4 m) further for 10 s (20 s) fails; the move ends and the
 //     behaviour plans again. A soldier standing still half a second jumps.
-// Not rewritten: the time-slicing of the searches (a segment a tick here),
-// the re-route from the bot's cluster when blocked (0x10095470 plans anew
-// here), the dynamic-obstacle sidestep (0x100e63c0), and the jump (the
-// rewrite's soldiers can't jump).
+// Not rewritten: the time-slicing of the searches (a segment a tick here)
+// and the jump (the rewrite's soldiers can't jump). A segment search the
+// original fails falls back to the whole mesh here (see planSegment).
 #pragma once
 
 #include "NavMesh.h"
@@ -45,21 +44,56 @@
 
 namespace dice::hfe::ai {
 
+// The climb test of a map's mesh rays (0x1003ce50's last argument and the
+// map's settings object, map +0x24, built by 0x100b0440): the level's
+// AI/AI.ai sets them per map after `aiPathfinding.setActiveMap`, with
+// `aiPathfinding.map.maxSlope` (degrees; stored as its cosine, +0xc, by
+// 0x1003bfb0 -> 0x100afdf0, read back as an angle by 0x100afe00) and
+// `aiPathfinding.map.allowedThresholdHeight` (+0x18, 0x1003c050; the map's
+// vt+0x2c). The step a ray may climb is that threshold, except on map 0
+// (Infantry), whose rays always take 0.35 (0x1003f930, 0x1003f810). The
+// defaults (no script): cos 0 (90 degrees, so only a polygon facing
+// down counts as steep) and 0.35.
+struct ClimbLimits {
+	float maxSlope = 1.5707964f; // radians
+	float stepHeight = 0.35f;
+};
+
+// What a ray reached (the output point of 0x1003ce50 / 0x1003d1c0): the
+// end when clear, else the last exit point (the start when it failed in
+// the first polygon). `started` is false when the start isn't on the mesh
+// (the original then leaves its output untouched: zeros). `lastClass` is
+// the cost class of the last polygon it tried to enter (param_11).
+struct RayHit {
+	bool started = false;
+	Vec3 point;
+	int lastClass = -1;
+};
+
 // A ray over the mesh (the pathfinder's vslot 0x84, 0x1003f930 ->
-// 0x1003ce50): from the start polygon, polygon by polygon where the ray
-// (x/z, from `from` towards `to`) leaves each one, at most `maxPolygons`
-// (-1: 1000). True once the exit point is within 0.05 m of the end (3-D)
-// or 0.16 m of it across; false when it leaves the mesh, enters a polygon
-// the profile can't walk on or of the cost class `stopClass` (5 and 6 stop
-// at 7 too; 0 for none), runs out of polygons, or (with a `width`) crosses
-// an edge with less than `width` beside the crossing point on either side.
-// `reached` gets how far it got (metres, x/z). The original also fails a
-// climb steeper than the tree's slope limit (tree +0x24 -> +0xc) by more
-// than the step height (0.35 on the infantry tree, the vehicle tree's own
-// through vt+0x2c); those limits are not in the .qtr/.clb files the
-// rewrite reads, so that test is left out.
+// 0x1003ce50, and without the climb test 0x1003d1c0): from the start
+// polygon, polygon by polygon where the ray (x/z, from `from` towards
+// `to`) leaves each one, at most `maxPolygons` (-1: 1000). True once the
+// exit point is within 0.05 m of the end (3-D) or 0.16 m of it across;
+// false when it leaves the mesh, enters a polygon the profile can't walk
+// on or of the cost class `stopClass` (5 and 6 stop at 7 too; 0 for none),
+// runs out of polygons, or (with a `width`) crosses an edge with less than
+// `width` beside the crossing point on either side. `reached` gets how far
+// it got (metres, x/z).
+// With `climb` (0x1003ce50): the start is first put on its polygon's
+// surface when it doesn't stand on it within 2.5 m (0x100b88e0), and a
+// climb is refused: over a run of polygons steeper than maxSlope against
+// the ray (0x1003c220: the normal facing the ray across the ground and
+// tilted past the limit, or facing down), the exit point may not rise more
+// than stepHeight above where the run began.
 bool meshRaycast(const NavMesh& mesh, const Vec3& from, const Vec3& to, const CostProfile* profile, int maxPolygons,
-	float* reached = nullptr, int32_t startPolygon = -1, float width = 0, uint8_t stopClass = 0);
+	float* reached = nullptr, int32_t startPolygon = -1, float width = 0, uint8_t stopClass = 0,
+	const ClimbLimits* climb = nullptr, RayHit* hit = nullptr);
+
+// Whether a polygon is steep for a ray going `dir` (0x1003c220): its
+// normal faces the ray across the ground (dot < 0) and is tilted more than
+// `maxSlope` from up, or faces down.
+bool steepAgainst(const Vec3& normal, const Vec3& dir, float maxSlope);
 
 // A waypoint (0x28 bytes): the portal it crosses (a, b), where the bot
 // steers (p) and the polygon it enters.
@@ -88,6 +122,9 @@ struct FollowerSettings {
 	float radius = 0.5f;   // the bot's (+0x100)
 	float approach = 0;    // +4: 0 for MoveTo, 1.1 x the target's radius for MoveToObject
 	PathOptions options;
+	// The climb test of the straight walk and the look-ahead's rays (both
+	// pass it on, 0x100952c0, 0x10093420): the map's limits.
+	ClimbLimits climb;
 };
 
 class PathFollower {
@@ -110,6 +147,10 @@ public:
 	void progress(const Vec3& position, float input, float now);
 	// What is left of the path (0x10093e50).
 	float remaining(const Vec3& position) const;
+	// The first waypoint from the current one farther than `distance`
+	// (x/z) from `position`, else the last; `position` without waypoints
+	// (0x100941c0).
+	Vec3 pointAhead(const Vec3& position, float distance) const;
 	// The sharpest bend (radians, signed) of the path within max(3,
 	// speed x lookAheadTime) metres ahead against `forward` (0x10093c00,
 	// kept for 0.5 s).
@@ -125,6 +166,8 @@ private:
 	void plan(const NavMesh& mesh, const Vec3& from, float now);
 	bool planSegment(const NavMesh& mesh, const Vec3& position, float now);
 	bool resync(const NavMesh& mesh, const Vec3& position);
+	bool reroute(const NavMesh& mesh, const Vec3& position, float now);
+	float pathLeft(const Vec3& position) const; // +0x14c (3-D, 0x10093e50)
 	void lookAhead(const NavMesh& mesh, const Vec3& position, float now);
 	int rayPolygons() const { return m_settings.soldier ? 8 : 30; }
 
@@ -152,6 +195,59 @@ private:
 	float m_bendAt = -100;
 	float m_bend = 0;
 };
+
+// The infantry steering (0x100ce860, run by InfanteryMoveTo 0x1008fc90,
+// FloatingTankMoveTo 0x1008c7c0 and the MoveToObject interpreter) and its
+// sidestep round other objects (0x100e63c0), for the moves that enable it
+// (vt+0x48: MoveToFinding and MoveToObjectFinding, 0x100f9ce0).
+//
+// An object in the bots' world list (the follower's +0x64 vector) as the
+// sidestep sees it.
+struct SidestepObstacle {
+	int id = -1;
+	Vec3 position;          // its origin (vt+0x2c)
+	float radius = 0;       // its physical part's centre radius (+0x40 vt+0x30)
+	float health = 1;       // +0x40 vt+0x10
+	bool soldier = false;   // ITSoldier (flag 0x200): never stepped round
+	bool fixed = false;     // ITObstacle (flag 0x2000)
+	bool mobile = true;     // has a Mobile part (+0x3c); without one only an ITObstacle counts
+};
+
+// The move's sidestep state (+0x64..+0x80).
+struct SidestepState {
+	int obstacle = -1;  // +0x64
+	Vec3 point;         // +0x68: where to pass it (x/z)
+	float radius = 0;   // +0x70: the room kept round it
+	float distance = 0; // +0x74: how far beside it the point lies
+	Vec3 at;            // +0x78: where it stood (x/z)
+	bool still = false; // +0x80: fixed, or below the wreck health
+};
+
+struct SidestepSense {
+	Vec3 position;            // the bot's (its controlled object's)
+	int self = -1;            // that object
+	Vec3 steer;               // the follower's steering point
+	Vec3 ahead;               // its first waypoint over 10 m on (0x100941c0)
+	Vec3 goal;                // the move's goal (+0x1c)
+	int target = -1;          // a MoveToObject's object (ce860's param_5), -1 for a MoveTo
+	bool avoidTarget = false; // MoveToObjectFinding's vt+0x20 (+0xf5): step round it too
+	// The bot's +0xe8 and +0xec (vt+0x198, vt+0x1a0): the objects its
+	// orders head for (an assist's or repair's target, a vehicle to enter).
+	int related[2] = {-1, -1};
+	float wreckHealth = 0.3f; // AIMain +0xdc (DAT_10139500 vt+0x68)
+	std::vector<SidestepObstacle> obstacles;
+	// The bot's map, for the rays beside an obstacle (no mesh: no room).
+	const NavMesh* mesh = nullptr;
+	const CostProfile* profile = nullptr;
+	float heightTolerance = 5.0f;
+};
+
+// 0x100ce860: the way to steer (unit, x/z; (1, 0) on the point) in
+// `direction`. True when the move ends here: the goal lies inside the
+// obstacle's room and the bot is as close as it gets (the interpreters
+// then stop the soldier and end the move), or the sidestep met a fixed
+// obstacle off the mesh (`direction` is then left as it was).
+bool sidestepSteer(SidestepState& state, const SidestepSense& sense, Vec3& direction);
 
 // The ground vehicles' driving from the Mobile and ControlInfo plug-ins:
 // CarMoveTo 0x10091050 (state machine 0x100e8170, controller 0x100e9d40),
@@ -197,10 +293,14 @@ struct DriveObstacle {
 };
 
 // A mesh ray for the driver: whether it is clear to the end, else how far
-// it got.
+// it got, and the cost class of the last polygon it tried to enter (the
+// rays' param_11; -1 for none). The drivers' rays (0x100e8170 and the
+// tank's and mech's machines) stop at cost class 6 (and 7) and take the
+// map's climb test.
 struct DriveRay {
 	bool clear = true;
 	float distance = 0;
+	int lastClass = -1;
 };
 
 // What the driver sees this tick.
@@ -262,9 +362,8 @@ float tankStopThrottle(float forwardSpeed);
 
 // FloatingTankMoveTo (0x1008c7c0): the hover tank strafes to its steering
 // point with a velocity loop (0x100de350) and never turns its hull (its
-// turn control, PIRoll, is the look's). `direction` is the unit 2-D way to
-// the steering point (the infantry steering 0x100ce860, without the
-// dynamic-obstacle sidestep 0x100e63c0, which is not rewritten),
+// turn control, PIRoll, is the look's). `direction` is the unit 2-D way
+// from the infantry steering (sidestepSteer, 0x100ce860),
 // `acceleration` the change of velocity since the last call over its time.
 struct FloatingTankOutput {
 	float throttle = 0; // PIThrottle

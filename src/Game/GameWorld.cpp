@@ -379,9 +379,11 @@ void GameWorld::tick(float seconds)
 		addBodies();
 		stepPhysics(seconds);
 	}
+	setRagDollLevels();
 	stepPlayers(seconds);
 	stepDrones(seconds);
 	stepSeatCorpses(seconds);
+	stepCorpses(seconds);
 	stepAbilities(seconds);
 	stepCommander(seconds);
 	stepVehicleDamage(seconds);
@@ -707,7 +709,8 @@ void GameWorld::shockDowned(Player& victim, const ProjectileSettings& shock, flo
 void GameWorld::fire(const Player& player, float aimPitch)
 {
 	const physics::SoldierBody& body = player.body;
-	const float yaw = body.yawDegrees * 3.14159265f / 180.0f;
+	const float look = lookYaw(player);
+	const float yaw = look * 3.14159265f / 180.0f;
 	const float pitch = aimPitch * 3.14159265f / 180.0f;
 	const physics::Vec3 direction {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
 	Projectile p;
@@ -719,11 +722,11 @@ void GameWorld::fire(const Player& player, float aimPitch)
 	p.shooter = player.object;
 	p.player = player.id;
 	p.team = player.team;
-	p.yaw = body.yawDegrees;
+	p.yaw = look;
 	m_projectiles.push_back(p);
 	if (!player.muzzleEffect.empty()) {
 		m_effects.spawn(player.muzzleEffect, p.origin + direction * 0.3f,
-			physics::Mat3::fromYawPitchRoll({body.yawDegrees, -aimPitch, 0}));
+			physics::Mat3::fromYawPitchRoll({look, -aimPitch, 0}));
 	}
 }
 
@@ -1130,7 +1133,7 @@ void GameWorld::steerSeeker(Projectile& p, float seconds)
 	if (!shooter || !shooter->alive) {
 		return;
 	}
-	const float yaw = shooter->body.yawDegrees * 3.14159265f / 180.0f;
+	const float yaw = lookYaw(*shooter) * 3.14159265f / 180.0f;
 	const float pitch = shooter->input.aimPitch * 3.14159265f / 180.0f;
 	const physics::Vec3 aim {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
 	const physics::Vec3 eye = shooter->body.position + physics::Vec3 {0, 0.6f, 0};
@@ -1503,6 +1506,8 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 	info.manDown = player->manDown;
 	info.squad = player->squad;
 	info.cloaked = player->alive && player->cloaked;
+	info.spawnedProne = player->alive && player->spawnedProne;
+	info.battery = player->battery;
 	info.squadLeader = player->squadLeader;
 	info.commander = commander(player->team) == player->id;
 	if (player->alive && player->vehicle) {
@@ -1516,7 +1521,7 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 		}
 	} else if (player->alive) {
 		info.position = player->body.position - physics::Vec3 {0, 1.0f, 0};
-		info.yaw = player->body.yawDegrees;
+		info.yaw = lookYaw(*player);
 		info.velocity = player->body.velocity;
 	} else if (const world::Object* body = player->manDown ? m_objects.find(player->object) : nullptr) {
 		info.position = {body->position().x, body->position().y, body->position().z}; // where it lies
@@ -1724,7 +1729,10 @@ bool GameWorld::spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& 
 			if (!at) {
 				return false;
 			}
-			if (!scatterOnLeader(*leader, position, yaw)) {
+			bool prone = false;
+			if (scatterOnLeader(*leader, position, yaw, &prone)) {
+				player.spawnedProne = prone;
+			} else {
 				// No try fits: the rewrite's fallback, a metre behind.
 				const float y = leader->body.yawDegrees * 3.14159265f / 180.0f;
 				position = leader->body.position - physics::Vec3 {std::sin(y), 1.0f, std::cos(y)};
@@ -1748,11 +1756,14 @@ bool GameWorld::spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& 
 // height through the objects; standing on the higher of them plus
 // spawnpoint-terrain-offset (1.01) when that is no more than the ray's
 // reach below, and with the way from the leader to that spot clear
-// (0x006f2d20). The member faces the leader (0x005b1d30). Not rewritten:
-// the stance checks (the soldier's shape fitting standing, else prone,
-// slot 0x14) and the extra test some callers ask for (DAT_00b4bb94 slot
-// 0xc, not identified).
-bool GameWorld::scatterOnLeader(const Player& leader, physics::Vec3& feet, float& yaw)
+// (0x006f2d20). Then the stance (the leader's soldier interface 0xc4d7
+// slot 0x14, 0x00585d00 -> its response's slot 0x98, 0x006c3340): the
+// soldier's spheres fitting there standing, else prone (the spawn point's
+// +0x18a: the member starts prone), else the try fails. The member faces
+// the leader (0x005b1d30). Not rewritten: the extra test some callers ask
+// for (IAIPathfindingCourier slot 0xc, DAT_00b4bb94; the callers passing
+// it are not traced).
+bool GameWorld::scatterOnLeader(const Player& leader, physics::Vec3& feet, float& yaw, bool* prone)
 {
 	constexpr float kMinDistance = 3, kMaxDistance = 9; // spawnpoint-scatter-mindist/-maxdist
 	constexpr float kTerrainOffset = 1.01f;             // spawnpoint-terrain-offset
@@ -1780,6 +1791,16 @@ bool GameWorld::scatterOnLeader(const Player& leader, physics::Vec3& feet, float
 			if (!lineOfSight(base, spot, leader.object)) {
 				continue;
 			}
+			bool lying = false;
+			if (!soldierFits({p.x, y, p.z}, SoldierPose::Stand, leader.object)) {
+				if (!soldierFits({p.x, y, p.z}, SoldierPose::Prone, leader.object)) {
+					continue;
+				}
+				lying = true;
+			}
+			if (prone) {
+				*prone = lying;
+			}
 			feet = {p.x, y - 1.0f, p.z}; // the origin a metre over the feet
 			const physics::Vec3 toLeader = leader.body.position - physics::Vec3 {p.x, y, p.z};
 			yaw = physics::lengthSquared(toLeader) < 1 ? leader.body.yawDegrees : std::atan2(toLeader.x, toLeader.z) * 57.29578f;
@@ -1787,6 +1808,32 @@ bool GameWorld::scatterOnLeader(const Player& leader, physics::Vec3& feet, float
 		}
 	}
 	return false;
+}
+
+// Whether a soldier fits at `origin` in a stance (physics::soldierFits,
+// 0x006c3340): against the soldier collision LOD of the objects nearby,
+// the static objects and the vehicles (`ignore`, the soldier's own, aside;
+// and the response types 0xc42e/0xc42f, which the rewrite doesn't have).
+bool GameWorld::soldierFits(const physics::Vec3& origin, SoldierPose pose, uint32_t ignore) const
+{
+	const int stance = static_cast<int>(pose);
+	if (!physics::soldierFits(m_collision, origin, stance)) {
+		return false;
+	}
+	for (const Body& body : m_bodies) {
+		if (body.soldierMesh && body.object != ignore
+			&& !physics::soldierFits(*body.soldierMesh, origin, stance, body.body.rotation, body.body.position)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+void GameWorld::setBattery(int id, float battery)
+{
+	if (Player* player = findPlayer(id)) {
+		player->battery = battery;
+	}
 }
 
 void GameWorld::setUnlocks(int id, std::vector<std::string> containers, bool all)
@@ -1874,7 +1921,8 @@ std::vector<GameWorld::ControlPointInfo> GameWorld::controlPointList() const
 	for (const ControlPoint& point : m_controlPoints) {
 		const world::ObjectTemplate* t = point.object->objectTemplate();
 		const world::Vec3& p = point.object->position();
-		list.push_back({point.id, point.team, {p.x, p.y, p.z}, t ? number(*t, "radius", 10) : 10});
+		list.push_back({point.id, point.team, {p.x, p.y, p.z}, t ? number(*t, "radius", 10) : 10,
+			!(t && number(*t, "unableToChangeTeam", 0) != 0)});
 	}
 	return list;
 }
@@ -1910,6 +1958,7 @@ void GameWorld::setInput(int id, const SoldierInput& input)
 world::Object* GameWorld::spawnSoldier(Player& player)
 {
 	const int team = player.team;
+	player.spawnedProne = false;
 	std::vector<world::Object*> points, fallback;
 	for (const auto& owned : m_objects.objects()) {
 		world::Object& object = *owned;
@@ -2007,6 +2056,7 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	// mesh's lowest point is at -1); the mesh's origin is at the feet.
 	player.body.position = {where.x, where.y + 1.0f, where.z};
 	player.body.yawDegrees = facing;
+	player.control.reset();
 	player.body.world = &m_collision;
 	// The kit's rifle (EU_Assault / Pac_Assault).
 	// What the kit carries, by slot.
@@ -2028,6 +2078,12 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 				|| (!player.allUnlocked
 					&& std::find(player.unlocked.begin(), player.unlocked.end(), container->name()) == player.unlocked.end())) {
 				continue;
+			}
+			// An unlock's Ability component: its increasedRepairAbility
+			// goes to the player when above 0 (0x005706b0), the last one
+			// taken winning.
+			if (const float modifier = number(*container, "ability.increasedRepairAbility", 0); modifier > 0) {
+				player.abilityModifier = modifier;
 			}
 			for (const world::ChildTemplate& inner : container->children()) {
 				const world::ObjectTemplate* item = m_templates.find(inner.name);
@@ -2115,6 +2171,11 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 			player.kitObject = worn->id();
 		}
 	}
+	// A fresh kit's battery is empty (kit +0x1bc, 0 from 0x00562a80),
+	// taken by the soldier as it picks the kit up (0x0058b680).
+	if (player.kitObject) {
+		player.battery = 0;
+	}
 	if (player.kitObject) {
 		raise("PickupKit", {ScriptValue::player(player.id), ScriptValue::object(player.kitObject)});
 	}
@@ -2166,20 +2227,25 @@ void GameWorld::kill(Player& victim, Player* attacker, uint32_t weapon)
 	// bundle fades in over 0.4 s and holds its last frame), the soldier
 	// keeps it as its dead seat (+0x244, 0x005c7790) and is posed by it
 	// from then on (0x005ef250): the body stays slumped there, no ragdoll.
-	// A seat without one ejects the body at its exit point with a ragdoll
-	// pushed along the soldier's forward by rd_dieInVehicleForce (100);
-	// the rewrite has no ragdoll that outlives the player's death, so that
-	// body is gone at once. In a vehicle that is destroyed, the occupants
-	// die and are deleted (0x005cacf0): gone at once too.
-	bool slumped = false;
+	// A seat without one throws the body out at the seat's exit (as a
+	// living soldier leaves) as a ragdoll pushed along its forward by
+	// rd_dieInVehicleForce (100, 0x005f0f50 with +0x2eb); the body then
+	// outlives the player's death (PlayerDeath at once: no man down in a
+	// vehicle) as a corpse (stepCorpses). In a vehicle that is destroyed,
+	// the occupants die and are deleted (0x005cacf0): gone at once.
+	bool slumped = false, thrown = false, deleted = false;
 	if (victim.vehicle) {
+		deleted = true;
 		if (Body* body = findBody(victim.vehicle);
 			body && victim.seat >= 0 && static_cast<size_t>(victim.seat) < body->occupants.size()) {
-			body->occupants[static_cast<size_t>(victim.seat)] = -1;
-			if (victim.seat == 0 && body->vehicle) {
+			const int seat = victim.seat;
+			body->occupants[static_cast<size_t>(seat)] = -1;
+			if (seat == 0 && body->vehicle) {
 				body->vehicle->setInput({});
 			}
-			if (body->wreckTime < 0 && victim.seatAnimation && victim.skeleton && victim.seatAnimation->play("die")) {
+			if (body->wreckTime >= 0) {
+				// deleted with the vehicle
+			} else if (victim.seatAnimation && victim.skeleton && victim.seatAnimation->play("die")) {
 				SeatCorpse corpse;
 				corpse.object = soldier;
 				corpse.vehicle = victim.vehicle;
@@ -2191,6 +2257,32 @@ void GameWorld::kill(Player& victim, Player* attacker, uint32_t weapon)
 				m_seatCorpses.push_back(std::move(corpse));
 				victim.seatAnimationPath.clear();
 				slumped = true;
+				deleted = false;
+			} else if (world::Object* corpse = m_objects.find(soldier)) {
+				// Out at the seat's exit, facing as the vehicle (enterOrLeaveVehicle's
+				// placement), in the pose it had in the seat.
+				physics::Vec3 exit {-2.5f, 0, 0};
+				const world::Object* vehicleObject = m_objects.find(body->object);
+				if (const world::ObjectTemplate* t = vehicleObject ? vehicleObject->objectTemplate() : nullptr) {
+					const VehicleLayout& layout = vehicleLayout(*t);
+					if (static_cast<size_t>(seat) < layout.seats.size() && layout.seats[static_cast<size_t>(seat)].hasExit) {
+						exit = layout.seats[static_cast<size_t>(seat)].exit;
+					} else if (const auto it = t->settings().find("altSoldierExitPosition"); it != t->settings().end()) {
+						exit = parseVec3(it->second);
+					}
+				}
+				physics::Vec3 at = body->body.position + body->body.rotation.transform(exit);
+				at.y = std::max(at.y, m_ground.height ? m_ground.height(at.x, at.z) : at.y) + 1.0f;
+				victim.body.position = at;
+				victim.body.velocity = {};
+				victim.body.yawDegrees = body->body.rotation.yawPitchRoll().x;
+				corpse->setPosition({at.x, at.y - 1.0f, at.z});
+				corpse->setRotation({victim.body.yawDegrees, 0, 0});
+				corpse->setHidden(false);
+				victim.seatAnimation.reset();
+				victim.seatAnimationPath.clear();
+				thrown = startRagDoll(victim, true);
+				deleted = false;
 			}
 		}
 	}
@@ -2220,7 +2312,11 @@ void GameWorld::kill(Player& victim, Player* attacker, uint32_t weapon)
 			}
 		}
 	} else {
-		finishDeath(victim, slumped);
+		if (onFoot && !victim.ragDoll) {
+			startRagDoll(victim); // without man down the body falls at once (0x005f0f50)
+		}
+		(void)thrown;
+		finishDeath(victim, slumped ? BodyFate::Seat : deleted ? BodyFate::Remove : BodyFate::Corpse);
 	}
 }
 
@@ -2283,21 +2379,143 @@ void GameWorld::stepSeatCorpses(float seconds)
 
 // The end of man down (its time is up, the body is finished off, or the
 // player spawns again): the scripts hear PlayerDeath (a ticket lost in
-// conquest) and the body goes.
-void GameWorld::finishDeath(Player& victim, bool keepBody)
+// conquest). The body stays as a corpse with its ragdoll until its
+// armour's countdown removes it (stepCorpses), unless it is slumped in a
+// seat or deleted with a destroyed vehicle.
+void GameWorld::finishDeath(Player& victim, BodyFate fate)
 {
 	const uint32_t soldier = victim.object;
 	victim.manDown = false;
 	victim.manDownLeft = 0;
-	victim.ragDoll.reset();
 	raise("PlayerDeath", {ScriptValue::player(victim.id), ScriptValue::object(soldier)});
 	if (soldier) {
-		m_hitPoints.erase(soldier);
-		if (!keepBody) {
-			m_objects.remove(soldier);
+		if (fate == BodyFate::Corpse && m_objects.find(soldier)) {
+			// A wreck: its armour stays at 0 or below.
+			m_hitPoints[soldier] = std::min(0.0f, m_hitPoints.count(soldier) ? m_hitPoints[soldier] : 0.0f);
+			Corpse corpse;
+			corpse.object = soldier;
+			corpse.ragDoll = std::move(victim.ragDoll);
+			corpse.skeleton = victim.skeleton;
+			corpse.pose = victim.pose;
+			corpse.worldPose = victim.worldPose;
+			corpse.diedAt = victim.diedAt;
+			if (const world::ObjectTemplate* t = victim.soldierTemplate.empty() ? nullptr : m_templates.find(victim.soldierTemplate)) {
+				corpse.landedDelay = number(*t, "ragdollLandedDelay", 4);
+				corpse.stayAsWreck = number(*t, "armor.timeToStayAsWreck", 20);       // 0x00630040: 20
+				corpse.afterDestroyed = number(*t, "armor.timeToStayAfterDestroyed", 0); // and 0
+			}
+			m_corpses.push_back(std::move(corpse));
+		} else {
+			m_hitPoints.erase(soldier);
+			if (fate == BodyFate::Remove) {
+				m_objects.remove(soldier);
+			}
 		}
 	}
+	victim.ragDoll.reset();
 	victim.object = 0;
+}
+
+// The soldier's armour once it is a wreck (0x00654d80 -> 0x00652380 while
+// its hit points are 0 or less, the template's +0x166 set and
+// timeToStayAsWreck not -1): the countdown begins (+0x64) once
+// timeToStayAsWreck seconds have passed since the death and the body has
+// landed (0x005eda20: no ragdoll, or one that touched something
+// ragdollLandedDelay after the death; a body still in a vehicle needn't
+// land), or after 60 s (*0x00a79388) whatever; timeToStayAfterDestroyed
+// later the server removes the object (0x00651db0). (The original also
+// fades the body's geometry out over that time, +0x44 slot 0x104.) The
+// ragdoll keeps stepping meanwhile.
+void GameWorld::stepCorpses(float seconds)
+{
+	for (auto it = m_corpses.begin(); it != m_corpses.end();) {
+		Corpse& corpse = *it;
+		world::Object* body = m_objects.find(corpse.object);
+		if (!body) {
+			m_hitPoints.erase(corpse.object);
+			it = m_corpses.erase(it);
+			continue;
+		}
+		if (corpse.ragDoll && corpse.skeleton) {
+			const anim::RagDollTemplate* ragDoll = corpse.ragDoll->ragDollTemplate();
+			const anim::Vec mid = corpse.ragDoll->update(
+				seconds, ragDollWorld(corpse.ragDoll->middle(), ragDoll ? ragDoll->settings.completeCollRadius : 1.5f));
+			corpse.ragDoll->pose(*corpse.skeleton, corpse.pose, corpse.worldPose);
+			playRagDollImpact(*corpse.ragDoll, mid);
+			body->setPosition({mid[0], mid[1], mid[2]});
+			body->setRotation({0, 0, 0});
+		}
+		const bool landed = !corpse.ragDoll || (corpse.ragDoll->touched() && m_time > corpse.diedAt + corpse.landedDelay);
+		const bool begin = (m_time > corpse.diedAt + corpse.stayAsWreck && landed) || m_time > corpse.diedAt + 60;
+		if (begin && corpse.fadeFrom < 0) {
+			corpse.fadeFrom = m_time;
+		}
+		if (corpse.fadeFrom >= 0 && corpse.afterDestroyed + corpse.fadeFrom - m_time <= 0) {
+			m_hitPoints.erase(corpse.object);
+			m_objects.remove(corpse.object);
+			it = m_corpses.erase(it);
+			continue;
+		}
+		++it;
+	}
+}
+
+std::vector<uint32_t> GameWorld::corpses() const
+{
+	std::vector<uint32_t> objects;
+	for (const Corpse& corpse : m_corpses) {
+		objects.push_back(corpse.object);
+	}
+	return objects;
+}
+
+void GameWorld::setCamera(const physics::Vec3& position, const physics::Vec3& forward)
+{
+	m_hasCamera = true;
+	m_cameraPosition = position;
+	m_cameraForward = forward;
+}
+
+// The ragdolls' levels of detail (the manager's frame 0x008ae120): with a
+// camera, each body's distance to it (its middle particle, +0x20), three
+// times as far when behind it; level 1 for each with three awake bodies
+// nearer (anim::ragDollLevels). The rewrite's bodies are never
+// network-driven, so level 2 (ragdoll_clientMaxUpdateTime) doesn't arise.
+void GameWorld::setRagDollLevels()
+{
+	std::vector<anim::RagDoll*> bodies;
+	for (const auto& owned : m_players) {
+		if (owned->ragDoll) {
+			bodies.push_back(owned->ragDoll.get());
+		}
+	}
+	for (Corpse& corpse : m_corpses) {
+		if (corpse.ragDoll) {
+			bodies.push_back(corpse.ragDoll.get());
+		}
+	}
+	if (!m_hasCamera) {
+		for (anim::RagDoll* body : bodies) {
+			body->setLevelOfDetail(0);
+		}
+		return;
+	}
+	std::vector<float> distances;
+	std::vector<bool> awake;
+	for (const anim::RagDoll* body : bodies) {
+		const anim::Vec mid = body->middle();
+		const physics::Vec3 d = physics::Vec3 {mid[0], mid[1], mid[2]} - m_cameraPosition;
+		float distance = std::sqrt(physics::lengthSquared(d));
+		if (physics::dot(d, m_cameraForward) < 0) {
+			distance *= 3;
+		}
+		distances.push_back(distance);
+		awake.push_back(!body->sleeping());
+	}
+	const std::vector<int> levels = anim::ragDollLevels(distances, awake);
+	for (size_t i = 0; i < bodies.size(); ++i) {
+		bodies[i]->setLevelOfDetail(levels[i]);
+	}
 }
 
 // A medic's shock brings a downed soldier back where it lies (the
@@ -2347,6 +2565,7 @@ void GameWorld::revive(Player& victim, Player* medic, float restoreHitPoints)
 		body->setPosition({mid[0], victim.body.position.y - 1.0f, mid[2]});
 		body->setRotation({victim.body.yawDegrees, 0, 0});
 		victim.lastYaw = victim.body.yawDegrees;
+		victim.control.reset();
 		victim.ragDoll.reset();
 		if (victim.skeleton) {
 			victim.pose = anim::setupPose(*victim.skeleton);
@@ -2395,7 +2614,7 @@ constexpr const char* kRagDollScript = "Objects/Soldiers/Common/Animations/ragDo
 // body's velocity and the explosion's push, if any (addForce, bone -2).
 // From then on the object sits at the middle particle, unturned, and the
 // pose is relative to it.
-bool GameWorld::startRagDoll(Player& victim)
+bool GameWorld::startRagDoll(Player& victim, bool thrown)
 {
 	world::Object* body = m_objects.find(victim.object);
 	const anim::RagDollTemplate* ragDoll = m_animationSystems ? m_animationSystems->ragDoll(kRagDollScript) : nullptr;
@@ -2418,12 +2637,19 @@ bool GameWorld::startRagDoll(Player& victim)
 	victim.ragDoll = std::make_unique<anim::RagDoll>();
 	const physics::Vec3& v = victim.body.velocity;
 	victim.ragDoll->start(*ragDoll, pose, {v.x, v.y, v.z});
-	// 0x005ee4d0 keeps the push for 0.5 s.
-	const physics::Vec3 push = victim.ragDollForceAt >= 0 && m_time - victim.ragDollForceAt <= 0.5
-		? victim.ragDollForce * ragDoll->settings.expForceMod
-		: physics::Vec3 {};
-	if (physics::lengthSquared(push) > 0) {
-		victim.ragDoll->addForce(-2, {push.x, push.y, push.z});
+	if (thrown) {
+		// 0x005f0f50: thrown out of its seat, pushed along the object's
+		// forward (its matrix's z row) by rd_dieInVehicleForce, bone -1.
+		const float force = ragDoll->settings.dieInVehicleForce;
+		victim.ragDoll->addForce(-1, {s * force, 0, c * force});
+	} else {
+		// 0x005ee4d0 keeps the push for 0.5 s.
+		const physics::Vec3 push = victim.ragDollForceAt >= 0 && m_time - victim.ragDollForceAt <= 0.5
+			? victim.ragDollForce * ragDoll->settings.expForceMod
+			: physics::Vec3 {};
+		if (physics::lengthSquared(push) > 0) {
+			victim.ragDoll->addForce(-2, {push.x, push.y, push.z});
+		}
 	}
 	victim.ragDollForce = {};
 	victim.ragDollForceAt = -1;
@@ -2563,28 +2789,48 @@ void GameWorld::stepRagDoll(Player& player, float seconds)
 	const anim::Vec mid = player.ragDoll->update(
 		seconds, ragDollWorld(player.ragDoll->middle(), ragDoll ? ragDoll->settings.completeCollRadius : 1.5f));
 	player.ragDoll->pose(*player.skeleton, player.pose, player.worldPose);
-	// The impact sound (polled each soldier tick, 0x0058d350 -> 0x008a79f0;
-	// played by 0x007fd780 through the material manager's slot 0x74 with
-	// key 0x157c): the cell of Human_body (24) and the surface's material,
-	// its sound template 0 (S_Soldier_RagDoll_Impact on most; material 1,
-	// water, S_Water_Splash). The key's mapping to material 24 is read from
-	// the data, not traced.
-	float speed = 0;
-	uint32_t material = 0;
-	if (player.ragDoll->takeImpact(speed, material) && m_materials) {
-		const physics::MaterialCell* cell = m_materials->cell(24, material);
-		if (cell && !cell->soundTemplates.empty() && !cell->soundTemplates[0].empty()) {
-			m_sounds.push_back({cell->soundTemplates[0], {mid[0], mid[1], mid[2]}});
-		}
-	}
+	playRagDollImpact(*player.ragDoll, mid);
 	body->setPosition({mid[0], mid[1], mid[2]});
 	body->setRotation({0, 0, 0});
+}
+
+// The impact sound (polled each soldier tick, 0x0058d350 -> 0x008a79f0;
+// played by 0x007fd780): the material manager's slot 0x74 (0x0060a6d0)
+// with material 0x157c (5500, Soldier_FootSteps) against the surface's,
+// its sound template 4 (S_Soldier_RagDoll_Impact), falling back to the
+// cell against material 0 when that cell has none.
+void GameWorld::playRagDollImpact(anim::RagDoll& ragDoll, const anim::Vec& at)
+{
+	float speed = 0;
+	uint32_t material = 0;
+	if (!ragDoll.takeImpact(speed, material) || !m_materials) {
+		return;
+	}
+	const std::string* sound = nullptr;
+	for (const uint32_t surface : {material, 0u}) {
+		const physics::MaterialCell* cell = m_materials->cell(kSoldierFootStepsMaterial, surface);
+		if (cell && cell->soundTemplates.size() > 4 && !cell->soundTemplates[4].empty()) {
+			sound = &cell->soundTemplates[4];
+			break;
+		}
+	}
+	if (sound) {
+		m_sounds.push_back({*sound, {at[0], at[1], at[2]}});
+	}
 }
 
 const anim::RagDoll* GameWorld::ragDoll(uint32_t soldier) const
 {
 	const Player* player = downedPlayer(soldier);
-	return player ? player->ragDoll.get() : nullptr;
+	if (player) {
+		return player->ragDoll.get();
+	}
+	for (const Corpse& corpse : m_corpses) {
+		if (corpse.object == soldier) {
+			return corpse.ragDoll.get();
+		}
+	}
+	return nullptr;
 }
 
 // Seated: the soldier at its seat (seatInformation's position and
@@ -2689,6 +2935,12 @@ bool GameWorld::skeletonPose(uint32_t object, const anim::Skeleton& skeleton, st
 	}
 	if (!player) {
 		for (const SeatCorpse& corpse : m_seatCorpses) {
+			if (corpse.object == object && corpse.worldPose.size() == skeleton.nodes.size()) {
+				world = corpse.worldPose;
+				return true;
+			}
+		}
+		for (const Corpse& corpse : m_corpses) {
 			if (corpse.object == object && corpse.worldPose.size() == skeleton.nodes.size()) {
 				world = corpse.worldPose;
 				return true;
@@ -2830,10 +3082,16 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 					? driverInputScale(body->empLevel, hitPoints(body->object), *vehicleObject->objectTemplate())
 					: 1.0f;
 				body->vehicle->setInput({input.throttle * scale, input.strafe * scale});
-			} else if (!disabled(*body) && player.seat != 0) {
-				// The guns: dead while the EMP level is above 0 (the rewrite's
-				// assumption; 0x005ca2e0 leaves a gunner's aim, PIMouseLook,
-				// alone, and what an EMP does to a firearm is not traced).
+			} else if (body->wreckTime < 0 && player.seat != 0) {
+				// The guns under EMP keep firing: the PlayerControlObject's
+				// input filter (0x005ca2e0) scales only the driver's throttle,
+				// yaw, pitch and roll and leaves PIFire and a gunner's aim
+				// (PIMouseLook) alone, unless the seat's armour is its own
+				// (a child's), which the rewrite's vehicles don't have; no
+				// firearm component reads the level (only the active defence's
+				// ammo, 0x005d9560, and the camouflage's drain, 0x005d9030).
+				// An auto-controlled one loses every input above level 1 (see
+				// the sentry drone's gun).
 				stepGunner(player, *body, seconds);
 			}
 			// The soldier rides in the seat.
@@ -2939,12 +3197,12 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 					++it;
 				}
 			}
-			const float yaw = player.body.yawDegrees * 3.14159265f / 180.0f;
+			const float yaw = lookYaw(player) * 3.14159265f / 180.0f;
 			physics::Vec3 at = player.body.position + physics::Vec3 {std::sin(yaw), 0, std::cos(yaw)} * 1.0f;
 			at.y = m_ground.height(at.x, at.z);
 			const auto projectile = inHand->settings().find("projectileTemplate");
 			world::ObjectTemplate* hub = projectile != inHand->settings().end() ? m_templates.find(projectile->second) : nullptr;
-			if (world::Object* placed = hub ? m_objects.create(hub, {at.x, at.y, at.z}, {player.body.yawDegrees, 0, 0}) : nullptr) {
+			if (world::Object* placed = hub ? m_objects.create(hub, {at.x, at.y, at.z}, {lookYaw(player), 0, 0}) : nullptr) {
 				placed->setTeam(player.team);
 				Supply supply {placed->id(), player.id, player.team, ability, inHand->name()};
 				// A hub that carries a SupplyObject works as one (the
@@ -2973,10 +3231,10 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 				if (const auto old = m_beacons.find({player.team, player.squad}); old != m_beacons.end()) {
 					m_objects.remove(old->second);
 				}
-				const float yaw = player.body.yawDegrees * 3.14159265f / 180.0f;
+				const float yaw = lookYaw(player) * 3.14159265f / 180.0f;
 				physics::Vec3 at = player.body.position + physics::Vec3 {std::sin(yaw), 0, std::cos(yaw)};
 				at.y = m_ground.height(at.x, at.z);
-				if (world::Object* placed = m_objects.create(beacon, {at.x, at.y, at.z}, {player.body.yawDegrees, 0, 0})) {
+				if (world::Object* placed = m_objects.create(beacon, {at.x, at.y, at.z}, {lookYaw(player), 0, 0})) {
 					placed->setTeam(player.team);
 					m_beacons[{player.team, player.squad}] = placed->id();
 				}
@@ -2993,10 +3251,10 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 			if (const auto old = m_deployed.find(key); old != m_deployed.end()) {
 				m_objects.remove(old->second);
 			}
-			const float yaw = player.body.yawDegrees * 3.14159265f / 180.0f;
+			const float yaw = lookYaw(player) * 3.14159265f / 180.0f;
 			physics::Vec3 at = player.body.position + physics::Vec3 {std::sin(yaw), 0, std::cos(yaw)};
 			at.y = m_ground.height(at.x, at.z);
-			if (world::Object* placed = m_objects.create(deployable, {at.x, at.y, at.z}, {player.body.yawDegrees, 0, 0})) {
+			if (world::Object* placed = m_objects.create(deployable, {at.x, at.y, at.z}, {lookYaw(player), 0, 0})) {
 				placed->setTeam(player.team);
 				m_deployed[key] = placed->id();
 			}
@@ -3012,6 +3270,8 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 	object->setRotation({player.body.yawDegrees, 0, 0});
 	followSoldier(player, *object);
 }
+
+float GameWorld::lookYaw(const Player& player) const { return player.body.yawDegrees + player.control.twist(); }
 
 void GameWorld::followSoldier(const Player& player, const world::Object& soldier)
 {
@@ -3032,9 +3292,23 @@ void GameWorld::followSoldier(const Player& player, const world::Object& soldier
 // segment test (collision-mesh slot 22, 0x006e5920 -> 0x006de850): no
 // radius. A crossing face gives a contact at the crossing with the face's
 // normal, as deep as the end point lies behind it. (The swept-sphere test
-// 0x006e2350, slot 24, is the soldiers'.) Not rewritten: the passes after
-// the vertices, which test the mesh's edges (its slot 0x70 lists), and
-// the vertical segment a mesh of under 4 vertices gets.
+// 0x006e2350, slot 24, is the soldiers'.)
+// Then the edge pass (the second of 0x006bb050's three; it runs for a root
+// vehicle against an object whose root has the non-mobile mesh response,
+// 0xc430 (0x006bfcc0, static objects), while *0x00a84214, 1, is set):
+// each edge of the vehicle LOD's steep faces (mesh slots 0x6c/0x70) at the
+// current pose, through the segment test from either end. Crossed from its
+// first end only: a push at that crossing along the face's normal; from
+// both: at the middle of the two crossings, along their normals' sum
+// flattened (y 0) and normalised, or from the crossing towards the
+// vehicle's origin when that sum is under 0.1 (*0x00a84230). The push is a
+// force of 3 (*0x00a8423c) at the point (node slot 0xa0, 0x006c7b10: an
+// acceleration and its torque about the centre of mass, no contact).
+// Not rewritten: the vertical probe of a part with under 4 vertices in the
+// vertex pass, the third pass (a mover's sphere LOD against a root), and
+// 0x006bb050's early exit for a vehicle whose component 0x9476 has type
+// 0x21 (its node traced along its motion first); the rewrite's vehicles
+// only meet static objects this way.
 void GameWorld::collideWithStatics(Body& body, const physics::Vec3& lastPosition, const physics::Mat3& lastRotation)
 {
 	for (const physics::Vec3& local : body.points) {
@@ -3051,6 +3325,16 @@ void GameWorld::collideWithStatics(Body& body, const physics::Vec3& lastPosition
 		}
 		body.response.addContact(contact.point - body.body.position, body.body.pointVelocity(contact.point), contact.normal,
 			contact.depth, material);
+	}
+	constexpr float kEdgePush = 3.0f;      // *0x00a8423c (0x008ed730)
+	constexpr float kEdgeMinNormal = 0.1f; // *0x00a84230 (0x008ed750)
+	for (const auto& edge : body.edges) {
+		const physics::Vec3 a = body.body.position + body.body.rotation.transform(body.points[edge[0]]);
+		const physics::Vec3 b = body.body.position + body.body.rotation.transform(body.points[edge[1]]);
+		physics::Vec3 point, normal;
+		if (m_vehicleCollision.edgeContact(a, b, body.body.position, kEdgeMinNormal, point, normal)) {
+			body.body.addForce(point - body.body.position, normal * kEdgePush);
+		}
 	}
 }
 
@@ -3263,6 +3547,7 @@ bool GameWorld::abilityOf(const world::ObjectTemplate& gadget, Ability& ability,
 	ability.radius = number(gadget, "ammo.abilityRadius", 0);
 	ability.strength = number(gadget, "ammo.abilityStrength", 0);
 	ability.material = static_cast<uint32_t>(integer(gadget, "ammo.abilityMaterial", 0));
+	ability.drain = number(gadget, "ammo.abilityDrain", 0);
 	whileFiring = integer(gadget, "ammo.onlyActiveWhileFiring", 0) != 0;
 	return true;
 }
@@ -3279,8 +3564,9 @@ std::vector<uint32_t> GameWorld::supplyObjects() const
 // A ReplenishingAmmoComp's work (the object's update 0x005d8ac0): for
 // each target, strength / 30 a tick (the template keeps abilityStrength x
 // 0.033333, setter 0x005d7b00) times the material table's cell of the
-// ability's material and the target's armour material (0x005d7a40; the
-// holder's modifier, player slot 0x2a0 +0x48, not identified: 1):
+// ability's material and the target's armour material, times the
+// holder's increasedRepairAbility when above 0 (0x005d7a40: player slot
+// 0x2a0 -> +0x30c, +0x48):
 // - RTHeal (gameLogic slot 0x108 -> 0x004cc380 -> armour slot 0x48
 //   0x00655a00): that many per cent of the target's maximum hit points,
 //   for one of the team that can be repaired, alive and not full;
@@ -3290,29 +3576,47 @@ std::vector<uint32_t> GameWorld::supplyObjects() const
 // Only the holder's team or team 0 (0x005d7d40). The targets come from a
 // sphere of abilityRadius round the holder (0x005d8740), rescanned every
 // second with none and every two seconds with some, those held treated
-// in between even out of reach. Not rewritten: the drain (abilityDrain /
-// 30 a tick per target treated, from the holder's battery, soldier
-// component 0xc4d7 slots 0x90/0x98, whose range is not identified) and
-// RTTeam (enemies only).
+// in between even out of reach.
+// The battery: nothing is treated unless the holder's battery holds
+// abilityDrain / 30 (template +0x6c, setter 0x005d7ae0; read through
+// 0x005d8160 -> 0x005d7fe0 -> soldier component 0xc4d7 slot 0x90), and
+// each target treated takes that much (0x005d81b0 -> slot 0x98 0x00586310,
+// only when it is there). The battery is the soldier's whose player owns
+// the object: a hub's owner off foot or dead has none (0).
+// RTTeam (slot 0x110) is used by no ammo in the game's data: not here.
 void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, int team, float seconds, uint32_t skip,
-	AbilityScan* scan)
+	AbilityScan* scan, Player* holder)
 {
+	const float drain = ability.drain * seconds;
+	float noBattery = 0;
+	float& battery = holder && holder->alive && !holder->vehicle && holder->battery >= 0 ? holder->battery : noBattery;
+	const float modifier = holder && holder->abilityModifier > 0 ? holder->abilityModifier : 1.0f;
 	const auto cellOf = [&](uint32_t object) {
 		const world::Object* target = m_objects.find(object);
 		const world::ObjectTemplate* t = target ? target->objectTemplate() : nullptr;
 		const uint32_t material = t ? static_cast<uint32_t>(integer(*t, "armor.defaultMaterial", 0)) : 0;
 		return m_materials ? m_materials->damageMod(ability.material, material) : 1.0f;
 	};
-	const auto amountFor = [&](uint32_t object) { return ability.strength * seconds * cellOf(object); };
+	const auto amountFor = [&](uint32_t object) { return modifier * ability.strength * seconds * cellOf(object); };
 	const auto heal = [&](uint32_t object, float percent) {
 		const world::Object* target = m_objects.find(object);
 		const world::ObjectTemplate* t = target ? target->objectTemplate() : nullptr;
 		const float left = hitPoints(object);
 		if (!t || left < 0 || percent <= 0) {
-			return;
+			return false;
 		}
 		const float most = number(*t, "armor.maxHitPoints", left);
+		if (left >= most) {
+			return false;
+		}
 		m_hitPoints[object] = std::min(left + percent * 0.01f * most, most);
+		return true;
+	};
+	// Each target treated draws on the battery, when it holds that much.
+	const auto draw = [&] {
+		if (battery >= drain) {
+			battery -= drain;
+		}
 	};
 	const auto inReach = [&](const physics::Vec3& p) { return physics::lengthSquared(p - at) <= ability.radius * ability.radius; };
 	// The targets: held ones between rescans.
@@ -3352,9 +3656,14 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 	if (scan) {
 		scan->timer += seconds;
 	}
+	if (drain > battery) {
+		return; // flat: nothing treated
+	}
 	for (const uint32_t object : found) {
 		if (!ability.ammo) {
-			heal(object, amountFor(object));
+			if (heal(object, amountFor(object))) {
+				draw();
+			}
 			continue;
 		}
 		Player* target = soldierPlayer(object);
@@ -3364,18 +3673,25 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 		const float percent = std::min(100.0f, amountFor(object));
 		const auto refill = [&](FireArm* weapon) {
 			if (!weapon) {
-				return;
+				return false;
+			}
+			if (weapon->magsLeft() >= weapon->settings().nrOfMags || weapon->settings().magSize < 0) {
+				m_resupply[object] = 0;
+				return false; // full: nothing builds up
 			}
 			float& owed = m_resupply[object];
 			owed += percent / 100.0f;
 			while (owed >= 1) {
 				owed -= 1;
 				if (!weapon->addMagazine()) {
-					owed = 0; // full: nothing builds up
+					owed = 0;
 				}
 			}
+			return true;
 		};
-		refill(target->weapon.get());
+		if (refill(target->weapon.get())) {
+			draw();
+		}
 	}
 }
 
@@ -3392,10 +3708,19 @@ void GameWorld::stepAbilities(float seconds)
 			continue; // a SupplyObject: stepCrates
 		}
 		const world::Vec3& p = m_objects.find(supply.object)->position();
-		applyAbility(supply.ability, {p.x, p.y, p.z}, supply.team, seconds, 0);
+		applyAbility(supply.ability, {p.x, p.y, p.z}, supply.team, seconds, 0, nullptr, findPlayer(supply.owner));
 	}
 	for (const auto& owned : m_players) {
 		Player& player = *owned;
+		// The battery fills by the kit's abilityRestoreRate / 30 a tick
+		// (kit +0x31c, setter 0x0056cd90) up to 1, in the soldier's
+		// update (0x0058d350).
+		if (player.alive && player.battery >= 0) {
+			const world::ObjectTemplate* kit = m_templates.find(
+				player.kitTemplate.empty() ? (player.team == 1 ? "Pac_Assault" : "EU_Assault") : player.kitTemplate);
+			const float rate = kit ? number(*kit, "abilityRestoreRate", 0) : 0;
+			player.battery = std::min(1.0f, player.battery + rate * seconds);
+		}
 		if (!player.alive || !player.abilityActive) {
 			m_abilityScans.erase(player.id);
 			continue;
@@ -3404,13 +3729,13 @@ void GameWorld::stepAbilities(float seconds)
 		bool whileFiring = false;
 		if (const world::ObjectTemplate* t = m_templates.find(player.weaponTemplate); t && abilityOf(*t, ability, whileFiring)) {
 			// Round the point a metre ahead of the soldier's hands.
-			const float yaw = player.body.yawDegrees * 3.14159265f / 180.0f;
+			const float yaw = lookYaw(player) * 3.14159265f / 180.0f;
 			const physics::Vec3 at = player.body.position + physics::Vec3 {std::sin(yaw), -0.5f, std::cos(yaw)} * 1.0f;
 			auto scan = m_abilityScans.try_emplace(player.id).first;
 			if (scan->second.targets.empty() && scan->second.timer == 0) {
 				scan->second.timer = 1; // the first scan at once
 			}
-			applyAbility(ability, at, player.team, seconds, 0, &scan->second);
+			applyAbility(ability, at, player.team, seconds, 0, &scan->second, &player);
 		}
 	}
 }
@@ -3494,6 +3819,7 @@ void GameWorld::enterOrLeaveVehicle(Player& player, world::Object& soldier)
 		player.body.position = at;
 		player.body.velocity = {};
 		player.body.yawDegrees = body->body.rotation.yawPitchRoll().x;
+		player.control.reset();
 		if (seat == 0 && body->vehicle) {
 			body->vehicle->setInput({});
 		}
@@ -3614,8 +3940,34 @@ void GameWorld::addBodies()
 				continue;
 			}
 			const physics::CollisionLod& lod = part.lods[1];
+			const size_t base = body.points.size();
 			for (const auto& v : lod.vertices) {
 				body.points.push_back({v[0], v[1], v[2]});
+			}
+			// The edge list (0x006e1430): a face whose normal (degenerate:
+			// up) has |y| <= cos 30 degrees (*0x00a85178) gives its edges
+			// v0-v1, v1-v2, v2-v0.
+			for (const physics::CollisionFace& face : lod.faces) {
+				const auto& v = lod.vertices;
+				if (face.vertices[0] >= v.size() || face.vertices[1] >= v.size() || face.vertices[2] >= v.size()) {
+					continue;
+				}
+				const physics::Vec3 p0 {v[face.vertices[0]][0], v[face.vertices[0]][1], v[face.vertices[0]][2]};
+				const physics::Vec3 a = physics::Vec3 {v[face.vertices[1]][0], v[face.vertices[1]][1], v[face.vertices[1]][2]} - p0;
+				const physics::Vec3 b = physics::Vec3 {v[face.vertices[2]][0], v[face.vertices[2]][1], v[face.vertices[2]][2]} - p0;
+				float ny = 1;
+				if (physics::lengthSquared(a) > 1e-8f && physics::lengthSquared(b) > 1e-8f) {
+					const physics::Vec3 n = physics::cross(a, b);
+					const float l = std::sqrt(physics::lengthSquared(n));
+					ny = l > 0 ? n.y / l : 0;
+				}
+				if (std::fabs(ny) > 0.866f) { // 0x3f5db22d
+					continue;
+				}
+				for (int k = 0; k < 3; ++k) {
+					body.edges.push_back({static_cast<uint16_t>(base + face.vertices[k]),
+						static_cast<uint16_t>(base + face.vertices[(k + 1) % 3])});
+				}
 			}
 			low = {std::min(low.x, lod.boundsMin[0]), std::min(low.y, lod.boundsMin[1]), std::min(low.z, lod.boundsMin[2])};
 			high = {std::max(high.x, lod.boundsMax[0]), std::max(high.y, lod.boundsMax[1]), std::max(high.z, lod.boundsMax[2])};
@@ -3758,7 +4110,7 @@ void GameWorld::launchDrone(Player& player, const world::ObjectTemplate& detonat
 	const physics::Vec3 start = parseVec3(detonator.settings().count("fire.projectileStartPosition")
 			? detonator.settings().find("fire.projectileStartPosition")->second
 			: "0/1.75/0");
-	const float yaw = player.body.yawDegrees * 3.14159265f / 180.0f;
+	const float yaw = lookYaw(player) * 3.14159265f / 180.0f;
 	const float c = std::cos(yaw), s = std::sin(yaw);
 	const physics::Vec3 feet {soldier->position().x, soldier->position().y, soldier->position().z};
 	Drone drone;
@@ -3766,7 +4118,7 @@ void GameWorld::launchDrone(Player& player, const world::ObjectTemplate& detonat
 	drone.team = player.team;
 	drone.position = feet + physics::Vec3 {start.x * c + start.z * s, start.y, -start.x * s + start.z * c};
 	drone.velocity = physics::Vec3 {s, 0, c} * number(detonator, "velocity", 0);
-	drone.yaw = player.body.yawDegrees;
+	drone.yaw = lookYaw(player);
 	drone.gunYaw = drone.yaw * 3.14159265f / 180.0f;
 	drone.hoverHeight = 1; // the soldier's physics origin over its feet (0x005f0a00)
 	if (const world::ObjectTemplate* force = findInTree(m_templates, t, "ForceObject")) {
@@ -3785,6 +4137,7 @@ void GameWorld::launchDrone(Player& player, const world::ObjectTemplate& detonat
 	if (const world::ObjectTemplate* gun = findInTree(m_templates, t, "GenericFireArm")) {
 		const FireArmSettings settings = FireArmSettings::fromTemplate(*gun);
 		drone.weapon = std::make_unique<FireArm>(settings);
+		drone.gunDeviation = DeviationBuildUp::fromTemplate(*gun);
 		drone.projectile = projectileFor(settings.projectileTemplate);
 		const auto& components = gun->components();
 		drone.pulse = std::find_if(components.begin(), components.end(), [](const std::string& c) {
@@ -3975,8 +4328,8 @@ void GameWorld::stepDrones(float seconds)
 		}
 		// Its weapon, run by its auto controller: the recon drone's
 		// (ReconDrone: simpleFirePlan) fires all the time; the sentry's
-		// (UAVDrone) at an enemy. (Whether the controller stops for EMP is
-		// AIDLL's auto controller, not decoded: the guns keep going.)
+		// (UAVDrone) at an enemy. Under EMP above level 1 the sentry's
+		// controller inputs are cut (fireSentry, 0x005ca2e0).
 		if (drone.weapon && drone.pulse) {
 			if (drone.weapon->tick(seconds, true)) {
 				pulse(drone);
@@ -4131,6 +4484,19 @@ void GameWorld::fireSentry(Drone& drone, float seconds)
 			drone.targetSeenAt = static_cast<float>(m_time);
 		}
 	}
+	// Under EMP (the PlayerControlObject's input filter 0x005ca2e0): an
+	// auto-controlled one (setAutoControllerTemplateName, UAVDrone on the
+	// sentry) has every input its controller gives cut above level 1: the
+	// look (PIMouseLookX) and PIFire too. The gun neither turns nor fires.
+	const world::Object* droneObject = m_objects.find(drone.object);
+	const world::ObjectTemplate* droneTemplate = droneObject ? droneObject->objectTemplate() : nullptr;
+	const bool autoControlled = droneTemplate && droneTemplate->settings().count("autoControllerTemplateName")
+		&& !droneTemplate->settings().at("autoControllerTemplateName").empty();
+	if (autoControlled && std::ceil(drone.empLevel) > 1) {
+		drone.gunDeviation.update(false);
+		drone.weapon->tick(seconds, false);
+		return;
+	}
 	bool onTarget = false;
 	if (best) {
 		const float want = std::atan2(aim.x - drone.position.x, aim.z - drone.position.z);
@@ -4141,6 +4507,7 @@ void GameWorld::fireSentry(Drone& drone, float seconds)
 	} else {
 		drone.gunYaw = std::remainder(drone.gunYaw + kSentryScanningSpeed * 30 * seconds, 6.2831853f);
 	}
+	drone.gunDeviation.update(onTarget); // the auto controller holds the trigger while on target
 	if (!drone.weapon->tick(seconds, onTarget) || !onTarget || !drone.projectile) {
 		return;
 	}
@@ -4149,8 +4516,10 @@ void GameWorld::fireSentry(Drone& drone, float seconds)
 	const world::Object* object = m_objects.find(drone.object);
 	const world::ObjectTemplate* gun = object ? findInTree(m_templates, *object->objectTemplate(), "GenericFireArm") : nullptr;
 	// The round strays by the gun's deviation component (0x005f5540): two
-	// normal numbers x minDev x 0.01 x its velocity, along its up and right.
-	const float deviation = gun ? number(*gun, "deviation.minDev", 0) : 0;
+	// normal numbers x (minDev + the firing's build-up) x 0.01 x its
+	// velocity, along its up and right; the round adds to the build-up.
+	const float deviation = gun ? drone.gunDeviation.deviation() : 0;
+	drone.gunDeviation.fired();
 	if (deviation > 0.01f) {
 		const physics::Vec3 right = physics::lengthSquared(physics::Vec3 {direction.z, 0, -direction.x}) > 1e-8f
 			? physics::Vec3 {direction.z, 0, -direction.x} * (1 / std::sqrt(direction.z * direction.z + direction.x * direction.x))

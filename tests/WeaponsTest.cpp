@@ -2,8 +2,12 @@
 #include "Game/Weapons.h"
 #include "TestMain.h"
 #include "World/ObjectTemplateManager.h"
+#include "World/Object.h"
+#include "World/WorldConsole.h"
+#include "Console/Console.h"
 
 #include <cmath>
+#include <cstdio>
 
 using namespace dice::hfe;
 
@@ -215,4 +219,55 @@ TEST(Weapons_DeviationIsNormal)
 	CHECK(std::fabs(v.z - 4.5f) < 1e-4f && std::fabs(v.x + 9) < 1e-4f && v.y == -10);
 	const physics::Vec3 none = game::deviateVelocity({0, -10, 0}, {1, 0, 0}, {0, 0, 1}, 10, 0.01f, 1, 1);
 	CHECK(none.x == 0 && none.z == 0);
+}
+
+// deviation.setFireDev max perShot decay (a method of three floats,
+// 0x004e7c73 -> 0x005f5360) keeps its numbers on the template; the build-up (0x005f5540 a
+// round, 0x005dedb0 an update) grows by perShot to max, decays unless the
+// trigger is held, and never stays below 0 once it decays; minDev adds.
+TEST(Weapons_DeviationBuildUp)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	Console console;
+	world::registerWorldConsoleMethods(console, templates, objects);
+	world::registerUntypedTemplateProperties(console, templates, {"deviation.minDev"});
+	templates.registerType(1, "GenericFireArm");
+	std::string out;
+	for (const char* line : {"ObjectTemplate.create GenericFireArm rifle", "ObjectTemplate.deviation.setFireDev 2.0 0.24 0.09",
+			 "ObjectTemplate.deviation.minDev 0.5", "ObjectTemplate.create GenericFireArm mg",
+			 "ObjectTemplate.deviation.setFireDev -1 -0.09 -0.009"}) {
+		const ConsoleResult r = console.execute(line, out, ConsoleAccess::Script);
+		CHECK(r != ConsoleResult::Error);
+		if (r == ConsoleResult::Error) {
+			std::fprintf(stderr, "  %s: %s\n", line, out.c_str());
+		}
+	}
+	const world::ObjectTemplate* rifle = templates.find("rifle");
+	CHECK(rifle && rifle->settings().count("deviation.setFireDev"));
+	if (!rifle || !rifle->settings().count("deviation.setFireDev")) {
+		return;
+	}
+	CHECK(rifle->settings().at("deviation.setFireDev") == "2.0 0.24 0.09");
+	game::DeviationBuildUp dev = game::DeviationBuildUp::fromTemplate(*rifle);
+	CHECK(dev.max == 2.0f && std::fabs(dev.perShot - 0.24f) < 1e-6f && std::fabs(dev.decay - 0.09f) < 1e-6f && dev.minDev == 0.5f);
+	for (int i = 0; i < 12; ++i) {
+		dev.fired();
+		dev.update(true); // held: no decay
+	}
+	CHECK(dev.value == 2.0f && dev.deviation() == 2.5f);
+	dev.update(false);
+	CHECK(std::fabs(dev.value - 1.91f) < 1e-5f);
+	for (int i = 0; i < 30; ++i) {
+		dev.update(false);
+	}
+	CHECK(dev.value == 0);
+	// A machine gun's grows steadier, held at -1; let go, it is 0 at once.
+	game::DeviationBuildUp mg = game::DeviationBuildUp::fromTemplate(*templates.find("mg"));
+	for (int i = 0; i < 20; ++i) {
+		mg.fired();
+	}
+	CHECK(mg.value == -1.0f);
+	mg.update(false);
+	CHECK(mg.value == 0);
 }

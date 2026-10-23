@@ -192,6 +192,25 @@ private:
 	float m_kept = 0;
 };
 
+// The firing's build-up of a deviation component (deviation.setFireDev
+// max perShot decay: template +0x10, +0x8, +0xc by 0x005f5360, all 0 by
+// default; deviation.minDev +0x14). Each round fired (0x005f5540) adds
+// perShot, held at max (above it for a positive perShot, below it for a
+// negative one: the machine guns' grow steadier); each update (0x005dedb0)
+// takes off decay unless the firer holds the trigger (its input, the
+// update's by-value argument), and a build-up below 0 is 0 then. The
+// deviation is minDev plus the build-up (0 while zoomed: the component's
+// +0x2c; the rewrite's users don't zoom).
+struct DeviationBuildUp {
+	float max = 0, perShot = 0, decay = 0;
+	float minDev = 0;
+	float value = 0; // +8
+	static DeviationBuildUp fromTemplate(const world::ObjectTemplate& t);
+	void update(bool firing);
+	void fired();
+	float deviation() const { return minDev + value; }
+};
+
 // A round's deviation (the deviation components' apply, 0x005f5540): two
 // normal(0, 1) numbers times `deviation` (minDev with the firing's
 // build-up for the main round, subProjectileDev for each sub-projectile),

@@ -111,12 +111,34 @@ bool exitPoint(const NavMesh& mesh, uint32_t polygon, int32_t previous, const Ve
 
 } // namespace
 
-// 0x1003f930 -> 0x1003ce50 (with the edge step 0x100b82a0).
+bool steepAgainst(const Vec3& normal, const Vec3& dir, float maxSlope)
+{
+	// 0x1003c220: the way across the ground (0x10026a20), against the normal.
+	float fx = dir.x, fz = dir.z;
+	const float l = std::sqrt(fx * fx + fz * fz);
+	if (l > 0) {
+		fx /= l;
+		fz /= l;
+	}
+	if (normal.x * fx + normal.z * fz >= 0) {
+		return false; // level, or downhill
+	}
+	if (normal.y < 0) {
+		return true;
+	}
+	return std::acos(std::clamp(normal.y, -1.0f, 1.0f)) > maxSlope;
+}
+
+// 0x1003f930 -> 0x1003ce50 (with the climb test) or 0x1003d1c0 (without),
+// with the edge step 0x100b82a0.
 bool meshRaycast(const NavMesh& mesh, const Vec3& from, const Vec3& to, const CostProfile* profile, int maxPolygons,
-	float* reached, int32_t startPolygon, float width, uint8_t stopClass)
+	float* reached, int32_t startPolygon, float width, uint8_t stopClass, const ClimbLimits* climb, RayHit* hit)
 {
 	if (reached) {
 		*reached = 0;
+	}
+	if (hit) {
+		*hit = RayHit();
 	}
 	int32_t current = startPolygon >= 0 ? startPolygon : mesh.findPolygon(from, 5.0f, profile);
 	if (current < 0) {
@@ -125,29 +147,58 @@ bool meshRaycast(const NavMesh& mesh, const Vec3& from, const Vec3& to, const Co
 	if (maxPolygons == -1) {
 		maxPolygons = 1000;
 	}
+	// 0x1003ce50 first puts the start on the polygon's surface: the offset
+	// 0x100b88e0 measures is zeroed when the start stands on it within
+	// 2.5 m, and otherwise the original adds a local it never wrote (the
+	// offset is only written on success); the start is kept here either way.
 	const Vec3 d = to - from;
 	const float length = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
 	const float flat = lengthXZ(from, to);
+	if (hit) {
+		hit->started = true;
+		hit->point = from;
+	}
 	if (length <= 1e-6f) { // 0x10114118
+		if (hit) {
+			hit->point = to;
+		}
 		return true;
 	}
 	const Vec3 dir = d * (1 / length);
 	Vec3 out = from;
 	const auto done = [&](bool clear) {
+		if (clear) {
+			out = to;
+		}
 		if (reached) {
 			*reached = clear ? flat : lengthXZ(from, out);
+		}
+		if (hit) {
+			hit->point = out;
 		}
 		return clear;
 	};
 	int32_t previous = -1;
+	bool climbing = false; // bVar1: on a run of steep polygons
+	float climbFrom = 0;   // local_1c: the height the run began at
 	for (int n = 0;; ++n) {
 		if (n >= maxPolygons) {
 			return done(false);
+		}
+		const bool steep = climb && steepAgainst(mesh.polygons[static_cast<size_t>(current)].normal, dir, climb->maxSlope);
+		if (!steep) {
+			climbing = false;
+		} else if (!climbing) {
+			climbFrom = out.y;
+			climbing = true;
 		}
 		Vec3 exit = out;
 		uint32_t edge = 0;
 		float clearance = 1e9f;
 		const bool ok = exitPoint(mesh, static_cast<uint32_t>(current), previous, from, dir, exit, edge, clearance);
+		if (climbing && ok && exit.y - climbFrom > climb->stepHeight) {
+			return done(false); // too steep a climb: the point stays where the run began
+		}
 		out = exit;
 		if (!ok) {
 			return done(previous == -1); // the end inside the first polygon
@@ -169,6 +220,9 @@ bool meshRaycast(const NavMesh& mesh, const Vec3& from, const Vec3& to, const Co
 			return done(false);
 		}
 		const uint8_t costClass = mesh.polygons[static_cast<size_t>(next)].costClass;
+		if (hit) {
+			hit->lastClass = costClass;
+		}
 		if (profile && profile->cost(costClass) < 0) {
 			return done(false);
 		}
@@ -284,7 +338,7 @@ void PathFollower::plan(const NavMesh& mesh, const Vec3& from, float now)
 	const CostProfile* profile = &m_settings.options.profile;
 	// A straight walk first (0x100952c0): under 200 m (0x101287b0), the
 	// mesh ray to the goal not entering cost class 5 (or 7).
-	if (distance2 < 40000 && meshRaycast(mesh, from, m_goal, profile, -1, nullptr, -1, 0, 5)) {
+	if (distance2 < 40000 && meshRaycast(mesh, from, m_goal, profile, -1, nullptr, -1, 0, 5, &m_settings.climb)) {
 		Waypoint w;
 		w.p = m_goal;
 		w.polygon = mesh.findPolygon(m_goal, m_settings.options.heightTolerance, profile);
@@ -361,9 +415,17 @@ bool PathFollower::planSegment(const NavMesh& mesh, const Vec3& position, float 
 	std::vector<PathStep> steps = findPolygonPath(mesh, static_cast<uint32_t>(fromPolygon), from,
 		static_cast<uint32_t>(toPolygon), to, m_settings.options, mesh.clusters.empty() ? nullptr : &allowed);
 	if (steps.empty() && !mesh.clusters.empty()) {
-		// The original fails the move here (0x10095120), which a trip of
-		// 100 m or less over more than its two end clusters always does;
-		// the rewrite deviates and searches the whole mesh.
+		// The original fails the move here (the search's state 3/4 makes
+		// getSteer 0x10095720 answer false), which a trip of 100 m or less
+		// (no cluster path: only the start's and the goal's clusters,
+		// 0x100962e0 putting 0xffff for the path's steps) that the mesh
+		// ray can't walk straight always does when it needs a third
+		// cluster. On 2142's meshes (clusters 7 to 26 m across) that is
+		// most short trips: of random 20-100 m trips, 312 of 321 on
+		// Cerbere_Landing, 351 of 393 on Camp Gibraltar, 255 of 397 on
+		// Minsk, all of which have a path. Failing them would leave the
+		// bots replanning in place, so the rewrite deviates and searches
+		// the whole mesh.
 		steps = findPolygonPath(mesh, static_cast<uint32_t>(fromPolygon), from, static_cast<uint32_t>(toPolygon), to,
 			m_settings.options);
 	}
@@ -432,6 +494,7 @@ bool PathFollower::resync(const NavMesh& mesh, const Vec3& position)
 // skipped, the ray to the waypoint itself (1000 polygons) says whether the
 // bot is blocked. On foot the rays need 0.5 m (0x101287a8) beside each
 // edge they cross; at the wheel the width (0x10139514, never set) is 0.
+// Both take the map's climb test (their last argument, 1).
 void PathFollower::lookAhead(const NavMesh& mesh, const Vec3& position, float now)
 {
 	if (m_current >= m_waypoints.size()) {
@@ -444,12 +507,14 @@ void PathFollower::lookAhead(const NavMesh& mesh, const Vec3& position, float no
 	int skipped = 0;
 	if (distance2XZ(position, m_waypoints[m_current].p) < trigger * trigger) {
 		while (skipped < most && m_current + 1 < m_waypoints.size()
-			&& meshRaycast(mesh, position, m_waypoints[m_current + 1].p, profile, rayPolygons(), nullptr, -1, width, 5)) {
+			&& meshRaycast(mesh, position, m_waypoints[m_current + 1].p, profile, rayPolygons(), nullptr, -1, width, 5,
+				&m_settings.climb)) {
 			++m_current;
 			++skipped;
 		}
 	}
-	if (skipped == 0 && !meshRaycast(mesh, position, m_waypoints[m_current].p, profile, -1, nullptr, -1, width, 0)) {
+	if (skipped == 0
+		&& !meshRaycast(mesh, position, m_waypoints[m_current].p, profile, -1, nullptr, -1, width, 0, &m_settings.climb)) {
 		m_blocked = true; // +0xda: until the path is planned again
 	} else {
 		m_lastClear = now;
@@ -462,21 +527,32 @@ PathFollower::Steer PathFollower::steer(const NavMesh& mesh, const Vec3& positio
 	if (!m_planned || m_failed || m_waypoints.empty()) {
 		return out;
 	}
-	if (!resync(mesh, position)) {
-		plan(mesh, position, now);
-		if (m_failed) {
-			return out;
-		}
-	}
+	// Back onto the path (0x10093a20). getSteer ignores what it answers:
+	// a bot off its path keeps steering for the current waypoint, and the
+	// blocked test below takes over when it can't be reached.
+	resync(mesh, position);
 	// The next segment while the cluster path goes on (0x10095720): the
 	// waypoints cut to ten past the current one and the search from the
-	// last (one segment a tick here; the original's searches are
-	// time-sliced, and it skips this under a condition not decoded,
-	// +0x14c >= 30 with a cluster test).
+	// last (at once here; the original's searches are time-sliced). Not
+	// while 30 m or more of path (+0x14c, 3-D from the bot, 0x10093e50) and
+	// more than ten waypoints are left, unless the current waypoint lies in
+	// the cluster at the cursor (or, as the original compares a cluster id
+	// with the cursor's index too, one numbered as the cursor): the
+	// segments follow the bot, so the cluster path is still there when it
+	// is blocked.
 	if (!m_clusterPath.empty() && m_cursor + 1 <= m_clusterPath.size()) {
-		m_waypoints.resize(std::min(m_waypoints.size(), m_current + 10));
-		if (!planSegment(mesh, position, now)) {
-			return out;
+		bool wait = false;
+		if (pathLeft(position) >= 30 && m_current + 10 < m_waypoints.size()) {
+			const int32_t polygon = m_waypoints[m_current].polygon;
+			const uint32_t cluster = polygon >= 0 ? mesh.polygons[static_cast<size_t>(polygon)].cluster : 0xffffu;
+			const uint32_t atCursor = m_cursor < m_clusterPath.size() ? m_clusterPath[m_cursor].cluster : 0xffffu;
+			wait = cluster != m_cursor && cluster != atCursor;
+		}
+		if (!wait) {
+			m_waypoints.resize(std::min(m_waypoints.size(), m_current + 10));
+			if (!planSegment(mesh, position, now)) {
+				return out;
+			}
 		}
 	}
 	// Reached (0x10094050).
@@ -501,10 +577,13 @@ PathFollower::Steer PathFollower::steer(const NavMesh& mesh, const Vec3& positio
 		++m_current;
 	}
 	lookAhead(mesh, position, now);
-	// Blocked too long: a new path from here (0x10095470).
+	// Blocked too long (0x10095720 -> 0x10095470): the search goes on from
+	// the bot's own cluster on the cluster path, or else the move fails.
 	if (m_blocked && now - m_lastClear > (m_settings.soldier ? 2.0f : 0.5f)) {
-		plan(mesh, position, now);
-		if (m_failed) {
+		m_blocked = false;
+		m_lastClear = now;
+		if (!reroute(mesh, position, now)) {
+			m_failed = true;
 			return out;
 		}
 	}
@@ -513,6 +592,62 @@ PathFollower::Steer PathFollower::steer(const NavMesh& mesh, const Vec3& positio
 	out.jump = m_jump;
 	m_jump = false;
 	return out;
+}
+
+// 0x10095470. With more than one step on the cluster path: the waypoints
+// dropped, the start moved to where the bot is (its polygon and position,
+// 0x100a46c0), and the cursor on the first of the path's steps (all but
+// the last) that is the bot's cluster, else on the first a link of the
+// bot's cluster leads into (0x1003f7a0 -> 0x100b0810); the next segment's
+// search then runs from there (+0xdb, 0x10096780; at once here). Without
+// a cluster path (a trip of 100 m or less, or once the last segment was
+// planned and the path cleared), or with the bot's cluster neither on nor
+// next to it, the follower is reset (0x10095120: +0xd9 cleared), so the
+// move fails and the behaviour plans again.
+bool PathFollower::reroute(const NavMesh& mesh, const Vec3& position, float now)
+{
+	const size_t count = m_clusterPath.size();
+	if (count <= 1) {
+		return false;
+	}
+	const int32_t polygon = mesh.findPolygon(position, m_settings.options.heightTolerance, &m_settings.options.profile);
+	if (polygon < 0) {
+		return false;
+	}
+	m_cursor = 0;
+	m_waypoints.clear();
+	m_current = 0;
+	m_startPolygon = polygon;
+	m_requestFrom = position;
+	const uint16_t cluster = mesh.polygons[static_cast<size_t>(polygon)].cluster;
+	const auto linked = [&](uint16_t to) {
+		if (cluster >= mesh.clusters.size()) {
+			return false;
+		}
+		const Cluster& c = mesh.clusters[cluster];
+		for (uint32_t k = c.firstLink; k < static_cast<uint32_t>(c.firstLink) + c.linkCount && k < mesh.links.size(); ++k) {
+			if (mesh.links[k].targetCluster == to) {
+				return true;
+			}
+		}
+		return false;
+	};
+	bool found = false;
+	for (size_t i = 0; i + 1 < count && !found; ++i) {
+		found = m_clusterPath[m_cursor].cluster == cluster;
+		m_cursor += found ? 0 : 1;
+	}
+	if (!found) {
+		m_cursor = 0;
+		for (size_t i = 0; i + 1 < count && !found; ++i) {
+			found = linked(m_clusterPath[m_cursor].cluster);
+			m_cursor += found ? 0 : 1;
+		}
+	}
+	if (!found) {
+		return false;
+	}
+	return planSegment(mesh, position, now);
 }
 
 void PathFollower::progress(const Vec3& position, float input, float now)
@@ -557,6 +692,31 @@ float PathFollower::remaining(const Vec3& position) const
 		total += lengthXZ(m_waypoints[i - 1].p, m_waypoints[i].p);
 	}
 	return total;
+}
+
+float PathFollower::pathLeft(const Vec3& position) const
+{
+	if (m_current >= m_waypoints.size()) {
+		return 0;
+	}
+	float total = distance(position, m_waypoints[m_current].p);
+	for (size_t i = m_current + 1; i < m_waypoints.size(); ++i) {
+		total += distance(m_waypoints[i - 1].p, m_waypoints[i].p);
+	}
+	return total;
+}
+
+Vec3 PathFollower::pointAhead(const Vec3& position, float distance) const
+{
+	if (m_waypoints.empty()) {
+		return position;
+	}
+	for (size_t i = m_current; i < m_waypoints.size(); ++i) {
+		if (distance * distance < distance2XZ(position, m_waypoints[i].p)) {
+			return m_waypoints[i].p;
+		}
+	}
+	return m_waypoints.back().p;
 }
 
 float PathFollower::maxBend(const Vec3& position, const Vec3& forward, float speed, float lookAheadTime, float now)
@@ -879,22 +1039,25 @@ void freeSpace(const DriveSettings& s, const DriveSense& in, float reach, float&
 		Vec3 frontRight = in.forward * length + in.right * width;
 		frontLeft = frontLeft * (1 / std::max(length3(frontLeft), 1e-6f));
 		frontRight = frontRight * (1 / std::max(length3(frontRight), 1e-6f));
+		// The diagonal rays don't count where they end entering cost class
+		// 4, and a side ray that does gives the whole reach.
 		front = distance(along(in.forward));
 		for (const Vec3& d : {frontLeft, frontRight}) {
 			const DriveRay r = along(d);
-			if (!r.clear) {
+			if (!r.clear && r.lastClass != 4) {
 				front = std::min(front, r.distance);
 			}
 		}
 		back = distance(along(in.forward * -1));
 		for (const Vec3& d : {frontLeft * -1, frontRight * -1}) {
 			const DriveRay r = along(d);
-			if (!r.clear) {
+			if (!r.clear && r.lastClass != 4) {
 				back = std::min(back, r.distance);
 			}
 		}
-		right = distance(along(in.right));
-		left = distance(along(in.right * -1));
+		const DriveRay toRight = along(in.right), toLeft = along(in.right * -1);
+		right = toRight.lastClass == 4 ? reach : distance(toRight);
+		left = toLeft.lastClass == 4 ? reach : distance(toLeft);
 	}
 	float unused = 0;
 	clipByObstacles(in, in.position, in.forward, unused, back, -1);
@@ -1375,6 +1538,219 @@ DriveOutput driveControl(const DriveSettings& s, DriveState& st, const DriveSens
 	}
 	out.throttle = throttle;
 	return out;
+}
+
+namespace {
+
+const SidestepObstacle* findSidestepObstacle(const SidestepSense& in, int id)
+{
+	for (const SidestepObstacle& o : in.obstacles) {
+		if (o.id == id && id != -1) {
+			return &o;
+		}
+	}
+	return nullptr;
+}
+
+// x/z unit vector (0x100643c0: zero when too short).
+Vec3 unit2(float x, float z)
+{
+	const float l2 = x * x + z * z;
+	if (l2 < 1e-12f) {
+		return {};
+	}
+	const float l = std::sqrt(l2);
+	return {x / l, 0, z / l};
+}
+
+// 0x100e63c0: the nearest object ahead on the way to `ahead` (along the
+// way, more than 0.1 of its distance ahead, within 2 m of the bot's height
+// and passing within its room + 1 m of the line; the bot itself, the move's
+// object unless it is to be stepped round, soldiers, and objects with
+// neither a Mobile part nor ITObstacle left out). Its room: its centre
+// radius, or for one that is fixed or below the wreck health (unless the
+// bot's orders head for it) max(r, min(10, r + 4)) x 1.3. Mesh rays 15 m
+// to either side of it across the way (from its own polygon, the original's
+// AI position on the map for a moving one; a fixed one off the mesh ends the
+// move: true) measure the room there; the bot passes on the side away from
+// it when that has more than room + 1 m (else on the roomier side), at
+// min(that room, its room) from it.
+bool findSidestep(SidestepState& st, const SidestepSense& in)
+{
+	const float px = in.position.x, pz = in.position.z;
+	const float wx = in.ahead.x - px, wz = in.ahead.z - pz;
+	const float wl = std::sqrt(wx * wx + wz * wz);
+	if (wl < 1e-4f) { // 0x10128c90
+		return false;
+	}
+	const float dx = wx / wl, dz = wz / wl;
+	const float rx = dz, rz = -dx; // 0x100a8290
+	st.distance = 0;               // *param_7
+	float best = 99999;
+	const SidestepObstacle* chosen = nullptr;
+	for (const SidestepObstacle& o : in.obstacles) {
+		if (o.id == in.self || (o.id == in.target && !in.avoidTarget) || o.soldier || (!o.mobile && !o.fixed)) {
+			continue;
+		}
+		const bool related = o.id == in.related[0] || o.id == in.related[1];
+		bool still = false;
+		float r = o.radius; // +0x40 vt+0x30
+		if (o.fixed || o.health < in.wreckHealth) {
+			still = true;
+			if (!related) {
+				r = std::max(o.radius, std::min(10.0f, o.radius + 4)) * 1.3f;
+			}
+		}
+		if (std::fabs(o.position.y - in.position.y) > 2) {
+			continue;
+		}
+		const float ox = o.position.x - px, oz = o.position.z - pz;
+		const float along = ox * dx + oz * dz;
+		const float d2 = ox * ox + oz * oz;
+		const float reach = r + 1;
+		if (reach * reach < d2 || (d2 > 0 && along / std::sqrt(d2) < 0.1f) || reach <= std::fabs(ox * rx + oz * rz)
+			|| best <= along) {
+			continue;
+		}
+		best = along;
+		chosen = &o;
+		st.radius = r;            // *param_9
+		st.obstacle = o.id;       // *param_6
+		st.at = {o.position.x, 0, o.position.z}; // *param_8
+		st.still = still;         // *param_10
+	}
+	if (!chosen) {
+		return false;
+	}
+	const Vec3 at = chosen->position;
+	int32_t start = -1;
+	if (in.mesh) {
+		start = in.mesh->findPolygon(at, in.heightTolerance, in.profile);
+		if (!chosen->mobile && start < 0) {
+			return true; // a fixed obstacle off the mesh (vt+0x30 failed)
+		}
+	}
+	const auto room = [&](float sign) {
+		if (!in.mesh) {
+			return 0.0f;
+		}
+		RayHit hit;
+		meshRaycast(*in.mesh, at, at + Vec3 {rx, 0, rz} * (15 * sign), in.profile, -1, nullptr, start, 0, 0, nullptr, &hit);
+		if (!hit.started || (std::fabs(hit.point.x) <= 1.1920929e-07f && std::fabs(hit.point.y) <= 1.1920929e-07f
+								&& std::fabs(hit.point.z) <= 1.1920929e-07f)) {
+			return 0.0f; // the output left as the original zeroed it
+		}
+		const Vec3 d = hit.point - at;
+		return std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+	};
+	const float right = room(1);  // param_12
+	const float left = room(-1);  // fVar19
+	st.point = st.at;
+	const float offset = (st.at.x - px) * rx + (st.at.z - pz) * rz;
+	bool negative = false;
+	float space = right;
+	if (offset <= 0) {
+		if (!(st.radius + 1 < right || right > left)) {
+			negative = true;
+			space = left;
+		}
+	} else if (st.radius + 1 < left || right < left) {
+		negative = true;
+		space = left;
+	}
+	space = std::min(space, st.radius);
+	const float s = negative ? -space : space;
+	st.point = {st.at.x + rx * s, 0, st.at.z + rz * s};
+	st.distance = space;
+	return false;
+}
+
+} // namespace
+
+// 0x100ce860 (its time stamp cache, +0x88, only answers a clock that went
+// back; the vt+0x1c branch, which hands the steering point to the bot's
+// look, runs once the move's +0x18 is set, and MoveToFinding never sets it
+// before that branch: neither is here).
+bool sidestepSteer(SidestepState& st, const SidestepSense& in, Vec3& direction)
+{
+	const float px = in.position.x, pz = in.position.z;
+	// A new sidestep when there is none, or the obstacle no longer has the
+	// point on its rim (0x100e5eb0: the point within [room, room + 1.5] of
+	// where it stands now).
+	bool search = st.obstacle == -1;
+	if (!search) {
+		if (const SidestepObstacle* o = findSidestepObstacle(in, st.obstacle)) {
+			const float ex = st.point.x - o->position.x, ez = st.point.z - o->position.z;
+			const float e2 = ex * ex + ez * ez;
+			search = !(st.radius * st.radius <= e2 && e2 <= (st.radius + 1.5f) * (st.radius + 1.5f));
+		}
+	}
+	if (search && findSidestep(st, in)) {
+		return true;
+	}
+	float wx = in.steer.x - px, wz = in.steer.z - pz;
+	float length = std::sqrt(wx * wx + wz * wz);
+	bool passed = false; // param_1._3_1_: pass it by (go straight for the point)
+	const SidestepObstacle* o = findSidestepObstacle(in, st.obstacle);
+	if (!o) {
+		st.obstacle = -1;
+	} else {
+		const float tx = st.at.x - px, tz = st.at.z - pz;
+		const float d2 = tx * tx + tz * tz;
+		if ((st.radius + 1) * (st.radius + 1) < d2) {
+			st.obstacle = -1; // out of its reach
+		}
+		const bool related = st.obstacle != -1 && (st.obstacle == in.related[0] || st.obstacle == in.related[1]);
+		passed = related;
+		if (st.obstacle != -1) {
+			// Behind on the way to the point, or (to an object) farther than the point.
+			if (!related && !st.still && (tx * wx + tz * wz < 0 || (in.target != -1 && length * length <= d2))) {
+				passed = true;
+			}
+			const float mx = st.at.x - o->position.x, mz = st.at.z - o->position.z;
+			if (mx * mx + mz * mz >= 0.25f) {
+				st.obstacle = -1; // it moved half a metre
+			} else {
+				// The goal inside its room and the bot about as close as it gets.
+				const float gx = o->position.x - in.goal.x, gz = o->position.z - in.goal.z;
+				const float goalOff = std::sqrt(gx * gx + gz * gz);
+				const float limit = (st.radius - goalOff + 0.8f) * (st.radius - goalOff + 0.8f);
+				const float toGoal2 = (in.goal.x - px) * (in.goal.x - px) + (in.goal.z - pz) * (in.goal.z - pz);
+				const float reach2 = (st.radius + 1) * (st.radius + 1);
+				if (st.still && goalOff < st.radius && (toGoal2 < limit || (st.distance < st.radius && d2 <= reach2))) {
+					direction = {wx, 0, wz};
+					return true;
+				}
+				if ((!passed || related) && goalOff < st.radius && toGoal2 < limit) {
+					direction = {wx, 0, wz};
+					return true;
+				}
+				wx = st.point.x - px;
+				wz = st.point.z - pz;
+				length = std::sqrt(wx * wx + wz * wz);
+			}
+		}
+	}
+	if (st.obstacle != -1) {
+		if (length < 0.3f) {
+			st.obstacle = -1; // at the point
+		}
+		if (st.obstacle != -1 && !passed && length > 0.5f) {
+			const Vec3 a = unit2(st.point.x - px, st.point.z - pz);
+			const Vec3 b = unit2(st.at.x - px, st.at.z - pz);
+			if (b.x * a.x + b.z * a.z <= 0.05f) {
+				direction = {wx / length, 0, wz / length};
+			} else {
+				// Round it: towards its rim at the sidestep distance, on the
+				// side a metre towards the point lies.
+				const Vec3 c = unit2(a.x + px - st.at.x, a.z + pz - st.at.z);
+				direction = unit2(c.x * st.distance + st.at.x - px, c.z * st.distance + st.at.z - pz);
+			}
+			return false;
+		}
+	}
+	direction = length <= 0.001f ? Vec3 {1, 0, 0} : Vec3 {wx / length, 0, wz / length};
+	return false;
 }
 
 float tankStopThrottle(float forwardSpeed)

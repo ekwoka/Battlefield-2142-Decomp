@@ -86,6 +86,30 @@ void SoldierBody::addContact(const Vec3& normal, float depth)
 // straight up; the body always uses the standing stack. The spheres are not
 // swept from the last position (the original sweeps them above 0.9 radius
 // a tick, faster than walking).
+bool soldierFits(const CollisionWorld& world, const Vec3& origin, int stance, const Mat3& rotation, const Vec3& position)
+{
+	int count = 5;
+	float height = soldier::kHeight;
+	if (stance == 1 || stance == 3) {
+		count = 3;
+		height = 1.4f; // *0x00a84798
+	} else if (stance == 2) {
+		count = 1;
+		height = 0.8f; // *0x00a84778 (one sphere: no spacing)
+	}
+	const float spacing = count > 1 ? (height - 2 * soldier::kRadius) / static_cast<float>(count - 1) : 0.0f;
+	std::vector<SphereContact> contacts;
+	for (int i = 0; i < count; ++i) {
+		// origin.y + i x spacing + (radius - *0x00a84768, 1)
+		const Vec3 centre {origin.x, origin.y + spacing * static_cast<float>(i) + soldier::kRadius - 1.0f, origin.z};
+		world.querySphere(rotation.untransform(centre - position), soldier::kRadius, contacts);
+		if (!contacts.empty()) {
+			return false;
+		}
+	}
+	return true;
+}
+
 void SoldierBody::collideWithObjects()
 {
 	if (!world) {

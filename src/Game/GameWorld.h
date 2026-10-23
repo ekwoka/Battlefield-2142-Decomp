@@ -137,10 +137,15 @@ public:
 	uint32_t seatCorpse(uint32_t vehicle, int seat) const;
 	// Whether a dead player's body has landed (0x005eda20): no ragdoll, or
 	// one a particle of which has hit something, ragdollLandedDelay (the
-	// soldier template's +0x3bc, 4 s) after the death. The engine holds the
-	// corpse's removal countdown (the armour's, 0x00652380) until then, or
-	// 60 s; the rewrite's bodies go at PlayerDeath (man down's end).
+	// soldier template's +0x3bc, 4 s) after the death. The corpse's removal
+	// countdown (the armour's, 0x00652380) waits for it, or 60 s.
 	bool bodyLanded(int player) const;
+	// The bodies left after PlayerDeath (see stepCorpses): their objects.
+	std::vector<uint32_t> corpses() const;
+	// Where the camera is and looks (unit), for the ragdolls' levels of
+	// detail (0x008ae120); without one (a server) every body steps at
+	// level 0.
+	void setCamera(const physics::Vec3& position, const physics::Vec3& forward);
 	// Sounds the game asks for (to be played by the sound layer), taken
 	// once: a ragdoll's impact (S_Soldier_RagDoll_Impact and the like).
 	struct SoundEvent {
@@ -191,6 +196,10 @@ public:
 		bool squadLeader = false;
 		bool commander = false;
 		bool cloaked = false; // active camouflage on
+		// Spawned on the squad leader where only a prone soldier fits (the
+		// spawn point's +0x18a): the soldier starts lying down.
+		bool spawnedProne = false;
+		float battery = -1; // the ability battery, 0..1 (-1 without a kit)
 		physics::Vec3 position;  // the soldier's feet
 		float yaw = 0;           // degrees, 0 facing +z
 		physics::Vec3 velocity;
@@ -216,6 +225,10 @@ public:
 		int team;
 		physics::Vec3 position;
 		float radius;
+		// Not ObjectTemplate.unableToChangeTeam (the template's vt+0x64 at
+		// +0x298; IAIGame vt+0x24, BF2142.exe 0x00895d90, answers it to
+		// the AI).
+		bool capturable = true;
 	};
 	std::vector<ControlPointInfo> controlPointList() const;
 	// Where a player wants to spawn next (a control point id, -1 for any of
@@ -241,6 +254,7 @@ public:
 	// unlocked item for it (the customise screen's choice is not in yet).
 	// Without a stats server nothing is unlocked; `all` unlocks everything.
 	void setUnlocks(int player, std::vector<std::string> containers, bool all = false);
+	void setBattery(int player, float battery); // tests and the scripts' view
 	bool unlockAllByDefault = false; // players joining from now on have everything
 	// The local player's unlocks (its soldier's chosen ItemContainers,
 	// Stats/Stats.h), given when spawnPlayer adds the player.
@@ -563,7 +577,7 @@ public:
 		uint32_t material;
 	};
 	std::vector<Capsule> soldierCapsules(uint32_t soldier) const;
-	// A downed soldier's ragdoll (null for others; docs/engine.md, "Ragdolls").
+	// A downed soldier's or a body's ragdoll (null for others; docs/engine.md, "Ragdolls").
 	const anim::RagDoll* ragDoll(uint32_t soldier) const;
 
 private:
@@ -602,6 +616,10 @@ private:
 		float empLevel = 0;
 		float wreckTime = -1; // >= 0 while a wreck
 		float wetTime = 0;    // seconds in water
+		// The vehicle LOD's edges (indices into `points`) of its faces
+		// steeper than 30 degrees (|normal y| at most cos 30), each face's
+		// three in turn (the loader 0x006e12a0 -> 0x006e1430, LOD +0xe4).
+		std::vector<std::array<uint16_t, 2>> edges;
 	};
 	void destroyVehicle(Body& body, int attacker);
 	void stepVehicleDamage(float seconds);
@@ -664,7 +682,15 @@ private:
 		bool abilityActive = false; // the gadget in hand is working this tick
 		bool cloaked = false;       // CamouflageAmmoComp held with the trigger down
 		bool manDown = false;       // killed, the body lying (sv.manDownTime)
+		bool spawnedProne = false;  // the leader's scatter found room only lying (spawn point +0x18a)
 		float manDownLeft = 0;
+		// The ability battery (soldier +0x338, read and drawn through
+		// component 0xc4d7 slots 0x90/0x98): 0..1, -1 without a kit.
+		float battery = -1;
+		// The unlocks' ability.increasedRepairAbility (player +0x30c
+		// +0x48, copied by 0x005706b0 when above 0): scales the
+		// abilities' strength when above 0.
+		float abilityModifier = 0;
 		double diedAt = 0;          // soldier +0x290: the death's time
 		uint32_t object = 0;
 		physics::SoldierBody body;
@@ -703,7 +729,9 @@ private:
 	anim::AnimationSystems* m_animationSystems = nullptr;
 	AnimationLoader m_loadAnimationSystem;
 	void stepAnimation(Player& player, float seconds);
-	bool startRagDoll(Player& victim);
+	// `thrown`: a body thrown out of its seat, pushed along its forward by
+	// rd_dieInVehicleForce (0x005f0f50 with +0x2eb) instead of a blast's push.
+	bool startRagDoll(Player& victim, bool thrown = false);
 	void stepRagDoll(Player& player, float seconds);
 	anim::RagDollWorld ragDollWorld(const anim::Vec& middle, float reach) const;
 	void poseSeated(Player& player, world::Object& soldier, const Body& body, const SeatLayout& seat, float seconds);
@@ -716,6 +744,9 @@ private:
 		}
 	}
 	void followSoldier(const Player& player, const world::Object& soldier);
+	// Where a soldier looks (degrees): its body's yaw plus the head's
+	// twist (SoldierControl, 0x0058a6d0).
+	float lookYaw(const Player& player) const;
 	void enterOrLeaveVehicle(Player& player, world::Object& soldier);
 	std::map<std::string, std::unique_ptr<ProjectileSettings>> m_projectileSettings;
 	std::vector<Projectile> m_projectiles;
@@ -737,6 +768,7 @@ private:
 		float radius = 0;
 		float strength = 0;
 		uint32_t material = 0;
+		float drain = 0;       // abilityDrain: of the holder's battery a second per target treated
 	};
 	static bool abilityOf(const world::ObjectTemplate& gadget, Ability& ability, bool& whileFiring);
 	struct Supply {
@@ -756,8 +788,12 @@ private:
 	std::map<int, AbilityScan> m_abilityScans;
 	std::vector<Supply> m_supplies;
 	std::map<uint32_t, float> m_resupply; // ammo owed to soldiers (fractions of a magazine)
+	// `holder`: the player whose battery pays and whose unlocks scale it
+	// (the gadget's holder, or the hub's owner); none: no battery.
+	static constexpr uint32_t kSoldierFootStepsMaterial = 5500; // 0x157c
+	void playRagDollImpact(anim::RagDoll& ragDoll, const anim::Vec& at);
 	void applyAbility(const Ability& ability, const physics::Vec3& at, int team, float seconds, uint32_t skip,
-		AbilityScan* scan = nullptr);
+		AbilityScan* scan = nullptr, Player* holder = nullptr);
 	void stepAbilities(float seconds);
 	void stepProjectiles(float seconds);
 	void steerSeeker(Projectile& projectile, float seconds);
@@ -771,7 +807,11 @@ private:
 	Player* soldierPlayer(uint32_t object) const;
 	world::Object* spawnSoldier(Player& player);
 	void kill(Player& victim, Player* attacker, uint32_t weapon);
-	void finishDeath(Player& victim, bool keepBody = false);
+	// What becomes of the body at PlayerDeath: it stays (a corpse, see
+	// stepCorpses), it is slumped in its seat (m_seatCorpses), or it goes
+	// at once (the occupants of a destroyed vehicle, 0x005cacf0).
+	enum class BodyFate { Corpse, Seat, Remove };
+	void finishDeath(Player& victim, BodyFate fate = BodyFate::Corpse);
 	void revive(Player& victim, Player* medic, float restoreHitPoints);
 	Player* downedPlayer(uint32_t object) const;
 	void shockDowned(Player& victim, const ProjectileSettings& shock, float amount, uint32_t surfaceMaterial, int attacker);
@@ -779,7 +819,8 @@ private:
 	std::map<std::pair<int, int>, uint32_t> m_beacons; // (team, squad) -> beacon object
 	std::vector<int> squadMembers(int team, int squad) const;
 	bool spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& position, float& yaw);
-	bool scatterOnLeader(const Player& leader, physics::Vec3& feet, float& yaw);
+	bool scatterOnLeader(const Player& leader, physics::Vec3& feet, float& yaw, bool* prone = nullptr);
+	bool soldierFits(const physics::Vec3& origin, SoldierPose pose, uint32_t ignore) const;
 	float m_waterLevel = 0;
 	bool m_hasWater = false;
 	void stepPlayers(float seconds);
@@ -827,6 +868,7 @@ private:
 		float pulseDistance = 0; // pulse.viewDistance
 		float revealTime = 0;    // pulse.revealTime
 		float empLevel = 0;      // its armour's EMP level (see empBlast)
+		DeviationBuildUp gunDeviation; // the gun's firing build-up (setFireDev)
 	};
 	std::vector<Drone> m_drones;
 	// Soldiers killed in a seat that has a die bundle: the body stays,
@@ -843,6 +885,25 @@ private:
 	std::vector<SeatCorpse> m_seatCorpses;
 	std::vector<SoundEvent> m_sounds;
 	void stepSeatCorpses(float seconds);
+	// Bodies after PlayerDeath, with their ragdolls (the soldier's armour
+	// stays a wreck until its countdown, 0x00652380, removes the object).
+	struct Corpse {
+		uint32_t object = 0;
+		std::unique_ptr<anim::RagDoll> ragDoll;
+		const anim::Skeleton* skeleton = nullptr;
+		anim::LocalPose pose;
+		std::vector<anim::Matrix> worldPose;
+		double diedAt = 0;          // the armour's wreck time (+0x60)
+		float landedDelay = 4;      // ragdollLandedDelay (+0x3bc)
+		float stayAsWreck = 20;     // armor.timeToStayAsWreck (+0x158)
+		float afterDestroyed = 0;   // armor.timeToStayAfterDestroyed (+0x15c)
+		double fadeFrom = -1;       // +0x64: when the countdown began
+	};
+	std::vector<Corpse> m_corpses;
+	void stepCorpses(float seconds);
+	bool m_hasCamera = false;
+	physics::Vec3 m_cameraPosition, m_cameraForward {0, 0, 1};
+	void setRagDollLevels();
 	std::map<std::pair<int, int>, float> m_revealed; // (player, team) -> seconds left
 	// The squads' battlefield objects (AIDLL 0x100bf000, 0x100bea30): per
 	// (team, squad), when each enemy player was last reported.
@@ -897,6 +958,7 @@ private:
 		std::string fireArm;
 		int player = -1; // the commander who called it (the kills are its)
 		float subUp = 0, subRight = 0; // the last sub-projectile's offset (deviation +0xc, +0x10)
+		DeviationBuildUp deviation;    // its firing's build-up (setFireDev)
 	};
 	std::vector<StrikeFire> m_strikeFire; // alongside m_strikes
 	struct Crate {

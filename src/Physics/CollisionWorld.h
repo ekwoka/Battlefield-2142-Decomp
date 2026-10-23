@@ -68,6 +68,13 @@ public:
 	// crosses from the front gives a contact at the crossing with the
 	// face's normal, as deep as the end lies behind the face (<= 0).
 	bool segmentContact(const Vec3& from, const Vec3& to, SphereContact& contact) const;
+	// A moving mesh's edge a-b against the faces (0x006bb050's second
+	// pass): segmentContact from a, then from b. Crossed from a only: the
+	// crossing and its face's normal; from both ends: the middle of the two
+	// crossings, along the normals' sum flattened (y 0) and normalised, or
+	// from there towards `origin` when that sum is under `minNormal`
+	// (*0x00a84230, 0.1). False when a's segment crosses nothing.
+	bool edgeContact(const Vec3& a, const Vec3& b, const Vec3& origin, float minNormal, Vec3& point, Vec3& normal) const;
 	// A capsule (segment a-b, radius) against the faces' edges only
 	// (collision-mesh slot 25, 0x006e5a50 -> 0x006e2ee0, per face
 	// 0x006be990; the ragdoll's capsules). At most one contact a face: for

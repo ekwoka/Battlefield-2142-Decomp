@@ -217,6 +217,38 @@ float Gaussian::next(Random& random)
 	return f * u;
 }
 
+DeviationBuildUp DeviationBuildUp::fromTemplate(const world::ObjectTemplate& t)
+{
+	DeviationBuildUp d;
+	if (const auto it = t.settings().find("deviation.setFireDev"); it != t.settings().end()) {
+		std::sscanf(it->second.c_str(), "%f %f %f", &d.max, &d.perShot, &d.decay);
+	}
+	if (const auto it = t.settings().find("deviation.minDev"); it != t.settings().end()) {
+		d.minDev = std::strtof(it->second.c_str(), nullptr);
+	}
+	return d;
+}
+
+void DeviationBuildUp::update(bool firing)
+{
+	if (!firing) {
+		value -= decay;
+		if (value < 0) {
+			value = 0;
+		}
+	}
+}
+
+void DeviationBuildUp::fired()
+{
+	value += perShot;
+	if (perShot > 0 && value > max) {
+		value = max;
+	} else if (perShot < 0 && value < max) {
+		value = max;
+	}
+}
+
 physics::Vec3 deviateVelocity(const physics::Vec3& velocity, const physics::Vec3& right, const physics::Vec3& up, float speed,
 	float deviation, float alongUp, float alongRight)
 {

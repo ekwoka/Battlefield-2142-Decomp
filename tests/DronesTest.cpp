@@ -49,7 +49,8 @@ struct Field {
 				"armor.defaultMaterial", "armor.takesEmpDamage", "physicsType", "hasMobilePhysics", "fire.roundsPerMinute",
 				"fire.projectileStartPosition", "ammo.magSize", "ammo.nrOfMags", "ammo.reloadTime", "velocity",
 				"projectileTemplate", "itemIndex", "pulse.fov", "pulse.viewDistance", "pulse.revealTime", "damage",
-				"minDamage", "distToStartLoseDamage", "distToMinDamage", "timeToLive", "material", "deviation.minDev"});
+				"minDamage", "distToStartLoseDamage", "distToMinDamage", "timeToLive", "material", "deviation.minDev",
+				"autoControllerTemplateName"});
 		std::string out;
 		for (const char* script : {"Objects/Weapons/Handheld/unl_drone_recon/unl_drone_recon.con",
 				 "Objects/Weapons/Handheld/Unl_Drone_Recon_Detonator/Unl_Drone_Recon_Detonator.con",
@@ -279,6 +280,35 @@ TEST(Drones_SentryShootsEnemies)
 	game::GameWorld::PlayerInfo me;
 	CHECK(field.world->playerInfo(leader, me) && me.kills == 1);
 	CHECK(field.world->playerInfo(mate, info) && info.alive && field.world->hitPoints(info.soldier) == 100);
+}
+
+TEST(Drones_EmpSilencesTheSentry)
+{
+	// The sentry's gun is run by its auto controller (UAVDrone): the
+	// PlayerControlObject's input filter (0x005ca2e0) cuts every input it
+	// gives above EMP level 1, PIFire too, so it neither turns nor fires.
+	Field field;
+	if (!field.loaded) {
+		return;
+	}
+	world::ObjectTemplate* emp = field.templates.create("GenericProjectile", "emp_grenade");
+	emp->components().push_back("DefaultDetonationComp");
+	emp->settings()["detonation.isEMPWeapon"] = "1";
+	emp->settings()["detonation.explosionRadius"] = "9";
+	emp->settings()["detonation.explosionMaterial"] = "0";
+	const int leader = field.spawnLeader("unl_drone_sentry_detonator");
+	const int enemy = field.world->addPlayer("Pac", 1, true);
+	CHECK(field.world->spawnSoldier(enemy));
+	field.launch();
+	const uint32_t drone = field.world->drone(leader);
+	CHECK(drone != 0);
+	field.run(1.5f);
+	CHECK(field.world->detonate("emp_grenade", field.at(drone)));
+	CHECK(field.world->empLevel(drone) == 3);
+	field.world->reportBattlefieldObjects(leader, {enemy});
+	game::GameWorld::PlayerInfo info;
+	field.run(2.5f);
+	CHECK(field.world->playerInfo(enemy, info) && info.deaths == 0 && field.world->hitPoints(info.soldier) == 100);
 }
 
 TEST(Drones_BotLeadersSendOutSentries)

@@ -237,8 +237,14 @@ Rewritten in `src/Game/Vehicle` (`rotationAxisStep`,
   with the face's normal, as deep as the end lies behind the face
   (`CollisionWorld::segmentContact`). The swept-sphere test `0x006e2350`
   (slot 24) is the soldiers' (`0x006c3890`, LOD 2) and `0x006cec60`'s.
-  Not rewritten: the later passes over the mesh's edges (slot `0x70`
-  lists) and the vertical segment of a mesh with under 4 vertices.
+  The second pass (`CollisionWorld::edgeContact`) runs the edges of the
+  LOD-1 faces no steeper than 30° off the vertical (|n.y| ≤ 0.866,
+  `0x006e1430`, kept at load in `Body::edges`) as segments through the
+  other mesh: a crossing whose face normal has y at least 0.1
+  (`*0x00a84230`) pushes with force 3 (`*0x00a8423c`) through the node's
+  addForce (slot `0xa0`, `0x006c7b10`). Not rewritten: the vertical
+  segment of a mesh with under 4 vertices, the third pass and the early
+  exit for type `0x21`.
 
 ### Seats and vehicle weapons
 
@@ -452,9 +458,12 @@ and 1) and each hit (`0x008a7a20`): the particle's speed into the face is
 its last step's displacement against the normal (metres a step), counted
 when the delay has passed since the last sound; the hardest waits. The
 soldier's tick takes it (`0x008a79f0`) and plays the material manager's
-sound for it (`0x007fd780`, slot `0x74` with key `0x157c`): the cell of
-Human_body (24) and the surface (`S_Soldier_RagDoll_Impact`; water
-`S_Water_Splash`). How the key maps to material 24 is read from the data.
+sound for it (`0x007fd780`): the material manager's slot `0x74`
+(`0x0060a6d0`) takes `0x157c` as a material, 5500 (Soldier_FootSteps),
+against the surface's: cells are keyed `a × 10000 + b` (`0x0060ad20`),
+and the sound is the cell's template 4 (`S_Soldier_RagDoll_Impact`),
+from the cell against material 0 when that one has none. Corpses play
+theirs too.
 
 **ragdollLandedDelay** (Soldier template `+0x3bc`, 4): `0x005eda20` says
 the body has landed when it has no ragdoll, or a particle has touched
@@ -503,16 +512,17 @@ Rewritten in `src/Animation/RagDoll` (`RagDollTemplate`, `RagDoll`,
   rewrite (0; the engine's heightmap ray returns it, and deep water,
   material 1, would not count).
 - The impact sounds are queued (`GameWorld::takeSounds`) for the sound
-  layer; nothing plays them yet. `GameWorld::bodyLanded` answers
-  `ragdollLandedDelay`; the rewrite's bodies go at `PlayerDeath`, so
-  nothing waits on it.
+  layer. `GameWorld::bodyLanded` answers `ragdollLandedDelay`, which the
+  corpse countdown waits on (see Final death).
+- The level of detail by distance to the camera (`0x008ae120` /
+  `0x008add10` / `0x008ac200`, `RagDoll::setLevelOfDetail`,
+  `anim::ragDollLevels`): past LOD 0 a step is dT × 1.5; LOD 2 also skips
+  the leg collisions, capsules and the object pass for the particles of
+  bones 2, 7, 16, 32 and 47. LOD 2 is only for network-driven bodies
+  (`+0x61`), which the rewrite has none of. `GameWorld::setCamera` gives
+  the camera; bodies behind it count three times as far.
 
-Not rewritten yet:
-
-- the network side (`ragdoll_net_*`, `0x008acce0`);
-- the level of detail by distance to the camera (`0x008ae120`: dT × 1.5
-  past LOD 0, no leg collisions or capsules, the particles of bones 2, 7,
-  16, 32 and 47 skipped from LOD 2).
+Not rewritten yet: the network side (`ragdoll_net_*`, `0x008acce0`).
 
 ## Server browsing (GameSpy, via OpenSpy)
 
@@ -1546,11 +1556,23 @@ tick's strength × the cell (`0x005d7a40`):
 - **RTAmmo** (slot `0x10c` → `0x004cf7b0`): min(100, it) per cent of a
   magazine for each weapon (`0x005f5110`, the fraction kept a second).
 
-Each target treated takes the tick's abilityDrain from the holder's
-battery (soldier component `0xc4d7` slots `0x90`/`0x98`); with less left
-nothing is treated. Not rewritten: the battery (its range isn't
-identified), RTTeam and the holder's modifier (player slot `0x2a0`
-`+0x48`). A thrown hub (`unl_hub_*_stationary`) carries a `SupplyObject`
+The strength is also multiplied by the holder's player's
+`ability.increasedRepairAbility` when above 0 (`0x005d7a40`: player slot
+`0x2a0` → `+0x30c`, `+0x48`; copied from an unlock's Ability component
+by `0x005706b0`, e.g. 1.5 for UnlockEU_AssaultMedic1).
+
+The battery is the soldier's (`+0x338`, read and drawn through component
+`0xc4d7` slots `0x90`/`0x98`, `0x0064aad0`/`0x00586310`), 0 to 1, −1
+without a kit. A new kit's is empty (kit `+0x1bc`, 0 from `0x00562a80`);
+the soldier takes it with the kit (`0x0058b680`) and hands it back when
+dropping it (`0x00589890`). Each soldier tick adds the kit's
+`abilityRestoreRate` / 30 (kit `+0x31c`, setter `0x0056cd90`), up to 1
+(`0x0058d350`). Nothing is treated unless the battery holds a tick's
+`abilityDrain` (template `+0x6c` = drain / 30, `0x005d7ae0`), and each
+target treated takes that much when it is there (`0x005d81b0`). A hub's
+battery is its owner's soldier's: owner seated or dead, none. RTTeam
+(slot `0x110`) is used by no ammo in the game's data and is not
+rewritten. A thrown hub (`unl_hub_*_stationary`) carries a `SupplyObject`
 child (`Unl_Hub_Medic_Supply`: radius 5, healSpeed 4, sharedStorageSize
 300; `Unl_Hub_Ammo_Supply`: radius 6, refillAmmoSpeed 8, workOnVehicles,
 sharedStorageSize 500; both destroyWhenEmptyStorage) and works as the
@@ -1635,9 +1657,12 @@ round adds to the build-up, to its maximum. So deviation 1 is 0.57°, one
 standard deviation on each axis; 45 is 24°. The rewrite applies it to
 the strikes' shells and the sentry drone's rounds with its own generator
 (the table's contents depend on the shared generator's state at the time,
-which the rewrite can't reproduce); the build-up is left out (the
-rewrite's templates keep only the first of `setFireDev`'s numbers), and
-hand-held firearms have no deviation model yet.
+which the rewrite can't reproduce). The build-up (`DeviationBuildUp`):
+`deviation.setFireDev` is a method of three numbers (template `0x005f5360`:
+`+0x10` the most, `+0x8` added a round, `+0xc` the decay a tick), with
+`minDev` (`+0x14`) the floor; a round adds (`0x005f5540`), each tick off
+the trigger decays toward the floor (`0x005dedb0`). Hand-held firearms
+have no deviation model yet.
 
 - **Mines:** a mine fires when an enemy faster than
   `triggerVictimMinSpeed` (3.6 m/s: walking past is safe) comes within its
@@ -1668,9 +1693,13 @@ Vehicles take damage through their armour settings:
   it cuts every input above level 1. With `scaleInputOnCriticalDamage`,
   below the armour's `criticalDamage` the inputs are scaled by
   `criticalDamageScaleModifier`. The level falls continuously, at
-  1 / `empLevelTime` a second. The rewrite keeps a vehicle's guns dead
-  while the level is above 0 (what an EMP does to a firearm is not
-  traced).
+  1 / `empLevelTime` a second. Firearm components never read the EMP
+  level: the filter (`0x005ca2e0`) scales the driver's inputs only, and a
+  gunner's fire (PIFire, input 8) and look are touched only on a seat
+  with its own child armour. So gunners keep firing; an auto-controlled
+  object (the sentry drone) neither turns nor fires above level 1. Only
+  ActiveDefense ammo (`0x005d9560`) and camouflage (`0x005d9030`,
+  `0x005d8ec0`) drain faster, × (level + 1).
 - **Critical damage:** below `armor.criticalDamage` a vehicle burns down at
   `hpLostWhileCriticalDamage` a second (FAV: 18 below 151, out in 5.6 s from
   100).
@@ -1780,9 +1809,10 @@ The drones' guns are run by auto controllers (`AI/AutoControllers.ai`):
     `0x0050e910`) only tells the team's players; it never reaches the
     AI. The minimap side (the client's `0x00508590`) isn't rewritten.
 
-What an EMP does to the drones' guns is up to AIDLL's auto controller
-(its "flip out" at `flipOutAtHealth` spins the gun and holds both
-triggers; the EMP's part is not traced); they keep firing. Bots that lead a squad send out the
+Under EMP above level 1 the sentry drone's auto controller (UAVDrone) has
+every input cut by the PlayerControlObject's filter (`0x005ca2e0`), the
+fire too: its gun neither turns nor fires. The recon drone's pulse is
+not an input and goes on. Bots that lead a squad send out the
 sentry drone at infantry 20 to 100 m off, following its weapon template
 `SentryDroneDetonator` (FireAndForget).
 
@@ -1914,6 +1944,15 @@ velocity the soldier's response is asked for (`0x00588420`, response slot
   as an acceleration for the soldier's physics node, which integrates
   without rotation, damped 0.99 per tick (0.9 in water).
 
+The look turns the head before the body (`0x0058a6d0`,
+`SoldierControl::twist`): standing (the shaped throttle within 0.01) the
+mouse turns the head up to 40° (`*0x00a68eb0`) off the body; past that
+the body turns and the twist catches up 4° a tick (`*0x00a68ee0`; the
+original turns the body by the excess and catches up as well, so it
+briefly turns twice, which the rewrite keeps). Moving, the twist catches
+up. Fire, aim and placing use the look (`GameWorld::lookYaw`), not the
+body's heading.
+
 Rewritten in `src/Physics/SoldierPhysics` and `src/Game/SoldierControl`.
 
 ## Account login (EA's FESL, via OpenSpy)
@@ -2009,10 +2048,18 @@ state, input, kills, deaths and team kills.
   team test of the rewrite's: `0x004c1960`'s man-down branch reads none,
   and its caller `0x005a3bd0` is not traced that far).
 - **Final death:** at the end of man down, or when the player respawns
-  (after `sv.spawnTime`, 15 s), the scripts get `PlayerDeath` and the body
-  goes. With the real `bf2/stats` and game-mode scripts, this is when the
-  team loses its ticket. A soldier killed in a vehicle dies at once (its
-  body slumped in the seat when the seat has a die bundle, see Seats).
+  (after `sv.spawnTime`, 15 s), the scripts get `PlayerDeath`. With the
+  real `bf2/stats` and game-mode scripts, this is when the team loses its
+  ticket. A soldier killed in a vehicle dies at once: slumped in the seat
+  when the seat has a die bundle (see Seats), else put out at the seat's
+  exit as a ragdoll pushed forward by `rd_dieInVehicleForce` (100,
+  `0x005f0f50`); in a vehicle that is destroyed the body goes with it.
+- **The body afterwards** (`GameWorld::Corpse`): it outlives `PlayerDeath`
+  as a ragdoll, counted down by its armour (`0x00652380`): once landed
+  (`0x005eda20`) it waits `timeToStayAsWreck` (`+0x158`, 20 by default,
+  `0x00630040`), or 60 s if it never lands (`*0x00a79388`), then
+  `timeToStayAfterDestroyed` (`+0x15c`, 0), and goes. Its fade is not
+  modelled.
 
 ## Squads
 
@@ -2040,11 +2087,16 @@ distance and then half: the terrain's height and a ray 4 m down from the
 point at the leader's height through the objects; the member stands on the higher of
 the two plus `spawnpoint-terrain-offset` (1.01), when that is within the
 probe, and the way from the leader's point to it is clear
-(`0x006f2d20`). The member faces the leader (`0x005b1d30`). Not
-rewritten: the stance checks (the soldier fitting standing, else spawning
-prone, slot `0x14`) and an extra test some callers ask for
-(`DAT_00b4bb94` slot `0xc`). When no try fits, the rewrite puts the
-member a metre behind the leader.
+(`0x006f2d20`). The member faces the leader (`0x005b1d30`). The spot
+must also hold the soldier (component `0xc4d7` slot `0x14`, `0x00585d00`
+→ the response's slot `0x98`, `0x006c3340`; `physics::soldierFits`): a
+stack of spheres from the lowest centre (origin − 1 + 0.25) up, five to
+1.7 m standing, three to 1.4 m crouched (`*0x00a84798`) and one to 0.8 m
+prone (`*0x00a84778`), clear of the static meshes and vehicles. Standing,
+else prone (the spawn point's `+0x18a`, `PlayerInfo::spawnedProne`), else
+the next try. Not traced: an extra test some callers ask for
+(IAIPathfindingCourier slot `0xc`, `DAT_00b4bb94`). When no try fits, the
+rewrite puts the member a metre behind the leader.
 Not in yet: the squad menus (invites, names).
 
 ## Commander
@@ -2497,10 +2549,14 @@ changes (0x100966c0 → 0x10095fc0).
     last segment; then the string-pull, the look-ahead twice and the
     cursor on. While the cluster path goes on (0x10095720) the waypoints
     are cut to ten past the current one and the next segment is searched
-    from the last. The rewrite searches a segment a tick (the original's
-    are time-sliced), and where a segment's search fails (the original
-    fails the move; any 100 m trip over more than its two end clusters
-    does) it searches the whole mesh.
+    from the last. The next segment waits while the path left (+0x14c,
+    3-D, 0x10093e50) is 30 m or more and over ten waypoints are ahead,
+    unless the current waypoint's cluster is the cursor's index or its
+    cluster (a mix-up kept). The rewrite searches a segment a tick (the
+    original's are time-sliced), and where a segment's search fails it
+    searches the whole mesh: the original fails the move, which measured
+    on random 20–100 m trips (clusters 7–26 m) fails 312 of 321 on
+    Cerbere, 351 of 393 on Camp Gibraltar and 255 of 397 on Minsk.
 - **String-pull** (0x10093610), twice, for waypoints 5 m or more from the
   bot: where the line from the previous waypoint to the next crosses the
   portal, kept max(1, 0.8 radius) (at most half the portal) from its ends.
@@ -2517,10 +2573,12 @@ changes (0x100966c0 → 0x10095fc0).
     foot, 30 at the wheel, stopping at cost class 5 or 7; one a tick on
     foot, up to four at the wheel). When none was skipped, the ray to the
     waypoint itself (1000 polygons) says whether it is blocked (+0xda,
-    until planned again). Blocked for 2 s (0.5 s) since last clear, the
-    path is planned anew from where the bot is (0x10095470; the original
-    first looks for the bot's cluster or one next to it on the cluster
-    path and carries on from there).
+    until planned again). Blocked for 2 s (0.5 s) since last clear
+    (0x10095470, `PathFollower::reroute`): with more than one cluster
+    step left, the cursor goes to the bot's cluster on the path (all but
+    the last step), else to the first one next to it (0x1003f7a0 →
+    0x100b0810); the waypoints are cleared and a segment is planned from
+    the bot. Neither: the move fails (0x10095120).
   - **The mesh ray** (vslot 0x84 0x1003f930 → 0x1003ce50, the edge step
     0x100b82a0): from the bot's polygon, across the x/z plane from the
     bot's position each time, the edge each polygon is left by (not the
@@ -2532,9 +2590,15 @@ changes (0x100966c0 → 0x10095fc0).
     0.5 on foot, `0x101287a8`; 0 at the wheel) where an edge leaves less
     than the width beside the crossing (the original also compares twice
     that with a local it never sets; the edge's length is meant). It also
-    fails a climb steeper than the tree's slope limit by more than the
-    step height (0.35 on the infantry tree); those limits aren't in the
-    files the rewrite reads, so that test is left out.
+    fails a climb (0x1003ce50 / 0x1003c220): a run of polygons steeper
+    than the map's slope limit along the ray may rise no more than the
+    step height. The limits are the level `AI/AI.ai`'s
+    `aiPathfinding.map.maxSlope` (stored as its cosine, 0x1003bfb0 →
+    0x100afdf0) and `map.allowedThresholdHeight` per map (defaults
+    0x100b0440: cos 0, 0.35, headClearance 2); map 0 (Infantry) always
+    uses 0.35 (0x1003f930 / 0x1003f810). Drivers' rays (0x100e8170) pass
+    −1 polygons, stop class 6 and the climb, and read the last polygon's
+    class (class 4: the diagonals ignore it, the sides get full reach).
   - **Progress** (0x10092bc0): a bot pushing its controls that doesn't get
     2 m (4 m) further in 10 s (20 s) fails; the move ends and the behaviour
     plans again. A soldier that hasn't moved for half a second jumps.
@@ -2615,8 +2679,16 @@ changes (0x100966c0 → 0x10095fc0).
     machine's error too. Stopping (0x100e3f00) lets go of everything.
   - **Hover tank** (FloatingTankMoveTo 0x1008c7c0, controller
     0x100de350): no machine, no mesh rays, no avoidance. The way to the
-    steering point comes from the infantry steering (0x100ce860; its
-    sidestep 0x100e63c0 isn't rewritten). The speed wanted is max(min(
+    steering point comes from the infantry steering (0x100ce860), sidestep
+    included.
+- **Sidestep** (0x100ce860 → 0x100e63c0, `sidestepSteer` /
+  `findSidestep`): obstacles near the way ahead (a vehicle, a mobile
+  object; not the one the move is for: the vehicle being entered,
+  +0xe8 via 0x100d4d60, or repaired, +0xec, 0x10073da0) are walked round
+  on the side with room, aiming at a point ahead on the path
+  (0x100941c0); the move ends when the sidestep says so. The rewrite
+  looks the obstacle's polygon up from its position (the original uses
+  the AI's nav position). The speed wanted is max(min(
     brake², bend) × maxSpeed, backingSpeed), the brake with the percentage
     × 0.01 at any speed. A velocity loop in the frame the hull will have
     half a second on: along its forward and right axes, ((wanted −
@@ -2671,10 +2743,11 @@ with an Armament plug-in, else 1:
 - **Refused (0):** a seat another bot reserved (+0x2c/+0x30); with
   `other`, one whose driver's seat is taken; a vehicle whose Unit team is
   not 0 or the bot's; below 0.3 health (AIMain +0xdc; × 0.3 for the
-  vehicle the bot drives); a root its team left under 7 s ago (Unit
-  vt+0x60, a per-team stamp whose setter isn't traced: the rewrite keys
-  it to the vehicle the bot itself left); more than 8 m over the
-  terrain (not in the rewrite).
+  vehicle the bot drives); the root seat of a non-ITAir vehicle a human
+  of the bot's team got out of under 7 s ago (the unit component, vtable
+  0x009d6af0, vt+0x60/+0x64 per team, −1000 at first, 0x008a1d70; set by
+  the exit event 0x00894860 for players that aren't bots, player vt+0x68);
+  more than 8 m over the terrain (not in the rewrite).
 - **Weapons** (0x100d3b80): for each of the seat's guns (on foot the
   kit's), its strength against each object the bot knows (by its
   CombatStrengthType), plus at a vehicle seat with Mobile its eight
@@ -2685,8 +2758,14 @@ with an Armament plug-in, else 1:
   maxSpeed × 0.5 × 1.5 at the root's seat; at another, × 5 behind a
   driver of the bot's squad, × 1 of its group, 0 without a driver.
 - × 1.15 for the seat the bot reserved itself.
-- Not rewritten: transport (the SAI order's areas, 0x100d3730,
-  0x1005d840).
+- **Transport** (0x100d3730, 0x1005d840): `orderClose` (the order's
+  spot within its area), `transportClose` (the bot's or the vehicle's
+  second position), and `threatened` (sensing +0x7c, 0x100ebdd0). Close:
+  no move value; close and not in the area: no weapons either. The root
+  seat stays close only when the order's spot is outside a capturable
+  control point (area flag bit 16; capturable = not
+  `unableToChangeTeam`, IAIGame vt+0x24 0x00895d90) or when threatened
+  and unarmed.
 
 Change (0x1006c520): the vehicles within 75 m (IAIInformationEnvironment
 0x100ca9e0; one without Mobile within 75/√2 m), on the vehicle mesh, each
@@ -2695,17 +2774,24 @@ soldier under a quarter of its health within 20 m. On foot the current
 value is 1.2 × the soldier's own; in a vehicle 2 × the seat's (250 at the
 driver's seat with others aboard), and the way out is the soldier's own
 value, or 10000 for a wreck or a vehicle more than 4 m off the vehicle
-mesh (0x100880e0). Not rewritten: changing seats inside a vehicle, the
-seat factors of the AI object's flag bits 1 and 3 (0x1006b910: 0.5,
-0.77; not identified) and the type-0/1 order multipliers.
+mesh (0x100880e0). The other seats' factor (0x1006b910): 1 with the
+driver's seat taken; else, for a Mobile root that isn't ITNaval, 0.77 for
+ITGround and 0.5 for ITAir. The AI flags are the template's
+`aiTemplate.addType` bits (BF2142.exe 0x0088fbd0, 0x00882ff1): ITUnit 0,
+ITAir 1, ITHelicopter 2, ITGround 3, ITNaval 4, ITControlpoint 5,
+ITTransportation 6, ITMobile 7, ITStructure 8, ITSoldier 9 (also set
+through 0x0088d070), ITObstructedView 10, ITNoTemperature 11, ITHasWreck
+12, ITObstacle 13, ITHasCarHorn 14; ITBiological sets none. Not
+rewritten: changing seats inside a vehicle and the type-0/1 order
+multipliers.
 
 ### Not decoded, and the rewrite's stand-ins
 
 - **Scheduling:** the CPU budgets (every slice runs to its count; the SAI
   runs once a second), and the whole path searched at once (the original
   searches three clusters at a time). Each think evaluates every behaviour.
-- **Aim:** the rewrite's soldiers turn their body at once (no head twist
-  ahead of the body); bots don't zoom.
+- **Aim:** bots don't zoom. (The head twists before the body for every
+  soldier: see `SoldierControl::twist`, 0x0058a6d0.)
 - **Deviation:** the AI deviation (0x00892b70) widens the weapon's own
   deviation through the soldier (vt+0xf4); the rewrite's hand-held
   firearms have no deviation model, so the bot spreads its aim uniformly
@@ -2720,8 +2806,6 @@ seat factors of the AI object's flag bits 1 and 3 (0x1006b910: 0.5,
   vehicle and weapon has its `ai/*.ai`. Levels without
   `StrategicAreas.ai` (three of the 46 with a mesh) leave the original's
   SAI without areas; the rewrite deviates and makes one per control point.
-- **Interpreters:** the sidestep round moving obstacles on foot and in the
-  hover tank (0x100e63c0).
 - **Strategy:** area temperatures (soldier 1, vehicle 20) and strengths
   (8 per unit; a vehicle's own battle strengths are not read).
 - **Revive:** the time left uses the respawn countdown, or 15 s. The
@@ -2734,13 +2818,13 @@ seat factors of the AI object's flag bits 1 and 3 (0x1006b910: 0.5,
   and orders for squads the SAI left without one are not from AIDLL's
   commander.
 - **Path follower:** a moving target re-planned when it moves 2 m; the
-  segment searches' fallback to the whole mesh; a blocked bot planning
-  anew rather than carrying on from its cluster (0x10095470). The jump (a
+  segment searches' fallback to the whole mesh (see above). The jump (a
   PIJump press) is not in the rewrite's soldiers: a second's back step to
   one side stands in.
 - **Stuck drivers:** after the 20 s progress check the move fails and
-  the behaviour plans again; what 0x100c91c0 then hands the game
-  (IAIGameEffector vt+0x24 → 0x0089e940) isn't rewritten.
+  the behaviour plans again. 0x100c91c0 also hands the bot to the game
+  (IAIGameEffector vt+0x24 → 0x0089e940 → GameLogic slot 0x58), whose
+  slot is `0x008924f0`, returning 0: it does nothing in this build.
 - **Assists:** the radio requests ("medic!", "ammo!") and the squads'
   order types the factors read are not modelled; basicTemp is read as the
   AI object's +0x14.

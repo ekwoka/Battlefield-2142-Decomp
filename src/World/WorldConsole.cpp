@@ -90,6 +90,23 @@ void registerWorldConsoleMethods(Console& console, ObjectTemplateManager& templa
 	};
 	console.registerMethod(active);
 
+	// deviation.setFireDev max perShot decay: a method of three floats
+	// (0x004e7af4 -> 0x004e7c73 -> template 0x005f5360: +0x10, +0x8, +0xc),
+	// which the generic template properties (one value each) can't keep:
+	// kept on the template as the three numbers.
+	ConsoleMethod fireDev;
+	fireDev.name = "ObjectTemplate.deviation.setFireDev";
+	fireDev.kind = ConsoleMethodKind::Method;
+	fireDev.access = access;
+	fireDev.minArgs = 3;
+	fireDev.maxArgs = 3;
+	fireDev.isActive = activeTemplate;
+	fireDev.invoke = [&templates](const std::vector<std::string>& args) -> std::string {
+		templates.active()->settings()["deviation.setFireDev"] = args[0] + " " + args[1] + " " + args[2];
+		return {};
+	};
+	console.registerMethod(fireDev);
+
 	// activeSafe <type> <name>: the type is only checked in debug builds.
 	bindMethod(console, "ObjectTemplate.activeSafe", access, [&templates](std::string, std::string name) {
 		templates.setActive(templates.find(firstWord(name)));

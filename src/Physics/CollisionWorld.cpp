@@ -204,6 +204,28 @@ void CollisionWorld::querySphere(const Vec3& center, float radius, std::vector<S
 	}
 }
 
+bool CollisionWorld::edgeContact(const Vec3& a, const Vec3& b, const Vec3& origin, float minNormal, Vec3& point,
+	Vec3& normal) const
+{
+	SphereContact first, second;
+	if (!segmentContact(a, b, first)) {
+		return false;
+	}
+	point = first.point;
+	normal = first.normal;
+	if (segmentContact(b, a, second)) {
+		point = (first.point + second.point) * 0.5f;
+		normal = first.normal + second.normal;
+		normal.y = 0;
+		if (lengthSquared(normal) < minNormal * minNormal) {
+			normal = origin - point;
+		}
+		const float length = std::sqrt(lengthSquared(normal));
+		normal = length > 0 ? normal * (1 / length) : normal;
+	}
+	return true;
+}
+
 bool CollisionWorld::segmentContact(const Vec3& from, const Vec3& to, SphereContact& contact) const
 {
 	Hit hit;

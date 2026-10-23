@@ -32,16 +32,25 @@ float soldierSpeed(int index);
 // The speed index of a pose (0x00586020).
 int soldierSpeedIndex(SoldierPose pose, bool sprinting);
 
+// The turn: the body (the soldier object's yaw, +0x25c) follows the look
+// with a lag: the look is the body plus the head's twist (+0x278); see
+// update. Firing, the camera and what the soldier sets down go along the
+// look; walking along the body.
 class SoldierControl {
 public:
 	void update(const SoldierInput& input, physics::SoldierBody& body);
 
 	float throttle() const { return m_throttle; }
 	float strafe() const { return m_strafe; }
+	// Degrees the look is ahead of the body (+0x278).
+	float twist() const { return m_twist; }
+	void reset() { m_twist = m_catchUp = 0; }
 
 private:
 	float m_throttle = 0; // 0x264
 	float m_strafe = 0;   // 0x260
+	float m_twist = 0;    // 0x278
+	float m_catchUp = 0;  // 0x280: the twist the body still has to catch up
 };
 
 } // namespace dice::hfe::game

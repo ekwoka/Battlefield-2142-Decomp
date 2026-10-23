@@ -11,6 +11,7 @@
 #include "IO/File/FileManager.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "Physics/CollisionWorld.h"
+#include "Physics/MaterialManager.h"
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
@@ -89,14 +90,15 @@ struct Game {
 	}
 
 	// The world, once the test's templates are in place.
-	void start()
+	void start(const physics::MaterialManager* materials = nullptr)
 	{
 		world = std::make_unique<game::GameWorld>(templates, objects);
 		world->enablePhysics(files, collisionTemplates,
 			{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
 				 normal = {0, 1, 0};
 				 return 0.0f;
-			 }});
+			 }},
+			materials);
 		world->setAnimationSystems(&systems, [this](const std::string& path) {
 			std::string out;
 			if (!valueHolders) {
@@ -550,4 +552,182 @@ TEST(CollisionWorld_CapsuleAgainstEdges)
 	contacts.clear();
 	world.capsuleEdgeContacts({-0.5f, 1.5f, 1}, {0.5f, 1.5f, 1}, 0.1f, contacts);
 	CHECK(contacts.empty());
+}
+
+// The manager's levels of detail (0x008ae120): by distance to the camera
+// (tripled behind it, done by the caller), level 1 for every body with
+// three awake ones nearer; a level-1 body steps 1.5 dT at a time
+// (0x008add10) and a level-2 one lets its knees', elbows', a spine bone's
+// and head's particles through the objects (0x008ac200).
+TEST(RagDoll_LevelsOfDetail)
+{
+	CHECK((anim::ragDollLevels({5, 1, 3, 2, 4}, {true, true, true, true, true}) == std::vector<int> {1, 0, 0, 0, 1}));
+	// Asleep ones don't count among the three.
+	CHECK((anim::ragDollLevels({5, 1, 3, 2, 4}, {true, false, true, true, true}) == std::vector<int> {1, 0, 0, 0, 0}));
+	CHECK((anim::ragDollLevels({}, {}).empty()));
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	const anim::RagDollTemplate* t = game.systems.ragDoll(kRagDollScript);
+	const anim::Skeleton* skeleton = game.systems.skeleton("Objects/Soldiers/Common/Animations/3p_setup.ske");
+	CHECK(t && skeleton);
+	if (!t || !skeleton) {
+		return;
+	}
+	std::vector<anim::Matrix> pose = anim::worldMatrices(*skeleton, anim::setupPose(*skeleton));
+	for (anim::Matrix& m : pose) {
+		m[13] += 5;
+	}
+	anim::RagDollWorld air;
+	anim::RagDoll fine, coarse;
+	fine.start(*t, pose, {0, 0, 0});
+	coarse.start(*t, pose, {0, 0, 0});
+	coarse.setLevelOfDetail(1);
+	// 1/30 s: ragdoll_dT (1/90 s) x slowMotion 0.75 fits 2 steps (round
+	// 0.025 / 0.0111) and 1.5 dT 2 steps of their own length (round 0.025 /
+	// 0.0167 = 1.5): they fall differently far.
+	for (int i = 0; i < 6; ++i) {
+		fine.update(1 / 30.0f, air);
+		coarse.update(1 / 30.0f, air);
+	}
+	CHECK(std::fabs(fine.middle()[1] - coarse.middle()[1]) > 1e-4f);
+	// Level 2: an object below everything stops all but those five.
+	anim::RagDollWorld floor;
+	floor.raycast = [](const anim::Vec& from, const anim::Vec& to, anim::Vec& point, anim::Vec& normal, uint32_t& material) {
+		if (from[1] < 4.0f || to[1] >= 4.0f) {
+			return false;
+		}
+		const float k = (from[1] - 4.0f) / (from[1] - to[1]);
+		point = {from[0] + (to[0] - from[0]) * k, 4.0f, from[2] + (to[2] - from[2]) * k};
+		normal = {0, 1, 0};
+		material = 0;
+		return true;
+	};
+	// The constraints drag the others along a little, but the five fall
+	// through the floor first; at level 0 they don't.
+	const auto gap = [&](int lod) {
+		anim::RagDoll body;
+		body.start(*t, pose, {0, -10, 0});
+		body.setLevelOfDetail(lod);
+		for (int i = 0; i < 15; ++i) {
+			body.update(1 / 30.0f, floor);
+		}
+		float skipped = 0, held = 0;
+		int nSkipped = 0, nHeld = 0;
+		for (const anim::RagDoll::Particle& p : body.particles()) {
+			if (p.bone == 2 || p.bone == 7 || p.bone == 16 || p.bone == 32 || p.bone == 47) {
+				skipped += p.position[1];
+				++nSkipped;
+			} else {
+				held += p.position[1];
+				++nHeld;
+			}
+		}
+		return nSkipped > 0 && nHeld > 0 ? held / nHeld - skipped / nSkipped : 0.0f;
+	};
+	CHECK(gap(2) > 0.05f);
+	CHECK(gap(0) < 0.05f);
+}
+
+// A soldier killed in a seat without a die bundle (0x005cea00 with
+// died = 1, 0x005f0f50 with +0x2eb): thrown out at the seat's exit as a
+// ragdoll pushed forward by rd_dieInVehicleForce; PlayerDeath at once,
+// but the body stays (the armour's countdown 0x00652380): it goes once it
+// has landed and armor.timeToStayAsWreck (20 by default, 0x00630040) has
+// passed since the death, plus timeToStayAfterDestroyed (0).
+TEST(RagDoll_ThrownOutOfASeatWithoutADieBundle)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	game.collisionTemplates.create("as_fav", "Objects/Vehicles/as_fav/");
+	world::ObjectTemplate* car = game.templates.create("PlayerControlObject", "car");
+	car->settings()["hasMobilePhysics"] = "1";
+	car->settings()["physicsType"] = "Mesh";
+	car->settings()["collisionMesh"] = "as_fav";
+	car->settings()["seatInformation"] = "car 0/0.5/0.4 0/0/0";
+	car->settings()["soldierExitLocation"] = "-2/0/0 0/0/0";
+	car->settings()["armor.maxHitPoints"] = "500";
+	car->children().push_back({"car_entry", {-1.5f, 0, 0}, {}});
+	game.templates.registerType(9, "Engine");
+	game.templates.registerType(10, "Spring");
+	car->settings()["mass"] = "1800";
+	world::ObjectTemplate* engine = game.templates.create("Engine", "car_engine");
+	engine->settings()["engineType"] = "194";
+	world::ObjectTemplate* wheel = game.templates.create("Spring", "car_wheel");
+	wheel->settings()["strength"] = "40";
+	wheel->settings()["damping"] = "8";
+	car->children().push_back({"car_engine", {0, -0.44f, 0}, {}});
+	for (float x : {-0.95f, 0.95f}) {
+		for (float z : {-1.4f, 1.6f}) {
+			engine->children().push_back({"car_wheel", {x, -0.15f, z}, {}});
+		}
+	}
+	game.templates.create("EntryPoint", "car_entry")->settings()["entryRadius"] = "3";
+	game.start();
+	const uint32_t vehicle = game.objects.create(car, {3, 1.2f, 0}, {0, 0, 0})->id();
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	game.run(3);
+	const uint32_t soldier = game.world->playerObject();
+	game::SoldierInput input;
+	input.use = true;
+	game.world->setPlayerInput(input);
+	game.world->tick(1 / 30.0f);
+	game.world->setPlayerInput({});
+	game.run(0.5f);
+	CHECK(game.world->playerVehicle() && game.world->playerVehicle()->id() == vehicle);
+	game.world->setHitPoints(soldier, 0);
+	CHECK(game.count("PlayerDeath") == 1);           // dead at once
+	CHECK(game.world->seatCorpse(vehicle, 0) == 0);  // not slumped: no die bundle
+	const world::Object* body = game.objects.find(soldier);
+	CHECK(body && !body->hidden() && game.world->ragDoll(soldier) != nullptr);
+	CHECK((game.world->corpses() == std::vector<uint32_t> {soldier}));
+	if (!body) {
+		return;
+	}
+	// Out at the exit, 2 m to the car's left (x - 2 at yaw 0), pushed
+	// forward (+z).
+	const world::Object* carObject = game.objects.find(vehicle);
+	CHECK(carObject && body->position().x < carObject->position().x - 1);
+	const float z0 = game.world->ragDoll(soldier)->middle()[2];
+	game.run(2);
+	CHECK(game.world->ragDoll(soldier) && game.world->ragDoll(soldier)->middle()[2] > z0 + 0.2f);
+	game.run(15); // 17.5 s after the death: still there
+	CHECK(game.objects.find(soldier) != nullptr);
+	game.run(4);  // past 20 s, landed: gone
+	CHECK(game.objects.find(soldier) == nullptr && game.world->corpses().empty());
+}
+
+TEST(RagDoll_ImpactSoundFromTheFootStepsMaterial)
+{
+	// A falling body's impact: the cell of material 0x157c (5500,
+	// Soldier_FootSteps) and the ground's, its sound template 4 (0x007fd780
+	// -> 0x0060a6d0), the cell against material 0 when that one has none.
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	physics::MaterialManager materials;
+	materials.createCell(5500, 0).soundTemplates = {"S_Walk_Dirt", "S_Walk_Dirt", "S_Prone_Dirt", "S_Sprint_Dirt",
+		"S_Soldier_RagDoll_Impact"};
+	materials.createCell(24, 0).soundTemplates = {"not_this_one"};
+	game.start(&materials);
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	game.run(2);
+	(void)game.world->takeSounds();
+	game.world->setHitPoints(game.world->playerObject(), 0);
+	std::vector<std::string> heard;
+	for (int i = 0; i < 90; ++i) {
+		game.world->tick(1 / 30.0f);
+		for (const auto& sound : game.world->takeSounds()) {
+			heard.push_back(sound.sound);
+		}
+	}
+	CHECK(!heard.empty());
+	CHECK(std::all_of(heard.begin(), heard.end(), [](const std::string& s) { return s == "S_Soldier_RagDoll_Impact"; }));
 }

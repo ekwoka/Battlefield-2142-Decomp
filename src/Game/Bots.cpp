@@ -275,6 +275,63 @@ const AiPlugin* BotSettings::plugin(const std::string& aiTemplate, const std::st
 	return nullptr;
 }
 
+uint32_t informationTypeFlag(const std::string& name)
+{
+	static const std::pair<const char*, int> names[] = {{"ITUnit", 0}, {"ITAir", 1}, {"ITHelicopter", 2}, {"ITGround", 3},
+		{"ITNaval", 4}, {"ITControlpoint", 5}, {"ITTransportation", 6}, {"ITMobile", 7}, {"ITStructure", 8},
+		{"ITSoldier", 9}, {"ITObstructedView", 10}, {"ITNoTemperature", 11}, {"ITHasWreck", 12}, {"ITObstacle", 13},
+		{"ITHasCarHorn", 14}};
+	for (const auto& [n, bit] : names) {
+		if (name == n) {
+			return 1u << bit;
+		}
+	}
+	return 0;
+}
+
+float otherSeatFactor(bool driverTaken, bool rootMobile, uint32_t rootTypes)
+{
+	if (driverTaken || !rootMobile || (rootTypes & kITNaval)) {
+		return 1;
+	}
+	return (rootTypes & kITGround) ? 0.77f : (rootTypes & kITAir) ? 0.5f : 1.0f;
+}
+
+bool transportClose(bool own, float botToInfantrySpot2, float vehicleToVehicleSpot2, bool& noMove)
+{
+	if (own) {
+		return vehicleToVehicleSpot2 < 25;
+	}
+	if (botToInfantrySpot2 >= 2500 && vehicleToVehicleSpot2 >= 2500
+		&& (botToInfantrySpot2 >= 4900 || vehicleToVehicleSpot2 <= botToInfantrySpot2)) {
+		noMove = false;
+		return false;
+	}
+	noMove = true;
+	return true;
+}
+
+uint32_t BotSettings::typeFlags(const std::string& aiTemplate) const
+{
+	const auto t = aiTemplates.find(lower(aiTemplate));
+	return t == aiTemplates.end() ? 0 : t->second.types;
+}
+
+ai::ClimbLimits BotSettings::climbLimits(int map) const
+{
+	ai::ClimbLimits limits;
+	if (map >= 0 && static_cast<size_t>(map) < pathfindingMaps.size()) {
+		const PathfindingMap& m = pathfindingMaps[static_cast<size_t>(map)];
+		// Stored as the cosine and read back through acos (0x100afdf0, 0x100afe00).
+		limits.maxSlope = std::acos(std::clamp(std::cos(m.maxSlope * kRadians), -1.0f, 1.0f));
+		limits.stepHeight = m.allowedThresholdHeight;
+	}
+	if (map == 0) {
+		limits.stepHeight = 0.35f; // 0x1003f930, 0x1003f810: the infantry map's own
+	}
+	return limits;
+}
+
 // A carried weapon's AI template: its ObjectTemplate.aiTemplate's
 // weaponTemplate (Unl_Hub_Medic -> MedicHub), else by its own name.
 WeaponAi BotManager::weaponAi(const std::string& name) const
@@ -513,6 +570,21 @@ void BotManager::update(float seconds)
 	// What every bot looks at this tick, gathered once.
 	m_players = m_world.playerList();
 	m_vehicles = m_world.vehicleList();
+	// A human player out of a vehicle stamps it for the team (BF2142.exe
+	// 0x00894860, exit event: the player not a bot (vt+0x84 -> player
+	// vt+0x68) and the soldier's root no longer the vehicle's -> the unit
+	// component's vt+0x64 0x008a1b10 with the clock and the player's team).
+	for (const GameWorld::PlayerInfo& player : m_players) {
+		if (player.ai) {
+			continue;
+		}
+		uint32_t& was = m_humanVehicle[player.id];
+		if (was && player.vehicle != was && player.team >= 1 && player.team <= 2) {
+			auto& stamp = m_humanLeftAt.try_emplace(was, std::array<float, 3> {-1000, -1000, -1000}).first->second;
+			stamp[static_cast<size_t>(player.team)] = m_time;
+		}
+		was = player.vehicle;
+	}
 	if (!enabled()) {
 		return;
 	}
@@ -599,9 +671,6 @@ void BotManager::update(float seconds)
 		bot.sinceThink += elapsed;
 		bot.thinkAge += 3;
 		bot.senseAge += 3;
-		if (bot.lastVehicle && !self->vehicle) {
-			bot.leftVehicleAt = m_time; // Change avoids it for 7 s (0x100d3e70)
-		}
 		updateGoal(bot, *self);
 		SoldierInput input;
 		act(bot, *self, input, elapsed);
@@ -609,7 +678,6 @@ void BotManager::update(float seconds)
 		if (self->vehicle && self->seat == 0) {
 			m_driven[self->vehicle] += std::sqrt(horizontal2(self->velocity)) * elapsed;
 		}
-		bot.lastVehicle = self->vehicle;
 		bot.usedLast = input.use;
 		bot.firedLast = input.fire;
 		bot.lastInput = input;
@@ -1043,7 +1111,7 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		} else if (bot.vehicleTarget) {
 			const physics::Vec3 d = at - self.position;
 			if (horizontal2(d) > 2.5f * 2.5f) {
-				steer(bot, self, at, 200000 + static_cast<int>(bot.vehicleTarget), seconds, input);
+				steer(bot, self, at, 200000 + static_cast<int>(bot.vehicleTarget), seconds, input, 0, bot.vehicleTarget);
 			} else {
 				input.use = !bot.usedLast && working; // a press
 			}
@@ -1489,10 +1557,12 @@ float BotManager::reviveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, con
 //   - 0 for a seat another bot heads for (its reservation, +0x2c/+0x30),
 //     one (when `other`) whose driver's seat is taken, or a vehicle with
 //     an enemy aboard; a vehicle below 0.3 of its health (0.09 the one
-//     the bot drives). The original also refuses a root left by its team
-//     under 7 s ago (Unit vt+0x60, a per-team stamp whose setter is not
-//     traced: here the vehicle the bot itself left) and one more than 8 m
-//     over the terrain.
+//     the bot drives); the root's seat of a vehicle that isn't ITAir
+//     within 7 s of a human player of the bot's team getting out of it
+//     (the unit's per-team stamp, vt+0x60; set by the game's exit event,
+//     BF2142.exe 0x00894860 -> vt+0x64 0x008a1b10, for players that are
+//     not bots). The original also refuses one more than 8 m over the
+//     terrain (not here).
 //   - weapons (0x100d3b80): for each of the seat's guns (on foot the
 //     kit's), its strength against each object the bot knows (by the
 //     object's CombatStrengthType), plus at a vehicle's seat its eight
@@ -1504,8 +1574,11 @@ float BotManager::reviveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, con
 //     a driver of the bot's squad, x 1 of its team, and 0 without a
 //     driver.
 //   - x 1.15 for the seat the bot reserved itself.
-// The original also counts transport (the SAI order's areas, 0x100d3730,
-// 0x1005d840), not decoded: never here.
+// Transport (0x100d3730, 0x1005d840; orderClose): while the bot's order is
+// close, the move isn't counted, nor the weapons when the vehicle is
+// outside the area's control point. At the root's seat it only stays close
+// when the order's spot for the vehicle's map lies outside the point, or
+// the bot is under threat and the seat unarmed.
 float BotManager::seatValue(const Bot& bot, const GameWorld::PlayerInfo& self, uint32_t vehicle, int seat, bool other) const
 {
 	const bool soldier = vehicle == 0;
@@ -1546,8 +1619,15 @@ float BotManager::seatValue(const Bot& bot, const GameWorld::PlayerInfo& self, u
 		if (health < floor) {
 			return 0;
 		}
-		if (vehicle == bot.lastVehicle && vehicle != self.vehicle && m_time - bot.leftVehicleAt < 7) {
-			return 0;
+		// The root's seat (a primary AI object, vt+0xec) of a vehicle that
+		// isn't ITAir: not within 7 s of a human player of the bot's team
+		// getting out of it (the unit's per-team stamp, vt+0x60).
+		if (seat == 0 && !(m_settings.typeFlags(rootAi) & kITAir)) {
+			const auto stamp = m_humanLeftAt.find(vehicle);
+			if (stamp != m_humanLeftAt.end() && self.team >= 1 && self.team <= 2
+				&& m_time - stamp->second[static_cast<size_t>(self.team)] < 7) {
+				return 0;
+			}
 		}
 		if (static_cast<size_t>(seat) < seats.size()) {
 			seatAi = aiTemplateOf(seats[static_cast<size_t>(seat)].name);
@@ -1557,9 +1637,41 @@ float BotManager::seatValue(const Bot& bot, const GameWorld::PlayerInfo& self, u
 		}
 	}
 	const AiPlugin* mobile = soldier ? nullptr : m_settings.plugin(rootAi, "Mobile");
+	const bool armament = !soldier && (m_settings.plugin(seatAi.empty() ? rootAi : seatAi, "Armament") || !guns.empty());
+	// Transport (0x100d3730, 0x1005d840): see orderClose.
+	bool close = false, inArea = false, noMove = false;
+	const GameWorld::VehicleInfo* info = nullptr;
+	for (const GameWorld::VehicleInfo& v : m_vehicles) {
+		info = v.object == vehicle ? &v : info;
+	}
+	if (!soldier && info) {
+		close = orderClose(bot, self, *info, rootAi, inArea, noMove);
+		if (close && seat == 0) {
+			// The root's seat: still close when the order's spot on the
+			// vehicle's map lies outside the area's control point (with
+			// the area flagged ControlPoint, 0x1005d840: farther than its
+			// radius + the vehicle's), else only when the bot is under
+			// threat (vt+0x9c) and the seat has no Armament part (+0x34).
+			bool outside = false;
+			const auto& areas = m_settings.strategy.areas;
+			if (mobile && bot.goalOrder >= 0 && static_cast<size_t>(bot.goalOrder) < areas.size()) {
+				const ai::StrategicArea& area = areas[static_cast<size_t>(bot.goalOrder)];
+				const int map = lower(mobile->pathfindingMap) == "vehicle" ? 1 : 0;
+				for (const GameWorld::ControlPointInfo& point : m_world.controlPointList()) {
+					if (area.controlPointFlag && point.id == area.controlPoint) {
+						const physics::Vec3 spot = area.hasOrderPosition[map]
+							? physics::Vec3 {area.orderPosition[map][0], area.orderPosition[map][1], area.orderPosition[map][2]}
+							: point.position;
+						outside = std::sqrt(physics::lengthSquared(spot - point.position)) - vehicleBox(*info).radius > point.radius;
+					}
+				}
+			}
+			close = outside || (threatened(bot, self) && !armament);
+		}
+	}
 	// Weapons.
 	float weapons = 0;
-	for (const std::string& name : guns) {
+	for (const std::string& name : (close && !inArea) ? std::vector<std::string> {} : guns) {
 		const WeaponAi w = weaponAi(name);
 		if (!soldier && mobile) {
 			for (const float strength : w.strength) {
@@ -1588,7 +1700,7 @@ float BotManager::seatValue(const Bot& bot, const GameWorld::PlayerInfo& self, u
 	float move = 0;
 	if (soldier) {
 		move = kSoldierSpeed * 1.5f * 0.5f * 0.3f; // SoldierMobile's maxSpeed, the root's factor
-	} else if (mobile) {
+	} else if (mobile && !close && !noMove) {
 		float f = 1.5f;
 		if (seat != 0) {
 			f = 0;
@@ -1599,12 +1711,88 @@ float BotManager::seatValue(const Bot& bot, const GameWorld::PlayerInfo& self, u
 		}
 		move = mobile->maxSpeed * f * 0.5f * 0.3f;
 	}
-	const bool armament = !soldier && (m_settings.plugin(seatAi.empty() ? rootAi : seatAi, "Armament") || !guns.empty());
 	float value = (armament ? 2.0f : 1.0f) * weapons + move;
 	if (!soldier && bot.vehicleTarget == vehicle) {
 		value *= 1.15f;
 	}
 	return health * value;
+}
+
+// 0x100d3730. For a ground or naval vehicle (not ITSoldier, ITAir or
+// ITHelicopter) with a Mobile part, when the bot's order lies in an area
+// (the squad's, squad +0x28) whose control point can change hands
+// (0x1005d8f0: IAIGame vt+0x24's flag, not unableToChangeTeam) and that the
+// bot's team doesn't hold (+0x70 + team x 4 not 0): `inArea` whether the
+// vehicle touches the point's radius (its radius + the point's). For a
+// vehicle the bot isn't in, the order is far (false, `noMove` cleared)
+// when the bot's root (squad member +0x40) is 50 m or more from the area's
+// infantry order spot, the vehicle as far from its vehicle spot, and the
+// bot 70 m or more away or the vehicle no farther than it (squared, 2500
+// and 4900); otherwise it is close (true, `noMove` set). For the vehicle the
+// bot is in, close within 5 m of its vehicle spot. The spots are the
+// area's order positions (aiStrategicArea.setOrderPosition), the control
+// point without one.
+bool BotManager::orderClose(const Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::VehicleInfo& vehicle,
+	const std::string& rootAi, bool& inArea, bool& noMove) const
+{
+	inArea = false;
+	const uint32_t types = m_settings.typeFlags(rootAi);
+	if ((types & (kITSoldier | kITAir | kITHelicopter)) || !m_settings.plugin(rootAi, "Mobile")) {
+		return false;
+	}
+	const auto& areas = m_settings.strategy.areas;
+	if (bot.goalOrder < 0 || static_cast<size_t>(bot.goalOrder) >= areas.size()) {
+		return false;
+	}
+	const ai::StrategicArea& area = areas[static_cast<size_t>(bot.goalOrder)];
+	for (const GameWorld::ControlPointInfo& point : m_world.controlPointList()) {
+		if (point.id != area.controlPoint || !point.capturable || point.team == self.team) {
+			continue;
+		}
+		const auto spot = [&](int map) {
+			return area.hasOrderPosition[map]
+				? physics::Vec3 {area.orderPosition[map][0], area.orderPosition[map][1], area.orderPosition[map][2]}
+				: point.position;
+		};
+		const physics::Vec3 vehicleSpot = spot(1), infantrySpot = spot(0);
+		const float reach = vehicleBox(vehicle).radius + point.radius;
+		inArea = physics::lengthSquared(vehicle.position - point.position) < reach * reach;
+		// The bot's root: on foot, or its vehicle (the soldier rides with it).
+		return transportClose(self.vehicle == vehicle.object, physics::lengthSquared(self.position - infantrySpot),
+			physics::lengthSquared(vehicleSpot - vehicle.position), noMove);
+	}
+	return false;
+}
+
+// 0x100ebdd0's +0x7c: over the sightings the bot remembers, the enemy's
+// strength against the bot's own type (+0x40 vt+0x40), decaying with age
+// but never to 0; above 0 when one of them carries (or mans) a weapon
+// with strength against it.
+bool BotManager::threatened(const Bot& bot, const GameWorld::PlayerInfo& self) const
+{
+	const size_t mine = static_cast<size_t>(std::clamp(strengthTypeOf(self), 0, 7));
+	for (const Known& known : bot.known) {
+		GameWorld::PlayerInfo enemy;
+		if (!known.everSeen || !m_world.playerInfo(known.player, enemy) || enemy.team == self.team) {
+			continue;
+		}
+		std::vector<std::string> weapons;
+		for (const auto& [slot, name] : enemy.carried) {
+			weapons.push_back(name);
+		}
+		if (enemy.vehicle) {
+			const std::vector<GameWorld::SeatLayout> seats = const_cast<GameWorld&>(m_world).vehicleSeats(enemy.vehicle);
+			if (enemy.seat >= 0 && static_cast<size_t>(enemy.seat) < seats.size()) {
+				weapons.push_back(seats[static_cast<size_t>(enemy.seat)].weapon);
+			}
+		}
+		for (const std::string& name : weapons) {
+			if (!name.empty() && weaponAi(name).strength[mine] > 0) {
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 // BBChange's urgency (0x1006c520). The current seat: on foot 1.2 x its
@@ -1618,9 +1806,13 @@ float BotManager::seatValue(const Bot& bot, const GameWorld::PlayerInfo& self, u
 // the soldier within 20 m below a quarter of its health. Urgency: best /
 // current x weight x 10 (best x weight when the current is worth
 // nothing), divided by 1 + 14 clamp((d - 10) / 60, 0, 1) for the distance
-// to it (0x1006bc50). Not rewritten: changing seats inside a vehicle,
-// the SAI's transport orders (types 0 and 1) and the seat factors of the
-// AI object's flag bits 1 and 3 (0x1006b910; not identified).
+// to it (0x1006bc50). Another vehicle's seats other than the root's are
+// weighed by 0x1006b910: 1 when its driver's seat is taken, else 0.77 for
+// an ITGround root and 0.5 for an ITAir one with a Mobile part, not
+// ITNaval (the flag bits 3 and 1: ai::InformationType, aiTemplate.addType).
+// Not rewritten: changing seats inside a vehicle (where the same factors
+// weigh the bot's own vehicle's other seats) and the SAI's transport
+// orders (types 0 and 1).
 float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight)
 {
 	constexpr float kReach = 75; // 0x42960000
@@ -1669,9 +1861,16 @@ float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 		if (myHealth < 0.25f && d2 < 400) {
 			f *= 5;
 		}
-		const size_t seats = std::max<size_t>(1, m_world.vehicleOccupants(vehicle.object).size());
+		const std::vector<int> occupants = m_world.vehicleOccupants(vehicle.object);
+		const size_t seats = std::max<size_t>(1, occupants.size());
+		// The other seats' factor (0x1006b910, for another vehicle): 1 with
+		// its driver's seat taken (0x100aa530); else, for a root with a
+		// Mobile part that isn't ITNaval, 0.77 for ITGround, 0.5 for ITAir.
+		const std::string rootAi = object && object->objectTemplate() ? aiTemplateOf(object->objectTemplate()->name()) : "";
+		const uint32_t types = m_settings.typeFlags(rootAi);
+		const float others = otherSeatFactor(!occupants.empty() && occupants[0] >= 0, mobile, types);
 		for (size_t seat = 0; seat < seats; ++seat) {
-			const float value = seatValue(bot, self, vehicle.object, static_cast<int>(seat), true) * f;
+			const float value = seatValue(bot, self, vehicle.object, static_cast<int>(seat), true) * f * (seat > 0 ? others : 1.0f);
 			if (value > best) {
 				best = value;
 				chosen = vehicle.object;
@@ -2227,7 +2426,7 @@ void BotManager::repair(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInpu
 	const float radii = vehicleBox(*vehicle).radius + kSoldierRadius;
 	const float d = std::sqrt(horizontal2(vehicle->position - self.position));
 	if (d > radii) {
-		steer(bot, self, vehicle->position, 600000 + static_cast<int>(vehicle->object), seconds, input, radii);
+		steer(bot, self, vehicle->position, 600000 + static_cast<int>(vehicle->object), seconds, input, radii, vehicle->object);
 		return;
 	}
 	input.selectItem = self.inHandSlot != slot ? slot : 0;
@@ -2652,6 +2851,9 @@ bool BotManager::follow(Bot& bot, const ai::NavMesh& mesh, const physics::Vec3& 
 	if (bot.follower.failed() && m_time - bot.followAt < 1 && !other) {
 		return false;
 	}
+	if (other) {
+		bot.sidestep = ai::SidestepState(); // a new move object (+0x64 = -1, 0x100ce620)
+	}
 	if (other || moved || !bot.follower.planned() || bot.follower.failed()) {
 		bot.follower.reset();
 		bot.follower.request(mesh, toAi(from), toAi(to), settings, m_time);
@@ -2672,8 +2874,46 @@ bool BotManager::follow(Bot& bot, const ai::NavMesh& mesh, const physics::Vec3& 
 // the follower asks for (0x10092bc0) is a PIJump press in the original;
 // the rewrite's soldiers cannot jump yet (no jump in SoldierPhysics /
 // SoldierControl), so a second's back step to one side stands in for it.
+ai::SidestepSense BotManager::sidestepSense(const Bot& bot, const physics::Vec3& at, uint32_t own, const ai::NavMesh& mesh,
+	const ai::FollowerSettings& settings, const physics::Vec3& steerPoint, const physics::Vec3& goal, uint32_t object) const
+{
+	ai::SidestepSense sense;
+	sense.position = toAi(at);
+	sense.self = static_cast<int>(own);
+	sense.steer = toAi(steerPoint);
+	sense.ahead = bot.follower.pointAhead(toAi(at), 10); // 0x100941c0
+	sense.goal = toAi(goal);
+	sense.target = object ? static_cast<int>(object) : -1;
+	// +0xe8: the vehicle Change heads for (0x100d4d60); +0xec: the one
+	// RepairVehicle works on (0x10073da0).
+	sense.related[0] = bot.vehicleTarget ? static_cast<int>(bot.vehicleTarget) : -1;
+	sense.related[1] = bot.repairTarget ? static_cast<int>(bot.repairTarget) : -1;
+	sense.mesh = &mesh;
+	sense.profile = &settings.options.profile;
+	sense.heightTolerance = settings.options.heightTolerance;
+	// The world list: the vehicles' AI objects (the soldiers' are flagged
+	// ITSoldier and never stepped round). Their room is the box's centre
+	// radius; ITObstacle comes from their AI template, and the Mobile part
+	// from its plug-in (a vehicle without AI scripts counts as mobile).
+	for (const GameWorld::VehicleInfo& v : m_vehicles) {
+		const world::Object* o = m_world.objects().find(v.object);
+		const std::string ai = o && o->objectTemplate() ? aiTemplateOf(o->objectTemplate()->name()) : "";
+		ai::SidestepObstacle obstacle;
+		obstacle.id = static_cast<int>(v.object);
+		obstacle.position = toAi(v.position);
+		obstacle.radius = vehicleBox(v).centreRadius;
+		obstacle.health = healthOf(v.object);
+		const uint32_t types = m_settings.typeFlags(ai);
+		obstacle.fixed = (types & kITObstacle) != 0;
+		obstacle.soldier = (types & kITSoldier) != 0;
+		obstacle.mobile = ai.empty() || !m_settings.aiTemplates.count(lower(ai)) || m_settings.plugin(ai, "Mobile");
+		sense.obstacles.push_back(obstacle);
+	}
+	return sense;
+}
+
 bool BotManager::steer(Bot& bot, const GameWorld::PlayerInfo& self, const physics::Vec3& to, int goalId, float seconds,
-	SoldierInput& input, float radius)
+	SoldierInput& input, float radius, uint32_t object)
 {
 	bot.pitch = 0;
 	input.aimPitch = 0;
@@ -2686,10 +2926,13 @@ bool BotManager::steer(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 		return false;
 	}
 	physics::Vec3 point = to;
+	bool steered = false;
+	physics::Vec3 d;
 	if (m_navMesh) {
 		ai::FollowerSettings settings;
 		settings.soldier = true;
 		settings.radius = kSoldierRadius;
+		settings.climb = m_settings.climbLimits(0);
 		if (follow(bot, *m_navMesh, self.position, to, goalId, settings)) {
 			const ai::PathFollower::Steer steer = bot.follower.steer(*m_navMesh, toAi(self.position), m_time);
 			if (steer.arrived) {
@@ -2701,13 +2944,25 @@ bool BotManager::steer(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 			}
 			if (steer.ok) {
 				point = fromAi(steer.point);
+				// The steering with its sidestep round vehicles (0x100ce860):
+				// a goal inside one's room, the bot as close as it gets,
+				// ends the move (InfanteryMoveTo stops, 0x100e6120).
+				ai::Vec3 way;
+				if (ai::sidestepSteer(bot.sidestep,
+						sidestepSense(bot, self.position, self.soldier, *m_navMesh, settings, point, to, object), way)) {
+					return false;
+				}
+				d = fromAi(way);
+				steered = true;
 			}
 		}
 	}
-	physics::Vec3 d = point - self.position;
-	d.y = 0;
-	const float length = std::sqrt(horizontal2(d));
-	d = length > 0.001f ? d * (1 / length) : physics::Vec3 {std::sin(self.yaw * kRadians), 0, std::cos(self.yaw * kRadians)};
+	if (!steered) {
+		d = point - self.position;
+		d.y = 0;
+		const float length = std::sqrt(horizontal2(d));
+		d = length > 0.001f ? d * (1 / length) : physics::Vec3 {std::sin(self.yaw * kRadians), 0, std::cos(self.yaw * kRadians)};
+	}
 	input.throttle = 1;
 	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight, 0};
 	aim(bot, self, eye + d * 5.0f, {}, false, 0, input, seconds);
@@ -2821,16 +3076,19 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 	}
 	physics::Vec3 point = to;
 	sense.remaining = std::sqrt(horizontal2(to - at));
+	ai::FollowerSettings floatingFollower;
 	if (m_vehicleNavMesh) {
 		ai::FollowerSettings follower;
 		follower.soldier = false;
 		follower.radius = settings.radius;
 		follower.options.vehicle = true;
+		follower.climb = m_settings.climbLimits(1);
 		if (!follow(bot, *m_vehicleNavMesh, at, to, goalId, follower)) {
 			brake();
 			// No progress for 20 s (0x10092bc0): the move fails and the
 			// behaviour plans again (0x100c91c0 hands the stuck bot to the
-			// game, IAIGame vt+0x24; the game's side isn't rewritten).
+			// game, IAIGameEffector vt+0x24 -> 0x0089e940 -> GameLogic slot
+			// 0x58, 0x008924f0, which only returns 0: nothing to rewrite).
 			return true;
 		}
 		const ai::PathFollower::Steer steer = bot.follower.steer(*m_vehicleNavMesh, toAi(at), m_time);
@@ -2846,14 +3104,21 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 		sense.remaining = bot.follower.remaining(toAi(at));
 		sense.maxBend = bot.follower.maxBend(toAi(at), toAi(forward), sense.speed, settings.lookAheadTime, m_time);
 		const ai::NavMesh& mesh = *m_vehicleNavMesh;
-		sense.ray = [&mesh](const ai::Vec3& from, const ai::Vec3& end) {
+		// The drivers' rays (0x100e8170: vslot 0x84 with 1000 polygons, no
+		// width, stopping at cost class 6, the class entered last, the
+		// climb test on).
+		const ai::ClimbLimits climb = follower.climb;
+		sense.ray = [&mesh, climb](const ai::Vec3& from, const ai::Vec3& end) {
 			ai::DriveRay ray;
 			if (mesh.findPolygon(from) < 0) {
 				return ray; // off the mesh (a spawn spot beside it): nothing known
 			}
-			ray.clear = ai::meshRaycast(mesh, from, end, nullptr, 30, &ray.distance);
+			ai::RayHit hit;
+			ray.clear = ai::meshRaycast(mesh, from, end, nullptr, -1, &ray.distance, -1, 0, 6, &climb, &hit);
+			ray.lastClass = hit.lastClass;
 			return ray;
 		};
+		floatingFollower = follower;
 	}
 	sense.goalDistance = std::sqrt(horizontal2(point - at));
 	sense.error = std::remainder(std::atan2(point.x - at.x, point.z - at.z) - heading, 2 * 3.14159265f);
@@ -2862,6 +3127,17 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 		way.y = 0;
 		const float length = std::sqrt(horizontal2(way));
 		way = length > 0.001f ? way * (1 / length) : physics::Vec3 {1, 0, 0}; // (1, 0) on the point (0x100ce860)
+		if (m_vehicleNavMesh) {
+			// The infantry steering with its sidestep (0x100ce860); the move
+			// ends when it says so (0x1008c7c0 stops the tank, 0x100e0930).
+			ai::Vec3 sidestep;
+			if (ai::sidestepSteer(bot.sidestep,
+					sidestepSense(bot, at, vehicle->object, *m_vehicleNavMesh, floatingFollower, point, to, 0), sidestep)) {
+				brake();
+				return false;
+			}
+			way = fromAi(sidestep);
+		}
 		const physics::Vec3 acceleration = seconds > 0 ? (vehicle->velocity - lastVelocity) * (1 / seconds) : physics::Vec3 {};
 		const ai::FloatingTankOutput out = ai::floatingTankControl(settings, sense, toAi(way), toAi(acceleration));
 		input.throttle = out.throttle;
@@ -3809,6 +4085,52 @@ void registerBotConsoleMethods(Console& console, BotSettings& settings)
 			it->second.plugins.push_back(lower(name));
 		}
 	});
+	bindMethod(console, "aiTemplate.addType", access, [s](std::string type) {
+		const auto it = s->aiTemplates.find(s->editingTemplate);
+		if (it != s->aiTemplates.end()) {
+			it->second.types |= informationTypeFlag(type);
+		}
+	});
+	// AIDLL's pathfinding maps (0x10020000's console settings on the active
+	// map, DAT_101394fc vt+0x48).
+	const auto activeMap = [s]() -> BotSettings::PathfindingMap* {
+		return s->activeMap >= 0 && static_cast<size_t>(s->activeMap) < s->pathfindingMaps.size()
+			? &s->pathfindingMaps[static_cast<size_t>(s->activeMap)]
+			: nullptr;
+	};
+	bindMethod(console, "aiPathfinding.createMap", access, [s](std::string name) {
+		s->pathfindingMaps.push_back({name});
+		s->activeMap = static_cast<int>(s->pathfindingMaps.size()) - 1;
+	});
+	bindMethod(console, "aiPathfinding.setActiveMap", access, [s](std::string name) {
+		for (size_t i = 0; i < s->pathfindingMaps.size(); ++i) {
+			if (lower(s->pathfindingMaps[i].name) == lower(name)) {
+				s->activeMap = static_cast<int>(i);
+			}
+		}
+	});
+	bindMethod(console, "aiPathfinding.map.maxSlope", access, [activeMap](float degrees) {
+		if (BotSettings::PathfindingMap* m = activeMap()) {
+			m->maxSlope = degrees;
+		}
+	});
+	bindMethod(console, "aiPathfinding.map.allowedThresholdHeight", access, [activeMap](float height) {
+		if (BotSettings::PathfindingMap* m = activeMap()) {
+			m->allowedThresholdHeight = height;
+		}
+	});
+	bindMethod(console, "aiPathfinding.map.headClearance", access, [activeMap](float height) {
+		if (BotSettings::PathfindingMap* m = activeMap()) {
+			m->headClearance = height;
+		}
+	});
+	// The mesh generator's settings (the editor traces the maps with them;
+	// the bots read the generated .qtr/.clb): accepted, not used.
+	bindMethod(console, "aiPathfinding.map.radius", access, [](float) {});
+	bindMethod(console, "aiPathfinding.map.allowedHeightDiff", access, [](float) {});
+	bindMethod(console, "aiPathfinding.map.addVehicleForClusterCost", access, [](std::string) {});
+	bindMethod(console, "aiPathfinding.traceMap", access, [](std::string) {});
+	bindMethod(console, "aiPathfinding.maxWaterDepth", access, [](float) {});
 	bindMethod(console, "aiTemplate.basicTemp", access, [s](float value) {
 		const auto it = s->aiTemplates.find(s->editingTemplate);
 		if (it != s->aiTemplates.end()) {

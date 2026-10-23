@@ -294,7 +294,9 @@ bool RagDollTemplate::execute(const std::string& line, std::string* include, std
 			{"ragdoll_legforwardfactor", &settings.legForwardFactor},
 			{"ragdoll_legpointforwardangle", &settings.legPointForwardAngle},
 			{"ragdoll_legpointforwardfactor", &settings.legPointForwardFactor},
-			{"rd_expforcemod", &settings.expForceMod}, {"rd_dieforce", &settings.dieForce}};
+			{"rd_expforcemod", &settings.expForceMod}, {"rd_dieforce", &settings.dieForce},
+			{"rd_dieinvehicleforce", &settings.dieInVehicleForce},
+			{"ragdoll_clientmaxupdatetime", &settings.clientMaxUpdateTime}};
 		for (const Var& v : floats) {
 			if (var == v.name) {
 				*v.number = value;
@@ -674,7 +676,13 @@ void RagDoll::legCollision()
 void RagDoll::collide(const RagDollWorld& world)
 {
 	const RagDollSettings& s = m_template->settings;
-	legCollision();
+	// Level of detail 2 (0x008ac200): no shin test, no capsules, and the
+	// particles of bones 2, 7, 16, 32 and 47 (knees, a spine bone, the
+	// elbows... and the head) skip the objects.
+	const bool reduced = m_lod >= 2;
+	if (!reduced) {
+		legCollision();
+	}
 	const auto segment = [](const Particle& p, Vec& from, Vec& direction, Vec& to) {
 		from = p.previous;
 		const Vec moved = p.position - p.previous;
@@ -688,6 +696,9 @@ void RagDoll::collide(const RagDollWorld& world)
 	if (s.useObjectCollision && world.raycast) {
 		for (Particle& p : m_particles) {
 			p.hitObject = false;
+			if (reduced && (p.bone == 2 || p.bone == 7 || p.bone == 16 || p.bone == 32 || p.bone == 47)) {
+				continue;
+			}
 			Vec from, direction, to, point, normal;
 			uint32_t material = 0;
 			segment(p, from, direction, to);
@@ -738,7 +749,9 @@ void RagDoll::collide(const RagDollWorld& world)
 			}
 		}
 	}
-	capsuleCollision(world);
+	if (!reduced) {
+		capsuleCollision(world);
+	}
 }
 
 // The body's capsules (addCapsuleCollision) against objects, while
@@ -845,15 +858,17 @@ const Vec& RagDoll::update(float seconds, const RagDollWorld& world)
 	}
 	m_sinceImpact += seconds;
 	m_accumulated += seconds;
-	if (step > 0 && m_accumulated >= step) {
-		const int steps = static_cast<int>(std::nearbyint(m_accumulated / step));
-		m_accumulated -= static_cast<float>(steps) * step;
+	// Past level of detail 0 a step is 1.5 dT long (0x008add10).
+	const float stepLength = m_lod > 0 ? step * 1.5f : step;
+	if (stepLength > 0 && m_accumulated >= stepLength) {
+		const int steps = static_cast<int>(std::nearbyint(m_accumulated / stepLength));
+		m_accumulated -= static_cast<float>(steps) * stepLength;
 		for (int i = 0; i < steps && i < 64; ++i) {
 			if (m_gravityRamp > 0) {
-				m_gravityTime = std::min(m_gravityTime + step, m_gravityRamp);
+				m_gravityTime = std::min(m_gravityTime + stepLength, m_gravityRamp);
 			}
 			accumulate();
-			integrate(step);
+			integrate(stepLength);
 			solve(world);
 		}
 	}
@@ -883,6 +898,24 @@ const Vec& RagDoll::update(float seconds, const RagDollWorld& world)
 	}
 	m_last = mid;
 	return middle();
+}
+
+std::vector<int> ragDollLevels(const std::vector<float>& distances, const std::vector<bool>& awake)
+{
+	std::vector<size_t> order(distances.size());
+	for (size_t i = 0; i < order.size(); ++i) {
+		order[i] = i;
+	}
+	// The manager's map is ordered by the key (a multimap: equal keys in
+	// insertion order).
+	std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return distances[a] < distances[b]; });
+	std::vector<int> levels(distances.size(), 0);
+	int awakeBefore = 0;
+	for (const size_t i : order) {
+		levels[i] = awakeBefore > 2 ? 1 : 0;
+		awakeBefore += i < awake.size() && awake[i] ? 1 : 0;
+	}
+	return levels;
 }
 
 void RagDoll::pose(const Skeleton& skeleton, const LocalPose& local, std::vector<Matrix>& matrices) const

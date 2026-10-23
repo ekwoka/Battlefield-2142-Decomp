@@ -524,6 +524,64 @@ TEST(GameWorld_GadgetsHealAndResupply)
 	CHECK(range.world->playerWeapon()->magsLeft() == magsBefore);
 }
 
+TEST(GameWorld_AbilityBattery)
+{
+	// The medic hub in hand heals only while its holder's battery holds
+	// abilityDrain / 30 (0x005d8ac0), each target treated taking that much
+	// (0x00586310); the battery starts empty with a fresh kit and fills by
+	// the kit's abilityRestoreRate a second up to 1 (0x0058d350). An
+	// unlock's increasedRepairAbility scales the strength (0x005d7a40).
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "ItemContainer");
+	world::ObjectTemplate* hub = range.templates.create("GenericFireArm", "unl_hub_medic");
+	hub->settings()["itemIndex"] = "4";
+	hub->settings()["ammo.replenishingType"] = "RTHeal";
+	hub->settings()["ammo.abilityRadius"] = "4";
+	hub->settings()["ammo.abilityStrength"] = "3";
+	hub->settings()["ammo.abilityDrain"] = "0.5";
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->settings()["abilityRestoreRate"] = "0.1";
+	for (const char* item : {"eu_ar_rifle", "unl_hub_medic"}) {
+		kit->children().push_back({item, {}, {}});
+	}
+	world::ObjectTemplate* unlock = range.templates.create("ItemContainer", "UnlockEU_AssaultMedic1");
+	unlock->settings()["ability.increasedRepairAbility"] = "1.5";
+	kit->children().push_back({"UnlockEU_AssaultMedic1", {}, {}});
+	range.world->localPlayerUnlocks = {"UnlockEU_AssaultMedic1"};
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int me = range.world->localPlayer();
+	game::GameWorld::PlayerInfo info;
+	CHECK(range.world->playerInfo(me, info) && info.battery == 0);
+	const uint32_t soldier = range.world->playerObject();
+	game::SoldierInput take;
+	take.selectItem = 4;
+	range.world->setPlayerInput(take);
+	range.world->tick(1 / 30.0f);
+	range.world->setPlayerInput({});
+	const auto run = [&](float seconds) {
+		for (int i = 0; i < static_cast<int>(seconds * 30 + 0.5f); ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+	};
+	// Nobody to treat: the battery only fills, a tenth a second.
+	run(1);
+	CHECK(range.world->playerInfo(me, info) && std::abs(info.battery - 0.1f) < 0.01f);
+	// Charged: 3 x 1.5 per cent a second, the battery down 0.5 - 0.1 a second.
+	range.world->setHitPoints(soldier, 40);
+	range.world->setBattery(me, 0.5f);
+	run(1);
+	CHECK(std::abs(range.world->hitPoints(soldier) - 44.5f) < 0.3f);
+	CHECK(range.world->playerInfo(me, info) && std::abs(info.battery - 0.1f) < 0.02f);
+	// Flat: a tick's treatment only now and then, as the battery creeps
+	// over 0.5 / 30 (a fifth of the time).
+	range.world->setBattery(me, 0);
+	const float flat = range.world->hitPoints(soldier);
+	run(1);
+	CHECK(range.world->hitPoints(soldier) - flat > 0.5f && range.world->hitPoints(soldier) - flat < 1.3f);
+}
+
 TEST(GameWorld_GrenadesBounceAndGoOff)
 {
 	// A frag grenade from an unlock (slot 7): thrown at the PAC bot 20 m

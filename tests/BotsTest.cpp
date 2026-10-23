@@ -1391,3 +1391,179 @@ TEST(Bots_SeatValueOfTheSoldier)
 	field.world->setHitPoints(info.soldier, 50);
 	CHECK(near(bots.seatValueFor(bot, 0, 0), 0.5f * (5 + 1.125f)));
 }
+
+// The level's AI/AI.ai pathfinding settings (aiPathfinding.createMap in
+// AI/AIPathfinding.ai, then setActiveMap and map.*): the maps' climb
+// limits; the infantry map's step is always 0.35 (0x1003f930). And the AI
+// templates' InformationTypes (aiTemplate.addType, BF2142.exe 0x0088fbd0).
+TEST(Bots_PathfindingMapsAndInformationTypes)
+{
+	Console console;
+	game::BotSettings settings;
+	game::registerBotConsoleMethods(console, settings);
+	std::string out;
+	// No scripts: 90 degrees (cos 0) and 0.35.
+	CHECK(near(settings.climbLimits(1).maxSlope, 1.5707964f) && near(settings.climbLimits(1).stepHeight, 0.35f));
+	for (const char* line : {"aiPathfinding.createMap Infantry", "aiPathfinding.createMap Vehicle",
+			 "aiPathfinding.setActiveMap Infantry", "aiPathfinding.map.maxSlope 35",
+			 "aiPathfinding.map.allowedThresholdHeight 1.0", "aiPathfinding.setActiveMap Vehicle",
+			 "aiPathfinding.map.maxSlope 24", "aiPathfinding.map.allowedThresholdHeight 0.1",
+			 "aiTemplate.create AS_APC", "aiTemplate.addType ITGround", "aiTemplate.addType ITMobile",
+			 "aiTemplate.addType ITBiological", "aiTemplate.create Wall", "aiTemplate.addType ITObstacle"}) {
+		console.execute(line, out);
+	}
+	CHECK(settings.pathfindingMaps.size() == 2);
+	const ai::ClimbLimits infantry = settings.climbLimits(0), vehicle = settings.climbLimits(1);
+	CHECK(near(infantry.maxSlope, 35 * 3.14159265f / 180) && near(infantry.stepHeight, 0.35f));
+	CHECK(near(vehicle.maxSlope, 24 * 3.14159265f / 180) && near(vehicle.stepHeight, 0.1f));
+	CHECK(settings.typeFlags("as_apc") == (game::kITGround | game::kITMobile)); // ITBiological is none
+	CHECK(settings.typeFlags("Wall") == game::kITObstacle && settings.typeFlags("nothing") == 0);
+	CHECK(game::informationTypeFlag("ITHelicopter") == 4 && game::informationTypeFlag("ITSoldier") == 0x200);
+}
+
+// BBChange's factor on another vehicle's other seats (0x1006b910) and the
+// seat value's transport distances (0x100d3730).
+TEST(Bots_SeatFactorsAndTransport)
+{
+	using game::otherSeatFactor;
+	CHECK(otherSeatFactor(false, true, game::kITGround) == 0.77f);
+	CHECK(otherSeatFactor(false, true, game::kITAir | game::kITHelicopter) == 0.5f);
+	CHECK(otherSeatFactor(false, true, game::kITGround | game::kITAir) == 0.77f); // ITGround first
+	CHECK(otherSeatFactor(true, true, game::kITGround) == 1);                    // someone drives it
+	CHECK(otherSeatFactor(false, false, game::kITGround) == 1);                  // no Mobile part
+	CHECK(otherSeatFactor(false, true, game::kITGround | game::kITNaval) == 1);
+	bool noMove = false;
+	// Far: the bot 80 m from the area's spot, the vehicle 60 m from its own.
+	CHECK(!game::transportClose(false, 80 * 80, 60 * 60, noMove) && !noMove);
+	// The bot within 50 m of the spot: close (the move doesn't count).
+	CHECK(game::transportClose(false, 40 * 40, 60 * 60, noMove) && noMove);
+	// The bot 60 m away and the vehicle 65 m: farther than the bot, and the
+	// bot under 70 m: close.
+	CHECK(game::transportClose(false, 60 * 60, 65 * 65, noMove));
+	CHECK(!game::transportClose(false, 60 * 60, 55 * 55, noMove)); // the vehicle nearer
+	// In it: close within 5 m of its spot.
+	noMove = false;
+	CHECK(game::transportClose(true, 1e6f, 4 * 4, noMove) && !noMove);
+	CHECK(!game::transportClose(true, 0, 6 * 6, noMove));
+}
+
+// The 7 s after a human player of the team gets out of a vehicle (BF2142.exe
+// 0x00894860 stamps the unit's per-team time, vt+0x64 0x008a1b10; the seat
+// value 0x100d3e70 reads it through vt+0x60): its root seat is worth
+// nothing to the team's bots; another team's bots don't care.
+TEST(Bots_HumanGettingOutKeepsBotsOffForSevenSeconds)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	Console console {&files};
+	bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+		[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+	std::string out;
+	console.run("ServerArchives.con", {}, out);
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	physics::CollisionTemplateManager collisionTemplates;
+	templates.registerType(1, "ControlPoint");
+	templates.registerType(2, "SpawnPoint");
+	templates.registerType(3, "Soldier");
+	templates.registerType(7, "PlayerControlObject");
+	templates.registerType(8, "EntryPoint");
+	templates.registerType(9, "Engine");
+	templates.registerType(10, "Spring");
+	for (const char* name : {"us_light_soldier", "pac_light_soldier"}) {
+		templates.create("Soldier", name)->settings()["armor.maxHitPoints"] = "100";
+	}
+	for (int team = 1; team <= 2; ++team) {
+		world::ObjectTemplate* point = templates.create("ControlPoint", team == 1 ? "cp_pac" : "cp_eu");
+		point->settings()["controlPointId"] = std::to_string(team);
+		point->settings()["team"] = std::to_string(team);
+		point->settings()["unableToChangeTeam"] = "1";
+		objects.create(point, {team == 1 ? 100.0f : -100.0f, 0, 0});
+	}
+	world::ObjectTemplate* spawn = templates.create("SpawnPoint", "sp");
+	objects.create(spawn, {0, 0, 20}, {90, 0, 0})->setControlPointId(1);
+	objects.create(spawn, {0, 0, 0}, {0, 0, 0})->setControlPointId(2);
+	// A car on as_fav's collision mesh, with an AI template that has a
+	// Mobile part (its root seat: 20 x 1.5 x 0.5 x 0.3 = 4.5).
+	collisionTemplates.create("as_fav", "Objects/Vehicles/as_fav/");
+	world::ObjectTemplate* car = templates.create("PlayerControlObject", "car");
+	car->settings()["hasMobilePhysics"] = "1";
+	car->settings()["physicsType"] = "Mesh";
+	car->settings()["collisionMesh"] = "as_fav";
+	car->settings()["seatInformation"] = "car 0/0.5/0.4 0/0/0";
+	car->settings()["mass"] = "1800";
+	car->settings()["aiTemplate"] = "TestCar";
+	car->children().push_back({"car_entry", {-1.5f, 0, 0}, {}});
+	world::ObjectTemplate* engine = templates.create("Engine", "car_engine");
+	engine->settings()["engineType"] = "194";
+	world::ObjectTemplate* wheel = templates.create("Spring", "car_wheel");
+	wheel->settings()["strength"] = "40";
+	wheel->settings()["damping"] = "8";
+	car->children().push_back({"car_engine", {0, -0.44f, 0}, {}});
+	for (float x : {-0.95f, 0.95f}) {
+		for (float z : {-1.4f, 1.6f}) {
+			engine->children().push_back({"car_wheel", {x, -0.15f, z}, {}});
+		}
+	}
+	templates.create("EntryPoint", "car_entry")->settings()["entryRadius"] = "3";
+	game::BotSettings settings;
+	game::registerBotConsoleMethods(console, settings);
+	for (const char* line : {"aiTemplatePlugIn.create Mobile TestCar_Mobile", "aiTemplatePlugIn.maxSpeed 20",
+			 "aiTemplate.create TestCar", "aiTemplate.addType ITGround", "aiTemplate.addPlugIn TestCar_Mobile"}) {
+		console.execute(line, out);
+	}
+	game::GameWorld world(templates, objects);
+	world.enablePhysics(files, collisionTemplates,
+		{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
+			 normal = {0, 1, 0};
+			 return 0.0f;
+		 }});
+	world.autoRespawn = false;
+	world.startRound();
+	const uint32_t vehicle = objects.create(car, {3, 1.2f, 0}, {30, 0, 0})->id();
+	const int human = world.addPlayer("Human", 2, false);
+	const int bot = world.addPlayer("Bot", 2, true);
+	const int enemyBot = world.addPlayer("EnemyBot", 1, true);
+	CHECK(world.spawnSoldier(human)); // the bots stay unspawned: they only weigh the seat
+	game::GameWorld::PlayerInfo info;
+	world.playerInfo(human, info);
+	world.setSoldierPosition(info.soldier, {0, 0, 0});
+	game::BotManager bots(world, settings);
+	const auto run = [&](float seconds) {
+		for (int tick = 0; tick < static_cast<int>(seconds * 30); ++tick) {
+			bots.update(1 / 30.0f);
+			world.tick(1 / 30.0f);
+		}
+	};
+	const auto press = [&] {
+		game::SoldierInput input;
+		input.use = true;
+		world.setInput(human, input);
+		bots.update(1 / 30.0f);
+		world.tick(1 / 30.0f);
+		world.setInput(human, {});
+	};
+	run(3); // the car settles
+	CHECK(near(bots.seatValueFor(bot, vehicle, 0), 4.5f, 0.05f));
+	press();
+	run(0.5f);
+	world.playerInfo(human, info);
+	CHECK(info.vehicle == vehicle);
+	press(); // out
+	run(0.5f);
+	world.playerInfo(human, info);
+	CHECK(info.vehicle == 0);
+	CHECK(bots.seatValueFor(bot, vehicle, 0) == 0);
+	// The other team's stamp isn't set (its bots would still refuse a car
+	// with an enemy aboard, but it is empty).
+	CHECK(near(bots.seatValueFor(enemyBot, vehicle, 0), 4.5f, 0.05f));
+	run(6.0f);
+	CHECK(bots.seatValueFor(bot, vehicle, 0) == 0); // 6.5 s after
+	run(1.0f);
+	CHECK(near(bots.seatValueFor(bot, vehicle, 0), 4.5f, 0.05f)); // 7.5 s after
+}

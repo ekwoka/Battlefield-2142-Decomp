@@ -39,6 +39,16 @@ constexpr Vec3 kGroundPoints[5] = {{0, -1, 0}, {-0.2f, -0.6f, -0.2f}, {0.2f, -0.
 	{-0.2f, -0.6f, 0.2f}};
 } // namespace soldier
 
+// Whether a soldier fits at `origin` (its physics origin, a metre over the
+// feet) in a stance (0 stand, 1 crouch, 2 prone, 3 swim as crouch): the
+// stack of 0x006c1b30 (five spheres of kRadius from the feet to 1.7 m,
+// three to 1.4 m crouching (*0x00a84798), one at the feet prone (0.8 m,
+// *0x00a84778); the lowest centre a radius over the feet) with none
+// touching the mesh (the response's slot 0x98, 0x006c3340). A mesh in
+// its own frame (a vehicle's) is tested with the centres taken into it.
+bool soldierFits(const CollisionWorld& world, const Vec3& origin, int stance, const Mat3& rotation = {},
+	const Vec3& position = {});
+
 class SoldierBody {
 public:
 	Vec3 position;
