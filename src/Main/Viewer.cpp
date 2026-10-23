@@ -437,6 +437,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.use = c.pressed(map, "c_PIUse", down);
 				input.scoreboard = c.pressed(map, "c_GIShowScoreboard", down);
 				input.commanderScreen = c.pressed(map, "c_GILeader", down);
+				input.crouch = c.pressed(map, "c_PICrouch", down);
+				input.lie = c.pressed(map, "c_PILie", down);
 				input.voipPushToTalk = c.pressed(map, "c_GIVoipPushToTalk", down);
 				input.voipLeaderChannel = c.pressed(map, "c_GIVoipUseLeaderChannel", down);
 				for (int item = 0; item < 8; ++item) {
@@ -462,6 +464,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.altFire = (shown.mouseButtons() & SDL_BUTTON_RMASK) != 0 && !pointer;
 				input.use = keys[SDL_SCANCODE_E];
 				input.scoreboard = keys[SDL_SCANCODE_TAB];
+				input.crouch = keys[SDL_SCANCODE_LCTRL];
+				input.lie = keys[SDL_SCANCODE_Z];
 				input.commanderScreen = keys[SDL_SCANCODE_CAPSLOCK];
 				for (int item = 0; item < 9; ++item) {
 					if (keys[SDL_SCANCODE_1 + item]) {

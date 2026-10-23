@@ -1879,6 +1879,8 @@ int runGame(Options& options, Session& session)
 		if (const terrain::Heightmap* ground = heightmaps.primary(); ground && ground->loaded()) {
 			physics::Ground surface;
 			surface.height = [ground](float x, float z) { return ground->heightAt(x, z); };
+			// The terrain's material under a point (heightmap.loadMaterialData).
+			surface.material = [&heightmaps](float x, float z) { return heightmaps.materialAt(x, z); };
 			surface.heightAndNormal = [ground](float x, float z, physics::Vec3& normal) {
 				const float step = ground->scale()[0];
 				const float dx = ground->heightAt(x + step, z) - ground->heightAt(x - step, z);
@@ -1917,6 +1919,7 @@ int runGame(Options& options, Session& session)
 			});
 		}
 		std::map<uint16_t, uint32_t> ghostObjects; // ghost -> object
+		std::map<uint16_t, uint32_t> ragdollUpdates; // ghost -> the ragdoll update last applied
 		struct TimedCommand {
 			float at;
 			std::string command;
@@ -1951,7 +1954,22 @@ int runGame(Options& options, Session& session)
 				const world::Vec3 at {ghost.position.x, ghost.position.y, ghost.position.z};
 				const world::Vec3 turned {ghost.rotation.x, ghost.rotation.y, ghost.rotation.z};
 				if (const auto it = ghostObjects.find(ghost.ghost); it != ghostObjects.end()) {
-					if (world::Object* object = objects.find(it->second)) {
+					// A dead soldier's body follows the server's networked
+					// ragdoll particles; GameWorld places it meanwhile.
+					if (ghost.ragdoll) {
+						if (ragdollUpdates[ghost.ghost] != ghost.ragdollUpdates) {
+							ragdollUpdates[ghost.ghost] = ghost.ragdollUpdates;
+							std::vector<physics::Vec3> particles;
+							for (const net::Vec3f& p : ghost.ragdollParticles) {
+								particles.push_back({p.x, p.y, p.z});
+							}
+							round.driveRemoteRagDoll(it->second, particles);
+						}
+					} else if (round.remoteRagDoll(it->second)) {
+						round.removeRemoteRagDoll(it->second); // revived
+						ragdollUpdates.erase(ghost.ghost);
+					}
+					if (world::Object* object = round.remoteRagDoll(it->second) ? nullptr : objects.find(it->second)) {
 						object->setPosition(at);
 						object->setRotation(turned);
 					}
@@ -1968,6 +1986,8 @@ int runGame(Options& options, Session& session)
 			}
 			for (auto it = ghostObjects.begin(); it != ghostObjects.end();) {
 				if (!seen.count(it->first)) {
+					round.removeRemoteRagDoll(it->second);
+					ragdollUpdates.erase(it->first);
 					objects.remove(it->second);
 					it = ghostObjects.erase(it);
 				} else {
@@ -2445,7 +2465,9 @@ int runGame(Options& options, Session& session)
 				}
 			};
 		} else if (round.player()) {
-			viewer.onPlayerInput = [&round, &scoreboardHeld, &options, &showMenu, &startedGame, &endOfRound, &commanderScreen, &commanderKeyWas](const ViewerOptions::PlayerInput& in) {
+			viewer.onPlayerInput = [&round, &scoreboardHeld, &options, &showMenu, &startedGame, &endOfRound, &commanderScreen,
+										&commanderKeyWas, wasAlive = false, spawnedProne = false](
+										const ViewerOptions::PlayerInput& in) mutable {
 				scoreboardHeld = options.scoreboard || in.scoreboard;
 				// Caps Lock opens and closes the commander's screen.
 				if (in.commanderScreen && !commanderKeyWas) {
@@ -2468,6 +2490,22 @@ int runGame(Options& options, Session& session)
 				input.use = in.use;
 				input.switchSeat = in.seat;
 				input.selectItem = in.item;
+				// Stance: crouch or lie while their keys are held. A spawn where
+				// only lying fits (the squad leader's scatter, 0x006c3340) starts
+				// prone until a stance key is pressed.
+				game::GameWorld::PlayerInfo me;
+				const bool alive = round.playerInfo(round.localPlayer(), me) && me.alive;
+				if (alive && !wasAlive) {
+					spawnedProne = me.spawnedProne;
+				}
+				wasAlive = alive;
+				if (in.crouch || in.lie) {
+					spawnedProne = false;
+				}
+				input.pose = in.lie ? game::SoldierPose::Prone
+					: in.crouch     ? game::SoldierPose::Crouch
+					: spawnedProne  ? game::SoldierPose::Prone
+									: game::SoldierPose::Stand;
 				round.setPlayerInput(input);
 			};
 			// The spawn screen: a pointer, and clicking a spawn icon picks it.
