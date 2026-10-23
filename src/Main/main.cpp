@@ -1670,7 +1670,12 @@ int runGame(Options& options, Session& session)
 				"/GamePlayObjects.con").c_str(),
 			{session.client ? "client" : "host"});
 		if (options.bots > 0) {
-			// The bots' strategies and the level's strategic areas.
+			// The level's AI settings (ai/AI.ai: ai.init and the pathfinding
+			// maps' slope and step limits), then the bots' strategies and the
+			// level's strategic areas.
+			if (files.exists(levelPath + "ai/AI.ai")) {
+				run((levelPath + "ai/AI.ai").c_str());
+			}
 			run("AI/AIDefaultStrategies.ai");
 			run("AI/AIDefaultStrategiesAdd.ai");
 			const std::string areas = levelPath + "GameModes/" + options.gameMode + "/" + std::to_string(options.mapSize) +
@@ -2389,6 +2394,10 @@ int runGame(Options& options, Session& session)
 		if (!controls.maps().empty()) {
 			viewer.controls = &controls;
 		}
+		// Ragdolls' level of detail goes by the camera (GameWorld::setCamera).
+		viewer.onCamera = [&round](const float position[3], const float forward[3]) {
+			round.setCamera({position[0], position[1], position[2]}, {forward[0], forward[1], forward[2]});
+		};
 		viewer.wantsQuit = [&] {
 			session.nextMap = nextMapDue();
 			return menuQuit || session.nextMap || session.disconnect || session.levelChange ||
@@ -2485,7 +2494,10 @@ int runGame(Options& options, Session& session)
 				if (!player) {
 					return false;
 				}
-				view = {player->position().x, player->position().y, player->position().z, player->rotation().x};
+				// The camera turns with the look (the head turns before the body, 0x0058a6d0).
+				game::GameWorld::PlayerInfo look;
+				const float lookYaw = round.playerInfo(round.localPlayer(), look) ? look.yaw : player->rotation().x;
+				view = {player->position().x, player->position().y, player->position().z, lookYaw};
 				if (const world::Object* vehicle = round.playerVehicle()) {
 					// A gunner looks along the gun.
 					game::GameWorld::PlayerInfo me;
@@ -2513,7 +2525,7 @@ int runGame(Options& options, Session& session)
 				float gunYaw = 0, gunPitch = 0;
 				round.playerInfo(round.localPlayer(), me);
 				round.gunAim(me.vehicle, me.seat, gunYaw, gunPitch);
-				const float yawDegrees = player->rotation().x + gunYaw;
+				const float yawDegrees = (me.vehicle ? player->rotation().x : me.yaw) + gunYaw;
 				const float yaw = yawDegrees * 3.14159265f / 180.0f;
 				char camera[128];
 				std::snprintf(camera, sizeof(camera), "%f/%f/%f/%f/-12", player->position().x - std::sin(yaw) * 5,

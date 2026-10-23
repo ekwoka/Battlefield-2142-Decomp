@@ -76,6 +76,9 @@ struct ViewerOptions {
 	// the game's default) and whether up looks down. Asked as it moves.
 	std::function<float()> mouseScale;
 	std::function<bool()> invertMouse;
+	// Told where the camera is and looks each frame (position, forward),
+	// before drawing: the game's level-of-detail choices go by it.
+	std::function<void(const float position[3], const float forward[3])> onCamera;
 	// The player's keys (Settings/Controls.con); without them W/S/A/D,
 	// shift, the mouse buttons, E, Tab, Caps Lock, 1-9 and F1-F8.
 	const input::ControlMaps* controls = nullptr;

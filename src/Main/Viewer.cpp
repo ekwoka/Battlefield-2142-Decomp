@@ -293,6 +293,12 @@ int screenshot(const render::LevelSources& sources, const ViewerOptions& options
 
 	auto target = gpu->createOffscreenTarget(static_cast<uint32_t>(options.width), static_cast<uint32_t>(options.height));
 	SDL_GPUCommandBuffer* commands = SDL_AcquireGPUCommandBuffer(gpu->device());
+	if (options.onCamera) {
+		const render::Vec3f forward = camera.forward();
+		const float position[3] = {camera.position.x, camera.position.y, camera.position.z};
+		const float ahead[3] = {forward.x, forward.y, forward.z};
+		options.onCamera(position, ahead);
+	}
 	level.syncObjects();
 	level.draw(commands, target.color, target, camera, sources.lights);
 	SDL_SubmitGPUCommandBuffer(commands);
@@ -503,6 +509,12 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				continue;
 			}
 			gpu->ensureDepth(target, width, height);
+			if (options.onCamera) {
+				const render::Vec3f forward = camera.forward();
+				const float position[3] = {camera.position.x, camera.position.y, camera.position.z};
+				const float ahead[3] = {forward.x, forward.y, forward.z};
+				options.onCamera(position, ahead);
+			}
 			level.syncObjects();
 			level.draw(commands, swapchain, target, camera, sources.lights);
 			SDL_SubmitGPUCommandBuffer(commands);
