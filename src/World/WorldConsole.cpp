@@ -144,6 +144,22 @@ void registerWorldConsoleMethods(Console& console, ObjectTemplateManager& templa
 	};
 	console.registerMethod(collisionBone);
 
+	// The soldier's eye for each pose (0 stand, 1 crouch, 2 prone) from its
+	// origin, x/y/z (the property at 0x004d0000's descriptor table), kept as
+	// "poseCameraPosition.<pose>".
+	ConsoleMethod poseCamera;
+	poseCamera.name = "ObjectTemplate.poseCameraPosition";
+	poseCamera.access = access;
+	poseCamera.minArgs = 2;
+	poseCamera.maxArgs = 2;
+	poseCamera.isActive = activeTemplate;
+	poseCamera.invoke = [&templates](const std::vector<std::string>& args) {
+		templates.active()->settings()["poseCameraPosition." + std::to_string(parseConsoleValue<int>(args[0]))] =
+			firstWord(args[1]);
+		return std::string();
+	};
+	console.registerMethod(poseCamera);
+
 	// Vehicle seats: a PlayerControlObject with seat information is a seat
 	// (its name, the soldier's position and rotation in the seat), and
 	// where a soldier leaving it goes. Kept as "seatInformation" ("name

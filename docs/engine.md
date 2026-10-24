@@ -135,6 +135,33 @@ Rewritten in `src/Terrain/Undergrowth` (data, generator) and
 
 ## Physics of mobile objects
 
+**Collision mesh instances.** A `.collisionmesh` holds geometries, each
+with sub-geometries, each with LODs by collision type. The template's
+loader (`0x006d8740`, one `0x006e4880` per geometry) keeps an object per
+geometry (`0x6c` bytes, `0x006e45c0`) whose `+8` array (`0x28` bytes an
+entry) is its sub-geometries; a trailing run of geometries without a LOD
+is dropped (unless it starts at geometry 0), and when no geometry's
+sub-geometry 0 has a LOD (`0x006de510`) every geometry loses its first
+(`0x006e5820`). The shipped vehicles' files lead every geometry with an
+empty one (`as_fav`: 46 geometries of three sub-geometries, the first
+empty, the second the normal shape, the third the wreck's for geometry
+0), so after loading sub-geometry 0 is the normal shape and 1 the
+wreck's, and 15 geometries stay. An object's mesh instance (`0x006e5d70`,
+vtable `0x00995ad8`, the collision manager's slot `0x28` = `0x006d8180`
+by mesh name and geometry index) keeps the geometry at `+0xc` and the
+state, the sub-geometry, at `+0x14` (0; slot `0x30`, `0x006e5df0`,
+switches to 1 when the geometry has `+0x60` set and more than one
+sub-geometry, applied by slot `0x34`, `0x006e5e90`; slot 5 back to 0).
+A part's `collisionPart` (template `+0x74`) is the geometry: `0x0063ccc0`
+gives each child with one over 0 an instance of the root's mesh at it.
+Every per-LOD query (slots 10–28: faces, vertices, materials, radius of
+a LOD, segment and sphere queries) goes through the instance's one
+sub-geometry; only the radius (slot `0x74`, `0x006dedb0`) and the box
+(slot `0x78`, `0x006deeb0`) look across all of them. Rewritten in
+`physics::parseCollisionMesh` (the trim) and `physics::collisionPart`:
+the rewrite collides with the normal sub-geometry alone (it used to add
+the wreck's faces too) and never switches to the wreck's.
+
 Objects whose template has `hasMobilePhysics 1` and `physicsType Mesh`
 get a `PhysicsNode.Basic` (created in `0x005f6ba0` with the template's
 mass, centre of mass, inertia and gravity modifiers). Per tick
@@ -677,11 +704,34 @@ the time step, every event at or before the bundle's time fires once
 go to the object's event handler (slot `0x100`) as `0x36 + N` (sounds) or
 `0x2c + N` (effects). The soldier (`0x00587b90`) plays its sound set's
 sound (`+0x324`, `0x007fd970`) for event `0x36`, unless it is only being
-posed (`+0x2ec`): the footstep set loaded for the ground under it
-(`0x007fd840`: the cells of material `0x157c` (Soldier_FootSteps) against
-the ground's material, `0x19c8` on a ladder; templates 0–3), its template
-3, else 0. Its jumps' `sound:0_first` is the landing sound. The weapons'
-and mechs' effect events aren't played yet.
+posed (`+0x2ec`): the footstep set loaded for what it stands on
+(`0x007fda00` → `0x007fd840`: the cells of material `0x157c`
+(Soldier_FootSteps) against a material; templates 0–3), its template 3,
+else 0. The material (`0x007fda00`): on a ladder `0x19c8`; standing or
+swimming (the response's `+0xf9`, stance 3) the other material of the
+soldier's last collision event (its handler `0x00586a90` keeps it at
+`+0x32c`, read through `+0x18c` slot `0x60` = `0x0063a0f0`; −1 at first):
+the terrain's, or the face's of the object it walks on; in the air the set
+stays. Its jumps' `sound:0_first` is the landing sound; the landing
+(`0x005ef250`) also stores its ray's material at `+0x32c` and plays
+through `0x007fdcd0`, which asks the player (slot `0x1bc`, `0x00591510`):
+the PlayerManager's local player (slot `0x30`) in a view whose kind (slot
+`0x1b4(0)` → `0x1c`) is 1 or 2 — so only the local player hears its
+landings (the rewrite has no view kinds). `GameWorld::stepAnimation`,
+`playAnimationSound`.
+
+Effect events (`0x2c + N`, N 0–9) go down the tree: the base handler
+(`0x0063ca60`, which the PlayerControlObject's `0x005c50e0` hands them to)
+passes every event to each child's slot `0x100`; an EffectBundle
+(vtable `0x0097b658`, `0x0061a4e0`) starts when its `startOnEffects`
+(template `+0x454`) has bit 9 + N (`1 << (event − 0x23)`) and stops on
+`stopOnEffects` (`+0x458`); it isn't started again while running (`+0x18e`)
+unless the template's `+0x3f4` is below 0. Shipped: `e_muzz_eu_av_reload`
+(512, effect 0) under a weapon, the mechs' `FootStepEffectRight` /
+`Left` (1024, 2048: effects 1 and 2 of their walk). The rewrite starts a
+held weapon's bundles from its animation's effect events
+(`GameWorld::startEffectsOn`; one-shot, so the stop mask has nothing to
+end); the mechs' legs aren't animated, so theirs never fire.
 
 **Camera springs.** `animationSystem.cameraSpring.use 1` gives a system a
 spring (`0x008b9670`, 0x50 bytes, `0x008bbfe0`): amplitude, zoomDamping,
@@ -698,12 +748,99 @@ clamped to ±1. The first-person skeleton's root is then moved by amplitude
 × value along the view's axes (`0x006acfa0`, `0x008b8880`); zoomed in, each
 amplitude goes towards amplitude / (zoomDamping × 6,
 `anim-soldier-spring-zoom-factor`) by how far the field of view is zoomed.
-The rewrite keeps the springs and their arithmetic (`CameraSpringState`)
-but has no first-person view to apply them to; `hit` is never read by the
-soldier.
+The rewrite applies them to its first-person view (see below); `hit` is
+never read by the soldier.
 
 Not rewritten: the per-instance time override (system `+0x84`/`+0x88`),
-the weapons' and vehicles' effect events, the first-person systems.
+the weapons' and vehicles' effect events.
+
+## The first-person view
+
+**The camera.** On foot the player looks through the soldier's camera, its
+first Camera child (`SoldierCamera`, soldier `+0x208`; `0x00588ec0`), which
+the Soldier moves each tick at the end of its update (`0x005890a0`, from
+`0x0058a6d0`): the local position is (0, y, 0) in the body's frame, y the
+pose's `poseCameraPosition` (getter `0x00586380`; the setter `0x005c0c70`
+keeps only y: stand 0.47, crouch −0.05, prone −0.63 over the origin, a
+metre above the feet; a seated soldier counts as crouching), reached 0.2 of
+the way each tick (`*0x00a68e14`, `*0x00a68eac`, `*0x00a68e18`, all 0.2,
+`0x0043dd80`; the camera-movement-speed vars of `Common.con` are in a
+`beginrem` block and not in the binary) from where the template put the
+child (0/4.1/0, so a fresh soldier's eye drops into place). The local
+rotation is Rx(pitch) × Ry(twist) (slot `0xe8`): the aim's pitch (±85°,
+`*0x00a68eb0`) and the head's twist over the body (±40°), i.e. the look.
+The field of view is the player's (`+0xc4`, moving to a target `+0xc0` at a
+rate `+0xc8`: `0x00591740`, `0x005912c0`), by default the camera's
+`insideFOV` in the inside mode, `worldFOV` in the others (`0x00610150`;
+template default 1.1, `0x00610fd0`; `SoldierCamera` sets 1.0), vertical,
+radians. RendDX9's setFov (`0x10066ac0`) keeps it from 4:3 to 16:9 and, for
+height / width of 0.8 or more, scales it by that × 4/3.
+
+**Modes.** The camera modes (`0x004db0c0`): FirstPerson, Inside, Nose,
+Chase, FrontChase, FlyBy, Trace, ExternTrace; first person is always Inside
+(`0x00612eb0`), the external ones need the template's CVM flags and
+sv.allowExternalViews. `c_PIToggleCameraMode` (input 0x23, `0x004bda00` →
+`0x004b9e10`) steps through the allowed modes only in a vehicle; on foot the
+original stays in first person. The rewrite's C switches between first
+person and its own chase view everywhere (its chase camera is not the
+original's Chase mode).
+
+**Seats.** In a vehicle the camera is the seat's (Player::getCamera
+`0x005948e0` → the PlayerControlObject's `0x005c7cb0`): the seat's Camera
+children (by `cameraId`, `0x0058bdb0`), placed by the template tree, so a
+gunner's camera under the gun's pitch bundle follows the gun; its
+`insideFOV`. The rewrite takes the seat's first Camera (nested seats left
+out) and turns the bundles as `GameWorld::partPose` does; ducking's second
+camera (`0x005c7cf0`) and the cockpit geometry (`cockpitSubGeom`) are not
+rewritten, nor is the free look.
+
+**The arms and the weapon.** For the local player in first person the
+soldier's character mode (`+0x2f0`, `0x0058d350` → `0x005f0f20`) is 0, which
+is also the geometry index the soldier's and the held weapon's meshes draw
+(slot `0x6c`, `0x005f06b0`): geometry 0 is the first person (the arms of the
+soldier's skinned mesh; the weapon's bundled mesh), 1 the third. The
+skeleton and animation system are the mode's (`+0x2c0`/`+0x2c4` + mode × 8):
+`skeleton1P` and `animationSystem1P` for the soldier and the weapon. The
+first-person skeleton (`1p_setup.ske`) is the arms and mesh1..mesh16 around
+`Camerabone`; `0x005ee860` keeps the inverse of that node's setup matrix,
+and each tick `0x005ee980` sets the root to it × the camera's world matrix
+(`0x006acfa0`), so the camera bone sits on the camera, plus the spring's
+offset along the camera's rows; the bones hang from that root
+(`0x008b8880`). The weapon's root is the skeleton's node 54 (mesh1) and its
+parts the following nodes. The renderer's meshes with a first-person
+field of view set (slot `0x10`, `soldier-fov1p` 0.82; only ≠ −1 is tested)
+go to the first-person queues (RSMT1Person), drawn after the world and its
+particles, after a depth clear (`0x1002cef0`, if `renderer.draw1pMeshes`),
+with a view of their own (renderer `+0xfc`): 0.82 rad whatever the zoom,
+near `renderer.tweakNearPlane1p` 0.16, far 15, the world view's camera
+(`0x1002aba0`, `0x10028bb0`).
+
+**Zoom** (DefaultZoomComp, defaults `0x005dacc0`): `addZoomFactor` builds a
+list starting with 0 (duplicates skipped, `0x005dae50`); the alternate fire
+(`0x005da670`) steps to the next level, past the last back to 0. A level's
+factor is the field of view in radians it asks the player for, 0 the
+camera's (`0x005da3f0`): over `zoomDelay` (0.5 by default) unless
+`changeFovDelay` is set. Zooming in sets the first-person weapon's LOD to
+`zoomLod` after zoomDelay ticks (`0x005da770` / `0x005da290`; geometry 0's
+LOD 1 is the sight), zooming out LOD 0 at once; reloading zooms out
+(`zoomOutOnReload`, `0x005da630`). Zoomed, the mouse's yaw is scaled by the
+field of view over the camera's and `mouseSpeedMod` (`0x00586420`). The HUD
+shows the weapon's `altGuiIndex` (its zoomed reticle). The muzzle children
+(FireComp `0x005f25f0`) named "zoom" flash instead of the others while zoomed
+with `disableMuzzleWhenZoomed` (`0x005da050`, `0x005f31d0`); they are the
+weapon's children, so they follow the first-person weapon and are drawn in
+the first-person particle lists.
+
+Rewritten in `src/Animation/FirstPerson` (rig, eye, zoom, field of view),
+`src/Main/PlayerCamera` (the player's camera from the game world, seats,
+the models) and `LevelRenderer`'s first-person pass. The first-person
+systems' events (sounds, effects) aren't played, a shot's kick to the
+spring is 1 for the tick it fires (the recoil component's value,
+`0x005861a0`, isn't decoded), the weapons' blended materials (sight glass,
+displays) are left out of the pass, the muzzle flash stays where it was
+fired rather than following the gun, and the world's near plane in first
+person is 0.1 (the original's `renderer.tweakNearPlane` is 0.041 with a
+400 m view). A joined game's player (`--connect`) keeps the chase view.
 
 Rewritten in `src/Animation/AnimationSystem` and `AnimationConsole`.
 
@@ -2060,11 +2197,12 @@ Rewritten in `GameWorld::explode`, `blastShare` and `empBlast`;
   without armour) halves the blast, and stops it when the object's radius
   (slot `0x90`: its geometry's and its children's) is under a fifth of
   the blast's (`*0x00a6ab24` = 5). The object's radius (`0x006f6b90`):
-  its collision mesh's (slot `0x74`, `0x006dedb0`: the first part with a
-  LOD, its LOD of the lowest collision type, that LOD's radius `+0xc0`;
-  the instance's own part, `+0x14`, is not read) plus slot `0x94` (0),
-  or, farther, a child's: its offset's length (slot `0xdc`) plus its own
-  radius. `Body::objectRadius`.
+  its collision mesh instance's (slot `0x74`, `0x006dedb0` on the
+  instance's geometry: the first sub-geometry with a LOD, its LOD of the
+  lowest collision type, that LOD's radius `+0xc0`; the state `+0x14` is
+  not read) plus slot `0x94` (0), or, farther, a child's: its offset's
+  length (slot `0xdc`) plus its own radius (a child's instance is the
+  geometry its `collisionPart` names). `Body::objectRadius`.
 - **The push on objects** (`0x005a66e0`): roots with a node that are not
   major actors (slot `0x1c4`), the blast's own object excepted (its
   armour, `param_6`). Without armour the mod is 10000 / max(mass, 100) and
@@ -2093,8 +2231,18 @@ Rewritten in `GameWorld::explode`, `blastShare` and `empBlast`;
   −a (`*0x00a6aa8c`) and a × f × −0.5 at the centre (`*0x00a6aa90`,
   `0x006ac600`'s zero). No shipped detonation has a negative
   `explosionDamage`. `game::blastTwist`.
-- Not in the rewrite: the lag-compensated positions (`*0x00a6ab48`, node
-  slot `0x178`).
+- The lag-compensated positions (`*0x00a6ab48`, node slot `0x178`):
+  on the server (`DAT_00a06884`, set from game logic slot `0x144` by
+  `0x006fac60`) a hit is tested against where the target was the
+  shooter's latency ago (`0x006b4ee0`): `lagComp` override
+  (`*0x00a83e48`, −1: off) when above 0; for a remote client (player slot
+  `0x60`) its ping × 0.5 (`*0x00a83e3c`) / 1000 plus 0.05 s
+  (`*0x00a83e40`) or, with `*0x00a83e2c` set, its interpolation (slot
+  `0x194`, ms); for a local one `0x006b4e70`: an input value (index 8,
+  `0x00696db0` → `*0x00a83e4c`) with `*0x00a83e30` set; at most 0.3 s
+  (`*0x00a83e44`). It only matters for remote clients' shots; the rewrite
+  has no server for remote clients (its local game is the local player and
+  bots), so nothing is rewound.
 
 Thrown weapons: projectiles with `physicsType` RotationalPoint or Mesh
 (grenades, mines, C4; rounds and missiles are Points) bounce. The
@@ -2211,25 +2359,39 @@ Vehicles take damage through their armour settings:
   the template's slot `0x90` name) at the spawner's matrix moved by
   `spawnOffset` (unturned) is tested against the PlayerControlObjects
   (interface `0xc4c5`) the scene finds within 10 m (`DAT_00a85220` slot
-  `0x44`), less those a global list holds (`0x005628f0` / `0x00561d90`, not
-  identified). One overlaps (`0x006f2e90`) when it isn't being deleted, its
+  `0x44`) of the spot, less those a global list holds (`0x005628f0` /
+  `0x00561d90`: the Titan sync manager, `ECPhysicsETitanSync`,
+  `0x00561c00`, with the two teams' Titans at `+8` / `+0xc`, in `gpm_ti`
+  alone; the rewrite has no Titans). The spot is first dropped
+  (`0x005ad8b0`): along the spawner's up axis from the template's
+  vehicle-LOD box top (slot `0x54(1)`: max y) to its bottom (min y), the
+  scene's ray (slot `0x68`, `0x00700b80`) through objects whose flags
+  (`+0x14`) have `0x1000100` and not 8 (`0x006f4aa0`; 8 marks the mobile
+  ones, set with their node by `0x005f6ba0` / `0x00621b50`): a hit on a
+  static object puts the box's bottom on it; else a bottom under the
+  terrain (`DAT_00a83e58` slot `0x6c`) comes up onto it. Only the test
+  moves: the spawn is at the spawner's spot. One overlaps (`0x006f2e90`) when it isn't being deleted, its
   response is a mesh one (`0xc42d`, `0xc430`, `0xc431`) and
   `0x006f2760` finds, for any vertex of the template's vehicle LOD (type
   1; slots `0x28`, `0x3c`, `0x40`) turned by the matrix, the segment from
   the spot to it crossing the object's soldier LOD (its slot `0xc4(2)`;
   the mesh instance's slot 22, `0x006e5920` → `0x006de850`, both sides of
   the faces). A template with MechLegs (`0x9482`) also probes three
-  segments down by its object's box bottom (the PlayerControlObject
-  template's `+0x4c4`, set by `0x005cd4f0`) from the spot and 1.7 m either
-  side across (`0x006f28e0`), and goes through its legs' objects; not
-  rewritten. An overlapping object in use (the interface's slot `0x18`,
+  segments down (world y) by its object's box bottom (the
+  PlayerControlObject template's `+0x4c4`, set by `0x005cd4f0` when one is
+  made: slot `0x98(0)`'s min y, `0x006f7050`: its mesh instance's box and
+  its children's at their offsets) from the spot and 1.7 m either side
+  along the spawner's x axis (`0x006f28e0`: the mesh instance's slot 22,
+  soldier LOD), when that is not 0. An existing walker is also tested
+  through its legs' objects (`0x006f2e90`'s loop over the responses, slot
+  `0x5c`), which the rewrite doesn't have as bodies: its hull alone. An overlapping object in use (the interface's slot `0x18`,
   `0x005c87b0`: `+0x14`) stops the spawn; otherwise the overlapping ones
   are counted as a try (`+0x204`) up to five, and on the sixth they are
   removed (the object manager's slot `0xa4`) unless a soldier (`0xc4d7`) is
   within 7 m of the spawner. Every one of these returns −1: the update
   tries again in a second (`0x005af230`). A spawn clears the count.
-  `GameWorld::testSpawnSpot`, `ObjectSpawner::SpotTest`. Not rewritten:
-  the spot's drop onto what is under it (`0x005ad8b0`).
+  `GameWorld::testSpawnSpot`, `dropSpawnSpot`, `ObjectSpawner::SpotTest`
+  (the drop's ray asks the static objects' projectile LOD).
 
 Deployables: a gadget whose projectile has mesh physics and armour, and
 neither explodes nor holds a beacon (`portable_shield`: 600 hit points),
@@ -2536,10 +2698,41 @@ from slot 9's object contacts faster than 1 m/s relative (between the two
 objects' events: the other's point velocity, none for a static object) and
 from a crush.
 
-Not rewritten: a vehicle ignoring the soldier who just left it
-(`0x006b8da0`, the mover's `+0xf8` / `+0xfc`), projectiles pushed by a
-soldier (class `0x9539`), the node's extra velocity `+0x90`, the parent's
-team filter in the run-over check.
+**A launcher's projectile** (`noInitialCollisionWithLauncher`, template
+`+0x355`, slot `0x114` = `0x005b37d0`; shipped: the portable shield, the
+sentry gun, the motion-mine bait): setting its launcher (the projectile
+interface `0x94c1`, vtable `0x00969b98`, slot 17 = `0x005b48b0`; on a
+client the creation event's `0x0050fb40`) makes its mesh response ignore
+the launcher's root (`0x006b8de0`: `+0xfc` the root, `+0xf8` the tick
+(`0x00666090`) + 2 (`*0x00a84284`) on the server, −1 for good on a
+client; null clears it, as the ghost updates `0x005ffec0` / `0x00606f20`
+do). In `0x006c3890`, once a mesh response's faces are found: in the main
+pass, when it ignores this soldier (`0x006b8da0`) its contacts are left
+out and the window opens again (so they never touch while overlapping);
+in the solve's passes whenever the window is open (`0x006b6c30`: any
+soldier). Nothing else reads it (the mobile meshes don't).
+
+**Small projectiles** (`0x006c3890`, per contact): the contact of a
+GenericProjectile (class `0x9539`) whose soldier LOD's radius (the mesh
+instance's slot `0x50(2)`) is under 0.6 m (`*0x00a84acc`) doesn't go to
+the soldier (no contact, no standing on it): unless it is the soldier's
+own (`*0x00a84774` = 1, the projectile interface's slot `0x48`), the
+projectile's response gets it (slot `0x2c`, `0x006ba4c0`: the point from
+its position, the soldier's relative velocity turned round, the
+soldier's normal and the depth turned round, the two materials), so it is
+pushed away. Shipped: the motion mine (0.19 m) and the sentry gun
+(0.57 m); the other deployables have no soldier LOD. The collision events
+still fire. The rewrite gives an awake body the contact.
+
+**The run-over's team filter** (`0x006c2e50`'s start): the soldier's first
+PlayerControlObject up its tree (itself) gives a team (slot `0x9c`); an
+object whose response has `collisionGroups` bit `0x10`, or `0x100` for
+team 1 / `0x200` for team 2, is passed. With `*0x00a84764` = 1 the soldier
+node's slot `0xd8` (`0x006c56e0`: `+0x90` while the tick count `+0x9c`
+runs, set by slot `0xdc`, `0x006c5df0`, at most `*PTR_DAT_00a06ee4` long
+for `*PTR_DAT_00a06ee0` ticks) comes off the relative velocity; no caller
+of the setter was found, so it is none. `SoldierBody::Mover` (`ignoring`,
+`ignoresThis`, `pushed`, `own`, `collisionGroups`), `SoldierBody::team`.
 
 **The jump** (the Soldier's `0x0058a6d0`, PIAction: input 9, mask
 `0x200`): while the action is held, a soldier standing (pose 0), on the
@@ -3233,6 +3426,45 @@ The urgencies:
   thrown only with the target over 10 m higher or steeper than 0.6;
   otherwise it aims an explosive at the ground under the target. Such a
   plan may fire at a target out of the bot's sight.
+- **Weapon choice** (0x10074ef0, `chooseWeapon`), over the bot's object's
+  weapons (the AI weapon's slots through BF2142.exe's adaptor, vtable
+  0x009d5be8): usable ones (slot 0x1c) of type FireArm, C4, Revive,
+  CloseCombat, Sniper, FireAndForget or TitanWeapon; without
+  `setFiresThroughTransparent` (+0x4c, 1 by default) only at a target
+  seen clear (memory flag 0x40) or known from others; C4 not while the
+  bot's own charge is out (+0x1b8); none without rounds (slot 0xc, all
+  magazines; −1 counts 0x10000) unless Revive. The score is the strength
+  against the target's type, × 0.5 against a scripted bot (+0x264),
+  × (3 − EMP level) with `isEmpWeapon` (+0x4d, 0x10074c60). CloseCombat
+  and Revive need the target on the bot's mesh outside the vehicles round
+  it (0x100947b0) and count only soldier to soldier within 3 m or when
+  "going in" (a human soldier within 20 m, moving, with its magazine
+  empty, and the bot's own empty or a melee weapon in hand); with the
+  mesh ray to the target clear such a weapon is taken at once. The
+  explosive bonus (above) needs the weapon unguided (+0x6c 0) and, for a
+  soldier, neither its `+0x248` nor the area guard: of the areas its
+  team doesn't hold (+0x70) the one with the most radius / max(1, d²)
+  from the team's spot (0x10034a10, slot 0x68 = 0x1005dd10 → 0x1005dd50
+  → 0x1005dd90: +0x98 + 4 team over d²); within 40 m of its centre while
+  pushing PIYaw, PIThrottle or PISprint, or with the target within the
+  radius of the spot, no bonus. Then an empty magazine of an unguided
+  weapon with `ammo.autoReload` and max(reloadTime,
+  minimumTimeUntilReload) over 1.9 s scores 0.1; wire guided with a
+  target locked × 10; without the bonus, below minRange × (0.1 − 0.09
+  min(1, (minRange − d)/5)), beyond maxRange × (1 − 0.9 min(1, (d −
+  maxRange)/5)); an empty magazine × 0.33. The best above 0 wins; none
+  keeps the last choice. The guidance kind is the target component's
+  `ObjectTemplate.target.targetSystem` (+0x80; GenericFireArm slot 0x154
+  0x005c1fa0 → slot 0xb4 0x005f5b80, through 0x008923a0): TSNone 0,
+  TSHeatSeeking 1, TSLaserGuided 2, TSWireGuided 3, TSTVGuided 4,
+  TSParabellic 0.
+- **Lob hold** (+0x209): a lob whose start condition held with a weapon
+  that isn't thrown sets it (0x100d8910, vt+0x20c(1)); the move plans'
+  throttle (0x100e6060) then stops: the follower's timers restart
+  (0x100923a0) and the bot crouches (vt+0x170(2, forced)). It falls when
+  the lob's condition fails, when the fire plan ends (0x100d4e20, with
+  `+0x248`) and when the plan's target condition fails while not lobbing
+  (0x100dc730).
 - **Aim:** the PID controller of the ControlInfo plugin (0x100e5820:
   proportional −7, derivative −0.01, angle speed 0.4 on the lead point;
   yaw limited to 3 × skill + 1). Its output is PIMouseLookX/Y, which the
@@ -3555,8 +3787,21 @@ own seat as its current value (× 2); then the way out (see above). A seat
 of the same vehicle is reached by pressing its select key
 (`aiTemplatePlugIn.setSelectKey PIPositionSelectN`, 0x100aa5f0; the plan
 0x1006dac0) and waiting to sit in it; seats are reserved one by one. Not
-rewritten: the type-0/1 order multipliers and, from a vehicle, the other
-vehicles' seats.
+rewritten earlier as "the type-0/1 order multipliers": those are the radio
+lists (the comm's +0xc, per type; read at their first message from a
+human alive and not down). bail_out (0): in a vehicle the way out ×
+modifier × 100 (`aiComm.addAIRadioMessage`'s modifier column, the
+message's +8; 10 shipped), 10000 in an ITAir object, and no other
+vehicle is weighed. get_in (1), on foot: a vehicle of the bot's team that
+a sender rides (0x1006c080) × the modifier; when the first sender rides
+the vehicle the bot already heads for, only that one counts, × 5. From a
+vehicle the other vehicles are weighed as on foot (the own one left out)
+unless the way out is already best, a bail_out is held, the bot's object
+is ITAir or it is off the mesh; a driver of a Mobile root (and a soldier)
+takes one with `setUseNoPathfindingToGetToObject` (Unit +0x15, the
+bipods), one without Mobile, or one whose infantry-map spot lies within
+the two radii; a passenger any. The choice of another vehicle gets out
+and walks there.
 
 ### Not decoded, and the rewrite's stand-ins
 
@@ -3578,15 +3823,29 @@ vehicles' seats.
   deviation through the soldier (vt+0xf4); the rewrite's hand-held
   firearms have no deviation model, so the bot spreads its aim uniformly
   over ± half of it on each axis.
-- **Explosives:** the weapon choice's other factors (0x10074ef0's own
-  range and ammo weights) are the rewrite's simpler strongest-weapon rule;
-  the explosive bonus's guard for a soldier standing in a strategic area
-  its team doesn't hold with the target inside it (0x10034a10, the area's
-  slot 0x68 not traced) and the bot's `+0x248` (set by fire plans,
-  0x100775f0) are left out; the AI weapon's guidance kind (`+0x6c`, from
-  the weapon's vt+0x154 through 0x008923a0) is taken as 0; the lob's
-  success leaves `+0x209` (vt+0x20c) unset; the rays bisect
-  `GameWorld::lineOfSight`.
+- **Explosives and the weapon choice:** the rays bisect
+  `GameWorld::lineOfSight`. `+0x248` is set by the fire plan (0x100795a0)
+  when it adds a move to the order's spot (0x100d11c0; 0x100775f0 tests
+  the spot set); that move isn't rewritten, so `+0x248` stays clear.
+  Stand-ins: the target's Mobile slot 0x78 (0x008a1960: a soldier's
+  interface 0xc4c5 slot 0x108, not traced) is its speed; a human's
+  attention on the bot (the sensing agent's stamp 0x100eb7f0, whose
+  writer wasn't traced) is a round of it having passed the bot; every
+  sighting is clear (no see-through materials); vehicle guns have no
+  magazines; no bot is scripted; no wire-guided weapon holds a target
+  (LPTargetComp's target isn't modelled); the area guard's per-side spot
+  is the control point (0x100623c0 starts it at the area's position) and
+  its per-side radius (+0x98 + 4 team: the spot's distance to the area's
+  +0x118 point) the control point's radius. Left out: C4's guard on a
+  moving target (|Mobile slot 0x18 · the bot object's +0x80| over 4, the
+  object field not traced); the guided weapons' own fire plan on foot
+  (0x10078570, picked when +0x6c isn't 0). `+0x209` falling with the
+  target condition 0x100dc730 is taken as the aim no longer lobbing.
+- **Change:** the infantry-map reach test for vehicles (the Mobile's
+  per-map points +8/+0x1c/+0x30 aren't kept: every vehicle counts), the
+  room test for ITAir vehicles that aren't ITHelicopter (0x1006c3e0), the
+  get_in answer radio (0x1006be70) and the low-health bail_out radio
+  (0x100a5990).
 - **Soldier radius:** the object's size through the AI adaptor (vt+0xdc
   → `0x008a3d40` → the object's vt+0x90, for the soldier `0x006f6b90`):
   its collision mesh's radius (`+0x4c`, interface 0xcaa32, the instance

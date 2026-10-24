@@ -61,7 +61,7 @@ float wheelRadius(const physics::CollisionMeshFile* mesh, int part)
 	if (!mesh || part < 0 || static_cast<size_t>(part) >= mesh->geometries.size()) {
 		return 0.5f;
 	}
-	for (const auto& sub : mesh->geometries[static_cast<size_t>(part)].subGeometries) {
+	for (const auto& sub : physics::collisionParts(*mesh, static_cast<size_t>(part))) {
 		if (sub.lods.size() >= 2 && -sub.lods[1].boundsMin[1] > 0.05f) {
 			return -sub.lods[1].boundsMin[1];
 		}
@@ -83,7 +83,7 @@ float wheelSpinRadius(const physics::CollisionMeshFile* mesh, int part)
 	if (!mesh || part < 0 || static_cast<size_t>(part) >= mesh->geometries.size()) {
 		return 0.5f;
 	}
-	for (const auto& sub : mesh->geometries[static_cast<size_t>(part)].subGeometries) {
+	for (const auto& sub : physics::collisionParts(*mesh, static_cast<size_t>(part))) {
 		if (!sub.lods.empty()) {
 			return std::max(0.1f, sub.lods[0].boundsMax[1] - sub.lods[0].boundsMin[1]);
 		}

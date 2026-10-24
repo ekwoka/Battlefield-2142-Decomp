@@ -272,6 +272,7 @@ public:
 		float battery = -1; // the ability battery, 0..1 (-1 without a kit)
 		physics::Vec3 position;  // the soldier's feet
 		float yaw = 0;           // degrees, 0 facing +z
+		float aimPitch = 0;      // degrees, up positive: the look's (the input's)
 		physics::Vec3 velocity;
 		std::vector<std::pair<int, std::string>> carried; // (slot, weapon template)
 		int inHandSlot = 0;
@@ -281,6 +282,12 @@ public:
 	bool playerInfo(int player, PlayerInfo& info) const;
 	// The player whose soldier (or vehicle) an object is, -1 for none.
 	int playerOf(uint32_t object) const;
+	// An effect event N (0..9) of a player's held weapon's animation, as
+	// its animation system fires it (see startEffectsOn).
+	void weaponEffectEvent(int player, int effect);
+	// The material a soldier's footstep set is for (0x007fda00; -1 before
+	// its first collision event).
+	uint32_t footstepMaterial(int player) const;
 	void setInput(int player, const SoldierInput& input);
 	// Moves a soldier (its feet) at once, as the scripts' setPosition does;
 	// false when the object is no living player's soldier on foot.
@@ -289,6 +296,10 @@ public:
 	// terrain) lies between two points.
 	// `ignore`: an object (a body) that doesn't count, such as the looker's own.
 	bool lineOfSight(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore = 0) const;
+	// The spawn spot's drop (0x005ad8b0): a box from `bottom` to `top`
+	// along `up` at `spot` put on what is under its top, or on the terrain.
+	bool groundMaterialAlong(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore, uint32_t& material) const;
+	physics::Vec3 dropSpawnSpot(const physics::Vec3& spot, const physics::Vec3& up, float bottom, float top) const;
 	// The spawn spot's test for a spawner (see ObjectSpawner::SpotTest).
 	ObjectSpawner::SpotTest testSpawnSpot(const world::ObjectTemplate& objectTemplate, const world::Vec3& spot,
 		const world::Vec3& rotation, const world::Vec3& spawner) const;
@@ -351,6 +362,10 @@ public:
 	void setManDownTime(float seconds) { m_manDownTime = seconds; }
 	// Respawn on their own when the time is up (no spawn menu yet).
 	bool autoRespawn = true;
+	// The local player's muzzle flashes in the world: off while the
+	// first-person view draws them on its own weapon (the original's
+	// first-person weapon children, FireComp 0x005f31d0).
+	bool localMuzzleEffects = true;
 	bool playerInsideControlPoint = false; // set by the scripts (setIsInsideCP)
 	// The player's rounds fired and rounds that damaged something, by
 	// weapon template; `clear` starts counting again.
@@ -491,6 +506,7 @@ public:
 		int rounds = 0;
 		int magSize = 0;
 		int magazines = 0;
+		int inMag = 0; // the rounds in the gun's magazine (-1 without magazines)
 	};
 	std::vector<WeaponAmmo> weaponAmmo(int player) const;
 	// A projectile template's detonation at a point, as if it went off
@@ -768,6 +784,18 @@ private:
 			std::string sound;
 		};
 		ContactEffect contactEffect, contactSound;
+		// The launcher its response ignores (noInitialCollisionWithLauncher,
+		// 0x005b48b0 -> 0x006b8de0: +0xfc) until the tick `ignoreUntil`
+		// (+0xf8, the tick + 2 on the server, kept open while they touch).
+		uint32_t ignored = 0;
+		uint32_t ignoreUntil = 0;
+		bool ignoreSet = false;
+		// A GenericProjectile (0x9539) with a soldier LOD under 0.6 m in
+		// radius: soldiers push it instead of standing against it
+		// (0x006c3890); its launcher (the projectile interface's slot 0x48)
+		// neither.
+		bool pushedBySoldiers = false;
+		uint32_t launcher = 0;
 	};
 	// The collision events (object slot 0xac, BF2142.exe's base
 	// 0x0063c9e0, a Soldier's 0x00586a90): `self` hit `other` (0 the
@@ -983,6 +1011,13 @@ private:
 		// 0x005f0a00).
 		physics::Vec3 hitPush;
 		double hitPushUntil = -1;
+		// The other material of the soldier's last collision event (its
+		// handler 0x00586a90 keeps it at +0x32c, -1 at first): the ground's
+		// or an object's face. The footstep set (0x007fda00 -> 0x007fd840)
+		// is the one for it while the soldier stands or swims, 0x19c8 on a
+		// ladder, and stays as it was in the air.
+		uint32_t contactMaterial = 0xffffffffu;
+		uint32_t footstepMaterial = 0xffffffffu;
 		// Seated: the seat's animation system (seatAnimationSystem).
 		std::unique_ptr<anim::AnimationState> seatAnimation;
 		std::string seatAnimationPath;
@@ -1087,6 +1122,7 @@ private:
 	// (the gadget's holder, or the hub's owner); none: no battery.
 	static constexpr uint32_t kSoldierFootStepsMaterial = 5500; // 0x157c
 	void playRagDollImpact(anim::RagDoll& ragDoll, const anim::Vec& at);
+	void startEffectsOn(const Player& player, int effect);
 	void playAnimationSound(const Player& player, int sound);
 	void applyAbility(const Ability& ability, const physics::Vec3& at, int team, float seconds, uint32_t skip,
 		AbilityScan* scan = nullptr, Player* holder = nullptr);
@@ -1242,6 +1278,13 @@ private:
 	// scan timers (DAT_00a6a390: 0x005a23b0, 0x005a2450) and the supply drop
 	// (0x0043d6d0).
 	double m_time = 0; // seconds since the round started
+	uint32_t m_ticks = 0; // the engine's tick count (0x00666090: DAT_00a7d1f8)
+	// The launchers of the objects thrown or set down (the projectile
+	// interface's +0x1c8, 0x005b48b0), by object; read when its body is made.
+	std::map<uint32_t, uint32_t> m_launchers;
+	// The box bottoms of templates with MechLegs (their +0x4c4, 0x005cd4f0),
+	// once one of them has a body.
+	std::map<const world::ObjectTemplate*, float> m_legsBottom;
 	bool m_commanderEnabled = false;
 	struct CommanderTeam {
 		int commander = -1;

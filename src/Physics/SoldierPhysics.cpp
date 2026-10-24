@@ -267,6 +267,23 @@ bool SoldierBody::collideWithMesh(const CollisionWorld& mesh, const Mover* mover
 		}
 		centres.resize(contacts.size(), centre);
 	}
+	// A moving object's response that ignores the soldier (0x006c3890 once
+	// the faces are found, mesh responses 0xc42d): in the main pass when it
+	// ignores this soldier (0x006b8da0), which keeps it ignoring
+	// (0x006b8de0); in the solve's passes whenever its window is open
+	// (0x006b6c30: any soldier).
+	if (mover && !contacts.empty()) {
+		if (scale < 1) {
+			if (mover->ignoring) {
+				return true;
+			}
+		} else if (mover->ignoresThis) {
+			if (onIgnored) {
+				onIgnored(mover->owner);
+			}
+			return true;
+		}
+	}
 	const auto normalize = [](Vec3& v) { // 0x004481a0
 		const float squared = lengthSquared(v);
 		if (std::fabs(squared - 1.0f) >= 1.1920929e-07f) {
@@ -330,6 +347,13 @@ bool SoldierBody::collideWithMesh(const CollisionWorld& mesh, const Mover* mover
 			}
 		}
 		if (scale < 1) {
+			if (mover && mover->pushed) {
+				if (!mover->own && onPushObject) {
+					onPushObject(mover->owner, contact.point, {}, normal, -depth * (soldier::kSolvePush / scale), material,
+						contact.material);
+				}
+				continue;
+			}
 			addContact(normal, depth * (soldier::kSolvePush / scale), {});
 			continue;
 		}
@@ -345,6 +369,12 @@ bool SoldierBody::collideWithMesh(const CollisionWorld& mesh, const Mover* mover
 				&& !onContact({mover ? mover->owner : 0, relative, normal, contact.point, material, contact.material})) {
 				return false;
 			}
+		}
+		if (mover && mover->pushed) {
+			if (!mover->own && onPushObject) {
+				onPushObject(mover->owner, contact.point, relative * -1.0f, normal, -depth, material, contact.material);
+			}
+			continue;
 		}
 		addContact(normal, depth, relative);
 		// Something underfoot holds the soldier up like the ground.
@@ -457,8 +487,11 @@ void SoldierBody::solve(float seconds, const Ground& ground, float gravity)
 // spheres where the soldier is now, its point velocity there over 3 m/s
 // from the soldier's, runs it over: 1000 damage, its owner credited. (The
 // original spares an owner under 10 in mass of the Particle class, which
-// the 100 already rules out, and leaves out the node's +0x90 velocity,
-// which the rewrite's soldiers don't have.)
+// the 100 already rules out, and with *0x00a84764 = 1 takes the soldier
+// node's slot 0xd8 off the relative velocity: 0x006c56e0, the node's +0x90
+// while its tick count +0x9c runs, set through slot 0xdc (0x006c5df0, at
+// most *PTR_DAT_00a06ee4 long, for *PTR_DAT_00a06ee0 ticks) by no caller
+// found, so it is none here.)
 void SoldierBody::runOver()
 {
 	if (!onCrushed) {
@@ -476,6 +509,13 @@ void SoldierBody::runOver()
 	std::vector<SphereContact> contacts;
 	for (const Mover& mover : movers) {
 		if (!mover.mesh || mover.mass < soldier::kHeavyMass || mover.asleep) {
+			continue;
+		}
+		// The team filter (0x006c2e50's start: the soldier's first
+		// PlayerControlObject, itself, and its slot 0x9c): an object with
+		// collisionGroups 0x10, or its team's bit, is passed.
+		if ((mover.collisionGroups & 0x10) || (team == 1 && (mover.collisionGroups & 0x100))
+			|| (team == 2 && (mover.collisionGroups & 0x200))) {
 			continue;
 		}
 		for (int i = 0; i < count; ++i) {

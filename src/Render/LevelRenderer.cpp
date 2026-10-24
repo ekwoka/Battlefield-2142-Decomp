@@ -118,6 +118,9 @@ LevelRenderer::~LevelRenderer()
 	if (m_particleVertices) {
 		SDL_ReleaseGPUBuffer(device, m_particleVertices);
 	}
+	if (m_firstPersonParticleVertices) {
+		SDL_ReleaseGPUBuffer(device, m_firstPersonParticleVertices);
+	}
 	for (Road& road : m_roads) {
 		SDL_ReleaseGPUBuffer(device, road.vertices);
 		SDL_ReleaseGPUBuffer(device, road.indices);
@@ -150,9 +153,12 @@ SDL_GPUTexture* LevelRenderer::texture(const io::FileManager& files, const std::
 	return gpuTexture;
 }
 
-const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, const std::string& geometryName)
+const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, const std::string& geometryName,
+	int wantedGeometry, int wantedLod)
 {
-	const std::string key = lower(geometryName);
+	const std::string key = wantedGeometry < 0 && wantedLod == 0
+		? lower(geometryName)
+		: lower(geometryName) + "#" + std::to_string(wantedGeometry) + "/" + std::to_string(wantedLod);
 	const auto it = m_meshes.find(key);
 	if (it != m_meshes.end()) {
 		return it->second.get();
@@ -179,13 +185,19 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		return missing("can't parse " + geometry->path);
 	}
 	// Bundled and skinned meshes hold the first-person, exterior (and
-	// wreck) geometries; draw the exterior.
+	// wreck) geometries; the world draws the exterior.
 	const bool bundled = geometry->kind == geom::MeshKind::Bundled;
 	const bool skinned = geometry->kind == geom::MeshKind::Skinned;
-	const size_t geometryIndex = (bundled || skinned) && file->geometries.size() > 1 ? 1 : 0;
+	const size_t geometryIndex = wantedGeometry >= 0 ? static_cast<size_t>(wantedGeometry)
+		: (bundled || skinned) && file->geometries.size() > 1 ? 1 : 0;
+	if (geometryIndex >= file->geometries.size()) {
+		return missing("no geometry " + std::to_string(geometryIndex) + " in " + geometry->path);
+	}
 	if (file->geometries[geometryIndex].lods.empty()) {
 		return missing("no LODs in " + geometry->path);
 	}
+	const size_t lodIndex = std::min(static_cast<size_t>(std::max(wantedLod, 0)), file->geometries[geometryIndex].lods.size() - 1);
+	const geom::MeshLod& lod = file->geometries[geometryIndex].lods[lodIndex];
 	const geom::VertexElement* position = file->element(geom::VertexUsage::Position);
 	const geom::VertexElement* normal = file->element(geom::VertexUsage::Normal);
 	const geom::VertexElement* texCoord = file->element(geom::VertexUsage::TexCoord);
@@ -248,7 +260,7 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 	gpuMesh->bundled = bundled;
 	gpuMesh->skinned = skinned;
 	if (skinned) {
-		for (const auto& rig : file->geometries[geometryIndex].lods[0].rigs) {
+		for (const auto& rig : lod.rigs) {
 			std::vector<RigBone> bones;
 			for (const geom::Bone& bone : rig) {
 				anim::Matrix m;
@@ -262,7 +274,7 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		static_cast<uint32_t>(vertices.size() * sizeof(Vertex)));
 	gpuMesh->indices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_INDEX, file->indices.data(),
 		static_cast<uint32_t>(file->indices.size() * sizeof(uint16_t)));
-	const auto& materials = file->geometries[geometryIndex].lods[0].materials;
+	const auto& materials = lod.materials;
 	for (size_t m = 0; m < materials.size(); ++m) {
 		const geom::MeshMaterial& material = materials[m];
 		// Alpha-tested materials use "<name>_alphatest.dds" where it exists:
@@ -279,6 +291,7 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		Submesh submesh {material.indexStart, material.indexCount, static_cast<int32_t>(material.vertexStart),
 			diffuse ? diffuse : m_gpu.whiteTexture(), material.alphaMode == 2 ? 0.5f : 0.0f,
 			skinned && m < gpuMesh->rigs.size() ? static_cast<int>(m) : -1};
+		submesh.blended = material.alphaMode == 1;
 		// StaticMesh.fx techniques name their layers: "BaseDetailDirtCrack..."
 		// with maps base, detail, dirt, crack in that order (normal maps follow).
 		const std::string technique = lower(material.technique);
@@ -867,6 +880,7 @@ void LevelRenderer::syncObjects()
 	// Move instances with their objects.
 	const world::Object* current = nullptr;
 	Mat4 objectWorld;
+	bool hiddenInView = false;
 	for (Instance& instance : m_instances) {
 		if (instance.object == 0) {
 			continue;
@@ -877,9 +891,10 @@ void LevelRenderer::syncObjects()
 				continue;
 			}
 			objectWorld = objectTransform(current->position(), current->rotation());
+			hiddenInView = m_sources->hiddenInView && m_sources->hiddenInView(instance.object);
 		}
 		instance.world = instance.local * objectWorld;
-		instance.hidden = current->hidden();
+		instance.hidden = current->hidden() || hiddenInView;
 		instance.fade = current->fade();
 		if (!instance.parts.empty() && m_sources->partTransforms) {
 			std::vector<anim::Matrix> placed(instance.parts.size(), anim::Matrix {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});
@@ -1096,16 +1111,22 @@ void LevelRenderer::buildMenu(float seconds)
 void LevelRenderer::buildParticles(const Camera& camera)
 {
 	(void)camera;
-	m_particleGroups.clear();
-	if (m_particleVertices) {
-		SDL_ReleaseGPUBuffer(m_gpu.device(), m_particleVertices); // released once the GPU is done with it
-		m_particleVertices = nullptr;
+	buildParticleBuffer(m_sources ? m_sources->effects : nullptr, m_particleVertices, m_particleGroups);
+}
+
+void LevelRenderer::buildParticleBuffer(const effects::EffectManager* manager, SDL_GPUBuffer*& buffer,
+	std::vector<ParticleGroup>& groups)
+{
+	groups.clear();
+	if (buffer) {
+		SDL_ReleaseGPUBuffer(m_gpu.device(), buffer); // released once the GPU is done with it
+		buffer = nullptr;
 	}
-	if (!m_sources || !m_sources->effects) {
+	if (!m_sources || !manager) {
 		return;
 	}
 	std::vector<Vertex> vertices;
-	m_sources->effects->forEachGroup([&](const std::string& path, bool additive, const std::vector<effects::Sprite>& sprites) {
+	manager->forEachGroup([&](const std::string& path, bool additive, const std::vector<effects::Sprite>& sprites) {
 		SDL_GPUTexture* image = texture(m_sources->files, path + ".dds");
 		if (!image) {
 			return;
@@ -1129,20 +1150,54 @@ void LevelRenderer::buildParticles(const Camera& camera)
 				vertices.push_back(v);
 			}
 		}
-		if (!m_particleGroups.empty() && m_particleGroups.back().texture == image &&
-			m_particleGroups.back().additive == additive) {
-			m_particleGroups.back().vertexCount += static_cast<uint32_t>(vertices.size()) - first;
+		if (!groups.empty() && groups.back().texture == image && groups.back().additive == additive) {
+			groups.back().vertexCount += static_cast<uint32_t>(vertices.size()) - first;
 		} else {
-			m_particleGroups.push_back({image, additive, first, static_cast<uint32_t>(vertices.size()) - first});
+			groups.push_back({image, additive, first, static_cast<uint32_t>(vertices.size()) - first});
 		}
 	});
 	if (vertices.empty()) {
-		m_particleGroups.clear();
+		groups.clear();
 		return;
 	}
-	m_particleVertices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_VERTEX, vertices.data(),
+	buffer = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_VERTEX, vertices.data(),
 		static_cast<uint32_t>(vertices.size() * sizeof(Vertex)));
 	m_gpu.flushUploads();
+}
+
+void LevelRenderer::drawParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Mat4& viewProjection,
+	const Camera& camera, const scene::LightSettings& lights, SDL_GPUBuffer* buffer,
+	const std::vector<ParticleGroup>& groups)
+{
+	if (!buffer || groups.empty()) {
+		return;
+	}
+	const LightingUniforms fog = lighting(lights, lights.sunColor, lights.skyColor, 0, false);
+	ParticleUniforms uniforms {};
+	uniforms.viewProjection = viewProjection;
+	const Vec3f right = camera.right();
+	const Vec3f up = cross(camera.forward(), right) * -1.0f;
+	uniforms.cameraRight[0] = right.x;
+	uniforms.cameraRight[1] = right.y;
+	uniforms.cameraRight[2] = right.z;
+	uniforms.cameraUp[0] = up.x;
+	uniforms.cameraUp[1] = up.y;
+	uniforms.cameraUp[2] = up.z;
+	SDL_GPUBufferBinding vertexBinding {buffer, 0};
+	bool bound = false, additive = false;
+	for (const ParticleGroup& group : groups) {
+		if (!bound || group.additive != additive) {
+			SDL_BindGPUGraphicsPipeline(pass, m_gpu.particlePipeline(group.additive));
+			SDL_PushGPUVertexUniformData(commands, 0, &uniforms, sizeof(uniforms));
+			SDL_PushGPUFragmentUniformData(commands, 0, &fog, sizeof(fog));
+			SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+			bound = true;
+			additive = group.additive;
+		}
+		SDL_GPUTextureSamplerBinding sampler {group.texture, m_gpu.clampSampler()};
+		SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
+		SDL_DrawGPUPrimitives(pass, group.vertexCount, 1, group.firstVertex, 0);
+	}
 }
 
 void LevelRenderer::build(const LevelSources& sources)
@@ -1197,6 +1252,17 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	depthTarget.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
 	updateUndergrowth(camera);
 	buildParticles(camera);
+	// The first-person models, loaded before the pass begins.
+	m_firstPerson = FirstPersonScene {};
+	m_hasFirstPerson = m_sources && m_sources->firstPerson && m_sources->firstPerson(m_firstPerson);
+	if (m_hasFirstPerson) {
+		for (const FirstPersonModel& model : m_firstPerson.models) {
+			mesh(*m_sources, model.geometry, model.geometryIndex, model.lod);
+		}
+		m_gpu.flushUploads();
+	}
+	buildParticleBuffer(m_hasFirstPerson ? m_firstPerson.effects : nullptr, m_firstPersonParticleVertices,
+		m_firstPersonParticleGroups);
 	buildOverlay();
 	// The menu keeps its own clock: it plays with or without a HUD.
 	const uint64_t now = SDL_GetTicks();
@@ -1206,7 +1272,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, &colorTarget, 1, &depthTarget);
 
 	const Mat4 viewProjection = camera.view() *
-		Mat4::perspective(camera.fovY, static_cast<float>(target.width) / target.height, 0.5f, 6000.0f);
+		Mat4::perspective(camera.fovY, static_cast<float>(target.width) / target.height, camera.nearPlane, 6000.0f);
 
 	// Sky dome around the camera, unlit and unfogged, behind everything.
 	if (m_skyMesh) {
@@ -1400,34 +1466,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		}
 	}
 	// Particles, after what they are in front of.
-	if (m_particleVertices && !m_particleGroups.empty()) {
-		const LightingUniforms fog = lighting(lights, lights.sunColor, lights.skyColor, 0, false);
-		ParticleUniforms uniforms {};
-		uniforms.viewProjection = viewProjection;
-		const Vec3f right = camera.right();
-		const Vec3f up = cross(camera.forward(), right) * -1.0f;
-		uniforms.cameraRight[0] = right.x;
-		uniforms.cameraRight[1] = right.y;
-		uniforms.cameraRight[2] = right.z;
-		uniforms.cameraUp[0] = up.x;
-		uniforms.cameraUp[1] = up.y;
-		uniforms.cameraUp[2] = up.z;
-		SDL_GPUBufferBinding vertexBinding {m_particleVertices, 0};
-		bool bound = false, additive = false;
-		for (const ParticleGroup& group : m_particleGroups) {
-			if (!bound || group.additive != additive) {
-				SDL_BindGPUGraphicsPipeline(pass, m_gpu.particlePipeline(group.additive));
-				SDL_PushGPUVertexUniformData(commands, 0, &uniforms, sizeof(uniforms));
-				SDL_PushGPUFragmentUniformData(commands, 0, &fog, sizeof(fog));
-				SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
-				bound = true;
-				additive = group.additive;
-			}
-			SDL_GPUTextureSamplerBinding sampler {group.texture, m_gpu.clampSampler()};
-			SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
-			SDL_DrawGPUPrimitives(pass, group.vertexCount, 1, group.firstVertex, 0);
-		}
-	}
+	drawParticles(commands, pass, viewProjection, camera, lights, m_particleVertices, m_particleGroups);
 
 	// Water last, blended over what is below it.
 	if (m_waterVertices && m_water) {
@@ -1449,6 +1488,15 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		SDL_GPUBufferBinding indexBinding {m_waterIndices, 0};
 		SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
 		SDL_DrawGPUIndexedPrimitives(pass, m_waterIndexCount, 1, 0, 0, 0);
+	}
+	// The first-person pass: the world's depth cleared, the weapon and arms
+	// drawn with their own projection.
+	if (m_hasFirstPerson) {
+		SDL_EndGPURenderPass(pass);
+		SDL_GPUColorTargetInfo keepColor = colorTarget;
+		keepColor.load_op = SDL_GPU_LOADOP_LOAD;
+		pass = SDL_BeginGPURenderPass(commands, &keepColor, 1, &depthTarget);
+		drawFirstPerson(commands, pass, camera, static_cast<float>(target.width) / target.height, lights);
 	}
 	// The HUD over everything.
 	if (m_overlayVertices && !m_overlayGroups.empty()) {
@@ -1489,6 +1537,63 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		}
 	}
 	SDL_EndGPURenderPass(pass);
+}
+
+void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Camera& camera,
+	float aspect, const scene::LightSettings& lights)
+{
+	const FirstPersonScene& scene = m_firstPerson;
+	const Mat4 viewProjection = camera.view() * Mat4::perspective(scene.fovY, aspect, scene.nearPlane, scene.farPlane);
+	SDL_BindGPUGraphicsPipeline(pass, m_gpu.meshPipeline());
+	const LightingUniforms lit[2] = {lighting(lights, lights.sunColor, lights.skyColor, 0, false),
+		lighting(lights, lights.sunColor, lights.skyColor, 0.5f, false)};
+	for (const FirstPersonModel& model : scene.models) {
+		const GpuMesh* gpuMesh = mesh(*m_sources, model.geometry, model.geometryIndex, model.lod);
+		if (!gpuMesh) {
+			continue;
+		}
+		SDL_GPUBufferBinding vertexBinding {gpuMesh->vertices, 0};
+		SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+		SDL_GPUBufferBinding indexBinding {gpuMesh->indices, 0};
+		SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+		TransformUniforms transforms {model.world * viewProjection, model.world, {1, 1, 0, 0}, {}};
+		for (size_t i = 0; i < model.parts.size() && i < static_cast<size_t>(kMaxMeshParts); ++i) {
+			transforms.parts[i] = model.parts[i];
+		}
+		SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
+		for (const Submesh& submesh : gpuMesh->submeshes) {
+			if (submesh.blended) {
+				continue; // additive glows (sights, displays): no blended mesh pipeline yet
+			}
+			if (gpuMesh->skinned) {
+				if (submesh.rig < 0 || model.pose.empty()) {
+					continue; // a skinned mesh without its pose isn't drawn
+				}
+				const auto& rig = gpuMesh->rigs[static_cast<size_t>(submesh.rig)];
+				for (size_t b = 0; b < rig.size() && b < static_cast<size_t>(kMaxMeshParts); ++b) {
+					const int node = rig[b].node;
+					const anim::Matrix skin = node >= 0 && static_cast<size_t>(node) < model.pose.size()
+						? anim::multiply(rig[b].meshToBone, model.pose[static_cast<size_t>(node)])
+						: rig[b].meshToBone;
+					std::copy(skin.begin(), skin.end(), transforms.parts[b].m.begin());
+				}
+				SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
+			}
+			LightingUniforms uniforms = lit[submesh.alphaReference > 0];
+			SDL_PushGPUFragmentUniformData(commands, 0, &uniforms, sizeof(uniforms));
+			SDL_GPUTextureSamplerBinding samplers[5] = {
+				{submesh.texture, m_gpu.repeatSampler()},
+				{m_gpu.whiteTexture(), m_gpu.clampSampler()},
+				{m_gpu.whiteTexture(), m_gpu.repeatSampler()},
+				{m_gpu.whiteTexture(), m_gpu.repeatSampler()},
+				{m_gpu.whiteTexture(), m_gpu.repeatSampler()},
+			};
+			SDL_BindGPUFragmentSamplers(pass, 0, samplers, 5);
+			SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
+		}
+	}
+	drawParticles(commands, pass, viewProjection, camera, lights, m_firstPersonParticleVertices,
+		m_firstPersonParticleGroups);
 }
 
 } // namespace dice::hfe::render

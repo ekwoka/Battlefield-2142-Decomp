@@ -84,3 +84,4 @@ TEST(CollisionMesh_VertexMaterialsAndRadius)
 	// A box's farthest corner, not its half diagonal.
 	CHECK(std::abs(dice::hfe::physics::boxRadius({0, 0, 0}, {3, 4, 0}) - 5) < 1e-5f);
 }
+

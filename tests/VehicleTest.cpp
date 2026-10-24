@@ -1,12 +1,21 @@
 // Ground vehicles: the newCar2 tyre and spin functions, and a car on flat
 // ground settling on its springs, driving, turning and braking.
+#include "Console/Console.h"
 #include "Game/Vehicle.h"
+#include "IO/File/FileManager.h"
+#include "Physics/CollisionMeshFile.h"
+#include "Physics/CollisionWorld.h"
 #include "TestMain.h"
+#include "World/Object.h"
 #include "World/ObjectTemplate.h"
 #include "World/ObjectTemplateManager.h"
+#include "World/WorldConsole.h"
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <vector>
 
 using namespace dice::hfe;
 using physics::Vec3;
@@ -264,4 +273,90 @@ TEST(Vehicle_WheelsSpinInTheAir)
 	CHECK(std::fabs(car.body.velocity.z) < 1e-3f); // no tyre force
 	car.run(30, {0, 0});
 	CHECK(car.vehicle->wheels()[2].spin < spun);
+}
+
+// The shipped FAVs' wheels and their collision parts. A Spring's
+// collisionPart is a geometry of the vehicle's collision mesh (0x0063ccc0
+// hands the template's +0x74 to the collision manager's slot 0x28,
+// 0x006d8180, which picks the geometry by it); the mesh instance's +0x14
+// is the sub-geometry, the state (0 normal, 1 wreck). The files lead every
+// geometry with an empty sub-geometry, which the loader drops (0x006d8740
+// → 0x006e5820), so the normal shape is sub-geometry 0 and the wreck 1, and
+// the trailing geometries without LODs go.
+TEST(Vehicle_ShippedWheelsResolveToTheirCollisionParts)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	files.setMountingAllowed(true);
+	CHECK(files.mountArchive("Objects/Vehicles_server.zip", "Objects\\Vehicles"));
+	files.setMountingAllowed(false);
+	Console console {&files};
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	world::registerWorldConsoleMethods(console, templates, objects);
+	world::registerUntypedTemplateProperties(console, templates, {"collisionPart", "strength", "damping"});
+	struct Case {
+		const char* name;
+		const char* script;
+		const char* mesh;
+		std::vector<int> parts; // the wheels' in the tree's order
+		float radius;           // the contact face's depth below the wheel's centre
+	};
+	for (const Case& c : {Case {"as_fav", "Objects/Vehicles/as_fav/as_fav.con", "Objects/Vehicles/as_fav/meshes/as_fav.collisionmesh",
+							  {8, 10, 11, 12}, 0.49f},
+			 Case {"eu_fav", "Objects/Vehicles/eu_fav/eu_fav.con", "Objects/Vehicles/eu_fav/meshes/eu_fav.collisionmesh",
+				 {8, 10, 11, 13}, 0.55f}}) {
+		std::string out;
+		console.run(c.script, {}, out);
+		const world::ObjectTemplate* root = templates.find(c.name);
+		CHECK(root != nullptr);
+		std::vector<uint8_t> data;
+		CHECK(files.readFile(c.mesh, data));
+		const auto mesh = physics::parseCollisionMesh(data);
+		CHECK(mesh.has_value());
+		if (!root || !mesh) {
+			continue;
+		}
+		CHECK(mesh->geometries.size() == 15); // 46 in the file, 31 empty at the end
+		// Geometry 0: the hull and its wreck, the first sub-geometry gone.
+		CHECK(mesh->geometries[0].subGeometries.size() == 2);
+		const physics::CollisionSubGeometry* hull = physics::collisionPart(*mesh, 0);
+		const physics::CollisionSubGeometry* wreck = physics::collisionPart(*mesh, 0, 1);
+		CHECK(hull && wreck && physics::collisionLodFor(*mesh, *hull, 1) && physics::collisionLodFor(*mesh, *wreck, 1));
+		CHECK(physics::collisionLodFor(*mesh, *hull, 2) && !physics::collisionLodFor(*mesh, *wreck, 2));
+		// Only the hull collides: its vehicle LOD's faces, not the wreck's too.
+		physics::CollisionWorld world;
+		world.addMesh(*mesh, physics::CollisionUser::Vehicle, {}, {}, 1, {});
+		CHECK(world.triangles() <= physics::collisionLodFor(*mesh, *hull, 1)->faces.size());
+		CHECK(world.triangles() + 4 > physics::collisionLodFor(*mesh, *hull, 1)->faces.size());
+
+		const auto vehicle = game::Vehicle::fromTemplate(*root, templates, &*mesh);
+		CHECK(vehicle != nullptr);
+		if (!vehicle) {
+			continue;
+		}
+		CHECK(vehicle->wheels().size() == c.parts.size());
+		for (size_t i = 0; i < vehicle->wheels().size() && i < c.parts.size(); ++i) {
+			const game::Vehicle::Wheel& wheel = vehicle->wheels()[i];
+			CHECK(wheel.collisionPart == c.parts[i]);
+			// The part is the wheel: a projectile LOD round it and a vehicle
+			// LOD of one face, the contact, under its centre.
+			const physics::CollisionSubGeometry* part = physics::collisionPart(*mesh, static_cast<size_t>(wheel.collisionPart));
+			CHECK(part != nullptr);
+			if (!part) {
+				continue;
+			}
+			const physics::CollisionLod* contact = physics::collisionLodFor(*mesh, *part, 1);
+			CHECK(contact && contact->faces.size() == 1 && physics::collisionLodFor(*mesh, *part, 0));
+			CHECK(near(wheel.radius, c.radius, 0.02f));
+			CHECK(wheel.spinRadius > 0.9f && wheel.spinRadius < 1.1f);
+			std::printf("  %s %s: part %d radius %.3f spin %.3f\n", c.name, wheel.spring.c_str(), wheel.collisionPart,
+				wheel.radius, wheel.spinRadius);
+		}
+	}
 }

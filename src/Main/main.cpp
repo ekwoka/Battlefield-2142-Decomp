@@ -36,6 +36,7 @@
 #include "UI/Player/Player.h"
 #include "IO/Localization/Localization.h"
 #include "MenuBindings.h"
+#include "PlayerCamera.h"
 #include "EndOfRoundBindings.h"
 #include "Game/GameWorld.h"
 #include "Stats/Stats.h"
@@ -123,6 +124,9 @@ struct Options {
 	std::string menuScript;      // --menu-script "wait:12 click:x,y type:text ...": drive the menu headless
 	std::string login;           // --login name:password[@soldier]: log in to the account service
 	std::string dumpTemplate;    // --dump-template: print a template's tree and settings
+	std::string cameraMode = "first"; // --camera-mode first|third: the player's view (C toggles it)
+	bool zoom = false;           // --zoom: a screenshot's soldier zooms in after its burst
+	int seat = 0;                // --seat N: with --drive, stay aboard in seat N (1 the driver)
 	// Set by a game started from the menu (server settings).
 	float botSkill = -1;         // 0..1, -1 for the AI scripts' own
 	int ticketRatio = 100;
@@ -205,6 +209,12 @@ bool parseOptions(int argc, char** argv, Options& options)
 				options.playTeam = std::atoi(argv[++i]);
 			}
 			options.view = true;
+		} else if (arg == "--seat" && hasValue) {
+			options.seat = std::atoi(argv[++i]);
+		} else if (arg == "--zoom") {
+			options.zoom = true;
+		} else if (arg == "--camera-mode" && hasValue) {
+			options.cameraMode = argv[++i];
 		} else if (arg == "--dump-template" && hasValue) {
 			options.dumpTemplate = argv[++i];
 		} else if (arg == "--animation" && hasValue) {
@@ -1912,14 +1922,19 @@ int runGame(Options& options, Session& session)
 		// Animation systems are built by their scripts when a soldier or
 		// weapon first needs one, after the global value holders.
 		bool valueHoldersLoaded = false;
-		round.setAnimationSystems(&animationSystems, [&](const std::string& path) {
+		const auto loadAnimationSystem = [&](const std::string& path) {
 			std::string output;
 			if (!valueHoldersLoaded) {
 				valueHoldersLoaded = true;
 				console.run("Objects/Soldiers/Common/Animations/ValueHolders.inc", {}, output);
 			}
 			return animationSystems.get(path, [&] { console.run(path, {}, output); });
-		});
+		};
+		round.setAnimationSystems(&animationSystems, loadAnimationSystem);
+		// The player's camera: first person by default (--camera-mode third
+		// for the chase view), its first-person systems built the same way.
+		PlayerCamera playerCamera(round, animationSystems, loadAnimationSystem);
+		playerCamera.firstPerson = options.cameraMode != "third";
 		// The HUD's map: the level's ingameMap.dds over the primary terrain.
 		if (const terrain::Heightmap* ground = heightmaps.primary(); ground && ground->loaded()) {
 			hudManager.setMap("Levels/" + options.level + "/Hud/Minimap/ingameMap.dds", ground->originX(), ground->originZ(),
@@ -2128,7 +2143,9 @@ int runGame(Options& options, Session& session)
 		const auto step = [&] {
 			remoteStep();
 			bots.update(1.0f / 30.0f);
+			round.localMuzzleEffects = !playerCamera.firstPerson;
 			round.tick(1.0f / 30.0f);
+			playerCamera.tick(1.0f / 30.0f);
 			gameLogic.tick(1.0f / 30.0f);
 			scripts.update();
 		};
@@ -2136,7 +2153,9 @@ int runGame(Options& options, Session& session)
 		const auto step = [&] {
 			remoteStep();
 			bots.update(1.0f / 30.0f);
+			round.localMuzzleEffects = !playerCamera.firstPerson;
 			round.tick(1.0f / 30.0f);
+			playerCamera.tick(1.0f / 30.0f);
 			gameLogic.tick(1.0f / 30.0f);
 		};
 #endif
@@ -2262,6 +2281,20 @@ int runGame(Options& options, Session& session)
 						report("after 1 s braking");
 						drive(0.5f, 1, 45);
 						report("after 1.5 s turning right");
+						if (options.seat > 0) {
+							// --seat N: stay aboard in that seat for the screenshot.
+							game::SoldierInput seat;
+							seat.switchSeat = options.seat;
+							round.setPlayerInput(seat);
+							step();
+							for (int i = 0; i < 30; ++i) {
+								round.setPlayerInput({});
+								step();
+							}
+							game::GameWorld::PlayerInfo me;
+							round.playerInfo(round.localPlayer(), me);
+							std::printf("  in seat %d of %zu\n", me.seat + 1, round.vehicleSeats(me.vehicle).size());
+						} else {
 						// The gunner's seat (F2): turn the gun a quarter round and fire.
 						game::SoldierInput gunner;
 						gunner.switchSeat = 2;
@@ -2296,6 +2329,7 @@ int runGame(Options& options, Session& session)
 						round.playerInfo(round.localPlayer(), me);
 						std::printf("  at 100 hit points it burnt out after %.1f s; the gunner is %s\n", burnt / 30.0f,
 							me.alive ? "alive" : "dead");
+						}
 					}
 				} else if (!options.screenshot.empty()) {
 					// Run forward for two seconds to show the soldier moving.
@@ -2333,6 +2367,25 @@ int runGame(Options& options, Session& session)
 						std::printf("  last impact at %.1f/%.1f/%.1f on object %u (material %u), damage %.1f\n",
 							last.point.x, last.point.y, last.point.z, last.object, last.material, last.damage);
 					}
+					if (options.zoom) {
+						// The right button once: the weapon's zoom, a second to settle.
+						playerCamera.setAltFire(true);
+						round.setPlayerInput({});
+						step();
+						playerCamera.setAltFire(false);
+						for (int i = 0; i < 30; ++i) {
+							round.setPlayerInput({});
+							step();
+						}
+					}
+					std::printf("first person: %s, eye %.2f m over the origin, field of view %.3f rad, zoom level %d%s;"
+								" playing",
+						playerCamera.firstPerson ? "on" : "off", playerCamera.eyeHeight(), playerCamera.fieldOfView(),
+						playerCamera.zoomLevel(), playerCamera.zoomed() ? " (zoomed in)" : "");
+					for (const std::string& name : playerCamera.playing()) {
+						std::printf(" %s", name.c_str());
+					}
+					std::printf("\n");
 				}
 			} else {
 				std::fprintf(stderr, "no spawn point for team %d\n", options.playTeam);
@@ -2413,6 +2466,17 @@ int runGame(Options& options, Session& session)
 				hudManager.set("PlayerKitIcon" + std::to_string(kit) + "SelectShow", kit == localKit ? 1 : 0);
 			}
 			updateHud(hudManager, round, gameLogic, scoreboardHeld, scoreOf, commanderScreen);
+			// Zoomed in, the weapon's zoomed HUD (weaponHud.altGuiIndex: the
+			// scopes' dots and reticles).
+			if (playerCamera.zoomed() && !round.playerVehicle()) {
+				if (const world::Object* held = round.objects().find(round.playerWeaponObject())) {
+					const auto& settings = held->objectTemplate()->settings();
+					const auto alt = settings.find("weaponHud.altGuiIndex");
+					if (alt != settings.end()) {
+						hudManager.set("GuiIndex", static_cast<float>(std::atoi(alt->second.c_str())));
+					}
+				}
+			}
 			return hudManager.frame(seconds);
 		};
 		// A game started from the menu shows it on Esc (Logic.isGameRunning).
@@ -2443,6 +2507,31 @@ int runGame(Options& options, Session& session)
 		sources.partPose = [&round](uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation) {
 			return round.partPose(object, part, offset, rotation);
 		};
+		// The first-person pass: the arms and the weapon at the eye, the
+		// player's own soldier left out of the world.
+		sources.hiddenInView = [&playerCamera](uint32_t object) { return playerCamera.hides(object); };
+		sources.firstPerson = [&playerCamera](render::FirstPersonScene& scene) {
+			const std::vector<PlayerCamera::Model> models = playerCamera.models();
+			if (models.empty()) {
+				return false;
+			}
+			for (const PlayerCamera::Model& model : models) {
+				render::FirstPersonModel drawn;
+				drawn.geometry = model.geometry;
+				drawn.geometryIndex = model.geometryIndex;
+				drawn.lod = model.lod;
+				std::copy(model.world.begin(), model.world.end(), drawn.world.m.begin());
+				drawn.pose = model.pose;
+				for (const anim::Matrix& part : model.parts) {
+					render::Mat4 m;
+					std::copy(part.begin(), part.end(), m.m.begin());
+					drawn.parts.push_back(m);
+				}
+				scene.models.push_back(std::move(drawn));
+			}
+			scene.effects = &playerCamera.effects();
+			return true;
+		};
 		ViewerOptions viewer;
 		viewer.screenshot = options.screenshot;
 		viewer.camera = options.camera;
@@ -2469,13 +2558,17 @@ int runGame(Options& options, Session& session)
 		if (session.menuBindings) {
 			// ControlSettings: 0.5 is the game's default sensitivity.
 			const dice::hfe::menu::MenuBindings* settings = session.menuBindings.get();
-			viewer.mouseScale = [settings] {
-				return static_cast<float>(settings->setting("ControlSettings.MouseSensitivity", 0.5) / 0.5);
+			viewer.mouseScale = [settings, &playerCamera] {
+				return static_cast<float>(settings->setting("ControlSettings.MouseSensitivity", 0.5) / 0.5)
+					* playerCamera.mouseScale();
 			};
 			viewer.invertMouse = [settings] { return settings->setting("ControlSettings.InvertMouse", 0) != 0; };
 		}
 		if (!controls.maps().empty()) {
 			viewer.controls = &controls;
+		}
+		if (!viewer.mouseScale) {
+			viewer.mouseScale = [&playerCamera] { return playerCamera.mouseScale(); }; // zoomed in: slower (0x00586420)
 		}
 		// Ragdolls' level of detail goes by the camera (GameWorld::setCamera).
 		viewer.onCamera = [&round](const float position[3], const float forward[3]) {
@@ -2529,7 +2622,8 @@ int runGame(Options& options, Session& session)
 			};
 		} else if (round.player()) {
 			viewer.onPlayerInput = [&round, &scoreboardHeld, &options, &showMenu, &startedGame, &endOfRound, &commanderScreen,
-										&commanderKeyWas, wasAlive = false, spawnedProne = false](
+										&commanderKeyWas, &playerCamera, wasAlive = false, spawnedProne = false,
+										toggleCameraWas = false](
 										const ViewerOptions::PlayerInput& in) mutable {
 				scoreboardHeld = options.scoreboard || in.scoreboard;
 				// Caps Lock opens and closes the commander's screen.
@@ -2553,6 +2647,13 @@ int runGame(Options& options, Session& session)
 				input.use = in.use;
 				input.switchSeat = in.seat;
 				input.selectItem = in.item;
+				// C: first person or the chase view; the right button's press
+				// steps a zoomed weapon's zoom.
+				if (in.toggleCamera && !toggleCameraWas) {
+					playerCamera.toggleMode();
+				}
+				toggleCameraWas = in.toggleCamera;
+				playerCamera.setAltFire(in.altFire);
 				// Stance: crouch or lie while their keys are held. A spawn where
 				// only lying fits (the squad leader's scatter, 0x006c3340) starts
 				// prone until a stance key is pressed.
@@ -2592,11 +2693,12 @@ int runGame(Options& options, Session& session)
 					hudManager.click(x, y);
 				}
 			};
-			viewer.playerView = [&round](ViewerOptions::PlayerView& view) {
+			viewer.playerView = [&round, &playerCamera](ViewerOptions::PlayerView& view) {
 				const world::Object* player = round.player();
 				if (!player) {
 					return false;
 				}
+				const float aspect = view.aspect;
 				// The camera turns with the look (the head turns before the body, 0x0058a6d0).
 				game::GameWorld::PlayerInfo look;
 				const float lookYaw = round.playerInfo(round.localPlayer(), look) ? look.yaw : player->rotation().x;
@@ -2619,9 +2721,19 @@ int runGame(Options& options, Session& session)
 						}
 					}
 				}
+				// First person: the soldier camera at the eye, or the seat's.
+				PlayerCamera::View eye;
+				view.aspect = aspect;
+				if (playerCamera.view(eye, aspect)) {
+					view.firstPerson = true;
+					std::copy(eye.position.begin(), eye.position.end(), view.eye);
+					view.eyeYaw = eye.yaw;
+					view.eyePitch = eye.pitch;
+					view.fovY = eye.fovY;
+				}
 				return true;
 			};
-			if (!options.screenshot.empty() && options.camera.empty()) {
+			if (!options.screenshot.empty() && options.camera.empty() && !playerCamera.firstPerson) {
 				// Frame the soldier (or the vehicle) from behind (along a gunner's gun).
 				const world::Object* player = round.playerVehicle() ? round.playerVehicle() : round.player();
 				game::GameWorld::PlayerInfo me;

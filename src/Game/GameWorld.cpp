@@ -372,7 +372,7 @@ void GameWorld::addStaticCollision(const world::ObjectTemplate& t, const physics
 				ladder.rotation = rotation;
 				ladder.position = position;
 				physics::Vec3 low {1e9f, 1e9f, 1e9f}, high {-1e9f, -1e9f, -1e9f};
-				for (const physics::CollisionSubGeometry& sub : mesh->geometries[0].subGeometries) {
+				for (const physics::CollisionSubGeometry& sub : physics::collisionParts(*mesh, 0)) {
 					if (const physics::CollisionLod* lod = physics::collisionLodFor(*mesh, sub, 2)) {
 						low = {std::min(low.x, lod->boundsMin[0]), std::min(low.y, lod->boundsMin[1]), std::min(low.z, lod->boundsMin[2])};
 						high = {std::max(high.x, lod->boundsMax[0]), std::max(high.y, lod->boundsMax[1]), std::max(high.z, lod->boundsMax[2])};
@@ -458,6 +458,7 @@ void GameWorld::setControlPointTeam(int controlPointId, int team)
 void GameWorld::tick(float seconds)
 {
 	m_time += seconds;
+	++m_ticks;
 	for (const auto& spawner : m_spawners) {
 		spawner->update(seconds, m_objects, m_templates, m_random);
 		// The spawn's hand-over to a PlayerControlObject root (0x005aeb80:
@@ -499,6 +500,19 @@ void GameWorld::tick(float seconds)
 	stepProjectiles(seconds);
 	stepControlPoints(seconds);
 	m_effects.update(seconds);
+}
+
+void GameWorld::weaponEffectEvent(int id, int effect)
+{
+	if (const Player* player = findPlayer(id); player && effect >= 0 && effect < 10) {
+		startEffectsOn(*player, effect);
+	}
+}
+
+uint32_t GameWorld::footstepMaterial(int id) const
+{
+	const Player* player = findPlayer(id);
+	return player ? player->footstepMaterial : 0xffffffffu;
 }
 
 std::vector<uint32_t> GameWorld::materialMap(const world::ObjectTemplate& t) const
@@ -865,13 +879,14 @@ std::vector<GameWorld::WeaponAmmo> GameWorld::weaponAmmo(int id) const
 			const world::ObjectTemplate* t = m_templates.find(c.name);
 			if (t) {
 				const FireArmSettings settings = FireArmSettings::fromTemplate(*t);
-				list.push_back({c.name, settings.magSize * (settings.nrOfMags + 1), settings.magSize, settings.nrOfMags});
+				list.push_back({c.name, settings.magSize * (settings.nrOfMags + 1), settings.magSize, settings.nrOfMags,
+					settings.magSize});
 			}
 			continue;
 		}
 		const FireArmSettings& settings = weapon->settings();
 		list.push_back({c.name, weapon->roundsInMag() + weapon->magsLeft() * std::max(settings.magSize, 0), settings.magSize,
-			settings.nrOfMags});
+			settings.nrOfMags, weapon->roundsInMag()});
 	}
 	return list;
 }
@@ -965,7 +980,7 @@ void GameWorld::fire(const Player& player, float aimPitch)
 	p.team = player.team;
 	p.yaw = look;
 	m_projectiles.push_back(p);
-	if (!player.muzzleEffect.empty()) {
+	if (!player.muzzleEffect.empty() && (localMuzzleEffects || &player != m_player)) {
 		m_effects.spawn(player.muzzleEffect, p.origin + direction * 0.3f,
 			physics::Mat3::fromYawPitchRoll({look, -aimPitch, 0}));
 	}
@@ -1851,6 +1866,7 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 	info.battery = player->battery;
 	info.squadLeader = player->squadLeader;
 	info.commander = commander(player->team) == player->id;
+	info.aimPitch = player->input.aimPitch;
 	if (player->alive && player->vehicle) {
 		// Aboard: the vehicle's place and heading.
 		for (const Body& body : m_bodies) {
@@ -2267,13 +2283,40 @@ bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, 
 // (slot 0xc4(2)) and a segment from the spot to any vertex of the
 // template's vehicle LOD (type 1) placed there crosses that soldier LOD
 // (0x006f2760: the instance's slot 22, 0x006e5920, both sides of the
-// faces). Not rewritten: the extra probe for templates with MechLegs (the
-// PlayerControlObject template's +0x4c4, its last object's box bottom set by
-// 0x005cd4f0: three segments down from the spot and 1.7 m either side across,
-// 0x006f28e0; walkers alone), their legs' objects (0x006f2e90's loop
-// through the node's slot 0x5c), the objects a global list holds
-// (0x005628f0 / 0x00561d90, not identified) and the spot's drop
-// (0x005ad8b0).
+// faces), the spot dropped first (dropSpawnSpot); a template with
+// MechLegs probes down too (0x006f28e0). An existing walker's legs'
+// objects (0x006f2e90's loop through the responses, slot 0x5c) aren't
+// bodies here: its hull alone is tested. The objects a global
+// list holds are passed (0x005628f0 / 0x00561d90: the Titan sync manager
+// ECPhysicsETitanSync's two Titans, 0x00561c00, in gpm_ti alone; the
+// rewrite has no Titans).
+// The spot's drop (0x005ad8b0, before the test): along the spawner's up
+// axis (its matrix's second row) from the template's vehicle-LOD box top
+// (slot 0x54(1): max y) to its bottom (min y), the scene's ray (slot
+// 0x68, 0x00700b80) through objects with flags (+0x14) 0x1000100 and
+// without 8 (0x006f4aa0 / 0x006f4ac0; 8 marks the mobile ones, set with
+// their node: 0x005f6ba0, 0x00621b50): static objects alone (the
+// rewrite asks their projectile LOD). A hit puts the box's bottom on it. Without one, a box bottom
+// under the terrain (DAT_00a83e58 slot 0x6c) is lifted onto it. Only the
+// test moves: the spawn itself is at the spawner's spot (0x005aeb80's
+// end, the game logic's slot 0x120).
+physics::Vec3 GameWorld::dropSpawnSpot(const physics::Vec3& spot, const physics::Vec3& up, float bottom, float top) const
+{
+	const physics::Vec3 high = spot + up * top;
+	const physics::Vec3 low = spot + up * bottom;
+	physics::CollisionWorld::Hit hit {};
+	if (m_projectileCollision.raycast(high, low, hit)) {
+		return high + (low - high) * hit.fraction - up * bottom;
+	}
+	if (m_ground.height) {
+		const float ground = m_ground.height(spot.x, spot.z);
+		if (spot.y - ground < -(up.y * bottom)) {
+			return {spot.x, ground - up.y * bottom, spot.z};
+		}
+	}
+	return spot;
+}
+
 ObjectSpawner::SpotTest GameWorld::testSpawnSpot(const world::ObjectTemplate& objectTemplate, const world::Vec3& spot,
 	const world::Vec3& rotation, const world::Vec3& spawner) const
 {
@@ -2286,15 +2329,22 @@ ObjectSpawner::SpotTest GameWorld::testSpawnSpot(const world::ObjectTemplate& ob
 		return test; // 0x005ad4d0 finds none: no test
 	}
 	std::vector<physics::Vec3> vertices;
-	for (const auto& part : mesh->geometries[0].subGeometries) {
+	const physics::CollisionLod* vehicleLod = nullptr;
+	for (const auto& part : physics::collisionParts(*mesh, 0)) {
 		if (const physics::CollisionLod* lod = physics::collisionLodFor(*mesh, part, 1)) {
+			vehicleLod = lod;
 			for (const auto& v : lod->vertices) {
 				vertices.push_back({v[0], v[1], v[2]});
 			}
 		}
 	}
 	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({rotation.x, rotation.y, rotation.z});
-	const physics::Vec3 from {spot.x, spot.y, spot.z};
+	physics::Vec3 from {spot.x, spot.y, spot.z};
+	if (vehicleLod) {
+		from = dropSpawnSpot(from, turn.rows[1], vehicleLod->boundsMin[1], vehicleLod->boundsMax[1]);
+	}
+	const auto legs = m_legsBottom.find(&objectTemplate);
+	const float legsBottom = legs != m_legsBottom.end() ? legs->second : 0.0f;
 	for (const Body& body : m_bodies) {
 		if (!body.controlObject || !body.soldierMesh || body.soldierMesh->triangles() == 0) {
 			continue;
@@ -2315,6 +2365,16 @@ ObjectSpawner::SpotTest GameWorld::testSpawnSpot(const world::ObjectTemplate& ob
 				overlaps = true;
 				break;
 			}
+		}
+		// A walker's legs (0x006f28e0, with the template's +0x4c4 not 0):
+		// three segments from the spot and 1.7 m either side along the
+		// spawner's x axis, down (world y) by the box bottom.
+		for (int side = -1; side <= 1 && !overlaps && std::fabs(legsBottom) >= 1.1920929e-07f; ++side) {
+			const physics::Vec3 start = from + turn.rows[0] * (1.7f * static_cast<float>(side));
+			const physics::Vec3 end = start + physics::Vec3 {0, legsBottom, 0};
+			physics::CollisionWorld::Hit hit {};
+			overlaps = body.soldierMesh->raycast(body.body.rotation.untransform(start - body.body.position),
+				body.body.rotation.untransform(end - body.body.position), hit);
 		}
 		if (!overlaps) {
 			continue;
@@ -2342,6 +2402,46 @@ ObjectSpawner::SpotTest GameWorld::testSpawnSpot(const world::ObjectTemplate& ob
 bool GameWorld::firstHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t& object) const
 {
 	return firstHit(from, to, object, 0);
+}
+
+// The landing's ray (0x005ef250): the scene's (slot 0x68, objects with
+// flags 0x100: their projectile LOD here), else the heightmap cluster's
+// (slot 0x8c); the material of what it meets.
+bool GameWorld::groundMaterialAlong(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore,
+	uint32_t& material) const
+{
+	float nearest = 2;
+	physics::CollisionWorld::Hit hit {};
+	if (m_projectileCollision.raycast(from, to, hit)) {
+		nearest = hit.fraction;
+		material = hit.material;
+	}
+	for (const Body& body : m_bodies) {
+		if (!body.projectileMesh || body.object == ignore) {
+			continue;
+		}
+		const physics::Vec3 localFrom = body.body.rotation.untransform(from - body.body.position);
+		const physics::Vec3 localTo = body.body.rotation.untransform(to - body.body.position);
+		if (body.projectileMesh->raycast(localFrom, localTo, hit) && hit.fraction < nearest) {
+			nearest = hit.fraction;
+			material = hit.material;
+		}
+	}
+	if (nearest <= 1) {
+		return true;
+	}
+	if (m_ground.height) {
+		const float length = std::sqrt(physics::lengthSquared(to - from));
+		const int samples = std::max(2, static_cast<int>(length / 2));
+		for (int i = 1; i <= samples; ++i) {
+			const physics::Vec3 at = from + (to - from) * (static_cast<float>(i) / samples);
+			if (at.y < m_ground.height(at.x, at.z)) {
+				material = m_ground.material ? m_ground.material(at.x, at.z) : 0;
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 bool GameWorld::firstHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t& object, uint32_t ignore) const
@@ -3489,16 +3589,16 @@ void GameWorld::stepRagDoll(Player& player, float seconds)
 }
 
 // The soldier's sound 0 (its sound set +0x324, 0x007fd970): the footstep
-// set's sound loaded for the ground under it (0x007fd840: the cell of
+// set's sound loaded for what it stands on (0x007fd840: the cell of
 // material 0x157c against it, templates 0-3; 0x007fda00 picks the
-// ground's material, or 0x19c8 on a ladder): template 3, else 0.
+// material, see Player::footstepMaterial): template 3, else 0.
 void GameWorld::playAnimationSound(const Player& player, int)
 {
 	if (!m_materials) {
 		return;
 	}
 	const physics::Vec3& at = player.body.position;
-	const uint32_t surface = player.ladder >= 0 ? 0x19c8u : (m_ground.material ? m_ground.material(at.x, at.z) : 0u);
+	const uint32_t surface = player.footstepMaterial;
 	const physics::MaterialCell* cell = m_materials->cell(kSoldierFootStepsMaterial, surface);
 	if (!cell) {
 		return;
@@ -3589,6 +3689,48 @@ void GameWorld::poseSeated(Player& player, world::Object& soldier, const Body& b
 	player.worldPose = anim::worldMatrices(*player.skeleton, player.pose);
 }
 
+// An effect event N of the held weapon's animation (0x0061a4e0 per
+// EffectBundle under the weapon): the bundles whose startOnEffects
+// (template +0x454) has bit 9 + N start, placed by their offset from the
+// weapon where its rounds leave (the muzzle's spot). stopOnEffects (+0x458)
+// would end a looping one; the rewrite's effects are one-shot. A bundle
+// already running (+0x18e) isn't started again unless the template's
+// +0x3f4 is below 0; the rewrite doesn't track it.
+void GameWorld::startEffectsOn(const Player& player, int effect)
+{
+	const world::ObjectTemplate* weapon = m_templates.find(player.weaponTemplate);
+	if (!weapon) {
+		return;
+	}
+	const float look = lookYaw(player);
+	const float pitch = player.input.aimPitch;
+	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({look, -pitch, 0});
+	const physics::Vec3 origin = player.body.position + physics::Vec3 {0, 0.6f, 0} + turn.transform({0, 0, 0.5f});
+	const uint32_t bit = 1u << (9 + effect);
+	const std::function<void(const world::ObjectTemplate&, const physics::Vec3&, int)> visit =
+		[&](const world::ObjectTemplate& t, const physics::Vec3& offset, int depth) {
+			if (depth > 8) {
+				return;
+			}
+			for (const world::ChildTemplate& child : t.children()) {
+				const world::ObjectTemplate* ct = m_templates.find(child.name);
+				if (!ct) {
+					continue;
+				}
+				const physics::Vec3 at = offset + physics::Vec3 {child.position.x, child.position.y, child.position.z};
+				if (sameName(ct->typeName(), "EffectBundle")) {
+					const uint32_t start = static_cast<uint32_t>(
+						integer(*ct, "setStartOnEffects", integer(*ct, "startOnEffects", 0)));
+					if (start & bit) {
+						m_effects.spawn(ct->name(), origin + turn.transform(at), turn);
+					}
+				}
+				visit(*ct, at, depth + 1);
+			}
+		};
+	visit(*weapon, {}, 0);
+}
+
 void GameWorld::setAnimationSystems(anim::AnimationSystems* systems, AnimationLoader load)
 {
 	m_animationSystems = systems;
@@ -3600,6 +3742,16 @@ void GameWorld::setAnimationSystems(anim::AnimationSystems* systems, AnimationLo
 // the soldier's frame, speed and turn rate.
 void GameWorld::stepAnimation(Player& player, float seconds)
 {
+	// The footstep set (0x007fda00 -> 0x007fd840): on a ladder 0x19c8; on
+	// the ground or swimming (the response's +0xf9, stance 3) the material
+	// of the last collision event (the soldier's +0x32c through its +0x18c
+	// slot 0x60, 0x0063a0f0: the terrain's or the object's face's); in the
+	// air the set stays.
+	if (player.ladder >= 0) {
+		player.footstepMaterial = 0x19c8u;
+	} else if (player.body.onGround() || player.body.stance == 3) {
+		player.footstepMaterial = player.contactMaterial;
+	}
 	if (!player.bodyAnimation) {
 		return;
 	}
@@ -3620,13 +3772,24 @@ void GameWorld::stepAnimation(Player& player, float seconds)
 		const physics::Vec3 feet = player.body.position - physics::Vec3 {0, 1, 0};
 		const uint32_t self = player.object;
 		anim::SoldierJumpAnimation::Sound sound;
+		uint32_t landedOn = player.contactMaterial;
 		input.upSpeed = player.jumpAnimation.update(player.body.onGround() || player.ladder >= 0, velocity,
-			[this, feet, self](const float way[3]) {
-				uint32_t hit = 0;
-				return firstHit(feet, feet + physics::Vec3 {way[0], way[1], way[2]}, hit, self);
+			[this, feet, self, &landedOn](const float way[3]) {
+				return groundMaterialAlong(feet, feet + physics::Vec3 {way[0], way[1], way[2]}, self, landedOn);
 			},
 			sound);
-		if (sound != anim::SoldierJumpAnimation::Sound::None) {
+		if (sound == anim::SoldierJumpAnimation::Sound::Land) {
+			// The landing (0x005ef250): the ray's material becomes the
+			// soldier's +0x32c (the footstep set's next material), and the
+			// sound plays through 0x007fdcd0 only for the local player
+			// (player slot 0x1bc, 0x00591510: the PlayerManager's local one,
+			// slot 0x30, in a first-person view, its camera's kind 1 or 2;
+			// the rewrite has no view kinds).
+			player.contactMaterial = landedOn;
+			if (player.id == localPlayer()) {
+				playAnimationSound(player, 0);
+			}
+		} else if (sound != anim::SoldierJumpAnimation::Sound::None) {
 			playAnimationSound(player, 0);
 		}
 	}
@@ -3648,7 +3811,15 @@ void GameWorld::stepAnimation(Player& player, float seconds)
 	player.bodyAnimation->update(input, seconds);
 	if (player.weaponAnimation) {
 		player.weaponAnimation->update(input, seconds);
-		player.weaponAnimation->takeEvents(); // the weapon's effect events: not played yet
+		// The weapon's effect events (0x2c + N) go down its tree (the base
+		// handler 0x0063ca60 passes each event to the children's slot
+		// 0x100); an EffectBundle (vtable 0x0097b658's 0x0061a4e0) starts
+		// when its startOnEffects has bit 9 + N (1 << (event - 0x23)).
+		for (const anim::AnimationState::FiredEvent& event : player.weaponAnimation->takeEvents()) {
+			if (event.type == anim::Bundle::EffectEvent && event.id >= 0 && event.id < 10) {
+				startEffectsOn(player, event.id);
+			}
+		}
 	}
 	// The body's events go to the soldier's handler (0x00587b90): sound 0
 	// (event 0x36) is the footstep set's sound.
@@ -3925,6 +4096,11 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 		mover.owner = b.object;
 		mover.mass = b.mass;
 		mover.asleep = b.sleep.asleep();
+		mover.collisionGroups = b.collisionGroups;
+		mover.ignoring = b.ignoreSet && m_ticks <= b.ignoreUntil;
+		mover.ignoresThis = mover.ignoring && b.ignored == player.object;
+		mover.pushed = b.pushedBySoldiers;
+		mover.own = b.launcher != 0 && b.launcher == player.object;
 		player.body.movers.push_back(mover);
 	}
 	// The other soldiers near it on foot (0x006c2620: a soldier's response
@@ -3960,10 +4136,34 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 		}
 		loseHitPoints(self->object, physics::soldier::kCrushDamage, credit);
 	};
+	// A launcher's projectile keeps ignoring it while they touch
+	// (0x006b8de0 again: the tick + 2); soldiers push a small projectile
+	// (its response's slot 0x2c, 0x006ba4c0; an awake one: a sleeping node
+	// isn't solved).
+	player.body.team = player.team;
+	player.body.onIgnored = [this](uint32_t owner) {
+		if (Body* b = findBody(owner)) {
+			b->ignoreUntil = m_ticks + 2;
+		}
+	};
+	player.body.onPushObject = [this](uint32_t owner, const physics::Vec3& point, const physics::Vec3& velocity,
+								   const physics::Vec3& normal, float depth, uint32_t ownMaterial, uint32_t otherMaterial) {
+		Body* b = findBody(owner);
+		if (!b || asleep(*b)) {
+			return;
+		}
+		physics::ContactMaterial material;
+		if (m_materials) {
+			material.friction = m_materials->friction(ownMaterial, otherMaterial);
+			material.elasticity = (m_materials->elasticity(ownMaterial) + m_materials->elasticity(otherMaterial)) * 0.5f;
+		}
+		b->response.addContact(point - b->body.position, velocity, normal, depth, material);
+	};
 	// The collision events: the ground's and each object's on the soldier
 	// (0x00586a90 -> the base), and the object's own (0x006c3890).
 	const uint32_t soldierId = player.object;
-	player.body.onContact = [this, soldierId](const physics::SoldierBody::Contact& c) {
+	player.body.onContact = [this, soldierId, self](const physics::SoldierBody::Contact& c) {
+		self->contactMaterial = c.otherMaterial; // 0x00586a90: +0x32c
 		collisionEvent(soldierId, c.owner, c.velocity, c.normal, c.point, c.ownMaterial, c.otherMaterial);
 		if (c.owner != 0 && m_objects.find(soldierId)) {
 			collisionEvent(c.owner, soldierId, -c.velocity, c.normal, c.point, c.otherMaterial, c.ownMaterial);
@@ -4120,6 +4320,7 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 			if (world::Object* placed = m_objects.create(deployable, {at.x, at.y, at.z}, {lookYaw(player), 0, 0})) {
 				placed->setTeam(player.team);
 				m_deployed[key] = placed->id();
+				m_launchers[placed->id()] = player.object;
 			}
 		} else if (!gadget && player.projectile) {
 			fire(player, input.aimPitch);
@@ -4760,16 +4961,17 @@ int firstEngineIn(const world::ObjectTemplateManager& templates, const std::vect
 	return t ? firstEngineIn(templates, t->children(), 0, depth + 1) : -1;
 }
 
-// A collision mesh's radius (slot 0x74, 0x006dedb0): the first part with a
-// LOD, its LOD of the lowest collision type, that LOD's radius (+0xc0, the
-// box's farthest corner). The part the instance stands for (+0x14) is not
-// read: every instance of the mesh gives geometry 0's first part's.
-float meshRadius(const physics::CollisionMeshFile& mesh)
+// A collision mesh instance's radius (slot 0x74, 0x006dedb0 on the
+// instance's geometry, +0xc): its first sub-geometry with a LOD, that
+// one's LOD of the lowest collision type, its radius (+0xc0, the box's
+// farthest corner). The instance's state (+0x14) is not read: the wreck's
+// sub-geometry doesn't change it.
+float meshRadius(const physics::CollisionMeshFile& mesh, size_t geometry = 0)
 {
-	if (mesh.geometries.empty()) {
+	if (geometry >= mesh.geometries.size()) {
 		return 0;
 	}
-	for (const physics::CollisionSubGeometry& part : mesh.geometries[0].subGeometries) {
+	for (const physics::CollisionSubGeometry& part : mesh.geometries[geometry].subGeometries) {
 		for (uint32_t type = 0; type < part.lods.size(); ++type) {
 			if (const physics::CollisionLod* lod = physics::collisionLodFor(mesh, part, type)) {
 				return physics::boxRadius(lod->boundsMin, lod->boundsMax);
@@ -4779,31 +4981,96 @@ float meshRadius(const physics::CollisionMeshFile& mesh)
 	return 0;
 }
 
-// The width across x of a collision mesh's box (slot 0x78, 0x006deeb0:
-// every part's LODs' boxes together).
-float meshWidth(const physics::CollisionMeshFile& mesh)
+// A collision mesh instance's box (slot 0x78, 0x006deeb0 on its
+// geometry: every sub-geometry's LODs' boxes together); false without one.
+bool meshBox(const physics::CollisionMeshFile& mesh, size_t geometry, physics::Vec3& low, physics::Vec3& high)
 {
-	float low = 1e30f, high = -1e30f;
-	if (!mesh.geometries.empty()) {
-		for (const physics::CollisionSubGeometry& part : mesh.geometries[0].subGeometries) {
+	bool found = false;
+	if (geometry < mesh.geometries.size()) {
+		for (const physics::CollisionSubGeometry& part : mesh.geometries[geometry].subGeometries) {
 			for (const physics::CollisionLod& lod : part.lods) {
-				low = std::min(low, lod.boundsMin[0]);
-				high = std::max(high, lod.boundsMax[0]);
+				const physics::Vec3 a {lod.boundsMin[0], lod.boundsMin[1], lod.boundsMin[2]};
+				const physics::Vec3 b {lod.boundsMax[0], lod.boundsMax[1], lod.boundsMax[2]};
+				low = found ? physics::Vec3 {std::min(low.x, a.x), std::min(low.y, a.y), std::min(low.z, a.z)} : a;
+				high = found ? physics::Vec3 {std::max(high.x, b.x), std::max(high.y, b.y), std::max(high.z, b.z)} : b;
+				found = true;
 			}
 		}
 	}
-	return high > low ? high - low : 0.0f;
+	return found;
 }
 
-// An object's radius (slot 0x90, 0x006f6b90): its mesh's (above; slot
-// 0x94 adds 0) or, when farther, a child's: the length of its offset (slot
-// 0xdc) plus the child's own radius, for children with a radius. A child
-// has the root's mesh when its template names a collisionPart; the rewrite
-// builds the tree from the templates.
-float objectRadiusOf(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& t, bool hasMesh,
-	float radius, int depth)
+// The width across x of a collision mesh's box (slot 0x78, 0x006deeb0).
+float meshWidth(const physics::CollisionMeshFile& mesh)
 {
-	float result = hasMesh ? radius : 0.0f;
+	physics::Vec3 low, high;
+	return meshBox(mesh, 0, low, high) && high.x > low.x ? high.x - low.x : 0.0f;
+}
+
+// Whether a child of the tree is of `type` (0x005c63b0's search: a
+// template's children before any of theirs).
+bool childOfType(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& t, const char* type, int depth)
+{
+	if (depth > 8) {
+		return false;
+	}
+	for (const world::ChildTemplate& child : t.children()) {
+		const world::ObjectTemplate* ct = templates.find(child.name);
+		if (ct && ct->typeName() == type) {
+			return true;
+		}
+	}
+	for (const world::ChildTemplate& child : t.children()) {
+		const world::ObjectTemplate* ct = templates.find(child.name);
+		if (ct && childOfType(templates, *ct, type, depth + 1)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// The object's box at rest (slot 0x98(0), 0x006f7050): its mesh
+// instance's (0x006deeb0) and each child's, by the child's offset and
+// rotation (slot 0xe4); a child's instance is the root's mesh's geometry
+// its collisionPart names (0x0063ccc0, the collision manager's slot 0x28).
+bool objectBoxOf(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& t,
+	const physics::CollisionMeshFile& mesh, int geometry, physics::Vec3& low, physics::Vec3& high, int depth)
+{
+	bool found = geometry >= 0 && meshBox(mesh, static_cast<size_t>(geometry), low, high);
+	if (depth > 8) {
+		return found;
+	}
+	for (const world::ChildTemplate& child : t.children()) {
+		const world::ObjectTemplate* ct = templates.find(child.name);
+		if (!ct) {
+			continue;
+		}
+		physics::Vec3 a, b;
+		if (!objectBoxOf(templates, *ct, mesh, static_cast<int>(number(*ct, "collisionPart", -1)), a, b, depth + 1)) {
+			continue;
+		}
+		const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z});
+		const physics::Vec3 offset {child.position.x, child.position.y, child.position.z};
+		for (int corner = 0; corner < 8; ++corner) {
+			const physics::Vec3 c = turn.transform({corner & 1 ? b.x : a.x, corner & 2 ? b.y : a.y, corner & 4 ? b.z : a.z})
+				+ offset;
+			low = found ? physics::Vec3 {std::min(low.x, c.x), std::min(low.y, c.y), std::min(low.z, c.z)} : c;
+			high = found ? physics::Vec3 {std::max(high.x, c.x), std::max(high.y, c.y), std::max(high.z, c.z)} : c;
+			found = true;
+		}
+	}
+	return found;
+}
+
+// An object's radius (slot 0x90, 0x006f6b90): its mesh instance's (above;
+// slot 0x94 adds 0) or, when farther, a child's: the length of its offset
+// (slot 0xdc) plus the child's own radius, for children with a radius. A
+// child's instance is the root's mesh's geometry its collisionPart names
+// (0x0063ccc0); the rewrite builds the tree from the templates.
+float objectRadiusOf(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& t,
+	const physics::CollisionMeshFile& mesh, int geometry, int depth)
+{
+	float result = geometry >= 0 ? meshRadius(mesh, static_cast<size_t>(geometry)) : 0.0f;
 	if (depth > 8) {
 		return result;
 	}
@@ -4812,8 +5079,8 @@ float objectRadiusOf(const world::ObjectTemplateManager& templates, const world:
 		if (!ct) {
 			continue;
 		}
-		const bool childMesh = number(*ct, "collisionPart", -1) >= 0;
-		const float own = objectRadiusOf(templates, *ct, childMesh, radius, depth + 1);
+		const int part = static_cast<int>(number(*ct, "collisionPart", -1));
+		const float own = objectRadiusOf(templates, *ct, mesh, part, depth + 1);
 		if (own > 0) {
 			const float offset = std::sqrt(child.position.x * child.position.x + child.position.y * child.position.y
 				+ child.position.z * child.position.z);
@@ -4864,7 +5131,7 @@ void GameWorld::addBodies()
 		physics::Vec3 low {1e9f, 1e9f, 1e9f}, high {-1e9f, -1e9f, -1e9f};
 		const std::vector<uint32_t> materials = materialMap(*t);
 		bool typeFour = false;
-		for (const auto& part : mesh->geometries[0].subGeometries) {
+		for (const auto& part : physics::collisionParts(*mesh, 0)) {
 			typeFour = typeFour || physics::collisionLodFor(*mesh, part, 4) != nullptr;
 			const physics::CollisionLod* found = physics::collisionLodFor(*mesh, part, 1);
 			if (!found) {
@@ -4915,7 +5182,16 @@ void GameWorld::addBodies()
 		body.helicopterEngine = firstEngineType(*t) == 33;
 		// For the mobile mesh physics (MeshCollision.cpp).
 		body.radius = physics::boxRadius({low.x, low.y, low.z}, {high.x, high.y, high.z});
-		body.objectRadius = objectRadiusOf(m_templates, *t, true, meshRadius(*mesh), 0);
+		body.objectRadius = objectRadiusOf(m_templates, *t, *mesh, 0, 0);
+		// A template with MechLegs keeps its object's box bottom
+		// (0x005cd4f0: the PlayerControlObject template's +0x4c4 from slot
+		// 0x98(0)'s min y) for the spawn spot's probes (0x006f28e0).
+		if (sameName(t->typeName(), "PlayerControlObject") && childOfType(m_templates, *t, "MechLegs", 0)) {
+			physics::Vec3 low, high;
+			if (objectBoxOf(m_templates, *t, *mesh, 0, low, high, 0)) {
+				m_legsBottom[t] = low.y;
+			}
+		}
 		body.boxWidth = meshWidth(*mesh);
 		body.vehicleMesh = std::make_shared<physics::CollisionWorld>();
 		body.vehicleMesh->addMesh(*mesh, physics::CollisionUser::Vehicle, {}, {}, object.id(), materials);
@@ -4938,6 +5214,26 @@ void GameWorld::addBodies()
 		body.projectileMesh->addMesh(*mesh, physics::CollisionUser::Projectile, {}, {}, object.id(), materialMap(*t));
 		body.soldierMesh = std::make_shared<physics::CollisionWorld>();
 		body.soldierMesh->addMesh(*mesh, physics::CollisionUser::Soldier, {}, {}, object.id(), materialMap(*t));
+		// Its launcher (0x005b48b0, the projectile interface's slot 17):
+		// with noInitialCollisionWithLauncher (template +0x355) and a mesh
+		// response, the response ignores the launcher's root for two ticks
+		// on the server (0x006b8de0; *0x00a84284 = 2).
+		if (const auto launcher = m_launchers.find(object.id()); launcher != m_launchers.end()) {
+			body.launcher = launcher->second;
+			m_launchers.erase(launcher);
+			if (flag(*t, "noInitialCollisionWithLauncher", false)) {
+				body.ignored = body.launcher;
+				body.ignoreUntil = m_ticks + 2;
+				body.ignoreSet = true;
+			}
+		}
+		// Soldiers push a small projectile (0x006c3890: class 0x9539, the
+		// soldier LOD's radius, slot 0x50(2) -> 0x006de7d0, under 0.6 m).
+		if (sameName(t->typeName(), "GenericProjectile")) {
+			const physics::CollisionSubGeometry* part = physics::collisionPart(*mesh, 0);
+			const physics::CollisionLod* lod = part ? physics::collisionLodFor(*mesh, *part, 2) : nullptr;
+			body.pushedBySoldiers = lod && physics::boxRadius(lod->boundsMin, lod->boundsMax) < 0.6f;
+		}
 		const auto vector = [t](const char* name, physics::Vec3 fallback) {
 			const auto it = t->settings().find(name);
 			if (it != t->settings().end()) {
@@ -4958,7 +5254,7 @@ void GameWorld::addBodies()
 			for (const Vehicle::Wheel& wheel : body.vehicle->wheels()) {
 				float radius = std::fabs(wheel.radius);
 				if (wheel.collisionPart >= 0 && static_cast<size_t>(wheel.collisionPart) < mesh->geometries.size()) {
-					for (const auto& part : mesh->geometries[static_cast<size_t>(wheel.collisionPart)].subGeometries) {
+					for (const auto& part : physics::collisionParts(*mesh, static_cast<size_t>(wheel.collisionPart))) {
 						if (const physics::CollisionLod* lod = physics::collisionLodFor(*mesh, part, 1)) {
 							radius = physics::boxRadius(lod->boundsMin, lod->boundsMax);
 						}

@@ -710,3 +710,93 @@ TEST(SoldierPhysics_SegmentThroughAMeshKills)
 	}
 	CHECK(killed == 1);
 }
+
+// The run-over check's team filter (0x006c2e50's start): the soldier's
+// team (its PlayerControlObject's slot 0x9c) passes an object with its
+// team's collisionGroups bit (0x100 team 1, 0x200 team 2), and every team
+// one with 0x10.
+TEST(SoldierPhysics_RunOverTeamFilter)
+{
+	physics::CollisionWorld hull;
+	hull.addMesh(boxMesh({-0.1f, 0, -1}, {2, 3, 1}), physics::CollisionUser::Soldier, {}, {});
+	struct Case {
+		int team;
+		uint32_t groups;
+		bool killed;
+	};
+	for (const Case& c : {Case {1, 0x100, false}, Case {2, 0x100, true}, Case {2, 0x200, false}, Case {1, 0x10, false},
+			 Case {0, 0x300, true}}) {
+		const int team = c.team;
+		const uint32_t groups = c.groups;
+		const bool killed = c.killed;
+		physics::SoldierBody body;
+		body.position = {0, 1, 0};
+		body.step(1 / 30.0f, slope(0));
+		physics::SoldierBody::Mover car;
+		car.mesh = &hull;
+		car.velocity = {0, 0, -5};
+		car.owner = 3;
+		car.mass = 1500;
+		car.collisionGroups = groups;
+		uint32_t by = 0;
+		body.team = team;
+		body.onCrushed = [&by](uint32_t who) { by = who; };
+		body.movers = {car};
+		body.step(1 / 30.0f, slope(0));
+		CHECK((by == 3) == killed);
+	}
+}
+
+// A projectile that ignores its launcher (noInitialCollisionWithLauncher:
+// 0x005b48b0 -> 0x006b8de0) doesn't stop it, and touching keeps the
+// window open (0x006b8da0, then 0x006b8de0 again); another soldier is
+// stopped. Small GenericProjectiles (soldier LOD under 0.6 m) are pushed
+// instead of stopping anyone but their own launcher, who neither stops nor
+// pushes them (0x006c3890's 0x9539 branch).
+TEST(SoldierPhysics_IgnoredAndPushedObjects)
+{
+	physics::CollisionWorld box;
+	box.addMesh(boxMesh({-1, 0, 0.5f}, {1, 2, 1.5f}), physics::CollisionUser::Soldier, {}, {});
+	const auto walk = [&](physics::SoldierBody::Mover mover, int& ignored, int& pushes, physics::Vec3& push) {
+		physics::SoldierBody body;
+		body.position = {0, 1, 0};
+		body.step(1 / 30.0f, slope(0));
+		body.movers = {mover};
+		body.onIgnored = [&ignored](uint32_t owner) { ignored += owner == 9 ? 1 : 100; };
+		body.onPushObject = [&](uint32_t owner, const physics::Vec3&, const physics::Vec3&, const physics::Vec3& normal,
+								float depth, uint32_t, uint32_t) {
+			if (pushes == 0) {
+				push = normal * -depth; // the first: against the near face
+			}
+			pushes += owner == 9 ? 1 : 100;
+		};
+		game::SoldierControl control;
+		game::SoldierInput forward;
+		forward.throttle = 1;
+		for (int i = 0; i < 30; ++i) {
+			control.update(forward, body);
+			body.step(1 / 30.0f, slope(0));
+		}
+		return body.position.z;
+	};
+	physics::SoldierBody::Mover mover;
+	mover.mesh = &box;
+	mover.owner = 9;
+	mover.mass = 50;
+	int ignored = 0, pushes = 0;
+	physics::Vec3 push;
+	// Stopped at the box's face (z 0.5) by its 0.25 m radius.
+	CHECK(walk(mover, ignored, pushes, push) < 0.3f && ignored == 0 && pushes == 0);
+	mover.ignoring = mover.ignoresThis = true;
+	CHECK(walk(mover, ignored, pushes, push) > 0.6f && ignored > 0 && pushes == 0);
+	ignored = 0;
+	mover.ignoresThis = false; // another soldier's: only the passes skip it
+	CHECK(walk(mover, ignored, pushes, push) < 0.3f && ignored == 0);
+	mover.ignoring = false;
+	mover.pushed = true;
+	CHECK(walk(mover, ignored, pushes, push) > 0.6f && pushes > 0);
+	CHECK(push.z > 0); // away from the soldier, into +z
+	pushes = 0;
+	mover.own = true;
+	CHECK(walk(mover, ignored, pushes, push) > 0.6f && pushes == 0);
+}

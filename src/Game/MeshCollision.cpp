@@ -688,7 +688,7 @@ std::shared_ptr<const GameWorld::MeshShape> GameWorld::meshShape(const physics::
 	made->mesh->addMesh(file, physics::CollisionUser::Vehicle, {}, {}, 0, materials);
 	Vec3 low {1e9f, 1e9f, 1e9f}, high {-1e9f, -1e9f, -1e9f};
 	if (!file.geometries.empty()) {
-		for (const physics::CollisionSubGeometry& part : file.geometries[0].subGeometries) {
+		for (const physics::CollisionSubGeometry& part : physics::collisionParts(file, 0)) {
 			if (physics::collisionLodFor(file, part, 4)) {
 				made->trunkFromTypeFour = true;
 			}

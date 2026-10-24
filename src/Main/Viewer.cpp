@@ -214,6 +214,10 @@ int flashKeyCode(int sdl)
 
 
 constexpr float kDegrees = 3.14159265f / 180.0f;
+// The world's near plane in first person, nearer than the chase view's so
+// that walls by the eye aren't cut (the original's renderer.tweakNearPlane
+// is 0.041 with a 400 m view; the rewrite draws to 6 km).
+constexpr float kFirstPersonNear = 0.1f;
 
 void applyCameraOption(render::Camera& camera, const std::string& text)
 {
@@ -290,6 +294,15 @@ int screenshot(const render::LevelSources& sources, const ViewerOptions& options
 	printStats(level.stats());
 	render::Camera camera = level.suggestedCamera();
 	applyCameraOption(camera, options.camera);
+	ViewerOptions::PlayerView view;
+	view.aspect = static_cast<float>(options.width) / static_cast<float>(options.height);
+	if (options.camera.empty() && options.playerView && options.playerView(view) && view.firstPerson) {
+		camera.position = {view.eye[0], view.eye[1], view.eye[2]};
+		camera.yaw = view.eyeYaw;
+		camera.pitch = view.eyePitch;
+		camera.fovY = view.fovY;
+		camera.nearPlane = kFirstPersonNear;
+	}
 
 	auto target = gpu->createOffscreenTarget(static_cast<uint32_t>(options.width), static_cast<uint32_t>(options.height));
 	SDL_GPUCommandBuffer* commands = SDL_AcquireGPUCommandBuffer(gpu->device());
@@ -335,6 +348,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		}
 		float pitch = -0.2f;
 		float turn = 0;
+		bool firstPerson = false; // the last frame's view
 
 		render::GpuContext::Target target;
 		Uint64 last = SDL_GetTicksNS();
@@ -394,7 +408,9 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					const float scale = options.mouseScale ? options.mouseScale() : 1.0f;
 					const float up = options.invertMouse && options.invertMouse() ? -1.0f : 1.0f;
 					turn += event.motion.xrel * 0.15f * scale;
-					pitch = std::fmax(-1.2f, std::fmin(1.0f, pitch - event.motion.yrel * 0.003f * scale * up));
+					// First person looks up and down to 85 degrees (0x005890a0).
+					const float low = firstPerson ? -1.4835f : -1.2f, high = firstPerson ? 1.4835f : 1.0f;
+					pitch = std::fmax(low, std::fmin(high, pitch - event.motion.yrel * 0.003f * scale * up));
 				} else if (event.type == SDL_EVENT_MOUSE_MOTION && (event.motion.state & SDL_BUTTON_RMASK)) {
 					camera.yaw += event.motion.xrel * 0.004f;
 					camera.pitch = std::fmax(-1.5f, std::fmin(1.5f, camera.pitch - event.motion.yrel * 0.004f));
@@ -440,6 +456,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.crouch = c.pressed(map, "c_PICrouch", down);
 				input.lie = c.pressed(map, "c_PILie", down);
 				input.jump = c.pressed(map, "c_PIAction", down);
+				input.toggleCamera = c.pressed(map, "c_PIToggleCameraMode", down);
 				input.voipPushToTalk = c.pressed(map, "c_GIVoipPushToTalk", down);
 				input.voipLeaderChannel = c.pressed(map, "c_GIVoipUseLeaderChannel", down);
 				for (int item = 0; item < 8; ++item) {
@@ -468,6 +485,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.crouch = keys[SDL_SCANCODE_LCTRL];
 				input.lie = keys[SDL_SCANCODE_Z];
 				input.jump = keys[SDL_SCANCODE_SPACE];
+				input.toggleCamera = keys[SDL_SCANCODE_C];
 				input.commanderScreen = keys[SDL_SCANCODE_CAPSLOCK];
 				for (int item = 0; item < 9; ++item) {
 					if (keys[SDL_SCANCODE_1 + item]) {
@@ -487,8 +505,24 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				options.onTicks(elapsedTicks);
 			}
 			ViewerOptions::PlayerView view;
-			if (playing && options.playerView(view)) {
+			{
+				int w = 1, h = 1;
+				SDL_GetWindowSizeInPixels(window, &w, &h);
+				view.aspect = static_cast<float>(w) / static_cast<float>(std::max(h, 1));
+			}
+			firstPerson = false;
+			if (playing && options.playerView(view) && view.firstPerson) {
+				// First person: the game's camera.
+				firstPerson = true;
+				camera.position = {view.eye[0], view.eye[1], view.eye[2]};
+				camera.yaw = view.eyeYaw;
+				camera.pitch = view.eyePitch;
+				camera.fovY = view.fovY;
+				camera.nearPlane = kFirstPersonNear;
+			} else if (playing && options.playerView(view)) {
 				// Third person: behind and above the soldier.
+				camera.fovY = 1.0f;
+				camera.nearPlane = render::Camera {}.nearPlane;
 				camera.yaw = view.yawDegrees * 3.14159265f / 180.0f;
 				camera.pitch = pitch;
 				if (view.driving) {

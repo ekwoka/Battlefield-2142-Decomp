@@ -1455,3 +1455,152 @@ TEST(GameWorld_LadderRaysAndJumpingOff)
 	CHECK(!range.world->onLadder(me));
 	CHECK(std::fabs(info.position.z - 39.25f) < 0.05f);
 }
+
+// The spawn spot's drop (0x005ad8b0): the template's vehicle-LOD box from
+// its top down to its bottom along the spawner's up axis meets a static
+// object (flags 0x1000100 without 8: mobile ones don't count) and sits on
+// it; otherwise a bottom under the terrain is lifted onto it.
+TEST(GameWorld_SpawnSpotDropsOntoStaticObjects)
+{
+	Range range;
+	range.collisionTemplates.add("slab_mesh", boxMesh(1));
+	range.collisionTemplates.add("car_mesh", boxMesh(1));
+	range.templates.registerType(6, "SimpleObject");
+	range.templates.registerType(7, "PlayerControlObject");
+	world::ObjectTemplate* slab = range.templates.create("SimpleObject", "slab");
+	slab->settings()["collisionMesh"] = "slab_mesh";
+	range.objects.create(slab, {0, 0, 30}); // its top at y 1
+	world::ObjectTemplate* car = range.templates.create("PlayerControlObject", "car");
+	makeMobile(*car, "car_mesh");
+	range.objects.create(car, {10, 1, 30}); // a mobile one, top at 2
+	range.world->startRound();
+	range.world->tick(1 / 30.0f);
+	const physics::Vec3 up {0, 1, 0};
+	// A box from -0.5 to 1.5 at y 0.2 over the slab: its top (1.7) is over
+	// the slab's (1), so it sits there, bottom at 1 (the spot at 1.5).
+	physics::Vec3 at = range.world->dropSpawnSpot({0, 0.2f, 30}, up, -0.5f, 1.5f);
+	CHECK(std::fabs(at.y - 1.5f) < 1e-3f && at.x == 0 && at.z == 30);
+	// Over the car: the ray passes it; the terrain (0) is under the bottom.
+	at = range.world->dropSpawnSpot({10, 1.2f, 30}, up, -0.5f, 1.5f);
+	CHECK(std::fabs(at.y - 1.2f) < 1e-6f);
+	// A bottom under the terrain comes up onto it.
+	at = range.world->dropSpawnSpot({20, 0.1f, 30}, up, -0.5f, 1.5f);
+	CHECK(std::fabs(at.y - 0.5f) < 1e-6f);
+	// High in the air: unchanged.
+	at = range.world->dropSpawnSpot({0, 10, 30}, up, -0.5f, 1.5f);
+	CHECK(std::fabs(at.y - 10) < 1e-6f);
+}
+
+// A walker's spawn (0x006f28e0): a template with MechLegs, once one has
+// a body, keeps its object's box bottom (0x005cd4f0: the root's geometry
+// and its legs' child, geometry 1 at its offset), and the spot's test also
+// probes three segments down by it (at the spot and 1.7 m either side): a
+// car under the spot, out of the hull's reach, holds the walker back.
+TEST(GameWorld_WalkerSpawnProbesUnderItsLegs)
+{
+	for (int clear = 0; clear < 2; ++clear) {
+		Level level;
+		io::FileManager files;
+		physics::CollisionTemplateManager collisionTemplates;
+		physics::CollisionMeshFile walkerMesh = boxMesh(0.5f);
+		walkerMesh.geometries.push_back(boxMesh(0.5f).geometries[0]); // the legs: half a metre round their origin
+		collisionTemplates.add("walker_mesh", walkerMesh);
+		collisionTemplates.add("car_mesh", boxMesh(0.5f));
+		level.templates.registerType(4, "MechLegs");
+		level.templates.registerType(5, "SimpleObject");
+		world::ObjectTemplate* walker = level.templates.find("tank_us");
+		makeMobile(*walker, "walker_mesh");
+		walker->children().push_back({"walker_legs_part", {0, -4.5f, 0}, {}});
+		walker->children().push_back({"walker_legs", {}, {}});
+		level.templates.create("SimpleObject", "walker_legs_part")->settings()["collisionPart"] = "1";
+		level.templates.create("MechLegs", "walker_legs");
+		world::ObjectTemplate* car = level.templates.create("PlayerControlObject", "car");
+		makeMobile(*car, "car_mesh");
+		// A walker parked far off (its body gives the box bottom: -5), and
+		// a car 3 m under the spawner's spot (10/5/20) or 3 m beside it.
+		level.objects.create(walker, {200, 50, 200});
+		const uint32_t blocker = level.objects.create(car, {clear ? 13.0f : 10.0f, 2, 20})->id();
+		game::GameWorld world(level.templates, level.objects);
+		world.enablePhysics(files, collisionTemplates,
+			{[](float, float) { return -10.0f; }, [](float, float, physics::Vec3& normal) {
+				 normal = {0, 1, 0};
+				 return -10.0f;
+			 }});
+		world.tick(1 / 30.0f); // the bodies
+		const game::ObjectSpawner::SpotTest test =
+			world.testSpawnSpot(*walker, {10, 5, 20}, {0, 0, 0}, {10, 5, 20});
+		std::fprintf(stderr, "  clear %d: %zu blockers\n", clear, test.blockers.size());
+		CHECK(clear ? test.blockers.empty() : test.blockers.size() == 1 && test.blockers[0] == blocker);
+	}
+}
+
+// The footstep set's material (0x007fda00): the other material of the
+// soldier's last collision event (0x00586a90's +0x32c), so on an object
+// its face's material and on the terrain the terrain's.
+TEST(GameWorld_FootstepsOnObjectsUseTheirMaterial)
+{
+	for (int onSlab = 0; onSlab < 2; ++onSlab) {
+		Range range;
+		range.templates.registerType(6, "SimpleObject");
+		if (onSlab) {
+			range.collisionTemplates.add("slab_mesh", panelMesh({{-10, 0, -10}, {10, 0, -10}, {10, 0, 10}, {-10, 0, 10}},
+														  {{{0, 2, 3}, 0}, {{0, 1, 2}, 0}})); // facing up
+			world::ObjectTemplate* slab = range.templates.create("SimpleObject", "slab");
+			slab->settings()["collisionMesh"] = "slab_mesh";
+			slab->settings()["mapMaterial.0"] = "42";
+			range.objects.create(slab, {0, 0, 0}); // at the spawn point, over the terrain
+		}
+		physics::Ground ground;
+		const float height = onSlab ? -5.0f : 0.0f;
+		ground.height = [height](float, float) { return height; };
+		ground.heightAndNormal = [height](float, float, physics::Vec3& normal) {
+			normal = {0, 1, 0};
+			return height;
+		};
+		ground.material = [](float, float) { return 7u; };
+		range.world->enablePhysics(range.files, range.collisionTemplates, ground);
+		range.world->startRound();
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		const int me = range.world->localPlayer();
+		CHECK(range.world->footstepMaterial(me) == 0xffffffffu);
+		if (onSlab) {
+			CHECK(range.world->setSoldierPosition(range.world->playerObject(), {0, 0.02f, 0}));
+		}
+		game::SoldierInput walk;
+		walk.throttle = 1;
+		range.world->setPlayerInput(walk);
+		for (int i = 0; i < 30; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		std::fprintf(stderr, "  on the %s: material %u, y %.2f\n", onSlab ? "slab" : "terrain", range.world->footstepMaterial(me), range.objects.find(range.world->playerObject())->position().y);
+		CHECK(range.world->footstepMaterial(me) == (onSlab ? 42u : 7u));
+	}
+}
+
+// The held weapon's effect event N (0x2c + N) reaches its EffectBundle
+// children (0x0063ca60 down the tree; 0x0061a4e0): those whose
+// startOnEffects has bit 9 + N start (e_muzz_eu_av_reload: 512, effect 0).
+TEST(GameWorld_WeaponEffectEventsStartTheirBundles)
+{
+	Range range;
+	range.templates.registerType(6, "EffectBundle");
+	range.templates.registerType(7, "SpriteParticleSystem");
+	world::ObjectTemplate* sparks = range.templates.create("SpriteParticleSystem", "reload_sparks");
+	sparks->settings()["emitFrequency"] = "100";
+	sparks->settings()["emitTime"] = "0.1";
+	sparks->settings()["timeToLive"] = "0.5";
+	sparks->settings()["textureName"] = "objects\\effects\\textures\\spark";
+	world::ObjectTemplate* reload = range.templates.create("EffectBundle", "e_reload");
+	reload->settings()["setStartOnEffects"] = "512";
+	reload->children().push_back({"reload_sparks", {}, {}});
+	for (const char* rifle : {"eu_ar_rifle", "as_ar_rifle"}) {
+		range.templates.find(rifle)->children().push_back({"e_reload", {0, 0, 0.3f}, {}});
+	}
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int me = range.world->localPlayer();
+	const size_t before = range.world->effects().emitters();
+	range.world->weaponEffectEvent(me, 1); // not its bit
+	CHECK(range.world->effects().emitters() == before);
+	range.world->weaponEffectEvent(me, 0);
+	CHECK(range.world->effects().emitters() == before + 1);
+}

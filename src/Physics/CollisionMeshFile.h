@@ -12,12 +12,16 @@
 //   bounds (min, max), a byte, bounds again
 //   BSP: u32 count + 16-byte nodes, u32 count + u16 face lists,
 //        u32 count + u32 (version >= 10)
+// After parsing, the file is trimmed as the loader trims it (see
+// parseCollisionMesh): vehicles' files lead every geometry with an empty
+// sub-geometry, which goes.
 // Checked against all 3,765 collision meshes in BF2142: all but three parse
 // to the last byte; those three are truncated or malformed in the shipped
 // data and are rejected.
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -66,6 +70,27 @@ struct CollisionMeshFile {
 // version 8 by order) and leaves the other types empty (-1), so a bush with
 // only a projectile LOD does not stop soldiers or vehicles.
 const CollisionLod* collisionLodFor(const CollisionMeshFile& file, const CollisionSubGeometry& part, uint32_t type);
+
+// The sub-geometry an instance of `geometry` collides with in `state`
+// (the instance's +0x14, 0x006e5d70: 0 normally, 1 for a wreck through
+// slot 0x30, 0x006e5df0), or null. Every per-LOD query of a mesh instance
+// (slots 10-28, 0x006e5b10 .. 0x006e5ab0) goes through this one
+// sub-geometry; only the radius (0x006dedb0) and the box (0x006deeb0) look
+// across them all. A part's collisionPart is the geometry (0x0063ccc0
+// hands the template's +0x74 to the collision manager's slot 0x28,
+// 0x006d8180, which picks the geometry by it).
+const CollisionSubGeometry* collisionPart(const CollisionMeshFile& file, size_t geometry, size_t state = 0);
+
+// The same as a range of zero or one sub-geometries, for loops.
+struct CollisionPartRange {
+	const CollisionSubGeometry* first = nullptr;
+	const CollisionSubGeometry* begin() const { return first; }
+	const CollisionSubGeometry* end() const { return first ? first + 1 : nullptr; }
+};
+inline CollisionPartRange collisionParts(const CollisionMeshFile& file, size_t geometry, size_t state = 0)
+{
+	return {collisionPart(file, geometry, state)};
+}
 
 // A LOD's radius (the mesh's slot 0x50, 0x006de7d0: the LOD's +0xc0,
 // copied at load from its box's +0x18, which 0x006aeda0 sets): the

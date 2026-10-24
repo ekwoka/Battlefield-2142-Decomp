@@ -51,7 +51,8 @@
 // allowedDeviation (0x100d9090) after a reaction time of
 // (1 - skill)(1.5 + U[0,1]) s (0x100777a0); the rounds stray by the AI
 // deviation (1 - acc)(1 - t/2) x deviation (BF2142.exe 0x00892b70).
-// Weapons are chosen per target by weaponTemplate strength, the fighting
+// Weapons are chosen for the target by 0x10074ef0 (strength, range, ammo,
+// guidance, the explosive bonus; chooseWeapon), the fighting
 // distance kept within [minRange, 1.1 x preferred] (0x100795a0).
 //
 // Strategy (src/AI/Strategy): each side's SAI picks a strategy and gives
@@ -99,6 +100,10 @@ struct WeaponAi {
 	float explosionRadius = 0;  // +0x20
 	bool indirect = false, thrown = false; // thrown: +2 (0x0088a650)
 	bool explodesOnImpact = false; // +0x4e
+	// +0x4c (setFiresThroughTransparent, 1 by default): without it the
+	// weapon choice wants the target seen clear or known from others.
+	bool firesThroughTransparent = true;
+	bool emp = false; // +0x4d (isEmpWeapon): x (3 - the target's EMP level) in the weapon choice
 };
 
 // An AI template plug-in (aiTemplatePlugIn.create <kind> <name>; BF2142.exe
@@ -226,6 +231,94 @@ struct ExplosivePick {
 };
 bool explosivePick(const ExplosivePick& pick);
 
+// The AI weapon's guidance kind (+0x6c; BF2142.exe 0x00892be0 from the
+// weapon's slot 0x154 through 0x008923a0): GenericFireArm 0x005c1fa0 asks
+// its target component (+0x2c) slot 0xb4 (0x005f5b80), its template's
+// +0x80: ObjectTemplate.target.targetSystem (0x005f6020 writes it out,
+// names 0x004db008): TSNone 0, TSHeatSeeking 1, TSLaserGuided 2,
+// TSWireGuided 3, TSTVGuided 4; TSParabellic (5) and no target component 0.
+int guidanceKind(const world::ObjectTemplate* weapon);
+
+// One weapon of the bot's object for the weapon choice (AIDLL 0x10074ef0;
+// the AI weapon's slots through BF2142.exe's adaptor, vtable 0x009d5be8).
+struct WeaponOption {
+	int type = 0;                 // WeaponAi::Type (+0x64, slot 0xf4)
+	float strength = 0;           // against the target's CombatStrengthType (slot 0xa8)
+	float explosionRadius = 0;    // +0x20 (slot 0xac)
+	bool thrown = false;          // slot 0xb0
+	bool fireMode2 = false;       // slot 0x104 (automatic)
+	float minRange = 0, maxRange = 0; // +0x18, +0x1c (slots 0x84, 0x88)
+	int guidance = 0;             // +0x6c (slot 0xf8): guidanceKind
+	bool firesThroughTransparent = true; // +0x4c (slot 0x98)
+	bool emp = false;             // +0x4d (slot 0x9c)
+	// The AI weapon's slot 0xc (0x100d2050/0x100abb90 -> GenericFireArm
+	// slot 0x8c 0x005c1be0): the rounds in all its magazines, -1 without
+	// magazines (taken as 0x10000).
+	int rounds = -1;
+	// Slot 0xd4(0) (-> GenericFireArm slot 0xa4 0x005c3b00: the ammo
+	// component's first magazine): the rounds in the gun; -1 without.
+	int inMag = -1;
+	// Slot 0xe8 (-> the ammo component's 0x005f3d20): max(reloadTime,
+	// minimumTimeUntilReload); slot 0xe4 (0x005f3a90): ammo.autoReload.
+	float reloadTime = 2;
+	bool autoReload = false;
+	bool usable = true;           // the AI weapon's slot 0x1c (GenericFireArm slot 0x170, 0x005c1150)
+	// Wire guided: its target component holds a target (slot 0xbc; the
+	// LPTargetComp's 0x005e2410).
+	bool locked = false;
+	// Close combat and revive: the target stands on the bot's mesh (its
+	// map spot within 1 m) outside every vehicle the bot's follower steps
+	// round (0x100947b0); and the mesh ray from the bot reaches it (the
+	// pathfinder's slot 0x84).
+	bool meleeReachable = true;
+	bool meleeRay = false;
+};
+
+// The weapon choice's view of the bot, the target and the moment.
+struct WeaponChoice {
+	bool soldierBot = true;       // the bot's object is ITSoldier
+	bool targetSoldier = true;
+	bool targetHuman = true;      // the target is no bot (the bot manager's slot 0x20 has none)
+	bool targetScripted = false;  // a target bot's +0x264 (vt+0x27c): x0.5
+	float distance = 0;
+	float targetEmpLevel = 0;     // 0x10074c60's 3 - level, for EMP weapons
+	bool inHandMelee = false;     // the weapon in hand is CloseCombat or Revive
+	bool inHandEmpty = false;     // ... else its magazine is empty
+	bool targetInHandEmpty = false; // the target's weapon in hand has an empty magazine
+	bool targetTargetsMe = false; // the target's attention on the bot (see Bots.cpp)
+	bool targetMobile = true;     // the target has a Mobile part (+0x3c)
+	float targetMotion = 0;       // its Mobile slot 0x78 (see Bots.cpp)
+	bool c4Placed = false;        // the bot's +0x1b8 (vt+0x13c): a charge of its own is out
+	bool clearSighting = true;    // the memory item's flag 0x40 (seen clear) or 8
+	bool orderMove = false;       // the bot's +0x248 (vt+0x258)
+	bool areaHold = false, targetInArea = false; // strategicAreaGuard
+	ExplosivePick pick;           // the bonus's inputs; the weapon's fields per option
+};
+// The weapon of `weapons` to fight the target with, -1 for none (the
+// original keeps its last choice then); `explosive` is the bot's +0x249
+// (the bonus given).
+int chooseWeapon(const WeaponChoice& choice, const std::vector<WeaponOption>& weapons, bool& explosive);
+
+// A strategic area for the explosive bonus's guard (0x10034a10 and
+// 0x10074ef0): whether the bot's team holds it (+0x70 + 4 team, 0 held),
+// its centre on the bot's map (vt+0x10), the team's spot (+0x7c + 8 team)
+// and the team's radius (+0x98 + 4 team).
+struct GuardArea {
+	bool held = true;
+	physics::Vec3 centre;
+	float spotX = 0, spotZ = 0;
+	float radius = 0;
+};
+// The guard: of the areas the team doesn't hold, the one with the most
+// radius / max(1, d^2) for the bot (d across, from the team's spot; slot
+// 0x68 = 0x1005dd10 -> 0x1005dd50 -> 0x1005dd90); with the spot inside
+// that radius of the centre, a bot within 40 m of the centre pushing its
+// PIYaw, PIThrottle or PISprint (the bot's input +4, mask +0x100 bits 0, 3,
+// 13) holds the bonus (`hold`); so does a target within the radius of the
+// spot (`targetInside`).
+void strategicAreaGuard(const std::vector<GuardArea>& areas, const physics::Vec3& bot, bool moving,
+	const physics::Vec3& target, bool& hold, bool& targetInside);
+
 struct BotSettings {
 	float skill = 0.4f;   // aiSettings.setBotSkill (0..1)
 	int maxBots = 16;     // aiSettings.setMaxNBots
@@ -264,6 +357,10 @@ struct BotSettings {
 	// type): the seconds a received message is kept, by type.
 	std::map<int, float> radioLife;
 	float radioLifeOf(int type) const;
+	// The modifier column, by type: a received message's +8 (0x100a6fe0
+	// stores the radio event's second word), 10 for every shipped one.
+	std::map<int, float> radioModifier;
+	float radioModifierOf(int type) const;
 	// The plug-in of a kind an AI template holds (null for none).
 	const AiPlugin* plugin(const std::string& aiTemplate, const std::string& kind) const;
 	// The template's ai::InformationType flags (aiTemplate.addType,
@@ -341,6 +438,8 @@ public:
 	bool honking(int player) const;
 	// Whether the bot's weapon choice gave the explosive bonus (its +0x249).
 	bool explosive(int player) const;
+	// Whether a lob that went off holds its moves (its +0x209).
+	bool holdingForLob(int player) const;
 	// A behaviour's urgency at the bot's last think (0 for none).
 	float lastUrgency(int player, const std::string& behaviour) const;
 	// A radio message (the game's AI event 0x1004e140 -> 0x10030b20 ->
@@ -388,6 +487,8 @@ private:
 		// Explosives (0x10074ef0, 0x100777a0, 0x100d8910, 0x100d8450).
 		bool explosive = false;          // +0x249: the weapon choice's bonus applied
 		bool lobbing = false;            // +0x208: the aim lobs (0x100dbd10)
+		bool lobHold = false;            // +0x209: a lob's condition held (vt+0x20c; read by 0x100e6060)
+		bool orderMove = false;          // +0x248: the fire plan moves to the order's spot (vt+0x254)
 		float conditionFailedAt = -1e9f; // +0x1f8
 		float vehicleFailedAt = -1e9f;   // +0x250
 		float lobFailedAt = -1e9f;       // +0x200: a lob's condition failed
@@ -477,6 +578,7 @@ private:
 			int type = -1;
 			int sender = -1;
 			float at = 0;
+			float modifier = 10; // +8
 		};
 		std::vector<Radio> radio;
 		bool firedLast = false;
@@ -499,7 +601,13 @@ private:
 	float urgency(Bot& bot, const ai::BehaviourSetup& behaviour, float weight, const GameWorld::PlayerInfo& self,
 		const std::vector<GameWorld::PlayerInfo>& players);
 	float fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players);
-	void pickExplosive(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players);
+	// The weapon choice for the bot's target (0x10074ef0): sets the slot
+	// and the explosive flag.
+	void pickWeapon(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players);
+	// The first message of a type a bot holds from a human alive and not
+	// down (the comm's list for the type, its first entry; the sender's
+	// slots 0x84, 0x20, 0x28), null for none.
+	const Bot::Radio* heardFromHuman(const Bot& bot, int type) const;
 	float moveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight);
 	float reviveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players);
 	float changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight);

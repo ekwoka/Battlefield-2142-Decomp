@@ -324,6 +324,16 @@ int radioMessageType(const std::string& voiceName)
 	return -1;
 }
 
+float BotSettings::radioModifierOf(int type) const
+{
+	const auto it = radioModifier.find(type);
+	if (it != radioModifier.end()) {
+		return it->second;
+	}
+	// AI/AIRadioMessages.ai: req_pickup 60, the rest 10.
+	return type == 2 ? 60.0f : 10.0f;
+}
+
 float BotSettings::radioLifeOf(int type) const
 {
 	const auto it = radioLife.find(type);
@@ -403,6 +413,188 @@ bool explosivePick(const ExplosivePick& p)
 	}
 	const int shot = !p.thrown && p.fireMode2 ? 2 : 0;
 	return !p.soldierBot || p.now - p.explosiveShots[shot] > 10;
+}
+
+int guidanceKind(const world::ObjectTemplate* weapon)
+{
+	if (!weapon) {
+		return 0;
+	}
+	const auto it = weapon->settings().find("target.targetSystem");
+	if (it == weapon->settings().end()) {
+		return 0;
+	}
+	static const char* names[] = {"tsnone", "tsheatseeking", "tslaserguided", "tswireguided", "tstvguided"};
+	const std::string name = lower(it->second);
+	for (int i = 0; i < 5; ++i) {
+		if (name == names[i]) {
+			return i; // 0x008923a0: 1..4 kept, anything else 0
+		}
+	}
+	return 0;
+}
+
+// The weapon choice (0x10074ef0), for each weapon of the bot's object
+// (its armament, vt+0x1c) in order:
+//   - only a usable one (slot 0x1c) of type FireArm, C4, Revive,
+//     CloseCombat, Sniper, FireAndForget or TitanWeapon; one that can't
+//     fire through transparent (+0x4c) only at a target seen clear (the
+//     memory item's flag 0x40) or known from others (8); C4 not while the
+//     bot's own charge is out (+0x1b8; DAT_10139508, never written, is 0);
+//   - CloseCombat and Revive ("melee"): only with the target on the bot's
+//     mesh outside the vehicles round it (0x100947b0); "going in" (+local_6)
+//     against a human soldier within 20 m from a soldier: the target
+//     moving (its Mobile slot 0x78 over 0.5, or above 0 with a melee
+//     weapon in the bot's hand and the target within 10 m), the target's
+//     magazine empty or that hand-and-10 m case, the bot's own magazine
+//     empty or a melee weapon in hand, and the target attending to the
+//     bot or that melee in hand;
+//   - none without rounds (slot 0xc below 1; -1 counts 0x10000) unless
+//     Revive or going in;
+//   - the score: the strength against the target's type, x0.5 against a
+//     scripted bot (+0x264), x (3 - EMP level) for an EMP weapon (+0x4d,
+//     0x10074c60); 0 drops it. A melee weapon soldier to soldier within
+//     3 m, or going in, is taken at once when the mesh ray reaches the
+//     target; a melee weapon otherwise is dropped;
+//   - the explosive bonus (x100, +0x249): from a soldier, or from a
+//     vehicle at a soldier with an unguided (+0x6c 0) explosive weapon,
+//     against a soldier; a soldier's not while its +0x248 or the area
+//     guard (strategicAreaGuard) holds, nor with the target inside that
+//     area; then explosivePick;
+//   - an empty magazine of an unguided weapon that reloads by itself in
+//     more than 1.9 s: the score 0.1; wire guided (3) with a target
+//     locked: x10; without the bonus, below minRange x (0.1 - 0.09 min(1,
+//     (minRange - d) / 5)), beyond maxRange x (1 - 0.9 min(1, (d -
+//     maxRange) / 5)); an empty magazine x0.33.
+// The best score above 0 wins.
+int chooseWeapon(const WeaponChoice& c, const std::vector<WeaponOption>& weapons, bool& explosive)
+{
+	explosive = false; // vt+0x260(0)
+	float best = 0;
+	int chosen = -1;
+	const float d = c.distance;
+	for (size_t i = 0; i < weapons.size(); ++i) {
+		const WeaponOption& w = weapons[i];
+		const bool allowed = w.type == WeaponAi::FireArm || w.type == WeaponAi::C4 || w.type == WeaponAi::Revive
+			|| w.type == WeaponAi::CloseCombat || w.type == WeaponAi::Sniper || w.type == WeaponAi::FireAndForget
+			|| w.type == WeaponAi::TitanWeapon;
+		if (!w.usable || !allowed) {
+			continue;
+		}
+		const bool melee = w.type == WeaponAi::CloseCombat || w.type == WeaponAi::Revive;
+		const bool vehicleExplosive = !c.soldierBot && c.targetSoldier && w.guidance == 0 && w.explosionRadius != 0;
+		if (!w.firesThroughTransparent && !c.clearSighting) {
+			continue;
+		}
+		if (w.type == WeaponAi::C4 && c.c4Placed) {
+			continue;
+		}
+		if (melee && c.soldierBot && c.targetMobile && !w.meleeReachable) {
+			continue;
+		}
+		const bool handAndNear = c.inHandMelee && d < 10;
+		const bool moving = c.targetMobile && (c.targetMotion > 0.5f || (handAndNear && c.targetMotion > 0));
+		const bool goingIn = moving && melee && (c.targetInHandEmpty || handAndNear) && (c.inHandEmpty || c.inHandMelee)
+			&& c.soldierBot && c.targetSoldier && c.targetHuman && d < 20 && (c.targetTargetsMe || c.inHandMelee);
+		const int rounds = w.rounds == -1 ? 0x10000 : w.rounds;
+		if (rounds < 1 && w.type != WeaponAi::Revive && !goingIn) {
+			continue;
+		}
+		float score = w.strength;
+		if (score == 0) {
+			continue;
+		}
+		if (c.targetScripted) {
+			score *= 0.5f;
+		}
+		if (w.emp) {
+			score *= 3 - c.targetEmpLevel;
+		}
+		if (score == 0) {
+			continue;
+		}
+		const bool close = c.soldierBot && c.targetSoldier && d < 3;
+		if (melee) {
+			if (!(close || goingIn)) {
+				continue;
+			}
+			if (w.meleeRay) {
+				return static_cast<int>(i);
+			}
+		}
+		bool bonus = false;
+		if ((c.soldierBot || vehicleExplosive) && c.targetSoldier && w.guidance == 0 && w.explosionRadius != 0) {
+			const bool held = !vehicleExplosive && (c.orderMove || c.areaHold || c.targetInArea);
+			if (!held) {
+				ExplosivePick p = c.pick;
+				p.soldierBot = c.soldierBot;
+				p.targetSoldier = c.targetSoldier;
+				p.explosionRadius = w.explosionRadius;
+				p.thrown = w.thrown;
+				p.sniper = w.type == WeaponAi::Sniper;
+				p.fireMode2 = w.fireMode2;
+				p.minRange = w.minRange;
+				p.maxRange = w.maxRange;
+				p.distance = d;
+				bonus = explosivePick(p);
+				if (bonus) {
+					score *= 100;
+					explosive = true; // vt+0x260(1)
+				}
+			}
+		}
+		if (w.inMag == 0 && w.reloadTime > 1.9f && w.autoReload && w.guidance == 0) {
+			score = 0.1f;
+		}
+		if (w.guidance == 3 && w.locked) {
+			score *= 10;
+		}
+		if (!bonus) {
+			if (d < w.minRange) {
+				score *= 0.100000024f - std::min(1.0f, (w.minRange - d) * 0.2f) * 0.09f;
+			} else if (d > w.maxRange) {
+				score *= 1 - std::min(1.0f, (d - w.maxRange) * 0.2f) * 0.9f;
+			}
+		}
+		if (w.inMag == 0) {
+			score *= 0.33f;
+		}
+		if (best < score) {
+			best = score;
+			chosen = static_cast<int>(i);
+		}
+	}
+	return chosen;
+}
+
+void strategicAreaGuard(const std::vector<GuardArea>& areas, const physics::Vec3& bot, bool moving,
+	const physics::Vec3& target, bool& hold, bool& targetInside)
+{
+	hold = false;
+	targetInside = false;
+	const GuardArea* area = nullptr;
+	float best = -1;
+	for (const GuardArea& a : areas) {
+		if (a.held) {
+			continue; // 0x10034a10 with its flag 0: only the areas not held
+		}
+		const float dx = bot.x - a.spotX, dz = bot.z - a.spotZ;
+		const float dist = std::sqrt(dx * dx + dz * dz);
+		const float value = dist < 1 ? a.radius : a.radius / (dist * dist);
+		if (best < value) {
+			best = value;
+			area = &a;
+		}
+	}
+	if (!area) {
+		return;
+	}
+	const physics::Vec3 spot {area->spotX, area->centre.y, area->spotZ};
+	const float r2 = area->radius * area->radius;
+	if (physics::lengthSquared(spot - area->centre) < r2 && physics::lengthSquared(area->centre - bot) < 1600 && moving) {
+		hold = true;
+	}
+	targetInside = physics::lengthSquared(target - spot) < r2;
 }
 
 float otherSeatFactor(bool driverTaken, bool rootMobile, uint32_t rootTypes)
@@ -595,6 +787,12 @@ bool BotManager::explosive(int player) const
 	return it != m_bots.end() && it->second.explosive;
 }
 
+bool BotManager::holdingForLob(int player) const
+{
+	const auto it = m_bots.find(player);
+	return it != m_bots.end() && it->second.lobHold;
+}
+
 // The game hands the AI a radio message per hearer (0x1004e140 ->
 // 0x10030b20): not one the hearer said itself (the player's vt+0xa8), and
 // for bail_out, get_in and req_pickup (types 0..2) the AI acts on it at
@@ -619,10 +817,25 @@ void BotManager::radio(int sender, const std::string& voiceName, int receiver)
 			[&](const Bot::Radio& r) { return r.type == type && r.sender == sender; });
 		if (same != bot.radio.end()) {
 			same->at = m_time;
+			same->modifier = m_settings.radioModifierOf(type);
 		} else {
-			bot.radio.push_back({type, sender, m_time});
+			bot.radio.push_back({type, sender, m_time, m_settings.radioModifierOf(type)});
 		}
 	}
+}
+
+const BotManager::Bot::Radio* BotManager::heardFromHuman(const Bot& bot, int type) const
+{
+	for (const Bot::Radio& r : bot.radio) {
+		if (r.type != type || m_time - r.at >= m_settings.radioLifeOf(type)) {
+			continue;
+		}
+		// The list's first entry only (**(list + 4)).
+		GameWorld::PlayerInfo sender;
+		const bool human = m_world.playerInfo(r.sender, sender) && !sender.ai && sender.alive && !sender.manDown;
+		return human ? &r : nullptr;
+	}
+	return nullptr;
 }
 
 bool BotManager::heard(const Bot& bot, int type, int sender) const
@@ -1335,6 +1548,11 @@ void BotManager::think(Bot& bot, const GameWorld::PlayerInfo& self, const std::v
 	const int running = ai::arbitrate(bot.arbitration, defaultIndex);
 	bot.behaviour = running >= 0 ? setup.behaviours[static_cast<size_t>(running)].name : setup.defaultBehaviour;
 	bot.pattern = running >= 0 ? setup.behaviours[static_cast<size_t>(running)].pattern : std::string();
+	if (bot.pattern.rfind("BBPFire", 0) != 0) {
+		// The fire plan's end (0x100d4e20: vt+0x20c(0), vt+0x254(0)).
+		bot.lobHold = false;
+		bot.orderMove = false;
+	}
 }
 
 // Bot vt+4 (0x1009a4c0): runs the chosen behaviour's plan for `seconds`
@@ -1348,6 +1566,8 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		bot.arbitration = ai::Arbitration();
 		bot.behaviour = m_settings.vehicle(equipment).defaultBehaviour;
 		bot.pattern.clear();
+		bot.lobHold = false;
+		bot.orderMove = false;
 	}
 	const std::string& pattern = bot.pattern;
 	if (pattern != "BBPMedicAssist" && pattern != "BBPAmmoAssist" && pattern != "BBPRepairVehicle"
@@ -1725,7 +1945,7 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 		if (bestTarget == bot.target) {
 			bot.weaponSlot = bestSlot;
 		}
-		pickExplosive(bot, self, players);
+		pickWeapon(bot, self, players);
 		return 50;
 	}
 	if (bestTarget != bot.target) {
@@ -1737,22 +1957,30 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 		bot.preferredRange = bestPreferred;
 	}
 	bot.weaponSlot = bestSlot;
-	pickExplosive(bot, self, players);
+	pickWeapon(bot, self, players);
 	return 50;
 }
 
 // The weapon choice for the target BBFire settled on (0x10074ef0, called
-// once more for it after the targets' loop): the rewrite keeps the
-// targets' strongest weapon (x1.03 in hand) and adds the explosive bonus,
-// x100 for a weapon explosivePick allows, which sets the bot's +0x249
-// (vt+0x260(1), cleared at the start of each call) that the fire plan
-// reads. The record is the target's memory item; the distance and height
-// are between the two objects. Not rewritten: the guard for a soldier bot
-// standing in a strategic area its team doesn't hold (0x10034a10, the
-// area's membership slot 0x68 not traced) with the target inside it, and
-// the bot's +0x248 (set by fire plans, 0x100775f0) that also holds the
-// bonus back.
-void BotManager::pickExplosive(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players)
+// once more for it after the targets' loop; see chooseWeapon), over the
+// bot's object's weapons: on foot the kit's, at a gun the seat's. The
+// choice replaces the slot the targets' loop found (the original keeps the
+// last choice when none comes back). The distance and height are between
+// the bot and the target's remembered position. Stand-ins: the target's
+// Mobile slot 0x78 (BF2142.exe 0x008a1960: a soldier's interface 0xc4c5
+// slot 0x108, not traced) is its speed; the target attending to the bot
+// (a bot: its target is this one, its vt+0x74; a human: the sensing
+// agent's stamp for it within 9995 s, 0x100eb7f0 on the map at +0x74
+// +0x84, whose writer wasn't traced) is, for a human, a round of it having
+// passed the bot (the rewrite's alert). The rewrite's sight has no
+// see-through materials, so every sighting counts as clear (flag 0x40). A
+// gun of a vehicle has no magazines here (rounds -1). No bot is scripted
+// (+0x264, set by the scripted-bot commands 0x1004d140/0x1004d8e0), and
+// no wire-guided weapon holds a target for a bot (the LPTargetComp's
+// target isn't modelled). The fire plan's move to the order's spot that
+// sets +0x248 (0x100795a0 -> 0x100d11c0, when 0x100775f0 finds the spot
+// set) isn't rewritten: +0x248 stays clear.
+void BotManager::pickWeapon(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players)
 {
 	bot.explosive = false;
 	const auto known = std::find_if(bot.known.begin(), bot.known.end(), [&](const Known& k) { return k.player == bot.target; });
@@ -1771,46 +1999,130 @@ void BotManager::pickExplosive(Bot& bot, const GameWorld::PlayerInfo& self, cons
 	} else if (!self.vehicle) {
 		weapons = carried(self);
 	}
-	const int targetType = strengthTypeOf(*target);
-	float best = 0;
-	int bestSlot = bot.weaponSlot;
+	if (weapons.empty()) {
+		return;
+	}
+	const std::vector<GameWorld::WeaponAmmo> ammo = self.vehicle ? std::vector<GameWorld::WeaponAmmo> {} : m_world.weaponAmmo(self.id);
+	const std::vector<GameWorld::WeaponAmmo> targetAmmo = target->vehicle ? std::vector<GameWorld::WeaponAmmo> {}
+		: m_world.weaponAmmo(target->id);
+	const auto ammoOf = [](const std::vector<GameWorld::WeaponAmmo>& list, const std::string& name) -> const GameWorld::WeaponAmmo* {
+		for (const GameWorld::WeaponAmmo& a : list) {
+			if (a.weapon == name) {
+				return &a;
+			}
+		}
+		return nullptr;
+	};
+	const int targetType = std::clamp(strengthTypeOf(*target), 0, 7);
+	const physics::Vec3 at = known->position;
+	WeaponChoice c;
+	c.soldierBot = !self.vehicle;
+	c.targetSoldier = !target->vehicle;
+	c.targetHuman = !target->ai;
+	c.distance = std::sqrt(physics::lengthSquared(at - self.position));
+	c.targetEmpLevel = target->vehicle ? static_cast<float>(m_world.empLevel(target->vehicle)) : 0.0f;
+	if (!self.vehicle) {
+		const std::string inHand = weaponName(self, self.inHandSlot);
+		const int type = weaponAi(inHand).type;
+		c.inHandMelee = type == WeaponAi::CloseCombat || type == WeaponAi::Revive;
+		const GameWorld::WeaponAmmo* a = ammoOf(ammo, inHand);
+		c.inHandEmpty = !c.inHandMelee && a && a->inMag == 0;
+	}
+	if (!target->vehicle) {
+		std::string theirs;
+		for (const auto& [slot, name] : target->carried) {
+			theirs = slot == target->inHandSlot ? name : theirs;
+		}
+		const GameWorld::WeaponAmmo* a = ammoOf(targetAmmo, theirs);
+		c.targetInHandEmpty = a && a->inMag == 0;
+	}
+	if (target->ai) {
+		const auto it = m_bots.find(target->id);
+		c.targetTargetsMe = it != m_bots.end() && it->second.target == self.id;
+	} else {
+		c.targetTargetsMe = known->alertAt > -1e8f;
+	}
+	c.targetMotion = target->vehicle ? 0.0f : std::sqrt(physics::lengthSquared(target->velocity));
+	c.c4Placed = bot.c4Placed;
+	c.orderMove = bot.orderMove;
+	if (!self.vehicle) {
+		std::vector<GuardArea> areas;
+		for (const ai::StrategicArea& area : m_settings.strategy.areas) {
+			for (const GameWorld::ControlPointInfo& point : m_world.controlPointList()) {
+				if (point.id == area.controlPoint) {
+					// The side's spot starts at the area's position (0x100623c0)
+					// and the rewrite's areas don't move it; the side's radius
+					// (+0x98 + 4 team, the spot's distance to the area's +0x118
+					// point there) is the control point's here.
+					GuardArea g;
+					g.held = point.team == self.team;
+					g.centre = point.position;
+					g.spotX = point.position.x;
+					g.spotZ = point.position.z;
+					g.radius = point.radius;
+					areas.push_back(g);
+				}
+			}
+		}
+		const bool moving = bot.lastInput.throttle != 0 || bot.lastInput.strafe != 0 || bot.lastInput.sprint;
+		strategicAreaGuard(areas, self.position, moving, at, c.areaHold, c.targetInArea);
+	}
+	ExplosivePick& pick = c.pick;
+	pick.heightAbove = at.y - self.position.y;
+	pick.lobbing = bot.lobbing;
+	pick.now = m_time;
+	pick.conditionFailedAt = bot.conditionFailedAt;
+	pick.vehicleFailedAt = bot.vehicleFailedAt;
+	pick.seen = known->everSeen;
+	pick.secondHand = known->secondHand;
+	pick.seenAt = known->seenAt;
+	std::copy(std::begin(bot.explosiveShots), std::end(bot.explosiveShots), pick.explosiveShots);
+	// The melee tests: the target on the bot's mesh, outside the vehicles'
+	// rooms (0x100947b0), and the mesh ray to it.
+	bool reachable = true, ray = true;
+	if (!self.vehicle && m_navMesh) {
+		reachable = m_navMesh->findPolygon(toAi(at), 1.0f) >= 0;
+		for (const GameWorld::VehicleInfo& v : m_vehicles) {
+			const float r = vehicleBox(v).centreRadius;
+			reachable = reachable && physics::lengthSquared(v.position - at) >= r * r;
+		}
+		ray = ai::meshRaycast(*m_navMesh, toAi(self.position), toAi(at), nullptr, -1);
+	}
+	std::vector<WeaponOption> options;
 	for (const auto& [slot, name] : weapons) {
 		const WeaponAi w = weaponAi(name);
-		const bool usable = w.type == WeaponAi::FireArm || w.type == WeaponAi::Sniper || w.type == WeaponAi::TitanWeapon
-			|| w.type == WeaponAi::CloseCombat || w.type == WeaponAi::Revive;
-		const float strength = w.strength[static_cast<size_t>(std::clamp(targetType, 0, 7))];
-		if (!usable || strength <= 0) {
-			continue;
+		const world::ObjectTemplate* t = m_world.templates().find(name);
+		WeaponOption o;
+		o.type = w.type;
+		o.strength = w.strength[static_cast<size_t>(targetType)];
+		o.explosionRadius = w.explosionRadius;
+		o.thrown = w.thrown;
+		o.fireMode2 = fireMode(t) == 2;
+		o.minRange = w.minRange;
+		o.maxRange = w.maxRange;
+		if (gunning && !m_settings.weapons.count(lower(name))) {
+			o.strength = std::max(o.strength, 1.0f); // as the targets' loop: no weaponTemplate, any target to 100 m
+			o.maxRange = std::max(o.maxRange, 100.0f);
 		}
-		ExplosivePick pick;
-		pick.soldierBot = !self.vehicle;
-		pick.targetSoldier = !target->vehicle;
-		pick.explosionRadius = w.explosionRadius;
-		pick.thrown = w.thrown;
-		pick.sniper = w.type == WeaponAi::Sniper;
-		pick.fireMode2 = fireMode(m_world.templates().find(name)) == 2;
-		pick.minRange = w.minRange;
-		pick.maxRange = w.maxRange;
-		pick.distance = std::sqrt(physics::lengthSquared(known->position - self.position));
-		pick.heightAbove = known->position.y - self.position.y;
-		pick.lobbing = bot.lobbing;
-		pick.now = m_time;
-		pick.conditionFailedAt = bot.conditionFailedAt;
-		pick.vehicleFailedAt = bot.vehicleFailedAt;
-		pick.seen = known->everSeen;
-		pick.secondHand = known->secondHand;
-		pick.seenAt = known->seenAt;
-		std::copy(std::begin(bot.explosiveShots), std::end(bot.explosiveShots), pick.explosiveShots);
-		const bool bonus = explosivePick(pick);
-		bot.explosive = bot.explosive || bonus;
-		const float score = strength * (slot == self.inHandSlot ? 1.03f : 1.0f) * (bonus ? 100.0f : 1.0f);
-		if (score > best) {
-			best = score;
-			bestSlot = slot;
+		o.guidance = guidanceKind(t);
+		o.firesThroughTransparent = w.firesThroughTransparent;
+		o.emp = w.emp;
+		if (const GameWorld::WeaponAmmo* a = ammoOf(ammo, name); a && a->magSize >= 0) {
+			// nrOfMags -1: the ammo component's one magazine (0x005f4c70).
+			o.rounds = a->magazines < 0 ? a->inMag : a->rounds;
+			o.inMag = a->inMag;
 		}
+		o.reloadTime = std::max(settingNumber(t, "ammo.reloadTime", 2), settingNumber(t, "ammo.minimumTimeUntilReload", 0));
+		o.autoReload = settingNumber(t, "ammo.autoReload", 0) != 0;
+		o.meleeReachable = reachable;
+		o.meleeRay = ray;
+		options.push_back(o);
 	}
-	if (bot.explosive && !self.vehicle) {
-		bot.weaponSlot = bestSlot;
+	bool explosive = false;
+	const int chosen = chooseWeapon(c, options, explosive);
+	bot.explosive = explosive;
+	if (chosen >= 0 && !self.vehicle) {
+		bot.weaponSlot = weapons[static_cast<size_t>(chosen)].first;
 	}
 }
 
@@ -2184,25 +2496,55 @@ bool BotManager::threatened(const Bot& bot, const GameWorld::PlayerInfo& self) c
 // value; in a vehicle 2 x the seat's value (250 at the driver's seat
 // with others aboard), and the way out is the soldier's own value, or
 // 10000 when the vehicle is worth nothing (a wreck) or stands more than
-// 4 m off the vehicle mesh (0x100880e0). On foot, the vehicles within 75 m
+// 4 m off the vehicle mesh (0x100880e0). The vehicles within 75 m
 // (IAIInformationEnvironment 0x100ca9e0; one without a Mobile plug-in
 // within 75/sqrt(2) m) on the vehicle mesh, each seat at its value x the
 // distance factor max(0, min(0.5, (R^2 - 0.8 d^2) / R^2) + 0.5), x5 for
-// the soldier within 20 m below a quarter of its health. Urgency: best /
+// a soldier within 20 m below a quarter of its health. Urgency: best /
 // current x weight x 10 (best x weight when the current is worth
 // nothing), divided by 1 + 14 clamp((d - 10) / 60, 0, 1) for the distance
 // to it (0x1006bc50). Another vehicle's seats other than the root's are
 // weighed by 0x1006b910: 1 when its driver's seat is taken, else 0.77 for
 // an ITGround root and 0.5 for an ITAir one with a Mobile part, not
 // ITNaval (the flag bits 3 and 1: ai::InformationType, aiTemplate.addType).
-// In a vehicle, see the branch below. Not rewritten: the SAI's transport
-// orders (types 0 and 1, x100 on the way out for a squad told to get out)
-// and, from a vehicle, the other vehicles' seats (the original weighs them
-// too unless it chose to get out).
+// The radio (the comm's lists, each read at its first message from a
+// human alive and not down: heardFromHuman):
+//   - bail_out (type 0): in a vehicle the way out x the message's
+//     modifier x 100 (10000 in an ITAir object), and no other vehicle is
+//     weighed;
+//   - get_in (type 1), on foot: a vehicle of the bot's team (0x1006c080:
+//     its team, or nobody aboard, 0x100d3530) the sender of one of the
+//     messages rides (any seat) is weighed x that modifier; and when the
+//     first sender rides the vehicle the bot already heads for (+0x2c),
+//     only that one counts, x5.
+// From a vehicle the other vehicles are weighed too unless the way out is
+// already the best, a bail_out is held, the bot's object is ITAir or it is
+// off the mesh; the bot's own vehicle is left out. A driver of a Mobile
+// root (and a soldier) takes one with UseNoPathfindingToGetToObject
+// (Unit +0x15, 0x00884eaf), or one without a Mobile part, or one whose
+// spot on the infantry map lies within its radius + the bot's of it (the
+// Mobile's per-map points +8/+0x1c/+0x30, which the rewrite doesn't keep:
+// every vehicle counts); a passenger takes any. Not rewritten: an ITAir
+// vehicle that isn't ITHelicopter also needs room round it (0x1006c3e0);
+// the get_in answer (0x1006be70: a radio within 15 m of the chosen
+// vehicle) and the low-health bail_out radio (0x100a5990).
 float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight)
 {
 	constexpr float kReach = 75; // 0x42960000
 	const std::vector<GameWorld::VehicleInfo>& vehicles = m_vehicles;
+	const Bot::Radio* bailOut = heardFromHuman(bot, 0);
+	const Bot::Radio* getIn = heardFromHuman(bot, 1);
+	const uint32_t reserved = bot.vehicleTarget; // the last choice (+0x2c)
+	const auto rootAiOf = [&](uint32_t vehicle) {
+		const world::Object* object = m_world.objects().find(vehicle);
+		return object && object->objectTemplate() ? aiTemplateOf(object->objectTemplate()->name()) : std::string();
+	};
+	float current = 0, best = 0;
+	uint32_t chosen = 0;
+	int chosenSeat = -1; // -2: out
+	float chosenDistance = 0;
+	bool weighOthers = true;
+	physics::Vec3 from = self.position;
 	if (self.vehicle) {
 		// In a vehicle (0x1006c520 with the bot's object not a soldier). The
 		// driver's current value is 2 x its seat's (250 with others aboard);
@@ -2211,9 +2553,8 @@ float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 		// x 0x1006b910's factor (1 for a passenger with the driver's seat
 		// taken; else 0.77 ITGround, 0.5 ITAir with Mobile, not ITNaval), the
 		// passenger's own one as its current value (x2), the others as
-		// another's; then the way out, the soldier's own value, or 10000 for a
-		// wreck (current 0) or a vehicle more than 4 m off the vehicle mesh
-		// (0x100880e0). The best that isn't the bot's seat is the change.
+		// another's; then the way out (above). The best that isn't the bot's
+		// seat is the change.
 		bot.vehicleTarget = 0;
 		bot.seatTarget = -1;
 		const GameWorld::VehicleInfo* own = nullptr;
@@ -2223,23 +2564,30 @@ float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 		if (!own) {
 			return 0;
 		}
+		from = own->position;
 		const bool offMesh = m_vehicleNavMesh && m_vehicleNavMesh->findPolygon(toAi(own->position), 4.0f) < 0;
 		const std::vector<int> occupants = m_world.vehicleOccupants(own->object);
 		const int aboard = static_cast<int>(std::count_if(occupants.begin(), occupants.end(), [](int p) { return p >= 0; }));
 		const bool driving = self.seat == 0;
-		const world::Object* object = m_world.objects().find(own->object);
-		const std::string rootAi = object && object->objectTemplate() ? aiTemplateOf(object->objectTemplate()->name()) : "";
+		const std::string rootAi = rootAiOf(own->object);
 		const uint32_t types = m_settings.typeFlags(rootAi);
 		const bool mobile = m_settings.plugin(rootAi, "Mobile") != nullptr;
 		const bool driverTaken = !occupants.empty() && occupants[0] >= 0 && occupants[0] != self.id;
-		float current = 0, best = 0;
-		int bestSeat = self.seat; // -2: out
+		// The bot's object: the root for the driver, else its seat's part.
+		uint32_t objectTypes = types;
+		if (!driving) {
+			const std::vector<GameWorld::SeatLayout> seats = m_world.vehicleSeats(own->object);
+			objectTypes = static_cast<size_t>(self.seat) < seats.size()
+				? m_settings.typeFlags(aiTemplateOf(seats[static_cast<size_t>(self.seat)].name)) : 0;
+		}
+		chosen = own->object;
+		chosenSeat = self.seat;
 		if (driving) {
 			current = own->working ? (aboard > 1 ? 250.0f : seatValue(bot, self, own->object, 0, false)) * 2.0f : 0.0f;
 			best = current;
 		} else {
 			best = own->working ? seatValue(bot, self, own->object, 0, true) : 0.0f;
-			bestSeat = 0;
+			chosenSeat = 0;
 		}
 		if (own->working && !(driving && (types & kITAir))) {
 			const float factor = otherSeatFactor(!driving && driverTaken, mobile, types);
@@ -2248,44 +2596,52 @@ float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 					current = std::max(0.0f, 2.0f * seatValue(bot, self, own->object, self.seat, false) * factor);
 					if (current > best) { // its own seat is weighed with the rest
 						best = current;
-						bestSeat = self.seat;
+						chosenSeat = self.seat;
 					}
 					continue;
 				}
 				const float value = seatValue(bot, self, own->object, static_cast<int>(seat), true) * factor;
 				if (value > best) {
 					best = value;
-					bestSeat = static_cast<int>(seat);
+					chosenSeat = static_cast<int>(seat);
 				}
 			}
 		}
-		const float leave = current < 0.001f || offMesh ? 10000.0f : seatValue(bot, self, 0, 0, false);
+		float leave = seatValue(bot, self, 0, 0, false);
+		if (bailOut) {
+			leave *= bailOut->modifier * 100;
+			if (objectTypes & kITAir) {
+				leave = 10000;
+			}
+		}
+		if (current < 0.001f || offMesh) {
+			leave = 10000;
+		}
 		if (leave > best) {
 			best = leave;
-			bestSeat = -2;
+			chosenSeat = -2;
 		}
-		if (bestSeat == self.seat || best <= 0) {
-			return 0;
-		}
-		if (bestSeat >= 0) {
-			bot.vehicleTarget = own->object; // the seat the bot heads for (reserved: +0x2c/+0x30)
-			bot.seatTarget = bestSeat;
-		}
-		return current < 0.001f ? best * weight : best / current * weight * 10;
+		weighOthers = chosenSeat != -2 && !bailOut && !(objectTypes & kITAir) && !offMesh;
+	} else {
+		current = 1.2f * seatValue(bot, self, 0, 0, false);
+		best = current;
 	}
-	const float current = 1.2f * seatValue(bot, self, 0, 0, false);
+	// The get_in sender's vehicle when it is the one the bot heads for
+	// (+local_e: only that one, x5).
+	bool onlyReserved = false;
+	if (!self.vehicle && getIn && reserved) {
+		GameWorld::PlayerInfo sender;
+		onlyReserved = m_world.playerInfo(getIn->sender, sender) && sender.vehicle == reserved;
+	}
 	const float myHealth = healthOf(self.soldier);
-	float best = 0;
-	uint32_t chosen = 0;
-	float chosenDistance = 0;
-	for (const GameWorld::VehicleInfo& vehicle : vehicles) {
-		if (!vehicle.working || vehicle.freeSeats <= 0) {
+	for (const GameWorld::VehicleInfo& vehicle : weighOthers ? vehicles : std::vector<GameWorld::VehicleInfo> {}) {
+		if (!vehicle.working || vehicle.freeSeats <= 0 || vehicle.object == self.vehicle
+			|| (onlyReserved && vehicle.object != reserved)) {
 			continue;
 		}
-		const float d2 = horizontal2(vehicle.position - self.position);
-		const world::Object* object = m_world.objects().find(vehicle.object);
-		const bool mobile = object && object->objectTemplate()
-			&& m_settings.plugin(aiTemplateOf(object->objectTemplate()->name()), "Mobile");
+		const float d2 = horizontal2(vehicle.position - from);
+		const std::string rootAi = rootAiOf(vehicle.object);
+		const bool mobile = !rootAi.empty() && m_settings.plugin(rootAi, "Mobile");
 		if (d2 > kReach * kReach || (!mobile && d2 > kReach * kReach * 0.5f)) {
 			continue;
 		}
@@ -2293,15 +2649,33 @@ float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 			continue; // not on the vehicle mesh
 		}
 		float f = std::max(0.0f, std::min(0.5f, (kReach * kReach - 0.8f * d2) / (kReach * kReach)) + 0.5f);
-		if (myHealth < 0.25f && d2 < 400) {
+		if (onlyReserved) {
+			f *= 5;
+		}
+		if (!self.vehicle && myHealth < 0.25f && d2 < 400) {
 			f *= 5;
 		}
 		const std::vector<int> occupants = m_world.vehicleOccupants(vehicle.object);
-		const size_t seats = std::max<size_t>(1, occupants.size());
+		// A get_in sender aboard (0x1006c080): its modifier.
+		if (!self.vehicle && getIn) {
+			for (const Bot::Radio& r : bot.radio) {
+				if (r.type != 1 || m_time - r.at >= m_settings.radioLifeOf(1)
+					|| std::find(occupants.begin(), occupants.end(), r.sender) == occupants.end()) {
+					continue;
+				}
+				GameWorld::PlayerInfo sender;
+				if (m_world.playerInfo(r.sender, sender) && sender.team == self.team) {
+					f *= getIn->modifier;
+					break;
+				}
+			}
+		}
+		// Every seat of its layout (the occupants' list only grows as
+		// players get in).
+		const size_t seats = std::max<size_t>({1, occupants.size(), m_world.vehicleSeats(vehicle.object).size()});
 		// The other seats' factor (0x1006b910, for another vehicle): 1 with
 		// its driver's seat taken (0x100aa530); else, for a root with a
 		// Mobile part that isn't ITNaval, 0.77 for ITGround, 0.5 for ITAir.
-		const std::string rootAi = object && object->objectTemplate() ? aiTemplateOf(object->objectTemplate()->name()) : "";
 		const uint32_t types = m_settings.typeFlags(rootAi);
 		const float others = otherSeatFactor(!occupants.empty() && occupants[0] >= 0, mobile, types);
 		for (size_t seat = 0; seat < seats; ++seat) {
@@ -2309,15 +2683,28 @@ float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 			if (value > best) {
 				best = value;
 				chosen = vehicle.object;
-				chosenDistance = std::sqrt(physics::lengthSquared(vehicle.position - self.position));
+				chosenSeat = -1;
+				chosenDistance = std::sqrt(physics::lengthSquared(vehicle.position - from));
 			}
 		}
 	}
-	if (best <= current) {
-		bot.vehicleTarget = 0;
-		return 0;
+	if (self.vehicle) {
+		if ((chosen == self.vehicle && chosenSeat == self.seat) || best <= 0) {
+			return 0;
+		}
+		if (chosenSeat >= 0) {
+			bot.vehicleTarget = self.vehicle; // the seat the bot heads for (reserved: +0x2c/+0x30)
+			bot.seatTarget = chosenSeat;
+		} else if (chosenSeat == -1) {
+			bot.vehicleTarget = chosen; // another vehicle: out, then to it
+		}
+	} else {
+		if (best <= current || !chosen) {
+			bot.vehicleTarget = 0;
+			return 0;
+		}
+		bot.vehicleTarget = chosen;
 	}
-	bot.vehicleTarget = chosen;
 	const float urgency = current < 0.001f ? best * weight : best / current * weight * 10;
 	return urgency / (1 + 14 * std::clamp((chosenDistance - 10) / 60, 0.0f, 1.0f));
 }
@@ -3267,6 +3654,12 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 		}
 	}
 	bot.lobbing = lob; // vt+0x204
+	if (!lob) {
+		// +0x209 also falls when the plan's target condition (0x100dc730,
+		// vtable 0x1011afd8) fails while not lobbing; that condition isn't
+		// rewritten, so the hold ends once the aim stops lobbing.
+		bot.lobHold = false;
+	}
 
 	// The distance kept (on foot).
 	bool moving = false;
@@ -3278,8 +3671,8 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 			steer(bot, self, target.position, 400000 + target.id, seconds, input);
 			bot.pitch = pitch;
 			input.turn = 0;
-			moving = true;
-		} else if (distance < weapon.minRange) {
+			moving = !bot.lobHold;
+		} else if (distance < weapon.minRange && !bot.lobHold) {
 			input.throttle = -1;
 			moving = true;
 		}
@@ -3298,7 +3691,10 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 		if (moving || std::fabs(input.turn) > 1) {
 			want = SoldierPose::Stand;
 		}
-		if (want != bot.pose && m_time - bot.poseRequested >= 1) {
+		if (bot.lobHold) {
+			want = SoldierPose::Crouch; // steer's hold: vt+0x170(2, forced)
+		}
+		if (want != bot.pose && (m_time - bot.poseRequested >= 1 || bot.lobHold)) {
 			bot.pose = want;
 			bot.poseRequested = m_time;
 		}
@@ -3488,7 +3884,6 @@ bool BotManager::explosiveClear(Bot& bot, const GameWorld::PlayerInfo& self, con
 	const physics::Vec3& aimDirection, const physics::Vec3& targetPoint, const WeaponAi& weapon,
 	const std::string& weaponTemplate, bool soldierBot)
 {
-	(void)weapon;
 	const auto mateNear = [&](const physics::Vec3& at, float reach) {
 		for (const GameWorld::PlayerInfo& p : m_players) {
 			if (p.alive && !p.vehicle && p.team == self.team && std::fabs(p.position.y - at.y) < 2.5f
@@ -3529,6 +3924,11 @@ bool BotManager::explosiveClear(Bot& bot, const GameWorld::PlayerInfo& self, con
 	}
 	if (!ok) {
 		(bot.lobbing ? bot.lobFailedAt : bot.conditionFailedAt) = m_time;
+		if (bot.lobbing) {
+			bot.lobHold = false; // vt+0x20c(0)
+		}
+	} else if (bot.lobbing && !weapon.thrown) {
+		bot.lobHold = true; // vt+0x20c(1): a launcher's lob holds the moves
 	}
 	return ok;
 }
@@ -3617,6 +4017,20 @@ bool BotManager::steer(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 	input.jump = m_time < bot.jumpUntil;
 	if (radius > 0 && physics::lengthSquared(to - self.position) <= radius * radius) {
 		return false;
+	}
+	if (bot.lobHold) {
+		// A lob's condition held (+0x209, 0x100e6060): the move's timers
+		// restart (0x100923a0), the bot asks to crouch (vt+0x170(2, 1),
+		// forced past the second between poses) and pushes nothing.
+		bot.follower.progress(toAi(self.position), 0, m_time);
+		if (bot.pose != SoldierPose::Crouch) {
+			bot.pose = SoldierPose::Crouch;
+			bot.poseRequested = m_time;
+		}
+		input.pose = bot.pose;
+		input.throttle = 0;
+		input.strafe = 0;
+		return true;
 	}
 	physics::Vec3 point = to;
 	bool steered = false;
@@ -4838,11 +5252,22 @@ void registerBotConsoleMethods(Console& console, BotSettings& settings)
 			p->selectKey = key.rfind(prefix, 0) == 0 ? std::atoi(key.c_str() + prefix.size()) : 0;
 		}
 	});
-	bindMethod(console, "aiComm.addAIRadioMessage", access, [s](std::string voice, float, float, float life) {
+	bindMethod(console, "aiComm.addAIRadioMessage", access, [s](std::string voice, float modifier, float, float life) {
 		voice.erase(std::remove(voice.begin(), voice.end(), '"'), voice.end());
 		const int type = radioMessageType(voice);
 		if (type >= 0) {
 			s->radioLife[type] = life;
+			s->radioModifier[type] = modifier;
+		}
+	});
+	bindMethod(console, "weaponTemplate.setFiresThroughTransparent", access, [weapon](bool v) {
+		if (WeaponAi* w = weapon()) {
+			w->firesThroughTransparent = v;
+		}
+	});
+	bindMethod(console, "weaponTemplate.isEmpWeapon", access, [weapon](bool v) {
+		if (WeaponAi* w = weapon()) {
+			w->emp = v;
 		}
 	});
 	bindMethod(console, "aiTemplatePlugIn.isFloating", access, [plugin](bool floating) {

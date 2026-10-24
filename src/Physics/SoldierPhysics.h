@@ -107,6 +107,25 @@ public:
 		uint32_t owner = 0;
 		float mass = 0;      // node slot 0x114
 		bool asleep = false; // node slot 0x14c
+		// collisionGroups (response slot 0x50): the run-over check
+		// (0x006c2e50) passes one with bit 0x10, or with its team's bit
+		// (0x100 team 1, 0x200 team 2) for the soldier's team.
+		uint32_t collisionGroups = 0;
+		// A projectile with noInitialCollisionWithLauncher (template +0x355,
+		// read by slot 0x114 = 0x005b37d0) ignores its launcher's root
+		// (0x005b48b0 -> the mesh response's 0x006b8de0: the response's +0xfc
+		// and, on the server, +0xf8 = the tick + 2, *0x00a84284; on a client
+		// +0xf8 = -1, for good). `ignoring`: that window is open (0x006b6c30);
+		// `ignoresThis`: and it is this soldier (0x006b8da0).
+		bool ignoring = false;
+		bool ignoresThis = false;
+		// A GenericProjectile (class 0x9539) whose soldier LOD's radius (the
+		// mesh instance's slot 0x50(2), 0x006de7d0) is under 0.6 m
+		// (*0x00a84acc): its contacts don't hold the soldier, they push it
+		// (its response's slot 0x2c), unless it is the soldier's own
+		// (*0x00a84774 = 1: the projectile interface 0x94c1's slot 0x48).
+		bool pushed = false;
+		bool own = false;
 		Vec3 pointVelocity(const Vec3& p) const { return velocity + cross(angularVelocity, p - centerOfMass); }
 	};
 	std::vector<Mover> movers;
@@ -126,6 +145,20 @@ public:
 	// mesh by the server's segment test (no one: 0).
 	std::function<void(uint32_t attacker)> onCrushed;
 	bool server = true; // the segment test (game logic slot 0x144)
+	int team = 0;       // the run-over check's filter (interface 0xc4c5 slot 0x9c)
+	// 0x006c3890 with a mover's contacts that its response ignores (the
+	// main pass, 0x006b8da0): the response's window is opened again
+	// (0x006b8de0: the tick + 2 on the server).
+	std::function<void(uint32_t owner)> onIgnored;
+	// A small projectile pushed (`pushed` above): its response's slot 0x2c
+	// with the contact's point, the projectile's velocity relative to the
+	// soldier (the soldier's relative velocity turned round: none in the
+	// solve's passes), the soldier's normal and the depth turned round
+	// (positive: the push goes against the normal, away from the soldier),
+	// the soldier's material and the mesh's.
+	std::function<void(uint32_t owner, const Vec3& point, const Vec3& velocity, const Vec3& normal, float depth,
+		uint32_t ownMaterial, uint32_t otherMaterial)>
+		onPushObject;
 	// The collision events (object slot 0xac on the soldier, from the ground
 	// pass and 0x006c3890): the other (0: the ground), the soldier's
 	// velocity relative to it, the contact's normal and point, the two

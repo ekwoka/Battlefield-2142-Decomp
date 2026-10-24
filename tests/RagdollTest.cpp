@@ -1641,3 +1641,49 @@ TEST(Physics_SoldierClimbsALadder)
 	CHECK(highest > 5.5f);
 	CHECK(!game.world->onLadder(game.world->localPlayer()));
 }
+
+// The landing's sound (0x005ef250 -> 0x007fdcd0): the footstep set's
+// sound, through the player check (player slot 0x1bc, 0x00591510: the
+// local player alone); the take-off's (0x007fd970) for everyone.
+TEST(Physics_LandSoundForTheLocalPlayerOnly)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	int heardBy[2] = {};
+	for (int local = 0; local < 2; ++local) {
+		Game game(gameDir);
+		physics::MaterialManager materials;
+		materials.createCell(5500, 0).soundTemplates = {"S_Step", "S_Step", "S_Step", "S_Step"};
+		game.start(&materials);
+		int id = -1;
+		if (local) {
+			CHECK(game.world->spawnPlayer(2) != nullptr);
+			id = game.world->localPlayer();
+		} else {
+			id = game.world->addPlayer("bot", 2, true);
+			CHECK(game.world->spawnSoldier(id));
+		}
+		game::SoldierInput walk;
+		walk.throttle = 1;
+		game.world->setInput(id, walk);
+		game.run(1); // the footstep set: the terrain's
+		(void)game.world->takeSounds();
+		game::SoldierInput jump;
+		jump.jump = true;
+		game.world->setInput(id, jump);
+		game.world->tick(1 / 30.0f);
+		game.world->setInput(id, {});
+		int heard = 0;
+		for (int i = 0; i < 60; ++i) {
+			game.world->tick(1 / 30.0f);
+			for (const auto& sound : game.world->takeSounds()) {
+				heard += sound.sound == "S_Step";
+			}
+		}
+		std::fprintf(stderr, "  %s: %d footstep-set sounds after the jump\n", local ? "local" : "bot", heard);
+		heardBy[local] = heard;
+	}
+	CHECK(heardBy[1] == heardBy[0] + 1); // the same steps and take-off, and the landing
+}

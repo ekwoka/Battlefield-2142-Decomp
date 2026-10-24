@@ -170,7 +170,7 @@ public:
 	struct Wheel {
 		Vec3 mount;          // the wheel's centre at rest, object space
 		float radius = 0.5f;     // how far its vehicle-LOD vertices lie below the centre (the probes' h)
-		int collisionPart = -1;  // its geometry in the vehicle's collision mesh (the template's collisionPart)
+		int collisionPart = -1;  // its geometry in the vehicle's collision mesh (the template's collisionPart, +0x74: 0x0063ccc0 -> 0x006d8180 picks the geometry; the instance's +0x14 is the state, sub-geometry 0)
 		float spinRadius = 0.5f; // the engine's (0x006cad60): its LOD 0 box's height, at least 0.1
 		float strength = 0;  // Spring template 0x2b4
 		float damping = 0;   // 0x2b0

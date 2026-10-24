@@ -54,10 +54,43 @@ struct Camera {
 	float yaw = 0;   // radians, 0 looks along +z
 	float pitch = 0; // radians, positive looks up
 	float fovY = 1.0f;
+	float nearPlane = 0.5f;
 
 	Vec3f forward() const;
 	Vec3f right() const;
 	Mat4 view() const;
+};
+
+// A model of the first-person view (the held weapon, the soldier's arms):
+// one geometry and LOD of a bundled or skinned mesh, placed in the world
+// (BF2142.exe draws the first-person geometry, 0, of the soldier's and the
+// weapon's meshes; the third person is geometry 1).
+struct FirstPersonModel {
+	std::string geometry; // the geometry template
+	int geometryIndex = 0;
+	int lod = 0;
+	Mat4 world;
+	// Skinned: the skeleton's node matrices in model space (as
+	// LevelSources::skeletonPose gives them).
+	std::vector<anim::Matrix> pose;
+	// Bundled: the parts' transforms in model space (part 0 first).
+	std::vector<Mat4> parts;
+};
+
+// The first-person pass, drawn over the world after a depth clear with its
+// own projection (RendDX9's first-person pass), so the weapon never cuts
+// into walls.
+struct FirstPersonScene {
+	// RendDX9's first-person view (+0xfc of the renderer): its own 0.82 rad
+	// whatever the world's field of view or zoom, near
+	// renderer.tweakNearPlane1p (0.16), far 15 (0x1002aba0).
+	float fovY = 0.82f;
+	float nearPlane = 0.16f;
+	float farPlane = 15.0f;
+	std::vector<FirstPersonModel> models;
+	// Effects of the first-person models (the muzzle flash), drawn in the
+	// same pass; may be null.
+	const effects::EffectManager* effects = nullptr;
 };
 
 struct LevelSources {
@@ -92,6 +125,11 @@ struct LevelSources {
 	std::function<ui::MenuFrame(float seconds)> menu;
 	// Effects to draw (particles), if any.
 	const effects::EffectManager* effects = nullptr;
+	// The first-person view, asked each frame: false draws none.
+	std::function<bool(FirstPersonScene& scene)> firstPerson;
+	// Objects the world pass leaves out this frame (in first person the
+	// player's own soldier, its weapon and kit); asked by syncObjects.
+	std::function<bool(uint32_t object)> hiddenInView;
 };
 
 struct LevelStats {
@@ -139,6 +177,7 @@ private:
 		SDL_GPUTexture* detail = nullptr; // static mesh layers, null if unused
 		SDL_GPUTexture* dirt = nullptr;
 		SDL_GPUTexture* crack = nullptr;
+		bool blended = false; // alpha mode 1 (blended or additive)
 	};
 	struct RigBone {
 		int node;
@@ -200,7 +239,11 @@ private:
 		float size[2];
 	};
 
-	const GpuMesh* mesh(const LevelSources& sources, const std::string& geometryName);
+	// A geometry of a mesh file at a LOD; geometryIndex -1 is the one the
+	// world shows (the exterior: 1 of bundled and skinned meshes with more
+	// than one).
+	const GpuMesh* mesh(const LevelSources& sources, const std::string& geometryName, int geometryIndex = -1,
+		int lod = 0);
 	SDL_GPUTexture* texture(const io::FileManager& files, const std::string& path);
 	void addTemplate(const LevelSources& sources, const world::ObjectTemplate& objectTemplate, const Mat4& local,
 		const Mat4& objectWorld, uint32_t object, int depth);
@@ -287,6 +330,19 @@ private:
 	void buildOverlay();
 	std::vector<ParticleGroup> m_particleGroups;
 	void buildParticles(const Camera& camera);
+	// One effect manager's particles into a buffer (released and rebuilt).
+	void buildParticleBuffer(const effects::EffectManager* manager, SDL_GPUBuffer*& buffer,
+		std::vector<ParticleGroup>& groups);
+	void drawParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Mat4& viewProjection,
+		const Camera& camera, const scene::LightSettings& lights, SDL_GPUBuffer* buffer,
+		const std::vector<ParticleGroup>& groups);
+	// The first-person pass (FirstPersonScene).
+	void drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Camera& camera,
+		float aspect, const scene::LightSettings& lights);
+	SDL_GPUBuffer* m_firstPersonParticleVertices = nullptr;
+	std::vector<ParticleGroup> m_firstPersonParticleGroups;
+	FirstPersonScene m_firstPerson;
+	bool m_hasFirstPerson = false;
 	const GpuMesh* m_skyMesh = nullptr;
 	SDL_GPUTexture* m_skyTexture = nullptr;
 	float m_skyRotation = 0;

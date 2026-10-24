@@ -43,6 +43,7 @@ struct ViewerOptions {
 		bool jump = false;            // held: jump (c_PIAction, Space)
 		bool voipPushToTalk = false;    // held: c_GIVoipPushToTalk (V)
 		bool voipLeaderChannel = false; // held: c_GIVoipUseLeaderChannel (B)
+		bool toggleCamera = false;      // held: c_PIToggleCameraMode (C)
 		int seat = 0;           // F1..F8 held: that vehicle seat (1-based)
 		int item = 0;            // 1..9 held: the weapon in that kit slot
 	};
@@ -53,6 +54,14 @@ struct ViewerOptions {
 		// The vehicle's ObjectTemplate.vehicleCategory: 0 VCLand, 1 VCSea,
 		// 2 VCAir, 3 VCHelicopter (its control map, 0x004b141a).
 		int vehicleCategory = 0;
+		// Given: the window's width over its height.
+		float aspect = 16.0f / 9.0f;
+		// First person: the camera itself (radians; yaw 0 along +z, pitch up
+		// positive) and its vertical field of view.
+		bool firstPerson = false;
+		float eye[3] = {0, 0, 0};
+		float eyeYaw = 0, eyePitch = 0;
+		float fovY = 1.0f;
 	};
 	std::function<void(const PlayerInput&)> onPlayerInput;
 	std::function<bool(PlayerView&)> playerView; // false without a player

@@ -2031,3 +2031,579 @@ TEST(Bots_ChangesSeatInsideAVehicle)
 	world.playerInfo(bot, info);
 	CHECK(info.seat == 1);
 }
+
+// The weapon choice (0x10074ef0): the strength against the target's type,
+// the range and ammo weights, the guidance kind and the bot's +0x248 and
+// area guard holding the explosive bonus back, close combat taken at once,
+// EMP weapons by the target's EMP level, C4 not twice.
+TEST(Bots_WeaponChoice)
+{
+	game::WeaponChoice c;
+	c.distance = 50;
+	c.pick.now = 100;
+	c.pick.seen = true;
+	c.pick.secondHand = true;
+	c.pick.seenAt = 99;
+	game::WeaponOption rifle;
+	rifle.strength = 1;
+	rifle.minRange = 0;
+	rifle.maxRange = 100;
+	rifle.rounds = 300;
+	rifle.inMag = 30;
+	game::WeaponOption pistol = rifle;
+	pistol.strength = 0.8f;
+	pistol.maxRange = 30; // 20 m short: x (1 - 0.9) = 0.08
+	bool explosive = true;
+	CHECK(game::chooseWeapon(c, {pistol, rifle}, explosive) == 1 && !explosive);
+	// The rifle 10 m beyond its maxRange: x0.1 < the pistol's 0.8 in range.
+	c.distance = 25;
+	rifle.maxRange = 15;
+	CHECK(game::chooseWeapon(c, {pistol, rifle}, explosive) == 0);
+	// 1 m beyond: x (1 - 0.9 x 0.2) = 0.82 > 0.8.
+	c.distance = 16;
+	CHECK(game::chooseWeapon(c, {pistol, rifle}, explosive) == 1);
+	// Below minRange: x0.1 (just under) to x0.01.
+	game::WeaponOption mortar = rifle;
+	mortar.strength = 5;
+	mortar.minRange = 30;
+	mortar.maxRange = 100;
+	CHECK(game::chooseWeapon(c, {pistol, mortar}, explosive) == 0); // 5 x 0.01 = 0.05
+	c.distance = 29.9f;
+	CHECK(game::chooseWeapon(c, {pistol, mortar}, explosive) == 0); // 5 x 0.0982 = 0.49
+	mortar.strength = 9;
+	CHECK(game::chooseWeapon(c, {pistol, mortar}, explosive) == 1); // 0.88
+	// An empty magazine x0.33; one that reloads by itself in over 1.9 s: 0.1 (then x0.33).
+	c.distance = 10;
+	rifle.maxRange = 100;
+	game::WeaponOption empty = rifle;
+	empty.strength = 2.5f;
+	empty.inMag = 0;
+	CHECK(game::chooseWeapon(c, {pistol, empty}, explosive) == 1); // 0.825 > 0.8
+	empty.autoReload = true;
+	empty.reloadTime = 3;
+	CHECK(game::chooseWeapon(c, {pistol, empty}, explosive) == 0); // 0.033
+	empty.rounds = 0; // nothing left at all: dropped
+	CHECK(game::chooseWeapon(c, {empty}, explosive) == -1);
+	empty.rounds = -1; // no magazines: counts 0x10000
+	CHECK(game::chooseWeapon(c, {empty}, explosive) == 0);
+	// The explosive bonus x100 (and +0x249): unguided only, not with +0x248
+	// or the area guard.
+	game::WeaponOption launcher = rifle;
+	launcher.strength = 0.1f;
+	launcher.explosionRadius = 6;
+	launcher.maxRange = 60;
+	c.distance = 20;
+	CHECK(game::chooseWeapon(c, {pistol, launcher}, explosive) == 1 && explosive);
+	launcher.guidance = 3; // wire guided
+	CHECK(game::chooseWeapon(c, {pistol, launcher}, explosive) == 0 && !explosive);
+	launcher.locked = true; // with a target: x10 = 1 > 0.8
+	CHECK(game::chooseWeapon(c, {pistol, launcher}, explosive) == 1 && !explosive);
+	launcher.guidance = 0;
+	launcher.locked = false;
+	c.orderMove = true;
+	CHECK(game::chooseWeapon(c, {pistol, launcher}, explosive) == 0 && !explosive);
+	c.orderMove = false;
+	c.targetInArea = true;
+	CHECK(game::chooseWeapon(c, {pistol, launcher}, explosive) == 0 && !explosive);
+	c.targetInArea = false;
+	// From a vehicle the guards don't count.
+	c.soldierBot = false;
+	c.areaHold = true;
+	CHECK(game::chooseWeapon(c, {pistol, launcher}, explosive) == 1 && explosive);
+	c.soldierBot = true;
+	c.areaHold = false;
+	// Close combat: soldier to soldier within 3 m, taken at once when the
+	// mesh ray reaches the target, else dropped beyond 3 m.
+	game::WeaponOption knife;
+	knife.type = game::WeaponAi::CloseCombat;
+	knife.strength = 0.5f;
+	knife.maxRange = 2;
+	knife.meleeRay = true;
+	c.distance = 2.5f;
+	CHECK(game::chooseWeapon(c, {pistol, knife}, explosive) == 1);
+	knife.meleeRay = false; // then weighed: 0.5 x 0.82 < 0.8
+	CHECK(game::chooseWeapon(c, {pistol, knife}, explosive) == 0);
+	knife.meleeRay = true;
+	knife.meleeReachable = false; // the target off the mesh or in a vehicle's room
+	CHECK(game::chooseWeapon(c, {pistol, knife}, explosive) == 0);
+	knife.meleeReachable = true;
+	c.distance = 5;
+	CHECK(game::chooseWeapon(c, {knife}, explosive) == -1);
+	// Going in: a human running at the bot with an empty magazine, the
+	// bot's own empty, within 20 m.
+	c.targetMotion = 3;
+	c.targetInHandEmpty = true;
+	c.inHandEmpty = true;
+	c.targetTargetsMe = true;
+	CHECK(game::chooseWeapon(c, {pistol, knife}, explosive) == 1);
+	c.targetHuman = false; // never against a bot
+	CHECK(game::chooseWeapon(c, {pistol, knife}, explosive) == 0);
+	c.targetHuman = true;
+	c.targetMotion = 0;
+	CHECK(game::chooseWeapon(c, {pistol, knife}, explosive) == 0);
+	// EMP: x (3 - level).
+	game::WeaponOption emp = rifle;
+	emp.emp = true;
+	emp.strength = 0.4f;
+	c.distance = 10;
+	CHECK(game::chooseWeapon(c, {pistol, emp}, explosive) == 1); // 1.2
+	c.targetEmpLevel = 1;
+	CHECK(game::chooseWeapon(c, {pistol, emp}, explosive) == 0); // 0.8: not above
+	// C4: not with the bot's own charge out.
+	game::WeaponOption c4 = rifle;
+	c4.type = game::WeaponAi::C4;
+	c4.strength = 5;
+	CHECK(game::chooseWeapon(c, {pistol, c4}, explosive) == 1);
+	c.c4Placed = true;
+	CHECK(game::chooseWeapon(c, {pistol, c4}, explosive) == 0);
+	// A weapon that can't fire through transparent wants a clear sighting.
+	rifle.firesThroughTransparent = false;
+	c.clearSighting = false;
+	CHECK(game::chooseWeapon(c, {pistol, rifle}, explosive) == 0);
+}
+
+// The guidance kind (BF2142.exe 0x00892be0 -> 0x008923a0): the target
+// component's targetSystem, TSParabellic and none 0; the shipped AV is
+// wire guided, the AA heat seeking.
+TEST(Bots_GuidanceKind)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* rocket = templates.create("GenericFireArm", "test_rocket");
+	CHECK(game::guidanceKind(rocket) == 0);
+	CHECK(game::guidanceKind(nullptr) == 0);
+	const std::pair<const char*, int> kinds[] = {{"TSNone", 0}, {"TSHeatSeeking", 1}, {"TSLaserGuided", 2},
+		{"TSWireGuided", 3}, {"TSTVGuided", 4}, {"TSParabellic", 0}};
+	for (const auto& [name, kind] : kinds) {
+		rocket->settings()["target.targetSystem"] = name;
+		CHECK(game::guidanceKind(rocket) == kind);
+	}
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	files.setMountingAllowed(true);
+	CHECK(files.mountArchive("Objects/Weapons_server.zip", "Objects\\Weapons"));
+	Console console {&files};
+	world::ObjectTemplateManager shipped;
+	world::ObjectManager objects;
+	world::registerWorldConsoleMethods(console, shipped, objects);
+	world::registerUntypedTemplateProperties(console, shipped, {"target.targetSystem"});
+	std::string out;
+	for (const char* file : {"Objects/Weapons/Handheld/EU_AV/eu_av.con", "Objects/Weapons/Handheld/EU_AV/eu_av.tweak",
+			 "Objects/Weapons/Handheld/EU_AA/eu_aa.con", "Objects/Weapons/Handheld/EU_AA/eu_aa.tweak"}) {
+		CHECK(console.run(file, {}, out));
+	}
+	CHECK(game::guidanceKind(shipped.find("eu_av")) == 3);
+	CHECK(game::guidanceKind(shipped.find("eu_aa")) == 1);
+}
+
+// The explosive bonus's area guard (0x10034a10, 0x10074ef0): the area
+// not held with the most radius / d^2; the bot within 40 m of it pushing
+// its controls, or the target inside its radius.
+TEST(Bots_StrategicAreaGuard)
+{
+	game::GuardArea mine, near, far;
+	mine.held = true;
+	mine.centre = {0, 0, 0};
+	mine.radius = 50;
+	near.held = false;
+	near.centre = {30, 0, 0};
+	near.spotX = 30;
+	near.radius = 20;
+	far.held = false;
+	far.centre = {300, 0, 0};
+	far.spotX = 300;
+	far.radius = 100;
+	bool hold = false, inside = false;
+	game::strategicAreaGuard({mine, near, far}, {0, 0, 0}, true, {35, 0, 5}, hold, inside);
+	CHECK(hold && inside); // 30 m from the near one's centre, moving; the target 7 m from its spot
+	game::strategicAreaGuard({mine, near, far}, {0, 0, 0}, false, {35, 0, 5}, hold, inside);
+	CHECK(!hold && inside); // standing still
+	game::strategicAreaGuard({mine, near, far}, {0, 0, 0}, true, {60, 0, 0}, hold, inside);
+	CHECK(hold && !inside);
+	// Far from both: the near one still scores more (20/900 > 100/90000),
+	// but the bot is over 40 m from it.
+	game::strategicAreaGuard({mine, near, far}, {-50, 0, 0}, true, {300, 0, 0}, hold, inside);
+	CHECK(!hold && !inside);
+	// The far one wins next to it: the target inside its 100 m.
+	game::strategicAreaGuard({mine, near, far}, {290, 0, 0}, true, {320, 0, 0}, hold, inside);
+	CHECK(hold && inside);
+	// Held areas don't count.
+	game::strategicAreaGuard({mine}, {0, 0, 0}, true, {0, 0, 0}, hold, inside);
+	CHECK(!hold && !inside);
+}
+
+// A launcher's lob whose condition holds (0x100d8910 with +0x208 set and
+// the weapon not thrown) sets +0x209 (vt+0x20c(1)): the bot's moves stop
+// (0x100e6060) while the fire plan runs.
+TEST(Bots_LobHoldsTheMove)
+{
+	Field field;
+	world::ObjectTemplate* launcher = field.templates.create("GenericFireArm", "test_launcher");
+	launcher->settings()["itemIndex"] = "4";
+	launcher->settings()["projectileTemplate"] = "test_launcher_shell";
+	launcher->settings()["velocity"] = "40";
+	launcher->settings()["ammo.magSize"] = "1";
+	launcher->settings()["ammo.nrOfMags"] = "5";
+	world::ObjectTemplate* shell = field.templates.create("GenericProjectile", "test_launcher_shell");
+	shell->settings()["detonation.explosionDamage"] = "1";
+	shell->settings()["detonation.explosionRadius"] = "6";
+	world::ObjectTemplate* kit = field.templates.create("Kit", "test_launcher_kit");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	kit->children().push_back({"test_launcher", {}, {}});
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	std::string out;
+	for (const char* line : {"aiSettings.setViewDistance 15", "weaponTemplate.create test_launcher",
+			 "weaponTemplate.setExplosionRadius 6", "weaponTemplate.maxRange 60", "weaponTemplate.setStrength Infantry 1",
+			 "weaponTemplate.create eu_ar_rifle", "weaponTemplate.maxRange 100", "weaponTemplate.setStrength Infantry 1"}) {
+		console.execute(line, out);
+	}
+	game::BotManager bots(*field.world, settings);
+	const int spotter = field.world->addPlayer("Spotter", 2, true);
+	const int gunner = field.world->addPlayer("Gunner", 2, true);
+	field.world->setKit(gunner, "test_launcher_kit", "us_light_soldier");
+	for (int id : {spotter, gunner}) {
+		field.world->joinSquad(id, 1);
+		field.world->spawnSoldier(id);
+	}
+	const int enemy = field.soldier(1, false, 0, 50);
+	const auto place = [&](int player, float x, float y, float z) {
+		game::GameWorld::PlayerInfo info;
+		field.world->playerInfo(player, info);
+		field.world->setSoldierPosition(info.soldier, {x, y, z});
+	};
+	place(gunner, 0, 0, 25);
+	bool held = false;
+	physics::Vec3 heldAt;
+	float drift = 0;
+	int heldTicks = 0;
+	for (int tick = 0; tick < 30 * 15 && heldTicks < 45; ++tick) {
+		place(enemy, 0, 12, 50);  // 12 m up: a launcher lobs
+		place(spotter, 0, 12, 42); // it sees the enemy and tells the squad
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+		game::GameWorld::PlayerInfo info;
+		field.world->playerInfo(gunner, info);
+		if (bots.holdingForLob(gunner)) {
+			if (!held) {
+				heldAt = info.position;
+			}
+			held = true;
+			++heldTicks;
+			const float dx = info.position.x - heldAt.x, dz = info.position.z - heldAt.z;
+			drift = std::max(drift, std::sqrt(dx * dx + dz * dz));
+		}
+	}
+	CHECK(held);
+	CHECK(heldTicks > 0 && drift < 0.3f);
+}
+
+// The follower's jump (0x10092bc0, 0x10095720): a soldier pushing its
+// controls without moving for half a second asks to jump (PIAction, which
+// BotManager::steer holds 0.4 s), not again within 2 s (the follower held
+// at its start fails on its blocked look-ahead after 2 s).
+TEST(Bots_FollowerJump)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	CerbereLanding round(gameDir, false);
+	CHECK(round.loaded && round.mesh.has_value());
+	if (!round.loaded || !round.mesh) {
+		return;
+	}
+	const ai::NavMesh& mesh = *round.mesh;
+	const physics::Vec3 start = round.position(round.players[0]);
+	const ai::Vec3 from {start.x, start.y, start.z};
+	ai::PathFollower follower;
+	ai::FollowerSettings settings;
+	settings.soldier = true;
+	follower.request(mesh, from, {19.7761f, 106.928f, 189.227f}, settings, 0);
+	CHECK(follower.planned() && !follower.failed());
+	std::vector<float> jumps;
+	for (float t = 0; t < 2.0f; t += 0.1f) {
+		follower.progress(from, 1, t);
+		if (follower.steer(mesh, from, t).jump) {
+			jumps.push_back(t);
+		}
+	}
+	CHECK(jumps.size() == 1); // once, then not within 2 s
+	CHECK(!jumps.empty() && jumps[0] > 0.5f && jumps[0] < 0.75f);
+	// A soldier that isn't pushing never jumps.
+	ai::PathFollower idle;
+	idle.request(mesh, from, {19.7761f, 106.928f, 189.227f}, settings, 0);
+	bool jumped = false;
+	for (float t = 0; t < 2.0f; t += 0.1f) {
+		idle.progress(from, 0, t);
+		jumped = jumped || idle.steer(mesh, from, t).jump;
+	}
+	CHECK(!jumped);
+}
+
+namespace {
+
+// Cars on as_fav's collision mesh (the game's files) on flat ground: a
+// driver's seat (TestCar, ITGround with a Mobile part, maxSpeed 20) and a
+// gunner's (TestGunner, Fixed, select key 2) with `gun`.
+struct CarField {
+	io::FileManager files;
+	Console console {&files};
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	physics::CollisionTemplateManager collisionTemplates;
+	game::BotSettings settings;
+	std::unique_ptr<game::GameWorld> world;
+
+	explicit CarField(const char* gameDir)
+	{
+		files.setRootPath(gameDir);
+		files.addSearchPath("mods/bf2142");
+		bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+			[this](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+		std::string out;
+		console.run("ServerArchives.con", {}, out);
+		templates.registerType(1, "ControlPoint");
+		templates.registerType(2, "SpawnPoint");
+		templates.registerType(3, "Soldier");
+		templates.registerType(7, "PlayerControlObject");
+		templates.registerType(8, "EntryPoint");
+		templates.registerType(9, "Engine");
+		templates.registerType(10, "Spring");
+		templates.registerType(11, "RotationalBundle");
+		templates.registerType(12, "GenericFireArm");
+		templates.create("Soldier", "us_light_soldier")->settings()["armor.maxHitPoints"] = "100";
+		world::ObjectTemplate* point = templates.create("ControlPoint", "cp_eu");
+		point->settings()["controlPointId"] = "2";
+		point->settings()["team"] = "2";
+		point->settings()["unableToChangeTeam"] = "1";
+		objects.create(point, {-100, 0, 0});
+		objects.create(templates.create("SpawnPoint", "sp"), {0, 0, 0})->setControlPointId(2);
+		collisionTemplates.create("as_fav", "Objects/Vehicles/as_fav/");
+		templates.create("EntryPoint", "car_entry")->settings()["entryRadius"] = "3";
+		world::ObjectTemplate* engine = templates.create("Engine", "car_engine");
+		engine->settings()["engineType"] = "194";
+		world::ObjectTemplate* wheel = templates.create("Spring", "car_wheel");
+		wheel->settings()["strength"] = "40";
+		wheel->settings()["damping"] = "8";
+		for (float x : {-0.95f, 0.95f}) {
+			for (float z : {-1.4f, 1.6f}) {
+				engine->children().push_back({"car_wheel", {x, -0.15f, z}, {}});
+			}
+		}
+		addCar("car", "car_firearm");
+		addCar("car_b", "car_firearm_b");
+		game::registerBotConsoleMethods(console, settings);
+		for (const char* line : {"aiTemplatePlugIn.create Mobile TestCar_Mobile", "aiTemplatePlugIn.maxSpeed 20",
+				 "aiTemplate.create TestCar", "aiTemplate.addType ITGround", "aiTemplate.addPlugIn TestCar_Mobile",
+				 "aiTemplatePlugIn.create Unit TestGunner_Unit", "aiTemplatePlugIn.equipmentTypeName Fixed",
+				 "aiTemplatePlugIn.setSelectKey PIPositionSelect2", "aiTemplate.create TestGunner",
+				 "aiTemplate.addPlugIn TestGunner_Unit", "weaponTemplate.create car_firearm",
+				 "weaponTemplate.setStrength Infantry 2", "weaponTemplate.setStrength LightArmour 2",
+				 "weaponTemplate.setStrength HeavyArmour 2", "weaponTemplate.setStrength Helicopter 2",
+				 "weaponTemplate.create car_firearm_b", "weaponTemplate.setStrength Infantry 10",
+				 "weaponTemplate.setStrength LightArmour 10", "weaponTemplate.setStrength HeavyArmour 10",
+				 "weaponTemplate.setStrength Helicopter 10", "aiSettings.createBehaviourModifiers UnitWeights",
+				 "aiSettings.setBehaviourModifier Idle 1.0", "aiSettings.createBehaviourModifiers StandardWeights",
+				 "aiSettings.setBehaviourModifier Idle 0.1", "aiSettings.setBehaviourModifier Change 1.9",
+				 "aiSettings.setBehaviourModifier Avoid 1.0", "aiSettings.createUCConstant UCUnion 1.0",
+				 "aiSettings.setVehicleBehaviour Car Change BBChange BBPChange 3 UCUnion UnitWeights",
+				 "aiSettings.setVehicleBehaviour Car Idle BBIdle BBPIdle2d 5 UCUnion UnitWeights",
+				 "aiSettings.setVehicleDefaultBehaviour Car Idle",
+				 "aiSettings.setVehicleBehaviour Fixed Change BBChange BBPChange 3 UCUnion UnitWeights",
+				 "aiSettings.setVehicleBehaviour Fixed Idle BBIdle BBPIdle2d 5 UCUnion UnitWeights",
+				 "aiSettings.setVehicleDefaultBehaviour Fixed Idle",
+				 "aiSettings.setVehicleBehaviour Infantery Avoid BBAvoid BBPAvoidCollisionInfantery 1 UCUnion UnitWeights",
+				 "aiSettings.setVehicleBehaviour Infantery Change BBChange BBPChange 3 UCUnion UnitWeights",
+				 "aiSettings.setVehicleBehaviour Infantery Idle BBIdle BBPIdleInfantery 5 UCUnion UnitWeights",
+				 "aiSettings.setVehicleDefaultBehaviour Infantery Idle"}) {
+			console.execute(line, out);
+		}
+		world = std::make_unique<game::GameWorld>(templates, objects);
+		world->enablePhysics(files, collisionTemplates,
+			{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
+				 normal = {0, 1, 0};
+				 return 0.0f;
+			 }});
+		world->autoRespawn = false;
+		world->startRound();
+	}
+	void addCar(const std::string& name, const std::string& gun)
+	{
+		world::ObjectTemplate* car = templates.create("PlayerControlObject", name);
+		car->settings()["hasMobilePhysics"] = "1";
+		car->settings()["physicsType"] = "Mesh";
+		car->settings()["collisionMesh"] = "as_fav";
+		car->settings()["seatInformation"] = name + " 0/0.5/0.4 0/0/0";
+		car->settings()["mass"] = "1800";
+		car->settings()["aiTemplate"] = "TestCar";
+		car->settings()["armor.maxHitPoints"] = "100";
+		car->children().push_back({"car_entry", {-1.5f, 0, 0}, {}});
+		car->children().push_back({name + "_second", {0, 0, -0.5f}, {}});
+		car->children().push_back({"car_engine", {0, -0.44f, 0}, {}});
+		world::ObjectTemplate* second = templates.create("PlayerControlObject", name + "_second");
+		second->settings()["seatInformation"] = name + "_second 0/0.5/-0.5 0/0/0";
+		second->settings()["aiTemplate"] = "TestGunner";
+		second->children().push_back({name + "_base", {0, 0.8f, 0}, {}});
+		world::ObjectTemplate* base = templates.create("RotationalBundle", name + "_base");
+		base->settings()["inputToYaw"] = "PIMouseLookX";
+		base->children().push_back({gun, {0, 0.1f, 0}, {}});
+		templates.create("GenericFireArm", gun)->settings()["projectileTemplate"] = "bullet";
+	}
+	uint32_t car(const std::string& name, float x, float z)
+	{
+		return objects.create(templates.find(name), {x, 1.2f, z}, {30, 0, 0})->id();
+	}
+	int soldier(const std::string& name, bool ai, float x, float z)
+	{
+		const int id = world->addPlayer(name, 2, ai);
+		world->spawnSoldier(id);
+		game::GameWorld::PlayerInfo info;
+		world->playerInfo(id, info);
+		world->setSoldierPosition(info.soldier, {x, 0, z});
+		return id;
+	}
+	void ticks(int n, game::BotManager* bots = nullptr)
+	{
+		for (int i = 0; i < n; ++i) {
+			if (bots) {
+				bots->update(1 / 30.0f);
+			}
+			world->tick(1 / 30.0f);
+		}
+	}
+	// Gets a player in (use) and, for seat 1, to the gunner's seat.
+	void board(int player, int seat)
+	{
+		game::SoldierInput input;
+		input.use = true;
+		world->setInput(player, input);
+		world->tick(1 / 30.0f);
+		world->setInput(player, {});
+		world->tick(1 / 30.0f);
+		if (seat > 0) {
+			input = {};
+			input.switchSeat = seat + 1;
+			world->setInput(player, input);
+			world->tick(1 / 30.0f);
+			world->setInput(player, {});
+			world->tick(1 / 30.0f);
+		}
+	}
+	game::GameWorld::PlayerInfo info(int player)
+	{
+		game::GameWorld::PlayerInfo i;
+		world->playerInfo(player, i);
+		return i;
+	}
+};
+
+} // namespace
+
+// The radio in BBChange (0x1006c520): a human's bail_out (type 0) makes a
+// driving bot's way out x modifier x 100 and it gets out; a human's get_in
+// (type 1) from a car makes a bot on foot weigh that car x the modifier.
+TEST(Bots_ChangeHearsBailOutAndGetIn)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	{
+		CarField field(gameDir);
+		const uint32_t car = field.car("car", 3, 0);
+		const int bot = field.soldier("Bot", true, 0, 0);
+		const int human = field.soldier("Human", false, -10, 0);
+		field.ticks(90);
+		field.board(bot, 0);
+		CHECK(field.info(bot).vehicle == car && field.info(bot).seat == 0);
+		game::BotManager bots(*field.world, field.settings);
+		field.ticks(60, &bots);
+		CHECK(field.info(bot).vehicle == car); // its seat (2 x 4.5) beats the soldier's own
+		bots.radio(human, "bail_out");
+		bool out = false;
+		for (int tick = 0; tick < 30 * 3 && !out; ++tick) {
+			field.ticks(1, &bots);
+			out = field.info(bot).vehicle == 0;
+		}
+		CHECK(out);
+	}
+	{
+		CarField field(gameDir);
+		const uint32_t car = field.car("car", 3, 0);
+		const int human = field.soldier("Human", false, 0, 0);
+		const int bot = field.soldier("Bot", true, -30, 0);
+		field.ticks(90);
+		field.board(human, 0);
+		CHECK(field.info(human).vehicle == car);
+		game::BotManager bots(*field.world, field.settings);
+		field.ticks(30, &bots);
+		const float before = bots.lastUrgency(bot, "Change");
+		bots.radio(human, "get_in");
+		field.ticks(30, &bots);
+		const float after = bots.lastUrgency(bot, "Change");
+		CHECK(before > 0);
+		CHECK(after > 5 * before); // x10, the same distance
+	}
+}
+
+// From a vehicle BBChange weighs the other vehicles' seats too (0x1006c520):
+// a gunner whose own seat is worth 2 x 16 x 0.77 = 24.6 leaves for a car
+// whose gun is worth 2 x 40 x 0.77 = 61.6 nearby.
+TEST(Bots_ChangeWeighsOtherVehiclesFromInside)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	CarField field(gameDir);
+	const uint32_t car = field.car("car", 3, 0);
+	const uint32_t other = field.car("car_b", 3, 12);
+	const int bot = field.soldier("Bot", true, 0, 0);
+	field.ticks(90);
+	field.board(bot, 1);
+	CHECK(field.info(bot).vehicle == car && field.info(bot).seat == 1);
+	game::BotManager bots(*field.world, field.settings);
+	bool left = false, boarded = false;
+	for (int tick = 0; tick < 30 * 20 && !boarded; ++tick) {
+		field.ticks(1, &bots);
+		const game::GameWorld::PlayerInfo i = field.info(bot);
+		left = left || i.vehicle != car;
+		boarded = i.vehicle == other;
+	}
+	CHECK(left);
+	CHECK(boarded);
+}
+
+// Avoid (0x10064850): a wreck within reach adds 100, x2 in the level's
+// first 5 s (the comm's +0x78 stamp at 0 against the game's clock).
+TEST(Bots_AvoidDoubledInTheFirstFiveSeconds)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	CarField field(gameDir);
+	const uint32_t car = field.car("car", 3, 0);
+	const int bot = field.soldier("Bot", true, 0, 0);
+	field.ticks(90);
+	field.world->setHitPoints(car, 10); // below 30 %: avoided like a wreck
+	game::BotManager bots(*field.world, field.settings);
+	float early = 0, late = 0;
+	for (int tick = 0; tick < 30 * 8; ++tick) {
+		field.world->setSoldierPosition(field.info(bot).soldier, {0, 0, 0});
+		field.ticks(1, &bots);
+		const float u = bots.lastUrgency(bot, "Avoid");
+		if (tick < 30 * 4) {
+			early = std::max(early, u);
+		} else if (tick > 30 * 6) {
+			late = std::max(late, u);
+		}
+	}
+	CHECK(near(early, 200, 1e-3f));
+	CHECK(near(late, 100, 1e-3f));
+}

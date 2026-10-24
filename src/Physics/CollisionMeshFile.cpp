@@ -74,6 +74,14 @@ const CollisionLod* collisionLodFor(const CollisionMeshFile& file, const Collisi
 	return nullptr;
 }
 
+const CollisionSubGeometry* collisionPart(const CollisionMeshFile& file, size_t geometry, size_t state)
+{
+	if (geometry >= file.geometries.size() || state >= file.geometries[geometry].subGeometries.size()) {
+		return nullptr;
+	}
+	return &file.geometries[geometry].subGeometries[state];
+}
+
 float boxRadius(const std::array<float, 3>& low, const std::array<float, 3>& high)
 {
 	float farthest = 0;
@@ -143,6 +151,33 @@ std::optional<CollisionMeshFile> parseCollisionMesh(const std::vector<uint8_t>& 
 			*error = r.ok() ? "unexpected data at the end" : "truncated";
 		}
 		return std::nullopt;
+	}
+	// What the template's loader (0x006d8740, its loop over 0x006e4880) keeps.
+	// A trailing run of geometries without a LOD is dropped (unless it
+	// starts at geometry 0), and when no geometry's sub-geometry 0 has a
+	// LOD (0x006de510), every geometry loses its first sub-geometry
+	// (0x006e5820): the shipped vehicles' files lead each geometry with an
+	// empty one, so their normal shape becomes sub-geometry 0 and the wreck
+	// sub-geometry 1, the states a mesh instance's +0x14 picks.
+	const auto hasLod = [](const CollisionGeometry& g) {
+		return std::any_of(g.subGeometries.begin(), g.subGeometries.end(),
+			[](const CollisionSubGeometry& sub) { return !sub.lods.empty(); });
+	};
+	size_t keep = file.geometries.size();
+	while (keep > 0 && !hasLod(file.geometries[keep - 1])) {
+		--keep;
+	}
+	if (keep > 0) {
+		file.geometries.resize(keep);
+	}
+	const bool firstHasLod = std::any_of(file.geometries.begin(), file.geometries.end(),
+		[](const CollisionGeometry& g) { return !g.subGeometries.empty() && !g.subGeometries[0].lods.empty(); });
+	if (!firstHasLod) {
+		for (CollisionGeometry& g : file.geometries) {
+			if (!g.subGeometries.empty()) {
+				g.subGeometries.erase(g.subGeometries.begin());
+			}
+		}
 	}
 	return file;
 }

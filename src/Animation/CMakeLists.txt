@@ -2,6 +2,7 @@ add_library(Animation STATIC
 	AnimationFiles.cpp
 	AnimationConsole.cpp
 	AnimationSystem.cpp
+	FirstPerson.cpp
 	Pose.cpp
 	RagDoll.cpp
 )
