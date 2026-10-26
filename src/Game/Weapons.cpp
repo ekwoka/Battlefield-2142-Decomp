@@ -61,6 +61,7 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	if (const auto seek = t.settings().find("seek.targetType"); seek != t.settings().end()) {
 		s.seek = seek->second == "TTMagnet" ? ProjectileSettings::Seek::Magnet
 			: seek->second == "TTUnique"    ? ProjectileSettings::Seek::Aim
+			: seek->second == "TTBeacon"    ? ProjectileSettings::Seek::Beacon
 											: ProjectileSettings::Seek::None;
 		s.seekDelay = number(t, "seek.trackingDelay", 0);
 		s.lockDistance = number(t, "seek.maxDistLock", 0);
@@ -79,6 +80,9 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 		s.maxAngleLock = number(t, "seek.maxAngleLock", 360);
 		s.ignoreFriendly = number(t, "seek.ignoreFriendly", 1) != 0;
 	}
+	s.startDelay = number(t, "startDelay", 0);
+	s.onlyDetonateOnMaterial = static_cast<int>(number(t, "onlyDetonateOnMaterial", -1));
+	s.onlyDetonateOnMaterialTime = number(t, "onlyDetonateOnMaterialTimeLimit", 0);
 	s.triggerRadius = number(t, "detonation.triggerRadius", 0);
 	s.triggerAngle = number(t, "detonation.triggerAngle", 180);
 	s.triggerMinSpeed = number(t, "detonation.triggerVictimMinSpeed", 0);

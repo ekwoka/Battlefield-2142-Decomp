@@ -21,6 +21,14 @@ struct GeometryTemplate {
 	std::string name;
 	MeshKind kind = MeshKind::Static;
 	std::string path; // virtual file system path of the mesh (roads: of the settings .dat)
+	// GeometryTemplate.hasAdditiveAlpha: its blended materials (alpha mode
+	// 1) are added (SrcBlend SRCALPHA, DestBlend ONE) rather than blended
+	// over (RendDX9 0x100c3880 reads it at the bundled template's +0x268).
+	bool hasAdditiveAlpha = false;
+	// GeometryTemplate.simpleUVTranslation u/v: the additive materials'
+	// texture coordinates scroll by this per second (RaShaderBMadditive.fx:
+	// frac(GlobalTime * simpleUVTranslation); template +0x26c/+0x270).
+	float simpleUVTranslation[2] = {0, 0};
 };
 
 class GeometryTemplateManager {

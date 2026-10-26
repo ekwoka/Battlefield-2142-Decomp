@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 
 namespace dice::hfe::geom {
 
@@ -71,6 +72,19 @@ void registerGeometryConsoleMethods(Console& console, GeometryTemplateManager& g
 			GeometryTemplate* created = geometries.create(type, name, directory);
 			return created ? created->name : std::string();
 		});
+	bindMethod(console, "GeometryTemplate.hasAdditiveAlpha", ConsoleAccess::Anyone, [&geometries](bool on) {
+		if (GeometryTemplate* active = geometries.active()) {
+			active->hasAdditiveAlpha = on;
+		}
+	});
+	bindMethod(console, "GeometryTemplate.simpleUVTranslation", ConsoleAccess::Anyone, [&geometries](std::string uv) {
+		if (GeometryTemplate* active = geometries.active()) {
+			float u = 0, v = 0;
+			std::sscanf(uv.c_str(), "%f/%f", &u, &v);
+			active->simpleUVTranslation[0] = u;
+			active->simpleUVTranslation[1] = v;
+		}
+	});
 }
 
 } // namespace dice::hfe::geom

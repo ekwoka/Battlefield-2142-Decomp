@@ -84,6 +84,39 @@ struct EyeHeight {
 	void tick(int pose);
 };
 
+// The weapon's recoil kick, as SoldierBasedRecoilComp runs it (template
+// 0x005dd730, defaults below; the weapon's component 0x005dd370). The
+// template builds a graph (0x005dd890): n = recoilGraphFrameCount values
+// g[i] = -(i + 1)^recoilGraphExponent x recoilGraphTotalMovement / S, S the
+// sum of the (i + 1)^exponent (so they add up to -totalMovement); with
+// goBackOnRecoil a second one of n + m values, m = round(n / 4), the
+// first m going back from -g[n-1] / 2 with 1.5 x the curve and the rest
+// the curve x 1.5 on top, its positive values then scaled to cancel the
+// negative ones (the kick returns), used instead (0x005dd030). Each shot
+// (0x005dd490 -> 0x005dd3f0) draws its force: recoilForceUp (and
+// recoilForceLeftRight) sampled, times zoomModifier while zoomed in
+// (0x005dd090), and keeps the tick in a ring of 10 (+0x60). The value
+// (0x005dd5d0, through the firearm's slot 0x11c = 0x005c1920 -> the
+// component's slot 0x94 = 0x005dd710) is, k ticks after the last shot,
+// force x graph[size - 1 - k] for k < size - 1, else 0 (the firearm's
+// slot 0x110 factor is 1, 0x005b6b10). The soldier (0x005861a0, only
+// with hasRecoilForce: slot 0x100 = 0x005c1960 -> 0x005dd080) feeds it to
+// the camera spring's fire part (0x005ee980) and adds it to the aim's pitch
+// (0x0058a6d0; the left-right one, 0x00586140, to its yaw).
+struct RecoilSettings {
+	bool hasRecoilForce = false; // +0x34: recoil.hasRecoilForce
+	bool goBackOnRecoil = true;  // +0x35
+	float zoomModifier = 1;      // +0x38
+	int graphFrameCount = 8;     // +0x3c: recoil.recoilGraphFrameCount
+	float graphExponent = 2;     // +0x40: recoil.recoilGraphExponent
+	float graphTotalMovement = 2; // +0x44: recoil.recoilGraphTotalMovement
+	// The graph the kick follows (0x005dd890 / 0x005dd030).
+	std::vector<float> graph() const;
+};
+
+// The kick k ticks after a shot of `force` (0x005dd5d0).
+float recoilAt(const std::vector<float>& graph, int ticksSinceShot, float force);
+
 // The first-person skeleton posed by the soldier's and the weapon's
 // first-person systems.
 class FirstPersonRig {
@@ -93,8 +126,14 @@ public:
 	// (its startup trigger: the deploy).
 	void setWeapon(const AnimationSystemTemplate* weapon);
 	const AnimationSystemTemplate* weapon() const { return m_weaponTemplate; }
-	// One tick. Model-space node matrices follow.
-	void update(const AnimationInput& input, float seconds);
+	// One tick. Model-space node matrices follow. The systems' events this
+	// tick (the soldier's, then the weapon's) go to `events` if given.
+	struct Event {
+		bool weapon = false; // the weapon's system, else the soldier's
+		int type = Bundle::SoundEvent; // Bundle::SoundEvent or Bundle::EffectEvent
+		int id = 0;
+	};
+	void update(const AnimationInput& input, float seconds, std::vector<Event>* events = nullptr);
 	const Skeleton& skeleton() const { return m_skeleton; }
 	const std::vector<Matrix>& pose() const { return m_world; }
 	int cameraNode() const { return m_cameraNode; }

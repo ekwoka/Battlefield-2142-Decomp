@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ghidra": {
+      "command": "/Users/kwoka/Documents/GhidraMCP/data/os/mac_aarch64/mcp_bridge",
+      "args": ["--host", "localhost", "--port", "8765"]
+    }
+  }
+}

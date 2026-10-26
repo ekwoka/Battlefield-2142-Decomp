@@ -4,6 +4,8 @@ add_library(Game STATIC
 	MeshCollision.cpp
 	Ladders.cpp
 	Commander.cpp
+	Titans.cpp
+	CombatAreas.cpp
 	SoldierControl.cpp
 	Weapons.cpp
 	Vehicle.cpp

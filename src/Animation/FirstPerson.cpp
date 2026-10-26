@@ -108,15 +108,25 @@ void FirstPersonRig::combineSprings()
 	}
 }
 
-void FirstPersonRig::update(const AnimationInput& input, float seconds)
+void FirstPersonRig::update(const AnimationInput& input, float seconds, std::vector<Event>* events)
 {
+	// The systems' events go to their objects' handlers (slot 0x100): the
+	// soldier's (0x00587b90) and the weapon's, down its tree to its effect
+	// bundles (0x0063ca60 -> 0x0061a4e0).
+	const auto take = [events](AnimationState& state, bool weapon) {
+		for (const AnimationState::FiredEvent& fired : state.takeEvents()) {
+			if (events) {
+				events->push_back({weapon, fired.type, fired.id});
+			}
+		}
+	};
 	if (m_soldier) {
 		m_soldier->update(input, seconds);
-		m_soldier->takeEvents();
+		take(*m_soldier, false);
 	}
 	if (m_weapon) {
 		m_weapon->update(input, seconds);
-		m_weapon->takeEvents(); // the first-person sounds and effects aren't played
+		take(*m_weapon, true);
 	}
 	std::vector<bool> touched;
 	if (m_soldier) {
@@ -137,6 +147,54 @@ std::vector<std::string> FirstPersonRig::playing() const
 		}
 	}
 	return names;
+}
+
+std::vector<float> RecoilSettings::graph() const
+{
+	// 0x005dd890.
+	const int n = std::max(graphFrameCount, 0);
+	std::vector<float> curve(static_cast<size_t>(n));
+	float sum = 0;
+	for (int i = 0; i < n; ++i) {
+		sum += std::pow(static_cast<float>(i + 1), graphExponent);
+	}
+	const float scale = sum != 0 ? -1.0f / (sum / graphTotalMovement) : 0.0f;
+	for (int i = 0; i < n; ++i) {
+		curve[static_cast<size_t>(i)] = std::pow(static_cast<float>(i + 1), graphExponent) * scale;
+	}
+	if (!goBackOnRecoil || n == 0) {
+		return curve;
+	}
+	const float base = curve[static_cast<size_t>(n - 1)] * -0.5f;
+	const int m = static_cast<int>(std::lround(static_cast<float>(n) * 0.25f));
+	std::vector<float> back(static_cast<size_t>(n + m));
+	float positive = 0, negative = 0;
+	for (int i = 0; i < n + m; ++i) {
+		float& v = back[static_cast<size_t>(i)];
+		if (i < m) {
+			v = base - curve[static_cast<size_t>(std::min(m - i, n - 1))] * 1.5f;
+		} else {
+			v = curve[static_cast<size_t>(i - m)] * 1.5f + base;
+		}
+		(v <= 0 ? negative : positive) += v;
+	}
+	if (positive > 0 && negative < 0) {
+		for (float& v : back) {
+			if (v > 0) {
+				v /= positive / -negative;
+			}
+		}
+	}
+	return back;
+}
+
+float recoilAt(const std::vector<float>& graph, int ticksSinceShot, float force)
+{
+	const int size = static_cast<int>(graph.size());
+	if (ticksSinceShot < 0 || ticksSinceShot >= size - 1) {
+		return 0;
+	}
+	return graph[static_cast<size_t>(size - 1 - ticksSinceShot)] * force;
 }
 
 Matrix firstPersonPlacement(const Skeleton& skeleton, const std::vector<Matrix>& pose, int cameraNode,

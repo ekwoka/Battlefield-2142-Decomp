@@ -84,9 +84,15 @@ struct LightingUniforms {
 	float skyColor[4];
 	float fogColor[4]; // w: fog end distance
 	float material[4]; // x: alpha reference, 0 for opaque; y: 1 with a lightmap;
-					   // z: mesh layers (1 detail, 2 dirt, 4 crack);
+					   // z: mesh layers (1 detail, 2 dirt, 4 crack) plus the
+					   // material's kind (kMaterialBlended, kMaterialAdditive);
 					   // w: the object's fade, 0 for none (fadedMeshPipeline)
+	float uvOffset[4] {}; // xy: added to the diffuse texture coordinates (mesh.frag)
 };
+
+// LightingUniforms::material[2] bits beside the layers.
+constexpr float kMaterialBlended = 8;   // alpha from the texture (times the fade)
+constexpr float kMaterialAdditive = 16; // unlit, added (additiveMeshPipeline)
 
 class GpuContext {
 public:
@@ -102,7 +108,12 @@ public:
 	SDL_GPUGraphicsPipeline* skyPipeline() const { return m_skyPipeline; }
 	// Meshes fading out (LightingUniforms material.w their alpha): blended,
 	// no depth writes.
+	// Also blended materials (RendDX9's transparency queues): SRCALPHA /
+	// INVSRCALPHA, no culling (CullMode 1, 0x100c3880).
 	SDL_GPUGraphicsPipeline* fadedMeshPipeline() const { return m_fadedMeshPipeline; }
+	// Additive materials (hasAdditiveAlpha, BMadditive): SRCALPHA / ONE,
+	// depth-tested, not written.
+	SDL_GPUGraphicsPipeline* additiveMeshPipeline() const { return m_additiveMeshPipeline; }
 	// Alpha-blended, depth-tested but not written.
 	SDL_GPUGraphicsPipeline* waterPipeline() const { return m_waterPipeline; }
 	// Water's blending plus a depth bias, for road decals.
@@ -170,6 +181,7 @@ private:
 	SDL_GPUGraphicsPipeline* m_terrainPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_skyPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_fadedMeshPipeline = nullptr;
+	SDL_GPUGraphicsPipeline* m_additiveMeshPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_waterPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_roadPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_undergrowthPipeline = nullptr;

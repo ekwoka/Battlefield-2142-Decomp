@@ -277,6 +277,11 @@ void GameWorld::startRound()
 {
 	m_controlPoints.clear();
 	m_spawners.clear();
+	m_titans.clear();
+	m_silos.clear();
+	m_pods.clear();
+	m_titanObstacles.clear();
+	m_titanObstaclesFound = false;
 	m_state = RoundState::BeforeStart;
 	const size_t placed = m_objects.objects().size();
 	for (size_t i = 0; i < placed; ++i) {
@@ -470,6 +475,11 @@ void GameWorld::tick(float seconds)
 			if (t && sameName(t->typeName(), "PlayerControlObject")) {
 				const float ttl = spawner->settings().timeToLive;
 				m_abandonment[id] = {spawner->object().id(), ttl, ttl, m_time + 0.5};
+				// Titan mode's Titans (0x005ab390) and missile silos (Titans.cpp).
+				if (titanModeOn()) {
+					registerTitan(id, spawner->settings().controlPointId);
+				}
+				registerSilo(*m_objects.find(id));
 			}
 		}
 		holdSpawned(*spawner);
@@ -486,10 +496,15 @@ void GameWorld::tick(float seconds)
 	}
 	if (m_files) {
 		addBodies();
+		stepTitans(seconds);
 		stepPhysics(seconds);
+	} else {
+		stepTitans(seconds);
 	}
 	setRagDollLevels();
 	stepPlayers(seconds);
+	stepPods(seconds);
+	stepSilos(seconds);
 	stepDrones(seconds);
 	stepSeatCorpses(seconds);
 	stepCorpses(seconds);
@@ -530,6 +545,11 @@ std::vector<uint32_t> GameWorld::materialMap(const world::ObjectTemplate& t) con
 
 float GameWorld::hitPoints(uint32_t object) const
 {
+	const Titan* titan = nullptr;
+	int part = 0;
+	if (titanPart(object, titan, part)) {
+		return titan->parts[static_cast<size_t>(part)].hitPoints;
+	}
 	const auto known = m_hitPoints.find(object);
 	if (known != m_hitPoints.end()) {
 		return known->second;
@@ -544,6 +564,12 @@ float GameWorld::hitPoints(uint32_t object) const
 
 void GameWorld::setHitPoints(uint32_t object, float value)
 {
+	Titan* titan = nullptr;
+	int part = 0;
+	if (titanPart(object, titan, part)) {
+		setTitanPartHitPoints(*titan, part, value, -1); // the scripts' setDamage
+		return;
+	}
 	if (hitPoints(object) < 0) {
 		return;
 	}
@@ -574,6 +600,9 @@ void GameWorld::damage(uint32_t object, float amount, uint32_t projectileMateria
 
 void GameWorld::loseHitPoints(uint32_t object, float amount, int attacker)
 {
+	if (titanDamage(object, amount, attacker)) {
+		return; // a Titan's armour (0x004c0e40's Titan rules)
+	}
 	const float left = hitPoints(object);
 	if (left < 0) {
 		return; // no armor
@@ -635,7 +664,8 @@ void GameWorld::stepAbandoned()
 			continue;
 		}
 		const physics::Vec3 at {object->position().x, object->position().y, object->position().z};
-		if (body && std::any_of(body->occupants.begin(), body->occupants.end(), [](int p) { return p >= 0; })) {
+		// In use: a seat taken, or a Titan (0x005c8b40 asks the Titan sync first).
+		if (isTitan(it->first) || (body && std::any_of(body->occupants.begin(), body->occupants.end(), [](int p) { return p >= 0; }))) {
 			a.nextCheck = m_time + 5;
 			continue;
 		}
@@ -756,6 +786,7 @@ void GameWorld::destroyVehicle(Body& body, int attacker)
 	const world::ObjectTemplate& t = *object->objectTemplate();
 	object->setDestroyed(true);
 	body.wreckTime = number(t, "armor.timeToStayAsWreck", 10);
+	raise("VehicleDestroyed", {ScriptValue::object(body.object), ScriptValue::player(attacker)});
 	if (body.vehicle) {
 		body.vehicle->setInput({});
 	}
@@ -1403,6 +1434,10 @@ void GameWorld::empBlast(const physics::Vec3& at, const ProjectileSettings& sett
 // where its shooter looks, at most its follow rates.
 void GameWorld::steerSeeker(Projectile& p, float seconds)
 {
+	if (p.settings && p.settings->seek == ProjectileSettings::Seek::Beacon) {
+		steerBeacon(p, seconds); // Titans.cpp
+		return;
+	}
 	if (!p.settings || p.settings->seek == ProjectileSettings::Seek::None || p.age < p.settings->seekDelay) {
 		return;
 	}
@@ -1608,7 +1643,8 @@ void GameWorld::stepProjectiles(float seconds)
 				hit = candidate;
 				hit.point = from + (to - from) * candidate.fraction;
 				hit.normal = body.body.rotation.transform(candidate.normal);
-				hitObject = body.object;
+				// The face's object: the body's, or a part of a Titan's tree.
+				hitObject = candidate.owner ? candidate.owner : body.object;
 			}
 		}
 		// Soldiers on foot: their bones' capsules, the soldier template's
@@ -1678,6 +1714,20 @@ void GameWorld::stepProjectiles(float seconds)
 					hitObject = 0;
 					break;
 				}
+			}
+		}
+		// onlyDetonateOnMaterial within its time (0x005b4ff0): an object of
+		// another material that is no Titan's is destroyed on the server
+		// (3e10 through the game logic's damage) and the projectile flies
+		// on; a Titan's any face, or the terrain, sets it off as usual.
+		if (best <= 1.0f && p.settings->onlyDetonateOnMaterial >= 0 && hitObject != 0
+			&& (p.settings->onlyDetonateOnMaterialTime <= 0 || p.age < p.settings->onlyDetonateOnMaterialTime)
+			&& hit.material != static_cast<uint32_t>(p.settings->onlyDetonateOnMaterial)) {
+			const Titan* struck = nullptr;
+			int part = 0;
+			if (!titanPart(hitObject, struck, part)) {
+				loseHitPoints(hitObject, 3e10f, -1);
+				continue;
 			}
 		}
 		if (best <= 1.0f && p.settings->bounces && p.lockedOn && hitObject == p.lockedOn) {
@@ -2346,7 +2396,8 @@ ObjectSpawner::SpotTest GameWorld::testSpawnSpot(const world::ObjectTemplate& ob
 	const auto legs = m_legsBottom.find(&objectTemplate);
 	const float legsBottom = legs != m_legsBottom.end() ? legs->second : 0.0f;
 	for (const Body& body : m_bodies) {
-		if (!body.controlObject || !body.soldierMesh || body.soldierMesh->triangles() == 0) {
+		// A Titan never blocks a spawn (0x005aeb80 asks the Titan sync).
+		if (!body.controlObject || !body.soldierMesh || body.soldierMesh->triangles() == 0 || isTitan(body.object)) {
 			continue;
 		}
 		// (A wreck counts: only an object being deleted, +0x14 bit 0, doesn't.)
@@ -4004,6 +4055,8 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 					? driverInputScale(body->empLevel, hitPoints(body->object), *vehicleObject->objectTemplate())
 					: 1.0f;
 				body->vehicle->setInput({input.throttle * scale, input.strafe * scale});
+			} else if (body->wreckTime < 0 && player.seat != 0 && input.altFire && launchPod(player.id)) {
+				return; // a pod seat's alternate fire (Titans.cpp): off in a drop pod
 			} else if (body->wreckTime < 0 && player.seat != 0) {
 				// The guns under EMP keep firing: the PlayerControlObject's
 				// input filter (0x005ca2e0) scales only the driver's throttle,
@@ -4798,6 +4851,12 @@ void GameWorld::seatPlayer(Player& player, Body& body, int seat)
 // vehicle's altSoldierExitPosition, else 2.5 m to the left.
 void GameWorld::enterOrLeaveVehicle(Player& player, world::Object& soldier)
 {
+	if (std::any_of(m_pods.begin(), m_pods.end(), [&](const Pod& pod) { return pod.player == player.id; })) {
+		return; // a drop pod's rider stays in until it lands (dontAllowExit)
+	}
+	if (!player.vehicle && launchPod(player.id)) {
+		return; // at a Titan's pod array (Titans.cpp)
+	}
 	if (player.vehicle) {
 		Body* body = findBody(player.vehicle);
 		const int seat = player.seat;
@@ -5277,8 +5336,8 @@ void GameWorld::stepPhysics(float seconds)
 			it = m_bodies.erase(it);
 			continue;
 		}
-		if (findDrone(it->object)) {
-			++it; // held in the air by its ForceObject (stepDrones)
+		if (findDrone(it->object) || isTitan(it->object)) {
+			++it; // held in the air by its ForceObject (stepDrones), or a Titan moved by its sync (stepTitans)
 			continue;
 		}
 		physics::RigidBody& body = it->body;
@@ -5340,7 +5399,7 @@ void GameWorld::stepPhysics(float seconds)
 	collideBodies(seconds);
 	for (Body& b : m_bodies) {
 		world::Object* object = m_objects.find(b.object);
-		if (!object || findDrone(b.object) || asleep(b)) {
+		if (!object || findDrone(b.object) || isTitan(b.object) || asleep(b)) {
 			continue;
 		}
 		b.response.solve(b.body);

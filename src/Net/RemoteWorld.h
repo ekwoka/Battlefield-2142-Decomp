@@ -114,6 +114,7 @@ struct RemotePlayer {
 	int32_t profileId = 0;
 	bool alive = false;
 	uint16_t soldierGhost = 0; // the soldier of HandlePickup / HandleDrop (or the control object)
+	uint16_t kitGhost = 0;     // the kit HandlePickup gave it (0 after HandleDrop)
 	uint16_t vehicleGhost = 0;
 	int kills = 0, deaths = 0; // counted from kill messages (PythonCommand type 100)
 	int score = 0;             // from the player's networkable (mask 8), as are these

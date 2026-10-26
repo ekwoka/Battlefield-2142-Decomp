@@ -63,7 +63,10 @@ struct ProjectileSettings {
 	// vehicle within maxDistLock after trackingDelay and chases it (motion
 	// mines); TTUnique follows the shooter's aim (the AV missile), turning
 	// at most maxYaw/maxPitch radians a second.
-	enum class Seek { None, Magnet, Aim };
+	// TTBeacon (the missile silos' msilo_missile, FixedTargetComp): chases
+	// the target object its launcher locked (the silo's TitanBeacon on the
+	// enemy Titan) after trackingDelay, by the magnet's follow.
+	enum class Seek { None, Magnet, Aim, Beacon };
 	Seek seek = Seek::None;
 	float seekDelay = 0;
 	float lockDistance = 0;
@@ -80,6 +83,16 @@ struct ProjectileSettings {
 	float acceleration = 0, deAcceleration = 0, maxSpeed = 0;
 	float maxAngleLock = 360;
 	bool ignoreFriendly = true;
+	// startDelay (the GenericProjectile's): seconds before its acceleration
+	// pushes it along its flight.
+	float startDelay = 0;
+	// onlyDetonateOnMaterial (template +0x348, -1 none) for the first
+	// onlyDetonateOnMaterialTimeLimit seconds (+0x34c; 0: always): until
+	// then it sets off only on that material, and anything else it meets
+	// that is no Titan the server destroys (3e10 damage) while it flies on
+	// (0x005b4ff0).
+	int onlyDetonateOnMaterial = -1;
+	float onlyDetonateOnMaterialTime = 0;
 	// Mines: an enemy inside triggerRadius and triggerAngle (degrees either
 	// side of the mine's facing) moving faster than triggerVictimMinSpeed
 	// sets it off; the blast reaches explosionConeAngle either side of the

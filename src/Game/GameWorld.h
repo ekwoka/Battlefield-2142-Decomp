@@ -57,6 +57,8 @@ class ObjectTemplateManager;
 
 namespace dice::hfe::game {
 
+class CombatAreas;
+
 // The game logic's state (slot 0x164); spawners treat team changes before
 // the round starts as the round's starting teams.
 enum class RoundState { BeforeStart = 3, Playing = 1 };
@@ -669,6 +671,93 @@ public:
 	const Vehicle* vehicle(uint32_t object) const;
 	// The input for the next ticks.
 	void setPlayerInput(const SoldierInput& input) { m_playerInput = input; }
+	// Titan mode (Titans.cpp; docs/engine.md, "Titans"). The Titan sync
+	// manager (0x005628f0, ECPhysicsETitanSync: set up by 0x00561c00, run by
+	// 0x00561e20 only when the game mode is "gpm_ti") keeps one Titan per
+	// team: a spawned object whose template tree holds a
+	// RemoteControlledObject of rcType RCTitan (7) of that team, not a
+	// wreck (0x005ab390). The game mode is the server settings' (main's
+	// +gameMode).
+	void setGameMode(std::string mode) { m_gameMode = std::move(mode); }
+	const std::string& gameMode() const { return m_gameMode; }
+	// The level's combat areas (CombatAreas.h): the Titans keep inside those
+	// binding vehicle category 4 (0x005ab740).
+	void setCombatAreas(const CombatAreas* areas) { m_combatAreas = areas; }
+	// sv.allowTitanMovement (the server settings' +0x59, read by the move
+	// 0x005aca70 and the order's check 0x005abaf0).
+	bool allowTitanMovement = true;
+	struct TitanInfo {
+		uint32_t object = 0;
+		int team = 0;
+		int controlPoint = -1;  // its spawner's (the Titan's spawn points belong to it)
+		physics::Vec3 position, velocity;
+		float hitPoints = 0, maxHitPoints = 0;
+		float percent = 0;      // armour vtable 0x40 (0x00651f90): hit points over the maximum, x 100
+		bool shield = false;    // above 60 %: the HUD's shield span (HudElementsTitans.con), the forcefield up
+		bool canMove = false;   // above 60 % (0x005aca70's +0x35 against *0x00a6afbc)
+		bool hasTarget = false; // a commander's move order in force
+		physics::Vec3 target;
+		bool wreck = false;
+		int consoles = 0, consolesLeft = 0;
+		bool coreExposed = false; // the core's doors are down
+		bool coreDestroyed = false;
+		float radius = 0;         // 0x00562090: half the diagonal of its box across x and z
+	};
+	std::vector<TitanInfo> titans() const;
+	bool isTitan(uint32_t object) const; // the Titan's root (0x00561d90)
+	uint32_t titanOf(int team) const;     // 0 without one
+	// The commander's move order (Commander.moveTitan, the order event's
+	// server side 0x0050f1f0 -> 0x005abba0): the point must leave the Titan
+	// clear of the terrain (0x005aba40); taken, it holds from two seconds
+	// on (the tick + 2 / tick length). The answer is the commander's radio
+	// message (0x00757xxx: AUTO_TITAN_CC_moveaccepted / _unablemove).
+	enum class TitanMove { Accepted, Unable, NoTitan, TooSoon };
+	TitanMove moveTitan(int team, float x, float z);
+	// The Titan's armoured parts (its tree's templates with armour below the
+	// root): consoles, the core and its doors, the guns, the forcefield.
+	struct TitanPartInfo {
+		std::string name;     // the part's template
+		uint32_t id = 0;      // what hits on it report (Impact::object)
+		enum Kind { Other, Console, Core, CoreDoors, Gun, Shield } kind = Other;
+		float hitPoints = 0, maxHitPoints = 0;
+		bool wreck = false;
+		physics::Vec3 position; // in the world
+	};
+	std::vector<TitanPartInfo> titanParts(int team) const;
+	// The game logic's damage (0x004c0e40) as a shot's hit: through the
+	// armour's rules (a Titan's floors and parts' parent damage), `attacker`
+	// the player (-1 for none). No material cell (a cell of 1).
+	void applyDamage(uint32_t object, float amount, int attacker = -1) { loseHitPoints(object, amount, attacker); }
+	// Missile silos (templates with isMissileSilo): each fires its
+	// GenericFireArm's projectile at the enemy Titan when loaded (the auto
+	// controller CP_CANNON, AI/AutoControllers.ai), reloading
+	// ammo.reloadTime after each launch and after each change of hands
+	// (reloadOnTeamChange).
+	struct SiloInfo {
+		uint32_t object = 0;
+		int team = 0;
+		int controlPoint = -1;
+		physics::Vec3 position;
+		bool loaded = false;
+		float reloadLeft = 0;   // seconds until it is loaded
+		int launched = 0;       // missiles fired this round
+	};
+	std::vector<SiloInfo> missileSilos() const;
+	// The Titans' interior spawn points (as_titan_SpawnPoint children, moved
+	// with the Titan); their objects.
+	std::vector<uint32_t> titanSpawnPoints(int team) const;
+	// Launches a soldier standing at a Titan's pod array (titan_pod_array1/2,
+	// within an EntryPoint's entryRadius) or riding a pod-launching seat in
+	// a drop pod (the launcher's projectileTemplate, a Parachute PCO with
+	// isPod): false when there is none at hand.
+	bool launchPod(int player);
+	struct PodInfo {
+		uint32_t object = 0;
+		int player = -1;
+		physics::Vec3 position, velocity;
+	};
+	std::vector<PodInfo> pods() const;
+
 	// A soldier's hit capsules (setSkeletonCollisionBone) in world space as
 	// of the last tick: segment ends and radius; for checks and drawing.
 	struct Capsule {
@@ -1360,6 +1449,137 @@ private:
 	void fireStrike(Strike& strike, StrikeFire& fire);
 	void stepCrates(float seconds);
 	bool isCommanderAsset(uint32_t object) const;
+
+	// Titan mode (Titans.cpp).
+	std::string m_gameMode;
+	const CombatAreas* m_combatAreas = nullptr;
+	uint32_t m_titanSerial = 0;
+	bool titanModeOn() const;
+	// A node of the Titan's template tree with armour (or with a collision
+	// mesh): where it sits in the Titan's frame, its armour's state
+	// (ArmorGLComp: hit points +0x10, the template's settings) and its parent
+	// part (-1: the root's own armour, part 0).
+	struct TitanPart {
+		const world::ObjectTemplate* t = nullptr;
+		int parent = -1;   // the nearest armoured ancestor's part
+		uint32_t id = 0;   // the root's object id for part 0, else kTitanPartIds + ...
+		physics::Mat3 rotation;
+		physics::Vec3 position;
+		bool armoured = false;
+		float hitPoints = 0, maxHitPoints = 10, wreckHitPoints = 10;
+		float criticalDamage = 0, hpLostWhileCritical = 0;
+		float parentDamageAlive = 0, parentDamageWreck = 0;
+		float destroyOnParentLevel = -1, destroyOnRootLevel = -1, onlyFromChildrenLevel = -100;
+		float criticalTime = 0; // +0xf0: seconds burnt since the last loss
+		int state = 0;          // vtable 0x60 (0x00651c20): 0 alive, 1 wreck, 2 destroyed
+		bool off = false;       // its subtree's collision gone (0x00651c60)
+		int destroyEvent = 0;   // Python.onDestroyEvent
+		TitanPartInfo::Kind kind = TitanPartInfo::Other;
+	};
+	struct TitanMesh {
+		const physics::CollisionMeshFile* mesh = nullptr;
+		std::vector<uint32_t> materials;
+		physics::Mat3 rotation;
+		physics::Vec3 position;
+		int node = -1;  // the template node's part (its armour's or its armoured ancestor's)
+		std::vector<int> chain; // the parts it lies under (its collision goes with any of them)
+	};
+	struct Titan {
+		uint32_t object = 0;
+		int team = 0;
+		int controlPoint = -1;
+		std::vector<TitanPart> parts; // [0]: the root
+		std::vector<TitanMesh> meshes;
+		physics::Vec3 velocity;       // x and z (0x005aa0e0 sets the node's)
+		// The move orders (+0x3c: tick -> target), the last order's time.
+		std::map<uint32_t, std::pair<float, float>> targets;
+		double lastOrder = -1e9;
+		float orderInterval = 5; // the RCTitan object's minTimeBetweenActivation
+		float radius = 0;
+		float bottom = 0;        // the box's lowest point below the origin (0x005aa090)
+		bool wrecked = false;
+		struct Spawn {
+			uint32_t object = 0;
+			physics::Vec3 offset; // in the Titan's frame
+			float yaw = 0;        // degrees, the child's
+		};
+		std::vector<Spawn> spawnPoints;
+		// Its pod arrays (titan_pod_array1/2: a PlayerControlObject with
+		// EntryPoints and a GenericFireArm with fire.isPodLauncher), in its
+		// frame.
+		struct PodArray {
+			std::vector<std::pair<physics::Vec3, float>> entries; // entry points and their radius
+			physics::Vec3 launcher;
+			physics::Vec3 direction;
+			std::string projectile;
+			float velocity = 100;
+		};
+		std::vector<PodArray> podArrays;
+		bool meshesDirty = true;
+		uint32_t serial = 0;      // its parts' ids: kTitanPartIds + serial << 12 + part
+	};
+	std::vector<Titan> m_titans;
+	static constexpr uint32_t kTitanPartIds = 0x7f000000u;
+	std::vector<std::pair<physics::Vec3, float>> m_titanObstacles; // static objects reaching the Titans (0x00562360)
+	bool m_titanObstaclesFound = false;
+	void registerTitan(uint32_t object, int controlPoint);
+	void buildTitanParts(Titan& titan);
+	void rebuildTitanMeshes(Titan& titan);
+	Titan* titanByObject(uint32_t object);
+	const Titan* titanByObject(uint32_t object) const;
+	bool titanPart(uint32_t id, Titan*& titan, int& part);
+	bool titanPart(uint32_t id, const Titan*& titan, int& part) const;
+	float titanPercent(const TitanPart& part) const;
+	// The game logic's damage (0x004c0e40) on a Titan's armour: true when
+	// `id` is a Titan or one of its parts (the damage handled).
+	bool titanDamage(uint32_t id, float amount, int attacker, bool fromChild = false);
+	void setTitanPartHitPoints(Titan& titan, int part, float value, int attacker);
+	void titanPartWrecked(Titan& titan, int part, int attacker);
+	bool titanTerrainClear(const Titan& titan, float x, float z) const;
+	void findTitanObstacles();
+	void stepTitans(float seconds);
+	void moveTitanBody(Titan& titan, const physics::Vec3& delta);
+	physics::Vec3 titanAim(const Titan& titan) const;
+	// Silos.
+	struct Silo {
+		uint32_t object = 0;
+		int team = 0;
+		bool loaded = false;
+		float reloadLeft = 0;
+		float reloadTime = 120;   // ammo.reloadTime
+		float launchDelay = 1;    // fire.fireLaunchDelay
+		float launchIn = -1;      // a launch pending (seconds)
+		float velocity = 4;
+		physics::Vec3 muzzle;     // the barrel's pivot in the silo's frame
+		float muzzleLength = 0;   // the muzzle along the aim from it
+		const ProjectileSettings* missile = nullptr;
+		uint32_t target = 0;
+		int launched = 0;
+	};
+	std::vector<Silo> m_silos;
+	void registerSilo(world::Object& object);
+	void stepSilos(float seconds);
+	void launchMissile(Silo& silo, const Titan& target);
+	void steerBeacon(Projectile& p, float seconds);
+	// Drop pods (a Parachute PCO with isPod; ForceObjects steer it).
+	struct Pod {
+		uint32_t object = 0;
+		int player = -1;
+		physics::Vec3 position, velocity;
+		float gravityModifier = 1, drag = 0, mass = 1;
+		physics::Vec3 dragModifier {1, 1, 1};
+		float forward = 0, strafe = 0; // the ForceObjects' force on PIThrottle / PIYaw
+		float age = 0;
+		float still = 0; // seconds at rest
+	};
+	bool podLauncherOf(const world::ObjectTemplate& node, std::string& projectile, float& velocity,
+		physics::Vec3& start, bool altFire) const;
+	bool startPod(Player& player, const std::string& projectile, const physics::Vec3& from, const physics::Vec3& velocity,
+		uint32_t launcher);
+	std::vector<Pod> m_pods;
+	void stepPods(float seconds);
+	void stepTitanSpawnPoints(Titan& titan);
+	void raiseTitanEvent(int eventId, uint32_t object, int attacker);
 };
 
 } // namespace dice::hfe::game

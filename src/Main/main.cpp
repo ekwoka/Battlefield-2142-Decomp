@@ -19,6 +19,7 @@
 #include "Animation/AnimationConsole.h"
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
+#include "Game/CombatAreas.h"
 #include "Game/GameLogic.h"
 #include "Hud/Hud.h"
 #include "Input/ControlMap.h"
@@ -613,6 +614,35 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 	const int team = round.playerTeam() == 1 ? 1 : 2, enemy = 3 - team;
 	hud.setString("FriendlyTicketsString", std::to_string(static_cast<int>(logic.team(team).tickets)));
 	hud.setString("EnemyTicketsString", std::to_string(static_cast<int>(logic.team(enemy).tickets)));
+	// The ticket bars' values (HudElementsTitans.con: in Titan mode the
+	// tickets are the Titan's armour, the shield span 60-100, the hull 0-60).
+	hud.set("FriendlyTickets", logic.team(team).tickets);
+	hud.set("EnemyTickets", logic.team(enemy).tickets);
+	if (round.gameMode() == "gpm_ti") {
+		// The Titan HUD shows for GameMode 1 or 3 (the conquest one for 0, 2,
+		// 4-7); the silos' row (CPCannon%i*, five slots) and the consoles'
+		// lights (*StrategicObject1-4Show: that console destroyed; 0: the
+		// Titan gone), the HUD manager's variables of 0x0044f1a0.
+		hud.set("GameMode", 1);
+		const auto silos = round.missileSilos();
+		for (size_t i = 0; i < 5; ++i) {
+			const std::string n = std::to_string(i);
+			hud.set("CPCannon" + n + "Show", i < silos.size() ? 1 : 0);
+			hud.set("CPCannon" + n + "Team", i < silos.size() ? static_cast<float>(silos[i].team) : 0);
+			hud.setString("CPCannon" + n + "String",
+				i < silos.size() && silos[i].team != 0 && !silos[i].loaded ? std::to_string(static_cast<int>(std::ceil(silos[i].reloadLeft))) : "");
+		}
+		for (const int side : {team, enemy}) {
+			const std::string prefix = side == team ? "FriendlyStrategicObject" : "EnemyStrategicObject";
+			int console = 0;
+			for (const auto& part : round.titanParts(side)) {
+				if (part.kind == game::GameWorld::TitanPartInfo::Console && console < 4) {
+					hud.set(prefix + std::to_string(++console) + "Show", part.wreck ? 1 : 0);
+				}
+			}
+			hud.set(prefix + "0Show", round.titanOf(side) == 0 ? 1 : 0);
+		}
+	}
 	if (soldier) {
 		if (const world::Object* rifle = round.objects().find(round.playerWeaponObject())) {
 			const auto& settings = rifle->objectTemplate()->settings();
@@ -1263,6 +1293,9 @@ int runGame(Options& options, Session& session)
 
 	game::GameLogic gameLogic;
 	game::registerGameLogicConsoleMethods(console, gameLogic);
+	// The level's combat areas (CombatArea.*): the Titans keep inside them.
+	game::CombatAreas combatAreas;
+	game::registerCombatAreaConsoleMethods(console, combatAreas);
 	gameLogic.mapSize = options.mapSize;
 
 	// The bots' settings (AI/AIBehaviours.ai, AI/AIDefault.ai).
@@ -1805,6 +1838,10 @@ int runGame(Options& options, Session& session)
 		// Start the round: spawners take their control points' teams and
 		// put their vehicles out on the first tick.
 		game::GameWorld round(templates, objects);
+		// Titan mode's Titans and silos run in gpm_ti (the Titan sync's
+		// 0x00561e20 checks the server's game mode).
+		round.setGameMode(options.gameMode);
+		round.setCombatAreas(&combatAreas);
 		// The bots see as far as the level's fog lets them (AIDLL 0x10056b20).
 		botSettings.levelFog = lights.fogStartEndAndBase;
 		game::BotManager bots(round, botSettings);
@@ -1848,6 +1885,17 @@ int runGame(Options& options, Session& session)
 		}
 		bindMethod(console, "Commander.satellite", ConsoleAccess::Anyone,
 			[&] { round.commanderAction(myTeam(), Ability::Satellite, 0, 0); });
+		// The Titan's move (Commander.moveTitan / toggleMoveTitanState: the
+		// HUD manager's slots 0x328 / 0x334 arm it; the map's next click
+		// orders the Titan there, 0x0050f1f0 on the server).
+		bool moveTitanArmed = false;
+		for (const char* command : {"Commander.moveTitan", "Commander.toggleMoveTitanState"}) {
+			bindMethod(console, command, ConsoleAccess::Anyone, [&] {
+				moveTitanArmed = !moveTitanArmed;
+				armedTool.reset();
+				armedOrder.reset();
+			});
+		}
 		// sendOrder <kind> <add>: the order kind (0..3 move, attack, defend,
 		// repair from the issue-order menu, 4..7 the same placed on the map,
 		// 10 or more drops it), sent where the map is clicked next. Both the
@@ -1873,6 +1921,14 @@ int runGame(Options& options, Session& session)
 		// A click on the map with a tool or order armed: used there.
 		const auto commanderClick = [&](float x, float y) {
 			float worldX = 0, worldZ = 0;
+			if (moveTitanArmed && hudManager.mapWorldAt(x, y, worldX, worldZ)) {
+				moveTitanArmed = false;
+				const auto answer = round.moveTitan(myTeam(), worldX, worldZ);
+				std::printf("titan move: %s\n", answer == game::GameWorld::TitanMove::Accepted ? "AUTO_TITAN_CC_moveaccepted"
+						: answer == game::GameWorld::TitanMove::Unable                  ? "AUTO_TITAN_CC_unablemove"
+																						: "refused");
+				return true;
+			}
 			if ((!armedTool && !armedOrder) || !hudManager.mapWorldAt(x, y, worldX, worldZ)) {
 				return false;
 			}
@@ -1935,6 +1991,37 @@ int runGame(Options& options, Session& session)
 		// for the chase view), its first-person systems built the same way.
 		PlayerCamera playerCamera(round, animationSystems, loadAnimationSystem);
 		playerCamera.firstPerson = options.cameraMode != "third";
+		// The effect bundles the world's objects carry (engines, exhausts,
+		// trails), following them (effects::ObjectEffects).
+		effects::EffectManager objectEffects(templates, 0x2f6b1d3u);
+		effects::ObjectEffects objectEffectBundles(templates);
+		const auto stepObjectEffects = [&] {
+			std::vector<effects::ObjectEffects::ObjectState> states;
+			states.reserve(objects.objects().size());
+			for (const auto& object : objects.objects()) {
+				effects::ObjectEffects::ObjectState state;
+				state.id = object->id();
+				state.objectTemplate = object->objectTemplate();
+				state.position = {object->position().x, object->position().y, object->position().z};
+				state.rotation = physics::Mat3::fromYawPitchRoll(
+					{object->rotation().x, object->rotation().y, object->rotation().z});
+				// A player in a control object (event 4; soldiers get none).
+				state.occupied = state.objectTemplate && state.objectTemplate->typeName() != "Soldier"
+					&& round.playerOf(state.id) >= 0;
+				states.push_back(state);
+			}
+			objectEffectBundles.update(states, objectEffects,
+				[&round](uint32_t object, const std::string& part, physics::Vec3& offset, physics::Vec3& rotation) {
+					world::Vec3 o, r;
+					if (!round.partPose(object, part, o, r)) {
+						return false;
+					}
+					offset = {o.x, o.y, o.z};
+					rotation = {r.x, r.y, r.z};
+					return true;
+				});
+			objectEffects.update(1.0f / 30.0f);
+		};
 		// The HUD's map: the level's ingameMap.dds over the primary terrain.
 		if (const terrain::Heightmap* ground = heightmaps.primary(); ground && ground->loaded()) {
 			hudManager.setMap("Levels/" + options.level + "/Hud/Minimap/ingameMap.dds", ground->originX(), ground->originZ(),
@@ -1983,6 +2070,73 @@ int runGame(Options& options, Session& session)
 			});
 		}
 		std::map<uint16_t, uint32_t> ghostObjects; // ghost -> object
+		// A joined game's look, as our input turns it (PlayerCamera::Remote).
+		struct RemoteLook {
+			bool started = false;
+			float yaw = 0, pitch = 0;
+			bool fire = false;
+			int stance = 0;
+		} remoteLook;
+		// A joined game's soldier for the first-person view.
+		if (session.client) {
+			playerCamera.setRemote([&session, &ghostObjects, &objects, &templates, &remoteLook](PlayerCamera::Remote& me) {
+				if (!session.client || !session.client->world().hasControlObject()) {
+					return false;
+				}
+				const net::RemoteWorld& world = session.client->world();
+				const net::ControlObjectRecord& control = world.controlObject();
+				const net::RemoteObject* ghost = world.object(control.ghost);
+				const auto object = ghostObjects.find(control.ghost);
+				const world::Object* soldier = object != ghostObjects.end() ? objects.find(object->second) : nullptr;
+				// Our soldier (its template's kind; the ghost's networkable kind
+				// comes with its first update).
+				if (!ghost || !soldier || !soldier->objectTemplate() || soldier->objectTemplate()->typeName() != "Soldier"
+					|| control.vehicle != 0) {
+					return false; // not on foot (a seat keeps the chase view)
+				}
+				if (!remoteLook.started && ghost->hasAngles) {
+					remoteLook.yaw = ghost->yaw;
+					remoteLook.started = true;
+				}
+				me.alive = ghost->health != 0;
+				me.soldier = soldier->id();
+				me.soldierTemplate = soldier->objectTemplate();
+				me.feet = {control.position.x, control.position.y, control.position.z};
+				if (ghost->hasVelocity) {
+					me.velocity = {ghost->velocity.x, ghost->velocity.y, ghost->velocity.z};
+				}
+				me.yaw = remoteLook.yaw;
+				me.aimPitch = remoteLook.pitch;
+				me.stance = remoteLook.stance;
+				me.firing = remoteLook.fire;
+				// The held weapon: the kit's firearm in the selected slot (the
+				// soldier's mask 0x2000; itemIndex, 3 the primary).
+				if (const net::RemotePlayer* player = world.player(world.localPlayer()); player && player->kitGhost) {
+					if (const auto kit = ghostObjects.find(player->kitGhost); kit != ghostObjects.end()) {
+						me.kit = kit->second;
+						if (const world::Object* kitObject = objects.find(kit->second); kitObject && kitObject->objectTemplate()) {
+							const int wanted = ghost->weapon >= 0 ? ghost->weapon : 3;
+							const world::ObjectTemplate* first = nullptr;
+							for (const world::ChildTemplate& child : kitObject->objectTemplate()->children()) {
+								const world::ObjectTemplate* t = templates.find(child.name);
+								if (!t || t->typeName() != "GenericFireArm") {
+									continue;
+								}
+								const auto index = t->settings().find("itemIndex");
+								if (index != t->settings().end() && std::atoi(index->second.c_str()) == wanted) {
+									me.weaponTemplate = t;
+								}
+								first = first ? first : t;
+							}
+							if (!me.weaponTemplate) {
+								me.weaponTemplate = first;
+							}
+						}
+					}
+				}
+				return true;
+			});
+		}
 		std::map<uint16_t, uint32_t> ragdollUpdates; // ghost -> the ragdoll update last applied
 		struct TimedCommand {
 			float at;
@@ -2146,6 +2300,7 @@ int runGame(Options& options, Session& session)
 			round.localMuzzleEffects = !playerCamera.firstPerson;
 			round.tick(1.0f / 30.0f);
 			playerCamera.tick(1.0f / 30.0f);
+			stepObjectEffects();
 			gameLogic.tick(1.0f / 30.0f);
 			scripts.update();
 		};
@@ -2156,6 +2311,7 @@ int runGame(Options& options, Session& session)
 			round.localMuzzleEffects = !playerCamera.firstPerson;
 			round.tick(1.0f / 30.0f);
 			playerCamera.tick(1.0f / 30.0f);
+			stepObjectEffects();
 			gameLogic.tick(1.0f / 30.0f);
 		};
 #endif
@@ -2190,6 +2346,22 @@ int runGame(Options& options, Session& session)
 		const int ticks = options.screenshot.empty() ? 1 : 90;
 		for (int i = 0; i < ticks; ++i) {
 			step();
+		}
+		// A screenshot of a joined game waits (in real time, up to 5 s) for
+		// the server's first control-object record and a second more of
+		// updates, so the view has our soldier.
+		if (session.client && !options.screenshot.empty()) {
+			const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+			int after = -1;
+			while (std::chrono::steady_clock::now() < until && after != 0 && session.client) {
+				step();
+				if (after < 0 && session.client && session.client->world().hasControlObject()) {
+					after = 30;
+				} else if (after > 0) {
+					--after;
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(33));
+			}
 		}
 		std::printf("round started: %zu control points, %zu spawners, %zu objects spawned, %zu with physics\n",
 			round.controlPoints().size(), round.spawners().size(), objects.objects().size() - before,
@@ -2432,6 +2604,19 @@ int runGame(Options& options, Session& session)
 				std::printf(" %d:%s", point.id, point.team == 1 ? "PAC" : point.team == 2 ? "EU" : "-");
 			}
 			std::printf("\n");
+			for (const auto& titan : round.titans()) {
+				std::printf("  titan %s: %.0f / %.0f hit points (%.1f %%%s), consoles %d of %d, core %s, at %.0f/%.0f/%.0f\n",
+					titan.team == 1 ? "PAC" : "EU", titan.hitPoints, titan.maxHitPoints, titan.percent,
+					titan.wreck ? ", a wreck" : titan.shield ? ", shield up" : ", shield down", titan.consolesLeft,
+					titan.consoles, titan.coreDestroyed ? "destroyed" : titan.coreExposed ? "exposed" : "closed",
+					titan.position.x, titan.position.y, titan.position.z);
+			}
+			for (const auto& silo : round.missileSilos()) {
+				std::printf("  silo %d: %s, %s, %d missiles fired\n", silo.controlPoint,
+					silo.team == 1 ? "PAC" : silo.team == 2 ? "EU" : "neutral",
+					silo.loaded ? "loaded" : ("reloading " + std::to_string(static_cast<int>(silo.reloadLeft)) + " s").c_str(),
+					silo.launched);
+			}
 			for (const auto& player : round.playerList()) {
 				const auto fired = round.playerRounds(player.id, false, false);
 				const auto hit = round.playerRounds(player.id, true, false);
@@ -2461,6 +2646,7 @@ int runGame(Options& options, Session& session)
 			"Levels/" + options.level + "/", options.animation};
 		sources.animationFor = [&round](uint32_t object) { return round.animationFor(object); };
 		sources.effects = &round.effects();
+		sources.objectEffects = &objectEffects;
 		sources.overlay = [&](float seconds) {
 			for (int kit = 0; kit < 8; ++kit) {
 				hudManager.set("PlayerKitIcon" + std::to_string(kit) + "SelectShow", kit == localKit ? 1 : 0);
@@ -2510,6 +2696,16 @@ int runGame(Options& options, Session& session)
 		// The first-person pass: the arms and the weapon at the eye, the
 		// player's own soldier left out of the world.
 		sources.hiddenInView = [&playerCamera](uint32_t object) { return playerCamera.hides(object); };
+		// Inside a vehicle in first person its cockpit geometry (0x00612880).
+		sources.geometryFor = [&playerCamera](uint32_t object, int& geometry, int& lod) {
+			PlayerCamera::Cockpit cockpit;
+			if (!playerCamera.cockpit(cockpit) || cockpit.vehicle != object) {
+				return false;
+			}
+			geometry = cockpit.subGeometry;
+			lod = cockpit.lod;
+			return true;
+		};
 		sources.firstPerson = [&playerCamera](render::FirstPersonScene& scene) {
 			const std::vector<PlayerCamera::Model> models = playerCamera.models();
 			if (models.empty()) {
@@ -2581,22 +2777,43 @@ int runGame(Options& options, Session& session)
 		};
 		if (session.client) {
 			// Our soldier is the server's: the camera follows the control
-			// object, the keys go up as moves, a click on a spawn point asks
-			// for it (with the first kit).
-			viewer.playerView = [&session](ViewerOptions::PlayerView& view) {
+			// object (in first person at its eye, PlayerCamera::Remote), the
+			// keys go up as moves, a click on a spawn point asks for it (with
+			// the first kit).
+			viewer.playerView = [&session, &playerCamera](ViewerOptions::PlayerView& view) {
 				if (!session.client || !session.client->world().hasControlObject()) {
 					return false;
 				}
 				const net::Vec3f& p = session.client->world().controlObject().position;
+				const float aspect = view.aspect;
 				view = {p.x, p.y, p.z, 0};
+				view.aspect = aspect;
+				PlayerCamera::View eye;
+				if (playerCamera.view(eye, aspect)) {
+					view.firstPerson = true;
+					std::copy(eye.position.begin(), eye.position.end(), view.eye);
+					view.eyeYaw = eye.yaw;
+					view.eyePitch = eye.pitch;
+					view.fovY = eye.fovY;
+				}
 				return true;
 			};
-			viewer.onPlayerInput = [&session, &scoreboardHeld, &options, lastAimPitch = 0.0f](
-										 const ViewerOptions::PlayerInput& in) mutable {
+			viewer.onPlayerInput = [&session, &scoreboardHeld, &options, &playerCamera, &remoteLook, lastAimPitch = 0.0f,
+										toggleCameraWas = false](const ViewerOptions::PlayerInput& in) mutable {
 				scoreboardHeld = options.scoreboard || in.scoreboard;
 				if (!session.client) {
 					return;
 				}
+				// The look as we turn it (the server's angles lag behind).
+				remoteLook.yaw = std::remainder(remoteLook.yaw + in.turnDegrees, 360.0f);
+				remoteLook.pitch = in.aimPitchDegrees;
+				remoteLook.fire = in.fire;
+				remoteLook.stance = in.lie ? 2 : in.crouch ? 1 : 0;
+				if (in.toggleCamera && !toggleCameraWas) {
+					playerCamera.toggleMode();
+				}
+				toggleCameraWas = in.toggleCamera;
+				playerCamera.setAltFire(in.altFire);
 				if (session.voice) {
 					session.voice->setKeys(in.voipPushToTalk, in.voipLeaderChannel);
 				}
@@ -2654,6 +2871,13 @@ int runGame(Options& options, Session& session)
 				}
 				toggleCameraWas = in.toggleCamera;
 				playerCamera.setAltFire(in.altFire);
+				// Crouch in a seat with allowDucking ducks (0x005ca2e0), and the
+				// seat's inputs are cleared while it does (0x005c9ec0).
+				playerCamera.setCrouch(in.crouch);
+				if (playerCamera.duckingDisablesInput()) {
+					input.throttle = input.strafe = input.turn = 0;
+					input.fire = input.altFire = false;
+				}
 				// Stance: crouch or lie while their keys are held. A spawn where
 				// only lying fits (the squad leader's scatter, 0x006c3340) starts
 				// prone until a stance key is pressed.
@@ -2754,6 +2978,13 @@ int runGame(Options& options, Session& session)
 				// The game's sounds this tick (ragdoll impacts), where they happen.
 				for (const auto& sound : round.takeSounds()) {
 					sounds.playSoundAt(sound.sound, sound.position.x, sound.position.y, sound.position.z);
+				}
+				// The effect bundles' start sounds (S_<bundle>_Start).
+				for (const auto& sound : playerCamera.takeSounds()) {
+					sounds.playSoundAt(sound.name, sound.position.x, sound.position.y, sound.position.z);
+				}
+				for (const auto& sound : objectEffects.takeSounds()) {
+					sounds.playSoundAt(sound.name, sound.position.x, sound.position.y, sound.position.z);
 				}
 				if (gameLogic.ended() || (session.client && session.client->world().roundEnded())) {
 					sinceEnd += 1.0f / 30.0f;

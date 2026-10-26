@@ -155,3 +155,33 @@ TEST(FirstPerson_RifleOnTheFirstPersonSkeleton)
 		CHECK(m[14] > c[14] && m[13] < c[13] + 0.05f);
 	}
 }
+
+TEST(FirstPerson_RecoilGraphAndKick)
+{
+	// Without going back: n = 8 values -(i + 1)^2 x 2 / 204, adding up to -2.
+	anim::RecoilSettings settings;
+	settings.goBackOnRecoil = false;
+	const std::vector<float> curve = settings.graph();
+	CHECK(curve.size() == 8);
+	float sum = 0;
+	for (float v : curve) {
+		sum += v;
+	}
+	CHECK(near(sum, -2.0f, 1e-5f) && near(curve[7], -128.0f / 204.0f));
+	// The kick reads it backwards from the shot: the largest first, then
+	// none from size - 1 ticks on.
+	CHECK(near(anim::recoilAt(curve, 0, 1.0f), curve[7]) && near(anim::recoilAt(curve, 6, 0.5f), curve[1] * 0.5f));
+	CHECK(anim::recoilAt(curve, 7, 1.0f) == 0 && anim::recoilAt(curve, -1, 1.0f) == 0);
+	// Going back (the default): n + n/4 values that cancel out.
+	settings.goBackOnRecoil = true;
+	const std::vector<float> back = settings.graph();
+	CHECK(back.size() == 10);
+	float total = 0;
+	for (float v : back) {
+		total += v;
+	}
+	CHECK(near(total, 0.0f, 1e-5f));
+	const float base = curve[7] * -0.5f;
+	CHECK(near(back[9], curve[7] * 1.5f + base) && back[9] < 0); // the shot's tick
+	CHECK(back[1] > 0);                                         // the way back
+}

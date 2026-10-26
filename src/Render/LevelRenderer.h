@@ -14,6 +14,7 @@
 
 #include <array>
 #include <functional>
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <string>
@@ -125,11 +126,18 @@ struct LevelSources {
 	std::function<ui::MenuFrame(float seconds)> menu;
 	// Effects to draw (particles), if any.
 	const effects::EffectManager* effects = nullptr;
+	// More of them, drawn with those (the bundles attached to objects:
+	// engines, exhausts, trails; effects::ObjectEffects).
+	const effects::EffectManager* objectEffects = nullptr;
 	// The first-person view, asked each frame: false draws none.
 	std::function<bool(FirstPersonScene& scene)> firstPerson;
 	// Objects the world pass leaves out this frame (in first person the
 	// player's own soldier, its weapon and kit); asked by syncObjects.
 	std::function<bool(uint32_t object)> hiddenInView;
+	// The geometry and LOD an object's meshes with more than one geometry
+	// draw instead of the exterior (a vehicle's cockpit seen from inside,
+	// BF2142.exe 0x00612880); false for the default. Asked by syncObjects.
+	std::function<bool(uint32_t object, int& geometry, int& lod)> geometryFor;
 };
 
 struct LevelStats {
@@ -177,7 +185,12 @@ private:
 		SDL_GPUTexture* detail = nullptr; // static mesh layers, null if unused
 		SDL_GPUTexture* dirt = nullptr;
 		SDL_GPUTexture* crack = nullptr;
-		bool blended = false; // alpha mode 1 (blended or additive)
+		// Alpha mode 1: drawn after the opaque ones, sorted back to front
+		// (RendDX9's transparency queues), or added when the geometry has
+		// additive alpha (RSMTAdditive; 0x100c3880).
+		bool blended = false;
+		bool additive = false;
+		float uvScroll[2] = {0, 0}; // additive: simpleUVTranslation, per second
 	};
 	struct RigBone {
 		int node;
@@ -186,6 +199,7 @@ private:
 	struct GpuMesh {
 		bool bundled = false;
 		bool skinned = false;
+		size_t geometries = 1; // in its file
 		std::vector<std::vector<RigBone>> rigs;
 		SDL_GPUBuffer* vertices = nullptr;
 		SDL_GPUBuffer* indices = nullptr;
@@ -204,6 +218,9 @@ private:
 		bool hidden = false; // its object is hidden
 		float fade = 1;      // its object's fade (below 1: drawn blended, after the opaque ones)
 		const world::ObjectTemplate* partsTemplate = nullptr; // whose children place the parts
+		std::string geometry;  // its geometry template
+		int shownGeometry = -1; // the geometry drawn (-1: the exterior)
+		int shownLod = 0;
 	};
 	struct TerrainPatch {
 		SDL_GPUBuffer* vertices = nullptr;
@@ -330,8 +347,8 @@ private:
 	void buildOverlay();
 	std::vector<ParticleGroup> m_particleGroups;
 	void buildParticles(const Camera& camera);
-	// One effect manager's particles into a buffer (released and rebuilt).
-	void buildParticleBuffer(const effects::EffectManager* manager, SDL_GPUBuffer*& buffer,
+	// Effect managers' particles into a buffer (released and rebuilt).
+	void buildParticleBuffer(std::initializer_list<const effects::EffectManager*> managers, SDL_GPUBuffer*& buffer,
 		std::vector<ParticleGroup>& groups);
 	void drawParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Mat4& viewProjection,
 		const Camera& camera, const scene::LightSettings& lights, SDL_GPUBuffer* buffer,

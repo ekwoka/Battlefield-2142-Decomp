@@ -6,6 +6,12 @@
 // With a lightmap (StaticMesh_dx9.dfx): g is sun visibility, b sky
 // visibility; the sky term also lights sunlit surfaces, and the result is
 // doubled: color = albedo * 2 * (0.52 * b * sky + g * sun * N.L).
+// Blended materials (alpha mode 1, BundledMesh's "Alpha" techniques) are
+// lit the same and take their alpha from the texture (RaShaderBM.fx:
+// outColor.a = diffuse.a * Transparency.a); additive ones (the geometry's
+// hasAdditiveAlpha) are the texture unlit, its alpha times the
+// transparency, fogged (RaShaderBMadditive.fx, technique depthAndFog), and
+// their coordinates scroll (frac(GlobalTime * simpleUVTranslation)).
 // SDL_GPU binds fragment samplers in set 2 and uniform buffers in set 3.
 layout(location = 0) in vec3 inNormal;
 layout(location = 1) in vec2 inTexCoord;
@@ -27,16 +33,24 @@ layout(set = 3, binding = 0) uniform Lighting {
 	vec4 skyColor;
 	vec4 fogColor;     // w: fog end distance
 	vec4 material;     // x: alpha reference (0 = off), y: 1 with a lightmap,
-					   // z: layers (1 detail, 2 dirt, 4 crack), w: the object's
-					   // fade (0 = none; else the alpha it is blended with)
+					   // z: layers (1 detail, 2 dirt, 4 crack) and the kind
+					   // (8 blended, 16 additive), w: the object's fade (0 =
+					   // none; else the alpha it is blended with)
+	vec4 uvOffset;     // xy: added to the diffuse coordinates (additive scrolling)
 };
 
 layout(location = 0) out vec4 outColor;
 
 void main()
 {
-	vec4 albedo = texture(diffuseMap, inTexCoord);
+	vec4 albedo = texture(diffuseMap, inTexCoord + uvOffset.xy);
 	int layers = int(material.z + 0.5);
+	float fade = material.w > 0.0 ? material.w : 1.0;
+	float fog = clamp(inDepth / fogColor.w, 0.0, 1.0);
+	if ((layers & 16) != 0) {
+		outColor = vec4(mix(albedo.rgb, fogColor.rgb, fog * fog), albedo.a * fade);
+		return;
+	}
 	if ((layers & 1) != 0) {
 		albedo *= texture(detailMap, inDetailCoord);
 	}
@@ -59,6 +73,6 @@ void main()
 	} else {
 		light = skyColor.rgb + sun;
 	}
-	float fog = clamp(inDepth / fogColor.w, 0.0, 1.0);
-	outColor = vec4(mix(albedo.rgb * light, fogColor.rgb, fog * fog), material.w > 0.0 ? material.w : albedo.a);
+	float alpha = (layers & 8) != 0 ? albedo.a * fade : material.w > 0.0 ? material.w : albedo.a;
+	outColor = vec4(mix(albedo.rgb * light, fogColor.rgb, fog * fog), alpha);
 }

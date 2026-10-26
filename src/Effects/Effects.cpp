@@ -116,6 +116,9 @@ ParticleTemplate ParticleTemplate::fromTemplate(const world::ObjectTemplate& t)
 		}
 	}
 	p.mesh = t.typeName() == "MeshParticleSystem";
+	p.localSystem = number(t, "isLocalSystem", 0) != 0;
+	p.showFirstPerson = number(t, "showInFirstPerson", 1) != 0;
+	p.showThirdPerson = number(t, "showInThirdPerson", 1) != 0;
 	return p;
 }
 
@@ -127,7 +130,22 @@ Emitter::Emitter(const ParticleTemplate& t, const Vec3& position, const Mat3& ro
 bool Emitter::alive() const
 {
 	const ParticleTemplate& t = *m_template;
-	return !m_particles.empty() || m_age < t.emitDelay + t.emitTime;
+	if (!m_particles.empty()) {
+		return true;
+	}
+	// An attached looping system emits until it is stopped.
+	return !m_stopped && (m_age < t.emitDelay + t.emitTime || (anchor != 0 && t.isLooping));
+}
+
+void Emitter::place(const Vec3& position, const Mat3& rotation)
+{
+	m_position = position;
+	m_rotation = rotation;
+}
+
+Vec3 Emitter::worldPosition(const Particle& p) const
+{
+	return m_template->localSystem ? m_position + m_rotation.transform(p.position) : p.position;
 }
 
 void Emitter::emit(game::Random& random)
@@ -135,7 +153,8 @@ void Emitter::emit(game::Random& random)
 	const ParticleTemplate& t = *m_template;
 	Particle p;
 	const Vec3 offset {t.emitRange[0].sample(random), t.emitRange[1].sample(random), t.emitRange[2].sample(random)};
-	p.position = m_position + m_rotation.transform(offset);
+	// A local system keeps its particles in its own space.
+	p.position = t.localSystem ? offset : m_position + m_rotation.transform(offset);
 	const Vec3 axis = normalized(t.emitDirection);
 	Vec3 direction = axis;
 	if (t.emitter == ParticleTemplate::Emitter::RadialDirection) {
@@ -152,7 +171,7 @@ void Emitter::emit(game::Random& random)
 		direction = Mat3::fromYawPitchRoll({angles.y, angles.x, angles.z}).transform(axis);
 	}
 	const float speed = t.emitSpeed + random.unit() * t.randomSpeed;
-	p.velocity = m_rotation.transform(direction) * speed;
+	p.velocity = (t.localSystem ? direction : m_rotation.transform(direction)) * speed;
 	p.life = std::max(0.01f, t.timeToLive + random.unit() * t.randomTimeToLive);
 	p.sizeOffset = random.unit() * t.randomSize;
 	p.rotation = random.unit() * t.randomRotation * 6.2831853f;
@@ -166,7 +185,7 @@ void Emitter::update(float seconds, game::Random& random)
 	const ParticleTemplate& t = *m_template;
 	m_age += seconds;
 	const float active = m_age - t.emitDelay;
-	if (active > 0 && (t.isLooping || active - seconds < t.emitTime)) {
+	if (!m_stopped && active > 0 && (t.isLooping || active - seconds < t.emitTime)) {
 		const float span = t.isLooping ? seconds : std::min(seconds, t.emitTime - std::max(0.0f, active - seconds));
 		m_pending += t.emitFrequency * std::max(0.0f, span);
 		while (m_pending >= 1.0f) {
@@ -174,9 +193,11 @@ void Emitter::update(float seconds, game::Random& random)
 			m_pending -= 1.0f;
 		}
 	}
+	// Gravity pulls down the world's y, in a local system's space too.
+	const Vec3 down = t.localSystem ? m_rotation.untransform({0, 1, 0}) : Vec3 {0, 1, 0};
 	for (Particle& p : m_particles) {
 		const float f = std::min(p.age / p.life, 1.0f);
-		p.velocity.y += t.gravity * t.gravityGraph.at(f) * seconds;
+		p.velocity += down * (t.gravity * t.gravityGraph.at(f) * seconds);
 		const float drag = std::max(0.0f, 1.0f - t.airResistance * t.airResistanceGraph.at(f) * seconds);
 		p.velocity = p.velocity * drag;
 		p.position += p.velocity * seconds;
@@ -204,7 +225,8 @@ const ParticleTemplate* EffectManager::particleTemplate(const world::ObjectTempl
 	return slot.get();
 }
 
-void EffectManager::spawnTemplate(const world::ObjectTemplate& t, const Vec3& position, const Mat3& rotation, int depth)
+void EffectManager::spawnTemplate(const world::ObjectTemplate& t, const Vec3& position, const Mat3& rotation, int depth,
+	View view, std::vector<Emitter*>* spawned)
 {
 	if (depth > 4) {
 		return;
@@ -212,36 +234,145 @@ void EffectManager::spawnTemplate(const world::ObjectTemplate& t, const Vec3& po
 	const std::string& type = t.typeName();
 	if (type == "SpriteParticleSystem" || type == "MeshParticleSystem" || type == "NonScreenAlignedParticleSystem") {
 		const ParticleTemplate* particles = particleTemplate(t);
+		if ((view == View::FirstPerson && !particles->showFirstPerson)
+			|| (view == View::ThirdPerson && !particles->showThirdPerson)) {
+			return;
+		}
 		if (!particles->texture.empty()) { // mesh particles are not drawn yet
 			m_emitters.push_back(std::make_unique<Emitter>(*particles, position, rotation));
+			if (spawned) {
+				spawned->push_back(m_emitters.back().get());
+			}
+		}
+		return;
+	}
+	if (type == "Sound") {
+		if (depth > 0) {
+			m_startedSounds.push_back({t.name(), position});
 		}
 		return;
 	}
 	if (type != "EffectBundle") {
-		return; // sounds, light sources: not drawn here
+		return; // light sources, mesh emitters: not drawn here
 	}
 	for (const world::ChildTemplate& child : t.children()) {
 		if (const world::ObjectTemplate* childTemplate = m_templates.find(child.name)) {
 			const Mat3 local = Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z});
 			spawnTemplate(*childTemplate,
 				position + rotation.transform({child.position.x, child.position.y, child.position.z}),
-				local * rotation, depth + 1);
+				local * rotation, depth + 1, view, spawned);
 		}
 	}
 }
 
-bool EffectManager::spawn(const std::string& name, const Vec3& position, const Mat3& rotation)
+bool EffectManager::spawn(const std::string& name, const Vec3& position, const Mat3& rotation, View view)
 {
 	const world::ObjectTemplate* t = m_templates.find(name);
 	if (!t) {
 		return false;
 	}
-	spawnTemplate(*t, position, rotation, 0);
+	spawnTemplate(*t, position, rotation, 0, view, nullptr);
 	return true;
+}
+
+bool EffectManager::spawnAttached(const std::string& name, uint32_t anchor, const Vec3& position, const Mat3& rotation,
+	View view, uint32_t tag)
+{
+	const world::ObjectTemplate* t = m_templates.find(name);
+	if (!t) {
+		return false;
+	}
+	// Spawned in the bundle's own space, then mounted on the anchor.
+	std::vector<Emitter*> spawned;
+	const size_t sounds = m_startedSounds.size();
+	spawnTemplate(*t, {}, {}, 0, view, &spawned);
+	for (Emitter* emitter : spawned) {
+		emitter->anchor = anchor;
+		emitter->tag = tag;
+		emitter->localPosition = emitter->position();
+		emitter->localRotation = emitter->rotation();
+		emitter->mountPosition = position;
+		emitter->mountRotation = rotation;
+		placeAttached(*emitter);
+	}
+	const auto at = m_anchors.find(anchor);
+	const Anchor place = at != m_anchors.end() ? at->second : Anchor {};
+	for (size_t i = sounds; i < m_startedSounds.size(); ++i) {
+		const Vec3 mounted = position + rotation.transform(m_startedSounds[i].position);
+		m_startedSounds[i].position = place.position + place.rotation.transform(mounted);
+	}
+	return true;
+}
+
+void EffectManager::placeAttached(Emitter& emitter) const
+{
+	const auto at = m_anchors.find(emitter.anchor);
+	const Anchor place = at != m_anchors.end() ? at->second : Anchor {};
+	// local, then the mount, then the anchor (row vectors: v * L * M * A).
+	const Vec3 mounted = emitter.mountPosition + emitter.mountRotation.transform(emitter.localPosition);
+	emitter.place(place.position + place.rotation.transform(mounted),
+		emitter.localRotation * emitter.mountRotation * place.rotation);
+}
+
+void EffectManager::setAnchor(uint32_t anchor, const Vec3& position, const Mat3& rotation)
+{
+	m_anchors[anchor] = {position, rotation};
+	for (const auto& emitter : m_emitters) {
+		if (emitter->anchor == anchor) {
+			placeAttached(*emitter);
+		}
+	}
+}
+
+void EffectManager::setMount(uint32_t anchor, uint32_t tag, const Vec3& position, const Mat3& rotation)
+{
+	for (const auto& emitter : m_emitters) {
+		if (emitter->anchor == anchor && emitter->tag == tag) {
+			emitter->mountPosition = position;
+			emitter->mountRotation = rotation;
+			placeAttached(*emitter);
+		}
+	}
+}
+
+void EffectManager::stopAttached(uint32_t anchor, uint32_t tag)
+{
+	for (const auto& emitter : m_emitters) {
+		if (emitter->anchor == anchor && (tag == 0 || emitter->tag == tag)) {
+			emitter->stop();
+		}
+	}
+}
+
+bool EffectManager::emitting(uint32_t anchor, uint32_t tag) const
+{
+	for (const auto& emitter : m_emitters) {
+		if (emitter->anchor == anchor && (tag == 0 || emitter->tag == tag) && !emitter->stopped()) {
+			return true;
+		}
+	}
+	return false;
+}
+
+void EffectManager::releaseAnchor(uint32_t anchor)
+{
+	for (const auto& emitter : m_emitters) {
+		if (emitter->anchor == anchor) {
+			emitter->stop();
+			emitter->anchor = 0;
+		}
+	}
+	m_anchors.erase(anchor);
 }
 
 void EffectManager::update(float seconds)
 {
+	// Emitters attached to nothing that is still known end.
+	for (const auto& emitter : m_emitters) {
+		if (emitter->anchor != 0 && !m_anchors.count(emitter->anchor)) {
+			emitter->stop();
+		}
+	}
 	for (const auto& emitter : m_emitters) {
 		emitter->update(seconds, m_random);
 	}
@@ -263,7 +394,130 @@ void EffectManager::collect(const Emitter& emitter, std::vector<Sprite>& out)
 			continue;
 		}
 		const Vec3 color = t.color1 * (1 - blend) + t.color2 * blend;
-		out.push_back({p.position, size, p.rotation, {color.x, color.y, color.z, alpha}});
+		out.push_back({emitter.worldPosition(p), size, p.rotation, {color.x, color.y, color.z, alpha}});
+	}
+}
+
+} // namespace dice::hfe::effects
+
+namespace dice::hfe::effects {
+
+namespace {
+
+uint32_t flags(const world::ObjectTemplate& t, const char* name, const char* other)
+{
+	const std::string* value = setting(t, name);
+	if (!value) {
+		value = setting(t, other);
+	}
+	return value ? static_cast<uint32_t>(std::strtoul(value->c_str(), nullptr, 10)) : 0u;
+}
+
+} // namespace
+
+std::vector<ObjectEffects::Placed> ObjectEffects::bundlesOf(const world::ObjectTemplateManager& templates,
+	const world::ObjectTemplate& root, uint32_t object, const PartPose& partPose)
+{
+	std::vector<Placed> out;
+	std::vector<std::string> path;
+	const std::function<void(const world::ObjectTemplate&, const Vec3&, const Mat3&, int)> walk =
+		[&](const world::ObjectTemplate& t, const Vec3& at, const Mat3& turn, int depth) {
+			if (depth > 10) {
+				return;
+			}
+			for (const world::ChildTemplate& child : t.children()) {
+				const world::ObjectTemplate* c = templates.find(child.name);
+				if (!c) {
+					continue;
+				}
+				// The child's placement, after the pose the game gives the
+				// part (as the renderer's collectParts).
+				Mat3 childTurn = Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z});
+				Vec3 childAt = at + turn.transform({child.position.x, child.position.y, child.position.z});
+				Vec3 offset, rotation;
+				if (partPose && object != 0 && partPose(object, child.name, offset, rotation)) {
+					childAt = childAt + (childTurn * turn).transform(offset);
+					childTurn = Mat3::fromYawPitchRoll(rotation) * childTurn;
+				}
+				childTurn = childTurn * turn;
+				path.push_back(child.name);
+				if (c->typeName() == "EffectBundle") {
+					Placed placed;
+					placed.bundle = c;
+					placed.path = path;
+					placed.position = childAt;
+					placed.rotation = childTurn;
+					placed.startOnEffects = flags(*c, "startOnEffects", "setStartOnEffects");
+					placed.stopOnEffects = flags(*c, "stopOnEffects", "setStopOnEffects");
+					placed.startAtCreation = number(*c, "startAtCreation", 0) != 0;
+					out.push_back(std::move(placed));
+				} else {
+					walk(*c, childAt, childTurn, depth + 1);
+				}
+				path.pop_back();
+			}
+		};
+	walk(root, {}, {}, 0);
+	return out;
+}
+
+void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManager& effects, const PartPose& partPose,
+	EffectManager::View view)
+{
+	constexpr uint32_t kEntered = 0x20; // event 4: a player entered (0x00593e30)
+	constexpr uint32_t kExited = 0x40;  // event 5: the player left (0x005cea00)
+	std::map<uint32_t, bool> seen;
+	for (const ObjectState& object : objects) {
+		if (!object.objectTemplate || object.id == 0) {
+			continue;
+		}
+		seen[object.id] = true;
+		auto found = m_objects.find(object.id);
+		const bool created = found == m_objects.end() || found->second.objectTemplate != object.objectTemplate;
+		if (created) {
+			if (found != m_objects.end()) {
+				effects.releaseAnchor(object.id);
+			}
+			Tracked tracked;
+			tracked.objectTemplate = object.objectTemplate;
+			tracked.bundles = bundlesOf(m_templates, *object.objectTemplate, object.id, partPose);
+			found = m_objects.insert_or_assign(object.id, std::move(tracked)).first;
+		}
+		Tracked& tracked = found->second;
+		if (tracked.bundles.empty()) {
+			continue;
+		}
+		effects.setAnchor(object.id, object.position, object.rotation);
+		// Turning parts carry their bundles along.
+		if (partPose && !created) {
+			const std::vector<Placed> now = bundlesOf(m_templates, *object.objectTemplate, object.id, partPose);
+			for (size_t i = 0; i < now.size() && i < tracked.bundles.size(); ++i) {
+				tracked.bundles[i].position = now[i].position;
+				tracked.bundles[i].rotation = now[i].rotation;
+				effects.setMount(object.id, static_cast<uint32_t>(i + 1), now[i].position, now[i].rotation);
+			}
+		}
+		for (size_t i = 0; i < tracked.bundles.size(); ++i) {
+			const Placed& b = tracked.bundles[i];
+			const uint32_t tag = static_cast<uint32_t>(i + 1);
+			const bool start = (created && b.startAtCreation)
+				|| (object.occupied && !tracked.occupied && (b.startOnEffects & kEntered) != 0);
+			if (start && !effects.emitting(object.id, tag)) {
+				effects.spawnAttached(b.bundle->name(), object.id, b.position, b.rotation, view, tag);
+			}
+			if (!object.occupied && tracked.occupied && (b.stopOnEffects & kExited) != 0) {
+				effects.stopAttached(object.id, tag);
+			}
+		}
+		tracked.occupied = object.occupied;
+	}
+	for (auto it = m_objects.begin(); it != m_objects.end();) {
+		if (!seen.count(it->first)) {
+			effects.releaseAnchor(it->first);
+			it = m_objects.erase(it);
+		} else {
+			++it;
+		}
 	}
 }
 

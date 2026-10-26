@@ -290,7 +290,10 @@ ScriptValue ScriptBridge::objectCall(uint32_t id, const std::string& method, con
 	if (method == "getIsWreck") {
 		return ScriptValue::integer(object->destroyed() ? 1 : 0);
 	}
-	if (method == "getIsRemoteControlled" || method == "isTitan") {
+	if (method == "isTitan") {
+		return ScriptValue::integer(m_world.isTitan(id) ? 1 : 0); // the Titan sync's 0x00561d90
+	}
+	if (method == "getIsRemoteControlled") {
 		return ScriptValue::integer(0);
 	}
 	if (method == "cp_getParam" || method == "cp_setParam") {

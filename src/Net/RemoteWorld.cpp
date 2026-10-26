@@ -264,6 +264,7 @@ bool RemoteWorld::apply(const GameEvent& event)
 		// for Kit (0x9496).
 		if (auto it = m_players.find(event.i(0)); it != m_players.end()) {
 			it->second.soldierGhost = static_cast<uint16_t>(event.u(2));
+			it->second.kitGhost = event.type == kEvHandlePickup ? static_cast<uint16_t>(event.u(1)) : 0;
 			if (event.type == kEvHandlePickup) {
 				it->second.alive = true;
 			}

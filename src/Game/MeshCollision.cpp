@@ -223,7 +223,8 @@ void GameWorld::collideBodies(float seconds)
 	// A sleeping node is no mover (the dispatch 0x006dd0b0 skips it) but
 	// stays a candidate for the others.
 	for (size_t i = 0; i < m_bodies.size(); ++i) {
-		if (!findDrone(m_bodies[i].object) && m_objects.find(m_bodies[i].object) && !asleep(m_bodies[i])) {
+		if (!findDrone(m_bodies[i].object) && !isTitan(m_bodies[i].object) && m_objects.find(m_bodies[i].object)
+			&& !asleep(m_bodies[i])) {
 			collideMover(m_bodies[i], i, seconds);
 		}
 	}
@@ -257,6 +258,12 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 		}
 		// collisionGroups (response slot 0x50): pairs sharing a bit don't meet.
 		if (m.collisionGroups & c.collisionGroups) {
+			return false;
+		}
+		// The launcher a response ignores (+0xfc, until the tick +0xf8:
+		// 0x006b8de0): a drop pod and its Titan or APC.
+		if (c.body && ((mover.ignoreSet && mover.ignored == c.body->object && m_ticks <= mover.ignoreUntil)
+						  || (c.body->ignoreSet && c.body->ignored == mover.object && m_ticks <= c.body->ignoreUntil))) {
 			return false;
 		}
 		return m.points->size() >= 4 || c.points->size() >= 4;

@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <sstream>
 
 namespace dice::hfe {
@@ -78,8 +79,58 @@ PlayerCamera::PlayerCamera(game::GameWorld& round, anim::AnimationSystems& syste
 
 PlayerCamera::~PlayerCamera() = default;
 
+bool PlayerCamera::current(Me& me) const
+{
+	if (m_remote) {
+		Remote remote;
+		if (!m_remote(remote)) {
+			return false;
+		}
+		me.alive = remote.alive;
+		me.soldier = remote.soldier;
+		me.weapon = remote.weapon;
+		me.kit = remote.kit;
+		me.soldierTemplate = remote.soldierTemplate;
+		me.weaponTemplate = remote.weaponTemplate;
+		me.origin = {remote.feet[0], remote.feet[1] + 1.0f, remote.feet[2]};
+		me.velocity = remote.velocity;
+		me.bodyYaw = me.yaw = remote.yaw;
+		me.aimPitch = remote.aimPitch;
+		me.stance = remote.stance;
+		me.firing = remote.firing;
+		return true;
+	}
+	game::GameWorld::PlayerInfo info;
+	const world::Object* soldier = m_round.player();
+	const physics::SoldierBody* body = m_round.playerBody();
+	if (!m_round.playerInfo(m_round.localPlayer(), info) || !soldier || !body) {
+		return false;
+	}
+	me.alive = info.alive;
+	me.soldier = info.soldier;
+	me.weapon = info.weapon;
+	me.kit = info.kit;
+	me.vehicle = info.vehicle;
+	me.seat = info.seat;
+	me.soldierTemplate = soldier->objectTemplate();
+	const world::Object* weapon = info.weapon ? m_round.objects().find(info.weapon) : nullptr;
+	me.weaponTemplate = weapon ? weapon->objectTemplate() : nullptr;
+	me.origin = {body->position.x, body->position.y, body->position.z};
+	me.velocity = {body->velocity.x, body->velocity.y, body->velocity.z};
+	me.bodyYaw = body->yawDegrees;
+	me.yaw = info.yaw;
+	me.aimPitch = info.aimPitch;
+	me.stance = body->stance;
+	if (const game::FireArm* firearm = m_round.playerWeapon()) {
+		me.reloading = firearm->reloading();
+		me.rounds = firearm->roundsInMag();
+	}
+	return true;
+}
+
 void PlayerCamera::resetSoldier()
 {
+	m_effects.releaseAnchor(kWeaponAnchor);
 	m_rig.reset();
 	m_soldierTemplate = nullptr;
 	m_weaponTemplate = nullptr;
@@ -92,12 +143,12 @@ void PlayerCamera::resetSoldier()
 void PlayerCamera::tick(float seconds)
 {
 	m_effects.update(seconds);
+	++m_tick; // the game's tick counter (0x00666090)
+	m_recoilNow = 0;
 	const bool altPressed = m_altFire && !m_altFireWas;
 	m_altFireWas = m_altFire;
-	game::GameWorld::PlayerInfo me;
-	const world::Object* soldier = m_round.player();
-	const physics::SoldierBody* body = m_round.playerBody();
-	if (!m_round.playerInfo(m_round.localPlayer(), me) || !me.alive || !soldier || !body) {
+	Me me;
+	if (!current(me) || !me.alive || !me.soldierTemplate) {
 		if (m_alive) {
 			resetSoldier();
 		}
@@ -108,7 +159,7 @@ void PlayerCamera::tick(float seconds)
 	m_alive = true;
 	// The soldier: its first-person skeleton and system, its camera's field
 	// of view and start (the soldier's first child camera, 0x005890a0).
-	const world::ObjectTemplate* soldierTemplate = soldier->objectTemplate();
+	const world::ObjectTemplate* soldierTemplate = me.soldierTemplate;
 	if (spawned || soldierTemplate != m_soldierTemplate) {
 		resetSoldier();
 		m_soldierTemplate = soldierTemplate;
@@ -141,8 +192,7 @@ void PlayerCamera::tick(float seconds)
 		m_lastPitch = me.aimPitch;
 	}
 	// The held weapon: its first-person system, zoom and muzzle flash.
-	const world::Object* weapon = me.weapon ? m_round.objects().find(me.weapon) : nullptr;
-	const world::ObjectTemplate* weaponTemplate = weapon ? weapon->objectTemplate() : nullptr;
+	const world::ObjectTemplate* weaponTemplate = me.weaponTemplate;
 	if (weaponTemplate != m_weaponTemplate) {
 		m_weaponTemplate = weaponTemplate;
 		const std::string systemPath = weaponTemplate ? text(*weaponTemplate, "animationSystem1P") : std::string();
@@ -151,7 +201,50 @@ void PlayerCamera::tick(float seconds)
 		}
 		m_zoomSettings = {};
 		m_muzzle = m_zoomMuzzle = {};
+		m_weaponBundles.clear();
+		m_recoil = {};
+		m_recoilGraph.clear();
+		m_lastShotTick = -1000;
 		if (weaponTemplate) {
+			const auto& has = weaponTemplate->components();
+			if (std::find(has.begin(), has.end(), "SoldierBasedRecoilComp") != has.end()) {
+				m_recoil.hasRecoilForce = number(*weaponTemplate, "recoil.hasRecoilForce", 0) != 0;
+				m_recoil.goBackOnRecoil = number(*weaponTemplate, "recoil.goBackOnRecoil", 1) != 0;
+				m_recoil.zoomModifier = number(*weaponTemplate, "recoil.zoomModifier", 1);
+				m_recoil.graphFrameCount = static_cast<int>(number(*weaponTemplate, "recoil.recoilGraphFrameCount", 8));
+				m_recoil.graphExponent = number(*weaponTemplate, "recoil.recoilGraphExponent", 2);
+				m_recoil.graphTotalMovement = number(*weaponTemplate, "recoil.recoilGraphTotalMovement", 2);
+				m_recoilGraph = m_recoil.graph();
+				m_recoilForceUp = game::RandomDistribution::parse(text(*weaponTemplate, "recoil.recoilForceUp"));
+			}
+			// The effect bundles its events start, anywhere in its tree.
+			const std::function<void(const world::ObjectTemplate&, std::array<float, 3>, int)> bundles =
+				[&](const world::ObjectTemplate& t, std::array<float, 3> at, int depth) {
+					if (depth > 8) {
+						return;
+					}
+					for (const world::ChildTemplate& child : t.children()) {
+						const world::ObjectTemplate* c = m_round.templates().find(child.name);
+						if (!c) {
+							continue;
+						}
+						const std::array<float, 3> place {at[0] + child.position.x, at[1] + child.position.y,
+							at[2] + child.position.z};
+						if (c->typeName() == "EffectBundle") {
+							std::string start = text(*c, "setStartOnEffects");
+							if (start.empty()) {
+								start = text(*c, "startOnEffects");
+							}
+							const uint32_t bits = static_cast<uint32_t>(std::strtoul(start.c_str(), nullptr, 10));
+							if (bits != 0) {
+								m_weaponBundles.push_back({c->name(), place, bits});
+							}
+							continue;
+						}
+						bundles(*c, place, depth + 1);
+					}
+				};
+			bundles(*weaponTemplate, {0, 0, 0}, 0);
 			const auto& components = weaponTemplate->components();
 			if (std::find(components.begin(), components.end(), "DefaultZoomComp") != components.end()) {
 				std::istringstream factors(text(*weaponTemplate, "zoom.addZoomFactor.list"));
@@ -182,11 +275,30 @@ void PlayerCamera::tick(float seconds)
 		m_fov.set(m_baseFov, 0);
 		m_roundsWas = -1;
 	}
-	const game::FireArm* firearm = m_round.playerWeapon();
-	const bool reloading = firearm && firearm->reloading();
-	const int rounds = firearm ? firearm->roundsInMag() : -1;
-	const bool fired = m_roundsWas >= 0 && rounds >= 0 && rounds < m_roundsWas;
+	const bool reloading = me.reloading;
+	const int rounds = me.rounds;
+	bool fired = m_roundsWas >= 0 && rounds >= 0 && rounds < m_roundsWas;
 	m_roundsWas = rounds;
+	// A joined game's shots aren't known before the server's state comes:
+	// the held fire input fires at the weapon's rate (fire.roundsPerMinute)
+	// as the client's own prediction.
+	if (m_remote && me.firing && weaponTemplate) {
+		const float perMinute = number(*weaponTemplate, "fire.roundsPerMinute", 600);
+		const int interval = std::max(1, static_cast<int>(std::lround(1800.0f / std::max(perMinute, 1.0f))));
+		if (m_tick - m_lastRemoteShot >= interval) {
+			fired = true;
+			m_lastRemoteShot = m_tick;
+		}
+	}
+	// A shot's recoil force (0x005dd3f0): recoilForceUp, times zoomModifier
+	// while zoomed in (0x005dd090).
+	if (fired && m_recoil.hasRecoilForce && !me.vehicle) {
+		m_recoilForce = m_recoilForceUp.sample(m_random) * (m_zoom.level() > 0 ? m_recoil.zoomModifier : 1.0f);
+		m_lastShotTick = m_tick;
+	}
+	if (m_recoil.hasRecoilForce) {
+		m_recoilNow = anim::recoilAt(m_recoilGraph, m_tick - m_lastShotTick, m_recoilForce);
+	}
 	// The zoom: the alternate fire's press steps it (0x005da670), a reload
 	// zooms out (0x005da630); the player's field of view follows over
 	// zoomDelay (0x005da3f0 -> 0x00591740).
@@ -207,7 +319,7 @@ void PlayerCamera::tick(float seconds)
 	m_zoom.tick();
 	m_fov.update(seconds);
 	// The eye's height by pose (seated counts as crouching).
-	const int pose = me.vehicle ? 1 : body->stance >= 0 && body->stance < 3 ? body->stance : 0;
+	const int pose = me.vehicle ? 1 : me.stance >= 0 && me.stance < 3 ? me.stance : 0;
 	m_eye.tick(pose);
 	if (!m_rig || me.vehicle) {
 		m_lastYaw = me.yaw;
@@ -218,16 +330,16 @@ void PlayerCamera::tick(float seconds)
 	// movement in the soldier's frame, fire and reload), and the zoom
 	// (message 4).
 	anim::AnimationInput input;
-	const physics::Vec3& v = body->velocity;
+	const physics::Vec3 v {me.velocity[0], me.velocity[1], me.velocity[2]};
 	const float speed = std::sqrt(v.x * v.x + v.z * v.z);
-	const float yaw = body->yawDegrees * kDegrees;
+	const float yaw = me.bodyYaw * kDegrees;
 	input.speed = speed;
 	if (speed > 0.01f) {
 		input.forward = (v.x * std::sin(yaw) + v.z * std::cos(yaw)) / speed;
 		input.side = (v.x * std::cos(yaw) - v.z * std::sin(yaw)) / speed;
 	}
 	input.movementSeconds = seconds;
-	input.pose = body->stance;
+	input.pose = me.stance;
 	if (reloading) {
 		input.messages |= 2;
 	}
@@ -237,7 +349,8 @@ void PlayerCamera::tick(float seconds)
 	if (fired) {
 		input.pulses |= 1;
 	}
-	m_rig->update(input, seconds);
+	std::vector<anim::FirstPersonRig::Event> events;
+	m_rig->update(input, seconds, &events);
 	// The camera spring (0x005ee980): the look's turn and pitch this tick,
 	// the velocity along the look's right, up and forward, a shot's kick.
 	if (const anim::CameraSpring* spring = m_rig->spring()) {
@@ -248,7 +361,7 @@ void PlayerCamera::tick(float seconds)
 		springInput.right = v.x * std::cos(look) - v.z * std::sin(look);
 		springInput.up = v.y;
 		springInput.forward = v.x * std::sin(look) + v.z * std::cos(look);
-		springInput.recoil = fired ? 1.0f : 0.0f;
+		springInput.recoil = m_recoilNow;
 		const float zoomedFov = m_zoom.factor(m_zoomSettings);
 		springInput.zoom = zoomedFov > 0 && zoomedFov < m_baseFov
 			? std::clamp((m_baseFov - m_fov.current) / (m_baseFov - zoomedFov), 0.0f, 1.0f)
@@ -257,28 +370,49 @@ void PlayerCamera::tick(float seconds)
 	}
 	m_lastYaw = me.yaw;
 	m_lastPitch = me.aimPitch;
-	// The muzzle flash: the weapon's child at its place on the animated
-	// first-person weapon (its root is the skeleton's mesh1), the zoomed one
-	// while zoomed in with disableMuzzleWhenZoomed.
+	// The weapon's bundles follow its root on the animated first-person
+	// skeleton (mesh1): the anchor goes there each tick.
+	View eye;
+	if (view(eye, 4.0f / 3.0f)) {
+		const anim::Skeleton& skeleton = m_rig->skeleton();
+		const int mesh1 = skeleton.find("mesh1");
+		const anim::Matrix place = anim::firstPersonPlacement(skeleton, m_rig->pose(), m_rig->cameraNode(),
+			eye.position, eye.yaw, eye.pitch, m_springOffset);
+		const anim::Matrix part = mesh1 >= 0 ? anim::multiply(m_rig->pose()[static_cast<size_t>(mesh1)], place) : place;
+		physics::Mat3 rotation;
+		for (int r = 0; r < 3; ++r) {
+			rotation.rows[static_cast<size_t>(r)] = {part[static_cast<size_t>(r * 4)],
+				part[static_cast<size_t>(r * 4 + 1)], part[static_cast<size_t>(r * 4 + 2)]};
+		}
+		m_effects.setAnchor(kWeaponAnchor, {part[12], part[13], part[14]}, rotation);
+	}
+	// The muzzle flash: the weapon's child at its place on the weapon, the
+	// zoomed one while zoomed in with disableMuzzleWhenZoomed; the systems
+	// shown in first person.
 	const Muzzle& muzzle = m_zoomSettings.disableMuzzle && zoomed() ? m_zoomMuzzle : m_muzzle;
 	if (fired && firstPerson && !muzzle.effect.empty()) {
-		View eye;
-		if (view(eye, 4.0f / 3.0f)) {
-			const anim::Skeleton& skeleton = m_rig->skeleton();
-			const int mesh1 = skeleton.find("mesh1");
-			const anim::Matrix place = anim::firstPersonPlacement(skeleton, m_rig->pose(), m_rig->cameraNode(),
-				eye.position, eye.yaw, eye.pitch, m_springOffset);
-			const anim::Matrix part = mesh1 >= 0 ? anim::multiply(m_rig->pose()[static_cast<size_t>(mesh1)], place) : place;
-			const float* o = muzzle.offset.data();
-			const physics::Vec3 at {o[0] * part[0] + o[1] * part[4] + o[2] * part[8] + part[12],
-				o[0] * part[1] + o[1] * part[5] + o[2] * part[9] + part[13],
-				o[0] * part[2] + o[1] * part[6] + o[2] * part[10] + part[14]};
-			physics::Mat3 rotation;
-			for (int r = 0; r < 3; ++r) {
-				rotation.rows[static_cast<size_t>(r)] = {part[static_cast<size_t>(r * 4)],
-					part[static_cast<size_t>(r * 4 + 1)], part[static_cast<size_t>(r * 4 + 2)]};
-			}
-			m_effects.spawn(muzzle.effect, at, rotation);
+		const float* o = muzzle.offset.data();
+		m_effects.spawnAttached(muzzle.effect, kWeaponAnchor, {o[0], o[1], o[2]}, {},
+			effects::EffectManager::View::FirstPerson);
+	}
+	// The weapon's first-person effect events (0x2c + N) start its bundles
+	// with bit 9 + N (0x0061a4e0); the soldier's first-person system has no
+	// events in the shipped data (its sound events would be the soldier's,
+	// 0x00587b90).
+	for (const anim::FirstPersonRig::Event& event : events) {
+		if (event.weapon && event.type == anim::Bundle::EffectEvent && event.id >= 0 && event.id < 10 && firstPerson) {
+			startWeaponEffects(event.id);
+		}
+	}
+}
+
+void PlayerCamera::startWeaponEffects(int effect)
+{
+	const uint32_t bit = 1u << (9 + effect);
+	for (const WeaponBundle& bundle : m_weaponBundles) {
+		if (bundle.startOnEffects & bit) {
+			m_effects.spawnAttached(bundle.name, kWeaponAnchor, {bundle.offset[0], bundle.offset[1], bundle.offset[2]}, {},
+				effects::EffectManager::View::FirstPerson);
 		}
 	}
 }
@@ -288,9 +422,8 @@ bool PlayerCamera::view(View& view, float aspect) const
 	if (!firstPerson || !m_alive) {
 		return false;
 	}
-	game::GameWorld::PlayerInfo me;
-	const physics::SoldierBody* body = m_round.playerBody();
-	if (!m_round.playerInfo(m_round.localPlayer(), me) || !me.alive || !body) {
+	Me me;
+	if (!current(me) || !me.alive) {
 		return false;
 	}
 	if (me.vehicle) {
@@ -303,7 +436,7 @@ bool PlayerCamera::view(View& view, float aspect) const
 	// The soldier camera: its local position is (0, eye, 0) in the body's
 	// frame, turned by the look (the body's yaw plus the head's twist) and
 	// the aim's pitch (0x005890a0: Rx(pitch) x Ry(yaw), slot 0xe8).
-	view.position = {body->position.x, body->position.y + m_eye.current, body->position.z};
+	view.position = {me.origin[0], me.origin[1] + m_eye.current, me.origin[2]};
 	view.yaw = me.yaw * kDegrees;
 	view.pitch = std::clamp(me.aimPitch, -85.0f, 85.0f) * kDegrees;
 	view.fovY = aspectFov(m_fov.current, aspect);
@@ -311,10 +444,18 @@ bool PlayerCamera::view(View& view, float aspect) const
 }
 
 // A seat's camera (Player::getCamera 0x005948e0 -> the seat's 0x005c7cb0):
-// the first Camera in the seat's subtree (its nested seats left out),
-// placed by the template tree (the guns' bundles turned as the game turns
-// them), its insideFOV.
-bool PlayerCamera::seatCamera(View& view) const
+// the seat's cameras by CameraId (0x0058bdb0 maps the seat's subtree, its
+// nested seats left out), id 0, or 1 while ducking (0x005c7cf0 selects
+// camera 1 when the seat has more than one); placed by the template tree
+// (the guns' bundles turned as the game turns them), its insideFOV.
+struct PlayerCamera::SeatView {
+	uint32_t vehicle = 0;
+	const world::ObjectTemplate* seat = nullptr;
+	const world::ObjectTemplate* camera = nullptr;
+	render::Mat4 world;
+};
+
+bool PlayerCamera::findSeatCamera(SeatView& out) const
 {
 	game::GameWorld::PlayerInfo me;
 	m_round.playerInfo(m_round.localPlayer(), me);
@@ -329,12 +470,14 @@ bool PlayerCamera::seatCamera(View& view) const
 	const std::string& seatName = seats[static_cast<size_t>(me.seat)].name;
 	const world::ObjectTemplateManager& templates = m_round.templates();
 	const uint32_t object = vehicle->id();
-	// Depth-first through the tree: find the seat, then its camera.
+	const int wanted = ducking() ? 1 : 0;
+	// Depth-first through the tree: find the seat, then its cameras.
 	struct Found {
 		bool ok = false;
 		render::Mat4 local;
 		const world::ObjectTemplate* camera = nullptr;
-	} found;
+	} found, first;
+	const world::ObjectTemplate* seatTemplate = nullptr;
 	std::function<void(const world::ObjectTemplate&, const render::Mat4&, bool, int)> walk =
 		[&](const world::ObjectTemplate& t, const render::Mat4& local, bool inSeat, int depth) {
 			if (found.ok || depth > 10) {
@@ -355,24 +498,104 @@ bool PlayerCamera::seatCamera(View& view) const
 					continue; // another seat's cameras
 				}
 				if (inSeat && isCamera(*c)) {
-					found = {true, m, c};
-					return;
+					const Found here {true, m, c};
+					if (!first.ok) {
+						first = here;
+					}
+					if (static_cast<int>(number(*c, "CameraId", 0)) == wanted) {
+						found = here;
+						return;
+					}
+					continue;
 				}
-				walk(*c, m, inSeat || (seat && c->name() == seatName), depth + 1);
+				const bool entering = seat && c->name() == seatName;
+				if (entering) {
+					seatTemplate = c;
+				}
+				walk(*c, m, inSeat || entering, depth + 1);
 				if (found.ok) {
 					return;
 				}
 			}
 		};
 	const world::ObjectTemplate& root = *vehicle->objectTemplate();
+	if (root.name() == seatName) {
+		seatTemplate = &root;
+	}
 	walk(root, render::Mat4 {}, root.name() == seatName, 0);
+	if (!found.ok) {
+		found = first;
+	}
 	if (!found.ok) {
 		return false;
 	}
-	const render::Mat4 world = found.local * placement(vehicle->position(), vehicle->rotation());
-	view.position = {world.at(3, 0), world.at(3, 1), world.at(3, 2)};
-	anglesOf(world, view.yaw, view.pitch);
-	view.fovY = number(*found.camera, "insideFOV", 1.1f);
+	out.vehicle = object;
+	out.seat = seatTemplate;
+	out.camera = found.camera;
+	out.world = found.local * placement(vehicle->position(), vehicle->rotation());
+	return true;
+}
+
+bool PlayerCamera::seatCamera(View& view) const
+{
+	SeatView seat;
+	if (!findSeatCamera(seat)) {
+		return false;
+	}
+	view.position = {seat.world.at(3, 0), seat.world.at(3, 1), seat.world.at(3, 2)};
+	anglesOf(seat.world, view.yaw, view.pitch);
+	view.fovY = number(*seat.camera, "insideFOV", 1.1f);
+	return true;
+}
+
+bool PlayerCamera::ducking() const
+{
+	if (!m_crouch || !m_alive) {
+		return false;
+	}
+	game::GameWorld::PlayerInfo me;
+	if (!m_round.playerInfo(m_round.localPlayer(), me) || !me.vehicle) {
+		return false;
+	}
+	const auto seats = m_round.vehicleSeats(me.vehicle);
+	if (me.seat < 0 || static_cast<size_t>(me.seat) >= seats.size()) {
+		return false;
+	}
+	// The seat's template allowDucking (+0x468, read by 0x005ca2e0).
+	const world::ObjectTemplate* seat = m_round.templates().find(seats[static_cast<size_t>(me.seat)].name);
+	return seat && number(*seat, "allowDucking", 0) != 0;
+}
+
+bool PlayerCamera::duckingDisablesInput() const
+{
+	if (!ducking()) {
+		return false;
+	}
+	game::GameWorld::PlayerInfo me;
+	m_round.playerInfo(m_round.localPlayer(), me);
+	const auto seats = m_round.vehicleSeats(me.vehicle);
+	const world::ObjectTemplate* seat = m_round.templates().find(seats[static_cast<size_t>(me.seat)].name);
+	return seat && number(*seat, "disableInputWhileDucking", 1) != 0; // +0x469, 1 by default
+}
+
+bool PlayerCamera::cockpit(Cockpit& cockpit) const
+{
+	if (!firstPerson || !m_alive) {
+		return false;
+	}
+	SeatView seat;
+	if (!findSeatCamera(seat)) {
+		return false;
+	}
+	// 0x00612880, first person (camera modes 0 and 1): the camera's
+	// cockpitSubGeom / cockpitLod unless -1, else the seat's.
+	const int cameraGeometry = static_cast<int>(number(*seat.camera, "cockpitSubGeom", -1));
+	const int cameraLod = static_cast<int>(number(*seat.camera, "cockpitLod", -1));
+	cockpit.vehicle = seat.vehicle;
+	cockpit.subGeometry = cameraGeometry != -1 ? cameraGeometry
+		: seat.seat                            ? static_cast<int>(number(*seat.seat, "cockpitSubGeom", 0))
+											   : 0;
+	cockpit.lod = cameraLod != -1 ? cameraLod : seat.seat ? static_cast<int>(number(*seat.seat, "cockpitLod", 0)) : 0;
 	return true;
 }
 
@@ -380,8 +603,8 @@ std::vector<PlayerCamera::Model> PlayerCamera::models() const
 {
 	std::vector<Model> out;
 	View eye;
-	game::GameWorld::PlayerInfo me;
-	if (!m_rig || !view(eye, 4.0f / 3.0f) || !m_round.playerInfo(m_round.localPlayer(), me) || me.vehicle) {
+	Me me;
+	if (!m_rig || !view(eye, 4.0f / 3.0f) || !current(me) || me.vehicle) {
 		return out;
 	}
 	const anim::Skeleton& skeleton = m_rig->skeleton();
@@ -417,8 +640,8 @@ bool PlayerCamera::hides(uint32_t object) const
 	if (!firstPerson || !m_alive || object == 0) {
 		return false;
 	}
-	game::GameWorld::PlayerInfo me;
-	if (!m_round.playerInfo(m_round.localPlayer(), me) || !me.alive) {
+	Me me;
+	if (!current(me) || !me.alive) {
 		return false;
 	}
 	return object == me.soldier || object == me.weapon || object == me.kit;

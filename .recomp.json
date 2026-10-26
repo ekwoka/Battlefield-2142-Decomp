@@ -1,0 +1,14 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "Battlefield 2142",
+  "wikidata": "Q811024",
+  "system": "PC (Windows)",
+  "type": "recomp",
+  "original": { "region": "USA", "revision": "1.51" },
+  "project": "BF2142 Recomp",
+  "status": "playable",
+  "targets": ["MacOS"],
+  "toolchain": "Ghidra",
+  "approach": "Functional Recomp",
+  "maintainers": [{ "name": "ekwoka", "link": "https://github.com/ekwoka" }]
+}
