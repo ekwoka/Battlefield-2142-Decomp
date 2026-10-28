@@ -124,6 +124,12 @@ bool SquadMenu::setCreateSelect(int player, bool select)
 	return false;
 }
 
+std::string SquadMenu::squadLabel(int team, int squad) const
+{
+	const auto it = m_names.find({team, squad});
+	return it != m_names.end() ? it->second : squadName(squad);
+}
+
 bool SquadMenu::createSquad(int player)
 {
 	game::GameWorld::PlayerInfo me;
@@ -133,6 +139,12 @@ bool SquadMenu::createSquad(int player)
 	const int squad = me.squad > 0 ? me.squad : freeSquad(me.team);
 	bool made = squad > 0 && (me.squad == squad || m_round.joinSquad(player, squad));
 	if (made) {
+		const std::string typed = typedName ? typedName() : std::string();
+		if (!typed.empty()) {
+			m_names[{me.team, squad}] = typed;
+		} else {
+			m_names.erase({me.team, squad});
+		}
 		if (m_createLocked) {
 			m_locked.insert({me.team, squad});
 		} else {
@@ -289,7 +301,7 @@ void SquadMenu::update(int player)
 		std::stable_sort(members.begin(), members.end(), [](const auto* a, const auto* b) { return a->squadLeader > b->squadLeader; });
 		std::vector<std::string> row(15);
 		row[1] = std::to_string(squad);
-		row[5] = squadName(squad);
+		row[5] = squadLabel(me.team, squad);
 		row[6] = std::to_string(members.size()) + "/" + std::to_string(kSquadSize);
 		row[kColumnLock] = locked(me.team, squad) ? "L" : "";
 		row[kColumnJoin] = text(squad == me.squad ? "HUD_TEXT_MENU_SPAWN_SQUAD_LEAVE" : "HUD_TEXT_MENU_SPAWN_SQUAD_JOIN");

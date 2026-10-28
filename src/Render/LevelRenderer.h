@@ -9,6 +9,7 @@
 
 #include "Animation/Pose.h"
 #include "Culling.h"
+#include "Effects/Effects.h"
 #include "GpuContext.h"
 #include "Hud/Hud.h"
 #include "UI/MenuDraw.h"
@@ -140,6 +141,8 @@ struct LevelSources {
 	// draw instead of the exterior (a vehicle's cockpit seen from inside,
 	// BF2142.exe 0x00612880); false for the default. Asked by syncObjects.
 	std::function<bool(uint32_t object, int& geometry, int& lod)> geometryFor;
+	// Rain and snow (rainManager.*), if any.
+	const scene::RainSettings* rain = nullptr;
 	// Told how far build() got (0..1, the last call 1), for a loading screen.
 	std::function<void(float done)> buildProgress;
 };
@@ -363,6 +366,7 @@ private:
 		bool additive;
 		uint32_t firstVertex;
 		uint32_t vertexCount;
+		bool repeat = false; // trails tile their texture along themselves
 	};
 	SDL_GPUBuffer* m_particleVertices = nullptr;
 	struct OverlayGroup {
@@ -399,8 +403,17 @@ private:
 	void buildParticles(const Camera& camera);
 	// This frame's point lights (the effects' LightSources nearest the
 	// camera), copied into the lit shaders' uniforms.
-	std::vector<std::array<float, 8>> m_pointLights; // position, range2, colour, range1
+	std::vector<effects::PointLight> m_pointLights;
 	void collectPointLights(const Camera& camera);
+	// The LightSources in the placed objects' template trees (the levels'
+	// light bundles: ambient_small, houselight_big ...; lights carried by
+	// vehicles), placed with their objects each frame.
+	struct ObjectLight {
+		uint32_t object = 0;
+		Mat4 local; // in the object's space
+		effects::LightSourceLook look;
+	};
+	std::vector<ObjectLight> m_objectLights;
 	void applyPointLights(LightingUniforms& uniforms) const;
 	// This frame's decals: one buffer, drawn in groups by texture.
 	SDL_GPUBuffer* m_decalVertices = nullptr;
@@ -411,7 +424,10 @@ private:
 		const scene::LightSettings& lights, std::initializer_list<const effects::EffectManager*> managers);
 	// Effect managers' particles into a buffer (released and rebuilt).
 	void buildParticleBuffer(std::initializer_list<const effects::EffectManager*> managers, SDL_GPUBuffer*& buffer,
-		std::vector<ParticleGroup>& groups);
+		std::vector<ParticleGroup>& groups, const Camera& camera, bool weather = false);
+	// Rain and snow (LevelSources::rain), stepped by buildParticles.
+	effects::Weather m_weather;
+	uint64_t m_lastWeatherTicks = 0;
 	void drawParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Mat4& viewProjection,
 		const Camera& camera, const scene::LightSettings& lights, SDL_GPUBuffer* buffer,
 		const std::vector<ParticleGroup>& groups);

@@ -491,6 +491,10 @@ public:
 		// (minRotation / maxRotation x; free without them).
 		float frameYaw = 0;
 		float minYaw = -1e9f, maxYaw = 1e9f;
+		// The yaw bundle's regulateVector x (template +0x314) and maxSpeed x:
+		// the bundle counter-turns with the hull (0x005644b0, see stepGunner).
+		float regulateYaw = 0, yawSpeed = 0;
+		float cameraRegulateYaw = 0; // the camera's regulateVector x
 		// The seat's camera when it turns on the mouse (a Camera with
 		// inputToYaw PIMouseLookX / inputToPitch PIMouseLookY: the drivers'
 		// free look, the FAV gunners' lean with automaticReset), its axes
@@ -516,6 +520,11 @@ public:
 	// Whether a seat drives: the first of a vehicle with an engine (the
 	// Titan's six seats are all guns).
 	bool drivesSeat(uint32_t vehicle, int seat) const;
+	// A bundle's regulateVector on its yaw (0x005644b0): clamp(regulate x
+	// the hull's yaw rate, -1, 1); and the input handler's merge (0x00565180:
+	// it replaces an input that is 0 or weaker the same way).
+	static float regulation(float regulate, const physics::RigidBody& body);
+	static float regulatedInput(float input, float regulated);
 	bool gunAim(uint32_t vehicle, int seat, float& yaw, float& pitch) const;
 	const FireArm* gun(uint32_t vehicle, int seat) const;
 	// Vehicles (for the bots): where, which way, how many seats are free.
@@ -536,6 +545,9 @@ public:
 		physics::Vec3 boxMin, boxMax;
 	};
 	std::vector<VehicleInfo> vehicleList();
+	// The terrain's height under a point (the heightmap the physics uses; 0
+	// without one).
+	float terrainHeight(float x, float z) const { return m_ground.height ? m_ground.height(x, z) : 0.0f; }
 	// The battlefield-objects report (BF2142.exe event 0x41, server
 	// 0x005088f0 -> IAIEventCourier vt+0xe0, AIDLL 0x1004e5e0 -> 0x100bf000):
 	// `reporter`'s squad now knows of the enemy `players` (and the
@@ -998,7 +1010,7 @@ private:
 	bool disabled(const Body& body) const { return body.empLevel > 0 || body.wreckTime >= 0; }
 
 	void seatPlayer(Player& player, Body& body, int seat);
-	void stepGunner(Player& player, Body& body, float seconds);
+	void stepGunner(Player& player, Body& body, float seconds, bool aims = true);
 	Body* findBody(uint32_t object);
 	int firstEngineType(const world::ObjectTemplate& root) const;
 	void addBodies();

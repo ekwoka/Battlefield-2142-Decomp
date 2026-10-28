@@ -1887,11 +1887,20 @@ void GameWorld::stepProjectiles(float seconds)
 				m_effects.spawn(cell->effectTemplates[0], hit.point, facing);
 			}
 			// Its decal (the cell's decal template) on the terrain or a static
-			// object; none on vehicles or soldiers.
+			// object, or in a vehicle's space; none on soldiers.
 			if (cell && !hitBody && !cell->decalTemplates.empty() && !cell->decalTemplates[0].empty()
 				&& std::none_of(m_players.begin(), m_players.end(),
 					[hitObject](const auto& player) { return hitObject != 0 && player->object == hitObject; })) {
 				m_effects.spawnDecal(cell->decalTemplates[0], hit.point, hit.normal);
+			} else if (cell && hitBody && !cell->decalTemplates.empty() && !cell->decalTemplates[0].empty()) {
+				// On a vehicle: kept in its space, moving with it (the
+				// object's own decal set, 0x0063c000 / RendDX9 0x100e6b70).
+				if (const world::Object* holder = m_objects.find(hitBody->object)) {
+					const world::Vec3& at = holder->position();
+					const world::Vec3& turn = holder->rotation();
+					m_effects.spawnDecal(cell->decalTemplates[0], hit.point, hit.normal, hitBody->object,
+						{at.x, at.y, at.z}, {turn.x, turn.y, turn.z});
+				}
 			}
 			if (m_impacts.size() > 64) {
 				m_impacts.erase(m_impacts.begin());
@@ -4249,10 +4258,20 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 				driven.throttle = input.throttle * scale;
 				driven.steer = input.strafe * scale;
 				driven.roll = std::clamp(input.turn / 5.0f, -1.0f, 1.0f) * scale;
-				driven.pitch = std::clamp(-(input.aimPitch - player.lastLookPitch) / 5.0f, -1.0f, 1.0f) * scale;
+				driven.pitch = (input.hasPitch ? std::clamp(input.pitch, -1.0f, 1.0f)
+										   : std::clamp(-(input.aimPitch - player.lastLookPitch) / 5.0f, -1.0f, 1.0f))
+					* scale;
 				driven.crouch = input.pose == SoldierPose::Crouch ? 1.0f : 0.0f;
 				driven.sprint = input.sprint;
 				body->vehicle->setInput(driven);
+				// The pilot's own gun (the gunships' seat GenericFireArm,
+				// fixed along the hull): PIFire fires it; the mouse flies the
+				// vehicle, so the gun keeps its aim. (Ground drivers' guns
+				// turn on the mouse in the original, which the rewrite's
+				// drivers spend on PIRoll: not fired here.)
+				if (body->vehicle->flies() && !body->guns.empty() && body->guns[0].weapon) {
+					stepGunner(player, *body, seconds, false);
+				}
 			} else if (body->wreckTime < 0 && player.seat != 0 && input.altFire && launchPod(player.id)) {
 				return; // a pod seat's alternate fire (Titans.cpp): off in a drop pod
 			} else if (body->wreckTime < 0 && (player.seat != 0 || !body->vehicle)) {
@@ -4701,6 +4720,16 @@ bool GameWorld::partPose(uint32_t object, const std::string& part, world::Vec3& 
 			return true;
 		}
 	}
+	// The moving parts (RotationalBundle, Engine, Wing: rotors, thrusters,
+	// flaps, turrets) turn by their axes' angles (degrees) in their own
+	// frame, as Vehicle::updateParts composes them (turn * base * parent).
+	for (const Vehicle::Part& p : state->parts()) {
+		if (p.moves && sameName(p.name, part)) {
+			offset = {};
+			rotation = {p.angle[0], p.angle[1], p.angle[2]};
+			return true;
+		}
+	}
 	return false;
 }
 
@@ -4826,6 +4855,7 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 						return a;
 					};
 					owner.camera = t.name();
+					owner.cameraRegulateYaw = vec("regulateVector").x;
 					owner.cameraYaw = axis(0, look("inputToYaw", "PIMouseLookX"));
 					owner.cameraPitch = axis(1, look("inputToPitch", "PIMouseLookY"));
 					owner.cameraPivot = vec("pivotPosition");
@@ -4838,6 +4868,12 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 					if (settings.count("inputToYaw") && owner.yawBundle.empty()) {
 						owner.yawBundle = t.name();
 						owner.frameYaw = turn.yawPitchRoll().x;
+						if (const auto reg = settings.find("regulateVector"); reg != settings.end()) {
+							owner.regulateYaw = parseVec3(reg->second).x;
+						}
+						if (const auto speed = settings.find("maxSpeed"); speed != settings.end()) {
+							owner.yawSpeed = parseVec3(speed->second).x;
+						}
 						const auto low = settings.find("minRotation");
 						const auto high = settings.find("maxRotation");
 						if (low != settings.end() && high != settings.end()
@@ -5297,13 +5333,43 @@ void GameWorld::stepSeatCamera(Player& player, Body& body, float seconds)
 	// An axis input is -1..1 (what goes past is lost: only
 	// rememberExcessInput, not rewritten, banks it).
 	Body::Look& look = body.looks[static_cast<size_t>(player.seat)];
-	rotationAxisStep(seat.cameraYaw, std::clamp(player.input.turn / 5.0f, -1.0f, 1.0f), seconds, look.yaw, look.yawSpeed);
+	float yawIn = std::clamp(player.input.turn / 5.0f, -1.0f, 1.0f);
+	yawIn = regulatedInput(yawIn, regulation(seat.cameraRegulateYaw, body.body));
+	rotationAxisStep(seat.cameraYaw, yawIn, seconds, look.yaw, look.yawSpeed);
 	rotationAxisStep(seat.cameraPitch, std::clamp(-pitchChange / 5.0f, -1.0f, 1.0f), seconds, look.pitch, look.pitchSpeed);
+}
+
+// A bundle's regulation of its yaw (0x005644b0, regulateFromParent -1 as
+// every shipped bundle has it): the root node's angular velocity (slot
+// 0x68, rad/s) about the yaw axis (the hull's up) times regulateVector.x,
+// within +-1. The original carries the angular velocity through the
+// bundle's and the root's matrices first (0x006acfa0, 0x004b9d60); for a
+// bundle upright in its hull that is the up component.
+float GameWorld::regulation(float regulate, const physics::RigidBody& body)
+{
+	if (regulate == 0) {
+		return 0;
+	}
+	return std::clamp(regulate * physics::dot(body.angularVelocity, body.rotation.rows[1]), -1.0f, 1.0f);
+}
+
+// The handler's merge (0x00565180): the regulated value replaces an input
+// that is 0, or of the same sign and smaller.
+float GameWorld::regulatedInput(float input, float regulated)
+{
+	if (regulated == 0) {
+		return input;
+	}
+	const auto sign = [](float x) { return x > 0 ? 1 : x < 0 ? -1 : 0; };
+	if (input == 0 || (sign(input) == sign(regulated) && std::fabs(input) < std::fabs(regulated))) {
+		return regulated;
+	}
+	return input;
 }
 
 // A gunner turns the seat's bundles with the mouse (yaw free, pitch within
 // the bundle's limits) and fires the seat's gun along them.
-void GameWorld::stepGunner(Player& player, Body& body, float seconds)
+void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims)
 {
 	if (player.seat < 0 || static_cast<size_t>(player.seat) >= body.guns.size()) {
 		return;
@@ -5311,9 +5377,23 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds)
 	Body::Gun& gun = body.guns[static_cast<size_t>(player.seat)];
 	const world::Object* object = m_objects.find(body.object);
 	const SeatLayout& seat = vehicleLayout(*object->objectTemplate()).seats[static_cast<size_t>(player.seat)];
-	gun.yaw = std::clamp(std::remainder(gun.yaw + player.input.turn, 360.0f), seat.minYaw, seat.maxYaw);
-	// Bundle pitch is down positive: its limits [min, max] bound the aim at [-max, -min].
-	gun.pitch = std::clamp(player.input.aimPitch, -seat.maxPitch, -seat.minPitch);
+	// regulateVector (0x005644b0 through the input handler 0x00565180 or
+	// the input pass 0x00565700): the bundle's yaw input becomes
+	// clamp(regulateVector.x x the hull's yaw rate, -1, 1) where the
+	// gunner's is 0 or weaker the same way, so a turret holds its heading
+	// while the hull turns (eu_tank's -0.5 at 90 degrees a second). The
+	// rewrite's gunner turns by degrees a tick: the regulation's are the
+	// input x maxSpeed x the tick.
+	if (aims) {
+		float turn = player.input.turn;
+		if (seat.regulateYaw != 0 && seat.yawSpeed != 0) {
+			const float reg = regulation(seat.regulateYaw, body.body) * seat.yawSpeed * seconds;
+			turn = regulatedInput(turn, reg);
+		}
+		gun.yaw = std::clamp(std::remainder(gun.yaw + turn, 360.0f), seat.minYaw, seat.maxYaw);
+		// Bundle pitch is down positive: its limits [min, max] bound the aim at [-max, -min].
+		gun.pitch = std::clamp(player.input.aimPitch, -seat.maxPitch, -seat.minPitch);
+	}
 	// A Titan's gun whose armour is out (disableInputOnDestroy) doesn't fire.
 	const bool working = !isTitan(body.object) || titanGunWorks(body.object, player.seat);
 	if (!gun.weapon || !gun.weapon->tick(seconds, player.input.fire && working) || !gun.projectile) {
@@ -5677,6 +5757,20 @@ void GameWorld::addBodies()
 		rigid.inertiaModifier = vector("inertiaModifier", {1, 1, 1});
 		rigid.gravityModifier = number(*t, "gravityModifier", 1);
 		body.vehicle = Vehicle::fromTemplate(*t, m_templates, mesh);
+		// A vehicle placed with its box's bottom under the terrain (the
+		// shipped spawners stand on the ground and spawn at their spot,
+		// 0x005aeb80) is lifted onto it, as the spawn spot's test drops it
+		// (dropSpawnSpot). A deviation: the original spawns it sunk and its
+		// responses come out of the ground without the rewrite's kick (the
+		// whole push out in a tick, the springs' rate after it) that wrecked
+		// the gunships and APCs on their pads.
+		if (body.vehicle && m_ground.height) {
+			const float up = rigid.rotation.rows[1].y;
+			const float ground = m_ground.height(rigid.position.x, rigid.position.z);
+			if (up > 0 && rigid.position.y + up * low.y < ground) {
+				rigid.position.y = ground - up * low.y;
+			}
+		}
 		if (body.vehicle) {
 			// Each wheel's part radius: its geometry's vehicle LOD's (slot 0x50),
 			// and its material (its first face's, through mapMaterial).

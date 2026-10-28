@@ -30,6 +30,10 @@
 //           on foot only: wrecks, and 1000 for a grenade warning,
 //           0x1004eab0); BridgeRepair is 0 (no broken bridges here).
 //
+// Pilots of Helicopter / TransportHelicopter seats fly with AIDLL's
+// HeliMoveTo family (src/AI/Heli; BotManager::fly): BBPGotoWaypoint3d,
+// BBPIdle3d and the gunship's BBPHeliFire3d.
+//
 // Scheduling (0x100ca590): about half the bots run their plan a frame, at
 // most four think (after 0.3 s / 0.5 s of plan time) and two sense.
 // Moving goes through the path follower and the drivers of
@@ -68,6 +72,7 @@
 #pragma once
 
 #include "AI/Behaviour.h"
+#include "AI/Heli.h"
 #include "AI/NavMesh.h"
 #include "AI/PathFollower.h"
 #include "AI/Strategy.h"
@@ -583,6 +588,21 @@ private:
 		};
 		std::vector<Radio> radio;
 		bool firedLast = false;
+		// A helicopter's pilot (src/AI/Heli): the controller's inputs and
+		// airborne flag (bot +0x140), the plan's hover point and its take-off
+		// wait (BBPGotoWaypoint3d 0x10067690), the last velocity and aim
+		// (HeliAimAt), the gunship's attack run (BBPHeliFire3d 0x1007f9d0).
+		ai::HeliState heli;
+		uint32_t heliVehicle = 0;
+		physics::Vec3 heliGoal, heliHover;
+		bool heliPlanned = false;
+		std::string heliPattern;
+		float heliWaitUntil = -1;
+		physics::Vec3 heliLastVelocity;
+		float heliLastAt = -1;
+		float heliLastDirY = 0;
+		int heliRun = 0;        // 0 approach, 1 away, 2 back
+		float heliTapAt = -1e9f;
 	};
 	// The side's strategic AI.
 	struct Side {
@@ -724,6 +744,7 @@ private:
 	std::map<int, std::pair<int, int64_t>> m_tasks;
 	std::map<std::string, float> m_behaviourSeconds;
 	std::map<uint32_t, float> m_driven;
+	std::map<uint32_t, std::string> m_drivenName; // the template, kept past the vehicle's removal
 	// When a human player of each team last got out of a vehicle (the unit
 	// component's per-team stamp, BF2142.exe vt+0x64 0x008a1b10 set by the
 	// exit event 0x00894860, read through vt+0x60 by the seat value), and
@@ -747,6 +768,10 @@ private:
 	float random(); // 0..1
 	void flee(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
 	void idle(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
+	// A Helicopter / TransportHelicopter pilot's plans (BBPGotoWaypoint3d,
+	// BBPIdle3d, BBPHeliFire3d) with the flight controllers of src/AI/Heli;
+	// false for a behaviour they leave to the others (Change).
+	bool fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
 };
 
 // The soldier a driver would sound the horn at (AIDLL 0x100fc660's scan;

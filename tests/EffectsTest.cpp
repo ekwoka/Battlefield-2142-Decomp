@@ -286,3 +286,138 @@ TEST(Effects_DecalsLightsAndMeshParticles)
 	}
 	CHECK(manager.lights().empty() && manager.emitters() == 0);
 }
+
+// A TrailSystem carried by its anchor leaves points while it moves faster
+// than minTrailVelocity and draws them as a ribbon in numPlanes planes
+// (Trail.fx); a NonScreenAlignedParticleSystem's quads lie across the
+// system's y axis (NonScreenAlignedParticles.fx).
+TEST(Effects_TrailsAndNonScreenAlignedQuads)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "EffectBundle");
+	templates.registerType(2, "TrailSystem");
+	templates.registerType(3, "NonScreenAlignedParticleSystem");
+	world::ObjectTemplate* trail = templates.create("TrailSystem", "smoke_trail");
+	trail->settings()["emitFrequency"] = "20";
+	trail->settings()["timeToLive"] = "2";
+	trail->settings()["particleMaxSize"] = "1";
+	trail->settings()["sizeGraph"] = "0/0/0/1";
+	trail->settings()["transparencyGraph"] = "0/0/0/1";
+	trail->settings()["numPlanes"] = "3";
+	trail->settings()["minTrailVelocity"] = "2";
+	trail->settings()["fadeInFactor"] = "0.05";
+	trail->settings()["fadeOutFactor"] = "0.05";
+	trail->settings()["textureName"] = "objects\\effects\\textures\\trail";
+	world::ObjectTemplate* bundle = templates.create("EffectBundle", "e_trail");
+	bundle->children().push_back({"smoke_trail", {}, {}});
+	effects::EffectManager manager(templates);
+	manager.setAnchor(3, {0, 10, 0}, {});
+	CHECK(manager.spawnAttached("e_trail", 3, {}));
+	const auto triangles = [&manager] {
+		size_t count = 0;
+		manager.forEachWorldGroup({50, 10, 5}, [&](const std::string&, bool, const std::vector<effects::WorldVertex>& list) {
+			count += list.size();
+		});
+		return count;
+	};
+	// Still: no points.
+	for (int i = 0; i < 15; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	CHECK(manager.emitters() == 1 && triangles() == 0);
+	// Flying along x at 30 m/s for half a second: about ten points, nine
+	// segments of three planes of two triangles.
+	for (int i = 0; i < 15; ++i) {
+		manager.setAnchor(3, {static_cast<float>(i + 1), 10, 0}, {});
+		manager.update(1 / 30.0f);
+	}
+	const size_t drawn = triangles();
+	CHECK(drawn >= 8 * 3 * 6 && drawn <= 10 * 3 * 6 && drawn % 18 == 0);
+	// Sprites leave it out.
+	size_t sprites = 0;
+	manager.forEachGroup([&](const std::string&, bool, const std::vector<effects::Sprite>& list) { sprites += list.size(); });
+	CHECK(sprites == 0);
+	// Stopped, its points fade and it goes.
+	manager.stopAttached(3);
+	for (int i = 0; i < 75; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	CHECK(manager.emitters() == 0);
+
+	world::ObjectTemplate* ripples = templates.create("NonScreenAlignedParticleSystem", "ripples");
+	ripples->settings()["emitFrequency"] = "30";
+	ripples->settings()["emitTime"] = "0.1";
+	ripples->settings()["timeToLive"] = "1";
+	ripples->settings()["particleMaxSize"] = "2";
+	ripples->settings()["sizeGraph"] = "0/0/0/1";
+	ripples->settings()["transparencyGraph"] = "0/0/0/1";
+	ripples->settings()["textureName"] = "objects\\effects\\textures\\ring";
+	CHECK(manager.spawn("ripples", {0, 1, 0}));
+	for (int i = 0; i < 3; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	bool flat = true;
+	size_t corners = 0;
+	manager.forEachWorldGroup({0, 20, 0}, [&](const std::string&, bool, const std::vector<effects::WorldVertex>& list) {
+		for (const auto& v : list) {
+			flat = flat && std::fabs(v.position.y - 1) < 1e-4f;
+			++corners;
+		}
+	});
+	CHECK(corners > 0 && corners % 6 == 0 && flat);
+}
+
+// Rain and snow (rainManager.*, Rain.fx): the particles stay in the box
+// about the camera as they fall, fade towards its edge and shrink with
+// distance.
+TEST(Effects_WeatherBoxFollowsTheCamera)
+{
+	scene::RainSettings rain;
+	rain.enabled = true;
+	rain.particleCount = 500;
+	rain.offset = {0, 10, 0};
+	rain.emitRadius = {20, 10, 20};
+	rain.particleVelocity = {0, -1, 0};
+	rain.particleSpeed = 5;
+	rain.particleSize = 8;
+	rain.particleMaxSize = 12;
+	rain.particleScale = {0, 0.1f, 0};
+	rain.fadeOutRange = 0.6f;
+	effects::Weather weather;
+	weather.update(rain, {100, 0, 100}, 0);
+	CHECK(!weather.drops().empty() && weather.drops().size() <= 500);
+	for (int i = 0; i < 60; ++i) {
+		weather.update(rain, {100.0f + static_cast<float>(i), 0, 100}, 1 / 30.0f);
+	}
+	bool inside = true, sized = true;
+	for (const auto& drop : weather.drops()) {
+		inside = inside && std::fabs(drop.position.x - 159) <= 20.01f && std::fabs(drop.position.y - 10) <= 10.01f
+			&& drop.alpha > 0 && drop.alpha <= 1;
+		sized = sized && drop.pixels > 0 && drop.pixels <= 12;
+	}
+	CHECK(inside && sized);
+	rain.enabled = false;
+	weather.update(rain, {}, 1 / 30.0f);
+	CHECK(weather.drops().empty());
+}
+
+// A decal on a moving object is kept in its space (the object's own
+// decal set, BF2142.exe 0x0063c000 / RendDX9 0x100e6b70).
+TEST(Effects_DecalsOnMovingObjects)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(5, "Decal");
+	world::ObjectTemplate* hole = templates.create("Decal", "hole");
+	hole->settings()["decalTextureName"] = "objects\\effects\\textures\\hole";
+	effects::EffectManager manager(templates);
+	// The object at (10, 0, 0) turned a quarter round (yaw 90: its +z is
+	// the world's +x); hit at (11, 1, 0) on a face looking along +x.
+	CHECK(manager.spawnDecal("hole", {11, 1, 0}, {1, 0, 0}, 42, {10, 0, 0}, {90, 0, 0}));
+	CHECK(manager.decals().size() == 1);
+	const effects::Decal& d = manager.decals()[0];
+	CHECK(d.object == 42);
+	CHECK(std::fabs(d.position.x) < 1e-4f && std::fabs(d.position.y - 1) < 1e-4f && std::fabs(d.position.z - 1) < 1e-4f);
+	CHECK(std::fabs(d.normal.z - 1) < 1e-4f);
+	manager.dropDecals(42);
+	CHECK(manager.decals().empty());
+}

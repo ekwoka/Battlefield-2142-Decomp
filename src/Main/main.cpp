@@ -31,12 +31,16 @@
 #include "Net/RemoteInput.h"
 #include "Net/GameEvents.h"
 #include "Net/ServerBrowser.h"
+#include "Net/ServerQuery.h"
 #include "AI/NavMesh.h"
 #include "Console/ConsoleBinding.h"
 #include "Game/Bots.h"
 #include "UI/Player/Player.h"
 #include "IO/Localization/Localization.h"
+#include "HostedGame.h"
 #include "HudMenus.h"
+#include "HudMenusChat.h"
+#include "HudMenusKits.h"
 #include "MenuBindings.h"
 #include "PlayerCamera.h"
 #include "EndOfRoundBindings.h"
@@ -66,6 +70,7 @@
 
 #if BF2142_HAS_RENDERER
 #include "Render/LevelRenderer.h"
+#include "Nametags.h"
 #include "Viewer.h"
 #endif
 
@@ -80,6 +85,7 @@
 #include <thread>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <set>
@@ -112,7 +118,12 @@ struct Options {
 	int bots = 0;                // --bots N: AI players, alternately PAC and EU
 	int simulate = 0;            // --simulate N: run N seconds headless, then show the scores
 	bool servers = false;        // --servers: list the servers OpenSpy's master server knows
-	std::string connect;         // --connect host[:port]: play on a game server
+	std::string connect;         // --connect host[:port] (the original's +joinServer): play on a game server
+	bool host = false;           // --host: serve the local game to other clients (HostedGame.h)
+	uint16_t hostPort = 17567;   // +port N (the original's "specifies the network port to be used")
+	uint16_t queryPort = 29900;  // --query-port N: the LAN query responder's (0: none)
+	std::string lanAddress = "255.255.255.255"; // --lan <address>: where the LOCAL page's search probes
+	std::string playerName;      // --name N: our name on a server (ChangePlayerName)
 	std::string probe;           // --probe host[:port]: shake hands and show what the server sends
 	uint32_t profileId = 0xffffffff; // the soldier's profile from --login
 	bool fesl = false;           // --fesl: greet the account service (no login)
@@ -235,6 +246,18 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.gameMode = argv[++i];
 		} else if (arg == "+mapSize" && hasValue) {
 			options.mapSize = std::atoi(argv[++i]);
+		} else if (arg == "+joinServer" && hasValue) {
+			options.connect = argv[++i];
+		} else if (arg == "+port" && hasValue) {
+			options.hostPort = static_cast<uint16_t>(std::atoi(argv[++i]));
+		} else if (arg == "--host") {
+			options.host = true;
+		} else if (arg == "--query-port" && hasValue) {
+			options.queryPort = static_cast<uint16_t>(std::atoi(argv[++i]));
+		} else if (arg == "--lan" && hasValue) {
+			options.lanAddress = argv[++i];
+		} else if (arg == "--name" && hasValue) {
+			options.playerName = argv[++i];
 		} else if (arg == "+dedicated" && hasValue) {
 			options.dedicated = std::atoi(argv[++i]) != 0;
 		} else if (arg[0] == '+' && hasValue) {
@@ -243,6 +266,9 @@ bool parseOptions(int argc, char** argv, Options& options)
 			std::fprintf(stderr, "unknown option %s\n", arg.c_str());
 			return false;
 		}
+	}
+	if (!options.connect.empty() && options.simulate > 0 && options.screenshot.empty()) {
+		options.view = false; // a joined game run headless for a while
 	}
 	if (options.gameDir.empty()) {
 		std::fprintf(stderr, "usage: bf2142 --game <BF2142 install dir> [--api symbols/BF2142.exe.console.csv]\n");
@@ -334,8 +360,16 @@ void setupScoreboard(hud::HudManager& hud)
 {
 	const std::vector<hud::HudManager::ListColumn> columns {
 		{8, 200, 0}, {214, 30, 2}, {245, 30, 2}, {278, 30, 2}, {308, 30, 2}, {342, 30, 2}};
-	for (int data : {1, 2, 9, 10}) {
+	for (int data : {9, 10}) {
 		hud.setListColumns(data, columns);
+	}
+	// The players' lists add the voice box (column 6, a click toggles the
+	// player's mute: 0x007bc590 type 7; where the exe draws it isn't known,
+	// so it sits at the name's end) and keep the player's id in cell 7.
+	auto players = columns;
+	players.push_back({196, 0, 0, 12});
+	for (int data : {1, 2}) {
+		hud.setListColumns(data, players);
 	}
 }
 
@@ -355,6 +389,9 @@ void updateTeams(hud::HudManager& hud, const game::GameWorld& round, const game:
 
 void updateScoreboard(hud::HudManager& hud, const game::GameWorld& round, const std::function<int(int)>& scoreOf)
 {
+	if (round.playerList().empty()) {
+		return; // a joined game: the server's players fill it
+	}
 	const int friendly = round.playerTeam() == 1 ? 1 : 2;
 	for (int side = 0; side < 2; ++side) {
 		const int team = side == 0 ? friendly : 3 - friendly;
@@ -391,6 +428,10 @@ constexpr int kMarkerBeacon = 100001;
 // while dead (the spawn screen). Markers: control points by owner (with
 // the spawn icons on the spawn screen, clickable), the team's soldiers,
 // and the player's heading arrow.
+// Where the commander's zoom buttons put the commander's view (0x007d8e00:
+// the asset's position); the commander screen's map centres on it.
+std::optional<std::pair<float, float>> g_commanderView;
+
 void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLogic& logic, bool commanderScreen)
 {
 	game::GameWorld::PlayerInfo me;
@@ -503,6 +544,9 @@ void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 			me.yaw};
 		markers.push_back(arrow);
 		hud.setMapFocus(me.position.x, me.position.z);
+	}
+	if (commanderScreen && g_commanderView) {
+		hud.setMapFocus(g_commanderView->first, g_commanderView->second);
 	}
 	hud.setMapMarkers(std::move(markers));
 }
@@ -1006,6 +1050,7 @@ struct Session {
 	int roundsPerMap = 1;
 	int roundsOnMap = 0;
 	bool nextMap = false; // the round ended: the playlist goes on
+	bool joinSpawn = false; // --play on a server: ask to spawn once in the game
 	// A game on a server (--connect, or the menu's join): the connection
 	// and the replicated world, for as long as it lasts.
 	std::unique_ptr<net::GameClient> client;
@@ -1028,6 +1073,9 @@ int main(int argc, char** argv)
 	Options options;
 	if (!parseOptions(argc, argv, options)) {
 		return 2;
+	}
+	if (options.host) {
+		std::setvbuf(stdout, nullptr, _IOLBF, 0); // a server's log as it happens
 	}
 	// The account service: a greeting, or a login whose soldier's profile
 	// id goes to the game server.
@@ -1294,6 +1342,8 @@ int runGame(Options& options, Session& session)
 	scene::registerSkyConsoleMethods(console, sky);
 	scene::WaterSettings water;
 	scene::registerWaterConsoleMethods(console, water);
+	scene::RainSettings rain;
+	scene::registerRainConsoleMethods(console, rain);
 
 	// Sound, as 0x007fcd50: the engine from getSoundEngine() reading files
 	// through the virtual file system, wrapped by the game's sound manager.
@@ -1501,6 +1551,8 @@ int runGame(Options& options, Session& session)
 		const std::string movie = "Menu/External/FlashMenu/" + options.menu + ".dfm";
 		// What the menu calls in the game (MenuBindings.h).
 		dice::hfe::menu::MenuServices services = dice::hfe::menu::MenuServices::openSpy();
+		// The LOCAL page's search: --lan picks where it probes.
+		services.browseLan = [address = options.lanAddress] { return net::browseLan(address); };
 		if (options.offline) {
 			services.checkOnline = [] { return false; };
 			services.loginAccount = [](const std::string&, const std::string&) {
@@ -1527,6 +1579,11 @@ int runGame(Options& options, Session& session)
 		menuBindings->onQuit = [&session]() { session.menuQuit = true; };
 		menuBindings->onLog = [](const std::string& line) { std::printf("menu: %s\n", line.c_str()); };
 		menuBindings->setMaps(scanMenuMaps(options));
+		// The award definitions (0x0046a0c0 runs awards.con at start-up).
+		if (std::string awards; files.readText("Menu/External/FlashMenu/awards.con", awards)) {
+			menuBindings->setAwards(stats::parseAwards(awards));
+			std::printf("%zu award definitions\n", menuBindings->awards().size());
+		}
 		menuBindings->onStartGame = [&session](const dice::hfe::menu::GameSetup& setup) { session.startedGame = setup; };
 		menuBindings->onDisconnect = [&session] { session.disconnect = true; };
 		menuBindings->onJoin = [&session, &options](const std::string& host, uint16_t port) {
@@ -1659,6 +1716,11 @@ int runGame(Options& options, Session& session)
 		}
 		net::GameClientOptions clientOptions;
 		clientOptions.profileId = options.profileId;
+		clientOptions.playerName = options.playerName;
+		if (clientOptions.playerName.empty() && session.menuBindings) {
+			clientOptions.playerName = session.menuBindings->soldierName(); // the soldier the menu plays as
+		}
+		showMenu = false; // the menu's join hands over to the game
 		net::GameClient& client = *session.client;
 		client.connect(host, port, clientOptions);
 		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
@@ -1731,6 +1793,8 @@ int runGame(Options& options, Session& session)
 			}
 		}
 		options.bots = 0;     // the server's players
+		// --play: ask to spawn (the first kit, any point) once in the game.
+		session.joinSpawn = options.playTeam != 0;
 		options.playTeam = 0; // our soldier is the server's
 		gameLogic.mapSize = options.mapSize;
 	}
@@ -1792,6 +1856,7 @@ int runGame(Options& options, Session& session)
 #endif
 	};
 	loadingStep(0);
+	std::set<uint32_t> levelObjects; // the static objects, before the game mode's
 	// Level loading, after FUN_004d3450: the level's archives are mounted at
 	// its directory, then materials, static objects and the game mode's
 	// gameplay objects are created.
@@ -1816,6 +1881,10 @@ int runGame(Options& options, Session& session)
 		run((levelPath + "Init.con").c_str());
 		loadingStep(0.6f);
 		run((levelPath + "StaticObjects.con").c_str());
+		// The level's own objects: a client loads them too (no ghosts).
+		for (const auto& object : objects.objects()) {
+			levelObjects.insert(object->id());
+		}
 		loadingStep(0.8f);
 		// v_arg1 is "host" on the server (a local game hosts) and "client"
 		// otherwise; spawners and control points only exist on the host
@@ -2043,10 +2112,161 @@ int runGame(Options& options, Session& session)
 		bindMethod(console, "SpawnManager.toggleMembers", ConsoleAccess::Anyone, [&](bool members) { membersShown = members; });
 		bindMethod(console, "spawnManager.commitSuicide", ConsoleAccess::Anyone,
 			[&] { round.setHitPoints(round.playerObject(), 0); });
+		// The kit buttons, the customise and the unlock screens (HudMenusKits.h).
+		dice::hfe::menu::KitMenu kitMenu(round, gameLogic, templates, hudManager);
+		kitMenu.setLocalizer([&localization](const std::string& id) { return localization.text(id); });
+		kitMenu.bind(console);
+		kitMenu.onEquip = [&](const std::vector<std::string>& containers) {
+			if (round.localPlayer() < 0) {
+				return;
+			}
+			round.setUnlocks(round.localPlayer(), containers, false);
+			const game::Team& team = gameLogic.team(round.playerTeam() == 1 ? 1 : 2);
+			if (localKit >= 0 && static_cast<size_t>(localKit) < team.kits.size()) {
+				const game::Kit& kit = team.kits[static_cast<size_t>(localKit)];
+				round.setKit(round.localPlayer(), kit.name,
+					kitMenu.heavyArmor() && !kit.heavySoldier.empty() ? kit.heavySoldier : kit.soldier);
+			}
+		};
 		dice::hfe::menu::SquadMenu squadMenu(round, hudManager);
 		squadMenu.setLocalizer([&localization](const std::string& id) { return localization.text(id); });
 		squadMenu.onMessage = [](const std::string& id) { std::printf("squad menu: %s\n", id.c_str()); };
 		squadMenu.bind(console);
+		// The chat and kill lines, the say boxes, the squad name box, the map
+		// vote and the VOIP list (HudMenusChat.h).
+		dice::hfe::menu::HudChat chat(hudManager);
+		chat.setLocalizer([&localization](const std::string& id) { return localization.text(id); });
+		dice::hfe::menu::SquadNameBox squadNameBox(hudManager);
+		squadMenu.typedName = [&squadNameBox] { return squadNameBox.take(); };
+		bindMethod(console, "SquadMenu.setSquadNameSelect", ConsoleAccess::Anyone, [&squadNameBox] { squadNameBox.select(); });
+		dice::hfe::menu::MapVoteList mapVote(hudManager);
+		using Box = dice::hfe::menu::HudChat::Box;
+		const auto sayLocal = [&](Box box, const std::string& line) {
+			// A line said: to the server, else into our own list.
+			const uint32_t channel = box == Box::kTeam ? net::kChatTeam : box == Box::kSquad ? net::kChatSquad : net::kChatGlobal;
+			if (session.client) {
+				session.client->say(line, channel);
+				return;
+			}
+			game::GameWorld::PlayerInfo me;
+			if (round.playerInfo(round.localPlayer(), me)) {
+				chat.addChat(me.name, line, static_cast<int>(channel),
+					box == Box::kSquad ? dice::hfe::menu::HudChat::Speaker::Squad : dice::hfe::menu::HudChat::Speaker::Team, !me.alive);
+			}
+		};
+		chat.onSay = sayLocal;
+		bindMethod(console, "HudManager.enableSayAllChatBox", ConsoleAccess::Anyone, [&chat](bool) { chat.open(Box::kAll); });
+		bindMethod(console, "HudManager.enableSayTeamChatBox", ConsoleAccess::Anyone, [&chat](bool) { chat.open(Box::kTeam); });
+		bindMethod(console, "HudManager.enableSaySquadChatBox", ConsoleAccess::Anyone, [&chat](bool) { chat.open(Box::kSquad); });
+		bindMethod(console, "Chat.sayAll", ConsoleAccess::Anyone, [sayLocal](std::string line) { sayLocal(Box::kAll, line); });
+		bindMethod(console, "Chat.sayTeam", ConsoleAccess::Anyone, [sayLocal](std::string line) { sayLocal(Box::kTeam, line); });
+		// The map vote (LevelsList): the playlist's maps, or the server's.
+		bindMethod(console, "levelsList.setVoteMapShow", ConsoleAccess::Anyone, [&mapVote](int show) { mapVote.setShow(show != 0); });
+		bindMethod(console, "levelsList.singleClick", ConsoleAccess::Anyone, [&mapVote, &hudManager](int) {
+			mapVote.click(hudManager.lastListClick().row, hudManager.lastListClick().column);
+		});
+		mapVote.onVote = [&](int map) {
+			if (session.client) {
+				session.client->startVote(1, map); // a map vote (0x00573df0, kind 1)
+			} else if (!session.playlist.empty() && static_cast<size_t>(map) < session.playlist.size()) {
+				// Offline the only voter carries it: the playlist goes on there.
+				session.current = (static_cast<size_t>(map) + session.playlist.size() - 1) % session.playlist.size();
+				session.roundsOnMap = session.roundsPerMap;
+			}
+		};
+		// The scoreboard's mute boxes (Scoreboard.singleClick → 0x007bc590,
+		// column 7): a player's voice on or off.
+		bindMethod(console, "Scoreboard.singleClick", ConsoleAccess::Anyone, [&](int list) {
+			const auto& click = hudManager.lastListClick();
+			const std::string id = hudManager.listCell(list, click.row, 7);
+			if (click.column == 6 && !id.empty() && session.voice) {
+				const int player = std::atoi(id.c_str());
+				session.voice->client().setMuted(player, !session.voice->client().muted(player));
+			}
+		});
+		// The commander's zoom buttons (Commander.<asset>Zoom, slots 0x370..
+		// 0x380 → 0x398, 0x007d8e00): the view to the asset; on a server
+		// the CommanderCam event (0x24: x, the camera's height, z).
+		const auto zoomTo = [&](float x, float z) {
+			g_commanderView = std::make_pair(x, z);
+			if (session.client) {
+				net::GameEvent cam;
+				cam.type = net::kEvCommanderCam;
+				const float xyz[3] = {x, 80.0f, z}; // HudManager +0x2d0: 80 until the camera template says
+				for (const float v : xyz) {
+					uint32_t bits = 0;
+					std::memcpy(&bits, &v, 4);
+					cam.values.push_back(bits);
+				}
+				session.client->sendEvent(cam);
+			}
+		};
+		for (const auto& [name, ability] : std::vector<std::pair<std::string, Ability>> {{"artilleryZoom", Ability::Artillery},
+				 {"satelliteZoom", Ability::Satellite}, {"uavZoom", Ability::Uav}, {"orbitalStrikeZoom", Ability::OrbitalStrike}}) {
+			const Ability tool = ability;
+			bindMethod(console, "Commander." + name, ConsoleAccess::Anyone, [&, tool] {
+				float x = 0, z = 0;
+				if (assetAt(tool, x, z)) {
+					zoomTo(x, z);
+				}
+			});
+		}
+		bindMethod(console, "Commander.moveTitanZoom", ConsoleAccess::Anyone, [&] {
+			if (const world::Object* titan = round.objects().find(round.titanOf(myTeam()))) {
+				zoomTo(titan->position().x, titan->position().z);
+			}
+		});
+		// The kills seen since the last frame (players' counters), for the
+		// kill messages (0x00759bf0).
+		std::map<int, std::array<int, 3>> killCounts;
+		const auto trackKills = [&] {
+			const auto players = round.playerList();
+			std::vector<int> victims, killers;
+			for (const auto& p : players) {
+				auto& seen = killCounts[p.id];
+				if (p.deaths > seen[1]) {
+					victims.push_back(p.id);
+				}
+				if (p.kills > seen[0] || p.teamKills > seen[2]) {
+					killers.push_back(p.id);
+				}
+				seen = {p.kills, p.deaths, p.teamKills};
+			}
+			game::GameWorld::PlayerInfo me;
+			round.playerInfo(round.localPlayer(), me);
+			for (const int victim : victims) {
+				game::GameWorld::PlayerInfo v, k;
+				round.playerInfo(victim, v);
+				const bool byOther = !killers.empty() && round.playerInfo(killers.front(), k) && k.id != victim;
+				std::string weapon;
+				if (byOther) {
+					if (const world::Object* vehicle = k.vehicle ? round.objects().find(k.vehicle) : nullptr) {
+						const auto it = vehicle->objectTemplate()->settings().find("vehicleHud.hudName");
+						weapon = it != vehicle->objectTemplate()->settings().end() ? it->second : "";
+					} else {
+						for (const auto& [slot, name] : k.carried) {
+							const world::ObjectTemplate* t = slot == k.inHandSlot ? templates.find(name) : nullptr;
+							const auto it = t ? t->settings().find("weaponHud.hudName") : decltype(t->settings().end()) {};
+							if (t && it != t->settings().end()) {
+								weapon = it->second;
+							}
+						}
+					}
+					weapon.erase(std::remove(weapon.begin(), weapon.end(), '"'), weapon.end());
+				}
+				const auto speaker = !byOther                ? dice::hfe::menu::HudChat::Speaker::Neutral
+					: k.team == me.team && k.squad && k.squad == me.squad ? dice::hfe::menu::HudChat::Speaker::Squad
+					: k.team == me.team                     ? dice::hfe::menu::HudChat::Speaker::Team
+															: dice::hfe::menu::HudChat::Speaker::Enemy;
+				chat.addKill(byOther ? k.name : std::string(), v.name, weapon, byOther && k.team == v.team, speaker);
+				if (victim == round.localPlayer()) {
+					chat.setKilledBy(byOther ? k.name : v.name);
+				}
+			}
+			if (me.alive) {
+				chat.setKilledBy("");
+			}
+		};
 		// A click on the map with a tool or order armed: used there.
 		const auto commanderClick = [&](float x, float y) {
 			float worldX = 0, worldZ = 0;
@@ -2177,6 +2397,27 @@ int runGame(Options& options, Session& session)
 			round.enablePhysics(files, collisionTemplates, std::move(surface), &materials);
 		}
 		round.startRound();
+		// --host: the round served to clients (HostedGame.h).
+		std::unique_ptr<host::HostedGame> hosted;
+		if (options.host && !session.client) {
+			host::HostSetup setup;
+			setup.level = options.level;
+			setup.gameMode = options.gameMode;
+			setup.mapSize = options.mapSize;
+			setup.maxPlayers = options.maxPlayers;
+			setup.gamePort = options.hostPort;
+			setup.queryPort = options.queryPort;
+			hosted = std::make_unique<host::HostedGame>(round, gameLogic, templates, setup);
+			hosted->setStaticObjects(levelObjects);
+			hosted->onLog = [](const std::string& line) { std::printf("host: %s\n", line.c_str()); };
+			if (hosted->start()) {
+				std::printf("hosting %s (%s, %d) on 127.0.0.1:%u, LAN query port %u\n", options.level.c_str(),
+					options.gameMode.c_str(), options.mapSize, hosted->gamePort(), options.queryPort);
+			} else {
+				std::fprintf(stderr, "cannot host on port %u\n", options.hostPort);
+				hosted.reset();
+			}
+		}
 		gameLogic.startRound();
 		std::function<int(int)> scoreOf; // the scripts' scores, by player
 		bool scoreboardHeld = options.scoreboard;
@@ -2311,7 +2552,14 @@ int runGame(Options& options, Session& session)
 					continue; // a seat of a vehicle ghost (drawn with its vehicle), or not placed yet
 				}
 				const world::Vec3 at {ghost.position.x, ghost.position.y, ghost.position.z};
-				const world::Vec3 turned {ghost.rotation.x, ghost.rotation.y, ghost.rotation.z};
+				world::Vec3 turned {ghost.rotation.x, ghost.rotation.y, ghost.rotation.z};
+				// The networked orientation (SimpleObject's quaternion) or a
+				// soldier's yaw, over CreateObject's rotation.
+				if (ghost.hasOrientation) {
+					host::yawPitchRollFromQuaternion(ghost.orientation, turned.x, turned.y, turned.z);
+				} else if (ghost.hasAngles) {
+					turned = {ghost.yaw, 0, 0};
+				}
 				if (const auto it = ghostObjects.find(ghost.ghost); it != ghostObjects.end()) {
 					// A soldier's networked health: clients run the corpse
 					// countdown and fade themselves (0x005fcdb0 → 0x00655460).
@@ -2358,9 +2606,38 @@ int runGame(Options& options, Session& session)
 					++it;
 				}
 			}
+			if (session.joinSpawn && client.world().gameState() == 1 && client.world().localPlayer() >= 0) {
+				session.joinSpawn = false;
+				client.selectKit(0);
+				client.selectSpawnGroup(-1);
+			}
+			const net::RemotePlayer* self = client.world().player(client.world().localPlayer());
+			const auto speakerOf = [self](const net::RemotePlayer* p) {
+				using Speaker = dice::hfe::menu::HudChat::Speaker;
+				if (!p || !self) {
+					return Speaker::Neutral;
+				}
+				return p->commander && p->team == self->team ? Speaker::Commander
+					: p->team == self->team && p->squad && p->squad == self->squad ? Speaker::Squad
+					: p->team == self->team ? Speaker::Team
+											: Speaker::Enemy;
+			};
 			for (const net::ChatLine& line : client.world().takeChat()) {
 				const net::RemotePlayer* from = client.world().player(line.player);
 				std::printf("chat %s: %s\n", from ? from->name.c_str() : "server", line.text.c_str());
+				if (from) {
+					chat.addChat(from->name, line.text, static_cast<int>(line.channel), speakerOf(from), !from->alive);
+				} else {
+					chat.addInfo(line.text);
+				}
+			}
+			for (const net::KillReport& kill : client.world().takeKills()) {
+				const net::RemotePlayer* victim = client.world().player(kill.victim);
+				const net::RemotePlayer* killer = client.world().player(kill.attacker);
+				if (victim) {
+					chat.addKill(killer && killer != victim ? killer->name : std::string(), victim->name, "",
+						killer && killer->team == victim->team, speakerOf(killer));
+				}
 			}
 			// Voice chat: the server's voice settings (data block 0), its
 			// VoipSession and mute events (not used by the world), our squad.
@@ -2430,6 +2707,9 @@ int runGame(Options& options, Session& session)
 		}
 		const auto step = [&] {
 			remoteStep();
+			if (hosted) {
+				hosted->tick();
+			}
 			bots.update(1.0f / 30.0f);
 			round.localMuzzleEffects = !playerCamera.firstPerson;
 			round.tick(1.0f / 30.0f);
@@ -2441,6 +2721,9 @@ int runGame(Options& options, Session& session)
 #else
 		const auto step = [&] {
 			remoteStep();
+			if (hosted) {
+				hosted->tick();
+			}
 			bots.update(1.0f / 30.0f);
 			round.localMuzzleEffects = !playerCamera.firstPerson;
 			round.tick(1.0f / 30.0f);
@@ -2714,7 +2997,13 @@ int runGame(Options& options, Session& session)
 			std::printf("console: %s%s%s\n", command.c_str(), output.empty() ? "" : " -> ", output.c_str());
 		}
 		if (options.simulate > 0) {
+			auto due = std::chrono::steady_clock::now();
 			for (int i = 0; i < options.simulate * 30; ++i) {
+				if (hosted || session.client) {
+					// A server (or a joined game) runs in real time: 30 ticks a second.
+					due += std::chrono::microseconds(33333);
+					std::this_thread::sleep_until(due);
+				}
 				step();
 				if (gameLogic.ended() || (session.client && session.client->world().roundEnded())) {
 					sinceEnd += 1.0f / 30.0f;
@@ -2800,10 +3089,76 @@ int runGame(Options& options, Session& session)
 			}
 		};
 		sources.effects = &round.effects();
+		sources.rain = &rain;
 		sources.objectEffects = &objectEffects;
+		nametags::Nametags nametags(files);
+		nametags::Nametags::View tagView;
 		sources.overlay = [&](float seconds) {
-			for (int kit = 0; kit < 8; ++kit) {
-				hudManager.set("PlayerKitIcon" + std::to_string(kit) + "SelectShow", kit == localKit ? 1 : 0);
+			kitMenu.setUnlocked(round.localPlayerUnlocks, round.unlockAllByDefault);
+			kitMenu.setKit(localKit);
+			kitMenu.update(round.playerTeam() == 1 ? 1 : 2);
+			kitMenu.commit();
+			trackKills();
+			chat.update(seconds);
+			mapVote.setMaps([&] {
+				std::vector<std::string> names;
+				if (session.client) {
+					for (const auto& map : session.client->world().mapList()) {
+						names.push_back(map.name);
+					}
+				} else {
+					for (const auto& map : session.playlist) {
+						names.push_back(map.level);
+					}
+					if (names.empty()) {
+						names.push_back(options.level);
+					}
+				}
+				return names;
+			}());
+			mapVote.update();
+			{
+				std::vector<dice::hfe::menu::VoipSpeaker> talking;
+				bool sending = false, commanding = false;
+				if (session.client && session.voice) {
+					sending = session.voice->sendingVoice();
+					for (const net::RemotePlayer& p : session.client->world().playerList()) {
+						if (!p.local && session.voice->client().talking(p.id)) {
+							talking.push_back({p.name, p.commander, p.squad});
+						}
+						commanding = commanding || (p.local && p.commander);
+					}
+				}
+				dice::hfe::menu::updateVoipList(hudManager, talking, sending, commanding);
+			}
+			if (session.client && scoreboardHeld) {
+				// A joined game's scoreboard: the server's players, with their voice boxes.
+				const net::RemoteWorld& world = session.client->world();
+				const net::RemotePlayer* me = world.player(world.localPlayer());
+				const int friendly = me ? me->team : 1;
+				for (int side = 0; side < 2; ++side) {
+					const int team = side == 0 ? friendly : 3 - friendly;
+					std::vector<net::RemotePlayer> players;
+					for (const net::RemotePlayer& p : world.playerList()) {
+						if (p.team == team) {
+							players.push_back(p);
+						}
+					}
+					std::stable_sort(players.begin(), players.end(), [](const auto& a, const auto& b) { return a.score > b.score; });
+					std::vector<std::vector<std::string>> rows;
+					for (const net::RemotePlayer& p : players) {
+						const bool muted = session.voice && session.voice->client().muted(p.id);
+						const bool talking = session.voice && session.voice->client().talking(p.id);
+						rows.push_back({p.name, std::to_string(p.score), std::to_string(p.teamwork), std::to_string(p.kills),
+							std::to_string(p.deaths), p.ai ? "BOT" : std::to_string(std::max(p.ping, 0)),
+							p.local || p.ai ? ""
+								: muted ? "Ingame/Scoreboard/Icons/checkbox_voipMute.tga"
+								: talking ? "Ingame/Scoreboard/Icons/checkbox_voipTalk.tga"
+										  : "Ingame/Scoreboard/Icons/checkbox_voipInactive.tga",
+							std::to_string(p.id)});
+					}
+					hudManager.setList(side == 0 ? 2 : 1, std::move(rows));
+				}
 			}
 			updateHud(hudManager, round, gameLogic, scoreboardHeld, scoreOf, commanderScreen);
 			squadMenu.update(round.localPlayer());
@@ -2822,7 +3177,11 @@ int runGame(Options& options, Session& session)
 					}
 				}
 			}
-			return hudManager.frame(seconds);
+			// The 3D name tags under the HUD (RendDX9's NametagManager).
+			std::vector<hud::HudQuad> quads = nametags.frame(round, round.objects(), tagView, seconds);
+			std::vector<hud::HudQuad> hud = hudManager.frame(seconds);
+			quads.insert(quads.end(), hud.begin(), hud.end());
+			return quads;
 		};
 		// A game started from the menu shows it on Esc (Logic.isGameRunning).
 		if (session.menuBindings) {
@@ -2856,7 +3215,18 @@ int runGame(Options& options, Session& session)
 		// player's own soldier left out of the world.
 		sources.hiddenInView = [&playerCamera](uint32_t object) { return playerCamera.hides(object); };
 		// Inside a vehicle in first person its cockpit geometry (0x00612880).
-		sources.geometryFor = [&playerCamera](uint32_t object, int& geometry, int& lod) {
+		sources.geometryFor = [&playerCamera, &round, &objects](uint32_t object, int& geometry, int& lod) {
+			// A kit on the ground: its template's geometry.dropGeom.
+			const world::Object* kit = round.isDroppedKit(object) ? objects.find(object) : nullptr;
+			if (kit && kit->objectTemplate()) {
+				const auto& settings = kit->objectTemplate()->settings();
+				const auto drop = settings.find("geometry.dropGeom");
+				if (drop != settings.end()) {
+					geometry = std::atoi(drop->second.c_str());
+					lod = 0;
+					return true;
+				}
+			}
 			PlayerCamera::Cockpit cockpit;
 			if (!playerCamera.cockpit(cockpit) || cockpit.vehicle != object) {
 				return false;
@@ -2929,6 +3299,9 @@ int runGame(Options& options, Session& session)
 		viewer.onCamera = [&round](const float position[3], const float forward[3]) {
 			round.setCamera({position[0], position[1], position[2]}, {forward[0], forward[1], forward[2]});
 		};
+		viewer.onView = [&tagView](const float position[3], float yaw, float pitch, float fovY, float aspect) {
+			tagView = {{position[0], position[1], position[2]}, yaw, pitch, fovY, aspect};
+		};
 		viewer.wantsQuit = [&] {
 			session.nextMap = nextMapDue();
 			return menuQuit || session.nextMap || session.disconnect || session.levelChange ||
@@ -2994,6 +3367,11 @@ int runGame(Options& options, Session& session)
 				if (session.client && point >= 0) {
 					session.client->selectKit(0);
 					session.client->selectSpawnGroup(point);
+				} else if (session.client && !session.client->world().hasControlObject()) {
+					// The client's own round has no control points (they are
+					// the server's ghosts): a click asks for any spawn point.
+					session.client->selectKit(0);
+					session.client->selectSpawnGroup(-1);
 				}
 			};
 		} else if (round.player()) {
@@ -3131,6 +3509,44 @@ int runGame(Options& options, Session& session)
 					player->position().y + 2.5f, player->position().z - std::cos(yaw) * 5, yawDegrees);
 				viewer.camera = camera;
 			}
+		}
+		// The HUD's text boxes: the say keys open the chat's (0x00755020: not
+		// over a menu), and while a box is open the keys type into it and the
+		// soldier gets no input.
+		viewer.wantsText = [&chat, &squadNameBox] { return chat.typing() != Box::kNone || squadNameBox.typing(); };
+		viewer.onHudText = [&chat, &squadNameBox](const ViewerOptions::MenuInput& in) {
+			const bool text = in.kind == ViewerOptions::MenuInput::Kind::Text;
+			if (squadNameBox.typing()) {
+				text ? squadNameBox.type(in.text) : squadNameBox.key(in.key);
+			} else {
+				text ? chat.type(in.text) : chat.key(in.key);
+			}
+		};
+		if (viewer.onPlayerInput) {
+			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &chat, &squadNameBox, &round, &session,
+										keysWere = std::array<bool, 3> {}](const ViewerOptions::PlayerInput& in) mutable {
+				const std::array<bool, 3> keys {in.sayAll, in.sayTeam, in.saySquad};
+				for (int i = 0; i < 3; ++i) {
+					if (keys[static_cast<size_t>(i)] && !keysWere[static_cast<size_t>(i)] && chat.typing() == Box::kNone) {
+						// The squad's box needs a squad (player slot 0x120).
+						game::GameWorld::PlayerInfo me;
+						const bool squad = session.client ? (session.client->world().player(session.client->world().localPlayer())
+																   && session.client->world().player(session.client->world().localPlayer())->squad)
+														  : round.playerInfo(round.localPlayer(), me) && me.squad;
+						if (i < 2 || squad) {
+							chat.open(i == 0 ? Box::kAll : i == 1 ? Box::kTeam : Box::kSquad);
+						}
+					}
+				}
+				keysWere = keys;
+				if (chat.typing() != Box::kNone || squadNameBox.typing()) {
+					ViewerOptions::PlayerInput idle;
+					idle.aimPitchDegrees = in.aimPitchDegrees;
+					inner(idle);
+					return;
+				}
+				inner(in);
+			};
 		}
 		viewer.onTicks = [&](int ticks) {
 			for (int i = 0; i < ticks; ++i) {

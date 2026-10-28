@@ -3,6 +3,8 @@
 #include "World/ObjectTemplateManager.h"
 
 #include <algorithm>
+#include <cctype>
+#include <string>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -122,6 +124,22 @@ ParticleTemplate ParticleTemplate::fromTemplate(const world::ObjectTemplate& t)
 		p.rotationSpeed3 = vector(t, "rotationSpeed", {});
 		p.alignToSpeed = number(t, "alignRotationToSpeed", 0) != 0;
 	}
+	p.nonScreenAligned = t.typeName() == "NonScreenAlignedParticleSystem";
+	p.trail = t.typeName() == "TrailSystem";
+	if (p.trail) {
+		p.fadeIn = number(t, "fadeInFactor", p.fadeIn);
+		p.fadeOut = number(t, "fadeOutFactor", p.fadeOut);
+		p.tileFactor = number(t, "textureTileFactor", p.tileFactor);
+		p.uvOffsetVelocity = number(t, "textureOffsetVelocity", p.uvOffsetVelocity);
+		p.planes = std::clamp(static_cast<int>(number(t, "numPlanes", 1)), 1, 8);
+		p.minTrailVelocity = number(t, "minTrailVelocity", p.minTrailVelocity);
+	}
+	if (number(t, "animationEnable", 0) != 0) {
+		p.frameCount = std::max(1, static_cast<int>(number(t, "animationFrameCount", 1)));
+		p.framesAcross = std::max(1, static_cast<int>(number(t, "animationFrameCountX", 1)));
+		p.frameWidth = number(t, "setAnimationFrameWidthRelative", 1);
+		p.frameHeight = number(t, "setAnimationFrameHeightRelative", 1);
+	}
 	p.localSystem = number(t, "isLocalSystem", 0) != 0;
 	p.showFirstPerson = number(t, "showInFirstPerson", 1) != 0;
 	p.showThirdPerson = number(t, "showInThirdPerson", 1) != 0;
@@ -137,6 +155,10 @@ bool Emitter::alive() const
 {
 	const ParticleTemplate& t = *m_template;
 	if (!m_particles.empty()) {
+		return true;
+	}
+	// A trail draws its path as long as its anchor carries it.
+	if (t.trail && anchor != 0 && !m_stopped) {
 		return true;
 	}
 	// An attached looping system emits until it is stopped.
@@ -195,7 +217,21 @@ void Emitter::update(float seconds, game::Random& random)
 	const ParticleTemplate& t = *m_template;
 	m_age += seconds;
 	const float active = m_age - t.emitDelay;
-	if (!m_stopped && active > 0 && (t.isLooping || active - seconds < t.emitTime)) {
+	if (t.trail) {
+		// A point at emitFrequency while the system moves faster than
+		// minTrailVelocity, for as long as it is carried.
+		m_speed = m_placed && seconds > 0 ? std::sqrt(physics::lengthSquared(m_position - m_lastPosition)) / seconds : 0.0f;
+		m_lastPosition = m_position;
+		m_placed = true;
+		const bool emitting = t.isLooping || anchor != 0 || active - seconds < t.emitTime;
+		if (!m_stopped && active > 0 && emitting && m_speed >= t.minTrailVelocity) {
+			m_pending += t.emitFrequency * seconds;
+			while (m_pending >= 1.0f) {
+				emit(random);
+				m_pending -= 1.0f;
+			}
+		}
+	} else if (!m_stopped && active > 0 && (t.isLooping || active - seconds < t.emitTime)) {
 		const float span = t.isLooping ? seconds : std::min(seconds, t.emitTime - std::max(0.0f, active - seconds));
 		m_pending += t.emitFrequency * std::max(0.0f, span);
 		while (m_pending >= 1.0f) {
@@ -242,7 +278,8 @@ void EffectManager::spawnTemplate(const world::ObjectTemplate& t, const Vec3& po
 		return;
 	}
 	const std::string& type = t.typeName();
-	if (type == "SpriteParticleSystem" || type == "MeshParticleSystem" || type == "NonScreenAlignedParticleSystem") {
+	if (type == "SpriteParticleSystem" || type == "MeshParticleSystem" || type == "NonScreenAlignedParticleSystem"
+		|| type == "TrailSystem") {
 		const ParticleTemplate* particles = particleTemplate(t);
 		if ((view == View::FirstPerson && !particles->showFirstPerson)
 			|| (view == View::ThirdPerson && !particles->showThirdPerson)) {
@@ -276,7 +313,7 @@ void EffectManager::spawnTemplate(const world::ObjectTemplate& t, const Vec3& po
 		}
 		const std::string& childType = childTemplate->typeName();
 		if (childType == "SpriteParticleSystem" || childType == "MeshParticleSystem"
-			|| childType == "NonScreenAlignedParticleSystem") {
+			|| childType == "NonScreenAlignedParticleSystem" || childType == "TrailSystem") {
 			const ParticleTemplate* particles = particleTemplate(*childTemplate);
 			looping = looping || particles->isLooping;
 			span = std::max(span, particles->emitDelay + particles->emitTime + particles->timeToLive + particles->randomTimeToLive);
@@ -287,14 +324,17 @@ void EffectManager::spawnTemplate(const world::ObjectTemplate& t, const Vec3& po
 			const Mat3 local = Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z});
 			const Vec3 at = position + rotation.transform({child.position.x, child.position.y, child.position.z});
 			if (childTemplate->typeName() == "LightSource") {
-				if (number(*childTemplate, "enabled", 1) == 0) {
+				const LightSourceLook look = lightSourceOf(*childTemplate);
+				if (!look.enabled || look.directional) {
 					continue;
 				}
 				LiveLight light;
-				const float intensity = number(*childTemplate, "intensity", 1);
-				light.color = vector(*childTemplate, "color", {1, 1, 1}) * intensity;
-				light.range1 = number(*childTemplate, "attenuationRange1", 0);
-				light.range2 = std::max(number(*childTemplate, "attenuationRange2", 1), light.range1 + 0.01f);
+				light.look = look;
+				light.color = look.color;
+				light.range1 = look.range1;
+				light.range2 = look.range2;
+				light.localDirection = (local * rotation).transform(look.direction);
+				light.direction = light.localDirection;
 				light.life = looping ? -1.0f : std::max(span, 0.1f);
 				light.position = at;
 				light.localPosition = at;
@@ -374,13 +414,43 @@ bool EffectManager::spawnDecal(const std::string& name, const Vec3& position, co
 	return true;
 }
 
+bool EffectManager::spawnDecal(const std::string& name, const Vec3& position, const Vec3& normal, uint32_t object,
+	const Vec3& objectPosition, const Vec3& objectRotation)
+{
+	if (!spawnDecal(name, position, normal)) {
+		return false;
+	}
+	if (object != 0) {
+		Decal& decal = m_decals.back();
+		const Mat3 turn = Mat3::fromYawPitchRoll(objectRotation);
+		decal.object = object;
+		decal.position = turn.untransform(decal.position - objectPosition);
+		decal.normal = turn.untransform(decal.normal);
+		decal.tangent = turn.untransform(decal.tangent);
+	}
+	return true;
+}
+
+void EffectManager::dropDecals(uint32_t object)
+{
+	m_decals.erase(std::remove_if(m_decals.begin(), m_decals.end(),
+					   [object](const Decal& decal) { return decal.object == object; }),
+		m_decals.end());
+}
+
 std::vector<PointLight> EffectManager::lights() const
 {
 	std::vector<PointLight> out;
 	for (const LiveLight& light : m_lights) {
 		const float fade = light.life < 0 ? 1.0f : std::clamp(1.0f - light.age / light.life, 0.0f, 1.0f);
 		if (fade > 0) {
-			out.push_back({light.position, light.color * fade, light.range1, light.range2});
+			PointLight lit {light.position, light.color * fade, light.range1, light.range2};
+			lit.spot = light.look.spot;
+			lit.direction = light.direction;
+			lit.cosInner = light.look.cosInner;
+			lit.cosOuter = light.look.cosOuter;
+			lit.affectsLightmapped = light.look.affectsLightmapped;
+			out.push_back(lit);
 		}
 	}
 	return out;
@@ -392,6 +462,42 @@ void EffectManager::placeLight(LiveLight& light) const
 	const Anchor place = at != m_anchors.end() ? at->second : Anchor {};
 	const Vec3 mounted = light.mountPosition + light.mountRotation.transform(light.localPosition);
 	light.position = place.position + place.rotation.transform(mounted);
+	light.direction = place.rotation.transform(light.mountRotation.transform(light.localDirection));
+}
+
+LightSourceLook lightSourceOf(const world::ObjectTemplate& t)
+{
+	LightSourceLook look;
+	look.enabled = number(t, "enabled", 1) != 0;
+	const std::string* type = setting(t, "lightType");
+	const auto is = [type](const char* name) {
+		if (!type || type->size() != std::char_traits<char>::length(name)) {
+			return false;
+		}
+		for (size_t i = 0; i < type->size(); ++i) {
+			if (std::tolower(static_cast<unsigned char>((*type)[i])) != std::tolower(static_cast<unsigned char>(name[i]))) {
+				return false;
+			}
+		}
+		return true;
+	};
+	look.spot = is("Spot");
+	look.directional = is("Directional");
+	look.dynamic = number(t, "isDynamic", 1) != 0;
+	look.affectsLightmapped = number(t, "affectLightmappedObjects", 1) != 0;
+	look.affectingType = static_cast<int>(number(t, "affectingType", 0));
+	look.color = vector(t, "color", {1, 1, 1}) * number(t, "intensity", 1);
+	look.range1 = number(t, "attenuationRange1", 0);
+	look.range2 = std::max(number(t, "attenuationRange2", 1), look.range1 + 0.01f);
+	look.direction = normalized(vector(t, "direction", {0, 0, 1}));
+	// The cone's angles taken as half angles in degrees, inner and outer
+	// (the original looks the falloff up in a table, LightManager's
+	// conical attenuation texture over 1 - cos^2; not read here).
+	const float inner = number(t, "coneAngle1", 20), outer = std::max(number(t, "coneAngle2", 22.5f), inner);
+	look.cosInner = std::cos(inner * kDegrees);
+	look.cosOuter = std::cos(outer * kDegrees);
+	look.flicker = std::clamp(number(t, "flicker", 0), 0.0f, 1.0f);
+	return look;
 }
 
 bool EffectManager::spawn(const std::string& name, const Vec3& position, const Mat3& rotation, View view)
@@ -598,6 +704,126 @@ void EffectManager::collect(const Emitter& emitter, std::vector<Sprite>& out)
 	}
 }
 
+namespace {
+
+// The texture rectangle of a particle's frame (frames over its life).
+std::array<float, 4> frameOf(const ParticleTemplate& t, float lifeFraction)
+{
+	if (t.frameCount <= 1) {
+		return {0, 0, 1, 1};
+	}
+	const int frame = std::min(static_cast<int>(lifeFraction * static_cast<float>(t.frameCount)), t.frameCount - 1);
+	const float u0 = static_cast<float>(frame % t.framesAcross) * t.frameWidth;
+	const float v0 = static_cast<float>(frame / t.framesAcross) * t.frameHeight;
+	return {u0, v0, u0 + t.frameWidth, v0 + t.frameHeight};
+}
+
+} // namespace
+
+// NonScreenAlignedParticles.fx: each particle a square of its size about
+// its centre in the plane across the system's y axis (its x and z axes;
+// the ripples and rings on the ground and water), turned by its rotation.
+void EffectManager::collectAligned(const Emitter& emitter, std::vector<WorldVertex>& out)
+{
+	const ParticleTemplate& t = emitter.particleTemplate();
+	const Mat3& turn = emitter.rotation();
+	const Vec3 axisU = turn.transform({1, 0, 0}), axisV = turn.transform({0, 0, 1});
+	for (const Particle& p : emitter.particles()) {
+		const float f = std::min(p.age / p.life, 1.0f);
+		const float blend = std::min(t.colorBlendGraph.at(f), 1.0f);
+		const float alpha = std::clamp(std::min(t.transparencyGraph.at(f), 1.0f), 0.0f, 1.0f);
+		const float size = std::min(t.sizeGraph.at(f), 1.0f) * t.particleMaxSize + p.sizeOffset;
+		if (size <= 0 || alpha <= 0) {
+			continue;
+		}
+		const Vec3 color = t.color1 * (1 - blend) + t.color2 * blend;
+		const std::array<float, 4> rgba {color.x, color.y, color.z, alpha};
+		const float c = std::cos(p.rotation), s = std::sin(p.rotation);
+		const Vec3 u = (axisU * c + axisV * s) * size, v = (axisV * c - axisU * s) * size;
+		const Vec3 centre = emitter.worldPosition(p);
+		const std::array<float, 4> frame = frameOf(t, f);
+		const WorldVertex corners[4] = {
+			{centre - u - v, frame[0], frame[3], rgba},
+			{centre + u - v, frame[2], frame[3], rgba},
+			{centre + u + v, frame[2], frame[1], rgba},
+			{centre - u + v, frame[0], frame[1], rgba},
+		};
+		for (int i : {0, 1, 2, 0, 2, 3}) {
+			out.push_back(corners[i]);
+		}
+	}
+}
+
+// Trail.fx: the points in the order they were left, joined into strips of
+// width 2 x size in numPlanes planes about the path; each vertex faded by
+// the square of its plane's normal against the eye and by the ends'
+// fade-in and fade-out over the point's life.
+void EffectManager::collectTrail(const Emitter& emitter, const Vec3& eye, std::vector<WorldVertex>& out)
+{
+	const ParticleTemplate& t = emitter.particleTemplate();
+	const std::vector<Particle>& points = emitter.particles();
+	if (points.size() < 2) {
+		return;
+	}
+	struct Point {
+		Vec3 position;
+		float size;
+		std::array<float, 4> color;
+		float u;
+		float age;
+	};
+	std::vector<Point> placed;
+	placed.reserve(points.size());
+	float along = 0;
+	for (size_t i = 0; i < points.size(); ++i) {
+		const Particle& p = points[i];
+		const float f = std::min(p.age / p.life, 1.0f);
+		const float blend = std::min(t.colorBlendGraph.at(f), 1.0f);
+		const float fade = std::clamp(f / std::max(t.fadeIn, 1e-3f), 0.0f, 1.0f)
+			* std::clamp((1 - f) / std::max(t.fadeOut, 1e-3f), 0.0f, 1.0f);
+		const float alpha = std::clamp(std::min(t.transparencyGraph.at(f), 1.0f), 0.0f, 1.0f) * fade;
+		const Vec3 color = t.color1 * (1 - blend) + t.color2 * blend;
+		const Vec3 at = emitter.worldPosition(p);
+		if (i > 0) {
+			along += std::sqrt(physics::lengthSquared(at - placed.back().position));
+		}
+		placed.push_back({at, std::max(0.0f, std::min(t.sizeGraph.at(f), 1.0f) * t.particleMaxSize),
+			{color.x, color.y, color.z, alpha}, along, p.age});
+	}
+	if (along <= 1e-3f) {
+		return;
+	}
+	const std::array<float, 4> frame = frameOf(t, 0);
+	const float slide = (placed.back().age) * t.uvOffsetVelocity;
+	for (size_t i = 0; i + 1 < placed.size(); ++i) {
+		const Point& a = placed[i];
+		const Point& b = placed[i + 1];
+		const Vec3 tangent = normalized(b.position - a.position);
+		const Vec3 base = perpendicular(tangent);
+		for (int plane = 0; plane < t.planes; ++plane) {
+			const float angle = 3.14159265f * static_cast<float>(plane) / static_cast<float>(t.planes);
+			const Vec3 side = base * std::cos(angle) + physics::cross(tangent, base) * std::sin(angle);
+			const Vec3 normal = physics::cross(tangent, side * -1.0f);
+			const auto vertex = [&](const Point& p, float across) {
+				Vec3 toEye = eye - p.position;
+				toEye = toEye - tangent * physics::dot(toEye, tangent);
+				const float facing = physics::dot(normalized(toEye), normal);
+				WorldVertex v;
+				v.position = p.position + side * (p.size * across);
+				v.u = (p.u / along) * t.tileFactor + slide;
+				v.v = frame[1] + (frame[3] - frame[1]) * (across * 0.5f + 0.5f);
+				v.color = p.color;
+				v.color[3] *= facing * facing;
+				return v;
+			};
+			const WorldVertex a0 = vertex(a, -1), a1 = vertex(a, 1), b0 = vertex(b, -1), b1 = vertex(b, 1);
+			for (const WorldVertex* v : {&a0, &b0, &b1, &a0, &b1, &a1}) {
+				out.push_back(*v);
+			}
+		}
+	}
+}
+
 } // namespace dice::hfe::effects
 
 namespace dice::hfe::effects {
@@ -762,6 +988,64 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 		} else {
 			++it;
 		}
+	}
+}
+
+} // namespace dice::hfe::effects
+
+namespace dice::hfe::effects {
+
+void Weather::update(const scene::RainSettings& s, const Vec3& camera, float seconds)
+{
+	m_drops.clear();
+	const int count = s.enabled ? std::clamp(s.particleCount, 0, kMaxParticles) : 0;
+	const Vec3 radius {std::max(s.emitRadius[0], 0.1f), std::max(s.emitRadius[1], 0.1f), std::max(s.emitRadius[2], 0.1f)};
+	const Vec3 centre = camera + Vec3 {s.offset[0], s.offset[1], s.offset[2]};
+	if (static_cast<int>(m_positions.size()) != count) {
+		m_positions.resize(static_cast<size_t>(count));
+		for (Vec3& p : m_positions) {
+			p = centre + Vec3 {(m_random.unit() * 2 - 1) * radius.x, (m_random.unit() * 2 - 1) * radius.y,
+				(m_random.unit() * 2 - 1) * radius.z};
+		}
+	}
+	if (count == 0) {
+		return;
+	}
+	m_time += seconds;
+	const Vec3 velocity = Vec3 {s.particleVelocity[0], s.particleVelocity[1], s.particleVelocity[2]} * s.particleSpeed;
+	const Vec3 direction = normalized(velocity);
+	const auto wrap = [](float v, float r) {
+		const float span = 2 * r;
+		v = std::fmod(v + r, span);
+		return (v < 0 ? v + span : v) - r;
+	};
+	const float fadeStart = std::clamp(s.fadeOutRange, 0.0f, 0.999f);
+	m_drops.reserve(m_positions.size());
+	for (size_t i = 0; i < m_positions.size(); ++i) {
+		Vec3& p = m_positions[i];
+		p += velocity * seconds;
+		Vec3 d = p - centre;
+		d = {wrap(d.x, radius.x), wrap(d.y, radius.y), wrap(d.z, radius.z)};
+		p = centre + d;
+		// Its group's sway (16 groups, phases spread round the circle).
+		const float phase = static_cast<float>(i % 16) * 0.3926991f;
+		const float a = phase + m_time * s.angleSpeed[0] * kDegrees, b = phase + m_time * s.angleSpeed[1] * kDegrees;
+		const Vec3 sway {s.maxDeviation[0] * std::sin(a), s.maxDeviation[1] * std::sin(b), s.maxDeviation[2] * std::cos(a)};
+		Drop drop;
+		drop.position = p + sway;
+		// vsPoint: 1 - |saturate((|delta| - range) / (radius - range))|.
+		const Vec3 over {std::clamp((std::fabs(d.x) - radius.x * fadeStart) / (radius.x * (1 - fadeStart)), 0.0f, 1.0f),
+			std::clamp((std::fabs(d.y) - radius.y * fadeStart) / (radius.y * (1 - fadeStart)), 0.0f, 1.0f),
+			std::clamp((std::fabs(d.z) - radius.z * fadeStart) / (radius.z * (1 - fadeStart)), 0.0f, 1.0f)};
+		drop.alpha = std::max(0.0f, 1 - std::sqrt(physics::lengthSquared(over)));
+		if (drop.alpha <= 0) {
+			continue;
+		}
+		const float distance = std::sqrt(physics::lengthSquared(drop.position - camera));
+		const float scale = s.particleScale[0] + s.particleScale[1] * distance;
+		drop.pixels = scale > 0 ? std::min(s.particleSize * std::sqrt(1 / scale), s.particleMaxSize) : s.particleMaxSize;
+		drop.tail = drop.position - direction * s.lineLength;
+		m_drops.push_back(drop);
 	}
 }
 

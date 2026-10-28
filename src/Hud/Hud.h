@@ -84,12 +84,36 @@ public:
 		float x;
 		float width;   // > 0: the column ends there (else at the next column)
 		int alignment; // 0 left, 1 right, 2 centre
+		// > 0: the column's cells are pictures (a texture path under
+		// Menu/HUD/Texture/), this many pixels square (the VOIP list's
+		// kit and squad icons, the map vote's buttons).
+		float iconSize = 0;
 	};
 	void setList(int data, std::vector<std::vector<std::string>> rows);
+	// Edit boxes by data id (setEditNodeData: 1 chat, 2 the squad name, 3
+	// the commander's chat): their text, the box with the keys (-1 none;
+	// it draws a caret) and the scripts' maximum length (0 none).
+	void setEditText(int data, const std::string& text) { m_editText[data] = text; }
+	std::string editText(int data) const
+	{
+		const auto it = m_editText.find(data);
+		return it == m_editText.end() ? std::string() : it->second;
+	}
+	void setEditFocus(int data) { m_editFocus = data; }
+	int editFocus() const { return m_editFocus; }
+	void setEditMaxLength(int data, int length) { m_editMaxLength[data] = length; }
+	int editMaxLength(int data) const
+	{
+		const auto it = m_editMaxLength.find(data);
+		return it == m_editMaxLength.end() ? 0 : it->second;
+	}
 	void setListColumns(int data, std::vector<ListColumn> columns);
 	// The cells' text colour (the list data's cells carry it, 0x007ddb90;
 	// black unless set) and the selected row (-1: none).
 	void setListTextColor(int data, float r, float g, float b, float a);
+	// Per row (the chat's lines by who said them); rows without one take
+	// the list's.
+	void setListRowColors(int data, std::vector<std::array<float, 4>> colors) { m_listRowColors[data] = std::move(colors); }
 	void setListSelection(int data, int row) { m_listSelection[data] = row; }
 	int listSelection(int data) const
 	{
@@ -164,6 +188,10 @@ private:
 		const float textColor[4], float alpha, std::vector<HudQuad>& out);
 	void drawCompass(const Node& node, float x, float y, const float color[4], std::vector<HudQuad>& out);
 	std::map<int, std::vector<std::vector<std::string>>> m_lists;
+	std::map<int, std::vector<std::array<float, 4>>> m_listRowColors;
+	std::map<int, std::string> m_editText;
+	std::map<int, int> m_editMaxLength;
+	int m_editFocus = -1;
 	std::map<int, std::vector<ListColumn>> m_listColumns;
 	std::map<int, std::array<float, 4>> m_listTextColors;
 	std::map<int, int> m_listSelection;

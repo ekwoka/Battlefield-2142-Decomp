@@ -162,6 +162,14 @@ build/native/src/Main/bf2142 --game "source/Battlefield 2142" \
 # logged-in account and a CD key), or only shake hands and print what it sends
 #   bf2142 --game "source/Battlefield 2142" --connect 1.2.3.4:17567
 #   bf2142 --game "source/Battlefield 2142" --probe 1.2.3.4:17567
+# host a game for other bf2142 clients on this machine (port 17567, +port N;
+# the LAN query port 29900 answers the menu's LOCAL page), for 10 minutes,
+# and join it (--play asks to spawn; --name gives the player's name;
+# +joinServer is the original's spelling of --connect)
+#   bf2142 --game "source/Battlefield 2142" +level Camp_Gibraltar +gameMode gpm_cq --host --simulate 600
+#   bf2142 --game "source/Battlefield 2142" --connect 127.0.0.1 --name Joiner --play
+# the menu's LOCAL page searches 255.255.255.255 as the original; --lan
+# 127.0.0.1 keeps the search on this machine
 # greet OpenSpy's account service (FESL, over TLS), or log in with an
 # OpenSpy account (the first soldier unless one is named) and join with it
 #   bf2142 --game "source/Battlefield 2142" --fesl

@@ -445,6 +445,13 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 	if (depth > 8) {
 		return; // guards against templates that contain themselves
 	}
+	if (objectTemplate.typeName() == "LightSource") {
+		const effects::LightSourceLook look = effects::lightSourceOf(objectTemplate);
+		if (look.enabled && !look.directional && object != 0) {
+			m_objectLights.push_back({object, local, look});
+		}
+		return;
+	}
 	if (!objectTemplate.geometry().empty()) {
 		if (const GpuMesh* gpuMesh = mesh(sources, objectTemplate.geometry())) {
 			const Mat4 world = local * objectWorld;
@@ -1221,6 +1228,9 @@ void LevelRenderer::syncObjects()
 	m_knownObjects.erase(std::remove_if(m_knownObjects.begin(), m_knownObjects.end(),
 							 [&objects](uint32_t id) { return !objects.find(id); }),
 		m_knownObjects.end());
+	m_objectLights.erase(std::remove_if(m_objectLights.begin(), m_objectLights.end(),
+							 [&objects](const ObjectLight& light) { return !objects.find(light.object); }),
+		m_objectLights.end());
 	const size_t before = m_instances.size();
 	for (const auto& object : objects.objects()) {
 		addObject(*m_sources, *object);
@@ -1478,14 +1488,14 @@ void LevelRenderer::buildMenu(float seconds)
 // Two triangles per particle, uploaded for this frame.
 void LevelRenderer::buildParticles(const Camera& camera)
 {
-	(void)camera;
 	buildParticleBuffer({m_sources ? m_sources->effects : nullptr, m_sources ? m_sources->objectEffects : nullptr},
-		m_particleVertices, m_particleGroups);
+		m_particleVertices, m_particleGroups, camera, true);
 }
 
 void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::EffectManager*> managers,
-	SDL_GPUBuffer*& buffer, std::vector<ParticleGroup>& groups)
+	SDL_GPUBuffer*& buffer, std::vector<ParticleGroup>& groups, const Camera& camera, bool weather)
 {
+	const Vec3f eye = camera.position;
 	groups.clear();
 	if (buffer) {
 		SDL_ReleaseGPUBuffer(m_gpu.device(), buffer); // released once the GPU is done with it
@@ -1529,6 +1539,99 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 				groups.push_back({image, additive, first, static_cast<uint32_t>(vertices.size()) - first});
 			}
 		});
+		// Non-screen-aligned quads and trails: placed already (a negative
+		// size tells particle.vert, the coordinates ride in lightmapCoord).
+		manager->forEachWorldGroup({eye.x, eye.y, eye.z},
+			[&](const std::string& path, bool additive, const std::vector<effects::WorldVertex>& triangles) {
+				SDL_GPUTexture* image = texture(m_sources->files, path + ".dds");
+				if (!image) {
+					return;
+				}
+				const uint32_t first = static_cast<uint32_t>(vertices.size());
+				for (const effects::WorldVertex& w : triangles) {
+					Vertex v {};
+					v.position[0] = w.position.x;
+					v.position[1] = w.position.y;
+					v.position[2] = w.position.z;
+					v.normal[0] = w.color[0];
+					v.normal[1] = w.color[1];
+					v.normal[2] = w.color[2];
+					v.weight = w.color[3];
+					v.lightmapCoord[0] = w.u;
+					v.lightmapCoord[1] = w.v;
+					v.part = -1;
+					vertices.push_back(v);
+				}
+				groups.push_back({image, additive, first, static_cast<uint32_t>(vertices.size()) - first, true});
+			});
+	}
+	if (weather && m_sources && m_sources->rain) {
+		const scene::RainSettings& rain = *m_sources->rain;
+		const uint64_t now = SDL_GetTicks();
+		const float seconds = m_lastWeatherTicks ? std::min(static_cast<float>(now - m_lastWeatherTicks) / 1000.0f, 0.1f) : 0.0f;
+		m_lastWeatherTicks = now;
+		m_weather.update(rain, {eye.x, eye.y, eye.z}, seconds);
+		// Pixels to metres at a distance: the game's 600-line screen.
+		const float perPixel = 2 * std::tan(camera.fovY / 2) / 600.0f;
+		const Vec3f forward = camera.forward();
+		const uint32_t first = static_cast<uint32_t>(vertices.size());
+		const auto push = [&](const Vec3f& at, float u, float v, float alpha) {
+			Vertex out {};
+			out.position[0] = at.x;
+			out.position[1] = at.y;
+			out.position[2] = at.z;
+			out.normal[0] = rain.particleColor[0];
+			out.normal[1] = rain.particleColor[1];
+			out.normal[2] = rain.particleColor[2];
+			out.weight = rain.particleColor[3] * alpha;
+			out.lightmapCoord[0] = u;
+			out.lightmapCoord[1] = v;
+			out.part = -1;
+			vertices.push_back(out);
+		};
+		SDL_GPUTexture* image = nullptr;
+		if (rain.lineDisplay) {
+			image = m_gpu.whiteTexture(); // psLine: the colour alone
+			for (const effects::Weather::Drop& drop : m_weather.drops()) {
+				const Vec3f a {drop.position.x, drop.position.y, drop.position.z}, b {drop.tail.x, drop.tail.y, drop.tail.z};
+				const Vec3f toEye = eye - a;
+				const float depth = dot(toEye * -1.0f, forward);
+				if (depth <= 0.1f) {
+					continue;
+				}
+				const Vec3f side = normalize(cross(b - a, toEye)) * (0.5f * perPixel * depth);
+				const Vec3f c0 = a - side, c1 = a + side, c2 = b + side, c3 = b - side;
+				for (const Vec3f* c : {&c0, &c1, &c2, &c0, &c2, &c3}) {
+					push(*c, 0.5f, 0.5f, drop.alpha);
+				}
+			}
+		} else if (!rain.texture.empty()) {
+			image = texture(m_sources->files, rain.texture + ".dds");
+			const Vec3f right = camera.right();
+			const Vec3f up = cross(forward, right) * -1.0f;
+			for (const effects::Weather::Drop& drop : m_weather.drops()) {
+				const Vec3f at {drop.position.x, drop.position.y, drop.position.z};
+				const float depth = dot(at - eye, forward);
+				if (depth <= 0.1f) {
+					continue;
+				}
+				const float half = 0.5f * drop.pixels * perPixel * depth;
+				const Vec3f r = right * half, u = up * half;
+				const Vec3f c0 = at - r - u, c1 = at + r - u, c2 = at + r + u, c3 = at - r + u;
+				push(c0, 0, 1, drop.alpha);
+				push(c1, 1, 1, drop.alpha);
+				push(c2, 1, 0, drop.alpha);
+				push(c0, 0, 1, drop.alpha);
+				push(c2, 1, 0, drop.alpha);
+				push(c3, 0, 0, drop.alpha);
+			}
+		}
+		if (image && vertices.size() > first) {
+			// Added (Rain.fx: SrcAlpha, One).
+			groups.push_back({image, true, first, static_cast<uint32_t>(vertices.size()) - first});
+		} else {
+			vertices.resize(first);
+		}
 	}
 	if (vertices.empty()) {
 		groups.clear();
@@ -1539,8 +1642,10 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 	m_gpu.flushUploads();
 }
 
-// The lights of this frame: the effect managers' LightSources, the ones
-// nearest the camera first (the shaders take kMaxPointLights).
+// The lights of this frame: the effect managers' LightSources and the
+// placed objects' (the levels' light bundles), the ones nearest the camera
+// first (the shaders take kMaxPointLights; RendDX9 picks per mesh,
+// lightManager.maxLightsPer*Mesh, within lightCullDistance).
 void LevelRenderer::collectPointLights(const Camera& camera)
 {
 	m_pointLights.clear();
@@ -1548,20 +1653,53 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 		return;
 	}
 	std::vector<std::pair<float, effects::PointLight>> found;
+	const auto consider = [&](const effects::PointLight& light) {
+		const Vec3f d = Vec3f {light.position.x, light.position.y, light.position.z} - camera.position;
+		found.push_back({std::sqrt(dot(d, d)) - light.range2, light});
+	};
 	for (const effects::EffectManager* manager :
 		{m_sources->effects, m_sources->objectEffects, m_hasFirstPerson ? m_firstPerson.effects : nullptr}) {
 		if (!manager) {
 			continue;
 		}
 		for (const effects::PointLight& light : manager->lights()) {
-			const Vec3f d = Vec3f {light.position.x, light.position.y, light.position.z} - camera.position;
-			found.push_back({std::sqrt(dot(d, d)) - light.range2, light});
+			consider(light);
 		}
+	}
+	const world::Object* current = nullptr;
+	Mat4 objectWorld;
+	for (const ObjectLight& placed : m_objectLights) {
+		if (!current || current->id() != placed.object) {
+			current = m_sources->objects.find(placed.object);
+			if (!current) {
+				continue;
+			}
+			objectWorld = objectTransform(current->position(), current->rotation());
+		}
+		if (current->hidden()) {
+			continue;
+		}
+		const Mat4 world = placed.local * objectWorld;
+		effects::PointLight light;
+		light.position = {world.at(3, 0), world.at(3, 1), world.at(3, 2)};
+		light.color = placed.look.color;
+		light.range1 = placed.look.range1;
+		light.range2 = placed.look.range2;
+		light.spot = placed.look.spot;
+		const effects::Vec3& a = placed.look.direction;
+		light.direction = {a.x * world.at(0, 0) + a.y * world.at(1, 0) + a.z * world.at(2, 0),
+			a.x * world.at(0, 1) + a.y * world.at(1, 1) + a.z * world.at(2, 1),
+			a.x * world.at(0, 2) + a.y * world.at(1, 2) + a.z * world.at(2, 2)};
+		light.cosInner = placed.look.cosInner;
+		light.cosOuter = placed.look.cosOuter;
+		// A static light (isDynamic 0) is in the lightmaps already (the
+		// lightmap generator's lights): only unlightmapped surfaces take it.
+		light.affectsLightmapped = placed.look.affectsLightmapped && placed.look.dynamic;
+		consider(light);
 	}
 	std::stable_sort(found.begin(), found.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
 	for (size_t i = 0; i < found.size() && i < static_cast<size_t>(kMaxPointLights); ++i) {
-		const effects::PointLight& l = found[i].second;
-		m_pointLights.push_back({l.position.x, l.position.y, l.position.z, l.range2, l.color.x, l.color.y, l.color.z, l.range1});
+		m_pointLights.push_back(found[i].second);
 	}
 }
 
@@ -1569,8 +1707,15 @@ void LevelRenderer::applyPointLights(LightingUniforms& uniforms) const
 {
 	uniforms.lightCount[0] = static_cast<float>(m_pointLights.size());
 	for (size_t i = 0; i < m_pointLights.size(); ++i) {
-		std::copy(m_pointLights[i].begin(), m_pointLights[i].begin() + 4, uniforms.lightPosition[i]);
-		std::copy(m_pointLights[i].begin() + 4, m_pointLights[i].end(), uniforms.lightColor[i]);
+		const effects::PointLight& l = m_pointLights[i];
+		const float position[4] = {l.position.x, l.position.y, l.position.z, l.range2};
+		const float color[4] = {l.color.x, l.color.y, l.color.z, l.range1};
+		const float spot[4] = {l.direction.x, l.direction.y, l.direction.z, l.spot ? l.cosOuter : -2.0f};
+		const float extra[4] = {l.cosInner, l.affectsLightmapped ? 1.0f : 0.0f, 0, 0};
+		std::copy(position, position + 4, uniforms.lightPosition[i]);
+		std::copy(color, color + 4, uniforms.lightColor[i]);
+		std::copy(spot, spot + 4, uniforms.lightSpot[i]);
+		std::copy(extra, extra + 4, uniforms.lightExtra[i]);
 	}
 }
 
@@ -1591,10 +1736,26 @@ void LevelRenderer::buildDecals()
 		if (!image) {
 			continue;
 		}
-		const effects::Vec3 n = decal.normal;
-		const effects::Vec3 u = decal.tangent * (decal.size * 0.5f);
-		const effects::Vec3 v = physics::cross(n, decal.tangent) * (decal.size * 0.5f);
-		const effects::Vec3 centre = decal.position + n * 0.02f;
+		effects::Vec3 n = decal.normal, tangent = decal.tangent, at = decal.position;
+		if (decal.object != 0) {
+			// On a moving object: from its space to the world's.
+			const world::Object* holder = m_sources->objects.find(decal.object);
+			if (!holder || holder->hidden()) {
+				continue;
+			}
+			const Mat4 place = objectTransform(holder->position(), holder->rotation());
+			const auto turn = [&place](const effects::Vec3& d) {
+				return effects::Vec3 {d.x * place.at(0, 0) + d.y * place.at(1, 0) + d.z * place.at(2, 0),
+					d.x * place.at(0, 1) + d.y * place.at(1, 1) + d.z * place.at(2, 1),
+					d.x * place.at(0, 2) + d.y * place.at(1, 2) + d.z * place.at(2, 2)};
+			};
+			n = turn(n);
+			tangent = turn(tangent);
+			at = turn(at) + effects::Vec3 {place.at(3, 0), place.at(3, 1), place.at(3, 2)};
+		}
+		const effects::Vec3 u = tangent * (decal.size * 0.5f);
+		const effects::Vec3 v = physics::cross(n, tangent) * (decal.size * 0.5f);
+		const effects::Vec3 centre = at + n * 0.02f;
 		const float corners[6][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, -1}, {1, 1}, {-1, 1}};
 		const uint32_t first = static_cast<uint32_t>(vertices.size());
 		for (const auto& c : corners) {
@@ -1728,7 +1889,7 @@ void LevelRenderer::drawParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderP
 			bound = true;
 			additive = group.additive;
 		}
-		SDL_GPUTextureSamplerBinding sampler {group.texture, m_gpu.clampSampler()};
+		SDL_GPUTextureSamplerBinding sampler {group.texture, group.repeat ? m_gpu.repeatSampler() : m_gpu.clampSampler()};
 		SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
 		SDL_DrawGPUPrimitives(pass, group.vertexCount, 1, group.firstVertex, 0);
 	}
@@ -1963,7 +2124,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		m_gpu.flushUploads();
 	}
 	buildParticleBuffer({m_hasFirstPerson ? m_firstPerson.effects : nullptr}, m_firstPersonParticleVertices,
-		m_firstPersonParticleGroups);
+		m_firstPersonParticleGroups, camera);
 	collectPointLights(camera);
 	if (m_hasFirstPerson && m_firstPerson.effects) {
 		m_firstPerson.effects->forEachMeshGroup([&](const std::string& geometry, bool, const std::vector<effects::MeshSprite>&) {

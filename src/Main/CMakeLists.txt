@@ -1,4 +1,4 @@
-add_executable(bf2142 main.cpp HudMenus.cpp MenuBindings.cpp EndOfRoundBindings.cpp PlayerCamera.cpp)
+add_executable(bf2142 main.cpp HostedGame.cpp Nametags.cpp HudMenus.cpp HudMenusKits.cpp HudMenusChat.cpp MenuBindings.cpp EndOfRoundBindings.cpp PlayerCamera.cpp)
 target_link_libraries(bf2142 PRIVATE Console IO World Geometry Terrain Scene GameSound Game Animation Effects Stats Physics Hud Input Net SwfPlayer Voip VoipMenu)
 if(TARGET Render)
 	target_sources(bf2142 PRIVATE Viewer.cpp)

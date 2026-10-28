@@ -29,6 +29,7 @@
 
 #include "Game/Random.h"
 #include "Physics/RigidBody.h"
+#include "Scene/LightSettings.h"
 
 #include <array>
 #include <functional>
@@ -94,6 +95,26 @@ struct ParticleTemplate {
 	Vec3 randomRotation3;
 	Vec3 rotationSpeed3;
 	bool alignToSpeed = false;
+	// NonScreenAlignedParticleSystem: quads lying across the system's y
+	// axis instead of facing the camera (NonScreenAlignedParticles.fx
+	// displaces each corner by world vectors the CPU gives, displaceCoords).
+	bool nonScreenAligned = false;
+	// TrailSystem (Trail.fx): the particles are the points of a ribbon
+	// along the system's path, in numPlanes planes about it, each faded as
+	// it turns edge-on (the square of the plane's normal against the eye),
+	// the ends faded over fadeInFactor / fadeOutFactor of the life, the
+	// texture tiled textureTileFactor times along it and slid by
+	// textureOffsetVelocity; points only while the system moves faster than
+	// minTrailVelocity.
+	bool trail = false;
+	float fadeIn = 0.05f, fadeOut = 0.05f;
+	float tileFactor = 1, uvOffsetVelocity = 0;
+	int planes = 1;
+	float minTrailVelocity = 0;
+	// The texture's frames (animationEnable): frameCount frames, framesAcross
+	// a row, each frameWidth x frameHeight of it.
+	int frameCount = 1, framesAcross = 1;
+	float frameWidth = 1, frameHeight = 1;
 	bool localSystem = false;    // isLocalSystem: particles in the system's space
 	bool showFirstPerson = true; // showInFirstPerson
 	bool showThirdPerson = true; // showInThirdPerson
@@ -148,7 +169,18 @@ private:
 	float m_age = 0;
 	float m_pending = 0; // fractional particles not emitted yet
 	bool m_stopped = false;
+	Vec3 m_lastPosition;  // a trail's: where it was last tick
+	bool m_placed = false;
+	float m_speed = 0;
 	std::vector<Particle> m_particles;
+};
+
+// A vertex of the triangles drawn in world space (non-screen-aligned
+// particles' quads, trails' ribbons): three per triangle.
+struct WorldVertex {
+	Vec3 position;
+	float u = 0, v = 0;
+	std::array<float, 4> color; // rgb, alpha
 };
 
 // What the renderer draws: one camera-facing quad per particle.
@@ -200,19 +232,57 @@ struct Decal {
 	float size = 1;
 	std::array<float, 4> frame {0, 0, 1, 1}; // u0, v0, u1, v1
 	Vec3 color {1, 1, 1};
+	// On a moving object (its id; 0 for the world): position, normal and
+	// tangent are in the object's space (BF2142.exe gives objects whose
+	// template asks for it a decal set of their own: 0x0063c000 asks
+	// DecalManager slot 0x14, RendDX9 0x100e6b70, kept at object +0x164 and
+	// released with it, slot 0x20).
+	uint32_t object = 0;
 };
 
 // A LightSource of an effect bundle (an explosion's flash, a muzzle
 // flash): a point light of color * intensity, full up to
-// attenuationRange1 and gone at attenuationRange2. How long it lives is not
-// from the original yet: as long as its bundle's longest sibling particle
-// system (emit delay + time + life), fading out over that.
+// attenuationRange1 and gone at attenuationRange2; or a placed object's
+// (the levels' light bundles). The LightSource template has no lifetime of
+// its own: a bundle's light lives as long as its bundle's longest sibling
+// particle system (emit delay + time + life), fading out over that.
 struct PointLight {
 	Vec3 position;
 	Vec3 color;   // at this moment (faded)
 	float range1 = 0;
 	float range2 = 1;
+	// lightType Spot: lit within the cone about `direction` (world space),
+	// full inside cosInner, gone outside cosOuter.
+	bool spot = false;
+	Vec3 direction {0, 0, 1};
+	float cosInner = 1, cosOuter = 1;
+	// affectLightmappedObjects: whether lightmapped surfaces take it too
+	// (the static lights of the levels leave them to their lightmaps).
+	bool affectsLightmapped = true;
 };
+
+// What a LightSource template sets (BF2142.exe's LightSource template,
+// class 0x94c7, as its writer 0x00617030 lists the fields): lightType
+// (+0x70: Directional, Point, Spot ...), isDynamic (+0x64),
+// affectLightmappedObjects (+0x6d), affectingType (+0x90),
+// attenuationRange1 / 2 (+0xa0 / +0xa4), color (+0xa8), coneAngle1 / 2
+// (+0xd0 / +0xd4), enabled, intensity; flicker (+0xe4, clamped to 0..1 by
+// 0x00616cf0) is kept but not applied. The template has no lifetime of its
+// own (none of its setters, 0x00528f5a..0x0052b6ea, is one).
+struct LightSourceLook {
+	bool enabled = true;
+	bool spot = false;
+	bool directional = false;
+	bool dynamic = true;
+	bool affectsLightmapped = true;
+	int affectingType = 0;
+	Vec3 color {1, 1, 1}; // times intensity
+	float range1 = 0, range2 = 1;
+	Vec3 direction {0, 0, 1}; // in the light's space
+	float cosInner = 1, cosOuter = 1;
+	float flicker = 0;
+};
+LightSourceLook lightSourceOf(const world::ObjectTemplate& t);
 
 class EffectManager {
 public:
@@ -255,6 +325,13 @@ public:
 	// Leaves a decal template's decal at a surface point (the oldest go
 	// beyond kMaxDecals); false if there is no such decal template.
 	bool spawnDecal(const std::string& name, const Vec3& position, const Vec3& normal);
+	// The same on a moving object placed at `objectPosition`, turned by
+	// `objectRotation` (yaw / pitch / roll degrees): kept in its space so it
+	// moves with it.
+	bool spawnDecal(const std::string& name, const Vec3& position, const Vec3& normal, uint32_t object,
+		const Vec3& objectPosition, const Vec3& objectRotation);
+	// Drops an object's decals (the object is gone).
+	void dropDecals(uint32_t object);
 	static constexpr size_t kMaxDecals = 256;
 	const std::vector<Decal>& decals() const { return m_decals; }
 	// The bundles' lights alive now.
@@ -282,8 +359,9 @@ public:
 	void forEachGroup(Draw draw) const
 	{
 		for (const auto& emitter : m_emitters) {
-			if (emitter->particleTemplate().mesh) {
-				continue; // forEachMeshGroup
+			const ParticleTemplate& t = emitter->particleTemplate();
+			if (t.mesh || t.trail || t.nonScreenAligned) {
+				continue; // forEachMeshGroup, forEachWorldGroup
 			}
 			m_sprites.clear();
 			collect(*emitter, m_sprites);
@@ -292,6 +370,30 @@ public:
 			}
 		}
 	}
+
+	// Calls `draw` for each non-screen-aligned or trail system: its texture,
+	// blending and triangles in world space, seen from `eye`.
+	template <class Draw>
+	void forEachWorldGroup(const Vec3& eye, Draw draw) const
+	{
+		for (const auto& emitter : m_emitters) {
+			const ParticleTemplate& t = emitter->particleTemplate();
+			if (!t.trail && !t.nonScreenAligned) {
+				continue;
+			}
+			m_worldVertices.clear();
+			if (t.trail) {
+				collectTrail(*emitter, eye, m_worldVertices);
+			} else {
+				collectAligned(*emitter, m_worldVertices);
+			}
+			if (!m_worldVertices.empty()) {
+				draw(t.texture, t.additive, m_worldVertices);
+			}
+		}
+	}
+	static void collectTrail(const Emitter& emitter, const Vec3& eye, std::vector<WorldVertex>& out);
+	static void collectAligned(const Emitter& emitter, std::vector<WorldVertex>& out);
 
 	// The emitters (checks).
 	const std::vector<std::unique_ptr<Emitter>>& emitterList() const { return m_emitters; }
@@ -310,6 +412,8 @@ private:
 	struct LiveLight {
 		Vec3 color;
 		float range1 = 0, range2 = 1;
+		LightSourceLook look;
+		Vec3 direction {0, 0, 1}, localDirection {0, 0, 1};
 		float age = 0, life = 1; // life below 0: until stopped (an attached looping bundle)
 		bool stopped = false;
 		// Attached as the emitters are.
@@ -323,6 +427,7 @@ private:
 	std::vector<Decal> m_decals;
 	game::Random m_decalRandom {0x2d5c1e37};
 	mutable std::vector<MeshSprite> m_meshSprites;
+	mutable std::vector<WorldVertex> m_worldVertices;
 
 	const world::ObjectTemplateManager& m_templates;
 	game::Random m_random;
@@ -387,6 +492,33 @@ private:
 	BundleCache m_hasBundles;
 	// A bundle's place along its chain under the parts' current poses.
 	static void place(const Placed& bundle, uint32_t object, const PartPose& partPose, Vec3& position, Mat3& rotation);
+};
+
+// Rain and snow (RendDX9's rain manager, Shaders/Rain.fx): particleCount
+// particles in a box of emitRadius about the camera plus offset, falling
+// along particleVelocity x particleSpeed and wrapped round the box (the
+// original's 32 cells that follow the camera), swaying by maxDeviation at
+// angleSpeed degrees a second in 16 groups (DEVIATIONGROUPS), faded from
+// fadeOutRange of the box to its edge (vsPoint's sysDelta), drawn as points
+// of particleSize x sqrt(1 / (scale.x + scale.y x distance)) pixels, at most
+// particleMaxSize, or as lines lineLength long. Kept to kMaxParticles.
+class Weather {
+public:
+	static constexpr int kMaxParticles = 8000;
+	struct Drop {
+		Vec3 position;
+		Vec3 tail;    // lines: the other end
+		float pixels; // points: the size on screen
+		float alpha;  // the fade (times particleColor's)
+	};
+	void update(const scene::RainSettings& settings, const Vec3& camera, float seconds);
+	const std::vector<Drop>& drops() const { return m_drops; }
+
+private:
+	std::vector<Vec3> m_positions; // without the sway
+	std::vector<Drop> m_drops;
+	float m_time = 0;
+	game::Random m_random {0x5eed4a1};
 };
 
 } // namespace dice::hfe::effects

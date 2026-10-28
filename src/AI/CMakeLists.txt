@@ -1,5 +1,6 @@
 add_library(AI STATIC
 	Behaviour.cpp
+	Heli.cpp
 	PathFollower.cpp
 	NavMesh.cpp
 	Strategy.cpp

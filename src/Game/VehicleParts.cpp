@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace dice::hfe::game {
 
@@ -121,11 +122,7 @@ float Vehicle::OldEngine::currentRatio() const
 
 float Vehicle::OldEngine::currentTorque() const
 {
-	const float x = std::min(std::fabs(rpm), 1.0f) * 100.0f;
-	const int i = std::clamp(static_cast<int>(std::nearbyint(x)), 0, 100);
-	const float f = x - static_cast<float>(i);
-	const float curve = f * torqueCurve[static_cast<size_t>(i) + 1] + (1 - f) * torqueCurve[static_cast<size_t>(i)];
-	return curve * settings.torque;
+	return settings.torqueAt(rpm);
 }
 
 // feedbackLoop (0x0064dd10): the push along the engine's axis as a load on
@@ -563,6 +560,115 @@ void Vehicle::updateForce(ForcePart& f, physics::RigidBody& body, float seconds)
 // at 7.5 m/s (x 1.3 sprinting), backwards at 4.5, turning on the spot at
 // 0.25 rad/s a tick; the feet's probes give a sideways push when one foot
 // is off the ground (30, the turn's balance).
+// LandingGear's update (0x00650120): the height over what lies below (a
+// ray down from the gear, gearUpHeight long, 0x00a85220 slot 0x68; none:
+// the largest float) and the root's speed. Down (+0x250 clear) and under
+// gearDownHeight and gearDownSpeed: the down delay starts and the gear
+// goes down; at gearUpHeight and gearUpSpeed or more: the up delay starts
+// and it goes up. Once its delay has run out each axis gets an input of +1
+// going up and -1 going down (the other way with invertGear). After more
+// than 5 ticks without an update (*0x00a0553c; the first one) the axes
+// stand at their limits at once: max for a gear up (flipped by invertGear
+// and by a negative maxSpeed x acceleration), else min. The rewrite's ray
+// meets only the terrain.
+void Vehicle::updateGear(GearPart& g, const physics::RigidBody& body, const physics::Ground& ground, float seconds)
+{
+	if (g.part < 0) {
+		return;
+	}
+	Part& part = m_parts[static_cast<size_t>(g.part)];
+	const bool snap = static_cast<unsigned>(m_tick - g.lastTick) > 5u;
+	g.lastTick = m_tick;
+	const Vec3 at = partPoint(body, g.part);
+	float height = std::numeric_limits<float>::max();
+	if (ground.height) {
+		const float below = at.y - ground.height(at.x, at.z);
+		if (below >= 0 && below <= g.upHeight) {
+			height = below;
+		}
+	}
+	const float speed2 = physics::lengthSquared(body.velocity);
+	if (height < g.downHeight && speed2 < g.downSpeed * g.downSpeed && g.up) {
+		g.downTimer = g.downDelay;
+		g.up = false;
+	}
+	float input = 0;
+	bool hold = false;
+	if (height >= g.upHeight && speed2 >= g.upSpeed * g.upSpeed && !g.up) {
+		g.upTimer = g.upDelay;
+		g.up = true;
+	}
+	if (g.up) {
+		if (g.upTimer > 0) {
+			g.upTimer -= seconds;
+			hold = true;
+		} else {
+			input = g.invert ? -1.0f : 1.0f;
+		}
+	} else if (g.downTimer > 0) {
+		g.downTimer -= seconds;
+		hold = true;
+	} else {
+		input = g.invert ? 1.0f : -1.0f;
+	}
+	for (size_t axis = 0; axis < 3; ++axis) {
+		RotationAxis& a = part.axes[axis];
+		if (snap) {
+			const float k = a.maxSpeed * a.acceleration;
+			if (k != 0) {
+				bool high = g.up != g.invert;
+				if (k < 0) {
+					high = !high;
+				}
+				part.angle[axis] = high ? a.maxRotation : a.minRotation;
+			}
+		}
+		if (!hold && (a.maxSpeed != 0 || a.continuousSpeed != 0)) {
+			rotationAxisStep(a, input, seconds, part.angle[axis], part.rate[axis]);
+		}
+	}
+}
+
+// A FloatingBundle's node (0x006ca860). Its bundle (0x0064f420) steps the
+// pitch axis only with a parent and a maxRotation.y over 0 (no shipped
+// float has one) and hands the node minus that angle. The node, from the
+// float's world point p and the water's height w there (HeightmapCluster
+// slot 0x98):
+//   c = ((p.y - hullHeight - w) + offset) / hullHeight, s = clamp(input - c
+//   hullHeight, 0, 1); below (c < 0, c at least -1):
+//   lift = (s floatMaxLift + (1 - s) floatMinLift) x gravity x c x 0.101833
+//   k = clamp((25 c + 1 - c) x drag x footprint x 10 / mass, -2, 2)
+//   (*0x00a070b8; drag the root node's slot 0xfc, +0x50; the footprint the
+//   root's vehicle-LOD box, x by z, 0x006aeda0's +0x24 x +0x2c)
+// and pushes the root up by k x (the point's vertical velocity) + lift at p
+// (slot 0xa0, 0x006c7b10: an acceleration at a world point, no mass
+// division).
+void Vehicle::updateFloater(FloaterPart& f, physics::RigidBody& body, const physics::Ground& ground, float seconds,
+	float gravity)
+{
+	(void)seconds;
+	if (f.part < 0 || !ground.waterLevel || f.hullHeight == 0) {
+		return;
+	}
+	const Part& part = m_parts[static_cast<size_t>(f.part)];
+	if (part.parent >= 0 && part.axes[1].maxRotation > 0) {
+		f.input = -part.angle[1];
+	}
+	const Vec3 p = partPoint(body, f.part);
+	const float water = ground.waterLevel(p.x, p.z);
+	float c = ((p.y - f.hullHeight - water) + f.offset) / f.hullHeight;
+	const float s = std::clamp(-(c * f.hullHeight - f.input), 0.0f, 1.0f);
+	if (c >= 0) {
+		return;
+	}
+	c = std::max(c, -1.0f);
+	const float lift = (s * f.maxLift + (1 - s) * f.minLift) * gravity * c * 0.101833f;
+	float k = (c * 25.0f + (1 - c)) * m_drag * m_footprint * 10.0f;
+	k = std::clamp(k / std::max(m_mass, 1e-3f), -2.0f, 2.0f);
+	const float vy = body.pointVelocity(p).y;
+	body.addForce(p - body.position, {0, k * vy + lift, 0});
+}
+
 void Vehicle::updateLegs(physics::RigidBody& body, const physics::Ground& ground, float seconds)
 {
 	(void)seconds;
@@ -730,7 +836,14 @@ void Vehicle::updateOldWheel(Wheel& wheel, physics::RigidBody& body, const physi
 	wheel.objectGround = {};
 	const float compression = std::max(0.0f, groundHeight - bottom.y);
 	wheel.contact = compression > 0;
-	const float compressionSpeed = (compression - wheel.compression) / seconds;
+	// The Spring node's first step that finds it moving (0x006caef0's
+	// +0x284, set by 0x006caae0) takes its displacement's rate as 0, so a
+	// vehicle spawned with its wheels in the ground isn't kicked out.
+	float compressionSpeed = (compression - wheel.compression) / seconds;
+	if (wheel.firstStep && compressionSpeed != 0) {
+		wheel.firstStep = false;
+		compressionSpeed = 0;
+	}
 	wheel.compression = compression;
 	if (wheel.contact || compressionSpeed != 0) {
 		const float push = compression * wheel.strength * (gravity * kSpringScale) + compressionSpeed * wheel.damping;

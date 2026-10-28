@@ -1,11 +1,13 @@
 // The vehicle models other than newCar2, with the shipped templates on flat
 // ground: the tracked tank, the hover tank, the walker, the transport and
 // the gunship, driven by a player in the driver's seat.
+#include "AI/Heli.h"
 #include "AI/PathFollower.h"
 #include "Animation/FirstPerson.h"
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
 #include "Game/GameWorld.h"
+#include "Game/Vehicle.h"
 #include "IO/File/FileManager.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "Physics/MaterialManager.h"
@@ -94,7 +96,7 @@ struct Garage {
 
 	// The vehicle at `at` facing +z, the world started and settled, the
 	// player spawned beside it.
-	uint32_t start(const char* name, const physics::Vec3& at, float settle = 3)
+	uint32_t start(const char* name, const physics::Vec3& at, float settle = 3, float ground = 0, float water = -10000)
 	{
 		world::ObjectTemplate* t = templates.find(name);
 		CHECK(t != nullptr);
@@ -105,11 +107,14 @@ struct Garage {
 		made->setTeam(2);
 		world = std::make_unique<game::GameWorld>(templates, objects);
 		world->enablePhysics(files, collisionTemplates,
-			{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
+			{[ground](float, float) { return ground; }, [ground](float, float, physics::Vec3& normal) {
 				 normal = {0, 1, 0};
-				 return 0.0f;
+				 return ground;
 			 }},
 			&materials);
+		if (water > -10000) {
+			world->setWaterLevel(water);
+		}
 		world->startRound();
 		run(settle);
 		return made->id();
@@ -455,5 +460,241 @@ TEST(Vehicles_BotsDriveTheWalkerAndTheTank)
 			std::string(name) == "eu_tank" ? 13.0f : 8.0f, goal, 25);
 		std::fprintf(stderr, "  %s driven by the bots' controller: %.1f m from the goal\n", name, left);
 		CHECK(left < 8);
+	}
+}
+
+// The renderer's turning parts: the transport's moving parts (its rotor
+// Engine and RotationalBundles) report their axes' angles through partPose,
+// so the drawn rotor spins as the vehicle's state has it.
+TEST(Vehicles_PartPoseTurnsTheMovingParts)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t at = g.start("as_at", {0, 3, 8});
+	CHECK(g.enter(at));
+	game::SoldierInput input;
+	input.throttle = 1;
+	g.drive(input, 1.3f);
+	const game::Vehicle* v = g.world->playerVehicleState();
+	CHECK(v != nullptr);
+	if (!v) {
+		return;
+	}
+	int turned = 0;
+	for (const game::Vehicle::Part& part : v->parts()) {
+		world::Vec3 offset, rotation;
+		if (!part.moves || part.angle == std::array<float, 3> {} || !g.world->partPose(at, part.name, offset, rotation)) {
+			continue;
+		}
+		// A gunner's bundle by its seat comes first; otherwise the part's angles.
+		if (rotation.x == part.angle[0] && rotation.y == part.angle[1] && rotation.z == part.angle[2]) {
+			++turned;
+		}
+	}
+	std::fprintf(stderr, "  as_at: %d moving parts turned\n", turned);
+	CHECK(turned > 0);
+}
+
+// The *_NP APCs' floats (FloatingBundle, node 0x006ca860): over 30 m of
+// water eu_apc_NP rides on its four floats near the surface; eu_apc,
+// without them, lies lower, held by its hull's buoyancy alone (floaterMod,
+// 0x006b9260).
+TEST(Vehicles_FloatingBundlesHoldTheApcUp)
+{
+	if (!gameDir()) {
+		return;
+	}
+	float heights[2] = {};
+	for (int np = 0; np < 2; ++np) {
+		Garage g(gameDir());
+		if (!g.loaded) {
+			return;
+		}
+		const uint32_t apc = g.start(np ? "eu_apc_NP" : "eu_apc", {0, 2, 6}, 10, -30, 0);
+		const game::Vehicle* v = g.world->vehicle(apc);
+		CHECK(v != nullptr);
+		if (v) {
+			CHECK(v->floaters().size() == (np ? 4u : 0u));
+		}
+		heights[np] = g.position(apc).y;
+	}
+	std::fprintf(stderr, "  after 10 s over 30 m of water: eu_apc at %.2f, eu_apc_NP at %.2f\n", heights[0], heights[1]);
+	CHECK(heights[1] > heights[0] + 1.5f);
+	CHECK(heights[1] > -2 && heights[1] < 3);
+}
+
+// regulateVector (0x005644b0, 0x00565180): eu_tank's cupola gun bundle has
+// -0.5 on its yaw (maxSpeed 90): with the hull turning at 0.56 rad/s the
+// regulated input is -0.28 (25 degrees a second against the hull), which
+// replaces a zero or weaker same-way input.
+TEST(Vehicles_TurretRegulationCounterTurns)
+{
+	physics::RigidBody body;
+	body.angularVelocity = {0, 0.56f, 0};
+	const float reg = game::GameWorld::regulation(-0.5f, body);
+	CHECK(std::fabs(reg + 0.28f) < 1e-4f);
+	CHECK(game::GameWorld::regulatedInput(0, reg) == reg);
+	CHECK(game::GameWorld::regulatedInput(-0.1f, reg) == reg);
+	CHECK(game::GameWorld::regulatedInput(-0.5f, reg) == -0.5f);
+	CHECK(game::GameWorld::regulatedInput(0.3f, reg) == 0.3f);
+	body.angularVelocity = {0, 10, 0};
+	CHECK(game::GameWorld::regulation(-0.5f, body) == -1.0f);
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t tank = g.start("eu_tank", {0, 2, 6}, 1);
+	bool found = false;
+	for (const auto& seat : g.world->vehicleSeats(tank)) {
+		if (seat.regulateYaw != 0) {
+			std::fprintf(stderr, "  eu_tank %s: regulateVector.x %.2f, yaw speed %.0f\n", seat.yawBundle.c_str(),
+				seat.regulateYaw, seat.yawSpeed);
+			found = found || (seat.regulateYaw == -0.5f && seat.yawSpeed == 90);
+		}
+	}
+	CHECK(found);
+}
+
+// LandingGear (0x00650120): eu_at's gear (down under 10 m and 10 m/s, up
+// from 20 m and 20 m/s) starts down, goes up flying high and fast and down
+// again low and slow. The shipped gears have no axes (only their sound
+// reads the state).
+TEST(Vehicles_LandingGearGoesUpAndDown)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const world::ObjectTemplate* at = g.templates.find("eu_at");
+	CHECK(at != nullptr);
+	if (!at) {
+		return;
+	}
+	std::unique_ptr<game::Vehicle> v = game::Vehicle::fromTemplate(*at, g.templates, nullptr);
+	CHECK(v && v->gears().size() == 1);
+	if (!v || v->gears().empty()) {
+		return;
+	}
+	const game::Vehicle::GearPart& gear = v->gears()[0];
+	CHECK(gear.downHeight == 10 && gear.upHeight == 20 && gear.downSpeed == 10 && gear.upSpeed == 20);
+	physics::Ground ground {[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& n) {
+								n = {0, 1, 0};
+								return 0.0f;
+							}};
+	physics::RigidBody body;
+	body.position = {0, 2, 0};
+	v->tick(body, ground, 1 / 30.0f, 0.8f);
+	CHECK(!gear.up);
+	body.position = {0, 15, 0}; // the ray (20 m) finds the ground, not up yet
+	body.velocity = {0, 0, 30};
+	v->tick(body, ground, 1 / 30.0f, 0.8f);
+	CHECK(!gear.up);
+	body.position = {0, 40, 0};
+	v->tick(body, ground, 1 / 30.0f, 0.8f);
+	CHECK(gear.up);
+	body.position = {0, 5, 0};
+	v->tick(body, ground, 1 / 30.0f, 0.8f);
+	CHECK(gear.up); // still fast
+	body.velocity = {0, 0, 5};
+	v->tick(body, ground, 1 / 30.0f, 0.8f);
+	CHECK(!gear.up);
+}
+
+namespace {
+
+// The pilots' controller (src/AI/Heli: HeliMoveTo 0x100e50b0) flying the
+// player's aircraft to `goal` at `margin` over the ground, the inputs
+// mapped as the bots map them (PIThrottle, PIYaw strafe, PIRoll the turn x
+// 5, PIPitch direct). Returns the closest it came (3-D) and the end.
+struct Flight {
+	float closest = 1e9f;
+	physics::Vec3 end;
+	float topSpeed = 0;
+	float lowest = 1e9f; // the least height over the ground after take-off
+};
+Flight pilotFlies(Garage& g, uint32_t vehicle, const physics::Vec3& goal, float margin, float seconds)
+{
+	ai::HeliState state;
+	Flight flight;
+	physics::Vec3 last;
+	for (int i = 0; i < static_cast<int>(seconds * 30); ++i) {
+		game::GameWorld::VehicleInfo me {};
+		for (const auto& info : g.world->vehicleList()) {
+			if (info.object == vehicle) {
+				me = info;
+			}
+		}
+		ai::HeliSense sense;
+		sense.position = {me.position.x, me.position.y, me.position.z};
+		sense.velocity = {me.velocity.x, me.velocity.y, me.velocity.z};
+		sense.angularVelocity = {me.angularVelocity.x, me.angularVelocity.y, me.angularVelocity.z};
+		sense.forward = {me.forward.x, me.forward.y, me.forward.z};
+		sense.right = {me.right.x, me.right.y, me.right.z};
+		const physics::Vec3& f = me.forward;
+		const physics::Vec3& r = me.right;
+		sense.up = {f.y * r.z - f.z * r.y, f.z * r.x - f.x * r.z, f.x * r.y - f.y * r.x};
+		const physics::Vec3 a = i > 0 ? (me.velocity - last) * 30.0f : physics::Vec3 {};
+		sense.acceleration = {a.x, a.y, a.z};
+		last = me.velocity;
+		sense.terrain = [](float, float) { return 0.0f; };
+		ai::HeliPilot pilot(state, sense);
+		pilot.flyTo({goal.x, goal.y, goal.z}, margin);
+		game::SoldierInput input;
+		input.throttle = state.controls.throttle;
+		input.strafe = state.controls.yaw;
+		input.turn = state.controls.roll * 5;
+		input.hasPitch = true;
+		input.pitch = state.controls.pitch;
+		g.world->setPlayerInput(input);
+		g.world->tick(1 / 30.0f);
+		const physics::Vec3 at = g.position(vehicle);
+		flight.closest = std::min(flight.closest, std::sqrt(physics::lengthSquared(at - goal)));
+		flight.topSpeed = std::max(flight.topSpeed, std::sqrt(physics::lengthSquared(me.velocity)));
+		if (state.airborne) {
+			flight.lowest = std::min(flight.lowest, at.y);
+		}
+	}
+	flight.end = g.position(vehicle);
+	return flight;
+}
+
+} // namespace
+
+// The bots' flight (src/AI/Heli, AIDLL 0x100e50b0 and its primitives):
+// the transport (as_at, eu_at) and the gunships (as_ag, us_ag) take off
+// and fly 150 m to a point 25 m over the ground. The gunships stop and hover
+// on it; the heavier transports overshoot (from 22 m/s, braking only within
+// 20 m) and wander round it within some 35 m on the rewrite's flight model.
+TEST(Vehicles_BotPilotsFlyToAPointAndHover)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const char* name : {"as_at", "eu_at", "as_ag", "us_ag"}) {
+		Garage g(gameDir());
+		if (!g.loaded) {
+			return;
+		}
+		const uint32_t v = g.start(name, {0, 4, 6});
+		CHECK(g.enter(v));
+		const physics::Vec3 goal {100, 25, 120};
+		const Flight flight = pilotFlies(g, v, goal, 25, 45);
+		const float off = std::sqrt(physics::lengthSquared(flight.end - goal));
+		std::fprintf(stderr, "  %s: closest %.1f m, %.1f m off after 45 s (at %.1f, %.1f, %.1f), top speed %.1f m/s\n",
+			name, flight.closest, off, flight.end.x, flight.end.y, flight.end.z, flight.topSpeed);
+		CHECK(flight.closest < 10);
+		CHECK(off < (name[3] == 'a' && name[4] == 'g' ? 5.0f : 45.0f));
+		CHECK(flight.end.y > 12 && flight.end.y < 40);
 	}
 }

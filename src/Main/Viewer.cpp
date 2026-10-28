@@ -312,6 +312,11 @@ int screenshot(const render::LevelSources& sources, const ViewerOptions& options
 		const float ahead[3] = {forward.x, forward.y, forward.z};
 		options.onCamera(position, ahead);
 	}
+	if (options.onView) {
+		const float position[3] = {camera.position.x, camera.position.y, camera.position.z};
+		options.onView(position, camera.yaw, camera.pitch, camera.fovY,
+			static_cast<float>(options.width) / static_cast<float>(options.height));
+	}
 	level.syncObjects();
 	level.draw(commands, target.color, target, camera, sources.lights);
 	SDL_SubmitGPUCommandBuffer(commands);
@@ -334,7 +339,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		render::Camera camera = level.suggestedCamera();
 		applyCameraOption(camera, options.camera);
 		const bool playing = static_cast<bool>(options.playerView);
-		if (options.onMenuInput) {
+		if (options.onMenuInput || options.onHudText) {
 			SDL_StartTextInput(window);
 		}
 		if (options.onMenuInput && !options.menuActive) {
@@ -378,6 +383,13 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				if (event.type == SDL_EVENT_QUIT) {
 					running = false;
 					shown.closed = true;
+				} else if (!menuUp && options.onHudText && options.wantsText && options.wantsText()
+					&& (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_TEXT_INPUT)) {
+					if (event.type == SDL_EVENT_TEXT_INPUT) {
+						options.onHudText({ViewerOptions::MenuInput::Kind::Text, 0, 0, 0, event.text.text});
+					} else {
+						options.onHudText({ViewerOptions::MenuInput::Kind::Key, 0, 0, flashKeyCode(static_cast<int>(event.key.key))});
+					}
 				} else if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE && options.onEscape) {
 					options.onEscape();
 				} else if (menuUp && (event.type == SDL_EVENT_MOUSE_MOTION || event.type == SDL_EVENT_MOUSE_BUTTON_DOWN
@@ -463,6 +475,9 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.toggleCamera = c.pressed(map, "c_PIToggleCameraMode", down);
 				input.voipPushToTalk = c.pressed(map, "c_GIVoipPushToTalk", down);
 				input.voipLeaderChannel = c.pressed(map, "c_GIVoipUseLeaderChannel", down);
+				input.sayAll = c.pressed(map, "c_GISayAll", down);
+				input.sayTeam = c.pressed(map, "c_GISayTeam", down);
+				input.saySquad = c.pressed(map, "c_GISaySquad", down);
 				for (int item = 0; item < 8; ++item) {
 					if (c.pressed(map, "c_PIWeaponSelect" + std::to_string(item + 1), down)) {
 						input.item = item + 1;
@@ -491,6 +506,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.jump = keys[SDL_SCANCODE_SPACE];
 				input.toggleCamera = keys[SDL_SCANCODE_C];
 				input.commanderScreen = keys[SDL_SCANCODE_CAPSLOCK];
+				input.sayAll = keys[SDL_SCANCODE_K];
+				input.sayTeam = keys[SDL_SCANCODE_L];
 				for (int item = 0; item < 9; ++item) {
 					if (keys[SDL_SCANCODE_1 + item]) {
 						input.item = item + 1;
@@ -558,6 +575,11 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				const float position[3] = {camera.position.x, camera.position.y, camera.position.z};
 				const float ahead[3] = {forward.x, forward.y, forward.z};
 				options.onCamera(position, ahead);
+			}
+			if (options.onView) {
+				const float position[3] = {camera.position.x, camera.position.y, camera.position.z};
+				options.onView(position, camera.yaw, camera.pitch, camera.fovY,
+					height > 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0f);
 			}
 			level.syncObjects();
 			level.draw(commands, swapchain, target, camera, sources.lights);

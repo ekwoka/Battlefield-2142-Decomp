@@ -509,4 +509,83 @@ UnlocksInfo parseUnlocksInfo(const StatsResponse& response)
 	return info;
 }
 
+
+std::vector<AwardDefinition> parseAwards(const std::string& script)
+{
+	std::vector<AwardDefinition> out;
+	std::istringstream lines(script);
+	for (std::string line; std::getline(lines, line);) {
+		std::istringstream words(line);
+		std::string command, id;
+		if (!(words >> command >> id) || command != "awards.setData") {
+			continue;
+		}
+		AwardDefinition award;
+		award.id = id;
+		award.number = std::atoi(id.c_str());
+		const size_t underscore = id.find('_');
+		award.level = underscore == std::string::npos ? 0 : std::atoi(id.c_str() + underscore + 1);
+		// The quoted criteria.
+		for (size_t at = line.find('"'); at != std::string::npos; at = line.find('"', at)) {
+			const size_t end = line.find('"', at + 1);
+			if (end == std::string::npos) {
+				break;
+			}
+			const std::string text = line.substr(at + 1, end - at - 1);
+			at = end + 1;
+			std::vector<std::string> fields;
+			std::istringstream parts(text);
+			for (std::string field; std::getline(parts, field, ',');) {
+				fields.push_back(field);
+			}
+			if (fields.size() < 4) {
+				continue;
+			}
+			AwardCriterion c;
+			const int flags = std::atoi(fields[0].c_str());
+			c.global = (flags & 1) != 0;
+			c.check = (flags & 4) != 0;
+			c.whole = (flags & 8) != 0;
+			c.textId = std::atoi(fields[1].c_str());
+			std::istringstream keys(fields[2]);
+			for (std::string key; std::getline(keys, key, ';');) {
+				key.erase(std::remove(key.begin(), key.end(), ' '), key.end());
+				if (!key.empty()) {
+					c.keys.push_back(key);
+				}
+			}
+			c.target = static_cast<float>(std::atof(fields[3].c_str()));
+			award.criteria.push_back(std::move(c));
+		}
+		out.push_back(std::move(award));
+	}
+	return out;
+}
+
+double awardStatValue(const SoldierStats& soldier, const std::string& key)
+{
+	if (key == "klls") {
+		return soldier.kills;
+	}
+	if (key == "dths") {
+		return soldier.deaths;
+	}
+	if (key == "gsco") {
+		return soldier.experience;
+	}
+	if (key == "wins") {
+		return soldier.wins;
+	}
+	if (key == "lose") {
+		return soldier.losses;
+	}
+	if (key == "tt") {
+		return soldier.timePlayed;
+	}
+	if (key == "wlr") {
+		return soldier.losses > 0 ? static_cast<double>(soldier.wins) / soldier.losses : soldier.wins;
+	}
+	return 0;
+}
+
 } // namespace dice::hfe::stats

@@ -1,5 +1,6 @@
 #version 450
-// Particles (Particles.fx): camera-facing quads. Each vertex carries the
+// Particles (Particles.fx): camera-facing quads; or, with a negative size,
+// triangles placed on the CPU (NonScreenAlignedParticles.fx, Trail.fx). Each vertex carries the
 // particle's centre, a corner (-1..1), its size and rotation, and its
 // colour and alpha (computed on the CPU from the template's graphs).
 layout(location = 0) in vec3 inCenter;
@@ -25,11 +26,19 @@ layout(location = 2) out float outDepth;
 
 void main()
 {
-	float c = cos(inRotation), s = sin(inRotation);
-	vec2 corner = vec2(inCorner.x * c - inCorner.y * s, inCorner.x * s + inCorner.y * c);
-	vec3 position = inCenter + (cameraRight.xyz * corner.x + cameraUp.xyz * corner.y) * inSize;
+	vec3 position;
+	if (inSize < 0.0) {
+		// Placed on the CPU (non-screen-aligned quads, trails): the
+		// coordinates come in the lightmap slot.
+		position = inCenter;
+		outTexCoord = inUnusedLightmap;
+	} else {
+		float c = cos(inRotation), s = sin(inRotation);
+		vec2 corner = vec2(inCorner.x * c - inCorner.y * s, inCorner.x * s + inCorner.y * c);
+		position = inCenter + (cameraRight.xyz * corner.x + cameraUp.xyz * corner.y) * inSize;
+		outTexCoord = inCorner * vec2(0.5, -0.5) + 0.5;
+	}
 	gl_Position = viewProjection * vec4(position, 1.0);
-	outTexCoord = inCorner * vec2(0.5, -0.5) + 0.5;
 	outColor = vec4(inColor, inAlpha);
 	outDepth = gl_Position.w;
 }

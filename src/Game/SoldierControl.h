@@ -27,6 +27,11 @@ struct SoldierInput {
 	int switchSeat = 0; // PIPosition1..8: move to that seat (1-based; on press)
 	int selectItem = 0; // PIWeaponSelect1..9: the weapon in that kit slot (on press)
 	bool jump = false;  // PIAction (input 9, c_PIAction: Space), held: jumps on landing
+	// A driving bot's PIPitch as the AI writes it (the ControlInfo adaptor's
+	// drivePitch, BF2142.exe 0x009d6b98 slot 0x88), in place of the mouse's
+	// y (aimPitch's change) when set.
+	bool hasPitch = false;
+	float pitch = 0;
 };
 
 // The sprint's stamina (the Soldier's +0x360; set up by 0x00645790 from

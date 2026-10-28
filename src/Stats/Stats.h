@@ -227,4 +227,35 @@ struct UnlocksInfo {
 };
 UnlocksInfo parseUnlocksInfo(const StatsResponse& response);
 
+// --- Awards (Menu/External/FlashMenu/awards.con, run at start-up by
+// 0x0046a0c0; "awards.setData <id> <criterion>..." parsed by 0x004a4e50).
+// 126 entries: badges 100-121 in levels _1.._3, medals 200-219, ribbons
+// 300-323, pins 400-416. Each criterion is "<flags>,<critId>,<keys>,<target>":
+// flag 1 a career (global) criterion, else one within a round; 4 shown as a
+// check mark rather than a bar; 8 whole numbers ("1" for a target of 0);
+// the keys the stats server's getplayerinfo.aspx keys whose values add up
+// ("wlr" wins over losses; an award id: 1 when held); its text is
+// AWARD_CRITERIA_<critId>.
+struct AwardCriterion {
+	bool global = false;
+	bool check = false;
+	bool whole = false;
+	int textId = 0;
+	std::vector<std::string> keys;
+	float target = 0;
+};
+struct AwardDefinition {
+	std::string id;   // "100_1", "200"
+	int number = 0;   // 100..416
+	int level = 0;    // badges 1..3, else 0
+	std::vector<AwardCriterion> criteria;
+	// 0 medal, 1 badge, 2 ribbon, 3 pin (SwiffPlayer's record +0, by the number)
+	int kind() const { return number < 200 ? 1 : number < 300 ? 0 : number < 400 ? 2 : 3; }
+};
+std::vector<AwardDefinition> parseAwards(const std::string& script);
+// A stat key's value from the local record: the getplayerinfo.aspx keys it
+// keeps (klls, dths, gsco, wins, lose, tt, and wlr); 0 for the rest
+// (per kit, weapon, vehicle and map stats aren't kept).
+double awardStatValue(const SoldierStats& soldier, const std::string& key);
+
 } // namespace dice::hfe::stats

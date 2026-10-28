@@ -103,7 +103,34 @@ float sampleTable(const std::array<float, 102>& table, float x)
 
 } // namespace
 
-EngineSettings::EngineSettings() { gearTable.fill(1.0f); }
+EngineSettings::EngineSettings()
+{
+	gearTable.fill(1.0f);
+	// The torque curve's default keys (the template constructor 0x006291d0
+	// through 0x0061ecf0): 0.7, 0.8 at 0.1, 0.9 at 0.3, 1 at 0.6, 0.85 at
+	// 0.85, 0.7 at 1. No property sets the curve.
+	const float keys[][2] = {{0, 0.7f}, {0.1f, 0.8f}, {0.3f, 0.9f}, {0.6f, 1.0f}, {0.85f, 0.85f}, {1, 0.7f}};
+	for (size_t i = 0; i <= 100; ++i) {
+		const float x = static_cast<float>(i) / 100.0f;
+		size_t k = 0;
+		while (k + 2 < std::size(keys) && x > keys[k + 1][0]) {
+			++k;
+		}
+		const float f = (x - keys[k][0]) / (keys[k + 1][0] - keys[k][0]);
+		torqueCurve[i] = keys[k][1] + (keys[k + 1][1] - keys[k][1]) * std::clamp(f, 0.0f, 1.0f);
+	}
+	torqueCurve[101] = torqueCurve[100];
+}
+
+float EngineSettings::torqueAt(float rpm) const
+{
+	// 0x00629660 with the sampler 0x00627cd0: |rpm| up to 1, rounded to
+	// the nearest of 100 steps, interpolated with the next.
+	const float x = std::min(std::fabs(rpm), 1.0f) * 100.0f;
+	const int i = std::clamp(static_cast<int>(std::nearbyint(x)), 0, 100);
+	const float f = x - static_cast<float>(i);
+	return (f * torqueCurve[static_cast<size_t>(i) + 1] + (1 - f) * torqueCurve[static_cast<size_t>(i)]) * torque;
+}
 
 EngineSettings EngineSettings::fromTemplate(const world::ObjectTemplate& t)
 {
@@ -320,19 +347,6 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 					engine.flags = engineType;
 					engine.settings = EngineSettings::fromTemplate(t);
 					engine.settings.engineType = engineType;
-					// The torque curve's default keys (0x006291d0): 0.7, 0.8 at
-					// 0.1, 0.9 at 0.3, 1 at 0.6, 0.85 at 0.85, 0.7 at 1.
-					const float keys[][2] = {{0, 0.7f}, {0.1f, 0.8f}, {0.3f, 0.9f}, {0.6f, 1.0f}, {0.85f, 0.85f}, {1, 0.7f}};
-					for (size_t i = 0; i <= 100; ++i) {
-						const float x = static_cast<float>(i) / 100.0f;
-						size_t k = 0;
-						while (k + 2 < std::size(keys) && x > keys[k + 1][0]) {
-							++k;
-						}
-						const float f = (x - keys[k][0]) / (keys[k + 1][0] - keys[k][0]);
-						engine.torqueCurve[i] = keys[k][1] + (keys[k + 1][1] - keys[k][1]) * std::clamp(f, 0.0f, 1.0f);
-					}
-					engine.torqueCurve[101] = engine.torqueCurve[100];
 					engine.noPropellerEffectAtSpeed = number(t, "noPropellerEffectAtSpeed", engine.noPropellerEffectAtSpeed);
 					engine.heatIncrement = number(t, "heatIncrement", engine.heatIncrement);
 					engine.coolingFactor = number(t, "coolingFactor", engine.coolingFactor);
@@ -372,6 +386,24 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 				wing.multiply = number(t, "multiply", 1);
 				wing.offsetY = vector(t, "offset").y;
 				vehicle->m_wings.push_back(wing);
+			} else if (type == "LandingGear") {
+				GearPart gear;
+				gear.part = self;
+				gear.downHeight = number(t, "gearDownHeight", gear.downHeight);
+				gear.upHeight = number(t, "gearUpHeight", gear.upHeight);
+				gear.downSpeed = number(t, "gearDownSpeed", gear.downSpeed);
+				gear.upSpeed = number(t, "gearUpSpeed", gear.upSpeed);
+				gear.upDelay = number(t, "gearUpDelay", gear.upDelay);
+				gear.downDelay = number(t, "gearDownDelay", gear.downDelay);
+				gear.invert = number(t, "invertGear", 0) != 0;
+				vehicle->m_gears.push_back(gear);
+			} else if (type == "FloatingBundle") {
+				FloaterPart floater;
+				floater.part = self;
+				floater.hullHeight = number(t, "hullHeight", floater.hullHeight);
+				floater.maxLift = number(t, "floatMaxLift", floater.maxLift);
+				floater.minLift = number(t, "floatMinLift", floater.minLift);
+				vehicle->m_floaters.push_back(floater);
 			} else if (type == "ForceObject") {
 				ForcePart force;
 				force.part = self;
@@ -457,6 +489,16 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 		return nullptr;
 	}
 	vehicle->m_mass = number(root, "mass", 1);
+	vehicle->m_drag = number(root, "drag", 0);
+	if (mesh && !mesh->geometries.empty()) {
+		for (const auto& sub : physics::collisionParts(*mesh, 0)) {
+			const auto& lod = sub.lods.size() >= 2 ? sub.lods[1] : sub.lods.front();
+			if (!sub.lods.empty()) {
+				vehicle->m_footprint = (lod.boundsMax[0] - lod.boundsMin[0]) * (lod.boundsMax[2] - lod.boundsMin[2]);
+				break;
+			}
+		}
+	}
 	vehicle->m_sprintFactor = number(root, "sprintFactor", 0);
 	if (const std::string* input = setting(root, "regulateVerticalPosInput")) {
 		vehicle->m_vertical.input = vehicleInputIndex(*input);
@@ -572,6 +614,9 @@ void Vehicle::tick(physics::RigidBody& body, const physics::Ground& ground, floa
 {
 	++m_tick;
 	regulateInput(body, gravity);
+	for (GearPart& gear : m_gears) {
+		updateGear(gear, body, ground, seconds);
+	}
 	updateParts(seconds);
 	if (m_newCar2) {
 		updateEngine(body, seconds);
@@ -587,6 +632,9 @@ void Vehicle::tick(physics::RigidBody& body, const physics::Ground& ground, floa
 	}
 	for (ForcePart& force : m_forces) {
 		updateForce(force, body, seconds);
+	}
+	for (FloaterPart& floater : m_floaters) {
+		updateFloater(floater, body, ground, seconds, gravity);
 	}
 	for (Wheel& wheel : m_wheels) {
 		if (wheel.newCar2) {
@@ -672,7 +720,14 @@ void Vehicle::updateWheel(Wheel& wheel, physics::RigidBody& body, const physics:
 
 	// The spring pushes the body by how far, and how fast, the ground
 	// pushed the wheel.
-	const float compressionSpeed = (compression - wheel.compression) / seconds;
+	// The Spring node's first step that finds it moving (0x006caef0's
+	// +0x284, set by 0x006caae0) takes its displacement's rate as 0, so a
+	// vehicle spawned with its wheels in the ground isn't kicked out.
+	float compressionSpeed = (compression - wheel.compression) / seconds;
+	if (wheel.firstStep && compressionSpeed != 0) {
+		wheel.firstStep = false;
+		compressionSpeed = 0;
+	}
 	wheel.compression = compression;
 	if (wheel.contact || compressionSpeed != 0) {
 		const float push = compression * wheel.strength * (gravity * kSpringScale) + compressionSpeed * wheel.damping;
@@ -712,9 +767,12 @@ void Vehicle::updateWheel(Wheel& wheel, physics::RigidBody& body, const physics:
 		if ((m_gear < 1 && throttle > 0) || (m_gear >= 1 && throttle <= 0)) {
 			throttle = 0; // slot 0x1a4: only towards the gear's direction
 		}
-		// Slot 0x1a4: the torque curve (flat, 0x374) times the throttle, times
+		// Slot 0x1a4 (0x0064f2a0): for an engineType with bit 0x80 (newCar2;
+		// the template's +0x6e8 read as a signed byte through slot 5 of its
+		// +0x36c interface, 0x00629140) the torque curve at the rpm
+		// (0x00629660: |rpm| up to 1, x torque), times the throttle, times
 		// the clutch with useClutchedTorque.
-		const float engineTorque = m_engine.torque * throttle * (m_engine.useClutchedTorque ? m_clutch : 1.0f);
+		const float engineTorque = m_engine.torqueAt(m_rpm) * throttle * (m_engine.useClutchedTorque ? m_clutch : 1.0f);
 		const float driveTorque = engineTorque * m_engine.differential * ratio * kDriveTorqueScale;
 		// 0x006b7460: the downhill part of the wheel's share of the weight,
 		// along the wheel, times the radius (all of it along the wheel off

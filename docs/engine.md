@@ -262,11 +262,17 @@ plus `friLatBrakeMod` at `0x79c`; defaults in `0x006291d0`). Per tick:
 - Spring (`0x006caef0`): the wheel collides as an object of its own. How
   far the ground pushed it from its rest place, and how fast, pushes the
   parent back by `disp * strength * Physics.gravity * -0.101833 + speed *
-  damping` (slot `0xa4`). The wheel is then put back at rest.
+  damping` (slot `0xa4`). The wheel is then put back at rest. Its first
+  step that finds the wheel moving (`+0x284`, set by `0x006caae0`) takes
+  the speed as 0.
 - Wheel (`0x006b7910`), for a wheel in contact: it takes the contact's
-  velocity along the ground. The engine's torque (`torque * throttle *
+  velocity along the ground. The engine's torque (slot `0x1a4`,
+  `0x0064f2a0`: the torque curve at the rpm × `torque * throttle *
   differential * gear ratio * 1.75`, zero unless the throttle points the
-  gear's way) and the slope's torque (`0x006b7460`: the downhill part of
+  gear's way; the curve is `0x00629660` at |rpm| up to 1, the defaults
+  below, for an engineType with bit 0x80 read as a signed byte through
+  slot 5 of the template's `+0x36c` interface, `0x00629140`; any other
+  type gets `torque` flat) and the slope's torque (`0x006b7460`: the downhill part of
   the wheel's quarter of the weight times the radius, times
   `slopeTorqueMod`, none in first gear) spin the wheel. `frictionTorque`,
   plus `engineBrakeTorque` off the throttle and `brakeTorque` while
@@ -316,7 +322,9 @@ plus `friLatBrakeMod` at `0x79c`; defaults in `0x006291d0`). Per tick:
   wheels' blended with the old by the clutch, and an rpm the throttle no
   longer holds decays (×0.9 braking, then ×0.96 without throttle or ×0.99
   with: `engine-inertia3`, `engine-inertia2`). The engine's torque (slot
-  `0x1a4`) is scaled by the clutch only with `useClutchedTorque`.
+  `0x1a4`) is scaled by the clutch only with `useClutchedTorque`. (The
+  rewrite took the torque flat until it followed `0x0064f2a0`: the FAVs
+  now pull 0.7–1 of `torque` by the rpm, as the old engines do.)
 
 Rewritten in `src/Game/Vehicle` (`rotationAxisStep`,
 `Vehicle::updateEngine`).
@@ -449,11 +457,65 @@ PlayerControlObject of its tree.
 rest, 64° in 2 s at full lock; as_tank floats at 1.6 m, 14.5 m in 3 s, 13
 m strafing, 79° in 2 s on PIRoll; as_heavy_mech stands at 3.32 m, 20.7 m in
 3 s, 99° in 2 s on the spot; as_at 32 m up in 6 s at full collective;
-as_ag 11.5 m up and 43 m ahead in 5 s. Not rewritten: LandingGear (visual
-only), FloatingBundle (the *_NP APCs' floats), the wing's liftRegulated,
-the mechs' effect events, the yaw/pitch/roll PCO regulators (no shipped
-vehicle sets them), the bundles' regulateVector (turrets and cameras
-counter-turning with the hull).
+as_ag 11.5 m up and 43 m ahead in 5 s.
+
+**FloatingBundle** (the *_NP APCs' four floats; object vtable `0x00988240`,
+update `0x0064f420`; its node `0x006ca810`, vtable `0x00993c98`, made by the
+template's slot 29 `0x00629a90` whatever `hasMobilePhysics` says; tick
+`0x006ca860`; template defaults `0x00629780`: hullHeight 1, both lifts 10).
+From the float's point p and the water's height w there (HeightmapCluster
+slot 0x98): c = ((p.y − hullHeight − w) + offset) / hullHeight and s =
+clamp(input − c × hullHeight, 0, 1) (input: minus the bundle's pitch, which
+steps only with a maxRotation.y over 0; offset `+0x264` grows by `+0x268`,
+never set). Below (c < 0, at least −1): lift = (s floatMaxLift + (1 − s)
+floatMinLift) × gravity × c × 0.101833, k = clamp((25c + 1 − c) × drag ×
+the root's vehicle-LOD footprint (box x × z, `+0x24 × +0x2c`) × 10 / mass,
+±2 `*0x00a070b8`), and the root is pushed up by k × the point's vertical
+velocity + lift at p (slot 0xa0, `0x006c7b10`: an acceleration at a world
+point). Over 30 m of water eu_apc_NP rides near the surface (−0.06 m),
+eu_apc on its hull's buoyancy alone 3 m lower.
+
+**LandingGear** (object vtable `0x00988768`, update `0x00650120`; defaults
+`0x0062a3xx`: down under 30 m and 60 m/s, up from 20 m and 70 m/s, no
+delays). A ray down gearUpHeight long gives the height (none: the largest
+float; the rewrite's meets only the terrain). Down and under gearDownHeight
+and gearDownSpeed: the down delay starts and it goes down; at gearUpHeight
+and gearUpSpeed: the up delay and up. After its delay each axis gets +1 up,
+−1 down (the other way with invertGear); after more than 5 ticks without an
+update (`*0x00a0553c`) the axes stand at their limits. The shipped gears
+(eu_at, us_ag: down under 10 m and 10 m/s, up from 20 m/s) have no axes:
+only their sound reads the state.
+
+**regulateVector** (RotationalBundle `+0x314`; `0x005644b0` through the
+input handler `0x00565180` for a bundle under the root PCO, or the input
+pass `0x00565700`): with regulateFromParent −1 (every shipped bundle), the
+root node's angular velocity (slot 0x68) carried through the bundle's and
+the root's matrices (`0x006acfa0`, `0x004b9d60`) — for an upright bundle
+its component about the hull's up — times regulateVector, within ±1,
+replaces an axis input that is 0 or weaker the same way. eu_tank's cupola
+(−0.5, 90°/s) holds its heading against the hull's turn. The rewrite
+regulates the gunners' yaw and the seat cameras' yaw
+(`GameWorld::regulation`); pitch and roll regulation and
+regulateFromParent(Pos) aren't (the rewrite's gun pitch is the aim's).
+
+**Pilots' guns.** A pilot (a vehicle that flies) fires the seat's own
+GenericFireArm, fixed along the hull, with PIFire. The ground drivers'
+guns turn on the mouse in the original, which the rewrite's drivers spend
+on PIRoll: they aren't fired.
+
+**Spawned in the ground** (a deviation): the shipped spawners stand on the
+ground and spawn at their spot (`0x005aeb80`). The rewrite lifts a vehicle
+whose box bottom is under the terrain onto it at creation: its push out of
+the ground in one tick and the springs' rate after it otherwise wrecked
+the gunships and APCs on their pads.
+
+Not rewritten: the wing's liftRegulated, regulateToLift and
+wingToRegulatorRatio (no shipped Wing sets them, so they never act); the
+mechs' animation speed factor (`0x008ba420`, taken as 1) and effect events
+(their animation's `effect:N`): both need the walker's own animation
+system (`bundleAnimationSystem`) run in the simulation with the movement
+`0x0063ce30` gives it, which isn't decoded far enough; the yaw/pitch/roll
+PCO regulators (no shipped vehicle sets them).
 
 ### Mobile meshes against objects (0x006dc7b0, 0x006bb050)
 
@@ -1118,6 +1180,23 @@ their component maps are absent, so c = (1, 0, 0) (the patch's default fill,
 other sample. Not from the original yet: vBlendMod (0.2 here) and which of
 farTopTilingHi / Low the surroundings take (Hi here, for seamless tiling).
 
+**The compiled terrain.** terraindata.raw is decoded to its end
+(`terrain::parseTerrainData`, `TerrainData::meshes`; the layout is in
+`src/Terrain/TerrainData.h`): the LOD index tree all patches share
+(`0x100b00a0`: 85 quadtree nodes with three LODs, nodes 0-20 with nine
+stitch variants at LODs 1 and 2), each patch's compiled vertices (height,
+three geomorph deltas, packed normal; `0x100aed30` → `0x1014be90`) and
+detail-material index lists, the surrounding terrains' heights and
+normals (`0x100aedb0` → `0x101506d0`, their counts from the meshes
+`0x100b3fe0` generates) and the culling quadtree (`0x1009da80`). The
+primary terrain is still drawn from the heightmap at full detail: what
+picks a node's LOD (the switch distances or error metric; they are not in
+the file) and how the shader blends the three morph deltas
+(TerrainShader's geomorph) were not traced in RendDX9's draw, and whether
+a LOD 2 node's stitched edge meets a LOD 1 neighbour (the indices keep the
+full-resolution vertices) is not settled, so the LOD meshes would leave
+cracks or pop.
+
 **Water.** RaShaderWaterBase.fx's `Water` pixel shader (the PS_20 variant
 with USE_FRESNEL and USE_SPECULAR, its 2D path): the normal is two frames of
 `common/textures/waterbump/Waterbump_0N.dds` (world space, green up)
@@ -1156,17 +1235,6 @@ the level's overgrowth atlases (`OvergrowthAtlas.tai`,
 shader scales and offsets the coordinates). Not done: dropping trees beyond
 the view distance, the overgrowth shadow map.
 
-**Decals.** A material cell's decal template (`MaterialManager.
-setDecalTemplate`; `decal` templates: `decalTextureName`, `size` +
-`randomSize`, `rotation` + `randomRotation` about the normal, `color`, one
-frame of an `animationFrameCount`-frame atlas, `animationFrameCountX`
-across) is left where a projectile hits the terrain or a static object, as
-Decals.fx's `psDecal` draws it: the texture × colour × (ambient + sun N·L),
-faded out from 100 m over 30 m (`decalFadeDistanceAndInterval`). The newest
-256 stay. Rewritten in `EffectManager::spawnDecal` / `decals()`,
-`decal.vert/.frag`; not done: decals on moving objects, the normal-mapped
-technique.
-
 **Mesh particles.** A MeshParticleSystem's particles are copies of its
 `geometry` (a MeshParticleMesh template: a bundled-mesh file), scaled by
 the size graph, turned by `randomRotation` + `rotationSpeed` (yaw / pitch /
@@ -1175,16 +1243,114 @@ roll), coloured by the colour graph and faded by the transparency graph
 (`psAdditive`). Drawn before the sprites, in the world and the first-person
 pass.
 
-**Lights.** An effect bundle's LightSource children (enabled ones) are
-point lights of `color × intensity`, full up to `attenuationRange1`, gone
-at `attenuationRange2` (the original reads a radial attenuation table over
+**Lights.** LightSource templates (class `0x94c7`; the fields as the
+writer `0x00617030` lists them: lightType `+0x70`, isDynamic `+0x64`,
+affectLightmappedObjects `+0x6d`, affectingType `+0x90`,
+attenuationRange1 / 2 `+0xa0` / `+0xa4`, color `+0xa8`, coneAngle1 / 2
+`+0xd0` / `+0xd4`, flicker `+0xe4` clamped to 0..1 by `0x00616cf0`) are
+read by `effects::lightSourceOf`. Enabled Point and Spot lights are lights
+of `color × intensity`, full up to attenuationRange1, gone at
+attenuationRange2 (the original reads a radial attenuation table over
 distance / range, LightManager_r3x0.fx; a linear ramp here), added to the
-mesh and terrain lighting (`N·L`; the eight nearest the camera). How long
-they live is the rewrite's guess: as long as their bundle's longest
-particle system, fading; attached looping bundles' lights live until
-stopped. Not done: the levels' own light objects and their
-`Object.setLightSourceMask` groups, spot lights and projector textures,
-specular.
+mesh and terrain lighting (`N·L`; the eight nearest the camera). They
+come from two places:
+
+- an effect bundle's LightSource children (explosions, muzzle flashes).
+  The template has no lifetime of its own: none of its setters
+  (`0x00528f5a`..`0x0052b6ea`) is one, so a light lives as its bundle
+  does, which the rewrite takes as the bundle's longest particle system
+  (emit delay + time + life), fading; attached looping bundles' lights
+  live until stopped. Many shipped effect lights are `enabled 0`.
+- the placed objects' template trees: the levels' light bundles
+  (`ambient_small`, `baselight`, `houselight_big`, `BigSpot`,
+  `Lamp_post_point`..., 52 on Highway_Tampa, 266 on Port_Bavaria) and
+  lights carried by vehicles (`as_titan_specular`), placed with their
+  objects each frame (`LevelRenderer::m_objectLights`). Static ones
+  (`isDynamic 0`) are in the lightmaps already, so only unlightmapped
+  surfaces (vehicles, soldiers, unlightmapped statics) take them; a
+  dynamic one lights lightmapped surfaces only with
+  `affectLightmappedObjects 1`.
+
+Spot lights (`lightType Spot`, one shipped template) light within a cone
+about their `direction` (default +z, turned with the object): full inside
+coneAngle1, gone outside coneAngle2, both taken as half angles in degrees
+with a smooth step between (the original looks the falloff up in a
+conical attenuation texture over 1 − cos², `psDx9_SpotLight`). Directional
+lights (the sun) are left to the level lighting.
+
+`Object.setLightSourceMask` (`0x006ed811`; 398 statics on Cerbere_Landing
+set 6, 82 set 4) reaches the object's render object through `0x006f6f90`
+(object `+0x44`, slot `0xe0`); for bundled, skinned and the other mesh
+templates' slot 56 RendDX9 has the empty `0x100bc0b0`, static meshes store
+it (`0x100e54d0`, `+0x2b0`). What reads that store wasn't traced, so the
+masks are kept unread (a mask against affectingType bits would fit the
+data: effect lights are type 1, static lights 0). Not done: projector
+textures, specular, flicker, shadows, the per-mesh light choice
+(`lightManager.maxLightsPer*Mesh`, `lightCullDistance`).
+
+**Non-screen-aligned particles and trails.** A
+NonScreenAlignedParticleSystem's particles are squares lying across the
+system's y axis (its x and z axes; NonScreenAlignedParticles.fx displaces
+each corner by world vectors the CPU gives): water ripples, ground rings.
+A TrailSystem (Trail.fx) leaves a point at emitFrequency while its system
+moves faster than `minTrailVelocity` and keeps doing so as long as an
+anchor carries it; the points, joined in the order they were left, make
+strips of 2 × size across in `numPlanes` planes about the path, each
+vertex faded by the square of its plane's normal against the eye
+(`fadeFactor`), the ends by `fadeInFactor` / `fadeOutFactor` of the life,
+the texture tiled `textureTileFactor` times along it (wrapping) and slid by
+`textureOffsetVelocity`. Both are built on the CPU as world-space
+triangles (`EffectManager::forEachWorldGroup`) and drawn by `particle.vert`
+with a negative size. Frames of an animated texture go by the particle's
+age for these (`animationFrameCount`, `animationFrameCountX`, the frames'
+relative size); the trail's own frame stays the first.
+
+**Rain and snow.** `rainManager.*` (RendDX9 `0x1007e761`..`0x1008009a`;
+Sky.con sets them; Cerbere_Landing snows) — `effects::Weather`:
+particleCount particles in a box of emitRadius about the camera plus
+offset, moving by particleVelocity × particleSpeed and wrapped round the
+box (the original's 32 cells that follow the camera), swaying by
+maxDeviation at angleSpeed degrees a second in 16 groups, faded from
+fadeOutRange of the box to its edge (Rain.fx `vsPoint`: 1 −
+|saturate((|Δ| − range) / (radius − range))|), and drawn added (SrcAlpha,
+One) in particleColor: as points of `min(particleSize × sqrt(1 /
+(scale.x + scale.y × distance)), particleMaxSize)` pixels of the game's
+600-line screen with the level's texture, or with lineDisplay as lines
+lineLength long along the fall. The rewrite keeps at most 8,000 (Aegis
+Station asks for 80,000); the sway's phases and the line width (a pixel)
+are its own.
+
+**Decals.** A material cell's decal template (`MaterialManager.
+setDecalTemplate`; `decal` templates: `decalTextureName`, `size` +
+`randomSize`, `rotation` + `randomRotation` about the normal, `color`, one
+frame of an `animationFrameCount`-frame atlas, `animationFrameCountX`
+across) is left where a projectile hits the terrain, a static object or a
+vehicle, as Decals.fx's `psDecal` draws it: the texture × colour ×
+(ambient + sun N·L), faded out from 100 m over 30 m
+(`decalFadeDistanceAndInterval`). The newest 256 stay. A decal on a
+vehicle is kept in its space and drawn where it is each frame: BF2142.exe's
+object constructor `0x0063c000` asks DecalManager (slot `0x14`, RendDX9
+`0x100e6b70`: a set of 0x40 bytes by `0x101647d0`) for a decal set of the
+object's own when its template's byte `+0xf1` has bit 4 and not `0x18`,
+keeps it at `+0x164` and releases it with the object (`0x0063c210`, slot
+`0x20`); which template property sets that bit wasn't traced, so the
+rewrite gives every vehicle (a body) one. Rewritten in
+`EffectManager::spawnDecal`, `decal.vert/.frag`; not done: the
+normal-mapped technique, clipping decals to the geometry
+(`decalGeomClipAngle`).
+
+**Turning parts.** A vehicle's moving parts (RotationalBundle, Engine,
+Wing: rotors, thrusters, flaps, turrets and the like) are drawn turned by
+their axes' angles (degrees, in their own frame, before their placement:
+`turn × base × parent`, as `Vehicle::updateParts` composes them), which
+`GameWorld::partPose` hands the renderer, the first-person cockpit and
+the attached effects; seat guns' yaw and pitch bundles, seat cameras and
+wheels keep their own poses.
+
+**Dropped kits.** A kit lying on the ground draws its template's
+`geometry.dropGeom` geometry of its mesh (`EU_Kits` / `Pac_kits`: 8 to
+11; the worn kit is `geometry.kit`, hidden here), through the renderer's
+`geometryFor`.
 
 ## Kits on the ground
 
@@ -2056,6 +2222,98 @@ logged-in profile id and a valid CD key (GameSpy pre-authorisation).
 Without an OpenSpy account the rest is tested against a loopback server
 in `tests/NetGameTest.cpp` that speaks these formats.
 
+### The server's side (`bf2142 --host`)
+
+The original can host a game from the same executable (`+dedicated`,
+`+port`, and `+joinServer <address>` for the client's direct join are
+among its command-line options, the table near `0x0050e000`). The rewrite's
+server is `src/Net/GameServer` (the protocol) and `src/Main/HostedGame`
+(the round it serves):
+
+- **Connecting** (`0x00689d30`, `0x00689400`): the protocol and build must
+  match (else refusal 9), the password (0x11), the mod directory (0x24); a
+  full server refuses 0x1e. The client gets a connection id; once it
+  acknowledges (type 4) the server sends the CD-key challenge (event 1,
+  `0x00509cc0`) and takes the response (event 2) and the connection type
+  (event 3, the rate row of `0x00928408`) before the client counts as
+  joined. Pings every 3 s, pongs answered; 30 s of silence drops a client.
+- **Reliable events** go both ways in the same blocks as the client's
+  (`src/Net/EventChannel`: the writer `0x00644bf0`, the reader
+  `0x006447b0`), resent after a loss the notify mask reports.
+- **Moves**: each move index is taken once (the client repeats its last
+  three, `0x00590450`); the move becomes the player's input as `0x005838d0`
+  does (the axes, the trigger bits; the mouse look turns 5° a unit,
+  `0x0058a6d0`).
+- **Joining a round** follows the game server's PostRemote handler
+  (`0x004b0690`): the settings (data block 0), the map list (5) and the
+  level (2) as soon as the client has joined; on its LoadComplete (6/2,
+  `0x004a7c00`) the players (CreatePlayer, its own without the remote bit),
+  every replicated object (CreateObject, one ghost per PlayerControlObject
+  of its tree), the soldiers held (HandlePickup), DatabaseComplete (6/4)
+  and the networkable checksum (6/5); on the echo of 6/4 (`0x004af710`)
+  StartSimulation (6/3) and the game state (0/1), then BeginRound.
+- **Each tick** a ghost block per client: the control-object record of its
+  soldier (or the seat it is in, with the vehicle's ghost), then the
+  players' networkables and the ghosts whose state changed (every ghost
+  again after two seconds), most important first (the client's own) and
+  the rest in turn, up to about 1100 bytes. The rewrite sends each ghost's
+  root group (positions, the orientation quaternion, hit points, control
+  points' flags) and leaves the other groups' masks empty.
+- **Client requests**: SelectKit (`0x0050b010`), the spawn point (6/6), a
+  name (ChangePlayerName, taken only for the sender's own player,
+  `0x0050bb90`; the rewrite's client sends its soldier's name after its
+  CreatePlayer), squads, the commander application, suicide (6/0xc) and
+  chat lines (the StringBlock, sent on to everyone with the sender's id,
+  `0x004a5460`).
+
+Not rewritten: the control-object record's prediction state (mode 3,
+`0x00580cd0`: a recorded bit, a 3-bit history slot, every group of the
+control object in mode 3, whose readers differ from mode 2 for the Soldier
+`0x005fcdb0`, RotationalBundle `0x00602070`, PlayerControlObject
+`0x00605b00`, Engine `0x00609340` and Spring `0x00605320`, then the object's
+own state through its vtable `0x1cc`). The rewrite's server leaves it empty
+and its client takes the server's position, so a joined soldier moves at
+the server's pace rather than predicted. Team changes (6/7) after joining
+aren't taken (the rewrite's round can't move a player between teams), and
+a client that leaves keeps its player in the round for the next one
+(GameWorld has no way to remove players).
+
+### Asking servers directly (QR2) and the LAN search
+
+Each server answers GameSpy's query and reporting protocol 2 on its query
+port (29900). The parser (`0x0071a7d0`) takes datagrams starting `FE FD`,
+then a type and a 4-byte instance key:
+
+- type 0, a query (`0x00719de0`): three key lists (server, player, team: a
+  count, `0xff` for every key, and the key ids) and an optional flags byte
+  (bit 0 asks for split replies, `0x00719b30`). The reply (`0x00719af0` →
+  `0x00719890`) is 0, the key, the server keys' values as zero-terminated
+  strings (an empty one for a missing value, `0x007194c0`), then for player
+  and team keys a big-endian 16-bit count and every player's values. Asked
+  for every key, the server sends names and values in turn and a 0.
+- type 2, an echo: answered with type 5, the key and up to 32 bytes.
+
+The keys are qr2's registered ones (the table at `0x00a08238`): 1
+hostname, 2 gamename, 3 gamever, 4 hostport, 5 mapname, 6 gametype, 7
+gamevariant, 8 numplayers, 9 numteams, 10 maxplayers, 11 gamemode, 12
+teamplay ... 19 password, 20 groupid; player keys from 21 (player_, score_,
+skill_, ping_, team_, deaths_, pid_), team keys 28 and 29.
+
+The menu's LOCAL page lists `serverListLAN`, the server browser manager's
+"lan" browser (made with the others by `0x00469580`; type 0, 200 servers).
+Its search (`0x00467d40` → `0x00715900` → `0x007249c0`) sends `FE FD 02 00
+00 00 00 00` to 255.255.255.255 (`0x0058ccb0`) with SO_BROADCAST on every
+port from 29900 to 29950 (`0x74cc`-`0x74fe`), and every address that
+answers within 2 s (`0x00724440`) is a server, which the browser's query
+engine then asks for its keys. `src/Net/ServerQuery` has both sides; the
+rewrite asks the standard keys among those `0x00467d40` lists (its others
+are the game's own, from 0x35 on, whose names aren't known). `bf2142 --lan
+<address>` sends the search elsewhere (127.0.0.1 finds the servers on this
+machine). The menu has no direct-IP join: `Multiplay.get/setConnectToIpHost`
+and `...Port` exist (the profile's `GSConnectToIpHost`/`Port`, `0x0046c030`
+-`0x0046c120`) but no page of the movie calls them; the original joins by
+address only from the command line (`+joinServer`).
+
 ## Voice chat (BF2VoipServer.dll and Bf2VoipClient)
 
 Three parties talk over UDP. The game server keeps a voice server's player
@@ -2409,19 +2667,62 @@ second click on the same row within half a second runs event 2 as well.
 The game reads the clicked row's cells back (`0x007dd3b0`), including
 cells past the drawn columns (`HudManager::listCell`, `lastListClick`).
 
-The 3D name tags and object icons (friendly names, health bars, vehicle
-and control point icons over the world) are not HUD nodes: BF2142.exe's
-NametagManager (`0x0043ab00`, the templates' `nametag.*` properties at
-`0x00550000`..) lists them and RendDX9.dll's NametagRenderer draws them
-(`0x1016c1e0` the health bars, `0x10168890`.. the icon passes with
-`Shaders/Nametag`, `Menu/Nametag/<team>/miniMap_CP`). Not in yet. The
-HUD's object marker nodes (`createObjectMarkerNode`) are the AA and
-gunship lock-on markers, kept but not drawn.
-
 Every node but a split places its children from its own position: the
 commander screen's tab pictures carry their buttons, labels and lists
 (`CommanderToolsTabSelected` at 3,519 with its button at 0,0), as do the
 transforms.
+
+### Name tags
+
+The 3D name tags and object icons (friendly names, health bars, control
+point icons over the world) are not HUD nodes: RendDX9.dll's
+NametagManager (`dice.hfe.geom.NametagManager`, vtable `0x101d6c80`, its
+frame `0x100f3490`) keeps them and its NametagRenderer draws them
+(`0x1016c1e0` the bars, `0x10168890`.. the icon passes, `Shaders/Nametag`,
+the font `Fonts/BF1942.font`); BF2142.exe only looks the manager up
+(`0x0043ab00`) and hands it object tags (slot `0x30`, `0x100f40d0`, from
+the templates' Nametag component, `0x0063b760`). `src/Main/Nametags`
+rewrites them as HUD quads under the HUD:
+
+- **Players** (`0x100f0e60`, `0x100f0310`): a tag per other player at its
+  soldier's head (0.6 m along its up over its origin, more with distance:
+  `+ min(d × 0.6 × 0.05, 3)`) or over its vehicle (`0.35 × height +
+  0.45`, nametags.vehicleNametagOffsetFactor / Offset), with "  [n/m]" for
+  a vehicle's occupants. Friends: full to 80 m, gone at 120
+  (maxFriendlyDistance), out to 500 m while aimed at (faded in over 0.7 s,
+  out over 1.5 s); down, they fade over 0.6 s (deathFadeOutTime), or 14 s
+  (manDownFadeOutTime) for a local medic. Enemies only while aimed at,
+  after a delay of their distance's share of 300 m (the player cull
+  distance) and gone past 285 m; never while down. Someone in the local
+  player's vehicle has none. Colours by ColorIndex: 1 enemy, 2 team, 3
+  squad (squad members stay on screen at the edge of a circle of 0.65,
+  glueToEdge, with "[d m]"), 4 a call.
+- **Aimed at** (`0x100f0d30`): the crosshair's target, a ray 300 m along
+  the view every 0.5 s (`0x100ef5b0`; every occupant of a vehicle it meets,
+  `0x100f2ec0`), or, looked at every 0.25 s, the tag's point within the
+  0.99999 cone and in sight. The rewrite's ray meets soldiers as 0.6 m
+  spheres and vehicles as 2.5 m ones and asks `GameWorld::lineOfSight`.
+- **The bar** (`ICArmorBar`: `bar_base` under `bar_filler`, filled from
+  texel 1 to 45 of 64, `createBar ICArmorBar 1 45`): a hurt friend's
+  health under half for a local medic (the Assault kit), a damaged
+  vehicle's armour for an engineer.
+- **Control points** (object tags, `0x100f1330`, `0x100ef960`): the
+  templates' `Nametag.*` (showItem, 3dMapIconOffset 0/5/0 on the shipped
+  points, showDistance, teamSpecific, maxDistance / maxEnemyDistance 1200
+  by default), the icon `Menu/Nametag/<Neutral|Pac|EU>/miniMap_CP` 32 × 32
+  with "[d m]" under it, alpha `1 − d / max`.
+- The distance shown changes only by more than 0 / 2 / 5 / 9 m below 25 /
+  250 / 400 m / beyond (`0x100f0be0`).
+
+Guesses: ColorArray's colours (white, red, blue, green, yellow), the
+soldier's origin 1 m over its feet, the vehicle height (4 m; RendDX9 asks
+the render object), the bar's place. Not done: ranks and veteran icons
+(`ICRank`, `ICVeteran`), the radio calls' icons (medic, ammo, repair,
+revive: events 0x33-0x37 within maxCallDistance 150), orders and requests
+(TTOrder / TTRequest), the Titans' and other objects' `3dMapIcon` frames,
+the fog factor on enemies, the spectator's rules. The HUD's object marker
+nodes (`createObjectMarkerNode`) are the AA and gunship lock-on markers,
+kept but not drawn.
 
 ### Map and spawn screen
 
@@ -2942,14 +3243,146 @@ Unlocks are the kits' `ItemContainer` children, one per branch and level
 frag grenade at 7, and the shotgun, defibrillator, mines, C4 and EMP
 grenade at 5. The local player gets the containers of its soldier's chosen
 unlocks ([Soldier stats](#soldier-stats-ranks-and-unlocks)); `--unlock-all`
-unlocks everything. The customise screen's choice between items for the
-same slot isn't in yet.
+unlocks everything. The customise screen's choice (below) gives the
+containers chosen.
 
 Guns without magazines (`ammo.magSize -1`, most vehicle guns) heat up
 instead. Each round adds `heatAddWhenFire`, the heat cools by
 `coolDownPerSec`, and at full heat the gun stops for `overheatPenalty`
 seconds. The HUD shows `PrimaryHeatValue`. `--spawn-screen` dies first, to
 show the spawn screen.
+
+### Kits, the customise screen and field unlocks
+
+The spawn screen's kit buttons (`HudElementsSpawn.con`, kits 0..6) are
+the HUD manager's (`0x0044f1a0` binds them) and `0x0044e650(team)`
+recomputes them on its events (entering the spawn screen, a kit change,
+the armour, an equip), not every frame: `Kit%iShow` (the team has the
+kit, while `KitsShow`), `KitName%iString` (the kit's
+`vehicleHud.hudName`), `KitIcon%iPath` (`vehicleHud.vehicleIcon`),
+`KitWeaponIcon%iPath` (the chosen primary's icon, else the kit weapon's
+`weaponHud.weaponIcon`), `Kit%iAbilityIcon0..6` (the kit's own
+`specialAbilityIcon`s, then the chosen unlocks'), `KitUnlock%iShow` (the
+first branch has unlocks), `KitAltWeaponIcon%iPath` (that branch's
+`altWeaponIcon`, `0x0044a3f0`), `Kit%iSprintAbility` (`0x00449600`: 0.75,
+0.25 in heavy armour, more with the sprint unlock), `Kit%iHeavyArmorShow`,
+`KitUnlockArrow%iShow` (a field unlock waiting, `+0x5f5`), and
+`PlayerKitIcon%iSelectShow` from `spawnManager.setPlayerKit`
+(`0x0079aa50`). The blink alphas (`Kit%iUnlockBlinkAlpha`,
+`UnlockBlinkAlpha`, `FUBlinkAlpha`) are the only per-frame work
+(`0x00448aa0`).
+
+The customise screen is `KitInterface` (constructor `0x00798610`, the
+console methods `0x00776db4`-`0x00777539`; `src/Main/HudMenusKits`). Per
+team and kit it holds five rows of six items (`this+0xb8`, 0x2c each):
+row 0 the primary (the kit's weapons in its primary slot), rows 1-4 the
+branches UB_First, UB_Second, UB_Player and UB_SquadLeader with each
+`ItemContainer` at its `unlockLevel` (the level-15 replacements are left
+out). An item is available when the soldier has it (alpha 1, else 0.3),
+shows its `weaponHud.unlockIcon`, and carries `specialAbilityIcon`,
+`renderedPicture` and `descrString` (else `hudName`). The rebuild
+(`0x00798dd0`) and the display copy (`0x007977a0`) set
+`Kit<row>Item<item>Active/FieldUnlocked/Show/Icon/Alpha`, `KitCustom<row>Icon`,
+`CustomInfoShow`, `HeavyArmorActive` and `HeavyArmor%iActive`,
+`CustomSoldierPicture` (`Ingame/Customization/soldiers/Soldier_<team-1><kit>[1].tga`,
+the 1 for heavy armour, `0x007975e0`), `OpenCloseKitCustomString`
+(`HUD_TEXT_MENU_UNLOCK_OPEN` / `_CLOSE`), `NotAntiVechicleKitChoosen`; the
+information (`0x007981e0`) `KitItemInfoString` with `LargeInfoPic` (row
+0) or `SmallInfoPic` (`DESCRIPTION_ARMOR_MOUSEOVER` and `Armour.tga` for
+the armour), reset to `HUD_TEXT_MENU_CUSTOMIZE_DEFAULT_TEXT`
+(`0x00797530`). `chooseKitSelection -1 <b>` opens it (`0x00799c70`),
+`closeCustomInterface` closes it (`0x00797d30`), `setHeavyArmor` sets the
+player's armour (`0x007976c0`). Choosing: the original takes an item on
+the pointer (`chooseKitCustom`, `0x00798090`) and drops it on a slot
+(`selectDroppedItem` `0x00798cf0` → `0x007986f0`: rows 0, 3 and 4 pick one
+item, rows 1 and 2 share two drop slots); the rewrite's HUD doesn't drag,
+so `chooseKitCustom` puts the item in its own row's slot at once. The
+choice goes to the server when the soldier spawns or the menu closes
+(`0x00799aa0` → SelectKit with the unlocks); the rewrite gives the chosen
+containers to `GameWorld::setUnlocks` then, and the heavy armour picks the
+kit's heavy soldier.
+
+The unlock screen (`UnlockInterface`, `0x007b8e60`-`0x007b9a20`) spends
+field unlocks: points a server grants during a round (player `+0x2d0`)
+that raise a kit's branch for the round (`+0x2d4`; the server's
+`0x004baaf0`, for UB_Player and UB_SquadLeader all four kits).
+`showUnlockInterface 1` opens it only with points (`0x007b95a0`), so
+offline it never opens; its branches' variables (`0x0044a130`) are kept:
+`Kit%iBranch%iUnlockLevel` and `MaxUnlockLevel` (eighths), `Alpha` (0.2
+once the branch is full), `NextUnlockIconPathString`,
+`NextUnlockNameString`, `NextUnlockShow`, `LargePicShow`;
+`setInformationString` / `resetInformationString` (`UnlockInfoString`,
+`UnlockInfoPic`, `HUD_TEXT_MENU_FU_DEFAULT_TEXT`) and `setFieldUnlock`
+(`Kit%iBranch%iSelected`) too. `selectNextUnlock` / `selectUnlockItem`
+(`0x007b8f30`, `0x007b92c0`) make an unlock the soldier has its branch's
+choice.
+
+### Chat, kill messages, VOIP and the map vote
+
+The HUD manager's list data ids (slot `0x214`, `0x007c6d70`): 1, 2 the
+scoreboard, 3 ChatList, 5 and 8 the squad menu, 6, 14, 15 the commander,
+7 the commander's chat, 9, 10 the totals, 11 VoipSquadList, 12 MapList,
+13 PersonalList. Edit boxes by data (slot `0x210`): 1 the chat (at most
+150 characters), 2 the squad name (8), 3 the commander's chat (100);
+`src/Hud` draws them (`createEditNode`, `setEditNode*`) with a caret
+while they have the keys. `src/Main/HudMenusChat`:
+
+- **Say boxes.** c_GISayAll (K), c_GISayTeam (L) and c_GISaySquad (no
+  default key) open the boxes (`0x00755020`: not over a menu; team and
+  squad not as a spectator; squad needs a squad), `enableSay*ChatBox`
+  (`0x007d93e0`-`0x007d95b0`) show `SayAllShow` / `SayTeamShow` /
+  `SaySquadShow` and give edit 1 the keys; the same again closes them
+  (`0x007da200`). Keys (`0x007da320`): 0x20-0x7f are added, Backspace takes
+  one off, Enter sends (`0x007d9640`, `0x007d9900`, `0x007d9b50`: to the
+  server, which echoes it to everyone; offline straight into the list)
+  and closes. While a box is open the soldier gets no input.
+- **ChatList** (the message list class `0x007b6d80`): a line is "§1" +
+  text + "§0", chat "<prefix><name>: <text>" (`0x007b4cd0`; the prefixes
+  `HUD_TEXT_CHAT_TEAM`, `_SQUAD`, `_COMMANDER`, `HUD_CHAT_DEADPREFIX`),
+  coloured by who said it (`0x007b4100`): the commander (0.969, 0.827,
+  0.255), the squad (0.4, 1, 0), the team (0.012, 0.722, 0.949), the
+  enemy (1, 0.392, 0.392), nobody (0.765, 0.729, 0.663). Nine categories
+  each keep 5 s from their newest line; when that runs out their oldest
+  line goes (`0x007b4a40` → `0x007b4800`). No cap on the lines was found.
+- **Kill messages** (`0x00759bf0`): `HUD_HUD_KILLEDBY_KILLS` / `_TEAMKILLS`
+  / `_MYSELF` with `#PLAYERNAME1#`, `#WEAPON#` (the weapon's
+  `weaponHud.hudName` text, a vehicle's `vehicleHud.hudName`) and
+  `#PLAYERNAME2#`, in category 1; the victim's `DeathMessage` is
+  `HUD_CHAT_YOUWEREKILLEDBY` with `#PLAYERNAME#`. The rewrite's local game
+  takes them from the players' kill and death counters (the killer's
+  weapon in hand); a joined game from the server's kill messages
+  (PythonCommand type 100, which the rewrite's host sends too).
+- **PersonalList** (data 13): personal notices, 5 s each.
+- **VoipSquadList** (data 11, `0x007be060` / `0x007be120`): the team's
+  commander, then our squad (the squad leaders for the commander), those
+  talking: `kit_Commander.tga` in (0.4, 0.6, 1) or
+  `mini_Squad_<n>_small.tga` in the squad's green at x 15, the name at 30
+  (`0x007bdd20`); `VoiceOverTalkIconShow` / `VoiceOverCommanderIconShow`
+  while we send. The scoreboard's voice boxes (`Scoreboard.singleClick`
+  → `0x007bc590`, the clicked column's kind: 6 private chat, 7 mute, 8
+  buddy, 10/11 kick vote): a click on a player's box mutes or unmutes
+  him (`checkbox_voipInactive/Talk/Mute.tga`; where the exe draws the box
+  isn't known, the rewrite puts it at the name's end).
+- **MapList** (data 12, LevelsList `0x00796ae0`): a row per map
+  (`0x00796690`): the vote button (`kickbutton_up.tga`, `_down.tga` while
+  a vote runs), `vote_square.tga` on the map voted for, the name with
+  spaces. `levelsList.setVoteMapShow` (`0x00796640`) shows it
+  (`VoteMapSelected`); a click on the first two columns (`0x00796a60` →
+  `0x00573df0`) starts a map vote (the Vote event, kind 1). Offline the
+  only voter carries it: the playlist goes on with that map.
+- **The squad name box** (`SquadMenu.setSquadNameSelect`, `0x007a5300` →
+  `0x007d6420`): edit 2 takes the keys; `createSquad` (`0x007a5ad0`)
+  names the squad with what was typed (else the first free name of
+  `0x00b3df00`) and sends ChangeSquadName.
+- **The commander's zoom** (`Commander.artilleryZoom`, `satelliteZoom`,
+  `uavZoom`: slots `0x370`, `0x378`, `0x380` → `0x398`, `0x007d8e00`):
+  with the asset available, the event 0x24 (CommanderCam: x, the camera's
+  height `+0x2d0`, 80 until the camera template's `height`, z) moves the
+  team's overhead camera there on the server (`0x00510b30` → `0x005f8410`);
+  the field of view doesn't change. `Commander.detailedView` keeps the
+  old position and leaving the commander screen sends it back. The
+  rewrite has no overhead camera object: the commander screen's map
+  centres on the asset and a joined game sends the event.
 
 ## Game scripts
 
@@ -4531,6 +4964,65 @@ load silently as no trees (0x100ae4e0); `ai.init` never fails
 - **Goal spots:** order + U × W × 0.8 − W / 2 on each axis with W twice
   the area's radius (0x10063460, 0x10063de0).
 
+### Helicopters (src/AI/Heli)
+
+The pilots' seats (equipment Helicopter: as_ag, us_ag; TransportHelicopter:
+as_at, eu_at) run AIDLL's 3d patterns with the HeliMoveTo family of
+interpreters (registered in 10020000.c: HeliMoveTo 0x1008e2e0,
+HeliMoveToObject 0x1008e1c0, HeliAimAt 0x1008db80, HeliResetControls
+0x1008da80, HeliMoveAwayFromObject 0x1008d8b0; AirTransportMoveTo
+0x1008cc40 is unused: no shipped template is AirTransport or Plane). The
+sets (AI/AIBehaviours.ai): Helicopter MoveTo (BBPGotoWaypoint3d), Idle
+(BBPIdle3d, the default), Fire (BBPHeliFire3d), Change; TransportHelicopter
+the same without Fire and with BBChangeLandingCraft. No aircraft set has
+Avoid.
+
+- **Inputs** (the ControlInfo adaptor, BF2142.exe vtable 0x009d6b98):
+  PIThrottle (the collective, 0..1 from the AI), PIYaw, PIPitch, PIRoll;
+  they persist between ticks. PIPitch > 0 lowers the nose, PIRoll > 0 dips
+  the right wing, PIYaw > 0 turns right. The rewrite hands PIPitch through
+  `SoldierInput::pitch` and PIRoll as the turn (5° a unit).
+- **Primitives** (100e0000.c; constants AIDLL .rdata 0x1012ad28...):
+  attitude 0x100e4440 (hold forward.y or right.y at a target: clamp((e −
+  rate) / 0.5) with e = clamp(error / 0.02) × scale), brake 0x100e4960
+  (the nose up by 0.3 × sign(v) × min(1, (|v| − deadband) / 5)²), yawTo
+  0x100e4550 (PIYaw = clamp((−1.5 clamp(diff / 30) − yaw rate) / 0.1),
+  headings atan2(−x, z)), holdHeight 0x100e4130 (wanted climb 5 ×
+  clamp(dy / 5) m/s, collective clamp((wanted − v.y) / 2, 0, 1), levelling
+  sign × min(1, e²) terms; airborne once over 5 m), terrainCheck 0x100e4a70
+  (probes every 5 m ahead, 2 + 0.01 s² of them, at least 5: under 5 m of
+  clearance it brakes and climbs, tilted it recovers, a wall it turns from
+  by the side with more room, 12 samples every 22 m), hoverAt 0x100e4fa0.
+- **HeliMoveTo** (0x100e50b0): over the highest probe + margin; within
+  20 m and not far below, hover or brake (deadband 3..5); else turn (over
+  45° off: brake first) and pitch for (1 − 0.9k) × 35 m/s × min(1, d / 50)
+  — a fixed 35 m/s, not Mobile maxSpeed. A margin of 0 lets the collective
+  go (0x1008e406).
+- **BBPGotoWaypoint3d** (0x10067690): no mesh, no path, no strategic
+  waypoints. The goal is read once; the hover point is 25 m over the
+  highest of it and 100 terrain samples 2–30 m round it (0x100674f0); done
+  within 2 m. Not yet airborne the bot first sits 10 s with the collective
+  down (While(10 s) HeliMoveTo(its spot, margin 0)).
+- **BBPIdle3d** (0x1006ab50): on the ground the controls let go; airborne
+  a transport hovers 25 m over its goal (or its spot), a gunship (Armament
+  on the root) flies on 500 m ahead and right.
+- **BBPHeliFire3d** (0x1007f9d0 / 0x1007f180): to the target (margin 25)
+  until within 30 m, then attack runs: away to 150 m (margin 40) and back
+  (margin 50); on the way back, 20 m to maxRange ahead (dot over 0.5) with
+  the line clear, HeliAimAt (0x100e5590: margin 40; too steep, fly on
+  150 m; lined up within 10° turning under 0.1 rad/s, the nose follows the
+  aim with a feed-forward) and the trigger every 60 / round((1 − (1 −
+  skill) 0.8) round(1.5 rpm)) s. Not decoded: the run condition 0x100dd3e0,
+  the aim's lead point (the target's position here), the on-target test
+  0x100dcab0 (here: lined up), BBFire3d's urgency (the ground one's here),
+  BBChangeLandingCraft (BBChange's here).
+- **Measured** (flat ground, `Vehicles_BotPilotsFlyToAPointAndHover`):
+  the gunships fly 156 m to a point 25 m up and stop on it within 1 m; the
+  transports reach it (1.5 m) from 22 m/s and wander round it within 35 m
+  (they brake only within 20 m). In a round (minsk_coop gpm_coop 32, 31
+  bots, 300 s) a PAC bot flew as_ag 2.2 km: 10 s on its pad, a climb to 25
+  m over the ground, the flight to its order, hovering, attack runs.
+
 ### Seat values (0x100d3e70) and Change
 
 A seat's value is health × (k × weapons + move), k 2 for a vehicle seat
@@ -4570,7 +5062,11 @@ soldier under a quarter of its health within 20 m. On foot the current
 value is 1.2 × the soldier's own; in a vehicle 2 × the seat's (250 at the
 driver's seat with others aboard), and the way out is the soldier's own
 value, or 10000 for a wreck or a vehicle more than 4 m off the vehicle
-mesh (0x100880e0). The other seats' factor (0x1006b910): 1 with the
+mesh (0x100880e0), a test 0x1006c520 runs only for a bot object that
+isn't ITAir (its flags' bit 1): a pilot stays in the air. A seat another
+bot reserved is worth nothing to others, but not to the bot sitting in it
+(the rewrite's reading: a passenger heading for the vehicle would
+otherwise turn its driver out). The other seats' factor (0x1006b910): 1 with the
 driver's seat taken; else, for a Mobile root that isn't ITNaval, 0.77 for
 ITGround and 0.5 for ITAir. The AI flags are the template's
 `aiTemplate.addType` bits (BF2142.exe 0x0088fbd0, 0x00882ff1): ITUnit 0,
@@ -5122,9 +5618,8 @@ answers the menu itself; nothing is sent.
   kit, the HUD manager's variables of `0x0044f1a0`): the items of the
   kit's unlocked ItemContainers with a `weaponHud.specialAbilityIcon`
   (`unl_scope_zoom`, `unl_stabilizer`, ...), in the kit's order (their
-  engine setter wasn't traced). The kit customise screen
-  (`kitInterface.*`, `unlockInterface.*`, HudElementsKitsMenu.con and
-  HudElementsUnlockInterface.con) is not in.
+  engine setter wasn't traced). The kit customise screen and
+  the unlock screen are in the [HUD](#kits-the-customise-screen-and-field-unlocks).
 - **Awards:** the menu's award definitions are `awards.con`
   (`menu/external/flashmenu/awards.con`, run at start-up, `0x00460000`'s
   loader; `awards.setData <id>[_<level>] "<type>,<criterion>,<stat
@@ -5134,17 +5629,60 @@ answers the menu itself; nothing is sent.
   `0x1004f770`), and the server decided them (the ranked server's
   `bf2.stats.medal_data`, never shipped with the game); most criteria are
   per round or per weapon, kit and vehicle, which the local store doesn't
-  keep. So no awards are earned offline; the award progress list
-  (SwiffPlayer's `awardProgress`, `0x1005ffc0`, not decompiled as a
-  function) isn't in.
+  keep. So no awards are earned offline. In detail:
+  - `awards.con` holds 126 entries (82 awards: 22 badges in three levels
+    100-121, 20 medals 200-219, 24 ribbons 300-323, 16 pins 400-416).
+    Each criterion is `"<flags>,<critId>,<keys>,<target>"` (parsed by
+    `0x004a4e50` into 0x24-byte records): flag 1 a career criterion (scope
+    2, else 1, within a round), 4 a check mark instead of a bar, 8 whole
+    numbers ("1" for a target 0), 2 never read; the text is
+    `AWARD_CRITERIA_<critId>`; the keys (`;`-separated, a space for none)
+    are the stats server's getplayerinfo.aspx keys whose values add up
+    (`ktt-3`, `wkls-5`, `vtp-12`, `tt`, `cpt`...; `wlr` is wins over
+    losses; a key that is an award id counts 1 when it is held); the
+    target is a float (seconds for the times). `stats::parseAwards`
+    reads them; the names are `AWARD_NAME_<id>[_<level>]`.
+  - The pictures: `images/awards/<badges|medals|ribbons|pins>/<front|
+    perspective|start|eor>/<badge|medal|ribbons|pin>_<view>_<id>[_<level>].png`;
+    the BFHQ awards page shows `_bw` for an award not held
+    (`Profile.hasThisAward`), a badge its level's picture (`_0` locked,
+    `getAwardLevel`); the start page's newest three come from
+    `getLatestAwards(n)` (`0x100506f0`: an Array of `{id, path}`, from the
+    profile's `LocalProfile.setCurrentProfileLatestAwards`, `0x0048d940`),
+    with `HEADER_noawardsavailable` when there are none.
+  - The held awards (SwiffPlayer's 0x50-byte records through the game's
+    vtable `+0x250`/`+0x260`: kind, name, description, id, level, dates)
+    come only from getawardsinfo.aspx (`0x004590a0`, parsed `0x00459d80`:
+    `award`, `level`, `when`, `first`).
+  - The award progress list (`awardProgress`, built by `0x1005fc70`,
+    refreshed by `0x1005fde0`, drawn by `0x1005f1e0`; `setArgs(<id>)`):
+    `HEADER_inaround` and the round's criteria (rows 1-2: the text and the
+    target), `HEADER_global` (row 3) and the career criteria from row 4
+    (the text, `value/target` and `mcProgress.setValue(min(value/target,
+    1))`, or `mcIconCheck` once reached, the value by `0x1005eea0`).
+  - Offline the rewrite answers as the original would without a held
+    award: every award locked, no latest awards, the award progress list
+    from the definitions with the values the local record has (kills,
+    deaths, the score, wins, losses, time played; 0 for the per kit,
+    weapon, vehicle and map keys). The BFHQ pages themselves are online
+    only in the movie (offline its BFHQ button shows "Not available
+    offline"), so offline only the start page's empty latest awards and
+    the end-of-round pages show.
 - **The stats page:** the details tab's category list (`statsTypes`,
   `0x10080cb0`: overview, player, titan mode, teamwork, leadership,
   weapons, vehicles, maps) and the `stats` list (`0x1007f640`, labels from
   `0x1007dfd0`) with "<category> 21". The overview (career points, score,
   time played, wins/losses, best round) and player (score and kills per
   minute, K/D, kills, deaths, per round) rows the store has are listed;
-  the other categories stay empty. The progress tab's chart
-  (`Logic.setActiveDiagram`) is drawn by the game and is not in.
+  the other categories stay empty. The progress tab's chart: its eleven
+  buttons call `Logic.setActiveDiagram(mode[, scale])` (`0x1003c0e0` →
+  the game's vtable `+0x3c4`), and the game draws into the clip's
+  `_isDiagram` (property `0x18`) from `dice.hfe.PlayerProgress`
+  (`0x0045f880`: getplayerprogress.aspx with mode point, score, ttp,
+  kills, spm, role, flag, waccu, wl, twsc or sup and scale game, day,
+  week or month). Not possible offline: the series are the stats
+  server's (their column names weren't found either) and the drawing code
+  behind `+0x3c4` wasn't found; the native is a no-op.
 - **The server's answers** (parsed, not used): `0x005752b0` splits the
   text into tokens at runs of tabs and newlines (no empty fields); it
   starts with `O` (anything else failed), then `H` header and `D` data

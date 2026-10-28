@@ -1,14 +1,19 @@
 #include "MenuBindings.h"
 
+#include "Net/ServerQuery.h"
+
 #include "EndOfRoundBindings.h"
 #include "Input/ControlMap.h"
 #include "Net/Fesl.h"
+#include "Net/ServerQuery.h"
 #include "Net/Socket.h"
 #include "UI/Player/Natives.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -166,6 +171,7 @@ struct MenuBindings::Job {
 	std::atomic<bool> done {false};
 	AccountReply account;
 	std::optional<net::ServerList> servers;
+	std::vector<net::ServerEntry> lan;
 	net::ConnectResult connect;
 	bool flag = false;
 	std::string error;
@@ -204,6 +210,7 @@ MenuServices MenuServices::openSpy()
 	};
 
 	MenuServices services;
+	services.browseLan = [] { return net::browseLan(); };
 	services.checkOnline = []() {
 		net::TcpSocket socket;
 		return socket.connect(net::kFeslHost, net::kFeslPort, 5);
@@ -429,7 +436,33 @@ void MenuBindings::bindProfileStats()
 		});
 	};
 	constant("isVeteran", Value(false));
-	constant("getLatestAwards", Value(""));
+	// Awards (0x1004f690-0x100506f0): the held-award list comes from the
+	// stats server (getawardsinfo.aspx); offline none is held, so every
+	// award shows its locked picture (_bw, a badge's level 0).
+	n.setFunction(kProfile, "getLatestAwards", [](Interpreter& vm, const Args&) {
+		return Value(vm.newArray()); // {id, path} objects of the newest held awards: none
+	});
+	n.setFunction(kProfile, "selectAward", [this](Interpreter& vm, const Args& args) {
+		m_selectedAward = vm.toString(arg(args, 0));
+		return Value(0); // 1 when held
+	});
+	n.setFunction(kProfile, "selectLatestAward", [](Interpreter&, const Args&) { return Value(0); });
+	n.setFunction(kProfile, "hasAward", [](Interpreter&, const Args&) { return Value(0); });
+	n.setFunction(kProfile, "hasThisAward", [](Interpreter&, const Args&) { return Value(0); });
+	n.setFunction(kProfile, "getAwardLevel", [](Interpreter&, const Args&) { return Value(0); });
+	n.setFunction(kProfile, "getAwardFirstDate", [](Interpreter&, const Args&) { return Value(""); });
+	n.setFunction(kProfile, "getAwardLatestDate", [](Interpreter&, const Args&) { return Value(""); });
+	n.setFunction(kProfile, "getAwardName", [this](Interpreter&, const Args&) {
+		// AWARD_NAME_<id>, a badge's by its first level.
+		const std::string id = m_selectedAward;
+		const bool badge = std::atoi(id.c_str()) > 0 && std::atoi(id.c_str()) < 200 && id.find('_') == std::string::npos;
+		return Value(m_natives.localize("AWARD_NAME_" + id + (badge ? "_1" : "")));
+	});
+	n.setFunction(kProfile, "getAwardDescription", [](Interpreter&, const Args&) { return Value(""); });
+	// The progress chart (Logic.setActiveDiagram 0x1003c0e0 → the game's
+	// +0x3c4, drawing getplayerprogress.aspx's series into the clip): no
+	// stats server, no series.
+	n.setFunction(kLogic, "setActiveDiagram", [](Interpreter&, const Args&) { return Value(); });
 	constant("showVeteranPopup", Value(false));
 	constant("showRetailerRankupPopup", Value(false));
 	constant("showRetailerWeaponPopup", Value(false));
@@ -1019,6 +1052,120 @@ void MenuBindings::showServers()
 	m_natives.setListRows("serverList", rows);
 }
 
+void MenuBindings::fillAwardProgress(const std::string& id)
+{
+	// 0x1005fde0: the in-round criteria under HEADER_inaround (rows 1-2,
+	// the text and the target), the career ones under HEADER_global from
+	// row 4 (the text, value/target, a bar or a check mark).
+	const stats::AwardDefinition* award = nullptr;
+	for (const stats::AwardDefinition& a : m_awards) {
+		award = a.id == id ? &a : award;
+	}
+	ui::NativeRegistry::Rows rows;
+	m_awardRows.clear();
+	if (award) {
+		std::vector<const stats::AwardCriterion*> round, global;
+		for (const stats::AwardCriterion& c : award->criteria) {
+			(c.global ? global : round).push_back(&c);
+		}
+		const auto number = [](double v) {
+			char text[32];
+			std::snprintf(text, sizeof(text), v == std::floor(v) ? "%.0f" : "%.2f", v);
+			return std::string(text);
+		};
+		stats::SoldierStats recruit;
+		const stats::SoldierStats* record = soldierStats();
+		const stats::SoldierStats& me = record ? *record : recruit;
+		const size_t count = global.empty() ? round.size() + 1 : global.size() + 4;
+		rows.resize(count, {"", "", ""});
+		m_awardRows.resize(count);
+		if (!round.empty()) {
+			rows[0][0] = m_natives.localize("HEADER_inaround");
+		}
+		for (size_t i = 0; i < round.size() && i < 2; ++i) {
+			rows[i + 1][1] = m_natives.localize("AWARD_CRITERIA_" + std::to_string(round[i]->textId));
+			rows[i + 1][2] = round[i]->target > 0 ? number(round[i]->target) : std::string();
+		}
+		if (!global.empty()) {
+			rows[3][0] = m_natives.localize("HEADER_global");
+		}
+		for (size_t i = 0; i < global.size(); ++i) {
+			const stats::AwardCriterion& c = *global[i];
+			double value = 0;
+			for (const std::string& key : c.keys) {
+				value += std::isdigit(static_cast<unsigned char>(key[0])) ? 0.0 : stats::awardStatValue(me, key); // no award is held
+			}
+			const double target = c.whole && c.target == 0 ? 1 : c.target;
+			rows[i + 4][1] = m_natives.localize("AWARD_CRITERIA_" + std::to_string(c.textId));
+			if (c.check) {
+				m_awardRows[i + 4].check = value >= target;
+			} else {
+				m_awardRows[i + 4].progress = target > 0 ? static_cast<float>(std::min(value / target, 1.0)) : 0;
+				rows[i + 4][2] = number(value) + "/" + number(target);
+			}
+		}
+	}
+	m_natives.setListRows("awardProgress", rows);
+}
+
+const std::vector<MenuBindings::Server>* MenuBindings::serversOf(const std::string& listId) const
+{
+	if (listId == "serverListLAN") {
+		return &m_lanServers;
+	}
+	return isInternetList(listId) ? &m_servers : nullptr;
+}
+
+void MenuBindings::startLanQuery()
+{
+	if (Job::running(m_lanQuery)) {
+		return;
+	}
+	const auto browse = m_services.browseLan;
+	m_lanQuery = Job::start([browse](Job& job) {
+		if (browse) {
+			job.lan = browse();
+		}
+	});
+	log("searching the local network");
+}
+
+bool MenuBindings::finishLanQuery()
+{
+	if (Job::running(m_lanQuery)) {
+		return true;
+	}
+	if (m_lanQuery) {
+		m_lanServers.clear();
+		for (const net::ServerEntry& entry : m_lanQuery->lan) {
+			Server server;
+			server.entry = entry;
+			const int port = fieldNumber(entry, "hostport");
+			server.gamePort = static_cast<uint16_t>(port > 0 ? port : net::kGamePort);
+			m_lanServers.push_back(std::move(server));
+		}
+		log(std::to_string(m_lanServers.size()) + " servers on the local network");
+		m_lanQuery.reset();
+		showLanServers();
+	}
+	return false;
+}
+
+void MenuBindings::showLanServers()
+{
+	std::vector<std::vector<std::string>> rows;
+	for (const Server& server : m_lanServers) {
+		const net::ServerEntry& e = server.entry;
+		std::string map = field(e, "mapname");
+		std::replace(map.begin(), map.end(), '_', ' ');
+		const std::string type = field(e, "gametype");
+		rows.push_back({field(e, "hostname"),
+			std::to_string(fieldNumber(e, "numplayers")) + "/" + std::to_string(fieldNumber(e, "maxplayers")) + " (0)", "",
+			map, type.empty() ? std::string() : m_natives.localize("TEXT_" + type)});
+	}
+	m_natives.setListRows("serverListLAN", rows);
+}
+
 void MenuBindings::bindLists()
 {
 	ui::NativeRegistry& n = m_natives;
@@ -1031,6 +1178,27 @@ void MenuBindings::bindLists()
 		const int shown = std::max(1, list.visibleRows(vm));
 		list.firstIndex = std::clamp(list.firstIndex, 0, std::max(0, count - shown));
 		list.populate(vm);
+		if (list.listId == "awardProgress" && list.holder) {
+			// The rows' check mark and bar (0x1005f1e0).
+			const std::string prefix = list.rowPrefix(vm);
+			for (int i = 0; i < list.visibleRows(vm); ++i) {
+				const Value row = vm.getMember(Value(list.holder), prefix + std::to_string(i));
+				const size_t index = static_cast<size_t>(list.firstIndex + i);
+				const AwardRow state = index < m_awardRows.size() ? m_awardRows[index] : AwardRow {};
+				const Value check = vm.getMember(row, "mcIconCheck");
+				if (check.isObject()) {
+					vm.setMember(check, "_visible", Value(state.check));
+				}
+				const Value bar = vm.getMember(row, "mcProgress");
+				if (bar.isObject()) {
+					vm.setMember(bar, "_visible", Value(state.progress >= 0));
+					if (state.progress >= 0) {
+						vm.callMethod(bar.object(), "setValue", {Value(static_cast<double>(state.progress))});
+					}
+				}
+			}
+			return;
+		}
 		if (!isServerList(list.listId) || !list.holder) {
 			return;
 		}
@@ -1039,12 +1207,13 @@ void MenuBindings::bindLists()
 		for (int i = 0; i < list.visibleRows(vm); ++i) {
 			const Value row = vm.getMember(Value(list.holder), prefix + std::to_string(i));
 			const int index = list.firstIndex + i;
-			const bool server = index >= headers && index < count && isInternetList(list.listId)
-				&& index - headers < static_cast<int>(m_servers.size());
+			const std::vector<Server>* listed = serversOf(list.listId);
+			const bool server = index >= headers && index < count && listed
+				&& index - headers < static_cast<int>(listed->size());
 			if (index < headers) {
 				vm.setMember(row, "isClickable", Value(0));
 			}
-			const net::ServerEntry* e = server ? &m_servers[static_cast<size_t>(index - headers)].entry : nullptr;
+			const net::ServerEntry* e = server ? &(*listed)[static_cast<size_t>(index - headers)].entry : nullptr;
 			const auto visible = [&](const char* name, bool on) {
 				const Value clip = vm.getMember(row, name);
 				if (clip.isObject()) {
@@ -1077,6 +1246,14 @@ void MenuBindings::bindLists()
 		if (start) {
 			list.selectedIndex = -1;
 		}
+		if (list.listId == "serverListLAN") {
+			if (start) {
+				startLanQuery();
+			}
+			const bool busy = finishLanQuery();
+			show(vm, list);
+			return Value(busy);
+		}
 		if (isInternetList(list.listId)) {
 			if (start) {
 				startServerQuery();
@@ -1084,6 +1261,11 @@ void MenuBindings::bindLists()
 			const bool busy = finishServerQuery();
 			show(vm, list);
 			return Value(busy);
+		}
+		if (list.listId == "awardProgress") {
+			fillAwardProgress(list.args.empty() ? std::string() : list.args[0]);
+			show(vm, list);
+			return Value(false);
 		}
 		// The BFHQ details page: its category list ("statsTypes", 0x10080cb0)
 		// and the category's rows ("stats" with "<category> 21").
@@ -1130,14 +1312,15 @@ void MenuBindings::bindLists()
 			vm.setMember(Value(object), "soldierName", Value(list.rows()[static_cast<size_t>(index)].at(0)));
 			return Value(object);
 		}
-		if (!isInternetList(list.listId)) {
+		const std::vector<Server>* listed = serversOf(list.listId);
+		if (!listed) {
 			return Value();
 		}
 		const int server = index - (hasHeaderRows(list.listId) ? kHeaderRows : 0);
-		if (server < 0 || server >= static_cast<int>(m_servers.size())) {
+		if (server < 0 || server >= static_cast<int>(listed->size())) {
 			return Value();
 		}
-		const Server& s = m_servers[static_cast<size_t>(server)];
+		const Server& s = (*listed)[static_cast<size_t>(server)];
 		const net::ServerEntry& e = s.entry;
 		// 0x100743xx: the row object.
 		auto object = vm.newObject();
@@ -1191,9 +1374,11 @@ void MenuBindings::bindMultiplay()
 		m_joinPort = static_cast<uint16_t>(port);
 		// The map the browser listed for it (the level to load).
 		m_joinMap = {};
-		for (const Server& server : m_servers) {
-			if (server.entry.ip == host && server.gamePort == m_joinPort) {
-				m_joinMap = {field(server.entry, "mapname"), field(server.entry, "gametype"), fieldNumber(server.entry, "mapsize")};
+		for (const auto* servers : {&m_servers, &m_lanServers}) {
+			for (const Server& server : *servers) {
+				if (server.entry.ip == host && server.gamePort == m_joinPort) {
+					m_joinMap = {field(server.entry, "mapname"), field(server.entry, "gametype"), fieldNumber(server.entry, "mapsize")};
+				}
 			}
 		}
 		log("joining " + host + ":" + std::to_string(port));
@@ -1286,9 +1471,11 @@ void MenuBindings::bindMultiplay()
 	// The name of the server the info popup shows (its lists got the
 	// address as arguments).
 	n.setFunction(kServerInfo, "getServerName", [this](Interpreter&, const Args&) {
-		for (const Server& server : m_servers) {
-			if (server.entry.ip == m_infoHost) {
-				return Value(field(server.entry, "hostname"));
+		for (const auto* servers : {&m_servers, &m_lanServers}) {
+			for (const Server& server : *servers) {
+				if (server.entry.ip == m_infoHost) {
+					return Value(field(server.entry, "hostname"));
+				}
 			}
 		}
 		return Value("");

@@ -57,6 +57,43 @@ void registerWaterConsoleMethods(Console& console, WaterSettings& settings)
 		[&settings](const ConsoleVec2& v) { settings.scroll = {v.x, v.y}; });
 }
 
+void registerRainConsoleMethods(Console& console, RainSettings& settings)
+{
+	const uint32_t access = ConsoleAccess::Anyone;
+	const auto bindFloat = [&console, access](const char* name, float& value) {
+		bindProperty<float>(console, name, access, [&value] { return value; }, [&value](const float& v) { value = v; });
+	};
+	const auto bindBool = [&console, access](const char* name, bool& value) {
+		bindProperty<bool>(console, name, access, [&value] { return value; }, [&value](const bool& v) { value = v; });
+	};
+	const auto bindVec4 = [&console, access](const char* name, std::array<float, 4>& value) {
+		bindProperty<ConsoleVec4>(console, name, access,
+			[&value] { return ConsoleVec4 {value[0], value[1], value[2], value[3]}; },
+			[&value](const ConsoleVec4& v) { value = {v.x, v.y, v.z, v.w}; });
+	};
+	bindBool("rainManager.enabled", settings.enabled);
+	bindProperty<int>(console, "rainManager.particleCount", access, [&settings] { return settings.particleCount; },
+		[&settings](const int& v) { settings.particleCount = v; });
+	bindVec4("rainManager.pos", settings.pos);
+	bindVec3(console, "rainManager.offset", settings.offset);
+	bindVec3(console, "rainManager.emitRadius", settings.emitRadius);
+	bindVec3(console, "rainManager.particleScale", settings.particleScale);
+	bindVec4("rainManager.particleColor", settings.particleColor);
+	bindFloat("rainManager.particleSize", settings.particleSize);
+	bindFloat("rainManager.particleMaxSize", settings.particleMaxSize);
+	bindVec3(console, "rainManager.particleVelocity", settings.particleVelocity);
+	bindFloat("rainManager.particleSpeed", settings.particleSpeed);
+	bindFloat("rainManager.fadeOutRange", settings.fadeOutRange);
+	bindVec3(console, "rainManager.maxDeviation", settings.maxDeviation);
+	bindProperty<ConsoleVec2>(console, "rainManager.angleSpeed", access,
+		[&settings] { return ConsoleVec2 {settings.angleSpeed[0], settings.angleSpeed[1]}; },
+		[&settings](const ConsoleVec2& v) { settings.angleSpeed = {v.x, v.y}; });
+	bindBool("rainManager.lineDisplay", settings.lineDisplay);
+	bindFloat("rainManager.lineLength", settings.lineLength);
+	bindProperty<std::string>(console, "rainManager.texture", access, [&settings] { return settings.texture; },
+		[&settings](const std::string& v) { settings.texture = v; });
+}
+
 void registerSkyConsoleMethods(Console& console, SkySettings& settings)
 {
 	const uint32_t access = ConsoleAccess::Anyone;

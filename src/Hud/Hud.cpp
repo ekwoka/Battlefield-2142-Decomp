@@ -40,6 +40,7 @@ enum NodeType {
 	kObjectMarker,
 	kList,
 	kMap,
+	kEdit,
 	kOther,
 };
 
@@ -93,6 +94,11 @@ struct HudManager::Node {
 	std::string textVariable;
 	std::string font;
 	int alignment = 0; // 0 left, 1 right, 2 centre
+	// Edit boxes (createEditNode; the HUD manager's edit nodes by data id,
+	// slot 0x210 0x007c6d40): 1 the chat's SayAll, 2 the squad name, 3
+	// the commander's chat.
+	int editData = -1;
+	int editMaxLength = 0;
 	// Bars: textures 0 (empty) and 1 (full), a value variable 0..1.
 	int barType = 3;
 	std::string barTextures[2];
@@ -377,6 +383,16 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 	case kText:
 		drawText(node, x, y, color, out);
 		break;
+	case kEdit: {
+		// The text typed so far and the caret while it has the keys.
+		const auto it = m_editText.find(node.editData);
+		std::string text = it == m_editText.end() ? std::string() : it->second;
+		if (m_editFocus == node.editData) {
+			text += '_';
+		}
+		drawString(node.font, text, x, y, static_cast<float>(node.w), 0, color, out);
+		break;
+	}
 	case kList:
 		drawList(node, x, y, color, out);
 		break;
@@ -695,8 +711,22 @@ void HudManager::drawList(const Node& node, float x, float y, const float color[
 		if (node.listSelectable && static_cast<int>(r) == selected) {
 			fill(node.listSelectColor, x + left, rowY, x + w - right, rowY + node.rowHeight);
 		}
+		const auto rowColors = m_listRowColors.find(node.listData);
+		const bool ownColor = rowColors != m_listRowColors.end() && r < rowColors->second.size();
 		for (size_t i = 0; i < rows[r].size() && i < columns.size(); ++i) {
-			drawCell(node, rows[r][i], x, rowY, columns[i], columnEnd(i), textColor, color[3], out);
+			if (columns[i].iconSize > 0) {
+				if (!rows[r][i].empty()) {
+					const float size = columns[i].iconSize;
+					const float iy = std::floor(rowY + (node.rowHeight - size) * 0.5f);
+					const float ix = x + columns[i].x;
+					const float* tint = ownColor ? rowColors->second[r].data() : nullptr;
+					out.push_back({kTextureRoot + slashes(rows[r][i]), ix, iy, ix + size, iy + size, 0, 0, 1, 1,
+						{tint ? tint[0] : 1.0f, tint ? tint[1] : 1.0f, tint ? tint[2] : 1.0f, color[3]}, 0});
+				}
+				continue;
+			}
+			drawCell(node, rows[r][i], x, rowY, columns[i], columnEnd(i), ownColor ? rowColors->second[r].data() : textColor,
+				color[3], out);
 		}
 		rowY += node.rowHeight + node.rowSpacing;
 	}
@@ -1082,7 +1112,36 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 	create("createHoverNode", kOther);
 	create("createObjectSelectionNode", kOther);
 	create("createTileNode", kOther);
-	create("createEditNode", kOther);
+	create("createEditNode", kEdit);
+	bindMethod(console, "HudBuilder.setEditNodeFont", access, [active](std::string font, int) {
+		if (Node* n = active()) {
+			n->font = font;
+		}
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setEditNodeData", access, [active](int data) {
+		if (Node* n = active()) {
+			n->editData = data;
+		}
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setEditNodeString", access, [](int) { return true; }); // the string slot: the data's
+	bindMethod(console, "HudBuilder.setEditNodeMaxLength", access, [m, active](int length) {
+		if (Node* n = active()) {
+			n->editMaxLength = length;
+			m->setEditMaxLength(n->editData, length);
+		}
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setEditNodeColor", access, [active](float r, float g, float b, float a) {
+		if (Node* n = active()) {
+			n->color[0] = r;
+			n->color[1] = g;
+			n->color[2] = b;
+			n->color[3] = a;
+		}
+		return true;
+	});
 	bindMethod(console, "HudBuilder.createBarNode", access,
 		[m](std::string parent, std::string name, int type, int x, int y, int w, int h) {
 			Node* node = m->create(kBar, parent, name, x, y, w, h);

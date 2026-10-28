@@ -1519,6 +1519,10 @@ TEST(Physics_CollisionDamageAndRoadKill)
 	{
 		Game game(gameDir);
 		const uint32_t car = makeCar(game, {3, 1.2f, 0});
+		// newCar2's torque follows the engine's torque curve at the rpm
+		// (0x0064f2a0: 0.7 of it at full rpm); a stronger engine than the
+		// default 60 brings the car over the run-over speed.
+		game.templates.find("car_engine")->settings()["torque"] = "90";
 		game.start();
 		CHECK(game.world->spawnPlayer(2) != nullptr);
 		const int victim = game.world->addPlayer("Victim", 1, false);

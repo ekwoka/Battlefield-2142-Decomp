@@ -3,14 +3,17 @@ add_library(Net STATIC
 	Fesl.cpp
 	GameClient.cpp
 	GameConnection.cpp
+	EventChannel.cpp
 	GameEvents.cpp
 	GameProtocol.cpp
+	GameServer.cpp
 	GhostLayout.cpp
 	Networkables.cpp
 	RemoteWorld.cpp
 	Md5.cpp
 	GameSpyCrypt.cpp
 	ServerBrowser.cpp
+	ServerQuery.cpp
 	Socket.cpp
 	TlsSocket.cpp
 )

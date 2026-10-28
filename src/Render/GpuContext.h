@@ -99,6 +99,12 @@ struct LightingUniforms {
 	float lightCount[4] {};
 	float lightPosition[kMaxPointLights][4] {};
 	float lightColor[kMaxPointLights][4] {};
+	// Spot lights: the cone's axis (xyz, world space) and the cosine it is
+	// gone outside (w; below -1 for a point light).
+	float lightSpot[kMaxPointLights][4] {};
+	// x: the cosine it is full inside; y: 1 when it lights lightmapped
+	// surfaces too (affectLightmappedObjects).
+	float lightExtra[kMaxPointLights][4] {};
 };
 
 // LightingUniforms::material[2] bits beside the layers.

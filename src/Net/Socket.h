@@ -65,6 +65,10 @@ public:
 	bool bind(uint16_t port, bool loopbackOnly = true);
 	uint16_t port() const { return m_port; }
 	bool sendTo(const Address& to, const std::vector<uint8_t>& data);
+	// Lets the socket send to broadcast addresses (SO_BROADCAST).
+	bool enableBroadcast();
+	// A dotted IPv4 address (or a host name) and a port as an Address.
+	static bool resolve(const std::string& host, uint16_t port, Address& out);
 	// One datagram within `timeoutMilliseconds`: its size, 0 on a timeout, -1 on errors.
 	int receiveFrom(std::vector<uint8_t>& out, Address& from, int timeoutMilliseconds);
 	void close();

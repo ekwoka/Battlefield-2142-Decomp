@@ -226,6 +226,34 @@ bool UdpServerSocket::sendTo(const Address& to, const std::vector<uint8_t>& data
 		== static_cast<int>(data.size());
 }
 
+bool UdpServerSocket::enableBroadcast()
+{
+	int on = 1;
+	return m_socket != -1
+		&& setsockopt(static_cast<Native>(m_socket), SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&on), sizeof(on)) == 0;
+}
+
+bool UdpServerSocket::resolve(const std::string& host, uint16_t port, Address& out)
+{
+	startup();
+	in_addr parsed {};
+	if (inet_pton(AF_INET, host.c_str(), &parsed) == 1) {
+		out.ip = parsed.s_addr;
+	} else {
+		addrinfo hints {};
+		hints.ai_family = AF_INET;
+		hints.ai_socktype = SOCK_DGRAM;
+		addrinfo* found = nullptr;
+		if (getaddrinfo(host.c_str(), nullptr, &hints, &found) != 0 || !found) {
+			return false;
+		}
+		out.ip = reinterpret_cast<sockaddr_in*>(found->ai_addr)->sin_addr.s_addr;
+		freeaddrinfo(found);
+	}
+	out.port = htons(port);
+	return true;
+}
+
 int UdpServerSocket::receiveFrom(std::vector<uint8_t>& out, Address& from, int timeoutMilliseconds)
 {
 	if (m_socket == -1) {

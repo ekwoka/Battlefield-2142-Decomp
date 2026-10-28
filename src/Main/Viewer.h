@@ -46,6 +46,7 @@ struct ViewerOptions {
 		bool toggleCamera = false;      // held: c_PIToggleCameraMode (C)
 		int seat = 0;           // F1..F8 held: that vehicle seat (1-based)
 		int item = 0;            // 1..9 held: the weapon in that kit slot
+		bool sayAll = false, sayTeam = false, saySquad = false; // c_GISayAll (K), c_GISayTeam (L), c_GISaySquad
 	};
 	struct PlayerView {
 		float x = 0, y = 0, z = 0; // the soldier's feet
@@ -83,6 +84,11 @@ struct ViewerOptions {
 		std::string text;     // typed text, UTF-8 (Text)
 	};
 	std::function<void(const MenuInput&)> onMenuInput;
+	// The HUD's text boxes (chat, the squad name): while wantsText says so,
+	// typed text (Text) and pressed keys (Key: Flash codes, Enter 13,
+	// Backspace 8, Esc 27) go to onHudText instead of the game.
+	std::function<bool()> wantsText;
+	std::function<void(const MenuInput&)> onHudText;
 	std::function<bool()> wantsQuit;
 	// A menu over a game: up while this says so (without it, always), and
 	// Esc toggles it through onEscape instead of quitting.
@@ -95,6 +101,9 @@ struct ViewerOptions {
 	// Told where the camera is and looks each frame (position, forward),
 	// before drawing: the game's level-of-detail choices go by it.
 	std::function<void(const float position[3], const float forward[3])> onCamera;
+	// The same camera in full (radians; yaw 0 along +z, pitch up positive),
+	// with the frame's aspect: the 3D name tags project by it.
+	std::function<void(const float position[3], float yaw, float pitch, float fovY, float aspect)> onView;
 	// The player's keys (Settings/Controls.con); without them W/S/A/D,
 	// shift, the mouse buttons, E, Tab, Caps Lock, 1-9 and F1-F8.
 	const input::ControlMaps* controls = nullptr;

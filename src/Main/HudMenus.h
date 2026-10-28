@@ -37,6 +37,7 @@
 #pragma once
 
 #include <functional>
+#include <map>
 #include <set>
 #include <string>
 #include <utility>
@@ -81,6 +82,10 @@ public:
 	void clickSquadList(int player, int row, int column);
 	void clickInviteList(int player, int row);
 
+	// The name typed in the create box (SquadMenu.setSquadNameSelect, edit
+	// data 2): the squad createSquad makes takes it (ChangeSquadName, 0x16).
+	std::function<std::string()> typedName;
+	std::string squadLabel(int team, int squad) const;
 	// A squad's lock (its leader's; the squad manager's slot 0x20).
 	bool locked(int team, int squad) const { return m_locked.count({team, squad}) != 0; }
 	bool createShown() const { return m_createShow; }
@@ -109,6 +114,7 @@ private:
 	std::set<int> m_selected;    // +0x104: invited, or members kept
 	std::set<int> m_unselected;  // +0x110: members to remove
 	std::set<std::pair<int, int>> m_locked;
+	std::map<std::pair<int, int>, std::string> m_names; // squads named in the create box
 };
 
 // The commander screen's tabs (CommanderMenu.toggleSquadTab, toggleMapTab,

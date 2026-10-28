@@ -20,7 +20,7 @@
 //    "drive" mods for wheels behind the engine), the surface's friction and
 //    the cube of the ground normal's height. The force is per tick: times 30
 //    it is an acceleration, averaged over the wheels (0xa8).
-//  - Wheel spin (0x006b73d0): the engine's torque (torque * throttle *
+//  - Wheel spin (0x006b73d0): the engine's torque (the torque curve at the rpm * throttle *
 //    differential * gear ratio * 1.75) and the slope's (0x006b7460, not in
 //    first gear) turn the wheel against friction, engine braking and brake
 //    torques over twice wheelInertia; the tyre's force feeds back on the spin
@@ -77,6 +77,8 @@ struct EngineSettings {
 	float gearChangeTime = 1;  // 0x534
 	// The gear ratio table (0x538): 101 samples and one past the end.
 	std::array<float, 102> gearTable;
+	// The torque curve (0x374): 101 samples and one past the end.
+	std::array<float, 102> torqueCurve;
 	// newCar2.*
 	float minRpm = 1000;                  // 0x760
 	float maxRpm = 4000;                  // 0x764
@@ -106,6 +108,8 @@ struct EngineSettings {
 	void setGearRatios(const std::array<float, 5>& ratios);
 	// Slot 0x1a0 for newCar2 (0x0064f360): gear 0 is reverse.
 	float gearRatio(int gear) const;
+	// The torque at an rpm (0x00629660): the curve at |rpm| (at most 1) x torque.
+	float torqueAt(float rpm) const;
 };
 
 // The tyre slip curve (0x006b7160): |x| / peakAt up to peakAt, then down
@@ -197,6 +201,7 @@ public:
 		float steer = 0;      // degrees (the bundle's rotation, 0x188)
 		float steerRate = 0;  // degrees a second (0x194)
 		float compression = 0; // how far the ground pushes the wheel up
+		bool firstStep = true; // the Spring node's +0x284: no displacement rate on its first move
 		float spin = 0;       // rad/s (Spring 0x27c)
 		float angle = 0;      // radians (0x280)
 		bool contact = false;
@@ -260,7 +265,6 @@ public:
 		int part = -1;
 		int flags = 0;      // engineType's bits: 1 propeller, 2 car, 4 tank, 8 ship, 0x10 rocket, 0x20 helicopter
 		EngineSettings settings;
-		std::array<float, 102> torqueCurve; // 0x374: sampled at |rpm|
 		float noPropellerEffectAtSpeed = 100; // 0x6e4
 		float heatIncrement = -1, coolingFactor = 0; // 0x6ec, 0x6f0
 		float horizontalSpeedMagnifier = 1;   // 0x704
@@ -332,6 +336,35 @@ public:
 		Vec3 bestNormal;
 		bool landed = false;
 	};
+	// A FloatingBundle (the *_NP APCs' floats; object vtable 0x00988240,
+	// update 0x0064f420; its own node PhysicsNode 0x006ca810, vtable
+	// 0x00993c98, made by the template's slot 29 0x00629a90 whatever
+	// hasMobilePhysics says; tick 0x006ca860).
+	struct FloaterPart {
+		int part = -1;
+		float hullHeight = 1;   // template 0x370
+		float maxLift = 10;     // 0x374 (floatMaxLift)
+		float minLift = 10;     // 0x378 (floatMinLift)
+		float input = 0;        // the node's +0x260: minus the bundle's pitch (0x0064f420)
+		float offset = 0;       // +0x264 (grows by +0x268, which nothing sets)
+	};
+	// A LandingGear (object vtable 0x00988768, update 0x00650120; template
+	// defaults 0x0062a3xx: down 30 m / 60 m/s, up 20 m / 70 m/s, no delays).
+	// Its axes run to their limits on an input of +-1: up once it is
+	// gearUpHeight over what is below and at gearUpSpeed, down under
+	// gearDownHeight and gearDownSpeed, each after its delay.
+	struct GearPart {
+		int part = -1;
+		float downHeight = 30, upHeight = 20;  // 0x36c, 0x370
+		float downSpeed = 60, upSpeed = 70;    // 0x374, 0x378
+		float upDelay = 0, downDelay = 0;      // 0x37c, 0x380
+		bool invert = false;                   // 0x384 (invertGear)
+		// State.
+		bool up = false;          // +0x250
+		float upTimer = 0;        // +0x248
+		float downTimer = 0;      // +0x24c
+		int lastTick = -100;      // +0x260
+	};
 	struct Regulator { // the PCO's input regulator (0x005c9ec0)
 		int input = -1;
 		float a = 0, b = 0;
@@ -347,6 +380,8 @@ public:
 	const std::vector<Part>& parts() const { return m_parts; }
 	const std::vector<OldEngine>& engines() const { return m_engines; }
 	const std::vector<WingPart>& wings() const { return m_wings; }
+	const std::vector<FloaterPart>& floaters() const { return m_floaters; }
+	const std::vector<GearPart>& gears() const { return m_gears; }
 	const Legs* legs() const { return m_legs.part >= 0 || m_hasLegs ? &m_legs : nullptr; }
 	// Whether its engines push it through the air (a propeller engine).
 	bool flies() const;
@@ -395,6 +430,9 @@ private:
 	void engineForce(OldEngine& engine, physics::RigidBody& body, const physics::Ground& ground, float gravity);
 	void updateWing(WingPart& wing, physics::RigidBody& body, const physics::Ground& ground, float seconds, float gravity);
 	void updateForce(ForcePart& force, physics::RigidBody& body, float seconds);
+	void updateGear(GearPart& gear, const physics::RigidBody& body, const physics::Ground& ground, float seconds);
+	void updateFloater(FloaterPart& floater, physics::RigidBody& body, const physics::Ground& ground, float seconds,
+		float gravity);
 	void updateLegs(physics::RigidBody& body, const physics::Ground& ground, float seconds);
 	void updateOldWheel(Wheel& wheel, physics::RigidBody& body, const physics::Ground& ground, float seconds, float grip,
 		float gravity);
@@ -424,6 +462,10 @@ private:
 	std::vector<OldEngine> m_engines;
 	std::vector<WingPart> m_wings;
 	std::vector<ForcePart> m_forces;
+	std::vector<FloaterPart> m_floaters;
+	std::vector<GearPart> m_gears;
+	float m_drag = 0;          // the root node's +0x50 (slot 0xfc): the template's drag
+	float m_footprint = 0;     // the root's vehicle-LOD box, size x times size z (+0x24 x +0x2c)
 	Legs m_legs;
 	bool m_hasLegs = false;
 	Regulator m_vertical; // regulateVerticalPos (0x390) on its input (0x374)

@@ -21,6 +21,7 @@
 // login for the profile id and a valid CD key: see docs/engine.md.
 #pragma once
 
+#include "EventChannel.h"
 #include "GameConnection.h"
 #include "GameProtocol.h"
 #include "RemoteWorld.h"
@@ -55,6 +56,11 @@ struct GameClientOptions {
 	uint32_t profileId = 0xffffffff;           // -1 without an account login
 	uint32_t connectionType = 4;               // 0-6 (event 3), an index into the rate settings
 	std::string password;
+	// Our name: sent as ChangePlayerName (0x0c) once the server has made our
+	// player; the server takes it only for the sender's own player
+	// (0x0050bb90 compares the id with the connection's). Empty: the
+	// server's name for us stays.
+	std::string playerName;
 	// The input block's 9-bit value (0x0057b040): the networkable manager's
 	// +0x50 (the rate table's 200 ms) plus 1000 x 0x006b4e70's
 	// interpolation time (from settings at 0x00a83e4c-0x00a83e54, taken as 0).
@@ -84,7 +90,7 @@ public:
 	void setInput(const PlayerInput& input) { m_world.setInput(input); }
 
 	// Requests (queued reliable events).
-	void sendEvent(const GameEvent& event) { m_outgoing.push_back(event); }
+	void sendEvent(const GameEvent& event) { m_events.queue(event); }
 	void selectTeam(int team);                 // PostRemote 6/7 (0x004c1dc0)
 	void selectSpawnGroup(int group);          // PostRemote 6/6 (0x004c1d50)
 	void selectKit(int kit, const std::array<int32_t, 4>& unlocks = {-1, -1, -1, -1}); // SelectKit (0x3f)
@@ -145,13 +151,12 @@ public:
 	size_t packetsSent() const { return m_packetsSent; }
 	size_t eventsReceived() const { return m_eventsReceived; }
 	size_t undecodedPayloads() const { return m_undecoded; }
-	size_t blocksResent() const { return m_blocksResent; }
+	size_t blocksResent() const { return m_events.blocksResent(); }
 	// The last payload whose events couldn't all be decoded (for logging).
 	const std::vector<uint8_t>& lastUndecodedPayload() const { return m_lastUndecoded; }
 
 private:
 	void onPacket(const ConnectedPacket& packet);
-	void onAcknowledge(uint32_t acknowledged, uint32_t mask);
 	void handleEvents(const ReliableEventBlock& block);
 	void deliver(const GameEvent& event);
 	void sendTick();
@@ -163,23 +168,16 @@ private:
 	State m_state = State::Idle;
 	RemoteWorld m_world;
 
-	// Incoming blocks, delivered in sequence order.
-	uint32_t m_nextIncoming = 0;
-	std::map<uint32_t, std::vector<GameEvent>> m_pendingIncoming;
-
-	// Outgoing events and blocks.
-	std::deque<GameEvent> m_outgoing;
-	uint32_t m_nextOutgoing = 0;
-	std::map<uint32_t, ReliableEventBlock> m_unacked;   // by block sequence
-	std::map<uint32_t, uint32_t> m_packetBlock;         // packet sequence -> block sequence
-	std::deque<uint32_t> m_resend;                      // block sequences lost
+	// Our events and the server's, in reliable ordered blocks.
+	EventChannel m_events;
+	bool m_nameSent = false;
 
 	std::deque<PlayerMove> m_moves; // the last three
 	int32_t m_moveIndex = 0;
 	std::chrono::steady_clock::time_point m_lastTick;
 	std::chrono::steady_clock::time_point m_lastPing; // 0x0068f280 pings every 3 s
 
-	size_t m_packetsReceived = 0, m_packetsSent = 0, m_eventsReceived = 0, m_undecoded = 0, m_blocksResent = 0;
+	size_t m_packetsReceived = 0, m_packetsSent = 0, m_eventsReceived = 0, m_undecoded = 0;
 	std::vector<uint8_t> m_lastUndecoded;
 };
 

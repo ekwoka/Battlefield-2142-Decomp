@@ -1,7 +1,9 @@
 // Undergrowth: the random generator, the shipped files and patch generation.
 #include "IO/File/ZipArchive.h"
 #include "TestMain.h"
+#include "Terrain/TerrainData.h"
 #include "Terrain/Undergrowth.h"
+#include "IO/File/FileManager.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -105,4 +107,54 @@ TEST(Undergrowth_GeneratesPatches)
 	ground.materialMap.assign(65 * 65, 2);
 	const terrain::UndergrowthGenerator bare({material}, ground);
 	CHECK(bare.generate(9).instances == 0);
+}
+
+// terraindata.raw walked to its end (RendDX9 0x100b3760 and its callees):
+// the shared LOD index tree, the patches' compiled meshes, the
+// surrounding terrains and the culling tree.
+TEST(TerrainData_PatchMeshesToTheEnd)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) {
+		return;
+	}
+	dice::hfe::io::FileManager files;
+	files.setRootPath(dir);
+	files.addSearchPath("mods/bf2142");
+	files.setMountingAllowed(true);
+	files.mountArchive("Levels/Cerbere_Landing/client.zip", "Levels/Cerbere_Landing/");
+	files.mountArchive("Levels/Cerbere_Landing/server.zip", "Levels/Cerbere_Landing/");
+	std::vector<uint8_t> data;
+	if (!files.readFile("Levels/Cerbere_Landing/terraindata.raw", data)) {
+		std::fprintf(stderr, "  no terraindata.raw\n");
+		return;
+	}
+	std::string error;
+	const auto terrain = dice::hfe::terrain::parseTerrainData(data, &error);
+	CHECK(terrain.has_value());
+	if (!terrain) {
+		return;
+	}
+	CHECK(terrain->meshes.has_value());
+	if (!terrain->meshes) {
+		return;
+	}
+	const auto& m = *terrain->meshes;
+	std::fprintf(stderr, "  %zu patches, %zu shared indices, %d surrounding records, %d culling nodes, heights %.1f..%.1f\n",
+		m.patches.size(), m.indices.size(), m.surroundingRecords, m.cullingNodes, terrain->lowest, terrain->highest);
+	CHECK(m.patches.size() == static_cast<size_t>(terrain->patchesPerSide * terrain->patchesPerSide));
+	CHECK(m.nodes.size() == 85 && m.cullingNodes == 1365);
+	// The root's LODs: every vertex, every second, every fourth.
+	CHECK(m.nodes[0][0][0].count == 98304 && m.nodes[0][1][0].count == 24576 && m.nodes[0][2][0].count == 6144);
+	const size_t side = static_cast<size_t>(terrain->patchSize) + 1;
+	bool rows = true, heights = true;
+	for (const auto& patch : m.patches) {
+		for (size_t i = 0; i < patch.vertices.size(); i += 97) {
+			const auto& v = patch.vertices[i];
+			rows = rows && v.row == i / side && v.column == i % side;
+			const float metres = v.height * terrain->primaryWorldScale[1];
+			heights = heights && metres >= patch.lowest - 1e-3f && metres <= patch.highest + 1e-3f;
+		}
+	}
+	CHECK(rows && heights);
 }

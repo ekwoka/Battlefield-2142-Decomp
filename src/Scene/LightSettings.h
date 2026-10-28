@@ -52,7 +52,30 @@ struct WaterSettings {
 	float animSpeed = 0;
 };
 
+// Rain and snow (RendDX9's rainManager.*, 0x1007e761..0x1008009a; set by
+// the levels' Sky.con, drawn by Shaders/Rain.fx): particles in a box about
+// the camera, points (snow) or lines (rain).
+struct RainSettings {
+	bool enabled = false;
+	int particleCount = 0;
+	std::array<float, 4> pos {};             // where the editor left it
+	std::array<float, 3> offset {0, 10, 0};  // the box's centre from the camera
+	std::array<float, 3> emitRadius {30, 30, 30};
+	std::array<float, 3> particleScale {0, 0.1f, 0}; // the point size's distance terms
+	std::array<float, 4> particleColor {1, 1, 1, 1};
+	float particleSize = 8, particleMaxSize = 12; // pixels
+	std::array<float, 3> particleVelocity {0, -1, 0};
+	float particleSpeed = 1;
+	float fadeOutRange = 0.875f; // of the box, where the fade starts
+	std::array<float, 3> maxDeviation {};
+	std::array<float, 2> angleSpeed {};
+	bool lineDisplay = false;
+	float lineLength = 3;
+	std::string texture; // without ".dds"
+};
+
 void registerLightConsoleMethods(Console& console, LightSettings& settings);
+void registerRainConsoleMethods(Console& console, RainSettings& settings);
 void registerWaterConsoleMethods(Console& console, WaterSettings& settings);
 void registerSkyConsoleMethods(Console& console, SkySettings& settings);
 

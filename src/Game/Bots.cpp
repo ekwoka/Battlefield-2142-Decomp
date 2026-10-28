@@ -689,8 +689,8 @@ BotManager::~BotManager()
 		std::fprintf(stderr, "  %-28s %8.1f\n", name.c_str(), seconds);
 	}
 	for (const auto& [vehicle, metres] : m_driven) {
-		const world::Object* o = m_world.objects().find(vehicle);
-		std::fprintf(stderr, "  driven %-20s %6.0f m\n", o && o->objectTemplate() ? o->objectTemplate()->name().c_str() : "?", metres);
+		const auto name = m_drivenName.find(vehicle);
+		std::fprintf(stderr, "  driven %-20s %6.0f m\n", name != m_drivenName.end() ? name->second.c_str() : "?", metres);
 	}
 }
 
@@ -1183,6 +1183,9 @@ void BotManager::update(float seconds)
 		m_behaviourSeconds[bot.behaviour + (self->vehicle ? (self->driving ? " (driving)" : " (seated)") : "")] += elapsed;
 		if (self->vehicle && self->driving) {
 			m_driven[self->vehicle] += std::sqrt(horizontal2(self->velocity)) * elapsed;
+			if (const world::Object* o = m_world.objects().find(self->vehicle); o && o->objectTemplate()) {
+				m_drivenName[self->vehicle] = o->objectTemplate()->name();
+			}
 		}
 		bot.usedLast = input.use;
 		bot.switchedLast = input.switchSeat > 0;
@@ -1639,7 +1642,10 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		m_tasks.erase(self.id);
 	}
 	const bool driving = self.vehicle && self.driving;
-	if (pattern.rfind("BBPFire", 0) == 0 || pattern == "BBPHeliFire3d") {
+	const std::string equipmentNow = driving ? equipmentOf(self) : std::string();
+	if ((equipmentNow == "Helicopter" || equipmentNow == "TransportHelicopter") && fly(bot, self, input, seconds)) {
+		// A pilot (src/AI/Heli).
+	} else if (pattern.rfind("BBPFire", 0) == 0 || pattern == "BBPHeliFire3d") {
 		fire(bot, self, input, seconds);
 	} else if (pattern.rfind("BBPGotoWaypoint", 0) == 0) {
 		if (bot.hasGoal) {
@@ -1730,6 +1736,179 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		}
 		input.fire = false;
 	}
+}
+
+namespace {
+physics::Vec3 flatUnit(const physics::Vec3& v)
+{
+	const float l = std::sqrt(v.x * v.x + v.z * v.z);
+	return l > 1e-5f ? physics::Vec3 {v.x / l, 0, v.z / l} : physics::Vec3 {0, 0, 1};
+}
+} // namespace
+
+// The pilot's plans (AIDLL; the controllers in src/AI/Heli):
+//  - BBPGotoWaypoint3d (0x10067690): no mesh, no path, no strategic
+//    waypoints: straight to the goal, hovering 25 m over the highest of it
+//    and the terrain round it (0x100674f0), the plan done within 2 m
+//    (0x100cf320 for ITHelicopter). Not yet airborne it first sits 10 s with
+//    the collective down (While(10 s) HeliMoveTo(its own spot, margin 0),
+//    0x100d1c60 / 0x100d19c0: a margin of 0 lets the collective go,
+//    0x1008e406), then climbs.
+//  - BBPIdle3d (0x1006ab50): on the ground the controls let go; airborne
+//    (its flag, or faster than 3 m/s) a transport hovers 25 m over its goal
+//    or its own spot, a gunship (an Armament plug-in on the root) flies on
+//    500 m ahead and to the right at its height.
+//  - BBPHeliFire3d (0x1007f9d0 built by 0x1007f180): HeliMoveToObject to
+//    the target with margin 25 until within 30 m, then attack runs:
+//    HeliMoveAwayFromObject (150 m away, margin 40) and back
+//    (HeliMoveToObject, margin 50 [0x10127688]); on the way back, with the
+//    target between 20 m and the gun's maxRange ahead (dot over 0.5,
+//    0x100d7b30), HeliAimAt (margin 40) and the trigger tapped every 60 /
+//    round((1 - (1 - skill) x 0.8) x round(1.5 x roundsPerMinute)) s while
+//    lined up. Not decoded: the run condition 0x100dd3e0, the aim's lead
+//    point (the target's position here) and the "on target" test
+//    0x100dcab0 (here: the aim lined up).
+// The four inputs are the vehicle's: PIThrottle the collective, PIYaw
+// (strafe), PIRoll (the mouse's x, 5 degrees a unit) and PIPitch.
+bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds)
+{
+	const std::string& pattern = bot.pattern;
+	if (pattern == "BBPChange" || pattern == "BBPChangeLandingCraft") {
+		return false;
+	}
+	const GameWorld::VehicleInfo* vehicle = nullptr;
+	for (const GameWorld::VehicleInfo& v : m_vehicles) {
+		vehicle = v.object == self.vehicle ? &v : vehicle;
+	}
+	if (!vehicle) {
+		return false;
+	}
+	// The plan is made when the behaviour starts (BBPGotoWaypoint3d reads
+	// the goal once, 0x10067690).
+	if (bot.heliPattern != pattern && !pattern.empty()) {
+		bot.heliPattern = pattern;
+		bot.heliPlanned = false;
+		bot.heliRun = 0;
+	}
+	if (bot.heliVehicle != vehicle->object) {
+		bot.heliVehicle = vehicle->object;
+		bot.heli = {};
+		bot.heliPlanned = false;
+		bot.heliWaitUntil = -1;
+		bot.heliLastAt = -1;
+		bot.heliRun = 0;
+	}
+	ai::HeliSense sense;
+	sense.position = toAi(vehicle->position);
+	sense.velocity = toAi(vehicle->velocity);
+	sense.angularVelocity = toAi(vehicle->angularVelocity);
+	sense.forward = toAi(vehicle->forward);
+	sense.right = toAi(vehicle->right);
+	const physics::Vec3& f = vehicle->forward;
+	const physics::Vec3& r = vehicle->right;
+	sense.up = {f.y * r.z - f.z * r.y, f.z * r.x - f.x * r.z, f.x * r.y - f.y * r.x};
+	const float dt = bot.heliLastAt >= 0 ? m_time - bot.heliLastAt : 0.0f;
+	if (dt > 0) {
+		sense.acceleration = toAi((vehicle->velocity - bot.heliLastVelocity) * (1 / dt));
+	}
+	bot.heliLastVelocity = vehicle->velocity;
+	bot.heliLastAt = m_time;
+	sense.terrain = [this](float x, float z) { return m_world.terrainHeight(x, z); };
+	ai::HeliPilot pilot(bot.heli, sense);
+	const physics::Vec3 at = vehicle->position;
+	const float hag = pilot.heightAboveGround();
+	std::string rootAi;
+	if (const world::Object* object = m_world.objects().find(vehicle->object); object && object->objectTemplate()) {
+		rootAi = aiTemplateOf(object->objectTemplate()->name());
+	}
+	const bool armed = m_settings.plugin(rootAi, "Armament") != nullptr;
+	const auto hover = [&](const physics::Vec3& spot) {
+		physics::Vec3 p = spot;
+		p.y = m_world.terrainHeight(spot.x, spot.z) + 25;
+		pilot.flyTo(toAi(p), 25);
+	};
+
+	GameWorld::PlayerInfo target;
+	const bool fighting = pattern == "BBPHeliFire3d" && bot.target >= 0 && m_world.playerInfo(bot.target, target)
+		&& target.alive;
+	if (fighting) {
+		const auto seats = m_world.vehicleSeats(self.vehicle);
+		const std::string gun = seats.empty() ? std::string() : seats[0].weapon;
+		const WeaponAi weapon = weaponAi(gun);
+		const float maxRange = weapon.maxRange > 0 ? weapon.maxRange : 300.0f;
+		physics::Vec3 to = target.position - at;
+		const float dist = std::sqrt(horizontal2(to));
+		input.fire = false;
+		if (bot.heliRun == 0) {
+			pilot.flyTo(toAi(target.position), 25); // HeliMoveToObject, margin 25
+			bot.heliRun = dist < 30 ? 1 : 0;
+		} else if (bot.heliRun == 1) {
+			// HeliMoveAwayFromObject: 100 m on at its own height, margin 40,
+			// until 150 m from the target.
+			physics::Vec3 away = at + flatUnit(vehicle->forward) * 100.0f;
+			pilot.flyTo(toAi(away), 40);
+			bot.heliRun = dist > 150 ? 2 : 1;
+		} else {
+			const float length = std::sqrt(physics::lengthSquared(to));
+			const physics::Vec3 dir = length > 0.01f ? to * (1 / length) : vehicle->forward;
+			if (dist >= 20 && dist <= maxRange && physics::dot(dir, vehicle->forward) > 0.5f
+				&& m_world.lineOfSight(at + vehicle->forward * 4.0f, target.position + physics::Vec3 {0, 1, 0},
+					vehicle->object)) {
+				const bool lined = pilot.aimAt(toAi(dir), 40, bot.heliLastDirY, dt > 0 ? dt : seconds);
+				bot.heliLastDirY = dir.y;
+				const world::ObjectTemplate* g = m_world.templates().find(gun);
+				const float rpm = settingNumber(g, "fire.roundsPerMinute", 60);
+				const float taps = std::round((1 - (1 - m_settings.skill) * 0.8f) * std::round(1.5f * rpm));
+				const float spacing = taps > 0 ? 60.0f / taps : 1.0f;
+				if (lined && m_time - bot.heliTapAt >= spacing) {
+					input.fire = true;
+					bot.heliTapAt = m_time;
+				}
+			} else {
+				pilot.flyTo(toAi(target.position), 50); // HeliMoveToObject, margin 50
+				bot.heliRun = dist < 30 ? 1 : 2;
+			}
+		}
+	} else if (pattern.rfind("BBPGotoWaypoint", 0) == 0 && bot.hasGoal) {
+		if (!bot.heliPlanned) {
+			bot.heliPlanned = true;
+			bot.heliGoal = bot.goal;
+			bot.heliHover = bot.goal;
+			bot.heliHover.y = ai::heliHoverHeight(toAi(bot.goal),
+								  [this](float x, float z) { return m_world.terrainHeight(x, z); })
+				+ 25;
+			bot.heliWaitUntil = bot.heli.airborne ? -1.0f : m_time + 10;
+		}
+		if (m_time < bot.heliWaitUntil) {
+			pilot.flyTo(toAi(at), 0);
+			bot.heli.controls.throttle = 0; // margin 0: the collective let go
+		} else {
+			pilot.flyTo(toAi(bot.heliHover), 25);
+			if (physics::lengthSquared(bot.heliHover - at) < 2.0f * 2.0f) {
+				bot.arbitration.replan = true; // the plan is done
+				bot.heliPlanned = false;
+			}
+		}
+	} else {
+		const bool airborne = bot.heli.airborne || std::sqrt(physics::lengthSquared(vehicle->velocity)) > 3;
+		if (!airborne) {
+			pilot.reset();
+		} else if (armed) {
+			physics::Vec3 ahead = at + (flatUnit(vehicle->forward) + vehicle->right) * 500.0f;
+			ahead.y = at.y;
+			pilot.flyTo(toAi(ahead), 25);
+		} else {
+			hover(bot.hasGoal ? bot.goal : at);
+		}
+	}
+	(void)hag;
+	const ai::HeliControls& c = bot.heli.controls;
+	input.throttle = std::clamp(c.throttle, -1.0f, 1.0f);
+	input.strafe = std::clamp(c.yaw, -1.0f, 1.0f);
+	input.turn = std::clamp(c.roll, -1.0f, 1.0f) * 5.0f;
+	input.hasPitch = true;
+	input.pitch = std::clamp(c.pitch, -1.0f, 1.0f);
+	return true;
 }
 
 // BBPFlee's plan (0x10085fc0, the point from 0x10085de0): Serial of
@@ -2354,24 +2533,20 @@ float BotManager::seatValue(const Bot& bot, const GameWorld::PlayerInfo& self, u
 		}
 		rootAi = seatAi = "";
 	} else {
+		// Reserved by another bot (its whole vehicle, or this seat): not the
+		// seat the bot sits in already (a passenger heading for the
+		// vehicle would otherwise turn its driver out).
+		const bool sitting = self.vehicle == vehicle && self.seat == seat;
 		for (const auto& [id, other] : m_bots) {
-			if (id != self.id && other.vehicleTarget == vehicle && (other.seatTarget < 0 || other.seatTarget == seat)) {
-				return 0; // reserved by another bot (its whole vehicle, or this seat)
+			if (!sitting && id != self.id && other.vehicleTarget == vehicle
+				&& (other.seatTarget < 0 || other.seatTarget == seat)) {
+				return 0;
 			}
 		}
 		const world::Object* object = m_world.objects().find(vehicle);
 		rootAi = object && object->objectTemplate() ? aiTemplateOf(object->objectTemplate()->name()) : "";
 		const std::vector<GameWorld::SeatLayout> seats = const_cast<GameWorld&>(m_world).vehicleSeats(vehicle);
 		const std::vector<int> occupants = m_world.vehicleOccupants(vehicle);
-		// The pilots' seats (equipment Helicopter, TransportHelicopter: AIDLL's
-		// HeliMoveTo and AirTransportMoveTo, not rewritten): no bot
-		// takes them; their gunners' seats stay open.
-		if (static_cast<size_t>(seat) < seats.size() && seat == 0) {
-			if (const AiPlugin* unit = m_settings.plugin(aiTemplateOf(seats[0].name), "Unit");
-				unit && (unit->equipmentType == "Helicopter" || unit->equipmentType == "TransportHelicopter")) {
-				return 0;
-			}
-		}
 		for (const int occupant : occupants) {
 			GameWorld::PlayerInfo aboard;
 			if (occupant >= 0 && m_world.playerInfo(occupant, aboard) && aboard.team != self.team) {
@@ -2638,7 +2813,7 @@ float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 			return 0;
 		}
 		from = own->position;
-		const bool offMesh = m_vehicleNavMesh && m_vehicleNavMesh->findPolygon(toAi(own->position), 4.0f) < 0;
+		bool offMesh = m_vehicleNavMesh && m_vehicleNavMesh->findPolygon(toAi(own->position), 4.0f) < 0;
 		const std::vector<int> occupants = m_world.vehicleOccupants(own->object);
 		const int aboard = static_cast<int>(std::count_if(occupants.begin(), occupants.end(), [](int p) { return p >= 0; }));
 		const bool driving = self.seat == 0;
@@ -2652,6 +2827,12 @@ float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 			const std::vector<GameWorld::SeatLayout> seats = m_world.vehicleSeats(own->object);
 			objectTypes = static_cast<size_t>(self.seat) < seats.size()
 				? m_settings.typeFlags(aiTemplateOf(seats[static_cast<size_t>(self.seat)].name)) : 0;
+		}
+		// 0x1006c520 runs that test (0x100880e0, its 10000) only for an
+		// object that isn't ITAir (the bot object's flags bit 1): a pilot
+		// over the vehicle mesh's reach stays.
+		if (objectTypes & kITAir) {
+			offMesh = false;
 		}
 		chosen = own->object;
 		chosenSeat = self.seat;

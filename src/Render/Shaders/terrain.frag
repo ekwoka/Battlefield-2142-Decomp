@@ -48,7 +48,25 @@ layout(set = 3, binding = 0) uniform Lighting {
 	vec4 lightCount;   // x: point lights in use
 	vec4 lightPosition[8]; // xyz, w: the range where it is gone
 	vec4 lightColor[8];    // rgb, w: the range it is full up to
+	vec4 lightSpot[8];     // a spot light's axis, w: the cosine it is gone
+						   // outside (below -1: a point light)
+	vec4 lightExtra[8];    // x: the cosine it is full inside, y: 1 when
+						   // it lights lightmapped surfaces too
 };
+
+// A light's cone (1 for a point light) and whether it lights this surface
+// (affectLightmappedObjects 0 leaves lightmapped ones to their lightmaps).
+float lightCone(int i, vec3 fromLight)
+{
+	if (material.y > 0.5 && lightExtra[i].y < 0.5) {
+		return 0.0;
+	}
+	if (lightSpot[i].w < -1.0) {
+		return 1.0;
+	}
+	float c = dot(fromLight, lightSpot[i].xyz);
+	return smoothstep(lightSpot[i].w, max(lightExtra[i].x, lightSpot[i].w + 1e-3), c);
+}
 
 layout(set = 3, binding = 1) uniform Detail {
 	vec4 tiling0;      // layers 0-3: repeats across a patch
@@ -116,7 +134,8 @@ void main()
 		float distance = length(toLight);
 		float range1 = lightColor[i].w, range2 = lightPosition[i].w;
 		float attenuation = 1.0 - clamp((distance - range1) / max(range2 - range1, 0.01), 0.0, 1.0);
-		color += albedo * lightColor[i].rgb * attenuation * max(dot(normal, toLight / max(distance, 1e-3)), 0.0);
+		vec3 direction = toLight / max(distance, 1e-3);
+		color += albedo * lightColor[i].rgb * attenuation * lightCone(i, -direction) * max(dot(normal, direction), 0.0);
 	}
 	float fog = clamp(inDepth / fogColor.w, 0.0, 1.0);
 	outColor = vec4(mix(color, fogColor.rgb, fog * fog), 1.0);

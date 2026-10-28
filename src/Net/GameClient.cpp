@@ -9,20 +9,15 @@ namespace dice::hfe::net {
 
 GameClient::GameClient()
 {
-	m_connection.onAcknowledge = [this](uint32_t acknowledged, uint32_t mask) { onAcknowledge(acknowledged, mask); };
+	m_connection.onAcknowledge = [this](uint32_t acknowledged, uint32_t mask) { m_events.acknowledge(acknowledged, mask); };
 }
 
 bool GameClient::connect(const std::string& host, uint16_t port, const GameClientOptions& options)
 {
 	m_options = options;
 	m_world.clear();
-	m_nextIncoming = 0;
-	m_pendingIncoming.clear();
-	m_outgoing.clear();
-	m_nextOutgoing = 0;
-	m_unacked.clear();
-	m_packetBlock.clear();
-	m_resend.clear();
+	m_events.clear();
+	m_nameSent = false;
 	m_moves.clear();
 	m_moveIndex = 0;
 	m_levelsAnswered = 0;
@@ -111,22 +106,7 @@ void GameClient::onPacket(const ConnectedPacket& packet)
 
 void GameClient::handleEvents(const ReliableEventBlock& block)
 {
-	// Blocks are taken in sequence order; ones from before the next
-	// expected are repeats (0x006447b0 keeps a map by sequence).
-	const uint32_t ahead = (block.sequence - m_nextIncoming) & 0x1f;
-	if (ahead >= 16 || m_pendingIncoming.count(block.sequence)) {
-		return;
-	}
-	m_pendingIncoming[block.sequence] = block.events;
-	for (auto it = m_pendingIncoming.find(m_nextIncoming); it != m_pendingIncoming.end();
-		 it = m_pendingIncoming.find(m_nextIncoming)) {
-		const std::vector<GameEvent> events = std::move(it->second);
-		m_pendingIncoming.erase(it);
-		m_nextIncoming = (m_nextIncoming + 1) & 0x1f;
-		for (const GameEvent& event : events) {
-			deliver(event);
-		}
-	}
+	m_events.receive(block, [this](const GameEvent& event) { deliver(event); });
 }
 
 void GameClient::deliver(const GameEvent& event)
@@ -141,11 +121,19 @@ void GameClient::deliver(const GameEvent& event)
 		static std::mt19937 random {std::random_device {}()};
 		const std::string challenge = event.text(0).substr(0, event.text(0).find('\0'));
 		const std::string response = cdKeyResponse(m_options.cdKey, challenge, static_cast<uint32_t>(random()));
-		m_outgoing.push_back(makeChallengeResponse(response, static_cast<uint32_t>(random()), kBuild, m_options.profileId));
-		m_outgoing.push_back(makeConnectionType(m_options.connectionType));
+		m_events.queue(makeChallengeResponse(response, static_cast<uint32_t>(random()), kBuild, m_options.profileId));
+		m_events.queue(makeConnectionType(m_options.connectionType));
 		return;
 	}
 	m_world.apply(event);
+	if (!m_nameSent && !m_options.playerName.empty() && m_world.localPlayer() >= 0) {
+		m_nameSent = true;
+		GameEvent name;
+		name.type = kEvChangePlayerName;
+		name.values = {static_cast<uint32_t>(m_world.localPlayer()) & 0xff};
+		name.bytes = {m_options.playerName.substr(0, 31)};
+		m_events.queue(name);
+	}
 	if (autoAnswer) {
 		answer(event);
 	}
@@ -156,7 +144,7 @@ void GameClient::answer(const GameEvent& event)
 	// 0x004b5eb0: each level block is answered with LoadComplete at once.
 	while (m_levelsAnswered < m_world.levelsReceived()) {
 		++m_levelsAnswered;
-		m_outgoing.push_back(makePostRemote(kMsgNetworkCategory, kNeLoadComplete));
+		m_events.queue(makePostRemote(kMsgNetworkCategory, kNeLoadComplete));
 	}
 	PostRemoteInfo info;
 	if (event.type != kEvPostRemote || !parsePostRemote(event, info) || info.category != kMsgNetworkCategory) {
@@ -164,33 +152,14 @@ void GameClient::answer(const GameEvent& event)
 	}
 	switch (info.id) {
 	case kNeStartSimulation: // 0x004b6630 case 3: the connection type (0x004b48a0)
-		m_outgoing.push_back(makeConnectionType(m_options.connectionType));
+		m_events.queue(makeConnectionType(m_options.connectionType));
 		break;
 	case kNeDatabaseComplete: // case 4: echoed
 	case kNeReset:            // case 5: echoed when the checksum matches (0x00678cf0)
-		m_outgoing.push_back(makePostRemote(kMsgNetworkCategory, info.id));
+		m_events.queue(makePostRemote(kMsgNetworkCategory, info.id));
 		break;
 	default:
 		break;
-	}
-}
-
-void GameClient::onAcknowledge(uint32_t acknowledged, uint32_t mask)
-{
-	for (auto it = m_packetBlock.begin(); it != m_packetBlock.end();) {
-		const uint32_t behind = (acknowledged - it->first) & 0x3f;
-		if (behind >= 32) {
-			++it; // not acknowledged either way yet
-			continue;
-		}
-		const uint32_t blockSequence = it->second;
-		if ((mask >> behind & 1u) != 0) {
-			m_unacked.erase(blockSequence);
-		} else if (m_unacked.count(blockSequence)
-			&& std::find(m_resend.begin(), m_resend.end(), blockSequence) == m_resend.end()) {
-			m_resend.push_back(blockSequence);
-		}
-		it = m_packetBlock.erase(it);
 	}
 }
 
@@ -214,44 +183,16 @@ void GameClient::sendTick()
 		payload.input.moves.assign(m_moves.begin(), m_moves.end());
 	}
 
-	// A lost block goes first, then new events (at most 15 blocks in flight).
-	std::optional<uint32_t> blockSequence;
-	while (!m_resend.empty() && !blockSequence) {
-		const uint32_t sequence = m_resend.front();
-		m_resend.pop_front();
-		const auto it = m_unacked.find(sequence);
-		if (it != m_unacked.end()) {
-			payload.hasEvents = true;
-			payload.events = it->second;
-			payload.events.resent = true;
-			blockSequence = sequence;
-			++m_blocksResent;
-		}
-	}
-	if (!blockSequence && !m_outgoing.empty() && m_unacked.size() < 15) {
-		ReliableEventBlock block;
-		block.sequence = m_nextOutgoing;
-		BitWriter size;
-		while (!m_outgoing.empty() && block.events.size() < 255) {
-			BitWriter one;
-			writeGameEvent(one, m_outgoing.front());
-			if (!block.events.empty() && size.bits() + one.bits() > 8 * 1000) {
-				break;
-			}
-			size.append(one);
-			block.events.push_back(m_outgoing.front());
-			m_outgoing.pop_front();
-		}
-		m_unacked[block.sequence] = block;
-		m_nextOutgoing = (m_nextOutgoing + 1) & 0x1f;
+	// A lost block goes first, then new events (EventChannel).
+	const std::optional<ReliableEventBlock> block = m_events.next();
+	if (block) {
 		payload.hasEvents = true;
-		payload.events = block;
-		blockSequence = block.sequence;
+		payload.events = *block;
 	}
 	if (m_connection.sendData(writeGamePayload(payload))) {
 		++m_packetsSent;
-		if (blockSequence) {
-			m_packetBlock[m_connection.lastSentSequence()] = *blockSequence;
+		if (block) {
+			m_events.sent(m_connection.lastSentSequence(), block->sequence);
 		}
 	}
 }

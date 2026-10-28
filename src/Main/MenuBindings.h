@@ -132,6 +132,10 @@ struct MenuServices {
 	std::function<void()> logoutAccount;
 	// The master server's list.
 	std::function<std::optional<net::ServerList>(std::string* error)> fetchServers;
+	// The LOCAL page's search (serverListLAN; the "lan" browser,
+	// 0x00467d40 -> 0x00715900): the servers on the local network that
+	// answer the query port probe (net/ServerQuery.h).
+	std::function<std::vector<net::ServerEntry>()> browseLan;
 	// Tries a game server's connect handshake (empty: not tried).
 	std::function<net::ConnectResult(const std::string& host, uint16_t port)> connectServer;
 
@@ -148,6 +152,12 @@ public:
 	~MenuBindings();
 	MenuBindings(const MenuBindings&) = delete;
 	MenuBindings& operator=(const MenuBindings&) = delete;
+
+	// The award definitions (Stats.h, from awards.con).
+	void setAwards(std::vector<stats::AwardDefinition> awards) { m_awards = std::move(awards); }
+	const std::vector<stats::AwardDefinition>& awards() const { return m_awards; }
+	// The awardProgress list's rows for an award id (its fillList).
+	void fillAwardProgress(const std::string& id);
 
 	// Called when the menu joins a server (host and game port). The game
 	// takes over from here; the handshake probe (connectServer) runs after.
@@ -313,6 +323,22 @@ private:
 	// Servers.
 	std::shared_ptr<Job> m_query;
 	std::vector<Server> m_servers;
+	// Awards (awards.con): none is held offline (the stats server granted
+	// them); the pages show each locked, with its criteria.
+	std::vector<stats::AwardDefinition> m_awards;
+	std::string m_selectedAward;
+	struct AwardRow {
+		bool check = false;    // mcIconCheck shown
+		float progress = -1;   // mcProgress.setValue, -1 none
+	};
+	std::vector<AwardRow> m_awardRows;
+	std::shared_ptr<Job> m_lanQuery;
+	std::vector<Server> m_lanServers; // the LOCAL page's
+	void startLanQuery();
+	bool finishLanQuery();
+	void showLanServers();
+	// The servers a list shows (nullptr: not a server list we fill).
+	const std::vector<Server>* serversOf(const std::string& listId) const;
 
 	std::string m_infoHost; // the server info popup's server
 
