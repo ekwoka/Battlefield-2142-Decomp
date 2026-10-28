@@ -406,6 +406,9 @@ void CollisionWorld::capsuleEdgeContacts(const Vec3& a, const Vec3& b, float rad
 	const int x1 = static_cast<int>(std::floor((std::max(a.x, b.x) + radius) / kCell));
 	const int z0 = static_cast<int>(std::floor((std::min(a.z, b.z) - radius) / kCell));
 	const int z1 = static_cast<int>(std::floor((std::max(a.z, b.z) + radius) / kCell));
+	// The capsule's box: a triangle wholly outside it can't touch it.
+	const Vec3 low {std::min(a.x, b.x) - radius, std::min(a.y, b.y) - radius, std::min(a.z, b.z) - radius};
+	const Vec3 high {std::max(a.x, b.x) + radius, std::max(a.y, b.y) + radius, std::max(a.z, b.z) + radius};
 	for (int x = x0; x <= x1; ++x) {
 		for (int z = z0; z <= z1; ++z) {
 			const auto cell = m_cells.find(cellKey(x, z));
@@ -418,6 +421,11 @@ void CollisionWorld::capsuleEdgeContacts(const Vec3& a, const Vec3& b, float rad
 					continue;
 				}
 				t.stamp = m_stamp;
+				if (std::max({t.a.x, t.b.x, t.c.x}) < low.x || std::min({t.a.x, t.b.x, t.c.x}) > high.x
+					|| std::max({t.a.y, t.b.y, t.c.y}) < low.y || std::min({t.a.y, t.b.y, t.c.y}) > high.y
+					|| std::max({t.a.z, t.b.z, t.c.z}) < low.z || std::min({t.a.z, t.b.z, t.c.z}) > high.z) {
+					continue;
+				}
 				const Vec3 corners[3] = {t.a, t.b, t.c};
 				bool have = false;
 				float best = 2;
