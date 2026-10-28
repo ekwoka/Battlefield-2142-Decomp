@@ -513,6 +513,7 @@ void GameWorld::tick(float seconds)
 	stepSilos(seconds);
 	stepDrones(seconds);
 	stepSeatCorpses(seconds);
+	stepDroppedKits();
 	stepCorpses(seconds);
 	stepRemoteBodies(seconds);
 	stepAbilities(seconds);
@@ -743,6 +744,7 @@ void GameWorld::holdSpawned(ObjectSpawner& spawner)
 	if (release) {
 		spawner.stopHolding();
 		if (body) {
+			body->held = false;
 			body->body.velocity = {};
 			body->body.angularVelocity = {};
 			sleep(*body);
@@ -763,6 +765,9 @@ void GameWorld::holdSpawned(ObjectSpawner& spawner)
 		body->body.torque = {};
 		body->body.impulse = {};
 		body->body.angularImpulse = {};
+		// Its node's motion stopped (slot 0x148): no step and no mover until
+		// it is let go; its engines still run (stepPhysics).
+		body->held = true;
 	}
 }
 
@@ -1881,6 +1886,13 @@ void GameWorld::stepProjectiles(float seconds)
 				facing.rows = {side, up, physics::cross(side, up)};
 				m_effects.spawn(cell->effectTemplates[0], hit.point, facing);
 			}
+			// Its decal (the cell's decal template) on the terrain or a static
+			// object; none on vehicles or soldiers.
+			if (cell && !hitBody && !cell->decalTemplates.empty() && !cell->decalTemplates[0].empty()
+				&& std::none_of(m_players.begin(), m_players.end(),
+					[hitObject](const auto& player) { return hitObject != 0 && player->object == hitObject; })) {
+				m_effects.spawnDecal(cell->decalTemplates[0], hit.point, hit.normal);
+			}
 			if (m_impacts.size() > 64) {
 				m_impacts.erase(m_impacts.begin());
 			}
@@ -2825,58 +2837,8 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	player.body.yawDegrees = facing;
 	player.control.reset();
 	player.body.world = &m_collision;
-	// The kit's rifle (EU_Assault / Pac_Assault).
-	// What the kit carries, by slot.
-	if (kitTemplate) {
-		for (const world::ChildTemplate& child : kitTemplate->children()) {
-			const world::ObjectTemplate* item = m_templates.find(child.name);
-			const int slot = item && item->typeName() == "GenericFireArm" ? integer(*item, "itemIndex", 0) : 0;
-			if (slot > 0) {
-				player.carried.push_back({item->name(), slot, nullptr});
-				if (item == primary) {
-					player.inHand = static_cast<int>(player.carried.size()) - 1;
-				}
-			}
-		}
-		// Unlocked items, in free slots.
-		for (const world::ChildTemplate& child : kitTemplate->children()) {
-			const world::ObjectTemplate* container = m_templates.find(child.name);
-			if (!container || container->typeName() != "ItemContainer"
-				|| (!player.allUnlocked
-					&& std::find(player.unlocked.begin(), player.unlocked.end(), container->name()) == player.unlocked.end())) {
-				continue;
-			}
-			// An unlock's Ability component: its increasedRepairAbility
-			// goes to the player when above 0 (0x005706b0), the last one
-			// taken winning.
-			if (const float modifier = number(*container, "ability.increasedRepairAbility", 0); modifier > 0) {
-				player.abilityModifier = modifier;
-			}
-			for (const world::ChildTemplate& inner : container->children()) {
-				const world::ObjectTemplate* item = m_templates.find(inner.name);
-				const int slot = item && item->typeName() == "GenericFireArm" ? integer(*item, "itemIndex", 0) : 0;
-				const bool taken = std::any_of(player.carried.begin(), player.carried.end(),
-					[slot](const Player::Carried& c) { return c.slot == slot; });
-				if (slot > 0 && !taken) {
-					player.carried.push_back({item->name(), slot, nullptr});
-				}
-			}
-		}
-		std::stable_sort(player.carried.begin(), player.carried.end(),
-			[](const Player::Carried& a, const Player::Carried& b) { return a.slot < b.slot; });
-		for (size_t i = 0; i < player.carried.size(); ++i) {
-			if (primary && player.carried[i].name == primary->name()) {
-				player.inHand = static_cast<int>(i);
-			}
-		}
-	}
-	if (world::ObjectTemplate* rifle = primary) {
-		player.weaponTemplate = rifle->name();
-		const FireArmSettings settings = FireArmSettings::fromTemplate(*rifle);
-		player.projectile = projectileFor(settings.projectileTemplate);
-		player.weapon = std::make_unique<FireArm>(settings);
-		weaponTraits(player, *rifle);
-	}
+	// The kit's rifle (EU_Assault / Pac_Assault) and what else it carries.
+	fillKit(player, kitTemplate, primary);
 	// The ground's material is not known yet: material 0 ("Default") on both sides.
 	if (m_materials) {
 		player.body.friction = m_materials->friction(0, 0);
@@ -2951,6 +2913,65 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	return created;
 }
 
+// What a kit carries, by slot, with its primary in hand (a new kit: the
+// spawn's, or a revive's that finds none on the ground).
+void GameWorld::fillKit(Player& player, world::ObjectTemplate* kitTemplate, world::ObjectTemplate* primary)
+{
+	player.carried.clear();
+	player.inHand = -1;
+	// What the kit carries, by slot.
+	if (kitTemplate) {
+		for (const world::ChildTemplate& child : kitTemplate->children()) {
+			const world::ObjectTemplate* item = m_templates.find(child.name);
+			const int slot = item && item->typeName() == "GenericFireArm" ? integer(*item, "itemIndex", 0) : 0;
+			if (slot > 0) {
+				player.carried.push_back({item->name(), slot, nullptr});
+				if (item == primary) {
+					player.inHand = static_cast<int>(player.carried.size()) - 1;
+				}
+			}
+		}
+		// Unlocked items, in free slots.
+		for (const world::ChildTemplate& child : kitTemplate->children()) {
+			const world::ObjectTemplate* container = m_templates.find(child.name);
+			if (!container || container->typeName() != "ItemContainer"
+				|| (!player.allUnlocked
+					&& std::find(player.unlocked.begin(), player.unlocked.end(), container->name()) == player.unlocked.end())) {
+				continue;
+			}
+			// An unlock's Ability component: its increasedRepairAbility
+			// goes to the player when above 0 (0x005706b0), the last one
+			// taken winning.
+			if (const float modifier = number(*container, "ability.increasedRepairAbility", 0); modifier > 0) {
+				player.abilityModifier = modifier;
+			}
+			for (const world::ChildTemplate& inner : container->children()) {
+				const world::ObjectTemplate* item = m_templates.find(inner.name);
+				const int slot = item && item->typeName() == "GenericFireArm" ? integer(*item, "itemIndex", 0) : 0;
+				const bool taken = std::any_of(player.carried.begin(), player.carried.end(),
+					[slot](const Player::Carried& c) { return c.slot == slot; });
+				if (slot > 0 && !taken) {
+					player.carried.push_back({item->name(), slot, nullptr});
+				}
+			}
+		}
+		std::stable_sort(player.carried.begin(), player.carried.end(),
+			[](const Player::Carried& a, const Player::Carried& b) { return a.slot < b.slot; });
+		for (size_t i = 0; i < player.carried.size(); ++i) {
+			if (primary && player.carried[i].name == primary->name()) {
+				player.inHand = static_cast<int>(i);
+			}
+		}
+	}
+	if (world::ObjectTemplate* rifle = primary) {
+		player.weaponTemplate = rifle->name();
+		const FireArmSettings settings = FireArmSettings::fromTemplate(*rifle);
+		player.projectile = projectileFor(settings.projectileTemplate);
+		player.weapon = std::make_unique<FireArm>(settings);
+		weaponTraits(player, *rifle);
+	}
+}
+
 // A soldier's death: the scripts hear PlayerKilled (victim, attacker,
 // weapon, assists, the victim's soldier) and PlayerDeath (victim, soldier);
 // the kit and the weapon go, the body lies as a ragdoll while man down,
@@ -2980,9 +3001,6 @@ void GameWorld::kill(Player& victim, Player* attacker, uint32_t weapon)
 							  attacker ? ScriptValue::player(attacker->id) : ScriptValue::none(),
 							  weapon ? ScriptValue::object(weapon) : ScriptValue::none(), ScriptValue::makeList({}),
 							  ScriptValue::object(soldier)});
-	if (victim.kitObject) {
-		raise("DropKit", {ScriptValue::player(victim.id), ScriptValue::object(victim.kitObject)});
-	}
 	// Killed in a seat of a vehicle that still stands (the seat's "occupant
 	// died" exit, interface 0xc4c5 slot 10 -> 0x005cea00 with died = 1):
 	// the seat's animation system plays its "die" trigger (0x008b9790; the
@@ -3049,6 +3067,13 @@ void GameWorld::kill(Player& victim, Player* attacker, uint32_t weapon)
 		}
 	}
 	const bool onFoot = !victim.vehicle;
+	// The kit falls where the soldier lies (0x00589890, Kits.cpp); killed
+	// in a seat it goes with the body.
+	if (onFoot || thrown) {
+		dropKit(victim);
+	} else if (victim.kitObject) {
+		raise("DropKit", {ScriptValue::player(victim.id), ScriptValue::object(victim.kitObject)});
+	}
 	victim.alive = false;
 	victim.vehicle = 0;
 	victim.seat = -1;
@@ -3567,15 +3592,33 @@ void GameWorld::revive(Player& victim, Player* medic, float restoreHitPoints)
 		hitPoints = std::min(hitPoints, number(*t, "armor.maxHitPoints", 0));
 	}
 	victim.body.velocity = {};
-	if (world::ObjectTemplate* kit = m_templates.find(victim.kitTemplate.empty() ? (victim.team == 1 ? "Pac_Assault" : "EU_Assault") : victim.kitTemplate)) {
-		if (world::Object* worn = m_objects.create(kit, body->position(), body->rotation())) {
-			worn->setHidden(true);
-			victim.kitObject = worn->id();
+	// The revived soldier's kit (its event 0x19, 0x00587b90): the closest
+	// on the ground within 10 m (his own, as a rule), else a new one of the
+	// player's choice (0x004bfcc0).
+	if (!pickUpClosestKit(victim, 10.0f)) {
+		world::ObjectTemplate* kit = m_templates.find(
+			victim.kitTemplate.empty() ? (victim.team == 1 ? "Pac_Assault" : "EU_Assault") : victim.kitTemplate);
+		if (kit) {
+			if (world::Object* worn = m_objects.create(kit, body->position(), body->rotation())) {
+				worn->setHidden(true);
+				victim.kitObject = worn->id();
+			}
+			world::ObjectTemplate* primary = nullptr;
+			for (const world::ChildTemplate& child : kit->children()) {
+				world::ObjectTemplate* item = m_templates.find(child.name);
+				if (item && item->typeName() == "GenericFireArm" && integer(*item, "itemIndex", 0) == 3) {
+					primary = item;
+					break;
+				}
+			}
+			fillKit(victim, kit, primary);
+			victim.battery = 0;
+			raise("PickupKit", {ScriptValue::player(victim.id), ScriptValue::object(victim.kitObject)});
 		}
-	}
-	if (world::ObjectTemplate* inHand = m_templates.find(victim.weaponTemplate)) {
-		if (world::Object* held = m_objects.create(inHand, body->position(), body->rotation())) {
-			victim.weaponObject = held->id();
+		if (world::ObjectTemplate* inHand = m_templates.find(victim.weaponTemplate)) {
+			if (world::Object* held = m_objects.create(inHand, body->position(), body->rotation())) {
+				victim.weaponObject = held->id();
+			}
 		}
 	}
 	raise("PlayerRevived", {ScriptValue::player(victim.id), medic ? ScriptValue::player(medic->id) : ScriptValue::none()});
@@ -4199,7 +4242,17 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 				const float scale = vehicleObject
 					? driverInputScale(body->empLevel, hitPoints(body->object), *vehicleObject->objectTemplate())
 					: 1.0f;
-				body->vehicle->setInput({input.throttle * scale, input.strafe * scale});
+				// The land and air maps: the mouse's x is PIRoll and its y
+				// PIPitch (a tick's look over 5 degrees, as PIMouseLook's
+				// units), A/D PIYaw, W/S PIThrottle, Z PICrouch.
+				VehicleInput driven;
+				driven.throttle = input.throttle * scale;
+				driven.steer = input.strafe * scale;
+				driven.roll = std::clamp(input.turn / 5.0f, -1.0f, 1.0f) * scale;
+				driven.pitch = std::clamp(-(input.aimPitch - player.lastLookPitch) / 5.0f, -1.0f, 1.0f) * scale;
+				driven.crouch = input.pose == SoldierPose::Crouch ? 1.0f : 0.0f;
+				driven.sprint = input.sprint;
+				body->vehicle->setInput(driven);
 			} else if (body->wreckTime < 0 && player.seat != 0 && input.altFire && launchPod(player.id)) {
 				return; // a pod seat's alternate fire (Titans.cpp): off in a drop pod
 			} else if (body->wreckTime < 0 && (player.seat != 0 || !body->vehicle)) {
@@ -4684,6 +4737,26 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 		return known->second;
 	}
 	VehicleLayout& layout = m_layouts[vehicle.name()];
+	// seatInformation is optional: a vehicle that names no seat (eu_tank,
+	// as_tank, the walkers, the APCs, as_ag) has a seat at each
+	// PlayerControlObject of its tree, at its place; one that names any (the
+	// Titans' gun hubs, the transports) has those alone.
+	const std::function<bool(const world::ObjectTemplate&, int)> namesSeats = [&](const world::ObjectTemplate& t, int depth) {
+		if (depth > 12) {
+			return false;
+		}
+		if (t.typeName() == "PlayerControlObject" && t.settings().count("seatInformation")) {
+			return true;
+		}
+		for (const world::ChildTemplate& child : t.children()) {
+			const world::ObjectTemplate* c = m_templates.find(child.name);
+			if (c && namesSeats(*c, depth + 1)) {
+				return true;
+			}
+		}
+		return false;
+	};
+	const bool named = namesSeats(vehicle, 0);
 	// Depth first from the root; `seat` is the seat whose subtree this is.
 	// Each child sits at its offset turned by its parents' rotations, and
 	// adds its own rotation (as Vehicle::fromTemplate places the wheels).
@@ -4694,15 +4767,20 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 			}
 			const auto& settings = t.settings();
 			const auto info = settings.find("seatInformation");
-			if (t.typeName() == "PlayerControlObject" && info != settings.end()) {
+			if (t.typeName() == "PlayerControlObject" && (info != settings.end() || !named)) {
 				SeatLayout added;
 				added.name = t.name();
-				char name[128] = {};
-				char position[64] = {};
-				char rotation[64] = {};
-				std::sscanf(info->second.c_str(), "%127s %63s %63s", name, position, rotation);
-				added.position = at + turn.transform(parseVec3(position));
-				added.rotation = parseVec3(rotation);
+				if (info != settings.end()) {
+					char name[128] = {};
+					char position[64] = {};
+					char rotation[64] = {};
+					std::sscanf(info->second.c_str(), "%127s %63s %63s", name, position, rotation);
+					added.position = at + turn.transform(parseVec3(position));
+					added.rotation = parseVec3(rotation);
+				} else {
+					added.position = at;
+					added.rotation = turn.yawPitchRoll();
+				}
 				const auto animation = settings.find("seatAnimationSystem");
 				if (animation != settings.end()) {
 					added.animationSystem = animation->second;
@@ -5021,8 +5099,10 @@ void GameWorld::stepAbilities(float seconds)
 		// (kit +0x31c, setter 0x0056cd90) up to 1, in the soldier's
 		// update (0x0058d350).
 		if (player.alive && player.battery >= 0) {
-			const world::ObjectTemplate* kit = m_templates.find(
-				player.kitTemplate.empty() ? (player.team == 1 ? "Pac_Assault" : "EU_Assault") : player.kitTemplate);
+			const world::Object* worn = player.kitObject ? m_objects.find(player.kitObject) : nullptr;
+			const world::ObjectTemplate* kit = worn && worn->objectTemplate() ? worn->objectTemplate()
+				: m_templates.find(player.kitTemplate.empty() ? (player.team == 1 ? "Pac_Assault" : "EU_Assault")
+																: player.kitTemplate);
 			const float rate = kit ? number(*kit, "abilityRestoreRate", 0) : 0;
 			player.battery = std::min(1.0f, player.battery + rate * seconds);
 		}
@@ -5182,6 +5262,10 @@ void GameWorld::enterOrLeaveVehicle(Player& player, world::Object& soldier)
 		seatPlayer(player, *nearest, freeSeat);
 		soldier.setHidden(true);
 		raise("EnterVehicle", {ScriptValue::player(player.id), ScriptValue::object(nearest->object)});
+	} else if (m_time - player.kitTimeStamp > 2.0) {
+		// No vehicle takes him: the closest kit on the ground within 3 m
+		// (0x004bda00 -> pickUpClosestKit, Kits.cpp).
+		pickUpClosestKit(player, 3.0f);
 	}
 }
 
@@ -5594,13 +5678,20 @@ void GameWorld::addBodies()
 		rigid.gravityModifier = number(*t, "gravityModifier", 1);
 		body.vehicle = Vehicle::fromTemplate(*t, m_templates, mesh);
 		if (body.vehicle) {
-			// Each wheel's part radius: its geometry's vehicle LOD's (slot 0x50).
-			for (const Vehicle::Wheel& wheel : body.vehicle->wheels()) {
+			// Each wheel's part radius: its geometry's vehicle LOD's (slot 0x50),
+			// and its material (its first face's, through mapMaterial).
+			const auto& wheels = body.vehicle->wheels();
+			for (size_t w = 0; w < wheels.size(); ++w) {
+				const Vehicle::Wheel& wheel = wheels[w];
 				float radius = std::fabs(wheel.radius);
 				if (wheel.collisionPart >= 0 && static_cast<size_t>(wheel.collisionPart) < mesh->geometries.size()) {
 					for (const auto& part : physics::collisionParts(*mesh, static_cast<size_t>(wheel.collisionPart))) {
 						if (const physics::CollisionLod* lod = physics::collisionLodFor(*mesh, part, 1)) {
 							radius = physics::boxRadius(lod->boundsMin, lod->boundsMax);
+							if (!lod->faces.empty()) {
+								const uint32_t index = lod->faces.front().material;
+								body.vehicle->setWheelMaterial(w, index < materials.size() ? materials[index] : index);
+							}
 						}
 					}
 				}
@@ -5629,6 +5720,20 @@ void GameWorld::stepPhysics(float seconds)
 		if (std::any_of(it->occupants.begin(), it->occupants.end(), [](int p) { return p >= 0; })) {
 			it->occupiedAt = m_time;
 		}
+		if (it->held) {
+			// Held by its spawner: the engines turn (the hold lets go at 0.1),
+			// the forces go nowhere.
+			if (it->vehicle) {
+				it->vehicle->setOccupied(
+					std::any_of(it->occupants.begin(), it->occupants.end(), [](int p) { return p >= 0; }));
+				it->vehicle->tick(body, m_ground, seconds, 0.8f);
+			}
+			body.velocity = body.angularVelocity = body.acceleration = body.torque = {};
+			body.impulse = body.angularImpulse = body.frictionAcceleration = body.frictionTorque = {};
+			body.frictionCount = 0;
+			++it;
+			continue;
+		}
 		if (it->vehicle && asleep(*it)) {
 			// The engine wakes its node (0x0064e920): a throttle or the
 			// engine still turning.
@@ -5641,18 +5746,33 @@ void GameWorld::stepPhysics(float seconds)
 			++it; // neither steps nor collides (0x006c9060, 0x006dd0b0)
 			continue;
 		}
+		const bool legs = it->vehicle && it->vehicle->legs();
 		if (it->vehicle) {
 			// The terrain's material under the vehicle (the level's material
-			// map) against material 0.
+			// map) against material 0; the other models' wheels against their
+			// parts' materials (the hover tanks' air cushions, 4351, multiply).
 			const uint32_t ground = m_ground.material ? m_ground.material(body.position.x, body.position.z) : 0;
 			const float grip = m_materials ? m_materials->friction(0, ground) : 0.8f;
+			const auto& wheels = it->vehicle->wheels();
+			for (size_t w = 0; w < wheels.size(); ++w) {
+				if (!wheels[w].newCar2 && wheels[w].material && m_materials) {
+					it->vehicle->setWheelGrip(w, m_materials->friction(wheels[w].material, ground));
+				}
+			}
+			it->vehicle->setOccupied(
+				std::any_of(it->occupants.begin(), it->occupants.end(), [](int p) { return p >= 0; }));
 			it->vehicle->tick(body, m_ground, seconds, grip);
 		}
 		it->lastPosition = body.position;
 		physics::applyDrag(body, it->drag, it->mass, it->dragModifier, it->boxMax - it->boxMin, it->submerged);
 		body.step(seconds);
+		if (legs) {
+			// A walker's response is its legs' (MechLegs 0xc432), not the
+			// hull's points.
+			it->vehicle->legsRespond(body, m_ground, seconds);
+		}
 		// collisionGroups bit 0: no ground (0x006b9260's start).
-		if (!(it->collisionGroups & 1)) {
+		if (!(it->collisionGroups & 1) && !legs) {
 			// Each contact (0x006b9260): the collision event while |v|^2 is
 			// over handleCollisionSpeed (compared unsquared, as the original
 			// does) and the contact effect from handleCollisionSpeed^2 on,
@@ -5688,6 +5808,26 @@ void GameWorld::stepPhysics(float seconds)
 			continue;
 		}
 		b.response.solve(b.body);
+		// A body thrown out of the world (a non-finite or absurd state) is
+		// stopped where it last was sane rather than carried on.
+		const auto sane = [](const physics::Vec3& v, float limit) {
+			return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z) && std::fabs(v.x) < limit
+				&& std::fabs(v.y) < limit && std::fabs(v.z) < limit;
+		};
+		if (!sane(b.body.position, 1e5f) || !sane(b.body.velocity, 1e4f) || !sane(b.body.angularVelocity, 1e4f)) {
+			if (!m_reportedBlowUp) {
+				m_reportedBlowUp = true;
+				std::fprintf(stderr, "physics: %s left the world (position %g %g %g)\n",
+					object->objectTemplate() ? object->objectTemplate()->name().c_str() : "?", b.body.position.x,
+					b.body.position.y, b.body.position.z);
+			}
+			b.body.position = b.lastPosition;
+			if (!sane(b.body.position, 1e5f)) {
+				b.body.position = {object->position().x, object->position().y, object->position().z};
+			}
+			b.body.velocity = b.body.angularVelocity = {};
+			b.body.rotation = sane(b.body.rotation.rows[0], 2) && sane(b.body.rotation.rows[1], 2) ? b.body.rotation : physics::Mat3 {};
+		}
 		playContactEffects(b);
 		object->setPosition({b.body.position.x, b.body.position.y, b.body.position.z});
 		const physics::Vec3 angles = b.body.rotation.yawPitchRoll();

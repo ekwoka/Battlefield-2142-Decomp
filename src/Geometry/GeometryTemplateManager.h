@@ -10,6 +10,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace dice::hfe {
 class Console;
@@ -29,6 +30,13 @@ struct GeometryTemplate {
 	// texture coordinates scroll by this per second (RaShaderBMadditive.fx:
 	// frac(GlobalTime * simpleUVTranslation); template +0x26c/+0x270).
 	float simpleUVTranslation[2] = {0, 0};
+	// A MeshParticleMesh (the meshes MeshParticleSystems emit; bundled-mesh
+	// files).
+	bool meshParticle = false;
+	// GeometryTemplate.setSubGeometryLodDistance <geometry> <lod> <distance>
+	// (RendDX9 0x1007303a): how far each LOD of a geometry is drawn; 0 or
+	// missing for unset.
+	std::vector<std::vector<float>> lodDistances;
 };
 
 class GeometryTemplateManager {

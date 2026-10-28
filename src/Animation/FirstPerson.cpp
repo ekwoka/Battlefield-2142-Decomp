@@ -154,13 +154,17 @@ std::vector<float> RecoilSettings::graph() const
 	// 0x005dd890.
 	const int n = std::max(graphFrameCount, 0);
 	std::vector<float> curve(static_cast<size_t>(n));
+	// pow(i + 1, e) / sum x -total, taken as pow((i + 1) / n, e) over its
+	// own sum: the same curve, without overflowing for a large exponent
+	// (eu_sni's), which made it inf x 0.
 	float sum = 0;
 	for (int i = 0; i < n; ++i) {
-		sum += std::pow(static_cast<float>(i + 1), graphExponent);
+		sum += std::pow(static_cast<float>(i + 1) / static_cast<float>(n), graphExponent);
 	}
-	const float scale = sum != 0 ? -1.0f / (sum / graphTotalMovement) : 0.0f;
+	const float scale = sum != 0 && std::isfinite(sum) ? -graphTotalMovement / sum : 0.0f;
 	for (int i = 0; i < n; ++i) {
-		curve[static_cast<size_t>(i)] = std::pow(static_cast<float>(i + 1), graphExponent) * scale;
+		const float v = std::pow(static_cast<float>(i + 1) / static_cast<float>(n), graphExponent) * scale;
+		curve[static_cast<size_t>(i)] = std::isfinite(v) ? v : 0.0f;
 	}
 	if (!goBackOnRecoil || n == 0) {
 		return curve;

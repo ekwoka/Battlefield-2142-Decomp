@@ -117,6 +117,9 @@ struct HudManager::Node {
 	float scrollbarWidth = 0;  // 0x24 (setListNodeScrollbar <width> <margin>)
 	float scrollbarMargin = 1; // 0xf8
 	bool listOutline = false;  // setListNodeOutline (the data's 0x20)
+	// setListNodeConCmd <event> <command>: 1 a click on a row, 2 a double
+	// click (the squad menu's SquadMenu.singleClickNew / doubleClickNew).
+	std::vector<std::pair<int, std::string>> listCommands;
 	// Maps: where the mini and the big map go (from the screen's centre).
 	float miniPos[2] = {245, -291}, miniSize[2] = {146, 146};
 	float maxiPos[2] = {-122, -271}, maxiSize[2] = {512, 512};
@@ -256,6 +259,8 @@ std::vector<HudQuad> HudManager::frame(float seconds)
 {
 	std::vector<HudQuad> quads;
 	m_buttonHits.clear();
+	m_listHits.clear();
+	m_clock += seconds;
 	for (m_pass = 0; m_pass < 2; ++m_pass) {
 		m_numbers["affectedbyempshow"] = static_cast<float>(m_pass);
 		m_numbers["updateallenabled"] = static_cast<float>(1 - m_pass);
@@ -384,8 +389,11 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 	default:
 		break;
 	}
-	// Splits pass their origin on; positioned nodes give their own.
-	const bool positioned = node.type == kTransform || node.type == kTransformList || node.parent == nullptr;
+	// Splits pass their origin on; positioned nodes give their own (every
+	// other kind: the commander screen's tab pictures place their buttons,
+	// labels and lists, e.g. CommanderToolsTabSelected at 3,519 with its
+	// button at 0,0).
+	const bool positioned = node.type != kSplit || node.parent == nullptr;
 	const size_t parentStart = m_parentStart;
 	m_parentStart = out.size();
 	for (Node* child : node.children) {
@@ -581,6 +589,16 @@ void HudManager::drawCompass(const Node& node, float x, float y, const float col
 
 void HudManager::setList(int data, std::vector<std::vector<std::string>> rows) { m_lists[data] = std::move(rows); }
 
+std::string HudManager::listCell(int data, int row, int column) const
+{
+	const auto it = m_lists.find(data);
+	if (it == m_lists.end() || row < 0 || row >= static_cast<int>(it->second.size()) || column < 0) {
+		return {};
+	}
+	const auto& cells = it->second[static_cast<size_t>(row)];
+	return column < static_cast<int>(cells.size()) ? cells[static_cast<size_t>(column)] : std::string();
+}
+
 void HudManager::setListColumns(int data, std::vector<ListColumn> columns) { m_listColumns[data] = std::move(columns); }
 
 void HudManager::setListTextColor(int data, float r, float g, float b, float a) { m_listTextColors[data] = {r, g, b, a}; }
@@ -667,6 +685,13 @@ void HudManager::drawList(const Node& node, float x, float y, const float color[
 	float rowY = y + top + node.rowSpacing;
 	const float lastRow = y + h - bottom - node.rowHeight;
 	for (size_t r = 0; r < rows.size() && rowY <= lastRow; ++r, ++shown) {
+		if (!node.listCommands.empty() && color[3] > 0) {
+			ListHit hit {x + left, rowY, x + w - right, rowY + node.rowHeight, &node, static_cast<int>(r), {}};
+			for (const ListColumn& column : columns) {
+				hit.columns.push_back(x + column.x);
+			}
+			m_listHits.push_back(std::move(hit));
+		}
 		if (node.listSelectable && static_cast<int>(r) == selected) {
 			fill(node.listSelectColor, x + left, rowY, x + w - right, rowY + node.rowHeight);
 		}
@@ -792,6 +817,37 @@ void HudManager::setMap(const std::string& texture, float originX, float originZ
 // release (event 3) commands. True when a button took it.
 bool HudManager::click(float x, float y)
 {
+	// A list's row (Bf2NewListBoxNode's click, 0x007dd3b0 reads its cells):
+	// the row is selected, the column under the pointer kept (the list's
+	// +0xc, which the squad menu switches on), and the list's commands run:
+	// event 1, then 2 when the same row was clicked within half a second.
+	for (auto it = m_listHits.rbegin(); it != m_listHits.rend(); ++it) {
+		if (x < it->x0 || x > it->x1 || y < it->y0 || y > it->y1) {
+			continue;
+		}
+		const int data = it->node->listData;
+		// The column whose left edge is the nearest one left of the pointer.
+		int column = 0;
+		for (size_t i = 0; i < it->columns.size(); ++i) {
+			if (x >= it->columns[i] && it->columns[i] > it->columns[static_cast<size_t>(column)]) {
+				column = static_cast<int>(i);
+			}
+		}
+		const bool twice = m_listClick.data == data && m_listClick.row == it->row && m_clock - m_listClickTime < 0.5f;
+		m_listClick = {data, it->row, column};
+		m_listClickTime = m_clock;
+		m_listSelection[data] = it->row;
+		if (m_run) {
+			for (int event : twice ? std::initializer_list<int> {1, 2} : std::initializer_list<int> {1}) {
+				for (const auto& [when, command] : it->node->listCommands) {
+					if (when == event) {
+						m_run(command);
+					}
+				}
+			}
+		}
+		return true;
+	}
 	for (auto it = m_buttonHits.rbegin(); it != m_buttonHits.rend(); ++it) {
 		if (x < it->x0 || x > it->x1 || y < it->y0 || y > it->y1) {
 			continue;
@@ -1152,6 +1208,12 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 	bindMethod(console, "HudBuilder.setListNodeData", access, [active](int data) {
 		if (Node* n = active()) {
 			n->listData = data;
+		}
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setListNodeConCmd", access, [active](int event, std::string command) {
+		if (Node* n = active()) {
+			n->listCommands.emplace_back(event, command);
 		}
 		return true;
 	});

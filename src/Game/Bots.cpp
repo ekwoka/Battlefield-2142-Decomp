@@ -2363,6 +2363,15 @@ float BotManager::seatValue(const Bot& bot, const GameWorld::PlayerInfo& self, u
 		rootAi = object && object->objectTemplate() ? aiTemplateOf(object->objectTemplate()->name()) : "";
 		const std::vector<GameWorld::SeatLayout> seats = const_cast<GameWorld&>(m_world).vehicleSeats(vehicle);
 		const std::vector<int> occupants = m_world.vehicleOccupants(vehicle);
+		// The pilots' seats (equipment Helicopter, TransportHelicopter: AIDLL's
+		// HeliMoveTo and AirTransportMoveTo, not rewritten): no bot
+		// takes them; their gunners' seats stay open.
+		if (static_cast<size_t>(seat) < seats.size() && seat == 0) {
+			if (const AiPlugin* unit = m_settings.plugin(aiTemplateOf(seats[0].name), "Unit");
+				unit && (unit->equipmentType == "Helicopter" || unit->equipmentType == "TransportHelicopter")) {
+				return 0;
+			}
+		}
 		for (const int occupant : occupants) {
 			GameWorld::PlayerInfo aboard;
 			if (occupant >= 0 && m_world.playerInfo(occupant, aboard) && aboard.team != self.team) {

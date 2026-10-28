@@ -1138,6 +1138,8 @@ TEST(Bots_CerbereLanding)
 	}
 	CHECK(moved >= 6);
 	CHECK(fired > 0);
+	// Nothing thrown out of the world on the way (finite, within 100 km).
+	CHECK(world.objectsOutOfWorld().empty());
 }
 
 // The same round among the level's static objects (houses, walls, rocks,

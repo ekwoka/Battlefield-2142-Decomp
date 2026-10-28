@@ -45,6 +45,11 @@ public:
 	// spawners spawn for its owner), -1 for none.
 	int controlPointId() const { return m_controlPointId; }
 	void setControlPointId(int id) { m_controlPointId = id; }
+	// "Object.isOvergrowth" (0x006ed5bb): a tree of the level's overgrowth
+	// (OvergrowthCollision.con), drawn with its "<geometry>_lod" mesh at
+	// a distance.
+	bool isOvergrowth() const { return m_overgrowth; }
+	void setOvergrowth(bool on) { m_overgrowth = on; }
 	// Destroyed objects stay until removed (wrecks).
 	bool destroyed() const { return m_destroyed; }
 	void setDestroyed(bool destroyed) { m_destroyed = destroyed; }
@@ -65,6 +70,7 @@ private:
 	std::string m_mesh;
 	int m_team = 0;
 	int m_controlPointId = -1;
+	bool m_overgrowth = false;
 	bool m_destroyed = false;
 	bool m_hidden = false;
 	float m_fade = 1;

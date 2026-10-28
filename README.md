@@ -139,6 +139,7 @@ build/native/src/Main/bf2142 --game "source/Battlefield 2142" \
 # (dying first; while dead, click a spawn icon on the map to pick it)
 #   --scoreboard
 #   --spawn-screen
+#   --commander-screen          (take command of the team and open its screen)
 # the Flash main menu (no level needed): a window, or a screenshot after 10 s
 #   bf2142 --game "source/Battlefield 2142" --menu --view
 #   bf2142 --game "source/Battlefield 2142" --menu --screenshot menu.png

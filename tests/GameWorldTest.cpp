@@ -1667,3 +1667,67 @@ TEST(GameWorld_RecoilKicksTheAim)
 		CHECK(std::fabs(range.world->aimPitchOf(me) - 5) < 1e-4f);
 	}
 }
+
+TEST(GameWorld_DroppedKitsArePickedUpAndTimeOut)
+{
+	// A dead soldier's kit falls where he lay (0x00589890: the ray straight
+	// down) with its weapons; the use key picks the closest within 3 m up
+	// (0x004bda00 -> 0x004bcd80), dropping the taker's own; a kit lies
+	// timeToLiveAfterDeath (30 s by default, 0x00570080) and goes.
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	world::ObjectTemplate* lmg = range.templates.create("GenericFireArm", "eu_lmg");
+	lmg->settings()["itemIndex"] = "3";
+	lmg->settings()["projectileTemplate"] = "bullet";
+	lmg->settings()["ammo.magSize"] = "100";
+	range.templates.create("Kit", "EU_Assault")->children().push_back({"eu_ar_rifle", {}, {}});
+	world::ObjectTemplate* support = range.templates.create("Kit", "EU_Support");
+	support->children().push_back({"eu_lmg", {}, {}});
+	support->settings()["timeToLiveAfterDeath"] = "5";
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int bot = range.world->addPlayer("Mate", 2, true);
+	range.world->setKit(bot, "EU_Support", "");
+	CHECK(range.world->spawnSoldier(bot));
+	game::GameWorld::PlayerInfo info, me;
+	range.world->playerInfo(range.world->localPlayer(), me);
+	range.world->setSoldierPosition(range.world->playerInfo(bot, info) ? info.soldier : 0,
+		me.position + physics::Vec3 {0, 0, 2.0f});
+	range.world->playerInfo(bot, info);
+	const uint32_t botKit = info.kit;
+	CHECK(botKit != 0 && range.objects.find(botKit)->hidden());
+	range.world->setSpawnTime(60);
+	range.world->setHitPoints(info.soldier, 0);
+	range.world->tick(1 / 30.0f);
+	// On the ground under him, visible, with the scripts told.
+	CHECK(range.world->droppedKits() == std::vector<uint32_t> {botKit} && range.world->isDroppedKit(botKit));
+	CHECK(!range.objects.find(botKit)->hidden() && std::abs(range.objects.find(botKit)->position().y) < 1e-3f);
+	CHECK(range.count("DropKit") == 1);
+	// Use: no vehicle about, so the kit 2 m off is taken; the assault kit
+	// goes down in its place, and the light machine gun is in hand.
+	const auto held = [&] { return range.objects.find(range.world->playerWeaponObject())->objectTemplate()->name(); };
+	CHECK(held() == "eu_ar_rifle");
+	range.world->playerInfo(range.world->localPlayer(), me);
+	const uint32_t ownKit = me.kit;
+	game::SoldierInput use;
+	use.use = true;
+	range.world->setPlayerInput(use);
+	range.world->tick(1 / 30.0f);
+	range.world->setPlayerInput({});
+	range.world->tick(1 / 30.0f);
+	range.world->playerInfo(range.world->localPlayer(), me);
+	CHECK(me.kit == botKit && held() == "eu_lmg" && range.world->playerWeapon()->roundsInMag() == 100);
+	CHECK(range.objects.find(botKit)->hidden() && range.count("PickupKit") >= 3 && range.count("DropKit") == 2);
+	CHECK(range.world->droppedKits() == std::vector<uint32_t> {ownKit});
+	// Within 2 s of a pick-up, use takes nothing (the time stamp).
+	range.world->setPlayerInput(use);
+	range.world->tick(1 / 30.0f);
+	range.world->setPlayerInput({});
+	range.world->playerInfo(range.world->localPlayer(), me);
+	CHECK(me.kit == botKit);
+	// The assault kit (30 s) is gone after its time on the ground.
+	for (int i = 0; i < 30 * 31; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->droppedKits().empty() && !range.objects.find(ownKit));
+}

@@ -211,3 +211,78 @@ TEST(Effects_ObjectBundlesStartAndStopAsTheOriginal)
 	objects.update({}, manager);
 	CHECK(!manager.emitting(9) && objects.tracked() == 0);
 }
+
+TEST(Effects_DecalsLightsAndMeshParticles)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "EffectBundle");
+	templates.registerType(2, "SpriteParticleSystem");
+	templates.registerType(3, "MeshParticleSystem");
+	templates.registerType(4, "LightSource");
+	templates.registerType(5, "Decal");
+	// A decal template: a 2 x 2 atlas, one of its four frames at random.
+	world::ObjectTemplate* hole = templates.create("Decal", "S_Decal_Concreate");
+	hole->settings()["size"] = "0.175";
+	hole->settings()["randomSize"] = "0";
+	hole->settings()["decalTextureName"] = "objects\\effects\\decals\\textures\\Decal_concreate01_c";
+	hole->settings()["randomRotation"] = "360";
+	hole->settings()["animationEnable"] = "1";
+	hole->settings()["animationFrameCount"] = "4";
+	hole->settings()["animationFrameCountX"] = "2";
+	hole->settings()["setAnimationFrameWidthRelative"] = "0.5";
+	hole->settings()["setAnimationFrameHeightRelative"] = "0.5";
+	hole->settings()["animationRandomizedStartFrame"] = "1";
+	effects::EffectManager manager(templates);
+	CHECK(manager.spawnDecal("S_Decal_Concreate", {1, 2, 3}, {0, 0, -2}));
+	CHECK(!manager.spawnDecal("missing", {}, {0, 1, 0}));
+	CHECK(manager.decals().size() == 1);
+	const effects::Decal& decal = manager.decals()[0];
+	CHECK(decal.texture == "objects/effects/decals/textures/Decal_concreate01_c" && decal.size == 0.175f);
+	CHECK(decal.normal.z == -1 && std::fabs(physics::dot(decal.tangent, decal.normal)) < 1e-5f);
+	CHECK(decal.frame[2] - decal.frame[0] == 0.5f && decal.frame[3] - decal.frame[1] == 0.5f);
+	for (size_t i = 0; i < effects::EffectManager::kMaxDecals + 10; ++i) {
+		manager.spawnDecal("S_Decal_Concreate", {static_cast<float>(i), 0, 0}, {0, 1, 0});
+	}
+	CHECK(manager.decals().size() == effects::EffectManager::kMaxDecals);
+	CHECK(manager.decals().back().position.x == effects::EffectManager::kMaxDecals + 9); // the oldest went
+
+	// A bundle with a mesh particle system and a light: the light lives as
+	// long as the bundle's systems, fading.
+	world::ObjectTemplate* spike = templates.create("MeshParticleSystem", "mp_spike");
+	spike->settings()["emitFrequency"] = "100";
+	spike->settings()["emitTime"] = "0.1";
+	spike->settings()["timeToLive"] = "0.5";
+	spike->settings()["randomRotation"] = "0/0/90";
+	spike->setGeometry("mp_smokespike");
+	world::ObjectTemplate* light = templates.create("LightSource", "flash");
+	light->settings()["color"] = "2/1/0.5";
+	light->settings()["intensity"] = "2";
+	light->settings()["attenuationRange1"] = "2";
+	light->settings()["attenuationRange2"] = "5";
+	world::ObjectTemplate* off = templates.create("LightSource", "off");
+	off->settings()["enabled"] = "0";
+	world::ObjectTemplate* bundle = templates.create("EffectBundle", "e_boom");
+	bundle->children().push_back({"mp_spike", {}, {}});
+	bundle->children().push_back({"flash", {0, 1, 0}, {}});
+	bundle->children().push_back({"off", {}, {}});
+	CHECK(manager.spawn("e_boom", {10, 0, 0}));
+	CHECK(manager.lights().size() == 1);
+	const effects::PointLight lit = manager.lights()[0];
+	CHECK(lit.position.x == 10 && lit.position.y == 1 && lit.color.x == 4 && lit.range1 == 2 && lit.range2 == 5);
+	for (int i = 0; i < 6; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	size_t meshes = 0, sprites = 0;
+	std::string geometry;
+	manager.forEachMeshGroup([&](const std::string& name, bool, const std::vector<effects::MeshSprite>& list) {
+		geometry = name;
+		meshes += list.size();
+	});
+	manager.forEachGroup([&](const std::string&, bool, const std::vector<effects::Sprite>& list) { sprites += list.size(); });
+	CHECK(geometry == "mp_smokespike" && meshes >= 9 && meshes <= 11 && sprites == 0);
+	CHECK(manager.lights().size() == 1 && manager.lights()[0].color.x < 4 && manager.lights()[0].color.x > 1);
+	for (int i = 0; i < 30; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	CHECK(manager.lights().empty() && manager.emitters() == 0);
+}

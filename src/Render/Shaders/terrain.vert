@@ -1,5 +1,7 @@
 #version 450
-// Terrain patches: position, normal, colormap/lightmap coordinates.
+// Terrain patches (and the surrounding terrain): position, normal,
+// colormap/lightmap coordinates; the world position for the low-detail
+// texture's planar projections.
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inNormal;
 layout(location = 2) in vec2 inTexCoord;
@@ -21,6 +23,7 @@ layout(set = 1, binding = 0) uniform Transforms {
 layout(location = 0) out vec3 outNormal;
 layout(location = 1) out vec2 outTexCoord;
 layout(location = 2) out float outDepth;
+layout(location = 3) out vec3 outWorldPosition;
 
 void main()
 {
@@ -28,4 +31,5 @@ void main()
 	outNormal = inNormal;
 	outTexCoord = inTexCoord;
 	outDepth = gl_Position.w;
+	outWorldPosition = inPosition;
 }

@@ -116,6 +116,12 @@ ParticleTemplate ParticleTemplate::fromTemplate(const world::ObjectTemplate& t)
 		}
 	}
 	p.mesh = t.typeName() == "MeshParticleSystem";
+	if (p.mesh) {
+		p.geometry = t.geometry();
+		p.randomRotation3 = vector(t, "randomRotation", {});
+		p.rotationSpeed3 = vector(t, "rotationSpeed", {});
+		p.alignToSpeed = number(t, "alignRotationToSpeed", 0) != 0;
+	}
 	p.localSystem = number(t, "isLocalSystem", 0) != 0;
 	p.showFirstPerson = number(t, "showInFirstPerson", 1) != 0;
 	p.showThirdPerson = number(t, "showInThirdPerson", 1) != 0;
@@ -175,6 +181,10 @@ void Emitter::emit(game::Random& random)
 	p.life = std::max(0.01f, t.timeToLive + random.unit() * t.randomTimeToLive);
 	p.sizeOffset = random.unit() * t.randomSize;
 	p.rotation = random.unit() * t.randomRotation * 6.2831853f;
+	if (t.mesh) {
+		p.angles = {(random.unit() * 2 - 1) * t.randomRotation3.x, (random.unit() * 2 - 1) * t.randomRotation3.y,
+			(random.unit() * 2 - 1) * t.randomRotation3.z};
+	}
 	if (m_particles.size() < kMaxParticlesPerEmitter) {
 		m_particles.push_back(p);
 	}
@@ -226,7 +236,7 @@ const ParticleTemplate* EffectManager::particleTemplate(const world::ObjectTempl
 }
 
 void EffectManager::spawnTemplate(const world::ObjectTemplate& t, const Vec3& position, const Mat3& rotation, int depth,
-	View view, std::vector<Emitter*>* spawned)
+	View view, std::vector<Emitter*>* spawned, std::vector<size_t>* spawnedLights)
 {
 	if (depth > 4) {
 		return;
@@ -238,7 +248,7 @@ void EffectManager::spawnTemplate(const world::ObjectTemplate& t, const Vec3& po
 			|| (view == View::ThirdPerson && !particles->showThirdPerson)) {
 			return;
 		}
-		if (!particles->texture.empty()) { // mesh particles are not drawn yet
+		if (!particles->texture.empty() || (particles->mesh && !particles->geometry.empty())) {
 			m_emitters.push_back(std::make_unique<Emitter>(*particles, position, rotation));
 			if (spawned) {
 				spawned->push_back(m_emitters.back().get());
@@ -255,14 +265,133 @@ void EffectManager::spawnTemplate(const world::ObjectTemplate& t, const Vec3& po
 	if (type != "EffectBundle") {
 		return; // light sources, mesh emitters: not drawn here
 	}
+	// How long the bundle's particle systems last (its lights' life).
+	float span = 0;
+	bool looping = false;
+	for (const world::ChildTemplate& child : t.children()) {
+		const world::ObjectTemplate* childTemplate = m_templates.find(child.name);
+		if (!childTemplate || childTemplate->typeName() == "LightSource" || childTemplate->typeName() == "Sound"
+			|| childTemplate->typeName() == "EffectBundle") {
+			continue;
+		}
+		const std::string& childType = childTemplate->typeName();
+		if (childType == "SpriteParticleSystem" || childType == "MeshParticleSystem"
+			|| childType == "NonScreenAlignedParticleSystem") {
+			const ParticleTemplate* particles = particleTemplate(*childTemplate);
+			looping = looping || particles->isLooping;
+			span = std::max(span, particles->emitDelay + particles->emitTime + particles->timeToLive + particles->randomTimeToLive);
+		}
+	}
 	for (const world::ChildTemplate& child : t.children()) {
 		if (const world::ObjectTemplate* childTemplate = m_templates.find(child.name)) {
 			const Mat3 local = Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z});
-			spawnTemplate(*childTemplate,
-				position + rotation.transform({child.position.x, child.position.y, child.position.z}),
-				local * rotation, depth + 1, view, spawned);
+			const Vec3 at = position + rotation.transform({child.position.x, child.position.y, child.position.z});
+			if (childTemplate->typeName() == "LightSource") {
+				if (number(*childTemplate, "enabled", 1) == 0) {
+					continue;
+				}
+				LiveLight light;
+				const float intensity = number(*childTemplate, "intensity", 1);
+				light.color = vector(*childTemplate, "color", {1, 1, 1}) * intensity;
+				light.range1 = number(*childTemplate, "attenuationRange1", 0);
+				light.range2 = std::max(number(*childTemplate, "attenuationRange2", 1), light.range1 + 0.01f);
+				light.life = looping ? -1.0f : std::max(span, 0.1f);
+				light.position = at;
+				light.localPosition = at;
+				m_lights.push_back(light);
+				if (spawnedLights) {
+					spawnedLights->push_back(m_lights.size() - 1);
+				}
+				continue;
+			}
+			spawnTemplate(*childTemplate, at, local * rotation, depth + 1, view, spawned, spawnedLights);
 		}
 	}
+}
+
+DecalTemplate DecalTemplate::fromTemplate(const world::ObjectTemplate& t)
+{
+	DecalTemplate d;
+	if (const std::string* texture = setting(t, "decalTextureName")) {
+		d.texture = *texture;
+		for (char& c : d.texture) {
+			if (c == '\\') {
+				c = '/';
+			}
+		}
+	}
+	d.size = number(t, "size", d.size);
+	d.randomSize = number(t, "randomSize", d.randomSize);
+	d.color = vector(t, "color", d.color);
+	d.rotation = number(t, "rotation", d.rotation);
+	d.randomRotation = number(t, "randomRotation", d.randomRotation);
+	if (number(t, "animationEnable", 0) != 0) {
+		d.frameCount = std::max(1, static_cast<int>(number(t, "animationFrameCount", 1)));
+		d.framesAcross = std::max(1, static_cast<int>(number(t, "animationFrameCountX", 1)));
+		d.frameWidth = number(t, "setAnimationFrameWidthRelative", 1);
+		d.frameHeight = number(t, "setAnimationFrameHeightRelative", 1);
+		d.randomStartFrame = number(t, "animationRandomizedStartFrame", 0) != 0;
+	}
+	return d;
+}
+
+bool EffectManager::spawnDecal(const std::string& name, const Vec3& position, const Vec3& normal)
+{
+	const world::ObjectTemplate* t = m_templates.find(name);
+	if (!t || (t->typeName() != "Decal" && t->typeName() != "decal")) {
+		return false;
+	}
+	auto found = m_decalTemplates.find(t);
+	if (found == m_decalTemplates.end()) {
+		found = m_decalTemplates.emplace(t, DecalTemplate::fromTemplate(*t)).first;
+	}
+	const DecalTemplate& look = found->second;
+	if (look.texture.empty()) {
+		return false;
+	}
+	Decal decal;
+	decal.texture = look.texture;
+	decal.normal = normalized(normal);
+	decal.position = position;
+	decal.size = look.size + m_decalRandom.unit() * look.randomSize;
+	decal.color = look.color;
+	// Turned about the normal from any perpendicular axis.
+	const float angle = (look.rotation + m_decalRandom.unit() * look.randomRotation) * kDegrees;
+	const Vec3 u = perpendicular(decal.normal), v = physics::cross(decal.normal, u);
+	decal.tangent = u * std::cos(angle) + v * std::sin(angle);
+	if (look.frameCount > 1) {
+		const int frame = look.randomStartFrame
+			? std::min(static_cast<int>(m_decalRandom.unit() * look.frameCount), look.frameCount - 1)
+			: 0;
+		const float u0 = (frame % look.framesAcross) * look.frameWidth;
+		const float v0 = (frame / look.framesAcross) * look.frameHeight;
+		decal.frame = {u0, v0, u0 + look.frameWidth, v0 + look.frameHeight};
+	}
+	if (m_decals.size() >= kMaxDecals) {
+		m_decals.erase(m_decals.begin());
+	}
+	m_decals.push_back(decal);
+	return true;
+}
+
+std::vector<PointLight> EffectManager::lights() const
+{
+	std::vector<PointLight> out;
+	for (const LiveLight& light : m_lights) {
+		const float fade = light.life < 0 ? 1.0f : std::clamp(1.0f - light.age / light.life, 0.0f, 1.0f);
+		if (fade > 0) {
+			out.push_back({light.position, light.color * fade, light.range1, light.range2});
+		}
+	}
+	return out;
+}
+
+void EffectManager::placeLight(LiveLight& light) const
+{
+	const auto at = m_anchors.find(light.anchor);
+	const Anchor place = at != m_anchors.end() ? at->second : Anchor {};
+	const Vec3 mounted = light.mountPosition + light.mountRotation.transform(light.localPosition);
+	light.position = place.position + place.rotation.transform(mounted);
 }
 
 bool EffectManager::spawn(const std::string& name, const Vec3& position, const Mat3& rotation, View view)
@@ -284,8 +413,17 @@ bool EffectManager::spawnAttached(const std::string& name, uint32_t anchor, cons
 	}
 	// Spawned in the bundle's own space, then mounted on the anchor.
 	std::vector<Emitter*> spawned;
+	std::vector<size_t> spawnedLights;
 	const size_t sounds = m_startedSounds.size();
-	spawnTemplate(*t, {}, {}, 0, view, &spawned);
+	spawnTemplate(*t, {}, {}, 0, view, &spawned, &spawnedLights);
+	for (size_t index : spawnedLights) {
+		LiveLight& light = m_lights[index];
+		light.anchor = anchor;
+		light.tag = tag;
+		light.mountPosition = position;
+		light.mountRotation = rotation;
+		placeLight(light);
+	}
 	for (Emitter* emitter : spawned) {
 		emitter->anchor = anchor;
 		emitter->tag = tag;
@@ -322,6 +460,11 @@ void EffectManager::setAnchor(uint32_t anchor, const Vec3& position, const Mat3&
 			placeAttached(*emitter);
 		}
 	}
+	for (LiveLight& light : m_lights) {
+		if (light.anchor == anchor) {
+			placeLight(light);
+		}
+	}
 }
 
 void EffectManager::setMount(uint32_t anchor, uint32_t tag, const Vec3& position, const Mat3& rotation)
@@ -333,6 +476,13 @@ void EffectManager::setMount(uint32_t anchor, uint32_t tag, const Vec3& position
 			placeAttached(*emitter);
 		}
 	}
+	for (LiveLight& light : m_lights) {
+		if (light.anchor == anchor && light.tag == tag) {
+			light.mountPosition = position;
+			light.mountRotation = rotation;
+			placeLight(light);
+		}
+	}
 }
 
 void EffectManager::stopAttached(uint32_t anchor, uint32_t tag)
@@ -340,6 +490,11 @@ void EffectManager::stopAttached(uint32_t anchor, uint32_t tag)
 	for (const auto& emitter : m_emitters) {
 		if (emitter->anchor == anchor && (tag == 0 || emitter->tag == tag)) {
 			emitter->stop();
+		}
+	}
+	for (LiveLight& light : m_lights) {
+		if (light.anchor == anchor && (tag == 0 || light.tag == tag)) {
+			light.stopped = true;
 		}
 	}
 }
@@ -362,6 +517,11 @@ void EffectManager::releaseAnchor(uint32_t anchor)
 			emitter->anchor = 0;
 		}
 	}
+	for (LiveLight& light : m_lights) {
+		if (light.anchor == anchor) {
+			light.stopped = true;
+		}
+	}
 	m_anchors.erase(anchor);
 }
 
@@ -379,6 +539,46 @@ void EffectManager::update(float seconds)
 	m_emitters.erase(std::remove_if(m_emitters.begin(), m_emitters.end(),
 						 [](const std::unique_ptr<Emitter>& e) { return !e->alive(); }),
 		m_emitters.end());
+	for (LiveLight& light : m_lights) {
+		light.age += seconds;
+		if (light.anchor != 0 && !m_anchors.count(light.anchor)) {
+			light.stopped = true;
+		}
+	}
+	m_lights.erase(std::remove_if(m_lights.begin(), m_lights.end(),
+					   [](const LiveLight& l) { return l.stopped || (l.life >= 0 && l.age >= l.life); }),
+		m_lights.end());
+}
+
+// A mesh particle at its age (MeshParticleMesh.fx vsDiffuse): the colour
+// and transparency graphs as the sprites', the size graph scaling the mesh.
+void EffectManager::collectMeshes(const Emitter& emitter, std::vector<MeshSprite>& out)
+{
+	const ParticleTemplate& t = emitter.particleTemplate();
+	for (const Particle& p : emitter.particles()) {
+		const float f = std::min(p.age / p.life, 1.0f);
+		const float blend = std::min(t.colorBlendGraph.at(f), 1.0f);
+		const float alpha = std::clamp(std::min(t.transparencyGraph.at(f), 1.0f), 0.0f, 1.0f);
+		const float size = std::min(t.sizeGraph.at(f), 1.0f) * t.particleMaxSize + p.sizeOffset;
+		if (size <= 0 || alpha <= 0) {
+			continue;
+		}
+		const Vec3 color = t.color1 * (1 - blend) + t.color2 * blend;
+		const Vec3 angles = p.angles + t.rotationSpeed3 * p.age;
+		Mat3 turn = Mat3::fromYawPitchRoll({angles.x, angles.y, angles.z});
+		const Mat3 system = t.localSystem ? emitter.rotation() : Mat3 {};
+		if (t.alignToSpeed && physics::lengthSquared(p.velocity) > 1e-6f) {
+			// z along the velocity, y as near the world's up as it goes.
+			const Vec3 z = normalized(t.localSystem ? emitter.rotation().transform(p.velocity) : p.velocity);
+			const Vec3 x = std::fabs(z.y) < 0.99f ? normalized(physics::cross({0, 1, 0}, z)) : Vec3 {1, 0, 0};
+			Mat3 aligned;
+			aligned.rows = {x, physics::cross(z, x), z};
+			turn = turn * aligned;
+		} else {
+			turn = turn * (t.localSystem ? system : emitter.rotation());
+		}
+		out.push_back({emitter.worldPosition(p), turn, size, {color.x, color.y, color.z, alpha}});
+	}
 }
 
 // The look of a particle at its age (Particles.fx vsParticle).

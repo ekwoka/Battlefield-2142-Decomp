@@ -38,6 +38,11 @@ GeometryTemplate* GeometryTemplateManager::create(const std::string& type, const
 	} else if (kind == "skinnedmesh") {
 		extension = ".skinnedMesh";
 		meshKind = MeshKind::Skinned;
+	} else if (kind == "meshparticlemesh") {
+		// The meshes of MeshParticleSystems (debris, sparks, tracers): bundled
+		// meshes in the files.
+		extension = ".bundledMesh";
+		meshKind = MeshKind::Bundled;
 	} else if (kind == "roadcompiled") {
 		meshKind = MeshKind::Road; // each road object loads its own mesh
 	} else {
@@ -49,6 +54,7 @@ GeometryTemplate* GeometryTemplateManager::create(const std::string& type, const
 		slot = std::make_unique<GeometryTemplate>();
 		slot->name = name;
 		slot->kind = meshKind;
+		slot->meshParticle = kind == "meshparticlemesh";
 		slot->path = extension ? scriptDirectory + "Meshes/" + name + extension
 								: scriptDirectory + name + "_compiled.dat";
 	}
@@ -85,6 +91,22 @@ void registerGeometryConsoleMethods(Console& console, GeometryTemplateManager& g
 			active->simpleUVTranslation[1] = v;
 		}
 	});
+	bindMethod(console, "GeometryTemplate.setSubGeometryLodDistance", ConsoleAccess::Anyone,
+		[&geometries](int geometry, int lod, float distance) {
+			GeometryTemplate* active = geometries.active();
+			if (!active || geometry < 0 || lod < 0 || geometry > 16 || lod > 16) {
+				return;
+			}
+			auto& lods = active->lodDistances;
+			if (lods.size() <= static_cast<size_t>(geometry)) {
+				lods.resize(static_cast<size_t>(geometry) + 1);
+			}
+			auto& distances = lods[static_cast<size_t>(geometry)];
+			if (distances.size() <= static_cast<size_t>(lod)) {
+				distances.resize(static_cast<size_t>(lod) + 1, 0.0f);
+			}
+			distances[static_cast<size_t>(lod)] = distance;
+		});
 }
 
 } // namespace dice::hfe::geom

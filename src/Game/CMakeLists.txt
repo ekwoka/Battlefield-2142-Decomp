@@ -5,10 +5,12 @@ add_library(Game STATIC
 	Ladders.cpp
 	Commander.cpp
 	Titans.cpp
+	Kits.cpp
 	CombatAreas.cpp
 	SoldierControl.cpp
 	Weapons.cpp
 	Vehicle.cpp
+	VehicleParts.cpp
 	GameLogic.cpp
 	ScriptBridge.cpp
 	TickTimer.cpp

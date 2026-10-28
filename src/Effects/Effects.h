@@ -86,7 +86,14 @@ struct ParticleTemplate {
 	float rotationSpeed = 0;
 	bool additive = false;
 	std::string texture; // without ".dds"
-	bool mesh = false;   // a MeshParticleSystem (drawn as sprites for now)
+	bool mesh = false;   // a MeshParticleSystem: each particle a copy of `geometry`
+	std::string geometry; // its MeshParticleMesh
+	// Mesh particles turn in three axes (yaw/pitch/roll, degrees): a random
+	// start up to randomRotation and rotationSpeed per second; with
+	// alignRotationToSpeed their z axis follows their velocity.
+	Vec3 randomRotation3;
+	Vec3 rotationSpeed3;
+	bool alignToSpeed = false;
 	bool localSystem = false;    // isLocalSystem: particles in the system's space
 	bool showFirstPerson = true; // showInFirstPerson
 	bool showThirdPerson = true; // showInThirdPerson
@@ -101,6 +108,7 @@ struct Particle {
 	float life = 1;
 	float sizeOffset = 0;
 	float rotation = 0;
+	Vec3 angles; // mesh particles: yaw/pitch/roll at birth, degrees
 };
 
 // A particle system placed in the world.
@@ -151,6 +159,61 @@ struct Sprite {
 	std::array<float, 4> color; // rgb, alpha
 };
 
+// A mesh particle: its mesh scaled by `size`, turned and placed
+// (MeshParticleMesh.fx: one bone per particle, the mesh times globalScale,
+// coloured by the colour graph and faded by the transparency graph).
+struct MeshSprite {
+	Vec3 position;
+	Mat3 rotation;
+	float size;
+	std::array<float, 4> color;
+};
+
+// "decal" templates (ObjectTemplate.create decal): what a material cell's
+// decal template (MaterialManager.setDecalTemplate) leaves where a
+// projectile hits: a square of `size` (+ up to randomSize) turned by
+// rotation + up to randomRotation degrees about the surface's normal,
+// showing one frame of an animationFrameCount-frame atlas
+// (animationFrameCountX across, each setAnimationFrameWidth/HeightRelative
+// of it; animationRandomizedStartFrame picks one at random).
+struct DecalTemplate {
+	std::string texture; // decalTextureName, without ".dds"
+	float size = 1;
+	float randomSize = 0;
+	Vec3 color {1, 1, 1};
+	float rotation = 0;
+	float randomRotation = 0;
+	int frameCount = 1;
+	int framesAcross = 1;
+	float frameWidth = 1;
+	float frameHeight = 1;
+	bool randomStartFrame = false;
+
+	static DecalTemplate fromTemplate(const world::ObjectTemplate& t);
+};
+
+struct Decal {
+	std::string texture;
+	Vec3 position;
+	Vec3 normal;
+	Vec3 tangent; // the square's u axis
+	float size = 1;
+	std::array<float, 4> frame {0, 0, 1, 1}; // u0, v0, u1, v1
+	Vec3 color {1, 1, 1};
+};
+
+// A LightSource of an effect bundle (an explosion's flash, a muzzle
+// flash): a point light of color * intensity, full up to
+// attenuationRange1 and gone at attenuationRange2. How long it lives is not
+// from the original yet: as long as its bundle's longest sibling particle
+// system (emit delay + time + life), fading out over that.
+struct PointLight {
+	Vec3 position;
+	Vec3 color;   // at this moment (faded)
+	float range1 = 0;
+	float range2 = 1;
+};
+
 class EffectManager {
 public:
 	explicit EffectManager(const world::ObjectTemplateManager& templates, uint32_t seed = 0x759dc150);
@@ -188,11 +251,40 @@ public:
 	std::vector<StartedSound> takeSounds() { return std::exchange(m_startedSounds, {}); }
 
 	size_t emitters() const { return m_emitters.size(); }
+
+	// Leaves a decal template's decal at a surface point (the oldest go
+	// beyond kMaxDecals); false if there is no such decal template.
+	bool spawnDecal(const std::string& name, const Vec3& position, const Vec3& normal);
+	static constexpr size_t kMaxDecals = 256;
+	const std::vector<Decal>& decals() const { return m_decals; }
+	// The bundles' lights alive now.
+	std::vector<PointLight> lights() const;
+
+	// Calls `draw` for each mesh particle system's particles: its mesh, its
+	// blending and the particles.
+	template <class Draw>
+	void forEachMeshGroup(Draw draw) const
+	{
+		for (const auto& emitter : m_emitters) {
+			const ParticleTemplate& t = emitter->particleTemplate();
+			if (!t.mesh || t.geometry.empty()) {
+				continue;
+			}
+			m_meshSprites.clear();
+			collectMeshes(*emitter, m_meshSprites);
+			if (!m_meshSprites.empty()) {
+				draw(t.geometry, t.additive, m_meshSprites);
+			}
+		}
+	}
 	// Calls `draw` for each group of sprites sharing a texture and blending.
 	template <class Draw>
 	void forEachGroup(Draw draw) const
 	{
 		for (const auto& emitter : m_emitters) {
+			if (emitter->particleTemplate().mesh) {
+				continue; // forEachMeshGroup
+			}
 			m_sprites.clear();
 			collect(*emitter, m_sprites);
 			if (!m_sprites.empty()) {
@@ -212,8 +304,25 @@ private:
 	void placeAttached(Emitter& emitter) const;
 	const ParticleTemplate* particleTemplate(const world::ObjectTemplate& t);
 	void spawnTemplate(const world::ObjectTemplate& t, const Vec3& position, const Mat3& rotation, int depth, View view,
-		std::vector<Emitter*>* spawned);
+		std::vector<Emitter*>* spawned, std::vector<size_t>* spawnedLights = nullptr);
 	static void collect(const Emitter& emitter, std::vector<Sprite>& out);
+	static void collectMeshes(const Emitter& emitter, std::vector<MeshSprite>& out);
+	struct LiveLight {
+		Vec3 color;
+		float range1 = 0, range2 = 1;
+		float age = 0, life = 1; // life below 0: until stopped (an attached looping bundle)
+		bool stopped = false;
+		// Attached as the emitters are.
+		uint32_t anchor = 0, tag = 0;
+		Vec3 position, mountPosition, localPosition;
+		Mat3 mountRotation;
+	};
+	void placeLight(LiveLight& light) const;
+	std::vector<LiveLight> m_lights;
+	std::map<const world::ObjectTemplate*, DecalTemplate> m_decalTemplates;
+	std::vector<Decal> m_decals;
+	game::Random m_decalRandom {0x2d5c1e37};
+	mutable std::vector<MeshSprite> m_meshSprites;
 
 	const world::ObjectTemplateManager& m_templates;
 	game::Random m_random;

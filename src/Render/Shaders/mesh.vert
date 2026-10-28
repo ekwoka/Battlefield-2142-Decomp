@@ -29,12 +29,15 @@ layout(location = 3) out vec2 outLightmapCoord;
 layout(location = 4) out vec2 outDetailCoord;
 layout(location = 5) out vec2 outDirtCoord;
 layout(location = 6) out vec2 outCrackCoord;
+layout(location = 7) out vec3 outWorldPosition;
 
 void main()
 {
 	mat4 part = parts[clamp(int(inPart + 0.5), 0, 63)] * inWeight +
 		parts[clamp(int(inPart2 + 0.5), 0, 63)] * (1.0 - inWeight);
-	gl_Position = worldViewProjection * (part * vec4(inPosition, 1.0));
+	vec4 local = part * vec4(inPosition, 1.0);
+	gl_Position = worldViewProjection * local;
+	outWorldPosition = (world * local).xyz;
 	outNormal = mat3(world) * (mat3(part) * inNormal);
 	outTexCoord = inTexCoord;
 	outDepth = gl_Position.w;

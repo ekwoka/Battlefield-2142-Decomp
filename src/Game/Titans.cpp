@@ -642,6 +642,7 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 	auto soldier = std::make_shared<physics::CollisionWorld>();
 	auto projectile = std::make_shared<physics::CollisionWorld>();
 	std::shared_ptr<physics::CollisionWorld> teams[2];
+	std::vector<Titan::VehiclePart> vehicleParts;
 	const auto soldierLod = [](const physics::CollisionMeshFile& mesh) {
 		for (const physics::CollisionSubGeometry& part : physics::collisionParts(mesh, 0)) {
 			if (physics::collisionLodFor(mesh, part, static_cast<uint32_t>(physics::CollisionUser::Soldier))) {
@@ -675,7 +676,34 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 			}
 		}
 		projectile->addMesh(*m.mesh, physics::CollisionUser::Projectile, m.rotation, m.position, owner, m.materials);
+		// Its vehicle LOD: a part the vehicles meet (with its own groups).
+		for (const physics::CollisionSubGeometry& sub : physics::collisionParts(*m.mesh, 0)) {
+			const physics::CollisionLod* lod =
+				physics::collisionLodFor(*m.mesh, sub, static_cast<uint32_t>(physics::CollisionUser::Vehicle));
+			if (!lod || lod->faces.empty()) {
+				continue;
+			}
+			Titan::VehiclePart part;
+			part.mesh = std::make_shared<physics::CollisionWorld>();
+			part.mesh->addMesh(*m.mesh, physics::CollisionUser::Vehicle, m.rotation, m.position, owner, m.materials);
+			part.groups = static_cast<uint32_t>(m.groups);
+			for (size_t i = 0; i < lod->vertices.size(); ++i) {
+				const auto& v = lod->vertices[i];
+				const physics::Vec3 p = m.rotation.transform({v[0], v[1], v[2]}) + m.position;
+				part.boxMin = part.points.empty() ? p : physics::Vec3 {std::min(part.boxMin.x, p.x), std::min(part.boxMin.y, p.y), std::min(part.boxMin.z, p.z)};
+				part.boxMax = part.points.empty() ? p : physics::Vec3 {std::max(part.boxMax.x, p.x), std::max(part.boxMax.y, p.y), std::max(part.boxMax.z, p.z)};
+				part.points.push_back(p);
+				const uint16_t index = i < lod->vertexMaterials.size() ? lod->vertexMaterials[i] : 0;
+				part.pointMaterials.push_back(index < m.materials.size() ? m.materials[index] : index);
+			}
+			for (const physics::Vec3& p : part.points) {
+				part.radius = std::max(part.radius, std::sqrt(physics::lengthSquared(p)));
+			}
+			vehicleParts.push_back(std::move(part));
+			break;
+		}
 	}
+	titan.vehicleParts = std::move(vehicleParts);
 	body->teamSoldierMesh[0] = teams[0];
 	body->teamSoldierMesh[1] = teams[1];
 	body->soldierMesh = soldier;
@@ -914,6 +942,7 @@ void GameWorld::moveTitanBody(Titan& titan, const physics::Vec3& delta)
 		body->body.position = body->body.position + delta;
 		body->body.velocity = titan.velocity;
 		body->body.angularVelocity = {};
+		body->response = physics::ContactResponse {}; // the sync moves it, no contact does
 	}
 	stepTitanSpawnPoints(titan);
 }

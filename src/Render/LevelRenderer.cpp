@@ -31,6 +31,9 @@ namespace {
 constexpr int kDefaultTerrainPatches = 8; // colormaps per side without terrain data
 constexpr float kDetailFadeStart = 60.0f;
 constexpr float kDetailFadeEnd = 140.0f;
+// The low-detail texture's planes blend by |normal| - this (vBlendMod of
+// TerrainShader_Shared.fx; its value is RendDX9's, not yet read: a guess).
+constexpr float kLowDetailBlendBias = 0.2f;
 
 std::string lower(std::string s)
 {
@@ -75,8 +78,10 @@ void materialUniforms(LightingUniforms& uniforms, const S& submesh, float fade, 
 	uniforms.material[2] = (submesh.detail ? 1.0f : 0.0f) + (submesh.dirt ? 2.0f : 0.0f) + (submesh.crack ? 4.0f : 0.0f)
 		+ (submesh.additive ? kMaterialAdditive : submesh.blended ? kMaterialBlended : 0.0f);
 	uniforms.material[3] = fade < 1.0f ? std::max(fade, 1e-3f) : 0.0f;
-	uniforms.uvOffset[0] = scrollOffset(submesh.uvScroll[0], seconds);
-	uniforms.uvOffset[1] = scrollOffset(submesh.uvScroll[1], seconds);
+	uniforms.uvOffset[0] = scrollOffset(submesh.uvScroll[0], seconds) + submesh.uvAtlas[2];
+	uniforms.uvOffset[1] = scrollOffset(submesh.uvScroll[1], seconds) + submesh.uvAtlas[3];
+	uniforms.uvOffset[2] = submesh.uvAtlas[0];
+	uniforms.uvOffset[3] = submesh.uvAtlas[1];
 }
 
 float transparencyKey(const Mat4& world, const Vec3f& camera)
@@ -123,9 +128,20 @@ LevelRenderer::~LevelRenderer()
 	for (TerrainPatch& patch : m_terrain) {
 		SDL_ReleaseGPUBuffer(device, patch.vertices);
 	}
-	if (m_waterVertices) {
-		SDL_ReleaseGPUBuffer(device, m_waterVertices);
-		SDL_ReleaseGPUBuffer(device, m_waterIndices);
+	for (WaterBlock& block : m_waterBlocks) {
+		SDL_ReleaseGPUBuffer(device, block.vertices);
+		SDL_ReleaseGPUBuffer(device, block.indices);
+	}
+	for (SurroundingPatch& patch : m_surrounding) {
+		SDL_ReleaseGPUBuffer(device, patch.vertices);
+	}
+	if (m_surroundingIndices) {
+		SDL_ReleaseGPUBuffer(device, m_surroundingIndices);
+	}
+	for (auto& [path, texture] : m_cubeTextures) {
+		if (texture) {
+			SDL_ReleaseGPUTexture(device, texture);
+		}
 	}
 	if (m_terrainIndices) {
 		SDL_ReleaseGPUBuffer(device, m_terrainIndices);
@@ -146,6 +162,9 @@ LevelRenderer::~LevelRenderer()
 	}
 	if (m_firstPersonParticleVertices) {
 		SDL_ReleaseGPUBuffer(device, m_firstPersonParticleVertices);
+	}
+	if (m_decalVertices) {
+		SDL_ReleaseGPUBuffer(device, m_decalVertices);
 	}
 	for (Road& road : m_roads) {
 		SDL_ReleaseGPUBuffer(device, road.vertices);
@@ -176,6 +195,24 @@ SDL_GPUTexture* LevelRenderer::texture(const io::FileManager& files, const std::
 	}
 	++(gpuTexture ? m_stats.textures : m_stats.missingTextures);
 	m_textures[key] = gpuTexture;
+	return gpuTexture;
+}
+
+SDL_GPUTexture* LevelRenderer::cubeTexture(const io::FileManager& files, const std::string& path)
+{
+	const std::string key = lower(path);
+	const auto it = m_cubeTextures.find(key);
+	if (it != m_cubeTextures.end()) {
+		return it->second;
+	}
+	SDL_GPUTexture* gpuTexture = nullptr;
+	std::vector<uint8_t> data;
+	if (files.readFile(path, data)) {
+		if (const auto image = texture::parseDds(data)) {
+			gpuTexture = m_gpu.createTexture(*image, true);
+		}
+	}
+	m_cubeTextures[key] = gpuTexture;
 	return gpuTexture;
 }
 
@@ -286,6 +323,36 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 	gpuMesh->bundled = bundled;
 	gpuMesh->skinned = skinned;
 	gpuMesh->geometries = file->geometries.size();
+	gpuMesh->lodCount = file->geometries[geometryIndex].lods.size();
+	if (geometryIndex < geometry->lodDistances.size()) {
+		gpuMesh->lodDistances = geometry->lodDistances[geometryIndex];
+	}
+	// The bounds of this LOD's vertices, by part (culling).
+	if (!skinned) {
+		std::vector<std::vector<Vec3f>> partPoints(bundled ? kMaxMeshParts : 1);
+		std::vector<Vec3f> all;
+		for (const geom::MeshMaterial& material : lod.materials) {
+			for (uint32_t i = 0; i < material.indexCount; ++i) {
+				const size_t index = static_cast<size_t>(material.indexStart) + i;
+				if (index >= file->indices.size()) {
+					break;
+				}
+				const size_t vertex = static_cast<size_t>(material.vertexStart) + file->indices[index];
+				if (vertex >= vertices.size()) {
+					continue;
+				}
+				const Vertex& v = vertices[vertex];
+				const Vec3f p {v.position[0], v.position[1], v.position[2]};
+				const size_t part = bundled ? std::min(static_cast<size_t>(v.part), partPoints.size() - 1) : 0;
+				partPoints[part].push_back(p);
+				all.push_back(p);
+			}
+		}
+		for (const auto& points : partPoints) {
+			gpuMesh->partBounds.push_back(sphereAround(points));
+		}
+		gpuMesh->bounds = sphereAround(all);
+	}
 	if (skinned) {
 		for (const auto& rig : lod.rigs) {
 			std::vector<RigBone> bones;
@@ -314,10 +381,33 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 				diffusePath = alphaTest;
 			}
 		}
+		// The overgrowth's distant meshes use textures only its atlases hold.
+		const AtlasEntry* atlas = nullptr;
+		if (!diffusePath.empty() && !m_overgrowthAtlas.empty() && !sources.files.exists(diffusePath)) {
+			std::string key = lower(material.maps[0]);
+			std::replace(key.begin(), key.end(), '\\', '/');
+			const auto& first = material.alphaMode == 2 ? m_overgrowthAlphaTestAtlas : m_overgrowthAtlas;
+			const auto& second = material.alphaMode == 2 ? m_overgrowthAtlas : m_overgrowthAlphaTestAtlas;
+			auto found = first.find(key);
+			if (found != first.end()) {
+				atlas = &found->second;
+			} else if ((found = second.find(key)) != second.end()) {
+				atlas = &found->second;
+			}
+			if (atlas) {
+				diffusePath = atlas->atlas;
+			}
+		}
 		SDL_GPUTexture* diffuse = diffusePath.empty() ? nullptr : texture(sources.files, diffusePath);
 		Submesh submesh {material.indexStart, material.indexCount, static_cast<int32_t>(material.vertexStart),
 			diffuse ? diffuse : m_gpu.whiteTexture(), material.alphaMode == 2 ? 0.5f : 0.0f,
 			skinned && m < gpuMesh->rigs.size() ? static_cast<int>(m) : -1};
+		if (atlas) {
+			submesh.uvAtlas[0] = atlas->size[0];
+			submesh.uvAtlas[1] = atlas->size[1];
+			submesh.uvAtlas[2] = atlas->offset[0];
+			submesh.uvAtlas[3] = atlas->offset[1];
+		}
 		// 0x100c3880: alpha mode 1 is blended (AlphaBlendEnable, no depth
 		// writes, no culling, SrcBlend SRCALPHA / DestBlend INVSRCALPHA), or
 		// with the template's hasAdditiveAlpha added (DestBlend ONE, the
@@ -374,21 +464,9 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 				collectParts(sources, objectTemplate, Mat4 {}, instance.parts, 0);
 				instance.partsTemplate = &objectTemplate;
 			}
-			// Lightmaps are named after the geometry, LOD and the position
-			// truncated to whole metres.
-			std::ostringstream key;
-			key << lower(objectTemplate.geometry()) << "=00=" << static_cast<int>(world.at(3, 0)) << '='
-				<< static_cast<int>(world.at(3, 1)) << '=' << static_cast<int>(world.at(3, 2));
-			const auto entry = m_lightmapAtlas.find(key.str());
-			if (entry != m_lightmapAtlas.end()) {
-				instance.lightmap = texture(sources.files, entry->second.atlas);
-				if (instance.lightmap) {
-					instance.lightmapTransform[0] = entry->second.size[0];
-					instance.lightmapTransform[1] = entry->second.size[1];
-					instance.lightmapTransform[2] = entry->second.offset[0];
-					instance.lightmapTransform[3] = entry->second.offset[1];
-					++m_stats.lightmappedInstances;
-				}
+			lightmapFor(sources, objectTemplate.geometry(), 0, world, instance.lightmap, instance.lightmapTransform);
+			if (instance.lightmap) {
+				++m_stats.lightmappedInstances;
 			}
 			m_instances.push_back(instance);
 		}
@@ -527,6 +605,13 @@ void LevelRenderer::buildTerrain(const LevelSources& sources)
 			char name[32];
 			std::snprintf(name, sizeof(name), "%02dx%02d", px, py);
 			TerrainPatch patch;
+			patch.boundsMin = patch.boundsMax = {vertices[0].position[0], vertices[0].position[1], vertices[0].position[2]};
+			for (const Vertex& v : vertices) {
+				patch.boundsMin = {std::fmin(patch.boundsMin.x, v.position[0]), std::fmin(patch.boundsMin.y, v.position[1]),
+					std::fmin(patch.boundsMin.z, v.position[2])};
+				patch.boundsMax = {std::fmax(patch.boundsMax.x, v.position[0]), std::fmax(patch.boundsMax.y, v.position[1]),
+					std::fmax(patch.boundsMax.z, v.position[2])};
+			}
 			patch.vertices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_VERTEX, vertices.data(),
 				static_cast<uint32_t>(vertices.size() * sizeof(Vertex)));
 			patch.colormap = texture(sources.files, colormapBase + name + ".dds");
@@ -543,6 +628,115 @@ void LevelRenderer::buildTerrain(const LevelSources& sources)
 		}
 	}
 	m_stats.terrainPatches = m_terrain.size();
+	m_terrainExtent = heightmap->worldWidth();
+	// The low-detail texture (0x100b0850): <level>lowdetailtexturehi.dds,
+	// else <level>/lowDetailTexture.dds (the editor's name, 0x100ccab0),
+	// else common/terrain/textures/Default.dds; tiled by terraindata.raw's
+	// far tilings.
+	for (const char* name : {"lowdetailtexturehi.dds", "lowDetailTexture.dds"}) {
+		if (!m_lowDetailTexture && sources.files.exists(sources.levelPath + name)) {
+			m_lowDetailTexture = texture(sources.files, sources.levelPath + name);
+		}
+	}
+	if (!m_lowDetailTexture && sources.files.exists("common/terrain/textures/Default.dds")) {
+		m_lowDetailTexture = texture(sources.files, "common/terrain/textures/Default.dds");
+	}
+	if (data) {
+		m_farTiling[0] = data->farSideTiling[0];
+		m_farTiling[1] = data->farSideTiling[1];
+		m_farTiling[2] = data->farTopTilingHigh;
+		m_farTiling[3] = data->farYOffset;
+	}
+}
+
+// The surrounding terrain: each secondary heightmap of the cluster drawn
+// with its colormap and low-detail component map, "<base>_s<i>.dds" (the
+// format RendDX9 builds the names with, "%s%s_s%i" at 0x10154110), i
+// counting the eight around the primary row by row from the -x/-z corner
+// (the order Heightdata.con declares them in).
+void LevelRenderer::buildSurroundingTerrain(const LevelSources& sources)
+{
+	const terrain::TerrainData* data = sources.terrainData;
+	if (!data) {
+		return;
+	}
+	// Every other sample: the secondary maps are 257 samples 4 m apart;
+	// 129 x 129 vertices fit 16-bit indices and are plenty at that range.
+	constexpr int kStride = 2;
+	int side = 0;
+	for (const auto& heightmap : sources.heightmaps.heightmaps()) {
+		const int x = heightmap->clusterX(), y = heightmap->clusterY();
+		if ((x == 0 && y == 0) || x < -1 || x > 1 || y < -1 || y > 1) {
+			continue;
+		}
+		if (!heightmap->loaded() || heightmap->width() < 3 || heightmap->width() != heightmap->height()) {
+			continue;
+		}
+		int index = (y + 1) * 3 + (x + 1);
+		if (index > 4) {
+			--index; // the primary's place is skipped
+		}
+		const int n = (heightmap->width() - 1) / kStride + 1;
+		if (side != 0 && n != side) {
+			continue; // one index buffer for all of them
+		}
+		const auto& scale = heightmap->scale();
+		std::vector<Vertex> vertices(static_cast<size_t>(n) * n);
+		SurroundingPatch patch;
+		for (int row = 0; row < n; ++row) {
+			for (int column = 0; column < n; ++column) {
+				const int sx = column * kStride, sy = row * kStride;
+				Vertex& v = vertices[static_cast<size_t>(row) * n + column];
+				v.position[0] = heightmap->originX() + sx * scale[0];
+				v.position[1] = heightmap->sample(sx, sy);
+				v.position[2] = heightmap->originZ() + sy * scale[2];
+				const float dx = heightmap->sample(sx + 1, sy) - heightmap->sample(sx - 1, sy);
+				const float dz = heightmap->sample(sx, sy + 1) - heightmap->sample(sx, sy - 1);
+				const Vec3f normal = normalize({-dx, 2 * scale[0], -dz});
+				v.normal[0] = normal.x;
+				v.normal[1] = normal.y;
+				v.normal[2] = normal.z;
+				v.texCoord[0] = static_cast<float>(column) / (n - 1);
+				v.texCoord[1] = static_cast<float>(row) / (n - 1);
+				const Vec3f p {v.position[0], v.position[1], v.position[2]};
+				if (row == 0 && column == 0) {
+					patch.boundsMin = patch.boundsMax = p;
+				}
+				patch.boundsMin = {std::fmin(patch.boundsMin.x, p.x), std::fmin(patch.boundsMin.y, p.y), std::fmin(patch.boundsMin.z, p.z)};
+				patch.boundsMax = {std::fmax(patch.boundsMax.x, p.x), std::fmax(patch.boundsMax.y, p.y), std::fmax(patch.boundsMax.z, p.z)};
+			}
+		}
+		const std::string suffix = "_s" + std::to_string(index) + ".dds";
+		if (!sources.files.exists(data->colormapBaseName + suffix)) {
+			continue;
+		}
+		patch.colormap = texture(sources.files, data->colormapBaseName + suffix);
+		if (sources.files.exists(data->lowDetailmapBaseName + suffix)) {
+			patch.lowComponent = texture(sources.files, data->lowDetailmapBaseName + suffix);
+		}
+		if (!patch.colormap) {
+			continue;
+		}
+		side = n;
+		patch.vertices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_VERTEX, vertices.data(),
+			static_cast<uint32_t>(vertices.size() * sizeof(Vertex)));
+		m_surrounding.push_back(patch);
+	}
+	if (m_surrounding.empty()) {
+		return;
+	}
+	std::vector<uint16_t> indices;
+	for (int row = 0; row + 1 < side; ++row) {
+		for (int column = 0; column + 1 < side; ++column) {
+			const auto at = [side](int px, int py) { return static_cast<uint16_t>(py * side + px); };
+			indices.insert(indices.end(), {at(column, row), at(column, row + 1), at(column + 1, row), at(column + 1, row),
+				at(column, row + 1), at(column + 1, row + 1)});
+		}
+	}
+	m_surroundingIndexCount = static_cast<uint32_t>(indices.size());
+	m_surroundingIndices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_INDEX, indices.data(),
+		static_cast<uint32_t>(indices.size() * sizeof(uint16_t)));
+	m_stats.surroundingPatches = m_surrounding.size();
 }
 
 void LevelRenderer::buildSky(const LevelSources& sources)
@@ -595,44 +789,160 @@ void LevelRenderer::loadLightmapAtlas(const LevelSources& sources)
 	}
 }
 
-// A grid over the primary heightmap at sea level; each vertex carries the
-// water depth (sea level minus terrain height) for the opacity.
+// The overgrowth: trees placed by OvergrowthCollision.con (Object.
+// isOvergrowth) are drawn whole within Overgrowth.viewDistance *
+// viewDistanceScale * closeDistPercentage, and with their
+// "<geometry>_lod" mesh beyond, whose textures the level's overgrowth
+// atlases hold (OvergrowthAtlas.tai: "<texture> <atlas>, <index>, <u>, <v>,
+// <width>, <height>", as the lightmaps' atlas).
+void LevelRenderer::loadOvergrowth(const LevelSources& sources)
+{
+	const std::string directory = sources.levelPath + "overgrowth/";
+	const auto readAtlas = [&](const std::string& path, std::map<std::string, AtlasEntry>& into) {
+		std::string text;
+		if (!sources.files.readText(path, text)) {
+			return;
+		}
+		std::istringstream lines(text);
+		std::string line;
+		while (std::getline(lines, line)) {
+			if (line.empty() || line[0] == '#') {
+				continue;
+			}
+			std::istringstream fields(line);
+			std::string texturePath, atlasPath;
+			fields >> texturePath >> atlasPath;
+			if (atlasPath.empty() || atlasPath.back() != ',') {
+				continue;
+			}
+			atlasPath.pop_back();
+			std::replace(atlasPath.begin(), atlasPath.end(), '\\', '/');
+			AtlasEntry entry {atlasPath, {0, 0}, {0, 0}};
+			int index = 0;
+			char comma = 0;
+			fields >> index >> comma >> entry.offset[0] >> comma >> entry.offset[1] >> comma >> entry.size[0] >> comma >>
+				entry.size[1];
+			if (!fields) {
+				continue;
+			}
+			std::string key = lower(texturePath);
+			std::replace(key.begin(), key.end(), '\\', '/');
+			into[key] = entry;
+		}
+	};
+	readAtlas(directory + "OvergrowthAtlas.tai", m_overgrowthAtlas);
+	readAtlas(directory + "OvergrowthAtlas_alphatest.tai", m_overgrowthAlphaTestAtlas);
+	std::string text;
+	if (m_overgrowthAtlas.empty() || !sources.files.readText(directory + "Overgrowth.con", text)) {
+		return;
+	}
+	float viewDistance = 0, scale = 1, close = 0;
+	std::istringstream lines(text);
+	std::string command;
+	while (lines >> command) {
+		std::string value;
+		std::getline(lines, value);
+		const std::string name = lower(command);
+		if (name == "overgrowth.viewdistance") {
+			viewDistance = static_cast<float>(std::atof(value.c_str()));
+		} else if (name == "overgrowth.viewdistancescale") {
+			scale = static_cast<float>(std::atof(value.c_str()));
+		} else if (name == "overgrowth.closedistpercentage") {
+			close = static_cast<float>(std::atof(value.c_str()));
+		}
+	}
+	m_overgrowthCloseDistance = viewDistance * scale * close;
+}
+
+// The sea: a grid at sea level over each heightmap of the cluster (the
+// primary and the surrounding ones), each vertex carrying the water's depth
+// there (sea level minus the terrain's height) for its opacity, and a ring
+// of deep water beyond them to the horizon (RendDX9's WaterSurrounding and
+// WaterDistant shader variants draw those parts).
 void LevelRenderer::buildWater(const LevelSources& sources)
 {
-	const terrain::Heightmap* heightmap = sources.heightmaps.primary();
-	if (!heightmap || !heightmap->loaded() || !sources.heightmaps.hasSea()) {
+	const terrain::Heightmap* primary = sources.heightmaps.primary();
+	if (!primary || !primary->loaded() || !sources.heightmaps.hasSea()) {
 		return;
 	}
 	m_water = &sources.water;
-	constexpr int kCells = 128;
 	const float level = sources.heightmaps.seaWaterLevel();
-	const float width = heightmap->worldWidth();
-	const float depthSpan = heightmap->worldDepth();
-	std::vector<Vertex> vertices;
-	vertices.reserve((kCells + 1) * (kCells + 1));
-	for (int y = 0; y <= kCells; ++y) {
-		for (int x = 0; x <= kCells; ++x) {
-			Vertex v {};
-			v.position[0] = heightmap->originX() + width * x / kCells;
-			v.position[1] = level;
-			v.position[2] = heightmap->originZ() + depthSpan * y / kCells;
-			v.normal[1] = 1;
-			v.texCoord[0] = level - heightmap->heightAt(v.position[0], v.position[2]);
-			vertices.push_back(v);
+	const auto groundAt = [&sources](float x, float z) {
+		for (const auto& heightmap : sources.heightmaps.heightmaps()) {
+			if (heightmap->loaded() && heightmap->covers(x, z)) {
+				return heightmap->heightAt(x, z);
+			}
 		}
-	}
-	std::vector<uint16_t> indices;
-	for (int y = 0; y < kCells; ++y) {
-		for (int x = 0; x < kCells; ++x) {
-			const auto at = [](int px, int py) { return static_cast<uint16_t>(py * (kCells + 1) + px); };
-			indices.insert(indices.end(), {at(x, y), at(x, y + 1), at(x + 1, y), at(x + 1, y), at(x, y + 1), at(x + 1, y + 1)});
+		return -1e4f;
+	};
+	const auto addGrid = [&](float x0, float z0, float x1, float z1, int cells) {
+		std::vector<Vertex> vertices;
+		vertices.reserve(static_cast<size_t>(cells + 1) * (cells + 1));
+		bool anyWater = false;
+		for (int y = 0; y <= cells; ++y) {
+			for (int x = 0; x <= cells; ++x) {
+				Vertex v {};
+				v.position[0] = x0 + (x1 - x0) * x / cells;
+				v.position[1] = level;
+				v.position[2] = z0 + (z1 - z0) * y / cells;
+				v.normal[1] = 1;
+				v.texCoord[0] = std::min(level - groundAt(v.position[0], v.position[2]), 1000.0f);
+				anyWater = anyWater || v.texCoord[0] > -2.0f;
+				vertices.push_back(v);
+			}
 		}
+		if (!anyWater) {
+			return; // all of it under ground
+		}
+		std::vector<uint16_t> indices;
+		for (int y = 0; y < cells; ++y) {
+			for (int x = 0; x < cells; ++x) {
+				const auto at = [cells](int px, int py) { return static_cast<uint16_t>(py * (cells + 1) + px); };
+				indices.insert(indices.end(), {at(x, y), at(x, y + 1), at(x + 1, y), at(x + 1, y), at(x, y + 1), at(x + 1, y + 1)});
+			}
+		}
+		WaterBlock block;
+		block.vertices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_VERTEX, vertices.data(),
+			static_cast<uint32_t>(vertices.size() * sizeof(Vertex)));
+		block.indices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_INDEX, indices.data(),
+			static_cast<uint32_t>(indices.size() * sizeof(uint16_t)));
+		block.indexCount = static_cast<uint32_t>(indices.size());
+		block.boundsMin = {std::min(x0, x1), level - 1, std::min(z0, z1)};
+		block.boundsMax = {std::max(x0, x1), level + 1, std::max(z0, z1)};
+		m_waterBlocks.push_back(block);
+	};
+	// The cluster's extent: the heightmaps it has.
+	float lo[2] = {primary->originX(), primary->originZ()};
+	float hi[2] = {lo[0] + primary->worldWidth(), lo[1] + primary->worldDepth()};
+	for (const auto& heightmap : sources.heightmaps.heightmaps()) {
+		if (!heightmap->loaded()) {
+			continue;
+		}
+		const bool isPrimary = heightmap.get() == primary;
+		const float x0 = heightmap->originX(), z0 = heightmap->originZ();
+		addGrid(x0, z0, x0 + heightmap->worldWidth(), z0 + heightmap->worldDepth(), isPrimary ? 128 : 64);
+		lo[0] = std::min(lo[0], x0);
+		lo[1] = std::min(lo[1], z0);
+		hi[0] = std::max(hi[0], x0 + heightmap->worldWidth());
+		hi[1] = std::max(hi[1], z0 + heightmap->worldDepth());
 	}
-	m_waterVertices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_VERTEX, vertices.data(),
-		static_cast<uint32_t>(vertices.size() * sizeof(Vertex)));
-	m_waterIndices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_INDEX, indices.data(),
-		static_cast<uint32_t>(indices.size() * sizeof(uint16_t)));
-	m_waterIndexCount = static_cast<uint32_t>(indices.size());
+	// Beyond: four strips to the horizon (the far plane is 6 km).
+	constexpr float kHorizon = 8000.0f;
+	addGrid(-kHorizon, -kHorizon, kHorizon, lo[1], 16);
+	addGrid(-kHorizon, hi[1], kHorizon, kHorizon, 16);
+	addGrid(-kHorizon, lo[1], lo[0], hi[1], 16);
+	addGrid(hi[0], lo[1], kHorizon, hi[1], 16);
+	// The normal map frames (WaterMapFrame0/1 of the 2D variants) and the
+	// level's cube map ("/Water/envmap.dds").
+	for (int frame = 1; frame <= 8; ++frame) {
+		char path[64];
+		std::snprintf(path, sizeof(path), "common/textures/waterbump/Waterbump_%02d.dds", frame);
+		if (!sources.files.exists(path)) {
+			break;
+		}
+		m_waterFrames.push_back(texture(sources.files, path));
+	}
+	m_waterEnvMap = cubeTexture(sources.files, sources.levelPath + "Water/envmap.dds");
 }
 
 // Roads placed by CompiledRoads.con: objects of a RoadCompiled template
@@ -888,7 +1198,11 @@ void LevelRenderer::addObject(const LevelSources& sources, const world::Object& 
 	}
 	m_knownObjects.insert(known, object.id());
 	if (const world::ObjectTemplate* objectTemplate = object.objectTemplate()) {
+		const size_t first = m_instances.size();
 		addTemplate(sources, *objectTemplate, Mat4 {}, objectTransform(object.position(), object.rotation()), object.id(), 0);
+		for (size_t i = first; i < m_instances.size(); ++i) {
+			m_instances[i].overgrowth = object.isOvergrowth() && m_overgrowthCloseDistance > 0;
+		}
 	}
 }
 
@@ -1225,6 +1539,166 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 	m_gpu.flushUploads();
 }
 
+// The lights of this frame: the effect managers' LightSources, the ones
+// nearest the camera first (the shaders take kMaxPointLights).
+void LevelRenderer::collectPointLights(const Camera& camera)
+{
+	m_pointLights.clear();
+	if (!m_sources) {
+		return;
+	}
+	std::vector<std::pair<float, effects::PointLight>> found;
+	for (const effects::EffectManager* manager :
+		{m_sources->effects, m_sources->objectEffects, m_hasFirstPerson ? m_firstPerson.effects : nullptr}) {
+		if (!manager) {
+			continue;
+		}
+		for (const effects::PointLight& light : manager->lights()) {
+			const Vec3f d = Vec3f {light.position.x, light.position.y, light.position.z} - camera.position;
+			found.push_back({std::sqrt(dot(d, d)) - light.range2, light});
+		}
+	}
+	std::stable_sort(found.begin(), found.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+	for (size_t i = 0; i < found.size() && i < static_cast<size_t>(kMaxPointLights); ++i) {
+		const effects::PointLight& l = found[i].second;
+		m_pointLights.push_back({l.position.x, l.position.y, l.position.z, l.range2, l.color.x, l.color.y, l.color.z, l.range1});
+	}
+}
+
+void LevelRenderer::applyPointLights(LightingUniforms& uniforms) const
+{
+	uniforms.lightCount[0] = static_cast<float>(m_pointLights.size());
+	for (size_t i = 0; i < m_pointLights.size(); ++i) {
+		std::copy(m_pointLights[i].begin(), m_pointLights[i].begin() + 4, uniforms.lightPosition[i]);
+		std::copy(m_pointLights[i].begin() + 4, m_pointLights[i].end(), uniforms.lightColor[i]);
+	}
+}
+
+// The decals as squares on their surfaces, lifted off them a little.
+void LevelRenderer::buildDecals()
+{
+	m_decalGroups.clear();
+	if (m_decalVertices) {
+		SDL_ReleaseGPUBuffer(m_gpu.device(), m_decalVertices);
+		m_decalVertices = nullptr;
+	}
+	if (!m_sources || !m_sources->effects || m_sources->effects->decals().empty()) {
+		return;
+	}
+	std::vector<Vertex> vertices;
+	for (const effects::Decal& decal : m_sources->effects->decals()) {
+		SDL_GPUTexture* image = texture(m_sources->files, decal.texture + ".dds");
+		if (!image) {
+			continue;
+		}
+		const effects::Vec3 n = decal.normal;
+		const effects::Vec3 u = decal.tangent * (decal.size * 0.5f);
+		const effects::Vec3 v = physics::cross(n, decal.tangent) * (decal.size * 0.5f);
+		const effects::Vec3 centre = decal.position + n * 0.02f;
+		const float corners[6][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, -1}, {1, 1}, {-1, 1}};
+		const uint32_t first = static_cast<uint32_t>(vertices.size());
+		for (const auto& c : corners) {
+			const effects::Vec3 p = centre + u * c[0] + v * c[1];
+			Vertex vertex {};
+			vertex.position[0] = p.x;
+			vertex.position[1] = p.y;
+			vertex.position[2] = p.z;
+			vertex.normal[0] = n.x;
+			vertex.normal[1] = n.y;
+			vertex.normal[2] = n.z;
+			vertex.texCoord[0] = c[0] < 0 ? decal.frame[0] : decal.frame[2];
+			vertex.texCoord[1] = c[1] < 0 ? decal.frame[3] : decal.frame[1];
+			vertex.lightmapCoord[0] = decal.color.x;
+			vertex.lightmapCoord[1] = decal.color.y;
+			vertex.part = decal.color.z;
+			vertex.weight = 1;
+			vertices.push_back(vertex);
+		}
+		if (!m_decalGroups.empty() && m_decalGroups.back().texture == image) {
+			m_decalGroups.back().vertexCount += 6;
+		} else {
+			m_decalGroups.push_back({image, false, first, 6});
+		}
+	}
+	if (vertices.empty()) {
+		m_decalGroups.clear();
+		return;
+	}
+	m_decalVertices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_VERTEX, vertices.data(),
+		static_cast<uint32_t>(vertices.size() * sizeof(Vertex)));
+	m_gpu.flushUploads();
+}
+
+// Each mesh particle draws its system's mesh, scaled, turned and placed,
+// its texture times the particle's colour and alpha: blended and lit as a
+// blended mesh material, or added (MeshParticleMesh.fx's Diffuse and
+// Additive techniques).
+void LevelRenderer::drawMeshParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass,
+	const Mat4& viewProjection, const scene::LightSettings& lights,
+	std::initializer_list<const effects::EffectManager*> managers)
+{
+	if (!m_sources) {
+		return;
+	}
+	const float seconds = static_cast<float>(SDL_GetTicks() - m_startTicks) / 1000.0f;
+	SDL_GPUGraphicsPipeline* boundPipeline = nullptr;
+	for (const effects::EffectManager* manager : managers) {
+		if (!manager) {
+			continue;
+		}
+		manager->forEachMeshGroup([&](const std::string& geometry, bool additive,
+									  const std::vector<effects::MeshSprite>& particles) {
+			const GpuMesh* particleMesh = mesh(*m_sources, geometry);
+			if (!particleMesh) {
+				return;
+			}
+			SDL_GPUGraphicsPipeline* pipeline = additive ? m_gpu.additiveMeshPipeline() : m_gpu.fadedMeshPipeline();
+			if (pipeline != boundPipeline) {
+				SDL_BindGPUGraphicsPipeline(pass, pipeline);
+				boundPipeline = pipeline;
+			}
+			SDL_GPUBufferBinding vertexBinding {particleMesh->vertices, 0};
+			SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+			SDL_GPUBufferBinding indexBinding {particleMesh->indices, 0};
+			SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+			LightingUniforms base = lighting(lights, lights.sunColor, lights.skyColor, 0, false);
+			applyPointLights(base);
+			for (const effects::MeshSprite& particle : particles) {
+				Mat4 world;
+				for (int row = 0; row < 3; ++row) {
+					const effects::Vec3& r = particle.rotation.rows[static_cast<size_t>(row)];
+					world.at(row, 0) = r.x * particle.size;
+					world.at(row, 1) = r.y * particle.size;
+					world.at(row, 2) = r.z * particle.size;
+				}
+				world.at(3, 0) = particle.position.x;
+				world.at(3, 1) = particle.position.y;
+				world.at(3, 2) = particle.position.z;
+				TransformUniforms transforms {world * viewProjection, world, {1, 1, 0, 0}, {}};
+				SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
+				for (const Submesh& submesh : particleMesh->submeshes) {
+					LightingUniforms uniforms = base;
+					uniforms.material[2] = additive ? kMaterialAdditive : kMaterialBlended;
+					uniforms.material[3] = std::max(particle.color[3], 1e-3f);
+					uniforms.uvOffset[0] = scrollOffset(submesh.uvScroll[0], seconds);
+					uniforms.uvOffset[1] = scrollOffset(submesh.uvScroll[1], seconds);
+					std::copy(particle.color.begin(), particle.color.begin() + 3, uniforms.tint);
+					SDL_PushGPUFragmentUniformData(commands, 0, &uniforms, sizeof(uniforms));
+					SDL_GPUTextureSamplerBinding samplers[5] = {
+						{submesh.texture, m_gpu.repeatSampler()},
+						{m_gpu.whiteTexture(), m_gpu.clampSampler()},
+						{m_gpu.whiteTexture(), m_gpu.repeatSampler()},
+						{m_gpu.whiteTexture(), m_gpu.repeatSampler()},
+						{m_gpu.whiteTexture(), m_gpu.repeatSampler()},
+					};
+					SDL_BindGPUFragmentSamplers(pass, 0, samplers, 5);
+					SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
+				}
+			}
+		});
+	}
+}
+
 void LevelRenderer::drawParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Mat4& viewProjection,
 	const Camera& camera, const scene::LightSettings& lights, SDL_GPUBuffer* buffer,
 	const std::vector<ParticleGroup>& groups)
@@ -1260,29 +1734,184 @@ void LevelRenderer::drawParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderP
 	}
 }
 
+// Lightmaps are named after the geometry, the LOD and the position
+// truncated to whole metres ("<geometry>=<lod, two digits>=<x>=<y>=<z>").
+void LevelRenderer::lightmapFor(const LevelSources& sources, const std::string& geometry, int lod, const Mat4& world,
+	SDL_GPUTexture*& lightmap, float transform[4])
+{
+	lightmap = nullptr;
+	for (int axis = 0; axis < 3; ++axis) {
+		if (!(std::fabs(world.at(3, axis)) < 1e6f)) {
+			return; // somewhere no lightmap is
+		}
+	}
+	char lodText[8];
+	std::snprintf(lodText, sizeof(lodText), "=%02d=", lod);
+	std::ostringstream key;
+	key << lower(geometry) << lodText << static_cast<int>(world.at(3, 0)) << '=' << static_cast<int>(world.at(3, 1))
+		<< '=' << static_cast<int>(world.at(3, 2));
+	const auto entry = m_lightmapAtlas.find(key.str());
+	lightmap = nullptr;
+	if (entry == m_lightmapAtlas.end()) {
+		return;
+	}
+	lightmap = texture(sources.files, entry->second.atlas);
+	if (lightmap) {
+		transform[0] = entry->second.size[0];
+		transform[1] = entry->second.size[1];
+		transform[2] = entry->second.offset[0];
+		transform[3] = entry->second.offset[1];
+	}
+}
+
+// An instance's sphere in the world: its parts' spheres where they are now.
+BoundingSphere LevelRenderer::instanceBounds(const Instance& instance, const GpuMesh& mesh) const
+{
+	if (mesh.skinned || mesh.bounds.radius < 0) {
+		return {}; // unknown: soldiers are posed by their skeletons
+	}
+	if (!mesh.bundled || instance.parts.empty()) {
+		return transformSphere(mesh.bounds, instance.world);
+	}
+	// The parts' spheres, each moved by its part and the object, in one box.
+	bool any = false;
+	Vec3f lo, hi;
+	for (size_t part = 0; part < mesh.partBounds.size() && part < instance.parts.size(); ++part) {
+		if (mesh.partBounds[part].radius < 0) {
+			continue;
+		}
+		const BoundingSphere b = transformSphere(mesh.partBounds[part], instance.parts[part] * instance.world);
+		const Vec3f r {b.radius, b.radius, b.radius};
+		lo = any ? Vec3f {std::fmin(lo.x, b.center.x - b.radius), std::fmin(lo.y, b.center.y - b.radius),
+					   std::fmin(lo.z, b.center.z - b.radius)}
+				 : b.center - r;
+		hi = any ? Vec3f {std::fmax(hi.x, b.center.x + b.radius), std::fmax(hi.y, b.center.y + b.radius),
+					   std::fmax(hi.z, b.center.z + b.radius)}
+				 : b.center + r;
+		any = true;
+	}
+	if (!any) {
+		return transformSphere(mesh.bounds, instance.world);
+	}
+	BoundingSphere all;
+	all.center = (lo + hi) * 0.5f;
+	const Vec3f half = (hi - lo) * 0.5f;
+	all.radius = std::sqrt(dot(half, half));
+	return all;
+}
+
+// The instances the world pass draws: those in the view, each with the LOD
+// its distance asks for (the exterior's; a cockpit keeps its own).
+void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProjection)
+{
+	m_drawList.clear();
+	m_culledInstances = 0;
+	const Frustum frustum = Frustum::fromViewProjection(viewProjection);
+	bool uploaded = false;
+	for (Instance& instance : m_instances) {
+		if (instance.hidden || instance.fade <= 0.0f) {
+			continue;
+		}
+		const BoundingSphere sphere = instanceBounds(instance, *instance.mesh);
+		if (!frustum.containsSphere(sphere.center, sphere.radius)) {
+			++m_culledInstances;
+			continue;
+		}
+		DrawItem item {&instance, instance.mesh, instance.lightmap, instance.lightmapTransform};
+		const GpuMesh& base = *instance.mesh;
+		if (instance.overgrowth && m_sources) {
+			const Vec3f origin {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
+			const Vec3f d = (sphere.radius >= 0 ? sphere.center : origin) - camera.position;
+			if (dot(d, d) > m_overgrowthCloseDistance * m_overgrowthCloseDistance) {
+				Instance::Lod& entry = instance.overgrowthLod;
+				if (!entry.resolved) {
+					entry.resolved = true;
+					if (m_sources->geometries.find(instance.geometry + "_lod")) {
+						entry.mesh = mesh(*m_sources, instance.geometry + "_lod");
+					}
+					uploaded = true;
+				}
+				if (entry.mesh) {
+					item.mesh = entry.mesh;
+					item.lightmap = nullptr;
+					m_drawList.push_back(item);
+					continue;
+				}
+			}
+		}
+		if (m_sources && instance.shownGeometry < 0 && base.lodCount > 1 && !instance.geometry.empty()) {
+			const Vec3f origin {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
+			const Vec3f toCamera = (sphere.radius >= 0 ? sphere.center : origin) - camera.position;
+			const float distance = std::sqrt(dot(toCamera, toCamera));
+			const std::vector<float> distances = base.lodDistances.empty()
+				? defaultLodDistances(std::fmax(sphere.radius, 1.0f), static_cast<int>(base.lodCount))
+				: base.lodDistances;
+			const int lod = lodForDistance(distance, distances, static_cast<int>(base.lodCount));
+			if (lod > 0) {
+				instance.lods.resize(base.lodCount);
+				Instance::Lod& entry = instance.lods[static_cast<size_t>(lod)];
+				if (!entry.resolved) {
+					entry.resolved = true;
+					entry.mesh = mesh(*m_sources, instance.geometry, -1, lod);
+					if (instance.lightmap) {
+						lightmapFor(*m_sources, instance.geometry, lod, instance.world, entry.lightmap, entry.lightmapTransform);
+					}
+					uploaded = true;
+				}
+				if (entry.mesh) {
+					// A LOD without its own lightmap is lit as an unlightmapped mesh.
+					item.mesh = entry.mesh;
+					item.lightmap = entry.lightmap;
+					item.lightmapTransform = entry.lightmapTransform;
+				}
+			}
+		}
+		m_drawList.push_back(item);
+	}
+	if (uploaded) {
+		m_gpu.flushUploads();
+	}
+}
+
 void LevelRenderer::build(const LevelSources& sources)
 {
 	m_startTicks = SDL_GetTicks();
+	const auto progress = [&sources](float done) {
+		if (sources.buildProgress) {
+			sources.buildProgress(done);
+		}
+	};
 	loadLightmapAtlas(sources);
+	loadOvergrowth(sources);
 	buildTerrain(sources);
+	progress(0.2f);
 	buildSky(sources);
 	buildWater(sources);
 	buildRoads(sources);
+	progress(0.3f);
 	buildUndergrowth(sources);
+	progress(0.4f);
 	m_sources = &sources;
 	Vec3f sum;
 	size_t placed = 0;
+	const size_t objectCount = sources.objects.objects().size();
+	size_t done = 0;
 	for (const auto& object : sources.objects.objects()) {
+		if (++done % 256 == 0) {
+			progress(0.4f + 0.6f * static_cast<float>(done) / static_cast<float>(objectCount));
+		}
 		const size_t before = m_instances.size();
 		addObject(sources, *object);
-		if (m_instances.size() > before) {
-			sum = sum + Vec3f {object->position().x, object->position().y, object->position().z};
+		const Vec3f at {object->position().x, object->position().y, object->position().z};
+		if (m_instances.size() > before && std::fabs(at.x) < 1e5f && std::fabs(at.y) < 1e5f && std::fabs(at.z) < 1e5f) {
+			sum = sum + at;
 			++placed;
 		}
 	}
 	m_center = placed ? sum * (1.0f / placed) : Vec3f {};
 	m_stats.instances = m_instances.size();
 	m_gpu.flushUploads();
+	progress(1);
 }
 
 Camera LevelRenderer::suggestedCamera() const
@@ -1312,6 +1941,18 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	depthTarget.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
 	updateUndergrowth(camera);
 	buildParticles(camera);
+	buildDecals();
+	// The mesh particles' meshes, loaded before the pass begins.
+	if (m_sources) {
+		for (const effects::EffectManager* manager : {m_sources->effects, m_sources->objectEffects}) {
+			if (manager) {
+				manager->forEachMeshGroup([&](const std::string& geometry, bool, const std::vector<effects::MeshSprite>&) {
+					mesh(*m_sources, geometry);
+				});
+			}
+		}
+		m_gpu.flushUploads();
+	}
 	// The first-person models, loaded before the pass begins.
 	m_firstPerson = FirstPersonScene {};
 	m_hasFirstPerson = m_sources && m_sources->firstPerson && m_sources->firstPerson(m_firstPerson);
@@ -1323,16 +1964,23 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	}
 	buildParticleBuffer({m_hasFirstPerson ? m_firstPerson.effects : nullptr}, m_firstPersonParticleVertices,
 		m_firstPersonParticleGroups);
+	collectPointLights(camera);
+	if (m_hasFirstPerson && m_firstPerson.effects) {
+		m_firstPerson.effects->forEachMeshGroup([&](const std::string& geometry, bool, const std::vector<effects::MeshSprite>&) {
+			mesh(*m_sources, geometry);
+		});
+		m_gpu.flushUploads();
+	}
 	buildOverlay();
 	// The menu keeps its own clock: it plays with or without a HUD.
 	const uint64_t now = SDL_GetTicks();
 	const float menuSeconds = m_lastMenuTicks ? static_cast<float>(now - m_lastMenuTicks) / 1000.0f : 0.0f;
 	m_lastMenuTicks = now;
 	buildMenu(menuSeconds);
-	SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, &colorTarget, 1, &depthTarget);
-
 	const Mat4 viewProjection = camera.view() *
 		Mat4::perspective(camera.fovY, static_cast<float>(target.width) / target.height, camera.nearPlane, 6000.0f);
+	prepareInstances(camera, viewProjection);
+	SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, &colorTarget, 1, &depthTarget);
 
 	// Sky dome around the camera, unlit and unfogged, behind everything.
 	if (m_skyMesh) {
@@ -1367,29 +2015,38 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// script values are the editor's (the game doesn't have them).
 	const auto& terrainSun = m_terrainColorsFromData ? m_terrainSunColor : lights.terrainSunColor;
 	const auto& terrainGI = m_terrainColorsFromData ? m_terrainGIColor : lights.terrainGIColor;
-	const LightingUniforms terrainLit = lighting(lights, terrainSun, terrainGI, 0, true);
-	const LightingUniforms terrainUnlit = lighting(lights, terrainSun, terrainGI, 0, false);
+	LightingUniforms terrainLit = lighting(lights, terrainSun, terrainGI, 0, true);
+	LightingUniforms terrainUnlit = lighting(lights, terrainSun, terrainGI, 0, false);
+	applyPointLights(terrainLit);
+	applyPointLights(terrainUnlit);
 	TransformUniforms transforms {viewProjection, Mat4 {}, {1, 1, 0, 0}, {}};
 	SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
 	if (m_terrainIndices) {
 		SDL_GPUBufferBinding indexBinding {m_terrainIndices, 0};
 		SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
 	}
+	const Frustum frustum = Frustum::fromViewProjection(viewProjection);
+	TerrainDetailUniforms detail {};
+	for (int i = 0; i < kMaxDetailLayers; ++i) {
+		detail.tiling[i] = m_detailTiling[i];
+	}
+	detail.detailFade[0] = kDetailFadeStart;
+	detail.detailFade[1] = kDetailFadeEnd;
+	std::copy(std::begin(m_farTiling), std::end(m_farTiling), detail.farTiling);
+	detail.farScale[0] = m_terrainExtent > 0 ? 1.0f / m_terrainExtent : 0.0f;
+	detail.farScale[1] = kLowDetailBlendBias;
+	detail.farScale[2] = m_lowDetailTexture ? 1.0f : 0.0f;
 	for (const TerrainPatch& patch : m_terrain) {
+		if (!frustum.containsBox(patch.boundsMin, patch.boundsMax)) {
+			continue;
+		}
 		SDL_GPUBufferBinding vertexBinding {patch.vertices, 0};
 		SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
 		SDL_PushGPUFragmentUniformData(commands, 0, patch.lightmap ? &terrainLit : &terrainUnlit, sizeof(terrainLit));
-		TerrainDetailUniforms detail {};
-		for (int i = 0; i < kMaxDetailLayers; ++i) {
-			detail.tiling[i] = m_detailTiling[i];
-		}
-		const bool hasDetail = patch.detailWeights[0] != nullptr;
-		detail.detailFade[0] = kDetailFadeStart;
-		detail.detailFade[1] = kDetailFadeEnd;
-		detail.detailFade[2] = hasDetail ? 1.0f : 0.0f;
+		detail.detailFade[2] = patch.detailWeights[0] != nullptr ? 1.0f : 0.0f;
 		SDL_PushGPUFragmentUniformData(commands, 1, &detail, sizeof(detail));
 		const auto orBlack = [this](SDL_GPUTexture* t) { return t ? t : m_gpu.blackTexture(); };
-		SDL_GPUTextureSamplerBinding samplers[4 + kMaxDetailLayers] = {
+		SDL_GPUTextureSamplerBinding samplers[5 + kMaxDetailLayers] = {
 			{patch.colormap ? patch.colormap : m_gpu.whiteTexture(), m_gpu.clampSampler()},
 			{patch.lightmap ? patch.lightmap : m_gpu.whiteTexture(), m_gpu.clampSampler()},
 			{orBlack(patch.detailWeights[0]), m_gpu.clampSampler()},
@@ -1398,8 +2055,32 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		for (int i = 0; i < kMaxDetailLayers; ++i) {
 			samplers[4 + i] = {m_detailLayers[i] ? m_detailLayers[i] : m_gpu.whiteTexture(), m_gpu.repeatSampler()};
 		}
-		SDL_BindGPUFragmentSamplers(pass, 0, samplers, 4 + kMaxDetailLayers);
+		samplers[4 + kMaxDetailLayers] = {m_lowDetailTexture ? m_lowDetailTexture : m_gpu.whiteTexture(), m_gpu.repeatSampler()};
+		SDL_BindGPUFragmentSamplers(pass, 0, samplers, 5 + kMaxDetailLayers);
 		SDL_DrawGPUIndexedPrimitives(pass, m_terrainIndexCount, 1, 0, 0, 0);
+	}
+	// The surrounding terrain.
+	if (!m_surrounding.empty()) {
+		SDL_BindGPUGraphicsPipeline(pass, m_gpu.surroundingPipeline());
+		SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
+		SDL_PushGPUFragmentUniformData(commands, 0, &terrainUnlit, sizeof(terrainUnlit));
+		SDL_PushGPUFragmentUniformData(commands, 1, &detail, sizeof(detail));
+		SDL_GPUBufferBinding indexBinding {m_surroundingIndices, 0};
+		SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+		for (const SurroundingPatch& patch : m_surrounding) {
+			if (!frustum.containsBox(patch.boundsMin, patch.boundsMax)) {
+				continue;
+			}
+			SDL_GPUBufferBinding vertexBinding {patch.vertices, 0};
+			SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+			SDL_GPUTextureSamplerBinding samplers[3] = {
+				{patch.colormap, m_gpu.clampSampler()},
+				{patch.lowComponent ? patch.lowComponent : m_gpu.blackTexture(), m_gpu.clampSampler()},
+				{m_lowDetailTexture ? m_lowDetailTexture : m_gpu.whiteTexture(), m_gpu.repeatSampler()},
+			};
+			SDL_BindGPUFragmentSamplers(pass, 0, samplers, 3);
+			SDL_DrawGPUIndexedPrimitives(pass, m_surroundingIndexCount, 1, 0, 0, 0);
+		}
 	}
 
 	// Roads, once per terrain patch they overlap, lit by that patch's lightmap.
@@ -1449,24 +2130,30 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// RSMTTransparency sorted by distance, RSMTAdditive, the particles).
 	SDL_BindGPUGraphicsPipeline(pass, m_gpu.meshPipeline());
 	// Lightmapped statics use the static sun/sky colors.
-	const LightingUniforms uniformsFor[2][2] = {
+	LightingUniforms uniformsFor[2][2] = {
 		{lighting(lights, lights.sunColor, lights.skyColor, 0, false),
 			lighting(lights, lights.sunColor, lights.skyColor, 0.5f, false)},
 		{lighting(lights, lights.staticSunColor, lights.staticSkyColor, 0, true),
 			lighting(lights, lights.staticSunColor, lights.staticSkyColor, 0.5f, true)},
 	};
+	for (auto& row : uniformsFor) {
+		for (LightingUniforms& uniforms : row) {
+			applyPointLights(uniforms);
+		}
+	}
 	const float seconds = static_cast<float>(SDL_GetTicks() - m_startTicks) / 1000.0f;
 	const GpuMesh* bound = nullptr;
-	const auto drawInstance = [&](const Instance& instance, MeshQueue queue) {
+	const auto drawInstance = [&](const DrawItem& item, MeshQueue queue) {
+		const Instance& instance = *item.instance;
 		bool any = false;
-		for (const Submesh& submesh : instance.mesh->submeshes) {
+		for (const Submesh& submesh : item.mesh->submeshes) {
 			any = any || queueOf(submesh, instance.fade) == queue;
 		}
 		if (!any) {
 			return;
 		}
-		if (instance.mesh != bound) {
-			bound = instance.mesh;
+		if (item.mesh != bound) {
+			bound = item.mesh;
 			SDL_GPUBufferBinding vertexBinding {bound->vertices, 0};
 			SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
 			SDL_GPUBufferBinding indexBinding {bound->indices, 0};
@@ -1477,10 +2164,9 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		for (int i = 0; i < kMaxMeshParts; ++i) {
 			transforms.parts[i] = instance.parts.empty() ? Mat4 {} : instance.parts[static_cast<size_t>(i)];
 		}
-		std::copy(std::begin(instance.lightmapTransform), std::end(instance.lightmapTransform),
-			transforms.lightmapTransform);
+		std::copy(item.lightmapTransform, item.lightmapTransform + 4, transforms.lightmapTransform);
 		SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
-		const bool lightmapped = instance.lightmap != nullptr;
+		const bool lightmapped = item.lightmap != nullptr;
 		std::vector<anim::Matrix> pose;
 		if (bound->skinned && instance.skeleton
 			&& !(m_sources && m_sources->skeletonPose && instance.object != 0
@@ -1509,7 +2195,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			const auto orWhite = [this](SDL_GPUTexture* t) { return t ? t : m_gpu.whiteTexture(); };
 			SDL_GPUTextureSamplerBinding samplers[5] = {
 				{submesh.texture, m_gpu.repeatSampler()},
-				{lightmapped ? instance.lightmap : m_gpu.whiteTexture(), m_gpu.clampSampler()},
+				{lightmapped ? item.lightmap : m_gpu.whiteTexture(), m_gpu.clampSampler()},
 				{orWhite(submesh.detail), m_gpu.repeatSampler()},
 				{orWhite(submesh.dirt), m_gpu.repeatSampler()},
 				{orWhite(submesh.crack), m_gpu.repeatSampler()},
@@ -1518,52 +2204,87 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
 		}
 	};
-	std::vector<const Instance*> visible;
-	for (const Instance& instance : m_instances) {
-		if (!instance.hidden && instance.fade > 0.0f) {
-			visible.push_back(&instance);
-			drawInstance(instance, MeshQueue::Opaque);
+	for (const DrawItem& item : m_drawList) {
+		drawInstance(item, MeshQueue::Opaque);
+	}
+	// Decals over the opaque surfaces.
+	if (m_decalVertices && !m_decalGroups.empty()) {
+		SDL_BindGPUGraphicsPipeline(pass, m_gpu.decalPipeline());
+		const LightingUniforms decalLighting = lighting(lights, lights.sunColor, lights.skyColor, 0, false);
+		SDL_PushGPUFragmentUniformData(commands, 0, &decalLighting, sizeof(decalLighting));
+		TransformUniforms decalTransforms {viewProjection, Mat4 {}, {1, 1, 0, 0}, {}};
+		SDL_PushGPUVertexUniformData(commands, 0, &decalTransforms, sizeof(decalTransforms));
+		SDL_GPUBufferBinding vertexBinding {m_decalVertices, 0};
+		SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+		for (const ParticleGroup& group : m_decalGroups) {
+			SDL_GPUTextureSamplerBinding sampler {group.texture, m_gpu.clampSampler()};
+			SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
+			SDL_DrawGPUPrimitives(pass, group.vertexCount, 1, group.firstVertex, 0);
 		}
+		bound = nullptr;
 	}
 
 	// Water, blended over what is below it.
-	if (m_waterVertices && m_water) {
+	if (!m_waterBlocks.empty() && m_water) {
 		SDL_BindGPUGraphicsPipeline(pass, m_gpu.waterPipeline());
 		const LightingUniforms waterLighting = lighting(lights, lights.sunColor, lights.skyColor, 0, false);
 		SDL_PushGPUFragmentUniformData(commands, 0, &waterLighting, sizeof(waterLighting));
+		// WaterCycleTime runs through the frames at renderer.waterAnimSpeed
+		// (100: four frames a second, the rewrite's rate), the texture
+		// scrolls by renderer.waterScroll (a hundredth of it a second).
+		const float frames = static_cast<float>(std::max<size_t>(m_waterFrames.size(), 1));
+		const float cycle = std::fmod(seconds * m_water->animSpeed * 0.04f, frames);
+		const size_t frame0 = static_cast<size_t>(cycle) % std::max<size_t>(m_waterFrames.size(), 1);
+		const size_t frame1 = (frame0 + 1) % std::max<size_t>(m_waterFrames.size(), 1);
 		const WaterUniforms water {
 			{camera.position.x, camera.position.y, camera.position.z, seconds},
 			{m_water->color[0], m_water->color[1], m_water->color[2], 1},
 			{m_water->specularColor[0], m_water->specularColor[1], m_water->specularColor[2], m_water->specularColor[3]},
-			{m_water->alphaAdd, m_water->alphaHeightMul, m_water->specularPower, 0},
+			{m_water->alphaAdd, m_water->alphaHeightMul, m_water->specularPower, m_waterEnvMap ? 1.0f : 0.0f},
+			{scrollOffset(m_water->scroll[0] * 0.01f, seconds), scrollOffset(m_water->scroll[1] * 0.01f, seconds),
+				cycle - std::floor(cycle), 0},
 		};
 		SDL_PushGPUFragmentUniformData(commands, 1, &water, sizeof(water));
 		TransformUniforms waterTransforms {viewProjection, Mat4 {}, {1, 1, 0, 0}, {}};
 		SDL_PushGPUVertexUniformData(commands, 0, &waterTransforms, sizeof(waterTransforms));
-		SDL_GPUBufferBinding vertexBinding {m_waterVertices, 0};
-		SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
-		SDL_GPUBufferBinding indexBinding {m_waterIndices, 0};
-		SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
-		SDL_DrawGPUIndexedPrimitives(pass, m_waterIndexCount, 1, 0, 0, 0);
+		SDL_GPUTexture* flat = m_gpu.whiteTexture();
+		SDL_GPUTextureSamplerBinding samplers[3] = {
+			{m_waterFrames.empty() ? flat : m_waterFrames[frame0], m_gpu.repeatSampler()},
+			{m_waterFrames.empty() ? flat : m_waterFrames[frame1], m_gpu.repeatSampler()},
+			{m_waterEnvMap ? m_waterEnvMap : m_gpu.whiteCubeTexture(), m_gpu.clampSampler()},
+		};
+		SDL_BindGPUFragmentSamplers(pass, 0, samplers, 3);
+		for (const WaterBlock& block : m_waterBlocks) {
+			if (!frustum.containsBox(block.boundsMin, block.boundsMax)) {
+				continue;
+			}
+			SDL_GPUBufferBinding vertexBinding {block.vertices, 0};
+			SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+			SDL_GPUBufferBinding indexBinding {block.indices, 0};
+			SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+			SDL_DrawGPUIndexedPrimitives(pass, block.indexCount, 1, 0, 0, 0);
+		}
 		bound = nullptr;
 	}
 
 	// The transparent materials, farthest object first.
 	SDL_BindGPUGraphicsPipeline(pass, m_gpu.fadedMeshPipeline());
-	std::vector<std::pair<float, const Instance*>> transparent;
-	for (const Instance* instance : visible) {
-		transparent.push_back({transparencyKey(instance->world, camera.position), instance});
+	std::vector<std::pair<float, const DrawItem*>> transparent;
+	for (const DrawItem& item : m_drawList) {
+		transparent.push_back({transparencyKey(item.instance->world, camera.position), &item});
 	}
 	sortBackToFront(transparent);
-	for (const auto& [distance, instance] : transparent) {
-		drawInstance(*instance, MeshQueue::Transparent);
+	for (const auto& [distance, item] : transparent) {
+		drawInstance(*item, MeshQueue::Transparent);
 	}
 	// The additive ones (not sorted: RSMTAdditive keeps its order).
 	SDL_BindGPUGraphicsPipeline(pass, m_gpu.additiveMeshPipeline());
-	for (const Instance* instance : visible) {
-		drawInstance(*instance, MeshQueue::Additive);
+	for (const DrawItem& item : m_drawList) {
+		drawInstance(item, MeshQueue::Additive);
 	}
-	// Particles, after what they are in front of.
+	// Particles, after what they are in front of: the mesh particles, then the sprites.
+	drawMeshParticles(commands, pass, viewProjection, lights,
+		{m_sources ? m_sources->effects : nullptr, m_sources ? m_sources->objectEffects : nullptr});
 	drawParticles(commands, pass, viewProjection, camera, lights, m_particleVertices, m_particleGroups);
 	// The first-person pass: the world's depth cleared, the weapon and arms
 	// drawn with their own projection.
@@ -1620,8 +2341,10 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 {
 	const FirstPersonScene& scene = m_firstPerson;
 	const Mat4 viewProjection = camera.view() * Mat4::perspective(scene.fovY, aspect, scene.nearPlane, scene.farPlane);
-	const LightingUniforms lit[2] = {lighting(lights, lights.sunColor, lights.skyColor, 0, false),
+	LightingUniforms lit[2] = {lighting(lights, lights.sunColor, lights.skyColor, 0, false),
 		lighting(lights, lights.sunColor, lights.skyColor, 0.5f, false)};
+	applyPointLights(lit[0]);
+	applyPointLights(lit[1]);
 	const float seconds = static_cast<float>(SDL_GetTicks() - m_startTicks) / 1000.0f;
 	const auto drawModel = [&](const FirstPersonModel& model, MeshQueue queue) {
 		const GpuMesh* gpuMesh = mesh(*m_sources, model.geometry, model.geometryIndex, model.lod);
@@ -1690,6 +2413,7 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 	}
 	// The first-person particles, then RSMT1PersonTransparency back to front
 	// (the sights' glass, the displays).
+	drawMeshParticles(commands, pass, viewProjection, lights, {scene.effects});
 	drawParticles(commands, pass, viewProjection, camera, lights, m_firstPersonParticleVertices,
 		m_firstPersonParticleGroups);
 	std::vector<std::pair<float, const FirstPersonModel*>> transparent;

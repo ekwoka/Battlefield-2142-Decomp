@@ -19,10 +19,13 @@ bf2142_embed_shaders(Render
 	Shaders/mesh.frag
 	Shaders/terrain.vert
 	Shaders/terrain.frag
+	Shaders/surrounding.frag
 	Shaders/water.vert
 	Shaders/water.frag
 	Shaders/road.vert
 	Shaders/road.frag
+	Shaders/decal.vert
+	Shaders/decal.frag
 	Shaders/undergrowth.vert
 	Shaders/undergrowth.frag
 	Shaders/particle.vert

@@ -216,6 +216,22 @@ Vec3 tyreForce(const EngineSettings& e, const TyreContact& contact, const Vec3& 
 	return (forward * along + right * acrossApplied) * scale;
 }
 
+// The engineType constants (symbols/BF2142.exe.constants.csv), or a number.
+static int engineTypeOf(const std::string& text)
+{
+	static const std::pair<const char*, int> kTypes[] = {{"c_etcar", 2}, {"c_ethelicopter", 33}, {"c_etnewcar", 66},
+		{"c_etnewcar2", 194}, {"c_etnewtank", 70}, {"c_etplane", 1}, {"c_etrocket", 17}, {"c_etship", 9},
+		{"c_ettank", 6}, {"c_ettorpedo", 25}};
+	std::string l = text;
+	std::transform(l.begin(), l.end(), l.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+	for (const auto& [name, value] : kTypes) {
+		if (l == name) {
+			return value;
+		}
+	}
+	return std::atoi(text.c_str());
+}
+
 std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root,
 	const world::ObjectTemplateManager& templates, const physics::CollisionMeshFile* mesh)
 {
@@ -226,17 +242,163 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 		RotationAxis axis;
 		std::string name;
 	};
+	// Where a node hangs: the nearest part above it (-1 the root), its
+	// offset and rotation from that part, the engine above it.
+	struct Place {
+		int part = -1;
+		Vec3 offset;
+		Mat3 rotation;
+		int oldEngine = -1;
+		bool newCar2 = false;
+	};
+	const auto axisOf = [](const world::ObjectTemplate& t, Part& part) {
+		const Vec3 lo = vector(t, "minRotation"), hi = vector(t, "maxRotation"), speed = vector(t, "maxSpeed");
+		const Vec3 accel = vector(t, "acceleration"), decel = vector(t, "deAcceleration");
+		const Vec3 cont = vector(t, "continousRotationSpeed");
+		const float lows[3] = {lo.x, lo.y, lo.z}, highs[3] = {hi.x, hi.y, hi.z}, speeds[3] = {speed.x, speed.y, speed.z};
+		const float accels[3] = {accel.x, accel.y, accel.z}, decels[3] = {decel.x, decel.y, decel.z};
+		const float conts[3] = {cont.x, cont.y, cont.z};
+		const char* inputs[3] = {"inputToYaw", "inputToPitch", "inputToRoll"};
+		for (size_t i = 0; i < 3; ++i) {
+			RotationAxis& a = part.axes[i];
+			a.minRotation = lows[i];
+			a.maxRotation = highs[i];
+			a.maxSpeed = speeds[i];
+			a.acceleration = accels[i];
+			a.deAcceleration = decels[i];
+			a.continuousSpeed = conts[i];
+			a.automaticReset = number(t, "automaticReset", 0) != 0;
+			a.snapToZero = number(t, "snapToZeroOnNoInput", 0) != 0;
+			a.useDeAcceleration = number(t, "useDeAcceleration", 0) != 0;
+			a.capMaxSpeed = number(t, "capMaxSpeed", 0) != 0;
+			a.maxSpeedMod = number(t, "maxSpeedMod", 0);
+			if (const std::string* input = setting(t, inputs[i])) {
+				part.inputs[i] = vehicleInputIndex(*input);
+			}
+			part.moves = part.moves || a.maxSpeed != 0 || a.continuousSpeed != 0;
+		}
+		part.rememberExcess = number(t, "rememberExcessInput", 0) != 0;
+	};
 	// Depth-first over the tree with each node's offset and rotation.
-	const std::function<void(const world::ObjectTemplate&, Vec3, Mat3, Steering, int)> visit =
-		[&](const world::ObjectTemplate& t, Vec3 position, Mat3 rotation, Steering steering, int depth) {
+	const std::function<void(const world::ObjectTemplate&, Vec3, Mat3, Steering, Place, int)> visit =
+		[&](const world::ObjectTemplate& t, Vec3 position, Mat3 rotation, Steering steering, Place place, int depth) {
 			if (depth > 8) {
 				return;
 			}
 			const std::string& type = t.typeName();
-			if (type == "Engine" && !haveEngine) {
-				haveEngine = true;
-				vehicle->m_engine = EngineSettings::fromTemplate(t);
-				vehicle->m_engineOffset = position;
+			const bool isPart = depth > 0
+				&& (type == "RotationalBundle" || type == "Engine" || type == "Wing" || type == "ForceObject"
+					|| type == "MechLegs" || type == "LandingGear" || type == "FloatingBundle");
+			if (isPart) {
+				Part part;
+				part.parent = place.part;
+				part.name = t.name();
+				part.type = type;
+				part.offset = place.offset;
+				part.base = place.rotation;
+				if (type != "ForceObject" && type != "MechLegs") {
+					axisOf(t, part);
+				}
+				vehicle->m_parts.push_back(part);
+				place.part = static_cast<int>(vehicle->m_parts.size()) - 1;
+				place.offset = {};
+				place.rotation = {};
+			}
+			const int self = place.part;
+			if (type == "Engine") {
+				const int engineType = setting(t, "engineType") ? engineTypeOf(*setting(t, "engineType")) : 0;
+				if ((engineType & 0x80) && !haveEngine) {
+					haveEngine = true;
+					vehicle->m_newCar2 = true;
+					vehicle->m_engine = EngineSettings::fromTemplate(t);
+					vehicle->m_engine.engineType = engineType;
+					vehicle->m_engineOffset = position;
+					place.newCar2 = true;
+				} else if (!(engineType & 0x80)) {
+					OldEngine engine;
+					engine.part = self;
+					engine.flags = engineType;
+					engine.settings = EngineSettings::fromTemplate(t);
+					engine.settings.engineType = engineType;
+					// The torque curve's default keys (0x006291d0): 0.7, 0.8 at
+					// 0.1, 0.9 at 0.3, 1 at 0.6, 0.85 at 0.85, 0.7 at 1.
+					const float keys[][2] = {{0, 0.7f}, {0.1f, 0.8f}, {0.3f, 0.9f}, {0.6f, 1.0f}, {0.85f, 0.85f}, {1, 0.7f}};
+					for (size_t i = 0; i <= 100; ++i) {
+						const float x = static_cast<float>(i) / 100.0f;
+						size_t k = 0;
+						while (k + 2 < std::size(keys) && x > keys[k + 1][0]) {
+							++k;
+						}
+						const float f = (x - keys[k][0]) / (keys[k + 1][0] - keys[k][0]);
+						engine.torqueCurve[i] = keys[k][1] + (keys[k + 1][1] - keys[k][1]) * std::clamp(f, 0.0f, 1.0f);
+					}
+					engine.torqueCurve[101] = engine.torqueCurve[100];
+					engine.noPropellerEffectAtSpeed = number(t, "noPropellerEffectAtSpeed", engine.noPropellerEffectAtSpeed);
+					engine.heatIncrement = number(t, "heatIncrement", engine.heatIncrement);
+					engine.coolingFactor = number(t, "coolingFactor", engine.coolingFactor);
+					engine.horizontalSpeedMagnifier = number(t, "horizontalSpeedMagnifier", engine.horizontalSpeedMagnifier);
+					engine.maxAngleOfAttack = number(t, "maxAngleOfAttack", engine.maxAngleOfAttack);
+					engine.defaultAngleOfAttack = number(t, "defaultAngleOfAttack", engine.defaultAngleOfAttack);
+					engine.pureRotational = number(t, "pureRotational", 0) != 0;
+					engine.attackSpeed = number(t, "attackSpeed", engine.attackSpeed);
+					engine.decreaseAngleToZero = number(t, "decreaseAngleToZero", 0) != 0;
+					engine.spinWhenNoEngineInAir = number(t, "spinWhenNoEngineInAir", engine.spinWhenNoEngineInAir);
+					engine.horizontalDampAngle = number(t, "horizontalDampAngle", engine.horizontalDampAngle);
+					engine.horizontalDampAngleFactor = number(t, "horizontalDampAngleFactor", engine.horizontalDampAngleFactor);
+					engine.dampHorizontalVel = number(t, "dampHorizontalVel", engine.dampHorizontalVel);
+					engine.dampHorizontalVelFactor = number(t, "dampHorizontalVelFactor", engine.dampHorizontalVelFactor);
+					engine.decreaseAngleToZeroVerticalVel =
+						number(t, "decreaseAngleToZeroVerticalVel", engine.decreaseAngleToZeroVerticalVel);
+					engine.airFlowAffect = number(t, "airFlowAffect", engine.airFlowAffect);
+					engine.noEffectAtPerpSpeed = number(t, "noEffectAtPerpSpeed", engine.noEffectAtPerpSpeed);
+					engine.trackTurnAcceleration = number(t, "trackTurnAcceleration", engine.trackTurnAcceleration);
+					engine.trackTurnSpeed = number(t, "trackTurnSpeed", engine.trackTurnSpeed);
+					engine.noPowerWhenUpsideDown = number(t, "noPowerWhenUpsideDown", 0) != 0;
+					if (self >= 0) {
+						vehicle->m_parts[static_cast<size_t>(self)].canReverse = number(t, "canReverse", 1) != 0;
+					}
+					vehicle->m_engines.push_back(engine);
+					place.oldEngine = static_cast<int>(vehicle->m_engines.size()) - 1;
+					place.newCar2 = false;
+				}
+			} else if (type == "Wing") {
+				WingPart wing;
+				wing.part = self;
+				wing.wingLift = number(t, "wingLift", 0);
+				wing.flapLift = number(t, "flapLift", 0);
+				wing.pitchOffset = number(t, "pitchOffset", 0);
+				wing.positionOffset = vector(t, "positionOffset");
+				wing.startDelay = number(t, "startDelay", 0);
+				wing.multiply = number(t, "multiply", 1);
+				wing.offsetY = vector(t, "offset").y;
+				vehicle->m_wings.push_back(wing);
+			} else if (type == "ForceObject") {
+				ForcePart force;
+				force.part = self;
+				force.keepUp = number(t, "keepUp", 0) != 0;
+				const char* names[3] = {"regulatePosX", "regulatePosY", "regulatePosZ"};
+				for (size_t i = 0; i < 3; ++i) {
+					const Vec3 v = vector(t, names[i]);
+					force.a[i] = v.x;
+					force.b[i] = v.y;
+					force.regulated[i] = v.x != 0 || v.y != 0;
+				}
+				force.onlyWhenOccupied = number(t, "onlyWhenOccupied", 0) != 0;
+				force.stopWhenUnoccupied = number(t, "stopRegulateWhenUnoccupied", 0) != 0;
+				force.startDelay = number(t, "startDelay", 0);
+				if (const std::string* input = setting(t, "input")) {
+					force.input = vehicleInputIndex(*input);
+				}
+				force.force = number(t, "force", 0);
+				force.constantForce = number(t, "constantForce", 0);
+				force.maxForce = number(t, "maxForceOnObject", 0);
+				vehicle->m_forces.push_back(force);
+			} else if (type == "MechLegs") {
+				vehicle->m_hasLegs = true;
+				vehicle->m_legs.part = self;
+				vehicle->m_legs.length = number(t, "length", vehicle->m_legs.length);
+				vehicle->m_legs.stepHeight = number(t, "stepHeight", vehicle->m_legs.stepHeight);
+				vehicle->m_legs.radius = number(t, "radius", vehicle->m_legs.radius);
 			} else if (type == "RotationalBundle") {
 				const std::string* input = setting(t, "inputToYaw");
 				if (input && *input == "PIYaw") {
@@ -267,6 +429,10 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 				wheel.steerAxis = steering.axis;
 				wheel.spring = t.name();
 				wheel.steering = steering.name;
+				wheel.newCar2 = place.newCar2;
+				wheel.engine = place.oldEngine;
+				wheel.part = self;
+				wheel.gripFlags = static_cast<int>(number(t, "grip", 2));
 				vehicle->m_wheels.push_back(wheel);
 				return;
 			}
@@ -276,15 +442,31 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 					continue;
 				}
 				const Mat3 local = Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z});
-				visit(*childTemplate, position + rotation.transform({child.position.x, child.position.y, child.position.z}),
-					local * rotation, steering, depth + 1);
+				const Vec3 childOffset {child.position.x, child.position.y, child.position.z};
+				Place next = place;
+				next.offset = place.offset + place.rotation.transform(childOffset);
+				next.rotation = local * place.rotation;
+				visit(*childTemplate, position + rotation.transform(childOffset), local * rotation, steering, next,
+					depth + 1);
 			}
 		};
-	visit(root, {}, {}, {}, 0);
-	if (!haveEngine || vehicle->m_wheels.empty()) {
+	visit(root, {}, {}, {}, {}, 0);
+	const bool newCar2Wheels = std::any_of(
+		vehicle->m_wheels.begin(), vehicle->m_wheels.end(), [](const Wheel& w) { return w.newCar2; });
+	if (!(haveEngine && newCar2Wheels) && vehicle->m_engines.empty() && !vehicle->m_hasLegs) {
 		return nullptr;
 	}
 	vehicle->m_mass = number(root, "mass", 1);
+	vehicle->m_sprintFactor = number(root, "sprintFactor", 0);
+	if (const std::string* input = setting(root, "regulateVerticalPosInput")) {
+		vehicle->m_vertical.input = vehicleInputIndex(*input);
+		const Vec3 ab = vector(root, "regulateVerticalPos");
+		vehicle->m_vertical.a = ab.x;
+		vehicle->m_vertical.b = ab.y;
+	}
+	for (Part& part : vehicle->m_parts) {
+		part.rotation = part.base;
+	}
 	return vehicle;
 }
 
@@ -388,9 +570,30 @@ void Vehicle::touchObject(size_t index, float height, const Vec3& normal, const 
 
 void Vehicle::tick(physics::RigidBody& body, const physics::Ground& ground, float seconds, float grip, float gravity)
 {
-	updateEngine(body, seconds);
+	++m_tick;
+	regulateInput(body, gravity);
+	updateParts(seconds);
+	if (m_newCar2) {
+		updateEngine(body, seconds);
+	}
+	for (OldEngine& engine : m_engines) {
+		updateOldEngine(engine, body, ground, seconds, gravity);
+	}
+	if (m_hasLegs) {
+		updateLegs(body, ground, seconds);
+	}
+	for (WingPart& wing : m_wings) {
+		updateWing(wing, body, ground, seconds, gravity);
+	}
+	for (ForcePart& force : m_forces) {
+		updateForce(force, body, seconds);
+	}
 	for (Wheel& wheel : m_wheels) {
-		updateWheel(wheel, body, ground, seconds, grip, gravity);
+		if (wheel.newCar2) {
+			updateWheel(wheel, body, ground, seconds, grip, gravity);
+		} else {
+			updateOldWheel(wheel, body, ground, seconds, grip, gravity);
+		}
 	}
 }
 

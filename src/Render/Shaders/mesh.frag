@@ -12,6 +12,10 @@
 // hasAdditiveAlpha) are the texture unlit, its alpha times the
 // transparency, fogged (RaShaderBMadditive.fx, technique depthAndFog), and
 // their coordinates scroll (frac(GlobalTime * simpleUVTranslation)).
+// Point lights (effect bundles' LightSources) add colour * N.L, full up to
+// attenuationRange1 and fading to nothing at attenuationRange2 (the
+// original reads a radial attenuation table over distance / range,
+// LightManager_r3x0.fx; a linear ramp here).
 // SDL_GPU binds fragment samplers in set 2 and uniform buffers in set 3.
 layout(location = 0) in vec3 inNormal;
 layout(location = 1) in vec2 inTexCoord;
@@ -20,6 +24,7 @@ layout(location = 3) in vec2 inLightmapCoord;
 layout(location = 4) in vec2 inDetailCoord;
 layout(location = 5) in vec2 inDirtCoord;
 layout(location = 6) in vec2 inCrackCoord;
+layout(location = 7) in vec3 inWorldPosition;
 
 layout(set = 2, binding = 0) uniform sampler2D diffuseMap;
 layout(set = 2, binding = 1) uniform sampler2D lightMap;
@@ -36,14 +41,34 @@ layout(set = 3, binding = 0) uniform Lighting {
 					   // z: layers (1 detail, 2 dirt, 4 crack) and the kind
 					   // (8 blended, 16 additive), w: the object's fade (0 =
 					   // none; else the alpha it is blended with)
-	vec4 uvOffset;     // xy: added to the diffuse coordinates (additive scrolling)
+	vec4 uvOffset;     // xy: added to the diffuse coordinates (additive scrolling,
+					   // an atlas's offset); zw: their scale in an atlas (0: none)
+	vec4 tint;         // multiplies the texture (mesh particles' colour)
+	vec4 lightCount;   // x: point lights in use
+	vec4 lightPosition[8]; // xyz, w: the range where it is gone
+	vec4 lightColor[8];    // rgb, w: the range it is full up to
 };
 
 layout(location = 0) out vec4 outColor;
 
+vec3 pointLights(vec3 normal)
+{
+	vec3 sum = vec3(0.0);
+	int count = int(lightCount.x + 0.5);
+	for (int i = 0; i < count && i < 8; ++i) {
+		vec3 toLight = lightPosition[i].xyz - inWorldPosition;
+		float distance = length(toLight);
+		float range1 = lightColor[i].w, range2 = lightPosition[i].w;
+		float attenuation = 1.0 - clamp((distance - range1) / max(range2 - range1, 0.01), 0.0, 1.0);
+		sum += lightColor[i].rgb * attenuation * max(dot(normal, toLight / max(distance, 1e-3)), 0.0);
+	}
+	return sum;
+}
+
 void main()
 {
-	vec4 albedo = texture(diffuseMap, inTexCoord + uvOffset.xy);
+	vec2 atlasScale = uvOffset.z > 0.0 ? uvOffset.zw : vec2(1.0);
+	vec4 albedo = texture(diffuseMap, inTexCoord * atlasScale + uvOffset.xy) * tint;
 	int layers = int(material.z + 0.5);
 	float fade = material.w > 0.0 ? material.w : 1.0;
 	float fog = clamp(inDepth / fogColor.w, 0.0, 1.0);
@@ -73,6 +98,7 @@ void main()
 	} else {
 		light = skyColor.rgb + sun;
 	}
+	light += pointLights(normal);
 	float alpha = (layers & 8) != 0 ? albedo.a * fade : material.w > 0.0 ? material.w : albedo.a;
 	outColor = vec4(mix(albedo.rgb * light, fogColor.rgb, fog * fog), alpha);
 }

@@ -35,6 +35,7 @@ struct Vertex {
 
 // Uniform blocks (std140-compatible: only vec4 and mat4 members).
 constexpr int kMaxMeshParts = 64;
+constexpr int kMaxPointLights = 8;
 
 struct TransformUniforms {
 	Mat4 worldViewProjection;
@@ -48,7 +49,8 @@ struct WaterUniforms {
 	float cameraPosition[4]; // w: time in seconds
 	float color[4];
 	float specularColor[4];  // w: intensity
-	float parameters[4];     // alpha add, alpha height multiplier, specular power
+	float parameters[4];     // alpha add, alpha height multiplier, specular power, has an env map
+	float animation[4];      // texture scroll xy, frame blend, unused
 };
 
 // Particle vertex shader uniforms.
@@ -76,6 +78,8 @@ struct RoadUniforms {
 struct TerrainDetailUniforms {
 	float tiling[8];     // repeats across a patch, per detail layer
 	float detailFade[4]; // start, end distance, has detail, unused
+	float farTiling[4];  // the low-detail texture: side x, side y, top, y offset
+	float farScale[4];   // 1 / terrain extent, the planes' blend bias, has a low-detail texture, unused
 };
 
 struct LightingUniforms {
@@ -88,6 +92,13 @@ struct LightingUniforms {
 					   // material's kind (kMaterialBlended, kMaterialAdditive);
 					   // w: the object's fade, 0 for none (fadedMeshPipeline)
 	float uvOffset[4] {}; // xy: added to the diffuse texture coordinates (mesh.frag)
+	float tint[4] {1, 1, 1, 1}; // times the texture (mesh.frag: mesh particles' colour)
+	// Point lights (mesh.frag, terrain.frag): count in x; each its position
+	// and the range it is gone at (w), its colour and the range it is full
+	// up to (w).
+	float lightCount[4] {};
+	float lightPosition[kMaxPointLights][4] {};
+	float lightColor[kMaxPointLights][4] {};
 };
 
 // LightingUniforms::material[2] bits beside the layers.
@@ -104,6 +115,9 @@ public:
 	SDL_Window* window() const { return m_window; }
 	SDL_GPUGraphicsPipeline* meshPipeline() const { return m_meshPipeline; }
 	SDL_GPUGraphicsPipeline* terrainPipeline() const { return m_terrainPipeline; }
+	// The surrounding terrain (secondary heightmaps): terrain.vert with
+	// surrounding.frag.
+	SDL_GPUGraphicsPipeline* surroundingPipeline() const { return m_surroundingPipeline; }
 	// Mesh shaders without depth test or write, for the sky dome.
 	SDL_GPUGraphicsPipeline* skyPipeline() const { return m_skyPipeline; }
 	// Meshes fading out (LightingUniforms material.w their alpha): blended,
@@ -118,6 +132,8 @@ public:
 	SDL_GPUGraphicsPipeline* waterPipeline() const { return m_waterPipeline; }
 	// Water's blending plus a depth bias, for road decals.
 	SDL_GPUGraphicsPipeline* roadPipeline() const { return m_roadPipeline; }
+	// The same state for decals (decal.vert / decal.frag).
+	SDL_GPUGraphicsPipeline* decalPipeline() const { return m_decalPipeline; }
 	// Opaque, alpha-tested; undergrowth uniforms in the vertex stage.
 	SDL_GPUGraphicsPipeline* undergrowthPipeline() const { return m_undergrowthPipeline; }
 	// Particles: depth-tested, not written; blended or added.
@@ -144,6 +160,7 @@ public:
 	SDL_GPUSampler* clampSampler() const { return m_clampSampler; }
 	SDL_GPUTexture* whiteTexture() const { return m_white; }
 	SDL_GPUTexture* blackTexture() const { return m_black; }
+	SDL_GPUTexture* whiteCubeTexture() const { return m_whiteCube; }
 	SDL_GPUTextureFormat colorFormat() const { return m_colorFormat; }
 	// Depth with a stencil (the menus' masks): D32_FLOAT_S8_UINT, else
 	// D24_UNORM_S8_UINT (SDL guarantees one of them).
@@ -151,7 +168,8 @@ public:
 
 	// Uploads are recorded into one copy pass and submitted by flushUploads().
 	SDL_GPUBuffer* createBuffer(SDL_GPUBufferUsageFlags usage, const void* data, uint32_t size);
-	SDL_GPUTexture* createTexture(const texture::DdsTexture& texture);
+	// A 2D texture, or with `cube` a cube map (null if the file is the other kind).
+	SDL_GPUTexture* createTexture(const texture::DdsTexture& texture, bool cube = false);
 	SDL_GPUTexture* createRgbaTexture(uint32_t width, uint32_t height, const void* pixels);
 	void flushUploads();
 
@@ -179,11 +197,13 @@ private:
 	SDL_GPUTextureFormat m_colorFormat = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
 	SDL_GPUGraphicsPipeline* m_meshPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_terrainPipeline = nullptr;
+	SDL_GPUGraphicsPipeline* m_surroundingPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_skyPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_fadedMeshPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_additiveMeshPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_waterPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_roadPipeline = nullptr;
+	SDL_GPUGraphicsPipeline* m_decalPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_undergrowthPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_particlePipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_additiveParticlePipeline = nullptr;
@@ -196,6 +216,7 @@ private:
 	SDL_GPUSampler* m_clampSampler = nullptr;
 	SDL_GPUTexture* m_white = nullptr;
 	SDL_GPUTexture* m_black = nullptr;
+	SDL_GPUTexture* m_whiteCube = nullptr;
 	SDL_GPUCommandBuffer* m_uploadCommands = nullptr;
 	SDL_GPUCopyPass* m_uploadPass = nullptr;
 	std::vector<SDL_GPUTransferBuffer*> m_pendingTransfers;

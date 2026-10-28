@@ -21,9 +21,11 @@
 // The node types are BF2142.exe's dice::meme nodes (the exe lays them out;
 // RendDX9.dll only draws the quads they make): compasses
 // (Bf2CompassNode, 0x007e9560), lists (Bf2NewListBoxNode, 0x007de7d0) and
-// the map (Bf2MenuMapNode, 0x00795620) as the exe draws them. What is
-// approximate: the corner roots' positions (the engine places them by the
-// screen size), and object markers and the spawn menu, kept but not drawn.
+// the map (Bf2MenuMapNode, 0x00795620) as the exe draws them; lists with
+// commands take clicks on their rows (the squad and commander menus).
+// What is approximate: the corner roots' positions (the engine places them
+// by the screen size); object markers (the lock-on markers) are kept but
+// not drawn.
 #pragma once
 
 #include "HudFont.h"
@@ -89,6 +91,23 @@ public:
 	// black unless set) and the selected row (-1: none).
 	void setListTextColor(int data, float r, float g, float b, float a);
 	void setListSelection(int data, int row) { m_listSelection[data] = row; }
+	int listSelection(int data) const
+	{
+		const auto it = m_listSelection.find(data);
+		return it == m_listSelection.end() ? -1 : it->second;
+	}
+	// A row's cell text ("" past the row's cells or the list's rows); rows
+	// may carry cells past the columns drawn (the squad menu's id and row
+	// type in cells 13 and 14).
+	std::string listCell(int data, int row, int column) const;
+	// The last row clicked in a list with commands (setListNodeConCmd):
+	// its data source, row and the column under the pointer.
+	struct ListClick {
+		int data = -1;
+		int row = -1;
+		int column = -1;
+	};
+	const ListClick& lastListClick() const { return m_listClick; }
 	// The map node (createMapNode, Bf2MenuMapNode): the level's map (a
 	// texture covering the terrain from originX/originZ, width by depth
 	// metres, north up) and what to mark on it, in world coordinates.
@@ -178,6 +197,16 @@ private:
 		const Node* node;
 	};
 	std::vector<ButtonHit> m_buttonHits;
+	struct ListHit {
+		float x0, y0, x1, y1;
+		const Node* node;
+		int row;
+		std::vector<float> columns; // each column's left edge
+	};
+	std::vector<ListHit> m_listHits;
+	ListClick m_listClick;
+	float m_listClickTime = -1;
+	float m_clock = 0; // seconds of frames drawn
 	float m_pointer[2] = {-1, -1};
 	std::function<void(const std::string&)> m_run;
 

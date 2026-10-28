@@ -1,12 +1,14 @@
 // Draws a loaded level: the primary terrain with its colormaps, and the
 // static objects placed by the level scripts with their meshes.
 //
-// This is a first, simplified stand-in for RendDX9's renderers (terrain,
-// static mesh, bundled mesh): diffuse textures with sun/sky lighting and
-// fog, LOD 0 only, no lightmaps, shadows or effects yet.
+// A stand-in for RendDX9's renderers (terrain and the surrounding terrain,
+// static, bundled and skinned meshes with their LODs, roads, undergrowth,
+// water, particles, decals): the original's shaders rewritten for the GPU
+// layer, with frustum culling; no shadows yet.
 #pragma once
 
 #include "Animation/Pose.h"
+#include "Culling.h"
 #include "GpuContext.h"
 #include "Hud/Hud.h"
 #include "UI/MenuDraw.h"
@@ -138,6 +140,8 @@ struct LevelSources {
 	// draw instead of the exterior (a vehicle's cockpit seen from inside,
 	// BF2142.exe 0x00612880); false for the default. Asked by syncObjects.
 	std::function<bool(uint32_t object, int& geometry, int& lod)> geometryFor;
+	// Told how far build() got (0..1, the last call 1), for a loading screen.
+	std::function<void(float done)> buildProgress;
 };
 
 struct LevelStats {
@@ -152,6 +156,7 @@ struct LevelStats {
 	size_t roads = 0;
 	size_t undergrowthTypes = 0;
 	size_t missingRoads = 0;
+	size_t surroundingPatches = 0;
 };
 
 class LevelRenderer {
@@ -191,6 +196,9 @@ private:
 		bool blended = false;
 		bool additive = false;
 		float uvScroll[2] = {0, 0}; // additive: simpleUVTranslation, per second
+		// Where the texture lies in an atlas (the overgrowth's distant trees'
+		// textures, OvergrowthAtlas.tai): scale, then offset.
+		float uvAtlas[4] = {1, 1, 0, 0};
 	};
 	struct RigBone {
 		int node;
@@ -200,6 +208,12 @@ private:
 		bool bundled = false;
 		bool skinned = false;
 		size_t geometries = 1; // in its file
+		size_t lodCount = 1;   // of the geometry drawn
+		std::vector<float> lodDistances; // how far each LOD is drawn (empty: the defaults)
+		// The vertices' spheres by part (bundled meshes; one, part 0, for
+		// static ones), in the part's space; unknown for skinned meshes.
+		std::vector<BoundingSphere> partBounds;
+		BoundingSphere bounds; // all of them, unmoved
 		std::vector<std::vector<RigBone>> rigs;
 		SDL_GPUBuffer* vertices = nullptr;
 		SDL_GPUBuffer* indices = nullptr;
@@ -221,8 +235,34 @@ private:
 		std::string geometry;  // its geometry template
 		int shownGeometry = -1; // the geometry drawn (-1: the exterior)
 		int shownLod = 0;
+		// The exterior's LODs by distance, loaded when first drawn: the mesh
+		// and that LOD's lightmap (the atlas keys name the LOD).
+		struct Lod {
+			bool resolved = false;
+			const GpuMesh* mesh = nullptr;
+			SDL_GPUTexture* lightmap = nullptr;
+			float lightmapTransform[4] {1, 1, 0, 0};
+		};
+		std::vector<Lod> lods;
+		bool overgrowth = false; // Object.isOvergrowth
+		Lod overgrowthLod;       // its "<geometry>_lod" mesh
 	};
+	// What the world pass draws of an instance this frame.
+	struct DrawItem {
+		const Instance* instance;
+		const GpuMesh* mesh;
+		SDL_GPUTexture* lightmap;
+		const float* lightmapTransform;
+	};
+	std::vector<DrawItem> m_drawList;
+	size_t m_culledInstances = 0;
+	// Culls the instances against the camera and picks their LODs.
+	void prepareInstances(const Camera& camera, const Mat4& viewProjection);
+	BoundingSphere instanceBounds(const Instance& instance, const GpuMesh& mesh) const;
+	void lightmapFor(const LevelSources& sources, const std::string& geometry, int lod, const Mat4& world,
+		SDL_GPUTexture*& lightmap, float transform[4]);
 	struct TerrainPatch {
+		Vec3f boundsMin, boundsMax;
 		SDL_GPUBuffer* vertices = nullptr;
 		SDL_GPUTexture* colormap = nullptr;
 		SDL_GPUTexture* lightmap = nullptr;
@@ -268,6 +308,9 @@ private:
 	void collectParts(const LevelSources& sources, const world::ObjectTemplate& objectTemplate, const Mat4& relative,
 		std::vector<Mat4>& parts, int depth, uint32_t object = 0) const;
 	void buildTerrain(const LevelSources& sources);
+	// The secondary heightmaps around the level (the surrounding terrain).
+	void buildSurroundingTerrain(const LevelSources& sources);
+	SDL_GPUTexture* cubeTexture(const io::FileManager& files, const std::string& path);
 	void buildSky(const LevelSources& sources);
 	void buildWater(const LevelSources& sources);
 	void buildRoads(const LevelSources& sources);
@@ -279,10 +322,17 @@ private:
 	std::shared_ptr<anim::Skeleton> skeleton(const io::FileManager& files, const std::string& path);
 	std::shared_ptr<anim::Animation> animation(const io::FileManager& files, const std::string& path);
 	void loadLightmapAtlas(const LevelSources& sources);
+	// The overgrowth's settings (Overgrowth.con) and texture atlases
+	// (OvergrowthAtlas.tai, OvergrowthAtlas_alphatest.tai).
+	void loadOvergrowth(const LevelSources& sources);
+	std::map<std::string, AtlasEntry> m_overgrowthAtlas;          // by texture path (lower case)
+	std::map<std::string, AtlasEntry> m_overgrowthAlphaTestAtlas; // the alpha-tested ones
+	float m_overgrowthCloseDistance = 0; // the distant mesh from here (0: no overgrowth)
 
 	GpuContext& m_gpu;
 	std::map<std::string, std::unique_ptr<GpuMesh>> m_meshes; // by geometry name (lower case)
 	std::map<std::string, SDL_GPUTexture*> m_textures;         // by path (lower case)
+	std::map<std::string, SDL_GPUTexture*> m_cubeTextures;     // by path (lower case)
 	std::map<std::string, std::shared_ptr<anim::Skeleton>> m_skeletons;
 	std::map<std::string, std::shared_ptr<anim::Animation>> m_animations;
 	std::vector<Instance> m_instances;
@@ -347,6 +397,18 @@ private:
 	void buildOverlay();
 	std::vector<ParticleGroup> m_particleGroups;
 	void buildParticles(const Camera& camera);
+	// This frame's point lights (the effects' LightSources nearest the
+	// camera), copied into the lit shaders' uniforms.
+	std::vector<std::array<float, 8>> m_pointLights; // position, range2, colour, range1
+	void collectPointLights(const Camera& camera);
+	void applyPointLights(LightingUniforms& uniforms) const;
+	// This frame's decals: one buffer, drawn in groups by texture.
+	SDL_GPUBuffer* m_decalVertices = nullptr;
+	std::vector<ParticleGroup> m_decalGroups;
+	void buildDecals();
+	// Mesh particles (MeshParticleSystems) of the effect managers.
+	void drawMeshParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Mat4& viewProjection,
+		const scene::LightSettings& lights, std::initializer_list<const effects::EffectManager*> managers);
 	// Effect managers' particles into a buffer (released and rebuilt).
 	void buildParticleBuffer(std::initializer_list<const effects::EffectManager*> managers, SDL_GPUBuffer*& buffer,
 		std::vector<ParticleGroup>& groups);
@@ -364,9 +426,29 @@ private:
 	SDL_GPUTexture* m_skyTexture = nullptr;
 	float m_skyRotation = 0;
 	SDL_GPUBuffer* m_terrainIndices = nullptr;
-	SDL_GPUBuffer* m_waterVertices = nullptr;
-	SDL_GPUBuffer* m_waterIndices = nullptr;
-	uint32_t m_waterIndexCount = 0;
+	// The sea: grids over the heightmaps (16-bit indices each) and a ring
+	// beyond them to the horizon.
+	struct WaterBlock {
+		SDL_GPUBuffer* vertices = nullptr;
+		SDL_GPUBuffer* indices = nullptr;
+		uint32_t indexCount = 0;
+		Vec3f boundsMin, boundsMax;
+	};
+	std::vector<WaterBlock> m_waterBlocks;
+	std::vector<SDL_GPUTexture*> m_waterFrames; // the normal map frames (Textures/waterbump)
+	SDL_GPUTexture* m_waterEnvMap = nullptr;     // <level>/Water/envmap.dds, a cube map
+	struct SurroundingPatch {
+		SDL_GPUBuffer* vertices = nullptr;
+		SDL_GPUTexture* colormap = nullptr;
+		SDL_GPUTexture* lowComponent = nullptr;
+		Vec3f boundsMin, boundsMax;
+	};
+	std::vector<SurroundingPatch> m_surrounding;
+	SDL_GPUBuffer* m_surroundingIndices = nullptr;
+	uint32_t m_surroundingIndexCount = 0;
+	SDL_GPUTexture* m_lowDetailTexture = nullptr; // <level>/lowDetailTexture.dds
+	float m_farTiling[4] {};                      // side x, side y, top, y offset
+	float m_terrainExtent = 0;                    // the primary heightmap's size in metres
 	const scene::WaterSettings* m_water = nullptr;
 	Uint64 m_startTicks = 0;
 	SDL_GPUTexture* m_detailLayers[kMaxDetailLayers] = {};

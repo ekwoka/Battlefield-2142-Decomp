@@ -86,6 +86,14 @@ std::unique_ptr<GpuContext> GpuContext::create(SDL_Window* window, std::string& 
 	context->m_white = context->createRgbaTexture(1, 1, &white);
 	const uint32_t black = 0xff000000;
 	context->m_black = context->createRgbaTexture(1, 1, &black);
+	{
+		texture::DdsTexture cube;
+		cube.format = texture::TextureFormat::RGBA8;
+		cube.width = cube.height = 1;
+		cube.cube = true;
+		cube.faces.assign(6, {{1, 1, {0xff, 0xff, 0xff, 0xff}}});
+		context->m_whiteCube = context->createTexture(cube, true);
+	}
 	context->flushUploads();
 	return context;
 }
@@ -99,15 +107,18 @@ GpuContext::~GpuContext()
 	SDL_WaitForGPUIdle(m_device);
 	SDL_ReleaseGPUTexture(m_device, m_white);
 	SDL_ReleaseGPUTexture(m_device, m_black);
+	SDL_ReleaseGPUTexture(m_device, m_whiteCube);
 	SDL_ReleaseGPUSampler(m_device, m_repeatSampler);
 	SDL_ReleaseGPUSampler(m_device, m_clampSampler);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_meshPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_terrainPipeline);
+	SDL_ReleaseGPUGraphicsPipeline(m_device, m_surroundingPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_skyPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_fadedMeshPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_additiveMeshPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_waterPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_roadPipeline);
+	SDL_ReleaseGPUGraphicsPipeline(m_device, m_decalPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_undergrowthPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_particlePipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_additiveParticlePipeline);
@@ -189,7 +200,10 @@ bool GpuContext::createPipelines(std::string& error)
 		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, 5, 1, "mesh");
 	m_terrainPipeline = build(k_terrain_vert_spv, k_terrain_vert_spv_size, k_terrain_vert_msl,
 		k_terrain_vert_msl_size, k_terrain_frag_spv, k_terrain_frag_spv_size, k_terrain_frag_msl,
-		k_terrain_frag_msl_size, 10, 2, "terrain");
+		k_terrain_frag_msl_size, 11, 2, "terrain");
+	m_surroundingPipeline = build(k_terrain_vert_spv, k_terrain_vert_spv_size, k_terrain_vert_msl,
+		k_terrain_vert_msl_size, k_surrounding_frag_spv, k_surrounding_frag_spv_size, k_surrounding_frag_msl,
+		k_surrounding_frag_msl_size, 3, 2, "surrounding terrain");
 	m_undergrowthPipeline = build(k_undergrowth_vert_spv, k_undergrowth_vert_spv_size, k_undergrowth_vert_msl,
 		k_undergrowth_vert_msl_size, k_undergrowth_frag_spv, k_undergrowth_frag_spv_size, k_undergrowth_frag_msl,
 		k_undergrowth_frag_msl_size, 3, 1, "undergrowth");
@@ -251,14 +265,16 @@ bool GpuContext::createPipelines(std::string& error)
 	}
 	info.depth_stencil_state.enable_depth_test = true;
 	m_waterPipeline = build(k_water_vert_spv, k_water_vert_spv_size, k_water_vert_msl, k_water_vert_msl_size,
-		k_water_frag_spv, k_water_frag_spv_size, k_water_frag_msl, k_water_frag_msl_size, 0, 2, "water");
+		k_water_frag_spv, k_water_frag_spv_size, k_water_frag_msl, k_water_frag_msl_size, 3, 2, "water");
 	// Roads: blended like water, pulled towards the camera over the terrain.
 	info.rasterizer_state.enable_depth_bias = true;
 	info.rasterizer_state.depth_bias_constant_factor = -1.0f;
 	info.rasterizer_state.depth_bias_slope_factor = -1.0f;
 	m_roadPipeline = build(k_road_vert_spv, k_road_vert_spv_size, k_road_vert_msl, k_road_vert_msl_size,
 		k_road_frag_spv, k_road_frag_spv_size, k_road_frag_msl, k_road_frag_msl_size, 3, 2, "road");
-	return m_meshPipeline && m_fadedMeshPipeline && m_additiveMeshPipeline && m_terrainPipeline && m_skyPipeline && m_waterPipeline && m_roadPipeline &&
+	m_decalPipeline = build(k_decal_vert_spv, k_decal_vert_spv_size, k_decal_vert_msl, k_decal_vert_msl_size,
+		k_decal_frag_spv, k_decal_frag_spv_size, k_decal_frag_msl, k_decal_frag_msl_size, 1, 1, "decal");
+	return m_meshPipeline && m_surroundingPipeline && m_fadedMeshPipeline && m_additiveMeshPipeline && m_terrainPipeline && m_skyPipeline && m_waterPipeline && m_roadPipeline && m_decalPipeline &&
 		m_undergrowthPipeline && m_particlePipeline && m_additiveParticlePipeline && m_uiPipeline && m_uiSubmitPipeline &&
 		m_uiTestPipeline && m_uiClearPipeline;
 }
@@ -309,18 +325,20 @@ SDL_GPUBuffer* GpuContext::createBuffer(SDL_GPUBufferUsageFlags usage, const voi
 	return buffer;
 }
 
-SDL_GPUTexture* GpuContext::createTexture(const texture::DdsTexture& texture)
+SDL_GPUTexture* GpuContext::createTexture(const texture::DdsTexture& texture, bool cube)
 {
-	if (texture.cube || texture.faces.empty()) {
+	if (texture.faces.empty() || texture.cube != cube) {
 		return nullptr;
 	}
 	SDL_GPUTextureCreateInfo info {};
-	info.type = SDL_GPU_TEXTURETYPE_2D;
+	// Cube maps (the water's and the envmaps): six faces in Direct3D's
+	// order, which SDL's cube layers share.
+	info.type = texture.cube ? SDL_GPU_TEXTURETYPE_CUBE : SDL_GPU_TEXTURETYPE_2D;
 	info.format = gpuFormat(texture.format);
 	info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
 	info.width = texture.width;
 	info.height = texture.height;
-	info.layer_count_or_depth = 1;
+	info.layer_count_or_depth = texture.cube ? 6 : 1;
 	info.num_levels = texture.levelCount();
 	if (!SDL_GPUTextureSupportsFormat(m_device, info.format, info.type, info.usage)) {
 		return nullptr;
@@ -330,8 +348,10 @@ SDL_GPUTexture* GpuContext::createTexture(const texture::DdsTexture& texture)
 		return nullptr;
 	}
 	size_t total = 0;
-	for (const auto& level : texture.faces[0]) {
-		total += level.data.size();
+	for (const auto& face : texture.faces) {
+		for (const auto& level : face) {
+			total += level.data.size();
+		}
 	}
 	SDL_GPUTransferBufferCreateInfo transferInfo {};
 	transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
@@ -339,25 +359,30 @@ SDL_GPUTexture* GpuContext::createTexture(const texture::DdsTexture& texture)
 	SDL_GPUTransferBuffer* transfer = SDL_CreateGPUTransferBuffer(m_device, &transferInfo);
 	auto* mapped = static_cast<uint8_t*>(SDL_MapGPUTransferBuffer(m_device, transfer, false));
 	size_t offset = 0;
-	for (const auto& level : texture.faces[0]) {
-		std::memcpy(mapped + offset, level.data.data(), level.data.size());
-		offset += level.data.size();
+	for (const auto& face : texture.faces) {
+		for (const auto& level : face) {
+			std::memcpy(mapped + offset, level.data.data(), level.data.size());
+			offset += level.data.size();
+		}
 	}
 	SDL_UnmapGPUTransferBuffer(m_device, transfer);
 	offset = 0;
-	for (uint32_t i = 0; i < texture.levelCount(); ++i) {
-		const auto& level = texture.faces[0][i];
-		SDL_GPUTextureTransferInfo source {};
-		source.transfer_buffer = transfer;
-		source.offset = static_cast<uint32_t>(offset);
-		SDL_GPUTextureRegion destination {};
-		destination.texture = gpuTexture;
-		destination.mip_level = i;
-		destination.w = level.width;
-		destination.h = level.height;
-		destination.d = 1;
-		SDL_UploadToGPUTexture(copyPass(), &source, &destination, false);
-		offset += level.data.size();
+	for (size_t face = 0; face < texture.faces.size(); ++face) {
+		for (uint32_t i = 0; i < texture.levelCount() && i < texture.faces[face].size(); ++i) {
+			const auto& level = texture.faces[face][i];
+			SDL_GPUTextureTransferInfo source {};
+			source.transfer_buffer = transfer;
+			source.offset = static_cast<uint32_t>(offset);
+			SDL_GPUTextureRegion destination {};
+			destination.texture = gpuTexture;
+			destination.mip_level = i;
+			destination.layer = static_cast<Uint32>(face);
+			destination.w = level.width;
+			destination.h = level.height;
+			destination.d = 1;
+			SDL_UploadToGPUTexture(copyPass(), &source, &destination, false);
+			offset += level.data.size();
+		}
 	}
 	m_pendingTransfers.push_back(transfer);
 	return gpuTexture;

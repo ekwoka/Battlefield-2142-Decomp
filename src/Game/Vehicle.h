@@ -161,9 +161,26 @@ struct RotationAxis {
 void rotationAxisStep(const RotationAxis& axis, float input, float seconds, float& angle, float& speed);
 
 struct VehicleInput {
-	float throttle = 0; // PIThrottle
-	float steer = 0;    // PIYaw: right positive
+	float throttle = 0;  // PIThrottle
+	float steer = 0;     // PIYaw: right positive
+	float pitch = 0;     // PIPitch (the mouse's y in the land and air control maps)
+	float roll = 0;      // PIRoll (the mouse's x)
+	float crouch = 0;    // PICrouch (a walker's)
+	bool sprint = false; // PISprint
 };
+
+// The player inputs a template names (inputToYaw PIThrottle, ...): an index
+// into VehicleInput, -1 for none (or one the vehicle doesn't read).
+int vehicleInputIndex(const std::string& name);
+float vehicleInputValue(const VehicleInput& input, int index);
+
+// The lift of a wing (0x006cb600): the air's velocity `v` against the
+// wing's normal `n`, a curve of the angle peaking at 22.5 degrees, times
+// |v|^2, `scale` and 0.0025.
+float wingLift(const Vec3& v, const Vec3& n, float scale);
+// The air's density at a height (Engine::getAirDensity 0x0064d3c0): 1 at
+// 0 falling to 0 at Physics.airDensityZeroAtHeight (1000).
+float airDensity(float height);
 
 class Vehicle {
 public:
@@ -199,6 +216,125 @@ public:
 			float grip = 0.8f;
 		};
 		ObjectGround objectGround;
+		// The other engines' wheels (0x006b8230's old path): driven by a
+		// newCar2 engine above it, else by an old one (`engine`, an index
+		// into engines(), -1 for none: the hover tanks' antigravs).
+		bool newCar2 = true;
+		int engine = -1;
+		int part = -1;          // its parent part (whose forward is the wheel's)
+		int gripFlags = 2;      // the template's grip (+0xfc): 8 EngineGrip, 0x80 EngineDummyGrip, ...
+		bool sticky = true;     // the response's static friction bit (+0xec & 0x40)
+		float surfaceSpeed = 0; // the track's speed along it (Spring +0x27c)
+		// Its part's material (the vehicle LOD's, through the template's
+		// mapMaterial) and the grip against the ground under it this tick
+		// (the material pair's friction, -1: the vehicle's), set by the world.
+		uint32_t material = 0;
+		float grip = -1;
+	};
+
+	// A node of the template tree that turns (a RotationalBundle, an Engine,
+	// a Wing, ...): its three axes (yaw, pitch, roll: the x, y and z of the
+	// template's vectors) driven by the inputs it names (0x00563bd0,
+	// rotationAxisStep), placed in its parent by its offset and rotation;
+	// its frame is R(angles) x base x the parent's (the bundle's matrix,
+	// 0x00565a20).
+	struct Part {
+		int parent = -1;
+		std::string name, type;
+		Vec3 offset;
+		physics::Mat3 base;
+		std::array<RotationAxis, 3> axes;
+		std::array<int, 3> inputs {-1, -1, -1};
+		std::array<float, 3> angle {}, rate {}, excess {};
+		bool rememberExcess = false; // 0x30a: input over 1 is kept for later ticks (+-40)
+		bool canReverse = true;      // an Engine's 0x744: an input against the axis's acceleration is 0
+		bool moves = false;          // an axis with a speed
+		// This tick, in object space.
+		physics::Mat3 rotation;
+		Vec3 position;
+	};
+
+	// An Engine of another type than newCar2 (the old Engine object, vtable
+	// 0x00987e30: handleUpdate 0x0064d4f0, updatePhysics 0x0064df20).
+	struct OldEngine {
+		int part = -1;
+		int flags = 0;      // engineType's bits: 1 propeller, 2 car, 4 tank, 8 ship, 0x10 rocket, 0x20 helicopter
+		EngineSettings settings;
+		std::array<float, 102> torqueCurve; // 0x374: sampled at |rpm|
+		float noPropellerEffectAtSpeed = 100; // 0x6e4
+		float heatIncrement = -1, coolingFactor = 0; // 0x6ec, 0x6f0
+		float horizontalSpeedMagnifier = 1;   // 0x704
+		float maxAngleOfAttack = 20, defaultAngleOfAttack = 0; // 0x708, 0x70c
+		bool pureRotational = false;          // 0x701
+		float attackSpeed = 0;                // 0x710
+		bool decreaseAngleToZero = false;     // 0x718
+		float spinWhenNoEngineInAir = 0;      // 0x71c
+		float horizontalDampAngle = -1, horizontalDampAngleFactor = 1; // 0x724, 0x728
+		float dampHorizontalVel = 0, dampHorizontalVelFactor = 0;      // 0x72c, 0x730
+		float decreaseAngleToZeroVerticalVel = 0; // 0x734
+		float airFlowAffect = 0;              // 0x73c
+		float noEffectAtPerpSpeed = 10000;    // 0x740
+		float trackTurnAcceleration = 120, trackTurnSpeed = 1.5f; // 0x758, 0x75c
+		bool noPowerWhenUpsideDown = false;   // 0x7d4
+		// State.
+		bool running = false; // +0x24c
+		float stopTimer = -1; // +0x28c
+		float rpm = 0;        // +0x25c
+		float load = 0;       // +0x260, the feedback this tick
+		int loadCount = 0;    // +0x268
+		float aoa = 0;        // +0x270, radians
+		float heat = 0;       // +0x250
+		int gear = 1;         // +0x280
+		bool braking = false; // +0x274
+		float yaw = 0;        // +0x26c: the yaw axis over its maximum
+		float trackFriction = 0; // +0x2a4
+		int trackCount = 0;      // +0x2a8
+		int trackSides = 0;      // +0x2ac
+		float gearRatio() const;  // slot 0x1a0 (0x0064c6e0): 4, 2, 1.5, 1.25, 1
+		float currentRatio() const;  // slot 0x1b8 (0x0064d3f0): differential x 3.5 / the table's ratio
+		float currentTorque() const; // slot 0x1a4 (0x00629660): the curve at |rpm| x torque
+		void feedback(float push);   // feedbackLoop 0x0064dd10 with the push along the axis
+	};
+	struct WingPart {
+		int part = -1;
+		float wingLift = 0, flapLift = 0, pitchOffset = 0; // 0x36c, 0x370, 0x374
+		Vec3 positionOffset;                                // 0x378
+		float startDelay = 0;                               // 0x390
+		float multiply = 1, offsetY = 0;                    // the bundle's 0x340, 0x338
+		float waited = 0;
+	};
+	// A ForceObject child (object 0x0062cd10, tick 0x0062c920, regulation
+	// 0x0062b750): with keepUp, a couple holding the vehicle upright.
+	struct ForcePart {
+		int part = -1;
+		bool keepUp = false;
+		std::array<float, 3> a {}, b {}; // regulatePosX/Y/Z
+		std::array<bool, 3> regulated {};
+		bool onlyWhenOccupied = false, stopWhenUnoccupied = false;
+		float startDelay = 0, waited = 0;
+		int input = -1;
+		float force = 0, constantForce = 0, maxForce = 0;
+	};
+	// MechLegs (the object's update 0x00650e90 with its input handler
+	// 0x00650b20, and the MechLegs response 0xc432, vtable 0x009944b8).
+	struct Legs {
+		int part = -1;
+		float length = 2.7f, stepHeight = 0.5f, radius = 1.5f;
+		// State.
+		int state = 0, stateTick = -100;
+		float throttle = 0, yaw = 0, crouch = 0;
+		float speed = 0;
+		Vec3 desired;
+		int footLeft = 0, footRight = 0;
+		int pushTick = 0;
+		float push = 0;
+		bool grounded = false;
+		Vec3 bestNormal;
+		bool landed = false;
+	};
+	struct Regulator { // the PCO's input regulator (0x005c9ec0)
+		int input = -1;
+		float a = 0, b = 0;
 	};
 
 	// The vehicle in a template tree with an Engine node whose children
@@ -207,10 +343,27 @@ public:
 		const world::ObjectTemplateManager& templates, const physics::CollisionMeshFile* mesh);
 
 	const EngineSettings& engine() const { return m_engine; }
+	bool hasNewCar2() const { return m_newCar2; }
+	const std::vector<Part>& parts() const { return m_parts; }
+	const std::vector<OldEngine>& engines() const { return m_engines; }
+	const std::vector<WingPart>& wings() const { return m_wings; }
+	const Legs* legs() const { return m_legs.part >= 0 || m_hasLegs ? &m_legs : nullptr; }
+	// Whether its engines push it through the air (a propeller engine).
+	bool flies() const;
+	// Someone aboard (the engines' messages 4 and 5: 0x0064c890; the force
+	// only with the PCO occupied, 0x005c87b0) and the tick (for the legs'
+	// latched inputs).
+	void setOccupied(bool occupied) { m_occupied = occupied; }
+	// A walker's response (MechLegs 0xc432) in place of the hull's ground
+	// points: its legs against the ground (0x006cf5c0), the solve
+	// (0x006ce740) and the drive (0x006cdca0). Call after the body steps.
+	void legsRespond(physics::RigidBody& body, const physics::Ground& ground, float seconds,
+		float gravity = physics::tuning::kGravity);
 	const std::vector<Wheel>& wheels() const { return m_wheels; }
 	float mass() const { return m_mass; }
 	int gear() const { return m_gear; }
-	float rpm() const { return m_rpm; } // normalised: 0 at minRpm, 1 at maxRpm
+	// normalised: 0 at minRpm, 1 at maxRpm; the first old engine's for the others
+	float rpm() const { return m_newCar2 || m_engines.empty() ? m_rpm : m_engines.front().rpm; }
 	bool braking() const { return m_braking; }
 	float clutch() const { return m_clutch; }
 
@@ -218,12 +371,37 @@ public:
 	// A probe of wheel `index` met an object's face at `height` (see
 	// Wheel::objectGround); taken by the next tick.
 	void touchObject(size_t index, float height, const Vec3& normal, const Vec3& velocity, float grip);
+	void setWheelMaterial(size_t index, uint32_t material)
+	{
+		if (index < m_wheels.size()) {
+			m_wheels[index].material = material;
+		}
+	}
+	void setWheelGrip(size_t index, float grip)
+	{
+		if (index < m_wheels.size()) {
+			m_wheels[index].grip = grip;
+		}
+	}
 	const VehicleInput& input() const { return m_input; }
 	// One tick: suspension and tyre forces on `body`; call before it steps.
 	void tick(physics::RigidBody& body, const physics::Ground& ground, float seconds, float grip,
 		float gravity = physics::tuning::kGravity);
 
 private:
+	void updateParts(float seconds);
+	void updateOldEngine(OldEngine& engine, physics::RigidBody& body, const physics::Ground& ground, float seconds,
+		float gravity);
+	void engineForce(OldEngine& engine, physics::RigidBody& body, const physics::Ground& ground, float gravity);
+	void updateWing(WingPart& wing, physics::RigidBody& body, const physics::Ground& ground, float seconds, float gravity);
+	void updateForce(ForcePart& force, physics::RigidBody& body, float seconds);
+	void updateLegs(physics::RigidBody& body, const physics::Ground& ground, float seconds);
+	void updateOldWheel(Wheel& wheel, physics::RigidBody& body, const physics::Ground& ground, float seconds, float grip,
+		float gravity);
+	void regulateInput(const physics::RigidBody& body, float gravity);
+	float trackSpeed(const OldEngine& engine, float side, const physics::RigidBody& body) const;
+	physics::Mat3 partWorld(const physics::RigidBody& body, int part) const;
+	Vec3 partPoint(const physics::RigidBody& body, int part) const;
 	void updateEngine(const physics::RigidBody& body, float seconds);
 	void updateWheel(Wheel& wheel, physics::RigidBody& body, const physics::Ground& ground, float seconds,
 		float grip, float gravity);
@@ -240,6 +418,19 @@ private:
 	bool m_braking = false;  // 0x274
 	float m_clutch = 0;      // 0x27c: 0 at the start, engaged at 1
 	int m_shift = 0;         // 0x2a4: a gear change under way, -1 or +1
+	// The other models (VehicleParts.cpp).
+	bool m_newCar2 = false;
+	std::vector<Part> m_parts;
+	std::vector<OldEngine> m_engines;
+	std::vector<WingPart> m_wings;
+	std::vector<ForcePart> m_forces;
+	Legs m_legs;
+	bool m_hasLegs = false;
+	Regulator m_vertical; // regulateVerticalPos (0x390) on its input (0x374)
+	bool m_occupied = false;
+	float m_sprintFactor = 0; // the PCO template's (0x464)
+	int m_tick = 0;
+	VehicleInput m_regulated; // the inputs after the PCO's regulator
 };
 
 } // namespace dice::hfe::game

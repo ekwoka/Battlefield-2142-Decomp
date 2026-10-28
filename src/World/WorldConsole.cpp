@@ -353,6 +353,17 @@ void registerWorldConsoleMethods(Console& console, ObjectTemplateManager& templa
 	};
 	console.registerMethod(name);
 
+	ConsoleMethod overgrowth = position;
+	overgrowth.name = "Object.isOvergrowth";
+	overgrowth.invoke = [&objects](const std::vector<std::string>& args) -> std::string {
+		if (args.empty()) {
+			return objects.active()->isOvergrowth() ? "1" : "0";
+		}
+		objects.active()->setOvergrowth(parseConsoleValue<bool>(args[0]));
+		return {};
+	};
+	console.registerMethod(overgrowth);
+
 	// Overgrowth collision objects are placed by matrix.
 	ConsoleMethod transformation = position;
 	transformation.name = "Object.absoluteTransformation";

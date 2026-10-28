@@ -70,6 +70,7 @@
 #include "World/Object.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cmath>
 #include <cstdlib>
 
@@ -354,6 +355,42 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 		wheelProbes(mover, c, seconds);
 		if (!asleep(other)) {
 			wheelProbes(other, m, seconds);
+		}
+	}
+	// The Titans' parts (their vehicle LODs, Titans.cpp), each a candidate
+	// of its own with its collisionGroups: the team forcefields (0x100 the
+	// PAC Titan's, 0x200 the EU's) let their own team's vehicles through
+	// (meshPair's team rule, 0x006bb050's start). A Titan is a major actor
+	// moved by its sync alone: the vehicle takes the whole push and rides
+	// along by the Titan's velocity.
+	for (const Titan& titan : m_titans) {
+		Body* tb = findBody(titan.object);
+		if (!tb || tb == &mover || titan.vehicleParts.empty()) {
+			continue;
+		}
+		for (const Titan::VehiclePart& part : titan.vehicleParts) {
+			MeshActor c;
+			c.body = tb;
+			c.points = &part.points;
+			c.pointMaterials = &part.pointMaterials;
+			c.mesh = part.mesh.get();
+			c.boxMin = part.boxMin;
+			c.boxMax = part.boxMax;
+			c.radius = part.radius;
+			c.rotation = tb->body.rotation;
+			c.position = tb->body.position;
+			c.velocity = tb->body.velocity;
+			c.controlObject = true;
+			c.collisionGroups = part.groups;
+			c.team = titan.team;
+			c.node = {std::max(tb->mass, 1e6f), true, false};
+			if (paired(c, length(tb->body.velocity))) {
+				if (!collide(c, true)) {
+					return;
+				}
+				m = actorOf(mover);
+			}
+			wheelProbes(mover, c, seconds);
 		}
 	}
 }

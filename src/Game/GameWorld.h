@@ -177,6 +177,13 @@ public:
 	// A body left slumped in a vehicle seat (the seat's die bundle), 0 for
 	// none.
 	uint32_t seatCorpse(uint32_t vehicle, int seat) const;
+	// The kits lying on the ground (their objects; drawn with the kit
+	// template's geometry.dropGeom), see Kits.cpp.
+	std::vector<uint32_t> droppedKits() const;
+	// Objects whose position isn't finite or lies over `limit` from the
+	// origin in any axis (a physics blow-up), for checks.
+	std::vector<uint32_t> objectsOutOfWorld(float limit = 1e5f) const;
+	bool isDroppedKit(uint32_t object) const;
 	// Whether a dead player's body has landed (0x005eda20): no ragdoll, or
 	// one a particle of which has hit something, ragdollLandedDelay (the
 	// soldier template's +0x3bc, 4 s) after the death. The corpse's removal
@@ -911,6 +918,7 @@ private:
 		uint32_t material = 0; // the template's material
 		// Sleeping (the node's counter +0x68 and its history).
 		physics::SleepState sleep;
+		bool held = false; // held at its spawner (holdObject, 0x005af230: the node's motion stopped, slot 0x148)
 		// The response's support (+0xf4, 0x006bb050): a heavier mobile object
 		// it touched; asleep, it wakes when that one is gone or awake.
 		uint32_t support = 0;
@@ -981,7 +989,9 @@ private:
 	// Slot 0x160: a sleeping PlayerControlObject root wakes what is round it
 	// (0x006bfad0) as well.
 	void wake(Body& body);
-	static bool asleep(const Body& body) { return body.sleep.asleep(); }
+	// Asleep, or held by its spawner (its motion stopped: a candidate the
+	// movers meet, moved by nothing).
+	static bool asleep(const Body& body) { return body.sleep.asleep() || body.held; }
 	void stepSleep(Body& body, float seconds);
 	void destroyVehicle(Body& body, int attacker);
 	void stepVehicleDamage(float seconds);
@@ -1154,6 +1164,9 @@ private:
 		std::vector<int> weaponNodes;        // skeleton nodes mesh1, mesh2...
 		uint32_t weaponObject = 0;           // the held weapon, an object of its own
 		uint32_t kitObject = 0;
+		// The player's kit time stamp (player +0x230/+0x234, set on a pickup):
+		// a kit is picked up by the use key at most every 2 s.
+		double kitTimeStamp = -1e9;
 		float lastYaw = 0;
 		bool fired = false;
 		// The jump state the animation's up value comes from (soldier
@@ -1389,6 +1402,28 @@ private:
 		std::vector<anim::Matrix> worldPose;
 	};
 	std::vector<SeatCorpse> m_seatCorpses;
+	// Kits on the ground (Kits.cpp): a dead soldier's kit dropped where a
+	// ray straight down from it meets something (0x00589890), with its
+	// weapons and their rounds and its battery, gone timeToLiveAfterDeath
+	// (kit template +0x2b8, 30 s by default, 0x00570080) later, carried by
+	// a Titan it lies on (0x00561b20 / 0x005ad2e0 / 0x005aa5b0).
+	struct DroppedKit {
+		uint32_t object = 0;
+		int team = 0;
+		std::vector<Player::Carried> carried;
+		int inHand = -1;
+		float battery = -1;
+		float abilityModifier = 0;
+		double removeAt = 0;
+		uint32_t titan = 0;   // the Titan it lies on (its object), 0 for none
+		physics::Vec3 offset; // kit position - Titan position (no rotation: Titans never turn)
+	};
+	std::vector<DroppedKit> m_droppedKits;
+	bool m_reportedBlowUp = false;
+	void dropKit(Player& player);
+	void fillKit(Player& player, world::ObjectTemplate* kitTemplate, world::ObjectTemplate* primary);
+	bool pickUpClosestKit(Player& player, float radius);
+	void stepDroppedKits();
 	std::vector<SoundEvent> m_sounds;
 	void stepSeatCorpses(float seconds);
 	// Bodies after PlayerDeath, with their ragdolls (the soldier's armour
@@ -1590,6 +1625,18 @@ private:
 		int controlPoint = -1;
 		std::vector<TitanPart> parts; // [0]: the root
 		std::vector<TitanMesh> meshes;
+		// Its parts' vehicle LODs (in the Titan's frame), each a candidate of
+		// its own for the vehicles' mesh physics (0x006dc7b0 / 0x006bb050)
+		// with its collisionGroups: a team's vehicles pass their own fields.
+		struct VehiclePart {
+			std::shared_ptr<physics::CollisionWorld> mesh;
+			std::vector<physics::Vec3> points;
+			std::vector<uint32_t> pointMaterials;
+			physics::Vec3 boxMin, boxMax;
+			float radius = 0;
+			uint32_t groups = 0;
+		};
+		std::vector<VehiclePart> vehicleParts;
 		physics::Vec3 velocity;       // x and z (0x005aa0e0 sets the node's)
 		// The move orders (+0x3c: tick -> target), the last order's time.
 		std::map<uint32_t, std::pair<float, float>> targets;

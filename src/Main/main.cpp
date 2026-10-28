@@ -36,6 +36,7 @@
 #include "Game/Bots.h"
 #include "UI/Player/Player.h"
 #include "IO/Localization/Localization.h"
+#include "HudMenus.h"
 #include "MenuBindings.h"
 #include "PlayerCamera.h"
 #include "EndOfRoundBindings.h"
@@ -69,6 +70,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <functional>
@@ -116,6 +118,7 @@ struct Options {
 	bool fesl = false;           // --fesl: greet the account service (no login)
 	bool scoreboard = false;     // --scoreboard: show it (as Tab does)
 	bool spawnScreen = false;    // --spawn-screen: die first, to show the spawn screen
+	bool commanderScreen = false; // --commander-screen: take command and open its screen
 	bool unlockAll = false;      // --unlock-all: every kit unlock (no stats server to ask)
 	std::string menu;            // --menu [mainMenu|endOfRound]: the Flash menu over everything
 	float menuSeconds = 10;      // --menu-seconds: how long a screenshot lets the menu play first
@@ -191,6 +194,8 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.unlockAll = true;
 		} else if (arg == "--spawn-screen") {
 			options.spawnScreen = true;
+		} else if (arg == "--commander-screen") {
+			options.commanderScreen = true;
 		} else if (arg == "--scoreboard") {
 			options.scoreboard = true;
 		} else if (arg == "--fesl") {
@@ -533,6 +538,43 @@ void updateCommander(hud::HudManager& hud, const game::GameWorld& round, bool sc
 	}
 }
 
+// The spawn screen's kit buttons show the upgrades the player has for each
+// kit (Kit%iAbilityIcon%iShow / PathString, seven a kit, the HUD manager's
+// variables of 0x0044f1a0): the kit's unlocked ItemContainers' items with
+// a weaponHud.specialAbilityIcon (unl_scope_zoom, unl_stabilizer, ...), in
+// the kit's order.
+void updateKitAbilities(hud::HudManager& hud, const game::GameWorld& round, const game::GameLogic& logic,
+	const world::ObjectTemplateManager& templates)
+{
+	const int team = round.playerTeam() == 1 ? 1 : 2;
+	const auto& kits = logic.team(team).kits;
+	const auto& unlocked = round.localPlayerUnlocks;
+	for (size_t kit = 0; kit < 5; ++kit) {
+		std::vector<std::string> icons;
+		const world::ObjectTemplate* kitTemplate = kit < kits.size() ? templates.find(kits[kit].name) : nullptr;
+		for (size_t c = 0; kitTemplate && c < kitTemplate->children().size(); ++c) {
+			const std::string& name = kitTemplate->children()[c].name;
+			const world::ObjectTemplate* container = templates.find(name);
+			if (!container || (!round.unlockAllByDefault && std::find(unlocked.begin(), unlocked.end(), name) == unlocked.end())) {
+				continue;
+			}
+			for (const auto& item : container->children()) {
+				const world::ObjectTemplate* itemTemplate = templates.find(item.name);
+				const auto icon = itemTemplate ? itemTemplate->settings().find("weaponHud.specialAbilityIcon") : decltype(itemTemplate->settings().end()) {};
+				if (itemTemplate && icon != itemTemplate->settings().end() && !icon->second.empty()
+					&& std::find(icons.begin(), icons.end(), icon->second) == icons.end()) {
+					icons.push_back(icon->second);
+				}
+			}
+		}
+		for (size_t i = 0; i < 7; ++i) {
+			const std::string prefix = "Kit" + std::to_string(kit) + "AbilityIcon" + std::to_string(i);
+			hud.set(prefix + "Show", i < icons.size() ? 1 : 0);
+			hud.setString(prefix + "PathString", i < icons.size() ? icons[i] : std::string());
+		}
+	}
+}
+
 void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLogic& logic, bool scoreboard = false,
 	const std::function<int(int)>& scoreOf = {}, bool commanderScreen = false)
 {
@@ -620,17 +662,37 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 	hud.set("EnemyTickets", logic.team(enemy).tickets);
 	if (round.gameMode() == "gpm_ti") {
 		// The Titan HUD shows for GameMode 1 or 3 (the conquest one for 0, 2,
-		// 4-7); the silos' row (CPCannon%i*, five slots) and the consoles'
-		// lights (*StrategicObject1-4Show: that console destroyed; 0: the
-		// Titan gone), the HUD manager's variables of 0x0044f1a0.
+		// 4-7); the consoles' lights (*StrategicObject1-4Show: that console
+		// destroyed; 0: the Titan gone), the HUD manager's variables of
+		// 0x0044f1a0.
 		hud.set("GameMode", 1);
+		// The silos' row (0x0044c350, each frame): the ten CPCannon%i slots
+		// are cleared, then each silo (the objects of class 10 whose
+		// ancestor's control point gives an index 1..9) shows in slot
+		// index - 1 with its team as the player sees it (1 his, 2 the
+		// enemy's, 0 neutral) and the time to its next missile, "%02d:%02d"
+		// minutes and seconds (its weapon's whole seconds), or "--:--" when
+		// loaded or neutral.
+		std::array<bool, 10> siloShown {};
 		const auto silos = round.missileSilos();
-		for (size_t i = 0; i < 5; ++i) {
-			const std::string n = std::to_string(i);
-			hud.set("CPCannon" + n + "Show", i < silos.size() ? 1 : 0);
-			hud.set("CPCannon" + n + "Team", i < silos.size() ? static_cast<float>(silos[i].team) : 0);
-			hud.setString("CPCannon" + n + "String",
-				i < silos.size() && silos[i].team != 0 && !silos[i].loaded ? std::to_string(static_cast<int>(std::ceil(silos[i].reloadLeft))) : "");
+		for (size_t i = 0; i < silos.size(); ++i) {
+			const int index = silos[i].controlPoint > 0 ? silos[i].controlPoint : static_cast<int>(i) + 1;
+			if (index < 1 || index > 9) {
+				continue;
+			}
+			const std::string n = std::to_string(index - 1);
+			siloShown[static_cast<size_t>(index - 1)] = true;
+			const int side = silos[i].team == team ? 1 : silos[i].team != 0 ? 2 : 0;
+			hud.set("CPCannon" + n + "Team", static_cast<float>(side));
+			const int seconds = silos[i].loaded ? 0 : static_cast<int>(silos[i].reloadLeft);
+			char text[16] = "--:--";
+			if (seconds > 0 && side != 0) {
+				std::snprintf(text, sizeof(text), "%02d:%02d", seconds / 60, seconds % 60);
+			}
+			hud.setString("CPCannon" + n + "String", text);
+		}
+		for (size_t i = 0; i < siloShown.size(); ++i) {
+			hud.set("CPCannon" + std::to_string(i) + "Show", siloShown[i] ? 1 : 0);
 		}
 		for (const int side : {team, enemy}) {
 			const std::string prefix = side == team ? "FriendlyStrategicObject" : "EnemyStrategicObject";
@@ -1721,10 +1783,10 @@ int runGame(Options& options, Session& session)
 	}
 #endif
 	// Shows how far loading got (a few frames of the loading screen).
-	const auto loadingStep = [&](float progress) {
+	const auto loadingStep = [&](float progress, [[maybe_unused]] int frames = 3) {
 		loadingBindings.setLoading(progress);
 #if BF2142_HAS_RENDERER
-		for (int i = 0; loadingScreen && i < 3; ++i) {
+		for (int i = 0; loadingScreen && i < frames; ++i) {
 			loadingScreen->frame();
 		}
 #endif
@@ -1781,9 +1843,6 @@ int runGame(Options& options, Session& session)
 	templates.setLoading(false);
 	sounds.reloadSoundFiles();
 	loadingStep(0.9f);
-#if BF2142_HAS_RENDERER
-	loadingScreen.reset(); // the level's renderer takes the window
-#endif
 
 	if (!options.playSound.empty() && soundEngine) {
 		// Plays for two seconds and reports what the engine did.
@@ -1900,9 +1959,10 @@ int runGame(Options& options, Session& session)
 		// repair from the issue-order menu, 4..7 the same placed on the map,
 		// 10 or more drops it), sent where the map is clicked next. Both the
 		// squad leader's and the commander's run the same handler
-		// (0x00770889 → 0x007d6ab0). The commander's goes to the squad whose
-		// leader is nearest the click (the screen's squad selection is not
-		// drawn); the squad leader's to his own squad.
+		// (0x00770889 → 0x007d6ab0). The commander's goes to the squads
+		// selected in the screen's squad list (CommanderMenu), else to the
+		// squad whose leader is nearest the click; the squad leader's to his
+		// own squad.
 		bool leaderOrder = false;
 		const auto armOrder = [&](int kind, bool leader) {
 			const game::GameWorld::OrderType type = game::GameWorld::orderTypeFromKind(kind);
@@ -1918,6 +1978,75 @@ int runGame(Options& options, Session& session)
 			[&](int accept) { round.answerCommanderOffer(round.localPlayer(), accept != 0); });
 		bindMethod(console, "Commander.commRoseAccept", ConsoleAccess::Anyone,
 			[&](int accept) { round.acceptOrder(round.localPlayer(), accept != 0); });
+		// The commander screen's tabs and squad list (CommanderMenu.*).
+		dice::hfe::menu::CommanderMenu commanderMenu(round, hudManager);
+		commanderMenu.bind(console);
+		// The assets' defend buttons (Commander.defend<Asset>: HUD manager
+		// slots 0x374, 0x37c, 0x384, ..., 0x007d7a30 / 0x007d7ac0 /
+		// 0x007d7b50): the asset object (0x007d92f0: the team's object of
+		// class 0x9c42 whose +0x29c is the asset's kind, 1 artillery, 2 the
+		// satellite, 3 the UAV) is where a defend order (kind 6, placed on
+		// the map) goes to the selected squads (slot 0x3f4); here the squad
+		// whose leader is nearest the asset, as for a map click. The zoom
+		// buttons (<asset>Zoom, slots 0x370 / 0x378 / 0x380 → 0x398,
+		// 0x007d8e00) send the server event 0xf with the asset's position
+		// for the commander's camera, which isn't rewritten.
+		const auto assetAt = [&](Ability ability, float& x, float& z) {
+			const auto state = round.abilityState(myTeam(), ability);
+			const world::Object* asset = state.available ? round.objects().find(state.asset) : nullptr;
+			if (asset) {
+				x = asset->position().x;
+				z = asset->position().z;
+			}
+			return asset != nullptr;
+		};
+		const auto defendAt = [&](float x, float z) {
+			if (!commanderMenu.selected().empty()) {
+				for (const int squad : commanderMenu.selected()) {
+					round.issueOrder(myTeam(), squad, game::GameWorld::orderTypeFromKind(6), x, z, round.localPlayer());
+				}
+				return;
+			}
+			int squad = 0;
+			float best = 0;
+			for (const auto& player : round.playerList()) {
+				const float dx = player.position.x - x, dz = player.position.z - z;
+				if (player.team == myTeam() && player.squadLeader && player.squad && (!squad || dx * dx + dz * dz < best)) {
+					best = dx * dx + dz * dz;
+					squad = player.squad;
+				}
+			}
+			if (squad) {
+				round.issueOrder(myTeam(), squad, game::GameWorld::orderTypeFromKind(6), x, z, round.localPlayer());
+			}
+		};
+		for (const auto& [name, ability] : std::vector<std::pair<std::string, Ability>> {{"Artillery", Ability::Artillery},
+				 {"Satellite", Ability::Satellite}, {"UAV", Ability::Uav}, {"OrbitalStrike", Ability::OrbitalStrike}}) {
+			const Ability tool = ability;
+			bindMethod(console, "Commander.defend" + name, ConsoleAccess::Anyone, [&, tool] {
+				float x = 0, z = 0;
+				if (assetAt(tool, x, z)) {
+					defendAt(x, z);
+				}
+			});
+		}
+		// The Titan's (defendMoveTitan): at the team's Titan.
+		bindMethod(console, "Commander.defendMoveTitan", ConsoleAccess::Anyone, [&] {
+			if (const world::Object* titan = round.objects().find(round.titanOf(myTeam()))) {
+				defendAt(titan->position().x, titan->position().z);
+			}
+		});
+		// The spawn screen's kit and squad halves (SpawnManager.toggleMembers
+		// 0/1, 0x007b8b80: menu states 1 and 0x12/0x13, which show KitsShow
+		// or MembersShow) and its squad menu.
+		bool membersShown = false;
+		bindMethod(console, "SpawnManager.toggleMembers", ConsoleAccess::Anyone, [&](bool members) { membersShown = members; });
+		bindMethod(console, "spawnManager.commitSuicide", ConsoleAccess::Anyone,
+			[&] { round.setHitPoints(round.playerObject(), 0); });
+		dice::hfe::menu::SquadMenu squadMenu(round, hudManager);
+		squadMenu.setLocalizer([&localization](const std::string& id) { return localization.text(id); });
+		squadMenu.onMessage = [](const std::string& id) { std::printf("squad menu: %s\n", id.c_str()); };
+		squadMenu.bind(console);
 		// A click on the map with a tool or order armed: used there.
 		const auto commanderClick = [&](float x, float y) {
 			float worldX = 0, worldZ = 0;
@@ -1937,6 +2066,11 @@ int runGame(Options& options, Session& session)
 			} else {
 				if (leaderOrder) {
 					round.issueSquadLeaderOrder(round.localPlayer(), *armedOrder, worldX, worldZ);
+				} else if (!commanderMenu.selected().empty()) {
+					// The squads selected on the commander screen (0x007a9f60).
+					for (const int squad : commanderMenu.selected()) {
+						round.issueOrder(myTeam(), squad, *armedOrder, worldX, worldZ, round.localPlayer());
+					}
 				} else {
 					int squad = 0;
 					float best = 1e30f;
@@ -2607,6 +2741,9 @@ int runGame(Options& options, Session& session)
 				std::printf(" %d:%s", point.id, point.team == 1 ? "PAC" : point.team == 2 ? "EU" : "-");
 			}
 			std::printf("\n");
+			if (const auto lost = round.objectsOutOfWorld(); !lost.empty()) {
+				std::printf("  %zu objects out of the world\n", lost.size());
+			}
 			for (const auto& titan : round.titans()) {
 				std::printf("  titan %s: %.0f / %.0f hit points (%.1f %%%s), consoles %d of %d, core %s, at %.0f/%.0f/%.0f\n",
 					titan.team == 1 ? "PAC" : "EU", titan.hitPoints, titan.maxHitPoints, titan.percent,
@@ -2651,6 +2788,17 @@ int runGame(Options& options, Session& session)
 			terrainData ? &*terrainData : nullptr, lights, sky, water,
 			"Levels/" + options.level + "/", options.animation};
 		sources.animationFor = [&round](uint32_t object) { return round.animationFor(object); };
+		// The loading screen stays up while the renderer builds the level
+		// (its last tenth), then the level's renderer takes the window.
+		sources.buildProgress = [&](float done) {
+			if (!loadingScreen) {
+				return;
+			}
+			loadingStep(0.9f + 0.1f * done, 1);
+			if (done >= 1) {
+				loadingScreen.reset();
+			}
+		};
 		sources.effects = &round.effects();
 		sources.objectEffects = &objectEffects;
 		sources.overlay = [&](float seconds) {
@@ -2658,6 +2806,11 @@ int runGame(Options& options, Session& session)
 				hudManager.set("PlayerKitIcon" + std::to_string(kit) + "SelectShow", kit == localKit ? 1 : 0);
 			}
 			updateHud(hudManager, round, gameLogic, scoreboardHeld, scoreOf, commanderScreen);
+			squadMenu.update(round.localPlayer());
+			updateKitAbilities(hudManager, round, gameLogic, templates);
+			commanderMenu.update(round.localPlayer());
+			hudManager.set("KitsShow", membersShown ? 0 : 1);
+			hudManager.set("MembersShow", membersShown ? 1 : 0);
 			// Zoomed in, the weapon's zoomed HUD (weaponHud.altGuiIndex: the
 			// scopes' dots and reticles).
 			if (playerCamera.zoomed() && !round.playerVehicle()) {
@@ -3000,6 +3153,12 @@ int runGame(Options& options, Session& session)
 			}
 			sounds.update(ticks);
 		};
+		if (options.commanderScreen && round.localPlayer() >= 0) {
+			// Command the player's team (the game mode enables it) with its
+			// screen open.
+			round.setCommanderEnabled(true);
+			commanderScreen = round.setCommander(round.playerTeam() == 1 ? 1 : 2, round.localPlayer());
+		}
 		if (options.spawnScreen && round.player()) {
 			// Die (and pick the first point to spawn at) to show the spawn screen.
 			const std::vector<int> points = round.spawnablePoints(round.playerTeam());
