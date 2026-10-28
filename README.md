@@ -12,12 +12,25 @@ for the GameSpy/EA backends. Network code follows OpenSpy's published source
 and patches rather than re-reversing protocols from scratch (see
 [Networking](#networking-openspy)).
 
-> **Status:** early. Two of the eight DICE modules are rewritten and tested
-> against the retail game (see [Progress](#progress)). The native `bf2142`
-> executable loads a level's scripts, templates, objects, meshes and terrain
-> through rewritten code and draws it on macOS through Metal. It isn't a game
-> yet: there is no simulation, gameplay, UI, networking or Python yet, and
-> most of the executable's ~35,000 functions are still to be rewritten.
+[OpenBattlefield2](https://github.com/Moxnatiy/OpenBattlefield2) (MIT) is a
+clean-room reimplementation of DICE's Refractor 2 engine for Battlefield 2,
+the engine BF2142 is built on. We use it as a **reference implementation** to
+cross-check details such as file formats, soldier physics, animation, the HUD's
+node tree and the network ghost records. It is not an exact match for BF2142:
+the games differ (2142 adds Titans, its own HUD and its own network records),
+and it is still in progress. The BF2142 binaries stay the authority, so check
+every detail against them and cite the BF2142 address, not the reference.
+Clone it into the git-ignored `reference/` folder:
+
+```sh
+git clone https://github.com/Moxnatiy/OpenBattlefield2 reference/OpenBattlefield2
+```
+
+> **Status:** playable offline. The native `bf2142` runs the game's own menus
+> and starts single-player, co-op, conquest, NV and SL rounds with bots. It
+> also has first-person view, vehicles, physics, the HUD, the commander, stats
+> and a network client. Titan mode and several rendering details are still in
+> progress (see [Progress](#progress) and [docs/roadmap.md](docs/roadmap.md)).
 
 ## Legal
 
@@ -33,6 +46,7 @@ annotation files, and tools.
 ```
 source/Battlefield 2142/   your game install, BF2142 1.51 + OpenSpy patch (git-ignored)
 build/                     build trees, Ghidra project, analysis output (git-ignored)
+reference/OpenBattlefield2/ the Refractor 2 reference implementation (git-ignored clone)
 src/                       the rewrite, laid out like DICE's Code/BF2 tree
   Platform/                OS abstraction (dialogs, dynamic libraries, ...)
   Memory/                  dice::hfe::memory (was Memory.dll)
