@@ -26,6 +26,7 @@ namespace dice::hfe::game {
 
 
 struct ProjectileSettings {
+	std::string name; // the projectile's template (its S_<name>_Looping flight sound)
 	float damage = 0;
 	float minDamage = -1;
 	float distToStartLoseDamage = 0;

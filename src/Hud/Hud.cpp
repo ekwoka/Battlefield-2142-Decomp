@@ -41,6 +41,8 @@ enum NodeType {
 	kList,
 	kMap,
 	kEdit,
+	kMouseOver,
+	kOccupied,
 	kOther,
 };
 
@@ -144,6 +146,98 @@ struct HudManager::Node {
 	int compassOffset = 0;     // 0x154
 	int compassTiltMode = 0;   // 0x170: 2 left, 3 right
 	float compassTilt = 0;     // 0x16c
+	// setNodeOffset x y (kept apart too: a transform list places the
+	// node at its slot plus this).
+	int offset[2] = {0, 0};
+	// Transform lists (Bf2TransformListNode, 0x007ebcd0; render
+	// 0x007eba70): the nodes added (addTransformListNode, slot 0xd4
+	// 0x007ebde0) are stacked downwards from the list's position (the
+	// position variables, slot 0xd0 0x007eb9d0, else where it was made;
+	// plus setTranformListNodeOffset, slot 0xcc 0x007ebd60), each its
+	// height plus the list's spacing (createTransformListNode's last
+	// argument, +0x24) below the one before.
+	std::vector<Node*> listItems;
+	int listSpacing = 0;
+	int listOffset[2] = {0, 0};
+	std::string listPosVariables[2];
+	int createdAt[2] = {0, 0};
+	// addNodeMoveShowEffect <direction> <distance> (0x007b1f40: a
+	// Bf2MoveEffect node, 0x007e4230, above the node): while it fades in
+	// or out the node and its children sit `distance` pixels along the
+	// direction (radians, 0 to the right, pi/2 down) times what is left of
+	// the fade.
+	bool moveEffect = false;
+	float moveAngle = 0, moveDistance = 0;
+	int blend[2] = {0, 0}; // addNodeBlendEffect
+	// setNodeTimesBlink <times> <mode> / setNodeIntervalBlink <seconds>
+	// (0x007b1c00 / 0x007b1da0, the "<node>BlinkEffect" node's slots 0xdc
+	// and 0xd8): once shown the node blinks `times` times, `interval`
+	// seconds on and off, then stays.
+	int blinkTimes = 0;
+	float blinkInterval = 0;
+	float shownSince[2] = {-1, -1};
+	// setNodeShowConCmd <command> <event> (0x007b0e00: an
+	// executeConsoleCommand effect): event 1 runs when the node shows, 0
+	// when it hides.
+	std::vector<std::pair<int, std::string>> showCommands;
+	uint64_t drawnFrame = 0;
+	bool wasDrawn = false;
+	// Buttons: setButtonNodeMouseArea x y w h (slot 0x104: the clickable
+	// rectangle from the node's corner), setButtonNodeAltConCmd (slot
+	// 0x100: the right button's commands), setButtonNodeDebug (slot 0x10c).
+	bool mouseArea = false;
+	int area[4] = {0, 0, 0, 0};
+	std::vector<std::pair<int, std::string>> altCommands;
+	bool buttonDebug = false;
+	// Mouse-over nodes (createMouseOverNode): setMouseOverNodeConCmd
+	// <command> <event> (0x007b02a0, slot 0xf8), event 3 on the button's
+	// release over the node (the kit screen's drop targets).
+	std::vector<std::pair<int, std::string>> mouseOverCommands;
+	uint64_t mouseOverFrame = 0;
+	// Pictures: setPictureNodeBorder <left> <top> <right> <bottom> and
+	// setPictureNodeBorderColor (0x007af640 / 0x007af6d0, slots 0xe4 /
+	// 0xe8: lines of those widths in that colour round the picture),
+	// setPictureNodeCenterPoint (slot 0xe0: the rotation's pivot from the
+	// corner; unset, the centre).
+	int pictureBorder[4] = {0, 0, 0, 0};
+	float pictureBorderColor[4] = {0, 0, 0, 0};
+	bool centerSet = false;
+	int center[2] = {0, 0};
+	// Text: setTextNodeOutLine <font> (0x007afa40: the outline font, the
+	// text node's font object slot 0x5c), setTextNodeOutLineOffset (0x60)
+	// and setTruncate (0x68: the text stops at the node's width).
+	std::string outlineFont;
+	float outlineOffset[2] = {0, 0};
+	bool truncate = false;
+	// Bars: setBarNodeBorder <a> <b> <c> <d> (0x007b0540, slot 0x104: the
+	// fill keeps a and b pixels off its start and end along the bar, c and
+	// d across), setBarNodeIncreaseShow (0x110), setBarNodeSnapDir
+	// (0x108), setBarNodeRound <mode> <w> <h> (0x120), kept.
+	int barBorder[4] = {0, 0, 0, 0};
+	bool barIncreaseShow = false, barSnapDir = false;
+	int barRound = 0;
+	float barRoundSize[2] = {0, 0};
+	// Occupied nodes (a vehicle's seat dots): the seat (createOccupiedNode's
+	// third argument), setOccupiedNodeData (0x007afce0) and
+	// setOccupiedNodePosVariable (0x007afc40, slot 0xcc).
+	int occupiedSeat = 0;
+	int occupiedData = 0;
+	// Object markers (Bf2ObjectMarkerNode 0x007e5f30): textures and sizes
+	// per state (slots 0xd8 / 0xdc, 4 each), the targets at most (+8, slot
+	// 0xc8), the lock-on type (+0x54, 2), the weapon (+0x58), the range cut
+	// (+0x61), the labels: on and their variables' prefix (slot 0xd0,
+	// 0x007e4bd0: <prefix><n>String, <prefix><n>Show), their offset from
+	// the marker (+0x40, -3 0) and their nodes (slot 0xd4 0x007e5cf0).
+	std::string markerTextures[4];
+	float markerSizes[4][2] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}};
+	int markerObjects = 0;
+	int lockOnType = 2;
+	int markerWeapon = 0;
+	bool markerRange = false;
+	bool lockText = false;
+	std::string lockTextPrefix;
+	float lockTextOffset[2] = {-3, 0};
+	std::vector<Node*> lockTextNodes;
 };
 
 HudManager::HudManager(Reader reader) : m_reader(std::move(reader))
@@ -199,6 +293,11 @@ HudManager::Node* HudManager::create(int type, const std::string& parentName, co
 	node->y = y;
 	node->w = w;
 	node->h = h;
+	node->createdAt[0] = x;
+	node->createdAt[1] = y;
+	if (type == kTransformList && std::find(m_transformLists.begin(), m_transformLists.end(), node) == m_transformLists.end()) {
+		m_transformLists.push_back(node);
+	}
 	if (Node* parent = parentName.empty() ? nullptr : find(parentName)) {
 		if (node->parent != parent) {
 			parent->children.push_back(node);
@@ -207,6 +306,13 @@ HudManager::Node* HudManager::create(int type, const std::string& parentName, co
 	}
 	m_active = node;
 	return node;
+}
+
+void HudManager::noteShowCommands(Node* node)
+{
+	if (std::find(m_showCommandNodes.begin(), m_showCommandNodes.end(), node) == m_showCommandNodes.end()) {
+		m_showCommandNodes.push_back(node);
+	}
 }
 
 const HudFont* HudManager::font(const std::string& path)
@@ -266,7 +372,10 @@ std::vector<HudQuad> HudManager::frame(float seconds)
 	std::vector<HudQuad> quads;
 	m_buttonHits.clear();
 	m_listHits.clear();
+	m_mouseOverHits.clear();
 	m_clock += seconds;
+	++m_frameNumber;
+	layoutTransformLists();
 	for (m_pass = 0; m_pass < 2; ++m_pass) {
 		m_numbers["affectedbyempshow"] = static_cast<float>(m_pass);
 		m_numbers["updateallenabled"] = static_cast<float>(1 - m_pass);
@@ -275,7 +384,72 @@ std::vector<HudQuad> HudManager::frame(float seconds)
 		}
 	}
 	m_numbers["affectedbyempshow"] = 0;
+	// setNodeShowConCmd: the nodes that began or stopped being drawn.
+	for (Node* node : m_showCommandNodes) {
+		const bool drawn = node->drawnFrame == m_frameNumber;
+		if (drawn != node->wasDrawn) {
+			node->wasDrawn = drawn;
+			runCommands(node->showCommands, drawn ? 1 : 0);
+		}
+	}
 	return quads;
+}
+
+void HudManager::runCommands(const std::vector<std::pair<int, std::string>>& commands, int event)
+{
+	if (!m_run) {
+		return;
+	}
+	for (const auto& [when, command] : commands) {
+		if (when == event) {
+			m_run(command);
+		}
+	}
+}
+
+// Bf2TransformListNode::render (0x007eba70), for every list each frame
+// before drawing: the list's position is its position variables' values
+// (when the game has set them) or where it was made, plus its offset; the
+// block of its nodes (as tall as their heights and the spacing between
+// them, as wide as the widest) is kept on the screen; then each node goes
+// to its slot (the node's slot 0xcc, 0x007da5b0 for transform nodes), its
+// own setNodeOffset on top. (The exe adds the offset to the position each
+// frame; without position variables that would creep, so here the offset
+// applies once. Its bounds are the parent's rectangle about the screen's
+// centre; with the HUD's roots that is the 800 x 600 screen.)
+void HudManager::layoutTransformLists()
+{
+	for (Node* list : m_transformLists) {
+		if (list->listItems.empty()) {
+			continue;
+		}
+		float pos[2] = {static_cast<float>(list->createdAt[0]), static_cast<float>(list->createdAt[1])};
+		for (int axis = 0; axis < 2; ++axis) {
+			if (!list->listPosVariables[axis].empty()) {
+				const auto it = m_numbers.find(lower(list->listPosVariables[axis]));
+				if (it != m_numbers.end()) {
+					pos[axis] = static_cast<float>(static_cast<int>(it->second)); // the variables are ints
+				}
+			}
+			pos[axis] += static_cast<float>(list->listOffset[axis]);
+		}
+		float width = 0, height = 0;
+		const float spacing = static_cast<float>(list->listSpacing);
+		for (const Node* item : list->listItems) {
+			width = std::max(width, static_cast<float>(item->w));
+			height += static_cast<float>(item->h) + spacing;
+		}
+		pos[0] = std::max(0.0f, std::min(pos[0], 800 - width));
+		pos[1] = std::max(0.0f, std::min(pos[1], 600 - height));
+		float y = pos[1];
+		for (Node* item : list->listItems) {
+			item->x = static_cast<int>(pos[0]) + item->offset[0];
+			item->y = static_cast<int>(y) + item->offset[1];
+			y += static_cast<float>(item->h) + spacing;
+		}
+		list->x = static_cast<int>(pos[0]);
+		list->y = static_cast<int>(pos[1]);
+	}
 }
 
 void HudManager::draw(Node& node, float originX, float originY, float alpha, const float* tint, float seconds,
@@ -283,10 +457,12 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 {
 	const bool show = visible(node);
 	float& shown = node.shown[m_pass];
+	const bool animated = (node.alphaShowEffect || node.moveEffect) && (node.inTime > 0 || node.outTime > 0);
+	const bool wasHidden = shown <= 0;
 	if (!node.started[m_pass]) {
 		node.started[m_pass] = true;
 		shown = show ? 1.0f : 0.0f;
-	} else if (node.alphaShowEffect && (node.inTime > 0 || node.outTime > 0)) {
+	} else if (animated) {
 		const float time = show ? node.inTime : node.outTime;
 		const float step = time > 0 ? seconds / time : 1.0f;
 		shown = std::clamp(shown + (show ? step : -step), 0.0f, 1.0f);
@@ -294,9 +470,24 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 		shown = show ? 1.0f : 0.0f;
 	}
 	if (shown <= 0) {
+		node.shownSince[m_pass] = -1;
 		return;
 	}
-	alpha *= shown;
+	if (wasHidden || node.shownSince[m_pass] < 0) {
+		node.shownSince[m_pass] = m_clock;
+	}
+	// Blinking: off every other interval for its first `times` blinks.
+	if (node.blinkTimes > 0 && node.blinkInterval > 0) {
+		const float since = m_clock - node.shownSince[m_pass];
+		const int phase = static_cast<int>(std::floor(since / node.blinkInterval));
+		if (phase < node.blinkTimes * 2 && phase % 2 == 1) {
+			return;
+		}
+	}
+	node.drawnFrame = m_frameNumber;
+	if (node.alphaShowEffect || !node.moveEffect) {
+		alpha *= shown;
+	}
 	if (!node.alphaVariable.empty()) {
 		alpha *= std::clamp(number(node.alphaVariable), 0.0f, 1.0f);
 	}
@@ -317,15 +508,26 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 	float y = originY + static_cast<float>(node.y);
 	// A position variable sets the coordinate (the crosshair's parts have
 	// x 0 and take CrossLeftPos = 399 - length - spread, 0x007be770).
-	// (Until the game sets one the node keeps its own.)
+	// (Until the game sets one the node keeps its own.) Its setNodeOffset
+	// goes on top (the transform node's +0x2c, 0x007da720: the map menus'
+	// markers sit -20 -20 from OrderMenuPosX/Y).
 	for (int axis = 0; axis < 2; ++axis) {
 		if (!node.posVariables[axis].empty()) {
 			const auto it = m_numbers.find(lower(node.posVariables[axis]));
 			if (it != m_numbers.end()) {
-				(axis == 0 ? x : y) = (axis == 0 ? originX : originY) + it->second;
+				(axis == 0 ? x : y) = (axis == 0 ? originX : originY) + it->second + static_cast<float>(node.offset[axis]);
 			}
 		}
 	}
+	// The move effect's slide, for the node and everything below it.
+	float moveX = 0, moveY = 0;
+	if (node.moveEffect && shown < 1) {
+		moveX = std::cos(node.moveAngle) * node.moveDistance * (1 - shown);
+		moveY = std::sin(node.moveAngle) * node.moveDistance * (1 - shown);
+		x += moveX;
+		y += moveY;
+	}
+	const size_t first = out.size();
 	const float w = static_cast<float>(node.w), h = static_cast<float>(node.h);
 	const auto quad = [&](const std::string& texture, float x0, float y0, float x1, float y1, float u0, float v0, float u1,
 						  float v1, float rotation) {
@@ -336,22 +538,44 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 			rotation};
 		out.push_back(q);
 	};
+	const auto fill = [&](const float rgba[4], float x0, float y0, float x1, float y1) {
+		if (rgba[3] * alpha > 0 && x1 > x0 && y1 > y0) {
+			out.push_back({"Menu/Console/white.dds", x0, y0, x1, y1, 0, 0, 1, 1, {rgba[0], rgba[1], rgba[2], rgba[3] * alpha}, 0});
+		}
+	};
 	switch (node.type) {
 	case kPicture: {
 		std::string texture = node.textureVariable.empty() ? node.texture : string(node.textureVariable);
 		const float rotation = node.rotation + (node.rotateVariable.empty() ? 0 : number(node.rotateVariable));
 		quad(texture, x, y, x + w, y + h, 0, 0, 1, 1, rotation);
+		const int* b = node.pictureBorder;
+		fill(node.pictureBorderColor, x, y, x + w, y + static_cast<float>(b[1]));
+		fill(node.pictureBorderColor, x, y + h - static_cast<float>(b[3]), x + w, y + h);
+		fill(node.pictureBorderColor, x, y + static_cast<float>(b[1]), x + static_cast<float>(b[0]), y + h - static_cast<float>(b[3]));
+		fill(node.pictureBorderColor, x + w - static_cast<float>(b[2]), y + static_cast<float>(b[1]), x + w,
+			y + h - static_cast<float>(b[3]));
 		break;
 	}
 	case kButton: {
-		const bool over = m_pointer[0] >= x && m_pointer[0] <= x + w && m_pointer[1] >= y && m_pointer[1] <= y + h;
+		const float ax = node.mouseArea ? x + static_cast<float>(node.area[0]) : x;
+		const float ay = node.mouseArea ? y + static_cast<float>(node.area[1]) : y;
+		const float aw = node.mouseArea ? static_cast<float>(node.area[2]) : w;
+		const float ah = node.mouseArea ? static_cast<float>(node.area[3]) : h;
+		const bool over = m_pointer[0] >= ax && m_pointer[0] <= ax + aw && m_pointer[1] >= ay && m_pointer[1] <= ay + ah;
 		const std::string& normal = node.buttonTextures[1].empty() ? node.buttonTextures[0] : node.buttonTextures[1];
 		quad(over && !node.buttonTextures[2].empty() ? node.buttonTextures[2] : normal, x, y, x + w, y + h, 0, 0, 1, 1, 0);
-		if (!node.buttonCommands.empty() && color[3] > 0) {
-			m_buttonHits.push_back({x, y, x + w, y + h, &node});
+		if ((!node.buttonCommands.empty() || !node.altCommands.empty()) && color[3] > 0) {
+			m_buttonHits.push_back({ax, ay, ax + aw, ay + ah, &node});
 		}
 		break;
 	}
+	case kMouseOver:
+		// (Once a frame: a node outside the EMP logic is in both passes.)
+		if (!node.mouseOverCommands.empty() && node.drawnFrame != node.mouseOverFrame) {
+			node.mouseOverFrame = node.drawnFrame;
+			m_mouseOverHits.push_back({x, y, x + w, y + h, &node});
+		}
+		break;
 	case kBar: {
 		quad(node.barTextures[0], x, y, x + w, y + h, 0, 0, 1, 1, 0);
 		float value = node.valueVariable.empty() ? 0 : number(node.valueVariable);
@@ -362,19 +586,29 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 		if (node.snap > 0) {
 			value = std::floor(value * static_cast<float>(node.snap) + 0.5f) / static_cast<float>(node.snap);
 		}
-		if (value > 0) {
+		// The border (top, bottom, left, right): the fill takes the inner
+		// rectangle, filling it along the bar (the conquest screens' point
+		// bars split one node, "0 0 17 76" from the right and "0 0 77 15"
+		// from the left, 152 wide).
+		const float bx0 = x + static_cast<float>(node.barBorder[2]), bx1 = x + w - static_cast<float>(node.barBorder[3]);
+		const float by0 = y + static_cast<float>(node.barBorder[0]), by1 = y + h - static_cast<float>(node.barBorder[1]);
+		const float u0 = w > 0 ? (bx0 - x) / w : 0, u1 = w > 0 ? (bx1 - x) / w : 1;
+		const float v0 = h > 0 ? (by0 - y) / h : 0, v1 = h > 0 ? (by1 - y) / h : 1;
+		if (value > 0 && bx1 > bx0 && by1 > by0) {
+			const float fx = (bx1 - bx0) * value, fy = (by1 - by0) * value;
+			const float fu = (u1 - u0) * value, fv = (v1 - v0) * value;
 			switch (node.barType) {
 			case 0: // filling upwards
-				quad(node.barTextures[1], x, y + h * (1 - value), x + w, y + h, 0, 1 - value, 1, 1, 0);
+				quad(node.barTextures[1], bx0, by1 - fy, bx1, by1, u0, v1 - fv, u1, v1, 0);
 				break;
 			case 1: // downwards
-				quad(node.barTextures[1], x, y, x + w, y + h * value, 0, 0, 1, value, 0);
+				quad(node.barTextures[1], bx0, by0, bx1, by0 + fy, u0, v0, u1, v0 + fv, 0);
 				break;
 			case 2: // from the right
-				quad(node.barTextures[1], x + w * (1 - value), y, x + w, y + h, 1 - value, 0, 1, 1, 0);
+				quad(node.barTextures[1], bx1 - fx, by0, bx1, by1, u1 - fu, v0, u1, v1, 0);
 				break;
 			default: // from the left
-				quad(node.barTextures[1], x, y, x + w * value, y + h, 0, 0, value, 1, 0);
+				quad(node.barTextures[1], bx0, by0, bx0 + fx, by1, u0, v0, u0 + fu, v1, 0);
 				break;
 			}
 		}
@@ -402,6 +636,9 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 	case kCompass:
 		drawCompass(node, x, y, color, out);
 		break;
+	case kObjectMarker:
+		drawMarkers(node, x, y, color, out);
+		break;
 	default:
 		break;
 	}
@@ -413,9 +650,17 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 	const size_t parentStart = m_parentStart;
 	m_parentStart = out.size();
 	for (Node* child : node.children) {
-		draw(*child, positioned ? x : originX, positioned ? y : originY, alpha, tint, seconds, out);
+		draw(*child, positioned ? x : originX + moveX, positioned ? y : originY + moveY, alpha, tint, seconds, out);
 	}
 	m_parentStart = parentStart;
+	if (node.blend[0] != 0 || node.blend[1] != 0) {
+		for (size_t i = first; i < out.size(); ++i) {
+			if (out[i].blend[0] == 0 && out[i].blend[1] == 0) {
+				out[i].blend[0] = node.blend[0];
+				out[i].blend[1] = node.blend[1];
+			}
+		}
+	}
 }
 
 void HudManager::drawText(const Node& node, float x, float y, const float color[4], std::vector<HudQuad>& out)
@@ -423,6 +668,21 @@ void HudManager::drawText(const Node& node, float x, float y, const float color[
 	std::string text = node.textVariable.empty() ? node.text : string(node.textVariable);
 	if (m_localize && !text.empty()) {
 		text = m_localize(text);
+	}
+	if (node.truncate && !node.font.empty()) {
+		// setTruncate: the text cut where it leaves the node.
+		if (const HudFont* f = font(node.font)) {
+			while (!text.empty() && f->width(text) > static_cast<float>(node.w)) {
+				text.pop_back();
+			}
+		}
+	}
+	if (!node.outlineFont.empty()) {
+		// setTextNodeOutLine: the outline font's glyphs beneath, moved by
+		// the outline offset, in the text's alpha (black).
+		const float shade[4] = {0, 0, 0, color[3]};
+		drawString(node.outlineFont, text, x + node.outlineOffset[0], y + node.outlineOffset[1], static_cast<float>(node.w),
+			node.alignment, shade, out);
 	}
 	drawString(node.font, text, x, y, static_cast<float>(node.w), node.alignment, color, out);
 }
@@ -602,6 +862,88 @@ void HudManager::drawCompass(const Node& node, float x, float y, const float col
 		}
 	}
 }
+
+// Bf2ObjectMarkerNode (update 0x007e6880): the targets (0x007e6520, here
+// from the game through setMarkerSource), each drawn with the texture and
+// size of its state centred on its point (0x007e5a10 -> 0x007e5060), at
+// most setObjectMarkerNodeObjects of them; with lock text on, the n-th
+// target's label node goes to the point plus half the marker's size plus
+// the label offset, rounded up, and the HUD variables <prefix><n>String
+// (its distance, whole metres rounded up) and <prefix><n>Show (1) are set
+// for it and <prefix><n>Show cleared for the rest of the 20 (0x007e56e0).
+void HudManager::drawMarkers(Node& node, float x, float y, const float color[4], std::vector<HudQuad>& out)
+{
+	std::vector<MarkerTarget> targets;
+	if (m_markerSource && color[3] > 0) {
+		MarkerQuery query;
+		query.lockOnType = node.lockOnType;
+		query.weapon = node.markerWeapon;
+		query.maxObjects = node.markerObjects;
+		query.rangeCheck = node.markerRange;
+		query.x0 = x;
+		query.y0 = y;
+		query.x1 = x + static_cast<float>(node.w);
+		query.y1 = y + static_cast<float>(node.h);
+		targets = m_markerSource(query);
+	}
+	if (node.markerObjects > 0 && targets.size() > static_cast<size_t>(node.markerObjects)) {
+		targets.resize(static_cast<size_t>(node.markerObjects));
+	}
+	for (size_t i = 0; i < targets.size(); ++i) {
+		const MarkerTarget& t = targets[i];
+		const int state = std::clamp(t.state, 0, 3);
+		const std::string& texture = node.markerTextures[state].empty() ? node.markerTextures[0] : node.markerTextures[state];
+		const float* size = node.markerSizes[state][0] > 0 ? node.markerSizes[state] : node.markerSizes[0];
+		if (!texture.empty() && size[0] > 0) {
+			out.push_back({kTextureRoot + slashes(texture), t.x - size[0] * 0.5f, t.y - size[1] * 0.5f, t.x + size[0] * 0.5f,
+				t.y + size[1] * 0.5f, 0, 0, 1, 1, {color[0], color[1], color[2], color[3]}, 0});
+		}
+		if (node.lockText && i < node.lockTextNodes.size()) {
+			Node* label = node.lockTextNodes[i];
+			label->x = static_cast<int>(std::ceil(t.x + size[0] * 0.5f + node.lockTextOffset[0]));
+			label->y = static_cast<int>(std::ceil(t.y + size[1] * 0.5f + node.lockTextOffset[1]));
+		}
+		if (node.lockText) {
+			const std::string n = node.lockTextPrefix + std::to_string(i);
+			setString(n + "String", std::to_string(static_cast<int>(std::ceil(t.distance))));
+			set(n + "Show", 1);
+		}
+	}
+	if (node.lockText) {
+		for (size_t i = targets.size(); i < 20; ++i) {
+			set(node.lockTextPrefix + std::to_string(i) + "Show", 0);
+		}
+	}
+}
+
+bool HudManager::pointerQuad(Pointer kind, HudQuad& quad) const
+{
+	const std::string& texture = m_pointerTextures[static_cast<int>(kind)];
+	if (texture.empty() || m_pointer[0] < 0 || m_pointer[1] < 0) {
+		return false;
+	}
+	const float w = m_pointerSize[0], h = m_pointerSize[1];
+	quad = {kTextureRoot + slashes(texture), m_pointer[0] - w * 0.5f, m_pointer[1] - h * 0.5f, m_pointer[0] + w * 0.5f,
+		m_pointer[1] + h * 0.5f, 0, 0, 1, 1, {1, 1, 1, 1}, 0};
+	return true;
+}
+
+void HudManager::togglePaintKit(int kit)
+{
+	if (kit >= 0 && kit < 8) {
+		m_paintKits ^= 1u << kit;
+	}
+}
+
+void HudManager::togglePaintVehicle(int kind)
+{
+	if (kind >= 0 && kind < 32) {
+		m_paintVehicles ^= 1u << kind;
+	}
+}
+
+void HudManager::paintAllKits() { m_paintKits = m_paintKits == 0xff ? 0 : 0xff; }
+void HudManager::paintAllVehicles() { m_paintVehicles = m_paintVehicles == 0xffffffff ? 0 : 0xffffffff; }
 
 void HudManager::setList(int data, std::vector<std::vector<std::string>> rows) { m_lists[data] = std::move(rows); }
 
@@ -844,14 +1186,23 @@ void HudManager::setMap(const std::string& texture, float originX, float originZ
 }
 
 // A click: the topmost button drawn there runs its press (event 0) and
-// release (event 3) commands. True when a button took it.
-bool HudManager::click(float x, float y)
+// release (event 3) commands (the alternate button its
+// setButtonNodeAltConCmd ones). True when a button took it.
+bool HudManager::click(float x, float y, bool alternate)
 {
+	// The mouse-over nodes under the pointer take the release (event 3).
+	if (!alternate) {
+		for (const MouseOverHit& hit : m_mouseOverHits) {
+			if (x >= hit.x0 && x <= hit.x1 && y >= hit.y0 && y <= hit.y1) {
+				runCommands(hit.node->mouseOverCommands, 3);
+			}
+		}
+	}
 	// A list's row (Bf2NewListBoxNode's click, 0x007dd3b0 reads its cells):
 	// the row is selected, the column under the pointer kept (the list's
 	// +0xc, which the squad menu switches on), and the list's commands run:
 	// event 1, then 2 when the same row was clicked within half a second.
-	for (auto it = m_listHits.rbegin(); it != m_listHits.rend(); ++it) {
+	for (auto it = m_listHits.rbegin(); !alternate && it != m_listHits.rend(); ++it) {
 		if (x < it->x0 || x > it->x1 || y < it->y0 || y > it->y1) {
 			continue;
 		}
@@ -882,9 +1233,13 @@ bool HudManager::click(float x, float y)
 		if (x < it->x0 || x > it->x1 || y < it->y0 || y > it->y1) {
 			continue;
 		}
+		const auto& commands = alternate ? it->node->altCommands : it->node->buttonCommands;
+		if (commands.empty()) {
+			continue;
+		}
 		if (m_run) {
 			for (int event : {0, 3}) {
-				for (const auto& [when, command] : it->node->buttonCommands) {
+				for (const auto& [when, command] : commands) {
 					if (when == event) {
 						m_run(command);
 					}
@@ -1107,7 +1462,7 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 	create("createTextNode", kText);
 	create("createButtonNode", kButton);
 	create("createObjectMarkerNode", kObjectMarker);
-	create("createMouseOverNode", kOther);
+	create("createMouseOverNode", kMouseOver);
 	create("createAnimationNode", kOther);
 	create("createHoverNode", kOther);
 	create("createObjectSelectionNode", kOther);
@@ -1148,13 +1503,18 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 			node->barType = type;
 			return true;
 		});
+	// createTransformListNode <parent> <name> x y w h <spacing> (0x007b2b50).
 	bindMethod(console, "HudBuilder.createTransformListNode", access,
-		[m](std::string parent, std::string name, int, int x, int y, int w, int h) {
-			return m->create(kTransformList, parent, name, x, y, w, h) != nullptr;
+		[m](std::string parent, std::string name, int x, int y, int w, int h, int spacing) {
+			Node* n = m->create(kTransformList, parent, name, x, y, w, h);
+			n->listSpacing = spacing;
+			return true;
 		});
 	bindMethod(console, "HudBuilder.createOccupiedNode", access,
-		[m](std::string parent, std::string name, int, int x, int y, int w, int h) {
-			return m->create(kOther, parent, name, x, y, w, h) != nullptr;
+		[m](std::string parent, std::string name, int seat, int x, int y, int w, int h) {
+			Node* n = m->create(kOccupied, parent, name, x, y, w, h);
+			n->occupiedSeat = seat;
+			return true;
 		});
 	bindMethod(console, "HudBuilder.createCompassNode", access,
 		[m](std::string parent, std::string name, int direction, int x, int y, int w, int h, bool wrap, bool snap) {
@@ -1319,9 +1679,18 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 		}
 		return true;
 	});
-	// setActiveObject <parent> <node>: later calls change that node.
+	// setActiveObject <parent> <node>: later calls change that node. The
+	// exe's text nodes sit below a transform node of their name, the text
+	// itself named "<name>TextNode" (the object markers' labels set their
+	// variables on those); here one node is both.
 	bindMethod(console, "HudBuilder.setActiveObject", access, [m](std::string, std::string name) {
-		m->setActive(m->find(name));
+		Node* n = m->find(name);
+		const std::string suffix = "textnode";
+		const std::string low = lower(name);
+		if (!n && low.size() > suffix.size() && low.compare(low.size() - suffix.size(), suffix.size(), suffix) == 0) {
+			n = m->find(name.substr(0, name.size() - suffix.size()));
+		}
+		m->setActive(n);
 		return m->active() != nullptr;
 	});
 
@@ -1375,6 +1744,8 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 		if (Node* n = active()) {
 			n->x += x;
 			n->y += y;
+			n->offset[0] += x;
+			n->offset[1] += y;
 		}
 		return true;
 	});
@@ -1498,6 +1869,425 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 			n->spanMax = high;
 		}
 		return true;
+	});
+
+	// --- Transform lists (Bf2TransformListNode) ---
+	// addTransformListNode <node> (0x007aed80 -> slot 0xd4, 0x007ebde0).
+	bindMethod(console, "HudBuilder.addTransformListNode", access, [m, active](std::string name) {
+		Node* list = active();
+		Node* item = m->find(name);
+		if (!list || list->type != kTransformList || !item) {
+			return false;
+		}
+		list->listItems.push_back(item);
+		return true;
+	});
+	// setTranformListNodePosVariable <axis> <variable> (0x007aedf0 -> slot
+	// 0xd0, 0x007eb9d0: 0 x, 1 y).
+	bindMethod(console, "HudBuilder.setTranformListNodePosVariable", access, [active](int axis, std::string variable) {
+		Node* n = active();
+		if (!n || n->type != kTransformList || axis < 0 || axis > 1 || variable.empty()) {
+			return false;
+		}
+		n->listPosVariables[axis] = variable;
+		return true;
+	});
+	// setTranformListNodeOffset x y (0x007ae270 -> slot 0xcc, 0x007ebd60).
+	bindMethod(console, "HudBuilder.setTranformListNodeOffset", access, [active](int x, int y) {
+		Node* n = active();
+		if (!n || n->type != kTransformList) {
+			return false;
+		}
+		n->listOffset[0] = x;
+		n->listOffset[1] = y;
+		return true;
+	});
+
+	// --- Show effects ---
+	bindMethod(console, "HudBuilder.addNodeMoveShowEffect", access, [active](float angle, int distance) {
+		if (Node* n = active()) {
+			n->moveEffect = true;
+			n->moveAngle = angle;
+			n->moveDistance = static_cast<float>(distance);
+		}
+		return true;
+	});
+	bindMethod(console, "HudBuilder.addNodeBlendEffect", access, [active](int source, int destination) {
+		if (Node* n = active()) {
+			n->blend[0] = source;
+			n->blend[1] = destination;
+		}
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setNodeTimesBlink", access, [active](int times, int) {
+		if (Node* n = active()) {
+			n->blinkTimes = times;
+		}
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setNodeIntervalBlink", access, [active](float seconds) {
+		if (Node* n = active()) {
+			n->blinkInterval = seconds;
+		}
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setNodeShowConCmd", access, [m, active](std::string command, int event) {
+		Node* n = active();
+		if (!n || event < 0 || event > 1 || command.empty()) {
+			return false;
+		}
+		n->showCommands.emplace_back(event, command);
+		m->noteShowCommands(n);
+		return true;
+	});
+	// setNodeSize w h (0x007b0a10: the node made last, slot 0xc8).
+	bindMethod(console, "HudBuilder.setNodeSize", access, [active](int w, int h) {
+		if (Node* n = active()) {
+			n->w = w;
+			n->h = h;
+		}
+		return true;
+	});
+
+	// --- Buttons and mouse-over nodes ---
+	bindMethod(console, "HudBuilder.setButtonNodeMouseArea", access, [active](int x, int y, int w, int h) {
+		Node* n = active();
+		if (!n || n->type != kButton) {
+			return false;
+		}
+		n->mouseArea = true;
+		n->area[0] = x;
+		n->area[1] = y;
+		n->area[2] = w;
+		n->area[3] = h;
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setButtonNodeAltConCmd", access, [active](std::string command, int event) {
+		Node* n = active();
+		if (!n || n->type != kButton || event < 0 || event > 3) {
+			return false;
+		}
+		n->altCommands.emplace_back(event, command);
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setButtonNodeDebug", access, [active](bool debug) {
+		Node* n = active();
+		if (!n || n->type != kButton) {
+			return false;
+		}
+		n->buttonDebug = debug;
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setMouseOverNodeConCmd", access, [active](std::string command, int event) {
+		Node* n = active();
+		if (!n || n->type != kMouseOver || event < 0 || event > 3) {
+			return false;
+		}
+		n->mouseOverCommands.emplace_back(event, command);
+		return true;
+	});
+
+	// --- Pictures, text, bars ---
+	bindMethod(console, "HudBuilder.setPictureNodeBorder", access, [active](int left, int top, int right, int bottom) {
+		if (Node* n = active()) {
+			n->pictureBorder[0] = left;
+			n->pictureBorder[1] = top;
+			n->pictureBorder[2] = right;
+			n->pictureBorder[3] = bottom;
+		}
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setPictureNodeBorderColor", access, [active](float r, float g, float b, float a) {
+		if (Node* n = active()) {
+			n->pictureBorderColor[0] = r;
+			n->pictureBorderColor[1] = g;
+			n->pictureBorderColor[2] = b;
+			n->pictureBorderColor[3] = a;
+		}
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setPictureNodeCenterPoint", access, [active](int x, int y) {
+		if (Node* n = active()) {
+			n->centerSet = true;
+			n->center[0] = x;
+			n->center[1] = y;
+		}
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setTextNodeOutLine", access, [active](std::string font) {
+		Node* n = active();
+		if (!n || n->type != kText) {
+			return false;
+		}
+		n->outlineFont = font;
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setTextNodeOutLineOffset", access, [active](float x, float y) {
+		Node* n = active();
+		if (!n || n->type != kText) {
+			return false;
+		}
+		n->outlineOffset[0] = x;
+		n->outlineOffset[1] = y;
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setTruncate", access, [active](bool truncate) {
+		Node* n = active();
+		if (!n || n->type != kText) {
+			return false;
+		}
+		n->truncate = truncate;
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setBarNodeBorder", access, [active](int a, int b, int c, int d) {
+		Node* n = active();
+		if (!n || (n->type != kBar && n->type != kCompass)) {
+			return false;
+		}
+		n->barBorder[0] = a;
+		n->barBorder[1] = b;
+		n->barBorder[2] = c;
+		n->barBorder[3] = d;
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setBarNodeIncreaseShow", access, [active](int on) {
+		if (Node* n = active()) {
+			n->barIncreaseShow = on != 0;
+		}
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setBarNodeSnapDir", access, [active](bool on) {
+		if (Node* n = active()) {
+			n->barSnapDir = on;
+		}
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setBarNodeRound", access, [active](int mode, float w, float h) {
+		if (Node* n = active()) {
+			n->barRound = mode;
+			n->barRoundSize[0] = w;
+			n->barRoundSize[1] = h;
+		}
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setOccupiedNodeData", access, [active](int data) {
+		Node* n = active();
+		if (!n || n->type != kOccupied) {
+			return false;
+		}
+		n->occupiedData = data;
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setOccupiedNodePosVariable", access, [active](int axis, std::string variable) {
+		Node* n = active();
+		if (!n || n->type != kOccupied || axis < 0 || axis > 1 || variable.empty()) {
+			return false;
+		}
+		n->posVariables[axis] = variable;
+		return true;
+	});
+
+	// --- Object markers (0x007af210..0x007af440 -> Bf2ObjectMarkerNode's slots) ---
+	const auto marker = [active]() -> Node* {
+		Node* n = active();
+		return n && n->type == kObjectMarker ? n : nullptr;
+	};
+	bindMethod(console, "HudBuilder.setObjectMarkerNodeTexture", access, [marker](int index, std::string texture) {
+		Node* n = marker();
+		if (!n || index < 0 || index >= 4) {
+			return false;
+		}
+		n->markerTextures[index] = texture;
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setObjectMarkerNodeTextureSize", access, [marker](int index, int w, int h) {
+		Node* n = marker();
+		if (!n || index < 0 || index >= 4) {
+			return false;
+		}
+		n->markerSizes[index][0] = static_cast<float>(w);
+		n->markerSizes[index][1] = static_cast<float>(h);
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setObjectMarkerNodeObjects", access, [marker](int count) {
+		Node* n = marker();
+		if (!n || count < 0) {
+			return false;
+		}
+		n->markerObjects = count;
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setObjectMarkerNodeLockOnType", access, [marker](int type) {
+		Node* n = marker();
+		if (!n) {
+			return false;
+		}
+		n->lockOnType = type;
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setObjectMarkerNodeWeapon", access, [marker](int weapon) {
+		Node* n = marker();
+		if (!n || weapon < 0) {
+			return false;
+		}
+		n->markerWeapon = weapon;
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setObjectMarkerNodeRC", access, [marker](int on) {
+		Node* n = marker();
+		if (!n) {
+			return false;
+		}
+		n->markerRange = on != 0;
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setObjectMarkerNodeLockText", access, [marker](bool on, std::string prefix) {
+		Node* n = marker();
+		if (!n) {
+			return false;
+		}
+		n->lockText = on;
+		n->lockTextPrefix = prefix;
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setObjectMarkerNodeLockTextOffset", access, [marker](int x, int y) {
+		Node* n = marker();
+		if (!n) {
+			return false;
+		}
+		n->lockTextOffset[0] = static_cast<float>(x);
+		n->lockTextOffset[1] = static_cast<float>(y);
+		return true;
+	});
+	bindMethod(console, "HudBuilder.addObjectMarkerNodeLockTextNode", access, [m, marker](std::string name) {
+		Node* n = marker();
+		Node* label = m->find(name);
+		if (!n || !label) {
+			return false;
+		}
+		n->lockTextNodes.push_back(label);
+		m->setActive(n); // the marker stays the node being built
+		return true;
+	});
+
+	// --- The maps' and selection nodes' settings, kept ---
+	bindMethod(console, "HudBuilder.createMiniMapNode", access,
+		[m](std::string parent, std::string name, int x, int y, int w, int h) {
+			return m->create(kOther, parent, name, x, y, w, h) != nullptr;
+		});
+	const auto keep = [&console, m](const char* method) {
+		bindMethod(console, std::string("HudBuilder.") + method, access, [m, method](std::string value) {
+			float a = 0, b = 0;
+			std::sscanf(value.c_str(), "%f/%f", &a, &b);
+			m->setSetting(std::string("HudBuilder.") + method, {a, b, 0, 0});
+			return true;
+		});
+	};
+	keep("setCommanderSize");
+	keep("setCommanderPos");
+	bindMethod(console, "HudBuilder.setZoomIcons", access, [m](bool on) {
+		m->setSetting("HudBuilder.setZoomIcons", {on ? 1.0f : 0.0f, 0, 0, 0});
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setCPFont", access, [m](std::string font) {
+		m->setSetting("HudBuilder.setCPFont", {});
+		m->setString("HudBuilder.CPFont", font);
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setCPFontColor", access, [m](float r, float g, float b, float a) {
+		m->setSetting("HudBuilder.setCPFontColor", {r, g, b, a});
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setAlphaMask", access, [m](std::string texture) {
+		m->setString("HudBuilder.AlphaMask", texture);
+		return true;
+	});
+	bindMethod(console, "HudBuilder.setObjectSelectionNodePointerSize", access, [m](int w, int h) {
+		m->setSetting("HudBuilder.setObjectSelectionNodePointerSize", {static_cast<float>(w), static_cast<float>(h), 0, 0});
+		return true;
+	});
+	// newLayer (0x007ad480): the builder's offset (+0xc, +0x10) back to 0.
+	bindMethod(console, "HudBuilder.newLayer", access, [] { return true; });
+
+	// --- HudManager's settings (the HUD manager's slots from 0x0075e732) ---
+	using Pointer = HudManager::Pointer;
+	for (const auto& [method, kind] : std::vector<std::pair<std::string, Pointer>> {{"setMouseTextureEmpty", Pointer::Empty},
+			 {"setMouseTextureFull", Pointer::Full}, {"setMouseTextureArtillery", Pointer::Artillery},
+			 {"setMouseTextureUAV", Pointer::Uav}, {"setMouseTextureSupply", Pointer::Supply},
+			 {"setMouseTextureMoveTitan", Pointer::MoveTitan}, {"setMouseTextureOrbitalStrike", Pointer::OrbitalStrike}}) {
+		const Pointer which = kind;
+		bindMethod(console, "HudManager." + method, access, [m, which](std::string texture) {
+			m->setPointerTexture(which, texture);
+			return true;
+		});
+	}
+	bindMethod(console, "HudManager.setPointerSize", access, [m](int w, int h) {
+		m->setPointerSize(static_cast<float>(w), static_cast<float>(h));
+		return true;
+	});
+	for (const char* method : {"setCommSize", "setCommPos", "setCommMousePos", "setSpottedMenuSize", "setSpottedMenuPos",
+			 "setSpottedMousePos"}) {
+		const std::string name = method;
+		bindMethod(console, "HudManager." + name, access, [m, name](int a, int b) {
+			m->setSetting("HudManager." + name, {static_cast<float>(a), static_cast<float>(b), 0, 0});
+			return true;
+		});
+	}
+	for (const char* method : {"setCommMouseSensitivity", "setPointerMouseSensitivity"}) {
+		const std::string name = method;
+		bindMethod(console, "HudManager." + name, access, [m, name](int value) {
+			m->setSetting("HudManager." + name, {static_cast<float>(value), 0, 0, 0});
+			return true;
+		});
+	}
+	for (const char* method : {"setMaximumNrOfCPs"}) {
+		const std::string name = method;
+		bindMethod(console, "HudManager." + name, access, [m, name](int value) {
+			m->setSetting("HudManager." + name, {static_cast<float>(value), 0, 0, 0});
+		});
+	}
+	for (const char* method : {"setSpottedAngle", "setTargetTop"}) {
+		const std::string name = method;
+		bindMethod(console, "HudManager." + name, access, [m, name](float value) {
+			m->setSetting("HudManager." + name, {value, 0, 0, 0});
+		});
+	}
+	for (const char* method : {"setPaint", "setUpdate", "setDisplayControlpoints", "setDisplayTickets", "setMapStatic"}) {
+		const std::string name = method;
+		bindMethod(console, "HudManager." + name, access, [m, name](bool value) {
+			m->setSetting("HudManager." + name, {value ? 1.0f : 0.0f, 0, 0, 0});
+		});
+	}
+	bindMethod(console, "HudManager.addTextureAtlas", access, [m](std::string atlas) { m->setString("HudManager.TextureAtlas", atlas); });
+
+	// --- Minimap (0x0076f773..0x00770017) ---
+	bindMethod(console, "Minimap.setZoom", access, [m] { m->cycleMapZoom(); });
+	bindMethod(console, "Minimap.setPaintKit", access, [m](int kit) { m->togglePaintKit(kit); });
+	bindMethod(console, "Minimap.setPaintAllKits", access, [m] { m->paintAllKits(); });
+	bindMethod(console, "Minimap.setPaintVehicle", access, [m](int kind) { m->togglePaintVehicle(kind); });
+	bindMethod(console, "Minimap.setPaintAllVehicles", access, [m] { m->paintAllVehicles(); });
+	bindMethod(console, "Minimap.setCurrOrderList", access, [m](int list) {
+		m->setSetting("Minimap.setCurrOrderList", {static_cast<float>(list), 0, 0, 0});
+	});
+	bindMethod(console, "Minimap.setFullScreenZoom", access, [m](int zoom) {
+		m->setSetting("Minimap.setFullScreenZoom", {static_cast<float>(zoom), 0, 0, 0});
+	});
+	bindMethod(console, "Minimap.toggleShowKits", access, [m] {
+		m->setSetting("Minimap.showKits", {m->setting("Minimap.showKits")[0] != 0 ? 0.0f : 1.0f, 0, 0, 0});
+	});
+	bindMethod(console, "Minimap.setCommanderOffset", access, [m](std::string value) {
+		float a = 0, b = 0;
+		std::sscanf(value.c_str(), "%f/%f", &a, &b);
+		m->setSetting("Minimap.setCommanderOffset", {a, b, 0, 0});
+	});
+	bindMethod(console, "Minimap.setSourceBlend", access, [m](int blend) {
+		m->setSetting("Minimap.setSourceBlend", {static_cast<float>(blend), 0, 0, 0});
+	});
+	bindMethod(console, "Minimap.setDestinationBlend", access, [m](int blend) {
+		m->setSetting("Minimap.setDestinationBlend", {static_cast<float>(blend), 0, 0, 0});
+	});
+	bindMethod(console, "Minimap.setFilterColor", access, [m](float r, float g, float b, float a) {
+		m->setSetting("Minimap.setFilterColor", {r, g, b, a});
 	});
 }
 

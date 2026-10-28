@@ -98,12 +98,22 @@ std::vector<GhostPartLayout> buildGhostLayout(const GhostTemplateNode& root)
 }
 
 bool decodeGhostState(BitReader& in, const GhostPartLayout& layout, const Vec3f& reference,
-	std::vector<NetworkableState>& states, unsigned mode)
+	std::vector<NetworkableState>& states, unsigned mode, const std::vector<MotionHistory>* history, size_t* cursor)
 {
 	states.clear();
+	size_t local = 0;
+	size_t& next = cursor ? *cursor : local;
 	for (size_t g = 0; g < layout.groups.size() && g < kMaxGroups; ++g) {
+		const NetworkableHints& hints = layout.groups[g].hints;
+		const MotionHistory* copy = nullptr;
+		if (history && hints.kind == NetworkableKind::SimpleObject) {
+			if (next >= history->size()) {
+				return false; // the slot keeps fewer (0x0057f7b0 fails the record)
+			}
+			copy = &(*history)[next++];
+		}
 		NetworkableState state;
-		if (!decodeNetworkable(in, layout.groups[g].hints, reference, state, mode) || !state.complete) {
+		if (!decodeNetworkable(in, hints, reference, state, mode, copy) || !state.complete) {
 			return false;
 		}
 		states.push_back(std::move(state));
@@ -112,25 +122,41 @@ bool decodeGhostState(BitReader& in, const GhostPartLayout& layout, const Vec3f&
 }
 
 void encodeGhostState(BitWriter& out, const GhostPartLayout& layout, const Vec3f* reference,
-	const std::vector<NetworkableState>& states, unsigned mode)
+	const std::vector<NetworkableState>& states, unsigned mode, const std::vector<MotionHistory>* history, size_t* cursor)
 {
+	size_t local = 0;
+	size_t& next = cursor ? *cursor : local;
 	for (size_t g = 0; g < layout.groups.size() && g < kMaxGroups; ++g) {
+		const NetworkableHints& hints = layout.groups[g].hints;
+		const MotionHistory* copy = nullptr;
+		if (history && hints.kind == NetworkableKind::SimpleObject && next < history->size()) {
+			copy = &(*history)[next++];
+		}
 		NetworkableState empty;
-		empty.kind = layout.groups[g].hints.kind;
-		encodeNetworkable(out, layout.groups[g].hints, reference, g < states.size() ? states[g] : empty, mode);
+		empty.kind = hints.kind;
+		encodeNetworkable(out, hints, reference, g < states.size() ? states[g] : empty, mode, copy);
 	}
 }
 
 bool decodeControlState(BitReader& in, const GhostPartLayout& ghost, const GhostPartLayout* second,
-	const Vec3f& reference, const PlayerOwnStateHints& own, ControlState& out)
+	const Vec3f& reference, const PlayerOwnStateHints& own, ControlState& out,
+	const std::array<std::vector<MotionHistory>, 8>* slots)
 {
 	out = {};
 	out.recorded = in.read(1) == 1;
 	out.slot = static_cast<int>(in.read(3));
-	if (!decodeGhostState(in, ghost, reference, out.groups, 3)) {
+	const std::vector<MotionHistory>* history = nullptr;
+	if (out.recorded) {
+		if (!slots) {
+			return false;
+		}
+		history = &(*slots)[static_cast<size_t>(out.slot) & 7];
+	}
+	size_t cursor = 0;
+	if (!decodeGhostState(in, ghost, reference, out.groups, 3, history, &cursor)) {
 		return false;
 	}
-	if (second && !decodeGhostState(in, *second, reference, out.second, 3)) {
+	if (second && !decodeGhostState(in, *second, reference, out.second, 3, history, &cursor)) {
 		return false;
 	}
 	out.ownBits = in.read(10);
@@ -146,13 +172,16 @@ bool decodeControlState(BitReader& in, const GhostPartLayout& ghost, const Ghost
 }
 
 void encodeControlState(BitWriter& out, const GhostPartLayout& ghost, const GhostPartLayout* second,
-	const Vec3f* reference, const PlayerOwnStateHints& own, const ControlState& state)
+	const Vec3f* reference, const PlayerOwnStateHints& own, const ControlState& state,
+	const std::vector<MotionHistory>* history)
 {
 	out.write(state.recorded ? 1 : 0, 1);
 	out.write(static_cast<uint32_t>(state.slot) & 7, 3);
-	encodeGhostState(out, ghost, reference, state.groups, 3);
+	const std::vector<MotionHistory>* against = state.recorded ? history : nullptr;
+	size_t cursor = 0;
+	encodeGhostState(out, ghost, reference, state.groups, 3, against, &cursor);
 	if (second) {
-		encodeGhostState(out, *second, reference, state.second, 3);
+		encodeGhostState(out, *second, reference, state.second, 3, against, &cursor);
 	}
 	// 0x00580830: 10 bits reserved (0x006873e0), the player's vtable 0x1c8,
 	// then the length written back.
@@ -162,6 +191,19 @@ void encodeControlState(BitWriter& out, const GhostPartLayout& ghost, const Ghos
 	}
 	out.write(static_cast<uint32_t>(std::min<size_t>(body.bits(), 0x3ff)), 10);
 	out.append(body);
+}
+
+std::vector<MotionHistory> motionHistoryOf(const ControlState& state)
+{
+	std::vector<MotionHistory> copies;
+	for (const std::vector<NetworkableState>* groups : {&state.groups, &state.second}) {
+		for (const NetworkableState& s : *groups) {
+			if (s.kind == NetworkableKind::SimpleObject) {
+				copies.push_back({s.position, s.velocity, s.angularVelocity});
+			}
+		}
+	}
+	return copies;
 }
 
 // ---------------------------------------------------------------------------
@@ -400,6 +442,15 @@ NetworkableHints networkableHintsFrom(const world::ObjectTemplateManager& templa
 		h.seatCameras = cameras;
 	}
 	return h;
+}
+
+bool firearmSendsHeat(const world::ObjectTemplate& firearm)
+{
+	// The template's +0x2c8 is ObjectTemplate.maxResetSpeed's (0x00521fab:
+	// the setter 0x005220a3 -> 0x00522125, the only writer), whatever the
+	// class: 0x005c1360 tests its y.
+	const std::string key = !setting(firearm, "maxResetSpeed").empty() ? "maxResetSpeed" : "setMaxResetSpeed";
+	return vec3Setting(firearm, key.c_str()).y > 0;
 }
 
 GhostTemplateNode ghostTemplateFrom(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& t,

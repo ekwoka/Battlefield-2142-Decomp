@@ -16,6 +16,10 @@ namespace {
 
 constexpr float kDegrees = 180.0f / 3.14159265f;
 constexpr float kRadians = 3.14159265f / 180.0f;
+// The bot manager's +0xdc (0x100c9c50; its slot 0x68, 0x100c5cd0): seats
+// of vehicles under it are refused, and a bot leaving one says bail_out
+// under it + 0.1.
+constexpr float kVehicleFloor = 0.3f;
 constexpr float kEyeHeight = 1.6f;    // above the feet (the soldier fires from here)
 constexpr float kChestHeight = 1.3f;  // where bots aim
 // A soldier's AI radius (see soldierAiRadius: the built-in soldier
@@ -794,6 +798,12 @@ float BotManager::lastUrgency(int player, const std::string& behaviour) const
 		}
 	}
 	return 0;
+}
+
+bool BotManager::keepsToOrder(int player) const
+{
+	const auto it = m_bots.find(player);
+	return it != m_bots.end() && it->second.orderMove;
 }
 
 bool BotManager::explosive(int player) const
@@ -1777,6 +1787,11 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		bot.lobHold = false;
 		bot.orderMove = false;
 	}
+	if (self.vehicle != bot.seatedVehicle || self.seat != bot.seatedSeat) {
+		bot.seatedVehicle = self.vehicle;
+		bot.seatedSeat = self.seat;
+		bot.seatedAt = m_time;
+	}
 	const std::string& pattern = bot.pattern;
 	if (pattern != "BBPMedicAssist" && pattern != "BBPAmmoAssist" && pattern != "BBPRepairVehicle"
 		&& pattern != "BBPRevive") {
@@ -1952,6 +1967,8 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		bot.heliWaitUntil = -1;
 		bot.heliLastAt = -1;
 		bot.heliRun = 0;
+		bot.heliLead = {};
+		bot.heliOnTarget.reset();
 	}
 	ai::HeliSense sense;
 	sense.position = toAi(vehicle->position);
@@ -2015,13 +2032,41 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 			if (dist >= 20 && dist <= maxRange && physics::dot(dir, vehicle->forward) > 0.5f
 				&& m_world.lineOfSight(at + vehicle->forward * 4.0f, target.position + physics::Vec3 {0, 1, 0},
 					vehicle->object)) {
-				const bool lined = pilot.aimAt(toAi(dir), 40, bot.heliLastDirY, dt > 0 ? dt : seconds);
-				bot.heliLastDirY = dir.y;
+				// HeliAimAt's aim (0x100dcf10): the lead from the gun (the
+				// hull's frame) for the round, the hull's motion inherited;
+				// an indirect weapon's with precision 0.75, no inherited
+				// motion and the direction laid flat. No solution: straight
+				// at the target (slot 8).
+				bool indirect = false;
+				const ai::RoundModel round = roundModel(gun, &indirect);
+				physics::Vec3 aimDir = dir;
+				ai::Vec3 solved = toAi(dir), impact;
+				double impactTime = 0;
+				bool hasSolution = false;
+				if (round.speed > 0) {
+					bot.heliLead.setup(toAi(target.position - at), toAi(target.velocity),
+						indirect ? ai::Vec3 {} : toAi(vehicle->velocity), toAi(vehicle->forward), m_time, round);
+					hasSolution = bot.heliLead.solve(m_time, indirect ? 0.75f : 0.5f, false, solved, impact, &impactTime);
+					if (hasSolution) {
+						aimDir = {solved.x, indirect ? 0.0f : solved.y, solved.z};
+						aimDir = aimDir * (1 / std::max(std::sqrt(physics::lengthSquared(aimDir)), 1e-4f));
+					}
+				}
+				pilot.aimAt(toAi(aimDir), 40, bot.heliLastDirY, dt > 0 ? dt : seconds);
+				bot.heliLastDirY = aimDir.y;
+				// The trigger's condition (0x1007ec50 -> 0x100dcab0): the
+				// AI weapon's allowedDeviation (slot 0x94) as the reach, the
+				// closest approach for a weapon that isn't automatic (slot
+				// 0x104).
 				const world::ObjectTemplate* g = m_world.templates().find(gun);
+				if (!bot.heliOnTarget) {
+					bot.heliOnTarget.emplace(weapon.allowedDeviation, fireMode(g) != 2);
+				}
+				const bool onTarget = bot.heliOnTarget->test(hasSolution, bot.heliLead, solved, impact, impactTime, m_time);
 				const float rpm = settingNumber(g, "fire.roundsPerMinute", 60);
 				const float taps = std::round((1 - (1 - m_settings.skill) * 0.8f) * std::round(1.5f * rpm));
 				const float spacing = taps > 0 ? 60.0f / taps : 1.0f;
-				if (lined && m_time - bot.heliTapAt >= spacing) {
+				if (onTarget && m_time - bot.heliTapAt >= spacing) {
 					input.fire = true;
 					bot.heliTapAt = m_time;
 				}
@@ -2177,6 +2222,12 @@ float BotManager::urgency(Bot& bot, const ai::BehaviourSetup& behaviour, float w
 	const std::vector<GameWorld::PlayerInfo>& players)
 {
 	const std::string& p = behaviour.pattern;
+	if (behaviour.bb == "BBChangeLandingCraft" && self.vehicle) {
+		return landingCraftUrgency(bot, self, weight);
+	}
+	if (behaviour.bb == "BBFire3d") {
+		return fire3dUrgency(bot, self, weight, players);
+	}
 	if (p.rfind("BBPFire", 0) == 0 || p == "BBPHeliFire3d") {
 		return fireUrgency(bot, self, players);
 	}
@@ -2721,7 +2772,7 @@ float BotManager::seatValue(const Bot& bot, const GameWorld::PlayerInfo& self, u
 		if (other && (seat == 0 ? driverTaken : seatTaken)) {
 			return 0;
 		}
-		const float floor = 0.3f * (seat == 0 && vehicle == self.vehicle && self.seat == 0 ? 0.3f : 1.0f); // AIMain +0xdc
+		const float floor = kVehicleFloor * (seat == 0 && vehicle == self.vehicle && self.seat == 0 ? 0.3f : 1.0f);
 		if (health < floor) {
 			return 0;
 		}
@@ -2934,10 +2985,9 @@ bool BotManager::threatened(const Bot& bot, const GameWorld::PlayerInfo& self) c
 // spot on the infantry map lies within its radius + the bot's of it (the
 // Mobile's per-map points +8/+0x1c/+0x30, which the rewrite doesn't keep:
 // every vehicle counts); a passenger takes any. The get_in answers are
-// below. Not rewritten: an ITAir vehicle that isn't ITHelicopter also
-// needs room round it (0x1006c3e0); the bail_out radio on taking the way
-// out with the bot's object's health at or under the IAIGame slot 0x68
-// value + 0.1 (0x100a5990 from 0x1006c520; that slot isn't traced).
+// below. With the way out chosen and the vehicle's health at or under
+// 0.4 the bot says bail_out (see below). Not rewritten: an ITAir vehicle
+// that isn't ITHelicopter also needs room round it (0x1006c3e0).
 float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight)
 {
 	constexpr float kReach = 75; // 0x42960000
@@ -3105,6 +3155,14 @@ float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 		}
 	}
 	if (self.vehicle) {
+		// The way out chosen with the bot's object (its vehicle) at or under
+		// the bot manager's vehicle floor + 0.1 (slot 0x68, 0x100c5cd0: its
+		// +0xdc, 0.3 from the constructor 0x100c9c50, the floor the seat
+		// values use): "bail_out" at once to those aboard (0x100a5990: type
+		// 0, the AI's channel 7, TCVehicle).
+		if (chosenSeat == -2 && healthOf(self.vehicle) <= kVehicleFloor + 0.1f) {
+			sendRadioNow(bot, self, 0, 7);
+		}
 		if ((chosen == self.vehicle && chosenSeat == self.seat) || best <= 0) {
 			return 0;
 		}
@@ -3147,6 +3205,271 @@ float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 	}
 	const float urgency = current < 0.001f ? best * weight : best / current * weight * 10;
 	return urgency / (1 + 14 * std::clamp((chosenDistance - 10) / 60, 0.0f, 1.0f));
+}
+
+// BBFire3d's urgency (behaviour vtable 0x10116d40 slot 9, 0x1007e1b0; the
+// gunships' Fire) with its target score 0x1007d6c0. Over the targets the
+// bot knows (memory flags 6) and then those the information environment
+// lists (DAT_101394b0 slot 0x18; here every enemy the bot knows), each
+// scores:
+//   score = facing x reach x 0.5 x temperature x motion x freshness x
+//           strength x recency
+//   - none for a teammate (the target's +0x40 team), a target without a
+//     Physical part, ITNoTemperature (flag 11) or with no health left;
+//   - strength: the best of the vehicle's weapons (with rounds: slot 0xc
+//     -1 or over 0) against the target's CombatStrengthType (0x100a41f0),
+//     none: no score; maxRange the largest of theirs (0x100a4170);
+//   - recency: 1.5 - 0.5 clamp((now - t) / 30) after the target last hurt
+//     the bot (bot vt+0x30c; here a round of it passing, the alert), else 1;
+//   - freshness: 1 / (0.05 (now - lost) + 1) once out of sight, 1 in it;
+//   - motion: for a target that isn't ITAir, 1 without a Mobile part,
+//     1 / (0.5 |v| + 1) within maxRange, beyond it 0.25 when it is no more
+//     than 5 m/s faster than the bot (the Mobile maxSpeeds, 0x100a4350),
+//     else 0.25 / (2 (closing along + closing across) + 0.5 |v| + 1); for
+//     an ITAir target with anti-air guns (the armament's slot 0x28; here a
+//     weapon strength against helicopters) the same once the bot is ITAir
+//     or 0.9 maxRange away, else 1; without them none over 5 m up (the
+//     target's +0x34) and the same only within 0.5 maxRange under 15 m/s;
+//   - temperature: the target's units' temperatures (each seat's per-team
+//     value + the table's for its type + its basic temperature, x the
+//     strategy's modifier for the type, x 0.75 outside the bot's area);
+//     here 20 a vehicle, 1 a soldier (the strategy's), x 0.75 out of the
+//     bot's order area;
+//   - reach: 1 - min(1, d / 3 maxRange); for an ITAir target max(0, 1 -
+//     d / 1.5 maxRange) and the temperature doubled with anti-air guns;
+//   - facing: max(0.5, 1 + the bot's forward . the way to it).
+// The current target stays unless another scores 1.2 times more; the
+// urgency is fuzzy(2 best) x the weight. Left out: the 20 s a failed
+// target is passed over (+0x30, its stamp's writer isn't traced), the
+// unit-count test that scales a score by 0.01 (0x100d2b30) and the
+// Unit's capability flags (0x100cf5c0 / 0x100cf5a0, bot vt+0x180).
+float BotManager::fire3dUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight,
+	const std::vector<GameWorld::PlayerInfo>& players)
+{
+	const GameWorld::VehicleInfo* vehicle = nullptr;
+	for (const GameWorld::VehicleInfo& v : m_vehicles) {
+		vehicle = v.object == self.vehicle ? &v : vehicle;
+	}
+	if (!vehicle) {
+		return fireUrgency(bot, self, players);
+	}
+	const auto seats = m_world.vehicleSeats(self.vehicle);
+	std::vector<WeaponAi> guns;
+	for (const GameWorld::SeatLayout& seat : seats) {
+		if (!seat.weapon.empty()) {
+			guns.push_back(weaponAi(seat.weapon));
+		}
+	}
+	const auto aiOf = [this](uint32_t object) {
+		const world::Object* o = m_world.objects().find(object);
+		return o && o->objectTemplate() ? aiTemplateOf(o->objectTemplate()->name()) : std::string();
+	};
+	const std::string ownAi = aiOf(self.vehicle);
+	const bool ownAir = (m_settings.typeFlags(ownAi) & kITAir) != 0;
+	const AiPlugin* ownMobile = m_settings.plugin(ownAi, "Mobile");
+	const float ownMaxSpeed = ownMobile ? ownMobile->maxSpeed : 0.0f;
+	bool antiAir = false;
+	float maxRange = 0;
+	for (const WeaponAi& w : guns) {
+		antiAir = antiAir || w.strength[4] > 0;
+		maxRange = std::max(maxRange, w.maxRange);
+	}
+	if (maxRange <= 0) {
+		maxRange = 300;
+	}
+	physics::Vec3 areaAt;
+	float areaRadius = 0;
+	int areaOwner = 0;
+	const bool hasArea = bot.hasGoal && bot.goalOrder >= 0 && areaPosition(bot.goalOrder, areaAt, areaRadius, areaOwner);
+	const auto inArea = [&](const physics::Vec3& p) { return !hasArea || horizontal2(p - areaAt) <= areaRadius * areaRadius; };
+	const float areaFactor = inArea(self.position) ? 1.0f : 0.75f;
+	float best = 0, currentScore = 0;
+	int bestTarget = -1;
+	for (const Known& known : bot.known) {
+		if (!known.everSeen) {
+			continue;
+		}
+		const auto other = std::find_if(players.begin(), players.end(), [&](const auto& p) { return p.id == known.player; });
+		if (other == players.end() || !other->alive || other->team == self.team) {
+			continue;
+		}
+		const int type = std::clamp(strengthTypeOf(*other), 0, 7);
+		float strength = 0;
+		for (const WeaponAi& w : guns) {
+			strength = std::max(strength, w.strength[static_cast<size_t>(type)]);
+		}
+		if (guns.empty()) {
+			strength = 1; // no weaponTemplates (the tests)
+		}
+		if (strength <= 0) {
+			continue;
+		}
+		const physics::Vec3 to = known.position - self.position;
+		const float d = std::max(0.5f, std::sqrt(physics::lengthSquared(to)));
+		const physics::Vec3 dir = to * (1 / d);
+		const float recency = m_time - known.alertAt < 1e8f
+			? 1.5f - 0.5f * std::clamp((m_time - known.alertAt) / 30.0f, 0.0f, 1.0f)
+			: 1.0f;
+		const float freshness = known.lostAt < 0 ? 1.0f : 1.0f / ((m_time - known.lostAt) * 0.05f + 1);
+		const std::string targetAi = other->vehicle ? aiOf(other->vehicle) : std::string();
+		const bool targetAir = other->vehicle && (m_settings.typeFlags(targetAi) & kITAir) != 0;
+		const AiPlugin* targetMobile = other->vehicle ? m_settings.plugin(targetAi, "Mobile") : nullptr;
+		const physics::Vec3 v = other->velocity;
+		const float speed = std::sqrt(physics::lengthSquared(v));
+		const auto motionOf = [&]() {
+			if (other->vehicle && !targetMobile) {
+				return 1.0f;
+			}
+			if (d <= maxRange) {
+				return 1 / (0.5f * speed + 1);
+			}
+			const float theirs = targetMobile ? targetMobile->maxSpeed : kSoldierSpeed;
+			if (theirs - ownMaxSpeed <= 5) {
+				return 0.25f;
+			}
+			const physics::Vec3 side {dir.z, 0, -dir.x}; // (0, 1, 0) x dir
+			const float along = std::max(0.0f, physics::dot(dir, v) - physics::dot(dir, vehicle->velocity));
+			const float across = std::max(0.0f, physics::dot(side, v) - physics::dot(side, vehicle->velocity));
+			return 0.25f / (2 * (along + across) + 0.5f * speed + 1);
+		};
+		float motion = 1;
+		if (!targetAir) {
+			motion = motionOf();
+		} else if (antiAir) {
+			motion = ownAir || d >= 0.9f * maxRange ? motionOf() : 1.0f;
+		} else {
+			if (other->position.y - m_world.terrainHeight(other->position.x, other->position.z) > 5) {
+				continue;
+			}
+			motion = d <= 0.5f * maxRange && speed <= 15 ? motionOf() : 0.0f;
+		}
+		float temperature = (other->vehicle ? 20.0f : 1.0f) * areaFactor;
+		if (ownMobile && !ownAir && !inArea(other->position)) {
+			temperature *= 0.75f;
+		}
+		float reach = 1 - std::min(1.0f, d / (3 * maxRange));
+		if (targetAir) {
+			reach = std::max(0.0f, 1 - d / (1.5f * maxRange));
+			if (antiAir) {
+				temperature *= 2;
+			}
+		}
+		const float facing = std::max(0.5f, physics::dot(dir, vehicle->forward) + 1);
+		const float score = facing * reach * 0.5f * temperature * motion * freshness * strength * recency;
+		if (known.player == bot.target) {
+			currentScore = score;
+		}
+		if (score > best) {
+			best = score;
+			bestTarget = known.player;
+		}
+	}
+	if (best <= 0) {
+		bot.target = -1;
+		return 0;
+	}
+	if (!(bot.target >= 0 && currentScore > 0 && best <= currentScore * 1.2f)) {
+		if (bestTarget != bot.target) {
+			bot.targetAcquired = m_time;
+			bot.heliOnTarget.reset(); // a new plan's condition
+		}
+		bot.target = bestTarget;
+	} else {
+		best = currentScore;
+	}
+	return ai::fuzzy(2 * best) * weight;
+}
+
+// BBChangeLandingCraft's urgency (0x1006f460; the transport helicopters'
+// pilots and passengers, AS_AT/EU_AT's ParatrooperFixed seats): a seat
+// change within its own vehicle, or the way out once it has landed at the
+// bot's order.
+//   - Each seat of the vehicle is weighed as BBChange weighs a seat
+//     (0x100d3e70, `other` for all but the bot's own) times a factor: the
+//     bot's own seat 1 when it drives, when the driver's seat is taken
+//     (0x100aa530) or the bot's object is ITNaval (flag bit 4), else 0.25;
+//     another seat 0.25, the root's (the driver's) 1.5 for a passenger of
+//     an ITAir root, else 1. A free driver's seat of a root with a Mobile
+//     part gains 100 (its Mobile with no way, 0x100a46c0's +4 at -1, ends
+//     the scan and takes the way out instead: the rewrite's vehicles always
+//     have one).
+//   - Near the order (the order's spot within 15 m of the bot, 50 m when
+//     the area is the enemy's: 0x100bf800 with 225 / 2500) a driven
+//     transport (0x1006f3c0: a seat whose Unit's driver's seat is taken)
+//     says "bail_out" to those aboard (0x100a7860: type 0, the AI's
+//     channel 7) unless its send period runs; one with nobody at the
+//     controls lets them out within 10 m (40 m: 100 / 1600): urgency 4 and
+//     the way out (0x10097e60 lets go of the controls).
+//   - Otherwise the best seat, if it isn't the bot's own: fuzzy(best /
+//     current / 2) x 4 (fuzzy(best / 2) x 4 with the current worth
+//     nothing), x 6 within 15 s of the vehicle's last entry (the root
+//     unit's 0x100aa610: here the bot's own seating), and 0 for a seat
+//     another bot reserved (0x1006f320).
+// The ground transports' way out (no ITAir: the Physical part's slot
+// 0x5c point within 4 m, the Mobile's speed under 2) isn't followed: no
+// shipped ground vehicle runs this behaviour. The weight is used only
+// through the record's +8 (1).
+float BotManager::landingCraftUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight)
+{
+	(void)weight;
+	const uint32_t vehicle = self.vehicle;
+	const std::vector<int> occupants = m_world.vehicleOccupants(vehicle);
+	const size_t seats = std::max<size_t>({1, occupants.size(), m_world.vehicleSeats(vehicle).size()});
+	const world::Object* object = m_world.objects().find(vehicle);
+	const std::string rootAi = object && object->objectTemplate() ? aiTemplateOf(object->objectTemplate()->name()) : "";
+	const uint32_t types = m_settings.typeFlags(rootAi);
+	const bool air = (types & kITAir) != 0;
+	const bool mobile = m_settings.plugin(rootAi, "Mobile") != nullptr;
+	const bool driving = self.seat == 0;
+	const bool driverTaken = !occupants.empty() && occupants[0] >= 0;
+	const float own = driving || driverTaken || (types & (1u << 4)) ? 1.0f : 0.25f;
+	const float root = !driving && air ? 1.5f : 1.0f;
+	float current = 0, best = 0;
+	int bestSeat = self.seat;
+	for (size_t seat = 0; seat < seats; ++seat) {
+		const bool mine = static_cast<int>(seat) == self.seat;
+		float value = seatValue(bot, self, vehicle, static_cast<int>(seat), !mine);
+		value *= mine ? own : seat == 0 ? root : 0.25f;
+		if (seat == 0 && !driverTaken && mobile) {
+			value += 100;
+		}
+		if (mine) {
+			current = value;
+		}
+		if (value > best) {
+			best = value;
+			bestSeat = static_cast<int>(seat);
+		}
+	}
+	// Landed at the order: out.
+	if (air && bot.hasGoal) {
+		physics::Vec3 at;
+		float radius = 0;
+		int owner = 0;
+		const bool enemyArea = bot.goalOrder >= 0 && areaPosition(bot.goalOrder, at, radius, owner) && owner != 0
+			&& owner != self.team;
+		const float d2 = horizontal2(bot.orderPosition - self.position);
+		if (d2 < (enemyArea ? 2500.0f : 225.0f)) {
+			if (driverTaken) {
+				queueRadio(bot, 0, 7, 0); // bail_out
+			} else if (d2 < (enemyArea ? 1600.0f : 100.0f)) {
+				bot.vehicleTarget = 0; // the way out
+				bot.seatTarget = -1;
+				return 4;
+			}
+		}
+	}
+	if (bestSeat == self.seat || best <= 0) {
+		bot.vehicleTarget = 0;
+		return 0;
+	}
+	bot.vehicleTarget = vehicle;
+	bot.seatTarget = bestSeat;
+	float urgency = ai::fuzzy(current > 0 ? best / current * 0.5f : best * 0.5f) * 4;
+	if (m_time - bot.seatedAt < 15) {
+		urgency *= 6;
+	}
+	return urgency;
 }
 
 // BBFlee's urgency (0x100859d0): below 30 % health, the camouflage
@@ -3742,7 +4065,7 @@ void BotManager::assist(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInpu
 	}
 	if (!itself && d <= radii) {
 		const physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight, 0};
-		aim(bot, self, target.position + physics::Vec3 {0, kChestHeight, 0}, {}, false, 0, input, seconds);
+		aim(bot, self, target.position + physics::Vec3 {0, kChestHeight, 0}, {}, false, {}, input, seconds);
 		(void)eye;
 	}
 }
@@ -3769,7 +4092,7 @@ void BotManager::repair(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInpu
 		return;
 	}
 	input.selectItem = self.inHandSlot != slot ? slot : 0;
-	aim(bot, self, vehicle->position, {}, true, 0, input, seconds);
+	aim(bot, self, vehicle->position, {}, true, {}, input, seconds);
 	const physics::Vec3 forward {std::sin(self.yaw * kRadians), 0, std::cos(self.yaw * kRadians)};
 	physics::Vec3 to = vehicle->position - self.position;
 	to.y = 0;
@@ -3826,7 +4149,7 @@ void BotManager::defuse(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInpu
 	}
 	bot.pose = SoldierPose::Crouch;
 	input.pose = bot.pose;
-	aim(bot, self, bot.mineAt, {}, true, 0, input, seconds);
+	aim(bot, self, bot.mineAt, {}, true, {}, input, seconds);
 	const int tool = kitSlot(self, WeaponAi::Healing);
 	if (tool) {
 		input.selectItem = self.inHandSlot != tool ? tool : 0;
@@ -3920,20 +4243,11 @@ void BotManager::avoid(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput
 // the target has been below on average over the last 10 errors
 // (min(0.75, 20 x the average)).
 void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics::Vec3& point,
-	const physics::Vec3& pointVelocity, bool hasTarget, float speed, SoldierInput& input, float seconds)
+	const physics::Vec3& pointVelocity, bool hasTarget, const std::string& leadWeapon, SoldierInput& input, float seconds)
 {
 	float gunYaw = 0, gunPitch = 0;
 	const bool gunning = self.vehicle && self.seat > 0 && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
 	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight, 0};
-	// Lead: where the target will be when the round gets there.
-	physics::Vec3 want = point;
-	if (speed > 0) {
-		const float flight = std::sqrt(horizontal2(point - eye)) / speed;
-		want = point + pointVelocity * flight;
-	}
-	const physics::Vec3 d = want - eye;
-	const float wantYaw = headingTo(eye, want);
-	const float wantPitch = std::atan2(d.y, std::sqrt(horizontal2(d))) * kDegrees;
 	const float trueYaw = (gunning ? self.yaw + gunYaw : self.yaw) - bot.devYaw;
 	// The weapon's recoil kicked the soldier's pitch (GameWorld::takeAimKick):
 	// the bot's own angle takes it, and the aim corrects from there.
@@ -3941,6 +4255,30 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 		bot.pitch = std::clamp(bot.pitch + m_world.takeAimKick(self.id), -kPitchLimit, kPitchLimit);
 	}
 	const float truePitch = gunning ? gunPitch : bot.pitch;
+	// The lead (the aim object's slot 8, 0x100d9a60): the solver takes the
+	// point less the gun, the point's motion, the round's inherited motion
+	// (the shooter's) and the gun's forward, and gives the launch
+	// direction (precision 0.5, the high arc for an indirect weapon). The
+	// aim then steers along it; without a solution, straight at the point
+	// (slot 9, 0x1008e940's fallback). A solve that succeeds without
+	// writing a direction (never bracketing the target) leaves 0x1008e940's
+	// zeroed local; here it leaves the straight line.
+	physics::Vec3 want = point;
+	bool indirect = false;
+	const ai::RoundModel round = leadWeapon.empty() ? ai::RoundModel {} : roundModel(leadWeapon, &indirect);
+	if (round.speed > 0) {
+		const float yr = trueYaw * kRadians, pr = truePitch * kRadians;
+		const physics::Vec3 forward {std::sin(yr) * std::cos(pr), std::sin(pr), std::cos(yr) * std::cos(pr)};
+		bot.lead.setup(toAi(point - eye), toAi(pointVelocity), toAi(self.velocity), toAi(forward), m_time, round);
+		const float reach = std::sqrt(physics::lengthSquared(point - eye));
+		ai::Vec3 direction = toAi((point - eye) * (1 / std::max(reach, 1e-3f))), impact;
+		if (bot.lead.solve(m_time, 0.5f, indirect, direction, impact)) {
+			want = eye + physics::Vec3 {direction.x, direction.y, direction.z} * reach;
+		}
+	}
+	const physics::Vec3 d = want - eye;
+	const float wantYaw = headingTo(eye, want);
+	const float wantPitch = std::atan2(d.y, std::sqrt(horizontal2(d))) * kDegrees;
 	const float ey = angleBetween(trueYaw, wantYaw) * kRadians;
 	const float ep = (wantPitch - truePitch) * kRadians;
 	float wy = 0, wp = 0;
@@ -3999,6 +4337,64 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 	input.aimPitch = bot.pitch;
 }
 
+// The fire plan's +0x248 (0x100795a0 -> bot vt+0x254(1), from either of
+// its two MoveToFinding sites, 0x100d11c0): instead of closing on the
+// target, the plan walks to the bot's order spot (its strategic area's
+// order position for its map, 0x100c1150, when set: 0x100775f0) while it
+// fights. The builder decides it once per plan:
+//   - keep to the order when the target can't be approached: a target
+//     without a Mobile part (and no root that has one) whose way 30 m
+//     towards the bot the pathfinder refuses (DAT_101394d4 slot 0x94; the
+//     rewrite asks whether that point is on the bot's mesh);
+//   - never with a close-combat weapon (type 7);
+//   - otherwise when the order spot is reachable (the follower's slots 4
+//     and 8; here: on the mesh) and the bot stands more than 30 m from it
+//     (50 m when neither the bot's object nor the target is ITSoldier)
+//     with the target on the far side (the two directions' dot under 0).
+// Not followed: the air-target clause (the target ITAir and the plan
+// weapon's slot 0x28 at 2, which isn't traced) and the builder's per-bot
+// byte (the BB's +0x10, taken as set).
+bool BotManager::fireKeepsToOrder(const Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& target) const
+{
+	if (!bot.hasGoal) {
+		return false;
+	}
+	const physics::Vec3 spot = bot.orderPosition;
+	if (spot.x == 0 && spot.y == 0 && spot.z == 0) {
+		return false; // no spot (0x100775f0)
+	}
+	const WeaponAi weapon = weaponAi(weaponName(self, bot.weaponSlot));
+	if (weapon.type == WeaponAi::CloseCombat) {
+		return false;
+	}
+	const auto onMesh = [this](const physics::Vec3& at) {
+		return !m_navMesh || m_navMesh->findPolygon(toAi(at)) >= 0;
+	};
+	if (!onMesh(spot)) {
+		return false;
+	}
+	bool keep = false;
+	bool targetMobile = !target.vehicle;
+	if (target.vehicle) {
+		const world::Object* object = m_world.objects().find(target.vehicle);
+		targetMobile = object && object->objectTemplate()
+			&& m_settings.plugin(aiTemplateOf(object->objectTemplate()->name()), "Mobile") != nullptr;
+	}
+	if (!targetMobile) {
+		physics::Vec3 toward = self.position - target.position;
+		const float length = std::sqrt(physics::lengthSquared(toward));
+		toward = length > 1e-3f ? toward * (30 / length) : physics::Vec3 {};
+		keep = !onMesh(target.position + toward);
+	}
+	if (!keep) {
+		const bool soldiers = !self.vehicle || !target.vehicle;
+		const float reach = soldiers ? 30.0f : 50.0f;
+		const physics::Vec3 toSpot = spot - self.position, toTarget = target.position - self.position;
+		keep = physics::lengthSquared(toSpot) > reach * reach && physics::dot(toSpot, toTarget) < 0;
+	}
+	return keep;
+}
+
 // BBPFireInfantery's plan (0x1007cf10, 0x100795a0): the chosen weapon in
 // hand, the aim on the target (with its lead), the distance kept within
 // [minRange, 1.1 preferred], the weapon's firing pose taken when standing
@@ -4035,6 +4431,7 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 	if (bot.sharedTarget != bot.target) {
 		bot.sharedTarget = bot.target;
 		shareTarget(self, target);
+		bot.orderMove = fireKeepsToOrder(bot, self, target);
 	}
 	const physics::Vec3 targetAt = (inSight ? target.position : known->position)
 		+ physics::Vec3 {0, target.vehicle ? 1.0f : kChestHeight, 0};
@@ -4106,9 +4503,18 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 		bot.lobHold = false;
 	}
 
-	// The distance kept (on foot).
+	// The distance kept (on foot); with +0x248 the plan's move goes to the
+	// order's spot instead (MoveToFinding at the Mobile maxSpeed).
 	bool moving = false;
-	if (!self.vehicle && weapon.type != WeaponAi::FireAndForget) {
+	if (!self.vehicle && bot.orderMove) {
+		if (horizontal2(bot.orderPosition - self.position) > 2.0f * 2.0f) {
+			const float pitch = bot.pitch;
+			steer(bot, self, bot.orderPosition, 450000 + bot.goalOrder, seconds, input);
+			bot.pitch = pitch;
+			input.turn = 0;
+			moving = !bot.lobHold;
+		}
+	} else if (!self.vehicle && weapon.type != WeaponAi::FireAndForget) {
 		if (distance > 1.1f * std::max(bot.preferredRange, weapon.minRange + 1)) {
 			// The aim turns the soldier and keeps its pitch (steering
 			// levels the view, which would undo the aim every tick).
@@ -4123,7 +4529,7 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 		}
 	}
 	aim(bot, self, aimPoint, inSight && !lob ? target.velocity : physics::Vec3 {}, true,
-		lob ? 0.0f : projectileSpeed(weaponTemplate), input, seconds);
+		lob ? std::string() : weaponTemplate, input, seconds);
 
 	// The firing pose, standing still and not turning.
 	SoldierPose want = SoldierPose::Stand;
@@ -4297,6 +4703,36 @@ bool BotManager::firstBlocked(const physics::Vec3& from, const physics::Vec3& to
 // The AI weapon's +0x28 (its launch speed: the weapon's velocity, 0x00892be0
 // from weapon vt+0x1b0) and +0x2c (the projectile's gravityModifier) times
 // the world's gravity (DAT_10139460 vt+4).
+// 0x00892be0 -> 0x0088a8c0: the AI weapon template's round. The speed is
+// the firearm's velocity; the projectile's drag as roundDrag keeps it by
+// its physicsType (0x006bf540: None 0, Point 1, RotationalPoint 2, Mesh 3,
+// MechLegs 4); the gravity the world's (IAIPhysics slot 4) times its
+// gravityModifier.
+ai::RoundModel BotManager::roundModel(const std::string& weaponTemplate, bool* indirect) const
+{
+	ai::RoundModel round;
+	ballistics(weaponTemplate, round.speed, round.gravity);
+	const world::ObjectTemplate* t = const_cast<GameWorld&>(m_world).templates().find(weaponTemplate);
+	const world::ObjectTemplate* projectile = nullptr;
+	if (t) {
+		const auto it = t->settings().find("projectileTemplate");
+		projectile = it != t->settings().end() ? const_cast<GameWorld&>(m_world).templates().find(it->second) : nullptr;
+	}
+	int type = 0;
+	if (projectile) {
+		if (const auto it = projectile->settings().find("physicsType"); it != projectile->settings().end()) {
+			const std::string& name = it->second;
+			type = name == "Point" ? 1 : name == "RotationalPoint" ? 2 : name == "Mesh" ? 3 : name == "MechLegs" ? 4
+				: std::atoi(name.c_str());
+		}
+	}
+	round.drag = projectile ? ai::roundDrag(settingNumber(projectile, "drag", 0), settingNumber(projectile, "mass", 1), type) : 0.0f;
+	if (indirect) {
+		*indirect = weaponAi(weaponTemplate).indirect;
+	}
+	return round;
+}
+
 void BotManager::ballistics(const std::string& weaponTemplate, float& speed, float& gravity) const
 {
 	const world::ObjectTemplate* t = const_cast<GameWorld&>(m_world).templates().find(weaponTemplate);
@@ -4517,7 +4953,7 @@ bool BotManager::steer(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 	}
 	input.throttle = 1;
 	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight, 0};
-	aim(bot, self, eye + d * 5.0f, {}, false, 0, input, seconds);
+	aim(bot, self, eye + d * 5.0f, {}, false, {}, input, seconds);
 	bot.follower.progress(toAi(self.position), std::fabs(input.throttle), m_time);
 	return true;
 }

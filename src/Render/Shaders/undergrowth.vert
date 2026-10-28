@@ -26,6 +26,7 @@ layout(location = 0) out vec2 outTexCoord;
 layout(location = 1) out vec2 outTerrainCoord;
 layout(location = 2) out float outTerrainColorMix;
 layout(location = 3) out float outDepth;
+layout(location = 4) out vec3 outWorldPosition;
 
 void main()
 {
@@ -39,4 +40,5 @@ void main()
 	outTerrainCoord = position.xz * terrainTexCoord.xy + terrainTexCoord.zw;
 	outTerrainColorMix = inTerrainColorMix;
 	outDepth = gl_Position.w;
+	outWorldPosition = position;
 }

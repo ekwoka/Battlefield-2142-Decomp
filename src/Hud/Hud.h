@@ -23,14 +23,20 @@
 // (Bf2CompassNode, 0x007e9560), lists (Bf2NewListBoxNode, 0x007de7d0) and
 // the map (Bf2MenuMapNode, 0x00795620) as the exe draws them; lists with
 // commands take clicks on their rows (the squad and commander menus).
+// Transform lists (Bf2TransformListNode, render 0x007eba70) stack the
+// nodes added to them at a position variable (the commander's and squad
+// leader's right-click menus at OrderMenuPosX/Y); move and blend effects
+// slide nodes in and out and set their blend; object markers
+// (Bf2ObjectMarkerNode, 0x007e6880) mark the lock-on weapons' targets the
+// game hands in (setMarkerSource).
 // What is approximate: the corner roots' positions (the engine places them
-// by the screen size); object markers (the lock-on markers) are kept but
-// not drawn.
+// by the screen size); see docs/engine.md "HUD nodes" for the rest.
 #pragma once
 
 #include "HudFont.h"
 
 #include <array>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -53,6 +59,12 @@ struct HudQuad {
 	// 0x0077af80) when clipped is set.
 	bool clipped = false;
 	float clip[4] = {0, 0, 0, 0}; // x0, y0, x1, y1
+	// addNodeBlendEffect <source> <destination> (0x007b20c0: a
+	// "<node>BlendEffect" render-state node above the node): Direct3D 9
+	// D3DBLEND values for the quads below it (the vehicle HUDs' "7 2":
+	// D3DBLEND_DESTALPHA, D3DBLEND_ONE). 0 0: the HUD's usual
+	// source-alpha blend.
+	int blend[2] = {0, 0};
 };
 
 class HudManager {
@@ -166,14 +178,80 @@ public:
 	// off the map.
 	bool mapWorldAt(float x, float y, float& worldX, float& worldZ) const;
 	// The pointer (menus) in the 800 x 600 screen, and a click there:
-	// buttons run their console commands (setButtonNodeConCmd) through the
-	// runner. True when a button took the click.
+	// buttons run their console commands (setButtonNodeConCmd; with
+	// `alternate`, the right button, setButtonNodeAltConCmd) through the
+	// runner, and the mouse-over nodes under it their release commands
+	// (setMouseOverNodeConCmd ... 3). True when a button took the click.
 	void setPointer(float x, float y) { m_pointer[0] = x; m_pointer[1] = y; }
-	bool click(float x, float y);
+	float pointerX() const { return m_pointer[0]; }
+	float pointerY() const { return m_pointer[1]; }
+	bool click(float x, float y, bool alternate = false);
+
+	// The pointer's textures (HudManager.setMouseTexture*, the HUD
+	// manager's slots from 0x0075e87f: the plain pointer, the map's, and
+	// one per commander tool) and its size (setPointerSize, slot 0x1b4).
+	enum class Pointer { Empty, Full, Artillery, Uav, Supply, MoveTitan, OrbitalStrike, Count };
+	void setPointerTexture(Pointer kind, const std::string& texture) { m_pointerTextures[static_cast<int>(kind)] = texture; }
+	const std::string& pointerTexture(Pointer kind) const { return m_pointerTextures[static_cast<int>(kind)]; }
+	void setPointerSize(float w, float h) { m_pointerSize[0] = w; m_pointerSize[1] = h; }
+	// The pointer as a quad centred on the pointer (false: no texture or
+	// no pointer).
+	bool pointerQuad(Pointer kind, HudQuad& quad) const;
+	// HudManager's other settings, kept by name (setCommPos, setCommSize,
+	// setCommMousePos, setSpottedMenuPos/Size, setSpottedMousePos,
+	// setCommMouseSensitivity, setPointerMouseSensitivity,
+	// setMaximumNrOfCPs, ...): up to four numbers each.
+	void setSetting(const std::string& name, std::array<float, 4> values) { m_settings[name] = values; }
+	std::array<float, 4> setting(const std::string& name) const
+	{
+		const auto it = m_settings.find(name);
+		return it == m_settings.end() ? std::array<float, 4> {} : it->second;
+	}
+
+	// The minimap's filters (Minimap.setPaintKit / setPaintVehicle,
+	// 0x0077e670 / 0x0077e6b0: a bit per kit or vehicle kind toggled;
+	// setPaintAllKits / AllVehicles 0x0077fff0 / 0x00780040: all on, or
+	// all off when all were on) and its zoom (Minimap.setZoom,
+	// 0x007800d0 -> 0x0077e850: the zoom index steps 0, 1, 2 and back to 0).
+	bool paintsKit(int kit) const { return kit < 0 || kit >= 8 || (m_paintKits >> kit & 1) != 0; }
+	bool paintsVehicle(int kind) const { return kind < 0 || kind >= 32 || (m_paintVehicles >> kind & 1) != 0; }
+	void togglePaintKit(int kit);
+	void togglePaintVehicle(int kind);
+	void paintAllKits();
+	void paintAllVehicles();
+	int mapZoom() const { return m_mapZoomIndex; }
+	void cycleMapZoom() { m_mapZoomIndex = m_mapZoomIndex + 1 < 3 ? m_mapZoomIndex + 1 : 0; }
+
+	// Object markers (Bf2ObjectMarkerNode, its update 0x007e6880): a
+	// visible marker node asks the game for the targets of its lock-on
+	// weapon (setObjectMarkerNodeWeapon: the seat's weapon, +0x58) of its
+	// target type (setObjectMarkerNodeLockOnType, +0x54: 2 TTHeat by
+	// default, 1 TTLaser, 5 TTBeacon, -1 the type of the weapon's own
+	// target), at most setObjectMarkerNodeObjects (+8) of them, cut by
+	// the weapon's range with setObjectMarkerNodeRC (+0x61). Each target is
+	// a point in the 800 x 600 screen with its state (0 a candidate, 1
+	// being locked, 2 locked: the marker textures 0..2) and its distance
+	// (the labels' text, 0x007e56e0).
+	struct MarkerQuery {
+		int lockOnType = 2;
+		int weapon = 0;
+		int maxObjects = 0;
+		bool rangeCheck = false;
+		float x0 = 0, y0 = 0, x1 = 800, y1 = 600; // the node's rectangle
+	};
+	struct MarkerTarget {
+		float x = 0, y = 0;
+		int state = 0;
+		float distance = 0;
+	};
+	using MarkerSource = std::function<std::vector<MarkerTarget>(const MarkerQuery&)>;
+	void setMarkerSource(MarkerSource source) { m_markerSource = std::move(source); }
 	void setCommandRunner(std::function<void(const std::string&)> run) { m_run = std::move(run); }
 	// Text ids ("HUD_TEXT_...") to the language's text (Localization).
 	void setLocalizer(std::function<std::string(const std::string&)> localize) { m_localize = std::move(localize); }
 	void setActive(Node* node) { m_active = node; }
+	// A node with setNodeShowConCmd commands (checked each frame).
+	void noteShowCommands(Node* node);
 	const HudFont* font(const std::string& path);
 
 private:
@@ -187,6 +265,22 @@ private:
 	void drawCell(const Node& node, const std::string& text, float x, float rowY, const ListColumn& column, float columnEnd,
 		const float textColor[4], float alpha, std::vector<HudQuad>& out);
 	void drawCompass(const Node& node, float x, float y, const float color[4], std::vector<HudQuad>& out);
+	void drawMarkers(Node& node, float x, float y, const float color[4], std::vector<HudQuad>& out);
+	void layoutTransformLists();
+	void runCommands(const std::vector<std::pair<int, std::string>>& commands, int event);
+	std::string m_pointerTextures[static_cast<int>(Pointer::Count)];
+	float m_pointerSize[2] = {32, 32};
+	std::map<std::string, std::array<float, 4>> m_settings;
+	uint32_t m_paintKits = 0xff, m_paintVehicles = 0xffffffff;
+	MarkerSource m_markerSource;
+	uint64_t m_frameNumber = 0;
+	std::vector<Node*> m_transformLists; // in creation order
+	std::vector<Node*> m_showCommandNodes;
+	struct MouseOverHit {
+		float x0, y0, x1, y1;
+		const Node* node;
+	};
+	std::vector<MouseOverHit> m_mouseOverHits;
 	std::map<int, std::vector<std::vector<std::string>>> m_lists;
 	std::map<int, std::vector<std::array<float, 4>>> m_listRowColors;
 	std::map<int, std::string> m_editText;

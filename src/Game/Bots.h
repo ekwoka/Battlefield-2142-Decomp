@@ -71,6 +71,7 @@
 // assumed.
 #pragma once
 
+#include "AI/Ballistics.h"
 #include "AI/Behaviour.h"
 #include "AI/Heli.h"
 #include "AI/NavMesh.h"
@@ -80,6 +81,7 @@
 
 #include <array>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -450,6 +452,8 @@ public:
 	bool explosive(int player) const;
 	// Whether a lob that went off holds its moves (its +0x209).
 	bool holdingForLob(int player) const;
+	// Whether its fire plan keeps to its order's spot (+0x248, 0x100795a0).
+	bool keepsToOrder(int player) const;
 	// A behaviour's urgency at the bot's last think (0 for none).
 	float lastUrgency(int player, const std::string& behaviour) const;
 	// A radio message (the game's AI event 0x1004e140 -> 0x10030b20 ->
@@ -496,6 +500,9 @@ private:
 		float triggerAt = 0;      // when the trigger may first be pulled
 		float preferredRange = 0; // the fighting distance kept
 		physics::Vec3 lastAimPoint;
+		// The aim's ballistic lead (the aim object's solver record,
+		// 0x100d9a60 -> 0x100fa6f0).
+		ai::LeadSolver lead;
 		float yawError = 0, pitchError = 0;
 		std::array<float, 10> pitchErrors {};
 		int pitchErrorCount = 0;
@@ -625,6 +632,15 @@ private:
 		float heliLastDirY = 0;
 		int heliRun = 0;        // 0 approach, 1 away, 2 back
 		float heliTapAt = -1e9f;
+		// When the bot last took a seat (BBChangeLandingCraft's x6 within 15 s).
+		float seatedAt = -1e9f;
+		uint32_t seatedVehicle = 0;
+		int seatedSeat = -1;
+		// HeliAimAt's lead (0x100dcf10) and the attack run's on-target
+		// condition (0x100dcab0), made with the run's plan.
+		ai::LeadSolver heliLead;
+		physics::Vec3 heliLeadDirection {0, 0, 1};
+		std::optional<ai::OnTargetTest> heliOnTarget;
 	};
 	// The side's strategic AI.
 	struct Side {
@@ -714,8 +730,19 @@ private:
 	float basicTemp(const std::string& objectTemplate, float fallback) const;
 	// Plans (what the chosen behaviour does).
 	void fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
+	// `leadWeapon`: the weapon whose round the aim leads the point for
+	// (empty: no lead).
 	void aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics::Vec3& point, const physics::Vec3& pointVelocity,
-		bool hasTarget, float projectileSpeed, SoldierInput& input, float seconds);
+		bool hasTarget, const std::string& leadWeapon, SoldierInput& input, float seconds);
+	// The round the AI weapon template describes for the solver (0x00892be0):
+	// the muzzle speed, the drag and the gravity; `indirect` its
+	// weaponTemplate.indirect (+0).
+	ai::RoundModel roundModel(const std::string& weaponTemplate, bool* indirect = nullptr) const;
+	// The fire plan's +0x248 (0x100795a0): fight on the way to the order's spot.
+	float landingCraftUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight);
+	float fire3dUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight,
+		const std::vector<GameWorld::PlayerInfo>& players);
+	bool fireKeepsToOrder(const Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& target) const;
 	// Walks (InfanteryMoveTo) or drives (CarMoveTo/TankMoveTo) along a path
 	// to `to`; false once it has arrived. `radius` is the goal's.
 	// `object`: a MoveToObject's object (a vehicle to enter or repair),

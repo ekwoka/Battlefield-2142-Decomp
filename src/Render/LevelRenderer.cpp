@@ -55,9 +55,10 @@ LightingUniforms lighting(const scene::LightSettings& lights, const std::array<f
 {
 	const Vec3f sun = normalize(Vec3f {-lights.sunDirection[0], -lights.sunDirection[1], -lights.sunDirection[2]});
 	const auto& fog = lights.fogColor;
+	const float on = lights.enableSun ? 1.0f : 0.0f; // lightManager.enableSun
 	return LightingUniforms {
 		{sun.x, sun.y, sun.z, 0},
-		{sunColor[0], sunColor[1], sunColor[2], 1},
+		{sunColor[0] * on, sunColor[1] * on, sunColor[2] * on, 1},
 		{skyColor[0], skyColor[1], skyColor[2], 1},
 		{fog[0] / 255.0f, fog[1] / 255.0f, fog[2] / 255.0f, kFogEnd},
 		{alphaReference, lightmapped ? 1.0f : 0.0f, 0, 0},
@@ -179,6 +180,16 @@ LevelRenderer::~LevelRenderer()
 			SDL_ReleaseGPUBuffer(device, patch.indices);
 		}
 	}
+	if (m_shadowDynamic) {
+		SDL_ReleaseGPUTexture(device, m_shadowDynamic);
+	}
+	if (m_shadowStatic) {
+		SDL_ReleaseGPUTexture(device, m_shadowStatic);
+	}
+	if (m_flareVertices) {
+		SDL_ReleaseGPUBuffer(device, m_flareVertices);
+	}
+	releasePostTargets();
 }
 
 SDL_GPUTexture* LevelRenderer::texture(const io::FileManager& files, const std::string& path)
@@ -1326,6 +1337,8 @@ void LevelRenderer::drawUndergrowth(SDL_GPUCommandBuffer* commands, SDL_GPURende
 		return;
 	}
 	SDL_BindGPUGraphicsPipeline(pass, m_gpu.undergrowthPipeline());
+	const bool undergrowthShadows = !(m_sources && m_sources->shadows && !m_sources->shadows->undergrowthShadows);
+	useShadows(commands, pass, 1, 3, false, undergrowthShadows);
 	const auto& sun = m_terrainColorsFromData ? m_terrainSunColor : lights.terrainSunColor;
 	const auto& gi = m_terrainColorsFromData ? m_terrainGIColor : lights.terrainGIColor;
 	LightingUniforms lit = lighting(lights, sun, gi, m_undergrowthAlphaRef, true);
@@ -2000,6 +2013,7 @@ void LevelRenderer::drawMeshParticles(SDL_GPUCommandBuffer* commands, SDL_GPURen
 			SDL_GPUGraphicsPipeline* pipeline = additive ? m_gpu.additiveMeshPipeline() : m_gpu.fadedMeshPipeline();
 			if (pipeline != boundPipeline) {
 				SDL_BindGPUGraphicsPipeline(pass, pipeline);
+				useShadows(commands, pass, 1, 5, true);
 				boundPipeline = pipeline;
 			}
 			SDL_GPUBufferBinding vertexBinding {particleMesh->vertices, 0};
@@ -2150,6 +2164,7 @@ BoundingSphere LevelRenderer::instanceBounds(const Instance& instance, const Gpu
 void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProjection)
 {
 	m_drawList.clear();
+	m_cloakedList.clear();
 	m_culledInstances = 0;
 	const Frustum frustum = Frustum::fromViewProjection(viewProjection);
 	bool uploaded = false;
@@ -2157,7 +2172,22 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 	const scene::RendererSettings& renderer =
 		m_sources && m_sources->renderer ? *m_sources->renderer : rendererDefaults;
 	const float zoom = viewZoom(camera);
+	static const bool cloakAll = [] { // BF2142_POST_EFFECT=camo: every soldier cloaked (screenshots)
+		const char* forced = std::getenv("BF2142_POST_EFFECT");
+		return forced && std::string(forced) == "camo";
+	}();
 	for (Instance& instance : m_instances) {
+		const bool forceCloak = cloakAll && instance.mesh->skinned && !instance.hidden;
+		if ((instance.hidden || forceCloak) && instance.object != 0 && m_sources &&
+			(instance.mesh->skinned || instance.mesh->bundled) &&
+			(forceCloak || (m_sources->cloaked && m_sources->cloaked(instance.object)))) {
+			// Active camouflage: hidden from the world pass, drawn into the
+			// camouflage mask (the first person's own soldier stays out).
+			if (!(m_sources->hiddenInView && m_sources->hiddenInView(instance.object))) {
+				m_cloakedList.push_back({&instance, instance.mesh, nullptr, instance.lightmapTransform});
+			}
+			continue;
+		}
 		if (instance.hidden || instance.fade <= 0.0f) {
 			continue;
 		}
@@ -2236,6 +2266,9 @@ void LevelRenderer::build(const LevelSources& sources)
 	buildTerrain(sources);
 	progress(0.2f);
 	buildSky(sources);
+	buildSkyLayers(sources);
+	loadHemiMap(sources);
+	loadPostTextures(sources);
 	buildWater(sources);
 	buildRoads(sources);
 	progress(0.3f);
@@ -2279,8 +2312,14 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	if (m_baseFovY <= 0) {
 		m_baseFovY = camera.fovY; // the zoom is against the view's first fov (0x10066b30)
 	}
+	// With the post-production the world is drawn into the scene texture,
+	// then post.frag into `color` with the HUD over it.
+	const bool post = postEnabled() && m_gpu.postPipeline();
+	if (post) {
+		ensurePostTargets(target.width, target.height);
+	}
 	SDL_GPUColorTargetInfo colorTarget {};
-	colorTarget.texture = color;
+	colorTarget.texture = post && m_sceneColor ? m_sceneColor : color;
 	colorTarget.clear_color = {lights.fogColor[0] / 255.0f, lights.fogColor[1] / 255.0f, lights.fogColor[2] / 255.0f, 1.0f};
 	colorTarget.load_op = SDL_GPU_LOADOP_CLEAR;
 	colorTarget.store_op = SDL_GPU_STOREOP_STORE;
@@ -2333,37 +2372,22 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	const Mat4 viewProjection = camera.view() *
 		Mat4::perspective(camera.fovY, static_cast<float>(target.width) / target.height, camera.nearPlane, 6000.0f);
 	prepareInstances(camera, viewProjection);
+	const float seconds = static_cast<float>(SDL_GetTicks() - m_startTicks) / 1000.0f;
+	m_poses.clear();
+	// The shadow maps, before the world pass that reads them.
+	renderShadows(commands, camera, lights, seconds);
+	if (!m_cloakedList.empty()) {
+		depthTarget.store_op = SDL_GPU_STOREOP_STORE; // the camouflage mask tests against it
+		depthTarget.stencil_store_op = SDL_GPU_STOREOP_STORE;
+	}
 	SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, &colorTarget, 1, &depthTarget);
 
 	// Sky dome around the camera, unlit and unfogged, behind everything.
-	if (m_skyMesh) {
-		SDL_BindGPUGraphicsPipeline(pass, m_gpu.skyPipeline());
-		LightingUniforms sky {};
-		sky.skyColor[0] = sky.skyColor[1] = sky.skyColor[2] = 1;
-		sky.fogColor[3] = 1e9f;
-		SDL_PushGPUFragmentUniformData(commands, 0, &sky, sizeof(sky));
-		const Mat4 world = Mat4::rotationY(m_skyRotation * 3.14159265f / 180.0f) * Mat4::translation(camera.position);
-		TransformUniforms skyTransforms {world * viewProjection, world, {1, 1, 0, 0}, {}};
-		SDL_PushGPUVertexUniformData(commands, 0, &skyTransforms, sizeof(skyTransforms));
-		SDL_GPUBufferBinding vertexBinding {m_skyMesh->vertices, 0};
-		SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
-		SDL_GPUBufferBinding indexBinding {m_skyMesh->indices, 0};
-		SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
-		for (const Submesh& submesh : m_skyMesh->submeshes) {
-			SDL_GPUTextureSamplerBinding samplers[5] = {
-				{m_skyTexture ? m_skyTexture : submesh.texture, m_gpu.clampSampler()},
-				{m_gpu.whiteTexture(), m_gpu.clampSampler()},
-				{m_gpu.whiteTexture(), m_gpu.clampSampler()},
-				{m_gpu.whiteTexture(), m_gpu.clampSampler()},
-				{m_gpu.whiteTexture(), m_gpu.clampSampler()},
-			};
-			SDL_BindGPUFragmentSamplers(pass, 0, samplers, 5);
-			SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
-		}
-	}
+	drawSky(commands, pass, viewProjection, camera);
 
 	// Terrain.
 	SDL_BindGPUGraphicsPipeline(pass, m_gpu.terrainPipeline());
+	useShadows(commands, pass, 2, 5 + kMaxDetailLayers, false);
 	// The terrain's sun and GI colors come from terraindata.raw; the
 	// script values are the editor's (the game doesn't have them).
 	const auto& terrainSun = m_terrainColorsFromData ? m_terrainSunColor : lights.terrainSunColor;
@@ -2521,6 +2545,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// Roads, once per terrain patch they overlap, lit by that patch's lightmap.
 	if (!m_roads.empty() && m_patchSize > 0) {
 		SDL_BindGPUGraphicsPipeline(pass, m_gpu.roadPipeline());
+		useShadows(commands, pass, 2, 3, false);
 		for (const Road& road : m_roads) {
 			SDL_GPUBufferBinding vertexBinding {road.vertices, 0};
 			SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
@@ -2564,6 +2589,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// particles: RendDX9's queue order (0x1002cef0: RSMTWater, then
 	// RSMTTransparency sorted by distance, RSMTAdditive, the particles).
 	SDL_BindGPUGraphicsPipeline(pass, m_gpu.meshPipeline());
+	useShadows(commands, pass, 1, 5, true);
 	// Lightmapped statics use the static sun/sky colors.
 	LightingUniforms uniformsFor[2][2] = {
 		{lighting(lights, lights.sunColor, lights.skyColor, 0, false),
@@ -2576,7 +2602,6 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			applyPointLights(uniforms);
 		}
 	}
-	const float seconds = static_cast<float>(SDL_GetTicks() - m_startTicks) / 1000.0f;
 	const GpuMesh* bound = nullptr;
 	const auto drawInstance = [&](const DrawItem& item, MeshQueue queue) {
 		const Instance& instance = *item.instance;
@@ -2602,30 +2627,21 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		std::copy(item.lightmapTransform, item.lightmapTransform + 4, transforms.lightmapTransform);
 		SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
 		const bool lightmapped = item.lightmap != nullptr;
-		std::vector<anim::Matrix> pose;
-		if (bound->skinned && instance.skeleton
-			&& !(m_sources && m_sources->skeletonPose && instance.object != 0
-				&& m_sources->skeletonPose(instance.object, *instance.skeleton, pose))) {
-			pose = anim::evaluatePose(*instance.skeleton, instance.animation.get(), seconds * anim::kFramesPerSecond);
-		}
+		static const std::vector<anim::Matrix> unposed;
+		const std::vector<anim::Matrix>& pose = bound->skinned ? poseFor(instance, seconds) : unposed;
 		for (const Submesh& submesh : bound->submeshes) {
 			if (queueOf(submesh, instance.fade) != queue) {
 				continue;
 			}
 			if (submesh.rig >= 0 && !pose.empty()) {
-				// Bone palette of this material's rig: mesh -> bone -> world.
-				const auto& rig = bound->rigs[static_cast<size_t>(submesh.rig)];
-				for (size_t b = 0; b < rig.size() && b < static_cast<size_t>(kMaxMeshParts); ++b) {
-					const int node = rig[b].node;
-					const anim::Matrix skin = node >= 0 && static_cast<size_t>(node) < pose.size()
-						? anim::multiply(rig[b].meshToBone, pose[static_cast<size_t>(node)])
-						: rig[b].meshToBone;
-					std::copy(skin.begin(), skin.end(), transforms.parts[b].m.begin());
-				}
+				skinPalette(*bound, submesh, pose, transforms);
 				SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
 			}
 			LightingUniforms uniforms = uniformsFor[lightmapped][submesh.alphaReference > 0];
 			materialUniforms(uniforms, submesh, instance.fade, seconds);
+			if (bound->skinned || bound->bundled) {
+				uniforms.material[2] += kMaterialHemi;
+			}
 			SDL_PushGPUFragmentUniformData(commands, 0, &uniforms, sizeof(uniforms));
 			const auto orWhite = [this](SDL_GPUTexture* t) { return t ? t : m_gpu.whiteTexture(); };
 			SDL_GPUTextureSamplerBinding samplers[5] = {
@@ -2715,8 +2731,11 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		bound = nullptr;
 	}
 
+	// The sun flare, behind what is in front of it.
+	drawSunFlare(commands, pass, viewProjection, camera);
 	// The transparent materials, farthest object first.
 	SDL_BindGPUGraphicsPipeline(pass, m_gpu.fadedMeshPipeline());
+	useShadows(commands, pass, 1, 5, true);
 	std::vector<std::pair<float, const DrawItem*>> transparent;
 	for (const DrawItem& item : m_drawList) {
 		transparent.push_back({transparencyKey(item.instance->world, camera.position), &item});
@@ -2727,6 +2746,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	}
 	// The additive ones (not sorted: RSMTAdditive keeps its order).
 	SDL_BindGPUGraphicsPipeline(pass, m_gpu.additiveMeshPipeline());
+	useShadows(commands, pass, 1, 5, true);
 	for (const DrawItem& item : m_drawList) {
 		drawInstance(item, MeshQueue::Additive);
 	}
@@ -2734,14 +2754,44 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	drawMeshParticles(commands, pass, viewProjection, lights,
 		{m_sources ? m_sources->effects : nullptr, m_sources ? m_sources->objectEffects : nullptr});
 	drawParticles(commands, pass, viewProjection, camera, lights, m_particleVertices, m_particleGroups);
+	// The cloaked soldiers' mask, tested against the world's depth.
+	const bool cloaked = post && !m_cloakedList.empty();
+	if (cloaked) {
+		SDL_EndGPURenderPass(pass);
+		drawCamouflage(commands, target.depth, viewProjection, seconds);
+		SDL_GPUColorTargetInfo keepColor = colorTarget;
+		keepColor.load_op = SDL_GPU_LOADOP_LOAD;
+		SDL_GPUDepthStencilTargetInfo keepDepth = depthTarget;
+		keepDepth.load_op = SDL_GPU_LOADOP_LOAD;
+		keepDepth.stencil_load_op = SDL_GPU_LOADOP_LOAD;
+		pass = SDL_BeginGPURenderPass(commands, &keepColor, 1, &keepDepth);
+	}
 	// The first-person pass: the world's depth cleared, the weapon and arms
 	// drawn with their own projection.
 	if (m_hasFirstPerson) {
 		SDL_EndGPURenderPass(pass);
 		SDL_GPUColorTargetInfo keepColor = colorTarget;
 		keepColor.load_op = SDL_GPU_LOADOP_LOAD;
-		pass = SDL_BeginGPURenderPass(commands, &keepColor, 1, &depthTarget);
+		SDL_GPUDepthStencilTargetInfo clearDepth = depthTarget;
+		clearDepth.store_op = SDL_GPU_STOREOP_DONT_CARE;
+		clearDepth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+		pass = SDL_BeginGPURenderPass(commands, &keepColor, 1, &clearDepth);
 		drawFirstPerson(commands, pass, camera, static_cast<float>(target.width) / target.height, lights);
+	}
+	// The post-production into the target (renderer.drawPostProduction),
+	// the HUD and menu over it.
+	if (post && m_sceneColor) {
+		SDL_EndGPURenderPass(pass);
+		const PostUniforms postUniforms = preparePost(commands, cloaked);
+		SDL_GPUColorTargetInfo finalColor {};
+		finalColor.texture = color;
+		finalColor.load_op = SDL_GPU_LOADOP_DONT_CARE;
+		finalColor.store_op = SDL_GPU_STOREOP_STORE;
+		SDL_GPUDepthStencilTargetInfo hudDepth = depthTarget; // the menus' masks start from 0
+		hudDepth.store_op = SDL_GPU_STOREOP_DONT_CARE;
+		hudDepth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+		pass = SDL_BeginGPURenderPass(commands, &finalColor, 1, &hudDepth);
+		drawPost(commands, pass, postUniforms);
 	}
 	// The HUD over everything.
 	if (m_overlayVertices && !m_overlayGroups.empty()) {
@@ -2836,6 +2886,9 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 			LightingUniforms uniforms = lit[submesh.alphaReference > 0];
 			materialUniforms(uniforms, submesh, 1.0f, seconds);
 			uniforms.material[2] = submesh.additive ? kMaterialAdditive : submesh.blended ? kMaterialBlended : 0.0f;
+			if (gpuMesh->skinned || gpuMesh->bundled) {
+				uniforms.material[2] += kMaterialHemi;
+			}
 			SDL_PushGPUFragmentUniformData(commands, 0, &uniforms, sizeof(uniforms));
 			SDL_GPUTextureSamplerBinding samplers[5] = {
 				{submesh.texture, m_gpu.repeatSampler()},
@@ -2852,10 +2905,12 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 	// bundled mesh sends those to the first-person queue too, 0x100c3880;
 	// drawn here after all the opaque ones).
 	SDL_BindGPUGraphicsPipeline(pass, m_gpu.meshPipeline());
+	useShadows(commands, pass, 1, 5, true);
 	for (const FirstPersonModel& model : scene.models) {
 		drawModel(model, MeshQueue::Opaque);
 	}
 	SDL_BindGPUGraphicsPipeline(pass, m_gpu.additiveMeshPipeline());
+	useShadows(commands, pass, 1, 5, true);
 	for (const FirstPersonModel& model : scene.models) {
 		drawModel(model, MeshQueue::Additive);
 	}
@@ -2870,6 +2925,7 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 	}
 	sortBackToFront(transparent);
 	SDL_BindGPUGraphicsPipeline(pass, m_gpu.fadedMeshPipeline());
+	useShadows(commands, pass, 1, 5, true);
 	for (const auto& [distance, model] : transparent) {
 		drawModel(*model, MeshQueue::Transparent);
 	}

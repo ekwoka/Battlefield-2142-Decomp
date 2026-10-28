@@ -1494,6 +1494,177 @@ wheels keep their own poses.
 11; the worn kit is `geometry.kit`, hidden here), through the renderer's
 `geometryFor`.
 
+## Shadows, hemi maps, sky and post-production (RendDX9)
+
+`src/Render/LevelRendererPost.cpp`, `src/Render/PostProduction.h`, the
+settings in `src/Scene/PostProductionSettings.h`; shaders `shadow.glsl`,
+`shadowcaster.frag`, `sky.frag`, `bloom.frag`, `post.frag`, `camo.frag`,
+`fullscreen.vert`. A frame is now: the shadow maps, the world pass into a
+scene texture, the camouflage mask, the first-person pass, the bloom
+chain, then `post.frag` into the target with the HUD and the menus over
+it.
+
+**Dynamic shadows.** The settings live in the light manager (class
+`dice.hfe.geom.LightManager` `0xd01c1`, created by `0x10070472`,
+constructed by `0x100aafe0`, which sets the defaults; its vtable
+`0x101d42e0` slots 41 to 94 are the `shadowManager.*` setters and getters
+the console's `0x100802eb`..`0x100821b3` call, e.g. `0x1014a580` the map
+size, which keeps the old one when the device refuses it, `0x1014a5d0` the
+object size, at most the map's, `0x1014a600` the bit depth as
+D3DFMT_D16/D24S8/D32, `0x1014a840` the alpha threshold that it uploads as
+SHADOWALPHATHRESHOLD). Defaults: map 1024, objects 512, depth distance 40,
+dynamic, static-mesh and first-person shadows on, alpha shadows off
+(threshold 0.2), update factor 1, the PSM/TSM tuning (fov 60, TSM focus
+0.52, 80 % line -0.6). The shipped scripts never call `shadowManager.*`;
+the menu's `VideoSettings.DynamicShadowsQuality` (0 off .. 3) picks the
+quality. The receivers' shaders are RaCommon.fx's `calcShadowProjection`
+and `getShadowFactorExactOther` (four taps half a texel apart) behind the
+`_HASSHADOW_` techniques (the `*Shadowed.fx` variants), the occluders'
+map (`ShadowOccluderMap`) multiplied in for bundled meshes, and
+LightManager_r3x0.fx's `saturate(lightmap.a + ShadowIntensityBias)`.
+
+The rewrite keeps two orthographic maps along the sun over a square region
+(half side `shadowMapDepthDistance` × 1, 1.5 or 2 by quality; the map's
+size doubled at quality 3), centred half a region ahead of the camera and
+snapped to a quarter of the region's side so the projection holds still between
+moves: the dynamic objects' map (bundled and skinned meshes, including
+the first person's own soldier when `dynamic1pShadowsEnabled`) is redrawn
+each frame, the static meshes' (with `shadowMapIncludeStaticMeshes` and
+`dynamicStaticMeshShadowsEnabled`) only when the region moves or objects
+come and go. Terrain, roads, undergrowth (`undergrowth.dynamicShadowsEnable`,
+`0x100861d8`) and lightmapped meshes take only the dynamic map (their
+lightmaps hold the statics' shadows); unlightmapped meshes (soldiers,
+vehicles, unlit statics, the first-person models) take both. Blended and
+additive materials cast nothing; alpha-tested ones only with
+`allowAlphaShadows`. The comparison is a filtered depth compare at four
+taps, faded out over the region's last fifth. `BF2142_SHADOW_DEBUG=1` shows
+the terrain's shadow factor, `BF2142_SHADOW_STATS=1` prints the casters,
+`BF2142_SHADOW_REDRAW=1` redraws the static map every frame (its cost).
+Not done: RendDX9's light-space perspective (LSPSM/TSM) fit and its
+per-object maps (`shadowMapObjectSize`), `GeometryTemplate.useRadiusForShadowDepth`
+(a Geometry template property, still unread), `dropShadowClipHeightOffset`,
+`lightmapIntensityBias`, the update factor.
+
+**Hemi maps.** `HemiMapManager.setBaseHemiMap <texture> <corner> <size>
+[<height>]` (`0x100857b8`; every level's Sky.con: `groundhemi`, 0/0/0,
+2048, 500) names a DXT5 map over the level: rgb the ground's bounced
+colour, alpha the sun's occlusion (roofs, bridges, the buildings'
+shade; Camp Gibraltar's is 97 % at 255). RaShaderBM.fx / RaShaderSM.fx
+`calcGroundUVAndLerp` look it up under the point a metre along its normal,
+`uv = ((p + size/2 + n).xz - corner.xz) / size`, v flipped, and lerp the
+ambient from that ground colour to `HemiMapSkyColor` (the sky colour) by
+`clamp((n.y + offset) / 2 + 0.5, 0, 0.9)`, offset = `clamp(localHeight × 2 −
+1 + HeightOverTerrain, −2(1 − HeightOverTerrain), 0.8)` with the point's
+height over its object's origin at InvHemiHeightScale (0.5 for skinned
+meshes); `_HASHEMIOCCLUSION_` multiplies the sun term by the map's alpha.
+The renderer uploads HemiMapConstants (corner, size, lerp bias) and
+HemiMapSkyColor with its per-frame constants (`0x10030000` table: 0x110,
+0x124; TreeSkyColor 0x138). The rewrite applies it to every unlightmapped
+mesh in mesh.frag, with HeightOverTerrain 0 and HemiMapConstantColor 1
+(both per object in RendDX9, at `0x10040000` table offsets 0x1e4, 0x1ec,
+not decoded). `loadTitanHemiMap` (12 calls: the Titans' interiors) is
+stored, not drawn.
+
+**The light manager's other colours.** All of `lightManager.*` is now
+registered; `enableSun` gates the sun term; the tree, effect and specular
+colours (`treeSkyColor`, `effectSunColor`, `effectShadowColor`,
+`sunSpecColor`, `staticSpecularColor`) are stored for shaders the rewrite
+doesn't have yet (RaShaderLeaf/Trunk, Particles.fx's lighting, specular).
+
+**Sky layers and the sun flare** (`0x100fd2f0`, `0x100fd900`, SkyDome.fx).
+With `skyDome.hasCloudLayer` the dome's technique is SkyDomeNV3x (one
+cloud texture on the dome's second coordinate set, scrolled by TEXOFFSET),
+with `hasCloudLayer2` SkyDomeNV3xDualClouds (`cloud × lerp.x + cloud2 ×
+lerp.y`); both fade out from CLOUDSFADEOUTDIST = (fadeCloudsDistances.x,
+y − x) along the dome's radius and below its horizon, then `lerp(sky, c,
+c.a)`. The offsets grow by `scrollDirection` a second. The flare is the
+flare template's sprite towards `-flareDirection`, added (SkyDomeSunFlare:
+ONE/ONE, no depth test) at a strength of the occlusion query's visible
+share (`(visible / total + flareFadeAdd) × flareFadeMul`, `SkyDomeFlareOccludeCheck`
+every few frames); the rewrite draws a camera-facing quad of the flare
+texture 4 km out, depth-tested instead of the query, brightest looking
+into it. `renderer.drawSunFlare` and `skyDome.domeSize` are not read.
+
+**Post-production** (PostProduction_nv3x.fx, FSQuadDrawer.fx; the object
+`0x1004a590` constructs, `DAT_101fb808`; driven from the renderer's frame
+at `0x1002df12`..`0x1002e6d0`). The order:
+
+1. *Glow and camouflage* (`0x1004a0b0`, `0x10049560`, `0x10048a80`,
+   `0x100495f0`, `0x10048b50`). Cloaked soldiers draw with
+   RaShaderSMActiveCamo.fx / RaShaderBMActiveCammo.fx technique Camouflage
+   (alpha only); FSBMExtractCamouflage (`(max(0.4, a) − 0.5) × 2`), a 5 × 5
+   blur and FSBMCamouflageBlurPassThrough blend the backbuffer shifted by
+   CAMOUFLAGEOFFSET (`renderer.camouflageOffset`), its luminance's
+   contrast × 0.1 added, by that mask: the soldier refracts what is behind
+   him. The rewrite draws cloaked soldiers (GameWorld hides them; the
+   renderer asks `LevelSources::cloaked`) into a mask tested against the
+   world's depth. The glow materials (GlowMaterial with stencil 0x80,
+   FSBMExtractGlowFilter `|a − 1| × a × 2`, `renderer.glow*`) need the
+   renderer's glow list (`*(DAT_101fae6c + 0x38)`), not decoded: not drawn.
+2. *Bloom* (`0x10049140`): FSBMContrastFilter (pass 28: the backbuffer
+   cubed, to luminance, less CONTRAST = `bloomFilterContrast`) into a
+   small target, FSBMLargeBloomFilter across (pass 29: 13 taps 0.01 and
+   0.015 × BLOOMSIZE × 1..3 apart, weighted 1, 0.45 .. 0.15 × BLOOMWEIGHTSCALE
+   × 0.9), FSBMGaussianBlur5x5Cheap (10), the large bloom down (30), then
+   Soften: `saturate(backbuffer + bloom × GLOWSTRENGTH)` with GLOWSTRENGTH
+   = `bloomOverlayAmount`; `showBloomOverlayTexture` shows the bloom alone.
+   The setters `0x100508d0`..`0x10050f80` write +0x104..+0x114; defaults 1,
+   1, 1, 0.2. The rewrite's small targets are a quarter of the screen.
+   `VideoSettings.setUseBloom` (the menu's BloomEnabled) turns it off.
+3. *Tinnitus* (`0x1004a2f0`) instead of the bloom while one runs: the game
+   logic's event 0xd (ECGameLogicGLTinnitus, data type 1 and three times,
+   Sound.tinnitusSetup's 1 2 4) lasts `(a + b + c) × 30` frames (at least
+   20, `0x10049440`); the last four frames weighted 0.5, 0.25, 0.125,
+   0.0675 at a random SAMPLEOFFSET, lerped to the frame by its progress
+   (halved below one half).
+4. *Colour grade* (`0x1004a120` then ColorTransform `0x10049a40`): the
+   matrix `0x10049900` builds, `out_r = Σ_c ((1 − s) lum_c + s[r = c]) tint_c in_c`
+   (lum 0.3086, 0.6094, 0.0820; s `defaultSaturation`, tint
+   `defaultColorTint`), transposed into COLORTRANSFORMMATRIX, then
+   CONTRASTPOLYNOM `a x + b x² + c` (`defaultContrast`; Camp Gibraltar's
+   2.1/−1/−0.04 lifts the mid-tones). It runs unless the view is tinted or
+   the player is EMPed (`0x10025be0`). CameraEffect (`0x10049b90`) takes its
+   place while the view's camera asks for it: the same grade on a
+   fisheye from `common/textures/frame` with `common/textures/scanline`
+   rolling (FRACTIME + 0.15 a frame's seconds, used below 1, reset at
+   1.5). The rewrite turns it on in a vehicle seat in first person whose
+   weapon's `weaponHud.enablePostProcessingOnGuiIndex` names the HUD shown
+   (`altGuiIndex` zoomed, else `guiIndex`: the tanks' and walkers' zoomed
+   sights).
+5. *EMP* (`0x10049d70`): a vehicle's EMP level (the player's slot 0x380)
+   loads the static from the table `0x10048950` builds (`0x10048a30`:
+   INTERFERENCE 0 then 8 for levels 1-5, DISTORTIONROLL 0 then 0.02, no
+   warp) and a second grade (`0x1004a280`: the view's colour at saturation
+   0 when the view is tinted, else neutral); a soldier's level + 3 (5 for
+   3) with the saturation swinging ±3 by 0.01 a frame. `psDx9_EMP20`: the
+   random texture's row shifts the image across by DISTORTIONROLL, the
+   static takes from it and adds a little red, the contrast polynomial
+   again. `renderer.emp*` (`0x10050250`..`0x10050730`) override the table.
+6. *Titan explosion* (event 0x14, `0x10049360`, run by `0x1004a120`): the
+   grade's tint 1 + 20 t with the contrast's constant t / 2 for two
+   seconds, then white (tint 40, saturation 0, + 1) until 12 s. The
+   rewrite starts it when `GameWorld::titans()` reports a core explosion.
+7. *TVEffect* (`0x10048f80`, `ps_TVEffect20`: grey image, rolled by the
+   noise and `1 − x²` bands, the random texture's interference; the
+   PostProcess component's `tvInterference`, `tvDistortionRoll`,
+   `tvDistortionFreq`, `tvDistortionScale`): nothing in RendDX9 calls it
+   (no caller, no vtable slot) and the game has no TV-guided view, so it
+   is implemented (`PostEffects::tv`) but never on.
+
+The rewrite does all of these in one full-screen pass: the passes that
+move pixels (the roll, the fisheye, the TV's bands) read the earlier
+stages at the moved coordinates. `renderer.drawPostProduction 0` draws
+the world straight into the target. `BF2142_POST_EFFECT=emp:N |
+soldieremp:N | tinnitus | tv | camera | flash | camo` forces one for a
+screenshot. PostProduction's Fog (a full-screen fog from a position
+buffer) and ThermopticCamouflage (returns black) techniques are named
+nowhere in RendDX9 (no technique string selects them): not drawn; fog
+stays in the shaders, the camouflage is FSQuadDrawer's passes above.
+Missing game state: the soldier's own EMP level and the tinnitus event
+(an explosion within its radius × `sound-tinnitus-range` of the local
+soldier) are not reported by GameWorld yet, and the view's tint colour
+(its slot 0x7c) is not decoded.
+
 ## Kits on the ground
 
 `src/Game/Kits.cpp`. A dead soldier's kit (on foot or thrown out of a
@@ -2445,8 +2616,21 @@ server is `src/Net/GameServer` (the protocol) and `src/Main/HostedGame`
   disconnect, sent three times as `0x0068e520` does. The client prints who
   left and why, and a disconnect's reason (`net::disconnectReason`).
 
-A client that leaves still keeps its player in the round for the next one
-to join (GameWorld has no way to remove players).
+A client that leaves takes its player with it, as the game server's
+destroyPlayer (`0x004acfb0`, GameServer.cpp; reached from the session's
+disconnections in `0x004ae1f0`, PlayerManager slot `0x20` by id then the
+server's vt+0x120) does: a player with a vehicle that isn't its free camera
+(or an AI one) dies there (game logic slot `0x54`, `0x004c1d20`: the
+player's vt+0x100(0) and the death `0x004cd390`); it leaves its squad (the
+squad manager `DAT_00a1c174` slot `0x38`) and the command (slot `0x70`);
+the scripts hear of it; the free camera goes; a human leaves the count
+(`+0xe0`); every client gets DestroyPlayer (vtable `0x0091cb58`, the id);
+GAME_MESSAGE_PLAYER_DISCONNECTED goes to the chat; the player's
+networkable ghost goes (`0x0067bb30`); the PlayerManager lets the player
+go (slot `0x14`) and AIDLL's records of it are dropped (`DAT_00b4bbcc`
+slot `0x14`). `GameWorld::removePlayer` does the round's part (the body
+lies on as a corpse; PlayerDisconnect), `HostedGame` the rest, and the
+next `addPlayer` takes the lowest free id.
 
 ### The control-object record and prediction
 
@@ -2470,6 +2654,17 @@ Mode 3 differs from mode 2 in three readers only; the others take the same
 bits and apply them differently (the seat's `0x00605b00` skips its "is the
 seat mine" check):
 
+- **SimpleObject** (`0x005ff5d0` / `0x005ffec0`): the angular velocity
+  (mask 8) as a wide delta in 1 mm/s steps (`0x00687510` / `0x006876c0`)
+  instead of the delta3 in cm/s; written against a history slot (a
+  relative record) the position, velocity and angular velocity are deltas
+  from the slot's copy (`0x005fe230` stores them, 0x24 bytes each at the
+  slot's cursor `+0x400`) instead of the stream's reference and zero. With
+  the setting `OptimizeSimpleObjectNetworking` (`0x004237c0`) at 1 a
+  relative record's Ground/AirPhysicsNodeInfo mask is fixed (`0x48600f`,
+  `| 0x10d80` on the ground): not rewritten, the default is 0. No other
+  shipped networkable reads the slots (the Soldier's, RotationalBundle's
+  and Engine's `0x400` are mask bits).
 - **Soldier** (`0x005fb8c0` / `0x005fcdb0` with the last argument 3; the
   fields come from `0x005fc1a0`): the velocity (0x100) in 1 mm/s steps
   instead of 1 cm/s, then three more node vectors: 0x200 the acceleration
@@ -2506,8 +2701,24 @@ The player's own state (`0x00594cc0` writes, `0x00596ed0` reads):
 
 `src/Net/Networkables` reads and writes both modes and the own state,
 `GhostLayout`'s `ControlState` the record's state; `RemoteWorld` decodes it
-with the ghost's layout (`controlState()`), and `HostedGame` writes it
-every tick: always a fresh state, in the next slot.
+with the ghost's layout (`controlState()`) and keeps the eight slots, and
+`HostedGame` writes it every tick as `0x00580830` does: a fresh state into
+the next slot (its own copy kept, `0x0057f750`) while the client has
+acknowledged none (`+0x20f0` -1) or the countdown (`+0x20fc`) has run out,
+then 5 (`DAT_00a00ce4`) relative ones against the acknowledged slot. The
+acknowledgement is the notify layer's: a delivered packet that carried a
+fresh record makes its slot the client's (`0x005830e0`, checking the
+record's ghost; `GameServer::onNotified`). A new control object starts
+from fresh records again; a fresh record overwriting the acknowledged slot
+drops it.
+
+The firearm's 0..6 in the own state (per weapon group, `+0x22c`) goes only
+for a firearm whose template's `+0x2c8` vector has y over 0 (`0x005c1360`):
+that field is `ObjectTemplate.maxResetSpeed`'s (`0x00521fab`, setter
+`0x005220a3` → `0x00522125`, the only writer, whatever the class). No
+shipped firearm sets it (only eu_sentrygun's RotationalBundle
+EU_Sentrygun_gun has `0/5000/0`), so it is never sent
+(`net::firearmSendsHeat`).
 
 After reading the record, `0x00580cd0` hands the stream, the ghost, the
 last move and the server's tick to the local player's interface `0x1d4c2`
@@ -2523,13 +2734,52 @@ server's, and remembered with the state it left. A record for move L puts
 the state remembered for L where the server's differs (every field mode 3
 carries; the timers and contacts it doesn't carry stay the client's own)
 and steps the later moves again. The soldier is drawn and seen from the
-prediction. The replay's own steps in BF2142.exe (the `0x1d4c2`
-interface's slot `0x10`) weren't traced, and neither are a vehicle's
-moves predicted: a seat's record brings the vehicle's mode-3 state, which
-the client takes as it is (GameWorld steps vehicles only as part of its
-round's physics). The moves a move-to-input conversion shares
+prediction. The moves a move-to-input conversion shares
 (`net::soldierInputFromMove`) make the server and the prediction step the
 same input.
+
+The exe's replay is the game client's interface `0x1d4c2` (the client
+object's `+0xa8`, `0x004b35b0`; vtable `0x00928fa8`) slot `0x10`,
+`0x004b5000`, given the stream, the record's ghost, its last move, the
+server's tick and 1/30 s. It keeps the move L in the local player's move
+list (player slot `0xa8`; `0x00583710` drops the moves before L and keeps
+L at the front), and, with the record's object found (`0x00678d70`) and
+prediction on (`+0x55`), sets the clock to the server's tick
+(`0x006660b0`), then for every move left in the list, L's own included:
+the clock one tick on while the game logic's state (slot `0x164`) is 1
+(`0x006660e0(1)`), the move decoded into the player's input
+(`0x00583820`, `0x005838d0`) and handed to the player (game logic slot
+`0x160`, player slot `0x44(input, 1/30, 4)`; not in state 4), and one
+tick of the control object's tree: each object's update (`0x0057b7f0`),
+the physics nodes' move (`0x0057b960`: PhysicsNodeManager `0x00a82514`
+slot `0x1c` per node), the ObjectManager's slot `0xa4`, the
+ResponsePhysicsManager's (`0x00a82518`) slot `0x20` and each response's
+slot `0x1c` (`0x0057ba00`). So the original steps whatever the control
+object is, a vehicle's tree included. Taking L's move again means the
+record's state is the server's before move L by this reading, while the
+rewrite's server (`HostedGame`, whose `lastMove` is the move its round last
+stepped) and client agree on "after L"; which the original server writes
+(`0x00580830`'s `+0x20e4`) wasn't settled.
+
+**Vehicles** (`VehiclePrediction`): the driver's moves step the client's
+own copy of the vehicle, `GameWorld::LoneVehicle` (`makeLoneVehicle`: built
+as `addBodies` builds a round's body, `buildBody`; `stepLoneVehicle`: the
+seat's inputs from the move, `GameWorld::driverInput` as `stepSoldier`
+makes them, then `stepBody`'s engines, wheels, drag, integration, legs,
+ground and water, the static objects' meshes (`collideMover`) and the
+response; not the other bodies, and no collision events, damage or contact
+effects). A record of the driver's seat (the root's SimpleObject in mode
+3: position, orientation, velocity, angular velocity) is put on the state
+remembered for its move, and the later moves are stepped again; the
+engines' and wheels' own state (rpm, gear, springs, wheel spin) isn't in
+the record and stays the client's.
+
+Measured on 127.0.0.1, a car (`NetHost_VehiclePrediction`: eu_fav on
+flat ground, the client driving 10 s at full throttle, steering both ways,
+then braking): 304 records (257 of them relative to a history slot), the
+prediction corrected by 0.9-1.2 cm on average and at most 11 cm, 143 m
+driven; the prediction ran up to 1.7 m ahead of the host's car (the moves
+in flight).
 
 Measured on 127.0.0.1: the in-process test (`NetHost_PredictionAndSession`:
 a client walking, turning, sprinting and jumping on a slope for eight
@@ -2583,6 +2833,149 @@ machine). The menu has no direct-IP join: `Multiplay.get/setConnectToIpHost`
 and `...Port` exist (the profile's `GSConnectToIpHost`/`Port`, `0x0046c030`
 -`0x0046c120`) but no page of the movie calls them; the original joins by
 address only from the command line (`+joinServer`).
+
+## Gameplay sound
+
+`src/Sound/Game` is the executable's side of sound (the engine itself,
+BF2142Audio.dll, is `src/Sound/SoundEngine`); `src/Main/GameAudio` feeds it
+from the round once a tick.
+
+**The sound manager** (vtable `0x009bf168`, `SoundManager`). Its update
+(`0x007f9d50`) takes the camera each frame: the listener's position,
+forward, up and velocity (engine slots 11, 13, 16; the engine keeps
+pointers to the manager's copies), whether it is inside a Titan (slot 18),
+the indoor level of the listener's spot (slot 20, `0x007fa100`), then the
+engine's update (slot 24). `0x007fa100` casts two rays up (from
+x +- 0.4, z +- 0.3) and one down, `sound-raylength` (15 m) long; with all
+three hitting, the room's height h (the floor's depth plus the ceilings'
+mean, at most 15) gives `sound-maxreverb` (0.5) x h / (0.98 h + 0.02 x 15),
+else 0; `0x007fa320` (slot 0x98) is "outdoors": that is 0. The rewrite casts
+them through `GameWorld::lineOfSight` (a bisection for the distance) when the
+listener has moved half a metre or every 15 frames.
+
+Muting (slot 0xbc, `0x007f9af0`) has five reasons; each update
+(`0x007f9f50`) moves every volume group's fade (`+0xe0 + group x 0x14`:
+user volume, current, target, rising step, falling step; steps 1/15 from
+the constructor `0x007f9040`) a step towards its target and sets the
+engine's group volume to user x current. Reason 0 is a one-update pulse
+(groups 0-3 at 0.25), 1 silences groups 0-3, 2 groups 0 and 2, 3 (a
+voice-over playing, asked each update by `0x004cdfb0` with the help voice's
+state) brings group 0 and group 4 to 0.125, 4 (a first-person weapon with
+`sound.muteOnFire` firing) multiplies group 0 by `sound-mute-level-1p`
+(0.4), with group 0's steps `sound-mute-fadein-1p` / `-fadeout-1p`
+(0.333 / 0.167) instead of the `-vo` ones (0.0667). Group 0 is the world's
+effects, 4 the first-person weapons (`0x005db760`), 1 music and interface,
+2 voice-over, 3 the other menu sounds.
+
+`Sound.addSound <name>` (`0x007fae20`) creates `S_Game_<name>` (left
+active for the script's lines that follow, Sound/GameSounds.con) and its
+sound; `Sound.addTrigger <template>` (`0x007f95a0`) gives the template to
+the engine as an ambient emitter (slot 28; at quality level 2, the lowest,
+only the first), which the levels' `AmbientObjects.con` do for their
+`S_AmbientDefault` and area sounds. When a level has loaded (the manager's
+event 5/3, `0x007fb6c0`) it runs `Sound/GameSounds.con` (`0x007fbb90`) and
+`Sound/AudioTweak.con` (the templates' `Sound.tweakTemplate` multipliers).
+
+**Object sounds.** In BF2142.exe each object's sound components own
+instances of their `S_<owner>_<event>` children (made by `0x0060e910`, see
+`SoundManager::registerTemplateType`) with the object as their transform.
+The rewrite's world doesn't carry those components, so `GameSounds` keeps
+the instances by owner: one-shots get a sound of their own that is
+released at once and plays out where it started (`Sound::detach`); loops
+(engines, projectiles) are kept while their owner refreshes them each tick,
+their volume and pitch envelopes read at the owner's value. Templates
+without files (most generated ones) are skipped. `BF2142_SOUND_LOG=1`
+prints each sound triggered.
+
+- Weapons: DefaultSoundComp (vtable `0x00971b48`) has eleven slots from
+  `+0x10` in `0x005db760`'s order: Fire1P, Fire1P_Outdoor, Fire3P,
+  BoltClick, TriggerClick, SwitchFireRate, Reload1P, Reload3P, Deploy1P,
+  Deploy3P, Zoom. "First person" is the owner seen from its own eyes
+  (`0x005c2d80` slot 0x1bc). Fire (`0x005dbdc0`): Fire1P_Outdoor when the
+  template has one and the listener is outdoors, else Fire1P, in first
+  person; Fire3P otherwise; with muteOnFire (on by default: the writer
+  `0x005dbc00` saves only a 0) reason 4 until the trigger is released
+  (`0x005db6c0`; the rewrite: two ticks without a round). With one sample,
+  an automatic burst plays it looped (`+0x43`) and maxSoundsPerBurst
+  (`+0x42`) limits a burst's sounds; with four, samples 1-3 are the start,
+  loop and end (the rewrite plays one per round). Reload (`0x005dbfe0`):
+  Reload1P / Reload3P (two- and three-part reloads by the reload events
+  4-7; the rewrite plays the first). Deploy (`0x005dc1d0`): Deploy1P /
+  Deploy3P, not within 9 ticks of the last. Zoom (`0x005dc250`) and
+  SwitchFireRate (`0x005dc290`) are first person only. `GameWorld` queues
+  a `WeaponSoundEvent` for each round (on foot and from a seat's gun), each
+  reload's start and each weapon taken in hand (`takeWeaponSounds`).
+  CountdownSoundComp adds ReloadTimeTeam<1-2>_<1-5> (`0x005dc760`), played
+  at `sound.addReloadTimeSound <n> <seconds>` before a missile silo is
+  loaded (the silo's team).
+- Engines: the engine audio (`0x007fe050`, vtable `0x009bf914`) plays an
+  Engine's Idle (stop type 2, its start-stop sample), Rpm1 and Rpm2 (made 3D,
+  looping, min distance 3 by `0x007fdd10`) while it runs (`0x007fe2c0`),
+  their envelopes read at |rpm| x 0.8333 (`0x007fe740`, the old-style
+  audio; `audio.newStyleAudio`'s throttle crossfade and sway `0x007fe430`
+  aren't done). The rewrite sounds the engines of vehicles someone is in.
+  Load and the parts' RotationRpm aren't played.
+- Projectiles: DefaultProjSoundComp's Looping (`0x005ea930`) follows a
+  projectile in flight.
+- The round's own sounds (footsteps, ragdoll impacts, `takeSounds`) and
+  the effect bundles' Start sounds (explosions, impacts, muzzle flashes)
+  are one-shots where they happen.
+- Not done: occlusion (the `sound-obstruction-*` tweaks; the engine's
+  `ISoundOcclusion` hook is there, the ray test isn't), the inside-Titan
+  listener flag, PlayerControlObjects' Ambient / AmbientDamaged loops, the
+  wind/speed sound of `0x007f9ea0`.
+
+**Voice messages.** The game logic's message manager (0x26b8 bytes,
+`0x004d99c0`, at game logic `+0x170`) is made by `0x004cdab0` once the
+level has set the teams' languages: team prefixes
+`sound/vo/<language>/` (with a GSLanguage other than English the team
+speaking it, else the English one, takes the player's language), the help
+prefix `sound/vo/<GSLanguage>/`. It runs `Sound/VoiceMessages.con`:
+`addMessage` (`0x004d8af0`, at most 300), `addRadioVoice <voice>
+<radio sample> <text> [<local sample> [<flags>]]` (`0x004d8b90`: at most 8
+voices; the sample goes to both teams' lists with their prefixes, and entry
+message x 8 | voice of the table at `+0xec` holds its first sample and
+count, so a voice's lines of a message must come together),
+`addRadioFilter` (`0x004d8de0`, no prefix), `addHelpMessage`
+(`0x004d8e40`), `addEmoteTrigger` (`0x004d83e0`), `setVolumes <vo>
+<filter>` (`0x004d7860`). Then `0x004d8f00` builds the sounds: per team a
+2D radio sound of every radio sample (group 2) and, except on a dedicated
+server, two 3D local ones (min distance 3, reverb 1), the filters' sound,
+and the help sound (group 2); the radio sounds' volume envelope (vtable
+`0x0092aad0`) is the VO or filter volume.
+
+A radio message the client hears (`0x0042e0c0`) has the sender's voice:
+"commander" (filter "commander") for the commander, else "squadleader" or
+"grunt"; with no sender (an automatic line) the commander's. A sender on
+foot who isn't the listener speaks it in person when he can
+(`0x004d8110`: a local sample, the listener's team unless flag 1, within
+15 m (`+0x26b4`) unless flag 2; one of two speaker slots, a silent one or
+the farther speaker's, `0x004d7a30`); else, from the listener's team only,
+it plays over the radio of the sender's team's voices (`0x004d7950`: one of
+the message's samples at random, `0x004d78d0`; the filter's static looped
+over its length). `GameAudio` plays what `GameWorld::takeRadioHeard` hands
+the local player. Help voices (`0x004d8280`) play unless group 2 is at
+0.05 or less; the HUD's help pop-ups that would ask for them aren't done
+(coverage gap 4).
+
+**Automatic radio messages.** The Radio template component (class
+`0xc4b6`, interface `0xc4b7`; 24 properties, `radio.*`) names messages for
+an object's events. The code that sends them wasn't found (the server's
+send for a message from no one is `0x004a5cf0`, vtable `0x00928d20` slot
+23), so `GameAudio::autoRadio` sends the team-change and destroyed ones
+where their names say, on TCServerTeamMessage (0xd): a change to a team
+its friendlyTeamChangeMessage to that team and enemyTeamChangeMessage to
+the other, a change to none its neutralTeamChangeMessage to the old owner;
+destruction its friendlyDestroyedMessage to its team and
+enemyDestroyedMessage to the other. spottedMessage, takeable, spawn,
+damage, repaired, use, fire and the indication distances aren't sent.
+
+**Cost** (`bf2142 ... --simulate N --sound` prints it; ASan build): 20 s on
+Camp_Gibraltar 32 without bots, 0.27 ms of sound work a tick; 40 s on
+Cerbere_Landing sp 16 with 8 bots (a walker's AA cannon firing, three
+vehicles' engines, up to 30 samples playing), 0.97 ms a tick, under 3% of
+the 33 ms tick. 1,822 files are loaded (10 MB of static buffers), the
+voice-over's included.
 
 ## Voice chat (BF2VoipServer.dll and Bf2VoipClient)
 
@@ -2993,8 +3386,8 @@ the render object), the bar's place. Not done: ranks and veteran icons
 revive: events 0x33-0x37 within maxCallDistance 150), orders and requests
 (TTOrder / TTRequest), the Titans' and other objects' `3dMapIcon` frames,
 the fog factor on enemies, the spectator's rules. The HUD's object marker
-nodes (`createObjectMarkerNode`) are the AA and gunship lock-on markers,
-kept but not drawn.
+nodes (`createObjectMarkerNode`) are the AA and gunship lock-on markers;
+see "HUD nodes: transform lists, effects, markers and the map menus".
 
 ### Map and spawn screen
 
@@ -3631,9 +4024,17 @@ the top.
   shows the spotted rose (`SpottedInterfaceShow`, whose buttons say
   `game.radioMessage TCTeam <kind>_spotted`). `sendSpottedMessage <bool>
   <type>` (`0x17c`, `0x007c8160`) spots the HUD's crosshair object
-  (`+0x1f0`, through the game's slot `0xd4`) and with 1 says it on the
-  chat: the HUD's crosshair object and the spotting list aren't
-  rewritten, so it only closes the rose.
+  (`+0x1f0`, through the game's slot `0xd4`, which AIDLL's IAIGame slot `0x68`,
+  `0x00895ab0`, calls too, with type 0x1b)
+  and with 1 says it on the chat. The crosshair object is filled as a rose
+  opens (`0x0075be30`): the HUD's ray (vt+0x18c, out to the local player's
+  slot `0x98(1)`) meets an object; the player it belongs to, when of the
+  other team, gives it, or that player's vehicle where the object's
+  template says so (`+0x64` slot `0x78`'s `+0xb8`); its network id goes to
+  `+0x1f0`, the point to `+0x1f4`. `GameWorld::crosshairTarget` /
+  `spotCrosshair` (the soldiers as 0.6 m spheres, the vehicles 2.5 m, along
+  the view, nothing in between); the HUD binding (`src/Main`) still only
+  closes the rose.
 - **`game.radioMessage <TargetChannel> <voice>`** (`0x00423e61` → the
   client's slot `0x50`, `0x004b2b60`: the voice's index in the game
   logic's radio table, the spam check, event 0x14 to the server, a local
@@ -3733,7 +4134,183 @@ while they have the keys. `src/Main/HudMenusChat`:
   the field of view doesn't change. `Commander.detailedView` keeps the
   old position and leaving the commander screen sends it back. The
   rewrite has no overhead camera object: the commander screen's map
-  centres on the asset and a joined game sends the event.
+  centres on the asset and a joined game sends the event. (The overhead
+  view itself is not a HUD node: the server's camera object at the asset,
+  `0x005f8410`, is drawn by the renderer into the map's area, the
+  `MinimapZoomDisplay 2` state; that needs a top-down view pass in
+  `src/Render`, which the rewrite doesn't have.)
+
+### HUD nodes: transform lists, effects, markers and the map menus
+
+The rest of the `hudBuilder` methods the shipped scripts call
+(`src/Hud/Hud.cpp`; the builder's methods are `0x007ae270`..`0x007b20c0`,
+each handing its arguments to a slot of the node class it casts the
+active node to):
+
+- **Transform lists** (`dice::meme::Bf2TransformListNode`, vtable
+  `0x009bbf88`). `createTransformListNode <parent> <name> x y w h
+  <spacing>` (`0x007b2b50`; the last argument is the spacing, `+0x24`).
+  `addTransformListNode <node>` (`0x007aed80` → slot `0xd4`,
+  `0x007ebde0`) appends a node, `setTranformListNodePosVariable <axis>
+  <variable>` (`0x007aedf0` → slot `0xd0`, `0x007eb9d0`) binds its
+  position to an int HUD variable, `setTranformListNodeOffset x y` (slot
+  `0xcc`, `0x007ebd60`) adds an offset. Its render (`0x007eba70`) puts
+  the list at the variables' values (else where it was made) plus the
+  offset, keeps the block (as tall as its nodes' heights plus the spacing
+  each, as wide as the widest) inside the screen, then sets each node's
+  position (the node's slot `0xcc`, `0x007da5b0` for a transform node)
+  one under the other; the node's own `setNodeOffset` (`+0x2c`) goes on
+  top. The exe adds the list's offset to its position every frame, which
+  only stays put with position variables (every shipped list has them);
+  the rewrite adds it once. The bounds use the render's parent rectangle
+  about the screen's centre; the rewrite uses the 800 x 600 screen. The
+  layout runs for every list before each frame is drawn.
+- **Position variables and offsets.** A transform node's render
+  (`0x007da720`) is the variable's value plus `setNodeOffset`: the map
+  menus' markers (`crosshair_comrose.tga`) sit -20 -20 from
+  `OrderMenuPosX/Y`.
+- **Move, blend and blink effects.** `addNodeMoveShowEffect <angle>
+  <distance>` (`0x007b1f40`) puts a `Bf2MoveEffect` (`0x007e4230`) above
+  the node: while the node fades in or out (its in and out times) it and
+  its children sit `distance` pixels along the angle (radians, 0 right,
+  pi/2 down) times what is left of the fade. `addNodeBlendEffect <src>
+  <dest>` (`0x007b20c0`, a `<node>BlendEffect` render-state node) gives
+  the quads below it those Direct3D 9 blend factors (the vehicle HUDs'
+  `7 2`: `D3DBLEND_DESTALPHA`, `D3DBLEND_ONE`); `HudQuad::blend` carries
+  them to the renderer, which still draws every HUD quad with its usual
+  source-alpha blend. `setNodeTimesBlink <n> <mode>` and
+  `setNodeIntervalBlink <s>` (`0x007b1c00`, `0x007b1da0`: the blink
+  effect's slots `0xdc`, `0xd8`): once shown, the node is off every other
+  interval for its first n blinks.
+- **Commands.** `setNodeShowConCmd <command> <event>` (`0x007b0e00`, an
+  `executeConsoleCommand` effect): event 1 when the node starts being
+  drawn, 0 when it stops (the pods' power-up sounds).
+  `setButtonNodeAltConCmd` (`0x007b00b0`, slot `0x100`): the right
+  button's commands. `setButtonNodeMouseArea x y w h` (slot `0x104`): the
+  button's clickable rectangle from its corner. `setMouseOverNodeConCmd
+  <command> 3` (`0x007b02a0`, slot `0xf8`): the release over a mouse-over
+  node (the kit screen's drop targets). `setButtonNodeDebug` is kept.
+- **Pictures, text and bars.** `setPictureNodeBorder <l> <t> <r> <b>` and
+  `setPictureNodeBorderColor` (`0x007af640`, `0x007af6d0`) draw lines of
+  those widths round the picture; `setPictureNodeCenterPoint` (slot
+  `0xe0`, the rotation's pivot) is kept but the quads still turn about
+  their centres. `setTextNodeOutLine <font>` and
+  `setTextNodeOutLineOffset` (`0x007afa40`, `0x007afac0`: the text's
+  font object's slots `0x5c`, `0x60`) draw the outline font beneath;
+  `setTruncate` (slot `0x68`) cuts the text at the node's width.
+  `setBarNodeBorder <top> <bottom> <left> <right>` (`0x007b0540`, slot
+  `0x104`): the fill takes the inner rectangle (the conquest point bars
+  share one 152 px node, `0 0 17 76` filling from the right and `0 0 77
+  15` from the left); `setBarNodeIncreaseShow`, `setBarNodeSnapDir`,
+  `setBarNodeRound` are kept. `setNodeSize` (`0x007b0a10`, slot `0xc8`).
+  Occupied nodes keep their seat, `setOccupiedNodeData` and
+  `setOccupiedNodePosVariable` (`0x007afce0`, `0x007afc40`).
+- **Object markers** (`dice::meme::Bf2ObjectMarkerNode`, made by
+  `0x007e5f30`, vtable `0x009baf30`; the builder's `0x007af210`..
+  `0x007af440` → slots `0xc8`..`0xe8`): textures and sizes per state
+  (`setObjectMarkerNodeTexture` / `TextureSize <n>`, up to 4), the most
+  targets (`setObjectMarkerNodeObjects`, `+8`), the lock-on type
+  (`setObjectMarkerNodeLockOnType`, `+0x54`, 2 by default: TTHeat; the
+  gunships 1 TTLaser, the mortar HUDs 5 TTBeacon, -1 the weapon's own
+  target's type), the weapon (`setObjectMarkerNodeWeapon`, `+0x58`), the
+  range cut (`setObjectMarkerNodeRC`, `+0x61`), the labels
+  (`setObjectMarkerNodeLockText <on> <prefix>`, `0x007e4bd0`: the HUD
+  variables `<prefix><n>String` and `<prefix><n>Show`;
+  `setObjectMarkerNodeLockTextOffset`, `+0x40`, -3 0 by default;
+  `addObjectMarkerNodeLockTextNode`, `0x007e5cf0`). Its update
+  (`0x007e6880`): the targets (`0x007e6520`: the objects of the lock-on
+  type in the weapon's lock cone and reach, not the player's team; the
+  weapon's lock-on component `0x94c0` gives its target, `0x144`, and
+  whether locked, `0x148`), their labels (`0x007e56e0`: the distance
+  rounded up, `Show` 1, the rest of the 20 cleared), the draw
+  (`0x007e5a10`: each centred on its point with its state's texture, the
+  n-th label beside it at the point plus half the marker plus the offset,
+  rounded up). The game hands the targets in (`HudManager::
+  setMarkerSource`): bf2142 gives the enemy objects that carry a target
+  object of the type (`HeatObject` TTHeat on the aircraft,
+  `LaserTarget_vehicle`, `Beacon`) in front of the camera, within the
+  node's rectangle and 600 m, nearest first. They are all candidates
+  (state 0): the game has no lock-on weapons yet (the `0x94c0`
+  component, locking 1 and locked 2), so the locking and locked boxes
+  don't show.
+- **The text node pair.** `createTextNode <name>` makes a transform node
+  and a text node `<name>TextNode` below it (`0x007b2b50`'s pattern);
+  `setActiveObject <parent> <name>TextNode` finds the one node the
+  rewrite makes.
+- **The map's right-click menus.** The map node's right click
+  (`Bf2MenuMapNode`, `0x00788c00` for event 0x15) sets `OrderMenuPosX/Y`
+  to the click and `MinimapRMBMenuState` to what is under it
+  (`0x00782d90`: 2 and 3 the player's and the enemy's Titan, 4 / 5 / 6 a
+  control point of his team / the enemy's / neutral, 0 one of his
+  commander's assets, 7 nothing), and the HUD manager's menu state for
+  his role (`0x0079ab90`: 0x16 `CommanderMenuShow`, 0x15
+  `SquadLeaderMenuShow`, 0x14 `MapMenuShow`). The menus' rows are
+  transform lists at `OrderMenuPosX/Y`; an order row (`Commander.
+  sendOrder 6 1`) goes to the clicked point (`+0xdbc`) at once and
+  closes the menu, as does any other click. bf2142 checks what is under
+  the click within 16 pixels of the map. `--hud-click x/y[/right]` clicks
+  the HUD before a screenshot.
+- **The HUD manager's settings** (`HudManager.*`, its slots from
+  `0x0075e732`): `setMouseTexture{Empty,Full,Artillery,UAV,Supply,
+  MoveTitan,OrbitalStrike}` and `setPointerSize` (slot `0x1b4`) give the
+  pointer (`HudManager::pointerQuad`; the commander screen draws the armed
+  tool's over the map, else the map's), `setCommSize/Pos/MousePos`,
+  `setSpottedMenuSize/Pos/MousePos`, the sensitivities and the rest are
+  kept by name. **Minimap** (`0x0076f773`..): `setZoom` steps the zoom
+  index 0, 1, 2, 0 (`0x007800d0` → `0x0077e850`), `setPaintKit` /
+  `setPaintVehicle` toggle a filter bit (`0x0077e670`, `0x0077e6b0`),
+  `setPaintAll*` sets all or clears them when all were set
+  (`0x0077fff0`, `0x00780040`); the filters are kept (nothing paints
+  kits on the map yet), as are the blend and filter colour settings.
+
+### Warnings and help pop-ups
+
+(`src/Main/HudAlerts.*`.)
+
+- **Missile and mine warnings.** The WarningHud template component
+  (class id `0xc4f6`; `warningHud.setWarningType`, `setWarningIcon`,
+  `setFirstWarningSound`, `setSecondWarningSound <TargetType> <value>`
+  from `0x0055a940`; 8 target types of 0x1c bytes, written back by
+  `0x00639a40`) says what a vehicle warns of. TargetType (`0x004daf00`):
+  TTNone 0, TTLaser 1, TTHeat 2, TTMagnet 3, TTUnique 4, TTBeacon 5,
+  TTDecoy 6, TTPod 7. The HUD's event 0x2f (`0x007a2100`) is a guided
+  projectile's lock on the player's vehicle: when the vehicle warns of its
+  type (TTUnique also when it warns of TTLaser, `+0x1c1`), the
+  component's warning sound starts (slot `0x3c`: 1 the first, 2 the
+  second), `WarningIconShow` comes on with the type's icon in
+  `WarningIconPath` (`HudElementsActionIcons.con`), and the projectile
+  joins a set (`+0x2c0`); when the last one lets go (id -1) the sound
+  stops and the icon goes. bf2142 makes the events each frame from the
+  projectiles locked on the player's vehicle (`GameWorld::projectiles`,
+  `lockedOn`): the first warning while a seeker has locked but is still in
+  its tracking delay, the second once it chases; only the motion mines
+  (TTMagnet) lock on vehicles in the game so far. The tones go to the
+  sound layer by name (`HUD_MotionMine_Warning`, `HUD_Laser_Track_Warning`).
+  What sends event 0x2f in the exe (and so the exact first/second split)
+  is not traced.
+- **Help pop-ups.** The HelpHud component (class id `0xc4fa`, 15
+  properties from `0x0055b355`: `helpStringKey`/`helpSoundKey`, their
+  `alt`, `lowArmor` and `lowAmmo` pairs, `closeToHelp{String,Sound}Key
+  {Neutral,Friendly,Enemy}`, `closeToDistance`): the help key shows when
+  the player takes the vehicle or the weapon that has one, the low-armour
+  key when that vehicle's hit points fall to its `armor.criticalDamage`,
+  the close-to key for the object's side when the player comes within its
+  distance. Showing (the HUD manager's slot `0x94`, `0x0074f2b0`) sets
+  `IngameHelpString` (localised) and `IngameHelpShow`, and a timer
+  (`+0x238`) the HUD manager's update counts down (`0x007539c0`) before
+  hiding it; the rewrite gives it 6 s (the help manager's own timers,
+  around `0x00645d40`, are not read). The matching sound key goes to the
+  sound layer's `VoiceMessages::playHelp` (`gameLogic.messages.
+  addHelpMessage` keeps the Help_VO files there).
+  `GeneralSettings.setHelpPopups 0` turns them off; each key shows once a
+  round. The help manager's own tutorial messages (`0x00645d40`'s 75
+  HUD_HELP keys: controls, squads, the commander's tools) are not done.
+- **Supply sounds.** AbilityHud (`0xc4f2`, `abilityHud.healingSound`,
+  `repairingSound`, `ammoSound` from `0x0055a41f`):
+  the kits carry them (`S_Heal`, `S_Repair`, `S_Resupply`); the player's
+  kit plays its sound while a hub, a repair or a supply crate treats him
+  or his vehicle (`GameWorld::received`: the last treatment
+  within half a second; when the exe starts and stops it is not traced).
 
 ## Game scripts
 
@@ -5082,7 +5659,12 @@ The urgencies:
   (0x100dc730).
 - **Aim:** the PID controller of the ControlInfo plugin (0x100e5820:
   proportional −7, derivative −0.01, angle speed 0.4 on the lead point;
-  yaw limited to 3 × skill + 1). Its output is PIMouseLookX/Y, which the
+  yaw limited to 3 × skill + 1). The lead point is the ballistic lead
+  (the aim at an object, 0x100d9a60 → 0x100fa6f0, precision 0.5: see
+  Helicopters, "The ballistic lead"): the launch direction for the
+  weapon's round (speed, drag, gravity; indirect weapons the high arc)
+  against the target's velocity, with the shooter's own; the explosives'
+  lob keeps its own arc (0x100fa440). Its output is PIMouseLookX/Y, which the
   soldier (BF2142.exe 0x0058a6d0) turns into 5° per unit a call
   (`*0x00a68e4c`, `*0x00a68f24`, 5.0 each; no time step, so 150° a
   second at 30 calls), scaled down by the field of view when zoomed
@@ -5401,23 +5983,79 @@ Avoid.
   player, 0x004d9d50 — its team or none on either side, binding its
   controlled object's vehicleCategory — inside a plain one and in no
   cut-out; with none, the heightmap's bounds), else HeliMoveToObject at
-  the target, margin 25 (`GameWorld::insideCombatArea`). Not rewritten:
-  HeliAimAt's lead (0x100dcf10: 0x100fa060 with the target's offset from
-  the gun and its Mobile velocity, then 0x100fa6f0, 1572 bytes iterating
-  the launch angle in round(8 p + 2) steps with the round's drag,
-  0x100fa100, and gravity, keeping the direction, impact point and time
-  at +0xb8, +0xc4, +0x110) and the trigger condition built on it,
-  0x100dcab0 (evaluated by 0x100dcb00: the gun's forward within
-  atan(0.0125 d) of that direction and the impact point within d of the
-  target's position predicted for that time, 0x100fbad0; d and a
-  closest-approach flag from the weapon adaptor's slots 0x94 and 0x104,
-  not traced): the aim is the target's position and the trigger the aim
-  lined up. BBFire3d's urgency (behaviour vtable 0x10116d40 slot 9,
-  0x1007e1b0, 2309 bytes) and BBChangeLandingCraft's (vtable 0x10116970,
-  0x1006f460, 2088 bytes: the transport's seats weighed by 0x100d3e70 with
-  the landing checks 0x1006f3c0 and 0x100bf800 at 15/50 m and 10/40 m,
-  and its bail_out radio) aren't rewritten: the ground Fire's and
-  BBChange's stand in for them.
+  the target, margin 25 (`GameWorld::insideCombatArea`). HeliAimAt's aim
+  is the ballistic lead (below) from the gun along the hull, the hull's
+  motion inherited (an indirect weapon: precision 0.75, none inherited,
+  the direction laid flat), else straight at the target (the aim's slot
+  8); the trigger's condition is the on-target test (0x1007ec50 builds it
+  with the AI weapon's allowedDeviation and its fire mode).
+- **BBFire3d** (behaviour vtable 0x10116d40 slot 9, 0x1007e1b0; the score
+  0x1007d6c0; `BotManager::fire3dUrgency`): over the known targets, each
+  `facing × reach × 0.5 × temperature × motion × freshness × strength ×
+  recency` (the factors in Bots.cpp: the vehicle's best weapon strength,
+  1.5 − 0.5 clamp(t/30) after the target hurt the bot, 1/(0.05 t + 1) once
+  lost, the target's motion against the bot's (none for an air target
+  over 5 m up without anti-air guns), 20 a vehicle and 1 a soldier × 0.75
+  outside the order's area, 1 − d/(3 maxRange), or for an air target
+  1 − d/(1.5 maxRange) with the temperature doubled by anti-air guns,
+  max(0.5, 1 + facing)); the target kept unless another scores 1.2 times
+  more; urgency fuzzy(2 best) × weight. Left out: the 20 s a failed
+  target is passed over (+0x30, whose writer isn't traced), the unit-count
+  scaling (0x100d2b30) and the Unit's capability flags (0x100cf5c0/a0,
+  bot vt+0x180).
+- **BBChangeLandingCraft** (vtable 0x10116970, 0x1006f460; the transport
+  helicopters' pilots and their ParatrooperFixed passengers;
+  `BotManager::landingCraftUrgency`): the vehicle's seats weighed as
+  BBChange weighs them (0x100d3e70) × 1 for the bot's own when it drives or
+  the driver's seat is taken (else 0.25), × 1.5 for a passenger looking at
+  an ITAir root's driver's seat, × 0.25 for the others; a free driver's
+  seat of a Mobile root + 100. Near the order (the order's spot within
+  15 m, 50 m in an enemy area: 0x100bf800 with 225/2500) a driven
+  transport says bail_out (0x100a7860: type 0, the AI's channel 7) and one
+  with nobody at the controls (0x1006f3c0) lets its passengers out within
+  10 m (40 m), urgency 4. Otherwise a better seat: fuzzy(best / current /
+  2) × 4, × 6 within 15 s of taking the seat, 0 for a seat another bot
+  reserved (0x1006f320). Not followed: the ground transports' way out (no
+  shipped ground vehicle runs it).
+- **The ballistic lead** (`src/AI/Ballistics`, `ai::LeadSolver`; the
+  solver record 0x100f9fd0, set up by 0x100fa060, solved by 0x100fa6f0):
+  every aim that leads (the turret and soldier aim at an object 0x100d9a60,
+  HeliAimAt's 0x100dcf10, the aim at a position 0x100dd6a0) solves for the
+  launch angle in the vertical plane through where the target will be.
+  The round: the muzzle speed (the AI weapon template's +0x28, the
+  firearm's velocity), the drag (+0x14: the projectile's drag over its
+  mass × π/100 for a Point or RotationalPoint, 0.3 for a Mesh with any)
+  and the gravity (IAIPhysics slot 4 × the projectile's gravityModifier,
+  +0x2c), all filled by 0x00892be0 through 0x0088a8c0; indirect (+0,
+  weaponTemplate.indirect) asks for the high arc. The first guess of the
+  flight time is the distance over the closing speed (the muzzle speed plus
+  the shooter's motion less the target's along the line; under 1 m/s no
+  solution). The search starts from the last solve's angle (the record
+  keeps it, 666 at first: straight at the target), the high arc from
+  3π/8 and pulled halfway to 1.508 rad each solve with the step reversed;
+  each of round(8 p + 2) iterations (p 0.5 at the aims: 6) computes the
+  flight time to the target's distance (with drag, 0x100fa100, in the AI
+  clock's 1/30 s steps, quadratic over 200 m/s), the round's height there
+  (0x100fa200) and the target's new place at that time, and moves the
+  angle by its step towards the target; once the target is bracketed the
+  step halves each time. A search that never brackets doubles the step
+  (up to 0.017 rad upwards) for the next solve, and with a step of a
+  degree or more succeeds without a new direction (0x1008e940 then aims
+  along its zeroed local; the rewrite keeps the straight line). Over 60 s
+  of flight it starts again straight at the first guess; over 100 s, an
+  angle past ±2.98 rad, a speed along the ground under 0.1 m/s or a
+  non-finite point: no solution. The record's +0x68..+0x6a, which would
+  pin the time or drop the point, are never set.
+- **The on-target test** (0x100dcab0 / 0x100dcb00, vtable 0x1011b048;
+  `ai::OnTargetTest`): with a solution, the gun's forward within
+  atan(0.0125 d) of its direction, and a round fired now along the gun
+  (0x100fbad0 → 0x100fa680) within d of the solution's impact point at its
+  flight time, d the AI weapon's allowedDeviation (slot 0x94 → 0x008926f0,
+  the template's +0x44, 0.5 by default; the plain fire statement 0x1007fec0
+  passes its own). A weapon that isn't automatic (slot 0x104 → 0x00892650:
+  the fire mode isn't 2) waits for the closest approach: while the miss
+  shrinks it holds; the test after it grows holds when the best was
+  within d.
 - **Measured** (flat ground, `Vehicles_BotPilotsFlyToAPointAndHover`):
   the gunships fly 156 m to a point 25 m up and stop on it within 1 m; the
   transports reach it (1.5 m) from 22 m/s and wander round it within 35 m
@@ -5524,11 +6162,22 @@ and walks there.
 - **Explosives and the weapon choice:** the rays bisect
   `GameWorld::lineOfSight`. `+0x248` is set by the fire plan (0x100795a0)
   when it adds a move to the order's spot (0x100d11c0; 0x100775f0 tests
-  the spot set): bot vt+0x254 (slot 149, 0x1009b370) with 1, from two
-  places in the 14.7 KB plan builder 0x100795a0, on conditions of its
-  locals (none, with no order and the target out of sight); cleared by
-  the statement 0x100d4e20 and the bot's resets (0x10097..). That builder
-  isn't rewritten, so `+0x248` stays clear.
+  the spot set): bot vt+0x254 (slot 149, 0x1009b370) with 1, from the
+  builder's two MoveToFinding sites; cleared by the statement 0x100d4e20
+  and the bot's resets (0x10097..). The builder decides it for a new
+  target (the pattern's per-bot byte, set by its slot 7 0x10077650 when
+  the target changes): the spot (the order's area position for the bot's
+  map, 0x100c1150) set and reachable (the follower's slots 4 and 8), and
+  either the target can't be approached (no Mobile part of its own or its
+  root's, and the pathfinder's slot 0x94 refuses the way 30 m from it
+  towards the bot) or the bot stands more than 30 m (50 m when neither it
+  nor the target is ITSoldier) from the spot with the target on the far
+  side (dot under 0); never with a close-combat weapon (type 7).
+  `BotManager::fireKeepsToOrder`; the plan then walks to the spot while
+  it fights. Stand-ins: reachability and the approach are "on the mesh";
+  the air-target clause (target ITAir and the plan weapon's slot 0x28 at
+  2) isn't traced. The rest of the 14.7 KB builder is the rewrite's
+  BotManager::fire.
   Stand-ins: the target's Mobile slot 0x78 (0x008a1960: a soldier's
   interface 0xc4c5 slot 0x108, not traced) is its speed; a human's
   attention on the bot (the sensing agent's stamp 0x100eb7f0, whose
@@ -5544,11 +6193,14 @@ and walks there.
   (0x10078570, picked when +0x6c isn't 0). `+0x209` falling with the
   target condition 0x100dc730 is taken as the aim no longer lobbing.
 - **Change:** the infantry-map reach test for vehicles (the Mobile's
-  per-map points +8/+0x1c/+0x30 aren't kept: every vehicle counts), the
-  room test for ITAir vehicles that aren't ITHelicopter (0x1006c3e0) and
-  the bail_out radio when the bot takes the way out (0x100a5990, its
-  health at or under the IAIGame slot 0x68 value + 0.1; that slot isn't
-  traced). The get_in answers are rewritten (see Radio).
+  per-map points +8/+0x1c/+0x30 aren't kept: every vehicle counts) and the
+  room test for ITAir vehicles that aren't ITHelicopter (0x1006c3e0). The
+  get_in answers are rewritten (see Radio), and the bail_out radio on
+  taking the way out: 0x100a5990(type 0, the AI's channel 7) when the
+  bot's object's health is at or under the slot 0x68 value + 0.1. That
+  slot is the bot manager's (`DAT_10139500`, constructor 0x100c9c50,
+  vtable 0x10119738 slot 0x68 = 0x100c5cd0: its +0xdc, 0.3), not
+  IAIGame's: the same floor the seat values refuse vehicles under, so 0.4.
 - **Soldier radius:** the object's size through the AI adaptor (vt+0xdc
   → `0x008a3d40` → the object's vt+0x90, for the soldier `0x006f6b90`):
   its collision mesh's radius (`+0x4c`, interface 0xcaa32, the instance

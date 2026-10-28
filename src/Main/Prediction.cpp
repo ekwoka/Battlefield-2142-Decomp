@@ -174,4 +174,169 @@ void SoldierPrediction::reconcile(int32_t lastMove, const net::NetworkableState&
 	}
 }
 
+physics::Mat3 rotationFromQuaternion(const net::Quat& q)
+{
+	// The column matrix R of the quaternion; the rows of physics' matrix
+	// are R's columns (it acts on row vectors).
+	const float x = q.x, y = q.y, z = q.z, w = q.w;
+	const float r[3][3] = {
+		{1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)},
+		{2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)},
+		{2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)},
+	};
+	physics::Mat3 m;
+	for (int j = 0; j < 3; ++j) {
+		m.rows[static_cast<size_t>(j)] = {r[0][j], r[1][j], r[2][j]};
+	}
+	return m;
+}
+
+bool VehiclePrediction::start(const world::ObjectTemplate* vehicle, int32_t lastMove, const net::NetworkableState& root,
+	const net::Vec3f& position)
+{
+	m_vehicle.reset();
+	m_template = vehicle;
+	if (!vehicle) {
+		return false;
+	}
+	const physics::Mat3 rotation = root.hasOrientation ? rotationFromQuaternion(root.orientation) : physics::Mat3 {};
+	m_vehicle = m_round.makeLoneVehicle(*vehicle, {position.x, position.y, position.z}, rotation);
+	if (!m_vehicle) {
+		return false;
+	}
+	const Stats before = m_stats;
+	reconcile(lastMove, root, position);
+	const uint32_t replayed = m_stats.replayed;
+	m_stats = before;
+	m_stats.replayed = replayed;
+	++m_stats.starts;
+	return true;
+}
+
+void VehiclePrediction::stop()
+{
+	m_vehicle.reset();
+	m_template = nullptr;
+}
+
+net::Vec3f VehiclePrediction::position() const
+{
+	if (!m_vehicle) {
+		return {};
+	}
+	const physics::Vec3& p = m_vehicle->body().position;
+	return {p.x, p.y, p.z};
+}
+
+net::Vec3f VehiclePrediction::velocity() const
+{
+	if (!m_vehicle) {
+		return {};
+	}
+	const physics::Vec3& v = m_vehicle->body().velocity;
+	return {v.x, v.y, v.z};
+}
+
+physics::Mat3 VehiclePrediction::rotation() const { return m_vehicle ? m_vehicle->body().rotation : physics::Mat3 {}; }
+
+void VehiclePrediction::apply(const net::NetworkableState& s, const net::Vec3f& position)
+{
+	// What 0x005ffec0 sets on the root's physics node in mode 3: the
+	// position (the record's when the group carries none), the
+	// orientation, the velocity and the angular velocity.
+	physics::RigidBody& body = m_vehicle->body();
+	const net::Vec3f at = s.hasPosition ? s.position : position;
+	body.position = {at.x, at.y, at.z};
+	if (s.hasOrientation) {
+		body.rotation = rotationFromQuaternion(s.orientation);
+	}
+	if (s.hasVelocity) {
+		body.velocity = {s.velocity.x, s.velocity.y, s.velocity.z};
+	}
+	if (s.hasAngularVelocity) {
+		body.angularVelocity = {s.angularVelocity.x, s.angularVelocity.y, s.angularVelocity.z};
+	}
+}
+
+void VehiclePrediction::tick(const net::PlayerMove& move)
+{
+	// The server's driver: the move as the soldier's input
+	// (net::soldierInputFromMove), the seat's inputs from it
+	// (GameWorld::driverInput: no EMP or damage scaling on the client),
+	// one tick of the vehicle.
+	const game::SoldierInput input = net::soldierInputFromMove(move, m_input);
+	m_round.stepLoneVehicle(*m_vehicle, game::GameWorld::driverInput(input, 1, m_lastLookPitch), kTick);
+	m_lastLookPitch = input.aimPitch;
+}
+
+void VehiclePrediction::step(const net::PlayerMove& move)
+{
+	if (m_vehicle) {
+		tick(move);
+		++m_stats.steps;
+	} else {
+		const game::SoldierInput input = net::soldierInputFromMove(move, m_input);
+		m_lastLookPitch = input.aimPitch;
+	}
+	Snapshot snapshot;
+	snapshot.move = move.index;
+	snapshot.input = move;
+	snapshot.inputState = m_input;
+	snapshot.lastLookPitch = m_lastLookPitch;
+	snapshot.stepped = m_vehicle != nullptr;
+	if (m_vehicle) {
+		snapshot.state = m_vehicle->save();
+	}
+	m_history.push_back(std::move(snapshot));
+	while (m_history.size() > kHistory) {
+		m_history.pop_front();
+	}
+}
+
+void VehiclePrediction::reconcile(int32_t lastMove, const net::NetworkableState& root, const net::Vec3f& position)
+{
+	if (!m_vehicle) {
+		return;
+	}
+	++m_stats.records;
+	const net::Vec3f before = this->position();
+	while (!m_history.empty() && m_history.front().move < lastMove) {
+		m_history.pop_front();
+	}
+	const bool known = !m_history.empty() && m_history.front().move == lastMove;
+	if (known && m_history.front().stepped) {
+		const Snapshot& at = m_history.front();
+		m_vehicle->restore(at.state);
+		m_input = at.inputState;
+		m_lastLookPitch = at.lastLookPitch;
+	} else if (!known) {
+		++m_stats.unknownMoves;
+	}
+	apply(root, position);
+	if (known) {
+		Snapshot& at = m_history.front();
+		at.state = m_vehicle->save();
+		at.inputState = m_input;
+		at.lastLookPitch = m_lastLookPitch;
+		at.stepped = true;
+	}
+	for (size_t i = known ? 1 : 0; i < m_history.size(); ++i) {
+		Snapshot& next = m_history[i];
+		tick(next.input);
+		next.inputState = m_input;
+		next.lastLookPitch = m_lastLookPitch;
+		next.state = m_vehicle->save();
+		next.stepped = true;
+		++m_stats.replayed;
+	}
+	const net::Vec3f after = this->position();
+	const float dx = after.x - before.x, dy = after.y - before.y, dz = after.z - before.z;
+	m_stats.lastCorrection = std::sqrt(dx * dx + dy * dy + dz * dz);
+	m_stats.maxCorrection = std::max(m_stats.maxCorrection, m_stats.lastCorrection);
+	m_stats.sumCorrection += m_stats.lastCorrection;
+	if (m_stats.lastCorrection > 0.01f) {
+		++m_stats.corrections;
+	}
+}
+
 } // namespace dice::hfe::host

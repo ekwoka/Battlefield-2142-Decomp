@@ -75,6 +75,10 @@ struct ViewerOptions {
 	// and left clicks go to onClick in the HUD's 800 x 600 screen.
 	std::function<bool()> wantsPointer;
 	std::function<void(float x, float y)> onClick;
+	// The right button's clicks and the pointer's moves (the HUD's
+	// right-click map menus, button highlights), same screen.
+	std::function<void(float x, float y)> onRightClick;
+	std::function<void(float x, float y)> onPointerMove;
 
 	// A Flash menu: all input goes to it (positions as fractions of the
 	// window), Esc included; it asks to quit through wantsQuit.

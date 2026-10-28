@@ -357,25 +357,33 @@ namespace {
 
 // 0x005ffec0. Fields of components the object lacks are not sent (the
 // writer, 0x005ff5d0, skips them), so the hints say which are there.
-bool readSimpleObject(BitReader& in, const NetworkableHints& h, const Vec3f& reference, NetworkableState& s)
+bool readSimpleObject(BitReader& in, const NetworkableHints& h, const Vec3f& reference, NetworkableState& s, unsigned mode,
+	const MotionHistory* history)
 {
 	s.mask = in.read(25);
 	s.flag = in.read(1) == 1;
 	const uint32_t m = s.mask;
+	// 0x005ffec0: against a history slot's copy (a relative control record,
+	// mode 3) the position, velocity and angular velocity are deltas from
+	// it; otherwise from the stream's reference and zero. In mode 3 the
+	// angular velocity is a wide delta in 1 mm steps, in mode 2 a delta3 in
+	// centimetres.
 	if (m & 2) {
 		s.hasPosition = true;
-		s.position = readDelta(in, DeltaTable::Wide, 0.0005f, reference);
+		s.position = readDelta(in, DeltaTable::Wide, 0.0005f, history ? history->position : reference);
 	}
 	// A physics node that moves (vtable 0x164), unless the flag is set.
 	const bool physics = h.mobile && !s.flag;
 	if (physics) {
 		if (m & 4) {
 			s.hasVelocity = true;
-			s.velocity = readDelta(in, DeltaTable::Wide, 0.001f, kZero);
+			s.velocity = readDelta(in, DeltaTable::Wide, 0.001f, history ? history->velocity : kZero);
 		}
 		if (m & 8) {
 			s.hasAngularVelocity = true;
-			s.angularVelocity = readDelta3(in, 0.01f, kZero);
+			s.angularVelocity = history ? readDelta(in, DeltaTable::Wide, 0.001f, history->angularVelocity)
+				: mode == 3        ? readDelta(in, DeltaTable::Wide, 0.001f, kZero)
+								   : readDelta3(in, 0.01f, kZero);
 		}
 	}
 	if (m & 1) {
@@ -1082,12 +1090,12 @@ bool readPlayer(BitReader& in, NetworkableState& s)
 } // namespace
 
 bool decodeNetworkable(BitReader& in, const NetworkableHints& hints, const Vec3f& reference, NetworkableState& out,
-	unsigned mode)
+	unsigned mode, const MotionHistory* history)
 {
 	out = {};
 	out.kind = hints.kind;
 	switch (hints.kind) {
-	case NetworkableKind::SimpleObject: return readSimpleObject(in, hints, reference, out);
+	case NetworkableKind::SimpleObject: return readSimpleObject(in, hints, reference, out, mode, history);
 	case NetworkableKind::Soldier: return readSoldier(in, hints, reference, out, mode);
 	case NetworkableKind::Kit: return readKit(in, reference, out);
 	case NetworkableKind::GenericProjectile: return readProjectile(in, hints, reference, out);
@@ -1112,7 +1120,7 @@ bool decodeNetworkable(BitReader& in, const NetworkableHints& hints, const Vec3f
 // Writers (mode 2), as the originals lay the fields out
 
 void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* reference, const NetworkableState& s,
-	unsigned mode)
+	unsigned mode, const MotionHistory* history)
 {
 	const bool full = mode == 3;
 	const uint32_t m = s.mask;
@@ -1121,15 +1129,21 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 		out.write(m, 25);
 		out.write(s.flag ? 1 : 0, 1);
 		if (m & 2) {
-			writeDelta(out, DeltaTable::Wide, 0.0005f, s.position, reference);
+			writeDelta(out, DeltaTable::Wide, 0.0005f, s.position, history ? &history->position : reference);
 		}
 		const bool physics = h.mobile && !s.flag;
 		if (physics) {
 			if (m & 4) {
-				writeDelta(out, DeltaTable::Wide, 0.001f, s.velocity, &kZero);
+				writeDelta(out, DeltaTable::Wide, 0.001f, s.velocity, history ? &history->velocity : &kZero);
 			}
 			if (m & 8) {
-				writeDelta3(out, 0.01f, s.angularVelocity, kZero);
+				if (history) {
+					writeDelta(out, DeltaTable::Wide, 0.001f, s.angularVelocity, &history->angularVelocity);
+				} else if (mode == 3) {
+					writeDelta(out, DeltaTable::Wide, 0.001f, s.angularVelocity, &kZero);
+				} else {
+					writeDelta3(out, 0.01f, s.angularVelocity, kZero);
+				}
 			}
 		}
 		if (m & 1) {

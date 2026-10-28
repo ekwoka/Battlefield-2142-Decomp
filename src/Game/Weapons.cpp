@@ -22,6 +22,7 @@ float number(const world::ObjectTemplate& t, const char* name, float fallback)
 ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate& t)
 {
 	ProjectileSettings s;
+	s.name = t.name();
 	s.damage = number(t, "damage", s.damage);
 	s.minDamage = number(t, "minDamage", s.minDamage);
 	s.distToStartLoseDamage = number(t, "distToStartLoseDamage", s.distToStartLoseDamage);

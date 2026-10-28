@@ -4,6 +4,7 @@
 #include "Console/ConsoleBinding.h"
 #include "SoundManager.h"
 #include "SoundObjectTemplate.h"
+#include "VoiceMessages.h"
 
 namespace dice::hfe::sound {
 
@@ -88,6 +89,26 @@ void registerSoundConsoleMethods(Console& console, SoundManager& sounds)
 			sounds.tweakTemplate(name, {a, b, c, d, e, f});
 		});
 	bindMethod(console, "Sound.getAllSoundTemplates", access, [&sounds] { return sounds.allSoundTemplates(); });
+	bindMethod(console, "Sound.addTrigger", access, [&sounds](std::string name) { sounds.addTrigger(name); });
+
+	// CountdownSoundComp's "sound.addReloadTimeSound <index> <seconds>" (the
+	// missile silos' launch countdown, S_<weapon>_ReloadTimeTeam<t>_<index>
+	// at that many seconds before it is loaded): kept on the template as
+	// "sound.reloadTimeSound.<index>".
+	world::ObjectTemplateManager& owners = sounds.templates();
+	console.registerMethod([&owners, access] {
+		ConsoleMethod method;
+		method.name = "ObjectTemplate.sound.addReloadTimeSound";
+		method.access = access;
+		method.minArgs = 2;
+		method.maxArgs = 2;
+		method.isActive = [&owners] { return owners.active() != nullptr; };
+		method.invoke = [&owners](const std::vector<std::string>& args) {
+			owners.active()->settings()["sound.reloadTimeSound." + args[0]] = args[1];
+			return std::string();
+		};
+		return method;
+	}());
 
 	// --- ObjectTemplate properties of Sound templates ------------------------
 	world::ObjectTemplateManager& templates = sounds.templates();
@@ -163,6 +184,34 @@ void registerSoundConsoleMethods(Console& console, SoundManager& sounds)
 	bindSoundProperty<float>(console, templates, "coneOuterVolume",
 		[engine](S& s) { return engine(s) ? engine(s)->coneOuterVolume() : 0.0f; },
 		[engine](S& s, const float& v) { if (engine(s)) engine(s)->setConeOuterVolume(v); });
+}
+
+void registerVoiceMessageConsoleMethods(Console& console, VoiceMessages& messages)
+{
+	const uint32_t access = ConsoleAccess::Anyone;
+	bindMethod(console, "GameLogic.messages.addMessage", access, [&messages](std::string name) { messages.addMessage(name); });
+	// addRadioVoice voice radioSample text [localSample [flags]]
+	console.registerMethod([&] {
+		ConsoleMethod method;
+		method.name = "GameLogic.messages.addRadioVoice";
+		method.access = access;
+		method.minArgs = 3;
+		method.maxArgs = 5;
+		method.invoke = [&messages](const std::vector<std::string>& args) {
+			messages.addRadioVoice(args[0], args[1], args[2], args.size() > 3 ? args[3] : std::string(),
+				args.size() > 4 ? parseConsoleValue<int>(args[4]) : 0);
+			return std::string();
+		};
+		return method;
+	}());
+	bindMethod(console, "GameLogic.messages.addRadioFilter", access,
+		[&messages](std::string name, std::string file) { messages.addRadioFilter(name, file); });
+	bindMethod(console, "GameLogic.messages.addHelpMessage", access,
+		[&messages](std::string name, std::string file) { messages.addHelpMessage(name, file); });
+	bindMethod(console, "GameLogic.messages.addEmoteTrigger", access,
+		[&messages](std::string emote) { messages.addEmoteTrigger(emote); });
+	bindMethod(console, "GameLogic.messages.setVolumes", access,
+		[&messages](float voiceOver, float filter) { messages.setVolumes(voiceOver, filter); });
 }
 
 } // namespace dice::hfe::sound

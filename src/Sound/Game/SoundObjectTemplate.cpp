@@ -91,6 +91,7 @@ SoundObjectTemplate::~SoundObjectTemplate()
 
 void SoundObjectTemplate::setSoundFilenames(const std::string& list)
 {
+	m_filenameText = list;
 	if (!m_sound) {
 		return;
 	}
@@ -105,7 +106,7 @@ void SoundObjectTemplate::setSoundFilenames(const std::string& list)
 std::string SoundObjectTemplate::soundFilenames() const
 {
 	if (!m_sound) {
-		return {};
+		return m_filenameText;
 	}
 	int count = 0;
 	const char* const* files = m_sound->soundFilenames(&count);

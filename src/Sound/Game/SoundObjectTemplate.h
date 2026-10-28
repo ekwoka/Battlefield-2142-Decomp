@@ -31,6 +31,9 @@ public:
 	// Comma-separated file names.
 	void setSoundFilenames(const std::string& list);
 	std::string soundFilenames() const;
+	// Whether the script gave it any file (the generated S_<owner>_<event>
+	// sounds mostly have none).
+	bool hasFiles() const { return m_filenameText.find_first_not_of(" ,\"") != std::string::npos; }
 
 	// "minX/maxX/minY/maxY/randomized/count/" then "x/yLow/yHigh/" per point.
 	void setVolumeEnvelope(const std::string& text);
@@ -72,6 +75,7 @@ private:
 	float m_soundRadius = 0;
 	bool m_titanAmbient = false;
 	std::array<float, 6> m_tweaks {1, 1, 1, 1, 1, 1};
+	std::string m_filenameText;
 	std::string m_volumeEnvelopeText = "0/1/0/1/0/0/";
 	std::string m_pitchEnvelopeText = "0/1/0.1/3.0/0/0/";
 };

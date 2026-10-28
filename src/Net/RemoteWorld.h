@@ -15,6 +15,7 @@
 #include "GhostLayout.h"
 #include "Networkables.h"
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -199,6 +200,8 @@ public:
 	// Records received, and how many of them had a decoded state.
 	uint32_t controlRecords() const { return m_controlRecords; }
 	uint32_t controlStates() const { return m_controlStates; }
+	// Of them, those written against a history slot (relative records).
+	uint32_t relativeControlStates() const { return m_relativeStates; }
 	uint32_t serverTick() const { return m_tick; }
 
 	// The game status (PostRemote category 0, id 1; game logic +0x40,
@@ -363,6 +366,8 @@ private:
 	ControlObjectRecord m_control;
 	void decodeControl();
 	ControlState m_controlState;
+	std::array<std::vector<MotionHistory>, 8> m_historySlots; // the ghost manager's +0x20f4
+	uint32_t m_relativeStates = 0;
 	bool m_controlStateValid = false;
 	bool m_controlInLastBlock = false;
 	uint32_t m_controlRecords = 0, m_controlStates = 0;

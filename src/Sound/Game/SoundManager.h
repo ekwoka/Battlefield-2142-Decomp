@@ -11,6 +11,7 @@
 #include "World/ObjectTemplateManager.h"
 
 #include <array>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -38,8 +39,20 @@ public:
 	// until stopped; interface sounds use volume group 1, others group 3.
 	void addMenuSound(const std::string& name, const std::string& file, float volume = 1, bool loop = false,
 		bool interface = false);
-	// Game sounds (slot 0x4c): from the template "S_Game_<name>".
+	// Game sounds (slot 0x4c, 0x007fae20): creates the template
+	// "S_Game_<name>" (left active, so the script's ObjectTemplate.* lines
+	// that follow set it up, Sound/GameSounds.con) and its sound.
 	void addSound(const std::string& name);
+	// "Sound.addTrigger" (0x007f95a0): the template becomes an ambient
+	// emitter of the engine (slot 0x70), the levels' AmbientObjects.con
+	// sounds; at quality level 2 (low) only the first one.
+	void addTrigger(const std::string& templateName);
+	// The engine template of a Sound template, by name (null for none, or
+	// without an engine).
+	ISoundTemplate* soundTemplate(const std::string& templateName) const;
+	// Whether there is a Sound template of that name with files to play
+	// (with or without an engine).
+	bool hasSound(const std::string& templateName) const;
 	void playSound(const std::string& name);
 	// The same at a point of the world (a 3-D sound's position).
 	void playSoundAt(const std::string& name, float x, float y, float z);
@@ -61,6 +74,19 @@ public:
 	float dopplerFactor() const;
 	void setVolumeForGroup(int group, float volume); // groups 0..7, volume clamped to 0..1
 	float volumeForGroup(int group) const;
+	// Muting (slot 0xbc, 0x007f9af0): reason 3 while a voice-over plays
+	// (0x004cdfb0), 4 while a first-person weapon whose sound.muteOnFire
+	// is set fires (0x005dbdc0, until 0x005db6c0). Each update
+	// (0x007f9f50) moves every group's volume a step towards its target:
+	// group 0 (the world's effects) at 0.125 under a voice-over, and x
+	// sound-mute-level-1p (0.4) while firing; group 4 (first-person
+	// weapons) only under the voice-over. Reason 4 also sets group 0's
+	// steps to sound-mute-fadein-1p / -fadeout-1p, the others to the -vo
+	// ones.
+	void setMuted(int reason, bool muted);
+	bool muted(int reason) const { return reason >= 0 && reason < 5 && m_mute[static_cast<size_t>(reason)]; }
+	// A group's volume as the ducking has it now (0..1, before the user's).
+	float duckedVolume(int group) const;
 
 	bool loadMusic(const std::string& path);
 	bool playMusic();
@@ -73,11 +99,31 @@ public:
 
 	// Loads the sample data of all sounds created so far (slot 8, after loading).
 	void reloadSoundFiles();
+	// The camera, as the manager's update (0x007f9d50) is handed it each
+	// frame: the engine keeps pointers to the copies (slots 11, 13, 16, 18).
+	void setListener(const Vec3& position, const Vec3& forward, const Vec3& up, const Vec3& velocity,
+		bool insideTitan = false);
+	const Vec3& listenerPosition() const { return m_listenerPosition; }
+	// The level's ray test for the indoor level (true, with the distance
+	// along the segment, when it hits something).
+	using RayTest = std::function<bool(const Vec3& from, const Vec3& to, float& distance)>;
+	void setRayTest(RayTest test) { m_rayTest = std::move(test); }
+	// 0x007fa100: how enclosed a point is, 0 in the open. Two rays up
+	// (from +-0.4 x, +-0.3 z) and one down, sound-raylength (15) long;
+	// all three hitting, the room's height h (the floor's depth plus the
+	// ceilings' mean, at most 15) gives sound-maxreverb (0.5) x h /
+	// (sound-reverb-steepness (0.98) x h + 0.02 x 15).
+	float indoorLevel(const Vec3& at) const;
+	// 0x007fa320 (slot 0x98): no ceiling and floor around.
+	bool outdoors(const Vec3& at) const { return indoorLevel(at) == 0.0f; }
+	// Once a frame (0x007f9d50): the muting's fades (0x007f9f50), the
+	// listener's indoor level (engine slot 20) and the engine's update.
 	void update(int ticks);
 
 private:
 	ISound* findSound(const std::string& name) const;
 	void createDefaultSounds(world::ObjectTemplate& owner, const std::vector<DefaultSound>& sounds);
+	void updateDucking();
 
 	ISoundEngine* m_engine;
 	world::ObjectTemplateManager& m_templates;
@@ -87,6 +133,23 @@ private:
 	std::vector<ISound*> m_gameSounds;
 	std::vector<ISound*> m_menuSounds;
 	std::array<float, 8> m_groupVolumes {1, 1, 1, 1, 1, 1, 1, 1};
+	// The per-group fade (+0xe0 + group x 0x14, set up by the constructor
+	// 0x007f9040): current, target and the rising and falling steps per
+	// update (1/15 at first).
+	struct Duck {
+		float current = 1, target = 1, riseStep = 0.0667f, fallStep = 0.0667f;
+	};
+	std::array<Duck, 8> m_duck {};
+	std::array<bool, 5> m_mute {};
+	Vec3 m_listenerPosition;
+	Vec3 m_listenerForward {0, 0, 1};
+	Vec3 m_listenerUp {0, 1, 0};
+	Vec3 m_listenerVelocity;
+	bool m_listenerSet = false;
+	RayTest m_rayTest;
+	Vec3 m_indoorAt {1e30f, 0, 0}; // where the indoor level was last measured
+	float m_indoorLevel = 0;
+	int m_indoorAge = 0;
 	float m_tinnitusAttack = 0.5f;
 	float m_tinnitusSustain = 0;
 	float m_tinnitusRelease = 0;

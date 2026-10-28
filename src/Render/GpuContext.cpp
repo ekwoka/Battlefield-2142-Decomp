@@ -2,6 +2,7 @@
 
 #include "EmbeddedShaders.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace dice::hfe::render {
@@ -81,6 +82,26 @@ std::unique_ptr<GpuContext> GpuContext::create(SDL_Window* window, std::string& 
 	sampler.address_mode_u = sampler.address_mode_v = sampler.address_mode_w =
 		SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
 	context->m_clampSampler = SDL_CreateGPUSampler(context->m_device, &sampler);
+	sampler.enable_anisotropy = false;
+	sampler.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+	sampler.max_lod = 0;
+	sampler.enable_compare = true;
+	sampler.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
+	context->m_shadowSampler = SDL_CreateGPUSampler(context->m_device, &sampler);
+	context->m_emptyShadowMap = context->createShadowMap(1);
+	if (context->m_emptyShadowMap) {
+		// Cleared to the far plane: everything is lit by it.
+		SDL_GPUCommandBuffer* commands = SDL_AcquireGPUCommandBuffer(context->m_device);
+		SDL_GPUDepthStencilTargetInfo depth {};
+		depth.texture = context->m_emptyShadowMap;
+		depth.clear_depth = 1.0f;
+		depth.load_op = SDL_GPU_LOADOP_CLEAR;
+		depth.store_op = SDL_GPU_STOREOP_STORE;
+		depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+		depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+		SDL_EndGPURenderPass(SDL_BeginGPURenderPass(commands, nullptr, 0, &depth));
+		SDL_SubmitGPUCommandBuffer(commands);
+	}
 
 	const uint32_t white = 0xffffffff;
 	context->m_white = context->createRgbaTexture(1, 1, &white);
@@ -117,6 +138,12 @@ GpuContext::~GpuContext()
 	SDL_ReleaseGPUTexture(m_device, m_whiteVolume);
 	SDL_ReleaseGPUSampler(m_device, m_repeatSampler);
 	SDL_ReleaseGPUSampler(m_device, m_clampSampler);
+	SDL_ReleaseGPUSampler(m_device, m_shadowSampler);
+	SDL_ReleaseGPUTexture(m_device, m_emptyShadowMap);
+	SDL_ReleaseGPUGraphicsPipeline(m_device, m_shadowCasterPipeline);
+	SDL_ReleaseGPUGraphicsPipeline(m_device, m_camoPipeline);
+	SDL_ReleaseGPUGraphicsPipeline(m_device, m_postPipeline);
+	SDL_ReleaseGPUGraphicsPipeline(m_device, m_bloomPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_meshPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_terrainPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_surroundingPipeline);
@@ -145,6 +172,10 @@ bool GpuContext::createPipelines(std::string& error)
 						SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET)
 		? SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT
 		: SDL_GPU_TEXTUREFORMAT_D24_UNORM_S8_UINT;
+	m_shadowDepthFormat = SDL_GPUTextureSupportsFormat(m_device, SDL_GPU_TEXTUREFORMAT_D32_FLOAT, SDL_GPU_TEXTURETYPE_2D,
+							  SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER)
+		? SDL_GPU_TEXTUREFORMAT_D32_FLOAT
+		: SDL_GPU_TEXTUREFORMAT_D16_UNORM;
 	SDL_GPUVertexBufferDescription buffer {};
 	buffer.slot = 0;
 	buffer.pitch = sizeof(Vertex);
@@ -205,20 +236,20 @@ bool GpuContext::createPipelines(std::string& error)
 		return pipeline;
 	};
 	m_meshPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
-		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, 5, 1, "mesh");
+		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, 8, 2, "mesh");
 	m_terrainPipeline = build(k_terrain_vert_spv, k_terrain_vert_spv_size, k_terrain_vert_msl,
 		k_terrain_vert_msl_size, k_terrain_frag_spv, k_terrain_frag_spv_size, k_terrain_frag_msl,
-		k_terrain_frag_msl_size, 11, 2, "terrain", 2);
+		k_terrain_frag_msl_size, 13, 3, "terrain", 2);
 	m_surroundingPipeline = build(k_terrain_vert_spv, k_terrain_vert_spv_size, k_terrain_vert_msl,
 		k_terrain_vert_msl_size, k_surrounding_frag_spv, k_surrounding_frag_spv_size, k_surrounding_frag_msl,
 		k_surrounding_frag_msl_size, 3, 2, "surrounding terrain", 2);
 	m_undergrowthPipeline = build(k_undergrowth_vert_spv, k_undergrowth_vert_spv_size, k_undergrowth_vert_msl,
 		k_undergrowth_vert_msl_size, k_undergrowth_frag_spv, k_undergrowth_frag_spv_size, k_undergrowth_frag_msl,
-		k_undergrowth_frag_msl_size, 3, 1, "undergrowth");
+		k_undergrowth_frag_msl_size, 5, 2, "undergrowth");
 	info.depth_stencil_state.enable_depth_test = false;
 	info.depth_stencil_state.enable_depth_write = false;
 	m_skyPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
-		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, 5, 1, "sky");
+		k_sky_frag_spv, k_sky_frag_spv_size, k_sky_frag_msl, k_sky_frag_msl_size, 3, 1, "sky");
 	info.depth_stencil_state.enable_depth_test = true;
 	color.blend_state.enable_blend = true;
 	color.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
@@ -229,17 +260,54 @@ bool GpuContext::createPipelines(std::string& error)
 	color.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
 	info.depth_stencil_state.enable_depth_write = false;
 	m_fadedMeshPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
-		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, 5, 1, "faded mesh");
+		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, 8, 2, "faded mesh");
 	m_particlePipeline = build(k_particle_vert_spv, k_particle_vert_spv_size, k_particle_vert_msl,
 		k_particle_vert_msl_size, k_particle_frag_spv, k_particle_frag_spv_size, k_particle_frag_msl,
 		k_particle_frag_msl_size, 1, 1, "particle");
 	color.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
 	m_additiveMeshPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
-		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, 5, 1, "additive mesh");
+		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, 8, 2, "additive mesh");
 	m_additiveParticlePipeline = build(k_particle_vert_spv, k_particle_vert_spv_size, k_particle_vert_msl,
 		k_particle_vert_msl_size, k_particle_frag_spv, k_particle_frag_spv_size, k_particle_frag_msl,
 		k_particle_frag_msl_size, 1, 1, "additive particle");
 	color.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+	{
+		// Cloaked meshes into their mask: depth-tested, not written, unblended.
+		color.blend_state.enable_blend = false;
+		m_camoPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
+			k_camo_frag_spv, k_camo_frag_spv_size, k_camo_frag_msl, k_camo_frag_msl_size, 0, 0, "camouflage");
+		// The full-screen passes: no vertex buffers, no depth test.
+		const SDL_GPUVertexInputState meshInput = info.vertex_input_state;
+		info.vertex_input_state = {};
+		info.depth_stencil_state.enable_depth_test = false;
+		m_postPipeline = build(k_fullscreen_vert_spv, k_fullscreen_vert_spv_size, k_fullscreen_vert_msl,
+			k_fullscreen_vert_msl_size, k_post_frag_spv, k_post_frag_spv_size, k_post_frag_msl, k_post_frag_msl_size, 11, 1,
+			"post-production", 0);
+		info.target_info.has_depth_stencil_target = false;
+		m_bloomPipeline = build(k_fullscreen_vert_spv, k_fullscreen_vert_spv_size, k_fullscreen_vert_msl,
+			k_fullscreen_vert_msl_size, k_bloom_frag_spv, k_bloom_frag_spv_size, k_bloom_frag_msl, k_bloom_frag_msl_size, 1, 1,
+			"bloom", 0);
+		// The shadow casters: depth only into the shadow maps' format.
+		info.vertex_input_state = meshInput;
+		info.target_info.num_color_targets = 0;
+		info.target_info.has_depth_stencil_target = true;
+		info.target_info.depth_stencil_format = m_shadowDepthFormat;
+		info.depth_stencil_state.enable_depth_test = true;
+		info.depth_stencil_state.enable_depth_write = true;
+		info.rasterizer_state.enable_depth_bias = true;
+		info.rasterizer_state.depth_bias_constant_factor = 1.0f;
+		info.rasterizer_state.depth_bias_slope_factor = 2.0f;
+		m_shadowCasterPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
+			k_shadowcaster_frag_spv, k_shadowcaster_frag_spv_size, k_shadowcaster_frag_msl, k_shadowcaster_frag_msl_size, 1,
+			1, "shadow caster");
+		info.rasterizer_state.enable_depth_bias = false;
+		info.rasterizer_state.depth_bias_constant_factor = 0;
+		info.rasterizer_state.depth_bias_slope_factor = 0;
+		info.target_info.num_color_targets = 1;
+		info.target_info.depth_stencil_format = m_depthFormat;
+		info.depth_stencil_state.enable_depth_write = false;
+		color.blend_state.enable_blend = true;
+	}
 	// The HUD: blended over everything, no depth.
 	info.depth_stencil_state.enable_depth_test = false;
 	m_uiPipeline = build(k_ui_vert_spv, k_ui_vert_spv_size, k_ui_vert_msl, k_ui_vert_msl_size, k_ui_frag_spv,
@@ -279,12 +347,38 @@ bool GpuContext::createPipelines(std::string& error)
 	info.rasterizer_state.depth_bias_constant_factor = -1.0f;
 	info.rasterizer_state.depth_bias_slope_factor = -1.0f;
 	m_roadPipeline = build(k_road_vert_spv, k_road_vert_spv_size, k_road_vert_msl, k_road_vert_msl_size,
-		k_road_frag_spv, k_road_frag_spv_size, k_road_frag_msl, k_road_frag_msl_size, 3, 2, "road");
+		k_road_frag_spv, k_road_frag_spv_size, k_road_frag_msl, k_road_frag_msl_size, 5, 3, "road");
 	m_decalPipeline = build(k_decal_vert_spv, k_decal_vert_spv_size, k_decal_vert_msl, k_decal_vert_msl_size,
 		k_decal_frag_spv, k_decal_frag_spv_size, k_decal_frag_msl, k_decal_frag_msl_size, 1, 1, "decal");
 	return m_meshPipeline && m_surroundingPipeline && m_fadedMeshPipeline && m_additiveMeshPipeline && m_terrainPipeline && m_skyPipeline && m_waterPipeline && m_roadPipeline && m_decalPipeline &&
 		m_undergrowthPipeline && m_particlePipeline && m_additiveParticlePipeline && m_uiPipeline && m_uiSubmitPipeline &&
-		m_uiTestPipeline && m_uiClearPipeline;
+		m_uiTestPipeline && m_uiClearPipeline && m_shadowCasterPipeline && m_camoPipeline && m_postPipeline &&
+		m_bloomPipeline;
+}
+
+SDL_GPUTexture* GpuContext::createColorTexture(uint32_t width, uint32_t height)
+{
+	SDL_GPUTextureCreateInfo info {};
+	info.type = SDL_GPU_TEXTURETYPE_2D;
+	info.format = m_colorFormat;
+	info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+	info.width = std::max<uint32_t>(width, 1);
+	info.height = std::max<uint32_t>(height, 1);
+	info.layer_count_or_depth = 1;
+	info.num_levels = 1;
+	return SDL_CreateGPUTexture(m_device, &info);
+}
+
+SDL_GPUTexture* GpuContext::createShadowMap(uint32_t size)
+{
+	SDL_GPUTextureCreateInfo info {};
+	info.type = SDL_GPU_TEXTURETYPE_2D;
+	info.format = m_shadowDepthFormat;
+	info.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+	info.width = info.height = std::max<uint32_t>(size, 1);
+	info.layer_count_or_depth = 1;
+	info.num_levels = 1;
+	return SDL_CreateGPUTexture(m_device, &info);
 }
 
 SDL_GPUCopyPass* GpuContext::copyPass()

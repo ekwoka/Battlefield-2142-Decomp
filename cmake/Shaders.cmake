@@ -13,6 +13,8 @@ function(bf2142_embed_shaders target)
 	endif()
 	set(dir ${CMAKE_CURRENT_BINARY_DIR}/shaders)
 	set(outputs)
+	# Shared GLSL (#include "x.glsl" beside the shaders) rebuilds them all.
+	file(GLOB includes ${CMAKE_CURRENT_SOURCE_DIR}/Shaders/*.glsl)
 	foreach(source ${ARGN})
 		get_filename_component(name ${source} NAME)
 		set(spv ${dir}/${name}.spv)
@@ -21,7 +23,7 @@ function(bf2142_embed_shaders target)
 			COMMAND ${CMAKE_COMMAND} -E make_directory ${dir}
 			COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 --quiet -o ${spv} ${CMAKE_CURRENT_SOURCE_DIR}/${source}
 			COMMAND ${SPIRV_CROSS} --msl --msl-version 20100 --msl-decoration-binding --output ${msl} ${spv}
-			DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${source}
+			DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${source} ${includes}
 			COMMENT "Compiling shader ${name}"
 			VERBATIM)
 		list(APPEND outputs ${spv} ${msl})

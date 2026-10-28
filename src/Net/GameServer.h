@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -80,6 +81,11 @@ public:
 	std::function<void(int client)> onLeft;
 	std::function<void(int client, const GameEvent& event)> onEvent;
 	std::function<void(int client, const PlayerMove& move)> onMove;
+	// A data packet we sent (its 6-bit sequence) was delivered or lost, as
+	// the client's notify header says.
+	std::function<void(int client, uint32_t sequence, bool delivered)> onNotified;
+	// The sequence the client's next data packet (sendTick's) will carry.
+	uint32_t nextSequence(int client) const;
 
 	uint32_t now() const;
 
@@ -90,6 +96,7 @@ private:
 		bool acknowledged = false;
 		NotifyState notify;
 		EventChannel events;
+		std::set<uint32_t> unsettled; // data sequences sent, not yet reported
 		std::chrono::steady_clock::time_point lastHeard, lastPing;
 	};
 	void handle(const std::vector<uint8_t>& datagram, const UdpServerSocket::Address& from);

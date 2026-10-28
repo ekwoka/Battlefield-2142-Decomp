@@ -34,10 +34,12 @@ endif()
 # The executable's side of sound: sound templates, the sound manager and the
 # "Sound.*" console methods.
 add_library(GameSound STATIC
+	Game/GameSounds.cpp
 	Game/SoundConsole.cpp
 	Game/SoundManager.cpp
 	Game/SoundObjectTemplate.cpp
 	Game/VfsSoundFileSystem.cpp
+	Game/VoiceMessages.cpp
 )
 target_include_directories(GameSound PUBLIC ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(GameSound PUBLIC SoundEngine World Console IO)

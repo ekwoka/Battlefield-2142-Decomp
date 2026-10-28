@@ -30,6 +30,7 @@ layout(location = 4) out vec2 outDetailCoord;
 layout(location = 5) out vec2 outDirtCoord;
 layout(location = 6) out vec2 outCrackCoord;
 layout(location = 7) out vec3 outWorldPosition;
+layout(location = 8) out float outObjectY; // the object's origin height (the hemi lerp's World[3][1])
 
 void main()
 {
@@ -45,4 +46,5 @@ void main()
 	outDetailCoord = inDetailCoord;
 	outDirtCoord = inDirtCoord;
 	outCrackCoord = inCrackCoord;
+	outObjectY = world[3][1];
 }

@@ -16,7 +16,11 @@
 // attenuationRange1 and fading to nothing at attenuationRange2 (the
 // original reads a radial attenuation table over distance / range,
 // LightManager_r3x0.fx; a linear ramp here).
+// The dynamic shadows darken the sun term (lightmapped surfaces: their
+// lightmap's sun visibility); without a lightmap the hemi map gives the
+// ambient and the sun's occlusion (shadow.glsl).
 // SDL_GPU binds fragment samplers in set 2 and uniform buffers in set 3.
+#extension GL_GOOGLE_include_directive : require
 layout(location = 0) in vec3 inNormal;
 layout(location = 1) in vec2 inTexCoord;
 layout(location = 2) in float inDepth;
@@ -25,12 +29,17 @@ layout(location = 4) in vec2 inDetailCoord;
 layout(location = 5) in vec2 inDirtCoord;
 layout(location = 6) in vec2 inCrackCoord;
 layout(location = 7) in vec3 inWorldPosition;
+layout(location = 8) in float inObjectY;
 
 layout(set = 2, binding = 0) uniform sampler2D diffuseMap;
 layout(set = 2, binding = 1) uniform sampler2D lightMap;
 layout(set = 2, binding = 2) uniform sampler2D detailMap;
 layout(set = 2, binding = 3) uniform sampler2D dirtMap;
 layout(set = 2, binding = 4) uniform sampler2D crackMap;
+#define SHADOW_UNIFORM_BINDING 1
+#define SHADOW_MAP_BINDING 5
+#define HEMI_MAP_BINDING 7
+#include "shadow.glsl"
 
 layout(set = 3, binding = 0) uniform Lighting {
 	vec4 sunDirection; // towards the sun
@@ -39,7 +48,8 @@ layout(set = 3, binding = 0) uniform Lighting {
 	vec4 fogColor;     // w: fog end distance
 	vec4 material;     // x: alpha reference (0 = off), y: 1 with a lightmap,
 					   // z: layers (1 detail, 2 dirt, 4 crack) and the kind
-					   // (8 blended, 16 additive), w: the object's fade (0 =
+					   // (8 blended, 16 additive, 32 hemi-lit: bundled and
+					   // skinned meshes), w: the object's fade (0 =
 					   // none; else the alpha it is blended with)
 	vec4 uvOffset;     // xy: added to the diffuse coordinates (additive scrolling,
 					   // an atlas's offset); zw: their scale in an atlas (0: none)
@@ -113,9 +123,13 @@ void main()
 	vec3 light;
 	if (material.y > 0.0) {
 		vec4 lightmap = texture(lightMap, inLightmapCoord);
-		light = 2.0 * (0.52 * lightmap.b * skyColor.rgb + lightmap.g * sun);
+		light = 2.0 * (0.52 * lightmap.b * skyColor.rgb + lightmap.g * sun * shadowFactor(inWorldPosition, false));
 	} else {
-		light = skyColor.rgb + sun;
+		// Bundled and skinned meshes (32) take the hemi map (RaShaderBM/SM's
+		// _USEHEMIMAP_); unlit statics the sky colour.
+		vec4 hemi = (layers & 32) != 0 ? hemiLight(inWorldPosition, normal, inObjectY, skyColor.rgb)
+									   : vec4(skyColor.rgb, 1.0);
+		light = hemi.rgb + sun * hemi.a * shadowFactor(inWorldPosition, true);
 	}
 	light += pointLights(normal);
 	float alpha = (layers & 8) != 0 ? albedo.a * fade : material.w > 0.0 ? material.w : albedo.a;

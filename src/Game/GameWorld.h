@@ -230,6 +230,20 @@ public:
 		physics::Vec3 position;
 	};
 	std::vector<SoundEvent> takeSounds() { return std::exchange(m_sounds, {}); }
+	// What a weapon's sound component hears (DefaultSoundComp, vtable
+	// 0x00971b48: its fire 0x005dbdc0, reload 0x005dbfe0 and deploy
+	// 0x005dc1d0 handlers), for the sound layer to play its weapon sounds
+	// (S_<weapon>_Fire1P / Fire3P...): a round leaving, a reload starting,
+	// a weapon taken in hand. `object` is the soldier, or the vehicle a
+	// seat's gun is on; at most the last 256 are kept.
+	struct WeaponSoundEvent {
+		enum Kind { Fire, Reload, Deploy } kind = Fire;
+		int player = -1;
+		uint32_t object = 0;
+		std::string weapon; // the weapon's template
+		physics::Vec3 position;
+	};
+	std::vector<WeaponSoundEvent> takeWeaponSounds() { return std::exchange(m_weaponSounds, {}); }
 
 	RoundState state() const { return m_state; }
 	const std::vector<ControlPoint>& controlPoints() const { return m_controlPoints; }
@@ -264,6 +278,15 @@ public:
 	// leaves its squad and the command, and the scripts hear
 	// PlayerChangeTeams. False for a living player or a team other than 1, 2.
 	bool setPlayerTeam(int player, int team);
+	// A player leaving the game (the game server's destroyPlayer,
+	// 0x004acfb0, for a client that disconnected): a living soldier dies
+	// where it is (game logic slot 0x54, 0x004c1d20: the death 0x004cd390,
+	// out of its vehicle, no one credited) and its body is left as a corpse;
+	// it leaves its squad (the squad manager's slot 0x38) and the command
+	// (slot 0x70); the scripts hear PlayerDisconnect; then the player
+	// manager lets it go (slot 0x14) and its id is free for the next
+	// addPlayer. False for no such player.
+	bool removePlayer(int player);
 	// Puts the player's soldier at a spawn point of its team; false when
 	// there is none or it lives already.
 	bool spawnSoldier(int player);
@@ -482,6 +505,19 @@ public:
 	};
 	const std::vector<Impact>& impacts() const { return m_impacts; }
 	size_t projectilesInFlight() const { return m_projectiles.size(); }
+	// What a soldier or vehicle was last given by a hub or a repair (0
+	// healed, 1 repaired, 2 rearmed) and when (round seconds; what -1:
+	// never), for the HUD's AbilityHud sounds.
+	struct Received {
+		int what = -1;
+		double at = -1;
+	};
+	Received received(uint32_t object) const
+	{
+		const auto it = m_received.find(object);
+		return it == m_received.end() ? Received {} : it->second;
+	}
+	double roundTime() const { return m_time; }
 	const std::vector<Projectile>& projectiles() const { return m_projectiles; }
 	// Armor: hit points left (from armor.hitPoints), -1 without armor.
 	float hitPoints(uint32_t object) const;
@@ -599,6 +635,17 @@ public:
 	// occupants of their vehicles). The bots send one as their trigger
 	// presses or lets go at their target (AIDLL 0x1009a1d0, 0x1009a2a0).
 	void reportBattlefieldObjects(int reporter, const std::vector<int>& players);
+	// The HUD's crosshair object (the HUD manager's +0x1f0, filled by
+	// 0x0075be30 as a comm rose opens): what the player's view ray meets
+	// out to `reach` (HUD vt+0x18c with the player's slot 0x98(1)), when
+	// it is an enemy's soldier or the vehicle an enemy rides; the enemy
+	// player (-1 for none) and where the ray met it.
+	int crosshairTarget(int player, float reach = 300, physics::Vec3* point = nullptr) const;
+	// Radio.sendSpottedMessage (0x007c8160): the crosshair object reported
+	// through the game's slot 0xd4, the reports' path (event 0x41: the
+	// squad's minimap knows it, reportBattlefieldObjects). The enemy
+	// reported, -1 for none.
+	int spotCrosshair(int player);
 	// Whether a team's squad had a player reported within the last 3 s
 	// (0x100bea30).
 	bool squadKnows(int team, int squad, int player) const;
@@ -620,6 +667,25 @@ public:
 	// What a vehicle's driver inputs are scaled by (0x005ca2e0): EMP and
 	// critical damage; see GameWorld.cpp.
 	static float driverInputScale(float empLevel, float hitPoints, const world::ObjectTemplate& vehicle);
+	// The driver's seat's inputs from the soldier's (stepSoldier: the land
+	// and air maps): W/S PIThrottle, A/D PIYaw, the mouse's x PIRoll (a
+	// tick's look over 5 degrees), its y PIPitch (the aim pitch's change
+	// from `lastLookPitch`, unless the input carries a pitch), Z PICrouch,
+	// the sprint; each times `scale`.
+	static VehicleInput driverInput(const SoldierInput& input, float scale, float lastLookPitch);
+
+	// A vehicle on its own, outside the round: a joined client's copy of
+	// the vehicle it drives, for the prediction (src/Main/Prediction). It
+	// is built as the round's bodies are (addBodies) and stepped as
+	// stepPhysics steps one: the driver's inputs, the engines and wheels,
+	// the drag, the integration, the ground and the water, then the static
+	// objects' meshes; not the other bodies (they are the server's), and
+	// with no collision events, damage or contact effects.
+	class LoneVehicle; // below
+	std::unique_ptr<LoneVehicle> makeLoneVehicle(const world::ObjectTemplate& t, const physics::Vec3& position,
+		const physics::Mat3& rotation);
+	// One tick of it with the driver's inputs (already driverInput's).
+	void stepLoneVehicle(LoneVehicle& vehicle, const VehicleInput& driver, float seconds);
 	// Deployed hubs (their objects).
 	std::vector<uint32_t> supplyObjects() const;
 	// Squad leaders' drones (a detonator whose projectile carries a
@@ -1069,6 +1135,9 @@ private:
 	int firstEngineType(const world::ObjectTemplate& root) const;
 	mutable std::map<const world::ObjectTemplate*, int> m_engineTypes; // firstEngineType's answers, by root
 	void addBodies();
+	bool buildBody(const world::ObjectTemplate& t, uint32_t id, const physics::Vec3& position,
+		const physics::Mat3& rotation, Body& body);
+	bool stepBody(Body& body, float seconds);
 	void stepPhysics(float seconds);
 	// A walker's animation system fed as 0x0063ce30 does (see GameWorld.cpp).
 	void stepObjectAnimation(Body& body, float seconds);
@@ -1169,6 +1238,7 @@ private:
 	};
 	struct Player {
 		int id = 0;
+		bool present = true; // false once removed: the slot is free
 		std::string name;
 		bool ai = false;
 		bool alive = false;
@@ -1378,6 +1448,7 @@ private:
 	std::map<int, AbilityScan> m_abilityScans;
 	std::vector<Supply> m_supplies;
 	std::map<uint32_t, float> m_resupply; // ammo owed to soldiers (fractions of a magazine)
+	std::map<uint32_t, Received> m_received; // received()
 	// `holder`: the player whose battery pays and whose unlocks scale it
 	// (the gadget's holder, or the hub's owner); none: no battery.
 	static constexpr uint32_t kSoldierFootStepsMaterial = 5500; // 0x157c
@@ -1494,11 +1565,17 @@ private:
 	};
 	std::vector<DroppedKit> m_droppedKits;
 	bool m_reportedBlowUp = false;
+	// Stepping a LoneVehicle: no collision events or contact effects, no
+	// other bodies met.
+	bool m_predicting = false;
 	void dropKit(Player& player);
 	void fillKit(Player& player, world::ObjectTemplate* kitTemplate, world::ObjectTemplate* primary);
 	bool pickUpClosestKit(Player& player, float radius);
 	void stepDroppedKits();
 	std::vector<SoundEvent> m_sounds;
+	std::vector<WeaponSoundEvent> m_weaponSounds;
+	void weaponSound(WeaponSoundEvent::Kind kind, const Player& player, uint32_t object, const std::string& weapon,
+		const physics::Vec3& position);
 	void stepSeatCorpses(float seconds);
 	// Bodies after PlayerDeath, with their ragdolls (the soldier's armour
 	// stays a wreck until its countdown, 0x00652380, removes the object).
@@ -1821,6 +1898,31 @@ private:
 	void stepPods(float seconds);
 	void stepTitanSpawnPoints(Titan& titan);
 	void raiseTitanEvent(int eventId, uint32_t object, int attacker);
+};
+
+class GameWorld::LoneVehicle {
+public:
+	~LoneVehicle();
+	// Its state for remembering and putting back (the rigid body, the
+	// response, the engines and wheels, the sleep).
+	struct State {
+		physics::RigidBody body;
+		physics::ContactResponse response;
+		std::shared_ptr<const Vehicle> vehicle;
+		physics::SleepState sleep;
+		float submerged = 0;
+		uint32_t support = 0;
+	};
+	State save() const;
+	void restore(const State& state);
+	physics::RigidBody& body();
+	const physics::RigidBody& body() const;
+	const Vehicle* vehicle() const;
+
+private:
+	friend class GameWorld;
+	LoneVehicle();
+	std::unique_ptr<GameWorld::Body> m_body;
 };
 
 } // namespace dice::hfe::game

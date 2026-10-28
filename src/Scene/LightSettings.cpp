@@ -64,6 +64,43 @@ void registerLightConsoleMethods(Console& console, LightSettings& settings)
 			return ConsoleVec4 {f[0], f[1], f[2], f[3]};
 		},
 		[&settings](const ConsoleVec4& v) { settings.fogStartEndAndBase = {v.x, v.y, v.z, v.w}; });
+	const uint32_t access = ConsoleAccess::Anyone;
+	const auto bindFloat = [&console, access](const char* name, float& value) {
+		bindProperty<float>(console, name, access, [&value] { return value; }, [&value](const float& v) { value = v; });
+	};
+	const auto bindInt = [&console, access](const char* name, int& value) {
+		bindProperty<int>(console, name, access, [&value] { return value; }, [&value](const int& v) { value = v; });
+	};
+	const auto bindBool = [&console, access](const char* name, bool& value) {
+		bindProperty<bool>(console, name, access, [&value] { return value; }, [&value](const bool& v) { value = v; });
+	};
+	// lightManager.init (0x1007c509) resets nothing the scripts don't set next.
+	bindMethod(console, "lightManager.init", access, [] {});
+	bindVec3(console, "lightManager.treeAmbientColor", settings.treeAmbientColor);
+	bindVec3(console, "lightManager.treeSunColor", settings.treeSunColor);
+	bindVec3(console, "lightManager.treeSkyColor", settings.treeSkyColor);
+	bindVec3(console, "lightManager.staticSpecularColor", settings.staticSpecularColor);
+	bindVec3(console, "lightManager.singlePointColor", settings.singlePointColor);
+	bindVec3(console, "lightManager.effectSunColor", settings.effectSunColor);
+	bindVec3(console, "lightManager.effectShadowColor", settings.effectShadowColor);
+	bindVec3(console, "lightManager.sunSpecColor", settings.sunSpecColor);
+	bindFloat("lightManager.defaultEffectLightAffectionFactor", settings.defaultEffectLightAffectionFactor);
+	bindProperty<std::string>(console, "lightManager.groundHemi", access, [&settings] { return settings.groundHemi; },
+		[&settings](const std::string& v) { settings.groundHemi = v; });
+	bindFloat("lightManager.hemiLerpBias", settings.hemiLerpBias);
+	bindFloat("lightManager.lightCullDistance", settings.lightCullDistance);
+	bindInt("lightManager.maxLightsPerBundledMesh", settings.maxLightsPerBundledMesh);
+	bindInt("lightManager.maxLightsPerStaticMesh", settings.maxLightsPerStaticMesh);
+	bindInt("lightManager.maxLightsPerSkinnedMesh", settings.maxLightsPerSkinnedMesh);
+	bindInt("lightManager.maxLightsPerTerrainPatch", settings.maxLightsPerTerrainPatch);
+	bindFloat("lightManager.skinnedMeshShaderLodDistance", settings.skinnedMeshShaderLodDistance);
+	bindProperty<ConsoleVec2>(console, "lightManager.lightMapAmbientAlphaCutoffRange", access,
+		[&settings] {
+			return ConsoleVec2 {settings.lightMapAmbientAlphaCutoffRange[0], settings.lightMapAmbientAlphaCutoffRange[1]};
+		},
+		[&settings](const ConsoleVec2& v) { settings.lightMapAmbientAlphaCutoffRange = {v.x, v.y}; });
+	bindBool("lightManager.enableSun", settings.enableSun);
+	bindBool("lightManager.enableStencilCullerReset", settings.enableStencilCullerReset);
 }
 
 void registerWaterConsoleMethods(Console& console, WaterSettings& settings)
@@ -135,6 +172,35 @@ void registerSkyConsoleMethods(Console& console, SkySettings& settings)
 	bindProperty<float>(console, "Skydome.domeRotation", access, [&settings] { return settings.domeRotation; },
 		[&settings](const float& degrees) { settings.domeRotation = degrees; });
 	bindVec3(console, "Skydome.domePosition", settings.domePosition);
+	const auto bindFloat = [&console, access](const char* name, float& value) {
+		bindProperty<float>(console, name, access, [&value] { return value; }, [&value](const float& v) { value = v; });
+	};
+	const auto bindBool = [&console, access](const char* name, bool& value) {
+		bindProperty<bool>(console, name, access, [&value] { return value; }, [&value](const bool& v) { value = v; });
+	};
+	const auto bindString = [&console, access](const char* name, std::string& value) {
+		bindProperty<std::string>(console, name, access, [&value] { return value; },
+			[&value](const std::string& v) { value = v; });
+	};
+	const auto bindVec2 = [&console, access](const char* name, std::array<float, 2>& value) {
+		bindProperty<ConsoleVec2>(console, name, access, [&value] { return ConsoleVec2 {value[0], value[1]}; },
+			[&value](const ConsoleVec2& v) { value = {v.x, v.y}; });
+	};
+	bindFloat("Skydome.domeSize", settings.domeSize);
+	bindBool("Skydome.hasCloudLayer", settings.hasCloudLayer);
+	bindBool("Skydome.hasCloudLayer2", settings.hasCloudLayer2);
+	bindString("Skydome.cloudTemplate", settings.cloudTemplate);
+	bindString("Skydome.cloudTexture", settings.cloudTexture);
+	bindString("Skydome.cloudTexture2", settings.cloudTexture2);
+	bindVec2("Skydome.scrollDirection", settings.scrollDirection);
+	bindVec2("Skydome.scrollDirection2", settings.scrollDirection2);
+	bindVec2("Skydome.fadeCloudsDistances", settings.fadeCloudsDistances);
+	bindVec2("Skydome.cloudLerpFactors", settings.cloudLerpFactors);
+	bindString("Skydome.flareTemplate", settings.flareTemplate);
+	bindString("Skydome.flareTexture", settings.flareTexture);
+	bindVec3(console, "Skydome.flareDirection", settings.flareDirection);
+	bindFloat("Skydome.flareFadeAdd", settings.flareFadeAdd);
+	bindFloat("Skydome.flareFadeMul", settings.flareFadeMul);
 }
 
 } // namespace dice::hfe::scene

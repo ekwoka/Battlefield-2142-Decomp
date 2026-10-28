@@ -2,6 +2,7 @@
 // (src/AI/Behaviour, src/AI/Strategy, src/Game/Bots), checked against
 // values derived from the decompilation; and, where $BF2142_GAME_DIR is
 // set, the game's own AI scripts and a round on Cerbere_Landing (gpm_sp).
+#include "AI/Ballistics.h"
 #include "AI/Behaviour.h"
 #include "AI/NavMesh.h"
 #include "AI/PathFollower.h"
@@ -1792,9 +1793,9 @@ TEST(Bots_ExplosivePick)
 
 // A bot's fire plan tells its squad of the target (0x100795a0 ->
 // 0x10089b70 -> 0x100c1ce0); a squadmate that can't see the target knows
-// it then, from others (flag 8), and lobs its grenade at it: the weapon
-// choice's bonus (0x10074ef0), the high arc (0x100fa440) and the start
-// condition (0x100d8910).
+// it then, from others (flag 8). Its grenade would be lobbed at it (the
+// weapon choice's bonus 0x10074ef0, the high arc 0x100fa440, the start
+// condition 0x100d8910), but here the fire plan keeps to the order.
 TEST(Bots_SquadTargetAndGrenadeLob)
 {
 	Field field;
@@ -1842,9 +1843,15 @@ TEST(Bots_SquadTargetAndGrenadeLob)
 			threw = threw || (p.player == grenadier && p.settings && p.settings->bounces);
 		}
 	}
+	// The grenadier's order (EU's attack on cp_pac at 100/0) lies over 30 m
+	// away, the enemy on the other side: its fire plan keeps to the order
+	// (+0x248, 0x100795a0), which withholds the explosive bonus from the
+	// next weapon choice on (the first, before the plan, may give it), so
+	// it fights with the rifle on its way and throws nothing.
 	CHECK(knew);
-	CHECK(picked);
-	CHECK(threw);
+	CHECK(bots.keepsToOrder(grenadier));
+	CHECK(!threw);
+	(void)picked;
 }
 
 // MedicAssist and the radio (0x10070200): a human squadmate's "medic"
@@ -2385,6 +2392,13 @@ struct CarField {
 		point->settings()["unableToChangeTeam"] = "1";
 		objects.create(point, {-100, 0, 0});
 		objects.create(templates.create("SpawnPoint", "sp"), {0, 0, 0})->setControlPointId(2);
+		// A far point and spawn for team 1, for the enemies some tests add.
+		world::ObjectTemplate* pac = templates.create("ControlPoint", "cp_pac");
+		pac->settings()["controlPointId"] = "1";
+		pac->settings()["team"] = "1";
+		pac->settings()["unableToChangeTeam"] = "1";
+		objects.create(pac, {400, 0, 400});
+		objects.create(templates.find("sp"), {400, 0, 380})->setControlPointId(1);
 		collisionTemplates.create("as_fav", "Objects/Vehicles/as_fav/");
 		templates.create("EntryPoint", "car_entry")->settings()["entryRadius"] = "3";
 		world::ObjectTemplate* engine = templates.create("Engine", "car_engine");
@@ -2732,4 +2746,205 @@ TEST(Bots_RadioHeardAndAnswered)
 		field.ticks(30 * 5, &bots);
 		CHECK(bots.radioSent(bot).size() == 1); // the 20 s send period
 	}
+}
+
+// The ballistic lead (AIDLL 0x100fa060 / 0x100fa6f0): a round launched along
+// the solved direction meets the target where the solver says, at the time
+// it says, against gravity, drag and a moving target; the high arc for an
+// indirect weapon; the time with drag (0x100fa100) against the flight
+// (0x100fa200).
+TEST(Bots_LeadSolverMeetsTheTarget)
+{
+	using ai::Vec3;
+	const auto meets = [](const ai::RoundModel& round, Vec3 offset, Vec3 targetVelocity, bool high, float& angle,
+						 int solves = 12) {
+		ai::LeadSolver solver;
+		Vec3 dir {0, 0, 1}, impact;
+		double t = 0;
+		bool ok = false;
+		for (int i = 0; i < solves; ++i) { // the angle persists between solves, as each aim tick
+			solver.setup(offset, targetVelocity, {}, {0, 0, 1}, 0, round);
+			ok = solver.solve(0, 0.5f, high, dir, impact, &t);
+		}
+		angle = solver.angle();
+		if (!ok) {
+			return 1e9f;
+		}
+		Vec3 at;
+		solver.roundAt(dir, static_cast<float>(t), at);
+		const Vec3 target = offset + targetVelocity * static_cast<float>(t);
+		const Vec3 d = at - target;
+		return std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+	};
+	float angle = 0;
+	// Straight: no gravity, no drag, the target still.
+	ai::RoundModel flat {300, 0, 0};
+	CHECK(meets(flat, {0, 10, 200}, {}, false, angle) < 0.2f);
+	CHECK(near(angle, std::atan2(10.0f, 200.0f), 0.002f));
+	// Gravity: the arc above the line, the round on the target.
+	ai::RoundModel rifle {300, 0, -14.73f};
+	CHECK(meets(rifle, {0, 0, 400}, {}, false, angle) < 0.5f);
+	CHECK(angle > 0.02f);
+	// A moving target.
+	CHECK(meets(rifle, {50, 0, 300}, {0, 0, 12}, false, angle) < 0.6f);
+	// Drag.
+	ai::RoundModel slow {120, 0.05f, -14.73f};
+	CHECK(meets(slow, {0, 5, 250}, {}, false, angle) < 1.0f);
+	// The high arc of an indirect weapon: found on the second solve (the
+	// first only starts the search). Each solve pulls the angle halfway to
+	// 1.508 before searching (0x100fa88e), so later solves wander round it
+	// as the original's do.
+	ai::RoundModel mortar {80, 0, -14.73f};
+	CHECK(meets(mortar, {0, 0, 300}, {}, true, angle, 2) < 1.5f);
+	CHECK(near(angle, 0.5f * (3.14159265f - std::asin(300 * 14.73f / 6400)), 0.01f));
+	// The time with drag covers the distance the flight does.
+	ai::LeadSolver solver;
+	solver.setup({0, 0, 100}, {}, {}, {0, 0, 1}, 0, slow);
+	const float t = solver.flightTime(100, 120);
+	ai::RoundModel noGravity = slow;
+	noGravity.gravity = 0;
+	solver.setup({0, 0, 100}, {}, {}, {0, 0, 1}, 0, noGravity);
+	CHECK(near(solver.flight({120, 0, 0}, t).x, 100, 1.5f));
+	CHECK(solver.flightTime(1e6f, 1) == 1000);
+	// The drag the AI weapon keeps (0x00892be0).
+	CHECK(near(ai::roundDrag(10, 2, 1), 0.157f, 1e-3f));
+	CHECK(ai::roundDrag(10, 2, 3) == 0.3f && ai::roundDrag(0, 2, 3) == 0);
+	CHECK(ai::roundDrag(4, 2, 0) == 4);
+}
+
+// The on-target condition (0x100dcab0 / 0x100dcb00): within atan(0.0125 d)
+// of the solution and a round fired now landing within d of the impact; a
+// weapon that isn't automatic fires at the closest approach.
+TEST(Bots_OnTargetWaitsForTheClosestApproach)
+{
+	using ai::Vec3;
+	ai::RoundModel round {400, 0, 0};
+	const auto aimed = [&](float yaw, ai::LeadSolver& solver, Vec3& dir, Vec3& impact, double& t) {
+		solver.setup({0, 0, 200}, {}, {}, {std::sin(yaw), 0, std::cos(yaw)}, 0, round);
+		dir = {0, 0, 1};
+		return solver.solve(0, 0.5f, false, dir, impact, &t);
+	};
+	ai::LeadSolver solver;
+	Vec3 dir, impact;
+	double t = 0;
+	ai::OnTargetTest automatic(0.5f, false);
+	CHECK(near(automatic.maxAngle(), std::atan(0.00625f)));
+	bool ok = aimed(0, solver, dir, impact, t);
+	CHECK(automatic.test(ok, solver, dir, impact, t, 0));
+	ok = aimed(0.01f, solver, dir, impact, t); // 2 m off at 200 m
+	CHECK(!automatic.test(ok, solver, dir, impact, t, 0));
+	CHECK(!automatic.test(false, solver, dir, impact, t, 0));
+	// Sweeping across: held while closing, fired as the miss grows.
+	ai::OnTargetTest single(0.5f, true);
+	std::vector<bool> fired;
+	for (float yaw : {0.004f, 0.002f, 0.0005f, -0.001f, -0.003f}) {
+		ok = aimed(yaw, solver, dir, impact, t);
+		fired.push_back(single.test(ok, solver, dir, impact, t, 0));
+	}
+	CHECK(!fired[0] && !fired[1] && !fired[2] && fired[3] && !fired[4]);
+}
+
+// The bail_out radio in BBChange (0x1006c520 -> 0x100a5990): a driver
+// that takes the way out with its vehicle at or under the bot manager's
+// floor + 0.1 (+0xdc 0.3, slot 0x68: 0.4) says bail_out (type 0) on the
+// AI's channel 7 (TCVehicle).
+TEST(Bots_BailOutRadioLeavingAWreck)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	CarField field(gameDir);
+	const uint32_t car = field.car("car", 3, 0);
+	const int bot = field.soldier("Bot", true, 0, 0);
+	field.ticks(90);
+	field.board(bot, 0);
+	CHECK(field.info(bot).vehicle == car);
+	game::BotManager bots(*field.world, field.settings);
+	field.world->setHitPoints(car, 5);
+	bool out = false;
+	for (int tick = 0; tick < 30 * 3 && !out; ++tick) {
+		field.ticks(1, &bots);
+		out = field.info(bot).vehicle == 0;
+	}
+	CHECK(out);
+	bool said = false;
+	for (const game::BotManager::RadioSent& r : bots.radioSent(bot)) {
+		said = said || (r.type == 0 && r.channel == 7);
+	}
+	CHECK(said);
+}
+
+// BBChangeLandingCraft (0x1006f460) inside its vehicle: a passenger whose
+// driver's seat is free weighs that seat + 100 (a root with a Mobile part)
+// and moves to it.
+TEST(Bots_LandingCraftTakesTheFreeDriversSeat)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	CarField field(gameDir);
+	std::string out;
+	field.console.execute("aiSettings.setVehicleBehaviour Fixed Change BBChangeLandingCraft BBPChange 3 UCUnion UnitWeights", out);
+	const uint32_t car = field.car("car", 3, 0);
+	const int bot = field.soldier("Bot", true, 0, 0);
+	field.ticks(90);
+	field.board(bot, 1);
+	CHECK(field.info(bot).vehicle == car && field.info(bot).seat == 1);
+	game::BotManager bots(*field.world, field.settings);
+	bool driving = false;
+	float urgency = 0;
+	for (int tick = 0; tick < 30 * 5 && !driving; ++tick) {
+		field.ticks(1, &bots);
+		urgency = std::max(urgency, bots.lastUrgency(bot, "Change"));
+		driving = field.info(bot).vehicle == car && field.info(bot).seat == 0;
+	}
+	CHECK(urgency > 0);
+	CHECK(driving);
+}
+
+// BBFire3d (0x1007e1b0 / 0x1007d6c0): a bot aboard with a Fire3d set
+// scores a known enemy soldier and the urgency is fuzzy(2 best) x the
+// weight (7.5 here, the fuzzy table saturated); a teammate scores nothing.
+TEST(Bots_Fire3dScoresKnownEnemies)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	CarField field(gameDir);
+	std::string out;
+	for (const char* line : {"aiSettings.createUCConstant UCFire 1.0", "aiSettings.setBehaviourModifier Fire 7.5",
+			 "aiSettings.setVehicleBehaviour Car Fire BBFire3d BBPHeliFire3d 2 UCFire UnitWeights",
+			 "aiSettings.setVehicleBehaviour Fixed Fire BBFire3d BBPHeliFire3d 2 UCFire UnitWeights",
+			 "aiSettings.createBehaviourModifiers UnitWeights", "aiSettings.setBehaviourModifier Idle 1.0",
+			 "aiSettings.setBehaviourModifier Fire 1.0", "aiSettings.setViewDistance 200"}) {
+		field.console.execute(line, out);
+	}
+	const uint32_t car = field.car("car", 3, 0);
+	const int bot = field.soldier("Bot", true, 0, 0);
+	const int mate = field.soldier("Mate", false, 3, 15);
+	field.ticks(90);
+	field.board(bot, 0);
+	CHECK(field.info(bot).vehicle == car);
+	game::BotManager bots(*field.world, field.settings);
+	field.ticks(60, &bots);
+	CHECK(bots.lastUrgency(bot, "Fire") == 0); // a teammate only
+	field.templates.create("Soldier", "pac_light_soldier")->settings()["armor.maxHitPoints"] = "100";
+	const int enemy = field.world->addPlayer("Enemy", 1, false);
+	field.world->spawnSoldier(enemy);
+	game::GameWorld::PlayerInfo e;
+	field.world->playerInfo(enemy, e);
+	const game::GameWorld::PlayerInfo me = field.info(bot);
+	field.world->setSoldierPosition(e.soldier,
+		{me.position.x + 4, 0, me.position.z + 1}); // close: seen whatever the view
+	float urgency = 0;
+	for (int tick = 0; tick < 30 * 3; ++tick) {
+		field.ticks(1, &bots);
+		urgency = std::max(urgency, bots.lastUrgency(bot, "Fire"));
+	}
+	(void)mate;
+	CHECK(bots.knows(bot, enemy));
+	CHECK(urgency > 0 && bots.target(bot) == enemy);
 }

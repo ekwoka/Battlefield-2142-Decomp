@@ -258,7 +258,7 @@ void SoundManager::addMenuSound(const std::string& name, const std::string& file
 void SoundManager::addSound(const std::string& name)
 {
 	ISound* instance = nullptr;
-	const world::ObjectTemplate* objectTemplate = m_templates.find("S_Game_" + name);
+	world::ObjectTemplate* objectTemplate = m_templates.create(SoundObjectTemplate::kClassId, "S_Game_" + name);
 	if (const auto* sound = dynamic_cast<const SoundObjectTemplate*>(objectTemplate)) {
 		if (sound->engineTemplate()) {
 			instance = sound->engineTemplate()->createSound();
@@ -275,6 +275,32 @@ void SoundManager::addSound(const std::string& name)
 		slot->release();
 	}
 	slot = instance;
+}
+
+ISoundTemplate* SoundManager::soundTemplate(const std::string& templateName) const
+{
+	const auto* sound = dynamic_cast<const SoundObjectTemplate*>(m_templates.find(templateName));
+	return sound ? sound->engineTemplate() : nullptr;
+}
+
+bool SoundManager::hasSound(const std::string& templateName) const
+{
+	const auto* sound = dynamic_cast<const SoundObjectTemplate*>(m_templates.find(templateName));
+	return sound && sound->hasFiles();
+}
+
+void SoundManager::addTrigger(const std::string& templateName)
+{
+	if (!m_engine) {
+		return;
+	}
+	if (m_engine->qualityLevel() == 2 && m_engine->ambientEmitterCount() > 0) {
+		return;
+	}
+	if (ISoundTemplate* sound = soundTemplate(templateName)) {
+		sound->markSoundFilesUsed();
+		m_engine->addAmbientEmitter(sound);
+	}
 }
 
 ISound* SoundManager::findSound(const std::string& name) const
@@ -406,8 +432,69 @@ void SoundManager::setVolumeForGroup(int group, float volume)
 	}
 	m_groupVolumes[static_cast<size_t>(group)] = std::clamp(volume, 0.0f, 1.0f);
 	if (m_engine) {
-		m_engine->setVolume(group, m_groupVolumes[static_cast<size_t>(group)]);
+		m_engine->setVolume(group, m_groupVolumes[static_cast<size_t>(group)] * m_duck[static_cast<size_t>(group)].current);
 	}
+}
+
+// 0x007f9af0. The steps are the tweaks sound-mute-fadein-1p / -fadeout-1p
+// (0x3eaa7efa, 0x3e2ab368) for reason 4, sound-mute-fadein-vo / -fadeout-vo
+// (0x3d889a02) otherwise (0x008f0000's tweak table).
+void SoundManager::setMuted(int reason, bool muted)
+{
+	if (reason < 0 || reason >= static_cast<int>(m_mute.size())) {
+		return;
+	}
+	m_mute[static_cast<size_t>(reason)] = muted;
+	Duck& effects = m_duck[0];
+	if (reason == 4) {
+		effects.riseStep = 0.333f;
+		effects.fallStep = 0.1667f;
+	} else {
+		effects.riseStep = 0.0667f;
+		effects.fallStep = 0.0667f;
+	}
+}
+
+float SoundManager::duckedVolume(int group) const
+{
+	return group >= 0 && group < static_cast<int>(m_duck.size()) ? m_duck[static_cast<size_t>(group)].current : 1.0f;
+}
+
+// 0x007f9f50, once an update: the targets from the reasons (reason 0 a
+// one-update pulse at 0.25, 1 all of groups 0-3 silent, 2 groups 0 and 2
+// silent, 3 a voice-over: group 0 at 0.125, 4 firing: group 0 x 0.4 on
+// top), every group a step towards its target, the engine's group volume
+// the user's x that.
+void SoundManager::updateDucking()
+{
+	constexpr float kPulse = 0.25f;   // +0x188
+	constexpr float kVoice = 0.125f;  // +0x194
+	constexpr float kFiring = 0.4f;   // sound-mute-level-1p
+	const bool off = m_mute[1];
+	const bool off02 = m_mute[2] || off;
+	const float pulse = m_mute[0] ? kPulse : 1.0f;
+	float effects = off02 ? 0.0f : m_mute[3] ? kVoice : pulse;
+	m_duck[1].target = off ? 0.0f : pulse;
+	m_duck[2].target = off02 ? 0.0f : pulse;
+	m_duck[3].target = off ? 0.0f : pulse;
+	m_duck[4].target = effects;
+	if (m_mute[4]) {
+		effects *= kFiring;
+	}
+	m_duck[0].target = effects;
+	for (size_t group = 0; group < m_duck.size(); ++group) {
+		Duck& d = m_duck[group];
+		if (d.current < d.target) {
+			d.current = std::min(d.current + d.riseStep, d.target);
+		} else if (d.current > d.target) {
+			d.current = std::max(d.current - d.fallStep, d.target);
+		}
+		if (m_engine) {
+			m_engine->setVolume(static_cast<int>(group), m_groupVolumes[group] * d.current);
+		}
+	}
+	m_mute[0] = false;
+	m_mute[3] = false;
 }
 
 float SoundManager::volumeForGroup(int group) const
@@ -470,8 +557,56 @@ void SoundManager::reloadSoundFiles()
 	}
 }
 
+void SoundManager::setListener(const Vec3& position, const Vec3& forward, const Vec3& up, const Vec3& velocity,
+	bool insideTitan)
+{
+	m_listenerPosition = position;
+	m_listenerForward = forward;
+	m_listenerUp = up;
+	m_listenerVelocity = velocity;
+	if (m_engine && !m_listenerSet) {
+		m_engine->setListenerPosition(&m_listenerPosition);
+		m_engine->setListenerOrientation(&m_listenerForward, &m_listenerUp);
+		m_engine->setListenerVelocity(&m_listenerVelocity);
+	}
+	m_listenerSet = true;
+	if (m_engine) {
+		m_engine->setListenerInsideTitan(insideTitan);
+	}
+}
+
+float SoundManager::indoorLevel(const Vec3& at) const
+{
+	if (!m_rayTest) {
+		return 0.0f;
+	}
+	constexpr float kRayLength = 15.0f;   // sound-raylength
+	constexpr float kMaxReverb = 0.5f;    // sound-maxreverb
+	constexpr float kSteepness = 0.98f;   // sound-reverb-steepness
+	float up1 = 0, up2 = 0, down = 0;
+	const Vec3 a {at.x + 0.4f, at.y, at.z + 0.3f};
+	const Vec3 b {at.x - 0.4f, at.y, at.z - 0.3f};
+	if (!m_rayTest(a, a + Vec3 {0, kRayLength, 0}, up1) || !m_rayTest(b, b + Vec3 {0, kRayLength, 0}, up2)
+		|| !m_rayTest(at, at - Vec3 {0, kRayLength, 0}, down)) {
+		return 0.0f;
+	}
+	const float height = std::clamp(down + (up1 + up2) * 0.5f, 0.0f, kRayLength);
+	return kMaxReverb * height / (kSteepness * height + (1.0f - kSteepness) * kRayLength);
+}
+
 void SoundManager::update(int ticks)
 {
+	updateDucking();
+	if (m_engine && m_listenerSet && m_rayTest) {
+		// The rays again once the listener has moved half a metre, or every
+		// 15 frames (the original casts them each frame).
+		if ((m_listenerPosition - m_indoorAt).lengthSquared() > 0.25f || ++m_indoorAge >= 15) {
+			m_indoorAt = m_listenerPosition;
+			m_indoorAge = 0;
+			m_indoorLevel = indoorLevel(m_listenerPosition);
+			m_engine->setIndoorLevel(m_indoorLevel);
+		}
+	}
 	if (m_engine) {
 		m_engine->update(ticks);
 	}

@@ -276,6 +276,8 @@ void printStats(const render::LevelStats& stats)
 				"%zu terrain patches, %zu roads (%zu missing)\n",
 		stats.meshes, stats.missingMeshes, stats.textures, stats.missingTextures, stats.instances,
 		stats.lightmappedInstances, stats.terrainPatches, stats.roads, stats.missingRoads);
+	std::printf("renderer: hemi map %s, %zu cloud layers, sun flare %s\n", stats.hemiMap ? "yes" : "no", stats.cloudLayers,
+		stats.sunFlare ? "yes" : "no");
 	for (const std::string& missing : stats.missingMeshNames) {
 		std::printf("  missing mesh %s\n", missing.c_str());
 	}
@@ -433,6 +435,15 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					int w = 1, h = 1;
 					SDL_GetWindowSize(window, &w, &h);
 					options.onClick(event.button.x * 800.0f / static_cast<float>(w), event.button.y * 600.0f / static_cast<float>(h));
+				} else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_RIGHT && pointer
+					&& options.onRightClick) {
+					int w = 1, h = 1;
+					SDL_GetWindowSize(window, &w, &h);
+					options.onRightClick(event.button.x * 800.0f / static_cast<float>(w), event.button.y * 600.0f / static_cast<float>(h));
+				} else if (event.type == SDL_EVENT_MOUSE_MOTION && playing && pointer && options.onPointerMove) {
+					int w = 1, h = 1;
+					SDL_GetWindowSize(window, &w, &h);
+					options.onPointerMove(event.motion.x * 800.0f / static_cast<float>(w), event.motion.y * 600.0f / static_cast<float>(h));
 				} else if (event.type == SDL_EVENT_MOUSE_MOTION && playing && !pointer) {
 					const float scale = options.mouseScale ? options.mouseScale() : 1.0f;
 					const float up = options.invertMouse && options.invertMouse() ? -1.0f : 1.0f;

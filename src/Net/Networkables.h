@@ -300,13 +300,23 @@ struct NetworkableState {
 // `reference` is the stream's reference position (the control-object
 // record's position in this ghost block, else the origin).
 // `mode` 2 for ghost updates, 3 for the control-object record.
+// A control-object record's history slot keeps, per SimpleObject in the
+// record (0x005fe230 stores it: 0x24 bytes each, the slot's cursor +0x400),
+// the node's position, velocity and angular velocity; a relative record's
+// SimpleObjects are written as deltas from that copy (0x005ff5d0 /
+// 0x005ffec0 with the slot). The other networkables in the shipped game
+// keep none.
+struct MotionHistory {
+	Vec3f position, velocity, angularVelocity;
+};
+
 bool decodeNetworkable(BitReader& in, const NetworkableHints& hints, const Vec3f& reference, NetworkableState& out,
-	unsigned mode = 2);
+	unsigned mode = 2, const MotionHistory* history = nullptr);
 // Writes one as the original writer does for the fields NetworkableState
 // holds (others present in the mask are written as zero), for tests and the
 // loopback server. `reference` nullptr: positions go as raw floats.
 void encodeNetworkable(BitWriter& out, const NetworkableHints& hints, const Vec3f* reference, const NetworkableState& state,
-	unsigned mode = 2);
+	unsigned mode = 2, const MotionHistory* history = nullptr);
 
 // The player's own state, the last part of the control-object record
 // (after its 10-bit length): the player's vtable 0x1c8 writes it
@@ -357,7 +367,8 @@ struct PlayerOwnStateHints {
 	bool controlObject = true;     // the control object has a PlayerControlObject on its parent chain
 	// Per weapon group: the selected firearm answers interface 0x94c0 slot 0x30
 	// (0x005c1360: its template's vector at +0x2c8, set by 0x00522125, has y
-	// > 0; the setting's name wasn't traced, so the rewrite's sides pass false).
+	// > 0: ObjectTemplate.maxResetSpeed, see net::firearmSendsHeat; no
+	// shipped firearm sets it, so the rewrite's sides pass false).
 	bool weaponHeat[3] {};
 };
 bool decodePlayerOwnState(BitReader& in, const PlayerOwnStateHints& hints, PlayerOwnState& out);

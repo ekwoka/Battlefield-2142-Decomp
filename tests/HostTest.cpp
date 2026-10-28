@@ -2,19 +2,27 @@
 // HostedGame) against the rewrite's own client, over UDP on 127.0.0.1.
 #include "TestMain.h"
 
+#include "Console/Console.h"
+#include "Console/ConsoleBinding.h"
 #include "Game/GameLogic.h"
 #include "Game/GameWorld.h"
 #include "IO/File/FileManager.h"
 #include "Main/HostedGame.h"
 #include "Main/Prediction.h"
 #include "Physics/CollisionTemplateManager.h"
+#include "Physics/MaterialManager.h"
 #include "Net/GameClient.h"
 #include "Net/GameServer.h"
 #include "Net/ServerQuery.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
+#include "World/TemplateFiles.h"
+#include "World/WorldConsole.h"
 
 #include <chrono>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
 #include <cmath>
 #include <functional>
 #include <map>
@@ -224,8 +232,28 @@ TEST(NetHost_HostedGameJoin)
 	}));
 	CHECK(!heard.empty() && heard[0].text == "hello all" && heard[0].player == client.world().localPlayer());
 	CHECK(hosted.clientCount() == 1);
+	const int joinerId = client.world().localPlayer();
 	client.disconnect();
 	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
+	// The player went with its client (GameWorld::removePlayer): out of the
+	// round's list, its id free; the next client takes it.
+	dice::hfe::game::GameWorld::PlayerInfo gone;
+	CHECK(!round.playerInfo(joinerId, gone) && round.playerList().size() == 1);
+	net::GameClient second;
+	options.playerName = "Second";
+	CHECK(second.connect("127.0.0.1", hosted.gamePort(), options));
+	const auto stepSecond = [&] {
+		second.update();
+		hosted.tick();
+		round.tick(1.0f / 30);
+	};
+	CHECK(pumpUntil(stepSecond, [&] {
+		const net::RemotePlayer* me = second.world().player(second.world().localPlayer());
+		return me && me->name == "Second";
+	}));
+	CHECK(second.world().localPlayer() == joinerId && round.playerList().size() == 2);
+	second.disconnect();
+	CHECK(pumpUntil(stepSecond, [&] { return hosted.clientCount() == 0; }));
 }
 
 namespace {
@@ -421,4 +449,285 @@ TEST(NetHost_PredictionAndSession)
 	CHECK(hosted.kickPlayer(client.world().localPlayer()));
 	CHECK(pumpUntil(stepNext, [&] { return client.state() != net::GameClient::State::Connected; }));
 	CHECK(hosted.clientCount() == 0);
+}
+
+namespace {
+
+// The shipped object templates and materials on flat ground (as
+// VehicleModelsTest's garage), with a control point and a spawn point for
+// team 2 and one vehicle.
+struct HostGarage {
+	dice::hfe::io::FileManager files;
+	dice::hfe::Console console {&files};
+	dice::hfe::world::ObjectTemplateManager templates;
+	dice::hfe::world::ObjectManager objects;
+	dice::hfe::physics::CollisionTemplateManager collisionTemplates;
+	dice::hfe::physics::MaterialManager materials;
+	std::unique_ptr<dice::hfe::game::GameWorld> round;
+	dice::hfe::game::GameLogic logic;
+	uint32_t vehicle = 0;
+
+	HostGarage(const char* gameDir, const char* vehicleName, const dice::hfe::physics::Vec3& at)
+	{
+		using namespace dice::hfe;
+		files.setRootPath(gameDir);
+		files.addSearchPath("mods/bf2142");
+		files.setMountingAllowed(true);
+		bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+			[this](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+		std::string out;
+		console.run("ServerArchives.con", {}, out);
+		files.setMountingAllowed(false);
+		world::registerWorldConsoleMethods(console, templates, objects);
+		templates.setCurrentFileProvider([this] { return console.currentFile(); });
+		physics::registerCollisionConsoleMethods(console, collisionTemplates);
+		physics::registerMaterialConsoleMethods(console, materials);
+		std::vector<std::string> untyped;
+		std::ifstream table(std::string(BF2142_SOURCE_DIR) + "/symbols/BF2142.exe.console.csv");
+		std::string line;
+		std::getline(table, line);
+		while (std::getline(table, line)) {
+			std::vector<std::string> cols;
+			std::stringstream row(line);
+			for (std::string col; std::getline(row, col, ',');) {
+				cols.push_back(col);
+			}
+			if (cols.size() >= 6 && cols[0] == "ObjectTemplate" && !console.hasMethod("ObjectTemplate." + cols[1])
+				&& (cols[2] == "property" || (cols[2] == "method" && cols[4] == "1" && cols[5] == "1"))) {
+				untyped.push_back(cols[1]);
+			}
+		}
+		world::registerUntypedTemplateProperties(console, templates, untyped);
+		std::ifstream constants(std::string(BF2142_SOURCE_DIR) + "/symbols/BF2142.exe.constants.csv");
+		while (std::getline(constants, line)) {
+			const size_t comma = line.find(',');
+			if (comma != std::string::npos) {
+				console.registerConstant(line.substr(0, comma), line.substr(comma + 1));
+			}
+		}
+		templates.setLoading(true);
+		world::loadObjectTemplates(console, files, "Objects/", false);
+		templates.setLoading(false);
+		console.run("Common/Material/MaterialManagerSettings.con", {}, out);
+		world::ObjectTemplate* point = templates.create("ControlPoint", "garage_cp");
+		point->settings()["controlPointId"] = "2";
+		point->settings()["team"] = "2";
+		point->settings()["unableToChangeTeam"] = "1";
+		objects.create(point, {-200, 0, 0});
+		world::ObjectTemplate* spawn = templates.create("SpawnPoint", "garage_sp");
+		objects.create(spawn, {0, 0, 0}, {0, 0, 0})->setControlPointId(2);
+		world::ObjectTemplate* t = templates.find(vehicleName);
+		if (!t) {
+			return;
+		}
+		world::Object* made = objects.create(t, {at.x, at.y, at.z}, {0, 0, 0});
+		made->setTeam(2);
+		vehicle = made->id();
+		round = std::make_unique<game::GameWorld>(templates, objects);
+		round->enablePhysics(files, collisionTemplates,
+			{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
+				 normal = {0, 1, 0};
+				 return 0.0f;
+			 }},
+			&materials);
+		round->startRound();
+		logic.startRound();
+	}
+};
+
+} // namespace
+
+// The vehicle prediction end to end: a client drives a shipped car on the
+// host over 127.0.0.1; its own copy (GameWorld::LoneVehicle) is stepped
+// with each move it sends and corrected by each record of the driver's
+// seat (Prediction.h's VehiclePrediction). Needs $BF2142_GAME_DIR.
+TEST(NetHost_VehiclePrediction)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		std::printf("  (BF2142_GAME_DIR not set: skipped)\n");
+		return;
+	}
+	HostGarage garage(gameDir, "eu_fav", {0, 0, 12});
+	CHECK(garage.round != nullptr);
+	if (!garage.round) {
+		return;
+	}
+	dice::hfe::game::GameWorld& round = *garage.round;
+	host::HostSetup setup;
+	setup.level = "Garage";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, garage.logic, garage.templates, setup);
+	CHECK(hosted.start());
+
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Driver";
+	client.world().setGhostTemplates([&garage](uint32_t id) {
+		const dice::hfe::world::ObjectTemplate* t = garage.templates.findById(id);
+		return t ? net::ghostTemplateFrom(garage.templates, *t) : net::GhostTemplateNode {};
+	});
+	host::SoldierPrediction soldier(round);
+	host::VehiclePrediction car(round);
+	client.onMoveSent = [&](const net::PlayerMove& move) {
+		soldier.step(move);
+		car.step(move);
+	};
+	client.sendOnTicks = true;
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+
+	dice::hfe::game::SoldierInput drive;
+	uint32_t records = 0;
+	float worstSeen = 0;
+	int frame = 0;
+	const auto step = [&] {
+		++frame;
+		client.setInput(net::playerInputFrom(drive));
+		client.update();
+		const net::RemoteWorld& world = client.world();
+		if (world.controlRecords() != records) {
+			records = world.controlRecords();
+			const net::ControlState* state = world.controlState();
+			const net::ControlObjectRecord& record = world.controlObject();
+			if (state && !state->groups.empty()) {
+				const net::NetworkableState& root = state->groups.front();
+				if (root.kind == net::NetworkableKind::Soldier) {
+					car.stop();
+					if (!soldier.active()) {
+						soldier.start(garage.templates.find("eu_light_soldier"), record.lastMove, root, record.position);
+					} else {
+						soldier.reconcile(record.lastMove, root, record.position);
+					}
+				} else if (root.kind == net::NetworkableKind::SimpleObject && record.vehicle) {
+					soldier.stop();
+					const net::RemoteObject* seen = world.object(record.vehicle);
+					const dice::hfe::world::ObjectTemplate* t = seen ? garage.templates.findById(seen->templateId) : nullptr;
+					if (!car.active()) {
+						car.start(t, record.lastMove, root, record.position);
+					} else {
+						car.reconcile(record.lastMove, root, record.position);
+					}
+				}
+			}
+		}
+		client.simulatedTick();
+		hosted.tick();
+		round.tick(1.0f / 30);
+		if (car.active()) {
+			// The prediction against the host's car at the same moment
+			// (the host has taken every move sent but those in flight).
+			const dice::hfe::world::Object* v = garage.objects.find(garage.vehicle);
+			worstSeen = std::max(worstSeen, distance(car.position(), {v->position().x, v->position().y, v->position().z}));
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(33));
+	};
+	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 8000));
+	const int me = client.world().localPlayer();
+	client.selectTeam(2);
+	dice::hfe::game::GameWorld::PlayerInfo info;
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.team == 2; }));
+	client.selectSpawnGroup(-1);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.alive; }, 6000));
+	// Beside the car, then in: the use key until the host seats us.
+	for (int tries = 0; tries < 40 && !(round.playerInfo(me, info) && info.vehicle); ++tries) {
+		const float a = static_cast<float>(tries % 8) * 0.785398f, r = 1.5f + static_cast<float>(tries / 8);
+		round.playerInfo(me, info);
+		round.setSoldierPosition(info.soldier, {r * std::sin(a), 0, 12 + r * std::cos(a)});
+		drive = {};
+		drive.use = true;
+		for (int i = 0; i < 4; ++i) {
+			step();
+		}
+		drive = {};
+		for (int i = 0; i < 4; ++i) {
+			step();
+		}
+	}
+	CHECK(round.playerInfo(me, info) && info.vehicle == garage.vehicle && info.seat == 0);
+	CHECK(pumpUntil(step, [&] { return car.active(); }, 4000));
+	const dice::hfe::world::Object* v = garage.objects.find(garage.vehicle);
+	const dice::hfe::physics::Vec3 from {v->position().x, v->position().y, v->position().z};
+	// Drive: full throttle, steering one way then the other, a stop.
+	for (int i = 0; i < 30 * 10; ++i) {
+		drive = {};
+		drive.throttle = i < 30 * 8 ? 1.0f : -1.0f;
+		drive.strafe = (i / 60) % 3 == 1 ? 0.7f : (i / 60) % 3 == 2 ? -0.5f : 0.0f;
+		step();
+	}
+	const host::VehiclePrediction::Stats& st = car.stats();
+	const float driven = distance(car.position(), from);
+	std::printf("  vehicle prediction: %u steps, %u records (%u for moves not remembered), %u replayed, driven %.1f m; "
+				"correction mean %.4f m, max %.4f m (%u over 1 cm); the prediction at most %.2f m from the host's car\n",
+		st.steps, st.records, st.unknownMoves, st.replayed, driven, st.records ? st.sumCorrection / st.records : 0.0,
+		st.maxCorrection, st.corrections, worstSeen);
+	std::printf("  control records: %u decoded, %u of them relative to a history slot\n", client.world().controlStates(),
+		client.world().relativeControlStates());
+	CHECK(client.world().relativeControlStates() > client.world().controlStates() / 2);
+	CHECK(client.world().controlStates() + 2 >= client.world().controlRecords());
+	CHECK(st.records > 100 && st.unknownMoves < st.records / 10);
+	CHECK(driven > 20);
+	CHECK(st.sumCorrection / std::max(1u, st.records) < 0.05);
+	client.disconnect();
+}
+
+// GameWorld::removePlayer (the game server's destroyPlayer, 0x004acfb0):
+// the soldier dies and lies, the squad and the command are left, the id is
+// free for the next player.
+TEST(GameWorld_RemovePlayerFreesItsSlot)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	const int a = round.addPlayer("A", 1, false);
+	const int b = round.addPlayer("B", 1, false);
+	CHECK(round.spawnSoldier(a) && round.joinSquad(a, 1) && round.joinSquad(b, 1));
+	round.setCommander(1, b); // may be refused without a commander kit
+	dice::hfe::game::GameWorld::PlayerInfo info;
+	CHECK(round.playerInfo(a, info) && info.alive && info.squad == 1);
+	const uint32_t soldier = info.soldier;
+	CHECK(round.removePlayer(a));
+	CHECK(!round.playerInfo(a, info) && !round.removePlayer(a));
+	CHECK(round.objects().find(soldier) != nullptr); // the body lies on
+	CHECK(round.playerList().size() == 1);
+	CHECK(round.playerInfo(b, info) && info.squad == 1);
+	const int commanderBefore = round.commander(1);
+	CHECK(round.removePlayer(b));
+	CHECK(commanderBefore != b || round.commander(1) != b);
+	// The lowest free id first.
+	CHECK(round.addPlayer("C", 2, false) == a && round.addPlayer("D", 2, false) == b);
+	CHECK(round.addPlayer("E", 2, false) == 2);
+	CHECK(round.playerInfo(a, info) && info.name == "C" && info.team == 2 && !info.alive && info.squad == 0);
+	for (int i = 0; i < 30; ++i) {
+		round.tick(1.0f / 30);
+	}
+}
+
+// The crosshair object and Radio.sendSpottedMessage (0x0075be30, 0x007c8160):
+// the enemy the view's ray meets is reported to the spotter's squad.
+TEST(GameWorld_SpottedCrosshairTarget)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	const int a = round.addPlayer("A", 1, false);
+	const int b = round.addPlayer("B", 2, false);
+	const int c = round.addPlayer("C", 1, false);
+	CHECK(round.spawnSoldier(a) && round.spawnSoldier(b) && round.spawnSoldier(c));
+	round.tick(1.0f / 30);
+	dice::hfe::game::GameWorld::PlayerInfo me, enemy, mate;
+	round.playerInfo(a, me);
+	round.playerInfo(b, enemy);
+	round.playerInfo(c, mate);
+	const float yaw = me.yaw * 3.14159265f / 180.0f;
+	const dice::hfe::physics::Vec3 ahead {std::sin(yaw), 0, std::cos(yaw)};
+	round.setSoldierPosition(mate.soldier, me.position + ahead * 8.0f + dice::hfe::physics::Vec3 {3, 0, 0});
+	round.setSoldierPosition(enemy.soldier, me.position + ahead * 30.0f);
+	round.tick(1.0f / 30);
+	CHECK(round.crosshairTarget(c) == -1 || round.crosshairTarget(c) == b);
+	dice::hfe::physics::Vec3 at;
+	CHECK(round.crosshairTarget(a, 300, &at) == b);
+	CHECK(round.crosshairTarget(a, 10) == -1); // out of reach
+	CHECK(!round.squadKnows(1, 0, b));
+	CHECK(round.spotCrosshair(a) == b);
+	CHECK(round.squadKnows(1, 0, b));
 }

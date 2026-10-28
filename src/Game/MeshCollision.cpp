@@ -337,6 +337,9 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 			}
 		}
 	}
+	if (m_predicting) {
+		return; // a LoneVehicle meets the static objects only
+	}
 	// The other bodies but those that were movers already (before it, awake).
 	for (size_t j = 0; j < m_bodies.size(); ++j) {
 		Body& other = m_bodies[j];
@@ -488,7 +491,9 @@ bool GameWorld::meshPair(MeshActor& a, MeshActor& b, float seconds, bool trunkOn
 		if (a.helicopter && a.body->wreckTime < 0) {
 			physics::SphereContact hit;
 			if (b.mesh->segmentContact(a.body->lastPosition, a.position, b.rotation, b.position, hit)) {
-				damage(a.body->object, 1e10f, 0x29a, 0x29a, -1);
+				if (!m_predicting) {
+					damage(a.body->object, 1e10f, 0x29a, 0x29a, -1);
+				}
 				return false;
 			}
 		}
@@ -858,6 +863,9 @@ void GameWorld::collisionEvent(uint32_t self, uint32_t other, const Vec3& veloci
 	const Vec3& point, uint32_t ownMaterial, uint32_t otherMaterial)
 {
 	(void)point;
+	if (m_predicting) {
+		return;
+	}
 	const world::Object* object = m_objects.find(self);
 	const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
 	if (!t) {
@@ -1031,7 +1039,7 @@ int GameWorld::collisionCredit(uint32_t attacker, uint32_t victim, const Vec3& v
 void GameWorld::recordContactEffect(Body& body, uint32_t first, uint32_t second, const Vec3& velocity,
 	const Vec3& point, const Vec3& normal)
 {
-	if (!m_materials) {
+	if (!m_materials || m_predicting) {
 		return;
 	}
 	const float strength = physics::lengthSquared(velocity);

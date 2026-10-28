@@ -13,9 +13,13 @@
 // hands the stream, the record's ghost, that move and the server's tick
 // to the local player's interface 0x1d4c2 (`DAT_00a1b5d8` slot 0xc, then
 // its slot 0x10 with 1/30 s, 0x005811ee-0x0058122a), which runs the
-// moves the server hasn't taken yet again on top of that state. The
-// replay's own steps weren't traced; this one follows what the state
-// carries:
+// moves the server hasn't taken yet again on top of that state. That
+// replay (0x004b5000) keeps the record's move in the player's move list
+// (0x00583710) and steps every move left, the record's own included: the
+// clock set to the server's tick and one on each move, the move as the
+// player's input, one tick of the control object's tree (0x0057b7f0,
+// 0x0057b960, 0x0057ba00) and of the physics managers. This one follows
+// what the rewrite's own server sends (its last move already stepped):
 //   - each move sent is stepped once (one 1/30 s tick, as the server's
 //     HostedGame takes one move a tick) and remembered with the state it
 //     left behind;
@@ -27,6 +31,7 @@
 // is kept for diagnostics.
 #pragma once
 
+#include "Game/GameWorld.h"
 #include "Game/SoldierControl.h"
 #include "Net/GameProtocol.h"
 #include "Net/Networkables.h"
@@ -35,13 +40,10 @@
 
 #include <cstdint>
 #include <deque>
+#include <memory>
 
 namespace dice::hfe::world {
 class ObjectTemplate;
-}
-
-namespace dice::hfe::game {
-class GameWorld;
 }
 
 namespace dice::hfe::host {
@@ -106,5 +108,64 @@ private:
 	int32_t m_lastMove = -1;
 	Stats m_stats;
 };
+
+// The vehicle a joined client drives, predicted the same way: the
+// driver's moves step the client's own copy of it (GameWorld::LoneVehicle,
+// the round's vehicle physics for one body against the ground and the
+// static objects), and a record of the driver's seat (its ghost's groups in
+// mode 3: the root's SimpleObject state, 0x005ffec0 with mode 3: the
+// position, the orientation, the velocity and the angular velocity) puts
+// the state remembered for its move where the server's differs and steps
+// the later moves again. The engines' and wheels' own state (the rpm, the
+// gear, the springs and the wheels' spin) isn't in the record and stays the
+// client's. The exe's replay steps whatever the control object is, so a
+// vehicle's tree too (see SoldierPrediction above).
+class VehiclePrediction {
+public:
+	explicit VehiclePrediction(game::GameWorld& round) : m_round(round) {}
+
+	// Starts predicting a vehicle of this template from the server's
+	// state after `lastMove` (`position` the record's), the moves sent
+	// since then on top. False when the template has no vehicle physics.
+	bool start(const world::ObjectTemplate* vehicle, int32_t lastMove, const net::NetworkableState& root,
+		const net::Vec3f& position);
+	void stop();
+	bool active() const { return m_vehicle != nullptr; }
+	const world::ObjectTemplate* vehicleTemplate() const { return m_template; }
+
+	void step(const net::PlayerMove& move);
+	void reconcile(int32_t lastMove, const net::NetworkableState& root, const net::Vec3f& position);
+
+	net::Vec3f position() const;
+	net::Vec3f velocity() const;
+	physics::Mat3 rotation() const;
+
+	using Stats = SoldierPrediction::Stats;
+	const Stats& stats() const { return m_stats; }
+
+private:
+	struct Snapshot {
+		int32_t move = 0;
+		net::PlayerMove input;
+		net::MoveInputState inputState;
+		float lastLookPitch = 0;
+		game::GameWorld::LoneVehicle::State state;
+		bool stepped = false;
+	};
+	void tick(const net::PlayerMove& move);
+	void apply(const net::NetworkableState& root, const net::Vec3f& position);
+
+	game::GameWorld& m_round;
+	const world::ObjectTemplate* m_template = nullptr;
+	std::unique_ptr<game::GameWorld::LoneVehicle> m_vehicle;
+	net::MoveInputState m_input;
+	float m_lastLookPitch = 0;
+	std::deque<Snapshot> m_history;
+	Stats m_stats;
+};
+
+// A record's orientation (the SimpleObject's quaternion, written from the
+// object's yaw/pitch/roll by HostedGame) as the rigid body's rotation.
+physics::Mat3 rotationFromQuaternion(const net::Quat& q);
 
 } // namespace dice::hfe::host

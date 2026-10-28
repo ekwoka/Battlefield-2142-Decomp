@@ -98,6 +98,23 @@ HostedGame::HostedGame(game::GameWorld& round, game::GameLogic& logic, world::Ob
 	: m_round(&round), m_logic(&logic), m_templates(&templates), m_setup(std::move(setup))
 {
 	m_server.onJoined = [this](int client) { joined(client); };
+	// A delivered packet with a fresh record makes its slot the client's
+	// (0x005830e0: +0x20f0 = the packet's slot, for the record's ghost).
+	m_server.onNotified = [this](int id, uint32_t sequence, bool delivered) {
+		const auto found = m_clients.find(id);
+		if (found == m_clients.end()) {
+			return;
+		}
+		Client& client = found->second;
+		const auto fresh = client.freshIn.find(sequence);
+		if (fresh == client.freshIn.end()) {
+			return;
+		}
+		if (delivered) {
+			client.ackedSlot = fresh->second;
+		}
+		client.freshIn.erase(fresh);
+	};
 	m_server.onLeft = [this](int client) { left(client); };
 	m_server.onEvent = [this](int client, const net::GameEvent& e) { event(client, e); };
 	m_server.onMove = [this](int client, const net::PlayerMove& move) {
@@ -180,7 +197,6 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 	m_layouts.clear();
 	m_ghosts.clear();
 	m_players.clear();
-	m_freePlayers.clear();
 	m_names.clear();
 	m_motion.clear();
 	m_nextGhost = 1;
@@ -273,16 +289,9 @@ void HostedGame::joined(int id)
 		}
 	}
 	int team = counts[1] <= counts[2] ? 1 : 2;
-	if (!m_freePlayers.empty()) {
-		client.player = m_freePlayers.back();
-		m_freePlayers.pop_back();
-		game::GameWorld::PlayerInfo info;
-		if (m_round->playerInfo(client.player, info)) {
-			team = info.team; // the player keeps its team
-		}
-	} else {
-		client.player = m_round->addPlayer("Player" + std::to_string(id), team, false);
-	}
+	// A left client's id is free again (GameWorld::removePlayer): the
+	// lowest free one is taken.
+	client.player = m_round->addPlayer("Player" + std::to_string(id), team, false);
 	client.name = "Player" + std::to_string(id);
 	client.team = team;
 	m_names[client.player] = client.name;
@@ -323,15 +332,15 @@ void HostedGame::left(int id)
 			+ std::to_string(it->second.ticksStarved) + " ticks without one");
 	}
 	m_clients.erase(it);
-	// The player stays in the round (GameWorld keeps its players) without
-	// a soldier, for the next client to take.
-	game::GameWorld::PlayerInfo info;
-	if (m_round->playerInfo(player, info) && info.alive) {
-		m_round->setHitPoints(info.soldier, 0);
-	}
-	m_freePlayers.push_back(player);
+	// The game server's destroyPlayer (0x004acfb0): the round lets the
+	// player go (its soldier dies where it is, it leaves its squad and the
+	// command, PlayerDisconnect), every client hears DestroyPlayer (event 8,
+	// vtable 0x0091cb58) and the player's networkable ghost goes
+	// (0x0067bb30); its id is free for the next to join.
+	m_round->removePlayer(player);
 	sendToPlaying(eventOf(net::kEvDestroyPlayer, {static_cast<uint32_t>(player) & 0xff}));
 	m_players.erase(player);
+	m_names.erase(player);
 	if (onLog) {
 		onLog("client " + std::to_string(id) + " left");
 	}
@@ -688,9 +697,6 @@ void HostedGame::trackPlayers()
 	for (const auto& p : m_round->playerList()) {
 		auto seen = m_players.find(p.id);
 		if (seen == m_players.end()) {
-			if (std::find(m_freePlayers.begin(), m_freePlayers.end(), p.id) != m_freePlayers.end()) {
-				continue; // a client's that left
-			}
 			PlayerSeen fresh;
 			fresh.ghost = m_nextGhost++;
 			fresh.kills = p.kills;
@@ -1014,17 +1020,44 @@ net::GhostBlock HostedGame::ghostsFor(int id)
 		const Ghost* vehicle = control.second ? ghostOf(control.second, rootPart) : nullptr;
 		if (ghost) {
 			net::ControlState state;
-			client.historySlot = (client.historySlot + 1) & 7;
-			state.slot = client.historySlot;
 			state.groups = statesOf(*ghost, part, 3);
 			if (vehicle) {
 				state.second = statesOf(*vehicle, rootPart, 3);
+			}
+			// A new control object starts again from fresh records (the
+			// slot the client acknowledged was another ghost's).
+			if (control.ghost != client.recordGhost) {
+				client.recordGhost = control.ghost;
+				client.ackedSlot = -1;
+				client.relativeLeft = 0;
+				client.freshIn.clear();
+			}
+			const std::vector<net::MotionHistory>* against = nullptr;
+			if (client.ackedSlot < 0 || client.relativeLeft < 1) {
+				// Fresh, into the next slot, our copy kept; 5 relative
+				// records may follow (DAT_00a00ce4).
+				client.historySlot = (client.historySlot + 1) & 7;
+				state.slot = client.historySlot;
+				if (client.ackedSlot == state.slot) {
+					client.ackedSlot = -1; // our copy of it changes now
+				}
+				client.slots[static_cast<size_t>(state.slot)] = net::motionHistoryOf(state);
+				client.freshIn[m_server.nextSequence(id)] = state.slot;
+				client.relativeLeft = 5;
+				++client.freshRecords;
+			} else {
+				// Against the slot the client has.
+				state.recorded = true;
+				state.slot = client.ackedSlot;
+				against = &client.slots[static_cast<size_t>(state.slot)];
+				--client.relativeLeft;
+				++client.relativeRecords;
 			}
 			state.hasOwn = true;
 			state.own = ownState(client.player);
 			net::BitWriter rest;
 			net::encodeControlState(rest, (*ghost->layout)[part], vehicle ? &(*vehicle->layout)[rootPart] : nullptr,
-				&control.position, net::PlayerOwnStateHints {}, state);
+				&control.position, net::PlayerOwnStateHints {}, state, against);
 			control.rest = rest.data();
 			control.restBits = rest.bits();
 		}

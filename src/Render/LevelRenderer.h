@@ -3,8 +3,9 @@
 //
 // A stand-in for RendDX9's renderers (terrain and the surrounding terrain,
 // static, bundled and skinned meshes with their LODs, roads, undergrowth,
-// water, particles, decals): the original's shaders rewritten for the GPU
-// layer, with frustum culling; no shadows yet.
+// water, particles, decals), the dynamic shadows, the hemi maps, the sky's
+// clouds and sun flare and the post-production: the original's shaders
+// rewritten for the GPU layer, with frustum culling.
 #pragma once
 
 #include "Animation/Pose.h"
@@ -12,6 +13,7 @@
 #include "TerrainLod.h"
 #include "Effects/Effects.h"
 #include "GpuContext.h"
+#include "PostProduction.h"
 #include "Hud/Hud.h"
 #include "UI/MenuDraw.h"
 #include "World/WorldMath.h"
@@ -46,7 +48,10 @@ namespace effects {
 class EffectManager;
 }
 namespace scene {
+struct HemiMapSettings;
 struct LightSettings;
+struct PostProductionSettings;
+struct ShadowSettings;
 struct RendererSettings;
 struct SkySettings;
 struct WaterSettings;
@@ -149,6 +154,17 @@ struct LevelSources {
 	const scene::RendererSettings* renderer = nullptr;
 	// Told how far build() got (0..1, the last call 1), for a loading screen.
 	std::function<void(float done)> buildProgress;
+	// renderer.bloom*/default*/emp*, shadowManager.*, HemiMapManager.*
+	// (defaults if null).
+	const scene::PostProductionSettings* post = nullptr;
+	const scene::ShadowSettings* shadows = nullptr;
+	const scene::HemiMapSettings* hemi = nullptr;
+	// The game state the post-production follows (EMP, tinnitus, the Titan
+	// flash, the camera effect), asked each frame; none if null.
+	std::function<void(PostEffects& effects)> postEffects;
+	// Hidden objects drawn as active camouflage (a cloaked soldier's
+	// refraction); asked each frame for the hidden ones.
+	std::function<bool(uint32_t object)> cloaked;
 };
 
 struct LevelStats {
@@ -165,6 +181,9 @@ struct LevelStats {
 	size_t undergrowthTypes = 0;
 	size_t missingRoads = 0;
 	size_t surroundingPatches = 0;
+	bool hemiMap = false;     // a base hemi map loaded
+	size_t cloudLayers = 0;   // the sky's cloud layers drawn
+	bool sunFlare = false;    // a sun flare drawn
 };
 
 class LevelRenderer {
@@ -356,6 +375,89 @@ private:
 	std::map<std::string, AtlasEntry> m_overgrowthAtlas;          // by texture path (lower case)
 	std::map<std::string, AtlasEntry> m_overgrowthAlphaTestAtlas; // the alpha-tested ones
 	float m_overgrowthCloseDistance = 0; // the distant mesh from here (0: no overgrowth)
+
+	// The skinned instances' bone poses this frame (shared by the shadow
+	// and world passes), and a submesh's palette into `transforms`.
+	std::map<const Instance*, std::vector<anim::Matrix>> m_poses;
+	const std::vector<anim::Matrix>& poseFor(const Instance& instance, float seconds);
+	static void skinPalette(const GpuMesh& mesh, const Submesh& submesh, const std::vector<anim::Matrix>& pose,
+		TransformUniforms& transforms);
+
+	// The dynamic shadows (LevelRendererPost.cpp): an orthographic map
+	// along the sun over a region ahead of the camera, its centre snapped
+	// so the projection holds still between moves; the dynamic objects
+	// redrawn into one map each frame, the static meshes into another only
+	// when the region moves.
+	struct ShadowRegion {
+		bool enabled = false;
+		Vec3f center;
+		float radius = 0;      // half the region's side, metres
+		float depth = 0;       // the light's depth range
+		Mat4 viewProjection;   // world -> the light's clip space
+		uint32_t size = 0;     // texels across
+	};
+	ShadowRegion m_shadow;
+	SDL_GPUTexture* m_shadowDynamic = nullptr;
+	SDL_GPUTexture* m_shadowStatic = nullptr;
+	uint32_t m_shadowMapSize = 0;
+	bool m_shadowStaticValid = false;
+	Vec3f m_shadowStaticCenter;
+	size_t m_shadowStaticInstances = 0; // m_instances' count when the static map was drawn
+	ShadowUniforms m_shadowUniforms;
+	void renderShadows(SDL_GPUCommandBuffer* commands, const Camera& camera, const scene::LightSettings& lights,
+		float seconds);
+	void drawShadowCasters(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* map, bool statics, float seconds);
+	// After binding a lit pipeline: its Shadows block at uniform `slot` and
+	// the maps (and the hemi map) from sampler `firstSampler`.
+	void useShadows(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, uint32_t slot, uint32_t firstSampler,
+		bool hemi, bool undergrowth = false);
+
+	// The hemi map (HemiMapManager.setBaseHemiMap).
+	SDL_GPUTexture* m_hemiMap = nullptr;
+	void loadHemiMap(const LevelSources& sources);
+
+	// The sky's cloud layers and sun flare.
+	SDL_GPUTexture* m_cloudTextures[2] = {};
+	int m_cloudLayers = 0;
+	float m_cloudOffsets[4] {};
+	uint64_t m_lastSkyTicks = 0;
+	SDL_GPUTexture* m_flareTexture = nullptr;
+	const GpuMesh* m_flareMesh = nullptr;
+	SDL_GPUBuffer* m_flareVertices = nullptr;
+	void buildSkyLayers(const LevelSources& sources);
+	void drawSky(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Mat4& viewProjection,
+		const Camera& camera);
+	void drawSunFlare(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Mat4& viewProjection,
+		const Camera& camera);
+
+	// The post-production (LevelRendererPost.cpp): the world drawn into
+	// m_sceneColor, the bloom chain at a quarter of its size, the
+	// tinnitus's last frames, the cloaked meshes' mask; then post.frag into
+	// the target, the HUD and menu over it.
+	SDL_GPUTexture* m_sceneColor = nullptr;
+	uint32_t m_sceneSize[2] {};
+	SDL_GPUTexture* m_bloomTargets[2] = {};
+	uint32_t m_bloomSize[2] {};
+	SDL_GPUTexture* m_history[4] = {};
+	int m_historyNext = 0;
+	bool m_historyValid = false; // the frames above hold a running tinnitus's
+	SDL_GPUTexture* m_camoMask = nullptr;
+	SDL_GPUTexture* m_postTextures[4] = {}; // noise, random, frame, scanline
+	PostProductionState m_postState;
+	uint64_t m_lastPostTicks = 0;
+	std::vector<DrawItem> m_cloakedList;
+	bool postEnabled() const;
+	void ensurePostTargets(uint32_t width, uint32_t height);
+	void loadPostTextures(const LevelSources& sources);
+	// Draws the cloaked meshes into the mask (the world's depth loaded).
+	void drawCamouflage(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* depth, const Mat4& viewProjection, float seconds);
+	// The bloom chain and the tinnitus's history from m_sceneColor, then
+	// the post pass into `pass` (already begun on the target).
+	PostUniforms preparePost(SDL_GPUCommandBuffer* commands, bool cloaked);
+	void drawPost(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const PostUniforms& uniforms);
+	void fullscreenPass(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* target, SDL_GPUTexture* source,
+		const BloomUniforms& uniforms);
+	void releasePostTargets();
 
 	GpuContext& m_gpu;
 	std::map<std::string, std::unique_ptr<GpuMesh>> m_meshes; // by geometry name (lower case)

@@ -1,8 +1,9 @@
 // The GPU device and the pipelines the level renderer uses (SDL3 GPU API:
 // Metal on macOS, Vulkan or Direct3D 12 elsewhere).
 //
-// This replaces RendDX9.dll's Direct3D 9 device. Only what drawing a level
-// needs is here so far: textured meshes with alpha test, and terrain.
+// This replaces RendDX9.dll's Direct3D 9 device: the pipelines of the
+// level's passes (meshes, terrain, water, roads, decals, undergrowth,
+// particles, the UI), the shadow maps' and the post-production's.
 #pragma once
 
 #include "RenderMath.h"
@@ -119,9 +120,27 @@ struct LightingUniforms {
 	float lightExtra[kMaxPointLights][4] {};
 };
 
+// The dynamic shadows and the hemi map (shadow.glsl's Shadows block).
+struct ShadowUniforms {
+	Mat4 shadowMatrix;           // world -> the maps' uv and depth
+	float params[4] {};          // x: 1 on, y: a texel in uv, z: depth bias, w: 1 with the static map
+	float hemiConstants[4] {};   // xy: corner (x, z), z: size (0 none), w: lerp bias
+	float hemiSky[4] {};         // rgb: the sky colour, w: 1 for the sun's occlusion
+	float extra[4] {0, 0.8f, 0, 0}; // x: shadowIntensityBias, y: the fade's start, z: 1 for the undergrowth
+};
+
+// The sky dome (sky.frag).
+struct SkyUniforms {
+	float domeCenter[4] {};   // xyz, w: the cloud layers
+	float cloudOffsets[4] {}; // TEXOFFSET, TEXOFFSET2
+	float cloudFade[4] {};    // start, length, CLOUDLERPFACTORS
+	float domeScale[4] {1, 0, 0, 0};
+};
+
 // LightingUniforms::material[2] bits beside the layers.
 constexpr float kMaterialBlended = 8;   // alpha from the texture (times the fade)
 constexpr float kMaterialAdditive = 16; // unlit, added (additiveMeshPipeline)
+constexpr float kMaterialHemi = 32;     // a bundled or skinned mesh: the hemi map's ambient
 
 class GpuContext {
 public:
@@ -174,6 +193,27 @@ public:
 	{
 		return additive ? m_additiveParticlePipeline : m_particlePipeline;
 	}
+	// The shadow maps' casters (mesh.vert, shadowcaster.frag): depth only,
+	// into shadowDepthFormat(), biased by the slope, two-sided.
+	SDL_GPUGraphicsPipeline* shadowCasterPipeline() const { return m_shadowCasterPipeline; }
+	// Cloaked meshes into the camouflage mask (camo.frag): depth-tested
+	// against the world's depth, not written.
+	SDL_GPUGraphicsPipeline* camoPipeline() const { return m_camoPipeline; }
+	// The post-production (fullscreen.vert, post.frag) into a target with
+	// the HUD's depth-stencil; the bloom's filters (bloom.frag) into colour
+	// only.
+	SDL_GPUGraphicsPipeline* postPipeline() const { return m_postPipeline; }
+	SDL_GPUGraphicsPipeline* bloomPipeline() const { return m_bloomPipeline; }
+	SDL_GPUTextureFormat shadowDepthFormat() const { return m_shadowDepthFormat; }
+	// A comparison sampler for the shadow maps (lit where the reference is
+	// at most the stored depth), filtered.
+	SDL_GPUSampler* shadowSampler() const { return m_shadowSampler; }
+	// A 1 x 1 shadow map cleared to the far plane (bound when there are no shadows).
+	SDL_GPUTexture* emptyShadowMap() const { return m_emptyShadowMap; }
+	// A sampled colour texture of the swapchain's format (post-production targets).
+	SDL_GPUTexture* createColorTexture(uint32_t width, uint32_t height);
+	// A sampled depth texture of shadowDepthFormat().
+	SDL_GPUTexture* createShadowMap(uint32_t size);
 	SDL_GPUSampler* repeatSampler() const { return m_repeatSampler; }
 	SDL_GPUSampler* clampSampler() const { return m_clampSampler; }
 	SDL_GPUTexture* whiteTexture() const { return m_white; }
@@ -230,6 +270,13 @@ private:
 	SDL_GPUGraphicsPipeline* m_uiSubmitPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_uiTestPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_uiClearPipeline = nullptr;
+	SDL_GPUGraphicsPipeline* m_shadowCasterPipeline = nullptr;
+	SDL_GPUGraphicsPipeline* m_camoPipeline = nullptr;
+	SDL_GPUGraphicsPipeline* m_postPipeline = nullptr;
+	SDL_GPUGraphicsPipeline* m_bloomPipeline = nullptr;
+	SDL_GPUTextureFormat m_shadowDepthFormat = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+	SDL_GPUSampler* m_shadowSampler = nullptr;
+	SDL_GPUTexture* m_emptyShadowMap = nullptr;
 	SDL_GPUTextureFormat m_depthFormat = SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT;
 	SDL_GPUSampler* m_repeatSampler = nullptr;
 	SDL_GPUSampler* m_clampSampler = nullptr;

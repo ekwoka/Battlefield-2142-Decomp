@@ -489,8 +489,17 @@ void RemoteWorld::decodeControl()
 	BitReader in(m_control.rest.data(), m_control.rest.size());
 	ControlState state;
 	PlayerOwnStateHints hints;
-	if (!decodeControlState(in, layout, second, m_control.position, hints, state) || in.position() > m_control.restBits) {
+	if (!decodeControlState(in, layout, second, m_control.position, hints, state, &m_historySlots)
+		|| in.position() > m_control.restBits) {
 		return;
+	}
+	// A fresh state goes into its history slot (0x00580800 -> 0x0057f750),
+	// for the relative records written against it.
+	if (!state.recorded) {
+		m_historySlots[static_cast<size_t>(state.slot) & 7] = motionHistoryOf(state);
+	}
+	if (state.recorded) {
+		++m_relativeStates;
 	}
 	m_controlState = std::move(state);
 	m_controlStateValid = true;

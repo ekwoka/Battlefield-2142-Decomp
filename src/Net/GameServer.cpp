@@ -198,6 +198,20 @@ void GameServer::handle(const std::vector<uint8_t>& datagram, const UdpServerSoc
 	}
 	client->events.acknowledge(packet.acknowledged, packet.mask);
 	client->notify.lastAcknowledged = packet.acknowledged;
+	// Each data packet of ours the header now settles, delivered or lost
+	// (the notify layer's report to the ghost manager: 0x005830e0).
+	for (auto it = client->unsettled.begin(); it != client->unsettled.end();) {
+		const uint32_t behind = (packet.acknowledged - *it) & 0x3f;
+		if (behind >= 32) {
+			++it;
+			continue;
+		}
+		const uint32_t sequence = *it;
+		it = client->unsettled.erase(it);
+		if (onNotified) {
+			onNotified(id, sequence, (packet.mask >> behind & 1u) != 0);
+		}
+	}
 	if (type == 7) {
 		if (packet.sequenced) {
 			client->notify.receive(packet.sequence, false);
@@ -295,10 +309,21 @@ void GameServer::sendTick(const std::function<GhostBlock(int client)>& ghosts)
 		client.notify.sendSequence = client.notify.sendSequence < 0 ? 1 : (client.notify.sendSequence + 1) & 0x3f;
 		const uint32_t sequence = static_cast<uint32_t>(client.notify.sendSequence);
 		m_socket.sendTo(client.address, dataPacket(static_cast<uint8_t>(id), sequence, client.notify, writeGamePayload(payload)));
+		client.unsettled.insert(sequence);
 		if (block) {
 			client.events.sent(sequence, block->sequence);
 		}
 	}
+}
+
+uint32_t GameServer::nextSequence(int client) const
+{
+	const auto it = m_clients.find(client);
+	if (it == m_clients.end()) {
+		return 0;
+	}
+	const int last = it->second.notify.sendSequence;
+	return last < 0 ? 1u : static_cast<uint32_t>(last + 1) & 0x3f;
 }
 
 void GameServer::send(int client, const GameEvent& event)

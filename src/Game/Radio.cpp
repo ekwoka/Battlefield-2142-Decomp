@@ -285,4 +285,59 @@ bool GameWorld::insideCombatArea(int playerId) const
 	return inside;
 }
 
+int GameWorld::crosshairTarget(int id, float reach, physics::Vec3* point) const
+{
+	const Player* me = findPlayer(id);
+	if (!me || !me->alive) {
+		return -1;
+	}
+	const float yaw = lookYaw(*me) * 3.14159265f / 180.0f;
+	const float pitch = me->input.aimPitch * 3.14159265f / 180.0f;
+	const physics::Vec3 dir {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+	const physics::Vec3 eye = me->body.position + physics::Vec3 {0, 0.6f, 0};
+	// The nearest enemy along the ray with nothing in between (the static
+	// objects, the bodies and the terrain: lineOfSight).
+	int found = -1;
+	float best = reach;
+	for (const auto& owned : m_players) {
+		const Player& p = *owned;
+		if (!p.present || !p.alive || p.id == id || p.team == me->team) {
+			continue;
+		}
+		// A soldier as a 0.6 m sphere about its middle, a vehicle as a
+		// 2.5 m one about its origin (as the name tags' ray).
+		physics::Vec3 centre = p.body.position;
+		float radius = 0.6f;
+		if (p.vehicle) {
+			if (const world::Object* v = m_objects.find(p.vehicle)) {
+				centre = {v->position().x, v->position().y, v->position().z};
+				radius = 2.5f;
+			}
+		}
+		const physics::Vec3 d = centre - eye;
+		const float along = physics::dot(d, dir);
+		if (along <= 0 || along >= best || physics::lengthSquared(d) - along * along > radius * radius) {
+			continue;
+		}
+		if (!lineOfSight(eye, centre, p.vehicle ? p.vehicle : me->vehicle)) {
+			continue;
+		}
+		best = along;
+		found = p.id;
+	}
+	if (found >= 0 && point) {
+		*point = eye + dir * best;
+	}
+	return found;
+}
+
+int GameWorld::spotCrosshair(int player)
+{
+	const int target = crosshairTarget(player);
+	if (target >= 0) {
+		reportBattlefieldObjects(player, {target});
+	}
+	return target;
+}
+
 } // namespace dice::hfe::game

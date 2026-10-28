@@ -25,6 +25,7 @@
 
 #include "Networkables.h"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -80,12 +81,16 @@ std::vector<GhostPartLayout> buildGhostLayout(const GhostTemplateNode& root);
 // decoded to its end (the groups after it are left out of `states`).
 // `mode`: 2 in ghost updates (0x0057f670), 3 in the control-object record
 // (0x0057f720 / 0x0057f9f0).
+// `history` (a relative control record): each SimpleObject group in turn
+// takes the next copy (`cursor` counts them across the record's ghosts).
 bool decodeGhostState(BitReader& in, const GhostPartLayout& layout, const Vec3f& reference,
-	std::vector<NetworkableState>& states, unsigned mode = 2);
+	std::vector<NetworkableState>& states, unsigned mode = 2, const std::vector<MotionHistory>* history = nullptr,
+	size_t* cursor = nullptr);
 // Writes the groups' states (one per group, in order), for tests and the
 // loopback server (0x0057f420 / 0x0057f7b0).
 void encodeGhostState(BitWriter& out, const GhostPartLayout& layout, const Vec3f* reference,
-	const std::vector<NetworkableState>& states, unsigned mode = 2);
+	const std::vector<NetworkableState>& states, unsigned mode = 2, const std::vector<MotionHistory>* history = nullptr,
+	size_t* cursor = nullptr);
 
 // The control-object record's state after its ghost fields (written by
 // 0x00580830, read by 0x00580cd0 when the client has the record's ghost):
@@ -101,8 +106,12 @@ void encodeGhostState(BitWriter& out, const GhostPartLayout& layout, const Vec3f
 //   - a 10-bit length and the player's own state (PlayerOwnState; its
 //     reader's bits are checked against the length: fewer are skipped,
 //     more fail the block).
-// The rewrite's server always sends fresh states (the writer's path while
-// +0x20f0 is -1), cycling the slot as 0x00580830 does ((+0x20f8 + 1) & 7).
+// The server (0x00580830) sends a fresh state into the next slot
+// ((+0x20f8 + 1) & 7, storing its own copy, 0x0057f750) until the client
+// has acknowledged a packet carrying one (0x005830e0 sets +0x20f0 to that
+// packet's slot); then the next 5 records (DAT_00a00ce4, +0x20fc) are
+// relative to the acknowledged slot, and a fresh one follows. `recorded`
+// is the relative bit.
 struct ControlState {
 	bool recorded = false;
 	int slot = 0;
@@ -113,10 +122,19 @@ struct ControlState {
 	size_t ownBits = 0;
 	bool complete = false;
 };
+// `slots`: the client's eight history slots, for a relative record (none:
+// a relative record's SimpleObjects can't be read and the decode fails).
 bool decodeControlState(BitReader& in, const GhostPartLayout& ghost, const GhostPartLayout* second,
-	const Vec3f& reference, const PlayerOwnStateHints& own, ControlState& out);
+	const Vec3f& reference, const PlayerOwnStateHints& own, ControlState& out,
+	const std::array<std::vector<MotionHistory>, 8>* slots = nullptr);
+// `history`: the slot's copy a relative state (`recorded`) is written against.
 void encodeControlState(BitWriter& out, const GhostPartLayout& ghost, const GhostPartLayout* second,
-	const Vec3f* reference, const PlayerOwnStateHints& own, const ControlState& state);
+	const Vec3f* reference, const PlayerOwnStateHints& own, const ControlState& state,
+	const std::vector<MotionHistory>* history = nullptr);
+// The copy a history slot keeps of a state: each SimpleObject group's
+// position, velocity and angular velocity, the first ghost's then the
+// second's (0x0057f750 / 0x005fe230).
+std::vector<MotionHistory> motionHistoryOf(const ControlState& state);
 
 // NetworkableInfo settings (Objects/Common/Networkables.con): which infos
 // are unique and which force a networkable id. The defaults are 1.51's.
@@ -129,6 +147,12 @@ struct NetworkableInfoTable {
 // templates the server loaded): its type, its networkableInfo, the hints
 // from its settings (hasMobilePhysics, armor.*, maxSpeed, engineType...),
 // and its children (ObjectTemplate.addTemplate), recursively.
+// The player's own state's per-group 0..6 (PlayerOwnStateHints::weaponHeat)
+// for a firearm of this template: its ObjectTemplate.maxResetSpeed's y over
+// 0 (0x005c1360 reads the template's +0x2c8, which only that setting writes:
+// 0x00522125). No shipped firearm sets it (only eu_sentrygun's
+// RotationalBundle EU_Sentrygun_gun has 0/5000/0), so the value never goes.
+bool firearmSendsHeat(const world::ObjectTemplate& firearm);
 GhostTemplateNode ghostTemplateFrom(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& t,
 	const NetworkableInfoTable& infos = {});
 // The hints for one template (no children); `hasParent` picks the

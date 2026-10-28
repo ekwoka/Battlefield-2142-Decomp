@@ -53,6 +53,7 @@
 #include "Net/ServerQuery.h"
 
 #include <cstdint>
+#include <array>
 #include <deque>
 #include <map>
 #include <memory>
@@ -134,6 +135,17 @@ private:
 		bool starved = true;                     // no move was waiting: wait for two
 		uint32_t movesDropped = 0, ticksStarved = 0; // for the log
 		int historySlot = 7;                     // the record's slot (0x00580830: +0x20f8)
+		// The relative records (0x00580830's other path): the slot the
+		// client has acknowledged (+0x20f0, -1 none), how many relative
+		// records are left before the next fresh one (+0x20fc), our copy
+		// of each slot's state (+0x20f4: 0x0057f750), the fresh slot each
+		// unsettled packet carried, and the record's ghost they belong to.
+		int ackedSlot = -1;
+		int relativeLeft = 0;
+		std::array<std::vector<net::MotionHistory>, 8> slots;
+		std::map<uint32_t, int> freshIn;
+		uint16_t recordGhost = 0;
+		uint32_t freshRecords = 0, relativeRecords = 0;
 		std::string chat;                        // a StringBlock coming in
 		uint32_t chatSize = 0;
 		bool spawnRequested = false;
@@ -189,7 +201,6 @@ private:
 	std::map<int, Client> m_clients;
 	std::map<int, PlayerSeen> m_players; // by player id
 	std::map<int, std::string> m_names;  // names the clients gave
-	std::vector<int> m_freePlayers;      // players of clients that left, for the next to join
 	uint32_t m_tick = 0;
 	bool m_roundEndSent = false;
 };

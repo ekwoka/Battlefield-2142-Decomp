@@ -25,6 +25,7 @@ layout(location = 1) out vec2 outTexCoord1;
 layout(location = 2) out vec2 outLightmapCoord;
 layout(location = 3) out float outAlpha;
 layout(location = 4) out float outDepth;
+layout(location = 5) out vec3 outWorldPosition;
 
 void main()
 {
@@ -36,4 +37,5 @@ void main()
 	outTexCoord1 = inTexCoord1;
 	outAlpha = inAlpha;
 	outDepth = gl_Position.w;
+	outWorldPosition = worldPosition.xyz;
 }

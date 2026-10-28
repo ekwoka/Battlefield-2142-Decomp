@@ -26,6 +26,8 @@
 // up. The low-detail pass (Shared_PS_LowDetail) also tints the ground under
 // the sea: lerp(color, TerrainWaterColor, saturate((WaterHeight - y) / 3)),
 // here by f too so it fades in with the LOD.
+// The dynamic objects' shadows darken the sun term (shadow.glsl).
+#extension GL_GOOGLE_include_directive : require
 layout(location = 0) in vec3 inNormal;
 layout(location = 1) in vec2 inTexCoord;
 layout(location = 2) in float inDepth;
@@ -43,6 +45,9 @@ layout(set = 2, binding = 7) uniform sampler2D layer3;
 layout(set = 2, binding = 8) uniform sampler2D layer4;
 layout(set = 2, binding = 9) uniform sampler2D layer5;
 layout(set = 2, binding = 10) uniform sampler2D lowDetailTexture;
+#define SHADOW_UNIFORM_BINDING 2
+#define SHADOW_MAP_BINDING 11
+#include "shadow.glsl"
 
 layout(set = 3, binding = 0) uniform Lighting {
 	vec4 sunDirection;
@@ -128,11 +133,12 @@ void main()
 		vec4 lightmap = texture(lightMap, inTexCoord);
 		vec3 sun = clamp(sunColor.rgb * 0.25, 0.0, 1.0);
 		vec3 gi = clamp(skyColor.rgb * 0.5, 0.0, 1.0);
-		vec3 light = 2.0 * lightmap.g * sun + clamp(2.0 * lightmap.b * gi, 0.0, 1.0) * 0.5;
+		vec3 light = 2.0 * lightmap.g * sun * shadowFactor(inWorldPosition, false) +
+			clamp(2.0 * lightmap.b * gi, 0.0, 1.0) * 0.5;
 		color = albedo * light * 2.0;
 	} else {
 		float sun = max(dot(normalize(inNormal), sunDirection.xyz), 0.0);
-		color = albedo * (skyColor.rgb * 0.5 + sunColor.rgb * sun);
+		color = albedo * (skyColor.rgb * 0.5 + sunColor.rgb * sun * shadowFactor(inWorldPosition, false));
 	}
 	// Point lights, as mesh.frag's.
 	vec3 normal = normalize(inNormal);
@@ -153,4 +159,9 @@ void main()
 	}
 	float fog = clamp(inDepth / fogColor.w, 0.0, 1.0);
 	outColor = vec4(mix(color, fogColor.rgb, fog * fog), 1.0);
+	if (shadowExtra.w > 0.5) { // BF2142_SHADOW_DEBUG: the dynamic shadow factor, the region tinted
+		vec4 p = shadowMatrix * vec4(inWorldPosition, 1.0);
+		bool inside = all(greaterThan(p.xy, vec2(0.0))) && all(lessThan(p.xy, vec2(1.0)));
+		outColor = vec4(vec3(shadowFactor(inWorldPosition, false)) * (inside ? vec3(1.0, 0.6, 0.6) : vec3(1.0)), 1.0);
+	}
 }

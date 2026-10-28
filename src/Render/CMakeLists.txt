@@ -10,6 +10,7 @@ include(${PROJECT_SOURCE_DIR}/cmake/Shaders.cmake)
 add_library(Render STATIC
 	GpuContext.cpp
 	LevelRenderer.cpp
+	LevelRendererPost.cpp
 	PngWriter.cpp
 )
 target_include_directories(Render PUBLIC ${PROJECT_SOURCE_DIR}/src)
@@ -32,4 +33,10 @@ bf2142_embed_shaders(Render
 	Shaders/particle.frag
 	Shaders/ui.vert
 	Shaders/ui.frag
+	Shaders/shadowcaster.frag
+	Shaders/camo.frag
+	Shaders/sky.frag
+	Shaders/fullscreen.vert
+	Shaders/bloom.frag
+	Shaders/post.frag
 )
