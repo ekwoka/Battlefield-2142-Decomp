@@ -751,6 +751,10 @@ public:
 	// a drop pod (the launcher's projectileTemplate, a Parachute PCO with
 	// isPod): false when there is none at hand.
 	bool launchPod(int player);
+	// For a soldier aboard its own Titan (within its box): the nearest entry
+	// point of the Titan's pod arrays, in the world, and its radius.
+	bool titanPodEntry(int player, physics::Vec3& entry, float& radius) const;
+	bool ridingPod(int player) const;
 	struct PodInfo {
 		uint32_t object = 0;
 		int player = -1;

@@ -324,3 +324,45 @@ TEST(Titan_MinskTitan16)
 		level.titan(1)->hitPoints);
 	CHECK(level.titan(1)->hitPoints < before);
 }
+
+// A soldier at its Titan's pod array drops in a pod (eu_pod0, a rigid body
+// falling at gravityModifier 1.5 with its drag) and steps out where it lands.
+TEST(Titan_PodArrayDropsASoldier)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Minsk", 48);
+	if (!level.loaded) {
+		return;
+	}
+	const int bot = level.world->addPlayer("Pac", 1, false);
+	level.world->setSpawnChoice(bot, 501);
+	game::GameWorld::PlayerInfo info;
+	physics::Vec3 entry;
+	float radius = 0;
+	for (int tries = 0; tries < 30 && !level.world->titanPodEntry(bot, entry, radius); ++tries) {
+		if (level.world->playerInfo(bot, info) && info.alive) {
+			level.world->setHitPoints(info.soldier, 0);
+			level.run(16);
+		} else {
+			level.world->spawnSoldier(bot);
+		}
+		level.run(0.1f);
+	}
+	CHECK(level.world->titanPodEntry(bot, entry, radius));
+	level.world->playerInfo(bot, info);
+	CHECK(level.world->setSoldierPosition(info.soldier, entry));
+	CHECK(level.world->launchPod(bot));
+	CHECK(level.world->ridingPod(bot) && level.world->pods().size() == 1);
+	float second = 0;
+	for (; second < 60 && level.world->ridingPod(bot); second += 0.5f) {
+		level.run(0.5f);
+	}
+	level.world->playerInfo(bot, info);
+	std::fprintf(stderr, "  the pod landed after %.1f s at %.0f/%.0f/%.0f (from %.0f/%.0f/%.0f)\n", second, info.position.x,
+		info.position.y, info.position.z, entry.x, entry.y, entry.z);
+	CHECK(!level.world->ridingPod(bot) && info.alive && info.vehicle == 0);
+	CHECK(info.position.y < 200); // down from the Titan's 287 to the ground
+}

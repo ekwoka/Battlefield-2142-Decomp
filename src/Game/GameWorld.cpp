@@ -2338,8 +2338,8 @@ bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, 
 // objects (0x006f2e90's loop through the responses, slot 0x5c) aren't
 // bodies here: its hull alone is tested. The objects a global
 // list holds are passed (0x005628f0 / 0x00561d90: the Titan sync manager
-// ECPhysicsETitanSync's two Titans, 0x00561c00, in gpm_ti alone; the
-// rewrite has no Titans).
+// ECPhysicsETitanSync's two Titans, 0x00561c00, in gpm_ti alone:
+// isTitan, Titans.cpp).
 // The spot's drop (0x005ad8b0, before the test): along the spawner's up
 // axis (its matrix's second row) from the template's vehicle-LOD box top
 // (slot 0x54(1): max y) to its bottom (min y), the scene's ray (slot

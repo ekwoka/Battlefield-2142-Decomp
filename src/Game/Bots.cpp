@@ -1113,8 +1113,30 @@ void BotManager::update(float seconds)
 		bot.sinceThink += elapsed;
 		bot.thinkAge += 3;
 		bot.senseAge += 3;
-		updateGoal(bot, *self);
 		SoldierInput input;
+		// Titan mode: no strategy of AIDLL's knows the Titans; a bot that
+		// spawned aboard its Titan goes to the nearest pod array (its AI
+		// template titan_pod_array_1_ai makes it a vehicle to the AI) and
+		// drops in a pod, riding it down without steering.
+		physics::Vec3 podEntry;
+		float podRadius = 0;
+		if (m_world.ridingPod(self->id)) {
+			bot.lastInput = input;
+			m_world.setInput(self->id, input);
+			continue;
+		}
+		if (m_world.titanPodEntry(self->id, podEntry, podRadius)) {
+			const physics::Vec3 d = podEntry - self->position;
+			const float want = std::atan2(d.x, d.z) * 57.29578f;
+			input.turn = std::clamp(std::remainder(want - self->yaw, 360.0f), -360 * elapsed, 360 * elapsed);
+			input.throttle = std::fabs(std::remainder(want - self->yaw, 360.0f)) < 45 ? 1.0f : 0.0f;
+			input.use = horizontal2(d) < podRadius * podRadius && !bot.usedLast;
+			bot.usedLast = input.use;
+			bot.lastInput = input;
+			m_world.setInput(self->id, input);
+			continue;
+		}
+		updateGoal(bot, *self);
 		act(bot, *self, input, elapsed);
 		m_behaviourSeconds[bot.behaviour + (self->vehicle ? (self->seat == 0 ? " (driving)" : " (seated)") : "")] += elapsed;
 		if (self->vehicle && self->seat == 0) {

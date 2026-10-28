@@ -1164,9 +1164,11 @@ void GameWorld::stepSilos(float seconds)
 	}
 }
 
-// The launch: from the barrel's muzzle aimed at the Titan (the barrel
-// pitches 0 to 90 degrees up), at the firearm's velocity, locked onto the
-// Titan (the wire-guided LPTargetComp's TitanBeacon on it).
+// The launch: the barrel (Missile_Silo_Barrel: setMinRotation 0/-90/0,
+// setAcceleration 0/-50/0, startAutoRotateOnEnter) turns on its own to its
+// limit, straight up; the missile leaves its muzzle upwards at the
+// firearm's velocity, locked onto the Titan (the wire-guided LPTargetComp's
+// TitanBeacon on it), and turns to it once it tracks.
 void GameWorld::launchMissile(Silo& silo, const Titan& target)
 {
 	const world::Object* object = m_objects.find(silo.object);
@@ -1177,12 +1179,7 @@ void GameWorld::launchMissile(Silo& silo, const Titan& target)
 	const physics::Mat3 turn =
 		physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
 	const physics::Vec3 pivot = base + turn.transform(silo.muzzle);
-	physics::Vec3 aim = titanAim(target) - pivot;
-	if (aim.y < 0) {
-		aim.y = 0;
-	}
-	const float length = std::sqrt(physics::lengthSquared(aim));
-	const physics::Vec3 direction = length > 0 ? aim * (1.0f / length) : physics::Vec3 {0, 1, 0};
+	const physics::Vec3 direction {0, 1, 0};
 	Projectile p;
 	p.origin = pivot + direction * silo.muzzleLength;
 	p.position = p.origin;
@@ -1198,26 +1195,33 @@ void GameWorld::launchMissile(Silo& silo, const Titan& target)
 	++silo.launched;
 }
 
-// A TTBeacon missile's flight (FixedTargetComp, DefaultFollowComp with
-// magneticBehaviour): from startDelay on its acceleration pushes it along
-// its flight up to maxSpeed; from seek.trackingDelay on it chases the
-// locked Titan's middle as a magnet does (followMagnet). With the Titan
-// gone it flies on.
+// A TTBeacon missile's flight (FixedTargetComp, DefaultFollowComp): from
+// startDelay on its acceleration pushes it along its flight up to
+// maxSpeed; from seek.trackingDelay on its flight turns towards the locked
+// Titan's middle at most follow.maxYaw (4) radians a second across and
+// follow.maxPitch (1 by default) up and down, the AV missile's follow
+// (the rewrite's reading of the component; changeYaw 0.2 and
+// magneticBehaviour are not decoded). With the Titan gone it flies on.
 void GameWorld::steerBeacon(Projectile& p, float seconds)
 {
 	const ProjectileSettings& s = *p.settings;
 	const Titan* titan = titanByObject(p.lockedOn);
-	if (p.age >= s.seekDelay && titan && !titan->wrecked) {
-		followMagnet(p, titanAim(*titan), titan->velocity, seconds);
+	float speed = std::sqrt(physics::lengthSquared(p.velocity));
+	if (p.age >= s.seekDelay && titan && !titan->wrecked && speed > 0.01f) {
+		const physics::Vec3 want = titanAim(*titan) - p.position;
+		const auto headingOf = [](const physics::Vec3& v) { return std::atan2(v.x, v.z); };
+		const auto pitchOf = [](const physics::Vec3& v) { return std::atan2(v.y, std::sqrt(v.x * v.x + v.z * v.z)); };
+		const float turnYaw = std::clamp(std::remainder(headingOf(want) - headingOf(p.velocity), 2 * 3.14159265f),
+			-s.maxYawRate * seconds, s.maxYawRate * seconds);
+		const float turnPitch =
+			std::clamp(pitchOf(want) - pitchOf(p.velocity), -s.maxPitchRate * seconds, s.maxPitchRate * seconds);
+		const float yaw = headingOf(p.velocity) + turnYaw, pitch = pitchOf(p.velocity) + turnPitch;
+		p.velocity = physics::Vec3 {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)} * speed;
+	}
+	if (p.age < s.startDelay || speed <= 0.01f || speed >= s.maxSpeed) {
 		return;
 	}
-	if (p.age < s.startDelay) {
-		return;
-	}
-	const float speed = std::sqrt(physics::lengthSquared(p.velocity));
-	if (speed > 0.01f && speed < s.maxSpeed) {
-		p.velocity = p.velocity + p.velocity * (std::min(s.acceleration * seconds, s.maxSpeed - speed) / speed);
-	}
+	p.velocity = p.velocity * ((speed + std::min(s.acceleration * seconds, s.maxSpeed - speed)) / speed);
 }
 
 // Drop pods. A pod launcher is a GenericFireArm with fire.isPodLauncher
@@ -1459,6 +1463,46 @@ void GameWorld::stepPods(float seconds)
 		}
 		++it;
 	}
+}
+
+bool GameWorld::ridingPod(int player) const
+{
+	return std::any_of(m_pods.begin(), m_pods.end(), [player](const Pod& pod) { return pod.player == player; });
+}
+
+bool GameWorld::titanPodEntry(int id, physics::Vec3& entry, float& radius) const
+{
+	const Player* player = findPlayer(id);
+	if (!player || !player->alive || player->vehicle) {
+		return false;
+	}
+	for (const Titan& titan : m_titans) {
+		const world::Object* object = m_objects.find(titan.object);
+		const Body* body = const_cast<GameWorld*>(this)->findBody(titan.object);
+		if (!object || !body || titan.wrecked || titan.team != player->team || titan.podArrays.empty()) {
+			continue;
+		}
+		const physics::Vec3 at {object->position().x, object->position().y, object->position().z};
+		const physics::Vec3 local = body->body.rotation.untransform(player->body.position - at);
+		if (local.x < body->boxMin.x - 5 || local.x > body->boxMax.x + 5 || local.y < body->boxMin.y - 5
+			|| local.y > body->boxMax.y + 5 || local.z < body->boxMin.z - 5 || local.z > body->boxMax.z + 5) {
+			continue;
+		}
+		float best = 1e30f;
+		for (const Titan::PodArray& array : titan.podArrays) {
+			for (const auto& [offset, r] : array.entries) {
+				const physics::Vec3 e = at + body->body.rotation.transform(offset);
+				const float d = physics::lengthSquared(e - player->body.position);
+				if (d < best) {
+					best = d;
+					entry = e;
+					radius = r;
+				}
+			}
+		}
+		return best < 1e29f;
+	}
+	return false;
 }
 
 } // namespace dice::hfe::game

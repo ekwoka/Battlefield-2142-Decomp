@@ -1182,39 +1182,39 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 	}
 	std::vector<Vertex> vertices;
 	for (const effects::EffectManager* manager : managers) {
-	if (!manager) {
-		continue;
-	}
-	manager->forEachGroup([&](const std::string& path, bool additive, const std::vector<effects::Sprite>& sprites) {
-		SDL_GPUTexture* image = texture(m_sources->files, path + ".dds");
-		if (!image) {
-			return;
+		if (!manager) {
+			continue;
 		}
-		const uint32_t first = static_cast<uint32_t>(vertices.size());
-		static const float corners[6][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, -1}, {1, 1}, {-1, 1}};
-		for (const effects::Sprite& sprite : sprites) {
-			for (const auto& corner : corners) {
-				Vertex v {};
-				v.position[0] = sprite.position.x;
-				v.position[1] = sprite.position.y;
-				v.position[2] = sprite.position.z;
-				v.normal[0] = sprite.color[0];
-				v.normal[1] = sprite.color[1];
-				v.normal[2] = sprite.color[2];
-				v.weight = sprite.color[3];
-				v.texCoord[0] = corner[0];
-				v.texCoord[1] = corner[1];
-				v.part = sprite.size;
-				v.part2 = sprite.rotation;
-				vertices.push_back(v);
+		manager->forEachGroup([&](const std::string& path, bool additive, const std::vector<effects::Sprite>& sprites) {
+			SDL_GPUTexture* image = texture(m_sources->files, path + ".dds");
+			if (!image) {
+				return;
 			}
-		}
-		if (!groups.empty() && groups.back().texture == image && groups.back().additive == additive) {
-			groups.back().vertexCount += static_cast<uint32_t>(vertices.size()) - first;
-		} else {
-			groups.push_back({image, additive, first, static_cast<uint32_t>(vertices.size()) - first});
-		}
-	});
+			const uint32_t first = static_cast<uint32_t>(vertices.size());
+			static const float corners[6][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, -1}, {1, 1}, {-1, 1}};
+			for (const effects::Sprite& sprite : sprites) {
+				for (const auto& corner : corners) {
+					Vertex v {};
+					v.position[0] = sprite.position.x;
+					v.position[1] = sprite.position.y;
+					v.position[2] = sprite.position.z;
+					v.normal[0] = sprite.color[0];
+					v.normal[1] = sprite.color[1];
+					v.normal[2] = sprite.color[2];
+					v.weight = sprite.color[3];
+					v.texCoord[0] = corner[0];
+					v.texCoord[1] = corner[1];
+					v.part = sprite.size;
+					v.part2 = sprite.rotation;
+					vertices.push_back(v);
+				}
+			}
+			if (!groups.empty() && groups.back().texture == image && groups.back().additive == additive) {
+				groups.back().vertexCount += static_cast<uint32_t>(vertices.size()) - first;
+			} else {
+				groups.push_back({image, additive, first, static_cast<uint32_t>(vertices.size()) - first});
+			}
+		});
 	}
 	if (vertices.empty()) {
 		groups.clear();

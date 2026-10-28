@@ -752,7 +752,8 @@ The rewrite applies them to its first-person view (see below); `hit` is
 never read by the soldier.
 
 Not rewritten: the per-instance time override (system `+0x84`/`+0x88`),
-the weapons' and vehicles' effect events.
+the vehicles' (the mechs') effect events. The first-person weapon's are
+played (see below).
 
 ## The first-person view
 
@@ -789,10 +790,38 @@ original's Chase mode).
 `0x005948e0` → the PlayerControlObject's `0x005c7cb0`): the seat's Camera
 children (by `cameraId`, `0x0058bdb0`), placed by the template tree, so a
 gunner's camera under the gun's pitch bundle follows the gun; its
-`insideFOV`. The rewrite takes the seat's first Camera (nested seats left
-out) and turns the bundles as `GameWorld::partPose` does; ducking's second
-camera (`0x005c7cf0`) and the cockpit geometry (`cockpitSubGeom`) are not
-rewritten, nor is the free look.
+`insideFOV`. The seat's cameras are mapped by `CameraId` (0 by default);
+the rewrite takes the seat's camera with id 0 (nested seats left out) and
+turns the bundles as `GameWorld::partPose` does.
+
+**Ducking.** A seat whose template has `allowDucking` (+0x468; only the
+stationary bipods ship it) ducks while c_PICrouch (input 38) is held: the
+PlayerControlObject's input (`0x005ca2e0`) calls setDucking (`0x005c7cf0`,
+slot `0x12c` of its `+0x184` interface), which with more than one camera
+selects camera 1 (the `DuckCamera`, `CameraId 1`), and with
+`disableInputWhileDucking` (+0x469, 1 by default) the seat's inputs are
+cleared (`0x005c9ec0`) and fire events are ignored (`0x005cacf0`).
+Rewritten in `PlayerCamera::ducking` (the main loop clears the seat's
+throttle, strafe, turn and fire while it ducks).
+
+**The cockpit.** The Camera's geometry switch (`0x00612880`) runs for the
+local player's camera: for the root object's and its children's meshes
+with more than one geometry, in the first-person modes (0, 1) it sets the
+sub-geometry (mesh slot `0x6c`) to the camera's `cockpitSubGeom`
+(template `+0x44c`, -1 by default) or, when that is -1, the seat's
+(PlayerControlObject slot `0xf8` = `0x005c6b90`: template `+0x428`, 0 by
+default) and the LOD (slot `0x78`) to `cockpitLod` the same way (`+0x448`
+/ slot `0xf4` = `0x005c6b80`, `+0x424`); in the other modes geometry 1 at
+the automatic LOD. So a driver sees geometry 0 (the cockpit) unless the
+seat says 1 (the FAVs). Rewritten in `PlayerCamera::cockpit` and
+`LevelSources::geometryFor`.
+
+**Free look.** There is none beyond the seat camera itself: Cameras are
+RotationalBundle-type objects (`setInputToYaw PIMouseLookX`, min/max
+rotation, `automaticReset`, the axis update `0x00563bd0`); the FAV's
+driver camera allows ±1/±0.5. The game world poses bundles; the rewrite's
+seat camera applies `partPose` to the camera's own node, so it follows
+once `GameWorld` turns Camera bundles (it doesn't yet).
 
 **The arms and the weapon.** For the local player in first person the
 soldier's character mode (`+0x2f0`, `0x0058d350` → `0x005f0f20`) is 0, which
@@ -831,18 +860,100 @@ with `disableMuzzleWhenZoomed` (`0x005da050`, `0x005f31d0`); they are the
 weapon's children, so they follow the first-person weapon and are drawn in
 the first-person particle lists.
 
-Rewritten in `src/Animation/FirstPerson` (rig, eye, zoom, field of view),
-`src/Main/PlayerCamera` (the player's camera from the game world, seats,
-the models) and `LevelRenderer`'s first-person pass. The first-person
-systems' events (sounds, effects) aren't played, a shot's kick to the
-spring is 1 for the tick it fires (the recoil component's value,
-`0x005861a0`, isn't decoded), the weapons' blended materials (sight glass,
-displays) are left out of the pass, the muzzle flash stays where it was
-fired rather than following the gun, and the world's near plane in first
-person is 0.1 (the original's `renderer.tweakNearPlane` is 0.041 with a
-400 m view). A joined game's player (`--connect`) keeps the chase view.
+**The recoil kick** (SoldierBasedRecoilComp: template `0x005dd730`, the
+weapon's component `0x005dd370`). The template builds a graph
+(`0x005dd890`): n = `recoilGraphFrameCount` (8) values g[i] = −(i + 1)^e ×
+T / Σ(i + 1)^e (e `recoilGraphExponent` 2, T `recoilGraphTotalMovement`
+2), so they add to −T; with `goBackOnRecoil` (1) a second graph of n + m
+values (m = round(n/4)): base = −g[n−1]/2, the first m are base − 1.5 ×
+g[m − i], the rest 1.5 × g[i − m] + base, and the positive values are
+scaled to cancel the negative ones (`0x005dd030` picks it). A shot
+(`0x005dd490` → `0x005dd3f0`) samples `recoilForceUp` (and
+`recoilForceLeftRight`), times `zoomModifier` while zoomed (`0x005dd090`),
+and records the tick in a ring of 10. The value (`0x005dd5d0`, the
+firearm's slot `0x11c` = `0x005c1920` → the component's slot `0x94`) is,
+k ticks after the last shot, force × graph[size − 1 − k] for k < size − 1
+(the firearm's slot `0x110` factor is 1, `0x005b6b10`); the soldier
+(`0x005861a0`, only with `hasRecoilForce`: slot `0x100` → `0x005dd080`)
+feeds it to the spring's fire part and adds it to the aim's pitch
+(`0x0058a6d0`; the left-right value, `0x00586140`, to the yaw). The
+rewrite's spring takes it (`anim::RecoilSettings`, `recoilAt`); the aim's
+kick is the game world's and not applied there yet.
+
+**Effects on the first-person weapon.** The weapon's bundles follow it:
+the muzzle flash and the bundles its first-person system's effect events
+start (`0x2c + N` → startOnEffects bit 9 + N, `0x0061a4e0`) are spawned
+against an anchor at the weapon's root (mesh1) that moves each tick, with
+the systems that have `showInFirstPerson` (so `glow1p` rather than
+`glow3p`); `isLocalSystem 1` systems keep their particles in their own
+space. The shipped first-person systems only have effect events (reloads'
+`effect:0`); their sound events would be the soldier's (`0x00587b90`).
+
+**In joined games** (`--connect`) the soldier is the server's: the view
+takes the control object's position (as the feet), our own look, and the
+kit HandlePickup gave (`RemotePlayer::kitGhost`, its firearm with the
+selected `itemIndex`, 3 the primary), and the held fire input fires at
+`fire.roundsPerMinute` for the muzzle and the kick (the client's own
+prediction; the server's shots aren't decoded). Seats there keep the
+chase view.
+
+Rewritten in `src/Animation/FirstPerson` (rig, eye, zoom, field of view,
+recoil), `src/Main/PlayerCamera` (the player's camera from the game world
+or the remote ghosts, seats, ducking, the cockpit, the models, the
+weapon's effects) and `LevelRenderer`'s first-person pass (opaque and
+additive materials, the first-person particles, then the transparent ones
+back to front). The world's near plane in first person is 0.1 (the
+original's `renderer.tweakNearPlane` is 0.041 with a 400 m view).
 
 Rewritten in `src/Animation/AnimationSystem` and `AnimationConsole`.
+
+## Transparent meshes and attached effects (RendDX9)
+
+**Render queues.** RendDX9's shader manager (`0x1003ed70`, global
+`0x101fae6c`) keeps queues by name (RSMTTransparency `+8`, RSMT1Person
+`+0xc`, RSMT1PersonTransparency `+0x10`, the delta-light ones, RSMTRoad,
+RSMTWater `+0x28`, RSMTAdditive `+0x2c`, RSMTStaticMeshAlphaBlended
+`+0x3c`, ...). A drawable goes to one by `0x1003e530(item, transparent,
+firstPerson, delta)`: index (delta × 2 | firstPerson) × 2 | transparent,
+0 meaning the material's own opaque queue. The bundled mesh's draw
+(`0x100c3880`) sets a material by its alpha mode (`+0x15c`): 1 is
+blended (AlphaBlendEnable, no depth writes, CullMode 1, alpha test above
+0, SrcBlend SRCALPHA / DestBlend INVSRCALPHA, RaShaderBM's
+`outColor.a = diffuse.a × Transparency.a`) into a transparency queue,
+unless its geometry template has `hasAdditiveAlpha` (`+0x268`): then
+DestBlend ONE, no alpha test, the BMadditive shader (`RaShaderBMadditive`
+technique `depthAndFog`: the texture unlit, its alpha × the transparency,
+fogged, its coordinates scrolled by `frac(GlobalTime ×
+simpleUVTranslation)`, template `+0x26c`) in RSMTAdditive, or in first
+person in RSMT1Person with the opaque ones. An object fading out (its
+transparency `+0x1e8` below 1) sends all its materials to the
+transparency queue. The transparency queues sort (mode 2 at `+0xc`;
+`0x10038120` → `0x10039380`, comparator `0x10038340`) by the camera's
+distance to the object's origin (`+0x238`, set at the start of
+`0x100c3880`), largest first. The frame (`0x1002cef0`) draws the opaque
+queues, RSMTStaticMeshAlphaBlended, the water, RSMTTransparency,
+RSMTAdditive and the particles; after the first-person depth clear,
+RSMT1Person, the first-person particles, then RSMT1PersonTransparency.
+Rewritten in `src/Render/MeshQueues.h` and `LevelRenderer::draw` /
+`drawFirstPerson` (GpuContext's `fadedMeshPipeline` serves both blended
+kinds, `additiveMeshPipeline` the additive one); the additive materials
+of the first-person pass are drawn after all its opaque ones.
+
+**Attached effects.** An EffectBundle (vtable `0x0097b658`) is a child
+of its object and follows it; its events (`0x0061a4e0`): 0 starts it when
+startOnEffects is 0, 4 (sent to a vehicle when a player enters it, Player
+`0x00593e30`) starts it with bit `0x20` (the exhaust's startup), 5 (the
+PlayerControlObject's exit, `0x005cea00`) stops it with bit `0x40`, `0x2c
++ N` (animation effects) with bit 9 + N; `startAtCreation 1` starts it
+with the object (the engines' flames, rocket trails). Its particle
+systems' `isLocalSystem 1` keeps their particles in their own space (they
+move with it), the others leave theirs in the world (exhaust smoke,
+trails); `showInFirstPerson` / `showInThirdPerson` pick the view.
+Rewritten in `src/Effects` (`EffectManager::spawnAttached`, `setAnchor`,
+`setMount`, `stopAttached`; `ObjectEffects` for the world's objects,
+driven by the main loop with their parts' poses; the bundles' Sound
+children are handed out by `takeSounds`). The 3P muzzle flash is the game
+world's (`GameWorld::fire`) and is still spawned unattached.
 
 ## Ragdolls
 
@@ -2362,7 +2473,7 @@ Vehicles take damage through their armour settings:
   `0x44`) of the spot, less those a global list holds (`0x005628f0` /
   `0x00561d90`: the Titan sync manager, `ECPhysicsETitanSync`,
   `0x00561c00`, with the two teams' Titans at `+8` / `+0xc`, in `gpm_ti`
-  alone; the rewrite has no Titans). The spot is first dropped
+  alone; `GameWorld::testSpawnSpot` skips them, see [Titans](#titans-gpm_ti)). The spot is first dropped
   (`0x005ad8b0`): along the spawner's up axis from the template's
   vehicle-LOD box top (slot `0x54(1)`: max y) to its bottom (min y), the
   scene's ray (slot `0x68`, `0x00700b80`) through objects whose flags
@@ -3149,6 +3260,174 @@ full map and `CommanderShow`); the tools' `CommanderNo*Show`, `*Armor`,
 `*Reloading`, `*TimeUntilReloaded` and `*ShowFullStatus` come from
 `abilityState`, and the minimap shows the UAV, strikes on their way,
 supply crates and the squad's order.
+
+## Titans (gpm_ti)
+
+`src/Game/Titans.cpp`, `src/Game/CombatAreas.cpp`. The game mode script
+(`mods/bf2142/python/game/gamemodes/gpm_ti.py`) runs the round from the
+engine's events; the engine keeps the Titans, their armour and parts, their
+movement, the silos' missiles and the drop pods.
+
+**The Titan sync manager** (`0x005628f0`, a static at `0x00a67410`,
+vtable `0x00962698`). `0x00561c00` registers it for physics event 9
+(`ECPhysicsETitanSync`) and makes one sync object per team (`0x005ac0a0`,
+vtable `0x009682f4`; the team at `+0x10`) at `+8` / `+0xc`. The server's
+frame (`0x004afb20`) and the client's (`0x00590e10`) run `0x00561e20`
+with the tick; it returns unless the server's game mode is `gpm_ti`.
+`0x005ab390` finds a team's Titan: the RemoteControlledObject of rcType
+RCTitan (7, template `+0x29c`; the names are `0x004daf74`'s) of the team
+whose armour is no wreck; its root is the Titan, the object's
+`minTimeBetweenActivation` (`+0x2a0`, 5 s) kept as ticks at `+0x18`.
+`0x00561d90` answers "is this object a Titan" and is asked all over:
+
+- `0x004c0e40` (the game logic's damage): a Titan with no hit points left
+  takes none;
+- `0x005c8b40`: a Titan is always "in use" for the abandoned-vehicle check;
+- `0x005aeb80`: a Titan never blocks a spawner's spot;
+- `0x005b4ff0` (a projectile's hit): see the silo missiles;
+- `0x00655a00`: a Titan is never repaired; `0x00654120`: its wreck isn't
+  scheduled for removal; `0x00656320`: no water or upside-down damage;
+- `0x006ca660` / `0x006ca3b0`: what stands on a Titan takes its velocity
+  (the rewrite's soldier contacts take the body's velocity already);
+- `0x00589890` / `0x005718d0`: kits dropped on a Titan are carried with it
+  (`0x005ad2e0` keeps their offsets, `0x005aa5b0` moves them; not rewritten);
+- `0x004a5f90`: removing a Titan while the round runs is an error.
+
+**Movement** (`0x005aca70`, a tick at a time). The commander's orders wait
+in a map by tick (`+0x3c`): `Commander.moveTitan` arms the HUD (slots
+`0x328` / `0x334`), the map's click sends the order, and the server
+(`0x0050f1f0` → `0x005abba0`) takes it when the point is inside the combat
+areas binding the Titans (`0x005aba40`), 2 s ahead (the tick + round(2 /
+tick length)); the commander hears `AUTO_TITAN_CC_moveaccepted` or
+`_unablemove` (event 0x2d, `0x00757xxx`). `0x005ab4b0` finds the order in
+force (the latest whose tick has come); without one the Titan hangs where it
+was spawned. Each tick:
+
+- the push towards the target is min(`*0x00a6afd0` = 0.33, (distance −
+  `*0x00a6af98` = 5) × `*0x00a6afa4` = 5), only while the Titan may move
+  (`+0x35`: its armour's percent above `*0x00a6afbc` = 60);
+- each obstacle within `*0x00a6af9c` = 50 m of its edge (the other Titan,
+  and the static objects whose box reaches the lowest Titan's bottom,
+  gathered once by `0x00562360`; each by `0x00562090`'s radius, half its
+  box's x-z diagonal) adds (50 − gap) × `*0x00a6afc0` = 10 / distance along
+  the line away from it (`0x005626a0`);
+- a combat area's border within 1.25 radii (`0x005ab740` → `0x004cad50`)
+  adds 10 (`*0x00a6afb0`) away from it;
+- the sum is scaled back to the push's length (avoidance only turns it);
+  velocity = `*0x00a6afb8` (0.99) × (velocity + push × tick); the position
+  moves by it across x and z (`0x005aa0e0`: the object's position, the
+  node's velocity). It never turns. The top speed is about 1.09 m/s. With
+  `sv.allowTitanMovement` off (server settings `+0x59`) it stands.
+
+The combat areas (`CombatArea.*`, `CombatAreaManager.*`; the manager is
+`DAT_00a25134`): an area binds vehicle category 4 when its `vehicles` is 4
+(all) or 4, 5 binding categories 2 and 3 (`0x004d9cc0`); a point is inside
+when it is in one of them, or anywhere when none binds (`0x004ca7d0`).
+
+**Armour.** The Titan's armour (as/eu_titan_playtest: 6,000,000, material
+4100) is ticket-shaped: gpm_ti.py sets the team's tickets to
+ceil(100 × hit points / maxHitPoints) on VehicleSpawn, VehicleDamage and
+VehicleRepair; the HUD's bars span the tickets (HudElementsTitans.con: the
+shield 60–100, the hull 0–60). The engine's rules (`0x004c0e40`):
+
+- the damage goes to the hit node's armour or its nearest armoured
+  ancestor; under 0.1 nothing;
+- `armor.onlyDamageFromChildrenLevel` (template `+0xe4`, −100 by default;
+  the Titans' 0) caps damage not from a child at what leaves the armour at
+  that percent: shots bring a Titan to 0 and no further;
+- after the damage: a part turned wreck (state 1, `0x00651c20`: hit points
+  ≤ 0, above −wreckHitPoints) gives its parent `parentDamageWreck`
+  (`+0xd4`) % of the parent's maxHitPoints; a part alive before or after
+  gives it `parentDamageAlive` (`+0xd0`) × the damage / its hit points
+  before × the parent's hit points, both as a child's damage. A hit past
+  −wreckHitPoints leaves the part destroyed (state 2) and its parent gets
+  nothing from parentDamageWreck, as the check reads;
+- the armour update (`0x00654d80`) destroys a part when its parent's or
+  root's percent is at or below `destroyOnParentDamageLevel` (`+0xd8`) or
+  `destroyOnRootParentDamageLevel` (`+0xe0`), and burns it below
+  `criticalDamage` at `hpLostWhileCriticalDamage` a second;
+- the setter (`0x00655460`) keeps hit points within −wreckHitPoints
+  (`+0xc0`) and maxHitPoints (`+0xc8`); the template's defaults
+  (`0x00630040`): 10, 10, parent damages 0, levels −1, −100;
+- a wrecked part's subtree loses its collision (`0x00651c60`).
+
+So the Titan's tree plays out as: the forcefield (as_titan_forcefield,
+destroyOnParentDamageLevel 61) goes with the shield; below 60 % the Titan
+stops. The four consoles (7,000) each take 2 off the core room's doors
+(10; parentDamageWreck 20); at 2, under their criticalDamage 3, the doors
+burn at 1 a second, open, and give the core 1 % (400); the core (40,000,
+parentDamageAlive 1) takes the Titan down with it share for share, and goes
+itself when the Titan reaches 0 (destroyOnParentDamageLevel 0). The
+Titan's wreck is VehicleDestroyed, on which gpm_ti.py ends the round
+(`sgl_endGame(winner, 3, 25)`). The armour effects at negative percents
+(the explosions down to −38 %, `0x00654730` sends event 0x14 there) belong
+to the Titan's crash after its destruction, which the rewrite doesn't run
+(the Titan stays a wreck where it is).
+
+The Python component's events by id (the host module's names, as the
+templates use them): 25 VehicleDestroyed, 26 VehicleDamage, 27
+VehicleRepair, 28 VehicleSpawn, 46/47 TitanPartDestroyed/Repaired (the
+consoles), 48/49 TitanCore*, 50/51 TitanWeapon* (the guns), 52/53
+GroundCannon* (the silos), 54 MissileDestroyed, 55
+CommanderAssetRepaired, 56 VehicleShieldDestroyed. VehicleDestroyed is
+raised for every destroyed vehicle.
+
+**The interior.** The Titan's body carries its whole tree's soldier and
+projectile LODs, each face reporting its part; soldiers walk its decks and
+ride along by its velocity. Its SpawnPoint children (seven in each Titan)
+are spawn points of its spawner's control point, moved with it. Left out:
+the team forcefields (collisionGroups 256: which team they let through is
+not decoded), the penetrable shields' damage loss (4112, 4118:
+overrideNeverPenetrate with damageLoss 1000; rounds pass them), the guns'
+seats, the Titan's object spawners (as_titan_ATSpawner/AGSpawner) and its
+SupplyObject.
+
+**Missile silos** (`isMissileSilo`, missile_silo_v2): the auto controller
+CP_CANNON (AI/AutoControllers.ai: fov 179, viewDistance 2000,
+reloadOnTeamChange) with the weapon AI missile_silo_Weapon (10–2000 m,
+Titans only). A silo held by a team, loaded and in range fires at the enemy
+Titan; the missile leaves `fire.fireLaunchDelay` (1 s) later straight up (the
+barrel, Missile_Silo_Barrel, turns on its own to its limit: setMinRotation
+0/−90/0, setAcceleration 0/−50/0, startAutoRotateOnEnter) at `velocity`
+(4); the magazine (1) refills `ammo.reloadTime` (120 s) later, and a change
+of hands starts the reload over. The missile (msilo_missile): from
+`startDelay` (2.5 s) its `acceleration` (10) pushes it to `maxSpeed` (80);
+from seek.trackingDelay (3 s) it turns towards the locked Titan's middle
+(FixedTargetComp TTBeacon; DefaultFollowComp's follow.maxYaw 4 radians a
+second across, follow.maxPitch 1 up and down, as the rewrite reads the AV
+missile's follow; changeYaw and magneticBehaviour are not decoded); for its
+first `onlyDetonateOnMaterialTimeLimit` (6.5 s) it sets off only on
+material 4100, and anything else in its way that is no Titan's is destroyed
+on the server (3e10 damage) while it flies on (`0x005b4ff0`). Its 110,000
+damage meets veh_titan_armor with a cell of 1 (the turrets' 4113: 3). On Minsk a silo's first missile reaches the other
+Titan about 13 s after launch.
+
+**Drop pods.** A GenericFireArm with `fire.isPodLauncher` (ThrownFireComp)
+fires its projectile, a Parachute PCO with `isPod` and `enterOnSpawn`
+(eu_pod0, eu_pod), which the soldier rides (`dontAllowExit`): the Titans'
+pod arrays (titan_pod_array1/2: entered at their EntryPoints, the launcher
+40° up at 100 m/s) and the APCs' pod seats (`fire.fireInput PIAltFire`,
+pod_launcher at 150 m/s; pod_launcher_cq in other modes). The pod is a
+rigid body of its own (gravityModifier 1.5, drag 1, dragModifier 3/1/3);
+its ForceObjects steer it (eu_pod_FOFWD 35 on PIThrottle, eu_pod_FOStrafe
+20 on PIYaw, × 30 / mass a second as the drones' are). At rest it lets the
+soldier out. Not rewritten: the pod's position regulator and keepUp
+torque (it is kept upright), lookAtClosestTitanOnEnter, pods against a
+shielded Titan.
+
+**Bots.** AIDLL has no Titan-mode strategy (its only Titan code is the
+CSTTitan strategic type); single-player BF2142 had no Titan mode. In the
+rewrite the bots play gpm_ti with the default strategies: the silos are
+capturable control points, the Titans' points are not. A bot that spawns
+aboard its Titan walks to the nearest pod array and drops (the arrays'
+titan_pod_array_1_ai template makes them vehicles to the AI). Boarding the
+enemy Titan and attacking its consoles and core has no AI to rewrite.
+
+**The HUD** (main.cpp's update): GameMode 1 (the Titan HUD shows for 1 or
+3), FriendlyTickets / EnemyTickets for the bars, CPCannon0–4Show / Team /
+String (the silos and their reload), Friendly/EnemyStrategicObject1–4Show
+(a console destroyed) and 0Show (the Titan gone); the variables are the HUD
+manager's (`0x0044f1a0`), their engine setters were not traced.
 
 ## Bots (AIDLL.dll)
 
