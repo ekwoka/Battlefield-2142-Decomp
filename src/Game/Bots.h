@@ -571,6 +571,7 @@ private:
 		bool hornHeld = false;
 		float waitingSince = -1;  // Idle: a driver waiting for a passenger
 		bool usedLast = false;    // presses: use and the defibrillator want a release between
+		int titanGun = -1;        // Titan mode: the gun seat of its Titan it goes to man (claimed)
 		bool switchedLast = false;
 		// The comm object's received radio messages (bot vt+0xa4, +0xc: a
 		// list per type, 0x100a6fe0), each kept for its lifetime (0x100a7130).

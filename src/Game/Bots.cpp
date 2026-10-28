@@ -918,7 +918,7 @@ std::string BotManager::equipmentOf(const GameWorld::PlayerInfo& self) const
 			return unit->equipmentType;
 		}
 	}
-	if (self.seat == 0) {
+	if (self.driving) {
 		return seat.weapon.empty() ? "Car" : "Tank";
 	}
 	return "Fixed";
@@ -1090,7 +1090,7 @@ void BotManager::update(float seconds)
 			physics::Vec3 velocity = self.velocity;
 			const GameWorld::VehicleInfo* vehicle = nullptr;
 			for (const GameWorld::VehicleInfo& v : m_vehicles) {
-				vehicle = v.object == self.vehicle && self.seat == 0 ? &v : vehicle;
+				vehicle = v.object == self.vehicle && self.driving ? &v : vehicle;
 			}
 			if (vehicle) {
 				velocity = vehicle->velocity;
@@ -1125,6 +1125,48 @@ void BotManager::update(float seconds)
 			m_world.setInput(self->id, input);
 			continue;
 		}
+		// Its Titan's guns (the gun hubs are seats of equipment type Fixed in
+		// their AI templates, which AIDLL's seat choice covers, but no
+		// strategy of its sends a bot into a Titan): while fewer than half
+		// its Titan's guns are manned or claimed, a bot aboard claims the
+		// nearest free working gun no other bot claimed, walks straight to
+		// its console and takes it; the Titan isn't among the bots' vehicles,
+		// so it stays and runs the Fixed behaviours there. The rest drop in
+		// pods.
+		int gunSeat = bot.titanGun;
+		bool toGun = false;
+		if (!self->vehicle && m_world.titanOf(self->team)) {
+			std::vector<int> claimed;
+			for (const auto& [id, other] : m_bots) {
+				const GameWorld::PlayerInfo* mate = nullptr;
+				for (const GameWorld::PlayerInfo& p : m_players) {
+					mate = p.id == id ? &p : mate;
+				}
+				if (id != self->id && other.titanGun >= 0 && mate && mate->team == self->team && mate->alive && !mate->vehicle) {
+					claimed.push_back(other.titanGun);
+				}
+			}
+			const std::vector<int> gunners = m_world.vehicleOccupants(m_world.titanOf(self->team));
+			const long manned = std::count_if(gunners.begin(), gunners.end(), [](int p) { return p >= 0; });
+			const long guns = static_cast<long>(m_world.vehicleSeats(m_world.titanOf(self->team)).size());
+			if (gunSeat >= 0) {
+				toGun = m_world.titanGunEntry(self->id, podEntry, podRadius, gunSeat, claimed);
+			} else if ((manned + static_cast<long>(claimed.size())) * 2 < guns) {
+				toGun = m_world.titanGunEntry(self->id, podEntry, podRadius, gunSeat, claimed);
+			}
+		}
+		bot.titanGun = toGun ? gunSeat : -1;
+		if (toGun) {
+			const physics::Vec3 d = podEntry - self->position;
+			const float want = std::atan2(d.x, d.z) * 57.29578f;
+			input.turn = std::clamp(std::remainder(want - self->yaw, 360.0f), -360 * elapsed, 360 * elapsed);
+			input.throttle = std::fabs(std::remainder(want - self->yaw, 360.0f)) < 45 ? 1.0f : 0.0f;
+			input.use = physics::lengthSquared(d) < podRadius * podRadius * 0.5f && !bot.usedLast;
+			bot.usedLast = input.use;
+			bot.lastInput = input;
+			m_world.setInput(self->id, input);
+			continue;
+		}
 		if (m_world.titanPodEntry(self->id, podEntry, podRadius)) {
 			const physics::Vec3 d = podEntry - self->position;
 			const float want = std::atan2(d.x, d.z) * 57.29578f;
@@ -1138,8 +1180,8 @@ void BotManager::update(float seconds)
 		}
 		updateGoal(bot, *self);
 		act(bot, *self, input, elapsed);
-		m_behaviourSeconds[bot.behaviour + (self->vehicle ? (self->seat == 0 ? " (driving)" : " (seated)") : "")] += elapsed;
-		if (self->vehicle && self->seat == 0) {
+		m_behaviourSeconds[bot.behaviour + (self->vehicle ? (self->driving ? " (driving)" : " (seated)") : "")] += elapsed;
+		if (self->vehicle && self->driving) {
 			m_driven[self->vehicle] += std::sqrt(horizontal2(self->velocity)) * elapsed;
 		}
 		bot.usedLast = input.use;
@@ -1284,7 +1326,7 @@ void BotManager::sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::v
 	// frustum of half-angle fov/2), seen when one of
 	// clamp(round(30 radius / d), 1, 10) rays is clear.
 	float gunYaw = 0, gunPitch = 0;
-	const bool gunning = self.vehicle && self.seat > 0 && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
+	const bool gunning = self.vehicle && !self.driving && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
 	const float lookYaw = gunning ? self.yaw + gunYaw : self.yaw;
 	const float lookPitch = gunning ? gunPitch : bot.pitch;
 	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight - 0.1f, 0};
@@ -1398,7 +1440,7 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 	bool hasOrder = false;
 	// A driver heads for the areas' vehicle order positions over the
 	// vehicle mesh.
-	const int map = self.vehicle && self.seat == 0 ? 1 : 0;
+	const int map = self.vehicle && self.driving ? 1 : 0;
 	if (const GameWorld::SquadOrder* order = self.squad ? m_world.squadOrder(self.team, self.squad) : nullptr) {
 		orderAt = order->position;
 		hasOrder = true;
@@ -1596,7 +1638,7 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		&& pattern != "BBPRevive") {
 		m_tasks.erase(self.id);
 	}
-	const bool driving = self.vehicle && self.seat == 0;
+	const bool driving = self.vehicle && self.driving;
 	if (pattern.rfind("BBPFire", 0) == 0 || pattern == "BBPHeliFire3d") {
 		fire(bot, self, input, seconds);
 	} else if (pattern.rfind("BBPGotoWaypoint", 0) == 0) {
@@ -1851,8 +1893,8 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 {
 	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight, 0};
 	float gunYaw = 0, gunPitch = 0;
-	const bool gunning = self.vehicle && self.seat > 0 && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
-	if (self.vehicle && !gunning && self.seat != 0) {
+	const bool gunning = self.vehicle && !self.driving && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
+	if (self.vehicle && !gunning && !self.driving) {
 		bot.target = -1;
 		return 0; // a seat without a gun
 	}
@@ -2011,7 +2053,7 @@ void BotManager::pickWeapon(Bot& bot, const GameWorld::PlayerInfo& self, const s
 		return;
 	}
 	float gunYaw = 0, gunPitch = 0;
-	const bool gunning = self.vehicle && self.seat > 0 && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
+	const bool gunning = self.vehicle && !self.driving && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
 	std::vector<std::pair<int, std::string>> weapons;
 	if (gunning) {
 		const auto seats = m_world.vehicleSeats(self.vehicle);
@@ -2188,10 +2230,10 @@ float BotManager::moveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float
 float BotManager::idleUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight,
 	const std::vector<GameWorld::PlayerInfo>& players)
 {
-	if (self.vehicle && self.seat != 0) {
+	if (self.vehicle && !self.driving) {
 		return 0.5f;
 	}
-	if (self.vehicle && self.seat == 0) {
+	if (self.vehicle && self.driving) {
 		float wait = 0;
 		for (const GameWorld::PlayerInfo& mate : players) {
 			const auto it = m_bots.find(mate.id);
@@ -3517,6 +3559,11 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 	const float wantYaw = headingTo(eye, want);
 	const float wantPitch = std::atan2(d.y, std::sqrt(horizontal2(d))) * kDegrees;
 	const float trueYaw = (gunning ? self.yaw + gunYaw : self.yaw) - bot.devYaw;
+	// The weapon's recoil kicked the soldier's pitch (GameWorld::takeAimKick):
+	// the bot's own angle takes it, and the aim corrects from there.
+	if (!gunning) {
+		bot.pitch = std::clamp(bot.pitch + m_world.takeAimKick(self.id), -kPitchLimit, kPitchLimit);
+	}
 	const float truePitch = gunning ? gunPitch : bot.pitch;
 	const float ey = angleBetween(trueYaw, wantYaw) * kRadians;
 	const float ep = (wantPitch - truePitch) * kRadians;

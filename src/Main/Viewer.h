@@ -65,6 +65,10 @@ struct ViewerOptions {
 	};
 	std::function<void(const PlayerInput&)> onPlayerInput;
 	std::function<bool(PlayerView&)> playerView; // false without a player
+	// The recoil's kick to the aim since the last call (degrees, up
+	// positive): the viewer adds it to its pitch, as the original adds it to
+	// the soldier's own angles (GameWorld::takeAimKick).
+	std::function<float()> takeAimKick;
 	// Menus (the spawn screen): while it says so the mouse is a pointer,
 	// and left clicks go to onClick in the HUD's 800 x 600 screen.
 	std::function<bool()> wantsPointer;

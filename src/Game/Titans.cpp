@@ -247,6 +247,38 @@ bool GameWorld::titanPart(uint32_t id, const Titan*& titan, int& part) const
 
 bool GameWorld::isTitan(uint32_t object) const { return titanByObject(object) != nullptr; }
 
+// A Titan gun seat fires while its Titan and its armour are whole (the guns'
+// armour: disableInputOnDestroy 1).
+bool GameWorld::titanGunWorks(uint32_t object, int seat) const
+{
+	const Titan* titan = titanByObject(object);
+	if (!titan || titan->wrecked) {
+		return false;
+	}
+	if (seat < 0 || static_cast<size_t>(seat) >= titan->seatParts.size()) {
+		return true;
+	}
+	const int part = titan->seatParts[static_cast<size_t>(seat)];
+	return part < 0 || titan->parts[static_cast<size_t>(part)].state == 0;
+}
+
+// The Titan's wreck puts its gunners out at their seats' exits (the hubs'
+// soldierExitLocation, at the consoles inside).
+void GameWorld::titanSeatsOut(Titan& titan)
+{
+	Body* body = findBody(titan.object);
+	if (!body) {
+		return;
+	}
+	for (const int occupant : std::vector<int>(body->occupants)) {
+		Player* player = occupant >= 0 ? findPlayer(occupant) : nullptr;
+		world::Object* soldier = player ? m_objects.find(player->object) : nullptr;
+		if (player && soldier && player->vehicle == titan.object) {
+			enterOrLeaveVehicle(*player, *soldier);
+		}
+	}
+}
+
 uint32_t GameWorld::titanOf(int team) const
 {
 	for (const Titan& titan : m_titans) {
@@ -284,6 +316,9 @@ void GameWorld::registerTitan(uint32_t id, int controlPoint)
 	titan.team = object->team();
 	titan.controlPoint = controlPoint;
 	titan.orderInterval = number(*control, "minTimeBetweenActivation", 5);
+	titan.stayAsWreck = number(*t, "armor.timeToStayAsWreck", 20);         // 0x00630040: 20
+	titan.afterDestroyed = number(*t, "armor.timeToStayAfterDestroyed", 0); // and 0
+	titan.canBeDestroyed = integer(*t, "armor.canBeDestroyed", 1) != 0;     // +0x166, 1
 	titan.serial = m_titanSerial++;
 	m_titans.push_back(std::move(titan));
 	buildTitanParts(m_titans.back());
@@ -316,6 +351,7 @@ void GameWorld::buildTitanParts(Titan& titan)
 	}
 	titan.parts.clear();
 	titan.meshes.clear();
+	std::vector<const world::ObjectTemplate*> carriedTemplates;
 	const auto addPart = [&](const world::ObjectTemplate& t, int parent, const physics::Mat3& rotation,
 							   const physics::Vec3& position) {
 		TitanPart part;
@@ -326,6 +362,7 @@ void GameWorld::buildTitanParts(Titan& titan)
 		part.armoured = true;
 		part.maxHitPoints = number(t, "armor.maxHitPoints", 10);
 		part.hitPoints = number(t, "armor.hitPoints", part.maxHitPoints);
+		part.effectHitPoints = part.hitPoints;
 		part.wreckHitPoints = number(t, "armor.wreckHitPoints", 10);
 		part.criticalDamage = number(t, "armor.criticalDamage", 0);
 		part.hpLostWhileCritical = number(t, "armor.hpLostWhileCriticalDamage", 0);
@@ -335,6 +372,22 @@ void GameWorld::buildTitanParts(Titan& titan)
 		part.destroyOnRootLevel = number(t, "armor.destroyOnRootParentDamageLevel", -1);
 		part.onlyFromChildrenLevel = number(t, "armor.onlyDamageFromChildrenLevel", -100);
 		part.destroyEvent = integer(t, "Python.onDestroyEvent", 0);
+		// The armour effects, highest level first (the list's order).
+		if (const std::string* list = setting(t, "armor.addArmorEffect.list")) {
+			size_t from = 0;
+			while (from < list->size()) {
+				const size_t end = std::min(list->find(';', from), list->size());
+				char effect[128] = {}, position[64] = {}, turn[64] = {};
+				int level = 0;
+				if (std::sscanf(list->substr(from, end - from).c_str(), "%d %127s %63s %63s", &level, effect, position, turn) == 4) {
+					const physics::Vec3 r = vec3Of(turn);
+					part.effects.push_back({level, effect, vec3Of(position), physics::Mat3::fromYawPitchRoll(r)});
+				}
+				from = end + 1;
+			}
+			std::stable_sort(part.effects.begin(), part.effects.end(),
+				[](const TitanPart::ArmorEffect& a, const TitanPart::ArmorEffect& b) { return a.level > b.level; });
+		}
 		part.kind = part.destroyEvent == 46 ? TitanPartInfo::Console
 			: part.destroyEvent == 48      ? TitanPartInfo::Core
 			: part.destroyEvent == 50      ? TitanPartInfo::Gun
@@ -346,24 +399,34 @@ void GameWorld::buildTitanParts(Titan& titan)
 		return static_cast<int>(index);
 	};
 	std::function<void(const world::ObjectTemplate&, const physics::Mat3&, const physics::Vec3&, int,
-		std::vector<int>, int)>
+		std::vector<int>, int, std::string)>
 		visit = [&](const world::ObjectTemplate& t, const physics::Mat3& rotation, const physics::Vec3& position,
-					int parentPart, std::vector<int> chain, int depth) {
+					int parentPart, std::vector<int> chain, int depth, std::string seat) {
 			if (depth > 8) {
 				return;
+			}
+			if (depth > 0 && sameName(t.typeName(), "PlayerControlObject") && setting(t, "seatInformation")) {
+				seat = t.name();
 			}
 			int node = parentPart;
 			if (depth == 0 || hasArmour(t)) {
 				node = addPart(t, parentPart, rotation, position);
+				titan.parts[static_cast<size_t>(node)].seat = seat;
 				chain.push_back(node);
 			}
 			if (sameName(t.typeName(), "SpawnPoint") && depth > 0) {
 				titan.spawnPoints.push_back({0, position, rotation.yawPitchRoll().x});
 			}
+			if ((sameName(t.typeName(), "ObjectSpawner") || sameName(t.typeName(), "SupplyObject")) && depth > 0) {
+				carriedTemplates.push_back(&t);
+				titan.carried.push_back({0, position, rotation.yawPitchRoll().x});
+			}
 			const std::string* meshName = collisionMeshOf(t);
-			if (meshName && integer(t, "hasCollisionPhysics", 1) != 0 && (integer(t, "collisionGroups", 0) & 256) == 0
-				&& m_collisionTemplates && m_files) {
-				if (const physics::CollisionMeshFile* mesh = m_collisionTemplates->mesh(*meshName, *m_files)) {
+			if (meshName && integer(t, "hasCollisionPhysics", 1) != 0 && m_collisionTemplates && m_files) {
+				const std::string& file = t.creationFile();
+				const size_t slash = file.find_last_of("/\\");
+				if (const physics::CollisionMeshFile* mesh = m_collisionTemplates->mesh(*meshName, *m_files,
+						slash == std::string::npos ? std::string() : file.substr(0, slash + 1))) {
 					TitanMesh m;
 					m.mesh = mesh;
 					m.materials = materialMap(t);
@@ -371,6 +434,7 @@ void GameWorld::buildTitanParts(Titan& titan)
 					m.position = position;
 					m.node = node;
 					m.chain = chain;
+					m.groups = integer(t, "collisionGroups", 0);
 					titan.meshes.push_back(std::move(m));
 				}
 			}
@@ -383,10 +447,23 @@ void GameWorld::buildTitanParts(Titan& titan)
 					physics::Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z});
 				visit(*c, local * rotation,
 					rotation.transform({child.position.x, child.position.y, child.position.z}) + position, node, chain,
-					depth + 1);
+					depth + 1, seat);
 			}
 		};
-	visit(*object->objectTemplate(), physics::Mat3 {}, physics::Vec3 {}, -1, {}, 0);
+	visit(*object->objectTemplate(), physics::Mat3 {}, physics::Vec3 {}, -1, {}, 0, std::string());
+	// The gun seats' armour: the first armoured node under each seat's hub
+	// (eu_groundcanone3 / eu_aacannon under their _hub: Python.onDestroyEvent
+	// 50, disableInputOnDestroy 1).
+	titan.seatParts.clear();
+	for (const SeatLayout& seat : vehicleLayout(*object->objectTemplate()).seats) {
+		int found = -1;
+		for (size_t i = 1; i < titan.parts.size() && found < 0; ++i) {
+			if (!titan.parts[i].seat.empty() && sameName(titan.parts[i].seat, seat.name)) {
+				found = static_cast<int>(i);
+			}
+		}
+		titan.seatParts.push_back(found);
+	}
 	// The pod arrays: PlayerControlObjects below the root with EntryPoints
 	// and a pod-launching firearm in their subtree.
 	titan.podArrays.clear();
@@ -468,6 +545,43 @@ void GameWorld::buildTitanParts(Titan& titan)
 			}
 		}
 	}
+	// Its object spawners and supply point: objects of their own at their
+	// places, carried with it (stepTitanSpawnPoints). A spawner's held spawn
+	// (holdObject) is put at the spawner each tick, so it rides along.
+	for (size_t i = 0; i < titan.carried.size() && i < carriedTemplates.size(); ++i) {
+		world::ObjectTemplate* t = m_templates.find(carriedTemplates[i]->name());
+		const physics::Vec3 at = physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y,
+									 object->rotation().z}).transform(titan.carried[i].offset)
+			+ physics::Vec3 {object->position().x, object->position().y, object->position().z};
+		world::Object* made = t ? m_objects.create(t, {at.x, at.y, at.z},
+			{object->rotation().x + titan.carried[i].yaw, 0, 0}) : nullptr;
+		if (!made) {
+			continue;
+		}
+		titan.carried[i].object = made->id();
+		if (sameName(t->typeName(), "ObjectSpawner")) {
+			made->setTeam(integer(*t, "team", titan.team));
+			auto spawner = std::make_unique<ObjectSpawner>(*made, SpawnerSettings::fromTemplate(*t));
+			spawner->setSpotCheck([this](const world::ObjectTemplate& objectTemplate, const world::Vec3& spot,
+									  const world::Vec3& rotation, const world::Vec3& place) {
+				return testSpawnSpot(objectTemplate, spot, rotation, place);
+			});
+			spawner->reset(m_random);
+			m_newSpawners.push_back(std::move(spawner));
+		} else {
+			// The supply point: its storage left at -1, never spent
+			// (0x005d0650 / 0x005d06a0).
+			Crate crate;
+			crate.object = made->id();
+			crate.team = integer(*t, "team", titan.team);
+			made->setTeam(crate.team);
+			crate.storage = 1e30f;
+			crate.timeLeft = 1e30f;
+			crate.settings = t;
+			crate.carried = true;
+			m_crates.push_back(crate);
+		}
+	}
 	stepTitanSpawnPoints(titan);
 	titan.meshesDirty = true;
 }
@@ -512,30 +626,58 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 	if (!body) {
 		return;
 	}
+	// The team forcefields (collisionGroups 0x100 on the PAC Titan's doors,
+	// spawn room, corridor and vehicle bay fields and its outer shield, 0x200
+	// on the EU Titan's): an object of a team passes what carries its own
+	// team's bit (0x006c3890 for a soldier, 0x006bb050 mesh against mesh;
+	// the team the first PlayerControlObject up the object's tree's, slot
+	// 0x9c; team 1 has 0x100, team 2 0x200); so each team's soldiers meet the
+	// soldier mesh and the other team's fields' soldier LODs. The shipped
+	// fields have none (their meshes carry the projectile and vehicle LODs
+	// only, and a mesh without a soldier LOD stops no soldier): soldiers pass
+	// them all, and the team rule sorts vehicles (the vehicle bay's shield,
+	// material 4117, lets its own team's in). A projectile has no
+	// PlayerControlObject and group 8: rounds meet every field, and only a
+	// penetrable material lets them through (the projectiles' penetration).
 	auto soldier = std::make_shared<physics::CollisionWorld>();
 	auto projectile = std::make_shared<physics::CollisionWorld>();
-	for (const TitanMesh& m : titan.meshes) {
-		const bool gone = std::any_of(m.chain.begin(), m.chain.end(), [&](int part) {
+	std::shared_ptr<physics::CollisionWorld> teams[2];
+	const auto soldierLod = [](const physics::CollisionMeshFile& mesh) {
+		for (const physics::CollisionSubGeometry& part : physics::collisionParts(mesh, 0)) {
+			if (physics::collisionLodFor(mesh, part, static_cast<uint32_t>(physics::CollisionUser::Soldier))) {
+				return true;
+			}
+		}
+		return false;
+	};
+	const auto live = [&](const TitanMesh& m) {
+		return std::none_of(m.chain.begin(), m.chain.end(), [&](int part) {
 			return part > 0 && titan.parts[static_cast<size_t>(part)].off;
 		});
-		if (gone) {
+	};
+	const bool teamFaces = std::any_of(titan.meshes.begin(), titan.meshes.end(),
+		[&](const TitanMesh& m) { return (m.groups & 0x300) != 0 && live(m) && soldierLod(*m.mesh); });
+	for (int team = 0; team < 2 && teamFaces; ++team) {
+		teams[team] = std::make_shared<physics::CollisionWorld>();
+	}
+	for (const TitanMesh& m : titan.meshes) {
+		if (!live(m)) {
 			continue;
 		}
 		const uint32_t owner = m.node >= 0 ? titan.parts[static_cast<size_t>(m.node)].id : titan.object;
-		soldier->addMesh(*m.mesh, physics::CollisionUser::Soldier, m.rotation, m.position, owner, m.materials);
-		// The penetrable shields (veh_titan_penetrate_shield_blue/red: 4112,
-		// 4118, overrideNeverPenetrate with a damageLoss) let rounds through:
-		// the cargo bay's forcefield keeps soldiers out, not missiles. (What
-		// a round loses on its way through is not rewritten.)
-		const bool penetrable = m_materials && !m.materials.empty()
-			&& std::all_of(m.materials.begin(), m.materials.end(), [this](uint32_t id) {
-				   const physics::Material* material = id ? m_materials->find(id) : nullptr;
-				   return id == 0 || id == 666 || (material && material->overrideNeverPenetrate && material->damageLoss > 0);
-			   });
-		if (!penetrable) {
-			projectile->addMesh(*m.mesh, physics::CollisionUser::Projectile, m.rotation, m.position, owner, m.materials);
+		const int field = m.groups & 0x300;
+		if (field == 0) {
+			soldier->addMesh(*m.mesh, physics::CollisionUser::Soldier, m.rotation, m.position, owner, m.materials);
 		}
+		for (int team = 0; team < 2 && teamFaces; ++team) {
+			if (field == 0 || (field & (0x100 << team)) == 0) {
+				teams[team]->addMesh(*m.mesh, physics::CollisionUser::Soldier, m.rotation, m.position, owner, m.materials);
+			}
+		}
+		projectile->addMesh(*m.mesh, physics::CollisionUser::Projectile, m.rotation, m.position, owner, m.materials);
 	}
+	body->teamSoldierMesh[0] = teams[0];
+	body->teamSoldierMesh[1] = teams[1];
 	body->soldierMesh = soldier;
 	body->projectileMesh = projectile;
 	// The radius (0x00562090): half the diagonal of the root's box across x
@@ -555,13 +697,34 @@ void GameWorld::stepTitanSpawnPoints(Titan& titan)
 	const physics::Mat3 rotation =
 		physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
 	const physics::Vec3 at {object->position().x, object->position().y, object->position().z};
-	for (const Titan::Spawn& spawn : titan.spawnPoints) {
-		if (world::Object* point = m_objects.find(spawn.object)) {
-			const physics::Vec3 p = at + rotation.transform(spawn.offset);
-			point->setPosition({p.x, p.y, p.z});
-			point->setRotation({object->rotation().x + spawn.yaw, 0, 0});
+	for (const std::vector<Titan::Spawn>* list : {&titan.spawnPoints, &titan.carried}) {
+		for (const Titan::Spawn& spawn : *list) {
+			if (world::Object* point = m_objects.find(spawn.object)) {
+				const physics::Vec3 p = at + rotation.transform(spawn.offset);
+				point->setPosition({p.x, p.y, p.z});
+				point->setRotation({object->rotation().x + spawn.yaw, 0, 0});
+			}
 		}
 	}
+}
+
+// A Titan's carried objects go with it: its spawners first (they hold
+// their objects by reference), its supply point.
+void GameWorld::removeTitanCarried(Titan& titan)
+{
+	for (const Titan::Spawn& spawn : titan.carried) {
+		const auto erase = [&](auto& list) {
+			list.erase(std::remove_if(list.begin(), list.end(),
+						   [&](const std::unique_ptr<ObjectSpawner>& s) { return s->object().id() == spawn.object; }),
+				list.end());
+		};
+		erase(m_spawners);
+		erase(m_newSpawners);
+		m_crates.erase(std::remove_if(m_crates.begin(), m_crates.end(), [&](const Crate& c) { return c.object == spawn.object; }),
+			m_crates.end());
+		m_objects.remove(spawn.object);
+	}
+	titan.carried.clear();
 }
 
 std::vector<uint32_t> GameWorld::titanSpawnPoints(int team) const
@@ -614,6 +777,8 @@ std::vector<GameWorld::TitanInfo> GameWorld::titans() const
 		info.canMove = info.percent > kMoveAbove;
 		info.wreck = titan.wrecked;
 		info.radius = titan.radius;
+		info.effectLevel = root.effectLevel;
+		info.coreExplosion = titan.coreExplosion;
 		for (auto it = titan.targets.rbegin(); it != titan.targets.rend(); ++it) {
 			if (it->first <= m_ticks) {
 				info.hasTarget = true;
@@ -763,6 +928,7 @@ void GameWorld::stepTitans(float seconds)
 			for (const Titan::Spawn& spawn : it->spawnPoints) {
 				m_objects.remove(spawn.object);
 			}
+			removeTitanCarried(*it);
 			it = m_titans.erase(it);
 		} else {
 			++it;
@@ -807,7 +973,19 @@ void GameWorld::stepTitans(float seconds)
 			rebuildTitanMeshes(titan);
 		}
 		world::Object* object = m_objects.find(titan.object);
-		if (!object || titan.wrecked || !titanModeOn()) {
+		if (object) {
+			// Its armour effects follow it.
+			m_effects.setAnchor(titan.object, {object->position().x, object->position().y, object->position().z},
+				physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z}));
+		}
+		if (object && titan.wrecked) {
+			// The wreck coasts to a stop (no push: velocity x 0.99 a tick).
+			titan.velocity = titan.velocity * std::pow(kDamping, seconds * 30.0f);
+			moveTitanBody(titan, titan.velocity * seconds);
+			stepTitanWreck(titan, seconds);
+			continue;
+		}
+		if (!object || !titanModeOn()) {
 			titan.velocity = {};
 			if (Body* body = findBody(titan.object)) {
 				body->body.velocity = {};
@@ -901,7 +1079,7 @@ void GameWorld::stepTitans(float seconds)
 // its hit points the core loses of its own). The Python component's
 // onDamageEvent (VehicleDamage) is raised with the damage before the
 // armour takes it, as gpm_ti.py subtracts it from getDamage.
-bool GameWorld::titanDamage(uint32_t id, float amount, int attacker, bool fromChild)
+bool GameWorld::titanDamage(uint32_t id, float amount, int attacker, bool fromChild, bool drain)
 {
 	Titan* titan = nullptr;
 	int index = 0;
@@ -912,7 +1090,8 @@ bool GameWorld::titanDamage(uint32_t id, float amount, int attacker, bool fromCh
 	if (amount < 0.1f) {
 		return true;
 	}
-	if (index == 0 && part.hitPoints <= 0) {
+	// The sync's check (0x4c0eb6) lets the wreck's drain (damage type -5) by.
+	if (index == 0 && part.hitPoints <= 0 && !drain) {
 		return true;
 	}
 	if (const Player* by = attacker >= 0 ? findPlayer(attacker) : nullptr;
@@ -936,6 +1115,24 @@ bool GameWorld::titanDamage(uint32_t id, float amount, int attacker, bool fromCh
 		amount = std::min(amount, cap);
 		if (amount <= 0) {
 			return true;
+		}
+	}
+	// The killing blow (the armour's damage, 0x00656320, on the server):
+	// what goes past the hit points left is limited, so a part lands a
+	// wreck rather than destroyed: hit points + min(0.8 x wreckHitPoints,
+	// (damage - hit points) x 0.5); 0.1 and 0.1 for a mobile object, 0.9 and
+	// 0.9 without canBeDestroyed; a Titan's root takes its hit points and
+	// stops at 0. So an overkilled console is a wreck (state 1) and its
+	// parent, the core room's doors, gets its parentDamageWreck share.
+	if (part.hitPoints > 0 && amount > part.hitPoints) {
+		if (index == 0) {
+			amount = part.hitPoints;
+		} else {
+			const bool mobile = integer(*part.t, "hasMobilePhysics", 0) != 0;
+			const bool destroyable = integer(*part.t, "armor.canBeDestroyed", 1) != 0;
+			const float k = !destroyable ? 0.9f : mobile ? 0.1f : 0.8f;
+			const float f = !destroyable ? 0.9f : mobile ? 0.1f : 0.5f;
+			amount = part.hitPoints + std::min(k * part.wreckHitPoints, (amount - part.hitPoints) * f);
 		}
 	}
 	const int stateBefore = part.state;
@@ -976,8 +1173,116 @@ void GameWorld::setTitanPartHitPoints(Titan& titan, int index, float value, int 
 	const int state = part.hitPoints > 0 ? 0 : part.hitPoints <= -part.wreckHitPoints ? 2 : 1;
 	const bool wrecked = part.state == 0 && state != 0;
 	part.state = state;
+	titanArmorEffects(titan, index);
 	if (wrecked) {
 		titanPartWrecked(titan, index, attacker);
+	}
+}
+
+// The armour effects (0x00654730, then 0x006549a0, after each change of
+// the hit points): the percents before (+0x254) and now, each
+// ceil(hit points / maxHitPoints x 100) at or above 0 and of
+// wreckHitPoints below. With the highest level under the percent now, the
+// group started is stopped (0x00652aa0) and none starts; otherwise, when a
+// level was passed on the way down (before > level >= now), the group of
+// the lowest level at or above the percent now starts, in place of the
+// last (one group at a time; skipped levels' groups never start). Its
+// effects follow the object (slot 0xf0), except at levels 0 and -100
+// (+0x188), which are left in the world. For a Titan's root, the percent
+// passing -38 (*0x00a7938c) sends ECGameLogicGLTitanCoreExplosion (event
+// 0x14) while the round runs or has ended (no listener of it was found).
+void GameWorld::titanArmorEffects(Titan& titan, int index)
+{
+	TitanPart& part = titan.parts[static_cast<size_t>(index)];
+	const auto percentOf = [&](float hitPoints) {
+		const float of = hitPoints < 0 ? part.wreckHitPoints : part.maxHitPoints;
+		return of > 0 ? static_cast<int>(std::ceil(hitPoints / of * 100.0f)) : 0;
+	};
+	const int before = percentOf(part.effectHitPoints), now = percentOf(part.hitPoints);
+	part.effectHitPoints = part.hitPoints;
+	if (index == 0 && before > -38 && now <= -38 && !titan.coreExplosion) {
+		titan.coreExplosion = true;
+	}
+	if (part.effects.empty() || before == now) {
+		return;
+	}
+	const uint32_t tag = 0x7e000000u + static_cast<uint32_t>(index);
+	if (part.effects.front().level < now) {
+		if (part.effectLevel != 0) {
+			m_effects.stopAttached(titan.object, tag);
+			part.effectLevel = 0;
+		}
+		return;
+	}
+	int group = part.effects.front().level;
+	bool passed = false;
+	for (const TitanPart::ArmorEffect& effect : part.effects) {
+		if (effect.level < now) {
+			break;
+		}
+		group = effect.level;
+		passed = passed || effect.level < before;
+	}
+	if (!passed || group == part.effectLevel) {
+		return;
+	}
+	m_effects.stopAttached(titan.object, tag);
+	part.effectLevel = group;
+	const world::Object* object = m_objects.find(titan.object);
+	if (!object) {
+		return;
+	}
+	const physics::Mat3 turn =
+		physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+	const physics::Vec3 at {object->position().x, object->position().y, object->position().z};
+	m_effects.setAnchor(titan.object, at, turn);
+	for (const TitanPart::ArmorEffect& effect : part.effects) {
+		if (effect.level != group) {
+			continue;
+		}
+		const physics::Vec3 offset = part.position + part.rotation.transform(effect.position);
+		const physics::Mat3 rotation = effect.rotation * part.rotation;
+		if (group == 0 || group == -100) {
+			m_effects.spawn(effect.effect, at + turn.transform(offset), rotation * turn);
+		} else {
+			m_effects.spawnAttached(effect.effect, titan.object, offset, rotation, effects::EffectManager::View::Any, tag);
+		}
+	}
+}
+
+// The wreck (the armour's update, 0x00654d80's wreck branch -> 0x00652380,
+// for a root that is no soldier, with canBeDestroyed and timeToStayAsWreck
+// not -1): on the server its hit points drain by wreckHitPoints /
+// (timeToStayAsWreck x 30) a tick (the game logic's damage, type -5),
+// three times that with the AI running and the object mobile; the Titan's
+// 3,000,000 over 100 s: 1 % a second (3 % with bots), its explosions
+// (addArmorEffect -1 to -36) going off on the way. Once timeToStayAsWreck
+// has passed or the hit points reach -wreckHitPoints, the countdown starts
+// (+0x64) and timeToStayAfterDestroyed (0) later the object is deleted
+// (0x00651db0; 0x004a5f90 only logs a Titan deleted while the round runs).
+// Meanwhile the sync still moves it (the RCTitan object has no armour, so
+// 0x005ab390 keeps the wreck its team's Titan): with no push (its armour is
+// under 60 %), its velocity dies away by 0.99 a tick and it coasts to a
+// stop at its height. Nothing in the binary makes it fall (gravityModifier
+// 0; 0x005aa0e0 keeps the object's y and sets the node's velocity's y to
+// 0).
+void GameWorld::stepTitanWreck(Titan& titan, float seconds)
+{
+	if (titan.wreckedAt < 0) {
+		titan.wreckedAt = m_time;
+	}
+	const TitanPart& root = titan.parts[0];
+	if (titan.removeFrom < 0 && titan.canBeDestroyed && titan.stayAsWreck != -1) {
+		if (m_time > titan.wreckedAt + titan.stayAsWreck || root.hitPoints <= -root.wreckHitPoints) {
+			titan.removeFrom = m_time;
+		} else if (titan.stayAsWreck > 0) {
+			const float perTick = root.wreckHitPoints / (titan.stayAsWreck * 30.0f) * (m_aiRunning ? 3.0f : 1.0f);
+			titanDamage(titan.object, perTick * seconds * 30.0f, -1, true, true);
+		}
+	}
+	if (titan.removeFrom >= 0 && m_time >= titan.removeFrom + titan.afterDestroyed) {
+		m_effects.releaseAnchor(titan.object);
+		m_objects.remove(titan.object);
 	}
 }
 
@@ -992,7 +1297,8 @@ void GameWorld::titanPartWrecked(Titan& titan, int index, int attacker)
 	TitanPart& part = titan.parts[static_cast<size_t>(index)];
 	if (index == 0) {
 		titan.wrecked = true;
-		titan.velocity = {};
+		titan.wreckedAt = m_time;
+		titanSeatsOut(titan);
 		const uint32_t object = titan.object;
 		for (const Titan::Spawn& spawn : titan.spawnPoints) {
 			m_objects.remove(spawn.object);
@@ -1190,35 +1496,31 @@ void GameWorld::launchMissile(Silo& silo, const Titan& target)
 	p.player = -1;
 	p.team = silo.team;
 	p.lockedOn = target.object;
+	p.newTarget = true; // the follow's target set (0x005ed260)
 	p.yaw = std::atan2(direction.x, direction.z) * 57.29578f;
 	m_projectiles.push_back(p);
 	++silo.launched;
 }
 
-// A TTBeacon missile's flight (FixedTargetComp, DefaultFollowComp): from
-// startDelay on its acceleration pushes it along its flight up to
-// maxSpeed; from seek.trackingDelay on its flight turns towards the locked
-// Titan's middle at most follow.maxYaw (4) radians a second across and
-// follow.maxPitch (1 by default) up and down, the AV missile's follow
-// (the rewrite's reading of the component; changeYaw 0.2 and
-// magneticBehaviour are not decoded). With the Titan gone it flies on.
+// A TTBeacon missile's flight (FixedTargetComp, DefaultFollowComp; the
+// projectile's update 0x005b3e60): from seek.trackingDelay on it turns
+// towards the locked Titan's middle (followStep: msilo_missile's
+// follow.maxYaw 4 and maxPitch 1 degrees a tick, predictionFactor 0.3 by
+// default, magneticBehaviour 1: the first turn after the lock is not
+// capped, a Titan behind it is turned to at the full rates); the speed is
+// kept along the new heading (hasDirection). From startDelay on its
+// acceleration pushes it along its heading up to maxSpeed, unless its
+// target is gone (magneticBehaviour without a target: it coasts).
 void GameWorld::steerBeacon(Projectile& p, float seconds)
 {
 	const ProjectileSettings& s = *p.settings;
 	const Titan* titan = titanByObject(p.lockedOn);
-	float speed = std::sqrt(physics::lengthSquared(p.velocity));
-	if (p.age >= s.seekDelay && titan && !titan->wrecked && speed > 0.01f) {
-		const physics::Vec3 want = titanAim(*titan) - p.position;
-		const auto headingOf = [](const physics::Vec3& v) { return std::atan2(v.x, v.z); };
-		const auto pitchOf = [](const physics::Vec3& v) { return std::atan2(v.y, std::sqrt(v.x * v.x + v.z * v.z)); };
-		const float turnYaw = std::clamp(std::remainder(headingOf(want) - headingOf(p.velocity), 2 * 3.14159265f),
-			-s.maxYawRate * seconds, s.maxYawRate * seconds);
-		const float turnPitch =
-			std::clamp(pitchOf(want) - pitchOf(p.velocity), -s.maxPitchRate * seconds, s.maxPitchRate * seconds);
-		const float yaw = headingOf(p.velocity) + turnYaw, pitch = pitchOf(p.velocity) + turnPitch;
-		p.velocity = physics::Vec3 {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)} * speed;
+	if (p.age >= s.seekDelay && titan) {
+		followStep(p, titanAim(*titan), titan->velocity, seconds, p.newTarget);
+		p.newTarget = false;
 	}
-	if (p.age < s.startDelay || speed <= 0.01f || speed >= s.maxSpeed) {
+	const float speed = std::sqrt(physics::lengthSquared(p.velocity));
+	if (p.age < s.startDelay || speed <= 0.01f || speed >= s.maxSpeed || (s.magneticBehaviour && !titan)) {
 		return;
 	}
 	p.velocity = p.velocity * ((speed + std::min(s.acceleration * seconds, s.maxSpeed - speed)) / speed);
@@ -1498,6 +1800,50 @@ bool GameWorld::titanPodEntry(int id, physics::Vec3& entry, float& radius) const
 					entry = e;
 					radius = r;
 				}
+			}
+		}
+		return best < 1e29f;
+	}
+	return false;
+}
+
+bool GameWorld::titanGunEntry(int id, physics::Vec3& entry, float& radius, int& seat, const std::vector<int>& skip) const
+{
+	const int wanted = seat;
+	const Player* player = findPlayer(id);
+	if (!player || !player->alive || player->vehicle) {
+		return false;
+	}
+	for (const Titan& titan : m_titans) {
+		const world::Object* object = m_objects.find(titan.object);
+		const Body* body = const_cast<GameWorld*>(this)->findBody(titan.object);
+		if (!object || !body || titan.wrecked || titan.team != player->team) {
+			continue;
+		}
+		const physics::Vec3 at {object->position().x, object->position().y, object->position().z};
+		const physics::Vec3 local = body->body.rotation.untransform(player->body.position - at);
+		if (local.x < body->boxMin.x - 5 || local.x > body->boxMax.x + 5 || local.y < body->boxMin.y - 5
+			|| local.y > body->boxMax.y + 5 || local.z < body->boxMin.z - 5 || local.z > body->boxMax.z + 5) {
+			continue;
+		}
+		const auto layout = m_layouts.find(object->objectTemplate()->name());
+		if (layout == m_layouts.end()) {
+			continue;
+		}
+		float best = 1e30f;
+		for (const VehicleLayout::Entry& e : layout->second.entries) {
+			const bool taken = e.seat < 0 || (static_cast<size_t>(e.seat) < body->occupants.size() && body->occupants[static_cast<size_t>(e.seat)] >= 0);
+			if (taken || !titanGunWorks(titan.object, e.seat) || (wanted >= 0 && e.seat != wanted)
+				|| std::find(skip.begin(), skip.end(), e.seat) != skip.end()) {
+				continue;
+			}
+			const physics::Vec3 w = at + body->body.rotation.transform(e.position);
+			const float d = physics::lengthSquared(w - player->body.position);
+			if (d < best) {
+				best = d;
+				entry = w;
+				radius = e.radius;
+				seat = e.seat;
 			}
 		}
 		return best < 1e29f;

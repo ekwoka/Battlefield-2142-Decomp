@@ -71,7 +71,7 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 		s.armingDelay = number(t, "armingDelay", 0);
 		s.armingSpeed = number(t, "follow.armingSpeed", 0);
 		s.speedModifier = number(t, "follow.speedModifier", 1);
-		s.predictionFactor = number(t, "follow.predictionFactor", 0);
+		s.predictionFactor = number(t, "follow.predictionFactor", 0.3f); // 0x005ed3b0's default
 		s.useTargetSpeed = number(t, "follow.useTargetSpeed", 0) != 0;
 		s.magneticBehaviour = number(t, "follow.magneticBehaviour", 0) != 0;
 		s.acceleration = number(t, "acceleration", 0);
@@ -371,6 +371,56 @@ void followMagnet(Projectile& p, const physics::Vec3& aim, const physics::Vec3& 
 		p.velocity = p.velocity + direction * (s.acceleration * seconds);
 		p.resting = false;
 	}
+}
+
+bool followStep(Projectile& p, const physics::Vec3& target, const physics::Vec3& targetVelocity, float seconds, bool newTarget)
+{
+	const ProjectileSettings& s = *p.settings;
+	const float speed = std::sqrt(physics::lengthSquared(p.velocity));
+	physics::Vec3 aim = target;
+	if (speed > 0 && s.predictionFactor != 0) {
+		aim = aim + targetVelocity * (std::sqrt(physics::lengthSquared(target - p.position)) / speed * s.predictionFactor);
+	}
+	physics::Vec3 d = aim - p.position;
+	const float length = std::sqrt(physics::lengthSquared(d));
+	if (length < 1e-4f || speed < 1e-4f) {
+		return false;
+	}
+	d = d * (1 / length);
+	const physics::Vec3 forward = p.velocity * (1 / speed);
+	physics::Vec3 right {forward.z, 0, -forward.x}; // (0, 1, 0) x forward
+	const float r = std::sqrt(physics::lengthSquared(right));
+	right = r > 1e-5f ? right * (1 / r) : physics::Vec3 {1, 0, 0};
+	const physics::Vec3 up {forward.y * right.z - forward.z * right.y, forward.z * right.x - forward.x * right.z,
+		forward.x * right.y - forward.y * right.x}; // forward x right
+	const float x = physics::dot(d, right), y = physics::dot(d, up), z = physics::dot(d, forward);
+	const float ticks = seconds * 30.0f;
+	const float maxYaw = s.maxYawRate * ticks, maxPitch = s.maxPitchRate * ticks;
+	constexpr float kDegrees = 57.29578f;
+	float yaw = 0, pitch = 0; // degrees: right positive, up positive
+	if (z > 0) {
+		const bool uncapped = s.magneticBehaviour && newTarget;
+		yaw = std::fabs(std::asin(std::clamp(x, -1.0f, 1.0f))) * kDegrees;
+		pitch = std::fabs(std::asin(std::clamp(y, -1.0f, 1.0f))) * kDegrees;
+		if (!uncapped) {
+			yaw = std::min(yaw, maxYaw);
+			pitch = std::min(pitch, maxPitch);
+		}
+	} else if (s.magneticBehaviour) {
+		yaw = maxYaw;
+		pitch = maxPitch;
+	} else {
+		return false;
+	}
+	yaw = x < 0 ? -yaw : yaw;
+	pitch = y < 0 ? -pitch : pitch;
+	// About its right (the pitch), then about its up as turned (the yaw).
+	const float a = pitch / kDegrees, b = yaw / kDegrees;
+	const physics::Vec3 pitched = forward * std::cos(a) + up * std::sin(a);
+	const physics::Vec3 turned = pitched * std::cos(b) + right * std::sin(b);
+	const float t = std::sqrt(physics::lengthSquared(turned));
+	p.velocity = turned * (speed / (t > 0 ? t : 1));
+	return true;
 }
 
 physics::Vec3 bounceVelocity(const physics::Vec3& velocity, const physics::Vec3& normal, float elasticity, float friction)

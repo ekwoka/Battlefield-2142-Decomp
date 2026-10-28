@@ -817,11 +817,20 @@ seat says 1 (the FAVs). Rewritten in `PlayerCamera::cockpit` and
 `LevelSources::geometryFor`.
 
 **Free look.** There is none beyond the seat camera itself: Cameras are
-RotationalBundle-type objects (`setInputToYaw PIMouseLookX`, min/max
-rotation, `automaticReset`, the axis update `0x00563bd0`); the FAV's
-driver camera allows ±1/±0.5. The game world poses bundles; the rewrite's
-seat camera applies `partPose` to the camera's own node, so it follows
-once `GameWorld` turns Camera bundles (it doesn't yet).
+RotationalBundle-type objects (`setInputToYaw PIMouseLookX`,
+`setInputToPitch PIMouseLookY`, min/max rotation, `automaticReset`, the
+axis update `0x00563bd0`). The drivers' (eu_fav_driver_camera −125..120
+across, −20..40 down at 90° a second, as_fav_PilotCamera ±130 / ±20) turn
+and stay; the FAV gunners' (eu_fav_MachineGun_Camera, as_fav_GunnerCamera:
+±1 / ±0.5, maxSpeed 5, acceleration 1 / 0.5, `automaticReset`; the eu one
+about its pivot 0/0/−2) lean with the mouse and settle back.
+`GameWorld::stepSeatCamera` turns the seat's Camera (the first with a
+PIMouseLook input under the seat) each tick with `rotationAxisStep`:
+PIMouseLookX is the turn over 5 degrees, PIMouseLookY the pitch's change
+over 5 (down positive), each kept within −1..1 (only `rememberExcessInput`,
+not rewritten, banks what goes past); a new sitter starts looking ahead
+(`restoreRotationOnExit`). `partPose` gives the camera node's turn about
+its pivot, which the seat camera already applies to its own node.
 
 **The arms and the weapon.** For the local player in first person the
 soldier's character mode (`+0x2f0`, `0x0058d350` → `0x005f0f20`) is 0, which
@@ -877,8 +886,17 @@ k ticks after the last shot, force × graph[size − 1 − k] for k < size − 1
 (`0x005861a0`, only with `hasRecoilForce`: slot `0x100` → `0x005dd080`)
 feeds it to the spring's fire part and adds it to the aim's pitch
 (`0x0058a6d0`; the left-right value, `0x00586140`, to the yaw). The
-rewrite's spring takes it (`anim::RecoilSettings`, `recoilAt`); the aim's
-kick is the game world's and not applied there yet.
+rewrite's spring takes it (`anim::RecoilSettings`, `recoilAt`). The aim's
+kick is `GameWorld`'s (`Player::recoil`, set with the weapon in hand): each
+tick of the soldier's update the left-right value joins the turn (so it
+twists the look like the mouse) and the up value the pitch; the soldier's
+update reads it before the weapon's tick fires, so a shot's own tick (k =
+0) passes. The rewrite's pitch is the viewer's absolute value, so the kick
+waits in `aimKickPitch`, added to the aim (`aimPitchOf`, the shots,
+`PlayerInfo::aimPitch`) until the viewer takes it into its own pitch
+(`takeAimKick`, `ViewerOptions::takeAimKick`); a bot's aim takes it into
+its own angle and corrects from there. `zoomModifier` is the viewer's (the
+world keeps no zoom).
 
 **Effects on the first-person weapon.** The weapon's bundles follow it:
 the muzzle flash and the bundles its first-person system's effect events
@@ -953,7 +971,13 @@ Rewritten in `src/Effects` (`EffectManager::spawnAttached`, `setAnchor`,
 `setMount`, `stopAttached`; `ObjectEffects` for the world's objects,
 driven by the main loop with their parts' poses; the bundles' Sound
 children are handed out by `takeSounds`). The 3P muzzle flash is the game
-world's (`GameWorld::fire`) and is still spawned unattached.
+world's (`GameWorld::fire`): FireComp places the muzzle bundles by the
+weapon's matrix times their own (`0x005f25f0` → `0x006acfa0`), so it is
+spawned against the weapon object's anchor at the e_muzz child's place
+(`GameWorld::weaponPlace`: the soldier's skeleton's mesh1 node, turned by
+the soldier's yaw), with the systems shown in third person, and the anchor
+follows the gun while it burns (a second; `followSoldier`). Without a posed
+skeleton it is spawned at the eyes along the aim.
 
 ## Ragdolls
 
@@ -2619,7 +2643,28 @@ The soldier is drawn hidden as a stand-in for the shimmer.
 Seeking projectiles (`seek.*`, `follow.*`):
 
 - **TTUnique (the AV missile):** follows its shooter's aim, turning at most
-  `follow.maxYaw` and `maxPitch` radians a second (0.45 and 0.85).
+  `follow.maxYaw` and `maxPitch` degrees a tick (0.45 and 0.85; see
+  DefaultFollowComp below).
+- **DefaultFollowComp** (template `0x005ed3b0`: maxYaw `+0xc` 1, maxPitch
+  `+0x10` 1, changeYaw `+0x14` 0.1, changePitch `+0x18` 0.1, minDist
+  `+0x1c` 50, predictionFactor `+0x20` 0.3, magneticBehaviour `+0x24`,
+  useTargetSpeed `+0x25`, speedModifier `+0x28` 1, armingSpeed `+0x2c`,
+  followTime `+0x30`): its turn (`0x005ed1a0` → `0x005ecb30`, once a tick
+  from the tracking tick, for followTime × 30 ticks when set) heads for the
+  target plus its velocity × (distance / own speed) × predictionFactor; in
+  the missile's own frame the way's x, y, z give a yaw of |asin x| degrees
+  at most maxYaw (to x's side) and a pitch of |asin y| at most maxPitch;
+  the missile's matrix turns by the pitch about its right, then the yaw
+  about its up, and is rebuilt upright (`0x005b1a70`). A target behind (z ≤
+  0) is not turned to, unless `magneticBehaviour`, which turns at the full
+  rates; magneticBehaviour also lifts the caps while still or on the tick
+  after the target changed (`+0x94`, set by `0x005ed260`). changeYaw,
+  changePitch and minDist are stored and saved but never read (no slot of
+  the instance vtables `0x00975f98` / `0x00975fe0` reads them). The
+  projectile (`0x005b3e60`, `hasDirection` `+0x335`, 1) keeps its speed
+  along the new heading and thrusts along it (acceleration `+0x31c`) while
+  under maxSpeed (`+0x324`), not with magneticBehaviour and no target.
+  `followStep` (Weapons.cpp).
 - **TTMagnet (the motion mine,** `Unl_Mine_Motion`; the projectile's
   update `0x005b3e60`, seek component `+0x1a0` (0xc555), follow `+0x1a4`
   (0xc559)): once `armingDelay` (3.5 s, template `+0x2fc`) and
@@ -2686,6 +2731,23 @@ negative going down; id 1 at 0 tickets ends the round).
 the id where the other parameters pass their value, and the value last.
 `getTemplateProperty` answers a property the template's script left out
 with the engine's default (a control point's `radius` is 1).
+
+A player's vehicle and default vehicle (`pmgr_p_get "vehicle"` /
+`"defaultvehicle"`, `0x0056ae00`) are the player's weak handles, `+0x80`
+(slot `0x4c`, `0x00593df0`) and `+0xcc` (slot `0xb4`, `0x00594ad0`), None
+once the object is being deleted (flag `0x20`); "vehicle" answers the
+default vehicle instead when the vehicle's PlayerControlObject's slot
+`0x148` says so (a remote-controlled one), and None without a vehicle
+(`0x00569770` wraps null as None). The death (`0x004cd390`, which sets the
+respawn time) gets the player out of its vehicles until the vehicle is the
+default one and clears only the default vehicle (`0x00594b10(0)`): the
+vehicle handle keeps the soldier through man down and as a corpse until
+the armour's countdown removes it (the soldiers' 6 s after landing and a
+second's fade). So gpm_ti.py's VehicleDestroyed handler, which calls
+`isValid` on every player's `getVehicle()`, works for the dead whose
+bodies lie; for a player whose body is gone or who never spawned the
+original's handler raises too (the host prints the error, the round has
+ended by then). `PlayerInfo::heldVehicle` / `heldSoldier`.
 
 The rewrite embeds Python 3 instead (`src/Python`). `py2compat.py`
 translates the Python 2 scripts as they are imported. It rewrites syntax
@@ -3289,8 +3351,16 @@ whose armour is no wreck; its root is the Titan, the object's
   scheduled for removal; `0x00656320`: no water or upside-down damage;
 - `0x006ca660` / `0x006ca3b0`: what stands on a Titan takes its velocity
   (the rewrite's soldier contacts take the body's velocity already);
-- `0x00589890` / `0x005718d0`: kits dropped on a Titan are carried with it
-  (`0x005ad2e0` keeps their offsets, `0x005aa5b0` moves them; not rewritten);
+- `0x00589890` / `0x005718d0`: kits dropped on a Titan are carried with it:
+  the drop (Soldier.cpp, a ray straight down from the soldier) asks each
+  team's Titan record (`0x00561b20`) whether the hit object's root is its
+  Titan (`0x005aa030`); `0x005ad2e0` then keeps {kit, kit position − Titan
+  position} (no rotation: the Titan never turns), the pick-up
+  (`0x00561b80` from `0x005718d0`) drops it, and the end of the server's
+  Titan tick (`0x00561e20`, also `0x0043f170` → `0x00561bb0`) puts each kit
+  at the Titan's position plus its offset (`0x005aa5b0`). Not rewritten:
+  the rewrite drops no kits (a dead soldier's kit object is deleted), so
+  there is nothing to carry;
 - `0x004a5f90`: removing a Titan while the round runs is an error.
 
 **Movement** (`0x005aca70`, a tick at a time). The commander's orders wait
@@ -3339,9 +3409,13 @@ shield 60–100, the hull 0–60). The engine's rules (`0x004c0e40`):
   ≤ 0, above −wreckHitPoints) gives its parent `parentDamageWreck`
   (`+0xd4`) % of the parent's maxHitPoints; a part alive before or after
   gives it `parentDamageAlive` (`+0xd0`) × the damage / its hit points
-  before × the parent's hit points, both as a child's damage. A hit past
-  −wreckHitPoints leaves the part destroyed (state 2) and its parent gets
-  nothing from parentDamageWreck, as the check reads;
+  before × the parent's hit points, both as a child's damage. The check
+  is `state after == 1 && state before == 0` (asm `0x4c1793`), but the
+  killing-blow limit below keeps any single hit from going past
+  −wreckHitPoints from alive (a console: 7,000 hit points, wreckHitPoints
+  10, lands at −8 at worst), so an overkilled console is a wreck and the
+  doors get their share; later hits on the wreck may destroy it (state 2)
+  with no second share;
 - the armour update (`0x00654d80`) destroys a part when its parent's or
   root's percent is at or below `destroyOnParentDamageLevel` (`+0xd8`) or
   `destroyOnRootParentDamageLevel` (`+0xe0`), and burns it below
@@ -3349,7 +3423,12 @@ shield 60–100, the hull 0–60). The engine's rules (`0x004c0e40`):
 - the setter (`0x00655460`) keeps hit points within −wreckHitPoints
   (`+0xc0`) and maxHitPoints (`+0xc8`); the template's defaults
   (`0x00630040`): 10, 10, parent damages 0, levels −1, −100;
-- a wrecked part's subtree loses its collision (`0x00651c60`).
+- a wrecked part's subtree loses its collision (`0x00651c60`);
+- the killing blow is limited (the armour's damage `0x00656320`, on the
+  server): with 0 < hit points < damage, a part takes hit points +
+  min(k × wreckHitPoints, (damage − hit points) × f), k = 0.8 and f = 0.5
+  (0.1 and 0.1 for a mobile object, 0.9 and 0.9 without `canBeDestroyed`),
+  and a Titan's root exactly its hit points.
 
 So the Titan's tree plays out as: the forcefield (as_titan_forcefield,
 destroyOnParentDamageLevel 61) goes with the shield; below 60 % the Titan
@@ -3359,10 +3438,50 @@ burn at 1 a second, open, and give the core 1 % (400); the core (40,000,
 parentDamageAlive 1) takes the Titan down with it share for share, and goes
 itself when the Titan reaches 0 (destroyOnParentDamageLevel 0). The
 Titan's wreck is VehicleDestroyed, on which gpm_ti.py ends the round
-(`sgl_endGame(winner, 3, 25)`). The armour effects at negative percents
-(the explosions down to −38 %, `0x00654730` sends event 0x14 there) belong
-to the Titan's crash after its destruction, which the rewrite doesn't run
-(the Titan stays a wreck where it is).
+(`sgl_endGame(winner, 3, 25)`; the engine makes the same call itself,
+`0x005b7680` → `0x004bbe30(gameLogic, other team, 3, 25.0)`, for a Titan
+whose armour state isn't 0: the status stays playing for 25 s, then
+ended).
+
+**The crash.** The wreck's armour update (`0x00654d80`'s wreck branch →
+`0x00652380`, for a root that is no soldier, with `canBeDestroyed`
+(`+0x166`, 1) and timeToStayAsWreck (`+0x158`) not −1) drains it on the
+server by wreckHitPoints / (timeToStayAsWreck × 30) a tick through the
+game logic's damage (type −5, which the sync's "no damage at 0" check at
+`0x4c0eb6` lets by; VehicleDamage keeps coming), three times that with the
+AI running and the object mobile (AIDLL's interface `*0x00b47ce4`, slots
+`0x18` true and `0x20` false; `GameWorld::setAiRunning`): the Titans'
+3,000,000 over 100 s, 1 % a second (3 % with bots). Its armour effects
+(`armor.addArmorEffect <level> <effect> <position> <rotation>`, kept in
+order by WorldConsole) go off as the percent falls: `0x00654730` (run after
+each change of the hit points) takes ceil(hit points / maxHitPoints × 100)
+before (`+0x254`) and now (of wreckHitPoints below 0); with the highest
+level under the percent now it stops the group started (`0x00652aa0`) and
+starts none, otherwise when a level was passed on the way down the group
+of the lowest level at or above the percent now starts (`0x006549a0`), in
+place of the last, attached to the object (slot `0xf0`) at their offsets,
+except levels 0 and −100 (`+0x188`), left in the world; skipped levels'
+groups never start. The Titans' groups are 13 … 1 above 0 and −1 … −36
+below (the explosive bundle child's 20 … 1), so the explosions run from the
+destruction to −36 %; the percent passing −38 (`*0x00a7938c`) sends
+ECGameLogicGLTitanCoreExplosion (event 0x14, category 0, `0x004d69d0`)
+while the round runs or has ended, 38 s after the destruction (no listener
+of it was found; the rewrite notes it in `TitanInfo::coreExplosion`). Once
+timeToStayAsWreck has passed or the hit points reach −wreckHitPoints the
+countdown starts (`+0x64`) and timeToStayAfterDestroyed (0) later the
+server deletes the object (`0x00651db0`; `0x004a5f90` only logs a Titan
+deleted while the round still runs): 100 s after the destruction, 33 s
+with bots, after the round's 25 s end delay either way. Meanwhile the sync
+still moves the wreck: 0x005ab390 tests the armour of the RCTitan object,
+which has none, so the wreck stays its team's Titan; with no push (its
+armour under 60 %) its velocity dies away by 0.99 a tick and it coasts to a
+stop. **It doesn't fall:** the Titan has gravityModifier 0, nothing on the
+wreck's path turns physics on (`0x00654120`'s slot `0x54(0x800, 0)` is a
+network dirty mask) and `0x005aa0e0` keeps the object's y and the node's
+velocity's y at 0; the "crash" is the explosions, then the deletion.
+`GameWorld::stepTitanWreck`, `titanArmorEffects` (the effects in the
+world's EffectManager against the Titan's anchor). The gunners are put out
+of their seats at the wreck.
 
 The Python component's events by id (the host module's names, as the
 templates use them): 25 VehicleDestroyed, 26 VehicleDamage, 27
@@ -3375,12 +3494,74 @@ raised for every destroyed vehicle.
 **The interior.** The Titan's body carries its whole tree's soldier and
 projectile LODs, each face reporting its part; soldiers walk its decks and
 ride along by its velocity. Its SpawnPoint children (seven in each Titan)
-are spawn points of its spawner's control point, moved with it. Left out:
-the team forcefields (collisionGroups 256: which team they let through is
-not decoded), the penetrable shields' damage loss (4112, 4118:
-overrideNeverPenetrate with damageLoss 1000; rounds pass them), the guns'
-seats, the Titan's object spawners (as_titan_ATSpawner/AGSpawner) and its
-SupplyObject.
+are spawn points of its spawner's control point, moved with it.
+
+**Team forcefields.** collisionGroups 0x100 marks the PAC Titan's fields
+(as_titan_forcefield, the vehicle bay's, the corridors', the spawn
+room's, the doors), 0x200 the EU Titan's; team 1 owns 0x100 and team 2
+0x200. An object of a team passes what carries its own team's bit, the
+team being the first PlayerControlObject's up its tree (slot `0x9c`), the
+bit read through the response's slot `0x50`: soldier against an object
+`0x006c3890`, mesh against mesh `0x006bb050` (already in `meshPair`),
+run-over `0x006c2e50`. A projectile's tree has no PlayerControlObject and
+its group (8) shares no bit, so rounds meet every field. The shipped
+fields' collision meshes carry only the projectile and vehicle LODs (and a
+mesh without a soldier LOD stops no soldier), so soldiers of both teams
+walk through them; the rule sorts vehicles (the vehicle bay's shield,
+material 4117, lets its own team's in) and rounds stop at them unless the
+material is penetrable. The rewrite builds each team's soldier mesh only
+when a field has a soldier LOD (`Body::teamSoldierMesh`); the vehicles'
+side isn't rewritten, as vehicles don't meet the Titan's mesh at all. The
+corridor and spawn room fields name their meshes with setCollisionMesh and
+no CollisionManager.createTemplate; they are looked for in Meshes/ beside
+the template's file (as OpenBattlefield2 resolves such names).
+
+**The penetrable shields** (materials 4112 / 4118, the outer forcefields:
+damageLoss and minDamageLoss 1000, overrideNeverPenetrate 1,
+maxDamageLoss 100000 by default). DefaultPenetrateComp (`0x005eaca0`,
+vtable `0x00975884` slot 7; class `0x953e` on every round): with
+overrideNeverPenetrate the solid/liquid tests are skipped; damageLoss −1
+means no penetration; the round's damage at its range less the loss must
+stay at or above a tenth of its damage, else it hits the face; the loss
+is minDamageLoss for a one-sided material, otherwise the thickness to the
+way out through the object's mesh (over 2.1 × its radius) × damageLoss,
+within minDamageLoss and maxDamageLoss (maxDamageLoss without a way out);
+it flies on from a centimetre past the way out with what is left. The
+shields are thin shells (about 1.6 m: a loss of about 1,640), so only
+rounds over about 1,111 pass: the silo missiles (110,000), static_aa
+(2,500) and the EMP strike (3,000); bullets and rockets stop at the
+shield. In the rewrite (the projectiles' hit, `Projectile::damageScale`)
+the way out is the first face of the same material on along the round's
+way. (The call site of `0x005eaca0` wasn't found; its last two arguments
+are read as the damage left and the round's damage.)
+
+**The guns' seats.** The six gun hubs (eu_groundcanone3*_hub and
+eu_aacannon*_hub, the as_ ones alike) are PlayerControlObjects with
+seatInformation under the root: the Titan's own seats, so its seat layout
+is exactly them. Each hub's EntryPoint (setEntryRadius 5) and seat are at
+its console inside (the gunner sits at the bridge's console while the
+turret is on the hull); the yaw bundle sits turned with its hub (0, 180,
+±90) and is limited (EU_groundcanonE3_Base ±45 and the others' own,
+EU_AAcannon_Base −65..145), the pitch bundle too (the ground cannons 5..75
+down, the AA guns −89..12). In the rewrite the Titan's body takes seats
+like a vehicle's (`enterOrLeaveVehicle`: a seat's own entry leads to that
+seat), none of them drives (`drivesSeat`, `PlayerInfo::driving`), the
+gunner aims in the hub's frame within the limits (`SeatLayout::frameYaw`,
+`minYaw`/`maxYaw`) and `partPose` turns the bundles. A gun whose armour
+(the hub's first armoured child: Python.onDestroyEvent 50,
+disableInputOnDestroy 1) is out doesn't fire; the Titan's wreck puts its
+gunners out.
+
+**Its spawners and supply point.** The Titan's ObjectSpawner children
+(as_titan_ATSpawner: as_at_spawn every 10–15 s, AGSpawner: as_ag every
+60–75 s; distance 100, two at most, team 1, holdObject; eu_titan_* alike)
+and SupplyObject (as_titan_heliRepairRearm: team 1, radius 14, vehicles
+only, healSpeed 8, refillAmmoSpeed 12, addVehicleType 3; its storage left
+at −1, never spent, `0x005d0650` / `0x005d06a0`) are objects of their own
+on its rear deck, carried with it (`Titan::carried`). A held spawn is put
+at its spawner each tick, so it rides along. The supply's vehicle types
+(`0x005d1710` reads each vehicle's through its template's interface
+`0xc4c4`, slot `0x24`, not resolved) are taken as `vehicleCategory`.
 
 **Missile silos** (`isMissileSilo`, missile_silo_v2): the auto controller
 CP_CANNON (AI/AutoControllers.ai: fov 179, viewDistance 2000,
@@ -3393,13 +3574,15 @@ barrel, Missile_Silo_Barrel, turns on its own to its limit: setMinRotation
 of hands starts the reload over. The missile (msilo_missile): from
 `startDelay` (2.5 s) its `acceleration` (10) pushes it to `maxSpeed` (80);
 from seek.trackingDelay (3 s) it turns towards the locked Titan's middle
-(FixedTargetComp TTBeacon; DefaultFollowComp's follow.maxYaw 4 radians a
-second across, follow.maxPitch 1 up and down, as the rewrite reads the AV
-missile's follow; changeYaw and magneticBehaviour are not decoded); for its
+(FixedTargetComp TTBeacon; DefaultFollowComp's follow.maxYaw 4 degrees a
+tick across, follow.maxPitch 1 up and down, predictionFactor 0.3 by
+default, magneticBehaviour 1: the first turn after the lock is not capped,
+and it coasts without a target; changeYaw 0.2 is never read); for its
 first `onlyDetonateOnMaterialTimeLimit` (6.5 s) it sets off only on
 material 4100, and anything else in its way that is no Titan's is destroyed
 on the server (3e10 damage) while it flies on (`0x005b4ff0`). Its 110,000
-damage meets veh_titan_armor with a cell of 1 (the turrets' 4113: 3). On Minsk a silo's first missile reaches the other
+damage (less what the penetrable shield took while it is up) meets
+veh_titan_armor with a cell of 1 (the turrets' 4113: 3). On Minsk a silo's first missile reaches the other
 Titan about 13 s after launch.
 
 **Drop pods.** A GenericFireArm with `fire.isPodLauncher` (ThrownFireComp)
@@ -3418,8 +3601,16 @@ shielded Titan.
 **Bots.** AIDLL has no Titan-mode strategy (its only Titan code is the
 CSTTitan strategic type); single-player BF2142 had no Titan mode. In the
 rewrite the bots play gpm_ti with the default strategies: the silos are
-capturable control points, the Titans' points are not. A bot that spawns
-aboard its Titan walks to the nearest pod array and drops (the arrays'
+capturable control points, the Titans' points are not. The Titan's gun
+seats have AI templates of equipment type Fixed (eu_Titan_Cannon1–4AI,
+eu_Titan_Cannon_AA_01/02AI: a Unit with setHasExposedSoldier,
+Armament setIsAntiAircraft), which AIDLL's seat choice (BBChange) and
+behaviours cover, but no strategy of its sends a bot into a Titan (its nav
+meshes are on the ground). The rewrite's choice: while fewer than half its
+Titan's guns are manned, a bot aboard walks straight to the nearest free
+working gun's console and takes it (`titanGunEntry`); the Titan isn't
+among the bots' vehicles, so it stays and runs the Fixed behaviours; the
+rest walk to the nearest pod array and drop (the arrays'
 titan_pod_array_1_ai template makes them vehicles to the AI). Boarding the
 enemy Titan and attacking its consoles and core has no AI to rewrite.
 

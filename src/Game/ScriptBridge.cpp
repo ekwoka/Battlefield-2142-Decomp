@@ -379,11 +379,14 @@ ScriptValue ScriptBridge::playerParam(const std::string& name, int index, const 
 	if (name == "name") {
 		return ScriptValue::string(player.name);
 	}
+	// The weak handles the host reads (0x0056ae00: "vehicle" is slot 0x4c,
+	// None when it is gone; "defaultvehicle" slot 0xb4): a dead player's
+	// soldier stays its vehicle until the corpse is removed.
 	if (name == "vehicle") {
-		return ScriptValue::object(player.vehicle ? player.vehicle : player.soldier);
+		return ScriptValue::object(player.heldVehicle);
 	}
 	if (name == "defaultvehicle") {
-		return ScriptValue::object(player.soldier);
+		return ScriptValue::object(player.heldSoldier);
 	}
 	if (name == "addr") {
 		return ScriptValue::string("127.0.0.1");

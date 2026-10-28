@@ -62,7 +62,7 @@ struct ProjectileSettings {
 	// Seeking (seek.*, follow.*): TTMagnet locks onto the closest enemy
 	// vehicle within maxDistLock after trackingDelay and chases it (motion
 	// mines); TTUnique follows the shooter's aim (the AV missile), turning
-	// at most maxYaw/maxPitch radians a second.
+	// at most maxYaw/maxPitch degrees a tick (followStep).
 	// TTBeacon (the missile silos' msilo_missile, FixedTargetComp): chases
 	// the target object its launcher locked (the silo's TitanBeacon on the
 	// enemy Titan) after trackingDelay, by the magnet's follow.
@@ -223,6 +223,8 @@ struct Projectile {
 	bool resting = false; // a grenade lying still
 	float age = 0;
 	uint32_t lockedOn = 0; // the vehicle a seeker chases
+	bool newTarget = false; // the follow's +0x94: its target set since its last turn
+	float damageScale = 1;  // what is left of its damage after penetrating (DefaultPenetrateComp)
 	// A magnet's follow state (0x005ecb30): chasing from when (the seek's
 	// trackingDelay after the lock), the fastest the target has gone
 	// (+0x90) and whether that armed it (+0x95).
@@ -246,6 +248,21 @@ physics::Vec3 bounceVelocity(const physics::Vec3& velocity, const physics::Vec3&
 // top speed, x speedModifier once armed) and braking along its velocity
 // at it.
 void followMagnet(Projectile& projectile, const physics::Vec3& aim, const physics::Vec3& targetVelocity, float seconds);
+
+// DefaultFollowComp's turn (0x005ed1a0 -> 0x005ecb30, once a 30 Hz tick:
+// follow.maxYaw / maxPitch are degrees a tick): towards `target` plus its
+// velocity x (distance / own speed) x predictionFactor, in the missile's
+// own upright frame (forward its flight, right = up x forward): x, y, z the
+// way's components, the yaw |asin x| degrees at most maxYaw (to the side of
+// x), the pitch |asin y| at most maxPitch (to the side of y), turned about
+// its right and then its up and rebuilt upright (0x005b1a70), the speed
+// kept. With the target behind (z <= 0) it doesn't turn, unless
+// magneticBehaviour, which turns it at the full rates; magneticBehaviour
+// also lifts the caps while it is still or on the tick its target changed
+// (`newTarget`). follow.changeYaw, changePitch and minDist are stored and
+// saved but never read. False when it didn't turn.
+bool followStep(Projectile& projectile, const physics::Vec3& target, const physics::Vec3& targetVelocity, float seconds,
+	bool newTarget = false);
 
 // A normal(0, 1) number (0x005b28d0: Marsaglia's polar method on the
 // engine's generator, the second of each pair kept for the next call).

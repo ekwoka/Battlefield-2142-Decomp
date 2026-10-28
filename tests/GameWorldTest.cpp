@@ -1,6 +1,7 @@
 // Round simulation: control points and object spawners.
 #include "Console/Console.h"
 #include "Game/Bots.h"
+#include "Animation/FirstPerson.h"
 #include "Game/GameWorld.h"
 #include "IO/File/FileManager.h"
 #include "Physics/CollisionTemplateManager.h"
@@ -1042,9 +1043,10 @@ TEST(GameWorld_ActiveCamouflage)
 
 TEST(GameWorld_GuidedMissileFollowsTheAim)
 {
-	// eu_av_missile: seek.targetType TTUnique, follow.maxYaw 0.45 rad/s.
-	// Fired north, the shooter then turns 30 degrees right: the missile
-	// turns after the aim, no faster than 0.45 rad a second.
+	// eu_av_missile: seek.targetType TTUnique, follow.maxYaw 0.45. Fired
+	// north, the shooter then turns 30 degrees right: the missile turns
+	// after the aim, no faster than 0.45 degrees a tick (DefaultFollowComp,
+	// 0x005ecb30: 13.5 degrees a second).
 	Range range;
 	world::ObjectTemplate* rifle = range.templates.find("eu_ar_rifle");
 	rifle->settings()["projectileTemplate"] = "missile";
@@ -1076,8 +1078,9 @@ TEST(GameWorld_GuidedMissileFollowsTheAim)
 	if (!range.world->projectiles().empty()) {
 		const physics::Vec3 v = range.world->projectiles().front().velocity;
 		const float heading = std::atan2(v.x, v.z);
-		// About a second of turning at 0.45 rad/s, short of the 30 degrees (0.52).
-		CHECK(heading > 0.35f && heading < 0.5f);
+		// About a second of turning at 0.45 degrees a tick (0.236 rad), short
+		// of the 30 degrees (0.52).
+		CHECK(heading > 0.22f && heading < 0.26f);
 	}
 }
 
@@ -1603,4 +1606,64 @@ TEST(GameWorld_WeaponEffectEventsStartTheirBundles)
 	CHECK(range.world->effects().emitters() == before);
 	range.world->weaponEffectEvent(me, 0);
 	CHECK(range.world->effects().emitters() == before + 1);
+}
+
+// The aim's recoil kick (SoldierBasedRecoilComp; 0x0058a6d0 adds
+// 0x005861a0's value to the soldier's pitch and 0x00586140's to its turn):
+// k ticks after a shot the graph's value times the forces drawn, so over
+// the graph's frames the aim rises by recoilGraphTotalMovement x
+// recoilForceUp; with goBackOnRecoil the second graph brings it back. The
+// viewer takes the kick into its own pitch (takeAimKick).
+TEST(GameWorld_RecoilKicksTheAim)
+{
+	for (const bool goBack : {false, true}) {
+		Range range;
+		world::ObjectTemplate* rifle = range.templates.find("eu_ar_rifle");
+		rifle->components().push_back("SoldierBasedRecoilComp");
+		rifle->settings()["recoil.hasRecoilForce"] = "1";
+		rifle->settings()["recoil.goBackOnRecoil"] = goBack ? "1" : "0";
+		rifle->settings()["recoil.recoilForceUp"] = "CRD_NONE/1.5/0/0";
+		rifle->settings()["recoil.recoilForceLeftRight"] = "CRD_NONE/1/0/0";
+		rifle->settings()["recoil.recoilGraphFrameCount"] = "8";
+		rifle->settings()["recoil.recoilGraphTotalMovement"] = "2";
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		const int me = range.world->localPlayer();
+		game::GameWorld::PlayerInfo info;
+		range.world->playerInfo(me, info);
+		const float yaw = info.yaw;
+		game::SoldierInput input;
+		input.fire = true;
+		input.aimPitch = 5;
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		input.fire = false;
+		range.world->setPlayerInput(input);
+		float highest = 0;
+		for (int i = 0; i < 20; ++i) {
+			range.world->tick(1 / 30.0f);
+			highest = std::max(highest, range.world->aimPitchOf(me) - 5);
+		}
+		const float kicked = range.world->aimPitchOf(me) - 5;
+		range.world->playerInfo(me, info);
+		const float turned = std::remainder(info.yaw - yaw, 360.0f);
+		std::fprintf(stderr, "  goBackOnRecoil %d: highest %.2f, after 20 ticks %.2f up, %.2f turned\n", goBack ? 1 : 0, highest,
+			kicked, turned);
+		// The soldier's update reads the kick before the weapon's tick fires,
+		// so a shot's own tick (k = 0) passes: the graph's values for k = 1 on
+		// (the left-right one twists the look: lookYaw).
+		anim::RecoilSettings recoil;
+		recoil.hasRecoilForce = true;
+		recoil.goBackOnRecoil = goBack;
+		recoil.graphFrameCount = 8;
+		recoil.graphTotalMovement = 2;
+		float expected = 0;
+		for (int k = 1; k <= 20; ++k) {
+			expected -= anim::recoilAt(recoil.graph(), k, 1.5f);
+		}
+		CHECK(std::fabs(kicked - expected) < 0.01f);
+		CHECK(goBack ? highest > 1 && kicked < highest - 1 : kicked > 1.9f);
+		// The viewer takes it: the aim is the input's again.
+		CHECK(std::fabs(range.world->takeAimKick(me) - kicked) < 1e-4f);
+		CHECK(std::fabs(range.world->aimPitchOf(me) - 5) < 1e-4f);
+	}
 }

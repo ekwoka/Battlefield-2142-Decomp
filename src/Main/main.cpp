@@ -2371,6 +2371,9 @@ int runGame(Options& options, Session& session)
 			// navigation mesh) has no bots.
 			std::printf("no bots on this level (it has no AI navigation data)\n");
 		}
+		// The AI runs on this server (AIDLL's interface; a wreck's armour
+		// drains three times as fast, 0x00652380).
+		round.setAiRunning(bots.enabled() && options.bots > 0);
 		for (int i = 0; i < (bots.enabled() ? options.bots : 0); ++i) {
 			const int team = i % 2 == 0 ? (options.playTeam == 1 ? 2 : 1) : (options.playTeam == 1 ? 1 : 2);
 			const int bot = round.addPlayer("Bot" + std::to_string(i + 1), team, true);
@@ -2620,10 +2623,13 @@ int runGame(Options& options, Session& session)
 			for (const auto& player : round.playerList()) {
 				const auto fired = round.playerRounds(player.id, false, false);
 				const auto hit = round.playerRounds(player.id, true, false);
-				std::printf("  %-8s %s %-6s kills %d deaths %d, %d rounds fired, %d hit%s%s\n", player.name.c_str(),
+				const std::string seated = player.vehicle && round.isTitan(player.vehicle)
+					? " (Titan gun " + std::to_string(player.seat + 1) + ")"
+					: player.vehicle ? " (seat " + std::to_string(player.seat + 1) + ")" : "";
+				std::printf("  %-8s %s %-6s kills %d deaths %d, %d rounds fired, %d hit%s%s%s\n", player.name.c_str(),
 					player.team == 1 ? "PAC" : "EU ", player.alive ? "alive" : "dead", player.kills, player.deaths,
 					fired.empty() ? 0 : fired[0].count, hit.empty() ? 0 : hit[0].count, player.ai ? "  " : "",
-					player.ai ? bots.behaviour(player.id).c_str() : "");
+					player.ai ? bots.behaviour(player.id).c_str() : "", seated.c_str());
 			}
 			if (session.nextMap || (!options.view && options.screenshot.empty())) {
 				return 0;
@@ -2917,6 +2923,7 @@ int runGame(Options& options, Session& session)
 					hudManager.click(x, y);
 				}
 			};
+			viewer.takeAimKick = [&round] { return round.takeAimKick(round.localPlayer()); };
 			viewer.playerView = [&round, &playerCamera](ViewerOptions::PlayerView& view) {
 				const world::Object* player = round.player();
 				if (!player) {

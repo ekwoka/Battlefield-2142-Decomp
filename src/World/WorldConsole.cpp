@@ -215,6 +215,18 @@ void registerWorldConsoleMethods(Console& console, ObjectTemplateManager& templa
 		}
 	});
 
+	// armor.addArmorEffect <percent> <effect> <position> <rotation>: an
+	// effect the armour starts as its percent falls to the level (see
+	// GameWorld's Titans, 0x00654730); kept in order as
+	// "armor.addArmorEffect.list" = "level effect position rotation;...".
+	bindMethod(console, "ObjectTemplate.armor.addArmorEffect", access,
+		[&templates](int level, std::string effect, std::string position, std::string rotation) {
+			if (templates.active()) {
+				std::string& list = templates.active()->settings()["armor.addArmorEffect.list"];
+				list += std::to_string(level) + " " + effect + " " + position + " " + rotation + ";";
+			}
+		});
+
 	// setGearRatios <5 ratios> (0x005406d1): an engine's ratio per gear, kept
 	// as "gearRatios" = "a/b/c/d/e".
 	bindMethod(console, "ObjectTemplate.setGearRatios", access,

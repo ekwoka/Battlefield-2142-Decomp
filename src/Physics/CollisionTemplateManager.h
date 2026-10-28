@@ -24,6 +24,12 @@ public:
 	void create(const std::string& name, const std::string& scriptDirectory);
 	// The template's mesh, loaded on first use; null if missing or unreadable.
 	const CollisionMeshFile* mesh(const std::string& name, const io::FileManager& files);
+	// The same; a name no script created a template for is looked for in
+	// `scriptDirectory`'s Meshes/ (the Titans' corridor and spawn room
+	// forcefields name their meshes with setCollisionMesh and never call
+	// CollisionManager.createTemplate; OpenBattlefield2 resolves such names
+	// beside the template's file the same way).
+	const CollisionMeshFile* mesh(const std::string& name, const io::FileManager& files, const std::string& scriptDirectory);
 	// A template whose mesh is made in memory (tests, tools).
 	void add(const std::string& name, CollisionMeshFile mesh)
 	{

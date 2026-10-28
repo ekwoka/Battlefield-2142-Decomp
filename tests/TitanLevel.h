@@ -61,6 +61,7 @@ struct TitanLevel {
 		}
 		files.setMountingAllowed(false);
 		world::registerWorldConsoleMethods(console, templates, objects);
+		templates.setCurrentFileProvider([this] { return console.currentFile(); }); // as main does
 		terrain::registerTerrainConsoleMethods(console, heightmaps, files);
 		physics::registerCollisionConsoleMethods(console, collisionTemplates);
 		physics::registerMaterialConsoleMethods(console, materials);

@@ -32,7 +32,7 @@ struct Material {
 	float projectileCollisionHardness = 0;
 	float damageLoss = 0;
 	float minDamageLoss = 0;
-	float maxDamageLoss = 0;
+	float maxDamageLoss = 100000; // 0x50's default
 	float penetrationDeviation = 0;
 	bool overrideNeverPenetrate = false;
 	bool hasWaterPhysics = false;

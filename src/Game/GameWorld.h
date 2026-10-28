@@ -21,6 +21,7 @@
 #pragma once
 
 #include "Animation/AnimationSystem.h"
+#include "Animation/FirstPerson.h"
 #include "Effects/Effects.h"
 #include "Physics/RigidBody.h"
 #include "Random.h"
@@ -260,7 +261,16 @@ public:
 		bool ai = false;
 		bool alive = false;
 		uint32_t soldier = 0, vehicle = 0, kit = 0, weapon = 0;
+		// What the host module's pmgr_p_get hands the scripts (0x0056ae00's
+		// "vehicle" and "defaultvehicle"): the player's weak handles, the
+		// vehicle (+0x80, slot 0x4c) and the default vehicle (+0xcc, slot
+		// 0xb4). The death (0x004cd390, which sets the respawn time) gets the
+		// player out of its vehicles and clears only the default vehicle: the
+		// vehicle handle keeps the soldier, through man down and then as a
+		// corpse until the armour's countdown removes it.
+		uint32_t heldVehicle = 0, heldSoldier = 0;
 		int seat = -1; // in the vehicle (0 the driver's)
+		bool driving = false; // in a vehicle's driver seat (a Titan's seats are all guns: drivesSeat)
 		float respawnIn = 0; // seconds until the next spawn while dead
 		bool manDown = false; // down, a medic may revive it
 		int kills = 0, deaths = 0, teamKills = 0;
@@ -291,6 +301,13 @@ public:
 	// its first collision event).
 	uint32_t footstepMaterial(int player) const;
 	void setInput(int player, const SoldierInput& input);
+	// The pitch (degrees, up positive) the weapon's recoil has kicked the
+	// player's aim by since the last call: the original adds the kick to the
+	// soldier's own angles (0x0058a6d0), so a viewer sending absolute pitches
+	// takes it into its own; until taken it is added to the input's pitch.
+	float takeAimKick(int player);
+	// The aim's pitch with the kick not yet taken (degrees, up positive).
+	float aimPitchOf(int player) const;
 	// Moves a soldier (its feet) at once, as the scripts' setPosition does;
 	// false when the object is no living player's soldier on foot.
 	bool setSoldierPosition(uint32_t soldier, const physics::Vec3& feet);
@@ -298,6 +315,10 @@ public:
 	// terrain) lies between two points.
 	// `ignore`: an object (a body) that doesn't count, such as the looker's own.
 	bool lineOfSight(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore = 0) const;
+	// Whether a team's soldier could pass from one point to the other through
+	// the moving objects' soldier meshes (a Titan's: with the other team's
+	// forcefields, not its own).
+	bool soldierPathClear(int team, const physics::Vec3& from, const physics::Vec3& to) const;
 	// The spawn spot's drop (0x005ad8b0): a box from `bottom` to `top`
 	// along `up` at `spot` put on what is under its top, or on the terrain.
 	bool groundMaterialAlong(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore, uint32_t& material) const;
@@ -458,20 +479,36 @@ public:
 		float minPitch = -90, maxPitch = 90; // the pitch bundle's limits (its rotation's y; down positive)
 		physics::Vec3 rotation;      // seatInformation's yaw/pitch/roll, degrees
 		std::string animationSystem; // seatAnimationSystem: the sitter's pose (empty: hidden)
+		// The yaw bundle's frame in the vehicle (its parents' turn: the
+		// Titans' gun hubs sit turned 180 or +-90 degrees) and its limits
+		// (minRotation / maxRotation x; free without them).
+		float frameYaw = 0;
+		float minYaw = -1e9f, maxYaw = 1e9f;
+		// The seat's camera when it turns on the mouse (a Camera with
+		// inputToYaw PIMouseLookX / inputToPitch PIMouseLookY: the drivers'
+		// free look, the FAV gunners' lean with automaticReset), its axes
+		// (yaw x, pitch y) and pivot.
+		std::string camera;
+		RotationAxis cameraYaw, cameraPitch;
+		physics::Vec3 cameraPivot;
 	};
 	struct VehicleLayout {
 		std::vector<SeatLayout> seats;
 		struct Entry {
 			physics::Vec3 position;
 			float radius;
+			int seat = -1; // an EntryPoint of a seat's own (the Titans' gun hubs): that seat
 		};
-		std::vector<Entry> entries; // EntryPoint children (entryRadius)
+		std::vector<Entry> entries; // EntryPoint children (entryRadius / setEntryRadius)
 	};
 	// A vehicle's seats (for checks and the HUD) and who sits in them.
 	std::vector<SeatLayout> vehicleSeats(uint32_t object);
 	std::vector<int> vehicleOccupants(uint32_t object) const;
 	// A seat's gun aim (degrees, yaw relative to the vehicle, pitch up
 	// positive); false for seats without a gun.
+	// Whether a seat drives: the first of a vehicle with an engine (the
+	// Titan's six seats are all guns).
+	bool drivesSeat(uint32_t vehicle, int seat) const;
 	bool gunAim(uint32_t vehicle, int seat, float& yaw, float& pitch) const;
 	const FireArm* gun(uint32_t vehicle, int seat) const;
 	// Vehicles (for the bots): where, which way, how many seats are free.
@@ -702,8 +739,16 @@ public:
 		bool coreExposed = false; // the core's doors are down
 		bool coreDestroyed = false;
 		float radius = 0;         // 0x00562090: half the diagonal of its box across x and z
+		// The wreck's end (0x00652380): the armour drains below 0 towards
+		// -wreckHitPoints; the explosions at their levels (addArmorEffect);
+		// ECGameLogicGLTitanCoreExplosion (event 0x14) at -38 %.
+		int effectLevel = 0;      // the armour effect group last started (0: none)
+		bool coreExplosion = false;
 	};
 	std::vector<TitanInfo> titans() const;
+	// The AI runs on the server (AIDLL's interface 0xb47ce4, its slots 0x18
+	// and 0x20): a wreck's armour then drains three times as fast (0x00652380).
+	void setAiRunning(bool on) { m_aiRunning = on; }
 	bool isTitan(uint32_t object) const; // the Titan's root (0x00561d90)
 	uint32_t titanOf(int team) const;     // 0 without one
 	// The commander's move order (Commander.moveTitan, the order event's
@@ -754,6 +799,11 @@ public:
 	// For a soldier aboard its own Titan (within its box): the nearest entry
 	// point of the Titan's pod arrays, in the world, and its radius.
 	bool titanPodEntry(int player, physics::Vec3& entry, float& radius) const;
+	// The nearest free gun seat of the player's own Titan whose gun works
+	// (its console's entry point, world frame), for a soldier on foot within
+	// the Titan's box; false for none.
+	// `seat` >= 0 asks for that seat only; `skip`: seats others are going to.
+	bool titanGunEntry(int player, physics::Vec3& entry, float& radius, int& seat, const std::vector<int>& skip = {}) const;
 	bool ridingPod(int player) const;
 	struct PodInfo {
 		uint32_t object = 0;
@@ -793,6 +843,9 @@ private:
 		std::vector<physics::Vec3> points; // vehicle collision LOD
 		std::shared_ptr<physics::CollisionWorld> projectileMesh; // object space, projectile LOD
 		std::shared_ptr<physics::CollisionWorld> soldierMesh;    // object space, soldier LOD (ragdolls)
+		// A Titan's: what each team's soldiers meet (the soldier mesh and the
+		// other team's forcefields; collisionGroups 0x100 / 0x200).
+		std::shared_ptr<physics::CollisionWorld> teamSoldierMesh[2];
 		std::unique_ptr<Vehicle> vehicle; // engines and wheels
 		// Seats: who sits in each (player id, -1 for nobody) and the guns.
 		std::vector<int> occupants;
@@ -803,6 +856,11 @@ private:
 			float yaw = 0, pitch = 0; // the bundles' rotation, degrees (pitch up positive)
 		};
 		std::vector<Gun> guns;
+		// Each seat's camera angles and speeds (SeatLayout::camera), degrees.
+		struct Look {
+			float yaw = 0, pitch = 0, yawSpeed = 0, pitchSpeed = 0;
+		};
+		std::vector<Look> looks;
 		// Armour (armor.*): the EMP level (armor 0x27c, see empBlast),
 		// falling by one every empLevelTime; destroyed, it lies as a wreck
 		// for timeToStayAsWreck.
@@ -1056,6 +1114,10 @@ private:
 		bool abilityActive = false; // the gadget in hand is working this tick
 		bool cloaked = false;       // CamouflageAmmoComp held with the trigger down
 		bool manDown = false;       // killed, the body lying (sv.manDownTime)
+		// The player's vehicle handle (+0x80) after death: the soldier's
+		// object, held weakly (gone with the corpse); see PlayerInfo::held.
+		uint32_t lastSoldier = 0;
+		float lastLookPitch = 0; // seated: the last tick's aim pitch (PIMouseLookY is its change)
 		bool spawnedProne = false;  // the leader's scatter found room only lying (spawn point +0x18a)
 		float manDownLeft = 0;
 		// The ability battery (soldier +0x338, read and drawn through
@@ -1072,6 +1134,9 @@ private:
 		std::unique_ptr<FireArm> weapon;
 		const ProjectileSettings* projectile = nullptr;
 		std::string muzzleEffect; // the weapon's e_muzz_* child
+		physics::Vec3 muzzleOffset; // its place on the weapon (the child's position and rotation)
+		physics::Mat3 muzzleRotation;
+		double muzzleUntil = -1; // its flash follows the weapon (the anchor moved) until then
 		int team = 0;
 		uint32_t vehicle = 0;     // the vehicle sat in, 0 on foot
 		int seat = -1;            // its seat (0 the driver's)
@@ -1111,6 +1176,17 @@ private:
 		// ladder, and stays as it was in the air.
 		uint32_t contactMaterial = 0xffffffffu;
 		uint32_t footstepMaterial = 0xffffffffu;
+		// The aim's recoil kick (SoldierBasedRecoilComp: anim::RecoilSettings
+		// of the weapon in hand; 0x005dd5d0 through 0x005861a0 / 0x00586140):
+		// the graph, the forces drawn at the last shot (recoilForceUp,
+		// recoilForceLeftRight; 0x005dd3f0) and its tick; the pitch kicked
+		// and not yet taken by the viewer (takeAimKick), up positive.
+		anim::RecoilSettings recoil;
+		std::vector<float> recoilGraph;
+		RandomDistribution recoilUp, recoilLeftRight;
+		float recoilForceUp = 0, recoilForceLeftRight = 0;
+		int64_t lastShotTick = -1000;
+		float aimKickPitch = 0;
 		// Seated: the seat's animation system (seatAnimationSystem).
 		std::unique_ptr<anim::AnimationState> seatAnimation;
 		std::string seatAnimationPath;
@@ -1156,6 +1232,11 @@ private:
 		}
 	}
 	void followSoldier(const Player& player, const world::Object& soldier);
+	// The held weapon's root (the soldier's skeleton's mesh1) in the world;
+	// false without a posed skeleton.
+	bool weaponPlace(const Player& player, physics::Vec3& at, physics::Mat3& rotation) const;
+	void weaponTraits(Player& player, const world::ObjectTemplate& weapon);
+	void stepSeatCamera(Player& player, Body& body, float seconds);
 	// Where a soldier looks (degrees): its body's yaw plus the head's
 	// twist (SoldierControl, 0x0058a6d0).
 	float lookYaw(const Player& player) const;
@@ -1427,6 +1508,7 @@ private:
 		// The SupplyObject's template when it is a child of the object (a
 		// deployed hub's Unl_Hub_*_Supply); null: the object's own.
 		const world::ObjectTemplate* settings = nullptr;
+		bool carried = false; // on a Titan (its supply point): moved with it, not lowered to the ground
 	};
 	std::vector<Crate> m_crates;
 
@@ -1479,6 +1561,19 @@ private:
 		bool off = false;       // its subtree's collision gone (0x00651c60)
 		int destroyEvent = 0;   // Python.onDestroyEvent
 		TitanPartInfo::Kind kind = TitanPartInfo::Other;
+		std::string seat;       // the gun seat (a hub PlayerControlObject) it lies under
+		// armor.addArmorEffect (0x00654730's list, by level, highest first):
+		// the effects started as the percent falls to a level, in the part's
+		// frame; the hit points last seen (+0x254) and the level started (+0x184).
+		struct ArmorEffect {
+			int level = 0;
+			std::string effect;
+			physics::Vec3 position;
+			physics::Mat3 rotation;
+		};
+		std::vector<ArmorEffect> effects;
+		float effectHitPoints = 0;
+		int effectLevel = 0;
 	};
 	struct TitanMesh {
 		const physics::CollisionMeshFile* mesh = nullptr;
@@ -1487,6 +1582,7 @@ private:
 		physics::Vec3 position;
 		int node = -1;  // the template node's part (its armour's or its armoured ancestor's)
 		std::vector<int> chain; // the parts it lies under (its collision goes with any of them)
+		int groups = 0;         // collisionGroups: 0x100 / 0x200 a team's own forcefield (PAC's, EU's)
 	};
 	struct Titan {
 		uint32_t object = 0;
@@ -1508,6 +1604,10 @@ private:
 			float yaw = 0;        // degrees, the child's
 		};
 		std::vector<Spawn> spawnPoints;
+		// Its object spawners (as_titan_ATSpawner / AGSpawner: team 1,
+		// holdObject) and supply point (as_titan_heliRepairRearm), objects of
+		// their own carried with it.
+		std::vector<Spawn> carried;
 		// Its pod arrays (titan_pod_array1/2: a PlayerControlObject with
 		// EntryPoints and a GenericFireArm with fire.isPodLauncher), in its
 		// frame.
@@ -1521,12 +1621,24 @@ private:
 		std::vector<PodArray> podArrays;
 		bool meshesDirty = true;
 		uint32_t serial = 0;      // its parts' ids: kTitanPartIds + serial << 12 + part
+		std::vector<int> seatParts; // each gun seat's armour (its hub's first armoured node), -1 for none
+		// The wreck (0x00652380): when it became one (+0x60), the root's
+		// armor.timeToStayAsWreck (+0x158), timeToStayAfterDestroyed (+0x15c)
+		// and canBeDestroyed (+0x166); the countdown's start (+0x64).
+		double wreckedAt = -1, removeFrom = -1;
+		float stayAsWreck = 20, afterDestroyed = 0;
+		bool canBeDestroyed = true;
+		bool coreExplosion = false; // event 0x14 sent (0x00654730)
 	};
 	std::vector<Titan> m_titans;
+	std::vector<std::unique_ptr<ObjectSpawner>> m_newSpawners; // a Titan's, made during the spawners' loop
 	static constexpr uint32_t kTitanPartIds = 0x7f000000u;
 	std::vector<std::pair<physics::Vec3, float>> m_titanObstacles; // static objects reaching the Titans (0x00562360)
 	bool m_titanObstaclesFound = false;
 	void registerTitan(uint32_t object, int controlPoint);
+	bool titanGunWorks(uint32_t titan, int seat) const;
+	void titanSeatsOut(Titan& titan);
+	void removeTitanCarried(Titan& titan);
 	void buildTitanParts(Titan& titan);
 	void rebuildTitanMeshes(Titan& titan);
 	Titan* titanByObject(uint32_t object);
@@ -1536,9 +1648,13 @@ private:
 	float titanPercent(const TitanPart& part) const;
 	// The game logic's damage (0x004c0e40) on a Titan's armour: true when
 	// `id` is a Titan or one of its parts (the damage handled).
-	bool titanDamage(uint32_t id, float amount, int attacker, bool fromChild = false);
+	// `drain`: the wreck's own (damage type -5), which a wrecked Titan takes.
+	bool titanDamage(uint32_t id, float amount, int attacker, bool fromChild = false, bool drain = false);
 	void setTitanPartHitPoints(Titan& titan, int part, float value, int attacker);
 	void titanPartWrecked(Titan& titan, int part, int attacker);
+	void titanArmorEffects(Titan& titan, int part);
+	void stepTitanWreck(Titan& titan, float seconds);
+	bool m_aiRunning = false;
 	bool titanTerrainClear(const Titan& titan, float x, float z) const;
 	void findTitanObstacles();
 	void stepTitans(float seconds);

@@ -1687,3 +1687,179 @@ TEST(Physics_LandSoundForTheLocalPlayerOnly)
 	}
 	CHECK(heardBy[1] == heardBy[0] + 1); // the same steps and take-off, and the landing
 }
+
+// The third-person muzzle flash follows the gun: the weapon's e_muzz child
+// is spawned against the weapon object's anchor at its place on the weapon
+// (FireComp 0x005f25f0 places the muzzle bundles by the weapon's matrix),
+// the anchor kept on the soldier's skeleton's weapon root (mesh1) while it
+// burns.
+TEST(RagDoll_MuzzleFlashFollowsTheGun)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	game.templates.registerType(20, "EffectBundle");
+	game.templates.registerType(21, "SpriteParticleSystem");
+	world::ObjectTemplate* glow = game.templates.create("SpriteParticleSystem", "test_glow3p");
+	glow->settings()["emitFrequency"] = "60";
+	glow->settings()["emitTime"] = "0.5";
+	glow->settings()["timeToLive"] = "0.1";
+	glow->settings()["isLocalSystem"] = "1";
+	glow->settings()["textureName"] = "objects\\effects\\textures\\spark";
+	world::ObjectTemplate* muzzle = game.templates.create("EffectBundle", "e_muzz_test");
+	muzzle->children().push_back({"test_glow3p", {}, {}});
+	game.templates.find("eu_ar_rifle")->children().push_back({"e_muzz_test", {0, 0.05f, 0.6f}, {}});
+	game.start();
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	const int me = game.world->localPlayer();
+	game.world->localMuzzleEffects = true;
+	game.run(0.5f);
+	game::GameWorld::PlayerInfo info;
+	game.world->playerInfo(me, info);
+	game::SoldierInput input;
+	input.fire = true;
+	game.world->setPlayerInput(input);
+	game.world->tick(1 / 30.0f);
+	game.world->setPlayerInput({});
+	game.world->tick(1 / 30.0f);
+	const auto flash = [&]() -> const effects::Emitter* {
+		for (const auto& emitter : game.world->effects().emitterList()) {
+			if (emitter->anchor == info.weapon && emitter->anchor != 0) {
+				return emitter.get();
+			}
+		}
+		return nullptr;
+	};
+	CHECK(flash() != nullptr);
+	if (!flash()) {
+		std::fprintf(stderr, "  weapon %u, %zu emitters, %zu projectiles\n", info.weapon, game.world->effects().emitterList().size(), game.world->projectiles().size());
+		for (const auto& e : game.world->effects().emitterList()) {
+			std::fprintf(stderr, "   anchor %u at %.1f/%.1f/%.1f\n", e->anchor, e->position().x, e->position().y, e->position().z);
+		}
+		return;
+	}
+	const physics::Vec3 first = flash()->position();
+	std::fprintf(stderr, "  flash at %.2f/%.2f/%.2f, the soldier at %.2f/%.2f/%.2f\n", first.x, first.y, first.z,
+		info.position.x, info.position.y, info.position.z);
+	CHECK(std::fabs(first.y - info.position.y - 1.3f) < 0.6f);
+	CHECK(physics::lengthSquared(first - info.position) < 2.5f * 2.5f);
+	// The soldier moved 3 m: the flash goes with the gun.
+	CHECK(game.world->setSoldierPosition(info.soldier, info.position + physics::Vec3 {3, 0, 0}));
+	game.world->tick(1 / 30.0f);
+	CHECK(flash() != nullptr);
+	if (flash()) {
+		const physics::Vec3 moved = flash()->position() - first;
+		std::fprintf(stderr, "  moved by %.2f/%.2f/%.2f\n", moved.x, moved.y, moved.z);
+		CHECK(std::fabs(moved.x - 3) < 0.3f && std::fabs(moved.z) < 0.3f);
+	}
+}
+
+// Seat cameras on the mouse (0x00563bd0 on a Camera bundle with inputToYaw
+// PIMouseLookX / inputToPitch PIMouseLookY): the driver's camera
+// (eu_fav_driver_camera's settings: -125..120 across at 90 a second) turns
+// and stays; a gunner's (eu_fav_MachineGun_Camera: +-1 / +-0.5,
+// automaticReset) leans with the mouse and settles back. partPose gives
+// the camera node's turn, which PlayerCamera applies.
+TEST(RagDoll_SeatCamerasTurnOnTheMouse)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	game.collisionTemplates.create("as_fav", "Objects/Vehicles/as_fav/");
+	game.templates.registerType(9, "Engine");
+	game.templates.registerType(10, "Spring");
+	game.templates.registerType(11, "Camera");
+	world::ObjectTemplate* car = game.templates.create("PlayerControlObject", "car");
+	car->settings()["hasMobilePhysics"] = "1";
+	car->settings()["physicsType"] = "Mesh";
+	car->settings()["collisionMesh"] = "as_fav";
+	car->settings()["seatInformation"] = "car 0/0.5/0.4 0/0/0";
+	car->settings()["mass"] = "1800";
+	car->children().push_back({"car_entry", {-1.5f, 0, 0}, {}});
+	world::ObjectTemplate* engine = game.templates.create("Engine", "car_engine");
+	engine->settings()["engineType"] = "194";
+	world::ObjectTemplate* wheel = game.templates.create("Spring", "car_wheel");
+	wheel->settings()["strength"] = "40";
+	wheel->settings()["damping"] = "8";
+	car->children().push_back({"car_engine", {0, -0.44f, 0}, {}});
+	for (float x : {-0.95f, 0.95f}) {
+		for (float z : {-1.4f, 1.6f}) {
+			engine->children().push_back({"car_wheel", {x, -0.15f, z}, {}});
+		}
+	}
+	world::ObjectTemplate* driverCamera = game.templates.create("Camera", "car_driver_camera");
+	driverCamera->settings()["minRotation"] = "-125/-20/0";
+	driverCamera->settings()["maxRotation"] = "120/40/0";
+	driverCamera->settings()["maxSpeed"] = "90/90/0";
+	driverCamera->settings()["acceleration"] = "5000/5000/0";
+	driverCamera->settings()["inputToYaw"] = "PIMouseLookX";
+	driverCamera->settings()["inputToPitch"] = "PIMouseLookY";
+	car->children().push_back({"car_driver_camera", {0, 1.2f, 0.4f}, {}});
+	// The gunner's seat with the leaning camera.
+	world::ObjectTemplate* gunner = game.templates.create("PlayerControlObject", "car_gunner");
+	gunner->settings()["seatInformation"] = "car_gunner 0/1/-1 0/0/0";
+	world::ObjectTemplate* gunnerCamera = game.templates.create("Camera", "car_gunner_camera");
+	gunnerCamera->settings()["minRotation"] = "-1/-0.5/0";
+	gunnerCamera->settings()["maxRotation"] = "1/0.5/0";
+	gunnerCamera->settings()["pivotPosition"] = "0/0/-2";
+	gunnerCamera->settings()["maxSpeed"] = "5/5/0";
+	gunnerCamera->settings()["acceleration"] = "1/0.5/0";
+	gunnerCamera->settings()["inputToYaw"] = "PIMouseLookX";
+	gunnerCamera->settings()["inputToPitch"] = "PIMouseLookY";
+	gunnerCamera->settings()["automaticReset"] = "1";
+	gunner->children().push_back({"car_gunner_camera", {0, 1, 0}, {}});
+	car->children().push_back({"car_gunner", {0, 0.5f, -1}, {}});
+	game.templates.create("EntryPoint", "car_entry")->settings()["entryRadius"] = "3";
+	game.start();
+	const uint32_t vehicle = game.objects.create(car, {3, 1.2f, 0}, {0, 0, 0})->id();
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	game.run(2);
+	const std::vector<game::GameWorld::SeatLayout> seats = game.world->vehicleSeats(vehicle);
+	CHECK(seats.size() == 2 && seats[0].camera == "car_driver_camera" && seats[1].camera == "car_gunner_camera");
+	game::SoldierInput input;
+	input.use = true;
+	game.world->setPlayerInput(input);
+	game.world->tick(1 / 30.0f);
+	// The driver looks right: 10 degrees a tick is PIMouseLookX 2, the
+	// axis' 1 at most: 90 degrees a second (maxSpeed).
+	input = {};
+	input.turn = 10;
+	for (int i = 0; i < 15; ++i) {
+		game.world->setPlayerInput(input);
+		game.world->tick(1 / 30.0f);
+	}
+	world::Vec3 offset, rotation;
+	CHECK(game.world->partPose(vehicle, "car_driver_camera", offset, rotation));
+	std::fprintf(stderr, "  the driver's camera after half a second: %.1f across, %.1f down\n", rotation.x, rotation.y);
+	CHECK(rotation.x > 30 && rotation.x <= 46);
+	// It stays where it was turned.
+	game.world->setPlayerInput({});
+	game.world->tick(1 / 30.0f);
+	CHECK(game.world->partPose(vehicle, "car_driver_camera", offset, rotation));
+	game.run(1);
+	world::Vec3 still;
+	CHECK(game.world->partPose(vehicle, "car_driver_camera", offset, still) && std::fabs(still.x - rotation.x) < 0.01f);
+	// The gunner's seat: a nudge leans the camera by at most its limit,
+	// then it settles back.
+	input = {};
+	input.switchSeat = 2;
+	game.world->setPlayerInput(input);
+	game.world->tick(1 / 30.0f);
+	input = {};
+	input.turn = 10;
+	for (int i = 0; i < 30; ++i) {
+		game.world->setPlayerInput(input);
+		game.world->tick(1 / 30.0f);
+	}
+	CHECK(game.world->partPose(vehicle, "car_gunner_camera", offset, rotation));
+	std::fprintf(stderr, "  the gunner's camera leaning: %.2f across (offset %.2f/%.2f/%.2f)\n", rotation.x, offset.x, offset.y,
+		offset.z);
+	CHECK(rotation.x > 0.5f && rotation.x <= 1.0f);
+	game.world->setPlayerInput({});
+	game.run(3);
+	CHECK(game.world->partPose(vehicle, "car_gunner_camera", offset, rotation) && std::fabs(rotation.x) < 0.05f);
+}

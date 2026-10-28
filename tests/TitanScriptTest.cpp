@@ -73,6 +73,19 @@ TEST(ScriptHost_TitanModeTicketsAndTheEnd)
 	level.run(0.1f);
 	CHECK(logic.team(2).tickets == 40);
 	CHECK(!logic.ended());
+	// A player killed before the end: its handler asks every player's
+	// vehicle (getClosestTitan(p.getVehicle(), ...) calls isValid on it);
+	// the host's handle keeps the dead soldier (man down, then the corpse),
+	// as BF2142.exe's weak handle does, so the script doesn't raise.
+	const int dead = level.world->addPlayer("Dead", 2, true);
+	CHECK(level.world->spawnSoldier(dead));
+	game::GameWorld::PlayerInfo info;
+	CHECK(level.world->playerInfo(dead, info));
+	const uint32_t deadSoldier = info.soldier;
+	level.world->applyDamage(deadSoldier, 1e5f, pac);
+	level.run(0.1f);
+	CHECK(level.world->playerInfo(dead, info) && !info.alive);
+	CHECK(info.heldVehicle == deadSoldier && info.heldSoldier == 0);
 	// The rest: VehicleDestroyed; the scripts end the round, PAC winning
 	// (sgl_endGame(winner, 3, 25)).
 	level.world->applyDamage(eu, 1e7f, pac);

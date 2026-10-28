@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <sstream>
 
 namespace dice::hfe::game {
 
@@ -780,7 +781,7 @@ void GameWorld::stepCrates(float seconds)
 		}
 		const world::ObjectTemplate* t = crate.settings ? crate.settings : object->objectTemplate();
 		world::Vec3 p = object->position();
-		if (!findBody(crate.object)) {
+		if (!findBody(crate.object) && !crate.carried) {
 			const float ground = m_ground.height ? m_ground.height(p.x, p.z) : 0.0f;
 			if (p.y > ground) {
 				p.y = std::max(ground, p.y - 5.0f * seconds);
@@ -853,6 +854,20 @@ void GameWorld::stepCrates(float seconds)
 				const world::ObjectTemplate* vt = vehicle ? vehicle->objectTemplate() : nullptr;
 				if (!body.vehicle || body.wreckTime >= 0 || !vt || (crate.team != 0 && vehicle->team() != crate.team)) {
 					continue;
+				}
+				// addVehicleType (0x005d1710 reads each vehicle's type through its
+				// template's interface 0xc4c4, slot 0x24; taken here as its
+				// vehicleCategory: the Titans' 3, VCHelicopter, for heliRepairRearm).
+				if (const auto types = t->settings().find("addVehicleType.list"); types != t->settings().end()) {
+					const std::string category = std::to_string(integer(*vt, "vehicleCategory", 0));
+					std::istringstream list(types->second);
+					bool listed = false;
+					for (std::string type; list >> type;) {
+						listed = listed || type == category;
+					}
+					if (!listed) {
+						continue;
+					}
 				}
 				float own = 0; // the body's radius: its farthest collision point
 				for (const physics::Vec3& point : body.points) {

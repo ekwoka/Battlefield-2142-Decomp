@@ -38,6 +38,16 @@ const CollisionMeshFile* CollisionTemplateManager::mesh(const std::string& name,
 	return slot.get();
 }
 
+const CollisionMeshFile* CollisionTemplateManager::mesh(const std::string& name, const io::FileManager& files,
+	const std::string& scriptDirectory)
+{
+	if (m_paths.find(name) == m_paths.end() && !scriptDirectory.empty()) {
+		m_meshes.erase(name);
+		create(name, scriptDirectory);
+	}
+	return mesh(name, files);
+}
+
 void registerCollisionConsoleMethods(Console& console, CollisionTemplateManager& templates)
 {
 	bindMethod(console, "collisionManager.createTemplate", ConsoleAccess::Anyone,

@@ -436,6 +436,10 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				};
 				ViewerOptions::PlayerView view;
 				const bool driving = options.playerView && options.playerView(view) && view.driving;
+				if (options.takeAimKick) {
+					const float low = firstPerson ? -1.4835f : -1.2f, high = firstPerson ? 1.4835f : 1.0f;
+					pitch = std::fmax(low, std::fmin(high, pitch + options.takeAimKick() / 57.29578f));
+				}
 				static const char* kVehicleMaps[] = {input::ControlMaps::kLand, input::ControlMaps::kSea,
 					input::ControlMaps::kAir, input::ControlMaps::kHelicopter};
 				const std::string map = !driving ? input::ControlMaps::kInfantry
