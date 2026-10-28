@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -61,6 +62,17 @@ inline float scrollOffset(float perSecond, float seconds)
 {
 	const float t = perSecond * seconds;
 	return t - std::floor(t);
+}
+
+// Whether an object's template tree is drawn through a child as part of
+// the object. An EffectBundle (and its wheel and air-draft kinds) makes
+// its children only when it starts (its start, 0x0061a4e0, from
+// startOnEffects / startAtCreation) and the effect system draws them: an
+// idle bundle (a vehicle's EMP trigger, eu_fav_EMP_trigger with e_EMP_Fav's
+// lightning meshes) shows nothing.
+inline bool drawnWithObject(const std::string& templateType)
+{
+	return templateType != "EffectBundle" && templateType != "WheelEffectBundle" && templateType != "AirDraftEffectBundle";
 }
 
 } // namespace dice::hfe::render

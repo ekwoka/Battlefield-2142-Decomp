@@ -1,6 +1,7 @@
 #include "GameWorld.h"
 
 #include "Animation/FirstPerson.h"
+#include "Animation/Ik.h"
 
 #include "Physics/CollisionTemplateManager.h"
 #include "Physics/MaterialManager.h"
@@ -613,6 +614,8 @@ void GameWorld::tick(float seconds)
 	stepAbilities(seconds);
 	stepCommander(seconds);
 	stepVehicleDamage(seconds);
+	stepVehicleTeams();
+	stepCombatAreas(seconds);
 	stepProjectiles(seconds);
 	stepControlPoints(seconds);
 	m_effects.update(seconds);
@@ -713,9 +716,26 @@ FireArmSettings GameWorld::withExtraAmmo(const Player& player, const world::Obje
 }
 
 void GameWorld::damage(uint32_t object, float amount, uint32_t projectileMaterial, uint32_t surfaceMaterial,
-	int attacker)
+	int attacker, bool splash)
 {
 	float mod = m_materials ? m_materials->damageMod(projectileMaterial, surfaceMaterial) : 1.0f;
+	// Friendly fire (0x005b7290): an attacker on a team hitting what its
+	// team controls (the victim's control object's team, slot 0x9c; the
+	// attacker's own things too) does the server's percentage of it. The
+	// victim's factor 0.9 / 1.1 (its slot 0xec(4) / (5)) isn't settled and
+	// is left at 1.
+	if (const Player* from = attacker >= 0 ? findPlayer(attacker) : nullptr; from && from->team > 0) {
+		const Player* victim = soldierPlayer(object);
+		const world::Object* o = m_objects.find(object);
+		const int team = victim ? victim->team : o ? o->team() : 0;
+		if (team == from->team) {
+			const bool soldier = victim || (o && o->objectTemplate() && sameName(o->objectTemplate()->typeName(), "Soldier"));
+			const float percent = soldier ? (splash ? m_friendlyFire.soldierSplash : m_friendlyFire.soldier)
+										  : (splash ? m_friendlyFire.vehicleSplash : m_friendlyFire.vehicle);
+			// The setters keep 0..100, under 1 as 0.
+			mod *= (percent < 1 ? 0.0f : std::min(percent, 100.0f)) * 0.01f;
+		}
+	}
 	// The victim's unlocks (ability.setMaterialDamageMod, slot 0x94 of the
 	// Ability: the damage a projectile of that material does to it).
 	if (const Player* victim = soldierPlayer(object)) {
@@ -1560,7 +1580,8 @@ void GameWorld::explode(const physics::Vec3& at, const ProjectileSettings& setti
 		if (hit.amount <= 0.1f) {
 			continue;
 		}
-		damage(hit.object, hit.amount, static_cast<uint32_t>(settings.explosionMaterial), materialOf(hit.object), attacker);
+		damage(hit.object, hit.amount, static_cast<uint32_t>(settings.explosionMaterial), materialOf(hit.object), attacker,
+			true);
 	}
 }
 
@@ -2336,6 +2357,7 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 	info.team = player->team;
 	info.ai = player->ai;
 	info.alive = player->alive;
+	info.killer = player->killer;
 	info.soldier = player->alive ? player->object : 0;
 	info.vehicle = player->alive ? player->vehicle : 0;
 	info.seat = player->alive && player->vehicle ? player->seat : -1;
@@ -3586,6 +3608,49 @@ void GameWorld::setSpawnVehicle(int id, uint32_t vehicle)
 	}
 }
 
+// The PlayerControlObject's team (slot 0x9c, 0x005c9500): the root's
+// seats in order, the first with a player gives that player's team (slot
+// 0xf8); none, the default team (+0xd0: the spawner's with teamOnVehicle,
+// else 0). Entering an empty neutral APC makes it the soldier's team's
+// (its SpawnPoint then a mobile spawn of that team), leaving it empty
+// gives it back its own. (The server's branch of 0x005c9500 returns +0xcc,
+// set by setTeam 0x005cc320: by the spawners, 0x005ae490, and a
+// parachute's entering, 0x005cfaf0; the rewrite keeps the one team every
+// side reads.) Titans keep theirs.
+void GameWorld::stepVehicleTeams()
+{
+	for (Body& body : m_bodies) {
+		if (!body.vehicle) {
+			continue;
+		}
+		world::Object* object = m_objects.find(body.object);
+		if (!object) {
+			continue;
+		}
+		int team = -1;
+		for (const int id : body.occupants) {
+			if (const Player* p = id >= 0 ? findPlayer(id) : nullptr; p && p->present) {
+				team = p->team;
+				break;
+			}
+		}
+		if (team >= 0) {
+			if (body.defaultTeam < 0) {
+				body.defaultTeam = object->team();
+			}
+		} else {
+			if (body.defaultTeam < 0) {
+				continue; // empty: its own (whatever sets it, the spawners)
+			}
+			team = body.defaultTeam;
+			body.defaultTeam = -1;
+		}
+		if (object->team() != team) {
+			object->setTeam(team);
+		}
+	}
+}
+
 std::vector<uint32_t> GameWorld::spawnVehicles(int team) const
 {
 	std::vector<uint32_t> found;
@@ -3706,6 +3771,7 @@ void GameWorld::kill(Player& victim, Player* attacker, uint32_t weapon)
 	}
 	++victim.deaths;
 	victim.diedAt = m_time;
+	victim.killer = attacker ? attacker->id : -1;
 	if (attacker) {
 		if (attacker->team == victim.team) {
 			++attacker->teamKills;
@@ -4644,7 +4710,197 @@ void GameWorld::poseSeated(Player& player, world::Object& soldier, const Body& b
 	player.seatAnimation->update({}, seconds);
 	std::vector<bool> touched;
 	player.seatAnimation->apply(*player.skeleton, player.pose, touched);
-	player.worldPose = anim::worldMatrices(*player.skeleton, player.pose);
+	// The hands on the seat's grips (the IK object 0x005ee910 found at
+	// entering, its targets set each frame by 0x005efc00).
+	std::vector<anim::IkTarget> targets;
+	const physics::Vec3 place {at.x, at.y, at.z};
+	if (seatIkTargets(player, seat, rotation, place, targets)) {
+		player.worldPose = anim::worldMatricesWithIk(*player.skeleton, player.pose, targets);
+	} else {
+		player.worldPose = anim::worldMatrices(*player.skeleton, player.pose);
+	}
+}
+
+namespace {
+
+// A template child's frame in its parent's: its place, then the part's
+// turn as the game turns it now (partPose), as PlayerCamera places seat
+// cameras.
+struct PartFrame {
+	physics::Mat3 rotation;
+	physics::Vec3 position;
+	// this in `parent`'s frame, in the parent's space.
+	PartFrame in(const PartFrame& parent) const
+	{
+		return {rotation * parent.rotation, parent.rotation.transform(position) + parent.position};
+	}
+};
+
+bool hasIk(const world::ObjectTemplate& t)
+{
+	for (const std::string& c : t.components()) {
+		if (c.size() == 2 && (c[0] == 'I' || c[0] == 'i') && (c[1] == 'k' || c[1] == 'K')) {
+			return true;
+		}
+	}
+	return false;
+}
+
+physics::Vec3 vec3Setting(const world::ObjectTemplate& t, const char* key)
+{
+	physics::Vec3 v;
+	const auto it = t.settings().find(key);
+	if (it != t.settings().end()) {
+		std::sscanf(it->second.c_str(), "%f/%f/%f", &v.x, &v.y, &v.z);
+	}
+	return v;
+}
+
+} // namespace
+
+bool GameWorld::seatIkTargets(const Player& player, const SeatLayout& seat, const physics::Mat3& soldierRotation,
+	const physics::Vec3& soldierPosition, std::vector<anim::IkTarget>& targets) const
+{
+	const world::Object* vehicle = player.vehicle ? m_objects.find(player.vehicle) : nullptr;
+	if (!vehicle || !vehicle->objectTemplate() || !player.skeleton) {
+		return false;
+	}
+	const anim::IkArms arms = anim::ikArms(*player.skeleton);
+	if (arms.leftBone < 0 && arms.rightBone < 0) {
+		return false;
+	}
+	const uint32_t object = vehicle->id();
+	const auto childFrame = [&](const world::ChildTemplate& child, const PartFrame& parent) {
+		PartFrame f {physics::Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z}),
+			{child.position.x, child.position.y, child.position.z}};
+		f = f.in(parent);
+		world::Vec3 offset, turn;
+		if (partPose(object, child.name, offset, turn)) {
+			const PartFrame posed {physics::Mat3::fromYawPitchRoll({turn.x, turn.y, turn.z}), {offset.x, offset.y, offset.z}};
+			f = posed.in(f);
+		}
+		return f;
+	};
+	// The IK object's place in the tree (0x005ee910 finds it as the soldier
+	// enters; the tree doesn't change, so the path is kept by template and
+	// seat).
+	const world::ObjectTemplate& root = *vehicle->objectTemplate();
+	const auto key = std::make_pair(&root, seat.name);
+	auto cached = m_ikPaths.find(key);
+	if (cached == m_ikPaths.end()) {
+		IkPath found;
+		std::vector<const world::ChildTemplate*> path;
+		// 0x005ed8c0: depth first from a child on, over children and the
+		// later siblings, not into other seats (PlayerControlObject 0xc4c2)
+		// or parachutes (0xc5a8); the first object with the component.
+		std::function<bool(const world::ObjectTemplate&, size_t, int)> search =
+			[&](const world::ObjectTemplate& t, size_t from, int depth) {
+				if (depth > 12) {
+					return false;
+				}
+				const auto& children = t.children();
+				for (size_t i = from; i < children.size(); ++i) {
+					const world::ObjectTemplate* c = m_templates.find(children[i].name);
+					if (!c) {
+						continue;
+					}
+					path.push_back(&children[i]);
+					if (hasIk(*c)) {
+						found.ik = c;
+						found.path = path;
+						return true;
+					}
+					if (!(c->typeName() == "PlayerControlObject" || c->typeName() == "Parachute"
+							|| c->settings().count("seatInformation"))
+						&& search(*c, 0, depth + 1)) {
+						return true;
+					}
+					path.pop_back();
+				}
+				return false;
+			};
+		// The seat in the tree (the root is the driver's), then from its
+		// first child; else from its next sibling (0x005ee910's second walk).
+		std::function<bool(const world::ObjectTemplate&, int)> seek = [&](const world::ObjectTemplate& t, int depth) {
+			if (depth > 12) {
+				return false;
+			}
+			const auto& children = t.children();
+			for (size_t i = 0; i < children.size(); ++i) {
+				const world::ObjectTemplate* c = m_templates.find(children[i].name);
+				if (!c) {
+					continue;
+				}
+				if (c->name() == seat.name) {
+					path.push_back(&children[i]);
+					if (search(*c, 0, depth + 1)) {
+						return true;
+					}
+					path.pop_back();
+					return search(t, i + 1, depth);
+				}
+				path.push_back(&children[i]);
+				if (seek(*c, depth + 1)) {
+					return true;
+				}
+				path.pop_back();
+			}
+			return false;
+		};
+		if (root.name() == seat.name) {
+			search(root, 0, 0);
+		} else {
+			seek(root, 0);
+		}
+		if (found.ik) {
+			const char* keys[2][3] = {{"ik.positionLeft", "ik.rotationLeft", "ik.poleVectorLeft"},
+				{"ik.positionRight", "ik.rotationRight", "ik.poleVectorRight"}};
+			for (int side = 0; side < 2; ++side) {
+				for (int k = 0; k < 3; ++k) {
+					found.grips[side][k] = vec3Setting(*found.ik, keys[side][k]);
+				}
+			}
+		}
+		cached = m_ikPaths.emplace(key, std::move(found)).first;
+	}
+	const world::ObjectTemplate* found = cached->second.ik;
+	if (!found) {
+		return false;
+	}
+	PartFrame foundFrame {
+		physics::Mat3::fromYawPitchRoll({vehicle->rotation().x, vehicle->rotation().y, vehicle->rotation().z}),
+		{vehicle->position().x, vehicle->position().y, vehicle->position().z}};
+	for (const world::ChildTemplate* child : cached->second.path) {
+		foundFrame = childFrame(*child, foundFrame);
+	}
+	// R = the IK object's world x the soldier's inverse (0x006acfa0): into
+	// the skeleton's space (the rewrite's soldier object sits where the
+	// exe's skeleton root does, a metre below the seat).
+	PartFrame relative;
+	for (size_t r = 0; r < 3; ++r) {
+		relative.rotation.rows[r] = soldierRotation.untransform(foundFrame.rotation.rows[r]);
+	}
+	relative.position = soldierRotation.untransform(foundFrame.position - soldierPosition);
+	const IkPath& grips = cached->second;
+	const auto target = [&](int side, int bone, int end) {
+		if (bone < 0) {
+			return;
+		}
+		anim::IkTarget t;
+		t.bone = bone;
+		t.end = end;
+		const physics::Mat3 local = physics::Mat3::fromYawPitchRoll(grips.grips[side][1]);
+		const physics::Mat3 turned = local * relative.rotation;
+		const physics::Vec3 at = relative.rotation.transform(grips.grips[side][0]) + relative.position;
+		t.target = {turned.rows[0].x, turned.rows[0].y, turned.rows[0].z, 0, turned.rows[1].x, turned.rows[1].y,
+			turned.rows[1].z, 0, turned.rows[2].x, turned.rows[2].y, turned.rows[2].z, 0, at.x, at.y, at.z, 1};
+		const physics::Vec3 p = relative.rotation.transform(grips.grips[side][2]);
+		t.pole = {p.x, p.y, p.z};
+		targets.push_back(t);
+	};
+	target(0, arms.leftBone, arms.leftEnd);
+	target(1, arms.rightBone, arms.rightEnd);
+	return !targets.empty();
 }
 
 // An effect event N of the held weapon's animation (0x0061a4e0 per
@@ -5241,10 +5497,33 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 	const bool gadget = inHand && abilityOf(*inHand, ability, whileFiring);
 	player.abilityActive = gadget && (!whileFiring || input.fire);
 	const bool wasReloading = player.weapon && player.weapon->reloading();
+	const bool emptyBefore = player.weapon && player.weapon->roundsInMag() <= 0 && !wasReloading;
 	const bool shot = player.weapon && player.weapon->tick(seconds, input.fire);
 	if (player.weapon && player.weapon->reloading() && !wasReloading) {
 		weaponSound(WeaponSoundEvent::Reload, player, player.object, player.weaponTemplate, player.body.position);
+		// The reload re-arms the weapon's fail and use messages (0x005c58a0,
+		// 0x005c1010 through the component's slots 0x3c / 0x44).
+		player.radioFailArmed = player.radioUseArmed = true;
 	}
+	// The weapon's Radio (its object component, 0x00656ac0 / 0x00656b90):
+	// a pull of the trigger refused for want of ammo says failMessage, a
+	// shot useMessage, once each until re-armed, on TCLocalTeam (10) as
+	// the player's own message (0x005c2ee0, game slot 0x50).
+	if (inHand && input.fire && !player.triggerWas && emptyBefore && !shot && player.radioFailArmed) {
+		const auto it = inHand->settings().find("radio.failMessage");
+		if (it != inHand->settings().end() && !it->second.empty()) {
+			player.radioFailArmed = false;
+			radioMessage(player.id, 10, it->second);
+		}
+	}
+	if (inHand && shot && player.radioUseArmed) {
+		const auto it = inHand->settings().find("radio.useMessage");
+		if (it != inHand->settings().end() && !it->second.empty()) {
+			player.radioUseArmed = false;
+			radioMessage(player.id, 10, it->second);
+		}
+	}
+	player.triggerWas = input.fire;
 	if (shot) {
 		weaponSound(WeaponSoundEvent::Fire, player, player.object, player.weaponTemplate,
 			player.body.position + physics::Vec3 {0, 0.6f, 0});

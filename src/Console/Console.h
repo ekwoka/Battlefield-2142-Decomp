@@ -76,6 +76,9 @@ struct ConsoleMethod {
 	// A stand-in for a method not rewritten yet (counted, does nothing): a
 	// real one registered later with the same name replaces it.
 	bool stub = false;
+	// Takes the place of every method already registered with this name
+	// (a wrapper that calls the one it replaces).
+	bool replaces = false;
 };
 
 // The outcome of one line, as the original reports it.

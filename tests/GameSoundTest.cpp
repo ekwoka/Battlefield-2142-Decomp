@@ -401,8 +401,8 @@ TEST(GameAudio_WeaponsOfARound)
 }
 
 // The local player's radio through GameAudio: a teammate's message within
-// 15 m in person, an object's automatic team-change message from no one
-// over the commander's radio (TCServerTeamMessage).
+// 15 m in person, an object's automatic team-change message played for the
+// local player by its team.
 TEST(GameAudio_RadioVoiceOverAndAutomaticMessages)
 {
 	Range range;
@@ -432,14 +432,53 @@ TEST(GameAudio_RadioVoiceOverAndAutomaticMessages)
 	audio.tick({});
 	CHECK(audio.radioHeard == 1 && audio.voiceOvers == 1 && !played.empty()
 		&& played.back() == "sound/vo/English/grunt/No_filter/a.ogg");
-	// EU takes the silo.
+	// EU takes the silo: played here only, the local player's (EU's) message
+	// (0x00656e80 through game slot 0x60).
 	object->setTeam(2);
 	const auto sent = audio.autoRadio();
-	CHECK(sent.size() == 2 && sent[0] == std::make_pair(2, std::string("AUTO_TITAN_C_friendlycapturedsilo"))
-		&& sent[1] == std::make_pair(1, std::string("AUTO_TITAN_C_enemycapturedsilo")));
+	CHECK(sent.size() == 1 && sent[0] == std::make_pair(2, std::string("AUTO_TITAN_C_friendlycapturedsilo")));
 	audio.tick({});
 	CHECK(audio.autoRadio().empty());
 	CHECK(played.back() == "sound/vo/English/commander/filter/cap.ogg");
+	// PAC takes it back: the enemy's message, still to the local player.
+	object->setTeam(1);
+	const auto lost = audio.autoRadio();
+	CHECK(lost.size() == 1 && lost[0].second == "AUTO_TITAN_C_enemycapturedsilo");
+}
+
+// An object's damage, destroyed and repaired messages (the Radio object
+// component's one-shots, 0x00656c90 / 0x00656d10 / 0x006571d0): from no one
+// to its team (the other team the enemy's), damage once until repaired.
+TEST(GameAudio_DamageDestroyedRepairedMessages)
+{
+	Range range;
+	world::ObjectTemplate* uav = range.templates.create("SimpleObject", "uav_trailer");
+	uav->settings()["armor.maxHitPoints"] = "100";
+	uav->settings()["radio.damageMessage"] = "COMMSL_UAV_trailerdamaged";
+	uav->settings()["radio.friendlyDestroyedMessage"] = "uav_lost";
+	uav->settings()["radio.enemyDestroyedMessage"] = "enemy_uav_down";
+	uav->settings()["radio.repairedMessage"] = "uav_repaired";
+	world::Object* object = range.objects.create(uav, {50, 0, 0});
+	object->setTeam(2);
+	GameAudio audio(*range.world, range.objects, range.templates, range.manager, range.game, &range.voices);
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	range.world->setHitPoints(object->id(), 100);
+	CHECK(audio.autoRadio().empty());
+	range.world->setHitPoints(object->id(), 80);
+	auto sent = audio.autoRadio();
+	CHECK(sent.size() == 1 && sent[0] == std::make_pair(2, std::string("COMMSL_UAV_trailerdamaged")));
+	range.world->setHitPoints(object->id(), 50);
+	CHECK(audio.autoRadio().empty()); // once
+	range.world->setHitPoints(object->id(), 0);
+	sent = audio.autoRadio();
+	CHECK(sent.size() == 2 && sent[0] == std::make_pair(2, std::string("uav_lost"))
+		&& sent[1] == std::make_pair(1, std::string("enemy_uav_down")));
+	range.world->setHitPoints(object->id(), 100);
+	sent = audio.autoRadio();
+	CHECK(sent.size() == 1 && sent[0].second == "uav_repaired");
+	range.world->setHitPoints(object->id(), 90);
+	sent = audio.autoRadio();
+	CHECK(sent.size() == 1 && sent[0].second == "COMMSL_UAV_trailerdamaged"); // re-armed
 }
 
 // The shipped table: Sound/VoiceMessages.con and the files it names.

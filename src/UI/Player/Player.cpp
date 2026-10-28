@@ -250,6 +250,7 @@ void Player::advance(double seconds)
 	if (!m_root) {
 		return;
 	}
+	advanceVideos(std::max(0.0, seconds));
 	m_time += std::max(0.0, seconds);
 	const double period = 1.0 / m_frameRate;
 	// At most a second's worth per call; a longer stall is dropped.
@@ -947,6 +948,9 @@ bool Player::loadImage(Clip& clip, const std::string& url)
 	if (url.empty()) {
 		return false;
 	}
+	if (url[0] == '?') {
+		return loadVideo(clip, url);
+	}
 	std::string path = url;
 	if (path.rfind("./", 0) == 0) {
 		path = path.substr(2);
@@ -980,9 +984,59 @@ bool Player::loadImage(Clip& clip, const std::string& url)
 	clip.frame = 0;
 	clip.drawing = swf::Shape();
 	clip.image = image;
+	clip.video.reset();
 	clip.url = url;
 	clip.bytes = data.size();
 	return true;
+}
+
+// A movie in a clip: its first picture now (so the clip has its size at
+// once, as an image's), the next ones as advance() passes time.
+bool Player::loadVideo(Clip& clip, const std::string& url)
+{
+	std::shared_ptr<VideoSource> video = m_videoOpener ? m_videoOpener(url) : nullptr;
+	if (!video) {
+		trace("loadMovie: cannot play " + url);
+		return false;
+	}
+	auto first = std::make_shared<MenuImage>();
+	if (!video->advance(0, *first) || !first->width || !first->height) {
+		trace("loadMovie: no picture in " + url);
+		return false;
+	}
+	std::vector<std::shared_ptr<DisplayObject>> children;
+	for (const auto& [depth, child] : clip.children) {
+		children.push_back(child);
+	}
+	for (const auto& child : children) {
+		remove(*child);
+	}
+	clip.timeline = &emptyTimeline();
+	clip.frame = 0;
+	clip.drawing = swf::Shape();
+	clip.image = first;
+	clip.video = video;
+	clip.url = url;
+	clip.bytes = 0;
+	m_videoClips.push_back(std::static_pointer_cast<DisplayObject>(clip.shared_from_this()));
+	return true;
+}
+
+void Player::advanceVideos(double seconds)
+{
+	for (auto it = m_videoClips.begin(); it != m_videoClips.end();) {
+		const std::shared_ptr<DisplayObject> object = it->lock();
+		auto* clip = object ? dynamic_cast<Clip*>(object.get()) : nullptr;
+		if (!clip || !clip->video) {
+			it = m_videoClips.erase(it);
+			continue;
+		}
+		auto frame = std::make_shared<MenuImage>();
+		if (clip->video->advance(seconds, *frame)) {
+			clip->image = frame;
+		}
+		++it;
+	}
 }
 
 // --- Dragging and focus
@@ -1686,6 +1740,7 @@ void Player::getUrl(const ObjectRef& clip, const std::string& url, const std::st
 		}
 		if (url.empty()) {
 			c->image.reset(); // unloadMovie
+			c->video.reset();
 			c->url.clear();
 		} else if (c != m_root.get()) {
 			loadImage(*c, url);

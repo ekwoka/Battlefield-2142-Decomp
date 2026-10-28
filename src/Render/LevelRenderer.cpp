@@ -7,7 +7,9 @@
 #include "Geometry/MeshFile.h"
 #include "Geometry/RoadFile.h"
 #include "IO/File/FileManager.h"
+#include "Scene/EffectSettings.h"
 #include "Scene/LightSettings.h"
+#include "Scene/PostProductionSettings.h"
 #include "Terrain/Heightmap.h"
 #include "Terrain/TerrainData.h"
 #include "Terrain/Undergrowth.h"
@@ -83,6 +85,24 @@ void materialUniforms(LightingUniforms& uniforms, const S& submesh, float fade, 
 	uniforms.uvOffset[1] = scrollOffset(submesh.uvScroll[1], seconds) + submesh.uvAtlas[3];
 	uniforms.uvOffset[2] = submesh.uvAtlas[0];
 	uniforms.uvOffset[3] = submesh.uvAtlas[1];
+}
+
+// The specular term's uniforms (mesh.frag specularTerm): the eye and the
+// kind, the colour (staticSpecularColor for static meshes, sunSpecColor's
+// SpecLUT64 for bundled ones; none without the sun) and StaticGloss
+// (GeometryTemplate.setSpecularStaticGloss, 0.15 by default).
+template <class S>
+void specularUniforms(LightingUniforms& uniforms, const S& submesh, const Camera& camera, const scene::LightSettings& lights)
+{
+	uniforms.eye[0] = camera.position.x;
+	uniforms.eye[1] = camera.position.y;
+	uniforms.eye[2] = camera.position.z;
+	uniforms.eye[3] = lights.enableSun ? static_cast<float>(submesh.specularKind) : 0.0f;
+	const auto& color = submesh.specularKind <= 2 ? lights.staticSpecularColor : lights.sunSpecColor;
+	uniforms.specular[0] = color[0];
+	uniforms.specular[1] = color[1];
+	uniforms.specular[2] = color[2];
+	uniforms.specular[3] = 0.15f;
 }
 
 float transparencyKey(const Mat4& world, const Vec3f& camera)
@@ -171,6 +191,9 @@ LevelRenderer::~LevelRenderer()
 	}
 	if (m_particleVertices) {
 		SDL_ReleaseGPUBuffer(device, m_particleVertices);
+	}
+	if (m_shimmerVertices) {
+		SDL_ReleaseGPUBuffer(device, m_shimmerVertices);
 	}
 	if (m_firstPersonParticleVertices) {
 		SDL_ReleaseGPUBuffer(device, m_firstPersonParticleVertices);
@@ -444,6 +467,18 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		// StaticMesh.fx techniques name their layers: "BaseDetailDirtCrack..."
 		// with maps base, detail, dirt, crack in that order (normal maps follow).
 		const std::string technique = lower(material.technique);
+		const std::string effect = lower(material.effect);
+		if (!submesh.additive) {
+			if (effect == "staticmesh.fx" && !skinned) {
+				submesh.specularKind = technique.find("detail") != std::string::npos && material.alphaMode != 2 ? 2 : 1;
+			} else if (effect == "bundledmesh.fx") {
+				submesh.specularKind = technique.find("colormapgloss") != std::string::npos ? 4 : 3;
+			}
+		}
+		// 0x100de8xx: a geometry whose path has "vegitation" is a tree
+		// (+0x2a2); its alpha-tested materials are the leaves (RaShaderLeaf).
+		submesh.leaf = !gpuMesh->bundled && !skinned && material.alphaMode == 2
+			&& lower(geometry->path).find("vegitation") != std::string::npos;
 		if (lower(material.effect) == "staticmesh.fx" && technique.compare(0, 10, "basedetail") == 0) {
 			const bool hasDirt = technique.find("dirt") != std::string::npos;
 			const bool hasCrack = technique.find("crack") != std::string::npos;
@@ -502,7 +537,8 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 		}
 	}
 	for (const world::ChildTemplate& child : objectTemplate.children()) {
-		if (const world::ObjectTemplate* childTemplate = sources.templates.find(child.name)) {
+		if (const world::ObjectTemplate* childTemplate = sources.templates.find(child.name);
+			childTemplate && drawnWithObject(childTemplate->typeName())) {
 			addTemplate(sources, *childTemplate, objectTransform(child.position, child.rotation) * local, objectWorld,
 				object, depth + 1);
 		}
@@ -843,7 +879,11 @@ float LevelRenderer::viewZoom(const Camera& camera) const
 void LevelRenderer::updateTerrainCells(const Camera& camera, const Frustum& frustum)
 {
 	const scene::RendererSettings defaults;
-	const scene::RendererSettings& settings = m_sources && m_sources->renderer ? *m_sources->renderer : defaults;
+	scene::RendererSettings settings = m_sources && m_sources->renderer ? *m_sources->renderer : defaults;
+	// VideoSettings' terrain quality: lodSwitchDistance 64 / 80 / 100 (0x10010040), unless a script set it.
+	if (m_sources && m_sources->quality && !settings.lodSwitchDistanceSet) {
+		settings.lodSwitchDistance = std::max(m_sources->quality->terrainLodSwitchDistance(), settings.baseCellSize);
+	}
 	m_terrainLodSwitch = terrainLodSwitch(viewZoom(camera), settings);
 	const terrain::Heightmap* heightmap = m_sources ? m_sources->heightmaps.primary() : nullptr;
 	const float ground = heightmap ? heightmap->heightAt(camera.position.x, camera.position.z) : 0.0f;
@@ -1278,7 +1318,7 @@ void LevelRenderer::updateUndergrowth(const Camera& camera)
 	}
 	const int n = m_undergrowth->patchesPerSide();
 	const float size = m_undergrowth->patchSize();
-	const float reach = m_undergrowthViewDistance + size;
+	const float reach = undergrowthViewDistance() + size;
 	const auto patchAt = [n, size](float world) {
 		return static_cast<int>(std::floor(world / size)) + n / 2;
 	};
@@ -1359,8 +1399,8 @@ void LevelRenderer::drawUndergrowth(SDL_GPUCommandBuffer* commands, SDL_GPURende
 	uniforms.cameraPosition[1] = camera.position.y;
 	uniforms.cameraPosition[2] = camera.position.z;
 	// Plants reach full height at (1 - fade scale) of the view distance.
-	uniforms.fade[0] = m_undergrowthViewDistance;
-	uniforms.fade[1] = 1.0f / std::max(m_undergrowthViewDistance * m_undergrowthFadeScale, 0.01f);
+	uniforms.fade[0] = undergrowthViewDistance();
+	uniforms.fade[1] = 1.0f / std::max(undergrowthViewDistance() * m_undergrowthFadeScale, 0.01f);
 	// The engine animates 16 sway offsets; until that is decompiled, each
 	// swings on its own phase, as far as SwayScale.
 	const float seconds = static_cast<float>(SDL_GetTicks() - m_startTicks) / 1000.0f;
@@ -1694,11 +1734,119 @@ void LevelRenderer::buildMenu(float seconds)
 	m_gpu.flushUploads();
 }
 
-// Two triangles per particle, uploaded for this frame.
+// Two triangles per particle, uploaded for this frame. The managers are
+// told the camera, the water, the wind and the settings first (what their
+// next update reads: the view distance, the distance LOD).
 void LevelRenderer::buildParticles(const Camera& camera)
 {
+	if (m_sources) {
+		// The manager's settings with VideoSettings' effects row over them
+		// (0x100991b0; no shipped script sets ParticleSystemManager.*).
+		m_particleSettings = m_sources->particles ? *m_sources->particles : scene::ParticleSystemSettings {};
+		if (m_sources->quality) {
+			m_sources->quality->applyEffects(m_particleSettings);
+		}
+		const bool water = m_sources->heightmaps.hasSea();
+		const float sea = m_sources->heightmaps.seaWaterLevel();
+		for (const effects::EffectManager* manager : {m_sources->effects, m_sources->objectEffects}) {
+			if (manager) {
+				manager->setSettings(&m_particleSettings);
+				manager->setWind(m_sources->wind);
+				manager->setWater(water, sea);
+				manager->setCamera({camera.position.x, camera.position.y, camera.position.z}, std::tan(camera.fovY / 2));
+			}
+		}
+	}
 	buildParticleBuffer({m_sources ? m_sources->effects : nullptr, m_sources ? m_sources->objectEffects : nullptr},
 		m_particleVertices, m_particleGroups, camera, true);
+	buildShimmer(camera);
+}
+
+// The particles' light (FXCommon.fx calcParticleLighting, Particles.fx
+// psParticleMedium / psParticleHigh by the manager's shader quality):
+// lerp(1, lerp(effectShadowColor, effectSunColor, saturate(lm + offset)),
+// lightFactor), lm the base hemi map's alpha under the particle (High; 1
+// at Medium), offset saturate(clamp((y - HemiShadowAltitude) / 10, 0, 1) +
+// lightMapIntensityOffset) with HemiShadowAltitude the base hemi map's
+// height (its fourth argument, HemiMapManager +0x44; RendDX9 0x10131d70)
+// and lightFactor the light manager's defaultEffectLightAffectionFactor
+// (the templates' own, +0x1fc, stays unset: 0x10139800). Low (1) is unlit.
+std::array<float, 3> LevelRenderer::particleLight(const effects::Vec3& at, float lightMapOffset) const
+{
+	const int quality = m_particleSettings.particleSystemShaderQuality;
+	if (!m_sources || quality <= 1) {
+		return {1, 1, 1};
+	}
+	const scene::LightSettings& lights = m_sources->lights;
+	const float altitude = m_sources->hemi ? m_sources->hemi->height : 0;
+	const float offset = std::clamp(std::clamp((at.y - altitude) / 10.0f, 0.0f, 1.0f) + lightMapOffset, 0.0f, 1.0f);
+	const float lm = quality >= 3 ? hemiShadowAt(at.x, at.z) : 1.0f;
+	const float lut = std::clamp(lm + offset, 0.0f, 1.0f);
+	const float f = lights.defaultEffectLightAffectionFactor;
+	std::array<float, 3> out;
+	for (int i = 0; i < 3; ++i) {
+		const float diffuse = lights.effectShadowColor[static_cast<size_t>(i)]
+			+ (lights.effectSunColor[static_cast<size_t>(i)] - lights.effectShadowColor[static_cast<size_t>(i)]) * lut;
+		out[static_cast<size_t>(i)] = 1 + (diffuse - 1) * f;
+	}
+	return out;
+}
+
+effects::ParticleView LevelRenderer::particleView(const Camera& camera) const
+{
+	effects::ParticleView view;
+	const Vec3f forward = camera.forward();
+	view.eye = {camera.position.x, camera.position.y, camera.position.z};
+	view.forward = {forward.x, forward.y, forward.z};
+	view.settings = m_sources ? &m_particleSettings : nullptr;
+	return view;
+}
+
+// The heat shimmer's sprites, drawn after the world over a copy of it.
+void LevelRenderer::buildShimmer(const Camera& camera)
+{
+	m_shimmerGroups.clear();
+	if (m_shimmerVertices) {
+		SDL_ReleaseGPUBuffer(m_gpu.device(), m_shimmerVertices);
+		m_shimmerVertices = nullptr;
+	}
+	if (!m_sources) {
+		return;
+	}
+	const effects::ParticleView view = particleView(camera);
+	std::vector<Vertex> vertices;
+	static const float corners[6][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, -1}, {1, 1}, {-1, 1}};
+	for (const effects::EffectManager* manager : {m_sources->effects, m_sources->objectEffects}) {
+		if (!manager) {
+			continue;
+		}
+		manager->forEachShimmerGroup(view, [&](const std::string& path, bool, const std::vector<effects::Sprite>& sprites) {
+			SDL_GPUTexture* image = texture(m_sources->files, path + ".dds");
+			if (!image) {
+				return;
+			}
+			const uint32_t first = static_cast<uint32_t>(vertices.size());
+			for (const effects::Sprite& sprite : sprites) {
+				for (const auto& corner : corners) {
+					Vertex v {};
+					v.position[0] = sprite.position.x;
+					v.position[1] = sprite.position.y;
+					v.position[2] = sprite.position.z;
+					v.weight = sprite.color[3];
+					v.texCoord[0] = corner[0];
+					v.texCoord[1] = corner[1];
+					v.part = sprite.size;
+					v.part2 = sprite.rotation;
+					vertices.push_back(v);
+				}
+			}
+			m_shimmerGroups.push_back({image, false, first, static_cast<uint32_t>(vertices.size()) - first});
+		});
+	}
+	if (!vertices.empty()) {
+		m_shimmerVertices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_VERTEX, vertices.data(),
+			static_cast<uint32_t>(vertices.size() * sizeof(Vertex)));
+	}
 }
 
 void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::EffectManager*> managers,
@@ -1714,11 +1862,12 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 		return;
 	}
 	std::vector<Vertex> vertices;
+	const effects::ParticleView view = particleView(camera);
 	for (const effects::EffectManager* manager : managers) {
 		if (!manager) {
 			continue;
 		}
-		manager->forEachGroup([&](const std::string& path, bool additive, const std::vector<effects::Sprite>& sprites) {
+		manager->forEachGroup(view, [&](const std::string& path, bool additive, const std::vector<effects::Sprite>& sprites) {
 			SDL_GPUTexture* image = texture(m_sources->files, path + ".dds");
 			if (!image) {
 				return;
@@ -1726,14 +1875,15 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 			const uint32_t first = static_cast<uint32_t>(vertices.size());
 			static const float corners[6][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, -1}, {1, 1}, {-1, 1}};
 			for (const effects::Sprite& sprite : sprites) {
+				const std::array<float, 3> light = particleLight(sprite.position, sprite.lightMapOffset);
 				for (const auto& corner : corners) {
 					Vertex v {};
 					v.position[0] = sprite.position.x;
 					v.position[1] = sprite.position.y;
 					v.position[2] = sprite.position.z;
-					v.normal[0] = sprite.color[0];
-					v.normal[1] = sprite.color[1];
-					v.normal[2] = sprite.color[2];
+					v.normal[0] = sprite.color[0] * light[0];
+					v.normal[1] = sprite.color[1] * light[1];
+					v.normal[2] = sprite.color[2] * light[2];
 					v.weight = sprite.color[3];
 					v.texCoord[0] = corner[0];
 					v.texCoord[1] = corner[1];
@@ -1750,7 +1900,7 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 		});
 		// Non-screen-aligned quads and trails: placed already (a negative
 		// size tells particle.vert, the coordinates ride in lightmapCoord).
-		manager->forEachWorldGroup({eye.x, eye.y, eye.z},
+		manager->forEachViewedWorldGroup(view,
 			[&](const std::string& path, bool additive, const std::vector<effects::WorldVertex>& triangles) {
 				SDL_GPUTexture* image = texture(m_sources->files, path + ".dds");
 				if (!image) {
@@ -1758,13 +1908,14 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 				}
 				const uint32_t first = static_cast<uint32_t>(vertices.size());
 				for (const effects::WorldVertex& w : triangles) {
+					const std::array<float, 3> light = particleLight(w.position, w.lightMapOffset);
 					Vertex v {};
 					v.position[0] = w.position.x;
 					v.position[1] = w.position.y;
 					v.position[2] = w.position.z;
-					v.normal[0] = w.color[0];
-					v.normal[1] = w.color[1];
-					v.normal[2] = w.color[2];
+					v.normal[0] = w.color[0] * light[0];
+					v.normal[1] = w.color[1] * light[1];
+					v.normal[2] = w.color[2] * light[2];
 					v.weight = w.color[3];
 					v.lightmapCoord[0] = w.u;
 					v.lightmapCoord[1] = w.v;
@@ -1866,9 +2017,12 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 		const Vec3f d = Vec3f {light.position.x, light.position.y, light.position.z} - camera.position;
 		found.push_back({std::sqrt(dot(d, d)) - light.range2, light});
 	};
+	// VideoSettings' dynamic lighting 0 turns the dynamic lights off (the
+	// light manager's slot 0xf4, 0x10010040): the effects' lights.
+	const bool dynamicLights = !m_sources->quality || m_sources->quality->dynamicLightsEnabled();
 	for (const effects::EffectManager* manager :
 		{m_sources->effects, m_sources->objectEffects, m_hasFirstPerson ? m_firstPerson.effects : nullptr}) {
-		if (!manager) {
+		if (!manager || !dynamicLights) {
 			continue;
 		}
 		for (const effects::PointLight& light : manager->lights()) {
@@ -1946,6 +2100,11 @@ void LevelRenderer::buildDecals()
 			continue;
 		}
 		effects::Vec3 n = decal.normal, tangent = decal.tangent, at = decal.position;
+		// Below VideoSettings' effects 2 objects get no decal sets of their own
+		// (DecalManager +0x322e, 0x100e6b70; set by 0x10010040).
+		if (decal.object != 0 && m_sources->quality && !m_sources->quality->decalsEnabled()) {
+			continue;
+		}
 		if (decal.object != 0) {
 			// On a moving object: from its space to the world's.
 			const world::Object* holder = m_sources->objects.find(decal.object);
@@ -2235,9 +2394,11 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 			const Vec3f toCamera = (sphere.radius >= 0 ? sphere.center : origin) - camera.position;
 			const float distance = lodDistance(std::sqrt(dot(toCamera, toCamera)), zoom, sphere.radius);
 			const std::vector<float> distances = lodSwitchDistances(base.lodDistances, static_cast<int>(base.lodCount));
-			const float scale = base.skinned ? renderer.skinnedMeshLodDistanceScale
-				: base.bundled               ? renderer.bundleMeshLodDistanceScale
-											 : renderer.staticMeshLodDistanceScale;
+			// renderer +0x974: VideoSettings' geometry quality, 0.5 / 0.8 / 1 (0x10010040).
+			const float quality = m_sources->quality ? m_sources->quality->geometryLodFactor() : 1.0f;
+			const float scale = quality * (base.skinned ? renderer.skinnedMeshLodDistanceScale
+						: base.bundled               ? renderer.bundleMeshLodDistanceScale
+													 : renderer.staticMeshLodDistanceScale);
 			const int lod = lodForDistance(distance, distances, static_cast<int>(base.lodCount), scale);
 			if (lod > 0) {
 				instance.lods.resize(base.lodCount);
@@ -2548,7 +2709,9 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	m_poses.clear();
 	// The shadow maps, before the world pass that reads them.
 	renderShadows(commands, camera, lights, seconds);
-	if (!m_cloakedList.empty()) {
+	// The heat shimmer reads a copy of the scene: the world pass ends before it.
+	const bool shimmer = post && m_sceneColor && !m_shimmerGroups.empty() && m_gpu.shimmerPipeline();
+	if (!m_cloakedList.empty() || shimmer) {
 		depthTarget.store_op = SDL_GPU_STOREOP_STORE; // the camouflage mask tests against it
 		depthTarget.stencil_store_op = SDL_GPU_STOREOP_STORE;
 	}
@@ -2774,6 +2937,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			applyPointLights(uniforms);
 		}
 	}
+	const float windSpeed = m_sources && m_sources->wind ? m_sources->wind->speedAt() : 0.0f;
 	const GpuMesh* bound = nullptr;
 	const auto drawInstance = [&](const DrawItem& item, MeshQueue queue) {
 		const Instance& instance = *item.instance;
@@ -2797,7 +2961,13 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			transforms.parts[i] = instance.parts.empty() ? Mat4 {} : instance.parts[static_cast<size_t>(i)];
 		}
 		std::copy(item.lightmapTransform, item.lightmapTransform + 4, transforms.lightmapTransform);
+		// The leaves' sway (not the overgrowth's: RaShaderLeaf's OVERGROWTH has none).
+		transforms.sway[0] = 0;
+		transforms.sway[1] = bound->bounds.radius;
+		transforms.sway[2] = windSpeed + 5; // WindSpeed (WindManager slot 0x30, 0x100bdb00) + WIND_ADD
+		transforms.sway[3] = seconds;
 		SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
+		bool swaying = false;
 		const bool lightmapped = item.lightmap != nullptr;
 		float hemiObject[4] = {1, 1, 1, 0};
 		if (bound->skinned || bound->bundled) {
@@ -2813,8 +2983,15 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 				skinPalette(*bound, submesh, pose, transforms);
 				SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
 			}
+			const bool sway = submesh.leaf && !instance.overgrowth;
+			if (sway != swaying) {
+				swaying = sway;
+				transforms.sway[0] = sway ? 1.0f : 0.0f;
+				SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
+			}
 			LightingUniforms uniforms = uniformsFor[lightmapped][submesh.alphaReference > 0];
 			materialUniforms(uniforms, submesh, instance.fade, seconds);
+			specularUniforms(uniforms, submesh, camera, lights);
 			if (bound->skinned || bound->bundled) {
 				uniforms.material[2] += kMaterialHemi;
 				std::copy(hemiObject, hemiObject + 4, uniforms.hemiObject);
@@ -2931,6 +3108,29 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	drawMeshParticles(commands, pass, viewProjection, lights,
 		{m_sources ? m_sources->effects : nullptr, m_sources ? m_sources->objectEffects : nullptr});
 	drawParticles(commands, pass, viewProjection, camera, lights, m_particleVertices, m_particleGroups);
+	if (shimmer) {
+		SDL_EndGPURenderPass(pass);
+		if (!m_shimmerSource || m_shimmerSize[0] != target.width || m_shimmerSize[1] != target.height) {
+			if (m_shimmerSource) {
+				SDL_ReleaseGPUTexture(m_gpu.device(), m_shimmerSource);
+			}
+			m_shimmerSource = m_gpu.createColorTexture(target.width, target.height);
+			m_shimmerSize[0] = target.width;
+			m_shimmerSize[1] = target.height;
+		}
+		SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands);
+		SDL_GPUTextureLocation from {m_sceneColor, 0, 0, 0, 0, 0};
+		SDL_GPUTextureLocation to {m_shimmerSource, 0, 0, 0, 0, 0};
+		SDL_CopyGPUTextureToTexture(copy, &from, &to, target.width, target.height, 1, false);
+		SDL_EndGPUCopyPass(copy);
+		SDL_GPUColorTargetInfo keepColor = colorTarget;
+		keepColor.load_op = SDL_GPU_LOADOP_LOAD;
+		SDL_GPUDepthStencilTargetInfo keepDepth = depthTarget;
+		keepDepth.load_op = SDL_GPU_LOADOP_LOAD;
+		keepDepth.stencil_load_op = SDL_GPU_LOADOP_LOAD;
+		pass = SDL_BeginGPURenderPass(commands, &keepColor, 1, &keepDepth);
+		drawShimmer(commands, pass, viewProjection, camera, target.width, target.height);
+	}
 	// The cloaked soldiers' mask, tested against the world's depth.
 	const bool cloaked = post && !m_cloakedList.empty();
 	if (cloaked) {
@@ -3028,10 +3228,28 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 {
 	const FirstPersonScene& scene = m_firstPerson;
 	const Mat4 viewProjection = camera.view() * Mat4::perspective(scene.fovY, aspect, scene.nearPlane, scene.farPlane);
-	LightingUniforms lit[2] = {lighting(lights, lights.sunColor, lights.skyColor, 0, false),
-		lighting(lights, lights.sunColor, lights.skyColor, 0.5f, false)};
-	applyPointLights(lit[0]);
-	applyPointLights(lit[1]);
+	// In a seat camera's inside view with allowInsideStaticSun the cockpit
+	// takes the camera's static sun and ambient (BF2142.exe 0x006104d0..
+	// 0x00610580: insideStaticSunDirection / Color / AmbientColor, flickering
+	// to insideStaticSunDamageColor when damaged), the dynamic lights only
+	// with allowInsideDynamicLights.
+	InsideSun inside;
+	const bool insideSun = m_sources && m_sources->insideSun && m_sources->insideSun(inside);
+	scene::LightSettings insideLights;
+	if (insideSun) {
+		insideLights = lights;
+		insideLights.sunDirection = inside.direction;
+		insideLights.enableSun = true;
+	}
+	const scene::LightSettings& useLights = insideSun ? insideLights : lights;
+	const std::array<float, 3>& sunColor = insideSun ? inside.color : lights.sunColor;
+	const std::array<float, 3>& skyColor = insideSun ? inside.ambient : lights.skyColor;
+	LightingUniforms lit[2] = {lighting(useLights, sunColor, skyColor, 0, false),
+		lighting(useLights, sunColor, skyColor, 0.5f, false)};
+	if (!insideSun || inside.dynamicLights) {
+		applyPointLights(lit[0]);
+		applyPointLights(lit[1]);
+	}
 	const float seconds = static_cast<float>(SDL_GetTicks() - m_startTicks) / 1000.0f;
 	const auto drawModel = [&](const FirstPersonModel& model, MeshQueue queue) {
 		const GpuMesh* gpuMesh = mesh(*m_sources, model.geometry, model.geometryIndex, model.lod);
@@ -3074,6 +3292,7 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 			}
 			LightingUniforms uniforms = lit[submesh.alphaReference > 0];
 			materialUniforms(uniforms, submesh, 1.0f, seconds);
+			specularUniforms(uniforms, submesh, camera, useLights);
 			uniforms.material[2] = submesh.additive ? kMaterialAdditive : submesh.blended ? kMaterialBlended : 0.0f;
 			if (gpuMesh->skinned || gpuMesh->bundled) {
 				uniforms.material[2] += kMaterialHemi;
@@ -3118,6 +3337,15 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 	for (const auto& [distance, model] : transparent) {
 		drawModel(*model, MeshQueue::Transparent);
 	}
+}
+
+} // namespace dice::hfe::render
+
+namespace dice::hfe::render {
+
+float LevelRenderer::undergrowthViewDistance() const
+{
+	return m_undergrowthViewDistance * (m_sources && m_sources->quality ? m_sources->quality->undergrowthViewDistanceScale() : 1.0f);
 }
 
 } // namespace dice::hfe::render

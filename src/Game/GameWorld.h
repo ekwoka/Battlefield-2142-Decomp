@@ -22,6 +22,7 @@
 
 #include "Animation/AnimationSystem.h"
 #include "Animation/FirstPerson.h"
+#include "Animation/Ik.h"
 #include "Effects/Effects.h"
 #include "Physics/RigidBody.h"
 #include "Random.h"
@@ -325,6 +326,10 @@ public:
 		float respawnIn = 0; // seconds until the next spawn while dead
 		bool manDown = false; // down, a medic may revive it
 		int kills = 0, deaths = 0, teamKills = 0;
+		// The player who killed it last (-1: none or itself): the player's
+		// slot 0x338, which the death camera (0x00614940) and the trace
+		// camera (0x00610d20) look towards while that player lives.
+		int killer = -1;
 		int squad = 0; // 0: none
 		bool squadLeader = false;
 		bool commander = false;
@@ -367,6 +372,14 @@ public:
 	// 256 kept); `receiver` takes only those whose hearer it picks.
 	std::vector<RadioHeard> takeRadioHeard() { return std::exchange(m_radioHeard, {}); }
 	std::vector<RadioHeard> takeRadioHeard(const std::function<bool(int receiver)>& receiver);
+	// A message only `receiver` hears (the local plays, game slot 0x60
+	// 0x0042e820: the team-change and takeable radio, the warnings).
+	void hearRadio(int receiver, int channel, const std::string& voice)
+	{
+		if (!voice.empty()) {
+			m_radioHeard.push_back({-1, receiver, channel, voice});
+		}
+	}
 	// The player whose soldier (or vehicle) an object is, -1 for none.
 	int playerOf(uint32_t object) const;
 	// An effect event N (0..9) of a player's held weapon's animation, as
@@ -499,6 +512,21 @@ public:
 		m_waterLevel = level;
 		m_hasWater = true;
 		m_ground.waterLevel = [this](float, float) { return m_waterLevel; };
+	}
+	// The friendly-fire percentages (sv.soldierFriendlyFire,
+	// vehicleFriendlyFire, soldierSplashFriendlyFire,
+	// vehicleSplashFriendlyFire: settings +0x128..+0x134, 0..100): damage
+	// from a teammate x the percentage / 100 (0x005b7290), soldiers' by the
+	// soldier ones, everything else's by the vehicle ones.
+	struct FriendlyFire {
+		float soldier = 100, vehicle = 100, soldierSplash = 100, vehicleSplash = 100;
+	};
+	void setFriendlyFire(const FriendlyFire& ff) { m_friendlyFire = ff; }
+	// The sea's height, or none (false).
+	bool waterLevel(float& level) const
+	{
+		level = m_waterLevel;
+		return m_hasWater;
 	}
 	// How long a killed soldier lies revivable (sv.manDownTime, 15; 0: none).
 	void setManDownTime(float seconds) { m_manDownTime = seconds; }
@@ -915,6 +943,12 @@ public:
 	// soldier) is inside the combat areas (0x004ca5d0, the AI's IAITerrain
 	// slot 0x1c 0x008a0380; CombatAreas.cpp).
 	bool insideCombatArea(int player) const;
+	// The time the player has been outside (player +0x294, sent to its
+	// client in the player networkable's 0x800 part) and the seconds left
+	// before it takes damage (the HUD's "TIME UNTIL PUNISH: #TIME#",
+	// 0x0044c7b0); -1 while inside or when the areas aren't used.
+	float outsideCombatArea(int player) const;
+	float combatAreaTimeLeft(int player) const;
 	// sv.allowTitanMovement (the server settings' +0x59, read by the move
 	// 0x005aca70 and the order's check 0x005abaf0).
 	bool allowTitanMovement = true;
@@ -1049,6 +1083,10 @@ private:
 		bool animationTried = false;
 		// Seats: who sits in each (player id, -1 for nobody) and the guns.
 		std::vector<int> occupants;
+		// Its own team while nobody sits in it (the PlayerControlObject's
+		// default team +0xd0, setDefaultTeam 0x005c7ee0; -1: not taken yet,
+		// the object's team then).
+		int defaultTeam = -1;
 		double occupiedAt = -1e9; // when someone last sat in it (MagneticObject's disableWhenEmptyVehicle)
 		struct Gun {
 			std::unique_ptr<FireArm> weapon;
@@ -1188,6 +1226,23 @@ private:
 	void stepSleep(Body& body, float seconds);
 	void destroyVehicle(Body& body, int attacker);
 	void stepVehicleDamage(float seconds);
+	// A vehicle's team is its first occupant's (0x005c9500), its own when
+	// empty: each tick from the seats.
+	void stepVehicleTeams();
+	// The combat areas' rules each tick (0x004bbf60, 0x004bed00).
+	void stepCombatAreas(float seconds);
+	bool insideCombatArea(const Player& player) const;
+	std::map<uint32_t, float> m_outsideVehicles; // +0x304: abandoned vehicles' seconds outside
+	FriendlyFire m_friendlyFire;
+	// The seats' IK objects (seatIkTargets): the template path from the
+	// vehicle's root, by root template and seat (ik null: none).
+	struct IkPath {
+		const world::ObjectTemplate* ik = nullptr;
+		std::vector<const world::ChildTemplate*> path;
+		// Its ik.* (left, right): position, rotation (degrees), pole.
+		physics::Vec3 grips[2][3];
+	};
+	mutable std::map<std::pair<const world::ObjectTemplate*, std::string>, IkPath> m_ikPaths;
 	bool disabled(const Body& body) const { return body.empLevel > 0 || body.wreckTime >= 0; }
 
 	void seatPlayer(Player& player, Body& body, int seat);
@@ -1306,6 +1361,11 @@ private:
 		int rank = 0; // setPlayerRank (the commander's applicants)
 		float respawnIn = 0;
 		int kills = 0, deaths = 0, teamKills = 0;
+		int killer = -1; // who killed it last (the player's slot 0x338: the death camera's other object)
+		float outsideTime = 0; // +0x294: seconds outside the combat area
+		// The held weapon's Radio one-shots (the object component's +0x10
+		// fail, +0x11 use) and the trigger last tick.
+		bool radioFailArmed = true, radioUseArmed = true, triggerWas = false;
 		SoldierInput input;
 		std::vector<HitBone> hitBones;
 		int spawnChoice = -1;
@@ -1547,7 +1607,7 @@ private:
 	void stepProjectiles(float seconds);
 	void steerSeeker(Projectile& projectile, float seconds);
 	void damage(uint32_t object, float amount, uint32_t projectileMaterial, uint32_t surfaceMaterial,
-		int attacker = -1); // the attacking player
+		int attacker = -1, bool splash = false); // the attacking player; an explosion's splash
 	std::vector<std::unique_ptr<Player>> m_players; // by id
 	Player* m_player = nullptr; // the local player
 	SoldierInput m_playerInput;
@@ -1557,6 +1617,11 @@ private:
 	Player* soldierPlayer(uint32_t object) const;
 	world::Object* spawnSoldier(Player& player);
 	void kill(Player& victim, Player* attacker, uint32_t weapon);
+	// The hands' IK targets of a seated soldier (Animation/Ik.h): the
+	// seat's IK object (an Ik component in the seat's tree, 0x005ee910),
+	// its ik.* grips in the skeleton's space (0x005efc00).
+	bool seatIkTargets(const Player& player, const SeatLayout& seat, const physics::Mat3& soldierRotation,
+		const physics::Vec3& soldierPosition, std::vector<anim::IkTarget>& targets) const;
 	// What becomes of the body at PlayerDeath: it stays (a corpse, see
 	// stepCorpses), it is slumped in its seat (m_seatCorpses), or it goes
 	// at once (the occupants of a destroyed vehicle, 0x005cacf0).

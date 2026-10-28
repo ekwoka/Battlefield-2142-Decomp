@@ -252,18 +252,31 @@ std::vector<GameWorld::RadioHeard> GameWorld::takeRadioHeard(const std::function
 // give: inside.
 bool GameWorld::insideCombatArea(int playerId) const
 {
-	PlayerInfo info;
-	if (!playerInfo(playerId, info) || !info.alive) {
+	const Player* player = findPlayer(playerId);
+	return player && insideCombatArea(*player);
+}
+
+bool GameWorld::insideCombatArea(const Player& player) const
+{
+	if (!player.present || !player.alive) {
 		return false;
 	}
 	if (!m_combatAreas || !m_combatAreas->use) {
 		return true;
 	}
 	int category = 4; // a soldier's template has no category: VCNoVehicleCategory
-	if (info.vehicle) {
-		const world::Object* vehicle = m_objects.find(info.vehicle);
+	physics::Vec3 at = player.body.position;
+	if (player.vehicle) {
+		const world::Object* vehicle = m_objects.find(player.vehicle);
 		category = vehicle && vehicle->objectTemplate() ? vehicleCategory(*vehicle->objectTemplate()) : 4;
+		if (vehicle) {
+			at = {vehicle->position().x, vehicle->position().y, vehicle->position().z};
+		}
 	}
+	struct {
+		int team;
+		physics::Vec3 position;
+	} info {player.team, at};
 	const auto applies = [&](const CombatArea& area) {
 		return (info.team == 0 || area.team == 0 || area.team == info.team) && area.binds(category);
 	};
@@ -283,6 +296,110 @@ bool GameWorld::insideCombatArea(int playerId) const
 		}
 	}
 	return inside;
+}
+
+float GameWorld::outsideCombatArea(int id) const
+{
+	const Player* player = findPlayer(id);
+	return player && player->outsideTime > 0 ? player->outsideTime : -1;
+}
+
+float GameWorld::combatAreaTimeLeft(int id) const
+{
+	const Player* player = findPlayer(id);
+	if (!player || player->outsideTime <= 0 || !m_combatAreas || !m_combatAreas->use) {
+		return -1;
+	}
+	int category = 4;
+	if (player->vehicle) {
+		const world::Object* vehicle = m_objects.find(player->vehicle);
+		category = vehicle && vehicle->objectTemplate() ? vehicleCategory(*vehicle->objectTemplate()) : 4;
+	}
+	// 0x0044c7b0: what is left of the controlled object's timer.
+	return std::max(0.0f, m_combatAreas->timerFor(category, !player->vehicle) - player->outsideTime);
+}
+
+void GameWorld::stepCombatAreas(float seconds)
+{
+	if (!m_combatAreas) {
+		return;
+	}
+	const CombatAreas& areas = *m_combatAreas;
+	// The players (0x004bbf60, every one, every seat): dead or inside, the
+	// time outside is 0; outside it runs, and past the controlled object's
+	// timer the soldier takes the manager's damage each tick (not by the
+	// second; 100 kills at once).
+	for (const auto& owned : m_players) {
+		Player& player = *owned;
+		if (!player.present) {
+			continue;
+		}
+		if (!player.alive || insideCombatArea(player)) {
+			player.outsideTime = 0;
+			continue;
+		}
+		const bool first = player.outsideTime <= 0;
+		player.outsideTime += seconds;
+		if (first && &player == m_player && !player.ai) {
+			// The HUD's first frame of the warning (HUD +0x24f): the
+			// commander's "leaving_the_combat_area" (0x0044c7b0).
+			m_radioHeard.push_back({-1, player.id, 13, "leaving_the_combat_area"});
+		}
+		int category = 4;
+		if (player.vehicle) {
+			const world::Object* vehicle = m_objects.find(player.vehicle);
+			category = vehicle && vehicle->objectTemplate() ? vehicleCategory(*vehicle->objectTemplate()) : 4;
+		}
+		if (player.outsideTime > areas.timerFor(category, !player.vehicle) && player.object) {
+			loseHitPoints(player.object, areas.damage, -1);
+		}
+	}
+	// Abandoned vehicles that destroyWhenOutsideCombatArea (0x004bed00):
+	// outside the areas binding every vehicle (0x004cb120, any team), after
+	// 15 s (0x0091f2c0) they lose damage(category) x floor(t / timer)^2 a
+	// second; taken, they start over.
+	std::vector<std::pair<uint32_t, float>> losses; // applied after the walk (a wreck may go)
+	for (const Body& body : m_bodies) {
+		const world::Object* object = body.vehicle ? m_objects.find(body.object) : nullptr;
+		const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
+		if (!t) {
+			continue;
+		}
+		const auto flag = t->settings().find("destroyWhenOutsideCombatArea");
+		if (flag == t->settings().end() || std::atoi(flag->second.c_str()) == 0) {
+			continue;
+		}
+		if (playerOf(body.object) >= 0) {
+			m_outsideVehicles.erase(body.object);
+			continue;
+		}
+		bool inside = true;
+		if (areas.use) {
+			bool any = false, in = false;
+			for (const CombatArea& area : areas.areas) {
+				if (area.vehicles == 4 && !area.inverted) {
+					any = true;
+					in = in || area.contains(object->position().x, object->position().z);
+				}
+			}
+			inside = !any || in;
+		}
+		if (inside) {
+			m_outsideVehicles.erase(body.object);
+			continue;
+		}
+		float& t2 = m_outsideVehicles[body.object];
+		t2 += seconds;
+		if (t2 > 15.0f) {
+			const int category = vehicleCategory(*t);
+			const float timer = std::max(areas.timerFor(category, false), 1e-3f);
+			const float steps = std::floor(t2 / timer);
+			losses.push_back({body.object, areas.damageFor(category) * steps * steps * seconds});
+		}
+	}
+	for (const auto& [object, amount] : losses) {
+		loseHitPoints(object, amount, -1);
+	}
 }
 
 int GameWorld::crosshairTarget(int id, float reach, physics::Vec3* point) const

@@ -70,6 +70,36 @@ bool isCamera(const world::ObjectTemplate& t)
 	return t.typeName() == "Camera";
 }
 
+game::camera::Frame frameOf(const render::Mat4& m)
+{
+	game::camera::Frame f;
+	for (int r = 0; r < 3; ++r) {
+		f.rotation.rows[static_cast<size_t>(r)] = {m.at(r, 0), m.at(r, 1), m.at(r, 2)};
+	}
+	f.position = {m.at(3, 0), m.at(3, 1), m.at(3, 2)};
+	return f;
+}
+
+game::camera::Vec3 vec3Of(const std::string& value, game::camera::Vec3 fallback)
+{
+	float v[3];
+	return vec3(value, v) ? game::camera::Vec3 {v[0], v[1], v[2]} : fallback;
+}
+
+// An object's bounding radius (slot 0x90, the hierarchy's): the rewrite
+// takes a vehicle's box (its collision LOD's farthest corner) and 1 m for
+// anything else (a soldier).
+float radiusOf(game::GameWorld& round, uint32_t object)
+{
+	for (const auto& v : round.vehicleList()) {
+		if (v.object == object) {
+			const auto far = [](const physics::Vec3& a) { return std::sqrt(a.x * a.x + a.y * a.y + a.z * a.z); };
+			return std::max(far(v.boxMin), far(v.boxMax));
+		}
+	}
+	return 1.0f;
+}
+
 } // namespace
 
 PlayerCamera::PlayerCamera(game::GameWorld& round, anim::AnimationSystems& systems, Loader load)
@@ -145,6 +175,9 @@ struct PlayerCamera::SeatView {
 	const world::ObjectTemplate* seat = nullptr;
 	const world::ObjectTemplate* camera = nullptr;
 	render::Mat4 world;
+	// The camera's frames up its tree, in the world: [0] the camera, [1]
+	// its parent ... the last the vehicle (chaseParentIndex counts these).
+	std::vector<render::Mat4> chain;
 };
 
 void PlayerCamera::stepShakes(float seconds)
@@ -200,7 +233,7 @@ float PlayerCamera::seatFov(bool inside) const
 bool PlayerCamera::insideSun(InsideSun& sun) const
 {
 	SeatView seat;
-	if (!firstPerson || !m_alive || !findSeatCamera(seat)) {
+	if (!insideView() || !findSeatCamera(seat)) {
 		return false;
 	}
 	const world::ObjectTemplate& c = *seat.camera;
@@ -230,10 +263,336 @@ bool PlayerCamera::insideSun(InsideSun& sun) const
 	return true;
 }
 
+game::camera::Ground PlayerCamera::ground() const
+{
+	game::camera::Ground g;
+	g.terrain = [this](float x, float z) { return m_round.terrainHeight(x, z); };
+	float sea = 0;
+	if (m_round.waterLevel(sea)) {
+		g.sea = [sea](float, float) { return sea; };
+	}
+	return g;
+}
+
+game::camera::ModeRules PlayerCamera::modeRules() const
+{
+	game::camera::ModeRules rules;
+	rules.allowNoseCam = allowNoseCam;
+	rules.allowExternalViews = allowExternalViews;
+	SeatView seat;
+	if (findSeatCamera(seat)) {
+		const world::ObjectTemplate& c = *seat.camera;
+		rules.inside = number(c, "CVMInside", 1) != 0;
+		rules.nose = number(c, "CVMNose", 0) != 0;
+		rules.chase = number(c, "CVMChase", 1) != 0;
+		rules.frontChase = number(c, "CVMFrontChase", 1) != 0;
+		rules.flyBy = number(c, "CVMFlyBy", 1) != 0;
+		rules.trace = number(c, "CVMTrace", 0) != 0;
+		rules.externTrace = number(c, "CVMExternTrace", 0) != 0;
+	}
+	return rules;
+}
+
+bool PlayerCamera::setMode(game::camera::Mode mode)
+{
+	using game::camera::Mode;
+	if (mode == Mode::FirstPerson) {
+		mode = Mode::Inside;
+	}
+	if (!game::camera::modeAllowed(mode, modeRules())) {
+		return false;
+	}
+	// 0x00612eb0: Chase and FrontChase start over (0x006105c0), FlyBy drops
+	// its points, Trace puts its point 20 m ahead.
+	m_mode = mode;
+	m_chase.reset();
+	m_flyBy.reset();
+	m_traceStarted = false;
+	return true;
+}
+
+void PlayerCamera::toggleMode(bool backwards)
+{
+	game::GameWorld::PlayerInfo me;
+	const bool alive = !m_remote && m_round.playerInfo(m_round.localPlayer(), me) && me.alive;
+	if (!m_remote && !alive && m_spectating == Spectating::Follow) {
+		nextPlayer();
+		return;
+	}
+	if (!m_remote && !alive && m_spectating == Spectating::Death && allowFreeCam) {
+		// 0x00615e00: the key picks a teammate to follow.
+		nextPlayer();
+		if (m_followPlayer >= 0) {
+			m_spectating = Spectating::Follow;
+			m_follow = {};
+		}
+		return;
+	}
+	if (alive && me.vehicle) {
+		const game::camera::Mode next = game::camera::nextMode(m_mode, modeRules(), backwards);
+		setMode(next);
+		firstPerson = next == game::camera::Mode::Inside;
+		return;
+	}
+	firstPerson = !firstPerson || !allowExternalViews;
+}
+
+bool PlayerCamera::insideView() const
+{
+	if (!m_alive) {
+		return false;
+	}
+	game::GameWorld::PlayerInfo me;
+	if (!m_remote && m_round.playerInfo(m_round.localPlayer(), me) && me.vehicle) {
+		return m_mode == game::camera::Mode::Inside;
+	}
+	return firstPerson;
+}
+
+void PlayerCamera::nextPlayer()
+{
+	// 0x00615ce0: the living teammates (not spectators) in the players'
+	// order, the one after the followed one, else the first.
+	game::GameWorld::PlayerInfo me;
+	if (!m_round.playerInfo(m_round.localPlayer(), me)) {
+		return;
+	}
+	int first = -1;
+	bool passed = false;
+	for (const auto& p : m_round.playerList()) {
+		if (p.team != me.team || !p.alive || p.id == me.id) {
+			continue;
+		}
+		if (p.id == m_followPlayer) {
+			passed = true;
+			continue;
+		}
+		if (first == -1) {
+			first = p.id;
+		}
+		if (passed) {
+			m_followPlayer = p.id;
+			return;
+		}
+	}
+	if (first != -1) {
+		m_followPlayer = first;
+	}
+}
+
+void PlayerCamera::spectatorAction()
+{
+	// 0x00616110: only for the dead (the camera not attached), with
+	// sv.allowFreeCam; it swaps flying free (mode 1) and mode 6.
+	game::GameWorld::PlayerInfo me;
+	if (m_remote || !allowFreeCam || !m_round.playerInfo(m_round.localPlayer(), me) || me.alive
+		|| m_spectating == Spectating::None) {
+		return;
+	}
+	if (m_spectating != Spectating::Free) {
+		// From the view now (the matrix +0x2a0 handed over).
+		m_free.position = m_external.eye;
+		float yaw = 0, pitch = 0;
+		game::camera::anglesOf(m_external, yaw, pitch);
+		m_free.yaw = yaw / kDegrees;
+		m_free.pitch = pitch / kDegrees;
+		m_spectating = Spectating::Free;
+		return;
+	}
+	// setMode 6 with no object (0x00615f10): the kept one (+0x198) again,
+	// else the next teammate; none, and it stays free.
+	if (m_deathObject && m_round.objects().find(m_deathObject)) {
+		const world::Object* o = m_round.objects().find(m_deathObject);
+		game::camera::deathStart(m_death, {o->position().x, o->position().y, o->position().z},
+			game::camera::normalized(m_external.at - m_external.eye), radiusOf(m_round, m_deathObject));
+		m_spectating = Spectating::Death;
+		return;
+	}
+	nextPlayer();
+	if (m_followPlayer >= 0) {
+		m_spectating = Spectating::Follow;
+		m_follow = {};
+	}
+}
+
+void PlayerCamera::stepViews(float seconds)
+{
+	using namespace game::camera;
+	m_hasExternal = false;
+	if (m_remote) {
+		return; // a joined game's views stay the first person and the chase
+	}
+	game::GameWorld::PlayerInfo me;
+	if (!m_round.playerInfo(m_round.localPlayer(), me)) {
+		return;
+	}
+	const Ground g = ground();
+	if (me.alive) {
+		m_spectating = Spectating::None;
+		m_followPlayer = -1;
+		m_deathObject = 0;
+		m_lastControlObject = me.vehicle ? me.vehicle : me.soldier;
+		SeatView seat;
+		if (!me.vehicle || !findSeatCamera(seat)) {
+			m_modeVehicle = 0;
+			m_modeSeat = -1;
+			m_mode = Mode::Inside;
+			const float yaw = me.yaw * kDegrees, pitch = me.aimPitch * kDegrees;
+			m_lastLook.eye = {me.position.x, me.position.y + 1.0f + m_eye.current, me.position.z};
+			m_lastLook.at = m_lastLook.eye
+				+ Vec3 {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+			return;
+		}
+		if (me.vehicle != m_modeVehicle || me.seat != m_modeSeat) {
+			// A new seat: Inside (its camera is set up so on entering), or
+			// Chase for a third-person player.
+			m_modeVehicle = me.vehicle;
+			m_modeSeat = me.seat;
+			m_mode = Mode::Inside;
+			if (!firstPerson ? !setMode(Mode::Chase) : !setMode(Mode::Inside)) {
+				setMode(nextMode(Mode::Inside, modeRules()));
+			}
+		} else if (!modeAllowed(m_mode, modeRules())) {
+			setMode(Mode::Inside);
+		}
+		m_flyBy.clock += seconds;
+		const Frame camera = frameOf(seat.world);
+		const Frame parent = seat.chain.size() > 1 ? frameOf(seat.chain[1]) : camera;
+		const Frame root = frameOf(seat.chain.back());
+		const world::ObjectTemplate& c = *seat.camera;
+		Vec3 velocity;
+		for (const auto& v : m_round.vehicleList()) {
+			if (v.object == me.vehicle) {
+				velocity = v.velocity;
+			}
+		}
+		const float radius = radiusOf(m_round, me.vehicle);
+		Look look;
+		switch (m_mode) {
+		case Mode::Nose: look = nose(camera, parent.rotation, vec3Of(text(c, "nosePos"), {})); break;
+		case Mode::Chase:
+		case Mode::FrontChase: {
+			ChaseSettings settings;
+			settings.distance = number(c, "chaseDistance", -1);
+			settings.angle = number(c, "chaseAngle", 0.3f);
+			settings.offset = vec3Of(text(c, "chaseOffset"), {});
+			settings.stiffness = number(c, "followStiffness", 1);
+			const int index = static_cast<int>(number(c, "chaseParentIndex", -1));
+			const Frame chaseParent = index == -1 ? root
+				: frameOf(seat.chain[static_cast<size_t>(std::min<int>(index, static_cast<int>(seat.chain.size()) - 1))]);
+			look = chase(m_chase, settings, chaseParent, root.position, radius, m_mode == Mode::FrontChase, seconds, g);
+			break;
+		}
+		case Mode::FlyBy: look = flyBy(m_flyBy, camera.position, root, velocity, radius, g); break;
+		case Mode::Trace: {
+			if (!m_traceStarted) {
+				traceStart(m_trace, camera.position, parent);
+				m_traceStarted = true;
+			}
+			// The player's slot 0x338 player (its killer) while it lives.
+			game::GameWorld::PlayerInfo other;
+			Vec3 at;
+			const bool target = me.killer >= 0 && m_round.playerInfo(me.killer, other) && other.alive;
+			if (target) {
+				at = other.position;
+			}
+			look = trace(m_trace, camera.position, parent, target ? &at : nullptr);
+			break;
+		}
+		default:
+			look.eye = camera.position;
+			look.at = camera.position + camera.forward();
+			break;
+		}
+		m_lastLook = look;
+		if (m_mode != Mode::Inside) {
+			m_external = look;
+			m_externalFov = number(c, "worldFOV", 1.1f); // 0x00610150
+			m_hasExternal = true;
+		}
+		return;
+	}
+	// Dead: the death camera starts on the object the player was in (the
+	// death 0x004cd390: setMode 6 with the player's control object).
+	if (m_spectating == Spectating::None) {
+		if (!m_alive || !m_lastControlObject) {
+			return; // never spawned yet: the before-spawn camera
+		}
+		m_deathObject = m_lastControlObject;
+		const world::Object* o = m_round.objects().find(m_deathObject);
+		const Vec3 at = o ? Vec3 {o->position().x, o->position().y, o->position().z} : m_lastLook.eye;
+		deathStart(m_death, at, normalized(m_lastLook.at - m_lastLook.eye), radiusOf(m_round, m_deathObject));
+		m_spectating = Spectating::Death;
+	}
+	Look look;
+	if (m_spectating == Spectating::Follow) {
+		game::GameWorld::PlayerInfo other;
+		if (!m_round.playerInfo(m_followPlayer, other) || !other.alive) {
+			const int was = m_followPlayer;
+			m_followPlayer = -1;
+			nextPlayer();
+			if (m_followPlayer < 0 || m_followPlayer == was) {
+				m_followPlayer = -1;
+				m_spectating = Spectating::Death;
+			}
+		}
+	}
+	if (m_spectating == Spectating::Follow) {
+		game::GameWorld::PlayerInfo other;
+		m_round.playerInfo(m_followPlayer, other);
+		Frame frame;
+		const uint32_t object = other.vehicle ? other.vehicle : other.soldier;
+		const world::Object* o = m_round.objects().find(object);
+		if (other.vehicle && o) {
+			frame.rotation = Mat3::fromYawPitchRoll({o->rotation().x, o->rotation().y, o->rotation().z});
+			frame.position = {o->position().x, o->position().y, o->position().z};
+		} else {
+			// Its soldier camera: at the eye, turned by the look.
+			frame.rotation = Mat3::fromYawPitchRoll({other.yaw, -other.aimPitch, 0});
+			frame.position = {other.position.x, other.position.y + 1.47f, other.position.z};
+		}
+		const Vec3 velocity = other.velocity;
+		look = follow(m_follow, frame, radiusOf(m_round, object), &velocity, g);
+	} else if (m_spectating == Spectating::Free) {
+		freeMove(m_free, m_freeInput, seconds, g);
+		m_freeInput.turnDegrees = m_freeInput.pitchDegrees = 0;
+		look = freeLook(m_free);
+	} else {
+		const world::Object* o = m_deathObject ? m_round.objects().find(m_deathObject) : nullptr;
+		Vec3 body, killer;
+		if (o) {
+			body = {o->position().x, o->position().y, o->position().z};
+		}
+		game::GameWorld::PlayerInfo other;
+		const bool hasKiller = me.killer >= 0 && m_round.playerInfo(me.killer, other) && other.alive;
+		if (hasKiller) {
+			const world::Object* k = m_round.objects().find(other.vehicle ? other.vehicle : other.soldier);
+			killer = k ? Vec3 {k->position().x, k->position().y, k->position().z} : other.position;
+		}
+		look = death(m_death, o ? &body : nullptr, hasKiller ? &killer : nullptr, seconds, g);
+	}
+	m_external = look;
+	m_externalFov = m_baseFov;
+	m_hasExternal = true;
+}
+
+bool PlayerCamera::externalView(View& view, float aspect) const
+{
+	if (!m_hasExternal) {
+		return false;
+	}
+	view.position = {m_external.eye.x, m_external.eye.y, m_external.eye.z};
+	game::camera::anglesOf(m_external, view.yaw, view.pitch);
+	view.fovY = aspectFov(m_externalFov, aspect);
+	view.roll = 0;
+	return true;
+}
+
 void PlayerCamera::tick(float seconds)
 {
 	m_effects.update(seconds);
 	stepShakes(seconds);
+	stepViews(seconds);
 	++m_tick; // the game's tick counter (0x00666090)
 	m_recoilNow = 0;
 	const bool altPressed = m_altFire && !m_altFireWas;
@@ -510,7 +869,7 @@ void PlayerCamera::startWeaponEffects(int effect)
 
 bool PlayerCamera::view(View& view, float aspect) const
 {
-	if (!firstPerson || !m_alive) {
+	if (!insideView()) {
 		return false;
 	}
 	Me me;
@@ -518,7 +877,7 @@ bool PlayerCamera::view(View& view, float aspect) const
 		return false;
 	}
 	if (me.vehicle) {
-		if (!seatCamera(view)) {
+		if (m_mode != game::camera::Mode::Inside || !seatCamera(view)) {
 			return false;
 		}
 		view.fovY = aspectFov(view.fovY, aspect);
@@ -561,10 +920,17 @@ bool PlayerCamera::findSeatCamera(SeatView& out) const
 		bool ok = false;
 		render::Mat4 local;
 		const world::ObjectTemplate* camera = nullptr;
+		std::vector<render::Mat4> path; // the root's .. the camera's parent's
 	} found, first;
 	const world::ObjectTemplate* seatTemplate = nullptr;
+	std::vector<render::Mat4> path;
 	std::function<void(const world::ObjectTemplate&, const render::Mat4&, bool, int)> walk =
 		[&](const world::ObjectTemplate& t, const render::Mat4& local, bool inSeat, int depth) {
+			path.push_back(local);
+			struct Pop {
+				std::vector<render::Mat4>& path;
+				~Pop() { path.pop_back(); }
+			} pop {path};
 			if (found.ok || depth > 10) {
 				return;
 			}
@@ -583,7 +949,7 @@ bool PlayerCamera::findSeatCamera(SeatView& out) const
 					continue; // another seat's cameras
 				}
 				if (inSeat && isCamera(*c)) {
-					const Found here {true, m, c};
+					const Found here {true, m, c, path};
 					if (!first.ok) {
 						first = here;
 					}
@@ -617,7 +983,13 @@ bool PlayerCamera::findSeatCamera(SeatView& out) const
 	out.vehicle = object;
 	out.seat = seatTemplate;
 	out.camera = found.camera;
-	out.world = found.local * placement(vehicle->position(), vehicle->rotation());
+	const render::Mat4 place = placement(vehicle->position(), vehicle->rotation());
+	out.world = found.local * place;
+	out.chain.clear();
+	out.chain.push_back(out.world);
+	for (auto it = found.path.rbegin(); it != found.path.rend(); ++it) {
+		out.chain.push_back(*it * place);
+	}
 	return true;
 }
 
@@ -666,7 +1038,7 @@ bool PlayerCamera::duckingDisablesInput() const
 
 bool PlayerCamera::cockpit(Cockpit& cockpit) const
 {
-	if (!firstPerson || !m_alive) {
+	if (!insideView()) {
 		return false;
 	}
 	SeatView seat;
@@ -723,7 +1095,7 @@ std::vector<PlayerCamera::Model> PlayerCamera::models() const
 
 bool PlayerCamera::hides(uint32_t object) const
 {
-	if (!firstPerson || !m_alive || object == 0) {
+	if (!insideView() || object == 0) {
 		return false;
 	}
 	Me me;

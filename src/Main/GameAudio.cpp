@@ -239,6 +239,20 @@ std::vector<std::pair<int, std::string>> GameAudio::autoRadio()
 			sent.push_back({team, message});
 		}
 	};
+	const int local = m_round.localPlayer();
+	game::GameWorld::PlayerInfo me;
+	const int localTeam = m_round.playerInfo(local, me) ? me.team : 0;
+	const auto play = [&](const std::string& message) {
+		// Game slot 0x60 (0x0042e820): for the local player only.
+		if (local >= 0 && !message.empty()) {
+			m_round.hearRadio(local, 13, message);
+			sent.push_back({localTeam, message});
+		}
+	};
+	const auto teamOf = [&](const world::Object& object) {
+		const int team = object.team();
+		return team != 0 ? team : localTeam; // 0x00656910's last resort
+	};
 	if (--m_scanIn <= 0) {
 		// The objects with radio messages, looked for every two seconds.
 		m_scanIn = 60;
@@ -247,37 +261,98 @@ std::vector<std::pair<int, std::string>> GameAudio::autoRadio()
 			if (!t || m_watched.count(object->id())) {
 				continue;
 			}
-			const auto& s = t->settings();
-			if (s.count("radio.friendlyDestroyedMessage") || s.count("radio.enemyDestroyedMessage")
-				|| s.count("radio.friendlyTeamChangeMessage") || s.count("radio.enemyTeamChangeMessage")
-				|| s.count("radio.neutralTeamChangeMessage")) {
-				m_watched[object->id()] = {object->team(), m_round.hitPoints(object->id()) <= 0};
+			auto known = m_radioTemplates.find(t);
+			if (known == m_radioTemplates.end()) {
+				const auto& s = t->settings();
+				bool any = false;
+				for (const char* key : {"radio.friendlyDestroyedMessage", "radio.destroyedMessage",
+						 "radio.enemyDestroyedMessage", "radio.friendlyTeamChangeMessage", "radio.enemyTeamChangeMessage",
+						 "radio.neutralTeamChangeMessage", "radio.damageMessage", "radio.repairedMessage",
+						 "radio.friendlySpawnMessage", "radio.enemySpawnMessage"}) {
+					any = any || s.count(key);
+				}
+				known = m_radioTemplates.emplace(t, any).first;
+			}
+			if (!known->second) {
+				continue;
+			}
+			Watched w;
+			w.team = object->team();
+			w.hitPoints = m_round.hitPoints(object->id());
+			w.destroyed = w.hitPoints >= 0 && w.hitPoints <= 0;
+			w.objectTemplate = t;
+			m_watched[object->id()] = w;
+			if (!m_firstScan) {
+				// Made since the round's start (the server's createObject).
+				const int team = teamOf(*object);
+				send(team, setting(*t, "radio.friendlySpawnMessage"));
+				if (team == 1 || team == 2) {
+					send(3 - team, setting(*t, "radio.enemySpawnMessage"));
+				}
 			}
 		}
+		m_firstScan = false;
 	}
 	for (auto it = m_watched.begin(); it != m_watched.end();) {
 		const world::Object* object = m_objects.find(it->first);
 		Watched& watched = it->second;
 		const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
-		const bool destroyed = !object || m_round.hitPoints(it->first) <= 0;
-		if (t && object->team() != watched.team) {
-			const int to = object->team();
-			if (to == 1 || to == 2) {
-				send(to, setting(*t, "radio.friendlyTeamChangeMessage"));
-				send(3 - to, setting(*t, "radio.enemyTeamChangeMessage"));
+		if (!t) {
+			// Gone (a wreck removed) before its end was seen: destroyed.
+			if (watched.objectTemplate && !watched.destroyed && watched.destroyedArmed && watched.hitPoints >= 0) {
+				const world::ObjectTemplate& was = *watched.objectTemplate;
+				const int team = watched.team != 0 ? watched.team : localTeam;
+				std::string friendly = setting(was, "radio.friendlyDestroyedMessage");
+				if (friendly.empty()) {
+					friendly = setting(was, "radio.destroyedMessage");
+				}
+				send(team, friendly);
+				if (team == 1 || team == 2) {
+					send(3 - team, setting(was, "radio.enemyDestroyedMessage"));
+				}
+			}
+			it = m_watched.erase(it);
+			continue;
+		}
+		if (object->team() != watched.team) {
+			const int to = object->team(), from = watched.team;
+			if (to == 0) {
+				if (localTeam == from) {
+					play(setting(*t, "radio.neutralTeamChangeMessage"));
+				}
 			} else {
-				send(watched.team, setting(*t, "radio.neutralTeamChangeMessage"));
+				play(setting(*t, localTeam == to ? "radio.friendlyTeamChangeMessage" : "radio.enemyTeamChangeMessage"));
 			}
 			watched.team = to;
 		}
-		if (destroyed && !watched.destroyed && t) {
-			send(watched.team, setting(*t, "radio.friendlyDestroyedMessage"));
-			if (watched.team == 1 || watched.team == 2) {
-				send(3 - watched.team, setting(*t, "radio.enemyDestroyedMessage"));
+		const float hp = m_round.hitPoints(it->first);
+		const int team = teamOf(*object);
+		if (hp >= 0) {
+			if (watched.hitPoints >= 0 && hp < watched.hitPoints && hp > 0 && watched.damageArmed) {
+				watched.damageArmed = false;
+				send(team, setting(*t, "radio.damageMessage"));
 			}
+			const bool destroyed = hp <= 0;
+			if (destroyed && !watched.destroyed && watched.destroyedArmed) {
+				watched.destroyedArmed = false;
+				watched.repairedArmed = true;
+				std::string friendly = setting(*t, "radio.friendlyDestroyedMessage");
+				if (friendly.empty()) {
+					friendly = setting(*t, "radio.destroyedMessage");
+				}
+				send(team, friendly);
+				if (team == 1 || team == 2) {
+					send(3 - team, setting(*t, "radio.enemyDestroyedMessage"));
+				}
+			} else if (!destroyed && watched.destroyed && watched.repairedArmed) {
+				watched.repairedArmed = false;
+				watched.damageArmed = watched.destroyedArmed = true;
+				send(team, setting(*t, "radio.repairedMessage"));
+			}
+			watched.destroyed = destroyed;
+			watched.hitPoints = hp;
 		}
-		watched.destroyed = destroyed;
-		it = object ? std::next(it) : m_watched.erase(it);
+		++it;
 	}
 	return sent;
 }

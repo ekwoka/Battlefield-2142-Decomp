@@ -364,6 +364,7 @@ void Player::installBuiltins()
 				self.remove(*child);
 			}
 			clip->image.reset();
+			clip->video.reset();
 			clip->url.clear();
 			clip->bytes = 0;
 		}
@@ -786,6 +787,8 @@ void Player::installBuiltins()
 		method(loader, "unloadClip", [&self](Interpreter& vm, CallArgs& c) -> Value {
 			if (auto* clip = dynamic_cast<Clip*>(targetOf(vm, c[0], self.root()))) {
 				clip->image.reset();
+				clip->video.reset();
+			clip->video.reset();
 				clip->url.clear();
 				clip->bytes = 0;
 				return Value(true);

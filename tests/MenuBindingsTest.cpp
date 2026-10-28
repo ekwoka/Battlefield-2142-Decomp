@@ -545,4 +545,22 @@ TEST(MenuBindings_Controls)
 	CHECK(shown(fire, true, false) == "Q");
 	CHECK(controls.pressed(input::ControlMaps::kInfantry, "c_PIFire",
 		[](const std::string& control) { return control == "IDKey_Q"; }));
+	// A gamepad's button as fire's secondary, its stick pushed up (negative)
+	// as throttle's forward: an inverted axis mapping.
+	bindings.setLastInput("IDFGameController_0", "IDButton_5", 1);
+	CHECK(avm1::toBoolean(call(vm, natives, "dice.bf2.ControlSettings", "mapInput",
+		{avm1::Value(fire), avm1::Value(true), avm1::Value(false), avm1::Value(false)})));
+	CHECK(shown(fire, true, false) == "Joy Button 5");
+	bindings.setLastInput("IDFGameController_0", "IDAxis_1", -1);
+	CHECK(avm1::toBoolean(call(vm, natives, "dice.bf2.ControlSettings", "mapInput",
+		{avm1::Value(throttle), avm1::Value(true), avm1::Value(false), avm1::Value(false)})));
+	const input::Binding* axis = controls.binding(input::ControlMaps::kInfantry, "c_PIThrottle", 1, 1);
+	CHECK(axis && axis->kind == input::Binding::Kind::Axis && axis->sign == -1 && axis->device == "IDFGameController_0");
+	CHECK(shown(throttle, true, false) == "Joy Axis 1");
+	CHECK(shown(throttle, false, false) == "W"); // the primary kept
+	// With the game's strings: the localized CONTROLLER_ key.
+	natives.setLocalizer([](const std::string& key) {
+		return key == "CONTROLLER_IDFGameController_IDButton_5" ? std::string("Joy Button 5 (loc)") : key;
+	});
+	CHECK(shown(fire, true, false) == "Joy Button 5 (loc)");
 }

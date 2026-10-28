@@ -7,6 +7,7 @@
 
 #include "Animation/FirstPerson.h"
 #include "Effects/Effects.h"
+#include "Game/Cameras.h"
 #include "Game/Random.h"
 
 #include <array>
@@ -29,16 +30,49 @@ public:
 	using Loader = std::function<const anim::AnimationSystemTemplate*(const std::string& path)>;
 	PlayerCamera(game::GameWorld& round, anim::AnimationSystems& systems, Loader load);
 	~PlayerCamera();
+	struct View;
 
-	// First person (CVMInside, the game's only view on foot and its default
-	// in vehicles) or the chase view behind (c_PIToggleCameraMode).
+	// On foot: first person (the game's only view there) or the rewrite's
+	// own chase view behind (--camera-mode third, C). In a vehicle the seat
+	// camera's view mode (game::camera::Mode) decides; a third-person
+	// choice starts a seat in Chase.
 	bool firstPerson = true;
-	// c_PIToggleCameraMode. The server's sv.allowExternalViews (data block
-	// 0's flag, +0x148 of its settings) keeps the player in first person:
-	// without it the chase view isn't offered.
-	void toggleMode() { firstPerson = !firstPerson || !allowExternalViews; }
+	// c_PIToggleCameraMode (0x004b9e10): in a vehicle the next view mode the
+	// seat's camera allows (0x00612eb0: its CVM* flags, sv.allowNoseCam,
+	// sv.allowExternalViews); on foot first person and the chase view (the
+	// latter only with sv.allowExternalViews). Dead and spectating with a
+	// player followed, the next player (0x00615e00).
+	void toggleMode(bool backwards = false);
 	bool allowExternalViews = true;
 	bool allowNoseCam = true; // sv.allowNoseCam (the seats' CVMNose views)
+	// sv.allowFreeCam (game logic +0x35): the dead may fly a free camera or
+	// follow teammates (0x00616110, 0x00615290).
+	bool allowFreeCam = false;
+	// The seat camera's view mode now (Inside when not in a seat).
+	game::camera::Mode mode() const { return m_mode; }
+	// Whether the view now is the first-person one (the soldier's eye or a
+	// seat's Inside camera).
+	bool insideView() const;
+	// The view when it isn't first person and the game places it: a seat
+	// camera's Nose, Chase, FrontChase, FlyBy or Trace view, the death
+	// camera, a followed player's or the free camera (false otherwise: the
+	// rewrite's own chase on foot, or before the first spawn).
+	bool externalView(View& view, float aspect) const;
+	// What the dead player's camera does (the player camera, vtable
+	// 0x0097a8b0): none (alive), the death camera on the killed object
+	// (mode 6 with no one followed, 0x00615970), following a teammate
+	// (mode 6, 0x00614d00) or flying free (mode 1 unattached, 0x00615290).
+	enum class Spectating { None, Death, Follow, Free };
+	Spectating spectating() const { return m_spectating; }
+	int followedPlayer() const { return m_followPlayer; }
+	// c_PIAction pressed while dead (0x00616110): with sv.allowFreeCam it
+	// switches between flying free and the death camera / following.
+	void spectatorAction();
+	// FreeCam.togglePlayer: the next living teammate to follow (0x00615ce0).
+	void nextPlayer();
+	// The keys for the free camera (c_PIYaw, c_PIThrottle, the mouse, c_PILie
+	// up, c_PICrouch down, the sprints' speeds).
+	void setFreeInput(const game::camera::FreeInput& input) { m_freeInput = input; }
 
 	// The alternate fire as held now (its press cycles the zoom).
 	void setAltFire(bool held) { m_altFire = held; }
@@ -182,6 +216,32 @@ private:
 	std::function<bool(Remote&)> m_remote;
 	int m_lastRemoteShot = -1000;
 	void startWeaponEffects(int effect);
+
+	// The seat camera's view modes and the dead player's camera (Cameras.h).
+	void stepViews(float seconds);
+	game::camera::ModeRules modeRules() const;
+	bool setMode(game::camera::Mode mode);
+	game::camera::Mode m_mode = game::camera::Mode::Inside;
+	uint32_t m_modeVehicle = 0;
+	int m_modeSeat = -1;
+	game::camera::ChaseState m_chase;
+	game::camera::FlyByState m_flyBy;
+	game::camera::TraceState m_trace;
+	bool m_traceStarted = false;
+	Spectating m_spectating = Spectating::None;
+	game::camera::DeathState m_death;
+	uint32_t m_deathObject = 0;
+	game::camera::FollowState m_follow;
+	int m_followPlayer = -1;
+	game::camera::FreeState m_free;
+	game::camera::FreeInput m_freeInput;
+	bool m_hasExternal = false;
+	game::camera::Look m_external;
+	float m_externalFov = 1.1f;
+	// The last tick's view (the death camera starts from its forward).
+	game::camera::Look m_lastLook;
+	uint32_t m_lastControlObject = 0;
+	game::camera::Ground ground() const;
 
 	game::GameWorld& m_round;
 	anim::AnimationSystems& m_systems;

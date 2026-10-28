@@ -10,6 +10,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <utility>
 
 namespace dice::hfe::host {
 
@@ -97,6 +99,25 @@ HostedGame::HostedGame(game::GameWorld& round, game::GameLogic& logic, world::Ob
 	HostSetup setup)
 	: m_round(&round), m_logic(&logic), m_templates(&templates), m_setup(std::move(setup))
 {
+	// The voters: the clients' players (bots don't vote).
+	m_votes.players = [this] {
+		std::vector<game::Votes::Voter> out;
+		for (const auto& [id, client] : m_clients) {
+			if (client.player >= 0 && !client.full) {
+				out.push_back({client.player, client.team, true});
+			}
+		}
+		return out;
+	};
+	m_votes.kickable = [this](int player) {
+		for (const auto& [id, client] : m_clients) {
+			if (client.player == player) {
+				return true;
+			}
+		}
+		return false;
+	};
+	m_votes.commander = [this](int team) { return m_round->commander(team); };
 	m_server.onJoined = [this](int client) { joined(client); };
 	// A delivered packet with a fresh record makes its slot the client's
 	// (0x005830e0: +0x20f0 = the packet's slot, for the record's ghost).
@@ -133,6 +154,7 @@ HostedGame::HostedGame(game::GameWorld& round, game::GameLogic& logic, world::Ob
 
 HostedGame::~HostedGame()
 {
+	stopDemo();
 	for (const auto& [id, client] : m_clients) {
 		if (onLog) {
 			onLog("client " + std::to_string(id) + "'s moves: " + std::to_string(client.movesDropped) + " dropped, "
@@ -148,7 +170,9 @@ bool HostedGame::start()
 	options.port = m_setup.gamePort;
 	options.loopbackOnly = m_setup.loopbackOnly;
 	options.password = m_setup.password;
-	options.maxClients = m_setup.maxPlayers;
+	// The transport takes ten over sv.maxPlayers (0x00688300): the join
+	// decides the rest (reserved slots).
+	options.maxClients = m_setup.maxPlayers + 10;
 	if (const net::BanList* bans = m_setup.bans) {
 		options.banned = [bans](const std::string& address) { return bans->bannedAddress(address); };
 	}
@@ -224,7 +248,7 @@ void HostedGame::sayTeam(int team, const std::string& text)
 	for (const auto& [id, client] : m_clients) {
 		if (client.team == team && client.stage == Client::Stage::Playing) {
 			for (const net::GameEvent& out : events) {
-				m_server.send(id, out);
+				sendTo(id, out);
 			}
 		}
 	}
@@ -240,7 +264,7 @@ void HostedGame::sendRemoteFeedback(int player, const std::string& text)
 			continue;
 		}
 		for (size_t at = 0; at < reply.size() || at == 0; at += 48) {
-			m_server.send(id, net::makePostRemote(net::kMsgNetworkCategory, net::kNeRemoteConsoleFeedback,
+			sendTo(id, net::makePostRemote(net::kMsgNetworkCategory, net::kNeRemoteConsoleFeedback,
 				net::int32Payload(-1) + reply.substr(at, 48)));
 			if (reply.empty()) {
 				break;
@@ -252,6 +276,7 @@ void HostedGame::sendRemoteFeedback(int player, const std::string& text)
 void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, world::ObjectTemplateManager& templates,
 	HostSetup setup)
 {
+	stopDemo(); // a demo is one round's (AutoRecorder stops at the round's end, 0x00585920)
 	m_round = &round;
 	m_logic = &logic;
 	m_templates = &templates;
@@ -300,9 +325,9 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 void HostedGame::sendLevel(int id)
 {
 	const auto block = [&](uint32_t type, const std::string& data) {
-		m_server.send(id, net::makeDataBlockStart(type, static_cast<uint32_t>(data.size())));
+		sendTo(id, net::makeDataBlockStart(type, static_cast<uint32_t>(data.size())));
 		for (size_t at = 0; at < data.size(); at += 63) {
-			m_server.send(id, net::makeDataBlockChunk(data.substr(at, 63)));
+			sendTo(id, net::makeDataBlockChunk(data.substr(at, 63)));
 		}
 	};
 	// The map list (0x00441410: every map, the current one's index).
@@ -371,7 +396,15 @@ void HostedGame::joined(int id)
 		m_server.kick(id, 0x16);
 		return;
 	}
+	// A full server (0x004ae6a0: the players at sv.maxPlayers): decided when
+	// the client's name comes (reservedSlotCheck).
+	int humans = 0;
+	for (const auto& [other, c] : m_clients) {
+		humans += other != id && c.player >= 0 ? 1 : 0;
+	}
+	const bool full = humans >= m_setup.maxPlayers;
 	Client& client = m_clients[id];
+	client.full = full;
 	// A team with fewer players.
 	int counts[3] {};
 	for (const auto& p : m_round->playerList()) {
@@ -390,6 +423,15 @@ void HostedGame::joined(int id)
 		m_round->setKit(client.player, kits.front().name, kits.front().soldier);
 	}
 	client.stage = Client::Stage::Loading;
+	sendJoinBlocks(id);
+	if (onLog) {
+		onLog("client " + std::to_string(id) + " (" + m_server.client(id)->address + ") joined as player "
+			+ std::to_string(client.player) + ", team " + std::to_string(team));
+	}
+}
+
+void HostedGame::sendJoinBlocks(int id)
+{
 	// The settings (block 0), the map list (5) and the level (2).
 	net::RemoteWorld::ServerSettings settings;
 	settings.name = m_setup.serverName;
@@ -421,17 +463,167 @@ void HostedGame::joined(int id)
 		settings.allowTitanMovement = sv->allowTitanMovement;
 	}
 	const auto block = [&](uint32_t type, const std::string& data) {
-		m_server.send(id, net::makeDataBlockStart(type, static_cast<uint32_t>(data.size())));
+		sendTo(id, net::makeDataBlockStart(type, static_cast<uint32_t>(data.size())));
 		for (size_t at = 0; at < data.size(); at += 63) {
-			m_server.send(id, net::makeDataBlockChunk(data.substr(at, 63)));
+			sendTo(id, net::makeDataBlockChunk(data.substr(at, 63)));
 		}
 	};
 	block(0, net::RemoteWorld::encodeSettings(settings));
 	sendLevel(id);
-	if (onLog) {
-		onLog("client " + std::to_string(id) + " (" + m_server.client(id)->address + ") joined as player "
-			+ std::to_string(client.player) + ", team " + std::to_string(team));
+}
+
+void HostedGame::sendTo(int client, const net::GameEvent& event)
+{
+	if (client == kDemoClient) {
+		m_demoEvents.queue(event);
+	} else {
+		m_server.send(client, event);
 	}
+}
+
+// --- demos (the server's recordDemo, 0x004afcc0; stopRecording 0x004afdb0)
+
+bool HostedGame::recordDemo(const std::string& path)
+{
+	if (m_demo.isOpen()) {
+		return false; // "already recording"
+	}
+	net::DemoHeader header;
+	header.serverName = m_setup.serverName;
+	header.level = m_setup.level;
+	header.gameMode = m_setup.gameMode;
+	if (!m_demo.open(path, header)) {
+		return false;
+	}
+	// The demo connection 0x81 (0x004ac920): no player, the join's data
+	// (blocks 0 and 5 then the level), the load and database steps
+	// (0x004ae6a0, 0x004a7c00, 0x004a7c80, 0x004af710), each flushed into
+	// the file: the first two at once (-1), the rest by the tick; then the
+	// marker (-2, 0).
+	m_demoEvents.clear();
+	m_demoSequence = 0;
+	Client& demo = m_clients[kDemoClient];
+	demo = {};
+	demo.player = -1;
+	demo.name = "DEMORECORD";
+	demo.stage = Client::Stage::Loading;
+	sendJoinBlocks(kDemoClient);
+	flushDemo(-1, false);
+	event(kDemoClient, net::makePostRemote(net::kMsgNetworkCategory, net::kNeLoadComplete));
+	flushDemo(-1, false);
+	event(kDemoClient, net::makePostRemote(net::kMsgNetworkCategory, net::kNeDatabaseComplete));
+	flushDemo(static_cast<int32_t>(m_tick), false);
+	m_demo.marker(0);
+	if (onLog) {
+		onLog("recording demo " + path);
+	}
+	return true;
+}
+
+void HostedGame::stopDemo()
+{
+	if (!m_demo.isOpen()) {
+		return;
+	}
+	m_demo.close(static_cast<int32_t>(m_tick));
+	m_clients.erase(kDemoClient);
+	m_demoEvents.clear();
+	if (onLog) {
+		onLog("stopping recording");
+	}
+}
+
+void HostedGame::flushDemo(int32_t time, bool ghosts)
+{
+	// 0x004b02a0's demo branch: the payload goes to the file, not the
+	// socket, and counts as delivered at once (0x0057ab30): no resends.
+	for (int guard = 0; guard < 64; ++guard) {
+		net::GamePayload payload;
+		const std::optional<net::ReliableEventBlock> block = m_demoEvents.next();
+		if (block) {
+			payload.hasEvents = true;
+			payload.events = *block;
+			m_demoSequence = (m_demoSequence + 1) & 0x3f;
+			m_demoEvents.sent(m_demoSequence, block->sequence);
+			m_demoEvents.acknowledge(m_demoSequence, 1);
+		}
+		if (ghosts) {
+			payload.ghosts = ghostsFor(kDemoClient);
+		}
+		if (!block && !ghosts) {
+			return;
+		}
+		m_demo.write(time, net::writeGamePayload(payload));
+		if (ghosts || m_demoEvents.idle()) {
+			return;
+		}
+	}
+}
+
+// 0x004ae6a0's full-server rule: with no reserved slots, or as many
+// reserved players in as there are slots, or a nick not on the list, the
+// joiner is refused (2, full); else the connected player without a reserved
+// nick with the highest player index is kicked (0x23) and the joiner stays.
+// No slots are held back: the others fill the server to sv.maxPlayers. The
+// nick is the name without a clan prefix (to its first space, 0x0043f7e0).
+void HostedGame::sendVoteReplies(const std::vector<game::Votes::Reply>& replies)
+{
+	for (const game::Votes::Reply& r : replies) {
+		uint32_t seconds = 0;
+		std::memcpy(&seconds, &r.seconds, sizeof seconds);
+		const net::GameEvent e = eventOf(net::kEvVote,
+			{static_cast<uint32_t>(r.target) & 0xff, static_cast<uint32_t>(r.choice) & 0xff,
+				static_cast<uint32_t>(r.topCount) & 0xff, static_cast<uint32_t>(r.target) & 0xff,
+				static_cast<uint32_t>(r.topChoice) & 0xff, static_cast<uint32_t>(std::max(r.needed, 0)) & 0xff,
+				static_cast<uint32_t>(r.voter) & 0xff, static_cast<uint32_t>(r.phase) & 0xff,
+				static_cast<uint32_t>(r.kind) & 0xff, seconds});
+		if (r.to < 0) {
+			sendToPlaying(e);
+			continue;
+		}
+		for (const auto& [id, client] : m_clients) {
+			if (client.player == r.to) {
+				sendTo(id, e);
+			}
+		}
+	}
+}
+
+bool HostedGame::reservedSlotCheck(int id)
+{
+	Client& client = m_clients[id];
+	client.full = false;
+	const auto nick = [](const std::string& name) {
+		const size_t space = name.find(' ');
+		return space == std::string::npos ? name : name.substr(space + 1);
+	};
+	const net::ReservedSlots* list = m_setup.reserved;
+	const int slots = m_setup.settings ? m_setup.settings->numReservedSlots : 0;
+	int reservedIn = 0;
+	int bump = -1, bumpPlayer = -1;
+	for (const auto& [other, c] : m_clients) {
+		if (other == id || c.player < 0) {
+			continue;
+		}
+		if (list && list->has(nick(c.name))) {
+			++reservedIn;
+		} else if (c.player > bumpPlayer) {
+			bumpPlayer = c.player;
+			bump = other;
+		}
+	}
+	if (slots <= 0 || !list || reservedIn >= slots || !list->has(nick(client.name)) || bump < 0) {
+		if (onLog) {
+			onLog("client " + std::to_string(id) + " refused: the server is full");
+		}
+		m_kickLater.push_back({id, 2});
+		return false;
+	}
+	if (onLog) {
+		onLog("client " + std::to_string(bump) + " kicked for " + client.name + "'s reserved slot");
+	}
+	m_kickLater.push_back({bump, 0x23});
+	return true;
 }
 
 void HostedGame::left(int id)
@@ -441,6 +633,7 @@ void HostedGame::left(int id)
 		return;
 	}
 	const int player = it->second.player;
+	sendVoteReplies(m_votes.playerLeft(player));
 	if (onLog) {
 		onLog("client " + std::to_string(id) + "'s moves: " + std::to_string(it->second.movesDropped) + " dropped, "
 			+ std::to_string(it->second.ticksStarved) + " ticks without one");
@@ -495,12 +688,12 @@ void HostedGame::sendDatabase(int id)
 	for (const auto& p : m_round->playerList()) {
 		const auto seen = m_players.find(p.id);
 		if (seen != m_players.end()) {
-			m_server.send(id, createPlayerEvent(p, p.id == client.player, seen->second.ghost));
+			sendTo(id, createPlayerEvent(p, p.id == client.player, seen->second.ghost));
 		}
 	}
 	for (const auto& [object, ghost] : m_ghosts) {
 		for (const net::GameEvent& e : createEvents(ghost)) {
-			m_server.send(id, e);
+			sendTo(id, e);
 		}
 		client.created.insert(ghost.first);
 	}
@@ -508,12 +701,12 @@ void HostedGame::sendDatabase(int id)
 		if (seen.alive && seen.soldier) {
 			game::GameWorld::PlayerInfo info;
 			m_round->playerInfo(player, info);
-			m_server.send(id, eventOf(net::kEvHandlePickup, {static_cast<uint32_t>(player) & 0xff, ghostOfObject(info.kit),
+			sendTo(id, eventOf(net::kEvHandlePickup, {static_cast<uint32_t>(player) & 0xff, ghostOfObject(info.kit),
 				ghostOfObject(seen.soldier), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}));
 		}
 	}
-	m_server.send(id, net::makePostRemote(net::kMsgNetworkCategory, net::kNeDatabaseComplete));
-	m_server.send(id, net::makePostRemote(net::kMsgNetworkCategory, net::kNeReset, net::int32Payload(0)));
+	sendTo(id, net::makePostRemote(net::kMsgNetworkCategory, net::kNeDatabaseComplete));
+	sendTo(id, net::makePostRemote(net::kMsgNetworkCategory, net::kNeReset, net::int32Payload(0)));
 	client.stage = Client::Stage::Database;
 }
 
@@ -521,7 +714,7 @@ void HostedGame::sendToPlaying(const net::GameEvent& event)
 {
 	for (const auto& [id, client] : m_clients) {
 		if (client.stage != Client::Stage::Loading && client.stage != Client::Stage::Connected) {
-			m_server.send(id, event);
+			sendTo(id, event);
 		}
 	}
 }
@@ -545,10 +738,10 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			}
 			break;
 		case net::kNeDatabaseComplete: { // 0x004af710: StartSimulation and the game state
-			m_server.send(id, net::makePostRemote(net::kMsgNetworkCategory, net::kNeStartSimulation));
-			m_server.send(id, net::makePostRemote(net::kMsgGameCategory, 1, net::int32Payload(1)));
+			sendTo(id, net::makePostRemote(net::kMsgNetworkCategory, net::kNeStartSimulation));
+			sendTo(id, net::makePostRemote(net::kMsgGameCategory, 1, net::int32Payload(1)));
 			const uint32_t end = m_logic->timeLimit > 0 ? static_cast<uint32_t>(m_logic->timeLimit * 30) : 0;
-			m_server.send(id, eventOf(net::kEvBeginRound, {3, end, static_cast<uint32_t>(-1)}));
+			sendTo(id, eventOf(net::kEvBeginRound, {3, end, static_cast<uint32_t>(-1)}));
 			client.stage = Client::Stage::Playing;
 			break;
 		}
@@ -604,6 +797,9 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			if (!name.empty()) {
 				client.name = name;
 				m_names[player] = name;
+				if (client.full && !reservedSlotCheck(id)) {
+					return; // refused: the server is full
+				}
 				net::GameEvent renamed = eventOf(net::kEvChangePlayerName, {static_cast<uint32_t>(player) & 0xff}, {name});
 				sendToPlaying(renamed);
 				if (onLog) {
@@ -658,6 +854,14 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			m_round->joinSquad(player, e.i(0));
 		}
 		return;
+	case net::kEvVote: { // 0x00590230: target, choice, .., voter, phase, kind
+		if (e.i(6) != player && e.u(6) != 0xff) {
+			return; // only the sender's own
+		}
+		sendVoteReplies(m_votes.handle(player, static_cast<int>(e.u(8)), static_cast<int>(e.u(7)), static_cast<int>(e.u(0)),
+			static_cast<int>(e.u(1))));
+		return;
+	}
 	case net::kEvCommander:
 		if (e.i(2) == player && e.u(0) == 4) {
 			m_round->applyForCommander(player);
@@ -675,6 +879,9 @@ void HostedGame::event(int id, const net::GameEvent& e)
 void HostedGame::applyMoves()
 {
 	for (auto& [id, client] : m_clients) {
+		if (client.player < 0) {
+			continue; // the demo's connection
+		}
 		// The move the round stepped last tick is the record's from now on.
 		client.stepped = client.stepping;
 		game::SoldierInput input = client.held;
@@ -767,7 +974,7 @@ void HostedGame::trackObjects()
 		for (auto& [id, client] : m_clients) {
 			if (client.stage == Client::Stage::Database || client.stage == Client::Stage::Playing) {
 				for (const net::GameEvent& e : createEvents(ghost)) {
-					m_server.send(id, e);
+					sendTo(id, e);
 				}
 				client.created.insert(ghost.first);
 			}
@@ -781,7 +988,7 @@ void HostedGame::trackObjects()
 		const uint16_t ghost = it->second.first;
 		for (auto& [id, client] : m_clients) {
 			if (client.created.erase(ghost)) {
-				m_server.send(id, eventOf(net::kEvDestroyObject, {ghost, 0}));
+				sendTo(id, eventOf(net::kEvDestroyObject, {ghost, 0}));
 			}
 			for (size_t part = 0; part < it->second.layout->size(); ++part) {
 				client.sent.erase(static_cast<uint16_t>(ghost + part));
@@ -827,7 +1034,7 @@ void HostedGame::trackPlayers()
 			seen = m_players.emplace(p.id, fresh).first;
 			for (const auto& [id, client] : m_clients) {
 				if (client.stage == Client::Stage::Database || client.stage == Client::Stage::Playing) {
-					m_server.send(id, createPlayerEvent(p, p.id == client.player, fresh.ghost));
+					sendTo(id, createPlayerEvent(p, p.id == client.player, fresh.ghost));
 				}
 			}
 		}
@@ -1095,6 +1302,12 @@ std::vector<uint8_t> HostedGame::playerStateOf(int player, size_t& bits) const
 		s.player.squad = p.squad;
 		s.player.squadLeader = p.squadLeader;
 		s.player.commander = p.commander;
+		// The time outside the combat area (+0x294, mask 0x800: the
+		// client's "TIME UNTIL PUNISH" countdown); whole seconds, as the
+		// byte's scale isn't settled.
+		const float outside = m_round->outsideCombatArea(player);
+		s.mask |= 0x800;
+		s.player.value294 = outside > 0 ? std::clamp(static_cast<int>(std::lround(outside)), 1, 255) : 0;
 	}
 	net::NetworkableHints hints;
 	hints.kind = net::NetworkableKind::Player;
@@ -1260,6 +1473,47 @@ void HostedGame::tick()
 		m_motion[v.object] = {v.velocity, v.angularVelocity};
 	}
 	m_server.poll();
+	// The votes (0x0058fdc0): their ends, and what passed.
+	{
+		const net::ServerSettings* sv = m_setup.settings;
+		m_votes.settings.enabled = !sv || sv->votingEnabled;
+		if (sv) {
+			m_votes.settings.voteTime = static_cast<float>(sv->voteTime);
+			m_votes.settings.minPlayers = sv->minPlayersForVoting;
+		}
+		m_votes.maps = m_setup.maps ? m_setup.maps->count() : 0;
+		m_votes.currentMap = m_setup.maps ? m_setup.maps->current() : -1;
+		std::vector<game::Votes::Reply> replies;
+		for (const game::Votes::Result& result : m_votes.tick(1.0f / 30, replies)) {
+			if (result.kind == game::Votes::kMap) {
+				m_mapVotes.push_back({5.0f, result.target}); // 5 s on (0x0058fb90)
+			} else if (result.kind == game::Votes::kKick) {
+				for (const auto& [id, client] : m_clients) {
+					if (client.player == result.target) {
+						m_kickLater.push_back({id, 0x15}); // "KICKED"
+					}
+				}
+			} else if (result.kind == game::Votes::kMutiny && onMutiny) {
+				onMutiny(result.team);
+			}
+		}
+		sendVoteReplies(replies);
+		for (auto it = m_mapVotes.begin(); it != m_mapVotes.end();) {
+			it->first -= 1.0f / 30;
+			if (it->first <= 0) {
+				if (onMapVote) {
+					onMapVote(it->second);
+				}
+				it = m_mapVotes.erase(it);
+			} else {
+				++it;
+			}
+		}
+	}
+	// Kicks decided while the server walked a client's events.
+	for (const auto& [client, reason] : std::exchange(m_kickLater, {})) {
+		m_server.kick(client, reason);
+	}
 	m_query.poll([this] { return report(); });
 	applyMoves();
 	trackObjects();
@@ -1285,9 +1539,9 @@ void HostedGame::tick()
 			if (client.stage == Client::Stage::Loading || client.stage == Client::Stage::Connected) {
 				continue;
 			}
-			m_server.send(id, net::makeDataBlockStart(8, static_cast<uint32_t>(encoded.size())));
+			sendTo(id, net::makeDataBlockStart(8, static_cast<uint32_t>(encoded.size())));
 			for (size_t at = 0; at < encoded.size(); at += 63) {
-				m_server.send(id, net::makeDataBlockChunk(encoded.substr(at, 63)));
+				sendTo(id, net::makeDataBlockChunk(encoded.substr(at, 63)));
 			}
 		}
 	}
@@ -1297,6 +1551,9 @@ void HostedGame::tick()
 			{0, static_cast<uint32_t>(m_logic->winner()), static_cast<uint32_t>(m_logic->victoryType())}));
 	}
 	m_server.sendTick([this](int client) { return ghostsFor(client); });
+	if (m_demo.isOpen()) {
+		flushDemo(static_cast<int32_t>(m_tick), true);
+	}
 }
 
 } // namespace dice::hfe::host

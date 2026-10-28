@@ -4,6 +4,7 @@ add_library(Animation STATIC
 	AnimationSystem.cpp
 	FirstPerson.cpp
 	Pose.cpp
+	Ik.cpp
 	RagDoll.cpp
 )
 target_include_directories(Animation PUBLIC ${PROJECT_SOURCE_DIR}/src)

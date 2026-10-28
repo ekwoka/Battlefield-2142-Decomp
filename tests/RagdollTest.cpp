@@ -4,7 +4,9 @@
 // and a soldier seated in a car posed by the seat's animation system.
 #include "Animation/AnimationConsole.h"
 #include "Animation/AnimationSystem.h"
+#include "Animation/Ik.h"
 #include "Animation/RagDoll.h"
+#include "Game/CombatAreas.h"
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
 #include "Game/GameWorld.h"
@@ -1866,4 +1868,259 @@ TEST(RagDoll_SeatCamerasTurnOnTheMouse)
 	game.world->setPlayerInput({});
 	game.run(3);
 	CHECK(game.world->partPose(vehicle, "car_gunner_camera", offset, rotation) && std::fabs(rotation.x) < 0.05f);
+}
+
+// The hands' IK (Animation/Ik.h, 0x008b6760): a three-part arm reaches a
+// target it can reach, its parts keep their lengths and the hand takes the
+// target whole.
+TEST(Ik_ArmReachesTheTarget)
+{
+	anim::Skeleton skeleton;
+	const auto node = [&skeleton](const char* name, int parent, float z) {
+		skeleton.nodes.push_back({name, parent, {0, 0, 0, 1}, {0, 0, z}});
+	};
+	node("root", -1, 0);
+	node("shoulder", 0, 0);
+	node("elbow", 1, 0.3f);
+	node("low_arm", 2, 0.06f);
+	node("joint", 3, 0.11f);
+	node("wrist", 4, 0.1f);
+	// The elbow a little bent, as the seats' poses have it (a straight arm
+	// gives the solve no plane to bend in: v1 x v2 is zero).
+	skeleton.nodes[2].rotation = {0.2588f, 0, 0, 0.9659f};
+	const anim::LocalPose pose = anim::setupPose(skeleton);
+	anim::IkTarget target;
+	target.bone = 4;
+	target.end = 5;
+	target.target = {0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0.25f, 0.1f, 0.3f, 1};
+	target.pole = {0, 1, 0};
+	const std::vector<anim::Matrix> world = anim::worldMatricesWithIk(skeleton, pose, {target});
+	const auto at = [&world](int i) { return physics::Vec3 {world[i][12], world[i][13], world[i][14]}; };
+	const auto distance = [](const physics::Vec3& a, const physics::Vec3& b) { return std::sqrt(physics::lengthSquared(a - b)); };
+	CHECK(world[5] == target.target);
+	CHECK(std::abs(distance(at(1), at(2)) - 0.3f) < 1e-4f);
+	CHECK(std::abs(distance(at(2), at(3)) - 0.06f) < 1e-4f);
+	CHECK(std::abs(distance(at(3), at(4)) - 0.11f) < 1e-4f);
+	// The wrist's own place from the lower arm lands near the target (the
+	// solve aims the wrist through the handle offset by the elbow part).
+	const physics::Vec3 wrist = at(4) + physics::Vec3 {world[4][8], world[4][9], world[4][10]} * 0.1f;
+	std::fprintf(stderr, "  ik: wrist %.3f from the target, elbow at %.3f/%.3f/%.3f\n", distance(wrist, at(5)), at(2).x,
+		at(2).y, at(2).z);
+	CHECK(distance(wrist, at(5)) < 0.05f);
+	// The pole bends the elbow its way (up).
+	CHECK(at(2).y > 0.05f);
+	// Out of reach: straight towards it.
+	target.target[12] = 2;
+	target.target[13] = 0;
+	target.target[14] = 0;
+	const std::vector<anim::Matrix> far = anim::worldMatricesWithIk(skeleton, pose, {target});
+	const physics::Vec3 elbow {far[2][12], far[2][13], far[2][14]};
+	CHECK(elbow.x > 0.29f && std::abs(elbow.y) < 0.01f && std::abs(elbow.z) < 0.01f);
+}
+
+// A seated driver's hands on the steering wheel: the seat's tree holds a
+// bundle with the Ik component (as_fav's AS_FAV_SteeringWheel, its ik.*),
+// so the 3P skeleton's wrists (left_wrist1, right_ullna) sit on its grips
+// (0x005ee910, 0x005efc00).
+TEST(Ik_DriverHoldsTheWheel)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	game.collisionTemplates.create("as_fav", "Objects/Vehicles/as_fav/");
+	world::ObjectTemplate* car = game.templates.create("PlayerControlObject", "car");
+	car->settings()["hasMobilePhysics"] = "1";
+	car->settings()["physicsType"] = "Mesh";
+	car->settings()["collisionMesh"] = "as_fav";
+	car->settings()["seatInformation"] = "car 0/0.5/0.4 0/0/0";
+	car->settings()["seatAnimationSystem"] = "Objects/Vehicles/AS_FAV/3p_as_fav_driver_animSys.inc";
+	car->children().push_back({"car_entry", {-1.5f, 0, 0}, {}});
+	game.templates.registerType(9, "Engine");
+	game.templates.registerType(10, "Spring");
+	game.templates.registerType(12, "RotationalBundle");
+	car->settings()["mass"] = "1800";
+	world::ObjectTemplate* engine = game.templates.create("Engine", "car_engine");
+	engine->settings()["engineType"] = "194";
+	world::ObjectTemplate* wheel = game.templates.create("Spring", "car_wheel");
+	wheel->settings()["strength"] = "40";
+	wheel->settings()["damping"] = "8";
+	car->children().push_back({"car_engine", {0, -0.44f, 0}, {}});
+	for (float x : {-0.95f, 0.95f}) {
+		for (float z : {-1.4f, 1.6f}) {
+			engine->children().push_back({"car_wheel", {x, -0.15f, z}, {}});
+		}
+	}
+	world::ObjectTemplate* steering = game.templates.create("RotationalBundle", "car_steering");
+	game.templates.addComponent(*steering, "Ik");
+	steering->settings()["ik.positionLeft"] = "-0.145199/-0.0447125/-0.186665";
+	steering->settings()["ik.rotationLeft"] = "-94.775/-2.18003/-58.2225";
+	steering->settings()["ik.poleVectorLeft"] = "-0.294253/-0.339534/-3.01e-6";
+	steering->settings()["ik.positionRight"] = "0.17838/-0.0352049/-0.155193";
+	steering->settings()["ik.rotationRight"] = "-114.531/21.6388/120.12";
+	steering->settings()["ik.poleVectorRight"] = "0.148879/-0.231249/0.143271";
+	car->children().push_back({"car_steering", {0, 0.85f, 0.85f}, {0, 20, 0}});
+	game.templates.create("EntryPoint", "car_entry")->settings()["entryRadius"] = "3";
+	game.start();
+	const uint32_t vehicle = game.objects.create(car, {3, 1.2f, 0}, {30, 0, 0})->id();
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	game.run(3);
+	const uint32_t soldier = game.world->playerObject();
+	game::SoldierInput input;
+	input.use = true;
+	game.world->setPlayerInput(input);
+	game.world->tick(1 / 30.0f);
+	game.world->setPlayerInput({});
+	game.run(0.5f);
+	CHECK(game.world->playerVehicle() && game.world->playerVehicle()->id() == vehicle);
+	const anim::Skeleton* skeleton = game.systems.skeleton("Objects/Soldiers/Common/Animations/3p_setup.ske");
+	std::vector<anim::Matrix> seated;
+	CHECK(skeleton && game.world->skeletonPose(soldier, *skeleton, seated));
+	const world::Object* object = game.objects.find(soldier);
+	const world::Object* carObject = game.objects.find(vehicle);
+	if (!skeleton || !object || !carObject || seated.size() != skeleton->nodes.size()) {
+		return;
+	}
+	// The grips in the world: the wheel's frame (its place in the car, the
+	// car's turn), the ik positions in it.
+	const physics::Mat3 carTurn = physics::Mat3::fromYawPitchRoll({carObject->rotation().x, carObject->rotation().y, carObject->rotation().z});
+	const physics::Mat3 wheelTurn = physics::Mat3::fromYawPitchRoll({0, 20, 0}) * carTurn;
+	const physics::Vec3 wheelAt = carTurn.transform({0, 0.85f, 0.85f})
+		+ physics::Vec3 {carObject->position().x, carObject->position().y, carObject->position().z};
+	const physics::Mat3 soldierTurn = physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+	const physics::Vec3 soldierAt {object->position().x, object->position().y, object->position().z};
+	const auto grip = [&](const physics::Vec3& local) {
+		return soldierTurn.untransform(wheelTurn.transform(local) + wheelAt - soldierAt);
+	};
+	const physics::Vec3 left = grip({-0.145199f, -0.0447125f, -0.186665f});
+	const physics::Vec3 right = grip({0.17838f, -0.0352049f, -0.155193f});
+	const int leftWrist = skeleton->find("left_wrist1"), ulna = skeleton->find("right_ullna");
+	CHECK(leftWrist >= 0 && ulna >= 0);
+	if (leftWrist < 0 || ulna < 0) {
+		return;
+	}
+	const auto at = [&seated](int bone) {
+		const anim::Matrix& m = seated[static_cast<size_t>(bone)];
+		return physics::Vec3 {m[12], m[13], m[14]};
+	};
+	const auto distance = [](const physics::Vec3& a, const physics::Vec3& b) { return std::sqrt(physics::lengthSquared(a - b)); };
+	std::fprintf(stderr, "  ik: left wrist %.3f from its grip, right %.3f; shoulder to grip %.2f\n",
+		distance(at(leftWrist), left), distance(at(ulna), right), distance(at(skeleton->find("left_shoulder")), left));
+	CHECK(distance(at(leftWrist), left) < 1e-3f);
+	CHECK(distance(at(ulna), right) < 1e-3f);
+	// The elbow stays at the upper arm's length from the shoulder.
+	const int shoulder = skeleton->find("left_shoulder"), elbow = skeleton->find("left_elbow");
+	CHECK(std::abs(distance(at(shoulder), at(elbow)) - std::sqrt(physics::lengthSquared({skeleton->nodes[elbow].position[0],
+		skeleton->nodes[elbow].position[1], skeleton->nodes[elbow].position[2]}))) < 1e-3f);
+}
+
+// The combat areas (CombatAreaManager / CombatArea, 0x004bbf60): outside
+// the areas that apply to the player the time outside runs; past the
+// manager's timeAllowedOutside the soldier takes `damage` a tick (50: dead
+// on the second). The commander warns the local player as it starts.
+TEST(CombatArea_OutsideTimerThenDamage)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	game::CombatAreas areas;
+	game::registerCombatAreaConsoleMethods(game.console, areas);
+	std::string out;
+	for (const char* line : {"CombatAreaManager.use 1", "CombatAreaManager.timeAllowedOutside 2",
+			 "CombatAreaManager.damage 50", "CombatAreaManager.addVehicleTimer VCLand 3", "CombatArea.create far",
+			 "CombatArea.addAreaPoint 100/100", "CombatArea.addAreaPoint 100/100", "CombatArea.addAreaPoint 200/100",
+			 "CombatArea.create other", "CombatArea.create far", "CombatArea.addAreaPoint 200/200",
+			 "CombatArea.addAreaPoint 100/200"}) {
+		game.console.execute(line, out);
+	}
+	CHECK(areas.areas.size() == 2);
+	CHECK(areas.areas[0].points.size() == 4 && areas.areas[0].polygon); // the repeat dropped, re-selected by name
+	CHECK(areas.areas[1].vehicles == 4 && areas.areas[1].layer == 1 && !areas.areas[1].polygon);
+	CHECK(areas.timerFor(0, false) == 3 && areas.timerFor(2, false) == 15 && areas.timerFor(0, true) == 2);
+	game.console.execute("CombatArea.create other", out);
+	game.console.execute("CombatArea.deleteActiveCombatArea", out);
+	CHECK(areas.areas.size() == 1);
+	game.start();
+	game.world->setCombatAreas(&areas);
+	CHECK(game.world->spawnPlayer(2) != nullptr); // at the origin: outside "far"
+	const int me = game.world->localPlayer();
+	game.run(1);
+	CHECK(game.world->outsideCombatArea(me) > 0.9f);
+	CHECK(std::abs(game.world->combatAreaTimeLeft(me) - 1) < 0.1f);
+	const auto heard = game.world->takeRadioHeard();
+	CHECK(std::count_if(heard.begin(), heard.end(), [](const auto& h) { return h.voice == "leaving_the_combat_area"; }) == 1);
+	game::GameWorld::PlayerInfo info;
+	game.run(1.0f);
+	CHECK(game.world->playerInfo(me, info) && info.alive); // 2 s and a tick at most
+	game.run(0.1f);
+	CHECK(game.world->playerInfo(me, info) && !info.alive);
+	CHECK(game.world->outsideCombatArea(me) < 0);
+	// Inside, nothing runs.
+	areas.areas[0].points = {{-50, -50}, {50, -50}, {50, 50}, {-50, 50}};
+	game.run(20);
+	CHECK(game.world->playerInfo(me, info) && (!info.alive || game.world->outsideCombatArea(me) < 0));
+}
+
+// A neutral APC (no teamOnVehicle) carrying a SpawnPoint: entered by a
+// team-2 soldier it is team 2's (0x005c9500: the first occupant's team),
+// so it is one of team 2's mobile spawn points; left empty it is its own
+// (neutral) again.
+TEST(Vehicle_TeamOfItsOccupant)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	game.collisionTemplates.create("as_fav", "Objects/Vehicles/as_fav/");
+	world::ObjectTemplate* car = game.templates.create("PlayerControlObject", "apc");
+	car->settings()["hasMobilePhysics"] = "1";
+	car->settings()["physicsType"] = "Mesh";
+	car->settings()["collisionMesh"] = "as_fav";
+	car->settings()["seatInformation"] = "apc 0/0.5/0.4 0/0/0";
+	car->settings()["mass"] = "1800";
+	car->children().push_back({"apc_entry", {-1.5f, 0, 0}, {}});
+	game.templates.registerType(9, "Engine");
+	game.templates.registerType(10, "Spring");
+	world::ObjectTemplate* engine = game.templates.create("Engine", "apc_engine");
+	engine->settings()["engineType"] = "194";
+	world::ObjectTemplate* wheel = game.templates.create("Spring", "apc_wheel");
+	wheel->settings()["strength"] = "40";
+	wheel->settings()["damping"] = "8";
+	car->children().push_back({"apc_engine", {0, -0.44f, 0}, {}});
+	for (float x : {-0.95f, 0.95f}) {
+		for (float z : {-1.4f, 1.6f}) {
+			engine->children().push_back({"apc_wheel", {x, -0.15f, z}, {}});
+		}
+	}
+	game.templates.create("SpawnPoint", "apc_SpawnPoint");
+	car->children().push_back({"apc_SpawnPoint", {0, 0, -3}, {}});
+	game.templates.create("EntryPoint", "apc_entry")->settings()["entryRadius"] = "3";
+	game.start();
+	world::Object* apc = game.objects.create(car, {3, 1.2f, 0}, {0, 0, 0});
+	const uint32_t vehicle = apc->id();
+	CHECK(apc->team() == 0);
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	game.run(2);
+	CHECK(game.world->spawnVehicles(2).empty());
+	game::SoldierInput input;
+	input.use = true;
+	game.world->setPlayerInput(input);
+	game.world->tick(1 / 30.0f);
+	game.world->setPlayerInput({});
+	game.run(0.2f);
+	CHECK(game.world->playerVehicle() && game.world->playerVehicle()->id() == vehicle);
+	const auto mine = game.world->spawnVehicles(2);
+	CHECK(mine.size() == 1 && mine[0] == vehicle);
+	CHECK(game.world->spawnVehicles(1).empty());
+	// Out: empty, its own team (none) again.
+	game.world->setPlayerInput(input);
+	game.world->tick(1 / 30.0f);
+	game.world->setPlayerInput({});
+	game.run(0.2f);
+	CHECK(game.world->playerVehicle() == nullptr);
+	CHECK(game.objects.find(vehicle)->team() == 0 && game.world->spawnVehicles(2).empty());
 }

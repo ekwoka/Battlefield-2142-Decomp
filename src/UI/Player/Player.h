@@ -80,6 +80,12 @@ public:
 
 	NativeRegistry& natives() { return m_natives; }
 	void setFileReader(FileReader reader) { m_reader = std::move(reader); }
+	// Opens a movie for a clip: loadMovie of a URL starting with '?' (the
+	// menu's "?titan_tutorial.bik", Multiplay.getMapMovie's
+	// "?/Levels/<level>/Info/..._menuMovie.bik" and "?/noise.bik",
+	// SwiffPlayer 0x100449b0). Null when it cannot be played.
+	using VideoOpener = std::function<std::shared_ptr<VideoSource>(const std::string& url)>;
+	void setVideoOpener(VideoOpener opener) { m_videoOpener = std::move(opener); }
 	void setTraceHandler(std::function<void(const std::string&)> handler) { m_traceHandler = std::move(handler); }
 	// getURL()/fscommand requests that are not movie loads.
 	void setUrlHandler(std::function<void(const std::string& url, const std::string& target)> handler)
@@ -260,6 +266,10 @@ private:
 
 	NativeRegistry m_natives;
 	FileReader m_reader;
+	VideoOpener m_videoOpener;
+	std::vector<std::weak_ptr<player::DisplayObject>> m_videoClips; // clips showing a movie
+	bool loadVideo(player::Clip& clip, const std::string& url);
+	void advanceVideos(double seconds);
 	std::function<void(const std::string&)> m_traceHandler;
 	std::function<void(const std::string&, const std::string&)> m_urlHandler;
 

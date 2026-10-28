@@ -9,6 +9,7 @@
 #include "Game/GameWorld.h"
 #include "Main/HostedGame.h"
 #include "Main/ServerAdmin.h"
+#include "Net/Demo.h"
 #include "Net/GameClient.h"
 #include "Net/GameProtocol.h"
 #include "Net/RemoteConsole.h"
@@ -16,9 +17,12 @@
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -301,4 +305,243 @@ TEST(ServerAdmin_HostedKickBanAndMessages)
 		[&] { return again.state() == net::GameClient::State::Refused; }));
 	CHECK(again.connectResult().reason == 0x16);
 	CHECK(run(console, "admin.removeAddressFromBanList 127.0.0.1").empty() && !admin.bans.bannedAddress("127.0.0.1"));
+}
+
+// Reserved slots on a full server (0x004ae6a0): with one player at
+// sv.maxPlayers, a listed nick (its clan prefix aside) bumps the player who
+// isn't listed (0x23); an unlisted one is refused as full (2).
+TEST(ServerAdmin_ReservedSlotAdmitsToAFullServer)
+{
+	dice::hfe::world::ObjectTemplateManager templates;
+	dice::hfe::world::ObjectManager objects;
+	dice::hfe::game::GameWorld round(templates, objects);
+	dice::hfe::game::GameLogic logic;
+	round.startRound();
+	logic.startRound();
+	host::ServerAdmin admin;
+	admin.settings.numReservedSlots = 1;
+	admin.reserved.addNick("vip");
+	host::HostSetup setup;
+	setup.level = "Camp_Gibraltar";
+	setup.gameMode = "gpm_cq";
+	setup.mapSize = 32;
+	setup.maxPlayers = 1;
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	setup.settings = &admin.settings;
+	setup.reserved = &admin.reserved;
+	host::HostedGame hosted(round, logic, templates, setup);
+	CHECK(hosted.start());
+	std::vector<std::unique_ptr<net::GameClient>> clients;
+	const auto join = [&](const char* name) {
+		auto client = std::make_unique<net::GameClient>();
+		net::GameClientOptions options;
+		options.playerName = name;
+		CHECK(client->connect("127.0.0.1", hosted.gamePort(), options));
+		clients.push_back(std::move(client));
+		return clients.back().get();
+	};
+	const auto step = [&] {
+		for (auto& c : clients) {
+			c->update();
+		}
+		hosted.tick();
+		round.tick(1.0f / 30);
+	};
+	net::GameClient* joe = join("joe");
+	CHECK(pumpUntil(step, [&] {
+		const net::RemotePlayer* me = joe->world().player(joe->world().localPlayer());
+		return me && me->name == "joe";
+	}));
+	net::GameClient* vip = join("[CLAN] vip");
+	CHECK(pumpUntil(step, [&] { return joe->state() != net::GameClient::State::Connected; }));
+	CHECK(joe->disconnectReason() == 0x23);
+	CHECK(vip->state() == net::GameClient::State::Connected);
+	net::GameClient* bob = join("bob");
+	CHECK(pumpUntil(step, [&] { return bob->state() != net::GameClient::State::Connected && bob->state() != net::GameClient::State::Connecting; }));
+	CHECK(bob->disconnectReason() == 2);
+	CHECK(vip->state() == net::GameClient::State::Connected);
+}
+
+// The server's round start (0x004c03b0): waiting for
+// sv.numPlayersNeededToStart, sv.startDelay's countdown, then playing; too
+// few players for sv.notEnoughPlayersRestartDelay raise TimeLimitReached(0)
+// (the time limit's own is -1).
+TEST(ServerAdmin_StartDelayAndTooFewPlayers)
+{
+	dice::hfe::game::GameLogic logic;
+	logic.startRound();
+	int players = 1;
+	bool playing = false;
+	std::vector<int> limits;
+	logic.setEventSink([&](const std::string& event, const dice::hfe::game::ScriptArgs& args) {
+		if (event == "TimeLimitReached") {
+			limits.push_back(static_cast<int>(args[0].asInt()));
+		}
+	});
+	logic.waitToStart(2, 3, 5, [&players] { return players; });
+	logic.onPlaying = [&playing] { playing = true; };
+	for (int i = 0; i < 300; ++i) {
+		logic.tick(1.0f / 30);
+	}
+	CHECK(logic.roundState() == 1 && !playing && logic.elapsed == 0);
+	players = 2;
+	for (int i = 0; i < 89; ++i) {
+		logic.tick(1.0f / 30);
+	}
+	CHECK(logic.roundState() == 2 && !playing);
+	for (int i = 0; i < 3; ++i) {
+		logic.tick(1.0f / 30);
+	}
+	CHECK(logic.roundState() == 3 && playing);
+	players = 1;
+	for (int i = 0; i < 30 * 5 + 2; ++i) {
+		logic.tick(1.0f / 30);
+	}
+	CHECK(limits.size() == 1 && limits[0] == 0);
+	logic.timeLimit = 6;
+	players = 2;
+	for (int i = 0; i < 30 * 2; ++i) {
+		logic.tick(1.0f / 30);
+	}
+	CHECK(limits.size() == 2 && limits[1] == -1);
+}
+
+// The server's votes (game::Votes, 0x00590230 / 0x0058f470 / 0x0058fb90):
+// too few voters refused (7), a map vote needing ceil(2/3) yes votes, a
+// second vote refused while one runs (6), a kick vote failing on time, a
+// mutiny only in the commander's team.
+TEST(ServerAdmin_Votes)
+{
+	using dice::hfe::game::Votes;
+	Votes votes;
+	votes.settings.minPlayers = 2;
+	votes.settings.voteTime = 10;
+	std::vector<Votes::Voter> players {{1, 1, true}, {2, 1, true}, {3, 2, true}, {4, 2, false}};
+	votes.players = [&players] { return players; };
+	votes.maps = 3;
+	votes.currentMap = 0;
+	votes.kickable = [](int p) { return p >= 1 && p <= 4; };
+	votes.commander = [](int team) { return team == 1 ? 1 : -1; };
+	// One voter (the others opted out): refused for too few.
+	votes.handle(2, Votes::kMap, Votes::kOptOut, 0, 1);
+	votes.handle(3, Votes::kMap, Votes::kOptOut, 0, 1);
+	auto r = votes.handle(1, Votes::kMap, Votes::kStart, 2, 0);
+	CHECK(r.size() == 1 && r[0].phase == Votes::kTooFewPlayers && r[0].to == 1);
+	votes.handle(2, Votes::kMap, Votes::kOptOut, 0, 0);
+	votes.handle(3, Votes::kMap, Votes::kOptOut, 0, 0);
+	// Three humans: 2 yes needed; the starter's is one.
+	CHECK(votes.handle(1, Votes::kMap, Votes::kStart, 0, 0).empty()); // the map running
+	r = votes.handle(1, Votes::kMap, Votes::kStart, 2, 0);
+	CHECK(r.size() == 1 && r[0].phase == Votes::kStart && r[0].needed == 2 && r[0].seconds == 10 && r[0].to == -1);
+	r = votes.handle(3, Votes::kKick, Votes::kStart, 2, 0);
+	CHECK(r.size() == 1 && r[0].phase == Votes::kRefused);
+	std::vector<Votes::Reply> replies;
+	CHECK(votes.tick(1, replies).empty() && replies.empty());
+	r = votes.handle(2, Votes::kMap, Votes::kCast, 2, 0);
+	CHECK(r.size() == 1 && r[0].phase == Votes::kCast && r[0].topCount == 2);
+	auto results = votes.tick(1, replies);
+	CHECK(results.size() == 1 && results[0].kind == Votes::kMap && results[0].target == 2);
+	CHECK(replies.size() == 1 && replies[0].phase == Votes::kPassed);
+	// A kick vote with one no: still short when the time runs out.
+	replies.clear();
+	r = votes.handle(1, Votes::kKick, Votes::kStart, 3, 0);
+	CHECK(r.size() == 1 && r[0].needed == 2); // the target doesn't vote
+	votes.tick(11, replies);
+	CHECK(replies.size() == 1 && replies[0].phase == Votes::kFailed && replies[0].needed == 1);
+	// A mutiny: only the commander's team votes, and the target can't.
+	replies.clear();
+	votes.settings.minPlayers = 1;
+	CHECK(votes.handle(3, Votes::kMutiny, Votes::kStart, 1, 0).empty()); // not team 1's commander from team 2
+	r = votes.handle(2, Votes::kMutiny, Votes::kStart, 1, 0);
+	CHECK(r.size() == 1 && r[0].phase == Votes::kStart && r[0].needed == 1);
+	results = votes.tick(0.1f, replies);
+	CHECK(results.size() == 1 && results[0].kind == Votes::kMutiny && results[0].team == 1);
+	// Voting off: nothing.
+	votes.settings.enabled = false;
+	CHECK(votes.handle(1, Votes::kMap, Votes::kStart, 1, 0).empty());
+}
+
+// A demo (Net/Demo.h): the host records what its demo connection 0x81 is
+// sent (the join's data at once, then a payload a tick) into a zlib'd
+// .bf2142demo; played back headless, a client with no socket gets the
+// server's settings, the level, the round's start and the players.
+TEST(ServerAdmin_DemoRecordAndPlayBack)
+{
+	const std::string path = "bf2142_test_demo.bf2142demo";
+	std::remove(path.c_str());
+	dice::hfe::world::ObjectTemplateManager templates;
+	dice::hfe::world::ObjectManager objects;
+	dice::hfe::game::GameWorld round(templates, objects);
+	dice::hfe::game::GameLogic logic;
+	round.startRound();
+	logic.startRound();
+	host::ServerAdmin admin;
+	admin.settings.serverName = "Demo Test";
+	CHECK(admin.maps.append({"Camp_Gibraltar", "gpm_cq", 32}));
+	host::HostSetup setup;
+	setup.serverName = admin.settings.serverName;
+	setup.level = "Camp_Gibraltar";
+	setup.gameMode = "gpm_cq";
+	setup.mapSize = 32;
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	setup.settings = &admin.settings;
+	setup.maps = &admin.maps;
+	host::HostedGame hosted(round, logic, templates, setup);
+	CHECK(hosted.start());
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Recorded";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	const auto step = [&] {
+		client.update();
+		hosted.tick();
+		round.tick(1.0f / 30);
+	};
+	CHECK(pumpUntil(step, [&] {
+		const net::RemotePlayer* me = client.world().player(client.world().localPlayer());
+		return me && me->name == "Recorded";
+	}));
+	CHECK(hosted.recordDemo(path));
+	CHECK(!hosted.recordDemo(path)); // already recording
+	for (int i = 0; i < 60; ++i) {
+		step();
+	}
+	hosted.stopDemo();
+	CHECK(!hosted.recordingDemo());
+
+	net::DemoHeader header;
+	std::vector<net::DemoRecord> records;
+	CHECK(net::readDemo(path, header, records));
+	CHECK(header.version == 0x70 && header.serverName == "Demo Test" && header.level == "Camp_Gibraltar");
+	CHECK(records.size() > 60);
+	CHECK(!records.empty() && records[0].time == -1);
+	const bool marker = std::any_of(records.begin(), records.end(), [](const net::DemoRecord& r) { return r.time == -2; });
+	CHECK(marker);
+	CHECK(records.back().time > 0 && records.back().payload.empty()); // the end record
+
+	// Played back: the clock follows the records, nothing goes out.
+	net::DemoPlayer player(records);
+	net::GameClient viewer;
+	viewer.playDemo([&player](std::vector<uint8_t>& payload) { return player.next(payload); });
+	CHECK(viewer.playingDemo() && viewer.state() == net::GameClient::State::Connected);
+	int ticks = 0;
+	while (viewer.update() && ticks < 600) {
+		player.advance(1);
+		++ticks;
+	}
+	CHECK(player.finished() && viewer.state() == net::GameClient::State::Disconnected);
+	CHECK(ticks >= 59 && ticks < 100);
+	CHECK(viewer.world().serverName() == "Demo Test" && viewer.world().hasLevel());
+	CHECK(viewer.world().gameState() == 1 && viewer.world().roundStarted());
+	bool sawPlayer = false;
+	for (int id = 0; id < 256; ++id) {
+		const net::RemotePlayer* p = viewer.world().player(id);
+		sawPlayer = sawPlayer || (p && p->name == "Recorded");
+	}
+	CHECK(sawPlayer);
+	CHECK(viewer.world().localPlayer() < 0); // no player of its own
+	std::remove(path.c_str());
+	CHECK(net::demoPath("match1") == "Demos/match1.bf2142demo" && net::demoPath("a\\b.dem") == "a/b.dem");
 }

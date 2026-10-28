@@ -16,6 +16,7 @@
 
 #include "ScriptGame.h"
 
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -68,6 +69,20 @@ public:
 
 	void startRound();
 	void tick(float seconds);
+
+	// The server's start of a round (its game logic's states, 0x004c03b0):
+	// waiting (1) until `playerCount` reaches sv.numPlayersNeededToStart,
+	// counting down sv.startDelay (2), then playing (3); while playing,
+	// fewer players than needed for sv.notEnoughPlayersRestartDelay raise
+	// TimeLimitReached(0) (the time limit's is -1). The clock (`elapsed`,
+	// the time limit) runs from the playing state. Without waitToStart the
+	// round plays at once (a local game).
+	void waitToStart(int playersNeeded, float startDelay, float notEnoughPlayersRestartDelay,
+		std::function<int()> playerCount);
+	int roundState() const { return m_state; }
+	float startCountdown() const { return m_countdown; }
+	// The round goes from waiting or counting down to playing.
+	std::function<void()> onPlaying;
 	void setTickets(int team, float tickets);
 	void endGame(int winner, int victoryType);
 
@@ -109,6 +124,12 @@ private:
 	int m_winner = 0;
 	int m_victoryType = 0;
 	bool m_timeLimitRaised = false;
+	int m_state = 3;
+	float m_countdown = 0;
+	int m_playersNeeded = 0;
+	float m_startDelay = 0, m_notEnoughDelay = 0, m_shortFor = 0;
+	bool m_shortRaised = false;
+	std::function<int()> m_playerCount;
 	std::string m_endOfRoundData;
 	int m_endOfRoundSerial = 0;
 };

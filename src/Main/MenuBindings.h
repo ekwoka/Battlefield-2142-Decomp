@@ -70,6 +70,7 @@ class ControlMaps;
 namespace dice::hfe::menu {
 
 struct RoundSummary;
+class SettingsObjects;
 
 // The ProfileManager's error indices (BF2142.exe 0x004a0980's table).
 enum ProfileError : int {
@@ -212,7 +213,28 @@ public:
 	// The controls page's maps (ControlSettings), and the key or button the
 	// player pressed last ("IDKey_Q"), which mapInput binds.
 	void setControls(input::ControlMaps* controls) { m_controls = controls; }
-	void setLastInput(const std::string& control) { m_lastInput = control; }
+	void setLastInput(const std::string& control)
+	{
+		m_lastInput = control;
+		m_lastDevice = control.compare(0, 9, "IDButton_") == 0 ? "IDFMouse" : "IDFKeyboard";
+		m_lastDirection = 1;
+	}
+	// A game controller's (GameControllers::lastInput): "IDFGameController_0"
+	// with "IDButton_3", or "IDAxis_1" and the way it was pushed (-1, +1).
+	void setLastInput(const std::string& device, const std::string& control, float direction)
+	{
+		m_lastDevice = device;
+		m_lastInput = control;
+		m_lastDirection = direction;
+	}
+
+	// The game's settings objects (SettingsObjects.h): their values (read
+	// from the profile's .con files) become the pages' starting values, and
+	// each page's apply() writes its values back to them and saves the
+	// files. The names match but for a few the pages spell differently
+	// (AudioSettings.VoiceOverVolume is helpVoiceVolume, NumberOfVoices
+	// forceNumberOfVoices, VideoSettings.BloomEnabled setUseBloom).
+	void setSettingsObjects(SettingsObjects* objects);
 
 	// The display modes the video page offers ("1280x720@60Hz").
 	void setDisplayModes(const std::vector<std::string>& modes);
@@ -345,7 +367,8 @@ private:
 	// The controls page.
 	void bindControls();
 	input::ControlMaps* m_controls = nullptr;
-	std::string m_lastInput;
+	std::string m_lastInput, m_lastDevice;
+	float m_lastDirection = 1;
 	int m_controlMap = 0;
 
 	// Starting a game.
@@ -358,6 +381,8 @@ private:
 	std::map<std::string, ui::avm1::Value> m_appliedSettings;
 	std::string m_settingsFile;
 	void saveSettings() const;
+	SettingsObjects* m_objects = nullptr;
+	void exportSettings(const std::string& prefix);
 
 	std::shared_ptr<Job> m_joinProbe;
 	bool m_joinReported = false;

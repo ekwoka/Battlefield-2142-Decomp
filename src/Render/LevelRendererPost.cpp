@@ -4,7 +4,9 @@
 #include "MeshQueues.h"
 
 #include "IO/File/FileManager.h"
+#include "Scene/EffectSettings.h"
 #include "Scene/LightSettings.h"
+#include "Texture/DdsFile.h"
 #include "Scene/PostProductionSettings.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
@@ -93,6 +95,81 @@ void LevelRenderer::loadHemiMap(const LevelSources& sources)
 	}
 	m_hemiMap = texture(sources.files, sources.hemi->baseHemiMap + ".dds");
 	m_stats.hemiMap = m_hemiMap != nullptr;
+	// Its alpha (the sun's occlusion) on the CPU for the particles' lighting
+	// (Particles.fx psParticleHigh samples it per particle: texCoords2): a
+	// level of at most 512 texels across, BC3's alpha blocks decoded.
+	m_hemiAlpha.clear();
+	m_hemiAlphaSize = 0;
+	std::vector<uint8_t> data;
+	const auto image = sources.files.readFile(sources.hemi->baseHemiMap + ".dds", data) ? texture::parseDds(data) : std::nullopt;
+	if (!image || image->faces.empty() || image->faces[0].empty()) {
+		return;
+	}
+	const auto& levels = image->faces[0];
+	size_t level = 0;
+	while (level + 1 < levels.size() && levels[level].width > 512) {
+		++level;
+	}
+	const texture::TextureLevel& l = levels[level];
+	if (l.width != l.height || l.width < 4) {
+		return;
+	}
+	const uint32_t n = l.width;
+	m_hemiAlpha.assign(static_cast<size_t>(n) * n, 255);
+	m_hemiAlphaSize = n;
+	if (image->format == texture::TextureFormat::RGBA8) {
+		for (size_t i = 0; i < m_hemiAlpha.size() && i * 4 + 3 < l.data.size(); ++i) {
+			m_hemiAlpha[i] = l.data[i * 4 + 3];
+		}
+		return;
+	}
+	if (image->format != texture::TextureFormat::BC3) {
+		return; // DXT1/3: none (or 4-bit) alpha; taken as unoccluded
+	}
+	const uint32_t blocks = n / 4;
+	for (uint32_t by = 0; by < blocks; ++by) {
+		for (uint32_t bx = 0; bx < blocks; ++bx) {
+			const size_t at = (static_cast<size_t>(by) * blocks + bx) * 16;
+			if (at + 8 > l.data.size()) {
+				return;
+			}
+			const uint8_t* b = &l.data[at];
+			uint8_t table[8] = {b[0], b[1]};
+			if (b[0] > b[1]) {
+				for (int i = 1; i < 7; ++i) {
+					table[i + 1] = static_cast<uint8_t>(((7 - i) * b[0] + i * b[1]) / 7);
+				}
+			} else {
+				for (int i = 1; i < 5; ++i) {
+					table[i + 1] = static_cast<uint8_t>(((5 - i) * b[0] + i * b[1]) / 5);
+				}
+				table[6] = 0;
+				table[7] = 255;
+			}
+			uint64_t bits = 0;
+			for (int i = 0; i < 6; ++i) {
+				bits |= static_cast<uint64_t>(b[2 + i]) << (8 * i);
+			}
+			for (int p = 0; p < 16; ++p) {
+				m_hemiAlpha[static_cast<size_t>(by * 4 + p / 4) * n + bx * 4 + p % 4] = table[(bits >> (3 * p)) & 7];
+			}
+		}
+	}
+}
+
+float LevelRenderer::hemiShadowAt(float x, float z) const
+{
+	// HemiMapInfo: uv = ((p + size / 2).xz - corner.xz) / size, v flipped (vsParticle).
+	if (m_hemiAlpha.empty() || !m_sources || !m_sources->hemi || m_sources->hemi->size <= 0) {
+		return 1;
+	}
+	const scene::HemiMapSettings& h = *m_sources->hemi;
+	const float u = (x + h.size / 2 - h.offset[0]) / h.size;
+	const float v = 1 - (z + h.size / 2 - h.offset[2]) / h.size;
+	const int n = static_cast<int>(m_hemiAlphaSize);
+	const int px = std::clamp(static_cast<int>(u * static_cast<float>(n)), 0, n - 1);
+	const int py = std::clamp(static_cast<int>(v * static_cast<float>(n)), 0, n - 1);
+	return static_cast<float>(m_hemiAlpha[static_cast<size_t>(py) * static_cast<size_t>(n) + static_cast<size_t>(px)]) / 255.0f;
 }
 
 // ---- the dynamic shadows -------------------------------------------------------
@@ -459,6 +536,48 @@ void LevelRenderer::drawSunFlare(SDL_GPUCommandBuffer* commands, SDL_GPURenderPa
 	SDL_DrawGPUPrimitives(pass, 6, 1, 0, 0);
 }
 
+// ---- the heat shimmer --------------------------------------------------------------
+
+// ParticleHeatShimmer (Particles.fx): the sprites show the scene behind
+// them displaced (shimmer.frag), from a copy of the scene made before they
+// are drawn (the original reads the back buffer, BackBufferTexture).
+void LevelRenderer::drawShimmer(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Mat4& viewProjection,
+	const Camera& camera, uint32_t width, uint32_t height)
+{
+	if (m_shimmerGroups.empty() || !m_shimmerVertices || !m_shimmerSource || !m_gpu.shimmerPipeline()) {
+		return;
+	}
+	ParticleUniforms uniforms {};
+	uniforms.viewProjection = viewProjection;
+	const Vec3f right = camera.right();
+	const Vec3f up = cross(camera.forward(), right) * -1.0f;
+	uniforms.cameraRight[0] = right.x;
+	uniforms.cameraRight[1] = right.y;
+	uniforms.cameraRight[2] = right.z;
+	uniforms.cameraUp[0] = up.x;
+	uniforms.cameraUp[1] = up.y;
+	uniforms.cameraUp[2] = up.z;
+	const scene::ParticleSystemSettings& s = m_particleSettings;
+	const double t = static_cast<double>(SDL_GetTicks() - m_startTicks) / 1000.0;
+	struct {
+		float screen[4];
+		float waves[4];
+	} shimmer {{1.0f / static_cast<float>(width), 1.0f / static_cast<float>(height),
+				   static_cast<float>(std::fmod(t * s.shimmerSpeed, 1.0)), s.shimmerIntensity},
+		{s.shimmerPhases, 0, 0, 0}};
+	SDL_BindGPUGraphicsPipeline(pass, m_gpu.shimmerPipeline());
+	SDL_PushGPUVertexUniformData(commands, 0, &uniforms, sizeof(uniforms));
+	SDL_PushGPUFragmentUniformData(commands, 0, &shimmer, sizeof(shimmer));
+	SDL_GPUBufferBinding vertexBinding {m_shimmerVertices, 0};
+	SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+	for (const ParticleGroup& group : m_shimmerGroups) {
+		SDL_GPUTextureSamplerBinding samplers[2] = {{group.texture, m_gpu.clampSampler()},
+			{m_shimmerSource, m_gpu.clampSampler()}};
+		SDL_BindGPUFragmentSamplers(pass, 0, samplers, 2);
+		SDL_DrawGPUPrimitives(pass, group.vertexCount, 1, group.firstVertex, 0);
+	}
+}
+
 // ---- the post-production ----------------------------------------------------------
 
 bool LevelRenderer::postEnabled() const
@@ -476,6 +595,7 @@ void LevelRenderer::releasePostTargets()
 		}
 	};
 	release(m_sceneColor);
+	release(m_shimmerSource);
 	release(m_bloomTargets[0]);
 	release(m_bloomTargets[1]);
 	for (SDL_GPUTexture*& history : m_history) {

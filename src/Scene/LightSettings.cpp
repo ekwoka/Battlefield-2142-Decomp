@@ -30,6 +30,7 @@ void registerRendererConsoleMethods(Console& console, RendererSettings& settings
 		[&settings](const int& v) {
 			if (v >= settings.baseCellSize && v <= 1000) { // 0x1009c9b0
 				settings.lodSwitchDistance = v;
+				settings.lodSwitchDistanceSet = true;
 			}
 		});
 	bindFloat("terrainCuller.lod0SwitchStart", settings.lod0SwitchStart);

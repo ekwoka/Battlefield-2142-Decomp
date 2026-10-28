@@ -46,6 +46,9 @@
 #pragma once
 
 #include "Game/GameWorld.h"
+#include "Game/Votes.h"
+#include "Net/Demo.h"
+#include "Net/EventChannel.h"
 #include "Net/GameServer.h"
 #include "Net/GhostLayout.h"
 #include "Net/RemoteInput.h"
@@ -84,6 +87,9 @@ struct HostSetup {
 	const net::ServerSettings* settings = nullptr;
 	const net::MapList* maps = nullptr;
 	const net::BanList* bans = nullptr;
+	// reservedSlots.* (with sv.numReservedSlots): a listed nick joining a
+	// full server bumps someone who isn't (0x004ae6a0).
+	const net::ReservedSlots* reserved = nullptr;
 };
 
 // The engine's yaw/pitch/roll (degrees) as the networkables' quaternion
@@ -142,6 +148,18 @@ public:
 	// A chat line a client said (for the scripts' ChatMessage: player, text,
 	// channel, flags).
 	std::function<void(int player, const net::ChatMessage& line)> onChat;
+	// The votes' results (game::Votes, the server's 0x0058fb90): a map vote
+	// passed (5 s on, the map-list index to run), a mutiny against a team's
+	// commander. A kick vote kicks here ("KICKED", 0x15).
+	std::function<void(int mapIndex)> onMapVote;
+	std::function<void(int team)> onMutiny;
+	game::Votes& votes() { return m_votes; }
+	// Demo recording (demo.recordDemo / stopRecording; Net/Demo.h): what
+	// the server sends a client with no player, connection 0x81, into a
+	// .bf2142demo file. False if one is recording or the file exists.
+	bool recordDemo(const std::string& path);
+	void stopDemo();
+	bool recordingDemo() const { return m_demo.isOpen(); }
 
 private:
 	struct Ghost {
@@ -180,6 +198,10 @@ private:
 		std::string chat;                        // a StringBlock coming in
 		uint32_t chatSize = 0;
 		bool spawnRequested = false;
+		// Joined while the server was full: admitted or refused once its name
+		// comes (the exe's join check has the name; the rewrite's clients
+		// send it after connecting).
+		bool full = false;
 		game::SoldierInput held;                 // the last move's held inputs
 	};
 	struct PlayerSeen {
@@ -191,6 +213,18 @@ private:
 	};
 	void joined(int client);
 	void left(int client);
+	bool reservedSlotCheck(int client);
+	void sendJoinBlocks(int client);
+	void sendTo(int client, const net::GameEvent& event); // the demo's connection: its file
+	void flushDemo(int32_t time, bool ghosts);
+	static constexpr int kDemoClient = 0x81;
+	net::DemoWriter m_demo;
+	net::EventChannel m_demoEvents;
+	uint32_t m_demoSequence = 0;
+	game::Votes m_votes;
+	void sendVoteReplies(const std::vector<game::Votes::Reply>& replies);
+	std::vector<std::pair<float, int>> m_mapVotes; // (seconds left, map) passed, waiting the 5 s
+	std::vector<std::pair<int, uint32_t>> m_kickLater; // (client, reason) after the poll
 	void event(int client, const net::GameEvent& event);
 	void sendDatabase(int client);
 	void sendLevel(int client); // the map list and the level block

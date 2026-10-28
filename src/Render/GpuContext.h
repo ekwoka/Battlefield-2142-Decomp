@@ -44,6 +44,10 @@ struct TransformUniforms {
 	Mat4 world;
 	float lightmapTransform[4] {1, 1, 0, 0}; // scale xy, offset zw into the atlas
 	Mat4 parts[kMaxMeshParts];              // bundled-mesh part transforms
+	// mesh.vert's leaf sway (RaShaderLeaf.fx without OVERGROWTH): x 1 for a
+	// tree's leaves, y the object's radius, z the wind's speed there plus
+	// WIND_ADD (5), w GlobalTime.
+	float sway[4] {};
 };
 
 // Water fragment shader, second uniform block.
@@ -124,6 +128,13 @@ struct LightingUniforms {
 	// object's HeightOverTerrain (w), per object (0x10041100's block
 	// +0x1ec / +0x1e4).
 	float hemiObject[4] {1, 1, 1, 0};
+	// mesh.frag's specular (RaShaderSTM getSpecularPixelLighting, RaShaderBM
+	// SpecLUT64): xyz the eye, w the kind (0 none, 1 a static mesh's
+	// StaticGloss, 2 its detail map's alpha, 3 a bundled mesh's StaticGloss,
+	// 4 its colour map's alpha); the colour (staticSpecularColor for statics,
+	// sunSpecColor for bundled meshes) and the gloss (w).
+	float eye[4] {};
+	float specular[4] {};
 };
 
 // The dynamic shadows and the hemi map (shadow.glsl's Shadows block).
@@ -210,6 +221,8 @@ public:
 	// Cloaked meshes into the camouflage mask (camo.frag): depth-tested
 	// against the world's depth, not written.
 	SDL_GPUGraphicsPipeline* camoPipeline() const { return m_camoPipeline; }
+	// The heat shimmer's particles (shimmer.frag: the scene copy displaced).
+	SDL_GPUGraphicsPipeline* shimmerPipeline() const { return m_shimmerPipeline; }
 	// The post-production (fullscreen.vert, post.frag) into a target with
 	// the HUD's depth-stencil; the bloom's filters (bloom.frag) into colour
 	// only.
@@ -276,6 +289,7 @@ private:
 	SDL_GPUGraphicsPipeline* m_decalPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_undergrowthPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_particlePipeline = nullptr;
+	SDL_GPUGraphicsPipeline* m_shimmerPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_additiveParticlePipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_uiPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_uiSubmitPipeline = nullptr;

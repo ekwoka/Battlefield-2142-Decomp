@@ -1,4 +1,5 @@
 add_library(Scene STATIC
+	EffectSettings.cpp
 	LightSettings.cpp
 	PostProductionSettings.cpp
 )

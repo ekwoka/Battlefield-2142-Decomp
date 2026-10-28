@@ -1,4 +1,5 @@
 #include "ControlMap.h"
+#include "GameControllers.h"
 
 #include "Console/Console.h"
 
@@ -12,7 +13,17 @@ ControlMaps::Map& ControlMaps::create(const std::string& name)
 	// Creating a map again adds to it (the profile's Common.con and
 	// Infantry.con both create defaultPlayerInputControlMap).
 	m_current = &m_maps[name];
+	m_currentName = name;
 	return *m_current;
+}
+
+void ControlMaps::setActive(const std::string& name)
+{
+	// 0x0066e1db: the map the following lines configure.
+	if (m_maps.count(name)) {
+		m_current = &m_maps[name];
+		m_currentName = name;
+	}
 }
 
 const ControlMaps::Map* ControlMaps::find(const std::string& name) const
@@ -36,13 +47,29 @@ const std::vector<Binding>* ControlMaps::bindings(const std::string& map, const 
 
 float ControlMaps::value(const std::string& map, const std::string& input, const IsDown& down) const
 {
+	Source source;
+	source.down = [&down](const Binding& b) { return GameControllers::slotNamed(b.device) < 0 && down(b.control); };
+	return value(map, input, source);
+}
+
+// 0x00680b00: each mapping's value by its kind (axis 0x006802c0, keys or
+// buttons as an axis 0x00680990, triggers 0x006803f0), summed here over
+// the input's primary and secondary bindings.
+float ControlMaps::value(const std::string& map, const std::string& input, const Source& source) const
+{
 	const std::vector<Binding>* list = bindings(map, input);
 	if (!list) {
 		return 0;
 	}
 	float value = 0;
 	for (const Binding& binding : *list) {
-		if (binding.kind != Binding::Kind::Axis && down(binding.control)) {
+		if (binding.kind == Binding::Kind::Axis) {
+			// Axis to axis (hold); axis to trigger is the mouse wheel's,
+			// counted by the window.
+			if (binding.hold && source.axis) {
+				value += source.axis(binding) * binding.sign;
+			}
+		} else if (source.down && source.down(binding)) {
 			value += binding.sign;
 		}
 	}
@@ -65,16 +92,37 @@ std::string ControlMaps::firstControl(const std::string& map, const std::string&
 
 void ControlMaps::bind(const std::string& map, const std::string& input, const std::string& control, int slot, float sign)
 {
+	const bool button = control.compare(0, 9, "IDButton_") == 0;
+	bind(map, input, button ? "IDFMouse" : "IDFKeyboard", control, slot, sign);
+}
+
+void ControlMaps::bind(const std::string& map, const std::string& input, const std::string& device, const std::string& control,
+	int slot, float sign)
+{
 	std::vector<Binding>& list = m_maps[map][input];
 	Binding binding;
-	binding.kind = control.compare(0, 9, "IDButton_") == 0 ? Binding::Kind::Button : Binding::Kind::Key;
-	binding.device = binding.kind == Binding::Kind::Button ? "IDFMouse" : "IDFKeyboard";
+	binding.kind = control.compare(0, 7, "IDAxis_") == 0 ? Binding::Kind::Axis
+		: control.compare(0, 9, "IDButton_") == 0      ? Binding::Kind::Button
+													   : Binding::Kind::Key;
+	binding.device = device;
 	binding.control = control;
 	binding.sign = sign;
 	binding.slot = slot;
-	if (!list.empty()) {
-		binding.hold = list.front().hold;
+	if (binding.kind == Binding::Kind::Axis) {
+		// An axis mapping covers both sides of its slot.
+		binding.hold = true;
+		list.erase(std::remove_if(list.begin(), list.end(), [slot](const Binding& b) { return b.slot == slot; }), list.end());
+		list.insert(slot == 0 ? list.begin() : list.end(), binding);
+		return;
 	}
+	if (!list.empty()) {
+		const auto trigger = std::find_if(list.begin(), list.end(), [](const Binding& b) { return b.kind != Binding::Kind::Axis; });
+		binding.hold = trigger != list.end() ? trigger->hold : true;
+	}
+	// A key replaces an axis mapping in its slot.
+	list.erase(std::remove_if(list.begin(), list.end(),
+				   [slot](const Binding& b) { return b.slot == slot && b.kind == Binding::Kind::Axis && b.hold; }),
+		list.end());
 	const auto same = [slot, sign](const Binding& b) { return b.slot == slot && b.sign == sign && b.kind != Binding::Kind::Axis; };
 	const auto at = std::find_if(list.begin(), list.end(), same);
 	if (at != list.end()) {
@@ -82,6 +130,20 @@ void ControlMaps::bind(const std::string& map, const std::string& input, const s
 	} else {
 		list.insert(slot == 0 ? list.begin() : list.end(), binding);
 	}
+}
+
+std::string ControlMaps::displayKey(const Binding& binding)
+{
+	if (binding.device == "IDFKeyboard") {
+		return "CONTROLLER_" + binding.control;
+	}
+	if (binding.device == "IDFMouse") {
+		return "CONTROLLER_IDFMouse_" + binding.control;
+	}
+	if (GameControllers::slotNamed(binding.device) >= 0) {
+		return "CONTROLLER_IDFGameController_" + binding.control;
+	}
+	return "CONTROLLER_" + binding.control;
 }
 
 std::string ControlMaps::script() const
@@ -112,7 +174,8 @@ std::string ControlMaps::script() const
 				}
 				size_t partner = list.size();
 				for (size_t j = i + 1; j < list.size(); ++j) {
-					if (!written[j] && list[j].slot == b.slot && list[j].sign == -b.sign && list[j].kind == Binding::Kind::Key) {
+					if (!written[j] && list[j].slot == b.slot && list[j].sign == -b.sign && list[j].kind == b.kind
+						&& list[j].device == b.device) {
 						partner = j;
 						break;
 					}
@@ -121,7 +184,7 @@ std::string ControlMaps::script() const
 					written[partner] = true;
 					const Binding& plus = b.sign > 0 ? b : list[partner];
 					const Binding& minus = b.sign > 0 ? list[partner] : b;
-					out += "ControlMap.addKeysToAxisMapping " + input + " " + b.device + " " + plus.control + " " + minus.control +
+					out += std::string(b.kind == Binding::Kind::Button ? "ControlMap.addButtonsToAxisMapping " : "ControlMap.addKeysToAxisMapping ") + input + " " + b.device + " " + plus.control + " " + minus.control +
 						" " + slot + "\n";
 				} else {
 					out += std::string("ControlMap.") +
@@ -129,6 +192,31 @@ std::string ControlMaps::script() const
 						" " + b.device + " " + b.control + " " + (b.hold ? "0" : "10000") + " " + slot + "\n";
 				}
 			}
+		}
+		// 0x00680f90: the settings not at their defaults.
+		const MapSettings set = settingsOf(name);
+		const auto number = [](float v) {
+			std::string text = std::to_string(v);
+			text.erase(text.find_last_not_of('0') + 1);
+			if (!text.empty() && text.back() == '.') {
+				text.pop_back();
+			}
+			return text;
+		};
+		if (set.invertMouse) {
+			out += "ControlMap.invertMouse 1\n";
+		}
+		if (set.mouseSensitivity != 1) {
+			out += "ControlMap.mouseSensitivity " + number(set.mouseSensitivity) + "\n";
+		}
+		if (set.keyboardSensitivity != 0.1f) {
+			out += "ControlMap.keyboardSensitivity " + number(set.keyboardSensitivity) + "\n";
+		}
+		if (set.yawFactor != 1) {
+			out += "ControlMap.setYawFactor " + number(set.yawFactor) + "\n";
+		}
+		if (set.pitchFactor != 1) {
+			out += "ControlMap.setPitchFactor " + number(set.pitchFactor) + "\n";
 		}
 	}
 	return out;
@@ -142,6 +230,11 @@ const Binding* ControlMaps::binding(const std::string& map, const std::string& i
 	}
 	for (const Binding& b : *list) {
 		if (b.slot == slot && b.sign == sign && b.kind != Binding::Kind::Axis) {
+			return &b;
+		}
+	}
+	for (const Binding& b : *list) {
+		if (b.slot == slot && b.kind == Binding::Kind::Axis && b.hold) {
 			return &b;
 		}
 	}
@@ -261,6 +354,15 @@ void registerControlMapConsoleMethods(Console& console, ControlMaps& maps)
 			list->push_back({Binding::Kind::Key, args[1], args[3], -1, true, slot});
 		}
 	});
+	// input device buttonPositive buttonNegative [slot] (the profile writer's,
+	// 0x00680f90, for a controller's buttons on an axis)
+	add("addButtonsToAxisMapping", 4, 5, [into](const std::vector<std::string>& args) {
+		if (std::vector<Binding>* list = into(args[0])) {
+			const int slot = args.size() > 4 ? std::atoi(args[4].c_str()) : 0;
+			list->push_back({Binding::Kind::Button, args[1], args[2], 1, true, slot});
+			list->push_back({Binding::Kind::Button, args[1], args[3], -1, true, slot});
+		}
+	});
 	// input device key [c_CM... | delay slot]
 	for (const char* name : {"addKeyToTriggerMapping", "addButtonToTriggerMapping"}) {
 		const bool button = std::string(name).find("Button") != std::string::npos;
@@ -291,7 +393,36 @@ void registerControlMapConsoleMethods(Console& console, ControlMaps& maps)
 				args.size() > 4 ? std::atoi(args[4].c_str()) : 0});
 		}
 	});
-	add("mouseSensitivity", 1, 2, [](const std::vector<std::string>&) {});
+	add("setActive", 1, 1, [&maps](const std::vector<std::string>& args) { maps.setActive(args[0]); });
+	// The current map's own settings (0x0066edb6..0x0066f475).
+	const auto settings = [&maps]() -> ControlMaps::MapSettings* {
+		return maps.current() ? &maps.settings(maps.currentName()) : nullptr;
+	};
+	add("mouseSensitivity", 1, 2, [settings](const std::vector<std::string>& args) {
+		if (auto* s = settings()) {
+			s->mouseSensitivity = std::clamp(static_cast<float>(std::atof(args[0].c_str())), 0.0f, 10.0f);
+		}
+	});
+	add("keyboardSensitivity", 1, 1, [settings](const std::vector<std::string>& args) {
+		if (auto* s = settings()) {
+			s->keyboardSensitivity = static_cast<float>(std::atof(args[0].c_str()));
+		}
+	});
+	add("invertMouse", 1, 1, [settings](const std::vector<std::string>& args) {
+		if (auto* s = settings()) {
+			s->invertMouse = std::atoi(args[0].c_str()) != 0;
+		}
+	});
+	add("setYawFactor", 1, 1, [settings](const std::vector<std::string>& args) {
+		if (auto* s = settings()) {
+			s->yawFactor = static_cast<float>(std::atof(args[0].c_str()));
+		}
+	});
+	add("setPitchFactor", 1, 1, [settings](const std::vector<std::string>& args) {
+		if (auto* s = settings()) {
+			s->pitchFactor = static_cast<float>(std::atof(args[0].c_str()));
+		}
+	});
 }
 
 } // namespace dice::hfe::input

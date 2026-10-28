@@ -15,6 +15,8 @@ add_library(Game STATIC
 	Radio.cpp
 	ScriptBridge.cpp
 	TickTimer.cpp
+	Cameras.cpp
+	Votes.cpp
 )
 target_include_directories(Game PUBLIC ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(Game PUBLIC World Physics Effects Animation Console AI)

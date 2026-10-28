@@ -4,6 +4,7 @@
 
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
+#include "Movie/MenuVideo.h"
 #include "Movie/MovieDecoder.h"
 #include "Movie/MovieQueue.h"
 
@@ -85,4 +86,28 @@ TEST(Movie_DecodesTheShippedBinkMovies)
 	CHECK(legal.open(movies + "Legal.bik") && !legal.hasAudio() && legal.width() == 800 && legal.height() == 600);
 	movie::MovieDecoder missing;
 	CHECK(!missing.open(movies + "health.bik", &error) && !error.empty());
+}
+
+// The menu's movies in clips (Movie/MenuVideo.h): the URL's file, and the
+// shipped Titan tutorial's pictures by time.
+TEST(Movie_MenuVideo)
+{
+	CHECK(movie::menuVideoFile("?titan_tutorial.bik") == "Movies/titan_tutorial.bik");
+	CHECK(movie::menuVideoFile("?/Levels/Suez_Canal/Info/gpm_cq_32_menuMovie.bik") ==
+		"Levels/Suez_Canal/Info/gpm_cq_32_menuMovie.bik");
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir || !movie::MovieDecoder::available()) {
+		return;
+	}
+	movie::MenuVideo video;
+	CHECK(video.open(std::string(gameDir) + "/mods/bf2142/" + movie::menuVideoFile("?titan_tutorial.bik")));
+	ui::MenuImage frame;
+	CHECK(video.advance(0, frame) && frame.width > 0 && frame.rgba.size() == frame.width * frame.height * 4u);
+	CHECK(!video.advance(0.001, frame)); // the next not due yet
+	CHECK(video.advance(0.5, frame));
+	CHECK(!video.finished());
+	for (int i = 0; i < 2000 && !video.finished(); ++i) {
+		video.advance(1.0, frame);
+	}
+	CHECK(video.finished());
 }

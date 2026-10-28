@@ -56,16 +56,29 @@ public:
 	// One tick: everything above, then the manager's update.
 	void tick(const Camera& camera);
 
-	// The Radio component's automatic messages (its properties, the Radio
-	// template component 0xc4b6, script names radio.*): BF2142.exe's
-	// senders of these weren't traced, so the rewrite sends them where the
-	// property names say, on TCServerTeamMessage (0xd) from no one (a
-	// commander's automatic line, 0x004a5cf0's server send):
-	//   team change to a team: friendlyTeamChangeMessage to it,
-	//     enemyTeamChangeMessage to the other; to none:
-	//     neutralTeamChangeMessage to the old owner;
-	//   destroyed: friendlyDestroyedMessage to its team,
-	//     enemyDestroyedMessage to the other.
+	// The objects' automatic radio (the Radio template component 0xc4b6;
+	// its object part, vtable 0x00988f30, at object +0x7c, with one-shot
+	// flags: +0x10 fail, +0x11 use, +0x12 repaired, +0x13 destroyed, +0x14
+	// damage). From no one on TCServerTeamMessage (0xd, game slot 0x5c,
+	// 0x004a5cf0) to the object's team (0x00656910: the object's or the
+	// local player's), the other team's message to the other:
+	//   damage (0x00656c90, the armour's hit points going down 0x00655460):
+	//     damageMessage, once until repaired;
+	//   destroyed (0x00656d10, event 0x18): friendlyDestroyedMessage (the
+	//     same field as destroyedMessage) / enemyDestroyedMessage, once;
+	//     arms repaired;
+	//   repaired (0x006571d0, event 0x19): repairedMessage when armed;
+	//     re-arms damage and destroyed;
+	//   spawn (0x00657120 from the server's createObject 0x004ab8a0):
+	//     friendlySpawnMessage / enemySpawnMessage for objects made after
+	//     the round's start.
+	// The team changes (0x00656e80 from a control point's setTeam 0x005cc320)
+	// play only here, for the local player (game slot 0x60): to no team,
+	// neutralTeamChangeMessage if it was the local team's; else
+	// friendlyTeamChangeMessage if the local player is on the new team,
+	// enemyTeamChangeMessage if not. (The silo's "_N" suffix from
+	// SiloSyncEvent isn't added.) The weapons' fail and use messages are
+	// GameWorld's (the players say them).
 	// Returns the messages sent this tick (team, message), for tests.
 	std::vector<std::pair<int, std::string>> autoRadio();
 
@@ -89,8 +102,13 @@ private:
 	std::map<std::string, std::string> m_looping; // projectile template -> its loop ("" none)
 	struct Watched {
 		int team = 0;
+		float hitPoints = -1;
+		bool damageArmed = true, destroyedArmed = true, repairedArmed = false;
 		bool destroyed = false;
+		const world::ObjectTemplate* objectTemplate = nullptr;
 	};
+	bool m_firstScan = true;
+	std::map<const world::ObjectTemplate*, bool> m_radioTemplates; // whether a template has any of them
 	std::map<uint32_t, Watched> m_watched; // objects whose template has radio messages
 	int m_scanIn = 0;
 	struct SiloSounds {

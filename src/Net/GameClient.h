@@ -84,6 +84,13 @@ public:
 	// connection is over (refused, failed or disconnected).
 	bool update();
 
+	// Plays a demo instead of a connection (BF2142.exe's client pump with
+	// no socket, 0x004b52e0): each update() takes `next`'s payloads (the
+	// recorded data payloads, as a client would have received them) while
+	// it returns 1; 0 is none due yet, -1 the end. Nothing is sent.
+	void playDemo(std::function<int(std::vector<uint8_t>& payload)> next);
+	bool playingDemo() const { return static_cast<bool>(m_demo); }
+
 	RemoteWorld& world() { return m_world; }
 	const RemoteWorld& world() const { return m_world; }
 	// The game simulated a tick: our packet with this tick's move goes now
@@ -133,8 +140,8 @@ public:
 	// type, a 32-bit value (0 from every builder). Types: 0 internal, 1 map
 	// (target a map-list index), 2 kick (a player), 3 mutiny (the
 	// commander). Phases: 0 start, 1 failed, 2 progress / ended, 3 passed,
-	// 4 cast, 5 bad target, 6 refused (one running or too soon), 7 too many
-	// votes from this player.
+	// 4 cast, 5 bad target, 6 refused (one running or too soon), 7 too few
+	// players to vote (sv.minPlayersForVoting; the server's game::Votes).
 	void startVote(int type, int target);
 	void castVote(int type, int target, int choice);
 	// A radio / commo-rose message (0x14; sent by 0x004b3020, written by
@@ -170,6 +177,8 @@ public:
 
 private:
 	void onPacket(const ConnectedPacket& packet);
+	void handlePayload(const std::vector<uint8_t>& payload);
+	std::function<int(std::vector<uint8_t>&)> m_demo;
 	void handleEvents(const ReliableEventBlock& block);
 	void deliver(const GameEvent& event);
 	void sendTick();

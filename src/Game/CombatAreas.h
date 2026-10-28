@@ -11,10 +11,13 @@
 //   CombatArea.layer 6
 //   CombatArea.addAreaPoint 704/251    (a polygon from the first point on)
 //
-// The rewrite uses them for the Titans' bounds (0x005ab740, Titans.cpp);
-// the soldiers' and vehicles' out-of-bounds timer is not rewritten.
+// The Titans keep inside them (0x005ab740, Titans.cpp); players outside
+// the ones that apply to them run a timer and then take damage, and
+// abandoned vehicles with destroyWhenOutsideCombatArea decay
+// (GameWorld::stepCombatAreas: 0x004bbf60, 0x004bed00).
 #pragma once
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -30,8 +33,8 @@ struct CombatArea {
 	float minX = 0, minZ = 0, maxX = 0, maxZ = 0;
 	std::vector<std::pair<float, float>> points; // x, z
 	int team = 0;
-	int vehicles = 0; // +0x14
-	int layer = 0;
+	int vehicles = 4; // +0x14 (4 from the create 0x004cb230)
+	int layer = 1;    // +0x4c (no reader found in the out-of-bounds code)
 	bool usedByPathFinding = false;
 	bool inverted = false; // +0x38: an area cut out of the others (no console property sets it)
 
@@ -49,8 +52,23 @@ struct CombatArea {
 
 class CombatAreas {
 public:
-	bool use = false; // CombatAreaManager.use
+	bool use = false; // CombatAreaManager.use (+0x14)
 	std::vector<CombatArea> areas;
+	int active = -1;  // the area the CombatArea.* commands set (+0)
+	// The manager's rules (constructor 0x004cb380, reset 0x004cb440):
+	// seconds a player may stay outside (+0x18) and the damage a tick after
+	// that (+0x1c), and per vehicle category (VCLand 0 .. VCHelicopter 3)
+	// the timer (+0x2c, addVehicleTimer; VCLand and VCAir start at 15) and
+	// the damage (+0x20, addVehicleDamage).
+	float timeAllowedOutside = 15;
+	float damage = 100;
+	std::map<int, float> vehicleTimers {{0, 15.0f}, {2, 15.0f}};
+	std::map<int, float> vehicleDamages;
+	// 0x004cac70: a soldier's (or a category without its own) is
+	// timeAllowedOutside; 0x004cacf0 likewise for the damage.
+	float timerFor(int category, bool soldier) const;
+	float damageFor(int category) const;
+	void reset(); // a new level (0x004cb440)
 
 	// 0x004ca7d0 over the areas binding `category`: inside one of them (or
 	// anywhere when none binds it) and inside no cut-out.

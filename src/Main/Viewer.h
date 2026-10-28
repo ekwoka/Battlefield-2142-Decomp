@@ -14,6 +14,7 @@ struct LevelSources;
 }
 namespace dice::hfe::input {
 class ControlMaps;
+class GameControllers;
 }
 
 namespace dice::hfe {
@@ -68,6 +69,10 @@ struct ViewerOptions {
 		float eyeRoll = 0; // radians (a seat camera's shakes)
 		// Third person: the seat camera's worldFOV (0: the viewer's own).
 		float chaseFovY = 0;
+		// Third person placed by the game (a seat camera's external modes,
+		// the death and spectator cameras): eye, eyeYaw, eyePitch, fovY and
+		// eyeRoll hold it, drawn with the usual near plane.
+		bool external = false;
 	};
 	std::function<void(const PlayerInput&)> onPlayerInput;
 	std::function<bool(PlayerView&)> playerView; // false without a player
@@ -116,6 +121,15 @@ struct ViewerOptions {
 	// The player's keys (Settings/Controls.con); without them W/S/A/D,
 	// shift, the mouse buttons, E, Tab, Caps Lock, 1-9 and F1-F8.
 	const input::ControlMaps* controls = nullptr;
+	// Joysticks and gamepads (IDFGameController_0..7): the window opens
+	// them through SDL3 as they are attached and feeds their state here;
+	// the control maps' bindings to them drive the player as the keys do.
+	// An axis bound to c_PIMouseLookX/Y turns at up to 120 degrees a second
+	// (the rewrite's rate; mouseScale applies).
+	input::GameControllers* gameControllers = nullptr;
+	// With a menu up: a controller's button pressed, or an axis pushed to
+	// its end (the controls page's "press the input", 0x006aadf0).
+	std::function<void(const std::string& device, const std::string& control, float direction)> onControllerInput;
 };
 
 // The game's window: one SDL window and GPU device from the menu through

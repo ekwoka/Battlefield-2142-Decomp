@@ -122,6 +122,10 @@ build/native/src/Main/bf2142 --game "source/Battlefield 2142" \
 # run around as a soldier (team 1 PAC, 2 EU): WASD, shift sprints, the mouse turns,
 # Space jumps, left Ctrl crouches, Z lies down, Caps Lock opens the commander screen,
 # (keys from the game's Settings/Controls.con; rebind them on the Options page),
+# joysticks and gamepads (SDL3, plugged in or out at any time) bind on the same
+# Options controls page: pick an action and press a button or push a stick
+# (a gamepad reads as an Xbox 360 pad: sticks IDAxis_0/1 and 3/4, triggers 2,
+# A B X Y = buttons 0-3, the d-pad buttons 10-13),
 # E enters and leaves a vehicle nearby (then W/S drive and brake, A/D steer;
 # F1..F8 change seats: a gunner's seat aims with the mouse and fires;
 # 1..9 take the kit's weapon of that slot: 1 knife, 2 sidearm, 3 primary;

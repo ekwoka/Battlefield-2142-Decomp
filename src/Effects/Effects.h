@@ -3,17 +3,43 @@
 // sources and sounds, as in Objects/Effects. Impacts, muzzle flashes and
 // explosions are effect bundles.
 //
-// What is from the original: the parameters and their script names, and
-// how a particle looks over its life, from the particle shaders
+// How a particle looks over its life is from the particle shaders
 // (Shaders/Particles.fx): the size, colour blend and transparency "graphs"
 // are cubic polynomials a*t^3 + b*t^2 + c*t + d of the particle's age
 // fraction t, clamped to 1; size = graph * particleMaxSize + randomSize,
-// colour = color1 blended towards color2.
+// colour = color1 blended towards color2, times the particle's intensity
+// plus its random intensity (vsParticle: (color * i + ri) / 2, doubled by
+// the pixel shader).
 //
-// What is inferred, until RendDX9's emitter update is decompiled: how
-// particles are emitted (frequency over the emit time, radial and random
-// directions, random speed and life) and moved (gravity and air resistance
-// scaled by their graphs).
+// The emitters are RendDX9's (the sprite system: its template class,
+// vtable 0x101d8c48, constructor defaults 0x10138b40; its instance, vtable
+// 0x101d9170, constructor 0x1013f6a0):
+//  - start (0x1013fb30): not at all when the template's QualityLevel is
+//    above the manager's, not emitting when the camera is beyond the
+//    manager's view distance; emitDelay, emitTime and preWarmTime are
+//    taken then;
+//  - update (0x101407c0): the time is cut to the particles' longest life,
+//    the particles move in fixed steps of 0.01 s (the remainder carried to
+//    the next update), the delay runs down, then the pre-warm is run in
+//    steps of 1/30 s, then the emission (0x101403b0);
+//  - emission (0x101403b0): one particle every 1 / (emitFrequency x the
+//    distance LOD scale x the bundle's emit scale) seconds, throttled by
+//    emitPrio once the pool is loaded, at the system's place lerped
+//    between its last two, then moved on for the rest of the step; at most
+//    (timeToLive + randomTimeToLive) x emitFrequency + 10 alive;
+//  - a particle's birth (0x1013fdc0): life ttl + u x randomTimeToLive,
+//    size offset and speed share one random s in -1..1 (randomSize x s,
+//    emitSpeed - s x randomSpeed, times emitSpeedGraph over the emit time
+//    and the bundle's speed scale), intensity the system's plus
+//    randomIntensity x (-1..1), rotation randomRotation x (-1..1), its
+//    speed rotationSpeed + |randomRotationSpeed x (-1..1)| with that
+//    random's sign; inheriting the system's velocity unless local;
+//  - its motion (0x1013f0c0): per step dv = -k |v - w| (v - w) + y
+//    gravity x clamp(gravityGraph, 0, 1) dt, k = airResistance x
+//    clamp(airResistanceGraph, 0, 1) dt, w the wind at it times
+//    windAffectionFactor (world systems only), x += (v + dv / 2) dt, tiny
+//    speeds zeroed; forceToWaterSurface puts it on the water; its
+//    rotation turns by its speed x clamp(rotationGraph, 0, 1) (0x10131f80).
 //
 // Attached effects: a bundle that is a child of an object (a weapon's
 // muzzle flash, a vehicle's exhaust and engine flames, a rocket's trail)
@@ -29,6 +55,7 @@
 
 #include "Game/Random.h"
 #include "Physics/RigidBody.h"
+#include "Scene/EffectSettings.h"
 #include "Scene/LightSettings.h"
 
 #include <array>
@@ -63,17 +90,19 @@ struct ParticleTemplate {
 	game::RandomDistribution emitRange[3];
 	float randomRadialDirection = 0; // degrees
 	float radialDirection = 0;       // degrees from the plane across emitDirection
-	float emitFrequency = 0;         // particles per second
+	float emitFrequency = 0;         // particles per second (the sprite template's +0x10, default 32)
 	float emitTime = 0;
 	float emitDelay = 0;
 	bool isLooping = false;
 	float emitSpeed = 0;
 	float randomSpeed = 0;
+	Graph emitSpeedGraph {0, 0, 0, 1}; // over the emit time (0x1013fdc0)
+	float preWarmTime = 0;             // run at the start in 1/30 s steps (0x101407c0)
 	Vec3 emitDirection {0, 1, 0};
 	Vec3 randomDirectionAngle;       // degrees
-	float timeToLive = 1;
+	float timeToLive = 1;     // the sprite template's default is 4 (0x10138b40)
 	float randomTimeToLive = 0;
-	float gravity = 0;
+	float gravity = 0;        // the sprite template's default is -9.82 (+0x90)
 	Graph gravityGraph;
 	float airResistance = 0;
 	Graph airResistanceGraph;
@@ -86,6 +115,26 @@ struct ParticleTemplate {
 	Graph transparencyGraph;
 	float randomRotation = 0;
 	float rotationSpeed = 0;
+	float randomRotationSpeed = 0;
+	Graph rotationGraph {0, 0, 0, 1}; // the rotation speed over the life
+	float windAffectionFactor = 0;    // +0xa8
+	bool forceToWaterSurface = false; // +0xac: on the water (the manager's water, slot 0x94)
+	float waterSurfaceOffset = 0;     // +0xb0
+	float randomIntensity = 0;        // +0x1bc
+	// Particles.fx calcParticleLighting: the light map offset (+0x148,
+	// TemplateParameters[0].z); the light factor is the light manager's
+	// defaultEffectLightAffectionFactor (+0x1fc stays -1: no script sets it,
+	// 0x10139800).
+	float lightMapIntensityOffset = 0;
+	// LodDistance, QualityLevel, emitPrio: Low 0, Medium 1, High 2
+	// (BF2142.exe's names 0x00a04284; +0x64, +0x68, +0x60).
+	int lodDistance = 2;
+	int qualityLevel = 0;
+	int emitPrio = 2;
+	float minEmitScale = 0.05f; // +0xc8: the distance LOD's floor
+	// particleShaderType 1: ParticleHeatShimmer (the back buffer displaced
+	// by ShimmerIntensity x a texel, in ShimmerPhases waves; 0x1012ed89).
+	bool heatShimmer = false;
 	bool additive = false;
 	std::string texture; // without ".dds"
 	bool mesh = false;   // a MeshParticleSystem: each particle a copy of `geometry`
@@ -130,7 +179,24 @@ struct Particle {
 	float life = 1;
 	float sizeOffset = 0;
 	float rotation = 0;
+	float rotationSpeed = 0; // radians a second (0x1013fdc0 +0x7c)
+	float intensity = 1;     // the system's, at birth (+0xc)
+	float randomIntensity = 0; // randomIntensity x (-1..1) (+0x10)
+	float alpha = 1;         // the bundle's alpha intensity at birth (+0x2c)
 	Vec3 angles; // mesh particles: yaw/pitch/roll at birth, degrees
+};
+
+// What an emitter's update sees: the wind, the water, the camera (the
+// distance LOD), the manager's settings and the sprite pool.
+struct EmitContext {
+	const scene::ParticleSystemSettings* settings = nullptr;
+	const scene::WindSettings* wind = nullptr;
+	bool hasWater = false;
+	float waterLevel = 0;
+	bool hasCamera = false;
+	Vec3 camera;
+	float tanHalfFov = 0.5f;
+	int* poolUsed = nullptr; // sprites alive in all systems
 };
 
 // A particle system placed in the world.
@@ -145,7 +211,7 @@ public:
 	Vec3 worldPosition(const Particle& p) const;
 	// Still emitting or with particles alive.
 	bool alive() const;
-	void update(float seconds, game::Random& random);
+	void update(float seconds, game::Random& random, const EmitContext& context = {});
 	// Moves the system (an attached one, each tick).
 	void place(const Vec3& position, const Mat3& rotation);
 	const Vec3& position() const { return m_position; }
@@ -153,6 +219,16 @@ public:
 	// Ends the emission (a looping system's too); the particles live on.
 	void stop() { m_stopped = true; }
 	bool stopped() const { return m_stopped; }
+
+	// The bundle's modifiers (EffectBundle's alpha intensity, emit scale,
+	// emit speed scale and age scale: the instance's +0x164, +0x138, +0x13c
+	// and +0x12c, set by Wheel/AirDraftEffectBundle each tick, 0x00618bc0..).
+	float alphaIntensity = 1, emitScale = 1, speedScale = 1, timeScale = 1;
+	// Whether it emits at all (started within the view distance and of a
+	// quality the manager draws).
+	bool active() const { return m_active; }
+	// The distance LOD's emission scale now (+0x134).
+	float lodScale() const { return m_lodScale; }
 
 	// Attached: the anchor (0 for none), the mount (where the bundle sits
 	// in the anchor's space) and the system's place in the bundle.
@@ -162,14 +238,26 @@ public:
 	Mat3 mountRotation, localRotation;
 
 private:
-	void emit(game::Random& random);
+	void emit(game::Random& random, const Vec3& at, float age, const EmitContext& context);
+	void simulate(Particle& p, float step, int steps, const EmitContext& context) const;
+	void start(const EmitContext& context);
+	void step(float seconds, game::Random& random, const EmitContext& context);
 
 	const ParticleTemplate* m_template;
+	bool m_started = false, m_active = true, m_prewarming = false;
+	float m_delay = 0;     // emitDelay left (+0xe4)
+	float m_emitLeft = 0;  // emitTime left (+0xe0)
+	float m_preWarm = 0;   // pre-warm left (+0xf8)
+	float m_clock = 0, m_emitClock = 0, m_carry = 0; // +0xe8, +0xf0, +0xf4
+	float m_lodScale = 1;
+	Vec3 m_previous;       // where it was at the last update (+0xc0)
+	Vec3 m_velocity;       // its own velocity (inherited by world particles)
 	Vec3 m_position;
 	Mat3 m_rotation;
 	float m_age = 0;
 	float m_pending = 0; // fractional particles not emitted yet
 	bool m_stopped = false;
+	size_t m_capacity = 0; // (ttl + random ttl) x frequency + 10
 	Vec3 m_lastPosition;  // a trail's: where it was last tick
 	bool m_placed = false;
 	float m_speed = 0;
@@ -182,6 +270,7 @@ struct WorldVertex {
 	Vec3 position;
 	float u = 0, v = 0;
 	std::array<float, 4> color; // rgb, alpha
+	float lightMapOffset = 0;   // the template's lightMapIntensityOffset (calcParticleLighting)
 };
 
 // What the renderer draws: one camera-facing quad per particle.
@@ -190,6 +279,18 @@ struct Sprite {
 	float size;
 	float rotation;
 	std::array<float, 4> color; // rgb, alpha
+	float lightMapOffset = 0;   // the template's lightMapIntensityOffset (calcParticleLighting)
+};
+
+// The view the particles are drawn from: their fade by distance per LOD
+// class (startLodPercentageOfLodDistance of the class's distance to it;
+// 0x10132e90), with the manager's settings.
+struct ParticleView {
+	Vec3 eye;
+	Vec3 forward {0, 0, 1};
+	const scene::ParticleSystemSettings* settings = nullptr;
+	// The alpha a particle keeps at view depth `depth` in LOD class `lod`.
+	float fade(float depth, int lod) const;
 };
 
 // A mesh particle: its mesh scaled by `size`, turned and placed
@@ -315,6 +416,31 @@ public:
 	void releaseAnchor(uint32_t anchor);
 	void update(float seconds);
 
+	// What the emitters read (null: the defaults): the manager's settings,
+	// the wind, the water level (forceToWaterSurface) and the camera (the
+	// view distance and the distance LOD; without one every system emits
+	// at full rate). The world around the effects, not their state: so
+	// const, for the owners that hand the manager out const (GameWorld).
+	void setSettings(const scene::ParticleSystemSettings* settings) const { m_settings = settings; }
+	void setWind(const scene::WindSettings* wind) const { m_wind = wind; }
+	void setWater(bool has, float level) const
+	{
+		m_context.hasWater = has;
+		m_context.waterLevel = level;
+	}
+	void setCamera(const Vec3& position, float tanHalfFov) const
+	{
+		m_context.hasCamera = true;
+		m_context.camera = position;
+		m_context.tanHalfFov = tanHalfFov;
+	}
+	// The bundle modifiers of an anchor's emitters spawned with `tag`
+	// (Wheel/AirDraftEffectBundle, 0x0061bd20 / 0x0061ce20).
+	void setModifiers(uint32_t anchor, uint32_t tag, float alphaIntensity, float emitScale, float speedScale,
+		float timeScale = 1);
+	// Sprites alive in all the sprite systems (the pool's use).
+	int poolUsed() const { return m_poolUsed; }
+
 	// The Sound children of the bundles started since the last call (the
 	// bundle's start sound, S_<bundle>_Start), where they start.
 	struct StartedSound {
@@ -357,27 +483,47 @@ public:
 			}
 		}
 	}
-	// Calls `draw` for each group of sprites sharing a texture and blending.
+	// Calls `draw` for each group of sprites sharing a texture and blending
+	// (the heat shimmer's with `shimmer`: forEachShimmerGroup), faded by
+	// distance from `view` when it has settings.
 	template <class Draw>
 	void forEachGroup(Draw draw) const
 	{
+		forEachGroup(ParticleView {}, draw);
+	}
+	template <class Draw>
+	void forEachGroup(const ParticleView& view, Draw draw, bool shimmer = false) const
+	{
 		for (const auto& emitter : m_emitters) {
 			const ParticleTemplate& t = emitter->particleTemplate();
-			if (t.mesh || t.trail || t.nonScreenAligned) {
+			if (t.mesh || t.trail || t.nonScreenAligned || t.heatShimmer != shimmer) {
 				continue; // forEachMeshGroup, forEachWorldGroup
 			}
 			m_sprites.clear();
-			collect(*emitter, m_sprites);
+			collect(*emitter, m_sprites, view);
 			if (!m_sprites.empty()) {
 				draw(emitter->particleTemplate().texture, emitter->particleTemplate().additive, m_sprites);
 			}
 		}
+	}
+	// The heat shimmer's sprites (particleShaderType 1).
+	template <class Draw>
+	void forEachShimmerGroup(const ParticleView& view, Draw draw) const
+	{
+		forEachGroup(view, draw, true);
 	}
 
 	// Calls `draw` for each non-screen-aligned or trail system: its texture,
 	// blending and triangles in world space, seen from `eye`.
 	template <class Draw>
 	void forEachWorldGroup(const Vec3& eye, Draw draw) const
+	{
+		ParticleView view;
+		view.eye = eye;
+		forEachViewedWorldGroup(view, draw);
+	}
+	template <class Draw>
+	void forEachViewedWorldGroup(const ParticleView& view, Draw draw) const
 	{
 		for (const auto& emitter : m_emitters) {
 			const ParticleTemplate& t = emitter->particleTemplate();
@@ -386,9 +532,14 @@ public:
 			}
 			m_worldVertices.clear();
 			if (t.trail) {
-				collectTrail(*emitter, eye, m_worldVertices);
+				collectTrail(*emitter, view.eye, m_worldVertices);
 			} else {
 				collectAligned(*emitter, m_worldVertices);
+			}
+			if (view.settings) {
+				for (WorldVertex& v : m_worldVertices) {
+					v.color[3] *= view.fade(physics::dot(v.position - view.eye, view.forward), t.lodDistance);
+				}
 			}
 			if (!m_worldVertices.empty()) {
 				draw(t.texture, t.additive, m_worldVertices);
@@ -410,7 +561,7 @@ private:
 	const ParticleTemplate* particleTemplate(const world::ObjectTemplate& t);
 	void spawnTemplate(const world::ObjectTemplate& t, const Vec3& position, const Mat3& rotation, int depth, View view,
 		std::vector<Emitter*>* spawned, std::vector<size_t>* spawnedLights = nullptr);
-	static void collect(const Emitter& emitter, std::vector<Sprite>& out);
+	static void collect(const Emitter& emitter, std::vector<Sprite>& out, const ParticleView& view = {});
 	static void collectMeshes(const Emitter& emitter, std::vector<MeshSprite>& out);
 	struct LiveLight {
 		Vec3 color;
@@ -439,6 +590,10 @@ private:
 	std::map<uint32_t, Anchor> m_anchors;
 	std::vector<StartedSound> m_startedSounds;
 	mutable std::vector<Sprite> m_sprites;
+	mutable const scene::ParticleSystemSettings* m_settings = nullptr;
+	mutable const scene::WindSettings* m_wind = nullptr;
+	mutable EmitContext m_context;
+	int m_poolUsed = 0;
 };
 
 // The effect bundles a world object carries in its template tree, started
@@ -449,6 +604,24 @@ private:
 // has 0x20 (the exhaust's startup) and event 5 (the PlayerControlObject's
 // exit, 0x005cea00) stops those whose stopOnEffects has 0x40. The bundles
 // follow the object, turned with its parts as the game poses them.
+//
+// Two bundle classes pick their effect from the ground (the template's own
+// material against the ground's: MaterialManager's cell effect 0, slot
+// 0x68): WheelEffectBundle (0x0061bfc0: while its wheel touches, at the
+// contact) and AirDraftEffectBundle (0x0061d820: a ray along its -y,
+// startDistance + 5 long, against the terrain, the water and the objects;
+// while it hits closer than startDistance, at the hit). Each tick their
+// modifiers (alpha intensity, emit scale, emit speed scale, age scale) are
+// min + (max - min) x the product of the "From" mappings that are set
+// (0x0061bd20, 0x0061ce20): FromSpeed the speed of the vehicle at the
+// bundle, FromSpeedInDof its forward part (at least 0), FromAltitude the
+// draft's ray length, FromEngine the engine's throttle; a mapping a/b
+// gives 0 at a and 1 at b, clamped.
+//
+// A soldier's breathEffect (Soldier +0x3a0, created with it, 0x00588xxx)
+// is shown while gameLogic.useColdBreath is on and the kit doesn't
+// disableBreathEffect, unless it is the local player's own soldier in
+// first person (0x00588830, every few seconds).
 class ObjectEffects {
 public:
 	struct ObjectState {
@@ -461,7 +634,27 @@ public:
 		// 9 + N for "effect:N"): those bundles whose startOnEffects has
 		// one start (0x0061a4e0), as a walker's foot steps.
 		uint32_t effects = 0;
+		// Its velocity (m/s, world) and its engine's throttle (0..1): the
+		// wheel and draft bundles' modifiers.
+		Vec3 velocity;
+		float engine = 0;
+		// Soldiers: breathing out in the cold (useColdBreath, not the
+		// kit's disableBreathEffect, not the local player in first person).
+		bool coldBreath = false;
 	};
+	// The ground under a point (wheel and draft bundles): the first hit from
+	// `from` to `to` against the terrain, the water and the objects (not
+	// `ignore`), its point and material.
+	using GroundProbe = std::function<bool(const Vec3& from, const Vec3& to, uint32_t ignore, Vec3& hit,
+		uint32_t& material)>;
+	// The effect template of a pair of materials (MaterialManager's cell
+	// effect 0), "" for none.
+	using MaterialEffect = std::function<std::string(uint32_t bundleMaterial, uint32_t groundMaterial)>;
+	void setGround(GroundProbe probe, MaterialEffect effect)
+	{
+		m_probe = std::move(probe);
+		m_materialEffect = std::move(effect);
+	}
 	// A part's pose in its parent (the game's partPose); may be empty.
 	using PartPose = std::function<bool(uint32_t object, const std::string& part, Vec3& offset, Vec3& rotation)>;
 
@@ -481,6 +674,24 @@ public:
 		Mat3 rotation;
 		uint32_t startOnEffects = 0, stopOnEffects = 0;
 		bool startAtCreation = false;
+		// WheelEffectBundle / AirDraftEffectBundle: the ground picks the effect.
+		enum class Kind { Plain, Wheel, AirDraft } kind = Kind::Plain;
+	};
+	// A Wheel/AirDraft bundle's template values (its effectProperties part).
+	struct GroundBundle {
+		uint32_t material = 0;
+		float startDistance = 0, maxDistance = 0; // AirDraft (+0x3b8, +0x3bc)
+		float engineInfluence = 0;                // +0x3b4
+		// The modifiers: 0 alpha intensity, 1 emit scale, 2 emit speed
+		// scale, 3 age scale. Each its range and its mappings (0/0 unset).
+		struct Modifier {
+			float min = 1, max = 1;
+			std::array<float, 2> fromSpeed {0, 0}, fromSpeedInDof {0, 0}, fromAltitude {0, 0}, fromEngine {0, 0};
+		};
+		std::array<Modifier, 4> modifiers;
+		static GroundBundle fromTemplate(const world::ObjectTemplate& t);
+		// A modifier's value for the inputs (0x0061bd20 / 0x0061ce20).
+		float value(int modifier, float speed, float speedInDof, float altitude, float engine) const;
 	};
 	// Whether each template's tree holds a bundle, kept between calls so
 	// the walk skips the branches without one (a Titan's tree is large).
@@ -493,12 +704,26 @@ private:
 		const world::ObjectTemplate* objectTemplate = nullptr;
 		std::vector<Placed> bundles;
 		bool occupied = false;
+		// The ground bundles' current effect (by bundle), "" while off.
+		std::vector<std::string> groundEffects;
+		std::string breath; // the breathEffect bundle, "" for none
+		bool breathing = false;
+		Vec3 lastPosition, velocity; // its velocity from its moves (one tick, 1/30 s)
+		bool moved = false;
 	};
+	void updateGround(const ObjectState& object, const Vec3& velocity, Tracked& tracked, size_t index, EffectManager& effects,
+		const PartPose& partPose, EffectManager::View view);
+	GroundProbe m_probe;
+	MaterialEffect m_materialEffect;
+	std::map<const world::ObjectTemplate*, GroundBundle> m_groundBundles;
 	const world::ObjectTemplateManager& m_templates;
 	std::map<uint32_t, Tracked> m_objects;
 	BundleCache m_hasBundles;
 	// A bundle's place along its chain under the parts' current poses.
 	static void place(const Placed& bundle, uint32_t object, const PartPose& partPose, Vec3& position, Mat3& rotation);
+public:
+	// The tag the breath bundle is spawned with on its soldier.
+	static constexpr uint32_t kBreathTag = 0xb7ea7;
 };
 
 // Rain and snow (RendDX9's rain manager, Shaders/Rain.fx): particleCount

@@ -26,6 +26,20 @@ struct MenuImage {
 	std::vector<uint8_t> rgba;
 };
 
+// A movie a clip shows in place of an image: the menu's Bink videos
+// (loadMovie / the image component's loadImg of "?titan_tutorial.bik"),
+// which SwiffPlayer draws as a video texture. The host decodes them
+// (Movie/MovieDecoder.h); the player asks for the picture as time passes.
+class VideoSource {
+public:
+	virtual ~VideoSource() = default;
+	// The picture `seconds` later: true and `frame` replaced when a new
+	// picture is due, false when it stays (also after the last one).
+	virtual bool advance(double seconds, MenuImage& frame) = 0;
+	// Whether the last picture was shown.
+	virtual bool finished() const = 0;
+};
+
 struct MenuBatch {
 	std::string texture;                     // a file path, or empty with `image`
 	std::shared_ptr<const MenuImage> image;  // kept alive while drawn; uploaded once per object

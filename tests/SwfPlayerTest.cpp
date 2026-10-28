@@ -653,3 +653,62 @@ TEST(SwfPlayer_MainMenu)
 	}
 	std::fprintf(stderr, "\n");
 }
+
+// A movie in a clip (loadMovie of "?name.bik", the menu's Titan tutorial):
+// the host's video source opened, its first picture at once, the next ones
+// as time passes, gone again with unloadMovie.
+TEST(SwfPlayer_VideoClip)
+{
+	struct FakeVideo : VideoSource {
+		double time = 0;
+		int shown = -1;
+		bool advance(double seconds, MenuImage& frame) override
+		{
+			time += seconds;
+			const int due = static_cast<int>(time * 10); // 10 pictures a second
+			if (due == shown || shown >= 4) {
+				return false;
+			}
+			shown = std::min(due, 4);
+			frame.width = 32;
+			frame.height = 16;
+			frame.rgba.assign(32 * 16 * 4, static_cast<uint8_t>(shown * 50));
+			return true;
+		}
+		bool finished() const override { return shown >= 4; }
+	};
+	Player player;
+	std::string error;
+	CHECK(player.load(testMovie(), &error));
+	std::string opened;
+	player.setVideoOpener([&opened](const std::string& url) -> std::shared_ptr<VideoSource> {
+		opened = url;
+		return url == "?titan_tutorial.bik" ? std::make_shared<FakeVideo>() : nullptr;
+	});
+	avm1::Interpreter& vm = player.vm();
+	vm.callMember(player.evaluate("_root"), "createEmptyMovieClip", {avm1::Value("tutorial"), avm1::Value(50)});
+	const avm1::Value clip = player.evaluate("tutorial");
+	CHECK(clip.isObject());
+	vm.callMember(clip, "loadMovie", {avm1::Value("?titan_tutorial.bik")});
+	CHECK(opened == "?titan_tutorial.bik");
+	CHECK(text(player, "tutorial._width") == "32");
+	const auto picture = [&player]() -> int {
+		for (const MenuBatch& batch : player.frame().batches) {
+			if (batch.image && batch.image->width == 32) {
+				return batch.image->rgba[0];
+			}
+		}
+		return -1;
+	};
+	CHECK(picture() == 0);
+	player.advance(0.25);
+	CHECK(picture() == 100); // picture 2 at 0.25 s
+	player.advance(1.0);
+	CHECK(picture() == 200); // the last one stays
+	// A movie that cannot be opened leaves the clip as it was.
+	vm.callMember(player.evaluate("_root"), "createEmptyMovieClip", {avm1::Value("other"), avm1::Value(51)});
+	vm.callMember(player.evaluate("other"), "loadMovie", {avm1::Value("?missing.bik")});
+	CHECK(text(player, "other._width") == "0");
+	vm.callMember(clip, "unloadMovie", {});
+	CHECK(picture() == -1);
+}

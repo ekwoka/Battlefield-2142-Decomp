@@ -56,10 +56,57 @@ void GameLogic::setTickets(int teamIndex, float tickets)
 	checkLimits(teamIndex, before, std::floor(t.tickets));
 }
 
+void GameLogic::waitToStart(int playersNeeded, float startDelay, float notEnoughPlayersRestartDelay,
+	std::function<int()> playerCount)
+{
+	m_playersNeeded = playersNeeded;
+	m_startDelay = std::max(startDelay, 0.0f);
+	m_notEnoughDelay = notEnoughPlayersRestartDelay;
+	m_playerCount = std::move(playerCount);
+	m_state = 1;
+	m_countdown = 0;
+	m_shortFor = 0;
+	m_shortRaised = false;
+}
+
 void GameLogic::tick(float seconds)
 {
 	if (m_ended) {
 		return;
+	}
+	const int players = m_playerCount ? m_playerCount() : 0;
+	if (m_state == 1) {
+		// Waiting for the players needed, then the start delay's countdown
+		// (+0x280; the round's start tick sent as now + startDelay x 30).
+		if (players < m_playersNeeded) {
+			return;
+		}
+		m_state = 2;
+		m_countdown = m_startDelay;
+	}
+	if (m_state == 2) {
+		m_countdown -= seconds;
+		if (m_countdown >= 0) {
+			return;
+		}
+		m_state = 3;
+		elapsed = 0;
+		if (onPlaying) {
+			onPlaying();
+		}
+		return;
+	}
+	// Too few players for notEnoughPlayersRestartDelay: TimeLimitReached(0).
+	if (m_playerCount && m_playersNeeded > 0 && players < m_playersNeeded) {
+		m_shortFor += seconds;
+		if (m_shortFor >= m_notEnoughDelay && !m_shortRaised) {
+			m_shortRaised = true;
+			if (m_events) {
+				m_events("TimeLimitReached", {ScriptValue::integer(0)});
+			}
+		}
+	} else {
+		m_shortFor = 0;
 	}
 	elapsed += seconds;
 	for (int t = 1; t <= 2 && !m_ended; ++t) {
@@ -71,7 +118,7 @@ void GameLogic::tick(float seconds)
 	if (!m_ended && timeLimit > 0 && elapsed >= timeLimit && !m_timeLimitRaised) {
 		m_timeLimitRaised = true;
 		if (m_events) {
-			m_events("TimeLimitReached", {ScriptValue::integer(0)});
+			m_events("TimeLimitReached", {ScriptValue::integer(-1)}); // the time limit's value
 		}
 	}
 }

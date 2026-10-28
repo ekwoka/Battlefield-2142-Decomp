@@ -39,8 +39,29 @@ void GameClient::disconnect()
 	}
 }
 
+void GameClient::playDemo(std::function<int(std::vector<uint8_t>& payload)> next)
+{
+	m_demo = std::move(next);
+	m_state = m_demo ? State::Connected : State::Idle;
+}
+
 bool GameClient::update()
 {
+	if (m_demo) {
+		// A demo (0x004b52e0 with no socket: 0x00517290 -> 0x00516c80): the
+		// recorded payloads as they come due, nothing sent back.
+		std::vector<uint8_t> payload;
+		for (int got; (got = m_demo(payload)) != 0;) {
+			if (got < 0) {
+				m_state = State::Disconnected;
+				m_demo = {};
+				return false;
+			}
+			handlePayload(payload);
+			payload.clear();
+		}
+		return true;
+	}
 	const auto onData = [this](const ConnectedPacket& packet) { onPacket(packet); };
 	if (m_state == State::Connecting) {
 		if (!m_connection.poll(onData)) {
@@ -82,7 +103,7 @@ void GameClient::simulatedTick()
 {
 	// 0x004b3df0: a client sends after each simulated tick (connection
 	// types other than 0), so each move is one of its ticks.
-	if (m_state != State::Connected || !sendOnTicks) {
+	if (m_state != State::Connected || !sendOnTicks || m_demo) {
 		return;
 	}
 	m_lastTick = std::chrono::steady_clock::now();
@@ -101,6 +122,11 @@ void GameClient::onPacket(const ConnectedPacket& packet)
 	if (length < payload.size()) {
 		payload.resize(length);
 	}
+	handlePayload(payload);
+}
+
+void GameClient::handlePayload(const std::vector<uint8_t>& payload)
+{
 	GamePayload decoded;
 	readGamePayload(payload, decoded);
 	if (onPayload) {

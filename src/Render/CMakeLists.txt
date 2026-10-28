@@ -31,6 +31,7 @@ bf2142_embed_shaders(Render
 	Shaders/undergrowth.frag
 	Shaders/particle.vert
 	Shaders/particle.frag
+	Shaders/shimmer.frag
 	Shaders/ui.vert
 	Shaders/ui.frag
 	Shaders/shadowcaster.frag

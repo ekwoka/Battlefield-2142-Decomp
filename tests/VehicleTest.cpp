@@ -5,6 +5,7 @@
 #include "IO/File/FileManager.h"
 #include "Physics/CollisionMeshFile.h"
 #include "Physics/CollisionWorld.h"
+#include "Render/MeshQueues.h"
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplate.h"
@@ -12,6 +13,7 @@
 #include "World/WorldConsole.h"
 
 #include <cmath>
+#include <functional>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -359,4 +361,54 @@ TEST(Vehicle_ShippedWheelsResolveToTheirCollisionParts)
 				wheel.radius, wheel.spinRadius);
 		}
 	}
+}
+
+// An idle FAV shows no EMP lightning: its eu_fav_EMP_trigger EffectBundle
+// (startOnEffects bit 17, not at creation) holds e_EMP_Fav, whose meshes
+// only the effect system draws once the bundle starts (0x0061a4e0); the
+// object's own drawing doesn't go into bundles (render::drawnWithObject).
+TEST(Vehicles_IdleBundlesAreNotDrawnWithTheObject)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	files.setMountingAllowed(true);
+	CHECK(files.mountArchive("Objects/Vehicles_server.zip", "Objects\\Vehicles"));
+	files.setMountingAllowed(false);
+	Console console {&files};
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	world::registerWorldConsoleMethods(console, templates, objects);
+	std::string out;
+	console.run("Objects/Vehicles/eu_fav/eu_fav.con", {}, out);
+	const world::ObjectTemplate* fav = templates.find("eu_fav");
+	CHECK(fav != nullptr);
+	if (!fav) {
+		return;
+	}
+	const world::ObjectTemplate* trigger = templates.find("eu_fav_EMP_trigger");
+	CHECK(trigger && trigger->typeName() == "EffectBundle");
+	const auto reaches = [&](bool filtered) {
+		bool found = false;
+		std::function<void(const world::ObjectTemplate&, int)> walk = [&](const world::ObjectTemplate& t, int depth) {
+			for (const world::ChildTemplate& child : t.children()) {
+				if (child.name == "e_EMP_Fav") {
+					found = true;
+				}
+				const world::ObjectTemplate* c = templates.find(child.name);
+				if (c && depth < 8 && (!filtered || render::drawnWithObject(c->typeName()))) {
+					walk(*c, depth + 1);
+				}
+			}
+		};
+		walk(*fav, 0);
+		return found;
+	};
+	CHECK(reaches(false));
+	CHECK(!reaches(true));
+	CHECK(render::drawnWithObject("PlayerControlObject") && render::drawnWithObject("RotationalBundle"));
 }

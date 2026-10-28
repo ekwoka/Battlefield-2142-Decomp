@@ -20,6 +20,9 @@ layout(set = 1, binding = 0) uniform Transforms {
 	mat4 world;
 	vec4 lightmapTransform; // xy scale, zw offset into the lightmap atlas
 	mat4 parts[64];         // bundled-mesh part transforms (identity for others)
+	// The leaves' sway (RaShaderLeaf.fx, not OVERGROWTH): x on, y ObjRadius,
+	// z WindSpeed + WIND_ADD, w GlobalTime.
+	vec4 sway;
 };
 
 layout(location = 0) out vec3 outNormal;
@@ -37,6 +40,12 @@ void main()
 	mat4 part = parts[clamp(int(inPart + 0.5), 0, 63)] * inWeight +
 		parts[clamp(int(inPart2 + 0.5), 0, 63)] * (1.0 - inWeight);
 	vec4 local = part * vec4(inPosition, 1.0);
+	if (sway.x > 0.5) {
+		// inPos.xyz += sin((GlobalTime / (ObjRadius + y)) * WindSpeed) *
+		// (ObjRadius + y)^2 / LEAF_MOVEMENT (1024).
+		float r = max(sway.y + local.y, 1e-3);
+		local.xyz += vec3(sin((sway.w / r) * sway.z) * r * r / 1024.0);
+	}
 	gl_Position = worldViewProjection * local;
 	outWorldPosition = (world * local).xyz;
 	outNormal = mat3(world) * (mat3(part) * inNormal);

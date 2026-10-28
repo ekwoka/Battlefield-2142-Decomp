@@ -136,7 +136,7 @@ void Console::registerMethod(ConsoleMethod method)
 	if (!method.stub) {
 		const auto [first, last] = m_methods.equal_range(key);
 		for (auto it = first; it != last;) {
-			it = it->second.stub ? m_methods.erase(it) : std::next(it);
+			it = it->second.stub || method.replaces ? m_methods.erase(it) : std::next(it);
 		}
 	}
 	m_methods.emplace(std::move(key), std::move(method));

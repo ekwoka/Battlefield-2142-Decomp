@@ -163,6 +163,7 @@ public:
 
 	// loadMovie() of an image: drawn at the origin instead of the timeline.
 	std::shared_ptr<const MenuImage> image;
+	std::shared_ptr<VideoSource> video; // a movie's pictures become `image`
 	std::string url;
 	size_t bytes = 0;
 

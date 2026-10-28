@@ -75,6 +75,7 @@ void addFlame(world::ObjectTemplateManager& templates, bool local, const char* f
 	flame->settings()["emitTime"] = "0.1";
 	flame->settings()["isLooping"] = "1";
 	flame->settings()["timeToLive"] = "1";
+	flame->settings()["gravity"] = "0"; // the sprite template's default is -9.82
 	flame->settings()["textureName"] = "flame";
 	flame->settings()["isLocalSystem"] = local ? "1" : "0";
 	flame->settings()["showInFirstPerson"] = firstPerson;
@@ -141,6 +142,8 @@ TEST(Effects_WorldSystemsLeaveTheirParticles)
 	effects::EffectManager manager(templates);
 	manager.setAnchor(1, {0, 0, 0}, {});
 	manager.spawnAttached("e_flame", 1, {});
+	// The first particle comes one interval (1/30 s) in, in 0.01 s steps.
+	manager.update(1 / 30.0f);
 	manager.update(1 / 30.0f);
 	const auto before = sprites(manager);
 	CHECK(!before.empty());
@@ -148,6 +151,7 @@ TEST(Effects_WorldSystemsLeaveTheirParticles)
 	manager.setAnchor(1, {50, 0, 0}, {});
 	const auto after = sprites(manager);
 	CHECK(after.size() == before.size() && std::fabs(after[0].position.x - before[0].position.x) < 1e-4f);
+	manager.update(1 / 30.0f);
 	manager.update(1 / 30.0f);
 	const auto trail = sprites(manager);
 	CHECK(trail.back().position.x > 40);
@@ -197,6 +201,7 @@ TEST(Effects_ObjectBundlesStartAndStopAsTheOriginal)
 	state.position = {100, 0, 0};
 	objects.update({state}, manager);
 	CHECK(manager.emitting(9, 1) && !manager.emitting(9, 2));
+	manager.update(1 / 30.0f);
 	manager.update(1 / 30.0f);
 	auto list = sprites(manager);
 	CHECK(!list.empty() && std::fabs(list[0].position.x - 100) < 1e-4f && std::fabs(list[0].position.z + 2) < 1e-4f);
@@ -420,4 +425,225 @@ TEST(Effects_DecalsOnMovingObjects)
 	CHECK(std::fabs(d.normal.z - 1) < 1e-4f);
 	manager.dropDecals(42);
 	CHECK(manager.decals().empty());
+}
+
+namespace {
+
+// One sprite system "puff" (no gravity by default here) in a bundle "e_puff".
+world::ObjectTemplate* addPuff(world::ObjectTemplateManager& templates)
+{
+	templates.registerType(1, "EffectBundle");
+	templates.registerType(2, "SpriteParticleSystem");
+	world::ObjectTemplate* puff = templates.create("SpriteParticleSystem", "puff");
+	puff->settings()["emitFrequency"] = "10";
+	puff->settings()["emitTime"] = "1";
+	puff->settings()["timeToLive"] = "5";
+	puff->settings()["gravity"] = "0";
+	puff->settings()["textureName"] = "puff";
+	world::ObjectTemplate* bundle = templates.create("EffectBundle", "e_puff");
+	bundle->children().push_back({"puff", {}, {}});
+	return puff;
+}
+
+} // namespace
+
+// RendDX9's emitter (0x101407c0 / 0x1013f0c0): the sprite template's
+// defaults, quadratic drag towards the wind, pre-warm, the quality level,
+// the view distance and the LOD fade.
+TEST(Effects_EmitterAsRendDX9)
+{
+	{
+		// The sprite template's defaults: 32 a second, 4 s, -9.82 (0x10138b40).
+		world::ObjectTemplateManager templates;
+		templates.registerType(2, "SpriteParticleSystem");
+		world::ObjectTemplate* t = templates.create("SpriteParticleSystem", "plain");
+		const auto p = effects::ParticleTemplate::fromTemplate(*t);
+		CHECK(p.emitFrequency == 32 && p.timeToLive == 4 && std::fabs(p.gravity + 9.82f) < 1e-5f);
+		t->settings()["LodDistance"] = "Low";
+		t->settings()["qualityLevel"] = "High";
+		t->settings()["emitPrio"] = "medium";
+		t->settings()["particleShaderType"] = "1";
+		const auto q = effects::ParticleTemplate::fromTemplate(*t);
+		CHECK(q.lodDistance == 0 && q.qualityLevel == 2 && q.emitPrio == 1 && q.heatShimmer);
+	}
+	// Drag: a particle shot at 20 m/s into still air slows as -k|v|v.
+	{
+		world::ObjectTemplateManager templates;
+		world::ObjectTemplate* puff = addPuff(templates);
+		puff->settings()["emitSpeed"] = "20";
+		puff->settings()["emitDirection"] = "1/0/0";
+		puff->settings()["airResistance"] = "0.1";
+		effects::EffectManager manager(templates);
+		manager.spawn("e_puff", {});
+		for (int i = 0; i < 6; ++i) {
+			manager.update(1 / 30.0f);
+		}
+		const auto& particles = manager.emitterList()[0]->particles();
+		CHECK(!particles.empty());
+		// v' = -0.1 v^2: from 20, after t seconds v = 20 / (1 + 2 t).
+		const effects::Particle& first = particles.front();
+		const float expected = 20 / (1 + 2 * first.age);
+		CHECK(std::fabs(first.velocity.x - expected) < 0.3f);
+		// Wind (5 m/s along z) moves a wind-affected particle towards it.
+		puff->settings()["windAffectionFactor"] = "1";
+		puff->settings()["emitSpeed"] = "0";
+		effects::EffectManager windy(templates);
+		scene::WindSettings wind;
+		wind.globalWindSpeed = 5;
+		windy.setWind(&wind);
+		windy.spawn("e_puff", {});
+		for (int i = 0; i < 30; ++i) {
+			windy.update(1 / 30.0f);
+		}
+		const auto& blown = windy.emitterList()[0]->particles();
+		CHECK(!blown.empty() && blown.front().velocity.z > 0.5f && blown.front().velocity.z < 5.01f);
+	}
+	// Pre-warm: half a second run at once when the emission starts.
+	{
+		world::ObjectTemplateManager templates;
+		world::ObjectTemplate* puff = addPuff(templates);
+		puff->settings()["preWarmTime"] = "0.5";
+		effects::EffectManager manager(templates);
+		manager.spawn("e_puff", {});
+		manager.update(1 / 30.0f);
+		const auto& particles = manager.emitterList()[0]->particles();
+		CHECK(particles.size() >= 4 && particles.front().age > 0.4f);
+	}
+	// The manager's quality level and view distance.
+	{
+		world::ObjectTemplateManager templates;
+		world::ObjectTemplate* puff = addPuff(templates);
+		puff->settings()["qualityLevel"] = "High";
+		scene::ParticleSystemSettings settings;
+		settings.qualityLevel = 1;
+		effects::EffectManager low(templates);
+		low.setSettings(&settings);
+		low.spawn("e_puff", {});
+		low.update(0.5f);
+		CHECK(low.emitters() == 0); // not started (0x1013fb30)
+		settings.qualityLevel = 2;
+		effects::EffectManager far(templates);
+		far.setSettings(&settings);
+		far.setCamera({0, 0, 1000}, 0.5f); // beyond 500 m
+		far.spawn("e_puff", {});
+		far.update(0.5f);
+		CHECK(far.emitters() == 0);
+		effects::EffectManager near(templates);
+		near.setSettings(&settings);
+		near.setCamera({0, 0, 10}, 0.5f);
+		near.spawn("e_puff", {});
+		near.update(0.5f);
+		CHECK(near.emitters() == 1 && !near.emitterList()[0]->particles().empty());
+		CHECK(near.emitterList()[0]->lodScale() == 1.0f);
+	}
+	// The draw fade: past 0.85 of the class's distance (High: the view
+	// distance), (1 - f)^2.
+	{
+		scene::ParticleSystemSettings settings;
+		effects::ParticleView view;
+		view.settings = &settings;
+		CHECK(view.fade(100, 2) == 1.0f);
+		CHECK(std::fabs(view.fade(0.85f * 500 + 0.5f * 0.15f * 500, 2) - 0.25f) < 1e-4f);
+		CHECK(view.fade(600, 2) == 0.0f && view.fade(160, 0) == 0.0f);
+	}
+}
+
+// Wheel and draft bundles: the ground's material picks the effect, the
+// modifiers follow the speed and the altitude (0x0061bd20, 0x0061ce20,
+// 0x0061d820).
+TEST(Effects_GroundBundles)
+{
+	world::ObjectTemplateManager templates;
+	addPuff(templates);
+	templates.registerType(6, "AirDraftEffectBundle");
+	templates.registerType(7, "PlayerControlObject");
+	world::ObjectTemplate* draft = templates.create("AirDraftEffectBundle", "ade_test");
+	draft->settings()["material"] = "62";
+	draft->settings()["startDistance"] = "20";
+	draft->settings()["AlphaIntensityRange"] = "0.5/1";
+	draft->settings()["AlphaIntensityFromAltitude"] = "20/0";
+	draft->settings()["EmitSpeedScaleRange"] = "0.3/1";
+	draft->settings()["EmitSpeedScaleFromEngine"] = "0/1";
+	const auto g = effects::ObjectEffects::GroundBundle::fromTemplate(*draft);
+	CHECK(g.material == 62 && g.startDistance == 20);
+	CHECK(std::fabs(g.value(0, 0, 0, 10, 0) - 0.75f) < 1e-5f); // halfway down: half the range
+	CHECK(g.value(0, 0, 0, 25, 0) == 0.5f && g.value(2, 0, 0, 0, 1) == 1.0f && g.value(1, 0, 0, 0, 0) == 1.0f);
+	world::ObjectTemplate* ship = templates.create("PlayerControlObject", "ship");
+	ship->children().push_back({"ade_test", {0, 0, 0}, {}});
+
+	effects::EffectManager manager(templates);
+	effects::ObjectEffects objects(templates);
+	int probes = 0;
+	objects.setGround(
+		[&probes](const effects::Vec3& from, const effects::Vec3& to, uint32_t, effects::Vec3& hit, uint32_t& material) {
+			++probes;
+			if (to.y > 0) {
+				return false;
+			}
+			hit = {from.x, 0, from.z}; // flat ground at y 0, material 2
+			material = 2;
+			return true;
+		},
+		[](uint32_t bundle, uint32_t ground) { return bundle == 62 && ground == 2 ? std::string("e_puff") : std::string(); });
+	effects::ObjectEffects::ObjectState state;
+	state.id = 5;
+	state.objectTemplate = ship;
+	state.position = {0, 10, 0};
+	objects.update({state}, manager);
+	CHECK(probes == 0 && manager.emitters() == 0); // parked, engine off: no rays
+	state.occupied = true;
+	objects.update({state}, manager);
+	CHECK(probes == 1 && manager.emitting(5, 1));
+	CHECK(std::fabs(manager.emitterList()[0]->alphaIntensity - 0.75f) < 1e-4f);
+	// Up beyond startDistance: the draft stops.
+	state.position = {0, 30, 0};
+	objects.update({state}, manager);
+	CHECK(!manager.emitting(5, 1));
+}
+
+// The cold breath (0x00588830): a soldier's breathEffect while it breathes out.
+TEST(Effects_ColdBreath)
+{
+	world::ObjectTemplateManager templates;
+	addPuff(templates);
+	templates.registerType(8, "Soldier");
+	world::ObjectTemplate* soldier = templates.create("Soldier", "bp1_soldier");
+	soldier->settings()["breathEffect"] = "e_puff";
+	effects::EffectManager manager(templates);
+	effects::ObjectEffects objects(templates);
+	effects::ObjectEffects::ObjectState state;
+	state.id = 3;
+	state.objectTemplate = soldier;
+	objects.update({state}, manager);
+	CHECK(!manager.emitting(3));
+	state.coldBreath = true;
+	objects.update({state}, manager);
+	CHECK(manager.emitting(3, effects::ObjectEffects::kBreathTag));
+	state.coldBreath = false;
+	objects.update({state}, manager);
+	CHECK(!manager.emitting(3));
+}
+
+// VideoSettings' levels as RendDX9's switch applies them (0x10010040,
+// 0x100991b0).
+TEST(Effects_QualityLevels)
+{
+	scene::QualitySettings q;
+	scene::ParticleSystemSettings s;
+	q.applyEffects(s);
+	CHECK(s.viewDistance == 500 && s.maxParticles == 1000 && s.particleSystemShaderQuality == 3 && s.qualityLevel == 2);
+	q.effects = 1;
+	q.terrain = 1;
+	q.geometry = 2;
+	q.texture = 1;
+	q.dynamicLighting = 0;
+	q.applyEffects(s);
+	CHECK(s.viewDistance == 250 && s.maxParticles == 300 && s.particleSystemShaderQuality == 1 && s.qualityLevel == 0);
+	CHECK(std::fabs(s.startFadePercentageOfViewDistance - 0.2f) < 1e-6f);
+	CHECK(q.terrainLodSwitchDistance() == 64 && q.undergrowthViewDistanceScale() == 0.5f);
+	CHECK(std::fabs(q.geometryLodFactor() - 0.8f) < 1e-6f && q.skipMipLevels() == 1);
+	CHECK(!q.dynamicLightsEnabled() && !q.decalsEnabled());
+	q.viewDistanceScale = 0.1f;
+	q.applyEffects(s);
+	CHECK(s.viewDistance == 200); // at least 200
 }

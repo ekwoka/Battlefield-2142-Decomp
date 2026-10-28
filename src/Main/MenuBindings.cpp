@@ -4,6 +4,8 @@
 
 #include "EndOfRoundBindings.h"
 #include "Input/ControlMap.h"
+#include "Input/GameControllers.h"
+#include "SettingsObjects.h"
 #include "Net/Fesl.h"
 #include "Net/ServerQuery.h"
 #include "Net/Socket.h"
@@ -1563,6 +1565,7 @@ void MenuBindings::bindServerSettings()
 				}
 			}
 			saveSettings();
+			exportSettings(prefix);
 			if (onSettingsApplied) {
 				onSettingsApplied();
 			}
@@ -1635,6 +1638,94 @@ void MenuBindings::bindServerSettings()
 	m_appliedSettings = m_settings;
 }
 
+namespace {
+
+// The pages' names that the settings objects spell differently.
+constexpr std::pair<const char*, const char*> kSettingAliases[] = {
+	{"AudioSettings.VoiceOverVolume", "AudioSettings.HelpVoiceVolume"},
+	{"AudioSettings.NumberOfVoices", "AudioSettings.ForceNumberOfVoices"},
+	{"VideoSettings.BloomEnabled", "VideoSettings.UseBloom"},
+};
+// Kept apart: the page's SoundQuality is a number, the object's a name.
+bool syncedSetting(const std::string& key)
+{
+	return key != "AudioSettings.SoundQuality";
+}
+std::string objectKey(const std::string& page)
+{
+	for (const auto& [from, to] : kSettingAliases) {
+		if (page == from) {
+			return to;
+		}
+	}
+	return page;
+}
+
+} // namespace
+
+void MenuBindings::setSettingsObjects(SettingsObjects* objects)
+{
+	m_objects = objects;
+	if (!objects) {
+		return;
+	}
+	// The objects' single values over the pages' defaults, keeping each
+	// default's kind (a check box's boolean, a slider's number).
+	for (auto& [key, value] : m_settings) {
+		const std::string from = objectKey(key);
+		if (!syncedSetting(key) || !objects->has(from)) {
+			continue;
+		}
+		const std::string text = objects->get(from);
+		if (text.empty() || text.find(' ') != std::string::npos) {
+			continue;
+		}
+		if (value.isBoolean()) {
+			value = Value(std::atof(text.c_str()) != 0);
+		} else if (value.isNumber()) {
+			value = Value(std::atof(text.c_str()));
+		} else {
+			value = Value(text);
+		}
+		m_appliedSettings[key] = value;
+	}
+	// The ones the pages had no default for.
+	for (const auto& [key, text] : objects->values()) {
+		if (!m_settings.count(key) && !text.empty() && text.find(' ') == std::string::npos && syncedSetting(key)) {
+			char* end = nullptr;
+			const double number = std::strtod(text.c_str(), &end);
+			const Value value = *end == 0 ? Value(number) : Value(text);
+			m_settings[key] = value;
+			m_appliedSettings[key] = value;
+		}
+	}
+}
+
+// apply(): the page's values to the settings objects, and their files saved.
+void MenuBindings::exportSettings(const std::string& prefix)
+{
+	if (!m_objects) {
+		return;
+	}
+	for (const auto& [key, v] : m_appliedSettings) {
+		if (key.compare(0, prefix.size(), prefix) != 0 || !syncedSetting(key)) {
+			continue;
+		}
+		const std::string to = objectKey(key);
+		if (!m_objects->has(to)) {
+			continue;
+		}
+		if (v.isBoolean()) {
+			m_objects->set(to, v.asBoolean() ? "1" : "0");
+		} else if (v.isNumber()) {
+			m_objects->set(to, avm1::numberToString(v.asNumber()));
+		} else if (v.isString()) {
+			m_objects->set(to, v.asString());
+		}
+	}
+	m_objects->save();
+}
+
 // The settings file: "Object.Name type value" per line (n number, b
 // boolean, s text), the applied values of every settings object.
 void MenuBindings::setSettingsFile(const std::string& path)
@@ -1703,7 +1794,10 @@ void MenuBindings::bindControls()
 	});
 	n.setFunction(kControlSettings, "getActiveControlMap", [this](Interpreter&, const Args&) { return Value(m_controlMap); });
 	// getMappedString(keyId, secondary, negative): the key on the input
-	// (keyId: the engine's c_PI number) in that slot and side, as shown.
+	// (keyId: the engine's c_PI number) in that slot and side, as shown:
+	// 0x10018050 localizes the "CONTROLLER_..." key the game gives
+	// (0x00498750: "CONTROLLER_IDKey_W", "CONTROLLER_IDFMouse_IDButton_0",
+	// "CONTROLLER_IDFGameController_IDButton_3"), nothing for none.
 	n.setFunction(kControlSettings, "getMappedString", [this, mapName](Interpreter& vm, const Args& args) {
 		if (!m_controls) {
 			return Value("");
@@ -1714,22 +1808,36 @@ void MenuBindings::bindControls()
 		if (!b) {
 			return Value("");
 		}
-		// "IDKey_W" as "W", "IDButton_0" as "Mouse 1".
-		if (b->control.compare(0, 9, "IDButton_") == 0) {
+		const std::string key = input::ControlMaps::displayKey(*b);
+		const std::string text = m_natives.localize(key);
+		if (!text.empty() && text != key) {
+			return Value(text);
+		}
+		// No localization: "IDKey_W" as "W", "IDButton_0" as "Mouse 1".
+		if (b->control.compare(0, 9, "IDButton_") == 0 && b->device == "IDFMouse") {
 			return Value("Mouse " + std::to_string(std::atoi(b->control.c_str() + 9) + 1));
+		}
+		if (input::GameControllers::slotNamed(b->device) >= 0) {
+			return Value((b->kind == input::Binding::Kind::Axis ? "Joy Axis " : "Joy Button ") +
+				std::to_string(std::atoi(b->control.c_str() + b->control.find('_') + 1)));
 		}
 		return Value(b->control.compare(0, 6, "IDKey_") == 0 ? b->control.substr(6) : b->control);
 	});
-	// mapInput(keyId, secondary, negative, superceed): binds the key pressed
-	// last there; true when it was bound.
+	// mapInput(keyId, secondary, negative, superceed): binds the input
+	// pressed last there (a key, a mouse button, or a game controller's
+	// button or axis: an axis goes on as an axis mapping, inverted when it
+	// was pushed the other way from the side being bound); true when it
+	// was bound.
 	n.setFunction(kControlSettings, "mapInput", [this, mapName](Interpreter& vm, const Args& args) {
 		const std::string input = input::inputNamed(static_cast<int>(vm.toNumber(arg(args, 0))), true);
 		if (!m_controls || input.empty() || m_lastInput.empty()) {
 			return Value(false);
 		}
-		m_controls->bind(mapName(), input, m_lastInput, avm1::toBoolean(arg(args, 1)) ? 1 : 0,
-			avm1::toBoolean(arg(args, 2)) ? -1.0f : 1.0f);
-		log("controls: " + input + " on " + m_lastInput);
+		const float side = avm1::toBoolean(arg(args, 2)) ? -1.0f : 1.0f;
+		const bool axis = m_lastInput.compare(0, 7, "IDAxis_") == 0;
+		m_controls->bind(mapName(), input, m_lastDevice.empty() ? std::string("IDFKeyboard") : m_lastDevice, m_lastInput,
+			avm1::toBoolean(arg(args, 1)) ? 1 : 0, axis ? side * m_lastDirection : side);
+		log("controls: " + input + " on " + (m_lastDevice.empty() ? "" : m_lastDevice + " ") + m_lastInput);
 		return Value(true);
 	});
 	n.setFunction(kControlSettings, "getLastDuplicateInput", [](Interpreter&, const Args&) { return Value(""); });

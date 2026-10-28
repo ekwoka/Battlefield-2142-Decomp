@@ -67,9 +67,35 @@ Graph Graph::parse(const std::string& text)
 	return g;
 }
 
+namespace {
+
+// Low, Medium, High (BF2142.exe 0x00a04284); some scripts give a number
+// for LodDistance (51 "500"), which the exe's setter (0x00625f60) doesn't
+// find among the names: the class stays as it was.
+int lowMediumHigh(const world::ObjectTemplate& t, const char* name, int fallback)
+{
+	const std::string* value = setting(t, name);
+	if (!value) {
+		return fallback;
+	}
+	std::string v = *value;
+	for (char& c : v) {
+		c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+	}
+	return v == "low" ? 0 : v == "medium" ? 1 : v == "high" ? 2 : fallback;
+}
+
+} // namespace
+
 ParticleTemplate ParticleTemplate::fromTemplate(const world::ObjectTemplate& t)
 {
 	ParticleTemplate p;
+	if (t.typeName() == "SpriteParticleSystem") {
+		// The sprite template's constructor (0x10138b40).
+		p.emitFrequency = 32;
+		p.gravity = -9.82f;
+		p.timeToLive = 4;
+	}
 	if (const std::string* type = setting(t, "emitterType")) {
 		p.emitter = *type == "RadialDirection" ? Emitter::RadialDirection : Emitter::Standard;
 	}
@@ -104,6 +130,19 @@ ParticleTemplate ParticleTemplate::fromTemplate(const world::ObjectTemplate& t)
 	p.transparencyGraph = graph(t, "transparencyGraph", p.transparencyGraph);
 	p.randomRotation = number(t, "randomRotation", p.randomRotation);
 	p.rotationSpeed = number(t, "rotationSpeed", p.rotationSpeed);
+	p.randomRotationSpeed = number(t, "randomRotationSpeed", p.randomRotationSpeed);
+	p.rotationGraph = graph(t, "rotationGraph", p.rotationGraph);
+	p.emitSpeedGraph = graph(t, "emitSpeedGraph", p.emitSpeedGraph);
+	p.preWarmTime = std::max(0.0f, number(t, "preWarmTime", p.preWarmTime));
+	p.windAffectionFactor = number(t, "windAffectionFactor", p.windAffectionFactor);
+	p.forceToWaterSurface = number(t, "forceToWaterSurface", 0) != 0;
+	p.waterSurfaceOffset = number(t, "waterSurfaceOffset", p.waterSurfaceOffset);
+	p.randomIntensity = number(t, "randomIntensity", p.randomIntensity);
+	p.lightMapIntensityOffset = number(t, "lightMapIntensityOffset", p.lightMapIntensityOffset);
+	p.lodDistance = lowMediumHigh(t, "LodDistance", p.lodDistance);
+	p.qualityLevel = lowMediumHigh(t, "QualityLevel", p.qualityLevel);
+	p.emitPrio = lowMediumHigh(t, "emitPrio", p.emitPrio);
+	p.heatShimmer = number(t, "particleShaderType", 0) == 1;
 	const std::string* blend = setting(t, "particleType");
 	if (!blend) {
 		blend = setting(t, "blendMode");
@@ -147,8 +186,12 @@ ParticleTemplate ParticleTemplate::fromTemplate(const world::ObjectTemplate& t)
 }
 
 Emitter::Emitter(const ParticleTemplate& t, const Vec3& position, const Mat3& rotation)
-	: m_template(&t), m_position(position), m_rotation(rotation)
+	: m_template(&t), m_position(position), m_rotation(rotation), m_previous(position)
 {
+	// The instance's pool (0x1013f6a0): (ttl + random ttl) x frequency + 10.
+	const float span = t.timeToLive + t.randomTimeToLive;
+	m_capacity = std::min(kMaxParticlesPerEmitter,
+		static_cast<size_t>(std::max(0.0f, std::round(span * t.emitFrequency + 10.0f))));
 }
 
 bool Emitter::alive() const
@@ -157,12 +200,15 @@ bool Emitter::alive() const
 	if (!m_particles.empty()) {
 		return true;
 	}
+	if (!m_active) {
+		return false; // never started (its quality, or out of view)
+	}
 	// A trail draws its path as long as its anchor carries it.
 	if (t.trail && anchor != 0 && !m_stopped) {
 		return true;
 	}
 	// An attached looping system emits until it is stopped.
-	return !m_stopped && (m_age < t.emitDelay + t.emitTime || (anchor != 0 && t.isLooping));
+	return !m_stopped && (m_age < t.emitDelay + t.emitTime + t.preWarmTime || (anchor != 0 && t.isLooping));
 }
 
 void Emitter::place(const Vec3& position, const Mat3& rotation)
@@ -176,83 +222,304 @@ Vec3 Emitter::worldPosition(const Particle& p) const
 	return m_template->localSystem ? m_position + m_rotation.transform(p.position) : p.position;
 }
 
-void Emitter::emit(game::Random& random)
+namespace {
+
+// RendDX9's random numbers in 0..1 and -1..1 (0x10025420: the mantissa's
+// top bits, (r | 0x80) >> 7 + 1, over 2^24 or 2^23 less 1).
+float unitRandom(game::Random& random)
+{
+	return random.unit();
+}
+
+float signedRandom(game::Random& random)
+{
+	return random.unit() * 2 - 1;
+}
+
+// 0x1000f070.
+float saturate(float v)
+{
+	return std::clamp(v, 0.0f, 1.0f);
+}
+
+constexpr float kStep = 0.01f;          // the particles' fixed step (DAT_101f7030)
+constexpr float kPreWarmStep = 1 / 30.0f; // the pre-warm's (0x101407c0)
+constexpr float kTwoPi = 6.2831853f;
+
+} // namespace
+
+// The start (0x1013fb30): of a quality the manager draws, within its view
+// distance of the camera, the emit time and delay and the pre-warm taken.
+void Emitter::start(const EmitContext& context)
 {
 	const ParticleTemplate& t = *m_template;
+	m_started = true;
+	m_delay = t.emitDelay;
+	m_emitLeft = t.emitTime;
+	m_preWarm = t.preWarmTime;
+	m_clock = m_emitClock = m_carry = 0;
+	m_previous = m_position;
+	m_active = true;
+	if (context.settings && t.qualityLevel > context.settings->qualityLevel) {
+		m_active = false;
+		return;
+	}
+	if (context.settings && context.hasCamera
+		&& physics::lengthSquared(m_position - context.camera)
+			> context.settings->viewDistance * context.settings->viewDistance) {
+		m_active = false;
+	}
+}
+
+// One particle's motion over `steps` steps of `step` seconds (0x1013f0c0).
+void Emitter::simulate(Particle& p, float step, int steps, const EmitContext& context) const
+{
+	const ParticleTemplate& t = *m_template;
+	const float f = std::min(p.age / p.life, 1.0f);
+	Vec3 wind;
+	if (!t.localSystem && t.windAffectionFactor > 0 && context.wind
+		&& (!context.settings || context.settings->affectedByWind)) {
+		const auto w = context.wind->windAt();
+		wind = Vec3 {w[0], w[1], w[2]} * t.windAffectionFactor;
+	}
+	const float drag = saturate(t.airResistanceGraph.at(f)) * t.airResistance * step;
+	const float fall = saturate(t.gravityGraph.at(f)) * t.gravity * step;
+	// Gravity pulls down the world's y, in a local system's space too.
+	const Vec3 down = t.localSystem ? m_rotation.untransform({0, 1, 0}) : Vec3 {0, 1, 0};
+	for (int i = 0; i < steps; ++i) {
+		const Vec3 relative = p.velocity - wind;
+		const float speed2 = physics::lengthSquared(relative);
+		Vec3 dv;
+		if (std::fabs(speed2) >= 1.1920929e-07f) {
+			dv = relative * (-std::sqrt(speed2) * drag); // -k |r| r
+		}
+		dv += down * fall;
+		p.position += (p.velocity + dv * 0.5f) * step;
+		p.velocity += dv;
+		p.age += step;
+	}
+	if (std::fabs(p.velocity.x) < 0.001f) {
+		p.velocity.x = 0;
+	}
+	if (std::fabs(p.velocity.y) < 0.001f) {
+		p.velocity.y = 0;
+	}
+	if (std::fabs(p.velocity.z) < 0.001f) {
+		p.velocity.z = 0;
+	}
+	if (t.forceToWaterSurface && context.hasWater && !t.localSystem) {
+		p.position.y = context.waterLevel + t.waterSurfaceOffset;
+	}
+	// Its rotation (0x10131f80): its speed times the rotation graph.
+	p.rotation = std::fmod(p.rotation + saturate(t.rotationGraph.at(f)) * step * static_cast<float>(steps) * p.rotationSpeed,
+		kTwoPi);
+}
+
+// A particle's birth (0x1013fdc0) at `at` (world), `age` seconds old.
+void Emitter::emit(game::Random& random, const Vec3& at, float age, const EmitContext& context)
+{
+	const ParticleTemplate& t = *m_template;
+	if (m_particles.size() >= m_capacity) {
+		return;
+	}
+	const bool sprite = !t.mesh && !t.trail && !t.nonScreenAligned;
+	if (sprite && context.poolUsed && context.settings && *context.poolUsed >= context.settings->maxParticles) {
+		return; // the sprite pool is empty (0x5efc)
+	}
 	Particle p;
+	p.life = std::max(0.01f, t.timeToLive + unitRandom(random) * t.randomTimeToLive);
+	p.age = age;
+	p.alpha = alphaIntensity;
+	// Size and speed share one random (0x1013fdc0's local_8).
+	const float shared = signedRandom(random);
+	p.sizeOffset = shared * t.randomSize;
+	p.randomIntensity = signedRandom(random) * t.randomIntensity;
+	p.rotation = signedRandom(random) * t.randomRotation;
+	const float spin = signedRandom(random) * t.randomRotationSpeed;
+	p.rotationSpeed = spin < 0 ? spin - t.rotationSpeed : spin + t.rotationSpeed;
 	const Vec3 offset {t.emitRange[0].sample(random), t.emitRange[1].sample(random), t.emitRange[2].sample(random)};
 	// A local system keeps its particles in its own space.
-	p.position = t.localSystem ? offset : m_position + m_rotation.transform(offset);
+	p.position = t.localSystem ? offset : at + m_rotation.transform(offset);
 	const Vec3 axis = normalized(t.emitDirection);
 	Vec3 direction = axis;
 	if (t.emitter == ParticleTemplate::Emitter::RadialDirection) {
 		// Around the axis, at radialDirection from the plane across it, give
 		// or take randomRadialDirection.
-		const float around = random.unit() * 6.2831853f;
-		const float elevation = (t.radialDirection + (random.unit() * 2 - 1) * t.randomRadialDirection) * kDegrees;
+		const float around = random.unit() * kTwoPi;
+		const float elevation = (t.radialDirection + signedRandom(random) * t.randomRadialDirection) * kDegrees;
 		const Vec3 u = perpendicular(axis), v = physics::cross(axis, u);
 		const Vec3 radial = u * std::cos(around) + v * std::sin(around);
 		direction = axis * std::sin(elevation) + radial * std::cos(elevation);
 	} else if (t.randomDirectionAngle.x != 0 || t.randomDirectionAngle.y != 0 || t.randomDirectionAngle.z != 0) {
-		const Vec3 angles {(random.unit() * 2 - 1) * t.randomDirectionAngle.x,
-			(random.unit() * 2 - 1) * t.randomDirectionAngle.y, (random.unit() * 2 - 1) * t.randomDirectionAngle.z};
+		const Vec3 angles {signedRandom(random) * t.randomDirectionAngle.x, signedRandom(random) * t.randomDirectionAngle.y,
+			signedRandom(random) * t.randomDirectionAngle.z};
 		direction = Mat3::fromYawPitchRoll({angles.y, angles.x, angles.z}).transform(axis);
 	}
-	const float speed = t.emitSpeed + random.unit() * t.randomSpeed;
+	// The speed: emitSpeed less the shared random's randomSpeed, times the
+	// bundle's speed scale and emitSpeedGraph over the emit time.
+	const float spent = t.emitTime > 0 ? 1 - m_emitLeft / t.emitTime : 0;
+	const float speed = (t.emitSpeed - shared * t.randomSpeed) * speedScale * saturate(t.emitSpeedGraph.at(spent));
 	p.velocity = (t.localSystem ? direction : m_rotation.transform(direction)) * speed;
-	p.life = std::max(0.01f, t.timeToLive + random.unit() * t.randomTimeToLive);
-	p.sizeOffset = random.unit() * t.randomSize;
-	p.rotation = random.unit() * t.randomRotation * 6.2831853f;
+	if (!t.localSystem) {
+		p.velocity += m_velocity; // the system's own (0x1013fdc0: +0xcc x +0xdc)
+	}
 	if (t.mesh) {
-		p.angles = {(random.unit() * 2 - 1) * t.randomRotation3.x, (random.unit() * 2 - 1) * t.randomRotation3.y,
-			(random.unit() * 2 - 1) * t.randomRotation3.z};
+		p.angles = {signedRandom(random) * t.randomRotation3.x, signedRandom(random) * t.randomRotation3.y,
+			signedRandom(random) * t.randomRotation3.z};
 	}
-	if (m_particles.size() < kMaxParticlesPerEmitter) {
-		m_particles.push_back(p);
+	if (sprite && context.poolUsed) {
+		++*context.poolUsed;
 	}
+	m_particles.push_back(p);
 }
 
-void Emitter::update(float seconds, game::Random& random)
+// One update of `seconds` (0x101407c0 with 0x101403b0).
+void Emitter::step(float seconds, game::Random& random, const EmitContext& context)
 {
 	const ParticleTemplate& t = *m_template;
+	seconds *= timeScale;
+	if (seconds <= 0) {
+		return;
+	}
 	m_age += seconds;
-	const float active = m_age - t.emitDelay;
+	// The time is cut to the longest life.
+	const float span = t.timeToLive + t.randomTimeToLive;
+	if (span > 0 && seconds > span) {
+		seconds = span;
+	}
+	// The system's velocity, inherited by world particles born now.
+	if (!m_prewarming) {
+		m_velocity = (m_position - m_previous) * (1 / seconds);
+	}
+	// The particles: fixed steps of 0.01 s, the remainder carried.
+	const float total = seconds + m_carry;
+	const int steps = static_cast<int>(std::lround(total * 100.0f));
+	m_carry = total - static_cast<float>(steps) * kStep;
+	const float before = m_clock;
+	m_clock += static_cast<float>(steps) * kStep;
+	const bool sprite = !t.mesh && !t.trail && !t.nonScreenAligned;
+	for (Particle& p : m_particles) {
+		simulate(p, kStep, steps, context);
+	}
+	const size_t alive = m_particles.size();
+	m_particles.erase(std::remove_if(m_particles.begin(), m_particles.end(),
+						  [](const Particle& p) { return p.age >= p.life; }),
+		m_particles.end());
+	if (sprite && context.poolUsed) {
+		*context.poolUsed -= static_cast<int>(alive - m_particles.size());
+	}
+	// The delay.
+	m_delay -= seconds;
+	if (m_delay > 0) {
+		m_emitClock = m_clock;
+		m_previous = m_position;
+		return;
+	}
+	// The pre-warm, once the delay is over: the time run at once in steps of 1/30 s.
+	if (m_preWarm > 0 && !m_prewarming) {
+		float left = m_preWarm;
+		m_preWarm = 0;
+		m_prewarming = true;
+		for (; left > 0; left -= kPreWarmStep) {
+			step(std::min(left, kPreWarmStep) / std::max(timeScale, 1e-3f), random, context);
+		}
+		m_prewarming = false;
+	}
+	if (m_stopped || !m_active) {
+		m_emitClock = m_clock;
+		m_previous = m_position;
+		return;
+	}
+	// The emission (0x101403b0): the frequency times the distance LOD and
+	// the bundle's scale, throttled by priority once the pool is loaded.
+	float frequency = t.emitFrequency * m_lodScale * emitScale;
+	if (sprite && context.settings && context.poolUsed && (t.isLooping || m_clock > 1.0f)
+		&& static_cast<float>(*context.poolUsed)
+			> std::round(static_cast<float>(context.settings->maxParticles) * context.settings->poolLoad)) {
+		frequency *= context.settings->priorityScales[static_cast<size_t>(std::clamp(t.emitPrio, 0, 2))];
+	}
+	if (frequency <= 1e-4f) {
+		m_emitClock = m_clock;
+		m_previous = m_position;
+		return;
+	}
+	const float interval = 1 / frequency;
+	while (m_emitClock + interval <= m_clock + 1e-5f) {
+		if (t.emitTime > 0 || !t.isLooping) {
+			m_emitLeft -= interval;
+			if (m_emitLeft <= 0) {
+				if (t.isLooping) {
+					m_emitLeft = t.emitTime; // the looping system starts over (slot 0xc)
+				} else {
+					m_stopped = true;
+					break;
+				}
+			}
+		}
+		m_emitClock += interval;
+		// Its place lerped over the update, then moved on for the rest of it.
+		const float share = m_clock > before ? std::clamp((m_emitClock - before) / (m_clock - before), 0.0f, 1.0f) : 1.0f;
+		const Vec3 at = m_previous + (m_position - m_previous) * share;
+		const size_t count = m_particles.size();
+		emit(random, at, 0, context);
+		if (m_particles.size() > count) {
+			const int rest = static_cast<int>(std::lround((m_clock - m_emitClock) * 100.0f));
+			if (rest > 0) {
+				simulate(m_particles.back(), kStep, rest, context);
+			}
+		}
+	}
+	m_previous = m_position;
+}
+
+void Emitter::update(float seconds, game::Random& random, const EmitContext& context)
+{
+	const ParticleTemplate& t = *m_template;
+	if (!m_started) {
+		start(context);
+	}
+	// The distance LOD (0x101393e0): (1 - f)^2 plus the particles' size on
+	// screen, between the template's floor and 1.
+	m_lodScale = 1;
+	if (context.settings && context.hasCamera) {
+		const scene::ParticleSystemSettings& s = *context.settings;
+		const float end = s.lodFractions[static_cast<size_t>(std::clamp(t.lodDistance, 0, 2))] * s.viewDistance;
+		const float fadeStart = s.startFadePercentageOfViewDistance * end;
+		const float distance = std::sqrt(physics::lengthSquared(m_position - context.camera));
+		float scale = 1;
+		if (distance > fadeStart && end > fadeStart) {
+			const float f = std::min((distance - fadeStart) / (end - fadeStart), 1.0f);
+			scale = (1 - f) * (1 - f);
+		}
+		const float radius = t.particleMaxSize + t.randomSize;
+		scale += radius / std::max(distance * context.tanHalfFov, 1e-3f);
+		m_lodScale = std::clamp(scale, std::min(t.minEmitScale, 1.0f), 1.0f);
+	}
 	if (t.trail) {
 		// A point at emitFrequency while the system moves faster than
 		// minTrailVelocity, for as long as it is carried.
+		m_age += seconds;
+		const float active = m_age - t.emitDelay;
 		m_speed = m_placed && seconds > 0 ? std::sqrt(physics::lengthSquared(m_position - m_lastPosition)) / seconds : 0.0f;
 		m_lastPosition = m_position;
 		m_placed = true;
 		const bool emitting = t.isLooping || anchor != 0 || active - seconds < t.emitTime;
-		if (!m_stopped && active > 0 && emitting && m_speed >= t.minTrailVelocity) {
-			m_pending += t.emitFrequency * seconds;
+		if (!m_stopped && m_active && active > 0 && emitting && m_speed >= t.minTrailVelocity) {
+			m_pending += t.emitFrequency * emitScale * seconds;
 			while (m_pending >= 1.0f) {
-				emit(random);
+				emit(random, m_position, 0, context);
 				m_pending -= 1.0f;
 			}
 		}
-	} else if (!m_stopped && active > 0 && (t.isLooping || active - seconds < t.emitTime)) {
-		const float span = t.isLooping ? seconds : std::min(seconds, t.emitTime - std::max(0.0f, active - seconds));
-		m_pending += t.emitFrequency * std::max(0.0f, span);
-		while (m_pending >= 1.0f) {
-			emit(random);
-			m_pending -= 1.0f;
+		for (Particle& p : m_particles) {
+			p.age += seconds;
 		}
+		m_particles.erase(std::remove_if(m_particles.begin(), m_particles.end(),
+							  [](const Particle& p) { return p.age >= p.life; }),
+			m_particles.end());
+		return;
 	}
-	// Gravity pulls down the world's y, in a local system's space too.
-	const Vec3 down = t.localSystem ? m_rotation.untransform({0, 1, 0}) : Vec3 {0, 1, 0};
-	for (Particle& p : m_particles) {
-		const float f = std::min(p.age / p.life, 1.0f);
-		p.velocity += down * (t.gravity * t.gravityGraph.at(f) * seconds);
-		const float drag = std::max(0.0f, 1.0f - t.airResistance * t.airResistanceGraph.at(f) * seconds);
-		p.velocity = p.velocity * drag;
-		p.position += p.velocity * seconds;
-		p.rotation += t.rotationSpeed * seconds;
-		p.age += seconds;
-	}
-	m_particles.erase(std::remove_if(m_particles.begin(), m_particles.end(),
-						  [](const Particle& p) { return p.age >= p.life; }),
-		m_particles.end());
+	step(seconds, random, context);
 }
 
 EffectManager::EffectManager(const world::ObjectTemplateManager& templates, uint32_t seed)
@@ -655,8 +922,20 @@ void EffectManager::update(float seconds)
 			emitter->stop();
 		}
 	}
+	EmitContext context = m_context;
+	context.settings = m_settings;
+	context.wind = m_wind;
+	// The sprite pool's use, counted afresh (systems that ended took theirs).
+	m_poolUsed = 0;
 	for (const auto& emitter : m_emitters) {
-		emitter->update(seconds, m_random);
+		const ParticleTemplate& t = emitter->particleTemplate();
+		if (!t.mesh && !t.trail && !t.nonScreenAligned) {
+			m_poolUsed += static_cast<int>(emitter->particles().size());
+		}
+	}
+	context.poolUsed = &m_poolUsed;
+	for (const auto& emitter : m_emitters) {
+		emitter->update(seconds, m_random, context);
 	}
 	m_emitters.erase(std::remove_if(m_emitters.begin(), m_emitters.end(),
 						 [](const std::unique_ptr<Emitter>& e) { return !e->alive(); }),
@@ -703,20 +982,58 @@ void EffectManager::collectMeshes(const Emitter& emitter, std::vector<MeshSprite
 	}
 }
 
-// The look of a particle at its age (Particles.fx vsParticle).
-void EffectManager::collect(const Emitter& emitter, std::vector<Sprite>& out)
+float ParticleView::fade(float depth, int lod) const
+{
+	if (!settings) {
+		return 1;
+	}
+	// 0x10132e90: past startLod of the class's distance, (1 - min((d - s) / (end - s), 1))^2.
+	const float end = settings->lodFractions[static_cast<size_t>(std::clamp(lod, 0, 2))] * settings->viewDistance;
+	const float start = settings->startLodPercentageOfLodDistance * end;
+	if (depth <= start || end <= start) {
+		return depth <= end || end <= start ? 1.0f : 0.0f;
+	}
+	const float f = std::min((depth - start) / (end - start), 1.0f);
+	return (1 - f) * (1 - f);
+}
+
+void EffectManager::setModifiers(uint32_t anchor, uint32_t tag, float alphaIntensity, float emitScale, float speedScale,
+	float timeScale)
+{
+	for (const auto& emitter : m_emitters) {
+		if (emitter->anchor == anchor && emitter->tag == tag) {
+			emitter->alphaIntensity = alphaIntensity;
+			emitter->emitScale = emitScale;
+			emitter->speedScale = speedScale;
+			emitter->timeScale = timeScale;
+		}
+	}
+}
+
+// The look of a particle at its age (Particles.fx vsParticle): the colour
+// blend times its intensity plus its random intensity, the transparency
+// graph times its alpha, faded by its depth in the view per LOD class.
+void EffectManager::collect(const Emitter& emitter, std::vector<Sprite>& out, const ParticleView& view)
 {
 	const ParticleTemplate& t = emitter.particleTemplate();
 	for (const Particle& p : emitter.particles()) {
 		const float f = std::min(p.age / p.life, 1.0f);
 		const float blend = std::min(t.colorBlendGraph.at(f), 1.0f);
-		const float alpha = std::clamp(std::min(t.transparencyGraph.at(f), 1.0f), 0.0f, 1.0f);
+		float alpha = std::clamp(std::min(t.transparencyGraph.at(f), 1.0f) * p.alpha, 0.0f, 1.0f);
 		const float size = std::min(t.sizeGraph.at(f), 1.0f) * t.particleMaxSize + p.sizeOffset;
 		if (size <= 0 || alpha <= 0) {
 			continue;
 		}
-		const Vec3 color = t.color1 * (1 - blend) + t.color2 * blend;
-		out.push_back({emitter.worldPosition(p), size, p.rotation, {color.x, color.y, color.z, alpha}});
+		const Vec3 at = emitter.worldPosition(p);
+		if (view.settings) {
+			alpha *= view.fade(physics::dot(at - view.eye, view.forward), t.lodDistance);
+			if (alpha <= 0) {
+				continue;
+			}
+		}
+		const Vec3 color = (t.color1 * (1 - blend) + t.color2 * blend) * p.intensity
+			+ Vec3 {p.randomIntensity, p.randomIntensity, p.randomIntensity};
+		out.push_back({at, size, p.rotation, {color.x, color.y, color.z, alpha}, t.lightMapIntensityOffset});
 	}
 }
 
@@ -752,17 +1069,19 @@ void EffectManager::collectAligned(const Emitter& emitter, std::vector<WorldVert
 		if (size <= 0 || alpha <= 0) {
 			continue;
 		}
-		const Vec3 color = t.color1 * (1 - blend) + t.color2 * blend;
-		const std::array<float, 4> rgba {color.x, color.y, color.z, alpha};
+		const Vec3 color = (t.color1 * (1 - blend) + t.color2 * blend) * p.intensity
+			+ Vec3 {p.randomIntensity, p.randomIntensity, p.randomIntensity};
+		const std::array<float, 4> rgba {color.x, color.y, color.z, alpha * p.alpha};
 		const float c = std::cos(p.rotation), s = std::sin(p.rotation);
 		const Vec3 u = (axisU * c + axisV * s) * size, v = (axisV * c - axisU * s) * size;
 		const Vec3 centre = emitter.worldPosition(p);
 		const std::array<float, 4> frame = frameOf(t, f);
+		const float offset = t.lightMapIntensityOffset;
 		const WorldVertex corners[4] = {
-			{centre - u - v, frame[0], frame[3], rgba},
-			{centre + u - v, frame[2], frame[3], rgba},
-			{centre + u + v, frame[2], frame[1], rgba},
-			{centre - u + v, frame[0], frame[1], rgba},
+			{centre - u - v, frame[0], frame[3], rgba, offset},
+			{centre + u - v, frame[2], frame[3], rgba, offset},
+			{centre + u + v, frame[2], frame[1], rgba, offset},
+			{centre - u + v, frame[0], frame[1], rgba, offset},
 		};
 		for (int i : {0, 1, 2, 0, 2, 3}) {
 			out.push_back(corners[i]);
@@ -830,6 +1149,7 @@ void EffectManager::collectTrail(const Emitter& emitter, const Vec3& eye, std::v
 				v.v = frame[1] + (frame[3] - frame[1]) * (across * 0.5f + 0.5f);
 				v.color = p.color;
 				v.color[3] *= facing * facing;
+				v.lightMapOffset = t.lightMapIntensityOffset;
 				return v;
 			};
 			const WorldVertex a0 = vertex(a, -1), a1 = vertex(a, 1), b0 = vertex(b, -1), b1 = vertex(b, 1);
@@ -878,7 +1198,7 @@ bool holdsBundles(const world::ObjectTemplateManager& templates, const world::Ob
 		return found->second;
 	}
 	bool holds = false;
-	if (t.typeName() == "EffectBundle") {
+	if (t.typeName() == "EffectBundle" || t.typeName() == "WheelEffectBundle" || t.typeName() == "AirDraftEffectBundle") {
 		holds = true;
 	} else if (depth <= 10) {
 		for (const world::ChildTemplate& child : t.children()) {
@@ -916,8 +1236,12 @@ std::vector<ObjectEffects::Placed> ObjectEffects::bundlesOf(const world::ObjectT
 				placeChild(child, object, partPose, childAt, childTurn);
 				path.push_back(child.name);
 				chain.push_back(&child);
-				if (c->typeName() == "EffectBundle") {
+				const std::string& type = c->typeName();
+				if (type == "EffectBundle" || type == "WheelEffectBundle" || type == "AirDraftEffectBundle") {
 					Placed placed;
+					placed.kind = type == "WheelEffectBundle" ? Placed::Kind::Wheel
+						: type == "AirDraftEffectBundle"      ? Placed::Kind::AirDraft
+															  : Placed::Kind::Plain;
 					placed.bundle = c;
 					placed.path = path;
 					placed.chain = chain;
@@ -971,9 +1295,23 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 			found = m_objects.insert_or_assign(object.id, std::move(tracked)).first;
 		}
 		Tracked& tracked = found->second;
-		if (tracked.bundles.empty()) {
+		if (created) {
+			tracked.groundEffects.assign(tracked.bundles.size(), std::string());
+			// A soldier's breathEffect (Soldier +0x3a0).
+			if (const std::string* breath = setting(*object.objectTemplate, "breathEffect")) {
+				tracked.breath = *breath;
+			}
+		}
+		if (tracked.bundles.empty() && tracked.breath.empty()) {
 			continue;
 		}
+		// Its velocity: the state's, else from its move over the tick.
+		tracked.velocity = object.velocity;
+		if (physics::lengthSquared(object.velocity) == 0 && tracked.moved) {
+			tracked.velocity = (object.position - tracked.lastPosition) * 30.0f;
+		}
+		tracked.lastPosition = object.position;
+		tracked.moved = true;
 		effects.setAnchor(object.id, object.position, object.rotation);
 		// Turning parts carry their bundles along: those with live
 		// particles or lights now, a starting one before it spawns.
@@ -987,9 +1325,23 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 				effects.setMount(object.id, tag, b.position, b.rotation);
 			}
 		}
+		// The cold breath (0x00588830): shown while the soldier breathes out
+		// in the cold, on its head (the bundle's own place in the soldier).
+		if (!tracked.breath.empty() && object.coldBreath != tracked.breathing) {
+			if (object.coldBreath) {
+				effects.spawnAttached(tracked.breath, object.id, {0, 1.6f, 0.15f}, {}, view, kBreathTag);
+			} else {
+				effects.stopAttached(object.id, kBreathTag);
+			}
+			tracked.breathing = object.coldBreath;
+		}
 		for (size_t i = 0; i < tracked.bundles.size(); ++i) {
 			Placed& b = tracked.bundles[i];
 			const uint32_t tag = static_cast<uint32_t>(i + 1);
+			if (b.kind != Placed::Kind::Plain) {
+				updateGround(object, tracked.velocity, tracked, i, effects, partPose, view);
+				continue;
+			}
 			const bool start = (created && b.startAtCreation)
 				|| (object.occupied && !tracked.occupied && (b.startOnEffects & kEntered) != 0)
 				|| (object.effects & b.startOnEffects) != 0;
@@ -1013,6 +1365,133 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 			++it;
 		}
 	}
+}
+
+namespace {
+
+// A "From" mapping a/b (0x0061bd20's slot 8): 0 at a, 1 at b, clamped.
+float mapping(const std::array<float, 2>& from, float x)
+{
+	if (from[0] == from[1]) {
+		return x >= from[1] ? 1.0f : 0.0f;
+	}
+	return std::clamp((x - from[0]) / (from[1] - from[0]), 0.0f, 1.0f);
+}
+
+std::array<float, 2> vector2(const world::ObjectTemplate& t, const char* name, std::array<float, 2> fallback)
+{
+	if (const std::string* value = setting(t, name)) {
+		std::sscanf(value->c_str(), "%f/%f", &fallback[0], &fallback[1]);
+	}
+	return fallback;
+}
+
+} // namespace
+
+ObjectEffects::GroundBundle ObjectEffects::GroundBundle::fromTemplate(const world::ObjectTemplate& t)
+{
+	GroundBundle g;
+	g.material = static_cast<uint32_t>(number(t, "material", 0));
+	g.startDistance = number(t, "startDistance", 0);
+	g.maxDistance = number(t, "maxDistance", 0);
+	g.engineInfluence = number(t, "engineInfluence", 0);
+	static const char* const kNames[4] = {"alphaIntensity", "emitScaleFactor", "emitSpeedScale", "AgeScaleFactor"};
+	for (int i = 0; i < 4; ++i) {
+		Modifier& m = g.modifiers[static_cast<size_t>(i)];
+		const std::string base = kNames[i];
+		const auto range = vector2(t, (base + "Range").c_str(), {1, 1});
+		m.min = range[0];
+		m.max = range[1];
+		m.fromSpeed = vector2(t, (base + "FromSpeed").c_str(), {0, 0});
+		m.fromSpeedInDof = vector2(t, (base + "FromSpeedInDof").c_str(), {0, 0});
+		m.fromAltitude = vector2(t, (base + "FromAltitude").c_str(), {0, 0});
+		m.fromEngine = vector2(t, (base + "FromEngine").c_str(), {0, 0});
+	}
+	return g;
+}
+
+float ObjectEffects::GroundBundle::value(int modifier, float speed, float speedInDof, float altitude, float engine) const
+{
+	const Modifier& m = modifiers[static_cast<size_t>(std::clamp(modifier, 0, 3))];
+	const auto set = [](const std::array<float, 2>& from) { return from[0] != 0 || from[1] != 0; };
+	float f = 1;
+	if (set(m.fromSpeed)) {
+		f *= mapping(m.fromSpeed, speed);
+	}
+	if (set(m.fromSpeedInDof)) {
+		f *= mapping(m.fromSpeedInDof, std::max(speedInDof, 0.0f));
+	}
+	if (set(m.fromAltitude)) {
+		f *= mapping(m.fromAltitude, altitude);
+	}
+	if (set(m.fromEngine)) {
+		f *= mapping(m.fromEngine, engine);
+	}
+	return m.min + (m.max - m.min) * f;
+}
+
+// A wheel's or a draft's effect this tick (0x0061bfc0, 0x0061d820): the
+// ground under it picks it (stopping the last when it changes), it is put
+// on the ground, upright, and its modifiers follow the vehicle.
+void ObjectEffects::updateGround(const ObjectState& object, const Vec3& velocity, Tracked& tracked, size_t index,
+	EffectManager& effects, const PartPose& partPose, EffectManager::View view)
+{
+	Placed& b = tracked.bundles[index];
+	const uint32_t tag = static_cast<uint32_t>(index + 1);
+	auto known = m_groundBundles.find(b.bundle);
+	if (known == m_groundBundles.end()) {
+		known = m_groundBundles.emplace(b.bundle, GroundBundle::fromTemplate(*b.bundle)).first;
+	}
+	const GroundBundle& g = known->second;
+	const float speed = std::sqrt(physics::lengthSquared(velocity));
+	// Idle and parked: nothing to show (a wheel's modifiers go with the
+	// speed, a draft's with the engine), and no rays to cast.
+	const bool idle = !object.occupied && object.engine <= 0 && speed < 0.5f;
+	if (partPose && !idle) {
+		place(b, object.id, partPose, b.position, b.rotation);
+	}
+	const Vec3 at = object.position + object.rotation.transform(b.position);
+	std::string effect;
+	Vec3 hit;
+	uint32_t material = 0;
+	float altitude = 0;
+	if (m_probe && m_materialEffect && !idle) {
+		const bool draft = b.kind == Placed::Kind::AirDraft;
+		// The draft looks along its -y for startDistance + 5; a wheel just
+		// below it (its contact; the rewrite has no wheel contact list here).
+		const Vec3 down = draft ? (b.rotation * object.rotation).transform({0, -1, 0}) : Vec3 {0, -1, 0};
+		const float reach = draft ? g.startDistance + 5 : 1.5f;
+		const bool engineOn = !draft || object.engine > 0 || object.occupied;
+		if (engineOn && m_probe(at, at + down * reach, object.id, hit, material)) {
+			altitude = std::sqrt(physics::lengthSquared(hit - at));
+			if (!draft || altitude < g.startDistance) {
+				effect = m_materialEffect(g.material, material);
+			}
+		}
+	}
+	std::string& current = tracked.groundEffects[index];
+	if (effect != current) {
+		if (!current.empty()) {
+			effects.stopAttached(object.id, tag);
+		}
+		current = effect;
+		if (!effect.empty()) {
+			effects.spawnAttached(effect, object.id, {}, {}, view, tag);
+		}
+	}
+	if (current.empty()) {
+		return;
+	}
+	// Placed on the ground, upright in the world: the mount is the hit in
+	// the object's space, its turn the object's undone.
+	const auto& m = object.rotation.rows;
+	Mat3 upright;
+	upright.rows = {Vec3 {m[0].x, m[1].x, m[2].x}, Vec3 {m[0].y, m[1].y, m[2].y}, Vec3 {m[0].z, m[1].z, m[2].z}};
+	effects.setMount(object.id, tag, object.rotation.untransform(hit - object.position), upright);
+	const float inDof = physics::dot(velocity, object.rotation.transform({0, 0, 1}));
+	const float engine = object.engine > 0 ? object.engine : object.occupied ? 1.0f : 0.0f;
+	effects.setModifiers(object.id, tag, g.value(0, speed, inDof, altitude, engine), g.value(1, speed, inDof, altitude, engine),
+		g.value(2, speed, inDof, altitude, engine), g.value(3, speed, inDof, altitude, engine));
 }
 
 } // namespace dice::hfe::effects

@@ -6,7 +6,7 @@
 # FFmpeg only from a PKG_CONFIG_PATH given for the target.
 option(BF2142_MOVIES "Play the Bink movies (needs FFmpeg)" ON)
 
-add_library(Movie STATIC MovieQueue.cpp MovieDecoder.cpp)
+add_library(Movie STATIC MovieQueue.cpp MovieDecoder.cpp MenuVideo.cpp)
 target_include_directories(Movie PUBLIC ${PROJECT_SOURCE_DIR}/src)
 
 if(BF2142_MOVIES AND (NOT CMAKE_CROSSCOMPILING OR DEFINED ENV{PKG_CONFIG_PATH}))

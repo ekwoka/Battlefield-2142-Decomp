@@ -12,6 +12,7 @@
 #include "Culling.h"
 #include "TerrainLod.h"
 #include "Effects/Effects.h"
+#include "Scene/EffectSettings.h"
 #include "GpuContext.h"
 #include "OverheadView.h"
 #include "PostProduction.h"
@@ -51,6 +52,9 @@ class EffectManager;
 namespace scene {
 struct HemiMapSettings;
 struct LightSettings;
+struct ParticleSystemSettings;
+struct QualitySettings;
+struct WindSettings;
 struct PostProductionSettings;
 struct ShadowSettings;
 struct RendererSettings;
@@ -93,6 +97,17 @@ struct FirstPersonModel {
 // The first-person pass, drawn over the world after a depth clear with its
 // own projection (RendDX9's first-person pass), so the weapon never cuts
 // into walls.
+// A seat camera's static interior sun (BF2142.exe 0x006104d0..0x00610580,
+// PlayerCamera::insideSun): in the vehicle's inside view the cockpit is lit
+// by this sun and ambient instead of the level's, and the dynamic lights
+// only with allowInsideDynamicLights.
+struct InsideSun {
+	bool dynamicLights = true;
+	std::array<float, 3> direction {-0.25f, -0.5f, 0.75f}; // the way the light travels
+	std::array<float, 3> color {1, 1, 1};
+	std::array<float, 3> ambient {0.7f, 0.7f, 0.7f};
+};
+
 struct FirstPersonScene {
 	// RendDX9's first-person view (+0xfc of the renderer): its own 0.82 rad
 	// whatever the world's field of view or zoom, near
@@ -161,6 +176,12 @@ struct LevelSources {
 	const scene::PostProductionSettings* post = nullptr;
 	const scene::ShadowSettings* shadows = nullptr;
 	const scene::HemiMapSettings* hemi = nullptr;
+	// ParticleSystemManager.*, windManager.*, VideoSettings.* (defaults if null).
+	const scene::ParticleSystemSettings* particles = nullptr;
+	const scene::WindSettings* wind = nullptr;
+	const scene::QualitySettings* quality = nullptr;
+	// The interior sun of the seat camera now; false when there is none.
+	std::function<bool(InsideSun& sun)> insideSun;
 	// The game state the post-production follows (EMP, tinnitus, the Titan
 	// flash, the camera effect), asked each frame; none if null.
 	std::function<void(PostEffects& effects)> postEffects;
@@ -237,6 +258,15 @@ private:
 		// Where the texture lies in an atlas (the overgrowth's distant trees'
 		// textures, OvergrowthAtlas.tai): scale, then offset.
 		float uvAtlas[4] = {1, 1, 0, 0};
+		// mesh.frag's specular kind (LightingUniforms::eye.w): 1 / 2 a static
+		// mesh's (StaticMesh.fx: the detail map's alpha as the gloss when it
+		// has one and isn't alpha-tested, RaShaderSTM getCompositeDiffuse),
+		// 3 / 4 a bundled mesh's (BundledMesh.fx: the colour map's alpha with
+		// a "ColormapGloss" technique); 0 none (skinned meshes, additive).
+		int specularKind = 0;
+		// A tree's leaves (a static mesh under "vegitation", RendDX9
+		// 0x100de8xx; its alpha-tested materials): RaShaderLeaf's sway.
+		bool leaf = false;
 	};
 	struct RigBone {
 		int node;
@@ -431,6 +461,11 @@ private:
 
 	// The hemi map (HemiMapManager.setBaseHemiMap).
 	SDL_GPUTexture* m_hemiMap = nullptr;
+	// Its alpha on the CPU (the particles' calcParticleLighting) and the
+	// share of the sun there (1 without a map).
+	std::vector<uint8_t> m_hemiAlpha;
+	uint32_t m_hemiAlphaSize = 0;
+	float hemiShadowAt(float x, float z) const;
 	void loadHemiMap(const LevelSources& sources);
 	// The Titan interiors' hemi maps (HemiMapManager.loadTitanHemiMap),
 	// sampled on the CPU as RendDX9 does (0x100ecb10), and this frame's
@@ -533,6 +568,22 @@ private:
 		bool repeat = false; // trails tile their texture along themselves
 	};
 	SDL_GPUBuffer* m_particleVertices = nullptr;
+	// The heat shimmer's sprites (ParticleHeatShimmer) and the copy of the
+	// scene they displace.
+	SDL_GPUBuffer* m_shimmerVertices = nullptr;
+	std::vector<ParticleGroup> m_shimmerGroups;
+	SDL_GPUTexture* m_shimmerSource = nullptr;
+	uint32_t m_shimmerSize[2] = {0, 0};
+	void buildShimmer(const Camera& camera);
+	void drawShimmer(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Mat4& viewProjection,
+		const Camera& camera, uint32_t width, uint32_t height);
+	std::array<float, 3> particleLight(const effects::Vec3& at, float lightMapOffset) const;
+	// The particle manager's settings in use (VideoSettings' effects row applied).
+	scene::ParticleSystemSettings m_particleSettings;
+	// The undergrowth's view distance: Undergrowth.cfg's times VideoSettings'
+	// terrain quality (undergrowth.viewDistanceScale 0.5 / 0.75 / 1, 0x10010040).
+	float undergrowthViewDistance() const;
+	effects::ParticleView particleView(const Camera& camera) const;
 	struct OverlayGroup {
 		SDL_GPUTexture* texture;
 		uint32_t firstVertex;

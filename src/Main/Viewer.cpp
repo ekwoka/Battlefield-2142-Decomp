@@ -5,6 +5,8 @@
 #include "Render/PngWriter.h"
 #include "Game/TickTimer.h"
 #include "Input/ControlMap.h"
+#include "Input/GameControllers.h"
+#include "Input/SdlGameControllers.h"
 
 #include <SDL3/SDL.h>
 
@@ -299,13 +301,13 @@ int screenshot(const render::LevelSources& sources, const ViewerOptions& options
 	applyCameraOption(camera, options.camera);
 	ViewerOptions::PlayerView view;
 	view.aspect = static_cast<float>(options.width) / static_cast<float>(options.height);
-	if (options.camera.empty() && options.playerView && options.playerView(view) && view.firstPerson) {
+	if (options.camera.empty() && options.playerView && options.playerView(view) && (view.firstPerson || view.external)) {
 		camera.position = {view.eye[0], view.eye[1], view.eye[2]};
 		camera.yaw = view.eyeYaw;
 		camera.pitch = view.eyePitch;
 		camera.fovY = view.fovY;
 		camera.roll = view.eyeRoll;
-		camera.nearPlane = kFirstPersonNear;
+		camera.nearPlane = view.firstPerson ? kFirstPersonNear : render::Camera {}.nearPlane;
 	}
 
 	auto target = gpu->createOffscreenTarget(static_cast<uint32_t>(options.width), static_cast<uint32_t>(options.height));
@@ -374,6 +376,14 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		}
 		float pitch = -0.2f;
 		float turn = 0;
+		// The game controllers, opened as SDL reports them.
+		std::unique_ptr<input::SdlGameControllers> sdlControllers;
+		if (options.gameControllers) {
+			sdlControllers = std::make_unique<input::SdlGameControllers>(*options.gameControllers);
+			if (!sdlControllers->start()) {
+				sdlControllers.reset();
+			}
+		}
 		bool firstPerson = false; // the last frame's view
 
 		render::GpuContext::Target target;
@@ -400,7 +410,13 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				running = false;
 			}
 			shown.runScript();
+			if (options.gameControllers) {
+				options.gameControllers->beginFrame();
+			}
 			while (SDL_PollEvent(&event)) {
+				if (sdlControllers && sdlControllers->handle(event)) {
+					continue;
+				}
 				if (event.type == SDL_EVENT_QUIT) {
 					running = false;
 					shown.closed = true;
@@ -464,17 +480,36 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 			last = now;
 			const bool* keys = shown.keyboard();
 			const auto pressed = [keys](SDL_Scancode code) { return keys[code] ? 1.0f : 0.0f; };
+			if (menuUp && options.gameControllers && options.onControllerInput) {
+				if (const auto last = options.gameControllers->lastInput()) {
+					options.onControllerInput(last->device, last->control, last->direction);
+				}
+			}
 			if (playing && options.onPlayerInput && options.controls) {
 				// The control maps (0x004b141a): on foot the infantry map, in a
 				// vehicle the map of its category.
 				const Uint32 buttons = shown.mouseButtons();
-				const input::ControlMaps::IsDown down = [keys, buttons, pointer](const std::string& control) {
+				input::GameControllers* pads = options.gameControllers;
+				input::ControlMaps::Source down;
+				down.down = [keys, buttons, pointer, pads](const input::Binding& b) {
+					const std::string& control = b.control;
+					if (const int slot = input::GameControllers::slotNamed(b.device); slot >= 0) {
+						return pads && control.compare(0, 9, "IDButton_") == 0 && pads->down(slot, std::atoi(control.c_str() + 9));
+					}
 					if (control.compare(0, 9, "IDButton_") == 0) {
 						const int button = std::atoi(control.c_str() + 9);
 						return !pointer && (buttons & SDL_BUTTON_MASK(button + 1)) != 0;
 					}
 					const SDL_Scancode code = scancodeFor(control);
 					return code != SDL_SCANCODE_UNKNOWN && keys[code];
+				};
+				// The controllers' axes (the mouse's come as motion events).
+				down.axis = [pads](const input::Binding& b) {
+					const int slot = input::GameControllers::slotNamed(b.device);
+					if (!pads || slot < 0 || b.control.compare(0, 7, "IDAxis_") != 0) {
+						return 0.0f;
+					}
+					return pads->axis(slot, std::atoi(b.control.c_str() + 7));
 				};
 				ViewerOptions::PlayerView view;
 				const bool driving = options.playerView && options.playerView(view) && view.driving;
@@ -492,6 +527,14 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.throttle = c.value(map, "c_PIThrottle", down);
 				input.strafe = c.value(map, "c_PIYaw", down);
 				input.sprint = c.pressed(map, "c_PISprint", down);
+				if (pads) {
+					// A stick on the look inputs: a rate, not a distance.
+					const float scale = options.mouseScale ? options.mouseScale() : 1.0f;
+					const float up = options.invertMouse && options.invertMouse() ? -1.0f : 1.0f;
+					turn += c.value(map, "c_PIMouseLookX", down) * 120.0f * dt * scale;
+					const float low = firstPerson ? -1.4835f : -1.2f, high = firstPerson ? 1.4835f : 1.0f;
+					pitch = std::fmax(low, std::fmin(high, pitch - c.value(map, "c_PIMouseLookY", down) * 2.0944f * dt * scale * up));
+				}
 				input.turnDegrees = turn;
 				input.aimPitchDegrees = pitch * 57.29578f;
 				input.fire = c.pressed(map, "c_PIFire", down);
@@ -573,6 +616,14 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				camera.fovY = view.fovY;
 				camera.roll = view.eyeRoll;
 				camera.nearPlane = kFirstPersonNear;
+			} else if (playing && options.playerView(view) && view.external) {
+				// Third person placed by the game.
+				camera.position = {view.eye[0], view.eye[1], view.eye[2]};
+				camera.yaw = view.eyeYaw;
+				camera.pitch = view.eyePitch;
+				camera.fovY = view.fovY;
+				camera.roll = view.eyeRoll;
+				camera.nearPlane = render::Camera {}.nearPlane;
 			} else if (playing && options.playerView(view)) {
 				// Third person: behind and above the soldier.
 				camera.fovY = view.chaseFovY > 0 ? view.chaseFovY : 1.0f;

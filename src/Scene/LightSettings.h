@@ -134,6 +134,10 @@ struct RendererSettings {
 	// start as multiples of it, the cell size in metres (16..512, a power of
 	// two, at least 32 and at most a patch; checked by the renderer).
 	int lodSwitchDistance = 100;
+	// Set by a script (two shipped levels): it then holds over the terrain
+	// quality's 64 / 80 / 100, which RendDX9's quality switch sets before
+	// the level loads (0x10029e20 -> 0x10010040).
+	bool lodSwitchDistanceSet = false;
 	float lod0SwitchStart = 0.4f;
 	float lod0SwitchStop = 0.9f;
 	float lod1SwitchStart = 2.0f;
