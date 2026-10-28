@@ -40,6 +40,7 @@
 
 namespace dice::hfe::world {
 class ObjectTemplate;
+struct ChildTemplate;
 class ObjectTemplateManager;
 } // namespace dice::hfe::world
 
@@ -254,13 +255,17 @@ public:
 	struct Placed {
 		const world::ObjectTemplate* bundle;
 		std::vector<std::string> path; // the children from the root to it (for part poses)
+		std::vector<const world::ChildTemplate*> chain; // the same children's links, to place it again
 		Vec3 position;
 		Mat3 rotation;
 		uint32_t startOnEffects = 0, stopOnEffects = 0;
 		bool startAtCreation = false;
 	};
+	// Whether each template's tree holds a bundle, kept between calls so
+	// the walk skips the branches without one (a Titan's tree is large).
+	using BundleCache = std::map<const world::ObjectTemplate*, bool>;
 	static std::vector<Placed> bundlesOf(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& root,
-		uint32_t object = 0, const PartPose& partPose = {});
+		uint32_t object = 0, const PartPose& partPose = {}, BundleCache* cache = nullptr);
 
 private:
 	struct Tracked {
@@ -270,6 +275,9 @@ private:
 	};
 	const world::ObjectTemplateManager& m_templates;
 	std::map<uint32_t, Tracked> m_objects;
+	BundleCache m_hasBundles;
+	// A bundle's place along its chain under the parts' current poses.
+	static void place(const Placed& bundle, uint32_t object, const PartPose& partPose, Vec3& position, Mat3& rotation);
 };
 
 } // namespace dice::hfe::effects

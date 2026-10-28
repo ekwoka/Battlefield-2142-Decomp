@@ -413,13 +413,52 @@ uint32_t flags(const world::ObjectTemplate& t, const char* name, const char* oth
 	return value ? static_cast<uint32_t>(std::strtoul(value->c_str(), nullptr, 10)) : 0u;
 }
 
+// Moves `at`/`turn` from a parent's space to its child's, after the pose
+// the game gives the part (as the renderer's collectParts).
+void placeChild(const world::ChildTemplate& child, uint32_t object, const ObjectEffects::PartPose& partPose, Vec3& at,
+	Mat3& turn)
+{
+	Mat3 childTurn = Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z});
+	Vec3 childAt = at + turn.transform({child.position.x, child.position.y, child.position.z});
+	Vec3 offset, rotation;
+	if (partPose && object != 0 && partPose(object, child.name, offset, rotation)) {
+		childAt = childAt + (childTurn * turn).transform(offset);
+		childTurn = Mat3::fromYawPitchRoll(rotation) * childTurn;
+	}
+	at = childAt;
+	turn = childTurn * turn;
+}
+
+bool holdsBundles(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& t,
+	ObjectEffects::BundleCache& cache, int depth = 0)
+{
+	if (const auto found = cache.find(&t); found != cache.end()) {
+		return found->second;
+	}
+	bool holds = false;
+	if (t.typeName() == "EffectBundle") {
+		holds = true;
+	} else if (depth <= 10) {
+		for (const world::ChildTemplate& child : t.children()) {
+			const world::ObjectTemplate* c = templates.find(child.name);
+			if (c && holdsBundles(templates, *c, cache, depth + 1)) {
+				holds = true;
+				break;
+			}
+		}
+	}
+	cache[&t] = holds;
+	return holds;
+}
+
 } // namespace
 
 std::vector<ObjectEffects::Placed> ObjectEffects::bundlesOf(const world::ObjectTemplateManager& templates,
-	const world::ObjectTemplate& root, uint32_t object, const PartPose& partPose)
+	const world::ObjectTemplate& root, uint32_t object, const PartPose& partPose, BundleCache* cache)
 {
 	std::vector<Placed> out;
 	std::vector<std::string> path;
+	std::vector<const world::ChildTemplate*> chain;
 	const std::function<void(const world::ObjectTemplate&, const Vec3&, const Mat3&, int)> walk =
 		[&](const world::ObjectTemplate& t, const Vec3& at, const Mat3& turn, int depth) {
 			if (depth > 10) {
@@ -427,24 +466,19 @@ std::vector<ObjectEffects::Placed> ObjectEffects::bundlesOf(const world::ObjectT
 			}
 			for (const world::ChildTemplate& child : t.children()) {
 				const world::ObjectTemplate* c = templates.find(child.name);
-				if (!c) {
+				if (!c || (cache && !holdsBundles(templates, *c, *cache))) {
 					continue;
 				}
-				// The child's placement, after the pose the game gives the
-				// part (as the renderer's collectParts).
-				Mat3 childTurn = Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z});
-				Vec3 childAt = at + turn.transform({child.position.x, child.position.y, child.position.z});
-				Vec3 offset, rotation;
-				if (partPose && object != 0 && partPose(object, child.name, offset, rotation)) {
-					childAt = childAt + (childTurn * turn).transform(offset);
-					childTurn = Mat3::fromYawPitchRoll(rotation) * childTurn;
-				}
-				childTurn = childTurn * turn;
+				Vec3 childAt = at;
+				Mat3 childTurn = turn;
+				placeChild(child, object, partPose, childAt, childTurn);
 				path.push_back(child.name);
+				chain.push_back(&child);
 				if (c->typeName() == "EffectBundle") {
 					Placed placed;
 					placed.bundle = c;
 					placed.path = path;
+					placed.chain = chain;
 					placed.position = childAt;
 					placed.rotation = childTurn;
 					placed.startOnEffects = flags(*c, "startOnEffects", "setStartOnEffects");
@@ -455,10 +489,21 @@ std::vector<ObjectEffects::Placed> ObjectEffects::bundlesOf(const world::ObjectT
 					walk(*c, childAt, childTurn, depth + 1);
 				}
 				path.pop_back();
+				chain.pop_back();
 			}
 		};
 	walk(root, {}, {}, 0);
 	return out;
+}
+
+void ObjectEffects::place(const Placed& bundle, uint32_t object, const PartPose& partPose, Vec3& position,
+	Mat3& rotation)
+{
+	position = {};
+	rotation = {};
+	for (const world::ChildTemplate* child : bundle.chain) {
+		placeChild(*child, object, partPose, position, rotation);
+	}
 }
 
 void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManager& effects, const PartPose& partPose,
@@ -480,7 +525,7 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 			}
 			Tracked tracked;
 			tracked.objectTemplate = object.objectTemplate;
-			tracked.bundles = bundlesOf(m_templates, *object.objectTemplate, object.id, partPose);
+			tracked.bundles = bundlesOf(m_templates, *object.objectTemplate, object.id, partPose, &m_hasBundles);
 			found = m_objects.insert_or_assign(object.id, std::move(tracked)).first;
 		}
 		Tracked& tracked = found->second;
@@ -490,11 +535,10 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 		effects.setAnchor(object.id, object.position, object.rotation);
 		// Turning parts carry their bundles along.
 		if (partPose && !created) {
-			const std::vector<Placed> now = bundlesOf(m_templates, *object.objectTemplate, object.id, partPose);
-			for (size_t i = 0; i < now.size() && i < tracked.bundles.size(); ++i) {
-				tracked.bundles[i].position = now[i].position;
-				tracked.bundles[i].rotation = now[i].rotation;
-				effects.setMount(object.id, static_cast<uint32_t>(i + 1), now[i].position, now[i].rotation);
+			for (size_t i = 0; i < tracked.bundles.size(); ++i) {
+				Placed& b = tracked.bundles[i];
+				place(b, object.id, partPose, b.position, b.rotation);
+				effects.setMount(object.id, static_cast<uint32_t>(i + 1), b.position, b.rotation);
 			}
 		}
 		for (size_t i = 0; i < tracked.bundles.size(); ++i) {
