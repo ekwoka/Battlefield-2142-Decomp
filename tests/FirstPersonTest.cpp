@@ -185,3 +185,22 @@ TEST(FirstPerson_RecoilGraphAndKick)
 	CHECK(near(back[9], curve[7] * 1.5f + base) && back[9] < 0); // the shot's tick
 	CHECK(back[1] > 0);                                         // the way back
 }
+
+// The seat cameras' shakes (0x00610240): none below cameraShakeStartSpeed,
+// half a degree at most at cameraShakeMaxSpeed, swinging 40 radians a
+// second; a hit's shake starts and ends at 0 over 0.6 s, 2 x the hit at most.
+TEST(FirstPerson_CameraShakes)
+{
+	CHECK(anim::cameraSpeedShake(1, 5, 10, 30) == 0);
+	CHECK(anim::cameraSpeedShake(1, 5, 0, 30) == 0); // no start speed: off
+	const float full = anim::cameraSpeedShake(3.14159265f / 80, 40, 10, 30); // sin(pi / 2)
+	CHECK(std::fabs(full - 0.5f) < 1e-4f);
+	CHECK(std::fabs(anim::cameraSpeedShake(3.14159265f / 80, 20, 10, 30) - 0.25f) < 1e-4f);
+	CHECK(std::fabs(anim::cameraHitShake(anim::kCameraHitShakeTime, 1)) < 1e-6f);
+	float most = 0;
+	for (float left = 0.6f; left > 0; left -= 1 / 300.0f) {
+		most = std::max(most, std::fabs(anim::cameraHitShake(left, 0.5f)));
+	}
+	CHECK(most > 0.5f && most < 1.0f);
+	CHECK(anim::cameraHitShake(0, 1) == 0);
+}

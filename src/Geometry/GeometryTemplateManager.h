@@ -33,6 +33,14 @@ struct GeometryTemplate {
 	// A MeshParticleMesh (the meshes MeshParticleSystems emit; bundled-mesh
 	// files).
 	bool meshParticle = false;
+	// GeometryTemplate.useRadiusForShadowDepth / useRadiusForShadowSpatial
+	// (RendDX9 0x100a7e60..0x100a7e90, the bundled template's +0x204 /
+	// +0x205; the heavy mechs set both): the light manager fits the
+	// shadow's depth range (0x10125780) and light-space bounds (0x10123e70)
+	// to the box pos +- radius * sqrt 2 instead of the mesh's oriented box,
+	// steady while its parts move.
+	bool useRadiusForShadowDepth = false;
+	bool useRadiusForShadowSpatial = false;
 	// GeometryTemplate.setSubGeometryLodDistance <geometry> <lod> <distance>
 	// (RendDX9 0x1007303a): how far each LOD of a geometry is drawn; 0 or
 	// missing for unset.

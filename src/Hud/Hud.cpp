@@ -197,8 +197,8 @@ struct HudManager::Node {
 	// Pictures: setPictureNodeBorder <left> <top> <right> <bottom> and
 	// setPictureNodeBorderColor (0x007af640 / 0x007af6d0, slots 0xe4 /
 	// 0xe8: lines of those widths in that colour round the picture),
-	// setPictureNodeCenterPoint (slot 0xe0: the rotation's pivot from the
-	// corner; unset, the centre).
+	// setPictureNodeCenterPoint (slot 0xe0, 0x007c6750: the rotation's
+	// pivot, about the screen's centre; unset, the picture's centre).
 	int pictureBorder[4] = {0, 0, 0, 0};
 	float pictureBorderColor[4] = {0, 0, 0, 0};
 	bool centerSet = false;
@@ -547,7 +547,29 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 	case kPicture: {
 		std::string texture = node.textureVariable.empty() ? node.texture : string(node.textureVariable);
 		const float rotation = node.rotation + (node.rotateVariable.empty() ? 0 : number(node.rotateVariable));
-		quad(texture, x, y, x + w, y + h, 0, 0, 1, 1, rotation);
+		const size_t at = out.size();
+		if (texture.empty()) {
+			// A picture without a texture (0x007c6580 leaves its texture
+			// null and 0x007c67b0 still draws the quad) is a fill in its
+			// colour: the commander screen's black side borders, the
+			// unlock and customise backgrounds.
+			const float fillColor[4] = {color[0], color[1], color[2], node.color[3]}; // fill() applies the alpha
+			fill(fillColor, x, y, x + w, y + h);
+			if (out.size() > at) {
+				out.back().rotation = rotation;
+			}
+		} else {
+			quad(texture, x, y, x + w, y + h, 0, 0, 1, 1, rotation);
+		}
+		if (node.centerSet && out.size() > at) {
+			// The point is kept as given (slot 0xe0, 0x007c6750) and replaces
+			// the centre; the shipped scripts' "0 0" (the hit indicator round
+			// the crosshair, the gunships' horizon bar) is the screen's
+			// centre, the HUD's quads being placed about it.
+			out.back().pivotSet = true;
+			out.back().pivot[0] = 400 + static_cast<float>(node.center[0]);
+			out.back().pivot[1] = 300 + static_cast<float>(node.center[1]);
+		}
 		const int* b = node.pictureBorder;
 		fill(node.pictureBorderColor, x, y, x + w, y + static_cast<float>(b[1]));
 		fill(node.pictureBorderColor, x, y + h - static_cast<float>(b[3]), x + w, y + h);
@@ -1320,7 +1342,26 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 	const bool full = number("MapFullSize") != 0;
 	const float* pos = full ? node.maxiPos : node.miniPos;
 	const float* size = full ? node.maxiSize : node.miniSize;
+	// The commander screen's map at setCommanderPos/Size (-300/-300,
+	// 600/600: the square between its black borders).
+	const auto commanderPos = setting("HudBuilder.setCommanderPos");
+	const auto commanderSize = setting("HudBuilder.setCommanderSize");
+	if (number("CommanderShow") != 0 && commanderSize[0] > 0 && commanderSize[1] > 0) {
+		pos = commanderPos.data();
+		size = commanderSize.data();
+	}
 	const float nx = 400 + pos[0], ny = 300 + pos[1], nw = size[0], nh = size[1];
+	// The map texture's alpha (+0x7b0) eased towards MenuMapAlpha's 0 with
+	// the overhead view on, 1 off: down by a tenth of (1 - e^(-9 t)) a
+	// frame, up by a fifth of it (0x00790400).
+	const float mapAlphaTarget = m_overhead ? 0.0f : 1.0f;
+	if (std::abs(m_mapAlpha - mapAlphaTarget) < 0.01f) {
+		m_mapAlpha = mapAlphaTarget;
+	} else if (mapAlphaTarget <= m_mapAlpha) {
+		m_mapAlpha = std::max(m_mapAlpha - (1 - std::exp(-seconds * 9)) * 0.1f, mapAlphaTarget);
+	} else {
+		m_mapAlpha = std::min(m_mapAlpha + (1 - std::exp(-seconds * 9)) * 0.2f, mapAlphaTarget);
+	}
 	// The zoom level.
 	static const float kFoot[3] = {0.5f, 1.5f, 2.5f}, kVehicle[3] = {0, 1, 2}, kTitan[3] = {1, 2, 2.3f};
 	const float target = full ? 0.0f
@@ -1408,8 +1449,18 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 	if (mapY + offY + shownH < ny + nh) {
 		mapY = ny + nh - (offY + shownH);
 	}
-	HudQuad map {m_mapTexture, mapX, mapY, mapX + mapW, mapY + mapH, 0, 0, 1, 1, {1, 1, 1, alpha}, 0};
-	if (clipTo(map, nx, ny, nx + nw, ny + nh)) {
+	if (m_overhead && m_overheadWidth > 0) {
+		// The overhead view: the node's height spans the camera's ground
+		// width about the camera (0x0077c4b0's zoom, unclamped; the exe
+		// doesn't ease it, +0x898), so the marks lie on what it sees.
+		const float perMetre = nh / m_overheadWidth;
+		mapW = m_mapSize[0] * perMetre;
+		mapH = m_mapSize[1] * perMetre;
+		mapX = nx + nw / 2 - (m_overheadPoint[0] - m_mapOrigin[0]) / m_mapSize[0] * mapW;
+		mapY = ny + nh / 2 - (1 - (m_overheadPoint[1] - m_mapOrigin[1]) / m_mapSize[1]) * mapH;
+	}
+	HudQuad map {m_mapTexture, mapX, mapY, mapX + mapW, mapY + mapH, 0, 0, 1, 1, {1, 1, 1, alpha * m_mapAlpha}, 0};
+	if (map.color[3] > 0 && clipTo(map, nx, ny, nx + nw, ny + nh)) {
 		out.push_back(map);
 	}
 	m_mapView = {true, nx, ny, nx + nw, ny + nh, mapX, mapY, mapW, mapH};

@@ -6,6 +6,7 @@
 #include "World/WorldConsole.h"
 #include "Console/Console.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -333,4 +334,96 @@ TEST(Weapons_BlastTwist)
 	// The other side, and a narrow object counts 2 m across.
 	const auto other = game::blastTwist(blast.axes, {-3, 0, 0}, 200, 1);
 	CHECK(other[0].at.x == 1 && std::fabs(other[0].force.y - 200 / 2.9f * 2) < 1e-2f);
+}
+
+// The soldier deviation (0x005de980) with eu_ar_rifle's numbers: standing
+// still it is minDev x devModStand; running adds the speed's part up to its
+// maximum; crouched and zoomed it narrows; in the air the misc part jumps
+// to its maximum; firing builds up and wears off off the trigger. The
+// 3- and 4-number setters are kept by the console (WorldConsole).
+TEST(Weapons_SoldierDeviation)
+{
+	Console console;
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "GenericFireArm");
+	world::registerWorldConsoleMethods(console, templates, objects);
+	std::string out;
+	for (const char* line :
+		{"ObjectTemplate.create GenericFireArm rifle", "ObjectTemplate.createComponent SoldierDeviationComp",
+			"ObjectTemplate.deviation.setFireDev 2.0 0.24 0.09", "ObjectTemplate.deviation.setTurnDev 1 0.1 0.2 0.05",
+			"ObjectTemplate.deviation.setSpeedDev 1 0.2 0.04 0.12", "ObjectTemplate.deviation.setMiscDev 7 7 0.14"}) {
+		CHECK(console.execute(line, out) == ConsoleResult::Ok);
+	}
+	world::ObjectTemplate* rifle = templates.find("rifle");
+	CHECK(rifle->settings()["deviation.setSpeedDev"] == "1 0.2 0.04 0.12");
+	rifle->settings()["deviation.minDev"] = "0.43";
+	rifle->settings()["deviation.devModStand"] = "1.3";
+	rifle->settings()["deviation.devModCrouch"] = "1.1";
+	rifle->settings()["deviation.devModZoom"] = "0.6";
+	rifle->settings()["deviation.minDevModZoom"] = "0.2";
+	game::SoldierDeviation d = game::SoldierDeviation::fromTemplate(*rifle);
+	CHECK(d.present);
+	d.update(0, 0, 0, 0, false, false, 0, false);
+	CHECK(std::fabs(d.deviation() - 0.43f * 1.3f) < 1e-5f);
+	for (int i = 0; i < 10; ++i) {
+		d.update(1, 0, 0, 0, false, false, 0, false);
+	}
+	CHECK(std::fabs(d.speed - 1) < 1e-5f); // 0.2 a tick, held at 1
+	CHECK(std::fabs(d.deviation() - (0.43f + 1) * 1.3f) < 1e-5f);
+	d.update(0, 0, 0, 0, false, false, 1, true); // still, crouched, zoomed: speed decays 0.12
+	CHECK(std::fabs(d.deviation() - (0.43f * 0.2f + 0.88f) * 0.6f * 1.1f) < 1e-4f);
+	d.update(0, 0, 2, 0, true, false, 0, false); // a jump and a turn
+	CHECK(std::fabs(d.misc - 6.86f) < 1e-4f && std::fabs(d.turn - (0.4f - 0.05f)) < 1e-5f);
+	d.fire.fired();
+	d.update(0, 0, 0, 0, false, true, 0, false);
+	CHECK(std::fabs(d.fire.value - 0.24f) < 1e-5f); // held on the trigger
+	d.update(0, 0, 0, 0, false, false, 0, false);
+	CHECK(std::fabs(d.fire.value - 0.15f) < 1e-5f);
+}
+
+// The gun sway (0x005e0da0): zoomed (gunSwayUseZoom), every update a
+// step of Max / Steps is put on the look, swinging back at Max; not
+// zoomed, nothing. Holding the sprint key with the scope stabilizer
+// steadies it (the stability falls to 0 over stabilityTime).
+TEST(Weapons_GunSway)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "GenericFireArm");
+	world::ObjectTemplate* sniper = templates.create("GenericFireArm", "sniper");
+	sniper->components().push_back("DefaultGunSwayComp");
+	auto& s = sniper->settings();
+	s["sway.gunSwayUseZoom"] = "1";
+	s["sway.gunSwayPitchSteps"] = "10";
+	s["sway.gunSwayPitchFactor"] = "30";
+	s["sway.gunSwayPitchMax"] = "1";
+	s["sway.stabilityTime"] = "1";
+	s["sway.stabilityRecoverTime"] = "2";
+	s["sway.stabilityDuration"] = "5";
+	game::GunSway sway = game::GunSway::fromTemplate(*sniper);
+	CHECK(sway.present && sway.useZoom);
+	const auto random = [] { return 0.5f; };
+	float x = 0, y = 0;
+	sway.update(1 / 30.0f, false, false, false, x, y, random);
+	CHECK(x == 0 && y == 0);
+	float swung = 0, most = 0, least = 0;
+	for (int i = 0; i < 60; ++i) {
+		x = y = 0;
+		sway.update(1 / 30.0f, true, false, false, x, y, random);
+		swung += y;
+		most = std::max(most, swung);
+		least = std::min(least, swung);
+		CHECK(std::fabs(std::fabs(y) - 30 * 0.1f / 30) < 1e-5f); // factor x step x dt
+	}
+	std::fprintf(stderr, "  sway between %.3f and %.3f\n", least, most);
+	CHECK(most > 0.05f && least < most);
+	// Steadied: after a second of the sprint key the stability is 0.
+	for (int i = 0; i < 32; ++i) {
+		x = y = 0;
+		sway.update(1 / 30.0f, true, true, true, x, y, random);
+	}
+	CHECK(sway.steadying && sway.stability < 1e-4f);
+	x = y = 0;
+	sway.update(1 / 30.0f, true, true, true, x, y, random);
+	CHECK(y == 0);
 }

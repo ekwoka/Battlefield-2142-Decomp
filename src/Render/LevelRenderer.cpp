@@ -106,7 +106,15 @@ Vec3f Camera::right() const
 
 Mat4 Camera::view() const
 {
-	return Mat4::lookAt(position, position + forward(), {0, 1, 0});
+	if (roll == 0) {
+		return Mat4::lookAt(position, position + forward(), {0, 1, 0});
+	}
+	// The world's up turned about the view axis (Rodrigues).
+	const Vec3f k = forward();
+	const float c = std::cos(roll), s = std::sin(roll);
+	const Vec3f kxUp {-k.z, 0, k.x}; // k x (0, 1, 0)
+	const Vec3f up {kxUp.x * s + k.x * k.y * (1 - c), c + k.y * k.y * (1 - c), kxUp.z * s + k.z * k.y * (1 - c)};
+	return Mat4::lookAt(position, position + k, up);
 }
 
 LevelRenderer::LevelRenderer(GpuContext& gpu) : m_gpu(gpu) {}
@@ -336,6 +344,7 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 	auto gpuMesh = std::make_unique<GpuMesh>();
 	gpuMesh->bundled = bundled;
 	gpuMesh->skinned = skinned;
+	gpuMesh->radiusShadowBounds = geometry->useRadiusForShadowDepth || geometry->useRadiusForShadowSpatial;
 	gpuMesh->geometries = file->geometries.size();
 	gpuMesh->lodCount = file->geometries[geometryIndex].lods.size();
 	if (geometryIndex < geometry->lodDistances.size()) {
@@ -1494,7 +1503,8 @@ void LevelRenderer::syncObjects()
 }
 
 // The HUD's quads for this frame: two triangles each, rotated about their
-// centres, grouped by texture in drawing order.
+// centres (or their setPictureNodeCenterPoint pivots), grouped by texture
+// and blend effect in drawing order.
 void LevelRenderer::buildOverlay()
 {
 	m_overlayGroups.clear();
@@ -1514,7 +1524,8 @@ void LevelRenderer::buildOverlay()
 		if (!image) {
 			continue;
 		}
-		const float cx = (q.x0 + q.x1) * 0.5f, cy = (q.y0 + q.y1) * 0.5f;
+		const float cx = q.pivotSet ? q.pivot[0] : (q.x0 + q.x1) * 0.5f;
+		const float cy = q.pivotSet ? q.pivot[1] : (q.y0 + q.y1) * 0.5f;
 		const float c = std::cos(q.rotation * 3.14159265f / 180.0f), s = std::sin(q.rotation * 3.14159265f / 180.0f);
 		// The quad's corners (x, y, u, v), turned about its centre, then cut
 		// to its clip rectangle when it has one (Sutherland-Hodgman).
@@ -1568,10 +1579,11 @@ void LevelRenderer::buildOverlay()
 			}
 		}
 		const uint32_t count = static_cast<uint32_t>(vertices.size()) - first;
-		if (!m_overlayGroups.empty() && m_overlayGroups.back().texture == image) {
+		if (!m_overlayGroups.empty() && m_overlayGroups.back().texture == image &&
+			m_overlayGroups.back().blend[0] == q.blend[0] && m_overlayGroups.back().blend[1] == q.blend[1]) {
 			m_overlayGroups.back().vertexCount += count;
 		} else {
-			m_overlayGroups.push_back({image, first, count});
+			m_overlayGroups.push_back({image, first, count, {q.blend[0], q.blend[1]}});
 		}
 	}
 	if (vertices.empty()) {
@@ -2268,6 +2280,7 @@ void LevelRenderer::build(const LevelSources& sources)
 	buildSky(sources);
 	buildSkyLayers(sources);
 	loadHemiMap(sources);
+	loadTitanHemiMaps(sources);
 	loadPostTextures(sources);
 	buildWater(sources);
 	buildRoads(sources);
@@ -2306,12 +2319,167 @@ Camera LevelRenderer::suggestedCamera() const
 	return camera;
 }
 
+Camera LevelRenderer::overheadCamera(const OverheadView& view) const
+{
+	float x = view.x, z = view.z;
+	if (m_terrainExtent > 160) {
+		x = std::clamp(x, m_patchOrigin[0] + 80, m_patchOrigin[0] + m_terrainExtent - 80);
+		z = std::clamp(z, m_patchOrigin[1] + 80, m_patchOrigin[1] + m_terrainExtent - 80);
+	}
+	const terrain::Heightmap* heightmap = m_sources ? m_sources->heightmaps.primary() : nullptr;
+	float ground = 0;
+	if (heightmap) {
+		ground = (heightmap->heightAt(x, z) + heightmap->heightAt(x, z + 2) + heightmap->heightAt(x, z - 2) +
+					 heightmap->heightAt(x + 2, z) + heightmap->heightAt(x - 2, z)) *
+			0.2f;
+	}
+	ground = std::max(ground, m_terrainWater[3]);
+	Camera camera;
+	camera.position = {x, ground + view.height, z};
+	camera.yaw = 0;
+	// Straight down (the exe's rows 1 0 0 / 0 0 1 / 0 -1 0): screen right
+	// +x, up +z; a hair off vertical for lookAt's up vector.
+	camera.pitch = -1.5697963f;
+	camera.fovY = view.fovY;
+	camera.nearPlane = 1.0f;
+	return camera;
+}
+
+void LevelRenderer::loadTitanHemiMaps(const LevelSources& sources)
+{
+	m_titanHemiMaps.clear();
+	if (!sources.hemi) {
+		return;
+	}
+	for (const auto& titan : sources.hemi->titans) {
+		if (titan.path.empty() || titan.size <= 0) {
+			continue;
+		}
+		// 0x100ed200: a missing file is an 8 x 8 white map.
+		TitanHemiMap map;
+		std::vector<uint8_t> data;
+		const auto image = sources.files.readFile(titan.path + ".dds", data) ? texture::parseDds(data) : std::nullopt;
+		if (image && image->format == texture::TextureFormat::RGBA8 && !image->faces.empty() && !image->faces[0].empty()) {
+			map.width = image->width;
+			map.height = image->height;
+			map.rgba = image->faces[0][0].data;
+		} else {
+			map.width = map.height = 8;
+			map.rgba.assign(8 * 8 * 4, 0xff);
+		}
+		std::copy(titan.position.begin(), titan.position.end(), map.offset);
+		map.size = titan.size;
+		map.team = titan.team == 1 ? 1 : 2; // its last argument: 1 the PAC's Titan, 0 the EU's
+		m_titanHemiMaps.push_back(std::move(map));
+	}
+}
+
+namespace {
+
+// A point in a Titan hemi map's space: inverse(TitanWorld) then the
+// map's offset taken off (0x100eda70).
+Vec3f titanMapLocal(const Vec3f& origin, const Vec3f axes[3], const float offset[3], const Vec3f& point)
+{
+	const Vec3f d = point - origin;
+	return {dot(d, axes[0]) - offset[0], dot(d, axes[1]) - offset[1], dot(d, axes[2]) - offset[2]};
+}
+
+} // namespace
+
+void LevelRenderer::placeTitanHemiMaps(const Camera& camera)
+{
+	m_cameraInTitan = false;
+	for (TitanHemiMap& map : m_titanHemiMaps) {
+		map.placed = false;
+		const uint32_t id = m_sources && m_sources->titanObject ? m_sources->titanObject(map.team) : 0;
+		const world::Object* titan = id ? m_sources->objects.find(id) : nullptr;
+		if (!titan) {
+			continue;
+		}
+		const Mat4 world = objectTransform(titan->position(), titan->rotation());
+		map.origin = {world.at(3, 0), world.at(3, 1), world.at(3, 2)};
+		for (int i = 0; i < 3; ++i) {
+			map.axes[i] = {world.at(i, 0), world.at(i, 1), world.at(i, 2)};
+		}
+		map.placed = true;
+		// The exe asks the game which Titan the camera's soldier is in, else
+		// tests the camera against the Titans (0x006fa8b0); the rewrite takes
+		// the camera over a Titan map's square.
+		const Vec3f local = titanMapLocal(map.origin, map.axes, map.offset, camera.position);
+		if (local.y > 0 && std::fabs(local.x) < map.size / 2 && std::fabs(local.z) < map.size / 2) {
+			m_cameraInTitan = true;
+		}
+	}
+}
+
+void LevelRenderer::hemiObjectFor(const Instance& instance, const GpuMesh& mesh, float out[4]) const
+{
+	const Vec3f origin {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
+	// HeightOverTerrain (BM 0x100c2b70, SM 0x10160e90): the height over
+	// what a ray 4 radii down meets, less a radius, in radii (at least
+	// 2 m); the rewrite's ray meets only the terrain.
+	const float radius = mesh.bounds.radius > 0 ? mesh.bounds.radius : 1.0f;
+	const terrain::Heightmap* heightmap = m_sources ? m_sources->heightmaps.primary() : nullptr;
+	float height = 4 * radius;
+	if (heightmap) {
+		const float below = origin.y - heightmap->heightAt(origin.x, origin.z);
+		if (below >= 0 && below < 4 * radius) {
+			height = below;
+		}
+	}
+	out[3] = std::max(height - radius, 0.0f) / std::max(radius, 2.0f);
+	// HemiMapConstantColor: 1 with the hemi technique outside the Titans;
+	// with the camera in one (the interior path 0x100c3880 / 0x10162070),
+	// the Titan map the object's origin is over (the nearest above its
+	// floor, 0x100edce0), sampled bilinearly 1 texel a metre (0x100ecb10),
+	// else the object's last one. HeightOverTerrain is 0 on that path.
+	out[0] = out[1] = out[2] = 1;
+	if (!m_cameraInTitan) {
+		return;
+	}
+	out[3] = 0;
+	const TitanHemiMap* best = nullptr;
+	Vec3f bestLocal;
+	for (const TitanHemiMap& map : m_titanHemiMaps) {
+		if (!map.placed) {
+			continue;
+		}
+		const Vec3f local = titanMapLocal(map.origin, map.axes, map.offset, origin);
+		if (local.y > 0 && std::fabs(local.x) < map.size / 2 && std::fabs(local.z) < map.size / 2 &&
+			(!best || local.y < bestLocal.y)) {
+			best = &map;
+			bestLocal = local;
+		}
+	}
+	if (best && best->width >= 2 && best->height >= 2) {
+		const float scaleU = static_cast<float>(best->width) / best->size;
+		const float scaleV = static_cast<float>(best->height) / best->size;
+		const float u = std::clamp((best->size / 2 - bestLocal.x) * scaleU, 0.0f, static_cast<float>(best->width - 2));
+		const float v = std::clamp((best->size / 2 + bestLocal.z) * scaleV, 0.0f, static_cast<float>(best->height - 2));
+		const uint32_t x = static_cast<uint32_t>(u), y = static_cast<uint32_t>(v);
+		const float fx = u - static_cast<float>(x), fy = v - static_cast<float>(y);
+		for (int c = 0; c < 3; ++c) {
+			const auto at = [&](uint32_t tx, uint32_t ty) {
+				return static_cast<float>(best->rgba[(static_cast<size_t>(ty) * best->width + tx) * 4 + static_cast<size_t>(c)]) / 255.0f;
+			};
+			const float top = at(x, y) * (1 - fx) + at(x + 1, y) * fx;
+			const float bottom = at(x, y + 1) * (1 - fx) + at(x + 1, y + 1) * fx;
+			instance.titanHemi[c] = top * (1 - fy) + bottom * fy;
+		}
+	}
+	std::copy(instance.titanHemi, instance.titanHemi + 3, out);
+}
+
 void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, GpuContext::Target& target,
-	const Camera& camera, const scene::LightSettings& lights)
+	const Camera& viewCamera, const scene::LightSettings& lights)
 {
 	if (m_baseFovY <= 0) {
-		m_baseFovY = camera.fovY; // the zoom is against the view's first fov (0x10066b30)
+		m_baseFovY = viewCamera.fovY; // the zoom is against the view's first fov (0x10066b30)
 	}
+	// The commander's overhead view takes the player's (0x00779680).
+	OverheadView overhead;
+	const bool overheadOn = m_sources && m_sources->overheadView && m_sources->overheadView(overhead);
+	const Camera camera = overheadOn ? overheadCamera(overhead) : viewCamera;
 	// With the post-production the world is drawn into the scene texture,
 	// then post.frag into `color` with the HUD over it.
 	const bool post = postEnabled() && m_gpu.postPipeline();
@@ -2347,7 +2515,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	}
 	// The first-person models, loaded before the pass begins.
 	m_firstPerson = FirstPersonScene {};
-	m_hasFirstPerson = m_sources && m_sources->firstPerson && m_sources->firstPerson(m_firstPerson);
+	m_hasFirstPerson = !overheadOn && m_sources && m_sources->firstPerson && m_sources->firstPerson(m_firstPerson);
 	if (m_hasFirstPerson) {
 		for (const FirstPersonModel& model : m_firstPerson.models) {
 			mesh(*m_sources, model.geometry, model.geometryIndex, model.lod);
@@ -2370,8 +2538,12 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	m_lastMenuTicks = now;
 	buildMenu(menuSeconds);
 	const Mat4 viewProjection = camera.view() *
-		Mat4::perspective(camera.fovY, static_cast<float>(target.width) / target.height, camera.nearPlane, 6000.0f);
+		(overheadOn ? overheadProjection(overhead, static_cast<float>(target.width), static_cast<float>(target.height),
+						  camera.nearPlane, 6000.0f)
+					: Mat4::perspective(camera.fovY, static_cast<float>(target.width) / target.height, camera.nearPlane,
+						  6000.0f));
 	prepareInstances(camera, viewProjection);
+	placeTitanHemiMaps(camera);
 	const float seconds = static_cast<float>(SDL_GetTicks() - m_startTicks) / 1000.0f;
 	m_poses.clear();
 	// The shadow maps, before the world pass that reads them.
@@ -2627,6 +2799,10 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		std::copy(item.lightmapTransform, item.lightmapTransform + 4, transforms.lightmapTransform);
 		SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
 		const bool lightmapped = item.lightmap != nullptr;
+		float hemiObject[4] = {1, 1, 1, 0};
+		if (bound->skinned || bound->bundled) {
+			hemiObjectFor(instance, *bound, hemiObject);
+		}
 		static const std::vector<anim::Matrix> unposed;
 		const std::vector<anim::Matrix>& pose = bound->skinned ? poseFor(instance, seconds) : unposed;
 		for (const Submesh& submesh : bound->submeshes) {
@@ -2641,6 +2817,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			materialUniforms(uniforms, submesh, instance.fade, seconds);
 			if (bound->skinned || bound->bundled) {
 				uniforms.material[2] += kMaterialHemi;
+				std::copy(hemiObject, hemiObject + 4, uniforms.hemiObject);
 			}
 			SDL_PushGPUFragmentUniformData(commands, 0, &uniforms, sizeof(uniforms));
 			const auto orWhite = [this](SDL_GPUTexture* t) { return t ? t : m_gpu.whiteTexture(); };
@@ -2800,7 +2977,19 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		SDL_PushGPUVertexUniformData(commands, 0, screen, sizeof(screen));
 		SDL_GPUBufferBinding vertexBinding {m_overlayVertices, 0};
 		SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+		// The blend effects' factors (addNodeBlendEffect: the render-state
+		// node 0x00870c40 hands each quad below it through, the vehicle
+		// HUDs' 7 2 adding their glass over the view).
+		SDL_GPUGraphicsPipeline* boundPipeline = m_gpu.uiPipeline();
 		for (const OverlayGroup& group : m_overlayGroups) {
+			SDL_GPUGraphicsPipeline* pipeline = m_gpu.uiBlendPipeline(group.blend[0], group.blend[1]);
+			if (!pipeline) {
+				pipeline = m_gpu.uiPipeline();
+			}
+			if (pipeline != boundPipeline) {
+				SDL_BindGPUGraphicsPipeline(pass, pipeline);
+				boundPipeline = pipeline;
+			}
 			SDL_GPUTextureSamplerBinding sampler {group.texture, m_gpu.clampSampler()};
 			SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
 			SDL_DrawGPUPrimitives(pass, group.vertexCount, 1, group.firstVertex, 0);

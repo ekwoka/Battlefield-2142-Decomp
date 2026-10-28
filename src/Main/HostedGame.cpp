@@ -149,6 +149,9 @@ bool HostedGame::start()
 	options.loopbackOnly = m_setup.loopbackOnly;
 	options.password = m_setup.password;
 	options.maxClients = m_setup.maxPlayers;
+	if (const net::BanList* bans = m_setup.bans) {
+		options.banned = [bans](const std::string& address) { return bans->bannedAddress(address); };
+	}
 	if (!m_server.start(options)) {
 		return false;
 	}
@@ -179,6 +182,73 @@ bool HostedGame::kickPlayer(int player, bool ban, uint32_t reason)
 	return false;
 }
 
+std::vector<HostedGame::ClientPlayer> HostedGame::clientPlayers() const
+{
+	std::vector<ClientPlayer> out;
+	for (const auto& [id, client] : m_clients) {
+		ClientPlayer p;
+		p.player = client.player;
+		p.name = client.name;
+		if (const net::GameServer::ClientInfo* info = m_server.client(id)) {
+			p.address = info->address;
+			p.cdKeyHash = info->cdKeyHash;
+		}
+		out.push_back(p);
+	}
+	return out;
+}
+
+void HostedGame::sayAll(const std::string& text)
+{
+	net::ChatMessage line;
+	line.channel = net::kChatServerMessage;
+	line.source = 1;
+	line.player = 0xff;
+	line.text = text;
+	for (const net::GameEvent& out : net::stringBlockEvents(net::encodeChat(line))) {
+		sendToPlaying(out);
+	}
+	if (onLog) {
+		onLog("server: " + text);
+	}
+}
+
+void HostedGame::sayTeam(int team, const std::string& text)
+{
+	net::ChatMessage line;
+	line.channel = net::kChatServerTeamMessage;
+	line.source = 1;
+	line.player = 0xff;
+	line.text = text;
+	const std::vector<net::GameEvent> events = net::stringBlockEvents(net::encodeChat(line));
+	for (const auto& [id, client] : m_clients) {
+		if (client.team == team && client.stage == Client::Stage::Playing) {
+			for (const net::GameEvent& out : events) {
+				m_server.send(id, out);
+			}
+		}
+	}
+}
+
+void HostedGame::sendRemoteFeedback(int player, const std::string& text)
+{
+	// 6/0x13 to the player's client: -1 (its console) and the text, as
+	// many messages as the text needs (a PostRemote payload holds 52 bytes).
+	const std::string reply = "rcon: " + text;
+	for (const auto& [id, client] : m_clients) {
+		if (client.player != player) {
+			continue;
+		}
+		for (size_t at = 0; at < reply.size() || at == 0; at += 48) {
+			m_server.send(id, net::makePostRemote(net::kMsgNetworkCategory, net::kNeRemoteConsoleFeedback,
+				net::int32Payload(-1) + reply.substr(at, 48)));
+			if (reply.empty()) {
+				break;
+			}
+		}
+	}
+}
+
 void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, world::ObjectTemplateManager& templates,
 	HostSetup setup)
 {
@@ -201,6 +271,7 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 	m_motion.clear();
 	m_nextGhost = 1;
 	m_roundEndSent = false;
+	m_endOfRoundSerialSent = 0;
 	for (auto& [id, client] : m_clients) {
 		// A new round: a new player of the client's team, a new database.
 		const int team = client.team ? client.team : 1;
@@ -234,7 +305,18 @@ void HostedGame::sendLevel(int id)
 			m_server.send(id, net::makeDataBlockChunk(data.substr(at, 63)));
 		}
 	};
-	block(5, net::RemoteWorld::encodeMapList({{m_setup.level, m_setup.gameMode, static_cast<uint32_t>(m_setup.mapSize)}}, 0));
+	// The map list (0x00441410: every map, the current one's index).
+	std::vector<net::RemoteWorld::MapEntry> maps;
+	int current = 0;
+	if (m_setup.maps && m_setup.maps->count() > 0) {
+		for (const net::MapListEntry& map : m_setup.maps->entries()) {
+			maps.push_back({map.level, map.gameMode, static_cast<uint32_t>(map.size)});
+		}
+		current = m_setup.maps->current();
+	} else {
+		maps.push_back({m_setup.level, m_setup.gameMode, static_cast<uint32_t>(m_setup.mapSize)});
+	}
+	block(5, net::RemoteWorld::encodeMapList(maps, current));
 	net::RemoteWorld::LevelInfo level;
 	level.gameMode = m_setup.gameMode;
 	level.levelDirectory = "levels/" + m_setup.level + "/";
@@ -280,6 +362,15 @@ net::ServerReport HostedGame::report() const
 
 void HostedGame::joined(int id)
 {
+	// A banned CD key (admin.banPlayerKey) goes as soon as its hash is known.
+	if (const net::GameServer::ClientInfo* info = m_server.client(id);
+		info && m_setup.bans && m_setup.bans->bannedKey(info->cdKeyHash)) {
+		if (onLog) {
+			onLog("client " + std::to_string(id) + " (" + info->address + ") is banned");
+		}
+		m_server.kick(id, 0x16);
+		return;
+	}
 	Client& client = m_clients[id];
 	// A team with fewer players.
 	int counts[3] {};
@@ -306,6 +397,29 @@ void HostedGame::joined(int id)
 	settings.gamePort = m_server.port();
 	settings.gameSpyPort = m_setup.queryPort;
 	settings.playersNeededToStart = 1;
+	if (const net::ServerSettings* sv = m_setup.settings) {
+		// 0x00515bc0's fields from the sv settings (the welcome message in
+		// up to three 256-byte pieces).
+		for (size_t at = 0; at < sv->welcomeMessage.size() && settings.welcome.size() < 3; at += 256) {
+			settings.welcome.push_back(sv->welcomeMessage.substr(at, 256));
+		}
+		settings.voipEnabled = sv->voipEnabled;
+		settings.allowNoseCam = sv->allowNoseCam;
+		settings.hitIndicator = sv->hitIndicator;
+		settings.tkPunishByDefault = sv->tkPunishByDefault;
+		settings.allowFreeCam = sv->allowFreeCam;
+		settings.allowExternalViews = sv->allowExternalViews;
+		settings.voipServerPort = static_cast<uint32_t>(sv->voipServerPort);
+		settings.voipClientPort = static_cast<uint32_t>(sv->voipBFClientPort);
+		settings.voipQuality = sv->voipQuality;
+		settings.radioSpamInterval = sv->radioSpamInterval;
+		settings.radioMaxSpamFlagCount = sv->radioMaxSpamFlagCount;
+		settings.radioBlockedDurationTime = sv->radioBlockedDurationTime;
+		settings.votingEnabled = sv->votingEnabled;
+		settings.playersNeededToStart = static_cast<uint32_t>(std::max(sv->numPlayersNeededToStart, 0));
+		settings.friendlyFireWithMines = sv->friendlyFireWithMines;
+		settings.allowTitanMovement = sv->allowTitanMovement;
+	}
 	const auto block = [&](uint32_t type, const std::string& data) {
 		m_server.send(id, net::makeDataBlockStart(type, static_cast<uint32_t>(data.size())));
 		for (size_t at = 0; at < data.size(); at += 63) {
@@ -455,6 +569,11 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			}
 			break;
 		}
+		case net::kNeRemoteConsoleCommand: // "rcon <command>" typed in the client's console
+			if (onRemoteCommand) {
+				onRemoteCommand(player, info.payload.substr(0, info.payload.find('\0')));
+			}
+			break;
 		case net::kNeSuicide: {
 			game::GameWorld::PlayerInfo me;
 			if (m_round->playerInfo(player, me) && me.alive) {
@@ -516,6 +635,9 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			}
 			if (onLog) {
 				onLog("chat " + nameOf(player) + ": " + line.text);
+			}
+			if (onChat) {
+				onChat(player, line);
 			}
 		}
 		client.chat.clear();
@@ -1142,6 +1264,33 @@ void HostedGame::tick()
 	applyMoves();
 	trackObjects();
 	trackPlayers();
+	// The scripts' end-of-round text (gl_sendEndOfRoundData, 0x00568930:
+	// data block 8 to everyone, with sv.endOfRoundDelay and each player's
+	// kills and deaths).
+	if (m_logic->endOfRoundSerial() != m_endOfRoundSerialSent) {
+		m_endOfRoundSerialSent = m_logic->endOfRoundSerial();
+		net::RemoteWorld::EndOfRoundData data;
+		data.text = m_logic->endOfRoundData();
+		data.endOfRoundDelay = m_setup.settings ? m_setup.settings->endOfRoundDelay : 15;
+		for (const game::GameWorld::PlayerInfo& p : m_round->playerList()) {
+			net::RemoteWorld::EndOfRoundData::Player row;
+			row.id = p.id;
+			row.kills = p.kills;
+			row.deaths = p.deaths;
+			row.score = p.kills;
+			data.players.push_back(row);
+		}
+		const std::string encoded = net::RemoteWorld::encodeEndOfRoundData(data);
+		for (const auto& [id, client] : m_clients) {
+			if (client.stage == Client::Stage::Loading || client.stage == Client::Stage::Connected) {
+				continue;
+			}
+			m_server.send(id, net::makeDataBlockStart(8, static_cast<uint32_t>(encoded.size())));
+			for (size_t at = 0; at < encoded.size(); at += 63) {
+				m_server.send(id, net::makeDataBlockChunk(encoded.substr(at, 63)));
+			}
+		}
+	}
 	if (m_logic->ended() && !m_roundEndSent) {
 		m_roundEndSent = true;
 		sendToPlaying(eventOf(net::kEvEndOfRound,

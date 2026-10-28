@@ -61,19 +61,20 @@ struct ShadowSettings {
 	bool shadowMapIncludeStaticMeshes = true; // +0x1cc
 	bool shadowShowFrustums = false;           // +0x6e4
 	float shadowIntensityBias = 0;  // +0x1d0 (SHADOWINTENSITYBIAS)
-	float lightmapIntensityBias = 0; // +0x1d4 (LIGHTMAPINTENSITYBIAS)
-	float dropShadowClipHeightOffset = 0; // +0x1d8
+	float lightmapIntensityBias = 0; // +0x1d4 (LIGHTMAPINTENSITYBIAS, set at once by 0x1014a780; only
+	                                 // LightManager_r3x0.fx's Combine technique reads it, which RendDX9 never picks)
+	float dropShadowClipHeightOffset = 0; // +0x1d8 (no reader in RendDX9 but its getter 0x1014a7c0)
 	bool dynamicShadowsEnabled = true;           // +0x748
 	bool dynamic1pShadowsEnabled = true;         // +0x749
 	bool dynamicStaticMeshShadowsEnabled = true; // +0x74a
 	bool allowAlphaShadows = false;  // +0x74b
 	float alphaShadowThreshold = 0.2f; // +0x74c (SHADOWALPHATHRESHOLD)
-	float shadowUpdateFactor = 1;    // +0x750
-	bool shadowUpdatesEnabled = true; // +0x754
+	float shadowUpdateFactor = 1;    // +0x750 (no reader but its getter 0x1014a8d0)
+	bool shadowUpdatesEnabled = true; // +0x755 (0x1014a900; 0: the maps aren't redrawn, 0x10127420)
 	float shadowMapDepthBias = 0;    // +0x760
 	float shadowMapSlopeBias = 0;    // +0x764
 	float shadowOccluderOversizeFactor = 1.5f; // +0x768
-	bool useLSSMOptimizations = true;  // +0x755
+	bool useLSSMOptimizations = true;
 	bool usePSMOptimizations = false;  // +0x75c
 	bool shadowPSMUseSlideback = false; // +0x75d
 	bool shadowPSMUseUnitCubeClipping = true; // +0x75e

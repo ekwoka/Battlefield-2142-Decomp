@@ -61,6 +61,7 @@ layout(set = 3, binding = 0) uniform Lighting {
 						   // outside (below -1: a point light)
 	vec4 lightExtra[8];    // x: the cosine it is full inside, y: 1 when
 						   // it lights lightmapped surfaces too
+	vec4 hemiObject;       // rgb: HemiMapConstantColor, w: HeightOverTerrain
 };
 
 // A light's cone (1 for a point light) and whether it lights this surface
@@ -127,7 +128,7 @@ void main()
 	} else {
 		// Bundled and skinned meshes (32) take the hemi map (RaShaderBM/SM's
 		// _USEHEMIMAP_); unlit statics the sky colour.
-		vec4 hemi = (layers & 32) != 0 ? hemiLight(inWorldPosition, normal, inObjectY, skyColor.rgb)
+		vec4 hemi = (layers & 32) != 0 ? hemiLight(inWorldPosition, normal, inObjectY, skyColor.rgb, hemiObject)
 									   : vec4(skyColor.rgb, 1.0);
 		light = hemi.rgb + sun * hemi.a * shadowFactor(inWorldPosition, true);
 	}

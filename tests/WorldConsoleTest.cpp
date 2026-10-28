@@ -1,5 +1,6 @@
 // World script methods: placing objects.
 #include "Console/Console.h"
+#include "Game/GameLogic.h"
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
@@ -46,4 +47,34 @@ TEST(WorldConsole_AbsoluteTransformation)
 	CHECK(console.execute("Object.rotation 0/0/0", out) == ConsoleResult::Ok);
 	CHECK(console.execute("Object.absoluteTransformation " + matrix, out) == ConsoleResult::Ok);
 	CHECK(near(object->rotation().x, 30) && near(object->rotation().y, -20) && near(object->rotation().z, 10));
+}
+
+// ObjectTemplate.supplyGroupNeeded <team> <group> [optional] (0x00503dec:
+// two or three arguments) keeps each pair in order.
+TEST(WorldConsole_SupplyGroupNeeded)
+{
+	Console console;
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "ControlPoint");
+	world::registerWorldConsoleMethods(console, templates, objects);
+	std::string out;
+	CHECK(console.execute("ObjectTemplate.create ControlPoint cp", out) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.supplyGroupNeeded 2 3 0", out) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.supplyGroupNeeded 1 4", out) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.supplyGroupNeeded 1 5 1", out) == ConsoleResult::Ok);
+	CHECK(templates.find("cp")->settings()["supplyGroupNeeded.list"] == "2 3 0;1 4 0;1 5 1;");
+}
+
+// GameLogic.setBeforeSpawnCamera <position> <rotation> (0x004278ef, the
+// levels' Init.con) keeps the camera for the view before the first spawn.
+TEST(WorldConsole_BeforeSpawnCamera)
+{
+	Console console;
+	game::GameLogic logic;
+	game::registerGameLogicConsoleMethods(console, logic);
+	std::string out;
+	CHECK(!logic.beforeSpawnCamera.set);
+	CHECK(console.execute("gameLogic.setBeforeSpawnCamera -180/29/-451 -138/-19/0", out) == ConsoleResult::Ok);
+	CHECK(logic.beforeSpawnCamera.set && logic.beforeSpawnCamera.position[2] == -451 && logic.beforeSpawnCamera.rotation[0] == -138);
 }

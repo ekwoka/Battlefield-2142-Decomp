@@ -63,8 +63,10 @@ float shadowFactor(vec3 worldPosition, bool withStatic)
 layout(set = 2, binding = HEMI_MAP_BINDING) uniform sampler2D hemiMap;
 
 // rgb: the ambient, a: the sun's visibility. `objectY` is the object's
-// origin height (World[3][1]).
-vec4 hemiLight(vec3 worldPosition, vec3 normal, float objectY, vec3 sky)
+// origin height (World[3][1]); `object` its HemiMapConstantColor (rgb: a
+// Titan interior map's colour under it, else 1) and HeightOverTerrain (w,
+// the per-object constants 0x10041100 +0x1ec / +0x1e4).
+vec4 hemiLight(vec3 worldPosition, vec3 normal, float objectY, vec3 sky, vec4 object)
 {
 	if (hemiConstants.z <= 0.0) {
 		return vec4(sky, 1.0);
@@ -72,11 +74,12 @@ vec4 hemiLight(vec3 worldPosition, vec3 normal, float objectY, vec3 sky)
 	vec2 uv = ((worldPosition + vec3(hemiConstants.z * 0.5) + normal).xz - hemiConstants.xy) / hemiConstants.z;
 	uv.y = 1.0 - uv.y;
 	vec4 ground = texture(hemiMap, uv);
-	// localHeight at half a metre's scale (InvHemiHeightScale), on the ground
-	// (HeightOverTerrain 0).
+	// localHeight at half a metre's scale (InvHemiHeightScale), lifted by
+	// the object's HeightOverTerrain (calcGroundUVAndLerp).
 	float localHeight = (worldPosition.y - objectY) * 0.5;
-	float offset = clamp(localHeight * 2.0 - 1.0, -2.0, 0.8);
+	float overTerrain = object.w;
+	float offset = clamp(localHeight * 2.0 - 1.0 + overTerrain, -2.0 * (1.0 - overTerrain), 0.8);
 	float lerpFactor = clamp((normal.y + offset) * 0.5 + 0.5, 0.0, 0.9);
-	return vec4(mix(ground.rgb, hemiSky.rgb, lerpFactor), hemiSky.w > 0.5 ? ground.a : 1.0);
+	return vec4(mix(ground.rgb, hemiSky.rgb, lerpFactor) * object.rgb, hemiSky.w > 0.5 ? ground.a : 1.0);
 }
 #endif

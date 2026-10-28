@@ -209,3 +209,32 @@ TEST(PostProduction_ConsoleSettings)
 	CHECK(console.execute("renderer.drawPostProduction 0", out) == ConsoleResult::Ok);
 	CHECK(!post.drawPostProduction);
 }
+
+// The commander's overhead view: its fov over the HUD's map rectangle,
+// the screen around it going on (render::overheadProjection).
+#include "Render/OverheadView.h"
+
+TEST(PostProduction_OverheadProjection)
+{
+	render::OverheadView view;
+	view.fovY = 0.3f;
+	view.rect[0] = 100;
+	view.rect[1] = 0;
+	view.rect[2] = 700;
+	view.rect[3] = 600;
+	// A 1280 x 720 target: the 600 x 600 square is 960 x 720 pixels.
+	const render::Mat4 p = render::overheadProjection(view, 1280, 720, 1, 6000);
+	const auto ndc = [&p](float x, float y, float z) {
+		const float cx = x * p.at(0, 0) + z * p.at(2, 0), cy = y * p.at(1, 1) + z * p.at(2, 1), w = z;
+		return std::array<float, 2> {cx / w, cy / w};
+	};
+	const float t = std::tan(0.15f);
+	// The top-left and bottom-right corners of the view (aspect 960 / 720)
+	// at the rectangle's corners (NDC x -0.75 .. 0.75, y 1 .. -1).
+	const auto a = ndc(-t * 960 / 720, t, 1), b = ndc(t * 960 / 720, -t, 1);
+	CHECK(near(a[0], -0.75f) && near(a[1], 1) && near(b[0], 0.75f) && near(b[1], -1));
+	// The ground width it spans: 2 tan(0.15) 260 = 78.6 m.
+	CHECK(near(render::overheadGroundWidth(0.3f, 260), 2 * t * 260));
+	// Depth 0 at the near plane, 1 at the far one.
+	CHECK(near((1 * p.at(2, 2) + p.at(3, 2)) / 1, 0) && near((6000 * p.at(2, 2) + p.at(3, 2)) / 6000, 1));
+}

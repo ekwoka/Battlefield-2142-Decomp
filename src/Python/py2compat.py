@@ -406,7 +406,15 @@ def _make_builtins():
 	return b
 
 
+# Modules a game module gets instead of the standard ones it names (name ->
+# replacement module), such as a socket module with Python 2's str API for
+# the server's admin scripts (Main/AdminScript.cpp fills it).
+REDIRECTS = {}
+
+
 def _py2_import(name, globals=None, locals=None, fromlist=(), level=-1):
+	if level <= 0 and name in REDIRECTS:
+		return builtins.__import__(REDIRECTS[name], globals, locals, fromlist, 0)
 	# Python 2 tries "import x" inside the importing module's package first.
 	if level <= 0 and globals:
 		package = globals.get('__package__') or (globals.get('__name__') if '__path__' in globals else None)

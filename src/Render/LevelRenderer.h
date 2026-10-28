@@ -13,6 +13,7 @@
 #include "TerrainLod.h"
 #include "Effects/Effects.h"
 #include "GpuContext.h"
+#include "OverheadView.h"
 #include "PostProduction.h"
 #include "Hud/Hud.h"
 #include "UI/MenuDraw.h"
@@ -66,6 +67,7 @@ struct Camera {
 	float pitch = 0; // radians, positive looks up
 	float fovY = 1.0f;
 	float nearPlane = 0.5f;
+	float roll = 0; // radians about the view axis (a seat camera's shakes)
 
 	Vec3f forward() const;
 	Vec3f right() const;
@@ -162,9 +164,15 @@ struct LevelSources {
 	// The game state the post-production follows (EMP, tinnitus, the Titan
 	// flash, the camera effect), asked each frame; none if null.
 	std::function<void(PostEffects& effects)> postEffects;
+	// The team's Titan (1 PAC, 2 EU; 0 without one), for the Titan
+	// interiors' hemi maps (HemiMapManager.loadTitanHemiMap).
+	std::function<uint32_t(int team)> titanObject;
 	// Hidden objects drawn as active camouflage (a cloaked soldier's
 	// refraction); asked each frame for the hidden ones.
 	std::function<bool(uint32_t object)> cloaked;
+	// The commander's overhead view, asked each frame: true while it is
+	// on (the world pass is then drawn from it, without the first person).
+	std::function<bool(OverheadView& view)> overheadView;
 };
 
 struct LevelStats {
@@ -196,6 +204,9 @@ public:
 
 	// A camera position above the middle of the placed objects.
 	Camera suggestedCamera() const;
+
+	// The overhead view's camera (OverheadView).
+	Camera overheadCamera(const OverheadView& view) const;
 
 	// Follows the world's objects: moves instances with their objects, adds
 	// new objects and drops removed ones (call once a frame before draw).
@@ -234,6 +245,7 @@ private:
 	struct GpuMesh {
 		bool bundled = false;
 		bool skinned = false;
+		bool radiusShadowBounds = false; // GeometryTemplate.useRadiusForShadowDepth / Spatial
 		size_t geometries = 1; // in its file
 		size_t lodCount = 1;   // of the geometry drawn
 		std::vector<float> lodDistances; // how far each LOD is drawn (empty: the defaults)
@@ -271,6 +283,10 @@ private:
 			float lightmapTransform[4] {1, 1, 0, 0};
 		};
 		std::vector<Lod> lods;
+		// HemiMapConstantColor from a Titan interior's map (the exe's per
+		// object cache, BM +0x2d0 / SM +0x570: kept while the object is
+		// outside every map; 0.5 0.5 0.5 at first).
+		mutable float titanHemi[3] = {0.5f, 0.5f, 0.5f};
 		bool overgrowth = false; // Object.isOvergrowth
 		Lod overgrowthLod;       // its "<geometry>_lod" mesh
 	};
@@ -401,6 +417,7 @@ private:
 	SDL_GPUTexture* m_shadowStatic = nullptr;
 	uint32_t m_shadowMapSize = 0;
 	bool m_shadowStaticValid = false;
+	bool m_shadowDrawn = false; // the maps hold a frame's casters (shadowUpdatesEnabled 0 keeps them)
 	Vec3f m_shadowStaticCenter;
 	size_t m_shadowStaticInstances = 0; // m_instances' count when the static map was drawn
 	ShadowUniforms m_shadowUniforms;
@@ -415,6 +432,26 @@ private:
 	// The hemi map (HemiMapManager.setBaseHemiMap).
 	SDL_GPUTexture* m_hemiMap = nullptr;
 	void loadHemiMap(const LevelSources& sources);
+	// The Titan interiors' hemi maps (HemiMapManager.loadTitanHemiMap),
+	// sampled on the CPU as RendDX9 does (0x100ecb10), and this frame's
+	// placement of each in its Titan (0x100eda70).
+	struct TitanHemiMap {
+		std::vector<uint8_t> rgba; // the top level, RGBA8
+		uint32_t width = 0, height = 0;
+		float offset[3] {};
+		float size = 0;
+		int team = 0; // the Titan's team (1 PAC, 2 EU)
+		bool placed = false;
+		Vec3f origin;    // the Titan's position
+		Vec3f axes[3];   // its rotation's rows
+	};
+	std::vector<TitanHemiMap> m_titanHemiMaps;
+	bool m_cameraInTitan = false;
+	void loadTitanHemiMaps(const LevelSources& sources);
+	void placeTitanHemiMaps(const Camera& camera);
+	// HemiMapConstantColor and HeightOverTerrain of a bundled or skinned
+	// instance this frame (LightingUniforms::hemiObject).
+	void hemiObjectFor(const Instance& instance, const GpuMesh& mesh, float out[4]) const;
 
 	// The sky's cloud layers and sun flare.
 	SDL_GPUTexture* m_cloudTextures[2] = {};
@@ -500,6 +537,7 @@ private:
 		SDL_GPUTexture* texture;
 		uint32_t firstVertex;
 		uint32_t vertexCount;
+		int blend[2] = {0, 0}; // HudQuad::blend (D3DBLEND source, destination)
 	};
 	SDL_GPUBuffer* m_overlayVertices = nullptr;
 	// The menu layer: its triangles by texture, and the textures of images

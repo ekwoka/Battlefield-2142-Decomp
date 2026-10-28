@@ -102,6 +102,10 @@ public:
 	void selectKit(int kit, const std::array<int32_t, 4>& unlocks = {-1, -1, -1, -1}); // SelectKit (0x3f)
 	void suicide();                            // PostRemote 6/0xc (0x004c22e0)
 	void say(const std::string& text, uint32_t channel = 0); // a StringBlock chat line (channel: ChatChannel)
+	// "rcon <command>" typed in the console: PostRemote 6/0x12 with the
+	// line (0x004b6630 case 0x12); the server's answers come back as 6/0x13
+	// messages (world().takeMessages(): -1 and "rcon: <text>").
+	void remoteCommand(const std::string& command);
 	void toggleFreeCamera();                   // ToggleFreeCamera (0x28)
 	// Squads (SquadManager): the team is our player's, the player us unless
 	// given. A squad must exist to be joined (0x004c6450 looks it up). A

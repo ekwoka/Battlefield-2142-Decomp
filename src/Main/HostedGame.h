@@ -51,6 +51,7 @@
 #include "Net/RemoteInput.h"
 #include "Net/RemoteWorld.h"
 #include "Net/ServerQuery.h"
+#include "Net/ServerSettings.h"
 
 #include <cstdint>
 #include <array>
@@ -77,6 +78,12 @@ struct HostSetup {
 	uint16_t queryPort = 29900; // 0: no LAN query responder
 	bool loopbackOnly = true;
 	std::string password;
+	// A server's configuration (Main/ServerAdmin.h), when it has one: the
+	// settings block's fields, the whole map list (block 5, with the map
+	// running), the query's keys, and the bans checked on connecting.
+	const net::ServerSettings* settings = nullptr;
+	const net::MapList* maps = nullptr;
+	const net::BanList* bans = nullptr;
 };
 
 // The engine's yaw/pitch/roll (degrees) as the networkables' quaternion
@@ -111,6 +118,30 @@ public:
 	uint32_t tickCount() const { return m_tick; } // the ghost blocks' tick (the last sent)
 	// Log lines (joins, leaves, chat).
 	std::function<void(const std::string&)> onLog;
+
+	// The connected clients' players (admin.listPlayers, the bans).
+	struct ClientPlayer {
+		int player = -1;
+		std::string name;
+		std::string address;   // "a.b.c.d:port"
+		std::string cdKeyHash; // the challenge response's (GameServer::ClientInfo)
+	};
+	std::vector<ClientPlayer> clientPlayers() const;
+	// A server message (Game.sayAll / sayTeam): a chat line on channel 12
+	// (13 for a team) from player 0xff with source 1, as the exe's server
+	// messages go (GameProtocol.h ChatMessage).
+	void sayAll(const std::string& text);
+	void sayTeam(int team, const std::string& text);
+	// The remote console in the game: a client's "rcon <command>" comes as
+	// message 6/0x12 (the client's 0x004b6630 case 0x12 sends the line;
+	// the server's 0x004b0690 case 0x12 raises the scripts' RemoteCommand
+	// with the player), the reply as 6/0x13 (host.rcon_feedback, 0x00442940:
+	// "rcon: <text>").
+	std::function<void(int player, const std::string& command)> onRemoteCommand;
+	void sendRemoteFeedback(int player, const std::string& text);
+	// A chat line a client said (for the scripts' ChatMessage: player, text,
+	// channel, flags).
+	std::function<void(int player, const net::ChatMessage& line)> onChat;
 
 private:
 	struct Ghost {
@@ -203,6 +234,7 @@ private:
 	std::map<int, std::string> m_names;  // names the clients gave
 	uint32_t m_tick = 0;
 	bool m_roundEndSent = false;
+	int m_endOfRoundSerialSent = 0;
 };
 
 } // namespace dice::hfe::host

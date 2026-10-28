@@ -9,7 +9,9 @@ add_library(Net STATIC
 	GameServer.cpp
 	GhostLayout.cpp
 	Networkables.cpp
+	RemoteConsole.cpp
 	RemoteWorld.cpp
+	ServerSettings.cpp
 	Md5.cpp
 	GameSpyCrypt.cpp
 	ServerBrowser.cpp

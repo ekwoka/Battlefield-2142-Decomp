@@ -802,3 +802,42 @@ TEST(Vehicles_BotPilotsFlyToAPointAndHover)
 		CHECK(flight.end.y > 12 && flight.end.y < 40);
 	}
 }
+
+// Spawning into a vehicle: the APC carries a SpawnPoint with
+// setEnterOnSpawn 1 (eu_apc_SpawnPoint): chosen as a mobile spawn point,
+// the soldier appears in its nearest free seat (0x005a98e0). A spawn
+// point with setEnterOnSpawn on the ground beside it does the same; with
+// no vehicle near, the point can't be used.
+TEST(Vehicles_SpawnIntoTheApc)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("eu_apc_pods")) {
+		return;
+	}
+	const uint32_t apc = g.start("eu_apc_pods", {0, 2, 30}, 2);
+	CHECK(g.world->spawnVehicles(2) == std::vector<uint32_t> {apc});
+	CHECK(g.world->spawnVehicles(1).empty());
+	const int me = g.world->addPlayer("Me", 2, false);
+	g.world->setSpawnVehicle(me, apc);
+	CHECK(g.world->spawnSoldier(me));
+	game::GameWorld::PlayerInfo info;
+	CHECK(g.world->playerInfo(me, info) && info.vehicle == apc && info.seat == 0);
+
+	// The garage's ground point with setEnterOnSpawn: the APC is 30 m away
+	// (out of 5 m), so a human can't spawn there...
+	world::ObjectTemplate* sp = g.templates.find("garage_sp");
+	sp->settings()["setEnterOnSpawn"] = "1";
+	const int bot = g.world->addPlayer("Bot", 2, false);
+	CHECK(!g.world->spawnSoldier(bot));
+	// ...until it stands beside the APC.
+	for (const auto& object : g.objects.objects()) {
+		if (object->objectTemplate() == sp) {
+			object->setPosition({3, 0, 30});
+		}
+	}
+	CHECK(g.world->spawnSoldier(bot));
+	CHECK(g.world->playerInfo(bot, info) && info.vehicle == apc && info.seat > 0);
+}

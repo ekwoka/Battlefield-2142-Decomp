@@ -160,6 +160,9 @@ GpuContext::~GpuContext()
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_uiSubmitPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_uiTestPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_uiClearPipeline);
+	for (const auto& [key, pipeline] : m_uiBlendPipelines) {
+		SDL_ReleaseGPUGraphicsPipeline(m_device, pipeline);
+	}
 	if (m_window) {
 		SDL_ReleaseWindowFromGPUDevice(m_device, m_window);
 	}
@@ -354,6 +357,96 @@ bool GpuContext::createPipelines(std::string& error)
 		m_undergrowthPipeline && m_particlePipeline && m_additiveParticlePipeline && m_uiPipeline && m_uiSubmitPipeline &&
 		m_uiTestPipeline && m_uiClearPipeline && m_shadowCasterPipeline && m_camoPipeline && m_postPipeline &&
 		m_bloomPipeline;
+}
+
+namespace {
+
+// Direct3D 9's D3DBLEND (d3d9types.h) as SDL's factors.
+bool blendFactor(int d3dBlend, SDL_GPUBlendFactor& factor)
+{
+	switch (d3dBlend) {
+	case 1: factor = SDL_GPU_BLENDFACTOR_ZERO; return true;
+	case 2: factor = SDL_GPU_BLENDFACTOR_ONE; return true;
+	case 3: factor = SDL_GPU_BLENDFACTOR_SRC_COLOR; return true;
+	case 4: factor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_COLOR; return true;
+	case 5: factor = SDL_GPU_BLENDFACTOR_SRC_ALPHA; return true;
+	case 6: factor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA; return true;
+	case 7: factor = SDL_GPU_BLENDFACTOR_DST_ALPHA; return true;
+	case 8: factor = SDL_GPU_BLENDFACTOR_ONE_MINUS_DST_ALPHA; return true;
+	case 9: factor = SDL_GPU_BLENDFACTOR_DST_COLOR; return true;
+	case 10: factor = SDL_GPU_BLENDFACTOR_ONE_MINUS_DST_COLOR; return true;
+	case 11: factor = SDL_GPU_BLENDFACTOR_SRC_ALPHA_SATURATE; return true;
+	default: return false;
+	}
+}
+
+} // namespace
+
+SDL_GPUGraphicsPipeline* GpuContext::uiBlendPipeline(int source, int destination)
+{
+	if (source == 0 && destination == 0) {
+		return m_uiPipeline;
+	}
+	const int key = source * 16 + destination;
+	if (const auto it = m_uiBlendPipelines.find(key); it != m_uiBlendPipelines.end()) {
+		return it->second;
+	}
+	SDL_GPUGraphicsPipeline* pipeline = nullptr;
+	SDL_GPUBlendFactor src {}, dst {};
+	if (blendFactor(source, src) && blendFactor(destination, dst)) {
+		// uiPipeline()'s state (the mesh vertex layout, no depth, the
+		// HUD pass's depth-stencil format) with the effect's factors.
+		SDL_GPUVertexBufferDescription buffer {};
+		buffer.slot = 0;
+		buffer.pitch = sizeof(Vertex);
+		buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+		const SDL_GPUVertexAttribute attributes[10] = {
+			{0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(Vertex, position)},
+			{1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(Vertex, normal)},
+			{2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(Vertex, texCoord)},
+			{3, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(Vertex, lightmapCoord)},
+			{4, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT, offsetof(Vertex, part)},
+			{5, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT, offsetof(Vertex, part2)},
+			{6, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT, offsetof(Vertex, weight)},
+			{7, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(Vertex, detailCoord)},
+			{8, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(Vertex, dirtCoord)},
+			{9, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(Vertex, crackCoord)},
+		};
+		SDL_GPUColorTargetDescription color {};
+		color.format = m_colorFormat;
+		color.blend_state.enable_blend = true;
+		color.blend_state.src_color_blendfactor = src;
+		color.blend_state.dst_color_blendfactor = dst;
+		color.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+		color.blend_state.src_alpha_blendfactor = src;
+		color.blend_state.dst_alpha_blendfactor = dst;
+		color.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+		SDL_GPUGraphicsPipelineCreateInfo info {};
+		info.vertex_input_state.vertex_buffer_descriptions = &buffer;
+		info.vertex_input_state.num_vertex_buffers = 1;
+		info.vertex_input_state.vertex_attributes = attributes;
+		info.vertex_input_state.num_vertex_attributes = 10;
+		info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+		info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+		info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_CLOCKWISE;
+		info.target_info.color_target_descriptions = &color;
+		info.target_info.num_color_targets = 1;
+		info.target_info.depth_stencil_format = m_depthFormat;
+		info.target_info.has_depth_stencil_target = true;
+		SDL_GPUShader* vertex = loadShader(m_device, SDL_GPU_SHADERSTAGE_VERTEX, k_ui_vert_spv, k_ui_vert_spv_size,
+			k_ui_vert_msl, k_ui_vert_msl_size, 0, 1);
+		SDL_GPUShader* fragment = loadShader(m_device, SDL_GPU_SHADERSTAGE_FRAGMENT, k_ui_frag_spv, k_ui_frag_spv_size,
+			k_ui_frag_msl, k_ui_frag_msl_size, 1, 0);
+		if (vertex && fragment) {
+			info.vertex_shader = vertex;
+			info.fragment_shader = fragment;
+			pipeline = SDL_CreateGPUGraphicsPipeline(m_device, &info);
+		}
+		SDL_ReleaseGPUShader(m_device, vertex);
+		SDL_ReleaseGPUShader(m_device, fragment);
+	}
+	m_uiBlendPipelines[key] = pipeline;
+	return pipeline;
 }
 
 SDL_GPUTexture* GpuContext::createColorTexture(uint32_t width, uint32_t height)

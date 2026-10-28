@@ -15,6 +15,7 @@
 #include "Physics/RigidBody.h"
 #include "Random.h"
 
+#include <functional>
 #include <array>
 #include <string>
 
@@ -295,6 +296,83 @@ struct DeviationBuildUp {
 	void update(bool firing);
 	void fired();
 	float deviation() const { return minDev + value; }
+};
+
+// A hand-held firearm's SoldierDeviationComp (template class 0x94e1; the
+// object's update 0x005de980, once a tick with the holder's input). The
+// template: setFireDev and minDev as DeviationBuildUp; setTurnDev max
+// pitch yaw decay (0x005de3c0: +0x2c, +0x20, +0x24, +0x28), setSpeedDev
+// max throttle strafe decay (0x005de3e0: +0x3c, +0x30, +0x34, +0x38),
+// setMiscDev max add decay (0x005de400: +0x48, +0x40, +0x44); devModStand,
+// devModCrouch, devModLie (+0x4c..+0x54, 1), devModZoom and
+// minDevModZoom (+0x58, +0x5c, 1). Each update:
+//   - the turn's part: |PIMouseLookY| x pitch + |PIMouseLookX| x yaw (the
+//     look inputs, PIMouseLook units) less decay is added, held at max
+//     (decaying back to it when above); without a turn it decays to 0;
+//   - the speed's part: throttle (|PIThrottle| > 0.01) adds `throttle`,
+//     strafing (|PIYaw|) `strafe`, held at max; without, decay;
+//   - the misc part: while its condition holds (the update's flag; the
+//     rewrite: in the air) add - decay up to max, else decay;
+//   - the firing's build-up decays off the trigger (DeviationBuildUp);
+//   - the stance's modifier (Stand, Crouch, Lie), and zoomed devModZoom
+//     on the whole and minDevModZoom on minDev (else 1 and 1).
+// The deviation = (minDev x minDevModZoom + misc + turn + speed + fire)
+// x zoom x stance. (Its +0x44 extra, added on a condition of the holder's
+// slot 0x1a0 not decoded, is left out.)
+struct SoldierDeviation {
+	DeviationBuildUp fire;
+	float turnMax = 0, turnPitch = 0, turnYaw = 0, turnDecay = 0;
+	float speedMax = 0, speedThrottle = 0, speedStrafe = 0, speedDecay = 0;
+	float miscMax = 0, miscAdd = 0, miscDecay = 0;
+	float modStand = 1, modCrouch = 1, modLie = 1, modZoom = 1, minModZoom = 1;
+	bool present = false;
+	float turn = 0, speed = 0, misc = 0; // +0x24, +0x28, +0x2c
+	float total = 0;                     // +4
+	static SoldierDeviation fromTemplate(const world::ObjectTemplate& t);
+	// lookX / lookY in PIMouseLook units; stance 0 stand, 1 crouch, 2 lie.
+	void update(float throttle, float strafe, float lookX, float lookY, bool misc, bool firing, int stance, bool zoomed);
+	float deviation() const { return total; }
+};
+
+// DefaultGunSwayComp (template class 0x94f6, its 28 sway.* settings at
+// +0xc..+0x78; object 0x005e0640, update 0x005e0da0 a tick): the aim
+// wanders by nudging the holder's look inputs. With gunSwayUseZoom it
+// runs only while zoomed. Per axis (pitch: 0x005e09a0 on PIMouseLookY;
+// left-right: 0x005e0ba0 on PIMouseLookX), every UpdateRate seconds a
+// step of Max / Steps less the smoothing is taken along the swing's
+// direction: Factor x ZoomModifier x step x dt x the stability (below) x
+// the direction (+-1) is put on the look input when the player's own is
+// smaller. A swing turns back at Max + its random extra (RandomMin ..
+// RandomMax, drawn at each end), keeping on (by DirModifier and
+// DirThreshold's draw) past it until 2 x (Max + extra), where it starts
+// again. The smoothing (0x005dfc20, SmoothFactor / SmoothMax /
+// SmoothThreshold) slows the step near the swing's ends. Holding the
+// sprint key while zoomed with the scope stabilizer (the holder's
+// ability, hasScopeStabilizerAbility) steadies it (0x005e0750): the
+// stability falls to 0 over stabilityTime and comes back over
+// stabilityRecoverTime; it lasts at most stabilityDuration (its use
+// recovering over stabilityDurationRecoverTime).
+struct GunSway {
+	struct Axis {
+		float steps = 0, factor = 0, max = 0, updateRate = 0, dirModifier = 0, dirThreshold = 0;
+		float randomMin = 0, randomMax = 0, smoothFactor = 0, smoothMax = 0, smoothThreshold = 0;
+		// State: the step timer, this swing's way, its total, the
+		// direction, the extra, the smoothing, the keep-going flag.
+		float timer = 0, swing = 0, total = 0, direction = 1, extra = 0, smooth = 0;
+		bool keepGoing = false;
+	};
+	bool present = false;
+	bool useZoom = false;
+	float zoomModifier = 1;
+	float recoverTime = 0, stabilityTime = 0, duration = 0, durationRecoverTime = 0;
+	Axis pitch, lr;
+	float stability = 1, used = 0;
+	bool steadying = false, latched = false;
+	static GunSway fromTemplate(const world::ObjectTemplate& t);
+	// One update: `lookX` / `lookY` the holder's look inputs this tick
+	// (PIMouseLook units; changed in place). `random01` gives (0, 1].
+	void update(float seconds, bool zoomed, bool sprintHeld, bool hasStabilizer, float& lookX, float& lookY,
+		const std::function<float()>& random01);
 };
 
 // A round's deviation (the deviation components' apply, 0x005f5540): two

@@ -14,6 +14,7 @@
 #include <sstream>
 #include <set>
 #include <cstdlib>
+#include <cstring>
 #include <cstdio>
 
 namespace dice::hfe {
@@ -303,6 +304,7 @@ int screenshot(const render::LevelSources& sources, const ViewerOptions& options
 		camera.yaw = view.eyeYaw;
 		camera.pitch = view.eyePitch;
 		camera.fovY = view.fovY;
+		camera.roll = view.eyeRoll;
 		camera.nearPlane = kFirstPersonNear;
 	}
 
@@ -569,10 +571,12 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				camera.yaw = view.eyeYaw;
 				camera.pitch = view.eyePitch;
 				camera.fovY = view.fovY;
+				camera.roll = view.eyeRoll;
 				camera.nearPlane = kFirstPersonNear;
 			} else if (playing && options.playerView(view)) {
 				// Third person: behind and above the soldier.
-				camera.fovY = 1.0f;
+				camera.fovY = view.chaseFovY > 0 ? view.chaseFovY : 1.0f;
+				camera.roll = 0;
 				camera.nearPlane = render::Camera {}.nearPlane;
 				camera.yaw = view.yawDegrees * 3.14159265f / 180.0f;
 				camera.pitch = pitch;
@@ -750,6 +754,202 @@ int runViewer(const render::LevelSources& sources, const ViewerOptions& options,
 	}
 	std::unique_ptr<Window> own = Window::open(options.width, options.height);
 	return own ? interactive(sources, options, *own->impl) : 1;
+}
+
+// --- movies
+
+namespace {
+
+// Uploads `rgba` into `texture` (made or remade at its size), clears
+// `target` to black and blits the picture onto it, scaled to fit.
+void drawMovieFrame(SDL_GPUDevice* device, SDL_GPUCommandBuffer* commands, SDL_GPUTexture*& texture,
+	SDL_GPUTransferBuffer*& transfer, uint32_t& textureWidth, uint32_t& textureHeight, const uint8_t* rgba,
+	uint32_t width, uint32_t height, SDL_GPUTexture* target, uint32_t targetWidth, uint32_t targetHeight)
+{
+	if (!texture || textureWidth != width || textureHeight != height) {
+		if (texture) {
+			SDL_ReleaseGPUTexture(device, texture);
+			SDL_ReleaseGPUTransferBuffer(device, transfer);
+		}
+		SDL_GPUTextureCreateInfo info {};
+		info.type = SDL_GPU_TEXTURETYPE_2D;
+		info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+		info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+		info.width = width;
+		info.height = height;
+		info.layer_count_or_depth = 1;
+		info.num_levels = 1;
+		texture = SDL_CreateGPUTexture(device, &info);
+		SDL_GPUTransferBufferCreateInfo transferInfo {};
+		transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+		transferInfo.size = width * height * 4;
+		transfer = SDL_CreateGPUTransferBuffer(device, &transferInfo);
+		textureWidth = width;
+		textureHeight = height;
+	}
+	if (rgba) {
+		void* mapped = SDL_MapGPUTransferBuffer(device, transfer, true);
+		std::memcpy(mapped, rgba, static_cast<size_t>(width) * height * 4);
+		SDL_UnmapGPUTransferBuffer(device, transfer);
+		SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands);
+		SDL_GPUTextureTransferInfo from {};
+		from.transfer_buffer = transfer;
+		SDL_GPUTextureRegion to {};
+		to.texture = texture;
+		to.w = width;
+		to.h = height;
+		to.d = 1;
+		SDL_UploadToGPUTexture(copy, &from, &to, true);
+		SDL_EndGPUCopyPass(copy);
+	}
+	SDL_GPUColorTargetInfo clear {};
+	clear.texture = target;
+	clear.load_op = SDL_GPU_LOADOP_CLEAR;
+	clear.store_op = SDL_GPU_STOREOP_STORE;
+	clear.clear_color = {0, 0, 0, 1};
+	SDL_EndGPURenderPass(SDL_BeginGPURenderPass(commands, &clear, 1, nullptr));
+	const float scale = std::min(static_cast<float>(targetWidth) / static_cast<float>(width),
+		static_cast<float>(targetHeight) / static_cast<float>(height));
+	const auto w = static_cast<uint32_t>(static_cast<float>(width) * scale);
+	const auto h = static_cast<uint32_t>(static_cast<float>(height) * scale);
+	SDL_GPUBlitInfo blit {};
+	blit.source.texture = texture;
+	blit.source.w = width;
+	blit.source.h = height;
+	blit.destination.texture = target;
+	blit.destination.x = (targetWidth - w) / 2;
+	blit.destination.y = (targetHeight - h) / 2;
+	blit.destination.w = w;
+	blit.destination.h = h;
+	blit.load_op = SDL_GPU_LOADOP_LOAD;
+	blit.filter = SDL_GPU_FILTER_LINEAR;
+	SDL_BlitGPUTexture(commands, &blit);
+}
+
+} // namespace
+
+struct Window::MovieScreen::State {
+	Window& window;
+	SDL_GPUTexture* texture = nullptr;
+	SDL_GPUTransferBuffer* transfer = nullptr;
+	uint32_t width = 0, height = 0;
+	SDL_AudioStream* audio = nullptr;
+	int audioRate = 0;
+	bool escape = false, anyKey = false;
+};
+
+Window::MovieScreen::MovieScreen(Window& window) : m_state(new State {window}) {}
+
+Window::MovieScreen::~MovieScreen()
+{
+	SDL_GPUDevice* device = m_state->window.impl->gpu->device();
+	if (m_state->texture) {
+		SDL_ReleaseGPUTexture(device, m_state->texture);
+		SDL_ReleaseGPUTransferBuffer(device, m_state->transfer);
+	}
+	if (m_state->audio) {
+		SDL_DestroyAudioStream(m_state->audio);
+	}
+}
+
+bool Window::MovieScreen::frame(const uint8_t* rgba, int width, int height)
+{
+	Window::Impl& shown = *m_state->window.impl;
+	shown.runScript();
+	m_state->escape = m_state->anyKey = false;
+	SDL_Event event;
+	while (SDL_PollEvent(&event)) {
+		if (event.type == SDL_EVENT_QUIT) {
+			shown.closed = true;
+		} else if (event.type == SDL_EVENT_KEY_DOWN) {
+			m_state->anyKey = true;
+			m_state->escape = m_state->escape || event.key.scancode == SDL_SCANCODE_ESCAPE;
+		} else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+			m_state->anyKey = true;
+		}
+	}
+	if (shown.closed) {
+		return false;
+	}
+	SDL_HideCursor(); // as 0x0040bd90 does while a movie plays
+	SDL_GPUCommandBuffer* commands = SDL_AcquireGPUCommandBuffer(shown.gpu->device());
+	SDL_GPUTexture* swapchain = nullptr;
+	Uint32 targetWidth = 0, targetHeight = 0;
+	if (!SDL_WaitAndAcquireGPUSwapchainTexture(commands, shown.window, &swapchain, &targetWidth, &targetHeight)
+		|| !swapchain || width <= 0 || height <= 0) {
+		SDL_SubmitGPUCommandBuffer(commands);
+		return true;
+	}
+	drawMovieFrame(shown.gpu->device(), commands, m_state->texture, m_state->transfer, m_state->width, m_state->height, rgba,
+		static_cast<uint32_t>(width), static_cast<uint32_t>(height), swapchain, targetWidth, targetHeight);
+	SDL_SubmitGPUCommandBuffer(commands);
+	if (!shown.shot.empty()) {
+		shown.shot.clear(); // a scripted shot of a movie: not kept (saveMovieFrame does those)
+	}
+	return true;
+}
+
+bool Window::MovieScreen::escape() const { return m_state->escape; }
+bool Window::MovieScreen::anyKey() const { return m_state->anyKey; }
+
+void Window::MovieScreen::queueAudio(const std::vector<float>& samples, int rate)
+{
+	if (samples.empty() || rate <= 0) {
+		return;
+	}
+	if (!m_state->audio || m_state->audioRate != rate) {
+		if (m_state->audio) {
+			SDL_DestroyAudioStream(m_state->audio);
+		}
+		SDL_InitSubSystem(SDL_INIT_AUDIO);
+		SDL_AudioSpec spec {SDL_AUDIO_F32, 2, rate};
+		m_state->audio = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
+		m_state->audioRate = rate;
+		if (m_state->audio) {
+			SDL_ResumeAudioStreamDevice(m_state->audio);
+		}
+	}
+	if (m_state->audio) {
+		SDL_PutAudioStreamData(m_state->audio, samples.data(), static_cast<int>(samples.size() * sizeof(float)));
+	}
+}
+
+double Window::MovieScreen::audioQueued() const
+{
+	if (!m_state->audio || m_state->audioRate <= 0) {
+		return 0;
+	}
+	return static_cast<double>(SDL_GetAudioStreamQueued(m_state->audio)) / (sizeof(float) * 2.0 * m_state->audioRate);
+}
+
+bool saveMovieFrame(const uint8_t* rgba, int frameWidth, int frameHeight, int width, int height, const std::string& png)
+{
+	const bool started = SDL_WasInit(SDL_INIT_VIDEO) != 0 || SDL_Init(SDL_INIT_VIDEO);
+	if (!started) {
+		std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
+		return false;
+	}
+	std::string error;
+	auto gpu = render::GpuContext::create(nullptr, error);
+	if (!gpu) {
+		std::fprintf(stderr, "%s\n", error.c_str());
+		return false;
+	}
+	auto target = gpu->createOffscreenTarget(static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+	SDL_GPUTexture* texture = nullptr;
+	SDL_GPUTransferBuffer* transfer = nullptr;
+	uint32_t textureWidth = 0, textureHeight = 0;
+	SDL_GPUCommandBuffer* commands = SDL_AcquireGPUCommandBuffer(gpu->device());
+	drawMovieFrame(gpu->device(), commands, texture, transfer, textureWidth, textureHeight, rgba,
+		static_cast<uint32_t>(frameWidth), static_cast<uint32_t>(frameHeight), target.color, target.width, target.height);
+	SDL_SubmitGPUCommandBuffer(commands);
+	std::vector<uint8_t> pixels;
+	const bool ok = gpu->readPixels(target, pixels) && render::writePng(png, target.width, target.height, pixels);
+	SDL_ReleaseGPUTexture(gpu->device(), texture);
+	SDL_ReleaseGPUTransferBuffer(gpu->device(), transfer);
+	gpu->releaseTarget(target);
+	std::printf("%s %s\n", ok ? "wrote" : "failed to write", png.c_str());
+	return ok;
 }
 
 } // namespace dice::hfe

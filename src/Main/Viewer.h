@@ -2,6 +2,7 @@
 // saved as a PNG (for checking the renderer without a display).
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -64,6 +65,9 @@ struct ViewerOptions {
 		float eye[3] = {0, 0, 0};
 		float eyeYaw = 0, eyePitch = 0;
 		float fovY = 1.0f;
+		float eyeRoll = 0; // radians (a seat camera's shakes)
+		// Third person: the seat camera's worldFOV (0: the viewer's own).
+		float chaseFovY = 0;
 	};
 	std::function<void(const PlayerInput&)> onPlayerInput;
 	std::function<bool(PlayerView&)> playerView; // false without a player
@@ -153,12 +157,38 @@ public:
 		std::unique_ptr<State> m_state;
 	};
 
+	// A movie drawn alone (the start-up movies, Movie/MovieQueue.h): each
+	// frame() shows the picture scaled to fit over black and handles the
+	// window's events. Its sound goes to the default playback device.
+	class MovieScreen {
+	public:
+		explicit MovieScreen(Window& window);
+		~MovieScreen();
+		// False once the window was closed.
+		bool frame(const uint8_t* rgba, int width, int height);
+		// Pressed since the last frame(): Esc, and any key or button.
+		bool escape() const;
+		bool anyKey() const;
+		// Interleaved stereo floats at `rate` Hz; and how many seconds of
+		// them are still to play.
+		void queueAudio(const std::vector<float>& samples, int rate);
+		double audioQueued() const;
+
+	private:
+		struct State;
+		std::unique_ptr<State> m_state;
+	};
+
 	struct Impl;
 	std::unique_ptr<Impl> impl;
 
 private:
 	Window();
 };
+
+// One movie frame as the movie screen draws it, rendered off screen at
+// width x height and saved as a PNG (for checking without a display).
+bool saveMovieFrame(const uint8_t* rgba, int frameWidth, int frameHeight, int width, int height, const std::string& png);
 
 // Returns the process exit code. With a window it draws there (and leaves
 // it open); without one it opens its own for this run.

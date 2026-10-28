@@ -83,6 +83,16 @@ void registerGeometryConsoleMethods(Console& console, GeometryTemplateManager& g
 			active->hasAdditiveAlpha = on;
 		}
 	});
+	bindMethod(console, "GeometryTemplate.useRadiusForShadowDepth", ConsoleAccess::Anyone, [&geometries](bool on) {
+		if (GeometryTemplate* active = geometries.active()) {
+			active->useRadiusForShadowDepth = on;
+		}
+	});
+	bindMethod(console, "GeometryTemplate.useRadiusForShadowSpatial", ConsoleAccess::Anyone, [&geometries](bool on) {
+		if (GeometryTemplate* active = geometries.active()) {
+			active->useRadiusForShadowSpatial = on;
+		}
+	});
 	bindMethod(console, "GeometryTemplate.simpleUVTranslation", ConsoleAccess::Anyone, [&geometries](std::string uv) {
 		if (GeometryTemplate* active = geometries.active()) {
 			float u = 0, v = 0;

@@ -69,7 +69,9 @@ src/                       the rewrite, laid out like DICE's Code/BF2 tree
   AI/                      bots' navigation mesh and path finding (AIDLL.dll)
   UI/                      the Flash menus: .dfm/SWF, AVM1 interpreter, characters, player
   Hud/                     the HUD: hudBuilder node trees, HUD variables, .dif fonts
-  Net/                     networking: GameSpy server browsing against OpenSpy, the game's UDP connections
+  Net/                     networking: GameSpy server browsing against OpenSpy, the game's UDP connections,
+                           a server's settings, map list and bans, the remote console client
+  Movie/                   the Bink movies' queue and decoder (FFmpeg; optional)
   Voip/                    voice chat: Speex, the voice client and the voice server (was BF2VoipServer.dll)
   Main/                    the bf2142 executable (start-up sequence and level viewer so far)
   Sound/SoundEngine/       the sound engine (was BF2142Audio.dll)
@@ -168,6 +170,27 @@ build/native/src/Main/bf2142 --game "source/Battlefield 2142" \
 # +joinServer is the original's spelling of --connect)
 #   bf2142 --game "source/Battlefield 2142" +level Camp_Gibraltar +gameMode gpm_cq --host --simulate 600
 #   bf2142 --game "source/Battlefield 2142" --connect 127.0.0.1 --name Joiner --play
+# run a dedicated server (no window, no sound): the install's
+# mods/bf2142/Settings/ServerSettings.con (sv.*) and maplist.con
+# (mapList.append <level> <mode> <size>), or +config <file> / +mapList
+# <file>; +overlayPath <dir/> reads <dir>/Settings/ and <dir>/admin/default.cfg
+# instead. It runs the map list in turn (sv.roundsPerMap rounds a map,
+# sv.endDelay seconds between rounds) until Ctrl+C or "quit" (--simulate N:
+# N seconds over all maps). sv.adminScript "default" starts the install's
+# admin/default.py: the TCP remote console on 127.0.0.1, port and password
+# from admin/default.cfg (port=4711, password=<yours>), with standard_admin's
+# team auto-balance (sv.autoBalanceTeam) and team-kill punishing
+# (sv.tkPunishEnabled)
+#   bf2142 --game "source/Battlefield 2142" --host --dedicated
+#   bf2142 --game "source/Battlefield 2142" --host --dedicated +overlayPath ~/bf2142-server/
+# talk to its remote console: maplist.list, admin.listPlayers,
+# admin.kickPlayer <id>, admin.banPlayer <id> [perm|round|<seconds>],
+# admin.runNextLevel, admin.nextLevel <i>, Game.sayAll "<text>", sv.*
+#   bf2142 --rcon 127.0.0.1:4711 --rcon-password <yours> --rcon-command "admin.listPlayers"
+# the Bink movies (FFmpeg: brew install ffmpeg; BF2142_MOVIES=OFF builds
+# without): the start-up movies play before the menu (--no-movies skips
+# them; Esc skips the intro), --movie plays one, or renders one frame
+#   bf2142 --game "source/Battlefield 2142" --movie Intro --movie-seconds 20 --screenshot intro.png
 # the menu's LOCAL page searches 255.255.255.255 as the original; --lan
 # 127.0.0.1 keeps the search on this machine
 # greet OpenSpy's account service (FESL, over TLS), or log in with an

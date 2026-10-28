@@ -38,7 +38,15 @@
 #include "UI/Player/Player.h"
 #include "IO/Localization/Localization.h"
 #include "HostedGame.h"
+#include "ServerAdmin.h"
+#include "ServerScriptBridge.h"
+#include "Net/RemoteConsole.h"
+#if BF2142_HAS_PYTHON
+#include "AdminScript.h"
+#endif
 #include "Prediction.h"
+#include "Movie/MovieDecoder.h"
+#include "Movie/MovieQueue.h"
 #include "HudAlerts.h"
 #include "HudMenus.h"
 #include "HudMenusChat.h"
@@ -83,8 +91,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <chrono>
+#include <csignal>
 #include <functional>
 #include <cmath>
 #include <filesystem>
@@ -133,6 +143,16 @@ struct Options {
 	std::string maps;            // --maps level[:mode[:size]],...: a playlist for --host (map changes on the same connections)
 	uint16_t hostPort = 17567;   // +port N (the original's "specifies the network port to be used")
 	uint16_t queryPort = 29900;  // --query-port N: the LAN query responder's (0: none)
+	bool hostPortGiven = false, queryPortGiven = false, timeLimitGiven = false; // given on the command line (over sv.*)
+	std::string configFile;      // +config <file>: a server's settings (default <mod>/Settings/ServerSettings.con)
+	std::string mapListFile;     // +mapList <file>: a server's map list (default <mod>/Settings/maplist.con)
+	std::string overlayPath;     // +overlayPath <dir/>: the original's GSOverlayPath (its Settings/, admin/default.cfg)
+	std::string rcon;            // --rcon host[:port]: talk to a server's remote console (admin/default.py)
+	std::string rconPassword;    // --rcon-password <password> (admin/default.cfg's)
+	std::vector<std::string> rconCommands; // --rcon-command "<console command>" (repeatable; "exec" is added)
+	bool movies = true;          // --no-movies: no start-up movies (Init.con's bf2Engine.playMovie)
+	std::string movie;           // --movie <file>: play that movie (Movies/<name>.bik under the mod)
+	float movieSeconds = 1;      // --movie-seconds: with --screenshot, the movie's frame at that time
 	std::string lanAddress = "255.255.255.255"; // --lan <address>: where the LOCAL page's search probes
 	std::string playerName;      // --name N: our name on a server (ChangePlayerName)
 	std::string probe;           // --probe host[:port]: shake hands and show what the server sends
@@ -269,6 +289,30 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.connect = argv[++i];
 		} else if (arg == "+port" && hasValue) {
 			options.hostPort = static_cast<uint16_t>(std::atoi(argv[++i]));
+			options.hostPortGiven = true;
+		} else if (arg == "+config" && hasValue) {
+			options.configFile = argv[++i];
+		} else if (arg == "+mapList" && hasValue) {
+			options.mapListFile = argv[++i];
+		} else if (arg == "+overlayPath" && hasValue) {
+			options.overlayPath = argv[++i];
+			if (!options.overlayPath.empty() && options.overlayPath.back() != '/' && options.overlayPath.back() != '\\') {
+				options.overlayPath += '/';
+			}
+		} else if (arg == "--dedicated") {
+			options.dedicated = true;
+		} else if (arg == "--rcon" && hasValue) {
+			options.rcon = argv[++i];
+		} else if (arg == "--rcon-password" && hasValue) {
+			options.rconPassword = argv[++i];
+		} else if (arg == "--rcon-command" && hasValue) {
+			options.rconCommands.push_back(argv[++i]);
+		} else if (arg == "--no-movies") {
+			options.movies = false;
+		} else if (arg == "--movie" && hasValue) {
+			options.movie = argv[++i];
+		} else if (arg == "--movie-seconds" && hasValue) {
+			options.movieSeconds = static_cast<float>(std::atof(argv[++i]));
 		} else if (arg == "--host") {
 			options.host = true;
 		} else if (arg == "--walk") {
@@ -277,8 +321,10 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.maps = argv[++i];
 		} else if (arg == "--time-limit" && hasValue) {
 			options.timeLimit = std::atoi(argv[++i]);
+			options.timeLimitGiven = true;
 		} else if (arg == "--query-port" && hasValue) {
 			options.queryPort = static_cast<uint16_t>(std::atoi(argv[++i]));
+			options.queryPortGiven = true;
 		} else if (arg == "--lan" && hasValue) {
 			options.lanAddress = argv[++i];
 		} else if (arg == "--name" && hasValue) {
@@ -295,7 +341,7 @@ bool parseOptions(int argc, char** argv, Options& options)
 	if (!options.connect.empty() && options.simulate > 0 && options.screenshot.empty()) {
 		options.view = false; // a joined game run headless for a while
 	}
-	if (options.gameDir.empty()) {
+	if (options.gameDir.empty() && options.rcon.empty()) {
 		std::fprintf(stderr, "usage: bf2142 --game <BF2142 install dir> [--api symbols/BF2142.exe.console.csv]\n");
 		return false;
 	}
@@ -475,6 +521,9 @@ constexpr int kMarkerBeacon = 100001;
 // Where the commander's zoom buttons put the commander's view (0x007d8e00:
 // the asset's position); the commander screen's map centres on it.
 std::optional<std::pair<float, float>> g_commanderView;
+// The team's overhead camera (MultiPlayerOverheadCamera: fOV, height), the
+// commander screen's view at its map zoom 2 (render::OverheadView).
+float g_overheadFov = 0.3f, g_overheadHeight = 260.0f;
 // The map's right-click menu open (the HUD manager's menu states: 0x14
 // MapMenuShow, 0x15 SquadLeaderMenuShow, 0x16 CommanderMenuShow; 0 none).
 int g_mapMenu = 0;
@@ -597,6 +646,12 @@ void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 	if (commanderScreen && g_commanderView) {
 		hud.setMapFocus(g_commanderView->first, g_commanderView->second);
 	}
+	// The overhead view over the commander's point (else his own), its
+	// ground width 2 tan(fov / 2) height (0x0077c4b0).
+	const bool overhead = commanderScreen && hud.commanderMapZoom() == 2;
+	hud.setOverhead(overhead, g_commanderView ? g_commanderView->first : me.position.x,
+		g_commanderView ? g_commanderView->second : me.position.z, 2 * std::tan(g_overheadFov / 2) * g_overheadHeight);
+	hud.set("MinimapZoomDisplay", static_cast<float>(commanderScreen ? hud.commanderMapZoom() : hud.mapZoom()));
 	hud.setMapMarkers(std::move(markers));
 }
 
@@ -808,12 +863,15 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 			// The crosshair's parts (0x007be770): the spread in pixels is
 			// the deviation (degrees) times weaponHud.deviationFactor
 			// (default 10); the parts are 20 long, about the 800 x 600
-			// centre. The deviation stays at its minimum (not modelled yet).
+			// centre. The deviation is the weapon's soldier deviation now
+			// (GameWorld::weaponDeviation: the turn, speed, stance and
+			// firing), its minimum without one.
 			const auto number = [&settings](const char* key, float otherwise) {
 				const auto it = settings.find(key);
 				return it != settings.end() ? static_cast<float>(std::atof(it->second.c_str())) : otherwise;
 			};
-			const float spread = std::ceil(number("deviation.minDev", 0) * number("weaponHud.deviationFactor", 10));
+			const float now = round.weaponDeviation(round.localPlayer());
+			const float spread = std::ceil((now > 0 ? now : number("deviation.minDev", 0)) * number("weaponHud.deviationFactor", 10));
 			constexpr float kLength = 20;
 			hud.set("CrossRightPos", 400 + spread);
 			hud.set("CrossLeftPos", 399 - kLength - spread);
@@ -1111,6 +1169,19 @@ struct Session {
 	// --host: the server, kept from map to map so the clients stay
 	// connected through a map change (HostedGame::changeLevel).
 	std::unique_ptr<host::HostedGame> hosted;
+	// --host: the server's configuration (sv.*, maplist.*, the bans) and
+	// its admin script (the remote console), kept from map to map
+	// (ServerAdmin.h, AdminScript.h); the installed maps the map list names.
+	std::unique_ptr<host::ServerAdmin> admin;
+#if BF2142_HAS_PYTHON
+	host::AdminScript adminScript;
+#endif
+	std::vector<dice::hfe::menu::MenuMap> installedMaps;
+	long serverTicksLeft = -1; // --host --dedicated --simulate N: the ticks left over every map (-1: no end)
+	// The start-up movies Init.con queues (bf2Engine.playMovie), played
+	// once before the menu (Movie/MovieQueue.h).
+	dice::hfe::movie::MovieQueue movies;
+	bool moviesQueued = false;
 	// Voice chat (Voip/VoiceChat.h): the menu's settings and mic test, the
 	// joined server's voice; updated on its own thread.
 	std::unique_ptr<dice::hfe::voip::VoiceChat> voice;
@@ -1121,6 +1192,20 @@ struct Session {
 
 int runGame(Options& options, Session& session);
 
+// A dedicated server runs until Ctrl+C or a console "quit".
+std::atomic<bool> g_stopServer {false};
+void stopServer(int) { g_stopServer = true; }
+
+// --rcon: a remote console client (admin/default.py's protocol).
+int runRemoteConsole(const Options& options);
+// --movie: one movie, in a window or (with --screenshot) one frame of it.
+int runMovieCommand(const Options& options);
+// --host: the server's settings and map list, and its playlist from them.
+bool setupServer(Options& options, Session& session);
+// A map list entry as a level to load: the level folder's own name and a
+// size its mode has (none for a level that isn't installed).
+std::optional<dice::hfe::menu::MenuMap> serverMap(const Session& session, const net::MapListEntry& entry);
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -1128,6 +1213,12 @@ int main(int argc, char** argv)
 	Options options;
 	if (!parseOptions(argc, argv, options)) {
 		return 2;
+	}
+	if (!options.rcon.empty()) {
+		return runRemoteConsole(options);
+	}
+	if (!options.movie.empty()) {
+		return runMovieCommand(options);
 	}
 	if (options.host) {
 		std::setvbuf(stdout, nullptr, _IOLBF, 0); // a server's log as it happens
@@ -1310,6 +1401,9 @@ int main(int argc, char** argv)
 		}
 		session.playlist.push_back(map);
 	}
+	if (options.host && !setupServer(options, session)) {
+		return 1;
+	}
 	if (!session.playlist.empty()) {
 		options.level = session.playlist.front().level;
 		options.gameMode = session.playlist.front().gameMode;
@@ -1362,10 +1456,25 @@ int main(int argc, char** argv)
 			}
 			continue;
 		}
-		if (!session.nextMap || session.playlist.empty()) {
+		if (!session.nextMap || session.playlist.empty() || g_stopServer) {
 			return result;
 		}
 		session.nextMap = false;
+		if (session.admin) {
+			// The server's map list (ServerAdmin::nextRound).
+			const net::MapListEntry next = session.admin->nextRound();
+			const auto map = serverMap(session, next);
+			if (!map) {
+				std::fprintf(stderr, "next map %s (%s) is not installed\n", next.level.c_str(), next.gameMode.c_str());
+				return 1;
+			}
+			options.level = map->level;
+			options.gameMode = map->gameMode;
+			options.mapSize = map->size;
+			std::printf("next map: %s (%s, %d), map list entry %d of %d\n", options.level.c_str(), options.gameMode.c_str(),
+				options.mapSize, session.admin->maps.current() + 1, session.admin->maps.count());
+			continue;
+		}
 		if (++session.roundsOnMap >= session.roundsPerMap) {
 			session.roundsOnMap = 0;
 			session.current = (session.current + 1) % session.playlist.size();
@@ -1379,6 +1488,237 @@ int main(int argc, char** argv)
 }
 
 namespace {
+
+int runRemoteConsole(const Options& options)
+{
+	// --rcon host[:port] [--rcon-password p] [--rcon-command "..."]...:
+	// the greeting, the seeded login, then each command through "exec".
+	const size_t colon = options.rcon.find(':');
+	const std::string address = options.rcon.substr(0, colon);
+	const uint16_t port = colon == std::string::npos ? 4711 : static_cast<uint16_t>(std::atoi(options.rcon.c_str() + colon + 1));
+	net::RemoteConsoleClient rcon;
+	std::string error;
+	if (!rcon.connect(address, port, 5, &error)) {
+		std::fprintf(stderr, "%s:%u: %s\n", address.c_str(), port, error.c_str());
+		return 1;
+	}
+	std::printf("%s\n", rcon.greeting().c_str());
+	std::string reply;
+	if (!rcon.login(options.rconPassword, &reply)) {
+		std::fprintf(stderr, "%s", reply.empty() ? "no answer to the login\n" : reply.c_str());
+		return 1;
+	}
+	std::printf("%s", reply.c_str());
+	for (const std::string& command : options.rconCommands) {
+		if (!rcon.exec(command, reply)) {
+			std::fprintf(stderr, "%s: no answer\n", command.c_str());
+			return 1;
+		}
+		std::printf("> %s\n%s", command.c_str(), reply.c_str());
+	}
+	return 0;
+}
+
+// A movie's file: a queued name ("Movies\\EA.bik") under the mod, or a
+// bare name ("Intro") as Movies/<name>.bik; matched without case.
+std::string moviePath(const Options& options, std::string file)
+{
+	std::replace(file.begin(), file.end(), '\\', '/');
+	if (file.find('/') == std::string::npos && file.find('.') == std::string::npos) {
+		file = "Movies/" + file + ".bik";
+	}
+	const std::filesystem::path given(file);
+	if (given.is_absolute() || std::filesystem::exists(given)) {
+		return file;
+	}
+	return host::findFileNoCase(options.gameDir + "/" + options.modPath + "/" + file);
+}
+
+#if BF2142_HAS_RENDERER
+// Plays the queued movies in the window, as the main loop does (0x0040bd90,
+// 0x00408680): each in turn, one that won't open dropped, to its end or
+// to Esc when its mode lets it. False when the window was closed.
+bool playMovies(Window& window, dice::hfe::movie::MovieQueue& queue, const Options& options)
+{
+	while (!queue.empty()) {
+		const dice::hfe::movie::QueuedMovie movie = queue.takeNext();
+		dice::hfe::movie::MovieDecoder decoder;
+		std::string error;
+		if (!decoder.open(moviePath(options, movie.file), &error)) {
+			std::printf("movie %s: %s\n", movie.file.c_str(), error.c_str());
+			continue;
+		}
+		std::printf("movie %s: %dx%d, %.1f s%s\n", movie.file.c_str(), decoder.width(), decoder.height(), decoder.duration(),
+			movie.skippable() ? " (Esc skips)" : "");
+		Window::MovieScreen screen(window);
+		dice::hfe::movie::VideoFrame shown, next;
+		bool more = decoder.nextFrame(next);
+		const auto start = std::chrono::steady_clock::now();
+		while (more || !shown.rgba.empty()) {
+			const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+			while (more && next.time <= now) {
+				std::swap(shown, next);
+				more = decoder.nextFrame(next);
+			}
+			screen.queueAudio(decoder.takeAudio(), decoder.sampleRate());
+			if (!screen.frame(shown.rgba.empty() ? nullptr : shown.rgba.data(), shown.width, shown.height)) {
+				return false;
+			}
+			if (screen.escape() && movie.skippable()) {
+				break;
+			}
+			if (!more && screen.audioQueued() <= 0.0) {
+				break; // the picture and the sound are over
+			}
+		}
+	}
+	return true;
+}
+#endif
+
+int runMovieCommand(const Options& options)
+{
+	// --movie <file> [--screenshot out.png --movie-seconds t]
+	dice::hfe::movie::MovieDecoder decoder;
+	std::string error;
+	const std::string path = moviePath(options, options.movie);
+	if (!decoder.open(path, &error)) {
+		std::fprintf(stderr, "%s\n", error.c_str());
+		return 1;
+	}
+	std::printf("%s: %dx%d, %.2f fps, %.1f s, %s\n", path.c_str(), decoder.width(), decoder.height(), decoder.frameRate(),
+		decoder.duration(), decoder.hasAudio() ? (std::to_string(decoder.sampleRate()) + " Hz stereo").c_str() : "no sound");
+#if BF2142_HAS_RENDERER
+	if (!options.screenshot.empty()) {
+		dice::hfe::movie::VideoFrame frame;
+		size_t samples = 0;
+		int frames = 0;
+		while (decoder.nextFrame(frame) && frame.time + 1e-6 < options.movieSeconds) {
+			samples += decoder.takeAudio().size() / 2;
+			++frames;
+		}
+		std::printf("frame %d at %.2f s (%zu sound samples before it)\n", frames, frame.time, samples);
+		return saveMovieFrame(frame.rgba.data(), frame.width, frame.height, 1280, 720, options.screenshot) ? 0 : 1;
+	}
+	auto window = Window::open(1280, 720);
+	if (!window) {
+		return 1;
+	}
+	window->setScript(options.inputScript);
+	dice::hfe::movie::MovieQueue queue;
+	queue.playMovie(options.movie, 0);
+	decoder.close();
+	return playMovies(*window, queue, options) ? 0 : 0;
+#else
+	std::fprintf(stderr, "built without the renderer: nothing to show the movie in\n");
+	return 1;
+#endif
+}
+
+std::optional<dice::hfe::menu::MenuMap> serverMap(const Session& session, const net::MapListEntry& entry)
+{
+	const auto same = [](const std::string& a, const std::string& b) {
+		return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+			return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
+		});
+	};
+	std::optional<dice::hfe::menu::MenuMap> found;
+	for (const dice::hfe::menu::MenuMap& map : session.installedMaps) {
+		if (!same(map.level, entry.level) || !same(map.gameMode, entry.gameMode)) {
+			continue;
+		}
+		if (!found || map.size == entry.size) {
+			found = map; // the size asked for, else the first the mode has
+		}
+	}
+	return found;
+}
+
+bool setupServer(Options& options, Session& session)
+{
+	// The files (0x00409950): +config / +mapList, else the mod's
+	// Settings/ServerSettings.con and maplist.con; then the command line's
+	// choices over them.
+	auto admin = std::make_unique<host::ServerAdmin>();
+	admin->settings.configFile = options.configFile;
+	admin->maps.configFile = options.mapListFile;
+	admin->setDefaultFiles(options.gameDir + "/" + options.modPath, options.overlayPath);
+	session.installedMaps = scanMenuMaps(options);
+	const Session* installed = &session;
+	admin->maps.validate = [installed](const net::MapListEntry& entry, std::string& error) {
+		if (serverMap(*installed, entry)) {
+			return true;
+		}
+		error = "map not found: " + entry.level + " gameMode: " + entry.gameMode;
+		return false;
+	};
+	Console console;
+	admin->registerConsole(console);
+	const bool settings = admin->loadSettings(console);
+	std::printf("server settings %s%s\n", admin->settings.configFile.c_str(), settings ? "" : " (not found: the defaults)");
+	admin->loadBanList(console);
+	if (!session.playlist.empty() || !options.level.empty()) {
+		// --maps or +level: those maps, not the map list file's.
+		admin->maps.clear();
+		if (session.playlist.empty()) {
+			session.playlist.push_back({options.level, options.gameMode, options.mapSize});
+		}
+		for (const dice::hfe::menu::MenuMap& map : session.playlist) {
+			std::string error;
+			if (!admin->maps.append({map.level, map.gameMode, map.size}, &error)) {
+				std::fprintf(stderr, "could not add to maplist. %s\n", error.c_str());
+			}
+		}
+	} else if (admin->loadMapList(console)) {
+		std::printf("map list %s: %d maps\n", admin->maps.configFile.c_str(), admin->maps.count());
+	}
+	if (admin->maps.count() == 0) {
+		std::fprintf(stderr, "no maps to host (+level, --maps or %s)\n", admin->maps.configFile.c_str());
+		return false;
+	}
+	net::ServerSettings& sv = admin->settings;
+	if (options.hostPortGiven) {
+		sv.serverPort = options.hostPort;
+	}
+	if (options.queryPortGiven) {
+		sv.gameSpyPort = options.queryPort;
+	}
+	if (options.timeLimitGiven) {
+		sv.timeLimit = options.timeLimit;
+	}
+	options.hostPort = static_cast<uint16_t>(sv.serverPort);
+	options.queryPort = static_cast<uint16_t>(sv.gameSpyPort);
+	options.timeLimit = sv.timeLimit;
+	options.ticketRatio = sv.ticketRatio;
+	options.scoreLimit = sv.scoreLimit;
+	options.maxPlayers = sv.maxPlayers;
+	if (options.botSkill < 0) {
+		options.botSkill = sv.botSkill;
+	}
+	session.roundsPerMap = std::max(sv.roundsPerMap, 1);
+	session.playlist.clear();
+	for (const net::MapListEntry& entry : admin->maps.entries()) {
+		if (const auto map = serverMap(session, entry)) {
+			session.playlist.push_back(*map);
+		}
+	}
+	if (session.playlist.empty()) {
+		std::fprintf(stderr, "none of the map list's maps is installed\n");
+		return false;
+	}
+	if (options.dedicated) {
+		if (options.simulate > 0) {
+			session.serverTicksLeft = static_cast<long>(options.simulate) * 30;
+		}
+		std::signal(SIGINT, stopServer);
+		std::signal(SIGTERM, stopServer);
+	}
+	std::printf("%s server \"%s\": %d maps, %d rounds a map, port %d, query port %d, admin script %s\n",
+		options.dedicated ? "dedicated" : "hosted", sv.serverName.c_str(), admin->maps.count(), session.roundsPerMap,
+		sv.serverPort, sv.gameSpyPort, sv.adminScript.empty() ? "none" : sv.adminScript.c_str());
+	session.admin = std::move(admin);
+	return true;
+}
 
 // One level's round (after the menu, when it runs first). Every manager
 // lives here, so the next map starts from nothing.
@@ -1537,6 +1877,23 @@ int runGame(Options& options, Session& session)
 		[&files](const std::string& path, std::vector<uint8_t>& data) { return files.readFile(path, data); });
 	anim::registerAnimationConsoleMethods(console, animationSystems);
 
+	// bf2Engine.playMovie (0x004082a0): Init.con queues the start-up
+	// movies, the first time it runs.
+	session.movies.dedicated = options.dedicated;
+	session.movies.northAmerica = dice::hfe::movie::MovieQueue::userInNorthAmerica();
+	bindMethod(console, "bf2Engine.playMovie", ConsoleAccess::Anyone, [&session](std::string file, int mode) {
+		if (!session.moviesQueued) {
+			session.movies.playMovie(file, mode);
+		}
+	});
+	// --host: sv.*, maplist.*, admin.* on the server's configuration
+	// (ServerAdmin.h); "quit" ends a dedicated server.
+	if (session.admin) {
+		session.admin->registerConsole(console);
+		if (options.dedicated) {
+			console.setExitHandler([] { g_stopServer = true; });
+		}
+	}
 	StubMethods stubs;
 	for (const std::string& table : options.apiTables) {
 		std::printf("%d console methods stubbed from %s\n", stubs.load(console, table), table.c_str());
@@ -1560,6 +1917,7 @@ int runGame(Options& options, Session& session)
 		run("Menu/MenuSounds.con");
 	}
 	run("Init.con");
+	session.moviesQueued = true;
 	run("Settings/RankSettings.con");
 	run("Menu/HUD/HudSetup/HudSetupMain.con");
 	if (!options.dedicated) {
@@ -1774,6 +2132,10 @@ int runGame(Options& options, Session& session)
 			}
 			session.menuBindings->setDisplayModes(session.window->displayModes());
 			applySettings();
+			// The start-up movies first (Esc skips the skippable ones).
+			if (options.movies && !playMovies(*session.window, session.movies, options)) {
+				return 0;
+			}
 			runViewer(sources, viewer, session.window.get());
 			if (session.window->closed()) {
 				return 0;
@@ -2094,7 +2456,7 @@ int runGame(Options& options, Session& session)
 		std::printf("  %7d %s\n", sorted[i].second, sorted[i].first.c_str());
 	}
 
-	if (options.view || !options.screenshot.empty() || options.simulate > 0) {
+	if (options.view || !options.screenshot.empty() || options.simulate > 0 || (options.dedicated && session.admin)) {
 		// Start the round: spawners take their control points' teams and
 		// put their vehicles out on the first tick.
 		game::GameWorld round(templates, objects);
@@ -2282,7 +2644,12 @@ int runGame(Options& options, Session& session)
 			const std::string v = voice;
 			bindMethod(console, command, ConsoleAccess::Anyone, [&round, c, v] { round.radioMessage(round.localPlayer(), c, v); });
 		}
-		bindMethod(console, "Radio.sendSpottedMessage", ConsoleAccess::Anyone, [&commRoses](bool, std::string) { commRoses.close(); });
+		// The crosshair's enemy reported to the squad (0x007c8160: the game's
+		// slot 0xd4, GameWorld::spotCrosshair) as the rose closes.
+		bindMethod(console, "Radio.sendSpottedMessage", ConsoleAccess::Anyone, [&commRoses, &round](bool, std::string) {
+			round.spotCrosshair(round.localPlayer());
+			commRoses.close();
+		});
 		dice::hfe::menu::SquadMenu squadMenu(round, hudManager);
 		squadMenu.setLocalizer([&localization](const std::string& id) { return localization.text(id); });
 		squadMenu.onMessage = [](const std::string& id) { std::printf("squad menu: %s\n", id.c_str()); };
@@ -2344,6 +2711,7 @@ int runGame(Options& options, Session& session)
 		// the CommanderCam event (0x24: x, the camera's height, z).
 		const auto zoomTo = [&](float x, float z) {
 			g_commanderView = std::make_pair(x, z);
+			hudManager.setCommanderMapZoom(2); // the overhead view (0x007d7f90: the map's zoom 2)
 			if (session.client) {
 				net::GameEvent cam;
 				cam.type = net::kEvCommanderCam;
@@ -2683,6 +3051,14 @@ int runGame(Options& options, Session& session)
 			setup.maxPlayers = options.maxPlayers;
 			setup.gamePort = options.hostPort;
 			setup.queryPort = options.queryPort;
+			if (session.admin) {
+				const net::ServerSettings& sv = session.admin->settings;
+				setup.serverName = sv.serverName;
+				setup.password = sv.password;
+				setup.settings = &sv;
+				setup.maps = &session.admin->maps;
+				setup.bans = &session.admin->bans;
+			}
 			if (session.hosted) {
 				// The next map on the same connections.
 				session.hosted->changeLevel(round, gameLogic, templates, setup);
@@ -2709,9 +3085,71 @@ int runGame(Options& options, Session& session)
 			{
 				if (hosted) {
 					hosted->detach();
+					hosted->onRemoteCommand = nullptr; // this round's scripts
+					hosted->onChat = nullptr;
 				}
 			}
 		} detachHosted {hosted};
+		// admin.* on this round (ServerAdmin.h): the players, kicks, and the
+		// map changes it asks for, which end the map at once.
+		bool serverNextMap = false;
+		if (hosted && session.admin) {
+			host::ServerAdmin& admin = *session.admin;
+			// The round's sv settings: the time limit (seconds), spawn and
+			// man-down times.
+			gameLogic.timeLimit = static_cast<float>(admin.settings.timeLimit);
+			round.setSpawnTime(admin.settings.spawnTime);
+			round.setManDownTime(admin.settings.manDownTime);
+			admin.hooks.players = [&round, hosted] {
+				std::vector<host::AdminHooks::Player> out;
+				const auto clients = hosted->clientPlayers();
+				for (const game::GameWorld::PlayerInfo& p : round.playerList()) {
+					host::AdminHooks::Player row;
+					row.id = p.id;
+					row.name = p.name;
+					row.ai = p.ai;
+					for (const host::HostedGame::ClientPlayer& c : clients) {
+						if (c.player == p.id) {
+							row.remote = true;
+							row.name = c.name;
+							row.address = c.address;
+							row.cdKeyHash = c.cdKeyHash;
+						}
+					}
+					out.push_back(row);
+				}
+				return out;
+			};
+			admin.hooks.kick = [hosted](int player, bool ban) { return hosted->kickPlayer(player, ban); };
+			admin.hooks.runNextLevel = [&admin, &serverNextMap] {
+				admin.request = host::ServerAdmin::Request::NextLevel;
+				serverNextMap = true;
+			};
+			admin.hooks.restartMap = [&admin, &serverNextMap] {
+				admin.request = host::ServerAdmin::Request::Restart;
+				serverNextMap = true;
+			};
+			admin.hooks.runLevel = [&admin, &serverNextMap, &session](const net::MapListEntry& map) {
+				if (!serverMap(session, map)) {
+					std::printf("admin.runLevel: %s (%s) is not installed\n", map.level.c_str(), map.gameMode.c_str());
+					return;
+				}
+				admin.request = host::ServerAdmin::Request::RunLevel;
+				admin.requestedLevel = map;
+				serverNextMap = true;
+			};
+			admin.hooks.sayAll = [hosted](const std::string& text) { hosted->sayAll(text); };
+			admin.hooks.sayTeam = [hosted](int team, const std::string& text) { hosted->sayTeam(team, text); };
+		}
+		struct ClearHooks {
+			host::ServerAdmin* admin;
+			~ClearHooks()
+			{
+				if (admin) {
+					admin->hooks = {};
+				}
+			}
+		} clearHooks {session.admin.get()};
 		gameLogic.startRound();
 		std::function<int(int)> scoreOf; // the scripts' scores, by player
 		bool scoreboardHeld = options.scoreboard;
@@ -2742,9 +3180,15 @@ int runGame(Options& options, Session& session)
 		// A joined game's own soldier, predicted from our moves and corrected
 		// by the server's records (Prediction.h).
 		host::SoldierPrediction prediction(round);
+		// And the vehicle we drive: a record of the driver's seat (its
+		// root's SimpleObject state, record.vehicle its ghost).
+		host::VehiclePrediction carPrediction(round);
 		uint32_t recordsSeen = 0;
 		if (session.client) {
-			session.client->onMoveSent = [&prediction](const net::PlayerMove& move) { prediction.step(move); };
+			session.client->onMoveSent = [&prediction, &carPrediction](const net::PlayerMove& move) {
+				prediction.step(move);
+				carPrediction.step(move);
+			};
 			session.client->sendOnTicks = true; // a move a tick (remoteStep's simulatedTick)
 		}
 		// The connection outlives this level (a map change): its hook doesn't.
@@ -2759,9 +3203,12 @@ int runGame(Options& options, Session& session)
 			}
 		} unhook {session};
 		// Where our soldier is drawn and seen from: the prediction's, else the server's.
-		const auto ownFeet = [&prediction, &session]() -> net::Vec3f {
+		const auto ownFeet = [&prediction, &carPrediction, &session]() -> net::Vec3f {
 			if (prediction.active()) {
 				return prediction.feet();
+			}
+			if (carPrediction.active()) {
+				return carPrediction.position();
 			}
 			return session.client ? session.client->world().controlObject().position : net::Vec3f {};
 		};
@@ -2875,6 +3322,16 @@ int runGame(Options& options, Session& session)
 				client.setInput(net::playerInputFrom(walk));
 			}
 			client.update();
+			// The server's camera rules (its settings block): no chase view
+			// without sv.allowExternalViews, no nose view without sv.allowNoseCam.
+			if (client.world().dataBlocks().count(0)) {
+				const net::RemoteWorld::ServerSettings sv = client.world().settings();
+				playerCamera.allowExternalViews = sv.allowExternalViews;
+				playerCamera.allowNoseCam = sv.allowNoseCam;
+				if (!sv.allowExternalViews) {
+					playerCamera.firstPerson = true;
+				}
+			}
 			// A new control-object record: the prediction takes the server's
 			// state (or starts from it); none in the last block: no soldier.
 			const net::RemoteWorld& own = client.world();
@@ -2882,8 +3339,19 @@ int runGame(Options& options, Session& session)
 				recordsSeen = own.controlRecords();
 				const net::ControlState* state = own.controlState();
 				const net::ControlObjectRecord& record = own.controlObject();
-				if (state && record.vehicle == 0 && !state->groups.empty()
+				if (state && record.vehicle != 0 && !state->groups.empty()
+					&& state->groups.front().kind == net::NetworkableKind::SimpleObject) {
+					prediction.stop();
+					const net::RemoteObject* car = own.object(record.vehicle);
+					const world::ObjectTemplate* t = car ? templates.findById(car->templateId) : nullptr;
+					if (carPrediction.active() && carPrediction.vehicleTemplate() == t) {
+						carPrediction.reconcile(record.lastMove, state->groups.front(), record.position);
+					} else if (!t || !carPrediction.start(t, record.lastMove, state->groups.front(), record.position)) {
+						carPrediction.stop();
+					}
+				} else if (state && record.vehicle == 0 && !state->groups.empty()
 					&& state->groups.front().kind == net::NetworkableKind::Soldier && !(state->groups.front().mask & 0x10000)) {
+					carPrediction.stop();
 					if (!prediction.active()) {
 						const auto object = ghostObjects.find(record.ghost);
 						const world::Object* soldier = object != ghostObjects.end() ? objects.find(object->second) : nullptr;
@@ -2901,9 +3369,11 @@ int runGame(Options& options, Session& session)
 					}
 				} else {
 					prediction.stop();
+					carPrediction.stop();
 				}
-			} else if (!own.controlInLastBlock() && prediction.active()) {
+			} else if (!own.controlInLastBlock() && (prediction.active() || carPrediction.active())) {
 				prediction.stop();
+				carPrediction.stop();
 			}
 			client.simulatedTick(); // this tick's move goes up (and is predicted)
 			std::set<uint16_t> seen;
@@ -2935,6 +3405,13 @@ int runGame(Options& options, Session& session)
 				}
 				if (predicted) {
 					turned = {prediction.yaw(), 0, 0};
+				}
+				// The car we drive: where its prediction has it.
+				if (carPrediction.active() && ghost.ghost == client.world().controlObject().vehicle) {
+					const net::Vec3f p = carPrediction.position();
+					const physics::Vec3 ypr = carPrediction.rotation().yawPitchRoll();
+					at = {p.x, p.y, p.z};
+					turned = {ypr.x, ypr.y, ypr.z};
 				}
 				if (const auto it = ghostObjects.find(ghost.ghost); it != ghostObjects.end()) {
 					// A soldier's networked health: clients run the corpse
@@ -3065,7 +3542,18 @@ int runGame(Options& options, Session& session)
 		serverSettings.timeLimit = options.timeLimit;
 		serverSettings.scoreLimit = options.scoreLimit;
 		serverSettings.maxPlayers = options.maxPlayers;
-		game::ScriptBridge bridge(round, gameLogic, serverSettings, options.modPath);
+		// On a server, ss_getParam reads its sv settings and rcon_invoke runs
+		// its console (ServerScriptBridge.h).
+		host::ServerScriptBridge bridge(round, gameLogic, serverSettings, options.modPath,
+			hosted ? session.admin.get() : nullptr, &console);
+		bridge.overlay = options.overlayPath.empty() ? options.gameDir + "/" : options.overlayPath;
+		bridge.onFeedback = [hosted](int player, const std::string& text) {
+			if (hosted && player >= 0) {
+				hosted->sendRemoteFeedback(player, text);
+			} else {
+				std::printf("rcon: %s", text.c_str());
+			}
+		};
 		scoreOf = [&bridge](int player) { return static_cast<int>(bridge.playerScore(player, "score").asInt()); };
 		script::ScriptHost scripts(bridge,
 			{options.gameDir + "/python", options.gameDir + "/" + options.modPath + "/python"},
@@ -3078,6 +3566,7 @@ int runGame(Options& options, Session& session)
 		const auto raise = [&scripts](const std::string& event, const game::ScriptArgs& args) { scripts.raise(event, args); };
 		round.setEventSink(raise);
 		gameLogic.setEventSink(raise);
+		bridge.events = raise;
 		gameLogic.onEndGame = [&](int winner, int victoryType) {
 			std::printf("round over: team %d won (victory type %d)\n", winner, victoryType);
 			scripts.setGameStatus(game::GameStatus::EndGame);
@@ -3089,6 +3578,21 @@ int runGame(Options& options, Session& session)
 			scripts.setGameStatus(game::GameStatus::Playing);
 			std::printf("game mode %s started: tickets %d / %d\n", options.gameMode.c_str(),
 				static_cast<int>(gameLogic.team(1).tickets), static_cast<int>(gameLogic.team(2).tickets));
+			// The server's admin script (sv.adminScript: admin/default.py's
+			// remote console, standard_admin's auto-balance and TK punish).
+			if (hosted && session.admin && !session.admin->settings.adminScript.empty()
+				&& session.adminScript.start(scripts, options.gameDir, session.admin->settings.adminScript, true)) {
+				std::printf("admin script %s running\n", session.admin->settings.adminScript.c_str());
+			}
+			if (hosted) {
+				hosted->onRemoteCommand = [&scripts](int player, const std::string& command) {
+					scripts.raise("RemoteCommand", {game::ScriptValue::integer(player), game::ScriptValue::string(command)});
+				};
+				hosted->onChat = [&scripts](int player, const net::ChatMessage& line) {
+					scripts.raise("ChatMessage", {game::ScriptValue::integer(player), game::ScriptValue::string(line.text),
+													 game::ScriptValue::integer(line.channel), game::ScriptValue::integer(0)});
+				};
+			}
 		} else {
 			std::fprintf(stderr, "game mode %s did not start\n", options.gameMode.c_str());
 		}
@@ -3099,11 +3603,13 @@ int runGame(Options& options, Session& session)
 			}
 			bots.update(1.0f / 30.0f);
 			round.localMuzzleEffects = !playerCamera.firstPerson;
+			round.setZoomed(round.localPlayer(), playerCamera.zoomLevel() > 0);
 			round.tick(1.0f / 30.0f);
 			playerCamera.tick(1.0f / 30.0f);
 			stepObjectEffects();
 			gameLogic.tick(1.0f / 30.0f);
 			scripts.update();
+			session.adminScript.update(scripts);
 			stepSounds();
 		};
 #else
@@ -3122,9 +3628,11 @@ int runGame(Options& options, Session& session)
 		};
 #endif
 		// After the round, sv.endDelay (15 s) before a playlist's next map.
-		constexpr float kEndDelay = 15;
+		const float kEndDelay = session.admin ? static_cast<float>(session.admin->settings.endDelay) : 15.0f;
 		float sinceEnd = 0;
-		const auto nextMapDue = [&] { return !session.playlist.empty() && sinceEnd >= kEndDelay; };
+		const auto nextMapDue = [&] {
+			return (serverNextMap && !session.playlist.empty()) || (!session.playlist.empty() && sinceEnd >= kEndDelay);
+		};
 		const auto showEndOfRound = [&] {
 			if (endOfRoundShown || options.dedicated) {
 				return;
@@ -3299,8 +3807,10 @@ int runGame(Options& options, Session& session)
 							round.playerRounds(false, false).empty() ? 0 : round.playerRounds(false, false)[0].count,
 							round.impacts().size() - impactsBefore);
 						// Critical damage: below armor.criticalDamage it burns down, and
-						// the soldier aboard dies with it.
+						// the soldier aboard dies with it (not before a screenshot:
+						// the picture is of the player aboard).
 						const uint32_t carId = me.vehicle;
+						if (options.screenshot.empty()) {
 						round.setHitPoints(carId, 100);
 						int burnt = 0;
 						for (; burnt < 30 * 20 && !objects.find(carId)->destroyed(); ++burnt) {
@@ -3310,6 +3820,7 @@ int runGame(Options& options, Session& session)
 						round.playerInfo(round.localPlayer(), me);
 						std::printf("  at 100 hit points it burnt out after %.1f s; the gunner is %s\n", burnt / 30.0f,
 							me.alive ? "alive" : "dead");
+						}
 						}
 					}
 				} else if (!options.screenshot.empty()) {
@@ -3385,9 +3896,15 @@ int runGame(Options& options, Session& session)
 			console.execute(command, output, ConsoleAccess::Anyone);
 			std::printf("console: %s%s%s\n", command.c_str(), output.empty() ? "" : " -> ", output.c_str());
 		}
-		if (options.simulate > 0) {
+		// A dedicated server (--host --dedicated) runs on until stopped, or
+		// for --simulate seconds over all its maps.
+		const bool serverRun = options.dedicated && hosted;
+		if (options.simulate > 0 || serverRun) {
 			auto due = std::chrono::steady_clock::now();
-			for (int i = 0; i < options.simulate * 30; ++i) {
+			for (long i = 0; serverRun ? session.serverTicksLeft != 0 && !g_stopServer : i < options.simulate * 30L; ++i) {
+				if (serverRun && session.serverTicksLeft > 0) {
+					--session.serverTicksLeft;
+				}
 				if (hosted || session.client) {
 					// A server (or a joined game) runs in real time: 30 ticks a second.
 					due += std::chrono::microseconds(33333);
@@ -3403,10 +3920,20 @@ int runGame(Options& options, Session& session)
 				}
 				if (nextMapDue()) {
 					session.nextMap = true;
-					std::printf("round over %.0f s ago: the next map\n", sinceEnd);
+					if (serverNextMap) {
+						std::printf("the admin asked for the next map\n");
+					} else {
+						std::printf("round over %.0f s ago: the next map\n", sinceEnd);
+					}
 					break;
 				}
 			}
+#if BF2142_HAS_PYTHON
+			if (serverRun && g_stopServer) {
+				std::printf("the server stops\n");
+				session.adminScript.shutdown(scripts);
+			}
+#endif
 			if (endOfRound.loaded()) {
 				std::printf("end of round shown: %zu script errors\n", endOfRound.scriptErrors().size());
 				for (const std::string& error : endOfRound.scriptErrors()) {
@@ -3512,6 +4039,26 @@ int runGame(Options& options, Session& session)
 		sources.post = &postSettings;
 		sources.shadows = &shadowSettings;
 		sources.hemi = &hemiSettings;
+		// The commander's overhead view (the map node's rectangle as drawn).
+		if (const world::ObjectTemplate* camera = templates.find("MultiPlayerOverheadCamera")) {
+			const auto value = [camera](const char* name, float fallback) {
+				const auto it = camera->settings().find(name);
+				return it != camera->settings().end() ? static_cast<float>(std::atof(it->second.c_str())) : fallback;
+			};
+			g_overheadFov = value("fOV", g_overheadFov);
+			g_overheadHeight = value("height", g_overheadHeight);
+		}
+		sources.titanObject = [&round](int team) { return round.titanOf(team); };
+		sources.overheadView = [&hudManager](render::OverheadView& view) {
+			if (!hudManager.overheadRect(view.rect)) {
+				return false;
+			}
+			view.x = hudManager.overheadX();
+			view.z = hudManager.overheadZ();
+			view.fovY = g_overheadFov;
+			view.height = g_overheadHeight;
+			return true;
+		};
 		// Cloaked soldiers (GameWorld hides them) drawn as active camouflage.
 		sources.cloaked = [&round](uint32_t object) {
 			game::GameWorld::PlayerInfo info;
@@ -3523,6 +4070,11 @@ int runGame(Options& options, Session& session)
 		// (weaponHud.enablePostProcessingOnGuiIndex naming the HUD shown).
 		sources.postEffects = [&round, &playerCamera, cores = std::vector<uint32_t> {}](render::PostEffects& effects) mutable {
 			game::GameWorld::PlayerInfo me;
+			// The soldier's own EMP on foot, and a tinnitus from an explosion near.
+			if (round.playerInfo(round.localPlayer(), me) && me.alive && !me.vehicle) {
+				effects.soldierEmpLevel = me.empLevel;
+			}
+			effects.tinnitusSeconds = round.takeTinnitus();
 			if (round.playerInfo(round.localPlayer(), me) && me.alive && me.vehicle) {
 				effects.vehicleEmpLevel = round.empLevel(me.vehicle);
 				const auto seats = round.vehicleSeats(me.vehicle);
@@ -3555,8 +4107,9 @@ int runGame(Options& options, Session& session)
 		// (HeatObject TTHeat on the aircraft, LaserTarget_vehicle TTLaser,
 		// Beacon TTBeacon; -1 any of them) in front of the camera, inside the
 		// marker's rectangle and within reach, nearest first. Their state is 0
-		// (a candidate): the weapons' own lock (their 0x94c0 component's
-		// target, locking 1 / locked 2) is not modelled by the game yet.
+		// (a candidate), or the local weapon's lock on it
+		// (GameWorld::weaponLock: locking 1, locked 2); the reach is the
+		// weapon's target.maxDistance when it has one.
 		std::map<const world::ObjectTemplate*, int> targetTypes; // a template's target object's type (-1 none)
 		std::function<int(const world::ObjectTemplate*, int)> targetTypeOf = [&](const world::ObjectTemplate* t, int depth) {
 			if (!t || depth > 6) {
@@ -3582,7 +4135,8 @@ int runGame(Options& options, Session& session)
 		hudManager.setMarkerSource([&](const hud::HudManager::MarkerQuery& query) {
 			std::vector<hud::HudManager::MarkerTarget> targets;
 			const int team = round.playerTeam();
-			constexpr float kReach = 600; // the weapons' lock distance (their 0x94c0's slot 0x158) isn't read yet
+			const game::GameWorld::WeaponLockInfo lock = round.weaponLock(round.localPlayer());
+			const float kReach = lock.maxDistance > 0 ? lock.maxDistance : 600;
 			for (const auto& object : round.objects().objects()) {
 				if (!object || object->destroyed() || object->hidden() || object->team() == 0 || object->team() == team) {
 					continue;
@@ -3601,7 +4155,7 @@ int runGame(Options& options, Session& session)
 				if (x < query.x0 || x > query.x1 || y < query.y0 || y > query.y1) {
 					continue;
 				}
-				targets.push_back({x, y, 0, distance});
+				targets.push_back({x, y, object->id() == lock.target ? lock.state : 0, distance});
 			}
 			std::sort(targets.begin(), targets.end(), [](const auto& a, const auto& b) { return a.distance < b.distance; });
 			return targets;
@@ -3880,6 +4434,15 @@ int runGame(Options& options, Session& session)
 		ViewerOptions viewer;
 		viewer.screenshot = options.screenshot;
 		viewer.camera = options.camera;
+		// Before the first spawn the view is the level's before-spawn camera
+		// (GameLogic.setBeforeSpawnCamera).
+		if (viewer.camera.empty() && gameLogic.beforeSpawnCamera.set && !round.player()) {
+			const auto& c = gameLogic.beforeSpawnCamera;
+			char text[128];
+			std::snprintf(text, sizeof(text), "%f/%f/%f/%f/%f", c.position[0], c.position[1], c.position[2], c.rotation[0],
+				c.rotation[1]);
+			viewer.camera = text;
+		}
 		{
 			// Input to the menu while it is up, else to the end-of-round movie.
 			const auto toMenu = menuInput(menu, [&session](int key) {
@@ -3947,6 +4510,7 @@ int runGame(Options& options, Session& session)
 					view.eyeYaw = eye.yaw;
 					view.eyePitch = eye.pitch;
 					view.fovY = eye.fovY;
+					view.eyeRoll = eye.roll;
 				}
 				return true;
 			};
@@ -4107,6 +4671,8 @@ int runGame(Options& options, Session& session)
 					round.gunAim(vehicle->id(), me.seat, gunYaw, gunPitch);
 					view = {vehicle->position().x, vehicle->position().y, vehicle->position().z, vehicle->rotation().x + gunYaw};
 					view.driving = true;
+					// The seat camera's worldFOV for the chase view (0x00610150).
+					view.chaseFovY = playerCamera.seatFov(false);
 					// Its category (VCNoVehicleCategory: the root vehicle's).
 					static const char* kCategories[] = {"VCLand", "VCSea", "VCAir", "VCHelicopter"};
 					const auto& settings = vehicle->objectTemplate()->settings();
@@ -4126,6 +4692,7 @@ int runGame(Options& options, Session& session)
 					view.eyeYaw = eye.yaw;
 					view.eyePitch = eye.pitch;
 					view.fovY = eye.fovY;
+					view.eyeRoll = eye.roll;
 				}
 				return true;
 			};

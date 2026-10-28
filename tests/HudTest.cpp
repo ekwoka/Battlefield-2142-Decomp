@@ -369,3 +369,92 @@ TEST(Hud_ListBordersSelectionScrollbar)
 		CHECK(quads[6].y0 == 30 && std::abs(quads[6].y1 - 42) < 1e-4f);
 	}
 }
+
+// The commander screen's map (setCommanderPos/Size) and its overhead view:
+// the map's texture fades out (MenuMapAlpha, +0x7b0 eased) and the map is
+// zoomed so the node's height spans the camera's ground width about it
+// (0x0077c4b0), the marks staying on what it sees.
+TEST(Hud_CommanderMapOverhead)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createMapNode Global Minimap",
+			 "hudBuilder.setMaxiPos -122/-271",
+			 "hudBuilder.setMaxiSize 512/512",
+			 "hudBuilder.setMiniPos 245/-291",
+			 "hudBuilder.setMiniSize 146/146",
+			 "hudBuilder.setCommanderPos -300/-300",
+			 "hudBuilder.setCommanderSize 600/600",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.setMap("Levels/x/Hud/Minimap/ingameMap.dds", -512, -512, 1024, 1024);
+	manager.setMapMarkers({{"mark.dds", 10, 0, 16}});
+	manager.set("MapFullSize", 1);
+	manager.set("CommanderShow", 1);
+	auto quads = manager.frame(0);
+	CHECK(!quads.empty() && quads[0].x0 == 100 && quads[0].y0 == 0 && quads[0].x1 == 700 && quads[0].y1 == 600);
+	// Its own zoom index: two steps to the overhead view.
+	CHECK(manager.commanderMapZoom() == 0);
+	manager.cycleMapZoom();
+	manager.cycleMapZoom();
+	CHECK(manager.commanderMapZoom() == 2 && manager.mapZoom() == 1);
+	// 60 m across the node's 600 pixels, over the origin: the mark 10 m
+	// east is 100 pixels right of the middle; the map fades to nothing.
+	manager.setOverhead(true, 0, 0, 60);
+	for (int i = 0; i < 200; ++i) {
+		quads = manager.frame(1.0f / 60);
+	}
+	CHECK(quads.size() == 1);
+	if (quads.size() == 1) {
+		CHECK(std::abs((quads[0].x0 + quads[0].x1) / 2 - 500) < 1 && std::abs((quads[0].y0 + quads[0].y1) / 2 - 300) < 1);
+	}
+	float rect[4];
+	CHECK(manager.overheadRect(rect) && rect[0] == 100 && rect[3] == 600);
+	// Off again: the map comes back.
+	manager.setOverhead(false, 0, 0, 60);
+	CHECK(!manager.overheadRect(rect));
+	for (int i = 0; i < 200; ++i) {
+		quads = manager.frame(1.0f / 60);
+	}
+	CHECK(quads.size() == 2 && quads[0].color[3] == 1);
+}
+
+// A picture without a texture is a fill in its colour (the commander
+// screen's black borders); setPictureNodeCenterPoint's point (about the
+// screen's centre) is the rotation's pivot.
+TEST(Hud_PictureFillAndPivot)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createSplitNode Global Items",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+			 "hudBuilder.createPictureNode Items Border 0 0 100 600",
+			 "hudBuilder.setNodeColor 0 0 0 1",
+			 "hudBuilder.createPictureNode Items Bar 304 394 193 13",
+			 "hudBuilder.setPictureNodeTexture Ingame/bar.tga",
+			 "hudBuilder.setPictureNodeRotateVariable Banking",
+			 "hudBuilder.setPictureNodeCenterPoint 0 0",
+			 "hudBuilder.createPictureNode Items Plain 10 10 20 20",
+			 "hudBuilder.setPictureNodeTexture Ingame/plain.tga",
+			 "hudBuilder.addNodeBlendEffect 7 2",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.set("Banking", 30);
+	const auto quads = manager.frame(0);
+	CHECK(quads.size() == 3);
+	if (quads.size() == 3) {
+		CHECK(quads[0].texture == "Menu/Console/white.dds" && quads[0].x1 == 100 && quads[0].color[0] == 0 &&
+			quads[0].color[3] == 1);
+		CHECK(quads[1].rotation == 30 && quads[1].pivotSet && quads[1].pivot[0] == 400 && quads[1].pivot[1] == 300);
+		CHECK(!quads[2].pivotSet && quads[2].blend[0] == 7 && quads[2].blend[1] == 2);
+	}
+}

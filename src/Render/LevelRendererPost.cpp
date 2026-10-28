@@ -122,6 +122,7 @@ void LevelRenderer::renderShadows(SDL_GPUCommandBuffer* commands, const Camera& 
 {
 	const scene::ShadowSettings defaults;
 	const scene::ShadowSettings& settings = m_sources && m_sources->shadows ? *m_sources->shadows : defaults;
+	const ShadowUniforms previous = m_shadowUniforms;
 	m_shadowUniforms = ShadowUniforms {};
 	// The hemi map's constants go with the shadows' (one block).
 	if (m_hemiMap && m_sources && m_sources->hemi) {
@@ -153,9 +154,19 @@ void LevelRenderer::renderShadows(SDL_GPUCommandBuffer* commands, const Camera& 
 		m_shadowStatic = m_gpu.createShadowMap(size);
 		m_shadowMapSize = size;
 		m_shadowStaticValid = false;
+		m_shadowDrawn = false;
 	}
 	if (!m_shadowDynamic || !m_shadowStatic) {
 		m_shadow.enabled = false;
+		return;
+	}
+	// shadowManager.shadowUpdatesEnabled 0 (LM +0x755, read by the shadow
+	// pass 0x10127420): the maps aren't redrawn and keep what they hold,
+	// with their projection. (shadowUpdateFactor, +0x750, has no reader.)
+	if (!settings.shadowUpdatesEnabled && m_shadowDrawn) {
+		m_shadowUniforms.shadowMatrix = previous.shadowMatrix;
+		std::copy(std::begin(previous.params), std::end(previous.params), m_shadowUniforms.params);
+		std::copy(std::begin(previous.extra), std::end(previous.extra), m_shadowUniforms.extra);
 		return;
 	}
 	const float radius = shadowRadius(settings);
@@ -187,6 +198,7 @@ void LevelRenderer::renderShadows(SDL_GPUCommandBuffer* commands, const Camera& 
 		m_shadowStaticValid = false;
 	}
 	drawShadowCasters(commands, m_shadowDynamic, false, seconds);
+	m_shadowDrawn = true;
 	m_shadowUniforms.shadowMatrix = m_shadow.viewProjection * kClipToTexture;
 	m_shadowUniforms.params[0] = 1;
 	m_shadowUniforms.params[1] = 1.0f / static_cast<float>(size);
@@ -241,6 +253,11 @@ void LevelRenderer::drawShadowCasters(SDL_GPUCommandBuffer* commands, SDL_GPUTex
 		if (sphere.radius < 0) {
 			sphere.center = {instance.world.at(3, 0), instance.world.at(3, 1) + 1.0f, instance.world.at(3, 2)};
 			sphere.radius = 2.5f;
+		}
+		if (gpuMesh->radiusShadowBounds) {
+			// useRadiusForShadowDepth / Spatial: the caster's box is
+			// pos +- radius * sqrt 2 (0x1012b190, 0x10123e70).
+			sphere.radius *= 1.4142135f;
 		}
 		// The sphere's centre in the light's clip space (x, y in -1..1).
 		const float cx = sphere.center.x * vp.at(0, 0) + sphere.center.y * vp.at(1, 0) + sphere.center.z * vp.at(2, 0) + vp.at(3, 0);

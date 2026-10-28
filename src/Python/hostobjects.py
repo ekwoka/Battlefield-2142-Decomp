@@ -12,6 +12,9 @@ _METHODS = (
 	'getOccupyingPlayers', 'isTitan', 'isValid', 'getTemplateProperty', 'setDamage', 'getMaxDamage',
 	'getDamage', 'getParent', 'getChildren', 'isControlPoint', 'isPlayerControlObject', 'hasArmor',
 	'getPosition', 'setPosition', 'getRotation', 'setRotation',
+	# Not in BF2142.exe (only gpm_sl.py's unused showControlGroups calls it):
+	# cp_getParam('supplyGroupId').
+	'getSupplyGroupId',
 )
 
 

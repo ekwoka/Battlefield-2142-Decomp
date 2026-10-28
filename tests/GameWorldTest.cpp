@@ -10,6 +10,8 @@
 #include "World/ObjectTemplateManager.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <memory>
 
 using namespace dice::hfe;
@@ -1730,4 +1732,168 @@ TEST(GameWorld_DroppedKitsArePickedUpAndTimeOut)
 		range.world->tick(1 / 30.0f);
 	}
 	CHECK(range.world->droppedKits().empty() && !range.objects.find(ownKit));
+}
+
+// SpawnPoint options (0x005b24f0, 0x005b2200): onlyForHuman / onlyForAI
+// keep players of the other kind off a point; the offset is added to the
+// point (the soldier's origin, (0, 1.02, 0) by default); a scattering
+// point puts the soldier 3 to 9 m out, facing the point.
+TEST(GameWorld_SpawnPointOptions)
+{
+	Range range;
+	world::ObjectTemplate* sp = range.templates.find("sp");
+	sp->settings()["setOnlyForAI"] = "1";
+	world::ObjectTemplate* human = range.templates.create("SpawnPoint", "sp_human");
+	human->settings()["setOnlyForHuman"] = "1";
+	human->settings()["setSpawnPositionOffset"] = "0/1.25/0";
+	range.objects.create(human, {30, 0, 0}, {0, 0, 0})->setControlPointId(2);
+	game::GameWorld::PlayerInfo info;
+	// The human takes the human-only point, with its offset.
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	range.world->playerInfo(range.world->localPlayer(), info);
+	CHECK(std::abs(info.position.x - 30) < 1e-3f && std::abs(info.position.y - 0.25f) < 1e-3f);
+	// The bot the AI-only one, at the default offset.
+	const int bot = range.world->addPlayer("Bot", 2, true);
+	CHECK(range.world->spawnSoldier(bot));
+	range.world->playerInfo(bot, info);
+	CHECK(std::abs(info.position.x) < 1e-3f && std::abs(info.position.y - 0.02f) < 1e-3f);
+	// A human-only point alone: no bot spawns.
+	sp->settings()["setOnlyForAI"] = "0";
+	sp->settings()["setOnlyForHuman"] = "1";
+	const int other = range.world->addPlayer("Other", 1, true);
+	CHECK(!range.world->spawnSoldier(other));
+
+	// Scattering: round the point, facing it.
+	sp->settings()["setOnlyForHuman"] = "0";
+	sp->settings()["setScatterSpawnPositions"] = "1";
+	CHECK(range.world->spawnSoldier(other));
+	range.world->playerInfo(other, info);
+	const float dx = info.position.x, dz = info.position.z - 20;
+	const float out = std::sqrt(dx * dx + dz * dz);
+	std::fprintf(stderr, "  scattered %.2f m out\n", out);
+	CHECK(out >= 1.5f - 1e-3f && out <= 9 + 1e-3f);
+}
+
+// The local soldier's own EMP level (its armour, with takesEmpDamage:
+// level = ceil(amount / empDamageStepSize), wearing off a step every
+// empLevelTime) and the tinnitus of an explosion within its radius x
+// tinnitusRange, both for the post-production.
+TEST(GameWorld_SoldierEmpAndTinnitus)
+{
+	Range range;
+	range.templates.find("us_light_soldier")->settings()["armor.takesEmpDamage"] = "1";
+	world::ObjectTemplate* blast = range.templates.create("GenericProjectile", "blast");
+	blast->components().push_back("DefaultDetonationComp");
+	blast->settings()["detonation.explosionDamage"] = "1";
+	blast->settings()["detonation.explosionMaterial"] = "69";
+	world::ObjectTemplate* emp = range.templates.create("GenericProjectile", "emp");
+	emp->components().push_back("DefaultDetonationComp");
+	emp->settings()["detonation.isEMPWeapon"] = "1";
+	emp->settings()["detonation.explosionMaterial"] = "0";
+	emp->settings()["detonation.explosionDamage"] = "300";
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	game::GameWorld::PlayerInfo info;
+	range.world->playerInfo(range.world->localPlayer(), info);
+	const physics::Vec3 origin = info.position + physics::Vec3 {0, 1, 0};
+	CHECK(info.empLevel == 0);
+	CHECK(range.world->detonate("emp", origin));
+	range.world->playerInfo(range.world->localPlayer(), info);
+	CHECK(info.empLevel == 3); // ceil(300 / 120), at most 3
+	for (int i = 0; i < 30 * 6; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	range.world->playerInfo(range.world->localPlayer(), info);
+	CHECK(info.empLevel == 2);
+	CHECK(range.world->takeTinnitus() == 0); // an EMP rings no ears
+	CHECK(range.world->detonate("blast", origin + physics::Vec3 {0, 0, 25}));
+	CHECK(range.world->takeTinnitus() == 0);
+	CHECK(range.world->detonate("blast", origin + physics::Vec3 {0, 0, 15}));
+	CHECK(range.world->takeTinnitus() == 7);
+	CHECK(range.world->takeTinnitus() == 0); // taken once
+}
+
+// An unlock's Ability lists: ability.addExtraAmmoItem gives the rifle
+// two more magazines, ability.setMaterialDamageMod cuts the damage of the
+// rifle's projectile material (69 here) to the soldier by a quarter.
+TEST(GameWorld_UnlockAbilityLists)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "ItemContainer");
+	world::ObjectTemplate* armour = range.templates.create("ItemContainer", "UnlockEU_AssaultPlayer5");
+	armour->settings()["ability.setMaterialDamageMod.list"] = "69 0.75;";
+	armour->settings()["ability.addExtraAmmoItem.list"] = "eu_ar_rifle 2 0 0;";
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	kit->children().push_back({"UnlockEU_AssaultPlayer5", {}, {}});
+	const int plain = range.world->addPlayer("Plain", 2, true);
+	range.world->setKit(plain, "EU_Assault", "us_light_soldier");
+	CHECK(range.world->spawnSoldier(plain));
+	const int armoured = range.world->addPlayer("Armoured", 2, true);
+	range.world->setKit(armoured, "EU_Assault", "us_light_soldier");
+	range.world->setUnlocks(armoured, {"UnlockEU_AssaultPlayer5"});
+	CHECK(range.world->spawnSoldier(armoured));
+	const auto mags = [&](int player) {
+		const auto ammo = range.world->weaponAmmo(player);
+		return ammo.empty() ? -1 : ammo.front().magazines;
+	};
+	std::fprintf(stderr, "  magazines: %d plain, %d with the unlock\n", mags(plain), mags(armoured));
+	CHECK(mags(armoured) == mags(plain) + 2);
+	game::GameWorld::PlayerInfo a, b;
+	range.world->playerInfo(plain, a);
+	range.world->playerInfo(armoured, b);
+	world::ObjectTemplate* blast = range.templates.create("GenericProjectile", "blast");
+	blast->components().push_back("DefaultDetonationComp");
+	blast->settings()["detonation.explosionDamage"] = "40";
+	blast->settings()["detonation.explosionMaterial"] = "69";
+	CHECK(range.world->detonate("blast", (a.position + b.position) * 0.5f + physics::Vec3 {0, 1, 0}));
+	const float lostPlain = 100 - range.world->hitPoints(a.soldier);
+	const float lostArmoured = 100 - range.world->hitPoints(b.soldier);
+	std::fprintf(stderr, "  blast: %.2f lost plain, %.2f with the unlock\n", lostPlain, lostArmoured);
+	CHECK(lostPlain > 1 && std::fabs(lostArmoured - 0.75f * lostPlain) < 0.01f);
+}
+
+// A lock-on weapon (target.targetSystem TSHeatSeeking): an enemy carrying
+// a TTHeat target object in the lock cone is locking at once and locked
+// after lockDelay; turned away, the lock holds for loseLockDelay, then
+// goes.
+TEST(GameWorld_WeaponLock)
+{
+	Range range;
+	range.templates.registerType(8, "SimpleObject");
+	world::ObjectTemplate* launcher = range.templates.find("eu_ar_rifle");
+	launcher->settings()["target.targetSystem"] = "TSHeatSeeking";
+	launcher->settings()["target.maxDistance"] = "450";
+	launcher->settings()["target.lockAngle"] = "10";
+	launcher->settings()["target.lockDelay"] = "1.5";
+	launcher->settings()["target.loseLockDelay"] = "0.35";
+	world::ObjectTemplate* jet = range.templates.create("SimpleObject", "jet");
+	jet->children().push_back({"HeatObject", {}, {}});
+	range.templates.create("SimpleObject", "HeatObject")->settings()["targetType"] = "TTHeat";
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	game::GameWorld::PlayerInfo me;
+	range.world->playerInfo(range.world->localPlayer(), me);
+	world::Object* enemy = range.objects.create(jet, {me.position.x, me.position.y + 1.6f, me.position.z + 60});
+	enemy->setTeam(1);
+	range.world->tick(1 / 30.0f);
+	game::GameWorld::WeaponLockInfo lock = range.world->weaponLock(range.world->localPlayer());
+	CHECK(lock.target == enemy->id() && lock.state == 1 && lock.maxDistance == 450);
+	for (int i = 0; i < 46; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	lock = range.world->weaponLock(range.world->localPlayer());
+	CHECK(lock.target == enemy->id() && lock.state == 2);
+	// Turned a quarter round: kept for 0.35 s, then lost.
+	game::SoldierInput turn;
+	turn.turn = 90;
+	range.world->setPlayerInput(turn);
+	range.world->tick(1 / 30.0f);
+	range.world->setPlayerInput({});
+	CHECK(range.world->weaponLock(range.world->localPlayer()).target == enemy->id());
+	for (int i = 0; i < 12; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	lock = range.world->weaponLock(range.world->localPlayer());
+	CHECK(lock.target == 0 && lock.state == 0);
 }

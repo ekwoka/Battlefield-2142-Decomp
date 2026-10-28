@@ -25,6 +25,38 @@ The window procedure (`0x00401570`) forwards mouse and keyboard input to the
 active Flash menu (`0x00a0f7a8`) and handles the EA launcher's shutdown
 message.
 
+### Movies (`bf2Engine.playMovie`, Bink)
+
+`Init.con` queues the start-up movies: `Movies\health.bik` and
+`Movies\warning.bik` (not shipped), `EA.bik`, `dice.bik` and `legal.bik`
+with mode 1, `intro.bik` with mode 0 ("These should be noops in server &
+editor"). `bf2Engine.playMovie` (`0x004082a0`) does nothing on a dedicated
+server (`0x0042b800`), swaps `legal.bik` for `legal_na.bik` when the user's
+locale is US or Canadian English (`0x00403230`: 0x409 or 0x1009), and
+appends to the engine's list (+0x100). The frame (`0x0040bd90`) takes the
+next when none plays (`0x00408680`: an `FSMoviePlayer` from RendDX9,
+binkw32.dll underneath; one that won't open is dropped); while one plays
+the cursor is hidden and a frame drawn, and it ends at its end, or on Esc
+(key 1) when its mode isn't 1: the logos can't be skipped, the intro can.
+An idle menu queues `Movies\screensaver.bik` (not shipped), which any key
+ends. Where `GeneralSettings.setViewIntroMovie` (+0x80) is read wasn't
+found.
+
+The rewrite (`src/Movie`, optional with `BF2142_MOVIES`) decodes the
+`.bik` files with FFmpeg's Bink demuxer and `binkvideo` /
+`binkaudio_dct` decoders (all six play: 640x480 or 800x600 at 30 fps,
+stereo 44.1 or 48 kHz; `Legal*.bik` are silent), converts frames to RGBA
+(swscale) and sound to interleaved floats (swresample). The window's
+movie screen (`Window::MovieScreen`) blits each frame scaled to fit over
+black and plays the sound through SDL; the start-up queue plays before
+the menu (`--no-movies` skips it), `--movie <name|file>` plays one, and
+with `--screenshot out.png --movie-seconds t` renders the frame at `t`
+off screen. Without FFmpeg the movies don't open and are skipped, as the
+original skips a movie that won't open. Not done: the menu's Titan
+tutorial (`mainMenu.swf` loads `?titan_tutorial.bik` into a clip through
+`loadImg`, SwiffPlayer playing it as a video texture) and the levels'
+`<mode>_menuMovie.bik` previews (none shipped).
+
 ## A frame (`0x0040bd90`)
 
 In order:
@@ -1017,6 +1049,38 @@ gunner's camera under the gun's pitch bundle follows the gun; its
 the rewrite takes the seat's camera with id 0 (nested seats left out) and
 turns the bundles as `GameWorld::partPose` does.
 
+**The seat camera's shakes** (the Camera object's per-tick `0x00610240`;
+the view matrix `0x00610620` rolls about its forward row by the sum of
+four angles, degrees, `0x005b1a70` → `0x006adf40`). The speed shake: past
+the template's `cameraShakeStartSpeed` (`+0x3d0`, 0 off) the time above it
+runs and the roll is sin(fmod(t × 40, 2π)) × 0.5 × the share of the way to
+`cameraShakeMaxSpeed` (`+0x3d4`; all of it when not above the start)
+(`*0x00a739f8` 40, `*0x00a739fc` 0.5, set by `0x008e9120`/`0x008e9140`).
+The hit shake (`0x00610450`, slot 19 of `0x00979a50`): 0.6 s
+(`*0x00a73a14`) of (1 − u) × sin(u × 7 × 2π) × the hit × 2 (`*0x00a73a0c`
+7, `*0x00a73a10` 2); its caller wasn't traced, so the rewrite gives the
+share of the vehicle's hit points the hit took. (A soldier camera's own
+bob, `+0x3d8`, and the `0x006101c0` shake started by `0x00610180` are not
+rewritten.) The camera never sinks below the terrain + 0.09
+(`*0x00a73a04`). `PlayerCamera::View::roll`, drawn through
+`render::Camera::roll`. Template defaults (`0x00610fd0`): CVMInside,
+CVMChase, CVMFlyBy and CVMFrontChase on, followStiffness 1, chaseDistance
+−1, chaseAngle 0.3, cameraShakeSensitivity 0.1, worldFOV and insideFOV
+1.1, allowInsideDynamicLights on, the interior sun off with direction
+(−0.25, −0.5, 0.75), colour (1, 1, 1), damage colour (1, 0, 0), ambient
+(0.7, 0.7, 0.7), insideDamageFrequency 3, insideDamageThreshold 0.15,
+insideViewInterpolate 1, saturation 1, cockpitLod / cockpitSubGeom −1.
+`PlayerCamera::insideSun` serves the interior sun (the getters
+`0x006104d0`..`0x00610580`, the damage colour flickering below the
+threshold; the flicker's wave is the rewrite's); the renderer doesn't
+light by it yet. The chase view's field of view is the seat camera's
+`worldFOV`. A joined client keeps first person when the server's
+settings block has `sv.allowExternalViews` off.
+
+**Before the first spawn** the view is the level's
+`GameLogic.setBeforeSpawnCamera <position> <yaw/pitch/roll>`
+(`0x004278ef`; the levels' `Init.con`), `GameLogic::beforeSpawnCamera`.
+
 **Ducking.** A seat whose template has `allowDucking` (+0x468; only the
 stationary bipods ship it) ducks while c_PICrouch (input 38) is held: the
 PlayerControlObject's input (`0x005ca2e0`) calls setDucking (`0x005c7cf0`,
@@ -1540,10 +1604,22 @@ additive materials cast nothing; alpha-tested ones only with
 taps, faded out over the region's last fifth. `BF2142_SHADOW_DEBUG=1` shows
 the terrain's shadow factor, `BF2142_SHADOW_STATS=1` prints the casters,
 `BF2142_SHADOW_REDRAW=1` redraws the static map every frame (its cost).
-Not done: RendDX9's light-space perspective (LSPSM/TSM) fit and its
-per-object maps (`shadowMapObjectSize`), `GeometryTemplate.useRadiusForShadowDepth`
-(a Geometry template property, still unread), `dropShadowClipHeightOffset`,
-`lightmapIntensityBias`, the update factor.
+`shadowManager.shadowUpdatesEnabled 0` (LM `+0x755`, `0x1014a900`;
+the shadow pass `0x10127420` runs only with it set) stops the maps'
+redraws: they keep what they hold, with their projection.
+`GeometryTemplate.useRadiusForShadowDepth` / `useRadiusForShadowSpatial`
+(`0x100a7e60`..`0x100a7e90`, the bundled template's `+0x204` / `+0x205`;
+the heavy mechs set both) make the light manager fit a caster's depth
+range (`0x10125780` → `0x1012b190`) and light-space bounds (`0x10123e70`)
+to the box `pos ± radius·√2` instead of the mesh's oriented box, steady
+while the legs move; the rewrite's region test takes that wider bound
+for them. Settled as unused by RendDX9: `shadowUpdateFactor` (`+0x750`)
+and `dropShadowClipHeightOffset` (`+0x1d8`) have no reader but their
+getters; `lightmapIntensityBias` (`+0x1d4`, uploaded at once by
+`0x1014a780` as LIGHTMAPINTENSITYBIAS) is read only by
+LightManager_r3x0.fx's Combine technique, which nothing selects. Not
+done: RendDX9's light-space perspective (LSPSM/TSM) fit and its
+per-object maps (`shadowMapObjectSize`).
 
 **Hemi maps.** `HemiMapManager.setBaseHemiMap <texture> <corner> <size>
 [<height>]` (`0x100857b8`; every level's Sky.con: `groundhemi`, 0/0/0,
@@ -1560,16 +1636,70 @@ meshes); `_HASHEMIOCCLUSION_` multiplies the sun term by the map's alpha.
 The renderer uploads HemiMapConstants (corner, size, lerp bias) and
 HemiMapSkyColor with its per-frame constants (`0x10030000` table: 0x110,
 0x124; TreeSkyColor 0x138). The rewrite applies it to every unlightmapped
-mesh in mesh.frag, with HeightOverTerrain 0 and HemiMapConstantColor 1
-(both per object in RendDX9, at `0x10040000` table offsets 0x1e4, 0x1ec,
-not decoded). `loadTitanHemiMap` (12 calls: the Titans' interiors) is
-stored, not drawn.
+mesh in mesh.frag. Per object (the block `0x10041100` builds:
+HeightOverTerrain `+0x1e4`, HemiMapConstantColor `+0x1ec`; only RaShaderBM
+and RaShaderSM read them):
+
+- *HeightOverTerrain* (BM `0x100c2b70`, SM `0x10160e90`): a ray from the
+  object's origin 4 radii down, `h` the height over what it meets (4 r
+  if nothing), `max(h − r, 0) / max(r, 2)`; it lifts the lerp's offset,
+  `clamp(localHeight × 2 − 1 + HOT, −2(1 − HOT), 0.8)`. The rewrite's
+  ray meets only the terrain.
+- *HemiMapConstantColor* multiplies the hemi colour: 1 with the hemi
+  technique outside the Titans. With the camera in a Titan (the game's
+  test, `0x006fa8b0`: the Titan the camera's soldier is in) bundled and
+  skinned meshes take the interior path (`0x100c3880`, `0x10162070`):
+  HeightOverTerrain 0, and the colour from the Titan maps.
+  `HemiMapManager.loadTitanHemiMap <texture> <offset> <size> <which>`
+  (`0x1008560d` → `0x100edf90`; 14 calls in the Titans' playtest and
+  wake files, `Common/Textures/eu_titan_interior_hemimap_level1_small
+  2/-10/-33 128 0` and the `as_` one `2/-9/-33 128 1`: 1 the PAC's Titan,
+  0 the EU's) keeps a map (`0x100ed200`, a missing file an 8 × 8 white
+  one); each frame (`0x1002db21` → `0x100eda70`) its matrix is the
+  Titan's inverse then the offset taken off; an object over a map's
+  square (local y > 0, |x|, |z| < size / 2, the nearest above,
+  `0x100edce0`) takes its texel bilinearly at `u = size/2 − x`, `v =
+  size/2 + z` (`0x100ecb10`, on the CPU), else keeps its last one (0.5
+  at first). The rewrite takes the camera as in a Titan when it is over
+  a Titan map's square (it has no soldier-in-Titan test of the
+  renderer's), the Titans from `LevelSources::titanObject`.
 
 **The light manager's other colours.** All of `lightManager.*` is now
-registered; `enableSun` gates the sun term; the tree, effect and specular
-colours (`treeSkyColor`, `effectSunColor`, `effectShadowColor`,
-`sunSpecColor`, `staticSpecularColor`) are stored for shaders the rewrite
-doesn't have yet (RaShaderLeaf/Trunk, Particles.fx's lighting, specular).
+registered; `enableSun` gates the sun term. What RendDX9 does with the
+rest (the light manager `DAT_101ffc84`; per-frame table `DAT_101fae14`
+filled at `0x1002a4a0` / `0x1002cef0`):
+
+- `treeSkyColor` is uploaded as TreeSkyColor × 0.5 (table 0x138) but no
+  shipped shader reads it (commented out in RaShaderLeaf.fx and
+  RaShaderTrunkSTMDetail.fx): settled unused. Trees take OverGrowthAmbient
+  from `treeAmbientColor` and their light from `treeSunColor`.
+- `staticSpecularColor` (StaticSpecularColor, 0x1d8): RaShaderSTM's
+  `pow(saturate(N·H), 32) × lightmap.g × gloss` times it; `sunSpecColor`
+  builds SpecLUT64SpecularColor (`0x1014aec0` → `0x101ac540`: a 256 × 1
+  texture, texel `i` = `(i/255)^64 × sunSpec`) that BM per-pixel
+  specular samples at H·N times the gloss (texture alpha, normal map
+  alpha or StaticGloss, `setSpecularStaticGloss`, default 0.15). Not
+  drawn yet: the rewrite has no specular term.
+- `effectSunColor` / `effectShadowColor` light the particles (FXCommon.fx
+  `calcParticleLighting`: `lerp(1, lerp(shadow, sun, saturate(lm + off)),
+  f)`, `lm` the base hemi map's alpha under the particle, `off` from the
+  height over HemiShadowAltitude and the template's
+  `lightMapIntensityOffset`, `f` its light factor). Not drawn yet: the
+  light factor's source (color1's intensity?) and HemiShadowAltitude are
+  not settled.
+
+**Environment maps** (`envmapManager.*`, EnvMapManager `DAT_101ff9cc`,
+vtable `0x101c6378`). At level load `0x100639b0` reads
+`<level>/Envmaps/EnvironmentMapInfo.emi` (`loadEMIFile` `0x10064770`:
+lines `EnvMapN x,y,z,bool`); each frame `0x10064f30` binds the entry
+nearest the camera as the one cube for bundled materials whose technique
+names "envmap" and static meshes (BM `_HASENVMAP_`: `lerp(diffuse,
+texCUBE(R), gloss / 4)` with a Fresnel alpha; reflection scale
+`setMaterialReflectionScale`, default 0.25), and the Titan interiors bind
+`common/textures/indoorenvmap`. `generateEnvMaps` and `save` are the
+editor's. No retail level ships an .emi (only six community levels do;
+no script calls `envmapManager.*`), so in the retail game the cube stays
+unset: not drawn, as shipped.
 
 **Sky layers and the sun flare** (`0x100fd2f0`, `0x100fd900`, SkyDome.fx).
 With `skyDome.hasCloudLayer` the dome's technique is SkyDomeNV3x (one
@@ -1598,9 +1728,24 @@ at `0x1002df12`..`0x1002e6d0`). The order:
    contrast × 0.1 added, by that mask: the soldier refracts what is behind
    him. The rewrite draws cloaked soldiers (GameWorld hides them; the
    renderer asks `LevelSources::cloaked`) into a mask tested against the
-   world's depth. The glow materials (GlowMaterial with stencil 0x80,
-   FSBMExtractGlowFilter `|a − 1| × a × 2`, `renderer.glow*`) need the
-   renderer's glow list (`*(DAT_101fae6c + 0x38)`), not decoded: not drawn.
+   world's depth. *Glow is dead code in RendDX9.* The list at
+   `*(DAT_101fae6c + 0x38)` is not a glow list: `DAT_101fae6c` is the
+   RaShader manager (ctor `0x1003ed70`), its +4..+0x3c the 15 render
+   queues (`0x10038250`), and +0x38 is RSMTCamouflage, filled only by the
+   bundled mesh (`0x100c2990`, BMActiveCammo / AdditiveAlpha) and the
+   skinned mesh (`0x10161150`, SMActiveCamo Camouflage, or
+   BrokenCamouflage flickering by a random draw): the cloaked soldiers'
+   mask above. The glow passes (`0x10049560` ExtractGlow, `0x100495f0` →
+   `0x10048c40` GlowH/GlowV and the additive composite) run only when
+   PostProduction `+0x21` is set, which only `0x10048d10` (GlowMaterial
+   with GLOWSTRENGTH) does, and neither it nor `0x10048e80` (Glow) has a
+   caller or a pointer anywhere in the DLL. `renderer.glowEnabled`
+   (`0x1004ed50` → `+0x20`, default 0) and `renderer.glowStrength`
+   (`0x1004eee0` → `+0xe8`, 0.5) are read only by that dead function, and
+   `renderer.colorBrightness` (`0x1004fad0` → `0x10035c40`, `+0xa58`..)
+   only by its getter: all three are stored, and nothing glows (the
+   shipped `hasGlow 1`, on the EU Titan's monitor and the floodlight
+   cones, is the EXE's).
 2. *Bloom* (`0x10049140`): FSBMContrastFilter (pass 28: the backbuffer
    cubed, to luminance, less CONTRAST = `bloomFilterContrast`) into a
    small target, FSBMLargeBloomFilter across (pass 29: 13 taps 0.01 and
@@ -1660,10 +1805,16 @@ screenshot. PostProduction's Fog (a full-screen fog from a position
 buffer) and ThermopticCamouflage (returns black) techniques are named
 nowhere in RendDX9 (no technique string selects them): not drawn; fog
 stays in the shaders, the camouflage is FSQuadDrawer's passes above.
-Missing game state: the soldier's own EMP level and the tinnitus event
-(an explosion within its radius × `sound-tinnitus-range` of the local
-soldier) are not reported by GameWorld yet, and the view's tint colour
-(its slot 0x7c) is not decoded.
+The game state: the soldier's own EMP level is its armour's on foot
+(the player's `0x005921b0` walks from its control object to the first
+armour, slot `0x14c`), which an EMP raises like a vehicle's when the
+soldier template has `armor.takesEmpDamage` (no shipped soldier sets it);
+`PlayerInfo::empLevel`. The tinnitus event's sender wasn't found (no
+`sound-tinnitus-range` setting exists in BF2142.exe; event 0xd is posted
+through the game logic's interface slot `0xa4`, `0x004a5e80`): the
+rewrite rings the local soldier's ears for an explosion whose radius ×
+`GameWorld::tinnitusRange` (2) reaches it (`takeTinnitus`, the setup's
+1 + 2 + 4 s). The view's tint colour (its slot 0x7c) is not decoded.
 
 ## Kits on the ground
 
@@ -2632,6 +2783,130 @@ slot `0x14`). `GameWorld::removePlayer` does the round's part (the body
 lies on as a corpse; PlayerDisconnect), `HostedGame` the rest, and the
 next `addPlayer` takes the lowest free id.
 
+### Server settings, the map list and remote admin
+
+A server (`bf2142 --host`, with `--dedicated` headless) keeps its
+configuration from map to map (`src/Net/ServerSettings`,
+`src/Main/ServerAdmin`), as BF2142.exe's settings object (`DAT_00a201c0`)
+and map list (`DAT_00a21940`, `MapList.cpp`) outlive the levels:
+
+- **Files** (`0x00409950`, the command line): `+config <file>` names the
+  settings' file, else `<mod>/Settings/serversettings.con` (with an
+  overlay, `+overlayPath`, the original's `GSOverlayPath`:
+  `<overlay>Settings/...`); `+mapList <file>` the map list's, else
+  `<mod>/Settings/maplist.con`. Both are console scripts. The names are
+  matched without case (the install has `ServerSettings.con`). The bans
+  are `Settings/banlist.con` (`0x00507570` writes `admin.addKeyToBanList`
+  and `admin.addAddressToBanList` lines after each ban; round bans are not
+  kept). In the rewrite `--maps` or `+level` replace the map list file's
+  maps; command-line `+port`, `--query-port` and `--time-limit` win over
+  `sv.serverPort`, `sv.gameSpyPort` and `sv.timeLimit`.
+- **`sv.*`** (76, registered `0x0041b003..0x004207a8`): every setting as a
+  property (no argument reads, one writes), `sv.load`, `sv.save` (the
+  order and quoting of `0x00431880`: strings quoted except `interfaceIP`,
+  `voipServerRemoteIP` and `voipSharedPassword`; `sv.ranked` only on a
+  ranked server), `sv.configFile`. Read by the server: the name, password,
+  port, max players, query port, welcome message (the settings block's up
+  to three 256-byte pieces) and the block's flags (`allowNoseCam`,
+  `hitIndicator`, `tkPunishByDefault`, `allowFreeCam`,
+  `allowExternalViews`, voice ports and quality, radio spam limits,
+  voting, players needed, `friendlyFireWithMines`, `allowTitanMovement`),
+  `timeLimit` (seconds: the game logic's time limit), `spawnTime`,
+  `manDownTime`, `roundsPerMap`, `endDelay` (seconds from a round's end
+  to the next map; ServerSettingsDesc.csv: "between when a round ends and
+  a new round begins"), `adminScript`, `botSkill`, and the Python keys
+  below. The friendly-fire percentages, `startDelay`,
+  `notEnoughPlayersRestartDelay`, `endOfRoundDelay`, the demo and sponsor
+  settings, PunkBuster and `internet` are kept but not acted on.
+- **`GameServerSettings.*`** (45, `0x0041655b..0x00419112`), the menu's
+  host page's setters, set the same settings (`setSoldierFF` is
+  `soldierFriendlyFire`, `setPunishTeamKills` `tkPunishEnabled`,
+  `setTeamRatio` `teamRatioPercent`, `setDemoHook` `autoDemoHook`...).
+- **`maplist.*`** (`0x0042154a..0x00421d50`): `append level mode [size]`
+  and `insert index level mode [size]` check the level and its mode are
+  installed (`0x00441090`: "could not add to maplist. map not found:" /
+  "gameMode not found:"), `remove`, `clear`, `list` (`i: "level" "mode"
+  size` lines), `mapCount`, `currentMap`, `load`, `save` (`maplist.append
+  "level" "mode" size`, `0x00440ef0`), `configFile`. The joining client
+  gets the whole list and the running map's index (data block 5,
+  `0x00441410`).
+- **`admin.*`** (`0x00429bba..0x0042adfc`): `runNextLevel`, `restartMap`,
+  `runLevel level mode size` end the map at once and start the one asked
+  for; `nextLevel` (property) picks the map after this one; `currentLevel`;
+  `kickPlayer id` and `banPlayer id [period]` / `banPlayerKey id [period]`
+  (`0x004a6090`, `0x00507e10`, `0x00507e80`: "Player not found." for no
+  such player; the address or CD-key hash banned, the list saved, the
+  player kicked with KickBan); the ban list's `add*`, `remove*`,
+  `clearBanList`, `listBanned*`. A period (`0x00505db0`) is `perm` or
+  nothing, `round`, or seconds. A banned address is refused on connecting
+  (refusal 0x16), a banned key once its challenge answer gives its hash.
+  `listPlayers` is `0x004a86b0`'s text (`Id:%3d - <name> is remote ip:
+  <address> ->\n         CD-key hash: <hash> `, ` is local.`, ` is an AI
+  bot.`).
+- **Rotation**: after each round `ServerAdmin::nextRound` gives the next
+  map: what an admin asked for, else `sv.roundsPerMap` rounds on each map
+  of the list in turn. Round bans end. The clients stay connected through
+  the change (`HostedGame::changeLevel`).
+- **`reservedSlots.*`** (`0x0041aa21..`): the nicks, `load`/`save`
+  (`reservedSlots.addNick` lines). Kept, not yet used to admit a player to
+  a full server.
+- **`Game.sayAll` / `Game.sayTeam`**: a chat line on channel 12 (13 to a
+  team) from player 0xff with source 1.
+
+**Python.** `host.rcon_invoke` (`0x004427b0`) runs a console command (line
+by line through the console's `executeString` `0x00674430`) and returns its
+output ending with a newline (nothing for nothing; a ranked server refuses
+`vars.set` with "Ranked server blocks vars.set from remote console").
+`host.rcon_feedback(player, text)` (`0x00442940`) posts "rcon: " + the text
+to the player as message 6/0x13; the rewrite sends it as PostRemote 6/0x13
+payloads of the int -1 and up to 48 characters each (the client's handler
+prints a -1 payload to its console, `0x004b6630`); how the exe carries a
+longer text was not traced. A client's `rcon <line>` (the console's
+`executeString` posts 6/0x12) comes to the server as 6/0x12 with the line
+and raises the scripts' `RemoteCommand(player, line)` (`0x004b0690` case
+0x12 makes event 0x2b); `GameClient::remoteCommand` sends one.
+`host.ss_getParam` (`0x00568350`) reads the settings: `gameMode` and
+`mapName` from the game logic, `ticketRatio`, `maxPlayers`, `timeLimit`,
+`scoreLimit`, `autoBalance` (`sv.autoBalanceTeam`), `teamRatioPct` (a
+float), `tkpEnabled`, `tkpNeeded`, `tkpDefault`, `globRank`,
+`globUnlocks`, `ranked`, `maxRank`. `host.sgl_getOverlayDirectory`
+(`0x00567730`) is `GSOverlayPath`: "" in the exe, which leaves
+`admin/default.cfg` to the working directory (the install); the rewrite
+gives the install's directory (or `+overlayPath`).
+
+**The admin script.** `sv.adminScript` names a module of the install's
+`admin` folder ("default": `admin/default.py`), imported once, its
+`init()` run, its `update()` every frame and `shutdown()` at the end
+(`src/Main/AdminScript`). `default.py` is the TCP remote console: it binds
+port `port` of `admin/default.cfg` (4711) on 0.0.0.0 (127.0.0.1 in the
+rewrite, which keeps servers on loopback), greets with `### Battlefield
+2142 default RCON/admin ready.`, `### Digest seed: <16 letters>` and an
+empty line; `login <md5 hex of seed + password>` authenticates, then
+`exec <command>` runs a console command through `rcon_invoke`, `users`
+lists the authenticated; a line starting with 0x02 gets a reply ending
+with 0x04. Its `init()` imports `admin/standard_admin`: `autobalance.py`
+(a joining player to the smaller team; on a death, a player moved when
+the teams differ by more than one, weighted by `teamRatioPct`, while
+`autoBalance` is on), `tk_punish.py` (team kills to punish or forgive
+within 20 s; `tkpNeeded` punishments ban for the round through
+`rcon_invoke("admin.banPlayer <id> Round")`) and `playerconnect.py`. Team
+balance and TK punishing are these scripts', not the engine's. The
+scripts are Python 2; besides `py2compat`'s translation the rewrite gives
+them a `socket` module with Python 2's `str` data and errors indexed as
+tuples (`detail[0]`, a would-block always `errno.EWOULDBLOCK`, a
+`shutdown` of a gone peer ignored as Winsock does), `md5` objects taking
+`str`, and the `admin` package from the install's `admin` (or `Admin`)
+folder. The interpreter outlives the per-map script hosts, so the admin
+module and its connections live on; the handlers and timers it
+registered are registered again on each map's host. `bf2142 --rcon
+host[:port] --rcon-password p --rcon-command "<command>"` is a client
+(`src/Net/RemoteConsole`).
+
+**Dedicated.** `bf2142 --host --dedicated` (or `+dedicated 1`) runs
+without a window, sound or client archives: the map list in turn, until
+Ctrl+C, SIGTERM or a console `quit` (through rcon), or for `--simulate N`
+seconds over all its maps.
+
 ### The control-object record and prediction
 
 The ghost block's record (written by `0x00580830`, read by `0x00580cd0`)
@@ -2772,7 +3047,12 @@ effects). A record of the driver's seat (the root's SimpleObject in mode
 3: position, orientation, velocity, angular velocity) is put on the state
 remembered for its move, and the later moves are stepped again; the
 engines' and wheels' own state (rpm, gear, springs, wheel spin) isn't in
-the record and stays the client's.
+the record and stays the client's. `bf2142 --connect` runs it: every
+move sent steps both predictions; a record whose root group is a
+SimpleObject with `record.vehicle` set starts (or reconciles) the car's,
+a soldier's record the soldier's, and the vehicle ghost
+(`record.vehicle`) is drawn, and the camera follows it, at the
+prediction's position and orientation.
 
 Measured on 127.0.0.1, a car (`NetHost_VehiclePrediction`: eu_fav on
 flat ground, the client driving 10 s at full throttle, steering both ways,
@@ -3638,8 +3918,64 @@ which the rewrite can't reproduce). The build-up (`DeviationBuildUp`):
 `deviation.setFireDev` is a method of three numbers (template `0x005f5360`:
 `+0x10` the most, `+0x8` added a round, `+0xc` the decay a tick), with
 `minDev` (`+0x14`) the floor; a round adds (`0x005f5540`), each tick off
-the trigger decays toward the floor (`0x005dedb0`). Hand-held firearms
-have no deviation model yet.
+the trigger decays toward the floor (`0x005dedb0`).
+
+**Soldier deviation** (hand-held firearms' `SoldierDeviationComp`, class
+`0x94e1`; the object's update `0x005de980` each tick with the holder's
+input; `game::SoldierDeviation`). The template adds `setTurnDev max pitch
+yaw decay` (`0x005de3c0`: `+0x2c`, `+0x20`, `+0x24`, `+0x28`), `setSpeedDev
+max throttle strafe decay` (`0x005de3e0`: `+0x3c`, `+0x30`, `+0x34`,
+`+0x38`), `setMiscDev max add decay` (`0x005de400`: `+0x48`, `+0x40`,
+`+0x44`), `devModStand/Crouch/Lie` (`+0x4c`..`+0x54`) and `devModZoom` /
+`minDevModZoom` (`+0x58`, `+0x5c`), all modifiers 1 by default. The
+input's bits pick the parts: PIYaw (strafe, bit 0) and PIThrottle (bit
+3) the speed's (a fixed step each while above 0.01, held at its max,
+decaying without), PIMouseLookX / Y (bits 4, 5) the turn's (their size
+times the factors less the decay); the misc part grows while its flag
+holds (the rewrite: in the air; eu_ar_rifle's `7 7 0.14` puts a jump at
+the maximum). The deviation = (minDev × minDevModZoom + misc + turn +
+speed + the firing's build-up) × devModZoom × the stance's (zoom
+modifiers 1 when not zoomed). Rounds stray by it as above, and the
+crosshair (`0x007be770`) spreads by it. Its `+0x44` extra (a condition of
+the holder's slot `0x1a0`) is left out.
+
+**Gun sway** (`DefaultGunSwayComp`, class `0x94f6`, object `0x005e0640`,
+update `0x005e0da0`; `game::GunSway`): it moves the aim by nudging the
+holder's look inputs, PIMouseLookY on the pitch (`0x005e09a0`) and
+PIMouseLookX left-right (`0x005e0ba0`). With `gunSwayUseZoom` only while
+zoomed. Each axis, every `UpdateRate` seconds, takes a step of `Max /
+Steps` less its smoothing: `Factor × ZoomModifier × step × dt × the
+stability × ±1` goes on the input when the player's own is smaller; the
+swing turns at `Max` + an extra (`RandomMin..RandomMax`, drawn at the
+ends), and with `DirModifier` / `DirThreshold`'s draw keeps on to
+2 × (Max + extra) before starting over (the left-right pass writes the
+pitch's keep-on flag, as `0x005e0ba0` does). The smoothing (`0x005dfc20`:
+`SmoothFactor`, `SmoothMax`, `SmoothThreshold`) slows the steps near the
+ends. Holding the sprint key (PISprint) while zoomed with the scope
+stabilizer (an unlock's `ability.hasScopeStabilizerAbility`) steadies it
+(`0x005e0750`): the stability falls to 0 over `stabilityTime` and back
+over `stabilityRecoverTime`, held at most `stabilityDuration`
+(`stabilityDurationRecoverTime` to recover).
+
+**Unlock abilities.** `ability.setMaterialDamageMod <material> <mod>`
+(`0x0054eadc` → the Ability's slot `0x94`) scales the damage a projectile
+of that material does to the soldier (the assault's armour unlock: 0.75
+for twenty bullet materials); `ability.addExtraAmmoItem <item> <mags>
+<rounds> <flag>` (`0x0054ebed`) adds magazines and rounds to an item of
+the kit (`as_handgun 3 0 0`, `unl_grenade_frag 0 1 1`; the list's
+consumer and the flag aren't traced, the rewrite adds to nrOfMags and
+magSize).
+
+**Lock-on weapons** (the target components: `MultiFireArmTargetComp` on
+the AA and AT launchers, the walkers' and gunships' guided guns; template
+`0xc50c`: `target.targetSystem` `+0x80`, `maxDistance` `+0x78`,
+`lockAngle` `+0x88`, `lockDelay` `+0x8c`, `loseLockDelay` `+0x94`). The
+component's object update is not decoded; the rewrite's rule from those
+settings (`GameWorld::weaponLock`): the enemy object carrying the system's
+target type (TSHeatSeeking: TTHeat; TSLaserGuided: TTLaser) nearest the
+aim within lockAngle, maxDistance and sight is locking at once and locked
+after lockDelay in the cone; out of it for loseLockDelay it is lost. The
+HUD's object markers (`Bf2ObjectMarkerNode`) show the state.
 
 - **Mines:** a mine fires when an enemy faster than
   `triggerVictimMinSpeed` (3.6 m/s: walking past is safe) comes within its
@@ -4033,8 +4369,9 @@ the top.
   template says so (`+0x64` slot `0x78`'s `+0xb8`); its network id goes to
   `+0x1f0`, the point to `+0x1f4`. `GameWorld::crosshairTarget` /
   `spotCrosshair` (the soldiers as 0.6 m spheres, the vehicles 2.5 m, along
-  the view, nothing in between); the HUD binding (`src/Main`) still only
-  closes the rose.
+  the view, nothing in between); the HUD binding (`src/Main`) spots the
+  local player's crosshair object (`spotCrosshair`) and closes the rose
+  (a joined game's spot isn't sent to the server).
 - **`game.radioMessage <TargetChannel> <voice>`** (`0x00423e61` → the
   client's slot `0x50`, `0x004b2b60`: the voice's index in the game
   logic's radio table, the spam check, event 0x14 to the server, a local
@@ -4134,11 +4471,32 @@ while they have the keys. `src/Main/HudMenusChat`:
   the field of view doesn't change. `Commander.detailedView` keeps the
   old position and leaving the commander screen sends it back. The
   rewrite has no overhead camera object: the commander screen's map
-  centres on the asset and a joined game sends the event. (The overhead
-  view itself is not a HUD node: the server's camera object at the asset,
-  `0x005f8410`, is drawn by the renderer into the map's area, the
-  `MinimapZoomDisplay 2` state; that needs a top-down view pass in
-  `src/Render`, which the rewrite doesn't have.)
+  centres on the asset and a joined game sends the event.
+- **The overhead view.** The asset zoom also sets the commander map's
+  zoom index to 2 (`0x007d7f90` → the map's slot `0xd8 (2, 1)`); the map
+  keeps a zoom index per mode (`0x0077e850`), and at 2 in the commander
+  screen (`+0x70d`) it turns the overhead view on (`0x00779680`: the
+  player's view takes the team's OverheadCamera, game logic slot `0x88`),
+  fades its texture out (MenuMapAlpha `+0x7b8` to 0, eased at `+0x7b0`:
+  down by a tenth of `1 − e^(−9t)` a frame, up by a fifth) and zooms so
+  the node spans the camera's ground width, `2 tan(fov / 2) × height`
+  (`0x0077c4b0`, with the view's half extents at `+0x878` for the
+  clicks), without easing (`+0x898`). The camera (OverheadCamera,
+  `0x005f8170`; MultiPlayerOverheadCamera.tweak: fOV 0.3, height 260)
+  sits over the point kept 80 m inside the terrain, at the mean of the
+  ground's height there and 2 m off along x and z (or the sea's) plus
+  its height, looking straight down with north up (rows 1 0 0 / 0 0 1 /
+  0 −1 0). The commander screen's map is the node at
+  `setCommanderPos/Size` (−300/−300, 600/600: the square between the black
+  borders), `MinimapZoomDisplay` the index. The renderer draws the
+  frame's world pass from that camera (`render::OverheadView`,
+  `LevelSources::overheadView`) with the fov over the map node's
+  rectangle and the screen around it going on with the same view (an
+  off-centre perspective, `overheadProjection`), without the first person:
+  one pass, as the exe's camera swap, the view seen through the faded
+  map. The exe also sets a renderer value to 1 while it is on
+  (`DAT_00a2020c` slot `0x80` → `0x28` with `DAT_00a0c204`, restored
+  after), not decoded.
 
 ### HUD nodes: transform lists, effects, markers and the map menus
 
@@ -4176,9 +4534,12 @@ active node to):
   pi/2 down) times what is left of the fade. `addNodeBlendEffect <src>
   <dest>` (`0x007b20c0`, a `<node>BlendEffect` render-state node) gives
   the quads below it those Direct3D 9 blend factors (the vehicle HUDs'
-  `7 2`: `D3DBLEND_DESTALPHA`, `D3DBLEND_ONE`); `HudQuad::blend` carries
-  them to the renderer, which still draws every HUD quad with its usual
-  source-alpha blend. `setNodeTimesBlink <n> <mode>` and
+  `7 2`: `D3DBLEND_DESTALPHA`, `D3DBLEND_ONE`; the render-state node
+  hands each quad below it through, `0x00870c40`); `HudQuad::blend`
+  carries them to the renderer, which draws those quads with a UI
+  pipeline of the same factors (`GpuContext::uiBlendPipeline`, made the
+  first time a pair is used; the target's alpha is 1 after the
+  post-production, so `7 2` adds the glass over the view). `setNodeTimesBlink <n> <mode>` and
   `setNodeIntervalBlink <s>` (`0x007b1c00`, `0x007b1da0`: the blink
   effect's slots `0xdc`, `0xd8`): once shown, the node is off every other
   interval for its first n blinks.
@@ -4192,9 +4553,16 @@ active node to):
   node (the kit screen's drop targets). `setButtonNodeDebug` is kept.
 - **Pictures, text and bars.** `setPictureNodeBorder <l> <t> <r> <b>` and
   `setPictureNodeBorderColor` (`0x007af640`, `0x007af6d0`) draw lines of
-  those widths round the picture; `setPictureNodeCenterPoint` (slot
-  `0xe0`, the rotation's pivot) is kept but the quads still turn about
-  their centres. `setTextNodeOutLine <font>` and
+  those widths round the picture. `setPictureNodeCenterPoint` (slot
+  `0xe0`, `0x007c6750`) stores a point the picture's render (`0x007c67b0`)
+  turns the quad about instead of the rectangle's centre; the shipped
+  scripts' `0 0` (the hit indicator round the crosshair, the gunships'
+  horizon bar) is the screen's centre, so the rewrite takes the point
+  about it (`HudQuad::pivot`). A picture without a texture
+  (`0x007c6580` leaves it null and the render still draws the quad) is a
+  fill in its colour: the commander screen's black side borders
+  (`CommanderHudLeftBorder` / `RightBorder`, 0..100 and 700..800) and the
+  unlock and customise backgrounds. `setTextNodeOutLine <font>` and
   `setTextNodeOutLineOffset` (`0x007afa40`, `0x007afac0`: the text's
   font object's slots `0x5c`, `0x60`) draw the outline font beneath;
   `setTruncate` (slot `0x68`) cuts the text at the node's width.
@@ -4358,6 +4726,44 @@ second's fade). So gpm_ti.py's VehicleDestroyed handler, which calls
 bodies lie; for a player whose body is gone or who never spawned the
 original's handler raises too (the host prints the error, the round has
 ended by then). `PlayerInfo::heldVehicle` / `heldSoldier`.
+
+**Assault Lines** (gpm_sl.py) gates capture by supply groups, all in the
+script: a point may be taken by a team (`cp_setParam allowCaptureByTeam`)
+only while that team holds every required group it needs and enough
+supply value. The engine serves the data (`cp_getParam`, `0x0056a010`):
+`supplyGroupId` (the ControlPoint template's, -1 by default; the save
+`0x005bc260` writes it from `+0x2ec`), per team `supplyValueNeeded`
+(`supplyValueNeededTeam1/2`) and `supplyValue` (`supplyValueTeam1/2`), and
+`supplyGroupsNeeded` (a tuple of (group, optional) pairs: the template's
+`supplyGroupNeeded <team> <group> [optional]`, `0x00503dec` /
+`0x00503f73` → slot `0xc0`, optional false by default; Highway Tampa's
+bases have `2 3 0` and `1 3 0`). `host.sgl_getControlPointsInGroup`
+(`0x00568890`, the game logic's slot `0x18c`) gives a group's points.
+`getSupplyGroupId` isn't in BF2142.exe (only gpm_sl.py's unused
+`showControlGroups` calls it); the rewrite answers it. The bots don't
+know the supply lines (their control point view, `0x00895d90`, asks
+`unableToChangeTeam` only).
+
+**The other host hooks.** `pmgr_getSquadLeader(team, squad)`
+(`0x0056a570`, the squad manager's slot `0x40`, -1 for none) and
+`pmgr_getPlayersInSquad` (`0x0056adb0`, the player manager's slot `0x58`,
+a tuple of indices). `pmgr_enableScoreEvents(n)` (`0x0056ad00`) sets the
+flag `0x00a00594` (n > 0) that makes `pmgr_setScore(p, "score", v)` raise
+`PlayerScore(player, change)` (`0x0056ae60`, the tuple of `0x0056a4b0`,
+event 0x20). `pers_plrGiveFieldUnlock(p)` (`0x00566850`, "no such player"
+unless valid) hands the game logic's slot `0x68` the player (the rewrite
+counts it: `GameWorld::fieldUnlocks`). `pers_plrRequestStats` /
+`pers_plrRequestUnlocks` (`0x00566930`, `0x00567370`) queue a request to
+the stats server and return whether it went: 0 here (no server; the
+scripts only ask with `sv.globRank` / `globUnlocks`, off), and
+`pers_getStatsKeyVal` (`0x00566b90`) raises "there is no current
+persistence object downloaded". `gl_sendEndOfRoundData(text)`
+(`0x00568930`) sends the end-of-round text to everyone (data block 8 with
+the delay, `0x0059cb..`) and, on a client, hands it to the menu's
+SwiffHost (slot `0x174`); the rewrite keeps it in `GameLogic` and a hosted
+game sends it as block 8. `sgl_getOverlayDirectory` (`0x00567730`) is the
+`GSOverlayPath` setting ("" unset) and `gs_abortCurrentConnectionAttempt`
+(`0x00568700`, the GameSpy layer's slot `0xe4`) does nothing offline.
 
 The rewrite embeds Python 3 instead (`src/Python`). `py2compat.py`
 translates the Python 2 scripts as they are imported. It rewrites syntax
@@ -4646,6 +5052,31 @@ state, input, kills, deaths and team kills.
   (`Object.setControlPointId`) or else its template
   (`ObjectTemplate.setControlPointId`, as the coop levels set it). The
   scripts get `PickupKit` and then `PlayerSpawn`.
+- **Spawn point options** (dice.bf.SpawnPoint, class `0x948a`, made by
+  `0x00635590`; the setters go through its interface `0xc47d` at `+0x68`,
+  vtable `0x00982918`; the point object's vtable `0x00969008`): the
+  point's test for a player (`0x005b24f0`, slot 7, which the spawn
+  manager asks of each, `0x00634fc0`): `setOnlyForAI` (`+0x92`) keeps
+  humans off, `setOnlyForHuman` (`+0x91`) bots; with `setEnterOnSpawn`
+  (`+0x89`, or a bot and `setAIEnterOnSpawn` `+0x8a`) only with a vehicle
+  of the team (or neutral) within 5 m (a bot: 15 m) of it (`0x005a98e0`:
+  the EntryComp objects, class `0x9477`, nearest first, with a free
+  seat), the soldier then put in that seat; otherwise, unless it scatters
+  or has `setAllowSpawnCloseToVehicle` (`+0x93`), not while a living
+  soldier or a vehicle is within a metre (objects within 1 m, flags
+  `0x1000200`). Where (`0x005b2200`, slot 13): with
+  `setScatterSpawnPositions` (`+0x90`) the squad leader's scatter (below)
+  from the point and its heading, else the point plus
+  `setSpawnPositionOffset` (`+0x70`, 0/1.02/0 by default: the soldier's
+  origin, about a metre over the feet), unturned. Not rewritten: the
+  `+0x8c` height test (-1, off; no shipped setter found) and the
+  parent's armour tests. When every point is taken the rewrite uses one
+  anyway. Mobile spawn points: a SpawnPoint in a vehicle's tree (the
+  APCs' `eu_apc_SpawnPoint`, the AT and IFV spawn vehicles', all
+  `setEnterOnSpawn 1`) is a spawn group of its own (net ids from `0xc0`,
+  SpawnManager `0x00635080`); `GameWorld::setSpawnVehicle` picks a team
+  vehicle carrying one (`spawnVehicles` lists them) and the soldier
+  starts in its nearest free seat. The spawn menu doesn't list them yet.
 - **Hits:** soldiers are hit through their bones' capsules. In the soldier
   template, `setSkeletonCollisionBone bone material offset radius length`
   (`0x004deb29` → `0x005c0930` → `0x008b7db0` → `0x008b7d40`: 0x24-byte

@@ -9,9 +9,11 @@
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 using namespace dice::hfe;
 
@@ -185,4 +187,108 @@ TEST(ScriptHost_ConquestEndsWithoutTickets)
 	host.update();
 	CHECK(round.logic.ended());
 	CHECK(winner == 2);
+}
+
+// Assault Lines (gpm_sl.py): a control point's supply groups
+// (supplyGroupNeeded <team> <group> <optional>) gate its capture. The
+// harbour needs team 2 (EU) to hold group 3 (PAC's base) first, so the EU
+// soldier inside it captures nothing; once its need is met, it does.
+TEST(ScriptHost_SupplyLinesGateCapture)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	for (const bool supplied : {false, true}) {
+		Round round;
+		world::ObjectTemplate* harbour = round.templates.find("cp_harbor");
+		harbour->settings()["supplyGroupId"] = "2";
+		harbour->settings()["supplyGroupNeeded.list"] = supplied ? "2 1 0;1 3 1;" : "2 3 0;";
+		round.templates.find("cp_eu_base")->settings()["supplyGroupId"] = "1";
+		round.templates.find("cp_pac_base")->settings()["supplyGroupId"] = "3";
+		round.world->startRound();
+		std::string errors;
+		script::ScriptHost host(*round.bridge,
+			{std::string(gameDir) + "/python", std::string(gameDir) + "/mods/bf2142/python"},
+			[&errors](const std::string& line) {
+				if (line.compare(0, 7, "stderr:") == 0) {
+					errors += line + "\n";
+				}
+			});
+		const auto raise = [&host](const std::string& event, const game::ScriptArgs& args) { host.raise(event, args); };
+		round.world->setEventSink(raise);
+		round.logic.setEventSink(raise);
+		CHECK(host.startGameMode("gpm_sl"));
+		host.setGameStatus(game::GameStatus::PreGame);
+		host.setGameStatus(game::GameStatus::Playing);
+		// What the script sees (0x0056a010, 0x00568890).
+		CHECK(host.run(std::string("import host, bf2\n"
+								   "cp = [o for o in bf2.objectManager.getObjectsOfType('dice.hfe.world.ObjectTemplate.ControlPoint')"
+								   " if o.templateName == 'cp_harbor'][0]\n"
+								   "assert cp.cp_getParam('supplyGroupId') == 2 and cp.getSupplyGroupId() == 2\n"
+								   "assert [o.templateName for o in host.sgl_getControlPointsInGroup(3)] == ['cp_pac_base']\n"
+								   "assert len(host.sgl_getControlPointsInGroup(7)) == 0\n")
+			+ (supplied ? "assert list(cp.cp_getParam('supplyGroupsNeeded', 2)) == [[1, 0]]\n"
+						  "assert list(cp.cp_getParam('supplyGroupsNeeded', 1)) == [[3, 1]]\n"
+						  "assert cp.cp_getParam('allowCaptureByTeam', 2) == 1\n"
+						: "assert list(cp.cp_getParam('supplyGroupsNeeded', 2)) == [[3, 0]]\n"
+						  "assert cp.cp_getParam('allowCaptureByTeam', 2) == 0\n"
+						  "assert cp.cp_getParam('allowCaptureByTeam', 1) == 1\n")));
+		CHECK(round.world->spawnPlayer(2) != nullptr);
+		for (int tick = 0; tick < 30 * 8; ++tick) {
+			round.world->tick(1 / 30.0f);
+			round.logic.tick(1 / 30.0f);
+			host.update();
+		}
+		std::fprintf(stderr, "  supplied %d: harbour team %d\n", supplied ? 1 : 0, round.enemyPoint->team());
+		CHECK(round.enemyPoint->team() == (supplied ? 2 : 1));
+		if (!errors.empty()) {
+			std::fprintf(stderr, "%s", errors.c_str());
+		}
+		CHECK(errors.empty());
+	}
+}
+
+// The squad and score hooks: pmgr_getSquadLeader / getPlayersInSquad
+// (0x0056a570, 0x0056adb0), pmgr_enableScoreEvents raising PlayerScore
+// (0x0056ad00, 0x0056ae60), pers_plrGiveFieldUnlock (0x00566850),
+// gl_sendEndOfRoundData (0x00568930), and the stats server calls failing
+// as with no server.
+TEST(ScriptHost_SquadAndStatsHooks)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Round round;
+	script::ScriptHost host(*round.bridge,
+		{std::string(gameDir) + "/python", std::string(gameDir) + "/mods/bf2142/python"}, [](const std::string&) {});
+	std::vector<std::string> events;
+	const auto raise = [&](const std::string& event, const game::ScriptArgs& args) {
+		events.push_back(event);
+		host.raise(event, args);
+	};
+	round.world->setEventSink(raise);
+	round.logic.setEventSink(raise);
+	round.bridge->events = raise;
+	CHECK(host.startGameMode("gpm_cq"));
+	const int a = round.world->addPlayer("A", 2, true);
+	const int b = round.world->addPlayer("B", 2, true);
+	const int c = round.world->addPlayer("C", 1, true);
+	CHECK(round.world->joinSquad(a, 3) && round.world->joinSquad(b, 3) && round.world->joinSquad(c, 3));
+	CHECK(host.run("import host, bf2\n"
+				   "assert host.pmgr_getSquadLeader(2, 3) == " + std::to_string(a) + "\n"
+				   "assert host.pmgr_getSquadLeader(2, 4) == -1\n"
+				   "assert sorted(host.pmgr_getPlayersInSquad(2, 3)) == sorted([" + std::to_string(a) + ", " + std::to_string(b) + "])\n"
+				   "assert [p.index for p in bf2.playerManager.getPlayersInSquad(1, 3)] == [" + std::to_string(c) + "]\n"
+				   "assert bf2.playerManager.getSquadLeader(2, 3).index == " + std::to_string(a) + "\n"
+				   "host.pers_plrGiveFieldUnlock(" + std::to_string(b) + ")\n"
+				   "assert host.pers_plrRequestStats(" + std::to_string(b) + ", 1, '&mode=base', 0) == 0\n"
+				   "try:\n  host.pers_getStatsKeyVal('rnk', 0)\n  assert False\nexcept RuntimeError:\n  pass\n"
+				   "host.pmgr_enableScoreEvents(1)\n"
+				   "host.pmgr_setScore(" + std::to_string(b) + ", 'score', 5)\n"
+				   "host.gl_sendEndOfRoundData('\\\\tp0\\\\B')\n"));
+	CHECK(round.world->fieldUnlocks(b) == 1 && round.world->fieldUnlocks(a) == 0);
+	CHECK(std::count(events.begin(), events.end(), "PlayerScore") == 1);
+	CHECK(round.logic.endOfRoundData() == "\\tp0\\B" && round.logic.endOfRoundSerial() == 1);
 }

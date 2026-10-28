@@ -32,7 +32,7 @@ plain integers during analysis.
 | `dice_py.dll` | Embedded **Python 2.3.4** (DICE build, 2005) | CPython 2.3.x built from source with the same `host`/`bf` built-in modules (which the scripts import), or a later compatible 2.x build. The game scripts in `python/` and `mods/*/python` ship as `.py` source. |
 | `pylib-2.3.4.zip` | Python standard library | Ships with the replacement interpreter. |
 | `d3dx9_29.dll` | D3DX (effects, math, textures) | Our own implementation of the parts the renderer uses. Shaders ship as HLSL `.fx` source in `mods/bf2142/Shaders_client.zip`. |
-| `binkw32.dll` | Bink 1 video (2002) | FFmpeg's `libavcodec` has a Bink decoder. |
+| `binkw32.dll` | Bink 1 video (2002) | Replaced by FFmpeg's Bink demuxer and decoders (`src/Movie`, optional with `BF2142_MOVIES`; see engine.md "Movies"). |
 | `BF2OpenAL.dll` | Creative OpenAL wrapper (`wrap_oal`) | OpenAL Soft. |
 | `zlib122.dll` | zlib 1.2.2 | System or vendored zlib. |
 | `PCRegExp.dll` / `PCRegExp_r.dll` | PCRE wrapper (DICE build) | PCRE2. |

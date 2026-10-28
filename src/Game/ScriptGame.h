@@ -124,6 +124,29 @@ public:
 	// sh_setEnableCommander (0x00568640: event 0x47).
 	virtual int commander(int team) { (void)team; return -1; }
 	virtual void setCommanderEnabled(bool enabled) { (void)enabled; }
+	// sgl_getControlPointsInGroup (0x00568890): the control points whose
+	// supplyGroupId is the group.
+	virtual std::vector<uint32_t> controlPointsInGroup(int group) { (void)group; return {}; }
+	// pmgr_getSquadLeader (0x0056a570: the squad manager's slot 0x40, -1
+	// for none) and pmgr_getPlayersInSquad (0x0056adb0: the player
+	// manager's slot 0x58, the players' indices).
+	virtual int squadLeader(int team, int squad) { (void)team; (void)squad; return -1; }
+	virtual std::vector<int> playersInSquad(int team, int squad) { (void)team; (void)squad; return {}; }
+	// pmgr_enableScoreEvents (0x0056ad00: the flag 0x00a00594 that makes
+	// pmgr_setScore("score") raise PlayerScore(player, change)).
+	virtual void setScoreEvents(bool enabled) { (void)enabled; }
+	// pers_plrGiveFieldUnlock (0x00566850: "no such player" unless valid;
+	// the game logic's slot 0x68 with the player).
+	virtual bool giveFieldUnlock(int player) { (void)player; return false; }
+	// gl_sendEndOfRoundData (0x00568930): the end-of-round screen's text.
+	virtual void endOfRoundData(const std::string& text) { (void)text; }
+	// Remote administration (a server's; Main/ServerAdmin.h): rcon_invoke
+	// (0x004427b0: a console command's output), rcon_feedback (0x00442940:
+	// "rcon: <text>" to a player's console, message 6/0x13) and
+	// sgl_getOverlayDirectory (the overlay path, "" without one).
+	virtual std::string rconInvoke(const std::string& command) { (void)command; return {}; }
+	virtual void rconFeedback(int player, const std::string& text) { (void)player; (void)text; }
+	virtual std::string overlayDirectory() { return {}; }
 };
 
 } // namespace dice::hfe::game

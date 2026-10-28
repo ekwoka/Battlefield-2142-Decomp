@@ -180,9 +180,33 @@ ScriptValue ScriptBridge::controlPointParam(ControlPoint& point, const std::stri
 		const int team = teamArgument(args, 0, point.team);
 		return ScriptValue::number(number(t, team == 2 ? "areaValueTeam2" : "areaValueTeam1", 0));
 	}
+	// Supply lines (gpm_sl.py): the point's group, and per team the value it
+	// needs and gives and the (group, optional) pairs it needs, a tuple of
+	// tuples (0x0056a010).
+	if (name == "supplyGroupId") {
+		return ScriptValue::integer(point.supplyGroupId);
+	}
+	if (name == "supplyValueNeeded" || name == "supplyValue" || name == "supplyGroupsNeeded") {
+		const int team = teamArgument(args, 0, 0);
+		if (team < 1 || team > 2) {
+			return name == "supplyGroupsNeeded" ? ScriptValue::makeList({}) : ScriptValue::integer(0);
+		}
+		if (name == "supplyValueNeeded") {
+			return ScriptValue::integer(point.supplyValueNeeded[team]);
+		}
+		if (name == "supplyValue") {
+			return ScriptValue::integer(point.supplyValue[team]);
+		}
+		std::vector<ScriptValue> groups;
+		for (const ControlPoint::SupplyGroup& group : point.supplyGroupsNeeded[team]) {
+			groups.push_back(ScriptValue::makeList(
+				{ScriptValue::integer(group.group), ScriptValue::integer(group.optional ? 1 : 0)}));
+		}
+		return ScriptValue::makeList(std::move(groups));
+	}
 	// Template settings, numbers (onlyTakeableByTeam, unableToChangeTeam,
 	// isHemisphere, timeToGetControl, timeToLoseControl,
-	// enemyTicketLossWhenCaptured, supplyGroupId, supplyValue...).
+	// enemyTicketLossWhenCaptured...).
 	const float value = number(t, name, 0);
 	if (name == "timeToGetControl" || name == "timeToLoseControl") {
 		return ScriptValue::number(value);
@@ -295,6 +319,12 @@ ScriptValue ScriptBridge::objectCall(uint32_t id, const std::string& method, con
 	}
 	if (method == "getIsRemoteControlled") {
 		return ScriptValue::integer(0);
+	}
+	if (method == "getSupplyGroupId") {
+		// Only gpm_sl.py's unused showControlGroups asks; BF2142.exe has no
+		// such method (the string isn't in it): cp_getParam's supplyGroupId.
+		const ControlPoint* point = m_world.controlPointOf(id);
+		return ScriptValue::integer(point ? point->supplyGroupId : -1);
 	}
 	if (method == "cp_getParam" || method == "cp_setParam") {
 		ControlPoint* point = m_world.controlPointOf(id);
@@ -454,7 +484,46 @@ ScriptValue ScriptBridge::playerScore(int index, const std::string& name)
 
 void ScriptBridge::setPlayerScore(int index, const std::string& name, const ScriptValue& value)
 {
-	m_scores[index][name] = value;
+	ScriptValue& score = m_scores[index][name];
+	const int64_t before = score.asInt();
+	score = value;
+	// 0x0056ae60: with score events on, a change of "score" raises
+	// PlayerScore(player, change) (the tuple 0x0056a4b0 builds, event 0x20).
+	if (name == "score" && m_scoreEvents && events && value.asInt() != before) {
+		events("PlayerScore", {ScriptValue::player(index), ScriptValue::integer(value.asInt() - before)});
+	}
 }
+
+int ScriptBridge::squadLeader(int team, int squad)
+{
+	for (const GameWorld::PlayerInfo& player : m_world.playerList()) {
+		if (player.team == team && squad != 0 && player.squad == squad && player.squadLeader) {
+			return player.id;
+		}
+	}
+	return -1;
+}
+
+std::vector<int> ScriptBridge::playersInSquad(int team, int squad)
+{
+	std::vector<int> ids;
+	for (const GameWorld::PlayerInfo& player : m_world.playerList()) {
+		if (player.team == team && squad != 0 && player.squad == squad) {
+			ids.push_back(player.id);
+		}
+	}
+	return ids;
+}
+
+bool ScriptBridge::giveFieldUnlock(int player)
+{
+	if (!playerValid(player)) {
+		return false;
+	}
+	m_world.giveFieldUnlock(player);
+	return true;
+}
+
+void ScriptBridge::endOfRoundData(const std::string& text) { m_logic.setEndOfRoundData(text); }
 
 } // namespace dice::hfe::game

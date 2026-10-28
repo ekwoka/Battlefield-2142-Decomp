@@ -473,9 +473,87 @@ PyObject* host_sh_setEnableCommander(PyObject*, PyObject* args)
 	return none();
 }
 
-PyObject* host_minusOne(PyObject*, PyObject*) { return PyLong_FromLong(-1); }
-PyObject* host_emptyList(PyObject*, PyObject*) { return PyList_New(0); }
-PyObject* host_emptyString(PyObject*, PyObject*) { return PyUnicode_FromString(""); }
+PyObject* host_sgl_getControlPointsInGroup(PyObject*, PyObject* args)
+{
+	// 0x00568890: a tuple of the group's control points.
+	std::vector<ScriptValue> items;
+	for (uint32_t id : g_host->game.controlPointsInGroup(static_cast<int>(intArg(args, 0)))) {
+		items.push_back(ScriptValue::object(id));
+	}
+	Ref list(result(ScriptValue::makeList(std::move(items))));
+	return list ? PyList_AsTuple(list.get()) : nullptr;
+}
+
+PyObject* host_pmgr_getSquadLeader(PyObject*, PyObject* args)
+{
+	return PyLong_FromLong(g_host->game.squadLeader(static_cast<int>(intArg(args, 0)), static_cast<int>(intArg(args, 1))));
+}
+
+PyObject* host_pmgr_getPlayersInSquad(PyObject*, PyObject* args)
+{
+	// 0x0056adb0: a tuple of player indices.
+	const std::vector<int> ids =
+		g_host->game.playersInSquad(static_cast<int>(intArg(args, 0)), static_cast<int>(intArg(args, 1)));
+	Ref tuple(PyTuple_New(static_cast<Py_ssize_t>(ids.size())));
+	for (size_t i = 0; i < ids.size(); ++i) {
+		PyTuple_SetItem(tuple.get(), static_cast<Py_ssize_t>(i), PyLong_FromLong(ids[i]));
+	}
+	return tuple.release();
+}
+
+PyObject* host_pmgr_enableScoreEvents(PyObject*, PyObject* args)
+{
+	g_host->game.setScoreEvents(intArg(args, 0) > 0);
+	return none();
+}
+
+PyObject* host_pers_plrGiveFieldUnlock(PyObject*, PyObject* args)
+{
+	if (!g_host->game.giveFieldUnlock(static_cast<int>(intArg(args, 0, -1)))) {
+		PyErr_SetString(PyExc_RuntimeError, "no such player");
+		return nullptr;
+	}
+	return none();
+}
+
+// pers_plrRequestStats / pers_plrRequestUnlocks (0x00566930, 0x00567370)
+// queue a request to the stats server and return whether it was sent;
+// there is none to ask (Stats/Stats.h keeps the standing on this
+// machine), so the request fails: 0, as with the server down.
+PyObject* host_pers_request(PyObject*, PyObject*) { return PyLong_FromLong(0); }
+
+PyObject* host_pers_getStatsKeyVal(PyObject*, PyObject* args)
+{
+	// 0x00566b90 with no persistence object downloaded (no request ever
+	// succeeds here).
+	(void)args;
+	PyErr_SetString(PyExc_RuntimeError, "there is no current persistence object downloaded");
+	return nullptr;
+}
+
+PyObject* host_gl_sendEndOfRoundData(PyObject*, PyObject* args)
+{
+	g_host->game.endOfRoundData(stringArg(args, 0));
+	return none();
+}
+
+PyObject* host_rcon_invoke(PyObject*, PyObject* args)
+{
+	const std::string output = g_host->game.rconInvoke(stringArg(args, 0));
+	return PyUnicode_FromStringAndSize(output.data(), static_cast<Py_ssize_t>(output.size()));
+}
+
+PyObject* host_rcon_feedback(PyObject*, PyObject* args)
+{
+	g_host->game.rconFeedback(static_cast<int>(intArg(args, 0, -1)), stringArg(args, 1));
+	return none();
+}
+
+PyObject* host_sgl_getOverlayDirectory(PyObject*, PyObject*)
+{
+	return PyUnicode_FromString(g_host->game.overlayDirectory().c_str());
+}
+
 PyObject* host_nothing(PyObject*, PyObject*) { return none(); }
 
 PyMethodDef g_methods[] = {
@@ -492,9 +570,9 @@ PyMethodDef g_methods[] = {
 	{"sgl_getIsAIGame", host_sgl_getIsAIGame, METH_VARARGS, nullptr},
 	{"sgl_getMapName", host_sgl_getMapName, METH_VARARGS, nullptr},
 	{"sgl_getModDirectory", host_sgl_getModDirectory, METH_VARARGS, nullptr},
-	{"sgl_getOverlayDirectory", host_emptyString, METH_VARARGS, nullptr},
+	{"sgl_getOverlayDirectory", host_sgl_getOverlayDirectory, METH_VARARGS, nullptr},
 	{"sgl_getWorldSize", host_sgl_getWorldSize, METH_VARARGS, nullptr},
-	{"sgl_getControlPointsInGroup", host_emptyList, METH_VARARGS, nullptr},
+	{"sgl_getControlPointsInGroup", host_sgl_getControlPointsInGroup, METH_VARARGS, nullptr},
 	{"sgl_endGame", host_sgl_endGame, METH_VARARGS, nullptr},
 	{"sgl_sendTextMessage", host_sgl_sendTextMessage, METH_VARARGS, nullptr},
 	{"sgl_sendGameLogicEvent", host_sgl_sendGameLogicEvent, METH_VARARGS, nullptr},
@@ -518,18 +596,18 @@ PyMethodDef g_methods[] = {
 	{"pmgr_getNumberOfPlayers", host_pmgr_getNumberOfPlayers, METH_VARARGS, nullptr},
 	{"pmgr_getScore", host_pmgr_getScore, METH_VARARGS, nullptr},
 	{"pmgr_setScore", host_pmgr_setScore, METH_VARARGS, nullptr},
-	{"pmgr_enableScoreEvents", host_nothing, METH_VARARGS, nullptr},
+	{"pmgr_enableScoreEvents", host_pmgr_enableScoreEvents, METH_VARARGS, nullptr},
 	{"pmgr_getCommander", host_pmgr_getCommander, METH_VARARGS, nullptr},
-	{"pmgr_getSquadLeader", host_minusOne, METH_VARARGS, nullptr},
-	{"pmgr_getPlayersInSquad", host_emptyList, METH_VARARGS, nullptr},
-	{"rcon_invoke", host_emptyString, METH_VARARGS, nullptr},
-	{"rcon_feedback", host_nothing, METH_VARARGS, nullptr},
-	{"pers_getStatsKeyVal", host_nothing, METH_VARARGS, nullptr},
-	{"pers_plrGiveFieldUnlock", host_nothing, METH_VARARGS, nullptr},
-	{"pers_plrRequestUnlocks", host_nothing, METH_VARARGS, nullptr},
-	{"pers_plrRequestStats", host_nothing, METH_VARARGS, nullptr},
+	{"pmgr_getSquadLeader", host_pmgr_getSquadLeader, METH_VARARGS, nullptr},
+	{"pmgr_getPlayersInSquad", host_pmgr_getPlayersInSquad, METH_VARARGS, nullptr},
+	{"rcon_invoke", host_rcon_invoke, METH_VARARGS, nullptr},
+	{"rcon_feedback", host_rcon_feedback, METH_VARARGS, nullptr},
+	{"pers_getStatsKeyVal", host_pers_getStatsKeyVal, METH_VARARGS, nullptr},
+	{"pers_plrGiveFieldUnlock", host_pers_plrGiveFieldUnlock, METH_VARARGS, nullptr},
+	{"pers_plrRequestUnlocks", host_pers_request, METH_VARARGS, nullptr},
+	{"pers_plrRequestStats", host_pers_request, METH_VARARGS, nullptr},
 	{"gs_abortCurrentConnectionAttempt", host_nothing, METH_VARARGS, nullptr},
-	{"gl_sendEndOfRoundData", host_nothing, METH_VARARGS, nullptr},
+	{"gl_sendEndOfRoundData", host_gl_sendEndOfRoundData, METH_VARARGS, nullptr},
 	{nullptr, nullptr, 0, nullptr},
 };
 

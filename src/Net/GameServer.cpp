@@ -130,6 +130,10 @@ void GameServer::handleConnect(BitReader& in, const UdpServerSocket::Address& fr
 		refuse(from, 0x24);
 		return;
 	}
+	if (m_options.banned && m_options.banned(addressText(from))) {
+		refuse(from, 0x16); // banned (admin.banPlayer's address bans)
+		return;
+	}
 	Client* client = find(from);
 	if (!client) {
 		if (static_cast<int>(m_clients.size()) >= m_options.maxClients) {

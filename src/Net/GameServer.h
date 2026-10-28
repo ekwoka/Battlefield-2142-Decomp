@@ -43,6 +43,8 @@ struct GameServerOptions {
 	std::string modDirectory = "mods/bf2142";
 	int maxClients = 64;
 	std::string challenge = "BF2142rcp"; // the CD-key challenge (event 1); a real server makes a random one
+	// Whether an address ("a.b.c.d:port") is banned: refused with 0x16.
+	std::function<bool(const std::string& address)> banned;
 };
 
 class GameServer {

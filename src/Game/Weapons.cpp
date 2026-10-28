@@ -6,6 +6,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cctype>
+#include <cstring>
+#include <functional>
 
 namespace dice::hfe::game {
 
@@ -452,6 +455,260 @@ void moveProjectile(Projectile& p, float seconds, float gravity)
 	if (p.timeLeft <= 0) {
 		p.alive = false;
 	}
+}
+
+} // namespace dice::hfe::game
+
+namespace dice::hfe::game {
+
+namespace {
+
+float settingOr(const world::ObjectTemplate& t, const char* name, float fallback)
+{
+	const auto it = t.settings().find(name);
+	return it == t.settings().end() ? fallback : std::strtof(it->second.c_str(), nullptr);
+}
+
+bool hasComponent(const world::ObjectTemplate& t, const char* name)
+{
+	for (const std::string& c : t.components()) {
+		if (c.size() == std::strlen(name)) {
+			bool same = true;
+			for (size_t i = 0; i < c.size() && same; ++i) {
+				same = std::tolower(static_cast<unsigned char>(c[i])) == std::tolower(static_cast<unsigned char>(name[i]));
+			}
+			if (same) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+// A held value's step (0x005de980's pattern): `add` while active, held at
+// `max` (decaying back to it when above); else decaying to 0.
+void accumulate(float& value, bool active, float add, float decay, float max)
+{
+	if (!active) {
+		value -= decay;
+		if (value < 0) {
+			value = 0;
+		}
+	} else if (max <= value) {
+		value -= decay;
+		if (value < max) {
+			value = max;
+		}
+	} else {
+		value += add;
+		if (max < value) {
+			value = max;
+		}
+	}
+}
+
+} // namespace
+
+SoldierDeviation SoldierDeviation::fromTemplate(const world::ObjectTemplate& t)
+{
+	SoldierDeviation d;
+	d.present = hasComponent(t, "SoldierDeviationComp");
+	d.fire = DeviationBuildUp::fromTemplate(t);
+	if (const auto it = t.settings().find("deviation.setTurnDev"); it != t.settings().end()) {
+		std::sscanf(it->second.c_str(), "%f %f %f %f", &d.turnMax, &d.turnPitch, &d.turnYaw, &d.turnDecay);
+	}
+	if (const auto it = t.settings().find("deviation.setSpeedDev"); it != t.settings().end()) {
+		std::sscanf(it->second.c_str(), "%f %f %f %f", &d.speedMax, &d.speedThrottle, &d.speedStrafe, &d.speedDecay);
+	}
+	if (const auto it = t.settings().find("deviation.setMiscDev"); it != t.settings().end()) {
+		std::sscanf(it->second.c_str(), "%f %f %f", &d.miscMax, &d.miscAdd, &d.miscDecay);
+	}
+	d.modStand = settingOr(t, "deviation.devModStand", 1);
+	d.modCrouch = settingOr(t, "deviation.devModCrouch", 1);
+	d.modLie = settingOr(t, "deviation.devModLie", 1);
+	d.modZoom = settingOr(t, "deviation.devModZoom", 1);
+	d.minModZoom = settingOr(t, "deviation.minDevModZoom", 1);
+	return d;
+}
+
+void SoldierDeviation::update(float throttle, float strafe, float lookX, float lookY, bool inMisc, bool firing,
+	int stance, bool zoomed)
+{
+	// The speed's part (+0x28): a step for moving, one for strafing.
+	float moving = 0;
+	if (std::fabs(throttle) > 0.01f) {
+		moving = speedThrottle;
+	}
+	if (std::fabs(strafe) > 0.01f) {
+		moving += speedStrafe;
+	}
+	accumulate(speed, moving != 0, moving, speedDecay, speedMax);
+	// The turn's part (+0x24): by how much the look turns, less the decay.
+	float turning = 0;
+	if (std::fabs(lookY) > 0.01f) {
+		turning = std::fabs(lookY) * turnPitch;
+	}
+	if (std::fabs(lookX) > 0.01f) {
+		turning += std::fabs(lookX) * turnYaw;
+	}
+	accumulate(turn, turning != 0, turning - turnDecay, turnDecay, turnMax);
+	// The misc part (+0x2c).
+	accumulate(misc, inMisc && miscAdd != 0, miscAdd - miscDecay, miscDecay, miscMax);
+	fire.update(firing);
+	const float stanceMod = stance == 1 ? modCrouch : stance == 2 ? modLie : modStand;
+	const float zoom = zoomed ? modZoom : 1;
+	const float minZoom = zoomed ? minModZoom : 1;
+	total = (fire.minDev * minZoom + misc + speed + turn + fire.value) * zoom * stanceMod;
+}
+
+GunSway GunSway::fromTemplate(const world::ObjectTemplate& t)
+{
+	GunSway s;
+	s.present = hasComponent(t, "DefaultGunSwayComp");
+	s.useZoom = settingOr(t, "sway.gunSwayUseZoom", 0) != 0;
+	s.zoomModifier = settingOr(t, "sway.gunSwayZoomModifier", 1);
+	s.recoverTime = settingOr(t, "sway.stabilityRecoverTime", 0);
+	s.stabilityTime = settingOr(t, "sway.stabilityTime", 0);
+	s.duration = settingOr(t, "sway.stabilityDuration", 0);
+	s.durationRecoverTime = settingOr(t, "sway.stabilityDurationRecoverTime", 0);
+	for (const char* axis : {"Pitch", "Lr"}) {
+		Axis& a = std::string(axis) == "Pitch" ? s.pitch : s.lr;
+		const std::string p = std::string("sway.gunSway") + axis;
+		a.steps = settingOr(t, (p + "Steps").c_str(), 0);
+		a.factor = settingOr(t, (p + "Factor").c_str(), 0);
+		a.max = settingOr(t, (p + "Max").c_str(), 0);
+		a.updateRate = settingOr(t, (p + "UpdateRate").c_str(), 0);
+		a.dirModifier = settingOr(t, (p + "DirModifier").c_str(), 0);
+		a.dirThreshold = settingOr(t, (p + "DirThreshold").c_str(), 0);
+		a.randomMin = settingOr(t, (p + "RandomMin").c_str(), 0);
+		a.randomMax = settingOr(t, (p + "RandomMax").c_str(), 0);
+		a.smoothFactor = settingOr(t, (p + "SmoothFactor").c_str(), 0);
+		a.smoothMax = settingOr(t, (p + "SmoothMax").c_str(), 0);
+		a.smoothThreshold = settingOr(t, (p + "SmoothThreshold").c_str(), 0);
+	}
+	return s;
+}
+
+namespace {
+
+// One axis's step (0x005e09a0 / 0x005e0ba0). `peakFlag` is the flag the
+// turn at the swing's peak sets: the pitch's own, and (as BF2142.exe has
+// it, 0x005e0ba0 writing +0x58) the pitch's for the left-right axis too.
+void swayAxis(GunSway::Axis& a, bool& peakFlag, float seconds, float limit, float stability, float zoomModifier,
+	float& input, const std::function<float()>& random01)
+{
+	if (a.max <= 0) {
+		a.swing = 0;
+		return;
+	}
+	const float step = a.max / a.steps - a.smooth;
+	if (a.updateRate <= a.timer) {
+		a.timer = 0;
+		const float amount = stability * a.direction * a.factor * zoomModifier * step * seconds;
+		if (std::fabs(input) < std::fabs(amount)) {
+			input += amount;
+		}
+		a.swing += step;
+		a.total += step;
+	}
+	if (a.max + a.extra <= a.swing && a.total < limit - step) {
+		a.swing = 0;
+		a.direction = -a.direction;
+		if (!a.keepGoing) {
+			peakFlag = random01() * a.dirModifier < a.dirThreshold; // 0x0042b2c0(0, DirModifier)
+		}
+	}
+	if (limit < a.total) {
+		a.swing = 0;
+		a.total = 0;
+		if (!a.keepGoing) {
+			a.direction *= a.dirThreshold <= random01() * a.dirModifier ? 1.0f : -1.0f;
+		} else {
+			a.direction = -a.direction;
+			a.smooth = a.smoothMax;
+		}
+		a.extra = (a.randomMax - a.randomMin) * random01() + a.randomMin;
+	}
+}
+
+// The smoothing near a swing's ends (0x005dfc20).
+void swaySmooth(GunSway::Axis& a, float limit)
+{
+	const float f = a.smoothFactor, x = a.total, t = a.smoothThreshold;
+	const float peak = a.max + a.extra;
+	if (f != 0 && (x <= t || (peak - t < x && x < peak + t) || limit - t <= x)) {
+		if (x < t) {
+			a.smooth -= f;
+			if (a.smooth < f) {
+				a.smooth = f;
+			}
+			if (!a.keepGoing) {
+				a.smooth = 0;
+			}
+		}
+		if (peak - t < x && x < peak) {
+			a.smooth = std::min(a.smooth + f, a.smoothMax);
+			a.keepGoing = false;
+		}
+		if (peak < x && x < peak + t) {
+			a.smooth -= f;
+			if (a.smooth < f) {
+				a.smooth = f;
+			}
+		}
+		if (x <= limit - t || limit <= x) {
+			return;
+		}
+		a.smooth = std::min(a.smooth + f, a.smoothMax);
+		if (a.keepGoing) {
+			return;
+		}
+	}
+	a.smooth = 0;
+}
+
+} // namespace
+
+void GunSway::update(float seconds, bool zoomed, bool sprintHeld, bool hasStabilizer, float& lookX, float& lookY,
+	const std::function<float()>& random01)
+{
+	if (!present) {
+		return;
+	}
+	// The stability (0x005e0750).
+	if (!steadying) {
+		stability = recoverTime <= 0 ? 1.0f : std::min(1.0f, stability + seconds / recoverTime);
+		used = durationRecoverTime > 0 ? std::max(0.0f, used - seconds / durationRecoverTime) : 0.0f;
+	} else {
+		stability = stabilityTime > 0 ? std::max(0.0f, stability - seconds / stabilityTime) : 0.0f;
+		used = duration > 0 ? std::min(duration, used + seconds / duration) : duration;
+	}
+	if (useZoom && !zoomed) {
+		return;
+	}
+	// Steadying (0x005e0da0): the sprint key, with the scope stabilizer.
+	if (hasStabilizer) {
+		if (sprintHeld && !latched && used == 0) {
+			steadying = latched = true;
+		}
+		if (!sprintHeld) {
+			steadying = false;
+			if (used == 0) {
+				latched = false;
+			}
+		}
+		if (steadying && duration <= used) {
+			steadying = false;
+		}
+	}
+	pitch.timer += seconds;
+	const float pitchLimit = 2 * (pitch.extra + pitch.max);
+	swayAxis(pitch, pitch.keepGoing, seconds, pitchLimit, stability, zoomModifier, lookY, random01);
+	lr.timer += seconds;
+	const float lrLimit = 2 * (lr.max + lr.extra);
+	swayAxis(lr, pitch.keepGoing, seconds, lrLimit, stability, zoomModifier, lookX, random01);
+	swaySmooth(pitch, pitchLimit);
+	swaySmooth(lr, lrLimit);
 }
 
 } // namespace dice::hfe::game

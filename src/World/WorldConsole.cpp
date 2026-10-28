@@ -7,6 +7,8 @@
 
 #include <cmath>
 #include <cstdio>
+#include <string>
+#include <utility>
 
 namespace dice::hfe::world {
 
@@ -106,6 +108,73 @@ void registerWorldConsoleMethods(Console& console, ObjectTemplateManager& templa
 		return {};
 	};
 	console.registerMethod(fireDev);
+
+	// The soldier deviation's other builds (SoldierDeviationComp, template
+	// 0x005de3c0 / 0x005de3e0 / 0x005de400): setTurnDev and setSpeedDev of
+	// four numbers (0x004e846a, 0x004e8673), setMiscDev of three
+	// (0x004e8828), kept as the numbers in order.
+	for (const auto& [property, count] : {std::pair<const char*, int> {"deviation.setTurnDev", 4},
+			 {"deviation.setSpeedDev", 4}, {"deviation.setMiscDev", 3}}) {
+		ConsoleMethod build;
+		build.name = std::string("ObjectTemplate.") + property;
+		build.kind = ConsoleMethodKind::Method;
+		build.access = access;
+		build.minArgs = count;
+		build.maxArgs = count;
+		build.isActive = activeTemplate;
+		build.invoke = [&templates, key = std::string(property)](const std::vector<std::string>& args) -> std::string {
+			std::string value;
+			for (const std::string& arg : args) {
+				value += (value.empty() ? "" : " ") + arg;
+			}
+			templates.active()->settings()[key] = value;
+			return {};
+		};
+		console.registerMethod(std::move(build));
+	}
+
+	// The unlocks' Ability lists (template component 0xc4b3):
+	// ability.setMaterialDamageMod <material> <modifier> (0x0054eadc ->
+	// slot 0x94) and ability.addExtraAmmoItem <item> <mags> <rounds> <flag>
+	// (0x0054ebed), kept in order as "<name>.list" = "args;...".
+	for (const auto& [property, count] : {std::pair<const char*, int> {"ability.setMaterialDamageMod", 2},
+			 {"ability.addExtraAmmoItem", 4}}) {
+		ConsoleMethod list;
+		list.name = std::string("ObjectTemplate.") + property;
+		list.kind = ConsoleMethodKind::Method;
+		list.access = access;
+		list.minArgs = count;
+		list.maxArgs = count;
+		list.isActive = activeTemplate;
+		list.invoke = [&templates, key = std::string(property) + ".list"](const std::vector<std::string>& args) -> std::string {
+			std::string& kept = templates.active()->settings()[key];
+			for (size_t i = 0; i < args.size(); ++i) {
+				kept += (i ? " " : "") + firstWord(args[i]);
+			}
+			kept += ";";
+			return {};
+		};
+		console.registerMethod(std::move(list));
+	}
+
+	// supplyGroupNeeded <team> <group> [optional] (0x00503dec / 0x00503f73:
+	// two or three arguments, optional false by default; the ControlPoint
+	// template's vt+0xc0 adds the pair to the team's list). Kept in order
+	// as "supplyGroupNeeded.list" = "team group optional;...".
+	ConsoleMethod supplyGroup;
+	supplyGroup.name = "ObjectTemplate.supplyGroupNeeded";
+	supplyGroup.kind = ConsoleMethodKind::Method;
+	supplyGroup.access = access;
+	supplyGroup.minArgs = 2;
+	supplyGroup.maxArgs = 3;
+	supplyGroup.isActive = activeTemplate;
+	supplyGroup.invoke = [&templates](const std::vector<std::string>& args) -> std::string {
+		const bool optional = args.size() > 2 && parseConsoleValue<bool>(args[2]);
+		templates.active()->settings()["supplyGroupNeeded.list"] += std::to_string(parseConsoleValue<int>(args[0]))
+			+ " " + std::to_string(parseConsoleValue<int>(args[1])) + (optional ? " 1;" : " 0;");
+		return {};
+	};
+	console.registerMethod(supplyGroup);
 
 	// activeSafe <type> <name>: the type is only checked in debug builds.
 	bindMethod(console, "ObjectTemplate.activeSafe", access, [&templates](std::string, std::string name) {

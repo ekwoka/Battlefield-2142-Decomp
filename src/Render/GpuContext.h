@@ -12,6 +12,7 @@
 #include <SDL3/SDL.h>
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -118,6 +119,11 @@ struct LightingUniforms {
 	// x: the cosine it is full inside; y: 1 when it lights lightmapped
 	// surfaces too (affectLightmappedObjects).
 	float lightExtra[kMaxPointLights][4] {};
+	// mesh.frag's hemi map (RaShaderBM/SM): HemiMapConstantColor (rgb; a
+	// Titan interior map's colour under the object, else 1) and the
+	// object's HeightOverTerrain (w), per object (0x10041100's block
+	// +0x1ec / +0x1e4).
+	float hemiObject[4] {1, 1, 1, 0};
 };
 
 // The dynamic shadows and the hemi map (shadow.glsl's Shadows block).
@@ -189,6 +195,11 @@ public:
 			: mode == UiStencil::Clear   ? m_uiClearPipeline
 										 : m_uiPipeline;
 	}
+	// The HUD with the blend factors of a HudBuilder.addNodeBlendEffect
+	// (Direct3D 9 D3DBLEND values, 1 ZERO .. 11 SRCALPHASAT, for colour and
+	// alpha alike; 0 0 is uiPipeline()'s SRCALPHA / INVSRCALPHA), made the
+	// first time a pair is asked for. Null when the pair can't be built.
+	SDL_GPUGraphicsPipeline* uiBlendPipeline(int source, int destination);
 	SDL_GPUGraphicsPipeline* particlePipeline(bool additive) const
 	{
 		return additive ? m_additiveParticlePipeline : m_particlePipeline;
@@ -270,6 +281,7 @@ private:
 	SDL_GPUGraphicsPipeline* m_uiSubmitPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_uiTestPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_uiClearPipeline = nullptr;
+	std::map<int, SDL_GPUGraphicsPipeline*> m_uiBlendPipelines; // by source * 16 + destination
 	SDL_GPUGraphicsPipeline* m_shadowCasterPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_camoPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_postPipeline = nullptr;

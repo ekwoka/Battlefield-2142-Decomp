@@ -65,6 +65,11 @@ struct HudQuad {
 	// D3DBLEND_DESTALPHA, D3DBLEND_ONE). 0 0: the HUD's usual
 	// source-alpha blend.
 	int blend[2] = {0, 0};
+	// setPictureNodeCenterPoint x y: the rotation's pivot (the picture
+	// node's render, 0x007c67b0, turns about the stored point instead of
+	// the rectangle's centre), in the 800 x 600 screen; unset, the centre.
+	bool pivotSet = false;
+	float pivot[2] = {0, 0};
 };
 
 class HudManager {
@@ -220,7 +225,49 @@ public:
 	void paintAllKits();
 	void paintAllVehicles();
 	int mapZoom() const { return m_mapZoomIndex; }
-	void cycleMapZoom() { m_mapZoomIndex = m_mapZoomIndex + 1 < 3 ? m_mapZoomIndex + 1 : 0; }
+	// In the commander screen (CommanderShow) the step goes to its own
+	// index (0x0077e850 keeps one per mode, +0x744 for the commander's).
+	void cycleMapZoom()
+	{
+		int& index = number("CommanderShow") != 0 ? m_commanderZoomIndex : m_mapZoomIndex;
+		index = index + 1 < 3 ? index + 1 : 0;
+	}
+
+	// The commander screen's map: the node at setCommanderPos/Size (the
+	// 600 x 600 square between the screen's black side borders) and its
+	// zoom index, 2 being the overhead view (the asset zoom buttons set
+	// it, 0x007d7f90 -> the map's slot 0xd8 (2, 1)).
+	void setCommanderMapZoom(int index) { m_commanderZoomIndex = index < 0 ? 0 : index > 2 ? 2 : index; }
+	int commanderMapZoom() const { return m_commanderZoomIndex; }
+	// The overhead view (the team's OverheadCamera over the commander's
+	// point, which the player's view takes, 0x00779680): while it is on
+	// the map's texture fades out (MenuMapAlpha, +0x7b8 to 0, eased at
+	// +0x7b0) to show the view through the node, and the map is zoomed so
+	// the node's height spans the view's ground width (0x0077c4b0: 2 tan
+	// (fov / 2) times the camera's height), centred on the camera.
+	void setOverhead(bool on, float x, float z, float groundWidth)
+	{
+		m_overhead = on;
+		m_overheadPoint[0] = x;
+		m_overheadPoint[1] = z;
+		m_overheadWidth = groundWidth;
+	}
+	bool overhead() const { return m_overhead; }
+	float overheadX() const { return m_overheadPoint[0]; }
+	float overheadZ() const { return m_overheadPoint[1]; }
+	// The node's rectangle (800 x 600 screen) as last drawn with the
+	// overhead view on; false when it is off or the map isn't shown.
+	bool overheadRect(float rect[4]) const
+	{
+		if (!m_overhead || !m_mapView.drawn) {
+			return false;
+		}
+		rect[0] = m_mapView.x0;
+		rect[1] = m_mapView.y0;
+		rect[2] = m_mapView.x1;
+		rect[3] = m_mapView.y1;
+		return true;
+	}
 
 	// Object markers (Bf2ObjectMarkerNode, its update 0x007e6880): a
 	// visible marker node asks the game for the targets of its lock-on
@@ -294,6 +341,11 @@ private:
 	void drawMap(const Node& node, float alpha, float seconds, std::vector<HudQuad>& out);
 	std::string m_mapTexture;
 	int m_mapZoomIndex = 1;
+	int m_commanderZoomIndex = 0;
+	bool m_overhead = false;
+	float m_overheadPoint[2] = {0, 0};
+	float m_overheadWidth = 0;
+	float m_mapAlpha = 1; // the map texture's alpha as eased (+0x7b0)
 	bool m_mapInVehicle = false, m_mapInsideTitan = false;
 	float m_mapLevel = 0;       // the zoom level as eased (0x714)
 	bool m_mapLevelSet = false;

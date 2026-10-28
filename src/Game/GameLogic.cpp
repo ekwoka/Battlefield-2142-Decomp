@@ -3,6 +3,7 @@
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
 
+#include <cstdio>
 #include <algorithm>
 #include <cmath>
 
@@ -150,6 +151,11 @@ void registerGameLogicConsoleMethods(Console& console, GameLogic& logic)
 	const uint32_t access = ConsoleAccess::Anyone;
 	GameLogic* l = &logic;
 	bindMethod(console, "GameLogic.setTeamName", access, [l](int team, std::string name) { l->team(team).name = name; });
+	bindMethod(console, "GameLogic.setBeforeSpawnCamera", access, [l](std::string position, std::string rotation) {
+		GameLogic::BeforeSpawnCamera& c = l->beforeSpawnCamera;
+		c.set = std::sscanf(position.c_str(), "%f/%f/%f", &c.position[0], &c.position[1], &c.position[2]) == 3;
+		std::sscanf(rotation.c_str(), "%f/%f/%f", &c.rotation[0], &c.rotation[1], &c.rotation[2]);
+	});
 	bindMethod(console, "GameLogic.setTeamLanguage", access,
 		[l](int team, std::string language) { l->team(team).language = language; });
 	bindMethod(console, "GameLogic.setTeamFlag", access, [l](int team, std::string flag) { l->team(team).flag = flag; });

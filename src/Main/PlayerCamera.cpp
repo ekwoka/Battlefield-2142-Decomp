@@ -140,9 +140,100 @@ void PlayerCamera::resetSoldier()
 	m_springOffset = {};
 }
 
+struct PlayerCamera::SeatView {
+	uint32_t vehicle = 0;
+	const world::ObjectTemplate* seat = nullptr;
+	const world::ObjectTemplate* camera = nullptr;
+	render::Mat4 world;
+};
+
+void PlayerCamera::stepShakes(float seconds)
+{
+	m_clock += seconds;
+	SeatView seat;
+	game::GameWorld::PlayerInfo me;
+	if (!m_round.playerInfo(m_round.localPlayer(), me) || !me.alive || !me.vehicle || !findSeatCamera(seat)) {
+		m_speedShake = m_hitShake = m_shakeTime = m_hitLeft = 0;
+		m_lastVehicleHp = -1;
+		m_shakeVehicle = 0;
+		return;
+	}
+	const world::ObjectTemplate& camera = *seat.camera;
+	// The speed shake.
+	const float start = number(camera, "cameraShakeStartSpeed", 0), most = number(camera, "cameraShakeMaxSpeed", 0);
+	float speed = 0;
+	for (const auto& v : m_round.vehicleList()) {
+		if (v.object == me.vehicle) {
+			speed = std::sqrt(v.velocity.x * v.velocity.x + v.velocity.y * v.velocity.y + v.velocity.z * v.velocity.z);
+		}
+	}
+	if (start > 0 && speed > start) {
+		m_shakeTime += seconds;
+	}
+	m_speedShake = anim::cameraSpeedShake(m_shakeTime, speed, start, most);
+	// The hit shake: a hit's share of the vehicle's hit points.
+	const float hp = m_round.hitPoints(me.vehicle);
+	const world::Object* vehicle = m_round.objects().find(me.vehicle);
+	const float maxHp = vehicle && vehicle->objectTemplate() ? number(*vehicle->objectTemplate(), "armor.maxHitPoints", 0) : 0;
+	if (m_shakeVehicle == me.vehicle && m_lastVehicleHp >= 0 && hp < m_lastVehicleHp && maxHp > 0) {
+		m_hitLeft = anim::kCameraHitShakeTime;
+		m_hitStrength = (m_lastVehicleHp - hp) / maxHp;
+	}
+	m_shakeVehicle = me.vehicle;
+	m_lastVehicleHp = hp;
+	m_hitShake = 0;
+	if (m_hitLeft > 0) {
+		m_hitLeft = std::max(0.0f, m_hitLeft - seconds);
+		m_hitShake = anim::cameraHitShake(m_hitLeft, m_hitStrength);
+	}
+}
+
+float PlayerCamera::seatFov(bool inside) const
+{
+	SeatView seat;
+	if (!findSeatCamera(seat)) {
+		return 0;
+	}
+	return number(*seat.camera, inside ? "insideFOV" : "worldFOV", 1.1f);
+}
+
+bool PlayerCamera::insideSun(InsideSun& sun) const
+{
+	SeatView seat;
+	if (!firstPerson || !m_alive || !findSeatCamera(seat)) {
+		return false;
+	}
+	const world::ObjectTemplate& c = *seat.camera;
+	if (number(c, "allowInsideStaticSun", 0) == 0) {
+		return false;
+	}
+	sun.dynamicLights = number(c, "allowInsideDynamicLights", 1) != 0;
+	const auto vec = [&c](const char* name, std::array<float, 3> fallback) {
+		const auto it = c.settings().find(name);
+		if (it != c.settings().end()) {
+			std::sscanf(it->second.c_str(), "%f/%f/%f", &fallback[0], &fallback[1], &fallback[2]);
+		}
+		return fallback;
+	};
+	sun.direction = vec("insideStaticSunDirection", sun.direction);
+	sun.color = vec("insideStaticSunColor", sun.color);
+	sun.ambient = vec("insideStaticSunAmbientColor", sun.ambient);
+	const world::Object* vehicle = m_round.objects().find(seat.vehicle);
+	const float maxHp = vehicle && vehicle->objectTemplate() ? number(*vehicle->objectTemplate(), "armor.maxHitPoints", 0) : 0;
+	const float share = maxHp > 0 ? m_round.hitPoints(seat.vehicle) / maxHp : 1;
+	if (share < number(c, "insideDamageThreshold", 0.15f)) {
+		const float frequency = number(c, "insideDamageFrequency", 3);
+		if (std::fmod(m_clock * frequency, 1.0f) < 0.5f) {
+			sun.color = vec("insideStaticSunDamageColor", {1, 0, 0});
+		}
+	}
+	return true;
+}
+
 void PlayerCamera::tick(float seconds)
 {
 	m_effects.update(seconds);
+	stepShakes(seconds);
 	++m_tick; // the game's tick counter (0x00666090)
 	m_recoilNow = 0;
 	const bool altPressed = m_altFire && !m_altFireWas;
@@ -448,12 +539,6 @@ bool PlayerCamera::view(View& view, float aspect) const
 // nested seats left out), id 0, or 1 while ducking (0x005c7cf0 selects
 // camera 1 when the seat has more than one); placed by the template tree
 // (the guns' bundles turned as the game turns them), its insideFOV.
-struct PlayerCamera::SeatView {
-	uint32_t vehicle = 0;
-	const world::ObjectTemplate* seat = nullptr;
-	const world::ObjectTemplate* camera = nullptr;
-	render::Mat4 world;
-};
 
 bool PlayerCamera::findSeatCamera(SeatView& out) const
 {
@@ -545,6 +630,7 @@ bool PlayerCamera::seatCamera(View& view) const
 	view.position = {seat.world.at(3, 0), seat.world.at(3, 1), seat.world.at(3, 2)};
 	anglesOf(seat.world, view.yaw, view.pitch);
 	view.fovY = number(*seat.camera, "insideFOV", 1.1f);
+	view.roll = shakeDegrees() * kDegrees;
 	return true;
 }
 

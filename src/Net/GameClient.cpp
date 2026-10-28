@@ -234,6 +234,12 @@ void GameClient::suicide()
 	sendEvent(makePostRemote(kMsgNetworkCategory, kNeSuicide));
 }
 
+void GameClient::remoteCommand(const std::string& command)
+{
+	// The line and its terminating NUL in one message (a payload holds 52 bytes).
+	sendEvent(makePostRemote(kMsgNetworkCategory, kNeRemoteConsoleCommand, command.substr(0, 51) + std::string(1, '\0')));
+}
+
 void GameClient::say(const std::string& text, uint32_t channel)
 {
 	ChatMessage message;

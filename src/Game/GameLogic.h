@@ -78,6 +78,28 @@ public:
 	// healScoreLimit and the like, kept for the scripts.
 	std::map<std::string, ScriptValue> limits;
 
+	// The level's camera before the player's first spawn
+	// (GameLogic.setBeforeSpawnCamera <position> <rotation>, 0x004278ef:
+	// the levels' Init.con set one per map), degrees yaw/pitch/roll.
+	struct BeforeSpawnCamera {
+		bool set = false;
+		float position[3] = {};
+		float rotation[3] = {};
+	};
+	BeforeSpawnCamera beforeSpawnCamera;
+
+	// The scripts' end-of-round text (gl_sendEndOfRoundData, 0x00568930:
+	// bf2/stats/endofround.py's "\\key\\value..." list), which the server
+	// sends its clients as data block 8 with the delay; the serial counts
+	// the times it was set (a hosted game sends each once).
+	void setEndOfRoundData(const std::string& text)
+	{
+		m_endOfRoundData = text;
+		++m_endOfRoundSerial;
+	}
+	const std::string& endOfRoundData() const { return m_endOfRoundData; }
+	int endOfRoundSerial() const { return m_endOfRoundSerial; }
+
 private:
 	void checkLimits(int team, float before, float after);
 
@@ -87,6 +109,8 @@ private:
 	int m_winner = 0;
 	int m_victoryType = 0;
 	bool m_timeLimitRaised = false;
+	std::string m_endOfRoundData;
+	int m_endOfRoundSerial = 0;
 };
 
 // gameLogic.* console methods.

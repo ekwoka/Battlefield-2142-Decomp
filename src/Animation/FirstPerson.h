@@ -167,4 +167,14 @@ private:
 Matrix firstPersonPlacement(const Skeleton& skeleton, const std::vector<Matrix>& pose, int cameraNode,
 	const Position& eye, float yaw, float pitch, const CameraSpring::V& springOffset);
 
+// A seat camera's shakes, degrees of roll (the Camera object's 0x00610240):
+// the speed shake after `time` above the template's cameraShakeStartSpeed
+// (sin(fmod(time x 40, 2 pi)) x 0.5 x the share of the way to
+// cameraShakeMaxSpeed, all of it when max <= start), and the hit shake
+// `left` seconds before its 0.6 s are up ((1 - u) x sin(u x 7 x 2 pi) x
+// strength x 2, u the share gone).
+float cameraSpeedShake(float time, float speed, float startSpeed, float maxSpeed);
+float cameraHitShake(float left, float strength);
+constexpr float kCameraHitShakeTime = 0.6f; // *0x00a73a14
+
 } // namespace dice::hfe::anim

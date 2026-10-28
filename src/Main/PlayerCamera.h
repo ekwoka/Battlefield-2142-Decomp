@@ -33,7 +33,12 @@ public:
 	// First person (CVMInside, the game's only view on foot and its default
 	// in vehicles) or the chase view behind (c_PIToggleCameraMode).
 	bool firstPerson = true;
-	void toggleMode() { firstPerson = !firstPerson; }
+	// c_PIToggleCameraMode. The server's sv.allowExternalViews (data block
+	// 0's flag, +0x148 of its settings) keeps the player in first person:
+	// without it the chase view isn't offered.
+	void toggleMode() { firstPerson = !firstPerson || !allowExternalViews; }
+	bool allowExternalViews = true;
+	bool allowNoseCam = true; // sv.allowNoseCam (the seats' CVMNose views)
 
 	// The alternate fire as held now (its press cycles the zoom).
 	void setAltFire(bool held) { m_altFire = held; }
@@ -70,8 +75,40 @@ public:
 		std::array<float, 3> position {};
 		float yaw = 0, pitch = 0; // radians: yaw 0 along +z, pitch up positive
 		float fovY = 1.0f;        // radians, for the window's aspect (RendDX9 0x10066ac0)
+		float roll = 0;           // radians about the view axis (a seat camera's shakes)
 	};
 	bool view(View& view, float aspect) const;
+	// A seat camera's shakes (the Camera object's 0x00610240, rolled about
+	// the view axis by 0x00610620 through 0x005b1a70, degrees): the speed
+	// shake past cameraShakeStartSpeed (template +0x3d0) up to
+	// cameraShakeMaxSpeed (+0x3d4): sin(fmod(t x 40, 2 pi)) x 0.5 x the
+	// share of the way between them (*0x00a739f8 = 40, *0x00a739fc = 0.5,
+	// t the time spent above the start speed); and the hit shake
+	// (0x00610450 then 0x00610240's last part): for 0.6 s (*0x00a73a14)
+	// (1 - u) x sin(u x 7 x 2 pi) x the hit x 2 (*0x00a73a0c = 7,
+	// *0x00a73a10 = 2), u the share of the 0.6 s gone. The hit's measure
+	// (0x00610450's argument) is not traced to its caller: the rewrite
+	// gives the share of the vehicle's hit points one hit took.
+	float shakeDegrees() const { return m_speedShake + m_hitShake; }
+	// The field of view of the seat's camera for the view now (0x00610150:
+	// insideFOV in the inside mode, worldFOV otherwise; both 1.1 by
+	// default, 0x00610fd0), radians; 0 when not in a seat with a camera.
+	float seatFov(bool inside) const;
+	// The seat camera's static interior sun (0x006104d0 .. 0x00610580:
+	// allowInsideDynamicLights / allowInsideStaticSun in the inside mode,
+	// insideStaticSunDirection (-0.25, -0.5, 0.75), insideStaticSunColor
+	// (1, 1, 1), insideStaticSunAmbientColor (0.7, 0.7, 0.7), and below
+	// insideDamageThreshold (0.15) of its hit points the colour flickers
+	// to insideStaticSunDamageColor (1, 0, 0) insideDamageFrequency (3)
+	// times a second; the flicker's square wave is the rewrite's). For the
+	// renderer's interior lighting.
+	struct InsideSun {
+		bool dynamicLights = true;
+		std::array<float, 3> direction {-0.25f, -0.5f, 0.75f};
+		std::array<float, 3> color {1, 1, 1};
+		std::array<float, 3> ambient {0.7f, 0.7f, 0.7f};
+	};
+	bool insideSun(InsideSun& sun) const;
 
 	// What the first-person pass draws.
 	struct Model {
@@ -194,6 +231,12 @@ private:
 	anim::CameraSpring::V m_springOffset;
 	float m_lastYaw = 0, m_lastPitch = 0;
 	bool m_alive = false;
+	// The seat camera's shakes (shakeDegrees) and their clocks.
+	void stepShakes(float seconds);
+	float m_speedShake = 0, m_hitShake = 0, m_shakeTime = 0;
+	float m_hitLeft = 0, m_hitStrength = 0, m_lastVehicleHp = -1;
+	uint32_t m_shakeVehicle = 0;
+	float m_clock = 0;
 };
 
 } // namespace dice::hfe

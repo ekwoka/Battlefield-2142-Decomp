@@ -55,6 +55,15 @@ public:
 	void setPlayerScore(int index, const std::string& name, const ScriptValue& value) override;
 	int commander(int team) override { return m_world.commander(team); }
 	void setCommanderEnabled(bool enabled) override { m_world.setCommanderEnabled(enabled); }
+	std::vector<uint32_t> controlPointsInGroup(int group) override { return m_world.controlPointsInGroup(group); }
+	int squadLeader(int team, int squad) override;
+	std::vector<int> playersInSquad(int team, int squad) override;
+	void setScoreEvents(bool enabled) override { m_scoreEvents = enabled; }
+	bool giveFieldUnlock(int player) override;
+	void endOfRoundData(const std::string& text) override;
+
+	// Where PlayerScore goes (the scripts' handlers; main sets it).
+	ScriptEventSink events;
 
 	// Messages and game events the scripts sent, newest last (for the HUD).
 	std::vector<std::string> messages;
@@ -70,6 +79,7 @@ private:
 	std::string m_modDirectory;
 	std::map<int, std::map<std::string, ScriptValue>> m_playerParams; // set by scripts, by player
 	std::map<int, std::map<std::string, ScriptValue>> m_scores;
+	bool m_scoreEvents = false;
 };
 
 } // namespace dice::hfe::game

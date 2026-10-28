@@ -248,4 +248,22 @@ Matrix firstPersonPlacement(const Skeleton& skeleton, const std::vector<Matrix>&
 	return multiply(inverse, view);
 }
 
+float cameraSpeedShake(float time, float speed, float startSpeed, float maxSpeed)
+{
+	if (startSpeed <= 0 || speed <= startSpeed) {
+		return 0;
+	}
+	const float share = maxSpeed - startSpeed <= 0 ? 1.0f : std::clamp((speed - startSpeed) / (maxSpeed - startSpeed), 0.0f, 1.0f);
+	return std::sin(std::fmod(time * 40, 6.2831855f)) * share * 0.5f; // *0x00a739f8, *0x00a739fc
+}
+
+float cameraHitShake(float left, float strength)
+{
+	if (left <= 0) {
+		return 0;
+	}
+	const float u = 1 - left / kCameraHitShakeTime;
+	return (1 - u) * std::sin(u * 7 * 6.2831855f) * strength * 2; // *0x00a73a0c, *0x00a73a10
+}
+
 } // namespace dice::hfe::anim

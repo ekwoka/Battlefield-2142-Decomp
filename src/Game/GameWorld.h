@@ -162,6 +162,21 @@ struct ControlPoint {
 	float takeOverChangePerSecond = 0;
 	int playerId = -1;           // who took it last
 	bool allowCapture[3] = {true, true, true}; // allowCaptureByTeam
+	// Assault Lines' supply lines (the ControlPoint template, saved by
+	// 0x005bc260): the point's group (supplyGroupId, -1 none, +0x2ec), and
+	// per team the groups it needs (supplyGroupNeeded <team> <group>
+	// <optional>, 0x00503f73 -> template vt+0xc0; vectors of (group,
+	// optional) at +0x2f4/+0x304), the supply value it needs
+	// (supplyValueNeededTeam<n>, +0x310) and gives (supplyValueTeam<n>,
+	// +0x318). cp_getParam (0x0056a010) hands them to gpm_sl.py.
+	struct SupplyGroup {
+		int group;
+		bool optional;
+	};
+	int supplyGroupId = -1;
+	std::vector<SupplyGroup> supplyGroupsNeeded[3];
+	int supplyValueNeeded[3] = {};
+	int supplyValue[3] = {};
 };
 
 class GameWorld {
@@ -314,6 +329,9 @@ public:
 		bool squadLeader = false;
 		bool commander = false;
 		bool cloaked = false; // active camouflage on
+		// The soldier's own EMP level (its armour's, 0x00652a00 through the
+		// player's 0x005921b0 on foot), 0 none.
+		int empLevel = 0;
 		// Spawned on the squad leader where only a prone soldier fits (the
 		// spawn point's +0x18a): the soldier starts lying down.
 		bool spawnedProne = false;
@@ -403,6 +421,19 @@ public:
 		bool capturable = true;
 	};
 	std::vector<ControlPointInfo> controlPointList() const;
+	// The control points of a supply group (host.sgl_getControlPointsInGroup,
+	// 0x00568890: the game logic's vt+0x18c): their objects.
+	std::vector<uint32_t> controlPointsInGroup(int group) const;
+	// Field unlocks the scripts gave (pers_plrGiveFieldUnlock, a squad's
+	// bar filled; the game logic's slot 0x68): the player's count not yet
+	// spent (the unlock menu's spendFieldUnlock).
+	void giveFieldUnlock(int player) { ++m_fieldUnlocks[player]; }
+	int fieldUnlocks(int player) const
+	{
+		const auto it = m_fieldUnlocks.find(player);
+		return it == m_fieldUnlocks.end() ? 0 : it->second;
+	}
+	static void readSupplyLines(const world::ObjectTemplate& t, ControlPoint& point);
 	// Where a player wants to spawn next (a control point id, -1 for any of
 	// the team's): the spawn menu's choice. Held points the team owns
 	// with spawn points; anywhere else falls back to any.
@@ -414,6 +445,14 @@ public:
 	static constexpr int kSquadSize = 6;
 	static constexpr int kSpawnOnLeader = -2;
 	static constexpr int kSpawnOnBeacon = -3;
+	// Mobile spawn points: a vehicle of the team carrying a SpawnPoint
+	// (the APCs' and the AT/IFV spawn vehicles' eu_apc_SpawnPoint...,
+	// setEnterOnSpawn 1): the spawn group the original gives such a point
+	// (net ids from 0xc0, SpawnManager 0x00635080). setSpawnVehicle picks
+	// one (spawnChoice kSpawnInVehicle); spawnVehicles lists the team's.
+	static constexpr int kSpawnInVehicle = -4;
+	void setSpawnVehicle(int player, uint32_t vehicle);
+	std::vector<uint32_t> spawnVehicles(int team) const;
 	// Joins a squad of the player's team (0 leaves), false when full;
 	// a new squad's first member leads it.
 	bool joinSquad(int player, int squad);
@@ -427,6 +466,21 @@ public:
 	// Without a stats server nothing is unlocked; `all` unlocks everything.
 	void setUnlocks(int player, std::vector<std::string> containers, bool all = false);
 	void setBattery(int player, float battery); // tests and the scripts' view
+	// Whether the player looks through the weapon's zoom (the local
+	// player's camera; the deviation's devModZoom and the gun sway use it).
+	void setZoomed(int player, bool zoomed);
+	// The weapon in hand's deviation now (SoldierDeviationComp; 0 without).
+	float weaponDeviation(int player) const;
+	// A lock-on weapon's lock (the target components: MultiFireArmTargetComp
+	// on the AA and AT launchers, the walkers' and gunships' guided
+	// guns): the target object and its state (0 none, 1 locking, 2
+	// locked), as the HUD's object markers show it.
+	struct WeaponLockInfo {
+		uint32_t target = 0;
+		int state = 0;
+		float maxDistance = 0; // target.maxDistance of the weapon (0: no lock-on weapon)
+	};
+	WeaponLockInfo weaponLock(int player) const;
 	bool unlockAllByDefault = false; // players joining from now on have everything
 	// The local player's unlocks (its soldier's chosen ItemContainers,
 	// Stats/Stats.h), given when spawnPlayer adds the player.
@@ -664,6 +718,13 @@ public:
 	bool detonate(const std::string& projectileTemplate, const physics::Vec3& at, int attacker = -1);
 	// A vehicle's or drone's EMP level (0: running) and whether it is a wreck.
 	int empLevel(uint32_t vehicle) const;
+	// The tinnitus the local player's ears got this tick (the game
+	// logic's event 0xd, ECGameLogicGLTinnitus, which RendDX9's post
+	// production and the sound engine take): an explosion whose radius x
+	// tinnitusRange reaches the local soldier. Its seconds (the
+	// Sound.tinnitusSetup fades summed, 1 + 2 + 4), 0 for none; taken once.
+	float tinnitusRange = 2.0f;
+	float takeTinnitus() { return std::exchange(m_tinnitus, 0.0f); }
 	// What a vehicle's driver inputs are scaled by (0x005ca2e0): EMP and
 	// critical damage; see GameWorld.cpp.
 	static float driverInputScale(float empLevel, float hitPoints, const world::ObjectTemplate& vehicle);
@@ -1248,6 +1309,7 @@ private:
 		SoldierInput input;
 		std::vector<HitBone> hitBones;
 		int spawnChoice = -1;
+		uint32_t spawnVehicle = 0; // spawnChoice kSpawnInVehicle: the vehicle
 		int squad = 0;
 		bool squadLeader = false;
 		std::string kitTemplate, soldierTemplate; // the next spawn's kit (empty: the team's assault kit)
@@ -1266,6 +1328,7 @@ private:
 		bool selectHeld = false;
 		bool abilityActive = false; // the gadget in hand is working this tick
 		bool cloaked = false;       // CamouflageAmmoComp held with the trigger down
+		float empLevel = 0;         // the soldier's armour's EMP level (empBlast)
 		bool manDown = false;       // killed, the body lying (sv.manDownTime)
 		// The player's vehicle handle (+0x80) after death: the soldier's
 		// object, held weakly (gone with the corpse); see PlayerInfo::held.
@@ -1280,6 +1343,27 @@ private:
 		// +0x48, copied by 0x005706b0 when above 0): scales the
 		// abilities' strength when above 0.
 		float abilityModifier = 0;
+		// The weapon in hand's soldier deviation and gun sway (Weapons.h),
+		// for `feelFor` (its template); zoomed as the player's camera says
+		// (setZoomed: the world keeps no zoom of its own); the scope
+		// stabilizer (an unlock's ability.hasScopeStabilizerAbility).
+		SoldierDeviation deviation;
+		GunSway sway;
+		std::string feelFor;
+		bool zoomed = false;
+		bool scopeStabilizer = false;
+		// The unlocks' Ability lists: damage taken by projectile material
+		// (setMaterialDamageMod) and extra magazines / rounds per item
+		// (addExtraAmmoItem).
+		std::map<uint32_t, float> materialDamageMods;
+		std::map<std::string, std::pair<int, int>> extraAmmo;
+		float lastSwayPitch = 0;
+		struct Lock {
+			uint32_t target = 0;
+			int state = 0;
+			float held = 0, lost = 0;
+			float maxDistance = 0;
+		} lock;
 		double diedAt = 0;          // soldier +0x290: the death's time
 		uint32_t object = 0;
 		physics::SoldierBody body;
@@ -1381,6 +1465,8 @@ private:
 	void poseSeated(Player& player, world::Object& soldier, const Body& body, const SeatLayout& seat, float seconds);
 	void stepControlPoints(float seconds);
 	ScriptEventSink m_events;
+	std::map<int, int> m_fieldUnlocks;
+	float m_tinnitus = 0;
 	void raise(const std::string& event, const ScriptArgs& args)
 	{
 		if (m_events) {
@@ -1484,11 +1570,20 @@ private:
 	std::vector<int> squadMembers(int team, int squad) const;
 	bool spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& position, float& yaw);
 	bool scatterOnLeader(const Player& leader, physics::Vec3& feet, float& yaw, bool* prone = nullptr);
+	bool scatterFrom(const physics::Vec3& base, float heading, const physics::Vec3& faceTo, uint32_t ignore,
+		physics::Vec3& feet, float& yaw, bool* prone);
+	bool spawnPointUsable(const world::Object& point, const Player& player, bool spotClear) const;
+	bool enterOnSpawn(Player& player, world::Object& soldier, const physics::Vec3& from, float radius, uint32_t only = 0);
 	bool soldierFits(const physics::Vec3& origin, SoldierPose pose, uint32_t ignore) const;
 	float m_waterLevel = 0;
 	bool m_hasWater = false;
 	void stepPlayers(float seconds);
 	void stepSoldier(Player& player, float seconds);
+	void stepWeaponFeel(Player& player, SoldierInput& turned, float seconds);
+	void stepWeaponLock(Player& player, float seconds);
+	int targetTypeOf(const world::ObjectTemplate& t, int depth = 0) const;
+	mutable std::map<const world::ObjectTemplate*, int> m_targetTypes;
+	FireArmSettings withExtraAmmo(const Player& player, const world::ObjectTemplate& item) const;
 	// Takes the carried weapon of a slot in hand.
 	void equip(Player& player, int slot);
 	const ProjectileSettings* projectileFor(const std::string& projectileTemplate);
