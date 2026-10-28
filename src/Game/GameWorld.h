@@ -1013,6 +1013,7 @@ private:
 	void stepGunner(Player& player, Body& body, float seconds, bool aims = true);
 	Body* findBody(uint32_t object);
 	int firstEngineType(const world::ObjectTemplate& root) const;
+	mutable std::map<const world::ObjectTemplate*, int> m_engineTypes; // firstEngineType's answers, by root
 	void addBodies();
 	void stepPhysics(float seconds);
 	const io::FileManager* m_files = nullptr;

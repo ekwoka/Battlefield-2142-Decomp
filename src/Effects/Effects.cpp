@@ -605,6 +605,22 @@ void EffectManager::stopAttached(uint32_t anchor, uint32_t tag)
 	}
 }
 
+std::set<uint32_t> EffectManager::mountedTags(uint32_t anchor) const
+{
+	std::set<uint32_t> tags;
+	for (const auto& emitter : m_emitters) {
+		if (emitter->anchor == anchor) {
+			tags.insert(emitter->tag);
+		}
+	}
+	for (const LiveLight& light : m_lights) {
+		if (light.anchor == anchor) {
+			tags.insert(light.tag);
+		}
+	}
+	return tags;
+}
+
 bool EffectManager::emitting(uint32_t anchor, uint32_t tag) const
 {
 	for (const auto& emitter : m_emitters) {
@@ -959,20 +975,27 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 			continue;
 		}
 		effects.setAnchor(object.id, object.position, object.rotation);
-		// Turning parts carry their bundles along.
+		// Turning parts carry their bundles along: those with live
+		// particles or lights now, a starting one before it spawns.
 		if (partPose && !created) {
-			for (size_t i = 0; i < tracked.bundles.size(); ++i) {
-				Placed& b = tracked.bundles[i];
+			for (const uint32_t tag : effects.mountedTags(object.id)) {
+				if (tag == 0 || tag > tracked.bundles.size()) {
+					continue;
+				}
+				Placed& b = tracked.bundles[tag - 1];
 				place(b, object.id, partPose, b.position, b.rotation);
-				effects.setMount(object.id, static_cast<uint32_t>(i + 1), b.position, b.rotation);
+				effects.setMount(object.id, tag, b.position, b.rotation);
 			}
 		}
 		for (size_t i = 0; i < tracked.bundles.size(); ++i) {
-			const Placed& b = tracked.bundles[i];
+			Placed& b = tracked.bundles[i];
 			const uint32_t tag = static_cast<uint32_t>(i + 1);
 			const bool start = (created && b.startAtCreation)
 				|| (object.occupied && !tracked.occupied && (b.startOnEffects & kEntered) != 0);
 			if (start && !effects.emitting(object.id, tag)) {
+				if (partPose && !created) {
+					place(b, object.id, partPose, b.position, b.rotation);
+				}
 				effects.spawnAttached(b.bundle->name(), object.id, b.position, b.rotation, view, tag);
 			}
 			if (!object.occupied && tracked.occupied && (b.stopOnEffects & kExited) != 0) {

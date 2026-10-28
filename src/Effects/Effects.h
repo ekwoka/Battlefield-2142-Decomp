@@ -35,6 +35,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -308,6 +309,8 @@ public:
 	void stopAttached(uint32_t anchor, uint32_t tag = 0);
 	// Whether an anchor has emitters still emitting (with `tag`: its).
 	bool emitting(uint32_t anchor, uint32_t tag = 0) const;
+	// The tags of an anchor's emitters and lights still alive (mounts to keep placed).
+	std::set<uint32_t> mountedTags(uint32_t anchor) const;
 	// The anchor's object is gone: its emitters stop where they are.
 	void releaseAnchor(uint32_t anchor);
 	void update(float seconds);

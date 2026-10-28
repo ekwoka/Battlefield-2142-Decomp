@@ -5602,11 +5602,18 @@ float objectRadiusOf(const world::ObjectTemplateManager& templates, const world:
 
 int GameWorld::firstEngineType(const world::ObjectTemplate& root) const
 {
-	if (root.typeName() == "Engine") {
-		const auto type = root.settings().find("engineType");
-		return type == root.settings().end() ? 0 : engineTypeOf(type->second);
+	if (const auto found = m_engineTypes.find(&root); found != m_engineTypes.end()) {
+		return found->second;
 	}
-	return firstEngineIn(m_templates, root.children(), 0, 0);
+	int type = -1;
+	if (root.typeName() == "Engine") {
+		const auto setting = root.settings().find("engineType");
+		type = setting == root.settings().end() ? 0 : engineTypeOf(setting->second);
+	} else {
+		type = firstEngineIn(m_templates, root.children(), 0, 0);
+	}
+	m_engineTypes[&root] = type;
+	return type;
 }
 
 void GameWorld::addBodies()
