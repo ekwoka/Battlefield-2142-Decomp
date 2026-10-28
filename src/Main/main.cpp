@@ -38,8 +38,10 @@
 #include "UI/Player/Player.h"
 #include "IO/Localization/Localization.h"
 #include "HostedGame.h"
+#include "Prediction.h"
 #include "HudMenus.h"
 #include "HudMenusChat.h"
+#include "HudMenusComm.h"
 #include "HudMenusKits.h"
 #include "MenuBindings.h"
 #include "PlayerCamera.h"
@@ -83,6 +85,7 @@
 #include <filesystem>
 #include <optional>
 #include <thread>
+#include <tuple>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -120,6 +123,9 @@ struct Options {
 	bool servers = false;        // --servers: list the servers OpenSpy's master server knows
 	std::string connect;         // --connect host[:port] (the original's +joinServer): play on a game server
 	bool host = false;           // --host: serve the local game to other clients (HostedGame.h)
+	bool playTeamGiven = false;  // --play 1|2: on a server, ask for that team (PostRemote 6/7)
+	bool walk = false;           // --walk: on a server without a window, walk and turn (the prediction's check)
+	std::string maps;            // --maps level[:mode[:size]],...: a playlist for --host (map changes on the same connections)
 	uint16_t hostPort = 17567;   // +port N (the original's "specifies the network port to be used")
 	uint16_t queryPort = 29900;  // --query-port N: the LAN query responder's (0: none)
 	std::string lanAddress = "255.255.255.255"; // --lan <address>: where the LOCAL page's search probes
@@ -224,6 +230,7 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.playTeam = 2;
 			if (hasValue && (std::string(argv[i + 1]) == "1" || std::string(argv[i + 1]) == "2")) {
 				options.playTeam = std::atoi(argv[++i]);
+				options.playTeamGiven = true;
 			}
 			options.view = true;
 		} else if (arg == "--seat" && hasValue) {
@@ -252,6 +259,12 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.hostPort = static_cast<uint16_t>(std::atoi(argv[++i]));
 		} else if (arg == "--host") {
 			options.host = true;
+		} else if (arg == "--walk") {
+			options.walk = true;
+		} else if (arg == "--maps" && hasValue) {
+			options.maps = argv[++i];
+		} else if (arg == "--time-limit" && hasValue) {
+			options.timeLimit = std::atoi(argv[++i]);
 		} else if (arg == "--query-port" && hasValue) {
 			options.queryPort = static_cast<uint16_t>(std::atoi(argv[++i]));
 		} else if (arg == "--lan" && hasValue) {
@@ -273,6 +286,25 @@ bool parseOptions(int argc, char** argv, Options& options)
 	if (options.gameDir.empty()) {
 		std::fprintf(stderr, "usage: bf2142 --game <BF2142 install dir> [--api symbols/BF2142.exe.console.csv]\n");
 		return false;
+	}
+	// Without --api, the engine's console tables from symbols/ (here, else
+	// the source tree's): the game's scripts call methods the rewrite only
+	// answers through them, and a level goes wrong without (no control
+	// points, a team losing at once).
+	if (options.apiTables.empty()) {
+		std::vector<std::filesystem::path> roots {"."};
+#ifdef BF2142_SOURCE_DIR
+		roots.emplace_back(BF2142_SOURCE_DIR);
+#endif
+		for (const std::filesystem::path& root : roots) {
+			const std::filesystem::path exe = root / "symbols" / "BF2142.exe.console.csv";
+			const std::filesystem::path rend = root / "symbols" / "RendDX9_ori.dll.console.csv";
+			std::error_code error;
+			if (std::filesystem::exists(exe, error) && std::filesystem::exists(rend, error)) {
+				options.apiTables = {exe.string(), rend.string()};
+				break;
+			}
+		}
 	}
 	return true;
 }
@@ -1051,11 +1083,15 @@ struct Session {
 	int roundsOnMap = 0;
 	bool nextMap = false; // the round ended: the playlist goes on
 	bool joinSpawn = false; // --play on a server: ask to spawn once in the game
+	int joinTeam = 0;       // --play 1|2 on a server: the team asked for first
 	// A game on a server (--connect, or the menu's join): the connection
 	// and the replicated world, for as long as it lasts.
 	std::unique_ptr<net::GameClient> client;
 	bool joinRequested = false; // the menu joined a server
 	bool levelChange = false;   // the server changed maps: load its new level
+	// --host: the server, kept from map to map so the clients stay
+	// connected through a map change (HostedGame::changeLevel).
+	std::unique_ptr<host::HostedGame> hosted;
 	// Voice chat (Voip/VoiceChat.h): the menu's settings and mic test, the
 	// joined server's voice; updated on its own thread.
 	std::unique_ptr<dice::hfe::voip::VoiceChat> voice;
@@ -1233,6 +1269,33 @@ int main(int argc, char** argv)
 	// Map after map: a playlist started from the menu goes on until the
 	// window is closed.
 	Session session;
+	// --maps: a host's playlist (level[:mode[:size]], comma separated).
+	for (size_t at = 0; !options.maps.empty() && at <= options.maps.size();) {
+		const size_t end = std::min(options.maps.find(',', at), options.maps.size());
+		const std::string entry = options.maps.substr(at, end - at);
+		at = end + 1;
+		if (entry.empty()) {
+			continue;
+		}
+		dice::hfe::menu::MenuMap map;
+		const size_t first = entry.find(':');
+		map.level = entry.substr(0, first);
+		map.gameMode = options.gameMode;
+		map.size = options.mapSize;
+		if (first != std::string::npos) {
+			const size_t second = entry.find(':', first + 1);
+			map.gameMode = entry.substr(first + 1, second == std::string::npos ? std::string::npos : second - first - 1);
+			if (second != std::string::npos) {
+				map.size = std::atoi(entry.c_str() + second + 1);
+			}
+		}
+		session.playlist.push_back(map);
+	}
+	if (!session.playlist.empty()) {
+		options.level = session.playlist.front().level;
+		options.gameMode = session.playlist.front().gameMode;
+		options.mapSize = session.playlist.front().size;
+	}
 	for (;;) {
 		const int result = runGame(options, session);
 #if BF2142_HAS_RENDERER
@@ -1344,6 +1407,8 @@ int runGame(Options& options, Session& session)
 	scene::registerWaterConsoleMethods(console, water);
 	scene::RainSettings rain;
 	scene::registerRainConsoleMethods(console, rain);
+	scene::RendererSettings rendererSettings;
+	scene::registerRendererConsoleMethods(console, rendererSettings);
 
 	// Sound, as 0x007fcd50: the engine from getSoundEngine() reading files
 	// through the virtual file system, wrapped by the game's sound manager.
@@ -1402,6 +1467,13 @@ int runGame(Options& options, Session& session)
 	}
 	hudManager.setLocalizer([&localization](const std::string& id) { return localization.text(id); });
 	setupScoreboard(hudManager);
+	// The comm roses, filled by the HUD's Communication scripts (HudMenusComm.h).
+	dice::hfe::menu::CommRoses commRoses(hudManager);
+	commRoses.setLocalizer([&localization](const std::string& id) { return localization.text(id); });
+	commRoses.bind(console, [&console](const std::string& line) {
+		std::string output;
+		console.execute(line, output);
+	});
 
 	game::GameLogic gameLogic;
 	game::registerGameLogicConsoleMethods(console, gameLogic);
@@ -1795,6 +1867,7 @@ int runGame(Options& options, Session& session)
 		options.bots = 0;     // the server's players
 		// --play: ask to spawn (the first kit, any point) once in the game.
 		session.joinSpawn = options.playTeam != 0;
+		session.joinTeam = options.playTeamGiven ? options.playTeam : 0;
 		options.playTeam = 0; // our soldier is the server's
 		gameLogic.mapSize = options.mapSize;
 	}
@@ -2128,6 +2201,19 @@ int runGame(Options& options, Session& session)
 					kitMenu.heavyArmor() && !kit.heavySoldier.empty() ? kit.heavySoldier : kit.soldier);
 			}
 		};
+		// The radio's console methods (HudMenusComm.h): the local player's
+		// messages, heard by whom the target channel reaches.
+		bindMethod(console, "game.radioMessage", ConsoleAccess::Anyone, [&round](std::string channel, std::string voice) {
+			round.radioMessage(round.localPlayer(), game::GameWorld::targetChannel(channel), voice);
+		});
+		for (const auto& [command, channel, voice] : std::vector<std::tuple<const char*, int, const char*>> {
+				 {"Radio.callForMedic", 6, "medic"}, {"Radio.callForAmmo", 1, "need_ammo"},
+				 {"Radio.callForRepair", 1, "need_repair"}}) {
+			const int c = channel;
+			const std::string v = voice;
+			bindMethod(console, command, ConsoleAccess::Anyone, [&round, c, v] { round.radioMessage(round.localPlayer(), c, v); });
+		}
+		bindMethod(console, "Radio.sendSpottedMessage", ConsoleAccess::Anyone, [&commRoses](bool, std::string) { commRoses.close(); });
 		dice::hfe::menu::SquadMenu squadMenu(round, hudManager);
 		squadMenu.setLocalizer([&localization](const std::string& id) { return localization.text(id); });
 		squadMenu.onMessage = [](const std::string& id) { std::printf("squad menu: %s\n", id.c_str()); };
@@ -2352,6 +2438,7 @@ int runGame(Options& options, Session& session)
 		const auto stepObjectEffects = [&] {
 			std::vector<effects::ObjectEffects::ObjectState> states;
 			states.reserve(objects.objects().size());
+			const std::map<uint32_t, uint32_t> fired = round.takeObjectEffectEvents();
 			for (const auto& object : objects.objects()) {
 				effects::ObjectEffects::ObjectState state;
 				state.id = object->id();
@@ -2362,6 +2449,10 @@ int runGame(Options& options, Session& session)
 				// A player in a control object (event 4; soldiers get none).
 				state.occupied = state.objectTemplate && state.objectTemplate->typeName() != "Soldier"
 					&& round.playerOf(state.id) >= 0;
+				if (!fired.empty()) {
+					const auto it = fired.find(state.id);
+					state.effects = it != fired.end() ? it->second : 0;
+				}
 				states.push_back(state);
 			}
 			objectEffectBundles.update(states, objectEffects,
@@ -2398,7 +2489,7 @@ int runGame(Options& options, Session& session)
 		}
 		round.startRound();
 		// --host: the round served to clients (HostedGame.h).
-		std::unique_ptr<host::HostedGame> hosted;
+		host::HostedGame* hosted = nullptr;
 		if (options.host && !session.client) {
 			host::HostSetup setup;
 			setup.level = options.level;
@@ -2407,17 +2498,35 @@ int runGame(Options& options, Session& session)
 			setup.maxPlayers = options.maxPlayers;
 			setup.gamePort = options.hostPort;
 			setup.queryPort = options.queryPort;
-			hosted = std::make_unique<host::HostedGame>(round, gameLogic, templates, setup);
-			hosted->setStaticObjects(levelObjects);
-			hosted->onLog = [](const std::string& line) { std::printf("host: %s\n", line.c_str()); };
-			if (hosted->start()) {
-				std::printf("hosting %s (%s, %d) on 127.0.0.1:%u, LAN query port %u\n", options.level.c_str(),
-					options.gameMode.c_str(), options.mapSize, hosted->gamePort(), options.queryPort);
+			if (session.hosted) {
+				// The next map on the same connections.
+				session.hosted->changeLevel(round, gameLogic, templates, setup);
+				session.hosted->setStaticObjects(levelObjects);
+				hosted = session.hosted.get();
 			} else {
-				std::fprintf(stderr, "cannot host on port %u\n", options.hostPort);
-				hosted.reset();
+				session.hosted = std::make_unique<host::HostedGame>(round, gameLogic, templates, setup);
+				session.hosted->setStaticObjects(levelObjects);
+				session.hosted->onLog = [](const std::string& line) { std::printf("host: %s\n", line.c_str()); };
+				if (session.hosted->start()) {
+					hosted = session.hosted.get();
+					std::printf("hosting %s (%s, %d) on 127.0.0.1:%u, LAN query port %u\n", options.level.c_str(),
+						options.gameMode.c_str(), options.mapSize, hosted->gamePort(), options.queryPort);
+				} else {
+					std::fprintf(stderr, "cannot host on port %u\n", options.hostPort);
+					session.hosted.reset();
+				}
 			}
 		}
+		// The round goes with this run: the server waits for the next one.
+		struct Detach {
+			host::HostedGame* hosted;
+			~Detach()
+			{
+				if (hosted) {
+					hosted->detach();
+				}
+			}
+		} detachHosted {hosted};
 		gameLogic.startRound();
 		std::function<int(int)> scoreOf; // the scripts' scores, by player
 		bool scoreboardHeld = options.scoreboard;
@@ -2445,6 +2554,32 @@ int runGame(Options& options, Session& session)
 			});
 		}
 		std::map<uint16_t, uint32_t> ghostObjects; // ghost -> object
+		// A joined game's own soldier, predicted from our moves and corrected
+		// by the server's records (Prediction.h).
+		host::SoldierPrediction prediction(round);
+		uint32_t recordsSeen = 0;
+		if (session.client) {
+			session.client->onMoveSent = [&prediction](const net::PlayerMove& move) { prediction.step(move); };
+			session.client->sendOnTicks = true; // a move a tick (remoteStep's simulatedTick)
+		}
+		// The connection outlives this level (a map change): its hook doesn't.
+		struct Unhook {
+			Session& session;
+			~Unhook()
+			{
+				if (session.client) {
+					session.client->onMoveSent = nullptr;
+					session.client->sendOnTicks = false;
+				}
+			}
+		} unhook {session};
+		// Where our soldier is drawn and seen from: the prediction's, else the server's.
+		const auto ownFeet = [&prediction, &session]() -> net::Vec3f {
+			if (prediction.active()) {
+				return prediction.feet();
+			}
+			return session.client ? session.client->world().controlObject().position : net::Vec3f {};
+		};
 		// A joined game's look, as our input turns it (PlayerCamera::Remote).
 		struct RemoteLook {
 			bool started = false;
@@ -2454,7 +2589,8 @@ int runGame(Options& options, Session& session)
 		} remoteLook;
 		// A joined game's soldier for the first-person view.
 		if (session.client) {
-			playerCamera.setRemote([&session, &ghostObjects, &objects, &templates, &remoteLook](PlayerCamera::Remote& me) {
+			playerCamera.setRemote([&session, &ghostObjects, &objects, &templates, &remoteLook, &ownFeet, &prediction](
+									   PlayerCamera::Remote& me) {
 				if (!session.client || !session.client->world().hasControlObject()) {
 					return false;
 				}
@@ -2476,8 +2612,12 @@ int runGame(Options& options, Session& session)
 				me.alive = ghost->health != 0;
 				me.soldier = soldier->id();
 				me.soldierTemplate = soldier->objectTemplate();
-				me.feet = {control.position.x, control.position.y, control.position.z};
-				if (ghost->hasVelocity) {
+				const net::Vec3f feet = ownFeet();
+				me.feet = {feet.x, feet.y, feet.z};
+				if (prediction.active()) {
+					const net::Vec3f v = prediction.velocity();
+					me.velocity = {v.x, v.y, v.z};
+				} else if (ghost->hasVelocity) {
 					me.velocity = {ghost->velocity.x, ghost->velocity.y, ghost->velocity.z};
 				}
 				me.yaw = remoteLook.yaw;
@@ -2537,7 +2677,50 @@ int runGame(Options& options, Session& session)
 				return;
 			}
 			net::GameClient& client = *session.client;
+			// --walk without a window: forward, turning, sprinting now and
+			// then (a check on the prediction against the server).
+			if (options.walk && !options.view) {
+				game::SoldierInput walk;
+				const int t = static_cast<int>(gameLogic.elapsed * 30);
+				walk.throttle = (t / 90) % 4 == 3 ? 0.0f : 1.0f;
+				walk.strafe = (t / 150) % 2 == 0 ? 0.0f : 0.5f;
+				walk.turn = (t / 60) % 3 == 0 ? 3.0f : 0.0f;
+				walk.sprint = (t / 120) % 3 == 1;
+				walk.jump = t % 200 == 100;
+				client.setInput(net::playerInputFrom(walk));
+			}
 			client.update();
+			// A new control-object record: the prediction takes the server's
+			// state (or starts from it); none in the last block: no soldier.
+			const net::RemoteWorld& own = client.world();
+			if (own.controlRecords() != recordsSeen) {
+				recordsSeen = own.controlRecords();
+				const net::ControlState* state = own.controlState();
+				const net::ControlObjectRecord& record = own.controlObject();
+				if (state && record.vehicle == 0 && !state->groups.empty()
+					&& state->groups.front().kind == net::NetworkableKind::Soldier && !(state->groups.front().mask & 0x10000)) {
+					if (!prediction.active()) {
+						const auto object = ghostObjects.find(record.ghost);
+						const world::Object* soldier = object != ghostObjects.end() ? objects.find(object->second) : nullptr;
+						const net::RemoteObject* ghost = own.object(record.ghost);
+						const world::ObjectTemplate* t = soldier ? soldier->objectTemplate()
+							: ghost ? templates.findById(ghost->templateId) : nullptr;
+						prediction.start(t, record.lastMove, state->groups.front(), record.position);
+					} else {
+						prediction.reconcile(record.lastMove, state->groups.front(), record.position);
+						if (options.verbose && prediction.stats().lastCorrection > 0.5f) {
+							const net::Vec3f f = prediction.feet();
+							std::printf("prediction: corrected by %.2f m at move %d (now at %.2f/%.2f/%.2f)\n",
+								prediction.stats().lastCorrection, record.lastMove, f.x, f.y, f.z);
+						}
+					}
+				} else {
+					prediction.stop();
+				}
+			} else if (!own.controlInLastBlock() && prediction.active()) {
+				prediction.stop();
+			}
+			client.simulatedTick(); // this tick's move goes up (and is predicted)
 			std::set<uint16_t> seen;
 			// Soldiers with a player: their wrecks wait for the player (0x00652380).
 			std::set<uint16_t> attached;
@@ -2551,14 +2734,22 @@ int runGame(Options& options, Session& session)
 				if (ghost.part > 0 || !ghost.hasPosition) {
 					continue; // a seat of a vehicle ghost (drawn with its vehicle), or not placed yet
 				}
-				const world::Vec3 at {ghost.position.x, ghost.position.y, ghost.position.z};
+				world::Vec3 at {ghost.position.x, ghost.position.y, ghost.position.z};
 				world::Vec3 turned {ghost.rotation.x, ghost.rotation.y, ghost.rotation.z};
+				const bool predicted = prediction.active() && ghost.ghost == client.world().controlObject().ghost;
+				if (predicted) {
+					const net::Vec3f feet = prediction.feet();
+					at = {feet.x, feet.y, feet.z};
+				}
 				// The networked orientation (SimpleObject's quaternion) or a
 				// soldier's yaw, over CreateObject's rotation.
 				if (ghost.hasOrientation) {
 					host::yawPitchRollFromQuaternion(ghost.orientation, turned.x, turned.y, turned.z);
 				} else if (ghost.hasAngles) {
 					turned = {ghost.yaw, 0, 0};
+				}
+				if (predicted) {
+					turned = {prediction.yaw(), 0, 0};
 				}
 				if (const auto it = ghostObjects.find(ghost.ghost); it != ghostObjects.end()) {
 					// A soldier's networked health: clients run the corpse
@@ -2608,6 +2799,10 @@ int runGame(Options& options, Session& session)
 			}
 			if (session.joinSpawn && client.world().gameState() == 1 && client.world().localPlayer() >= 0) {
 				session.joinSpawn = false;
+				const net::RemotePlayer* me = client.world().player(client.world().localPlayer());
+				if (session.joinTeam != 0 && me && me->team != session.joinTeam) {
+					client.selectTeam(session.joinTeam); // PostRemote 6/7, before the kit (the team's)
+				}
 				client.selectKit(0);
 				client.selectSpawnGroup(-1);
 			}
@@ -2659,8 +2854,15 @@ int runGame(Options& options, Session& session)
 					session.levelChange = true;
 				}
 			}
+			for (const net::KickInfo& kick : client.world().takeKicks()) {
+				const net::RemotePlayer* who = client.world().player(kick.player);
+				const std::string name = who ? who->name : "player " + std::to_string(kick.player);
+				std::printf("%s was %s\n", name.c_str(), kick.banned ? "banned" : "kicked");
+				chat.addInfo(name + (kick.banned ? " was banned" : " was kicked"));
+			}
 			if (client.state() != net::GameClient::State::Connected) {
-				std::printf("the server ended the connection (reason %u)\n", client.disconnectReason());
+				std::printf("the server ended the connection (reason %u: %s)\n", client.disconnectReason(),
+					net::disconnectReason(client.disconnectReason()));
 				if (session.voice) {
 					session.voice->leave();
 				}
@@ -3046,14 +3248,37 @@ int runGame(Options& options, Session& session)
 					silo.loaded ? "loaded" : ("reloading " + std::to_string(static_cast<int>(silo.reloadLeft)) + " s").c_str(),
 					silo.launched);
 			}
+			if (session.client) {
+				// A joined game: the server's players as we see them, and how
+				// the prediction of our own soldier went.
+				const net::RemoteWorld& world = session.client->world();
+				for (const net::RemotePlayer& p : world.playerList()) {
+					const net::RemoteObject* soldier = p.soldierGhost ? world.object(p.soldierGhost) : nullptr;
+					if (p.local && prediction.active()) {
+						const net::Vec3f f = prediction.feet();
+						std::printf("  %-8s %s (ours) predicted at %.2f/%.2f/%.2f, server at %.2f/%.2f/%.2f\n", p.name.c_str(),
+							p.team == 1 ? "PAC" : "EU ", f.x, f.y, f.z, world.controlObject().position.x,
+							world.controlObject().position.y, world.controlObject().position.z);
+					} else if (soldier && soldier->hasPosition) {
+						std::printf("  %-8s %s at %.2f/%.2f/%.2f health %.2f (tick %u)\n", p.name.c_str(), p.team == 1 ? "PAC" : "EU ",
+							soldier->position.x, soldier->position.y, soldier->position.z, soldier->health, soldier->lastTick);
+					}
+				}
+				const host::SoldierPrediction::Stats& st = prediction.stats();
+				std::printf("  prediction: %u moves stepped, %u replayed, %u records (%u for moves not remembered), "
+							"correction mean %.4f m, max %.4f m, %u over 1 cm; %u of %u records with a mode-3 state\n",
+					st.steps, st.replayed, st.records, st.unknownMoves, st.records ? st.sumCorrection / st.records : 0.0,
+					st.maxCorrection, st.corrections, world.controlStates(), world.controlRecords());
+			}
 			for (const auto& player : round.playerList()) {
 				const auto fired = round.playerRounds(player.id, false, false);
 				const auto hit = round.playerRounds(player.id, true, false);
 				const std::string seated = player.vehicle && round.isTitan(player.vehicle)
 					? " (Titan gun " + std::to_string(player.seat + 1) + ")"
 					: player.vehicle ? " (seat " + std::to_string(player.seat + 1) + ")" : "";
-				std::printf("  %-8s %s %-6s kills %d deaths %d, %d rounds fired, %d hit%s%s%s\n", player.name.c_str(),
-					player.team == 1 ? "PAC" : "EU ", player.alive ? "alive" : "dead", player.kills, player.deaths,
+				std::printf("  %-8s %s %-6s at %.2f/%.2f/%.2f kills %d deaths %d, %d rounds fired, %d hit%s%s%s\n",
+					player.name.c_str(), player.team == 1 ? "PAC" : "EU ", player.alive ? "alive" : "dead", player.position.x,
+					player.position.y, player.position.z, player.kills, player.deaths,
 					fired.empty() ? 0 : fired[0].count, hit.empty() ? 0 : hit[0].count, player.ai ? "  " : "",
 					player.ai ? bots.behaviour(player.id).c_str() : "", seated.c_str());
 			}
@@ -3090,6 +3315,7 @@ int runGame(Options& options, Session& session)
 		};
 		sources.effects = &round.effects();
 		sources.rain = &rain;
+		sources.renderer = &rendererSettings;
 		sources.objectEffects = &objectEffects;
 		nametags::Nametags nametags(files);
 		nametags::Nametags::View tagView;
@@ -3208,8 +3434,24 @@ int runGame(Options& options, Session& session)
 		sources.partTransforms = [&round](uint32_t object, std::vector<anim::Matrix>& parts) {
 			return round.partTransforms(object, parts);
 		};
-		sources.partPose = [&round](uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation) {
-			return round.partPose(object, part, offset, rotation);
+		sources.partPose = [&round, &session, &ghostObjects](uint32_t object, const std::string& part, world::Vec3& offset,
+							   world::Vec3& rotation) {
+			if (round.partPose(object, part, offset, rotation)) {
+				return true;
+			}
+			// A joined game's vehicle: its ghost groups' turrets and wheels.
+			if (!session.client) {
+				return false;
+			}
+			for (const auto& [ghost, id] : ghostObjects) {
+				net::Vec3f o, r;
+				if (id == object && session.client->world().partPose(ghost, part, o, r)) {
+					offset = {o.x, o.y, o.z};
+					rotation = {r.x, r.y, r.z};
+					return true;
+				}
+			}
+			return false;
 		};
 		// The first-person pass: the arms and the weapon at the eye, the
 		// player's own soldier left out of the world.
@@ -3312,11 +3554,11 @@ int runGame(Options& options, Session& session)
 			// object (in first person at its eye, PlayerCamera::Remote), the
 			// keys go up as moves, a click on a spawn point asks for it (with
 			// the first kit).
-			viewer.playerView = [&session, &playerCamera](ViewerOptions::PlayerView& view) {
+			viewer.playerView = [&session, &playerCamera, &ownFeet](ViewerOptions::PlayerView& view) {
 				if (!session.client || !session.client->world().hasControlObject()) {
 					return false;
 				}
-				const net::Vec3f& p = session.client->world().controlObject().position;
+				const net::Vec3f p = ownFeet();
 				const float aspect = view.aspect;
 				view = {p.x, p.y, p.z, 0};
 				view.aspect = aspect;
@@ -3523,6 +3765,28 @@ int runGame(Options& options, Session& session)
 			}
 		};
 		if (viewer.onPlayerInput) {
+			// The comm roses while their keys are held (Q the radio, T the
+			// tactical rose), with the pointer to pick an entry.
+			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &commRoses, &round, radioWas = false,
+										tacticalWas = false](const ViewerOptions::PlayerInput& in) mutable {
+				game::GameWorld::PlayerInfo me;
+				const bool alive = round.playerInfo(round.localPlayer(), me) && me.alive;
+				if (alive && in.radioComm && !radioWas) {
+					commRoses.openRadio(me.vehicle != 0);
+				} else if (alive && in.tacticalComm && !tacticalWas) {
+					commRoses.openTactical(me.commander, me.squadLeader, me.squad != 0);
+				} else if ((!in.radioComm && radioWas) || (!in.tacticalComm && tacticalWas) || !alive) {
+					if (!commRoses.shown().empty() && !in.radioComm && !in.tacticalComm) {
+						commRoses.close();
+					}
+				}
+				radioWas = in.radioComm;
+				tacticalWas = in.tacticalComm;
+				inner(in);
+			};
+			viewer.wantsPointer = [inner = viewer.wantsPointer, &commRoses] {
+				return !commRoses.shown().empty() || (inner && inner());
+			};
 			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &chat, &squadNameBox, &round, &session,
 										keysWere = std::array<bool, 3> {}](const ViewerOptions::PlayerInput& in) mutable {
 				const std::array<bool, 3> keys {in.sayAll, in.sayTeam, in.saySquad};

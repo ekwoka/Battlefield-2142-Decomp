@@ -47,6 +47,7 @@ struct ViewerOptions {
 		int seat = 0;           // F1..F8 held: that vehicle seat (1-based)
 		int item = 0;            // 1..9 held: the weapon in that kit slot
 		bool sayAll = false, sayTeam = false, saySquad = false; // c_GISayAll (K), c_GISayTeam (L), c_GISaySquad
+		bool radioComm = false, tacticalComm = false; // held: c_GIRadioComm (Q), c_GITacticalComm (T)
 	};
 	struct PlayerView {
 		float x = 0, y = 0, z = 0; // the soldier's feet

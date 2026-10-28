@@ -465,9 +465,9 @@ constexpr unsigned kDemoGhostStateLengthBits = 13;
 // bits an angle, the PCO 0x00605b00 skips a check, Engine 0x00609340 and
 // Spring 0x00605320 differ too), then a 10-bit length and the control
 // object's own state (its vtable 0x1cc), checked against that length.
-// Without the object everything is skipped by the 12-bit length. The
-// mode-3 variants of the readers aren't rewritten: a client predicting its
-// own soldier would need them (the rewrite's client takes the position).
+// Without the object everything is skipped by the 12-bit length. `rest`
+// holds that state; GhostLayout.h's ControlState reads and writes it with
+// the ghost's layout (RemoteWorld::controlState, HostedGame).
 struct ControlObjectRecord {
 	int32_t lastMove = 0;
 	Vec3f position;

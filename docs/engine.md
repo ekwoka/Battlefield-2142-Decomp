@@ -160,7 +160,10 @@ sub-geometry; only the radius (slot `0x74`, `0x006dedb0`) and the box
 (slot `0x78`, `0x006deeb0`) look across all of them. Rewritten in
 `physics::parseCollisionMesh` (the trim) and `physics::collisionPart`:
 the rewrite collides with the normal sub-geometry alone (it used to add
-the wreck's faces too) and never switches to the wreck's.
+the wreck's faces too) and never switches to the wreck's: no caller of the
+instance's slot `0x30` with 1 was found (the `+ 0x30))(1)` calls in
+`0x0050`–`0x006f` are other classes' slots), so what turns a wreck's
+mesh over is unknown.
 
 Objects whose template has `hasMobilePhysics 1` and `physicsType Mesh`
 get a `PhysicsNode.Basic` (created in `0x005f6ba0` with the template's
@@ -445,9 +448,56 @@ hull's ground points: the legs' segment from stepHeight above the foot
 the approach taken out, then the drive: the velocity along the ground to
 the desired by at most 1 m/s a tick, ω × 0.75. The MechLegs node's leg
 probes (slots 118–123) are dead code in BF2142, so spacing, footWidth,
-footLength, testCount and legEnableMask do nothing. The legs' animation
-speed factor (`0x008ba420`) is taken as 1 and the object pass of the
-response (a 1.5 m sphere) is left to the hull's mesh physics.
+footLength, testCount and legEnableMask do nothing.
+
+**The walker's own animation system** (`bundleAnimationSystem`: the object
+`0x0063d340` builds for the template, updated by `0x0063d2f0`; only the
+walkers are fed in the rewrite, `GameWorld::stepObjectAnimation`).
+`0x0063ce30` gives it each tick: the root node's velocity (slot `0x64`)
+less what it stands on (slot `0xd8`, zero here, so the 0.7 m/s floor of
+that subtraction never applies), flattened into the object's frame (x
+its right, z its forward, not normalised) with its length as the speed,
+divided by the system's speed factor (slot `0x54`) when that is over 0;
+the angular velocity (slot `0x68`) as the last vector; the slope (slot
+`0x3c`): the terrain normal at the object (the heightmap's slot `0x7c`)
+against its forward and right × 3.2 (`*0x00a75504`), each within ±1; the
+messages 0x800 occupied (interface `0xc4c5` slot `0x18`), 0x10 the PCO's
+crouch flag (slot `0x138`), 0x20 its armour destroyed (`+0x48` slot `0x58`:
+the walkers' `alive` switch takes its first child, `dead`), 0x40 a landing
+gear down (`+0x18`, `0x00650010`) and the legs' 0x80/0x100/0x200/0x400.
+The legs (`0x00650680`, `0x00650530` each tick from `0x00650e90`): the
+state follows the inputs only while no playing bundle has blockInput
+(slot `0x50`, `0x008b9e00`); its message is cleared (0x780) and set again
+while the input's sign holds (`0x00650600`): 0x80 walking, 0x100 backing,
+0x400 turning left, 0x200 right; state 5 sets the PCO's crouch flag
+(slot `0x134`). The system's speed factor (slot `0x54`, `0x008ba420`: the
+product of the playing bundles' speed key points) scales the legs' speed
+and turn (`0x00650e90`, the root's slot `0x180`); stand_walk's fade-in
+key points (0.2 to 1) slow the start, and with blockInput a walk let go
+plays on to its next force-stop point before the legs stand. Its
+`effect:N` events (event 0x2c + N to the object, passed down its tree)
+start the EffectBundles whose startOnEffects has bit 9 + N
+(`0x0061a4e0`): effect 1 the right foot's bundle (1024), 2 the left's
+(2048), 3 and 4 the walk cycle's sound (`e_sfx_MECH_Walk_Cycle`, 12288)
+(`GameWorld::takeObjectEffectEvents`, `ObjectEffects::ObjectState::effects`).
+
+**The legs against objects** (the MechLegs response's slot `0x24`,
+`0x006cec60`, for a pair the dispatch met, unless the other's response is
+a walker's too): a sphere of the legs' radius (`+0x14c`, 1.5) at length −
+radius under the legs' origin along their up, against the other's mesh
+(slot `0x60`, its vehicle LOD). Each contact (any normal:
+`*0x00a84cec` −1) is pushed along the way from it to the legs' origin
+(`*0x00a84cf0` = 1), its height × 10 (`*0x00a84cf4`) when it lies
+stepHeight or more under the legs (length − stepHeight below), (0, 1, 0)
+when that is nil; the legs' material 4250 (`*0x00a84d00`), 4251
+(`*0x00a84d04`) from a relative speed of 20 (`*0x00a84d08`); then as the
+mesh pass's contacts (the events, the shares `0x006b6cc0`, both sides).
+Its normal joins the drive's (`+0x1b8`) by axis (`0x006b6b60`: the larger
+of one sign, the sum of opposite signs), and a contact under the
+half-radius line (lower than length − radius / 2) is ground for the drive
+(the best normal by height `+0x1c4`, `+0x21c`). The drive (`0x006cdca0`)
+runs after the solve, once a tick, and resets the normal to (0, 1, 0).
+`GameWorld::legsSphere`, `Vehicle::legsObjectContact`, `Vehicle::legsDrive`.
 
 **Seats.** seatInformation is optional: a vehicle naming no seat (eu_tank,
 as_tank, the walkers, the APCs, as_ag) has a seat at each
@@ -511,11 +561,9 @@ the gunships and APCs on their pads.
 
 Not rewritten: the wing's liftRegulated, regulateToLift and
 wingToRegulatorRatio (no shipped Wing sets them, so they never act); the
-mechs' animation speed factor (`0x008ba420`, taken as 1) and effect events
-(their animation's `effect:N`): both need the walker's own animation
-system (`bundleAnimationSystem`) run in the simulation with the movement
-`0x0063ce30` gives it, which isn't decoded far enough; the yaw/pitch/roll
-PCO regulators (no shipped vehicle sets them).
+yaw/pitch/roll PCO regulators (no shipped vehicle sets them); the other
+bundle animation systems (eu_at, us_ag, the sentry gun, the deployables)
+aren't fed, as nothing of theirs reaches the simulation.
 
 ### Mobile meshes against objects (0x006dc7b0, 0x006bb050)
 
@@ -1177,8 +1225,18 @@ primary patches use it too (TerrainShader_Hi.fx `Hi_PS_FullDetail`):
 their component maps are absent, so c = (1, 0, 0) (the patch's default fill,
 0xff0000). Rewritten in `LevelRenderer::buildSurroundingTerrain`,
 `surrounding.frag` and `terrain.frag`; the secondary meshes take every
-other sample. Not from the original yet: vBlendMod (0.2 here) and which of
-farTopTilingHi / Low the surroundings take (Hi here, for seamless tiling).
+other sample. The planes' coordinates (0x100af7e0): on the primary
+TEXSCALE = (255 / patch size, -0.00615148, 255 / patch size) over the
+vertices' grid bytes, so the low-detail texture repeats farTopTiling times
+a **patch** across (not the terrain) and its x / z planes run -0.00615148 a
+metre up; on the surroundings STTEXSCALE = (1 / (patch size x secondary x
+scale), secondary y scale x 400 x 1.53787e-05 a height unit, ...) over
+world metres, and STFARTEXTILING = (farSideTiling.x x patches per side /
+(secondary x scale / 4), farSideTiling.y, the top tiling likewise, the y
+offset). Both take the same top tiling: terraindata.raw's first one
+(terrain +0x2c0) unless +0x2ee picks the second (+0x2bc; set with the
+Low_Terrain fallback). vBlendMod is the effect's default (0.2, 0.5, 0.2):
+RendDX9 never looks up BLENDMOD.
 
 **The compiled terrain.** terraindata.raw is decoded to its end
 (`terrain::parseTerrainData`, `TerrainData::meshes`; the layout is in
@@ -1189,13 +1247,58 @@ three geomorph deltas, packed normal; `0x100aed30` → `0x1014be90`) and
 detail-material index lists, the surrounding terrains' heights and
 normals (`0x100aedb0` → `0x101506d0`, their counts from the meshes
 `0x100b3fe0` generates) and the culling quadtree (`0x1009da80`). The
-primary terrain is still drawn from the heightmap at full detail: what
-picks a node's LOD (the switch distances or error metric; they are not in
-the file) and how the shader blends the three morph deltas
-(TerrainShader's geomorph) were not traced in RendDX9's draw, and whether
-a LOD 2 node's stitched edge meets a LOD 1 neighbour (the indices keep the
-full-resolution vertices) is not settled, so the LOD meshes would leave
-cracks or pop.
+vertices' heights are the heightmap's samples (row z, column x, patches
+row-major from the −x/−z corner); a vertex's first byte is the LOD at
+which a cell edge drops it (1 on the 32-quad cell lines at odd
+positions, 2 at positions 2 mod 4, else 0), the deltas are h − the next
+LOD's height there (the third always 0).
+
+**Terrain LODs** (`src/Render/TerrainLod.h`, `LevelRenderer::
+buildTerrainLods` / `updateTerrainCells`). The terrain culler (object at
+terrain +0x34c, constructor `0x1009d5a0`, `0x1009c820`): lodSwitchDistance
+100 (+0x18, taken between baseCellSize and 1000, `0x1009c9b0`),
+lod0SwitchStart / Stop 0.4 / 0.9, lod1SwitchStart / Stop 2.0 / 2.7, lod2Start
+3.0 (+0x20..+0x30), baseCellSize 64 m (+0x14; a power of two 16..512 no
+bigger than a patch, `0x1009cf40`), cullerType 3, version ≥ 26 turning
+stitching on (+0x78, `0x1009da80`). Each frame (`0x100a07a0`) s =
+max(round(zoom × lodSwitchDistance × 0.75), baseCellSize), the zoom being
+RenderView +0x1c = tan(first fov / 2) / tan(fov / 2) (`0x10066b30`); the
+culler walks its quadtree (`0x1009f210`) down to the visible cells of
+baseCellSize and gives each LOD 0 when the horizontal distance from the
+camera to its box plus the camera's height above the ground (terrain
++0x294, `0x100af7e0`) is at most s, LOD 1 up to s × lod2Start, else LOD 2.
+Then (`0x1009cfa0`) a LOD 2 cell with a LOD 0 cell among its eight
+neighbours becomes LOD 1, and a cell's stitch mask keeps a visible
+neighbour's vertices one LOD finer on that edge: bit 1 its −z edge, else 2
+its +z edge, 4 its −x edge, else 8 its +x edge. A cell is drawn as its
+tree node's range [LOD][mask] (`0x1014d700`). The vertex shader
+(TerrainShader_Shared.fx geoMorphPosition) moves y by
+`dot(selector, delta) × interp + dot(adder[edge byte], delta)`, interp =
+saturate(d² × x − y) with d² from the vertex to (camera x, height above
+ground, camera z); per LOD (`0x100af7e0`, squared since `0x101f62e8` = 1):
+x = 1 / (stop − start)², y = start² / (stop − start)² with start / stop the
+LOD's switch values × s (none at LOD 2); MORPHDELTASELECTOR the LOD's
+delta (× the y scale); MORPHDELTAADDER (0, 0, s) for every edge byte but
+(s, 0, 0) for byte 1 at LOD 1 and (0, s, 0) for byte 2 at LOD 2 — the
+stitched edge's extra vertices sit fully on the coarser line. With the
+defaults LOD 0 is fully morphed from 48 m and ends at 75 m, LOD 1 morphs
+from 150 to 158.9 m and ends at 225 m: no pops. One crack is left by the
+original: a LOD 0 cell reaches 75 + 64√2 m away and its LOD 1
+neighbours start morphing towards LOD 2 at 150 m, so with a low camera
+their shared edge parts by up to a decimetre; the rewrite also morphs a
+LOD 0 cell's vertices on towards LOD 2 with LOD 1's limits (a deliberate
+deviation). `TerrainLod_NoCracksOrPops` checks every shared edge of
+Cerbere_Landing for eight cameras. The full-detail pass (Hi_PS_FullDetail)
+fades its detail by the same interp; the farther cells are the low-detail
+pass (Shared_PS_LowDetail), which also tints the ground under the sea:
+lerp(colour, TerrainWaterColor (terraindata.raw's water colour,
+terrain +0xc4), saturate((WaterHeight − y) / 3)) — here weighted by the
+fade so it comes in with the LOD. Frame cost (release build, 1280 × 720,
+100 waited frames): Camp_Gibraltar 5.1–5.3 → 4.6–4.7 ms, Cerbere_Landing
+7.23 → 6.68 ms and 6.72 → 6.21 ms (the mesh LOD defaults below
+changed in the same run). Not done: the per-material detail lists (the
+rewrite draws all six layers in one pass), the cullerTypes other than 3,
+detailCullMaxLevel.
 
 **Water.** RaShaderWaterBase.fx's `Water` pixel shader (the PS_20 variant
 with USE_FRESNEL and USE_SPECULAR, its 2D path): the normal is two frames of
@@ -1208,10 +1311,19 @@ depth alpha × (1.5 − pow(dot(view, up), 30)) + alpha add`. The original's
 water objects carry the depth alpha and the sun's shade in a lightmap; the
 rewrite's grids (one per heightmap of the cluster, and four strips to the
 horizon for the WaterSurrounding / WaterDistant variants) derive the depth
-alpha from the sea's depth and use no shade. The frame rate (four frames a
-second at `waterAnimSpeed` 100) and the scroll (a hundredth of
-`waterScroll` a second) are the rewrite's. Cube maps are uploaded as SDL
-GPU cube textures (`GpuContext::createTexture(texture, true)`).
+alpha from the sea's depth and use no shade. The variant goes by the
+lighting quality (`0x100b0fe0`: 0-1 Water2D, 2 Water3D, 3-4
+WaterHighEnd3D); the 3D ones (drawn here) take the normal from the volume
+`Textures/watervolume.dds` (the terrain's water map name "watervolume",
+`0x100b4690`; 256 × 256 × 8, R5G6B5) at xy = P.xz / (29.13, 31.81) +
+WaterScroll × WaterCycleTime, z = WaterCycleTime × 10 + 0.7 x + 1.13 y,
+with WaterCycleTime = frac(t / waterAnimSpeed) (`0x100b17d0`; a speed of 0
+becomes 0.01, t the renderer's clock in seconds) and WaterScroll
+renderer.waterScroll unscaled (defaults 10 and 0.1 / 0.1, `0x100b4690`);
+the 2D ones run once through all the waterbump frames in 0.2 × speed
+seconds, blending each into the next, at P.xz / (99.13, 71.81), unscrolled.
+Cube maps are uploaded as SDL GPU cube textures
+(`GpuContext::createTexture(texture, true)`), volumes as 3D textures.
 
 **Culling and LODs.** The world pass culls instances against the view
 frustum (`src/Render/Culling.h`): static meshes by the sphere of their
@@ -1220,11 +1332,21 @@ the parts; skinned meshes are not culled. Terrain patches, surrounding
 patches and water grids are culled by their boxes. A geometry's LOD is
 picked by the camera's distance: `GeometryTemplate.setSubGeometryLodDistance
 <geometry> <lod> <distance>` (RendDX9 `0x1007303a`) says how far each LOD is
-drawn; meshes without distances use the rewrite's own (LOD 1 from 30 radii,
-doubling). Each LOD has its own lightmap in the atlas (`=<lod, two
-digits>=` in its key); a LOD without one is lit as an unlightmapped mesh.
-Not done: `renderer.global*LodDistanceScale` (taken as 1), the static
-meshes' `ObjectTemplate.lodDistance` High/Medium/Low.
+drawn. The switch list a mesh gets (`0x100d4d30` static, `0x100a31d0`
+bundled and skinned): entry i is the set distance, else a running value
+that starts at 50 m and grows by 50 for each default and by the set value
+for each set one (the editor's writer `0x100d3320` leaves out exactly 50,
+100, 150 ...). The LOD (`0x100bdb00` static, `0x100c3390` bundled,
+`0x101616c0` skinned) is one past the last entry whose value ×
+renderer.global{Static,Bundle,Skinned}MeshLodDistanceScale (renderer
++0x9d8 / +0x9dc / +0x9e0, 1 by default; the shipped levels' Init.con set
+1, a few 2) × the geometry quality (+0x974, 0.5 / 0.8 / 1; 1 here) is
+below the camera's distance over the zoom less the mesh's radius
+(`render::lodDistance`). Each LOD has its own lightmap in the atlas
+(`=<lod, two digits>=` in its key); a LOD without one is lit as an
+unlightmapped mesh. Not done: the skipped LODs (maxSkip3pLods,
+renderer +0x910), the static meshes' `ObjectTemplate.lodDistance`
+High/Medium/Low.
 
 **Overgrowth.** Trees placed by `overgrowth/OvergrowthCollision.con`
 (`Object.isOvergrowth 1`, `0x006ed5bb`) are drawn whole within
@@ -1274,17 +1396,26 @@ come from two places:
 Spot lights (`lightType Spot`, one shipped template) light within a cone
 about their `direction` (default +z, turned with the object): full inside
 coneAngle1, gone outside coneAngle2, both taken as half angles in degrees
-with a smooth step between (the original looks the falloff up in a
-conical attenuation texture over 1 − cos², `psDx9_SpotLight`). Directional
+with a smooth step between. Still a guess: the templates give degrees
+(BigSpot 25 / 25, ZurichLight01 20), the shaders want a cosine-space
+width c — SkinnedMesh.fx `saturate(cos − (1 − c)) / c`, LightGeom.fx
+`saturate(cos² − (1 − c))`, LightManager a conical texture over 1 − cos²
+— handed as ConeAngle from the light's slot 0x1c8 (`0x10060000` region,
+the "Spotlight" technique); where the degrees become c wasn't found (no
+degree-to-radian constant near the template's +0xd0 / +0xd4 in either
+binary). Directional
 lights (the sun) are left to the level lighting.
 
 `Object.setLightSourceMask` (`0x006ed811`; 398 statics on Cerbere_Landing
 set 6, 82 set 4) reaches the object's render object through `0x006f6f90`
 (object `+0x44`, slot `0xe0`); for bundled, skinned and the other mesh
 templates' slot 56 RendDX9 has the empty `0x100bc0b0`, static meshes store
-it (`0x100e54d0`, `+0x2b0`). What reads that store wasn't traced, so the
-masks are kept unread (a mask against affectingType bits would fit the
-data: effect lights are type 1, static lights 0). Not done: projector
+it (`0x100e54d0`, `+0x2b0`). Nothing in RendDX9 reads that field but the
+static mesh's slot 57 (`0x100e54e0`), and BF2142.exe calls that only
+from the object's getter (slot 0x134 = `0x006f6fb0`, 7 without a render
+object) for the console (`0x006ed952`); every other `+0x2b0` read in
+RendDX9 is another class's. So the mask is inert in the shipped renderer
+and the rewrite leaves it unread on purpose. Not done: projector
 textures, specular, flicker, shadows, the per-mesh light choice
 (`lightManager.maxLightsPer*Mesh`, `lightCullDistance`).
 
@@ -1316,9 +1447,15 @@ fadeOutRange of the box to its edge (Rain.fx `vsPoint`: 1 −
 One) in particleColor: as points of `min(particleSize × sqrt(1 /
 (scale.x + scale.y × distance)), particleMaxSize)` pixels of the game's
 600-line screen with the level's texture, or with lineDisplay as lines
-lineLength long along the fall. The rewrite keeps at most 8,000 (Aegis
-Station asks for 80,000); the sway's phases and the line width (a pixel)
-are its own.
+lineLength long along the fall. All particleCount particles are kept:
+RendDX9 sizes its buffer by it (`0x1011d5b0`; Aegis Station's 80,000 cost
+the rewrite about 4 ms a frame). The original moves 6 × 6 × 6 = 216 cells
+of 0.4 × emitRadius (`0x1011c810`) by the velocity (`0x1011b2a0`), wraps
+the cells (not the particles) round the box (`0x1011b720`) and draws them
+32 at a time (CELLPOSITIONS, CELLVISIBILITY); the sway is 16 deviation
+groups (DEVIATIONGROUPS) walked by randomness / maxRandomChange /
+randomDeviationAngleSpeed, not a sine. The rewrite's per-particle wrap,
+sine sway and line width (a pixel) remain its own.
 
 **Decals.** A material cell's decal template (`MaterialManager.
 setDecalTemplate`; `decal` templates: `decalTextureName`, `size` +
@@ -1333,8 +1470,13 @@ object constructor `0x0063c000` asks DecalManager (slot `0x14`, RendDX9
 `0x100e6b70`: a set of 0x40 bytes by `0x101647d0`) for a decal set of the
 object's own when its template's byte `+0xf1` has bit 4 and not `0x18`,
 keeps it at `+0x164` and releases it with the object (`0x0063c210`, slot
-`0x20`); which template property sets that bit wasn't traced, so the
-rewrite gives every vehicle (a body) one. Rewritten in
+`0x20`). The bits are the template's physics flags (their console
+accessors `0x0051d5c8`..`0x0051d9ed`): 4 hasCollisionPhysics, 8
+hasPointPhysics, 0x10 hasRotationalPointPhysics, 0x20
+hasResponsePhysics; DynamicBundle (vehicles) sets 4 by default
+(`0x0060fea0`). So every object with collision physics and neither point
+physics gets its own set; the rewrite's rule (every body a decal lands
+on) is that for the bodies a projectile can hit. Rewritten in
 `EffectManager::spawnDecal`, `decal.vert/.frag`; not done: the
 normal-mapped technique, clipping decals to the geometry
 (`decalGeomClipAngle`).
@@ -1823,15 +1965,11 @@ then moves the kit to the position.
   last move the server took, the position (3 floats; it also becomes the
   reference for delta-coded positions, `0x006874f0`), the ghost id, an
   optional second ghost and vehicle, then networkable state. A client
-  without that object skips it by the length. With it: 1 bit (recorded
-  for prediction), a 3-bit history slot, every group of the ghost (and
-  the second ghost) in mode 3 (the prediction's mode: the Soldier reader
-  `0x005fcdb0` takes raw floats and 16-bit angles there, RotationalBundle
-  16-bit angles; PlayerControlObject, Engine and Spring differ too), a
-  10-bit length and the control object's own state (its vtable `0x1cc`).
-  The rewrite's client keeps the record's position and leaves the mode-3
-  state undecoded (`ControlObjectRecord::rest`): only prediction of the
-  client's own soldier needs it.
+  without that object skips it by the length. With it: 1 bit (a fresh or
+  a relative state), a 3-bit history slot, every group of the ghost (and
+  the second ghost) in mode 3, a 10-bit length and the player's own state
+  (the connection's player, vtable `0x1c8` writes, `0x1cc` reads). See
+  [the control-object record](#the-control-object-record-and-prediction).
 - Each update (`0x0057fce0`) has 2 bits kind and a 16-bit ghost id. Kind
   1 updates: 1 bit (full), the state's length and that much state. Kind 3
   removes the ghost; kind 0 does nothing; kind 2 is an error.
@@ -1973,6 +2111,8 @@ Soldier (21-bit mask):
 
 - health as 8 bits of maxHitPoints and a bit (0x40); the EMP level (0x80);
   two values 0-4 (0x20);
+- in mode 3 (the control-object record) the soldier's movement goes at
+  full precision: see [the control-object record](#the-control-object-record-and-prediction);
 - dead (0x10000): the ragdoll (`0x008a9ce0`): a 9-bit length, the first
   particle's position as floats and the others as 3-bit-mode deltas of
   0.01 from it. Nothing else follows. (A seated soldier's state goes with
@@ -1997,8 +2137,9 @@ Vehicle parts:
 - **RotationalBundle** (12-bit mask): rotation yaw, pitch, roll in degrees
   (1, 2, 4; 12 bits of ±360), their speeds (8, 0x10, 0x20; ±16 maxSpeed),
   0x40 a 16-bit ±41, and under a PlayerControlObject the ignore-parent
-  rotation (0x200-0x800 angles, 0x100 a 14-bit quaternion). The writer
-  only sends the angles an input drives. Values within one step of 0 read
+  rotation (0x200-0x800 angles, 0x100 a 14-bit quaternion). In mode 3
+  every angle and speed takes 16 bits (`0x006015a0`: `(mode == 3) * 4 +
+  12`). The writer only sends the angles an input drives. Values within one step of 0 read
   as 0 (`0x00593c70`).
 - **Engine** (11-bit mask): the gear (2; `0..numberOfGears`), rotation
   speeds z and x (4, 8; 16 bits of 1.25 x the rotation limit), a target
@@ -2243,7 +2384,8 @@ server is `src/Net/GameServer` (the protocol) and `src/Main/HostedGame`
 - **Moves**: each move index is taken once (the client repeats its last
   three, `0x00590450`); the move becomes the player's input as `0x005838d0`
   does (the axes, the trigger bits; the mouse look turns 5° a unit,
-  `0x0058a6d0`).
+  `0x0058a6d0`), through `net::soldierInputFromMove`, which the client's
+  prediction uses too.
 - **Joining a round** follows the game server's PostRemote handler
   (`0x004b0690`): the settings (data block 0), the map list (5) and the
   level (2) as soon as the client has joined; on its LoadComplete (6/2,
@@ -2256,9 +2398,10 @@ server is `src/Net/GameServer` (the protocol) and `src/Main/HostedGame`
   soldier (or the seat it is in, with the vehicle's ghost), then the
   players' networkables and the ghosts whose state changed (every ghost
   again after two seconds), most important first (the client's own) and
-  the rest in turn, up to about 1100 bytes. The rewrite sends each ghost's
-  root group (positions, the orientation quaternion, hit points, control
-  points' flags) and leaves the other groups' masks empty.
+  the rest in turn, up to about 1100 bytes, with every group of each
+  ghost (below). The record carries the prediction state (mode 3 and the
+  player's own state, see
+  [the control-object record](#the-control-object-record-and-prediction)).
 - **Client requests**: SelectKit (`0x0050b010`), the spawn point (6/6), a
   name (ChangePlayerName, taken only for the sender's own player,
   `0x0050bb90`; the rewrite's client sends its soldier's name after its
@@ -2266,17 +2409,144 @@ server is `src/Net/GameServer` (the protocol) and `src/Main/HostedGame`
   chat lines (the StringBlock, sent on to everyone with the sender's id,
   `0x004a5460`).
 
-Not rewritten: the control-object record's prediction state (mode 3,
-`0x00580cd0`: a recorded bit, a 3-bit history slot, every group of the
-control object in mode 3, whose readers differ from mode 2 for the Soldier
-`0x005fcdb0`, RotationalBundle `0x00602070`, PlayerControlObject
-`0x00605b00`, Engine `0x00609340` and Spring `0x00605320`, then the object's
-own state through its vtable `0x1cc`). The rewrite's server leaves it empty
-and its client takes the server's position, so a joined soldier moves at
-the server's pace rather than predicted. Team changes (6/7) after joining
-aren't taken (the rewrite's round can't move a player between teams), and
-a client that leaves keeps its player in the round for the next one
-(GameWorld has no way to remove players).
+- **Moves are stepped one a tick**, in order: a client's moves wait in a
+  queue of at most four (past that the oldest go; the depth is
+  OpenBattlefield2's reading of BF2's `GameServer::clearPlayerActions`, not
+  traced in BF2142.exe), and after the queue runs dry it waits for two before
+  stepping again, so a move a tick late doesn't leave a tick stepped with
+  none. The record's last move is the one the round stepped last.
+- **Every group of every ghost** goes out, not only the root's: a
+  RotationalBundle's angles (the turrets' yaw and pitch, the steering, the
+  rotors, as the round poses the part), a Spring's offset (the wheels'
+  suspension), a seat's occupant (a seat without cameras carries its
+  soldier's state), a vehicle's velocity and angular velocity, and the
+  armoured parts below it (0x800000; the rewrite's vehicles keep their
+  armour on the root, so they go as whole). The client poses a joined
+  game's vehicles from them (`RemoteWorld::partPose`). Engines, MechLegs and
+  a seat's weapon fields stay empty: the round doesn't model them.
+- **Team changes** (6/7, `0x004c1dc0`; the server's handler `0x004b0690`
+  case 7 hands it to the game logic's slot `0x60`) are taken while the
+  player has no soldier (`GameWorld::setPlayerTeam`: the squad and the
+  command left, PlayerChangeTeams for the scripts); `--connect --play 1|2`
+  asks for the team before spawning.
+- **Map changes and new rounds** keep the connections
+  (`HostedGame::changeLevel`; `bf2142 --host --maps
+  level[:mode[:size]],...` plays a list): every client gets the map list and
+  the level block again, loads it and answers LoadComplete, and the join's
+  database follows (a new player of the client's team, the new round's
+  objects), as the original's map change does (`0x004abbc0(-1)` broadcasts
+  the level block and counts a pending load per connection). A round on the
+  same map is the same level again. The client clears its players and
+  ghosts on the new level block and sends no moves until its new
+  CreatePlayer (`0x00590740`).
+- **Kicks** (`HostedGame::kickPlayer`): KickBan (0x37, written by
+  `0x0050cf30`: the player, banned, a byte) to every playing client, whose
+  handler (`0x0050cfd0`) posts message 2/0x4d for the HUD, then the
+  disconnect, sent three times as `0x0068e520` does. The client prints who
+  left and why, and a disconnect's reason (`net::disconnectReason`).
+
+A client that leaves still keeps its player in the round for the next one
+to join (GameWorld has no way to remove players).
+
+### The control-object record and prediction
+
+The ghost block's record (written by `0x00580830`, read by `0x00580cd0`)
+carries, after its 12-bit length:
+
+| Field | Bits | Notes |
+|---|---|---|
+| last move | sign + 31 | the last move the server stepped |
+| position | 3 floats | the control object's; the stream's reference for delta positions (`0x006874f0`) |
+| ghost | 16 | the control object's ghost (a soldier, or the seat's ghost) |
+| second ghost | 1 + 16 | `+0x20de` |
+| vehicle | 1, then 1 + 16 | only for a soldier control object (`0x0057f060`): whether it is in a vehicle, and its ghost; a client whose own copy of the soldier sits elsewhere skips its own state |
+| fresh or relative | 1 | 0: a fresh state, which the client keeps in the history slot (`0x0057f750` via `0x00580800`: 8 slots of `0x402` bytes at the ghost manager's `+0x20f4`); 1: written against a slot the client has (`+0x20f0`, while `+0x20fc` counts down; `0x0057f9b0`) |
+| slot | 3 | `(+0x20f8 + 1) & 7` for a fresh one |
+| groups | | every group of the ghost in mode 3, then the second ghost's (`0x0057f420` / `0x0057f720`, `0x0057f9f0`) |
+| own state | 10 + n | the length, then the player's own state (below); a reader taking fewer bits skips the rest, more fails the block |
+
+Without the record's ghost the client skips it all by the 12-bit length.
+Mode 3 differs from mode 2 in three readers only; the others take the same
+bits and apply them differently (the seat's `0x00605b00` skips its "is the
+seat mine" check):
+
+- **Soldier** (`0x005fb8c0` / `0x005fcdb0` with the last argument 3; the
+  fields come from `0x005fc1a0`): the velocity (0x100) in 1 mm/s steps
+  instead of 1 cm/s, then three more node vectors: 0x200 the acceleration
+  the next integration takes (node slot `0x74`, set back with `0x78`), 0x400
+  slot `0x88` (`0x8c`; meaning not established) in 0.1 mm, 0x80000 the
+  velocity change for the next tick (`0xc4` / `0xc8`) in 1 mm; the four
+  angles as raw floats: the body's yaw (`+0x25c`), the look's twist ahead of
+  it (`+0x278`), the twist still to catch up (`+0x280`) and the aim
+  (`+0x270`); the leans' 16 bits instead of 10 (`+0x264`, `+0x260`: the
+  eased throttle and strafe); the stamina's 7 bits instead of 5, then the
+  sprinting bit (`0x005fb1f0`, PCO vtable `0x100` / `0x104`); mask 0x40000,
+  -1..1 in 7 bits (the soldier's `+0x18c` interface, vtable `0x90` /
+  `0x94`; meaning not traced). The server's mask is every bit but the
+  ragdoll's.
+- **RotationalBundle**: 16 bits an angle and speed.
+- **A seat's occupant**: the seat hands the mode to the soldier's reader.
+
+The player's own state (`0x00594cc0` writes, `0x00596ed0` reads):
+
+| Field | Bits | Player field |
+|---|---|---|
+| a flag | 1 | vtable `0x210` (the reader calls `0x20c(1)`) |
+| four flags | 4 | `+0x16a`, `+0x168`, `+0x169`, `+0x16b` |
+| a value | 8 | `+0x14c` (vtable `0x228`) |
+| the hit's direction | 1 + 8 | `+0x1d0`, -pi..pi; sent for two records after a hit (`+0x1d4`); a new one posts message 2/0x39 (the hit indicator) |
+| the hit's strength | 1 + 8 | `+0x1d8`, 0..25, twice too (`+0x1dc`); handed to the control object's vtable `0x1b4(0)` slot `0x4c` |
+| per weapon group 0-2 (with a PlayerControlObject on the control object's chain) | 1, then 5 + 2 + 2 + 2 + 11 + 10 (+ 8) | active (`+0x1e0 + g`); the weapon's index in the group + 1 (`0x005a98b0`), three 2-bit values (`+0x208`, `+0x238`, `+0x1fc`), the rounds + 1 (`+0x1e4`), the magazines + 1 (`+0x214`), and for a firearm whose interface `0x94c0` slot `0x30` holds (`0x005c1360`: its template's vector at `+0x2c8`, set by `0x00522125`, has y > 0) a 0..6 (`+0x22c`) |
+| group 0's component `0xc506` | 1 + 8 | 0..1 (a template component of class `0x94e5` with its `+0x48` flag: slot `0xcc`) |
+| spawn tick | 32 | `+0xdc` |
+| man down | 1 | `+0xe0` |
+| health | 1 + 8 | the soldier's hit points over maxHitPoints, signed |
+| three flags | 3 | `+0x124`, `+0x19f`, `+0x1a0` |
+| commander | 1 | `+0x10c` |
+
+`src/Net/Networkables` reads and writes both modes and the own state,
+`GhostLayout`'s `ControlState` the record's state; `RemoteWorld` decodes it
+with the ghost's layout (`controlState()`), and `HostedGame` writes it
+every tick: always a fresh state, in the next slot.
+
+After reading the record, `0x00580cd0` hands the stream, the ghost, the
+last move and the server's tick to the local player's interface `0x1d4c2`
+(`DAT_00a1b5d8` slot `0xc`, then its slot `0x10` with 1/30 s,
+`0x005811ee`-`0x0058122a`): the moves the server hasn't taken yet run
+again on top of its state. The rewrite's client does that with the shared
+soldier simulation (`src/Main/Prediction`, `SoldierPrediction`): each move it
+sends (one per simulated tick, `GameClient::simulatedTick`, as
+`0x004b3df0` sends after each tick) is stepped once with
+`game::SoldierControl` and `physics::SoldierBody` against the round's
+ground and static collision, as `GameWorld::stepSoldier` steps the
+server's, and remembered with the state it left. A record for move L puts
+the state remembered for L where the server's differs (every field mode 3
+carries; the timers and contacts it doesn't carry stay the client's own)
+and steps the later moves again. The soldier is drawn and seen from the
+prediction. The replay's own steps in BF2142.exe (the `0x1d4c2`
+interface's slot `0x10`) weren't traced, and neither are a vehicle's
+moves predicted: a seat's record brings the vehicle's mode-3 state, which
+the client takes as it is (GameWorld steps vehicles only as part of its
+round's physics). The moves a move-to-input conversion shares
+(`net::soldierInputFromMove`) make the server and the prediction step the
+same input.
+
+Measured on 127.0.0.1: the in-process test (`NetHost_PredictionAndSession`:
+a client walking, turning, sprinting and jumping on a slope for eight
+seconds) corrects the prediction by 1.3 mm on average (at most 9 cm,
+5 of 240 records over 1 cm) and sees the host's bot within 0.1 mm and
+0.002 of its health at each update's tick; two processes (`bf2142 --host
+... --bots 6 --simulate 90`, `bf2142 --connect 127.0.0.1 --play 2 --walk
+--simulate 40` on Cerbere_Landing, the client walking, turning, sprinting
+and jumping with `--walk`): 1189 records, the prediction corrected by
+0.1 mm on average and at most 1.7 cm (one record over 1 cm); the six bots'
+positions as the client saw them equal the host's to the printed
+centimetre, their health 1.00 on both. While the client is still loading
+its level its game doesn't tick, so its moves go up only on the
+connection's own timer (every 200 ms) and the server steps the ticks in
+between with the last move held: those records correct it by tens of
+centimetres until the client's loop runs. `bf2142 --connect ... --verbose`
+prints any correction over half a metre.
 
 ### Asking servers directly (QR2) and the LAN search
 
@@ -2714,8 +2984,10 @@ rewrites them as HUD quads under the HUD:
 - The distance shown changes only by more than 0 / 2 / 5 / 9 m below 25 /
   250 / 400 m / beyond (`0x100f0be0`).
 
-Guesses: ColorArray's colours (white, red, blue, green, yellow), the
-soldier's origin 1 m over its feet, the vehicle height (4 m; RendDX9 asks
+ColorArray for player and object tags (types 0 and 3) is the table at
+`0x102112f8` the NametagManager's constructor fills (`0x100f24c0`):
+white, red (0.87, 0.094, 0.094), blue (0.254, 0.552, 0.89), green (74,
+227, 37 / 255), yellow (1, 1, 0). Guesses: the soldier's origin 1 m over its feet, the vehicle height (4 m; RendDX9 asks
 the render object), the bar's place. Not done: ranks and veteran icons
 (`ICRank`, `ICVeteran`), the radio calls' icons (medic, ammo, repair,
 revive: events 0x33-0x37 within maxCallDistance 150), orders and requests
@@ -3316,6 +3588,85 @@ once the branch is full), `NextUnlockIconPathString`,
 (`Kit%iBranch%iSelected`) too. `selectNextUnlock` / `selectUnlockItem`
 (`0x007b8f30`, `0x007b92c0`) make an unlock the soldier has its branch's
 choice.
+
+### Comm roses and the radio
+
+`src/Main/HudMenusComm` (tests in `tests/HudMenusTest.cpp`). The HUD
+manager keeps a radio interface per rose (class vtable `0x009b6528`,
+constructor `0x007b88e0`), each named and sized by `0x0075e1f0` (slot 0,
+`0x007b7070`): Radio 11, RadioVehicle 11, SquadLeader 11, Squad 11,
+Lonewolf 0, Commander 11, DemoCamera 3, DemoRecorder 9, Camera 3.
+`Menu/HUD/HudSetup/Communication/<Rose>.con` fills them:
+`<name>Interface.setStringMap Interface_1:<n> <text id> "<command>"`
+(slot `0x20`, `0x007b8310`: the text localised into the map at `+8`, a
+non-empty command into the map at `+0x14`) and `setVariableMap` (slot
+`0x24`). The keys are `Interface_<path>:<n>`, the path (`+0x2c`) "1" at
+the top.
+
+- **Opening** (slot `0x14`, `0x007b7130`): the path back to "1", each
+  entry's text and value into `<name><n>String` / `<name><n>Variable`
+  (its last line clears `Radio%iMoseOver`, a slip in the name, after the
+  counter went up, so the real `Radio<n>MouseOver` keep their values). Q
+  (`c_GIRadioComm`) opens Radio on foot and RadioVehicle aboard; T
+  (`c_GITacticalComm`) Commander, SquadLeader, Squad or Lonewolf by the
+  player's role (the HUD manager's menu states, hidden by `0x0079ab90`:
+  5/6 radio, 7 spotted, 4 Squad, 8 SquadLeader, 9 Commander, 3
+  Lonewolf), `<name>InterfaceShow` 1 and the others 0, while the key is
+  held, with the pointer.
+- **`RadioInterface.mouseOver <n>`** (slot `0x10`, `0x007b70b0`): every
+  rose's buttons call it (event 1): `Radio<n>MouseOver` 1 for that entry, 0
+  for the rest.
+- **`<name>Interface.selectOrder <n>`** (slot `0xc`, `0x007b73d0`): if the
+  level below (`Interface_<path>:<n>:<i>`) has texts, they replace the
+  entries and the path goes down; else the entry's command runs through
+  the console with a new line (the HUD manager's slot `0x420`) and the
+  rose closes (`+4`).
+- **The Radio.* methods** (the HUD manager's slots): `callForMedic`
+  (`0x198` → `0x007c7c10`), `callForAmmo` (`0x1a0` → `0x007c7c70`) and
+  `callForRepair` (`0x1a4` → `0x007c7ca0`) hand the game's slot `0xd8`
+  (`0x0042d220`) the codes 0x33, 0x34 and 0x35: "medic" on
+  TCLocalTeamMedic, "need_ammo" and "need_repair" on TCTeam (it also
+  sends the code to the server, whose use isn't rewritten).
+  `setSpottedMenuActive` (`0x268`, the middle button's alternate command)
+  shows the spotted rose (`SpottedInterfaceShow`, whose buttons say
+  `game.radioMessage TCTeam <kind>_spotted`). `sendSpottedMessage <bool>
+  <type>` (`0x17c`, `0x007c8160`) spots the HUD's crosshair object
+  (`+0x1f0`, through the game's slot `0xd4`) and with 1 says it on the
+  chat: the HUD's crosshair object and the spotting list aren't
+  rewritten, so it only closes the rose.
+- **`game.radioMessage <TargetChannel> <voice>`** (`0x00423e61` → the
+  client's slot `0x50`, `0x004b2b60`: the voice's index in the game
+  logic's radio table, the spam check, event 0x14 to the server, a local
+  echo): the local player's message (`GameWorld::radioMessage`). The
+  target channels (`0x0042d4a0`): TCGlobal 0, TCTeam 1, TCCommander 2,
+  TCSquad 3, TCSquadLeader 4, TCSquadId 5, TCLocalTeamMedic 6,
+  TCLocalGroundVehicle 7, TCLocalAirVehicle 8, TCLocal 9, TCLocalTeam 10,
+  TCVehicle 11, TCServerMessage 12, TCServerTeamMessage 13, TCPlayer 14,
+  TCLocalRevive 15, TCAutoLocalRevive 16, TCTeamAndLocalEnemies 17,
+  TCSquadAndLocalEnemies 18.
+- **Who hears** (the server's `0x004a6f70`, its `this` the game server,
+  whose `+0x108`, `+0x10c`, `+0x110`, `+0x114` are the squared distances
+  10000, 225, 10000, 10000 from `0x004b2330`; distances between the
+  controlled objects): Global everyone but the sender; Team the team
+  (TeamAndLocalEnemies anyone within 15 m too); Commander the team's
+  commander and squad leaders; Squad the sender's squad id, not the
+  commander (two players in no squad share id 0), same team
+  (SquadAndLocalEnemies anyone within 15 m too); SquadLeader the leader of
+  the message's squad; SquadId that squad; LocalTeamMedic / LocalRevive
+  teammates within 100 m with the medic's means (the soldier's interface
+  `0xc4d7`, `0x00585af0` → its kit, `+0x228`, whose `+0x74` slot `0x38`
+  flag's setter wasn't traced: taken as a kit with an RTHeal gadget),
+  else as AutoLocalRevive, anyone within 15 m; Local anyone within 100 m;
+  LocalTeam teammates within 100 m and enemies within 15 m;
+  LocalGround/AirVehicle anyone within 15 m (ground only), else teammates
+  of the sender's squad or riding a vehicle whose template's category
+  (interface `0xc4c4` slot `0x24`, `0x0059d880`: vehicleCategory) is
+  VCLand, VCAir or VCHelicopter within 100 m; Vehicle those in the
+  sender's vehicle; ServerMessage everyone; ServerTeamMessage the
+  message's team; Player the message's player. The bots take theirs (see
+  Bots: Radio); the radio's text and sound for the local player (the
+  client's `0x0042e0c0` → `0x0042d7f0`, the voice table's text and the
+  `_important` variants) aren't rewritten.
 
 ### Chat, kill messages, VOIP and the map vote
 
@@ -4216,7 +4567,11 @@ below (the explosive bundle child's 20 … 1), so the explosions run from the
 destruction to −36 %; the percent passing −38 (`*0x00a7938c`) sends
 ECGameLogicGLTitanCoreExplosion (event 0x14, category 0, `0x004d69d0`)
 while the round runs or has ended, 38 s after the destruction (no listener
-of it was found; the rewrite notes it in `TitanInfo::coreExplosion`). Once
+of it was found: the category-0 listeners test their event id themselves,
+like the UAV manager's `0x005a20a0`, and neither a `param_3 == 0x14` test
+nor a `case 0x14:` of one on category 0 exists among them; the sites with
+`case 0x14:` are other switches. The rewrite notes it in
+`TitanInfo::coreExplosion`). Once
 timeToStayAsWreck has passed or the hit points reach −wreckHitPoints the
 countdown starts (`+0x64`) and timeToStayAfterDestroyed (0) later the
 server deletes the object (`0x00651db0`; `0x004a5f90` only logs a Titan
@@ -4287,7 +4642,10 @@ rounds over about 1,111 pass: the silo missiles (110,000), static_aa
 (2,500) and the EMP strike (3,000); bullets and rockets stop at the
 shield. In the rewrite (the projectiles' hit, `Projectile::damageScale`)
 the way out is the first face of the same material on along the round's
-way. (The call site of `0x005eaca0` wasn't found; its last two arguments
+way. (The call site of `0x005eaca0` wasn't found: no virtual call through
+slot `0x1c` in `0x00400000`–`0x00900000` pushes its ten arguments, the
+only ones with ten or more, `0x00745945` and `0x0081749f`, being the
+menus' and the network's; its last two arguments
 are read as the damage left and the round's damage.)
 
 **The guns' seats.** The six gun hubs (eu_groundcanone3*_hub and
@@ -4316,7 +4674,9 @@ at −1, never spent, `0x005d0650` / `0x005d06a0`) are objects of their own
 on its rear deck, carried with it (`Titan::carried`). A held spawn is put
 at its spawner each tick, so it rides along. The supply's vehicle types
 (`0x005d1710` reads each vehicle's through its template's interface
-`0xc4c4`, slot `0x24`, not resolved) are taken as `vehicleCategory`.
+`0xc4c4`, slot `0x24`: `0x0059d880`, the template's `+0x3d0`, which
+`ObjectTemplate.vehicleCategory` sets through slot `0x20`, `0x00504086` /
+`0x0059d870`) are its `vehicleCategory`.
 
 **Missile silos** (`isMissileSilo`, missile_silo_v2): the auto controller
 CP_CANNON (AI/AutoControllers.ai: fov 179, viewDistance 2000,
@@ -4505,8 +4865,30 @@ The urgencies:
   7, need_ammo 10, ..., req_new_order 14, defend 15, attack_position 16,
   move 17) with its sender, a newer one replacing the older, for its
   receive time to live (`aiComm.addAIRadioMessage`, AI/AIRadioMessages.ai:
-  20 s for medic and need_ammo; 0x100a7130). `BotManager::radio` hands
-  one in; who hears the radio is the game's matter (not traced).
+  20 s for medic and need_ammo; 0x100a7130). Who hears is the game
+  server's 0x004a6f70 (see the HUD's comm roses: `GameWorld::hearsRadio`);
+  `BotManager::update` takes the bots' share of what the world heard.
+  The bots' own radio, the comm object's sends (0x100a7860): a type is
+  queued `delay` s on unless its next time (+0x3c) hasn't come, which
+  queuing sets the type's max send period on (+100: the
+  addAIRadioMessage column); the comm's update (0x100a7af0, every bot
+  tick) sends what is due (0x100a57c0 → the AI game effector's
+  0x00896270, the AI's channel mapped: 0 TCLocalTeamMedic, 1
+  TCLocalGroundVehicle, 2 TCLocalAirVehicle, 3 TCSquad, 4 TCCommander, 5
+  TCSquadLeader, 6 TCLocalTeam, 7 TCVehicle, 8 TCPlayer) unless one of its
+  type was heard within the send period. The senders rewritten: the
+  low-health call (0x100a7910: unless airborne, +0x140, or in an ITAir
+  vehicle over 3 m/s, the bot's object between 0 and half its health —
+  0.75 aboard — "medic" on channel 0 on foot, "need_repair" on 6 aboard;
+  a squad member whose AI player's slot 0xf4 answers 1, and the bot's
+  +0xfc, set by the game's AI event 0x1004e220, hold it back: neither is
+  traced, so neither does here); the get_in answers (an unanswered
+  get_in whose first sender rides a vehicle, marked answered by
+  0x100a61c0: a choice that isn't that vehicle answers "negative" within
+  15 m of it, 0x1006be70; heading for it, "roger_that", 0x1006dac0; both
+  channel 6, 1 s on); a hornless driver's "PLAYER_TACTICS_gogogo" to the
+  soldier in the way (0x100a5c00 → 0x100a5990, at once).
+  `BotManager::radioSent` lists what a bot said.
 - **Curves:** `ai::fuzzy` (0x100cbce0, table 0x100cb6f0) takes the entry
   at trunc(100 x); `ai::scurve` (0x100cc930, table 0x100cc350)
   interpolates its own S-shaped table.
@@ -5012,10 +5394,30 @@ Avoid.
   the line clear, HeliAimAt (0x100e5590: margin 40; too steep, fly on
   150 m; lined up within 10° turning under 0.1 rad/s, the nose follows the
   aim with a feed-forward) and the trigger every 60 / round((1 − (1 −
-  skill) 0.8) round(1.5 rpm)) s. Not decoded: the run condition 0x100dd3e0,
-  the aim's lead point (the target's position here), the on-target test
-  0x100dcab0 (here: lined up), BBFire3d's urgency (the ground one's here),
-  BBChangeLandingCraft (BBChange's here).
+  skill) 0.8) round(1.5 rpm)) s. The runs only inside the combat area:
+  the plan's If (0x100d29f0) on 0x100dd3e0 (type 9; its 150 at +8 is
+  never read), which asks IAITerrain slot 0x1c (BF2142.exe 0x008a0380 →
+  the combat area manager's 0x004ca5d0: the areas that apply to the
+  player, 0x004d9d50 — its team or none on either side, binding its
+  controlled object's vehicleCategory — inside a plain one and in no
+  cut-out; with none, the heightmap's bounds), else HeliMoveToObject at
+  the target, margin 25 (`GameWorld::insideCombatArea`). Not rewritten:
+  HeliAimAt's lead (0x100dcf10: 0x100fa060 with the target's offset from
+  the gun and its Mobile velocity, then 0x100fa6f0, 1572 bytes iterating
+  the launch angle in round(8 p + 2) steps with the round's drag,
+  0x100fa100, and gravity, keeping the direction, impact point and time
+  at +0xb8, +0xc4, +0x110) and the trigger condition built on it,
+  0x100dcab0 (evaluated by 0x100dcb00: the gun's forward within
+  atan(0.0125 d) of that direction and the impact point within d of the
+  target's position predicted for that time, 0x100fbad0; d and a
+  closest-approach flag from the weapon adaptor's slots 0x94 and 0x104,
+  not traced): the aim is the target's position and the trigger the aim
+  lined up. BBFire3d's urgency (behaviour vtable 0x10116d40 slot 9,
+  0x1007e1b0, 2309 bytes) and BBChangeLandingCraft's (vtable 0x10116970,
+  0x1006f460, 2088 bytes: the transport's seats weighed by 0x100d3e70 with
+  the landing checks 0x1006f3c0 and 0x100bf800 at 15/50 m and 10/40 m,
+  and its bail_out radio) aren't rewritten: the ground Fire's and
+  BBChange's stand in for them.
 - **Measured** (flat ground, `Vehicles_BotPilotsFlyToAPointAndHover`):
   the gunships fly 156 m to a point 25 m up and stop on it within 1 m; the
   transports reach it (1.5 m) from 22 m/s and wander round it within 35 m
@@ -5122,7 +5524,11 @@ and walks there.
 - **Explosives and the weapon choice:** the rays bisect
   `GameWorld::lineOfSight`. `+0x248` is set by the fire plan (0x100795a0)
   when it adds a move to the order's spot (0x100d11c0; 0x100775f0 tests
-  the spot set); that move isn't rewritten, so `+0x248` stays clear.
+  the spot set): bot vt+0x254 (slot 149, 0x1009b370) with 1, from two
+  places in the 14.7 KB plan builder 0x100795a0, on conditions of its
+  locals (none, with no order and the target out of sight); cleared by
+  the statement 0x100d4e20 and the bot's resets (0x10097..). That builder
+  isn't rewritten, so `+0x248` stays clear.
   Stand-ins: the target's Mobile slot 0x78 (0x008a1960: a soldier's
   interface 0xc4c5 slot 0x108, not traced) is its speed; a human's
   attention on the bot (the sensing agent's stamp 0x100eb7f0, whose
@@ -5139,9 +5545,10 @@ and walks there.
   target condition 0x100dc730 is taken as the aim no longer lobbing.
 - **Change:** the infantry-map reach test for vehicles (the Mobile's
   per-map points +8/+0x1c/+0x30 aren't kept: every vehicle counts), the
-  room test for ITAir vehicles that aren't ITHelicopter (0x1006c3e0), the
-  get_in answer radio (0x1006be70) and the low-health bail_out radio
-  (0x100a5990).
+  room test for ITAir vehicles that aren't ITHelicopter (0x1006c3e0) and
+  the bail_out radio when the bot takes the way out (0x100a5990, its
+  health at or under the IAIGame slot 0x68 value + 0.1; that slot isn't
+  traced). The get_in answers are rewritten (see Radio).
 - **Soldier radius:** the object's size through the AI adaptor (vt+0xdc
   → `0x008a3d40` → the object's vt+0x90, for the soldier `0x006f6b90`):
   its collision mesh's radius (`+0x4c`, interface 0xcaa32, the instance
@@ -5175,9 +5582,7 @@ and walks there.
   the behaviour plans again. 0x100c91c0 also hands the bot to the game
   (IAIGameEffector vt+0x24 → 0x0089e940 → GameLogic slot 0x58), whose
   slot is `0x008924f0`, returning 0: it does nothing in this build.
-- **Assists:** basicTemp is read as the AI object's +0x14; the radio's
-  hearers are the caller's (`BotManager::radio`); the rewrite's soldiers
-  have no comm rose that calls it.
+- **Assists:** basicTemp is read as the AI object's +0x14.
 - **Avoid:** r is the vehicle's AI radius; the grenade warning's event
   is checked every tick.
 - **Keeping distance:** while the Fire pattern walks the bot towards its

@@ -93,6 +93,12 @@ std::unique_ptr<GpuContext> GpuContext::create(SDL_Window* window, std::string& 
 		cube.cube = true;
 		cube.faces.assign(6, {{1, 1, {0xff, 0xff, 0xff, 0xff}}});
 		context->m_whiteCube = context->createTexture(cube, true);
+		texture::DdsTexture volume; // two slices: a 3D texture
+		volume.format = texture::TextureFormat::RGBA8;
+		volume.width = volume.height = 1;
+		volume.depth = 2;
+		volume.faces.assign(1, {{1, 1, std::vector<uint8_t>(8, 0xff), 2}});
+		context->m_whiteVolume = context->createTexture(volume);
 	}
 	context->flushUploads();
 	return context;
@@ -108,6 +114,7 @@ GpuContext::~GpuContext()
 	SDL_ReleaseGPUTexture(m_device, m_white);
 	SDL_ReleaseGPUTexture(m_device, m_black);
 	SDL_ReleaseGPUTexture(m_device, m_whiteCube);
+	SDL_ReleaseGPUTexture(m_device, m_whiteVolume);
 	SDL_ReleaseGPUSampler(m_device, m_repeatSampler);
 	SDL_ReleaseGPUSampler(m_device, m_clampSampler);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_meshPipeline);
@@ -179,8 +186,9 @@ bool GpuContext::createPipelines(std::string& error)
 	const auto build = [&](const unsigned char* vs, size_t vsSize, const unsigned char* vsMsl, size_t vsMslSize,
 						   const unsigned char* fs, size_t fsSize, const unsigned char* fsMsl, size_t fsMslSize,
 						   uint32_t fragmentSamplers, uint32_t fragmentUniforms,
-						   const char* name) -> SDL_GPUGraphicsPipeline* {
-		SDL_GPUShader* vertex = loadShader(m_device, SDL_GPU_SHADERSTAGE_VERTEX, vs, vsSize, vsMsl, vsMslSize, 0, 1);
+						   const char* name, uint32_t vertexUniforms = 1) -> SDL_GPUGraphicsPipeline* {
+		SDL_GPUShader* vertex =
+			loadShader(m_device, SDL_GPU_SHADERSTAGE_VERTEX, vs, vsSize, vsMsl, vsMslSize, 0, vertexUniforms);
 		SDL_GPUShader* fragment = loadShader(m_device, SDL_GPU_SHADERSTAGE_FRAGMENT, fs, fsSize, fsMsl, fsMslSize,
 			fragmentSamplers, fragmentUniforms);
 		SDL_GPUGraphicsPipeline* pipeline = nullptr;
@@ -200,10 +208,10 @@ bool GpuContext::createPipelines(std::string& error)
 		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, 5, 1, "mesh");
 	m_terrainPipeline = build(k_terrain_vert_spv, k_terrain_vert_spv_size, k_terrain_vert_msl,
 		k_terrain_vert_msl_size, k_terrain_frag_spv, k_terrain_frag_spv_size, k_terrain_frag_msl,
-		k_terrain_frag_msl_size, 11, 2, "terrain");
+		k_terrain_frag_msl_size, 11, 2, "terrain", 2);
 	m_surroundingPipeline = build(k_terrain_vert_spv, k_terrain_vert_spv_size, k_terrain_vert_msl,
 		k_terrain_vert_msl_size, k_surrounding_frag_spv, k_surrounding_frag_spv_size, k_surrounding_frag_msl,
-		k_surrounding_frag_msl_size, 3, 2, "surrounding terrain");
+		k_surrounding_frag_msl_size, 3, 2, "surrounding terrain", 2);
 	m_undergrowthPipeline = build(k_undergrowth_vert_spv, k_undergrowth_vert_spv_size, k_undergrowth_vert_msl,
 		k_undergrowth_vert_msl_size, k_undergrowth_frag_spv, k_undergrowth_frag_spv_size, k_undergrowth_frag_msl,
 		k_undergrowth_frag_msl_size, 3, 1, "undergrowth");
@@ -265,7 +273,7 @@ bool GpuContext::createPipelines(std::string& error)
 	}
 	info.depth_stencil_state.enable_depth_test = true;
 	m_waterPipeline = build(k_water_vert_spv, k_water_vert_spv_size, k_water_vert_msl, k_water_vert_msl_size,
-		k_water_frag_spv, k_water_frag_spv_size, k_water_frag_msl, k_water_frag_msl_size, 3, 2, "water");
+		k_water_frag_spv, k_water_frag_spv_size, k_water_frag_msl, k_water_frag_msl_size, 4, 2, "water");
 	// Roads: blended like water, pulled towards the camera over the terrain.
 	info.rasterizer_state.enable_depth_bias = true;
 	info.rasterizer_state.depth_bias_constant_factor = -1.0f;
@@ -333,12 +341,14 @@ SDL_GPUTexture* GpuContext::createTexture(const texture::DdsTexture& texture, bo
 	SDL_GPUTextureCreateInfo info {};
 	// Cube maps (the water's and the envmaps): six faces in Direct3D's
 	// order, which SDL's cube layers share.
-	info.type = texture.cube ? SDL_GPU_TEXTURETYPE_CUBE : SDL_GPU_TEXTURETYPE_2D;
+	info.type = texture.cube ? SDL_GPU_TEXTURETYPE_CUBE
+		: texture.depth > 1  ? SDL_GPU_TEXTURETYPE_3D
+							 : SDL_GPU_TEXTURETYPE_2D;
 	info.format = gpuFormat(texture.format);
 	info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
 	info.width = texture.width;
 	info.height = texture.height;
-	info.layer_count_or_depth = texture.cube ? 6 : 1;
+	info.layer_count_or_depth = texture.cube ? 6 : texture.depth;
 	info.num_levels = texture.levelCount();
 	if (!SDL_GPUTextureSupportsFormat(m_device, info.format, info.type, info.usage)) {
 		return nullptr;
@@ -379,7 +389,7 @@ SDL_GPUTexture* GpuContext::createTexture(const texture::DdsTexture& texture, bo
 			destination.layer = static_cast<Uint32>(face);
 			destination.w = level.width;
 			destination.h = level.height;
-			destination.d = 1;
+			destination.d = level.depth;
 			SDL_UploadToGPUTexture(copyPass(), &source, &destination, false);
 			offset += level.data.size();
 		}

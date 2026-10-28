@@ -1761,3 +1761,163 @@ TEST(NetGame_GhostLayoutFromGameTemplates)
 		CHECK(h.kind == net::NetworkableKind::Unknown);
 	}
 }
+
+// The control-object record's mode 3 (0x00580830 / 0x00580cd0): the
+// Soldier's full-precision fields (raw-float angles, the node's vectors,
+// 16-bit leans, 7-bit stamina and the sprinting bit, mask 0x40000),
+// RotationalBundle's 16-bit angles, a seat's occupant in mode 3, the
+// player's own state, and the whole ControlState of a vehicle's seat with
+// its root as the second ghost.
+TEST(NetGame_ControlRecordMode3)
+{
+	const net::Vec3f ref {100, 20, -50};
+	net::NetworkableHints soldier;
+	soldier.kind = net::NetworkableKind::Soldier;
+	soldier.soldierItemSlots = 10;
+	net::NetworkableState s;
+	s.kind = net::NetworkableKind::Soldier;
+	s.mask = 0x1effff & ~0x20000u; // every field but the ragdoll's and the ladder's
+	s.position = {100.25f, 20.5f, -49.75f};
+	s.velocity = {1.2345f, -0.5f, 3.25f};
+	s.soldierAcceleration = {0, -9.81f, 0};
+	s.soldierNode88 = {0.0123f, 0, -0.0456f};
+	s.soldierImpulse = {0, 6, 0};
+	s.yaw = 123.456789f;
+	s.pitch = 12.3456f; // the twist
+	s.roll = -3.21f;    // the catch-up
+	s.aimPitch = -7.654321f;
+	s.health = 0.5f;
+	s.soldierLean[0] = 0.4567f;
+	s.soldierLean[1] = -0.25f;
+	s.stamina = 0.75f;
+	s.sprinting = true;
+	s.weapon = 3;
+	s.soldierValue40000 = -0.5f;
+	const auto roundTrip = [&](unsigned mode, net::NetworkableState& back, size_t& bits) {
+		net::BitWriter out;
+		net::encodeNetworkable(out, soldier, &ref, s, mode);
+		bits = out.bits();
+		net::BitReader in(out.data().data(), out.data().size());
+		return net::decodeNetworkable(in, soldier, ref, back, mode) && back.complete && in.position() == out.bits();
+	};
+	net::NetworkableState full, coarse;
+	size_t fullBits = 0, coarseBits = 0;
+	CHECK(roundTrip(3, full, fullBits) && roundTrip(2, coarse, coarseBits));
+	CHECK(fullBits > coarseBits + 4 * 20); // floats for angles, three more vectors...
+	CHECK(full.yaw == s.yaw && full.pitch == s.pitch && full.roll == s.roll && full.aimPitch == s.aimPitch);
+	CHECK(near(full.velocity.x, 1.2345f, 0.0006f) && near(coarse.velocity.x, 1.2345f, 0.006f));
+	CHECK(near(full.soldierAcceleration.y, -9.81f, 0.0001f) && near(full.soldierNode88.z, -0.0456f, 0.0001f));
+	CHECK(near(full.soldierImpulse.y, 6, 0.001f) && near(full.position.x, 100.25f, 0.0006f));
+	CHECK(near(full.soldierLean[0], 0.4567f, 0.002f) && near(full.soldierLean[1], -0.25f, 0.002f));
+	CHECK(near(full.stamina, 0.75f, 0.005f) && full.sprinting && near(full.soldierValue40000, -0.5f, 0.02f));
+	CHECK(full.weapon == 3 && coarse.weapon == 3 && near(coarse.yaw, s.yaw, 0.1f) && coarse.soldierValue40000 == 0);
+
+	// RotationalBundle: 16 bits an angle and speed in mode 3.
+	net::NetworkableHints bundle;
+	bundle.kind = net::NetworkableKind::RotationalBundle;
+	bundle.maxSpeed = {2, 2, 2};
+	net::NetworkableState turret;
+	turret.mask = 0x1 | 0x2 | 0x8;
+	turret.rotation[0] = 33.33f;
+	turret.rotation[1] = -12.5f;
+	turret.rotationSpeed[0] = 1.5f;
+	size_t bits[2] {};
+	for (unsigned mode : {2u, 3u}) {
+		net::BitWriter out;
+		net::encodeNetworkable(out, bundle, nullptr, turret, mode);
+		net::BitReader in(out.data().data(), out.data().size());
+		net::NetworkableState back;
+		CHECK(net::decodeNetworkable(in, bundle, {}, back, mode) && in.position() == out.bits());
+		CHECK(near(back.rotation[0], 33.33f, mode == 3 ? 0.012f : 0.2f) && near(back.rotationSpeed[0], 1.5f, 0.02f));
+		bits[mode - 2] = out.bits();
+	}
+	CHECK(bits[1] == bits[0] + 3 * 4);
+
+	// The player's own state, with and without the weapon part.
+	net::PlayerOwnState own;
+	own.flag168 = true;
+	own.value14c = 77;
+	own.hasHitDirection = true;
+	own.hitDirection = -1.5f;
+	own.hasHitStrength = true;
+	own.hitStrength = 12.5f;
+	own.weapons[0].active = true;
+	own.weapons[0].index = 2;
+	own.weapons[0].ammo = 27;
+	own.weapons[0].magazines = 5;
+	own.weapons[0].heat = 4;
+	own.hasCharge = true;
+	own.charge = 0.5f;
+	own.spawnTick = 123456;
+	own.manDown = true;
+	own.health = -0.25f;
+	own.commander = true;
+	for (bool withWeapons : {true, false}) {
+		net::PlayerOwnStateHints hints;
+		hints.controlObject = withWeapons;
+		hints.weaponHeat[0] = true;
+		net::BitWriter out;
+		net::encodePlayerOwnState(out, hints, own);
+		net::BitReader in(out.data().data(), out.data().size());
+		net::PlayerOwnState back;
+		CHECK(net::decodePlayerOwnState(in, hints, back) && in.position() == out.bits());
+		CHECK(back.flag168 && back.value14c == 77 && near(back.hitDirection, -1.5f, 0.03f) && near(back.hitStrength, 12.5f, 0.1f));
+		CHECK(back.spawnTick == 123456 && back.manDown && near(back.health, -0.25f, 0.005f) && back.commander);
+		if (withWeapons) {
+			const net::PlayerOwnState::Weapon& w = back.weapons[0];
+			CHECK(w.active && w.index == 2 && w.ammo == 27 && w.magazines == 5 && w.heat == 4 && !back.weapons[1].active);
+			CHECK(back.hasCharge && near(back.charge, 0.5f, 0.005f));
+		} else {
+			CHECK(!back.weapons[0].active && !back.hasCharge);
+		}
+	}
+
+	// A record's state: the buggy's gunner seat (its occupant in mode 3)
+	// and the car as the second ghost, then the player's own state, inside
+	// a ghost block's record.
+	std::vector<net::GhostPartLayout> layout = net::buildGhostLayout(buggy());
+	CHECK(layout.size() == 2);
+	if (layout.size() != 2) {
+		return;
+	}
+	layout[1].groups[0].hints.seatCameras = 0; // a seat without cameras: its occupant's state
+	net::ControlState state;
+	state.slot = 5;
+	state.groups.resize(layout[1].groups.size());
+	state.groups[0].kind = net::NetworkableKind::PlayerControlObject;
+	state.groups[0].occupant = std::make_shared<net::NetworkableState>(s);
+	state.groups[0].occupant->mask &= ~0x2000u;
+	state.second.resize(layout[0].groups.size());
+	state.second[0].mask = 0x2;
+	state.second[0].position = {101, 20, -50};
+	state.hasOwn = true;
+	state.own = own;
+	net::BitWriter rest;
+	net::encodeControlState(rest, layout[1], &layout[0], &ref, {}, state);
+	net::GhostBlock block;
+	block.present = true;
+	block.tick = 99;
+	net::ControlObjectRecord record;
+	record.lastMove = 1234;
+	record.position = ref;
+	record.ghost = 8;
+	record.second = 7;
+	record.rest = rest.data();
+	record.restBits = rest.bits();
+	block.control = record;
+	net::BitWriter wire;
+	net::writeGhostBlock(wire, block);
+	net::BitReader in(wire.data().data(), wire.data().size());
+	net::GhostBlock got;
+	CHECK(net::readGhostBlock(in, got) && got.control && got.control->restBits == rest.bits());
+	if (!got.control) {
+		return;
+	}
+	net::BitReader restIn(got.control->rest.data(), got.control->rest.size());
+	net::ControlState back;
+	CHECK(net::decodeControlState(restIn, layout[1], &layout[0], got.control->position, {}, back) && back.complete);
+	CHECK(back.slot == 5 && !back.recorded && back.hasOwn && back.own.spawnTick == 123456);
+	CHECK(restIn.position() == rest.bits());
+	CHECK(!back.groups.empty() && back.groups[0].occupant && back.groups[0].occupant->yaw == s.yaw);
+	CHECK(back.second.size() == layout[0].groups.size() && near(back.second[0].position.x, 101, 0.001f));
+}

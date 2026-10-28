@@ -1973,6 +1973,26 @@ int GameWorld::addPlayer(const std::string& name, int team, bool ai)
 	return m_players.back()->id;
 }
 
+bool GameWorld::setPlayerTeam(int id, int team)
+{
+	Player* player = findPlayer(id);
+	if (!player || (team != 1 && team != 2) || player->alive) {
+		return false;
+	}
+	if (player->team == team) {
+		return true;
+	}
+	if (player->squad != 0) {
+		joinSquad(id, 0);
+	}
+	if (commander(player->team) == id) {
+		resignCommander(id);
+	}
+	player->team = team;
+	raise("PlayerChangeTeams", {ScriptValue::player(id), ScriptValue::integer(0)});
+	return true;
+}
+
 bool GameWorld::spawnSoldier(int id)
 {
 	Player* player = findPlayer(id);
@@ -4667,6 +4687,20 @@ const Vehicle* GameWorld::vehicle(uint32_t object) const
 	return nullptr;
 }
 
+float GameWorld::soldierFriction() const { return m_materials ? m_materials->friction(0, 0) : 1.0f; }
+
+const SoldierControl* GameWorld::soldierControl(int id) const
+{
+	const Player* player = findPlayer(id);
+	return player && player->alive ? &player->control : nullptr;
+}
+
+const physics::SoldierBody* GameWorld::soldierBody(int id) const
+{
+	const Player* player = findPlayer(id);
+	return player && player->alive ? &player->body : nullptr;
+}
+
 bool GameWorld::partPose(uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation) const
 {
 	const Vehicle* state = vehicle(object);
@@ -5803,6 +5837,94 @@ void GameWorld::addBodies()
 	}
 }
 
+// A walker's own animation system (bundleAnimationSystem; the object
+// 0x0063d340 builds for the template, whose update 0x0063d2f0 runs
+// 0x0063ce30 and the system's update, slot 0xc). 0x0063ce30 gives it:
+// - the movement: the root node's velocity (slot 0x64) less the velocity
+//   of what it stands on (slot 0xd8; nothing moves under a walker here, so
+//   the 0.7 m/s floor that subtraction brings never applies), flattened
+//   into the object's frame (x along its right, z its forward, y 0; not
+//   normalised) for a root object, its length the speed divided by the
+//   system's speed factor (slot 0x54) when that is over 0; the vector is
+//   the node's angular velocity (slot 0x68);
+// - the slope (slot 0x3c): the terrain's normal at the object's position
+//   (the heightmap's slot 0x7c) against the object's forward and right,
+//   times 3.2 (*0x00a75504), each within +-1 (the forward one not zeroed:
+//   *0x00a75510 is 0);
+// - the messages: 0x800 while the control object is occupied (interface
+//   0xc4c5 slot 0x18), 0x10 while its crouch flag is up (slot 0x138, set by
+//   the legs in state 5), 0x20 once its armour is destroyed (+0x48 slot
+//   0x58: the walkers' "alive" switch takes its first child, "dead"),
+//   0x40 a landing gear's down (+0x18, 0x00650010: none on a walker), and
+//   the legs' movement messages (0x00650530).
+// Its effect events go to the object's tree (takeObjectEffectEvents).
+void GameWorld::stepObjectAnimation(Body& b, float seconds)
+{
+	if (!b.animation) {
+		if (b.animationTried || !m_loadAnimationSystem || !m_animationSystems) {
+			return;
+		}
+		b.animationTried = true;
+		const world::Object* object = m_objects.find(b.object);
+		const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
+		std::string path;
+		if (t) {
+			const auto found = t->settings().find("bundleAnimationSystem");
+			path = found != t->settings().end() ? found->second : std::string();
+		}
+		if (path.empty()) {
+			return;
+		}
+		if (const anim::AnimationSystemTemplate* system = m_loadAnimationSystem(path)) {
+			b.animation = std::make_unique<anim::AnimationState>(*m_animationSystems, *system);
+		}
+		if (!b.animation) {
+			return;
+		}
+	}
+	const Vehicle::Legs& legs = *b.vehicle->legs();
+	const physics::Mat3& m = b.body.rotation;
+	const physics::Vec3& v = b.body.velocity;
+	anim::AnimationInput input;
+	input.movementSeconds = seconds;
+	float speed = std::sqrt(physics::lengthSquared(v));
+	if (speed > 0.001f) {
+		input.forward = v.x * m.rows[2].x + v.z * m.rows[2].z;
+		input.side = v.x * m.rows[0].x + v.z * m.rows[0].z;
+		speed = std::sqrt(input.forward * input.forward + input.side * input.side);
+	}
+	const float factor = b.animation->speedFactor();
+	input.speed = factor > 0 ? speed / factor : speed;
+	input.lookAroundX = b.body.angularVelocity.x;
+	input.turn = b.body.angularVelocity.y;
+	input.lookAroundY = b.body.angularVelocity.y;
+	if (m_ground.heightAndNormal) {
+		physics::Vec3 n {0, 1, 0};
+		m_ground.heightAndNormal(b.body.position.x, b.body.position.z, n);
+		input.slopeForward = std::clamp(physics::dot(n, m.rows[2]) * 3.2f, -1.0f, 1.0f);
+		input.slopeSide = std::clamp(physics::dot(n, m.rows[0]) * 3.2f, -1.0f, 1.0f);
+	}
+	const bool occupied = std::any_of(b.occupants.begin(), b.occupants.end(), [](int p) { return p >= 0; });
+	input.messages = legs.messages | (occupied ? 0x800u : 0u) | (legs.crouching ? 0x10u : 0u)
+		| (b.wreckTime >= 0 ? 0x20u : 0u);
+	b.animation->update(input, seconds);
+	for (const anim::AnimationState::FiredEvent& event : b.animation->takeEvents()) {
+		if (event.type == anim::Bundle::EffectEvent && event.id >= 0 && event.id < 10) {
+			m_objectEffectEvents[b.object] |= 1u << (9 + event.id);
+		}
+	}
+}
+
+std::vector<std::string> GameWorld::objectAnimation(uint32_t object) const
+{
+	for (const Body& b : m_bodies) {
+		if (b.object == object && b.animation) {
+			return b.animation->playing();
+		}
+	}
+	return {};
+}
+
 void GameWorld::stepPhysics(float seconds)
 {
 	// Each body's step and ground contact, then the mobile mesh physics
@@ -5862,6 +5984,9 @@ void GameWorld::stepPhysics(float seconds)
 			}
 			it->vehicle->setOccupied(
 				std::any_of(it->occupants.begin(), it->occupants.end(), [](int p) { return p >= 0; }));
+			if (it->animation) {
+				it->vehicle->setLegsAnimation(it->animation->blocksInput(), it->animation->speedFactor());
+			}
 			it->vehicle->tick(body, m_ground, seconds, grip);
 		}
 		it->lastPosition = body.position;
@@ -5902,6 +6027,12 @@ void GameWorld::stepPhysics(float seconds)
 		}
 		++it;
 	}
+	// The walkers' own animation systems, after their legs' state.
+	for (Body& b : m_bodies) {
+		if (b.vehicle && b.vehicle->legs() && !b.held) {
+			stepObjectAnimation(b, seconds);
+		}
+	}
 	collideBodies(seconds);
 	for (Body& b : m_bodies) {
 		world::Object* object = m_objects.find(b.object);
@@ -5909,6 +6040,9 @@ void GameWorld::stepPhysics(float seconds)
 			continue;
 		}
 		b.response.solve(b.body);
+		if (b.vehicle && b.vehicle->legs()) {
+			b.vehicle->legsDrive(b.body);
+		}
 		// A body thrown out of the world (a non-finite or absurd state) is
 		// stopped where it last was sane rather than carried on.
 		const auto sane = [](const physics::Vec3& v, float limit) {

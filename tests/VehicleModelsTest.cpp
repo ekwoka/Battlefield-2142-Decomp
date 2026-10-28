@@ -3,6 +3,8 @@
 // the gunship, driven by a player in the driver's seat.
 #include "AI/Heli.h"
 #include "AI/PathFollower.h"
+#include "Animation/AnimationConsole.h"
+#include "Animation/AnimationSystem.h"
 #include "Animation/FirstPerson.h"
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
@@ -17,6 +19,7 @@
 #include "World/TemplateFiles.h"
 #include "World/WorldConsole.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -29,6 +32,8 @@
 using namespace dice::hfe;
 
 namespace {
+
+bool near(float a, float b, float tolerance = 1e-3f) { return std::fabs(a - b) <= tolerance; }
 
 // Every object template and the materials, on flat ground at height 0; the
 // EU spawn point at the origin facing +z.
@@ -303,6 +308,105 @@ TEST(Vehicles_WalkerStandsWalksAndTurns)
 	CHECK(std::sqrt((after.x - ahead.x) * (after.x - ahead.x) + (after.z - ahead.z) * (after.z - ahead.z)) < 5);
 	// Upright all along (the keepUp couple).
 	CHECK(std::fabs(g.objects.find(mech)->rotation().y) < 10 && std::fabs(g.objects.find(mech)->rotation().z) < 10);
+}
+
+// The walker's own animation system in the simulation (0x0063d2f0 with
+// 0x0063ce30): occupied and walking it plays stand_walk, whose effect
+// events 1 and 2 (the feet: FootStepEffectRight 1024, FootStepEffectLeft
+// 2048) and 3 and 4 (the walk cycle's sound, 12288) reach the object's
+// tree; the walk's fade-in speed key points (0.2 to 1) slow the legs'
+// drive at the start (0x008ba420 into 0x00650e90), and while a bundle with
+// blockInput plays the legs hold their state (0x00650680).
+TEST(Vehicles_WalkerRunsItsAnimationSystem)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	g.files.setMountingAllowed(true);
+	std::string out;
+	g.console.run("ClientArchives.con", {}, out);
+	g.files.setMountingAllowed(false);
+	anim::AnimationSystems systems([&g](const std::string& path, std::vector<uint8_t>& data) {
+		return g.files.readFile(path, data);
+	});
+	anim::registerAnimationConsoleMethods(g.console, systems);
+	g.console.run("Objects/Soldiers/Common/Animations/ValueHolders.inc", {}, out);
+	const auto load = [&](const std::string& path) {
+		return systems.get(path, [&] { g.console.run(path, {}, out); });
+	};
+	const uint32_t mech = g.start("as_heavy_mech", {0, 4, 6});
+	g.world->setAnimationSystems(&systems, load);
+	g.run(1);
+	const auto playing = [&](const char* name) {
+		const std::vector<std::string> names = g.world->objectAnimation(mech);
+		return std::find(names.begin(), names.end(), name) != names.end();
+	};
+	CHECK(playing("unmanned_slope")); // the parked pose while nobody sits in it
+	CHECK(g.enter(mech));
+	g.drive({}, 2);
+	CHECK(playing("stand_slope"));
+	game::SoldierInput input;
+	input.throttle = 1;
+	const physics::Vec3 rest = g.position(mech);
+	uint32_t fired = 0;
+	float firstSecond = 0;
+	for (int i = 0; i < 90; ++i) {
+		g.world->setPlayerInput(input);
+		g.world->tick(1 / 30.0f);
+		const auto events = g.world->takeObjectEffectEvents();
+		const auto it = events.find(mech);
+		fired |= it != events.end() ? it->second : 0;
+		if (i == 29) {
+			firstSecond = g.position(mech).z - rest.z;
+		}
+	}
+	CHECK(playing("stand_walk"));
+	const float walked = g.position(mech).z - rest.z;
+	std::fprintf(stderr, "  as_heavy_mech animated: %.1f m in the first second, %.1f m in 3 s, effects %#x\n",
+		firstSecond, walked, fired);
+	CHECK((fired & 1024) && (fired & 2048) && (fired & 4096) && (fired & 8192));
+	CHECK(walked > 10 && walked < 24);
+	// Let go: the walk plays on to its stop point holding the legs, then
+	// the walker stands again.
+	g.drive({}, 3);
+	CHECK(!playing("stand_walk") && playing("stand_slope"));
+	const game::Vehicle* v = g.world->playerVehicleState();
+	CHECK(v && v->legs() && v->legs()->state == 0 && v->legs()->messages == 0);
+}
+
+// The legs' object pass (0x006cec60): a contact under the legs' half-radius
+// line is ground for the drive, its normal joining the drive's by axis
+// (0x006b6b60: the larger of one sign, the sum of opposite signs).
+TEST(Vehicles_WalkerLegsSphereContacts)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const world::ObjectTemplate* t = g.templates.find("as_heavy_mech");
+	CHECK(t != nullptr);
+	if (!t) {
+		return;
+	}
+	std::unique_ptr<game::Vehicle> v = game::Vehicle::fromTemplate(*t, g.templates, nullptr);
+	CHECK(v && v->legs());
+	if (!v || !v->legs()) {
+		return;
+	}
+	CHECK(near(v->legs()->length, 2.8f) && near(v->legs()->stepHeight, 1.4f) && near(v->legs()->radius, 1.5f));
+	v->legsObjectContact({0.6f, 0.8f, 0}, {0, 1, 0}, false);
+	CHECK(!v->legs()->landed && near(v->legs()->contactNormal.x, 0.6f) && near(v->legs()->contactNormal.y, 1));
+	v->legsObjectContact({-0.2f, 0.9f, 0.3f}, {0, 0.95f, 0.1f}, true);
+	CHECK(near(v->legs()->contactNormal.x, 0.4f) && near(v->legs()->contactNormal.y, 1)
+		&& near(v->legs()->contactNormal.z, 0.3f));
+	CHECK(v->legs()->landed && v->legs()->grounded && near(v->legs()->bestNormal.y, 0.95f));
 }
 
 // The transport (as_at: the rotor's collective on PIThrottle, the PCO's

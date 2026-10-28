@@ -23,6 +23,7 @@ struct TextureLevel {
 	uint32_t width;
 	uint32_t height;
 	std::vector<uint8_t> data;
+	uint32_t depth = 1; // slices of a volume texture's level
 };
 
 struct DdsTexture {
@@ -30,6 +31,7 @@ struct DdsTexture {
 	uint32_t width = 0;
 	uint32_t height = 0;
 	bool cube = false;
+	uint32_t depth = 1; // above 1: a volume texture (one face, its levels halving the depth too)
 	// Faces (6 for cube maps, in +X -X +Y -Y +Z -Z order), each with its mip levels.
 	std::vector<std::vector<TextureLevel>> faces;
 

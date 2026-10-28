@@ -258,6 +258,12 @@ public:
 	// armor runs out (PlayerKilled, PlayerDeath for the scripts) and
 	// respawns after the spawn time.
 	int addPlayer(const std::string& name, int team, bool ai);
+	// Moves a player to the other team (a joined client's PostRemote 6/7,
+	// which the game server hands the game logic's slot 0x60, 0x004b0690):
+	// only while it has no soldier (the spawn screen's team buttons); it
+	// leaves its squad and the command, and the scripts hear
+	// PlayerChangeTeams. False for a living player or a team other than 1, 2.
+	bool setPlayerTeam(int player, int team);
 	// Puts the player's soldier at a spawn point of its team; false when
 	// there is none or it lives already.
 	bool spawnSoldier(int player);
@@ -299,11 +305,40 @@ public:
 	};
 	std::vector<PlayerInfo> playerList() const;
 	bool playerInfo(int player, PlayerInfo& info) const;
+	// Radio messages (Radio.cpp). A target channel's value by its name
+	// (TCTeam 1 ... TCSquadAndLocalEnemies 0x12, 0x0042d4a0), -1 for none.
+	static int targetChannel(const std::string& name);
+	// A control object template's vehicleCategory (its interface 0xc4c4
+	// slot 0x24, 0x0059d880): VCLand 0, VCSea 1, VCAir 2, VCHelicopter 3,
+	// VCNoVehicleCategory 4; the scripts give the names.
+	static int vehicleCategory(const world::ObjectTemplate& t);
+	// Whether `receiver` hears a message `sender` says on a target channel
+	// (0x004a6f70); `value` is the message's team, squad or player for the
+	// channels that name one.
+	bool hearsRadio(int channel, int sender, int receiver, int value = 0) const;
+	// A radio message said: each hearer gets it (the server's hand-out).
+	void radioMessage(int sender, int channel, const std::string& voice, int value = 0);
+	struct RadioHeard {
+		int sender = -1, receiver = -1, channel = 0;
+		std::string voice;
+	};
+	// The messages heard since the last call, in order (at most the last
+	// 256 kept); `receiver` takes only those whose hearer it picks.
+	std::vector<RadioHeard> takeRadioHeard() { return std::exchange(m_radioHeard, {}); }
+	std::vector<RadioHeard> takeRadioHeard(const std::function<bool(int receiver)>& receiver);
 	// The player whose soldier (or vehicle) an object is, -1 for none.
 	int playerOf(uint32_t object) const;
 	// An effect event N (0..9) of a player's held weapon's animation, as
 	// its animation system fires it (see startEffectsOn).
 	void weaponEffectEvent(int player, int effect);
+	// The effect events objects' own animation systems fired since the
+	// last call (a walker's foot steps: "effect:N" as event 0x2c + N to the
+	// object's handler, slot 0x100, which passes it down its tree, where an
+	// EffectBundle whose startOnEffects has bit 9 + N starts: 0x0061a4e0),
+	// as those bits by object.
+	std::map<uint32_t, uint32_t> takeObjectEffectEvents() { return std::exchange(m_objectEffectEvents, {}); }
+	// A walker's animation system's playing bundles (none without one).
+	std::vector<std::string> objectAnimation(uint32_t object) const;
 	// The material a soldier's footstep set is for (0x007fda00; -1 before
 	// its first collision event).
 	uint32_t footstepMaterial(int player) const;
@@ -421,6 +456,16 @@ public:
 	// Whether a player's soldier is on a ladder (its LadderContainer).
 	bool onLadder(int player) const;
 	const physics::CollisionWorld& staticCollision() const { return m_collision; }
+	// The ground the soldiers and bodies stand on (enablePhysics').
+	const physics::Ground& ground() const { return m_ground; }
+	// A living player's soldier movement (its control and physics body),
+	// null otherwise: what a server sends a client's prediction (the
+	// control-object record, src/Main/HostedGame).
+	// The friction a spawned soldier's body starts with (material 0 on
+	// both sides, as spawnSoldier sets it; 1 without materials).
+	float soldierFriction() const;
+	const SoldierControl* soldierControl(int player) const;
+	const physics::SoldierBody* soldierBody(int player) const;
 
 	// The local player's soldier: spawned at a spawn point of a control
 	// point the team holds (team 1 PAC, team 2 EU). Returns its object.
@@ -739,6 +784,10 @@ public:
 	// The level's combat areas (CombatAreas.h): the Titans keep inside those
 	// binding vehicle category 4 (0x005ab740).
 	void setCombatAreas(const CombatAreas* areas) { m_combatAreas = areas; }
+	// Whether a player's controlled object (its vehicle aboard, else its
+	// soldier) is inside the combat areas (0x004ca5d0, the AI's IAITerrain
+	// slot 0x1c 0x008a0380; CombatAreas.cpp).
+	bool insideCombatArea(int player) const;
 	// sv.allowTitanMovement (the server settings' +0x59, read by the move
 	// 0x005aca70 and the order's check 0x005abaf0).
 	bool allowTitanMovement = true;
@@ -866,6 +915,11 @@ private:
 		// other team's forcefields; collisionGroups 0x100 / 0x200).
 		std::shared_ptr<physics::CollisionWorld> teamSoldierMesh[2];
 		std::unique_ptr<Vehicle> vehicle; // engines and wheels
+		// A walker's own animation system (bundleAnimationSystem: the
+		// object 0x0063d340 makes for it, updated by 0x0063d2f0), built
+		// the first tick it is needed.
+		std::unique_ptr<anim::AnimationState> animation;
+		bool animationTried = false;
 		// Seats: who sits in each (player id, -1 for nobody) and the guns.
 		std::vector<int> occupants;
 		double occupiedAt = -1e9; // when someone last sat in it (MagneticObject's disableWhenEmptyVehicle)
@@ -1016,6 +1070,10 @@ private:
 	mutable std::map<const world::ObjectTemplate*, int> m_engineTypes; // firstEngineType's answers, by root
 	void addBodies();
 	void stepPhysics(float seconds);
+	// A walker's animation system fed as 0x0063ce30 does (see GameWorld.cpp).
+	void stepObjectAnimation(Body& body, float seconds);
+	std::map<uint32_t, uint32_t> m_objectEffectEvents;
+	std::vector<RadioHeard> m_radioHeard;
 	const io::FileManager* m_files = nullptr;
 	physics::CollisionTemplateManager* m_collisionTemplates = nullptr;
 	physics::Ground m_ground;
@@ -1093,6 +1151,8 @@ private:
 	// Returns false when it destroyed A (the helicopter exit).
 	bool meshPair(MeshActor& a, MeshActor& b, float seconds, bool trunkOnly);
 	void wheelProbes(Body& body, MeshActor& b, float seconds);
+	// A walker's legs' sphere against B (the MechLegs response's slot 0x24).
+	void legsSphere(Body& walker, MeshActor& a, MeshActor& b);
 	physics::MassShares addMeshContact(MeshActor& a, MeshActor& b, const physics::Vec3& point, const physics::Vec3& normal, float depth,
 		uint32_t materialA, uint32_t materialB, bool trunkPass, bool toA = true);
 	std::vector<uint32_t> materialMap(const world::ObjectTemplate& objectTemplate) const;
@@ -1336,6 +1396,7 @@ private:
 	SoldierInput m_playerInput;
 	float m_spawnTime = 15;
 	Player* findPlayer(int id) const;
+	bool carriesHealing(const Player& player) const; // TCLocalTeamMedic's receivers (Radio.cpp)
 	Player* soldierPlayer(uint32_t object) const;
 	world::Object* spawnSoldier(Player& player);
 	void kill(Player& victim, Player* attacker, uint32_t weapon);

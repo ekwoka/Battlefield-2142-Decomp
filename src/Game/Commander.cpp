@@ -856,10 +856,12 @@ void GameWorld::stepCrates(float seconds)
 					continue;
 				}
 				// addVehicleType (0x005d1710 reads each vehicle's type through its
-				// template's interface 0xc4c4, slot 0x24; taken here as its
-				// vehicleCategory: the Titans' 3, VCHelicopter, for heliRepairRearm).
+				// template's interface 0xc4c4, slot 0x24: 0x0059d880, the
+				// template's +0x3d0, which ObjectTemplate.vehicleCategory sets
+				// through slot 0x20, 0x00504086 / 0x0059d870): its
+				// vehicleCategory (the Titans' 3, VCHelicopter, for heliRepairRearm).
 				if (const auto types = t->settings().find("addVehicleType.list"); types != t->settings().end()) {
-					const std::string category = std::to_string(integer(*vt, "vehicleCategory", 0));
+					const std::string category = std::to_string(vehicleCategory(*vt));
 					std::istringstream list(types->second);
 					bool listed = false;
 					for (std::string type; list >> type;) {

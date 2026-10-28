@@ -1225,6 +1225,16 @@ std::vector<std::string> AnimationState::playing() const
 	return names;
 }
 
+bool AnimationState::blocksInput() const
+{
+	for (const Instance& instance : m_instances) {
+		if (m_system.bundles()[instance.bundle].blockInput) {
+			return true;
+		}
+	}
+	return false;
+}
+
 // 0x008ba420 with 0x008c2d70 per instance: the fade-in key points over the
 // fade in, the fade-out ones over the fade out, else the speed key points
 // over the bundle's length; 1 for instances held still.

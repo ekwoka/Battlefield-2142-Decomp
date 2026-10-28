@@ -84,10 +84,13 @@ std::optional<DdsTexture> parseDds(const std::vector<uint8_t>& data, std::string
 	const Channel red(u32(pf + 16)), green(u32(pf + 20)), blue(u32(pf + 24));
 	const Channel alpha((pfFlags & kAlphaPixels) ? u32(pf + 28) : 0);
 	const uint32_t caps2 = u32(h + 108);
-	if (caps2 & kVolume) {
-		return fail("volume textures are not supported");
-	}
 	texture.cube = (caps2 & kCubeMap) != 0;
+	if (caps2 & kVolume) {
+		texture.depth = std::max(1u, u32(h + 20)); // dwDepth
+		if (texture.cube || texture.depth > 2048) {
+			return fail("bad volume texture");
+		}
+	}
 
 	uint32_t sourceBytesPerPixel = 0;
 	if (pfFlags & kFourCC) {
@@ -119,10 +122,11 @@ std::optional<DdsTexture> parseDds(const std::vector<uint8_t>& data, std::string
 	for (auto& face : texture.faces) {
 		uint32_t width = texture.width;
 		uint32_t height = texture.height;
+		uint32_t depth = texture.depth;
 		for (uint32_t level = 0; level < mipCount; ++level) {
-			TextureLevel out {width, height, {}};
+			TextureLevel out {width, height, {}, depth};
 			if (sourceBytesPerPixel == 0) {
-				const size_t size = levelSize(texture.format, width, height);
+				const size_t size = levelSize(texture.format, width, height) * depth;
 				if (offset + size > data.size()) {
 					return fail("truncated");
 				}
@@ -130,7 +134,7 @@ std::optional<DdsTexture> parseDds(const std::vector<uint8_t>& data, std::string
 					data.begin() + static_cast<std::ptrdiff_t>(offset + size));
 				offset += size;
 			} else {
-				const size_t pixels = static_cast<size_t>(width) * height;
+				const size_t pixels = static_cast<size_t>(width) * height * depth;
 				if (offset + pixels * sourceBytesPerPixel > data.size()) {
 					return fail("truncated");
 				}
@@ -148,6 +152,7 @@ std::optional<DdsTexture> parseDds(const std::vector<uint8_t>& data, std::string
 			face.push_back(std::move(out));
 			width = std::max(1u, width / 2);
 			height = std::max(1u, height / 2);
+			depth = std::max(1u, depth / 2);
 		}
 	}
 	return texture;

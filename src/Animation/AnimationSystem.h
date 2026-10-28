@@ -387,6 +387,10 @@ public:
 	// key points; vehicles multiply their movement by it (0x00650e90) and
 	// divide the speed they give the system by it (0x0063ce30).
 	float speedFactor() const;
+	// 0x008b9e00 (slot 0x50): whether a playing bundle has blockInput
+	// (0x2d); the walker's legs hold their state while one does
+	// (0x00650680).
+	bool blocksInput() const;
 	// 0x78: the weight of the whole system's pose over what was there
 	// before it, below 1 while a trigger with a fadeInTime fades in.
 	float weight() const { return m_weight; }

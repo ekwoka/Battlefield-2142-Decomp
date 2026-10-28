@@ -74,6 +74,28 @@ struct RainSettings {
 	std::string texture; // without ".dds"
 };
 
+// RendDX9 settings the level scripts set (Init.con, Terrain.con).
+struct RendererSettings {
+	// renderer.global{Static,Bundle,Skinned}MeshLodDistanceScale (renderer
+	// +0x9d8 / +0x9dc / +0x9e0, 1 at 0x1002aba0): times every switch distance.
+	float staticMeshLodDistanceScale = 1;
+	float bundleMeshLodDistanceScale = 1;
+	float skinnedMeshLodDistanceScale = 1;
+	// terrainCuller.* (the culler's constructor 0x1009d5a0 and 0x1009c820;
+	// setters 0x1009c9b0..0x1009ca60, 0x1009cf40): the LOD 0 distance
+	// (taken between baseCellSize and 1000), the morph ranges and the LOD 2
+	// start as multiples of it, the cell size in metres (16..512, a power of
+	// two, at least 32 and at most a patch; checked by the renderer).
+	int lodSwitchDistance = 100;
+	float lod0SwitchStart = 0.4f;
+	float lod0SwitchStop = 0.9f;
+	float lod1SwitchStart = 2.0f;
+	float lod1SwitchStop = 2.7f;
+	float lod2Start = 3.0f;
+	int baseCellSize = 64;
+};
+
+void registerRendererConsoleMethods(Console& console, RendererSettings& settings);
 void registerLightConsoleMethods(Console& console, LightSettings& settings);
 void registerRainConsoleMethods(Console& console, RainSettings& settings);
 void registerWaterConsoleMethods(Console& console, WaterSettings& settings);

@@ -6,12 +6,13 @@
 // setSubGeometryLodDistance <geometry> <lod> <distance> (RendDX9 0x1007303a)
 // sets how far LOD <lod> is drawn, scaled by renderer.global{Static,Bundle,
 // Skinned}MeshLodDistanceScale. Spheres come from the vertices the rewrite
-// uploads; meshes whose template sets no distances use the defaults below
-// (the rewrite's own choice, not the original's).
+// uploads; distances a template leaves unset are RendDX9's defaults
+// (lodSwitchDistances).
 #pragma once
 
 #include "RenderMath.h"
 
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
@@ -133,34 +134,52 @@ inline BoundingSphere transformSphere(const BoundingSphere& s, const Mat4& world
 	return out;
 }
 
-// The LOD to draw a mesh with at `distance` from the camera: the first
-// whose switch distance is beyond it. `switchDistances[i]` is where LOD i
-// gives way to LOD i + 1; `scale` the renderer's LOD distance scale (larger
-// keeps detail farther, 0 always LOD 0). LODs past the list keep the last.
+// The LOD to draw a mesh with at `distance` (lodDistance): one past the
+// last switch distance that, times `scale`, is below it (RendDX9 walks the
+// list from its end, 0x100bdb00). `switchDistances[i]` is where LOD i gives
+// way to LOD i + 1; LODs past the list keep the last.
 inline int lodForDistance(float distance, const std::vector<float>& switchDistances, int lodCount, float scale = 1)
 {
-	if (lodCount <= 1 || scale <= 0) {
-		return 0;
+	const int entries = std::min(static_cast<int>(switchDistances.size()), lodCount - 1);
+	for (int i = entries - 1; i >= 0; --i) {
+		if (switchDistances[static_cast<size_t>(i)] * scale < distance) {
+			return i + 1;
+		}
 	}
-	int lod = 0;
-	while (lod + 1 < lodCount && lod < static_cast<int>(switchDistances.size()) &&
-		distance > switchDistances[static_cast<size_t>(lod)] * scale) {
-		++lod;
-	}
-	return lod;
+	return 0;
 }
 
-// Switch distances for a mesh without its own (the rewrite's choice): LOD 1
-// from 30 radii, each further LOD at twice the distance.
-inline std::vector<float> defaultLodDistances(float radius, int lodCount)
+// A geometry's switch distances as RendDX9 fills them when the mesh loads
+// (static meshes 0x100d4d30, bundled and skinned 0x100a31d0): entry i is
+// the template's setSubGeometryLodDistance for LOD i if it set one, else a
+// running distance that starts at 50 m and grows by 50 m for each entry
+// left to it and by the set distance for each set one (the editor's writer
+// 0x100d3320 leaves out exactly the values 50, 100, 150 ...).
+inline std::vector<float> lodSwitchDistances(const std::vector<float>& set, int lodCount)
 {
 	std::vector<float> distances;
-	float d = std::fmax(radius, 1.0f) * 30.0f;
+	float running = 50.0f;
 	for (int i = 0; i + 1 < lodCount; ++i) {
-		distances.push_back(d);
-		d *= 2;
+		if (i < static_cast<int>(set.size())) {
+			distances.push_back(set[static_cast<size_t>(i)]);
+			running += set[static_cast<size_t>(i)];
+		} else {
+			distances.push_back(running);
+			running += 50.0f;
+		}
 	}
 	return distances;
+}
+
+// The distance a mesh's LOD is picked by (0x100bdb00 static, 0x100c3390
+// bundled, 0x101616c0 skinned): the camera's distance over the view's zoom
+// (RenderView slot 0x30, tan(first fov / 2) / tan(fov / 2) inverted) less
+// the mesh's radius. Its LOD is the last whose switch distance times
+// renderer.global*MeshLodDistanceScale times the geometry quality
+// (renderer +0x974: 0.5 / 0.8 / 1 by the video setting, 1 here) is below it.
+inline float lodDistance(float cameraDistance, float zoom, float radius)
+{
+	return cameraDistance / std::fmax(zoom, 1e-3f) - std::fmax(radius, 0.0f);
 }
 
 } // namespace dice::hfe::render

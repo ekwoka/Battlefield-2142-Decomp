@@ -4,7 +4,10 @@
 
 #include "Game/GameLogic.h"
 #include "Game/GameWorld.h"
+#include "IO/File/FileManager.h"
 #include "Main/HostedGame.h"
+#include "Main/Prediction.h"
+#include "Physics/CollisionTemplateManager.h"
 #include "Net/GameClient.h"
 #include "Net/GameServer.h"
 #include "Net/ServerQuery.h"
@@ -14,6 +17,8 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <map>
+#include <memory>
 #include <thread>
 
 namespace net = dice::hfe::net;
@@ -221,4 +226,199 @@ TEST(NetHost_HostedGameJoin)
 	CHECK(hosted.clientCount() == 1);
 	client.disconnect();
 	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
+}
+
+namespace {
+
+// A flat range with a spawn point per team and two soldier templates
+// that sprint (as GameWorldTest's): enough for soldiers to walk on.
+struct HostRange {
+	dice::hfe::world::ObjectTemplateManager templates;
+	dice::hfe::world::ObjectManager objects;
+	dice::hfe::io::FileManager files;
+	dice::hfe::physics::CollisionTemplateManager collisionTemplates;
+	std::unique_ptr<dice::hfe::game::GameWorld> round;
+	dice::hfe::game::GameLogic logic;
+
+	HostRange()
+	{
+		templates.registerType(1, "ControlPoint");
+		templates.registerType(2, "SpawnPoint");
+		templates.registerType(3, "Soldier");
+		for (const char* name : {"us_light_soldier", "pac_light_soldier"}) {
+			dice::hfe::world::ObjectTemplate* soldier = templates.create("Soldier", name);
+			soldier->settings()["armor.maxHitPoints"] = "100";
+			soldier->settings()["sprintDissipationTime"] = "6";
+			soldier->settings()["sprintRecoverTime"] = "10";
+			soldier->settings()["sprintLimit"] = "0.2";
+			soldier->settings()["sprintLossAtJump"] = "0.1";
+		}
+		for (int team = 1; team <= 2; ++team) {
+			dice::hfe::world::ObjectTemplate* point = templates.create("ControlPoint", team == 1 ? "cp_pac" : "cp_eu");
+			point->settings()["controlPointId"] = std::to_string(team);
+			point->settings()["team"] = std::to_string(team);
+			point->settings()["unableToChangeTeam"] = "1";
+			objects.create(point, {team == 1 ? 100.0f : -100.0f, 0, 0});
+		}
+		dice::hfe::world::ObjectTemplate* spawn = templates.create("SpawnPoint", "sp");
+		objects.create(spawn, {0, 0, 20}, {90, 0, 0})->setControlPointId(1);
+		objects.create(spawn, {0, 0, 0}, {0, 0, 0})->setControlPointId(2);
+		round = std::make_unique<dice::hfe::game::GameWorld>(templates, objects);
+		dice::hfe::physics::Ground ground;
+		ground.height = [](float x, float) { return 0.02f * x; }; // a gentle slope
+		ground.heightAndNormal = [](float x, float, dice::hfe::physics::Vec3& normal) {
+			normal = {-0.019996f, 0.9998f, 0}; // (-0.02, 1, 0) normalised
+			return 0.02f * x;
+		};
+		round->enablePhysics(files, collisionTemplates, ground);
+		round->startRound();
+		logic.startRound();
+	}
+};
+
+float distance(const net::Vec3f& a, const dice::hfe::physics::Vec3& b)
+{
+	return std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z));
+}
+
+} // namespace
+
+// The control-object record's mode-3 state end to end: a client predicts
+// its soldier from its own moves (Prediction.h) while the host steps the
+// same moves one a tick; every record corrects the prediction. A bot
+// walks on the host, and the client's view of it (position, health) is
+// checked against what the host had at the update's tick. Then a team
+// change, a map change on the same connection and a kick.
+TEST(NetHost_PredictionAndSession)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	host::HostSetup setup;
+	setup.level = "Range";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, range.logic, range.templates, setup);
+	CHECK(hosted.start());
+	const int bot = round.addPlayer("Bot1", 2, true);
+	CHECK(round.spawnSoldier(bot));
+
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Joiner";
+	client.world().setGhostTemplates([&range](uint32_t id) {
+		const dice::hfe::world::ObjectTemplate* t = range.templates.findById(id);
+		return t ? net::ghostTemplateFrom(range.templates, *t) : net::GhostTemplateNode {};
+	});
+	host::SoldierPrediction prediction(round);
+	client.onMoveSent = [&prediction](const net::PlayerMove& move) { prediction.step(move); };
+	client.sendOnTicks = true;
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+
+	// The host's bot, by the tick of the ghost block that carried it.
+	std::map<uint32_t, dice::hfe::game::GameWorld::PlayerInfo> botAt;
+	uint32_t records = 0, compared = 0;
+	float worstBot = 0, worstHealth = 0;
+	int frame = 0;
+	const auto step = [&] {
+		++frame;
+		// The client walks: forward, turning, a sprint, a jump now and then.
+		dice::hfe::game::SoldierInput walk;
+		walk.throttle = (frame / 45) % 4 == 3 ? 0.0f : 1.0f;
+		walk.strafe = (frame / 70) % 2 == 0 ? 0.0f : 0.6f;
+		walk.turn = (frame / 30) % 3 == 0 ? 4.0f : 0.0f;
+		walk.sprint = (frame / 60) % 3 == 1;
+		walk.jump = frame % 97 == 50;
+		walk.aimPitch = 10.0f * std::sin(frame * 0.05f);
+		client.setInput(net::playerInputFrom(walk));
+		client.update();
+		const net::RemoteWorld& world = client.world();
+		if (world.controlRecords() != records) {
+			records = world.controlRecords();
+			const net::ControlState* state = world.controlState();
+			if (state && !state->groups.empty() && state->groups.front().kind == net::NetworkableKind::Soldier) {
+				if (!prediction.active()) {
+					prediction.start(range.templates.find("pac_light_soldier"), world.controlObject().lastMove, state->groups.front(),
+						world.controlObject().position);
+				} else {
+					prediction.reconcile(world.controlObject().lastMove, state->groups.front(), world.controlObject().position);
+				}
+			}
+		}
+		client.simulatedTick();
+		// The bot's ghost against the host's bot at that update's tick.
+		dice::hfe::game::GameWorld::PlayerInfo b;
+		if (round.playerInfo(bot, b) && b.alive) {
+			const uint16_t ghost = [&] {
+				for (const net::RemotePlayer& p : world.playerList()) {
+					if (p.name == "Bot1") {
+						return p.soldierGhost;
+					}
+				}
+				return uint16_t {0};
+			}();
+			const net::RemoteObject* seen = ghost ? world.object(ghost) : nullptr;
+			if (const auto at = seen && seen->hasPosition ? botAt.find(seen->lastTick) : botAt.end(); at != botAt.end()) {
+				worstBot = std::max(worstBot, distance(seen->position, at->second.position));
+				worstHealth = std::max(worstHealth, std::fabs(seen->health - round.hitPoints(at->second.soldier) / 100.0f));
+				++compared;
+			}
+		}
+		// The bot walks in a circle; it loses some health on the way.
+		dice::hfe::game::SoldierInput botWalk;
+		botWalk.throttle = 1;
+		botWalk.turn = 2;
+		round.setInput(bot, botWalk);
+		if (frame % 40 == 0 && round.playerInfo(bot, b) && b.alive && round.hitPoints(b.soldier) > 30) {
+			round.setHitPoints(b.soldier, round.hitPoints(b.soldier) - 3);
+		}
+		round.playerInfo(bot, b);
+		botAt[hosted.tickCount() + 1] = b;
+		hosted.tick();
+		round.tick(1.0f / 30);
+		std::this_thread::sleep_for(std::chrono::milliseconds(33)); // about the game's 30 ticks a second
+	};
+	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 6000));
+	// A team change first (6/7, while we have no soldier), then a spawn.
+	const int me = client.world().localPlayer();
+	dice::hfe::game::GameWorld::PlayerInfo info;
+	CHECK(round.playerInfo(me, info) && info.team == 1);
+	client.selectTeam(2);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.team == 2; }));
+	client.selectSpawnGroup(-1);
+	CHECK(pumpUntil(step, [&] { return prediction.active(); }, 6000));
+	for (int i = 0; i < 30 * 8; ++i) {
+		step();
+	}
+	const host::SoldierPrediction::Stats& st = prediction.stats();
+	std::printf("  prediction: %u steps, %u records (%u for moves not remembered), %u replayed, correction mean %.4f m, "
+				"max %.4f m (%u over 1 cm)\n",
+		st.steps, st.records, st.unknownMoves, st.replayed, st.records ? st.sumCorrection / st.records : 0.0,
+		st.maxCorrection, st.corrections);
+	std::printf("  the bot as the client saw it: %u updates compared, at most %.4f m and %.3f health from the host's\n",
+		compared, worstBot, worstHealth);
+	CHECK(client.world().controlStates() > 100 && client.world().controlStates() == client.world().controlRecords());
+	CHECK(st.records > 100 && st.unknownMoves < st.records / 10);
+	CHECK(st.sumCorrection / st.records < 0.05);
+	CHECK(compared > 100 && worstBot < 0.01f && worstHealth < 0.01f);
+
+	// A map change on the same connection: the level block again, and the
+	// join's database for the new round.
+	HostRange next;
+	setup.level = "Range2";
+	hosted.changeLevel(*next.round, next.logic, next.templates, setup);
+	const auto stepNext = [&] {
+		client.update();
+		hosted.tick();
+		next.round->tick(1.0f / 30);
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	};
+	CHECK(pumpUntil(stepNext, [&] {
+		return client.world().levelsReceived() == 2 && client.world().localPlayer() >= 0 && client.world().roundStarted();
+	}, 6000));
+	CHECK(client.world().level().mapName == "Range2" && client.state() == net::GameClient::State::Connected);
+	// A kick: KickBan to everyone, then the disconnect.
+	CHECK(hosted.kickPlayer(client.world().localPlayer()));
+	CHECK(pumpUntil(stepNext, [&] { return client.state() != net::GameClient::State::Connected; }));
+	CHECK(hosted.clientCount() == 0);
 }

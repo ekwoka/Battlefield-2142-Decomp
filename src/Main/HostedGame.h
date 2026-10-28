@@ -17,29 +17,43 @@
 //   - its echo of 6/4 (0x004af710): StartSimulation (6/3) and the game
 //     state (0/1, the game logic's slot 0x164), then BeginRound.
 // From then on, each tick: ghost blocks with the control-object record of
-// the client's soldier (or the vehicle it sits in) and the updates of the
+// the client's soldier (or the seat it sits in) and the updates of the
 // ghosts whose state changed (and of every ghost again every two
 // seconds), as much as a packet holds; created and removed objects,
 // players' spawns and seat changes as events. The client's moves drive its
-// player's soldier (the move's inputs as the server's PlayerInput,
-// 0x005838d0), its events pick its kit (SelectKit, 0x0050b010), spawn
-// point (6/6), team (6/7, before its first spawn), name (ChangePlayerName,
-// 0x0050bb90), squad (JoinSquad, LeaveSquad), suicide (6/0xc) and chat
-// (the StringBlock chat lines, sent on to everyone).
+// player's soldier, one move a tick (the move's inputs as the server's
+// PlayerInput, 0x005838d0, through net::soldierInputFromMove), its events
+// pick its kit (SelectKit, 0x0050b010), spawn point (6/6), team (6/7,
+// while it has no soldier: the game logic's slot 0x60), name
+// (ChangePlayerName, 0x0050bb90), squad (JoinSquad, LeaveSquad), suicide
+// (6/0xc) and chat (the StringBlock chat lines, sent on to everyone).
 //
-// The control-object record carries the position and ghost only: the
-// mode-3 prediction state after them (0x00580cd0) is left empty, so the
-// rewrite's client takes the server's position (an original client would
-// read prediction bits there).
+// The control-object record (0x00580830) carries the last move the
+// server stepped, the position and ghost, and the prediction state: every
+// group of the record's ghost in mode 3 (a soldier's physics node and
+// control state at full precision; a seat's, with the vehicle's root
+// ghost as the second ghost) and the player's own state (the player's
+// vtable 0x1c8: spawn tick, man down, health, the weapon in hand's rounds),
+// which a client predicting its soldier (Prediction.h) corrects itself by.
+// Every group of every ghost goes out (the turrets' and wheels' poses,
+// the seats' occupants, the armoured parts' health), not only the roots'.
+//
+// A map change (changeLevel) keeps the connections: the new level's block
+// goes to every client, which loads it and answers LoadComplete, and the
+// join's database follows on the new round, as a map change does on the
+// original server (0x004abbc0(-1) broadcasts the level block and counts a
+// pending load per connection).
 #pragma once
 
 #include "Game/GameWorld.h"
 #include "Net/GameServer.h"
 #include "Net/GhostLayout.h"
+#include "Net/RemoteInput.h"
 #include "Net/RemoteWorld.h"
 #include "Net/ServerQuery.h"
 
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <memory>
 #include <set>
@@ -74,6 +88,17 @@ public:
 	HostedGame(game::GameWorld& round, game::GameLogic& logic, world::ObjectTemplateManager& templates, HostSetup setup);
 	~HostedGame();
 	bool start();
+	// A new level (the next map, or the same one again for a new round) on
+	// the same connections: the clients get its level block and join it.
+	void changeLevel(game::GameWorld& round, game::GameLogic& logic, world::ObjectTemplateManager& templates,
+		HostSetup setup);
+	// Between levels: nothing of the old round is touched until changeLevel.
+	void detach() { m_attached = false; }
+	// Ends a player's connection: KickBan (0x37; 0x0050cf30 writes the
+	// player, whether banned and a byte, and a client's handler 0x0050cfd0
+	// posts it as message 2/0x4d for the HUD) to everyone, then the
+	// disconnect (type 5, sent three times as 0x0068e520 does).
+	bool kickPlayer(int player, bool ban = false, uint32_t reason = 0);
 	uint16_t gamePort() const { return m_server.port(); }
 	// Objects the clients load themselves (the level's static objects): never ghosts.
 	void setStaticObjects(std::set<uint32_t> ids) { m_static = std::move(ids); }
@@ -82,6 +107,7 @@ public:
 	void tick();
 	size_t clientCount() const;
 	size_t ghostCount() const { return m_ghosts.size(); }
+	uint32_t tickCount() const { return m_tick; } // the ghost blocks' tick (the last sent)
 	// Log lines (joins, leaves, chat).
 	std::function<void(const std::string&)> onLog;
 
@@ -95,19 +121,23 @@ private:
 	struct Client {
 		int player = -1;
 		std::string name;
+		int team = 0;
 		enum class Stage { Connected, Loading, Database, Playing } stage = Stage::Connected;
 		std::set<uint16_t> created;              // the ghosts it was told of
 		std::map<uint16_t, std::vector<uint8_t>> sent; // each ghost's last state sent
 		std::map<uint16_t, uint32_t> sentTick;   // and when
 		size_t cursor = 0;                       // round-robin over the ghosts
-		float pitch = 0;                         // the aim, as the moves turn it
-		std::vector<net::PlayerMove> moves;      // this tick's
+		std::deque<net::PlayerMove> moves;       // moves waiting, one a tick
+		net::MoveInputState moveState;           // the aim and the keys held
+		int32_t stepping = -1;                   // the move the round steps this tick
+		int32_t stepped = -1;                    // the last move the round has stepped (the record's)
+		bool starved = true;                     // no move was waiting: wait for two
+		uint32_t movesDropped = 0, ticksStarved = 0; // for the log
+		int historySlot = 7;                     // the record's slot (0x00580830: +0x20f8)
 		std::string chat;                        // a StringBlock coming in
 		uint32_t chatSize = 0;
 		bool spawnRequested = false;
 		game::SoldierInput held;                 // the last move's held inputs
-		bool useWas = false;
-		int seatWas = 0, itemWas = 0;
 	};
 	struct PlayerSeen {
 		uint16_t ghost = 0; // its networkable's
@@ -120,6 +150,7 @@ private:
 	void left(int client);
 	void event(int client, const net::GameEvent& event);
 	void sendDatabase(int client);
+	void sendLevel(int client); // the map list and the level block
 	void applyMoves();
 	void trackObjects();
 	void trackPlayers();
@@ -127,6 +158,12 @@ private:
 	std::vector<net::GameEvent> createEvents(const Ghost& ghost) const;
 	net::GameEvent createPlayerEvent(const game::GameWorld::PlayerInfo& player, bool own, uint16_t ghost) const;
 	std::vector<uint8_t> stateOf(const Ghost& ghost, size_t part, size_t& bits) const;
+	// Every group's state of one of a ghost's parts (mode 2 or 3).
+	std::vector<net::NetworkableState> statesOf(const Ghost& ghost, size_t part, unsigned mode) const;
+	net::NetworkableState soldierState(uint32_t soldier, const world::ObjectTemplate& t, const net::NetworkableHints& h,
+		unsigned mode) const;
+	net::PlayerOwnState ownState(int player) const;
+	const Ghost* ghostOf(uint16_t ghost, size_t& part) const;
 	std::vector<uint8_t> playerStateOf(int player, size_t& bits) const;
 	const std::vector<net::GhostPartLayout>* layoutFor(const world::ObjectTemplate& t);
 	uint16_t ghostOfObject(uint32_t object, int part = 0) const;
@@ -134,9 +171,14 @@ private:
 	void sendToPlaying(const net::GameEvent& event);
 	net::ServerReport report() const;
 
-	game::GameWorld& m_round;
-	game::GameLogic& m_logic;
-	world::ObjectTemplateManager& m_templates;
+	game::GameWorld* m_round;
+	game::GameLogic* m_logic;
+	world::ObjectTemplateManager* m_templates;
+	bool m_attached = true;
+	struct Motion {
+		physics::Vec3 velocity, angularVelocity;
+	};
+	std::map<uint32_t, Motion> m_motion; // the vehicles', this tick
 	HostSetup m_setup;
 	net::GameServer m_server;
 	net::QueryServer m_query;

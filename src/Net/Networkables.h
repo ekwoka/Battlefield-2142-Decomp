@@ -19,8 +19,15 @@
 // (the player object +0xc, vtable 0x00966c80); CreatePlayer gives their
 // ghost id.
 //
-// Ghost updates use mode 2 (0x0057fce0 passes 2; mode 3 is the
-// control-object record's prediction state). Fields after something the
+// Ghost updates use mode 2 (0x0057fce0 passes 2); the control-object
+// record's prediction state uses mode 3 (0x00580830 writes it, 0x00580cd0
+// reads it: every group of the client's own soldier or seat). Only three
+// readers lay mode 3 out differently: the Soldier's (0x005fcdb0: its
+// physics node and control state at full precision), RotationalBundle's
+// (0x00602070: 16 bits an angle) and a seat's occupant (0x00605b00 hands
+// the mode to the soldier's reader). The others (SimpleObject, Engine,
+// Spring, a seat's weapons) read the same bits and only apply them
+// differently (the PCO's reader skips its "is the seat mine" check). Fields after something the
 // reader takes from the client's own copy of the object (whether its
 // physics moves, its armor's hit points, its weapon count...) need
 // NetworkableHints; without them decoding stops there (`complete` false).
@@ -169,6 +176,21 @@ struct NetworkableState {
 	int weapon = -1;             // Soldier mask 0x2000: the active item's index (-1 none)
 	float soldierLean[2] {};     // Soldier 0x800, 0x1000: ±50 (+0x264, +0x260)
 	float stamina = -1;          // Soldier 0x8000: 0..1, sprint stamina (soldier +0x378; PCO vtable 0x108/0x10c)
+	// Soldier in mode 3 (the control-object record), for the prediction:
+	// the node's vectors after the velocity (0x005fc1a0 fills them from node
+	// slots 0x74, 0x88 and 0xc4; 0x005fcdb0 sets them back with 0x78, 0x8c
+	// and 0xc8): the acceleration the next integration takes (0x200), a
+	// vector whose meaning wasn't established (0x400) and the velocity
+	// change for the next tick (0x80000; a jump's node slots, see
+	// physics::SoldierBody::jump). In mode 3 `pitch` and `roll` are the
+	// look's twist ahead of the body (+0x278) and the twist the body still
+	// has to catch up (+0x280), the leans the eased throttle (+0x264) and
+	// strafe (+0x260) (game::SoldierControl's fields of those offsets).
+	Vec3f soldierAcceleration;
+	Vec3f soldierNode88;
+	Vec3f soldierImpulse;
+	bool sprinting = false;      // mode 3, with 0x8000: PCO vtable 0x100 (0x104 sets it)
+	float soldierValue40000 = 0; // mode 3, 0x40000: -1..1 in 7 bits (the soldier's +0x18c interface, vtable 0x90 / 0x94; meaning not traced)
 	int ladder = -1;             // Soldier 0x20000: the ladder's id (0 none)
 	float ladderPosition = 0;    // and the position on it, 0..1
 	int soldierValues[3] {};     // Soldier 0x20 (+0x268, +0x26c, 0..4), 0x4000 (+0x284)
@@ -277,11 +299,69 @@ struct NetworkableState {
 // Reads the first group of a ghost update for a networkable of `hints.kind`.
 // `reference` is the stream's reference position (the control-object
 // record's position in this ghost block, else the origin).
-bool decodeNetworkable(BitReader& in, const NetworkableHints& hints, const Vec3f& reference, NetworkableState& out);
+// `mode` 2 for ghost updates, 3 for the control-object record.
+bool decodeNetworkable(BitReader& in, const NetworkableHints& hints, const Vec3f& reference, NetworkableState& out,
+	unsigned mode = 2);
 // Writes one as the original writer does for the fields NetworkableState
 // holds (others present in the mask are written as zero), for tests and the
 // loopback server. `reference` nullptr: positions go as raw floats.
-void encodeNetworkable(BitWriter& out, const NetworkableHints& hints, const Vec3f* reference, const NetworkableState& state);
+void encodeNetworkable(BitWriter& out, const NetworkableHints& hints, const Vec3f* reference, const NetworkableState& state,
+	unsigned mode = 2);
+
+// The player's own state, the last part of the control-object record
+// (after its 10-bit length): the player's vtable 0x1c8 writes it
+// (0x00594cc0), 0x1cc reads it (0x00596ed0) with the client's control
+// object. The weapon part is there only when that object (or a parent) is
+// a PlayerControlObject (interface 0xc4c5: a soldier or a seat).
+struct PlayerOwnState {
+	bool flag210 = false;          // player vtable 0x210 (the reader calls 0x20c(1) when set; meaning not traced)
+	bool flag16a = false, flag168 = false, flag169 = false, flag16b = false; // player +0x16a, +0x168, +0x169, +0x16b
+	int value14c = 0;              // 8 bits, player +0x14c (vtable 0x228 sets it)
+	// Where the last hit came from (+0x1d0, radians -pi..pi), sent in the
+	// two records after a hit (+0x1d4 counts them down); the reader posts
+	// message 2/0x39 (the hit indicator) for a new one.
+	bool hasHitDirection = false;
+	float hitDirection = 0;
+	// The hit's strength (+0x1d8, 0..25), sent twice as well (+0x1dc); the
+	// reader hands it to the control object's vtable 0x1b4(0) slot 0x4c.
+	bool hasHitStrength = false;
+	float hitStrength = 0;
+	// Weapon groups 0-2 (player +0x1e0 + g: one is active): the selected
+	// weapon's index in the group (5 bits of index + 1, 0x005a98b0), three
+	// 2-bit values (+0x208, +0x238, +0x1fc; meanings not traced), the rounds
+	// (+0x1e4, 11 bits of value + 1) and the magazines (+0x214, 10 bits of
+	// value + 1); with a heat-carrying firearm (PlayerOwnStateHints) its
+	// 0..6 (+0x22c) in 8 bits.
+	struct Weapon {
+		bool active = false;
+		int index = -1;
+		int value208 = 0, value238 = 0, value1fc = 0;
+		int ammo = -1;
+		int magazines = -1;
+		int heat = 0;
+	};
+	Weapon weapons[3];
+	// Group 0's weapon's component 0xc506 (a 1 bit, then 0..1 in 8 bits;
+	// non-zero only with a template component of class 0x94e5 whose +0x48
+	// flag is set: its slot 0xcc).
+	bool hasCharge = false;
+	float charge = 0;
+	uint32_t spawnTick = 0;        // player +0xdc (as the player networkable's mask 0x20)
+	bool manDown = false;          // +0xe0
+	float health = 0;              // the player's soldier's hit points over maxHitPoints, a sign bit and 8 bits
+	bool flag124 = false, flag19f = false, flag1a0 = false; // player +0x124, +0x19f, +0x1a0
+	bool commander = false;        // +0x10c
+	bool complete = false;
+};
+struct PlayerOwnStateHints {
+	bool controlObject = true;     // the control object has a PlayerControlObject on its parent chain
+	// Per weapon group: the selected firearm answers interface 0x94c0 slot 0x30
+	// (0x005c1360: its template's vector at +0x2c8, set by 0x00522125, has y
+	// > 0; the setting's name wasn't traced, so the rewrite's sides pass false).
+	bool weaponHeat[3] {};
+};
+bool decodePlayerOwnState(BitReader& in, const PlayerOwnStateHints& hints, PlayerOwnState& out);
+void encodePlayerOwnState(BitWriter& out, const PlayerOwnStateHints& hints, const PlayerOwnState& state);
 
 // --- the quantizations, shared with the tests
 

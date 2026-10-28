@@ -46,6 +46,9 @@ enum class PacketType : uint8_t {
 
 // Why a server refuses (the codes 0x00689d30 returns).
 const char* refusalReason(uint32_t code);
+// A disconnect's reason (type 5): the same codes as a refusal where they
+// apply (0 none given: the other side left, or a kick).
+const char* disconnectReason(uint32_t code);
 
 struct ConnectRequest {
 	std::string key;      // 4 bytes

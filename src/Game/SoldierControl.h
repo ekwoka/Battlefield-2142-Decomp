@@ -57,6 +57,13 @@ public:
 	void lose(float amount) { m_stamina = amount < m_stamina ? m_stamina - amount : 0.0f; }
 	bool sprinting() const { return m_sprinting; }
 	float stamina() const { return m_stamina; }
+	// A client's prediction taking the server's values (the soldier's
+	// mode-3 state, 0x005fcdb0: PCO vtable 0x10c and 0x104).
+	void restore(float stamina, bool sprinting)
+	{
+		m_stamina = stamina;
+		m_sprinting = sprinting;
+	}
 
 private:
 	bool m_configured = false;
@@ -116,6 +123,16 @@ public:
 	float strafe() const { return m_strafe; }
 	// Degrees the look is ahead of the body (+0x278).
 	float twist() const { return m_twist; }
+	float catchUp() const { return m_catchUp; } // +0x280
+	// A client's prediction taking the server's values (the soldier's
+	// mode-3 state: +0x264, +0x260, +0x278, +0x280; 0x005fcdb0).
+	void restore(float throttle, float strafe, float twist, float catchUp)
+	{
+		m_throttle = throttle;
+		m_strafe = strafe;
+		m_twist = twist;
+		m_catchUp = catchUp;
+	}
 	void reset()
 	{
 		m_twist = m_catchUp = 0;

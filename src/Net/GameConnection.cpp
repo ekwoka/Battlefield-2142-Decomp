@@ -33,6 +33,16 @@ const char* refusalReason(uint32_t code)
 	}
 }
 
+const char* disconnectReason(uint32_t code)
+{
+	switch (code) {
+	case 0: return "the connection was closed";
+	case 0x16: return "banned";
+	case 0x1b: return "no content check"; // 0x004af710's refusal of a client without one
+	default: return refusalReason(code);
+	}
+}
+
 std::vector<uint8_t> connectPacket(const ConnectRequest& request)
 {
 	BitWriter out = header(PacketType::Connect, 0);

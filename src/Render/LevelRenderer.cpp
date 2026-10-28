@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <optional>
 #include <sstream>
 
@@ -29,11 +30,10 @@ namespace dice::hfe::render {
 namespace {
 
 constexpr int kDefaultTerrainPatches = 8; // colormaps per side without terrain data
-constexpr float kDetailFadeStart = 60.0f;
-constexpr float kDetailFadeEnd = 140.0f;
-// The low-detail texture's planes blend by |normal| - this (vBlendMod of
-// TerrainShader_Shared.fx; its value is RendDX9's, not yet read: a guess).
-constexpr float kLowDetailBlendBias = 0.2f;
+// The low-detail texture's x and z planes: its v a metre up (TEXSCALE.y,
+// 0x100af7e0; STTEXSCALE.y is the secondary y scale x 400 x 1.53787e-05 of
+// the samples, the same a metre).
+constexpr float kLowDetailVerticalScale = 0.00615148f;
 
 std::string lower(std::string s)
 {
@@ -145,6 +145,9 @@ LevelRenderer::~LevelRenderer()
 	}
 	if (m_terrainIndices) {
 		SDL_ReleaseGPUBuffer(device, m_terrainIndices);
+	}
+	if (m_terrainLodIndices) {
+		SDL_ReleaseGPUBuffer(device, m_terrainLodIndices);
 	}
 	if (m_overlayVertices) {
 		SDL_ReleaseGPUBuffer(device, m_overlayVertices);
@@ -565,45 +568,67 @@ void LevelRenderer::buildTerrain(const LevelSources& sources)
 	const int samples = heightmap->width();
 	const int quads = (samples - 1) / patchesPerSide;
 	const int side = quads + 1;
-	std::vector<uint16_t> indices;
-	indices.reserve(static_cast<size_t>(quads) * quads * 6);
-	for (int y = 0; y < quads; ++y) {
-		for (int x = 0; x < quads; ++x) {
-			const auto at = [side](int px, int py) { return static_cast<uint16_t>(py * side + px); };
-			indices.insert(indices.end(), {at(x, y), at(x, y + 1), at(x + 1, y), at(x + 1, y), at(x, y + 1), at(x + 1, y + 1)});
-		}
-	}
-	m_terrainIndexCount = static_cast<uint32_t>(indices.size());
-	m_terrainIndices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_INDEX, indices.data(),
-		static_cast<uint32_t>(indices.size() * sizeof(uint16_t)));
-
 	const auto& scale = heightmap->scale();
 	m_patchesPerSide = patchesPerSide;
 	m_patchOrigin[0] = heightmap->originX();
 	m_patchOrigin[1] = heightmap->originZ();
 	m_patchSize = quads * scale[0];
+	// terraindata.raw's compiled patches when they fit the heightmap: drawn
+	// by LOD cells (buildTerrainLods); else the heightmap at full detail.
+	const bool lods = buildTerrainLods(sources, quads);
+	m_stats.terrainLods = lods;
+	if (!lods) {
+		std::vector<uint16_t> indices;
+		indices.reserve(static_cast<size_t>(quads) * quads * 6);
+		for (int y = 0; y < quads; ++y) {
+			for (int x = 0; x < quads; ++x) {
+				const auto at = [side](int px, int py) { return static_cast<uint16_t>(py * side + px); };
+				indices.insert(indices.end(), {at(x, y), at(x, y + 1), at(x + 1, y), at(x + 1, y), at(x, y + 1), at(x + 1, y + 1)});
+			}
+		}
+		m_terrainIndexCount = static_cast<uint32_t>(indices.size());
+		m_terrainIndices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_INDEX, indices.data(),
+			static_cast<uint32_t>(indices.size() * sizeof(uint16_t)));
+	}
 	for (int py = 0; py < patchesPerSide; ++py) {
 		for (int px = 0; px < patchesPerSide; ++px) {
 			std::vector<Vertex> vertices(static_cast<size_t>(side) * side);
+			const terrain::TerrainPatchMesh* compiled =
+				lods ? &data->meshes->patches[static_cast<size_t>(py * patchesPerSide + px)] : nullptr;
 			for (int y = 0; y < side; ++y) {
 				for (int x = 0; x < side; ++x) {
 					const int sx = px * quads + x;
 					const int sy = py * quads + y;
 					Vertex& v = vertices[static_cast<size_t>(y) * side + x];
 					v.position[0] = heightmap->originX() + sx * scale[0];
-					v.position[1] = heightmap->sample(sx, sy);
 					v.position[2] = heightmap->originZ() + sy * scale[2];
-					const float dx = heightmap->sample(sx + 1, sy) - heightmap->sample(sx - 1, sy);
-					const float dz = heightmap->sample(sx, sy + 1) - heightmap->sample(sx, sy - 1);
-					const Vec3f n = normalize({-dx, 2 * scale[0], -dz});
-					v.normal[0] = n.x;
-					v.normal[1] = n.y;
-					v.normal[2] = n.z;
+					if (compiled) {
+						// The compiled vertex (0x1014be90): its height and the
+						// three geomorph deltas in heightmap units, the normal
+						// a D3DCOLOR (B, G, R, A; x = R, y = G, z = B), the
+						// LOD step it drops out at on a cell's edge.
+						const terrain::TerrainVertex& c = compiled->vertices[static_cast<size_t>(y) * side + x];
+						v.position[1] = c.height * scale[1];
+						for (int i = 0; i < 3; ++i) {
+							v.normal[i] = (c.normal[2 - i] - 127.5f) / 127.5f;
+						}
+						v.lightmapCoord[0] = c.morph[0] * scale[1];
+						v.lightmapCoord[1] = c.morph[1] * scale[1];
+						v.part = c.morph[2] * scale[1];
+						v.part2 = static_cast<float>(c.edge);
+					} else {
+						v.position[1] = heightmap->sample(sx, sy);
+						const float dx = heightmap->sample(sx + 1, sy) - heightmap->sample(sx - 1, sy);
+						const float dz = heightmap->sample(sx, sy + 1) - heightmap->sample(sx, sy - 1);
+						const Vec3f n = normalize({-dx, 2 * scale[0], -dz});
+						v.normal[0] = n.x;
+						v.normal[1] = n.y;
+						v.normal[2] = n.z;
+						v.part2 = -1; // no LOD step: never morphed
+					}
 					// Colormap and lightmap texels run along +x and +z.
 					v.texCoord[0] = static_cast<float>(x) / quads;
 					v.texCoord[1] = static_cast<float>(y) / quads;
-					v.lightmapCoord[0] = v.texCoord[0];
-					v.lightmapCoord[1] = v.texCoord[1];
 				}
 			}
 			// "<base><x patch>x<z patch>", counted from the -x/-z corner
@@ -636,6 +661,14 @@ void LevelRenderer::buildTerrain(const LevelSources& sources)
 	}
 	m_stats.terrainPatches = m_terrain.size();
 	m_terrainExtent = heightmap->worldWidth();
+	// TerrainWaterColor and WaterHeight (0x100af7e0: terraindata.raw's water
+	// colour, the cluster's water level): the distant cells' low-detail pass
+	// (Shared_PS_LowDetail) tints the ground under the sea.
+	m_terrainWater = {0, 0, 0, -1e9f};
+	if (data && sources.heightmaps.hasSea()) {
+		m_terrainWater = {data->waterColor[0], data->waterColor[1], data->waterColor[2],
+			sources.heightmaps.seaWaterLevel()};
+	}
 	// The low-detail texture (0x100b0850): <level>lowdetailtexturehi.dds,
 	// else <level>/lowDetailTexture.dds (the editor's name, 0x100ccab0),
 	// else common/terrain/textures/Default.dds; tiled by terraindata.raw's
@@ -653,7 +686,153 @@ void LevelRenderer::buildTerrain(const LevelSources& sources)
 		m_farTiling[1] = data->farSideTiling[1];
 		m_farTiling[2] = data->farTopTilingHigh;
 		m_farTiling[3] = data->farYOffset;
+		// The surrounding terrain's (STFARTEXTILING, STTEXSCALE: 0x100af7e0):
+		// world metres over patch size x the secondary x scale, the tilings
+		// across times patches per side over a quarter of that scale.
+		const float secondary = data->secondaryWorldScale[0] > 0 ? data->secondaryWorldScale[0] : 1.0f;
+		const float across = static_cast<float>(data->patchesPerSide) / (secondary * 0.25f);
+		m_surroundingFarTiling[0] = data->farSideTiling[0] * across;
+		m_surroundingFarTiling[1] = data->farSideTiling[1];
+		m_surroundingFarTiling[2] = data->farTopTilingHigh * across;
+		m_surroundingFarTiling[3] = data->farYOffset;
+		m_surroundingTexScale = data->patchSize > 0 ? 1.0f / (static_cast<float>(data->patchSize) * secondary) : 0.0f;
 	}
+}
+
+// terraindata.raw's LOD meshes (0x100b00a0, 0x100aed30): the index ranges of
+// the shared tree's nodes and the cells the terrain culler draws, each a node
+// of a patch's tree as big as terrainCuller.baseCellSize (64 m by default,
+// 0x1009c820; a patch's quarter at 2 m a quad). False when the file has no
+// meshes or they don't fit the heightmap (then the heightmap is drawn whole).
+bool LevelRenderer::buildTerrainLods(const LevelSources& sources, int quads)
+{
+	const terrain::TerrainData* data = sources.terrainData;
+	const terrain::Heightmap* heightmap = sources.heightmaps.primary();
+	if (!data || !data->meshes || !heightmap || data->patchSize != quads || data->patchesPerSide <= 0) {
+		return false;
+	}
+	const terrain::TerrainMeshes& meshes = *data->meshes;
+	const size_t side = static_cast<size_t>(quads) + 1;
+	if (meshes.nodes.size() != 85 || meshes.indices.empty() ||
+		meshes.patches.size() != static_cast<size_t>(data->patchesPerSide * data->patchesPerSide)) {
+		return false;
+	}
+	for (const terrain::TerrainPatchMesh& patch : meshes.patches) {
+		if (patch.vertices.size() != side * side) {
+			return false;
+		}
+	}
+	for (uint16_t index : meshes.indices) {
+		if (index >= side * side) {
+			return false;
+		}
+	}
+	// The cell: baseCellSize metres if that is a node of the tree (128, 64
+	// or 32 quads: levels 0-2, the ones with stitched variants), else the
+	// nearest of them.
+	const scene::RendererSettings defaults;
+	const scene::RendererSettings& settings = sources.renderer ? *sources.renderer : defaults;
+	const float metresPerQuad = heightmap->scale()[0];
+	int cellQuads = static_cast<int>(std::lround(settings.baseCellSize / std::fmax(metresPerQuad, 1e-3f)));
+	cellQuads = std::clamp(cellQuads, quads / 4, quads);
+	int level = 0;
+	while ((quads >> level) > cellQuads && level < 2) {
+		++level;
+	}
+	cellQuads = quads >> level;
+	if (cellQuads <= 0) {
+		return false;
+	}
+	m_terrainNodeRanges.assign(meshes.nodes.size(), {});
+	for (size_t n = 0; n < meshes.nodes.size(); ++n) {
+		for (int lod = 0; lod < 3; ++lod) {
+			for (int mask = 0; mask < 11; ++mask) {
+				const terrain::IndexRange& r = meshes.nodes[n][static_cast<size_t>(lod)][static_cast<size_t>(mask)];
+				if (r.start >= 0 && r.count > 0 && static_cast<size_t>(r.start) + r.count <= meshes.indices.size()) {
+					m_terrainNodeRanges[n][static_cast<size_t>(lod * 11 + mask)] = {
+						static_cast<uint32_t>(r.start), static_cast<uint32_t>(r.count)};
+				}
+			}
+		}
+	}
+	// The nodes of that level by the corner their full-detail triangles
+	// start at (the tree is ordered as a quadtree: 0; 1-4; 5-20; 21-84).
+	const int perPatch = quads / cellQuads;
+	std::vector<int> nodeAt(static_cast<size_t>(perPatch * perPatch), -1);
+	const size_t first = level == 0 ? 0 : level == 1 ? 1 : 5;
+	const size_t last = level == 0 ? 1 : level == 1 ? 5 : 21;
+	for (size_t n = first; n < last; ++n) {
+		const TerrainNodeRange& r = m_terrainNodeRanges[n][0];
+		int x0 = quads, z0 = quads;
+		for (uint32_t i = r.start; i < r.start + r.count; ++i) {
+			x0 = std::min(x0, static_cast<int>(meshes.indices[i] % side));
+			z0 = std::min(z0, static_cast<int>(meshes.indices[i] / side));
+		}
+		if (r.count > 0 && x0 % cellQuads == 0 && z0 % cellQuads == 0) {
+			nodeAt[static_cast<size_t>((z0 / cellQuads) * perPatch + x0 / cellQuads)] = static_cast<int>(n);
+		}
+	}
+	if (std::find(nodeAt.begin(), nodeAt.end(), -1) != nodeAt.end()) {
+		return false;
+	}
+	const int patches = data->patchesPerSide;
+	m_terrainCellsPerPatch = perPatch;
+	m_terrainCellsPerSide = patches * perPatch;
+	m_terrainCells.assign(static_cast<size_t>(m_terrainCellsPerSide) * m_terrainCellsPerSide, {});
+	m_terrainCellNodes.assign(m_terrainCells.size(), 0);
+	const float yScale = heightmap->scale()[1];
+	for (int cz = 0; cz < m_terrainCellsPerSide; ++cz) {
+		for (int cx = 0; cx < m_terrainCellsPerSide; ++cx) {
+			const size_t c = static_cast<size_t>(cz) * m_terrainCellsPerSide + cx;
+			TerrainLodCell& cell = m_terrainCells[c];
+			const int px = cx / perPatch, pz = cz / perPatch;
+			m_terrainCellNodes[c] = nodeAt[static_cast<size_t>((cz % perPatch) * perPatch + cx % perPatch)];
+			const terrain::TerrainPatchMesh& patch = meshes.patches[static_cast<size_t>(pz * patches + px)];
+			float low = 1e30f, high = -1e30f;
+			const int x0 = (cx % perPatch) * cellQuads, z0 = (cz % perPatch) * cellQuads;
+			for (int z = z0; z <= z0 + cellQuads; ++z) {
+				for (int x = x0; x <= x0 + cellQuads; ++x) {
+					const terrain::TerrainVertex& v = patch.vertices[static_cast<size_t>(z) * side + x];
+					// Morphed anywhere between its own height and its LODs'.
+					for (float h : {v.height, v.height - v.morph[0], v.height - v.morph[1], v.height - v.morph[2]}) {
+						low = std::fmin(low, h * yScale);
+						high = std::fmax(high, h * yScale);
+					}
+				}
+			}
+			const float x = heightmap->originX() + static_cast<float>(cx * cellQuads) * metresPerQuad;
+			const float z = heightmap->originZ() + static_cast<float>(cz * cellQuads) * heightmap->scale()[2];
+			cell.boundsMin = {x, low, z};
+			cell.boundsMax = {x + cellQuads * metresPerQuad, high, z + cellQuads * heightmap->scale()[2]};
+		}
+	}
+	m_terrainLodIndices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_INDEX, meshes.indices.data(),
+		static_cast<uint32_t>(meshes.indices.size() * sizeof(uint16_t)));
+	return m_terrainLodIndices != nullptr;
+}
+
+float LevelRenderer::viewZoom(const Camera& camera) const
+{
+	// RenderView +0x1c (0x10066b30): tan(first fov / 2) / tan(fov / 2).
+	const float base = m_baseFovY > 0 ? m_baseFovY : camera.fovY;
+	const float t = std::tan(camera.fovY * 0.5f);
+	return t > 1e-6f ? std::tan(base * 0.5f) / t : 1.0f;
+}
+
+// The terrain culler's frame (TerrainLod.h): visibility, LODs, stitches.
+void LevelRenderer::updateTerrainCells(const Camera& camera, const Frustum& frustum)
+{
+	const scene::RendererSettings defaults;
+	const scene::RendererSettings& settings = m_sources && m_sources->renderer ? *m_sources->renderer : defaults;
+	m_terrainLodSwitch = terrainLodSwitch(viewZoom(camera), settings);
+	const terrain::Heightmap* heightmap = m_sources ? m_sources->heightmaps.primary() : nullptr;
+	const float ground = heightmap ? heightmap->heightAt(camera.position.x, camera.position.z) : 0.0f;
+	m_terrainHeightAboveGround = std::fabs(camera.position.y - ground);
+	for (TerrainLodCell& cell : m_terrainCells) {
+		cell.visible = frustum.containsBox(cell.boundsMin, cell.boundsMax);
+	}
+	pickTerrainLods(m_terrainCells, m_terrainCellsPerSide, camera.position.x, camera.position.z,
+		m_terrainHeightAboveGround, m_terrainLodSwitch, settings.lod2Start);
 }
 
 // The surrounding terrain: each secondary heightmap of the cluster drawn
@@ -950,6 +1129,11 @@ void LevelRenderer::buildWater(const LevelSources& sources)
 		m_waterFrames.push_back(texture(sources.files, path));
 	}
 	m_waterEnvMap = cubeTexture(sources.files, sources.levelPath + "Water/envmap.dds");
+	// The 3D variants' volume (the terrain's water map name, "watervolume"
+	// at 0x100b4690: Textures/watervolume.dds, 256 x 256 x 8).
+	if (sources.files.exists("common/textures/watervolume.dds")) {
+		m_waterVolume = texture(sources.files, "common/textures/watervolume.dds");
+	}
 }
 
 // Roads placed by CompiledRoads.con: objects of a RoadCompiled template
@@ -1969,6 +2153,10 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 	m_culledInstances = 0;
 	const Frustum frustum = Frustum::fromViewProjection(viewProjection);
 	bool uploaded = false;
+	const scene::RendererSettings rendererDefaults;
+	const scene::RendererSettings& renderer =
+		m_sources && m_sources->renderer ? *m_sources->renderer : rendererDefaults;
+	const float zoom = viewZoom(camera);
 	for (Instance& instance : m_instances) {
 		if (instance.hidden || instance.fade <= 0.0f) {
 			continue;
@@ -2003,11 +2191,12 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 		if (m_sources && instance.shownGeometry < 0 && base.lodCount > 1 && !instance.geometry.empty()) {
 			const Vec3f origin {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
 			const Vec3f toCamera = (sphere.radius >= 0 ? sphere.center : origin) - camera.position;
-			const float distance = std::sqrt(dot(toCamera, toCamera));
-			const std::vector<float> distances = base.lodDistances.empty()
-				? defaultLodDistances(std::fmax(sphere.radius, 1.0f), static_cast<int>(base.lodCount))
-				: base.lodDistances;
-			const int lod = lodForDistance(distance, distances, static_cast<int>(base.lodCount));
+			const float distance = lodDistance(std::sqrt(dot(toCamera, toCamera)), zoom, sphere.radius);
+			const std::vector<float> distances = lodSwitchDistances(base.lodDistances, static_cast<int>(base.lodCount));
+			const float scale = base.skinned ? renderer.skinnedMeshLodDistanceScale
+				: base.bundled               ? renderer.bundleMeshLodDistanceScale
+											 : renderer.staticMeshLodDistanceScale;
+			const int lod = lodForDistance(distance, distances, static_cast<int>(base.lodCount), scale);
 			if (lod > 0) {
 				instance.lods.resize(base.lodCount);
 				Instance::Lod& entry = instance.lods[static_cast<size_t>(lod)];
@@ -2087,6 +2276,9 @@ Camera LevelRenderer::suggestedCamera() const
 void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, GpuContext::Target& target,
 	const Camera& camera, const scene::LightSettings& lights)
 {
+	if (m_baseFovY <= 0) {
+		m_baseFovY = camera.fovY; // the zoom is against the view's first fov (0x10066b30)
+	}
 	SDL_GPUColorTargetInfo colorTarget {};
 	colorTarget.texture = color;
 	colorTarget.clear_color = {lights.fogColor[0] / 255.0f, lights.fogColor[1] / 255.0f, lights.fogColor[2] / 255.0f, 1.0f};
@@ -2182,31 +2374,52 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	applyPointLights(terrainUnlit);
 	TransformUniforms transforms {viewProjection, Mat4 {}, {1, 1, 0, 0}, {}};
 	SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
-	if (m_terrainIndices) {
-		SDL_GPUBufferBinding indexBinding {m_terrainIndices, 0};
-		SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
-	}
 	const Frustum frustum = Frustum::fromViewProjection(viewProjection);
 	TerrainDetailUniforms detail {};
 	for (int i = 0; i < kMaxDetailLayers; ++i) {
 		detail.tiling[i] = m_detailTiling[i];
 	}
-	detail.detailFade[0] = kDetailFadeStart;
-	detail.detailFade[1] = kDetailFadeEnd;
 	std::copy(std::begin(m_farTiling), std::end(m_farTiling), detail.farTiling);
-	detail.farScale[0] = m_terrainExtent > 0 ? 1.0f / m_terrainExtent : 0.0f;
-	detail.farScale[1] = kLowDetailBlendBias;
-	detail.farScale[2] = m_lowDetailTexture ? 1.0f : 0.0f;
-	for (const TerrainPatch& patch : m_terrain) {
-		if (!frustum.containsBox(patch.boundsMin, patch.boundsMax)) {
-			continue;
-		}
+	// The low-detail texture's coordinates (TEXSCALE, 0x100af7e0): a patch
+	// across, 255 / patch size of the vertices' 0..255 grid bytes, and
+	// -0.00615148 a metre up for the x and z planes.
+	detail.farScale[0] = m_patchSize > 0 ? 1.0f / m_patchSize : 0.0f;
+	detail.farScale[1] = m_lowDetailTexture ? 1.0f : 0.0f;
+	detail.farScale[3] = kLowDetailVerticalScale;
+	std::copy(m_terrainWater.begin(), m_terrainWater.end(), detail.water);
+	// The geomorph (TerrainShader_Shared.fx geoMorphPosition): the camera's
+	// height above the ground in w, the squared morph limits of the cell's
+	// LOD (NEARFARMORPHLIMITS, 0x100af7e0: lod<n>SwitchStart / Stop times the
+	// LOD 0 distance; the third LOD has none), MORPHDELTASELECTOR picking the
+	// LOD's delta and MORPHDELTAADDER the deltas a cell's stitched edge
+	// vertices take whole (0x1014d700): at LOD 1 the vertices that drop at
+	// LOD 1 move fully to it, at LOD 2 those that drop at LOD 2.
+	const scene::RendererSettings rendererDefaults;
+	const scene::RendererSettings& renderer =
+		m_sources && m_sources->renderer ? *m_sources->renderer : rendererDefaults;
+	if (!m_terrainCells.empty()) {
+		updateTerrainCells(camera, frustum);
+	} else {
+		m_terrainLodSwitch = terrainLodSwitch(viewZoom(camera), renderer);
+		const terrain::Heightmap* heightmap = m_sources ? m_sources->heightmaps.primary() : nullptr;
+		m_terrainHeightAboveGround = std::fabs(camera.position.y -
+			(heightmap ? heightmap->heightAt(camera.position.x, camera.position.z) : 0.0f));
+	}
+	const auto morphFor = [&](int lod, bool morph) {
+		const TerrainMorph m = terrainMorph(lod, morph, m_terrainLodSwitch, renderer, camera.position.x,
+			camera.position.z, m_terrainHeightAboveGround);
+		TerrainMorphUniforms u {};
+		static_assert(sizeof(u) == sizeof(m));
+		std::memcpy(&u, &m, sizeof(u));
+		return u;
+	};
+	const auto orBlack = [this](SDL_GPUTexture* t) { return t ? t : m_gpu.blackTexture(); };
+	const auto bindPatch = [&](const TerrainPatch& patch) {
 		SDL_GPUBufferBinding vertexBinding {patch.vertices, 0};
 		SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
 		SDL_PushGPUFragmentUniformData(commands, 0, patch.lightmap ? &terrainLit : &terrainUnlit, sizeof(terrainLit));
 		detail.detailFade[2] = patch.detailWeights[0] != nullptr ? 1.0f : 0.0f;
 		SDL_PushGPUFragmentUniformData(commands, 1, &detail, sizeof(detail));
-		const auto orBlack = [this](SDL_GPUTexture* t) { return t ? t : m_gpu.blackTexture(); };
 		SDL_GPUTextureSamplerBinding samplers[5 + kMaxDetailLayers] = {
 			{patch.colormap ? patch.colormap : m_gpu.whiteTexture(), m_gpu.clampSampler()},
 			{patch.lightmap ? patch.lightmap : m_gpu.whiteTexture(), m_gpu.clampSampler()},
@@ -2218,14 +2431,75 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		}
 		samplers[4 + kMaxDetailLayers] = {m_lowDetailTexture ? m_lowDetailTexture : m_gpu.whiteTexture(), m_gpu.repeatSampler()};
 		SDL_BindGPUFragmentSamplers(pass, 0, samplers, 5 + kMaxDetailLayers);
-		SDL_DrawGPUIndexedPrimitives(pass, m_terrainIndexCount, 1, 0, 0, 0);
+	};
+	static const bool lodDebug = std::getenv("BF2142_TERRAIN_LODS") != nullptr;
+	if (!m_terrainCells.empty()) {
+		SDL_GPUBufferBinding indexBinding {m_terrainLodIndices, 0};
+		SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+		const int perPatch = m_terrainCellsPerPatch;
+		for (size_t p = 0; p < m_terrain.size(); ++p) {
+			const int px = static_cast<int>(p) % m_patchesPerSide, pz = static_cast<int>(p) / m_patchesPerSide;
+			bool bound = false;
+			int pushed = -1;
+			for (int j = 0; j < perPatch; ++j) {
+				for (int i = 0; i < perPatch; ++i) {
+					const size_t c = static_cast<size_t>(pz * perPatch + j) * m_terrainCellsPerSide +
+						static_cast<size_t>(px * perPatch + i);
+					const TerrainLodCell& cell = m_terrainCells[c];
+					if (!cell.visible) {
+						continue;
+					}
+					const auto& ranges = m_terrainNodeRanges[static_cast<size_t>(m_terrainCellNodes[c])];
+					TerrainNodeRange range = ranges[static_cast<size_t>(cell.lod * 11 + cell.mask)];
+					if (range.count == 0) {
+						range = ranges[static_cast<size_t>(cell.lod * 11)]; // a node without stitched variants
+					}
+					if (range.count == 0) {
+						continue;
+					}
+					if (!bound) {
+						bindPatch(m_terrain[p]);
+						bound = true;
+					}
+					if (pushed != cell.lod) {
+						const TerrainMorphUniforms morph = morphFor(cell.lod, true);
+						SDL_PushGPUVertexUniformData(commands, 1, &morph, sizeof(morph));
+						pushed = cell.lod;
+						if (lodDebug) { // BF2142_TERRAIN_LODS=1: cells tinted by LOD
+							detail.detailFade[0] = static_cast<float>(cell.lod + 1);
+							SDL_PushGPUFragmentUniformData(commands, 1, &detail, sizeof(detail));
+						}
+					}
+					SDL_DrawGPUIndexedPrimitives(pass, range.count, 1, range.start, 0, 0);
+				}
+			}
+		}
+	} else if (m_terrainIndices) {
+		SDL_GPUBufferBinding indexBinding {m_terrainIndices, 0};
+		SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+		// The heightmap at full detail: no morph, the detail fading as LOD 0's.
+		const TerrainMorphUniforms morph = morphFor(0, false);
+		SDL_PushGPUVertexUniformData(commands, 1, &morph, sizeof(morph));
+		for (const TerrainPatch& patch : m_terrain) {
+			if (!frustum.containsBox(patch.boundsMin, patch.boundsMax)) {
+				continue;
+			}
+			bindPatch(patch);
+			SDL_DrawGPUIndexedPrimitives(pass, m_terrainIndexCount, 1, 0, 0, 0);
+		}
 	}
 	// The surrounding terrain.
 	if (!m_surrounding.empty()) {
 		SDL_BindGPUGraphicsPipeline(pass, m_gpu.surroundingPipeline());
 		SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
+		const TerrainMorphUniforms still = morphFor(2, false);
+		SDL_PushGPUVertexUniformData(commands, 1, &still, sizeof(still));
 		SDL_PushGPUFragmentUniformData(commands, 0, &terrainUnlit, sizeof(terrainUnlit));
-		SDL_PushGPUFragmentUniformData(commands, 1, &detail, sizeof(detail));
+		// STTEXSCALE and STFARTEXTILING (0x100af7e0).
+		TerrainDetailUniforms surroundingDetail = detail;
+		std::copy(std::begin(m_surroundingFarTiling), std::end(m_surroundingFarTiling), surroundingDetail.farTiling);
+		surroundingDetail.farScale[0] = m_surroundingTexScale;
+		SDL_PushGPUFragmentUniformData(commands, 1, &surroundingDetail, sizeof(surroundingDetail));
 		SDL_GPUBufferBinding indexBinding {m_surroundingIndices, 0};
 		SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
 		for (const SurroundingPatch& patch : m_surrounding) {
@@ -2390,31 +2664,44 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		SDL_BindGPUGraphicsPipeline(pass, m_gpu.waterPipeline());
 		const LightingUniforms waterLighting = lighting(lights, lights.sunColor, lights.skyColor, 0, false);
 		SDL_PushGPUFragmentUniformData(commands, 0, &waterLighting, sizeof(waterLighting));
-		// WaterCycleTime runs through the frames at renderer.waterAnimSpeed
-		// (100: four frames a second, the rewrite's rate), the texture
-		// scrolls by renderer.waterScroll (a hundredth of it a second).
-		const float frames = static_cast<float>(std::max<size_t>(m_waterFrames.size(), 1));
-		const float cycle = std::fmod(seconds * m_water->animSpeed * 0.04f, frames);
-		const size_t frame0 = static_cast<size_t>(cycle) % std::max<size_t>(m_waterFrames.size(), 1);
-		const size_t frame1 = (frame0 + 1) % std::max<size_t>(m_waterFrames.size(), 1);
+		// WaterCycleTime (0x100b17d0; t the renderer's clock in seconds, a
+		// waterAnimSpeed of 0 taken as 0.01): the 3D variants (Water3D,
+		// WaterHighEnd3D: lighting quality 2 and up) take frac(t / speed), and
+		// the shader scrolls the volume's coordinates by waterScroll times it
+		// and moves through its slices by ten times it; the 2D ones (quality
+		// 0-1) run once through all the waterbump frames in 0.2 x speed
+		// seconds, blending each into the next, unscrolled.
+		const float speed = m_water->animSpeed != 0 ? m_water->animSpeed : 0.01f;
+		const size_t frameCount = std::max<size_t>(m_waterFrames.size(), 1);
+		float cycle = 0;
+		size_t frame0 = 0;
+		if (m_waterVolume) {
+			cycle = seconds / speed - std::floor(seconds / speed);
+		} else {
+			const float position = seconds / (speed * 0.2f) - std::floor(seconds / (speed * 0.2f));
+			const float frames = position * static_cast<float>(frameCount);
+			frame0 = static_cast<size_t>(frames) % frameCount;
+			cycle = frames - std::floor(frames);
+		}
+		const size_t frame1 = (frame0 + 1) % frameCount;
 		const WaterUniforms water {
 			{camera.position.x, camera.position.y, camera.position.z, seconds},
 			{m_water->color[0], m_water->color[1], m_water->color[2], 1},
 			{m_water->specularColor[0], m_water->specularColor[1], m_water->specularColor[2], m_water->specularColor[3]},
 			{m_water->alphaAdd, m_water->alphaHeightMul, m_water->specularPower, m_waterEnvMap ? 1.0f : 0.0f},
-			{scrollOffset(m_water->scroll[0] * 0.01f, seconds), scrollOffset(m_water->scroll[1] * 0.01f, seconds),
-				cycle - std::floor(cycle), 0},
+			{m_water->scroll[0], m_water->scroll[1], cycle, m_waterVolume ? 1.0f : 0.0f},
 		};
 		SDL_PushGPUFragmentUniformData(commands, 1, &water, sizeof(water));
 		TransformUniforms waterTransforms {viewProjection, Mat4 {}, {1, 1, 0, 0}, {}};
 		SDL_PushGPUVertexUniformData(commands, 0, &waterTransforms, sizeof(waterTransforms));
 		SDL_GPUTexture* flat = m_gpu.whiteTexture();
-		SDL_GPUTextureSamplerBinding samplers[3] = {
+		SDL_GPUTextureSamplerBinding samplers[4] = {
 			{m_waterFrames.empty() ? flat : m_waterFrames[frame0], m_gpu.repeatSampler()},
 			{m_waterFrames.empty() ? flat : m_waterFrames[frame1], m_gpu.repeatSampler()},
 			{m_waterEnvMap ? m_waterEnvMap : m_gpu.whiteCubeTexture(), m_gpu.clampSampler()},
+			{m_waterVolume ? m_waterVolume : m_gpu.whiteVolumeTexture(), m_gpu.repeatSampler()},
 		};
-		SDL_BindGPUFragmentSamplers(pass, 0, samplers, 3);
+		SDL_BindGPUFragmentSamplers(pass, 0, samplers, 4);
 		for (const WaterBlock& block : m_waterBlocks) {
 			if (!frustum.containsBox(block.boundsMin, block.boundsMax)) {
 				continue;

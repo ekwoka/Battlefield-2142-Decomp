@@ -335,6 +335,25 @@ public:
 		bool grounded = false;
 		Vec3 bestNormal;
 		bool landed = false;
+		// The drive's contact normal (+0x1b8, (0, 1, 0) after each drive),
+		// which the legs' object pass (0x006cec60) adds its contacts into
+		// per axis (0x006b6bd0); the heightmap's contact sets it.
+		Vec3 contactNormal {0, 1, 0};
+		bool objectNormal = false; // an object contact combined into it this tick
+		// The walker's animation system (the root's slot 0x180): whether a
+		// playing bundle blocks input (slot 0x50, 0x008b9e00: blockInput),
+		// which holds the state (0x00650680), and its speed factor (slot
+		// 0x54, 0x008ba420), which scales the drive (0x00650e90). Set by
+		// the game before each tick; 1 and no block without a system.
+		bool animationBlocks = false;
+		float speedFactor = 1;
+		// What the state gives the system (0x00650530, each tick): 0x80
+		// walking, 0x100 backing, 0x400 turning left, 0x200 right (with
+		// the input's sign holding, 0x00650600), and the PCO's crouch flag
+		// (interface 0xc4c5 slot 0x134, set in state 5), which 0x0063ce30
+		// passes on as 0x10.
+		uint32_t messages = 0;
+		bool crouching = false;
 	};
 	// A FloatingBundle (the *_NP APCs' floats; object vtable 0x00988240,
 	// update 0x0064f420; its own node PhysicsNode 0x006ca810, vtable
@@ -383,6 +402,29 @@ public:
 	const std::vector<FloaterPart>& floaters() const { return m_floaters; }
 	const std::vector<GearPart>& gears() const { return m_gears; }
 	const Legs* legs() const { return m_legs.part >= 0 || m_hasLegs ? &m_legs : nullptr; }
+	// The walker's animation system's state for the next tick (see Legs).
+	void setLegsAnimation(bool blocks, float speedFactor)
+	{
+		m_legs.animationBlocks = blocks;
+		m_legs.speedFactor = speedFactor;
+	}
+	// A contact of the legs' sphere with another object (0x006cec60): its
+	// normal into the drive's (per axis, 0x006b6bd0) and, below the legs'
+	// half-radius line, the best ground normal by height (+0x1c4).
+	void legsObjectContact(const Vec3& normal, const Vec3& queryNormal, bool below);
+	// The legs' drive (0x006cdca0), after every contact of the tick.
+	void legsDrive(physics::RigidBody& body);
+	// The legs' frame in the world (the MechLegs node's matrix); false
+	// without legs.
+	bool legsFrame(const physics::RigidBody& body, physics::Mat3& frame, Vec3& origin) const
+	{
+		if (!m_hasLegs) {
+			return false;
+		}
+		frame = partWorld(body, m_legs.part);
+		origin = partPoint(body, m_legs.part);
+		return true;
+	}
 	// Whether its engines push it through the air (a propeller engine).
 	bool flies() const;
 	// Someone aboard (the engines' messages 4 and 5: 0x0064c890; the force

@@ -28,8 +28,9 @@ layout(set = 3, binding = 1) uniform Detail {
 	vec4 tiling0;
 	vec4 tiling1;
 	vec4 detailFade;
-	vec4 farTiling; // side x, side y, top, y offset
-	vec4 farScale;  // x: 1 / the primary terrain's extent, y: blend bias, z: 1 with a low-detail texture
+	vec4 farTiling; // STFARTEXTILING: side x, side y, top, y offset
+	vec4 farScale;  // x: STTEXSCALE.x (a metre across), y: 1 with a low-detail texture, w: a metre up
+	vec4 water;
 };
 
 layout(location = 0) out vec4 outColor;
@@ -38,13 +39,13 @@ void main()
 {
 	vec3 colormap = texture(colorMap, inTexCoord).rgb;
 	float low = 0.25;
-	if (farScale.z > 0.0) {
+	if (farScale.y > 0.0) {
 		vec4 component = texture(lowComponentMap, inTexCoord);
-		vec3 tex = vec3(inWorldPosition.z, -inWorldPosition.y, inWorldPosition.x) * farScale.x;
+		vec3 tex = vec3(inWorldPosition.z * farScale.x, -inWorldPosition.y * farScale.w, inWorldPosition.x * farScale.x);
 		vec4 yPlane = texture(lowDetailTexture, tex.zx * farTiling.z);
 		vec4 xPlane = texture(lowDetailTexture, tex.xy * farTiling.xy + vec2(0.0, farTiling.w));
 		vec4 zPlane = texture(lowDetailTexture, tex.zy * farTiling.xy + vec2(0.0, farTiling.w));
-		vec3 blend = clamp(abs(normalize(inNormal)) - farScale.y, 0.0, 1.0);
+		vec3 blend = clamp(abs(normalize(inNormal)) - vec3(0.2, 0.5, 0.2), 0.0, 1.0); // vBlendMod
 		blend /= max(dot(blend, vec3(1.0)), 1e-4);
 		float mountain = xPlane.g * blend.x + yPlane.r * blend.y + zPlane.g * blend.z;
 		low = mix(0.5, yPlane.b, component.r) * mix(0.5, mountain, component.b);

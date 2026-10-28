@@ -454,9 +454,15 @@ bool readSimpleObject(BitReader& in, const NetworkableHints& h, const Vec3f& ref
 	return s.complete;
 }
 
-// 0x005fcdb0
-bool readSoldier(BitReader& in, const NetworkableHints& h, const Vec3f& reference, NetworkableState& s)
+// 0x005fcdb0. `mode` is the reader's last argument: 2 in ghost updates
+// (0x0057fce0), 3 in the control-object record (0x00580cd0). Mode 3 sends
+// the soldier's physics node and control state at full precision for the
+// client's prediction: the velocity in 1 mm steps and three more node
+// vectors, the angles as raw floats, the leans in 16 bits, the stamina in
+// 7 bits and the sprinting bit, and mask 0x40000.
+bool readSoldier(BitReader& in, const NetworkableHints& h, const Vec3f& reference, NetworkableState& s, unsigned mode = 2)
 {
+	const bool full = mode == 3;
 	s.mask = in.read(21);
 	const uint32_t m = s.mask;
 	if (m & 0x40) {
@@ -498,38 +504,77 @@ bool readSoldier(BitReader& in, const NetworkableHints& h, const Vec3f& referenc
 		s.hasPosition = true;
 		s.position = readDelta(in, DeltaTable::Wide, 0.001f, reference);
 	}
-	if (m & 0x100) {
+	if (full) {
+		// 0x005fb670 per field: the node's velocity (slot 0x58, set by
+		// 0x5c) in 1 mm/s, its slots 0x74 / 0x8c (set 0x78 / 0x8c) in 0.1 mm
+		// and 0xc4 (set 0xc8) in 1 mm.
+		if (m & 0x100) {
+			s.hasVelocity = true;
+			s.velocity = readDelta(in, DeltaTable::Wide, 0.001f, kZero);
+		}
+		if (m & 0x200) {
+			s.soldierAcceleration = readDelta(in, DeltaTable::Wide, 0.0001f, kZero);
+		}
+		if (m & 0x400) {
+			s.soldierNode88 = readDelta(in, DeltaTable::Wide, 0.0001f, kZero);
+		}
+		if (m & 0x80000) {
+			s.soldierImpulse = readDelta(in, DeltaTable::Wide, 0.001f, kZero);
+		}
+	} else if (m & 0x100) {
 		s.hasVelocity = true;
 		s.velocity = readDelta(in, DeltaTable::Wide, 0.01f, kZero);
 	}
 	if (m & 0x1e) {
 		s.hasAngles = true;
 	}
-	if (m & 2) {
-		s.yaw = readSnorm(in, 12, 360.0f);
-	}
-	if (m & 4) {
-		s.pitch = readSnorm(in, 12, 90.0f);
-	}
-	if (m & 8) {
-		s.roll = readSnorm(in, 12, 180.0f);
-	}
-	if (m & 0x10) {
-		s.aimPitch = readSnorm(in, 12, 90.0f);
+	if (full) {
+		// The four angles as raw floats (+0x25c, +0x278, +0x280, +0x270).
+		if (m & 2) {
+			s.yaw = in.readFloat();
+		}
+		if (m & 4) {
+			s.pitch = in.readFloat();
+		}
+		if (m & 8) {
+			s.roll = in.readFloat();
+		}
+		if (m & 0x10) {
+			s.aimPitch = in.readFloat();
+		}
+	} else {
+		if (m & 2) {
+			s.yaw = readSnorm(in, 12, 360.0f);
+		}
+		if (m & 4) {
+			s.pitch = readSnorm(in, 12, 90.0f);
+		}
+		if (m & 8) {
+			s.roll = readSnorm(in, 12, 180.0f);
+		}
+		if (m & 0x10) {
+			s.aimPitch = readSnorm(in, 12, 90.0f);
+		}
 	}
 	s.weaponZoom = static_cast<int>(readRanged(in, 4));      // the weapon's DefaultZoomComp +0xc
 	s.weaponFireState = static_cast<int>(readRanged(in, 2)); // the fire comp mode (ExplosivesFireComp 0x005e6350)
 	for (int i = 0; i < 3; ++i) {
 		s.soldierBits |= (in.read(1) == 1 ? 2u : 0u) << i;   // +0x328, +0x30c, +0x3e9
 	}
+	const unsigned leanBits = full ? 16 : 10;
 	if (m & 0x800) {
-		s.soldierLean[0] = readSnorm(in, 10, 50.0f); // +0x264
+		s.soldierLean[0] = readSnorm(in, leanBits, 50.0f); // +0x264
 	}
 	if (m & 0x1000) {
-		s.soldierLean[1] = readSnorm(in, 10, 50.0f); // +0x260
+		s.soldierLean[1] = readSnorm(in, leanBits, 50.0f); // +0x260
 	}
 	s.responseFlag = in.read(1) == 1;
-	if (m & 0x8000) {
+	if (full) {
+		if (m & 0x8000) {
+			s.stamina = static_cast<float>(in.read(7)) / 127.0f; // PCO vtable 0x108 / 0x10c
+			s.sprinting = in.read(1) == 1;                      // 0x005fb1f0: PCO vtable 0x100 / 0x104
+		}
+	} else if (m & 0x8000) {
 		s.stamina = static_cast<float>(in.read(5)) / 31.0f; // sprint stamina (PCO vtable 0x10c)
 	}
 	if (m & 0x2000) {
@@ -540,6 +585,9 @@ bool readSoldier(BitReader& in, const NetworkableHints& h, const Vec3f& referenc
 	}
 	if (m & 0x4000) {
 		s.soldierValues[2] = static_cast<int>(in.read(2)); // +0x284
+	}
+	if (full && (m & 0x40000)) {
+		s.soldierValue40000 = readSnorm(in, 7, 1.0f); // +0x18c's vtable 0x90 (set by 0x94)
 	}
 	if (m & 0x20000) {
 		s.ladder = static_cast<int>(readRanged(in, 256));
@@ -657,12 +705,13 @@ bool readDestroyable(BitReader& in, const NetworkableHints& h, const Vec3f& refe
 }
 
 // 0x00602070 (RotationalBundle; also Camera, Wing, FloatingBundle and
-// LandingGear objects). Mode 2 uses 12 bits per angle (mode 3: 16). The
+// LandingGear objects). Mode 2 uses 12 bits per angle and speed, mode 3
+// 16 (the writer's `(mode == 3) * 4 + 12`). The
 // writer (0x006015a0) only sends the fields its template uses (inputs
 // mapped, no automatic reset...), so the mask is enough to read them.
-bool readRotationalBundle(BitReader& in, const NetworkableHints& h, NetworkableState& s)
+bool readRotationalBundle(BitReader& in, const NetworkableHints& h, NetworkableState& s, unsigned mode = 2)
 {
-	constexpr unsigned kBits = 12;
+	const unsigned kBits = mode == 3 ? 16 : 12;
 	s.mask = in.read(12);
 	const float speed[3] = {h.maxSpeed.x, h.maxSpeed.y, h.maxSpeed.z};
 	for (int i = 0; i < 3; ++i) {
@@ -872,7 +921,7 @@ bool readWindows(BitReader& in, const NetworkableHints& h, NetworkableState& s)
 }
 
 // 0x00605b00 (PlayerControlObject with a parent: a seat)
-bool readSeat(BitReader& in, const NetworkableHints& h, const Vec3f& reference, NetworkableState& s)
+bool readSeat(BitReader& in, const NetworkableHints& h, const Vec3f& reference, NetworkableState& s, unsigned mode = 2)
 {
 	if (h.seatCameras < 0) {
 		return false;
@@ -886,7 +935,9 @@ bool readSeat(BitReader& in, const NetworkableHints& h, const Vec3f& reference, 
 			auto occupant = std::make_shared<NetworkableState>();
 			NetworkableHints soldier;
 			soldier.kind = NetworkableKind::Soldier;
-			if (readSoldier(in, soldier, reference, *occupant) && in.position() <= start + s.occupantBits) {
+			// The seat hands its mode on (0x00605b00: the soldier's slot 0x30
+			// with the same last argument).
+			if (readSoldier(in, soldier, reference, *occupant, mode) && in.position() <= start + s.occupantBits) {
 				occupant->kind = NetworkableKind::Soldier;
 				s.occupant = occupant;
 			}
@@ -1030,19 +1081,20 @@ bool readPlayer(BitReader& in, NetworkableState& s)
 
 } // namespace
 
-bool decodeNetworkable(BitReader& in, const NetworkableHints& hints, const Vec3f& reference, NetworkableState& out)
+bool decodeNetworkable(BitReader& in, const NetworkableHints& hints, const Vec3f& reference, NetworkableState& out,
+	unsigned mode)
 {
 	out = {};
 	out.kind = hints.kind;
 	switch (hints.kind) {
 	case NetworkableKind::SimpleObject: return readSimpleObject(in, hints, reference, out);
-	case NetworkableKind::Soldier: return readSoldier(in, hints, reference, out);
+	case NetworkableKind::Soldier: return readSoldier(in, hints, reference, out, mode);
 	case NetworkableKind::Kit: return readKit(in, reference, out);
 	case NetworkableKind::GenericProjectile: return readProjectile(in, hints, reference, out);
 	case NetworkableKind::ControlPoint: return readControlPoint(in, out);
 	case NetworkableKind::DestroyableObject: return readDestroyable(in, hints, reference, out);
 	case NetworkableKind::Player: return readPlayer(in, out);
-	case NetworkableKind::RotationalBundle: return readRotationalBundle(in, hints, out);
+	case NetworkableKind::RotationalBundle: return readRotationalBundle(in, hints, out, mode);
 	case NetworkableKind::Spring: return readSpring(in, hints, out);
 	case NetworkableKind::Engine: return readEngine(in, hints, out);
 	case NetworkableKind::MechLegs: return readMechLegs(in, out);
@@ -1051,7 +1103,7 @@ bool decodeNetworkable(BitReader& in, const NetworkableHints& hints, const Vec3f
 	case NetworkableKind::FreeCamera: return readFreeCamera(in, reference, out);
 	case NetworkableKind::OverheadCamera: return readOverheadCamera(in, hints, reference, out);
 	case NetworkableKind::DestroyableWindowsBundle: return readWindows(in, hints, out);
-	case NetworkableKind::PlayerControlObject: return readSeat(in, hints, reference, out);
+	case NetworkableKind::PlayerControlObject: return readSeat(in, hints, reference, out, mode);
 	default: return false; // the other classes' layouts aren't decoded
 	}
 }
@@ -1059,8 +1111,10 @@ bool decodeNetworkable(BitReader& in, const NetworkableHints& hints, const Vec3f
 // ---------------------------------------------------------------------------
 // Writers (mode 2), as the originals lay the fields out
 
-void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* reference, const NetworkableState& s)
+void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* reference, const NetworkableState& s,
+	unsigned mode)
 {
+	const bool full = mode == 3;
 	const uint32_t m = s.mask;
 	switch (h.kind) {
 	case NetworkableKind::SimpleObject: { // 0x005ff5d0
@@ -1184,20 +1238,48 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 		if (m & 1) {
 			writeDelta(out, DeltaTable::Wide, 0.001f, s.position, reference);
 		}
-		if (m & 0x100) {
-			writeDelta(out, DeltaTable::Wide, 0.01f, s.velocity, &kZero);
-		}
-		if (m & 2) {
-			writeSnorm(out, s.yaw, 12, 360.0f);
-		}
-		if (m & 4) {
-			writeSnorm(out, s.pitch, 12, 90.0f);
-		}
-		if (m & 8) {
-			writeSnorm(out, s.roll, 12, 180.0f);
-		}
-		if (m & 0x10) {
-			writeSnorm(out, s.aimPitch, 12, 90.0f);
+		if (full) {
+			// 0x005fb8c0 with mode 3 (0x00687510 per vector).
+			if (m & 0x100) {
+				writeDelta(out, DeltaTable::Wide, 0.001f, s.velocity, &kZero);
+			}
+			if (m & 0x200) {
+				writeDelta(out, DeltaTable::Wide, 0.0001f, s.soldierAcceleration, &kZero);
+			}
+			if (m & 0x400) {
+				writeDelta(out, DeltaTable::Wide, 0.0001f, s.soldierNode88, &kZero);
+			}
+			if (m & 0x80000) {
+				writeDelta(out, DeltaTable::Wide, 0.001f, s.soldierImpulse, &kZero);
+			}
+			if (m & 2) {
+				out.writeFloat(s.yaw);
+			}
+			if (m & 4) {
+				out.writeFloat(s.pitch);
+			}
+			if (m & 8) {
+				out.writeFloat(s.roll);
+			}
+			if (m & 0x10) {
+				out.writeFloat(s.aimPitch);
+			}
+		} else {
+			if (m & 0x100) {
+				writeDelta(out, DeltaTable::Wide, 0.01f, s.velocity, &kZero);
+			}
+			if (m & 2) {
+				writeSnorm(out, s.yaw, 12, 360.0f);
+			}
+			if (m & 4) {
+				writeSnorm(out, s.pitch, 12, 90.0f);
+			}
+			if (m & 8) {
+				writeSnorm(out, s.roll, 12, 180.0f);
+			}
+			if (m & 0x10) {
+				writeSnorm(out, s.aimPitch, 12, 90.0f);
+			}
 		}
 		writeRanged(out, static_cast<uint32_t>(std::clamp(s.weaponZoom, 0, 3)), 4);
 		writeRanged(out, static_cast<uint32_t>(std::clamp(s.weaponFireState, 0, 1)), 2);
@@ -1205,14 +1287,22 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 			out.write(s.soldierBits >> (i + 1) & 1, 1);
 		}
 		if (m & 0x800) {
-			writeSnorm(out, s.soldierLean[0], 10, 50.0f);
+			writeSnorm(out, s.soldierLean[0], full ? 16 : 10, 50.0f);
 		}
 		if (m & 0x1000) {
-			writeSnorm(out, s.soldierLean[1], 10, 50.0f);
+			writeSnorm(out, s.soldierLean[1], full ? 16 : 10, 50.0f);
 		}
 		out.write(s.responseFlag ? 1 : 0, 1);
 		if (m & 0x8000) {
-			writeUnit(out, s.stamina, 5);
+			// ROUND(clamp(stamina) x 127) and the sprinting bit (0x005fb300) in
+			// mode 3; 5 bits otherwise.
+			const float stamina = std::clamp(s.stamina, 0.0f, 1.0f);
+			if (full) {
+				out.write(static_cast<uint32_t>(std::lround(stamina * 127.0f)), 7);
+				out.write(s.sprinting ? 1 : 0, 1);
+			} else {
+				out.write(static_cast<uint32_t>(std::lround(stamina * 31.0f)), 5);
+			}
 		}
 		if (m & 0x2000) {
 			const int slots = std::max(0, h.soldierItemSlots);
@@ -1220,6 +1310,9 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 		}
 		if (m & 0x4000) {
 			out.write(static_cast<uint32_t>(s.soldierValues[2]) & 3, 2);
+		}
+		if (full && (m & 0x40000)) {
+			writeSnorm(out, s.soldierValue40000, 7, 1.0f);
 		}
 		if (m & 0x20000) {
 			writeRanged(out, static_cast<uint32_t>(std::clamp(s.ladder, 0, 255)), 256);
@@ -1401,15 +1494,16 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 	}
 	case NetworkableKind::RotationalBundle: { // 0x006015a0
 		out.write(m, 12);
+		const unsigned bits = full ? 16 : 12; // (mode == 3) * 4 + 12
 		const float speed[3] = {h.maxSpeed.x, h.maxSpeed.y, h.maxSpeed.z};
 		for (int i = 0; i < 3; ++i) {
 			if (m & (1u << i)) {
-				writeSnormTrunc(out, s.rotation[i], 12, 360.0f);
+				writeSnormTrunc(out, s.rotation[i], bits, 360.0f);
 			}
 		}
 		for (int i = 0; i < 3; ++i) {
 			if (m & (8u << i)) {
-				writeSnormTrunc(out, s.rotationSpeed[i], 12, std::fabs(speed[i]) * 16.0f);
+				writeSnormTrunc(out, s.rotationSpeed[i], bits, std::fabs(speed[i]) * 16.0f);
 			}
 		}
 		if (m & 0x40) {
@@ -1417,7 +1511,7 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 		}
 		for (int i = 0; i < 3; ++i) {
 			if (m & (0x200u << i)) {
-				writeSnormTrunc(out, s.parentRotation[i], 12, 360.0f);
+				writeSnormTrunc(out, s.parentRotation[i], bits, 360.0f);
 			}
 		}
 		if (m & 0x100) {
@@ -1559,7 +1653,7 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 			BitWriter soldier;
 			NetworkableHints sh;
 			sh.kind = NetworkableKind::Soldier;
-			encodeNetworkable(soldier, sh, reference, *s.occupant);
+			encodeNetworkable(soldier, sh, reference, *s.occupant, mode);
 			out.write(static_cast<uint32_t>(soldier.bits()), 11);
 			out.append(soldier);
 			break;
@@ -1577,6 +1671,119 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 	default:
 		break;
 	}
+}
+
+// ---------------------------------------------------------------------------
+// The player's own state in the control-object record (player vtable
+// 0x1c8 writes, 0x00594cc0; 0x1cc reads, 0x00596ed0)
+
+namespace {
+
+// Bits for a value below `limit` as the loops at 0x00594cc0 count them:
+// the smallest n with 2^n - 1 >= limit.
+unsigned loopBits(uint32_t limit) { return bitsFor(limit); }
+
+} // namespace
+
+bool decodePlayerOwnState(BitReader& in, const PlayerOwnStateHints& h, PlayerOwnState& s)
+{
+	s = {};
+	s.flag210 = in.read(1) == 1;
+	s.flag16a = in.read(1) == 1;
+	s.flag168 = in.read(1) == 1;
+	s.flag169 = in.read(1) == 1;
+	s.flag16b = in.read(1) == 1;
+	s.value14c = static_cast<int>(in.read(8));
+	s.hasHitDirection = in.read(1) == 1;
+	if (s.hasHitDirection) {
+		s.hitDirection = readSnorm(in, 8, 6.2831855f);
+	}
+	s.hasHitStrength = in.read(1) == 1;
+	if (s.hasHitStrength) {
+		s.hitStrength = static_cast<float>(in.read(8)) * (25.0f / 255.0f);
+	}
+	if (h.controlObject) {
+		for (int g = 0; g < 3; ++g) {
+			PlayerOwnState::Weapon& w = s.weapons[g];
+			w.active = in.read(1) == 1;
+			if (!w.active) {
+				continue;
+			}
+			w.index = static_cast<int>(in.read(loopBits(0x10))) - 1;
+			w.value208 = static_cast<int>(in.read(2));
+			w.value238 = static_cast<int>(in.read(2));
+			w.value1fc = static_cast<int>(in.read(2));
+			w.ammo = static_cast<int>(in.read(loopBits(0x400))) - 1;
+			w.magazines = static_cast<int>(in.read(loopBits(0x200))) - 1;
+			if (h.weaponHeat[g]) {
+				w.heat = static_cast<int>(static_cast<float>(in.read(8)) * (1.0f / 255.0f) * 6.0f);
+			}
+		}
+		s.hasCharge = in.read(1) == 1;
+		if (s.hasCharge) {
+			s.charge = static_cast<float>(in.read(8)) / 255.0f;
+		}
+	}
+	s.spawnTick = in.read(32);
+	s.manDown = in.read(1) == 1;
+	const bool negative = in.read(1) == 1;
+	const int health = static_cast<int>(in.read(8));
+	s.health = static_cast<float>(negative ? -health : health) / 255.0f;
+	s.flag124 = in.read(1) == 1;
+	s.flag19f = in.read(1) == 1;
+	s.flag1a0 = in.read(1) == 1;
+	s.commander = in.read(1) == 1;
+	s.complete = !in.bad();
+	return s.complete;
+}
+
+void encodePlayerOwnState(BitWriter& out, const PlayerOwnStateHints& h, const PlayerOwnState& s)
+{
+	out.write(s.flag210 ? 1 : 0, 1);
+	out.write(s.flag16a ? 1 : 0, 1);
+	out.write(s.flag168 ? 1 : 0, 1);
+	out.write(s.flag169 ? 1 : 0, 1);
+	out.write(s.flag16b ? 1 : 0, 1);
+	out.write(static_cast<uint32_t>(s.value14c) & 0xff, 8);
+	out.write(s.hasHitDirection ? 1 : 0, 1);
+	if (s.hasHitDirection) {
+		writeSnorm(out, s.hitDirection, 8, 6.2831855f); // x 1/(2 pi), (v + 1) / 2, x 255
+	}
+	out.write(s.hasHitStrength ? 1 : 0, 1);
+	if (s.hasHitStrength) {
+		out.write(static_cast<uint32_t>(std::lround(std::clamp(std::min(s.hitStrength, 25.0f) * 0.04f, 0.0f, 1.0f) * 255.0f)), 8);
+	}
+	if (h.controlObject) {
+		for (int g = 0; g < 3; ++g) {
+			const PlayerOwnState::Weapon& w = s.weapons[g];
+			out.write(w.active ? 1 : 0, 1);
+			if (!w.active) {
+				continue;
+			}
+			out.write(static_cast<uint32_t>(std::clamp(w.index + 1, 0, 15)), loopBits(0x10));
+			out.write(static_cast<uint32_t>(w.value208) & 3, 2);
+			out.write(static_cast<uint32_t>(w.value238) & 3, 2);
+			out.write(static_cast<uint32_t>(w.value1fc) & 3, 2);
+			out.write(static_cast<uint32_t>(std::clamp(w.ammo + 1, 0, 0x3ff)), loopBits(0x400));
+			out.write(static_cast<uint32_t>(std::clamp(w.magazines + 1, 0, 0x1ff)), loopBits(0x200));
+			if (h.weaponHeat[g]) {
+				out.write(static_cast<uint32_t>(std::lround(std::clamp(w.heat / 6.0f, 0.0f, 1.0f) * 255.0f)), 8);
+			}
+		}
+		out.write(s.hasCharge ? 1 : 0, 1);
+		if (s.hasCharge) {
+			out.write(static_cast<uint32_t>(std::lround(std::clamp(s.charge, 0.0f, 1.0f) * 255.0f)), 8);
+		}
+	}
+	out.write(s.spawnTick, 32);
+	out.write(s.manDown ? 1 : 0, 1);
+	const int health = static_cast<int>(std::lround(std::clamp(s.health, -1.0f, 1.0f) * 255.0f));
+	out.write(health < 0 ? 1 : 0, 1);
+	out.write(static_cast<uint32_t>(std::abs(health)), 8);
+	out.write(s.flag124 ? 1 : 0, 1);
+	out.write(s.flag19f ? 1 : 0, 1);
+	out.write(s.flag1a0 ? 1 : 0, 1);
+	out.write(s.commander ? 1 : 0, 1);
 }
 
 } // namespace dice::hfe::net

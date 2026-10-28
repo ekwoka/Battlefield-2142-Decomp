@@ -320,6 +320,23 @@ int screenshot(const render::LevelSources& sources, const ViewerOptions& options
 	level.syncObjects();
 	level.draw(commands, target.color, target, camera, sources.lights);
 	SDL_SubmitGPUCommandBuffer(commands);
+	// BF2142_FRAME_BENCH=N: draw the same frame N more times, each waited
+	// for, and print the mean frame cost (CPU preparation and the GPU's).
+	if (const char* bench = std::getenv("BF2142_FRAME_BENCH")) {
+		const int frames = std::max(std::atoi(bench), 1);
+		const Uint64 start = SDL_GetTicksNS();
+		for (int i = 0; i < frames; ++i) {
+			SDL_GPUCommandBuffer* again = SDL_AcquireGPUCommandBuffer(gpu->device());
+			level.draw(again, target.color, target, camera, sources.lights);
+			SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(again);
+			if (fence) {
+				SDL_WaitForGPUFences(gpu->device(), true, &fence, 1);
+				SDL_ReleaseGPUFence(gpu->device(), fence);
+			}
+		}
+		std::printf("frame cost %.3f ms (mean of %d)\n",
+			static_cast<double>(SDL_GetTicksNS() - start) / 1e6 / frames, frames);
+	}
 	std::vector<uint8_t> pixels;
 	const bool ok = gpu->readPixels(target, pixels) &&
 		render::writePng(options.screenshot, target.width, target.height, pixels);
@@ -478,6 +495,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.sayAll = c.pressed(map, "c_GISayAll", down);
 				input.sayTeam = c.pressed(map, "c_GISayTeam", down);
 				input.saySquad = c.pressed(map, "c_GISaySquad", down);
+				input.radioComm = c.pressed(map, "c_GIRadioComm", down);
+				input.tacticalComm = c.pressed(map, "c_GITacticalComm", down);
 				for (int item = 0; item < 8; ++item) {
 					if (c.pressed(map, "c_PIWeaponSelect" + std::to_string(item + 1), down)) {
 						input.item = item + 1;

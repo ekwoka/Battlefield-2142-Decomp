@@ -5,10 +5,14 @@
 #include "Game/GameWorld.h"
 #include "Hud/Hud.h"
 #include "Main/HudMenus.h"
+#include "Main/HudMenusComm.h"
+#include "Console/ConsoleBinding.h"
+#include "IO/File/FileManager.h"
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
 
+#include <cstdlib>
 #include <set>
 #include <string>
 #include <vector>
@@ -190,4 +194,77 @@ TEST(HudMenus_CommanderSquadList)
 	// Not the commander: clicks do nothing.
 	commander.click(a, 1, 4);
 	CHECK(commander.selected() == std::set<int> {1});
+}
+
+// The comm roses (0x007b8310, 0x007b7130, 0x007b73d0): the string map's
+// texts on the HUD, a level below an entry, the command an entry runs.
+TEST(CommRose_LevelsAndCommands)
+{
+	hud::HudManager hud([](const std::string&, std::string&) { return false; });
+	menu::CommRoses roses(hud);
+	Console console(nullptr);
+	std::vector<std::string> ran;
+	roses.bind(console, [&ran](const std::string& line) { ran.push_back(line); });
+	std::string out;
+	console.execute("RadioInterface.setStringMap Interface_1:1 HUD_COMROSE_GRUNT_spotted \"Radio.sendSpottedMessage 1 VTNoVehicleType\"", out);
+	console.execute("RadioInterface.setStringMap Interface_1:8 HUD_COMROSE_GRUNT_rogerthat \"game.radioMessage TCTeamAndLocalEnemies roger_that\"", out);
+	console.execute("RadioInterface.setStringMap Interface_1:2 Sub \"\"", out);
+	console.execute("RadioInterface.setStringMap Interface_1:2:1 Deeper \"game.radioMessage TCTeam negative\"", out);
+	roses.openRadio(false);
+	CHECK(roses.shown() == "Radio" && hud.number("RadioInterfaceShow") == 1 && hud.number("RadioVehicleInterfaceShow") == 0);
+	CHECK(hud.string("Radio1String") == "HUD_COMROSE_GRUNT_spotted" && hud.string("Radio8String") == "HUD_COMROSE_GRUNT_rogerthat"
+		&& hud.string("Radio3String").empty());
+	console.execute("RadioInterface.mouseOver 8", out);
+	CHECK(hud.number("Radio8MouseOver") == 1 && hud.number("Radio1MouseOver") == 0);
+	console.execute("RadioInterface.selectOrder 8", out);
+	CHECK(ran.size() == 1 && ran[0] == "game.radioMessage TCTeamAndLocalEnemies roger_that" && roses.shown().empty()
+		&& hud.number("RadioInterfaceShow") == 0);
+	// A level down, then its entry.
+	roses.openRadio(false);
+	console.execute("RadioInterface.selectOrder 2", out);
+	menu::CommRose* radio = roses.find("Radio");
+	CHECK(radio && radio->path() == "1:2" && hud.string("Radio1String") == "Deeper" && hud.string("Radio8String").empty()
+		&& roses.shown() == "Radio");
+	console.execute("RadioInterface.selectOrder 1", out);
+	CHECK(ran.size() == 2 && ran[1] == "game.radioMessage TCTeam negative");
+	// The tactical rose by role; the vehicle's radio aboard.
+	roses.openTactical(false, true, true);
+	CHECK(roses.shown() == "SquadLeader" && hud.number("SquadLeaderInterfaceShow") == 1);
+	roses.openRadio(true);
+	CHECK(roses.shown() == "RadioVehicle" && hud.number("SquadLeaderInterfaceShow") == 0);
+	roses.close();
+	CHECK(roses.shown().empty());
+}
+
+// The shipped radio rose (Menu/HUD/HudSetup/Communication/Radio.con): 11
+// entries, each a text and a command.
+TEST(CommRose_ShippedRadio)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	Console console(&files);
+	bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+		[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+	std::string out;
+	console.run("ServerArchives.con", {}, out);
+	hud::HudManager hud([](const std::string&, std::string&) { return false; });
+	menu::CommRoses roses(hud);
+	std::vector<std::string> ran;
+	roses.bind(console, [&ran](const std::string& line) { ran.push_back(line); });
+	CHECK(console.run("Menu/HUD/HudSetup/Communication/Radio.con", {}, out));
+	CHECK(console.run("Menu/HUD/HudSetup/Communication/SquadLeader.con", {}, out));
+	const menu::CommRose* radio = roses.find("Radio");
+	CHECK(radio && radio->entries() == 11);
+	for (int i = 1; radio && i <= 11; ++i) {
+		CHECK(!radio->text(i).empty() && !radio->command(i).empty());
+	}
+	CHECK(radio && radio->command(7) == "Radio.callForMedic" && radio->command(3) == "game.radioMessage TCLocalGroundVehicle req_pickup");
+	roses.openTactical(false, true, true);
+	console.execute("SquadLeaderInterface.selectOrder 9", out);
+	CHECK(ran.size() == 1 && ran[0] == "SquadLeader.sendRequest 0 0");
 }

@@ -366,6 +366,11 @@ struct BotSettings {
 	// stores the radio event's second word), 10 for every shipped one.
 	std::map<int, float> radioModifier;
 	float radioModifierOf(int type) const;
+	// The max send period column, by type (the comm's +100): how long a
+	// sent type waits before it may be queued again, and how long one
+	// heard holds a send of the same type back (0x100a7af0).
+	std::map<int, float> radioSendPeriod;
+	float radioSendPeriodOf(int type) const;
 	// The plug-in of a kind an AI template holds (null for none).
 	const AiPlugin* plugin(const std::string& aiTemplate, const std::string& kind) const;
 	// The template's ai::InformationType flags (aiTemplate.addType,
@@ -450,9 +455,19 @@ public:
 	// A radio message (the game's AI event 0x1004e140 -> 0x10030b20 ->
 	// 0x100a6fe0): `voiceName` from AI/AIRadioMessages.ai ("medic",
 	// "need_ammo", ...) said by `sender`, heard by `receiver`, or with -1 by
-	// every bot of the sender's team (who hears the radio is the game's
-	// matter, not traced). A bot doesn't hear itself.
+	// every bot of the sender's team (the game's hand-out, 0x004a6f70, is
+	// GameWorld::hearsRadio; update takes what the world heard). A bot
+	// doesn't hear itself.
 	void radio(int sender, const std::string& voiceName, int receiver = -1);
+	// A bot's own radio (the comm object's sends, 0x100a7860, dispatched
+	// by 0x100a7af0): what it has queued and what it said, oldest first.
+	struct RadioSent {
+		int type = -1;
+		int channel = 0; // the AI's channel (0x00896270 maps it to a target channel)
+		int target = -1;
+		float at = 0;
+	};
+	std::vector<RadioSent> radioSent(int player) const;
 private:
 	// An enemy a bot knows of (the sensing agent's memory item).
 	struct Known {
@@ -585,8 +600,15 @@ private:
 			int sender = -1;
 			float at = 0;
 			float modifier = 10; // +8
+			bool answered = false; // +0x18 (0x100a61c0 marks it)
 		};
 		std::vector<Radio> radio;
+		// The comm's sends (0x100a7860): the queue by send time (+0x28,
+		// a heap), the next time each type may be queued (+0x3c), and what
+		// went out (for checks).
+		std::vector<RadioSent> radioQueue;
+		std::map<int, float> radioNext;
+		std::vector<RadioSent> radioSent;
 		bool firedLast = false;
 		// A helicopter's pilot (src/AI/Heli): the controller's inputs and
 		// airborne flag (bot +0x140), the plan's hover point and its take-off
@@ -632,6 +654,16 @@ private:
 	float moveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight);
 	float reviveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players);
 	float changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight);
+	// The comm object's send (0x100a7860): `type` on the AI's `channel`
+	// `delay` s from now, unless the type was queued within its send
+	// period; and its update (0x100a7af0): the low-health call
+	// (0x100a7910), then what is due goes out (0x100a57c0).
+	void queueRadio(Bot& bot, int type, int channel, float delay, int target = -1);
+	void sendRadioNow(Bot& bot, const GameWorld::PlayerInfo& self, int type, int channel, int target = -1);
+	void updateComm(Bot& bot, const GameWorld::PlayerInfo& self);
+	// Marks the bot's unanswered messages of a type answered (0x100a61c0):
+	// true when there was one.
+	bool answerRadio(Bot& bot, int type);
 	// A seat's value (0x100d3e70): `vehicle` 0 for the bot's own soldier.
 	float seatValue(const Bot& bot, const GameWorld::PlayerInfo& self, uint32_t vehicle, int seat, bool other) const;
 	// The seat value's transport test (0x100d3730): true when the bot's

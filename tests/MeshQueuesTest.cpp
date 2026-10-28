@@ -71,9 +71,14 @@ TEST(MeshQueues_GeometryTemplatesLodDistancesAndMeshParticles)
 	CHECK(render::lodForDistance(10, d, 4) == 0 && render::lodForDistance(76, d, 4) == 1);
 	CHECK(render::lodForDistance(300, d, 4) == 2 && render::lodForDistance(5000, d, 4) == 3);
 	CHECK(render::lodForDistance(5000, d, 2) == 1 && render::lodForDistance(5000, d, 1) == 0);
-	CHECK(render::lodForDistance(5000, d, 4, 0) == 0);
-	const std::vector<float> defaults = render::defaultLodDistances(2, 3);
-	CHECK(defaults.size() == 2 && defaults[0] == 60 && defaults[1] == 120);
+	CHECK(render::lodForDistance(5000, d, 4, 0) == 3 && render::lodForDistance(76, d, 4, 2) == 0);
+	// Unset distances: 50 m, then 50 m more each (0x100d4d30); a set one
+	// moves the later defaults on by itself.
+	const std::vector<float> defaults = render::lodSwitchDistances({}, 4);
+	CHECK(defaults.size() == 3 && defaults[0] == 50 && defaults[1] == 100 && defaults[2] == 150);
+	const std::vector<float> mixed = render::lodSwitchDistances({30}, 3);
+	CHECK(mixed.size() == 2 && mixed[0] == 30 && mixed[1] == 80);
+	CHECK(render::lodDistance(120, 2, 10) == 50);
 	// MeshParticleMesh templates are bundled-mesh files.
 	console.execute("GeometryTemplate.create MeshParticleMesh mp_spark2", output, ConsoleAccess::Anyone);
 	const geom::GeometryTemplate* spark = geometries.find("mp_spark2");

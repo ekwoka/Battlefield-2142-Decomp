@@ -50,7 +50,7 @@ struct WaterUniforms {
 	float color[4];
 	float specularColor[4];  // w: intensity
 	float parameters[4];     // alpha add, alpha height multiplier, specular power, has an env map
-	float animation[4];      // texture scroll xy, frame blend, unused
+	float animation[4];      // waterScroll xy, WaterCycleTime, 1 with the volume (the 3D variants)
 };
 
 // Particle vertex shader uniforms.
@@ -77,9 +77,21 @@ struct RoadUniforms {
 // Terrain fragment shader, second uniform block.
 struct TerrainDetailUniforms {
 	float tiling[8];     // repeats across a patch, per detail layer
-	float detailFade[4]; // start, end distance, has detail, unused
+	float detailFade[4]; // unused, unused, has detail, unused
 	float farTiling[4];  // the low-detail texture: side x, side y, top, y offset
-	float farScale[4];   // 1 / terrain extent, the planes' blend bias, has a low-detail texture, unused
+	float farScale[4];   // its coordinates a metre across, has a low-detail texture, unused, a metre up
+	float water[4];      // TerrainWaterColor, WaterHeight (below -1e8: no sea)
+};
+
+// terrain.vert's geomorph (TerrainShader_Shared.fx geoMorphPosition); the
+// vertices carry their three deltas in metres and the LOD step their edge
+// drops at.
+struct TerrainMorphUniforms {
+	float camera[4];   // x, unused, z, the height above the ground (CAMERAPOS.w - 1)
+	float limits[4];   // NEARFARMORPHLIMITS (squared), 1 to morph, 1 to fade the detail by it
+	float selector[4]; // MORPHDELTASELECTOR over the scale
+	float adder[3][4]; // MORPHDELTAADDER by edge step
+	float next[4];     // a LOD 0 cell's morph on towards LOD 2 (TerrainLod.h): LOD 1's limits, its weight
 };
 
 struct LightingUniforms {
@@ -167,6 +179,7 @@ public:
 	SDL_GPUTexture* whiteTexture() const { return m_white; }
 	SDL_GPUTexture* blackTexture() const { return m_black; }
 	SDL_GPUTexture* whiteCubeTexture() const { return m_whiteCube; }
+	SDL_GPUTexture* whiteVolumeTexture() const { return m_whiteVolume; }
 	SDL_GPUTextureFormat colorFormat() const { return m_colorFormat; }
 	// Depth with a stencil (the menus' masks): D32_FLOAT_S8_UINT, else
 	// D24_UNORM_S8_UINT (SDL guarantees one of them).
@@ -223,6 +236,7 @@ private:
 	SDL_GPUTexture* m_white = nullptr;
 	SDL_GPUTexture* m_black = nullptr;
 	SDL_GPUTexture* m_whiteCube = nullptr;
+	SDL_GPUTexture* m_whiteVolume = nullptr;
 	SDL_GPUCommandBuffer* m_uploadCommands = nullptr;
 	SDL_GPUCopyPass* m_uploadPass = nullptr;
 	std::vector<SDL_GPUTransferBuffer*> m_pendingTransfers;

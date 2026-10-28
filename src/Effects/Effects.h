@@ -457,6 +457,10 @@ public:
 		Vec3 position;
 		Mat3 rotation;
 		bool occupied = false; // a player is in it
+		// Effect events the object's own animation fired this update (bit
+		// 9 + N for "effect:N"): those bundles whose startOnEffects has
+		// one start (0x0061a4e0), as a walker's foot steps.
+		uint32_t effects = 0;
 	};
 	// A part's pose in its parent (the game's partPose); may be empty.
 	using PartPose = std::function<bool(uint32_t object, const std::string& part, Vec3& offset, Vec3& rotation)>;
@@ -500,14 +504,19 @@ private:
 // Rain and snow (RendDX9's rain manager, Shaders/Rain.fx): particleCount
 // particles in a box of emitRadius about the camera plus offset, falling
 // along particleVelocity x particleSpeed and wrapped round the box (the
-// original's 32 cells that follow the camera), swaying by maxDeviation at
-// angleSpeed degrees a second in 16 groups (DEVIATIONGROUPS), faded from
+// original moves 6 x 6 x 6 cells of 0.4 x emitRadius with the particles
+// fixed in them, 0x1011b2a0, wrapping the cells round the box, 0x1011b720,
+// and draws them 32 at a time, CELLPOSITIONS), swaying by maxDeviation in 16
+// groups (DEVIATIONGROUPS; the original's walk of them, randomness and
+// maxRandomChange, isn't the rewrite's sine at angleSpeed), faded from
 // fadeOutRange of the box to its edge (vsPoint's sysDelta), drawn as points
 // of particleSize x sqrt(1 / (scale.x + scale.y x distance)) pixels, at most
-// particleMaxSize, or as lines lineLength long. Kept to kMaxParticles.
+// particleMaxSize, or as lines lineLength long. All particleCount of them:
+// RendDX9 sizes its buffer by it (0x1011d5b0; Aegis Station asks for
+// 80,000), kMaxParticles only guards against a runaway script.
 class Weather {
 public:
-	static constexpr int kMaxParticles = 8000;
+	static constexpr int kMaxParticles = 200000;
 	struct Drop {
 		Vec3 position;
 		Vec3 tail;    // lines: the other end

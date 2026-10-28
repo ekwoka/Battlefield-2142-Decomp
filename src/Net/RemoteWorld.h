@@ -128,6 +128,14 @@ struct RemotePlayer {
 	int rank = -1;             // mask 0x4000
 };
 
+// KickBan (0x37; written by 0x0050cf30): a player leaves the server,
+// kicked or banned, with a byte (the server's reason; meaning not traced).
+struct KickInfo {
+	int player = -1;
+	bool banned = false;
+	uint32_t value = 0;
+};
+
 struct ChatLine {
 	int player = -1;
 	uint32_t channel = 0;
@@ -170,12 +178,27 @@ public:
 	// Objects and players.
 	std::vector<RemoteObject> objectList() const;
 	const RemoteObject* object(uint16_t ghost) const;
+	// How a vehicle ghost's part stands as its groups last said (the
+	// root's ghost and its seats' ghosts searched): a RotationalBundle's
+	// angles (degrees) or a Spring's offset; false for a part no group
+	// moved. The renderer poses a joined game's vehicles by it.
+	bool partPose(uint16_t rootGhost, const std::string& part, Vec3f& offset, Vec3f& rotation) const;
 	std::vector<RemotePlayer> playerList() const;
 	const RemotePlayer* player(int id) const;
 	int localPlayer() const { return m_localPlayer; }
 	// Our own soldier or vehicle as the last control-object record had it.
 	bool hasControlObject() const { return m_hasControl; }
 	const ControlObjectRecord& controlObject() const { return m_control; }
+	// The last record's prediction state (mode 3, GhostLayout.h's
+	// ControlState), nullptr when that record's couldn't be decoded (no
+	// ghost layout for its ghost, or a server that sent none).
+	const ControlState* controlState() const { return m_controlStateValid ? &m_controlState : nullptr; }
+	// Whether the last ghost block carried a record (the server sends one
+	// while we have a living soldier).
+	bool controlInLastBlock() const { return m_controlInLastBlock; }
+	// Records received, and how many of them had a decoded state.
+	uint32_t controlRecords() const { return m_controlRecords; }
+	uint32_t controlStates() const { return m_controlStates; }
 	uint32_t serverTick() const { return m_tick; }
 
 	// The game status (PostRemote category 0, id 1; game logic +0x40,
@@ -309,6 +332,7 @@ public:
 	std::vector<KillReport> takeKills() { return std::exchange(m_kills, {}); }
 	std::vector<PostRemoteInfo> takeMessages() { return std::exchange(m_messages, {}); }
 	std::vector<GameEvent> takeUnhandled() { return std::exchange(m_unhandled, {}); }
+	std::vector<KickInfo> takeKicks() { return std::exchange(m_kicks, {}); }
 
 	// The local player's input, sent with each tick by the GameClient.
 	void setInput(const PlayerInput& input) { m_input = input; }
@@ -337,6 +361,11 @@ private:
 	int m_localPlayer = -1;
 	bool m_hasControl = false;
 	ControlObjectRecord m_control;
+	void decodeControl();
+	ControlState m_controlState;
+	bool m_controlStateValid = false;
+	bool m_controlInLastBlock = false;
+	uint32_t m_controlRecords = 0, m_controlStates = 0;
 	uint32_t m_tick = 0;
 	uint32_t m_gameState = 0;
 	bool m_roundStarted = false;
@@ -358,6 +387,7 @@ private:
 	std::vector<KillReport> m_kills;
 	std::vector<PostRemoteInfo> m_messages;
 	std::vector<GameEvent> m_unhandled;
+	std::vector<KickInfo> m_kicks;
 	PlayerInput m_input;
 };
 

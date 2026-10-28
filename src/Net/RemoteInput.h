@@ -14,6 +14,8 @@
 #include "Game/SoldierControl.h"
 #include "Net/GameProtocol.h"
 
+#include <algorithm>
+
 namespace dice::hfe::net {
 
 constexpr float kDegreesPerMouseLookUnit = 5.0f;
@@ -32,6 +34,7 @@ inline PlayerInput playerInputFrom(const game::SoldierInput& in, float previousA
 	out.set(kPIFire, in.fire ? 1.0f : 0.0f);
 	out.set(kPIAltFire, in.altFire ? 1.0f : 0.0f);
 	out.set(kPIUse, in.use ? 1.0f : 0.0f);
+	out.set(kPIAction, in.jump ? 1.0f : 0.0f);
 	if (in.switchSeat >= 1 && in.switchSeat <= 8) {
 		out.set(kPIPositionSelect1 + in.switchSeat - 1, 1.0f);
 	}
@@ -39,6 +42,55 @@ inline PlayerInput playerInputFrom(const game::SoldierInput& in, float previousA
 		out.set(kPIWeaponSelect1 + in.selectItem - 1, 1.0f);
 	}
 	return out;
+}
+
+// What one move asks of a soldier, as the server takes it: 0x005838d0
+// copies the move into the player's PlayerInput, and the soldier's input
+// handler (0x0058a6d0) turns it 5 degrees a PIMouseLook unit, the throttle
+// and PIYaw move it, the triggers act on a press. The server (HostedGame)
+// and the client's prediction (Prediction.h) both go through this, so the
+// prediction steps exactly what the server steps. `state` carries what
+// lasts from move to move: the aim's pitch, and the keys held (presses
+// act once).
+struct MoveInputState {
+	float pitch = 0;
+	bool useWas = false;
+	int seatWas = 0, itemWas = 0;
+};
+inline game::SoldierInput soldierInputFromMove(const PlayerMove& move, MoveInputState& state)
+{
+	game::SoldierInput input;
+	input.throttle = move.axis(kPIThrottle);
+	input.strafe = move.axis(kPIYaw);
+	input.turn = move.axis(kPIMouseLookX) * kDegreesPerMouseLookUnit;
+	state.pitch = std::clamp(state.pitch - move.axis(kPIMouseLookY) * kDegreesPerMouseLookUnit, -89.0f, 89.0f);
+	input.aimPitch = state.pitch;
+	input.sprint = move.trigger(kPISprint);
+	input.fire = move.trigger(kPIFire);
+	input.altFire = move.trigger(kPIAltFire);
+	input.jump = move.trigger(kPIAction);
+	input.pose = move.trigger(kPILie) ? game::SoldierPose::Prone
+		: move.trigger(kPICrouch)     ? game::SoldierPose::Crouch
+									  : game::SoldierPose::Stand;
+	const bool use = move.trigger(kPIUse);
+	input.use = use && !state.useWas;
+	state.useWas = use;
+	int seat = 0, item = 0;
+	for (int i = 0; i < 8; ++i) {
+		seat = move.trigger(kPIPositionSelect1 + i) ? i + 1 : seat;
+	}
+	for (int i = 0; i < 9; ++i) {
+		item = move.trigger(kPIWeaponSelect1 + i) ? i + 1 : item;
+	}
+	if (seat && seat != state.seatWas) {
+		input.switchSeat = seat;
+	}
+	if (item && item != state.itemWas) {
+		input.selectItem = item;
+	}
+	state.seatWas = seat;
+	state.itemWas = item;
+	return input;
 }
 
 } // namespace dice::hfe::net

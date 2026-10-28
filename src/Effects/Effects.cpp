@@ -991,7 +991,8 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 			Placed& b = tracked.bundles[i];
 			const uint32_t tag = static_cast<uint32_t>(i + 1);
 			const bool start = (created && b.startAtCreation)
-				|| (object.occupied && !tracked.occupied && (b.startOnEffects & kEntered) != 0);
+				|| (object.occupied && !tracked.occupied && (b.startOnEffects & kEntered) != 0)
+				|| (object.effects & b.startOnEffects) != 0;
 			if (start && !effects.emitting(object.id, tag)) {
 				if (partPose && !created) {
 					place(b, object.id, partPose, b.position, b.rotation);

@@ -323,7 +323,10 @@ void GameServer::kick(int client, uint32_t reason)
 	if (it == m_clients.end()) {
 		return;
 	}
-	m_socket.sendTo(it->second.address, disconnectPacket(static_cast<uint8_t>(client), reason));
+	// 0x0068e520 sends the disconnect three times.
+	for (int i = 0; i < 3; ++i) {
+		m_socket.sendTo(it->second.address, disconnectPacket(static_cast<uint8_t>(client), reason));
+	}
 	drop(client);
 }
 

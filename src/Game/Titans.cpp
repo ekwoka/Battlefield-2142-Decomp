@@ -340,9 +340,10 @@ void GameWorld::registerTitan(uint32_t id, int controlPoint)
 // node is an object of the tree in the engine, so a hit on it is the
 // node's, its armour that of the node or the nearest armoured ancestor,
 // 0x004c0e40's start). SpawnPoint nodes are the Titan's spawn points.
-// Nodes with collisionGroups 256 (the team forcefields: doors, the spawn
-// room's, the vehicle bay's shield) are left out of the collision (which
-// team they let through is not decoded).
+// Each mesh keeps its node's collisionGroups: the team forcefields (0x100
+// the PAC Titan's, 0x200 the EU's) let their own team through (0x006c3890
+// for soldiers, 0x006bb050 for meshes; see rebuildTitanMeshes and
+// MeshCollision.cpp).
 void GameWorld::buildTitanParts(Titan& titan)
 {
 	world::Object* object = m_objects.find(titan.object);

@@ -114,8 +114,8 @@ cmake -S . -B build/win32 -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-i686.cmake
 ninja -C build/win32
 
 # Run the start-up and level scripts against your install, and look at the level
+# (the engine's console tables in symbols/ load by themselves; --api names others)
 build/native/src/Main/bf2142 --game "source/Battlefield 2142" \
-    --api symbols/BF2142.exe.console.csv --api symbols/RendDX9_ori.dll.console.csv \
     +level Camp_Gibraltar --view          # or --screenshot shot.png [--camera x/y/z/yaw/pitch]
 # run around as a soldier (team 1 PAC, 2 EU): WASD, shift sprints, the mouse turns,
 # Space jumps, left Ctrl crouches, Z lies down, Caps Lock opens the commander screen,

@@ -62,7 +62,10 @@ bool GameClient::update()
 	}
 	const auto now = std::chrono::steady_clock::now();
 	const auto tick = std::chrono::microseconds(1000000 / clientSendRate(m_options.connectionType));
-	if (now - m_lastTick >= tick) {
+	// Driven by the game's ticks (simulatedTick), the timer only keeps the
+	// connection going while none come (loading, a menu).
+	const auto due = sendOnTicks ? std::chrono::microseconds(200000) : tick;
+	if (now - m_lastTick >= due) {
 		m_lastTick = now;
 		sendTick();
 	}
@@ -73,6 +76,17 @@ bool GameClient::update()
 		m_connection.ping();
 	}
 	return true;
+}
+
+void GameClient::simulatedTick()
+{
+	// 0x004b3df0: a client sends after each simulated tick (connection
+	// types other than 0), so each move is one of its ticks.
+	if (m_state != State::Connected || !sendOnTicks) {
+		return;
+	}
+	m_lastTick = std::chrono::steady_clock::now();
+	sendTick();
 }
 
 void GameClient::onPacket(const ConnectedPacket& packet)
@@ -172,6 +186,9 @@ void GameClient::sendTick()
 	// hands moves to its player for the connection.
 	if (m_world.localPlayer() >= 0) {
 		m_moves.push_back(m_world.input().toMove(m_moveIndex++));
+		if (onMoveSent) {
+			onMoveSent(m_moves.back());
+		}
 		while (m_moves.size() > 3) {
 			m_moves.pop_front();
 		}

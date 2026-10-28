@@ -86,6 +86,12 @@ public:
 
 	RemoteWorld& world() { return m_world; }
 	const RemoteWorld& world() const { return m_world; }
+	// The game simulated a tick: our packet with this tick's move goes now
+	// (0x004b3df0 sends after each simulated tick). With sendOnTicks set,
+	// update() sends only while no ticks come (every 200 ms), so a move is
+	// exactly one tick of the client's, as the server steps it.
+	void simulatedTick();
+	bool sendOnTicks = false;
 	// Shortcut for world().setInput().
 	void setInput(const PlayerInput& input) { m_world.setInput(input); }
 
@@ -145,6 +151,9 @@ public:
 	// each received payload as decoded.
 	std::function<void(const GameEvent&)> onEvent;
 	std::function<void(const GamePayload&)> onPayload;
+	// Each move as it goes up (once, with its index): the client's
+	// prediction steps it (src/Main/Prediction.h).
+	std::function<void(const PlayerMove&)> onMoveSent;
 
 	// Counters for diagnostics.
 	size_t packetsReceived() const { return m_packetsReceived; }

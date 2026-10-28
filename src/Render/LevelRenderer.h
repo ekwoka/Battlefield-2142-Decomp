@@ -9,6 +9,7 @@
 
 #include "Animation/Pose.h"
 #include "Culling.h"
+#include "TerrainLod.h"
 #include "Effects/Effects.h"
 #include "GpuContext.h"
 #include "Hud/Hud.h"
@@ -46,6 +47,7 @@ class EffectManager;
 }
 namespace scene {
 struct LightSettings;
+struct RendererSettings;
 struct SkySettings;
 struct WaterSettings;
 } // namespace scene
@@ -143,6 +145,8 @@ struct LevelSources {
 	std::function<bool(uint32_t object, int& geometry, int& lod)> geometryFor;
 	// Rain and snow (rainManager.*), if any.
 	const scene::RainSettings* rain = nullptr;
+	// renderer.global*LodDistanceScale and terrainCuller.* (defaults if null).
+	const scene::RendererSettings* renderer = nullptr;
 	// Told how far build() got (0..1, the last call 1), for a loading screen.
 	std::function<void(float done)> buildProgress;
 };
@@ -155,6 +159,7 @@ struct LevelStats {
 	size_t missingTextures = 0;
 	size_t instances = 0;
 	size_t terrainPatches = 0;
+	bool terrainLods = false; // the primary terrain drawn from terraindata.raw's LOD meshes
 	size_t lightmappedInstances = 0;
 	size_t roads = 0;
 	size_t undergrowthTypes = 0;
@@ -266,7 +271,7 @@ private:
 		SDL_GPUTexture*& lightmap, float transform[4]);
 	struct TerrainPatch {
 		Vec3f boundsMin, boundsMax;
-		SDL_GPUBuffer* vertices = nullptr;
+		SDL_GPUBuffer* vertices = nullptr; // full detail; terraindata.raw's compiled vertices with m_terrainCells
 		SDL_GPUTexture* colormap = nullptr;
 		SDL_GPUTexture* lightmap = nullptr;
 		SDL_GPUTexture* detailWeights[2] = {}; // layers 0-2 and 3-5
@@ -311,6 +316,26 @@ private:
 	void collectParts(const LevelSources& sources, const world::ObjectTemplate& objectTemplate, const Mat4& relative,
 		std::vector<Mat4>& parts, int depth, uint32_t object = 0) const;
 	void buildTerrain(const LevelSources& sources);
+	// The primary terrain's LODs (terraindata.raw's compiled patches, drawn
+	// as RendDX9's terrain culler draws them: cells of terrainCuller.
+	// baseCellSize metres, each at LOD 0..2 by its distance, its edges
+	// stitched to finer neighbours, geomorphed in the vertex shader).
+	struct TerrainNodeRange {
+		uint32_t start = 0;
+		uint32_t count = 0;
+	};
+	bool buildTerrainLods(const LevelSources& sources, int quads);
+	// This frame's cells: visibility, LODs, stitches (0x1009f210, 0x1009cfa0).
+	void updateTerrainCells(const Camera& camera, const Frustum& frustum);
+	std::vector<TerrainLodCell> m_terrainCells; // row-major from the -x/-z corner (TerrainLod.h)
+	std::vector<int> m_terrainCellNodes;        // each cell's node of the shared LOD index tree
+	std::vector<std::array<TerrainNodeRange, 33>> m_terrainNodeRanges; // [node][lod * 11 + mask]
+	int m_terrainCellsPerSide = 0;
+	int m_terrainCellsPerPatch = 0; // per side
+	float m_terrainLodSwitch = 0;   // this frame's LOD 0 distance (the culler's +0)
+	float m_terrainHeightAboveGround = 0; // the camera's (terrain +0x294)
+	float m_baseFovY = 0; // the view's first field of view: the zoom is against it (0x10066b30)
+	float viewZoom(const Camera& camera) const;
 	// The secondary heightmaps around the level (the surrounding terrain).
 	void buildSurroundingTerrain(const LevelSources& sources);
 	SDL_GPUTexture* cubeTexture(const io::FileManager& files, const std::string& path);
@@ -442,6 +467,7 @@ private:
 	SDL_GPUTexture* m_skyTexture = nullptr;
 	float m_skyRotation = 0;
 	SDL_GPUBuffer* m_terrainIndices = nullptr;
+	SDL_GPUBuffer* m_terrainLodIndices = nullptr; // terraindata.raw's shared LOD index buffer
 	// The sea: grids over the heightmaps (16-bit indices each) and a ring
 	// beyond them to the horizon.
 	struct WaterBlock {
@@ -453,6 +479,7 @@ private:
 	std::vector<WaterBlock> m_waterBlocks;
 	std::vector<SDL_GPUTexture*> m_waterFrames; // the normal map frames (Textures/waterbump)
 	SDL_GPUTexture* m_waterEnvMap = nullptr;     // <level>/Water/envmap.dds, a cube map
+	SDL_GPUTexture* m_waterVolume = nullptr;     // Textures/watervolume.dds (the 3D variants)
 	struct SurroundingPatch {
 		SDL_GPUBuffer* vertices = nullptr;
 		SDL_GPUTexture* colormap = nullptr;
@@ -464,7 +491,10 @@ private:
 	uint32_t m_surroundingIndexCount = 0;
 	SDL_GPUTexture* m_lowDetailTexture = nullptr; // <level>/lowDetailTexture.dds
 	float m_farTiling[4] {};                      // side x, side y, top, y offset
+	float m_surroundingFarTiling[4] {};           // STFARTEXTILING (0x100af7e0)
+	float m_surroundingTexScale = 0;              // STTEXSCALE.x: world metres to its low-detail coordinates
 	float m_terrainExtent = 0;                    // the primary heightmap's size in metres
+	std::array<float, 4> m_terrainWater {};       // TerrainWaterColor (rgb), WaterHeight (w; below -1e8: none)
 	const scene::WaterSettings* m_water = nullptr;
 	Uint64 m_startTicks = 0;
 	SDL_GPUTexture* m_detailLayers[kMaxDetailLayers] = {};

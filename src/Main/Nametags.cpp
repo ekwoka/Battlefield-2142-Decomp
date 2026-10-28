@@ -35,15 +35,15 @@ float number(const world::ObjectTemplate* t, const char* name, float fallback)
 	return value ? static_cast<float>(std::atof(value->c_str())) : fallback;
 }
 
-// The colours of ColorArray (Shaders/Nametag) are set by the renderer
-// from a table not read yet: these are the rewrite's (white, red, blue,
-// green, yellow).
+// ColorArray (Shaders/Nametag) for the player and object tags: the
+// NametagManager's constructor (0x100f24c0) fills the table at 0x102112f8
+// that tag types 0 and 3 point at: white, red, blue, green, yellow.
 const float kColours[5][4] = {
 	{1, 1, 1, 1},
-	{1, 0.3f, 0.25f, 1},
-	{0.55f, 0.78f, 1, 1},
-	{0.5f, 1, 0.45f, 1},
-	{1, 0.85f, 0.25f, 1},
+	{0.87f, 0.094f, 0.094f, 1},
+	{0.254f, 0.552f, 0.89f, 1},
+	{74 / 255.0f, 227 / 255.0f, 37 / 255.0f, 1},
+	{1, 1, 0, 1},
 };
 
 struct Vec {

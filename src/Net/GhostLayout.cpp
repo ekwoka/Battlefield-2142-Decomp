@@ -98,12 +98,12 @@ std::vector<GhostPartLayout> buildGhostLayout(const GhostTemplateNode& root)
 }
 
 bool decodeGhostState(BitReader& in, const GhostPartLayout& layout, const Vec3f& reference,
-	std::vector<NetworkableState>& states)
+	std::vector<NetworkableState>& states, unsigned mode)
 {
 	states.clear();
 	for (size_t g = 0; g < layout.groups.size() && g < kMaxGroups; ++g) {
 		NetworkableState state;
-		if (!decodeNetworkable(in, layout.groups[g].hints, reference, state) || !state.complete) {
+		if (!decodeNetworkable(in, layout.groups[g].hints, reference, state, mode) || !state.complete) {
 			return false;
 		}
 		states.push_back(std::move(state));
@@ -112,13 +112,56 @@ bool decodeGhostState(BitReader& in, const GhostPartLayout& layout, const Vec3f&
 }
 
 void encodeGhostState(BitWriter& out, const GhostPartLayout& layout, const Vec3f* reference,
-	const std::vector<NetworkableState>& states)
+	const std::vector<NetworkableState>& states, unsigned mode)
 {
 	for (size_t g = 0; g < layout.groups.size() && g < kMaxGroups; ++g) {
 		NetworkableState empty;
 		empty.kind = layout.groups[g].hints.kind;
-		encodeNetworkable(out, layout.groups[g].hints, reference, g < states.size() ? states[g] : empty);
+		encodeNetworkable(out, layout.groups[g].hints, reference, g < states.size() ? states[g] : empty, mode);
 	}
+}
+
+bool decodeControlState(BitReader& in, const GhostPartLayout& ghost, const GhostPartLayout* second,
+	const Vec3f& reference, const PlayerOwnStateHints& own, ControlState& out)
+{
+	out = {};
+	out.recorded = in.read(1) == 1;
+	out.slot = static_cast<int>(in.read(3));
+	if (!decodeGhostState(in, ghost, reference, out.groups, 3)) {
+		return false;
+	}
+	if (second && !decodeGhostState(in, *second, reference, out.second, 3)) {
+		return false;
+	}
+	out.ownBits = in.read(10);
+	const size_t start = in.position();
+	out.hasOwn = decodePlayerOwnState(in, own, out.own);
+	if (in.bad() || in.position() > start + out.ownBits) {
+		out.hasOwn = false; // 0x00580cd0: more than the length is an error
+		return false;
+	}
+	in.seek(start + out.ownBits); // fewer: the rest is skipped (0x006873e0)
+	out.complete = !in.bad();
+	return out.complete;
+}
+
+void encodeControlState(BitWriter& out, const GhostPartLayout& ghost, const GhostPartLayout* second,
+	const Vec3f* reference, const PlayerOwnStateHints& own, const ControlState& state)
+{
+	out.write(state.recorded ? 1 : 0, 1);
+	out.write(static_cast<uint32_t>(state.slot) & 7, 3);
+	encodeGhostState(out, ghost, reference, state.groups, 3);
+	if (second) {
+		encodeGhostState(out, *second, reference, state.second, 3);
+	}
+	// 0x00580830: 10 bits reserved (0x006873e0), the player's vtable 0x1c8,
+	// then the length written back.
+	BitWriter body;
+	if (state.hasOwn) {
+		encodePlayerOwnState(body, own, state.own);
+	}
+	out.write(static_cast<uint32_t>(std::min<size_t>(body.bits(), 0x3ff)), 10);
+	out.append(body);
 }
 
 // ---------------------------------------------------------------------------

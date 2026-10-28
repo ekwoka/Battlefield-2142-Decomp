@@ -23,6 +23,7 @@ void RemoteWorld::clear()
 	m_playerGhosts.clear();
 	m_localPlayer = -1;
 	m_hasControl = false;
+	m_controlInLastBlock = m_controlStateValid = false;
 	m_ghostParts.clear();
 	m_gameState = 0;
 	m_roundStarted = false;
@@ -348,6 +349,9 @@ bool RemoteWorld::apply(const GameEvent& event)
 		m_roundStarted = false;
 		m_roundEnded = true;
 		return true;
+	case kEvKickBan: // 0x0050cec0; the client's handler (0x0050cfd0) posts 2/0x4d for the HUD
+		m_kicks.push_back({static_cast<int>(event.u(0)), event.u(1) != 0, event.u(2)});
+		return true;
 	default:
 		m_unhandled.push_back(event);
 		return false;
@@ -360,13 +364,19 @@ void RemoteWorld::apply(const GhostBlock& ghosts)
 		return;
 	}
 	m_tick = ghosts.tick;
+	m_controlInLastBlock = ghosts.control.has_value();
+	if (!ghosts.control) {
+		m_controlStateValid = false;
+	}
 	if (ghosts.control) {
 		m_hasControl = true;
 		m_control = *ghosts.control;
+		++m_controlRecords;
 		if (auto it = m_objects.find(m_control.ghost); it != m_objects.end()) {
 			it->second.position = m_control.position;
 			it->second.hasPosition = true;
 		}
+		decodeControl();
 		if (m_localPlayer >= 0) {
 			RemotePlayer& p = m_players[m_localPlayer];
 			if (p.soldierGhost == 0) {
@@ -455,6 +465,53 @@ void RemoteWorld::apply(const GhostBlock& ghosts)
 		if (decodeNetworkable(in, hint->second, reference, state)) {
 			applyState(o, state);
 		}
+	}
+}
+
+void RemoteWorld::decodeControl()
+{
+	// 0x00580cd0: only with the record's ghost (0x00678d70) is the rest
+	// read; without it the 12-bit length skips it.
+	m_controlStateValid = false;
+	const auto part = m_ghostParts.find(m_control.ghost);
+	if (part == m_ghostParts.end() || !part->second.first || m_control.restBits == 0) {
+		return;
+	}
+	const GhostPartLayout& layout = (*part->second.first)[part->second.second];
+	const GhostPartLayout* second = nullptr;
+	if (m_control.second) {
+		const auto other = m_ghostParts.find(m_control.second);
+		if (other == m_ghostParts.end() || !other->second.first) {
+			return;
+		}
+		second = &(*other->second.first)[other->second.second];
+	}
+	BitReader in(m_control.rest.data(), m_control.rest.size());
+	ControlState state;
+	PlayerOwnStateHints hints;
+	if (!decodeControlState(in, layout, second, m_control.position, hints, state) || in.position() > m_control.restBits) {
+		return;
+	}
+	m_controlState = std::move(state);
+	m_controlStateValid = true;
+	++m_controlStates;
+	// The state also brings the ghost's object up to date (as the mode-3
+	// reader applies it, 0x0057f720 with 1). A soldier's mode-3 pitch and
+	// roll are its control's twist, not angles: left out here.
+	const auto applyTo = [this](uint16_t ghost, const GhostPartLayout& l, std::vector<NetworkableState> states) {
+		const auto it = m_objects.find(ghost);
+		if (it == m_objects.end() || states.empty()) {
+			return;
+		}
+		if (states.front().kind == NetworkableKind::Soldier) {
+			states.front().mask &= ~0xcu;
+		}
+		applyState(it->second, states.front());
+		applyParts(it->second, l, states);
+	};
+	applyTo(m_control.ghost, layout, m_controlState.groups);
+	if (second) {
+		applyTo(m_control.second, *second, m_controlState.second);
 	}
 }
 
@@ -663,6 +720,44 @@ const RemoteObject* RemoteWorld::object(uint16_t ghost) const
 {
 	const auto it = m_objects.find(ghost);
 	return it == m_objects.end() ? nullptr : &it->second;
+}
+
+bool RemoteWorld::partPose(uint16_t rootGhost, const std::string& part, Vec3f& offset, Vec3f& rotation) const
+{
+	const RemoteObject* root = object(rootGhost);
+	if (!root) {
+		return false;
+	}
+	std::vector<const RemoteObject*> ghosts {root};
+	for (const uint16_t seat : root->seats) {
+		if (const RemoteObject* o = object(seat)) {
+			ghosts.push_back(o);
+		}
+	}
+	const auto same = [](const std::string& a, const std::string& b) {
+		return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+			return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
+		});
+	};
+	for (const RemoteObject* o : ghosts) {
+		for (size_t i = 1; i < o->parts.size(); ++i) {
+			const RemotePart& p = o->parts[i];
+			if (!same(p.name, part)) {
+				continue;
+			}
+			if (p.hasRotation) {
+				offset = {};
+				rotation = {p.rotation[0], p.rotation[1], p.rotation[2]};
+				return true;
+			}
+			if (p.hasSpring) {
+				offset = p.springOffset;
+				rotation = {};
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 std::vector<RemotePlayer> RemoteWorld::playerList() const
@@ -982,8 +1077,9 @@ void RemoteWorld::onLevel(const std::string& data)
 		m_roundEnded = false;
 		for (auto& [id, p] : m_players) {
 			p.alive = false;
-			p.soldierGhost = p.vehicleGhost = 0;
+			p.soldierGhost = p.vehicleGhost = p.kitGhost = 0;
 		}
+		m_controlInLastBlock = m_controlStateValid = false;
 	}
 	++m_levels;
 	m_level = level;

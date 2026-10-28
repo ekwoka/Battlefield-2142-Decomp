@@ -78,12 +78,45 @@ std::vector<GhostPartLayout> buildGhostLayout(const GhostTemplateNode& root);
 
 // The groups' states of one update. Returns false when a group couldn't be
 // decoded to its end (the groups after it are left out of `states`).
+// `mode`: 2 in ghost updates (0x0057f670), 3 in the control-object record
+// (0x0057f720 / 0x0057f9f0).
 bool decodeGhostState(BitReader& in, const GhostPartLayout& layout, const Vec3f& reference,
-	std::vector<NetworkableState>& states);
+	std::vector<NetworkableState>& states, unsigned mode = 2);
 // Writes the groups' states (one per group, in order), for tests and the
-// loopback server.
+// loopback server (0x0057f420 / 0x0057f7b0).
 void encodeGhostState(BitWriter& out, const GhostPartLayout& layout, const Vec3f* reference,
-	const std::vector<NetworkableState>& states);
+	const std::vector<NetworkableState>& states, unsigned mode = 2);
+
+// The control-object record's state after its ghost fields (written by
+// 0x00580830, read by 0x00580cd0 when the client has the record's ghost):
+//   - 1 bit: 0 a fresh state, which the client stores into history slot
+//     `slot` (0x0057f750 via 0x00580800: 8 slots of 0x402 bytes at the
+//     ghost manager's +0x20f4); 1 a state written against the copy in a
+//     slot the client has (the server's +0x20f0, sent while +0x20fc
+//     counts down: 0x0057f9b0 with the slot; the networkables that keep
+//     history take it, the Soldier's reader ignores it);
+//   - 3 bits: the slot;
+//   - every group of the record's ghost in mode 3, then those of the
+//     second ghost when the record names one;
+//   - a 10-bit length and the player's own state (PlayerOwnState; its
+//     reader's bits are checked against the length: fewer are skipped,
+//     more fail the block).
+// The rewrite's server always sends fresh states (the writer's path while
+// +0x20f0 is -1), cycling the slot as 0x00580830 does ((+0x20f8 + 1) & 7).
+struct ControlState {
+	bool recorded = false;
+	int slot = 0;
+	std::vector<NetworkableState> groups;
+	std::vector<NetworkableState> second;
+	bool hasOwn = false;
+	PlayerOwnState own;
+	size_t ownBits = 0;
+	bool complete = false;
+};
+bool decodeControlState(BitReader& in, const GhostPartLayout& ghost, const GhostPartLayout* second,
+	const Vec3f& reference, const PlayerOwnStateHints& own, ControlState& out);
+void encodeControlState(BitWriter& out, const GhostPartLayout& ghost, const GhostPartLayout* second,
+	const Vec3f* reference, const PlayerOwnStateHints& own, const ControlState& state);
 
 // NetworkableInfo settings (Objects/Common/Networkables.con): which infos
 // are unique and which force a networkable id. The defaults are 1.51's.

@@ -2609,3 +2609,127 @@ TEST(Bots_AvoidDoubledInTheFirstFiveSeconds)
 	CHECK(near(early, 200, 1e-3f));
 	CHECK(near(late, 100, 1e-3f));
 }
+
+namespace {
+// Two teams' soldiers on flat ground, for the radio's hand-out.
+struct RadioField {
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	std::unique_ptr<game::GameWorld> world;
+	RadioField()
+	{
+		templates.registerType(1, "ControlPoint");
+		templates.registerType(2, "SpawnPoint");
+		templates.registerType(3, "Soldier");
+		templates.create("Soldier", "us_light_soldier")->settings()["armor.maxHitPoints"] = "100";
+		templates.create("Soldier", "pac_light_soldier")->settings()["armor.maxHitPoints"] = "100";
+		for (int team = 1; team <= 2; ++team) {
+			world::ObjectTemplate* point = templates.create("ControlPoint", "cp" + std::to_string(team));
+			point->settings()["controlPointId"] = std::to_string(team);
+			point->settings()["team"] = std::to_string(team);
+			point->settings()["unableToChangeTeam"] = "1";
+			objects.create(point, {team == 1 ? -300.0f : 300.0f, 0, 0});
+			objects.create(templates.create("SpawnPoint", "sp" + std::to_string(team)), {team == 1 ? -10.0f : 10.0f, 0, 0})
+				->setControlPointId(team);
+		}
+		world = std::make_unique<game::GameWorld>(templates, objects);
+		world->autoRespawn = false;
+		world->startRound();
+	}
+	int soldier(const std::string& name, int team, float x, float z, bool ai = false)
+	{
+		const int id = world->addPlayer(name, team, ai);
+		world->spawnSoldier(id);
+		game::GameWorld::PlayerInfo info;
+		world->playerInfo(id, info);
+		world->setSoldierPosition(info.soldier, {x, 0, z});
+		world->tick(1 / 30.0f);
+		return id;
+	}
+};
+} // namespace
+
+// Who hears a radio message (0x004a6f70): the team channels, the local
+// ones by the server's distances (100 m, and 15 m for enemies and the
+// revive channels), the squad's, the commander's, a player's.
+TEST(Radio_TargetChannelsReachTheirHearers)
+{
+	CHECK(game::GameWorld::targetChannel("TCTeam") == 1 && game::GameWorld::targetChannel("TCLocalTeam") == 10
+		&& game::GameWorld::targetChannel("TCTeamAndLocalEnemies") == 17 && game::GameWorld::targetChannel("TCVehicle") == 11
+		&& game::GameWorld::targetChannel("TCLocalGroundVehicle") == 7 && game::GameWorld::targetChannel("nope") == -1);
+	RadioField f;
+	const int me = f.soldier("Me", 2, 0, 0);
+	const int mate = f.soldier("Mate", 2, 50, 0);
+	const int far = f.soldier("Far", 2, 150, 0);
+	const int enemy = f.soldier("Enemy", 1, 10, 0);
+	const int enemyFar = f.soldier("EnemyFar", 1, 60, 0);
+	game::GameWorld& w = *f.world;
+	CHECK(w.hearsRadio(1, me, mate) && w.hearsRadio(1, me, far) && !w.hearsRadio(1, me, enemy) && !w.hearsRadio(1, me, me));
+	CHECK(w.hearsRadio(17, me, enemy) && !w.hearsRadio(17, me, enemyFar) && w.hearsRadio(17, me, far));
+	CHECK(w.hearsRadio(10, me, mate) && !w.hearsRadio(10, me, far) && w.hearsRadio(10, me, enemy) && !w.hearsRadio(10, me, enemyFar));
+	CHECK(w.hearsRadio(9, me, enemyFar) && !w.hearsRadio(9, me, far));
+	CHECK(!w.hearsRadio(16, me, mate) && w.hearsRadio(16, me, enemy));
+	CHECK(w.hearsRadio(0, me, enemyFar) && w.hearsRadio(14, me, enemy, enemy) && !w.hearsRadio(14, me, mate, enemy));
+	// TCSquad compares the squad ids (slot 0x120): two players in no squad
+	// share "squad 0".
+	CHECK(w.hearsRadio(3, me, mate) && !w.hearsRadio(3, me, enemy));
+	CHECK(!w.hearsRadio(11, me, mate)); // on foot: no vehicle to share
+	// Ground vehicles' channel: 15 m for anyone, else teammates aboard.
+	CHECK(w.hearsRadio(7, me, enemy) && !w.hearsRadio(7, me, mate) && !w.hearsRadio(8, me, enemy));
+	// The hand-out: each hearer once, in player order.
+	w.radioMessage(me, 10, "roger_that");
+	const auto heard = w.takeRadioHeard();
+	CHECK(heard.size() == 2 && heard[0].receiver == mate && heard[1].receiver == enemy && heard[0].voice == "roger_that");
+	CHECK(w.takeRadioHeard().empty());
+}
+
+// The bots hear through the world's hand-out and answer through their
+// comm (0x100a7860 / 0x100a7af0): a get_in from a human's car makes a bot
+// on foot head for it and say "roger_that" a second on (0x1006dac0); the
+// low-health call says "medic" on TCLocalTeamMedic (0x100a7910), once per
+// send period (20 s).
+TEST(Bots_RadioHeardAndAnswered)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	{
+		CarField field(gameDir);
+		const uint32_t car = field.car("car", 3, 0);
+		field.car("car_b", -14, 0);
+		const int human = field.soldier("Human", false, 0, 0);
+		const int bot = field.soldier("Bot", true, -11, 0);
+		field.ticks(90);
+		field.board(human, 0);
+		CHECK(field.info(human).vehicle == car);
+		game::BotManager bots(*field.world, field.settings);
+		field.ticks(30, &bots);
+		field.world->takeRadioHeard();
+		field.world->radioMessage(human, game::GameWorld::targetChannel("TCLocalTeam"), "get_in");
+		field.ticks(60, &bots);
+		const auto sent = bots.radioSent(bot);
+		CHECK(!sent.empty() && sent.front().type == 6 && sent.front().channel == 6);
+		// What the bot said reached the human (TCLocalTeam within 100 m).
+		bool humanHeard = false;
+		for (const auto& h : field.world->takeRadioHeard()) {
+			humanHeard = humanHeard || (h.sender == bot && h.receiver == human && h.voice == "roger_that");
+		}
+		CHECK(humanHeard);
+	}
+	{
+		CarField field(gameDir);
+		const int bot = field.soldier("Bot", true, 0, 0);
+		const int mate = field.soldier("Mate", false, 20, 0);
+		(void)mate;
+		field.ticks(30);
+		game::BotManager bots(*field.world, field.settings);
+		const uint32_t soldier = field.info(bot).soldier;
+		field.world->setHitPoints(soldier, 30); // 0.3 of 100
+		field.ticks(30, &bots);
+		auto sent = bots.radioSent(bot);
+		CHECK(sent.size() == 1 && sent[0].type == 3 && sent[0].channel == 0);
+		field.ticks(30 * 5, &bots);
+		CHECK(bots.radioSent(bot).size() == 1); // the 20 s send period
+	}
+}

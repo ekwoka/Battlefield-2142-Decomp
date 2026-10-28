@@ -334,6 +334,21 @@ float BotSettings::radioModifierOf(int type) const
 	return type == 2 ? 60.0f : 10.0f;
 }
 
+float BotSettings::radioSendPeriodOf(int type) const
+{
+	const auto it = radioSendPeriod.find(type);
+	if (it != radioSendPeriod.end()) {
+		return it->second;
+	}
+	// AI/AIRadioMessages.ai's max send periods when the script was not run.
+	switch (type) {
+	case 2: return 0;
+	case 16: case 6: case 7: case 8: case 9: return 2;
+	case 1: case 3: case 4: case 10: return 20;
+	default: return 10;
+	}
+}
+
 float BotSettings::radioLifeOf(int type) const
 {
 	const auto it = radioLife.find(type);
@@ -818,10 +833,131 @@ void BotManager::radio(int sender, const std::string& voiceName, int receiver)
 		if (same != bot.radio.end()) {
 			same->at = m_time;
 			same->modifier = m_settings.radioModifierOf(type);
+			same->answered = false;
 		} else {
 			bot.radio.push_back({type, sender, m_time, m_settings.radioModifierOf(type)});
 		}
 	}
+}
+
+namespace {
+// The voice of an AI radio type (the game's table at 0x0088f000 read back).
+const char* radioVoice(int type)
+{
+	static const char* const voices[] = {"bail_out", "get_in", "req_pickup", "medic", "need_repair", nullptr,
+		"roger_that", "negative", "PLAYER_CONFIRM_thankyou", "PLAYER_CONFIRM_sorry", "need_ammo",
+		"PLAYER_TACTICS_gogogo", "PLAYER_TACTICS_followme", "laserpaint", "req_new_order", "defend",
+		"attack_position", "move", "COMMSL_COMRADIO_commend", "COMMSL_COMRADIO_rebuke",
+		"COMMSL_COMRADIO_followorders", "COMMSL_COMRADIO_divide"};
+	return type >= 0 && type < static_cast<int>(sizeof(voices) / sizeof(voices[0])) ? voices[type] : nullptr;
+}
+
+// The AI's radio channels as the game's effector maps them (0x00896270):
+// 0 TCLocalTeamMedic, 1 TCLocalGroundVehicle, 2 TCLocalAirVehicle, 3
+// TCSquad, 4 TCCommander, 5 TCSquadLeader, 6 TCLocalTeam, 7 TCVehicle, 8
+// TCPlayer; any other 0x13, which nobody hears.
+int targetChannelOf(int aiChannel)
+{
+	static const int channels[] = {6, 7, 8, 3, 2, 4, 10, 11, 14};
+	return aiChannel >= 0 && aiChannel < 9 ? channels[aiChannel] : 0x13;
+}
+} // namespace
+
+// 0x100a7860: a send is queued only once its type's next time (+0x3c) has
+// come; queuing sets it a send period on (+100).
+void BotManager::queueRadio(Bot& bot, int type, int channel, float delay, int target)
+{
+	const auto next = bot.radioNext.find(type);
+	if (next != bot.radioNext.end() && m_time < next->second) {
+		return;
+	}
+	bot.radioQueue.push_back({type, channel, target, m_time + delay});
+	std::stable_sort(bot.radioQueue.begin(), bot.radioQueue.end(),
+		[](const RadioSent& a, const RadioSent& b) { return a.at < b.at; });
+	bot.radioNext[type] = m_time + m_settings.radioSendPeriodOf(type);
+}
+
+// 0x100a57c0 (0x100a5990 sends at once): the type's index in the game's
+// radio table (the effector's slot 0x18), then the game's send (0x00896270)
+// on the channel's target channel, the target the message's value.
+void BotManager::sendRadioNow(Bot& bot, const GameWorld::PlayerInfo& self, int type, int channel, int target)
+{
+	const char* voice = radioVoice(type);
+	if (!voice) {
+		return;
+	}
+	const int tc = targetChannelOf(channel);
+	const int value = tc == 14 ? target : tc == 4 || tc == 5 ? self.squad : tc == 13 ? self.team : 0;
+	m_world.radioMessage(self.id, tc, voice, value);
+	bot.radioSent.push_back({type, channel, target, m_time});
+	if (bot.radioSent.size() > 16) {
+		bot.radioSent.erase(bot.radioSent.begin());
+	}
+}
+
+bool BotManager::answerRadio(Bot& bot, int type)
+{
+	bool any = false;
+	for (Bot::Radio& r : bot.radio) {
+		if (r.type == type && !r.answered && m_time - r.at < m_settings.radioLifeOf(type)) {
+			r.answered = true;
+			any = true;
+		}
+	}
+	return any;
+}
+
+// The comm's update (0x100a7af0, from the bot's update):
+//  - the low-health call (0x100a7910): unless airborne (the bot's +0x140)
+//    or in an ITAir vehicle moving over 3 m/s, with the bot's object
+//    (its vehicle, else its soldier) between 0 and half its health (0.75 in
+//    a vehicle) and its +0xfc clear: "medic" on the AI's channel 0
+//    (TCLocalTeamMedic) on foot, "need_repair" on 6 (TCLocalTeam) aboard.
+//    A squad member whose AI player's slot 0xf4 answers 1 holds it back;
+//    neither that slot nor the setter of +0xfc (the game's AI event
+//    0x1004e220, interface slot 18; Idle's driver wait clears it) is
+//    traced, so neither holds a call back here;
+//  - the queue, by send time: a send due goes out unless a message of its
+//    type was heard within the type's send period (the first of its list:
+//    another said it already), which holds the queue for later.
+void BotManager::updateComm(Bot& bot, const GameWorld::PlayerInfo& self)
+{
+	{
+		bool held = bot.heli.airborne;
+		const GameWorld::VehicleInfo* vehicle = nullptr;
+		for (const GameWorld::VehicleInfo& v : m_vehicles) {
+			vehicle = v.object == self.vehicle ? &v : vehicle;
+		}
+		if (vehicle) {
+			const world::Object* object = m_world.objects().find(vehicle->object);
+			const std::string ai = object && object->objectTemplate() ? aiTemplateOf(object->objectTemplate()->name()) : std::string();
+			held = held || ((m_settings.typeFlags(ai) & kITAir) && std::sqrt(physics::lengthSquared(vehicle->velocity)) > 3);
+		}
+		const float health = healthOf(self.vehicle ? self.vehicle : self.soldier);
+		if (!held && health > 0 && health < (self.vehicle ? 0.75f : 0.5f)) {
+			if (!self.vehicle) {
+				queueRadio(bot, 3, 0, 0);
+			} else {
+				queueRadio(bot, 4, 6, 0, 0);
+			}
+		}
+	}
+	while (!bot.radioQueue.empty() && bot.radioQueue.front().at <= m_time) {
+		const RadioSent due = bot.radioQueue.front();
+		for (const Bot::Radio& r : bot.radio) {
+			if (r.type == due.type && m_time - r.at < m_settings.radioSendPeriodOf(due.type)) {
+				return;
+			}
+		}
+		bot.radioQueue.erase(bot.radioQueue.begin());
+		sendRadioNow(bot, self, due.type, due.channel, due.target);
+	}
+}
+
+std::vector<BotManager::RadioSent> BotManager::radioSent(int player) const
+{
+	const auto it = m_bots.find(player);
+	return it != m_bots.end() ? it->second.radioSent : std::vector<RadioSent> {};
 }
 
 const BotManager::Bot::Radio* BotManager::heardFromHuman(const Bot& bot, int type) const
@@ -978,6 +1114,10 @@ void BotManager::update(float seconds)
 	// What every bot looks at this tick, gathered once.
 	m_players = m_world.playerList();
 	m_vehicles = m_world.vehicleList();
+	// What the bots heard (the game's hand-out, GameWorld::hearsRadio).
+	for (const GameWorld::RadioHeard& heard : m_world.takeRadioHeard([this](int receiver) { return m_bots.count(receiver) != 0; })) {
+		radio(heard.sender, heard.voice, heard.receiver);
+	}
 	// A human player out of a vehicle stamps it for the team (BF2142.exe
 	// 0x00894860, exit event: the player not a bot (vt+0x84 -> player
 	// vt+0x68) and the soldier's root no longer the vehicle's -> the unit
@@ -1055,6 +1195,7 @@ void BotManager::update(float seconds)
 		bot.radio.erase(std::remove_if(bot.radio.begin(), bot.radio.end(),
 							[&](const Bot::Radio& r) { return m_time - r.at >= m_settings.radioLifeOf(r.type); }),
 			bot.radio.end());
+		updateComm(bot, self);
 		bots.push_back(&self);
 	}
 	if (bots.empty()) {
@@ -1765,9 +1906,23 @@ physics::Vec3 flatUnit(const physics::Vec3& v)
 //    target between 20 m and the gun's maxRange ahead (dot over 0.5,
 //    0x100d7b30), HeliAimAt (margin 40) and the trigger tapped every 60 /
 //    round((1 - (1 - skill) x 0.8) x round(1.5 x roundsPerMinute)) s while
-//    lined up. Not decoded: the run condition 0x100dd3e0, the aim's lead
-//    point (the target's position here) and the "on target" test
-//    0x100dcab0 (here: the aim lined up).
+//    lined up; all of it only inside the combat area: the plan's If
+//    (0x100d29f0) on 0x100dd3e0, which asks IAITerrain slot 0x1c
+//    (0x008a0380 -> 0x004ca5d0, GameWorld::insideCombatArea; its 150 at +8
+//    is never read), its else HeliMoveToObject at the target, margin 25.
+//    The aim's lead point is HeliAimAt's solver (0x100dcf10: 0x100fa060
+//    takes the target's offset from the gun and the target's Mobile
+//    velocity, 0x100fa6f0 iterates the launch angle in round(8 x p + 2)
+//    steps with the projectile's drag (0x100fa100) and gravity, keeping
+//    the direction at +0xb8, the impact point at +0xc4 and the time at
+//    +0x110); its trigger condition 0x100dcab0 (evaluated by 0x100dcb00)
+//    holds when the gun's forward is within atan(0.0125 d) of that
+//    direction and the impact point within d of the target's position
+//    predicted for that time (0x100fbad0), d and a closest-approach flag
+//    from the weapon adaptor's slots 0x94 and 0x104. That solver isn't
+//    rewritten (1572 bytes of iteration over the round's flight model,
+//    which the rewrite's projectiles don't share with the AI): the aim
+//    here is the target's position and the trigger the aim lined up.
 // The four inputs are the vehicle's: PIThrottle the collective, PIYaw
 // (strafe), PIRoll (the mouse's x, 5 degrees a unit) and PIPitch.
 bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds)
@@ -1839,7 +1994,13 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		physics::Vec3 to = target.position - at;
 		const float dist = std::sqrt(horizontal2(to));
 		input.fire = false;
-		if (bot.heliRun == 0) {
+		// The attack runs only inside the combat area (the plan's If on
+		// 0x100dd3e0: IAITerrain slot 0x1c, 0x008a0380 -> 0x004ca5d0);
+		// outside it HeliMoveToObject at the target, margin 25.
+		if (!m_world.insideCombatArea(self.id)) {
+			pilot.flyTo(toAi(target.position), 25);
+			bot.heliRun = 0;
+		} else if (bot.heliRun == 0) {
 			pilot.flyTo(toAi(target.position), 25); // HeliMoveToObject, margin 25
 			bot.heliRun = dist < 30 ? 1 : 0;
 		} else if (bot.heliRun == 1) {
@@ -2772,10 +2933,11 @@ bool BotManager::threatened(const Bot& bot, const GameWorld::PlayerInfo& self) c
 // (Unit +0x15, 0x00884eaf), or one without a Mobile part, or one whose
 // spot on the infantry map lies within its radius + the bot's of it (the
 // Mobile's per-map points +8/+0x1c/+0x30, which the rewrite doesn't keep:
-// every vehicle counts); a passenger takes any. Not rewritten: an ITAir
-// vehicle that isn't ITHelicopter also needs room round it (0x1006c3e0);
-// the get_in answer (0x1006be70: a radio within 15 m of the chosen
-// vehicle) and the low-health bail_out radio (0x100a5990).
+// every vehicle counts); a passenger takes any. The get_in answers are
+// below. Not rewritten: an ITAir vehicle that isn't ITHelicopter also
+// needs room round it (0x1006c3e0); the bail_out radio on taking the way
+// out with the bot's object's health at or under the IAIGame slot 0x68
+// value + 0.1 (0x100a5990 from 0x1006c520; that slot isn't traced).
 float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight)
 {
 	constexpr float kReach = 75; // 0x42960000
@@ -2953,6 +3115,30 @@ float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 			bot.vehicleTarget = chosen; // another vehicle: out, then to it
 		}
 	} else {
+		// The get_in answers (on foot, with a get_in held whose first
+		// sender rides a vehicle): a choice that isn't the sender's vehicle,
+		// or none, answers "negative" when the bot is within 15 m of that
+		// vehicle (0x1006be70: 0x100a61c0 marks the get_ins answered; the
+		// AI's channel 6, TCLocalTeam, 1 s on); heading for the sender's
+		// vehicle answers "roger_that" (the plan 0x1006dac0 does as it sets
+		// off, its choice new: the same channel and delay).
+		const uint32_t newChoice = best <= current ? 0 : chosen;
+		GameWorld::PlayerInfo sender;
+		if (getIn && m_world.playerInfo(getIn->sender, sender) && sender.vehicle) {
+			if (newChoice == sender.vehicle) {
+				if (reserved != newChoice && answerRadio(bot, 1)) {
+					queueRadio(bot, 6, 6, 1);
+				}
+			} else if (std::any_of(bot.radio.begin(), bot.radio.end(), [](const Bot::Radio& r) { return r.type == 1 && !r.answered; })) {
+				const GameWorld::VehicleInfo* ridden = nullptr;
+				for (const GameWorld::VehicleInfo& v : vehicles) {
+					ridden = v.object == sender.vehicle ? &v : ridden;
+				}
+				if (answerRadio(bot, 1) && ridden && physics::lengthSquared(ridden->position - self.position) < 225) {
+					queueRadio(bot, 7, 6, 1);
+				}
+			}
+		}
 		if (best <= current || !chosen) {
 			bot.vehicleTarget = 0;
 			return 0;
@@ -4534,8 +4720,8 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 // when that soldier's player is a bot, player slot 0x84): a vehicle whose
 // AI template has ITHasCarHorn (the FAVs' Car_horn) gets PIFire (input 8,
 // when the input has it) for 2 s; any other sends the radio request
-// (0x100a5990: 0xb, 6, 3, to that player), which the rewrite's bots don't
-// have. The stamp (comm object +0x80) is taken either way.
+// (0x100a5990: PLAYER_TACTICS_gogogo on the AI's channel 6, TCLocalTeam,
+// to that player). The stamp (comm object +0x80) is taken either way.
 void BotManager::horn(Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::VehicleInfo& vehicle, SoldierInput& input)
 {
 	const world::Object* object = m_world.objects().find(vehicle.object);
@@ -4572,6 +4758,10 @@ void BotManager::horn(Bot& bot, const GameWorld::PlayerInfo& self, const GameWor
 	if (hasHorn) {
 		input.fire = true;
 		bot.hornHeld = true;
+	} else {
+		// No horn (ITHasCarHorn clear): "PLAYER_TACTICS_gogogo" to the
+		// soldier in the way at once (0x100a5990 with the AI's channel 6).
+		sendRadioNow(bot, self, 11, 6, honked->id);
 	}
 }
 
@@ -5511,12 +5701,13 @@ void registerBotConsoleMethods(Console& console, BotSettings& settings)
 			p->selectKey = key.rfind(prefix, 0) == 0 ? std::atoi(key.c_str() + prefix.size()) : 0;
 		}
 	});
-	bindMethod(console, "aiComm.addAIRadioMessage", access, [s](std::string voice, float modifier, float, float life) {
+	bindMethod(console, "aiComm.addAIRadioMessage", access, [s](std::string voice, float modifier, float period, float life) {
 		voice.erase(std::remove(voice.begin(), voice.end(), '"'), voice.end());
 		const int type = radioMessageType(voice);
 		if (type >= 0) {
 			s->radioLife[type] = life;
 			s->radioModifier[type] = modifier;
+			s->radioSendPeriod[type] = period;
 		}
 	});
 	bindMethod(console, "weaponTemplate.setFiresThroughTransparent", access, [weapon](bool v) {

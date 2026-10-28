@@ -330,6 +330,7 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 						return;
 					}
 					m = actorOf(mover); // the pre-trace may have moved it
+					legsSphere(mover, m, c);
 				}
 				// Its wheels' parts as movers of their own (their probes).
 				wheelProbes(mover, c, seconds);
@@ -351,6 +352,8 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 				return;
 			}
 			m = actorOf(mover);
+			legsSphere(mover, m, c);
+			legsSphere(other, c, m);
 		}
 		wheelProbes(mover, c, seconds);
 		if (!asleep(other)) {
@@ -389,9 +392,60 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 					return;
 				}
 				m = actorOf(mover);
+				legsSphere(mover, m, c);
 			}
 			wheelProbes(mover, c, seconds);
 		}
+	}
+}
+
+// The MechLegs response's object pass (slot 0x24, 0x006cec60), for a pair
+// the dispatch met: the legs' sphere (radius +0x14c, its centre length -
+// radius under the legs' origin along their up) against B's mesh at its
+// vehicle LOD (B's slot 0x60), unless B's response is a walker's too. Each
+// contact (any normal: *0x00a84cec is -1) is pushed along the way from
+// the contact to the legs' origin (*0x00a84cf0 = 1), its height times 10
+// (*0x00a84cf4) when the contact lies stepHeight or more under the legs
+// (length - stepHeight below the origin), (0, 1, 0) when that is nil; the
+// legs' material is 4250 (*0x00a84d00), 4251 (*0x00a84d04) from a speed
+// of 20 (*0x00a84d08). Then as the mesh pass's contacts (the events, the
+// shares 0x006b6cc0, both responses: addMeshContact); the normal joins the
+// drive's (+0x1b8) and a contact under the legs' half-radius line (its
+// height under -(length - radius / 2)) is ground for the drive (+0x1c4,
+// +0x21c). A soldier (0xc42d) would lose the normal's height; the
+// rewrite's soldiers aren't bodies.
+void GameWorld::legsSphere(Body& walker, MeshActor& a, MeshActor& b)
+{
+	if (!walker.vehicle || !b.mesh || walker.wreckTime >= 0) {
+		return;
+	}
+	if (b.body && b.body->vehicle && b.body->vehicle->legs()) {
+		return; // another walker: its response is the legs' too
+	}
+	physics::Mat3 frame;
+	Vec3 origin;
+	if (!walker.vehicle->legsFrame(walker.body, frame, origin)) {
+		return;
+	}
+	const Vehicle::Legs& legs = *walker.vehicle->legs();
+	const Vec3 up = frame.rows[1];
+	const Vec3 centre = origin - up * (legs.length - legs.radius);
+	std::vector<physics::SphereContact> contacts;
+	b.mesh->querySphere(b.rotation.untransform(centre - b.position), legs.radius, contacts);
+	for (const physics::SphereContact& c : contacts) {
+		const Vec3 point = b.rotation.transform(c.point) + b.position;
+		const Vec3 faceNormal = b.rotation.transform(c.normal);
+		const Vec3 offset = point - origin;
+		Vec3 n = offset * -1.0f;
+		if (legs.length - legs.stepHeight <= n.y) {
+			n.y *= 10.0f;
+		}
+		const float l = length(n);
+		n = l > 1.1920929e-07f ? n * (1.0f / l) : Vec3 {0, 1, 0};
+		const Vec3 relative = a.pointVelocity(point) - b.pointVelocity(point);
+		const uint32_t material = length(relative) >= 20.0f ? 4251u : 4250u;
+		addMeshContact(a, b, point, n, c.depth, material, c.material, false);
+		walker.vehicle->legsObjectContact(n, faceNormal, offset.y < -(legs.length - legs.radius * 0.5f));
 	}
 }
 

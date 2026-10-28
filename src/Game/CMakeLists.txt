@@ -12,6 +12,7 @@ add_library(Game STATIC
 	Vehicle.cpp
 	VehicleParts.cpp
 	GameLogic.cpp
+	Radio.cpp
 	ScriptBridge.cpp
 	TickTimer.cpp
 )

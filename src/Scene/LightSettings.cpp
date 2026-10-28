@@ -16,6 +16,37 @@ void bindVec3(Console& console, const char* name, std::array<float, 3>& value)
 
 } // namespace
 
+void registerRendererConsoleMethods(Console& console, RendererSettings& settings)
+{
+	const uint32_t access = ConsoleAccess::Anyone;
+	const auto bindFloat = [&console, access](const char* name, float& value) {
+		bindProperty<float>(console, name, access, [&value] { return value; }, [&value](const float& v) { value = v; });
+	};
+	bindFloat("renderer.globalStaticMeshLodDistanceScale", settings.staticMeshLodDistanceScale);
+	bindFloat("renderer.globalBundleMeshLodDistanceScale", settings.bundleMeshLodDistanceScale);
+	bindFloat("renderer.globalSkinnedMeshLodDistanceScale", settings.skinnedMeshLodDistanceScale);
+	bindProperty<int>(console, "terrainCuller.lodSwitchDistance", access,
+		[&settings] { return settings.lodSwitchDistance; },
+		[&settings](const int& v) {
+			if (v >= settings.baseCellSize && v <= 1000) { // 0x1009c9b0
+				settings.lodSwitchDistance = v;
+			}
+		});
+	bindFloat("terrainCuller.lod0SwitchStart", settings.lod0SwitchStart);
+	bindFloat("terrainCuller.lod0SwitchStop", settings.lod0SwitchStop);
+	bindFloat("terrainCuller.lod1SwitchStart", settings.lod1SwitchStart);
+	bindFloat("terrainCuller.lod1SwitchStop", settings.lod1SwitchStop);
+	bindFloat("terrainCuller.lod2Start", settings.lod2Start);
+	bindProperty<int>(console, "terrainCuller.baseCellSize", access, [&settings] { return settings.baseCellSize; },
+		[&settings](const int& v) {
+			// 0x1009cf40: a power of two from 16 to 512, at least the
+			// smallest cell (32); the patch limit is the renderer's.
+			if (v >= 32 && v <= 512 && (v & (v - 1)) == 0) {
+				settings.baseCellSize = v;
+			}
+		});
+}
+
 void registerLightConsoleMethods(Console& console, LightSettings& settings)
 {
 	bindVec3(console, "lightManager.sunDirection", settings.sunDirection);

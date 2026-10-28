@@ -681,17 +681,36 @@ void Vehicle::updateLegs(physics::RigidBody& body, const physics::Ground& ground
 		l.yaw = std::clamp(m_regulated.steer, -1.0f, 1.0f);
 		l.crouch = std::clamp(m_regulated.crouch, 0.0f, 1.0f);
 	}
-	const int state = l.crouch > 0 ? 5 : l.throttle != 0 ? (l.throttle > 0 ? 1 : 2) : l.yaw != 0 ? (l.yaw > 0 ? 4 : 3) : 0;
-	if (state != l.state) {
-		l.state = state;
-		l.stateTick = m_tick;
+	// 0x00650680: the state follows the inputs only while no playing
+	// bundle of the walker's animation system blocks input (slot 0x50).
+	if (!l.animationBlocks) {
+		const int state = l.crouch > 0 ? 5 : l.throttle != 0 ? (l.throttle > 0 ? 1 : 2) : l.yaw != 0 ? (l.yaw > 0 ? 4 : 3) : 0;
+		if (state != l.state) {
+			l.state = state;
+			l.stateTick = m_tick;
+		}
 	}
 	if (!m_occupied) {
 		l.state = 0;
 	}
+	// 0x00650530 (each tick from 0x00650e90): the movement messages
+	// cleared (0x780), then the state's while its input's sign still holds
+	// (0x00650600); the crouch flag only in state 5.
+	{
+		const bool holds = (l.state == 1 && l.throttle > 0) || (l.state == 2 && l.throttle < 0)
+			|| (l.state == 3 && l.yaw < 0) || (l.state == 4 && l.yaw > 0) || (l.state == 5 && l.crouch > 0);
+		l.messages &= ~0x780u;
+		l.crouching = false;
+		if (holds) {
+			l.messages |= l.state == 1 ? 0x80u : l.state == 2 ? 0x100u : l.state == 3 ? 0x400u : l.state == 4 ? 0x200u : 0u;
+			l.crouching = l.state == 5;
+		}
+	}
 	const Mat3 m = partWorld(body, l.part);
 	const Vec3 at = partPoint(body, l.part);
-	const float k = 1; // the animation's speed factor (0x008ba420); 1 without the walker's system
+	// The animation's speed factor (the root's system, slot 0x54: 0x008ba420),
+	// 1 for a vehicle without one.
+	const float k = l.speedFactor;
 	const float target = l.state == 1 ? 7.5f * (m_regulated.sprint ? 1.3f : 1.0f) : l.state == 2 ? -4.5f : 0.0f;
 	const float turn = l.state == 4 ? 1.0f : l.state == 3 ? -1.0f : 0.0f;
 	const bool stop = l.speed > 0 && target == 0;
@@ -767,6 +786,7 @@ void Vehicle::legsRespond(physics::RigidBody& body, const physics::Ground& groun
 		l.grounded = true;
 	}
 	Vec3 contactNormal {0, 1, 0};
+	l.objectNormal = false;
 	if (l.grounded) {
 		const Vec3 point {foot.x, groundY, foot.z};
 		const Vec3 r = point - at;
@@ -786,13 +806,60 @@ void Vehicle::legsRespond(physics::RigidBody& body, const physics::Ground& groun
 	} else {
 		l.bestNormal = {};
 	}
-	// The drive.
+	l.contactNormal = contactNormal;
+}
+
+namespace {
+// 0x006b6b60: an axis of a contact normal taken into the drive's: of the
+// same sign the larger, of opposite signs (or into 0) the sum.
+float combineAxis(float into, float value)
+{
+	if (into == 0) {
+		return value;
+	}
+	if (into > 0 && value > 0) {
+		return std::max(into, value);
+	}
+	if (into < 0 && value < 0) {
+		return std::min(into, value);
+	}
+	return into + value;
+}
+} // namespace
+
+void Vehicle::legsObjectContact(const Vec3& normal, const Vec3& queryNormal, bool below)
+{
+	Legs& l = m_legs;
+	l.contactNormal = {combineAxis(l.contactNormal.x, normal.x), combineAxis(l.contactNormal.y, normal.y),
+		combineAxis(l.contactNormal.z, normal.z)};
+	l.objectNormal = true;
+	// Below the legs (0x006cec60's bVar3): the best ground normal by its
+	// height (+0x1c4, its y at +0x1c8) and the landed flag (+0x21c).
+	if (below && l.bestNormal.y < queryNormal.y) {
+		l.bestNormal = queryNormal;
+		l.grounded = true;
+		l.landed = true;
+	}
+}
+
+// The drive (0x006cdca0): the velocity's part along the ground (off the
+// contact normal) moved towards the legs' desired one, by the best ground
+// normal's height, at most 1 m/s, as a force of 30 at the legs; a quarter
+// of the turn damped (*0x00a072fc). The contact normals are reset after.
+void Vehicle::legsDrive(physics::RigidBody& body)
+{
+	if (!m_hasLegs) {
+		return;
+	}
+	Legs& l = m_legs;
+	const Vec3 at = partPoint(body, l.part);
 	const Vec3 e = body.velocity - l.desired;
-	const Vec3 along = e - contactNormal * physics::dot(e, contactNormal);
+	const Vec3 along = e - l.contactNormal * physics::dot(e, l.contactNormal);
 	Vec3 dv = along * (-std::max(0.0f, l.bestNormal.y));
 	dv = clampLength(dv, 1.0f);
 	body.addForce(at - body.position, dv * 30.0f);
 	body.angularVelocity = body.angularVelocity + body.angularVelocity * -0.25f;
+	l.contactNormal = {0, 1, 0};
 }
 
 // The track's speed at a wheel (0x0064c440): a tank's sides by the yaw,
