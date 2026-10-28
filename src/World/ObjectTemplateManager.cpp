@@ -7,9 +7,18 @@ namespace dice::hfe::world {
 
 bool CaseInsensitiveLess::operator()(const std::string& a, const std::string& b) const
 {
-	return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end(), [](char x, char y) {
-		return std::tolower(static_cast<unsigned char>(x)) < std::tolower(static_cast<unsigned char>(y));
-	});
+	// ASCII folding, as the C locale's tolower does it, without a library
+	// call per character: every template and setting lookup comes here.
+	const auto fold = [](unsigned char c) { return c >= 'A' && c <= 'Z' ? static_cast<unsigned char>(c + ('a' - 'A')) : c; };
+	const size_t n = std::min(a.size(), b.size());
+	for (size_t i = 0; i < n; ++i) {
+		const unsigned char x = fold(static_cast<unsigned char>(a[i]));
+		const unsigned char y = fold(static_cast<unsigned char>(b[i]));
+		if (x != y) {
+			return x < y;
+		}
+	}
+	return a.size() < b.size();
 }
 
 ObjectTemplate::ObjectTemplate(uint32_t classId, std::string typeName, std::string name, uint32_t id)
