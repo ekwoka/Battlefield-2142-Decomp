@@ -81,7 +81,7 @@ GCC (MinGW, i686) can match it as long as these rules hold:
 
 ## 5. Verify
 
-- Unit and integration tests: `ninja -C build/native && build/native/tests/bf2142_tests`.
+- Unit and integration tests: `ninja -C build/native && build/native/tests/bf2142_tests`. They run in parallel processes, one per core; `-j N` sets how many (`-j 1` runs them in one process, as on Windows), and a name argument runs only the tests containing it. Tests over a second print their time.
   The native build uses ASan/UBSan. Sound tests need
   `BF2142_SOUND_TEST_DIR` pointing at extracted game sounds, and run on
   OpenAL Soft's silent `null` driver.

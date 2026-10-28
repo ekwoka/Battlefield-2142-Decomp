@@ -29,7 +29,9 @@ git clone https://github.com/Moxnatiy/OpenBattlefield2 reference/OpenBattlefield
 > **Status:** playable offline. The native `bf2142` runs the game's own menus
 > and starts single-player, co-op, conquest, NV and SL rounds with bots. It
 > also has first-person view, vehicles, physics, the HUD, the commander, stats
-> and a network client. Titan mode and several rendering details are still in
+> and a network client. Titan mode runs (Titans, silos and missiles, shields,
+> the core's consoles, the commander's moves, drop pods; see
+> [docs/engine.md](docs/engine.md#titans-gpm_ti)); several rendering details are still in
 > progress (see [Progress](#progress) and [docs/roadmap.md](docs/roadmap.md)).
 
 ## Legal
@@ -104,6 +106,8 @@ brew install python@3                         # for the game-mode scripts (optio
 # Native (macOS) build and tests (ASan/UBSan enabled)
 cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined"
 ninja -C build/native && build/native/tests/bf2142_tests
+# tests run in parallel processes, one per core (about 30 s); -j 1 runs them
+# one by one (about 4 min under ASan); a name runs only the tests containing it
 
 # 32-bit Windows build: drop-in replacements for the retail DLLs
 cmake -S . -B build/win32 -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-i686.cmake -DCMAKE_BUILD_TYPE=Release
