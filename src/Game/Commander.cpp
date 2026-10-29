@@ -446,6 +446,21 @@ bool GameWorld::commanderAction(int team, CommanderAbility ability, float x, flo
 	return true;
 }
 
+void GameWorld::noteCommanderUse(int team, CommanderAbility ability)
+{
+	if (team != 1 && team != 2) {
+		return;
+	}
+	if (m_assetScan <= 0) {
+		scanCommanderAssets();
+		m_assetScan = 1;
+	}
+	CommanderTeam& side = m_commanders[team];
+	const int index = static_cast<int>(ability);
+	side.minTime[index] = commanderRecharge(team, ability);
+	side.lastUse[index] = m_time;
+}
+
 // The UAV's drone (the UAV manager, ctor 0x005a1a00, vtable 0x00967f68).
 // The RC object's activation (0x0050eb90) raises ECGameLogicGLUAV; the
 // manager (0x005a20a0 -> 0x005a1e40) looks up the template named

@@ -308,6 +308,14 @@ int screenshot(const render::LevelSources& sources, const ViewerOptions& options
 		camera.fovY = view.fovY;
 		camera.roll = view.eyeRoll;
 		camera.nearPlane = view.firstPerson ? kFirstPersonNear : render::Camera {}.nearPlane;
+	} else if (options.camera.empty() && options.playerView && options.playerView(view)) {
+		// The chase view of a soldier known only now (a joined game's: its
+		// ghost): framed from behind as main.cpp frames a local one (5 m
+		// back, 2.5 m up, 12 degrees down).
+		const float yaw = view.yawDegrees * 3.14159265f / 180.0f;
+		camera.position = {view.x - std::sin(yaw) * 5, view.y + 2.5f, view.z - std::cos(yaw) * 5};
+		camera.yaw = yaw;
+		camera.pitch = -12 * 3.14159265f / 180.0f;
 	}
 
 	auto target = gpu->createOffscreenTarget(static_cast<uint32_t>(options.width), static_cast<uint32_t>(options.height));

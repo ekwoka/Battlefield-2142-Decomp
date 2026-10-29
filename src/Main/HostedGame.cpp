@@ -4,6 +4,7 @@
 #include "Console/ConsoleBinding.h"
 #include "Game/GameLogic.h"
 #include "Net/BitStream.h"
+#include "Net/GameClient.h"
 #include "Net/GameProtocol.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
@@ -361,6 +362,8 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 	m_nextGhost = kFirstGhost;
 	m_spawnGroups.clear();
 	m_requestsSent.clear();
+	m_ordersSent.clear();
+	m_offerSent = {-1, -1, -1};
 	m_roundEndSent = false;
 	m_endOfRoundSerialSent = 0;
 	for (auto& [id, client] : m_clients) {
@@ -919,6 +922,22 @@ void HostedGame::sendDatabase(int id)
 	for (const auto& [key, at] : m_requestsSent) {
 		sendTo(id, requestEvent(std::get<0>(key), std::get<1>(key), std::get<2>(key), at));
 	}
+	// And the orders standing, the commander's answered ones with the answer.
+	for (const auto& [key, order] : m_ordersSent) {
+		const auto [team, squad, store] = key;
+		net::SquadOrderInfo info;
+		info.team = team;
+		info.squad = squad;
+		info.kind = order.kind;
+		info.store = store;
+		info.floats[0] = order.at.x;
+		info.floats[1] = order.at.y;
+		info.floats[2] = order.at.z;
+		sendTo(id, net::makeSquadOrder(info));
+		if (store == 1 && order.accepted) {
+			sendTo(id, net::makeAcceptOrder({squad, team, true, store, order.kind}));
+		}
+	}
 	sendTo(id, net::makePostRemote(net::kMsgNetworkCategory, net::kNeDatabaseComplete));
 	sendTo(id, net::makePostRemote(net::kMsgNetworkCategory, net::kNeReset, net::int32Payload(0)));
 	client.stage = Client::Stage::Database;
@@ -1069,9 +1088,43 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			m_round->joinSquad(player, e.i(2));
 		}
 		return;
-	case net::kEvLeaveSquad:
+	case net::kEvLeaveSquad: { // team, player, squad, bit (0x004c9c50)
 		if (e.i(1) == player) {
 			m_round->joinSquad(player, 0);
+			return;
+		}
+		// Another player: the squad's leader removes a member (the invite
+		// list's apply, squad manager slot 0x38).
+		game::GameWorld::PlayerInfo me, other;
+		if (m_round->playerInfo(player, me) && me.squadLeader && me.squad == e.i(2) && m_round->playerInfo(e.i(1), other)
+			&& other.team == me.team && other.squad == me.squad) {
+			m_round->joinSquad(other.id, 0);
+		}
+		return;
+	}
+	case net::kEvInvite: { // 0x0050e700: team, player, squad, from the leader
+		// From the squad's leader (squad manager slot 0x40) only; slot 0x30
+		// invites. A bot in no squad takes it at once (as offline: the
+		// rewrite's stand-in for its answer); a client's player is told
+		// (the event to its client).
+		game::GameWorld::PlayerInfo me, other;
+		if (!m_round->playerInfo(player, me) || !me.squadLeader || me.squad != e.i(2) || !m_round->playerInfo(e.i(1), other)
+			|| other.team != me.team || other.commander) {
+			return;
+		}
+		if (other.ai && other.squad == 0) {
+			m_round->joinSquad(other.id, me.squad);
+		}
+		for (const auto& [id, c] : m_clients) {
+			if (c.player == other.id) {
+				sendTo(id, e);
+			}
+		}
+		return;
+	}
+	case net::kEvSetPrivateSquad: // team, squad, bit: the leader's lock (slot 0x20)
+		if (onLog) {
+			onLog("player " + std::to_string(player) + (e.u(2) ? " locks" : " unlocks") + " squad " + std::to_string(e.i(1)));
 		}
 		return;
 	case net::kEvChangeSquadName: // a new squad (0x004c6720)
@@ -1090,9 +1143,31 @@ void HostedGame::event(int id, const net::GameEvent& e)
 	case net::kEvIssueSquadOrder: { // 0x0050e3a0 with the sender's player
 		net::SquadOrderInfo order;
 		game::GameWorld::PlayerInfo me;
-		if (!net::parseSquadOrder(e, order) || order.store != net::kSquadOrderStoreRequest
-			|| !m_round->playerInfo(player, me) || me.team != order.team) {
-			return; // the squads' orders themselves aren't taken from clients yet
+		if (!net::parseSquadOrder(e, order) || !m_round->playerInfo(player, me) || me.team != order.team) {
+			return;
+		}
+		if (order.store == 0 || order.store == 1) {
+			// An order: the leader's to his own squad (slot 0x48), the
+			// commander's to a squad (0x4c); on an object, at the object.
+			net::Vec3f at = order.point();
+			if (order.object) {
+				size_t part = 0;
+				if (const Ghost* g = ghostOf(order.object, part)) {
+					if (const world::Object* o = m_round->objects().find(g->object)) {
+						at = {o->position().x, o->position().y, o->position().z};
+					}
+				}
+			}
+			const auto type = game::GameWorld::orderTypeFromKind(order.kind);
+			if (order.store == 0 && me.squadLeader && me.squad == order.squad) {
+				m_round->issueSquadLeaderOrder(player, type, at.x, at.z);
+			} else if (order.store == 1 && m_round->commander(me.team) == player) {
+				m_round->issueOrder(me.team, order.squad, type, at.x, at.z, player);
+			}
+			return; // trackOrders sends it on
+		}
+		if (order.store != net::kSquadOrderStoreRequest) {
+			return;
 		}
 		// From the squad's leader or the team's commander (0x0050e3a0's
 		// slot 0x40 / 0x78 checks), into the store (0x004c5720 with 0:
@@ -1120,8 +1195,17 @@ void HostedGame::event(int id, const net::GameEvent& e)
 	case net::kEvSetAcceptOrder: { // 0x0050df60 with the sender's player
 		net::AcceptOrderInfo answer;
 		game::GameWorld::PlayerInfo me;
-		if (!net::parseAcceptOrder(e, answer) || answer.store != net::kSquadOrderStoreRequest
-			|| !m_round->playerInfo(player, me) || me.team != answer.team) {
+		if (!net::parseAcceptOrder(e, answer) || !m_round->playerInfo(player, me) || me.team != answer.team) {
+			return;
+		}
+		if (answer.store == 1) {
+			// The leader's answer to the commander's order (0x004c2f60).
+			if (me.squadLeader && me.squad == answer.squad) {
+				m_round->acceptOrder(player, answer.flag);
+			}
+			return;
+		}
+		if (answer.store != net::kSquadOrderStoreRequest) {
 			return;
 		}
 		if ((me.squadLeader && me.squad == answer.squad) || m_round->commander(me.team) == player) {
@@ -1129,15 +1213,186 @@ void HostedGame::event(int id, const net::GameEvent& e)
 		}
 		return;
 	}
-	case net::kEvCommander:
-		if (e.i(2) == player && e.u(0) == 4) {
+	case net::kEvCommander: // 0x0050cb00: only from the sender's own player
+		if (e.i(2) != player) {
+			return;
+		}
+		if (e.u(0) == net::GameClient::kCommanderApply) { // SquadManager slot 0x60
 			m_round->applyForCommander(player);
-		} else if (e.i(2) == player && e.u(0) == 2) {
+		} else if (e.u(0) == net::GameClient::kCommanderResign) { // slot 0x70
 			m_round->resignCommander(player);
+		} else if (e.u(0) == net::GameClient::kCommanderStepDown || e.u(0) == net::GameClient::kCommanderWithdraw) {
+			// The offer's answer: kind 0 takes command (slot 0x68,
+			// 0x004c8c20), kind 1 passes it on (slot 0x6c).
+			m_round->answerCommanderOffer(player, e.u(0) == net::GameClient::kCommanderStepDown);
 		}
 		return;
+	case net::kEvRadioMessage: { // 0x0050d3b0: the connection's player says it
+		net::RadioMessageInfo radio;
+		if (!net::parseRadioMessage(e, radio) || player < 0) {
+			return;
+		}
+		const std::string voice = radioVoice ? radioVoice(radio.index) : std::string();
+		if (!voice.empty()) {
+			m_round->radioMessage(player, radio.channel, voice, radio.value);
+		}
+		return;
+	}
+	case net::kEvArtillery:
+	case net::kEvUav:
+	case net::kEvSupplyDrop:
+	case net::kEvTitan: {
+		net::CommanderToolUse use;
+		if (net::parseCommanderToolUse(e, use)) {
+			commanderTool(player, use);
+		}
+		return;
+	}
 	default:
 		return;
+	}
+}
+
+// The commander's tools from a client: only the team's commander's
+// (0x0050ee10 / 0x0050eb90 / 0x00511220 / 0x0050f1f0 check the sender's
+// player slot 0x128), for his own team.
+void HostedGame::commanderTool(int player, const net::CommanderToolUse& use)
+{
+	game::GameWorld::PlayerInfo me;
+	if (!m_round->playerInfo(player, me) || me.team != use.team || m_round->commander(me.team) != player) {
+		return;
+	}
+	using Ability = game::GameWorld::CommanderAbility;
+	bool done = false;
+	switch (use.tool) {
+	case net::CommanderToolUse::Artillery:
+		done = m_round->commanderAction(me.team, Ability::Artillery, use.x, use.z);
+		break;
+	case net::CommanderToolUse::OrbitalStrike:
+		done = m_round->commanderAction(me.team, Ability::OrbitalStrike, use.x, use.z);
+		break;
+	case net::CommanderToolUse::Uav:
+		done = m_round->commanderAction(me.team, Ability::Uav, use.x, use.z);
+		break;
+	case net::CommanderToolUse::Satellite:
+		done = m_round->commanderAction(me.team, Ability::Satellite, use.x, use.z);
+		break;
+	case net::CommanderToolUse::Supplies:
+		done = m_round->commanderAction(me.team, Ability::Supplies, use.x, use.z);
+		break;
+	case net::CommanderToolUse::MoveTitan: {
+		// 0x0050f1f0 → the Titan's move (0x005abba0); its answer is the
+		// commander's radio: AUTO_TITAN_CC_moveaccepted / _unablemove.
+		const auto answer = m_round->moveTitan(me.team, use.x, use.z);
+		done = answer == game::GameWorld::TitanMove::Accepted;
+		if (answer == game::GameWorld::TitanMove::Accepted || answer == game::GameWorld::TitanMove::Unable) {
+			m_round->hearRadio(player, 2, done ? "AUTO_TITAN_CC_moveaccepted" : "AUTO_TITAN_CC_unablemove");
+		}
+		break;
+	}
+	}
+	if (onLog) {
+		onLog("player " + std::to_string(player) + " uses commander tool " + std::to_string(static_cast<int>(use.tool))
+			+ (done ? "" : " (refused)"));
+	}
+	if (onCommanderTool) {
+		onCommanderTool(player, use, done);
+	}
+}
+
+// Each message a client's player heard in the round this tick goes to its
+// client as the RadioMessage event (0x004a6c60): the sender (0xff for
+// none: the game's own automatic messages), the sender's team, the
+// channel, source 3 from a player, 0 from the game. A voice the table
+// doesn't have can't go.
+void HostedGame::sendRadio()
+{
+	const auto heard = m_round->takeRadioHeard([this](int receiver) { return receiver >= 0 && clientHas(receiver); });
+	for (const game::GameWorld::RadioHeard& message : heard) {
+		const int index = radioIndex ? radioIndex(message.voice) : -1;
+		if (index < 0) {
+			continue;
+		}
+		net::RadioMessageInfo info;
+		info.index = index;
+		info.channel = message.channel;
+		game::GameWorld::PlayerInfo from;
+		if (message.sender >= 0 && m_round->playerInfo(message.sender, from)) {
+			info.sender = message.sender;
+			info.team = from.team;
+			info.source = 3;
+		}
+		for (const auto& [id, client] : m_clients) {
+			if (client.player == message.receiver && client.stage == Client::Stage::Playing) {
+				sendTo(id, net::makeRadioMessage(info));
+			}
+		}
+	}
+}
+
+// The squads' orders (the leader's, slot 0x48 → 0x004c5360, and the
+// commander's, 0x4c → 0x004c5530) as they change: each new or moved one
+// to everyone as IssueSquadOrder (store 0 / 1, the map kind and the
+// point), the leader's answer to the commander's as SetAcceptOrder with
+// the bit, an order gone as SetAcceptOrder without it (0x004c2f60).
+void HostedGame::trackOrders()
+{
+	std::map<std::tuple<int, int, int>, OrderSent> now;
+	for (int team = 1; team <= 2; ++team) {
+		for (int squad = 1; squad <= 9; ++squad) {
+			const game::GameWorld::SquadOrder* orders[2] = {m_round->squadLeaderOrder(team, squad), m_round->squadOrder(team, squad)};
+			for (int store = 0; store < 2; ++store) {
+				const game::GameWorld::SquadOrder* o = orders[store];
+				if (o && o->type != game::GameWorld::OrderType::None) {
+					now[{team, squad, store}] = {static_cast<int>(o->type), o->position, o->accepted};
+				}
+			}
+		}
+	}
+	for (const auto& [key, order] : now) {
+		const auto [team, squad, store] = key;
+		const auto was = m_ordersSent.find(key);
+		const bool moved = was == m_ordersSent.end() || was->second.kind != order.kind
+			|| physics::lengthSquared(was->second.at - order.at) > 1e-4f;
+		if (moved) {
+			net::SquadOrderInfo info;
+			info.team = team;
+			info.squad = squad;
+			info.kind = order.kind;
+			info.store = store;
+			info.floats[0] = order.at.x;
+			info.floats[1] = order.at.y;
+			info.floats[2] = order.at.z;
+			sendToPlaying(net::makeSquadOrder(info));
+		}
+		if (store == 1 && order.accepted && (moved || !was->second.accepted)) {
+			sendToPlaying(net::makeAcceptOrder({squad, team, true, store, order.kind}));
+		}
+	}
+	for (const auto& [key, order] : m_ordersSent) {
+		if (!now.count(key)) {
+			const auto [team, squad, store] = key;
+			sendToPlaying(net::makeAcceptOrder({squad, team, false, store, order.kind}));
+		}
+	}
+	m_ordersSent = std::move(now);
+}
+
+// The offer of command (0x004c5070: PostRemote 2/0x23 to the applicant
+// picked, its id as the payload), once per offer.
+void HostedGame::trackCommanderOffers()
+{
+	for (int team = 1; team <= 2; ++team) {
+		const int candidate = m_round->commanderOffer(team);
+		if (candidate == m_offerSent[static_cast<size_t>(team)]) {
+			continue;
+		}
+		m_offerSent[static_cast<size_t>(team)] = candidate;
+		for (const auto& [id, client] : m_clients) {
+			if (candidate >= 0 && client.player == candidate) {
+				sendTo(id, net::makePostRemote(2, 0x23, net::int32Payload(candidate)));
+			}
+		}
 	}
 }
 
@@ -2131,6 +2386,9 @@ void HostedGame::tick()
 	trackPlayers();
 	trackSpawnGroups();
 	trackRequests();
+	trackCommanderOffers();
+	trackOrders();
+	sendRadio();
 	// The scripts' end-of-round text (gl_sendEndOfRoundData, 0x00568930:
 	// data block 8 to everyone, with sv.endOfRoundDelay and each player's
 	// kills and deaths).

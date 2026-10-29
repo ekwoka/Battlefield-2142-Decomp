@@ -192,6 +192,19 @@ public:
 	// commander is the host's own player and whose leader isn't comes to
 	// onRequestStored (the host's 2/0x1d).
 	std::function<void(int team, int squad, int kind)> onRequestStored;
+	// The radio (net::RadioMessageInfo): the game logic's voice message
+	// table by name and by index (Sound/VoiceMessages.con's addMessage
+	// order, 0x004d8af0; the server has it too, 0x004cdab0). A client's
+	// RadioMessage is said in the round by the connection's player
+	// (0x0050d3b0 → GameWorld::radioMessage); every message a client's
+	// player hears in the round goes to that client (0x004a6c60), the
+	// sender's id and team in it (0xff and 0: the game's own, source 0).
+	std::function<int(const std::string& voice)> radioIndex;
+	std::function<std::string(int index)> radioVoice;
+	// A client's commander's tool used (net::CommanderToolUse: Artillery,
+	// Uav, SupplyDrop, Titan; 0x0050ee10, 0x0050eb90, 0x00511220,
+	// 0x0050f1f0), after the round took it, and the Titan's answer.
+	std::function<void(int player, const net::CommanderToolUse& use, bool done)> onCommanderTool;
 	// Demo recording (demo.recordDemo / stopRecording; Net/Demo.h): what
 	// the server sends a client with no player, connection 0x81, into a
 	// .bf2142demo file. False if one is recording or the file exists.
@@ -298,6 +311,19 @@ private:
 	void trackSpawnGroups();
 	std::map<std::tuple<int, int, int>, physics::Vec3> m_requestsSent;
 	void trackRequests();
+	void sendRadio();
+	// The offers of command made (PostRemote 2/0x23 to the candidate,
+	// 0x004c5070), per team.
+	std::array<int, 3> m_offerSent {-1, -1, -1};
+	void trackCommanderOffers();
+	struct OrderSent {
+		int kind = 0;
+		physics::Vec3 at;
+		bool accepted = false;
+	};
+	std::map<std::tuple<int, int, int>, OrderSent> m_ordersSent; // (team, squad, store)
+	void trackOrders();
+	void commanderTool(int player, const net::CommanderToolUse& use);
 	net::GameEvent requestEvent(int team, int squad, int kind, const physics::Vec3& at) const;
 	std::vector<std::pair<float, int>> m_mapVotes; // (seconds left, map) passed, waiting the 5 s
 	std::vector<std::pair<int, uint32_t>> m_kickLater; // (client, reason) after the poll

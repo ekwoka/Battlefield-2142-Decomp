@@ -66,7 +66,15 @@ public:
 	virtual std::vector<VehicleInfo> vehicleList() const = 0;
 	virtual std::vector<int> vehicleOccupants(uint32_t vehicle) const = 0;
 	virtual float hitPoints(uint32_t object) const = 0;
+	// An object's armour as a fraction of its maxHitPoints, -1 when not known
+	// (no armour, or a ghost whose health hasn't come): the name tags' bars
+	// and useAliveArmor (RendDX9 0x1016a950: the armour's slot 0x60).
+	virtual float objectHealth(uint32_t object) const = 0;
 	virtual std::vector<SquadRequest> squadRequests(int team) const = 0;
+	// A squad's order: its leader's own (fromCommander false) or the
+	// commander's; false for none.
+	using SquadOrder = game::GameWorld::SquadOrder;
+	virtual bool squadOrder(int team, int squad, bool fromCommander, SquadOrder& out) const = 0;
 	// The local player's soldier and the vehicle it sits in, as objects of
 	// the level (nullptr: none, or dead).
 	virtual const world::Object* soldier() const = 0;
@@ -103,7 +111,16 @@ public:
 	std::vector<VehicleInfo> vehicleList() const override { return m_round.vehicleList(); }
 	std::vector<int> vehicleOccupants(uint32_t vehicle) const override { return m_round.vehicleOccupants(vehicle); }
 	float hitPoints(uint32_t object) const override { return m_round.hitPoints(object); }
+	float objectHealth(uint32_t object) const override;
 	std::vector<SquadRequest> squadRequests(int team) const override { return m_round.squadRequests(team); }
+	bool squadOrder(int team, int squad, bool fromCommander, SquadOrder& out) const override
+	{
+		const SquadOrder* o = fromCommander ? m_round.squadOrder(team, squad) : m_round.squadLeaderOrder(team, squad);
+		if (o) {
+			out = *o;
+		}
+		return o != nullptr;
+	}
 	const world::Object* soldier() const override { return m_round.player(); }
 	const world::Object* vehicle() const override { return m_round.playerVehicle(); }
 	float health() const override { return 1; }
@@ -145,7 +162,9 @@ public:
 	std::vector<VehicleInfo> vehicleList() const override;
 	std::vector<int> vehicleOccupants(uint32_t vehicle) const override;
 	float hitPoints(uint32_t object) const override;
+	float objectHealth(uint32_t object) const override;
 	std::vector<SquadRequest> squadRequests(int team) const override;
+	bool squadOrder(int team, int squad, bool fromCommander, SquadOrder& out) const override;
 	const world::Object* soldier() const override;
 	const world::Object* vehicle() const override;
 	float health() const override;

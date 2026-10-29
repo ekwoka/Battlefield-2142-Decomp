@@ -1,6 +1,10 @@
 // The 3D name tags' rules (src/Main/Nametags: RendDX9's NametagManager,
 // 0x100f0e60, 0x100f0310, 0x100f0be0, 0x100ef210) and their font.
 #include "Main/Nametags.h"
+#include "Game/GameWorld.h"
+#include "Main/HudWorld.h"
+#include "World/Object.h"
+#include "World/ObjectTemplateManager.h"
 #include "Console/Console.h"
 #include "IO/File/FileManager.h"
 #include "TestMain.h"
@@ -233,4 +237,106 @@ TEST(Nametags_VehicleOrderAndFog)
 	nametags::Fade clear;
 	const float plain = run(nametags::Settings {}, in, clear, 5);
 	CHECK(fogged < plain && plain > 0.9f);
+}
+
+// A joined game's tags (Nametags::setWorld): the players and the
+// commander's requests come from the HUD's world (the server's), not the
+// client's round, which has none.
+TEST(Nametags_JoinedWorld)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	CHECK(files.mountArchive("Fonts_client.zip", "Fonts"));
+	world::ObjectTemplateManager templates;
+	templates.registerType(3, "Soldier");
+	world::ObjectTemplate* soldierTemplate = templates.create("Soldier", "pac_light_soldier");
+	soldierTemplate->settings()["armor.maxHitPoints"] = "100";
+	world::ObjectManager objects;
+	game::GameWorld round(templates, objects);
+	round.startRound();
+	const uint32_t mine = objects.create(soldierTemplate, {0, 0, 0})->id();
+	const uint32_t friendBody = objects.create(soldierTemplate, {0, 0, 20})->id();
+	// The server's world as the HUD has it.
+	struct Joined : host::HudWorld {
+		std::vector<PlayerInfo> players;
+		std::vector<SquadRequest> requests;
+		bool joined() const override { return true; }
+		int localPlayer() const override { return 0; }
+		bool playerInfo(int player, PlayerInfo& out) const override
+		{
+			for (const PlayerInfo& p : players) {
+				if (p.id == player) {
+					out = p;
+					return true;
+				}
+			}
+			return false;
+		}
+		std::vector<PlayerInfo> playerList() const override { return players; }
+		Scores scores(int) const override { return {}; }
+		float tickets(int) const override { return 0; }
+		int commander(int) const override { return 0; }
+		std::vector<ControlPointInfo> controlPointList() const override { return {}; }
+		std::vector<int> spawnablePoints(int) const override { return {}; }
+		int spawnChoice(int) const override { return -1; }
+		std::vector<VehicleInfo> vehicleList() const override { return {}; }
+		std::vector<int> vehicleOccupants(uint32_t) const override { return {}; }
+		float hitPoints(uint32_t) const override { return 100; }
+		float objectHealth(uint32_t) const override { return 1; }
+		bool squadOrder(int, int, bool, SquadOrder&) const override { return false; }
+		std::vector<SquadRequest> squadRequests(int) const override { return requests; }
+		const world::Object* soldier() const override { return nullptr; }
+		const world::Object* vehicle() const override { return nullptr; }
+		float health() const override { return 1; }
+		Weapon heldWeapon() const override { return {}; }
+	} joined;
+	game::GameWorld::PlayerInfo me;
+	me.id = 0;
+	me.team = 1;
+	me.alive = true;
+	me.commander = true;
+	me.soldier = mine;
+	me.name = "Cmdr";
+	game::GameWorld::PlayerInfo mate = me;
+	mate.id = 1;
+	mate.commander = false;
+	mate.squad = 1;
+	mate.squadLeader = true;
+	mate.soldier = friendBody;
+	mate.position = {0, 0, 20};
+	mate.name = "Leader";
+	joined.players = {me, mate};
+	joined.requests = {{1, 1, 3, {0, 0, 30}, 0}};
+	nametags::IconRegistry icons;
+	icons.icons[nametags::requestIconId(3, false)] = {"supplyRequest.dds", 0, 0, 1, 1, 16, 16};
+	icons.icons[nametags::requestIconId(3, true)] = {"supplyRequestSelected.dds", 0, 0, 1, 1, 16, 16};
+	nametags::Nametags tags(files);
+	tags.setIcons(&icons);
+	nametags::Nametags::View view;
+	view.position = {0, 1.6f, 0};
+	const auto hasTexture = [](const std::vector<hud::HudQuad>& quads, const std::string& texture) {
+		for (const hud::HudQuad& q : quads) {
+			if (q.texture == texture) {
+				return true;
+			}
+		}
+		return false;
+	};
+	// The round alone: no local player, no tags.
+	CHECK(tags.frame(round, objects, view, 1 / 30.0f).empty());
+	tags.setWorld(&joined);
+	std::vector<hud::HudQuad> quads;
+	for (int i = 0; i < 30; ++i) {
+		quads = tags.frame(round, objects, view, 1 / 30.0f);
+	}
+	// The friend's name (the font's glyphs) and the squad's request, which
+	// the crosshair selects (it is straight ahead).
+	CHECK(hasTexture(quads, "Fonts/BF1942.dds"));
+	CHECK(hasTexture(quads, "supplyRequest.dds") || hasTexture(quads, "supplyRequestSelected.dds"));
+	CHECK(tags.selectedRequest() == 1 * 4 + 3);
 }

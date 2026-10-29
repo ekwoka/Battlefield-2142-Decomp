@@ -246,6 +246,16 @@ int VoiceMessages::message(const std::string& name) const
 	return it == m_messages.end() ? -1 : it->second;
 }
 
+std::string VoiceMessages::messageName(int index) const
+{
+	for (const auto& [name, at] : m_messages) {
+		if (at == index) {
+			return name;
+		}
+	}
+	return {};
+}
+
 int VoiceMessages::voice(const std::string& name) const
 {
 	const auto it = m_voices.find(name);

@@ -39,6 +39,7 @@ void RemoteWorld::clear()
 	m_teamState = {};
 	m_spawnGroups.clear();
 	m_requests.clear();
+	m_orders.clear();
 }
 
 std::vector<RemoteWorld::SquadRequest> RemoteWorld::squadRequests(int team) const
@@ -52,6 +53,23 @@ std::vector<RemoteWorld::SquadRequest> RemoteWorld::squadRequests(int team) cons
 		}
 	}
 	return out;
+}
+
+std::vector<RemoteWorld::SquadOrder> RemoteWorld::squadOrders(int team) const
+{
+	std::vector<SquadOrder> out;
+	for (const auto& [key, order] : m_orders) {
+		if (team == 0 || std::get<0>(key) == team) {
+			out.push_back(order);
+		}
+	}
+	return out;
+}
+
+const RemoteWorld::SquadOrder* RemoteWorld::squadOrder(int team, int squad, int store) const
+{
+	const auto it = m_orders.find({team, squad, store});
+	return it == m_orders.end() ? nullptr : &it->second;
 }
 
 void RemoteWorld::applyDataBlock(const DataBlockChunk& chunk)
@@ -388,8 +406,15 @@ bool RemoteWorld::apply(const GameEvent& event)
 		if (!parseSquadOrder(event, info)) {
 			return false;
 		}
+		if (info.store == 0 || info.store == 1) {
+			// The squad's order (slot 0x48) or the commander's to it (0x4c),
+			// unanswered until the leader says (the commander's).
+			SquadOrder& order = m_orders[{info.team, info.squad, info.store}];
+			order = SquadOrder {info.team, info.squad, info.store, info.kind, info.object, info.point(), info.store == 0};
+			return true;
+		}
 		if (info.store != kSquadOrderStoreRequest) {
-			m_unhandled.push_back(event); // the orders themselves: not kept here
+			m_unhandled.push_back(event);
 			return false;
 		}
 		// The squad's record keeps one request a kind (0x004c3f20).
@@ -407,6 +432,15 @@ bool RemoteWorld::apply(const GameEvent& event)
 		if (info.store == kSquadOrderStoreRequest && info.kind >= 0 && info.kind < 4) {
 			if (auto it = m_requests.find({info.team, info.squad}); it != m_requests.end()) {
 				it->second[static_cast<size_t>(info.kind)].reset();
+			}
+		} else if (info.store == 0 || info.store == 1) {
+			// The leader's answer: accepted it stays, else it goes.
+			if (auto it = m_orders.find({info.team, info.squad, info.store}); it != m_orders.end()) {
+				if (info.flag) {
+					it->second.accepted = true;
+				} else {
+					m_orders.erase(it);
+				}
 			}
 		} else {
 			m_unhandled.push_back(event);

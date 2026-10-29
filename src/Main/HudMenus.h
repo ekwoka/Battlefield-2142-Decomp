@@ -36,6 +36,8 @@
 // at once (a stand-in for the invite's answer).
 #pragma once
 
+#include "Game/GameWorld.h"
+
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -49,6 +51,9 @@ namespace dice::hfe {
 class Console;
 namespace game {
 class GameWorld;
+}
+namespace host {
+class HudWorld;
 }
 namespace hud {
 class HudManager;
@@ -91,6 +96,24 @@ public:
 	std::string squadLabel(int team, int squad) const;
 	// A squad's lock (its leader's; the squad manager's slot 0x20).
 	bool locked(int team, int squad) const { return m_locked.count({team, squad}) != 0; }
+
+	// A joined game (HudWorld.h): the players as the server has them, and
+	// what the menu changes sent as the original's events (a client's
+	// squad manager, ClientSquadManager: JoinSquad 0x10 from 0x004c9bf0,
+	// LeaveSquad 0x11 from 0x004c9c50, another player for the leader's
+	// kick; ChangeSquadName 0x16 for a new squad, which the server makes and
+	// joins the sender to, 0x004c6720; SetPrivateSquad 0x17 for the lock;
+	// Invite 0x19). The server's players then show the change.
+	struct Remote {
+		const host::HudWorld* world = nullptr;
+		std::function<void(int squad)> join;
+		std::function<void(int squad)> leave;
+		std::function<void(int squad, const std::string& name)> create;
+		std::function<void(int squad, bool locked)> lock;
+		std::function<void(int player, int squad)> invite;
+		std::function<void(int player, int squad)> kick;
+	};
+	void setRemote(Remote remote) { m_remote = std::move(remote); }
 	bool createShown() const { return m_createShow; }
 	bool inviteListShown() const { return m_inviteShow; }
 	// The first squad id with no members, 0 when all nine are taken
@@ -107,6 +130,11 @@ private:
 	}
 	bool join(int player, int squad);
 	void leave(int player);
+	// The players: the joined game's, else the round's.
+	bool playerInfo(int player, game::GameWorld::PlayerInfo& out) const;
+	std::vector<game::GameWorld::PlayerInfo> playerList() const;
+	int localPlayer() const;
+	Remote m_remote;
 
 	game::GameWorld& m_round;
 	hud::HudManager& m_hud;
@@ -159,8 +187,13 @@ public:
 	void deselect();
 	const std::set<int>& selected() const { return m_selected; }
 	CommanderTabs tabs;
+	// A joined game's players and requests (the server's, HudWorld.h).
+	void setWorld(const host::HudWorld* world) { m_world = world; }
 
 private:
+	const host::HudWorld* m_world = nullptr;
+	bool playerInfo(int player, game::GameWorld::PlayerInfo& out) const;
+	std::vector<game::GameWorld::PlayerInfo> playerList() const;
 	// The squad's order picture in the list (cell 2) and the panel.
 	std::string orderPicture(int team, int squad) const;
 	std::string kitPicture(bool alive, bool manDown, uint32_t kit) const;
@@ -232,8 +265,19 @@ public:
 	void received(int team, int squad, int kind);
 	std::string receivedLine(int squad, int kind) const;
 	static const char* toolName(int kind); // "artillery", "orbitalstrike", "uav", "supply"
+	// A joined game's commander (the server's requests and players,
+	// HudWorld.h): the 4 s turn-down takes the request off with the squad
+	// manager's slot 0x24 (SetAcceptOrder to the server) and says its line
+	// to the leader (0x007c7810: TCPlayer through the client's radio).
+	struct Remote {
+		const host::HudWorld* world = nullptr;
+		std::function<void(int squad, int kind)> takeOff;
+		std::function<void(int leader, const std::string& voice)> say;
+	};
+	void setRemote(Remote remote) { m_remote = std::move(remote); }
 
 private:
+	Remote m_remote;
 	std::string text(const std::string& key) const { return localize ? localize(key) : key; }
 	int leaderOf(int team, int squad) const;
 	game::GameWorld& m_round;

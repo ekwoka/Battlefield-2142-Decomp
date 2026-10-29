@@ -686,7 +686,7 @@ TEST(NetGame_LoopbackSession)
 	client.setPrivateSquad(3, true);
 	client.applyForCommander();
 	client.startVote(2, 5);
-	client.radioMessage(12, 1);
+	client.radioMessage(1, 12);
 	client.createSquad(4, "an overly long squad name of over 31 bytes");
 	CHECK(runUntil(client, server, [&] {
 		server.send({});
@@ -706,8 +706,8 @@ TEST(NetGame_LoopbackSession)
 			CHECK(e.u(0) == 5 && e.u(6) == 3 && e.u(7) == 0 && e.u(8) == 2);
 		}
 		if (e.type == net::kEvRadioMessage) {
-			// 0x004b3020: the channel again in the byte after it, the last field 0.
-			CHECK(e.u(0) == 12 && e.u(2) == 1 && e.u(3) == 1 && e.u(5) == 0);
+			// 0x004b2b60: the index, our player and team, the value, the channel, source 3.
+			CHECK(e.u(0) == 12 && e.u(1) == 3 && e.u(2) == 1 && e.u(3) == 0 && e.u(4) == 1 && e.u(5) == 3);
 		}
 		if (e.type == net::kEvChangeSquadName) {
 			// 0x0050d960: squad, team, our player id (the server joins it), at most 31 bytes.

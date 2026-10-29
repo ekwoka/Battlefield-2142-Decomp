@@ -65,6 +65,8 @@ public:
 	void build(bool dedicated = false);
 
 	int message(const std::string& name) const; // -1 for none
+	// The message of an index (the RadioMessage event's, 0x0050d300), "" for none.
+	std::string messageName(int index) const;
 	int voice(const std::string& name) const;
 	int filter(const std::string& name) const;
 	size_t messageCount() const { return m_messages.size(); }

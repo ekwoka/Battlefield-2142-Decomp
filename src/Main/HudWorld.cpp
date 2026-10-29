@@ -33,6 +33,15 @@ int HudWorld::playerTeam() const
 
 // --- the local round
 
+float LocalHudWorld::objectHealth(uint32_t object) const
+{
+	const float hp = m_round.hitPoints(object);
+	const world::Object* owned = m_round.objects().find(object);
+	const world::ObjectTemplate* t = owned ? owned->objectTemplate() : nullptr;
+	const float most = templateNumber(t, "armor.maxHitPoints", templateNumber(t, "armor.hitPoints", 0));
+	return hp >= 0 && most > 0 ? hp / most : -1;
+}
+
 HudWorld::Scores LocalHudWorld::scores(int player) const
 {
 	Scores s;
@@ -294,6 +303,22 @@ float RemoteHudWorld::hitPoints(uint32_t object) const
 	return o && o->health >= 0 ? o->health : 0;
 }
 
+float RemoteHudWorld::objectHealth(uint32_t object) const
+{
+	// A soldier's networked health is a fraction already (0x005fcdb0); the
+	// others' are hit points.
+	const net::RemoteObject* o = m_world.object(ghostOf(object));
+	if (!o || o->health < 0) {
+		return -1;
+	}
+	if (o->kind == net::NetworkableKind::Soldier) {
+		return o->health;
+	}
+	const world::Object* owned = m_round.objects().find(object);
+	const float most = templateNumber(owned ? owned->objectTemplate() : nullptr, "armor.maxHitPoints", 0);
+	return most > 0 ? o->health / most : -1;
+}
+
 std::vector<HudWorld::SquadRequest> RemoteHudWorld::squadRequests(int team) const
 {
 	std::vector<SquadRequest> out;
@@ -301,6 +326,25 @@ std::vector<HudWorld::SquadRequest> RemoteHudWorld::squadRequests(int team) cons
 		out.push_back({r.team, r.squad, r.kind, {r.point.x, r.point.y, r.point.z}, 0});
 	}
 	return out;
+}
+
+bool RemoteHudWorld::squadOrder(int team, int squad, bool fromCommander, SquadOrder& out) const
+{
+	// The server's IssueSquadOrder (store 1 the commander's), its kind the
+	// order type's number; on an object, at the object's ghost.
+	const net::RemoteWorld::SquadOrder* o = m_world.squadOrder(team, squad, fromCommander ? 1 : 0);
+	if (!o || game::GameWorld::orderTypeFromKind(o->kind) == game::GameWorld::OrderType::None) {
+		return false;
+	}
+	out = {};
+	out.type = game::GameWorld::orderTypeFromKind(o->kind);
+	out.position = {o->point.x, o->point.y, o->point.z};
+	if (const net::RemoteObject* on = o->object ? m_world.object(o->object) : nullptr; on && on->hasPosition) {
+		out.position = {on->position.x, on->position.y, on->position.z};
+	}
+	out.fromCommander = fromCommander;
+	out.accepted = o->accepted;
+	return true;
 }
 
 const world::Object* RemoteHudWorld::soldier() const

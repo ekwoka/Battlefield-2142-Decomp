@@ -1,6 +1,7 @@
 #include "GameAudio.h"
 
 #include "Game/GameWorld.h"
+#include "HudWorld.h"
 #include "Game/Vehicle.h"
 #include "Sound/Game/GameSounds.h"
 #include "Sound/Game/SoundManager.h"
@@ -37,6 +38,13 @@ GameAudio::GameAudio(game::GameWorld& round, world::ObjectManager& objects, worl
 	sound::SoundManager& manager, sound::GameSounds& sounds, sound::VoiceMessages* voices)
 	: m_round(round), m_objects(objects), m_templates(templates), m_manager(manager), m_sounds(sounds), m_voices(voices)
 {
+}
+
+int GameAudio::localPlayer() const { return m_hud ? m_hud->localPlayer() : m_round.localPlayer(); }
+
+bool GameAudio::playerInfo(int player, game::GameWorld::PlayerInfo& out) const
+{
+	return m_hud ? m_hud->playerInfo(player, out) : m_round.playerInfo(player, out);
 }
 
 void GameAudio::effectSound(const std::string& name, const sound::Vec3& position) { m_sounds.play(name, position); }
@@ -155,7 +163,7 @@ void GameAudio::projectiles()
 
 void GameAudio::radio()
 {
-	const int local = m_round.localPlayer();
+	const int local = localPlayer();
 	if (local < 0) {
 		return;
 	}
@@ -169,7 +177,7 @@ void GameAudio::radio()
 		return;
 	}
 	game::GameWorld::PlayerInfo me;
-	if (!m_round.playerInfo(local, me)) {
+	if (!playerInfo(local, me)) {
 		return;
 	}
 	for (const auto& message : heard) {
@@ -179,7 +187,7 @@ void GameAudio::radio()
 		in.listenerTeam = me.team;
 		in.listener = toSound(me.position);
 		game::GameWorld::PlayerInfo sender;
-		if (message.sender >= 0 && m_round.playerInfo(message.sender, sender)) {
+		if (message.sender >= 0 && playerInfo(message.sender, sender)) {
 			in.hasSender = true;
 			in.senderIsListener = message.sender == local;
 			in.commander = sender.commander;
@@ -249,9 +257,9 @@ std::vector<std::pair<int, std::string>> GameAudio::autoRadio()
 			sent.push_back({team, message});
 		}
 	};
-	const int local = m_round.localPlayer();
+	const int local = localPlayer();
 	game::GameWorld::PlayerInfo me;
-	const int localTeam = m_round.playerInfo(local, me) ? me.team : 0;
+	const int localTeam = playerInfo(local, me) ? me.team : 0;
 	const auto play = [&](const std::string& message) {
 		// Game slot 0x60 (0x0042e820): for the local player only.
 		if (local >= 0 && !message.empty()) {

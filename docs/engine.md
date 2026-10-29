@@ -3264,7 +3264,11 @@ PostRemotes:
 | 0x18 | IssueSquadOrder | squad, team, kind (bytes), 1 bit: the order's object ghost (16), else 9 floats (the record's `+8`..`+0x28`, written `+0x10`, `+0x1c`, `+0x28`, `+0x14`, `+0x20`, `+0x2c`, `+0x18`, `+0x24`, `+0x30`: the point is `+0x10`..`+0x18`), the store (8: 0 the squad's order, squad manager slot `0x48`; 1 the commander's, `0x4c`; 2 a request, `0x50`), 1 bit (built `0x0050e170`, written `0x0050dfe0`, read `0x0050e220`; server `0x0050e3a0` takes it from the squad's leader or the commander, client `0x0050e4d0` only stores it) |
 | 0x1b | SetAcceptOrder | squad, team, 1 bit, the store, the kind (bytes; built `0x0050dd50`, written `0x0050de40`, read `0x0050dd90`): squad manager slot `0x24`, a request or order taken off; server `0x0050df60` (from the leader or the commander, passed on to everyone by `0x004c3300`), client `0x0050df20` |
 | 0x39, 0x3a | CreateSpawnGroup, RemoveSpawnGroup | the group's id (8), team (4), three bits and two bytes not traced, the ghost of the object it is at (16) (`0x005125c0` / `0x005126b0`, handled `0x005127f0` → the client spawn manager's slot `0x44`); Remove: id, ghost (`0x00512880`, `0x00512970` → slot `0x48`) |
-| 0x14 | RadioMessage | the radio table index (16 bits), a byte, 2 bits (channel), a byte, 0..0x12, 0..4 (`0x004b3020`, written by `0x0050d1f0`). A client puts the channel in the byte after it too, and 0 in the last field. The first byte and the 0..0x12 value come from GameLogic slot 23's callers, which go through the scripts and weren't traced |
+| 0x14 | RadioMessage | `+0xc` the voice message's index in the game logic's message table (16 bits: VoiceMessages.con's `addMessage` order, `0x004d8af0`, looked up by name with `0x004d8040` at game logic `+0x170`), `+0xe` the sender's player id (8), `+0xf` its team (2), `+0x10` the team, squad or player the channel names (8), `+0x14` the target channel (0..0x13), `+0x18` the source (0..4: 3 a player's, 0 the game's) (read `0x0050d100`, written `0x0050d1f0`). A player's (the client's slot 0x50, `0x004b2b60` → `0x004b26b0`) carries its id and team (slots 0x58, 0xf8) and source 3; `0x004b3020` (no spam check) puts the team in `+0xf` and `+0x10` and source 0. The server (`0x0050d3b0`) says it with the connection's player as the sender (`0x004a54d0`) and hands it out (slot 0xa8 → `0x004a7800`, who hears: `0x004a6f70`); each hearer's client gets the event again (`0x004a6c60`: the sender into `+0xe`); a client's handler (`0x0050d300`) posts it (category 6) for the voice and the text (`0x0042e0c0`) |
+| 0x1e | Artillery | kind (2 bits; 1 an RC object's use), team (32, a byte), x, z (floats), then kind 1: the rcType (32: 1 RCArtillery, 4 RCOrbitalStrike), kind 2: 16 + 32 bits (vtable `0x0091e42c`, built `0x007d7c20`, read `0x0050ec60`; server `0x0050ee10`: from the team's commander or no player, slot 0x128, the team's asset of that kind, `DAT_00a69cb8`, fires, `0x005a11c0` / `0x005a1270`) |
+| 0x2d | Uav | x, z (floats), team (8), a bit: the satellite scan (vtable `0x0091e3fc`, built `0x007d7ca0`, read `0x0050ea60`; server `0x0050eb90`: from the team's commander, game logic slot 0x78; events 0/0x11 the UAV at the point, 0/0x12 the scan) |
+| 0x25 | SupplyDrop | team (32, a byte), x, z (vtable `0x0091e54c`; a client's `0x0043d6d0` sends it, the server's `0x00511220` runs `0x0043d6d0` with its reload and `0x0043d510`'s crate) |
+| 0x21 | Titan | kind (2 bits), team (32, a byte), kind 1: x, z (the commander's move, server `0x0050f1f0` → `0x005abba0`), kind 2: a ghost (16) (read `0x0050efd0`) |
 
 Squad refusals come back as PostRemote category 2 (0xb full, 0xc
 private, 0x11 asks the leader). A squad is looked up before it is joined
@@ -3740,7 +3744,10 @@ squad bar, the map's team mates), the control points' ghosts and the
 spawn groups (CreateSpawnGroup: the spawn screen's icons; a click sends
 6/6 with the group's id), our own soldier from the control-object record
 (health, the weapon's rounds and magazines from the player's own state,
-the vehicle panel from the seat's ghost), kill messages and chat. Each run hands the
+the vehicle panel from the seat's ghost), kill messages and chat. The radio,
+the commander's tools, the squad menus and the name tags work there as in a
+local round (see [joined games' radio, tools and menus](#joined-games-radio-tools-and-menus)).
+Each run hands the
 client this level's templates (`setTemplateResolver`, `setGhostTemplates`
 for the ghost layouts); seat ghosts are drawn with their vehicle. Another
 level block on the connection is a map change: the level reloads and the
@@ -3752,6 +3759,103 @@ then waits; it sends no CreatePlayer, most likely because it needs a
 logged-in profile id and a valid CD key (GameSpy pre-authorisation).
 Without an OpenSpy account the rest is tested against a loopback server
 in `tests/NetGameTest.cpp` that speaks these formats.
+
+#### Joined games' radio, tools and menus
+
+What a joined client does where a local round would act on its own world
+(`src/Main/main.cpp`'s console methods, with `joinedServer()`; the host's
+side in `HostedGame::event`; tests `NetHost_RadioCommanderToolsAndSquads`,
+`Nametags_JoinedWorld`, `RagDoll_RemoteSoldierAnimated`):
+
+- **Radio** (RadioMessage 0x14, layout in the event table): every message
+  a client's player hears in the host's round goes to its client
+  (`HostedGame::sendRadio`, `0x004a6c60`; the voice's index from the
+  game logic's message table, which a dedicated server loads too,
+  `0x004cdab0`), the sender 0xff with source 0 for the game's own: the
+  automatic radio (the objects' damage, destroyed, repaired and spawn
+  messages, the request lines a commander on the host says,
+  `<tool>_accept` / `_deny` / `_auto_deny`). A client's `game.radioMessage`, `Radio.callFor*` and the
+  commander's and leader's request lines go up (the client's slot 0x50,
+  `0x004b2b60`) and are said in the round by the connection's player
+  (`0x0050d3b0`); the sender hears his own at once (`0x0042e0c0`, as the
+  server's `0x004a5a80` does for its local player, which the local round
+  now does too). The client plays and shows what it hears
+  (`GameAudio::setHudWorld`: the server's players for the voices and the
+  name tags' calls). The team-change radio stays local (game slot 0x60):
+  a client's control point objects take their ghost's team. The spam
+  check (player slot 0x340) isn't done.
+- **The commander** (the Commander event 0x13): applying (kind 4) and
+  resigning (2) go up; the offer of command after the apply period is
+  PostRemote 2/0x23 to the applicant (`0x004c5070`, `HostedGame::
+  trackCommanderOffers`), answered by `Commander.accept` (kind 0 takes it,
+  `0x004c8c20`; kind 1 passes it on). `Commander.commanderMutiny` (HUD
+  `0x007d7390` → `0x00573cb0`) starts a mutiny vote (Vote kind 3) against
+  the team's commander.
+- **The commander's tools** (Artillery 0x1e for the artillery and the
+  orbital strike, Uav 0x2d for the UAV and the scan, SupplyDrop 0x25,
+  Titan 0x21 kind 1 for the Titan's move): the HUD's uses (`0x007d88d0`,
+  `0x007d7d80`, `0x007d8370`, `0x007d8660`, `0x007d81d0` → `0x0043d6d0`)
+  send them on a client; the server takes them from the team's commander
+  only (`HostedGame::commanderTool`: `GameWorld::commanderAction` /
+  `moveTitan`). The client's own round has the assets as ghosts (their
+  armour, `RemoteHudWorld::objectHealth`), so the refusals
+  (`commanderToolRefusal`), the commander screen's tool states and the
+  request turn-downs read it; the reloads are kept by the client from its
+  own uses (`GameWorld::noteCommanderUse`; the exe's client sets the tool's
+  `+0x5c` / `+0x60` itself, `0x007d81d0`). A request accepted
+  (`Commander.commRoseAccept`, `0x007c7e20`) uses the tool quietly at the
+  request's point, then answers each squad's request of that kind
+  (SetAcceptOrder) and tells its leader on TCPlayer (`0x007c7810`);
+  the 4 s turn-down (`0x007c8a60`) does the same with `<tool>_auto_deny`.
+- **Squads** (`SquadMenu::setRemote`: the ClientSquadManager's events):
+  join (JoinSquad 0x10), leave (LeaveSquad 0x11), a new squad by naming it
+  (ChangeSquadName 0x16), its lock (SetPrivateSquad 0x17), the leader's
+  invites (Invite 0x19; the server lets a bot in no squad take it at once,
+  as offline, and passes it to a client's player) and removals (LeaveSquad
+  with the member: the server's leader check). The commander screen's
+  squad list and the request pictures read the server's players and
+  requests (`CommanderMenu::setWorld`).
+- **The HUD**: the spawn screen's kit (`spawnManager.setPlayerKit` sends
+  SelectKit; the joining client sends the kit chosen there, not always the
+  team's first, the recon's, whose sniper rifle, `weaponHud.guiIndex` 52,
+  has no crosshair: HudElementsGenericWeapon.con draws the crosshair's
+  parts only for GuiIndex 5); the crosshair's spread from the client's own
+  soldier deviation (each move's inputs into the weapon's
+  `SoldierDeviation`, as the server's soldier, `0x005de980`); the range
+  finder (the look and the level's sight lines); the help pop-ups' state,
+  the comm roses, the commander screen (Caps Lock) and the map's right-click
+  menus from the server's player; the name tags from the server's players,
+  control points and requests (`Nametags::setWorld`); the chase view and
+  its screenshot framing from our soldier's ghost.
+- **The players' soldiers**: each living soldier ghost on foot is animated
+  on the client from its networkable (`GameWorld::animateRemoteSoldier`:
+  the body's and the weapon's animationSystem3P fed the speed and its
+  direction against the yaw and the turn rate, as stepAnimation feeds the
+  round's own; our own from its prediction, with its stance and fire) and
+  holds the kit's firearm of its selected item (mask 0x2000), an object of
+  the client's posed by the skeleton's mesh nodes (`partTransforms`); a
+  kit a living player carries is hidden as the round's worn kits are, a
+  dropped one shows. The others' stance isn't networked by the rewrite's
+  server: they stand.
+- **Orders** (IssueSquadOrder stores 0 and 1, SetAcceptOrder store 1): a
+  joined leader's `SquadLeader.sendOrder` and a joined commander's orders
+  (the map, the selected squads or the nearest leader's, the assets'
+  defend buttons) go up; the server takes them from the squad's leader or
+  the team's commander (`0x0050e3a0`: `issueSquadLeaderOrder` /
+  `issueOrder`) and a leader's answer to the commander's
+  (`Commander.commRoseAccept` with no request: `acceptOrder`,
+  `0x004c2f60`); `HostedGame::trackOrders` sends every change to everyone
+  (an order gone as SetAcceptOrder without the bit) and the standing ones
+  to a joining client. A client keeps them (`RemoteWorld::squadOrders`) for
+  the name tags' order icons, the world's order markers and the commander
+  screen's pictures (`HudWorld::squadOrder`).
+
+Not done between machines: the spotted messages (Spotted 0x1d, whose
+server handler `0x0050e910` posts the code to the team) and the radio
+calls' code to other clients' name tags (the same event), a client
+player's answer to an invite, the commander's camera (CommanderCam is sent,
+not used), and the other players' stance and fire on a client (the
+rewrite's server doesn't fill the soldier networkable's groups for them).
 
 ### The server's side (`bf2142 --host`)
 
@@ -4526,9 +4630,10 @@ plays it as is, else at once. Only Assault Lines' points have them. The
 SiloSyncEvent's "_N" (`0x00514030`, `sprintf("_%d")` into the Radio's
 `+0x18`) is appended to the team-change messages. `GameAudio::autoRadio`
 (objects, takeable), `GameWorld`'s fire (weapons) and the silos' launch.
+On a joined client the server's messages come as RadioMessage events
+(with no sender) and its control points' team changes are played there.
 Not rewritten: a joined client's takeable radio (its ghost's bits aren't
-applied to a world, and a joined game has no radio voice path yet),
-destroyedGameEvent (no reader).
+applied to a world), destroyedGameEvent (no reader).
 The
 closeToIndication* and indicationDistance* aren't radio: the server's
 0.2 s scan (`0x0059a6c0`) posts events 0x3e / 0x3f as a player comes
@@ -4840,11 +4945,13 @@ round (GameWorld, GameLogic) or `RemoteHudWorld` over a joined game's
 the ids of the spawn groups at them, the requests, our soldier from the
 control-object record and its own state, the ghosts as the level's
 objects). What only the local round has (gun aims, projectiles, Titans,
-silos, the commanders' assets, the range finder's ray) it still asks the
-round, which a client has empty. The
+silos) it still asks the round, which a client has empty; the commanders'
+assets are a client's ghosts (their tools' reloads its own uses') and the
+range finder's ray the level's. The
 corner roots' positions are approximate. The crosshair spreads by the
 weapon's soldier deviation (`GameWorld::weaponDeviation`, see Soldier
-deviation), its minimum without one.
+deviation; a joined client's from its own moves), its minimum without
+one.
 
 ### Text and the scoreboard
 
@@ -5085,7 +5192,11 @@ frame `0x100f3490`) keeps them and its NametagRenderer draws them
 the font `Fonts/BF1942.font`); BF2142.exe only looks the manager up
 (`0x0043ab00`) and hands it object tags (slot `0x30`, `0x100f40d0`, from
 the templates' Nametag component, `0x0063b760`). `src/Main/Nametags`
-rewrites them as HUD quads under the HUD:
+rewrites them as HUD quads under the HUD. The manager reads the player
+manager and the objects, which a client fills from the server: a joined
+game's tags take the server's players, control points, requests and the
+ghosts' armour (`Nametags::setWorld` with the RemoteHudWorld; the round
+answers the sight lines and the seats):
 
 - **Players** (`0x100f0e60`, `0x100f0310`): a tag per other player at its
   soldier's head (0.6 m along its up over its origin, more with distance:
@@ -5953,11 +6064,14 @@ the top.
   `spotCrosshair` (the soldiers as 0.6 m spheres, the vehicles 2.5 m, along
   the view, nothing in between); the HUD binding (`src/Main`) spots the
   local player's crosshair object (`spotCrosshair`) and closes the rose
-  (a joined game's spot isn't sent to the server).
+  (a joined game's spot isn't sent to the server: the Spotted event isn't
+  rewritten).
 - **`game.radioMessage <TargetChannel> <voice>`** (`0x00423e61` → the
   client's slot `0x50`, `0x004b2b60`: the voice's index in the game
   logic's radio table, the spam check, event 0x14 to the server, a local
-  echo): the local player's message (`GameWorld::radioMessage`). The
+  echo; a server's slot 0x50, `0x004a5a80`, hands it out and echoes it
+  too): the local player's message (`GameWorld::radioMessage`, and
+  `hearRadio` for the sender's own), a joined game's to the server. The
   target channels (`0x0042d4a0`): TCGlobal 0, TCTeam 1, TCCommander 2,
   TCSquad 3, TCSquadLeader 4, TCSquadId 5, TCLocalTeamMedic 6,
   TCLocalGroundVehicle 7, TCLocalAirVehicle 8, TCLocal 9, TCLocalTeam 10,
@@ -5984,9 +6098,10 @@ the top.
   VCLand, VCAir or VCHelicopter within 100 m; Vehicle those in the
   sender's vehicle; ServerMessage everyone; ServerTeamMessage the
   message's team; Player the message's player. The bots take theirs (see
-  Bots: Radio); the radio's text and sound for the local player (the
-  client's `0x0042e0c0` → `0x0042d7f0`, the voice table's text and the
-  `_important` variants) aren't rewritten.
+  Bots: Radio); the local player's (`GameAudio`'s radio, the client's
+  `0x0042e0c0` → `0x0042d7f0`: the voice and its text) also on a joined
+  client, from the server's RadioMessage events; the `_important`
+  variants aren't rewritten.
 
 ### Chat, kill messages, VOIP and the map vote
 
@@ -6124,6 +6239,8 @@ while they have the keys. `src/Main/HudMenusChat`:
   `target_aquired` / `target_lost` (TSLaserGuided, `0x005e1b30`) and
   `missile_away` (`0x005e1ee0`) as radio, whose texts are
   `AUTO_MOODGP_*_gotlock` and the like; the exe has no other lock text.
+  A joined client's lines come from the server's RadioMessage events,
+  their senders the server's players.
 - **Text styles** (`setTextNodeStyle <font> <style>`, `0x007af920` picks
   the node's drawer): 0 centred lines (`0x007da990` / `0x007dab10`), 1
   right-aligned (`0x007ebe60` / `0x007ebf00`), 2 left-aligned with word
@@ -6135,7 +6252,11 @@ while they have the keys. `src/Main/HudMenusChat`:
 - **The crosshair** (`CrosshairIconShow`, the weapon HUD's `+0xec`,
   `0x007be6e0`) needs CrosshairActive (`+0xed`), set by the menu state
   (`0x007c1bf0`): off over the spawn screen, the big map, the scoreboard,
-  the roses and the commander screen.
+  the roses and the commander screen. Its parts are drawn only for
+  GuiIndex 5 (HudElementsGenericWeapon.con: the snipers' 52 shows the
+  generic HUD's hit indicator alone), which is why a joined client that
+  always took the team's first kit (the recon's) had none: it now sends
+  the spawn screen's kit.
 - **The map keys** (the HUD's input `0x00754290`): c_GIMapSize (M) toggles
   the big map (menu state 2, `0x0074fd90`: `MapShow` at full size) while
   alive; c_GIMapZoom (N) steps the minimap's zoom 0, 1, 2 (`0x0079a040` /
@@ -7272,13 +7393,14 @@ taken off goes out, so the host's own leader's and commander's reach the
 clients too; a client's request for the host's own commander gives him
 2/`0x1d`'s line). A joined leader's `SquadLeader.sendRequest` and a joined
 commander's `Commander.commRoseAccept` go this way; the client shows
-2/`0x1e`'s and 2/`0x1d`'s lines. Not done between machines: the radio
-(`<tool>_accept` / `_deny` and the leader's call are said on the server,
-which has no radio events to clients yet), a remote commander's tool use
-on accept (a client's commander tools aren't networked: his accept only
-takes the request off), his choice by request tag (a client's name tags
-don't show the networked requests: the team's first standing request is
-answered).
+2/`0x1e`'s and 2/`0x1d`'s lines (the latter by `SquadRequests::received`:
+the 4 s turn-down when the tool can't be used). The radio of it (the
+leader's call, `<tool>_accept` / `_deny` / `_auto_deny`) travels as
+RadioMessage events, and a joined commander's accept uses the tool on the
+server at the request's point: see [joined games' radio, tools and
+menus](#joined-games-radio-tools-and-menus). His request is the one his
+name tags select (the server's requests are the tags there), else the
+team's first standing one.
 
 Not done: the AI commander's answers
 to bot squad leaders (they send none), the squad panel's voice icons

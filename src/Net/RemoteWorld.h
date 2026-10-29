@@ -21,6 +21,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -353,6 +354,18 @@ public:
 		Vec3f point;
 	};
 	std::vector<SquadRequest> squadRequests(int team = 0) const;
+	// The squads' orders (IssueSquadOrder with store 0, the squad leader's
+	// to his squad, squad manager slot 0x48; 1 the commander's, slot 0x4c):
+	// one of each store a squad; SetAcceptOrder for its store sets the
+	// leader's answer (the bit) or, refused, takes it off (0x004c2f60).
+	struct SquadOrder {
+		int team = 0, squad = 0, store = 0, kind = 0;
+		uint16_t object = 0;
+		Vec3f point;
+		bool accepted = false;
+	};
+	std::vector<SquadOrder> squadOrders(int team = 0) const;
+	const SquadOrder* squadOrder(int team, int squad, int store) const;
 
 	// The local player's input, sent with each tick by the GameClient.
 	void setInput(const PlayerInput& input) { m_input = input; }
@@ -418,6 +431,7 @@ private:
 	TeamNetState m_teamState;
 	std::map<int, SpawnGroupInfo> m_spawnGroups;
 	std::map<std::pair<int, int>, std::array<std::optional<SquadRequest>, 4>> m_requests; // (team, squad)
+	std::map<std::tuple<int, int, int>, SquadOrder> m_orders; // (team, squad, store)
 };
 
 } // namespace dice::hfe::net

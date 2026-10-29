@@ -967,6 +967,107 @@ GameEvent makeAcceptOrder(const AcceptOrderInfo& info)
 	return e;
 }
 
+bool parseRadioMessage(const GameEvent& e, RadioMessageInfo& out)
+{
+	if (e.type != kEvRadioMessage || e.values.size() < 6) {
+		return false;
+	}
+	out.index = e.i(0);
+	out.sender = e.i(1);
+	out.team = e.i(2);
+	out.value = e.i(3);
+	out.channel = e.i(4);
+	out.source = e.i(5);
+	return true;
+}
+
+GameEvent makeRadioMessage(const RadioMessageInfo& info)
+{
+	GameEvent e;
+	e.type = kEvRadioMessage;
+	e.values = {static_cast<uint32_t>(info.index) & 0xffff, static_cast<uint32_t>(info.sender) & 0xff,
+		static_cast<uint32_t>(info.team) & 3, static_cast<uint32_t>(info.value) & 0xff,
+		static_cast<uint32_t>(std::clamp(info.channel, 0, 0x13)), static_cast<uint32_t>(std::clamp(info.source, 0, 5))};
+	return e;
+}
+
+GameEvent makeArtilleryUse(int team, float x, float z, int rcType)
+{
+	GameEvent e;
+	e.type = kEvArtillery;
+	e.values = {1, static_cast<uint32_t>(team) & 0xff, floatRaw(x), floatRaw(z), static_cast<uint32_t>(rcType)};
+	return e;
+}
+
+GameEvent makeUavUse(int team, float x, float z, bool satellite)
+{
+	GameEvent e;
+	e.type = kEvUav;
+	e.values = {floatRaw(x), floatRaw(z), static_cast<uint32_t>(team) & 0xff, satellite ? 1u : 0u};
+	return e;
+}
+
+GameEvent makeSupplyDrop(int team, float x, float z)
+{
+	GameEvent e;
+	e.type = kEvSupplyDrop;
+	e.values = {static_cast<uint32_t>(team) & 0xff, floatRaw(x), floatRaw(z)};
+	return e;
+}
+
+GameEvent makeTitanMove(int team, float x, float z)
+{
+	GameEvent e;
+	e.type = kEvTitan;
+	e.values = {1, static_cast<uint32_t>(team) & 0xff, floatRaw(x), floatRaw(z)};
+	return e;
+}
+
+bool parseCommanderToolUse(const GameEvent& e, CommanderToolUse& out)
+{
+	out = {};
+	switch (e.type) {
+	case kEvArtillery: // kind 1: team, x, z, rcType (0x0050ec60)
+		if (e.u(0) != 1 || e.values.size() < 5 || (e.u(4) != 1 && e.u(4) != 4)) {
+			return false;
+		}
+		out.tool = e.u(4) == 4 ? CommanderToolUse::OrbitalStrike : CommanderToolUse::Artillery;
+		out.team = static_cast<int>(e.u(1) & 0xff);
+		out.x = e.f(2);
+		out.z = e.f(3);
+		return true;
+	case kEvUav: // x, z, team, satellite (0x0050ea60)
+		if (e.values.size() < 4) {
+			return false;
+		}
+		out.tool = e.u(3) ? CommanderToolUse::Satellite : CommanderToolUse::Uav;
+		out.x = e.f(0);
+		out.z = e.f(1);
+		out.team = static_cast<int>(e.u(2));
+		return true;
+	case kEvSupplyDrop: // team, x, z (0x00511110)
+		if (e.values.size() < 3) {
+			return false;
+		}
+		out.tool = CommanderToolUse::Supplies;
+		out.team = static_cast<int>(e.u(0) & 0xff);
+		out.x = e.f(1);
+		out.z = e.f(2);
+		return true;
+	case kEvTitan: // kind 1: team, x, z (0x0050efd0)
+		if (e.u(0) != 1 || e.values.size() < 4) {
+			return false;
+		}
+		out.tool = CommanderToolUse::MoveTitan;
+		out.team = static_cast<int>(e.u(1) & 0xff);
+		out.x = e.f(2);
+		out.z = e.f(3);
+		return true;
+	default:
+		return false;
+	}
+}
+
 bool parseSpawnGroup(const GameEvent& e, SpawnGroupInfo& out)
 {
 	out = {};

@@ -5627,8 +5627,119 @@ void GameWorld::stepAnimation(Player& player, float seconds)
 	}
 }
 
+void GameWorld::animateRemoteSoldier(uint32_t object, const RemoteSoldierState& state, float seconds)
+{
+	const world::Object* soldier = m_objects.find(object);
+	const world::ObjectTemplate* t = soldier ? soldier->objectTemplate() : nullptr;
+	if (!t || !m_animationSystems || !m_loadAnimationSystem) {
+		return;
+	}
+	RemoteSoldier& remote = m_remoteSoldiers[object];
+	const auto system = [this](const world::ObjectTemplate* of) -> const anim::AnimationSystemTemplate* {
+		if (!of) {
+			return nullptr;
+		}
+		const auto it = of->settings().find("animationSystem3P");
+		return it != of->settings().end() ? m_loadAnimationSystem(it->second) : nullptr;
+	};
+	if (!remote.started) {
+		// As a soldier's set-up (spawnSoldier): skeleton3P, its mesh nodes
+		// for the weapon's parts, the body's animationSystem3P.
+		remote.started = true;
+		const auto path = t->settings().find("skeleton3P");
+		remote.skeleton = path != t->settings().end() ? m_animationSystems->skeleton(path->second) : nullptr;
+		if (remote.skeleton) {
+			for (int part = 1; part <= 16; ++part) {
+				remote.weaponNodes.push_back(remote.skeleton->find("mesh" + std::to_string(part)));
+			}
+		}
+		if (const anim::AnimationSystemTemplate* body = system(t)) {
+			remote.body = std::make_unique<anim::AnimationState>(*m_animationSystems, *body);
+		}
+		remote.lastYaw = state.yaw;
+	}
+	if (state.weapon != remote.weaponName) {
+		// The weapon in hand changed (selectItem's object, 0x00582xxx): its
+		// object and its animationSystem3P.
+		remote.weaponName = state.weapon;
+		if (remote.weaponObject) {
+			m_objects.remove(remote.weaponObject);
+			remote.weaponObject = 0;
+		}
+		remote.weapon.reset();
+		if (world::ObjectTemplate* held = state.weapon.empty() ? nullptr : m_templates.find(state.weapon)) {
+			if (world::Object* made = m_objects.create(held, soldier->position(), soldier->rotation())) {
+				remote.weaponObject = made->id();
+			}
+			if (const anim::AnimationSystemTemplate* weapon = system(held)) {
+				remote.weapon = std::make_unique<anim::AnimationState>(*m_animationSystems, *weapon);
+			}
+		}
+	}
+	// stepAnimation's input from the networked state.
+	anim::AnimationInput input;
+	const physics::Vec3& v = state.velocity;
+	const float speed = std::sqrt(v.x * v.x + v.z * v.z);
+	const float yaw = state.yaw * 3.14159265f / 180.0f;
+	input.speed = speed;
+	if (speed > 0.01f) {
+		input.forward = (v.x * std::sin(yaw) + v.z * std::cos(yaw)) / speed;
+		input.side = (v.x * std::cos(yaw) - v.z * std::sin(yaw)) / speed;
+	}
+	input.upSpeed = state.onGround ? 0.0f : v.y;
+	input.movementSeconds = seconds;
+	const float turn = std::remainder(state.yaw - remote.lastYaw, 360.0f);
+	input.turn = seconds > 0 ? std::clamp(turn / seconds, -1499.0f, 1499.0f) * 0.01f : 0.0f;
+	remote.lastYaw = state.yaw;
+	input.pose = static_cast<int>(state.pose);
+	if (state.fired) {
+		input.pulses |= 1;
+	}
+	if (remote.body) {
+		remote.body->update(input, seconds);
+		remote.body->takeEvents();
+	}
+	if (remote.weapon) {
+		remote.weapon->update(input, seconds);
+		remote.weapon->takeEvents();
+	}
+	if (remote.skeleton && remote.body) {
+		if (remote.pose.rotations.size() != remote.skeleton->nodes.size()) {
+			remote.pose = anim::setupPose(*remote.skeleton);
+		}
+		std::vector<bool> touched;
+		remote.body->apply(*remote.skeleton, remote.pose, touched);
+		if (remote.weapon) {
+			remote.weapon->apply(*remote.skeleton, remote.pose, touched);
+		}
+		remote.worldPose = anim::worldMatrices(*remote.skeleton, remote.pose);
+	}
+	if (world::Object* held = remote.weaponObject ? m_objects.find(remote.weaponObject) : nullptr) {
+		held->setPosition(soldier->position());
+		held->setRotation(soldier->rotation());
+		held->setHidden(soldier->hidden());
+	}
+}
+
+void GameWorld::removeRemoteSoldier(uint32_t object)
+{
+	const auto it = m_remoteSoldiers.find(object);
+	if (it == m_remoteSoldiers.end()) {
+		return;
+	}
+	if (it->second.weaponObject) {
+		m_objects.remove(it->second.weaponObject);
+	}
+	m_remoteSoldiers.erase(it);
+}
+
 bool GameWorld::skeletonPose(uint32_t object, const anim::Skeleton& skeleton, std::vector<anim::Matrix>& world)
 {
+	if (const auto remote = m_remoteSoldiers.find(object);
+		remote != m_remoteSoldiers.end() && remote->second.worldPose.size() == skeleton.nodes.size()) {
+		world = remote->second.worldPose;
+		return true;
+	}
 	const Player* player = soldierPlayer(object);
 	if (!player) {
 		player = downedPlayer(object); // the ragdoll's pose
@@ -5677,6 +5788,18 @@ bool GameWorld::partTransforms(uint32_t object, std::vector<anim::Matrix>& parts
 				return true;
 			}
 		}
+	}
+	for (const auto& [soldier, remote] : m_remoteSoldiers) {
+		if (remote.weaponObject != object || remote.worldPose.empty()) {
+			continue;
+		}
+		for (size_t i = 0; i < parts.size() && i < remote.weaponNodes.size(); ++i) {
+			const int node = remote.weaponNodes[i];
+			if (node >= 0 && static_cast<size_t>(node) < remote.worldPose.size()) {
+				parts[i] = remote.worldPose[static_cast<size_t>(node)];
+			}
+		}
+		return true;
 	}
 	for (const auto& owned : m_players) {
 		const Player& player = *owned;

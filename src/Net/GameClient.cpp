@@ -387,6 +387,32 @@ void GameClient::answerRequest(int squad, int kind)
 	sendEvent(makeAcceptOrder(answer));
 }
 
+void GameClient::issueOrder(int store, int squad, int kind, const Vec3f& point)
+{
+	const RemotePlayer* me = m_world.player(m_world.localPlayer());
+	SquadOrderInfo order;
+	order.squad = squad;
+	order.team = me ? me->team : 0;
+	order.kind = kind;
+	order.floats[0] = point.x;
+	order.floats[1] = point.y;
+	order.floats[2] = point.z;
+	order.store = store;
+	sendEvent(makeSquadOrder(order));
+}
+
+void GameClient::answerOrder(int squad, int kind, bool accept)
+{
+	const RemotePlayer* me = m_world.player(m_world.localPlayer());
+	AcceptOrderInfo answer;
+	answer.squad = squad;
+	answer.team = me ? me->team : 0;
+	answer.flag = accept;
+	answer.store = 1;
+	answer.kind = kind;
+	sendEvent(makeAcceptOrder(answer));
+}
+
 void GameClient::commander(int kind)
 {
 	// 0x0050cb00 takes it only with the sender's own player id.
@@ -408,11 +434,45 @@ void GameClient::castVote(int type, int target, int choice)
 	sendEvent(eventOf(kEvVote, {u8(target), u8(choice), 0, u8(target), 0, 0, me, 4, u8(type), 0}));
 }
 
-void GameClient::radioMessage(int index, int channel, int a, int c)
+void GameClient::radioMessage(int channel, int index, int value)
 {
-	// 0x004b3020: the channel also in the byte after it, the last field 0.
-	sendEvent(eventOf(kEvRadioMessage, {static_cast<uint32_t>(index) & 0xffff, u8(a), static_cast<uint32_t>(channel) & 3,
-		u8(channel), static_cast<uint32_t>(std::clamp(c, 0, 0x12)), 0}));
+	// 0x004b2b60: the index, the player (slot 0x58) and its team (0xf8),
+	// the value, the channel and 3.
+	const RemotePlayer* me = m_world.player(m_world.localPlayer());
+	RadioMessageInfo info;
+	info.index = index;
+	info.sender = m_world.localPlayer();
+	info.team = me ? me->team : 0;
+	info.value = value;
+	info.channel = channel;
+	info.source = 3;
+	sendEvent(makeRadioMessage(info));
+}
+
+void GameClient::commanderTool(CommanderToolUse::Tool tool, float x, float z)
+{
+	const RemotePlayer* me = m_world.player(m_world.localPlayer());
+	const int team = me ? me->team : 0;
+	switch (tool) {
+	case CommanderToolUse::Artillery:
+		sendEvent(makeArtilleryUse(team, x, z, 1)); // 0x007d88d0: RCArtillery
+		break;
+	case CommanderToolUse::OrbitalStrike:
+		sendEvent(makeArtilleryUse(team, x, z, 4)); // 0x007d7d80: RCOrbitalStrike
+		break;
+	case CommanderToolUse::Uav:
+		sendEvent(makeUavUse(team, x, z, false)); // 0x007d8370
+		break;
+	case CommanderToolUse::Satellite:
+		sendEvent(makeUavUse(team, x, z, true)); // 0x007d8660
+		break;
+	case CommanderToolUse::Supplies:
+		sendEvent(makeSupplyDrop(team, x, z)); // 0x007d81d0 → 0x0043d6d0
+		break;
+	case CommanderToolUse::MoveTitan:
+		sendEvent(makeTitanMove(team, x, z));
+		break;
+	}
 }
 
 void GameClient::toggleFreeCamera()

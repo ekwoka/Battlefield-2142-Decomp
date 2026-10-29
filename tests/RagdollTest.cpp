@@ -2124,3 +2124,55 @@ TEST(Vehicle_TeamOfItsOccupant)
 	CHECK(game.world->playerVehicle() == nullptr);
 	CHECK(game.objects.find(vehicle)->team() == 0 && game.world->spawnVehicles(2).empty());
 }
+
+// A joined game's soldier ghost (no player of the client's round) is
+// posed by its animation and holds its weapon, as the round's own
+// soldiers are; it goes with its ghost.
+TEST(RagDoll_RemoteSoldierAnimated)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	game.start();
+	const anim::Skeleton* skeleton = game.systems.skeleton("Objects/Soldiers/Common/Animations/3p_setup.ske");
+	CHECK(skeleton != nullptr);
+	if (!skeleton) {
+		return;
+	}
+	world::Object* ghost = game.objects.create(game.templates.find("us_light_soldier"), {5, 0, 5});
+	const uint32_t id = ghost->id();
+	std::vector<anim::Matrix> pose;
+	CHECK(!game.world->skeletonPose(id, *skeleton, pose)); // no player, no pose
+	game::GameWorld::RemoteSoldierState state;
+	state.weapon = "eu_ar_rifle";
+	state.velocity = {0, 0, 3}; // running forward
+	for (int i = 0; i < 30; ++i) {
+		game.world->animateRemoteSoldier(id, state, 1 / 30.0f);
+	}
+	CHECK(game.world->isRemoteSoldier(id));
+	CHECK(game.world->skeletonPose(id, *skeleton, pose) && pose.size() == skeleton->nodes.size());
+	// Not the setup pose: the run moved the bones.
+	const std::vector<anim::Matrix> setup = anim::worldMatrices(*skeleton, anim::setupPose(*skeleton));
+	float moved = 0;
+	for (size_t i = 0; i < pose.size() && i < setup.size(); ++i) {
+		for (int k = 12; k < 15; ++k) {
+			moved = std::max(moved, std::abs(pose[i][static_cast<size_t>(k)] - setup[i][static_cast<size_t>(k)]));
+		}
+	}
+	CHECK(moved > 0.01f);
+	// Its rifle: an object at the soldier, its parts on the mesh nodes.
+	const uint32_t rifle = game.world->remoteSoldierWeapon(id);
+	const world::Object* held = game.objects.find(rifle);
+	CHECK(held && held->objectTemplate() && held->objectTemplate()->name() == "eu_ar_rifle");
+	std::vector<anim::Matrix> parts(2);
+	CHECK(game.world->partTransforms(rifle, parts));
+	// Another weapon in hand replaces it; the ghost gone, both go.
+	state.weapon = "as_ar_rifle";
+	game.world->animateRemoteSoldier(id, state, 1 / 30.0f);
+	CHECK(!game.objects.find(rifle) && game.world->remoteSoldierWeapon(id) != 0);
+	const uint32_t second = game.world->remoteSoldierWeapon(id);
+	game.world->removeRemoteSoldier(id);
+	CHECK(!game.world->isRemoteSoldier(id) && !game.objects.find(second));
+}

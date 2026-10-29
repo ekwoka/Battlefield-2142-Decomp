@@ -184,7 +184,15 @@ build/native/src/Main/bf2142 --game "source/Battlefield 2142" \
 #   bf2142 --game "source/Battlefield 2142" --connect 127.0.0.1 --name Joiner --play
 # (the joined game's HUD is the server's: its tickets, players, control
 # points and spawn groups; --scoreboard and --spawn-screen work joined too,
-# e.g. --connect 127.0.0.1 --play 2 --spawn-screen --screenshot out.png)
+# e.g. --connect 127.0.0.1 --play 2 --spawn-screen --screenshot out.png;
+# the radio, squads, requests and the commander's tools go to the server,
+# e.g. a headless commander and squad leader on the loopback host:
+#   bf2142 ... --connect 127.0.0.1 --name Cmdr --play 1 --simulate 70 --screenshot cmdr.png \
+#     --console "2:Commander.commanderApply" --console "22:Commander.accept 1" \
+#     --console "50:Commander.commRoseAccept 1"
+#   bf2142 ... --connect 127.0.0.1 --name Leader --play 1 --simulate 70 --screenshot leader.png \
+#     --console "3:SquadMenu.setSquadCreateSelect 1" --console "4:SquadMenu.createSquad" \
+#     --console "40:SquadLeader.sendRequest 3 0")
 # run a dedicated server (no window, no sound): the install's
 # mods/bf2142/Settings/ServerSettings.con (sv.*) and maplist.con
 # (mapList.append <level> <mode> <size>), or +config <file> / +mapList

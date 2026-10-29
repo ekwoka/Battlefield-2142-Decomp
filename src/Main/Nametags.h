@@ -33,6 +33,9 @@ class ObjectTemplate;
 namespace game {
 class GameWorld;
 }
+namespace host {
+class HudWorld;
+}
 } // namespace dice::hfe
 
 namespace dice::hfe::nametags {
@@ -235,6 +238,11 @@ public:
 	void setFog(const std::array<float, 4>& startEndAndBase) { m_settings.fog = startEndAndBase; }
 	// The icons nametags.con made (the objects' 3D icons draw with them).
 	void setIcons(const IconRegistry* icons) { m_icons = icons; }
+	// A joined game's players, control points, requests and armour (the
+	// server's, HudWorld.h's RemoteHudWorld: the exe's NametagManager reads
+	// the same player manager and objects on a client); nullptr: frame's
+	// round. The round still answers the sight lines, seats and orders.
+	void setWorld(const host::HudWorld* world) { m_world = world; }
 	// The camera inside a Titan (the objects' showInside / showOutside;
 	// RendDX9's object drawer slot 0x40, which the manager's frame reads,
 	// 0x100f3490).
@@ -303,6 +311,7 @@ private:
 	float m_clock = 0; // the manager's +0x10 (the blink)
 	Settings m_settings;
 	const IconRegistry* m_icons = nullptr;
+	const host::HudWorld* m_world = nullptr;
 	bool m_insideTitan = false;
 	TagFont m_font;
 	bool m_fontLoaded = false;

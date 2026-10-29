@@ -19,6 +19,7 @@
 //     component, 0xc4b6): see AutoRadio below.
 #pragma once
 
+#include "Game/GameWorld.h"
 #include "Sound/SoundEngine/SoundMath.h"
 
 #include <cstdint>
@@ -31,6 +32,9 @@
 namespace dice::hfe {
 namespace game {
 class GameWorld;
+}
+namespace host {
+class HudWorld;
 }
 namespace world {
 class ObjectManager;
@@ -99,6 +103,11 @@ public:
 	// missile silo, else "".
 	static std::string siloSuffix(int index) { return index > 0 ? "_" + std::to_string(index) : std::string(); }
 
+	// Who the local player is and what the players are, for the radio
+	// (heard and the local plays): a joined game's (HudWorld.h's
+	// RemoteHudWorld: the server's players), else the round's.
+	void setHudWorld(const host::HudWorld* world) { m_hud = world; }
+
 	// Counters, for --verbose and tests.
 	int weaponSounds = 0, radioHeard = 0, voiceOvers = 0;
 
@@ -116,6 +125,9 @@ private:
 	sound::SoundManager& m_manager;
 	sound::GameSounds& m_sounds;
 	sound::VoiceMessages* m_voices;
+	const host::HudWorld* m_hud = nullptr;
+	int localPlayer() const;
+	bool playerInfo(int player, game::GameWorld::PlayerInfo& out) const;
 	std::map<std::string, std::string> m_looping; // projectile template -> its loop ("" none)
 	struct Watched {
 		int team = 0;

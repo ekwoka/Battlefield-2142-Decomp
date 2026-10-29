@@ -329,6 +329,67 @@ struct AcceptOrderInfo {
 };
 bool parseAcceptOrder(const GameEvent& e, AcceptOrderInfo& out);
 GameEvent makeAcceptOrder(const AcceptOrderInfo& info);
+// kEvRadioMessage (0x14; read 0x0050d100, written 0x0050d1f0): +0xc the
+// voice message's index in the game logic's message table (16 bits: the
+// order of Sound/VoiceMessages.con's addMessage, 0x004d8af0, looked up by
+// name with 0x004d8040 at game logic +0x170), +0xe the sender's player id
+// (8), +0xf its team (2), +0x10 the team, squad or player the channel
+// names (8), +0x14 the target channel (0..0x13) and +0x18 the source
+// (0..4: 3 a player's, 0 the game's own).
+//   - A player's (the client's slot 0x50, 0x004b2b60 → 0x004b26b0): the
+//     index, the player's id and team (slots 0x58, 0xf8), the value, the
+//     channel, 3; after the spam check (player slot 0x340: "spam" and
+//     HUD_HUD_MENU_CHAT_SPAM_MESSAGE) it goes to the server and the sender
+//     hears his own at once (0x0042e0c0 with source 3).
+//   - The server's handler (0x0050d3b0) makes the message with the
+//     connection's player as its sender (0x004a54d0: +0x28) and hands it
+//     out (slot 0xa8 → 0x004a7800 for each player, 0x004a6f70 who hears);
+//     each hearer's client gets the event again from it (0x004a6c60: the
+//     sender +0x28 into +0xe, the rest as they came).
+//   - A client's handler (0x0050d300) posts it to the event manager
+//     (category 6) for the HUD and the voice (0x0042e0c0: source 2 or 3
+//     with a sender; 0 none, the commander's voice).
+struct RadioMessageInfo {
+	int index = 0;
+	int sender = 0xff; // 0xff: no player
+	int team = 0;
+	int value = 0;
+	int channel = 0;
+	int source = 0;
+};
+bool parseRadioMessage(const GameEvent& e, RadioMessageInfo& out);
+GameEvent makeRadioMessage(const RadioMessageInfo& info);
+// The commander's tools as a client sends them to the server (the HUD's
+// uses, 0x007d88d0..0x007d8660: on a server the event manager's slot 0x18
+// takes the event at once, on a client the game client's slot 0x90 sends
+// it):
+//   - kEvArtillery (0x1e; vtable 0x0091e42c, built 0x007d7c20, read
+//     0x0050ec60, server 0x0050ee10): kind 1 (an RC object's use; 2 bits),
+//     the team (32 bits, a byte), x and z (floats), then the rcType (32: 1
+//     RCArtillery, 4 RCOrbitalStrike); the server takes it from the team's
+//     commander or no player (0x0050ee10: slot 0x128) and fires the team's
+//     asset (0x005a11c0, 0x005a1270);
+//   - kEvUav (0x2d; vtable 0x0091e3fc, built 0x007d7ca0, read 0x0050ea60,
+//     server 0x0050eb90): x, z (floats), the team (8), a bit set for the
+//     satellite scan (else the UAV), from the team's commander (game logic
+//     slot 0x78): events 0/0x11 (the UAV at the point) or 0/0x12 (the scan);
+//   - kEvSupplyDrop (0x25; vtable 0x0091e54c, built 0x0043d6d0 on a client,
+//     read 0x00511110, server 0x00511220): the team (32 bits, a byte), x, z;
+//     the server runs 0x0043d6d0 (its reload and 0x0043d510's crate);
+//   - kEvTitan (0x21; read 0x0050efd0, server 0x0050f1f0): kind 1 the
+//     commander's move (the team, x, z), kind 2 the team and a ghost.
+GameEvent makeArtilleryUse(int team, float x, float z, int rcType);
+GameEvent makeUavUse(int team, float x, float z, bool satellite);
+GameEvent makeSupplyDrop(int team, float x, float z);
+GameEvent makeTitanMove(int team, float x, float z);
+struct CommanderToolUse {
+	enum Tool { Artillery, OrbitalStrike, Uav, Satellite, Supplies, MoveTitan } tool = Artillery;
+	int team = 0;
+	float x = 0, z = 0;
+};
+// One of the four above as the server reads it; false for another event
+// (or an Artillery / Titan event of another kind).
+bool parseCommanderToolUse(const GameEvent& e, CommanderToolUse& out);
 // kEvCreateSpawnGroup (0x39; read 0x005125c0, written 0x005126b0, handled
 // 0x005127f0 → the client's spawn manager slot 0x44) and
 // kEvRemoveSpawnGroup (0x3a; read 0x00512880, written 0x005128e0, handled

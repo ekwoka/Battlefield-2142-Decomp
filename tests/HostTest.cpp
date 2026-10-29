@@ -32,6 +32,7 @@
 #include <map>
 #include <memory>
 #include <thread>
+#include <tuple>
 
 namespace net = dice::hfe::net;
 namespace host = dice::hfe::host;
@@ -354,6 +355,194 @@ TEST(NetHost_JoinedHudStateAndRequests)
 	CHECK(!replies.empty());
 	CHECK(replies.empty() || replies.front().to == -1 || replies.front().to == bot);
 	client.disconnect();
+	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
+}
+
+
+// Two clients on a hosted round: the radio both ways (a client's message
+// said in the round by its connection's player and heard by the other
+// client, the game's own with no sender), the offer of command (2/0x23)
+// answered by a client, the commander's tools from a client (the supply
+// drop; refused from anyone else), the squads' events (a new squad by
+// name, the leader's invite of a bot, his kick), the orders both ways and
+// a mutiny vote.
+TEST(NetHost_RadioCommanderToolsAndSquads)
+{
+	dice::hfe::world::ObjectTemplateManager templates;
+	templates.registerType(1, "SupplyObject");
+	templates.create("SupplyObject", "supply_crate")->settings()["sharedStorageSize"] = "500";
+	dice::hfe::world::ObjectManager objects;
+	dice::hfe::game::GameWorld round(templates, objects);
+	dice::hfe::game::GameLogic logic;
+	round.startRound();
+	logic.startRound();
+	round.setCommanderEnabled(true);
+	host::HostSetup setup;
+	setup.level = "Camp_Gibraltar";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, logic, templates, setup);
+	// The voice message table both sides have (VoiceMessages.con's order).
+	const std::vector<std::string> table {"medic", "need_ammo", "roger_that", "AUTO_MOODGP_TEAM_lostcp", "supply_accept"};
+	hosted.radioIndex = [&table](const std::string& voice) {
+		const auto it = std::find(table.begin(), table.end(), voice);
+		return it == table.end() ? -1 : static_cast<int>(it - table.begin());
+	};
+	hosted.radioVoice = [&table](int index) {
+		return index >= 0 && static_cast<size_t>(index) < table.size() ? table[static_cast<size_t>(index)] : std::string();
+	};
+	std::vector<std::tuple<int, int, bool>> tools; // (player, tool, done)
+	hosted.onCommanderTool = [&tools](int player, const net::CommanderToolUse& use, bool done) {
+		tools.push_back({player, static_cast<int>(use.tool), done});
+	};
+	CHECK(hosted.start());
+
+	net::GameClient a, b;
+	net::GameClientOptions options;
+	options.playerName = "Alpha";
+	CHECK(a.connect("127.0.0.1", hosted.gamePort(), options));
+	options.playerName = "Bravo";
+	CHECK(b.connect("127.0.0.1", hosted.gamePort(), options));
+	std::vector<net::GameEvent> heardA, heardB;
+	std::vector<net::PostRemoteInfo> messagesA;
+	const auto step = [&] {
+		a.update();
+		b.update();
+		hosted.tick();
+		round.tick(1.0f / 30);
+		for (const net::GameEvent& e : a.world().takeUnhandled()) {
+			heardA.push_back(e);
+		}
+		for (const net::GameEvent& e : b.world().takeUnhandled()) {
+			heardB.push_back(e);
+		}
+		for (const net::PostRemoteInfo& m : a.world().takeMessages()) {
+			messagesA.push_back(m);
+		}
+	};
+	CHECK(pumpUntil(step, [&] {
+		const net::RemotePlayer* pa = a.world().player(a.world().localPlayer());
+		const net::RemotePlayer* pb = b.world().player(b.world().localPlayer());
+		return pa && pa->name == "Alpha" && pb && pb->name == "Bravo" && a.world().gameState() == 1 && b.world().gameState() == 1;
+	}));
+	const int idA = a.world().localPlayer(), idB = b.world().localPlayer();
+	dice::hfe::game::GameWorld::PlayerInfo infoA, infoB;
+	CHECK(round.playerInfo(idA, infoA));
+	const int team = infoA.team;
+	b.selectTeam(team); // 6/7, while B has no soldier
+	CHECK(pumpUntil(step, [&] {
+		const net::RemotePlayer* pb = b.world().player(idB);
+		return round.playerInfo(idB, infoB) && infoB.team == team && pb && pb->team == team;
+	}));
+
+	// A's message to everyone (TCGlobal): said by A in the round, B hears
+	// it with A as the sender (source 3); A doesn't get it back.
+	const auto radioOf = [](const std::vector<net::GameEvent>& events, int index, net::RadioMessageInfo& out) {
+		for (const net::GameEvent& e : events) {
+			if (net::parseRadioMessage(e, out) && out.index == index) {
+				return true;
+			}
+		}
+		return false;
+	};
+	a.radioMessage(0, 2); // roger_that
+	net::RadioMessageInfo radio;
+	CHECK(pumpUntil(step, [&] { return radioOf(heardB, 2, radio); }));
+	CHECK(radio.sender == idA && radio.team == team && radio.channel == 0 && radio.source == 3);
+	CHECK(!radioOf(heardA, 2, radio));
+	// The game's own (no sender) to the team.
+	round.radioMessage(-1, 13, "AUTO_MOODGP_TEAM_lostcp", team);
+	CHECK(pumpUntil(step, [&] { return radioOf(heardA, 3, radio) && radioOf(heardB, 3, radio); }));
+	CHECK(radio.sender == 0xff && radio.source == 0 && radio.channel == 13);
+
+	// A applies for command; after the apply period the server offers it
+	// (2/0x23) and A takes it (the Commander event's kind 0).
+	a.applyForCommander();
+	CHECK(pumpUntil(step, [&] {
+		return std::any_of(messagesA.begin(), messagesA.end(), [](const net::PostRemoteInfo& m) { return m.category == 2 && m.id == 0x23; });
+	}, 8000));
+	a.answerCommanderOffer(true);
+	CHECK(pumpUntil(step, [&] {
+		const net::RemotePlayer* pa = a.world().player(idA);
+		return round.commander(team) == idA && pa && pa->commander;
+	}));
+
+	// The commander's supply drop from his client; B's is refused.
+	b.commanderTool(net::CommanderToolUse::Supplies, 30, 40);
+	a.commanderTool(net::CommanderToolUse::Supplies, 10, 20);
+	CHECK(pumpUntil(step, [&] { return tools.size() == 1 && !round.supplyCrates().empty(); }));
+	CHECK(!tools.empty() && std::get<0>(tools[0]) == idA && std::get<2>(tools[0]));
+	if (const auto crates = round.supplyCrates(); !crates.empty()) {
+		const dice::hfe::world::Object* crate = objects.find(crates.front());
+		CHECK(crate && std::abs(crate->position().x - 10) < 0.01f && std::abs(crate->position().z - 20) < 0.01f);
+	}
+	// Again too soon: refused by the round.
+	a.commanderTool(net::CommanderToolUse::Supplies, 10, 20);
+	CHECK(pumpUntil(step, [&] { return tools.size() == 2; }));
+	CHECK(tools.size() == 2 && !std::get<2>(tools[1]));
+
+	// B makes squad 1 by naming it, invites a bot (who takes it), then
+	// removes him (LeaveSquad with the member).
+	b.createSquad(1, "Alpha");
+	CHECK(pumpUntil(step, [&] {
+		const net::RemotePlayer* pb = b.world().player(idB);
+		return pb && pb->squad == 1 && pb->squadLeader;
+	}));
+	const int bot = round.addPlayer("Bot1", team, true);
+	CHECK(pumpUntil(step, [&] { return b.world().player(bot) != nullptr; }));
+	b.invite(bot, 1);
+	CHECK(pumpUntil(step, [&] {
+		dice::hfe::game::GameWorld::PlayerInfo p;
+		return round.playerInfo(bot, p) && p.squad == 1;
+	}));
+	b.leaveSquad(1, bot);
+	CHECK(pumpUntil(step, [&] {
+		dice::hfe::game::GameWorld::PlayerInfo p;
+		return round.playerInfo(bot, p) && p.squad == 0;
+	}));
+	// The commander's order to B's squad (IssueSquadOrder store 1, a defend
+	// placed on the map), B's answer (SetAcceptOrder), B's own order to his
+	// squad (store 0); each reaches the other client.
+	a.issueOrder(1, 1, 6, {50, 0, 60});
+	CHECK(pumpUntil(step, [&] {
+		const net::RemoteWorld::SquadOrder* o = b.world().squadOrder(team, 1, 1);
+		return round.squadOrder(team, 1) && o && o->kind == 6 && std::abs(o->point.z - 60) < 0.01f && !o->accepted;
+	}));
+	b.answerOrder(1, 6, true);
+	CHECK(pumpUntil(step, [&] {
+		const net::RemoteWorld::SquadOrder* o = a.world().squadOrder(team, 1, 1);
+		return round.squadOrder(team, 1) && round.squadOrder(team, 1)->accepted && o && o->accepted;
+	}));
+	b.issueOrder(0, 1, 4, {-20, 0, 5});
+	CHECK(pumpUntil(step, [&] {
+		const net::RemoteWorld::SquadOrder* o = a.world().squadOrder(team, 1, 0);
+		return round.squadLeaderOrder(team, 1) && o && o->kind == 4 && std::abs(o->point.x + 20) < 0.01f;
+	}));
+	// A refused order goes (0x004c2f60), here and there.
+	a.issueOrder(1, 1, 5, {70, 0, 70});
+	CHECK(pumpUntil(step, [&] {
+		const net::RemoteWorld::SquadOrder* o = b.world().squadOrder(team, 1, 1);
+		return o && o->kind == 5;
+	}));
+	b.answerOrder(1, 5, false);
+	CHECK(pumpUntil(step, [&] { return !round.squadOrder(team, 1) && !a.world().squadOrder(team, 1, 1); }));
+	// A non-leader can't remove anyone.
+	a.leaveSquad(1, idB);
+	for (int i = 0; i < 30; ++i) {
+		step();
+	}
+	CHECK(round.playerInfo(idB, infoB) && infoB.squad == 1);
+
+	// B's mutiny vote against the commander (kind 3) reaches the server's
+	// votes, which answer it.
+	heardB.clear();
+	b.startVote(3, idA);
+	CHECK(pumpUntil(step, [&] {
+		return std::any_of(heardB.begin(), heardB.end(), [](const net::GameEvent& e) { return e.type == net::kEvVote && e.u(8) == 3; });
+	}));
+	a.disconnect();
+	b.disconnect();
 	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
 }
 

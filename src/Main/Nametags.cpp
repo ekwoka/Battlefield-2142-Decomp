@@ -1,5 +1,7 @@
 #include "Nametags.h"
 
+#include "HudWorld.h"
+
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
 #include "Game/GameWorld.h"
@@ -560,8 +562,11 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		m_selectedRequest = -1;
 		return out;
 	}
+	// The players, control points and requests: a joined game's (the
+	// server's, setWorld), else the round's.
+	const host::HudWorld* hud = m_world;
 	game::GameWorld::PlayerInfo me;
-	if (!world.playerInfo(world.localPlayer(), me)) {
+	if (!(hud ? hud->playerInfo(hud->localPlayer(), me) : world.playerInfo(world.localPlayer(), me))) {
 		return out;
 	}
 	// The manager's clock and the calls' timers (0x100f3490): the blink
@@ -582,7 +587,7 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 	const Abilities mine = kitAbilities(myKitType);
 	const bool localMedic = myKitType == "Assault";
 	const bool localEngineer = myKitType == "Engineer";
-	const std::vector<game::GameWorld::PlayerInfo> players = world.playerList();
+	const std::vector<game::GameWorld::PlayerInfo> players = hud ? hud->playerList() : world.playerList();
 
 	// The calls heard (0x100f19c0): on the caller's tag within
 	// maxCallDistance when the local kit can answer; the local player's
@@ -738,7 +743,7 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			}
 		}
 	}
-	const std::vector<game::GameWorld::ControlPointInfo> points = world.controlPointList();
+	const std::vector<game::GameWorld::ControlPointInfo> points = hud ? hud->controlPointList() : world.controlPointList();
 	for (const uint32_t id : m_tagged) {
 		const world::Object* owned = objects.find(id);
 		if (!owned || owned->hidden()) {
@@ -819,7 +824,7 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		if (!icon || (m_insideTitan ? !tt.showInside : !tt.showOutside)) {
 			continue;
 		}
-		if (tt.useAliveArmor && (owned->destroyed() || world.hitPoints(id) == 0)) {
+		if (tt.useAliveArmor && (owned->destroyed() || (hud ? hud->objectHealth(id) == 0 : world.hitPoints(id) == 0))) {
 			continue;
 		}
 		const int team = owned->team();
@@ -861,6 +866,13 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 	// has them.
 	if (me.squad != 0 && m_icons) {
 		const game::GameWorld::SquadOrder* orders[] = {world.squadLeaderOrder(me.team, me.squad), world.squadOrder(me.team, me.squad)};
+		// A joined game's: the server's orders (IssueSquadOrder stores 0, 1).
+		game::GameWorld::SquadOrder remote[2];
+		if (hud) {
+			for (int i = 0; i < 2; ++i) {
+				orders[i] = hud->squadOrder(me.team, me.squad, i == 1, remote[i]) ? &remote[i] : nullptr;
+			}
+		}
 		for (const game::GameWorld::SquadOrder* order : orders) {
 			if (!order || order->type == game::GameWorld::OrderType::None) {
 				continue;
@@ -902,7 +914,7 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 	};
 	std::vector<std::pair<int, RequestTag>> requestTags; // (squad x 4 + kind, ...)
 	if (me.commander && m_icons) {
-		for (const game::GameWorld::SquadRequest& request : world.squadRequests(me.team)) {
+		for (const game::GameWorld::SquadRequest& request : hud ? hud->squadRequests(me.team) : world.squadRequests(me.team)) {
 			const IconRegistry::Icon* icon = m_icons->find(requestIconId(request.kind, false));
 			if (!icon) {
 				continue;
@@ -1146,7 +1158,11 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			const float hp = world.hitPoints(armoured);
 			const world::ObjectTemplate* t = o ? o->objectTemplate() : nullptr;
 			const float most = number(t, "armor.maxHitPoints", number(t, "armor.hitPoints", 100));
-			const float fraction = most > 0 && hp >= 0 ? hp / most : 1.0f;
+			float fraction = most > 0 && hp >= 0 ? hp / most : 1.0f;
+			if (hud) {
+				const float known = hud->objectHealth(armoured); // the ghost's networked armour
+				fraction = known >= 0 ? known : 1.0f;
+			}
 			if (fraction > 0 && fraction < 0.5f) {
 				hud::HudQuad base;
 				base.texture = "Menu/Nametag/bar_base.dds";

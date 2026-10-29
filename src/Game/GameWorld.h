@@ -235,6 +235,31 @@ public:
 	// only the removal (0x00651db0) is the server's, which the client sees
 	// as the ghost going. Back above 0 (revived) it is whole again.
 	void setRemoteHealth(uint32_t object, float health, bool playerAttached);
+	// A joined game's living soldier ghost (another player's, the server's:
+	// no player of this round): its third-person body and the weapon in its
+	// hands animated from what its networkable says, as the round's own
+	// soldiers are by their state (stepAnimation's input: the speed and its
+	// direction against the yaw, the turn rate, the fire pulse), so it is
+	// drawn posed (skeletonPose) and holding its weapon (an object made here
+	// for it, posed by the skeleton's mesh nodes, partTransforms). The
+	// stance isn't networked by the rewrite's server: the others stand.
+	struct RemoteSoldierState {
+		physics::Vec3 velocity;
+		float yaw = 0; // degrees
+		std::string weapon; // the template in its hands ("" none)
+		bool onGround = true;
+		bool fired = false;
+		SoldierPose pose = SoldierPose::Stand; // known for the client's own soldier
+	};
+	void animateRemoteSoldier(uint32_t object, const RemoteSoldierState& state, float seconds);
+	// The ghost gone, dead or in a vehicle: its animation and weapon go.
+	void removeRemoteSoldier(uint32_t object);
+	bool isRemoteSoldier(uint32_t object) const { return m_remoteSoldiers.count(object) != 0; }
+	uint32_t remoteSoldierWeapon(uint32_t object) const
+	{
+		const auto it = m_remoteSoldiers.find(object);
+		return it == m_remoteSoldiers.end() ? 0 : it->second.weaponObject;
+	}
 	// Where the camera is and looks (unit), for the ragdolls' levels of
 	// detail (0x008ae120); without one (a server) every body steps at
 	// level 0.
@@ -380,11 +405,13 @@ public:
 	std::vector<RadioHeard> takeRadioHeard() { return std::exchange(m_radioHeard, {}); }
 	std::vector<RadioHeard> takeRadioHeard(const std::function<bool(int receiver)>& receiver);
 	// A message only `receiver` hears (the local plays, game slot 0x60
-	// 0x0042e820: the team-change and takeable radio, the warnings).
-	void hearRadio(int receiver, int channel, const std::string& voice)
+	// 0x0042e820: the team-change and takeable radio, the warnings; a
+	// joined game's from the server's RadioMessage events, with their
+	// sender).
+	void hearRadio(int receiver, int channel, const std::string& voice, int sender = -1)
 	{
 		if (!voice.empty()) {
-			m_radioHeard.push_back({-1, receiver, channel, voice});
+			m_radioHeard.push_back({sender, receiver, channel, voice});
 		}
 	}
 	// A control point's allowCaptureByTeam set (CP interface slot 0x34,
@@ -946,6 +973,11 @@ public:
 	// byAi: the AI commander's use (AIDLL's IBFCommander, sender -1),
 	// which needs no commander.
 	bool commanderAction(int team, CommanderAbility ability, float x, float z, bool byAi = false);
+	// A joined game's commander used a tool on the server: its recharge
+	// counts from now in this (the client's) round, as the exe's client
+	// keeps its tools' reload times itself (0x007d81d0: the tool's +0x5c
+	// and +0x60 = now + its reload time). abilityState then has it.
+	void noteCommanderUse(int team, CommanderAbility ability);
 	// The team's UAV while it is up: where, and how far it reveals.
 	bool uavArea(int team, physics::Vec3& at, float& radius) const;
 	bool satelliteScanActive(int team) const;
@@ -2012,6 +2044,18 @@ private:
 		std::vector<anim::Matrix> worldPose;
 	};
 	std::vector<RemoteBody> m_remoteBodies;
+	struct RemoteSoldier {
+		const anim::Skeleton* skeleton = nullptr;
+		std::unique_ptr<anim::AnimationState> body, weapon;
+		std::string weaponName;
+		uint32_t weaponObject = 0;
+		std::vector<int> weaponNodes;
+		anim::LocalPose pose;
+		std::vector<anim::Matrix> worldPose;
+		float lastYaw = 0;
+		bool started = false;
+	};
+	std::map<uint32_t, RemoteSoldier> m_remoteSoldiers;
 	void stepRemoteBodies(float seconds);
 	struct RemoteWreck {
 		double wreckedAt = 0;  // armour +0x60

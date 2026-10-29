@@ -152,6 +152,15 @@ public:
 	// manager's slot 0x24, 0x004c99a0: SetAcceptOrder with 0, store 2 and
 	// the kind), which takes it off on the server and every client.
 	void answerRequest(int squad, int kind);
+	// An order (IssueSquadOrder, 0x0050e170): store 0 the squad leader's to
+	// his own squad (squad manager slot 0x48), 1 the commander's to a squad
+	// (slot 0x4c); kind the order kind (0..3 the issue-order menu's, 4..7
+	// placed on the map), at a point. The server takes it from the squad's
+	// leader or the team's commander (0x0050e3a0).
+	void issueOrder(int store, int squad, int kind, const Vec3f& point);
+	// The squad leader's answer to the commander's order (SetAcceptOrder,
+	// store 1, the bit set for an accept; Commander.commRoseAccept).
+	void answerOrder(int squad, int kind, bool accept);
 	// Commander (0x13; 0x0050c8f0): a kind (0-8), our team, our player id.
 	enum CommanderKind { kCommanderStepDown = 0, kCommanderWithdraw = 1, kCommanderResign = 2, kCommanderSet = 3,
 		kCommanderApply = 4, kCommanderLeaveScreen = 6, kCommanderEnterScreen = 7 };
@@ -167,13 +176,21 @@ public:
 	// players to vote (sv.minPlayersForVoting; the server's game::Votes).
 	void startVote(int type, int target);
 	void castVote(int type, int target, int choice);
-	// A radio / commo-rose message (0x14; sent by 0x004b3020, written by
-	// 0x0050d1f0): the index in the game logic's radio table (16 bits), a
-	// byte `a`, a 2-bit channel, a byte, 0..0x12 `c`, 0..4. The client puts
-	// the channel in the byte after it too and 0 in the last field; what
-	// `a` and `c` carry comes from GameLogic slot 23's callers, which go
-	// through the scripts and weren't traced.
-	void radioMessage(int index, int channel = 0, int a = 0, int c = 0);
+	// A radio / comm-rose message (0x14; the client's slot 0x50,
+	// 0x004b2b60 → 0x004b26b0, written by 0x0050d1f0): the voice message's
+	// index in the game logic's table (16 bits), our player and team, the
+	// team, squad or player the channel names, the target channel and the
+	// source 3 (a player's). The server hands it to those who hear it
+	// (RadioMessageInfo).
+	void radioMessage(int channel, int index, int value = 0);
+	// The commander's tools (GameProtocol.h's makeArtilleryUse..): the
+	// artillery and the orbital strike as Artillery (rcType 1 / 4), the UAV
+	// and the satellite scan as Uav, the supply drop as SupplyDrop and the
+	// Titan's move as Titan kind 1, for our team at x, z.
+	void commanderTool(CommanderToolUse::Tool tool, float x, float z);
+	// The answer to the offer of command (PostRemote 2/0x23): the
+	// Commander event's kind 0 accepts (0x004c8c20), 1 declines.
+	void answerCommanderOffer(bool accept) { commander(accept ? kCommanderStepDown : kCommanderWithdraw); }
 	// Answers the original client gives by itself (all on by default):
 	// PostRemote 6/2 (LoadComplete) for each level block (data block 2),
 	// echoes of 6/4 (DatabaseComplete) and 6/5 (Reset, the networkable

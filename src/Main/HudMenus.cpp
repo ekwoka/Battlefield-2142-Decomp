@@ -4,6 +4,7 @@
 #include "Console/ConsoleBinding.h"
 #include "Game/GameWorld.h"
 #include "Hud/Hud.h"
+#include "HudWorld.h"
 #include "World/Object.h"
 
 #include <algorithm>
@@ -50,9 +51,21 @@ SquadMenu::SquadMenu(game::GameWorld& round, hud::HudManager& hud) : m_round(rou
 	m_hud.setListColumns(8, {{6, 196, 0}});
 }
 
+bool SquadMenu::playerInfo(int player, game::GameWorld::PlayerInfo& out) const
+{
+	return m_remote.world ? m_remote.world->playerInfo(player, out) : m_round.playerInfo(player, out);
+}
+
+std::vector<game::GameWorld::PlayerInfo> SquadMenu::playerList() const
+{
+	return m_remote.world ? m_remote.world->playerList() : m_round.playerList();
+}
+
+int SquadMenu::localPlayer() const { return m_remote.world ? m_remote.world->localPlayer() : m_round.localPlayer(); }
+
 void SquadMenu::bind(Console& console)
 {
-	const auto local = [this] { return m_round.localPlayer(); };
+	const auto local = [this] { return localPlayer(); };
 	bindMethod(console, "SquadMenu.setSquadCreateSelect", ConsoleAccess::Anyone,
 		[this, local](bool select) { setCreateSelect(local(), select); });
 	bindMethod(console, "SquadMenu.squadCreateLockToggle", ConsoleAccess::Anyone, [this] { toggleCreateLock(); });
@@ -83,7 +96,7 @@ void SquadMenu::bind(Console& console)
 int SquadMenu::freeSquad(int team) const
 {
 	std::set<int> taken;
-	for (const auto& player : m_round.playerList()) {
+	for (const auto& player : playerList()) {
 		if (player.team == team && player.squad > 0) {
 			taken.insert(player.squad);
 		}
@@ -99,7 +112,7 @@ int SquadMenu::freeSquad(int team) const
 bool SquadMenu::setCreateSelect(int player, bool select)
 {
 	game::GameWorld::PlayerInfo me;
-	if (!m_round.playerInfo(player, me)) {
+	if (!playerInfo(player, me)) {
 		return false;
 	}
 	if ((me.squad == 0 && !me.commander) || !select) {
@@ -107,7 +120,7 @@ bool SquadMenu::setCreateSelect(int player, bool select)
 		if (me.squad > 0) {
 			// A leader alone in his squad makes it again.
 			int members = 0;
-			for (const auto& other : m_round.playerList()) {
+			for (const auto& other : playerList()) {
 				members += other.team == me.team && other.squad == me.squad ? 1 : 0;
 			}
 			if (members == 1) {
@@ -135,11 +148,24 @@ std::string SquadMenu::squadLabel(int team, int squad) const
 bool SquadMenu::createSquad(int player)
 {
 	game::GameWorld::PlayerInfo me;
-	if (!m_createShow || !m_round.playerInfo(player, me)) {
+	if (!m_createShow || !playerInfo(player, me)) {
 		return false;
 	}
 	const int squad = me.squad > 0 ? me.squad : freeSquad(me.team);
-	bool made = squad > 0 && (me.squad == squad || m_round.joinSquad(player, squad));
+	bool made = false;
+	if (m_remote.world) {
+		// ChangeSquadName for the empty squad: the server makes it.
+		made = squad > 0 && m_remote.create;
+		if (made && me.squad != squad) {
+			const std::string typed = typedName ? typedName() : std::string();
+			m_remote.create(squad, typed.empty() ? squadName(squad) : typed);
+			if (m_createLocked && m_remote.lock) {
+				m_remote.lock(squad, true);
+			}
+		}
+	} else {
+		made = squad > 0 && (me.squad == squad || m_round.joinSquad(player, squad));
+	}
 	if (made) {
 		const std::string typed = typedName ? typedName() : std::string();
 		if (!typed.empty()) {
@@ -160,7 +186,7 @@ bool SquadMenu::createSquad(int player)
 bool SquadMenu::join(int player, int squad)
 {
 	game::GameWorld::PlayerInfo me;
-	if (!m_round.playerInfo(player, me) || me.commander) {
+	if (!playerInfo(player, me) || me.commander) {
 		return false;
 	}
 	if (me.squad != 0) {
@@ -170,15 +196,27 @@ bool SquadMenu::join(int player, int squad)
 	if (locked(me.team, squad)) {
 		return false;
 	}
+	if (m_remote.world) {
+		if (m_remote.join) {
+			m_remote.join(squad);
+		}
+		return true;
+	}
 	return m_round.joinSquad(player, squad);
 }
 
 void SquadMenu::leave(int player)
 {
 	game::GameWorld::PlayerInfo me;
-	if (m_round.playerInfo(player, me) && me.squad > 0) {
+	if (playerInfo(player, me) && me.squad > 0) {
 		if (me.squadLeader) {
 			m_locked.erase({me.team, me.squad});
+		}
+		if (m_remote.world) {
+			if (m_remote.leave) {
+				m_remote.leave(me.squad);
+			}
+			return;
 		}
 		m_round.joinSquad(player, 0);
 	}
@@ -189,7 +227,7 @@ void SquadMenu::clickSquadList(int player, int row, int column)
 	const int id = std::atoi(m_hud.listCell(5, row, kCellId).c_str());
 	const int kind = std::atoi(m_hud.listCell(5, row, kCellKind).c_str());
 	game::GameWorld::PlayerInfo me;
-	if (kind != kRowSquad || !m_round.playerInfo(player, me)) {
+	if (kind != kRowSquad || !playerInfo(player, me)) {
 		return; // selecting a member or a squad
 	}
 	if (column == kColumnJoin) {
@@ -202,20 +240,23 @@ void SquadMenu::clickSquadList(int player, int row, int column)
 		if (!m_locked.erase({me.team, id})) {
 			m_locked.insert({me.team, id});
 		}
+		if (m_remote.world && m_remote.lock) {
+			m_remote.lock(id, locked(me.team, id));
+		}
 	}
 }
 
 void SquadMenu::setShowInviteList(int player, bool show)
 {
 	game::GameWorld::PlayerInfo me;
-	if (!m_round.playerInfo(player, me) || !me.squadLeader) {
+	if (!playerInfo(player, me) || !me.squadLeader) {
 		return;
 	}
 	m_inviteShow = show;
 	if (show) {
 		m_selected.clear();
 		m_unselected.clear();
-		for (const auto& other : m_round.playerList()) {
+		for (const auto& other : playerList()) {
 			if (other.team == me.team && other.squad == me.squad && other.id != player) {
 				m_selected.insert(other.id);
 			}
@@ -227,7 +268,7 @@ void SquadMenu::clickInviteList(int player, int row)
 {
 	const int id = std::atoi(m_hud.listCell(8, row, 2).c_str());
 	game::GameWorld::PlayerInfo me, other;
-	if (!m_round.playerInfo(player, me) || !m_round.playerInfo(id, other) || other.commander || id == player) {
+	if (!playerInfo(player, me) || !playerInfo(id, other) || other.commander || id == player) {
 		return;
 	}
 	if (other.squad != me.squad) {
@@ -235,13 +276,13 @@ void SquadMenu::clickInviteList(int player, int row)
 			return;
 		}
 		int members = 0;
-		for (const auto& mate : m_round.playerList()) {
+		for (const auto& mate : playerList()) {
 			members += mate.team == me.team && mate.squad == me.squad ? 1 : 0;
 		}
 		int invited = 0;
 		for (const int selected : m_selected) {
 			game::GameWorld::PlayerInfo info;
-			invited += m_round.playerInfo(selected, info) && info.squad != me.squad ? 1 : 0;
+			invited += playerInfo(selected, info) && info.squad != me.squad ? 1 : 0;
 		}
 		if (invited < kSquadSize - members) {
 			m_selected.insert(id);
@@ -256,18 +297,31 @@ void SquadMenu::clickInviteList(int player, int row)
 void SquadMenu::applyInviteList(int player)
 {
 	game::GameWorld::PlayerInfo me;
-	if (!m_round.playerInfo(player, me) || me.squad == 0) {
+	if (!playerInfo(player, me) || me.squad == 0) {
 		return;
 	}
 	for (const int id : m_unselected) {
 		game::GameWorld::PlayerInfo other;
-		if (m_round.playerInfo(id, other) && other.team == me.team && other.squad == me.squad) {
-			m_round.joinSquad(id, 0);
+		if (playerInfo(id, other) && other.team == me.team && other.squad == me.squad) {
+			if (m_remote.world) {
+				if (m_remote.kick) {
+					m_remote.kick(id, me.squad); // LeaveSquad with the member (squad manager slot 0x38)
+				}
+			} else {
+				m_round.joinSquad(id, 0);
+			}
 		}
 	}
 	for (const int id : m_selected) {
 		game::GameWorld::PlayerInfo other;
-		if (!m_unselected.count(id) && m_round.playerInfo(id, other) && other.ai && other.squad == 0
+		if (m_remote.world) {
+			// The invitation (slot 0x30: Invite); the server's player answers it.
+			if (!m_unselected.count(id) && playerInfo(id, other) && other.squad != me.squad && m_remote.invite) {
+				m_remote.invite(id, me.squad);
+			}
+			continue;
+		}
+		if (!m_unselected.count(id) && playerInfo(id, other) && other.ai && other.squad == 0
 			&& !locked(me.team, me.squad)) {
 			m_round.joinSquad(id, me.squad);
 		}
@@ -278,10 +332,10 @@ void SquadMenu::applyInviteList(int player)
 void SquadMenu::update(int player)
 {
 	game::GameWorld::PlayerInfo me;
-	if (!m_round.playerInfo(player, me)) {
+	if (!playerInfo(player, me)) {
 		return;
 	}
-	const auto players = m_round.playerList();
+	const auto players = playerList();
 	std::map<int, std::vector<const game::GameWorld::PlayerInfo*>> squads;
 	int unassigned = 0;
 	for (const auto& other : players) {
@@ -357,9 +411,19 @@ CommanderMenu::CommanderMenu(game::GameWorld& round, hud::HudManager& hud) : m_r
 	m_hud.setListColumns(14, {{4, 13, 2, 13}, {22, 190, 0}});
 }
 
+bool CommanderMenu::playerInfo(int player, game::GameWorld::PlayerInfo& out) const
+{
+	return m_world ? m_world->playerInfo(player, out) : m_round.playerInfo(player, out);
+}
+
+std::vector<game::GameWorld::PlayerInfo> CommanderMenu::playerList() const
+{
+	return m_world ? m_world->playerList() : m_round.playerList();
+}
+
 void CommanderMenu::bind(Console& console)
 {
-	const auto local = [this] { return m_round.localPlayer(); };
+	const auto local = [this] { return m_world ? m_world->localPlayer() : m_round.localPlayer(); };
 	bindMethod(console, "CommanderMenu.toggleSquadTab", ConsoleAccess::Anyone, [this] { tabs.toggleSquad(); });
 	bindMethod(console, "CommanderMenu.toggleMapTab", ConsoleAccess::Anyone, [this] { tabs.map = !tabs.map; });
 	bindMethod(console, "CommanderMenu.toggleCommanderToolsTab", ConsoleAccess::Anyone, [this] { tabs.tools = !tabs.tools; });
@@ -384,7 +448,7 @@ void CommanderMenu::deselect()
 void CommanderMenu::click(int player, int row, int column)
 {
 	game::GameWorld::PlayerInfo me;
-	if (!m_round.playerInfo(player, me) || !me.commander || m_hud.listCell(15, row, kCellKind) != "0") {
+	if (!playerInfo(player, me) || !me.commander || m_hud.listCell(15, row, kCellKind) != "0") {
 		return;
 	}
 	const int squad = std::atoi(m_hud.listCell(15, row, kCellId).c_str());
@@ -401,11 +465,11 @@ void CommanderMenu::click(int player, int row, int column)
 void CommanderMenu::update(int player)
 {
 	game::GameWorld::PlayerInfo me;
-	if (!m_round.playerInfo(player, me)) {
+	if (!playerInfo(player, me)) {
 		return;
 	}
 	std::map<int, std::vector<game::GameWorld::PlayerInfo>> squads;
-	for (const auto& other : m_round.playerList()) {
+	for (const auto& other : playerList()) {
 		if (other.team == me.team && other.squad > 0) {
 			squads[other.squad].push_back(other);
 		}
@@ -467,11 +531,21 @@ std::string CommanderMenu::orderPicture(int team, int squad) const
 	// kind (+0x174 + 4 kind: none for 0..3 and 8.., Move, Attack, Defend,
 	// Repair for 4..7, 0x007a8770's textures).
 	for (int kind = 0; kind < game::GameWorld::kRequestKinds; ++kind) {
-		if (m_round.squadRequest(team, squad, kind)) {
+		if (m_world) {
+			for (const auto& request : m_world->squadRequests(team)) {
+				if (request.squad == squad) {
+					return "Ingame/Commander/Orders/orderNew.tga";
+				}
+			}
+		} else if (m_round.squadRequest(team, squad, kind)) {
 			return "Ingame/Commander/Orders/orderNew.tga";
 		}
 	}
 	const game::GameWorld::SquadOrder* order = m_round.squadOrder(team, squad);
+	game::GameWorld::SquadOrder remote;
+	if (m_world) {
+		order = m_world->squadOrder(team, squad, true, remote) ? &remote : nullptr;
+	}
 	static const char* const kPictures[] = {"orderMove", "orderAttack", "orderDefend", "orderRepair"};
 	const int kind = order ? static_cast<int>(order->type) : -1;
 	return kind >= 4 && kind <= 7 ? std::string("Ingame/Commander/Orders/") + kPictures[kind - 4] + ".tga" : std::string();
@@ -574,7 +648,7 @@ const char* SquadRequests::toolName(int kind)
 
 int SquadRequests::leaderOf(int team, int squad) const
 {
-	for (const auto& p : m_round.playerList()) {
+	for (const auto& p : m_remote.world ? m_remote.world->playerList() : m_round.playerList()) {
 		if (p.team == team && p.squad == squad && p.squadLeader) {
 			return p.id;
 		}
@@ -720,10 +794,21 @@ void SquadRequests::tick(float seconds)
 		// 0x007c8a60: taken off, and 0x007c7a00's line to the leader.
 		const Pending p = *it;
 		it = m_pending.erase(it);
-		if (!m_round.squadRequest(p.team, p.squad, p.kind)) {
-			continue;
+		if (m_remote.world) {
+			const auto standing = m_remote.world->squadRequests(p.team);
+			if (std::none_of(standing.begin(), standing.end(),
+					[&](const game::GameWorld::SquadRequest& r) { return r.squad == p.squad && r.kind == p.kind; })) {
+				continue;
+			}
+			if (m_remote.takeOff) {
+				m_remote.takeOff(p.squad, p.kind);
+			}
+		} else {
+			if (!m_round.squadRequest(p.team, p.squad, p.kind)) {
+				continue;
+			}
+			m_round.removeSquadRequest(p.team, p.squad, p.kind);
 		}
-		m_round.removeSquadRequest(p.team, p.squad, p.kind);
 		const auto state = m_round.abilityState(p.team, game::GameWorld::requestAbility(p.kind));
 		std::string voice;
 		switch (p.kind) {
@@ -734,7 +819,13 @@ void SquadRequests::tick(float seconds)
 		}
 		const int leader = leaderOf(p.team, p.squad);
 		if (leader >= 0 && localPlayer >= 0) {
-			m_round.radioMessage(localPlayer, 14, voice, leader);
+			if (m_remote.world) {
+				if (m_remote.say) {
+					m_remote.say(leader, voice);
+				}
+			} else {
+				m_round.radioMessage(localPlayer, 14, voice, leader);
+			}
 		}
 	}
 }
