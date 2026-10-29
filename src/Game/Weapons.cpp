@@ -223,6 +223,7 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 	s.nrOfMags = static_cast<int>(number(t, "ammo.nrOfMags", static_cast<float>(s.nrOfMags)));
 	s.reloadTime = number(t, "ammo.reloadTime", s.reloadTime);
 	s.reloadWithoutPlayer = number(t, "ammo.reloadWithoutPlayer", 0) != 0;
+	s.busyUntilButtonRelease = number(t, "fire.busyUntilButtonRelease", 0) != 0;
 	s.keepProjectiles = number(t, "keepProjectiles", s.keepProjectiles);
 	s.velocity = number(t, "velocity", s.velocity);
 	s.heatAddWhenFire = number(t, "heatAddWhenFire", 0);
@@ -446,6 +447,17 @@ bool FireArm::fire(float seconds, bool trigger)
 	} else if (mode == kFireBurst) {
 		trigger = m_burstLeft > 0;
 	}
+	// busyUntilButtonRelease (SingleFireComp template +0x9c; the rocket,
+	// AA and AV launchers): after a round the weapon stays busy (the
+	// update 0x005d4800 pushes weapon +0x228 on by wp-delay-ticks) until the
+	// trigger is released (slot 12, 0x005d3c20, sets +0x164): no next
+	// round, no reload.
+	if (m_busyUntilRelease) {
+		if (m_triggerWas) {
+			return false;
+		}
+		m_busyUntilRelease = false;
+	}
 	if (m_reloadLeft > 0) {
 		m_reloadLeft -= seconds;
 		if (m_reloadLeft <= 0) {
@@ -476,6 +488,7 @@ bool FireArm::fire(float seconds, bool trigger)
 		--m_burstLeft;
 	}
 	m_cooldown = m_settings.ticksBetweenShots();
+	m_busyUntilRelease = m_settings.busyUntilButtonRelease;
 	if (m_settings.heatAddWhenFire > 0) {
 		m_heat += m_settings.heatAddWhenFire;
 		if (m_heat >= 1) {

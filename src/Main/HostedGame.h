@@ -238,7 +238,18 @@ private:
 		// under 0 always ghosted (c_NIGhostAlways), 0 never scored.
 		float basePriority = 1;
 		bool projectile = false; // interface 0x94c1: +0.3 (0x0057d560)
+		// A projectile of the round's (not an object of its object
+		// manager): its serial (game::Projectile::serial), keyed in
+		// m_ghosts as kProjectileKey | serial.
+		uint32_t projectileSerial = 0;
 	};
+	static constexpr uint32_t kProjectileKey = 0x80000000u;
+	// The round's projectiles with a networkable (GenericProjectile with a
+	// networkableInfo: missiles, grenades, mines, C4...; FireComp makes
+	// them on the server only, 0x005f31d0 / 0x005f1440) as ghosts.
+	void trackProjectiles();
+	void sendBattlefieldReports();
+	const game::Projectile* projectileOf(const Ghost& ghost) const;
 	struct Client {
 		int player = -1;
 		std::string name;
@@ -255,6 +266,10 @@ private:
 		std::map<uint32_t, std::vector<uint32_t>> carried;
 		std::map<uint16_t, uint32_t> lastCarried;
 		std::vector<uint16_t> lostRemovals; // written first (gm +0x10c0)
+		// Each player's reload presses this client has had a state with
+		// mask 0x10000 for (the exe's per-client dirty mask keeps the bit
+		// until it goes out).
+		std::map<int, uint32_t> reloadsSent;
 		bool hasEye = false;
 		net::GhostEye eye;
 		std::deque<net::PlayerMove> moves;       // moves waiting, one a tick
@@ -354,7 +369,7 @@ private:
 		unsigned mode) const;
 	net::PlayerOwnState ownState(int player) const;
 	const Ghost* ghostOf(uint16_t ghost, size_t& part) const;
-	std::vector<uint8_t> playerStateOf(int player, size_t& bits) const;
+	std::vector<uint8_t> playerStateOf(int player, size_t& bits, bool everyGroup = false) const;
 	const std::vector<net::GhostPartLayout>* layoutFor(const world::ObjectTemplate& t);
 	uint16_t ghostOfObject(uint32_t object, int part = 0) const;
 	std::string nameOf(int player) const;

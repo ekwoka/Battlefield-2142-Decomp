@@ -183,11 +183,27 @@ struct PlayerCamera::SeatView {
 void PlayerCamera::stepShakes(float seconds)
 {
 	m_clock += seconds;
+	// The hit shake (0x00610450 then 0x00610240's last part), started by a
+	// blast's 0x005a6e70 through the player's camera, slot 0x4c: on foot
+	// (the SoldierCamera is a Camera too) and in a seat.
+	const float hit = m_round.takeCameraShake();
+	if (hit > 0) {
+		m_hitLeft = anim::kCameraHitShakeTime;
+		m_hitStrength = hit;
+	}
+	m_hitShake = 0;
+	if (m_hitLeft > 0) {
+		m_hitLeft = std::max(0.0f, m_hitLeft - seconds);
+		m_hitShake = anim::cameraHitShake(m_hitLeft, m_hitStrength);
+	}
 	SeatView seat;
 	game::GameWorld::PlayerInfo me;
-	if (!m_round.playerInfo(m_round.localPlayer(), me) || !me.alive || !me.vehicle || !findSeatCamera(seat)) {
-		m_speedShake = m_hitShake = m_shakeTime = m_hitLeft = 0;
-		m_lastVehicleHp = -1;
+	const bool alive = m_round.playerInfo(m_round.localPlayer(), me) && me.alive;
+	if (!alive) {
+		m_hitShake = m_hitLeft = 0;
+	}
+	if (!alive || !me.vehicle || !findSeatCamera(seat)) {
+		m_speedShake = m_shakeTime = 0;
 		m_shakeVehicle = 0;
 		m_cameraRecoil = {};
 		m_recoilShake = 0;
@@ -219,21 +235,7 @@ void PlayerCamera::stepShakes(float seconds)
 		m_shakeTime += seconds;
 	}
 	m_speedShake = anim::cameraSpeedShake(m_shakeTime, speed, start, most);
-	// The hit shake: a hit's share of the vehicle's hit points.
-	const float hp = m_round.hitPoints(me.vehicle);
-	const world::Object* vehicle = m_round.objects().find(me.vehicle);
-	const float maxHp = vehicle && vehicle->objectTemplate() ? number(*vehicle->objectTemplate(), "armor.maxHitPoints", 0) : 0;
-	if (m_shakeVehicle == me.vehicle && m_lastVehicleHp >= 0 && hp < m_lastVehicleHp && maxHp > 0) {
-		m_hitLeft = anim::kCameraHitShakeTime;
-		m_hitStrength = (m_lastVehicleHp - hp) / maxHp;
-	}
 	m_shakeVehicle = me.vehicle;
-	m_lastVehicleHp = hp;
-	m_hitShake = 0;
-	if (m_hitLeft > 0) {
-		m_hitLeft = std::max(0.0f, m_hitLeft - seconds);
-		m_hitShake = anim::cameraHitShake(m_hitLeft, m_hitStrength);
-	}
 }
 
 float PlayerCamera::seatFov(bool inside) const
@@ -913,6 +915,7 @@ bool PlayerCamera::view(View& view, float aspect) const
 	view.yaw = me.yaw * kDegrees;
 	view.pitch = std::clamp(me.aimPitch, -85.0f, 85.0f) * kDegrees;
 	view.fovY = aspectFov(m_fov.current, aspect);
+	view.roll = m_hitShake * kDegrees; // the SoldierCamera's hit shake
 	return true;
 }
 

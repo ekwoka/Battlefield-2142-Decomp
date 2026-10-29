@@ -882,6 +882,185 @@ TEST(NetHost_StanceFireSpottedAndInvites)
 	}));
 }
 
+// Others' rounds and reloads on clients: a reload pressed on the server
+// (c_PIReload in 0x004bda00 -> player vtable 0x1fc, 0x0059b330) sends the
+// player's state once with mask 0x10000 (every group's fields), which the
+// client counts as a reload (0x005981a0's +0x280, taken by 0x00590e10); a
+// networked projectile (a GenericProjectile with a networkableInfo) is a
+// ghost of its own from its firing until it goes, a bullet without one
+// isn't (each client makes it from the firing).
+TEST(NetHost_ReloadFlagAndProjectileGhosts)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	range.templates.registerType(4, "GenericFireArm");
+	range.templates.registerType(5, "GenericProjectile");
+	range.templates.registerType(6, "Kit");
+	dice::hfe::world::ObjectTemplate* launcher = range.templates.create("GenericFireArm", "test_launcher");
+	launcher->settings()["projectileTemplate"] = "test_grenade";
+	launcher->settings()["velocity"] = "15";
+	launcher->settings()["itemIndex"] = "3";
+	launcher->settings()["fire.roundsPerMinute"] = "60";
+	launcher->settings()["ammo.magSize"] = "4";
+	launcher->settings()["ammo.reloadTime"] = "2";
+	dice::hfe::world::ObjectTemplate* grenade = range.templates.create("GenericProjectile", "test_grenade");
+	grenade->settings()["networkableInfo"] = "BasicInfo";
+	grenade->settings()["timeToLive"] = "1.5";
+	grenade->settings()["detonation.explosionRadius"] = "4";
+	dice::hfe::world::ObjectTemplate* kit = range.templates.create("Kit", "test_grenadier_kit");
+	kit->children().push_back({"test_launcher", {}, {}});
+	host::HostSetup setup;
+	setup.level = "Range";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, range.logic, range.templates, setup);
+	CHECK(hosted.start());
+	const int bot = round.addPlayer("Bot1", 2, true);
+	round.setKit(bot, "test_grenadier_kit", "us_light_soldier");
+	CHECK(round.spawnSoldier(bot));
+
+	net::GameClient a;
+	a.world().setGhostTemplates([&range](uint32_t id) {
+		const dice::hfe::world::ObjectTemplate* t = range.templates.findById(id);
+		return t ? net::ghostTemplateFrom(range.templates, *t) : net::GhostTemplateNode {};
+	});
+	net::GameClientOptions options;
+	options.playerName = "Alpha";
+	CHECK(a.connect("127.0.0.1", hosted.gamePort(), options));
+	dice::hfe::game::SoldierInput botInput;
+	const auto step = [&] {
+		a.update();
+		round.setInput(bot, botInput);
+		hosted.tick();
+		round.tick(1.0f / 30);
+	};
+	CHECK(pumpUntil(step, [&] { return a.world().gameState() == 1 && a.world().localPlayer() >= 0; }, 6000));
+	const auto botOf = [&]() { return a.world().player(bot); };
+	CHECK(pumpUntil(step, [&] { return botOf() && botOf()->soldierGhost != 0; }));
+	const auto grenades = [&] {
+		int n = 0;
+		for (const net::RemoteObject& o : a.world().objectList()) {
+			n += o.templateId == grenade->id();
+		}
+		return n;
+	};
+	// It fires: the grenade comes as a ghost, flying (its speed block).
+	botInput.fire = true;
+	CHECK(pumpUntil(step, [&] { return grenades() > 0; }));
+	botInput.fire = false;
+	CHECK(pumpUntil(step, [&] {
+		for (const net::RemoteObject& o : a.world().objectList()) {
+			if (o.templateId == grenade->id() && o.hasVelocity && o.velocity.z * o.velocity.z + o.velocity.x * o.velocity.x > 1) {
+				return true;
+			}
+		}
+		return false;
+	}));
+	// Its fuse out on the server: the ghost goes.
+	CHECK(pumpUntil(step, [&] { return grenades() == 0; }, 6000));
+	// A reload pressed: one state with mask 0x10000.
+	const uint32_t before = botOf()->reloads;
+	botInput.reload = true;
+	step();
+	botInput.reload = false;
+	CHECK(pumpUntil(step, [&] { return botOf()->reloads == before + 1; }));
+	for (int i = 0; i < 20; ++i) {
+		step();
+	}
+	CHECK(botOf()->reloads == before + 1); // only once
+}
+
+// A whisper (chat channel 14 for the HUD manager's player, -1 in retail:
+// 0x007d9e20) reaches nobody else; the control points' allowCaptureByTeam
+// reaches the clients (masks 8 / 0x10, the takeable radio); a battlefield
+// report (event 0x41) puts the enemy on the reporter's minimap
+// (0x005088f0 -> the client's 0x00508590).
+TEST(NetHost_WhisperTakeableAndRadar)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	for (const char* name : {"cp_pac", "cp_eu"}) {
+		range.templates.find(name)->settings()["networkableInfo"] = "BasicInfo";
+	}
+	host::HostSetup setup;
+	setup.level = "Range";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, range.logic, range.templates, setup);
+	CHECK(hosted.start());
+	const int bot = round.addPlayer("Bot1", 1, true);
+	CHECK(round.spawnSoldier(bot));
+	net::GameClient a, b;
+	net::GameClientOptions options;
+	for (net::GameClient* c : {&a, &b}) {
+		c->world().setGhostTemplates([&range](uint32_t id) {
+			const dice::hfe::world::ObjectTemplate* t = range.templates.findById(id);
+			return t ? net::ghostTemplateFrom(range.templates, *t) : net::GhostTemplateNode {};
+		});
+	}
+	options.playerName = "Alpha";
+	CHECK(a.connect("127.0.0.1", hosted.gamePort(), options));
+	options.playerName = "Bravo";
+	CHECK(b.connect("127.0.0.1", hosted.gamePort(), options));
+	std::vector<net::ChatLine> chatB;
+	std::vector<net::RemoteWorld::TakeableSet> takeable;
+	const auto step = [&] {
+		a.update();
+		b.update();
+		hosted.tick();
+		round.tick(1.0f / 30);
+		for (const net::ChatLine& line : b.world().takeChat()) {
+			chatB.push_back(line);
+		}
+		for (const auto& set : a.world().takeTakeable()) {
+			takeable.push_back(set);
+		}
+	};
+	CHECK(pumpUntil(step, [&] {
+		return a.world().gameState() == 1 && b.world().gameState() == 1 && a.world().localPlayer() >= 0
+			&& b.world().localPlayer() >= 0;
+	}, 6000));
+	const int idA = a.world().localPlayer();
+	a.selectTeam(2);
+	CHECK(pumpUntil(step, [&] {
+		dice::hfe::game::GameWorld::PlayerInfo pa;
+		return round.playerInfo(idA, pa) && pa.team == 2;
+	}));
+	// The whisper goes to no one; a team line still reaches B.
+	a.whisper("psst");
+	a.say("hello", net::kChatGlobal);
+	CHECK(pumpUntil(step, [&] {
+		return std::any_of(chatB.begin(), chatB.end(), [](const net::ChatLine& l) { return l.text == "hello"; });
+	}));
+	CHECK(std::none_of(chatB.begin(), chatB.end(), [](const net::ChatLine& l) { return l.text == "psst"; }));
+	// The control points' first states tell both teams' allowCaptureByTeam;
+	// a change on the host comes again.
+	CHECK(pumpUntil(step, [&] { return takeable.size() >= 2; }));
+	takeable.clear();
+	dice::hfe::game::ControlPoint* cp = nullptr;
+	for (const auto& object : range.objects.objects()) {
+		if (!cp) {
+			cp = round.controlPointOf(object->id());
+		}
+	}
+	CHECK(cp != nullptr);
+	if (cp) {
+		cp->allowCapture[1] = false;
+		CHECK(pumpUntil(step, [&] {
+			return std::any_of(takeable.begin(), takeable.end(), [](const auto& t) { return t.team == 1 && !t.allowed; });
+		}));
+	}
+	// A reports the bot: it is on A's minimap for the report's seconds, not B's.
+	round.reportBattlefieldObjects(idA, {bot}, 3);
+	CHECK(pumpUntil(step, [&] {
+		const std::vector<int> seen = a.world().radarPlayers();
+		return std::find(seen.begin(), seen.end(), bot) != seen.end();
+	}));
+	CHECK(b.world().radarReports() == 0);
+}
+
 namespace {
 
 // The shipped object templates and materials on flat ground (as

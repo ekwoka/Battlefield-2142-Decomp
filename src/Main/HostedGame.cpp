@@ -887,7 +887,14 @@ std::vector<net::GameEvent> HostedGame::createEvents(const Ghost& ghost) const
 	info.templateId = ghost.objectTemplate->id();
 	info.ghost = ghost.first;
 	info.count = static_cast<uint32_t>(ghost.layout->size());
-	if (object) {
+	if (const game::Projectile* p = projectileOf(ghost)) {
+		info.team = std::clamp(p->team, 0, 3);
+		info.hasPosition = info.hasRotation = true;
+		info.position = {p->position.x, p->position.y, p->position.z};
+		const float horizontal = std::sqrt(p->velocity.x * p->velocity.x + p->velocity.z * p->velocity.z);
+		info.rotation = {std::atan2(p->velocity.x, p->velocity.z) * 57.29578f,
+			std::atan2(p->velocity.y, horizontal) * 57.29578f, 0};
+	} else if (object) {
 		info.team = std::clamp(object->team(), 0, 3);
 		info.hasPosition = info.hasRotation = true;
 		info.position = {object->position().x, object->position().y, object->position().z};
@@ -1077,6 +1084,17 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			&& line.channel != net::kChatServerTeamMessage) {
 			line.player = player; // 0x004a5460: the sender's player
 			for (const net::GameEvent& out : net::stringBlockEvents(net::encodeChat(line))) {
+				if (line.channel == net::kChatPlayer) {
+					// A whisper (byte 9 the player it is for, 0xff from the
+					// retail HUD, 0x007d9e20): only to that player's client
+					// (the rewrite's routing; the sender shows its own line).
+					for (auto& [to, other] : m_clients) {
+						if (other.player == line.b9 && other.stage == Client::Stage::Playing) {
+							sendTo(to, out);
+						}
+					}
+					continue;
+				}
 				sendToPlaying(out);
 			}
 			if (onLog) {
@@ -1594,7 +1612,122 @@ void HostedGame::trackObjects()
 		}
 	}
 	for (auto it = m_ghosts.begin(); it != m_ghosts.end();) {
-		if (present.count(it->first)) {
+		if (present.count(it->first) || (it->first & kProjectileKey)) {
+			++it; // a projectile's goes with trackProjectiles
+			continue;
+		}
+		const uint16_t ghost = it->second.first;
+		for (auto& [id, client] : m_clients) {
+			if (client.created.erase(ghost)) {
+				sendTo(id, eventOf(net::kEvDestroyObject, {ghost, 0}));
+			}
+			for (size_t part = 0; part < it->second.layout->size(); ++part) {
+				client.sent.erase(static_cast<uint16_t>(ghost + part));
+				client.ghosts.forget(static_cast<uint16_t>(ghost + part));
+				client.lastCarried.erase(static_cast<uint16_t>(ghost + part));
+			}
+		}
+		it = m_ghosts.erase(it);
+	}
+}
+
+// The battlefield reports (event 0x41, SquadRadar): the server's handler
+// (0x005088f0) hands one to the AI (IAIEventCourier vt+0xe0) and posts a
+// copy (0x005087b0) to each player of the reporter's team and squad (the
+// reporter alone without a squad), whose client puts the enemies on its
+// minimap for the report's seconds (0x00508590). The rewrite's round makes
+// them in reportBattlefieldObjects (the bots' trigger, the recon drones'
+// pulses, the cloak, the radio's spot).
+void HostedGame::sendBattlefieldReports()
+{
+	for (const game::GameWorld::BattlefieldReport& report : m_round->takeBattlefieldReports()) {
+		if (report.players.empty() || report.reporter < 0) {
+			continue;
+		}
+		std::vector<uint32_t> values {0, static_cast<uint32_t>(report.reporter & 0xff),
+			static_cast<uint32_t>(std::min<size_t>(report.players.size(), 0x40)),
+			static_cast<uint32_t>(std::clamp(report.seconds, 0, 0x3c))};
+		for (size_t i = 0; i < report.players.size() && i < 0x40; ++i) {
+			values.push_back(static_cast<uint32_t>(report.players[i] & 0xff));
+		}
+		const net::GameEvent e = eventOf(net::kEvSquadRadar, values);
+		for (auto& [id, client] : m_clients) {
+			game::GameWorld::PlayerInfo p;
+			if (client.stage != Client::Stage::Playing || !m_round->playerInfo(client.player, p) || p.team != report.team) {
+				continue;
+			}
+			if (report.squad == 0 ? client.player == report.reporter : p.squad == report.squad) {
+				sendTo(id, e);
+			}
+		}
+	}
+}
+
+const game::Projectile* HostedGame::projectileOf(const Ghost& ghost) const
+{
+	if (!ghost.projectileSerial) {
+		return nullptr;
+	}
+	for (const game::Projectile& p : m_round->projectiles()) {
+		if (p.serial == ghost.projectileSerial && p.alive) {
+			return &p;
+		}
+	}
+	return nullptr;
+}
+
+// The round's networked projectiles (the rewrite's round keeps them out of
+// its object manager): each a ghost of its template (one, a projectile
+// being its own tree's root), created when it is fired and destroyed when
+// it goes, as the server's object manager does with a projectile object.
+// The rounds without a networkable (bullets, shells) aren't ghosted: each
+// client makes them from the firing (0x005f31d0).
+void HostedGame::trackProjectiles()
+{
+	std::set<uint32_t> present;
+	for (const game::Projectile& p : m_round->projectiles()) {
+		if (!p.alive || !p.serial || p.visual || !p.settings) {
+			continue;
+		}
+		const uint32_t key = kProjectileKey | p.serial;
+		if (m_ghosts.count(key)) {
+			present.insert(key);
+			continue;
+		}
+		const world::ObjectTemplate* t = m_round->templates().find(p.settings->name);
+		if (!t) {
+			continue;
+		}
+		const auto info = t->settings().find("networkableInfo");
+		if (info == t->settings().end() || info->second.empty()) {
+			continue;
+		}
+		const std::vector<net::GhostPartLayout>* layout = layoutFor(*t);
+		if (!layout || layout->empty()) {
+			continue;
+		}
+		present.insert(key);
+		Ghost ghost;
+		ghost.object = key;
+		ghost.objectTemplate = t;
+		ghost.layout = layout;
+		ghost.first = m_nextGhost;
+		ghost.basePriority = net::networkableInfos().basePriority(info->second);
+		ghost.projectile = true;
+		ghost.projectileSerial = p.serial;
+		m_nextGhost = static_cast<uint16_t>(m_nextGhost + layout->size());
+		m_ghosts[key] = ghost;
+		for (auto& [id, client] : m_clients) {
+			if (client.stage == Client::Stage::Database || client.stage == Client::Stage::Playing) {
+				for (const net::GameEvent& e : createEvents(ghost)) {
+					sendTo(id, e);
+				}
+				client.created.insert(ghost.first);
+			}
+		}
+	}
+	for (auto it = m_ghosts.begin(); it != m_ghosts.end();) {
+		if (!(it->first & kProjectileKey) || present.count(it->first)) {
 			++it;
 			continue;
 		}
@@ -1746,6 +1879,24 @@ std::vector<net::NetworkableState> HostedGame::statesOf(const Ghost& ghost, size
 {
 	const net::GhostPartLayout& layout = (*ghost.layout)[part];
 	std::vector<net::NetworkableState> states(layout.groups.size());
+	if (ghost.projectileSerial) {
+		// GenericProjectile (0x006067c0): the position (2), the rotation (1)
+		// and the speed block (4: its velocity), as the projectile flies.
+		const game::Projectile* p = projectileOf(ghost);
+		if (!p || states.empty()) {
+			return states;
+		}
+		net::NetworkableState& s = states.front();
+		s.kind = layout.groups.front().hints.kind;
+		s.mask = 0x1 | 0x2 | 0x4;
+		s.position = {p->position.x, p->position.y, p->position.z};
+		const float horizontal = std::sqrt(p->velocity.x * p->velocity.x + p->velocity.z * p->velocity.z);
+		s.orientation = quaternionFromYawPitchRoll(std::atan2(p->velocity.x, p->velocity.z) * 57.29578f,
+			std::atan2(p->velocity.y, horizontal) * 57.29578f, 0);
+		s.hasVelocity = true;
+		s.velocity = {p->velocity.x, p->velocity.y, p->velocity.z};
+		return states;
+	}
 	const world::Object* object = m_round->objects().find(ghost.object);
 	if (!object) {
 		return states;
@@ -1799,6 +1950,11 @@ std::vector<net::NetworkableState> HostedGame::statesOf(const Ghost& ghost, size
 					s.cpValues[0] = cp.flagHeight;
 					s.cpValues[1] = cp.takeOverChangePerSecond;
 					s.cpValue = cp.flag;
+					// allowCaptureByTeam for teams 1 and 2 (8, 0x10: cp +0x1b4,
+					// +0x1b5), the clients' takeable radio.
+					s.mask |= 0x8 | 0x10;
+					s.cpAllowTeam1 = cp.allowCapture[1];
+					s.cpAllowTeam2 = cp.allowCapture[2];
 				}
 			}
 			break;
@@ -2049,7 +2205,7 @@ void HostedGame::trackRequests()
 	m_requestsSent = std::move(now);
 }
 
-std::vector<uint8_t> HostedGame::playerStateOf(int player, size_t& bits) const
+std::vector<uint8_t> HostedGame::playerStateOf(int player, size_t& bits, bool everyGroup) const
 {
 	game::GameWorld::PlayerInfo p;
 	net::NetworkableState s;
@@ -2095,6 +2251,13 @@ std::vector<uint8_t> HostedGame::playerStateOf(int player, size_t& bits) const
 			f.heat = p.heat;
 		}
 		s.player.firePresses = static_cast<int>(p.firePresses & 3);
+		// A reload pressed (0x004bda00 -> player vtable 0x1fc, 0x0059b330:
+		// +0x28c, which the snapshot 0x005929f0 turns into mask 0x10000 and
+		// clears): every group's fields, so the others' clients reload the
+		// soldier's weapon (0x005981a0 -> 0x00590e10).
+		if (everyGroup) {
+			s.mask |= 0x10000;
+		}
 	}
 	net::NetworkableHints hints;
 	hints.kind = net::NetworkableKind::Player;
@@ -2201,7 +2364,27 @@ net::GhostBlock HostedGame::ghostsFor(int id, size_t budgetBits)
 	for (const auto& [player, seen] : m_players) {
 		playerOfGhost[seen.ghost] = player;
 	}
+	// A player's reload this client hasn't had: its state with mask 0x10000.
+	std::map<uint16_t, std::pair<std::vector<uint8_t>, size_t>> reloadStates;
+	const auto reloadOf = [&](uint16_t ghost, uint32_t& presses) {
+		const auto p = playerOfGhost.find(ghost);
+		game::GameWorld::PlayerInfo info;
+		if (p == playerOfGhost.end() || !m_round->playerInfo(p->second, info)) {
+			return -1;
+		}
+		presses = info.reloadPresses;
+		const auto seen = client.reloadsSent.try_emplace(p->second, info.reloadPresses).first;
+		return seen->second != info.reloadPresses ? p->second : -1;
+	};
 	const auto current = [&](uint16_t ghost) -> const std::pair<std::vector<uint8_t>, size_t>* {
+		uint32_t presses = 0;
+		if (const int player = reloadOf(ghost, presses); player >= 0) {
+			auto& entry = reloadStates[ghost];
+			if (entry.first.empty()) {
+				entry.first = playerStateOf(player, entry.second, true);
+			}
+			return &entry;
+		}
 		if (auto it = m_stateCache.find(ghost); it != m_stateCache.end()) {
 			return &it->second;
 		}
@@ -2318,6 +2501,9 @@ net::GhostBlock HostedGame::ghostsFor(int id, size_t budgetBits)
 		client.ghosts.written(ghost);
 		carried.push_back(ghost);
 		client.lastCarried[ghost] = sequence;
+		if (uint32_t presses = 0; reloadStates.count(ghost) && reloadOf(ghost, presses) >= 0) {
+			client.reloadsSent[playerOfGhost[ghost]] = presses;
+		}
 	}
 	return block;
 }
@@ -2376,15 +2562,19 @@ void HostedGame::rescore(Client& client)
 		if (ghost.basePriority == 0) {
 			continue; // never scored
 		}
-		const world::Object* o = m_round->objects().find(object);
-		if (!o) {
+		net::GhostVec3 at, velocity;
+		if (const game::Projectile* p = projectileOf(ghost)) {
+			at = {p->position.x, p->position.y, p->position.z};
+			velocity = {p->velocity.x, p->velocity.y, p->velocity.z};
+		} else if (const world::Object* o = m_round->objects().find(object)) {
+			at = {o->position().x, o->position().y, o->position().z};
+			if (const auto m = m_motion.find(object); m != m_motion.end()) {
+				velocity = {m->second.velocity.x, m->second.velocity.y, m->second.velocity.z};
+			}
+		} else {
 			continue;
 		}
-		net::GhostVec3 velocity;
-		if (const auto m = m_motion.find(object); m != m_motion.end()) {
-			velocity = {m->second.velocity.x, m->second.velocity.y, m->second.velocity.z};
-		}
-		const float score = net::ghostScore(client.eye, {o->position().x, o->position().y, o->position().z}, velocity);
+		const float score = net::ghostScore(client.eye, at, velocity);
 		if (score > 0) {
 			everyPart(ghost, (score + (ghost.projectile ? net::kGhostProjectileBonus : 0)) * ghost.basePriority, false);
 		}
@@ -2400,6 +2590,57 @@ void HostedGame::rescore(Client& client)
 		const auto it = m_ghosts.find(p.vehicle ? p.vehicle : p.soldier);
 		if (it != m_ghosts.end() && it->second.basePriority > 0) {
 			everyPart(it->second, net::kGhostTeammatePriority, true);
+		}
+	}
+	// The commander's tools (0x0057dc10's end, the asset manager
+	// DAT_00a6a390): for the team's commander with the satellite scan
+	// running (0x005a2370: the team's +0xc of its 0x3c bytes over 0) every
+	// enemy (radius -1), else with the team's UAV up (0x005a27c0: +0x4 over
+	// 0, its point at +0x14) the enemies within the game logic's +0x230
+	// (uavRadius, slot 0x28c) of it: each living enemy's soldier or vehicle
+	// (vt+0x4c) whose networkable's base priority is over 0 at 0.5, kept
+	// over a higher score (0x0057cfb0 -> 0x00581e80(..., 0.5, 1)). Then the
+	// commander's own assets (0x0057db50: the objects of the game logic's
+	// slot 0x1d0 list of his team whose +0x29c kind is 1-4) at 0.03.
+	if (me.team != 1 && me.team != 2) {
+		return;
+	}
+	const bool scan = me.commander && m_round->satelliteScanActive(me.team);
+	physics::Vec3 uavAt;
+	float uavRadius = 0;
+	const bool uav = !scan && m_round->uavArea(me.team, uavAt, uavRadius);
+	if (scan || uav) {
+		for (const auto& [player, seen] : m_players) {
+			game::GameWorld::PlayerInfo p;
+			if (!m_round->playerInfo(player, p) || !p.alive || p.team == me.team || (p.team != 1 && p.team != 2)) {
+				continue;
+			}
+			const uint32_t object = p.vehicle ? p.vehicle : p.soldier;
+			const auto it = m_ghosts.find(object);
+			if (it == m_ghosts.end() || it->second.basePriority <= 0) {
+				continue;
+			}
+			if (uav && uavRadius > 0) {
+				const world::Object* o = m_round->objects().find(object);
+				if (!o) {
+					continue;
+				}
+				const float dx = o->position().x - uavAt.x, dy = o->position().y - uavAt.y, dz = o->position().z - uavAt.z;
+				if (dx * dx + dy * dy + dz * dz > uavRadius * uavRadius) {
+					continue;
+				}
+			}
+			everyPart(it->second, net::kGhostScanPriority, true);
+		}
+	}
+	if (me.commander) {
+		using Ability = game::GameWorld::CommanderAbility;
+		for (const Ability ability : {Ability::OrbitalStrike, Ability::Artillery, Ability::Uav, Ability::Satellite}) {
+			const auto state = m_round->abilityState(me.team, ability);
+			const auto it = state.available ? m_ghosts.find(state.asset) : m_ghosts.end();
+			if (it != m_ghosts.end()) {
+				everyPart(it->second, net::kGhostTeammatePriority, true);
+			}
 		}
 	}
 }
@@ -2504,6 +2745,8 @@ void HostedGame::tick()
 	}
 	applyMoves();
 	trackObjects();
+	trackProjectiles();
+	sendBattlefieldReports();
 	trackPlayers();
 	trackSpawnGroups();
 	trackRequests();

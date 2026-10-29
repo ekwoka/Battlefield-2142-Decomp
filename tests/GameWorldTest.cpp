@@ -1802,8 +1802,8 @@ TEST(GameWorld_SpawnPointOptions)
 
 // The local soldier's own EMP level (its armour, with takesEmpDamage:
 // level = ceil(amount / empDamageStepSize), wearing off a step every
-// empLevelTime) and the tinnitus of an explosion within its radius x
-// tinnitusRange, both for the post-production.
+// empLevelTime) and the tinnitus of an explosion within 0.6 x its radius
+// (0x005a6e70, event 0xd), both for the post-production.
 TEST(GameWorld_SoldierEmpAndTinnitus)
 {
 	Range range;
@@ -1831,11 +1831,324 @@ TEST(GameWorld_SoldierEmpAndTinnitus)
 	range.world->playerInfo(range.world->localPlayer(), info);
 	CHECK(info.empLevel == 2);
 	CHECK(range.world->takeTinnitus() == 0); // an EMP rings no ears
-	CHECK(range.world->detonate("blast", origin + physics::Vec3 {0, 0, 25}));
+	CHECK(range.world->takeCameraShake() == 0); // nor shakes the view (0x005a7ab0)
+	// The default radius 10: 0.6 x 10 = 6 m.
+	CHECK(range.world->detonate("blast", origin + physics::Vec3 {0, 0, 7}));
 	CHECK(range.world->takeTinnitus() == 0);
-	CHECK(range.world->detonate("blast", origin + physics::Vec3 {0, 0, 15}));
+	CHECK(range.world->detonate("blast", origin + physics::Vec3 {0, 0, 5}));
 	CHECK(range.world->takeTinnitus() == 7);
 	CHECK(range.world->takeTinnitus() == 0); // taken once
+}
+
+// A blast's camera shake (0x005a6e70): min(damage / 150, 1) x min(force /
+// 20, 1) x 4, x 0.1 without an instigator, x (1 - d / 3r) off one's own
+// object; nothing past 3r; and an EffectBundle's own (cameraShake, the
+// mechs' footsteps: radius and damage from cameraShakeRadius / Force).
+TEST(GameWorld_ExplosionCameraShake)
+{
+	Range range;
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	game::GameWorld::PlayerInfo info;
+	range.world->playerInfo(range.world->localPlayer(), info);
+	const physics::Vec3 origin = info.position + physics::Vec3 {0, 1, 0}; // the body's
+	game::GameWorld::ShakeSource s;
+	s.at = origin + physics::Vec3 {0, 0, 5};
+	s.radius = 10;
+	s.damage = 300;
+	s.force = 150;
+	s.material = -1;
+	s.instigated = true;
+	range.world->cameraShake(s);
+	float shake = range.world->takeCameraShake();
+	std::fprintf(stderr, "  shake at 5 m of 10: %.3f\n", shake);
+	CHECK(std::fabs(shake - 4 * (1 - 5 / 30.0f)) < 1e-3f);
+	CHECK(range.world->takeCameraShake() == 0); // taken once
+	CHECK(range.world->takeTinnitus() == 0);   // material -1
+	s.instigated = false;
+	s.damage = 75; // half of 150
+	range.world->cameraShake(s);
+	CHECK(std::fabs(range.world->takeCameraShake() - 0.1f * 0.5f * 4 * (1 - 5 / 30.0f)) < 1e-4f);
+	s.at = origin + physics::Vec3 {0, 0, 31};
+	range.world->cameraShake(s);
+	CHECK(range.world->takeCameraShake() == 0);
+	// On the soldier itself: no falloff.
+	s.at = origin + physics::Vec3 {0, 0, 29};
+	s.hitObject = info.soldier;
+	s.instigated = true;
+	s.damage = 300;
+	range.world->cameraShake(s);
+	CHECK(std::fabs(range.world->takeCameraShake() - 4) < 1e-4f);
+	// A gun's round (material 0, no damage): no shake, the tinnitus within 0.6r.
+	s = {};
+	s.at = origin + physics::Vec3 {3, 0, 0};
+	s.material = 0;
+	s.radius = 12;
+	s.force = 90;
+	range.world->cameraShake(s);
+	CHECK(range.world->takeCameraShake() == 0 && range.world->takeTinnitus() == 7);
+	// The mech's footstep bundle at 3 m: 0.6 x 1 x 4 x 0.1 x (1 - 3 / 30).
+	range.templates.registerType(9, "EffectBundle");
+	world::ObjectTemplate* step = range.templates.create("EffectBundle", "us_heavy_mech_FootStepEffectLeft");
+	step->settings()["cameraShake"] = "1";
+	step->settings()["cameraShakeRadius"] = "10";
+	step->settings()["cameraShakeForce"] = "90";
+	range.world->bundleCameraShake("us_heavy_mech_FootStepEffectLeft", origin + physics::Vec3 {0, 0, 3});
+	CHECK(std::fabs(range.world->takeCameraShake() - 0.6f * 4 * 0.1f * 0.9f) < 1e-4f);
+	CHECK(range.world->takeTinnitus() == 0);
+	CHECK(range.world->takeSentShake(range.world->localPlayer()) == 0);
+}
+
+// Friendly fire (0x005b7290): a teammate's blast does
+// soldierSplashFriendlyFire percent of an enemy's; under 1 none.
+TEST(GameWorld_FriendlyFireScaling)
+{
+	const auto lost = [](float percent, bool teammate) {
+		Range range;
+		world::ObjectTemplate* blast = range.templates.create("GenericProjectile", "blast");
+		blast->components().push_back("DefaultDetonationComp");
+		blast->settings()["detonation.explosionDamage"] = "40";
+		blast->settings()["detonation.explosionMaterial"] = "69";
+		game::GameWorld::FriendlyFire ff;
+		ff.soldierSplash = percent;
+		range.world->setFriendlyFire(ff);
+		const int victim = range.world->addPlayer("Victim", 2, true);
+		const int attacker = range.world->addPlayer("Attacker", teammate ? 2 : 1, true);
+		CHECK(range.world->spawnSoldier(victim) && range.world->spawnSoldier(attacker));
+		game::GameWorld::PlayerInfo info;
+		range.world->playerInfo(victim, info);
+		CHECK(range.world->detonate("blast", info.position + physics::Vec3 {0, 1, 2}, attacker));
+		return 100 - range.world->hitPoints(info.soldier);
+	};
+	const float enemy = lost(50, false), half = lost(50, true), none = lost(0.5f, true);
+	std::fprintf(stderr, "  blast: %.2f from an enemy, %.2f from a teammate at 50%%, %.2f at 0.5%%\n", enemy, half, none);
+	CHECK(enemy > 1 && std::fabs(half - enemy * 0.5f) < 0.01f && none == 0);
+}
+
+// hasOnTimeEffect (0x005b62a0): a fused round whose time runs out goes off
+// (event 0x1f) with it, and is only removed (0x20) without.
+TEST(GameWorld_OnTimeEffect)
+{
+	for (const bool effect : {true, false}) {
+		Range range;
+		world::ObjectTemplate* grenade = range.templates.create("GenericProjectile", "grenade");
+		grenade->components().push_back("DefaultDetonationComp");
+		grenade->settings()["detonation.explosionDamage"] = "60";
+		grenade->settings()["detonation.explosionMaterial"] = "69";
+		grenade->settings()["detonation.explosionRadius"] = "8";
+		grenade->settings()["timeToLive"] = "0.2";
+		grenade->settings()["hasOnTimeEffect"] = effect ? "1" : "0";
+		grenade->settings()["physicsType"] = "RotationalPoint";
+		range.templates.find("eu_ar_rifle")->settings()["projectileTemplate"] = "grenade";
+		range.templates.find("eu_ar_rifle")->settings()["velocity"] = "1";
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		game::GameWorld::PlayerInfo me;
+		range.world->playerInfo(range.world->localPlayer(), me);
+		game::SoldierInput fire;
+		fire.fire = true;
+		range.world->setPlayerInput(fire);
+		range.world->tick(1 / 30.0f);
+		range.world->setPlayerInput({});
+		for (int i = 0; i < 30; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		CHECK(range.world->projectilesInFlight() == 0);
+		const float hp = range.world->hitPoints(me.soldier);
+		std::fprintf(stderr, "  hasOnTimeEffect %d: %.1f hit points left\n", effect ? 1 : 0, hp);
+		CHECK(effect ? hp < 100 : hp == 100);
+	}
+}
+
+// The dog-tag knife (0x00570ab0): the kit's isDogtagReplacement container
+// takes the place of the knife for a player with totalDogtagCount 50 or
+// more, unlocked or not.
+TEST(GameWorld_DogtagReplacement)
+{
+	for (const int tags : {49, 50}) {
+		Range range;
+		range.templates.registerType(6, "Kit");
+		range.templates.registerType(7, "ItemContainer");
+		for (const char* name : {"knife", "knife_unlock"}) {
+			world::ObjectTemplate* knife = range.templates.create("GenericFireArm", name);
+			knife->settings()["itemIndex"] = "1";
+		}
+		range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+		world::ObjectTemplate* tag = range.templates.create("ItemContainer", "UnlockEU_AssaultDogTagReplacement");
+		tag->settings()["isDogtagReplacement"] = "1";
+		tag->settings()["replaceItem.list"] = "knife;";
+		tag->children().push_back({"knife_unlock", {}, {}});
+		world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+		kit->children().push_back({"knife", {}, {}});
+		kit->children().push_back({"eu_ar_rifle", {}, {}});
+		kit->children().push_back({"UnlockEU_AssaultDogTagReplacement", {}, {}});
+		const int me = range.world->addPlayer("Me", 2, true);
+		range.world->setKit(me, "EU_Assault", "us_light_soldier");
+		range.world->setDogtagCount(me, tags);
+		CHECK(range.world->spawnSoldier(me));
+		game::GameWorld::PlayerInfo info;
+		range.world->playerInfo(me, info);
+		std::string first;
+		for (const auto& [slot, name] : info.carried) {
+			if (slot == 1) {
+				first = name;
+			}
+		}
+		std::fprintf(stderr, "  %d dog tags: %s\n", tags, first.c_str());
+		CHECK(first == (tags >= 50 ? "knife_unlock" : "knife"));
+	}
+}
+
+// Object.disableChildren (0x006f6fd0): a placed object's children leave
+// the scene, so a gas tank's ladder can't be climbed.
+TEST(GameWorld_DisabledChildrenHaveNoLadder)
+{
+	for (const bool disabled : {false, true}) {
+		Range range;
+		range.collisionTemplates.add("ladder_mesh",
+			panelMesh({{-0.3f, 0, -0.05f}, {0.3f, 0, -0.05f}, {0.3f, 6, -0.05f}, {-0.3f, 6, -0.05f}},
+				{{{0, 1, 2}, 0}, {{0, 2, 3}, 0}}));
+		range.templates.registerType(8, "Ladder");
+		range.templates.registerType(6, "SimpleObject");
+		world::ObjectTemplate* ladder = range.templates.create("Ladder", "ladder_5m_c");
+		ladder->settings()["collisionMesh"] = "ladder_mesh";
+		world::ObjectTemplate* tank = range.templates.create("SimpleObject", "gastank_c");
+		tank->children().push_back({"ladder_5m_c", {}, {}});
+		Console console;
+		world::registerWorldConsoleMethods(console, range.templates, range.objects);
+		std::string out;
+		console.execute("Object.create gastank_c", out);
+		console.execute("Object.absolutePosition 0/0/40", out);
+		if (disabled) {
+			console.execute("Object.disableChildren 1", out);
+		}
+		console.execute("Object.disableChildren", out);
+		CHECK(out == (disabled ? "1" : "0"));
+		range.world->startRound();
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		const int me = range.world->localPlayer();
+		game::GameWorld::PlayerInfo info;
+		range.world->playerInfo(me, info);
+		range.world->setSoldierPosition(info.soldier, {0, 0, 39.5f});
+		game::SoldierInput climb;
+		climb.aimPitch = 20;
+		climb.throttle = 1;
+		climb.turn = -info.yaw;
+		bool on = false;
+		for (int i = 0; i < 30 && !on; ++i) {
+			range.world->setInput(me, climb);
+			climb.turn = 0;
+			range.world->tick(1 / 30.0f);
+			on = range.world->onLadder(me);
+		}
+		CHECK(on == !disabled);
+	}
+}
+
+// The unlocks' sprint modifiers (0x005706b0 -> the stamina's 0x00645790):
+// sprintUseModifier slows the drain, sprintRechargeModifier speeds the
+// recovery; setOverheatMod scales the named gadget's heat per round; and a
+// squad member spawning on the beacon waits sv.spawnTime x its leader's
+// beaconSpawnTimeMod (0x004bb220 -> player slot 0x108, 0x005913c0).
+TEST(GameWorld_UnlockSprintHeatAndBeaconModifiers)
+{
+	const auto run = [](bool unlocked, float& drained, float& recovered, float& heat) {
+		Range range;
+		range.templates.registerType(6, "Kit");
+		range.templates.registerType(7, "ItemContainer");
+		world::ObjectTemplate* soldier = range.templates.find("us_light_soldier");
+		soldier->settings()["sprintDissipationTime"] = "10";
+		soldier->settings()["sprintRecoverTime"] = "20";
+		soldier->settings()["sprintLimit"] = "0.1";
+		world::ObjectTemplate* unlock = range.templates.create("ItemContainer", "UnlockEU_AssaultPlayer1");
+		unlock->settings()["ability.sprintUseModifier"] = "0.5";
+		unlock->settings()["ability.sprintRechargeModifier"] = "1.5";
+		unlock->settings()["ability.setOverheatMod.list"] = "unl_active_camo 0.5;";
+		world::ObjectTemplate* camo = range.templates.create("GenericFireArm", "unl_active_camo");
+		camo->settings()["itemIndex"] = "5";
+		camo->settings()["ammo.magSize"] = "-1";
+		camo->settings()["fire.roundsPerMinute"] = "1800";
+		camo->settings()["heatAddWhenFire"] = "0.02";
+		camo->components().push_back("CamouflageAmmoComp");
+		range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+		world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+		kit->children().push_back({"eu_ar_rifle", {}, {}});
+		kit->children().push_back({"unl_active_camo", {}, {}});
+		kit->children().push_back({"UnlockEU_AssaultPlayer1", {}, {}});
+		const int me = range.world->addPlayer("Me", 2, true);
+		range.world->setKit(me, "EU_Assault", "us_light_soldier");
+		if (unlocked) {
+			range.world->setUnlocks(me, {"UnlockEU_AssaultPlayer1"});
+		}
+		CHECK(range.world->spawnSoldier(me));
+		game::SoldierInput input;
+		input.throttle = 1;
+		input.sprint = true;
+		for (int i = 0; i < 120; ++i) { // four seconds' sprint
+			range.world->setInput(me, input);
+			range.world->tick(1 / 30.0f);
+		}
+		game::GameWorld::PlayerInfo info;
+		range.world->playerInfo(me, info);
+		drained = 1 - info.stamina;
+		const float low = info.stamina;
+		for (int i = 0; i < 45; ++i) { // a second and a half standing
+			range.world->setInput(me, {});
+			range.world->tick(1 / 30.0f);
+		}
+		range.world->playerInfo(me, info);
+		recovered = info.stamina - low;
+		input = {};
+		input.selectItem = 5;
+		range.world->setInput(me, input);
+		range.world->tick(1 / 30.0f);
+		input = {};
+		input.fire = true;
+		range.world->setInput(me, input);
+		range.world->tick(1 / 30.0f);
+		range.world->playerInfo(me, info);
+		heat = info.heat;
+	};
+	float drained[2], recovered[2], heat[2];
+	run(false, drained[0], recovered[0], heat[0]);
+	run(true, drained[1], recovered[1], heat[1]);
+	std::fprintf(stderr, "  drained %.3f / %.3f, recovered %.3f / %.3f, heat %.4f / %.4f\n", drained[0], drained[1],
+		recovered[0], recovered[1], heat[0], heat[1]);
+	CHECK(drained[0] > 0.1f && std::fabs(drained[1] - drained[0] * 0.5f) < 0.01f);
+	CHECK(recovered[0] > 0.05f && std::fabs(recovered[1] - recovered[0] * 1.5f) < 0.01f);
+	CHECK(heat[0] > 0 && std::fabs(heat[1] - heat[0] * 0.5f) < 1e-4f);
+
+	// The beacon: a member who chose it waits 15 s x the leader's 0.8.
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "ItemContainer");
+	range.templates.create("ItemContainer", "UnlockEU_AssaultSquadLeader3")->settings()["ability.beaconSpawnTimeMod"] =
+		"0.8";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	kit->children().push_back({"UnlockEU_AssaultSquadLeader3", {}, {}});
+	const int leader = range.world->addPlayer("Leader", 2, true);
+	const int member = range.world->addPlayer("Member", 2, true);
+	CHECK(range.world->joinSquad(leader, range.world->openSquad(2)));
+	CHECK(range.world->joinSquad(member, 1));
+	for (const int id : {leader, member}) {
+		range.world->setKit(id, "EU_Assault", "us_light_soldier");
+	}
+	range.world->setUnlocks(leader, {"UnlockEU_AssaultSquadLeader3"});
+	CHECK(range.world->spawnSoldier(leader) && range.world->spawnSoldier(member));
+	const auto waitAfterDeath = [&](int choice) {
+		range.world->setSpawnChoice(member, choice);
+		game::GameWorld::PlayerInfo info;
+		range.world->playerInfo(member, info);
+		range.world->setHitPoints(info.soldier, 0);
+		range.world->tick(1 / 30.0f);
+		range.world->playerInfo(member, info);
+		const float wait = info.respawnIn;
+		range.world->spawnSoldier(member);
+		return wait;
+	};
+	const float plain = waitAfterDeath(-1), onBeacon = waitAfterDeath(game::GameWorld::kSpawnOnBeacon);
+	std::fprintf(stderr, "  respawn wait %.2f, on the beacon %.2f\n", plain, onBeacon);
+	CHECK(plain > 1 && std::fabs(onBeacon - plain * 0.8f) < 0.05f);
 }
 
 // An unlock's Ability lists: ability.addExtraAmmoItem gives the rifle
@@ -2374,6 +2687,39 @@ TEST(GameWorld_WreckDrainsFasterWithBots)
 		}
 		std::fprintf(stderr, "  ai %d: the wreck went after %d ticks\n", ai, ticks);
 		CHECK(ai ? (ticks >= 29 && ticks <= 32) : (ticks >= 89 && ticks <= 92));
+	}
+}
+
+// The wreck's own blast (0x00654120): drained to -wreckHitPoints, a wreck
+// with armor.wreckExplosionDamage goes off with its wreckExplosion radius
+// and material, hurting a soldier near it.
+TEST(GameWorld_WreckExplodes)
+{
+	for (const bool blast : {false, true}) {
+		ExitRange range;
+		range.jeep->settings()["armor.maxHitPoints"] = "100";
+		range.jeep->settings()["armor.wreckHitPoints"] = "50";
+		range.jeep->settings()["armor.timeToStayAsWreck"] = "1";
+		if (blast) {
+			range.jeep->settings()["armor.wreckExplosionDamage"] = "60";
+			range.jeep->settings()["armor.wreckExplosionRadius"] = "8";
+			range.jeep->settings()["armor.wreckExplosionMaterial"] = "69";
+		}
+		range.id = range.objects.create(range.jeep, {0, 1, 40})->id();
+		range.world->tick(1 / 30.0f);
+		const int bot = range.world->addPlayer("Bot", 2, true);
+		CHECK(range.world->spawnSoldier(bot));
+		game::GameWorld::PlayerInfo info;
+		range.world->playerInfo(bot, info);
+		range.world->setSoldierPosition(info.soldier, {3, 0, 40});
+		range.world->applyDamage(range.id, 1000, -1);
+		for (int i = 0; i < 60 && range.objects.find(range.id); ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		CHECK(!range.objects.find(range.id));
+		const float hp = range.world->hitPoints(info.soldier);
+		std::fprintf(stderr, "  wreck blast %d: the soldier at 3 m has %.1f\n", blast ? 1 : 0, hp);
+		CHECK(blast ? hp < 100 : hp == 100);
 	}
 }
 

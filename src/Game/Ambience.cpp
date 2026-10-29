@@ -125,6 +125,15 @@ void GameWorld::ambientShot(const Player& player)
 	if (m_ambience.triggers() == 0) {
 		return;
 	}
+	// 0x005c4500: only a weapon whose sound component is noisy (its
+	// template's sound.noisy, +0xc, on unless a script sets 0; the object
+	// part's slot 0x98, 0x005e7840).
+	if (const world::ObjectTemplate* weapon = player.vehicle == 0 ? m_templates.find(player.weaponTemplate) : nullptr) {
+		const auto noisy = weapon->settings().find("sound.noisy");
+		if (noisy != weapon->settings().end() && noisy->second == "0") {
+			return;
+		}
+	}
 	const uint32_t id = player.vehicle != 0 ? player.vehicle : player.object;
 	if (const world::Object* object = m_objects.find(id)) {
 		AmbientTriggers::Activator a;

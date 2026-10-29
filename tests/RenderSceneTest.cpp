@@ -7,6 +7,7 @@
 #include "Console/Console.h"
 #include "Effects/Effects.h"
 #include "Geometry/GeometryTemplateManager.h"
+#include "Render/AnimatedUV.h"
 #include "Render/EnvMaps.h"
 #include "Render/Fog.h"
 #include "Render/OverheadView.h"
@@ -17,6 +18,7 @@
 #include "TestMain.h"
 #include "World/ObjectTemplateManager.h"
 
+#include <array>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -358,4 +360,69 @@ TEST(RenderScene_EnvMapsAndNearFade)
 	CHECK(near(effects::ParticleView::nearFade(0.1f, 0.1f, 1), 0));
 	// 5 m past it: t = 0.5, f = 1 - 0.05 x 4 = 0.8: 0.5 + 0.5 x 0.8.
 	CHECK(near(effects::ParticleView::nearFade(5.1f, 0.1f, 0.2f), 0.9f));
+}
+
+TEST(RenderScene_AnimatedUVFollowsThePartsTravel)
+{
+	// EU_TANK_tracks_left: v scrolls by the distance / 8, wrapped into [0, 0.285].
+	render::AnimatedUVSettings tracks;
+	tracks.translation = true;
+	tracks.max[0] = 0;
+	tracks.max[1] = 0.285f;
+	tracks.size[0] = 0;
+	tracks.size[1] = 8;
+	tracks.translationIndex = 5;
+	std::array<render::UVMatrix, render::kAnimatedUVMatrices> matrices {};
+	render::AnimatedUVState state;
+	const float z[3] = {0, 0, 1};
+	float at[3] = {10, 0, 20};
+	render::updateAnimatedUV(tracks, state, at, z, matrices); // the first update moves nothing
+	CHECK(state.uv[1] == 0 && matrices[5].r2[1] == 0);
+	at[2] = 19; // a metre backwards along z: +1 / 8
+	render::updateAnimatedUV(tracks, state, at, z, matrices);
+	CHECK(near(state.uv[1], 0.125f) && near(matrices[5].r2[1], 0.125f) && matrices[5].r2[0] == 0);
+	at[2] = 17; // two more: 0.375 wraps to 0.09
+	render::updateAnimatedUV(tracks, state, at, z, matrices);
+	CHECK(near(state.uv[1], 0.375f - 0.285f));
+	at[2] = 25; // forwards: -1, back into [0, 0.285]
+	render::updateAnimatedUV(tracks, state, at, z, matrices);
+	CHECK(state.uv[1] >= 0 && state.uv[1] <= 0.285f && near(state.uv[1], std::fmod(0.09f - 1.0f + 4 * 0.285f, 0.285f), 1e-3f));
+	// Reverse subtracts; sideways travel does nothing.
+	render::AnimatedUVSettings reverse = tracks;
+	reverse.translationReverse = true;
+	render::AnimatedUVState r;
+	float p[3] = {0, 0, 0};
+	render::updateAnimatedUV(reverse, r, p, z, matrices);
+	p[2] = -0.8f;
+	render::updateAnimatedUV(reverse, r, p, z, matrices);
+	CHECK(near(r.uv[1], 0.285f - 0.1f));
+	p[0] = 5;
+	render::updateAnimatedUV(reverse, r, p, z, matrices);
+	CHECK(near(r.uv[1], 0.185f));
+
+	// EU_TANK_Rwheel_06's turn: angle = distance / radius 0.3, the matrix
+	// rows (cos sx, -sin sy), (sin sx, cos sy), row 2 zero.
+	render::AnimatedUVSettings wheel;
+	wheel.rotation = true;
+	wheel.radius = 0.3f;
+	wheel.scale[0] = 0.5f;
+	wheel.scale[1] = 1;
+	wheel.rotationIndex = 3;
+	render::AnimatedUVState w;
+	float c[3] = {0, 0, 0};
+	matrices[3].r2[0] = 7;
+	render::updateAnimatedUV(wheel, w, c, z, matrices);
+	c[2] = -0.3f; // one radian
+	render::updateAnimatedUV(wheel, w, c, z, matrices);
+	CHECK(near(w.angle, 1.0f, 1e-4f));
+	CHECK(near(matrices[3].r0[0], std::cos(1.0f) * 0.5f) && near(matrices[3].r0[1], -std::sin(1.0f)));
+	CHECK(near(matrices[3].r1[0], std::sin(1.0f) * 0.5f) && near(matrices[3].r1[1], std::cos(1.0f)));
+	CHECK(matrices[3].r2[0] == 0 && matrices[3].r2[1] == 0);
+	c[2] = 0.3f; // two radians back: wrapped into [0, 2 pi]
+	render::updateAnimatedUV(wheel, w, c, z, matrices);
+	CHECK(near(w.angle, 6.2831855f - 1.0f, 1e-4f));
+
+	float v[2] = {0, 0};
+	render::parseAnimatedUVVec2("0.2/0.285", v);
+	CHECK(near(v[0], 0.2f) && near(v[1], 0.285f));
 }

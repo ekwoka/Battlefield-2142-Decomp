@@ -128,6 +128,13 @@ struct RainSettings {
 	float fadeOutRange = 0.875f; // of the box, where the fade starts
 	std::array<float, 3> maxDeviation {};
 	std::array<float, 2> angleSpeed {};
+	// The deviation groups' walk (RendDX9 0x1011a860, the rain manager's
+	// +0x6384 / +0x6388 / +0x638c, constructor 0x1011d370): one chance in
+	// `randomness` a frame that a group's speeds change to (a random
+	// 0..randomDeviationAngleSpeed - 1) x maxRandomChange.
+	int randomness = 1000;
+	float maxRandomChange = 0.3f;
+	int randomDeviationAngleSpeed = 1;
 	bool lineDisplay = false;
 	float lineLength = 3;
 	std::string texture; // without ".dds"

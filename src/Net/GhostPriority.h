@@ -61,7 +61,8 @@ float ghostScore(const GhostEye& eye, const GhostVec3& position, const GhostVec3
 constexpr float kGhostNewPriority = 10000; // 0x00581e80, 0x00581d40
 constexpr float kGhostAlwaysPriority = 255; // 0x437f0000
 constexpr float kGhostProjectileBonus = 0.3f; // 0x0057d560
-constexpr float kGhostTeammatePriority = 0.03f; // 0x3cf5c28f
+constexpr float kGhostTeammatePriority = 0.03f; // 0x3cf5c28f (also the commander's assets, 0x0057db50)
+constexpr float kGhostScanPriority = 0.5f;      // 0x3f000000: enemies in the scan or the UAV's radius (0x0057cfb0)
 constexpr size_t kGhostEntriesPerPacket = 40; // gm +0x213c
 constexpr size_t kGhostMinimumBitsLeft = 24;  // 0x18
 constexpr float kGhostRescoreSeconds = 0.1f;  // 0x00920bd8

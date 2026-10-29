@@ -143,11 +143,8 @@ std::vector<uint32_t> ScriptBridge::triggerCandidates(const std::string&)
 			found.push_back(player.soldier);
 		}
 	}
-	for (const auto& object : m_world.objects().objects()) {
-		if (m_world.isVehicle(object->id())) {
-			found.push_back(object->id());
-		}
-	}
+	const std::vector<uint32_t> vehicles = m_world.vehicleObjects();
+	found.insert(found.end(), vehicles.begin(), vehicles.end());
 	return found;
 }
 
@@ -458,6 +455,11 @@ void ScriptBridge::setPlayerParam(const std::string& name, int index, const Scri
 	}
 	if (name == "isInsideCP" && index == m_world.localPlayer()) {
 		m_world.playerInsideControlPoint = value.asInt() != 0;
+	}
+	// pmgr_p_set "totalDogtagCount" (0x0056a610: player +0x104, slot 0x39c):
+	// the kit build's dog-tag replacement (GameWorld::setDogtagCount).
+	if (name == "totalDogtagCount") {
+		m_world.setDogtagCount(index, static_cast<int>(value.asInt()));
 	}
 	m_playerParams[index][name] = value;
 }

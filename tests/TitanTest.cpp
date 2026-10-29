@@ -633,3 +633,47 @@ TEST(Titan_BotsManHalfTheGuns)
 	std::fprintf(stderr, "  of 6 bots aboard: %d at the guns, %d on foot aboard\n", gunners, aboard);
 	CHECK(gunners >= 1 && gunners <= 3);
 }
+
+// 0x004bbf60's tail / 0x006f2b00: a PAC soldier inside EU's Titan's
+// coreroom (its type-5 hull) while the shield is up dies
+// within 64 ticks with no attacker; an EU soldier there lives.
+TEST(Titan_EnemyInsideTheHullDies)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Minsk", 48);
+	CHECK(level.loaded);
+	if (!level.loaded) {
+		return;
+	}
+	const auto* titan = level.titan(2);
+	CHECK(titan != nullptr);
+	if (!titan) {
+		return;
+	}
+	// The coreroom (eu_titan_coreroom at 0/-0.081/-53.40 in the Titan, its
+	// hull 48 x 13 x 79 m from z -21 to 58): the middle of it.
+	const world::Object* object = level.objects.find(titan->object);
+	const physics::Mat3 turn =
+		physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+	const physics::Vec3 at = physics::Vec3 {object->position().x, object->position().y, object->position().z}
+		+ turn.transform({0, -0.081f, -53.4f + 18});
+	const int pac = level.world->addPlayer("Pac", 1, true);
+	const int eu = level.world->addPlayer("Eu", 2, true);
+	CHECK(level.world->spawnSoldier(pac) && level.world->spawnSoldier(eu));
+	for (const int id : {pac, eu}) {
+		game::GameWorld::PlayerInfo info;
+		level.world->playerInfo(id, info);
+		level.world->setSoldierPosition(info.soldier, {at.x, at.y, at.z});
+	}
+	for (int i = 0; i < 64; ++i) {
+		level.world->tick(1 / 30.0f);
+	}
+	game::GameWorld::PlayerInfo a, b;
+	level.world->playerInfo(pac, a);
+	level.world->playerInfo(eu, b);
+	std::fprintf(stderr, "  in EU's Titan: PAC %s, EU %s\n", a.alive ? "alive" : "dead", b.alive ? "alive" : "dead");
+	CHECK(!a.alive && b.alive);
+}

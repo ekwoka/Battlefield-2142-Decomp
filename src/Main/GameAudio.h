@@ -45,12 +45,16 @@ namespace sound {
 class SoundManager;
 class GameSounds;
 class VoiceMessages;
+class ISound;
 }
 
 class GameAudio {
 public:
 	GameAudio(game::GameWorld& round, world::ObjectManager& objects, world::ObjectTemplateManager& templates,
 		sound::SoundManager& manager, sound::GameSounds& sounds, sound::VoiceMessages* voices);
+	~GameAudio();
+	GameAudio(const GameAudio&) = delete;
+	GameAudio& operator=(const GameAudio&) = delete;
 
 	struct Camera {
 		sound::Vec3 position, forward {0, 0, 1}, up {0, 1, 0}, velocity;
@@ -109,9 +113,46 @@ public:
 	void setHudWorld(const host::HudWorld* world) { m_hud = world; }
 
 	// Counters, for --verbose and tests.
-	int weaponSounds = 0, radioHeard = 0, voiceOvers = 0;
+	int weaponSounds = 0, radioHeard = 0, voiceOvers = 0, materialRadios = 0;
+
+	// What the listener was given this tick (tests, --verbose): the local
+	// player's seat PlayerControlObject (empty on foot or without one),
+	// its interior loop ("" none), the listener-3d-obstruction tweak, the
+	// wind wanted and the inside-Titan flag.
+	struct ListenerState {
+		std::string seat;
+		std::string ambient;
+		float listenerObstruction = 0;
+		bool windWanted = false;
+		bool insideTitan = false;
+		bool panting = false;
+		int injuries = 0;
+	};
+	const ListenerState& listenerState() const { return m_listenerState; }
+	// The new-style engine audio's (audio.newStyleAudio, 0x007fe740) state
+	// of one engine and its step, for tests: `on` the throttle held,
+	// `clutch` 0..1, `rpm` the engine's, `gear`, `speed` the root's,
+	// `clock` seconds; gives the envelopes' input and the two rpm loops'
+	// volume scales (Rpm1, Rpm2).
+	struct NewStyleEngine {
+		float throttleBlend = 0;      // +0x78
+		float jitter = 0;             // +0x80
+		int jitterCountdown = 0;      // +0x7c
+		float smoothed = 0, smoothedSpeed = 0; // +0x84, +0x94
+		int gear = -1, lastGear = 1;  // +0x90
+		float swayLeft = -1;          // +0x8c
+		uint32_t random = 0x1234567u;
+		bool shifted = false;         // the Load sound's cue this step
+		float input = 0, rpm1Scale = 1, rpm2Scale = 0;
+	};
+	static void stepNewStyle(NewStyleEngine& engine, bool on, float clutch, float rpm, int gear, float speed,
+		double clock);
 
 private:
+	void listener(Camera& camera);
+	void interior(const game::GameWorld::PlayerInfo& me, bool firstPerson);
+	void soldierHud(const game::GameWorld::PlayerInfo& me, bool alive);
+	void materialRadio();
 	void weapons(const Camera& camera);
 	void engines();
 	void projectiles();
@@ -148,6 +189,39 @@ private:
 		float lastLeft = -1;
 	};
 	std::map<uint32_t, SiloSounds> m_silos;
+	ListenerState m_listenerState;
+	// The interior loops of the local player's seat (S_<pco>_Ambient /
+	// _AmbientDamaged, PlayerControlObject +0x2fc / +0x300; 2D loops made
+	// by 0x005c6dc0), their envelopes read at +0x304 (the root's speed).
+	struct Interior {
+		uint32_t vehicle = 0;
+		int seat = -2;
+		std::string pco;
+		sound::ISound* ambient = nullptr;
+		sound::ISound* damaged = nullptr;
+		float obstruction = 0, damagedLimit = 0.5f, maxHitPoints = 0;
+		float speedInput = 0; // +0x304
+	} m_interior;
+	void releaseInterior();
+	// The soldier HUD's sounds (the vehicleHud object part 0x009890c0):
+	// panting's latch (+0x10) and the injury's last fraction (+0x1cc) and
+	// timer (+0xb8).
+	bool m_panting = false;
+	std::string m_pantingSound;
+	float m_lastHealth = -1, m_injuryTimer = -1;
+	// Who is firing (the automatic loops' release, 0x005db6c0) and when
+	// their last round left (ticks).
+	struct Trigger {
+		bool firing = false;
+		int lastRound = -1000;
+		int interval = 2;
+	};
+	std::map<uint64_t, Trigger> m_triggers;
+	int m_tick = 0;
+	std::map<uint64_t, NewStyleEngine> m_newStyle;
+	std::map<std::string, bool> m_newStyleEngines; // engine template -> audio.newStyleAudio
+	std::map<std::pair<const void*, int>, double> m_materialRadioNext; // the cells' next times (0x0060c5e0)
+	int m_materialScanIn = 0;
 };
 
 } // namespace dice::hfe

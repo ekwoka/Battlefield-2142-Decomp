@@ -121,9 +121,10 @@ public:
 	// t the time spent above the start speed); and the hit shake
 	// (0x00610450 then 0x00610240's last part): for 0.6 s (*0x00a73a14)
 	// (1 - u) x sin(u x 7 x 2 pi) x the hit x 2 (*0x00a73a0c = 7,
-	// *0x00a73a10 = 2), u the share of the 0.6 s gone. The hit's measure
-	// (0x00610450's argument) is not traced to its caller: the rewrite
-	// gives the share of the vehicle's hit points one hit took.
+	// *0x00a73a10 = 2), u the share of the 0.6 s gone. The hit (0x00610450's
+	// argument) is a blast's amount from 0x005a6e70 (GameWorld::cameraShake,
+	// taken each tick), the camera reached through player slot 0x1b4(0)
+	// slot 0x4c (vtable 0x00979a50 slot 19); on foot the SoldierCamera's.
 	// And the gun's camera recoil (game::CameraRecoil: the seat's
 	// WeaponBasedRecoilComp's cameraRecoilSpeed / cameraRecoilSize, started
 	// by each round its gun fires while the view is the inside or the nose
@@ -299,7 +300,7 @@ private:
 	// The seat camera's shakes (shakeDegrees) and their clocks.
 	void stepShakes(float seconds);
 	float m_speedShake = 0, m_hitShake = 0, m_shakeTime = 0;
-	float m_hitLeft = 0, m_hitStrength = 0, m_lastVehicleHp = -1;
+	float m_hitLeft = 0, m_hitStrength = 0;
 	game::CameraRecoil m_cameraRecoil;
 	float m_recoilShake = 0;
 	uint32_t m_lastGunShots = 0;

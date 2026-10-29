@@ -217,6 +217,9 @@ struct FireArmSettings {
 	// begun while nobody uses it (0x005f4bb0); without it the reload is
 	// dropped when its user leaves (0x005f3a40: +0x3c, +0x34, +0x20 cleared).
 	bool reloadWithoutPlayer = false;
+	// fire.busyUntilButtonRelease (SingleFireComp +0x9c, setter 0x004e3f33):
+	// see FireArm::fire.
+	bool busyUntilButtonRelease = false;
 	// keepProjectiles (the firearm template's +0x318, 5 by default,
 	// 0x005c2800): when the firearm goes, its rounds still in the world
 	// (its list +0x18) are removed this many seconds later (0x005f1cc0:
@@ -307,6 +310,7 @@ private:
 	int m_mode = kFireAutomatic;
 	bool m_useModes = true;
 	bool m_triggerWas = false;
+	bool m_busyUntilRelease = false; // a round fired with busyUntilButtonRelease, trigger still held
 	bool m_pending = false; // a press waiting for the gun
 	int m_burstLeft = 0;
 	int m_tracerCount = 0; // +0x78
@@ -346,8 +350,9 @@ struct CameraRecoil {
 // recoilForce above 0 the round also pushes the vehicle's root body by
 // -forward x recoilForce at the gun (physics slot 0xa0, 0x006c7b10: added
 // to the acceleration, its moment to the torque; slot 0x160 wakes it).
-// (Above 5 the force also starts 0x005a6e70, the explosions' camera shake
-// for the players near, which the rewrite leaves out.)
+// Above 5 the force also starts 0x005a6e70 at the gun (GameWorld::cameraShake:
+// radius min(force, 12), material 0, no damage: the tinnitus of a soldier
+// on foot near it, no shake).
 struct GunRecoil {
 	float force = 0, speed = 0, speedGB = 0, size = 0;
 	uint32_t kickEnd = 0, returnEnd = 0; // ticks (0: at rest)
@@ -394,6 +399,14 @@ struct Projectile {
 	physics::Vec3 tracerOffset;
 	physics::Vec3 tracerStart;
 	bool tracerHit = false; // +0x23c: it hit something (the tracer sits on the round from then on)
+	// A joined client's round (GameWorld::fireRemoteRound, launchRemoteProjectile):
+	// it flies, hits and shows its effects, tracer and decals as any, but
+	// damages nothing: the client game logic (vtable 0x0092a530) has a
+	// return (0x008c961e) in the hit slots 0xf8..0x104 where the server's
+	// (0x009294e8) has 0x004ba440, 0x004ba500, 0x004ba5c0 and 0x004ba3f0.
+	bool visual = false;
+	uint32_t ghostObject = 0; // a server projectile's ghost object it follows (0: the client's own round)
+	uint32_t serial = 0;      // a stable id (the server's projectile ghosts, HostedGame::trackProjectiles)
 };
 
 // A tracer's place and size this frame (0x005b3e60, 0x005b3cb0): `round`

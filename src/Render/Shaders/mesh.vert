@@ -25,9 +25,13 @@ layout(set = 1, binding = 0) uniform Transforms {
 	vec4 sway;
 	// x: the normal map's space (0 none, 1 the tangent's: bundled and static
 	// meshes, a skinned mesh's tangent-space map; 2 the object's).
+	// y: an AnimatedUV technique (RaShaderBM _HASUVANIMATION_, below).
 	vec4 normalSpace;
 	mat4 parts[64];         // bundled-mesh part transforms (identity for others; a
 	                        // static mesh is sent only the first)
+	// The bundled instance's UV matrices (RendDX9 +0x28c): rows 0 and 1,
+	// then row 2, two vec4s each (sent with bundled meshes only).
+	vec4 uvMatrices[16];
 };
 
 layout(location = 0) out vec3 outNormal;
@@ -79,6 +83,15 @@ void main()
 		outBasisZ = outNormal;
 	}
 	outTexCoord = inTexCoord;
+	if (normalSpace.y > 0.5) {
+		// calcUVRotation: (TexUVRotCenter, 1) x uvMatrix[IndexArray[3]] +
+		// TexDiffuse; the centre is texture set 1 (inDetailCoord), the
+		// matrix the fourth blend index byte (inDirtCoord.x for bundled
+		// meshes).
+		int m = clamp(int(inDirtCoord.x + 0.5), 0, 7) * 2;
+		vec4 rows = uvMatrices[m];
+		outTexCoord = inDetailCoord.x * rows.xy + inDetailCoord.y * rows.zw + uvMatrices[m + 1].xy + inTexCoord;
+	}
 	outDepth = gl_Position.w;
 	outLightmapCoord = inLightmapCoord * lightmapTransform.xy + lightmapTransform.zw;
 	outDetailCoord = inDetailCoord;

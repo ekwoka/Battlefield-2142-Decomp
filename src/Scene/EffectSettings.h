@@ -108,6 +108,27 @@ struct ParticleSystemSettings {
 	float shimmerIntensity = 0.75f, shimmerPhases = 20, shimmerSpeed = 10;
 	float nsaShimmerIntensity = 0.75f, nsaShimmerPhases = 20, nsaShimmerSpeed = 10;
 	float trailShimmerIntensity = 0.75f, trailShimmerPhases = 20, trailShimmerSpeed = 10;
+	// DecalManager.* (RendDX9's decal manager DAT_101ffc78, its
+	// constructor's defaults): a decal set's decals age each frame
+	// (0x10164f10) and go at timeToLive (+0x10, 20 s), their alpha 1 -
+	// saturate((age - ttl p) / (ttl - ttl p)) with p =
+	// fadeOutAtPercentageOfTimeToLive (+0x1c, 0.85), not drawn below +0x3240
+	// (0.05, 0x10163570); Decals.fx fades them by depth, 1 -
+	// saturate((z - fadeDistance) / (fadeDistance x startFadePercentage
+	// OfFadeDistancel)) (DecalFadeDistanceAndInterval, +0x3238 50 and
+	// +0x3244 0.85, 0x10163810). decalNormalOffset (+0x3248, 0.01) lifts
+	// them off the surface; decalGeomClipAngle (+0x324c, 60) is the
+	// clipping's (0x10165f60), which the rewrite's flat squares don't do.
+	bool decalDrawStats = false;
+	float decalNormalOffset = 0.01f;
+	float decalGeomClipAngle = 60;
+	float decalFadeDistance = 50;
+	float decalStartFadePercentage = 0.85f;
+	float decalTimeToLive = 20;
+	float decalFadeOutPercentage = 0.85f;
+	static constexpr float kDecalCullAlpha = 0.05f;
+	// A decal's alpha at `age` seconds.
+	float decalAlpha(float age) const;
 };
 
 // VideoSettings' levels (the menu's Video page; SettingsObjects keeps

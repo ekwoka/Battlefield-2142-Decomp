@@ -2,7 +2,10 @@
 
 #include "SoundObjectTemplate.h"
 
+#include "Console/Vars.h"
+
 #include <algorithm>
+#include <cmath>
 #include <sstream>
 
 namespace dice::hfe::sound {
@@ -136,13 +139,63 @@ std::vector<std::string> splitList(const std::string& list)
 
 } // namespace
 
+// The manager's ISoundOcclusion (+0x10, vtable 0x009bf138): each 3D
+// sound's owner in parameter 0 and the last clear ray in parameter 1, as
+// 0x007f9340 sets them up.
+class SoundManager::Occlusion final : public ISoundOcclusion {
+public:
+	static constexpr int kRayBudget = 48;
+	explicit Occlusion(SoundManager& manager) : m_manager(manager) {}
+	float occlusion(ISound* sound, const Vec3* position) override
+	{
+		if (!sound || !position) {
+			return 0.0f;
+		}
+		// The answer kept in parameter 2 (value x 65535, frames left in the
+		// top 16 bits), as sound-obstruction-opt1 does. The rewrite always
+		// keeps it, for round(e^(1 + dist / 100)) frames but at least 10
+		// and at most 30, and casts at most kRayBudget rays an update
+		// (the others keep their last answer): its line test is far
+		// slower than the exe's.
+		const unsigned cached = sound->parameter(2);
+		const bool budget = m_manager.m_raysThisUpdate < kRayBudget;
+		if (cached != 0 && ((cached >> 16) != 0 || !budget)) {
+			if ((cached >> 16) != 0) {
+				sound->setParameter(2, (((cached >> 16) - 1) << 16) | (cached & 0xffff));
+			}
+			return static_cast<float>(cached & 0xffff) * 1.5259022e-05f;
+		}
+		if (!budget) {
+			return 0.0f;
+		}
+		ISoundTemplate* t = sound->soundTemplate();
+		int last = static_cast<int>(sound->parameter(1));
+		const float value = m_manager.obstruction(*position, t ? t->soundRadius() : 0.0f, sound->parameter(0), &last);
+		sound->setParameter(1, static_cast<unsigned>(last));
+		const float dist = std::sqrt((*position - m_manager.m_listenerPosition).lengthSquared());
+		const unsigned frames = static_cast<unsigned>(std::clamp(std::lround(std::exp(1 + std::min(dist, 1000.0f) * 0.01f)), 10L, 30L));
+		sound->setParameter(2, (frames << 16) | (static_cast<unsigned>(std::lround(value * 65535.0f)) & 0xffff) | (value == 0 ? 1u : 0u));
+		return value;
+	}
+
+private:
+	SoundManager& m_manager;
+};
+
 SoundManager::SoundManager(ISoundEngine* engine, world::ObjectTemplateManager& templates)
-	: m_engine(engine), m_templates(templates)
+	: m_engine(engine), m_templates(templates), m_occlusion(std::make_unique<Occlusion>(*this))
 {
 }
 
 SoundManager::~SoundManager()
 {
+	setInteriorAmbient(nullptr, 0);
+	if (m_wind) {
+		m_wind->stopImmediately();
+		m_wind->setVolumeEnvelope(nullptr, nullptr);
+		m_wind->setPitchEnvelope(nullptr, nullptr);
+		m_wind->release();
+	}
 	for (ISound* sound : m_gameSounds) {
 		if (sound) {
 			sound->release();
@@ -446,12 +499,13 @@ void SoundManager::setMuted(int reason, bool muted)
 	}
 	m_mute[static_cast<size_t>(reason)] = muted;
 	Duck& effects = m_duck[0];
+	const Vars& vars = Vars::global();
 	if (reason == 4) {
-		effects.riseStep = 0.333f;
-		effects.fallStep = 0.1667f;
+		effects.riseStep = vars.number("sound-mute-fadein-1p", 0.333f);
+		effects.fallStep = vars.number("sound-mute-fadeout-1p", 0.1667f);
 	} else {
-		effects.riseStep = 0.0667f;
-		effects.fallStep = 0.0667f;
+		effects.riseStep = vars.number("sound-mute-fadein-vo", 0.0667f);
+		effects.fallStep = vars.number("sound-mute-fadeout-vo", 0.0667f);
 	}
 }
 
@@ -469,7 +523,7 @@ void SoundManager::updateDucking()
 {
 	constexpr float kPulse = 0.25f;   // +0x188
 	constexpr float kVoice = 0.125f;  // +0x194
-	constexpr float kFiring = 0.4f;   // sound-mute-level-1p
+	const float kFiring = Vars::global().number("sound-mute-level-1p", 0.4f); // DAT_00b44f14
 	const bool off = m_mute[1];
 	const bool off02 = m_mute[2] || off;
 	const float pulse = m_mute[0] ? kPulse : 1.0f;
@@ -570,8 +624,158 @@ void SoundManager::setListener(const Vec3& position, const Vec3& forward, const 
 		m_engine->setListenerVelocity(&m_listenerVelocity);
 	}
 	m_listenerSet = true;
+	m_insideTitan = insideTitan;
 	if (m_engine) {
 		m_engine->setListenerInsideTitan(insideTitan);
+	}
+}
+
+float SoundManager::obstruction(const Vec3& at, float radius, uint32_t owner, int* lastClear) const
+{
+	const Vars& vars = Vars::global();
+	if (!m_obstructionTest || vars.number("sound-obstruction-disable", 0) != 0) {
+		return 0.0f;
+	}
+	const float listenerRadius = vars.number("sound-listener-radius", 0.2f);
+	const Vec3 d = at - m_listenerPosition;
+	const float r = radius > 0 ? radius : 0.05f;
+	const float length = std::sqrt(d.lengthSquared());
+	const float dist = length - r - listenerRadius;
+	if (dist <= 0 || length <= 0) {
+		return 0.0f;
+	}
+	const Vec3 n = d * (1.0f / length);
+	const auto cross = [](const Vec3& a, const Vec3& b) {
+		return Vec3 {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+	};
+	const auto unit = [](const Vec3& v) {
+		const float l = std::sqrt(v.lengthSquared());
+		return l > 0 ? v * (1.0f / l) : v;
+	};
+	const Vec3 up = std::fabs(n.y) >= 0.99f ? Vec3 {1, 0, 0} : Vec3 {0, 1, 0};
+	const Vec3 a = unit(cross(up, n));
+	const Vec3 b = unit(cross(n, a));
+	const Vec3 from[3] = {m_listenerPosition + n * listenerRadius, m_listenerPosition + a * listenerRadius,
+		m_listenerPosition + b * listenerRadius};
+	const Vec3 to[3] = {at - n * r, at + a * r, at + b * r};
+	// Three rays within 40 m, one beyond; sound-obstruction-opt0 starts
+	// with the one last found clear.
+	const int rays = dist <= 40.0f ? 3 : 1;
+	const bool opt0 = vars.number("sound-obstruction-opt0", 0) != 0;
+	const int first = rays > 1 && opt0 && lastClear ? std::max(0, *lastClear) : 0;
+	const uint32_t ignore = m_listenerRootLarge ? 0 : m_listenerRoot;
+	RayHit hits[3];
+	int tried = first;
+	for (; tried < first + rays; ++tried) {
+		const int ray = tried % rays;
+		++m_raysThisUpdate;
+		if (!m_obstructionTest(from[ray], to[ray], ignore, hits[ray])) {
+			if (lastClear) {
+				*lastClear = ray;
+			}
+			return 0.0f;
+		}
+	}
+	// Every ray blocked. The first meeting the sound's own (small) root:
+	// nothing in the way.
+	if (owner != 0 && hits[0].root == owner && !hits[0].large) {
+		return 0.0f;
+	}
+	const float h = std::sqrt((to[0] - from[0]).lengthSquared()) * hits[0].fraction;
+	constexpr float kInvPi = 0.31830987f;
+	const auto shape = [&](float rad, float max) {
+		const float value = (1.0f - (std::atan((dist - h) / rad) + std::atan(h / rad)) * kInvPi) * max;
+		return std::clamp(value, 0.0f, 1.0f);
+	};
+	const float obstructionRadius = vars.number("sound-obstruction-radius", 2.0f);
+	const float obstructionMax = vars.number("sound-obstruction-max", 0.8f);
+	const bool inside = m_insideTitan || vars.number("sound-inside-titan", 0) != 0;
+	const float inner = vars.number("sound-obstruction-titan-inner", 8.0f);
+	const float outer = vars.number("sound-obstruction-titan-outer", 55.0f);
+	if (!inside || dist < inner) {
+		return shape(obstructionRadius, obstructionMax);
+	}
+	if (dist >= outer) {
+		return 1.0f;
+	}
+	const float near = shape(obstructionRadius, obstructionMax);
+	const float far = shape(vars.number("sound-obstruction-radius-titan", 500.0f),
+		vars.number("sound-obstruction-max-titan", 0.99f));
+	float w = 1.0f - std::clamp((dist - inner) / (outer - inner), 0.0f, 1.0f);
+	for (int i = static_cast<int>(vars.number("sound-obstruction-titan-exp", 0)); i > 0; --i) {
+		w *= w;
+	}
+	return w * near + (1.0f - w) * far;
+}
+
+ISoundOcclusion* SoundManager::occlusionHook() { return m_occlusion.get(); }
+
+void SoundManager::windSetup(const std::string& templateName, float speed)
+{
+	// 0x007f9840: the speed at least 1; a sound of the template replaces
+	// the last, its envelopes read at the wind's volume.
+	ISoundTemplate* t = soundTemplate(templateName);
+	if (!t) {
+		return;
+	}
+	if (m_wind) {
+		m_wind->stopImmediately();
+		m_wind->setVolumeEnvelope(nullptr, nullptr);
+		m_wind->setPitchEnvelope(nullptr, nullptr);
+		m_wind->release();
+		m_wind = nullptr;
+	}
+	m_wind = t->createSound();
+	m_windInput = 0;
+	if (m_wind) {
+		m_wind->setVolumeEnvelope(nullptr, &m_windInput);
+		m_wind->setPitchEnvelope(nullptr, &m_windInput);
+	}
+	m_windSpeed = std::max(speed, 1.0f);
+	m_windWanted = false;
+	m_windPlaying = false;
+}
+
+void SoundManager::startWind()
+{
+	// 0x007f9900: not at the lowest quality.
+	if (!m_engine || m_engine->qualityLevel() != 2) {
+		m_windWanted = true;
+	}
+}
+
+void SoundManager::updateWind()
+{
+	// 0x007f9ea0 (with no wind sound set up, nothing).
+	if (!m_wind) {
+		return;
+	}
+	m_windInput = std::clamp(std::sqrt(m_listenerVelocity.lengthSquared()) / m_windSpeed, 0.0f, 1.0f);
+	if (!m_windAllowed) {
+		if (m_windPlaying) {
+			m_wind->stop();
+		}
+		m_windPlaying = false;
+	} else if (m_windWanted != m_windPlaying) {
+		if (m_windWanted) {
+			m_wind->play();
+		} else {
+			m_wind->stop();
+		}
+		m_windPlaying = m_windWanted;
+	}
+}
+
+void SoundManager::setInteriorAmbient(ISound* sound, float listenerObstruction)
+{
+	if (sound == m_interiorAmbient && listenerObstruction == m_listenerObstruction) {
+		return;
+	}
+	m_interiorAmbient = sound;
+	m_listenerObstruction = listenerObstruction;
+	if (m_engine) {
+		m_engine->setTweak("listener-3d-obstruction", listenerObstruction);
+		m_engine->setGlobalAmbient(sound);
 	}
 }
 
@@ -580,9 +784,15 @@ float SoundManager::indoorLevel(const Vec3& at) const
 	if (!m_rayTest) {
 		return 0.0f;
 	}
-	constexpr float kRayLength = 15.0f;   // sound-raylength
-	constexpr float kMaxReverb = 0.5f;    // sound-maxreverb
-	constexpr float kSteepness = 0.98f;   // sound-reverb-steepness
+	// The settings as 0x007fa100 reads them each time (Settings/Sound.con
+	// sets 17, 0 and 0.55: retail's listener is never "indoors").
+	const Vars& vars = Vars::global();
+	const float kRayLength = vars.number("sound-raylength", 15.0f);
+	const float kMaxReverb = std::clamp(vars.number("sound-maxreverb", 0.5f), 0.0f, 1.0f);
+	const float kSteepness = std::clamp(vars.number("sound-reverb-steepness", 0.98f), 0.0f, 1.0f);
+	if (kRayLength <= 0) {
+		return 0.0f;
+	}
 	float up1 = 0, up2 = 0, down = 0;
 	const Vec3 a {at.x + 0.4f, at.y, at.z + 0.3f};
 	const Vec3 b {at.x - 0.4f, at.y, at.z - 0.3f};
@@ -596,6 +806,8 @@ float SoundManager::indoorLevel(const Vec3& at) const
 
 void SoundManager::update(int ticks)
 {
+	m_raysThisUpdate = 0;
+	updateWind();
 	updateDucking();
 	if (m_engine && m_listenerSet && m_rayTest) {
 		// The rays again once the listener has moved half a metre, or every

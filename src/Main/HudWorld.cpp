@@ -427,4 +427,9 @@ HudWorld::Weapon RemoteHudWorld::heldWeapon() const
 	return w;
 }
 
+std::vector<int> RemoteHudWorld::revealedPlayers(int) const
+{
+	return m_world.radarPlayers();
+}
+
 } // namespace dice::hfe::host

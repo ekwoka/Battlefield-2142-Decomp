@@ -133,6 +133,7 @@ struct Options {
 	bool dedicated = false;
 	bool verbose = false;
 	bool view = false;
+	bool viewAsked = false; // --view given: keep the window even with --simulate
 	std::string screenshot;
 	std::string camera;
 	bool sound = false;          // create the audio engine (on with --view)
@@ -214,6 +215,7 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.apiTables.push_back(argv[++i]);
 		} else if (arg == "--view") {
 			options.view = true;
+			options.viewAsked = true;
 			options.sound = true;
 		} else if (arg == "--nosound") {
 			options.sound = false;
@@ -364,8 +366,11 @@ bool parseOptions(int argc, char** argv, Options& options)
 			return false;
 		}
 	}
-	if (!options.connect.empty() && options.simulate > 0 && options.screenshot.empty()) {
-		options.view = false; // a joined game run headless for a while
+	if (options.simulate > 0 && options.screenshot.empty() && !options.viewAsked) {
+		// A game run for a while without a picture stays headless, whatever
+		// else asked for the viewer (--play, --connect, --drive): only --view
+		// opens a window with it.
+		options.view = false;
 	}
 	if (options.gameDir.empty() && options.rcon.empty()) {
 		std::fprintf(stderr, "usage: bf2142 --game <BF2142 install dir> [--api symbols/BF2142.exe.console.csv]\n");
@@ -630,6 +635,7 @@ int g_mapMenu = 0;
 // (HudMenusVehicles.h) and the sound the weapon HUD starts (its overheat).
 dice::hfe::menu::WeaponHud g_weaponHud;
 dice::hfe::menu::ItemSelection g_itemSelection;
+dice::hfe::menu::StrategicObjects g_strategicObjects;
 dice::hfe::menu::VehicleHud g_vehicleHud;
 std::function<void(const std::string&)> g_hudSound;
 int g_inHandSlot = -1;
@@ -840,7 +846,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	}
 	// Enemies a recon drone's pulse revealed to the team, in red.
 	// The satellite scan's enemies, shown to the commander only (0x0057cfb0).
-	std::vector<int> revealed = round.revealedPlayers(me.team);
+	std::vector<int> revealed = world.revealedPlayers(me.team);
 	for (const int id : round.scannedPlayers(me.id)) {
 		if (std::find(revealed.begin(), revealed.end(), id) == revealed.end()) {
 			revealed.push_back(id);
@@ -1103,7 +1109,11 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// A seat's second gun (0x007c2d50) would set the Secondary* block
 	// (WeaponHud::update's secondary); the game's seats carry one gun.
 	hud.set("SecondaryAmmoShow", 0);
-	if (heldGun || (heldGunTemplate && held.rounds >= 0)) {
+	// With the commander screen open (the HUD manager's slot 0x234) the
+	// weapon HUD's frame (0x007c40c0) skips the update and clears its show
+	// flags (PrimaryAmmoShow +0x15d, the clips, the reload, the crosshair
+	// +0xec...), so the ammunition doesn't draw over the screen.
+	if (!commanderScreen && (heldGun || (heldGunTemplate && held.rounds >= 0))) {
 		// The weapon HUD (0x007c1f10; see HudMenusVehicles.h). The game's
 		// magazines count the one in the gun (the firearm's slot 0xb0). A
 		// joined game's counts are our player's own state's (the server's
@@ -1242,16 +1252,23 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		for (size_t i = 0; i < siloShown.size(); ++i) {
 			hud.set("CPCannon" + std::to_string(i) + "Show", siloShown[i] ? 1 : 0);
 		}
-		for (const int side : {team, enemy}) {
-			const std::string prefix = side == team ? "FriendlyStrategicObject" : "EnemyStrategicObject";
-			int console = 0;
+		// The consoles and shields (StrategicObject%iShow, HudMenusVehicles.h's
+		// StrategicObjects: 1 from the round's start, cleared by a destroyed
+		// part with vehicleHud.sendDestroyedHudEvent at its guiIndex,
+		// 0x0044b680 case 0x32; shown for the local team by 0x00448850).
+		static float strategicAt = -1;
+		if (now < strategicAt) {
+			g_strategicObjects.reset();
+		}
+		strategicAt = now;
+		for (const int side : {1, 2}) {
 			for (const auto& part : round.titanParts(side)) {
-				if (part.kind == game::GameWorld::TitanPartInfo::Console && console < 4) {
-					hud.set(prefix + std::to_string(++console) + "Show", part.wreck ? 1 : 0);
+				if (part.wreck) {
+					g_strategicObjects.destroyed(side, round.templates().find(part.name));
 				}
 			}
-			hud.set(prefix + "0Show", round.titanOf(side) == 0 ? 1 : 0);
 		}
+		g_strategicObjects.update(hud, team);
 	}
 	if (soldier) {
 		if (const world::ObjectTemplate* rifle = held.weapon) {
@@ -1268,13 +1285,14 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 				const auto it = settings.find(key);
 				return it != settings.end() ? static_cast<float>(std::atof(it->second.c_str())) : otherwise;
 			};
+			// minVisualDeviation pushes the parts out, maxVisualDeviation
+			// holds them (menu::crosshairParts).
 			const float now = world.joined() ? std::max(g_remoteDeviation, 0.0f) : round.weaponDeviation(round.localPlayer());
-			const float spread = std::ceil((now > 0 ? now : number("deviation.minDev", 0)) * number("weaponHud.deviationFactor", 10));
-			constexpr float kLength = 20;
-			hud.set("CrossRightPos", 400 + spread);
-			hud.set("CrossLeftPos", 399 - kLength - spread);
-			hud.set("CrossUpPos", 300 - kLength - spread);
-			hud.set("CrossDownPos", 301 + spread);
+			const auto parts = dice::hfe::menu::crosshairParts(now > 0 ? now : number("deviation.minDev", 0), rifle);
+			hud.set("CrossRightPos", parts.right);
+			hud.set("CrossLeftPos", parts.left);
+			hud.set("CrossUpPos", parts.up);
+			hud.set("CrossDownPos", parts.down);
 		}
 	}
 }
@@ -3791,8 +3809,13 @@ int runGame(Options& options, Session& session)
 			// A line said: to the server, else into our own list.
 			const uint32_t channel = box == Box::kTeam ? net::kChatTeam : box == Box::kSquad ? net::kChatSquad : net::kChatGlobal;
 			if (box == Box::kPlayer) {
-				// A whisper: no player is picked for it offline (+0x48 -1), and
-				// its network message isn't decoded, so it stays local.
+				// A whisper (0x007d9e20): to the server as chat channel 14
+				// for the HUD manager's player (+0x48: -1, which nothing in
+				// BF2142.exe changes after 0x0075c6b0), and into our own list
+				// (its slot 0x158).
+				if (session.client) {
+					session.client->whisper(line, -1);
+				}
 				chat.addChat(localization.text("HUD_TEXT_CHAT_WHIPSER"), line, static_cast<int>(net::kChatGlobal),
 					dice::hfe::menu::HudChat::Speaker::Neutral);
 				return;
@@ -4342,12 +4365,25 @@ int runGame(Options& options, Session& session)
 			distance = (to - from).length() * hi;
 			return true;
 		});
+		// The obstruction rays (0x007fa350's line test): the first object
+		// met, a Titan counting as over 50 m across (slot 0x90).
+		sounds.setObstructionTest([&round](const sound::Vec3& from, const sound::Vec3& to, uint32_t ignore,
+									  sound::SoundManager::RayHit& hit) {
+			uint32_t object = 0;
+			if (!round.segmentHit({from.x, from.y, from.z}, {to.x, to.y, to.z}, ignore, hit.fraction, object)) {
+				return false;
+			}
+			hit.root = object;
+			hit.large = object != 0 && round.isTitan(object);
+			return true;
+		});
 		// Leaving the round: its loops stop and the rays no longer reach it.
 		struct RoundSounds {
 			sound::SoundManager& manager;
 			sound::GameSounds& sounds;
 			~RoundSounds()
 			{
+				manager.setObstructionTest({});
 				manager.setRayTest({});
 				manager.setMuted(4, false);
 				sounds.stopAll();
@@ -4870,6 +4906,8 @@ int runGame(Options& options, Session& session)
 			});
 		}
 		std::map<uint16_t, uint32_t> ragdollUpdates; // ghost -> the ragdoll update last applied
+		std::map<uint16_t, uint32_t> projectileUpdates; // a projectile ghost -> the update last applied to its round
+		std::map<int, uint32_t> reloadsSeen;          // a player -> the reloads (mask 0x10000) already shown
 		struct TimedCommand {
 			float at;
 			std::string command;
@@ -5086,7 +5124,16 @@ int runGame(Options& options, Session& session)
 						round.removeRemoteRagDoll(it->second); // revived
 						ragdollUpdates.erase(ghost.ghost);
 					}
-					if (world::Object* object = round.remoteRagDoll(it->second) ? nullptr : objects.find(it->second)) {
+					// A server projectile's ghost (GenericProjectile): its round
+					// here flies on from each update's place and velocity, and
+					// moves the object (GameWorld::launchRemoteProjectile).
+					const bool flying = round.hasRemoteProjectile(it->second);
+					if (flying && projectileUpdates[ghost.ghost] != ghost.updates) {
+						projectileUpdates[ghost.ghost] = ghost.updates;
+						const physics::Vec3 v {ghost.velocity.x, ghost.velocity.y, ghost.velocity.z};
+						round.moveRemoteProjectile(it->second, {at.x, at.y, at.z}, ghost.hasVelocity ? &v : nullptr);
+					}
+					if (world::Object* object = round.remoteRagDoll(it->second) || flying ? nullptr : objects.find(it->second)) {
 						object->setPosition(at);
 						object->setRotation(turned);
 						// A control point taken (its networkable's team, 0x006084b0):
@@ -5101,6 +5148,13 @@ int runGame(Options& options, Session& session)
 					if (world::Object* object = objects.create(t, at, turned)) {
 						object->setTeam(ghost.team);
 						ghostObjects[ghost.ghost] = object->id();
+						if (t->typeName() == "GenericProjectile") {
+							const physics::Vec3 v = ghost.hasVelocity
+								? physics::Vec3 {ghost.velocity.x, ghost.velocity.y, ghost.velocity.z}
+								: physics::Vec3 {};
+							round.launchRemoteProjectile(object->id(), t->name(), {at.x, at.y, at.z}, v);
+							projectileUpdates[ghost.ghost] = ghost.updates;
+						}
 						if (options.verbose) {
 							std::printf("ghost %u: %s\n", ghost.ghost, t->name().c_str());
 						}
@@ -5175,13 +5229,24 @@ int runGame(Options& options, Session& session)
 				}
 				round.animateRemoteSoldier(found->second, state, 1.0f / 30.0f);
 				animated.insert(found->second);
+				// A reload pressed on the server (mask 0x10000): the weapon in
+				// its hands reloads (0x00590e10's message 10).
+				if (!p.local) {
+					uint32_t& reloads = reloadsSeen.try_emplace(p.id, p.reloads).first->second;
+					if (p.reloads < reloads) {
+						reloads = p.reloads; // a new level's player
+					} else if (p.reloads != reloads) {
+						reloads = p.reloads;
+						round.reloadRemoteSoldier(found->second, p.fire[0].rounds);
+					}
+				}
 				if (options.verbose && !p.local) {
 					// What the others' soldiers show: a line when it changes.
 					static std::map<int, std::string> shown;
 					char line[160];
-					std::snprintf(line, sizeof line, "pose %d firing %d presses %d rounds %d weapon %s at %.0f/%.0f/%.0f", body->pose,
-						state.firing ? 1 : 0, state.firePresses, p.fire[0].rounds, state.weapon.c_str(), body->position.x,
-						body->position.y, body->position.z);
+					std::snprintf(line, sizeof line, "pose %d firing %d presses %d rounds %d weapon %s at %.0f/%.0f/%.0f aim %.0f/%.0f",
+						body->pose, state.firing ? 1 : 0, state.firePresses, p.fire[0].rounds, state.weapon.c_str(), body->position.x,
+						body->position.y, body->position.z, state.yaw, state.aimPitch);
 					if (shown[p.id] != line) {
 						shown[p.id] = line;
 						std::printf("remote soldier %s: %s\n", p.name.c_str(), line);
@@ -5191,6 +5256,42 @@ int runGame(Options& options, Session& session)
 			for (const auto& [ghost, id] : ghostObjects) {
 				if (round.isRemoteSoldier(id) && !animated.count(id)) {
 					round.removeRemoteSoldier(id);
+				}
+			}
+			if (options.verbose) {
+				// The client's own rounds of everyone's firing (fireRemoteRound)
+				// and the server's projectile ghosts flying here: a line a second.
+				static int shownAt = -1;
+				const int second = static_cast<int>(gameLogic.elapsed);
+				if (second != shownAt) {
+					shownAt = second;
+					size_t rounds = 0, tracers = 0, ghosts = 0;
+					for (const game::Projectile& p : round.projectiles()) {
+						if (p.visual && p.alive) {
+							(p.ghostObject ? ghosts : rounds) += 1;
+							tracers += p.tracer && !p.ghostObject;
+						}
+					}
+					static size_t impactsSeen = 0;
+					const auto& impacts = round.impacts();
+					if (rounds || ghosts || impacts.size() != impactsSeen) {
+						std::printf("client rounds: %zu in flight (%zu tracers), %zu projectile ghosts, %zu impacts", rounds, tracers,
+							ghosts, impacts.size());
+						if (!impacts.empty()) {
+							const auto& last = impacts.back();
+							std::printf(" (last at %.1f/%.1f/%.1f on %s)", last.point.x, last.point.y, last.point.z,
+								last.object == 0 ? "the terrain" : round.isRemoteSoldier(last.object) ? "a soldier" : "an object");
+						}
+						for (auto p = round.projectiles().rbegin(); p != round.projectiles().rend(); ++p) {
+							if (p->visual && p->alive && !p->ghostObject) {
+								std::printf(" newest from %.1f/%.1f/%.1f at %.0f/%.0f/%.0f m/s", p->origin.x, p->origin.y,
+									p->origin.z, p->velocity.x, p->velocity.y, p->velocity.z);
+								break;
+							}
+						}
+						std::printf("\n");
+						impactsSeen = impacts.size();
+					}
 				}
 			}
 			// A kit a living player carries is hidden, as the round's own
@@ -5211,8 +5312,19 @@ int runGame(Options& options, Session& session)
 					}
 				}
 			}
+			// The control points' allowCaptureByTeam from their ghosts (masks 8 /
+			// 0x10, every set: 0x006084b0 -> 0x005bcd00), for the takeable
+			// radio of the local player (GameAudio::autoRadio).
+			for (const net::RemoteWorld::TakeableSet& set : client.world().takeTakeable()) {
+				const auto it = ghostObjects.find(set.ghost);
+				if (const game::ControlPoint* cp = it != ghostObjects.end() ? round.controlPointOf(it->second) : nullptr) {
+					round.noteTakeable(cp->id, set.team, set.allowed);
+				}
+			}
 			for (auto it = ghostObjects.begin(); it != ghostObjects.end();) {
 				if (!seen.count(it->first)) {
+					round.endRemoteProjectile(it->second); // its detonation, unless it went off here
+					projectileUpdates.erase(it->first);
 					round.removeRemoteRagDoll(it->second);
 					round.removeRemoteSoldier(it->second);
 					ragdollUpdates.erase(it->first);

@@ -96,6 +96,58 @@ TEST(Weapons_GunsHeatUp)
 	CHECK(!gun.overheated() && gun.heat() < 0.25f && gun.tick(1 / 30.0f, true));
 }
 
+// ammo.reloadWithoutPlayer (0x005f4bb0 / 0x005f3a40): a gun left with a
+// reload under way finishes it (runReload); one without the flag forgets
+// it (dropReload) and keeps its empty magazine.
+TEST(Weapons_ReloadWithoutPlayer)
+{
+	game::FireArmSettings settings;
+	settings.magSize = 2;
+	settings.nrOfMags = 2;
+	settings.reloadTime = 1;
+	settings.roundsPerMinute = 1800;
+	for (const bool runs : {true, false}) {
+		game::FireArm gun(settings);
+		int rounds = 0;
+		for (int i = 0; i < 4; ++i) {
+			rounds += gun.tick(1 / 30.0f, true) ? 1 : 0;
+		}
+		CHECK(rounds == 2 && gun.roundsInMag() == 0 && gun.reloading());
+		if (runs) {
+			for (int i = 0; i < 40; ++i) {
+				gun.runReload(1 / 30.0f);
+			}
+			CHECK(!gun.reloading() && gun.roundsInMag() == 2);
+		} else {
+			gun.dropReload();
+			CHECK(!gun.reloading() && gun.roundsInMag() == 0);
+		}
+	}
+}
+
+// fire.busyUntilButtonRelease (0x005d4800 / 0x005d3c20): a launcher held
+// fires one round and neither fires again nor reloads until let go.
+TEST(Weapons_BusyUntilButtonRelease)
+{
+	game::FireArmSettings settings;
+	settings.magSize = 1;
+	settings.nrOfMags = 3;
+	settings.reloadTime = 0.5f;
+	settings.roundsPerMinute = 600;
+	settings.busyUntilButtonRelease = true;
+	game::FireArm gun(settings);
+	int rounds = 0;
+	for (int i = 0; i < 60; ++i) { // two seconds held
+		rounds += gun.tick(1 / 30.0f, true) ? 1 : 0;
+	}
+	CHECK(rounds == 1 && gun.reloading() && std::fabs(gun.reloadLeft() - 0.5f) < 1e-4f);
+	for (int i = 0; i < 20; ++i) { // let go: the reload runs
+		gun.tick(1 / 30.0f, false);
+	}
+	CHECK(!gun.reloading() && gun.roundsInMag() == 1);
+	CHECK(gun.tick(1 / 30.0f, true));
+}
+
 TEST(Weapons_ProjectileKinds)
 {
 	world::ObjectTemplateManager templates;

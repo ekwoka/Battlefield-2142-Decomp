@@ -9,6 +9,7 @@
 #pragma once
 
 #include "Animation/Pose.h"
+#include "AnimatedUV.h"
 #include "Culling.h"
 #include "EnvMaps.h"
 #include "Fog.h"
@@ -298,6 +299,10 @@ private:
 		// A tree's leaves (a static mesh under "vegitation", RendDX9
 		// 0x100de8xx; its alpha-tested materials): RaShaderLeaf's sway.
 		bool leaf = false;
+		// A bundled material with an "AnimatedUV..." technique (RaShaderBM
+		// _HASUVANIMATION_): its coordinates go through the instance's UV
+		// matrices (AnimatedUV.h).
+		bool animatedUV = false;
 	};
 	struct RigBone {
 		int node;
@@ -362,6 +367,12 @@ private:
 		bool overgrowth = false; // Object.isOvergrowth
 		Lod overgrowthLod;       // its "<geometry>_lod" mesh
 		bool debris = false;     // an effects' debris piece, placed afresh each frame (syncDebris)
+		// The mesh instance's UV matrices (RendDX9 +0x28c) and its parts'
+		// animated-UV states (BF2142.exe's SimpleObject +0x160), in the
+		// order collectParts meets them (AnimatedUV.h).
+		std::array<UVMatrix, kAnimatedUVMatrices> uvMatrices {};
+		std::vector<AnimatedUVState> uvStates;
+		bool animatedUV = false; // a part has animatedUVTranslation or animatedUVRotation
 	};
 	// What the world pass draws of an instance this frame.
 	struct DrawItem {
@@ -369,6 +380,9 @@ private:
 		const GpuMesh* mesh;
 		SDL_GPUTexture* lightmap;
 		const float* lightmapTransform;
+		// A bundled mesh drawn by the Titan interior path (0x100c3880): its
+		// envmap materials take the indoor cube.
+		bool interior = false;
 	};
 	std::vector<DrawItem> m_drawList;
 	size_t m_culledInstances = 0;
@@ -424,8 +438,22 @@ private:
 	void addTemplate(const LevelSources& sources, const world::ObjectTemplate& objectTemplate, const Mat4& local,
 		const Mat4& objectWorld, uint32_t object, int depth);
 	void addObject(const LevelSources& sources, const world::Object& object);
+	// A part that animates its texture coordinates, placed relative to its object.
+	struct AnimatedUVPart {
+		const AnimatedUVSettings* settings;
+		Mat4 local;
+	};
 	void collectParts(const LevelSources& sources, const world::ObjectTemplate& objectTemplate, const Mat4& relative,
-		std::vector<Mat4>& parts, int depth, uint32_t object = 0) const;
+		std::vector<Mat4>& parts, int depth, uint32_t object = 0,
+		std::vector<AnimatedUVPart>* animated = nullptr) const;
+	// A template's animatedUV* and Spring rotateUV values, read once.
+	struct AnimatedUVLook {
+		AnimatedUVSettings settings;
+		bool rotateUV = false; // Spring +0x2b8: the wheel's mesh doesn't turn
+	};
+	const AnimatedUVLook& animatedUVLook(const world::ObjectTemplate& objectTemplate) const;
+	mutable std::unordered_map<const world::ObjectTemplate*, AnimatedUVLook> m_animatedUVLooks;
+	std::vector<AnimatedUVPart> m_animatedUVParts; // syncObjects' scratch
 	void buildTerrain(const LevelSources& sources);
 	// The primary terrain's LODs (terraindata.raw's compiled patches, drawn
 	// as RendDX9's terrain culler draws them: cells of terrainCuller.
@@ -701,7 +729,8 @@ private:
 	void applyPointLights(LightingUniforms& uniforms) const;
 	// mesh.frag's samplers 8-10: a static material's detail and crack
 	// normal maps (flat without) and this frame's envmap.
-	void bindMeshLayers(SDL_GPURenderPass* pass, const Submesh* submesh) const;
+	void bindMeshLayers(SDL_GPURenderPass* pass, const Submesh* submesh, SDL_GPUTexture* envMap) const;
+	void bindMeshLayers(SDL_GPURenderPass* pass, const Submesh* submesh) const { bindMeshLayers(pass, submesh, m_envMap); }
 	// This frame's decals: one buffer, drawn in groups by texture.
 	SDL_GPUBuffer* m_decalVertices = nullptr;
 	std::vector<ParticleGroup> m_decalGroups;
@@ -749,6 +778,9 @@ private:
 	};
 	std::vector<EnvMap> m_envMaps;
 	SDL_GPUTexture* m_envMap = nullptr;
+	// The Titan interiors' cube (EnvMapManager +0x6c,
+	// "common/textures/indoorenvmap", 0x10063900).
+	SDL_GPUTexture* m_indoorEnvMap = nullptr;
 	SDL_GPUTexture* m_waterVolume = nullptr;     // Textures/watervolume.dds (the 3D variants)
 	struct SurroundingPatch {
 		SDL_GPUBuffer* vertices = nullptr;

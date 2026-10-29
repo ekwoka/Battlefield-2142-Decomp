@@ -38,6 +38,9 @@ struct Material {
 	bool hasWaterPhysics = false;
 	bool isOneSided = false;
 	bool isSeeThrough = false;
+	// Material.triggerRadio (slots 0x74 / 0x78): a soldier touching it
+	// looks for its cells' radio messages (0x00586a90; the Titans' floors).
+	bool triggerRadio = false;
 };
 
 // A pair of materials meeting (a projectile's and a surface's, ...).
@@ -48,6 +51,14 @@ struct MaterialCell {
 	std::vector<std::string> decalTemplates;
 	std::vector<std::string> effectTemplates;
 	std::vector<std::string> soundTemplates;
+	// "setRadioMessage <index> <message> <delay>" (the cell's slot 0x34,
+	// 0x0060ce20; "" removes it): read by slot 0x3c (0x0060c5e0), which
+	// hands the message out at most once in `delay` seconds.
+	struct RadioMessage {
+		std::string message;
+		double delay = 0;
+	};
+	std::map<int, RadioMessage> radioMessages;
 };
 
 class MaterialManager {
@@ -56,6 +67,9 @@ public:
 	const Material* find(uint32_t id) const;
 	MaterialCell& createCell(uint32_t a, uint32_t b);
 	const MaterialCell* cell(uint32_t a, uint32_t b) const;
+	// Slot 0x78 (0x0060a730): a radio message of the cell (a, b) at
+	// `index`, else of (a, 0); null for none.
+	const MaterialCell::RadioMessage* radioMessage(uint32_t a, uint32_t b, int index) const;
 	size_t materialCount() const { return m_materials.size(); }
 	size_t cellCount() const { return m_cells.size(); }
 

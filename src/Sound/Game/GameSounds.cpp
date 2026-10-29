@@ -1,7 +1,10 @@
 #include "GameSounds.h"
 
 #include "SoundManager.h"
+#include "SoundObjectTemplate.h"
+#include "Sound/SoundEngine/SoundEnvelope.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 
@@ -17,8 +20,22 @@ public:
 	Vec3 m_velocity;
 };
 
+// The template's volume envelope at x times a scale the owner keeps
+// (0x007fe010).
+class ScaledEnvelope final : public ISoundEnvelope {
+public:
+	float evaluate(float x, unsigned seed) override
+	{
+		const float y = base ? base->evaluate(x, seed) : 1.0f;
+		return scale ? y * *scale : y;
+	}
+	ISoundEnvelope* base = nullptr;
+	const float* scale = nullptr;
+};
+
 struct GameSounds::Loop {
 	ISound* sound = nullptr;
+	ScaledEnvelope scaled;
 	Transform transform;
 	float input = 0; // the envelopes' (read through the pointer)
 	bool refreshed = true;
@@ -34,6 +51,10 @@ GameSounds::~GameSounds() { stopAll(); }
 
 void GameSounds::stopAll()
 {
+	for (auto& [user, state] : m_weapons) {
+		release(state);
+	}
+	m_weapons.clear();
 	for (auto& [key, loop] : m_loops) {
 		if (loop->sound) {
 			loop->sound->stopImmediately();
@@ -43,7 +64,42 @@ void GameSounds::stopAll()
 	m_loops.clear();
 }
 
-bool GameSounds::play(const std::string& templateName, const Vec3& position)
+ISound* GameSounds::create(const std::string& templateName, uint32_t owner)
+{
+	ISoundTemplate* t = m_manager.soundTemplate(templateName);
+	ISound* sound = t ? t->createSound() : nullptr;
+	if (sound) {
+		// 0x007f9340: the owner in parameter 0, 1 and 2 cleared, and a 3D
+		// sound asks the manager how obstructed it is.
+		sound->setParameter(0, owner);
+		sound->setParameter(1, 0);
+		sound->setParameter(2, 0);
+		if (t->is3dSound()) {
+			sound->setOcclusion(m_manager.occlusionHook());
+		}
+	}
+	return sound;
+}
+
+int GameSounds::sampleCount(const std::string& templateName) const
+{
+	const auto* t = dynamic_cast<const SoundObjectTemplate*>(m_manager.templates().find(templateName));
+	if (!t || !t->hasFiles()) {
+		return 0;
+	}
+	int count = 0;
+	bool inName = false;
+	for (const char c : t->soundFilenames()) {
+		const bool separator = c == ',' || c == ' ' || c == '"';
+		if (!separator && !inName) {
+			++count;
+		}
+		inName = !separator;
+	}
+	return count;
+}
+
+bool GameSounds::play(const std::string& templateName, const Vec3& position, uint32_t owner)
 {
 	if (!m_manager.hasSound(templateName)) {
 		return false;
@@ -58,7 +114,7 @@ bool GameSounds::play(const std::string& templateName, const Vec3& position)
 	if (sound) {
 		// A sound of its own, released at once: it plays out where it
 		// started (Sound::detach) as an object's component sound would.
-		if (ISound* instance = sound->createSound()) {
+		if (ISound* instance = create(templateName, owner)) {
 			instance->playAt(&position);
 			instance->release();
 		}
@@ -93,7 +149,7 @@ bool GameSounds::playFirstPerson(const std::string& templateName, int sample)
 }
 
 void GameSounds::loop(uint64_t owner, const std::string& templateName, const Vec3& position, const Vec3& velocity,
-	float input)
+	float input, uint32_t object, const float* volumeScale)
 {
 	const auto key = std::make_pair(owner, templateName);
 	auto it = m_loops.find(key);
@@ -116,12 +172,18 @@ void GameSounds::loop(uint64_t owner, const std::string& templateName, const Vec
 		loop->transform.matrix.m[3][2] = position.z;
 		loop->transform.m_velocity = velocity;
 		if (sound) {
-			loop->sound = sound->createSound();
+			loop->sound = create(templateName, object);
 			if (loop->sound) {
 				loop->sound->setTransform(&loop->transform);
 				// The template's envelopes, read at the owner's value (the
 				// engine audio's rpm, 0x007fe050).
-				loop->sound->setVolumeEnvelope(nullptr, &loop->input);
+				if (volumeScale) {
+					loop->scaled.base = sound->volumeEnvelopeObject();
+					loop->scaled.scale = volumeScale;
+					loop->sound->setVolumeEnvelope(&loop->scaled, &loop->input);
+				} else {
+					loop->sound->setVolumeEnvelope(nullptr, &loop->input);
+				}
 				loop->sound->setPitchEnvelope(nullptr, &loop->input);
 				loop->sound->play();
 			}
@@ -157,6 +219,18 @@ void GameSounds::endTick()
 		}
 		it = m_loops.erase(it);
 	}
+	// Weapon components not heard from in a minute (players gone) go,
+	// unless an automatic loop still waits for its trigger.
+	if (m_tick % 64 == 0) {
+		for (auto it = m_weapons.begin(); it != m_weapons.end();) {
+			if (!it->second.looping && m_tick - it->second.lastTick > 1800) {
+				release(it->second);
+				it = m_weapons.erase(it);
+			} else {
+				++it;
+			}
+		}
+	}
 	// muteOnFire lasts while the weapon fires (0x005db6c0 clears it when
 	// the trigger is let go): two ticks without a round.
 	if (m_manager.muted(4) && m_tick - m_firingTick > 2) {
@@ -164,35 +238,240 @@ void GameSounds::endTick()
 	}
 }
 
+void GameSounds::release(WeaponState& state)
+{
+	for (ISound*& sound : state.fire) {
+		if (sound) {
+			sound->stop();
+			sound->release();
+			sound = nullptr;
+		}
+	}
+	for (ISound*& sound : state.reload) {
+		if (sound) {
+			sound->release();
+			sound = nullptr;
+		}
+	}
+	state.looping = false;
+}
+
+void GameSounds::releaseTrigger(uint64_t user)
+{
+	// 0x005db6c0: a looping fire sound stops (its stop type's end), and
+	// reason 4 is lifted.
+	const auto it = m_weapons.find(user);
+	if (it != m_weapons.end() && it->second.looping) {
+		for (ISound*& sound : it->second.fire) {
+			if (sound) {
+				sound->stop();
+				sound->release();
+				sound = nullptr;
+			}
+		}
+		it->second.looping = false;
+	}
+	if (m_manager.muted(4)) {
+		m_manager.setMuted(4, false);
+	}
+}
+
+void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstPerson, const Vec3& position,
+	bool muteOnFire, uint32_t object, const FireInfo& info)
+{
+	// 0x005dbdc0. Sounds a burst already played are skipped (+0x3c); an
+	// automatic loop under way (+0x43) plays on.
+	if (state.skip > 0) {
+		--state.skip;
+		return;
+	}
+	if (state.looping) {
+		return;
+	}
+	// The slot: in first person (with a Fire1P or Fire1P_Outdoor) slot 1
+	// where it has one and the engine finds the listener outdoors (manager
+	// slot 0x98, 0x007fa320), else 0, the world's effects ducking with
+	// muteOnFire (reason 4); otherwise slot 2, Fire3P.
+	int slot = 2;
+	const bool outdoorSound = m_manager.hasSound(prefix + "Fire1P_Outdoor");
+	if (firstPerson && (outdoorSound || m_manager.hasSound(prefix + "Fire1P"))) {
+		slot = outdoorSound && m_manager.outdoors(m_manager.listenerPosition()) ? 1 : 0;
+		if (muteOnFire) {
+			m_manager.setMuted(4, true);
+		}
+	}
+	static const char* const kSlots[3] = {"Fire1P", "Fire1P_Outdoor", "Fire3P"};
+	const std::string name = prefix + kSlots[slot];
+	const int samples = sampleCount(name);
+	int sample = -1, loops = 1;
+	bool keep = false;
+	if (samples == 1) {
+		if (info.mode == 2) {
+			// Automatic: the sample loops until the trigger is let go.
+			state.looping = true;
+			keep = true;
+			loops = 0;
+		} else if (info.burstRounds > 1) {
+			// A burst: a slow gun (+0x42, under 301 rounds a minute) a
+			// sound a round; a fast one plays the sample once for each
+			// round now and skips the burst's other rounds (+0x3c).
+			if (info.roundsPerMinute >= 301) {
+				loops = std::min(info.burstRounds, 0xffff);
+				state.skip = info.burstRounds - 1;
+			}
+		}
+	} else if (samples == 4) {
+		// Four samples (the grenades' throws): 1 while the fire state is 2
+		// (held), and at the end 0 (a single), or after a hold 2, or 3 when
+		// the fire component's slot 0xe0 value is at least 0.5 (it is
+		// always 1: after a hold, 3).
+		if (info.held) {
+			state.burst = true;
+			sample = 1;
+		} else {
+			sample = state.burst ? (info.heldValue >= 0.5f ? 3 : 2) : 0;
+			state.burst = false;
+		}
+	} else {
+		return; // two, three or no samples: nothing (0x005dbdc0 plays only 1 or 4)
+	}
+	if (!m_manager.hasSound(name)) {
+		return;
+	}
+	const bool head = slot != 2;
+	if (m_log) {
+		std::printf("sound: %s%s%s\n", name.c_str(), head ? " (first person)" : "", loops == 0 ? " loops" : "");
+	}
+	if (onTrigger) {
+		onTrigger({name, head ? m_manager.listenerPosition() : position, head, sample});
+	}
+	ISound* sound = create(name, head ? 0 : object);
+	if (!sound) {
+		return;
+	}
+	if (head) {
+		sound->setHeadRelative(true);
+		if (sample >= 0) {
+			sound->playSampleLooped(sample, 1);
+		} else {
+			sound->playLooped(loops);
+		}
+	} else if (sample >= 0) {
+		sound->playSampleAtLooped(&position, sample, 1);
+	} else {
+		sound->playAtLooped(&position, loops);
+	}
+	if (keep) {
+		if (state.fire[static_cast<size_t>(slot)]) {
+			state.fire[static_cast<size_t>(slot)]->stop();
+			state.fire[static_cast<size_t>(slot)]->release();
+		}
+		state.fire[static_cast<size_t>(slot)] = sound;
+	} else {
+		sound->release();
+	}
+}
+
+void GameSounds::reload(WeaponState& state, const std::string& prefix, bool firstPerson, const Vec3& position,
+	uint32_t object, int reloadState)
+{
+	// 0x005dbfe0: state 2 nothing; Reload1P in first person, else
+	// Reload3P. With one or two samples sample 0 unless that sound still
+	// plays; event 7 sample 1 of two; three samples: a shell reload's
+	// first (4) sample 0, its middle (5) sample 1, its last (6) sample 1
+	// after a first, else 0. A magazine (3) with three samples: nothing.
+	// The burst's skips end (+0x3c = 0).
+	if (reloadState == 2) {
+		return;
+	}
+	const int slot = firstPerson ? 0 : 1;
+	const std::string name = prefix + (firstPerson ? "Reload1P" : "Reload3P");
+	state.skip = 0;
+	if (!m_manager.hasSound(name)) {
+		return;
+	}
+	const int samples = sampleCount(name);
+	int sample = -1;
+	ISound*& kept = state.reload[static_cast<size_t>(slot)];
+	if (reloadState == 7) {
+		if (samples != 2) {
+			return;
+		}
+		sample = 1;
+	} else if (samples == 1 || samples == 2) {
+		if (kept && kept->isPlaying()) {
+			return;
+		}
+		sample = 0;
+	} else if (samples == 3) {
+		switch (reloadState) {
+		case 4:
+			state.reloadPart = 1;
+			sample = 0;
+			break;
+		case 5:
+			sample = 1;
+			break;
+		case 6:
+			sample = state.reloadPart != 0 ? 1 : 0;
+			state.reloadPart = 2;
+			break;
+		default:
+			return;
+		}
+	} else {
+		return;
+	}
+	if (m_log) {
+		std::printf("sound: %s sample %d%s\n", name.c_str(), sample, firstPerson ? " (first person)" : "");
+	}
+	if (onTrigger) {
+		onTrigger({name, firstPerson ? m_manager.listenerPosition() : position, firstPerson, sample});
+	}
+	ISound* sound = create(name, firstPerson ? 0 : object);
+	if (!sound) {
+		return;
+	}
+	if (firstPerson) {
+		sound->setHeadRelative(true);
+		sound->playSampleLooped(sample, 1);
+	} else {
+		sound->playSampleAtLooped(&position, sample, 1);
+	}
+	if (kept) {
+		kept->release();
+	}
+	kept = sound;
+}
+
 void GameSounds::weapon(WeaponEvent event, const std::string& weaponTemplate, bool firstPerson, const Vec3& position,
-	bool muteOnFire)
+	bool muteOnFire, uint64_t user, uint32_t object, const FireInfo* fireInfo, int reloadState)
 {
 	const std::string prefix = "S_" + weaponTemplate + "_";
+	WeaponState& state = m_weapons[user];
+	if (state.weapon != weaponTemplate) {
+		// Another weapon in hand: the last one's component is done with.
+		release(state);
+		state = WeaponState {};
+		state.weapon = weaponTemplate;
+	}
+	state.lastTick = m_tick;
 	const auto person = [&](const char* first, const char* third) {
 		if (firstPerson) {
 			playFirstPerson(prefix + first);
 		} else {
-			play(prefix + third, position);
+			play(prefix + third, position, object);
 		}
 	};
 	switch (event) {
 	case WeaponEvent::Fire:
-		if (firstPerson) {
-			// Slot 1 (Fire1P_Outdoor) where the engine finds no roof over the
-			// listener (manager slot 0x98, 0x007fa320), else slot 0.
-			const bool outdoor = m_manager.hasSound(prefix + "Fire1P_Outdoor")
-				&& m_manager.outdoors(m_manager.listenerPosition());
-			playFirstPerson(prefix + (outdoor ? "Fire1P_Outdoor" : "Fire1P"));
-			if (muteOnFire) {
-				m_manager.setMuted(4, true);
-				m_firingTick = m_tick;
-			}
-		} else {
-			play(prefix + "Fire3P", position);
+		if (firstPerson && muteOnFire) {
+			m_firingTick = m_tick;
 		}
+		fire(state, prefix, firstPerson, position, muteOnFire, object, fireInfo ? *fireInfo : FireInfo {});
 		break;
 	case WeaponEvent::Reload:
-		person("Reload1P", "Reload3P");
+		reload(state, prefix, firstPerson, position, object, reloadState);
 		break;
 	case WeaponEvent::Deploy: {
 		// Not again within 9 ticks of the last (+0x48).

@@ -713,3 +713,52 @@ TEST(RadioSpam_CountBlockAndReset)
 		CHECK(!spots.check(false, false, now));
 	}
 }
+
+// The crosshair's parts (0x007be770): the spread by deviationFactor, pushed
+// out by minVisualDeviation and held at maxVisualDeviation.
+TEST(HudWeapon_CrosshairVisualDeviation)
+{
+	auto parts = menu::crosshairParts(1.5f, 10, 0, 1000);
+	CHECK(parts.offset == 15 && parts.right == 415 && parts.left == 364 && parts.up == 265 && parts.down == 316);
+	parts = menu::crosshairParts(1.5f, 10, 3, 1000);
+	CHECK(parts.offset == 18 && parts.right == 418 && parts.down == 319);
+	parts = menu::crosshairParts(4.0f, 10, 3, 23);
+	CHECK(parts.offset == 23 && parts.right == 423 && parts.left == 356 && parts.up == 257 && parts.down == 324);
+	// The template's fields, with the constructor's defaults (0x006390e0).
+	world::ObjectTemplate rifle(1, "GenericFireArm", "rifle", 1);
+	CHECK(menu::crosshairParts(0.21f, &rifle).offset == 3);
+	rifle.settings()["weaponHud.deviationFactor"] = "20";
+	rifle.settings()["weaponHud.minVisualDeviation"] = "15";
+	rifle.settings()["weaponHud.maxVisualDeviation"] = "75";
+	CHECK(menu::crosshairParts(1.0f, &rifle).offset == 35);
+	CHECK(menu::crosshairParts(9.0f, &rifle).offset == 75);
+}
+
+// The Titans' consoles and shields on the HUD (0x0044b680 case 0x32,
+// 0x00448850): all shown from the round's start, cleared at the destroyed
+// part's guiIndex when it has sendDestroyedHudEvent.
+TEST(HudTitan_StrategicObjects)
+{
+	world::ObjectTemplate console2(1, "PlayerControlObject", "as_titan_console_01", 1);
+	console2.settings()["vehicleHud.sendDestroyedHudEvent"] = "1";
+	console2.settings()["vehicleHud.guiIndex"] = "2";
+	world::ObjectTemplate shield(2, "PlayerControlObject", "as_titan_forcefield", 1);
+	shield.settings()["vehicleHud.sendDestroyedHudEvent"] = "1"; // no guiIndex: 0
+	world::ObjectTemplate gun(3, "PlayerControlObject", "as_titan_aa", 1);
+	gun.settings()["vehicleHud.guiIndex"] = "3"; // no sendDestroyedHudEvent
+	menu::StrategicObjects objects;
+	hud::HudManager hudManager(nullptr);
+	objects.update(hudManager, 1);
+	CHECK(hudManager.number("FriendlyStrategicObject0Show") == 1 && hudManager.number("EnemyStrategicObject2Show") == 1);
+	objects.destroyed(2, &console2);
+	objects.destroyed(2, &gun);
+	objects.destroyed(0, &shield);
+	objects.update(hudManager, 1);
+	CHECK(hudManager.number("EnemyStrategicObject2Show") == 0 && hudManager.number("EnemyStrategicObject3Show") == 1);
+	CHECK(hudManager.number("FriendlyStrategicObject2Show") == 1 && hudManager.number("EnemyStrategicObject0Show") == 1);
+	objects.destroyed(2, &shield);
+	objects.update(hudManager, 2);
+	CHECK(hudManager.number("FriendlyStrategicObject0Show") == 0 && hudManager.number("EnemyStrategicObject0Show") == 1);
+	objects.reset();
+	CHECK(objects.shown(2, 0) && objects.shown(2, 2));
+}

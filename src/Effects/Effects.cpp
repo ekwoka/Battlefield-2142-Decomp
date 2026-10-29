@@ -187,6 +187,7 @@ ParticleTemplate ParticleTemplate::fromTemplate(const world::ObjectTemplate& t)
 		p.randomRotation3 = vector(t, "randomRotation", {});
 		p.rotationSpeed3 = vector(t, "rotationSpeed", {});
 		p.alignToSpeed = number(t, "alignRotationToSpeed", 0) != 0;
+		p.directionalScale = number(t, "directionalScale", 0);
 	}
 	p.nonScreenAligned = t.typeName() == "NonScreenAlignedParticleSystem";
 	p.trail = t.typeName() == "TrailSystem";
@@ -731,6 +732,16 @@ void EffectManager::spawnTemplate(const world::ObjectTemplate& t, const Vec3& po
 		ageFactor = game::RandomDistribution::parse(*factor).sample(m_random);
 	}
 	const bool physicsSpeed = number(t, "speedFromPhysics", 0) != 0;
+	// Its modifiers at the start (0x0061a1c0 -> 0x00618e30): a bundle on
+	// its own has no physics to take speeds from, only its altitude.
+	const BundleModifiers& modifiers = bundleModifiers(t);
+	std::array<float, 6> modifierValues {};
+	unsigned modifierMask = 0;
+	if (modifiers.any()) {
+		BundleModifiers::Inputs inputs;
+		inputs.altitude = altitudeAt(position, modifiers.minUnderWater >= 0);
+		modifierMask = modifiers.evaluate(inputs, modifierValues);
+	}
 	for (const world::ChildTemplate& child : t.children()) {
 		if (const world::ObjectTemplate* childTemplate = m_templates.find(child.name)) {
 			const Mat3 local = Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z});
@@ -749,6 +760,13 @@ void EffectManager::spawnTemplate(const world::ObjectTemplate& t, const Vec3& po
 				for (Emitter* emitter : started) {
 					emitter->timeScale *= ageFactor;
 					emitter->physicsVelocity = physicsSpeed;
+					float* const targets[4] = {&emitter->alphaIntensity, &emitter->emitScale, &emitter->speedScale,
+						&emitter->timeScale};
+					for (int m = 0; m < 4; ++m) {
+						if ((modifierMask & (1u << m)) != 0) {
+							*targets[m] = modifierValues[static_cast<size_t>(m)];
+						}
+					}
 					if (spawned) {
 						spawned->push_back(emitter);
 					}
@@ -1097,6 +1115,14 @@ void EffectManager::releaseAnchor(uint32_t anchor)
 
 void EffectManager::update(float seconds)
 {
+	// The decals age and go at the decal manager's timeToLive (0x10164f10).
+	const float decalLife = m_settings ? m_settings->decalTimeToLive : scene::ParticleSystemSettings {}.decalTimeToLive;
+	for (Decal& decal : m_decals) {
+		decal.age += seconds;
+	}
+	m_decals.erase(std::remove_if(m_decals.begin(), m_decals.end(),
+					   [decalLife](const Decal& decal) { return decal.age >= decalLife; }),
+		m_decals.end());
 	// Emitters attached to nothing that is still known end.
 	for (const auto& emitter : m_emitters) {
 		if (emitter->anchor != 0 && !m_anchors.count(emitter->anchor)) {
@@ -1452,17 +1478,29 @@ void EffectManager::collectMeshes(const Emitter& emitter, std::vector<MeshSprite
 		const Vec3 angles = p.angles + t.rotationSpeed3 * p.age;
 		Mat3 turn = Mat3::fromYawPitchRoll({angles.x, angles.y, angles.z});
 		const Mat3 system = t.localSystem ? emitter.rotation() : Mat3 {};
-		if (t.alignToSpeed && physics::lengthSquared(p.velocity) > 1e-6f) {
-			// z along the velocity, y as near the world's up as it goes.
-			const Vec3 z = normalized(t.localSystem ? emitter.rotation().transform(p.velocity) : p.velocity);
-			const Vec3 x = std::fabs(z.y) < 0.99f ? normalized(physics::cross({0, 1, 0}, z)) : Vec3 {1, 0, 0};
-			Mat3 aligned;
-			aligned.rows = {x, physics::cross(z, x), z};
-			turn = turn * aligned;
+		float stretch = 1;
+		if (t.alignToSpeed || t.directionalScale != 0) {
+			// 0x101357c0: z along the velocity, y as near the world's up as
+			// it goes (straight up or down: x the world's, y its -z / z);
+			// the particle's own turn is dropped, and none at all at rest.
+			const Vec3 v = t.localSystem ? emitter.rotation().transform(p.velocity) : p.velocity;
+			const float speed = std::sqrt(physics::lengthSquared(v));
+			turn = Mat3 {};
+			if (speed >= 1.1920929e-07f) {
+				const Vec3 z = v * (1 / speed);
+				Vec3 x {1, 0, 0};
+				if (std::fabs(z.x) >= 0.0001f || std::fabs(z.z) >= 0.0001f) {
+					x = normalized(physics::cross({0, 1, 0}, z));
+				}
+				turn.rows = {x, physics::cross(z, x), z};
+				if (t.directionalScale > 0) {
+					stretch = speed * t.directionalScale;
+				}
+			}
 		} else {
 			turn = turn * (t.localSystem ? system : emitter.rotation());
 		}
-		out.push_back({emitter.worldPosition(p), turn, size, {color.x, color.y, color.z, alpha}});
+		out.push_back({emitter.worldPosition(p), turn, size, {color.x, color.y, color.z, alpha}, stretch});
 	}
 }
 
@@ -1479,6 +1517,39 @@ float ParticleView::fade(float depth, int lod) const
 	}
 	const float f = std::min((depth - start) / (end - start), 1.0f);
 	return (1 - f) * (1 - f);
+}
+
+void EffectManager::setModifier(uint32_t anchor, uint32_t tag, int modifier, float value)
+{
+	for (const auto& emitter : m_emitters) {
+		if (emitter->anchor != anchor || emitter->tag != tag) {
+			continue;
+		}
+		switch (modifier) {
+		case 0: emitter->alphaIntensity = value; break;
+		case 1: emitter->emitScale = value; break;
+		case 2: emitter->speedScale = value; break;
+		case 3: emitter->timeScale = value; break;
+		default: break;
+		}
+	}
+}
+
+const BundleModifiers& EffectManager::bundleModifiers(const world::ObjectTemplate& bundle)
+{
+	auto known = m_bundleModifiers.find(&bundle);
+	if (known == m_bundleModifiers.end()) {
+		known = m_bundleModifiers.emplace(&bundle, BundleModifiers::fromTemplate(bundle)).first;
+	}
+	return known->second;
+}
+
+float EffectManager::altitudeAt(const Vec3& at, bool underWater) const
+{
+	if (underWater) {
+		return m_context.hasWater ? std::max(m_context.waterLevel - at.y, 0.0f) : 0.0f;
+	}
+	return m_context.groundHeight ? at.y - m_context.groundHeight(at.x, at.z) : at.y;
 }
 
 void EffectManager::setModifiers(uint32_t anchor, uint32_t tag, float alphaIntensity, float emitScale, float speedScale,
@@ -1756,6 +1827,7 @@ std::vector<ObjectEffects::Placed> ObjectEffects::bundlesOf(const world::ObjectT
 					placed.chain = chain;
 					placed.position = childAt;
 					placed.rotation = childTurn;
+					placed.onEngine = t.typeName() == "Engine";
 					placed.startOnEffects = flags(*c, "startOnEffects", "setStartOnEffects");
 					placed.stopOnEffects = flags(*c, "stopOnEffects", "setStopOnEffects");
 					placed.startAtCreation = number(*c, "startAtCreation", 0) != 0;
@@ -1908,6 +1980,31 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 			if (b.speedFromPhysics) {
 				effects.setPhysicsVelocity(object.id, tag, object.velocity); // 0x00618ae0, each tick
 			}
+			// Its modifiers each tick (0x0061a760 -> 0x00618e30) from the
+			// object's motion at the bundle; the rewrite takes the speeds
+			// from the bundle's moves over the tick (1/30 s).
+			const BundleModifiers& modifiers = effects.bundleModifiers(*b.bundle);
+			if (modifiers.anyMapping && effects.emitting(object.id, tag)) {
+				const Vec3 point = object.position + object.rotation.transform(b.position);
+				const Vec3 pointVelocity = b.hasLastPoint ? (point - b.lastPoint) * 30.0f : tracked.velocity;
+				BundleModifiers::Inputs inputs;
+				inputs.speed = std::sqrt(physics::lengthSquared(pointVelocity));
+				inputs.rotationalSpeed = std::sqrt(physics::lengthSquared(pointVelocity - tracked.velocity));
+				inputs.acceleration = b.hasLastPoint ? std::sqrt(physics::lengthSquared((pointVelocity - b.lastPointVelocity) * 30.0f)) : 0;
+				inputs.altitude = effects.altitudeAt(point, modifiers.minUnderWater >= 0);
+				inputs.engine = b.onEngine ? object.engine : 0;
+				inputs.speedInDof = physics::dot(pointVelocity, (b.rotation * object.rotation).transform({0, 0, 1}));
+				std::array<float, 6> values {};
+				const unsigned mask = modifiers.evaluate(inputs, values);
+				for (int m = 0; m < 4; ++m) {
+					if ((mask & (1u << m)) != 0) {
+						effects.setModifier(object.id, tag, m, values[static_cast<size_t>(m)]);
+					}
+				}
+				b.lastPoint = point;
+				b.lastPointVelocity = pointVelocity;
+				b.hasLastPoint = true;
+			}
 			if (!object.occupied && tracked.occupied && (b.stopOnEffects & kExited) != 0) {
 				effects.stopAttached(object.id, tag);
 			}
@@ -1951,6 +2048,83 @@ std::array<float, 2> vector2(const world::ObjectTemplate& t, const char* name, s
 }
 
 } // namespace
+
+bool BundleModifiers::Modifier::mapped() const
+{
+	for (const auto& f : from) {
+		if (f[0] != 0 || f[1] != 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+BundleModifiers BundleModifiers::fromTemplate(const world::ObjectTemplate& t)
+{
+	BundleModifiers b;
+	static const char* const kNames[6] = {"alphaIntensity", "emitScaleFactor", "emitSpeedScale", "AgeScaleFactor",
+		"startAge", "soundIntensity"};
+	static const char* const kInputs[6] = {"FromSpeed", "FromRotationalSpeed", "FromAcceleration", "FromAltitude",
+		"FromEngine", "FromSpeedInDof"};
+	for (int i = 0; i < 6; ++i) {
+		Modifier& m = b.modifiers[static_cast<size_t>(i)];
+		const std::string base = kNames[i];
+		const auto range = vector2(t, (base + "Range").c_str(), {1, 1});
+		m.min = range[0];
+		m.max = range[1];
+		m.used = number(t, (base + "Used").c_str(), 0) != 0;
+		for (int j = 0; j < 6; ++j) {
+			m.from[static_cast<size_t>(j)] = vector2(t, (base + kInputs[j]).c_str(), {0, 0});
+		}
+		b.anyMapping = b.anyMapping || m.mapped();
+	}
+	b.minUnderWater = number(t, "minDistanceUnderWaterSurface", b.minUnderWater);
+	return b;
+}
+
+bool BundleModifiers::any() const
+{
+	if (anyMapping) {
+		return true;
+	}
+	for (const Modifier& m : modifiers) {
+		if (m.used) {
+			return true;
+		}
+	}
+	return false;
+}
+
+unsigned BundleModifiers::evaluate(const Inputs& inputs, std::array<float, 6>& out) const
+{
+	unsigned mask = 0;
+	const float x[6] = {inputs.speed, inputs.rotationalSpeed, inputs.acceleration, inputs.altitude, inputs.engine,
+		std::max(inputs.speedInDof, 0.0f)};
+	for (int i = 0; i < 6; ++i) {
+		const Modifier& m = modifiers[static_cast<size_t>(i)];
+		float value = 0;
+		bool set = false;
+		if (anyMapping) {
+			float f = 1;
+			for (int j = 0; j < 6; ++j) {
+				const auto& from = m.from[static_cast<size_t>(j)];
+				if (from[0] != 0 || from[1] != 0) {
+					f *= mapping(from, x[j]);
+					set = true;
+				}
+			}
+			value = (m.max - m.min) * f + m.min;
+		} else if (m.used) {
+			value = m.min;
+			set = true;
+		}
+		if (set) {
+			out[static_cast<size_t>(i)] = i == 5 ? std::clamp(value, 0.0f, 1.0f) : value;
+			mask |= 1u << i;
+		}
+	}
+	return mask;
+}
 
 ObjectEffects::GroundBundle ObjectEffects::GroundBundle::fromTemplate(const world::ObjectTemplate& t)
 {
@@ -2072,13 +2246,42 @@ void ObjectEffects::updateGround(const ObjectState& object, const Vec3& velocity
 	effects.setMount(object.id, tag, object.rotation.untransform(hit - object.position), upright);
 	const float inDof = physics::dot(velocity, object.rotation.transform({0, 0, 1}));
 	const float engine = object.engine > 0 ? object.engine : object.occupied ? 1.0f : 0.0f;
-	effects.setModifiers(object.id, tag, g.value(0, speed, inDof, altitude, engine), g.value(1, speed, inDof, altitude, engine),
-		g.value(2, speed, inDof, altitude, engine), g.value(3, speed, inDof, altitude, engine));
+	// Only the modifiers with a mapping set are set (0x0061bd20's bVar1).
+	for (int i = 0; i < 4; ++i) {
+		const GroundBundle::Modifier& m = g.modifiers[static_cast<size_t>(i)];
+		const auto set = [](const std::array<float, 2>& from) { return from[0] != 0 || from[1] != 0; };
+		if (set(m.fromSpeed) || set(m.fromSpeedInDof) || set(m.fromAltitude) || set(m.fromEngine)) {
+			effects.setModifier(object.id, tag, i, g.value(i, speed, inDof, altitude, engine));
+		}
+	}
 }
 
 } // namespace dice::hfe::effects
 
 namespace dice::hfe::effects {
+
+int Weather::rand()
+{
+	m_randState = m_randState * 214013u + 2531011u;
+	return static_cast<int>((m_randState >> 16) & 0x7fff);
+}
+
+void Weather::rebuildDeviations(const scene::RainSettings& s)
+{
+	for (Deviation& d : m_deviations) {
+		d.angle[0] = static_cast<float>(rand() % 3600) * 0.1f;
+		d.angle[1] = static_cast<float>(rand() % 3600) * 0.1f;
+		d.speed[0] = s.angleSpeed[0];
+		d.speed[1] = s.angleSpeed[1];
+		for (int k = 0; k < 3; ++k) {
+			d.size[k] = s.maxDeviation[static_cast<size_t>(k)] == 0.0f ? 0.0f
+				: static_cast<float>(rand() % 1000) / (1000.0f / s.maxDeviation[static_cast<size_t>(k)]);
+		}
+	}
+	m_deviationSpeed = s.angleSpeed;
+	m_deviationSize = s.maxDeviation;
+	m_deviationsBuilt = true;
+}
 
 void Weather::update(const scene::RainSettings& s, const Vec3& camera, float seconds)
 {
@@ -2096,6 +2299,28 @@ void Weather::update(const scene::RainSettings& s, const Vec3& camera, float sec
 	if (count == 0) {
 		return;
 	}
+	if (!m_deviationsBuilt || m_deviationSpeed != s.angleSpeed || m_deviationSize != s.maxDeviation) {
+		rebuildDeviations(s);
+	}
+	// 0x1011a860, once a frame.
+	constexpr float kRadians = 0.017453292f; // DAT_101f6a98
+	for (Deviation& d : m_deviations) {
+		const int roll = s.randomness != 0 ? rand() % s.randomness : 0;
+		if (roll == s.randomness - 1) {
+			for (float& speed : d.speed) {
+				speed = s.randomDeviationAngleSpeed != 0
+					? static_cast<float>(rand() % s.randomDeviationAngleSpeed) * s.maxRandomChange : 0.0f;
+			}
+		}
+		d.offset = {std::cos(kRadians * d.angle[0]) * d.size[0], std::sin(kRadians * d.angle[1]) * d.size[1],
+			std::sin(kRadians * d.angle[0]) * d.size[2]};
+		for (int k = 0; k < 2; ++k) {
+			d.angle[k] += (s.angleSpeed[0] + d.speed[k]) * seconds;
+			if (360.0f < d.angle[k]) {
+				d.angle[k] -= 360.0f;
+			}
+		}
+	}
 	m_time += seconds;
 	const Vec3 velocity = Vec3 {s.particleVelocity[0], s.particleVelocity[1], s.particleVelocity[2]} * s.particleSpeed;
 	const Vec3 direction = normalized(velocity);
@@ -2112,12 +2337,9 @@ void Weather::update(const scene::RainSettings& s, const Vec3& camera, float sec
 		Vec3 d = p - centre;
 		d = {wrap(d.x, radius.x), wrap(d.y, radius.y), wrap(d.z, radius.z)};
 		p = centre + d;
-		// Its group's sway (16 groups, phases spread round the circle).
-		const float phase = static_cast<float>(i % 16) * 0.3926991f;
-		const float a = phase + m_time * s.angleSpeed[0] * kDegrees, b = phase + m_time * s.angleSpeed[1] * kDegrees;
-		const Vec3 sway {s.maxDeviation[0] * std::sin(a), s.maxDeviation[1] * std::sin(b), s.maxDeviation[2] * std::cos(a)};
+		// Its deviation group's offset.
 		Drop drop;
-		drop.position = p + sway;
+		drop.position = p + m_deviations[i % 16].offset;
 		// vsPoint: 1 - |saturate((|delta| - range) / (radius - range))|.
 		const Vec3 over {std::clamp((std::fabs(d.x) - radius.x * fadeStart) / (radius.x * (1 - fadeStart)), 0.0f, 1.0f),
 			std::clamp((std::fabs(d.y) - radius.y * fadeStart) / (radius.y * (1 - fadeStart)), 0.0f, 1.0f),

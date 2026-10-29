@@ -1,6 +1,7 @@
 #version 450
 // Decals (Decals.fx vsDecal): squares laid on surfaces, built on the CPU in
-// world space. texCoord: the atlas frame's coordinates; weight: alpha;
+// world space. texCoord: the atlas frame's coordinates; weight: alpha (the
+// decal's age);
 // lightmapCoord.xy and part: the decal's colour.
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inNormal;
@@ -16,7 +17,7 @@ layout(location = 9) in vec2 inUnusedCrackCoord;
 layout(set = 1, binding = 0) uniform Transforms {
 	mat4 worldViewProjection;
 	mat4 world;
-	vec4 lightmapTransform;
+	vec4 lightmapTransform; // xy: DecalFadeDistanceAndInterval
 };
 
 layout(location = 0) out vec3 outNormal;
@@ -30,5 +31,8 @@ void main()
 	outNormal = inNormal;
 	outTexCoord = inTexCoord;
 	outDepth = gl_Position.w;
-	outColor = vec4(inColorRG, inColorB, inAlpha);
+	// vsDecal: 1 - saturate((HPos.z - distance) / interval), times the
+	// decal's age fade; the depth taken as the view's.
+	float fade = 1.0 - clamp((gl_Position.w - lightmapTransform.x) / max(lightmapTransform.y, 1e-3), 0.0, 1.0);
+	outColor = vec4(inColorRG, inColorB, inAlpha * fade);
 }

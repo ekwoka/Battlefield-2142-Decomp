@@ -424,6 +424,22 @@ bool RemoteWorld::apply(const GameEvent& event)
 		}
 		return true;
 	}
+	case kEvSquadRadar: { // 0x00508800; the client's handler 0x00508590
+		// The kind, the reporter, the count, the seconds, the players: each
+		// enemy on the minimap for the seconds (the minimap DAT_00a20a00's
+		// slot 0x20 with the seconds and the enemy flag).
+		if (event.values.size() < 4) {
+			return false;
+		}
+		const uint32_t count = event.values[2];
+		const uint32_t ticks = event.values[3] * 30;
+		for (size_t i = 0; i < count && 4 + i < event.values.size(); ++i) {
+			uint32_t& until = m_radar[static_cast<int>(event.values[4 + i])];
+			until = std::max(until, m_tick + ticks);
+		}
+		++m_radarReports;
+		return true;
+	}
 	case kEvSetAcceptOrder: { // 0x0050df20 → the squad manager's slot 0x24 (0x004c3300 with 1)
 		AcceptOrderInfo info;
 		if (!parseAcceptOrder(event, info)) {
@@ -565,6 +581,12 @@ void RemoteWorld::apply(const GhostBlock& ghosts)
 				if (n.firePresses >= 0) {
 					p.firePresses = n.firePresses;
 					++p.fireUpdates;
+				}
+				// Mask 0x10000 (every group's fields): the reader sets the
+				// networkable's +0x280 (player +0x28c, 0x005981a0), which the
+				// client's 0x00590e10 hands the soldier as the reload message.
+				if (state.mask & 0x10000) {
+					++p.reloads;
 				}
 			}
 			continue;
@@ -853,6 +875,22 @@ void RemoteWorld::applyState(RemoteObject& o, const NetworkableState& s)
 		}
 		if (s.mask & 0x20) {
 			o.raisedFlag = s.cpValue;
+		}
+		// allowCaptureByTeam (masks 8, 0x10): the reader 0x006084b0 calls the
+		// point's setter (CP slot 0x34, 0x005bcd00) on every one, changed or
+		// not, which tells its Radio (the takeable radio).
+		// The server's per-client dirty masks send them when they change
+		// (and with a new ghost's first state); the rewrite's server sends
+		// them in every state, so a set here is one that changed or the first.
+		if ((s.mask & 8) && (!o.hasAllow[0] || o.allow[0] != s.cpAllowTeam1)) {
+			o.hasAllow[0] = true;
+			o.allow[0] = s.cpAllowTeam1;
+			m_takeable.push_back({o.ghost, 1, s.cpAllowTeam1});
+		}
+		if ((s.mask & 0x10) && (!o.hasAllow[1] || o.allow[1] != s.cpAllowTeam2)) {
+			o.hasAllow[1] = true;
+			o.allow[1] = s.cpAllowTeam2;
+			m_takeable.push_back({o.ghost, 2, s.cpAllowTeam2});
 		}
 	}
 }

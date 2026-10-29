@@ -801,3 +801,106 @@ TEST(Effects_SpriteDrawAndCollision)
 	culled.forEachGroup([&](const std::string&, bool, const std::vector<effects::Sprite>& s) { drawn += static_cast<int>(s.size()); });
 	CHECK(drawn == 0);
 }
+
+// An EffectBundle's modifiers (0x00618e30): with a mapping set anywhere, the
+// mapped ones follow their inputs; otherwise the Used ones take their min.
+TEST(Effects_BundleModifiersAsTheExe)
+{
+	world::ObjectTemplateManager templates;
+	addPuff(templates);
+	world::ObjectTemplate* used = templates.create("EffectBundle", "e_used");
+	used->children().push_back({"puff", {}, {}});
+	used->settings()["AgeScaleFactorUsed"] = "1";
+	used->settings()["AgeScaleFactorRange"] = "1.5/1";
+	used->settings()["AlphaIntensityRange"] = "0.2/0.4"; // not used: left alone
+	world::ObjectTemplate* mapped = templates.create("EffectBundle", "e_mapped");
+	mapped->children().push_back({"puff", {}, {}});
+	mapped->settings()["EmitScaleFactorRange"] = "0.5/1";
+	mapped->settings()["EmitScaleFactorFromSpeed"] = "0/20";
+	mapped->settings()["AgeScaleFactorUsed"] = "1"; // a mapping elsewhere: Used is not read
+	mapped->settings()["AgeScaleFactorRange"] = "3/3";
+
+	const auto u = effects::BundleModifiers::fromTemplate(*used);
+	CHECK(!u.anyMapping && u.any() && u.modifiers[3].used);
+	std::array<float, 6> values {};
+	CHECK(u.evaluate({}, values) == 8u && values[3] == 1.5f);
+	const auto m = effects::BundleModifiers::fromTemplate(*mapped);
+	CHECK(m.anyMapping);
+	effects::BundleModifiers::Inputs moving;
+	moving.speed = 10;
+	CHECK(m.evaluate(moving, values) == 2u && std::fabs(values[1] - 0.75f) < 1e-5f);
+	moving.speed = 50;
+	m.evaluate(moving, values);
+	CHECK(values[1] == 1.0f);
+
+	// Spawned on their own (no physics: speed 0).
+	effects::EffectManager manager(templates);
+	CHECK(manager.spawn("e_used", {0, 0, 0}));
+	CHECK(manager.emitterList().back()->timeScale == 1.5f && manager.emitterList().back()->alphaIntensity == 1.0f);
+	CHECK(manager.spawn("e_mapped", {0, 0, 0}));
+	CHECK(manager.emitterList().back()->emitScale == 0.5f && manager.emitterList().back()->timeScale == 1.0f);
+}
+
+// A mesh particle system's directionalScale (RendDX9 0x101357c0): the
+// particles follow their velocity and stretch along it by speed x scale.
+TEST(Effects_MeshParticlesDirectionalScale)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "EffectBundle");
+	templates.registerType(3, "MeshParticleSystem");
+	world::ObjectTemplate* spark = templates.create("MeshParticleSystem", "mp_spark");
+	spark->settings()["emitFrequency"] = "100";
+	spark->settings()["emitTime"] = "0.1";
+	spark->settings()["timeToLive"] = "2";
+	spark->settings()["gravity"] = "0";
+	spark->settings()["emitSpeed"] = "10";
+	spark->settings()["randomRotation"] = "0/0/90";
+	spark->settings()["directionalScale"] = "0.5";
+	spark->setGeometry("mp_spark");
+	effects::EffectManager manager(templates);
+	CHECK(manager.spawn("mp_spark", {0, 0, 0}));
+	for (int i = 0; i < 3; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	size_t checked = 0;
+	manager.forEachMeshGroup([&](const std::string&, bool, const std::vector<effects::MeshSprite>& list) {
+		for (const effects::MeshSprite& m : list) {
+			// The particle's own roll dropped: z its direction of travel.
+			const effects::Vec3 z = m.rotation.rows[2];
+			CHECK(std::fabs(physics::lengthSquared(z) - 1) < 1e-4f && m.stretch > 1);
+			CHECK(std::fabs(m.rotation.rows[0].y) < 1e-4f); // x level
+			++checked;
+		}
+	});
+	CHECK(checked > 0);
+}
+
+// The rain's 16 deviation groups (RendDX9 0x1011a790 / 0x1011a860).
+TEST(Effects_RainDeviationGroups)
+{
+	scene::RainSettings s;
+	s.enabled = true;
+	s.particleCount = 32;
+	s.maxDeviation = {0.5f, 0, 0.25f};
+	s.angleSpeed = {90, 10};
+	s.randomness = 1000000; // no speed changes in a few frames
+	effects::Weather weather;
+	weather.update(s, {}, 0);
+	for (const effects::Weather::Deviation& d : weather.deviations()) {
+		CHECK(d.size[0] >= 0 && d.size[0] < 0.5f && d.size[1] == 0 && d.size[2] < 0.25f);
+		CHECK(d.angle[0] >= 0 && d.angle[0] < 360 && d.speed[0] == 90 && d.speed[1] == 10);
+	}
+	const effects::Weather::Deviation before = weather.deviations()[3];
+	weather.update(s, {}, 0.5f);
+	const effects::Weather::Deviation& after = weather.deviations()[3];
+	// The offset from the angles before the turn; both turn by angleSpeed.x + their speed.
+	CHECK(std::fabs(after.offset.x - std::cos(before.angle[0] * 0.017453292f) * before.size[0]) < 1e-5f);
+	CHECK(std::fabs(after.offset.z - std::sin(before.angle[0] * 0.017453292f) * before.size[2]) < 1e-5f);
+	CHECK(after.offset.y == 0);
+	CHECK(std::fabs(std::fmod(before.angle[0] + 90, 360) - after.angle[0]) < 1e-3f);
+	CHECK(std::fabs(std::fmod(before.angle[1] + 50, 360) - after.angle[1]) < 1e-3f);
+	// randomness 1: every frame a change, to 0 x maxRandomChange (randomDeviationAngleSpeed 1).
+	s.randomness = 1;
+	weather.update(s, {}, 0.1f);
+	CHECK(weather.deviations()[0].speed[0] == 0 && weather.deviations()[0].speed[1] == 0);
+}

@@ -32,6 +32,19 @@ const MaterialCell* MaterialManager::cell(uint32_t a, uint32_t b) const
 	return it == m_cells.end() ? nullptr : &it->second;
 }
 
+const MaterialCell::RadioMessage* MaterialManager::radioMessage(uint32_t a, uint32_t b, int index) const
+{
+	for (const uint32_t second : {b, 0u}) {
+		if (const MaterialCell* found = cell(a, second)) {
+			const auto it = found->radioMessages.find(index);
+			if (it != found->radioMessages.end() && !it->second.message.empty()) {
+				return &it->second;
+			}
+		}
+	}
+	return nullptr;
+}
+
 const Material* MaterialManager::lookup(uint32_t id) const
 {
 	const Material* material = find(id);
@@ -106,6 +119,7 @@ void registerMaterialConsoleMethods(Console& console, MaterialManager& materials
 	property("hasWaterPhysics", &Material::hasWaterPhysics);
 	property("isOneSided", &Material::isOneSided);
 	property("isSeeThrough", &Material::isSeeThrough);
+	property("triggerRadio", &Material::triggerRadio);
 
 	bindMethod(console, "MaterialManager.createCell", access, [&materials](int a, int b) {
 		materials.createCell(static_cast<uint32_t>(a), static_cast<uint32_t>(b));
@@ -141,6 +155,18 @@ void registerMaterialConsoleMethods(Console& console, MaterialManager& materials
 	templateSetter("setDecalTemplate", &MaterialCell::decalTemplates);
 	templateSetter("setEffectTemplate", &MaterialCell::effectTemplates);
 	templateSetter("setSoundTemplate", &MaterialCell::soundTemplates);
+	// MaterialManager.setRadioMessage <index> <message> <delay> (0x0051a6c3
+	// -> the active cell's slot 0x34, 0x0060ce20).
+	bindMethod(console, "MaterialManager.setRadioMessage", access,
+		[&materials](int index, std::string message, double delay) {
+			if (MaterialCell* cell = materials.activeCell()) {
+				if (message.empty()) {
+					cell->radioMessages.erase(index);
+				} else {
+					cell->radioMessages[index] = {message, delay};
+				}
+			}
+		});
 }
 
 } // namespace dice::hfe::physics

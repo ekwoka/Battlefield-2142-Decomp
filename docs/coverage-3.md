@@ -243,11 +243,27 @@ Effort: **S** = days, **M** = 1–3 weeks, **L** = a month or more. Call counts 
 | L7 | **Firing direction and fire-component flags** | Guns with `fireInCameraDof` aim off the camera in retail. Busy-until-release, prone-only fire, pull-back time and barrels differ. | `fire.fireInCameraDof` 125 (86 fire comps), `fire.busyUntilButtonRelease` 25, `pullbackTime` 24, `projectileStartRotation` 24, `addBarrelName` 32, `useDistanceCounter` / `distanceStep` / `minimumDistance` 20, `altFireInput` 19 are unread (0x004e39f3–0x004e586c). | S |
 | L8 | **Weapon and vehicle HUD remainder** | The crosshair doesn't hide while sprinting. Vehicle type and selection icons fall back. No destroyed-vehicle HUD event. Visual deviation limits are missing. | `weaponHud.disableOnSprint` 121 (85 comps), `vehicleHud.useSelectionIcons` 214, `typeIcon` 102, `sendDestroyedHudEvent` 57, `canBeSpotted` 41, `weaponHud.min/maxVisualDeviation` 16/24, `altCrosshairIcon` 14 are unread. engine.md "Left: typeIcon, useSelectionIcons". | S |
 | L9 | **Titan-mode remainder** | In gpm_ti, standing inside the enemy Titan's shield doesn't kill. No combat-area HUD text or minimap area texture. Pods have no regulator. No Titan-interior indoor cube. | engine.md:7117 (`0x006f2b00`, every 64 ticks), 7814 (pod regulator and keepUp, lookAtClosestTitanOnEnter), 2728 (`+0x6c`, `0x100c3880`). | S each |
-| L10 | **Animated UVs on tank and IFV tracks and wheels** | Tracks and road wheels don't scroll or turn their textures when driving. | `animatedUVTranslation*` 16, `animatedUVRotation*` 8, `rotateUV` 48 are unread. The setters are at 0x0051f24d–0x005205e5, in the (d) list. They are set on `EU_IFV_tracks_Left/Right`, `EU_TANK_Rwheel_06` and similar. `GeometryTemplate.nrOfAnimatedUVMatrix` is kept, but coverage-2 #14 says "the exe's per-part UV transforms not traced". | S–M |
+| L10 | **Animated UVs on tank and IFV tracks and wheels** | Tracks and road wheels don't scroll or turn their textures when driving. | **Status (render pass 4): done** (`AnimatedUV.h`, 0x0063b9b0, RendDX9 0x100c2eb0 / 0x100c3050; rotateUV). `animatedUVTranslation*` 16, `animatedUVRotation*` 8, `rotateUV` 48 are unread. The setters are at 0x0051f24d–0x005205e5, in the (d) list. They are set on `EU_IFV_tracks_Left/Right`, `EU_TANK_Rwheel_06` and similar. `GeometryTemplate.nrOfAnimatedUVMatrix` is kept, but coverage-2 #14 says "the exe's per-part UV transforms not traced". | S–M |
 | L11 | **Dog tags** | Knife kills don't produce the dog-tag reward or exchange items. | `dogTagRewardTemplate` / `dogTagExchangeTemplate` / `isDogtagReplacement` are unread (32 each; e.g. EU_Assault → knife_unlock). | S |
 | L12 | **Spawn, exit and seat flags** | Close spawn points stay active. Pod-launcher exits, team from the closest CP, seat rotation limits and toggling positions differ. | Unread: `disableCloseSpawnPoints` 46, `exitThroughPodLauncher` 32, `teamFromClosestCP` 17, `seatLeft/RightRotationLimit` 18, `allowTogglePosition` 18, `lockToTeam`, `destroyOnExit` (0x004fbdb3). GameWorld.h:18: the spawn spot's drop `0x005ad8b0` and activation by events are not rewritten. | S |
 | L13 | **Small game-logic tunables and leftovers** | The commander radial level, supply drop height and life, UAV and scan timings; the slowed movement state; banked excess input. | `GameLogic.radialLevelIndex` (30), `supplyDropHeight` / `NumSecsToLive` / `enableVoHelp` stubs. SoldierControl.cpp:87 ("slowed state not rewritten"), GameWorld.cpp:7260 (rememberExcessInput). | S |
 | L14 | **Bot realism** | Bots don't zoom, know everything, ignore hearing and cull distance, and never use the guided weapons' own plan. | `AITemplatePlugIn.cullDistance` (21), `setSoundSphereRadius` / `setHearingProbability` (3) stubs; engine.md:8724–8815 (knowledge certainty 0x100a9b90, ITAir clause, 0x10078570, the C4 guard, revive water rule…). | M |
+
+**Status (sound and HUD, after HEAD 6a79054):**
+- L3 done: obstruction (`0x007fa350`: three rays within 40 m, the atan shape, the Titan blend, the filter `0x007fabf0`; the rewrite caches answers 10–30 frames and casts at most 48 rays an update for cost); the inside-Titan listener flag; a seat's Ambient / AmbientDamaged as the engine's global ambient with `damagedAmbientSoundLimit` and `listenerObstruction` → listener-3d-obstruction (`0x005c7dc0`, `0x005c8a90`); the wind (`Sound.windSetup`, `0x007f9840` / `0x007f9ea0`); panting and injury (`0x00657590`, `0x006575f0` from `0x007a3180` / `0x007a0f80`); material radio (`Material.triggerRadio`, `MaterialManager.setRadioMessage`, `0x00586a90`, `0x0060a730`, `0x0060c5e0`); `audio.newStyleAudio` (`0x007fe740`, `0x007fe570`, `0x007fe430`); the fire and reload sample rules (`0x005dbdc0` loops / bursts / four-sample throws, `+0x42` = roundsPerMinute < 301; `0x005dbfe0` by ammo state); `sound.noisy` (`0x005c4500` gates the ambient triggers' event 2); `vars.set` (`Console/Vars.h`), so Settings/Sound.con's tunables apply (retail's sound-maxreverb 0: never indoors). Left: the sway clock's period and the engine's contact int (not read); the soldier's own material in the radio cell taken as Human_body; the inside-Titan test is the rewrite's box test (the player's slot 0x390 not traced).
+- L8 done where BF2142.exe reads them: the visual deviation limits (`0x007be770`, `menu::crosshairParts`); sendDestroyedHudEvent → event 0x32 → the StrategicObject%iShow table (`0x0063c6a0`, `0x0044b680`, `0x00448850`: the Titan console row by guiIndex, shown once the shield is down); the weapon HUD cleared under the commander screen (`0x007c40c0`, slot 0x234). Settled as never read: weaponHud / vehicleHud.disableOnSprint (retail doesn't hide the crosshair while sprinting; L8's premise was wrong), vehicleHud.typeIcon. Decoded, not used: useSelectionIcons / displaySelectOnActivation (`0x00755d50`, `0x0079fd30`, `0x0079c470`; the rewrite's seats carry one gun), canBeSpotted (`0x007925a0` / `0x007926c0`; the rewrite spots players). Left: altCrosshairIcon.
+
+**Status (local gameplay, after HEAD 6a79054):**
+- L1 done: the blast shake `0x005a6e70` (`GameWorld::cameraShake`; its callers 0x004ba7a0 / 0x004cc4c0, the gun's recoilForce > 5 at 0x005ddfc0, the EffectBundle's `cameraShake` at 0x0061a1c0) feeds the camera's hit shake 0x00610450 (slot 19 of 0x00979a50; on foot too), replacing the hit-point share stand-in; the tinnitus is its event 0xd (material ≠ −1, on foot, within 0.6 r), replacing `tinnitusRange`; the hit vehicle's players get the shake for their networkable's hit strength (`takeSentShake`, for the network side to send). `GSCameraShake` (GeneralSettings +0xb9, getter 0x0049c640) has no reader found, so it gates nothing.
+- L2 done: `Object.disableChildren` (0x006ed98a → 0x006f6fd0): the children leave collision and drawing; the 144 ladders go.
+- L4 done: sprintRechargeModifier / sprintUseModifier into the stamina (0x005706b0 → 0x0058b680 → 0x00645790), beaconSpawnTimeMod into the respawn wait (0x004bb220, 0x005913c0), `ability.setOverheatMod` registered and applied per round (0x0054e8b0, 0x005c3cb0). `sprintStaminaDissipationFactor` (Kit +0x304) is read by nothing. Not done: `abilityInVehicle*`.
+- L5 done: the wreck's own blast (0x00654120, wreckExplosion damage/radius/material/force).
+- L6 partly: the hit's offset (detonation-collface-offset 0.07 + 0.05 × speed share). Not done: maxDepthForExplosion, useMMOnEndEffect, useCollisionNormal's orientation, detonateOnWaterCollision, detectionRadius, the penetrate flags, hitImpactModifier, activeDefenseEnabled (their readers not traced in this pass).
+- L7 partly: busyUntilButtonRelease (0x005d4800 / 0x005d3c20). Traced but not rewritten: fireInCameraDof(+Locked) (0x005f1a20 / 0x005d5fb0 / 0x005f25f0: the seat camera's frame; never on foot), pullbackTime (ThrownFireComp 0x005e4c80: the throw waits), addBarrelName (MultiFireComp 0x005d6d20 / 0x005d64a0).
+- L9 partly: the kill inside the enemy Titan's hull while its shield stands (0x004bbf60's tail, 0x006f2b00; `stepTitanHullKills`). The pods' keepUp couple and lookAtClosestTitanOnEnter are traced (engine.md) but not rewritten.
+- L11 done as far as the exe goes: dogTagReward/ExchangeTemplate are read by nothing; isDogtagReplacement applies for totalDogtagCount ≥ 50 (0x00570ab0; `pmgr_p_set`). The knife-kill message (game logic event 19 → HUD 0x28) is the stats scripts' and the HUD's: not done.
+- L12 partly: disableCloseSpawnPoints (0x005b24f0), exitThroughPodLauncher and allowTogglePosition (0x004bda00); the spawn spot's drop was already done (`dropSpawnSpot`; GameWorld.h's comment fixed). Not done: seat rotation limits (0x005890a0), teamFromClosestCP (0x005d1710; no static supply objects step in the rewrite).
+- Hedges settled: engine.md:1375 / PlayerCamera.h (the hit shake's caller), 2851 (the tinnitus sender), Weapons.h:349, GameWorld.h:18, the cloak comment (GameWorld.cpp "stand-in"). Tests added for friendly-fire scaling, hasOnTimeEffect, reloadWithoutPlayer; the squad spawn spread was tested already (GameWorld_Squads). Not testable here: maintainCameraOnExit's camera and the world order markers (src/Main, not linked into the tests).
 
 ### 2b. Joined and hosted play
 
@@ -259,6 +275,13 @@ Effort: **S** = days, **M** = 1–3 weeks, **L** = a month or more. Call counts 
 | J4 | **Spectator** | No spectator rules or HUD. | engine.md:5467 "Not done: … the spectator's rules"; nametags "Left: the spectator". | M |
 | J5 | **Ghost field meanings** | Minor state on clients (fields read but unused). | Networkables.h:221, 235, 258, 355, 369; engine.md:3462 (+0x168 bits), 3955 (mask 0x10000 via +0x280), 4424; RemoteWorld.h:149 (kick reason byte); CreateSpawnGroup's bits (engine.md:3266, HostedGame.cpp:1939). | S each |
 | J6 | **Server odds and ends** | rcon_feedback over one message; the ranked minimums; the end-of-round delay's per-mode rules; mutiny re-application refusal. | engine.md:4215, 4291; Commander.cpp:138. | S |
+
+**Status (joined play, after HEAD 6a79054):**
+- J1 done: a client makes the bullets and shells of everyone's firing (FireComp `0x005f31d0` / `0x005f1440`: only templates without a networkable), with tracers, impact effects, decals and the others' soldiers' capsules, damaging nothing (client game logic vtable `0x0092a530`'s hit slots `0xf8`..`0x104` are returns); the networked projectiles (84 templates) are server ghosts flown on the client and detonated (effects) when they go. Manual reloads are seen (mask 0x10000: `0x004bda00` → `0x0059b330` → `0x005929f0`; the client's `0x005981a0` → `0x00590e10`, message 10).
+- J2 done for scoping: the scan (commander, every enemy) and the UAV (the team, uavRadius) at 0.5 and the commander's assets at 0.03 (`0x0057dc10`, `0x0057cfb0`, `0x0057db50`). The CommanderCam handler acts on the server (`0x005f8410` returns unless the server test holds: the old note had it backwards); the alternate eye (vt+0xd4, `0x0059afd0`) needs `+0x8d` / `+0x8e`, set only by the HUD's console executors, so it never holds for a remote client. The server's overhead camera object isn't modelled.
+- J3 done: whispers go as channel 14 for the HUD manager's player, which is always -1 in retail (`0x007d9e20`, `0x0075c6b0`), so they reach no one; the takeable radio from the control points' masks 8 / 0x10; the squad's minimap from event 0x41 (`0x005088f0` → `0x00508590`; the 60 m sight test and 2/0x2e left).
+- J4 open: the spectator (how a client joins as one, `Logic.readyToPlay(asSpectator)` `0x1003dba0` in the menu, isn't traced to the network).
+- J5: mask 0x10000's setter found (above); the +0x168 bits, 0x40000 and the others unchanged.
 
 ### 2c. Menus and front end
 
@@ -276,12 +299,12 @@ Effort: **S** = days, **M** = 1–3 weeks, **L** = a month or more. Call counts 
 | # | Gap | Evidence | Effort |
 |---|---|---|---|
 | R1 | **Animated UVs** | see L10 | S–M |
-| R2 | **Particle draw detail** | `usedOnTransparentSurface` 224, MeshParticleSystem `writeZ` / `directionalScale` 215, the bundles' `*Range` / `*Used` / `*FromSpeed` modifiers (76–78, 43), `soundIntensity*` 55; the zoomed-mode systems' `+8` reader (engine.md:2460); the Particle object's blend for tracers (897); drawOrder and the system ground planes (Effects.h:227, 232). Setters 0x0053c649–0x0053f395 (11.6 KB, top (d) cluster). | S–M |
-| R3 | **Undergrowth sway and distance** | LevelRenderer.cpp:1566 "The engine animates 16 sway offsets; until that is decompiled, each swings on its own phase"; roadmap row 5 "sway animation and view-distance scaling are approximations"; `undergrowth.viewDistanceFade` / `viewDistanceScale` stubs | S |
-| R4 | **Overgrowth and static LOD** | engine.md:1749 (dropping trees beyond the view distance, the overgrowth shadow map), 1734 (template +0xc8 at 0x100dd480, `ObjectTemplate.lodDistance` High/Medium/Low); `StaticMeshRenderer.*` 10/10 stubs | S–M |
-| R5 | **Decals** | engine.md:1878 (normal-mapped technique, `decalGeomClipAngle`); `DecalManager.*` 7/7 stubs (timeToLive, fade) | S–M |
+| R2 | **Particle draw detail** | `usedOnTransparentSurface` 224, MeshParticleSystem `writeZ` / `directionalScale` 215, the bundles' `*Range` / `*Used` / `*FromSpeed` modifiers (76–78, 43), `soundIntensity*` 55; the zoomed-mode systems' `+8` reader (engine.md:2460); the Particle object's blend for tracers (897); drawOrder and the system ground planes (Effects.h:227, 232). Setters 0x0053c649–0x0053f395 (11.6 KB, top (d) cluster). **Status: done** for the bundles' Range / Used / From* (0x00618e30), directionalScale (0x101357c0); writeZ and usedOnTransparentSurface settled as no-ops for shipped content; startAge / soundIntensity left. | S–M |
+| R3 | **Undergrowth sway and distance** | LevelRenderer.cpp:1566 "The engine animates 16 sway offsets; until that is decompiled, each swings on its own phase"; roadmap row 5 "sway animation and view-distance scaling are approximations"; `undergrowth.viewDistanceFade` / `viewDistanceScale` stubs **Status:** the per-frame walk decoded (0x1010a900); the 16 offsets' spread of SwaySpeed/Scale not traced. | S |
+| R4 | **Overgrowth and static LOD** | engine.md:1749 (dropping trees beyond the view distance, the overgrowth shadow map), 1734 (template +0xc8 at 0x100dd480, `ObjectTemplate.lodDistance` High/Medium/Low); `StaticMeshRenderer.*` 10/10 stubs **Status:** static LOD skips done (+0xc8 = isTitanExterior); overgrowth view-distance drop and lodDistance left. | S–M |
+| R5 | **Decals** | engine.md:1878 (normal-mapped technique, `decalGeomClipAngle`); `DecalManager.*` 7/7 stubs (timeToLive, fade) **Status:** `DecalManager.*` done (TTL, age/depth fades, normal offset); clipping left. | S–M |
 | R6 | **Lights** | engine.md:1816 (specular, flicker, the per-mesh light choice `lightManager.maxLightsPer*Mesh`, `lightCullDistance`); projectors and shadows are settled as not drawn by retail | M |
-| R7 | **Terrain and rain detail** | engine.md:1678 (per-material detail lists, cullerTypes other than 3, detailCullMaxLevel); `rainManager.randomness` / `maxRandomChange` / `randomDeviationAngleSpeed` stubs (23 each); `terrain.waterQuality` / `waterNormalMap` | S |
+| R7 | **Terrain and rain detail** | engine.md:1678 (per-material detail lists, cullerTypes other than 3, detailCullMaxLevel); `rainManager.randomness` / `maxRandomChange` / `randomDeviationAngleSpeed` stubs (23 each); `terrain.waterQuality` / `waterNormalMap` **Status:** the rain's deviation walk and its three properties done (0x1011a790 / 0x1011a860). | S |
 | R8 | **View tint and overhead value** | engine.md:2856 (PostProduction slot 0x7c), 6325 (`DAT_00a2020c` slot 0x80) | S |
 
 ### 2e. Not decodable or out of scope (unchanged from coverage-2 §2b)
@@ -314,12 +337,12 @@ Searched in docs/engine.md (9,515 lines; 50 hits after removing false matches) a
 - GameWorld.cpp:728: the consumer of addExtraAmmoItem's flag.
 
 **Rendering**
-- engine.md:1735: template +0xc8 in 0x100dd480 (static LOD skip).
+- engine.md:1735: template +0xc8 in 0x100dd480 (static LOD skip). **Settled:** isTitanExterior (slot 0xcc).
 - engine.md:1876: per-object decal sets; the rewrite's rule is fitted to what a projectile can hit.
 - engine.md:2460: the zoomed-mode systems' `+8` reader.
 - engine.md:6325: the overhead view's renderer value (`DAT_00a2020c` slot 0x80).
 - Effects.h:227: drawOrder's use. Effects.h:232: the systems' ground planes.
-- LevelRenderer.cpp:1566, roadmap.md:34: the undergrowth sway offsets and view-distance scaling (approximation).
+- LevelRenderer.cpp:1566, roadmap.md:34: the undergrowth sway offsets and view-distance scaling (approximation). **Partly settled:** the walk is 0x1010a900's; the 0x1011a860 walk was the rain's (done); the offsets' spread remains.
 
 **Spawning and game logic**
 - engine.md:7070: the caller 0x005a3bd0 of the man-down branch.
@@ -337,13 +360,13 @@ Searched in docs/engine.md (9,515 lines; 50 hits after removing false matches) a
 - Commander.cpp:138: the client refusing an applicant barred after a mutiny.
 
 **HUD**
-- engine.md:5049: the bar fill directions are "inferred".
+- engine.md:5049: the bar fill directions are "inferred". Not settleable from the EXE: the bar node (vtable `0x009b8b70`, draw `0x007da720`) hands the type to RendDX9 (`0x0087d5b0`).
 - engine.md:5069, Hud.h:32, Hud.cpp:49: the corner roots' positions are "approximate" (the engine places them by screen size).
 - engine.md:5140: the rows the scoreboard blacks out via +0x410 / +0x404.
 - main.cpp:474: the scoreboard list's own drawing (RendDX9) isn't decompiled; the layout is read off the scripts.
 - engine.md:5269: the range finder's firearm components (0x94d3 / 0xc4f1 / 0x94db, +0x17c).
 - engine.md:5352: the name-tag "Guesses": the soldier's origin 1 m over the feet, the 4 m vehicle height, the bar's place.
-- engine.md:6542: the sender of HUD event 0x2f (the first/second warning split).
+- ~~engine.md:6542: the sender of HUD event 0x2f.~~ Found: game slot 0x9c (`0x004b14c0`) from `0x005ebd10` (a projectile's target change, third byte 1 / -1) and `0x005f5df0` (from `0x005f63e0`, a firearm lock, its +0x30); the rewrite's first/second rule is unchanged.
 - engine.md:7206, 7423, HudMenus.cpp:42, 409: the squad and commander list columns are fitted to the scripts' widths (the menu's own widths at +0xc0 are set in code).
 - engine.md:7378: which order kind the minimap draws with which icon.
 - HudMenus.h:157: the commander tabs' first state (constructor not found).
@@ -354,12 +377,12 @@ Searched in docs/engine.md (9,515 lines; 50 hits after removing false matches) a
 **Network**
 - engine.md:3266, HostedGame.cpp:1939: CreateSpawnGroup's three bits and two bytes.
 - engine.md:3462, Networkables.h:235: the +0x168 ghost bits' setter.
-- engine.md:3955: mask 0x10000's setter (+0x280).
+- ~~engine.md:3955: mask 0x10000's setter (+0x280).~~ Found: c_PIReload in `0x004bda00` → player vtable `0x1fc` (`0x0059b330`).
 - engine.md:4424, Networkables.h:221: the soldier's mask 0x40000 field.
 - Networkables.h:258, 355, 369: the fields at 0x00562a80 / 0x00562ee0, flag210, and +0x208 / +0x238 / +0x1fc.
 - RemoteWorld.h:149: the kick reason byte.
 - engine.md:4215: how a long rcon_feedback is carried.
-- main.cpp:3795, engine.md:6246: the whisper's network message.
+- ~~main.cpp:3795, engine.md:6246: the whisper's network message.~~ Channel 14, byte 9 the HUD manager's `+0x48` (-1), `0x007d9e20` → `0x004b2af0` → `0x00643370`.
 - engine.md:3829, main.cpp:4309: the radio heard is the rewrite's stand-in for the bots' calls (bots don't go through slot 0xd8).
 - HostedGame.cpp:156: the move buffer's depth is "OpenBattlefield2's reading of BF2's, not traced in BF2142.exe".
 - engine.md:4126, GhostPriority.h:77, HostedGame.cpp:2199: the ghost dirty masks' stand-in. Settleable by decoding the 12 masks, but low value.
@@ -385,8 +408,8 @@ Searched in docs/engine.md (9,515 lines; 50 hits after removing false matches) a
 ## 4. Inconsistencies
 
 **Docs that say "not done" for something the code now does (stale):**
-1. **engine.md:5298–5301** says "Not done: … the map's spotted vehicles and the silos' reload and background icons (0x0077dee0 / 0x0077df60 …)". The same file (5246), main.cpp:764–765, HudMenusVehicles.h:256 and coverage-2 gap 4 all say these are done (miniMapInfo, `HudQuad::sweep`, spottedIcon).
-2. **engine.md:5463–5467** says "the rewrite's squad leaders send no requests (SquadLeader.sendRequest 0x007708d4 and the squad manager's request store aren't rewritten). Not done: the requests (above)". The probe shows `SquadLeader.sendRequest` implemented at HEAD. engine.md:7433, HudMenus.h:209 and main.cpp:3386 describe it, and coverage-2 #9 has it done.
+1. **Fixed.** **engine.md:5298–5301** said "Not done: … the map's spotted vehicles and the silos' reload and background icons (0x0077dee0 / 0x0077df60 …)". The same file (5246), main.cpp:764–765, HudMenusVehicles.h:256 and coverage-2 gap 4 all say these are done (miniMapInfo, `HudQuad::sweep`, spottedIcon).
+2. **Fixed.** **engine.md:5463–5467** said "the rewrite's squad leaders send no requests (SquadLeader.sendRequest 0x007708d4 and the squad manager's request store aren't rewritten). Not done: the requests (above)". The probe shows `SquadLeader.sendRequest` implemented at HEAD. engine.md:7433, HudMenus.h:209 and main.cpp:3386 describe it, and coverage-2 #9 has it done.
 3. **src/Game/GameWorld.cpp:6249–6251** says the cloak is "drawn hidden as a stand-in for the shimmer". `LevelRenderer::drawCamouflage` (LevelRendererPost.cpp:627, called at LevelRenderer.cpp:3451) draws the refraction. Coverage-2 fixed the engine.md line but not this comment.
 4. **roadmap.md** states:
    - Rows 8 (playable local game), 10 (multiplayer), 11 (AI) and 12 (VoIP) still open with "Started:". Given the audits (≈81% calibrated EXE, joined and hosted games at parity), "Started" understates them.

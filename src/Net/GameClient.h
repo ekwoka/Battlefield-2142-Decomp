@@ -123,6 +123,11 @@ public:
 	void selectKit(int kit, const std::array<int32_t, 4>& unlocks = {-1, -1, -1, -1}); // SelectKit (0x3f)
 	void suicide();                            // PostRemote 6/0xc (0x004c22e0)
 	void say(const std::string& text, uint32_t channel = 0); // a StringBlock chat line (channel: ChatChannel)
+	// A whisper (the HUD's 0x007d9e20: channel 14, kChatPlayer, through
+	// the game client's slots 0x3c / 0x4c / 0x30, 0x004b2af0 -> the chat
+	// queue 0x00643370): the header's byte 9 is the HUD manager's player
+	// (+0x48), which 0x0075c6b0 sets to -1 and nothing changes, so 0xff.
+	void whisper(const std::string& text, int target = -1);
 	// "rcon <command>" typed in the console: PostRemote 6/0x12 with the
 	// line (0x004b6630 case 0x12); the server's answers come back as 6/0x13
 	// messages (world().takeMessages(): -1 and "rcon: <text>").

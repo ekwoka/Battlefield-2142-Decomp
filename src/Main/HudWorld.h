@@ -90,6 +90,14 @@ public:
 		int rounds = -1, mags = -1;
 	};
 	virtual Weapon heldWeapon() const = 0;
+	// The enemies on the team's minimap: a local round's revealed ones (the
+	// recon drones' pulses), a joined game's from the squad's battlefield
+	// reports (event 0x41, the client's 0x00508590).
+	virtual std::vector<int> revealedPlayers(int team) const
+	{
+		(void)team;
+		return {};
+	}
 };
 
 // A local round (also a hosting server's own player).
@@ -125,6 +133,7 @@ public:
 	const world::Object* vehicle() const override { return m_round.playerVehicle(); }
 	float health() const override { return 1; }
 	Weapon heldWeapon() const override;
+	std::vector<int> revealedPlayers(int team) const override { return m_round.revealedPlayers(team); }
 
 private:
 	game::GameWorld& m_round;
@@ -169,6 +178,7 @@ public:
 	const world::Object* vehicle() const override;
 	float health() const override;
 	Weapon heldWeapon() const override;
+	std::vector<int> revealedPlayers(int team) const override;
 
 	// The object of a ghost (0 none) and the ghost of an object.
 	uint32_t objectOf(uint16_t ghost) const;

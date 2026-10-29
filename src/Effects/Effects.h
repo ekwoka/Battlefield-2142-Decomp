@@ -160,6 +160,13 @@ struct ParticleTemplate {
 	Vec3 randomRotation3;
 	Vec3 rotationSpeed3;
 	bool alignToSpeed = false;
+	// directionalScale (RendDX9's mesh particle template +0x1ec, slot
+	// 0x188; 0): when not 0 the particles follow their velocity as with
+	// alignRotationToSpeed (+0x1f0), and over 0 stretch along it by their
+	// speed x it (0x101357c0). writeZ (+0x1f3, slot 0x1a8) only picks
+	// another pass when on (0x10134450), and every shipped system has it 0,
+	// the default; it isn't kept.
+	float directionalScale = 0;
 	// NonScreenAlignedParticleSystem: quads lying across the system's y
 	// axis instead of facing the camera (NonScreenAlignedParticles.fx
 	// displaces each corner by world vectors the CPU gives, displaceCoords).
@@ -405,6 +412,7 @@ struct MeshSprite {
 	Mat3 rotation;
 	float size;
 	std::array<float, 4> color;
+	float stretch = 1; // along its z (directionalScale)
 };
 
 // "decal" templates (ObjectTemplate.create decal): what a material cell's
@@ -444,6 +452,7 @@ struct Decal {
 	// DecalManager slot 0x14, RendDX9 0x100e6b70, kept at object +0x164 and
 	// released with it, slot 0x20).
 	uint32_t object = 0;
+	float age = 0; // seconds (RendDX9 0x10164f10; it goes at DecalManager.timeToLive)
 };
 
 // A LightSource of an effect bundle (an explosion's flash, a muzzle
@@ -573,6 +582,49 @@ struct DebrisPiece {
 	Vec3 scale() const;
 };
 
+// An EffectBundle's modifiers (the template's block at +0x298, vtable
+// 0x00979278; the setters 0x0053cbb9..0x0053f0e0 forward to its slots
+// 0x18..0x168): six of them, 0 alpha intensity, 1 emit scale, 2 emit speed
+// scale, 3 age scale, 4 start age, 5 sound intensity; each a Range (min,
+// max; +4 + 8i), a Used flag (+0x154 + i) and six "From" mappings a/b
+// (+0x34 + 8 (6i + j)): j 0 FromSpeed, 1 FromRotationalSpeed, 2
+// FromAcceleration, 3 FromAltitude, 4 FromEngine, 5 FromSpeedInDof.
+//
+// The bundle's update (0x00618e30, at its start 0x0061a1c0 and each tick
+// 0x0061a760): when any mapping of any modifier is set (0x0064be90), each
+// modifier with one set becomes min + (max - min) x the product of its
+// mappings (0 at a, 1 at b, clamped) of: the speed of the root object's
+// physics at the bundle (slot 0xac; none for a bundle on its own), the
+// rotational part of it (that less the body's velocity, slot 0x58), the
+// size of slot 0xb0 at the bundle, the altitude (minDistanceUnderWater
+// Surface +0x3f4 below 0: the height over the terrain, DAT_00a83e58 slot
+// 0x68; else the depth under the water, slot 0x94, at least 0), the
+// throttle of the Engine the bundle sits on (template 0x9476 with +0x24c,
+// 0x0064c3b0) and the speed along the bundle's z (at least 0). Otherwise
+// each modifier with Used on is set to its min. The values are set on the
+// systems (0x00618bc0..0x00618d00: their slots 0x58 / 0x60 / 0x68 / 0x78 /
+// 0x80, RendDX9 +0x164 / +0x138 / +0x13c / +0x12c / +0xd8), replacing the
+// age scale randomAgeFactor gave; the sound's (5) is the bundle's +0x1d8,
+// clamped to 0..1.
+struct BundleModifiers {
+	struct Inputs {
+		float speed = 0, rotationalSpeed = 0, acceleration = 0, altitude = 0, engine = 0, speedInDof = 0;
+	};
+	struct Modifier {
+		float min = 1, max = 1;
+		bool used = false;
+		std::array<std::array<float, 2>, 6> from {}; // by input j
+		bool mapped() const;
+	};
+	std::array<Modifier, 6> modifiers;
+	bool anyMapping = false;           // 0x0064be90
+	float minUnderWater = -0.25f;      // minDistanceUnderWaterSurface (+0x3f4)
+	static BundleModifiers fromTemplate(const world::ObjectTemplate& t);
+	// The modifiers the update sets: bit i for modifier i, its value in out[i].
+	unsigned evaluate(const Inputs& inputs, std::array<float, 6>& out) const;
+	bool any() const;
+};
+
 class EffectManager {
 public:
 	explicit EffectManager(const world::ObjectTemplateManager& templates, uint32_t seed = 0x759dc150);
@@ -638,6 +690,13 @@ public:
 	// (Wheel/AirDraftEffectBundle, 0x0061bd20 / 0x0061ce20).
 	void setModifiers(uint32_t anchor, uint32_t tag, float alphaIntensity, float emitScale, float speedScale,
 		float timeScale = 1);
+	// One of them (BundleModifiers' 0..3) of those emitters.
+	void setModifier(uint32_t anchor, uint32_t tag, int modifier, float value);
+	// A bundle's modifiers (read once per template).
+	const BundleModifiers& bundleModifiers(const world::ObjectTemplate& bundle);
+	// BundleModifiers' altitude at a point: over the ground (the
+	// collisionEnable ground), or under the water when `underWater`.
+	float altitudeAt(const Vec3& at, bool underWater) const;
 	// Sprites alive in all the sprite systems (the pool's use).
 	int poolUsed() const { return m_poolUsed; }
 	// EffectBundle.speedFromPhysics: the physics velocity (world) at an
@@ -790,6 +849,7 @@ private:
 		Mat3 rotation;
 	};
 	void placeAttached(Emitter& emitter) const;
+	std::map<const world::ObjectTemplate*, BundleModifiers> m_bundleModifiers;
 	const ParticleTemplate* particleTemplate(const world::ObjectTemplate& t);
 	void spawnTemplate(const world::ObjectTemplate& t, const Vec3& position, const Mat3& rotation, int depth, View view,
 		std::vector<Emitter*>* spawned, std::vector<size_t>* spawnedLights = nullptr);
@@ -937,6 +997,11 @@ public:
 		uint32_t startOnEffects = 0, stopOnEffects = 0;
 		bool startAtCreation = false;
 		bool speedFromPhysics = false; // EffectBundle.speedFromPhysics (+0x45c)
+		bool onEngine = false; // its parent is an Engine (BundleModifiers' FromEngine)
+		// Its place in the world and its velocity there last tick (the
+		// modifiers' rotational speed and acceleration).
+		Vec3 lastPoint, lastPointVelocity;
+		bool hasLastPoint = false;
 		// WheelEffectBundle / AirDraftEffectBundle: the ground picks the effect.
 		enum class Kind { Plain, Wheel, AirDraft, Wind } kind = Kind::Plain;
 	};
@@ -1002,9 +1067,8 @@ public:
 // along particleVelocity x particleSpeed and wrapped round the box (the
 // original moves 6 x 6 x 6 cells of 0.4 x emitRadius with the particles
 // fixed in them, 0x1011b2a0, wrapping the cells round the box, 0x1011b720,
-// and draws them 32 at a time, CELLPOSITIONS), swaying by maxDeviation in 16
-// groups (DEVIATIONGROUPS; the original's walk of them, randomness and
-// maxRandomChange, isn't the rewrite's sine at angleSpeed), faded from
+// and draws them 32 at a time, CELLPOSITIONS), swaying by one of 16
+// deviation groups (DEVIATIONGROUPS, Weather::Deviation), faded from
 // fadeOutRange of the box to its edge (vsPoint's sysDelta), drawn as points
 // of particleSize x sqrt(1 / (scale.x + scale.y x distance)) pixels, at most
 // particleMaxSize, or as lines lineLength long. All particleCount of them:
@@ -1022,7 +1086,33 @@ public:
 	void update(const scene::RainSettings& settings, const Vec3& camera, float seconds);
 	const std::vector<Drop>& drops() const { return m_drops; }
 
+	// A deviation group (RendDX9's rain manager, 28 bytes each from
+	// +0x63a4): made afresh when angleSpeed or maxDeviation change
+	// (0x1011c6a0 / 0x1011b880 flag a rebuild, 0x1011a790): two angles at
+	// a random 0..359.9 degrees, its speeds angleSpeed x and y, its sizes a
+	// random 0..0.999 of maxDeviation's (0 where that is 0). Each frame
+	// (0x1011a860): with randomness's chance its speeds become a random
+	// step (RainSettings), then its offset is (cos a x size.x, sin b x
+	// size.y, sin a x size.z) and a and b turn by (angleSpeed.x + their
+	// speed) x the frame's seconds (both by angleSpeed's x), wrapped past
+	// 360. The particle's group is its index mod 16 (the original's
+	// vertex data, Rain.fx Data.y, isn't traced).
+	struct Deviation {
+		float angle[2] {};
+		float size[3] {};
+		float speed[2] {};
+		Vec3 offset;
+	};
+	const std::array<Deviation, 16>& deviations() const { return m_deviations; }
+
 private:
+	void rebuildDeviations(const scene::RainSettings& settings);
+	int rand(); // MSVC's rand() (the original's CRT), seeded 1
+	std::array<Deviation, 16> m_deviations {};
+	std::array<float, 2> m_deviationSpeed {};
+	std::array<float, 3> m_deviationSize {};
+	bool m_deviationsBuilt = false;
+	uint32_t m_randState = 1;
 	std::vector<Vec3> m_positions; // without the sway
 	std::vector<Drop> m_drops;
 	float m_time = 0;

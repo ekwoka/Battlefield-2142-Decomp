@@ -157,6 +157,55 @@ private:
 	Fields m_fields;
 };
 
+// The crosshair's four parts (0x007be770, each frame from 0x007c1f10's
+// weapon HUD): the spread is ceil(deviation x deviationFactor) pixels
+// (the weapon HUD's +0x104, weaponHud.deviationFactor, 10 by default),
+// pushed out by minVisualDeviation (+0x10c, 0) and held at
+// maxVisualDeviation (+0x108, 1000): an offset min + spread over the
+// maximum is the maximum. Up = 300 - length - offset, Down = 301 + offset,
+// Left = 399 - length - offset, Right = 400 + offset, about the 800 x 600
+// centre (the clamped branch takes the node's half size, the same 400 /
+// 300). The block fields are the WeaponHud component's (constructor
+// 0x006390e0: +0xf8 10, +0xfc 1000, +0x100 0; read through slot 0x50 at
+// +0xb0 / +0xb4 / +0xb8).
+struct CrosshairParts {
+	float up = 0, down = 0, left = 0, right = 0;
+	int offset = 0;
+};
+CrosshairParts crosshairParts(float deviation, int deviationFactor, int minVisual, int maxVisual, float length = 20);
+// The same with the weapon template's weaponHud.* (defaults as above).
+CrosshairParts crosshairParts(float deviation, const world::ObjectTemplate* weapon, float length = 20);
+
+// The Titans' consoles and shields on the HUD (Friendly/EnemyStrategic-
+// Object%iShow, 0..9; the HUD information layer's +0xa89 + (team - 1) x
+// 10, copied for the local team and the other by 0x00448850). Every
+// entry is 1 from the round's start (0x00448300, 0x00448760); a destroyed
+// object (event 0x18, 0x0063c6a0) whose first templated ancestor has
+// vehicleHud.sendDestroyedHudEvent (the vehicle block's +0xb3, the
+// component's +0xfb, 0 by default) posts event 2/0x32 with itself, and the
+// handler (0x0044b680, case 0x32) clears the entry of the root
+// PlayerControlObject's team (1 or 2) at the template's vehicleHud.guiIndex
+// (0..9; the consoles 1..4, the AS forcefield none so 0, eu_forcefield_small
+// 5). Nothing sets an entry back before the next round. The Titan HUD
+// (HudElementsTitans.con) shows a team's console row while entry 0 is 0
+// (its shield down) and each console lit while its entry is 1.
+class StrategicObjects {
+public:
+	void reset() { m_alive.fill(true); }
+	// A part destroyed: `team` the root's (1 or 2), `t` the part's template.
+	void destroyed(int team, const world::ObjectTemplate* t);
+	bool shown(int team, int index) const
+	{
+		return team >= 1 && team <= 2 && index >= 0 && index < 10 && m_alive[static_cast<size_t>((team - 1) * 10 + index)];
+	}
+	// Sets Friendly/EnemyStrategicObject%iShow for the local team.
+	void update(hud::HudManager& hud, int localTeam) const;
+
+private:
+	std::array<bool, 20> m_alive {true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+		true, true, true, true, true, true};
+};
+
 struct SelectItem {
 	int index = 0;       // the item index (1 the knife, 2 the sidearm, 3 the primary...)
 	std::string icon;    // weaponHud.selectIcon

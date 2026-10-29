@@ -402,6 +402,13 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 			: bundled || skinned ? 1.0f : -1.0f;
 		v.part = partIndex ? file->vertices[vertexOffset + partIndex->offset] : 0.0f;
 		v.part2 = skinned && partIndex ? file->vertices[vertexOffset + partIndex->offset + 1] : v.part;
+		// A bundled vertex's UV matrix (RaShaderBM getSkinnedUVMatrix: the
+		// fourth blend index byte) rides in the dirt coordinates, which
+		// only static meshes use; its TexUVRotCenter is texture set 1, the
+		// detail coordinates.
+		if (bundled && partIndex) {
+			v.dirtCoord[0] = file->vertices[vertexOffset + partIndex->offset + 3];
+		}
 		v.weight = 1;
 		if (blendWeight) {
 			file->readFloats(i, *blendWeight, &v.weight, 1);
@@ -425,13 +432,20 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 	// 0x100a31d0: of three geometries 1 takes maxSkip3pLods and 2
 	// maxSkipWreckLods, of two 1 the former; skinned 0x100d4b..: the third
 	// person's, geometry 0 of one and 1 of two), at most renderer +0x910 (the
-	// geometry quality's) and one less than the LODs. Static meshes keep
-	// theirs here (0x100dd480 also asks the template's +0xc8, not known).
-	if ((bundled || skinned) && wantedLod == 0) {
+	// geometry quality's) and one less than the LODs. Static meshes
+	// (0x100dd480): geometry 0 maxSkip3pLods (+0xc0), 1 maxSkipWreckLods
+	// (+0xc4), none for an isTitanExterior template (its slot 0xcc, +0xc8:
+	// the hull's parts pair their LODs, TitanParts.h).
+	if (wantedLod == 0) {
 		const size_t count = file->geometries.size();
 		unsigned wanted = 0;
 		if (bundled && count == 3) {
 			wanted = geometryIndex == 1 ? geometry->maxSkip3pLods : geometryIndex == 2 ? geometry->maxSkipWreckLods : 0;
+		} else if (!bundled && !skinned) {
+			wanted = geometry->titanExterior ? 0u
+				: geometryIndex == 0         ? geometry->maxSkip3pLods
+				: geometryIndex == 1         ? geometry->maxSkipWreckLods
+											 : 0u;
 		} else if (count == 2 || (skinned && count == 1)) {
 			wanted = geometryIndex == count - 1 ? geometry->maxSkip3pLods : 0;
 		}
@@ -555,6 +569,8 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		// 0x100de8xx: a geometry whose path has "vegitation" is a tree
 		// (+0x2a2); its alpha-tested materials are the leaves (RaShaderLeaf).
 		submesh.leaf = tree && material.alphaMode == 2;
+		// BundledMesh.fx's "AnimatedUV..." techniques (_HASUVANIMATION_).
+		submesh.animatedUV = bundled && technique.find("animateduv") != std::string::npos;
 		if (lower(material.effect) == "staticmesh.fx" && technique.compare(0, 10, "basedetail") == 0) {
 			const bool hasDirt = technique.find("dirt") != std::string::npos;
 			const bool hasCrack = technique.find("crack") != std::string::npos;
@@ -682,6 +698,12 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 			m_instances.push_back(instance);
 		}
 	}
+	// Object.disableChildren: a placed object's children are out of the scene.
+	if (depth == 0 && object != 0) {
+		if (const world::Object* placed = sources.objects.find(object); placed && placed->childrenDisabled()) {
+			return;
+		}
+	}
 	for (const world::ChildTemplate& child : objectTemplate.children()) {
 		if (const world::ObjectTemplate* childTemplate = sources.templates.find(child.name);
 			childTemplate && drawnWithObject(childTemplate->typeName())) {
@@ -718,8 +740,57 @@ std::shared_ptr<anim::Animation> LevelRenderer::animation(const io::FileManager&
 // A vehicle's parts (turrets, wheels, doors) are child templates with a
 // "geometryPart" index into the parent's bundled mesh; each part is drawn
 // with its template's position relative to the object.
+const LevelRenderer::AnimatedUVLook& LevelRenderer::animatedUVLook(const world::ObjectTemplate& objectTemplate) const
+{
+	const auto known = m_animatedUVLooks.find(&objectTemplate);
+	if (known != m_animatedUVLooks.end()) {
+		return known->second;
+	}
+	AnimatedUVLook look;
+	AnimatedUVSettings& s = look.settings;
+	const auto& settings = objectTemplate.settings();
+	const auto text = [&settings](const char* name) -> const std::string* {
+		const auto found = settings.find(name);
+		return found != settings.end() ? &found->second : nullptr;
+	};
+	const auto flag = [&text](const char* name, bool& out) {
+		if (const std::string* t = text(name)) {
+			out = std::atoi(t->c_str()) != 0;
+		}
+	};
+	const auto vec2 = [&text](const char* name, float out[2]) {
+		if (const std::string* t = text(name)) {
+			parseAnimatedUVVec2(*t, out);
+		}
+	};
+	// The setters 0x0051f30b..0x0051ff58 (template +0x12c..+0x160).
+	flag("animatedUVTranslation", s.translation);
+	vec2("animatedUVTranslationSpeed", s.speed);
+	vec2("animatedUVTranslationMax", s.max);
+	vec2("animatedUVTranslationSize", s.size);
+	if (const std::string* t = text("animatedUVTranslationIndex")) {
+		s.translationIndex = std::atoi(t->c_str());
+	}
+	flag("animatedUVTranslationReverse", s.translationReverse);
+	if (const std::string* t = text("animatedUVRotation")) {
+		s.rotation = std::atoi(t->c_str()) != 0;
+	}
+	vec2("animatedUVRotationScale", s.scale);
+	if (const std::string* t = text("animatedUVRotationIndex")) {
+		s.rotationIndex = std::atoi(t->c_str());
+	}
+	if (const std::string* t = text("animatedUVRotationRadius")) {
+		s.radius = static_cast<float>(std::atof(t->c_str()));
+	}
+	flag("animatedUVRotationReverse", s.rotationReverse);
+	// Spring.rotateUV (0x00543fab, +0x2b8).
+	flag("rotateUV", look.rotateUV);
+	return m_animatedUVLooks.emplace(&objectTemplate, look).first->second;
+}
+
 void LevelRenderer::collectParts(const LevelSources& sources, const world::ObjectTemplate& objectTemplate,
-	const Mat4& relative, std::vector<Mat4>& parts, int depth, uint32_t object) const
+	const Mat4& relative, std::vector<Mat4>& parts, int depth, uint32_t object,
+	std::vector<AnimatedUVPart>* animated) const
 {
 	if (depth > 8) {
 		return;
@@ -732,7 +803,19 @@ void LevelRenderer::collectParts(const LevelSources& sources, const world::Objec
 		Mat4 local = objectTransform(child.position, child.rotation) * relative;
 		world::Vec3 offset, rotation;
 		if (object != 0 && sources.partPose && sources.partPose(object, child.name, offset, rotation)) {
+			// A Spring with rotateUV keeps its mesh unturned: 0x006cace0
+			// and 0x006b7261 skip the set rotation (0x00614b50); its
+			// texture turns instead (AnimatedUV.h).
+			if (animatedUVLook(*childTemplate).rotateUV && childTemplate->typeName() == "Spring") {
+				rotation = {};
+			}
 			local = objectTransform(offset, rotation) * local;
+		}
+		if (animated) {
+			const AnimatedUVLook& look = animatedUVLook(*childTemplate);
+			if (look.settings.any()) {
+				animated->push_back({&look.settings, local});
+			}
 		}
 		const auto part = childTemplate->settings().find("geometryPart");
 		if (part != childTemplate->settings().end()) {
@@ -741,7 +824,7 @@ void LevelRenderer::collectParts(const LevelSources& sources, const world::Objec
 				parts[static_cast<size_t>(index)] = local;
 			}
 		}
-		collectParts(sources, *childTemplate, local, parts, depth + 1, object);
+		collectParts(sources, *childTemplate, local, parts, depth + 1, object, animated);
 	}
 }
 
@@ -1563,13 +1646,22 @@ void LevelRenderer::drawUndergrowth(SDL_GPUCommandBuffer* commands, SDL_GPURende
 	uniforms.fade[1] = 1.0f / std::max(undergrowthViewDistance() * m_undergrowthFadeScale, 0.01f);
 	// undergrowth.simpleShaderEnable: the terrain quality's 1 / 1 / 0 (0x10010040, slot 0x40).
 	uniforms.fade[2] = m_sources && m_sources->quality && m_sources->quality->undergrowthSimpleShader() ? 1.0f : 0.0f;
-	// The engine animates 16 sway offsets; until that is decompiled, each
-	// swings on its own phase, as far as SwayScale.
+	// UndergrowthSystem's 16 sway offsets (slot 0x24, 0x1010a900, each
+	// frame; uploaded as SwayOffset from +0x1b8 by 0x1010e270): angle_i =
+	// fmod(angle_i + dt x speed_i, 2 pi) (+0x178 / +0xf8), the offset
+	// (sin angle_i x amp_i, cos angle_i x amp_i, 0, 0) (amp +0x138). The
+	// per-offset speeds and amplitudes come from Undergrowth.cfg's SwaySpeed
+	// / SwaySpeedDiff / SwayScale / SwayScaleDiff (+0x48..+0x54, defaults
+	// 1 / 0.2 / 0.15 / 0.01, 0x101100d0); how they are spread over the 16
+	// isn't traced, so the rewrite spreads them evenly over speed +- diff
+	// and keeps SwayScale as every amplitude, starting at even phases.
 	const float seconds = static_cast<float>(SDL_GetTicks() - m_startTicks) / 1000.0f;
 	for (int i = 0; i < 16; ++i) {
-		const float phase = seconds * (1.3f + 0.11f * i) + i * 0.7f;
-		uniforms.swayOffsets[i][0] = std::sin(phase) * m_undergrowthSwayScale;
-		uniforms.swayOffsets[i][1] = std::cos(phase * 0.8f) * m_undergrowthSwayScale;
+		const float spread = (static_cast<float>(i) / 15.0f) * 2.0f - 1.0f; // -1..1
+		const float speed = 1.0f + 0.2f * spread;
+		const float angle = std::fmod(i * 0.3926991f + seconds * speed, 6.2831855f);
+		uniforms.swayOffsets[i][0] = std::sin(angle) * m_undergrowthSwayScale;
+		uniforms.swayOffsets[i][1] = std::cos(angle) * m_undergrowthSwayScale;
 	}
 	for (const auto& [index, buffers] : m_undergrowthPatches) {
 		if (!buffers.vertices) {
@@ -1694,7 +1786,25 @@ void LevelRenderer::syncObjects()
 		}
 		if (instance.partsTemplate && m_sources->partPose) {
 			std::fill(instance.parts.begin(), instance.parts.end(), Mat4 {});
-			collectParts(*m_sources, *instance.partsTemplate, Mat4 {}, instance.parts, 0, instance.object);
+			m_animatedUVParts.clear();
+			collectParts(*m_sources, *instance.partsTemplate, Mat4 {}, instance.parts, 0, instance.object,
+				&m_animatedUVParts);
+			// The parts' animated UVs (0x0063b9b0, each object update): the
+			// distance each moved along its own z axis in the world.
+			instance.animatedUV = !m_animatedUVParts.empty();
+			instance.uvStates.resize(m_animatedUVParts.size());
+			for (size_t i = 0; i < m_animatedUVParts.size(); ++i) {
+				const Mat4 world = m_animatedUVParts[i].local * objectWorld;
+				const float position[3] = {world.at(3, 0), world.at(3, 1), world.at(3, 2)};
+				float z[3] = {world.at(2, 0), world.at(2, 1), world.at(2, 2)};
+				const float length = std::sqrt(z[0] * z[0] + z[1] * z[1] + z[2] * z[2]);
+				if (length > 0) {
+					z[0] /= length;
+					z[1] /= length;
+					z[2] /= length;
+				}
+				updateAnimatedUV(*m_animatedUVParts[i].settings, instance.uvStates[i], position, z, instance.uvMatrices);
+			}
 		}
 		if (instance.mesh->skinned && m_sources->animationFor) {
 			const std::string path = m_sources->animationFor(instance.object);
@@ -2289,13 +2399,13 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 	}
 }
 
-void LevelRenderer::bindMeshLayers(SDL_GPURenderPass* pass, const Submesh* submesh) const
+void LevelRenderer::bindMeshLayers(SDL_GPURenderPass* pass, const Submesh* submesh, SDL_GPUTexture* envMap) const
 {
 	SDL_GPUTexture* flat = m_gpu.flatNormalTexture();
 	const SDL_GPUTextureSamplerBinding samplers[3] = {
 		{submesh && submesh->detailNormal ? submesh->detailNormal : flat, m_gpu.repeatSampler()},
 		{submesh && submesh->crackNormal ? submesh->crackNormal : flat, m_gpu.repeatSampler()},
-		{m_envMap ? m_envMap : m_gpu.whiteCubeTexture(), m_gpu.clampSampler()},
+		{envMap ? envMap : m_gpu.whiteCubeTexture(), m_gpu.clampSampler()},
 	};
 	SDL_BindGPUFragmentSamplers(pass, kMeshLayerSamplers, samplers, 3);
 }
@@ -2351,9 +2461,14 @@ void LevelRenderer::buildDecals()
 			tangent = turn(tangent);
 			at = turn(at) + effects::Vec3 {place.at(3, 0), place.at(3, 1), place.at(3, 2)};
 		}
+		// Its age's fade (0x10163570: not drawn below 0x3240's 0.05).
+		const float alpha = m_particleSettings.decalAlpha(decal.age);
+		if (alpha < scene::ParticleSystemSettings::kDecalCullAlpha) {
+			continue;
+		}
 		const effects::Vec3 u = tangent * (decal.size * 0.5f);
 		const effects::Vec3 v = physics::cross(n, tangent) * (decal.size * 0.5f);
-		const effects::Vec3 centre = at + n * 0.02f;
+		const effects::Vec3 centre = at + n * m_particleSettings.decalNormalOffset;
 		const float corners[6][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, -1}, {1, 1}, {-1, 1}};
 		const uint32_t first = static_cast<uint32_t>(vertices.size());
 		for (const auto& c : corners) {
@@ -2370,7 +2485,7 @@ void LevelRenderer::buildDecals()
 			vertex.lightmapCoord[0] = decal.color.x;
 			vertex.lightmapCoord[1] = decal.color.y;
 			vertex.part = decal.color.z;
-			vertex.weight = 1;
+			vertex.weight = alpha;
 			vertices.push_back(vertex);
 		}
 		if (!m_decalGroups.empty() && m_decalGroups.back().texture == image) {
@@ -2427,9 +2542,10 @@ void LevelRenderer::drawMeshParticles(SDL_GPUCommandBuffer* commands, SDL_GPURen
 				Mat4 world;
 				for (int row = 0; row < 3; ++row) {
 					const effects::Vec3& r = particle.rotation.rows[static_cast<size_t>(row)];
-					world.at(row, 0) = r.x * particle.size;
-					world.at(row, 1) = r.y * particle.size;
-					world.at(row, 2) = r.z * particle.size;
+					const float scale = particle.size * (row == 2 ? particle.stretch : 1.0f);
+					world.at(row, 0) = r.x * scale;
+					world.at(row, 1) = r.y * scale;
+					world.at(row, 2) = r.z * scale;
 				}
 				world.at(3, 0) = particle.position.x;
 				world.at(3, 1) = particle.position.y;
@@ -2601,6 +2717,7 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 			continue;
 		}
 		const GpuMesh& base = *instance.mesh;
+		bool interior = false;
 		if (base.titanInterior || base.titanExterior || titanView.cameraInside) {
 			const Vec3f origin {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
 			const Vec3f d = origin - camera.position;
@@ -2612,13 +2729,14 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 			if (how == TitanDraw::Skip) {
 				continue;
 			}
+			interior = how == TitanDraw::Interior && base.bundled;
 		}
 		const BoundingSphere sphere = instanceBounds(instance, *instance.mesh);
 		if (!frustum.containsSphere(sphere.center, sphere.radius)) {
 			++m_culledInstances;
 			continue;
 		}
-		DrawItem item {&instance, instance.mesh, instance.lightmap, instance.lightmapTransform};
+		DrawItem item {&instance, instance.mesh, instance.lightmap, instance.lightmapTransform, interior};
 		if (instance.overgrowth && m_sources) {
 			const Vec3f origin {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
 			const Vec3f d = (sphere.radius >= 0 ? sphere.center : origin) - camera.position;
@@ -2719,6 +2837,8 @@ void LevelRenderer::loadEnvMaps(const LevelSources& sources)
 {
 	// EnvMaps.h: the .emi's maps and their cubes.
 	m_envMaps.clear();
+	// The Titan interiors' cube (0x10063900, loaded with the manager).
+	m_indoorEnvMap = cubeTexture(sources.files, "common/textures/indoorenvmap.dds");
 	std::vector<uint8_t> data;
 	if (!sources.files.readFile(sources.levelPath + "Envmaps/EnvironmentMapInfo.emi", data)) {
 		return;
@@ -3270,6 +3390,20 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		// Bundled and static meshes' normal maps are in tangent space; a
 		// skinned mesh's material says (its normalKind).
 		transforms.normalSpace[0] = bound->skinned ? 0.0f : 1.0f;
+		transforms.normalSpace[1] = 0;
+		transforms.uvUsed = bound->bundled;
+		if (bound->bundled) {
+			for (int i = 0; i < kAnimatedUVMatrices; ++i) {
+				const UVMatrix& m = instance.uvMatrices[static_cast<size_t>(i)];
+				float* rows = transforms.uvMatrices[i * 2];
+				rows[0] = m.r0[0];
+				rows[1] = m.r0[1];
+				rows[2] = m.r1[0];
+				rows[3] = m.r1[1];
+				transforms.uvMatrices[i * 2 + 1][0] = m.r2[0];
+				transforms.uvMatrices[i * 2 + 1][1] = m.r2[1];
+			}
+		}
 		SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
 		bool swaying = false;
 		const bool lightmapped = item.lightmap != nullptr;
@@ -3284,12 +3418,17 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 				continue;
 			}
 			const float space = bound->skinned ? static_cast<float>(submesh.normalKind) : transforms.normalSpace[0];
+			// Identity matrices without a part that animates them (RendDX9
+			// copies identities while +0x28c is unmade).
+			const float uvAnimated = submesh.animatedUV ? 1.0f : 0.0f;
 			if (submesh.rig >= 0 && !pose.empty()) {
 				skinPalette(*bound, submesh, pose, transforms);
 				transforms.normalSpace[0] = space;
+				transforms.normalSpace[1] = uvAnimated;
 				SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
-			} else if (space != transforms.normalSpace[0]) {
+			} else if (space != transforms.normalSpace[0] || uvAnimated != transforms.normalSpace[1]) {
 				transforms.normalSpace[0] = space;
+				transforms.normalSpace[1] = uvAnimated;
 				SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
 			}
 			const bool sway = submesh.leaf && !instance.overgrowth;
@@ -3305,7 +3444,10 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 				meshKindUniforms(uniforms, submesh, hemiAndShadows);
 				std::copy(hemiObject, hemiObject + 4, uniforms.hemiObject);
 			}
-			layerUniforms(uniforms, submesh, m_envMap != nullptr);
+			// The Titan interior path binds the indoor cube (0x100c3880,
+			// EnvMapManager +0x6c) for the envmap materials.
+			SDL_GPUTexture* const envMap = item.interior && m_indoorEnvMap ? m_indoorEnvMap : m_envMap;
+			layerUniforms(uniforms, submesh, envMap != nullptr);
 			SDL_PushGPUFragmentUniformData(commands, 0, &uniforms, sizeof(uniforms));
 			const auto orWhite = [this](SDL_GPUTexture* t) { return t ? t : m_gpu.whiteTexture(); };
 			SDL_GPUTextureSamplerBinding samplers[5] = {
@@ -3316,7 +3458,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 				{orWhite(submesh.crack), m_gpu.repeatSampler()},
 			};
 			SDL_BindGPUFragmentSamplers(pass, 0, samplers, 5);
-			bindMeshLayers(pass, &submesh);
+			bindMeshLayers(pass, &submesh, envMap);
 			SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
 		}
 	};
@@ -3328,7 +3470,9 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		SDL_BindGPUGraphicsPipeline(pass, m_gpu.decalPipeline());
 		const LightingUniforms decalLighting = lighting(m_viewFog, lights, lights.sunColor, lights.skyColor, 0, false);
 		SDL_PushGPUFragmentUniformData(commands, 0, &decalLighting, sizeof(decalLighting));
-		TransformUniforms decalTransforms {viewProjection, Mat4 {}, {1, 1, 0, 0}, {}};
+		// Decals.fx's DecalFadeDistanceAndInterval (0x10163810).
+		TransformUniforms decalTransforms {viewProjection, Mat4 {},
+			{m_particleSettings.decalFadeDistance, m_particleSettings.decalFadeDistance * m_particleSettings.decalStartFadePercentage, 0, 0}, {}};
 		decalTransforms.partsUsed = 0;
 		SDL_PushGPUVertexUniformData(commands, 0, &decalTransforms, pushUniformSize(decalTransforms));
 		SDL_GPUBufferBinding vertexBinding {m_decalVertices, 0};

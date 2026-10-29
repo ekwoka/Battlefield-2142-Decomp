@@ -2243,3 +2243,81 @@ TEST(RagDoll_RemoteSoldierAnimated)
 	game.world->removeRemoteSoldier(id);
 	CHECK(!game.world->isRemoteSoldier(id) && !game.objects.find(second));
 }
+
+// A joined client's rounds (GameWorld::fireRemoteRound): the remote
+// soldier's firearm makes its bullets here (a projectile template without a
+// networkable, 0x005f31d0), with tracers at the interval, which hit the
+// other soldiers' capsules for their impact and damage nothing; a reload
+// seen (mask 0x10000) reloads its weapon once; a server projectile's ghost
+// flies as a visual round and goes off when the ghost goes.
+TEST(RagDoll_RemoteSoldierRounds)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	world::ObjectTemplate* tracer = game.templates.create("GenericProjectile", "bullet_tracer");
+	tracer->setGeometry("tracer_mesh");
+	game.templates.find("bullet")->settings()["tracerTemplate"] = "bullet_tracer";
+	game.templates.find("bullet")->settings()["tracerInterval"] = "3";
+	world::ObjectTemplate* grenade = game.templates.create("GenericProjectile", "grenade");
+	grenade->settings()["networkableInfo"] = "BasicInfo";
+	grenade->settings()["detonation.explosionRadius"] = "5";
+	game.start();
+	world::Object* shooter = game.objects.create(game.templates.find("us_light_soldier"), {5, 0, 5});
+	world::Object* target = game.objects.create(game.templates.find("pac_light_soldier"), {5, 0, 25});
+	const uint32_t id = shooter->id();
+	const float before = game.world->hitPoints(target->id());
+	game::GameWorld::RemoteSoldierState idle;
+	idle.weapon = "eu_ar_rifle";
+	game.world->animateRemoteSoldier(target->id(), idle, 1 / 30.0f);
+	game::GameWorld::RemoteSoldierState state;
+	state.weapon = "eu_ar_rifle";
+	state.remoteFire = true;
+	state.firing = true;
+	state.firePresses = 1;
+	state.fireMode = game::kFireAutomatic;
+	size_t made = 0, tracers = 0;
+	bool allVisual = true;
+	for (int i = 0; i < 20; ++i) {
+		const size_t had = game.world->projectiles().size();
+		game.world->animateRemoteSoldier(id, state, 1 / 30.0f);
+		for (size_t k = had; k < game.world->projectiles().size(); ++k) {
+			const game::Projectile& p = game.world->projectiles()[k];
+			++made;
+			tracers += p.tracer;
+			allVisual = allVisual && p.visual && p.ghostObject == 0;
+		}
+		game.world->tick(1 / 30.0f);
+	}
+	CHECK(made >= 3 && allVisual);
+	CHECK(tracers >= 1 && tracers <= (made + 2) / 3); // the first, then every third
+	bool hitTarget = false;
+	for (const auto& impact : game.world->impacts()) {
+		hitTarget = hitTarget || impact.object == target->id();
+	}
+	CHECK(hitTarget);
+	CHECK(game.world->hitPoints(target->id()) == before);
+	// A reload seen: once (the second finds it reloading).
+	state.firing = false;
+	game.world->animateRemoteSoldier(id, state, 1 / 30.0f);
+	game.world->takeWeaponSounds();
+	game.world->reloadRemoteSoldier(id, 5);
+	game.world->reloadRemoteSoldier(id, 5);
+	int reloads = 0;
+	for (const auto& sound : game.world->takeWeaponSounds()) {
+		reloads += sound.kind == game::GameWorld::WeaponSoundEvent::Reload;
+	}
+	CHECK(reloads == 1);
+	// A server grenade's ghost: it flies here, moving its object, and goes
+	// when the ghost goes.
+	world::Object* thrown = game.objects.create(grenade, {0, 10, 0});
+	game.world->launchRemoteProjectile(thrown->id(), "grenade", {0, 10, 0}, {0, 0, 5});
+	CHECK(game.world->hasRemoteProjectile(thrown->id()));
+	game.world->tick(1 / 30.0f);
+	CHECK(thrown->position().z > 0.1f);
+	game.world->moveRemoteProjectile(thrown->id(), {1, 10, 1}, nullptr);
+	game.world->endRemoteProjectile(thrown->id());
+	CHECK(!game.world->hasRemoteProjectile(thrown->id()));
+}

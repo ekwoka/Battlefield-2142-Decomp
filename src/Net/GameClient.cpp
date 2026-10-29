@@ -293,6 +293,19 @@ void GameClient::say(const std::string& text, uint32_t channel)
 	}
 }
 
+void GameClient::whisper(const std::string& text, int target)
+{
+	ChatMessage message;
+	message.channel = kChatPlayer;
+	message.source = 2;
+	message.player = m_world.localPlayer();
+	message.b9 = static_cast<uint8_t>(target < 0 ? 0xff : target);
+	message.text = text;
+	for (const GameEvent& event : stringBlockEvents(encodeChat(message))) {
+		sendEvent(event);
+	}
+}
+
 namespace {
 
 GameEvent eventOf(uint32_t type, std::vector<uint32_t> values, std::vector<std::string> bytes = {})

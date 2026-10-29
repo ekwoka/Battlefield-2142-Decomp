@@ -6,6 +6,7 @@
 // particles, the UI), the shadow maps' and the post-production's.
 #pragma once
 
+#include "AnimatedUV.h"
 #include "RenderMath.h"
 #include "Texture/DdsFile.h"
 
@@ -62,14 +63,25 @@ struct TransformUniforms {
 	// _OBJSPACENORMALMAP_).
 	float normalSpace[4] {};
 	Mat4 parts[kMaxMeshParts]; // bundled-mesh part transforms, skinned meshes' bones
+	// normalSpace.y 1: an "AnimatedUV" bundled technique (RaShaderBM
+	// _HASUVANIMATION_): the texture coordinates are (TexUVRotCenter, 1) x
+	// uvMatrix[blend index 3] + TexDiffuse. Each matrix as two vec4s: rows
+	// 0 and 1 (xy, xy), then row 2 (xy) (AnimatedUV.h).
+	// After the parts: sent only for bundled meshes (uvUsed).
+	float uvMatrices[kAnimatedUVMatrices * 2][4] {};
 	// Not in the shaders' block: how many of `parts` pushUniformSize sends
-	// (a static mesh reads only the first; the other shaders none).
+	// (a static mesh reads only the first; the other shaders none), and
+	// whether the UV matrices after them go too (all parts then).
 	uint32_t partsUsed = kMaxMeshParts;
+	bool uvUsed = false;
 };
 
 // The bytes of `t` to push: the block up to the parts it uses.
 inline uint32_t pushUniformSize(const TransformUniforms& t)
 {
+	if (t.uvUsed) {
+		return static_cast<uint32_t>(offsetof(TransformUniforms, uvMatrices) + sizeof(t.uvMatrices));
+	}
 	return static_cast<uint32_t>(offsetof(TransformUniforms, parts) + sizeof(Mat4) * std::min<uint32_t>(t.partsUsed, kMaxMeshParts));
 }
 

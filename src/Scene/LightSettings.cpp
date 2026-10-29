@@ -189,6 +189,17 @@ void registerRainConsoleMethods(Console& console, RainSettings& settings)
 	bindProperty<ConsoleVec2>(console, "rainManager.angleSpeed", access,
 		[&settings] { return ConsoleVec2 {settings.angleSpeed[0], settings.angleSpeed[1]}; },
 		[&settings](const ConsoleVec2& v) { settings.angleSpeed = {v.x, v.y}; });
+	// rainManager.randomness keeps only values over 0 (0x1011acf0).
+	bindProperty<int>(console, "rainManager.randomness", access, [&settings] { return settings.randomness; },
+		[&settings](const int& v) {
+			if (v > 0) {
+				settings.randomness = v;
+			}
+		});
+	bindFloat("rainManager.maxRandomChange", settings.maxRandomChange);
+	bindProperty<int>(console, "rainManager.randomDeviationAngleSpeed", access,
+		[&settings] { return settings.randomDeviationAngleSpeed; },
+		[&settings](const int& v) { settings.randomDeviationAngleSpeed = v; });
 	bindBool("rainManager.lineDisplay", settings.lineDisplay);
 	bindFloat("rainManager.lineLength", settings.lineLength);
 	bindProperty<std::string>(console, "rainManager.texture", access, [&settings] { return settings.texture; },

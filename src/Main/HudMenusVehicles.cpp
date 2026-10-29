@@ -237,6 +237,51 @@ std::string WeaponHud::update(hud::HudManager& hud, const WeaponHudInput& in, bo
 	return sound;
 }
 
+// --- The crosshair's parts (0x007be770) ---
+
+CrosshairParts crosshairParts(float deviation, int deviationFactor, int minVisual, int maxVisual, float length)
+{
+	CrosshairParts parts;
+	const int spread = static_cast<int>(std::ceil(deviation * static_cast<float>(deviationFactor)));
+	// maxVisualDeviation < minVisualDeviation + spread: the maximum.
+	parts.offset = maxVisual < minVisual + spread ? maxVisual : minVisual + spread;
+	const float o = static_cast<float>(parts.offset);
+	parts.up = 300 - length - o;
+	parts.down = 301 + o;
+	parts.left = 399 - length - o;
+	parts.right = 400 + o;
+	return parts;
+}
+
+CrosshairParts crosshairParts(float deviation, const world::ObjectTemplate* weapon, float length)
+{
+	return crosshairParts(deviation, static_cast<int>(hudNumber(weapon, "weaponHud.deviationFactor", 10)),
+		static_cast<int>(hudNumber(weapon, "weaponHud.minVisualDeviation", 0)),
+		static_cast<int>(hudNumber(weapon, "weaponHud.maxVisualDeviation", 1000)), length);
+}
+
+// --- The Titans' consoles (0x0044b680 case 0x32, 0x00448850) ---
+
+void StrategicObjects::destroyed(int team, const world::ObjectTemplate* t)
+{
+	if (!t || (team != 1 && team != 2) || !flag(t, "vehicleHud.sendDestroyedHudEvent", false)) {
+		return;
+	}
+	const int index = static_cast<int>(hudNumber(t, "vehicleHud.guiIndex", 0));
+	if (index >= 0 && index < 10) {
+		m_alive[static_cast<size_t>((team - 1) * 10 + index)] = false;
+	}
+}
+
+void StrategicObjects::update(hud::HudManager& hud, int localTeam) const
+{
+	const int own = localTeam == 1 ? 1 : 2, other = 3 - own;
+	for (int i = 0; i < 10; ++i) {
+		hud.set("FriendlyStrategicObject" + std::to_string(i) + "Show", shown(own, i) ? 1 : 0);
+		hud.set("EnemyStrategicObject" + std::to_string(i) + "Show", shown(other, i) ? 1 : 0);
+	}
+}
+
 // --- The item selection (0x0079bc70..0x0079c720) ---
 
 void ItemSelection::bind(Console& console)

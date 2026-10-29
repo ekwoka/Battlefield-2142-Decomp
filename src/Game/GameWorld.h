@@ -15,9 +15,10 @@
 // PlayerControlObjects within 10 m that the template's mesh overlaps there
 // hold the spawn back, and after five tries they are removed unless a
 // soldier is within 7 m (ObjectSpawner::SpotTest, GameWorld::testSpawnSpot).
-// Not rewritten yet: the spawn spot's drop onto what is under it
-// (0x005ad8b0), and activation by events. useButtonRadius (waiting
-// for a player to use the spawner) is set by no shipped level.
+// The spot's drop onto what is under it (0x005ad8b0, the test's matrix
+// only) is GameWorld::dropSpawnSpot. Not rewritten yet: activation by
+// events. useButtonRadius (waiting for a player to use the spawner) is
+// set by no shipped level.
 #pragma once
 
 #include "Animation/AnimationSystem.h"
@@ -271,6 +272,26 @@ public:
 		bool muzzleEffects = true; // off for our own soldier seen from inside
 	};
 	void animateRemoteSoldier(uint32_t object, const RemoteSoldierState& state, float seconds);
+	// A manual reload seen on a joined client (the player networkable's
+	// mask 0x10000: its reader 0x005981a0 sets the networkable's +0x280,
+	// player +0x28c, which the client's 0x00590e10 takes through player
+	// vtable 0x200, 0x0059b340, handing the soldier input message 10, the
+	// reload): the weapon in the remote soldier's hands starts its reload
+	// (the Reload sound, the reload message) unless it reloads already or
+	// its magazine is full.
+	void reloadRemoteSoldier(uint32_t object, int serverRounds);
+	// A server projectile's ghost on a joined client (a GenericProjectile
+	// with a networkable: the server's FireComp makes it, 0x005f31d0, and
+	// the client's leaves it to the ghost: 0x005f1440): it flies here as
+	// a visual round from the ghost's place and velocity, its ghost object
+	// moved with it, corrected by each update (moveRemoteProjectile); it
+	// shows its impact where it hits, and its detonation when the ghost
+	// goes (endRemoteProjectile) if it hasn't gone off here.
+	void launchRemoteProjectile(uint32_t ghostObject, const std::string& projectileTemplate, const physics::Vec3& at,
+		const physics::Vec3& velocity);
+	void moveRemoteProjectile(uint32_t ghostObject, const physics::Vec3& at, const physics::Vec3* velocity);
+	void endRemoteProjectile(uint32_t ghostObject);
+	bool hasRemoteProjectile(uint32_t ghostObject) const;
 	// The ghost gone, dead or in a vehicle: its animation and weapon go.
 	void removeRemoteSoldier(uint32_t object);
 	bool isRemoteSoldier(uint32_t object) const { return m_remoteSoldiers.count(object) != 0; }
@@ -398,6 +419,7 @@ public:
 		std::vector<std::pair<int, std::string>> carried; // (slot, weapon template)
 		int inHandSlot = 0;
 		float heat = 0; // the weapon in hand's (or the seat's gun's), 0..1
+		float stamina = 1; // the sprint's (SprintStamina, the soldier's +0x378), 0..1
 		uint32_t gunShots = 0; // rounds the seats' guns have fired (the camera's recoil)
 		// The player's fire states (player +0x19c / +0x19d: vtable 0x1d4 /
 		// 0x1dc, set from c_PIFire / c_PIAltFire held by the game logic's
@@ -406,6 +428,11 @@ public:
 		// 0x0059b260; mask 0x4000000's two bits).
 		bool firing = false, altFiring = false;
 		uint32_t firePresses = 0;
+		// c_PIReload's presses (the server's input handling 0x004bda00 calls
+		// player vtable 0x1fc, 0x0059b330, setting +0x28c, which the next
+		// snapshot 0x005929f0 turns into mask 0x10000: every weapon group's
+		// fields), counted on each press.
+		uint32_t reloadPresses = 0;
 		// The weapon in hand (group 0): its rounds in the magazine (-1 none),
 		// fire mode (FireArm::fireMode) and whether it reloads.
 		int roundsInMag = -1;
@@ -471,6 +498,16 @@ public:
 	// The material a soldier's footstep set is for (0x007fda00; -1 before
 	// its first collision event).
 	uint32_t footstepMaterial(int player) const;
+	// The other material of the soldier's last collision event (+0x32c,
+	// -1 before one): what the sound's material radio (0x00586a90's
+	// triggerRadio test) looks at.
+	uint32_t contactMaterial(int player) const;
+	const physics::MaterialManager* materials() const { return m_materials; }
+	// The first thing a segment meets (firstHit with where): the fraction
+	// along it and the object (0 the terrain or a static object's owner
+	// id); `ignore` a body passed through. For the sound's obstruction rays.
+	bool segmentHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore, float& fraction,
+		uint32_t& object) const;
 	void setInput(int player, const SoldierInput& input);
 	// The pitch (degrees, up positive) the weapon's recoil has kicked the
 	// player's aim by since the last call: the original adds the kick to the
@@ -554,6 +591,11 @@ public:
 	// Without a stats server nothing is unlocked; `all` unlocks everything.
 	void setUnlocks(int player, std::vector<std::string> containers, bool all = false);
 	void setBattery(int player, float battery); // tests and the scripts' view
+	// The player's totalDogtagCount (player +0x104, set by the stats
+	// scripts' pmgr_p_set; the kit-selection event carries it to clients):
+	// at 50 or more (*0x00a67b68) the kit build (0x00570ab0) applies the
+	// kit's isDogtagReplacement containers (+0x2e2) whatever is unlocked.
+	void setDogtagCount(int player, int count);
 	// Whether the player looks through the weapon's zoom (the local
 	// player's camera; the deviation's devModZoom and the gun sway use it).
 	void setZoomed(int player, bool zoomed);
@@ -652,6 +694,8 @@ public:
 	// The local player's id, -1 before spawnPlayer.
 	int localPlayer() const { return m_player ? m_player->id : -1; }
 	bool isVehicle(uint32_t object) const { return vehicle(object) != nullptr; }
+	// The objects with a vehicle, by id (the objects' order).
+	std::vector<uint32_t> vehicleObjects() const;
 
 	// Mobile objects (hasMobilePhysics, physicsType Mesh, a collision mesh)
 	// get rigid bodies that fall and rest on `ground`.
@@ -882,7 +926,19 @@ public:
 	// `reporter`'s squad now knows of the enemy `players` (and the
 	// occupants of their vehicles). The bots send one as their trigger
 	// presses or lets go at their target (AIDLL 0x1009a1d0, 0x1009a2a0).
-	void reportBattlefieldObjects(int reporter, const std::vector<int>& players);
+	// `seconds`: how long the clients' minimaps show them (the report's
+	// +0x14: a recon drone's pulse its template's +0x70, the revealTime).
+	void reportBattlefieldObjects(int reporter, const std::vector<int>& players, float seconds = 3);
+	// The reports made since the last call, for a server to send each to
+	// the reporter's squad (event 0x41: 0x005088f0 posts a copy to each,
+	// 0x005087b0; the client's 0x00508590 puts them on its minimap).
+	struct BattlefieldReport {
+		int reporter = -1;
+		int team = 0, squad = 0; // the reporter's
+		int seconds = 3;
+		std::vector<int> players;
+	};
+	std::vector<BattlefieldReport> takeBattlefieldReports() { return std::exchange(m_battlefieldReports, {}); }
 	// The HUD's crosshair object (the HUD manager's +0x1f0, filled by
 	// 0x0075be30 as a comm rose opens): what the player's view ray meets
 	// out to `reach` (HUD vt+0x18c with the player's slot 0x98(1)), when
@@ -912,12 +968,51 @@ public:
 	bool detonate(const std::string& projectileTemplate, const physics::Vec3& at, int attacker = -1);
 	// A vehicle's or drone's EMP level (0: running) and whether it is a wreck.
 	int empLevel(uint32_t vehicle) const;
+	// The camera shake and the tinnitus of a blast (0x005a6e70; its
+	// callers: the server's and the client's game logic slot 0xe8,
+	// 0x004ba7a0 -> 0x005a9090 and 0x004cc4c0, for a detonation; a gun's
+	// round with recoilForce above 5, 0x005ddfc0; an EffectBundle with
+	// cameraShake starting, 0x0061a1c0). The arguments as 0x005a6e70 takes
+	// them (the detonation's 0x005e9300 fills them, see GameWorld.cpp):
+	struct ShakeSource {
+		physics::Vec3 at;
+		int material = -1;       // edx: -1 shakes but rings no ears
+		float radius = 0;        // [ebp+8]
+		float damage = 0;        // [ebp+0xc]: the detonation's explosionDamage
+		float force = 0;         // [ebp+0x24]: its explosionForce
+		bool instigated = false; // [ebp+0x1c]: the projectile's +0x184 slot 0x30 (its handle +0x1c0) set
+		uint32_t hitObject = 0;  // [ebp+0x2c]: what the round hit
+	};
+	// The local player (PlayerManager slot 0x30) with a control object
+	// (slot 0x4c): amount = min(damage / 150, 1) x min(force / 20, 1) x 4
+	// (*0x00a6ab74, *0x00a6abc8, *0x00a6ab4c) x (instigated ? 1 : 0.1,
+	// *0x00a6ab84) x (on foot, or the blast inside its vehicle's box
+	// (0x005a60a0) or on its own object: 1, else 0.2, *0x00a6ab00) x (on
+	// or inside its own object: 1, else max(0, 1 - d / (3 x radius))), d
+	// from the control object's position; above 0 it goes to the player's
+	// camera (slot 0x1b4(0)) slot 0x4c: the Camera object's 0x00610450,
+	// the hit shake (takeCameraShake). The players in the hit object's
+	// PlayerControlObject (interface 0xc4c5, its slot 0x64 list, each
+	// with slot 0x60) get the amount without the distance and the
+	// on-foot factors through player slot 0x21c (0x00592010: +0x1d8, the
+	// player networkable's hit strength, sent twice, +0x1dc): see
+	// PlayerInfo::sentShake. And with a material, a local player on foot
+	// within 0.6 x radius (*0x00a6ab7c) hears the tinnitus (event 0xd).
+	void cameraShake(const ShakeSource& source);
+	// The local camera's hit shake this tick (the largest; 0 for none),
+	// taken once: 0x00610450's argument.
+	float takeCameraShake() { return std::exchange(m_cameraShake, 0.0f); }
+	// A player's hit strength for its networkable's record (+0x1d8, 0..25
+	// on the wire): the last blast on its vehicle, for the next two records
+	// (+0x1dc; each call counts one), else 0.
+	float takeSentShake(int player);
+	// An EffectBundle's own shake as it starts (cameraShake, 0x0061a1c0).
+	void bundleCameraShake(const std::string& bundle, const physics::Vec3& at);
 	// The tinnitus the local player's ears got this tick (the game
 	// logic's event 0xd, ECGameLogicGLTinnitus, which RendDX9's post
-	// production and the sound engine take): an explosion whose radius x
-	// tinnitusRange reaches the local soldier. Its seconds (the
-	// Sound.tinnitusSetup fades summed, 1 + 2 + 4), 0 for none; taken once.
-	float tinnitusRange = 2.0f;
+	// production and the sound engine take; see cameraShake). Its seconds
+	// (the Sound.tinnitusSetup fades summed, 1 + 2 + 4), 0 for none;
+	// taken once.
 	float takeTinnitus() { return std::exchange(m_tinnitus, 0.0f); }
 	// What a vehicle's driver inputs are scaled by (0x005ca2e0): EMP and
 	// critical damage; see GameWorld.cpp.
@@ -1521,6 +1616,9 @@ private:
 	std::map<std::pair<int, int>, std::array<std::optional<SquadRequest>, 4>> m_squadRequests; // (team, squad)
 	// The combat areas' rules each tick (0x004bbf60, 0x004bed00).
 	void stepCombatAreas(float seconds);
+	// Titan mode: the soldier of a player inside the enemy Titan's hull
+	// while its shield is up dies (Titans.cpp, 0x004bbf60's tail).
+	void stepTitanHullKills();
 	bool insideCombatArea(const Player& player) const;
 	std::map<uint32_t, float> m_outsideVehicles; // +0x304: abandoned vehicles' seconds outside
 	FriendlyFire m_friendlyFire;
@@ -1705,8 +1803,11 @@ private:
 		SoldierDeviation deviation;
 		float aiDeviation = 0; // the deviation component's +0x44 (setAiDeviation)
 		uint32_t gunShots = 0;  // the seats' guns' rounds (PlayerInfo::gunShots)
+		float sentShake = 0;    // player +0x1d8 (cameraShake), for
+		int sentShakeRecords = 0; // +0x1dc more records (takeSentShake)
 		bool toggleFireWas = false; // c_PIToggleFireRate last tick
 		bool reloadWas = false;     // c_PIReload last tick
+		uint32_t reloadPresses = 0; // its presses (PlayerInfo::reloadPresses)
 		GunSway sway;
 		std::string feelFor;
 		bool zoomed = false;
@@ -1716,6 +1817,14 @@ private:
 		// (addExtraAmmoItem).
 		std::map<uint32_t, float> materialDamageMods;
 		std::map<std::string, std::pair<int, int>> extraAmmo;
+		// The unlocks' sprint and beacon modifiers (player +0x30c: +0x4c
+		// sprintRechargeModifier, +0x50 sprintUseModifier, +0x54
+		// beaconSpawnTimeMod; 0x005706b0 copies each that isn't 1, the last
+		// taken winning) and ability.setOverheatMod's list (+0x24: a weapon
+		// template's heat factor, read by the batch fire 0x005c3cb0).
+		float sprintRechargeModifier = 1, sprintUseModifier = 1, beaconSpawnTimeMod = 1;
+		int dogtagCount = 0; // totalDogtagCount (setDogtagCount)
+		std::map<std::string, float> overheatMods;
 		float lastSwayPitch = 0;
 		struct Lock {
 			uint32_t target = 0;
@@ -1829,6 +1938,8 @@ private:
 	ScriptEventSink m_events;
 	std::map<int, int> m_fieldUnlocks;
 	float m_tinnitus = 0;
+	float m_cameraShake = 0;
+	uint32_t m_blastSelf = 0; // the object whose own blast explode() runs (its rays pass it)
 	void raise(const std::string& event, const ScriptArgs& args)
 	{
 		if (m_events) {
@@ -1853,8 +1964,10 @@ private:
 	void fire(const Player& player, float aimPitch);
 	// `exclude`: the object whose own blast it is (its armour, 0x005a9090's
 	// param_6: neither hurt nor pushed by it).
+	// `hitObject`: what the round hit (0x005e9300's param_2; the camera
+	// shake's own-object test).
 	void explode(const physics::Vec3& at, const ProjectileSettings& settings, int attacker, float facing = 0,
-		uint32_t exclude = 0);
+		uint32_t exclude = 0, uint32_t hitObject = 0);
 	// The object a segment meets first (static objects' projectile LOD,
 	// bodies, the terrain as 0); false when nothing is in the way.
 	bool firstHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t& object) const;
@@ -2099,8 +2212,19 @@ private:
 		int presses = -1;
 		bool wasFiring = false;
 		int burstLeft = 0;
+		int tracerCount = 0;       // the fire comp's +0x78 (FireArm::takeTracer)
+		std::vector<HitBone> hitBones; // the soldier template's skeletonCollisionBone records
 	};
 	std::map<uint32_t, RemoteSoldier> m_remoteSoldiers;
+	// A remote soldier's round: the projectile its firearm makes on a
+	// client (one without a networkable), from the muzzle along the aim.
+	void fireRemoteRound(RemoteSoldier& remote, uint32_t object, const physics::Vec3& muzzle, const physics::Mat3& turn,
+		const physics::Vec3& velocity);
+	// A visual projectile's detonation: its end effect and the ambient
+	// triggers' event, nothing hurt.
+	void explodeEffects(const physics::Vec3& at, const ProjectileSettings& settings);
+	uint32_t m_projectileSerial = 0;
+	std::vector<BattlefieldReport> m_battlefieldReports;
 	void stepRemoteBodies(float seconds);
 	struct RemoteWreck {
 		double wreckedAt = 0;  // armour +0x60
@@ -2328,6 +2452,7 @@ private:
 		bool coreExplosion = false; // event 0x14 sent (0x00654730)
 	};
 	std::vector<Titan> m_titans;
+	bool insideTitanHull(const Titan& titan, const physics::Vec3& point) const;
 	std::vector<std::unique_ptr<ObjectSpawner>> m_newSpawners; // a Titan's, made during the spawners' loop
 	static constexpr uint32_t kTitanPartIds = 0x7f000000u;
 	std::vector<std::pair<physics::Vec3, float>> m_titanObstacles; // static objects reaching the Titans (0x00562360)

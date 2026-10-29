@@ -136,9 +136,12 @@ void registerWorldConsoleMethods(Console& console, ObjectTemplateManager& templa
 	// The unlocks' Ability lists (template component 0xc4b3):
 	// ability.setMaterialDamageMod <material> <modifier> (0x0054eadc ->
 	// slot 0x94) and ability.addExtraAmmoItem <item> <mags> <rounds> <flag>
-	// (0x0054ebed), kept in order as "<name>.list" = "args;...".
+	// (0x0054ebed), and ability.setOverheatMod <weapon> <modifier>
+	// (0x0054e8b0 -> slot 0x8c, 0x00631740: a {modifier, name} pair on the
+	// list at +0x34; the unlocks' Unl_Active_Camo 0.72), kept in order as
+	// "<name>.list" = "args;...".
 	for (const auto& [property, count] : {std::pair<const char*, int> {"ability.setMaterialDamageMod", 2},
-			 {"ability.addExtraAmmoItem", 4}}) {
+			 {"ability.addExtraAmmoItem", 4}, {"ability.setOverheatMod", 2}}) {
 		ConsoleMethod list;
 		list.name = std::string("ObjectTemplate.") + property;
 		list.kind = ConsoleMethodKind::Method;
@@ -474,6 +477,18 @@ void registerWorldConsoleMethods(Console& console, ObjectTemplateManager& templa
 		return {};
 	};
 	console.registerMethod(overgrowth);
+
+	// 0x006ed98a: the getter slot 0x138, the setter 0x13c (0x006f6fd0).
+	ConsoleMethod disableChildren = position;
+	disableChildren.name = "Object.disableChildren";
+	disableChildren.invoke = [&objects](const std::vector<std::string>& args) -> std::string {
+		if (args.empty()) {
+			return objects.active()->childrenDisabled() ? "1" : "0";
+		}
+		objects.active()->setChildrenDisabled(parseConsoleValue<bool>(args[0]));
+		return {};
+	};
+	console.registerMethod(disableChildren);
 
 	// Overgrowth collision objects are placed by matrix.
 	ConsoleMethod transformation = position;

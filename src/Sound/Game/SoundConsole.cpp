@@ -2,6 +2,7 @@
 
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
+#include "Console/Vars.h"
 #include "SoundManager.h"
 #include "SoundObjectTemplate.h"
 #include "VoiceMessages.h"
@@ -90,6 +91,25 @@ void registerSoundConsoleMethods(Console& console, SoundManager& sounds)
 		});
 	bindMethod(console, "Sound.getAllSoundTemplates", access, [&sounds] { return sounds.allSoundTemplates(); });
 	bindMethod(console, "Sound.addTrigger", access, [&sounds](std::string name) { sounds.addTrigger(name); });
+	// Sound.windSetup <template> <speed> (0x007f7150 -> slot 0x8c,
+	// 0x007f9840): Settings/Sound.con's S_Wind at 30.
+	bindMethod(console, "Sound.windSetup", access,
+		[&sounds](std::string name, float speed) { sounds.windSetup(name, speed); });
+
+	// --- Vars (the settings table, DAT_00a1b5cc; Vars.set 0x004244c1):
+	// Settings/Sound.con's sound-* tunables among others (Console/Vars.h).
+	console.registerMethod([access] {
+		ConsoleMethod method;
+		method.name = "Vars.set";
+		method.access = access;
+		method.minArgs = 2;
+		method.maxArgs = 2;
+		method.invoke = [](const std::vector<std::string>& args) {
+			Vars::global().set(args[0], args[1]);
+			return std::string();
+		};
+		return method;
+	}());
 
 	// CountdownSoundComp's "sound.addReloadTimeSound <index> <seconds>" (the
 	// missile silos' launch countdown, S_<weapon>_ReloadTimeTeam<t>_<index>

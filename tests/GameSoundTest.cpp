@@ -6,6 +6,8 @@
 // hands the sound layer from a round. With $BF2142_GAME_DIR, also the
 // shipped Sound/VoiceMessages.con.
 #include "Console/Console.h"
+#include "Console/Vars.h"
+#include "Physics/MaterialManager.h"
 #include "Game/GameWorld.h"
 #include "IO/File/FileManager.h"
 #include "Main/GameAudio.h"
@@ -20,6 +22,7 @@
 #include "World/ObjectTemplateManager.h"
 #include "World/WorldConsole.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <memory>
@@ -389,7 +392,9 @@ TEST(GameAudio_WeaponsOfARound)
 		range.world->tick(1 / 30.0f);
 		audio.tick(camera);
 	}
-	CHECK(range.count("S_eu_ar_rifle_Fire1P") == 3 && range.count("S_eu_ar_rifle_Fire3P") == 0);
+	// An automatic rifle with one sample: it loops from the first round
+	// (0x005dbdc0's +0x43) until the reload stops it, and again after.
+	CHECK(range.count("S_eu_ar_rifle_Fire1P") == 2 && range.count("S_eu_ar_rifle_Fire3P") == 0);
 	CHECK(range.count("S_eu_ar_rifle_Reload1P") == 1 && audio.weaponSounds >= 4);
 	// From the chase camera the same rifle is a 3P sound.
 	camera.firstPerson = false;
@@ -515,4 +520,227 @@ TEST(VoiceMessages_ShippedTable)
 	CHECK(files.exists(voices.localFile(2, grunt.first)));
 	const auto automatic = voices.samples(voices.message("AUTO_RULES_welostacp"), voices.voice("commander"));
 	CHECK(automatic.second == 2 && files.exists(voices.radioFile(2, automatic.first)));
+}
+
+// 0x005dbdc0 by the template's samples: one sample loops for an automatic
+// weapon until the trigger is let go (0x005db6c0); a fast burst plays the
+// sample once per round and skips the burst's other events, a slow one
+// (+0x42, under 301 rounds a minute) plays it each round; four samples
+// are a grenade's throw (1 while held, 3 at the release after a hold, 0
+// for a single); two or three samples play nothing.
+TEST(GameSounds_FireSampleRules)
+{
+	Sounds s;
+	addSoundTemplate(s.templates, "S_mg_Fire3P");
+	addSoundTemplate(s.templates, "S_nade_Fire3P", "a.wav,b.wav,c.wav,d.wav");
+	addSoundTemplate(s.templates, "S_odd_Fire3P", "a.wav,b.wav");
+	using E = sound::GameSounds::WeaponEvent;
+	sound::GameSounds::FireInfo automatic;
+	automatic.mode = 2;
+	automatic.burstRounds = 30;
+	s.game.weapon(E::Fire, "mg", false, {}, true, 1, 0, &automatic);
+	s.game.weapon(E::Fire, "mg", false, {}, true, 1, 0, &automatic);
+	CHECK(s.triggered.size() == 1 && s.game.fireLooping(1));
+	s.game.releaseTrigger(1);
+	CHECK(!s.game.fireLooping(1));
+	s.game.weapon(E::Fire, "mg", false, {}, true, 1, 0, &automatic);
+	CHECK(s.triggered.size() == 2);
+	s.game.releaseTrigger(1);
+	// A burst of three at 600 rounds a minute: one sound, two skipped.
+	sound::GameSounds::FireInfo burst;
+	burst.mode = 1;
+	burst.burstRounds = 3;
+	for (int i = 0; i < 4; ++i) {
+		s.game.weapon(E::Fire, "mg", false, {}, true, 2, 0, &burst);
+	}
+	CHECK(s.triggered.size() == 4); // rounds 1 and 4
+	burst.roundsPerMinute = 300;
+	const size_t before = s.triggered.size();
+	for (int i = 0; i < 3; ++i) {
+		s.game.weapon(E::Fire, "mg", false, {}, true, 3, 0, &burst);
+	}
+	CHECK(s.triggered.size() == before + 3);
+	// The grenade: a single throw sample 0; held then thrown 1 then 3.
+	sound::GameSounds::FireInfo throwInfo;
+	s.game.weapon(E::Fire, "nade", false, {}, true, 4, 0, &throwInfo);
+	CHECK(s.triggered.back().sample == 0);
+	throwInfo.held = true;
+	s.game.weapon(E::Fire, "nade", false, {}, true, 4, 0, &throwInfo);
+	CHECK(s.triggered.back().sample == 1);
+	throwInfo.held = false;
+	s.game.weapon(E::Fire, "nade", false, {}, true, 4, 0, &throwInfo);
+	CHECK(s.triggered.back().sample == 3);
+	const size_t odd = s.triggered.size();
+	s.game.weapon(E::Fire, "odd", false, {}, true, 5, 0, &throwInfo);
+	CHECK(s.triggered.size() == odd);
+	CHECK(s.game.sampleCount("S_nade_Fire3P") == 4 && s.game.sampleCount("S_mg_Fire3P") == 1);
+}
+
+// 0x005dbfe0 by the reload state and samples: one sample plays at a
+// magazine reload; three samples play nothing for a magazine and 0, 1, 1
+// for a shell reload's first, middle and last; two samples' second at
+// event 7.
+TEST(GameSounds_ReloadSampleRules)
+{
+	Sounds s;
+	addSoundTemplate(s.templates, "S_rifle_Reload3P");
+	addSoundTemplate(s.templates, "S_shotgun_Reload3P", "a.wav,b.wav,c.wav");
+	addSoundTemplate(s.templates, "S_rocket_Reload3P", "a.wav,b.wav");
+	using E = sound::GameSounds::WeaponEvent;
+	s.game.weapon(E::Reload, "rifle", false, {}, true, 1, 0, nullptr, 3);
+	CHECK(s.triggered.size() == 1 && s.triggered.back().sample == 0);
+	s.game.weapon(E::Reload, "rifle", false, {}, true, 1, 0, nullptr, 2);
+	CHECK(s.triggered.size() == 1);
+	s.game.weapon(E::Reload, "shotgun", false, {}, true, 2, 0, nullptr, 3);
+	CHECK(s.triggered.size() == 1);
+	for (const int state : {4, 5, 6}) {
+		s.game.weapon(E::Reload, "shotgun", false, {}, true, 2, 0, nullptr, state);
+	}
+	CHECK(s.triggered.size() == 4 && s.triggered[1].sample == 0 && s.triggered[2].sample == 1
+		&& s.triggered[3].sample == 1);
+	s.game.weapon(E::Reload, "rocket", false, {}, true, 3, 0, nullptr, 7);
+	CHECK(s.triggered.size() == 5 && s.triggered.back().sample == 1);
+}
+
+// 0x007fa350: nothing in the way, nothing; every ray blocked gives
+// clamp((1 - (atan((dist - h) / 2) + atan(h / 2)) / pi) x 0.8); the
+// sound's own (small) root, nothing; beyond 40 m a single ray; inside a
+// Titan beyond 55 m, 1; Settings/Sound.con's vars change it.
+TEST(SoundManager_Obstruction)
+{
+	Vars::global().clear();
+	world::ObjectTemplateManager templates;
+	sound::SoundManager manager(nullptr, templates);
+	manager.setListener({0, 0, 0}, {0, 0, 1}, {0, 1, 0}, {});
+	CHECK(manager.obstruction({0, 0, 20}, 1, 0) == 0); // no test: nothing
+	int rays = 0;
+	manager.setObstructionTest([&rays](const sound::Vec3&, const sound::Vec3&, uint32_t, sound::SoundManager::RayHit& hit) {
+		++rays;
+		hit.fraction = 0.5f;
+		hit.root = 7;
+		return true;
+	});
+	const float dist = 20 - 1 - 0.2f;
+	const float h = (20 - 1 - 0.2f) * 0.5f;
+	const float expected = (1 - (std::atan((dist - h) / 2) + std::atan(h / 2)) * 0.31830987f) * 0.8f;
+	CHECK(near(manager.obstruction({0, 0, 20}, 1, 0), std::clamp(expected, 0.0f, 1.0f)));
+	CHECK(rays == 3);
+	CHECK(manager.obstruction({0, 0, 20}, 1, 7) == 0); // its own root
+	rays = 0;
+	manager.obstruction({0, 0, 100}, 1, 0);
+	CHECK(rays == 1);
+	manager.setListener({0, 0, 0}, {0, 0, 1}, {0, 1, 0}, {}, true);
+	CHECK(manager.obstruction({0, 0, 100}, 1, 0) == 1);
+	// A ray clear: nothing; the one found clear is remembered.
+	manager.setObstructionTest([](const sound::Vec3& from, const sound::Vec3&, uint32_t, sound::SoundManager::RayHit&) {
+		return from.x == 0 && from.y == 0; // only the middle ray blocked
+	});
+	int clear = -1;
+	CHECK(manager.obstruction({0, 0, 20}, 1, 0, &clear) == 0 && clear == 1);
+	Vars::global().set("sound-obstruction-disable", "1");
+	manager.setObstructionTest([](const sound::Vec3&, const sound::Vec3&, uint32_t, sound::SoundManager::RayHit&) { return true; });
+	CHECK(manager.obstruction({0, 0, 20}, 1, 0) == 0);
+	Vars::global().clear();
+}
+
+// Vars.set (0x004244c1) feeds the sound tunables: Settings/Sound.con's
+// sound-maxreverb 0 leaves the listener never indoors; its
+// sound-mute-level-1p 0.3 the firing's duck.
+TEST(SoundConsole_VarsSetTheSoundTunables)
+{
+	Vars::global().clear();
+	world::ObjectTemplateManager templates;
+	sound::SoundManager manager(nullptr, templates);
+	Console console;
+	sound::registerSoundConsoleMethods(console, manager);
+	std::string out;
+	manager.setRayTest([](const sound::Vec3& from, const sound::Vec3& to, float& distance) {
+		distance = to.y > from.y ? 4.0f : 2.0f;
+		return true;
+	});
+	CHECK(manager.indoorLevel({0, 0, 0}) > 0);
+	CHECK(console.execute("vars.set sound-maxreverb 0", out, ConsoleAccess::Anyone) != ConsoleResult::Error);
+	CHECK(manager.indoorLevel({0, 0, 0}) == 0 && manager.outdoors({0, 0, 0}));
+	CHECK(console.execute("vars.set sound-mute-level-1p 0.3", out, ConsoleAccess::Anyone) != ConsoleResult::Error);
+	CHECK(console.execute("vars.set sound-mute-fadeout-1p 1", out, ConsoleAccess::Anyone) != ConsoleResult::Error);
+	manager.setMuted(4, true);
+	manager.update(1);
+	CHECK(near(manager.duckedVolume(0), 0.3f));
+	Vars::global().clear();
+}
+
+// MaterialManager.setRadioMessage <index> <message> <delay> on the active
+// cell (0x0060ce20), looked up by slot 0x78 (0x0060a730: the cell, else
+// the surface against material 0); Material.triggerRadio.
+TEST(MaterialManager_RadioMessages)
+{
+	physics::MaterialManager materials;
+	Console console;
+	physics::registerMaterialConsoleMethods(console, materials);
+	std::string out;
+	CHECK(console.execute("Material.active 4101", out, ConsoleAccess::Anyone) != ConsoleResult::Error);
+	CHECK(console.execute("Material.triggerRadio 1", out, ConsoleAccess::Anyone) != ConsoleResult::Error);
+	CHECK(console.execute("MaterialManager.createCell 4101 24", out, ConsoleAccess::Anyone) != ConsoleResult::Error);
+	CHECK(console.execute("MaterialManager.setRadioMessage 2 AUTO_TITAN_BB_enemydetectedcargo_inside 100", out, ConsoleAccess::Anyone) != ConsoleResult::Error);
+	CHECK(materials.find(4101) && materials.find(4101)->triggerRadio);
+	const auto* radio = materials.radioMessage(4101, 24, 2);
+	CHECK(radio && radio->message == "AUTO_TITAN_BB_enemydetectedcargo_inside" && radio->delay == 100);
+	CHECK(materials.radioMessage(4101, 24, 1) == nullptr && materials.radioMessage(4101, 25, 2) == nullptr);
+	CHECK(console.execute("MaterialManager.createCell 4101 0", out, ConsoleAccess::Anyone) != ConsoleResult::Error);
+	CHECK(console.execute("MaterialManager.setRadioMessage 2 fallback 30", out, ConsoleAccess::Anyone) != ConsoleResult::Error);
+	CHECK(materials.radioMessage(4101, 25, 2) && materials.radioMessage(4101, 25, 2)->message == "fallback");
+}
+
+// The new-style engine audio (0x007fe740): the throttle blend moves by at
+// most 0.2 an update and crossfades Rpm1 to Rpm2; the input follows |rpm|
+// x 0.909 once settled; a gear change cues Load.
+TEST(GameAudio_NewStyleEngineAudio)
+{
+	Vars::global().clear();
+	GameAudio::NewStyleEngine e;
+	GameAudio::stepNewStyle(e, true, 1, 0.5f, 1, 0, 0);
+	CHECK(near(e.throttleBlend, 0.2f) && near(e.rpm1Scale, 0.8f) && near(e.rpm2Scale, 0.2f) && e.shifted);
+	for (int i = 0; i < 120; ++i) {
+		GameAudio::stepNewStyle(e, false, 1, 0.5f, 1, 0, i / 30.0);
+	}
+	CHECK(e.throttleBlend == 0 && e.rpm1Scale == 1 && !e.shifted);
+	CHECK(near(e.input, 0.5f * 0.9090909f, 0.01f));
+	GameAudio::stepNewStyle(e, false, 1, 0.5f, 2, 0, 5);
+	CHECK(e.shifted);
+}
+
+// The soldier HUD's injury sound (0x006575f0 from 0x007a0f80): once when
+// the armour's fraction falls, then not again for 2 s; the local player
+// on foot.
+TEST(GameAudio_InjurySound)
+{
+	Range range;
+	for (const char* name : {"us_light_soldier", "pac_light_soldier"}) {
+		range.templates.find(name)->settings()["vehicleHud.injurySound"] = "S_Injury";
+	}
+	GameAudio audio(*range.world, range.objects, range.templates, range.manager, range.game, nullptr);
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	GameAudio::Camera camera;
+	camera.firstPerson = true;
+	const auto step = [&] {
+		range.world->tick(1 / 30.0f);
+		audio.tick(camera);
+	};
+	step();
+	game::GameWorld::PlayerInfo me;
+	CHECK(range.world->playerInfo(range.world->localPlayer(), me) && me.soldier != 0);
+	range.world->setHitPoints(me.soldier, 80);
+	step();
+	CHECK(audio.listenerState().injuries == 1);
+	range.world->setHitPoints(me.soldier, 60);
+	step();
+	CHECK(audio.listenerState().injuries == 1);
+	for (int i = 0; i < 61; ++i) {
+		step();
+	}
+	range.world->setHitPoints(me.soldier, 40);
+	step();
+	CHECK(audio.listenerState().injuries == 2);
+	// On foot in the open, first person: the wind is wanted.
+	CHECK(audio.listenerState().windWanted && audio.listenerState().seat.empty());
 }

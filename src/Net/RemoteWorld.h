@@ -83,6 +83,7 @@ struct RemoteObject {
 	float captureProgress = 0;
 	float captureRate = 0;
 	int raisedFlag = 0;
+	bool hasAllow[2] {}, allow[2] {true, true}; // allowCaptureByTeam 1, 2 (masks 8, 0x10)
 	// Soldiers: the ragdoll group (0x10000) seen; the positions it sent last
 	// (its networked particles, see NetworkableState::ragdollParticles), and
 	// how many such updates came (a new one drives the body: 0x008acce0).
@@ -143,6 +144,10 @@ struct RemotePlayer {
 	std::array<PlayerNetState::FireState, 3> fire {};
 	int firePresses = -1;
 	uint32_t fireUpdates = 0; // player states that carried mask 0x4000000
+	// Player states that carried mask 0x10000 (the server's flag +0x28c,
+	// set by a c_PIReload press: 0x004bda00 -> 0x0059b330): each is a
+	// reload seen (the client's 0x00590e10: soldier input message 10).
+	uint32_t reloads = 0;
 };
 
 // KickBan (0x37; written by 0x0050cf30): a player leaves the server,
@@ -349,6 +354,27 @@ public:
 	// Things that happened since the last take*().
 	std::vector<ChatLine> takeChat() { return std::exchange(m_chat, {}); }
 	std::vector<KillReport> takeKills() { return std::exchange(m_kills, {}); }
+	// The control points' allowCaptureByTeam as their ghosts set it (each
+	// set, 0x006084b0 -> 0x005bcd00), for the takeable radio.
+	struct TakeableSet {
+		uint16_t ghost = 0;
+		int team = 0;
+		bool allowed = true;
+	};
+	std::vector<TakeableSet> takeTakeable() { return std::exchange(m_takeable, {}); }
+	// The players the squad's battlefield reports (event 0x41) put on the
+	// minimap, while their seconds last (0x00508590).
+	std::vector<int> radarPlayers() const
+	{
+		std::vector<int> players;
+		for (const auto& [id, until] : m_radar) {
+			if (until > m_tick) {
+				players.push_back(id);
+			}
+		}
+		return players;
+	}
+	uint32_t radarReports() const { return m_radarReports; }
 	std::vector<PostRemoteInfo> takeMessages() { return std::exchange(m_messages, {}); }
 	std::vector<GameEvent> takeUnhandled() { return std::exchange(m_unhandled, {}); }
 	std::vector<KickInfo> takeKicks() { return std::exchange(m_kicks, {}); }
@@ -438,6 +464,9 @@ private:
 	bool m_inString = false;
 	std::vector<ChatLine> m_chat;
 	std::vector<KillReport> m_kills;
+	std::vector<TakeableSet> m_takeable;
+	std::map<int, uint32_t> m_radar; // a player -> the server tick it leaves the minimap
+	uint32_t m_radarReports = 0;
 	std::vector<PostRemoteInfo> m_messages;
 	std::vector<GameEvent> m_unhandled;
 	std::vector<KickInfo> m_kicks;

@@ -1902,3 +1902,121 @@ bool GameWorld::titanGunEntry(int id, physics::Vec3& entry, float& radius, int& 
 }
 
 } // namespace dice::hfe::game
+
+namespace dice::hfe::game {
+
+// The server tick's combat-area loop (0x004bbf60) ends, in gpm_ti, with a
+// check of one player a tick: the player at index i of the player
+// manager's list (slot 0x40) when (tick & 0x3f) == i, alive (slot 0x74)
+// and on a team, its controlled object (slot 0x4c: its vehicle or soldier)
+// tested against the enemy Titan (3 - team; 0x005628f0 -> 0x00561d50 ->
+// 0x005aa030) while that Titan's forcefield (the first object of its tree
+// with a LOD-0 vertex of material 4112 / 4118, 0x006f2170) stands: inside
+// its hull (0x006f2b00), the player's soldier (slot 0xb4) takes 1e10 with
+// no attacker through the game logic's slot 0xe4, the combat area's call.
+void GameWorld::stepTitanHullKills()
+{
+	if (!titanModeOn() || m_titans.empty()) {
+		return;
+	}
+	const size_t index = m_ticks & 0x3f;
+	if (index >= m_players.size()) {
+		return;
+	}
+	Player& player = *m_players[index];
+	if (!player.present || !player.alive || player.team <= 0 || !player.object) {
+		return;
+	}
+	const Titan* enemy = nullptr;
+	for (const Titan& titan : m_titans) {
+		if (titan.team == 3 - player.team && !titan.wrecked) {
+			enemy = &titan;
+		}
+	}
+	if (!enemy) {
+		return;
+	}
+	const bool shieldUp = std::any_of(enemy->parts.begin(), enemy->parts.end(),
+		[](const TitanPart& part) { return part.kind == TitanPartInfo::Shield && part.state == 0; });
+	if (!shieldUp) {
+		return;
+	}
+	const Body* vehicle = player.vehicle ? findBody(player.vehicle) : nullptr;
+	const physics::Vec3 at = vehicle ? vehicle->body.position : player.body.position;
+	if (insideTitanHull(*enemy, at)) {
+		loseHitPoints(player.object, 1e10f, -1);
+	}
+}
+
+// 0x006f2b00: the hull is the first object of the Titan's tree with a LOD
+// of collision type 5 (the coreroom's closed shell, 240 faces). From the
+// point a ray to the hull's origin raised by the hull object's radius +
+// 0.1 (slot 0x90) looks for the nearest face crossed from inside (the
+// normals negated, flag 0); none: outside. A second ray to that crossing
+// with the normals as stored (flag 1): a face entered on the way means
+// outside. So: inside when the nearest face the ray crosses is crossed on
+// its way out.
+bool GameWorld::insideTitanHull(const Titan& titan, const physics::Vec3& point) const
+{
+	const world::Object* object = m_objects.find(titan.object);
+	if (!object) {
+		return false;
+	}
+	const physics::Mat3 turn =
+		physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+	const physics::Vec3 origin {object->position().x, object->position().y, object->position().z};
+	for (const TitanMesh& m : titan.meshes) {
+		if (!m.mesh) {
+			continue;
+		}
+		for (const physics::CollisionSubGeometry& sub : physics::collisionParts(*m.mesh, 0)) {
+			const physics::CollisionLod* hull = physics::collisionLodFor(*m.mesh, sub, 5);
+			if (!hull) {
+				continue;
+			}
+			// The object's radius: its mesh's first LOD's (+0xc0).
+			float radius = 0;
+			for (const physics::CollisionLod& lod : sub.lods) {
+				if (!lod.vertices.empty()) {
+					for (const auto& v : lod.vertices) {
+						radius = std::max(radius, std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]));
+					}
+					break;
+				}
+			}
+			const physics::Vec3 from = m.rotation.untransform(turn.untransform(point - origin) - m.position);
+			const physics::Vec3 to {0, radius + 0.1f, 0};
+			const physics::Vec3 d = to - from;
+			float nearest = 2;
+			bool leaving = false;
+			for (const physics::CollisionFace& face : hull->faces) {
+				const auto& va = hull->vertices[face.vertices[0]];
+				const auto& vb = hull->vertices[face.vertices[1]];
+				const auto& vc = hull->vertices[face.vertices[2]];
+				const physics::Vec3 a {va[0], va[1], va[2]}, b {vb[0], vb[1], vb[2]}, c {vc[0], vc[1], vc[2]};
+				const physics::Vec3 e1 = b - a, e2 = c - a;
+				const physics::Vec3 p = physics::cross(d, e2);
+				const float det = physics::dot(e1, p);
+				if (std::fabs(det) < 1e-9f) {
+					continue;
+				}
+				const physics::Vec3 s = from - a;
+				const float u = physics::dot(s, p) / det;
+				const physics::Vec3 q = physics::cross(s, e1);
+				const float v = physics::dot(d, q) / det;
+				const float t = physics::dot(e2, q) / det;
+				if (u < 0 || v < 0 || u + v > 1 || t < 0 || t > 1 || t >= nearest) {
+					continue;
+				}
+				nearest = t;
+				// The face's outward normal (c - b) x (b - a) (0x006e8080).
+				leaving = physics::dot(physics::cross(c - b, b - a), d) > 0;
+			}
+			return nearest <= 1 && leaving;
+		}
+	}
+	return false;
+}
+
+} // namespace dice::hfe::game
+

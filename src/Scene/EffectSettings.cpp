@@ -262,6 +262,24 @@ void registerParticleSystemConsoleMethods(Console& console, ParticleSystemSettin
 	bindFloat(console, "ParticleSystemManager.trailShimmerIntensity", s.trailShimmerIntensity);
 	bindFloat(console, "ParticleSystemManager.trailShimmerPhases", s.trailShimmerPhases);
 	bindFloat(console, "ParticleSystemManager.trailShimmerSpeed", s.trailShimmerSpeed);
+	// The decal manager's (RendDX9 0x1007bdca..0x1007c4c0).
+	bindBool(console, "DecalManager.drawStats", s.decalDrawStats);
+	bindFloat(console, "DecalManager.decalNormalOffset", s.decalNormalOffset);
+	bindFloat(console, "DecalManager.decalGeomClipAngle", s.decalGeomClipAngle);
+	bindFloat(console, "DecalManager.fadeDistance", s.decalFadeDistance);
+	bindFloat(console, "DecalManager.startFadePercentageOfFadeDistancel", s.decalStartFadePercentage);
+	bindFloat(console, "DecalManager.timeToLive", s.decalTimeToLive);
+	bindFloat(console, "DecalManager.fadeOutAtPercentageOfTimeToLive", s.decalFadeOutPercentage);
+}
+
+float ParticleSystemSettings::decalAlpha(float age) const
+{
+	const float start = decalTimeToLive * decalFadeOutPercentage;
+	const float range = decalTimeToLive - start;
+	if (range <= 0) {
+		return age < decalTimeToLive ? 1.0f : 0.0f;
+	}
+	return 1.0f - std::clamp((age - start) / range, 0.0f, 1.0f);
 }
 
 void registerQualityConsoleMethods(Console& console, QualitySettings& s)

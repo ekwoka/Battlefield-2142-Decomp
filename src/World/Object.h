@@ -56,6 +56,14 @@ public:
 	// Not drawn (a soldier inside a vehicle).
 	bool hidden() const { return m_hidden; }
 	void setHidden(bool hidden) { m_hidden = hidden; }
+	// "Object.disableChildren" (0x006ed98a; the object's slot 0x13c,
+	// 0x006f6fd0): +0x159, and each child's updateFlags (slot 0x54,
+	// 0x006f68f0) with flag 1 set (1, 0) or cleared (0, 1): a disabled
+	// child leaves the scene, its collision and drawing. 144 placed objects
+	// of the shipped levels set it: their ladders (gastank_c's ladder_5m_c,
+	// guard_watchtower_01_c's ladder_10m_c / ladder_6m_c) go.
+	bool childrenDisabled() const { return m_childrenDisabled; }
+	void setChildrenDisabled(bool disabled) { m_childrenDisabled = disabled; }
 	// The game's fade of its geometry (the render instance's +0x28, set
 	// through slot 0x104; a corpse's, 0x00652380): 1 opaque, 0 gone.
 	float fade() const { return m_fade; }
@@ -73,6 +81,7 @@ private:
 	bool m_overgrowth = false;
 	bool m_destroyed = false;
 	bool m_hidden = false;
+	bool m_childrenDisabled = false;
 	float m_fade = 1;
 };
 
