@@ -120,6 +120,11 @@ public:
 		m_layouts.clear();
 	}
 	const hud::HudFont* engineFont(const std::string& name, int pixels) const;
+	// One line of an engine font laid out as RendDX9 does (0x10183240):
+	// its width, and its glyphs with the top left at (x, y), stage pixels.
+	float lineWidth(const hud::HudFont& font, const std::vector<uint32_t>& codes) const;
+	void engineLine(const hud::HudFont& font, const std::vector<uint32_t>& codes, float x, float y, swf::Rgba colour,
+		std::vector<MenuBatch>& out) const;
 
 	// The mask state of the frame being drawn (Stencil.h).
 	Stencil& stencil() { return m_stencil; }

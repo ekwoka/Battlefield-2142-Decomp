@@ -111,6 +111,8 @@ private:
 	std::map<const world::ObjectTemplate*, bool> m_radioTemplates; // whether a template has any of them
 	std::map<uint32_t, Watched> m_watched; // objects whose template has radio messages
 	int m_scanIn = 0;
+	// The takeable radio waiting out radio.delay (timed event 2/0x52).
+	std::vector<std::pair<float, std::string>> m_delayedRadio;
 	struct SiloSounds {
 		std::string weapon;                       // the firearm with the countdown
 		std::vector<std::pair<int, float>> times; // (index, seconds before loaded)

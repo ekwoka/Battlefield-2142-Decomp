@@ -1401,6 +1401,12 @@ void GameWorld::registerSilo(world::Object& object)
 	silo.reloadTime = number(*firearm, "ammo.reloadTime", 120);
 	silo.launchDelay = number(*firearm, "fire.fireLaunchDelay", 0);
 	silo.velocity = number(*firearm, "velocity", 4);
+	if (const std::string* m = setting(*firearm, "radio.friendlyFireMessage")) {
+		silo.friendlyFire = *m;
+	}
+	if (const std::string* m = setting(*firearm, "radio.enemyFireMessage")) {
+		silo.enemyFire = *m;
+	}
 	silo.missile = projectileFor(*setting(*firearm, "projectileTemplate"));
 	silo.loaded = true; // a full magazine (ammo.magSize 1)
 	m_silos.push_back(silo);
@@ -1492,6 +1498,13 @@ void GameWorld::stepSilos(float seconds)
 		silo.loaded = false;
 		silo.reloadLeft = silo.reloadTime;
 		silo.target = enemy->object;
+		// The shot: the firearm's batch fire (0x005c3cb0) in fire state 4
+		// calls its Radio's fire message (slot 0x54, 0x00656dd0): from the
+		// server on TCServerTeamMessage, friendly to its team and enemy to
+		// the other. No timer gates it (fire.radioMessageDelay is the laser
+		// painter's, 0x005e1730).
+		radioMessage(-1, 13, silo.friendlyFire, silo.team);
+		radioMessage(-1, 13, silo.enemyFire, 3 - silo.team);
 		silo.launchIn = silo.launchDelay;
 		if (silo.launchIn <= 0) {
 			silo.launchIn = -1;

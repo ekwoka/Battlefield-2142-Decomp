@@ -1,5 +1,8 @@
 #include "MenuBindings.h"
 
+#include "Console/Console.h"
+#include "UI/Player/Scroller.h"
+
 #include "Net/ServerQuery.h"
 
 #include "EndOfRoundBindings.h"
@@ -18,6 +21,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -378,6 +382,18 @@ void MenuBindings::bindLogic()
 	});
 	n.setFunction(kLogic, "getCommandline", [](Interpreter&, const Args&) { return Value(""); });
 	n.setFunction(kLogic, "getModVersion", [](Interpreter&, const Args&) { return Value(kModVersion); });
+	// 0x1003d370: today as "%04d%02d%02d" (local time).
+	n.setFunction(kLogic, "getDateString", [](Interpreter&, const Args&) {
+		const std::time_t now = std::time(nullptr);
+		const std::tm* t = std::localtime(&now);
+		char text[16] = "";
+		if (t) {
+			std::snprintf(text, sizeof text, "%04d%02d%02d", t->tm_year + 1900, t->tm_mon + 1, t->tm_mday);
+		}
+		return Value(std::string(text));
+	});
+	// 0x1003b620: 12.
+	n.setFunction(kLogic, "getMaxRank", [](Interpreter&, const Args&) { return Value(12); });
 	// No patch server to ask: the check is over at once and finds nothing.
 	n.setFunction(kLogic, "checkVersion", [](Interpreter&, const Args&) { return Value(false); });
 	n.setFunction(kLogic, "getVersionResult", [](Interpreter&, const Args&) { return Value(0); });
@@ -410,6 +426,19 @@ void MenuBindings::bindLogic()
 		m_account = {};
 		m_account.name = local->name;
 		m_account.soldiers = local->soldiers;
+		// 0x1007ab70: offline, the soldiers are the sub accounts of this
+		// account's local profiles.
+		if (m_profiles) {
+			for (const auto& entry : m_profiles->list()) {
+				if (!entry.sub.empty() && entry.master.size() == name.size()
+					&& std::equal(name.begin(), name.end(), entry.master.begin(), [](char a, char b) {
+						   return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+					   })
+					&& std::find(m_account.soldiers.begin(), m_account.soldiers.end(), entry.sub) == m_account.soldiers.end()) {
+					m_account.soldiers.push_back(entry.sub);
+				}
+			}
+		}
 		m_account.loggedIn = true;
 		setSoldierRows(m_account.soldiers);
 		log("offline mode: account " + name);
@@ -684,6 +713,7 @@ void MenuBindings::bindProfile()
 		if (!m_account.connected) {
 			m_transaction.reset();
 			finishSoldierLogin();
+			takeProfile(m_account.name, soldier);
 			return Value(true);
 		}
 		const auto login = m_services.loginSoldier;
@@ -699,6 +729,9 @@ void MenuBindings::bindProfile()
 	n.setFunction(kProfile, "disconnectFromSubAccount", [this](Interpreter&, const Args&) {
 		log("soldier " + m_soldier + " logged out");
 		m_soldier.clear();
+		if (m_profiles) {
+			m_profiles->release();
+		}
 		return Value();
 	});
 	// 0x10049bf0: whether the running transaction is over (and, when it
@@ -736,6 +769,9 @@ void MenuBindings::bindProfile()
 		log("account " + m_account.name + " logged out");
 		m_account = {};
 		m_soldier.clear();
+		if (m_profiles) {
+			m_profiles->release();
+		}
 		m_offline = false;
 		m_natives.setListRows("soldiers", {});
 		return Value();
@@ -750,7 +786,23 @@ void MenuBindings::bindProfile()
 	// The offline profiles of the old login page (frame "offline"): local
 	// accounts by index.
 	n.setFunction(kProfile, "createOfflineAccount", [this](Interpreter& vm, const Args& args) {
-		const std::string name = vm.toString(arg(args, 0));
+		// 0x1004d280: createProfile(the last argument, offline, reset); the
+		// new profile is current (the page goes on to "start").
+		const std::string name = vm.toString(args.empty() ? Value() : args.back());
+		if (m_profiles) {
+			if (m_profiles->create(name, true, true) < 0) {
+				return Value(false);
+			}
+			m_offline = true;
+			m_account = {};
+			m_account.name = name;
+			m_account.loggedIn = true;
+			m_soldier = name;
+			showLocalProfiles();
+			profileLoaded();
+			log("offline profile " + name + " in " + m_profiles->currentDirectory());
+			return Value(true);
+		}
 		if (name.empty() || localAccount(name)) {
 			return Value(false);
 		}
@@ -760,6 +812,21 @@ void MenuBindings::bindProfile()
 	});
 	n.setFunction(kProfile, "loginOfflineAccount", [this](Interpreter& vm, const Args& args) {
 		const int index = static_cast<int>(vm.toNumber(arg(args, 0)));
+		// 0x1004d450: select(index), the row's profileIndex.
+		if (m_profiles) {
+			const auto entries = m_profiles->list();
+			if (index < 0 || index >= static_cast<int>(entries.size()) || !m_profiles->select(index)) {
+				return Value(false);
+			}
+			m_offline = true;
+			m_account = {};
+			m_account.name = entries[static_cast<size_t>(index)].name;
+			m_account.loggedIn = true;
+			m_soldier = m_account.name;
+			profileLoaded();
+			log("offline profile " + m_account.name + " from " + m_profiles->currentDirectory());
+			return Value(true);
+		}
 		if (index < 0 || index >= static_cast<int>(m_local.size())) {
 			return Value(false);
 		}
@@ -772,7 +839,29 @@ void MenuBindings::bindProfile()
 		return Value(true);
 	});
 	n.setFunction(kProfile, "getNumLocalProfiles", [this](Interpreter&, const Args&) {
-		return Value(static_cast<double>(m_local.size()));
+		// 0x10050fb0: all the profiles.
+		return Value(static_cast<double>(m_profiles ? m_profiles->list().size() : m_local.size()));
+	});
+	// 0x10050cf0 / 0x10050e50: those with and without a GameSpy nick.
+	for (const bool withNick : {true, false}) {
+		n.setFunction(kProfile, withNick ? "getNumOnlineProfiles" : "getNumOfflineProfiles", [this, withNick](Interpreter&, const Args&) {
+			double count = 0;
+			if (m_profiles) {
+				for (const auto& entry : m_profiles->list()) {
+					count += entry.gamespyNick.empty() != withNick ? 1 : 0;
+				}
+			}
+			return Value(count);
+		});
+	}
+	// 0x1004c720: delete(index); refused while a profile is current.
+	n.setFunction(kProfile, "deleteLocalProfile", [this](Interpreter& vm, const Args& args) {
+		const int index = static_cast<int>(vm.toNumber(arg(args, 0)));
+		const bool removed = m_profiles && m_profiles->remove(index);
+		if (removed) {
+			showLocalProfiles();
+		}
+		return Value(removed);
 	});
 }
 
@@ -826,6 +915,10 @@ void MenuBindings::finishAccountLogin()
 	local->remembered = m_transactionRemember ? scramble(m_transactionPassword) : std::string();
 	m_lastUser = m_account.name;
 	saveProfiles();
+	// 0x1004bb20: Global.con's last online user.
+	if (m_objects) {
+		m_objects->set("GlobalSettings.LastOnlineUser", m_account.name);
+	}
 	std::string soldiers;
 	for (const std::string& s : reply.soldiers) {
 		soldiers += " " + s;
@@ -848,6 +941,71 @@ void MenuBindings::finishSoldierLogin()
 	}
 	m_soldier = m_transactionName;
 	log("playing as " + m_soldier + (m_account.connected ? "" : " (offline)"));
+	if (m_account.connected) {
+		takeProfile(m_account.name, m_soldier);
+	}
+}
+
+void MenuBindings::takeProfile(const std::string& account, const std::string& soldier)
+{
+	if (!m_profiles || !m_objects) {
+		return;
+	}
+	m_profiles->release();
+	// Online the profile of the soldier (0x00491030, its sub account);
+	// offline the one of this account's soldier (0x100510c0).
+	int index = -1;
+	const auto entries = m_profiles->list();
+	for (size_t i = 0; i < entries.size() && index < 0; ++i) {
+		if (entries[i].sub == soldier && (m_account.connected || entries[i].master == account)) {
+			index = static_cast<int>(i);
+		}
+	}
+	if (index >= 0) {
+		m_profiles->select(index);
+	} else {
+		// createProfile(soldier, online, reset): master the last online user.
+		m_objects->set("GlobalSettings.LastOnlineUser", account);
+		m_profiles->create(soldier, false, true);
+	}
+	// The soldier's standing (rank and points from the stats) and the time.
+	m_objects->set("LocalProfile.LastBaseUpdate", std::to_string(static_cast<long long>(std::time(nullptr))));
+	m_profiles->save();
+	log("profile " + m_profiles->currentDirectory() + " for " + soldier);
+	profileLoaded();
+}
+
+void MenuBindings::profileLoaded()
+{
+	if (m_objects) {
+		setSettingsObjects(m_objects);
+	}
+	if (onSettingsApplied) {
+		onSettingsApplied();
+	}
+}
+
+void MenuBindings::setLocalProfiles(LocalProfileManager* profiles)
+{
+	m_profiles = profiles;
+	showLocalProfiles();
+}
+
+void MenuBindings::showLocalProfiles()
+{
+	if (!m_profiles) {
+		return;
+	}
+	std::vector<std::vector<std::string>> rows;
+	m_localProfileIndices.clear();
+	const auto entries = m_profiles->list();
+	for (size_t i = 0; i < entries.size(); ++i) {
+		if (entries[i].master.empty() && entries[i].gamespyNick.empty()) {
+			rows.push_back({entries[i].name});
+			m_localProfileIndices.push_back(static_cast<int>(i));
+		}
+	}
+	m_natives.setListRows("localProfiles", rows);
 }
 
 void MenuBindings::setSoldierRows(const std::vector<std::string>& soldiers)
@@ -921,7 +1079,11 @@ void MenuBindings::loadProfiles()
 	for (const LocalAccount& local : m_local) {
 		rows.push_back({local.name});
 	}
-	m_natives.setListRows("localProfiles", rows);
+	if (m_profiles) {
+		showLocalProfiles();
+	} else {
+		m_natives.setListRows("localProfiles", rows);
+	}
 }
 
 void MenuBindings::saveProfiles()
@@ -930,7 +1092,11 @@ void MenuBindings::saveProfiles()
 	for (const LocalAccount& local : m_local) {
 		rows.push_back({local.name});
 	}
-	m_natives.setListRows("localProfiles", rows);
+	if (m_profiles) {
+		showLocalProfiles();
+	} else {
+		m_natives.setListRows("localProfiles", rows);
+	}
 	if (m_profileFile.empty()) {
 		return;
 	}
@@ -1307,6 +1473,13 @@ void MenuBindings::bindLists()
 			auto object = vm.newObject();
 			vm.setMember(Value(object), "rowIndex", Value(index));
 			vm.setMember(Value(object), "rowValue", Value(list.rows()[static_cast<size_t>(index)].at(0)));
+			return Value(object);
+		}
+		if (list.listId == "localProfiles" && m_profiles) {
+			auto object = vm.newObject();
+			const size_t row = static_cast<size_t>(index);
+			vm.setMember(Value(object), "profileIndex", Value(row < m_localProfileIndices.size() ? m_localProfileIndices[row] : index));
+			vm.setMember(Value(object), "profileName", Value(list.rows()[row].at(0)));
 			return Value(object);
 		}
 		if (list.listId == "soldiers") {
@@ -1928,6 +2101,116 @@ GameSetup MenuBindings::gameSetup() const
 	setup.friendlyFire = setting("ServerSettings.FriendlyFire", 1) != 0;
 	setup.roundsPerMap = std::max(1, static_cast<int>(setting("ServerSettings.RoundsPerMap", 1)));
 	return setup;
+}
+
+// --- SwiffHost and MenuTeamManager (the menu scripts' console objects)
+
+namespace {
+
+std::string lowerText(std::string text)
+{
+	for (char& c : text) {
+		c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+	}
+	return text;
+}
+
+} // namespace
+
+std::string MenuHost::gameModeName(const std::string& id) const
+{
+	const auto it = gameModes.find(lowerText(id));
+	return it == gameModes.end() ? std::string("N/A") : it->second;
+}
+
+void registerMenuHostConsole(Console& console, MenuHost& host)
+{
+	const auto add = [&console](const std::string& name, int minArgs, int maxArgs,
+						 std::function<std::string(const std::vector<std::string>&)> run) {
+		ConsoleMethod method;
+		method.name = name;
+		method.access = ConsoleAccess::Anyone;
+		method.minArgs = minArgs;
+		method.maxArgs = maxArgs;
+		method.invoke = std::move(run);
+		console.registerMethod(std::move(method));
+	};
+	const auto integer = [](const std::string& text) { return std::atoi(text.c_str()); };
+	MenuHost* h = &host;
+	// 0x0047a0c0: {text, size} kept as written (localized when drawn).
+	add("SwiffHost.addCredit", 2, 2, [h, integer](const std::vector<std::string>& args) {
+		if (h->scroller) {
+			h->scroller->addCredit(args[0], integer(args[1]));
+		}
+		return std::string();
+	});
+	add("SwiffHost.setScrollFadeSpeed", 1, 1, [h, integer](const std::vector<std::string>& args) {
+		if (h->scroller) {
+			h->scroller->setFadeSpeed(integer(args[0]));
+		}
+		return std::string();
+	});
+	add("SwiffHost.setScrollSpeed", 1, 1, [h](const std::vector<std::string>& args) {
+		if (h->scroller) {
+			h->scroller->setSpeed(static_cast<float>(std::atof(args[0].c_str())));
+		}
+		return std::string();
+	});
+	add("SwiffHost.enableScroller", 1, 1, [h, integer](const std::vector<std::string>& args) {
+		if (h->scroller) {
+			h->scroller->enable(integer(args[0]) != 0 || lowerText(args[0]) == "true");
+		}
+		return std::string();
+	});
+	add("SwiffHost.setScrollerRect", 4, 4, [h, integer](const std::vector<std::string>& args) {
+		if (h->scroller) {
+			h->scroller->setRect(integer(args[0]), integer(args[1]), integer(args[2]), integer(args[3]));
+		}
+		return std::string();
+	});
+	add("SwiffHost.addGameMode", 2, 2, [h](const std::vector<std::string>& args) {
+		h->gameModes[lowerText(args[0])] = args[1];
+		return std::string();
+	});
+	add("SwiffHost.addAward", 4, 4, [h, integer](const std::vector<std::string>& args) {
+		MenuHost::Award award;
+		award.id = integer(args[1]);
+		award.level = integer(args[2]);
+		award.value = integer(args[3]);
+		award.kind = award.id < 200 ? 1 : award.id < 300 ? 0 : award.id < 400 ? 2 : 3;
+		const std::string suffix = std::to_string(award.id) + (award.kind == 1 ? "_" + std::to_string(award.level) : "");
+		award.nameKey = "AWARD_NAME_" + suffix;
+		award.descriptionKey = "AWARD_DESCRIPTION_" + suffix;
+		h->awards.push_back(award);
+		return std::string();
+	});
+	add("SwiffHost.loadImage", 1, 1, [h](const std::vector<std::string>& args) {
+		return std::string(h->loadImage && h->loadImage(args[0]) ? "1" : "0");
+	});
+	add("SwiffHost.joinServer", 3, 3, [h, integer](const std::vector<std::string>& args) {
+		return std::string(h->joinServer && h->joinServer(args[0], integer(args[1]), integer(args[2])) ? "1" : "0");
+	});
+	add("SwiffHost.disconnectGame", 0, 0, [h](const std::vector<std::string>&) {
+		return std::string(h->disconnectGame && h->disconnectGame() ? "1" : "0");
+	});
+	add("SwiffHost.setLatestGameVersion", 1, 1, [h](const std::vector<std::string>& args) {
+		h->latestGameVersion = args[0];
+		return std::string();
+	});
+	add("MenuTeamManager.addTeam", 2, 2, [h](const std::vector<std::string>& args) {
+		h->teams.push_back({args[0], args[1], {}});
+		return std::string();
+	});
+	add("MenuTeamManager.addKit", 1, 1, [h](const std::vector<std::string>& args) {
+		if (!h->teams.empty()) {
+			h->teams.back().kits.push_back(args[0]);
+		}
+		return std::string();
+	});
+	add("MenuTeamManager.addWeapon", 4, 4, [h, integer](const std::vector<std::string>& args) {
+		h->weapons[lowerText(args[0])] = {integer(args[1]), integer(args[2]), integer(args[3])};
+		return std::string();
+	});
 }
 
 } // namespace dice::hfe::menu

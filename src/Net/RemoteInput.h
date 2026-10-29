@@ -26,6 +26,8 @@ inline PlayerInput playerInputFrom(const game::SoldierInput& in, float previousA
 	PlayerInput out;
 	out.set(kPIThrottle, in.throttle);
 	out.set(kPIYaw, in.strafe); // on foot PIYaw strafes
+	out.set(kPIPitch, in.pitchAxis); // a driver's keys and sticks (the mouse's go as PIMouseLook)
+	out.set(kPIRoll, in.rollAxis);
 	out.set(kPIMouseLookX, in.turn / kDegreesPerMouseLookUnit);
 	out.set(kPIMouseLookY, -(in.aimPitch - previousAimPitch) / kDegreesPerMouseLookUnit);
 	out.set(kPISprint, in.sprint ? 1.0f : 0.0f);
@@ -62,6 +64,8 @@ inline game::SoldierInput soldierInputFromMove(const PlayerMove& move, MoveInput
 	game::SoldierInput input;
 	input.throttle = move.axis(kPIThrottle);
 	input.strafe = move.axis(kPIYaw);
+	input.pitchAxis = move.axis(kPIPitch);
+	input.rollAxis = move.axis(kPIRoll);
 	input.turn = move.axis(kPIMouseLookX) * kDegreesPerMouseLookUnit;
 	state.pitch = std::clamp(state.pitch - move.axis(kPIMouseLookY) * kDegreesPerMouseLookUnit, -89.0f, 89.0f);
 	input.aimPitch = state.pitch;

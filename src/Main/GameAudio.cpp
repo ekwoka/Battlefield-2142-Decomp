@@ -253,6 +253,47 @@ std::vector<std::pair<int, std::string>> GameAudio::autoRadio()
 		const int team = object.team();
 		return team != 0 ? team : localTeam; // 0x00656910's last resort
 	};
+	// Takeable / not takeable (Radio slots 0x60 0x00656fc0 and 0x64
+	// 0x006567b0, from the point's allowCaptureByTeam setter 0x005bcd00):
+	// only a point that needs supply groups for that team, team 1 or 2;
+	// for the local player, friendly when that is its team; after
+	// radio.delay whole seconds (template +0x218, an int) through timed
+	// event 2/0x52, whose handler (0x00758cd0 in the HUD manager's
+	// 0x00756b60) plays it as it is, else at once (game slot 0x60).
+	for (auto it = m_delayedRadio.begin(); it != m_delayedRadio.end();) {
+		it->first -= 1.0f / 30;
+		if (it->first <= 0) {
+			play(it->second);
+			it = m_delayedRadio.erase(it);
+		} else {
+			++it;
+		}
+	}
+	for (const game::GameWorld::TakeableChange& c : m_round.takeTakeableChanges()) {
+		if ((c.team != 1 && c.team != 2) || local < 0) {
+			continue;
+		}
+		for (const game::ControlPoint& cp : m_round.controlPoints()) {
+			if (cp.id != c.point || cp.supplyGroupsNeeded[c.team].empty() || !cp.object || !cp.object->objectTemplate()) {
+				continue;
+			}
+			const world::ObjectTemplate& t = *cp.object->objectTemplate();
+			const bool friendly = localTeam == c.team;
+			const std::string message = setting(t,
+				c.allowed ? (friendly ? "radio.friendlyTakeableMessage" : "radio.enemyTakeableMessage")
+						  : (friendly ? "radio.friendlyNotTakeableMessage" : "radio.enemyNotTakeableMessage"));
+			const int delay = std::atoi(setting(t, "radio.delay").c_str());
+			if (message.empty()) {
+				break;
+			}
+			if (delay > 0) {
+				m_delayedRadio.push_back({static_cast<float>(delay), message});
+			} else {
+				play(message);
+			}
+			break;
+		}
+	}
 	if (--m_scanIn <= 0) {
 		// The objects with radio messages, looked for every two seconds.
 		m_scanIn = 60;

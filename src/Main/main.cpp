@@ -1014,6 +1014,45 @@ void bindMenuSounds(ui::Player& movie, sound::SoundManager& sounds)
 	});
 }
 
+// The mod's menu music: Mod.desc's <music> (ModInfo +0x8c; bf2142's
+// "sound/music/2142MenuMusic.ogg").
+std::string menuMusicFile(const io::FileManager& files)
+{
+	std::vector<uint8_t> data;
+	if (!files.readFile("Mod.desc", data)) {
+		return std::string();
+	}
+	const std::string text(data.begin(), data.end());
+	const size_t open = text.find("<music>"), close = text.find("</music>");
+	if (open == std::string::npos || close == std::string::npos || close < open) {
+		return std::string();
+	}
+	std::string file = text.substr(open + 7, close - open - 7);
+	file.erase(0, file.find_first_not_of(" \t\r\n"));
+	file.erase(file.find_last_not_of(" \t\r\n") + 1);
+	return file;
+}
+
+// 0x007fd060 for the menu's two requests: play (0) starts the mod's track
+// when nothing plays (0x007fce80), stop (1) fades it out over 5 s. The
+// game asks for play when the menu comes up alone (0x004032b0) and for
+// stop when a game takes over (0x00403370); the menu's
+// Sound.playMenuMusic / stopMenuMusic (SwiffPlayer 0x10059dd0 / 0x10059df0,
+// SwiffHost slots 102 / 103: events 0x16 / 0x15, 0x00404590) the same.
+void menuMusic(int& state, bool play, sound::SoundManager& sounds, const io::FileManager& files)
+{
+	if (play && state == 0) {
+		const std::string track = menuMusicFile(files);
+		if (!track.empty() && sounds.loadMusic(track) && sounds.playMusic()) {
+			std::printf("menu music %s\n", track.c_str());
+			state = 1;
+		}
+	} else if (!play && state == 1) {
+		sounds.stopMusic(5.0f);
+		state = 0;
+	}
+}
+
 // endOfRound.dfm's files: "$/Levels/..." and "/Levels/..." (the map's
 // pictures) from the game's root, the rest beside the movie.
 std::function<bool(const std::string&, std::vector<uint8_t>&)> endOfRoundReader(const io::FileManager& files)
@@ -1129,8 +1168,8 @@ void runMenuScript(ui::Player& menu, const std::string& script, const std::funct
 	}
 }
 
-// Where rebound keys are kept: Controls.con's format, next to the
-// menu's settings.
+// Where rebound keys were kept before the profiles had them: Controls.con's
+// format, next to the menu's settings (read when a profile has none).
 std::string controlsFile()
 {
 	const std::string settings = dice::hfe::menu::MenuBindings::defaultSettingsFile();
@@ -1251,11 +1290,22 @@ struct Session {
 	// profile's files once, kept for the next maps.
 	dice::hfe::menu::SettingsObjects settings;
 	bool settingsLoaded = false;
+	// The local profiles (Profiles/0001...), each with its settings and
+	// controls (LocalProfileManager).
+	dice::hfe::menu::LocalProfileManager profiles {settings};
+	// SwiffHost's and MenuTeamManager's (credits.con, gameModes.con,
+	// menuTeams.con), run once when the menu first starts.
+	dice::hfe::menu::MenuHost menuHost;
+	bool menuScriptsRun = false;
+	// The menu's music object (0x007fd030, the game's +0xf4): 0 silent,
+	// 1 the mod's menu track playing.
+	int menuMusic = 0;
 	// Voice chat (Voip/VoiceChat.h): the menu's settings and mic test, the
 	// joined server's voice; updated on its own thread.
 	std::unique_ptr<dice::hfe::voip::VoiceChat> voice;
 #if BF2142_HAS_RENDERER
 	std::unique_ptr<Window> window; // opened by the first view, kept for the next maps
+	AudioOut menuVideoAudio; // a menu clip's movie's own sound (RendDX9's Bink)
 #endif
 };
 
@@ -1917,6 +1967,8 @@ int runGame(Options& options, Session& session)
 	// the controls page's changes stay for the next maps).
 	input::ControlMaps& controls = session.controls;
 	input::registerControlMapConsoleMethods(console, controls);
+	session.menuHost.scroller = &session.menu.scroller();
+	dice::hfe::menu::registerMenuHostConsole(console, session.menuHost);
 	// Localized text (0x00405360: Localization/strings.csv in the
 	// profile's language, English here; strings_patch.csv over it).
 	io::Localization localization;
@@ -1947,6 +1999,8 @@ int runGame(Options& options, Session& session)
 	// The bots' settings (AI/AIBehaviours.ai, AI/AIDefault.ai).
 	game::BotSettings botSettings;
 	game::registerBotConsoleMethods(console, botSettings);
+	// NetworkableInfo.* (Objects/Common/Networkables.con): the ghosts' infos.
+	host::registerNetworkableInfoConsoleMethods(console);
 	// Ranks (rankSettings.setRank; Settings/RankSettings.con, 0x0043ac80).
 	stats::registerRankConsoleMethods(console);
 	// The kits' unlock properties the unlock ids come from (also without --api).
@@ -2018,30 +2072,76 @@ int runGame(Options& options, Session& session)
 		// The player profile's options (the crosshair colour among them).
 		hudManager.set("CrossHairColorAlpha", 1);
 		run("Settings/Profiles/Default/GeneralOptions.con");
-		if (controls.maps().empty()) {
-			// The keys as the controls page left them, else the game's.
-			std::ifstream saved(controlsFile());
-			if (saved) {
+		// A profile's controls: its Controls.con (0x0048f490 runs it after the
+		// maps' reset), else the keys kept before profiles had them, else the
+		// game's.
+		const auto loadControls = [&controls, &console, &run](const std::string& profileFile) {
+			controls.clear();
+			for (const std::string& path : {profileFile, controlsFile()}) {
+				std::ifstream saved(path);
+				if (path.empty() || !saved) {
+					continue;
+				}
 				std::string output;
 				for (std::string line; std::getline(saved, line);) {
 					console.execute(line, output, ConsoleAccess::Anyone);
 				}
-				std::printf("controls from %s\n", controlsFile().c_str());
-			} else {
-				run("Settings/Controls.con");
+				std::printf("controls from %s\n", path.c_str());
+				return;
 			}
-		}
+			run("Settings/Controls.con");
+		};
+		const auto profileControls = [&session](const std::string& folder) {
+			const std::string& dir = session.profiles.directory();
+			return dir.empty() || folder.empty() ? std::string() : (std::filesystem::path(dir) / folder / "Controls.con").string();
+		};
+		session.profiles.onLoad = [&session, &console, loadControls, profileControls](const std::string& folder) {
+			if (session.settings.load(console)) {
+				std::printf("settings from %s/%s\n", session.settings.directory().c_str(), folder.c_str());
+			}
+			loadControls(profileControls(folder));
+		};
+		session.profiles.onSaveControls = [&controls, profileControls](const std::string& folder) {
+			const std::string path = profileControls(folder);
+			if (!controls.maps().empty() && !path.empty()) {
+				std::ofstream(path) << controls.script();
+			}
+		};
+		session.profiles.onResetControls = [&controls, &run] {
+			controls.clear();
+			run("Settings/Controls.con");
+		};
 		// The profile's settings files (Global.con, Profile.con, General.con,
 		// Audio.con, Video.con, Usersettings.con), as the original runs them
-		// after the defaults; later maps keep the values.
+		// after the defaults; later maps keep the values. At start-up the
+		// original loads Default (0x0048fc30, made when missing); the rewrite
+		// then takes Global.con's default user, the profile last logged in,
+		// so that a run without the menu has its options (the menu's login
+		// selects the soldier's own again).
 		if (!session.settingsLoaded) {
 			session.settingsLoaded = true;
-			session.settings.setDirectory(dice::hfe::menu::SettingsObjects::defaultDirectory());
-			if (session.settings.load(console)) {
-				std::printf("settings from %s\n", session.settings.directory().c_str());
+			const std::string dir = dice::hfe::menu::SettingsObjects::defaultDirectory();
+			session.profiles.setDirectory(dir);
+			session.profiles.ensureDefault();
+			session.settings.setDirectory(dir, "Default");
+			session.settings.load(console);
+			std::string folder = session.settings.get("GlobalSettings.DefaultUser");
+			std::error_code missing;
+			if (folder.empty() || dir.empty() || !std::filesystem::exists(std::filesystem::path(dir) / folder / "Profile.con", missing)) {
+				folder = "Default";
 			}
-		} else if (session.settings.get("GeneralSettings.CrosshairColor") != "255 255 255 255") {
-			session.settings.onChange("GeneralSettings.CrosshairColor");
+			if (folder != "Default") {
+				session.settings.resetProfile();
+				session.settings.setDirectory(dir, folder);
+			}
+			session.profiles.onLoad(folder);
+		} else {
+			if (controls.maps().empty()) {
+				loadControls(profileControls(session.settings.profile()));
+			}
+			if (session.settings.get("GeneralSettings.CrosshairColor") != "255 255 255 255") {
+				session.settings.onChange("GeneralSettings.CrosshairColor");
+			}
 		}
 	}
 	sounds.reloadSoundFiles();
@@ -2066,11 +2166,65 @@ int runGame(Options& options, Session& session)
 		});
 		menu.natives().setLocalizer([&localization](const std::string& key) { return localization.text(key); });
 		bindMenuSounds(menu, sounds);
+		// The scripts SwiffHost (slot 5, 0x004697c0: credits.con, once) and
+		// MenuTeamManager (0x004957f0: menuTeams.con, gameModes.con) run.
+		if (!session.menuScriptsRun) {
+			session.menuScriptsRun = true;
+			run("Menu/External/FlashMenu/credits.con");
+			run("Menu/External/FlashMenu/menuTeams.con");
+			run("Menu/External/FlashMenu/gameModes.con");
+		}
+		// The credits page: Logic.enableScroller (0x1003be40) and
+		// setScrollSpeed (0x1003be90), SwiffHost slots 0x368 and 0x364.
+		menu.natives().setFunction("dice.bf2.Logic", "enableScroller",
+			[&session](ui::avm1::Interpreter&, const std::vector<ui::avm1::Value>& args) {
+				session.menu.scroller().enable(!args.empty() && ui::avm1::toBoolean(args[0]));
+				return ui::avm1::Value();
+			});
+		menu.natives().setFunction("dice.bf2.Logic", "setScrollSpeed",
+			[&session](ui::avm1::Interpreter& vm, const std::vector<ui::avm1::Value>& args) {
+				if (!args.empty()) {
+					session.menu.scroller().setSpeed(static_cast<float>(vm.toNumber(args[0])));
+				}
+				return ui::avm1::Value();
+			});
+		// 0x100425c0: the fade speed setScrollFadeSpeed kept.
+		menu.natives().setFunction("dice.bf2.Multiplay", "getScrollFadeSpeed",
+			[&session](ui::avm1::Interpreter&, const std::vector<ui::avm1::Value>&) {
+				return ui::avm1::Value(session.menu.scroller().fadeSpeed());
+			});
+		// The menu's music (not in an off-screen shot).
+		if (options.screenshot.empty()) {
+			for (const bool play : {true, false}) {
+				menu.natives().setFunction("dice.bf2.Sound", play ? "playMenuMusic" : "stopMenuMusic",
+					[&session, &sounds, &files, play](ui::avm1::Interpreter&, const std::vector<ui::avm1::Value>&) {
+						menuMusic(session.menuMusic, play, sounds, files);
+						return ui::avm1::Value();
+					});
+			}
+			// A new manager for each map: what played before is gone.
+			session.menuMusic = 0;
+			if (!startedGame) {
+				menuMusic(session.menuMusic, true, sounds, files);
+			} else {
+				sounds.stopMusic(5.0f); // a game took over (0x00403370)
+			}
+		}
 		// The menu's movies in their clips ("?titan_tutorial.bik"): through
 		// the Bink decoder, unless the movies are off.
 		if (options.movies) {
-			menu.setVideoOpener([&options](const std::string& url) -> std::shared_ptr<ui::VideoSource> {
-				auto video = std::make_shared<dice::hfe::movie::MenuVideo>();
+			// Its sound to the playback device while the menu is in a window
+			// (RendDX9's Bink plays it itself, 0x1011e0d0).
+			menu.setVideoOpener([&options, &session](const std::string& url) -> std::shared_ptr<ui::VideoSource> {
+				dice::hfe::movie::MenuVideo::AudioSink sink;
+#if BF2142_HAS_RENDERER
+				if (session.window) {
+					AudioOut* audio = &session.menuVideoAudio;
+					sink.play = [audio](const std::vector<float>& samples, int rate) { audio->queue(samples, rate); };
+					sink.stop = [audio] { audio->clear(); };
+				}
+#endif
+				auto video = std::make_shared<dice::hfe::movie::MenuVideo>(std::move(sink));
 				std::string error;
 				const std::string path = moviePath(options, dice::hfe::movie::menuVideoFile(url));
 				if (!video->open(path, &error)) {
@@ -2125,8 +2279,9 @@ int runGame(Options& options, Session& session)
 		}
 		applyVoiceSettings();
 		const dice::hfe::menu::MenuBindings& settings = *session.menuBindings;
-		if (!controls.maps().empty() && !controlsFile().empty()) {
-			std::ofstream(controlsFile()) << controls.script();
+		// The controls page's keys into the profile's Controls.con.
+		if (session.profiles.onSaveControls) {
+			session.profiles.onSaveControls(session.settings.profile());
 		}
 		const auto effects = static_cast<float>(settings.setting("AudioSettings.EffectsVolume", 1));
 		sounds.setMasterVolume(1);
@@ -2178,6 +2333,7 @@ int runGame(Options& options, Session& session)
 		session.menuBindings = std::make_unique<dice::hfe::menu::MenuBindings>(menu.natives(), services);
 		dice::hfe::menu::MenuBindings* menuBindings = session.menuBindings.get();
 		menuBindings->setSettingsObjects(&session.settings);
+		menuBindings->setLocalProfiles(&session.profiles);
 		// The voice natives (dice.bf2.Sound.voip*) in place of MenuBindings' stand-ins.
 		if (!session.voice) {
 			session.voice = std::make_unique<dice::hfe::voip::VoiceChat>();
@@ -2356,15 +2512,34 @@ int runGame(Options& options, Session& session)
 			auto player = std::make_shared<net::DemoPlayer>(std::move(records));
 			auto started = std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
 			auto ticked = std::make_shared<int>(0);
-			client.playDemo([player, started, ticked](std::vector<uint8_t>& payload) {
+			auto paused = std::make_shared<bool>(false);
+			client.playDemo([player, started, ticked, paused](std::vector<uint8_t>& payload) {
 				const auto elapsed = std::chrono::steady_clock::now() - *started;
 				const int due = static_cast<int>(std::chrono::duration<double>(elapsed).count() * 30.0);
 				if (due > *ticked) {
-					player->advance(due - *ticked);
+					if (!*paused) { // the game speed 0 (0x004b32f0: client slot 0xe8(0))
+						player->advance(due - *ticked);
+					}
 					*ticked = due;
 				}
 				return player->next(payload);
 			});
+			// The playback controls (the demo interface 0x00928fa8 through
+			// QueryInterface 0x1d4c2): toggleDemoPauseOrPlay (slot 0x5c,
+			// 0x004b32d0: the speed 0 or 100), restartDemo (slot 0x48,
+			// 0x004b3190: the world and ghosts reset, 0x00582340, and the
+			// demo again from its start; the join's level block makes the
+			// client start over), shutdownDemo (0x00404750: the game ends).
+			// togglePlayerDemo / toggleCameraDemo (the demo camera's follow
+			// and free modes, 0x005fa440, 0x005fa130) and adjustDemoFov have
+			// no demo camera to act on (no .bf2142cam playback).
+			bindMethod(console, "demo.toggleDemoPauseOrPlay", ConsoleAccess::Anyone, [paused] { *paused = !*paused; });
+			bindMethod(console, "demo.restartDemo", ConsoleAccess::Anyone, [player, started, ticked] {
+				player->restart();
+				*started = std::chrono::steady_clock::now();
+				*ticked = 0;
+			});
+			bindMethod(console, "demo.shutdownDemo", ConsoleAccess::Anyone, [player] { player->finish(); });
 		} else {
 			client.connect(host, port, clientOptions);
 		}
@@ -2457,6 +2632,7 @@ int runGame(Options& options, Session& session)
 	// window is up already: from the menu, or between maps.
 	ui::Player loadingMovie;
 	dice::hfe::menu::EndOfRoundBindings loadingBindings(loadingMovie.natives());
+	loadingBindings.gameModeName = [&session](const std::string& mode) { return session.menuHost.gameModeName(mode); };
 #if BF2142_HAS_RENDERER
 	std::optional<render::LevelSources> loadingSources;
 	std::unique_ptr<Window::MenuScreen> loadingScreen;
@@ -3145,10 +3321,38 @@ int runGame(Options& options, Session& session)
 				state.occupied = state.objectTemplate && state.objectTemplate->typeName() != "Soldier"
 					&& round.playerOf(state.id) >= 0;
 				// The cold breath (0x00588830): not the local player's own
-				// soldier seen in first person.
+				// soldier seen in first person, not with a kit that has
+				// disableBreathEffect (+0x384), not in a vehicle (+0x264).
 				state.coldBreath = coldBreath.useColdBreath && state.objectTemplate
 					&& state.objectTemplate->typeName() == "Soldier"
 					&& !(state.id == round.playerObject() && playerCamera.firstPerson);
+				if (state.coldBreath) {
+					game::GameWorld::PlayerInfo info;
+					const int player = round.playerOf(state.id);
+					if (player >= 0 && round.playerInfo(player, info) && info.soldier == state.id) {
+						const world::Object* kit = info.kit ? objects.find(info.kit) : nullptr;
+						bool disabled = false;
+						if (kit && kit->objectTemplate()) {
+							const auto& kitSettings = kit->objectTemplate()->settings();
+							const auto it = kitSettings.find("disableBreathEffect");
+							disabled = it != kitSettings.end() && std::atoi(it->second.c_str()) != 0;
+						}
+						state.coldBreath = info.vehicle == 0 && !disabled;
+					}
+				}
+				// A vehicle's wheels and throttle (the wheel bundles' contact
+				// and FromEngine).
+				if (const game::Vehicle* vehicle = round.vehicle(state.id)) {
+					state.engine = state.occupied ? std::min(std::fabs(vehicle->input().throttle), 1.0f) : 0.0f;
+					const physics::Vec3 up = state.rotation.rows[1];
+					for (const game::Vehicle::Wheel& wheel : vehicle->wheels()) {
+						effects::ObjectEffects::ObjectState::WheelContact contact;
+						contact.spring = wheel.spring;
+						contact.contact = wheel.contact;
+						contact.point = state.position + state.rotation.transform(wheel.mount) + up * (wheel.compression - wheel.radius);
+						state.wheels.push_back(contact);
+					}
+				}
 				if (!fired.empty()) {
 					const auto it = fired.find(state.id);
 					state.effects = it != fired.end() ? it->second : 0;
@@ -3165,6 +3369,8 @@ int runGame(Options& options, Session& session)
 					rotation = {r.x, r.y, r.z};
 					return true;
 				});
+			// The WindManager's local winds: the objects' WindAffectors.
+			windSettings.localWinds = objectEffectBundles.localWinds();
 			objectEffects.update(1.0f / 30.0f);
 		};
 		// Sound, once a tick (GameAudio.h): the listener at the camera, what
@@ -3402,6 +3608,7 @@ int runGame(Options& options, Session& session)
 		// next map.
 		ui::Player endOfRound;
 		dice::hfe::menu::EndOfRoundBindings endOfRoundBindings(endOfRound.natives());
+		endOfRoundBindings.gameModeName = [&session](const std::string& mode) { return session.menuHost.gameModeName(mode); };
 		bool endOfRoundShown = false;
 		endOfRound.setFileReader(endOfRoundReader(files));
 		endOfRound.natives().setLocalizer([&localization](const std::string& key) { return localization.text(key); });
@@ -4812,6 +5019,8 @@ int runGame(Options& options, Session& session)
 				game::SoldierInput input;
 				input.throttle = in.throttle;
 				input.strafe = in.strafe;
+				input.pitchAxis = in.pitch;
+				input.rollAxis = in.roll;
 				input.sprint = in.sprint;
 				input.turn = in.turnDegrees;
 				input.aimPitch = in.aimPitchDegrees;
@@ -4853,6 +5062,8 @@ int runGame(Options& options, Session& session)
 				game::SoldierInput input;
 				input.throttle = in.throttle;
 				input.strafe = in.strafe;
+				input.pitchAxis = in.pitch;
+				input.rollAxis = in.roll;
 				input.sprint = in.sprint;
 				input.turn = in.turnDegrees;
 				input.aimPitch = in.aimPitchDegrees;
@@ -4872,7 +5083,7 @@ int runGame(Options& options, Session& session)
 				// seat's inputs are cleared while it does (0x005c9ec0).
 				playerCamera.setCrouch(in.crouch);
 				if (playerCamera.duckingDisablesInput()) {
-					input.throttle = input.strafe = input.turn = 0;
+					input.throttle = input.strafe = input.turn = input.pitchAxis = input.rollAxis = 0;
 					input.fire = input.altFire = false;
 				}
 				// Stance: crouch or lie while their keys are held. A spawn where

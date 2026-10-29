@@ -32,6 +32,9 @@ struct SoldierInput {
 	// y (aimPitch's change) when set.
 	bool hasPitch = false;
 	float pitch = 0;
+	// A driver's c_PIPitch and c_PIRoll from keys, joysticks and gamepads
+	// (-1..1), added to what the mouse gives (aimPitch's change, turn).
+	float pitchAxis = 0, rollAxis = 0;
 };
 
 // The sprint's stamina (the Soldier's +0x360; set up by 0x00645790 from

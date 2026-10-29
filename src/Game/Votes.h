@@ -9,9 +9,10 @@
 // players who haven't opted out; a kick's target and a mutiny's other team
 // left out) and needs ceil(2/3 of them) (0x3f2aaa9f, 0x00645b20; 0x0058f340)
 // yes votes; it ends once that many said yes, everyone voted, or
-// sv.voteTime ran out (0x0058ef90). The starter's vote is the choice 0;
-// the rewrite counts a cast's choice 0 as yes and 1 or 2 as no (the
-// choice's meaning isn't settled).
+// sv.voteTime ran out (0x0058ef90). A cast's choice is 0 yes, 1 no, 2
+// counted but neither (the vote record 0x00645b20 takes 0..2, 0x00645950);
+// the starter's is 0; a client sends 0 or 1 (0x0079d6e0's case 6). One
+// vote a player, unchanged.
 #pragma once
 
 #include <functional>
@@ -42,7 +43,7 @@ public:
 	// The Vote event's fields as the server sends them (0x005113c0's order).
 	struct Reply {
 		int kind = 0, phase = 0, target = 0, voter = 0, choice = 0;
-		int topCount = 0, topChoice = 0, needed = 0;
+		int yesCount = 0, noCount = 0, needed = 0; // the event's +0x10, +0x11 (counts[0], counts[1]), +0x12
 		float seconds = 0; // a start's time to run
 		int to = -1;       // -1: everyone, else that player only
 	};
@@ -75,6 +76,7 @@ private:
 		int needed = 0;
 		float left = 0;
 		int yes() const;
+		int no() const;
 	};
 	Vote* slot(int kind, int team);
 	int eligibleCount(int kind, int target, int team, std::set<int>* out) const;

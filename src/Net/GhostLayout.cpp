@@ -292,6 +292,22 @@ bool contains(const std::vector<std::string>& list, const std::string& name)
 	return std::any_of(list.begin(), list.end(), [&](const std::string& s) { return lower(s) == l; });
 }
 
+} // namespace
+
+float NetworkableInfoTable::basePriority(const std::string& info) const
+{
+	const auto it = infos.find(lower(info));
+	return it != infos.end() ? it->second.basePriority : 1.0f;
+}
+
+NetworkableInfoTable& networkableInfos()
+{
+	static NetworkableInfoTable table;
+	return table;
+}
+
+namespace {
+
 bool hasComponent(const world::ObjectTemplate& t, const char* name)
 {
 	const std::string l = lower(name);

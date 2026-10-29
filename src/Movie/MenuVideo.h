@@ -4,13 +4,17 @@
 // (Multiplay.getMapMovie). SwiffPlayer draws such a movie as a video
 // texture (RendDX9's Video/VideoTarget); here its pictures replace the
 // clip's image as time passes, in step with the movie's own clock. Its
-// sound is not played (the menu's music goes on).
+// sound goes to the host's sink as it is decoded (Bink plays a menu movie's
+// sound itself, RendDX9 0x1011e0d0: BinkOpen(path, 0)), and what is still
+// queued stops when the clip lets the movie go (unloadMovie).
 #pragma once
 
 #include "Movie/MovieDecoder.h"
 #include "UI/MenuDraw.h"
 
+#include <functional>
 #include <string>
+#include <vector>
 
 namespace dice::hfe::movie {
 
@@ -21,11 +25,25 @@ std::string menuVideoFile(const std::string& url);
 
 class MenuVideo : public ui::VideoSource {
 public:
+	// Where the movie's sound goes: interleaved stereo floats at a rate,
+	// and `stop` when the movie is closed.
+	struct AudioSink {
+		std::function<void(const std::vector<float>& samples, int rate)> play;
+		std::function<void()> stop;
+	};
+	MenuVideo() = default;
+	explicit MenuVideo(AudioSink sink) : m_sink(std::move(sink)) {}
+	~MenuVideo() override;
+	MenuVideo(const MenuVideo&) = delete;
+	MenuVideo& operator=(const MenuVideo&) = delete;
+
 	bool open(const std::string& path, std::string* error = nullptr);
 	bool advance(double seconds, ui::MenuImage& frame) override;
 	bool finished() const override { return m_finished; }
 
 private:
+	void playAudio();
+	AudioSink m_sink;
 	MovieDecoder m_decoder;
 	VideoFrame m_next;
 	bool m_haveNext = false, m_finished = false, m_started = false;

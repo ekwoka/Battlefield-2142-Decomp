@@ -101,6 +101,16 @@ void registerGeometryConsoleMethods(Console& console, GeometryTemplateManager& g
 			active->simpleUVTranslation[1] = v;
 		}
 	});
+	bindMethod(console, "GeometryTemplate.maxSkip3pLods", ConsoleAccess::Anyone, [&geometries](unsigned lods) {
+		if (GeometryTemplate* active = geometries.active()) {
+			active->maxSkip3pLods = lods;
+		}
+	});
+	bindMethod(console, "GeometryTemplate.maxSkipWreckLods", ConsoleAccess::Anyone, [&geometries](unsigned lods) {
+		if (GeometryTemplate* active = geometries.active()) {
+			active->maxSkipWreckLods = lods;
+		}
+	});
 	bindMethod(console, "GeometryTemplate.setSubGeometryLodDistance", ConsoleAccess::Anyone,
 		[&geometries](int geometry, int lod, float distance) {
 			GeometryTemplate* active = geometries.active();

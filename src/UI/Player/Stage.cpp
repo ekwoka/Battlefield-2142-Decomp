@@ -18,6 +18,15 @@ namespace {
 constexpr float kTwips = 20.0f;
 constexpr double kPi = 3.14159265358979323846;
 
+std::string lowered(const std::string& name)
+{
+	std::string out = name;
+	for (char& c : out) {
+		c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+	}
+	return out;
+}
+
 // "_x" -> kPropX, ...
 int propertyIndex(const std::string& name)
 {
@@ -169,12 +178,20 @@ bool DisplayObject::specialMember(Interpreter& vm, const std::string& name, Valu
 		out = Value(vm.global());
 		return true;
 	}
+	if (lowered(name) == "_isscroller") {
+		out = Value(isScroller);
+		return true;
+	}
 	return false;
 }
 
 bool DisplayObject::setSpecialMember(Interpreter& vm, const std::string& name, const Value& value)
 {
-	(void)vm, (void)value;
+	(void)vm;
+	if (lowered(name) == "_isscroller") {
+		isScroller = avm1::toBoolean(value);
+		return true;
+	}
 	return name == "_parent" || name == "_root" || name == "_level0";
 }
 
@@ -861,6 +878,12 @@ bool Clip::hitLocal(swf::Point local, bool shape, bool includeHidden)
 void Clip::draw(Drawer& drawer, const swf::Matrix& world, const swf::ColorTransform& tint, std::vector<MenuBatch>& out)
 {
 	if (!visible || isMask || clipDepth != 0) {
+		return;
+	}
+	if (isScroller) {
+		// The roll in its place, in stage coordinates (its own transform
+		// and colour unused, 0x100c6ee0).
+		player.drawScroller(drawer, out);
 		return;
 	}
 	const swf::Matrix at = multiply(world, matrix);

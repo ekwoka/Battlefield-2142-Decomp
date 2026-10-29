@@ -145,3 +145,97 @@ TEST(SettingsObjects_MenuPages)
 	CHECK(settings.get("GeneralSettings.MaxBots") == "12");
 	bindings.finishJobs();
 }
+
+// Several local profiles (LocalProfileManager): Default made at start-up,
+// numbered folders with gaps filled, each with its own settings and
+// controls, selected, released and deleted as the original does; and the
+// menu's offline accounts and soldiers on them.
+TEST(SettingsObjects_LocalProfiles)
+{
+	const std::filesystem::path dir = std::filesystem::temp_directory_path() / "bf2142-profiles-test";
+	std::filesystem::remove_all(dir);
+	Console console;
+	menu::SettingsObjects settings;
+	settings.registerConsole(console);
+	menu::LocalProfileManager profiles(settings);
+	profiles.setDirectory(dir.string());
+	std::string controls = "game";
+	profiles.onLoad = [&](const std::string& folder) {
+		settings.load(console);
+		std::ifstream in(dir / folder / "Controls.con");
+		std::getline(in, controls);
+	};
+	profiles.onSaveControls = [&](const std::string& folder) { std::ofstream(dir / folder / "Controls.con") << controls; };
+	profiles.onResetControls = [&] { controls = "game"; };
+	profiles.ensureDefault();
+	CHECK(std::filesystem::exists(dir / "Default" / "Profile.con"));
+	CHECK(!std::filesystem::exists(dir / "Default" / "General.con")); // Default: Profile, Audio, Video
+	CHECK(profiles.list().empty());                                  // Default is not listed
+	CHECK(menu::LocalProfileManager::nextDirectory({"0001", "0003", "Default"}) == "0002");
+
+	// Two offline profiles, each with its own bots and keys.
+	CHECK(profiles.create("Alpha", true) == 0);
+	CHECK(profiles.currentDirectory() == "0001" && settings.get("GlobalSettings.DefaultUser") == "0001");
+	CHECK(profiles.create("Bravo", true) < 0); // one is current
+	run(console, "GeneralSettings.setMaxBots 4");
+	controls = "alpha keys";
+	CHECK(profiles.save());
+	profiles.release();
+	CHECK(profiles.create("Bravo", true) == 1);
+	CHECK(settings.number("GeneralSettings.MaxBots", 0) == 16); // reset to the defaults
+	CHECK(controls == "game");
+	run(console, "GeneralSettings.setMaxBots 12");
+	controls = "bravo keys";
+	profiles.save();
+	profiles.release();
+	const auto entries = profiles.list();
+	CHECK(entries.size() == 2 && entries[0].name == "Alpha" && entries[1].directory == "0002" && entries[1].master.empty());
+	// Selecting one loads its own.
+	CHECK(profiles.select(0));
+	CHECK(settings.number("GeneralSettings.MaxBots", 0) == 4 && controls == "alpha keys");
+	CHECK(settings.number("LocalProfile.NumTimesLoggedIn", 0) == 1);
+	CHECK(!profiles.remove(1)); // not while one is current
+	profiles.release();
+	CHECK(profiles.select(1));
+	CHECK(settings.number("GeneralSettings.MaxBots", 0) == 12 && controls == "bravo keys");
+	profiles.release();
+	// Deleting the first: its folder goes, and the next one takes its number.
+	CHECK(profiles.remove(0));
+	CHECK(!std::filesystem::exists(dir / "0001") && profiles.list().size() == 1);
+	CHECK(profiles.create("Charlie", true) == 0 && profiles.currentDirectory() == "0001");
+	profiles.release();
+
+	// The menu: offline accounts are the profiles without an account.
+	ui::NativeRegistry natives;
+	menu::MenuServices services;
+	services.checkOnline = [] { return false; };
+	menu::MenuBindings bindings(natives, services);
+	bindings.setSettingsObjects(&settings);
+	bindings.setLocalProfiles(&profiles);
+	ui::avm1::Interpreter vm;
+	const auto call = [&](const char* object, const char* member, std::vector<ui::avm1::Value> args) {
+		return natives.call(vm, object, member, args);
+	};
+	CHECK(natives.listRows("localProfiles").size() == 2);
+	CHECK(vm.toNumber(call("dice.bf2.Profile", "getNumLocalProfiles", {})) == 2);
+	CHECK(ui::avm1::toBoolean(call("dice.bf2.Profile", "createOfflineAccount", {ui::avm1::Value("Delta"), ui::avm1::Value("Delta")})));
+	CHECK(bindings.loggedIn() && bindings.soldierName() == "Delta" && profiles.currentDirectory() == "0003");
+	CHECK(natives.listRows("localProfiles").size() == 3);
+	call("dice.bf2.Profile", "logout", {});
+	CHECK(profiles.current() < 0);
+	CHECK(ui::avm1::toBoolean(call("dice.bf2.Profile", "loginOfflineAccount", {ui::avm1::Value(1)})));
+	CHECK(bindings.soldierName() == "Bravo" && bindings.setting("GeneralSettings.MaxBots", 0) == 12);
+	call("dice.bf2.Profile", "logout", {});
+	// A soldier of an account gets its own profile (master the account).
+	CHECK(ui::avm1::toBoolean(call("dice.bf2.Logic", "setOfflineMode", {ui::avm1::Value("acct")})));
+	call("dice.bf2.Profile", "connectToSubAccount", {ui::avm1::Value("acct")});
+	CHECK(profiles.current() >= 0);
+	const auto soldier = profiles.list()[static_cast<size_t>(profiles.current())];
+	CHECK(soldier.master == "acct" && soldier.sub == "acct" && soldier.directory == "0004");
+	CHECK(natives.listRows("localProfiles").size() == 3); // not an offline account
+	call("dice.bf2.Profile", "disconnectFromSubAccount", {});
+	// Again: the same profile.
+	call("dice.bf2.Profile", "connectToSubAccount", {ui::avm1::Value("acct")});
+	CHECK(profiles.currentDirectory() == "0004" && profiles.list().size() == 4);
+	std::filesystem::remove_all(dir);
+}

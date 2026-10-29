@@ -4,8 +4,10 @@
 // and axes (and written back), and, with SDL3, virtual SDL joysticks and
 // gamepads fed through SdlGameControllers.
 #include "Console/Console.h"
+#include "Game/GameWorld.h"
 #include "Input/ControlMap.h"
 #include "Input/GameControllers.h"
+#include "Net/RemoteInput.h"
 #include "TestMain.h"
 
 #if BF2142_HAS_SDL_INPUT
@@ -175,6 +177,61 @@ TEST(GameControllers_ControlMaps)
 	b = maps.binding(inf, "c_PIThrottle", 0, 1);
 	CHECK(b && b->kind == input::Binding::Kind::Key && b->control == "IDKey_Up");
 	CHECK(input::ControlMaps::displayKey(*b) == "CONTROLLER_IDKey_Up");
+}
+
+// A stick and a hat flying: the air map's c_PIRoll and c_PIPitch from a
+// controller reach the driver's vehicle input on top of the mouse's share,
+// and survive a move to a server.
+TEST(GameControllers_VehicleAxes)
+{
+	Console console;
+	input::ControlMaps maps;
+	input::registerControlMapConsoleMethods(console, maps);
+	std::string out;
+	for (const char* line : {
+			 "ControlMap.create AirPlayerInputControlMap",
+			 "ControlMap.addAxisToAxisMapping c_PIPitch IDFMouse IDAxis_1 0 0",
+			 "ControlMap.addAxisToAxisMapping c_PIPitch IDFGameController_0 IDAxis_1 0 1",
+			 "ControlMap.addAxisToAxisMapping c_PIRoll IDFMouse IDAxis_0 0 0",
+			 "ControlMap.addAxisToAxisMapping c_PIRoll IDFGameController_0 IDAxis_0 0 1",
+			 "ControlMap.addKeysToAxisMapping c_PIThrottle IDFKeyboard IDKey_W IDKey_S 0",
+			 "ControlMap.addAxisToAxisMapping c_PIThrottle IDFGameController_0 IDAxis_2 1 1",
+		 }) {
+		CHECK(console.execute(line, out, ConsoleAccess::Anyone) != ConsoleResult::Error);
+	}
+	input::GameControllers pads;
+	pads.add(1, "stick", 3, 4, 1);
+	input::ControlMaps::Source source;
+	// The window's mouse axes come as motion events: 0 here.
+	source.axis = [&pads](const input::Binding& b) {
+		const int slot = input::GameControllers::slotNamed(b.device);
+		return slot >= 0 ? pads.axis(slot, std::atoi(b.control.c_str() + 7)) : 0.0f;
+	};
+	source.pov = [&pads](const input::Binding& b) {
+		return pads.pov(input::GameControllers::slotNamed(b.device), std::atoi(b.control.c_str() + 6));
+	};
+	source.seconds = 1.0f / 60.0f;
+	const std::string air = input::ControlMaps::kAir;
+	pads.setAxis(0, 0, 500);  // right
+	pads.setAxis(0, 1, -250); // pushed forward: nose down
+	pads.setAxis(0, 2, -800); // throttle forward (inverted)
+	game::SoldierInput in;
+	in.rollAxis = maps.value(air, "c_PIRoll", source);
+	in.pitchAxis = maps.value(air, "c_PIPitch", source);
+	in.throttle = maps.value(air, "c_PIThrottle", source);
+	CHECK(near(in.rollAxis, 0.5f) && near(in.pitchAxis, -0.25f) && near(in.throttle, 0.8f));
+	// The mouse's share adds (5 degrees a unit).
+	in.turn = 1.0f;
+	const game::VehicleInput driven = game::GameWorld::driverInput(in, 1, 0);
+	CHECK(near(driven.roll, 0.7f) && near(driven.pitch, -0.25f) && near(driven.throttle, 0.8f));
+	// A move carries them to the server.
+	net::MoveInputState state;
+	const game::SoldierInput back = net::soldierInputFromMove(net::playerInputFrom(in).toMove(0), state);
+	CHECK(near(back.rollAxis, 0.5f) && near(back.pitchAxis, -0.25f));
+	// The hat on pitch and roll (the map's slot 12).
+	maps.addPovToAxisMapping(air, "c_PIRoll", "c_PIPitch", "IDFGameController_0", 0, false, 1);
+	pads.setPov(0, 0, 18000); // down: nose up
+	CHECK(maps.value(air, "c_PIPitch", source) == 1 && maps.value(air, "c_PIRoll", source) == 0);
 }
 
 #if BF2142_HAS_SDL_INPUT

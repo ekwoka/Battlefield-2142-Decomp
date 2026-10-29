@@ -278,6 +278,21 @@ const AiPlugin* BotSettings::plugin(const std::string& aiTemplate, const std::st
 	return nullptr;
 }
 
+int playerInputIndex(const std::string& name)
+{
+	// io::PlayerInputMap's reader (0x0068fb90) takes the c_PI names; the
+	// AI templates write them without "c_". Only the axes are used.
+	static const char* const kAxes[] = {"PIYaw", "PIPitch", "PIRoll", "PIThrottle", "PIMouseLookX", "PIMouseLookY",
+		"PICameraX", "PICameraY"};
+	const std::string bare = name.rfind("c_", 0) == 0 ? name.substr(2) : name;
+	for (int i = 0; i < 8; ++i) {
+		if (lower(bare) == lower(kAxes[i])) {
+			return i;
+		}
+	}
+	return 0x40;
+}
+
 uint32_t informationTypeFlag(const std::string& name)
 {
 	static const std::pair<const char*, int> names[] = {{"ITUnit", 0}, {"ITAir", 1}, {"ITHelicopter", 2}, {"ITGround", 3},
@@ -3268,10 +3283,21 @@ float BotManager::fire3dUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 	const bool ownAir = (m_settings.typeFlags(ownAi) & kITAir) != 0;
 	const AiPlugin* ownMobile = m_settings.plugin(ownAi, "Mobile");
 	const float ownMaxSpeed = ownMobile ? ownMobile->maxSpeed : 0.0f;
-	bool antiAir = false;
+	// The motion test and the doubled temperature (0x1007d6c0) take the
+	// bot's Armament plug-in's setIsAntiAircraft != 0 (its seat's, else
+	// the vehicle's; AI object +0x34 slot 10, BF2142.exe 0x008a7460). Runs
+	// without the AI scripts: a gun with a helicopter strength.
+	const AiPlugin* armament = nullptr;
+	if (self.seat >= 0 && static_cast<size_t>(self.seat) < seats.size()) {
+		armament = m_settings.plugin(aiTemplateOf(seats[static_cast<size_t>(self.seat)].name), "Armament");
+	}
+	if (!armament) {
+		armament = m_settings.plugin(ownAi, "Armament");
+	}
+	bool antiAir = armament && armament->antiAircraft != 0;
 	float maxRange = 0;
 	for (const WeaponAi& w : guns) {
-		antiAir = antiAir || w.strength[4] > 0;
+		antiAir = antiAir || (!armament && w.strength[4] > 0);
 		maxRange = std::max(maxRange, w.maxRange);
 	}
 	if (maxRange <= 0) {
@@ -3533,6 +3559,78 @@ float BotManager::basicTemp(const std::string& objectTemplate, float fallback) c
 {
 	const auto it = m_settings.aiTemplates.find(lower(aiTemplateOf(objectTemplate)));
 	return it != m_settings.aiTemplates.end() && it->second.basicTemp > 0 ? it->second.basicTemp : fallback;
+}
+
+const BotManager::UnitAi& BotManager::unitAiOf(const world::ObjectTemplate* t) const
+{
+	auto it = m_unitAi.find(t);
+	if (it != m_unitAi.end()) {
+		return it->second;
+	}
+	UnitAi u;
+	if (t) {
+		const auto ai = t->settings().find("aiTemplate");
+		const std::string name = ai != t->settings().end() ? lower(ai->second) : std::string();
+		if (const auto tt = m_settings.aiTemplates.find(name); tt != m_settings.aiTemplates.end()) {
+			u.basicTemp = tt->second.basicTemp;
+		}
+		u.unit = name.empty() ? nullptr : m_settings.plugin(name, "Unit");
+		if (const auto k = m_settings.kitTemplates.find(name); k != m_settings.kitTemplates.end()) {
+			u.kit = &k->second;
+		}
+	}
+	return m_unitAi.emplace(t, u).first->second;
+}
+
+void BotManager::unitStrengths(const GameWorld::PlayerInfo& p, float& battle, std::array<float, 2>& strategic) const
+{
+	battle = 0;
+	strategic = {};
+	const world::Object* soldier = m_world.objects().find(p.soldier);
+	const world::Object* root = p.vehicle ? m_world.objects().find(p.vehicle) : nullptr;
+	std::array<float, 8> b {};
+	std::array<int, 2> st {};
+	if (root) {
+		// A manned vehicle (seat 0 taken, 0x008a1b30): its root's Unit.
+		// Whether the seated soldier counts too isn't settled; here not.
+		if (!p.driving) {
+			return;
+		}
+		if (const AiPlugin* unit = unitAiOf(root->objectTemplate()).unit) {
+			b = unit->battleStrength;
+			st = unit->strategicStrength;
+		}
+	} else {
+		const UnitAi& u = unitAiOf(soldier ? soldier->objectTemplate() : nullptr);
+		if (u.unit) {
+			b = u.unit->battleStrength;
+			st = u.unit->strategicStrength;
+		}
+		const world::Object* kit = m_world.objects().find(p.kit);
+		const BotSettings::KitTemplate* kt = unitAiOf(kit ? kit->objectTemplate() : nullptr).kit;
+		if (kt) {
+			st = kt->strategic;
+		}
+		bool armed = false;
+		std::array<float, 8> best {};
+		for (const auto& [slot, weapon] : p.carried) {
+			const WeaponAi w = weaponAi(weapon);
+			for (size_t i = 0; i < 8; ++i) {
+				best[i] = std::max(best[i], w.strength[i]);
+				armed = armed || w.strength[i] > 0;
+			}
+		}
+		if (armed) {
+			b = best;
+		} else if (kt) {
+			b = kt->battle;
+		}
+	}
+	const float factor = std::clamp(0.25f + 0.5f * ai::scurve(1.0f) + 0.25f * ai::scurve(healthOf(root ? p.vehicle : p.soldier)), 0.0f, 1.0f);
+	for (float x : b) {
+		battle += x * factor;
+	}
+	strategic = {static_cast<float>(st[0]) * factor, static_cast<float>(st[1]) * factor};
 }
 
 // The squad coordination factor (0x10089aa0 -> 0x100c28e0) for a task
@@ -4234,6 +4332,42 @@ void BotManager::avoid(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput
 	}
 }
 
+// The aim controller's control object (MouseTurretAimAt 0x1008e940 passes
+// the bot's control object's AI part, +0x38, whose ControlInfo the
+// controller reads through 0x100cf7e0/0x100cf800/0x100cf820, slots
+// 0x3c/0x40/0x44): a seat's aiTemplate, or the soldier's (SoldierCtrl).
+AimGains BotManager::aimGainsOf(const GameWorld::PlayerInfo& self) const
+{
+	std::string objectTemplate;
+	if (self.vehicle) {
+		const std::vector<GameWorld::SeatLayout> seats = const_cast<GameWorld&>(m_world).vehicleSeats(self.vehicle);
+		if (self.seat >= 0 && static_cast<size_t>(self.seat) < seats.size()) {
+			objectTemplate = seats[static_cast<size_t>(self.seat)].name;
+		}
+	} else if (const world::Object* soldier = m_world.objects().find(self.soldier);
+			   soldier && soldier->objectTemplate()) {
+		objectTemplate = soldier->objectTemplate()->name();
+	}
+	AimGains gains;
+	const AiPlugin* c = objectTemplate.empty() ? nullptr : m_settings.plugin(aiTemplateOf(objectTemplate), "ControlInfo");
+	if (!c) {
+		// Runs without the AI scripts (the tests; every shipped soldier and
+		// seat has its ControlInfo): SoldierCtrl's.
+		gains.proportional = kProportional;
+		gains.derivative = kDerivative;
+		gains.angleSpeed = kAngleSpeed;
+		gains.lookVertical = 5;
+		gains.lookHorizontal = 4;
+		return gains;
+	}
+	gains.proportional = c->proportional;
+	gains.derivative = c->derivative;
+	gains.angleSpeed = c->angleSpeed;
+	gains.lookVertical = c->lookVertical;
+	gains.lookHorizontal = c->lookHorizontal;
+	return gains;
+}
+
 // The aim (MouseTurretAimAt 0x1008e940, controller 0x100e5820), in the
 // "towards the target" sense: pitch u = bias + 7 e + 0.01 de + lead,
 // clamped to 4 and halved (at least 0.01); yaw likewise without bias and
@@ -4245,6 +4379,12 @@ void BotManager::avoid(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput
 void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics::Vec3& point,
 	const physics::Vec3& pointVelocity, bool hasTarget, const std::string& leadWeapon, SoldierInput& input, float seconds)
 {
+	if (bot.gainsVehicle != self.vehicle || bot.gainsSeat != self.seat) {
+		bot.gains = aimGainsOf(self);
+		bot.gainsVehicle = self.vehicle;
+		bot.gainsSeat = self.seat;
+	}
+	const AimGains& g = bot.gains;
 	float gunYaw = 0, gunPitch = 0;
 	const bool gunning = self.vehicle && self.seat > 0 && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
 	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight, 0};
@@ -4296,25 +4436,25 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 	}
 	average /= static_cast<float>(std::max(n, 1));
 	// Pitch.
-	float lead = kAngleSpeed * wp;
+	float lead = g.angleSpeed * wp;
 	if ((ep > 0) == (wp > 0)) {
 		lead *= 0.5f;
 	}
 	const float bias = average < -1e-4f ? -std::min(0.75f, -20 * average) : 0.0f;
-	float up = bias - kProportional * ep - kDerivative * (ep - bot.pitchError) + lead;
+	float up = bias - g.proportional * ep - g.derivative * (ep - bot.pitchError) + lead;
 	up = std::clamp(up, -4.0f, 4.0f) * 0.5f;
 	if (up != 0 && std::fabs(up) < 0.01f) {
 		up = up > 0 ? 0.01f : -0.01f;
 	}
 	// Yaw.
 	const bool idleLook = !hasTarget && input.throttle == 0 && input.strafe == 0 && !input.sprint;
-	const float gain = idleLook ? -3.0f : kProportional;
+	const float gain = idleLook ? -3.0f : g.proportional;
 	const float limit = idleLook ? 1.5f : input.sprint ? 4.0f : 3 * m_settings.skill + 1;
-	float yawLead = kAngleSpeed * wy;
+	float yawLead = g.angleSpeed * wy;
 	if ((ey > 0) == (wy > 0)) {
 		yawLead *= 0.5f;
 	}
-	float right = -gain * ey - kDerivative * (ey - bot.yawError) + yawLead;
+	float right = -gain * ey - g.derivative * (ey - bot.yawError) + yawLead;
 	right = std::clamp(right, -limit, limit);
 	if (std::fabs(right) < 0.001f) {
 		right = 0; // the soldier's dead zone (0x0091fdc0)
@@ -5478,6 +5618,7 @@ void BotManager::updateStrategy(float seconds)
 			physics::Vec3 order;
 		};
 		std::vector<AreaView> views(s.areas.size());
+		const std::vector<GameWorld::VehicleInfo> vehicles = m_world.vehicleList();
 		ai::SideStatus mine, theirs;
 		mine.time = theirs.time = m_time;
 		mine.sinceStrategy = m_time - side.startedAt;
@@ -5510,27 +5651,57 @@ void BotManager::updateStrategy(float seconds)
 				v.state.status = ai::AreaStatus::Hostile;
 				theirs.controlPoints += 1;
 			}
-			// Units in the area: temperature (basicTemp: a soldier 1, a
-			// vehicle 20) and strengths (the soldier's battle strengths sum
-			// to 8; a vehicle's own setBattleStrength values are not read
-			// here, so it counts as a soldier).
+			// Units in the area (0x1005f210): the temperature is the area's
+			// base plus each unit's basicTemp x its certainty (1 here: the
+			// rewrite's side knows every unit), empty vehicles and every
+			// seat included; the strengths count the manned units' battle
+			// strengths (friendly +0xc0, enemy +0xc8), and the required
+			// strength the enemies' strategic ones (round each, index 1 in
+			// an owned area, 0 elsewhere).
 			float temperature = s.areas[i].temperature;
-			float enemies = 0;
+			float enemyStrategic = 0;
+			const bool owned = v.state.status == ai::AreaStatus::Owned;
 			const float r = std::max(v.point->radius, s.areas[i].temperature);
 			for (const GameWorld::PlayerInfo& p : players) {
 				if (!p.alive || horizontal2(p.position - v.point->position) > r * r) {
 					continue;
 				}
-				temperature += (p.vehicle ? 20.0f : 1.0f) * healthOf(p.soldier);
+				const world::Object* soldier = m_world.objects().find(p.soldier);
+				temperature += unitAiOf(soldier ? soldier->objectTemplate() : nullptr).basicTemp;
+				float battle = 0;
+				std::array<float, 2> strategic {};
+				unitStrengths(p, battle, strategic);
 				if (p.team == team) {
-					v.state.friendlyStrength += 8;
+					v.state.friendlyStrength += battle;
 				} else {
-					v.state.enemyStrength += 8;
-					enemies += 1;
+					v.state.enemyStrength += battle;
+					enemyStrategic += std::round(strategic[owned ? 1 : 0]);
 				}
 			}
+			for (const GameWorld::VehicleInfo& vehicle : vehicles) {
+				if (horizontal2(vehicle.position - v.point->position) > r * r) {
+					continue;
+				}
+				const world::Object* o = m_world.objects().find(vehicle.object);
+				if (!o || !o->objectTemplate()) {
+					continue;
+				}
+				const UnitAi& u = unitAiOf(o->objectTemplate());
+				if (!u.seatsKnown) {
+					UnitAi& w = m_unitAi[o->objectTemplate()];
+					for (const GameWorld::SeatLayout& seat : m_world.vehicleSeats(vehicle.object)) {
+						const world::ObjectTemplate* st = m_world.templates().find(seat.name);
+						if (st && st != o->objectTemplate()) {
+							w.seatsTemp += unitAiOf(st).basicTemp;
+						}
+					}
+					w.seatsKnown = true;
+				}
+				temperature += u.basicTemp + u.seatsTemp;
+			}
 			v.state.temperature = temperature;
-			v.state.required = ai::requiredStrength(enemies, v.state.status == ai::AreaStatus::Owned);
+			const float total = v.state.friendlyStrength + v.state.enemyStrength;
+			v.state.required = ai::requiredStrength(enemyStrategic, owned, total > 0 ? v.state.friendlyStrength / total : 0);
 		}
 		for (size_t i = 0; i < s.areas.size(); ++i) {
 			if (!views[i].point) {
@@ -6171,14 +6342,74 @@ void registerBotConsoleMethods(Console& console, BotSettings& settings)
 		{"proportionalConstant", &AiPlugin::proportional}, {"derivativeConstant", &AiPlugin::derivative},
 		{"angleSpeedConstant", &AiPlugin::angleSpeed}, {"yawScale", &AiPlugin::yawScale}};
 	for (const auto& [name, member] : numbers) {
-		const bool gain = std::string(name).find("Constant") != std::string::npos;
-		bindMethod(console, std::string("aiTemplatePlugIn.") + name, access, [plugin, member = member, gain](float value) {
+		bindMethod(console, std::string("aiTemplatePlugIn.") + name, access, [plugin, member = member](float value) {
 			if (AiPlugin* p = plugin()) {
 				p->*member = value;
-				p->hasGains = p->hasGains || gain;
 			}
 		});
 	}
+	// The ControlInfo inputs (BF2142.exe 0x008856e1 driveThrottleControl ..
+	// 0x00886618 aimRollControl): the index, and its bit in the group's mask.
+	struct InputSetter {
+		const char* name;
+		int AiPlugin::*index;
+		uint64_t AiPlugin::*mask;
+	};
+	const InputSetter inputs[] = {{"driveThrottleControl", &AiPlugin::driveThrottle, &AiPlugin::driveMask},
+		{"driveTurnControl", &AiPlugin::driveTurn, &AiPlugin::driveMask},
+		{"drivePitchControl", &AiPlugin::drivePitch, &AiPlugin::driveMask},
+		{"driveRollControl", &AiPlugin::driveRoll, &AiPlugin::driveMask},
+		{"aimThrottleControl", &AiPlugin::aimThrottle, &AiPlugin::aimMask},
+		{"aimVerticalControl", &AiPlugin::aimVertical, &AiPlugin::aimMask},
+		{"aimHorizontalControl", &AiPlugin::aimHorizontal, &AiPlugin::aimMask},
+		{"aimRollControl", &AiPlugin::aimRoll, &AiPlugin::aimMask},
+		{"lookVerticalControl", &AiPlugin::lookVertical, &AiPlugin::lookMask},
+		{"lookHorizontalControl", &AiPlugin::lookHorizontal, &AiPlugin::lookMask}};
+	for (const InputSetter& in : inputs) {
+		bindMethod(console, std::string("aiTemplatePlugIn.") + in.name, access, [plugin, in](std::string name) {
+			if (AiPlugin* p = plugin()) {
+				const int index = playerInputIndex(name);
+				p->*in.index = index;
+				if (index < 64) {
+					p->*in.mask |= uint64_t {1} << index;
+				}
+			}
+		});
+	}
+	// "x/y/z" degrees, each x pi / 180 clamped to +-pi (0x00891fa0, 0x00892070).
+	const auto rotation = [](const std::string& text, std::array<float, 3>& out) {
+		float v[3] = {0, 0, 0};
+		std::sscanf(text.c_str(), "%f/%f/%f", &v[0], &v[1], &v[2]);
+		for (int i = 0; i < 3; ++i) {
+			out[static_cast<size_t>(i)] = std::clamp(v[i] * 0.017453292f, -3.1415927f, 3.1415927f);
+		}
+	};
+	bindMethod(console, "aiTemplatePlugIn.setCameraRelativeMinRotationDeg", access, [plugin, rotation](std::string v) {
+		if (AiPlugin* p = plugin()) {
+			rotation(v, p->cameraMin);
+		}
+	});
+	bindMethod(console, "aiTemplatePlugIn.setCameraRelativeMaxRotationDeg", access, [plugin, rotation](std::string v) {
+		if (AiPlugin* p = plugin()) {
+			rotation(v, p->cameraMax);
+		}
+	});
+	// 0x00885d71: degrees x pi / 180 into +0x60.
+	bindMethod(console, "aiTemplatePlugIn.setCameraRelativeDofRotationOffsetDeg", access, [plugin](float degrees) {
+		if (AiPlugin* p = plugin()) {
+			p->dofRotationOffset = degrees * 0.017453292f;
+		}
+	});
+	bindMethod(console, "aiTemplatePlugIn.maxClimbAngle", access, [plugin](float v) {
+		if (AiPlugin* p = plugin()) {
+			p->maxClimbAngle = v;
+		}
+	});
+	bindMethod(console, "aiTemplatePlugIn.maxRollAngle", access, [plugin](float v) {
+		if (AiPlugin* p = plugin()) {
+			p->maxRollAngle = v;
+		}
+	});
 	bindMethod(console, "aiTemplate.create", access, [s](std::string name) {
 		s->editingTemplate = lower(name);
 		s->aiTemplates[s->editingTemplate] = AiTemplate();
@@ -6240,6 +6471,57 @@ void registerBotConsoleMethods(Console& console, BotSettings& settings)
 		const auto it = s->aiTemplates.find(s->editingTemplate);
 		if (it != s->aiTemplates.end()) {
 			it->second.basicTemp = value;
+		}
+	});
+	bindMethod(console, "aiTemplatePlugIn.setBattleStrength", access, [plugin](std::string type, float value) {
+		const int i = std::isdigit(static_cast<unsigned char>(type.empty() ? 'x' : type[0])) ? std::atoi(type.c_str()) : strengthIndex(type);
+		if (AiPlugin* p = plugin(); p && i >= 0 && i < 8) {
+			p->battleStrength[static_cast<size_t>(i)] = value;
+		}
+	});
+	bindMethod(console, "aiTemplatePlugIn.setStrategicStrength", access, [plugin](int side, int value) {
+		if (AiPlugin* p = plugin(); p && side >= 0 && side < 2) {
+			p->strategicStrength[static_cast<size_t>(side)] = value;
+		}
+	});
+	bindMethod(console, "aiTemplatePlugIn.setIsAntiAircraft", access, [plugin](int value) {
+		if (AiPlugin* p = plugin()) {
+			p->antiAircraft = value;
+		}
+	});
+	bindMethod(console, "kitTemplate.create", access, [s](std::string name, std::string type) {
+		s->editingKit = lower(name);
+		BotSettings::KitTemplate& k = s->kitTemplates[s->editingKit];
+		k = {};
+		k.kitType = kitTypeIndex(type);
+	});
+	bindMethod(console, "kitTemplate.active", access, [s](std::string name) { s->editingKit = lower(name); });
+	bindMethod(console, "kitTemplate.setStrategicStrength", access, [s](int side, int value) {
+		const auto it = s->kitTemplates.find(s->editingKit);
+		if (it != s->kitTemplates.end() && side >= 0 && side < 2) {
+			it->second.strategic[static_cast<size_t>(side)] = value;
+		}
+	});
+	bindMethod(console, "kitTemplate.setBattleStrength", access, [s](std::string type, float value) {
+		const auto it = s->kitTemplates.find(s->editingKit);
+		const int i = std::isdigit(static_cast<unsigned char>(type.empty() ? 'x' : type[0])) ? std::atoi(type.c_str()) : strengthIndex(type);
+		if (it != s->kitTemplates.end() && i >= 0 && i < 8) {
+			it->second.battle[static_cast<size_t>(i)] = value;
+		}
+	});
+	bindMethod(console, "aiTemplate.degeneration", access, [s](float value) {
+		if (const auto it = s->aiTemplates.find(s->editingTemplate); it != s->aiTemplates.end()) {
+			it->second.degeneration = value;
+		}
+	});
+	bindMethod(console, "aiTemplate.allowedTimeDiff", access, [s](float value) {
+		if (const auto it = s->aiTemplates.find(s->editingTemplate); it != s->aiTemplates.end()) {
+			it->second.allowedTimeDiff = value;
+		}
+	});
+	bindMethod(console, "aiTemplate.commonKnowledge", access, [s](bool value) {
+		if (const auto it = s->aiTemplates.find(s->editingTemplate); it != s->aiTemplates.end()) {
+			it->second.commonKnowledge = value;
 		}
 	});
 	bindMethod(console, "aiTemplate.secondary", access, [s](bool value) {

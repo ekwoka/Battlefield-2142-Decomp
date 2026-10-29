@@ -377,6 +377,42 @@ Drawer::TextLine layoutLine(const hud::HudFont& font, std::vector<uint32_t> code
 
 } // namespace
 
+float Drawer::lineWidth(const hud::HudFont& font, const std::vector<uint32_t>& codes) const
+{
+	return layoutLine(font, codes).end;
+}
+
+void Drawer::engineLine(const hud::HudFont& font, const std::vector<uint32_t>& codes, float x, float y, swf::Rgba c,
+	std::vector<MenuBatch>& out) const
+{
+	const TextLine line = layoutLine(font, codes);
+	const float mult[4] = {c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, c.a / 255.0f};
+	const float tw = static_cast<float>(std::max(font.textureWidth, 1));
+	const float th = static_cast<float>(std::max(font.textureHeight, 1));
+	MenuBatch batch;
+	batch.texture = font.name + ".dds";
+	for (size_t k = 0; k < line.codes.size(); ++k) {
+		const hud::Glyph* g = font.glyph(line.codes[k] == 0xa0 ? ' ' : line.codes[k]);
+		if (!g || g->x1 <= g->x0 || g->y1 <= g->y0) {
+			continue;
+		}
+		const float x0 = x + line.boxes[k].x, y0 = y + line.boxes[k].top;
+		const float x1 = x0 + static_cast<float>(g->x1 - g->x0), y1 = y0 + static_cast<float>(g->y1 - g->y0);
+		const float u0 = (static_cast<float>(g->x0) + 0.01f) / tw, v0 = (static_cast<float>(g->y0) + 0.01f) / th;
+		const float u1 = (static_cast<float>(g->x1) + 0.01f) / tw, v1 = (static_cast<float>(g->y1) + 0.01f) / th;
+		const MenuVertex corners[4] = {{x0, y0, u0, v0, {mult[0], mult[1], mult[2], mult[3]}, {0, 0, 0, 0}},
+			{x1, y0, u1, v0, {mult[0], mult[1], mult[2], mult[3]}, {0, 0, 0, 0}},
+			{x1, y1, u1, v1, {mult[0], mult[1], mult[2], mult[3]}, {0, 0, 0, 0}},
+			{x0, y1, u0, v1, {mult[0], mult[1], mult[2], mult[3]}, {0, 0, 0, 0}}};
+		for (int v : {0, 1, 2, 0, 2, 3}) {
+			batch.vertices.push_back(corners[v]);
+		}
+	}
+	if (!batch.vertices.empty()) {
+		out.push_back(std::move(batch));
+	}
+}
+
 bool Drawer::LayoutKey::operator==(const LayoutKey& o) const
 {
 	return text == o.text && fontId == o.fontId && fontHeight == o.fontHeight && rightMargin == o.rightMargin

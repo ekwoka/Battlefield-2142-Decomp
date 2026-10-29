@@ -9,6 +9,7 @@
 
 #include <array>
 #include <string>
+#include <vector>
 
 namespace dice::hfe {
 class Console;
@@ -27,14 +28,40 @@ namespace dice::hfe::scene {
 struct WindSettings {
 	float globalWindSpeed = 0;
 	std::array<float, 3> globalWindDirection {0, 0, 1};
-	// The wind at a point: the global wind (the local WindAffector winds
-	// are not modelled: see engine.md).
+	// The global wind alone.
 	std::array<float, 3> windAt() const
 	{
 		return {globalWindDirection[0] * globalWindSpeed, globalWindDirection[1] * globalWindSpeed,
 			globalWindDirection[2] * globalWindSpeed};
 	}
 	float speedAt() const;
+
+	// A WindAffector component's wind (BF2142.exe: the template component
+	// 0x127bbe7, vtable 0x0097b1a0, written out by 0x006178c0; its instance
+	// 0x0064b8c0, vtable 0x009874b8, registered with the WindManager by
+	// 0x0064b490). The template's windType (Directional, Point, RadialDir,
+	// TurbulenceField: 0x00a03b30), windDirection (in the affector's space,
+	// turned with it), windSpeed, windFalloff, windRadialFalloff and
+	// windBlowTime (-1 for ever; the instance counts it down, 0x0064b4c0,
+	// and leaves the manager at 0). Shipped on the helicopters' and
+	// gunships' rotor Engines (RadialDir 0/0/-1, speed 20, falloff 20,
+	// radial falloff 10) and on a few explosion effects (Point).
+	struct LocalWind {
+		enum class Type { Directional = 0, Point = 1, RadialDir = 2, Turbulence = 3 } type = Type::Directional;
+		std::array<float, 3> position {};  // the affector's (slot 0x48: its object's, slot 0x60)
+		std::array<float, 3> direction {0, 0, 1}; // windDirection turned into the world
+		float speed = 0, falloff = 0, radialFalloff = 0;
+		// Its wind at a point (slot 0x50 = direction x strength from slot
+		// 0x4c, 0x0064b5f0); reached when the point is within the falloff
+		// (slot 0x44: the template's +0x40) of its position (0x007040d0).
+		std::array<float, 3> windAt(const std::array<float, 3>& point) const;
+	};
+	// The local winds this tick (the world's objects' affectors).
+	std::vector<LocalWind> localWinds;
+	// The wind at a point (WindManager slot 0x3c, 0x00703b20): the global
+	// wind plus the local winds reaching it.
+	std::array<float, 3> windAt(const std::array<float, 3>& point) const;
+	float speedAt(const std::array<float, 3>& point) const;
 };
 
 // The particle systems' manager (0x1009a8c0's defaults; the effects
@@ -105,7 +132,32 @@ struct ParticleSystemSettings {
 //             scales, LOD fractions, fade/LOD starts, shader quality,
 //             quality level), DecalManager +0x322e = level > 1.
 //   texture   1/2/3: GSSkipMipLevels 2/1/0 (the texture manager's mip
-//             skips, at most 1 per texture class).
+//             skips by texture class, TextureClass below).
+//
+// The texture manager (DAT_101f8e5c, constructed by 0x10017ca0) keeps 15
+// texture classes at +0x5c + 8 x class: a byte "skips" (all on but class 1's,
+// +0x64) and the mip levels skipped (+0x60). The loaders name their class
+// (0x10017240 sets the current one, +0xd4; a texture's load 0x10017f20 takes
+// it, 0x10018xxx) and 0x10017710 drops that many top levels of a 2D texture,
+// never below 4 texels (+0x1c). The switch (0x10010040) gives every class
+// that skips GSSkipMipLevels and then classes 2, 6, 10 and 11 at most
+// clamp(skip - 1, 0, 1). The classes by their loaders:
+enum class TextureClass {
+	Default = 0,           // what no loader names (effects, sky, water, roads, decals, the hemi map, ...)
+	Interface = 1,         // the menu's atlases (0x10187ca0, 0x10188330 "Menu/Atlas/"): never skipped
+	TerrainColormap = 3,   // a patch's colormap (0x1014be90, terrain +0x54)
+	TerrainLowDetail = 4,  // the low-detail texture (0x100b0850)
+	TerrainLightmap = 5,   // a patch's lightmap (0x1014be90, terrain +0xa8)
+	TerrainDetail = 7,     // the detail layers' textures (0x100b2af0: "", "_side", "_normal")
+	TerrainDetailMaps = 8, // a patch's numbered maps "%02ix%02i_%i" (0x1014b6a0)
+	TerrainPatchMap = 9,   // a patch's map of the second base name (0x1014be90, terrain +0x70)
+	Undergrowth = 10,      // the undergrowth's atlas (0x101100d0)
+	Overgrowth = 11,       // the overgrowth's atlases (0x1008c7e0) and the trees' materials (0x10151830, +0x2a2)
+	StaticMesh = 12,       // static meshes' materials (0x100dea90)
+	BundledMesh = 13,      // bundled meshes' (0x100a3b70)
+	SkinnedMesh = 14,      // skinned meshes' (0x100d4160)
+};
+
 struct QualitySettings {
 	int terrain = 3;
 	int geometry = 3;
@@ -124,7 +176,24 @@ struct QualitySettings {
 	float geometryLodFactor() const;
 	float overgrowthViewDistanceScale() const;
 	int maxSkip3pLods() const;
+	// GSSkipMipLevels (2/1/0), and what a texture class skips of it.
 	int skipMipLevels() const;
+	int skipMipLevels(TextureClass textureClass) const;
+	// The lighting level (renderer +0x6b4: 3/1/0 for lighting 1/2/3), the
+	// RaShader permutations' "RAPATH": each shader's DeprecationList
+	// (RaShaderBM.mfx, RaShaderSM.mfx, RaShaderSTM.mfx) drops its rows below
+	// it (0x10148ae0: row i goes when i < level; the table at 0x10210924
+	// RaShaderSTM.mfx builds, 0x100db190). So at medium (1) bundled and
+	// skinned meshes lose their normal maps (row 0; their loaders skip the
+	// "_b.dds" / "_b_os.dds" maps: 0x101499b0, 0x100d4160) and static meshes
+	// parallax; at low (3) also bundled and skinned meshes' hemi map, envmap,
+	// shadows and colormap gloss (BM rows 1-2, SM rows 1-2) and static
+	// meshes' crack, dirt and the detail normal maps (STM rows 1-2: the
+	// "_cr", "_crb", "_di", "_deb" maps skipped by 0x10151830).
+	int lightingLevel() const;
+	bool meshNormalMaps() const { return lightingLevel() == 0; }
+	bool meshHemiAndShadows() const { return lightingLevel() < 3; }
+	bool staticMeshDirtAndCrack() const { return lightingLevel() < 3; }
 	bool dynamicLightsEnabled() const;
 	bool decalsEnabled() const;
 	// The effects row: applies it to the manager's settings.

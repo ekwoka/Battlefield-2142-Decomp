@@ -27,7 +27,22 @@
 // halves, their axes to axis inputs
 //   ControlMap.addAxisToAxisMapping c_PIThrottle IDFGameController_0 IDAxis_1 1 0
 // (input, device, axis, inverted, slot; read by 0x006802c0: the device's
-// axis, negated when inverted), and add up with the keys' values.
+// axis, negated when inverted).
+//
+// An input's value (0x00680dc0 for each mapping, 0x00680b00 by its kind):
+// an axis input (c_PIYaw..c_PICameraY, numbers 0..7) takes its primary
+// mapping, or the secondary one while the primary is at rest (|v| under
+// 0.0001 and the secondary's above); a trigger is down while either is.
+// Keys and buttons on an axis ramp (0x00680990): while the first key is
+// held the value rises by the frame's time over the map's +0x40, while
+// only the second is held it falls by as much, and with neither it goes
+// back towards 0 by the time over +0x44, within -1..1 (both 0.001 s, set
+// by the map's slots 23 and 24, which no console method or script calls:
+// a key reaches 1 in a millisecond). A POV hat on an axis pair (kind 4,
+// 0x006807f0) ramps the same way towards its direction: the X input by the
+// sine of the hat's angle, the Y input by minus its cosine (up is -1),
+// past +-0.001; it is made by the map's slot 12 (0x00682db0), which no
+// console method or script reaches either (the profile writer skips it).
 #pragma once
 
 #include <functional>
@@ -43,12 +58,15 @@ namespace dice::hfe::input {
 
 // One binding of a player input.
 struct Binding {
-	enum class Kind { Key, Button, Axis } kind = Kind::Key;
+	enum class Kind { Key, Button, Axis, Pov } kind = Kind::Key;
 	std::string device;  // "IDFKeyboard", "IDFMouse"
 	std::string control; // "IDKey_W", "IDButton_0", "IDAxis_2"
 	float sign = 1;      // a key pair's halves: +1 the first key, -1 the second
 	bool hold = true;    // while held (c_CMPushAndHold, delay 0), else once per press
 	int slot = 0;        // 0 primary, 1 secondary
+	// A POV hat on an axis (Kind::Pov; control "IDPov_<n>"): true for the
+	// X input (the angle's sine), false for the Y input (minus its cosine).
+	bool povX = false;
 };
 
 class ControlMaps {
@@ -62,6 +80,15 @@ public:
 	// The map the next mappings go to (the last created, or setActive's).
 	Map* current() { return m_current; }
 	void setActive(const std::string& name);
+	// No maps (before another profile's Controls.con runs).
+	void clear()
+	{
+		m_maps.clear();
+		m_settings.clear();
+		m_ramps.clear();
+		m_current = nullptr;
+		m_currentName.clear();
+	}
 	const std::string& currentName() const { return m_currentName; }
 
 	// A map's own settings (the control map object's +0x4c..+0x6c, written
@@ -74,6 +101,9 @@ public:
 		float mouseSensitivity = 1;
 		float keyboardSensitivity = 0.1f;
 		float yawFactor = 1, pitchFactor = 1;
+		// The keys' ramp (0x00680990): seconds from 0 to 1 while a key is
+		// held (+0x40) and back to 0 once released (+0x44).
+		float rampUp = 0.001f, rampDown = 0.001f;
 	};
 	MapSettings& settings(const std::string& map) { return m_settings[map]; }
 	MapSettings settingsOf(const std::string& map) const
@@ -100,12 +130,25 @@ public:
 	struct Source {
 		std::function<bool(const Binding&)> down;
 		std::function<float(const Binding&)> axis;
+		// A POV hat's angle in hundredths of a degree (-1 centred; the
+		// device's slot 0x6c).
+		std::function<int(const Binding&)> pov;
+		// The frame's time for the ramps (0: no ramp, keys answer -1..1 at
+		// once and the ramps keep their state).
+		float seconds = 0;
 	};
 	float value(const std::string& map, const std::string& input, const Source& source) const;
 	bool pressed(const std::string& map, const std::string& input, const Source& source) const
 	{
 		return value(map, input, source) != 0;
 	}
+
+	// A POV hat on two axis inputs (the map's slot 12, 0x00682db0): its X
+	// to `inputX`, its Y to `inputY` ("" for none), negated when inverted.
+	void addPovToAxisMapping(const std::string& map, const std::string& inputX, const std::string& inputY,
+		const std::string& device, int pov, bool inverted, int slot = 0);
+	// Whether an input is one of the axes (c_PIYaw..c_PICameraY).
+	static bool isAxisInput(const std::string& input);
 
 	// The control a player input is bound to first ("IDKey_E"; "" for
 	// none), for the controls page (ControlSettings.getMappedString).
@@ -145,7 +188,12 @@ public:
 	static constexpr const char* kSea = "SeaPlayerInputControlMap";
 
 private:
-	const std::vector<Binding>* bindings(const std::string& map, const std::string& input) const;
+	const std::vector<Binding>* bindings(const std::string& map, const std::string& input,
+		const std::string** found = nullptr) const;
+	float slotValue(const std::string& map, const std::string& input, const std::vector<Binding>& list, int slot,
+		const Source& source) const;
+	// The ramps' values (the mapping's +0x40) by map, input and slot.
+	mutable std::map<std::string, float> m_ramps;
 	std::map<std::string, Map> m_maps;
 	std::map<std::string, MapSettings> m_settings;
 	Map* m_current = nullptr;

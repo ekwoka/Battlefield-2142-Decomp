@@ -1,5 +1,7 @@
 #include "GameServer.h"
 
+#include "GameClient.h"
+
 #include "BitStream.h"
 
 #include <algorithm>
@@ -282,6 +284,12 @@ void GameServer::deliver(Client& client, const GameEvent& event)
 	if (event.type == kEvConnectionType) {
 		// The type (0x0050a070): the rate settings for this client (0x004a6160).
 		client.info.connectionType = event.u(0);
+		// Type 6 and over leave the rates as they are (0x004a6160).
+		if (client.info.connectionType <= 5) {
+			const ConnectionRates& rates = kConnectionRates[client.info.connectionType];
+			client.info.packetsPerSecond = rates.serverPacketsPerSecond;
+			client.info.packetBytes = rates.serverMaxBytes;
+		}
 		if (!client.info.joined) {
 			client.info.joined = true;
 			if (onJoined) {
@@ -298,9 +306,30 @@ void GameServer::deliver(Client& client, const GameEvent& event)
 void GameServer::sendTick(const std::function<GhostBlock(int client)>& ghosts)
 {
 	for (auto& [id, client] : m_clients) {
+		if (client.acknowledged) {
+			sendTo(client, id, [&ghosts](int c, size_t) { return ghosts ? ghosts(c) : GhostBlock {}; });
+		}
+	}
+}
+
+void GameServer::sendPaced(const std::function<GhostBlock(int client, size_t ghostBits)>& ghosts, float seconds)
+{
+	for (auto& [id, client] : m_clients) {
 		if (!client.acknowledged) {
 			continue;
 		}
+		client.sendIn -= seconds;
+		if (client.sendIn > 0) {
+			continue;
+		}
+		client.sendIn += 1.0f / static_cast<float>(std::max(client.info.packetsPerSecond, 1));
+		sendTo(client, id, ghosts);
+	}
+}
+
+void GameServer::sendTo(Client& client, int id, const std::function<GhostBlock(int client, size_t ghostBits)>& ghosts)
+{
+	{
 		GamePayload payload; // the input block: a lone 0 bit from a server
 		const std::optional<ReliableEventBlock> block = client.events.next();
 		if (block) {
@@ -308,7 +337,11 @@ void GameServer::sendTick(const std::function<GhostBlock(int client)>& ghosts)
 			payload.events = *block;
 		}
 		if (client.info.joined && ghosts) {
-			payload.ghosts = ghosts(id);
+			// The writers share the stream in order (0x0057b380): input,
+			// events, then the ghosts with what is left.
+			const size_t used = writeGamePayload(payload).size() * 8;
+			const size_t cap = static_cast<size_t>(client.info.packetBytes) * 8;
+			payload.ghosts = ghosts(id, cap > used ? cap - used : 0);
 		}
 		client.notify.sendSequence = client.notify.sendSequence < 0 ? 1 : (client.notify.sendSequence + 1) & 0x3f;
 		const uint32_t sequence = static_cast<uint32_t>(client.notify.sendSequence);

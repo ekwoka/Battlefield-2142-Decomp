@@ -75,6 +75,9 @@ public:
 
 	// What the control maps read.
 	float axis(int slot, int axis) const; // 0x006aadc0
+	// A hat's angle in hundredths of a degree, -1 centred (slot 0x6c, read
+	// by the POV-to-axis mapping 0x006807f0).
+	int pov(int slot, int pov) const;
 	bool down(int slot, int button) const;
 	bool pressed(int slot, int button) const;  // down now, not last frame
 	bool released(int slot, int button) const; // the other way

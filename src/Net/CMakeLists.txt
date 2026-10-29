@@ -9,6 +9,7 @@ add_library(Net STATIC
 	GameProtocol.cpp
 	GameServer.cpp
 	GhostLayout.cpp
+	GhostPriority.cpp
 	Networkables.cpp
 	RemoteConsole.cpp
 	RemoteWorld.cpp

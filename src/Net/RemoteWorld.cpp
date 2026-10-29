@@ -18,6 +18,7 @@ RemotePlayer& RemoteWorld::playerSlot(int id)
 void RemoteWorld::clear()
 {
 	m_objects.clear();
+	m_hidden.clear();
 	m_players.clear();
 	m_objectHints.clear();
 	m_playerGhosts.clear();
@@ -232,6 +233,7 @@ bool RemoteWorld::apply(const GameEvent& event)
 		}
 		for (uint16_t g : gone) {
 			m_objects.erase(g);
+			m_hidden.erase(g);
 			m_objectHints.erase(g);
 			m_ghostParts.erase(g);
 		}
@@ -390,12 +392,19 @@ void RemoteWorld::apply(const GhostBlock& ghosts)
 	const Vec3f reference = ghosts.control ? ghosts.control->position : Vec3f {};
 	for (const GhostUpdate& u : ghosts.updates) {
 		if (u.kind == 3) {
-			m_objects.erase(u.ghost);
-			m_objectHints.erase(u.ghost);
+			// Out of the client's scope: hidden, kept for its return.
+			if (auto it = m_objects.find(u.ghost); it != m_objects.end()) {
+				m_hidden[u.ghost] = std::move(it->second);
+				m_objects.erase(it);
+			}
 			continue;
 		}
 		if (u.kind != 1) {
 			continue;
+		}
+		if (auto it = m_hidden.find(u.ghost); it != m_hidden.end()) {
+			m_objects[u.ghost] = std::move(it->second);
+			m_hidden.erase(it);
 		}
 		if (auto pg = m_playerGhosts.find(u.ghost); pg != m_playerGhosts.end()) {
 			BitReader in(u.state.data(), u.state.size());
@@ -1078,6 +1087,7 @@ void RemoteWorld::onLevel(const std::string& data)
 		// A map change: the old level's objects go (the server makes the
 		// new level's), and their templates with it.
 		m_objects.clear();
+		m_hidden.clear();
 		m_objectHints.clear();
 		m_ghostParts.clear();
 		m_layouts.clear();

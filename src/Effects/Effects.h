@@ -166,6 +166,21 @@ struct ParticleTemplate {
 	int frameCount = 1, framesAcross = 1;
 	float frameWidth = 1, frameHeight = 1;
 	bool localSystem = false;    // isLocalSystem: particles in the system's space
+	// alphaCull (the sprite template's +0xa0, slot 0x154): a particle whose
+	// alpha is below it isn't drawn (the sprites' collector 0x10130bd0).
+	float alphaCull = 0;
+	// pivotOffset (+0x1b0 / +0x1b4, slot 0x1c8): the quad's centre moved by
+	// this many half-sizes off the particle (0/-0.5: standing on it).
+	float pivot[2] = {0, 0};
+	// drawOrder Back / Front (the name's sense; its use not decoded): Front
+	// draws the newest particles over the older, Back under them.
+	bool drawNewestFirst = false;
+	// collisionEnable (+0xf0) with collisionSpeedAlongNormal / AlongPlane:
+	// world particles bounce off the ground (here the terrain under them,
+	// taken as flat: the original's system ground planes not decoded),
+	// keeping those shares of their speed across and along it.
+	bool collision = false;
+	float collisionAlongNormal = 0.7f, collisionAlongPlane = 0.8f;
 	bool showFirstPerson = true; // showInFirstPerson
 	bool showThirdPerson = true; // showInThirdPerson
 
@@ -197,6 +212,8 @@ struct EmitContext {
 	Vec3 camera;
 	float tanHalfFov = 0.5f;
 	int* poolUsed = nullptr; // sprites alive in all systems
+	// The ground's height at a point (collisionEnable); none if empty.
+	std::function<float(float x, float z)> groundHeight;
 };
 
 // A particle system placed in the world.
@@ -280,6 +297,7 @@ struct Sprite {
 	float rotation;
 	std::array<float, 4> color; // rgb, alpha
 	float lightMapOffset = 0;   // the template's lightMapIntensityOffset (calcParticleLighting)
+	std::array<float, 2> pivot {0, 0}; // the template's pivotOffset
 };
 
 // The view the particles are drawn from: their fade by distance per LOD
@@ -428,6 +446,8 @@ public:
 		m_context.hasWater = has;
 		m_context.waterLevel = level;
 	}
+	// The ground the colliding particles bounce off (collisionEnable).
+	void setGround(std::function<float(float x, float z)> height) const { m_context.groundHeight = std::move(height); }
 	void setCamera(const Vec3& position, float tanHalfFov) const
 	{
 		m_context.hasCamera = true;
@@ -639,8 +659,19 @@ public:
 		Vec3 velocity;
 		float engine = 0;
 		// Soldiers: breathing out in the cold (useColdBreath, not the
-		// kit's disableBreathEffect, not the local player in first person).
+		// kit's disableBreathEffect, not in a vehicle, not the local player
+		// in first person).
 		bool coldBreath = false;
+		// Its wheels' contact this tick (the vehicle's springs, by template
+		// name): a WheelEffectBundle under a wheel's spring is on while it
+		// touches, at its contact point (world). Empty: the bundle probes
+		// the ground under itself.
+		struct WheelContact {
+			std::string spring;
+			bool contact = false;
+			Vec3 point;
+		};
+		std::vector<WheelContact> wheels;
 	};
 	// The ground under a point (wheel and draft bundles): the first hit from
 	// `from` to `to` against the terrain, the water and the objects (not
@@ -675,8 +706,15 @@ public:
 		uint32_t startOnEffects = 0, stopOnEffects = 0;
 		bool startAtCreation = false;
 		// WheelEffectBundle / AirDraftEffectBundle: the ground picks the effect.
-		enum class Kind { Plain, Wheel, AirDraft } kind = Kind::Plain;
+		enum class Kind { Plain, Wheel, AirDraft, Wind } kind = Kind::Plain;
 	};
+	// The local winds of the objects' WindAffector components this tick
+	// (a template in the tree with the component, placed with its parts):
+	// what the WindManager holds (scene::WindSettings::localWinds).
+	const std::vector<scene::WindSettings::LocalWind>& localWinds() const { return m_localWinds; }
+	// A WindAffector template's wind, at `position` turned by `rotation`.
+	static scene::WindSettings::LocalWind localWindOf(const world::ObjectTemplate& t, const Vec3& position,
+		const Mat3& rotation);
 	// A Wheel/AirDraft bundle's template values (its effectProperties part).
 	struct GroundBundle {
 		uint32_t material = 0;
@@ -719,6 +757,7 @@ private:
 	const world::ObjectTemplateManager& m_templates;
 	std::map<uint32_t, Tracked> m_objects;
 	BundleCache m_hasBundles;
+	std::vector<scene::WindSettings::LocalWind> m_localWinds;
 	// A bundle's place along its chain under the parts' current poses.
 	static void place(const Placed& bundle, uint32_t object, const PartPose& partPose, Vec3& position, Mat3& rotation);
 public:

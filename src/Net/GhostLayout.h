@@ -28,6 +28,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -141,7 +142,26 @@ std::vector<MotionHistory> motionHistoryOf(const ControlState& state);
 struct NetworkableInfoTable {
 	std::vector<std::string> unique {"SpringInfo"};
 	std::vector<std::string> forceNetworkableId {"HandFireArmsInfo"};
+	// An info (NetworkableInfo.createNewInfo, the manager's slot 0x30
+	// 0x006a49a0; the info's constructor 0x006ac190, vtable 0x00991078).
+	struct Info {
+		// setBasePriority (slot 0x28 0x006ac060: at most 255; +0x18, 1 by
+		// default). c_NIGhostAlways is -1 (0x00669489(-1.0)): a ghost every
+		// client always has. 0x006fa190 copies it into the networkable
+		// (+0x10) when it's made; registering the ghost (0x00679d90) puts a
+		// negative one in the always set.
+		float basePriority = 1;
+		// setPredictionMode (slot 0x20, +0x24): PMNone 0, PMLinear 1; its
+		// reader isn't in the ghost manager.
+		int predictionMode = 0;
+	};
+	std::map<std::string, Info> infos; // by lower-case name
+	std::string active;                // the one the setters change
+	// The info's base priority, 1 for an unknown name.
+	float basePriority(const std::string& info) const;
 };
+// The game's table, filled by the NetworkableInfo.* console methods.
+NetworkableInfoTable& networkableInfos();
 
 // Builds the node for a template of a client's template manager (the same
 // templates the server loaded): its type, its networkableInfo, the hints
@@ -154,7 +174,7 @@ struct NetworkableInfoTable {
 // RotationalBundle EU_Sentrygun_gun has 0/5000/0), so the value never goes.
 bool firearmSendsHeat(const world::ObjectTemplate& firearm);
 GhostTemplateNode ghostTemplateFrom(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& t,
-	const NetworkableInfoTable& infos = {});
+	const NetworkableInfoTable& infos = networkableInfos());
 // The hints for one template (no children); `hasParent` picks the
 // networkable of a PlayerControlObject (SimpleObject as a root,
 // PlayerControlObject as a seat).

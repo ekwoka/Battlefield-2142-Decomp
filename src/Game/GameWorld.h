@@ -380,6 +380,16 @@ public:
 			m_radioHeard.push_back({-1, receiver, channel, voice});
 		}
 	}
+	// A control point's allowCaptureByTeam set (CP interface slot 0x34,
+	// 0x005bcd00: every set, changed or not; from the scripts' cp_setParam,
+	// 0x00569510, or a client's ghost, 0x006084b0), for the takeable radio.
+	struct TakeableChange {
+		int point = -1; // controlPointId
+		int team = 0;
+		bool allowed = true;
+	};
+	void noteTakeable(int point, int team, bool allowed) { m_takeable.push_back({point, team, allowed}); }
+	std::vector<TakeableChange> takeTakeableChanges() { return std::exchange(m_takeable, {}); }
 	// The player whose soldier (or vehicle) an object is, -1 for none.
 	int playerOf(uint32_t object) const;
 	// An effect event N (0..9) of a player's held weapon's animation, as
@@ -1259,6 +1269,7 @@ private:
 	void stepObjectAnimation(Body& body, float seconds);
 	std::map<uint32_t, uint32_t> m_objectEffectEvents;
 	std::vector<RadioHeard> m_radioHeard;
+	std::vector<TakeableChange> m_takeable;
 	const io::FileManager* m_files = nullptr;
 	physics::CollisionTemplateManager* m_collisionTemplates = nullptr;
 	physics::Ground m_ground;
@@ -2033,6 +2044,9 @@ private:
 		const ProjectileSettings* missile = nullptr;
 		uint32_t target = 0;
 		int launched = 0;
+		// The firearm's Radio fire messages (Missile_Silo_firearm's
+		// radio.friendlyFireMessage / enemyFireMessage).
+		std::string friendlyFire, enemyFire;
 	};
 	std::vector<Silo> m_silos;
 	void registerSilo(world::Object& object);

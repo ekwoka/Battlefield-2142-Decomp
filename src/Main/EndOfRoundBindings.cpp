@@ -170,6 +170,19 @@ std::vector<const EndOfRoundPlayer*> EndOfRoundBindings::teamPlayers(int team) c
 
 // --- dice.bf2.EndOfRound (0x1001fd50)
 
+// 0x1001beb0: HEADER_<mode>; without that text the mod's name of the mode
+// (ModInfo, "N/A" when unknown), and then the mode itself.
+std::string EndOfRoundBindings::modeName(const std::string& mode) const
+{
+	const std::string key = "HEADER_" + mode;
+	const std::string text = localized(key);
+	if (text != key) {
+		return text;
+	}
+	const std::string name = gameModeName ? gameModeName(mode) : std::string("N/A");
+	return name == "N/A" || name.empty() ? mode : name;
+}
+
 void EndOfRoundBindings::bindEndOfRound()
 {
 	ui::NativeRegistry& n = m_natives;
@@ -203,11 +216,7 @@ void EndOfRoundBindings::bindEndOfRound()
 	bind("getMapDescription", [this] { return Value(localized(m_summary.mapDescriptionKey)); });
 	bind("getMapGameMode", [&s] { return Value(s.gameMode); }); // 0x1001d210
 	// 0x1001beb0: HEADER_<mode>, the mode itself when that has no text.
-	bind("getMapGameModeName", [this] {
-		const std::string key = "HEADER_" + m_summary.gameMode;
-		const std::string text = localized(key);
-		return Value(text == key ? m_summary.gameMode : text);
-	});
+	bind("getMapGameModeName", [this] { return Value(modeName(m_summary.gameMode)); });
 	// 0x1001e610: the .desc's text for the mode and size.
 	bind("getMapGameModeDescription", [this] { return Value(localized(m_summary.gameModeDescriptionKey)); });
 	bind("getMapFriendlyFire", [&s] { return Value(s.friendlyFire); }); // 0x1001fbd0
@@ -221,7 +230,7 @@ void EndOfRoundBindings::bindEndOfRound()
 	bind("getPreviousMapMaxPlayers", [&s, round] { return round(Value(s.previousMapSize)); });
 	bind("getPreviousMapGameMode", [&s, round] { return round(Value(s.previousGameMode)); });
 	bind("getPreviousMapGameModeName", [this, round] {
-		return round(Value(localized("HEADER_" + m_summary.previousGameMode)));
+		return round(Value(modeName(m_summary.previousGameMode)));
 	});
 
 	// 0x1001d9c0 / 0x1001db80: the outcome's pictures.

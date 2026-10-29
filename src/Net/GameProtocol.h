@@ -505,7 +505,9 @@ struct GamePayload {
 	GhostBlock ghosts;
 	bool complete = true; // false when an event couldn't be decoded (ghosts unread)
 };
-bool readGamePayload(const std::vector<uint8_t>& payload, GamePayload& out);
-std::vector<uint8_t> writeGamePayload(const GamePayload& payload);
+// lengthBits: the ghost states' length field (kDemoGhostStateLengthBits on
+// a demo connection, recording and playback).
+bool readGamePayload(const std::vector<uint8_t>& payload, GamePayload& out, unsigned lengthBits = kGhostStateLengthBits);
+std::vector<uint8_t> writeGamePayload(const GamePayload& payload, unsigned lengthBits = kGhostStateLengthBits);
 
 } // namespace dice::hfe::net

@@ -105,6 +105,18 @@ void specularUniforms(LightingUniforms& uniforms, const S& submesh, const Camera
 	uniforms.specular[3] = 0.15f;
 }
 
+// A bundled or skinned mesh's kind bits (mesh.frag): the hemi map (not at
+// the low lighting level, which also drops their dynamic shadows: RaShaderBM
+// and RaShaderSM's DeprecationList rows 1 and 2) and its normal map.
+template <class S>
+void meshKindUniforms(LightingUniforms& uniforms, const S& submesh, bool hemiAndShadows)
+{
+	uniforms.material[2] += hemiAndShadows ? kMaterialHemi : kMaterialNoShadows;
+	if (submesh.normalMap) {
+		uniforms.material[2] += kMaterialNormalMap;
+	}
+}
+
 float transparencyKey(const Mat4& world, const Vec3f& camera)
 {
 	const float origin[3] = {world.at(3, 0), world.at(3, 1), world.at(3, 2)};
@@ -223,9 +235,12 @@ LevelRenderer::~LevelRenderer()
 	releasePostTargets();
 }
 
-SDL_GPUTexture* LevelRenderer::texture(const io::FileManager& files, const std::string& path)
+SDL_GPUTexture* LevelRenderer::texture(const io::FileManager& files, const std::string& path,
+	scene::TextureClass textureClass)
 {
-	const std::string key = lower(path);
+	// VideoSettings' texture quality: the class's mip skips (0x10017710).
+	const int skip = m_sources && m_sources->quality ? m_sources->quality->skipMipLevels(textureClass) : 0;
+	const std::string key = skip > 0 ? lower(path) + "#skip" + std::to_string(skip) : lower(path);
 	const auto it = m_textures.find(key);
 	if (it != m_textures.end()) {
 		return it->second;
@@ -234,7 +249,8 @@ SDL_GPUTexture* LevelRenderer::texture(const io::FileManager& files, const std::
 	std::vector<uint8_t> data;
 	if (files.readFile(path, data)) {
 		const bool targa = key.size() > 4 && key.compare(key.size() - 4, 4, ".tga") == 0;
-		if (const auto image = targa ? texture::parseTga(data) : texture::parseDds(data)) {
+		if (auto image = targa ? texture::parseTga(data) : texture::parseDds(data)) {
+			texture::skipTopLevels(*image, skip);
 			gpuTexture = m_gpu.createTexture(*image);
 		}
 	}
@@ -333,6 +349,12 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 	const geom::VertexElement* partIndex =
 		bundled || skinned ? file->element(geom::VertexUsage::BlendIndices) : nullptr;
 	const geom::VertexElement* blendWeight = skinned ? file->element(geom::VertexUsage::BlendWeight) : nullptr;
+	// Bundled and skinned meshes' tangents (RaShaderBM/SM createWorld2TanMat
+	// / getTangentBasis: the binormal cross(tangent, normal) times
+	// 1 - 2 x the third blend index byte). They have no detail, dirt or
+	// crack layers, so they carry them in those coordinates' place
+	// (Vertex::dirtCoord xy, crackCoord x; the sign in crackCoord y).
+	const geom::VertexElement* tangent = bundled || skinned ? file->element(geom::VertexUsage::Tangent) : nullptr;
 	std::vector<Vertex> vertices(file->vertexCount);
 	for (uint32_t i = 0; i < file->vertexCount; ++i) {
 		Vertex& v = vertices[i];
@@ -357,6 +379,13 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 			}
 		}
 		const size_t vertexOffset = static_cast<size_t>(i) * file->vertexStride;
+		float t[3] = {1, 0, 0};
+		if (tangent && file->readFloats(i, *tangent, t, 3)) {
+			v.dirtCoord[0] = t[0];
+			v.dirtCoord[1] = t[1];
+			v.crackCoord[0] = t[2];
+			v.crackCoord[1] = partIndex ? 1.0f - 2.0f * file->vertices[vertexOffset + partIndex->offset + 2] : 1.0f;
+		}
 		v.part = partIndex ? file->vertices[vertexOffset + partIndex->offset] : 0.0f;
 		v.part2 = skinned && partIndex ? file->vertices[vertexOffset + partIndex->offset + 1] : v.part;
 		v.weight = 1;
@@ -372,6 +401,23 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 	gpuMesh->lodCount = file->geometries[geometryIndex].lods.size();
 	if (geometryIndex < geometry->lodDistances.size()) {
 		gpuMesh->lodDistances = geometry->lodDistances[geometryIndex];
+	}
+	// The third-person and wreck geometries' skipped LODs (bundled
+	// 0x100a31d0: of three geometries 1 takes maxSkip3pLods and 2
+	// maxSkipWreckLods, of two 1 the former; skinned 0x100d4b..: the third
+	// person's, geometry 0 of one and 1 of two), at most renderer +0x910 (the
+	// geometry quality's) and one less than the LODs. Static meshes keep
+	// theirs here (0x100dd480 also asks the template's +0xc8, not known).
+	if ((bundled || skinned) && wantedLod == 0) {
+		const size_t count = file->geometries.size();
+		unsigned wanted = 0;
+		if (bundled && count == 3) {
+			wanted = geometryIndex == 1 ? geometry->maxSkip3pLods : geometryIndex == 2 ? geometry->maxSkipWreckLods : 0;
+		} else if (count == 2 || (skinned && count == 1)) {
+			wanted = geometryIndex == count - 1 ? geometry->maxSkip3pLods : 0;
+		}
+		const unsigned cap = sources.quality ? static_cast<unsigned>(sources.quality->maxSkip3pLods()) : 0u;
+		gpuMesh->skippedLods = static_cast<int>(std::min({wanted, cap, static_cast<unsigned>(gpuMesh->lodCount - 1)}));
 	}
 	// The bounds of this LOD's vertices, by part (culling).
 	if (!skinned) {
@@ -415,6 +461,17 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 	gpuMesh->indices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_INDEX, file->indices.data(),
 		static_cast<uint32_t>(file->indices.size() * sizeof(uint16_t)));
 	const auto& materials = lod.materials;
+	// The texture class of the mesh's materials (scene::TextureClass): a
+	// tree's are the overgrowth's (0x10151830 with the template's +0x2a2).
+	const bool tree = !bundled && !skinned && lower(geometry->path).find("vegitation") != std::string::npos;
+	const scene::TextureClass textureClass = skinned ? scene::TextureClass::SkinnedMesh
+		: bundled                                    ? scene::TextureClass::BundledMesh
+		: tree                                       ? scene::TextureClass::Overgrowth
+													 : scene::TextureClass::StaticMesh;
+	// The lighting quality's level (renderer +0x6b4): normal maps only at 0,
+	// static meshes' dirt and crack layers not at 3 (QualitySettings).
+	const scene::QualitySettings defaults;
+	const scene::QualitySettings& quality = sources.quality ? *sources.quality : defaults;
 	for (size_t m = 0; m < materials.size(); ++m) {
 		const geom::MeshMaterial& material = materials[m];
 		// Alpha-tested materials use "<name>_alphatest.dds" where it exists:
@@ -444,7 +501,8 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 				diffusePath = atlas->atlas;
 			}
 		}
-		SDL_GPUTexture* diffuse = diffusePath.empty() ? nullptr : texture(sources.files, diffusePath);
+		SDL_GPUTexture* diffuse = diffusePath.empty() ? nullptr
+			: texture(sources.files, diffusePath, atlas ? scene::TextureClass::Overgrowth : textureClass);
 		Submesh submesh {material.indexStart, material.indexCount, static_cast<int32_t>(material.vertexStart),
 			diffuse ? diffuse : m_gpu.whiteTexture(), material.alphaMode == 2 ? 0.5f : 0.0f,
 			skinned && m < gpuMesh->rigs.size() ? static_cast<int>(m) : -1};
@@ -477,18 +535,45 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		}
 		// 0x100de8xx: a geometry whose path has "vegitation" is a tree
 		// (+0x2a2); its alpha-tested materials are the leaves (RaShaderLeaf).
-		submesh.leaf = !gpuMesh->bundled && !skinned && material.alphaMode == 2
-			&& lower(geometry->path).find("vegitation") != std::string::npos;
+		submesh.leaf = tree && material.alphaMode == 2;
 		if (lower(material.effect) == "staticmesh.fx" && technique.compare(0, 10, "basedetail") == 0) {
 			const bool hasDirt = technique.find("dirt") != std::string::npos;
 			const bool hasCrack = technique.find("crack") != std::string::npos;
 			size_t map = 1;
-			const auto next = [&]() -> SDL_GPUTexture* {
-				return map < material.maps.size() ? texture(sources.files, material.maps[map++]) : nullptr;
+			// The lighting level drops the dirt and crack maps (0x10151830
+			// skips "_di" / "_cr" without their literals).
+			const auto next = [&](bool load) -> SDL_GPUTexture* {
+				if (map >= material.maps.size()) {
+					return nullptr;
+				}
+				const std::string& path = material.maps[map++];
+				return load ? texture(sources.files, path, textureClass) : nullptr;
 			};
-			submesh.detail = next();
-			submesh.dirt = hasDirt ? next() : nullptr;
-			submesh.crack = hasCrack ? next() : nullptr;
+			submesh.detail = next(true);
+			submesh.dirt = hasDirt ? next(quality.staticMeshDirtAndCrack()) : nullptr;
+			submesh.crack = hasCrack ? next(quality.staticMeshDirtAndCrack()) : nullptr;
+		}
+		// Normal maps (RaShaderBM/SM _HASNORMALMAP_), only at the top
+		// lighting level: the loaders skip "_b.dds" (bundled, 0x101499b0) and
+		// "_b.dds" / "_b_os.dds" (skinned, 0x100d4160) otherwise. A bundled
+		// mesh's second map ending "_b.dds" is its tangent-space normal map
+		// (+0x35); a skinned mesh's second map, unless the SpecularLUT, is in
+		// tangent space when its technique names "tangent" (+0x100), else in
+		// the object's (_OBJSPACENORMALMAP_, the first person's arms).
+		if ((bundled || skinned) && material.maps.size() > 1 && quality.meshNormalMaps() && !submesh.additive) {
+			const std::string second = lower(material.maps[1]);
+			const bool bump = second.size() >= 6 && second.compare(second.size() - 6, 6, "_b.dds") == 0;
+			const bool skinnedMap = skinned && second.find("specularlut") == std::string::npos;
+			if (bump || skinnedMap) {
+				submesh.normalMap = texture(sources.files, material.maps[1], textureClass);
+				if (submesh.normalMap) {
+					submesh.normalKind = bundled || technique.find("tangent") != std::string::npos ? 1 : 2;
+					++m_stats.normalMapped;
+				}
+			}
+		}
+		if (skinned && !submesh.additive) {
+			submesh.specularKind = 5; // RaShaderSM: pow(N.H, SpecularPower) x the gloss
 		}
 		gpuMesh->submeshes.push_back(submesh);
 	}
@@ -617,7 +702,7 @@ void LevelRenderer::buildTerrain(const LevelSources& sources)
 		m_terrainGIColor = data->giColor;
 		m_terrainColorsFromData = true;
 		for (size_t i = 0; i < data->layers.size() && i < kMaxDetailLayers; ++i) {
-			m_detailLayers[i] = texture(sources.files, data->layers[i].texture + ".dds");
+			m_detailLayers[i] = texture(sources.files, data->layers[i].texture + ".dds", scene::TextureClass::TerrainDetail);
 			m_detailTiling[i] = data->layers[i].tiling;
 		}
 	}
@@ -702,13 +787,13 @@ void LevelRenderer::buildTerrain(const LevelSources& sources)
 			}
 			patch.vertices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_VERTEX, vertices.data(),
 				static_cast<uint32_t>(vertices.size() * sizeof(Vertex)));
-			patch.colormap = texture(sources.files, colormapBase + name + ".dds");
-			patch.lightmap = texture(sources.files, lightmapBase + name + ".dds");
+			patch.colormap = texture(sources.files, colormapBase + name + ".dds", scene::TextureClass::TerrainColormap);
+			patch.lightmap = texture(sources.files, lightmapBase + name + ".dds", scene::TextureClass::TerrainLightmap);
 			if (data) {
 				for (int map = 0; map < 2; ++map) {
 					const std::string path = data->detailmapBaseName + name + "_" + std::to_string(map + 1) + ".dds";
 					if (sources.files.exists(path)) {
-						patch.detailWeights[map] = texture(sources.files, path);
+						patch.detailWeights[map] = texture(sources.files, path, scene::TextureClass::TerrainDetailMaps);
 					}
 				}
 			}
@@ -731,11 +816,11 @@ void LevelRenderer::buildTerrain(const LevelSources& sources)
 	// far tilings.
 	for (const char* name : {"lowdetailtexturehi.dds", "lowDetailTexture.dds"}) {
 		if (!m_lowDetailTexture && sources.files.exists(sources.levelPath + name)) {
-			m_lowDetailTexture = texture(sources.files, sources.levelPath + name);
+			m_lowDetailTexture = texture(sources.files, sources.levelPath + name, scene::TextureClass::TerrainLowDetail);
 		}
 	}
 	if (!m_lowDetailTexture && sources.files.exists("common/terrain/textures/Default.dds")) {
-		m_lowDetailTexture = texture(sources.files, "common/terrain/textures/Default.dds");
+		m_lowDetailTexture = texture(sources.files, "common/terrain/textures/Default.dds", scene::TextureClass::TerrainLowDetail);
 	}
 	if (data) {
 		m_farTiling[0] = data->farSideTiling[0];
@@ -1098,6 +1183,20 @@ void LevelRenderer::loadOvergrowth(const LevelSources& sources)
 		}
 	}
 	m_overgrowthCloseDistance = viewDistance * scale * close;
+	m_overgrowthCloseBase = viewDistance * close;
+	m_overgrowthScriptScale = scale;
+	m_overgrowthQualityScale = sources.quality ? sources.quality->overgrowthViewDistanceScale() : 1.0f;
+}
+
+float LevelRenderer::overgrowthCloseDistance() const
+{
+	if (m_sources && m_sources->quality) {
+		const float quality = m_sources->quality->overgrowthViewDistanceScale();
+		if (quality != m_overgrowthQualityScale) {
+			return m_overgrowthCloseBase * quality;
+		}
+	}
+	return m_overgrowthCloseBase * m_overgrowthScriptScale;
 }
 
 // The sea: a grid at sea level over each heightmap of the cluster (the
@@ -1307,8 +1406,8 @@ void LevelRenderer::buildUndergrowth(const LevelSources& sources)
 	m_undergrowthSwayScale = config.swayScale;
 	m_undergrowthAlphaRef = config.alphaRef;
 	const std::string atlas = sources.levelPath + "UndergrowthAtlas_alphatest0.dds";
-	m_undergrowthAtlas = texture(sources.files, sources.files.exists(atlas) ? atlas
-																		 : sources.levelPath + "UndergrowthAtlas0.dds");
+	m_undergrowthAtlas = texture(sources.files,
+		sources.files.exists(atlas) ? atlas : sources.levelPath + "UndergrowthAtlas0.dds", scene::TextureClass::Undergrowth);
 }
 
 void LevelRenderer::updateUndergrowth(const Camera& camera)
@@ -1401,6 +1500,8 @@ void LevelRenderer::drawUndergrowth(SDL_GPUCommandBuffer* commands, SDL_GPURende
 	// Plants reach full height at (1 - fade scale) of the view distance.
 	uniforms.fade[0] = undergrowthViewDistance();
 	uniforms.fade[1] = 1.0f / std::max(undergrowthViewDistance() * m_undergrowthFadeScale, 0.01f);
+	// undergrowth.simpleShaderEnable: the terrain quality's 1 / 1 / 0 (0x10010040, slot 0x40).
+	uniforms.fade[2] = m_sources && m_sources->quality && m_sources->quality->undergrowthSimpleShader() ? 1.0f : 0.0f;
 	// The engine animates 16 sway offsets; until that is decompiled, each
 	// swings on its own phase, as far as SwayScale.
 	const float seconds = static_cast<float>(SDL_GetTicks() - m_startTicks) / 1000.0f;
@@ -1435,6 +1536,7 @@ void LevelRenderer::drawUndergrowth(SDL_GPUCommandBuffer* commands, SDL_GPURende
 			{patch.lightmap ? patch.lightmap : m_gpu.whiteTexture(), m_gpu.clampSampler()},
 		};
 		SDL_BindGPUFragmentSamplers(pass, 0, samplers, 3);
+		SDL_BindGPUVertexSamplers(pass, 0, samplers + 1, 2);
 		SDL_GPUBufferBinding vertexBinding {buffers.vertices, 0};
 		SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
 		SDL_GPUBufferBinding indexBinding {buffers.indices, 0};
@@ -1560,7 +1662,7 @@ void LevelRenderer::buildOverlay()
 	m_lastOverlayTicks = now;
 	std::vector<Vertex> vertices;
 	for (const hud::HudQuad& q : m_sources->overlay(seconds)) {
-		SDL_GPUTexture* image = texture(m_sources->files, q.texture);
+		SDL_GPUTexture* image = texture(m_sources->files, q.texture, scene::TextureClass::Interface);
 		if (!image) {
 			continue;
 		}
@@ -1693,7 +1795,7 @@ void LevelRenderer::buildMenu(float seconds)
 		const bool clear = batch.stencil == ui::MenuBatch::Stencil::Clear;
 		SDL_GPUTexture* image = clear ? m_gpu.whiteTexture()
 			: batch.image             ? menuTexture(batch.image)
-									  : texture(m_sources->files, batch.texture);
+									  : texture(m_sources->files, batch.texture, scene::TextureClass::Interface);
 		const std::vector<ui::MenuVertex> quad = clear ? stageQuad() : std::vector<ui::MenuVertex>();
 		const std::vector<ui::MenuVertex>& batchVertices = clear ? quad : batch.vertices;
 		if (!image || batchVertices.empty()) {
@@ -1753,6 +1855,10 @@ void LevelRenderer::buildParticles(const Camera& camera)
 				manager->setSettings(&m_particleSettings);
 				manager->setWind(m_sources->wind);
 				manager->setWater(water, sea);
+				// collisionEnable's ground: the primary terrain.
+				if (const terrain::Heightmap* heights = m_sources->heightmaps.primary(); heights && heights->loaded()) {
+					manager->setGround([heights](float x, float z) { return heights->heightAt(x, z); });
+				}
 				manager->setCamera({camera.position.x, camera.position.y, camera.position.z}, std::tan(camera.fovY / 2));
 			}
 		}
@@ -1835,6 +1941,8 @@ void LevelRenderer::buildShimmer(const Camera& camera)
 					v.weight = sprite.color[3];
 					v.texCoord[0] = corner[0];
 					v.texCoord[1] = corner[1];
+					v.detailCoord[0] = sprite.pivot[0];
+					v.detailCoord[1] = sprite.pivot[1];
 					v.part = sprite.size;
 					v.part2 = sprite.rotation;
 					vertices.push_back(v);
@@ -1887,6 +1995,8 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 					v.weight = sprite.color[3];
 					v.texCoord[0] = corner[0];
 					v.texCoord[1] = corner[1];
+					v.detailCoord[0] = sprite.pivot[0];
+					v.detailCoord[1] = sprite.pivot[1];
 					v.part = sprite.size;
 					v.part2 = sprite.rotation;
 					vertices.push_back(v);
@@ -2343,6 +2453,7 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 	const scene::RendererSettings& renderer =
 		m_sources && m_sources->renderer ? *m_sources->renderer : rendererDefaults;
 	const float zoom = viewZoom(camera);
+	const float closeOvergrowth = overgrowthCloseDistance();
 	static const bool cloakAll = [] { // BF2142_POST_EFFECT=camo: every soldier cloaked (screenshots)
 		const char* forced = std::getenv("BF2142_POST_EFFECT");
 		return forced && std::string(forced) == "camo";
@@ -2372,7 +2483,7 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 		if (instance.overgrowth && m_sources) {
 			const Vec3f origin {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
 			const Vec3f d = (sphere.radius >= 0 ? sphere.center : origin) - camera.position;
-			if (dot(d, d) > m_overgrowthCloseDistance * m_overgrowthCloseDistance) {
+			if (dot(d, d) > closeOvergrowth * closeOvergrowth) {
 				Instance::Lod& entry = instance.overgrowthLod;
 				if (!entry.resolved) {
 					entry.resolved = true;
@@ -2393,13 +2504,15 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 			const Vec3f origin {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
 			const Vec3f toCamera = (sphere.radius >= 0 ? sphere.center : origin) - camera.position;
 			const float distance = lodDistance(std::sqrt(dot(toCamera, toCamera)), zoom, sphere.radius);
-			const std::vector<float> distances = lodSwitchDistances(base.lodDistances, static_cast<int>(base.lodCount));
+			// The LODs left after the skipped ones switch as a mesh of that many.
+			const int kept = static_cast<int>(base.lodCount) - base.skippedLods;
+			const std::vector<float> distances = lodSwitchDistances(base.lodDistances, kept);
 			// renderer +0x974: VideoSettings' geometry quality, 0.5 / 0.8 / 1 (0x10010040).
 			const float quality = m_sources->quality ? m_sources->quality->geometryLodFactor() : 1.0f;
 			const float scale = quality * (base.skinned ? renderer.skinnedMeshLodDistanceScale
 						: base.bundled               ? renderer.bundleMeshLodDistanceScale
 													 : renderer.staticMeshLodDistanceScale);
-			const int lod = lodForDistance(distance, distances, static_cast<int>(base.lodCount), scale);
+			const int lod = base.skippedLods + lodForDistance(distance, distances, kept, scale);
 			if (lod > 0) {
 				instance.lods.resize(base.lodCount);
 				Instance::Lod& entry = instance.lods[static_cast<size_t>(lod)];
@@ -2429,6 +2542,7 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 void LevelRenderer::build(const LevelSources& sources)
 {
 	m_startTicks = SDL_GetTicks();
+	m_sources = &sources; // the quality levels the loaders read
 	const auto progress = [&sources](float done) {
 		if (sources.buildProgress) {
 			sources.buildProgress(done);
@@ -2448,7 +2562,6 @@ void LevelRenderer::build(const LevelSources& sources)
 	progress(0.3f);
 	buildUndergrowth(sources);
 	progress(0.4f);
-	m_sources = &sources;
 	Vec3f sum;
 	size_t placed = 0;
 	const size_t objectCount = sources.objects.objects().size();
@@ -2938,6 +3051,8 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		}
 	}
 	const float windSpeed = m_sources && m_sources->wind ? m_sources->wind->speedAt() : 0.0f;
+	// The lighting level's bundled and skinned meshes (QualitySettings).
+	const bool hemiAndShadows = !m_sources || !m_sources->quality || m_sources->quality->meshHemiAndShadows();
 	const GpuMesh* bound = nullptr;
 	const auto drawInstance = [&](const DrawItem& item, MeshQueue queue) {
 		const Instance& instance = *item.instance;
@@ -2964,8 +3079,16 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		// The leaves' sway (not the overgrowth's: RaShaderLeaf's OVERGROWTH has none).
 		transforms.sway[0] = 0;
 		transforms.sway[1] = bound->bounds.radius;
-		transforms.sway[2] = windSpeed + 5; // WindSpeed (WindManager slot 0x30, 0x100bdb00) + WIND_ADD
+		// WindSpeed (WindManager slot 0x30 at the object, +0x208, 0x100bdb00:
+		// a helicopter's downwash bends the trees under it) + WIND_ADD.
+		const scene::WindSettings* wind = m_sources ? m_sources->wind : nullptr;
+		transforms.sway[2] = (wind && !wind->localWinds.empty()
+				? wind->speedAt({instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)})
+				: windSpeed) + 5;
 		transforms.sway[3] = seconds;
+		// Bundled meshes' normal maps are in tangent space; a skinned mesh's
+		// material says (its normalKind).
+		transforms.normalSpace[0] = bound->bundled ? 1.0f : 0.0f;
 		SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
 		bool swaying = false;
 		const bool lightmapped = item.lightmap != nullptr;
@@ -2979,8 +3102,13 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			if (queueOf(submesh, instance.fade) != queue) {
 				continue;
 			}
+			const float space = bound->skinned ? static_cast<float>(submesh.normalKind) : transforms.normalSpace[0];
 			if (submesh.rig >= 0 && !pose.empty()) {
 				skinPalette(*bound, submesh, pose, transforms);
+				transforms.normalSpace[0] = space;
+				SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
+			} else if (space != transforms.normalSpace[0]) {
+				transforms.normalSpace[0] = space;
 				SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
 			}
 			const bool sway = submesh.leaf && !instance.overgrowth;
@@ -2993,7 +3121,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			materialUniforms(uniforms, submesh, instance.fade, seconds);
 			specularUniforms(uniforms, submesh, camera, lights);
 			if (bound->skinned || bound->bundled) {
-				uniforms.material[2] += kMaterialHemi;
+				meshKindUniforms(uniforms, submesh, hemiAndShadows);
 				std::copy(hemiObject, hemiObject + 4, uniforms.hemiObject);
 			}
 			SDL_PushGPUFragmentUniformData(commands, 0, &uniforms, sizeof(uniforms));
@@ -3002,7 +3130,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 				{submesh.texture, m_gpu.repeatSampler()},
 				{lightmapped ? item.lightmap : m_gpu.whiteTexture(), m_gpu.clampSampler()},
 				{orWhite(submesh.detail), m_gpu.repeatSampler()},
-				{orWhite(submesh.dirt), m_gpu.repeatSampler()},
+				{orWhite(submesh.normalMap ? submesh.normalMap : submesh.dirt), m_gpu.repeatSampler()},
 				{orWhite(submesh.crack), m_gpu.repeatSampler()},
 			};
 			SDL_BindGPUFragmentSamplers(pass, 0, samplers, 5);
@@ -3251,6 +3379,7 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 		applyPointLights(lit[1]);
 	}
 	const float seconds = static_cast<float>(SDL_GetTicks() - m_startTicks) / 1000.0f;
+	const bool hemiAndShadows = !m_sources || !m_sources->quality || m_sources->quality->meshHemiAndShadows();
 	const auto drawModel = [&](const FirstPersonModel& model, MeshQueue queue) {
 		const GpuMesh* gpuMesh = mesh(*m_sources, model.geometry, model.geometryIndex, model.lod);
 		if (!gpuMesh) {
@@ -3276,6 +3405,7 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 			if (queueOf(submesh, 1.0f) != queue) {
 				continue;
 			}
+			transforms.normalSpace[0] = gpuMesh->skinned ? static_cast<float>(submesh.normalKind) : gpuMesh->bundled ? 1.0f : 0.0f;
 			if (gpuMesh->skinned) {
 				if (submesh.rig < 0 || model.pose.empty()) {
 					continue; // a skinned mesh without its pose isn't drawn
@@ -3288,21 +3418,21 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 						: rig[b].meshToBone;
 					std::copy(skin.begin(), skin.end(), transforms.parts[b].m.begin());
 				}
-				SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
 			}
+			SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
 			LightingUniforms uniforms = lit[submesh.alphaReference > 0];
 			materialUniforms(uniforms, submesh, 1.0f, seconds);
 			specularUniforms(uniforms, submesh, camera, useLights);
 			uniforms.material[2] = submesh.additive ? kMaterialAdditive : submesh.blended ? kMaterialBlended : 0.0f;
 			if (gpuMesh->skinned || gpuMesh->bundled) {
-				uniforms.material[2] += kMaterialHemi;
+				meshKindUniforms(uniforms, submesh, hemiAndShadows);
 			}
 			SDL_PushGPUFragmentUniformData(commands, 0, &uniforms, sizeof(uniforms));
 			SDL_GPUTextureSamplerBinding samplers[5] = {
 				{submesh.texture, m_gpu.repeatSampler()},
 				{m_gpu.whiteTexture(), m_gpu.clampSampler()},
 				{m_gpu.whiteTexture(), m_gpu.repeatSampler()},
-				{m_gpu.whiteTexture(), m_gpu.repeatSampler()},
+				{submesh.normalMap ? submesh.normalMap : m_gpu.whiteTexture(), m_gpu.repeatSampler()},
 				{m_gpu.whiteTexture(), m_gpu.repeatSampler()},
 			};
 			SDL_BindGPUFragmentSamplers(pass, 0, samplers, 5);

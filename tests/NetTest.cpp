@@ -1,6 +1,9 @@
 // The server browser: GameSpy's cipher, the master server's host, and a
 // list reply built the way the master builds one.
 #include "Net/BitStream.h"
+#include "Net/Demo.h"
+#include "Net/GameProtocol.h"
+#include "Net/GhostPriority.h"
 #include "Net/Fesl.h"
 #include "Net/GameConnection.h"
 #include "Net/GameEvents.h"
@@ -10,6 +13,9 @@
 #include "Net/ServerBrowser.h"
 #include "TestMain.h"
 
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 
 using namespace dice::hfe;
@@ -303,4 +309,119 @@ TEST(Net_FeslMessages)
 	bool bad = false;
 	std::vector<uint8_t> junk {'f', 's', 'y', 's', 0, 0, 0, 0, 0, 0, 0, 3};
 	CHECK(net::takeFeslMessages(junk, &bad).empty() && bad);
+}
+
+// The GhostManager's scoring (0x0057d300): moving, in view and near each
+// add up to 1; nothing at or past the radius.
+TEST(Net_GhostScore)
+{
+	net::GhostEye eye;
+	eye.position = {0, 0, 0};
+	eye.forward = {0, 0, 1};
+	eye.radius = net::ghostScopeRadius(850);
+	CHECK(eye.radius == 850 && net::ghostScopeRadius(100) == 500);
+	// 425 m ahead, still: in view (cos 0 = 1 >= 1.1 x 0.5 x 4/3) and half way.
+	CHECK(std::fabs(net::ghostScore(eye, {0, 0, 425}, {}) - 1.5f) < 1e-4f);
+	// Behind, at 40 m/s (|v|^2 x 0.000625 = 1).
+	CHECK(std::fabs(net::ghostScore(eye, {0, 0, -425}, {40, 0, 0}) - 1.5f) < 1e-4f);
+	CHECK(net::ghostScore(eye, {0, 0, 850}, {}) == 0);
+	CHECK(net::ghostScore(eye, {0, 0, 900}, {}, true) > 0); // LargerProjectileRadius 1000
+}
+
+// The heap (0x005823c0): new states first at 10000, the accumulated value
+// of a dirty one grows until it's written; an out-of-scope one goes (its
+// kind 3) once written; always states keep 255.
+TEST(Net_GhostScheduler)
+{
+	net::GhostScheduler g;
+	g.setPriority(1, 1, false);
+	g.setPriority(2, 2, false);
+	g.setPriority(3, -1, false);
+	CHECK(g.state(3)->always && g.state(1)->priority == net::kGhostNewPriority);
+	std::vector<uint16_t> q = g.queue();
+	CHECK(q.size() == 3);
+	for (uint16_t ghost : q) {
+		g.written(ghost);
+	}
+	CHECK(g.queue().empty()); // nothing dirty
+	g.beginRescore();
+	g.setPriority(1, 1, false);
+	g.setPriority(2, 2, false);
+	CHECK(g.state(3)->priority == net::kGhostAlwaysPriority);
+	g.markDirty(1);
+	g.markDirty(2);
+	q = g.queue();
+	CHECK(q.size() == 2 && q[0] == 2 && q[1] == 1);
+	g.written(2);
+	g.markDirty(2);
+	q = g.queue(); // 1 has 1 + 1, 2 has 2: equal, by id
+	CHECK(q.size() == 2 && q[0] == 1);
+	g.markDirty(1, true); // a loss
+	CHECK(g.state(1)->priority == net::kGhostNewPriority);
+	// keepMax keeps a higher priority.
+	g.setPriority(2, 0.03f, true);
+	CHECK(g.state(2)->priority == 2);
+	// Out of scope: queued, gone once written.
+	g.beginRescore();
+	q = g.queue();
+	CHECK(std::find(q.begin(), q.end(), uint16_t {1}) != q.end());
+	g.written(1);
+	CHECK(!g.has(1) && g.has(3));
+}
+
+// sv.demoQuality's rates (0x0057b3f0): 4 a second of 260 bytes and 40
+// updates at 1, 20 of 4096 and 255 at 10.
+TEST(Net_DemoQualityRates)
+{
+	const net::DemoRates low = net::demoRates(1), high = net::demoRates(10), mid = net::demoRates(5);
+	CHECK(low.packetsPerSecond == 4 && low.packetBytes == 260 && low.maxUpdates == 40);
+	CHECK(high.packetsPerSecond == 20 && high.packetBytes == 4096 && high.maxUpdates == 255);
+	CHECK(mid.packetsPerSecond == 11 && mid.packetBytes == 1964 && mid.maxUpdates == 135);
+	CHECK(net::demoRates(0).packetsPerSecond == 4 && net::demoRates(99).maxUpdates == 255);
+}
+
+// The demo connection's ghost states carry 13-bit lengths (0x00582a50).
+TEST(Net_DemoGhostLengths)
+{
+	net::GamePayload payload;
+	payload.ghosts.present = true;
+	net::GhostUpdate u;
+	u.kind = 1;
+	u.ghost = 7;
+	u.stateBits = 3000; // over 11 bits
+	u.state.assign(375, 0xa5);
+	payload.ghosts.updates.push_back(u);
+	const std::vector<uint8_t> bytes = net::writeGamePayload(payload, net::kDemoGhostStateLengthBits);
+	net::GamePayload back;
+	CHECK(net::readGamePayload(bytes, back, net::kDemoGhostStateLengthBits) && back.complete);
+	CHECK(back.ghosts.updates.size() == 1 && back.ghosts.updates[0].stateBits == 3000);
+}
+
+// The demo camera's keyframes (.bf2142cam, 0x005f8d30 / 0x005f91f0): a
+// free frame's rotation and position, a follow frame's object; the reader
+// drops a far position and takes an override as mode 0.
+TEST(Net_DemoCameraFile)
+{
+	std::vector<net::CameraKeyframe> frames(3);
+	frames[0].tick = 5;
+	frames[0].position[1] = 12.5f;
+	frames[1].tick = 6;
+	frames[1].mode = 1;
+	frames[1].followed = 42;
+	frames[1].follow[4] = 3;
+	frames[2].tick = 7;
+	frames[2].mode = 1;
+	frames[2].override = true;
+	frames[2].position[0] = 1e6f;
+	const std::vector<uint8_t> raw = net::encodeCameraKeyframes(frames);
+	CHECK(raw.size() == (10 + 28) + (10 + 25) + (10 + 28));
+	std::vector<net::CameraKeyframe> back;
+	CHECK(net::decodeCameraKeyframes(raw, back) && back.size() == 3);
+	CHECK(back[0].free() && back[0].position[1] == 12.5f && back[0].rotation[3] == 1);
+	CHECK(!back[1].free() && back[1].followed == 42 && back[1].follow[4] == 3);
+	CHECK(back[2].mode == 0 && back[2].position[0] == 0);
+	const std::string path = "bf2142_test_camera.bf2142cam";
+	CHECK(net::writeCameraFile(path, frames));
+	CHECK(net::readCameraFile(path, back) && back.size() == 3 && back[1].followed == 42);
+	std::remove(path.c_str());
 }

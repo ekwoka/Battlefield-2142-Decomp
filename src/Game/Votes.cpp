@@ -10,6 +10,11 @@ int Votes::Vote::yes() const
 	return static_cast<int>(std::count_if(choices.begin(), choices.end(), [](const auto& c) { return c.second == 0; }));
 }
 
+int Votes::Vote::no() const
+{
+	return static_cast<int>(std::count_if(choices.begin(), choices.end(), [](const auto& c) { return c.second == 1; }));
+}
+
 Votes::Vote* Votes::slot(int kind, int team)
 {
 	if (m_votes.size() < 4) {
@@ -64,16 +69,11 @@ Votes::Reply Votes::replyOf(const Vote& vote, int phase, int voter, int choice) 
 	r.target = vote.target;
 	r.voter = voter;
 	r.choice = choice;
-	// The top of the tally (0x00645b90): the choice with the most votes.
-	std::map<int, int> tally;
+	// The tally (0x00645a90: counts[choice]++): every event carries the
+	// yes and no counts.
 	for (const auto& [who, c] : vote.choices) {
-		++tally[c];
-	}
-	for (const auto& [c, n] : tally) {
-		if (n > r.topCount) {
-			r.topCount = n;
-			r.topChoice = c;
-		}
+		r.yesCount += c == 0 ? 1 : 0;
+		r.noCount += c == 1 ? 1 : 0;
 	}
 	r.needed = vote.needed;
 	return r;
@@ -172,8 +172,8 @@ std::vector<Votes::Reply> Votes::handle(int player, int kind, int phase, int tar
 	}
 	if (phase == kCast) {
 		Vote* v = slot(kind, kind == kMutiny ? team : 0);
-		if (!v || !v->on || !v->eligible.count(player) || v->choices.count(player)) {
-			return out;
+		if (!v || !v->on || !v->eligible.count(player) || v->choices.count(player) || choice < 0 || choice > 2) {
+			return out; // one vote a player; 0..2 only (0x00645950)
 		}
 		v->choices[player] = choice;
 		out.push_back(replyOf(*v, kCast, player, choice));
@@ -194,7 +194,9 @@ std::vector<Votes::Result> Votes::tick(float seconds, std::vector<Reply>& replie
 			v.on = false;
 			replies.push_back(replyOf(v, kPassed, v.starter, 0));
 			results.push_back({v.kind, v.target, v.team});
-		} else if (v.choices.size() >= v.eligible.size() || v.left <= 0) {
+		} else if (v.yes() + v.no() >= static_cast<int>(v.eligible.size()) || v.left <= 0) {
+			// 0x00645bb0: every eligible voter said yes or no (a 2 counts
+			// for neither), or the time is out.
 			v.on = false;
 			Reply r = replyOf(v, kFailed, v.starter, 0);
 			r.needed = v.needed - yes; // the yes votes it lacked

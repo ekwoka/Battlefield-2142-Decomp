@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <cstdlib>
 #include <functional>
 #include <memory>
@@ -439,16 +440,29 @@ TEST(ServerAdmin_Votes)
 	std::vector<Votes::Reply> replies;
 	CHECK(votes.tick(1, replies).empty() && replies.empty());
 	r = votes.handle(2, Votes::kMap, Votes::kCast, 2, 0);
-	CHECK(r.size() == 1 && r[0].phase == Votes::kCast && r[0].topCount == 2);
+	CHECK(r.size() == 1 && r[0].phase == Votes::kCast && r[0].yesCount == 2);
 	auto results = votes.tick(1, replies);
 	CHECK(results.size() == 1 && results[0].kind == Votes::kMap && results[0].target == 2);
 	CHECK(replies.size() == 1 && replies[0].phase == Votes::kPassed);
-	// A kick vote with one no: still short when the time runs out.
+	// A kick vote: a 3 refused (0..2 only), a 2 counts for neither, so it
+	// runs on; still short when the time runs out.
 	replies.clear();
 	r = votes.handle(1, Votes::kKick, Votes::kStart, 3, 0);
 	CHECK(r.size() == 1 && r[0].needed == 2); // the target doesn't vote
-	votes.tick(11, replies);
+	CHECK(votes.handle(2, Votes::kKick, Votes::kCast, 3, 3).empty());
+	r = votes.handle(2, Votes::kKick, Votes::kCast, 3, 2);
+	CHECK(r.size() == 1 && r[0].yesCount == 1 && r[0].noCount == 0);
+	votes.tick(1, replies);
+	CHECK(replies.empty()); // yes + no (1) under the two eligible
+	votes.tick(10, replies);
 	CHECK(replies.size() == 1 && replies[0].phase == Votes::kFailed && replies[0].needed == 1);
+	// A no from the last voter ends it at once (0x00645bb0: yes + no >= eligible).
+	replies.clear();
+	votes.handle(1, Votes::kKick, Votes::kStart, 3, 0);
+	r = votes.handle(2, Votes::kKick, Votes::kCast, 3, 1);
+	CHECK(r.size() == 1 && r[0].noCount == 1);
+	votes.tick(0.1f, replies);
+	CHECK(replies.size() == 1 && replies[0].phase == Votes::kFailed);
 	// A mutiny: only the commander's team votes, and the target can't.
 	replies.clear();
 	votes.settings.minPlayers = 1;
@@ -515,7 +529,8 @@ TEST(ServerAdmin_DemoRecordAndPlayBack)
 	std::vector<net::DemoRecord> records;
 	CHECK(net::readDemo(path, header, records));
 	CHECK(header.version == 0x70 && header.serverName == "Demo Test" && header.level == "Camp_Gibraltar");
-	CHECK(records.size() > 60);
+	// sv.demoQuality 1: 4 records a second (net::demoRates), 60 ticks of them.
+	CHECK(records.size() > 8);
 	CHECK(!records.empty() && records[0].time == -1);
 	const bool marker = std::any_of(records.begin(), records.end(), [](const net::DemoRecord& r) { return r.time == -2; });
 	CHECK(marker);
@@ -544,4 +559,50 @@ TEST(ServerAdmin_DemoRecordAndPlayBack)
 	CHECK(viewer.world().localPlayer() < 0); // no player of its own
 	std::remove(path.c_str());
 	CHECK(net::demoPath("match1") == "Demos/match1.bf2142demo" && net::demoPath("a\\b.dem") == "a/b.dem");
+}
+
+// sv.autoRecord (AutoRecorder 0x00585860 / 0x00585920): a demo from the
+// round's start, named by the local time (0x00585620), stopped at the
+// round's restart; without the hook program nothing is run.
+TEST(ServerAdmin_AutoRecorder)
+{
+	CHECK(host::autoDemoPath("mods/bf2142", 0).rfind("mods/bf2142/demos/auto_", 0) == 0);
+	const std::string name = host::autoDemoPath("m", 1700000000);
+	CHECK(name.size() == std::string("m/demos/auto_2023_11_14_22_13_20.bf2142demo").size());
+	CHECK(name.find(':') == std::string::npos && name.find(' ') == std::string::npos && name.find('-') == std::string::npos);
+	const std::string root = "bf2142_test_autodemo";
+	std::filesystem::remove_all(root);
+	dice::hfe::world::ObjectTemplateManager templates;
+	dice::hfe::world::ObjectManager objects;
+	dice::hfe::game::GameWorld round(templates, objects);
+	dice::hfe::game::GameLogic logic;
+	round.startRound();
+	logic.startRound();
+	host::ServerAdmin admin;
+	admin.settings.autoRecord = true;
+	admin.settings.autoDemoHook = root + "/no_such_hook.exe";
+	host::HostSetup setup;
+	setup.level = "Camp_Gibraltar";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	setup.settings = &admin.settings;
+	setup.modDirectory = root;
+	std::string file;
+	{
+		host::HostedGame hosted(round, logic, templates, setup);
+		CHECK(hosted.start());
+		for (int i = 0; i < 10; ++i) {
+			hosted.tick();
+			round.tick(1.0f / 30);
+		}
+		CHECK(hosted.recordingDemo() && !hosted.autoDemo().empty());
+		file = hosted.autoDemo();
+		hosted.changeLevel(round, logic, templates, setup); // the round's restart stops it
+		CHECK(!hosted.recordingDemo() && hosted.lastAutoDemo() == file);
+	}
+	net::DemoHeader header;
+	std::vector<net::DemoRecord> records;
+	CHECK(net::readDemo(file, header, records) && !records.empty());
+	std::filesystem::remove_all(root);
 }

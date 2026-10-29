@@ -99,15 +99,37 @@ TEST(Movie_MenuVideo)
 	if (!gameDir || !movie::MovieDecoder::available()) {
 		return;
 	}
-	movie::MenuVideo video;
-	CHECK(video.open(std::string(gameDir) + "/mods/bf2142/" + movie::menuVideoFile("?titan_tutorial.bik")));
-	ui::MenuImage frame;
-	CHECK(video.advance(0, frame) && frame.width > 0 && frame.rgba.size() == frame.width * frame.height * 4u);
-	CHECK(!video.advance(0.001, frame)); // the next not due yet
-	CHECK(video.advance(0.5, frame));
-	CHECK(!video.finished());
-	for (int i = 0; i < 2000 && !video.finished(); ++i) {
-		video.advance(1.0, frame);
+	// Its sound goes to the sink as the pictures go by (Bink plays it,
+	// RendDX9 0x1011e0d0), and stops with the clip.
+	size_t samples = 0;
+	int rate = 0;
+	bool stopped = false;
+	double soundAtHalf = 0;
+	{
+		movie::MenuVideo::AudioSink sink;
+		sink.play = [&](const std::vector<float>& s, int r) {
+			samples += s.size();
+			rate = r;
+		};
+		sink.stop = [&] { stopped = true; };
+		movie::MenuVideo video(sink);
+		CHECK(video.open(std::string(gameDir) + "/mods/bf2142/" + movie::menuVideoFile("?titan_tutorial.bik")));
+		ui::MenuImage frame;
+		CHECK(video.advance(0, frame) && frame.width > 0 && frame.rgba.size() == frame.width * frame.height * 4u);
+		CHECK(!video.advance(0.001, frame)); // the next not due yet
+		CHECK(video.advance(0.5, frame));
+		CHECK(!video.finished());
+		soundAtHalf = rate > 0 ? static_cast<double>(samples) / 2 / rate : 0;
+		for (int i = 0; i < 2000 && !video.finished(); ++i) {
+			video.advance(1.0, frame);
+		}
+		CHECK(video.finished());
+		CHECK(!stopped);
 	}
-	CHECK(video.finished());
+	CHECK(stopped);
+	CHECK(rate > 0 && samples > 0);
+	// At least as much sound as pictures by then: Bink files carry their
+	// sound ahead (1.3 s of it by the half second here), queued to play at
+	// its own pace from the first picture.
+	CHECK(soundAtHalf >= 0.5 && soundAtHalf < 2.0);
 }

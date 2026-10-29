@@ -23,6 +23,8 @@ layout(set = 1, binding = 0) uniform Transforms {
 	// The leaves' sway (RaShaderLeaf.fx, not OVERGROWTH): x on, y ObjRadius,
 	// z WindSpeed + WIND_ADD, w GlobalTime.
 	vec4 sway;
+	// x: the normal map's space (0 none, 1 the tangent's, 2 the object's).
+	vec4 normalSpace;
 };
 
 layout(location = 0) out vec3 outNormal;
@@ -34,6 +36,14 @@ layout(location = 5) out vec2 outDirtCoord;
 layout(location = 6) out vec2 outCrackCoord;
 layout(location = 7) out vec3 outWorldPosition;
 layout(location = 8) out float outObjectY; // the object's origin height (the hemi lerp's World[3][1])
+// A normal map's frame in the world (its columns: what the map's x, y and
+// z are): the tangent, binormal and normal (RaShaderBM createWorld2TanMat,
+// RaShaderSM getTangentBasis; the binormal cross(tangent, normal) times the
+// sign the vertex carries), or the object's axes for an object-space map
+// (RaShaderSM _OBJSPACENORMALMAP_), skinned with the vertex.
+layout(location = 9) out vec3 outBasisX;
+layout(location = 10) out vec3 outBasisY;
+layout(location = 11) out vec3 outBasisZ;
 
 void main()
 {
@@ -48,7 +58,24 @@ void main()
 	}
 	gl_Position = worldViewProjection * local;
 	outWorldPosition = (world * local).xyz;
-	outNormal = mat3(world) * (mat3(part) * inNormal);
+	mat3 toWorld = mat3(world) * mat3(part);
+	outNormal = toWorld * inNormal;
+	if (normalSpace.x > 1.5) {
+		outBasisX = toWorld[0];
+		outBasisY = toWorld[1];
+		outBasisZ = toWorld[2];
+	} else if (normalSpace.x > 0.5) {
+		// Bundled and skinned meshes carry the tangent in the layers' place.
+		vec3 tangent = vec3(inDirtCoord, inCrackCoord.x);
+		vec3 binormal = normalize(cross(tangent, inNormal)) * inCrackCoord.y;
+		outBasisX = toWorld * tangent;
+		outBasisY = toWorld * binormal;
+		outBasisZ = outNormal;
+	} else {
+		outBasisX = vec3(1.0, 0.0, 0.0);
+		outBasisY = vec3(0.0, 0.0, 1.0);
+		outBasisZ = outNormal;
+	}
 	outTexCoord = inTexCoord;
 	outDepth = gl_Position.w;
 	outLightmapCoord = inLightmapCoord * lightmapTransform.xy + lightmapTransform.zw;

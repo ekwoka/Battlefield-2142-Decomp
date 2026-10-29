@@ -1224,7 +1224,7 @@ void writeGhostBlock(BitWriter& out, const GhostBlock& block, unsigned lengthBit
 // ---------------------------------------------------------------------------
 // Payloads
 
-bool readGamePayload(const std::vector<uint8_t>& payload, GamePayload& out)
+bool readGamePayload(const std::vector<uint8_t>& payload, GamePayload& out, unsigned lengthBits)
 {
 	out = {};
 	BitReader in(payload.data(), payload.size());
@@ -1236,18 +1236,18 @@ bool readGamePayload(const std::vector<uint8_t>& payload, GamePayload& out)
 		out.complete = false;
 		return true; // the events before the undecoded one are usable
 	}
-	if (!readGhostBlock(in, out.ghosts)) {
+	if (!readGhostBlock(in, out.ghosts, lengthBits)) {
 		out.complete = false;
 	}
 	return true;
 }
 
-std::vector<uint8_t> writeGamePayload(const GamePayload& payload)
+std::vector<uint8_t> writeGamePayload(const GamePayload& payload, unsigned lengthBits)
 {
 	BitWriter out;
 	writeInputBlock(out, payload.input);
 	writeEventBlock(out, payload.hasEvents ? &payload.events : nullptr);
-	writeGhostBlock(out, payload.ghosts);
+	writeGhostBlock(out, payload.ghosts, lengthBits);
 	return out.data();
 }
 

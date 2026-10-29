@@ -1,5 +1,8 @@
 #include "Demo.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include <zlib.h>
 
 #include <cstdio>
@@ -174,7 +177,9 @@ bool parseDemo(const std::vector<uint8_t>& in, DemoHeader& header, std::vector<D
 	return true;
 }
 
-bool readDemo(const std::string& path, DemoHeader& header, std::vector<DemoRecord>& records)
+namespace {
+
+bool inflateFile(const std::string& path, std::vector<uint8_t>& inflated)
 {
 	std::FILE* file = std::fopen(path.c_str(), "rb");
 	if (!file) {
@@ -192,7 +197,6 @@ bool readDemo(const std::string& path, DemoHeader& header, std::vector<DemoRecor
 	}
 	z.next_in = packed.data();
 	z.avail_in = static_cast<uInt>(packed.size());
-	std::vector<uint8_t> inflated;
 	int result = Z_OK;
 	while (result == Z_OK) {
 		z.next_out = buffer;
@@ -204,7 +208,129 @@ bool readDemo(const std::string& path, DemoHeader& header, std::vector<DemoRecor
 		}
 	}
 	inflateEnd(&z);
-	return parseDemo(inflated, header, records);
+	return true;
+}
+
+void putFloat(std::vector<uint8_t>& out, float v)
+{
+	uint32_t bits = 0;
+	std::memcpy(&bits, &v, 4);
+	putU32(out, bits);
+}
+
+bool getFloat(const std::vector<uint8_t>& in, size_t& at, float& v)
+{
+	uint32_t bits = 0;
+	if (!getU32(in, at, bits)) {
+		return false;
+	}
+	std::memcpy(&v, &bits, 4);
+	return true;
+}
+
+} // namespace
+
+bool readDemo(const std::string& path, DemoHeader& header, std::vector<DemoRecord>& records)
+{
+	std::vector<uint8_t> inflated;
+	return inflateFile(path, inflated) && parseDemo(inflated, header, records);
+}
+
+std::vector<uint8_t> encodeCameraKeyframes(const std::vector<CameraKeyframe>& frames)
+{
+	std::vector<uint8_t> out;
+	for (const CameraKeyframe& f : frames) {
+		putU32(out, f.tick);
+		putU32(out, f.mode);
+		out.push_back(f.attached ? 1 : 0);
+		out.push_back(f.override ? 1 : 0);
+		if (f.free()) {
+			for (float v : f.rotation) {
+				putFloat(out, v);
+			}
+			for (float v : f.position) {
+				putFloat(out, v);
+			}
+		} else {
+			putU32(out, f.followed);
+			out.push_back(f.followFlag);
+			for (float v : f.follow) {
+				putFloat(out, v);
+			}
+		}
+	}
+	return out;
+}
+
+bool decodeCameraKeyframes(const std::vector<uint8_t>& in, std::vector<CameraKeyframe>& frames)
+{
+	frames.clear();
+	size_t at = 0;
+	while (at < in.size()) {
+		CameraKeyframe f;
+		if (!getU32(in, at, f.tick) || !getU32(in, at, f.mode) || at + 2 > in.size()) {
+			return false;
+		}
+		f.attached = in[at++] != 0;
+		f.override = in[at++] != 0;
+		if (f.free()) {
+			for (float& v : f.rotation) {
+				if (!getFloat(in, at, v)) {
+					return false;
+				}
+			}
+			for (float& v : f.position) {
+				if (!getFloat(in, at, v)) {
+					return false;
+				}
+			}
+			const float d2 = f.position[0] * f.position[0] + f.position[1] * f.position[1] + f.position[2] * f.position[2];
+			if (d2 > 1e10f) {
+				f.position[0] = f.position[1] = f.position[2] = 0;
+			}
+			if (f.override) {
+				f.mode = 0;
+			}
+		} else {
+			if (!getU32(in, at, f.followed) || at + 1 > in.size()) {
+				return false;
+			}
+			f.followFlag = in[at++];
+			for (float& v : f.follow) {
+				if (!getFloat(in, at, v)) {
+					return false;
+				}
+			}
+		}
+		if (f.mode != 0 && f.mode != 1) {
+			f.mode = 0; // only exactly 1 follows
+		}
+		frames.push_back(f);
+	}
+	return true;
+}
+
+bool writeCameraFile(const std::string& path, const std::vector<CameraKeyframe>& frames)
+{
+	const std::vector<uint8_t> raw = encodeCameraKeyframes(frames);
+	uLongf size = compressBound(static_cast<uLong>(raw.size()));
+	std::vector<uint8_t> packed(size);
+	if (compress2(packed.data(), &size, raw.data(), static_cast<uLong>(raw.size()), 3) != Z_OK) {
+		return false;
+	}
+	std::FILE* file = std::fopen(path.c_str(), "wb");
+	if (!file) {
+		return false;
+	}
+	std::fwrite(packed.data(), 1, size, file);
+	std::fclose(file);
+	return true;
+}
+
+bool readCameraFile(const std::string& path, std::vector<CameraKeyframe>& frames)
+{
+	std::vector<uint8_t> inflated;
+	return inflateFile(path, inflated) && decodeCameraKeyframes(inflated, frames);
 }
 
 int DemoPlayer::next(std::vector<uint8_t>& payload)
@@ -247,6 +373,17 @@ std::string demoPath(const std::string& name)
 		path = "Demos/" + path + ".bf2142demo";
 	}
 	return path;
+}
+
+DemoRates demoRates(int quality)
+{
+	quality = quality < 2 ? 1 : std::min(quality, 10);
+	const float f = static_cast<float>(quality - 1) * 0.11111111f;
+	DemoRates r;
+	r.packetsPerSecond = 4 - static_cast<int>(f * -16.0f);
+	r.packetBytes = 0x104 - static_cast<int>(f * -3836.0f);
+	r.maxUpdates = static_cast<int>(std::floor(static_cast<double>(f * 215.0f))) + 40;
+	return r;
 }
 
 } // namespace dice::hfe::net

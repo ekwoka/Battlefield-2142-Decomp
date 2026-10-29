@@ -279,8 +279,8 @@ void printStats(const render::LevelStats& stats)
 				"%zu terrain patches, %zu roads (%zu missing)\n",
 		stats.meshes, stats.missingMeshes, stats.textures, stats.missingTextures, stats.instances,
 		stats.lightmappedInstances, stats.terrainPatches, stats.roads, stats.missingRoads);
-	std::printf("renderer: hemi map %s, %zu cloud layers, sun flare %s\n", stats.hemiMap ? "yes" : "no", stats.cloudLayers,
-		stats.sunFlare ? "yes" : "no");
+	std::printf("renderer: hemi map %s, %zu cloud layers, sun flare %s, %zu normal-mapped materials\n",
+		stats.hemiMap ? "yes" : "no", stats.cloudLayers, stats.sunFlare ? "yes" : "no", stats.normalMapped);
 	for (const std::string& missing : stats.missingMeshNames) {
 		std::printf("  missing mesh %s\n", missing.c_str());
 	}
@@ -511,6 +511,14 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					}
 					return pads->axis(slot, std::atoi(b.control.c_str() + 7));
 				};
+				down.pov = [pads](const input::Binding& b) {
+					const int slot = input::GameControllers::slotNamed(b.device);
+					return pads && slot >= 0 && b.control.compare(0, 6, "IDPov_") == 0
+						? pads->pov(slot, std::atoi(b.control.c_str() + 6))
+						: -1;
+				};
+				// The keys' ramp on the axes (0x00680990) runs on the frame's time.
+				down.seconds = dt;
 				ViewerOptions::PlayerView view;
 				const bool driving = options.playerView && options.playerView(view) && view.driving;
 				if (options.takeAimKick) {
@@ -527,6 +535,10 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.throttle = c.value(map, "c_PIThrottle", down);
 				input.strafe = c.value(map, "c_PIYaw", down);
 				input.sprint = c.pressed(map, "c_PISprint", down);
+				if (driving) {
+					input.pitch = c.value(map, "c_PIPitch", down);
+					input.roll = c.value(map, "c_PIRoll", down);
+				}
 				if (pads) {
 					// A stick on the look inputs: a rate, not a distance.
 					const float scale = options.mouseScale ? options.mouseScale() : 1.0f;
@@ -971,6 +983,50 @@ double Window::MovieScreen::audioQueued() const
 		return 0;
 	}
 	return static_cast<double>(SDL_GetAudioStreamQueued(m_state->audio)) / (sizeof(float) * 2.0 * m_state->audioRate);
+}
+
+AudioOut::~AudioOut()
+{
+	if (m_stream) {
+		SDL_DestroyAudioStream(static_cast<SDL_AudioStream*>(m_stream));
+	}
+}
+
+void AudioOut::queue(const std::vector<float>& samples, int rate)
+{
+	if (samples.empty() || rate <= 0) {
+		return;
+	}
+	if (!m_stream || m_rate != rate) {
+		if (m_stream) {
+			SDL_DestroyAudioStream(static_cast<SDL_AudioStream*>(m_stream));
+		}
+		SDL_InitSubSystem(SDL_INIT_AUDIO);
+		SDL_AudioSpec spec {SDL_AUDIO_F32, 2, rate};
+		m_stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
+		m_rate = rate;
+		if (m_stream) {
+			SDL_ResumeAudioStreamDevice(static_cast<SDL_AudioStream*>(m_stream));
+		}
+	}
+	if (m_stream) {
+		SDL_PutAudioStreamData(static_cast<SDL_AudioStream*>(m_stream), samples.data(), static_cast<int>(samples.size() * sizeof(float)));
+	}
+}
+
+void AudioOut::clear()
+{
+	if (m_stream) {
+		SDL_ClearAudioStream(static_cast<SDL_AudioStream*>(m_stream));
+	}
+}
+
+double AudioOut::queued() const
+{
+	if (!m_stream || m_rate <= 0) {
+		return 0;
+	}
+	return static_cast<double>(SDL_GetAudioStreamQueued(static_cast<SDL_AudioStream*>(m_stream))) / (sizeof(float) * 2.0 * m_rate);
 }
 
 bool saveMovieFrame(const uint8_t* rgba, int frameWidth, int frameHeight, int width, int height, const std::string& png)

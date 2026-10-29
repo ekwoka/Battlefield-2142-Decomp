@@ -13,6 +13,8 @@ layout(location = 1) in vec2 inTerrainCoord;
 layout(location = 2) in float inTerrainColorMix;
 layout(location = 3) in float inDepth;
 layout(location = 4) in vec3 inWorldPosition;
+layout(location = 5) in vec4 inTerrainColor; // the simple shader's (w 1): per vertex
+layout(location = 6) in vec4 inTerrainLight;
 
 layout(set = 2, binding = 0) uniform sampler2D atlas;
 layout(set = 2, binding = 1) uniform sampler2D colorMap;
@@ -37,10 +39,11 @@ void main()
 	if (base.a < material.x) {
 		discard;
 	}
-	vec3 terrain = mix(texture(colorMap, inTerrainCoord).rgb, vec3(1.0), inTerrainColorMix);
+	bool simple = inTerrainColor.w > 0.5;
+	vec3 terrain = mix(simple ? inTerrainColor.rgb : texture(colorMap, inTerrainCoord).rgb, vec3(1.0), inTerrainColorMix);
 	vec3 light = vec3(1.0);
 	if (material.y > 0.0) {
-		vec4 lightmap = texture(lightMap, inTerrainCoord);
+		vec4 lightmap = simple ? inTerrainLight : texture(lightMap, inTerrainCoord);
 		vec3 sun = clamp(sunColor.rgb * 0.25, 0.0, 1.0);
 		vec3 gi = clamp(skyColor.rgb * 0.5, 0.0, 1.0);
 		float shadow = shadowExtra.z > 0.5 ? shadowFactor(inWorldPosition, false) : 1.0;

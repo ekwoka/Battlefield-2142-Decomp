@@ -48,6 +48,10 @@ struct TransformUniforms {
 	// tree's leaves, y the object's radius, z the wind's speed there plus
 	// WIND_ADD (5), w GlobalTime.
 	float sway[4] {};
+	// mesh.vert's normal map frame: x 0 none, 1 the tangent's (bundled and
+	// skinned meshes' tangents), 2 the object's (RaShaderSM
+	// _OBJSPACENORMALMAP_).
+	float normalSpace[4] {};
 };
 
 // Water fragment shader, second uniform block.
@@ -158,6 +162,8 @@ struct SkyUniforms {
 constexpr float kMaterialBlended = 8;   // alpha from the texture (times the fade)
 constexpr float kMaterialAdditive = 16; // unlit, added (additiveMeshPipeline)
 constexpr float kMaterialHemi = 32;     // a bundled or skinned mesh: the hemi map's ambient
+constexpr float kMaterialNormalMap = 64;  // a normal map (the dirt map's binding; RaShaderBM/SM _HASNORMALMAP_)
+constexpr float kMaterialNoShadows = 128; // receives no dynamic shadows (the low lighting level's BM/SM)
 
 class GpuContext {
 public:

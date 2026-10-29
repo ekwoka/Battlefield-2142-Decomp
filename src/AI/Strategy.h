@@ -141,8 +141,9 @@ struct AreaState {
 	bool hostileNeighbour = false, neutralNeighbour = false, ownedNeighbour = false;
 };
 
-// Required strength (FUN_1005f210): round(2 * max(enemies' strategic strength, 1)), x1.25 unless owned.
-int requiredStrength(float enemyStrategicStrength, bool owned);
+// Required strength (FUN_1005f210): the enemies' strategic strengths' sum, at least 1, x 2 when owned, else
+// x (2 - S(friendly / (friendly + enemy) battle strength)) x 1.25.
+int requiredStrength(float enemyStrategicStrength, bool owned, float friendlyRatio = 0);
 // The strategy's modifiers on an area's temperature (0x1005def0).
 float modifiedTemperature(const Strategy& strategy, float temperature, AreaStatus status, bool controlPoint,
 	bool hostileNeighbour);

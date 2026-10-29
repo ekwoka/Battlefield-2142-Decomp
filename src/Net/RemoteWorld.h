@@ -360,6 +360,10 @@ private:
 	std::map<uint16_t, int> m_playerGhosts; // player networkable ghost -> player id
 	void applyState(RemoteObject& o, const NetworkableState& state);
 	std::map<uint16_t, RemoteObject> m_objects;
+	// Ghosts out of scope (kind 3, 0x0057fce0 -> 0x0057bb10: the object is
+	// hidden and leaves the active map, not destroyed); a kind-1 update
+	// brings one back (0x0057bdc0).
+	std::map<uint16_t, RemoteObject> m_hidden;
 	std::map<int, RemotePlayer> m_players;
 	int m_localPlayer = -1;
 	bool m_hasControl = false;

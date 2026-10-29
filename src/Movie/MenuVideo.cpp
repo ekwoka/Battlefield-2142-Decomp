@@ -16,6 +16,21 @@ std::string menuVideoFile(const std::string& url)
 	return "Movies/" + file;
 }
 
+MenuVideo::~MenuVideo()
+{
+	if (m_sink.stop) {
+		m_sink.stop();
+	}
+}
+
+void MenuVideo::playAudio()
+{
+	std::vector<float> samples = m_decoder.takeAudio();
+	if (!samples.empty() && m_sink.play) {
+		m_sink.play(samples, m_decoder.sampleRate());
+	}
+}
+
 bool MenuVideo::open(const std::string& path, std::string* error)
 {
 	if (!m_decoder.open(path, error)) {
@@ -44,7 +59,7 @@ bool MenuVideo::advance(double seconds, ui::MenuImage& frame)
 		frame.rgba = m_next.rgba;
 		changed = true;
 		m_haveNext = m_decoder.nextFrame(m_next);
-		m_decoder.takeAudio(); // not played
+		playAudio();
 	}
 	if (!m_haveNext) {
 		m_finished = true;

@@ -59,6 +59,12 @@ public:
 	// Sends every joined client its data packet: the queued events and the
 	// ghost block from `ghosts` (nullptr: none).
 	void sendTick(const std::function<GhostBlock(int client)>& ghosts);
+	// The send loop's pacing (0x004b02a0): each client's timer (connection
+	// +0x1c) falls by `seconds`; a client whose timer is out gets its
+	// packet and 1 / its packets a second more. `ghosts` gets the bits the
+	// packet has left for the ghost block (its bytes x 8, 0x0057b040,
+	// less the input and event blocks).
+	void sendPaced(const std::function<GhostBlock(int client, size_t ghostBits)>& ghosts, float seconds);
 
 	void send(int client, const GameEvent& event);
 	void broadcast(const GameEvent& event);
@@ -70,6 +76,11 @@ public:
 		bool joined = false;           // the challenge answered and the connection type given
 		uint32_t profileId = 0xffffffff;
 		uint32_t connectionType = 0;
+		// The connection's rates (0x004a6160 applies the type's row of
+		// 0x00928408's server columns; 20 packets a second of 1400 bytes,
+		// connection +0x14 / +0x18, until the type comes).
+		int packetsPerSecond = 20;
+		int packetBytes = 0x578;
 		std::string cdKeyHash;         // the response's first 32 characters: md5 of the key
 		int32_t lastMove = -1;         // the last move index taken
 		uint32_t lagMs = 0;            // the input block's 9-bit view delay
@@ -96,6 +107,7 @@ private:
 		ClientInfo info;
 		UdpServerSocket::Address address;
 		bool acknowledged = false;
+		float sendIn = 0; // connection +0x1c
 		NotifyState notify;
 		EventChannel events;
 		std::set<uint32_t> unsettled; // data sequences sent, not yet reported
@@ -105,6 +117,7 @@ private:
 	void handleConnect(BitReader& in, const UdpServerSocket::Address& from);
 	void handleData(Client& client, const ConnectedPacket& packet);
 	void deliver(Client& client, const GameEvent& event);
+	void sendTo(Client& client, int id, const std::function<GhostBlock(int client, size_t ghostBits)>& ghosts);
 	void refuse(const UdpServerSocket::Address& to, uint32_t reason);
 	void drop(int id);
 	Client* find(const UdpServerSocket::Address& from);

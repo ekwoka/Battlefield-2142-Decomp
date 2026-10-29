@@ -62,6 +62,80 @@ float WindSettings::speedAt() const
 	return std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
 }
 
+namespace {
+
+using Vec = std::array<float, 3>;
+
+float dot3(const Vec& a, const Vec& b)
+{
+	return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+Vec normalized3(const Vec& v)
+{
+	const float l = std::sqrt(dot3(v, v));
+	return l > 1e-6f ? Vec {v[0] / l, v[1] / l, v[2] / l} : Vec {0, 0, 0};
+}
+
+} // namespace
+
+std::array<float, 3> WindSettings::LocalWind::windAt(const std::array<float, 3>& point) const
+{
+	const Vec d {point[0] - position[0], point[1] - position[1], point[2] - position[2]};
+	if (falloff <= 0 || dot3(d, d) >= falloff * falloff) {
+		return {0, 0, 0}; // out of reach (0x007040d0)
+	}
+	Vec towards;
+	float strength = 0;
+	switch (type) {
+	case Type::Directional:
+	case Type::Point: {
+		// (1 - min(d^2 / falloff^2, 1)) x speed, along the turned direction
+		// or away from the affector.
+		strength = (1 - std::min(dot3(d, d) / (falloff * falloff), 1.0f)) * speed;
+		towards = type == Type::Point ? normalized3(d) : direction;
+		break;
+	}
+	case Type::RadialDir: {
+		// Along its axis: (1 - min(a / falloff, 1)) x speed, a the distance
+		// along it; nothing beyond radialFalloff from the axis, and the
+		// direction bends out from the axis by min(r^2 / rf^2 + 0.2, 1)
+		// (0x00a051a0).
+		const float along = dot3(d, direction);
+		strength = (1 - std::min(along / falloff, 1.0f)) * speed;
+		const Vec radial {d[0] - direction[0] * along, d[1] - direction[1] * along, d[2] - direction[2] * along};
+		const float r2 = dot3(radial, radial);
+		if (radialFalloff <= 0 || r2 >= radialFalloff * radialFalloff) {
+			return {0, 0, 0};
+		}
+		const float bend = std::min(r2 / (radialFalloff * radialFalloff) + 0.2f, 1.0f);
+		const Vec out = normalized3(radial);
+		towards = {out[0] * bend + direction[0] * (1 - bend), out[1] * bend + direction[1] * (1 - bend),
+			out[2] * bend + direction[2] * (1 - bend)};
+		break;
+	}
+	case Type::Turbulence:
+		return {0, 0, 0}; // no case of its own in 0x0064b5f0
+	}
+	return {towards[0] * strength, towards[1] * strength, towards[2] * strength};
+}
+
+std::array<float, 3> WindSettings::windAt(const std::array<float, 3>& point) const
+{
+	std::array<float, 3> w = windAt();
+	for (const LocalWind& local : localWinds) {
+		const auto l = local.windAt(point);
+		w = {w[0] + l[0], w[1] + l[1], w[2] + l[2]};
+	}
+	return w;
+}
+
+float WindSettings::speedAt(const std::array<float, 3>& point) const
+{
+	const auto w = windAt(point);
+	return std::sqrt(dot3(w, w));
+}
+
 int QualitySettings::terrainLodSwitchDistance() const
 {
 	static constexpr int kDistance[3] = {64, 80, 100}; // 0x10010040: 0x40, 0x50, 100
@@ -98,9 +172,30 @@ int QualitySettings::maxSkip3pLods() const
 
 int QualitySettings::skipMipLevels() const
 {
-	// GSSkipMipLevels: 1 -> 2, 2 -> 1, 3 -> 0; the texture classes take at
-	// most one of them (clamp(skip - 1, 0, 1)).
-	return std::clamp(3 - level3(texture) - 1, 0, 1);
+	// GSSkipMipLevels: 1 -> 2, 2 -> 1, 3 -> 0 (0x10010040: +0x114 below 0
+	// takes the texture level).
+	return 3 - level3(texture);
+}
+
+int QualitySettings::skipMipLevels(TextureClass textureClass) const
+{
+	const int skip = skipMipLevels();
+	switch (textureClass) {
+	case TextureClass::Interface:
+		return 0; // the class's "skips" byte is off (0x10017ca0: +0x64)
+	case TextureClass::Undergrowth:
+	case TextureClass::Overgrowth:
+		// +0x70, +0x90, +0xb0, +0xb8: classes 2, 6, 10 and 11.
+		return std::clamp(skip - 1, 0, 1);
+	default:
+		return skip;
+	}
+}
+
+int QualitySettings::lightingLevel() const
+{
+	static constexpr int kLevel[3] = {3, 1, 0}; // 0x10010040: renderer +0x6b4
+	return kLevel[level3(lighting) - 1];
 }
 
 bool QualitySettings::dynamicLightsEnabled() const

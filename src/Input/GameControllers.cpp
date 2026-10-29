@@ -146,6 +146,15 @@ float GameControllers::axis(int slot, int axis) const
 	return d.inverted[i] ? d.offset[i] - d.axis[i] : d.offset[i] + d.axis[i];
 }
 
+int GameControllers::pov(int slot, int pov) const
+{
+	if (slot < 0 || slot >= kMaxDevices || pov < 0 || pov >= 4) {
+		return -1;
+	}
+	const Device& d = m_devices[static_cast<size_t>(slot)];
+	return d.connected && pov < d.povCount ? d.pov[static_cast<size_t>(pov)] : -1;
+}
+
 bool GameControllers::down(int slot, int button) const
 {
 	if (slot < 0 || slot >= kMaxDevices || button < 0 || button >= kMaxButtons) {

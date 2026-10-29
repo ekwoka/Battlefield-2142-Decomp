@@ -251,6 +251,7 @@ void Player::advance(double seconds)
 		return;
 	}
 	advanceVideos(std::max(0.0, seconds));
+	m_scroller.addTime(std::max(0.0, seconds));
 	m_time += std::max(0.0, seconds);
 	const double period = 1.0 / m_frameRate;
 	// At most a second's worth per call; a longer stall is dropped.
@@ -1020,6 +1021,11 @@ bool Player::loadVideo(Clip& clip, const std::string& url)
 	clip.bytes = 0;
 	m_videoClips.push_back(std::static_pointer_cast<DisplayObject>(clip.shared_from_this()));
 	return true;
+}
+
+void Player::drawScroller(Drawer& drawer, std::vector<MenuBatch>& out)
+{
+	m_scroller.draw(drawer, [this](const std::string& key) { return natives().localize(key); }, out);
 }
 
 void Player::advanceVideos(double seconds)

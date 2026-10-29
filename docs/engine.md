@@ -70,8 +70,13 @@ pictures due as `advance` passes time, the last one staying; `unloadMovie`
 drops it. The host (`movie::MenuVideo`) resolves `?name.bik` to
 `Movies/name.bik` and `?/path` to the mod's root (where the files are; the
 DLL's resolver is in RendDX9's undecompiled video code) and decodes with
-the Bink decoder; the sound isn't played (the menu music was stopped by
-the button). `--no-movies` leaves the clip empty. The Titan tips panel is
+the Bink decoder. Its sound plays too, as RendDX9's Bink plays it itself
+(0x1011df20 picks `BinkOpenDirectSound`; 0x1011e0d0 opens the file with
+`BinkOpen(path, 0)`, no `BINKNOSOUND`, and sets no volume): the decoded
+samples go straight to the playback device (`AudioOut`, outside the
+game's sound groups) as the pictures go by, and what is queued stops when
+the clip lets the movie go (the menu music was stopped by the button,
+`Sound.stopMenuMusic`). `--no-movies` leaves the clip empty. The Titan tips panel is
 on the online multiplayer page; off screen, `--menu-script` has
 `call:<clip>.<method>,<args>` to load it into a clip offline.
 
@@ -1095,7 +1100,10 @@ CVMFrontChase `+0x37d`, CVMFlyBy `+0x37a`, CVMTrace `+0x37b`,
 CVMExternTrace `+0x37c`; the first four on by default, `0x00610fd0`), Nose
 also without sv.allowNoseCam (game logic `+0x32`), Chase, FrontChase and
 FlyBy without sv.allowExternalViews (`+0x36`), ExternTrace while its
-extern target (`+0x2dc`) is zero (nothing the rewrite runs sets it).
+extern point (`+0x2dc`, the translation of the matrix at `+0x2ac`, set
+only by ICamera slot 0x3c `0x006136b0`, which nothing calls) is zero: so
+always in retail; its draw would be the camera's own frame (`0x00612d80`'s
+default).
 `c_PIToggleCameraMode` (input 0x23, `0x004bda00` → `0x004b9e10`) steps on
 over 0..7, wrapping, until `setMode` takes one or it is back; the seat
 camera then draws (`0x00612d80`) by mode (`src/Game/Cameras`, played by
@@ -1535,9 +1543,17 @@ renderer.global{Static,Bundle,Skinned}MeshLodDistanceScale (renderer
 below the camera's distance over the zoom less the mesh's radius
 (`render::lodDistance`). Each LOD has its own lightmap in the atlas
 (`=<lod, two digits>=` in its key); a LOD without one is lit as an
-unlightmapped mesh. Not done: the skipped LODs (maxSkip3pLods,
-renderer +0x910), the static meshes' `ObjectTemplate.lodDistance`
-High/Medium/Low.
+unlightmapped mesh. Skipped LODs: `GeometryTemplate.maxSkip3pLods` /
+`maxSkipWreckLods` (0x10073920 / 0x10073a8a, template +0xc0 / +0xc4, both
+1 by default, 0x10148e50) are capped by renderer +0x910 (1 at the low
+geometry quality, else 0) and one less than the LODs; bundled meshes
+(0x100a31d0: of three geometries 1 takes the first and 2 the second, of
+two geometry 1) and skinned ones (0x100d4b..: the third person's,
+geometry 0 of one and 1 of two) drop that many first LODs at load
+(0x100a3b70 / 0x100d4160 skip their materials), the rest switching as a
+mesh of that many (`GpuMesh::skippedLods`). Not done: static meshes'
+(0x100dd480 also asks the template's +0xc8, unknown), the static meshes'
+`ObjectTemplate.lodDistance` High/Medium/Low.
 
 **Overgrowth.** Trees placed by `overgrowth/OvergrowthCollision.con`
 (`Object.isOvergrowth 1`, `0x006ed5bb`) are drawn whole within
@@ -1545,8 +1561,13 @@ High/Medium/Low.
 with their `<geometry>_lod` mesh, whose `*_lod.dds` textures exist only in
 the level's overgrowth atlases (`OvergrowthAtlas.tai`,
 `OvergrowthAtlas_alphatest.tai`: texture → atlas, offset, size; the mesh
-shader scales and offsets the coordinates). Not done: dropping trees beyond
-the view distance, the overgrowth shadow map.
+shader scales and offsets the coordinates). viewDistanceScale is
+Overgrowth +0x110, which the geometry quality's switch writes too
+(0x10010040: 0.4 / 0.7 / 1) and every level's Overgrowth.con sets to 1
+after it: the rewrite takes the script's value, and the quality's once
+the video settings change after the level loaded (the switch runs when
+they are applied). Not done: dropping trees beyond the view distance,
+the overgrowth shadow map.
 
 **Mesh particles.** A MeshParticleSystem's particles are copies of its
 `geometry` (a MeshParticleMesh template: a bundled-mesh file), scaled by
@@ -1754,14 +1775,26 @@ transparency and size graphs), randomSize `+0x1b8`, randomIntensity
   `affectedByWind`), r = v − w, dv = −k |r| r + y × gravity ×
   clamp(gravityGraph, 0, 1) × dt with k = airResistance ×
   clamp(airResistanceGraph, 0, 1) × dt, x += (v + dv / 2) dt, v += dv;
-  speeds under 0.001 zeroed; with collisionEnable the particle bounces
-  off the system's ground planes (not done); forceToWaterSurface puts it
+  speeds under 0.001 zeroed; with collisionEnable (+0xf0) the particle
+  bounces off the ground (the rewrite: the terrain under it taken flat,
+  the speed across it reversed times collisionSpeedAlongNormal, along it
+  times collisionSpeedAlongPlane; the original's system ground planes
+  aren't decoded, nor the two speeds' defaults: 0.7 / 0.8, the commonest
+  shipped values); forceToWaterSurface puts it
   on the water (the manager's water, `+0x8c18` slot 0x94; the rewrite
   the sea level plus waterSurfaceOffset); its rotation turns by its speed
   × clamp(rotationGraph(age), 0, 1) (`0x10131f80`).
 - *the draw* (`0x10132e90` and the like): a particle's alpha times (1 −
   min((d − s) / (end − s), 1))² past s = startLodPercentageOfLodDistance
-  (0.85) of its class's end, d its depth in the view.
+  (0.85) of its class's end, d its depth in the view; a particle whose
+  alpha is below the template's alphaCull (+0xa0, the exe's slot 0x154,
+  `0x00539094` → `0x00626c50`) isn't drawn (the collector `0x10130bd0`).
+  pivotOffset (+0x1b0 / +0x1b4, slot 0x1c8) moves the quad's centre off
+  the particle by that many half-sizes (`particle.vert`; 0/−0.5 stands
+  it on it). drawOrder Back / Front is applied by its name (Back draws the
+  newest particles under the older; where RendDX9 reads it wasn't
+  found). selfShadowIntensity (+0xa4, slot 0x1d0) is stored by the
+  template, but no reader of it in the sprite code was found: not drawn.
 
 **Heat shimmer.** particleShaderType 1 (41 shipped systems: the fires'
 and the explosions' `*_Heatshimmer`, engines) picks ParticleHeatShimmer
@@ -1777,8 +1810,23 @@ draws them over it (`shimmer.frag`, `LevelRenderer::drawShimmer`).
 `0x0099ad60`; `windManager.globalWindSpeed` / `globalWindDirection`,
 `0x006ebec1` / `0x006ebfc8`): slot 0x3c (`0x00703b20`) is the global wind
 plus the WindAffector components whose radius reaches the point (slot
-0x18, `0x007040d0`; 29 shipped templates, RadialDir winds of the
-helicopters; not modelled), slot 0x30 its length. RendDX9 steps it each
+0x18, `0x007040d0`: |p − pos| < falloff + the query's radius), slot 0x30
+its length. A WindAffector (template component 0x127bbe7, vtable
+`0x0097b1a0`; its instance `0x0064b8c0`, vtable `0x009874b8`, registered
+by `0x0064b490`, counting windBlowTime down by `0x0064b4c0`) gives
+direction × strength (slot 0x50 → 0x4c, `0x0064b5f0`): Directional
+(0) the template's windDirection turned by the object's matrix,
+strength (1 − min(d² / falloff², 1)) × windSpeed; Point (1) away from
+it, the same strength; RadialDir (2) along the turned direction D,
+strength (1 − min(a / falloff, 1)) × speed with a = (p − pos)·D,
+nothing beyond windRadialFalloff from the axis, the direction bent out
+from it by min(r² / rf² + 0.2, 1); TurbulenceField (3) none. Shipped on
+the gunships' and transports' rotor Engines (RadialDir 0/0/−1, 20, 20,
+10) and some explosions (Point). The rewrite collects them from the
+world objects' template trees (`ObjectEffects::localWinds`, placed with
+their parts each tick) into `scene::WindSettings::localWinds`;
+`windAt(point)` sums them (the explosion effects' own affectors are not
+collected). RendDX9 steps it each
 frame (`0x10028bb0`). Its readers: the particles (above), and static
 meshes' leaves: RendDX9 marks a geometry whose path has "vegitation" a
 tree (`0x100de8xx`, `+0x2a2`) and draws its leaves with RaShaderLeaf
@@ -1787,7 +1835,8 @@ tree (`0x100de8xx`, `+0x2a2`) and draws its leaves with RaShaderLeaf
 `pos += sin((GlobalTime / (ObjRadius + y)) × (WindSpeed + 5)) × (ObjRadius
 + y)² / 1024` (not the overgrowth's: OVERGROWTH has no sway). The rewrite
 takes the alpha-tested materials of such meshes as the leaves
-(`mesh.vert`, TransformUniforms `sway`).
+(`mesh.vert`, TransformUniforms `sway`), the speed at each tree's origin
+(so a helicopter's downwash stirs the trees under it).
 
 **Wheel and draft bundles.** WheelEffectBundle (`0x0061bfc0`) and
 AirDraftEffectBundle (`0x0061d820`) take their effect from
@@ -1810,7 +1859,12 @@ rewrite (ObjectEffects::updateGround) probes with the game's collision
 (`setGround`: the water, else `groundMaterialAlong`, the point on the
 terrain under it), a wheel 1.5 m straight down from its bundle (no
 contact list), takes the velocity from the object's moves, the throttle
-as 1 when occupied, and skips parked, empty vehicles.
+as 1 when occupied, and skips parked, empty vehicles. With the vehicle's
+wheel list (`ObjectState::wheels`, from `game::Vehicle::wheels()`: the
+spring's name, its contact and the point under it) a wheel bundle under
+a wheel's spring is on only while that wheel touches, at its contact
+point, the material probed there; FromEngine takes |PIThrottle| of an
+occupied vehicle.
 
 **Cold breath.** `GameLogic.useColdBreath` (`0x00427d38`, the game
 logic's slots 0xd8 / 0xdc; 30 levels set it) and the Soldier's
@@ -1819,8 +1873,9 @@ logic's slots 0xd8 / 0xdc; 30 levels set it) and the Soldier's
 every few seconds (`0x00588830`: slot 0x100(0) on, (1) off) while
 useColdBreath is on, the kit hasn't disableBreathEffect (`+0x384`), and
 it isn't the local player's own soldier in first person. The rewrite
-starts it at the head (0, 1.6, 0.15) and leaves out the kit's flag and
-the other checks (the soldier in a vehicle, `+0x264`).
+starts it at the head (0, 1.6, 0.15), with the kit's flag (the player's
+kit template's disableBreathEffect: two shipped kits) and the soldier in
+a vehicle (`+0x264`: the player's vehicle) checked.
 
 **The quality switches** (RendDX9's settings object, vtable `0x101bfd48`,
 slot 0x38 `0x10010040`, run at the renderer's start `0x10029e20` and
@@ -1836,14 +1891,44 @@ lighting 0 — no dynamic lights (the light manager's slot 0xf4); effects
 pools 0/300/500/1000/1500, the fade starts 0/0.2/0.3/0.4/0.85, the
 shader quality 1/1/3/3/3, the quality level 0/0/1/2/2), and below 2 no
 decal sets on moving objects (DecalManager `+0x322e`, `0x100e6b70`);
-dynamic shadows as before (`ShadowSettings::quality`). Stored only:
-undergrowth.simpleShaderEnable (1/1/0), renderer `+0x693`, the road
-renderer's and the sky dome's levels, the geometry's maxSkip3pLods and
-`+0x6a8`..`+0x6b0`, the Overgrowth's viewDistanceScale 0.4/0.7/1 (every
-level's Overgrowth.con sets 1 after it), the lighting level's renderer
-`+0x6b4` and `DAT_101fa9ac +0x40`, the texture level's mip skips
-(GSSkipMipLevels 2/1/0, at most one per texture class; the classes
-`DAT_101f8e5c +0x70`.. are not identified) and the filtering.
+dynamic shadows as before (`ShadowSettings::quality`). Also applied:
+undergrowth.simpleShaderEnable (1/1/0: Undergrowth.fx's `_simple`
+techniques, the terrain colour and lightmap read per vertex,
+`undergrowth.vert`'s vertex samplers), maxSkip3pLods (renderer +0x910,
+above), the Overgrowth's viewDistanceScale (above), the lighting level
+and the texture classes (below). Stored only: renderer `+0x693`, the
+road renderer's and the sky dome's levels, `+0x6a8`..`+0x6b0`,
+`DAT_101fa9ac +0x40` and the filtering.
+
+*Texture classes.* The texture manager (`DAT_101f8e5c`, constructor
+`0x10017ca0`) has 15 classes at +0x5c + 8 × class: a "skips" byte (all on
+but class 1's, +0x64) and the levels skipped (+0x60). A loader names its
+class (`0x10017240` sets +0xd4) before loading (`0x10018650` →
+`0x10017f20`), and `0x10017710` drops that many top mips of a 2D texture
+while the next stays at least 4 texels (+0x1c). The switch gives every
+skipping class GSSkipMipLevels (2/1/0) and classes 2, 6, 10, 11
+clamp(skip − 1, 0, 1). The classes by their callers (`push n; call
+0x10017240`): 1 the menu atlases (`0x10187ca0`, `0x10188330`), 3 / 5 / 9
+a terrain patch's colormap / lightmap / second-name map (`0x1014be90`:
+terrain +0x54, +0xa8, +0x70), 4 the low-detail texture (`0x100b0850`), 7
+the detail layers (`0x100b2af0`), 8 the numbered patch maps
+(`0x1014b6a0`), 10 the undergrowth (`0x101100d0`), 11 the overgrowth
+atlases (`0x1008c7e0`) and trees' materials (`0x10151830` with +0x2a2),
+12 static (`0x100dea90`), 13 bundled (`0x100a3b70`), 14 skinned meshes
+(`0x100d4160`); 0 the rest; 2 and 6 have no caller. Rewritten as
+`scene::TextureClass`, `QualitySettings::skipMipLevels(class)`,
+`texture::skipTopLevels` and `LevelRenderer::texture`'s class.
+
+*The lighting level* (renderer +0x6b4: 3/1/0 for lighting 1/2/3) is the
+RaShader permutations' path: each `.mfx`'s DeprecationList drops its rows
+below it (`0x10148ae0`; the static meshes' table at `0x10210924`, built
+from RaShaderSTM.mfx by `0x100db190`). At medium bundled and skinned meshes
+lose their normal maps (the loaders skip "_b.dds", `0x101499b0`, and
+"_b.dds" / "_b_os.dds", `0x100d4160`); at low also their hemi map,
+envmap, dynamic shadows and colormap gloss, and static meshes their crack,
+dirt and detail normal maps (`0x10151830` skips "_cr", "_crb", "_di",
+"_deb"). `QualitySettings::lightingLevel`, `meshNormalMaps`,
+`meshHemiAndShadows`, `staticMeshDirtAndCrack`.
 
 **The interior sun.** A seat camera's inside view with
 `allowInsideStaticSun` (BF2142.exe `0x006104d0`..`0x00610580`,
@@ -1914,7 +1999,12 @@ getters; `lightmapIntensityBias` (`+0x1d4`, uploaded at once by
 `0x1014a780` as LIGHTMAPINTENSITYBIAS) is read only by
 LightManager_r3x0.fx's Combine technique, which nothing selects. Not
 done: RendDX9's light-space perspective (LSPSM/TSM) fit and its
-per-object maps (`shadowMapObjectSize`).
+per-object maps (`shadowMapObjectSize`). A view-fitted perspective map
+moves with every turn of the camera, so the static casters' map could no
+longer be kept between moves of the region (its redraw costs up to ~1 ms
+a frame, see above), and per-object maps add a pass per caster; both
+would raise the frame cost well beyond the current 0.2-0.4 ms, so they
+are left out on purpose.
 
 **Hemi maps.** `HemiMapManager.setBaseHemiMap <texture> <corner> <size>
 [<height>]` (`0x100857b8`; every level's Sky.con: `groundhemi`, 0/0/0,
@@ -1978,12 +2068,29 @@ filled at `0x1002a4a0` / `0x1002cef0`):
   ColormapGloss technique, else StaticGloss, `setSpecularStaticGloss`,
   default 0.15), killed by the shadow and the hemi occlusion. Drawn by
   mesh.frag's `specularTerm` (LightingUniforms `eye` / `specular`; the
-  submesh's `specularKind` from its effect and technique). The rewrite's
-  normals are the vertices' (no normal maps), and bundled meshes without
-  ColormapGloss take the per-pixel LUT with StaticGloss where RaShaderBM
-  lights them per vertex (`lit(N·L, R·V, SpecularPower)` clamped to
-  StaticGloss); skinned meshes have none (RaShaderSM's needs the normal
-  map's alpha).
+  submesh's `specularKind` from its effect and technique). Bundled meshes
+  without a normal map or ColormapGloss take the per-pixel LUT with
+  StaticGloss where RaShaderBM lights them per vertex (`lit(N·L, R·V,
+  SpecularPower)` clamped to StaticGloss). Skinned meshes (RaShaderSM):
+  pow(N·H, SpecularPower) × the gloss × the sun's specular colour,
+  SpecularPower the material block's default 20 (`0x10040070` +0x74), the
+  gloss the normal map's alpha, else StaticGloss 0.15 (and nothing facing
+  away, lit()).
+- *Normal maps* (RaShaderBM/SM `_HASNORMALMAP_`, at the top lighting level
+  only): a bundled mesh's second map ending "_b.dds" (`0x101499b0` +0x35)
+  is in tangent space; a skinned mesh's second map unless the SpecularLUT
+  is in tangent space when the technique names "tangent" (`0x100d4160`
+  +0x100), else in object space (`_OBJSPACENORMALMAP_`: the first-person
+  arms' "_b_os.dds"). The tangent is the vertex's TANGENT, the binormal
+  cross(tangent, normal) × (1 − 2 × the third blend-index byte)
+  (createWorld2TanMat / getTangentBasis). Bundled and skinned meshes keep
+  the tangent in the static layers' coordinates (Vertex dirtCoord,
+  crackCoord), mesh.vert hands mesh.frag the map's frame in the world,
+  and the map is bound in the dirt map's place; the bumped normal lights
+  the sun, the point lights and the specular, a skinned mesh's hemi lerp
+  too (per pixel at RAPATH 0), its alpha is the gloss unless the colour
+  map's (ColormapGloss). `LevelStats::normalMapped` counts them (17 on
+  Cerbere Landing at load).
 - `effectSunColor` / `effectShadowColor` light the particles (FXCommon.fx
   `calcParticleLighting`: `lerp(1, lerp(shadow, sun, saturate(lm + off)),
   f)`, `lm` the base hemi map's alpha under the particle, `off` =
@@ -3030,14 +3137,13 @@ server is `src/Net/GameServer` (the protocol) and `src/Main/HostedGame`
   of its tree), the soldiers held (HandlePickup), DatabaseComplete (6/4)
   and the networkable checksum (6/5); on the echo of 6/4 (`0x004af710`)
   StartSimulation (6/3) and the game state (0/1), then BeginRound.
-- **Each tick** a ghost block per client: the control-object record of its
-  soldier (or the seat it is in, with the vehicle's ghost), then the
-  players' networkables and the ghosts whose state changed (every ghost
-  again after two seconds), most important first (the client's own) and
-  the rest in turn, up to about 1100 bytes, with every group of each
-  ghost (below). The record carries the prediction state (mode 3 and the
-  player's own state, see
-  [the control-object record](#the-control-object-record-and-prediction)).
+- **A packet per client at its connection's rate** (see [ghost priorities
+  and bandwidth](#ghost-priorities-and-bandwidth)): the input block, the
+  events, then a ghost block with what is left of the packet's bytes: the
+  control-object record of its soldier (or the seat it is in, with the
+  vehicle's ghost), then the ghosts the client's GhostManager picks. The
+  record carries the prediction state (mode 3 and the player's own state,
+  see [the control-object record](#the-control-object-record-and-prediction)).
 - **Client requests**: SelectKit (`0x0050b010`), the spawn point (6/6), a
   name (ChangePlayerName, taken only for the sender's own player,
   `0x0050bb90`; the rewrite's client sends its soldier's name after its
@@ -3096,6 +3202,67 @@ go (slot `0x14`) and AIDLL's records of it are dropped (`DAT_00b4bbcc`
 slot `0x14`). `GameWorld::removePlayer` does the round's part (the body
 lies on as a corpse; PlayerDisconnect), `HostedGame` the rest, and the
 next `addPlayer` takes the lowest free id.
+
+### Ghost priorities and bandwidth
+
+Each ServerConnection (constructor `0x0057b3f0`) has a GhostManager
+(`conn +0x2c`, constructor `0x00582a50`, vtable `0x0096531c`;
+GhostManager.cpp) with a state per ghost the client has (0x54 bytes:
+`+0x40` always, `+0x44` priority, `+0x48` accumulated, `+0x50` sendable,
+12 dirty masks, status 1 in scope or 3 out). `net::GhostScheduler`,
+`HostedGame::ghostsFor` / `rescore` / `ghostLost`.
+
+- **The send loop** (`0x004b02a0`): each connection's timer (`+0x1c`)
+  falls by the frame; out, the connection sends and adds 1 / its packets a
+  second (`+0x14`). The rates are 20 a second of 1400 bytes (`+0x18`,
+  0x578) until the connection type comes; then the row of `0x00928408`
+  (`0x004a6160`: 4, 4, 10, 20, 20, 20 a second of 260, 260, 350, 400,
+  512, 640 bytes; type 6 and over left as they are; not for the demo
+  connection). `GameServer::sendPaced`.
+- **The packet** (`0x0057b040`): its bytes × 8 bits, shared by the
+  writers in order (`0x0057b380`): input, events, ghosts. The ghost writer
+  (`0x00582cd0`) reserves its 42-bit header (present, tick, count, record
+  bit), writes the record (`0x00580830`), lost removals, then pops the
+  heap: at most 40 entries (`gm +0x213c`; the demo's by sv.demoQuality),
+  each 2 bits kind and 16 bits id, kind 1 a full bit, the 11-bit length
+  (13 on a demo connection) and the groups; one that doesn't fit is
+  skipped (keeping its accumulated value) until under 24 bits are left.
+- **Base priority**: NetworkableInfo.setBasePriority (the info's `+0x18`,
+  1 by default, at most 255; c_NIGhostAlways = −1), copied into the
+  networkable by `0x006fa190`. Registering a ghost (`0x00679d90`) puts a
+  negative one (or a ghost without an object, the players') in the always
+  set: every client has them at 255, never out of scope. 0 is never
+  scored. predictionMode's reader isn't in the ghost manager.
+- **Scoring** (`0x0057dc10`, at most every 0.1 s a client, `conn +0x20`):
+  every state not always goes out of scope at 10000 (`0x00581d40`); each
+  object tree within R = max(GSViewDistance, 500) (850 by default,
+  `0x004cc8d0`; 1000 for a projectile whose vt+0x108 holds) is scored once
+  by its root (`0x0057d300`): min(1, |v|² × 0.000625) + (the direction ·
+  the eye's forward ≥ fov × 0.5 × 4/3 ? 1 : 0; an angle against a cosine,
+  as the original has it) + (1 − d / R), and each of its ghosts gets (score
+  + 0.3 for a projectile) × its base priority (`0x0057d560`), back in
+  scope; each living teammate's soldier or vehicle at least 0.03. A state
+  new to the client starts at 10000 with every mask set (`0x00581e80`).
+  The demo connection takes everything at 1 (`0x0057d8f0`).
+- **Queueing** (`0x005823c0`, each packet): a state out of scope or with
+  something to send adds its priority to its accumulated value and joins
+  a max-heap on it; written, it starts from 0 (the starvation guard).
+  Nothing resends a clean in-scope ghost (no periodic refresh).
+- **Out of scope**: kind 3, then the state goes (`0x00581dc0`); the client
+  hides the object (`0x0057fce0` → `0x0057bb10`) and a kind-1 update
+  brings it back (`0x0057bdc0`; `RemoteWorld` keeps it aside).
+- **Losses** (`0x005830e0`): what a lost packet carried that no later
+  packet carried is dirty again at 10000; a lost removal goes first next.
+
+The rewrite's stand-ins: the dirty masks are "the state the client last
+got differs" (the states encoded once a tick for every client); the eye
+is the soldier's head (kept from its last life; before any, every ghost at
+1), with a field of view of 1.1; the client's own soldier and vehicle are
+scored like any (the original skips the player's own, which the record
+carries). Not rewritten: the commander's satellite scan and the UAV
+(enemies at 0.5, `0x0057cfb0`), his soldiers with `+0x29c` set (0.03),
+OptimizeEnclosingObjectsNetworking / GhostNotEnclosed, the alternate eye
+of player vt+0xd4, the 20-rescores-a-pass cap, the enable set (`gm +0x28`).
 
 ### Server settings, the map list and remote admin
 
@@ -3237,8 +3404,14 @@ seconds over all its maps.
   is × the percentage / 100: sv.soldierFriendlyFire /
   soldierSplashFriendlyFire for soldiers, vehicleFriendlyFire /
   vehicleSplashFriendlyFire for anything else (setters 0..100, under 1 as
-  0). `GameWorld::setFriendlyFire`. The victim's 0.9 / 1.1 factor (its
-  slot `0xec(4)` / `(5)`) isn't settled.
+  0). `GameWorld::setFriendlyFire`. The victim's factor f applies to
+  all damage, friendly or not: its PlayerControlObject's slot 0xec
+  (`0x005c6af0`) counts per ability type n the crew aboard whose kit lists
+  the vehicle (kit template `+0x308`, entering `0x0058cf00` and leaving
+  `0x00588ed0` move slots 0xe4 / 0xe8); type 4 alone gives 0.9, type 5
+  alone 1.1. A soldier's slot 0xec is 0 (`0x007f1f70`): 1. Which loader
+  fills the kit's list isn't found, so f is 1 in practice and not
+  rewritten.
 - **The start** (the server game logic's states, `0x004c03b0`): waiting
   while the players are under sv.numPlayersNeededToStart, then
   sv.startDelay's countdown (`+0x280`), then playing; fewer players than
@@ -3259,8 +3432,11 @@ seconds over all its maps.
   that, when all voted, or after sv.voteTime (1: failed, with the votes it
   lacked; 3: passed). A passed map vote runs the map 5 s on, a kick kicks
   ("KICKED", 0x15; the round's address ban isn't kept), a mutiny removes
-  the commander. The starter's choice is 0; the rewrite counts a cast's
-  0 as yes (the choice's range 0..2 isn't settled). sv.teamVoteOnly isn't
+  the commander. A choice is 0 yes, 1 no, 2 counted for neither (the vote
+  record `0x00645b20` takes 0..2, `0x00645950`); one vote a player; the
+  starter's is 0, and a client sends 0 or 1 (`0x0079d6e0` case 6). It ends
+  early once yes + no reach the eligible (`0x00645bb0`); every event
+  carries the yes and no counts (`+0x10`, `+0x11`). sv.teamVoteOnly isn't
   in BF2142.exe.
 
 ### Demos (`.bf2142demo`)
@@ -3279,12 +3455,56 @@ and two strings) and the records (`src/Net/Demo`, `HostedGame::recordDemo`).
 Playback (`bf2142 --demo <file>`; `GameClient::playDemo`): a client with
 no socket takes the records as they come due (`0x00516c80`: −1 at once,
 markers skipped, the clock set by the first timed record or one over 100
-ticks ahead), sends nothing and has no player. Not rewritten: the
-13-bit ghost state lengths and the demoQuality rates of the demo
-connection (the rewrite's recorder and player both use the usual ones),
-sv.autoRecord's AutoRecorder (`0x00585860`, `0x00585920`, the upload hook),
-`.bf2142cam` camera files, render and timedemo modes, the demo camera's
-controls (togglePlayerDemo, toggleCameraDemo, pause, restart).
+ticks ahead), sends nothing and has no player. The header's two strings are the map (server slot 0xf4, `+0x3c`, the
+map list entry's map) and the game mode (slot 0xf8, `+4`); records never
+carry an empty payload (`0x00516950`).
+
+- **The demo connection's ghost lengths**: the GhostManager's state length
+  field (`+0x2140`) is 11 bits, 13 when it is built with a non-zero kind
+  (`0x00582a50`): recording (kind 1, `0x004ac920` → `0x0057cec0(id ==
+  0x81)`) and playback (kind 2, `0x004b4a80`). Only that field changes (the
+  record's 12-bit length and the rest are constants). The rewrite writes
+  and reads demos with 13 (`net::kDemoGhostStateLengthBits`).
+- **sv.demoQuality** (1..10, setter `0x0041f80c`, 1 by default) sets the
+  kind-1 connection's rates (`0x0057b3f0`): with f = (q − 1) × 0.11111111
+  (truncated), 4 − (int)(f × −16) records a second, 0x104 − (int)(f ×
+  −3836) bytes each and floor(f × 215) + 40 ghost updates a block: 4 / 260
+  / 40 at 1, 20 / 4096 / 255 at 10 (`net::demoRates`). The demo connection
+  is paced like a client and takes every ghost at priority 1.
+- **AutoRecorder** (AutoRecorder.cpp; constructor `0x005854a0`, at the
+  server's `+0x164`): with sv.autoRecord, the round's start (the game
+  logic turning to playing, `0x004c03b0` → `0x00585860`) records
+  `<GSModDirectory>/demos/auto_<%Y-%m-%d %H:%M:%S, every character but
+  0-9 and _ as _>.bf2142demo` (`0x00585620`); the round's restart
+  (`0x004ba0c0` → `0x00585920`) stops it and, unless the last one is still
+  being handled ("dep: cannot call auto-recording hook for …"), logs
+  "Uploading demo file … ..." and hands it to sv.autoDemoHook, run by the
+  recorder's thread (`0x005853b0`, ShellExecuteExA "open" with the file
+  in quotes). Once the hook is done (`0x005852b0`) the server sends game
+  message 9 to everyone with sv.demoDownloadURL (its "{file}" replaced by
+  the file's name, or the name appended) and the map. sv.demoIndexURL is
+  only advertised (GameSpy keys 0x36..0x38). The exe keeps no count of
+  demos (rotate_demo.cfg's file_limit is the hook's). `HostedGame`'s
+  autoDemo; not rewritten: message 9 (its event isn't mapped), whether a
+  map change (`0x004bc850`) stops it, setAutoRecordRounds.
+- **Camera files** (`.bf2142cam`, `net::CameraKeyframe`, read/write): the
+  same zlib wrapper, no header, a keyframe a tick (`0x005f8d30`, read by
+  `0x005f91f0`): u32 tick, u32 mode (follow only when exactly 1), u8
+  attached, u8 override (read as mode 0), then a free frame's quaternion
+  x, y, z, w and position (zeroed when |p|² > 1e10), or a follow frame's
+  object id, a byte and 5 floats. recordDemo writes `<name>-def.bf2142cam`
+  only with a local player. The `demo` command-line option names a con
+  file of demo.* options (`0x0043a3a0`: demomode playback/record/render/
+  rendersound, cameramode, demofile, camerafile, the render settings,
+  timedemo...).
+- **Playback controls** (the demo interface, vtable `0x00928fa8`):
+  toggleDemoPauseOrPlay (slot 0x5c, `0x004b32d0`: the game speed 0 or
+  100), restartDemo (slot 0x48, `0x004b3190`: world and ghosts reset,
+  `0x00582340`, the demo again from its start), shutdownDemo
+  (`0x00404750`). `bf2142 --demo` binds them. Not rewritten: the demo
+  camera and its controls (togglePlayerDemo `0x005fa440` / `0x005fa470`,
+  toggleCameraDemo `0x005fa130`, adjustDemoFov), playing camera files,
+  render and timedemo modes (`0x00432ee0`: timedemo_report.txt).
 
 ### The control-object record and prediction
 
@@ -3630,7 +3850,11 @@ hit points going down, `0x00655460`; once until repaired), destroyed
 field as destroyedMessage, and enemyDestroyedMessage; arms repaired),
 repaired (`0x006571d0`, event 0x19, when armed; re-arms the others),
 spawn (`0x00657120` from createObject `0x004ab8a0`) and fire
-(`0x00656dd0`; its gate, fire.radioMessageDelay, not traced, not sent).
+(`0x00656dd0`, slot 0x54: from the firearm's batch fire `0x005c3cb0` in
+fire state 4, every shot, no timer: friendlyFireMessage to its team,
+enemyFireMessage to the other; only the Titan missile silos' firearm has
+them; fire.radioMessageDelay is the laser painter's, `0x005e1730`, its
+"laserpaint" call's delay).
 Team changes (`0x00656e80` from a control point's setTeam `0x005cc320`)
 play for the local player only (game slot 0x60, `0x0042e820`): to no team
 neutralTeamChangeMessage if it was the local team's, else friendly if the
@@ -3638,10 +3862,23 @@ local player is on the new team and enemy if not (SiloSyncEvent's "_N"
 suffix, `0x00514030`, not added). The weapons' failMessage (a refused pull
 of the trigger, `0x005c2ee0`) and useMessage (the shot) are the player's
 own on TCLocalTeam (10, game slot 0x50), once until a reload re-arms them
-(`0x005c58a0`). `GameAudio::autoRadio` (objects) and `GameWorld`'s fire
-(weapons). Not sent: takeable / not takeable (local, delayed by
-radio.delay through a timed event 2/0x52 whose handler wasn't found; the
-rewrite's control points have no takeable state), fire. The
+(`0x005c58a0`). Takeable / not takeable: a control point's
+allowCaptureByTeam setter (CP slot 0x34, `0x005bcd00`; every set, from the
+scripts' cp_setParam `0x00569510` on the host or the ghost's mask 8 / 0x10
+on a client, `0x006084b0`) tells the point's Radio (slots 0x60 / 0x64,
+`0x00656fc0` / `0x006567b0`) when the point needs supply groups for that
+team: for the local player (none on a dedicated server), team 1 or 2,
+friendlyTakeable / enemyTakeable or friendlyNotTakeable /
+enemyNotTakeable as the local team is that team or not; with radio.delay
+(an int, template `+0x218`) over 0 it goes as timed event 2/0x52 that many
+seconds on, whose handler (`0x00758cd0`, the HUD manager's `0x00756b60`)
+plays it as is, else at once. Only Assault Lines' points have them. The
+SiloSyncEvent's "_N" (`0x00514030`, `sprintf("_%d")` into the Radio's
+`+0x18`) is appended to the team-change messages. `GameAudio::autoRadio`
+(objects, takeable), `GameWorld`'s fire (weapons) and the silos' launch.
+Not rewritten: a joined client's takeable radio (its ghost's bits aren't
+applied to a world), the "_N" suffix, destroyedGameEvent (no reader).
+The
 closeToIndication* and indicationDistance* aren't radio: the server's
 0.2 s scan (`0x0059a6c0`) posts events 0x3e / 0x3f as a player comes
 within or leaves them; not rewritten. spottedMessage is the HUD's and the
@@ -5557,7 +5794,8 @@ outside (player `+0x294`) is 0; outside it runs, and past the timer
 (`0x004cac70`: a soldier's is timeAllowedOutside, a vehicle's its
 category's) the soldier takes `damage` each tick (not by the second: 100
 kills at once). The time goes to the client in the player networkable's
-0x800 part (whole seconds here; the byte's scale isn't settled), whose HUD
+0x800 part as (u8)floor(seconds) in 9 bits (`0x00592410` at `0x592856`,
+no clamp; the client takes it back as whole seconds, `0x599209`), whose HUD
 shows "TIME UNTIL PUNISH: #TIME#" (`0x0044c7b0`; the timer less the time
 outside, `GameWorld::combatAreaTimeLeft`) and plays the commander's
 "leaving_the_combat_area" on the first frame. Abandoned vehicles with
@@ -6530,8 +6768,15 @@ The urgencies:
   `+0x248`) and when the plan's target condition fails while not lobbing
   (0x100dc730).
 - **Aim:** the PID controller of the ControlInfo plugin (0x100e5820:
-  proportional −7, derivative −0.01, angle speed 0.4 on the lead point;
-  yaw limited to 3 × skill + 1). The lead point is the ballistic lead
+  the gains of the bot's control object, MouseTurretAimAt 0x1008e940
+  passing its AI part's `+0x38`: the soldier's SoldierCtrl, proportional
+  −7, derivative −0.01, angle speed 0.4, or the seat's, e.g. a tank
+  gunner's −4 / −1 / 1.5, the as_tank driver's −1.5 / −20 / 0; read
+  through 0x100cf7e0 / 0x100cf800 / 0x100cf820, adaptor slots 0x3c / 0x40
+  / 0x44; on the lead point; yaw limited to 3 × skill + 1). Its outputs
+  go to the control object's look inputs (slots 0x30 / 0x34: lookVertical
+  and lookHorizontal, PIMouseLookY / X in every gunner seat), each only
+  when the PlayerInput's mask has that input. The lead point is the ballistic lead
   (the aim at an object, 0x100d9a60 → 0x100fa6f0, precision 0.5: see
   Helicopters, "The ballistic lead"): the launch direction for the
   weapon's round (speed, drag, gravity; indirect weapons the high arc)
@@ -6549,6 +6794,27 @@ The urgencies:
   with t the time on target over 15 s (BF2142.exe 0x00892b70). acc is
   skill against soldiers.
 
+- **The ControlInfo plug-in** (BF2142.exe, constructor 0x00891d80, AI
+  adaptor vtable 0x009d6b98): `+4` proportionalConstant (−7), `+8`
+  derivativeConstant (−1), `+0xc` angleSpeedConstant (1.5), `+0x10`
+  yawScale (1); the inputs as c_PI indices (0x40 none; each setter also
+  sets the input's bit in its group's 64-bit mask, drive `+0x28`, aim
+  `+0x40`, look `+0x50`): drive throttle `+0x14`, turn `+0x18`, pitch
+  `+0x1c`, roll `+0x20` (setters 0x008856e1, 0x008857f9, 0x008863e8,
+  0x008862d0), aim throttle `+0x30`, vertical `+0x34`, horizontal `+0x38`,
+  roll `+0x3c`, look vertical `+0x48`, horizontal `+0x4c`;
+  setCameraRelativeDofRotationOffsetDeg `+0x60` (radians), the
+  camera-relative min / max rotations `+0x64` / `+0x70` (degrees × π /
+  180, each clamped to ±π: 0x00891fa0, 0x00892070; −π..π by default; the
+  scan statement 0x100f9a90 takes them as the gun's yaw range, free when
+  both are 0 or the range spans ±3.14), maxClimbAngle `+0x58` and
+  maxRollAngle `+0x5c` (adaptor slots 0x7c / 0x80, read only by the plane
+  controller 0x100e6d00; no shipped template sets them), isFloating
+  `+0xfe`. The gains are read by nothing but the aim controller; the
+  drivers' controllers read yawScale (cars, the mech) and the input
+  indices (the helicopters' PIRoll from slot 0x84). `AiPlugin`,
+  `BotManager::aimGainsOf` (looked up once per control object).
+
 ### Strategy (SAI, 0x100a2dd0)
 
 - **Choosing a strategy:** each side weighs its strategies by their
@@ -6561,10 +6827,33 @@ The urgencies:
   - Attack value: `100 v / d − penalty` for areas not owned that border
     an owned one.
   - Defence value: `(enemy strength + temp) × 2 × neighbour factor`.
+- **Area units** (0x1005f210): the temperature is the area's base plus
+  each unit's basicTemp (aiTemplate.basicTemp, the AI object's +0x14) ×
+  its certainty, empty vehicles and every seat's object included; the
+  friendly and enemy strengths sum the manned units' battle strengths ×
+  certainty (`+0xc0`, `+0xc8`). A unit's strengths (0x100aa740) are its
+  Unit plug-in's setBattleStrength / setStrategicStrength × the capability
+  factor 0.25 + 0.5 S(ammo) + 0.25 S(health) (0x100aa420); a soldier's
+  battle strengths are the most of its weapons' (0xc4c5 slot 0x74's items)
+  and its strategic ones its kit's kitTemplate's (the one its kit's AI
+  template names, 0x0088c0d0; kitTemplate.create name kitType, vtable
+  0x009d5d68). `BotManager::unitStrengths`, `unitAiOf` (cached per
+  template).
 - **Assignment:** the best NumberOfAttacks and NumberOfDefences areas
   (0x100a21a0, 0x100a2630) get squads, nearest first, until each has its
-  required strength (`2 × max(enemies, 1)`, ×1.25 if not owned). An area
-  releases a spare squad.
+  required strength: the enemies' strategic strengths (each rounded; index
+  1 in an owned area, 0 elsewhere), at least 1, × 2 when owned, else × (2
+  − S(the friendly share of the strengths)) × 1.25. An area releases a
+  spare squad.
+- **Anti-aircraft** (the Armament plug-in's setIsAntiAircraft, 0x00884739;
+  read through 0x100f0840): Fire3d's motion test and doubled temperature
+  take it (0x1007d6c0); the fire plan's ITAir clause (1: fight from where
+  it is; 2: hold the order spot) isn't rewritten.
+- **degeneration, allowedTimeDiff, commonKnowledge** go to AIDLL when an
+  object is registered (0x008a3980 → 0x1003b900): the knowledge decay out
+  of sight, the update throttle (0x100a9e70) and per-team (0, every
+  shipped template) or shared knowledge (0x0088d0d0). Stored, not used:
+  the rewrite's sides know every unit.
 - **Orders:** attack or defend orders go to the area's order position.
   Squads under a human commander keep that player's orders.
 - **Goals** (0x10060300): a bot heads for a spot within 0.8 of the
@@ -7088,8 +7377,11 @@ and walks there.
   vehicle and weapon has its `ai/*.ai`. Levels without
   `StrategicAreas.ai` (three of the 46 with a mesh) leave the original's
   SAI without areas; the rewrite deviates and makes one per control point.
-- **Strategy:** area temperatures (soldier 1, vehicle 20) and strengths
-  (8 per unit; a vehicle's own battle strengths are not read).
+- **Strategy:** every unit's certainty is 1 (the side knows everyone; the
+  original's falls by 1 − S(t / degeneration) out of sight, 0x100a9b90),
+  a unit's ammo counts as full in its capability factor, and a seated
+  soldier counts only through its vehicle's Unit (whether it counts on
+  its own isn't settled).
 - **Revive:** the time left uses the respawn countdown, or 15 s. The
   original also leaves out a body under more than 0.75 m of water and
   0.5 m below its surface.
@@ -7329,7 +7621,34 @@ ask whether it's done.
   The account is checked against OpenSpy's FESL.
 - **Soldiers:** the `soldiers` list, then `connectToSubAccount`.
 - **Offline play:** `Logic.setOfflineMode` with soldiers kept in
-  `bf2142-recomp/profiles.txt` under the user's config directory.
+  `bf2142-recomp/profiles.txt` under the user's config directory, and the
+  soldiers of the account's local profiles (0x1007ab70).
+- **Local profiles** (`LocalProfileManager` in `src/Main/SettingsObjects`;
+  BF2142.exe's, vtable 0x00925968): one folder per profile under
+  `Profiles/`, numbered `%.4d` from 1 with gaps filled (0x004904d0), each
+  with its own `Profile.con`, `General.con`, `Audio.con`, `Video.con` and
+  `Controls.con`, plus `Default/` (made at start-up, 0x0048fc30 /
+  0x0048f2b0: Profile, Audio and Video only). A profile is valid with its
+  four settings files (0x0048ccb0; the original also wants
+  `ServerSettings.con`, which the rewrite, keeping the server pages'
+  values in the menu, does not write). The menu's offline accounts are
+  the profiles without an account: `createOfflineAccount` (0x1004d280)
+  makes one with the defaults and makes it current and Global.con's
+  default user; the `localProfiles` list (0x100396b0) shows those
+  without an account or GameSpy nick, each row's `profileIndex` its place
+  among all; `loginOfflineAccount(index)` (0x1004d450) selects one
+  (0x004903d0, 0x0048f490: the objects reset, its files run, its
+  controls loaded, numTimesLoggedIn counted, the pages and the game given
+  its settings); `deleteLocalProfile(index)` (0x1004c720, 0x00490ca0)
+  removes its folder (never while one is current; the shipped menu does
+  not call it). A soldier's profile is the one whose sub account is its
+  name (0x00491030), selected when it logs in (isTransactionComplete
+  0x10049bf0, offline connectToSubAccount 0x100510c0), else made (master
+  the account, sub the soldier); logging out releases it (0x0048f3a0).
+  There is no rename: `LocalProfile.setName` changes the current one's
+  name for its next save, and no menu page calls it. At start-up the
+  rewrite loads Default and then Global.con's default user (the profile
+  last used), so a run without the menu has its options.
 - **MessageHandler** popups: the game's error texts.
 - **Server lists:** `fillList` and `refreshList` query OpenSpy's master
   server. The columns are those of `0x10079770`.
@@ -7365,7 +7684,39 @@ ask whether it's done.
   totals, until the next map; JOIN GAME skips the rest of `sv.endDelay`.
 - **Sound:** `Sound.playSound(name)` and `stopSound` play the menu sounds
   that `Menu/MenuSounds.con` adds with `sound.addMenuSound` (`rowPress`,
-  `buttonPress`...), through the game's sound manager.
+  `buttonPress`...), through the game's sound manager. The menu music is
+  the mod's `Mod.desc` `<music>` (`sound/music/2142MenuMusic.ogg`; ModInfo
+  +0x8c), streamed by the music player: the game's menu music object
+  (0x007fd030, the game's +0xf4; 0x007fd060) starts it when the menu
+  comes up alone (0x004032b0) and fades it out over 5 s when a game takes
+  over (0x00403370); `Sound.playMenuMusic` / `stopMenuMusic` (SwiffPlayer
+  0x10059dd0 / 0x10059df0, SwiffHost slots 102 / 103: events 0x16 / 0x15)
+  do the same (not in an off-screen shot).
+- **Credits** (`src/UI/Player/Scroller`): `credits.con` fills SwiffHost
+  (`addCredit` 0x0047a0c0, `setScrollSpeed` 0x0046c2a0 clamped to
+  500..4000 twips a second, `setScrollerRect` 0x0046c3a0 left top right
+  bottom, `setScrollFadeSpeed` 0x0046c170 kept for
+  `Multiplay.getScrollFadeSpeed` only), run once when the menu starts
+  (SwiffHost slot 5, 0x004697c0). The credits page sets
+  `scrollerman._isScroller = true` and calls `Logic.enableScroller(true)`
+  (0x1003be40 to 0x0046c2f0: on, from the first line); gameswf then draws
+  the roll in that clip's place (0x100dfe77, 0x100c6ee0, RendDX9
+  0x10117910), in stage coordinates. Each line is localized (names pass
+  as they are), in `StandardTextBold_15` (size 2), `StandardTextBold_13`
+  (1) or `DynamicText_11`, centred in a box 1199/1024 of the width
+  (0x101774b0, 0x10183570), opaque white, cut to the rectangle (a
+  scissor, no fade); 40 slots from the stage's bottom 20 px apart, moving
+  up at the speed, the top one recycled 20 px below the last, looping
+  (0x10177210, 0x10177290, 0x10177190). `cacheCredits` and
+  `getRandomCreditsTexture` have no caller in the shipped menus.
+  `gameModes.con`'s `SwiffHost.addGameMode` names the modes (ModInfo,
+  0x00461740 / 0x00460ff0, "N/A" when unknown) behind the end-of-round
+  `HEADER_<mode>` texts (0x1001beb0); `menuTeams.con`'s
+  `MenuTeamManager.addTeam` / `addKit` and `addWeapon` are kept (their
+  readers, `Profile.getEquipmentName/Description`, `getSprint` and the
+  unlock lists, have no caller in the shipped menus); `addAward` keeps
+  the record 0x00459250 makes. `Logic.getDateString` (0x1003d370,
+  YYYYMMDD) and `getMaxRank` (0x1003b620, 12) answer as the DLL.
 - **Options:** the game, controls, video and audio pages read
   `VideoSettings`, `AudioSettings`, `ControlSettings`, `GeneralSettings`
   (and the server pages `ServerSettings`) with `getX` and write with
@@ -7442,6 +7793,32 @@ ask whether it's done.
   `c_PIMouseLookX/Y` turns at up to 120° a second (the rewrite's rate; the
   original treats the value as the mouse's). Tested with SDL's virtual
   joysticks.
+- **Axis values** (`ControlMaps::value`): an axis input (c_PIYaw ..
+  c_PICameraY) takes its primary mapping, or the secondary while the
+  primary rests (0x00680dc0: under 0.0001 and the secondary above); a
+  trigger is down while either is. Keys or buttons on an axis ramp
+  (0x00680990): while the first key is held (it wins over the second) by
+  the frame's time over the map's +0x40, while the second by as much
+  down, with neither back to 0 by the time over +0x44; both 0.001 s
+  (0x006825b0; set by the map's slots 23 / 24, which nothing calls), so a
+  key is at its end within a millisecond. `keyboardSensitivity` (+0x54)
+  is only stored, written and given to the controls page
+  (`ControlSettings` 0x004980b0 / 0x00498090). A POV hat on an axis pair
+  (kind 4, 0x006807f0; made by the map's slot 12, 0x00682db0, which no
+  console method or script reaches, and not written back) ramps the same
+  way towards its direction: the X input by the angle's sine, the Y input
+  by minus its cosine (up -1), past ±0.001.
+- **Controllers in vehicles:** the viewer's player input carries the
+  vehicle map's `c_PIPitch` and `c_PIRoll` from keys, joystick and
+  gamepad axes and hats (`c_PIYaw` and `c_PIThrottle` already came from
+  them); the driver's pitch and roll are those plus the mouse's share
+  (`SoldierInput::pitchAxis / rollAxis`, `GameWorld::driverInput`), and a
+  move sends them as `PIPitch` / `PIRoll`. The Falcon (`IDFFalcon`, device
+  flag 0x400; the shipped Air and Helicopter maps' secondary pitch and
+  roll) is a real device class, a Novint Falcon haptic controller
+  (0x0067f830, vtable 0x0098e9d8, opened through `bf2142haptics.dll`'s
+  `ConnectHapticAPI`, 0x0067f460, and NovintHFX.dll): not rewritten, its
+  bindings read 0.
 - **Settings and profile objects** (`src/Main/SettingsObjects`): the
   console objects `GeneralSettings` (41 methods and the writer's
   `setBotSkill`, `setLastAwardsCheckDate`, `setLCDDisplayModes`),
@@ -7454,8 +7831,8 @@ ask whether it's done.
   pop-ups and camera shake on, toggle filters 0x4c382), `Audio.con`
   (0x004961a0, the properties written as `setX`), `Video.con`
   (0x00497560), and `Usersettings.con`; under
-  `<config dir>/bf2142-recomp/Profiles/` (`0001/` for the profile's), run
-  at start-up after the game's defaults. The options pages start from
+  `<config dir>/bf2142-recomp/Profiles/` (the current local profile's
+  folder, see Local profiles), run at start-up after the game's defaults. The options pages start from
   their values and write theirs back on apply (the pages' VoiceOverVolume
   is `helpVoiceVolume`, NumberOfVoices `forceNumberOfVoices`, BloomEnabled
   `setUseBloom`). Applied: the volumes (also without the menu), the bots,

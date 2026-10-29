@@ -184,6 +184,11 @@ public:
 	void setLoading(float progress);
 	void setLevelLoaded();
 
+	// A game mode's name from the mod (SwiffHost.addGameMode into ModInfo,
+	// its slot 0x48 0x00460ff0: "N/A" when unknown), behind the
+	// HEADER_<mode> text (0x1001beb0, 0x1001bfd0).
+	std::function<std::string(const std::string& mode)> gameModeName;
+
 	// Logic.readyToPlay: the player pressed JOIN GAME (false) or SPECTATOR (true).
 	std::function<void(bool asSpectator)> onReadyToPlay;
 
@@ -193,6 +198,7 @@ public:
 
 private:
 	void bindEndOfRound();
+	std::string modeName(const std::string& mode) const;
 	void bindLogic();
 	void bindServer();
 	void bindLists();

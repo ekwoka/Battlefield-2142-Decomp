@@ -2,7 +2,9 @@
 
 #include "Console/Console.h"
 
+#include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -236,6 +238,26 @@ SettingsObjects::SettingsObjects()
 	defaults(kAudio);
 	defaults(kVideo);
 	defaults(kGlobal);
+	defaults(kProfile);
+}
+
+void SettingsObjects::resetProfile()
+{
+	// The settings objects' resets (0x0048f490 resets General,
+	// ServerSettings, Audio and Video before a profile's files run); the
+	// global ones and SettingsManager's stay.
+	const auto defaults = [this](const auto& fields) {
+		for (const Field& field : fields) {
+			if (field.list) {
+				m_lists.erase(keyOf(field.method));
+			} else {
+				m_values[keyOf(field.method)] = field.fallback;
+			}
+		}
+	};
+	defaults(kGeneral);
+	defaults(kAudio);
+	defaults(kVideo);
 	defaults(kProfile);
 }
 
@@ -486,6 +508,239 @@ bool SettingsObjects::saveProfile() const
 bool SettingsObjects::saveUserSettings() const
 {
 	return write(file("Usersettings.con", true), userSettingsScript());
+}
+
+// --- The local profiles (LocalProfileManager)
+
+namespace {
+
+bool sameText(const std::string& a, const std::string& b)
+{
+	return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+		return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
+	});
+}
+
+// A Profile.con's LocalProfile.set* strings.
+LocalProfileManager::Entry readProfileFile(const std::filesystem::path& file)
+{
+	LocalProfileManager::Entry entry;
+	std::ifstream in(file);
+	for (std::string line; std::getline(in, line);) {
+		const size_t space = line.find(' ');
+		if (space == std::string::npos) {
+			continue;
+		}
+		const std::string method = line.substr(0, space);
+		std::string value = line.substr(space + 1);
+		while (!value.empty() && (value.back() == '\r' || value.back() == ' ')) {
+			value.pop_back();
+		}
+		if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+			value = value.substr(1, value.size() - 2);
+		}
+		if (method == "LocalProfile.setName") {
+			entry.name = value;
+		} else if (method == "LocalProfile.setGamespyNick") {
+			entry.gamespyNick = value;
+		} else if (method == "LocalProfile.setEmail") {
+			entry.email = value;
+		} else if (method == "LocalProfile.setEAOnlineMasterAccount") {
+			entry.master = value;
+		} else if (method == "LocalProfile.setEAOnlineSubAccount") {
+			entry.sub = value;
+		}
+	}
+	return entry;
+}
+
+} // namespace
+
+std::vector<LocalProfileManager::Entry> LocalProfileManager::list() const
+{
+	std::vector<Entry> out;
+	std::error_code error;
+	if (m_directory.empty() || !std::filesystem::is_directory(m_directory, error)) {
+		return out;
+	}
+	for (const auto& item : std::filesystem::directory_iterator(m_directory, error)) {
+		if (!item.is_directory(error)) {
+			continue;
+		}
+		const std::string folder = item.path().filename().string();
+		if (sameText(folder, "Default")) {
+			continue;
+		}
+		bool valid = true;
+		for (const char* name : {"Profile.con", "General.con", "Audio.con", "Video.con"}) {
+			valid = valid && std::filesystem::exists(item.path() / name, error);
+		}
+		if (!valid) {
+			continue;
+		}
+		Entry entry = readProfileFile(item.path() / "Profile.con");
+		entry.directory = folder;
+		out.push_back(std::move(entry));
+	}
+	// The FileManager's order on the original; by name here.
+	std::sort(out.begin(), out.end(), [](const Entry& a, const Entry& b) { return a.directory < b.directory; });
+	return out;
+}
+
+std::string LocalProfileManager::nextDirectory(const std::vector<std::string>& taken)
+{
+	for (int n = 1;; ++n) {
+		char name[16];
+		std::snprintf(name, sizeof name, "%.4d", n);
+		if (std::none_of(taken.begin(), taken.end(), [&name](const std::string& t) { return sameText(t, name); })) {
+			return name;
+		}
+	}
+}
+
+void LocalProfileManager::ensureDefault()
+{
+	std::error_code error;
+	if (m_directory.empty() || std::filesystem::exists(std::filesystem::path(m_directory) / "Default" / "Profile.con", error)) {
+		return;
+	}
+	const std::string previous = m_settings.profile();
+	m_settings.setDirectory(m_directory, "Default");
+	m_settings.set("LocalProfile.Name", "Default");
+	m_currentDirectory = "Default";
+	save();
+	m_currentDirectory.clear();
+	m_settings.setDirectory(m_directory, previous);
+}
+
+int LocalProfileManager::create(const std::string& name, bool offline, bool reset)
+{
+	if (m_directory.empty() || name.empty() || (offline && m_current >= 0)) {
+		return -1;
+	}
+	// Every folder counts for the number (slot 15 without validate).
+	std::vector<std::string> taken;
+	std::error_code error;
+	for (const auto& item : std::filesystem::directory_iterator(m_directory, error)) {
+		if (item.is_directory(error)) {
+			taken.push_back(item.path().filename().string());
+		}
+	}
+	const std::string folder = nextDirectory(taken);
+	if (reset) {
+		m_settings.resetProfile();
+		if (onResetControls) {
+			onResetControls();
+		}
+	}
+	m_settings.set("LocalProfile.Name", name);
+	m_settings.set("LocalProfile.GamespyNick", "");
+	m_settings.set("LocalProfile.Email", "");
+	if (offline) {
+		m_settings.set("GlobalSettings.DefaultUser", folder);
+		m_settings.set("LocalProfile.EAOnlineMasterAccount", "");
+		m_settings.set("LocalProfile.EAOnlineSubAccount", "");
+	} else {
+		m_settings.set("LocalProfile.EAOnlineMasterAccount", m_settings.get("GlobalSettings.LastOnlineUser"));
+		m_settings.set("LocalProfile.EAOnlineSubAccount", name);
+	}
+	m_settings.setDirectory(m_directory, folder);
+	m_currentDirectory = folder;
+	save();
+	const std::vector<Entry> entries = list();
+	m_current = -1;
+	for (size_t i = 0; i < entries.size(); ++i) {
+		if (entries[i].directory == folder) {
+			m_current = static_cast<int>(i);
+		}
+	}
+	return m_current;
+}
+
+bool LocalProfileManager::load(const std::string& folder)
+{
+	m_settings.resetProfile();
+	m_settings.setDirectory(m_directory, folder);
+	m_settings.set("GlobalSettings.DefaultUser", folder);
+	if (onLoad) {
+		onLoad(folder);
+	}
+	const double times = m_settings.number("LocalProfile.NumTimesLoggedIn", 0);
+	m_settings.set("LocalProfile.NumTimesLoggedIn", std::to_string(static_cast<int>(times) + 1));
+	return true;
+}
+
+bool LocalProfileManager::select(int index)
+{
+	if (m_current >= 0) {
+		return false;
+	}
+	const std::vector<Entry> entries = list();
+	if (index < 0 || index >= static_cast<int>(entries.size())) {
+		return false;
+	}
+	m_currentDirectory = entries[static_cast<size_t>(index)].directory;
+	m_current = index;
+	load(m_currentDirectory);
+	save();
+	return true;
+}
+
+bool LocalProfileManager::remove(int index)
+{
+	if (m_current >= 0) {
+		return false;
+	}
+	const std::vector<Entry> entries = list();
+	if (index < 0 || index >= static_cast<int>(entries.size())) {
+		return false;
+	}
+	const std::string folder = entries[static_cast<size_t>(index)].directory;
+	if (m_settings.get("GlobalSettings.DefaultUser") == folder) {
+		m_settings.set("GlobalSettings.DefaultUser", "");
+	}
+	std::ofstream(std::filesystem::path(m_directory) / "Global.con", std::ios::binary) << m_settings.globalScript();
+	std::error_code error;
+	std::filesystem::remove_all(std::filesystem::path(m_directory) / folder, error);
+	return !error;
+}
+
+void LocalProfileManager::release()
+{
+	m_current = -1;
+	m_currentDirectory.clear();
+}
+
+bool LocalProfileManager::save()
+{
+	if (m_directory.empty() || m_currentDirectory.empty()) {
+		return false;
+	}
+	if (m_currentDirectory == "Default") {
+		const std::filesystem::path dir = std::filesystem::path(m_directory) / "Default";
+		std::error_code error;
+		std::filesystem::create_directories(dir, error);
+		bool ok = static_cast<bool>(std::ofstream(dir / "Profile.con", std::ios::binary) << m_settings.profileScript());
+		ok = static_cast<bool>(std::ofstream(dir / "Audio.con", std::ios::binary) << m_settings.audioScript()) && ok;
+		ok = static_cast<bool>(std::ofstream(dir / "Video.con", std::ios::binary) << m_settings.videoScript()) && ok;
+		return ok;
+	}
+	const bool ok = m_settings.save();
+	if (onSaveControls) {
+		onSaveControls(m_currentDirectory);
+	}
+	return ok;
+}
+
+int LocalProfileManager::findBySub(const std::string& sub) const
+{
+	const std::vector<Entry> entries = list();
+	for (size_t i = 0; i < entries.size(); ++i) {
+		if (entries[i].sub == sub) {
+			return static_cast<int>(i);
+		}
+	}
+	return -1;
 }
 
 } // namespace dice::hfe::menu

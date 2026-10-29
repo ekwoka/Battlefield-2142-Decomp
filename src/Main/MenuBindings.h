@@ -60,8 +60,12 @@
 #include <string>
 #include <vector>
 
+namespace dice::hfe {
+class Console;
+}
 namespace dice::hfe::ui {
 class NativeRegistry;
+class CreditsScroller;
 }
 namespace dice::hfe::input {
 class ControlMaps;
@@ -71,6 +75,7 @@ namespace dice::hfe::menu {
 
 struct RoundSummary;
 class SettingsObjects;
+class LocalProfileManager;
 
 // The ProfileManager's error indices (BF2142.exe 0x004a0980's table).
 enum ProfileError : int {
@@ -235,6 +240,13 @@ public:
 	// (AudioSettings.VoiceOverVolume is helpVoiceVolume, NumberOfVoices
 	// forceNumberOfVoices, VideoSettings.BloomEnabled setUseBloom).
 	void setSettingsObjects(SettingsObjects* objects);
+	// The local profiles (SettingsObjects.h's LocalProfileManager): the
+	// offline accounts (createOfflineAccount, loginOfflineAccount, the
+	// localProfiles list, deleteLocalProfile) and each soldier's own
+	// profile, selected or made when it logs in (SwiffPlayer
+	// isTransactionComplete 0x10049bf0, connectToSubAccount 0x100510c0);
+	// a profile's settings become the pages' (onSettingsApplied is told).
+	void setLocalProfiles(LocalProfileManager* profiles);
 
 	// The display modes the video page offers ("1280x720@60Hz").
 	void setDisplayModes(const std::vector<std::string>& modes);
@@ -301,6 +313,16 @@ private:
 	static std::string loginToken(const LocalAccount& local);
 	void pollJoin();
 	void setSoldierRows(const std::vector<std::string>& soldiers);
+	// The soldier's local profile (isTransactionComplete 0x10049bf0): the
+	// one whose accounts match, else a new one (master the account).
+	void takeProfile(const std::string& account, const std::string& soldier);
+	// A profile was loaded: its settings to the pages and the game.
+	void profileLoaded();
+	// The localProfiles list (0x100396b0): the profiles without an account
+	// or GameSpy nick, each row's profileIndex its place in all of them.
+	void showLocalProfiles();
+	LocalProfileManager* m_profiles = nullptr;
+	std::vector<int> m_localProfileIndices;
 	void log(const std::string& line) const;
 
 	ui::NativeRegistry& m_natives;
@@ -390,5 +412,49 @@ private:
 	uint16_t m_joinPort = 0;
 	MenuMap m_joinMap;
 };
+
+// What the menu's scripts give the game (credits.con, gameModes.con and
+// menuTeams.con, run once when the menu starts: SwiffHost slot 5
+// 0x004697c0, MenuTeamManager slot 4 0x004957f0), as the console objects
+// SwiffHost (singleton 0x00a0f7ac, vtable 0x00924d50) and MenuTeamManager
+// (0x00a0f7b8, vtable 0x00925c40) keep it.
+struct MenuHost {
+	// SwiffHost.addCredit, setScroll*, enableScroller (Scroller.h).
+	ui::CreditsScroller* scroller = nullptr;
+	// SwiffHost.addGameMode (0x0046a580) into ModInfo's map (+0x1c, slot
+	// 0x44 0x00461740): its name by id (slot 0x48 0x00460ff0, the id
+	// lower-cased; "N/A" when unknown).
+	std::map<std::string, std::string> gameModes;
+	std::string gameModeName(const std::string& id) const;
+	// SwiffHost.addAward (0x0046a6e0 into PlayerAwards slot 0x28,
+	// 0x00459250; the first argument unused): kind 1 below id 200, 0 to
+	// 299, 2 to 399, 3 above; keys AWARD_NAME_<id>[_<level> for kind 1].
+	struct Award {
+		int id = 0, level = 0, kind = 0, value = 0;
+		std::string nameKey, descriptionKey;
+	};
+	std::vector<Award> awards;
+	// SwiffHost.setLatestGameVersion.
+	std::string latestGameVersion;
+	// SwiffHost.loadImage (0x0046bfa0): the texture loads (a precache).
+	std::function<bool(const std::string& path)> loadImage;
+	// SwiffHost.joinServer "ip" port queryPort and disconnectGame.
+	std::function<bool(const std::string& host, int port, int queryPort)> joinServer;
+	std::function<bool()> disconnectGame;
+	// MenuTeamManager.addTeam (0x00495be0) name and kit folder, addKit
+	// (0x00494da0) a kit file of the last team, addWeapon (0x00491a60) a
+	// weapon's damage, accuracy and rate of fire (by template, any case).
+	struct Team {
+		std::string name, path;
+		std::vector<std::string> kits;
+	};
+	std::vector<Team> teams;
+	struct WeaponStats {
+		int damage = 0, accuracy = 0, rateOfFire = 0;
+	};
+	std::map<std::string, WeaponStats> weapons; // lower-cased template
+};
+// SwiffHost.* and MenuTeamManager.* into `host`.
+void registerMenuHostConsole(Console& console, MenuHost& host);
 
 } // namespace dice::hfe::menu

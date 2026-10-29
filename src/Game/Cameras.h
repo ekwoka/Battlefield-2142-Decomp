@@ -51,8 +51,9 @@ struct ModeRules {
 	bool inside = true, nose = false, chase = true, frontChase = true, flyBy = true, trace = false, externTrace = false;
 	bool allowNoseCam = true;       // game logic +0x32 (sv.allowNoseCam)
 	bool allowExternalViews = true; // game logic +0x36 (sv.allowExternalViews)
-	// ExternTrace needs the camera's extern target (+0x2dc) to be non-zero;
-	// nothing the rewrite runs sets it.
+	// ExternTrace needs the camera's extern point (+0x2dc, the translation
+	// of the matrix at +0x2ac) to be non-zero; its only setter, ICamera
+	// slot 0x3c (0x006136b0), has no caller in BF2142.exe, so it never is.
 	bool hasExternTarget = false;
 };
 // setMode's refusal (0x00612eb0): FirstPerson becomes Inside; each mode needs

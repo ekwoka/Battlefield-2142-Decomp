@@ -641,9 +641,155 @@ TEST(Effects_QualityLevels)
 	CHECK(s.viewDistance == 250 && s.maxParticles == 300 && s.particleSystemShaderQuality == 1 && s.qualityLevel == 0);
 	CHECK(std::fabs(s.startFadePercentageOfViewDistance - 0.2f) < 1e-6f);
 	CHECK(q.terrainLodSwitchDistance() == 64 && q.undergrowthViewDistanceScale() == 0.5f);
-	CHECK(std::fabs(q.geometryLodFactor() - 0.8f) < 1e-6f && q.skipMipLevels() == 1);
+	CHECK(std::fabs(q.geometryLodFactor() - 0.8f) < 1e-6f && q.skipMipLevels() == 2);
+	// The texture classes (0x10010040, 0x10017ca0): the menu never, the
+	// undergrowth and overgrowth one less, at most one.
+	CHECK(q.skipMipLevels(scene::TextureClass::BundledMesh) == 2 && q.skipMipLevels(scene::TextureClass::Interface) == 0);
+	CHECK(q.skipMipLevels(scene::TextureClass::Undergrowth) == 1 && q.skipMipLevels(scene::TextureClass::Overgrowth) == 1);
+	q.texture = 2;
+	CHECK(q.skipMipLevels(scene::TextureClass::Default) == 1 && q.skipMipLevels(scene::TextureClass::Overgrowth) == 0);
+	// The lighting level (renderer +0x6b4) and what it drops.
+	CHECK(q.lightingLevel() == 0 && q.meshNormalMaps());
+	q.lighting = 2;
+	CHECK(q.lightingLevel() == 1 && !q.meshNormalMaps() && q.meshHemiAndShadows());
+	q.lighting = 1;
+	CHECK(q.lightingLevel() == 3 && !q.meshHemiAndShadows() && !q.staticMeshDirtAndCrack());
 	CHECK(!q.dynamicLightsEnabled() && !q.decalsEnabled());
 	q.viewDistanceScale = 0.1f;
 	q.applyEffects(s);
 	CHECK(s.viewDistance == 200); // at least 200
+}
+
+// A wheel bundle under a wheel's spring follows the wheel's own contact
+// (0x0061bfc0), not a probe under itself.
+TEST(Effects_WheelBundlesFollowTheirContact)
+{
+	world::ObjectTemplateManager templates;
+	addPuff(templates);
+	templates.registerType(5, "WheelEffectBundle");
+	templates.registerType(7, "PlayerControlObject");
+	templates.registerType(9, "Spring");
+	world::ObjectTemplate* dust = templates.create("WheelEffectBundle", "wheel_dust");
+	dust->settings()["material"] = "67";
+	world::ObjectTemplate* spring = templates.create("Spring", "car_wheel_fl");
+	spring->children().push_back({"wheel_dust", {0, 0, 0}, {}});
+	world::ObjectTemplate* car = templates.create("PlayerControlObject", "car");
+	car->children().push_back({"car_wheel_fl", {1, 0, 2}, {}});
+	effects::EffectManager manager(templates);
+	effects::ObjectEffects objects(templates);
+	objects.setGround(
+		[](const effects::Vec3& from, const effects::Vec3&, uint32_t, effects::Vec3& hit, uint32_t& material) {
+			hit = from;
+			material = 2;
+			return true;
+		},
+		[](uint32_t bundle, uint32_t ground) { return bundle == 67 && ground == 2 ? std::string("e_puff") : std::string(); });
+	effects::ObjectEffects::ObjectState state;
+	state.id = 8;
+	state.objectTemplate = car;
+	state.occupied = true;
+	state.wheels.push_back({"car_wheel_fl", false, {1, 0, 2}});
+	objects.update({state}, manager);
+	CHECK(!manager.emitting(8, 1)); // in the air
+	state.wheels[0].contact = true;
+	objects.update({state}, manager);
+	CHECK(manager.emitting(8, 1));
+}
+
+// The WindAffector winds (0x0064b5f0) and the WindManager's sum (0x00703b20).
+TEST(Effects_LocalWinds)
+{
+	using Wind = scene::WindSettings::LocalWind;
+	Wind rotor;
+	rotor.type = Wind::Type::RadialDir;
+	rotor.position = {0, 10, 0};
+	rotor.direction = {0, -1, 0};
+	rotor.speed = 20;
+	rotor.falloff = 20;
+	rotor.radialFalloff = 10;
+	// On the axis 5 m down: (1 - 5/20) x 20 along it (bent 0.2 out, no radial part).
+	auto w = rotor.windAt({0, 5, 0});
+	CHECK(std::fabs(w[1] + 0.8f * 15) < 1e-3f);
+	// Beyond the radial falloff or the reach: none.
+	w = rotor.windAt({11, 9, 0});
+	CHECK(w[0] == 0 && w[1] == 0);
+	w = rotor.windAt({0, -15, 0});
+	CHECK(w[1] == 0);
+	Wind blast;
+	blast.type = Wind::Type::Point;
+	blast.speed = 10;
+	blast.falloff = 10;
+	w = blast.windAt({5, 0, 0});
+	CHECK(std::fabs(w[0] - 7.5f) < 1e-4f);
+	scene::WindSettings all;
+	all.globalWindSpeed = 1;
+	all.localWinds = {blast};
+	w = all.windAt({5, 0, 0});
+	CHECK(std::fabs(w[0] - 7.5f) < 1e-4f && std::fabs(w[2] - 1) < 1e-4f);
+
+	// An object carrying a WindAffector in its tree hands its wind out,
+	// turned with the object.
+	world::ObjectTemplateManager templates;
+	templates.registerType(7, "PlayerControlObject");
+	templates.registerType(10, "Engine");
+	world::ObjectTemplate* engine = templates.create("Engine", "heli_rotor");
+	engine->components().push_back("WindAffector");
+	engine->settings()["windType"] = "RadialDir";
+	engine->settings()["windDirection"] = "0/0/-1";
+	engine->settings()["windSpeed"] = "20";
+	engine->settings()["windFalloff"] = "20";
+	engine->settings()["windRadialFalloff"] = "10";
+	world::ObjectTemplate* heli = templates.create("PlayerControlObject", "heli");
+	heli->children().push_back({"heli_rotor", {0, 2, 0}, {}});
+	effects::EffectManager manager(templates);
+	effects::ObjectEffects objects(templates);
+	effects::ObjectEffects::ObjectState state;
+	state.id = 4;
+	state.objectTemplate = heli;
+	state.position = {10, 0, 0};
+	objects.update({state}, manager);
+	CHECK(objects.localWinds().size() == 1);
+	const Wind& local = objects.localWinds()[0];
+	CHECK(local.type == Wind::Type::RadialDir && std::fabs(local.position[0] - 10) < 1e-4f
+		&& std::fabs(local.position[1] - 2) < 1e-4f && std::fabs(local.direction[2] + 1) < 1e-4f);
+}
+
+// alphaCull, pivotOffset, drawOrder and collisionEnable of a sprite system.
+TEST(Effects_SpriteDrawAndCollision)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* puff = addPuff(templates);
+	puff->settings()["alphaCull"] = "0.2";
+	puff->settings()["pivotOffset"] = "0/-0.5";
+	puff->settings()["drawOrder"] = "Front";
+	puff->settings()["collisionEnable"] = "1";
+	puff->settings()["collisionSpeedAlongNormal"] = "0.5";
+	puff->settings()["gravity"] = "-10";
+	const auto t = effects::ParticleTemplate::fromTemplate(*puff);
+	CHECK(t.alphaCull == 0.2f && t.pivot[1] == -0.5f && !t.drawNewestFirst && t.collision
+		&& t.collisionAlongNormal == 0.5f);
+	effects::EffectManager manager(templates);
+	manager.setGround([](float, float) { return 0.0f; });
+	manager.spawn("e_puff", {0, 1, 0});
+	for (int i = 0; i < 60; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	bool above = true;
+	for (const effects::Particle& p : manager.emitterList()[0]->particles()) {
+		above = above && p.position.y >= -1e-4f;
+	}
+	CHECK(above); // they stay on the ground
+	int sprites = 0;
+	manager.forEachGroup([&](const std::string&, bool, const std::vector<effects::Sprite>& s) {
+		sprites += static_cast<int>(s.size());
+		CHECK(s.empty() || s[0].pivot[1] == -0.5f);
+	});
+	CHECK(sprites > 0);
+	puff->settings()["alphaCull"] = "2"; // above any alpha: nothing drawn
+	effects::EffectManager culled(templates);
+	culled.spawn("e_puff", {0, 1, 0});
+	culled.update(0.5f);
+	int drawn = 0;
+	culled.forEachGroup([&](const std::string&, bool, const std::vector<effects::Sprite>& s) { drawn += static_cast<int>(s.size()); });
+	CHECK(drawn == 0);
 }

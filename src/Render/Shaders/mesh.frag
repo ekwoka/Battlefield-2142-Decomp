@@ -30,11 +30,14 @@ layout(location = 5) in vec2 inDirtCoord;
 layout(location = 6) in vec2 inCrackCoord;
 layout(location = 7) in vec3 inWorldPosition;
 layout(location = 8) in float inObjectY;
+layout(location = 9) in vec3 inBasisX; // the normal map's frame in the world (mesh.vert)
+layout(location = 10) in vec3 inBasisY;
+layout(location = 11) in vec3 inBasisZ;
 
 layout(set = 2, binding = 0) uniform sampler2D diffuseMap;
 layout(set = 2, binding = 1) uniform sampler2D lightMap;
 layout(set = 2, binding = 2) uniform sampler2D detailMap;
-layout(set = 2, binding = 3) uniform sampler2D dirtMap;
+layout(set = 2, binding = 3) uniform sampler2D dirtMap; // bundled and skinned meshes: their normal map
 layout(set = 2, binding = 4) uniform sampler2D crackMap;
 #define SHADOW_UNIFORM_BINDING 1
 #define SHADOW_MAP_BINDING 5
@@ -49,8 +52,9 @@ layout(set = 3, binding = 0) uniform Lighting {
 	vec4 material;     // x: alpha reference (0 = off), y: 1 with a lightmap,
 					   // z: layers (1 detail, 2 dirt, 4 crack) and the kind
 					   // (8 blended, 16 additive, 32 hemi-lit: bundled and
-					   // skinned meshes), w: the object's fade (0 =
-					   // none; else the alpha it is blended with)
+					   // skinned meshes, 64 a normal map, 128 no dynamic
+					   // shadows), w: the object's fade (0 = none; else the
+					   // alpha it is blended with)
 	vec4 uvOffset;     // xy: added to the diffuse coordinates (additive scrolling,
 					   // an atlas's offset); zw: their scale in an atlas (0: none)
 	vec4 tint;         // multiplies the texture (mesh particles' colour)
@@ -71,7 +75,11 @@ layout(set = 3, binding = 0) uniform Lighting {
 // or the detail map's alpha) x StaticSpecularColor. Bundled meshes
 // (RaShaderBM.fx): SpecLUT64SpecularColor at N.H (texel i = (i/255)^64 x
 // sunSpecColor, 0x1014aec0) x the gloss (the colour map's alpha with
-// ColormapGloss, else StaticGloss), killed in the shadows.
+// ColormapGloss, else the normal map's alpha with one, else StaticGloss),
+// killed in the shadows. Skinned meshes (RaShaderSM.fx): pow(N.H,
+// SpecularPower) x the gloss (the normal map's alpha, else StaticGloss) x
+// the sun's specular colour, SpecularPower the material block's default 20
+// (0x10040070 +0x74); without a normal map lit() gives none facing away.
 vec3 specularTerm(vec3 normal, float sunVisible, float gloss)
 {
 	int kind = int(eye.w + 0.5);
@@ -80,7 +88,10 @@ vec3 specularTerm(vec3 normal, float sunVisible, float gloss)
 	}
 	vec3 h = normalize(sunDirection.xyz + normalize(eye.xyz - inWorldPosition));
 	float nh = clamp(dot(normal, h), 0.0, 1.0);
-	float power = kind <= 2 ? 32.0 : 64.0;
+	float power = kind <= 2 ? 32.0 : kind == 5 ? 20.0 : 64.0;
+	if (kind == 5 && dot(normal, sunDirection.xyz) <= 0.0) {
+		return vec3(0.0);
+	}
 	return pow(nh, power) * sunVisible * gloss * specular.rgb;
 }
 
@@ -140,29 +151,44 @@ void main()
 		discard;
 	}
 	vec3 normal = normalize(inNormal);
-	vec3 sun = sunColor.rgb * max(dot(normal, sunDirection.xyz), 0.0);
-	vec3 light;
-	vec3 shine = vec3(0.0);
 	int kind = int(eye.w + 0.5);
 	float gloss = kind == 4 ? albedo.a : specular.w;
 	if (kind == 2) {
 		gloss = (layers & 1) != 0 ? texture(detailMap, inDetailCoord).a : specular.w;
 	}
+	// A normal map (RaShaderBM/SM ps: tex * 2 - 1, renormalised) turns the
+	// per-pixel lighting's normal; its alpha is the gloss unless the colour
+	// map's is (ColormapGloss).
+	vec3 lit = normal;
+	if ((layers & 64) != 0) {
+		vec4 bump = texture(dirtMap, inTexCoord * atlasScale + uvOffset.xy);
+		vec3 n = normalize(bump.xyz * 2.0 - 1.0);
+		lit = normalize(inBasisX * n.x + inBasisY * n.y + inBasisZ * n.z);
+		if (kind != 4) {
+			gloss = bump.a;
+		}
+	}
+	vec3 sun = sunColor.rgb * max(dot(lit, sunDirection.xyz), 0.0);
+	vec3 light;
+	vec3 shine = vec3(0.0);
+	bool shadowed = (layers & 128) == 0;
 	if (material.y > 0.0) {
 		vec4 lightmap = texture(lightMap, inLightmapCoord);
 		float sunVisible = lightmap.g * shadowFactor(inWorldPosition, false);
 		light = 2.0 * (0.52 * lightmap.b * skyColor.rgb + sun * sunVisible);
-		shine = specularTerm(normal, sunVisible, gloss);
+		shine = specularTerm(lit, sunVisible, gloss);
 	} else {
 		// Bundled and skinned meshes (32) take the hemi map (RaShaderBM/SM's
-		// _USEHEMIMAP_); unlit statics the sky colour.
-		vec4 hemi = (layers & 32) != 0 ? hemiLight(inWorldPosition, normal, inObjectY, skyColor.rgb, hemiObject)
+		// _USEHEMIMAP_: by the vertex normal, a skinned mesh's per pixel);
+		// unlit statics the sky colour.
+		vec3 hemiNormal = kind == 5 ? lit : normal;
+		vec4 hemi = (layers & 32) != 0 ? hemiLight(inWorldPosition, hemiNormal, inObjectY, skyColor.rgb, hemiObject)
 									   : vec4(skyColor.rgb, 1.0);
-		float sunVisible = hemi.a * shadowFactor(inWorldPosition, true);
+		float sunVisible = hemi.a * (shadowed ? shadowFactor(inWorldPosition, true) : 1.0);
 		light = hemi.rgb + sun * sunVisible;
-		shine = specularTerm(normal, sunVisible * (sunColor.a > 0.0 ? 1.0 : 0.0), gloss);
+		shine = specularTerm(lit, sunVisible * (sunColor.a > 0.0 ? 1.0 : 0.0), gloss);
 	}
-	light += pointLights(normal);
+	light += pointLights(lit);
 	float alpha = (layers & 8) != 0 ? albedo.a * fade : material.w > 0.0 ? material.w : albedo.a;
 	outColor = vec4(mix(albedo.rgb * light + shine, fogColor.rgb, fog * fog), alpha);
 }

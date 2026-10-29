@@ -19,6 +19,7 @@
 #include "World/TemplateFiles.h"
 #include "World/WorldConsole.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
@@ -347,6 +348,9 @@ TEST(NetHost_PredictionAndSession)
 	std::map<uint32_t, dice::hfe::game::GameWorld::PlayerInfo> botAt;
 	uint32_t records = 0, compared = 0;
 	float worstBot = 0, worstHealth = 0;
+	// The host's at each tick: the server sends at the connection's rate
+	// (20 a second for type 4), so an update can be a tick or two old.
+	std::map<uint32_t, float> healthAt;
 	int frame = 0;
 	const auto step = [&] {
 		++frame;
@@ -388,7 +392,7 @@ TEST(NetHost_PredictionAndSession)
 			const net::RemoteObject* seen = ghost ? world.object(ghost) : nullptr;
 			if (const auto at = seen && seen->hasPosition ? botAt.find(seen->lastTick) : botAt.end(); at != botAt.end()) {
 				worstBot = std::max(worstBot, distance(seen->position, at->second.position));
-				worstHealth = std::max(worstHealth, std::fabs(seen->health - round.hitPoints(at->second.soldier) / 100.0f));
+				worstHealth = std::max(worstHealth, std::fabs(seen->health - healthAt[seen->lastTick] / 100.0f));
 				++compared;
 			}
 		}
@@ -402,6 +406,7 @@ TEST(NetHost_PredictionAndSession)
 		}
 		round.playerInfo(bot, b);
 		botAt[hosted.tickCount() + 1] = b;
+		healthAt[hosted.tickCount() + 1] = round.hitPoints(b.soldier);
 		hosted.tick();
 		round.tick(1.0f / 30);
 		std::this_thread::sleep_for(std::chrono::milliseconds(33)); // about the game's 30 ticks a second
@@ -730,4 +735,25 @@ TEST(GameWorld_SpottedCrosshairTarget)
 	CHECK(!round.squadKnows(1, 0, b));
 	CHECK(round.spotCrosshair(a) == b);
 	CHECK(round.squadKnows(1, 0, b));
+}
+
+// NetworkableInfo.* (Objects/Common/Networkables.con): c_NIGhostAlways is
+// -1, base priorities at most 255, unique and forced ids listed.
+TEST(NetHost_NetworkableInfoMethods)
+{
+	using namespace dice::hfe;
+	Console console;
+	host::registerNetworkableInfoConsoleMethods(console);
+	std::string out;
+	for (const char* line : {"NetworkableInfo.createNewInfo TestAlwaysInfo", "NetworkableInfo.setBasePriority c_NIGhostAlways",
+			 "NetworkableInfo.setPredictionMode PMLinear", "NetworkableInfo.createNewInfo TestHighInfo",
+			 "NetworkableInfo.setBasePriority 300", "NetworkableInfo.setIsUnique 1"}) {
+		console.execute(line, out);
+	}
+	const net::NetworkableInfoTable& t = net::networkableInfos();
+	CHECK(t.basePriority("testalwaysinfo") == -1 && t.infos.at("testalwaysinfo").predictionMode == 1);
+	CHECK(t.basePriority("TestHighInfo") == 255 && t.basePriority("NoSuchInfo") == 1);
+	CHECK(std::find(t.unique.begin(), t.unique.end(), "TestHighInfo") != t.unique.end());
+	console.execute("NetworkableInfo.setIsUnique 0", out);
+	CHECK(std::find(t.unique.begin(), t.unique.end(), "TestHighInfo") == t.unique.end());
 }

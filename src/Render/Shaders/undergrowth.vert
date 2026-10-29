@@ -14,10 +14,15 @@ layout(location = 7) in vec2 inUnusedDetailCoord;
 layout(location = 8) in vec2 inUnusedDirtCoord;
 layout(location = 9) in vec2 inUnusedCrackCoord;
 
+// The simple shader's terrain maps, looked up per vertex (SDL_GPU binds
+// vertex-stage samplers in set 0).
+layout(set = 0, binding = 0) uniform sampler2D vertexColorMap;
+layout(set = 0, binding = 1) uniform sampler2D vertexLightMap;
+
 layout(set = 1, binding = 0) uniform Undergrowth {
 	mat4 viewProjection;
 	vec4 cameraPosition;
-	vec4 fade;            // x: view distance, y: fade factor
+	vec4 fade;            // x: view distance, y: fade factor, z: 1 for the simple shader
 	vec4 terrainTexCoord; // world xz -> terrain patch colormap/lightmap: scale xy, offset zw
 	vec4 swayOffsets[16];
 };
@@ -27,6 +32,12 @@ layout(location = 1) out vec2 outTerrainCoord;
 layout(location = 2) out float outTerrainColorMix;
 layout(location = 3) out float outDepth;
 layout(location = 4) out vec3 outWorldPosition;
+// undergrowth.simpleShaderEnable (Undergrowth.fx VShader_Simple /
+// PShader_Simple, the t0_l*_simple techniques): the terrain's colour and
+// light come with the vertex (APP2VS_Simple TerrainColormap / Lightmap)
+// instead of being read per pixel; w 1 when they do.
+layout(location = 5) out vec4 outTerrainColor;
+layout(location = 6) out vec4 outTerrainLight;
 
 void main()
 {
@@ -41,4 +52,10 @@ void main()
 	outTerrainColorMix = inTerrainColorMix;
 	outDepth = gl_Position.w;
 	outWorldPosition = position;
+	outTerrainColor = vec4(0.0);
+	outTerrainLight = vec4(0.0);
+	if (fade.z > 0.5) {
+		outTerrainColor = vec4(textureLod(vertexColorMap, outTerrainCoord, 0.0).rgb, 1.0);
+		outTerrainLight = vec4(textureLod(vertexLightMap, outTerrainCoord, 0.0).rgb, 1.0);
+	}
 }

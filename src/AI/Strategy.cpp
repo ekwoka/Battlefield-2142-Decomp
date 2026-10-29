@@ -1,5 +1,7 @@
 #include "Strategy.h"
 
+#include "Behaviour.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -206,11 +208,13 @@ bool strategyWeightsChanged(const std::vector<float>& previous, const std::vecto
 	return false;
 }
 
-int requiredStrength(float enemyStrategicStrength, bool owned)
+int requiredStrength(float enemyStrategicStrength, bool owned, float friendlyRatio)
 {
-	// round((2 - S(x)) * max(required, 1)), S(x) = 0 as +0xB0 is never
-	// written; x1.25 for areas not owned.
-	const float required = 2.0f * std::max(std::round(enemyStrategicStrength), 1.0f) * (owned ? 1.0f : 1.25f);
+	// Owned: round((2 - S(+0xb0)) x max(sum, 1)), +0xb0 only set by the
+	// area's constructor (taken as 0); else round((2 - S(the friendly
+	// share of the strengths, +0xb8)) x max(sum, 1) x 1.25).
+	const float sum = std::max(std::round(enemyStrategicStrength), 1.0f);
+	const float required = owned ? 2.0f * sum : (2.0f - scurve(friendlyRatio)) * sum * 1.25f;
 	return static_cast<int>(std::lround(required));
 }
 

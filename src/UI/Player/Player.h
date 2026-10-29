@@ -35,6 +35,7 @@
 #pragma once
 
 #include "Natives.h"
+#include "Scroller.h"
 
 #include "UI/Avm1/Host.h"
 #include "UI/Avm1/Interpreter.h"
@@ -86,6 +87,10 @@ public:
 	// SwiffPlayer 0x100449b0). Null when it cannot be played.
 	using VideoOpener = std::function<std::shared_ptr<VideoSource>(const std::string& url)>;
 	void setVideoOpener(VideoOpener opener) { m_videoOpener = std::move(opener); }
+	// The credits roll (SwiffHost's scroller, Scroller.h), drawn where a
+	// clip has _isScroller set.
+	CreditsScroller& scroller() { return m_scroller; }
+	void drawScroller(Drawer& drawer, std::vector<MenuBatch>& out);
 	void setTraceHandler(std::function<void(const std::string&)> handler) { m_traceHandler = std::move(handler); }
 	// getURL()/fscommand requests that are not movie loads.
 	void setUrlHandler(std::function<void(const std::string& url, const std::string& target)> handler)
@@ -267,6 +272,7 @@ private:
 	NativeRegistry m_natives;
 	FileReader m_reader;
 	VideoOpener m_videoOpener;
+	CreditsScroller m_scroller;
 	std::vector<std::weak_ptr<player::DisplayObject>> m_videoClips; // clips showing a movie
 	bool loadVideo(player::Clip& clip, const std::string& url);
 	void advanceVideos(double seconds);

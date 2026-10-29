@@ -158,4 +158,22 @@ std::optional<DdsTexture> parseDds(const std::vector<uint8_t>& data, std::string
 	return texture;
 }
 
+int skipTopLevels(DdsTexture& texture, int levels, uint32_t minimum)
+{
+	if (texture.cube || texture.depth > 1 || texture.faces.size() != 1) {
+		return 0;
+	}
+	std::vector<TextureLevel>& face = texture.faces[0];
+	int skipped = 0;
+	while (skipped < levels && face.size() > 1 && face[1].width >= minimum && face[1].height >= minimum) {
+		face.erase(face.begin());
+		++skipped;
+	}
+	if (skipped > 0) {
+		texture.width = face[0].width;
+		texture.height = face[0].height;
+	}
+	return skipped;
+}
+
 } // namespace dice::hfe::texture

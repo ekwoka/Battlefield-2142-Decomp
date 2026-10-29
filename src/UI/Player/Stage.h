@@ -55,6 +55,9 @@ public:
 	bool scriptTransformed = false; // script set _x & co.: timeline moves no longer apply
 	bool removed = false;
 	bool isMask = false; // the argument of some setMask(): not drawn itself
+	// DICE's _isScroller (sprite property 0x19, +0xbf): drawn as the
+	// credits roll instead of itself (0x100dfe77, Scroller.h).
+	bool isScroller = false;
 	uint64_t bornTick = 0;
 	std::vector<ClipEvent> events;
 

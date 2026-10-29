@@ -213,6 +213,7 @@ struct LevelStats {
 	bool hemiMap = false;     // a base hemi map loaded
 	size_t cloudLayers = 0;   // the sky's cloud layers drawn
 	bool sunFlare = false;    // a sun flare drawn
+	size_t normalMapped = 0;  // bundled and skinned materials drawn with their normal maps
 };
 
 class LevelRenderer {
@@ -262,8 +263,15 @@ private:
 		// mesh's (StaticMesh.fx: the detail map's alpha as the gloss when it
 		// has one and isn't alpha-tested, RaShaderSTM getCompositeDiffuse),
 		// 3 / 4 a bundled mesh's (BundledMesh.fx: the colour map's alpha with
-		// a "ColormapGloss" technique); 0 none (skinned meshes, additive).
+		// a "ColormapGloss" technique), 5 a skinned mesh's (RaShaderSM:
+		// pow(N.H, SpecularPower 20) x the normal map's alpha, else
+		// StaticGloss); 0 none (additive).
 		int specularKind = 0;
+		// A bundled or skinned mesh's normal map (RaShaderBM/SM
+		// _HASNORMALMAP_) and its space: 1 the tangent's, 2 the object's
+		// (RaShaderSM _OBJSPACENORMALMAP_); 0 none.
+		SDL_GPUTexture* normalMap = nullptr;
+		int normalKind = 0;
 		// A tree's leaves (a static mesh under "vegitation", RendDX9
 		// 0x100de8xx; its alpha-tested materials): RaShaderLeaf's sway.
 		bool leaf = false;
@@ -279,6 +287,10 @@ private:
 		size_t geometries = 1; // in its file
 		size_t lodCount = 1;   // of the geometry drawn
 		std::vector<float> lodDistances; // how far each LOD is drawn (empty: the defaults)
+		// The exterior's first LODs dropped (GeometryTemplate.maxSkip3pLods
+		// capped by the geometry quality's renderer +0x910): its LOD 0 drawn
+		// from LOD skippedLods on.
+		int skippedLods = 0;
 		// The vertices' spheres by part (bundled meshes; one, part 0, for
 		// static ones), in the part's space; unknown for skinned meshes.
 		std::vector<BoundingSphere> partBounds;
@@ -374,7 +386,10 @@ private:
 	// than one).
 	const GpuMesh* mesh(const LevelSources& sources, const std::string& geometryName, int geometryIndex = -1,
 		int lod = 0);
-	SDL_GPUTexture* texture(const io::FileManager& files, const std::string& path);
+	// A texture by path, its top mip levels skipped by its class at the
+	// texture quality (RendDX9's texture classes, scene::TextureClass).
+	SDL_GPUTexture* texture(const io::FileManager& files, const std::string& path,
+		scene::TextureClass textureClass = scene::TextureClass::Default);
 	void addTemplate(const LevelSources& sources, const world::ObjectTemplate& objectTemplate, const Mat4& local,
 		const Mat4& objectWorld, uint32_t object, int depth);
 	void addObject(const LevelSources& sources, const world::Object& object);
@@ -421,6 +436,16 @@ private:
 	std::map<std::string, AtlasEntry> m_overgrowthAtlas;          // by texture path (lower case)
 	std::map<std::string, AtlasEntry> m_overgrowthAlphaTestAtlas; // the alpha-tested ones
 	float m_overgrowthCloseDistance = 0; // the distant mesh from here (0: no overgrowth)
+	// Overgrowth.viewDistance x closeDistPercentage, and viewDistanceScale
+	// (+0x110) as Overgrowth.con set it and as the geometry quality's
+	// switch would (0x10010040: 0.4 / 0.7 / 1) when the quality was loaded.
+	float m_overgrowthCloseBase = 0;
+	float m_overgrowthScriptScale = 1;
+	float m_overgrowthQualityScale = 1;
+	// This frame's close distance: the script's scale, or the quality's
+	// once the video settings change it after the level's script ran (the
+	// switch writes +0x110 when they are applied).
+	float overgrowthCloseDistance() const;
 
 	// The skinned instances' bone poses this frame (shared by the shadow
 	// and world passes), and a submesh's palette into `transforms`.

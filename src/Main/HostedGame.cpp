@@ -1,5 +1,7 @@
 #include "HostedGame.h"
 
+#include "Console/Console.h"
+#include "Console/ConsoleBinding.h"
 #include "Game/GameLogic.h"
 #include "Net/BitStream.h"
 #include "Net/GameProtocol.h"
@@ -7,10 +9,14 @@
 #include "World/ObjectTemplateManager.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <filesystem>
+#include <thread>
 #include <utility>
 
 namespace dice::hfe::host {
@@ -18,8 +24,10 @@ namespace dice::hfe::host {
 namespace {
 
 constexpr float kDegreesPerMouseLookUnit = 5.0f; // 0x0058a6d0's turn per PIMouseLook unit
-constexpr size_t kGhostBudgetBits = 8 * 1100;    // a packet is at most 1472 bytes (0x5c0)
-constexpr uint32_t kRefreshTicks = 60;           // every ghost again after two seconds
+constexpr float kTickSeconds = 1.0f / 30;
+// The ghost block's header (0x00582cd0 reserves 0x2a bits: present, the
+// tick, the count, the record bit).
+constexpr size_t kGhostHeaderBits = 42;
 
 net::GameEvent eventOf(uint32_t type, std::vector<uint32_t> values, std::vector<std::string> bytes = {})
 {
@@ -127,6 +135,7 @@ HostedGame::HostedGame(game::GameWorld& round, game::GameLogic& logic, world::Ob
 			return;
 		}
 		Client& client = found->second;
+		ghostLost(client, sequence, delivered);
 		const auto fresh = client.freshIn.find(sequence);
 		if (fresh == client.freshIn.end()) {
 			return;
@@ -154,6 +163,7 @@ HostedGame::HostedGame(game::GameWorld& round, game::GameLogic& logic, world::Ob
 
 HostedGame::~HostedGame()
 {
+	stopAutoDemo();
 	stopDemo();
 	for (const auto& [id, client] : m_clients) {
 		if (onLog) {
@@ -162,6 +172,50 @@ HostedGame::~HostedGame()
 		}
 	}
 	m_server.stop();
+}
+
+void registerNetworkableInfoConsoleMethods(Console& console)
+{
+	const uint32_t access = ConsoleAccess::Anyone;
+	const auto lower = [](std::string text) {
+		std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		return text;
+	};
+	const auto active = [lower]() -> net::NetworkableInfoTable::Info* {
+		net::NetworkableInfoTable& t = net::networkableInfos();
+		const auto it = t.infos.find(lower(t.active));
+		return it != t.infos.end() ? &it->second : nullptr;
+	};
+	// A name already made is refused (the manager's slot 0x2c(0)).
+	bindMethod(console, "NetworkableInfo.createNewInfo", access, [lower](std::string name) {
+		net::NetworkableInfoTable& t = net::networkableInfos();
+		t.active = name;
+		t.infos.emplace(lower(name), net::NetworkableInfoTable::Info {});
+	});
+	bindMethod(console, "NetworkableInfo.setPredictionMode", access, [active, lower](std::string mode) {
+		if (net::NetworkableInfoTable::Info* i = active()) {
+			i->predictionMode = lower(mode) == "pmlinear" ? 1 : 0;
+		}
+	});
+	// c_NIGhostAlways is -1.0 (0x00669489); at most 255 (0x006ac060).
+	console.registerConstant("c_NIGhostAlways", "-1");
+	bindMethod(console, "NetworkableInfo.setBasePriority", access, [active](float value) {
+		if (net::NetworkableInfoTable::Info* i = active()) {
+			i->basePriority = std::min(value, 255.0f);
+		}
+	});
+	const auto flagList = [lower](std::vector<std::string>& list, bool on) {
+		const std::string name = net::networkableInfos().active;
+		list.erase(std::remove_if(list.begin(), list.end(), [&](const std::string& s) { return lower(s) == lower(name); }),
+			list.end());
+		if (on) {
+			list.push_back(name);
+		}
+	};
+	bindMethod(console, "NetworkableInfo.setIsUnique", access,
+		[flagList](bool on) { flagList(net::networkableInfos().unique, on); });
+	bindMethod(console, "NetworkableInfo.setForceNetworkableId", access,
+		[flagList](bool on) { flagList(net::networkableInfos().forceNetworkableId, on); });
 }
 
 bool HostedGame::start()
@@ -276,7 +330,9 @@ void HostedGame::sendRemoteFeedback(int player, const std::string& text)
 void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, world::ObjectTemplateManager& templates,
 	HostSetup setup)
 {
-	stopDemo(); // a demo is one round's (AutoRecorder stops at the round's end, 0x00585920)
+	stopAutoDemo(); // the round's restart (0x004ba0c0 -> 0x00585920)
+	stopDemo();
+	m_lastRoundState = -1;
 	m_round = &round;
 	m_logic = &logic;
 	m_templates = &templates;
@@ -307,8 +363,12 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 		}
 		client.created.clear();
 		client.sent.clear();
-		client.sentTick.clear();
-		client.cursor = 0;
+		client.ghosts.clear();
+		client.carried.clear();
+		client.lastCarried.clear();
+		client.lostRemovals.clear();
+		client.rescoreIn = 0;
+		client.hasEye = false;
 		client.moves.clear();
 		client.stepping = client.stepped = -1;
 		client.spawnRequested = false;
@@ -520,6 +580,78 @@ bool HostedGame::recordDemo(const std::string& path)
 	return true;
 }
 
+// The AutoRecorder's file name (0x00585620): strftime("%Y-%m-%d %H:%M:%S")
+// of the local time (0x00669050) with every character but 0-9 and '_' as
+// '_', under GSModDirectory's demos/.
+std::string autoDemoPath(const std::string& modDirectory, std::time_t now)
+{
+	char stamp[64] = {};
+	std::tm local {};
+#ifdef _WIN32
+	localtime_s(&local, &now);
+#else
+	localtime_r(&now, &local);
+#endif
+	std::strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M:%S", &local);
+	for (char* c = stamp; *c; ++c) {
+		if (!((*c >= '0' && *c <= '9') || *c == '_')) {
+			*c = '_';
+		}
+	}
+	return modDirectory + "/demos/auto_" + stamp + ".bf2142demo";
+}
+
+// 0x00585860: once the round plays, with sv.autoRecord and no demo running.
+void HostedGame::startAutoDemo()
+{
+	if (m_demo.isOpen() || !m_setup.settings || !m_setup.settings->autoRecord) {
+		return;
+	}
+	const std::string path = autoDemoPath(m_setup.modDirectory, std::time(nullptr));
+	std::error_code ignored;
+	std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ignored);
+	if (recordDemo(path)) {
+		m_autoDemo = path;
+	}
+}
+
+// 0x00585920: the demo stops; the hook (sv.autoDemoHook, run by the
+// recorder's thread 0x005853b0 with the file in quotes, ShellExecuteExA
+// "open") gets it unless the last one is still being handled.
+void HostedGame::stopAutoDemo()
+{
+	if (m_autoDemo.empty()) {
+		return;
+	}
+	stopDemo();
+	const std::string file = m_autoDemo;
+	m_autoDemo.clear();
+	const std::string hook = m_setup.settings ? m_setup.settings->autoDemoHook : std::string();
+	if (m_hookBusy->load()) {
+		if (onLog) {
+			onLog("dep: cannot call auto-recording hook for " + file + ", last file (" + m_lastAutoDemo
+				+ ") is still processing");
+		}
+		return;
+	}
+	if (onLog) {
+		onLog("Uploading demo file " + file + " ...");
+	}
+	m_lastAutoDemo = file;
+	std::error_code missing;
+	if (hook.empty() || !std::filesystem::is_regular_file(hook, missing)) {
+		return; // no hook program (the original's launch fails: "failed to launch hook program")
+	}
+	m_hookBusy->store(true);
+	std::thread([busy = m_hookBusy, command = "\"" + hook + "\" \"" + file + "\""] {
+		const int result = std::system(command.c_str());
+		if (result != 0) {
+			std::fprintf(stderr, "dep: autodemo hook program failed w/ non-zero exit code\n");
+		}
+		busy->store(false);
+	}).detach();
+}
+
 void HostedGame::stopDemo()
 {
 	if (!m_demo.isOpen()) {
@@ -548,12 +680,19 @@ void HostedGame::flushDemo(int32_t time, bool ghosts)
 			m_demoEvents.acknowledge(m_demoSequence, 1);
 		}
 		if (ghosts) {
-			payload.ghosts = ghostsFor(kDemoClient);
+			const net::DemoRates rates = net::demoRates(m_setup.settings ? m_setup.settings->demoQuality : 1);
+			const size_t used = net::writeGamePayload(payload).size() * 8;
+			const size_t cap = static_cast<size_t>(rates.packetBytes) * 8;
+			const size_t demoBits = cap > used ? cap - used : 0;
+			payload.ghosts = ghostsFor(kDemoClient, demoBits);
 		}
 		if (!block && !ghosts) {
 			return;
 		}
-		m_demo.write(time, net::writeGamePayload(payload));
+		const std::vector<uint8_t> bytes = net::writeGamePayload(payload, net::kDemoGhostStateLengthBits);
+		if (!bytes.empty()) { // 0x00516950 writes no empty payload
+			m_demo.write(time, bytes);
+		}
 		if (ghosts || m_demoEvents.idle()) {
 			return;
 		}
@@ -573,8 +712,8 @@ void HostedGame::sendVoteReplies(const std::vector<game::Votes::Reply>& replies)
 		std::memcpy(&seconds, &r.seconds, sizeof seconds);
 		const net::GameEvent e = eventOf(net::kEvVote,
 			{static_cast<uint32_t>(r.target) & 0xff, static_cast<uint32_t>(r.choice) & 0xff,
-				static_cast<uint32_t>(r.topCount) & 0xff, static_cast<uint32_t>(r.target) & 0xff,
-				static_cast<uint32_t>(r.topChoice) & 0xff, static_cast<uint32_t>(std::max(r.needed, 0)) & 0xff,
+				static_cast<uint32_t>(r.yesCount) & 0xff, static_cast<uint32_t>(r.target) & 0xff,
+				static_cast<uint32_t>(r.noCount) & 0xff, static_cast<uint32_t>(std::max(r.needed, 0)) & 0xff,
 				static_cast<uint32_t>(r.voter) & 0xff, static_cast<uint32_t>(r.phase) & 0xff,
 				static_cast<uint32_t>(r.kind) & 0xff, seconds});
 		if (r.to < 0) {
@@ -969,6 +1108,9 @@ void HostedGame::trackObjects()
 		ghost.objectTemplate = t;
 		ghost.layout = layout;
 		ghost.first = m_nextGhost;
+		const auto info = t->settings().find("networkableInfo");
+		ghost.basePriority = info != t->settings().end() ? net::networkableInfos().basePriority(info->second) : 1.0f;
+		ghost.projectile = t->typeName() == "GenericProjectile";
 		m_nextGhost = static_cast<uint16_t>(m_nextGhost + layout->size());
 		m_ghosts[object->id()] = ghost;
 		for (auto& [id, client] : m_clients) {
@@ -992,7 +1134,8 @@ void HostedGame::trackObjects()
 			}
 			for (size_t part = 0; part < it->second.layout->size(); ++part) {
 				client.sent.erase(static_cast<uint16_t>(ghost + part));
-				client.sentTick.erase(static_cast<uint16_t>(ghost + part));
+				client.ghosts.forget(static_cast<uint16_t>(ghost + part));
+				client.lastCarried.erase(static_cast<uint16_t>(ghost + part));
 			}
 		}
 		it = m_ghosts.erase(it);
@@ -1303,11 +1446,13 @@ std::vector<uint8_t> HostedGame::playerStateOf(int player, size_t& bits) const
 		s.player.squadLeader = p.squadLeader;
 		s.player.commander = p.commander;
 		// The time outside the combat area (+0x294, mask 0x800: the
-		// client's "TIME UNTIL PUNISH" countdown); whole seconds, as the
-		// byte's scale isn't settled.
+		// client's "TIME UNTIL PUNISH" countdown): the snapshot's byte is
+		// (u8)floor(+0x294) (0x00592410 at 0x592856), no clamp, in 9 bits
+		// (0x00596100); the client takes it back as whole seconds
+		// (0x599209), so the first second outside reads 0.
 		const float outside = m_round->outsideCombatArea(player);
 		s.mask |= 0x800;
-		s.player.value294 = outside > 0 ? std::clamp(static_cast<int>(std::lround(outside)), 1, 255) : 0;
+		s.player.value294 = outside > 0 ? static_cast<uint8_t>(static_cast<int>(std::floor(outside))) : 0;
 	}
 	net::NetworkableHints hints;
 	hints.kind = net::NetworkableKind::Player;
@@ -1317,7 +1462,7 @@ std::vector<uint8_t> HostedGame::playerStateOf(int player, size_t& bits) const
 	return out.data();
 }
 
-net::GhostBlock HostedGame::ghostsFor(int id)
+net::GhostBlock HostedGame::ghostsFor(int id, size_t budgetBits)
 {
 	net::GhostBlock block;
 	Client& client = m_clients[id];
@@ -1398,68 +1543,245 @@ net::GhostBlock HostedGame::ghostsFor(int id)
 		}
 		block.control = control;
 	}
-	size_t used = 0;
-	const auto add = [&](uint16_t ghost, std::vector<uint8_t> state, size_t bits) {
-		const auto sent = client.sent.find(ghost);
-		const auto when = client.sentTick.find(ghost);
-		const bool due = when == client.sentTick.end() || m_tick - when->second >= kRefreshTicks;
-		if (!due && sent != client.sent.end() && sent->second == state) {
-			return true; // unchanged
-		}
-		if (used + bits + 32 > kGhostBudgetBits || block.updates.size() >= 255) {
-			return false;
-		}
-		used += bits + 32;
-		net::GhostUpdate update;
-		update.kind = 1;
-		update.ghost = ghost;
-		update.state = state;
-		update.stateBits = bits;
-		block.updates.push_back(std::move(update));
-		client.sent[ghost] = std::move(state);
-		client.sentTick[ghost] = m_tick;
-		return true;
-	};
-	// The players' networkables.
-	for (const auto& [player, seen] : m_players) {
-		size_t bits = 0;
-		std::vector<uint8_t> state = playerStateOf(player, bits);
-		add(seen.ghost, std::move(state), bits);
+	const bool demo = id == kDemoClient;
+	const unsigned lengthBits = demo ? net::kDemoGhostStateLengthBits : net::kGhostStateLengthBits;
+	const size_t maxUpdates = demo
+		? static_cast<size_t>(net::demoRates(m_setup.settings ? m_setup.settings->demoQuality : 1).maxUpdates)
+		: net::kGhostEntriesPerPacket;
+	// The rescore (connection +0x20: at most every 0.1 s).
+	if (client.rescoreIn <= 0) {
+		rescore(client);
+		client.rescoreIn = net::kGhostRescoreSeconds;
 	}
-	std::vector<const Ghost*> order;
-	for (const uint16_t g : first) {
-		for (const auto& [object, ghost] : m_ghosts) {
-			if (ghost.first == g) {
-				order.push_back(&ghost);
+	// Each ghost's state this tick, once for every client; a state the
+	// client doesn't have is its dirty masks' stand-in.
+	std::map<uint16_t, int> playerOfGhost;
+	for (const auto& [player, seen] : m_players) {
+		playerOfGhost[seen.ghost] = player;
+	}
+	const auto current = [&](uint16_t ghost) -> const std::pair<std::vector<uint8_t>, size_t>* {
+		if (auto it = m_stateCache.find(ghost); it != m_stateCache.end()) {
+			return &it->second;
+		}
+		std::pair<std::vector<uint8_t>, size_t> entry;
+		if (const auto p = playerOfGhost.find(ghost); p != playerOfGhost.end()) {
+			entry.first = playerStateOf(p->second, entry.second);
+		} else {
+			size_t part = 0;
+			const Ghost* g = ghostOf(ghost, part);
+			if (!g) {
+				return nullptr;
+			}
+			entry.first = stateOf(*g, part, entry.second);
+		}
+		return &(m_stateCache[ghost] = std::move(entry));
+	};
+	// What the block has used: the header and the record.
+	size_t used = kGhostHeaderBits;
+	if (block.control) {
+		net::GhostBlock record;
+		record.present = true;
+		record.control = block.control;
+		net::BitWriter w;
+		net::writeGhostBlock(w, record, lengthBits);
+		used = w.bits();
+	}
+	const uint32_t sequence = m_server.nextSequence(id);
+	std::vector<uint32_t>& carried = client.carried[sequence];
+	carried.clear();
+	const auto fits = [&](size_t bits) { return used + bits <= budgetBits; };
+	// Lost removals first (gm +0x10c0).
+	for (auto it = client.lostRemovals.begin(); it != client.lostRemovals.end();) {
+		if (block.updates.size() >= maxUpdates || !fits(18)) {
+			break;
+		}
+		if (client.ghosts.has(*it)) {
+			it = client.lostRemovals.erase(it); // back in scope meanwhile
+			continue;
+		}
+		net::GhostUpdate update;
+		update.kind = 3;
+		update.ghost = *it;
+		block.updates.push_back(update);
+		used += 18;
+		carried.push_back(0x10000u | *it);
+		client.lastCarried[*it] = sequence;
+		it = client.lostRemovals.erase(it);
+	}
+	// Dirty: an in-scope state whose current state the client lacks.
+	std::vector<uint16_t> scheduled;
+	for (const auto& [object, ghost] : m_ghosts) {
+		for (size_t part = 0; part < ghost.layout->size(); ++part) {
+			scheduled.push_back(static_cast<uint16_t>(ghost.first + part));
+		}
+	}
+	for (const auto& [player, seen] : m_players) {
+		scheduled.push_back(seen.ghost);
+	}
+	for (const uint16_t ghost : scheduled) {
+		const net::GhostScheduler::State* st = client.ghosts.state(ghost);
+		if (!st || st->status != net::GhostScheduler::Status::InScope || st->dirty) {
+			continue;
+		}
+		const auto* now = current(ghost);
+		const auto sent = client.sent.find(ghost);
+		if (now && (sent == client.sent.end() || sent->second != now->first)) {
+			client.ghosts.markDirty(ghost);
+		}
+	}
+	// The heap (0x005823c0) and the writes (0x00582cd0): at most the
+	// block's updates; one that doesn't fit is skipped until under 24 bits
+	// are left.
+	for (const uint16_t ghost : client.ghosts.queue()) {
+		if (block.updates.size() >= maxUpdates || used + net::kGhostMinimumBitsLeft > budgetBits) {
+			break;
+		}
+		const net::GhostScheduler::State* st = client.ghosts.state(ghost);
+		if (!st) {
+			continue;
+		}
+		net::GhostUpdate update;
+		update.ghost = ghost;
+		if (st->status == net::GhostScheduler::Status::OutOfScope) {
+			if (!fits(18)) {
+				continue;
+			}
+			update.kind = 3;
+			used += 18;
+			block.updates.push_back(update);
+			client.sent.erase(ghost);
+			client.ghosts.written(ghost);
+			carried.push_back(0x10000u | ghost);
+			client.lastCarried[ghost] = sequence;
+			continue;
+		}
+		const auto* now = current(ghost);
+		if (!now) {
+			client.ghosts.written(ghost);
+			continue;
+		}
+		const size_t bits = 2 + 16 + 1 + lengthBits + now->second;
+		if (!fits(bits) || now->second >= (size_t {1} << lengthBits)) {
+			continue;
+		}
+		used += bits;
+		update.kind = 1;
+		update.state = now->first;
+		update.stateBits = now->second;
+		block.updates.push_back(std::move(update));
+		client.sent[ghost] = now->first;
+		client.ghosts.written(ghost);
+		carried.push_back(ghost);
+		client.lastCarried[ghost] = sequence;
+	}
+	return block;
+}
+
+// The rescore (0x0057dc10) for a client: everything not always out of
+// scope (0x00581d40); the always ghosts (a negative base priority, and the
+// players' networkables, which have no object) at 255; each tree within
+// the radius scored by its root (0x0057d300) and each ghost of it at
+// (score + 0.3 for a projectile) x its base priority (0x0057d560); each
+// living teammate's soldier or vehicle at least 0.03. The demo connection
+// takes everything at 1 (0x0057d8f0). Not rewritten: the commander's
+// satellite scan and the UAV (enemies at 0.5), his soldiers with +0x29c
+// set (0.03), OptimizeEnclosingObjectsNetworking, and the eye of player
+// vt+0xd4 (a team object's). The client's own soldier and vehicle are
+// scored like the rest here (the original skips the player's own, which
+// the record carries); the eye is the soldier's head, kept from its last
+// life while it has none (the original's camera object).
+void HostedGame::rescore(Client& client)
+{
+	net::GhostScheduler& g = client.ghosts;
+	g.beginRescore();
+	for (const auto& [player, seen] : m_players) {
+		g.setPriority(seen.ghost, -1, false);
+	}
+	const auto everyPart = [&](const Ghost& ghost, float p, bool keepMax) {
+		if (!client.created.count(ghost.first)) {
+			return;
+		}
+		for (size_t part = 0; part < ghost.layout->size(); ++part) {
+			g.setPriority(static_cast<uint16_t>(ghost.first + part), p, keepMax);
+		}
+	};
+	for (const auto& [object, ghost] : m_ghosts) {
+		if (ghost.basePriority < 0) {
+			everyPart(ghost, -1, false);
+		}
+	}
+	game::GameWorld::PlayerInfo me;
+	if (client.player >= 0 && m_round->playerInfo(client.player, me) && me.alive) {
+		const float yaw = me.yaw * 0.017453292f, pitch = me.aimPitch * 0.017453292f;
+		client.eye.position = {me.position.x, me.position.y + 1.6f, me.position.z};
+		client.eye.forward = {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+		client.eye.radius = net::ghostScopeRadius(850); // GSViewDistance's default (0x004cc8d0)
+		client.hasEye = true;
+	}
+	const bool everything = client.player < 0 || !client.hasEye;
+	for (const auto& [object, ghost] : m_ghosts) {
+		if (ghost.basePriority < 0) {
+			continue;
+		}
+		if (everything) {
+			everyPart(ghost, 1, false);
+			continue;
+		}
+		if (ghost.basePriority == 0) {
+			continue; // never scored
+		}
+		const world::Object* o = m_round->objects().find(object);
+		if (!o) {
+			continue;
+		}
+		net::GhostVec3 velocity;
+		if (const auto m = m_motion.find(object); m != m_motion.end()) {
+			velocity = {m->second.velocity.x, m->second.velocity.y, m->second.velocity.z};
+		}
+		const float score = net::ghostScore(client.eye, {o->position().x, o->position().y, o->position().z}, velocity);
+		if (score > 0) {
+			everyPart(ghost, (score + (ghost.projectile ? net::kGhostProjectileBonus : 0)) * ghost.basePriority, false);
+		}
+	}
+	if (everything) {
+		return;
+	}
+	for (const auto& [player, seen] : m_players) {
+		game::GameWorld::PlayerInfo p;
+		if (player == client.player || !m_round->playerInfo(player, p) || !p.alive || p.team != me.team) {
+			continue;
+		}
+		const auto it = m_ghosts.find(p.vehicle ? p.vehicle : p.soldier);
+		if (it != m_ghosts.end() && it->second.basePriority > 0) {
+			everyPart(it->second, net::kGhostTeammatePriority, true);
+		}
+	}
+}
+
+// A packet's fate (0x005830e0): lost, what it carried that no later packet
+// carried goes again at 10000 (a lost removal first next packet).
+void HostedGame::ghostLost(Client& client, uint32_t sequence, bool delivered)
+{
+	const auto it = client.carried.find(sequence);
+	if (it == client.carried.end()) {
+		return;
+	}
+	if (!delivered) {
+		for (const uint32_t entry : it->second) {
+			const uint16_t ghost = static_cast<uint16_t>(entry & 0xffff);
+			const auto last = client.lastCarried.find(ghost);
+			if (last == client.lastCarried.end() || last->second != sequence) {
+				continue;
+			}
+			if (entry & 0x10000u) {
+				client.lostRemovals.push_back(ghost);
+			} else {
+				client.sent.erase(ghost);
+				client.ghosts.markDirty(ghost, true);
 			}
 		}
 	}
-	std::vector<const Ghost*> all;
-	for (const auto& [object, ghost] : m_ghosts) {
-		if (client.created.count(ghost.first)) {
-			all.push_back(&ghost);
-		}
-	}
-	for (size_t i = 0; i < all.size(); ++i) {
-		order.push_back(all[(client.cursor + i) % all.size()]);
-	}
-	size_t visited = 0;
-	for (const Ghost* ghost : order) {
-		bool fitted = true;
-		for (size_t part = 0; part < ghost->layout->size() && fitted; ++part) {
-			size_t bits = 0;
-			std::vector<uint8_t> state = stateOf(*ghost, part, bits);
-			fitted = add(static_cast<uint16_t>(ghost->first + part), std::move(state), bits);
-		}
-		if (!fitted) {
-			break;
-		}
-		++visited;
-	}
-	if (!all.empty()) {
-		client.cursor = (client.cursor + std::max<size_t>(1, visited > first.size() ? visited - first.size() : 1)) % all.size();
-	}
-	return block;
+	client.carried.erase(it);
 }
 
 void HostedGame::tick()
@@ -1468,6 +1790,12 @@ void HostedGame::tick()
 		return; // between levels: the clients' packets wait in the socket
 	}
 	++m_tick;
+	m_stateCache.clear();
+	// The AutoRecorder starts when the round turns to playing (state 3).
+	if (m_logic->roundState() == 3 && m_lastRoundState != 3) {
+		startAutoDemo();
+	}
+	m_lastRoundState = m_logic->roundState();
 	m_motion.clear();
 	for (const game::GameWorld::VehicleInfo& v : m_round->vehicleList()) {
 		m_motion[v.object] = {v.velocity, v.angularVelocity};
@@ -1550,9 +1878,19 @@ void HostedGame::tick()
 		sendToPlaying(eventOf(net::kEvEndOfRound,
 			{0, static_cast<uint32_t>(m_logic->winner()), static_cast<uint32_t>(m_logic->victoryType())}));
 	}
-	m_server.sendTick([this](int client) { return ghostsFor(client); });
+	for (auto& [id, client] : m_clients) {
+		client.rescoreIn -= kTickSeconds;
+	}
+	m_server.sendPaced([this](int client, size_t bits) { return ghostsFor(client, bits); }, kTickSeconds);
 	if (m_demo.isOpen()) {
-		flushDemo(static_cast<int32_t>(m_tick), true);
+		// The demo connection is paced by sv.demoQuality's rate too
+		// (0x004b02a0 adds 1 / its packets a second).
+		m_demoSendIn -= kTickSeconds;
+		if (m_demoSendIn <= 0) {
+			const net::DemoRates rates = net::demoRates(m_setup.settings ? m_setup.settings->demoQuality : 1);
+			m_demoSendIn += 1.0f / static_cast<float>(rates.packetsPerSecond);
+			flushDemo(static_cast<int32_t>(m_tick), true);
+		}
 	}
 }
 

@@ -4,6 +4,7 @@
 #include "Console/Console.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 
 namespace dice::hfe::input {
@@ -32,17 +33,30 @@ const ControlMaps::Map* ControlMaps::find(const std::string& name) const
 	return it == m_maps.end() ? nullptr : &it->second;
 }
 
-const std::vector<Binding>* ControlMaps::bindings(const std::string& map, const std::string& input) const
+const std::vector<Binding>* ControlMaps::bindings(const std::string& map, const std::string& input,
+	const std::string** found) const
 {
 	const std::string common = input.compare(0, 4, "c_GI") == 0 ? kGame : kPlayer;
 	for (const std::string& name : {map, common}) {
-		if (const Map* m = find(name)) {
-			if (const auto it = m->find(input); it != m->end() && !it->second.empty()) {
-				return &it->second;
+		const auto m = m_maps.find(name);
+		if (m == m_maps.end()) {
+			continue;
+		}
+		if (const auto it = m->second.find(input); it != m->second.end() && !it->second.empty()) {
+			if (found) {
+				*found = &m->first;
 			}
+			return &it->second;
 		}
 	}
 	return nullptr;
+}
+
+bool ControlMaps::isAxisInput(const std::string& input)
+{
+	// c_PIYaw 0 .. c_PICameraY 7 (0x00669baf).
+	const int number = inputNumber(input);
+	return input.compare(0, 4, "c_PI") == 0 && number >= 0 && number <= 7;
 }
 
 float ControlMaps::value(const std::string& map, const std::string& input, const IsDown& down) const
@@ -52,28 +66,117 @@ float ControlMaps::value(const std::string& map, const std::string& input, const
 	return value(map, input, source);
 }
 
-// 0x00680b00: each mapping's value by its kind (axis 0x006802c0, keys or
-// buttons as an axis 0x00680990, triggers 0x006803f0), summed here over
-// the input's primary and secondary bindings.
-float ControlMaps::value(const std::string& map, const std::string& input, const Source& source) const
+namespace {
+
+// 0x00680990's step: towards +1 while `up`, else towards -1 while `down`,
+// else back towards 0 (FUN_00562d80 keeps the sign).
+float ramp(float value, bool up, bool down, float seconds, float rampUp, float rampDown)
 {
-	const std::vector<Binding>* list = bindings(map, input);
-	if (!list) {
-		return 0;
+	if (up) {
+		return std::min(1.0f, value + seconds / rampUp);
 	}
-	float value = 0;
-	for (const Binding& binding : *list) {
+	if (down) {
+		return std::max(-1.0f, value - seconds / rampUp);
+	}
+	const float left = std::max(0.0f, std::fabs(value) - seconds / rampDown);
+	return value < 0 ? -left : left;
+}
+
+} // namespace
+
+// One mapping (a slot's bindings) by its kind (0x00680b00): an axis
+// (0x006802c0), keys or buttons as an axis (0x00680990, ramped), a POV hat
+// (0x006807f0, ramped), a trigger's keys and buttons (0x006803f0: 1 while
+// one is down).
+float ControlMaps::slotValue(const std::string& map, const std::string& input, const std::vector<Binding>& list, int slot,
+	const Source& source) const
+{
+	const bool axisInput = isAxisInput(input);
+	bool any = false, up = false, down = false;
+	float axis = 0;
+	bool hasAxis = false;
+	for (const Binding& binding : list) {
+		if (binding.slot != slot) {
+			continue;
+		}
+		any = true;
 		if (binding.kind == Binding::Kind::Axis) {
 			// Axis to axis (hold); axis to trigger is the mouse wheel's,
 			// counted by the window.
 			if (binding.hold && source.axis) {
-				value += source.axis(binding) * binding.sign;
+				axis += source.axis(binding) * binding.sign;
+				hasAxis = true;
+			}
+		} else if (binding.kind == Binding::Kind::Pov) {
+			const int angle = source.pov ? source.pov(binding) : -1;
+			if (angle != -1) {
+				const float radians = static_cast<float>(angle) * 0.017453292f * 0.01f;
+				// X: the sine; Y: the cosine, up (0 degrees) towards -1.
+				const float v = binding.povX ? std::sin(radians) : -std::cos(radians);
+				up |= v * binding.sign > 0.001f;
+				down |= v * binding.sign < -0.001f;
 			}
 		} else if (source.down && source.down(binding)) {
-			value += binding.sign;
+			(binding.sign > 0 ? up : down) = true;
 		}
 	}
-	return std::clamp(value, -1.0f, 1.0f);
+	if (!any) {
+		return 0;
+	}
+	if (hasAxis) {
+		return axis;
+	}
+	if (!axisInput) {
+		return up || down ? 1.0f : 0.0f;
+	}
+	if (source.seconds <= 0) {
+		return up ? 1.0f : down ? -1.0f : 0.0f;
+	}
+	const MapSettings set = settingsOf(map);
+	float& state = m_ramps[map + "/" + input + "/" + std::to_string(slot)];
+	state = ramp(state, up, down, source.seconds, set.rampUp, set.rampDown);
+	return state;
+}
+
+// 0x00680dc0: an axis input is its primary mapping's value, or the
+// secondary's while the primary rests; a trigger is down while either is.
+float ControlMaps::value(const std::string& map, const std::string& input, const Source& source) const
+{
+	const std::string* found = nullptr;
+	const std::vector<Binding>* list = bindings(map, input, &found);
+	if (!list) {
+		return 0;
+	}
+	const float primary = slotValue(*found, input, *list, 0, source);
+	const float secondary = slotValue(*found, input, *list, 1, source);
+	if (!isAxisInput(input)) {
+		return primary != 0 || secondary != 0 ? 1.0f : 0.0f;
+	}
+	if (std::fabs(primary) < 0.0001f && std::fabs(secondary) > 0.0001f) {
+		return std::clamp(secondary, -1.0f, 1.0f);
+	}
+	return std::clamp(primary, -1.0f, 1.0f);
+}
+
+void ControlMaps::addPovToAxisMapping(const std::string& map, const std::string& inputX, const std::string& inputY,
+	const std::string& device, int pov, bool inverted, int slot)
+{
+	for (int half = 0; half < 2; ++half) {
+		const std::string& input = half == 0 ? inputX : inputY;
+		if (input.empty()) {
+			continue;
+		}
+		std::vector<Binding>& list = m_maps[map][input];
+		list.erase(std::remove_if(list.begin(), list.end(), [slot](const Binding& b) { return b.slot == slot; }), list.end());
+		Binding binding;
+		binding.kind = Binding::Kind::Pov;
+		binding.device = device;
+		binding.control = "IDPov_" + std::to_string(pov);
+		binding.sign = inverted ? -1.0f : 1.0f;
+		binding.slot = slot;
+		binding.povX = half == 0;
+		list.insert(slot == 0 ? list.begin() : list.end(), binding);
+	}
 }
 
 std::string ControlMaps::firstControl(const std::string& map, const std::string& input) const
@@ -160,6 +263,9 @@ std::string ControlMaps::script() const
 					continue;
 				}
 				written[i] = true;
+				if (b.kind == Binding::Kind::Pov) {
+					continue; // 0x00680f90 writes no POV mapping (kind 4)
+				}
 				const std::string slot = std::to_string(b.slot);
 				if (b.kind == Binding::Kind::Axis) {
 					if (b.hold) {

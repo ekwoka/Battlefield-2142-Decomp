@@ -57,7 +57,7 @@ bool GameClient::update()
 				m_demo = {};
 				return false;
 			}
-			handlePayload(payload);
+			handlePayload(payload, kDemoGhostStateLengthBits); // a kind-2 connection's (0x004b4a80)
 			payload.clear();
 		}
 		return true;
@@ -125,10 +125,10 @@ void GameClient::onPacket(const ConnectedPacket& packet)
 	handlePayload(payload);
 }
 
-void GameClient::handlePayload(const std::vector<uint8_t>& payload)
+void GameClient::handlePayload(const std::vector<uint8_t>& payload, unsigned lengthBits)
 {
 	GamePayload decoded;
-	readGamePayload(payload, decoded);
+	readGamePayload(payload, decoded, lengthBits);
 	if (onPayload) {
 		onPayload(decoded);
 	}

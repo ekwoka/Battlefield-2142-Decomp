@@ -139,6 +139,18 @@ ParticleTemplate ParticleTemplate::fromTemplate(const world::ObjectTemplate& t)
 	p.waterSurfaceOffset = number(t, "waterSurfaceOffset", p.waterSurfaceOffset);
 	p.randomIntensity = number(t, "randomIntensity", p.randomIntensity);
 	p.lightMapIntensityOffset = number(t, "lightMapIntensityOffset", p.lightMapIntensityOffset);
+	p.alphaCull = number(t, "alphaCull", p.alphaCull);
+	{
+		const Vec3 pivot = vector(t, "pivotOffset", {0, 0, 0});
+		p.pivot[0] = pivot.x;
+		p.pivot[1] = pivot.y;
+	}
+	if (const std::string* order = setting(t, "drawOrder")) {
+		p.drawNewestFirst = order->size() == 4 && std::tolower(static_cast<unsigned char>((*order)[0])) == 'b';
+	}
+	p.collision = number(t, "collisionEnable", 0) != 0;
+	p.collisionAlongNormal = number(t, "collisionSpeedAlongNormal", p.collisionAlongNormal);
+	p.collisionAlongPlane = number(t, "collisionSpeedAlongPlane", p.collisionAlongPlane);
 	p.lodDistance = lowMediumHigh(t, "LodDistance", p.lodDistance);
 	p.qualityLevel = lowMediumHigh(t, "QualityLevel", p.qualityLevel);
 	p.emitPrio = lowMediumHigh(t, "emitPrio", p.emitPrio);
@@ -279,7 +291,10 @@ void Emitter::simulate(Particle& p, float step, int steps, const EmitContext& co
 	Vec3 wind;
 	if (!t.localSystem && t.windAffectionFactor > 0 && context.wind
 		&& (!context.settings || context.settings->affectedByWind)) {
-		const auto w = context.wind->windAt();
+		// WindManager slot 0x3c at the particle: the global wind and the
+		// local winds reaching it.
+		const auto w = context.wind->localWinds.empty() ? context.wind->windAt()
+														: context.wind->windAt({p.position.x, p.position.y, p.position.z});
 		wind = Vec3 {w[0], w[1], w[2]} * t.windAffectionFactor;
 	}
 	const float drag = saturate(t.airResistanceGraph.at(f)) * t.airResistance * step;
@@ -297,6 +312,19 @@ void Emitter::simulate(Particle& p, float step, int steps, const EmitContext& co
 		p.position += (p.velocity + dv * 0.5f) * step;
 		p.velocity += dv;
 		p.age += step;
+		// collisionEnable: off the ground, the speed across it reversed
+		// and kept by collisionSpeedAlongNormal, along it by ...AlongPlane.
+		if (t.collision && !t.localSystem && context.groundHeight) {
+			const float ground = context.groundHeight(p.position.x, p.position.z);
+			if (p.position.y < ground) {
+				p.position.y = ground;
+				if (p.velocity.y < 0) {
+					p.velocity.y = -p.velocity.y * t.collisionAlongNormal;
+				}
+				p.velocity.x *= t.collisionAlongPlane;
+				p.velocity.z *= t.collisionAlongPlane;
+			}
+		}
 	}
 	if (std::fabs(p.velocity.x) < 0.001f) {
 		p.velocity.x = 0;
@@ -1016,12 +1044,14 @@ void EffectManager::setModifiers(uint32_t anchor, uint32_t tag, float alphaInten
 void EffectManager::collect(const Emitter& emitter, std::vector<Sprite>& out, const ParticleView& view)
 {
 	const ParticleTemplate& t = emitter.particleTemplate();
-	for (const Particle& p : emitter.particles()) {
+	const auto& particles = emitter.particles();
+	for (size_t i = 0; i < particles.size(); ++i) {
+		const Particle& p = particles[t.drawNewestFirst ? particles.size() - 1 - i : i];
 		const float f = std::min(p.age / p.life, 1.0f);
 		const float blend = std::min(t.colorBlendGraph.at(f), 1.0f);
 		float alpha = std::clamp(std::min(t.transparencyGraph.at(f), 1.0f) * p.alpha, 0.0f, 1.0f);
 		const float size = std::min(t.sizeGraph.at(f), 1.0f) * t.particleMaxSize + p.sizeOffset;
-		if (size <= 0 || alpha <= 0) {
+		if (size <= 0 || alpha <= 0 || alpha < t.alphaCull) {
 			continue;
 		}
 		const Vec3 at = emitter.worldPosition(p);
@@ -1033,7 +1063,8 @@ void EffectManager::collect(const Emitter& emitter, std::vector<Sprite>& out, co
 		}
 		const Vec3 color = (t.color1 * (1 - blend) + t.color2 * blend) * p.intensity
 			+ Vec3 {p.randomIntensity, p.randomIntensity, p.randomIntensity};
-		out.push_back({at, size, p.rotation, {color.x, color.y, color.z, alpha}, t.lightMapIntensityOffset});
+		out.push_back({at, size, p.rotation, {color.x, color.y, color.z, alpha}, t.lightMapIntensityOffset,
+			{t.pivot[0], t.pivot[1]}});
 	}
 }
 
@@ -1191,6 +1222,18 @@ void placeChild(const world::ChildTemplate& child, uint32_t object, const Object
 	turn = childTurn * turn;
 }
 
+bool hasWindAffector(const world::ObjectTemplate& t)
+{
+	for (const std::string& component : t.components()) {
+		if (component.size() == 12 && std::equal(component.begin(), component.end(), "WindAffector", [](char a, char b) {
+				return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+			})) {
+			return true;
+		}
+	}
+	return false;
+}
+
 bool holdsBundles(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& t,
 	ObjectEffects::BundleCache& cache, int depth = 0)
 {
@@ -1198,7 +1241,8 @@ bool holdsBundles(const world::ObjectTemplateManager& templates, const world::Ob
 		return found->second;
 	}
 	bool holds = false;
-	if (t.typeName() == "EffectBundle" || t.typeName() == "WheelEffectBundle" || t.typeName() == "AirDraftEffectBundle") {
+	if (t.typeName() == "EffectBundle" || t.typeName() == "WheelEffectBundle" || t.typeName() == "AirDraftEffectBundle"
+		|| hasWindAffector(t)) {
 		holds = true;
 	} else if (depth <= 10) {
 		for (const world::ChildTemplate& child : t.children()) {
@@ -1252,6 +1296,16 @@ std::vector<ObjectEffects::Placed> ObjectEffects::bundlesOf(const world::ObjectT
 					placed.startAtCreation = number(*c, "startAtCreation", 0) != 0;
 					out.push_back(std::move(placed));
 				} else {
+					if (hasWindAffector(*c)) {
+						Placed placed;
+						placed.kind = Placed::Kind::Wind;
+						placed.bundle = c;
+						placed.path = path;
+						placed.chain = chain;
+						placed.position = childAt;
+						placed.rotation = childTurn;
+						out.push_back(std::move(placed));
+					}
 					walk(*c, childAt, childTurn, depth + 1);
 				}
 				path.pop_back();
@@ -1260,6 +1314,29 @@ std::vector<ObjectEffects::Placed> ObjectEffects::bundlesOf(const world::ObjectT
 		};
 	walk(root, {}, {}, 0);
 	return out;
+}
+
+scene::WindSettings::LocalWind ObjectEffects::localWindOf(const world::ObjectTemplate& t, const Vec3& position,
+	const Mat3& rotation)
+{
+	using Wind = scene::WindSettings::LocalWind;
+	Wind wind;
+	const std::string* type = setting(t, "windType");
+	std::string name = type ? *type : std::string();
+	for (char& c : name) {
+		c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+	}
+	wind.type = name == "point" ? Wind::Type::Point
+		: name == "radialdir"   ? Wind::Type::RadialDir
+		: name == "turbulencefield" ? Wind::Type::Turbulence
+									: Wind::Type::Directional;
+	const Vec3 d = normalized(rotation.transform(vector(t, "windDirection", {0, 0, 1})));
+	wind.position = {position.x, position.y, position.z};
+	wind.direction = {d.x, d.y, d.z};
+	wind.speed = number(t, "windSpeed", 0);
+	wind.falloff = number(t, "windFalloff", 0);
+	wind.radialFalloff = number(t, "windRadialFalloff", 0);
+	return wind;
 }
 
 void ObjectEffects::place(const Placed& bundle, uint32_t object, const PartPose& partPose, Vec3& position,
@@ -1278,6 +1355,7 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 	constexpr uint32_t kEntered = 0x20; // event 4: a player entered (0x00593e30)
 	constexpr uint32_t kExited = 0x40;  // event 5: the player left (0x005cea00)
 	std::map<uint32_t, bool> seen;
+	m_localWinds.clear();
 	for (const ObjectState& object : objects) {
 		if (!object.objectTemplate || object.id == 0) {
 			continue;
@@ -1338,6 +1416,16 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 		for (size_t i = 0; i < tracked.bundles.size(); ++i) {
 			Placed& b = tracked.bundles[i];
 			const uint32_t tag = static_cast<uint32_t>(i + 1);
+			if (b.kind == Placed::Kind::Wind) {
+				// The affector's wind, placed with its part (its object's
+				// position and matrix, slots 0x60 / 0x78).
+				if (partPose) {
+					place(b, object.id, partPose, b.position, b.rotation);
+				}
+				m_localWinds.push_back(localWindOf(*b.bundle, object.position + object.rotation.transform(b.position),
+					b.rotation * object.rotation));
+				continue;
+			}
 			if (b.kind != Placed::Kind::Plain) {
 				updateGround(object, tracked.velocity, tracked, i, effects, partPose, view);
 				continue;
@@ -1368,6 +1456,13 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 }
 
 namespace {
+
+bool equalsIgnoreCase(const std::string& a, const std::string& b)
+{
+	return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+		return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
+	});
+}
 
 // A "From" mapping a/b (0x0061bd20's slot 8): 0 at a, 1 at b, clamped.
 float mapping(const std::array<float, 2>& from, float x)
@@ -1455,7 +1550,25 @@ void ObjectEffects::updateGround(const ObjectState& object, const Vec3& velocity
 	Vec3 hit;
 	uint32_t material = 0;
 	float altitude = 0;
-	if (m_probe && m_materialEffect && !idle) {
+	// A wheel's own contact (the vehicle's wheel list, 0x0061bfc0: on while
+	// its wheel touches, at the contact; the ground material from just
+	// above and below it).
+	const ObjectState::WheelContact* wheel = nullptr;
+	if (b.kind == Placed::Kind::Wheel) {
+		for (const ObjectState::WheelContact& w : object.wheels) {
+			for (const std::string& step : b.path) {
+				if (!w.spring.empty() && equalsIgnoreCase(step, w.spring)) {
+					wheel = &w;
+				}
+			}
+		}
+	}
+	if (wheel && m_probe && m_materialEffect && !idle) {
+		if (wheel->contact && m_probe(wheel->point + Vec3 {0, 0.5f, 0}, wheel->point - Vec3 {0, 0.5f, 0}, object.id, hit, material)) {
+			hit = wheel->point;
+			effect = m_materialEffect(g.material, material);
+		}
+	} else if (m_probe && m_materialEffect && !idle) {
 		const bool draft = b.kind == Placed::Kind::AirDraft;
 		// The draft looks along its -y for startDistance + 5; a wheel just
 		// below it (its contact; the rewrite has no wheel contact list here).

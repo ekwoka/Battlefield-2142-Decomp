@@ -5,6 +5,7 @@ add_library(SwfPlayer STATIC
 	Natives.cpp
 	NativeTable.cpp
 	Player.cpp
+	Scroller.cpp
 	Stage.cpp
 	Stencil.cpp
 )

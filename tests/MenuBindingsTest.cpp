@@ -2,6 +2,7 @@
 // and master server: the error mapping, the natives' states, and (with
 // $BF2142_GAME_DIR) the shipped mainMenu.dfm driven from the login page to
 // joining a server.
+#include "Console/Console.h"
 #include "IO/File/ZipArchive.h"
 #include "IO/Localization/Localization.h"
 #include "Input/ControlMap.h"
@@ -10,6 +11,7 @@
 #include "UI/Player/Player.h"
 
 #include <cctype>
+#include <cmath>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -563,4 +565,46 @@ TEST(MenuBindings_Controls)
 		return key == "CONTROLLER_IDFGameController_IDButton_5" ? std::string("Joy Button 5 (loc)") : key;
 	});
 	CHECK(shown(fire, true, false) == "Joy Button 5 (loc)");
+}
+
+// SwiffHost's and MenuTeamManager's console objects (credits.con,
+// gameModes.con, menuTeams.con) and the credits roll's slots: 40 lines 20 px
+// apart from the stage's bottom, moving up at the speed (twips a second,
+// 500..4000), recycled at the top and looping.
+TEST(MenuBindings_MenuHostAndCredits)
+{
+	Console console;
+	ui::CreditsScroller scroller;
+	menu::MenuHost host;
+	host.scroller = &scroller;
+	menu::registerMenuHostConsole(console, host);
+	std::string out;
+	for (const char* line : {"swiffHost.setScrollFadeSpeed 200", "swiffHost.setScrollSpeed 800",
+			 "swiffHost.setScrollerRect 200 195 1000 648", "swiffHost.addCredit \"DIGITAL ILLUSIONS CE\" 2",
+			 "swiffHost.addCredit \"\" 0", "swiffHost.addCredit \"CREDITS_DICE_producer\" 1", "swiffHost.addGameMode \"gpm_cq\" \"Conquest\"",
+			 "MenuTeamManager.addTeam \"EU\" \"objects/kits/eu\"", "MenuTeamManager.addKit \"EU_Recon.con\"",
+			 "swiffHost.addAward 0 105 2 7"}) {
+		CHECK(console.execute(line, out, ConsoleAccess::Anyone) != ConsoleResult::Error);
+	}
+	CHECK(scroller.credits().size() == 3 && scroller.credits()[2].size == 1 && scroller.fadeSpeed() == 200);
+	CHECK(scroller.speed() == 800);
+	scroller.setSpeed(100);
+	CHECK(scroller.speed() == 500);
+	scroller.setSpeed(800);
+	CHECK(host.gameModeName("GPM_CQ") == "Conquest" && host.gameModeName("gpm_ti") == "N/A");
+	CHECK(host.teams.size() == 1 && host.teams[0].kits.size() == 1 && host.teams[0].path == "objects/kits/eu");
+	CHECK(host.awards.size() == 1 && host.awards[0].kind == 1 && host.awards[0].nameKey == "AWARD_NAME_105_2");
+	// On: 40 slots from 768 px, 20 px apart, lines in turn (3 lines loop).
+	scroller.enable(true);
+	CHECK(scroller.slots().size() == 40 && scroller.slots()[0].y == 15360 && scroller.slots()[1].y == 15760);
+	CHECK(scroller.slots()[3].line == 0 && scroller.slots()[4].line == 1);
+	// 20 s at 800 twips a second: 16000 twips up; the first slots gone.
+	for (int i = 0; i < 200; ++i) {
+		scroller.addTime(0.1);
+	}
+	CHECK(scroller.slots().size() == 40 && scroller.slots()[0].y >= -400 && scroller.slots()[0].y < 0);
+	CHECK(std::fabs(scroller.slots()[1].y - scroller.slots()[0].y - 400) < 0.01f);
+	CHECK(scroller.slots().back().line == (scroller.slots().front().line + 39) % 3);
+	scroller.enable(false);
+	CHECK(scroller.slots().empty());
 }

@@ -45,6 +45,15 @@ struct GeometryTemplate {
 	// (RendDX9 0x1007303a): how far each LOD of a geometry is drawn; 0 or
 	// missing for unset.
 	std::vector<std::vector<float>> lodDistances;
+	// GeometryTemplate.maxSkip3pLods / maxSkipWreckLods (RendDX9 0x10073920
+	// / 0x10073a8a; the template's +0xc0 / +0xc4, both 1 by default,
+	// 0x10148e50): the LODs the third-person and wreck geometries may drop
+	// at load, at most the renderer's +0x910 (1 at the low geometry quality,
+	// else 0) and one less than they have (bundled 0x100a31d0, skinned
+	// 0x100d4b..: the first LODs go, the loaders 0x100a3b70 / 0x100d4160
+	// skip their materials).
+	unsigned maxSkip3pLods = 1;
+	unsigned maxSkipWreckLods = 1;
 };
 
 class GeometryTemplateManager {

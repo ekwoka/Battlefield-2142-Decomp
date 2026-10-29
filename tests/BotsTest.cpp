@@ -373,6 +373,70 @@ TEST(Bots_AiTemplatesFillTheSettings)
 	CHECK(settings.aiTemplates.at("as_fav").basicTemp == 8 && !settings.plugin("AS_FAV", "Armament"));
 }
 
+// The ControlInfo plug-in (BF2142.exe 0x00891d80 and the setters after
+// 0x008856e1): the constructor's gains, the inputs as c_PI indices with
+// their masks, and the camera-relative limits in radians clamped to +-pi.
+TEST(Bots_ControlInfoTuning)
+{
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	std::string out;
+	for (const char* line : {"aiTemplatePlugIn.create ControlInfo Plain_Ctrl", "aiTemplatePlugIn.create ControlInfo Gun_Ctrl",
+			 "aiTemplatePlugIn.driveTurnControl PIYaw", "aiTemplatePlugIn.driveThrottleControl PIThrottle",
+			 "aiTemplatePlugIn.aimHorizontalControl PIMouseLookX", "aiTemplatePlugIn.lookVerticalControl PIMouseLookY",
+			 "aiTemplatePlugIn.lookHorizontalControl PIRoll", "aiTemplatePlugIn.proportionalConstant -4",
+			 "aiTemplatePlugIn.derivativeConstant -1", "aiTemplatePlugIn.angleSpeedConstant 0.5",
+			 "aiTemplatePlugIn.setCameraRelativeMinRotationDeg -193.5/-30/0",
+			 "aiTemplatePlugIn.setCameraRelativeMaxRotationDeg 39.5/85/0",
+			 "aiTemplatePlugIn.setCameraRelativeDofRotationOffsetDeg 90", "aiTemplate.create Plain",
+			 "aiTemplate.addPlugIn Plain_Ctrl", "aiTemplate.create Gun", "aiTemplate.addPlugIn Gun_Ctrl"}) {
+		console.execute(line, out);
+	}
+	const game::AiPlugin* plain = settings.plugin("Plain", "ControlInfo");
+	CHECK(plain && plain->proportional == -7 && plain->derivative == -1 && near(plain->angleSpeed, 1.5f));
+	CHECK(plain && plain->yawScale == 1 && plain->lookHorizontal == 0x40 && plain->driveMask == 0);
+	CHECK(plain && near(plain->cameraMin[0], -3.1415927f) && near(plain->cameraMax[2], 3.1415927f));
+	const game::AiPlugin* gun = settings.plugin("Gun", "ControlInfo");
+	CHECK(gun && gun->proportional == -4 && gun->derivative == -1 && near(gun->angleSpeed, 0.5f));
+	CHECK(gun && gun->driveTurn == 0 && gun->driveThrottle == 3 && gun->driveMask == 0x9);
+	CHECK(gun && gun->aimHorizontal == 4 && gun->aimMask == 0x10 && gun->aimVertical == 0x40);
+	CHECK(gun && gun->lookVertical == 5 && gun->lookHorizontal == 2 && gun->lookMask == 0x24);
+	// -193.5 degrees clamps to -pi; 85 degrees is 1.4835 rad.
+	CHECK(gun && near(gun->cameraMin[0], -3.1415927f) && near(gun->cameraMin[1], -0.5235988f));
+	CHECK(gun && near(gun->cameraMax[0], 0.6894051f) && near(gun->cameraMax[1], 1.4835299f));
+	CHECK(gun && near(gun->dofRotationOffset, 1.5707964f));
+	CHECK(game::playerInputIndex("c_PIMouseLookY") == 5 && game::playerInputIndex("PIFire") == 0x40);
+}
+
+// The SAI's strengths (0x1005f210): the Unit plug-in's battle and strategic
+// strengths, the Armament's isAntiAircraft and the kits' kitTemplate; the
+// required strength from the enemies' strategic sum and the friendly share.
+TEST(Bots_StrengthsAndKitTemplates)
+{
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	std::string out;
+	for (const char* line : {"aiTemplatePlugIn.create Unit SoldierUnit", "aiTemplatePlugIn.setBattleStrength Infantry 4.0",
+			 "aiTemplatePlugIn.setBattleStrength LightArmour 2.0", "aiTemplatePlugIn.setStrategicStrength 0 1",
+			 "aiTemplatePlugIn.setStrategicStrength 1 3", "aiTemplatePlugIn.create Armament SoldierArms",
+			 "aiTemplatePlugIn.setIsAntiAircraft 2", "aiTemplate.create Soldier", "aiTemplate.addPlugIn SoldierUnit",
+			 "aiTemplate.addPlugIn SoldierArms", "kitTemplate.create Anti-Vehicle AT", "kitTemplate.setStrategicStrength 0 2",
+			 "kitTemplate.setStrategicStrength 1 2", "kitTemplate.setBattleStrength HeavyArmour 3"}) {
+		console.execute(line, out);
+	}
+	const game::AiPlugin* unit = settings.plugin("Soldier", "Unit");
+	CHECK(unit && unit->battleStrength[0] == 4 && unit->battleStrength[1] == 2 && unit->strategicStrength[1] == 3);
+	const game::AiPlugin* arms = settings.plugin("Soldier", "Armament");
+	CHECK(arms && arms->antiAircraft == 2);
+	const auto kit = settings.kitTemplates.find("anti-vehicle");
+	CHECK(kit != settings.kitTemplates.end() && kit->second.kitType == 3 && kit->second.strategic[0] == 2);
+	CHECK(kit != settings.kitTemplates.end() && kit->second.battle[2] == 3);
+	// Owned: 2 x max(sum, 1); not owned: (2 - S(share)) x max(sum, 1) x 1.25.
+	CHECK(ai::requiredStrength(4, true, 0.9f) == 8);
+	CHECK(ai::requiredStrength(4, false, 0) == 10 && ai::requiredStrength(4, false, 1) == 5);
+	CHECK(ai::requiredStrength(4, false, 0.5f) == 8); // (2 - 0.5) x 4 x 1.25 = 7.5
+}
+
 // The view distance (AIDLL 0x10056b20, BF2142.exe 0x008959f0): set by the
 // scripts, or the game's from the level's fog (where it reaches 0.8),
 // within the level's view distance and 300 m.

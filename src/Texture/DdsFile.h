@@ -43,4 +43,11 @@ std::optional<DdsTexture> parseDds(const std::vector<uint8_t>& data, std::string
 // Bytes of one mip level.
 size_t levelSize(TextureFormat format, uint32_t width, uint32_t height);
 
+// Drops up to `levels` top mip levels of a 2D texture as RendDX9's texture
+// manager does for its texture classes' skips (0x10017710): one at a time
+// while more than one level is left and the next is at least `minimum`
+// (the manager's +0x1c, 4) texels on both sides. Cube and volume textures
+// keep theirs. Returns the levels dropped.
+int skipTopLevels(DdsTexture& texture, int levels, uint32_t minimum = 4);
+
 } // namespace dice::hfe::texture

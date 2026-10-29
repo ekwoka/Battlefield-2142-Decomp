@@ -76,6 +76,7 @@ public:
 	int next(std::vector<uint8_t>& payload);
 	bool finished() const { return m_at >= m_records.size(); }
 	void restart() { m_at = 0, m_tick = 0, m_started = false; } // demo.restartDemo
+	void finish() { m_at = m_records.size(); } // demo.shutdownDemo: next() answers the end
 
 private:
 	std::vector<DemoRecord> m_records;
@@ -83,6 +84,47 @@ private:
 	int m_tick = 0;
 	bool m_started = false;
 };
+
+// sv.demoQuality (1..10, the setter 0x0041f80c; 1 by default) as the demo
+// connection's rates (0x0057b3f0 for a kind-1 connection, 0x0057b582..
+// 0x0057b64c): with f = (q - 1) x 0.11111111, truncated as the original's
+// fistp does, 4 - (int)(f x -16) packets a second (4..20), 0x104 -
+// (int)(f x -3836) bytes a packet (260..4096) and floor(f x 215) + 40
+// ghost updates a block (40..255). 0x004a6160 leaves the rate table out
+// for the demo connection.
+struct DemoRates {
+	int packetsPerSecond = 4;
+	int packetBytes = 260;
+	int maxUpdates = 40;
+};
+DemoRates demoRates(int quality);
+
+// A demo camera file's keyframe (.bf2142cam; the camera object 0x005f93d0:
+// written once a tick by 0x005f8d30 from 0x005f9630, read by 0x005f91f0;
+// the same zlib stream wrapper as a demo, no header). recordDemo writes
+// <name>-def.bf2142cam beside the demo only with a local player (a
+// dedicated server makes none). Each keyframe, little-endian:
+//   u32 tick, u32 mode (follow when exactly 1 on reading), u8 attached,
+//   u8 override (the reader then takes mode 0);
+//   mode 0, attached or override: 7 floats, a quaternion x, y, z, w then
+//     the position (zeroed on reading when |p|^2 > 1e10);
+//   else: u32 the followed object's id, u8, 5 floats (the follow
+//     camera's parameters, not settled).
+struct CameraKeyframe {
+	uint32_t tick = 0;
+	uint32_t mode = 0;
+	bool attached = false, override = false;
+	float rotation[4] = {0, 0, 0, 1};
+	float position[3] = {0, 0, 0};
+	uint32_t followed = 0;
+	uint8_t followFlag = 0;
+	float follow[5] = {0, 0, 0, 0, 0};
+	bool free() const { return mode == 0 || attached || override; }
+};
+std::vector<uint8_t> encodeCameraKeyframes(const std::vector<CameraKeyframe>& frames);
+bool decodeCameraKeyframes(const std::vector<uint8_t>& inflated, std::vector<CameraKeyframe>& frames);
+bool writeCameraFile(const std::string& path, const std::vector<CameraKeyframe>& frames);
+bool readCameraFile(const std::string& path, std::vector<CameraKeyframe>& frames);
 
 // demo.recordDemo's name (0x00432cc0): '\\' as '/', and with no extension
 // Demos/<name>.bf2142demo.

@@ -221,9 +221,9 @@ bool GpuContext::createPipelines(std::string& error)
 	const auto build = [&](const unsigned char* vs, size_t vsSize, const unsigned char* vsMsl, size_t vsMslSize,
 						   const unsigned char* fs, size_t fsSize, const unsigned char* fsMsl, size_t fsMslSize,
 						   uint32_t fragmentSamplers, uint32_t fragmentUniforms,
-						   const char* name, uint32_t vertexUniforms = 1) -> SDL_GPUGraphicsPipeline* {
-		SDL_GPUShader* vertex =
-			loadShader(m_device, SDL_GPU_SHADERSTAGE_VERTEX, vs, vsSize, vsMsl, vsMslSize, 0, vertexUniforms);
+						   const char* name, uint32_t vertexUniforms = 1, uint32_t vertexSamplers = 0) -> SDL_GPUGraphicsPipeline* {
+		SDL_GPUShader* vertex = loadShader(
+			m_device, SDL_GPU_SHADERSTAGE_VERTEX, vs, vsSize, vsMsl, vsMslSize, vertexSamplers, vertexUniforms);
 		SDL_GPUShader* fragment = loadShader(m_device, SDL_GPU_SHADERSTAGE_FRAGMENT, fs, fsSize, fsMsl, fsMslSize,
 			fragmentSamplers, fragmentUniforms);
 		SDL_GPUGraphicsPipeline* pipeline = nullptr;
@@ -249,7 +249,7 @@ bool GpuContext::createPipelines(std::string& error)
 		k_surrounding_frag_msl_size, 3, 2, "surrounding terrain", 2);
 	m_undergrowthPipeline = build(k_undergrowth_vert_spv, k_undergrowth_vert_spv_size, k_undergrowth_vert_msl,
 		k_undergrowth_vert_msl_size, k_undergrowth_frag_spv, k_undergrowth_frag_spv_size, k_undergrowth_frag_msl,
-		k_undergrowth_frag_msl_size, 5, 2, "undergrowth");
+		k_undergrowth_frag_msl_size, 5, 2, "undergrowth", 1, 2);
 	info.depth_stencil_state.enable_depth_test = false;
 	info.depth_stencil_state.enable_depth_write = false;
 	m_skyPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,

@@ -33,6 +33,11 @@ struct ViewerOptions {
 	// the free camera, which follows it.
 	struct PlayerInput {
 		float throttle = 0, strafe = 0, turnDegrees = 0;
+		// In a vehicle: the map's c_PIPitch and c_PIRoll from keys, joystick
+		// and gamepad axes and POV hats (-1..1; the mouse's own share comes as
+		// turnDegrees and aimPitchDegrees). c_PIYaw is strafe, c_PIThrottle
+		// throttle, from the same devices.
+		float pitch = 0, roll = 0;
 		float aimPitchDegrees = 0;
 		bool sprint = false;
 		bool fire = false;
@@ -198,6 +203,28 @@ public:
 
 private:
 	Window();
+};
+
+// Sound straight to the default playback device, outside the game's sound
+// groups: a menu clip's movie (the Titan tutorial) plays its own sound as
+// Bink does in RendDX9 (0x1011df20 picks BinkOpenDirectSound, and
+// 0x1011e0d0 opens the file with BinkOpen(path, 0), no BINKNOSOUND, and
+// sets no volume), stopped with the clip.
+class AudioOut {
+public:
+	AudioOut() = default;
+	~AudioOut();
+	AudioOut(const AudioOut&) = delete;
+	AudioOut& operator=(const AudioOut&) = delete;
+	// Interleaved stereo floats at `rate` Hz, after what is queued.
+	void queue(const std::vector<float>& samples, int rate);
+	// Drops what is still to play.
+	void clear();
+	double queued() const; // seconds
+
+private:
+	void* m_stream = nullptr; // SDL_AudioStream
+	int m_rate = 0;
 };
 
 // One movie frame as the movie screen draws it, rendered off screen at

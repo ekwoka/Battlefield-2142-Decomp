@@ -6,6 +6,7 @@
 #include "Input/ControlMap.h"
 #include "TestMain.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <set>
@@ -19,6 +20,8 @@ input::ControlMaps::IsDown pressedKeys(std::set<std::string> keys)
 {
 	return [keys](const std::string& control) { return keys.count(control) != 0; };
 }
+
+bool near(float a, float b) { return std::fabs(a - b) < 1e-4f; }
 
 } // namespace
 
@@ -52,7 +55,8 @@ TEST(ControlMap_Formats)
 	const std::string infantry = input::ControlMaps::kInfantry;
 	CHECK(maps.value(infantry, "c_PIThrottle", pressedKeys({"IDKey_W"})) == 1);
 	CHECK(maps.value(infantry, "c_PIThrottle", pressedKeys({"IDKey_S"})) == -1);
-	CHECK(maps.value(infantry, "c_PIThrottle", pressedKeys({"IDKey_W", "IDKey_S"})) == 0);
+	// Both keys: the first one wins (0x00680990 tests it first).
+	CHECK(maps.value(infantry, "c_PIThrottle", pressedKeys({"IDKey_W", "IDKey_S"})) == 1);
 	CHECK(maps.pressed(infantry, "c_PIFire", pressedKeys({"IDButton_0"})));
 	// From the common maps.
 	CHECK(maps.pressed(infantry, "c_PIUse", pressedKeys({"IDKey_E"})));
@@ -68,6 +72,70 @@ TEST(ControlMap_Formats)
 	CHECK(maps.firstControl(infantry, "c_PILie") == "IDKey_X");
 	CHECK(maps.pressed(infantry, "c_PILie", pressedKeys({"IDButton_3"})));
 	CHECK(!maps.pressed(infantry, "c_PILie", pressedKeys({"IDKey_Z"})));
+}
+
+// The keys' ramp on an axis (0x00680990), the primary-or-secondary rule
+// (0x00680dc0) and a POV hat on an axis pair (0x006807f0).
+TEST(ControlMap_RampAndPov)
+{
+	Console console;
+	input::ControlMaps maps;
+	input::registerControlMapConsoleMethods(console, maps);
+	std::string out;
+	for (const char* line : {
+			 "ControlMap.create AirPlayerInputControlMap",
+			 "ControlMap.addKeysToAxisMapping c_PIRoll IDFKeyboard IDKey_D IDKey_A 0",
+			 "ControlMap.addAxisToAxisMapping c_PIRoll IDFGameController_0 IDAxis_0 0 1",
+		 }) {
+		CHECK(console.execute(line, out, ConsoleAccess::Anyone) != ConsoleResult::Error);
+	}
+	const std::string air = input::ControlMaps::kAir;
+	std::set<std::string> keys;
+	float stick = 0;
+	int hat = -1;
+	input::ControlMaps::Source source;
+	source.down = [&keys](const input::Binding& b) { return keys.count(b.control) != 0; };
+	source.axis = [&stick](const input::Binding&) { return stick; };
+	source.pov = [&hat](const input::Binding&) { return hat; };
+	// With the default 0.001 s a frame's time takes a key to its end.
+	source.seconds = 1.0f / 60.0f;
+	keys = {"IDKey_D"};
+	CHECK(maps.value(air, "c_PIRoll", source) == 1);
+	keys.clear();
+	CHECK(maps.value(air, "c_PIRoll", source) == 0);
+	// A slower ramp: 0.5 s up, 0.25 s back.
+	maps.settings(air).rampUp = 0.5f;
+	maps.settings(air).rampDown = 0.25f;
+	source.seconds = 0.1f;
+	keys = {"IDKey_A"};
+	CHECK(near(maps.value(air, "c_PIRoll", source), -0.2f));
+	CHECK(near(maps.value(air, "c_PIRoll", source), -0.4f));
+	keys.clear();
+	CHECK(near(maps.value(air, "c_PIRoll", source), 0.0f));
+	// The primary at rest: the secondary (the stick) counts; the keys win
+	// once they move the value.
+	maps.settings(air).rampUp = maps.settings(air).rampDown = 0.001f;
+	stick = 0.7f;
+	CHECK(near(maps.value(air, "c_PIRoll", source), 0.7f));
+	keys = {"IDKey_A"};
+	CHECK(maps.value(air, "c_PIRoll", source) == -1);
+	keys.clear();
+	stick = 0;
+	// The hat on pitch and roll: right is roll +1, up is pitch -1, the
+	// diagonal both.
+	maps.addPovToAxisMapping(air, "c_PIRoll", "c_PIPitch", "IDFGameController_0", 0, false, 1);
+	hat = 9000;
+	CHECK(maps.value(air, "c_PIRoll", source) == 1);
+	CHECK(maps.value(air, "c_PIPitch", source) == 0);
+	hat = 0;
+	CHECK(maps.value(air, "c_PIPitch", source) == -1);
+	hat = 22500; // down-left
+	CHECK(maps.value(air, "c_PIRoll", source) == -1);
+	CHECK(maps.value(air, "c_PIPitch", source) == 1);
+	hat = -1;
+	CHECK(maps.value(air, "c_PIRoll", source) == 0);
+	// Not written back (the profile writer has no POV mapping).
+	CHECK(maps.script().find("IDPov_") == std::string::npos);
 }
 
 TEST(ControlMap_Shipped)

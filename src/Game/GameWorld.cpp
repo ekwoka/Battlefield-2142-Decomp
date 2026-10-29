@@ -1118,9 +1118,9 @@ VehicleInput GameWorld::driverInput(const SoldierInput& input, float scale, floa
 	VehicleInput driven;
 	driven.throttle = input.throttle * scale;
 	driven.steer = input.strafe * scale;
-	driven.roll = std::clamp(input.turn / 5.0f, -1.0f, 1.0f) * scale;
+	driven.roll = std::clamp(input.turn / 5.0f + input.rollAxis, -1.0f, 1.0f) * scale;
 	driven.pitch = (input.hasPitch ? std::clamp(input.pitch, -1.0f, 1.0f)
-								   : std::clamp(-(input.aimPitch - lastLookPitch) / 5.0f, -1.0f, 1.0f))
+								   : std::clamp(-(input.aimPitch - lastLookPitch) / 5.0f + input.pitchAxis, -1.0f, 1.0f))
 		* scale;
 	driven.crouch = input.pose == SoldierPose::Crouch ? 1.0f : 0.0f;
 	driven.sprint = input.sprint;

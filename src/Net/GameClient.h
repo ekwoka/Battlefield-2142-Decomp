@@ -177,7 +177,7 @@ public:
 
 private:
 	void onPacket(const ConnectedPacket& packet);
-	void handlePayload(const std::vector<uint8_t>& payload);
+	void handlePayload(const std::vector<uint8_t>& payload, unsigned lengthBits = kGhostStateLengthBits);
 	std::function<int(std::vector<uint8_t>&)> m_demo;
 	void handleEvents(const ReliableEventBlock& block);
 	void deliver(const GameEvent& event);

@@ -132,18 +132,65 @@ struct AiPlugin {
 	bool floating = false;
 	// Unit: setHasExposedSoldier (+0x16; the seat value's armour bonus).
 	bool exposedSoldier = false;
+	// Unit (constructor 0x008919d0): setBattleStrength <CombatStrengthType>
+	// <float> (0x00884b1e, +8: 8 floats) and setStrategicStrength <0|1>
+	// <int> (0x00884c6f, +0xc: attack 0, defence 1). The SAI's area
+	// strengths sum the battle ones, its required strength the strategic.
+	std::array<float, 8> battleStrength {};
+	std::array<int, 2> strategicStrength {};
+	// Armament (type 0): setIsAntiAircraft (0x00884739, +8; 0 none, 1, 2).
+	int antiAircraft = 0;
 	// Unit: setSelectKey PIPositionSelectN (read through 0x100aa5f0): the
 	// position key that moves a bot to this seat, N; 0 for none.
 	int selectKey = 0;
-	// ControlInfo.
-	float proportional = 0, derivative = 0, angleSpeed = 0, yawScale = 1;
-	bool hasGains = false;
+	// ControlInfo (BF2142.exe's plug-in, constructor 0x00891d80; the AI
+	// reads it through the adaptor vtable 0x009d6b98). The gains feed only
+	// the aim controller (AIDLL 0x100e5820, from the adaptor's slots
+	// 0x3c/0x40/0x44): +4 proportionalConstant (-7), +8 derivativeConstant
+	// (-1), +0xc angleSpeedConstant (1.5); +0x10 yawScale (1) the mech's
+	// and cars' steering.
+	float proportional = -7, derivative = -1, angleSpeed = 1.5f, yawScale = 1;
+	// The inputs a bot writes (io::PlayerInputMap: a c_PI index, 0x40 for
+	// none; each setter also sets its bit in the group's mask, +0x28 drive,
+	// +0x40 aim, +0x50 look). Drive: +0x14 throttle, +0x18 turn, +0x1c
+	// pitch, +0x20 roll. Aim: +0x30 throttle, +0x34 vertical, +0x38
+	// horizontal, +0x3c roll. Look: +0x48 vertical, +0x4c horizontal (the
+	// aim controller's outputs, adaptor slots 0x30/0x34).
+	int driveThrottle = 0x40, driveTurn = 0x40, drivePitch = 0x40, driveRoll = 0x40;
+	int aimThrottle = 0x40, aimVertical = 0x40, aimHorizontal = 0x40, aimRoll = 0x40;
+	int lookVertical = 0x40, lookHorizontal = 0x40;
+	uint64_t driveMask = 0, aimMask = 0, lookMask = 0;
+	// setCameraRelativeMin/MaxRotationDeg (0x00891fa0, 0x00892070: x pi /
+	// 180, each clamped to +-pi; +0x64.., +0x70..; default -pi..pi) and
+	// setCameraRelativeDofRotationOffsetDeg (+0x60, radians): the gunner's
+	// scan limits (ScanForEnemies 0x100f9a90) and the turret's offset.
+	std::array<float, 3> cameraMin {-3.1415927f, -3.1415927f, -3.1415927f};
+	std::array<float, 3> cameraMax {3.1415927f, 3.1415927f, 3.1415927f};
+	float dofRotationOffset = 0;
+	// maxClimbAngle (+0x58) and maxRollAngle (+0x5c): only the plane
+	// controller (0x100e6d00) reads them; no shipped template sets them.
+	float maxClimbAngle = 0, maxRollAngle = 0;
 };
+
+// The aim controller's gains for a control object (its ControlInfo
+// plug-in's, the constructor's defaults without one).
+struct AimGains {
+	float proportional = -7, derivative = -1, angleSpeed = 1.5f;
+	int lookVertical = 0x40, lookHorizontal = 0x40;
+};
+// A c_PI axis name of io::PlayerInputMap (PIYaw 0 .. PICameraY 7; the
+// "c_" prefix optional), 0x40 (none) otherwise.
+int playerInputIndex(const std::string& name);
 
 // aiTemplate.create <name> with its plug-ins (aiTemplate.addPlugIn).
 struct AiTemplate {
 	std::vector<std::string> plugins;
 	float basicTemp = 0;
+	// +0xc degeneration (the knowledge's decay out of sight, AIDLL +0x50),
+	// +0x10 allowedTimeDiff (the AI object's update throttle, +0xc), +0x18
+	// commonKnowledge (per-team or shared AI objects, 0x0088d0d0).
+	float degeneration = 0, allowedTimeDiff = 0;
+	bool commonKnowledge = false;
 	bool secondary = false;
 	uint32_t types = 0; // aiTemplate.addType: 1 << ai::InformationType
 };
@@ -358,6 +405,17 @@ struct BotSettings {
 	// lower-case name.
 	std::map<std::string, AiTemplate> aiTemplates;
 	std::map<std::string, AiPlugin> aiPlugins;
+	// kitTemplate.create <name> <kitType> (0x0088cc40; class vtable
+	// 0x009d5d68: +4 strategic int[2], +8 battle float[8]); a soldier takes
+	// the strategic strengths of the one named as its kit's AI template
+	// (0x0088c0d0), its battle ones only when it carries no weapon.
+	struct KitTemplate {
+		int kitType = -1;
+		std::array<int, 2> strategic {};
+		std::array<float, 8> battle {};
+	};
+	std::map<std::string, KitTemplate> kitTemplates; // by lower-case name
+	std::string editingKit;
 	std::string editingTemplate, editingPlugin;
 	// aiComm.addAIRadioMessage <voice> <modifier> <max send period> <receive
 	// time to live> (AI/AIRadioMessages.ai; the comm object's +0x54 per
@@ -504,6 +562,12 @@ private:
 		// 0x100d9a60 -> 0x100fa6f0).
 		ai::LeadSolver lead;
 		float yawError = 0, pitchError = 0;
+		// The aim controller's gains, from the control object's ControlInfo
+		// (the seat's, or the soldier's on foot): looked up once per
+		// control object (vehicle, seat), not per tick.
+		AimGains gains;
+		uint32_t gainsVehicle = 0;
+		int gainsSeat = -2;
 		std::array<float, 10> pitchErrors {};
 		int pitchErrorCount = 0;
 		float pitch = 0;          // the look's pitch, degrees
@@ -728,6 +792,24 @@ private:
 	// The kit slot holding a weapon of a type (0 for none).
 	int kitSlot(const GameWorld::PlayerInfo& self, int type) const;
 	float basicTemp(const std::string& objectTemplate, float fallback) const;
+	// What the SAI reads of an object template, cached per template: its AI
+	// template's basicTemp (+0x14), its Unit plug-in (nullptr for none),
+	// for a kit the kitTemplate its AI template names, and for a vehicle
+	// the basicTemp of its seats (every seat's AI object counts).
+	struct UnitAi {
+		float basicTemp = 0, seatsTemp = 0;
+		const AiPlugin* unit = nullptr;
+		const BotSettings::KitTemplate* kit = nullptr;
+		bool seatsKnown = false;
+	};
+	const UnitAi& unitAiOf(const world::ObjectTemplate* t) const;
+	mutable std::map<const world::ObjectTemplate*, UnitAi> m_unitAi;
+	// A unit's strengths in the SAI (AIDLL 0x100aa740): its Unit's battle
+	// and strategic strengths x the capability factor 0.25 + 0.5 S(ammo) +
+	// 0.25 S(health) (0x100aa420; ammo counts as full here). A soldier's
+	// battle strengths are the most of its weapons' (their setStrength), its
+	// strategic ones its kit's kitTemplate's (0x008a1e80).
+	void unitStrengths(const GameWorld::PlayerInfo& p, float& battle, std::array<float, 2>& strategic) const;
 	// Plans (what the chosen behaviour does).
 	void fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
 	// `leadWeapon`: the weapon whose round the aim leads the point for
@@ -777,6 +859,9 @@ private:
 	std::vector<std::pair<int, std::string>> carried(const GameWorld::PlayerInfo& self) const;
 	std::string weaponName(const GameWorld::PlayerInfo& self, int slot) const;
 	float projectileSpeed(const std::string& weapon) const;
+	// The ControlInfo gains of a player's control object (its seat's
+	// aiTemplate, or its soldier's on foot), the plug-in's defaults without one.
+	AimGains aimGainsOf(const GameWorld::PlayerInfo& self) const;
 	std::string equipmentOf(const GameWorld::PlayerInfo& self) const;
 	std::string aiTemplateOf(const std::string& objectTemplate) const;
 	WeaponAi weaponAi(const std::string& name) const;

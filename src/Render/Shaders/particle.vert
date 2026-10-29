@@ -10,7 +10,7 @@ layout(location = 3) in vec2 inUnusedLightmap;
 layout(location = 4) in float inSize;
 layout(location = 5) in float inRotation;
 layout(location = 6) in float inAlpha;
-layout(location = 7) in vec2 inUnusedDetailCoord;
+layout(location = 7) in vec2 inPivot; // pivotOffset: the centre moved by half-sizes
 layout(location = 8) in vec2 inUnusedDirtCoord;
 layout(location = 9) in vec2 inUnusedCrackCoord;
 
@@ -34,7 +34,8 @@ void main()
 		outTexCoord = inUnusedLightmap;
 	} else {
 		float c = cos(inRotation), s = sin(inRotation);
-		vec2 corner = vec2(inCorner.x * c - inCorner.y * s, inCorner.x * s + inCorner.y * c);
+		vec2 shifted = inCorner + inPivot;
+		vec2 corner = vec2(shifted.x * c - shifted.y * s, shifted.x * s + shifted.y * c);
 		position = inCenter + (cameraRight.xyz * corner.x + cameraUp.xyz * corner.y) * inSize;
 		outTexCoord = inCorner * vec2(0.5, -0.5) + 0.5;
 	}

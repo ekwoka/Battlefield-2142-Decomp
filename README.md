@@ -126,6 +126,10 @@ build/native/src/Main/bf2142 --game "source/Battlefield 2142" \
 # Options controls page: pick an action and press a button or push a stick
 # (a gamepad reads as an Xbox 360 pad: sticks IDAxis_0/1 and 3/4, triggers 2,
 # A B X Y = buttons 0-3, the d-pad buttons 10-13),
+# in vehicles and aircraft the vehicle maps' pitch and roll take sticks and keys
+# as well as the mouse (bind them on the Air/Helicopter/Land pages),
+# each local profile (Profiles/0001...: an offline account or a soldier) keeps
+# its own options and keys,
 # E enters and leaves a vehicle nearby (then W/S drive and brake, A/D steer;
 # F1..F8 change seats: a gunner's seat aims with the mouse and fires;
 # 1..9 take the kit's weapon of that slot: 1 knife, 2 sidearm, 3 primary;

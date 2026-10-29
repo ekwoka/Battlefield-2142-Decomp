@@ -229,6 +229,7 @@ void ScriptBridge::setControlPointParam(ControlPoint& point, const std::string& 
 		const int team = static_cast<int>(args[0].asInt());
 		if (team >= 0 && team <= 2) {
 			point.allowCapture[team] = args[1].asInt() != 0;
+			m_world.noteTakeable(point.id, team, point.allowCapture[team]);
 		}
 	}
 }

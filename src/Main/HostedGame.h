@@ -51,19 +51,26 @@
 #include "Net/EventChannel.h"
 #include "Net/GameServer.h"
 #include "Net/GhostLayout.h"
+#include "Net/GhostPriority.h"
 #include "Net/RemoteInput.h"
 #include "Net/RemoteWorld.h"
 #include "Net/ServerQuery.h"
 #include "Net/ServerSettings.h"
 
 #include <cstdint>
+#include <ctime>
 #include <array>
+#include <atomic>
 #include <deque>
 #include <map>
 #include <memory>
 #include <set>
 #include <string>
 #include <vector>
+
+namespace dice::hfe {
+class Console;
+} // namespace dice::hfe
 
 namespace dice::hfe::game {
 class GameLogic;
@@ -80,6 +87,7 @@ struct HostSetup {
 	uint16_t gamePort = 17567;
 	uint16_t queryPort = 29900; // 0: no LAN query responder
 	bool loopbackOnly = true;
+	std::string modDirectory = "mods/bf2142"; // GSModDirectory: the auto demos' root
 	std::string password;
 	// A server's configuration (Main/ServerAdmin.h), when it has one: the
 	// settings block's fields, the whole map list (block 5, with the map
@@ -96,6 +104,15 @@ struct HostSetup {
 // and back (physics::Mat3's convention, rows acting on row vectors).
 net::Quat quaternionFromYawPitchRoll(float yaw, float pitch, float roll);
 void yawPitchRollFromQuaternion(const net::Quat& q, float& yaw, float& pitch, float& roll);
+
+// NetworkableInfo.* (Objects/Common/Networkables.con; BF2142.exe
+// 0x0067de4c createNewInfo, 0x0067df7d setPredictionMode, 0x0067e06b
+// setBasePriority, 0x0067e14e setIsUnique, 0x0067e238 setForceNetworkableId):
+// into net::networkableInfos().
+void registerNetworkableInfoConsoleMethods(Console& console);
+// The AutoRecorder's file (0x00585620): <mod>/demos/auto_<local time as
+// %Y_%m_%d_%H_%M_%S>.bf2142demo.
+std::string autoDemoPath(const std::string& modDirectory, std::time_t now);
 
 class HostedGame {
 public:
@@ -160,6 +177,13 @@ public:
 	bool recordDemo(const std::string& path);
 	void stopDemo();
 	bool recordingDemo() const { return m_demo.isOpen(); }
+	// sv.autoRecord's AutoRecorder (AutoRecorder.cpp; constructor 0x005854a0,
+	// at the server's +0x164): a demo of each round from its start (0x00585860,
+	// when the game logic turns to playing, 0x004c03b0) to its restart
+	// (0x00585920, from 0x004ba0c0), named <mod>/demos/auto_<date>.bf2142demo
+	// (0x00585620), then handed to sv.autoDemoHook.
+	const std::string& autoDemo() const { return m_autoDemo; }
+	const std::string& lastAutoDemo() const { return m_lastAutoDemo; }
 
 private:
 	struct Ghost {
@@ -167,6 +191,10 @@ private:
 		uint16_t first = 0; // its ghost ids: first .. first + layout size - 1
 		const std::vector<net::GhostPartLayout>* layout = nullptr;
 		const world::ObjectTemplate* objectTemplate = nullptr;
+		// Its networkable info's base priority (copied in by 0x006fa190):
+		// under 0 always ghosted (c_NIGhostAlways), 0 never scored.
+		float basePriority = 1;
+		bool projectile = false; // interface 0x94c1: +0.3 (0x0057d560)
 	};
 	struct Client {
 		int player = -1;
@@ -175,8 +203,17 @@ private:
 		enum class Stage { Connected, Loading, Database, Playing } stage = Stage::Connected;
 		std::set<uint16_t> created;              // the ghosts it was told of
 		std::map<uint16_t, std::vector<uint8_t>> sent; // each ghost's last state sent
-		std::map<uint16_t, uint32_t> sentTick;   // and when
-		size_t cursor = 0;                       // round-robin over the ghosts
+		// The client's GhostManager (net::GhostScheduler): its states, the
+		// rescore timer (connection +0x20, every 0.1 s), what each packet
+		// carried (by its sequence; kind 3 as the ghost | 0x10000) and the
+		// packet that last carried each ghost, for a loss (0x005830e0).
+		net::GhostScheduler ghosts;
+		float rescoreIn = 0;
+		std::map<uint32_t, std::vector<uint32_t>> carried;
+		std::map<uint16_t, uint32_t> lastCarried;
+		std::vector<uint16_t> lostRemovals; // written first (gm +0x10c0)
+		bool hasEye = false;
+		net::GhostEye eye;
 		std::deque<net::PlayerMove> moves;       // moves waiting, one a tick
 		net::MoveInputState moveState;           // the aim and the keys held
 		int32_t stepping = -1;                   // the move the round steps this tick
@@ -221,6 +258,12 @@ private:
 	net::DemoWriter m_demo;
 	net::EventChannel m_demoEvents;
 	uint32_t m_demoSequence = 0;
+	float m_demoSendIn = 0; // the demo connection's pacing (sv.demoQuality)
+	std::string m_autoDemo, m_lastAutoDemo; // the AutoRecorder's file and its last (+0x10, +0x2c)
+	int m_lastRoundState = -1;
+	std::shared_ptr<std::atomic<bool>> m_hookBusy = std::make_shared<std::atomic<bool>>(false);
+	void startAutoDemo();
+	void stopAutoDemo();
 	game::Votes m_votes;
 	void sendVoteReplies(const std::vector<game::Votes::Reply>& replies);
 	std::vector<std::pair<float, int>> m_mapVotes; // (seconds left, map) passed, waiting the 5 s
@@ -231,7 +274,9 @@ private:
 	void applyMoves();
 	void trackObjects();
 	void trackPlayers();
-	net::GhostBlock ghostsFor(int client);
+	net::GhostBlock ghostsFor(int client, size_t budgetBits);
+	void rescore(Client& client);
+	void ghostLost(Client& client, uint32_t sequence, bool delivered);
 	std::vector<net::GameEvent> createEvents(const Ghost& ghost) const;
 	net::GameEvent createPlayerEvent(const game::GameWorld::PlayerInfo& player, bool own, uint16_t ghost) const;
 	std::vector<uint8_t> stateOf(const Ghost& ghost, size_t part, size_t& bits) const;
@@ -267,6 +312,8 @@ private:
 	std::map<int, PlayerSeen> m_players; // by player id
 	std::map<int, std::string> m_names;  // names the clients gave
 	uint32_t m_tick = 0;
+	// Each ghost id's state this tick, shared by the clients.
+	std::map<uint16_t, std::pair<std::vector<uint8_t>, size_t>> m_stateCache;
 	bool m_roundEndSent = false;
 	int m_endOfRoundSerialSent = 0;
 };
