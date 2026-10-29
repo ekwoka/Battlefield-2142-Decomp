@@ -47,6 +47,7 @@
 
 #include "Game/GameWorld.h"
 #include "Game/Votes.h"
+#include "Net/ContentCheck.h"
 #include "Net/Demo.h"
 #include "Net/EventChannel.h"
 #include "Net/GameServer.h"
@@ -98,6 +99,11 @@ struct HostSetup {
 	// reservedSlots.* (with sv.numReservedSlots): a listed nick joining a
 	// full server bumps someone who isn't (0x004ae6a0).
 	const net::ReservedSlots* reserved = nullptr;
+	// The game's folder on disk (holding mods/): a mod with std_archive.md5
+	// there makes the server pure (net/ContentCheck.h, 0x004adb60): its
+	// clients must send their content's fingerprint or are kicked (0x1b).
+	// Empty: not pure.
+	std::string contentRoot;
 };
 
 // The engine's yaw/pitch/roll (degrees) as the networkables' quaternion
@@ -235,6 +241,7 @@ private:
 		std::string chat;                        // a StringBlock coming in
 		uint32_t chatSize = 0;
 		bool spawnRequested = false;
+		bool contentChecked = false; // the connection's slot 0x28(1): its ContentCheck matched (0x004aec40)
 		// Joined while the server was full: admitted or refused once its name
 		// comes (the exe's join check has the name; the rewrite's clients
 		// send it after connecting).
@@ -302,6 +309,12 @@ private:
 	};
 	std::map<uint32_t, Motion> m_motion; // the vehicles', this tick
 	HostSetup m_setup;
+	// The pure-server check: the mod's and the level's fingerprints, and
+	// the level's ordinal (0x004aefe0: rand() % 10 after srand(ms)).
+	net::ContentChecker m_content;
+	int m_ordinal = 0;
+	void startContentLevel();
+	void checkContent(int id, const net::GameEvent& e);
 	net::GameServer m_server;
 	net::QueryServer m_query;
 	std::set<uint32_t> m_static;

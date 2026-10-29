@@ -27,8 +27,16 @@
 // playAtEventPosition at the activator (or the explosion), its height on
 // the terrain with projectOnHeightmap; at most 10 of its effects alive at
 // once, and no bundle whose timeToLive comes out -1 or 30 (0x005ba490).
-// numNetworkedEffects above 0 makes the area the server's (it would send
-// the effect to the clients, 0x00510270): a hosted game is the server.
+// numNetworkedEffects above 0 makes the area the server's: a joined
+// client's returns at once (0x005ba9c0 asks the game, DAT_00a1c170 slot
+// 0x144), and the server sends what it plays to the clients as the
+// AmbientEffectArea event (0x22, built by 0x00510270, written 0x00510160,
+// read 0x005100a0, played by 0x00510230 -> 0x005ba490): the area's id
+// (its creation order in the level, +0x19c from DAT_00a6bb08, reset to 0
+// for each level), the Bundle child picked (the list index, 1 for the
+// first child; a dedicated server, which loads no effects, picks 1..
+// numNetworkedEffects), the activator's ghost when the effect sits on it
+// (playAtEventPosition) and the offset from the area (or the activator).
 #pragma once
 
 #include "Physics/RigidBody.h"
@@ -63,6 +71,12 @@ public:
 		std::string bundle;
 		physics::Vec3 position;
 		uint32_t area = 0;
+		// What a server sends of it (networked areas only).
+		bool networked = false;
+		size_t areaId = 0;         // +0x19c
+		int index = 0;             // the Bundle's list index (0: an EffectBundle)
+		physics::Vec3 offset;      // from the area, or from the activator
+		uint32_t attachedTo = 0;   // the activator's object (playAtEventPosition), else 0
 	};
 	// The trigger's and the area's template values.
 	struct TriggerSettings {
@@ -98,6 +112,13 @@ public:
 	void explosion(double now, uint32_t tick, const physics::Vec3& position);
 	// The effects to start since the last call.
 	std::vector<Effect> takeEffects() { return std::exchange(m_effects, {}); }
+	// A joined client: the networked areas play only what the server sends.
+	bool client = false;
+	// The server's AmbientEffectArea event on a client (0x00510230): area
+	// `areaId` plays its list's `index` at `offset` from it, or from
+	// `attachedAt` (the activator's ghost's place). False for an area that
+	// isn't there.
+	bool playNetworked(size_t areaId, int index, const physics::Vec3& offset, const physics::Vec3* attachedAt = nullptr);
 
 	// The terrain's height (projectOnHeightmap); the bundles' sampled
 	// timeToLive (-1 or 30 aren't played) and a Bundle's children; how
@@ -129,6 +150,7 @@ private:
 	void test(Trigger& trigger, double now, uint32_t tick, const std::vector<const Activator*>& inside);
 	void fire(Trigger& trigger, double now, const Activator* by, const physics::Vec3* at);
 	void play(Area& area, const Activator* by, const physics::Vec3* at);
+	bool start(Area& area, const std::string& bundle, const physics::Vec3& position); // 0x005ba490's checks
 	std::vector<Trigger> m_triggers;
 	std::vector<Area> m_areas;
 	size_t m_cursor = 0;

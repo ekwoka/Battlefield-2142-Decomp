@@ -53,84 +53,87 @@ Field field(const char* name, T ServerSettings::*member, bool quoted = false, bo
 		[member](ServerSettings& s, const std::string& text) { s.*member = parse(text, s.*member); }};
 }
 
+// The sv.* rows (the GameServerSettings console object, 0x0041aa74..
+// 0x00422035): each field's row constructor, then its executors (the
+// property's get and set), as cited by its line.
 const std::vector<Field>& fields()
 {
 	using S = ServerSettings;
 	static const std::vector<Field> table {
-		field("serverName", &S::serverName, true),
-		field("password", &S::password, true),
-		field("internet", &S::internet),
-		field("bandwidthChoke", &S::bandwidthChoke),
-		field("serverIP", &S::serverIP, true),
-		field("serverPort", &S::serverPort),
-		field("welcomeMessage", &S::welcomeMessage, true),
-		field("punkBuster", &S::punkBuster),
-		field("allowFreeCam", &S::allowFreeCam),
-		field("allowExternalViews", &S::allowExternalViews),
-		field("allowNoseCam", &S::allowNoseCam),
-		field("hitIndicator", &S::hitIndicator),
-		field("maxPlayers", &S::maxPlayers),
-		field("numPlayersNeededToStart", &S::numPlayersNeededToStart),
-		field("notEnoughPlayersRestartDelay", &S::notEnoughPlayersRestartDelay),
-		field("startDelay", &S::startDelay),
-		field("endDelay", &S::endDelay),
-		field("spawnTime", &S::spawnTime),
-		field("manDownTime", &S::manDownTime),
-		field("endOfRoundDelay", &S::endOfRoundDelay),
-		field("ticketRatio", &S::ticketRatio),
-		field("roundsPerMap", &S::roundsPerMap),
-		field("timeLimit", &S::timeLimit),
-		field("scoreLimit", &S::scoreLimit),
-		field("soldierFriendlyFire", &S::soldierFriendlyFire),
-		field("vehicleFriendlyFire", &S::vehicleFriendlyFire),
-		field("soldierSplashFriendlyFire", &S::soldierSplashFriendlyFire),
-		field("vehicleSplashFriendlyFire", &S::vehicleSplashFriendlyFire),
-		field("tkPunishEnabled", &S::tkPunishEnabled),
-		field("tkNumPunishToKick", &S::tkNumPunishToKick),
-		field("tkPunishByDefault", &S::tkPunishByDefault),
-		field("votingEnabled", &S::votingEnabled),
-		field("voteTime", &S::voteTime),
-		field("minPlayersForVoting", &S::minPlayersForVoting),
-		field("gameSpyPort", &S::gameSpyPort),
-		field("allowNATNegotiation", &S::allowNATNegotiation),
-		field("interfaceIP", &S::interfaceIP),
-		field("autoRecord", &S::autoRecord),
-		field("demoIndexURL", &S::demoIndexURL, true),
-		field("demoDownloadURL", &S::demoDownloadURL, true),
-		field("autoDemoHook", &S::autoDemoHook, true),
-		field("demoQuality", &S::demoQuality),
-		field("adminScript", &S::adminScript, true),
-		field("timeBeforeRestartMap", &S::timeBeforeRestartMap),
-		field("autoBalanceTeam", &S::autoBalanceTeam),
-		field("teamRatioPercent", &S::teamRatioPercent),
-		field("voipEnabled", &S::voipEnabled),
-		field("voipQuality", &S::voipQuality),
-		field("voipServerRemote", &S::voipServerRemote),
-		field("voipServerRemoteIP", &S::voipServerRemoteIP),
-		field("voipServerPort", &S::voipServerPort),
-		field("voipBFClientPort", &S::voipBFClientPort),
-		field("voipBFServerPort", &S::voipBFServerPort),
-		field("voipSharedPassword", &S::voipSharedPassword),
-		field("useGlobalRank", &S::useGlobalRank),
-		field("useGlobalUnlocks", &S::useGlobalUnlocks),
-		field("ranked", &S::ranked), // written only for a ranked server
-		field("minUnlockLevel", &S::minUnlockLevel),
-		field("maxUnlockLevel", &S::maxUnlockLevel),
-		field("sponsorText", &S::sponsorText, true),
-		field("sponsorLogoURL", &S::sponsorLogoURL, true),
-		field("communityLogoURL", &S::communityLogoURL, true),
-		field("customMapURL", &S::customMapURL, true),
-		field("radioSpamInterval", &S::radioSpamInterval),
-		field("radioMaxSpamFlagCount", &S::radioMaxSpamFlagCount),
-		field("radioBlockedDurationTime", &S::radioBlockedDurationTime),
-		field("numReservedSlots", &S::numReservedSlots),
-		field("maxRank", &S::maxRank),
-		field("friendlyFireWithMines", &S::friendlyFireWithMines),
-		field("botSkill", &S::botSkill),
-		field("allowSpectators", &S::allowSpectators),
-		field("allowTitanMovement", &S::allowTitanMovement),
-		field("configFile", &S::configFile, false, false),
-		field("maxConnectionType", &S::maxConnectionType, false, false),
+		field("serverName", &S::serverName, true), // 0x0041b275 0x0041b2f2 0x0041b35c
+		field("password", &S::password, true), // 0x0041b3d1 0x0041b450 0x0041b4c5 0x0041b556
+		field("internet", &S::internet), // 0x0041b59b 0x0041b61c 0x0041b669 0x0041b6de
+		field("bandwidthChoke", &S::bandwidthChoke), // 0x0041b721 0x0041b792 0x0041b7df
+		field("serverIP", &S::serverIP, true), // 0x0041bad7 0x0041bb54 0x0041bbbe
+		field("serverPort", &S::serverPort), // 0x0041bc33 0x0041bcb4 0x0041bd01 0x0041bd71
+		field("welcomeMessage", &S::welcomeMessage, true), // 0x0041b97d 0x0041b9fa 0x0041ba62
+		field("punkBuster", &S::punkBuster), // 0x004207a8 0x00420819 0x00420866 0x004208ae 0x0042093a 0x00420946 0x00420968
+		field("allowFreeCam", &S::allowFreeCam), // 0x0041bdb6 0x0041be27 0x0041be74
+		field("allowExternalViews", &S::allowExternalViews), // 0x0041bec8 0x0041bf39 0x0041bf86
+		field("allowNoseCam", &S::allowNoseCam), // 0x0041bfda 0x0041c04b 0x0041c098
+		field("hitIndicator", &S::hitIndicator), // 0x0041c293 0x0041c304 0x0041c351
+		field("maxPlayers", &S::maxPlayers), // 0x0041c3a5 0x0041c426 0x0041c473 0x0041c4e3
+		field("numPlayersNeededToStart", &S::numPlayersNeededToStart), // 0x0041c834 0x0041c8a5 0x0041c8f2
+		field("notEnoughPlayersRestartDelay", &S::notEnoughPlayersRestartDelay), // 0x0041c93a 0x0041c9ab 0x0041c9f8
+		field("startDelay", &S::startDelay), // 0x0041ca4b 0x0041cabc 0x0041cb09
+		field("endDelay", &S::endDelay), // 0x0041cb53 0x0041cbc4 0x0041cc11
+		field("spawnTime", &S::spawnTime), // 0x0041cc5b 0x0041cccc 0x0041cd19
+		field("manDownTime", &S::manDownTime), // 0x0041cd6b 0x0041cddc 0x0041ce29
+		field("endOfRoundDelay", &S::endOfRoundDelay), // 0x0041ce7b 0x0041ceec 0x0041cf39
+		field("ticketRatio", &S::ticketRatio), // 0x0041cf81 0x0041cff2 0x0041d03f
+		field("roundsPerMap", &S::roundsPerMap), // 0x0041d086 0x0041d0f7 0x0041d144
+		field("timeLimit", &S::timeLimit), // 0x0041d18e 0x0041d1ff 0x0041d24c
+		field("scoreLimit", &S::scoreLimit), // 0x0041d296 0x0041d307 0x0041d354
+		field("soldierFriendlyFire", &S::soldierFriendlyFire), // 0x0041d39e 0x0041d40f 0x0041d45c
+		field("vehicleFriendlyFire", &S::vehicleFriendlyFire), // 0x0041d4b6 0x0041d527 0x0041d574
+		field("soldierSplashFriendlyFire", &S::soldierSplashFriendlyFire), // 0x0041d5ce 0x0041d63f 0x0041d68c
+		field("vehicleSplashFriendlyFire", &S::vehicleSplashFriendlyFire), // 0x0041d6e6 0x0041d757 0x0041d7a4
+		field("tkPunishEnabled", &S::tkPunishEnabled), // 0x0041d921 0x0041d992 0x0041d9df
+		field("tkNumPunishToKick", &S::tkNumPunishToKick), // 0x0041da29 0x0041da9a 0x0041dae7
+		field("tkPunishByDefault", &S::tkPunishByDefault), // 0x0041db31 0x0041dba2 0x0041dbef
+		field("votingEnabled", &S::votingEnabled), // 0x0041dc43 0x0041dcb4 0x0041dd01
+		field("voteTime", &S::voteTime), // 0x0041dd55 0x0041ddc6 0x0041de13
+		field("minPlayersForVoting", &S::minPlayersForVoting), // 0x0041de5d 0x0041dece 0x0041df1b
+		field("gameSpyPort", &S::gameSpyPort), // 0x0041e883 0x0041e8f4 0x0041e941
+		field("allowNATNegotiation", &S::allowNATNegotiation), // 0x0041e98b 0x0041e9fc 0x0041ea49
+		field("interfaceIP", &S::interfaceIP), // 0x0041ea93 0x0041eb10 0x0041eb7f
+		field("autoRecord", &S::autoRecord), // 0x0041f223 0x0041f294 0x0041f2e1
+		field("demoIndexURL", &S::demoIndexURL, true), // 0x0041f32b 0x0041f3a8 0x0041f417
+		field("demoDownloadURL", &S::demoDownloadURL, true), // 0x0041f48c 0x0041f509 0x0041f578
+		field("autoDemoHook", &S::autoDemoHook, true), // 0x0041f5ed 0x0041f66a 0x0041f6d9
+		field("demoQuality", &S::demoQuality), // 0x0041f74e 0x0041f7bf 0x0041f80c
+		field("adminScript", &S::adminScript, true), // 0x0041f868 0x0041f8e5 0x0041f954
+		field("timeBeforeRestartMap", &S::timeBeforeRestartMap), // 0x0041ebf4 0x0041ec65 0x0041ecb2
+		field("autoBalanceTeam", &S::autoBalanceTeam), // 0x0041ed05 0x0041ed76 0x0041edc3
+		field("teamRatioPercent", &S::teamRatioPercent), // 0x0041ee0d 0x0041ee7e 0x0041eecb
+		field("voipEnabled", &S::voipEnabled), // 0x0041df65 0x0041dfd6 0x0041e023
+		field("voipQuality", &S::voipQuality), // 0x0041e77b 0x0041e7ec 0x0041e839
+		field("voipServerRemote", &S::voipServerRemote), // 0x0041e06d 0x0041e0de 0x0041e12b
+		field("voipServerRemoteIP", &S::voipServerRemoteIP), // 0x0041e175 0x0041e1f2 0x0041e261
+		field("voipServerPort", &S::voipServerPort), // 0x0041e2d6 0x0041e347 0x0041e394
+		field("voipBFClientPort", &S::voipBFClientPort), // 0x0041e3de 0x0041e44f 0x0041e49c
+		field("voipBFServerPort", &S::voipBFServerPort), // 0x0041e4e6 0x0041e557 0x0041e5a4
+		field("voipSharedPassword", &S::voipSharedPassword), // 0x0041e5ee 0x0041e66b 0x0041e706
+		field("useGlobalRank", &S::useGlobalRank), // 0x00420273 0x004202e4 0x00420331
+		field("useGlobalUnlocks", &S::useGlobalUnlocks), // 0x00420379 0x004203ea 0x00420437
+		field("ranked", &S::ranked), // 0x00420697 0x00420708 0x00420755; written only for a ranked server
+		field("minUnlockLevel", &S::minUnlockLevel), // 0x0041f0a0 0x0041f121 0x0041f16e 0x0041f1de
+		field("maxUnlockLevel", &S::maxUnlockLevel), // 0x0041ef1d 0x0041ef9e 0x0041efeb 0x0041f05b
+		field("sponsorText", &S::sponsorText, true), // 0x0041f9c9 0x0041fa46 0x0041fab5
+		field("sponsorLogoURL", &S::sponsorLogoURL, true), // 0x0041fb2a 0x0041fba7 0x0041fc16
+		field("communityLogoURL", &S::communityLogoURL, true), // 0x0041fc8b 0x0041fd08 0x0041fd14 0x0041fd83
+		field("customMapURL", &S::customMapURL, true), // 0x0041fdf8 0x0041fe75 0x0041fee6
+		field("radioSpamInterval", &S::radioSpamInterval), // 0x0041ff5b 0x0041ffcc 0x00420019
+		field("radioMaxSpamFlagCount", &S::radioMaxSpamFlagCount), // 0x00420063 0x004200d4 0x00420121
+		field("radioBlockedDurationTime", &S::radioBlockedDurationTime), // 0x0042016b 0x004201dc 0x00420229
+		field("numReservedSlots", &S::numReservedSlots), // 0x0041c528 0x0041c5a9 0x0041c5f6 0x0041c666
+		field("maxRank", &S::maxRank), // 0x0041c6ab 0x0041c72c 0x0041c779 0x0041c7ee
+		field("friendlyFireWithMines", &S::friendlyFireWithMines), // 0x0041d7fe 0x0041d86f 0x0041d8bc
+		field("botSkill", &S::botSkill), // 0x0042047f 0x004204f0 0x0042053d
+		field("allowSpectators", &S::allowSpectators), // 0x0041c0ec 0x0041c16d 0x0041c1ba 0x0041c22f 0x0041c276
+		field("allowTitanMovement", &S::allowTitanMovement), // 0x00420588 0x004205f9 0x00420646
+		field("configFile", &S::configFile, false, false), // 0x0041b11d 0x0041b19a 0x0041b200
+		field("maxConnectionType", &S::maxConnectionType, false, false), // 0x0041b823 0x0041b894 0x0041b8ec 0x0041b939
 	};
 	return table;
 }
@@ -368,6 +371,9 @@ bool addBan(std::vector<Ban>& list, const std::string& what, const std::string& 
 
 bool active(const Ban& ban, std::time_t now) { return ban.kind != Ban::Kind::Until || ban.until > now; }
 
+// The listing (0x00506b60 builds a line per ban: "IP: " / "Key: ", " Time
+// Left: " or " Perm"; 0x00507800 / 0x005078d0 cut the address and key
+// lists from it).
 std::string listBans(const std::vector<Ban>& list, std::time_t now)
 {
 	std::string out;
@@ -383,16 +389,19 @@ std::string listBans(const std::vector<Ban>& list, std::time_t now)
 
 bool BanList::addAddress(const std::string& address, const std::string& period, std::time_t now)
 {
+	// 0x00507ef0 (the period read by 0x00507ff0).
 	return addBan(m_addresses, hostOf(address), period, now);
 }
 
 bool BanList::addKey(const std::string& key, const std::string& period, std::time_t now)
 {
+	// 0x00507f20 (the period read by 0x00508030).
 	return addBan(m_keys, key, period, now);
 }
 
 void BanList::removeAddress(const std::string& address)
 {
+	// 0x005077b0
 	const std::string host = hostOf(address);
 	m_addresses.erase(std::remove_if(m_addresses.begin(), m_addresses.end(), [&](const Ban& b) { return b.what == host; }),
 		m_addresses.end());
@@ -400,11 +409,13 @@ void BanList::removeAddress(const std::string& address)
 
 void BanList::removeKey(const std::string& key)
 {
+	// 0x005077d0
 	m_keys.erase(std::remove_if(m_keys.begin(), m_keys.end(), [&](const Ban& b) { return b.what == key; }), m_keys.end());
 }
 
 void BanList::clear()
 {
+	// 0x005077f0
 	m_addresses.clear();
 	m_keys.clear();
 }

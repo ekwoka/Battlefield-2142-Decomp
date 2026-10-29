@@ -424,7 +424,10 @@ void readTriggerTail(const std::vector<std::string>& args, size_t at, Binding& b
 
 // The engine's input constants and their numbers (0x00669baf registers
 // them: the player inputs c_PI... and the game inputs c_GI... count from 0
-// each). The scripts name them; here each stands for its own name, and
+// each; the console streams and parses the same names: the game inputs
+// by 0x006a5190 (number -> "GIMenu"...) and 0x006a5880 / 0x006a7780 (the
+// name back, narrow and wide), the player inputs by 0x0068f5a0 and
+// 0x0068fb90). The scripts name them; here each stands for its own name, and
 // the menu's controls page asks by number.
 constexpr std::pair<const char*, int> kInputs[] = {
 	{"c_noAccess", 0}, {"c_endUserAccess", 1}, {"c_fullAccess", 2}, {"c_totalAccess", 7}, {"c_GIMenu", 0},

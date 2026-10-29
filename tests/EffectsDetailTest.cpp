@@ -6,6 +6,7 @@
 #include "TestMain.h"
 #include "World/ObjectTemplateManager.h"
 
+#include <algorithm>
 #include <cmath>
 
 using namespace dice::hfe;
@@ -223,4 +224,82 @@ TEST(EffectsDetail_HitReactionNames)
 	CHECK(std::string(GameWorld::hitReaction(0x21, north * -1.0f, 0)) == "hitFrontRight");
 	CHECK(std::string(GameWorld::hitReaction(3, north, 180)) == "hitFrontBody"); // turned round
 	CHECK(std::string(GameWorld::hitReaction(-1, north, 0)) == "hitBackBody");
+}
+
+namespace {
+
+physics::CollisionMeshFile debrisPanel(std::vector<std::array<float, 3>> vertices, std::vector<physics::CollisionFace> faces)
+{
+	physics::CollisionSubGeometry part;
+	for (uint32_t type = 0; type < 3; ++type) {
+		physics::CollisionLod lod;
+		lod.collisionType = type;
+		lod.boundsMin = {1e9f, 1e9f, 1e9f};
+		lod.boundsMax = {-1e9f, -1e9f, -1e9f};
+		for (const auto& v : vertices) {
+			for (size_t k = 0; k < 3; ++k) {
+				lod.boundsMin[k] = std::min(lod.boundsMin[k], v[k]);
+				lod.boundsMax[k] = std::max(lod.boundsMax[k], v[k]);
+			}
+		}
+		lod.vertices = vertices;
+		lod.faces = faces;
+		part.lods.push_back(lod);
+	}
+	physics::CollisionGeometry geometry;
+	geometry.subGeometries = {part};
+	physics::CollisionMeshFile mesh;
+	mesh.version = 10;
+	mesh.geometries = {geometry};
+	return mesh;
+}
+
+} // namespace
+
+// The pieces' own bodies (as the exe's physics nodes): thrown at a wall
+// they stop at it and fall, land on the terrain on their mesh's corners
+// (not on their centre) and go to sleep.
+TEST(EffectsDetail_DebrisBodiesMeetTheWorld)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* piece = templates.create("Particle", "p_chunk");
+	piece->setGeometry("chunk");
+	piece->settings()["collisionMesh"] = "chunk_mesh";
+	piece->settings()["timeToLive"] = "CRD_NONE/10/0/0";
+	world::ObjectTemplate* emitter = templates.create("Emitter", "em_chunks");
+	emitter->settings()["template"] = "p_chunk";
+	emitter->settings()["intensity"] = "CRD_NONE/10/0/0";
+	emitter->settings()["timeToLive"] = "CRD_NONE/0.25/0/0";
+	emitter->settings()["positionalSpeedInDof"] = "CRD_NONE/12/0/0";
+	emitter->settings()["positionalSpeedInUp"] = "CRD_NONE/2/0/0";
+	// A cube of 0.4 m, and a wall across z = 4 (faced both ways).
+	const float h = 0.2f;
+	const physics::CollisionMeshFile chunk = debrisPanel(
+		{{-h, -h, -h}, {h, -h, -h}, {h, h, -h}, {-h, h, -h}, {-h, -h, h}, {h, -h, h}, {h, h, h}, {-h, h, h}},
+		{{{0, 2, 1}, 0}, {{0, 3, 2}, 0}, {{4, 5, 6}, 0}, {{4, 6, 7}, 0}});
+	const physics::CollisionMeshFile wall = debrisPanel({{-20, -1, 0}, {20, -1, 0}, {20, 20, 0}, {-20, 20, 0}},
+		{{{0, 1, 2}, 0}, {{0, 2, 3}, 0}, {{0, 2, 1}, 0}, {{0, 3, 2}, 0}});
+	physics::CollisionWorld statics;
+	statics.addMesh(wall, physics::CollisionUser::Soldier, {}, {0, 0, 4});
+	effects::EffectManager manager(templates);
+	effects::EffectManager::DebrisWorld world;
+	world.ground.height = [](float, float) { return 0.0f; };
+	world.ground.heightAndNormal = [](float, float, physics::Vec3& n) {
+		n = {0, 1, 0};
+		return 0.0f;
+	};
+	world.statics = &statics;
+	world.collisionMesh = [&chunk](const std::string& name) { return name == "chunk_mesh" ? &chunk : nullptr; };
+	manager.setDebrisWorld(world);
+	CHECK(manager.spawn("em_chunks", {0, 1, 0}));
+	for (int i = 0; i < 30 * 5; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	CHECK(manager.debris().size() == 2);
+	for (const auto& p : manager.debris()) {
+		CHECK(p.look->points.size() == 8);
+		CHECK(p.position.z < 4); // the wall held them
+		CHECK(p.position.y > 0.1f && p.position.y < 0.5f); // on their corners
+		CHECK(p.resting); // asleep after a second still
+	}
 }

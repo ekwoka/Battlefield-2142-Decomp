@@ -268,6 +268,9 @@ void KitMenu::update(int team)
 		}
 		m_hud.setString("KitCustom" + std::to_string(row) + "Icon", orEmpty(chosenIcon));
 	}
+	// The kit screen's variables (registered by 0x00796d80: Kit%iItem%iActive
+	// / Alpha / FieldUnlocked, Ability%iActive, HeavyArmor%iActive,
+	// HeavyArmorActive, CustomInfoShow, CustomSoldierPicture).
 	m_hud.set("CustomInfoShow", m_customOpen ? 1 : 0);
 	m_hud.set("HeavyArmorActive", m_heavy ? 1 : 0);
 	m_hud.set("NotAntiVechicleKitChoosen", 1);

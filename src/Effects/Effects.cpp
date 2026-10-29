@@ -1,5 +1,7 @@
 #include "Effects.h"
 
+#include "Physics/CollisionMeshFile.h"
+
 #include "World/ObjectTemplateManager.h"
 
 #include <algorithm>
@@ -1184,6 +1186,11 @@ DebrisPieceTemplate DebrisPieceTemplate::fromTemplate(const world::ObjectTemplat
 	DebrisPieceTemplate d;
 	d.geometry = t.geometry();
 	d.part = static_cast<int>(number(t, "geometryPart", 0));
+	if (const auto it = t.settings().find("collisionMesh"); it != t.settings().end()) {
+		d.collisionMesh = it->second;
+	}
+	d.collisionPart = static_cast<int>(number(t, "collisionPart", 0));
+	d.material = static_cast<uint32_t>(std::max(0.0f, number(t, "material", 0)));
 	d.timeToLive = distribution(t, "timeToLive", 10);
 	d.size = distribution(t, "size", 1);
 	d.transparency = distribution(t, "transparency", 0);
@@ -1289,10 +1296,102 @@ void EffectManager::emitDebris(LiveDebrisEmitter& e, float lead)
 	} else {
 		piece.resting = true;
 	}
+	resolveShape(*slot);
+	piece.body.position = piece.position;
+	piece.body.rotation = piece.rotation;
+	piece.body.velocity = piece.velocity;
+	piece.body.angularVelocity = piece.spin; // the node's slot 0x6c
+	piece.body.gravityModifier = piece.gravity;
+	piece.body.setBounds(slot->boxSize);
 	if (m_debris.size() >= kMaxDebris) {
 		m_debris.erase(m_debris.begin());
 	}
 	m_debris.push_back(piece);
+}
+
+void EffectManager::resolveShape(DebrisPieceTemplate& t)
+{
+	if (t.shapeResolved) {
+		return;
+	}
+	t.shapeResolved = true;
+	t.points = {{0, 0, 0}};
+	const physics::CollisionMeshFile* mesh =
+		!t.collisionMesh.empty() && m_debrisWorld.collisionMesh ? m_debrisWorld.collisionMesh(t.collisionMesh) : nullptr;
+	if (!mesh || mesh->geometries.empty()) {
+		return;
+	}
+	const auto& parts = mesh->geometries[0].subGeometries;
+	const size_t index = static_cast<size_t>(std::max(t.collisionPart, 0));
+	if (index >= parts.size()) {
+		return;
+	}
+	// The vehicle LOD (the mobile mesh physics' own), its box's corners.
+	const physics::CollisionLod* lod = physics::collisionLodFor(*mesh, parts[index], 1);
+	if (!lod || lod->vertices.empty()) {
+		return;
+	}
+	const Vec3 low {lod->boundsMin[0], lod->boundsMin[1], lod->boundsMin[2]};
+	const Vec3 high {lod->boundsMax[0], lod->boundsMax[1], lod->boundsMax[2]};
+	t.boxSize = {std::max(high.x - low.x, 0.05f), std::max(high.y - low.y, 0.05f), std::max(high.z - low.z, 0.05f)};
+	t.points.clear();
+	for (int corner = 0; corner < 8; ++corner) {
+		t.points.push_back({corner & 1 ? high.x : low.x, corner & 2 ? high.y : low.y, corner & 4 ? high.z : low.z});
+	}
+}
+
+void EffectManager::stepPiece(DebrisPiece& p, float seconds)
+{
+	physics::RigidBody& body = p.body;
+	const std::vector<Vec3>& points = p.look->points; // resolveShape gave at least the origin
+	// The points where they were (their motion this tick meets the statics).
+	Vec3 before[8];
+	const size_t tested = std::min<size_t>(points.size(), 8);
+	for (size_t i = 0; i < tested; ++i) {
+		before[i] = body.position + body.rotation.transform(points[i]);
+	}
+	if (p.drag > 0) {
+		body.velocity = body.velocity * std::max(0.0f, 1.0f - p.drag * seconds);
+	}
+	body.step(seconds);
+	physics::ContactResponse response;
+	const DebrisWorld& w = m_debrisWorld;
+	const uint32_t own = p.look->material;
+	const auto materialOf = [&](uint32_t surface) {
+		return w.material ? w.material(own, surface) : physics::ContactMaterial {};
+	};
+	if (w.ground.height && w.ground.heightAndNormal) {
+		const uint32_t surface = w.ground.material ? w.ground.material(body.position.x, body.position.z) : 0;
+		physics::collideWithGround(body, response, points, w.ground, materialOf(surface));
+	} else if (m_context.groundHeight) {
+		physics::Ground flat;
+		flat.height = m_context.groundHeight;
+		flat.heightAndNormal = [this](float x, float z, Vec3& normal) {
+			normal = {0, 1, 0};
+			return m_context.groundHeight(x, z);
+		};
+		physics::collideWithGround(body, response, points, flat, materialOf(0));
+	}
+	if (w.statics && w.statics->triangles() > 0) {
+		for (size_t i = 0; i < tested; ++i) {
+			const Vec3 now = body.position + body.rotation.transform(points[i]);
+			physics::SphereContact contact;
+			if (w.statics->segmentContact(before[i], now, contact)) {
+				response.addContact(contact.point - body.position, body.pointVelocity(contact.point), contact.normal,
+					contact.depth, materialOf(contact.material));
+			}
+		}
+	}
+	response.solve(body);
+	p.sleep.sample(body.position, body.angularVelocity, seconds);
+	if (p.sleep.asleep()) {
+		body.velocity = body.angularVelocity = {};
+		p.resting = true;
+	}
+	p.position = body.position;
+	p.rotation = body.rotation;
+	p.velocity = body.velocity;
+	p.spin = body.angularVelocity;
 }
 
 void EffectManager::stepDebris(float seconds)
@@ -1326,34 +1425,10 @@ void EffectManager::stepDebris(float seconds)
 							   [](const LiveDebrisEmitter& e) { return e.delay <= 0 && e.elapsed >= e.timeToLive; }),
 		m_debrisEmitters.end());
 	// The pieces.
-	const float damping = std::pow(physics::tuning::kLinearDamping, seconds * 30.0f);
 	for (DebrisPiece& p : m_debris) {
 		p.age += seconds;
-		if (p.resting) {
-			continue;
-		}
-		p.velocity.y += physics::tuning::kGravity * p.gravity * seconds;
-		p.velocity = p.velocity * (damping * std::max(0.0f, 1.0f - p.drag * seconds));
-		p.position += p.velocity * seconds;
-		const float spinLength = std::sqrt(physics::lengthSquared(p.spin));
-		if (spinLength > 1e-4f) {
-			p.rotation = p.rotation * Mat3::axisAngle(p.spin * (1.0f / spinLength), spinLength * seconds);
-			p.spin = p.spin * damping;
-		}
-		if (m_context.groundHeight) {
-			const float ground = m_context.groundHeight(p.position.x, p.position.z);
-			if (p.position.y < ground) {
-				p.position.y = ground;
-				if (p.velocity.y < 0) {
-					p.velocity.y = -p.velocity.y * 0.3f;
-				}
-				p.velocity.x *= 0.6f;
-				p.velocity.z *= 0.6f;
-				p.spin = p.spin * 0.6f;
-				if (physics::lengthSquared(p.velocity) < 0.04f) {
-					p.resting = true;
-				}
-			}
+		if (!p.resting) {
+			stepPiece(p, seconds);
 		}
 	}
 	m_debris.erase(std::remove_if(m_debris.begin(), m_debris.end(), [](const DebrisPiece& p) { return p.age >= p.life; }),

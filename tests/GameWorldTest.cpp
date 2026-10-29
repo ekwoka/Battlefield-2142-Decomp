@@ -8,6 +8,7 @@
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
+#include "World/WorldConsole.h"
 
 #include <algorithm>
 #include <cmath>
@@ -750,6 +751,31 @@ TEST(GameWorld_MinesAndC4)
 		range.world->playerInfo(range.world->localPlayer(), me);
 		CHECK(!me.alive); // standing on it
 	}
+}
+
+// keepProjectiles (0x005f1cc0): a mine whose owner left the game stays
+// the gadget's keepProjectiles seconds more, then goes without going off.
+TEST(GameWorld_KeepProjectilesAfterTheOwnerLeaves)
+{
+	Range range;
+	world::ObjectTemplate* mine = nullptr;
+	giveGadget(range, "unl_mine_emp", mine);
+	mine->settings()["detonation.explosionDamage"] = "200";
+	mine->settings()["detonation.triggerRadius"] = "3";
+	range.templates.find("unl_mine_emp")->settings()["keepProjectiles"] = "2";
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	throwGadget(range);
+	CHECK(range.world->projectilesInFlight() == 1);
+	const int owner = range.world->localPlayer();
+	CHECK(range.world->removePlayer(owner));
+	for (int i = 0; i < 50; ++i) { // 1.7 s
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->projectilesInFlight() == 1);
+	for (int i = 0; i < 15; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->projectilesInFlight() == 0);
 }
 
 TEST(GameWorld_DefibrillatorRevives)
@@ -1852,6 +1878,47 @@ TEST(GameWorld_UnlockAbilityLists)
 	const float lostArmoured = 100 - range.world->hitPoints(b.soldier);
 	std::fprintf(stderr, "  blast: %.2f lost plain, %.2f with the unlock\n", lostPlain, lostArmoured);
 	CHECK(lostPlain > 1 && std::fabs(lostArmoured - 0.75f * lostPlain) < 0.01f);
+}
+
+// replaceItem: an equipped unlock's rifle takes the place of the kit's
+// own (the console method keeps the list), and is the one in hand.
+TEST(GameWorld_UnlockReplacesItem)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "ItemContainer");
+	Console console;
+	world::registerWorldConsoleMethods(console, range.templates, range.objects);
+	world::ObjectTemplate* better = range.templates.create("GenericFireArm", "unl_har_rifle");
+	better->settings()["itemIndex"] = "3";
+	better->settings()["projectileTemplate"] = "bullet";
+	world::ObjectTemplate* unlock = range.templates.create("ItemContainer", "UnlockEU_AssaultLight3");
+	unlock->children().push_back({"unl_har_rifle", {}, {}});
+	std::string out;
+	CHECK(console.execute("ObjectTemplate.activeSafe ItemContainer UnlockEU_AssaultLight3", out) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.replaceItem eu_ar_rifle", out) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.replaceItem unl_best_buy_rifle", out) == ConsoleResult::Ok);
+	CHECK(unlock->settings()["replaceItem.list"] == "eu_ar_rifle;unl_best_buy_rifle;");
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	kit->children().push_back({"UnlockEU_AssaultLight3", {}, {}});
+	const int plain = range.world->addPlayer("Plain", 2, true);
+	range.world->setKit(plain, "EU_Assault", "us_light_soldier");
+	CHECK(range.world->spawnSoldier(plain));
+	const int equipped = range.world->addPlayer("Equipped", 2, true);
+	range.world->setKit(equipped, "EU_Assault", "us_light_soldier");
+	range.world->setUnlocks(equipped, {"UnlockEU_AssaultLight3"});
+	CHECK(range.world->spawnSoldier(equipped));
+	const auto carried = [&](int player) {
+		std::vector<std::string> names;
+		for (const auto& w : range.world->weaponAmmo(player)) {
+			names.push_back(w.weapon);
+		}
+		return names;
+	};
+	CHECK(carried(plain) == std::vector<std::string> {"eu_ar_rifle"});
+	CHECK(carried(equipped) == std::vector<std::string> {"unl_har_rifle"});
 }
 
 // A lock-on weapon (target.targetSystem TSHeatSeeking): an enemy carrying

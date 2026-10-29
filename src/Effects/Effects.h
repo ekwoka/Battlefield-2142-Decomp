@@ -54,6 +54,7 @@
 #pragma once
 
 #include "Game/Random.h"
+#include "Physics/CollisionWorld.h"
 #include "Physics/RigidBody.h"
 #include "Scene/EffectSettings.h"
 #include "Scene/LightSettings.h"
@@ -513,12 +514,21 @@ LightSourceLook lightSourceOf(const world::ObjectTemplate& t);
 // 0x00621250 / update 0x00621480): it lives timeToLive (below 0: 0.5 s)
 // seconds, drawn at size x sizeModifier (the axes above 0), its alpha the
 // transparencyGraph at its age's share of the life (clamped, 0x00621210)
-// times 1 - Transparency, its gravity times gravityModifier and drag. The
-// exe moves it with its physics node (Mesh or RotationalPoint, colliding
-// with the world); the rewrite's piece is a point under gravity (Physics'
-// -14.73 x gravityModifier) and the 0.99-a-tick damping, bouncing off the
-// ground under it. Another template made by an emitter (an effect bundle,
-// a particle system) is started there instead.
+// times 1 - Transparency, its gravity times gravityModifier and drag. As
+// the exe gives each piece its own physics node (physicsType 3, Mesh, for
+// the shipped pieces with a collisionMesh; the object's 0x00621250 makes
+// it through the template's hasMobilePhysics, 0x005f6ba0), the rewrite's
+// piece is a rigid body (physics::RigidBody: Physics' -14.73 x
+// gravityModifier, the 0.99-a-tick damping, the box inertia of its mesh)
+// whose contact points, the corners of its collision mesh's vehicle LOD
+// box (collisionPart), meet the terrain (collideWithGround, as a
+// vehicle's points do) and the static objects (each point's motion in the
+// tick against their faces, CollisionWorld::segmentContact), the contacts
+// solved as ResponsePhysics does; it sleeps as a PhysicsNode does
+// (physics::SleepState: a second still). Without the debris world
+// (setDebrisWorld) it falls onto the height `setGround` gives. Another
+// template made by an emitter (an effect bundle, a particle system) is
+// started there instead.
 struct DebrisEmitterTemplate {
 	game::RandomDistribution delay, timeToLive, intensity;
 	game::RandomDistribution relativePosition[3]; // right, up, dof
@@ -536,6 +546,15 @@ struct DebrisEmitterTemplate {
 struct DebrisPieceTemplate {
 	std::string geometry;
 	int part = 0; // geometryPart
+	std::string collisionMesh;
+	int collisionPart = 0;
+	uint32_t material = 0;
+	// The body's contact points (object space) and box, from the collision
+	// mesh once it is looked up (a point at the origin and a 0.5 m box
+	// without one).
+	bool shapeResolved = false;
+	std::vector<Vec3> points;
+	Vec3 boxSize {0.5f, 0.5f, 0.5f};
 	game::RandomDistribution timeToLive, size, transparency, gravityModifier, drag;
 	Graph transparencyGraph {0, 0, 0, 1};
 	Vec3 sizeModifier {1, 1, 1};
@@ -547,6 +566,8 @@ struct DebrisPiece {
 	Mat3 rotation;
 	float age = 0, life = 10, size = 1, transparency = 0, gravity = 1, drag = 0;
 	bool resting = false;
+	physics::RigidBody body;   // its physics node (position, rotation, velocity, spin mirror it)
+	physics::SleepState sleep;
 	// What it is drawn with now.
 	float alpha() const;
 	Vec3 scale() const;
@@ -596,6 +617,17 @@ public:
 	}
 	// The ground the colliding particles bounce off (collisionEnable).
 	void setGround(std::function<float(float x, float z)> height) const { m_context.groundHeight = std::move(height); }
+	// What the debris pieces' bodies collide with: the terrain (height and
+	// normal; its material), the static objects' faces (world space), the
+	// pieces' collision meshes by name and the contacts' materials (the
+	// piece's, the surface's).
+	struct DebrisWorld {
+		physics::Ground ground;
+		const physics::CollisionWorld* statics = nullptr;
+		std::function<const physics::CollisionMeshFile*(const std::string& name)> collisionMesh;
+		std::function<physics::ContactMaterial(uint32_t piece, uint32_t surface)> material;
+	};
+	void setDebrisWorld(DebrisWorld world) { m_debrisWorld = std::move(world); }
 	void setCamera(const Vec3& position, float tanHalfFov) const
 	{
 		m_context.hasCamera = true;
@@ -787,6 +819,9 @@ private:
 	};
 	std::vector<LiveDebrisEmitter> m_debrisEmitters;
 	std::vector<DebrisPiece> m_debris;
+	DebrisWorld m_debrisWorld;
+	void resolveShape(DebrisPieceTemplate& t);
+	void stepPiece(DebrisPiece& p, float seconds);
 	std::map<const world::ObjectTemplate*, std::unique_ptr<DebrisEmitterTemplate>> m_debrisEmitterTemplates;
 	std::map<const world::ObjectTemplate*, std::unique_ptr<DebrisPieceTemplate>> m_debrisPieceTemplates;
 	void startDebrisEmitter(const world::ObjectTemplate& t, const Vec3& position, const Mat3& rotation, int depth, View view);

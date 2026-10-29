@@ -86,6 +86,12 @@ public:
 	// Every radio message the local player hears, as it is heard (the
 	// name tags' calls).
 	std::function<void(int sender, const std::string& voice)> onHeard;
+	// The text of each radio message the local player hears (the sample's
+	// text id, 0x0042e0c0 -> 0x0042d7f0 -> 0x0042bef0: the HUD's chat
+	// list with the sender, slot 0x158 -> ChatList 0x007b4cd0, or without
+	// one, slot 0x15c): the lock-on lines ("target_aquired", "target_lost",
+	// "missile_away", 0x005e1b30 / 0x005e1ee0) among them.
+	std::function<void(int sender, int channel, const std::string& textId)> onRadioText;
 
 	// The SiloSyncEvent's suffix (0x00514030: "_%d", DAT_00928708, of the
 	// silo's index, its ancestor's slot 0x38, into the Radio's +0x18) that

@@ -13,7 +13,7 @@ namespace {
 // A trigger (events, chance, average time, minimum time) at the origin of
 // radius 10 and its area at (20, 0, 0), radius 5, playing e_bird.
 void addTriggerAndArea(world::ObjectTemplateManager& templates, world::ObjectManager& objects, const char* events,
-	const char* chance, const char* average, const char* minimum, bool project = false)
+	const char* chance, const char* average, const char* minimum, bool project = false, bool networked = false)
 {
 	world::ObjectTemplate* trigger = templates.create("Trigger", "trigger_1");
 	trigger->settings()["triggerId"] = "1";
@@ -28,8 +28,9 @@ void addTriggerAndArea(world::ObjectTemplateManager& templates, world::ObjectMan
 	area->settings()["triggerId"] = "1";
 	area->settings()["radius"] = "5";
 	area->settings()["linkedEffectContainer"] = "e_bird";
-	if (project) {
-		area->settings()["projectOnHeightmap"] = "1";
+	area->settings()["projectOnHeightmap"] = project ? "1" : "0"; // on by default (0x005b9340); the levels say 0
+	if (networked) {
+		area->settings()["numNetworkedEffects"] = "1";
 	}
 	objects.create(trigger, {0, 0, 0});
 	objects.create(area, {20, 3, 0});
@@ -126,4 +127,43 @@ TEST(Ambience_AreasCapTheirEffects)
 	ambience.bundleTimeToLive = [](const std::string&) { return 1.0f; };
 	ambience.explosion(3, 90, {0, 0, 0});
 	CHECK(ambience.takeEffects().size() == 1);
+}
+
+// numNetworkedEffects: the server plays the area and says what it played
+// (0x00510270: the area's id, the Bundle child, the offset); a joined
+// client plays only what the server sends (0x00510230).
+TEST(Ambience_NetworkedAreasAreTheServers)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	addTriggerAndArea(templates, objects, "1", "1", "1", "10", false, true);
+	const auto children = [](const std::string& bundle) {
+		return bundle == "e_bird" ? std::vector<std::string> {"e_bird_a", "e_bird_b"} : std::vector<std::string> {};
+	};
+	game::AmbientTriggers server, client;
+	server.bundleChildren = client.bundleChildren = children;
+	server.link(objects, templates);
+	client.link(objects, templates);
+	client.client = true;
+	std::vector<game::AmbientTriggers::Activator> near {{0, 1, {3, 0, 0}, 0}};
+	std::vector<game::AmbientTriggers::Effect> sent;
+	for (int i = 0; i < 90; ++i) {
+		server.update(i / 30.0, static_cast<uint32_t>(i), near);
+		client.update(i / 30.0, static_cast<uint32_t>(i), near);
+		for (const auto& e : server.takeEffects()) {
+			sent.push_back(e);
+		}
+		CHECK(client.takeEffects().empty());
+	}
+	CHECK(sent.size() == 1);
+	const game::AmbientTriggers::Effect& e = sent.front();
+	CHECK(e.networked && e.areaId == 0 && (e.index == 1 || e.index == 2));
+	CHECK(e.bundle == (e.index == 1 ? "e_bird_a" : "e_bird_b"));
+	CHECK(std::fabs(e.position.x - (20 + e.offset.x)) < 1e-4f && std::fabs(e.position.z - e.offset.z) < 1e-4f);
+	// The client plays the server's pick at the server's place.
+	CHECK(client.playNetworked(e.areaId, e.index, e.offset));
+	const auto played = client.takeEffects();
+	CHECK(played.size() == 1 && played[0].bundle == e.bundle);
+	CHECK(std::fabs(played[0].position.x - e.position.x) < 1e-4f && std::fabs(played[0].position.z - e.position.z) < 1e-4f);
+	CHECK(!client.playNetworked(5, 1, {}) && !client.playNetworked(0, 3, {}));
 }

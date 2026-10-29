@@ -17,6 +17,7 @@ add_library(Game STATIC
 	TickTimer.cpp
 	Cameras.cpp
 	Votes.cpp
+	SquadRequests.cpp
 	AmbientTriggers.cpp
 	Ambience.cpp
 	LockFeedback.cpp

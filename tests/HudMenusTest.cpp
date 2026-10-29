@@ -5,6 +5,7 @@
 #include "Game/GameWorld.h"
 #include "Hud/Hud.h"
 #include "Main/HudMenus.h"
+#include "Main/HudMenusChat.h"
 #include "Main/HudMenusComm.h"
 #include "Main/HudMenusVehicles.h"
 #include "Console/ConsoleBinding.h"
@@ -557,4 +558,86 @@ TEST(HudVehicle_SiloReloadIcons)
 	CHECK(std::fabs(area(hud::sweepPieces(square, 1, 1, 6.2831853f * 0.75f)) - 3) < 1e-4f);
 	CHECK(std::fabs(area(hud::sweepPieces(square, 1, 1, 6.2831853f / 8)) - 0.5f) < 1e-4f);
 	CHECK(hud::sweepPieces(square, 1, 1, 7).size() == 1 && hud::sweepPieces(square, 1, 1, 0).empty());
+}
+
+// The votes' HUD lines (the client's vote view 0x005740e0, its tick
+// 0x00573ae0, the lines 0x005725e0).
+TEST(HudVotes_Lines)
+{
+	menu::VoteMessages votes;
+	std::vector<std::string> lines;
+	votes.localize = [](const std::string& id) {
+		if (id == "HUD_HUD_KICKVOTE_PLAYER_START_REMOTE") return std::string("#PLAYERNAME1# vs #PLAYERNAME2#");
+		if (id == "HUD_HUD_KICKVOTE_PLAYER_STAT") return std::string("#YESVOTES#/#NEEDED# #PLAYERNAME#");
+		if (id == "HUD_HUD_KICKVOTE_MAP_START_LOCAL") return std::string("#PLAYERNAME# #MAPNAME# #MINUTES#");
+		if (id == "HUD_HUD_KICKVOTE_UNABLE_TO_ISSUE") return std::string("wait #MINUTES#");
+		return id;
+	};
+	votes.playerName = [](int id) { return id == 1 ? std::string("Me") : id == 2 ? std::string("Bob") : std::string("Eve"); };
+	votes.mapName = [](int) { return std::string("Sidi_Power_Plant"); };
+	votes.onLine = [&](const std::string& s) { lines.push_back(s); };
+	votes.localPlayer = 1;
+	// Eve starts a kick of Bob: the remote start line, again every 5 s
+	// until we vote; the count every 30 s.
+	votes.handle({2, 0, 2, 3, 0, 4, 90});
+	CHECK(lines.size() == 1 && lines[0] == "Eve vs Bob");
+	for (int i = 0; i < 30 * 5 + 1; ++i) {
+		votes.tick(1.0f / 30);
+	}
+	CHECK(lines.size() == 2);
+	votes.handle({2, 4, 2, 1, 0, 0, 0}); // we say yes
+	CHECK(lines.back() == "HUD_HUD_KICKVOTE_VOTE_YES");
+	for (int i = 0; i < 30 * 26; ++i) {
+		votes.tick(1.0f / 30);
+	}
+	CHECK(lines.size() == 4 && lines.back() == "2/4 Bob"); // the starter and us
+	votes.handle({2, 3, 2, 3, 0, 0, 0});
+	CHECK(lines.back() == "HUD_HUD_KICKVOTE_PLAYER_KICKED" && !votes.running());
+	// Our own map vote: the local start line; then 300 s before the next.
+	votes.handle({1, 0, 5, 1, 0, 3, 120});
+	CHECK(lines.back() == "Me Sidi Power Plant 2");
+	votes.handle({1, 1, 5, 1, 0, 0, 0});
+	CHECK(lines.back() == "HUD_HUD_KICKVOTE_MAP_STAYS");
+	CHECK(!votes.mayStart(1, 2, false) && lines.back() == "wait 5");
+	CHECK(!votes.mayStart(2, 1, false) && lines.back() == "HUD_HUD_KICKVOTE_CANNOT_KICK_SELF");
+	CHECK(!votes.mayStart(2, 3, true) && lines.back() == "HUD_HUD_KICKVOTE_CANNOT_KICK_HOST");
+	// A refusal goes to the starter only.
+	const size_t before = lines.size();
+	votes.handle({2, 6, 2, 3, 0, 0, 0});
+	CHECK(lines.size() == before);
+	votes.handle({2, 7, 2, 1, 0, 0, 0});
+	CHECK(lines.back() == "HUD_HUD_KICKVOTE_UNABLE_TO_START_VOTE");
+}
+
+// The commander screen's squad panel (0x007ab790): a squad's order picture
+// in its row and the panel, orderNew while it has a request; the squad info
+// bar (0x007a0f80).
+TEST(HudMenus_CommanderSquadPanelAndInfo)
+{
+	Squads s;
+	menu::CommanderMenu commander(s.world, s.hud);
+	const int me = s.world.addPlayer("Me", 2, false);
+	const int a = s.world.addPlayer("A", 2, true);
+	s.world.joinSquad(a, 4);
+	s.world.setCommanderEnabled(true);
+	CHECK(s.world.setCommander(2, me));
+	CHECK(s.world.issueOrder(2, 4, game::GameWorld::OrderType::MapMove, 10, 10, me));
+	commander.update(me);
+	commander.click(me, 0, 4);
+	commander.update(me);
+	CHECK(s.hud.listCell(15, 0, 2) == "Ingame/Commander/Orders/orderMove.tga");
+	CHECK(s.hud.string("SquadOrderPicturePathString") == "Ingame/Commander/Orders/orderMove.tga"
+		&& s.hud.number("ShowSquadOrderPicture") == 1);
+	CHECK(s.hud.string("SquadLeaderKitPicturePathString") == "Ingame/Commander/kits/icon_kit_dead.tga");
+	CHECK(s.world.storeSquadRequest(2, 4, 1, {0, 0, 0}));
+	commander.update(me);
+	CHECK(s.hud.listCell(15, 0, 2) == "Ingame/Commander/Orders/orderNew.tga");
+	// The info bar: the commander's, and a squad member's.
+	menu::updateSquadInfo(s.hud, s.world, me, false, {});
+	CHECK(s.hud.number("ShowCommanderIcon") == 1 && s.hud.string("SquadInfoText") == "HUD_HUD_SQUADINFO_COMMANDER");
+	menu::updateSquadInfo(s.hud, s.world, me, true, {});
+	CHECK(s.hud.number("SquadInfoBarShow") == 0);
+	menu::updateSquadInfo(s.hud, s.world, a, false, {});
+	CHECK(s.hud.number("ShowSquadIcon") == 1 && s.hud.string("SquadInfoIconPath") == "Ingame/SquadInfo/icon_squad4.tga"
+		&& s.hud.string("SquadInfoText") == "HUD_HUD_SQUADINFO_SQUADLEADER");
 }

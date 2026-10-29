@@ -244,6 +244,14 @@ public:
 	// The tag the crosshair selects now (0x100f16c0: the selectable tag
 	// nearest the screen's centre within 0.08), its object; 0 none.
 	uint32_t selected() const { return m_selectedObject; }
+	// The request tag the crosshair selects (the commander's), its id
+	// squad x 4 + kind; -1 none.
+	int selectedRequest() const { return m_selectedRequest; }
+	// The tags shown at all (the manager's +0x465, on from its
+	// constructor; slots 0x64 / 0x68, 0x100f5f40 / 0x100f5f50): the HUD's
+	// c_GI3dMap flips it (0x00754290). Off, frame draws nothing.
+	bool shown() const { return m_shown; }
+	void setShown(bool shown) { m_shown = shown; }
 
 	// A point in the 800 x 600 screen; false behind the camera. With
 	// `glue`, a point off the circle of radius circleRadius (normalised
@@ -289,6 +297,9 @@ private:
 	};
 	std::vector<PendingCall> m_pendingCalls;
 	uint32_t m_selectedObject = 0;
+	int m_selectedRequest = -1;
+	bool m_shown = true;
+	static constexpr uint32_t kRequestObject = 0x80000000u; // a request's selection (the manager's id - 0x80000000)
 	float m_clock = 0; // the manager's +0x10 (the blink)
 	Settings m_settings;
 	const IconRegistry* m_icons = nullptr;

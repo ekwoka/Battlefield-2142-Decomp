@@ -164,6 +164,7 @@ void ServerAdmin::setDefaultFiles(const std::string& modDirectory, const std::st
 	}
 }
 
+// sv.load (0x0041b003, 0x0041b056, 0x0041b078) and sv.save (0x0041b0a1, 0x0041b0f4).
 bool ServerAdmin::loadSettings(Console& console) { return runFile(console, settings.configFile); }
 bool ServerAdmin::loadMapList(Console& console) { return runFile(console, maps.configFile); }
 bool ServerAdmin::loadBanList(Console& console) { return runFile(console, banListFile); }
@@ -344,21 +345,24 @@ void ServerAdmin::registerConsole(Console& console)
 	bindMethod(console, "reservedSlots.clear", access, [a]() { a->reserved.clear(); });
 	bindMethod(console, "reservedSlots.list", access, [a]() { return a->reserved.list(); });
 
-	// --- admin.*
-	bindMethod(console, "admin.runNextLevel", access, [a]() {
+	// --- admin.* (the rows 0x00429bba..0x0042af3b; the ban list is the
+	// game server's, 0x00506210..0x00508300: each call below names its
+	// functions, and every change to the list saves it, 0x00508100 ->
+	// 0x00507570's banlist.con writer)
+	bindMethod(console, "admin.runNextLevel", access, [a]() { // 0x00429bba: the game server's slot 0x2c
 		if (a->hooks.runNextLevel) {
 			a->hooks.runNextLevel();
 		}
 	});
-	bindMethod(console, "admin.currentLevel", access, [a]() { return a->maps.current(); });
-	bindProperty<int>(
+	bindMethod(console, "admin.currentLevel", access, [a]() { return a->maps.current(); }); // 0x00429c28 -> 0x004baed0
+	bindProperty<int>( // 0x00429ca4 -> 0x004bae80
 		console, "admin.nextLevel", access, [a]() { return a->maps.next(); }, [a](const int& index) { a->maps.setNext(index); });
-	bindMethod(console, "admin.restartMap", access, [a]() {
+	bindMethod(console, "admin.restartMap", access, [a]() { // 0x00429dab -> 0x004ba0c0
 		if (a->hooks.restartMap) {
 			a->hooks.restartMap();
 		}
 	});
-	bindMethod(console, "admin.runLevel", access, [a](std::string level, std::string mode, int size) {
+	bindMethod(console, "admin.runLevel", access, [a](std::string level, std::string mode, int size) { // 0x00429e19 -> 0x004baee0
 		if (a->hooks.runLevel) {
 			a->hooks.runLevel({level, mode, size});
 		}
@@ -376,8 +380,9 @@ void ServerAdmin::registerConsole(Console& console)
 		}
 		return false;
 	};
-	// 0x00507e10 / 0x00507e80: ban the player's address (key), save the
-	// list, then the kick.
+	// 0x00507e10 / 0x00507e80 (from the rows 0x0042a04a / 0x0042a27d, the
+	// period parsed by 0x00507f70 / 0x00507fb0): ban the player's address
+	// (key), save the list, then the kick.
 	bindMethod(
 		console, "admin.banPlayer", access,
 		[a, findPlayer](std::string id, std::string period) -> std::string {
@@ -408,27 +413,27 @@ void ServerAdmin::registerConsole(Console& console)
 			return "";
 		},
 		1);
-	bindMethod(
+	bindMethod( // 0x0042a4b0 -> 0x00507ef0 (the period 0x00507ff0)
 		console, "admin.addAddressToBanList", access,
 		[a](std::string address, std::string period) { a->bans.addAddress(address, period); }, 1);
-	bindMethod(
+	bindMethod( // 0x0042a6a0 -> 0x00507f20 (the period 0x00508030)
 		console, "admin.addKeyToBanList", access, [a](std::string key, std::string period) { a->bans.addKey(key, period); },
 		1);
-	bindMethod(console, "admin.removeAddressFromBanList", access, [a](std::string address) {
+	bindMethod(console, "admin.removeAddressFromBanList", access, [a](std::string address) { // 0x0042a890 -> 0x005077b0
 		a->bans.removeAddress(address);
 		a->saveBanList();
 	});
-	bindMethod(console, "admin.removeKeyFromBanList", access, [a](std::string key) {
+	bindMethod(console, "admin.removeKeyFromBanList", access, [a](std::string key) { // 0x0042a9b6 -> 0x005077d0
 		a->bans.removeKey(key);
 		a->saveBanList();
 	});
-	bindMethod(console, "admin.clearBanList", access, [a]() {
+	bindMethod(console, "admin.clearBanList", access, [a]() { // 0x0042aadc -> 0x005077f0
 		a->bans.clear();
 		a->saveBanList();
 	});
-	bindMethod(console, "admin.listBannedAddresses", access, [a]() { return a->bans.listAddresses(); });
-	bindMethod(console, "admin.listBannedKeys", access, [a]() { return a->bans.listKeys(); });
-	// 0x004a6090
+	bindMethod(console, "admin.listBannedAddresses", access, [a]() { return a->bans.listAddresses(); }); // 0x0042ab4a -> 0x00507800
+	bindMethod(console, "admin.listBannedKeys", access, [a]() { return a->bans.listKeys(); }); // 0x0042abee -> 0x005078d0
+	// 0x0042ac9e -> 0x004a6090
 	bindMethod(console, "admin.kickPlayer", access, [a, findPlayer](std::string id) -> std::string {
 		AdminHooks::Player p;
 		if (!findPlayer(id, p) || !a->hooks.kick || !a->hooks.kick(p.id, false)) {
@@ -436,7 +441,7 @@ void ServerAdmin::registerConsole(Console& console)
 		}
 		return "";
 	});
-	bindMethod(console, "admin.listPlayers", access, [a]() { return a->listPlayers(); });
+	bindMethod(console, "admin.listPlayers", access, [a]() { return a->listPlayers(); }); // 0x0042adfc
 
 	// --- Game.sayAll / sayTeam (0x0042407c, 0x004241be)
 	if (!console.hasMethod("Game.sayAll")) {

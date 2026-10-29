@@ -4,8 +4,10 @@
 #include "Console/ConsoleBinding.h"
 #include "Game/GameWorld.h"
 #include "Hud/Hud.h"
+#include "World/Object.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <map>
 #include <vector>
@@ -351,8 +353,8 @@ void CommanderTabs::apply(hud::HudManager& hud) const
 CommanderMenu::CommanderMenu(game::GameWorld& round, hud::HudManager& hud) : m_round(round), m_hud(hud)
 {
 	// Fitted to the 182-pixel list of HudElementsCommander.con.
-	m_hud.setListColumns(15, {{4, 14, 2}, {20, 100, 0}, {-1, 0, 0}, {-1, 0, 0}, {124, 50, 2}});
-	m_hud.setListColumns(14, {{6, 200, 0}});
+	m_hud.setListColumns(15, {{4, 14, 2}, {20, 84, 0}, {106, 15, 2, 15}, {-1, 0, 0}, {124, 50, 2}});
+	m_hud.setListColumns(14, {{4, 13, 2, 13}, {22, 190, 0}});
 }
 
 void CommanderMenu::bind(Console& console)
@@ -421,6 +423,7 @@ void CommanderMenu::update(int player)
 		row[0] = std::to_string(squad);
 		row[1] = (m_selected.count(squad) ? "|c" : "") + std::string(squadName(squad));
 		row[4] = std::to_string(members.size()) + "/" + std::to_string(kSquadSize);
+		row[2] = orderPicture(me.team, squad);
 		row[kCellId] = std::to_string(squad);
 		row[kCellKind] = "0";
 		if (squad == m_current) {
@@ -431,13 +434,15 @@ void CommanderMenu::update(int player)
 	m_hud.setList(15, std::move(rows));
 	m_hud.setListSelection(15, selectedRow);
 	std::vector<std::vector<std::string>> memberRows;
-	std::string leader;
+	std::string leader, leaderKit;
 	if (const auto it = squads.find(m_current); it != squads.end()) {
 		for (const auto& member : it->second) {
 			if (member.squadLeader) {
 				leader = member.name;
+				leaderKit = kitPicture(member.alive, member.manDown, member.kit);
 			} else {
-				memberRows.push_back({member.name});
+				// The members' rows (0x007ac8f0): the kit's icon (0x007aa0f0) and the name.
+				memberRows.push_back({kitPicture(member.alive, member.manDown, member.kit), member.name});
 			}
 		}
 	}
@@ -445,7 +450,55 @@ void CommanderMenu::update(int player)
 	m_hud.setString("CurrentSquadName", m_current >= 0 ? squadName(m_current) : "");
 	m_hud.setString("CurrentSquadLeaderName", leader);
 	m_hud.set("ShowSquadLeaderStats", leader.empty() ? 0 : 1);
+	// The squad shown (0x007ab790 with its row the current one): its
+	// order's picture (+0x1c5 ShowSquadOrderPicture) and its leader's kit
+	// (SquadLeaderKitPicturePathString, 0x007aa0f0).
+	const std::string order = m_current >= 0 ? orderPicture(me.team, m_current) : std::string();
+	m_hud.setString("SquadOrderPicturePathString", order);
+	m_hud.set("ShowSquadOrderPicture", order.empty() ? 0 : 1);
+	m_hud.setString("SquadLeaderKitPicturePathString", leaderKit);
 	tabs.apply(m_hud);
+}
+
+std::string CommanderMenu::orderPicture(int team, int squad) const
+{
+	// 0x007ab790: the squad's requests first (orderNew, +0x1a0: any of its
+	// four kinds, the squad's slot 0x18), else the commander's order by its
+	// kind (+0x174 + 4 kind: none for 0..3 and 8.., Move, Attack, Defend,
+	// Repair for 4..7, 0x007a8770's textures).
+	for (int kind = 0; kind < game::GameWorld::kRequestKinds; ++kind) {
+		if (m_round.squadRequest(team, squad, kind)) {
+			return "Ingame/Commander/Orders/orderNew.tga";
+		}
+	}
+	const game::GameWorld::SquadOrder* order = m_round.squadOrder(team, squad);
+	static const char* const kPictures[] = {"orderMove", "orderAttack", "orderDefend", "orderRepair"};
+	const int kind = order ? static_cast<int>(order->type) : -1;
+	return kind >= 4 && kind <= 7 ? std::string("Ingame/Commander/Orders/") + kPictures[kind - 4] + ".tga" : std::string();
+}
+
+std::string CommanderMenu::kitPicture(bool alive, bool manDown, uint32_t kitObject) const
+{
+	// 0x007aa0f0 (0x007aa000's kit type): alive and not down, the kit's
+	// icon (1 assault, 2 support, 4 engineer, 7 recon), else
+	// icon_kit_dead.
+	std::string type;
+	if (alive && !manDown) {
+		if (const world::Object* kit = kitObject ? m_round.objects().find(kitObject) : nullptr; kit && kit->objectTemplate()) {
+			const auto it = kit->objectTemplate()->settings().find("kitType");
+			if (it != kit->objectTemplate()->settings().end()) {
+				for (const char c : it->second) {
+					type += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+				}
+			}
+		}
+	}
+	const char* icon = type.find("assault") != std::string::npos ? "assault"
+		: type.find("support") != std::string::npos               ? "support"
+		: type.find("engineer") != std::string::npos              ? "engineer"
+		: type.find("recon") != std::string::npos || type.find("sniper") != std::string::npos ? "recon"
+																									: "dead";
+	return std::string("Ingame/Commander/kits/icon_kit_") + icon + ".tga";
 }
 
 ScoreboardStyle scoreboardStyle(const ScoreboardRow& row, int rowIndex)
@@ -504,6 +557,203 @@ std::vector<ScoreboardLine> scoreboardBySquad(const std::vector<ScoreboardMember
 	}
 	group(0);
 	return lines;
+}
+
+
+// --- Squad requests (0x007d6d20, 0x007c8f10, 0x007c7e20, 0x007c8a60) -------
+
+const char* SquadRequests::toolName(int kind)
+{
+	switch (kind) {
+	case 1: return "orbitalstrike";
+	case 2: return "uav";
+	case 3: return "supply";
+	default: return "artillery";
+	}
+}
+
+int SquadRequests::leaderOf(int team, int squad) const
+{
+	for (const auto& p : m_round.playerList()) {
+		if (p.team == team && p.squad == squad && p.squadLeader) {
+			return p.id;
+		}
+	}
+	return -1;
+}
+
+bool SquadRequests::send(int player, int kind, float x, float z)
+{
+	game::GameWorld::PlayerInfo me;
+	if (!m_round.playerInfo(player, me)) {
+		return false;
+	}
+	if (!me.alive) {
+		if (onPersonal) {
+			onPersonal(text("HUD_HUD_SQUAD_ALIVE_TO_REQUEST"));
+		}
+		return false;
+	}
+	if (m_sent >= maxRequests) {
+		return false;
+	}
+	if (m_since < 0) {
+		m_since = 0;
+	}
+	++m_sent;
+	const int commander = m_round.commander(me.team);
+	if (!noCommanderNeeded && commander < 0) {
+		m_round.hearRadio(player, 2, "no_commander_available");
+		return false;
+	}
+	if (kind < 0 || kind >= game::GameWorld::kRequestKinds || !me.squadLeader
+		|| !m_round.storeSquadRequest(me.team, me.squad, kind, {x, m_round.terrainHeight(x, z), z})) {
+		return false;
+	}
+	// 2/0x1e to the leader: his line and his radio to the commander
+	// (0x007c7690, TCPlayer 0xe with the commander as the value).
+	static const char* const kVoices[] = {"req_artillery", "PLAYER_REQUEST_TM_requestforcestrike", "PLAYER_REQUEST_requestuav",
+		"PLAYER_REQUEST_requestsupplies"};
+	if (player == localPlayer && onPersonal) {
+		onPersonal(text("HUD_HUD_SQUAD_REQUEST_TO_COMMANDER"));
+	}
+	if (commander >= 0) {
+		m_round.radioMessage(player, 14, kVoices[kind], commander);
+	}
+	// 2/0x1d to the commander (0x007c8f10).
+	if (commander >= 0 && commander == localPlayer) {
+		const auto state = m_round.abilityState(me.team, game::GameWorld::requestAbility(kind));
+		if (state.available && state.ready) {
+			static const char* const kNames[] = {"HUD_TEXT_COMMANDER_ARTILLERY", "HUD_TEXT_COMMANDER_ORBITALSTRIKE",
+				"HUD_TEXT_COMMANDER_UAV", "HUD_TEXT_COMMANDER_SUPPLIES"};
+			std::string line = text("HUD_HUD_REQUEST_RECIEVED_FROM_SQUAD");
+			const auto put = [&line](const std::string& from, const std::string& to) {
+				for (size_t at = line.find(from); at != std::string::npos; at = line.find(from, at + to.size())) {
+					line.replace(at, from.size(), to);
+				}
+			};
+			put("#REQUESTNAME#", text(kNames[kind]));
+			put("#SQUADNAME#", squadName(me.squad));
+			if (onInfo) {
+				onInfo(line);
+			}
+		} else {
+			m_pending.push_back({me.team, me.squad, kind, 4.0f}); // 0x40800000
+		}
+	}
+	return true;
+}
+
+SquadRequests::Answer SquadRequests::answer(int commander, int squad, int kind, bool accept)
+{
+	game::GameWorld::PlayerInfo me;
+	if (!m_round.playerInfo(commander, me) || !me.commander) {
+		return Answer::None;
+	}
+	const game::GameWorld::SquadRequest* request = m_round.squadRequest(me.team, squad, kind);
+	if (!request) {
+		return Answer::None;
+	}
+	const std::string tool = toolName(kind);
+	if (!accept) {
+		m_round.removeSquadRequest(me.team, squad, kind);
+		const int leader = leaderOf(me.team, squad);
+		if (leader >= 0) {
+			m_round.radioMessage(commander, 14, tool + "_deny", leader);
+		}
+		return Answer::Denied;
+	}
+	const physics::Vec3 at = request->position;
+	if (!m_round.commanderAction(me.team, game::GameWorld::requestAbility(kind), at.x, at.z)) {
+		m_round.hearRadio(commander, 2, tool + "_unavailable");
+		return Answer::Unavailable;
+	}
+	for (int other = 1; other <= 9; ++other) {
+		if (!m_round.squadRequest(me.team, other, kind)) {
+			continue;
+		}
+		m_round.removeSquadRequest(me.team, other, kind);
+		const int leader = leaderOf(me.team, other);
+		if (leader >= 0) {
+			m_round.radioMessage(commander, 14, tool + (other == squad ? "_accept" : "_deny"), leader);
+		}
+	}
+	return Answer::Accepted;
+}
+
+void SquadRequests::tick(float seconds)
+{
+	// The count's reset (the HUD's update: blockedSeconds after the first).
+	if (m_since >= 0) {
+		m_since += seconds;
+		if (m_since > blockedSeconds) {
+			m_since = -1;
+			m_sent = 0;
+		}
+	}
+	for (auto it = m_pending.begin(); it != m_pending.end();) {
+		it->left -= seconds;
+		if (it->left > 0) {
+			++it;
+			continue;
+		}
+		// 0x007c8a60: taken off, and 0x007c7a00's line to the leader.
+		const Pending p = *it;
+		it = m_pending.erase(it);
+		if (!m_round.squadRequest(p.team, p.squad, p.kind)) {
+			continue;
+		}
+		m_round.removeSquadRequest(p.team, p.squad, p.kind);
+		const auto state = m_round.abilityState(p.team, game::GameWorld::requestAbility(p.kind));
+		std::string voice;
+		switch (p.kind) {
+		case 1: voice = state.available ? "orbitalstrike_auto_deny" : "orbitalstrike_unavailable"; break;
+		case 2: voice = state.available ? "uav_auto_deny" : "uav_unavailable"; break;
+		case 3: voice = "supplies_auto_deny"; break;
+		default: voice = state.available ? "artillery_auto_deny" : "artillery_unavailable"; break;
+		}
+		const int leader = leaderOf(p.team, p.squad);
+		if (leader >= 0 && localPlayer >= 0) {
+			m_round.radioMessage(localPlayer, 14, voice, leader);
+		}
+	}
+}
+
+std::string commanderToolRefusal(int ability, bool available, bool ready)
+{
+	switch (ability) {
+	case 0: return !available ? "orbitalstrike_unavailable" : !ready ? "orbitalstrike_in_use" : "";
+	case 1: return !available ? "artillery_unavailable" : !ready ? "artillery_in_use" : "";
+	case 2: return !available ? "uav_unavailable" : !ready ? "uav_in_use" : "";
+	case 3: return !available ? "satellite_unavailable" : !ready ? "satellite_not_ready" : "";
+	default: return !ready ? "supplies_in_use" : "";
+	}
+}
+
+
+void updateSquadInfo(hud::HudManager& hud, game::GameWorld& round, int player, bool commanderScreen,
+	const std::function<std::string(const std::string&)>& localize)
+{
+	game::GameWorld::PlayerInfo me;
+	const bool known = round.playerInfo(player, me);
+	const auto text = [&localize](const char* id) { return localize ? localize(id) : std::string(id); };
+	bool bar = false, commanderIcon = false, squadIcon = false;
+	std::string line, icon;
+	if (known && !commanderScreen && me.commander) {
+		bar = commanderIcon = true;
+		line = text("HUD_HUD_SQUADINFO_COMMANDER");
+		icon = "Ingame/SquadInfo/icon_commander.tga";
+	} else if (known && !commanderScreen && me.squad > 0) {
+		bar = squadIcon = true;
+		line = text(me.squadLeader ? "HUD_HUD_SQUADINFO_SQUADLEADER" : "HUD_HUD_SQUADINFO_SQUADMEMBER");
+		icon = "Ingame/SquadInfo/icon_squad" + std::to_string(me.squad) + ".tga";
+	}
+	hud.set("SquadInfoBarShow", bar ? 1 : 0);
+	hud.set("ShowCommanderIcon", commanderIcon ? 1 : 0);
+	hud.set("ShowSquadIcon", squadIcon ? 1 : 0);
+	hud.set("SquadOrderInfoBarShow", 0);
+	hud.setString("SquadInfoText", line);
+	hud.setString("SquadInfoIconPath", icon);
 }
 
 } // namespace dice::hfe::menu

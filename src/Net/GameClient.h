@@ -65,6 +65,14 @@ struct GameClientOptions {
 	// +0x50 (the rate table's 200 ms) plus 1000 x 0x006b4e70's
 	// interpolation time (from settings at 0x00a83e4c-0x00a83e54, taken as 0).
 	uint32_t lagCompensationMs = 200;
+	// The game's folder on disk (holding mods/), for a pure server's
+	// content check (ContentCheck.h): with it, each level of a server whose
+	// settings ask for the check is answered, after its LoadComplete, with
+	// the ContentCheck event of our archives' fingerprint for the level's
+	// ordinal (0x004b5eb0 case 2 -> 0x0068ba40(0), 0x005123f0). Empty: no
+	// answer, and a pure server kicks us (0x1b).
+	std::string contentRoot;
+	std::string modDirectory = "mods/bf2142";
 };
 
 class GameClient {

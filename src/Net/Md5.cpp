@@ -1,7 +1,7 @@
 #include "Md5.h"
 
+#include <algorithm>
 #include <cstring>
-#include <vector>
 
 namespace dice::hfe::net {
 
@@ -24,56 +24,85 @@ uint32_t rotate(uint32_t x, uint32_t c) { return (x << c) | (x >> (32 - c)); }
 
 } // namespace
 
+void Md5::block(const uint8_t* p)
+{
+	uint32_t w[16];
+	for (int i = 0; i < 16; ++i) {
+		w[i] = static_cast<uint32_t>(p[i * 4]) | static_cast<uint32_t>(p[i * 4 + 1]) << 8
+			| static_cast<uint32_t>(p[i * 4 + 2]) << 16 | static_cast<uint32_t>(p[i * 4 + 3]) << 24;
+	}
+	uint32_t a = m_h[0], b = m_h[1], c = m_h[2], d = m_h[3];
+	for (uint32_t i = 0; i < 64; ++i) {
+		uint32_t f, g;
+		if (i < 16) {
+			f = (b & c) | (~b & d);
+			g = i;
+		} else if (i < 32) {
+			f = (d & b) | (~d & c);
+			g = (5 * i + 1) % 16;
+		} else if (i < 48) {
+			f = b ^ c ^ d;
+			g = (3 * i + 5) % 16;
+		} else {
+			f = c ^ (b | ~d);
+			g = (7 * i) % 16;
+		}
+		const uint32_t next = d;
+		d = c;
+		c = b;
+		b = b + rotate(a + f + kSine[i] + w[g], kShift[i]);
+		a = next;
+	}
+	m_h[0] += a;
+	m_h[1] += b;
+	m_h[2] += c;
+	m_h[3] += d;
+}
+
+void Md5::update(const void* data, size_t size)
+{
+	const uint8_t* p = static_cast<const uint8_t*>(data);
+	m_length += size;
+	while (size > 0) {
+		const size_t take = std::min(size, sizeof(m_buffer) - m_buffered);
+		std::memcpy(m_buffer + m_buffered, p, take);
+		m_buffered += take;
+		p += take;
+		size -= take;
+		if (m_buffered == sizeof(m_buffer)) {
+			block(m_buffer);
+			m_buffered = 0;
+		}
+	}
+}
+
+std::array<uint8_t, 16> Md5::digest() const
+{
+	Md5 copy = *this;
+	const uint64_t bits = static_cast<uint64_t>(m_length) * 8;
+	const uint8_t pad = 0x80;
+	copy.update(&pad, 1);
+	const uint8_t zero = 0;
+	while (copy.m_buffered != 56) {
+		copy.update(&zero, 1);
+	}
+	uint8_t length[8];
+	for (int i = 0; i < 8; ++i) {
+		length[i] = static_cast<uint8_t>(bits >> (8 * i));
+	}
+	copy.update(length, 8);
+	std::array<uint8_t, 16> out {};
+	for (int i = 0; i < 16; ++i) {
+		out[static_cast<size_t>(i)] = static_cast<uint8_t>(copy.m_h[i / 4] >> (8 * (i % 4)));
+	}
+	return out;
+}
+
 std::array<uint8_t, 16> md5(const void* data, size_t size)
 {
-	std::vector<uint8_t> message(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
-	const uint64_t bits = static_cast<uint64_t>(size) * 8;
-	message.push_back(0x80);
-	while (message.size() % 64 != 56) {
-		message.push_back(0);
-	}
-	for (int i = 0; i < 8; ++i) {
-		message.push_back(static_cast<uint8_t>(bits >> (8 * i)));
-	}
-	uint32_t h[4] = {0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476};
-	for (size_t block = 0; block < message.size(); block += 64) {
-		uint32_t w[16];
-		for (int i = 0; i < 16; ++i) {
-			w[i] = static_cast<uint32_t>(message[block + i * 4]) | static_cast<uint32_t>(message[block + i * 4 + 1]) << 8
-				| static_cast<uint32_t>(message[block + i * 4 + 2]) << 16 | static_cast<uint32_t>(message[block + i * 4 + 3]) << 24;
-		}
-		uint32_t a = h[0], b = h[1], c = h[2], d = h[3];
-		for (uint32_t i = 0; i < 64; ++i) {
-			uint32_t f, g;
-			if (i < 16) {
-				f = (b & c) | (~b & d);
-				g = i;
-			} else if (i < 32) {
-				f = (d & b) | (~d & c);
-				g = (5 * i + 1) % 16;
-			} else if (i < 48) {
-				f = b ^ c ^ d;
-				g = (3 * i + 5) % 16;
-			} else {
-				f = c ^ (b | ~d);
-				g = (7 * i) % 16;
-			}
-			const uint32_t next = d;
-			d = c;
-			c = b;
-			b = b + rotate(a + f + kSine[i] + w[g], kShift[i]);
-			a = next;
-		}
-		h[0] += a;
-		h[1] += b;
-		h[2] += c;
-		h[3] += d;
-	}
-	std::array<uint8_t, 16> digest {};
-	for (int i = 0; i < 16; ++i) {
-		digest[static_cast<size_t>(i)] = static_cast<uint8_t>(h[i / 4] >> (8 * (i % 4)));
-	}
-	return digest;
+	Md5 context;
+	context.update(data, size);
+	return context.digest();
 }
 
 std::string md5Hex(const std::string& text)

@@ -37,11 +37,13 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <set>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace dice::hfe {
 class Console;
@@ -159,11 +161,108 @@ public:
 	CommanderTabs tabs;
 
 private:
+	// The squad's order picture in the list (cell 2) and the panel.
+	std::string orderPicture(int team, int squad) const;
+	std::string kitPicture(bool alive, bool manDown, uint32_t kit) const;
 	game::GameWorld& m_round;
 	hud::HudManager& m_hud;
 	std::set<int> m_selected;
 	int m_current = -1; // +0xac: the squad whose members show
 };
+
+// The squad leaders' requests and the commander's answers (BF2142.exe's
+// HUD manager; the store is GameWorld's squad requests, the squad
+// manager's slot 0x50 0x004c5720):
+//   - SquadLeader.sendRequest <kind> <add> (0x007708d4's executor
+//     0x007709f8 → HUD manager slot 0x3f8, 0x007d6d20): kind 0 artillery,
+//     1 orbital strike, 2 UAV, 3 supplies (SquadLeader.con's rose:
+//     "sendRequest 3 0" supplies, 2 the UAV, 1 the orbital strike, 0 the
+//     artillery; the map menus "<kind> 1"). Only alive
+//     ("HUD_HUD_SQUAD_ALIVE_TO_REQUEST" otherwise), at most
+//     sv.radioMaxSpamFlagCount (DAT_00a3fcc0 +0x48, 6) requests until
+//     sv.radioBlockedDurationTime (+0x4c, 30 s) has passed since the first
+//     (+0x378 the count, +0x37c the time, reset by the HUD's update
+//     0x00750xxx), and outside sp1 / gpm_sp / gpm_coop only with a
+//     commander ("no_commander_available" said to the leader alone
+//     otherwise). The request's point is the order record's (+0x28c): the
+//     rose's aim (0x00753b40, up to 1000 m) or the map's point with add
+//     (0x00780820). Stored (0x004c5720) it goes to the squad leader (PostRemote 2/0x1e:
+//     "HUD_HUD_SQUAD_REQUEST_TO_COMMANDER" and his radio to the commander
+//     on TCPlayer, 0x007c7690: "req_artillery",
+//     "PLAYER_REQUEST_TM_requestforcestrike", "PLAYER_REQUEST_requestuav",
+//     "PLAYER_REQUEST_requestsupplies") and to the commander (2/0x1d,
+//     0x007c8f10): with the tool usable (0x007c7880) the line
+//     "HUD_HUD_REQUEST_RECIEVED_FROM_SQUAD" (#REQUESTNAME# the tool's
+//     HUD_TEXT_COMMANDER_*, 0x007c7970, #SQUADNAME#), else it waits 4 s
+//     (0x007c8c00 → 0x007c8a60) and is turned down by itself: taken off
+//     and "<tool>_auto_deny" (the asset standing) or "<tool>_unavailable"
+//     (0x007c7a00) said to the squad's leader (0x007c7810: TCPlayer).
+//   - The commander's answer (Commander.commRoseAccept on a selected
+//     request tag, slot 0x390 0x007d8d30 → 0x007c7e20): deny says
+//     "<tool>_deny" to the leader; accept uses the tool at the request's
+//     point quietly (the tools' slots 0x32c / 0x348 / 0x35c / 0x358 with
+//     1): done, "<tool>_accept" to the leader and "<tool>_deny" to every
+//     other squad with a request of that kind (each taken off); not done,
+//     "<tool>_unavailable" to the commander alone and the request stays.
+// The tools are named artillery, orbitalstrike, uav and supply.
+class SquadRequests {
+public:
+	explicit SquadRequests(game::GameWorld& round) : m_round(round) {}
+	std::function<std::string(const std::string&)> localize;
+	std::function<void(const std::string&)> onPersonal; // slot 0x170 (PersonalList)
+	std::function<void(const std::string&)> onInfo;     // slot 0x15c (the chat's game line)
+	int localPlayer = -1;  // whose HUD (the commander's lines)
+	bool noCommanderNeeded = false; // sp1, gpm_sp, gpm_coop
+	int maxRequests = 6;            // sv.radioMaxSpamFlagCount
+	float blockedSeconds = 30;      // sv.radioBlockedDurationTime
+
+	// slot 0x3f8 for `player` at (x, z); true when stored.
+	bool send(int player, int kind, float x, float z);
+	enum class Answer { None, Accepted, Denied, Unavailable };
+	// 0x007c7e20 by the team's commander.
+	Answer answer(int commander, int squad, int kind, bool accept);
+	// The 4 s waits (0x007c8a60) and the count's reset.
+	void tick(float seconds);
+	static const char* toolName(int kind); // "artillery", "orbitalstrike", "uav", "supply"
+
+private:
+	std::string text(const std::string& key) const { return localize ? localize(key) : key; }
+	int leaderOf(int team, int squad) const;
+	game::GameWorld& m_round;
+	int m_sent = 0;      // +0x378
+	float m_since = -1;  // seconds since the first (+0x37c), -1 none
+	struct Pending {
+		int team, squad, kind;
+		float left;
+	};
+	std::vector<Pending> m_pending; // the commander's +0x354
+};
+
+// The squad and commander info bar (0x007a0f80, HudElementsPlayer.con's
+// SquadInfo): the commander, outside the commander screen (HUD slot
+// 0x234), sees "HUD_HUD_SQUADINFO_COMMANDER" with
+// Ingame/SquadInfo/icon_commander.tga (ShowCommanderIcon +0x2ff); a
+// squad's leader or member "HUD_HUD_SQUADINFO_SQUADLEADER" /
+// "_SQUADMEMBER" with icon_squad<n>.tga (ShowSquadIcon +0x300); anyone
+// else nothing (SquadInfoBarShow +0x2fe 0). SquadInfoText +0x304,
+// SquadInfoIconPath +0x308. The squad order points bar
+// (SquadOrderInfoBarShow +0x2fd, SquadInfoValue +0x30c: +0x310 over
+// +0x318, from the field-unlock progress the server grants) stays off.
+void updateSquadInfo(hud::HudManager& hud, game::GameWorld& round, int player, bool commanderScreen,
+	const std::function<std::string(const std::string&)>& localize);
+
+// The commander's own tools' refusals (said to him alone, game slot 0x60):
+// arming (0x007d73a0 artillery, 0x007d74e0 the UAV, 0x007d7640 supplies)
+// and using (0x007d88d0, 0x007d7d80 the orbital strike, 0x007d8370,
+// 0x007d81d0; 0x007d8660 the scan): "<tool>_unavailable" without a
+// standing asset (slot 0x3c8) with armour (0x3d8), "<tool>_in_use" while it
+// reloads or runs ("supplies_in_use"; the scan's "satellite_unavailable" /
+// "satellite_not_ready"); "" when it may be used. A use that goes ahead
+// plays the HUD's "mapAction" sound (DAT_00b43878 slot 0x2c) and sends the
+// commander event (0x007d7c20, 0x28 bytes).
+// ability: GameWorld::CommanderAbility as an int (0 orbital strike, 1
+// artillery, 2 UAV, 3 satellite, 4 supplies).
+std::string commanderToolRefusal(int ability, bool available, bool ready);
 
 // A scoreboard player row's look (the scoreboard's row filler 0x007bb540,
 // reached through the HUD manager's list data, slot 0x214 → 0x007c6d70:

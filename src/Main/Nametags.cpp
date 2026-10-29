@@ -555,7 +555,9 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 	const View& view, float seconds)
 {
 	std::vector<hud::HudQuad> out;
-	if (!m_fontLoaded) {
+	if (!m_fontLoaded || !m_shown) {
+		m_selectedObject = 0;
+		m_selectedRequest = -1;
 		return out;
 	}
 	game::GameWorld::PlayerInfo me;
@@ -887,12 +889,45 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		}
 	}
 	// The commander's view of the squad leaders' requests (TTRequest:
-	// 0x004c5720 → slot 0x24, 0x100f44d0, only for the local commander):
-	// ICObjectOrbitalBombardmentRequestOrder 0x7a for kind 0, the orbital
-	// strike's 0x79 for 1, the UAV's 0x7b for 2, the supply drop's 0x7c for
-	// 3, selectable (0x100000: their Selected icons 0x7e / 0x7d / 0x7f /
-	// 0x80). The rewrite's squad leaders send no requests (the request
-	// rose's lines go only to the radio), so none is drawn.
+	// 0x004c5720 → slot 0x24, 0x100f44d0, only for the local commander, its
+	// id squad x 4 + kind): ICObjectOrbitalBombardmentRequestOrder 0x7a for
+	// kind 0, the orbital strike's 0x79 for 1, the UAV's 0x7b for 2, the
+	// supply drop's 0x7c for 3, at the request's point 1.5 m up, white,
+	// with "[d m]" (flags 0x104079: as the orders, and selectable 0x100000:
+	// the selected one shows its Selected icon 0x7e / 0x7d / 0x7f / 0x80,
+	// +0x58), faded out to 1200 m (DAT_101f67bc).
+	struct RequestTag {
+		size_t drawn;
+		int kind;
+	};
+	std::vector<std::pair<int, RequestTag>> requestTags; // (squad x 4 + kind, ...)
+	if (me.commander && m_icons) {
+		for (const game::GameWorld::SquadRequest& request : world.squadRequests(me.team)) {
+			const IconRegistry::Icon* icon = m_icons->find(requestIconId(request.kind, false));
+			if (!icon) {
+				continue;
+			}
+			const std::array<float, 3> at {request.position.x, request.position.y + 1.5f, request.position.z};
+			const float dx = at[0] - eye.x, dy = at[1] - eye.y, dz = at[2] - eye.z;
+			const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+			const float alpha = clamp01(1 - distance / kOrderDistance);
+			float x = 0, y = 0;
+			if (alpha <= 0.01f || !project(view, at, x, y, true, m_settings.circleRadius)) {
+				continue;
+			}
+			float c[4];
+			std::copy(kColours[Neutral], kColours[Neutral] + 4, c);
+			c[3] = alpha;
+			const int id = request.squad * 4 + request.kind;
+			requestTags.push_back({id, {drawn.size(), request.kind}});
+			consider(x, y, -1, kRequestObject | static_cast<uint32_t>(id));
+			Drawn d {distance, {iconQuad(*icon, x, y, c)}};
+			char text[32];
+			std::snprintf(text, sizeof(text), "[%i m]", static_cast<int>(std::lround(distance)));
+			m_font.write(text, std::round(x - m_font.width(text) / 2), std::round(y + icon->height / 2), c, d.quads);
+			drawn.push_back(std::move(d));
+		}
+	}
 
 	// The players' tags.
 	std::map<int, Tag> seen;
@@ -1137,6 +1172,22 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 	m_players = std::move(seen);
 	// The selected tag's background under its icon (its first quad).
 	m_selectedObject = selection.centre < 0.08f ? selection.object : 0;
+	// A selected request shows its Selected icon instead (+0x58).
+	m_selectedRequest = -1;
+	if ((m_selectedObject & kRequestObject) != 0) {
+		m_selectedRequest = static_cast<int>(m_selectedObject & ~kRequestObject);
+		m_selectedObject = 0;
+		for (const auto& [id, tag] : requestTags) {
+			const IconRegistry::Icon* icon = m_icons ? m_icons->find(requestIconId(tag.kind, true)) : nullptr;
+			if (id == m_selectedRequest && icon && tag.drawn < drawn.size() && !drawn[tag.drawn].quads.empty()) {
+				hud::HudQuad& q = drawn[tag.drawn].quads.front();
+				const float cx = (q.x0 + q.x1) / 2, cy = (q.y0 + q.y1) / 2;
+				float c[4];
+				std::copy(q.color, q.color + 4, c);
+				q = iconQuad(*icon, cx, cy, c);
+			}
+		}
+	}
 	if (m_selectedObject && selection.background >= 0 && m_icons && selection.drawn < drawn.size()
 		&& !drawn[selection.drawn].quads.empty()) {
 		if (const IconRegistry::Icon* back = m_icons->find(selection.background)) {

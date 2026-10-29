@@ -1,5 +1,7 @@
 #include "GameClient.h"
 
+#include "ContentCheck.h"
+
 #include "GameEvents.h"
 
 #include <algorithm>
@@ -190,6 +192,14 @@ void GameClient::answer(const GameEvent& event)
 	while (m_levelsAnswered < m_world.levelsReceived()) {
 		++m_levelsAnswered;
 		m_events.queue(makePostRemote(kMsgNetworkCategory, kNeLoadComplete));
+		// A pure server (the settings' contentCheck, DAT_00a3fcc0 +0x54):
+		// our fingerprint for the level's ordinal (0x0068ba40(0), sent as
+		// 0x005123f0's event).
+		if (!m_options.contentRoot.empty() && m_world.settings().contentCheck) {
+			const RemoteWorld::LevelInfo& level = m_world.level();
+			m_events.queue(makeContentCheck(computeContentDigests(m_options.contentRoot, m_options.modDirectory,
+				level.levelDirectory, level.seed)));
+		}
 	}
 	PostRemoteInfo info;
 	if (event.type != kEvPostRemote || !parsePostRemote(event, info) || info.category != kMsgNetworkCategory) {

@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -233,6 +234,12 @@ bool HostedGame::start()
 	if (!m_server.start(options)) {
 		return false;
 	}
+	// 0x004aff80: pure when the mod has std_archive.md5 (0x004adb60; the
+	// settings' content check flag, DAT_00a3fcc0 +0x54).
+	if (!m_setup.contentRoot.empty() && m_content.loadCommon(m_setup.contentRoot, m_setup.modDirectory) && onLog) {
+		onLog("pure server: clients' content is checked");
+	}
+	startContentLevel();
 	if (m_setup.queryPort != 0 && !m_query.start(m_setup.queryPort, m_setup.loopbackOnly) && onLog) {
 		onLog("no query port " + std::to_string(m_setup.queryPort) + ": the server isn't listed on the LAN");
 	}
@@ -340,6 +347,7 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 	m_setup.level = setup.level;
 	m_setup.gameMode = setup.gameMode;
 	m_setup.mapSize = setup.mapSize;
+	startContentLevel();
 	// The old round's players go (DestroyPlayer); the new round makes its own.
 	for (const auto& [player, seen] : m_players) {
 		sendToPlaying(eventOf(net::kEvDestroyPlayer, {static_cast<uint32_t>(player) & 0xff}));
@@ -408,7 +416,45 @@ void HostedGame::sendLevel(int id)
 	level.mapName = m_setup.level;
 	level.maxPlayers = m_setup.mapSize;
 	level.commander = true;
+	level.seed = m_ordinal;
 	block(2, net::RemoteWorld::encodeLevel(level));
+}
+
+void HostedGame::startContentLevel()
+{
+	// 0x004aefe0: the level's ordinal (rand() % 10 just after srand of the
+	// clock's milliseconds: msvcrt's first rand(), without touching ours)
+	// and the level's archive.md5 (0x004adda0, +0x1ad).
+	const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count();
+	const uint32_t seed = static_cast<uint32_t>(ms) * 214013u + 2531011u;
+	m_ordinal = static_cast<int>((seed >> 16) & 0x7fff) % 10;
+	if (m_content.pure()) {
+		m_content.loadLevel(m_setup.contentRoot, "levels/" + m_setup.level + "/", m_setup.modDirectory);
+	}
+}
+
+void HostedGame::checkContent(int id, const net::GameEvent& e)
+{
+	// Game server slot 51 (0x004aec40, from the event's server handler
+	// 0x005123a0): a pure server compares the fingerprint with its own.
+	const auto it = m_clients.find(id);
+	if (!m_content.pure() || it == m_clients.end() || it->second.stage == Client::Stage::Connected) {
+		return;
+	}
+	Client& client = it->second;
+	if (std::any_of(m_kickLater.begin(), m_kickLater.end(), [id](const auto& k) { return k.first == id; })) {
+		return;
+	}
+	net::ContentDigests digests;
+	if (net::parseContentCheck(e, digests) && m_content.matches(m_ordinal, digests)) {
+		client.contentChecked = true;
+		return;
+	}
+	if (onLog) {
+		onLog("dep: kicking client " + std::to_string(id) + " (" + client.name + ") for using modified data");
+	}
+	m_kickLater.push_back({id, net::kKickModifiedContent}); // the game server's kick list (+0x20)
 }
 
 std::string HostedGame::nameOf(int player) const
@@ -528,6 +574,7 @@ void HostedGame::sendJoinBlocks(int id)
 			sendTo(id, net::makeDataBlockChunk(data.substr(at, 63)));
 		}
 	};
+	settings.contentCheck = m_content.pure();
 	block(0, net::RemoteWorld::encodeSettings(settings));
 	sendLevel(id);
 }
@@ -877,6 +924,14 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			}
 			break;
 		case net::kNeDatabaseComplete: { // 0x004af710: StartSimulation and the game state
+			if (m_content.pure() && !client.contentChecked) {
+				// A pure server's client that sent no matching fingerprint.
+				if (onLog) {
+					onLog("client " + std::to_string(id) + " sent no content check");
+				}
+				m_kickLater.push_back({id, net::kKickModifiedContent});
+				return;
+			}
 			sendTo(id, net::makePostRemote(net::kMsgNetworkCategory, net::kNeStartSimulation));
 			sendTo(id, net::makePostRemote(net::kMsgGameCategory, 1, net::int32Payload(1)));
 			const uint32_t end = m_logic->timeLimit > 0 ? static_cast<uint32_t>(m_logic->timeLimit * 30) : 0;
@@ -918,6 +973,9 @@ void HostedGame::event(int id, const net::GameEvent& e)
 		}
 		return;
 	}
+	case net::kEvContentCheck:
+		checkContent(id, e);
+		return;
 	case net::kEvSelectKit: { // 0x0050b010: the team's kit by index
 		game::GameWorld::PlayerInfo me;
 		if (m_round->playerInfo(player, me)) {
@@ -1847,6 +1905,19 @@ void HostedGame::tick()
 		m_server.kick(client, reason);
 	}
 	m_query.poll([this] { return report(); });
+	// The networked ambient areas' effects (0x005ba9c0 -> 0x00510270, to
+	// everyone, DAT_00a1b5d8 slot 0x94): the area's id, the Bundle child,
+	// the activator's ghost, the offset.
+	for (const game::GameWorld::AmbientEvent& a : m_round->takeAmbientEvents()) {
+		const auto bits = [](float f) {
+			uint32_t u;
+			std::memcpy(&u, &f, sizeof u);
+			return u;
+		};
+		const uint16_t ghost = a.attachedTo ? ghostOfObject(a.attachedTo, 0) : 0;
+		sendToPlaying(eventOf(net::kEvAmbientEffectArea, {static_cast<uint32_t>(a.area) & 0xffff,
+			static_cast<uint32_t>(a.index) & 0xff, ghost, bits(a.offset.x), bits(a.offset.y), bits(a.offset.z)}));
+	}
 	applyMoves();
 	trackObjects();
 	trackPlayers();

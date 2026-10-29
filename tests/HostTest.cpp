@@ -11,6 +11,7 @@
 #include "Main/Prediction.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "Physics/MaterialManager.h"
+#include "Net/ContentCheck.h"
 #include "Net/GameClient.h"
 #include "Net/GameServer.h"
 #include "Net/ServerQuery.h"
@@ -22,6 +23,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <cmath>
@@ -756,4 +758,156 @@ TEST(NetHost_NetworkableInfoMethods)
 	CHECK(std::find(t.unique.begin(), t.unique.end(), "TestHighInfo") != t.unique.end());
 	console.execute("NetworkableInfo.setIsUnique 0", out);
 	CHECK(std::find(t.unique.begin(), t.unique.end(), "TestHighInfo") == t.unique.end());
+}
+
+namespace {
+
+// A tiny mod for the content check: two archive lists, the two .con files
+// the lists' digest takes, three archives (one over ten 16 KB blocks), a
+// level with its two archives, and the .md5 files generate_md5.py would
+// write for them.
+void writeFile(const std::filesystem::path& path, const std::string& data)
+{
+	std::filesystem::create_directories(path.parent_path());
+	std::ofstream(path, std::ios::binary) << data;
+}
+
+std::string noise(size_t size, uint32_t seed)
+{
+	std::string out(size, '\0');
+	for (char& c : out) {
+		seed = seed * 1103515245u + 12345u;
+		c = static_cast<char>(seed >> 16);
+	}
+	return out;
+}
+
+void writeContentMod(const std::filesystem::path& root)
+{
+	const std::filesystem::path mod = root / "mods" / "bf2142";
+	writeFile(mod / "ClientArchives.con", "fileManager.mountArchive Common_client.zip Common\n"
+										  "fileManager.mountArchive Objects/Weapons_client.zip Objects\\Weapons\n");
+	writeFile(mod / "ServerArchives.con", "fileManager.mountArchive Common_server.zip Common\n");
+	writeFile(mod / "Init.con", "run GameLogicInit.con\n");
+	writeFile(mod / "GameLogicInit.con", "gameLogic.setTeamName 1 \"EU\"\n");
+	writeFile(mod / "Common_client.zip", noise(300000, 1));
+	writeFile(mod / "Objects" / "Weapons_client.zip", noise(40000, 2));
+	writeFile(mod / "Common_server.zip", noise(5000, 3));
+	writeFile(mod / "Levels" / "Test_Level" / "client.zip", noise(70000, 4));
+	writeFile(mod / "Levels" / "Test_Level" / "server.zip", noise(20000, 5));
+	std::string common, level;
+	for (const std::string& line : net::stripedFingerprints(root.string(), net::commonArchives(mod.string()))) {
+		common += line + "\n";
+	}
+	for (const std::string& line :
+		net::stripedFingerprints(root.string(), net::levelArchives("levels/Test_Level/"))) {
+		level += "test_level " + line + "\n";
+	}
+	writeFile(mod / "std_archive.md5", common);
+	writeFile(mod / "Levels" / "Test_Level" / "archive.md5", level);
+}
+
+} // namespace
+
+// The pure-server check end to end (0x004aec40, 0x005123f0, 0x004af710):
+// a client with the server's content plays; one whose archive differs by
+// a byte, and one that sends no fingerprint, are kicked with 0x1b.
+TEST(NetHost_PureServerContentCheck)
+{
+	namespace fs = std::filesystem;
+	const fs::path base = fs::temp_directory_path() / ("bf2142_content_" + std::to_string(std::rand()));
+	const fs::path good = base / "good", modified = base / "modified";
+	writeContentMod(good);
+	writeContentMod(modified);
+	// The fingerprints aren't regenerated for the copy: its archive changed after.
+	{
+		std::fstream f(modified / "mods" / "bf2142" / "Common_client.zip", std::ios::in | std::ios::out | std::ios::binary);
+		f.seekp(0);
+		f.put('X');
+	}
+	net::ContentChecker checker;
+	CHECK(checker.loadCommon(good.string()) && checker.pure());
+	CHECK(checker.loadLevel(good.string(), "levels/Test_Level/") && checker.hasLevel());
+	for (int ordinal : {0, 3, 9}) {
+		CHECK(checker.matches(ordinal, net::computeContentDigests(good.string(), "mods/bf2142", "levels/Test_Level/", ordinal)));
+	}
+	// The byte is in the first block: only the ordinal reading block 0 sees it.
+	CHECK(!checker.matches(0, net::computeContentDigests(modified.string(), "mods/bf2142", "levels/Test_Level/", 0)));
+	CHECK(checker.matches(1, net::computeContentDigests(modified.string(), "mods/bf2142", "levels/Test_Level/", 1)));
+	// The event round-trips its three digests.
+	net::ContentDigests digests = net::computeContentDigests(good.string(), "mods/bf2142", "levels/Test_Level/", 4);
+	dice::hfe::net::BitWriter out;
+	CHECK(net::writeGameEvent(out, net::makeContentCheck(digests)));
+	dice::hfe::net::BitReader in(out.data().data(), out.data().size());
+	net::GameEvent read;
+	net::ContentDigests back;
+	CHECK(net::readGameEvent(in, read) && net::parseContentCheck(read, back));
+	CHECK(back.lists == digests.lists && back.common == digests.common && back.level == digests.level);
+
+	dice::hfe::world::ObjectTemplateManager templates;
+	dice::hfe::world::ObjectManager objects;
+	dice::hfe::game::GameWorld round(templates, objects);
+	dice::hfe::game::GameLogic logic;
+	round.startRound();
+	logic.startRound();
+	host::HostSetup setup;
+	setup.level = "Test_Level";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	setup.contentRoot = good.string();
+	host::HostedGame hosted(round, logic, templates, setup);
+	std::vector<std::string> log;
+	hosted.onLog = [&log](const std::string& line) { log.push_back(line); };
+	CHECK(hosted.start());
+
+	const auto join = [&](const fs::path& root, bool& kicked, uint32_t& reason) {
+		net::GameClient client;
+		net::GameClientOptions options;
+		options.playerName = "Joiner";
+		options.contentRoot = root.string();
+		CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+		const auto step = [&] {
+			client.update();
+			hosted.tick();
+			round.tick(1.0f / 30);
+		};
+		pumpUntil(step, [&] {
+			return client.state() == net::GameClient::State::Disconnected || client.world().roundStarted();
+		});
+		kicked = client.state() == net::GameClient::State::Disconnected;
+		reason = client.disconnectReason();
+		CHECK(client.world().settings().contentCheck);
+		client.disconnect();
+		pumpUntil(step, [&] { return hosted.clientCount() == 0; });
+	};
+	bool kicked = true;
+	uint32_t reason = 0;
+	join(good, kicked, reason);
+	CHECK(!kicked);
+	// The modified client: its archive differs in every block, so at any
+	// ordinal the round drew.
+	writeFile(modified / "mods" / "bf2142" / "Common_client.zip", noise(300000, 99));
+	join(modified, kicked, reason);
+	CHECK(kicked && reason == net::kKickModifiedContent);
+	CHECK(std::any_of(log.begin(), log.end(), [](const std::string& l) { return l.find("for using modified data") != std::string::npos; }));
+	join(fs::path(), kicked, reason); // no fingerprint at all
+	CHECK(kicked && reason == net::kKickModifiedContent);
+	std::error_code error;
+	fs::remove_all(base, error);
+}
+
+// The striped fingerprints of the shipped content are the shipped
+// std_archive.md5 and a level's archive.md5 (needs $BF2142_GAME_DIR).
+TEST(Net_ContentFingerprintsMatchShippedMd5)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	net::ContentChecker checker;
+	CHECK(checker.loadCommon(gameDir) && checker.loadLevel(gameDir, "levels/Suez_Canal/"));
+	for (int ordinal : {0, 7}) {
+		CHECK(checker.matches(ordinal, net::computeContentDigests(gameDir, "mods/bf2142", "levels/Suez_Canal/", ordinal)));
+	}
 }

@@ -97,8 +97,12 @@ vec3 gradedAt(vec2 uv)
 		float lerpFactor = texture(frameTexture, uv).r * 0.5;
 		vec2 d = uv - 0.5;
 		vec2 fisheye = uv - d * d * d * lerpFactor;
-		float scanline = texture(scanlineTexture, vec2(uv.x, uv.y - timeValues.w)).r;
-		color = polynomial(transform(colorRow, baseAt(vec2(fisheye.x + scanline * 0.03, fisheye.y))));
+		// sampler2wrap: the scanline point sampled, wrapped.
+		ivec2 lines = textureSize(scanlineTexture, 0);
+		vec2 at = fract(vec2(uv.x, uv.y - timeValues.w)) * vec2(lines);
+		float scanline = texelFetch(scanlineTexture, min(ivec2(at), lines - 1), 0).r;
+		// sampler0bilinwrap: the scanline's push past the right edge wraps.
+		color = polynomial(transform(colorRow, baseAt(fract(vec2(fisheye.x + scanline * 0.03, fisheye.y)))));
 	} else if (hasMode(2)) {
 		color = polynomial(transform(colorRow, baseAt(uv)));
 	} else {

@@ -472,3 +472,46 @@ TEST(Hud_PictureFillAndPivot)
 		CHECK(!quads[2].pivotSet && quads[2].blend[0] == 7 && quads[2].blend[1] == 2);
 	}
 }
+
+// The text node styles (setTextNodeStyle → 0x007af920): 0 centred lines
+// (0x007dab10), 1 right-aligned (0x007ebf00), 2 left-aligned with word
+// wrap inside the node (0x007ec480).
+TEST(Hud_TextNodeStyles)
+{
+	// A font of one glyph 'A' (10 wide) and the space (5 wide), 12 high.
+	const std::string font = "header\r\n2\r\ntest\r\n64\r\n64\r\n12.000000\r\nglyphs\r\n2\r\n"
+							 "65\t0.000000\t10.000000\t0.000000\t0\t0\t0\t10\t10\r\n"
+							 "32\t0.000000\t5.000000\t0.000000\t0\t0\t0\t0\t0\r\n";
+	Console console;
+	hud::HudManager manager([&font](const std::string& path, std::string& out) {
+		if (path.find("t.dif") == std::string::npos) {
+			return false;
+		}
+		out = font;
+		return true;
+	});
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {"hudBuilder.createSplitNode Global G", "hudBuilder.createTextNode G Centre 100 0 50 12",
+			 "hudBuilder.setTextNodeStyle Fonts/t.dif 0", "hudBuilder.setTextNodeString AA",
+			 "hudBuilder.createTextNode G Right 100 20 50 12", "hudBuilder.setTextNodeStyle Fonts/t.dif 1",
+			 "hudBuilder.setTextNodeString AA", "hudBuilder.createTextNode G Wrap 100 40 30 30",
+			 "hudBuilder.setTextNodeStyle Fonts/t.dif 2", "hudBuilder.setTextNodeString \"AA AA A\""}) {
+		console.execute(line, out);
+	}
+	const auto quads = manager.frame(0);
+	std::vector<std::pair<float, float>> at;
+	for (const auto& q : quads) {
+		at.push_back({q.x0, q.y0});
+	}
+	// Both passes draw these (no AffectedByEMPShow logic): 9 glyphs each.
+	CHECK(at.size() == 18);
+	if (at.size() == 18) {
+		CHECK(at[0].first == 115 && at[1].first == 125); // centred: (50 - 20) / 2
+		CHECK(at[2].first == 130 && at[3].first == 140); // right: 150 - 20
+		// "AA AA" is 45 > 30: one word a line; the third starts at 64,
+		// above the node's bottom (70): still drawn.
+		CHECK(at[4] == std::make_pair(100.0f, 40.0f) && at[5] == std::make_pair(110.0f, 40.0f));
+		CHECK(at[6] == std::make_pair(100.0f, 52.0f) && at[8] == std::make_pair(100.0f, 64.0f));
+	}
+}

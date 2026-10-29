@@ -189,8 +189,12 @@ void GameAudio::radio()
 			in.sender.team = sender.team;
 			in.sender.position = toSound(sender.position) + sound::Vec3 {0, 1.6f, 0};
 		}
-		if (m_voices->heard(in).played != sound::VoiceMessages::Played::None) {
+		const sound::VoiceMessages::Result result = m_voices->heard(in);
+		if (result.played != sound::VoiceMessages::Played::None) {
 			++voiceOvers;
+		}
+		if (onRadioText && !result.text.empty()) {
+			onRadioText(message.sender, message.channel, result.text);
 		}
 	}
 }

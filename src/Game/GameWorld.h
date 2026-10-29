@@ -35,7 +35,9 @@
 
 #include <cstdint>
 #include <functional>
+#include <array>
 #include <map>
+#include <optional>
 #include <memory>
 #include <set>
 #include <string>
@@ -524,6 +526,20 @@ public:
 		int system = 0;      // as Lock::system
 	};
 	std::vector<LockEvent> takeLockEvents() { return std::exchange(m_lockEvents, {}); }
+	// The level ambience over the network (AmbientTriggers.h): what the
+	// networked areas (numNetworkedEffects) played since the last call, for
+	// a server to send (the AmbientEffectArea event, 0x00510270; kept only
+	// until the next tick); a joined client leaves those areas to the
+	// server and plays the server's events (0x00510230).
+	struct AmbientEvent {
+		size_t area = 0;        // the area's id (+0x19c)
+		int index = 0;          // the Bundle child
+		physics::Vec3 offset;
+		uint32_t attachedTo = 0; // the activator's object, or 0
+	};
+	std::vector<AmbientEvent> takeAmbientEvents() { return std::exchange(m_ambientEvents, {}); }
+	void setAmbienceClient(bool client) { m_ambience.client = client; }
+	bool playAmbientEvent(size_t area, int index, const physics::Vec3& offset, const physics::Vec3* attachedAt = nullptr);
 	bool unlockAllByDefault = false; // players joining from now on have everything
 	// The local player's unlocks (its soldier's chosen ItemContainers,
 	// Stats/Stats.h), given when spawnPlayer adds the player.
@@ -1015,6 +1031,29 @@ public:
 	// 0x004c2ee0), not the commander's.
 	bool issueSquadLeaderOrder(int player, OrderType type, float x, float z);
 	const SquadOrder* squadLeaderOrder(int team, int squad) const;
+	// The squad leaders' requests to the commander (SquadRequests.cpp; the
+	// squad manager's slot 0x50, 0x004c5720, into the squad's record
+	// 0x004c3f20): kind 0 artillery, 1 orbital strike, 2 UAV, 3 supplies,
+	// one of each kind a squad (+0x2b + kind its flag, +0x60 + 0x30 kind
+	// its point), until the commander answers or the squad has no leader.
+	struct SquadRequest {
+		int team = 0, squad = 0, kind = 0;
+		physics::Vec3 position;
+		float storedAt = 0; // the world's time
+	};
+	static constexpr int kRequestKinds = 4;
+	// False for a kind out of range or a squad without a leader.
+	bool storeSquadRequest(int team, int squad, int kind, const physics::Vec3& at);
+	// The squad manager's slot 0x24: the request taken off.
+	void removeSquadRequest(int team, int squad, int kind);
+	const SquadRequest* squadRequest(int team, int squad, int kind) const;
+	std::vector<SquadRequest> squadRequests(int team) const;
+	// A request's tool.
+	static CommanderAbility requestAbility(int kind)
+	{
+		return kind == 1 ? CommanderAbility::OrbitalStrike : kind == 2 ? CommanderAbility::Uav
+			: kind == 3 ? CommanderAbility::Supplies : CommanderAbility::Artillery;
+	}
 	// The vehicle model of an object with one.
 	const Vehicle* vehicle(uint32_t object) const;
 	// The input for the next ticks.
@@ -1402,6 +1441,8 @@ private:
 	AmbientTriggers m_ambience;
 	std::map<int, physics::Vec3> m_ambiencePlaces; // the players' last places (their speed)
 	uint32_t m_ambienceTag = 0;
+	std::vector<AmbientEvent> m_ambientEvents;
+	void startAmbientEffects();
 	void linkAmbience();
 	void stepAmbience(float seconds);
 	void ambientShot(const Player& player);
@@ -1414,6 +1455,7 @@ private:
 	// The seats' guns nobody uses (ammo.reloadWithoutPlayer; TemplateBehaviours.cpp).
 	void stepUnmannedGuns(float seconds);
 	std::vector<LockEvent> m_lockEvents;
+	std::map<std::pair<int, int>, std::array<std::optional<SquadRequest>, 4>> m_squadRequests; // (team, squad)
 	// The combat areas' rules each tick (0x004bbf60, 0x004bed00).
 	void stepCombatAreas(float seconds);
 	bool insideCombatArea(const Player& player) const;
@@ -1852,6 +1894,11 @@ private:
 	world::ObjectTemplate* beaconTemplate(const world::ObjectTemplate* weapon) const;
 	world::ObjectTemplate* deployableTemplate(const world::ObjectTemplate* weapon) const;
 	std::map<std::pair<int, std::string>, uint32_t> m_deployed; // (owner, gadget) -> object
+	// keepProjectiles (0x005f1cc0): what a gone player's firearms left, and
+	// when it goes.
+	std::vector<std::pair<double, uint32_t>> m_keptObjects;
+	void keepProjectilesOf(int player);
+	void stepKeptObjects();
 	bool removeDeployed(uint32_t object);
 	// Drones: the ForceObject's template settings (0x0062d4f0; offsets in
 	// the template) that hold the drone by its target, the owner.

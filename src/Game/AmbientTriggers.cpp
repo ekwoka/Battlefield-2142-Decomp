@@ -76,7 +76,9 @@ AmbientTriggers::AreaSettings AmbientTriggers::AreaSettings::fromTemplate(const 
 	if (const std::string* linked = setting(t, "linkedEffectContainer")) {
 		s.linkedEffectContainer = *linked;
 	}
-	s.projectOnHeightmap = number(t, "projectOnHeightmap", 0) != 0;
+	// On by default (the area template's constructor 0x005b9340 sets +0x2c8;
+	// the editor's writer saves it only when off).
+	s.projectOnHeightmap = number(t, "projectOnHeightmap", 1) != 0;
 	return s;
 }
 
@@ -239,10 +241,11 @@ void AmbientTriggers::play(Area& area, const Activator* by, const physics::Vec3*
 {
 	// 0x005ba9c0.
 	const AreaSettings& s = area.settings;
-	if (s.linkedEffectContainer.empty()) {
+	if (s.linkedEffectContainer.empty() || (s.numNetworkedEffects > 0 && client)) {
 		return;
 	}
 	std::string bundle = s.linkedEffectContainer;
+	int index = 0;
 	if (bundleChildren) {
 		// A Bundle: one of its children (the list holds the bundle itself
 		// first, 0x006f2f70; a lone bundle plays nothing).
@@ -250,11 +253,12 @@ void AmbientTriggers::play(Area& area, const Activator* by, const physics::Vec3*
 		if (!children.empty()) {
 			const size_t count = children.size() + 1;
 			const float pick = (static_cast<float>(count) - 1.0f) * unitOf(lehmerNext(m_shared)) + 1.0f;
-			const size_t index = std::min(static_cast<size_t>(std::lround(pick)), count - 1);
-			bundle = children[index - 1];
+			index = static_cast<int>(std::min(static_cast<size_t>(std::lround(pick)), count - 1));
+			bundle = children[static_cast<size_t>(index) - 1];
 		}
 	}
 	physics::Vec3 offset;
+	uint32_t attachedTo = 0;
 	if (by == nullptr || !s.playAtEventPosition) {
 		if (!s.playAtEventPosition) {
 			const float u = std::clamp(signedOf(lehmerNext(area.random)), -1.0f, 1.0f);
@@ -265,22 +269,77 @@ void AmbientTriggers::play(Area& area, const Activator* by, const physics::Vec3*
 			offset = *at - area.position;
 		}
 	} else {
+		// On the activator (+0x2c9, set by the constructor and never
+		// cleared): no offset from it.
 		offset = by->position - area.position;
+		attachedTo = by->object;
 	}
 	if (s.projectOnHeightmap && groundHeight) {
 		offset.y = groundHeight(area.position.x + offset.x, area.position.z + offset.z) - area.position.y;
 	}
+	if (s.numNetworkedEffects > 0) {
+		// The server's event (0x00510270), sent whether or not it plays here.
+		Effect sent;
+		sent.networked = true;
+		sent.areaId = static_cast<size_t>(&area - m_areas.data());
+		sent.index = index;
+		sent.offset = attachedTo ? physics::Vec3 {} : offset;
+		sent.attachedTo = attachedTo;
+		if (!start(area, bundle, area.position + offset)) {
+			sent.bundle.clear(); // not played here; the clients still get it
+			sent.area = area.object;
+			m_effects.push_back(sent);
+			return;
+		}
+		Effect& played = m_effects.back();
+		played.networked = true;
+		played.areaId = sent.areaId;
+		played.index = index;
+		played.offset = sent.offset;
+		played.attachedTo = attachedTo;
+		return;
+	}
+	start(area, bundle, area.position + offset);
+}
+
+bool AmbientTriggers::start(Area& area, const std::string& bundle, const physics::Vec3& position)
+{
 	// 0x005ba490: at most ten alive, none that would never end.
 	if (liveEffects && liveEffects(area.object) > 10) {
-		return;
+		return false;
 	}
 	if (bundleTimeToLive) {
 		const float life = bundleTimeToLive(bundle);
 		if (life == -1.0f || life == 30.0f) {
-			return;
+			return false;
 		}
 	}
-	m_effects.push_back({bundle, area.position + offset, area.object});
+	m_effects.push_back({bundle, position, area.object});
+	return true;
+}
+
+bool AmbientTriggers::playNetworked(size_t areaId, int index, const physics::Vec3& offset, const physics::Vec3* attachedAt)
+{
+	// 0x00510230 -> 0x005ba490 with the area the id names (0x005b9ea0).
+	if (areaId >= m_areas.size()) {
+		return false;
+	}
+	Area& area = m_areas[areaId];
+	std::string bundle = area.settings.linkedEffectContainer;
+	if (bundle.empty()) {
+		return false;
+	}
+	if (bundleChildren) {
+		const std::vector<std::string> children = bundleChildren(bundle);
+		if (!children.empty()) {
+			if (index < 1 || static_cast<size_t>(index) > children.size()) {
+				return false;
+			}
+			bundle = children[static_cast<size_t>(index) - 1];
+		}
+	}
+	start(area, bundle, (attachedAt ? *attachedAt : area.position) + offset);
+	return true;
 }
 
 } // namespace dice::hfe::game

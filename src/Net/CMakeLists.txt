@@ -1,5 +1,6 @@
 add_library(Net STATIC
 	BitStream.cpp
+	ContentCheck.cpp
 	Demo.cpp
 	Fesl.cpp
 	GameClient.cpp

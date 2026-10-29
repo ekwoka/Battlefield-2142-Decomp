@@ -217,6 +217,13 @@ struct FireArmSettings {
 	// begun while nobody uses it (0x005f4bb0); without it the reload is
 	// dropped when its user leaves (0x005f3a40: +0x3c, +0x34, +0x20 cleared).
 	bool reloadWithoutPlayer = false;
+	// keepProjectiles (the firearm template's +0x318, 5 by default,
+	// 0x005c2800): when the firearm goes, its rounds still in the world
+	// (its list +0x18) are removed this many seconds later (0x005f1cc0:
+	// the object manager's slot 0xd0 with 0x20, a projectile's removal
+	// without its effect, else 0x21): the mines, hubs, sonars and
+	// beacons a soldier left (30 or 60 s for those, 0 for the AP mine).
+	float keepProjectiles = 5;
 
 	static FireArmSettings fromTemplate(const world::ObjectTemplate& firearm);
 	int ticksBetweenShots() const { return roundsPerMinute > 0 ? 1800 / roundsPerMinute : 1; }
@@ -374,6 +381,10 @@ struct Projectile {
 	int team = 0;         // the thrower's (mines spare their own side unless allowFriendlyFireDetonation)
 	float yaw = 0;        // the facing it was thrown with (mines' cones)
 	bool alive = true;
+	// Its firearm went (its player left): removed, without its effect, when
+	// this runs out (keepProjectiles, 0x005f1cc0); below 0 not counting.
+	float keepLeft = -1;
+	float keepProjectiles = 5; // the firing firearm's
 	// A tracer round's tracer (ProjectileSettings' tracer*): it shows from
 	// `tracerFrom` (the muzzle as drawn) and closes on the round
 	// (tracerOffset, what it lies off the round's own start), and its

@@ -83,7 +83,19 @@ void GameWorld::stepAmbience(float seconds)
 		activators.push_back(a);
 	}
 	m_ambience.update(m_time, m_ticks, activators);
+	startAmbientEffects();
+}
+
+void GameWorld::startAmbientEffects()
+{
+	m_ambientEvents.clear(); // the last tick's went to the clients (or nowhere)
 	for (const AmbientTriggers::Effect& effect : m_ambience.takeEffects()) {
+		if (effect.networked) {
+			m_ambientEvents.push_back({effect.areaId, effect.index, effect.offset, effect.attachedTo});
+		}
+		if (effect.bundle.empty()) {
+			continue;
+		}
 		const world::Object* area = m_objects.find(effect.area);
 		const physics::Vec3 at = area ? physics::Vec3 {area->position().x, area->position().y, area->position().z}
 									  : physics::Vec3 {};
@@ -95,6 +107,17 @@ void GameWorld::stepAmbience(float seconds)
 			m_sounds.push_back({sound.name, sound.position});
 		}
 	}
+}
+
+bool GameWorld::playAmbientEvent(size_t area, int index, const physics::Vec3& offset, const physics::Vec3* attachedAt)
+{
+	if (!m_ambience.playNetworked(area, index, offset, attachedAt)) {
+		return false;
+	}
+	const std::vector<AmbientEvent> kept = std::exchange(m_ambientEvents, {});
+	startAmbientEffects();
+	m_ambientEvents = kept; // a client's own plays aren't sent on
+	return true;
 }
 
 void GameWorld::ambientShot(const Player& player)

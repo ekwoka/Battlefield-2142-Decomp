@@ -2174,21 +2174,38 @@ gravity x `gravityModifier`, its `drag`. Another template (an effect
 bundle, a particle system) is started there instead. The wrecks'
 `p_wreck_*` bundles are made of these (`em_wreck_*_Genericparts` throws
 `p_wreck_01/04/06`, each part emitter one piece of the hull's bundled mesh
-by `geometryPart`). **The rewrite's piece** is a point under Physics'
-gravity (-14.73) x `gravityModifier` and the 0.99-a-tick damping, bouncing
-off the terrain under it (0.3 of its fall, 0.6 of its slide and spin kept),
-where the exe gives it a Mesh or RotationalPoint physics node colliding
-with the world. `EffectManager::debris()` holds at most 384 (a guard of the
-rewrite's); the renderer draws each as an instance of its mesh with the
-other parts collapsed (`LevelRenderer::syncDebris`), faded by its alpha.
+by `geometryPart`). **Each piece has its own body**, as the exe gives
+each its physics node (the shipped pieces are `physicsType 3`, Mesh, with a
+`collisionMesh` and `collisionPart`): a `physics::RigidBody` under Physics'
+gravity (-14.73) x `gravityModifier` and the 0.99-a-tick damping, its box
+inertia from its mesh, whose contact points (the eight corners of its
+collision mesh's vehicle-LOD box; the origin alone without a mesh) meet
+the terrain as a vehicle's do (`collideWithGround`) and the static
+objects' faces (each point's motion over the tick,
+`CollisionWorld::segmentContact` on the soldier-LOD statics), the contacts
+solved as ResponsePhysics does with the materials' friction and
+elasticity (the piece's `material`, the surface's). It sleeps as a
+PhysicsNode does (`physics::SleepState`, a second still) and is not stepped
+again. GameWorld hands the effects its terrain, statics and collision
+meshes when it builds the static collision (`EffectManager::DebrisWorld`).
+`EffectManager::debris()` holds at most 384 (a guard of the rewrite's,
+the oldest go first); the renderer draws each as an instance of its mesh
+with the other parts collapsed (`LevelRenderer::syncDebris`), faded by its
+alpha. Bot rounds cost no more CPU with it (Cerbere 2.1 s, Suez 2.5 s,
+minsk_coop 4.4 s, Highway_Tampa 1.9 s user for 120 s).
 
 **The object caps** `GSDestroyableObjectsLimit` (100),
 `GSDestroyableWindowsBundlesLimit` (50) and `GSDynamicObjectsLimit` (50)
 are read from the SettingsRepository (`DAT_00a7a008` slot `0x10`,
 `0x00659a40`: the value or the default) by `0x004d2250` and the results
 dropped: nothing in BF2142.exe limits by them. That function turns the
-level's DestroyableObjects, DestroyableWindowsBundles and physics objects
-into ObjectSpawners of their own (respawning them).
+level's DestroyableObjects (class `0xc4d0`), DestroyableWindowsBundles
+(`0xc4dc`) and mobile physics objects into ObjectSpawners (class `0x94a1`)
+of their own, respawning them (10 s, `setTimeToSpawn`; a DestroyableObject
+its template's own times, `+0x29c` / `+0x2a0`). Not done: the shipped
+content has six DestroyableObject templates (barrels, crates, a bridge
+piece, rail bars, a Titan console) and the rewrite destroys none of them,
+so a respawn would change nothing; the moved props' return is cosmetic.
 
 **Level ambience: Trigger and AmbientEffectArea** (classes `0x9c45`,
 `0x9c44`; the levels' `AmbientObjects.con`: Liberation of Leipzig 49
@@ -2214,7 +2231,24 @@ activator or explosion with `playAtEventPosition`, on the terrain with
 `projectOnHeightmap`; at most ten of its effects alive, none whose bundle's
 `timeToLive` comes out -1 or 30 (`0x005ba490`). `numNetworkedEffects`
 above 0 makes the area the server's (the effect is sent to the clients,
-`0x00510270`); a hosted game is the server, a joined client plays none.
+`0x00510270`); a joined client's networked area returns at once (the
+game's slot `0x144`) and plays only the server's events.
+**Networked areas** (`numNetworkedEffects` above 0; every shipped level
+with ambience uses 1): the server sends what such an area plays as the
+AmbientEffectArea event (`0x22`, built by `0x00510270`, written
+`0x00510160`, read `0x005100a0`, to everyone through `DAT_00a1b5d8` slot
+`0x94`): the area's id (16 bits, its creation order in the level: `+0x19c`
+from the counter `DAT_00a6bb08`, reset to 0 per level, looked up by
+`0x005b9ea0`), the Bundle's list index played (8 bits; a dedicated server,
+which loads no effects, picks 1..numNetworkedEffects), the activator's
+ghost (16 bits, when the effect sits on it: playAtEventPosition with the
+unnamed `+0x2c9`, which the template's constructor `0x005b9340` sets and
+nothing clears) and the offset from the area (or the activator), three
+floats. The client (`0x00510230`) plays it through `0x005ba490`'s checks.
+`projectOnHeightmap` is on by default (`0x005b9340`; the editor's writer
+saves only a 0, and every shipped area says 0). In the rewrite:
+`AmbientTriggers::client`, `GameWorld::takeAmbientEvents` (HostedGame
+sends them), `GameWorld::playAmbientEvent` (main's remote step).
 
 **Lock-on feedback** (the target component: update `0x005e1b30`, fire
 `0x005e1ee0`). The lock is announced 35 ticks after its target was taken
@@ -2245,11 +2279,81 @@ not held by a soldier finishes a reload begun while nobody uses it
 the scripts' `cp_getParam` (`0x0056a010`; the template's field is otherwise only
 initialised, `0x005bd4c0`); LightSource `castsDynamicShadow` reaches no
 shader (the projector and per-light shadow passes are never drawn, see
-coverage-2 #13). Left: `keepProjectiles` (`+0x318`: read by `0x005f1cc0`,
-which hands the firearm's kept rounds to the object manager's slot `0xd0`;
-the seconds' use not traced), `replaceItem`, `allowEmoteAnimation`
-(`+0x31e`, the soldier's emote `0x005edbf0`: the rewrite has no emotes),
-`cullRadiusScale`.
+coverage-2 #13). `keepProjectiles` (the firearm template's `+0x318`, 5 by
+default, `0x005c2800`; shipped 5, 30 for the hubs, beacons, camo, EMP and
+motion mines, 60 for the sonars, 3 for C4, 0 for the AP mine and the
+sentry drone's detonator): when a firearm goes, `0x005f1cc0` hands each of
+its rounds still alive (its list `+0x18`; not class `DAT_00998768`) to the
+object manager's slot `0xd0` with event `0x20` (a projectile: removal
+without its effect) or `0x21`, and the seconds (the argument the
+disassembly pushes before the QueryInterface `0x94c1`). The rewrite: a
+player leaving the game (its kit's firearms deleted) leaves its rounds,
+mines, hubs and deployables for that long (`GameWorld::keepProjectilesOf`).
+`replaceItem` (ItemContainer, `0x004e0758` -> `0x005bdd80`: each call
+appends to the container's list `+0x2b4`): an equipped unlock's item takes
+the place of the kit items it names (`unl_har_rifle` for `eu_ar_rifle` and
+`unl_best_buy_rifle`), the one in hand if it replaced that (fillKit; the
+console keeps `replaceItem.list`). `cullRadiusScale` (template `+0x58`,
+slots 27 / 28: `0x00504987` / `0x00504994`; 239 lights and meshes) is the
+renderer's view culling and changes no play: not done here. Left:
+`allowEmoteAnimation` (`+0x31e`, the soldier's emote `0x005edbf0`: the
+rewrite has no emotes).
+
+## The pure-server content check
+
+`src/Net/ContentCheck` (BF2142.exe's "dep" check; the shipped
+`generate_md5.py` writes the fingerprints it compares, and the rewrite's
+fingerprint of the shipped content gives the shipped `std_archive.md5`
+and `levels/*/archive.md5` lines, `Net_ContentFingerprintsMatchShippedMd5`).
+
+- **Pure.** The game server's init (`0x004aff80`) loads
+  `<mod>/std_archive.md5` (`0x004adb60`: "`<ordinal> <md5>`" lines into
+  the map `+0x194`, and the md5 of the archive lists into `+0x178`); its
+  success is the server's purity (`+0x1ac`) and the settings' content check
+  flag (`DAT_00a3fcc0 +0x54`), data block 0's `contentCheck` bit.
+- **Each level** (`0x004aefe0`): the ordinal, `rand() % 10` just after
+  `srand` of the clock's milliseconds, goes into the level block (data
+  block 2's last field, level info `+0x5c`), and the level's
+  `archive.md5` (`0x004adda0`: "`<level> <ordinal> <md5>`" into `+0x1a0`;
+  `+0x1ad` says it was there).
+- **The client** of a pure server, once the level is loaded (`0x004b5eb0`
+  case 2, after its LoadComplete), fingerprints its content for the ordinal
+  (`0x0068ba40(0)`) and sends the ContentCheck event (`0x2e`; built by
+  `0x005123f0`, vtable `0x0091d0c8`, which copies the fingerprint's three
+  digests at `+4`, `+0x14`, `+0x24` through `0x005a9ea0` / `0x0087b560` /
+  `0x0058cc60`; written by `0x005124d0`, read by `0x00512470`, 128 bits
+  each). The digests, MD5 throughout (`0x0071b140` / `0x0071bac0` /
+  `0x0071bb80`):
+  1. ClientArchives.con, ServerArchives.con, Init.con and
+     GameLogicInit.con, whole;
+  2. the striped fingerprint of the mounted archives outside `/levels/`
+     (sorted, `0x0068b910`);
+  3. the same of the level's archives.
+
+  The striped fingerprint: of each archive its 16 KB blocks whose index %
+  10 is the ordinal, at most 500 blocks (`(size >> 14) + 1` of them); an
+  archive over 500 blocks contributes its first ten blocks whole and then
+  its last 500; then its size in decimal (`"%d"`, `0x00918be0`). The
+  rewrite lists the archives as `generate_md5.py` does (the two .con
+  files' `mountArchive` lines, lower case, sorted) and finds them on disk
+  without regard to case.
+- **The server** (the event's server handler `0x005123a0` -> game server
+  slot 51, `0x004aec40`, for a connection past state 2): the lists' digest
+  against its own, and, when the level's `archive.md5` was there, the
+  other two against the ordinal's lines (as hex, `0x0068b100`). A match
+  marks the connection checked (its slot `0x28(1)`, read by `0x2c`); a
+  mismatch logs "dep: kicking client <id> (<name>) for using modified
+  data" and queues the kick with reason `0x1b` in the game server's kick
+  list (`+0x20`). A client still unchecked when it echoes DatabaseComplete
+  (`0x004af710`; not the local connection `0x81`) is kicked with `0x1b`
+  too.
+- **The rewrite:** `HostSetup::contentRoot` (main sets the game folder:
+  a hosted game with the shipped content is pure), `GameClientOptions::
+  contentRoot` (the joining client answers), `HostedGame::checkContent`;
+  the kicks go after the tick's events (`m_kickLater`). Tested over
+  loopback with a small mod (`NetHost_PureServerContentCheck`: the same
+  content plays, a changed archive and a client without a fingerprint are
+  kicked with `0x1b`).
 
 ## Titans' parts, the underwater view, particle and material detail (RendDX9)
 
@@ -2695,10 +2799,22 @@ at `0x1002df12`..`0x1002e6d0`). The order:
    place while the view's camera asks for it: the same grade on a
    fisheye from `common/textures/frame` with `common/textures/scanline`
    rolling (FRACTIME + 0.15 a frame's seconds, used below 1, reset at
-   1.5). The rewrite turns it on in a vehicle seat in first person whose
+   1.5). The backbuffer is read wrapped (sampler0bilinwrap: the scanline's
+   3 % push past the right edge comes in from the left) and the scanline
+   point sampled and wrapped (sampler2wrap). The streaks at the left and
+   right edges of these views are the effect itself: frame.dds is white in
+   the middle with vertical ridges towards its sides, so the fisheye's
+   `(uv − 0.5)³ × frame × 0.5` moves each ridge's columns by a different
+   amount (up to 0.06 of the screen vertically near the corners). The exe
+   asks for it from the HUD manager's vehicle HUD (RendDX9 `0x1002e2xx`
+   calls HudManager slot 0x2b8 → `+0xd8`, the object `0x007a24c0` builds,
+   whose slot 0x20, `0x007a0080`, is true when the player's object's
+   PostProcess component has settings for the HUD's gui index). The
+   rewrite turns it on in a vehicle seat in first person whose
    weapon's `weaponHud.enablePostProcessingOnGuiIndex` names the HUD shown
    (`altGuiIndex` zoomed, else `guiIndex`: the tanks' and walkers' zoomed
-   sights).
+   sights, and unzoomed guns such as the FAV gunner's machine gun, whose
+   `guiIndex` and `enablePostProcessingOnGuiIndex` are both 74).
 5. *EMP* (`0x10049d70`): a vehicle's EMP level (the player's slot 0x380)
    loads the static from the table `0x10048950` builds (`0x10048a30`:
    INTERFERENCE 0 then 8 for levels 1-5, DISTORTIONROLL 0 then 0.02, no
@@ -3519,9 +3635,11 @@ bit (`0x006a9bb0`) is set once data has gone out, as it is in a pong.
 8. The server sends the objects (CreateObject) and 6/4, which the client
    echoes; 6/5 (the networkable checksum), echoed when it matches; then
    (`0x004af710`) 6/3 StartSimulation, on which the client sends its
-   connection type again, and the game status (PostRemote 0/1). A server
-   that requires a content check (settings) disconnects a client without
-   one (reason 0x1b). Then ghosts.
+   connection type again, and the game status (PostRemote 0/1). A pure
+   server (its mod has std_archive.md5) disconnects a client whose content
+   fingerprint (the ContentCheck event, sent after LoadComplete) didn't
+   match, or that sent none (reason 0x1b; see [the pure-server content
+   check](#the-pure-server-content-check)). Then ghosts.
 
 Data blocks are bit streams; strings are a 16-bit length and the bytes
 (`0x005155b0`):
@@ -5672,7 +5790,10 @@ Guns without magazines (`ammo.magSize -1`, most vehicle guns) heat up
 instead. Each round adds `heatAddWhenFire`, the heat cools by
 `coolDownPerSec`, and at full heat the gun stops for `overheatPenalty`
 seconds. The HUD shows `PrimaryHeatValue`. `--spawn-screen` dies first, to
-show the spawn screen.
+show the spawn screen, and runs a second of ticks dead so the view behind it
+is the death camera on the body (`0x00615970`), as in the game; without them
+a screenshot fell back to the renderer's overview camera, which on Camp
+Gibraltar sits 100 m up inside its 100 m fog and drew the screen pale yellow.
 
 ### Kits, the customise screen and field unlocks
 
@@ -5929,6 +6050,56 @@ while they have the keys. `src/Main/HudMenusChat`:
   map. The exe also sets a renderer value to 1 while it is on
   (`DAT_00a2020c` slot `0x80` → `0x28` with `DAT_00a0c204`, restored
   after), not decoded.
+
+### Vote lines, radio text, text styles and the map keys
+
+- **Votes** (`menu::VoteMessages`, HudMenusChat): the client's vote object
+  (the Vote event's handler `0x005740e0`, its tick `0x00573ae0`, the lines
+  `0x005725e0`). A start (phase 0) keeps the kind, target and its name,
+  the starter, the time and the yes votes needed, and shows
+  `HUD_HUD_KICKVOTE_{PLAYER,COMMANDER,MAP}_START_{LOCAL,REMOTE}` (local for
+  the starter or the target: the time it runs; remote: the keys to vote),
+  again every 5 s until the local player votes; the count
+  (`*_STAT`, #YESVOTES# the starter and the yes votes, `0x005724b0`,
+  #NEEDED#) every 30 s; passed `PLAYER_KICKED` / `COMMANDER_KICKED` /
+  `MAP_CHANGE`, failed `*_STAYS`, cancelled `PLAYER_NOT_IN_GAME` /
+  `COMMANDER_NOT_IN_GAME`, the local player's cast `VOTE_YES` / `VOTE_NO`,
+  and to the starter `PLAYER_NOT_IN` (5), `IN_PROGRESS` (6),
+  `UNABLE_TO_START_VOTE` (7). The client refuses before sending a vote
+  against itself (`CANNOT_KICK_SELF`), against the host
+  (`CANNOT_KICK_HOST`) and within 300 s of its own last start
+  (`UNABLE_TO_ISSUE`, `0x00573cb0` / `0x00573df0` / `0x00573f20`). #MINUTES#
+  is ceil (`0x00448120`) of the minutes; a map's name has `_` as spaces.
+  The lines go to the PersonalList (slots `0x170` / `0x174`, `0x007c7490` /
+  `0x007c7520`). Not done: the host's own player (HostedGame hands the
+  replies only to its clients) and the kick vote's start from the
+  scoreboard's Manage tab.
+- **Radio text** (`GameAudio::onRadioText`): a heard message's sample text
+  (`0x0042e0c0` → `0x0042d7f0` → `0x0042bef0`) is a chat line with its
+  sender (HUD slot `0x158` → ChatList `0x007b4cd0`) or a game line without
+  one (slot `0x15c`). The lock-on feedback (`GameWorld::takeLockEvents`)
+  reaches the HUD this way only: the target component says
+  `target_aquired` / `target_lost` (TSLaserGuided, `0x005e1b30`) and
+  `missile_away` (`0x005e1ee0`) as radio, whose texts are
+  `AUTO_MOODGP_*_gotlock` and the like; the exe has no other lock text.
+- **Text styles** (`setTextNodeStyle <font> <style>`, `0x007af920` picks
+  the node's drawer): 0 centred lines (`0x007da990` / `0x007dab10`), 1
+  right-aligned (`0x007ebe60` / `0x007ebf00`), 2 left-aligned with word
+  wrap (`0x007ec340` / `0x007ec480`: a word that would cross the node's
+  right edge starts the next line, the font's height lower; nothing below
+  the node's bottom). The rewrite had 0 left and 2 centred: the scoreboard's
+  enemy team name (761, 65 wide) ran off the screen and the help box's text
+  out of its box.
+- **The crosshair** (`CrosshairIconShow`, the weapon HUD's `+0xec`,
+  `0x007be6e0`) needs CrosshairActive (`+0xed`), set by the menu state
+  (`0x007c1bf0`): off over the spawn screen, the big map, the scoreboard,
+  the roses and the commander screen.
+- **The map keys** (the HUD's input `0x00754290`): c_GIMapSize (M) toggles
+  the big map (menu state 2, `0x0074fd90`: `MapShow` at full size) while
+  alive; c_GIMapZoom (N) steps the minimap's zoom 0, 1, 2 (`0x0079a040` /
+  `0x00799fb0`, not on the spawn screen) and takes tutorial 0x3d back;
+  c_GI3dMap (left Alt) flips the 3D name tags and icons (the
+  NametagManager's `+0x465`, slots `0x64` / `0x68`).
 
 ### HUD nodes: transform lists, effects, markers and the map menus
 
@@ -6919,7 +7090,8 @@ rewritten:
 - Without a body the crate comes down at
   5 m/s (its parachute's Wing and ForceObject only act on a rigid body);
   a soldier's own radius in the crate's reach is taken as 0.
-- The bots don't send squad requests, so the AI commander's answers
+- The bots don't send squad requests (the players' do: see "Squad
+  requests" below), so the AI commander's answers
   (orbital strike, supplies, UAV) never run.
 - Which order kind the minimap draws with which icon (it loads move,
   attack, defend, repair, destroy, mine) isn't traced.
@@ -6969,6 +7141,85 @@ it alone too (slot `0x1c`; Shift adds it, slot `0x20`, not done); column 3
 mutes the leader's voice (slot `0x300`, not done). `CommanderMenu.deselect`
 (`0x007a9db0`) closes the members. The list's columns are fitted to the
 script's widths.
+
+### Squad requests, asset feedback and the commander screen's panel
+
+`src/Game/SquadRequests.cpp` (the store), `src/Main/HudMenus`
+(`SquadRequests`, `commanderToolRefusal`, `CommanderMenu`,
+`updateSquadInfo`), `src/Main/Nametags` (the request tags).
+
+- **Sending** (`SquadLeader.sendRequest <kind> <add>`, the method object
+  `0x007708d4`, its executor `0x007709f8` → HUD manager slot `0x3f8`,
+  `0x007d6d20`): kind 0 artillery, 1 orbital strike, 2 UAV, 3 supplies
+  (`SquadLeader.con`'s rose sends `<kind> 0`, the squad leader map menus
+  `<kind> 1`). A dead player gets `HUD_HUD_SQUAD_ALIVE_TO_REQUEST`; at
+  most `sv.radioMaxSpamFlagCount` (6, `DAT_00a3fcc0 +0x48`) requests until
+  `sv.radioBlockedDurationTime` (30 s, `+0x4c`) after the first (HUD
+  `+0x378` / `+0x37c`); outside sp1 / gpm_sp / gpm_coop a team without a
+  commander answers `no_commander_available` to the leader alone. The
+  point is the order record's `+0x28c`: the rose's aim out to 1000 m
+  (`0x00753b40`, HUD slot `0x18c`) or the map menu's point (`0x00780820`).
+- **The store** (squad manager slot `0x50`, `0x004c5720` → the squad's
+  record `0x004c3f20`: a flag at `+0x2b + kind`, the point at `+0x68 +
+  0x30 kind`; slot `0x24` takes one off): one request of each kind a
+  squad. The local commander's NametagManager gets it (slot `0x24`, id
+  squad × 4 + kind, `0x100f44d0`: the TTRequest tag, icons `0x79`..`0x80`,
+  flags `0x104079`, faded to 1200 m). The server sends the Request event
+  (`0x0050e170`) and PostRemotes 2/`0x1e` to the leader
+  (`HUD_HUD_SQUAD_REQUEST_TO_COMMANDER` and his radio on TCPlayer to the
+  commander, `0x007c7690`: `req_artillery`,
+  `PLAYER_REQUEST_TM_requestforcestrike`, `PLAYER_REQUEST_requestuav`,
+  `PLAYER_REQUEST_requestsupplies`) and 2/`0x1d` to the commander
+  (`0x007c8f10`): with the tool usable (`0x007c7880`)
+  `HUD_HUD_REQUEST_RECIEVED_FROM_SQUAD` (#REQUESTNAME# the tool's
+  `HUD_TEXT_COMMANDER_*`, `0x007c7970`), else a 4 s wait (`0x007c8c00`,
+  `0x007c8a60`) after which it is taken off and `<tool>_auto_deny` (the
+  asset stands) or `<tool>_unavailable` (`0x007c7a00`) said to the leader
+  (`0x007c7810`).
+- **Answering** (`Commander.commRoseAccept` with a request tag selected:
+  slot `0x390`, `0x007d8d30` → `0x007c7e20`; the rose's Accept/Reject show
+  with `ShowCommanderAcceptReject`, `0x00753b40`): deny says
+  `<tool>_deny`; accept uses the tool quietly at the request's point (the
+  tools' slots `0x32c` / `0x348` / `0x35c` / `0x358` with 1): done,
+  `<tool>_accept` to the leader and `<tool>_deny` to the other squads with
+  a request of that kind (all taken off); not done, `<tool>_unavailable`
+  to the commander and the request stays. The tools are `artillery`,
+  `orbitalstrike`, `uav`, `supply`.
+- **The commander's own tools** say why they refuse, to him alone: arming
+  (`0x007d73a0`, `0x007d74e0`, `0x007d7640`) and using (`0x007d88d0`,
+  `0x007d7d80`, `0x007d8370`, `0x007d81d0`, the scan `0x007d8660`) give
+  `<tool>_unavailable` without a standing asset with armour,
+  `<tool>_in_use` while it reloads (`supplies_in_use`;
+  `satellite_unavailable` / `satellite_not_ready`); a use plays the HUD's
+  `mapAction` and sends the commander event (`0x007d7c20`).
+- **The UAV offline** (the minimap's `0x00788600`): its time out or its
+  asset gone, the local player hears `uav_offline` (game slot `0x58`).
+- **The squad panel** (`0x007ab790` for the current squad's row,
+  `0x007ac8f0` for its members): a squad's row shows its order's picture
+  (`orderNew.tga` while it has requests, else `orderMove` / `Attack` /
+  `Defend` / `Repair` for the map kinds 4..7, `0x007a8770`'s textures at
+  `+0x174 + 4 kind`), the panel `SquadOrderPicturePathString` /
+  `ShowSquadOrderPicture` and the leader's kit (`0x007aa0f0`:
+  `icon_kit_assault` / `support` / `engineer` / `recon` by the kit type, 1,
+  2, 4, 7, else `icon_kit_dead`), the members their kits.
+- **The squad info bar** (`0x007a0f80`, HudElementsPlayer.con's SquadInfo):
+  `HUD_HUD_SQUADINFO_COMMANDER` with `icon_commander.tga` for the commander
+  outside his screen, `HUD_HUD_SQUADINFO_SQUADLEADER` / `_SQUADMEMBER` with
+  `icon_squad<n>.tga` in a squad, nothing otherwise.
+- **The world order markers** (the order object `0x005b8b20`): a placed
+  order (kinds 4..9) without a target object sets the Bundle
+  `ordermarker_move` / `_attack` / `_defend` (geometry `ordermarker`, the
+  `e_marker_*` effects) on the ground at its point and gives the
+  NametagManager its tag (slot `0x2c`); an order on an object gives the
+  object instead (slot `0x28`).
+
+Not done: the Request event and the PostRemotes between machines (a
+joined client's requests, a remote commander), the AI commander's answers
+to bot squad leaders (they send none), the squad panel's voice icons
+(`voip_icon_*`), `SELECTED_ALL_SQUADS` (no select-all), the order points
+bar (`SquadOrderInfoBarShow`, from the server's field-unlock progress),
+the marker's height from its geometry (`+0x8c` / 2 over the ground: the
+rewrite puts it on the ground).
 
 ## Titans (gpm_ti)
 

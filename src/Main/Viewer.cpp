@@ -567,6 +567,9 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.saySquad = c.pressed(map, "c_GISaySquad", down);
 				input.radioComm = c.pressed(map, "c_GIRadioComm", down);
 				input.tacticalComm = c.pressed(map, "c_GITacticalComm", down);
+				input.mapSize = c.pressed(map, "c_GIMapSize", down);
+				input.mapZoom = c.pressed(map, "c_GIMapZoom", down);
+				input.map3d = c.pressed(map, "c_GI3dMap", down);
 				for (int item = 0; item < 8; ++item) {
 					if (c.pressed(map, "c_PIWeaponSelect" + std::to_string(item + 1), down)) {
 						input.item = item + 1;
@@ -598,6 +601,9 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.commanderScreen = keys[SDL_SCANCODE_CAPSLOCK];
 				input.sayAll = keys[SDL_SCANCODE_K];
 				input.sayTeam = keys[SDL_SCANCODE_L];
+				input.mapSize = keys[SDL_SCANCODE_M];
+				input.mapZoom = keys[SDL_SCANCODE_N];
+				input.map3d = keys[SDL_SCANCODE_LALT];
 				for (int item = 0; item < 9; ++item) {
 					if (keys[SDL_SCANCODE_1 + item]) {
 						input.item = item + 1;

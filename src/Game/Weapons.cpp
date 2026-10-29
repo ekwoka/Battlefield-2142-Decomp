@@ -223,6 +223,7 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 	s.nrOfMags = static_cast<int>(number(t, "ammo.nrOfMags", static_cast<float>(s.nrOfMags)));
 	s.reloadTime = number(t, "ammo.reloadTime", s.reloadTime);
 	s.reloadWithoutPlayer = number(t, "ammo.reloadWithoutPlayer", 0) != 0;
+	s.keepProjectiles = number(t, "keepProjectiles", s.keepProjectiles);
 	s.velocity = number(t, "velocity", s.velocity);
 	s.heatAddWhenFire = number(t, "heatAddWhenFire", 0);
 	s.coolDownPerSec = number(t, "coolDownPerSec", 0);

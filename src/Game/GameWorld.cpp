@@ -441,6 +441,26 @@ void GameWorld::buildStaticCollision()
 			physics::Mat3::fromYawPitchRoll({object.rotation().x, object.rotation().y, object.rotation().z}),
 			{object.position().x, object.position().y, object.position().z}, object.id(), 0);
 	}
+	// The debris pieces' bodies (Effects.h DebrisPiece): the terrain, the
+	// static objects, their collision meshes and the materials' friction
+	// and elasticity (as the bodies' contacts take them).
+	effects::EffectManager::DebrisWorld debris;
+	if (m_ground.height && m_ground.heightAndNormal) {
+		debris.ground = m_ground;
+	}
+	debris.statics = &m_collision;
+	debris.collisionMesh = [this](const std::string& name) {
+		return m_collisionTemplates && m_files ? m_collisionTemplates->mesh(name, *m_files) : nullptr;
+	};
+	debris.material = [this](uint32_t piece, uint32_t surface) {
+		physics::ContactMaterial material;
+		if (m_materials) {
+			material.friction = m_materials->friction(piece, surface);
+			material.elasticity = (m_materials->elasticity(piece) + m_materials->elasticity(surface)) * 0.5f;
+		}
+		return material;
+	};
+	m_effects.setDebrisWorld(std::move(debris));
 }
 
 void GameWorld::addStaticCollision(const world::ObjectTemplate& t, const physics::Mat3& rotation,
@@ -922,6 +942,49 @@ void GameWorld::holdSpawned(ObjectSpawner& spawner)
 		// Its node's motion stopped (slot 0x148): no step and no mover until
 		// it is let go; its engines still run (stepPhysics).
 		body->held = true;
+	}
+}
+
+// A player's firearms go with it (its kit's objects deleted): what they
+// left in the world (0x005f1cc0, each firearm's rounds still alive) is
+// removed keepProjectiles seconds later: its rounds and mines, its hubs and
+// deployables (the gadget's own setting).
+void GameWorld::keepProjectilesOf(int id)
+{
+	for (Projectile& p : m_projectiles) {
+		if (p.player == id && p.alive && p.keepLeft < 0) {
+			p.keepLeft = std::max(p.keepProjectiles, 0.0f);
+		}
+	}
+	const auto keepOf = [this](const std::string& gadget) {
+		const world::ObjectTemplate* t = m_templates.find(gadget);
+		return t ? std::max(FireArmSettings::fromTemplate(*t).keepProjectiles, 0.0f) : 5.0f;
+	};
+	for (const Supply& supply : m_supplies) {
+		if (supply.owner == id) {
+			m_keptObjects.push_back({m_time + keepOf(supply.gadget), supply.object});
+		}
+	}
+	for (const auto& [key, object] : m_deployed) {
+		if (key.first == id) {
+			m_keptObjects.push_back({m_time + keepOf(key.second), object});
+		}
+	}
+}
+
+void GameWorld::stepKeptObjects()
+{
+	for (auto it = m_keptObjects.begin(); it != m_keptObjects.end();) {
+		if (it->first > m_time) {
+			++it;
+			continue;
+		}
+		const uint32_t object = it->second;
+		it = m_keptObjects.erase(it);
+		if (!removeDeployed(object) && m_objects.find(object)) {
+			m_objects.remove(object); // a hub: stepAbilities drops its supply
+			m_hitPoints.erase(object);
+		}
 	}
 }
 
@@ -1657,6 +1720,7 @@ void GameWorld::fire(const Player& player, float aimPitch)
 	p.player = player.id;
 	p.team = player.team;
 	p.yaw = look;
+	p.keepProjectiles = player.weapon->settings().keepProjectiles;
 	// A tracer round (0x005f2bb0): its tracer starts at the muzzle as
 	// drawn (the weapon's e_muzz place, else the round's start) and closes
 	// on the round.
@@ -2291,6 +2355,10 @@ void GameWorld::stepProjectiles(float seconds)
 			continue; // set off already (remote charges)
 		}
 		p.age += seconds;
+		if (p.keepLeft >= 0 && (p.keepLeft -= seconds) <= 0) {
+			p.alive = false; // 0x005f1cc0's removal (0x20): no effect
+			continue;
+		}
 		steerSeeker(p, seconds);
 		if (p.resting) {
 			p.timeLeft -= seconds;
@@ -2698,6 +2766,7 @@ bool GameWorld::removePlayer(int id)
 		resignCommander(id);
 	}
 	raise("PlayerDisconnect", {ScriptValue::player(id)});
+	keepProjectilesOf(id);
 	// What lingers of it is left to the round (the corpse has its own
 	// countdown); the player itself goes.
 	player->present = false;
@@ -4204,12 +4273,38 @@ void GameWorld::fillKit(Player& player, world::ObjectTemplate* kitTemplate, worl
 					}
 				}
 			}
+			// replaceItem (the container's list +0x2b4, 0x005bdd80): a chosen
+			// unlock's item takes the place of the kit items it names (the
+			// customise screen's equipped unlocks; not every unlock of `all`).
+			std::vector<std::string> replaces;
+			if (const auto list = container->settings().find("replaceItem.list");
+				list != container->settings().end() && !player.allUnlocked) {
+				std::stringstream names(list->second);
+				for (std::string name; std::getline(names, name, ';');) {
+					if (!name.empty()) {
+						replaces.push_back(name);
+					}
+				}
+			}
 			for (const world::ChildTemplate& inner : container->children()) {
 				const world::ObjectTemplate* item = m_templates.find(inner.name);
 				const int slot = item && item->typeName() == "GenericFireArm" ? integer(*item, "itemIndex", 0) : 0;
+				if (slot <= 0) {
+					continue;
+				}
+				const auto replaced = std::find_if(player.carried.begin(), player.carried.end(), [&](const Player::Carried& c) {
+					return std::any_of(replaces.begin(), replaces.end(), [&c](const std::string& r) { return sameName(r, c.name); });
+				});
+				if (replaced != player.carried.end()) {
+					if (primary && sameName(replaced->name, primary->name())) {
+						primary = m_templates.find(item->name()); // the new item is the one in hand
+					}
+					*replaced = {item->name(), slot, nullptr};
+					continue;
+				}
 				const bool taken = std::any_of(player.carried.begin(), player.carried.end(),
 					[slot](const Player::Carried& c) { return c.slot == slot; });
-				if (slot > 0 && !taken) {
+				if (!taken) {
 					player.carried.push_back({item->name(), slot, nullptr});
 				}
 			}
@@ -6663,6 +6758,7 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 
 void GameWorld::stepAbilities(float seconds)
 {
+	stepKeptObjects();
 	m_supplies.erase(std::remove_if(m_supplies.begin(), m_supplies.end(),
 						 [this](const Supply& supply) {
 							 const world::Object* object = m_objects.find(supply.object);

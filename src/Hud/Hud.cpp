@@ -95,7 +95,11 @@ struct HudManager::Node {
 	std::string text;
 	std::string textVariable;
 	std::string font;
-	int alignment = 0; // 0 left, 1 right, 2 centre
+	// setTextNodeStyle's style (0x007af920 picks the node's text drawer):
+	// 0 centred lines (0x007da990, drawn by 0x007dab10), 1 right-aligned
+	// (0x007ebe60 / 0x007ebf00), 2 left-aligned with word wrap
+	// (0x007ec340 / 0x007ec480).
+	int alignment = 0;
 	// Edit boxes (createEditNode; the HUD manager's edit nodes by data id,
 	// slot 0x210 0x007c6d40): 1 the chat's SayAll, 2 the squad name, 3
 	// the commander's chat.
@@ -721,14 +725,61 @@ void HudManager::drawText(const Node& node, float x, float y, const float color[
 			}
 		}
 	}
-	if (!node.outlineFont.empty()) {
-		// setTextNodeOutLine: the outline font's glyphs beneath, moved by
-		// the outline offset, in the text's alpha (black).
-		const float shade[4] = {0, 0, 0, color[3]};
-		drawString(node.outlineFont, text, x + node.outlineOffset[0], y + node.outlineOffset[1], static_cast<float>(node.w),
-			node.alignment, shade, out);
+	// The node's lines (the drawers split at '\n'; style 2 also wraps a
+	// word that would cross the node's right edge onto the next line,
+	// 0x007ec480, and stops below the node's bottom) and the drawString
+	// alignment each takes (0 left, 1 right, 2 centre).
+	const HudFont* f = node.font.empty() ? nullptr : font(node.font);
+	const int align = node.alignment == 0 ? 2 : node.alignment == 1 ? 1 : 0;
+	const float width = static_cast<float>(node.w);
+	if (text.find_first_of("\n\r") == std::string::npos
+		&& (node.alignment != 2 || !f || width <= 0 || f->width(text) <= width)) {
+		// One line (most nodes, each frame): no splitting.
+		if (!node.outlineFont.empty()) {
+			const float shade[4] = {0, 0, 0, color[3]};
+			drawString(node.outlineFont, text, x + node.outlineOffset[0], y + node.outlineOffset[1], width, align, shade, out);
+		}
+		drawString(node.font, text, x, y, width, align, color, out);
+		return;
 	}
-	drawString(node.font, text, x, y, static_cast<float>(node.w), node.alignment, color, out);
+	std::vector<std::string> lines;
+	std::string line;
+	for (size_t i = 0; i <= text.size(); ++i) {
+		const char c = i < text.size() ? text[i] : '\n';
+		if (c == '\n') {
+			lines.push_back(line);
+			line.clear();
+			continue;
+		}
+		if (c == '\r') {
+			continue;
+		}
+		if (c == ' ' && node.alignment == 2 && f && width > 0 && !line.empty()) {
+			// The next word: does it still fit after this space?
+			size_t end = text.find_first_of(" \n", i + 1);
+			end = end == std::string::npos ? text.size() : end;
+			if (f->width(line + text.substr(i, end - i)) > width) {
+				lines.push_back(line);
+				line.clear();
+				continue;
+			}
+		}
+		line += c;
+	}
+	const float lineHeight = f && f->lineHeight > 0 ? f->lineHeight : 0;
+	for (size_t i = 0; i < lines.size(); ++i) {
+		const float ly = y + lineHeight * static_cast<float>(i);
+		if (i > 0 && (lineHeight <= 0 || ly >= y + static_cast<float>(node.h))) {
+			break;
+		}
+		if (!node.outlineFont.empty()) {
+			// setTextNodeOutLine: the outline font's glyphs beneath, moved by
+			// the outline offset, in the text's alpha (black).
+			const float shade[4] = {0, 0, 0, color[3]};
+			drawString(node.outlineFont, lines[i], x + node.outlineOffset[0], ly + node.outlineOffset[1], width, align, shade, out);
+		}
+		drawString(node.font, lines[i], x, ly, width, align, color, out);
+	}
 }
 
 void HudManager::drawString(const std::string& fontPath, const std::string& text, float x, float y, float width,
@@ -1555,6 +1606,14 @@ std::vector<std::vector<std::array<float, 4>>> sweepPieces(
 	return pieces;
 }
 
+// The hudBuilder.* / hudManager.* console methods: BF2142.exe's method
+// objects of 0x0075f91a-0x00773b23 (each a constructor naming the method
+// and its argument types, e.g. createTextNode 0x0076cd5a, and an executor
+// at its vtable's slot 23 that calls the HUD manager or its builder:
+// createTextNode 0x0076ce5e → 0x007b35d0, setTextNodeStyle 0x0076d28f →
+// 0x007af920). (0x0075cba0 next to them is the HUD manager's destructor:
+// its event handlers dropped, its menus deleted; the rewrite's members go
+// by themselves.)
 void registerHudConsoleMethods(Console& console, HudManager& hud)
 {
 	const uint32_t access = ConsoleAccess::Anyone;
@@ -2381,6 +2440,8 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 	bindMethod(console, "HudManager.addTextureAtlas", access, [m](std::string atlas) { m->setString("HudManager.TextureAtlas", atlas); });
 
 	// --- Minimap (0x0076f773..0x00770017) ---
+	// setZoom and the map's own zoom event (the map node's 0x007918d0:
+	// MapZoom stepped, MapStatic) step the same index.
 	bindMethod(console, "Minimap.setZoom", access, [m] { m->cycleMapZoom(); });
 	bindMethod(console, "Minimap.setPaintKit", access, [m](int kit) { m->togglePaintKit(kit); });
 	bindMethod(console, "Minimap.setPaintAllKits", access, [m] { m->paintAllKits(); });

@@ -7,6 +7,7 @@
 #include "Game/Bots.h"
 #include "Game/GameWorld.h"
 #include "IO/File/FileManager.h"
+#include "Main/HudMenus.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "TestMain.h"
 #include "World/Object.h"
@@ -493,4 +494,86 @@ TEST(Commander_AiUsesToolsWithoutCommander)
 	// (IBFCommander, no sender) goes through.
 	CHECK(world.commander(1) == -1 && !world.commanderAction(1, Ability::Artillery, 0, -60));
 	CHECK(world.commanderAction(1, Ability::Artillery, 0, -60, true) && world.strikes().size() == 1);
+}
+
+// The squad leaders' requests (SquadLeader.sendRequest → 0x007d6d20, the
+// store 0x004c5720) and the commander's answers (0x007c7e20), the 4 s
+// auto-deny of a tool that can't be used (0x007c8a60 / 0x007c7a00).
+TEST(Commander_SquadRequests)
+{
+	Field field;
+	if (!field.loaded) {
+		return;
+	}
+	game::GameWorld& world = *field.world;
+	world.setCommanderEnabled(true);
+	const int boss = world.addPlayer("Boss", 2, false);
+	const int leader = field.soldier(2, 10, 10);
+	const int other = field.soldier(2, 30, 10);
+	world.joinSquad(leader, 1);
+	world.joinSquad(other, 2);
+	menu::SquadRequests requests(world);
+	std::vector<std::string> personal, info;
+	requests.onPersonal = [&](const std::string& s) { personal.push_back(s); };
+	requests.onInfo = [&](const std::string& s) { info.push_back(s); };
+	requests.localPlayer = boss;
+	// Without a commander: refused, the leader alone hears why.
+	world.takeRadioHeard();
+	CHECK(!requests.send(leader, 3, 40, 41));
+	auto heard = world.takeRadioHeard();
+	CHECK(heard.size() == 1 && heard[0].voice == "no_commander_available" && heard[0].receiver == leader);
+	world.setCommander(2, boss);
+	// Supplies (kind 3): stored, the leader's radio to the commander, the
+	// commander's line (the tool is ready).
+	CHECK(requests.send(leader, 3, 40, 41) && world.squadRequest(2, 1, 3));
+	heard = world.takeRadioHeard();
+	CHECK(!heard.empty() && heard[0].voice == "PLAYER_REQUEST_requestsupplies" && heard[0].receiver == boss);
+	CHECK(info.size() == 1 && info[0] == "HUD_HUD_REQUEST_RECIEVED_FROM_SQUAD");
+	CHECK(requests.send(other, 3, 30, 31) && world.squadRequests(2).size() == 2);
+	world.takeRadioHeard();
+	// Accepted: the drop at the request's point, "supply_accept" to its
+	// leader, "supply_deny" to the other squad's; both taken off.
+	CHECK(requests.answer(boss, 1, 3, true) == menu::SquadRequests::Answer::Accepted);
+	CHECK(world.supplyCrates().size() == 1 && world.squadRequests(2).empty());
+	heard = world.takeRadioHeard();
+	bool accepted = false, denied = false;
+	for (const auto& h : heard) {
+		accepted = accepted || (h.voice == "supply_accept" && h.receiver == leader);
+		denied = denied || (h.voice == "supply_deny" && h.receiver == other);
+	}
+	CHECK(accepted && denied);
+	// Again: the drop reloads, so accepting fails and the request stays.
+	CHECK(requests.send(leader, 3, 40, 41));
+	world.takeRadioHeard();
+	CHECK(requests.answer(boss, 1, 3, true) == menu::SquadRequests::Answer::Unavailable && world.squadRequest(2, 1, 3));
+	heard = world.takeRadioHeard();
+	CHECK(heard.size() == 1 && heard[0].voice == "supply_unavailable" && heard[0].receiver == boss);
+	CHECK(requests.answer(boss, 1, 3, false) == menu::SquadRequests::Answer::Denied && !world.squadRequest(2, 1, 3));
+	// Artillery with no asset: no line for the commander, and 4 s later
+	// it goes by itself with "artillery_unavailable" to the leader.
+	info.clear();
+	CHECK(requests.send(leader, 0, 40, 41) && info.empty());
+	world.takeRadioHeard();
+	requests.tick(3.9f);
+	CHECK(world.squadRequest(2, 1, 0));
+	requests.tick(0.2f);
+	heard = world.takeRadioHeard();
+	CHECK(!world.squadRequest(2, 1, 0) && heard.size() == 1 && heard[0].voice == "artillery_unavailable"
+		&& heard[0].receiver == leader);
+	// At most six requests until 30 s after the first (sv.radio* defaults);
+	// eight sent so far would be refused had they not reset: reset now.
+	requests.tick(31);
+	int stored = 0;
+	for (int i = 0; i < 8; ++i) {
+		stored += requests.send(leader, 2, 40, 41) ? 1 : 0;
+	}
+	CHECK(stored == 6);
+	// A dead leader can't request.
+	game::GameWorld::PlayerInfo me;
+	world.playerInfo(leader, me);
+	world.setHitPoints(me.soldier, 0);
+	field.run(0.1f);
+	requests.tick(31);
+	personal.clear();
+	CHECK(!requests.send(leader, 2, 40, 41) && personal.size() == 1 && personal[0] == "HUD_HUD_SQUAD_ALIVE_TO_REQUEST");
 }

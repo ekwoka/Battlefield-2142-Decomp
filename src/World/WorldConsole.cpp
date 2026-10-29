@@ -157,6 +157,25 @@ void registerWorldConsoleMethods(Console& console, ObjectTemplateManager& templa
 		console.registerMethod(std::move(list));
 	}
 
+	// replaceItem <item> (ItemContainer, 0x004e0758 -> 0x005bdd80: each
+	// call appends to the container's list at +0x2b4): the kit items the
+	// unlock's own item takes the place of. Kept in order as
+	// "replaceItem.list" = "item;...".
+	{
+		ConsoleMethod replace;
+		replace.name = "ObjectTemplate.replaceItem";
+		replace.kind = ConsoleMethodKind::Method;
+		replace.access = access;
+		replace.minArgs = 1;
+		replace.maxArgs = 1;
+		replace.isActive = activeTemplate;
+		replace.invoke = [&templates](const std::vector<std::string>& args) -> std::string {
+			templates.active()->settings()["replaceItem.list"] += firstWord(args[0]) + ";";
+			return {};
+		};
+		console.registerMethod(std::move(replace));
+	}
+
 	// supplyGroupNeeded <team> <group> [optional] (0x00503dec / 0x00503f73:
 	// two or three arguments, optional false by default; the ControlPoint
 	// template's vt+0xc0 adds the pair to the team's list). Kept in order

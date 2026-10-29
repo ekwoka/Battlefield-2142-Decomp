@@ -1,5 +1,7 @@
 #include "HudMenusChat.h"
 
+#include <cmath>
+
 #include "Hud/Hud.h"
 
 #include <algorithm>
@@ -300,6 +302,181 @@ void updateVoipList(hud::HudManager& hud, const std::vector<VoipSpeaker>& talkin
 	hud.set("VoiceOverIconShow", sending ? 1 : 0);
 	hud.set("VoiceOverTalkIconShow", sending && !commander ? 1 : 0);
 	hud.set("VoiceOverCommanderIconShow", sending && commander ? 1 : 0);
+}
+
+
+// --- Votes (0x005740e0, 0x00573ae0, 0x005725e0) ---------------------------
+
+void VoteMessages::clear()
+{
+	// 0x00572570: the vote forgotten, the players' vote states reset.
+	m_kind = 0;
+	m_target = 0;
+	m_starter = -1;
+	m_needed = 0;
+	m_targetName.clear();
+	m_starterName.clear();
+	m_left = m_statTimer = m_startTimer = 0;
+	m_voted = false;
+	m_states.clear();
+}
+
+int VoteMessages::yesVotes() const
+{
+	int n = 0;
+	for (const auto& [player, state] : m_states) {
+		n += state == 1 || state == 2 ? 1 : 0;
+	}
+	return n;
+}
+
+std::string VoteMessages::targetLabel() const
+{
+	if (m_kind != 1) {
+		return m_targetName;
+	}
+	std::string name = mapName ? mapName(m_target) : std::to_string(m_target);
+	std::replace(name.begin(), name.end(), '_', ' ');
+	return name;
+}
+
+void VoteMessages::line(int which, int choice)
+{
+	const auto minutes = [](float seconds) { return std::to_string(static_cast<int>(std::ceil(std::max(seconds, 0.0f) / 60))); };
+	const char* key = nullptr;
+	std::string out;
+	const bool player = m_kind == 2, mutiny = m_kind == 3;
+	switch (which) {
+	case kUnable:
+		out = replaced(text("HUD_HUD_KICKVOTE_UNABLE_TO_ISSUE"), "#MINUTES#", minutes(m_wait));
+		break;
+	case kInProgress: key = "HUD_HUD_KICKVOTE_IN_PROGRESS"; break;
+	case kSelf: key = "HUD_HUD_KICKVOTE_CANNOT_KICK_SELF"; break;
+	case kNotIn: key = "HUD_HUD_KICKVOTE_PLAYER_NOT_IN"; break;
+	case kHost: key = "HUD_HUD_KICKVOTE_CANNOT_KICK_HOST"; break;
+	case kTooFew: key = "HUD_HUD_KICKVOTE_UNABLE_TO_START_VOTE"; break;
+	case kVoted: key = choice == 0 ? "HUD_HUD_KICKVOTE_VOTE_YES" : "HUD_HUD_KICKVOTE_VOTE_NO"; break;
+	case kStart: {
+		// Local when the local player started it or (a kick, a mutiny) is
+		// its target: no keys to press, the time it runs.
+		const std::string me = playerName ? playerName(localPlayer) : std::string();
+		const bool local = (!me.empty() && me == m_starterName) || (m_kind != 1 && !me.empty() && me == m_targetName);
+		if (m_kind == 1) {
+			out = text(local ? "HUD_HUD_KICKVOTE_MAP_START_LOCAL" : "HUD_HUD_KICKVOTE_MAP_START_REMOTE");
+			out = replaced(out, "#PLAYERNAME#", m_starterName);
+			out = replaced(out, "#MAPNAME#", targetLabel());
+		} else {
+			out = text(player ? (local ? "HUD_HUD_KICKVOTE_PLAYER_START_LOCAL" : "HUD_HUD_KICKVOTE_PLAYER_START_REMOTE")
+							  : (local ? "HUD_HUD_KICKVOTE_COMMANDER_START_LOCAL" : "HUD_HUD_KICKVOTE_COMMANDER_START_REMOTE"));
+			out = replaced(out, "#PLAYERNAME1#", m_starterName);
+			out = replaced(out, "#PLAYERNAME2#", m_targetName);
+		}
+		out = replaced(out, "#MINUTES#", minutes(m_left));
+		break;
+	}
+	case kStat: case kPassed: case kFailed: {
+		static const char* const keys[3][3] = {
+			{"HUD_HUD_KICKVOTE_MAP_STAT", "HUD_HUD_KICKVOTE_MAP_CHANGE", "HUD_HUD_KICKVOTE_MAP_STAYS"},
+			{"HUD_HUD_KICKVOTE_PLAYER_STAT", "HUD_HUD_KICKVOTE_PLAYER_KICKED", "HUD_HUD_KICKVOTE_PLAYER_STAYS"},
+			{"HUD_HUD_KICKVOTE_COMMANDER_STAT", "HUD_HUD_KICKVOTE_COMMANDER_KICKED", "HUD_HUD_KICKVOTE_COMMANDER_STAYS"}};
+		out = text(keys[player ? 1 : mutiny ? 2 : 0][which - kStat]);
+		out = replaced(replaced(out, "#PLAYERNAME#", m_targetName), "#MAPNAME#", targetLabel());
+		out = replaced(out, "#YESVOTES#", std::to_string(yesVotes()));
+		out = replaced(out, "#NEEDED#", std::to_string(m_needed));
+		break;
+	}
+	case kLeft: out = replaced(text("HUD_HUD_KICKVOTE_PLAYER_NOT_IN_GAME"), "#PLAYERNAME#", m_targetName); break;
+	case kResigned: out = replaced(text("HUD_HUD_KICKVOTE_COMMANDER_NOT_IN_GAME"), "#PLAYERNAME#", m_targetName); break;
+	default: return;
+	}
+	if (key) {
+		out = text(key);
+	}
+	if (onLine && !out.empty()) {
+		onLine(out);
+	}
+}
+
+void VoteMessages::handle(const Event& e)
+{
+	switch (e.phase) {
+	case 0: // a start (0x005721e0: a kind 1..3)
+		if (e.kind < 1 || e.kind > 3) {
+			return;
+		}
+		clear();
+		m_kind = e.kind;
+		m_target = e.target;
+		m_left = e.seconds;
+		m_starter = e.voter;
+		m_needed = e.needed;
+		if (m_kind != 1 && playerName) {
+			m_targetName = playerName(m_target);
+		}
+		if (m_starter == localPlayer) {
+			m_wait = 300; // +0x58 (0x43960000)
+			m_voted = true;
+		}
+		m_starterName = playerName ? playerName(m_starter) : std::string();
+		m_states[m_starter] = 1;
+		line(kStart);
+		return;
+	case 1: line(kFailed); clear(); return;
+	case 2: line(m_kind == 3 ? kResigned : kLeft); clear(); return;
+	case 3: line(kPassed); clear(); return;
+	case 4:
+		if (e.choice == 2) {
+			return;
+		}
+		m_states[e.voter] = e.choice == 0 ? 2 : 3;
+		if (e.voter == localPlayer) {
+			m_voted = true;
+			line(kVoted, e.choice);
+		}
+		return;
+	case 5: if (e.voter == localPlayer) line(kNotIn); return;
+	case 6: if (e.voter == localPlayer) line(kInProgress); return;
+	case 7: if (e.voter == localPlayer) line(kTooFew); return;
+	default: return;
+	}
+}
+
+void VoteMessages::tick(float seconds)
+{
+	m_wait = std::max(0.0f, m_wait - seconds);
+	if (m_kind == 0) {
+		return;
+	}
+	m_left -= seconds;
+	m_statTimer += seconds;
+	m_startTimer = m_voted ? 0 : m_startTimer + seconds;
+	if (m_startTimer >= 5) {
+		m_startTimer = 0;
+		line(kStart);
+	}
+	if (m_statTimer >= 30) {
+		m_statTimer = 0;
+		line(kStat);
+	}
+}
+
+bool VoteMessages::mayStart(int kind, int target, bool targetIsHost)
+{
+	// 0x00573f20 (a kick or a mutiny): not against oneself, not the host;
+	// every start (also 0x00573cb0 / 0x00573df0): not inside the wait.
+	if (kind != 1 && target == localPlayer) {
+		line(kSelf);
+		return false;
+	}
+	if (kind != 1 && targetIsHost) {
+		line(kHost);
+		return false;
+	}
+	if (m_wait > 0) {
+		line(kUnable);
+		return false;
+	}
+	return true;
 }
 
 } // namespace dice::hfe::menu
