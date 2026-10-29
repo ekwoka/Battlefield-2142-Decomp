@@ -594,13 +594,9 @@ bool SquadRequests::send(int player, int kind, float x, float z)
 		}
 		return false;
 	}
-	if (m_sent >= maxRequests) {
+	if (!count()) {
 		return false;
 	}
-	if (m_since < 0) {
-		m_since = 0;
-	}
-	++m_sent;
 	const int commander = m_round.commander(me.team);
 	if (!noCommanderNeeded && commander < 0) {
 		m_round.hearRadio(player, 2, "no_commander_available");
@@ -622,26 +618,50 @@ bool SquadRequests::send(int player, int kind, float x, float z)
 	}
 	// 2/0x1d to the commander (0x007c8f10).
 	if (commander >= 0 && commander == localPlayer) {
-		const auto state = m_round.abilityState(me.team, game::GameWorld::requestAbility(kind));
-		if (state.available && state.ready) {
-			static const char* const kNames[] = {"HUD_TEXT_COMMANDER_ARTILLERY", "HUD_TEXT_COMMANDER_ORBITALSTRIKE",
-				"HUD_TEXT_COMMANDER_UAV", "HUD_TEXT_COMMANDER_SUPPLIES"};
-			std::string line = text("HUD_HUD_REQUEST_RECIEVED_FROM_SQUAD");
-			const auto put = [&line](const std::string& from, const std::string& to) {
-				for (size_t at = line.find(from); at != std::string::npos; at = line.find(from, at + to.size())) {
-					line.replace(at, from.size(), to);
-				}
-			};
-			put("#REQUESTNAME#", text(kNames[kind]));
-			put("#SQUADNAME#", squadName(me.squad));
-			if (onInfo) {
-				onInfo(line);
-			}
-		} else {
-			m_pending.push_back({me.team, me.squad, kind, 4.0f}); // 0x40800000
-		}
+		received(me.team, me.squad, kind);
 	}
 	return true;
+}
+
+bool SquadRequests::count()
+{
+	if (m_sent >= maxRequests) {
+		return false;
+	}
+	if (m_since < 0) {
+		m_since = 0;
+	}
+	++m_sent;
+	return true;
+}
+
+std::string SquadRequests::receivedLine(int squad, int kind) const
+{
+	static const char* const kNames[] = {"HUD_TEXT_COMMANDER_ARTILLERY", "HUD_TEXT_COMMANDER_ORBITALSTRIKE",
+		"HUD_TEXT_COMMANDER_UAV", "HUD_TEXT_COMMANDER_SUPPLIES"};
+	std::string line = text("HUD_HUD_REQUEST_RECIEVED_FROM_SQUAD");
+	const auto put = [&line](const std::string& from, const std::string& to) {
+		for (size_t at = line.find(from); at != std::string::npos; at = line.find(from, at + to.size())) {
+			line.replace(at, from.size(), to);
+		}
+	};
+	put("#REQUESTNAME#", text(kNames[kind >= 0 && kind < 4 ? kind : 0]));
+	put("#SQUADNAME#", squadName(squad));
+	return line;
+}
+
+void SquadRequests::received(int team, int squad, int kind)
+{
+	// 0x007c8f10: with the tool usable (0x007c7880) the line, else the 4 s
+	// wait (0x007c8c00).
+	const auto state = m_round.abilityState(team, game::GameWorld::requestAbility(kind));
+	if (state.available && state.ready) {
+		if (onInfo) {
+			onInfo(receivedLine(squad, kind));
+		}
+	} else {
+		m_pending.push_back({team, squad, kind, 4.0f}); // 0x40800000
+	}
 }
 
 SquadRequests::Answer SquadRequests::answer(int commander, int squad, int kind, bool accept)
@@ -736,6 +756,17 @@ void updateSquadInfo(hud::HudManager& hud, game::GameWorld& round, int player, b
 {
 	game::GameWorld::PlayerInfo me;
 	const bool known = round.playerInfo(player, me);
+	updateSquadInfo(hud, known, me.commander, me.squad, me.squadLeader, commanderScreen, localize);
+}
+
+void updateSquadInfo(hud::HudManager& hud, bool known, bool commander, int squad, bool squadLeader, bool commanderScreen,
+	const std::function<std::string(const std::string&)>& localize)
+{
+	struct {
+		bool commander;
+		int squad;
+		bool squadLeader;
+	} me {commander, squad, squadLeader};
 	const auto text = [&localize](const char* id) { return localize ? localize(id) : std::string(id); };
 	bool bar = false, commanderIcon = false, squadIcon = false;
 	std::string line, icon;

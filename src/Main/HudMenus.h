@@ -223,6 +223,14 @@ public:
 	Answer answer(int commander, int squad, int kind, bool accept);
 	// The 4 s waits (0x007c8a60) and the count's reset.
 	void tick(float seconds);
+	// The request count's limit (+0x378 against sv.radioMaxSpamFlagCount,
+	// +0x37c's sv.radioBlockedDurationTime): false when no more may go.
+	bool count();
+	// 2/0x1d for the commander's HUD: a squad's request stored (the line,
+	// or the 4 s wait and the turn-down when the tool can't be used), and
+	// the line itself ("HUD_HUD_REQUEST_RECIEVED_FROM_SQUAD").
+	void received(int team, int squad, int kind);
+	std::string receivedLine(int squad, int kind) const;
 	static const char* toolName(int kind); // "artillery", "orbitalstrike", "uav", "supply"
 
 private:
@@ -249,6 +257,10 @@ private:
 // (SquadOrderInfoBarShow +0x2fd, SquadInfoValue +0x30c: +0x310 over
 // +0x318, from the field-unlock progress the server grants) stays off.
 void updateSquadInfo(hud::HudManager& hud, game::GameWorld& round, int player, bool commanderScreen,
+	const std::function<std::string(const std::string&)>& localize);
+// The same for a player as the HUD's world has it (a joined game's: the
+// server's player): whether there is one, commands, its squad and lead.
+void updateSquadInfo(hud::HudManager& hud, bool known, bool commander, int squad, bool squadLeader, bool commanderScreen,
 	const std::function<std::string(const std::string&)>& localize);
 
 // The commander's own tools' refusals (said to him alone, game slot 0x60):

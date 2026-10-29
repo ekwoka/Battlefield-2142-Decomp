@@ -374,6 +374,34 @@ struct PlayerOwnStateHints {
 bool decodePlayerOwnState(BitReader& in, const PlayerOwnStateHints& hints, PlayerOwnState& out);
 void encodePlayerOwnState(BitWriter& out, const PlayerOwnStateHints& hints, const PlayerOwnState& state);
 
+// The teams' networkable (the class of interface 0xc4b8, constructor
+// 0x00560e00, networkable vtable 0x009625f8: writer 0x0055fe30, reader
+// 0x00560ff0): the two teams (0x94 bytes each at networkable +0x5c and
+// +0xf0, team 1 and 2; the team manager DAT_00a209d8's slot 0x10 hands
+// them out) as one ghost. Its ghost id is fixed: 0x0042b8b0 registers it
+// with id 0x201 (0x0067d3d0 → 0x00678610, which then hands out ids from
+// 0x202), on the server as it starts (GameServer.cpp's 0x004ab030) and on
+// a client as it connects (0x004b4d10) or plays a demo (0x004b4a80), so it
+// needs no CreateObject. The state: a 32-bit mask, then per set bit sign + 17 bits
+// (0x0050a460 / 0x0050a410), the last two bits' sign + 2. The tickets are
+// team +0x84 (0x0055f180 clamps them to 0..9999; the HUD's 0x00449860
+// shows them, and over 100 as low, team +0x90 and +0x8c beside them): bit
+// 0x400 for team 1, 0x400000 for team 2, each followed by a bit (team
+// +0x90) and a value (team +0x8c). The other bits' fields (the history
+// record at +0x184 + 0xa4 slot) are kept by bit but not named.
+constexpr uint16_t kTeamStateGhost = 0x201;
+struct TeamNetState {
+	uint32_t mask = 0;
+	// Per mask bit, its values (most bits one; 0x10, 0x10000, 0x1000000,
+	// 0x2000000 two; the tickets' a value, a bit, a value).
+	std::array<std::array<int32_t, 3>, 32> values {};
+	int tickets(int team) const;   // -1 when this state hasn't them
+	void setTickets(int team, int tickets, bool flag = false, int value = 0);
+	bool complete = false;
+};
+bool decodeTeamState(BitReader& in, TeamNetState& out);
+void encodeTeamState(BitWriter& out, const TeamNetState& state);
+
 // --- the quantizations, shared with the tests
 
 // 2-bit mode, then three floats or three signed values of the table's bits

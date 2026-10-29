@@ -67,6 +67,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace dice::hfe {
@@ -177,6 +178,20 @@ public:
 	std::function<void(int mapIndex)> onMapVote;
 	std::function<void(int team)> onMutiny;
 	game::Votes& votes() { return m_votes; }
+	// The host's own player votes as a client's Vote event does (0x00590230
+	// with the host's player); the replies meant for it (to everyone, or to
+	// a player no client has: the host's) come to onVoteReply, as the Vote
+	// events a client's vote object (0x005740e0) takes.
+	void localVote(int player, int kind, int phase, int target, int choice);
+	std::function<void(const game::Votes::Reply&)> onVoteReply;
+	// The squads' requests (the round's store, GameWorld::squadRequests):
+	// each new one goes to every client (IssueSquadOrder with store 2, as
+	// 0x004c5720 broadcasts it), with 2/0x1e to its squad's leader and
+	// 2/0x1d to the team's commander when they are clients' players; each
+	// one taken off goes as SetAcceptOrder (0x004c3300). A new one whose
+	// commander is the host's own player and whose leader isn't comes to
+	// onRequestStored (the host's 2/0x1d).
+	std::function<void(int team, int squad, int kind)> onRequestStored;
 	// Demo recording (demo.recordDemo / stopRecording; Net/Demo.h): what
 	// the server sends a client with no player, connection 0x81, into a
 	// .bf2142demo file. False if one is recording or the file exists.
@@ -273,6 +288,17 @@ private:
 	void stopAutoDemo();
 	game::Votes m_votes;
 	void sendVoteReplies(const std::vector<game::Votes::Reply>& replies);
+	bool clientHas(int player) const;
+	// The teams' networkable (ghost net::kTeamStateGhost): its state now.
+	std::vector<uint8_t> teamStateOf(size_t& bits) const;
+	// The spawn groups (CreateSpawnGroup / RemoveSpawnGroup) and the
+	// requests (IssueSquadOrder / SetAcceptOrder) sent, to send the changes.
+	std::map<int, net::SpawnGroupInfo> m_spawnGroups;
+	std::vector<net::SpawnGroupInfo> spawnGroupsNow() const;
+	void trackSpawnGroups();
+	std::map<std::tuple<int, int, int>, physics::Vec3> m_requestsSent;
+	void trackRequests();
+	net::GameEvent requestEvent(int team, int squad, int kind, const physics::Vec3& at) const;
 	std::vector<std::pair<float, int>> m_mapVotes; // (seconds left, map) passed, waiting the 5 s
 	std::vector<std::pair<int, uint32_t>> m_kickLater; // (client, reason) after the poll
 	void event(int client, const net::GameEvent& event);
@@ -320,7 +346,10 @@ private:
 	std::set<uint32_t> m_static;
 	std::map<uint32_t, std::unique_ptr<std::vector<net::GhostPartLayout>>> m_layouts; // by template id
 	std::map<uint32_t, Ghost> m_ghosts; // by object id
-	uint16_t m_nextGhost = 1;
+	uint16_t m_nextGhost = kFirstGhost;
+	// The teams' networkable takes 0x201 first (0x0042b8b0), so the ghost
+	// manager hands out ids from 0x202 (0x00678610).
+	static constexpr uint16_t kFirstGhost = net::kTeamStateGhost + 1;
 	std::map<int, Client> m_clients;
 	std::map<int, PlayerSeen> m_players; // by player id
 	std::map<int, std::string> m_names;  // names the clients gave

@@ -902,6 +902,111 @@ bool parseCreateKit(const GameEvent& e, CreateKitInfo& out)
 	return true;
 }
 
+bool parseSquadOrder(const GameEvent& e, SquadOrderInfo& out)
+{
+	if (e.type != kEvIssueSquadOrder || e.values.size() < 7) {
+		return false;
+	}
+	out = {};
+	out.squad = e.i(0);
+	out.team = e.i(1);
+	out.kind = e.i(2);
+	size_t n = 4;
+	if (e.u(3)) {
+		out.object = static_cast<uint16_t>(e.u(n++));
+	} else {
+		// Written +0x10, +0x1c, +0x28, +0x14, +0x20, +0x2c, +0x18, +0x24, +0x30.
+		static constexpr size_t kOrder[9] = {0, 3, 6, 1, 4, 7, 2, 5, 8};
+		for (size_t i = 0; i < 9; ++i) {
+			out.floats[kOrder[i]] = e.f(n++);
+		}
+	}
+	out.store = e.i(n++);
+	out.flag = e.u(n) != 0;
+	return e.values.size() > n;
+}
+
+GameEvent makeSquadOrder(const SquadOrderInfo& info)
+{
+	GameEvent e;
+	e.type = kEvIssueSquadOrder;
+	e.values = {static_cast<uint32_t>(info.squad) & 0xff, static_cast<uint32_t>(info.team) & 0xff,
+		static_cast<uint32_t>(info.kind) & 0xff, info.object ? 1u : 0u};
+	if (info.object) {
+		e.values.push_back(info.object);
+	} else {
+		static constexpr size_t kOrder[9] = {0, 3, 6, 1, 4, 7, 2, 5, 8};
+		for (const size_t i : kOrder) {
+			e.values.push_back(floatRaw(info.floats[i]));
+		}
+	}
+	e.values.push_back(static_cast<uint32_t>(info.store) & 0xff);
+	e.values.push_back(info.flag ? 1 : 0);
+	return e;
+}
+
+bool parseAcceptOrder(const GameEvent& e, AcceptOrderInfo& out)
+{
+	if (e.type != kEvSetAcceptOrder || e.values.size() < 5) {
+		return false;
+	}
+	out.squad = e.i(0);
+	out.team = e.i(1);
+	out.flag = e.u(2) != 0;
+	out.store = e.i(3);
+	out.kind = e.i(4);
+	return true;
+}
+
+GameEvent makeAcceptOrder(const AcceptOrderInfo& info)
+{
+	GameEvent e;
+	e.type = kEvSetAcceptOrder;
+	e.values = {static_cast<uint32_t>(info.squad) & 0xff, static_cast<uint32_t>(info.team) & 0xff, info.flag ? 1u : 0u,
+		static_cast<uint32_t>(info.store) & 0xff, static_cast<uint32_t>(info.kind) & 0xff};
+	return e;
+}
+
+bool parseSpawnGroup(const GameEvent& e, SpawnGroupInfo& out)
+{
+	out = {};
+	if (e.type == kEvRemoveSpawnGroup && e.values.size() >= 2) {
+		out.id = e.i(0);
+		out.ghost = static_cast<uint16_t>(e.u(1));
+		return true;
+	}
+	if (e.type != kEvCreateSpawnGroup || e.values.size() < 8) {
+		return false;
+	}
+	out.id = e.i(0);
+	out.team = e.i(1);
+	out.flag14 = e.u(2) != 0;
+	out.flag15 = e.u(3) != 0;
+	out.flag16 = e.u(4) != 0;
+	out.byte17 = e.i(5);
+	out.byte18 = e.i(6);
+	out.ghost = static_cast<uint16_t>(e.u(7));
+	return true;
+}
+
+GameEvent makeCreateSpawnGroup(const SpawnGroupInfo& info)
+{
+	GameEvent e;
+	e.type = kEvCreateSpawnGroup;
+	e.values = {static_cast<uint32_t>(info.id) & 0xff, static_cast<uint32_t>(info.team) & 0xf, info.flag14 ? 1u : 0u,
+		info.flag15 ? 1u : 0u, info.flag16 ? 1u : 0u, static_cast<uint32_t>(info.byte17) & 0xff,
+		static_cast<uint32_t>(info.byte18) & 0xff, info.ghost};
+	return e;
+}
+
+GameEvent makeRemoveSpawnGroup(int id, uint16_t ghost)
+{
+	GameEvent e;
+	e.type = kEvRemoveSpawnGroup;
+	e.values = {static_cast<uint32_t>(id) & 0xff, ghost};
+	return e;
+}
+
 int32_t PostRemoteInfo::payloadInt(size_t index) const
 {
 	if (payload.size() < (index + 1) * 4) {

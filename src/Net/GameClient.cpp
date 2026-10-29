@@ -362,6 +362,31 @@ void GameClient::squadRequest(int type)
 	sendEvent(eventOf(kEvRequest, {u8(me ? me->squad : 0), u8(me ? me->team : 0), static_cast<uint32_t>(type) & 3}));
 }
 
+void GameClient::requestAsset(int kind, const Vec3f& point)
+{
+	const RemotePlayer* me = m_world.player(m_world.localPlayer());
+	SquadOrderInfo order;
+	order.squad = me ? me->squad : 0;
+	order.team = me ? me->team : 0;
+	order.kind = kind;
+	order.floats[0] = point.x;
+	order.floats[1] = point.y;
+	order.floats[2] = point.z;
+	order.store = kSquadOrderStoreRequest;
+	sendEvent(makeSquadOrder(order));
+}
+
+void GameClient::answerRequest(int squad, int kind)
+{
+	const RemotePlayer* me = m_world.player(m_world.localPlayer());
+	AcceptOrderInfo answer;
+	answer.squad = squad;
+	answer.team = me ? me->team : 0;
+	answer.store = kSquadOrderStoreRequest;
+	answer.kind = kind;
+	sendEvent(makeAcceptOrder(answer));
+}
+
 void GameClient::commander(int kind)
 {
 	// 0x0050cb00 takes it only with the sender's own player id.

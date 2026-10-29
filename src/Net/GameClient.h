@@ -143,6 +143,15 @@ public:
 	void createSquad(int squad, const std::string& name) { setSquadName(squad, name); }
 	void setPrivateSquad(int squad, bool isPrivate);              // SetPrivateSquad (0x17; leader only)
 	void squadRequest(int type);                                  // Request (0x32): 0-3, to the commander (leader only)
+	// An asset request to the commander (SquadLeader.sendRequest: the
+	// ClientSquadManager's slot 0x50, 0x004c9b00, sends IssueSquadOrder with
+	// store 2): kind 0 artillery, 1 orbital strike, 2 UAV, 3 supplies, at a
+	// point; our team and squad.
+	void requestAsset(int kind, const Vec3f& point);
+	// The commander's answer to a squad's request (0x007c7e20 → the squad
+	// manager's slot 0x24, 0x004c99a0: SetAcceptOrder with 0, store 2 and
+	// the kind), which takes it off on the server and every client.
+	void answerRequest(int squad, int kind);
 	// Commander (0x13; 0x0050c8f0): a kind (0-8), our team, our player id.
 	enum CommanderKind { kCommanderStepDown = 0, kCommanderWithdraw = 1, kCommanderResign = 2, kCommanderSet = 3,
 		kCommanderApply = 4, kCommanderLeaveScreen = 6, kCommanderEnterScreen = 7 };

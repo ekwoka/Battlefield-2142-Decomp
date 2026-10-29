@@ -358,7 +358,9 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 	m_players.clear();
 	m_names.clear();
 	m_motion.clear();
-	m_nextGhost = 1;
+	m_nextGhost = kFirstGhost;
+	m_spawnGroups.clear();
+	m_requestsSent.clear();
 	m_roundEndSent = false;
 	m_endOfRoundSerialSent = 0;
 	for (auto& [id, client] : m_clients) {
@@ -763,6 +765,9 @@ void HostedGame::sendVoteReplies(const std::vector<game::Votes::Reply>& replies)
 				static_cast<uint32_t>(r.noCount) & 0xff, static_cast<uint32_t>(std::max(r.needed, 0)) & 0xff,
 				static_cast<uint32_t>(r.voter) & 0xff, static_cast<uint32_t>(r.phase) & 0xff,
 				static_cast<uint32_t>(r.kind) & 0xff, seconds});
+		if (onVoteReply && (r.to < 0 || !clientHas(r.to))) {
+			onVoteReply(r); // the host's own player's vote object
+		}
 		if (r.to < 0) {
 			sendToPlaying(e);
 			continue;
@@ -773,6 +778,21 @@ void HostedGame::sendVoteReplies(const std::vector<game::Votes::Reply>& replies)
 			}
 		}
 	}
+}
+
+bool HostedGame::clientHas(int player) const
+{
+	for (const auto& [id, client] : m_clients) {
+		if (client.player == player) {
+			return true;
+		}
+	}
+	return false;
+}
+
+void HostedGame::localVote(int player, int kind, int phase, int target, int choice)
+{
+	sendVoteReplies(m_votes.handle(player, kind, phase, target, choice));
 }
 
 bool HostedGame::reservedSlotCheck(int id)
@@ -890,6 +910,14 @@ void HostedGame::sendDatabase(int id)
 			sendTo(id, eventOf(net::kEvHandlePickup, {static_cast<uint32_t>(player) & 0xff, ghostOfObject(info.kit),
 				ghostOfObject(seen.soldier), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}));
 		}
+	}
+	// The spawn groups and the squads' requests standing (their events, as
+	// they went to the others).
+	for (const auto& [group, info] : m_spawnGroups) {
+		sendTo(id, net::makeCreateSpawnGroup(info));
+	}
+	for (const auto& [key, at] : m_requestsSent) {
+		sendTo(id, requestEvent(std::get<0>(key), std::get<1>(key), std::get<2>(key), at));
 	}
 	sendTo(id, net::makePostRemote(net::kMsgNetworkCategory, net::kNeDatabaseComplete));
 	sendTo(id, net::makePostRemote(net::kMsgNetworkCategory, net::kNeReset, net::int32Payload(0)));
@@ -1057,6 +1085,48 @@ void HostedGame::event(int id, const net::GameEvent& e)
 		}
 		sendVoteReplies(m_votes.handle(player, static_cast<int>(e.u(8)), static_cast<int>(e.u(7)), static_cast<int>(e.u(0)),
 			static_cast<int>(e.u(1))));
+		return;
+	}
+	case net::kEvIssueSquadOrder: { // 0x0050e3a0 with the sender's player
+		net::SquadOrderInfo order;
+		game::GameWorld::PlayerInfo me;
+		if (!net::parseSquadOrder(e, order) || order.store != net::kSquadOrderStoreRequest
+			|| !m_round->playerInfo(player, me) || me.team != order.team) {
+			return; // the squads' orders themselves aren't taken from clients yet
+		}
+		// From the squad's leader or the team's commander (0x0050e3a0's
+		// slot 0x40 / 0x78 checks), into the store (0x004c5720 with 0:
+		// trackRequests sends it on).
+		const bool leader = me.squadLeader && me.squad == order.squad;
+		if ((!leader && m_round->commander(me.team) != player) || order.kind < 0
+			|| order.kind >= game::GameWorld::kRequestKinds) {
+			return;
+		}
+		const net::Vec3f at = order.point();
+		if (m_round->storeSquadRequest(order.team, order.squad, order.kind, {at.x, at.y, at.z})) {
+			// The leader's radio to the commander (0x007c7690, TCPlayer).
+			static const char* const kVoices[] = {"req_artillery", "PLAYER_REQUEST_TM_requestforcestrike",
+				"PLAYER_REQUEST_requestuav", "PLAYER_REQUEST_requestsupplies"};
+			if (const int commander = m_round->commander(me.team); commander >= 0) {
+				m_round->radioMessage(player, 14, kVoices[order.kind], commander);
+			}
+			if (onLog) {
+				onLog("player " + std::to_string(player) + " requests " + std::to_string(order.kind) + " for squad "
+					+ std::to_string(order.squad));
+			}
+		}
+		return;
+	}
+	case net::kEvSetAcceptOrder: { // 0x0050df60 with the sender's player
+		net::AcceptOrderInfo answer;
+		game::GameWorld::PlayerInfo me;
+		if (!net::parseAcceptOrder(e, answer) || answer.store != net::kSquadOrderStoreRequest
+			|| !m_round->playerInfo(player, me) || me.team != answer.team) {
+			return;
+		}
+		if ((me.squadLeader && me.squad == answer.squad) || m_round->commander(me.team) == player) {
+			m_round->removeSquadRequest(answer.team, answer.squad, answer.kind); // trackRequests passes it on
+		}
 		return;
 	}
 	case net::kEvCommander:
@@ -1487,6 +1557,140 @@ const HostedGame::Ghost* HostedGame::ghostOf(uint16_t id, size_t& part) const
 	return nullptr;
 }
 
+std::vector<uint8_t> HostedGame::teamStateOf(size_t& bits) const
+{
+	// Both teams' tickets (the bits 0x400 and 0x400000, team +0x84, as
+	// 0x0055f180 clamps them), each with its bit and value (+0x90, +0x8c:
+	// not kept by the rewrite's game logic, 0).
+	net::TeamNetState state;
+	for (int team = 1; team <= 2; ++team) {
+		const int tickets = static_cast<int>(std::lround(m_logic->team(team).tickets));
+		state.setTickets(team, std::clamp(tickets, 0, 9999));
+	}
+	net::BitWriter out;
+	net::encodeTeamState(out, state);
+	bits = out.bits();
+	return out.data();
+}
+
+std::vector<net::SpawnGroupInfo> HostedGame::spawnGroupsNow() const
+{
+	// The control points a team may spawn at (the spawn manager's groups
+	// the team's spawn screen offers, 0x0078e830): a group each, its id the
+	// point's (what the client's 6/6 picks, setSpawnChoice), at the point's
+	// ghost. The flags and bytes stay 0 (not traced).
+	std::vector<net::SpawnGroupInfo> out;
+	std::map<int, uint16_t> ghosts;
+	for (const game::ControlPoint& cp : m_round->controlPoints()) {
+		if (cp.object) {
+			ghosts[cp.id] = ghostOfObject(cp.object->id());
+		}
+	}
+	for (int team = 1; team <= 2; ++team) {
+		for (const int id : m_round->spawnablePoints(team)) {
+			const auto ghost = ghosts.find(id);
+			if (ghost == ghosts.end() || ghost->second == 0 || id < 0 || id > 0xff) {
+				continue;
+			}
+			net::SpawnGroupInfo info;
+			info.id = id;
+			info.team = team;
+			info.ghost = ghost->second;
+			out.push_back(info);
+		}
+	}
+	return out;
+}
+
+void HostedGame::trackSpawnGroups()
+{
+	std::map<int, net::SpawnGroupInfo> now;
+	for (const net::SpawnGroupInfo& info : spawnGroupsNow()) {
+		now.emplace(info.id, info);
+	}
+	for (const auto& [id, info] : m_spawnGroups) {
+		if (!now.count(id)) {
+			sendToPlaying(net::makeRemoveSpawnGroup(id, info.ghost));
+		}
+	}
+	for (const auto& [id, info] : now) {
+		const auto was = m_spawnGroups.find(id);
+		if (was == m_spawnGroups.end() || was->second.team != info.team || was->second.ghost != info.ghost) {
+			if (was != m_spawnGroups.end()) {
+				sendToPlaying(net::makeRemoveSpawnGroup(id, was->second.ghost));
+			}
+			sendToPlaying(net::makeCreateSpawnGroup(info));
+		}
+	}
+	m_spawnGroups = std::move(now);
+}
+
+net::GameEvent HostedGame::requestEvent(int team, int squad, int kind, const physics::Vec3& at) const
+{
+	net::SquadOrderInfo order;
+	order.team = team;
+	order.squad = squad;
+	order.kind = kind;
+	order.floats[0] = at.x;
+	order.floats[1] = at.y;
+	order.floats[2] = at.z;
+	order.store = net::kSquadOrderStoreRequest;
+	return net::makeSquadOrder(order);
+}
+
+void HostedGame::trackRequests()
+{
+	std::map<std::tuple<int, int, int>, physics::Vec3> now;
+	for (int team = 1; team <= 2; ++team) {
+		for (const game::GameWorld::SquadRequest& r : m_round->squadRequests(team)) {
+			now[{r.team, r.squad, r.kind}] = r.position;
+		}
+	}
+	// Taken off: SetAcceptOrder to everyone (0x004c3300 with 0).
+	for (const auto& [key, at] : m_requestsSent) {
+		if (!now.count(key)) {
+			net::AcceptOrderInfo answer;
+			answer.team = std::get<0>(key);
+			answer.squad = std::get<1>(key);
+			answer.store = net::kSquadOrderStoreRequest;
+			answer.kind = std::get<2>(key);
+			sendToPlaying(net::makeAcceptOrder(answer));
+		}
+	}
+	// New: the event to everyone, 2/0x1e to the leader (the kind) and
+	// 2/0x1d to the commander (the squad and the kind), 0x004c5720.
+	for (const auto& [key, at] : now) {
+		if (m_requestsSent.count(key)) {
+			continue;
+		}
+		const auto [team, squad, kind] = key;
+		sendToPlaying(requestEvent(team, squad, kind, at));
+		int leader = -1;
+		for (const game::GameWorld::PlayerInfo& p : m_round->playerList()) {
+			if (p.team == team && p.squad == squad && p.squadLeader) {
+				leader = p.id;
+			}
+		}
+		const int commander = m_round->commander(team);
+		std::string pair = net::int32Payload(squad) + net::int32Payload(kind);
+		for (const auto& [id, client] : m_clients) {
+			if (client.stage != Client::Stage::Playing) {
+				continue;
+			}
+			if (client.player == leader && leader >= 0) {
+				sendTo(id, net::makePostRemote(2, 0x1e, net::int32Payload(kind)));
+			}
+			if (client.player == commander && commander >= 0) {
+				sendTo(id, net::makePostRemote(2, 0x1d, pair));
+			}
+		}
+		if (onRequestStored && commander >= 0 && !clientHas(commander) && (leader < 0 || clientHas(leader))) {
+			onRequestStored(team, squad, kind);
+		}
+	}
+	m_requestsSent = std::move(now);
+}
+
 std::vector<uint8_t> HostedGame::playerStateOf(int player, size_t& bits) const
 {
 	game::GameWorld::PlayerInfo p;
@@ -1626,7 +1830,9 @@ net::GhostBlock HostedGame::ghostsFor(int id, size_t budgetBits)
 			return &it->second;
 		}
 		std::pair<std::vector<uint8_t>, size_t> entry;
-		if (const auto p = playerOfGhost.find(ghost); p != playerOfGhost.end()) {
+		if (ghost == net::kTeamStateGhost) {
+			entry.first = teamStateOf(entry.second);
+		} else if (const auto p = playerOfGhost.find(ghost); p != playerOfGhost.end()) {
 			entry.first = playerStateOf(p->second, entry.second);
 		} else {
 			size_t part = 0;
@@ -1680,6 +1886,7 @@ net::GhostBlock HostedGame::ghostsFor(int id, size_t budgetBits)
 	for (const auto& [player, seen] : m_players) {
 		scheduled.push_back(seen.ghost);
 	}
+	scheduled.push_back(net::kTeamStateGhost);
 	for (const uint16_t ghost : scheduled) {
 		const net::GhostScheduler::State* st = client.ghosts.state(ghost);
 		if (!st || st->status != net::GhostScheduler::Status::InScope || st->dirty) {
@@ -1756,6 +1963,7 @@ void HostedGame::rescore(Client& client)
 {
 	net::GhostScheduler& g = client.ghosts;
 	g.beginRescore();
+	g.setPriority(net::kTeamStateGhost, -1, false); // the teams' networkable: always in scope
 	for (const auto& [player, seen] : m_players) {
 		g.setPriority(seen.ghost, -1, false);
 	}
@@ -1921,6 +2129,8 @@ void HostedGame::tick()
 	applyMoves();
 	trackObjects();
 	trackPlayers();
+	trackSpawnGroups();
+	trackRequests();
 	// The scripts' end-of-round text (gl_sendEndOfRoundData, 0x00568930:
 	// data block 8 to everyone, with sv.endOfRoundDelay and each player's
 	// kills and deaths).

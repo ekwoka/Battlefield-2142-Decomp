@@ -1921,3 +1921,84 @@ TEST(NetGame_ControlRecordMode3)
 	CHECK(!back.groups.empty() && back.groups[0].occupant && back.groups[0].occupant->yaw == s.yaw);
 	CHECK(back.second.size() == layout[0].groups.size() && near(back.second[0].position.x, 101, 0.001f));
 }
+
+// The squads' requests and answers, and the spawn groups, as events
+// (IssueSquadOrder 0x0050dfe0 / 0x0050e220, SetAcceptOrder 0x0050de40 /
+// 0x0050dd90, CreateSpawnGroup 0x005126b0 / 0x005125c0), and the teams'
+// networkable (0x0055fe30 / 0x00560ff0) through a RemoteWorld.
+TEST(Net_SquadRequestSpawnGroupAndTeamEvents)
+{
+	const auto roundTrip = [](const net::GameEvent& e, net::GameEvent& back) {
+		net::BitWriter out;
+		if (!net::writeGameEvent(out, e)) {
+			return false;
+		}
+		net::BitReader in(out.data().data(), out.data().size());
+		return net::readGameEvent(in, back) && back.type == e.type && back.values == e.values;
+	};
+	net::SquadOrderInfo order;
+	order.squad = 3;
+	order.team = 2;
+	order.kind = 1;
+	order.floats = {1.5f, -2, 300, 4, 5, 6, 7, 8, 9};
+	order.store = net::kSquadOrderStoreRequest;
+	net::GameEvent back;
+	CHECK(roundTrip(net::makeSquadOrder(order), back));
+	net::SquadOrderInfo parsed;
+	CHECK(net::parseSquadOrder(back, parsed));
+	CHECK(parsed.squad == 3 && parsed.team == 2 && parsed.kind == 1 && parsed.store == 2 && parsed.object == 0);
+	CHECK(parsed.point().x == 1.5f && parsed.point().y == -2 && parsed.point().z == 300 && parsed.floats[8] == 9);
+	// The floats go x, x, x, y, y, y, z, z, z (+0x10, +0x1c, +0x28, ...).
+	CHECK(back.f(4) == 1.5f && back.f(5) == 4 && back.f(7) == -2);
+	order.object = 77;
+	CHECK(roundTrip(net::makeSquadOrder(order), back) && net::parseSquadOrder(back, parsed) && parsed.object == 77);
+	net::AcceptOrderInfo answer;
+	answer.squad = 3;
+	answer.team = 2;
+	answer.store = 2;
+	answer.kind = 1;
+	net::AcceptOrderInfo answered;
+	CHECK(roundTrip(net::makeAcceptOrder(answer), back) && net::parseAcceptOrder(back, answered));
+	CHECK(answered.squad == 3 && answered.team == 2 && answered.store == 2 && answered.kind == 1 && !answered.flag);
+	net::SpawnGroupInfo group;
+	group.id = 201;
+	group.team = 1;
+	group.ghost = 600;
+	net::SpawnGroupInfo got;
+	CHECK(roundTrip(net::makeCreateSpawnGroup(group), back) && net::parseSpawnGroup(back, got));
+	CHECK(got.id == 201 && got.team == 1 && got.ghost == 600);
+
+	net::RemoteWorld world;
+	CHECK(world.apply(net::makeCreateSpawnGroup(group)) && world.spawnGroups().count(201) == 1);
+	order.object = 0;
+	CHECK(world.apply(net::makeSquadOrder(order)) && world.squadRequests(2).size() == 1 && world.squadRequests(1).empty());
+	CHECK(world.apply(net::makeAcceptOrder(answer)) && world.squadRequests(2).empty());
+	CHECK(world.apply(net::makeRemoveSpawnGroup(201, 600)) && world.spawnGroups().empty());
+	// Tickets: the bits 0x400 / 0x400000, sign + 17 bits each; an update
+	// with one team keeps the other's.
+	CHECK(world.tickets(1) == -1);
+	net::TeamNetState teams;
+	teams.setTickets(1, 220);
+	teams.setTickets(2, 9999, true, -5);
+	net::BitWriter state;
+	net::encodeTeamState(state, teams);
+	CHECK(state.bits() == 32 + 2 * 37);
+	net::GhostBlock block;
+	block.present = true;
+	net::GhostUpdate update;
+	update.kind = 1;
+	update.ghost = net::kTeamStateGhost;
+	update.state = state.data();
+	update.stateBits = state.bits();
+	block.updates.push_back(update);
+	world.apply(block);
+	CHECK(world.tickets(1) == 220 && world.tickets(2) == 9999 && world.teamState().values[22][2] == -5);
+	net::TeamNetState one;
+	one.setTickets(1, 219);
+	net::BitWriter second;
+	net::encodeTeamState(second, one);
+	block.updates[0].state = second.data();
+	block.updates[0].stateBits = second.bits();
+	world.apply(block);
+	CHECK(world.tickets(1) == 219 && world.tickets(2) == 9999 && world.objectList().empty());
+}

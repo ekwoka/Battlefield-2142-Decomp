@@ -36,6 +36,22 @@ void RemoteWorld::clear()
 	m_levelChanges.clear();
 	m_dataBlocks.clear();
 	m_inData = m_inString = false;
+	m_teamState = {};
+	m_spawnGroups.clear();
+	m_requests.clear();
+}
+
+std::vector<RemoteWorld::SquadRequest> RemoteWorld::squadRequests(int team) const
+{
+	std::vector<SquadRequest> out;
+	for (const auto& [key, kinds] : m_requests) {
+		for (const auto& request : kinds) {
+			if (request && (team == 0 || key.first == team)) {
+				out.push_back(*request);
+			}
+		}
+	}
+	return out;
 }
 
 void RemoteWorld::applyDataBlock(const DataBlockChunk& chunk)
@@ -354,6 +370,50 @@ bool RemoteWorld::apply(const GameEvent& event)
 	case kEvKickBan: // 0x0050cec0; the client's handler (0x0050cfd0) posts 2/0x4d for the HUD
 		m_kicks.push_back({static_cast<int>(event.u(0)), event.u(1) != 0, event.u(2)});
 		return true;
+	case kEvCreateSpawnGroup:   // 0x005127f0 → the spawn manager's slot 0x44
+	case kEvRemoveSpawnGroup: { // 0x00512970 → slot 0x48
+		SpawnGroupInfo info;
+		if (!parseSpawnGroup(event, info)) {
+			return false;
+		}
+		if (event.type == kEvCreateSpawnGroup) {
+			m_spawnGroups[info.id] = info;
+		} else {
+			m_spawnGroups.erase(info.id);
+		}
+		return true;
+	}
+	case kEvIssueSquadOrder: { // the client's handler 0x0050e4d0: stored, not sent on
+		SquadOrderInfo info;
+		if (!parseSquadOrder(event, info)) {
+			return false;
+		}
+		if (info.store != kSquadOrderStoreRequest) {
+			m_unhandled.push_back(event); // the orders themselves: not kept here
+			return false;
+		}
+		// The squad's record keeps one request a kind (0x004c3f20).
+		if (info.kind >= 0 && info.kind < 4) {
+			auto& slot = m_requests[{info.team, info.squad}][static_cast<size_t>(info.kind)];
+			slot = SquadRequest {info.team, info.squad, info.kind, info.object, info.point()};
+		}
+		return true;
+	}
+	case kEvSetAcceptOrder: { // 0x0050df20 → the squad manager's slot 0x24 (0x004c3300 with 1)
+		AcceptOrderInfo info;
+		if (!parseAcceptOrder(event, info)) {
+			return false;
+		}
+		if (info.store == kSquadOrderStoreRequest && info.kind >= 0 && info.kind < 4) {
+			if (auto it = m_requests.find({info.team, info.squad}); it != m_requests.end()) {
+				it->second[static_cast<size_t>(info.kind)].reset();
+			}
+		} else {
+			m_unhandled.push_back(event);
+			return false;
+		}
+		return true;
+	}
 	default:
 		m_unhandled.push_back(event);
 		return false;
@@ -405,6 +465,22 @@ void RemoteWorld::apply(const GhostBlock& ghosts)
 		if (auto it = m_hidden.find(u.ghost); it != m_hidden.end()) {
 			m_objects[u.ghost] = std::move(it->second);
 			m_hidden.erase(it);
+		}
+		if (u.ghost == kTeamStateGhost) {
+			// The teams' networkable (0x00560ff0), registered by 0x0042b8b0
+			// as the client connects: only the bits sent change.
+			BitReader in(u.state.data(), (u.stateBits + 7) / 8);
+			TeamNetState state;
+			if (decodeTeamState(in, state)) {
+				for (int bit = 0; bit < 32; ++bit) {
+					if (state.mask & (1u << bit)) {
+						m_teamState.values[static_cast<size_t>(bit)] = state.values[static_cast<size_t>(bit)];
+					}
+				}
+				m_teamState.mask |= state.mask;
+				m_teamState.complete = true;
+			}
+			continue;
 		}
 		if (auto pg = m_playerGhosts.find(u.ghost); pg != m_playerGhosts.end()) {
 			BitReader in(u.state.data(), u.state.size());

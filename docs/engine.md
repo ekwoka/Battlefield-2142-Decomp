@@ -3260,7 +3260,10 @@ PostRemotes:
 | 0x17 | SetPrivateSquad | team, squad, 1 bit (`0x0050db90`) |
 | 0x13 | Commander | kind (0-8 in 4 bits), team, player (sign + 15; must be the sender): 0 step down, 1 withdraw, 2 resign, 3 set (s→c), 4 apply, 6 / 7 leave / enter the commander screen |
 | 0x27 | Vote | target, choice, top count, target, top choice, votes needed, voter, phase, type (bytes), 32 bits (`0x005113c0`, server `0x00590230`): phases 0 start, 1 failed, 2 progress / ended, 3 passed, 4 cast, 5 bad target, 6 refused, 7 too many votes; types 0 internal, 1 map, 2 kick, 3 mutiny |
-| 0x32 | Request | squad, team, 0-3 (the leader asks the commander; forwarded as PostRemote 2/0x19) |
+| 0x32 | Request | squad, team, 0-3 (the leader asks the commander; forwarded as PostRemote 2/0x19, `ECHudHESquadLeaderRequest`) |
+| 0x18 | IssueSquadOrder | squad, team, kind (bytes), 1 bit: the order's object ghost (16), else 9 floats (the record's `+8`..`+0x28`, written `+0x10`, `+0x1c`, `+0x28`, `+0x14`, `+0x20`, `+0x2c`, `+0x18`, `+0x24`, `+0x30`: the point is `+0x10`..`+0x18`), the store (8: 0 the squad's order, squad manager slot `0x48`; 1 the commander's, `0x4c`; 2 a request, `0x50`), 1 bit (built `0x0050e170`, written `0x0050dfe0`, read `0x0050e220`; server `0x0050e3a0` takes it from the squad's leader or the commander, client `0x0050e4d0` only stores it) |
+| 0x1b | SetAcceptOrder | squad, team, 1 bit, the store, the kind (bytes; built `0x0050dd50`, written `0x0050de40`, read `0x0050dd90`): squad manager slot `0x24`, a request or order taken off; server `0x0050df60` (from the leader or the commander, passed on to everyone by `0x004c3300`), client `0x0050df20` |
+| 0x39, 0x3a | CreateSpawnGroup, RemoveSpawnGroup | the group's id (8), team (4), three bits and two bytes not traced, the ghost of the object it is at (16) (`0x005125c0` / `0x005126b0`, handled `0x005127f0` → the client spawn manager's slot `0x44`); Remove: id, ghost (`0x00512880`, `0x00512970` → slot `0x48`) |
 | 0x14 | RadioMessage | the radio table index (16 bits), a byte, 2 bits (channel), a byte, 0..0x12, 0..4 (`0x004b3020`, written by `0x0050d1f0`). A client puts the channel in the byte after it too, and 0 in the last field. The first byte and the 0..0x12 value come from GameLogic slot 23's callers, which go through the scripts and weren't traced |
 
 Squad refusals come back as PostRemote category 2 (0xb full, 0xc
@@ -3547,6 +3550,23 @@ Vehicle parts:
   of ±1.25. Then allowCaptureByTeam for teams 1 and 2 (cp `+0x1b4`,
   `+0x1b5`), and the scripts' "flag", whose flag is raised (0-2).
 
+The teams' networkable (the class of interface `0xc4b8`, constructor
+`0x00560e00`, networkable vtable `0x009625f8`: writer `0x0055fe30`, reader
+`0x00560ff0`) holds both teams (`0x94` bytes each at networkable `+0x5c`
+and `+0xf0`; the team manager `DAT_00a209d8` slot `0x10` hands them out).
+Its ghost id is fixed: `0x0042b8b0` registers it as ghost `0x201`
+(`0x0067d3d0` → `0x00678610`, after which the manager hands out ids from
+`0x202`), on the server as it starts (GameServer.cpp's `0x004ab030`) and
+on a client as it connects (`0x004b4d10`) or plays a demo
+(`0x004b4a80`), so no CreateObject announces it. Its state is a 32-bit
+mask, then per bit sign + 17 bits (`0x0050a460`), the top two bits sign +
+2. The tickets are team `+0x84` (`0x0055f180` clamps them to 0..9999; the
+HUD's `0x00449860` shows them, low under 101): bit `0x400` for team 1,
+`0x400000` for team 2, each followed by a bit (team `+0x90`) and a value
+(`+0x8c`). The other bits are kept unnamed (`net::TeamNetState`). The
+rewrite's server sends both tickets (HostedGame, always in scope) and
+starts its own ghost ids at `0x202`.
+
 The player's networkable (30-bit mask; CreatePlayer gives its ghost id) is
 fully decoded:
 
@@ -3713,7 +3733,14 @@ spawners, the server's objects come as ghosts). Each tick the client
 updates and every ghost whose template we have becomes, and moves as, an
 object of the level; the keys go up as moves, the camera follows the
 control object, and a click on a spawn point asks for it. The server runs
-the round (no local game-mode script, no bots). Each run hands the
+the round (no local game-mode script, no bots). The HUD is the local
+game's, fed by the server's state ([the HUD's world](#hud)): the tickets
+(ghost `0x201`), the players and their networkables (the scoreboard, the
+squad bar, the map's team mates), the control points' ghosts and the
+spawn groups (CreateSpawnGroup: the spawn screen's icons; a click sends
+6/6 with the group's id), our own soldier from the control-object record
+(health, the weapon's rounds and magazines from the player's own state,
+the vehicle panel from the seat's ghost), kill messages and chat. Each run hands the
 client this level's templates (`setTemplateResolver`, `setGhostTemplates`
 for the ghost layouts); seat ghosts are drawn with their vehicle. Another
 level block on the connection is a map change: the level reloads and the
@@ -4801,7 +4828,20 @@ spacing, top offset and texture rectangle, kerning pairs, and a `.dds`
 beside it. Textures are under `Menu/HUD/Texture/`, mostly `.tga`.
 
 Rewritten in `src/Hud` (nodes, variables, fonts, quads), with the drawing
-in `src/Render` (`ui.vert/.frag`) and the variables set in `src/Main`. The
+in `src/Render` (`ui.vert/.frag`) and the variables set in `src/Main`.
+The exe's HUD reads the same managers on a server and a client (the
+player manager's players, the teams, the control points, the spawn
+manager's groups), which a client fills from the server's events and
+ghosts. The rewrite's one HUD update (main.cpp's `updateHud` and its map,
+commander, team and scoreboard parts, the squad bar) reads a
+`host::HudWorld` (`src/Main/HudWorld.h`): `LocalHudWorld` over the local
+round (GameWorld, GameLogic) or `RemoteHudWorld` over a joined game's
+`net::RemoteWorld` (players, tickets, control points by their ghosts with
+the ids of the spawn groups at them, the requests, our soldier from the
+control-object record and its own state, the ghosts as the level's
+objects). What only the local round has (gun aims, projectiles, Titans,
+silos, the commanders' assets, the range finder's ray) it still asks the
+round, which a client has empty. The
 corner roots' positions are approximate. The crosshair spreads by the
 weapon's soldier deviation (`GameWorld::weaponDeviation`, see Soldier
 deviation), its minimum without one.
@@ -6071,9 +6111,11 @@ while they have the keys. `src/Main/HudMenusChat`:
   (`UNABLE_TO_ISSUE`, `0x00573cb0` / `0x00573df0` / `0x00573f20`). #MINUTES#
   is ceil (`0x00448120`) of the minutes; a map's name has `_` as spaces.
   The lines go to the PersonalList (slots `0x170` / `0x174`, `0x007c7490` /
-  `0x007c7520`). Not done: the host's own player (HostedGame hands the
-  replies only to its clients) and the kick vote's start from the
-  scoreboard's Manage tab.
+  `0x007c7520`). The host's own player has a vote object too: HostedGame
+  hands it the replies for everyone and those for a player no client has
+  (`onVoteReply`), and its map votes go to the server's votes as a
+  client's Vote event would (`localVote`, the sender its player). Not
+  done: the kick vote's start from the scoreboard's Manage tab.
 - **Radio text** (`GameAudio::onRadioText`): a heard message's sample text
   (`0x0042e0c0` → `0x0042d7f0` → `0x0042bef0`) is a chat line with its
   sender (HUD slot `0x158` → ChatList `0x007b4cd0`) or a game line without
@@ -7170,7 +7212,9 @@ script's widths.
   commander, `0x007c7690`: `req_artillery`,
   `PLAYER_REQUEST_TM_requestforcestrike`, `PLAYER_REQUEST_requestuav`,
   `PLAYER_REQUEST_requestsupplies`) and 2/`0x1d` to the commander
-  (`0x007c8f10`): with the tool usable (`0x007c7880`)
+  (`0x007c8f10`; the "Request event" here is IssueSquadOrder, 0x18, with
+  store 2, which 0x004c5720 sends to everyone through game slot `0x94`):
+  with the tool usable (`0x007c7880`)
   `HUD_HUD_REQUEST_RECIEVED_FROM_SQUAD` (#REQUESTNAME# the tool's
   `HUD_TEXT_COMMANDER_*`, `0x007c7970`), else a 4 s wait (`0x007c8c00`,
   `0x007c8a60`) after which it is taken off and `<tool>_auto_deny` (the
@@ -7213,8 +7257,30 @@ script's widths.
   NametagManager its tag (slot `0x2c`); an order on an object gives the
   object instead (slot `0x28`).
 
-Not done: the Request event and the PostRemotes between machines (a
-joined client's requests, a remote commander), the AI commander's answers
+Between machines: a client's squad manager (ClientSquadManager, slot
+`0x50` `0x004c9b00`, slot `0x24` `0x004c99a0`) sends a request as
+IssueSquadOrder with store 2 and the commander's answer as SetAcceptOrder
+(store 2, the kind; `0x007c7e20` passes 0 for its bit); the server's
+handlers (`0x0050e3a0`, `0x0050df60`) take them from the squad's leader
+or the team's commander, store or take off (`0x004c5720` / `0x004c3300`
+with 0) and pass them on: the event to everyone, 2/`0x1e` (the kind) to
+the leader and 2/`0x1d` (squad, kind) to the commander. Clients only
+store them (`0x0050e4d0`, `0x0050df20`). The rewrite: `GameClient::
+requestAsset` / `answerRequest`, `RemoteWorld::squadRequests`, HostedGame
+(the round's store compared each tick: every new request and every one
+taken off goes out, so the host's own leader's and commander's reach the
+clients too; a client's request for the host's own commander gives him
+2/`0x1d`'s line). A joined leader's `SquadLeader.sendRequest` and a joined
+commander's `Commander.commRoseAccept` go this way; the client shows
+2/`0x1e`'s and 2/`0x1d`'s lines. Not done between machines: the radio
+(`<tool>_accept` / `_deny` and the leader's call are said on the server,
+which has no radio events to clients yet), a remote commander's tool use
+on accept (a client's commander tools aren't networked: his accept only
+takes the request off), his choice by request tag (a client's name tags
+don't show the networked requests: the team's first standing request is
+answered).
+
+Not done: the AI commander's answers
 to bot squad leaders (they send none), the squad panel's voice icons
 (`voip_icon_*`), `SELECTED_ALL_SQUADS` (no select-all), the order points
 bar (`SquadOrderInfoBarShow`, from the server's field-unlock progress),

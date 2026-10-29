@@ -287,6 +287,66 @@ struct CreateKitInfo { // kEvCreateKit (0x0050ac80, built 0x0050ac20)
 };
 bool parseCreateKit(const GameEvent& e, CreateKitInfo& out);
 
+// kEvIssueSquadOrder (0x18; built 0x0050e170, written 0x0050dfe0, read
+// 0x0050e220): a squad's order or request: the squad (+0xd), the team
+// (+0xc), the kind (+0xe; an order's type, or a request's 0 artillery, 1
+// orbital strike, 2 UAV, 3 supplies), then 1 bit: the order's object ghost
+// (16 bits), else 9 floats (the record's +8..+0x28, written +0x10, +0x1c,
+// +0x28, +0x14, +0x20, +0x2c, +0x18, +0x24, +0x30: the point is +0x10,
+// +0x14, +0x18), which store (8 bits, +0x36: 0 the squad's order, squad
+// manager slot 0x48; 1 the commander's, slot 0x4c; 2 a request, slot 0x50)
+// and a bit (+0x37, the record's +0x2c). A client's squad manager
+// (ClientSquadManager 0x004c9b00 for a request) sends it to the server,
+// whose handler (0x0050e3a0) takes it from the squad's leader (an order or
+// a request) or the team's commander (his order or a request) and stores
+// it with the broadcast (0x004c5720: the event to everyone, 2/0x1e to the
+// leader, 2/0x1d to the commander); a client's handler (0x0050e4d0) only
+// stores it.
+struct SquadOrderInfo {
+	int squad = 0, team = 0, kind = 0;
+	uint16_t object = 0; // 0: placed at `point`
+	std::array<float, 9> floats {}; // the record's +8..+0x28 (point first)
+	int store = 0;       // 0 order, 1 commander order, 2 request
+	bool flag = false;
+	Vec3f point() const { return {floats[0], floats[1], floats[2]}; }
+};
+constexpr int kSquadOrderStoreRequest = 2;
+bool parseSquadOrder(const GameEvent& e, SquadOrderInfo& out);
+GameEvent makeSquadOrder(const SquadOrderInfo& info);
+// kEvSetAcceptOrder (0x1b; built 0x0050dd50, read 0x0050dd90, written
+// 0x0050de40): the squad (+0xd), the team (+0xc), a bit (+0xe), the order's
+// store (+0xf: 2 a request) and its kind (+0x10). Squad manager slot 0x24:
+// the commander's answer to a request (0x007c7e20 passes 0 for the bit, 2
+// and the request's kind) takes it off. A client's (0x004c99a0) goes to the
+// server, whose handler (0x0050df60) takes it from the squad's leader or
+// the commander and passes it on (0x004c3300: the record's 0x004c2f60, the
+// event to everyone, the commander's request tag off); a client's
+// (0x0050df20) only applies it.
+struct AcceptOrderInfo {
+	int squad = 0, team = 0;
+	bool flag = false;
+	int store = 0, kind = 0;
+};
+bool parseAcceptOrder(const GameEvent& e, AcceptOrderInfo& out);
+GameEvent makeAcceptOrder(const AcceptOrderInfo& info);
+// kEvCreateSpawnGroup (0x39; read 0x005125c0, written 0x005126b0, handled
+// 0x005127f0 → the client's spawn manager slot 0x44) and
+// kEvRemoveSpawnGroup (0x3a; read 0x00512880, written 0x005128e0, handled
+// 0x00512970 → slot 0x48 with the id): a spawn group the spawn screen
+// offers: its id (8 bits), team (4), three bits (+0x14..+0x16) and two
+// bytes (+0x17, +0x18) whose meanings weren't traced, and the ghost of the
+// object it is at (16 bits: a control point, or a vehicle carrying a
+// SpawnPoint).
+struct SpawnGroupInfo {
+	int id = 0, team = 0;
+	bool flag14 = false, flag15 = false, flag16 = false;
+	int byte17 = 0, byte18 = 0;
+	uint16_t ghost = 0;
+};
+bool parseSpawnGroup(const GameEvent& e, SpawnGroupInfo& out);
+GameEvent makeCreateSpawnGroup(const SpawnGroupInfo& info);
+GameEvent makeRemoveSpawnGroup(int id, uint16_t ghost);
+
 // kEvPostRemote (0x005096a0, built 0x00509990): a message for the event
 // manager (0x00a7d06c) on the other side: category (4 bits), id (32 bits),
 // delay (float), payload (8-bit length and bytes, at most 52).

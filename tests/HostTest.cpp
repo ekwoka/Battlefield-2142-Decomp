@@ -8,6 +8,7 @@
 #include "Game/GameWorld.h"
 #include "IO/File/FileManager.h"
 #include "Main/HostedGame.h"
+#include "Main/HudWorld.h"
 #include "Main/Prediction.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "Physics/MaterialManager.h"
@@ -257,6 +258,103 @@ TEST(NetHost_HostedGameJoin)
 	CHECK(second.world().localPlayer() == joinerId && round.playerList().size() == 2);
 	second.disconnect();
 	CHECK(pumpUntil(stepSecond, [&] { return hosted.clientCount() == 0; }));
+}
+
+// What a joined game's HUD reads from the server (main.cpp's updateHud
+// through HudWorld): the teams' tickets (ghost 0x201), the players with
+// their squads, a squad leader's request to the commander and the
+// commander's answer (IssueSquadOrder / SetAcceptOrder with store 2,
+// 2/0x1e), and the host's own player's vote replies.
+TEST(NetHost_JoinedHudStateAndRequests)
+{
+	dice::hfe::world::ObjectTemplateManager templates;
+	dice::hfe::world::ObjectManager objects;
+	dice::hfe::game::GameWorld round(templates, objects);
+	dice::hfe::game::GameLogic logic;
+	round.startRound();
+	logic.startRound();
+	logic.setTickets(1, 150);
+	logic.setTickets(2, 99);
+	host::HostSetup setup;
+	setup.level = "Camp_Gibraltar";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, logic, templates, setup);
+	CHECK(hosted.start());
+
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Leader";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	const auto step = [&] {
+		client.update();
+		hosted.tick();
+		round.tick(1.0f / 30);
+	};
+	CHECK(pumpUntil(step, [&] { return client.world().tickets(1) == 150 && client.world().tickets(2) == 99; }));
+	logic.setTickets(2, 98);
+	CHECK(pumpUntil(step, [&] { return client.world().tickets(2) == 98; }));
+	CHECK(client.world().teamState().complete && client.world().tickets(1) == 150);
+	const int me = client.world().localPlayer();
+	dice::hfe::game::GameWorld::PlayerInfo mine;
+	CHECK(me >= 0 && round.playerInfo(me, mine) && mine.team == 1);
+	const int bot = round.addPlayer("Bot1", 1, true);
+	// Our player leads squad 1; the bot commands team 1.
+	CHECK(round.joinSquad(me, 1));
+	round.setCommanderEnabled(true);
+	CHECK(round.setCommander(1, bot));
+	CHECK(pumpUntil(step, [&] {
+		const net::RemotePlayer* p = client.world().player(me);
+		const net::RemotePlayer* c = client.world().player(bot);
+		return p && p->squad == 1 && p->squadLeader && c && c->commander;
+	}));
+	// The HUD's view of it.
+	dice::hfe::world::ObjectManager clientObjects;
+	dice::hfe::game::GameWorld clientRound(templates, clientObjects);
+	std::map<uint16_t, uint32_t> ghostObjects;
+	host::RemoteHudWorld hud(client.world(), clientRound, ghostObjects);
+	CHECK(hud.joined() && hud.localPlayer() == me && hud.playerList().size() == 2 && hud.playerTeam() == 1);
+	CHECK(hud.tickets(1) == 150 && hud.tickets(2) == 98 && hud.commander(1) == bot && hud.commander(2) == -1);
+	dice::hfe::game::GameWorld::PlayerInfo info;
+	CHECK(hud.playerInfo(me, info) && info.squadLeader && info.squad == 1 && info.name == "Leader");
+	host::LocalHudWorld local(round, logic);
+	CHECK(!local.joined() && local.tickets(1) == 150 && local.playerList().size() == 2);
+	// A request for the UAV at a point: stored on the server, sent back to
+	// everyone (store 2) and the leader's 2/0x1e.
+	client.requestAsset(2, {10, 0, 20});
+	bool sent = false;
+	CHECK(pumpUntil(step, [&] {
+		for (const net::PostRemoteInfo& m : client.world().takeMessages()) {
+			sent = sent || (m.category == 2 && m.id == 0x1e && m.payloadInt() == 2);
+		}
+		return sent && round.squadRequest(1, 1, 2) && client.world().squadRequests(1).size() == 1;
+	}));
+	const auto requests = hud.squadRequests(1);
+	CHECK(requests.size() == 1);
+	if (requests.size() == 1) {
+		CHECK(requests[0].squad == 1 && requests[0].kind == 2);
+		CHECK(std::abs(requests[0].position.x - 10) < 1e-3f && std::abs(requests[0].position.z - 20) < 1e-3f);
+	}
+	// Only a leader or the commander may answer; the leader's answer here
+	// (SetAcceptOrder) takes it off everywhere.
+	client.answerRequest(1, 2);
+	CHECK(pumpUntil(step, [&] { return !round.squadRequest(1, 1, 2) && client.world().squadRequests(1).empty(); }));
+	// A request stored on the host (its own leader's) reaches the client too.
+	CHECK(round.storeSquadRequest(1, 1, 3, {1, 2, 3}));
+	CHECK(pumpUntil(step, [&] { return client.world().squadRequests(1).size() == 1; }));
+	round.removeSquadRequest(1, 1, 3);
+	CHECK(pumpUntil(step, [&] { return client.world().squadRequests(1).empty(); }));
+	// The host's own player's votes: its replies come to onVoteReply (here
+	// the bot stands in for the host's player: a kick vote, refused or
+	// started, answers it).
+	std::vector<dice::hfe::game::Votes::Reply> replies;
+	hosted.onVoteReply = [&replies](const dice::hfe::game::Votes::Reply& r) { replies.push_back(r); };
+	hosted.localVote(bot, dice::hfe::game::Votes::kKick, 0, me, 0);
+	CHECK(!replies.empty());
+	CHECK(replies.empty() || replies.front().to == -1 || replies.front().to == bot);
+	client.disconnect();
+	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
 }
 
 namespace {

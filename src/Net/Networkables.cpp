@@ -1800,4 +1800,95 @@ void encodePlayerOwnState(BitWriter& out, const PlayerOwnStateHints& h, const Pl
 	out.write(s.commander ? 1 : 0, 1);
 }
 
+// --- the teams' networkable (0x0055fe30 writes, 0x00560ff0 reads)
+
+namespace {
+
+// The mask's bits in the order they are written, with how many values each
+// carries (2: two values; 3: the tickets' value, bit, value), each sign +
+// 17 bits; 0x40000000 and 0x80000000 carry sign + 2 bits.
+struct TeamField {
+	uint32_t bit;
+	int values;
+};
+constexpr TeamField kTeamFields[] = {
+	{0x1, 1}, {0x2, 1}, {0x1000000, 2}, {0x4000000, 1}, {0x10000000, 1}, {0x4, 1}, {0x8, 1}, {0x10, 2}, {0x20, 1},
+	{0x40, 1}, {0x80, 1}, {0x100, 1}, {0x200, 1}, {0x400, 3}, {0x800, 1}, {0x1000, 1}, {0x2000, 1}, {0x2000000, 2},
+	{0x8000000, 1}, {0x20000000, 1}, {0x4000, 1}, {0x8000, 1}, {0x10000, 2}, {0x20000, 1}, {0x40000, 1}, {0x80000, 1},
+	{0x100000, 1}, {0x200000, 1}, {0x400000, 3}, {0x800000, 1}, {0x40000000, 1}, {0x80000000, 1}};
+
+int bitIndex(uint32_t bit)
+{
+	int i = 0;
+	while (i < 32 && (1u << i) != bit) {
+		++i;
+	}
+	return i;
+}
+
+} // namespace
+
+int TeamNetState::tickets(int team) const
+{
+	const uint32_t bit = team == 1 ? 0x400u : team == 2 ? 0x400000u : 0;
+	return bit && (mask & bit) ? values[static_cast<size_t>(bitIndex(bit))][0] : -1;
+}
+
+void TeamNetState::setTickets(int team, int tickets, bool flag, int value)
+{
+	const uint32_t bit = team == 1 ? 0x400u : team == 2 ? 0x400000u : 0;
+	if (!bit) {
+		return;
+	}
+	mask |= bit;
+	values[static_cast<size_t>(bitIndex(bit))] = {tickets, flag ? 1 : 0, value};
+}
+
+bool decodeTeamState(BitReader& in, TeamNetState& out)
+{
+	out = {};
+	out.mask = in.read(32);
+	for (const TeamField& f : kTeamFields) {
+		if (!(out.mask & f.bit)) {
+			continue;
+		}
+		auto& v = out.values[static_cast<size_t>(bitIndex(f.bit))];
+		if (f.bit == 0x40000000 || f.bit == 0x80000000) {
+			v[0] = in.readSigned(3);
+		} else if (f.values == 3) {
+			v[0] = in.readSigned(18);
+			v[1] = static_cast<int32_t>(in.read(1));
+			v[2] = in.readSigned(18);
+		} else {
+			for (int i = 0; i < f.values; ++i) {
+				v[static_cast<size_t>(i)] = in.readSigned(18);
+			}
+		}
+	}
+	out.complete = !in.bad();
+	return out.complete;
+}
+
+void encodeTeamState(BitWriter& out, const TeamNetState& state)
+{
+	out.write(state.mask, 32);
+	for (const TeamField& f : kTeamFields) {
+		if (!(state.mask & f.bit)) {
+			continue;
+		}
+		const auto& v = state.values[static_cast<size_t>(bitIndex(f.bit))];
+		if (f.bit == 0x40000000 || f.bit == 0x80000000) {
+			out.writeSigned(v[0], 3);
+		} else if (f.values == 3) {
+			out.writeSigned(v[0], 18);
+			out.write(v[1] ? 1 : 0, 1);
+			out.writeSigned(v[2], 18);
+		} else {
+			for (int i = 0; i < f.values; ++i) {
+				out.writeSigned(v[static_cast<size_t>(i)], 18);
+			}
+		}
+	}
+}
+
 } // namespace dice::hfe::net

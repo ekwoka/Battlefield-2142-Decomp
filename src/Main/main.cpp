@@ -40,6 +40,7 @@
 #include "UI/Player/Player.h"
 #include "IO/Localization/Localization.h"
 #include "HostedGame.h"
+#include "HudWorld.h"
 #include "ServerAdmin.h"
 #include "ServerScriptBridge.h"
 #include "Net/RemoteConsole.h"
@@ -483,9 +484,9 @@ void setupScoreboard(hud::HudManager& hud)
 	hud.set("ToggleScore", 1);
 }
 
-void updateTeams(hud::HudManager& hud, const game::GameWorld& round, const game::GameLogic& logic)
+void updateTeams(hud::HudManager& hud, const host::HudWorld& world, const game::GameLogic& logic)
 {
-	const int friendly = round.playerTeam() == 1 ? 1 : 2;
+	const int friendly = world.playerTeam() == 1 ? 1 : 2;
 	// The teams' names and flags (0x0079a5f0: HUD_TEXT_MENU_SPAWN_ARMY_MEC
 	// and _USMC for PAC and EU, flags by the team's name).
 	for (int side = 0; side < 2; ++side) {
@@ -497,40 +498,44 @@ void updateTeams(hud::HudManager& hud, const game::GameWorld& round, const game:
 	}
 }
 
-void updateScoreboard(hud::HudManager& hud, const game::GameWorld& round, const std::function<int(int)>& scoreOf)
+// A player's voice box on the scoreboard (column 6: the voice client's
+// mute and talk state; "" none), set while a joined game has voice.
+std::function<std::string(int player)> g_scoreboardVoice;
+
+void updateScoreboard(hud::HudManager& hud, const host::HudWorld& world)
 {
-	if (round.playerList().empty()) {
-		return; // a joined game: the server's players fill it
-	}
-	const int friendly = round.playerTeam() == 1 ? 1 : 2;
+	const int friendly = world.playerTeam() == 1 ? 1 : 2;
 	game::GameWorld::PlayerInfo me;
-	round.playerInfo(round.localPlayer(), me);
+	world.playerInfo(world.localPlayer(), me);
+	const std::vector<game::GameWorld::PlayerInfo> everyone = world.playerList();
 	for (int side = 0; side < 2; ++side) {
 		const int team = side == 0 ? friendly : 3 - friendly;
 		std::vector<game::GameWorld::PlayerInfo> players;
-		for (const game::GameWorld::PlayerInfo& player : round.playerList()) {
+		for (const game::GameWorld::PlayerInfo& player : everyone) {
 			if (player.team == team) {
 				players.push_back(player);
 			}
 		}
-		const auto score = [&scoreOf](const game::GameWorld::PlayerInfo& p) {
-			return scoreOf ? scoreOf(p.id) : p.kills * 2 - p.teamKills * 4;
-		};
+		const auto score = [&world](const game::GameWorld::PlayerInfo& p) { return world.scores(p.id).score; };
 		std::stable_sort(players.begin(), players.end(), [&](const auto& a, const auto& b) { return score(a) > score(b); });
 		std::vector<std::vector<std::string>> rows;
 		std::vector<std::array<float, 4>> colors, backgrounds;
-		int totalScore = 0, totalKills = 0, totalDeaths = 0;
+		int totalScore = 0, totalTeamwork = 0, totalKills = 0, totalDeaths = 0;
 		for (const game::GameWorld::PlayerInfo& p : players) {
 			// The cells in the list's font 1 (0x007bb540: "\xa71%s\xa70" 0x009b4f1c,
-			// "\xa71%d\xa70" 0x009b6854).
+			// "\xa71%d\xa70" 0x009b6854), then the voice box and the id.
 			const auto f1 = [](const std::string& text) { return "\xa7" "1" + text + "\xa7" "0"; };
-			rows.push_back({f1(p.name), f1(std::to_string(score(p))), f1("0"), f1(std::to_string(p.kills)),
-				f1(std::to_string(p.deaths)), f1(p.ai ? "BOT" : "0")});
+			const host::HudWorld::Scores n = world.scores(p.id);
+			rows.push_back({f1(p.name), f1(std::to_string(n.score)), f1(std::to_string(n.teamwork)), f1(std::to_string(p.kills)),
+				f1(std::to_string(p.deaths)), f1(p.ai ? "BOT" : std::to_string(std::max(n.ping, 0))),
+				g_scoreboardVoice && !p.ai && p.id != world.localPlayer() ? g_scoreboardVoice(p.id) : std::string(),
+				std::to_string(p.id)});
+			totalTeamwork += n.teamwork;
 			// The row's colours (0x007bb540; see menu::scoreboardStyle).
 			dice::hfe::menu::ScoreboardRow look;
 			look.alive = p.alive;
 			look.friendlyList = side == 0;
-			look.local = p.id == round.localPlayer();
+			look.local = p.id == world.localPlayer();
 			look.sameSquad = me.squad > 0 && p.squad == me.squad;
 			look.localCommands = me.commander;
 			const dice::hfe::menu::ScoreboardStyle style = dice::hfe::menu::scoreboardStyle(look, static_cast<int>(colors.size()));
@@ -546,7 +551,8 @@ void updateScoreboard(hud::HudManager& hud, const game::GameWorld& round, const 
 			std::vector<dice::hfe::menu::ScoreboardMember> members;
 			for (size_t i = 0; i < players.size(); ++i) {
 				const auto& p = players[i];
-				members.push_back({static_cast<int>(i), p.squad, p.commander, score(p), 0, p.kills, p.deaths, 0});
+				const host::HudWorld::Scores n = world.scores(p.id);
+				members.push_back({static_cast<int>(i), p.squad, p.commander, n.score, n.teamwork, p.kills, p.deaths, std::max(n.ping, 0)});
 			}
 			std::vector<std::vector<std::string>> grouped;
 			std::vector<std::array<float, 4>> groupedColors, groupedBackgrounds;
@@ -557,7 +563,7 @@ void updateScoreboard(hud::HudManager& hud, const game::GameWorld& round, const 
 				if (line.member >= 0) {
 					grouped.push_back(rows[static_cast<size_t>(line.member)]);
 					groupedColors.push_back(colors[static_cast<size_t>(line.member)]);
-					const bool local = players[static_cast<size_t>(line.member)].id == round.localPlayer();
+					const bool local = players[static_cast<size_t>(line.member)].id == world.localPlayer();
 					groupedBackgrounds.push_back(local ? std::array<float, 4> {0.392157f, 0.392157f, 0.392157f, 0.35f}
 						: memberRow % 2 != 0           ? std::array<float, 4> {0.65098f, 0.65098f, 0.65098f, 0.8f}
 													   : std::array<float, 4> {0, 0, 0, 0});
@@ -584,8 +590,8 @@ void updateScoreboard(hud::HudManager& hud, const game::GameWorld& round, const 
 		hud.setList(side == 0 ? 2 : 1, std::move(rows));
 		hud.setListRowColors(side == 0 ? 2 : 1, std::move(colors));
 		hud.setListRowBackgrounds(side == 0 ? 2 : 1, std::move(backgrounds));
-		hud.setList(side == 0 ? 10 : 9, {{"", std::to_string(totalScore), "0", std::to_string(totalKills),
-											   std::to_string(totalDeaths), ""}});
+		hud.setList(side == 0 ? 10 : 9, {{"", std::to_string(totalScore), std::to_string(totalTeamwork),
+											   std::to_string(totalKills), std::to_string(totalDeaths), ""}});
 	}
 }
 
@@ -620,6 +626,10 @@ dice::hfe::menu::VehicleHud g_vehicleHud;
 std::function<void(const std::string&)> g_hudSound;
 int g_inHandSlot = -1;
 float g_hudTime = -1;
+// What the HUD shows now (HudWorld.h): the local round's, and a joined
+// game's while one runs (the console's HUD methods ask it).
+host::HudWorld* g_hudWorld = nullptr;
+host::RemoteHudWorld* g_remoteHud = nullptr;
 // The name tags' icons (Menu/Nametag/nametags.con).
 nametags::IconRegistry g_tagIcons;
 // The name tags of the game running now (the radio calls reach them).
@@ -628,10 +638,11 @@ nametags::Nametags* g_nametags = nullptr;
 // toggles it while alive (0x00754290 → 0x0074fd90(2)).
 bool g_bigMap = false;
 
-void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLogic& logic, bool commanderScreen)
+void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorld& round, const game::GameLogic& logic,
+	bool commanderScreen)
 {
 	game::GameWorld::PlayerInfo me;
-	const bool known = round.playerInfo(round.localPlayer(), me);
+	const bool known = world.playerInfo(world.localPlayer(), me);
 	const bool spawning = known && !me.alive;
 	const bool big = spawning || commanderScreen || g_bigMap;
 	hud.set("MapShow", known ? 1 : 0);
@@ -646,9 +657,9 @@ void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 	}
 	const auto folder = [&logic](int team) { return team == 0 ? std::string("Neutral") : logic.team(team).name; };
 	std::vector<hud::HudManager::MapMarker> markers;
-	const std::vector<int> spawnable = round.spawnablePoints(me.team);
-	const int chosen = round.spawnChoice(me.id);
-	for (const auto& point : round.controlPointList()) {
+	const std::vector<int> spawnable = world.spawnablePoints(me.team);
+	const int chosen = world.spawnChoice(me.id);
+	for (const auto& point : world.controlPointList()) {
 		hud::HudManager::MapMarker flag {"Ingame/Flags/Icons/Minimap/" + folder(point.team) + "/miniMap_CP.tga",
 			point.position.x, point.position.z, 32};
 		markers.push_back(flag);
@@ -684,7 +695,7 @@ void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 	}
 	// The squad: its leader (to spawn on) and the leader's beacon.
 	if (spawning && me.squad != 0) {
-		for (const auto& player : round.playerList()) {
+		for (const auto& player : world.playerList()) {
 			if (player.alive && player.squadLeader && player.team == me.team && player.squad == me.squad && player.id != me.id
 				&& !player.vehicle) {
 				hud::HudManager::MapMarker leader {"Ingame/Player/Icons/Minimap/SquadLeaders/mini_Squad_" + std::to_string(me.squad) +
@@ -706,7 +717,7 @@ void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 	// their relation to the player, filtered by Minimap.setPaintVehicle's
 	// vehicleType bits, tinted like the players (0x00b3be30: no team
 	// white, a team 0.7 grey), turned by the vehicle.
-	for (const auto& vehicle : round.vehicleList()) {
+	for (const auto& vehicle : world.vehicleList()) {
 		const world::Object* object = round.objects().find(vehicle.object);
 		if (!object || !object->objectTemplate()) {
 			continue;
@@ -718,9 +729,9 @@ void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 		}
 		int occupantTeam = 0;
 		bool occupied = false;
-		for (const int occupant : round.vehicleOccupants(vehicle.object)) {
+		for (const int occupant : world.vehicleOccupants(vehicle.object)) {
 			game::GameWorld::PlayerInfo who;
-			if (occupant >= 0 && round.playerInfo(occupant, who)) {
+			if (occupant >= 0 && world.playerInfo(occupant, who)) {
 				occupied = true;
 				occupantTeam = who.team;
 				break;
@@ -780,7 +791,7 @@ void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 			layer(icons.reload, sweep);
 		}
 	}
-	for (const auto& player : round.playerList()) {
+	for (const auto& player : world.playerList()) {
 		if (!player.alive || player.team != me.team || player.id == me.id) {
 			continue;
 		}
@@ -829,7 +840,7 @@ void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 	// kits' mini_Soldier), else the kit's own map icon.
 	for (const int id : revealed) {
 		game::GameWorld::PlayerInfo enemy;
-		if (round.playerInfo(id, enemy) && enemy.alive) {
+		if (world.playerInfo(id, enemy) && enemy.alive) {
 			std::string texture = "Ingame/Player/Icons/Minimap/mini_Soldier.dds";
 			float size = 16;
 			const world::Object* kit = enemy.kit ? round.objects().find(enemy.kit) : nullptr;
@@ -873,10 +884,10 @@ void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 // The commander's tools on the HUD (HudElementsCommander*.con): whether
 // the screen shows, which tools have their asset, its armour, and the
 // recharge bars.
-void updateCommander(hud::HudManager& hud, const game::GameWorld& round, bool screen)
+void updateCommander(hud::HudManager& hud, const host::HudWorld& world, const game::GameWorld& round, bool screen)
 {
 	game::GameWorld::PlayerInfo me;
-	const bool commander = round.playerInfo(round.localPlayer(), me) && me.commander;
+	const bool commander = world.playerInfo(world.localPlayer(), me) && me.commander;
 	// (CommanderInterfaceShow is the commander's tactical rose, menu state
 	// 9: the comm roses show it.)
 	hud.set("CommanderShow", commander && screen ? 1 : 0);
@@ -940,22 +951,25 @@ void updateKitAbilities(hud::HudManager& hud, const game::GameWorld& round, cons
 	}
 }
 
-void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLogic& logic, bool scoreboard = false,
-	const std::function<int(int)>& scoreOf = {}, bool commanderScreen = false)
+// The HUD's variables from the game it shows (HudWorld.h: the local round
+// or a joined game's server; `round` the level's objects either way).
+void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorld& round, const game::GameLogic& logic,
+	bool scoreboard = false, bool commanderScreen = false)
 {
-	updateMap(hud, round, logic, commanderScreen);
-	updateCommander(hud, round, commanderScreen);
-	updateTeams(hud, round, logic);
+	updateMap(hud, world, round, logic, commanderScreen);
+	updateCommander(hud, world, round, commanderScreen);
+	updateTeams(hud, world, logic);
 	hud.set("ScoreboardShow", scoreboard ? 1 : 0);
 	if (scoreboard) {
-		updateScoreboard(hud, round, scoreOf);
+		updateScoreboard(hud, world);
 	}
-	const world::Object* soldier = round.player();
+	const world::Object* soldier = world.soldier();
 	const bool alive = soldier != nullptr;
-	const bool inVehicle = round.playerVehicle() != nullptr;
+	const world::Object* const playerVehicle = world.vehicle();
+	const bool inVehicle = playerVehicle != nullptr;
 	// The in-game HUD stays up while dead (the spawn screen is part of it);
 	// the soldier's own items have their own show variables.
-	const bool connected = round.localPlayer() >= 0;
+	const bool connected = world.localPlayer() >= 0;
 	hud.set("ShowIngameHud", connected ? 1 : 0);
 	hud.set("ShowSoldierHud", connected ? 1 : 0);
 	hud.set("ShowVehicleHud", inVehicle ? 1 : 0);
@@ -981,11 +995,12 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 	// The gun in hand (the soldier's or the seat's) for the weapon HUD.
 	const game::FireArm* heldGun = nullptr;
 	const world::ObjectTemplate* heldGunTemplate = nullptr;
-	if (const world::Object* vehicle = round.playerVehicle()) {
+	const host::HudWorld::Weapon held = world.heldWeapon();
+	if (const world::Object* vehicle = playerVehicle) {
 		const auto& settings = vehicle->objectTemplate()->settings();
 		const auto icon = settings.find("vehicleHud.vehicleIcon");
 		hud.setString("VehicleIconPathString", icon != settings.end() ? icon->second : std::string());
-		const float left = round.hitPoints(vehicle->id());
+		const float left = world.hitPoints(vehicle->id());
 		const auto most = settings.find("armor.maxHitPoints");
 		const float max = most != settings.end() ? static_cast<float>(std::atof(most->second.c_str())) : 0;
 		// The vehicle's own HUD (0x007a3180 → 0x007a2e60, 0x007a18a0,
@@ -993,7 +1008,7 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 		dice::hfe::menu::VehicleHudInput look;
 		look.vehicle = vehicle->objectTemplate();
 		look.armor = max > 0 ? left / max : 1.0f;
-		for (const auto& info : round.vehicleList()) {
+		for (const auto& info : world.vehicleList()) {
 			if (info.object == vehicle->id()) {
 				const physics::Vec3& v = info.velocity;
 				look.speed = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
@@ -1003,9 +1018,9 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 		float sea = 0;
 		look.altitude = vehicle->position().y - (round.waterLevel(sea) ? sea : 0.0f);
 		game::GameWorld::PlayerInfo me;
-		const bool known = round.playerInfo(round.localPlayer(), me);
+		const bool known = world.playerInfo(world.localPlayer(), me);
 		const auto seats = round.vehicleSeats(vehicle->id());
-		const auto occupants = round.vehicleOccupants(vehicle->id());
+		const auto occupants = world.vehicleOccupants(vehicle->id());
 		for (size_t i = 0; i < seats.size(); ++i) {
 			dice::hfe::menu::SeatDot dot;
 			const world::ObjectTemplate* part = round.templates().find(seats[i].name);
@@ -1017,7 +1032,7 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 			}
 			const int occupant = i < occupants.size() ? occupants[i] : -1;
 			game::GameWorld::PlayerInfo who;
-			const bool occupied = occupant >= 0 && round.playerInfo(occupant, who);
+			const bool occupied = occupant >= 0 && world.playerInfo(occupant, who);
 			dot.state = dice::hfe::menu::seatDotState(occupied, occupied && who.id == me.id, occupied ? who.squad : 0,
 				known && me.team == who.team ? me.squad : 0, occupied && who.team == me.team);
 			if (occupied) {
@@ -1038,6 +1053,13 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 			hud.set("VehicleTurretAngle", yaw);
 			heldGun = round.gun(vehicle->id(), me.seat);
 			heldGunTemplate = gun;
+		} else if (world.joined() && held.weapon) {
+			// A joined game's seat gun: its HUD by the template (the aim
+			// isn't networked to the HUD here).
+			const auto gui = held.weapon->settings().find("weaponHud.guiIndex");
+			hud.set("GuiIndex", gui != held.weapon->settings().end() ? static_cast<float>(std::atoi(gui->second.c_str())) : 0);
+			hud.set("CrosshairIconShow", crosshairActive ? 1 : 0);
+			heldGunTemplate = held.weapon;
 		}
 	} else {
 		g_vehicleHud.clear(hud);
@@ -1045,7 +1067,7 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 	// Compass headings, degrees clockwise from north (+z): the vehicle's
 	// and, for the minimap's ring, the soldier's.
 	const auto heading = [](float yaw) { return yaw - 360.0f * std::floor(yaw / 360.0f); };
-	if (const world::Object* vehicle = round.playerVehicle()) {
+	if (const world::Object* vehicle = playerVehicle) {
 		hud.set("VehicleAngle", heading(vehicle->rotation().x));
 	}
 	if (soldier) {
@@ -1055,36 +1077,44 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 		hud.set("MinimapDelayedMapAngle", heading(soldier->rotation().x));
 	}
 	hud.set("PlayerHealthShow", alive ? 1 : 0);
-	hud.set("PlayerHealth", 1);
-	hud.setString("PlayerHealthString", "100");
-	const game::FireArm* weapon = round.playerWeapon();
+	const float health = world.health();
+	hud.set("PlayerHealth", health);
+	hud.setString("PlayerHealthString", std::to_string(static_cast<int>(std::lround(health * 100))));
+	const game::FireArm* weapon = held.gun;
 	if (weapon && !inVehicle) {
 		heldGun = weapon;
-		if (const world::Object* rifle = round.objects().find(round.playerWeaponObject())) {
-			heldGunTemplate = rifle->objectTemplate();
-		}
+		heldGunTemplate = held.weapon;
+	} else if (!inVehicle && held.weapon) {
+		heldGunTemplate = held.weapon; // a joined game's: the template and the server's counts
 	}
-	hud.set("UsingChildHud", weapon && !inVehicle ? 1 : 0);
+	hud.set("UsingChildHud", heldGunTemplate && !inVehicle ? 1 : 0);
 	hud.set("PrimaryAmmoShow", 0);
 	// A seat's second gun (0x007c2d50) would set the Secondary* block
 	// (WeaponHud::update's secondary); the game's seats carry one gun.
 	hud.set("SecondaryAmmoShow", 0);
-	if (heldGun) {
+	if (heldGun || (heldGunTemplate && held.rounds >= 0)) {
 		// The weapon HUD (0x007c1f10; see HudMenusVehicles.h). The game's
-		// magazines count the one in the gun (the firearm's slot 0xb0).
-		const game::FireArmSettings& gun = heldGun->settings();
+		// magazines count the one in the gun (the firearm's slot 0xb0). A
+		// joined game's counts are our player's own state's (the server's
+		// firearm: PlayerOwnState's rounds and magazines).
+		const game::FireArmSettings gun = heldGun ? heldGun->settings() : game::FireArmSettings::fromTemplate(*heldGunTemplate);
 		dice::hfe::menu::WeaponHudInput in;
 		in.weapon = heldGunTemplate;
-		in.rounds = heldGun->roundsInMag();
 		in.magSize = gun.magSize;
-		in.mags = heldGun->magsLeft() + 1;
 		in.nrOfMags = gun.nrOfMags;
-		in.reload = heldGun->reloading() && gun.reloadTime > 0 ? 1 - heldGun->reloadLeft() / gun.reloadTime : 0;
-		in.heat = gun.heatAddWhenFire > 0 ? heldGun->heat() : 0;
-		in.overheated = heldGun->overheated();
-		in.fireRate = heldGun->fireMode(); // the fire component's mode (FireArm::fireMode)
-		in.scanning = heldGun->scanning(); // the pulse meter's (0x007be380 → 0xc4f2 slots 0xf8 / 0xfc)
-		in.scan = heldGun->scan();
+		if (heldGun) {
+			in.rounds = heldGun->roundsInMag();
+			in.mags = heldGun->magsLeft() + 1;
+			in.reload = heldGun->reloading() && gun.reloadTime > 0 ? 1 - heldGun->reloadLeft() / gun.reloadTime : 0;
+			in.heat = gun.heatAddWhenFire > 0 ? heldGun->heat() : 0;
+			in.overheated = heldGun->overheated();
+			in.fireRate = heldGun->fireMode(); // the fire component's mode (FireArm::fireMode)
+			in.scanning = heldGun->scanning(); // the pulse meter's (0x007be380 → 0xc4f2 slots 0xf8 / 0xfc)
+			in.scan = heldGun->scan();
+		} else {
+			in.rounds = held.rounds;
+			in.mags = held.mags >= 0 ? held.mags : 0;
+		}
 		// The range finder's ray and the distance counter's projectile
 		// (0x007c1470), only for the weapons with them (read once per
 		// template); the ray (999 m from the eye along the look, bisected
@@ -1098,7 +1128,7 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 			distanceCounter = dice::hfe::menu::hudNumber(heldGunTemplate, "weaponHud.hasDistanceCounter", 0) != 0;
 		}
 		game::GameWorld::PlayerInfo me;
-		if ((rangeFinder || distanceCounter) && round.playerInfo(round.localPlayer(), me) && me.alive) {
+		if ((rangeFinder || distanceCounter) && !world.joined() && round.playerInfo(round.localPlayer(), me) && me.alive) {
 			static float rangeAt = -1;
 			static bool rangeHit = false;
 			static float rangeDistance = 0;
@@ -1144,7 +1174,7 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 	}
 	// The item selection: opened when the weapon in hand changes, with the
 	// kit's weapons by slot (their weaponHud.selectIcon).
-	if (game::GameWorld::PlayerInfo me; round.playerInfo(round.localPlayer(), me) && me.alive && !inVehicle) {
+	if (game::GameWorld::PlayerInfo me; world.playerInfo(world.localPlayer(), me) && me.alive && !inVehicle) {
 		if (g_inHandSlot >= 0 && me.inHandSlot != g_inHandSlot) {
 			std::vector<dice::hfe::menu::SelectItem> items;
 			for (const auto& [slot, name] : me.carried) {
@@ -1157,13 +1187,13 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 		g_inHandSlot = -1;
 	}
 	g_itemSelection.update(hud, dt);
-	const int team = round.playerTeam() == 1 ? 1 : 2, enemy = 3 - team;
-	hud.setString("FriendlyTicketsString", std::to_string(static_cast<int>(logic.team(team).tickets)));
-	hud.setString("EnemyTicketsString", std::to_string(static_cast<int>(logic.team(enemy).tickets)));
+	const int team = world.playerTeam() == 1 ? 1 : 2, enemy = 3 - team;
+	hud.setString("FriendlyTicketsString", std::to_string(static_cast<int>(world.tickets(team))));
+	hud.setString("EnemyTicketsString", std::to_string(static_cast<int>(world.tickets(enemy))));
 	// The ticket bars' values (HudElementsTitans.con: in Titan mode the
 	// tickets are the Titan's armour, the shield span 60-100, the hull 0-60).
-	hud.set("FriendlyTickets", logic.team(team).tickets);
-	hud.set("EnemyTickets", logic.team(enemy).tickets);
+	hud.set("FriendlyTickets", world.tickets(team));
+	hud.set("EnemyTickets", world.tickets(enemy));
 	if (round.gameMode() == "gpm_ti") {
 		// The Titan HUD shows for GameMode 1 or 3 (the conquest one for 0, 2,
 		// 4-7); the consoles' lights (*StrategicObject1-4Show: that console
@@ -1210,8 +1240,8 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 		}
 	}
 	if (soldier) {
-		if (const world::Object* rifle = round.objects().find(round.playerWeaponObject())) {
-			const auto& settings = rifle->objectTemplate()->settings();
+		if (const world::ObjectTemplate* rifle = held.weapon) {
+			const auto& settings = rifle->settings();
 			const auto gui = settings.find("weaponHud.guiIndex");
 			hud.set("GuiIndex", gui != settings.end() ? static_cast<float>(std::atoi(gui->second.c_str())) : 0);
 			// The crosshair's parts (0x007be770): the spread in pixels is
@@ -1224,7 +1254,7 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 				const auto it = settings.find(key);
 				return it != settings.end() ? static_cast<float>(std::atof(it->second.c_str())) : otherwise;
 			};
-			const float now = round.weaponDeviation(round.localPlayer());
+			const float now = world.joined() ? 0.0f : round.weaponDeviation(round.localPlayer());
 			const float spread = std::ceil((now > 0 ? now : number("deviation.minDev", 0)) * number("weaponHud.deviationFactor", 10));
 			constexpr float kLength = 20;
 			hud.set("CrossRightPos", 400 + spread);
@@ -3302,6 +3332,53 @@ int runGame(Options& options, Session& session)
 		bindMethod(console, "SquadLeader.sendRequest", ConsoleAccess::Anyone, [&](int kind, int add) {
 			float x = 0, z = 0;
 			bool placed = false;
+			if (session.client && g_remoteHud) {
+				// A joined game (0x007d6d20 on a client): alive, under the
+				// count's limit, then the ClientSquadManager's slot 0x50
+				// sends it to the server (IssueSquadOrder, store 2) at the
+				// map menu's point or the rose's aim; the server's 2/0x1e
+				// brings the leader's line. (A team without a commander gets
+				// no_commander_available as radio, which a client doesn't
+				// play yet: the request then just isn't sent.)
+				game::GameWorld::PlayerInfo me;
+				if (!g_remoteHud->playerInfo(g_remoteHud->localPlayer(), me)) {
+					return;
+				}
+				if (!me.alive) {
+					if (squadRequests.onPersonal) {
+						squadRequests.onPersonal(localization.text("HUD_HUD_SQUAD_ALIVE_TO_REQUEST"));
+					}
+					return;
+				}
+				if (!squadRequests.count() || (!squadRequests.noCommanderNeeded && g_remoteHud->commander(me.team) < 0)
+					|| !me.squadLeader || kind < 0 || kind >= game::GameWorld::kRequestKinds) {
+					return;
+				}
+				if (add) {
+					placed = mapMenuPoint && hudManager.mapWorldAt(mapMenuPoint->first, mapMenuPoint->second, x, z);
+					if (placed) {
+						mapMenuPoint.reset();
+						g_mapMenu = 0;
+					}
+				} else {
+					const float yaw = me.yaw * 3.14159265f / 180, pitch = me.aimPitch * 3.14159265f / 180;
+					const float dx = std::sin(yaw) * std::cos(pitch), dy = std::sin(pitch), dz = std::cos(yaw) * std::cos(pitch);
+					const physics::Vec3 eye = me.position + physics::Vec3 {0, 1.6f, 0};
+					for (float d = 0; d < 1000; d += 2) {
+						const physics::Vec3 p = eye + physics::Vec3 {dx * d, dy * d, dz * d};
+						x = p.x;
+						z = p.z;
+						if (p.y <= round.terrainHeight(p.x, p.z)) {
+							break;
+						}
+					}
+					placed = true;
+				}
+				if (placed) {
+					session.client->requestAsset(kind, {x, round.terrainHeight(x, z), z});
+				}
+				return;
+			}
 			if (add) {
 				// The map's point (0x00780820): the right-click menu's.
 				if (mapMenuPoint && hudManager.mapWorldAt(mapMenuPoint->first, mapMenuPoint->second, x, z)) {
@@ -3317,6 +3394,33 @@ int runGame(Options& options, Session& session)
 			}
 		});
 		bindMethod(console, "Commander.commRoseAccept", ConsoleAccess::Anyone, [&](int accept) {
+			if (session.client && g_remoteHud) {
+				// A joined game's commander (0x007c7e20): his answer takes the
+				// request off (the squad manager's slot 0x24 → SetAcceptOrder
+				// to the server, which tells everyone). The request answered
+				// is the selected tag's, else the team's first standing one
+				// (a client's name tags don't list the networked requests
+				// yet). An accept's tool use isn't sent: a client's commander
+				// tools aren't networked.
+				game::GameWorld::PlayerInfo me;
+				if (!g_remoteHud->playerInfo(g_remoteHud->localPlayer(), me) || !me.commander) {
+					return;
+				}
+				int squad = -1, kind = -1;
+				if (const int tag = g_nametags ? g_nametags->selectedRequest() : -1; tag >= 0) {
+					squad = tag / 4;
+					kind = tag % 4;
+				} else if (const auto standing = g_remoteHud->squadRequests(me.team); !standing.empty()) {
+					squad = standing.front().squad;
+					kind = standing.front().kind;
+				}
+				if (squad > 0) {
+					session.client->answerRequest(squad, kind);
+					std::printf("request of squad %d (%s) %s\n", squad, dice::hfe::menu::SquadRequests::toolName(kind),
+						accept ? "accepted" : "denied");
+				}
+				return;
+			}
 			const int request = g_nametags ? g_nametags->selectedRequest() : -1;
 			if (request >= 0) {
 				squadRequests.answer(round.localPlayer(), request / 4, request % 4, accept != 0);
@@ -4027,9 +4131,48 @@ int runGame(Options& options, Session& session)
 					hosted->detach();
 					hosted->onRemoteCommand = nullptr; // this round's scripts
 					hosted->onChat = nullptr;
+					hosted->onRequestStored = nullptr;
+					hosted->onVoteReply = nullptr;
 				}
 			}
 		} detachHosted {hosted};
+		if (hosted) {
+			// The host's own player: a squad's request for him as commander
+			// (2/0x1d), and his vote object (the replies, 0x005740e0), his
+			// map votes going to the server's votes as a client's would.
+			hosted->onRequestStored = [&squadRequests, &round](int team, int squad, int kind) {
+				if (round.commander(team) == round.localPlayer() && round.localPlayer() >= 0) {
+					squadRequests.received(team, squad, kind);
+				}
+			};
+			voteMessages.localPlayer = round.localPlayer();
+			voteMessages.playerName = [&round](int id) {
+				game::GameWorld::PlayerInfo p;
+				return round.playerInfo(id, p) ? p.name : std::string();
+			};
+			voteMessages.mapName = [&session](int map) {
+				if (session.admin && map >= 0 && map < session.admin->maps.count()) {
+					return session.admin->maps.entries()[static_cast<size_t>(map)].level;
+				}
+				return std::string();
+			};
+			hosted->onVoteReply = [&voteMessages](const game::Votes::Reply& r) {
+				dice::hfe::menu::VoteMessages::Event v;
+				v.target = r.target;
+				v.choice = r.choice;
+				v.needed = r.needed;
+				v.voter = r.voter;
+				v.phase = r.phase;
+				v.kind = r.kind;
+				v.seconds = r.seconds;
+				voteMessages.handle(v);
+			};
+			mapVote.onVote = [&voteMessages, hosted, &round](int map) {
+				if (voteMessages.mayStart(1, map, false)) {
+					hosted->localVote(round.localPlayer(), 1, 0, map, 0); // a map vote (0x00573df0, kind 1)
+				}
+			};
+		}
 		// admin.* on this round (ServerAdmin.h): the players, kicks, and the
 		// map changes it asks for, which end the map at once.
 		bool serverNextMap = false;
@@ -4192,6 +4335,33 @@ int runGame(Options& options, Session& session)
 			bool fire = false;
 			int stance = 0;
 		} remoteLook;
+		// What the HUD shows (HudWorld.h): this round, or the server's game.
+		host::LocalHudWorld localHud(round, gameLogic);
+		std::optional<host::RemoteHudWorld> remoteHud;
+		if (session.client) {
+			remoteHud.emplace(session.client->world(), round, ghostObjects);
+			remoteHud->ownLook = [&ownFeet, &remoteLook, &session](physics::Vec3& feet, float& yaw, float& pitch) {
+				if (!session.client || !session.client->world().hasControlObject() || !remoteLook.started) {
+					return false;
+				}
+				const net::Vec3f f = ownFeet();
+				feet = {f.x, f.y, f.z};
+				yaw = remoteLook.yaw;
+				pitch = remoteLook.pitch;
+				return true;
+			};
+		}
+		const auto hudWorld = [&]() -> const host::HudWorld& {
+			if (session.client && remoteHud) {
+				return *remoteHud;
+			}
+			return localHud;
+		};
+		struct HudWorldHook {
+			~HudWorldHook() { g_hudWorld = nullptr; g_remoteHud = nullptr; }
+		} hudWorldHook;
+		g_hudWorld = &localHud;
+		g_remoteHud = remoteHud ? &*remoteHud : nullptr;
 		// A joined game's soldier for the first-person view.
 		if (session.client) {
 			playerCamera.setRemote([&session, &ghostObjects, &objects, &templates, &remoteLook, &ownFeet, &prediction](
@@ -4471,6 +4641,18 @@ int runGame(Options& options, Session& session)
 						killer && killer->team == victim->team, speakerOf(killer));
 				}
 			}
+			// The squads' requests (0x004c5720's messages): 2/0x1e to the
+			// leader that asked (his line; the radio to the commander isn't
+			// played on a client yet), 2/0x1d to the commander (the squad
+			// and the kind: 0x007c8f10's line; the tools' states aren't
+			// networked, so it always shows).
+			for (const net::PostRemoteInfo& message : client.world().takeMessages()) {
+				if (message.category == 2 && message.id == 0x1e && squadRequests.onPersonal) {
+					squadRequests.onPersonal(localization.text("HUD_HUD_SQUAD_REQUEST_TO_COMMANDER"));
+				} else if (message.category == 2 && message.id == 0x1d && squadRequests.onInfo) {
+					squadRequests.onInfo(squadRequests.receivedLine(message.payloadInt(0), message.payloadInt(1)));
+				}
+			}
 			// Voice chat: the server's voice settings (data block 0), its
 			// VoipSession and mute events (not used by the world), our squad.
 			// The server's Vote events (0x005740e0): target, choice, yes,
@@ -4642,6 +4824,7 @@ int runGame(Options& options, Session& session)
 			remoteStep();
 			if (hosted) {
 				hosted->tick();
+				voteMessages.tick(1.0f / 30.0f); // the host's own vote object
 			}
 			bots.update(1.0f / 30.0f);
 			round.localMuzzleEffects = !playerCamera.insideView();
@@ -4660,6 +4843,7 @@ int runGame(Options& options, Session& session)
 			remoteStep();
 			if (hosted) {
 				hosted->tick();
+				voteMessages.tick(1.0f / 30.0f); // the host's own vote object
 			}
 			bots.update(1.0f / 30.0f);
 			round.localMuzzleEffects = !playerCamera.insideView();
@@ -5327,50 +5511,19 @@ int runGame(Options& options, Session& session)
 				}
 				dice::hfe::menu::updateVoipList(hudManager, talking, sending, commanding);
 			}
-			if (session.client && scoreboardHeld) {
-				// A joined game's scoreboard: the server's players, with their voice boxes.
-				const net::RemoteWorld& world = session.client->world();
-				const net::RemotePlayer* me = world.player(world.localPlayer());
-				const int friendly = me ? me->team : 1;
-				for (int side = 0; side < 2; ++side) {
-					const int team = side == 0 ? friendly : 3 - friendly;
-					std::vector<net::RemotePlayer> players;
-					for (const net::RemotePlayer& p : world.playerList()) {
-						if (p.team == team) {
-							players.push_back(p);
-						}
-					}
-					std::stable_sort(players.begin(), players.end(), [](const auto& a, const auto& b) { return a.score > b.score; });
-					std::vector<std::vector<std::string>> rows;
-					std::vector<std::array<float, 4>> colors, backgrounds;
-					for (const net::RemotePlayer& p : players) {
-						dice::hfe::menu::ScoreboardRow look;
-						look.alive = p.alive;
-						look.friendlyList = side == 0;
-						look.local = p.local;
-						look.sameSquad = me && me->squad > 0 && p.squad == me->squad;
-						look.localCommands = me && me->commander;
-						const dice::hfe::menu::ScoreboardStyle style = dice::hfe::menu::scoreboardStyle(look, static_cast<int>(colors.size()));
-						colors.push_back(style.text);
-						backgrounds.push_back(style.background);
-						const bool muted = session.voice && session.voice->client().muted(p.id);
-						const bool talking = session.voice && session.voice->client().talking(p.id);
-						const auto f1 = [](const std::string& text) { return "\xa7" "1" + text + "\xa7" "0"; };
-						rows.push_back({f1(p.name), f1(std::to_string(p.score)), f1(std::to_string(p.teamwork)),
-							f1(std::to_string(p.kills)), f1(std::to_string(p.deaths)),
-							f1(p.ai ? "BOT" : std::to_string(std::max(p.ping, 0))),
-							p.local || p.ai ? ""
-								: muted ? "Ingame/Scoreboard/Icons/checkbox_voipMute.tga"
-								: talking ? "Ingame/Scoreboard/Icons/checkbox_voipTalk.tga"
-										  : "Ingame/Scoreboard/Icons/checkbox_voipInactive.tga",
-							std::to_string(p.id)});
-					}
-					hudManager.setList(side == 0 ? 2 : 1, std::move(rows));
-					hudManager.setListRowColors(side == 0 ? 2 : 1, std::move(colors));
-					hudManager.setListRowBackgrounds(side == 0 ? 2 : 1, std::move(backgrounds));
-				}
+			// A joined game's scoreboard has the players' voice boxes.
+			g_scoreboardVoice = nullptr;
+			if (session.client && session.voice) {
+				g_scoreboardVoice = [&session](int id) -> std::string {
+					const bool muted = session.voice->client().muted(id);
+					const bool talking = session.voice->client().talking(id);
+					return muted ? "Ingame/Scoreboard/Icons/checkbox_voipMute.tga"
+						: talking ? "Ingame/Scoreboard/Icons/checkbox_voipTalk.tga"
+								  : "Ingame/Scoreboard/Icons/checkbox_voipInactive.tga";
+				};
 			}
-			updateHud(hudManager, round, gameLogic, scoreboardHeld, scoreOf, commanderScreen);
+			localHud.scoreOf = scoreOf;
+			updateHud(hudManager, hudWorld(), round, gameLogic, scoreboardHeld, commanderScreen);
 			{
 				// The vehicle's warnings: the seekers locked on it (their
 				// seek's target type; chasing once past the tracking delay).
@@ -5558,8 +5711,13 @@ int runGame(Options& options, Session& session)
 			commanderMenu.update(round.localPlayer());
 			squadRequests.localPlayer = round.localPlayer();
 			squadRequests.tick(seconds);
-			dice::hfe::menu::updateSquadInfo(hudManager, round, round.localPlayer(), commanderScreen,
-				[&localization](const std::string& id) { return localization.text(id); });
+			{
+				game::GameWorld::PlayerInfo me;
+				const host::HudWorld& shown = hudWorld();
+				const bool known = shown.playerInfo(shown.localPlayer(), me);
+				dice::hfe::menu::updateSquadInfo(hudManager, known, me.commander, me.squad, me.squadLeader, commanderScreen,
+					[&localization](const std::string& id) { return localization.text(id); });
+			}
 			{
 				// The minimap's UAV (0x00788600): its time run out or its
 				// asset gone, the local player hears "uav_offline" (game
@@ -5879,6 +6037,9 @@ int runGame(Options& options, Session& session)
 				if (session.client && point >= 0) {
 					session.client->selectKit(0);
 					session.client->selectSpawnGroup(point);
+					if (g_remoteHud) {
+						g_remoteHud->chosenSpawn = point; // the spawn screen's selected icon
+					}
 				} else if (session.client && !session.client->world().hasControlObject()) {
 					// The client's own round has no control points (they are
 					// the server's ghosts): a click asks for any spawn point.
@@ -6192,6 +6353,18 @@ int runGame(Options& options, Session& session)
 			// screen open.
 			round.setCommanderEnabled(true);
 			commanderScreen = round.setCommander(round.playerTeam() == 1 ? 1 : 2, round.localPlayer());
+		}
+		if (options.spawnScreen && session.client && session.client->world().hasControlObject()) {
+			// A joined game: ask the server to die (6/0xc) and wait for it
+			// (the player's networkable turns dead), as long as two seconds.
+			session.client->suicide();
+			for (int i = 0; i < 60 && session.client; ++i) {
+				step();
+				const net::RemotePlayer* me = session.client ? session.client->world().player(session.client->world().localPlayer()) : nullptr;
+				if (me && !me->alive && i >= 30) {
+					break;
+				}
+			}
 		}
 		if (options.spawnScreen && round.player()) {
 			// Die (and pick the first point to spawn at) to show the spawn screen.

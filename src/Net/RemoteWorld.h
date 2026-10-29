@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -337,6 +338,22 @@ public:
 	std::vector<GameEvent> takeUnhandled() { return std::exchange(m_unhandled, {}); }
 	std::vector<KickInfo> takeKicks() { return std::exchange(m_kicks, {}); }
 
+	// The teams' networkable (ghost kTeamStateGhost, Networkables.h): each
+	// bit's values as last sent; tickets(team) -1 before the server sent them.
+	const TeamNetState& teamState() const { return m_teamState; }
+	int tickets(int team) const { return m_teamState.tickets(team); }
+	// The spawn groups the server offers (CreateSpawnGroup / RemoveSpawnGroup), by id.
+	const std::map<int, SpawnGroupInfo>& spawnGroups() const { return m_spawnGroups; }
+	// The squads' requests to their commander (IssueSquadOrder with store 2,
+	// kept one a kind per squad as the squad's record does, 0x004c3f20;
+	// SetAcceptOrder for store 2 takes one off). team 0: every team's.
+	struct SquadRequest {
+		int team = 0, squad = 0, kind = 0;
+		uint16_t object = 0;
+		Vec3f point;
+	};
+	std::vector<SquadRequest> squadRequests(int team = 0) const;
+
 	// The local player's input, sent with each tick by the GameClient.
 	void setInput(const PlayerInput& input) { m_input = input; }
 	const PlayerInput& input() const { return m_input; }
@@ -398,6 +415,9 @@ private:
 	std::vector<GameEvent> m_unhandled;
 	std::vector<KickInfo> m_kicks;
 	PlayerInput m_input;
+	TeamNetState m_teamState;
+	std::map<int, SpawnGroupInfo> m_spawnGroups;
+	std::map<std::pair<int, int>, std::array<std::optional<SquadRequest>, 4>> m_requests; // (team, squad)
 };
 
 } // namespace dice::hfe::net
