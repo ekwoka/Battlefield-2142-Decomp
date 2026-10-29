@@ -28,6 +28,7 @@ class FileManager;
 }
 namespace world {
 class ObjectManager;
+class ObjectTemplate;
 }
 namespace game {
 class GameWorld;
@@ -82,6 +83,51 @@ Colour playerTagColour(const PlayerTagInput& in);
 // The rounded distance shown (0x100f0be0 / 0x100ef120): kept until it
 // changes by more than 0 / 2 / 5 / 9 m below 25 / 250 / 400 m / beyond.
 int shownDistance(int shown, float distance);
+
+// The player's own icon (tag +0x60, 0x100f0310): a squad leader's
+// ICObject + 25 + his squad, the commander's ICObject + 25, everyone else
+// ICObject + 10 (0x5a; a vehicle's too: the vehicle's own pick, its HUD
+// type, isn't traced).
+int playerIconId(bool squadLeader, int squad, bool commander);
+
+// What a kit lets its carrier answer (the HUD manager's slot 0xac -> +0x74
+// slot 0x38: [0] heal and revive, [1] repair, [2] ammunition); by the
+// kit's kitType here (Assault, Engineer, Support).
+struct Abilities {
+	bool heal = false, repair = false, ammo = false;
+};
+Abilities kitAbilities(const std::string& kitType);
+
+// The radio calls (the NametagManager's events 0x33..0x37, 0x100f19c0):
+// 0x33 medic, 0x34 ammunition, 0x35 repair, 0x36 / 0x37 revive. A call
+// from another player within maxCallDistance (150 m) whom the local
+// player's kit can answer puts the call's icon on the caller's tag
+// (ICMedic 0x2d, ICAmmo 0x2f, ICRepair 0x2e, ICRevive 0x2c) for 12 s (30 s
+// for a revive, DAT_101f6740), in the highlight colour, shown off screen
+// too; the local player's own call starts a 12 s timer (DAT_10211290 /
+// 98 / a0) during which those who can answer it show that icon.
+enum CallCode { CallMedic = 0x33, CallAmmo = 0x34, CallRepair = 0x35, CallRevive = 0x36 };
+struct CallTimers {
+	float medic = 0, ammo = 0, repair = 0; // the local player's own (0x10211290, 0x10211298, 0x102112a0)
+	void tick(float seconds);
+};
+// The icon a player's tag shows for the local player's own call (0x100f0310's
+// first branch): -1 none.
+int helperIcon(const CallTimers& timers, const Abilities& helper);
+// A call's icon on the caller's tag and its time (0x100f19c0's switch); -1
+// when the local player can't answer it.
+int callIcon(int code, const Abilities& local, float& seconds);
+// The rank and veteran icons on the name's line (0x100f0840: tag +0x50
+// ICRank + the stats' rank, player slot 0x1a8 +0x20; +0x54 ICVeteran 0x4f
+// when the player's slot 0x3ac, +0x402, says so: the online profile's
+// "Ent-3" entitlement, 0x0045c8a0 / 0x00513e70, never offline). The
+// renderer (0x1016b100) copies them into the tag's text row left of the
+// name, each advancing by its width, then 2 pixels, the row centred; in
+// white (the squad's colour for a squad member).
+struct NameRow {
+	int rankIcon = -1, veteranIcon = -1;
+};
+NameRow nameRow(int rank, bool veteran);
 
 // The BF1942.font bitmap font the tags are written in ("Fonts/BF1942.font":
 // a header, then "<char> <x0> <y> <x1>" cells of Height rows).
@@ -154,8 +200,15 @@ public:
 	const Settings& settings() const { return m_settings; }
 	// The icons nametags.con made (the objects' 3D icons draw with them).
 	void setIcons(const IconRegistry* icons) { m_icons = icons; }
-	// The camera inside a Titan (the objects' showInside / showOutside).
+	// The camera inside a Titan (the objects' showInside / showOutside;
+	// RendDX9's object drawer slot 0x40, which the manager's frame reads,
+	// 0x100f3490).
 	void setInsideTitan(bool inside) { m_insideTitan = inside; }
+	// A radio call heard (see CallCode); `local` for the local player's own.
+	void radioCall(int caller, int code, bool local);
+	// The tag the crosshair selects now (0x100f16c0: the selectable tag
+	// nearest the screen's centre within 0.08), its object; 0 none.
+	uint32_t selected() const { return m_selectedObject; }
 
 	// A point in the 800 x 600 screen; false behind the camera. With
 	// `glue`, a point off the circle of radius circleRadius (normalised
@@ -169,7 +222,38 @@ private:
 		int distance = -1;
 		float aimCheck = 0; // until the next look (0.25 s)
 		bool aimed = false;
+		int callIcon = -1;  // +0x64
+		float callTime = 0; // +0x6c
 	};
+	// A template's Nametag component (its flags, component +0x30 → the
+	// tag's +0xb8: showItem 1, showIcon 2, showName 4, showDistance 8,
+	// show3dIcon 0x10, glueToEdge 0x20, teamSpecific 0x200,
+	// inverseTeamSpecific 0x400, showIconOnTracker 0x4000, showInside
+	// 0x40000, showOutside 0x80000, selectable 0x100000, useTeamColor
+	// 0x200000, useAliveArmor 0x1000000; the write-back 0x0063xxxx),
+	// read once per template.
+	struct TagTemplate {
+		bool controlPoint = false;
+		bool showItem = false, show3dIcon = false, showDistance = false, glue = false;
+		bool teamSpecific = false, inverse = false, tracker = false, showInside = false, showOutside = true;
+		bool selectable = false, useTeamColor = false, useAliveArmor = false;
+		int icon = -1, selectedIcon = -1; // 3dMapIcon, selected3dMapIcon
+		float maxDistance = 1200, maxEnemyDistance = 1200;
+		std::array<float, 3> offset {};
+		bool tagged() const { return (controlPoint && showItem) || (!controlPoint && show3dIcon); }
+	};
+	const TagTemplate& tagTemplate(const world::ObjectTemplate* t);
+	std::map<const world::ObjectTemplate*, TagTemplate> m_templates;
+	std::vector<uint32_t> m_tagged; // the objects with tags, looked for once a second
+	float m_taggedCheck = 0;
+	CallTimers m_calls;
+	struct PendingCall {
+		int caller, code;
+		bool local;
+	};
+	std::vector<PendingCall> m_pendingCalls;
+	uint32_t m_selectedObject = 0;
+	float m_clock = 0; // the manager's +0x10 (the blink)
 	Settings m_settings;
 	const IconRegistry* m_icons = nullptr;
 	bool m_insideTitan = false;

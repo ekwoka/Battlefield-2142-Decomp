@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 // Sea water, after RaShaderWaterBase.fx's Water pixel shader (the PS_20
 // variant with USE_FRESNEL and USE_SPECULAR). The normal: in the 3D variants
 // (USE_3DTEXTURE) the volume Textures/watervolume.dds at
@@ -31,9 +32,11 @@ layout(set = 3, binding = 0) uniform Lighting {
 	vec4 sunDirection;
 	vec4 sunColor;
 	vec4 skyColor;
-	vec4 fogColor;
+	vec4 fogColor;     // rgb, w: the near term's floor (FogColor.w)
+	vec4 fogRange;     // RaCommon.fx FogRange (fog.glsl)
 	vec4 material;
 };
+#include "fog.glsl"
 
 layout(set = 3, binding = 1) uniform Water {
 	vec4 cameraPosition; // w: time in seconds
@@ -67,6 +70,6 @@ void main()
 	float fresnel = 1.5 - pow(abs(dot(normalize(lookup), vec3(0.0, 1.0, 0.0))), 30.0);
 	float depthAlpha = clamp(max(inWaterDepth, 0.0) * max(parameters.y, 0.08), 0.0, 1.0);
 	float alpha = clamp(depthAlpha * fresnel + parameters.x, 0.0, 1.0);
-	float fog = clamp(inDepth / fogColor.w, 0.0, 1.0);
-	outColor = vec4(mix(color, fogColor.rgb, fog * fog), alpha);
+	float fog = fogAmount(inDepth);
+	outColor = vec4(mix(color, fogColor.rgb, fog), alpha);
 }

@@ -39,6 +39,9 @@ layout(set = 2, binding = 1) uniform sampler2D lightMap;
 layout(set = 2, binding = 2) uniform sampler2D detailMap;
 layout(set = 2, binding = 3) uniform sampler2D dirtMap; // bundled and skinned meshes: their normal map
 layout(set = 2, binding = 4) uniform sampler2D crackMap;
+layout(set = 2, binding = 8) uniform sampler2D detailNormalMap; // static meshes: NDetail (alpha: the parallax height)
+layout(set = 2, binding = 9) uniform sampler2D crackNormalMap;  // static meshes: NCrack
+layout(set = 2, binding = 10) uniform samplerCube envMap;       // the level's nearest envmap
 #define SHADOW_UNIFORM_BINDING 1
 #define SHADOW_MAP_BINDING 5
 #define HEMI_MAP_BINDING 7
@@ -48,7 +51,8 @@ layout(set = 3, binding = 0) uniform Lighting {
 	vec4 sunDirection; // towards the sun
 	vec4 sunColor;
 	vec4 skyColor;
-	vec4 fogColor;     // w: fog end distance
+	vec4 fogColor;     // rgb, w: the near term's floor (FogColor.w)
+	vec4 fogRange;     // RaCommon.fx FogRange (fog.glsl)
 	vec4 material;     // x: alpha reference (0 = off), y: 1 with a lightmap,
 					   // z: layers (1 detail, 2 dirt, 4 crack) and the kind
 					   // (8 blended, 16 additive, 32 hemi-lit: bundled and
@@ -61,14 +65,16 @@ layout(set = 3, binding = 0) uniform Lighting {
 	vec4 lightCount;   // x: point lights in use
 	vec4 lightPosition[8]; // xyz, w: the range where it is gone
 	vec4 lightColor[8];    // rgb, w: the range it is full up to
-	vec4 lightSpot[8];     // a spot light's axis, w: the cosine it is gone
-						   // outside (below -1: a point light)
-	vec4 lightExtra[8];    // x: the cosine it is full inside, y: 1 when
-						   // it lights lightmapped surfaces too
+	vec4 lightSpot[8];     // a spot light's axis, w: its ConeAngle (radians;
+						   // below -1: a point light)
+	vec4 lightExtra[8];    // y: 1 when it lights lightmapped surfaces too
 	vec4 hemiObject;       // rgb: HemiMapConstantColor, w: HeightOverTerrain
 	vec4 eye;              // xyz: the camera, w: the specular kind (0 none)
 	vec4 specular;         // rgb: its colour, w: the static gloss
+	vec4 layerMaps;        // xy: ParallaxScaleBias's scale, z: 1 detail normal map,
+						   // 2 crack normal map, 4 parallax, 8 the envmap
 };
+#include "fog.glsl"
 
 // The specular term. Static meshes (RaShaderSTM.fx getSpecularPixelLighting):
 // pow(saturate(N.H), 32) x the lightmap's sun (g) x the gloss (StaticGloss,
@@ -97,6 +103,8 @@ vec3 specularTerm(vec3 normal, float sunVisible, float gloss)
 
 // A light's cone (1 for a point light) and whether it lights this surface
 // (affectLightmappedObjects 0 leaves lightmapped ones to their lightmaps).
+// The cone is SkinnedMesh.fx's: saturate(cos - (1 - c)) / c with c the
+// light's ConeAngle (coneAngle2 in radians, BF2142.exe 0x0064aad0).
 float lightCone(int i, vec3 fromLight)
 {
 	if (material.y > 0.5 && lightExtra[i].y < 0.5) {
@@ -105,8 +113,8 @@ float lightCone(int i, vec3 fromLight)
 	if (lightSpot[i].w < -1.0) {
 		return 1.0;
 	}
-	float c = dot(fromLight, lightSpot[i].xyz);
-	return smoothstep(lightSpot[i].w, max(lightExtra[i].x, lightSpot[i].w + 1e-3), c);
+	float c = max(lightSpot[i].w, 1e-3);
+	return clamp(dot(fromLight, lightSpot[i].xyz) - (1.0 - c), 0.0, 1.0) / c;
 }
 
 layout(location = 0) out vec4 outColor;
@@ -131,35 +139,53 @@ void main()
 	vec2 atlasScale = uvOffset.z > 0.0 ? uvOffset.zw : vec2(1.0);
 	vec4 albedo = texture(diffuseMap, inTexCoord * atlasScale + uvOffset.xy) * tint;
 	int layers = int(material.z + 0.5);
+	int extra = int(layerMaps.z + 0.5);
 	float fade = material.w > 0.0 ? material.w : 1.0;
-	float fog = clamp(inDepth / fogColor.w, 0.0, 1.0);
+	float fog = fogAmount(inDepth);
 	if ((layers & 16) != 0) {
-		outColor = vec4(mix(albedo.rgb, fogColor.rgb, fog * fog), albedo.a * fade);
+		outColor = vec4(mix(albedo.rgb, fogColor.rgb, fog), albedo.a * fade);
 		return;
 	}
+	vec3 normal = normalize(inNormal);
+	vec3 toEye = normalize(eye.xyz - inWorldPosition);
+	// A static mesh's per-pixel path (RaShaderSTM PERPIXEL: NDetail, NCrack,
+	// parallax): the eye in the tangent frame (mesh.vert's basis).
+	bool perPixel = (extra & 7) != 0;
+	vec3 tangentEye = normalize(vec3(dot(toEye, inBasisX), dot(toEye, inBasisY), dot(toEye, inBasisZ)));
+	vec2 detailCoord = inDetailCoord;
+	if ((extra & 4) != 0) {
+		// calculateParallaxCoordinatesFromAlpha: the normal map's alpha
+		// times the scale, less half of it, along the eye's (x, -y).
+		vec2 height = texture(detailNormalMap, inDetailCoord).aa * layerMaps.xy - 0.5 * layerMaps.xy;
+		detailCoord = inDetailCoord + height * tangentEye.xy * vec2(1.0, -1.0);
+	}
+	vec4 detail = vec4(1.0);
 	if ((layers & 1) != 0) {
-		albedo *= texture(detailMap, inDetailCoord);
+		detail = texture(detailMap, detailCoord);
+		albedo *= detail;
 	}
 	if ((layers & 2) != 0) {
 		albedo.rgb *= texture(dirtMap, inDirtCoord).rgb;
 	}
+	vec4 crack = vec4(0.0);
 	if ((layers & 4) != 0) {
-		vec4 crack = texture(crackMap, inCrackCoord);
+		crack = texture(crackMap, inCrackCoord);
 		albedo.rgb = albedo.rgb * (1.0 - crack.a) + crack.rgb * crack.a;
 	}
 	if (material.x > 0.0 && albedo.a < material.x) {
 		discard;
 	}
-	vec3 normal = normalize(inNormal);
 	int kind = int(eye.w + 0.5);
 	float gloss = kind == 4 ? albedo.a : specular.w;
 	if (kind == 2) {
-		gloss = (layers & 1) != 0 ? texture(detailMap, inDetailCoord).a : specular.w;
+		gloss = (layers & 1) != 0 ? detail.a : specular.w;
 	}
 	// A normal map (RaShaderBM/SM ps: tex * 2 - 1, renormalised) turns the
 	// per-pixel lighting's normal; its alpha is the gloss unless the colour
-	// map's is (ColormapGloss).
+	// map's is (ColormapGloss). A static mesh's (getCompositeNormals): the
+	// detail normal map, the crack normal map over it by the crack's alpha.
 	vec3 lit = normal;
+	vec3 tangentNormal = vec3(0.0, 0.0, 1.0);
 	if ((layers & 64) != 0) {
 		vec4 bump = texture(dirtMap, inTexCoord * atlasScale + uvOffset.xy);
 		vec3 n = normalize(bump.xyz * 2.0 - 1.0);
@@ -167,6 +193,19 @@ void main()
 		if (kind != 4) {
 			gloss = bump.a;
 		}
+	} else if (perPixel) {
+		vec3 n = texture(detailNormalMap, detailCoord).rgb;
+		if ((extra & 2) != 0) {
+			n = mix(n, texture(crackNormalMap, inCrackCoord).rgb, crack.a);
+		}
+		tangentNormal = normalize(n * 2.0 - 1.0);
+		lit = normalize(inBasisX * tangentNormal.x + inBasisY * tangentNormal.y + inBasisZ * tangentNormal.z);
+	}
+	// RaShaderBM _HASENVMAP_: the colour towards the envmap's reflection by
+	// a quarter of the gloss, before the lighting.
+	bool envMapped = (extra & 8) != 0;
+	if (envMapped && (kind == 3 || kind == 4)) {
+		albedo.rgb = mix(albedo.rgb, texture(envMap, reflect(-toEye, normal)).rgb, gloss / 4.0);
 	}
 	vec3 sun = sunColor.rgb * max(dot(lit, sunDirection.xyz), 0.0);
 	vec3 light;
@@ -175,7 +214,10 @@ void main()
 	if (material.y > 0.0) {
 		vec4 lightmap = texture(lightMap, inLightmapCoord);
 		float sunVisible = lightmap.g * shadowFactor(inWorldPosition, false);
-		light = 2.0 * (0.52 * lightmap.b * skyColor.rgb + sun * sunVisible);
+		// getDiffusePixelLighting: the sky by the bumped normal against
+		// skyNormal (0.78, 0.52, 0.65) in the tangent frame.
+		float skyShare = perPixel ? dot(tangentNormal, vec3(0.78, 0.52, 0.65)) : 0.52;
+		light = 2.0 * (skyShare * lightmap.b * skyColor.rgb + sun * sunVisible);
 		shine = specularTerm(lit, sunVisible, gloss);
 	} else {
 		// Bundled and skinned meshes (32) take the hemi map (RaShaderBM/SM's
@@ -190,5 +232,15 @@ void main()
 	}
 	light += pointLights(lit);
 	float alpha = (layers & 8) != 0 ? albedo.a * fade : material.w > 0.0 ? material.w : albedo.a;
-	outColor = vec4(mix(albedo.rgb * light + shine, fogColor.rgb, fog * fog), alpha);
+	vec3 color = albedo.rgb * light + shine;
+	// RaShaderSTM's envmap, after the lighting: per pixel towards the cube
+	// at the reflection of the eye off the bumped normal by (1 -
+	// saturate(0.95 (E.N)^2)) x the gloss; per vertex by gloss x 2 x (1 -
+	// |E.N|) (unclamped, as the shader's lerp).
+	if (envMapped && (kind == 1 || kind == 2)) {
+		float en = dot(toEye, lit);
+		float share = perPixel ? (1.0 - clamp(en * en * 0.95, 0.0, 1.0)) * gloss : gloss * 2.0 * (1.0 - abs(en));
+		color = mix(color, texture(envMap, reflect(-toEye, lit)).rgb, share);
+	}
+	outColor = vec4(mix(color, fogColor.rgb, fog), alpha);
 }

@@ -199,4 +199,27 @@ struct ScoreboardStyle {
 };
 ScoreboardStyle scoreboardStyle(const ScoreboardRow& row, int rowIndex);
 
+// The scoreboard by squads (the "Squads" tab, scoreboard.setToggleShow 1):
+// 0x007bad00's commander header ("HUD_HUD_MENU_COMMANDER_HEADING", no
+// totals) and the commander, then per squad 0x007baed0's header row (the
+// squad's number and name, squad 0 "HUD_TEXT_MENU_SPAWN_SQUAD_UNASSIGNED"
+// last) whose cells 0x007ba570 fills with the squad's score, teamwork,
+// kills and deaths and its average ping, then its members by score. The
+// headers' text (0.5, 0.5, 0.5) (DAT_00a0bc60), the local player's squad's
+// (0.141, 0.502, 0.259) (DAT_00a0bba0), over (0.843, 0.847, 0.847, 0.9)
+// (DAT_00a0bc40, alpha 0x3f666666).
+struct ScoreboardMember {
+	int index = 0;   // into the caller's rows (sorted by score)
+	int squad = 0;
+	bool commander = false;
+	int score = 0, teamwork = 0, kills = 0, deaths = 0, ping = 0;
+};
+struct ScoreboardLine {
+	int member = -1;      // a member's index, or -1 for a header
+	int squad = 0;        // a header's squad (-1 the commander's)
+	int score = 0, teamwork = 0, kills = 0, deaths = 0, ping = 0; // a squad header's totals
+	bool totals = false;  // the cells carry them (not the commander's)
+};
+std::vector<ScoreboardLine> scoreboardBySquad(const std::vector<ScoreboardMember>& members);
+
 } // namespace dice::hfe::menu

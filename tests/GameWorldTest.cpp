@@ -2133,3 +2133,173 @@ TEST(GameWorld_RestrictedExit)
 		}
 	}
 }
+
+namespace {
+
+// A jeep (a 2 m box) at 0/1/3 with a restricted exit 3 m to its left, the
+// local player spawned beside it; `use` presses c_PIUse for a tick.
+struct ExitRange : Range {
+	world::ObjectTemplate* jeep = nullptr;
+	uint32_t id = 0;
+	ExitRange()
+	{
+		collisionTemplates.add("jeep_mesh", boxMesh(1));
+		collisionTemplates.add("plate_mesh", boxMesh(1));
+		templates.registerType(20, "PlayerControlObject");
+		templates.registerType(21, "SimpleObject");
+		templates.registerType(23, "Engine");
+		templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
+		jeep = templates.create("PlayerControlObject", "jeep");
+		makeMobile(*jeep, "jeep_mesh");
+		jeep->children().push_back({"jeep_engine", {}, {}});
+		jeep->settings()["soldierExitLocation"] = "-3/0/0";
+		jeep->settings()["hasRestrictedExit"] = "1";
+	}
+	void use()
+	{
+		game::SoldierInput press;
+		press.use = true;
+		world->setPlayerInput(press);
+		world->tick(1 / 30.0f);
+		world->setPlayerInput({});
+		world->tick(1 / 30.0f);
+	}
+	game::GameWorld::PlayerInfo me()
+	{
+		game::GameWorld::PlayerInfo info;
+		world->playerInfo(world->localPlayer(), info);
+		return info;
+	}
+};
+
+} // namespace
+
+// The restricted exit's place must hold a standing soldier (interface
+// 0xc4d7 slot 0x14 -> 0x00585d00 -> physics::soldierFits): a slab 0.5 m
+// over the left place leaves the way to it clear but no room to stand, so
+// the soldier leaves by the mirrored place.
+TEST(GameWorld_RestrictedExitNeedsRoomToStand)
+{
+	for (int slab = 0; slab < 2; ++slab) {
+		ExitRange range;
+		world::ObjectTemplate* plate = range.templates.create("SimpleObject", "plate");
+		plate->settings()["collisionMesh"] = "plate_mesh";
+		if (slab) {
+			range.objects.create(plate, {-3, 3.0f, 3}); // its bottom at 2 m, the place at 1.5
+		}
+		range.id = range.objects.create(range.jeep, {0, 1, 3})->id();
+		range.world->startRound();
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		range.world->tick(1 / 30.0f);
+		range.use();
+		CHECK(range.me().vehicle == range.id);
+		range.use();
+		const auto me = range.me();
+		std::fprintf(stderr, "  slab %d: %s at x %.2f\n", slab, me.vehicle ? "still in" : "out", me.position.x);
+		CHECK(me.vehicle == 0);
+		CHECK(slab ? me.position.x > 2.5f : me.position.x < -2.5f);
+	}
+}
+
+// dontClearTeamOnExit (template +0x34f, 0x005c95b0): the empty vehicle
+// keeps the team of the soldier who left; without it, it goes back to its
+// own (the default team, here neutral).
+TEST(GameWorld_DontClearTeamOnExit)
+{
+	for (int keep = 0; keep < 2; ++keep) {
+		ExitRange range;
+		range.jeep->settings()["hasRestrictedExit"] = "0";
+		range.jeep->settings()["dontClearTeamOnExit"] = keep ? "1" : "0";
+		range.id = range.objects.create(range.jeep, {0, 1, 3})->id();
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		range.world->tick(1 / 30.0f);
+		range.use();
+		CHECK(range.me().vehicle == range.id && range.objects.find(range.id)->team() == 2);
+		range.use();
+		range.world->tick(1 / 30.0f);
+		CHECK(range.me().vehicle == 0);
+		CHECK(range.objects.find(range.id)->team() == (keep ? 2 : 0));
+	}
+}
+
+// The help manager's reach tests (0x00646cb0 cases 0x43 and 0x47): a
+// vehicle whose entry reaches the soldier on foot (not once he sits in it).
+TEST(GameWorld_VehicleInReachForTheHelp)
+{
+	ExitRange range;
+	range.id = range.objects.create(range.jeep, {0, 1, 3})->id();
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	range.world->tick(1 / 30.0f);
+	const int me = range.world->localPlayer();
+	CHECK(range.world->vehicleInReach(me));
+	CHECK(!range.world->ladderInReach(me));
+	range.use();
+	CHECK(range.me().vehicle == range.id);
+	CHECK(!range.world->vehicleInReach(me));
+}
+
+// The wreck (0x00652380): timeToStayAsWreck (20 by default) drains its
+// armour to -wreckHitPoints; with the AI running three times as fast, so a
+// 3 s wreck goes after 1 s.
+TEST(GameWorld_WreckDrainsFasterWithBots)
+{
+	for (int ai = 0; ai < 2; ++ai) {
+		ExitRange range;
+		range.jeep->settings()["armor.maxHitPoints"] = "100";
+		range.jeep->settings()["armor.wreckHitPoints"] = "50";
+		range.jeep->settings()["armor.timeToStayAsWreck"] = "3";
+		range.world->setAiRunning(ai != 0);
+		range.id = range.objects.create(range.jeep, {0, 1, 40})->id();
+		range.world->tick(1 / 30.0f);
+		range.world->applyDamage(range.id, 1000, -1);
+		int ticks = 0;
+		while (range.objects.find(range.id) && ticks < 200) {
+			range.world->tick(1 / 30.0f);
+			++ticks;
+		}
+		std::fprintf(stderr, "  ai %d: the wreck went after %d ticks\n", ai, ticks);
+		CHECK(ai ? (ticks >= 29 && ticks <= 32) : (ticks >= 89 && ticks <= 92));
+	}
+}
+
+// A spectacular death: destroyOnSpectacularDeath (+0x165) removes the
+// vehicle at its armour's next update with the level's effects, no wreck;
+// hideChildrenOnSpectacularDeath (+0x164) keeps the wreck but hides every
+// mesh part after the first (0x00651c60: zero matrices).
+TEST(GameWorld_SpectacularDeathDestroysOrHides)
+{
+	for (int mode = 0; mode < 2; ++mode) {
+		ExitRange range;
+		range.templates.registerType(24, "GenericProjectile");
+		range.jeep->settings()["armor.maxHitPoints"] = "100";
+		range.jeep->settings()["armor.timeToStayAsWreck"] = "10";
+		range.jeep->settings()[mode ? "armor.hideChildrenOnSpectacularDeath" : "armor.destroyOnSpectacularDeath"] = "1";
+		world::ObjectTemplate* blast = range.templates.create("GenericProjectile", "shell");
+		blast->components().push_back("DefaultDetonationComp");
+		blast->settings()["detonation.explosionDamage"] = "500";
+		blast->settings()["detonation.explosionRadius"] = "10";
+		blast->settings()["detonation.explosionMaterial"] = "0";
+		world::ObjectTemplate* filler = range.templates.create("SimpleObject", "filler");
+		for (int i = 0; i < 20; ++i) {
+			const uint32_t next = range.objects.create(filler, {500, 0, 500})->id() + 1;
+			if (game::GameWorld::spectacularHit(next, 100, -100, 100)) {
+				break;
+			}
+		}
+		range.id = range.objects.create(range.jeep, {0, 1, 40})->id();
+		range.world->tick(1 / 30.0f);
+		const int me = range.world->addPlayer("Me", 2, false);
+		std::vector<anim::Matrix> parts(3, anim::Matrix {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});
+		CHECK(!range.world->partTransforms(range.id, parts));
+		CHECK(range.world->detonate("shell", {0, 1, 41}, me));
+		range.world->tick(1 / 30.0f);
+		range.world->tick(1 / 30.0f);
+		if (mode == 0) {
+			CHECK(!range.objects.find(range.id)); // gone at once
+		} else {
+			CHECK(range.objects.find(range.id) != nullptr); // a wreck
+			CHECK(range.world->partTransforms(range.id, parts));
+			CHECK(parts[0][0] == 1 && parts[1] == anim::Matrix {} && parts[2] == anim::Matrix {});
+		}
+	}
+}

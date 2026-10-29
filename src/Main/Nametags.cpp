@@ -229,6 +229,70 @@ void TagFont::write(const std::string& text, float x, float y, const float colou
 	}
 }
 
+int playerIconId(bool squadLeader, int squad, bool commander)
+{
+	// 0x100f0310: slot 0x150 (leads a squad) ICObject 0x69 + the squad
+	// (slot 0x120), slot 0x128 (commands) 0x69, else 0x5a.
+	if (squadLeader) {
+		return 0x69 + squad;
+	}
+	return commander ? 0x69 : 0x5a;
+}
+
+Abilities kitAbilities(const std::string& kitType)
+{
+	Abilities a;
+	a.heal = kitType == "Assault";
+	a.repair = kitType == "Engineer";
+	a.ammo = kitType == "Support";
+	return a;
+}
+
+void CallTimers::tick(float seconds)
+{
+	// 0x100f3490: each counts down to 0.
+	medic = std::max(0.0f, medic - seconds);
+	ammo = std::max(0.0f, ammo - seconds);
+	repair = std::max(0.0f, repair - seconds);
+}
+
+int helperIcon(const CallTimers& t, const Abilities& helper)
+{
+	if (t.medic > 0 && helper.heal) {
+		return 0x2d; // ICMedic
+	}
+	if (t.repair > 0 && helper.repair) {
+		return 0x2e; // ICRepair
+	}
+	if (t.ammo > 0 && helper.ammo) {
+		return 0x2f; // ICAmmo
+	}
+	return -1;
+}
+
+int callIcon(int code, const Abilities& local, float& seconds)
+{
+	seconds = 12; // DAT_101f6740
+	switch (code) {
+	case CallMedic: return local.heal ? 0x2d : -1;
+	case CallAmmo: return local.ammo ? 0x2f : -1;
+	case CallRepair: return local.repair ? 0x2e : -1;
+	case CallRevive:
+	case CallRevive + 1:
+		seconds = 30; // 0x41f00000
+		return local.heal ? 0x2c : -1; // ICRevive
+	default: return -1;
+	}
+}
+
+NameRow nameRow(int rank, bool veteran)
+{
+	NameRow row;
+	row.rankIcon = rank >= 0 && rank < 44 ? rank : -1; // ICRank + rank (44 frames)
+	row.veteranIcon = veteran ? 0x4f : -1;
+	return row;
+}
+
 // --- The icon registry (nametags.con) ---
 
 int IconRegistry::idOf(const std::string& name)
@@ -369,6 +433,44 @@ bool Nametags::project(const View& view, const std::array<float, 3>& point, floa
 	return true;
 }
 
+const Nametags::TagTemplate& Nametags::tagTemplate(const world::ObjectTemplate* t)
+{
+	const auto known = m_templates.find(t);
+	if (known != m_templates.end()) {
+		return known->second;
+	}
+	TagTemplate tt;
+	if (t) {
+		const auto flag = [t](const char* name, bool otherwise) { return number(t, name, otherwise ? 1.0f : 0.0f) != 0; };
+		tt.controlPoint = t->typeName() == "ControlPoint";
+		tt.showItem = flag("Nametag.showItem", false);
+		tt.show3dIcon = flag("Nametag.show3dIcon", false);
+		tt.showDistance = flag("Nametag.showDistance", false);
+		tt.glue = flag("Nametag.glueToEdge", false);
+		tt.teamSpecific = flag("Nametag.teamSpecific", false);
+		tt.inverse = flag("Nametag.inverseTeamSpecific", false);
+		tt.tracker = flag("Nametag.showIconOnTracker", false);
+		tt.showInside = flag("Nametag.showInside", false);
+		tt.showOutside = flag("Nametag.showOutside", true);
+		tt.selectable = flag("Nametag.selectable", false);
+		tt.useTeamColor = flag("Nametag.useTeamColor", false);
+		tt.useAliveArmor = flag("Nametag.useAliveArmor", false);
+		tt.icon = static_cast<int>(number(t, "Nametag.3dMapIcon", -1));
+		tt.selectedIcon = static_cast<int>(number(t, "Nametag.selected3dMapIcon", -1));
+		tt.maxDistance = number(t, "Nametag.maxDistance", 1200);
+		tt.maxEnemyDistance = number(t, "Nametag.maxEnemyDistance", 1200);
+		if (const std::string* offset = setting(t, "Nametag.3dMapIconOffset")) {
+			std::sscanf(offset->c_str(), "%f/%f/%f", &tt.offset[0], &tt.offset[1], &tt.offset[2]);
+		}
+	}
+	return m_templates.emplace(t, tt).first->second;
+}
+
+void Nametags::radioCall(int caller, int code, bool local)
+{
+	m_pendingCalls.push_back({caller, code, local});
+}
+
 std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::ObjectManager& objects,
 	const View& view, float seconds)
 {
@@ -380,19 +482,56 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 	if (!world.playerInfo(world.localPlayer(), me)) {
 		return out;
 	}
+	// The manager's clock and the calls' timers (0x100f3490): the blink
+	// 0.5 - 0.5 cos(2 pi t) (DAT_10211288, the rate DAT_10212250 =
+	// 12 / 12 x 2 pi).
+	m_clock = std::fmod(m_clock + seconds, 1.0f);
+	const float blink = 0.5f - 0.5f * std::cos(m_clock * 6.2831855f);
+	m_calls.tick(seconds);
 	const Vec eye {view.position[0], view.position[1], view.position[2]};
 	const Vec forward = forwardOf(view);
 	const physics::Vec3 eyeP {eye.x, eye.y, eye.z};
-	const world::Object* myKit = me.kit ? objects.find(me.kit) : nullptr;
-	const std::string* kitType = setting(myKit ? myKit->objectTemplate() : nullptr, "kitType");
-	const bool localMedic = kitType && *kitType == "Assault";
-	const bool localEngineer = kitType && *kitType == "Engineer";
+	const auto kitTypeOf = [&](uint32_t kit) -> std::string {
+		const world::Object* o = kit ? objects.find(kit) : nullptr;
+		const std::string* type = setting(o ? o->objectTemplate() : nullptr, "kitType");
+		return type ? *type : std::string();
+	};
+	const std::string myKitType = kitTypeOf(me.kit);
+	const Abilities mine = kitAbilities(myKitType);
+	const bool localMedic = myKitType == "Assault";
+	const bool localEngineer = myKitType == "Engineer";
 	const std::vector<game::GameWorld::PlayerInfo> players = world.playerList();
 
-	// The tagged object's point (0x100efb90): a soldier's head along its
-	// up (standing: 0.6 m over its origin, more with distance), a
-	// vehicle's top (0.35 x its height + 0.45).
-	const auto headOf = [&](const game::GameWorld::PlayerInfo& p, float distance, std::array<float, 3>& at) {
+	// The calls heard (0x100f19c0): on the caller's tag within
+	// maxCallDistance when the local kit can answer; the local player's
+	// own start his timers.
+	for (const PendingCall& call : m_pendingCalls) {
+		if (call.local || call.caller == me.id) {
+			float& timer = call.code == CallAmmo ? m_calls.ammo : call.code == CallRepair ? m_calls.repair : m_calls.medic;
+			timer = 12;
+			continue;
+		}
+		const auto it = m_players.find(call.caller);
+		float time = 0;
+		const int icon = callIcon(call.code, mine, time);
+		if (icon < 0 || it == m_players.end() || it->second.distance < 0
+			|| static_cast<float>(it->second.distance) >= m_settings.maxCallDistance) {
+			continue;
+		}
+		Tag& tag = it->second;
+		if (call.code >= CallRevive || tag.callTime <= 0) {
+			tag.callTime = time;
+		}
+		tag.callIcon = icon;
+	}
+	m_pendingCalls.clear();
+
+	// The tagged object's points (0x100efb90): the text's at a soldier's
+	// head along its up (standing: 0.6 m over its origin, more with
+	// distance), a vehicle's top (0.35 x its height + 0.45); the icon's
+	// 0.6 m under the soldier's origin (the offset times 30 / d past
+	// 30 m), a vehicle's origin.
+	const auto headOf = [&](const game::GameWorld::PlayerInfo& p, float distance, std::array<float, 3>& at, std::array<float, 3>& icon) {
 		if (p.vehicle) {
 			const world::Object* v = objects.find(p.vehicle);
 			if (!v) {
@@ -404,12 +543,15 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			at = {v->position().x, v->position().y
 					+ m_settings.vehicleNametagOffsetFactor * kVehicleHeight + m_settings.vehicleNametagOffset,
 				v->position().z};
+			icon = {v->position().x, v->position().y, v->position().z};
 			return true;
 		}
 		// The soldier's origin taken 1 m over its feet (the original's
 		// soldier is placed by its body); pose 1 (standing) adds 0.6.
 		const float k = 0.6f + std::min(distance * 0.6f * 0.05f, 3.0f);
 		at = {p.position.x, p.position.y + 1.0f + k, p.position.z};
+		const float below = -0.6f * (distance > 30 ? 30 / distance : 1.0f);
+		icon = {p.position.x, p.position.y + 1.0f + below, p.position.z};
 		return true;
 	};
 
@@ -454,132 +596,162 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		std::vector<hud::HudQuad> quads;
 	};
 	std::vector<Drawn> drawn;
-
-	// The control points' icons (object tags, 0x100f1330 / 0x100ef960).
-	const std::vector<game::GameWorld::ControlPointInfo> points = world.controlPointList();
-	for (const auto& owned : objects.objects()) {
-		const world::ObjectTemplate* t = owned->objectTemplate();
-		if (!t || t->typeName() != "ControlPoint" || number(t, "Nametag.showItem", 0) == 0
-			|| owned->hidden()) {
-			continue;
+	// The selection (0x100f16c0): the selectable tag nearest the screen's
+	// centre within 0.08 (normalised device units); an object's shows its
+	// selected3dMapIcon (0x50 +, ICObjectFlagBackground 0x93 without one,
+	// 0x100f3ed0) under the icon in ColorArray's yellow (ColorIndex3 4).
+	struct Candidate {
+		float centre;
+		size_t drawn;
+		int background; // -1: none (players, +0x58)
+		uint32_t object;
+	};
+	Candidate selection {0.08f, 0, -1, 0};
+	const auto consider = [&](float x, float y, int background, uint32_t object) {
+		const float nx = x / 400 - 1, ny = 1 - y / 300;
+		const float c = std::sqrt(nx * nx + ny * ny);
+		if (c > 0 && c < selection.centre) {
+			selection = {c, drawn.size(), background, object};
 		}
-		int team = 0;
-		float nearest = 1e9f;
-		for (const auto& point : points) {
-			const float dx = point.position.x - owned->position().x, dz = point.position.z - owned->position().z;
-			if (dx * dx + dz * dz < nearest) {
-				nearest = dx * dx + dz * dz;
-				team = point.team;
+	};
+	const auto iconQuad = [](const IconRegistry::Icon& icon, float x, float y, const float colour[4]) {
+		hud::HudQuad q;
+		q.texture = icon.texture;
+		q.x0 = std::round(x - icon.width / 2);
+		q.y0 = std::round(y - icon.height / 2);
+		q.x1 = q.x0 + icon.width;
+		q.y1 = q.y0 + icon.height;
+		q.u0 = icon.u0;
+		q.v0 = icon.v0;
+		q.u1 = icon.u1;
+		q.v1 = icon.v1;
+		std::copy(colour, colour + 4, q.color);
+		return q;
+	};
+
+	// The objects with tags, looked for again once a second (the
+	// templates' Nametag fields are read once per template).
+	m_taggedCheck -= seconds;
+	if (m_taggedCheck <= 0) {
+		m_taggedCheck = 1;
+		m_tagged.clear();
+		for (const auto& owned : objects.objects()) {
+			if (owned && tagTemplate(owned->objectTemplate()).tagged()) {
+				m_tagged.push_back(owned->id());
 			}
 		}
-		const bool teamSpecific = number(t, "Nametag.teamSpecific", 0) != 0;
-		const bool inverse = number(t, "Nametag.inverseTeamSpecific", 0) != 0;
-		if ((teamSpecific && team != me.team) || (inverse && team == me.team)) {
-			continue;
-		}
-		const bool enemy = team != 0 && team != me.team;
-		const float maxDistance = number(t, "Nametag.maxDistance", 1200);
-		const float maxEnemy = std::min(number(t, "Nametag.maxEnemyDistance", 1200), inverse ? 1e9f : maxDistance);
-		const float most = enemy ? maxEnemy : maxDistance;
-		if (most == 0) {
-			continue;
-		}
-		std::array<float, 3> at {owned->position().x, owned->position().y, owned->position().z};
-		if (const std::string* offset = setting(t, "Nametag.3dMapIconOffset")) {
-			float ox = 0, oy = 0, oz = 0;
-			std::sscanf(offset->c_str(), "%f/%f/%f", &ox, &oy, &oz);
-			at = {at[0] + ox, at[1] + oy, at[2] + oz};
-		}
-		const float dx = at[0] - eye.x, dz = at[2] - eye.z;
-		const float distance = std::sqrt(dx * dx + dz * dz);
-		const float alpha = most < 0 ? 1.0f : clamp01(1 - distance / most);
-		const bool glue = number(t, "Nametag.glueToEdge", 0) != 0;
-		float x = 0, y = 0;
-		if (alpha <= 0.01f || !project(view, at, x, y, glue, m_settings.circleRadius)) {
-			continue;
-		}
-		const int colour = number(t, "Nametag.useTeamColor", 0) != 0 ? (team == 0 ? Neutral : enemy ? Enemy : Team)
-																	: Neutral;
-		Drawn d {distance, {}};
-		hud::HudQuad icon;
-		icon.texture = std::string("Menu/Nametag/") + (team == 1 ? "Pac" : team == 2 ? "EU" : "Neutral") + "/miniMap_CP.dds";
-		icon.x0 = std::round(x) - 16;
-		icon.y0 = std::round(y) - 16;
-		icon.x1 = icon.x0 + 32;
-		icon.y1 = icon.y0 + 32;
-		icon.u0 = icon.v0 = 0;
-		icon.u1 = icon.v1 = 1;
-		icon.color[0] = icon.color[1] = icon.color[2] = 1;
-		icon.color[3] = alpha;
-		d.quads.push_back(icon);
-		if (number(t, "Nametag.showDistance", 0) != 0) {
-			char text[32];
-			std::snprintf(text, sizeof(text), "[%i m]", static_cast<int>(std::lround(distance)));
-			float c[4];
-			std::copy(kColours[colour], kColours[colour] + 4, c);
-			c[3] = alpha;
-			m_font.write(text, std::round(x - m_font.width(text) / 2), std::round(y + 16), c, d.quads);
-		}
-		drawn.push_back(std::move(d));
 	}
-
-	// The objects' 3D icons (Nametag.show3dIcon: the Titans' consoles and
-	// core, the silos, the Titans themselves): the icon ICObject +
-	// 3dMapIcon (0x50 + n, from nametags.con's frames) at the object and
-	// its 3dMapIconOffset, faded out to maxDistance (maxEnemyDistance for
-	// the enemy's); inside a Titan only those with showInside, outside
-	// those with showOutside (default on); teamSpecific / inverse as the
-	// control points'. The selection backgrounds (selected3dMapIcon) need
-	// the commander's or squad leader's pick, not kept here.
-	for (const auto& owned : objects.objects()) {
-		const world::ObjectTemplate* t = owned->objectTemplate();
-		if (!m_icons || !t || t->typeName() == "ControlPoint" || owned->hidden() || number(t, "Nametag.show3dIcon", 0) == 0) {
+	const std::vector<game::GameWorld::ControlPointInfo> points = world.controlPointList();
+	for (const uint32_t id : m_tagged) {
+		const world::Object* owned = objects.find(id);
+		if (!owned || owned->hidden()) {
 			continue;
 		}
-		const int frame = static_cast<int>(number(t, "Nametag.3dMapIcon", -1));
-		const IconRegistry::Icon* icon = frame >= 0 ? m_icons->find(0x50 + frame) : nullptr;
-		if (!icon) {
+		const TagTemplate& tt = tagTemplate(owned->objectTemplate());
+		if (tt.controlPoint) {
+			// The control points' icons (object tags, 0x100f1330 / 0x100ef960).
+			int team = 0;
+			float nearest = 1e9f;
+			for (const auto& point : points) {
+				const float dx = point.position.x - owned->position().x, dz = point.position.z - owned->position().z;
+				if (dx * dx + dz * dz < nearest) {
+					nearest = dx * dx + dz * dz;
+					team = point.team;
+				}
+			}
+			if ((tt.teamSpecific && team != me.team) || (tt.inverse && team == me.team)) {
+				continue;
+			}
+			const bool enemy = team != 0 && team != me.team;
+			const float maxEnemy = std::min(tt.maxEnemyDistance, tt.inverse ? 1e9f : tt.maxDistance);
+			const float most = enemy ? maxEnemy : tt.maxDistance;
+			if (most == 0) {
+				continue;
+			}
+			const std::array<float, 3> at {owned->position().x + tt.offset[0], owned->position().y + tt.offset[1],
+				owned->position().z + tt.offset[2]};
+			const float dx = at[0] - eye.x, dz = at[2] - eye.z;
+			const float distance = std::sqrt(dx * dx + dz * dz);
+			const float alpha = most < 0 ? 1.0f : clamp01(1 - distance / most);
+			float x = 0, y = 0;
+			bool clamped = false;
+			if (alpha <= 0.01f || !project(view, at, x, y, tt.glue, m_settings.circleRadius, &clamped)) {
+				continue;
+			}
+			// Off screen only glued with showIconOnTracker (0x100f3490's
+			// skip of the tags out of the frustum).
+			if (clamped && !tt.tracker && !project(view, at, x, y, false, 0)) {
+				continue;
+			}
+			const int colour = tt.useTeamColor ? (team == 0 ? Neutral : enemy ? Enemy : Team) : Neutral;
+			Drawn d {distance, {}};
+			hud::HudQuad icon;
+			icon.texture = std::string("Menu/Nametag/") + (team == 1 ? "Pac" : team == 2 ? "EU" : "Neutral") + "/miniMap_CP.dds";
+			icon.x0 = std::round(x) - 16;
+			icon.y0 = std::round(y) - 16;
+			icon.x1 = icon.x0 + 32;
+			icon.y1 = icon.y0 + 32;
+			icon.u0 = icon.v0 = 0;
+			icon.u1 = icon.v1 = 1;
+			icon.color[0] = icon.color[1] = icon.color[2] = 1;
+			icon.color[3] = alpha;
+			d.quads.push_back(icon);
+			if (tt.showDistance) {
+				char text[32];
+				std::snprintf(text, sizeof(text), "[%i m]", static_cast<int>(std::lround(distance)));
+				float c[4];
+				std::copy(kColours[colour], kColours[colour] + 4, c);
+				c[3] = alpha;
+				m_font.write(text, std::round(x - m_font.width(text) / 2), std::round(y + 16), c, d.quads);
+			}
+			if (tt.selectable) {
+				consider(x, y, tt.selectedIcon < 0 ? 0x93 : 0x50 + tt.selectedIcon, id);
+			}
+			drawn.push_back(std::move(d));
 			continue;
 		}
-		const bool inside = number(t, "Nametag.showInside", 0) != 0;
-		const bool outside = number(t, "Nametag.showOutside", 1) != 0;
-		if (m_insideTitan ? !inside : !outside) {
+		// The objects' 3D icons (Nametag.show3dIcon: the Titans' consoles and
+		// core, the silos, the Titans themselves): the icon ICObject +
+		// 3dMapIcon (0x50 + n, from nametags.con's frames) at the object and
+		// its 3dMapIconOffset, faded out to maxDistance (maxEnemyDistance for
+		// the enemy's); inside a Titan only those with showInside, outside
+		// those with showOutside (default on); teamSpecific / inverse as the
+		// control points'; with useAliveArmor none once the object's armour
+		// is gone (the selectable pass, 0x1016a950: its armour's slot 0x60).
+		const IconRegistry::Icon* icon = m_icons && tt.icon >= 0 ? m_icons->find(0x50 + tt.icon) : nullptr;
+		if (!icon || (m_insideTitan ? !tt.showInside : !tt.showOutside)) {
+			continue;
+		}
+		if (tt.useAliveArmor && (owned->destroyed() || world.hitPoints(id) == 0)) {
 			continue;
 		}
 		const int team = owned->team();
-		if ((number(t, "Nametag.teamSpecific", 0) != 0 && team != me.team)
-			|| (number(t, "Nametag.inverseTeamSpecific", 0) != 0 && team == me.team)) {
+		if ((tt.teamSpecific && team != me.team) || (tt.inverse && team == me.team)) {
 			continue;
 		}
 		const bool enemy = team != 0 && team != me.team;
-		const float most = enemy ? number(t, "Nametag.maxEnemyDistance", 1200) : number(t, "Nametag.maxDistance", 1200);
-		std::array<float, 3> at {owned->position().x, owned->position().y, owned->position().z};
-		if (const std::string* offset = setting(t, "Nametag.3dMapIconOffset")) {
-			float ox = 0, oy = 0, oz = 0;
-			std::sscanf(offset->c_str(), "%f/%f/%f", &ox, &oy, &oz);
-			at = {at[0] + ox, at[1] + oy, at[2] + oz};
-		}
+		const float most = enemy ? tt.maxEnemyDistance : tt.maxDistance;
+		const std::array<float, 3> at {owned->position().x + tt.offset[0], owned->position().y + tt.offset[1],
+			owned->position().z + tt.offset[2]};
 		const float dx = at[0] - eye.x, dy = at[1] - eye.y, dz = at[2] - eye.z;
 		const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
 		const float alpha = most <= 0 ? 0.0f : clamp01(1 - distance / most);
 		float x = 0, y = 0;
-		if (alpha <= 0.01f || !project(view, at, x, y, number(t, "Nametag.glueToEdge", 0) != 0, m_settings.circleRadius)) {
+		bool clamped = false;
+		if (alpha <= 0.01f || !project(view, at, x, y, tt.glue, m_settings.circleRadius, &clamped)) {
 			continue;
 		}
-		const int colour = number(t, "Nametag.useTeamColor", 0) != 0 ? (team == 0 ? Neutral : enemy ? Enemy : Team) : Neutral;
-		hud::HudQuad q;
-		q.texture = icon->texture;
-		q.x0 = std::round(x - icon->width / 2);
-		q.y0 = std::round(y - icon->height / 2);
-		q.x1 = q.x0 + icon->width;
-		q.y1 = q.y0 + icon->height;
-		q.u0 = icon->u0;
-		q.v0 = icon->v0;
-		q.u1 = icon->u1;
-		q.v1 = icon->v1;
-		std::copy(kColours[colour], kColours[colour] + 4, q.color);
-		q.color[3] = alpha;
-		drawn.push_back({distance, {q}});
+		if (clamped && !tt.tracker && !project(view, at, x, y, false, 0)) {
+			continue;
+		}
+		const int colour = tt.useTeamColor ? (team == 0 ? Neutral : enemy ? Enemy : Team) : Neutral;
+		float c[4];
+		std::copy(kColours[colour], kColours[colour] + 4, c);
+		c[3] = alpha;
+		if (tt.selectable) {
+			consider(x, y, tt.selectedIcon < 0 ? 0x93 : 0x50 + tt.selectedIcon, id);
+		}
+		drawn.push_back({distance, {iconQuad(*icon, x, y, c)}});
 	}
 
 	// The players' tags.
@@ -600,8 +772,18 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			distance = std::sqrt(vx * vx + vz * vz);
 		}
 		tag.distance = shownDistance(tag.distance, distance);
-		std::array<float, 3> head {};
-		if (!headOf(p, distance, head)) {
+		// A call's icon and its timer (+0x64, +0x6c: back to the tag's own
+		// flags at 0).
+		if (tag.callTime > 0) {
+			tag.callTime -= seconds;
+			if (tag.callTime <= 0) {
+				tag.callTime = 0;
+				tag.callIcon = -1;
+			}
+		}
+		std::array<float, 3> head {}, iconAt {};
+		if (!headOf(p, distance, head, iconAt)) {
+			seen[p.id] = tag;
 			continue;
 		}
 		// Aimed at (0x100f0d30): the crosshair's target, or (looked at
@@ -628,13 +810,28 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		in.aimedAt = tag.aimed;
 		in.localMedic = localMedic;
 		in.distance = distance;
+		const bool calling = tag.callIcon >= 0 && in.friendly;
 		const float alpha = playerTagAlpha(m_settings, in, tag.fade, seconds);
 		seen[p.id] = tag;
-		float x = 0, y = 0;
+		// The first occupant only speaks for a vehicle (0x100f33c0, bit
+		// 0x10000).
+		if (p.vehicle) {
+			bool first = true;
+			for (const auto& other : players) {
+				if (other.alive && other.vehicle == p.vehicle && other.id != p.id && other.seat >= 0 && other.seat < p.seat) {
+					first = false;
+				}
+			}
+			if (!first) {
+				continue;
+			}
+		}
+		// Squad members' and callers' tags stay on screen (flags 0x4020 /
+		// 0x26808: glueToEdge, showIconOnTracker).
+		const bool glue = in.sameSquad || calling;
+		float x = 0, y = 0, ix = 0, iy = 0;
 		bool clamped = false;
-		// Squad members' tags stay on screen (flags 0x4020: glueToEdge,
-		// showIconOnTracker).
-		if (alpha <= 0.01f || !project(view, head, x, y, in.sameSquad, m_settings.circleRadius, &clamped)) {
+		if (alpha <= 0.01f || !project(view, head, x, y, glue, m_settings.circleRadius, &clamped)) {
 			continue;
 		}
 		Drawn d {distance, {}};
@@ -642,28 +839,123 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		const Colour index = playerTagColour(in);
 		std::copy(kColours[index], kColours[index] + 4, colour);
 		colour[3] = alpha;
-		std::string text = clamped ? std::string() : p.name;
-		// "  [%d/%d]": the occupants of a vehicle with more than one
-		// (0x100f2b60).
-		if (p.vehicle && !clamped) {
-			int aboard = 0;
-			for (const auto& other : players) {
-				aboard += other.alive && other.vehicle == p.vehicle ? 1 : 0;
-			}
-			const size_t seats = world.vehicleSeats(p.vehicle).size();
-			if (aboard > 1) {
-				char suffix[32];
-				std::snprintf(suffix, sizeof(suffix), "  [%d/%zu]", aboard, seats);
-				text += suffix;
+		// A call blinks the text towards the highlight (ColorIndex2 = +0x68
+		// 4, the crossfade (1 - min(d / 150, 1) / 2) x the blink).
+		float textColour[4];
+		std::copy(colour, colour + 4, textColour);
+		const float fade = (1 - clamp01(distance / m_settings.maxCallDistance) * 0.5f) * blink;
+		if (calling) {
+			for (int k = 0; k < 3; ++k) {
+				textColour[k] = colour[k] + (kColours[Highlight][k] - colour[k]) * fade;
 			}
 		}
-		if (clamped) {
-			char edge[32];
-			std::snprintf(edge, sizeof(edge), "[%d m]", tag.distance);
-			text = edge;
+		// The text (0x100f2b60): glued to the edge none (unless the call's
+		// showDistance), "[d m]  name" with showDistance under 300 m, else
+		// the name with "  [n/m]" for a vehicle's occupants.
+		std::string text;
+		if (!clamped || calling) {
+			std::string suffix;
+			if (p.vehicle) {
+				int aboard = 0;
+				for (const auto& other : players) {
+					aboard += other.alive && other.vehicle == p.vehicle ? 1 : 0;
+				}
+				const size_t seats = world.vehicleSeats(p.vehicle).size();
+				if (aboard > 1) {
+					char buffer[32];
+					std::snprintf(buffer, sizeof(buffer), "  [%d/%zu]", aboard, seats);
+					suffix = buffer;
+				}
+			}
+			if (clamped) {
+				char buffer[32];
+				std::snprintf(buffer, sizeof(buffer), "[%d m]", tag.distance);
+				text = buffer;
+			} else if (calling && static_cast<float>(tag.distance) < m_settings.playerCullFar) {
+				char buffer[32];
+				std::snprintf(buffer, sizeof(buffer), "[%d m]  ", tag.distance);
+				text = buffer + p.name + suffix;
+			} else {
+				text = p.name + suffix;
+			}
 		}
-		const float width = m_font.width(text);
-		m_font.write(text, std::round(x - width / 2), std::round(y - 8), colour, d.quads);
+		// The name's row (0x1016b100): the rank and veteran icons, 2
+		// pixels, the text; centred, 16 pixels high; the icons white (the
+		// squad's colour for a squad member).
+		const NameRow row = clamped ? NameRow {} : nameRow(p.rank, false);
+		std::vector<const IconRegistry::Icon*> rowIcons;
+		float rowWidth = 0;
+		for (const int id : {row.rankIcon, row.veteranIcon}) {
+			const IconRegistry::Icon* i = id >= 0 && m_icons ? m_icons->find(id) : nullptr;
+			if (i) {
+				rowIcons.push_back(i);
+				rowWidth += i->width;
+			}
+		}
+		if (!text.empty() || !rowIcons.empty()) {
+			const float iconsEnd = rowIcons.empty() ? 0 : rowWidth + 2;
+			const float total = iconsEnd + m_font.width(text);
+			float rx = std::round(x - total / 2);
+			float iconColour[4] = {1, 1, 1, alpha};
+			if (index == Squad) {
+				std::copy(kColours[Squad], kColours[Squad] + 3, iconColour);
+			}
+			for (const IconRegistry::Icon* i : rowIcons) {
+				d.quads.push_back(iconQuad(*i, rx + i->width / 2, std::round(y), iconColour));
+				rx += i->width;
+			}
+			m_font.write(text, rx + (rowIcons.empty() ? 0 : 2), std::round(y - 8), textColour, d.quads);
+		}
+		// The player's icon (the selectable pass, 0x1016a950, flags
+		// 0x500201 + 0x10 for the same team): +0x60, or crossfaded to the
+		// call's icon +0x64 (the local player's own call shows who can
+		// answer it), at the icon's point; glued to the edge with the
+		// location arrow (Menu/Nametag/loactionArrow.dds, 0x10168d90:
+		// outwards at 1.05 the edge, alpha 0.5).
+		if (in.friendly && m_icons) {
+			const int own = playerIconId(p.squadLeader, p.squad, p.commander);
+			int overlay = calling ? tag.callIcon : -1;
+			if (overlay < 0) {
+				overlay = helperIcon(m_calls, kitAbilities(kitTypeOf(p.kit)));
+			}
+			const IconRegistry::Icon* base = m_icons->find(own);
+			const IconRegistry::Icon* flash = overlay >= 0 ? m_icons->find(overlay) : nullptr;
+			const bool shown = clamped ? true : project(view, iconAt, ix, iy, false, 0);
+			if (clamped) {
+				ix = x;
+				iy = y;
+			}
+			if (base && shown) {
+				float c[4];
+				std::copy(colour, colour + 4, c);
+				const float cross = flash ? fade : 0;
+				c[3] = alpha * (1 - cross);
+				d.quads.push_back(iconQuad(*base, ix, iy, c));
+				if (flash) {
+					c[3] = alpha * cross;
+					d.quads.push_back(iconQuad(*flash, ix, iy, c));
+				}
+				if (!clamped) {
+					consider(ix, iy, -1, object);
+				}
+			}
+			if (clamped) {
+				const float ax = x - 400, ay = y - 300;
+				hud::HudQuad arrow;
+				arrow.texture = "Menu/Nametag/loactionArrow.dds";
+				const float cx = 400 + ax * 1.05f, cy = 300 + ay * 1.05f;
+				arrow.x0 = std::round(cx - 8);
+				arrow.y0 = std::round(cy - 8);
+				arrow.x1 = arrow.x0 + 16;
+				arrow.y1 = arrow.y0 + 16;
+				arrow.u0 = arrow.v0 = 0;
+				arrow.u1 = arrow.v1 = 1;
+				std::copy(colour, colour + 3, arrow.color);
+				arrow.color[3] = 0.5f;
+				arrow.rotation = std::atan2(-ay, -ax) * 180 / 3.14159265f; // the texture points left
+				d.quads.push_back(arrow);
+			}
+		}
 		// The bar (0x1016c1e0, ICArmorBar: bar_base under bar_filler, the
 		// fill from texel 1 to 45 of 64): a hurt friend's health for a
 		// medic, a damaged vehicle's armour for an engineer, under half.
@@ -697,6 +989,19 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		drawn.push_back(std::move(d));
 	}
 	m_players = std::move(seen);
+	// The selected tag's background under its icon (its first quad).
+	m_selectedObject = selection.centre < 0.08f ? selection.object : 0;
+	if (m_selectedObject && selection.background >= 0 && m_icons && selection.drawn < drawn.size()
+		&& !drawn[selection.drawn].quads.empty()) {
+		if (const IconRegistry::Icon* back = m_icons->find(selection.background)) {
+			const hud::HudQuad& front = drawn[selection.drawn].quads.front();
+			float c[4];
+			std::copy(kColours[Highlight], kColours[Highlight] + 4, c);
+			c[3] = front.color[3];
+			auto& quads = drawn[selection.drawn].quads;
+			quads.insert(quads.begin(), iconQuad(*back, (front.x0 + front.x1) / 2, (front.y0 + front.y1) / 2, c));
+		}
+	}
 	std::stable_sort(drawn.begin(), drawn.end(), [](const Drawn& a, const Drawn& b) { return a.distance > b.distance; });
 	for (Drawn& d : drawn) {
 		out.insert(out.end(), d.quads.begin(), d.quads.end());

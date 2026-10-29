@@ -53,21 +53,24 @@ layout(set = 3, binding = 0) uniform Lighting {
 	vec4 sunDirection;
 	vec4 sunColor;     // terrain sun color
 	vec4 skyColor;     // terrain GI color
-	vec4 fogColor;
+	vec4 fogColor;     // rgb, w: the near term's floor (FogColor.w)
+	vec4 fogRange;     // RaCommon.fx FogRange (fog.glsl)
 	vec4 material;     // y: 1 with a lightmap
 	vec4 uvOffset;
 	vec4 tint;
 	vec4 lightCount;   // x: point lights in use
 	vec4 lightPosition[8]; // xyz, w: the range where it is gone
 	vec4 lightColor[8];    // rgb, w: the range it is full up to
-	vec4 lightSpot[8];     // a spot light's axis, w: the cosine it is gone
-						   // outside (below -1: a point light)
-	vec4 lightExtra[8];    // x: the cosine it is full inside, y: 1 when
-						   // it lights lightmapped surfaces too
+	vec4 lightSpot[8];     // a spot light's axis, w: its ConeAngle (radians;
+						   // below -1: a point light)
+	vec4 lightExtra[8];    // y: 1 when it lights lightmapped surfaces too
 };
+#include "fog.glsl"
 
 // A light's cone (1 for a point light) and whether it lights this surface
 // (affectLightmappedObjects 0 leaves lightmapped ones to their lightmaps).
+// The cone is SkinnedMesh.fx's: saturate(cos - (1 - c)) / c with c the
+// light's ConeAngle (coneAngle2 in radians, BF2142.exe 0x0064aad0).
 float lightCone(int i, vec3 fromLight)
 {
 	if (material.y > 0.5 && lightExtra[i].y < 0.5) {
@@ -76,8 +79,8 @@ float lightCone(int i, vec3 fromLight)
 	if (lightSpot[i].w < -1.0) {
 		return 1.0;
 	}
-	float c = dot(fromLight, lightSpot[i].xyz);
-	return smoothstep(lightSpot[i].w, max(lightExtra[i].x, lightSpot[i].w + 1e-3), c);
+	float c = max(lightSpot[i].w, 1e-3);
+	return clamp(dot(fromLight, lightSpot[i].xyz) - (1.0 - c), 0.0, 1.0) / c;
 }
 
 layout(set = 3, binding = 1) uniform Detail {
@@ -157,8 +160,8 @@ void main()
 	if (detailFade.x > 0.5) { // the LOD debug tint (BF2142_TERRAIN_LODS)
 		color *= detailFade.x < 1.5 ? vec3(1.0, 0.6, 0.6) : detailFade.x < 2.5 ? vec3(0.6, 1.0, 0.6) : vec3(0.6, 0.6, 1.0);
 	}
-	float fog = clamp(inDepth / fogColor.w, 0.0, 1.0);
-	outColor = vec4(mix(color, fogColor.rgb, fog * fog), 1.0);
+	float fog = fogAmount(inDepth);
+	outColor = vec4(mix(color, fogColor.rgb, fog), 1.0);
 	if (shadowExtra.w > 0.5) { // BF2142_SHADOW_DEBUG: the dynamic shadow factor, the region tinted
 		vec4 p = shadowMatrix * vec4(inWorldPosition, 1.0);
 		bool inside = all(greaterThan(p.xy, vec2(0.0))) && all(lessThan(p.xy, vec2(1.0)));

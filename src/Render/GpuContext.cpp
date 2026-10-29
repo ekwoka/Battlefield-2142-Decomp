@@ -107,6 +107,8 @@ std::unique_ptr<GpuContext> GpuContext::create(SDL_Window* window, std::string& 
 	context->m_white = context->createRgbaTexture(1, 1, &white);
 	const uint32_t black = 0xff000000;
 	context->m_black = context->createRgbaTexture(1, 1, &black);
+	const uint32_t flat = 0xffff8080; // (0.5, 0.5, 1): a tangent-space normal straight out
+	context->m_flatNormal = context->createRgbaTexture(1, 1, &flat);
 	{
 		texture::DdsTexture cube;
 		cube.format = texture::TextureFormat::RGBA8;
@@ -134,6 +136,7 @@ GpuContext::~GpuContext()
 	SDL_WaitForGPUIdle(m_device);
 	SDL_ReleaseGPUTexture(m_device, m_white);
 	SDL_ReleaseGPUTexture(m_device, m_black);
+	SDL_ReleaseGPUTexture(m_device, m_flatNormal);
 	SDL_ReleaseGPUTexture(m_device, m_whiteCube);
 	SDL_ReleaseGPUTexture(m_device, m_whiteVolume);
 	SDL_ReleaseGPUSampler(m_device, m_repeatSampler);
@@ -184,7 +187,7 @@ bool GpuContext::createPipelines(std::string& error)
 	buffer.slot = 0;
 	buffer.pitch = sizeof(Vertex);
 	buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
-	SDL_GPUVertexAttribute attributes[10] = {
+	SDL_GPUVertexAttribute attributes[11] = {
 		{0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(Vertex, position)},
 		{1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(Vertex, normal)},
 		{2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(Vertex, texCoord)},
@@ -195,6 +198,7 @@ bool GpuContext::createPipelines(std::string& error)
 		{7, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(Vertex, detailCoord)},
 		{8, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(Vertex, dirtCoord)},
 		{9, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(Vertex, crackCoord)},
+		{10, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(Vertex, tangent)},
 	};
 
 	SDL_GPUColorTargetDescription color {};
@@ -204,7 +208,7 @@ bool GpuContext::createPipelines(std::string& error)
 	info.vertex_input_state.vertex_buffer_descriptions = &buffer;
 	info.vertex_input_state.num_vertex_buffers = 1;
 	info.vertex_input_state.vertex_attributes = attributes;
-	info.vertex_input_state.num_vertex_attributes = 10;
+	info.vertex_input_state.num_vertex_attributes = 11;
 	info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
 	// Front faces are clockwise as in Direct3D; vegetation is two-sided, so
 	// nothing is culled yet (the original takes this from the material).
@@ -240,7 +244,7 @@ bool GpuContext::createPipelines(std::string& error)
 		return pipeline;
 	};
 	m_meshPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
-		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, 8, 2, "mesh");
+		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, kMeshSamplers, 2, "mesh");
 	m_terrainPipeline = build(k_terrain_vert_spv, k_terrain_vert_spv_size, k_terrain_vert_msl,
 		k_terrain_vert_msl_size, k_terrain_frag_spv, k_terrain_frag_spv_size, k_terrain_frag_msl,
 		k_terrain_frag_msl_size, 13, 3, "terrain", 2);
@@ -264,7 +268,7 @@ bool GpuContext::createPipelines(std::string& error)
 	color.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
 	info.depth_stencil_state.enable_depth_write = false;
 	m_fadedMeshPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
-		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, 8, 2, "faded mesh");
+		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, kMeshSamplers, 2, "faded mesh");
 	m_particlePipeline = build(k_particle_vert_spv, k_particle_vert_spv_size, k_particle_vert_msl,
 		k_particle_vert_msl_size, k_particle_frag_spv, k_particle_frag_spv_size, k_particle_frag_msl,
 		k_particle_frag_msl_size, 1, 1, "particle");
@@ -273,7 +277,7 @@ bool GpuContext::createPipelines(std::string& error)
 		k_shimmer_frag_msl_size, 2, 1, "heat shimmer");
 	color.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
 	m_additiveMeshPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
-		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, 8, 2, "additive mesh");
+		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, kMeshSamplers, 2, "additive mesh");
 	m_additiveParticlePipeline = build(k_particle_vert_spv, k_particle_vert_spv_size, k_particle_vert_msl,
 		k_particle_vert_msl_size, k_particle_frag_spv, k_particle_frag_spv_size, k_particle_frag_msl,
 		k_particle_frag_msl_size, 1, 1, "additive particle");
@@ -404,7 +408,7 @@ SDL_GPUGraphicsPipeline* GpuContext::uiBlendPipeline(int source, int destination
 		buffer.slot = 0;
 		buffer.pitch = sizeof(Vertex);
 		buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
-		const SDL_GPUVertexAttribute attributes[10] = {
+		const SDL_GPUVertexAttribute attributes[11] = {
 			{0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(Vertex, position)},
 			{1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(Vertex, normal)},
 			{2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(Vertex, texCoord)},
@@ -415,6 +419,7 @@ SDL_GPUGraphicsPipeline* GpuContext::uiBlendPipeline(int source, int destination
 			{7, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(Vertex, detailCoord)},
 			{8, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(Vertex, dirtCoord)},
 			{9, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(Vertex, crackCoord)},
+			{10, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(Vertex, tangent)},
 		};
 		SDL_GPUColorTargetDescription color {};
 		color.format = m_colorFormat;
@@ -429,7 +434,7 @@ SDL_GPUGraphicsPipeline* GpuContext::uiBlendPipeline(int source, int destination
 		info.vertex_input_state.vertex_buffer_descriptions = &buffer;
 		info.vertex_input_state.num_vertex_buffers = 1;
 		info.vertex_input_state.vertex_attributes = attributes;
-		info.vertex_input_state.num_vertex_attributes = 10;
+		info.vertex_input_state.num_vertex_attributes = 11;
 		info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
 		info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
 		info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_CLOCKWISE;
@@ -522,6 +527,55 @@ SDL_GPUBuffer* GpuContext::createBuffer(SDL_GPUBufferUsageFlags usage, const voi
 	SDL_UploadToGPUBuffer(copyPass(), &source, &destination, false);
 	m_pendingTransfers.push_back(transfer);
 	return buffer;
+}
+
+void GpuContext::uploadDynamic(SDL_GPUBuffer*& buffer, SDL_GPUBufferUsageFlags usage, const void* data, uint32_t size)
+{
+	if (size == 0) {
+		return;
+	}
+	auto it = buffer ? m_dynamicBuffers.find(buffer) : m_dynamicBuffers.end();
+	if (it == m_dynamicBuffers.end() || it->second.capacity < size) {
+		const uint32_t capacity = std::max(size, it == m_dynamicBuffers.end() ? 0u : it->second.capacity + it->second.capacity / 2);
+		releaseDynamicBuffer(buffer);
+		SDL_GPUBufferCreateInfo info {};
+		info.usage = usage;
+		info.size = capacity;
+		buffer = SDL_CreateGPUBuffer(m_device, &info);
+		SDL_GPUTransferBufferCreateInfo transferInfo {};
+		transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+		transferInfo.size = capacity;
+		SDL_GPUTransferBuffer* transfer = SDL_CreateGPUTransferBuffer(m_device, &transferInfo);
+		if (!buffer || !transfer) {
+			if (transfer) {
+				SDL_ReleaseGPUTransferBuffer(m_device, transfer);
+			}
+			return;
+		}
+		it = m_dynamicBuffers.emplace(buffer, DynamicBuffer {capacity, transfer}).first;
+	}
+	void* mapped = SDL_MapGPUTransferBuffer(m_device, it->second.transfer, true);
+	if (!mapped) {
+		return;
+	}
+	std::memcpy(mapped, data, size);
+	SDL_UnmapGPUTransferBuffer(m_device, it->second.transfer);
+	SDL_GPUTransferBufferLocation source {it->second.transfer, 0};
+	SDL_GPUBufferRegion destination {buffer, 0, size};
+	SDL_UploadToGPUBuffer(copyPass(), &source, &destination, true);
+}
+
+void GpuContext::releaseDynamicBuffer(SDL_GPUBuffer*& buffer)
+{
+	if (!buffer) {
+		return;
+	}
+	if (const auto it = m_dynamicBuffers.find(buffer); it != m_dynamicBuffers.end()) {
+		SDL_ReleaseGPUTransferBuffer(m_device, it->second.transfer);
+		m_dynamicBuffers.erase(it);
+	}
+	SDL_ReleaseGPUBuffer(m_device, buffer);
+	buffer = nullptr;
 }
 
 SDL_GPUTexture* GpuContext::createTexture(const texture::DdsTexture& texture, bool cube)

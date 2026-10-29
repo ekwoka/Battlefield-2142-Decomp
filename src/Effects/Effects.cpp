@@ -203,6 +203,7 @@ ParticleTemplate ParticleTemplate::fromTemplate(const world::ObjectTemplate& t)
 	}
 	p.selfShadowIntensity = number(t, "selfShadowIntensity", p.selfShadowIntensity);
 	p.showZoomed = number(t, "showInZoomedMode", 1) != 0;
+	p.nearCulling = number(t, "nearCullingEnable", 0) != 0;
 	p.noRotationFromParent = number(t, "noRotationFromParent", 0) != 0;
 	p.localSystem = number(t, "isLocalSystem", 0) != 0;
 	p.showFirstPerson = number(t, "showInFirstPerson", 1) != 0;
@@ -811,8 +812,7 @@ std::vector<PointLight> EffectManager::lights() const
 			PointLight lit {light.position, light.color * fade, light.range1, light.range2};
 			lit.spot = light.look.spot;
 			lit.direction = light.direction;
-			lit.cosInner = light.look.cosInner;
-			lit.cosOuter = light.look.cosOuter;
+			lit.cone = light.look.cone;
 			lit.affectsLightmapped = light.look.affectsLightmapped;
 			out.push_back(lit);
 		}
@@ -851,15 +851,14 @@ LightSourceLook lightSourceOf(const world::ObjectTemplate& t)
 	look.affectsLightmapped = number(t, "affectLightmappedObjects", 1) != 0;
 	look.affectingType = static_cast<int>(number(t, "affectingType", 0));
 	look.color = vector(t, "color", {1, 1, 1}) * number(t, "intensity", 1);
-	look.range1 = number(t, "attenuationRange1", 0);
-	look.range2 = std::max(number(t, "attenuationRange2", 1), look.range1 + 0.01f);
+	// The light object clamps both ranges to 100 (BF2142.exe 0x0064b170,
+	// +0x17c / +0x180; RendDX9 reads the second through slot 0x198).
+	look.range1 = std::min(number(t, "attenuationRange1", 0), 100.0f);
+	look.range2 = std::max(std::min(number(t, "attenuationRange2", 1), 100.0f), look.range1 + 0.01f);
 	look.direction = normalized(vector(t, "direction", {0, 0, 1}));
-	// The cone's angles taken as half angles in degrees, inner and outer
-	// (the original looks the falloff up in a table, LightManager's
-	// conical attenuation texture over 1 - cos^2; not read here).
-	const float inner = number(t, "coneAngle1", 20), outer = std::max(number(t, "coneAngle2", 22.5f), inner);
-	look.cosInner = std::cos(inner * kDegrees);
-	look.cosOuter = std::cos(outer * kDegrees);
+	// The cone: coneAngle2 (22.5 by default, +0xdc), at most 180 degrees,
+	// in radians (Effects.h).
+	look.cone = std::min(number(t, "coneAngle2", 22.5f), 180.0f) * kDegrees;
 	look.flicker = std::clamp(number(t, "flicker", 0), 0.0f, 1.0f);
 	return look;
 }
@@ -1143,7 +1142,16 @@ void EffectManager::collect(const Emitter& emitter, std::vector<Sprite>& out, co
 		}
 		const Vec3 at = emitter.worldPosition(p);
 		if (view.settings) {
-			alpha *= view.fade(physics::dot(at - view.eye, view.forward), t.lodDistance);
+			const float depth = physics::dot(at - view.eye, view.forward);
+			const float near = t.nearCulling ? ParticleView::nearFade(depth, view.nearPlane, size) : -1.0f;
+			if (near >= 0) {
+				if (near < 0.01f) {
+					continue;
+				}
+				alpha *= near;
+			} else {
+				alpha *= view.fade(depth, t.lodDistance);
+			}
 			if (alpha <= 0) {
 				continue;
 			}

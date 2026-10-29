@@ -10,6 +10,7 @@
 
 #include "Animation/Pose.h"
 #include "Culling.h"
+#include "EnvMaps.h"
 #include "Fog.h"
 #include "TerrainLod.h"
 #include "TitanParts.h"
@@ -26,6 +27,7 @@
 #include <functional>
 #include <initializer_list>
 #include <map>
+#include <unordered_map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -196,6 +198,10 @@ struct LevelSources {
 	// The commander's overhead view, asked each frame: true while it is
 	// on (the world pass is then drawn from it, without the first person).
 	std::function<bool(OverheadView& view)> overheadView;
+	// Told each frame whether the camera is inside a Titan (the object
+	// drawer's slot 0x40, which RendDX9's NametagManager reads too,
+	// 0x100f3490: the 3D icons' showInside / showOutside); may be null.
+	bool* cameraInTitanOut = nullptr;
 };
 
 struct LevelStats {
@@ -278,6 +284,14 @@ private:
 		// (RaShaderSM _OBJSPACENORMALMAP_); 0 none.
 		SDL_GPUTexture* normalMap = nullptr;
 		int normalKind = 0;
+		// A static mesh's RaShaderSTM per-pixel maps: the detail normal map
+		// ("_deb", NDetail; its alpha the parallax height), the crack normal
+		// map ("_crb", NCrack), and ParallaxScaleBias's scale (0: none).
+		SDL_GPUTexture* detailNormal = nullptr;
+		SDL_GPUTexture* crackNormal = nullptr;
+		float parallax[2] = {0, 0};
+		// Lit with the level's envmap (EnvMapManager.h).
+		bool envMap = false;
 		// A tree's leaves (a static mesh under "vegitation", RendDX9
 		// 0x100de8xx; its alpha-tested materials): RaShaderLeaf's sway.
 		bool leaf = false;
@@ -434,6 +448,7 @@ private:
 	SDL_GPUTexture* cubeTexture(const io::FileManager& files, const std::string& path);
 	void buildSky(const LevelSources& sources);
 	void buildWater(const LevelSources& sources);
+	void loadEnvMaps(const LevelSources& sources);
 	void buildRoads(const LevelSources& sources);
 	void buildUndergrowth(const LevelSources& sources);
 	// Generates the undergrowth patches in view and drops distant ones.
@@ -580,6 +595,10 @@ private:
 	std::map<std::string, std::unique_ptr<GpuMesh>> m_meshes; // by geometry name (lower case)
 	std::map<std::string, SDL_GPUTexture*> m_textures;         // by path (lower case)
 	std::map<std::string, SDL_GPUTexture*> m_cubeTextures;     // by path (lower case)
+	std::map<SDL_GPUTexture*, std::array<uint32_t, 2>> m_textureSizes; // width, height (the parallax's scale)
+	// texture()'s front cache by the path as asked and the class (the mip
+	// skip it was loaded with, the texture).
+	std::array<std::unordered_map<std::string, std::pair<int, SDL_GPUTexture*>>, 16> m_texturesByPath;
 	std::map<std::string, std::shared_ptr<anim::Skeleton>> m_skeletons;
 	std::map<std::string, std::shared_ptr<anim::Animation>> m_animations;
 	std::vector<Instance> m_instances;
@@ -676,6 +695,9 @@ private:
 	};
 	std::vector<ObjectLight> m_objectLights;
 	void applyPointLights(LightingUniforms& uniforms) const;
+	// mesh.frag's samplers 8-10: a static material's detail and crack
+	// normal maps (flat without) and this frame's envmap.
+	void bindMeshLayers(SDL_GPURenderPass* pass, const Submesh* submesh) const;
 	// This frame's decals: one buffer, drawn in groups by texture.
 	SDL_GPUBuffer* m_decalVertices = nullptr;
 	std::vector<ParticleGroup> m_decalGroups;
@@ -715,6 +737,14 @@ private:
 	std::vector<WaterBlock> m_waterBlocks;
 	std::vector<SDL_GPUTexture*> m_waterFrames; // the normal map frames (Textures/waterbump)
 	SDL_GPUTexture* m_waterEnvMap = nullptr;     // <level>/Water/envmap.dds, a cube map
+	// The level's envmaps (EnvMaps.h) and the one nearest the camera this
+	// frame (null: none, the materials drawn without).
+	struct EnvMap {
+		EnvMapEntry entry;
+		SDL_GPUTexture* cube = nullptr;
+	};
+	std::vector<EnvMap> m_envMaps;
+	SDL_GPUTexture* m_envMap = nullptr;
 	SDL_GPUTexture* m_waterVolume = nullptr;     // Textures/watervolume.dds (the 3D variants)
 	struct SurroundingPatch {
 		SDL_GPUBuffer* vertices = nullptr;

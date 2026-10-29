@@ -160,6 +160,11 @@ void GameAudio::radio()
 		return;
 	}
 	const auto heard = m_round.takeRadioHeard([local](int receiver) { return receiver == local; });
+	if (onHeard) {
+		for (const auto& message : heard) {
+			onHeard(message.sender, message.voice);
+		}
+	}
 	if (!m_voices) {
 		return;
 	}
@@ -358,12 +363,24 @@ std::vector<std::pair<int, std::string>> GameAudio::autoRadio()
 		}
 		if (object->team() != watched.team) {
 			const int to = object->team(), from = watched.team;
+			// A silo's index (the HUD's slot: its control point, else its
+			// place among the silos) as SiloSyncEvent hands it.
+			int silo = 0;
+			const auto silos = m_round.missileSilos();
+			for (size_t i = 0; i < silos.size(); ++i) {
+				if (silos[i].object == it->first) {
+					silo = silos[i].controlPoint > 0 ? silos[i].controlPoint : static_cast<int>(i) + 1;
+				}
+			}
+			const auto suffixed = [&](const std::string& message) {
+				return message.empty() ? message : message + siloSuffix(silo);
+			};
 			if (to == 0) {
 				if (localTeam == from) {
-					play(setting(*t, "radio.neutralTeamChangeMessage"));
+					play(suffixed(setting(*t, "radio.neutralTeamChangeMessage")));
 				}
 			} else {
-				play(setting(*t, localTeam == to ? "radio.friendlyTeamChangeMessage" : "radio.enemyTeamChangeMessage"));
+				play(suffixed(setting(*t, localTeam == to ? "radio.friendlyTeamChangeMessage" : "radio.enemyTeamChangeMessage")));
 			}
 			watched.team = to;
 		}

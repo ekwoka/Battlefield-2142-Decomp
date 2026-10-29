@@ -36,6 +36,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -334,6 +335,7 @@ public:
 		bool squadLeader = false;
 		bool commander = false;
 		bool cloaked = false; // active camouflage on
+		int rank = 0; // the stats' rank (player slot 0x1a8 +0x20; setPlayerRank): the name tags' ICRank
 		// The soldier's own EMP level (its armour's, 0x00652a00 through the
 		// player's 0x005921b0 on foot), 0 none.
 		int empLevel = 0;
@@ -725,6 +727,17 @@ public:
 		// cameraRecoilSize: CameraRecoil) and its SimpleDeviationComp
 		// (minDev, setFireDev: DeviationBuildUp; hasDeviation without one off).
 		float cameraRecoilSpeed = 0, cameraRecoilSize = 0;
+		GunRecoil gunRecoil; // the component's own slide and push (GunRecoil)
+		// The gun's ToggleCameraComp (template 0x005db120): zoom.startCameraId
+		// (+0x1c, -1 none) and startCameraViewMode (+0x20): the seat's camera
+		// as the weapon is taken up (0x005db260: the control object's slot
+		// 0x4c, its camera's slot 0x18).
+		int startCameraId = -1, startCameraViewMode = -1;
+		// The seat's maintainCameraOnExitToOtherVehicle (template +0x488):
+		// leaving straight into another vehicle (a pod) it stands in for
+		// maintainCameraOnExit (GameServer 0x004b0b90).
+		bool maintainCameraOnExitToOther = false;
+		bool dontClearTeamOnExit = false; // +0x34f (0x005c95b0)
 		DeviationBuildUp deviation;
 		bool hasDeviation = false;
 	};
@@ -1090,6 +1103,13 @@ public:
 	// For a soldier aboard its own Titan (within its box): the nearest entry
 	// point of the Titan's pod arrays, in the world, and its radius.
 	bool titanPodEntry(int player, physics::Vec3& entry, float& radius) const;
+	// For the help manager's tick (0x00646cb0), on foot: a ladder (class
+	// 0x9c40) whose object lies within `radius` of the soldier (0x00646880;
+	// case 0x43 asks 3 m), and a vehicle with a free seat whose entry point
+	// reaches him (case 0x47: 0x005a98e0 with 3 m; the rewrite's entering
+	// test, enterOrLeaveVehicle's).
+	bool ladderInReach(int player, float radius = 3) const;
+	bool vehicleInReach(int player) const;
 	// The nearest free gun seat of the player's own Titan whose gun works
 	// (its console's entry point, world frame), for a soldier on foot within
 	// the Titan's box; false for none.
@@ -1177,7 +1197,6 @@ private:
 		bool spectacular = false;
 		bool effectsAttached = false;
 		bool effectsSeen = false; // effectHitPoints set (its first look: the template's armor.hitPoints)
-		float wreckFor = 0; // its timeToStayAsWreck (the wreck's drain to -wreckHitPoints)
 		// The vehicle LOD's edges (indices into `points`) of its faces
 		// steeper than 30 degrees (|normal y| at most cos 30), each face's
 		// three in turn (the loader 0x006e12a0 -> 0x006e1430, LOD +0xe4).
@@ -1185,6 +1204,24 @@ private:
 		// The vehicle LOD's box (object space; the mesh's slot 0x54), which
 		// the third pass tests trees against.
 		physics::Vec3 boxMin, boxMax;
+		// The soldier LOD's box (the mesh's slot 0x54(2)): where a restricted
+		// exit's ray starts (0x005c6ff0).
+		physics::Vec3 soldierBoxMin, soldierBoxMax;
+		bool hasSoldierBox = false;
+		// The dontClearTeamOnExit (template +0x34f, read by 0x005c95b0 as a
+		// seat is left) of the seat last left: emptied, it keeps its team.
+		bool dontClearTeam = false;
+		// The armour's spectacular death (+0x250 at the killing hit) with
+		// hideChildrenOnSpectacularDeath (template +0x164, 0x00651c60): the
+		// mesh's parts after the first are hidden (zero matrices).
+		bool hideChildren = false;
+		bool destroyNow = false; // destroyOnSpectacularDeath (+0x251)
+		// The wreck: the time it has stood, how long its armour drains to
+		// -wreckHitPoints (timeToStayAsWreck, a third of it with the AI
+		// running: 0x00652380's x 3) and the fade after (timeToStayAfterDestroyed).
+		float wreckAge = 0, wreckDrain = 0;
+		// Each seat gun's WeaponBasedRecoilComp slide (GunRecoil), by seat.
+		std::vector<GunRecoil> gunRecoil;
 		// Its first Engine (0x006b6c50: the tree searched siblings first)
 		// is a helicopter's (engineType c_ETHelicopter, 33): hitting a static
 		// object is the end of it (0x006bb050's early exit).
@@ -1326,6 +1363,7 @@ private:
 	// The exit a restricted seat allows (0x005c7840 over 0x005c71a0's four
 	// places); false when none does.
 	bool restrictedExit(const Body& body, const VehicleLayout& layout, int seat, physics::Vec3& at) const;
+	static physics::Vec3 exitRayStart(const Body& body, const physics::Vec3& place);
 	// A vehicle's team is its first occupant's (0x005c9500), its own when
 	// empty: each tick from the seats.
 	void stepVehicleTeams();
@@ -1791,6 +1829,11 @@ private:
 		// Its weapon: a recon drone's pulse (PulseMeterAmmoComp) or a
 		// sentry drone's gun, fired by its auto controller.
 		std::unique_ptr<FireArm> weapon;
+		// Its auto controller's trigger (an AIDLL bot's fire statement,
+		// 0x100777a0 / BAPATrigger 0x100d3110): held for an automatic gun
+		// (fire mode 2), else a tap, pressed on one execution and let go on
+		// the next (autoTrigger).
+		bool tapped = false;
 		const ProjectileSettings* projectile = nullptr;
 		bool pulse = false;
 		float pulseDistance = 0; // pulse.viewDistance
@@ -1892,6 +1935,7 @@ private:
 	void launchDrone(Player& player, const world::ObjectTemplate& detonator, world::ObjectTemplate& drone);
 	void stepDrones(float seconds);
 	void pulse(const Drone& drone);
+	static bool autoTrigger(Drone& drone, bool want);
 	void fireSentry(Drone& drone, float seconds);
 	bool removeDrone(uint32_t object);
 	Drone* findDrone(uint32_t object);
@@ -2117,6 +2161,7 @@ private:
 	void titanArmorEffects(Titan& titan, int part);
 	void stepTitanWreck(Titan& titan, float seconds);
 	bool m_aiRunning = false;
+	std::set<uint32_t> m_hiddenChildren; // wrecks with hideChildren (partTransforms' quick test)
 	bool titanTerrainClear(const Titan& titan, float x, float z) const;
 	void findTitanObstacles();
 	void stepTitans(float seconds);

@@ -305,6 +305,19 @@ void registerWorldConsoleMethods(Console& console, ObjectTemplateManager& templa
 				list += std::to_string(level) + " " + effect + " " + position + " " + rotation + ";";
 			}
 		});
+	// armor.addWreckArmorEffect, the same arguments (template slot 0x16c,
+	// 0x00630c00: names +0x7c, positions +0x8c, rotations +0x9c, levels
+	// +0xac). The armour's instance resolves them into its own level map
+	// (0x0062fb50, +0x1c) and points +0x210 at it (0x00655630), but nothing
+	// reads +0x210 in BF2142.exe and no shipped template calls it: kept as
+	// "armor.addWreckArmorEffect.list", never started.
+	bindMethod(console, "ObjectTemplate.armor.addWreckArmorEffect", access,
+		[&templates](int level, std::string effect, std::string position, std::string rotation) {
+			if (templates.active()) {
+				std::string& list = templates.active()->settings()["armor.addWreckArmorEffect.list"];
+				list += std::to_string(level) + " " + effect + " " + position + " " + rotation + ";";
+			}
+		});
 
 	// setGearRatios <5 ratios> (0x005406d1): an engine's ratio per gear, kept
 	// as "gearRatios" = "a/b/c/d/e".

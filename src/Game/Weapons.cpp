@@ -293,6 +293,50 @@ float CameraRecoil::update(float seconds)
 	return std::sin(phase * 6.2831855f) * size * 0.6f; // *0x00a739c0
 }
 
+GunRecoil GunRecoil::fromTemplate(const world::ObjectTemplate& t)
+{
+	GunRecoil r;
+	const auto& c = t.components();
+	if (std::find(c.begin(), c.end(), "WeaponBasedRecoilComp") == c.end()) {
+		return r;
+	}
+	r.force = number(t, "recoil.recoilForce", 0);
+	r.speed = number(t, "recoil.recoilSpeed", 0);
+	r.speedGB = number(t, "recoil.recoilSpeedGB", 0);
+	r.size = number(t, "recoil.recoilSize", 0);
+	return r;
+}
+
+void GunRecoil::fired(uint32_t tick)
+{
+	// 0x005ddfc0: ROUND(+0x1c x -30 x 0.5) and ROUND(+0x20 x -30), the
+	// x87's round to nearest.
+	const float kick = speed != 0 ? 3.14f / speed : 0;      // +0x1c
+	const float back = speedGB != 0 ? 1.57f / speedGB : 0;  // +0x20
+	const long a = std::lrint(kick * -30.0f * 0.5f);
+	const long b = std::lrint(back * -30.0f);
+	kickEnd = static_cast<uint32_t>(static_cast<long>(tick) - a);
+	returnEnd = static_cast<uint32_t>(static_cast<long>(kickEnd) - b);
+}
+
+float GunRecoil::slide(uint32_t tick) const
+{
+	if (!(speed > 0) || kickEnd == 0) {
+		return 0;
+	}
+	const float kick = 3.14f / speed;
+	if (tick <= kickEnd) {
+		const float t = static_cast<float>(kickEnd - tick) * 0.033333335f;
+		return size * 0.05f * 0.5f * std::sin((kick * 0.5f + t) * speed);
+	}
+	if (tick <= returnEnd) {
+		const float t = static_cast<float>(returnEnd - tick) * 0.033333335f;
+		const float back = speedGB != 0 ? 1.57f / speedGB : 0;
+		return back > 0 ? size * 0.05f * 0.5f * (t / back) : 0;
+	}
+	return 0; // at rest (0x005ddd80 clears +0x5c)
+}
+
 TracerLook tracerLook(const ProjectileSettings& settings, const physics::Vec3& round, const physics::Vec3& velocity,
 	const physics::Vec3& origin, const physics::Vec3& start, const physics::Vec3& offset, bool hit)
 {

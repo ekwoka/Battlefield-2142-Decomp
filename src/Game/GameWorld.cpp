@@ -947,8 +947,33 @@ void GameWorld::destroyVehicle(Body& body, int attacker)
 	}
 	const world::ObjectTemplate& t = *object->objectTemplate();
 	object->setDestroyed(true);
-	body.wreckTime = number(t, "armor.timeToStayAsWreck", 10);
-	body.wreckFor = body.wreckTime;
+	// The wreck (0x00652380): it stands timeToStayAsWreck (20 by default,
+	// the template's +0x158) while its armour drains to -wreckHitPoints by
+	// wreckHitPoints / (timeToStayAsWreck x 30) a tick, three times that
+	// with the AI running and the object mobile (AIDLL's *0x00b47ce4 slots
+	// 0x18 / 0x20; every vehicle body is); drained (or its time up) it
+	// fades for timeToStayAfterDestroyed (+0x15c, 0) and goes. With
+	// canBeDestroyed 0 or a time of -1 it never drains.
+	const float stay = number(t, "armor.timeToStayAsWreck", 20);
+	const float after = std::max(0.0f, number(t, "armor.timeToStayAfterDestroyed", 0));
+	const bool drains = number(t, "armor.canBeDestroyed", 1) != 0 && stay != -1;
+	body.wreckAge = 0;
+	body.wreckDrain = drains ? stay / (m_aiRunning ? 3.0f : 1.0f) : 0;
+	body.wreckTime = drains ? body.wreckDrain + after : 1e30f;
+	// A spectacular death (the killing hit's +0x250): with
+	// destroyOnSpectacularDeath (+0x165) the armour's next update starts
+	// the level's effects and removes the object, no wreck (0x00654120 sets
+	// +0x251, 0x00654d80 -> 0x006549a0, 0x00651db0); with
+	// hideChildrenOnSpectacularDeath (+0x164) the wreck's mesh shows its
+	// first part alone (0x00651c60: the other parts' matrices zero).
+	if (body.spectacular && number(t, "armor.destroyOnSpectacularDeath", 0) != 0) {
+		body.wreckTime = 0;
+		body.wreckDrain = 0;
+		body.destroyNow = true;
+	} else if (body.spectacular && number(t, "armor.hideChildrenOnSpectacularDeath", 0) != 0) {
+		body.hideChildren = true;
+		m_hiddenChildren.insert(body.object);
+	}
 	raise("VehicleDestroyed", {ScriptValue::object(body.object), ScriptValue::player(attacker)});
 	if (body.vehicle) {
 		body.vehicle->setInput({});
@@ -1146,10 +1171,10 @@ void GameWorld::followArmorEffects()
 			continue; // untouched
 		}
 		float now = known != m_hitPoints.end() ? known->second : body.effectHitPoints;
-		if (body.wreckTime >= 0 && body.wreckFor > 0) {
+		if (body.wreckTime >= 0 && body.wreckDrain > 0) {
 			const world::Object* object = m_objects.find(body.object);
 			const float wreck = object && object->objectTemplate() ? armorEffectList(*object->objectTemplate()).wreckHitPoints : 0;
-			now = std::min(now, 0.0f) - wreck * std::clamp(1 - body.wreckTime / body.wreckFor, 0.0f, 1.0f);
+			now = std::min(now, 0.0f) - wreck * std::clamp(body.wreckAge / body.wreckDrain, 0.0f, 1.0f);
 		}
 		if (!body.effectsSeen || now != body.effectHitPoints) {
 			armorEffectsAfterDamage(body, now);
@@ -1206,15 +1231,16 @@ void GameWorld::placeTracers()
 // hasRestrictedExit (0x005c7840): the seat's four places (0x005c71a0:
 // soldierExitLocation, the same mirrored across x, altSoldierExitPosition
 // and it mirrored; a place of zero length takes the vehicle's root
-// PlayerControlObject's), in the seat's frame, 0.5 m up. A place is
-// taken when nothing lies between the vehicle and it (0x006f2530, from
-// the vehicle's centre: 0x005c6ff0's start is not traced) and the ground
-// is more than 0.5 m below it; then, for an air vehicle (the template's
-// +0x3d0 2 or 3: VCAir, VCHelicopter) at once, else when there is ground
-// within 5 m below a point 0.25 m further out (the terrain's ray, slot
-// 0x8c). The first place that passed only the first tests is the
-// fallback. (The soldier's fit there, interface 0xc4d7 slot 0x14, is left
-// to the ray.)
+// PlayerControlObject's), in the seat's frame, 0.5 m up. A place is taken
+// when nothing lies between the vehicle and it (0x006f2530, from
+// exitRayStart's point), the ground is more than 0.5 m below it and a
+// standing soldier fits there (interface 0xc4d7 slot 0x14, 0x00585d00 with
+// pose 0 -> physics::soldierFits); then, for an air vehicle (the
+// template's +0x3d0 2 or 3: VCAir, VCHelicopter) at once, else when there
+// is something within 5 m below a point 0.25 m further out along the way
+// from the vehicle's centre to it (the terrain's ray, slot 0x8c, then the
+// objects', 0x006f2530). The last place that passed all but that is the
+// fallback; with none the soldier stays in.
 bool GameWorld::restrictedExit(const Body& body, const VehicleLayout& layout, int seat, physics::Vec3& at) const
 {
 	const SeatLayout& place = layout.seats[static_cast<size_t>(seat)];
@@ -1238,34 +1264,70 @@ bool GameWorld::restrictedExit(const Body& body, const VehicleLayout& layout, in
 		}
 		physics::Vec3 p = centre + body.body.rotation.transform(from->frameAt + from->frameTurn.transform(local));
 		p.y += 0.5f;
-		if (!lineOfSight(centre, p, body.object)) {
+		if (!lineOfSight(exitRayStart(body, p), p, body.object)) {
 			continue;
 		}
 		if (m_ground.height && !(m_ground.height(p.x, p.z) < p.y - 0.5f)) {
+			continue;
+		}
+		if (!soldierFits(p, SoldierPose::Stand, 0)) {
 			continue;
 		}
 		if (place.category == 2 || place.category == 3) {
 			at = p;
 			return true;
 		}
+		fallback = true;
+		kept = p;
 		physics::Vec3 out = p - centre;
-		out.y = 0;
-		const float across = std::sqrt(physics::lengthSquared(out));
-		const physics::Vec3 further = across > 1e-4f ? p + out * (0.25f / across) : p;
+		const float length = std::sqrt(physics::lengthSquared(out));
+		const physics::Vec3 further = length > 1e-4f ? p + out * (0.25f / length) : p;
 		if (!m_ground.height || m_ground.height(further.x, further.z) >= further.y - 5.0f
 			|| !lineOfSight(further, further - physics::Vec3 {0, 5.0f, 0}, body.object)) {
 			at = p;
 			return true;
-		}
-		if (!fallback) {
-			fallback = true;
-			kept = p;
 		}
 	}
 	if (fallback) {
 		at = kept;
 	}
 	return fallback;
+}
+
+// Where a restricted exit's ray starts (0x005c6ff0): with the root's
+// soldier collision LOD (slot 0xc4(2)), the place in the root's frame and
+// the ray from it towards the root's origin; where that first meets the
+// LOD's box (slot 0x54(2), the slab test 0x006ae680), back in the world.
+// Inside the box, or without one, the root's position.
+physics::Vec3 GameWorld::exitRayStart(const Body& body, const physics::Vec3& place)
+{
+	if (!body.hasSoldierBox) {
+		return body.body.position;
+	}
+	const physics::Vec3 p = body.body.rotation.untransform(place - body.body.position);
+	const physics::Vec3 d = p * -1.0f; // to the origin
+	float enter = 0, leave = 1;
+	const float o[3] = {p.x, p.y, p.z}, v[3] = {d.x, d.y, d.z};
+	const float lo[3] = {body.soldierBoxMin.x, body.soldierBoxMin.y, body.soldierBoxMin.z};
+	const float hi[3] = {body.soldierBoxMax.x, body.soldierBoxMax.y, body.soldierBoxMax.z};
+	for (int k = 0; k < 3; ++k) {
+		if (std::fabs(v[k]) < 1e-8f) {
+			if (o[k] < lo[k] || o[k] > hi[k]) {
+				return body.body.position;
+			}
+			continue;
+		}
+		float t0 = (lo[k] - o[k]) / v[k], t1 = (hi[k] - o[k]) / v[k];
+		if (t0 > t1) {
+			std::swap(t0, t1);
+		}
+		enter = std::max(enter, t0);
+		leave = std::min(leave, t1);
+	}
+	if (enter > leave || enter <= 0) {
+		return body.body.position; // no meeting, or the place is in the box
+	}
+	return body.body.position + body.body.rotation.transform(p + d * enter);
 }
 
 // Each tick: EMP wears off a step at a time; below armor.criticalDamage a
@@ -1291,13 +1353,23 @@ void GameWorld::stepVehicleDamage(float seconds)
 			body.empLevel = std::max(0.0f, body.empLevel - seconds / number(t, "armor.empLevelTime", 5));
 			body.vehicle->setInput({});
 		}
+		if (body.destroyNow) {
+			// destroyOnSpectacularDeath: the effects of the hit points now,
+			// then gone (0x00654d80's first branch).
+			armorEffectsAfterDamage(body, std::min(hitPoints(body.object), 0.0f));
+			m_effects.stopAttached(body.object, kArmorEffectTag);
+			m_objects.remove(body.object);
+			continue;
+		}
 		if (body.wreckTime >= 0) {
 			body.wreckTime -= seconds;
+			body.wreckAge += seconds;
 			if (body.wreckTime < 0) {
 				// The wreck's armour has drained to -wreckHitPoints: its last
 				// effects (level -100, left in the world) go off as it goes.
 				armorEffectsAfterDamage(body, -armorEffectList(t).wreckHitPoints);
 				m_effects.stopAttached(body.object, kArmorEffectTag);
+				m_hiddenChildren.erase(body.object);
 				m_objects.remove(body.object); // the body goes with it (stepPhysics)
 			}
 			continue;
@@ -2719,6 +2791,7 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 	info.manDown = player->manDown;
 	info.squad = player->squad;
 	info.cloaked = player->alive && player->cloaked;
+	info.rank = player->rank;
 	info.empLevel = player->alive ? static_cast<int>(std::ceil(player->empLevel)) : 0;
 	info.spawnedProne = player->alive && player->spawnedProne;
 	info.battery = player->battery;
@@ -3992,7 +4065,9 @@ void GameWorld::setSpawnVehicle(int id, uint32_t vehicle)
 // gives it back its own. (The server's branch of 0x005c9500 returns +0xcc,
 // set by setTeam 0x005cc320: by the spawners, 0x005ae490, and a
 // parachute's entering, 0x005cfaf0; the rewrite keeps the one team every
-// side reads.) Titans keep theirs.
+// side reads.) Titans keep theirs. After an exit (0x005c95b0) the
+// left seat's dontClearTeamOnExit (+0x34f) keeps an emptied vehicle's
+// team as it was.
 void GameWorld::stepVehicleTeams()
 {
 	for (Body& body : m_bodies) {
@@ -4017,6 +4092,9 @@ void GameWorld::stepVehicleTeams()
 		} else {
 			if (body.defaultTeam < 0) {
 				continue; // empty: its own (whatever sets it, the spawners)
+			}
+			if (body.dontClearTeam) {
+				continue; // dontClearTeamOnExit: it keeps the last sitter's team
 			}
 			team = body.defaultTeam;
 			body.defaultTeam = -1;
@@ -5471,6 +5549,19 @@ bool GameWorld::partTransforms(uint32_t object, std::vector<anim::Matrix>& parts
 	if (object == 0) {
 		return false;
 	}
+	// A spectacular wreck with hideChildrenOnSpectacularDeath (0x00651c60):
+	// the render object's parts 1.. take the zero matrix (0x006ae320), the
+	// first stays where it is.
+	if (m_hiddenChildren.count(object)) {
+		for (const Body& body : m_bodies) {
+			if (body.object == object && body.hideChildren && body.wreckTime >= 0) {
+				for (size_t i = 1; i < parts.size(); ++i) {
+					parts[i] = {};
+				}
+				return true;
+			}
+		}
+	}
 	for (const auto& owned : m_players) {
 		const Player& player = *owned;
 		if (!player.alive || player.weaponObject != object || player.worldPose.empty()) {
@@ -6091,6 +6182,15 @@ bool GameWorld::partPose(uint32_t object, const std::string& part, world::Vec3& 
 				rotation = {0, -body.guns[i].pitch, 0};
 				return true;
 			}
+			// The gun's recoil slide along its own z (GunRecoil, 0x005ddd80).
+			if (i < body.gunRecoil.size() && !seat.weapon.empty() && sameName(seat.weapon, part)) {
+				const float back = body.gunRecoil[i].slide(m_ticks);
+				if (back != 0) {
+					offset = {0, 0, -back};
+					rotation = {};
+					return true;
+				}
+			}
 		}
 	}
 	if (!state) {
@@ -6215,6 +6315,8 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 				}
 				added.restrictedExit = number(t, "hasRestrictedExit", 0) != 0;
 				added.maintainCameraOnExit = number(t, "maintainCameraOnExit", 0) != 0;
+				added.maintainCameraOnExitToOther = number(t, "maintainCameraOnExitToOtherVehicle", 0) != 0;
+				added.dontClearTeamOnExit = number(t, "dontClearTeamOnExit", 0) != 0;
 				added.exitSpeedMod = number(t, "exitSpeedMod", 1);
 				added.category = vehicleCategory(vehicle);
 				layout.seats.push_back(added);
@@ -6266,6 +6368,11 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 					if (has("WeaponBasedRecoilComp")) {
 						owner.cameraRecoilSpeed = number(t, "recoil.cameraRecoilSpeed", 0);
 						owner.cameraRecoilSize = number(t, "recoil.cameraRecoilSize", 0);
+						owner.gunRecoil = GunRecoil::fromTemplate(t);
+					}
+					if (has("ToggleCameraComp")) {
+						owner.startCameraId = static_cast<int>(number(t, "zoom.startCameraId", -1));
+						owner.startCameraViewMode = static_cast<int>(number(t, "zoom.startCameraViewMode", 2));
 					}
 					if (has("SimpleDeviationComp")) {
 						owner.deviation = DeviationBuildUp::fromTemplate(t);
@@ -6666,6 +6773,7 @@ void GameWorld::enterOrLeaveVehicle(Player& player, world::Object& soldier)
 		if (seat >= 0 && static_cast<size_t>(seat) < body->occupants.size()) {
 			body->occupants[static_cast<size_t>(seat)] = -1;
 		}
+		body->dontClearTeam = leaving && leaving->dontClearTeamOnExit;
 		physics::Vec3 exit {-2.5f, 0, 0};
 		const world::Object* vehicleObject = m_objects.find(body->object);
 		if (const world::ObjectTemplate* t = vehicleObject ? vehicleObject->objectTemplate() : nullptr) {
@@ -6738,6 +6846,44 @@ void GameWorld::enterOrLeaveVehicle(Player& player, world::Object& soldier)
 		// (0x004bda00 -> pickUpClosestKit, Kits.cpp).
 		pickUpClosestKit(player, 3.0f);
 	}
+}
+
+bool GameWorld::vehicleInReach(int id) const
+{
+	const Player* player = findPlayer(id);
+	if (!player || !player->alive || player->vehicle || player->manDown) {
+		return false;
+	}
+	GameWorld& self = const_cast<GameWorld&>(*this); // the layouts' cache
+	for (const Body& body : m_bodies) {
+		const Titan* titan = body.vehicle ? nullptr : titanByObject(body.object);
+		const world::Object* object = (body.vehicle && body.wreckTime < 0) || (titan && !titan->wrecked)
+			? m_objects.find(body.object)
+			: nullptr;
+		if (!object || !object->objectTemplate()) {
+			continue;
+		}
+		const VehicleLayout& layout = self.vehicleLayout(*object->objectTemplate());
+		const auto freeAt = [&](size_t i) { return i >= body.occupants.size() || body.occupants[i] < 0; };
+		bool anyFree = false;
+		for (size_t i = 0; i < layout.seats.size() && !anyFree; ++i) {
+			anyFree = freeAt(i);
+		}
+		if (!anyFree) {
+			continue;
+		}
+		const std::vector<VehicleLayout::Entry> fallback {{{0, 0, 0}, 4}};
+		for (const VehicleLayout::Entry& entry : layout.entries.empty() ? fallback : layout.entries) {
+			if ((entry.seat >= 0 && !freeAt(static_cast<size_t>(entry.seat))) || (titan && entry.seat < 0)) {
+				continue;
+			}
+			const physics::Vec3 at = body.body.position + body.body.rotation.transform(entry.position);
+			if (physics::lengthSquared(at - player->body.position) <= entry.radius * entry.radius) {
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 // The seat's camera on the mouse (a Camera bundle with inputToYaw
@@ -6886,6 +7032,23 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims)
 		p.tracerStart = p.origin;
 	}
 	m_projectiles.push_back(p);
+	// WeaponBasedRecoilComp (0x005ddfc0): the gun's slide, and its push on
+	// the vehicle (slot 0xa0: -forward x recoilForce at the gun, no mass).
+	if (seat.gunRecoil.any()) {
+		if (body.gunRecoil.size() <= static_cast<size_t>(player.seat)) {
+			body.gunRecoil.resize(static_cast<size_t>(player.seat) + 1);
+		}
+		GunRecoil& recoil = body.gunRecoil[static_cast<size_t>(player.seat)];
+		if (recoil.speed == 0 && recoil.force == 0) {
+			recoil = seat.gunRecoil;
+		}
+		recoil.fired(m_ticks);
+		if (recoil.force > 0) {
+			const physics::Vec3 at = body.body.rotation.transform(seat.weaponPosition);
+			body.body.addForce(at, straight * -recoil.force);
+			wake(body);
+		}
+	}
 	++player.roundsFired;
 	++player.gunShots;
 	weaponSound(WeaponSoundEvent::Fire, player, body.object, seat.weapon, p.origin);
@@ -7127,6 +7290,21 @@ bool GameWorld::buildBody(const world::ObjectTemplate& tRef, uint32_t id, const 
 	bool typeFour = false;
 	for (const auto& part : physics::collisionParts(*mesh, 0)) {
 		typeFour = typeFour || physics::collisionLodFor(*mesh, part, 4) != nullptr;
+		// The soldier LOD's box over the parts (slot 0x54(2)).
+		if (const physics::CollisionLod* soldier = physics::collisionLodFor(*mesh, part, 2)) {
+			const physics::Vec3 lo {soldier->boundsMin[0], soldier->boundsMin[1], soldier->boundsMin[2]};
+			const physics::Vec3 hi {soldier->boundsMax[0], soldier->boundsMax[1], soldier->boundsMax[2]};
+			if (!body.hasSoldierBox) {
+				body.soldierBoxMin = lo;
+				body.soldierBoxMax = hi;
+				body.hasSoldierBox = true;
+			} else {
+				body.soldierBoxMin = {std::min(body.soldierBoxMin.x, lo.x), std::min(body.soldierBoxMin.y, lo.y),
+					std::min(body.soldierBoxMin.z, lo.z)};
+				body.soldierBoxMax = {std::max(body.soldierBoxMax.x, hi.x), std::max(body.soldierBoxMax.y, hi.y),
+					std::max(body.soldierBoxMax.z, hi.z)};
+			}
+		}
 		const physics::CollisionLod* found = physics::collisionLodFor(*mesh, part, 1);
 		if (!found) {
 			continue;
@@ -7657,7 +7835,6 @@ void GameWorld::launchDrone(Player& player, const world::ObjectTemplate& detonat
 	if (const world::ObjectTemplate* gun = findInTree(m_templates, t, "GenericFireArm")) {
 		const FireArmSettings settings = FireArmSettings::fromTemplate(*gun);
 		drone.weapon = std::make_unique<FireArm>(settings);
-		drone.weapon->setUseFireModes(false); // its auto controller holds the trigger (FireArm::setUseFireModes)
 		drone.gunDeviation = DeviationBuildUp::fromTemplate(*gun);
 		drone.projectile = projectileFor(settings.projectileTemplate);
 		const auto& components = gun->components();
@@ -7852,7 +8029,7 @@ void GameWorld::stepDrones(float seconds)
 		// (UAVDrone) at an enemy. Under EMP above level 1 the sentry's
 		// controller inputs are cut (fireSentry, 0x005ca2e0).
 		if (drone.weapon && drone.pulse) {
-			if (drone.weapon->tick(seconds, true)) {
+			if (drone.weapon->tick(seconds, autoTrigger(drone, true))) {
 				pulse(drone);
 			}
 		} else if (drone.weapon) {
@@ -7869,6 +8046,14 @@ void GameWorld::stepDrones(float seconds)
 // within pulse.viewDistance (+0.01) of the drone, with no line of sight
 // needed. The server sends them to the drone's team with pulse.revealTime
 // (seconds) to show on its minimap; the team's own are left out here.
+bool GameWorld::autoTrigger(Drone& drone, bool want)
+{
+	const bool automatic = drone.weapon && drone.weapon->fireMode() == kFireAutomatic;
+	const bool press = want && (automatic || !drone.tapped);
+	drone.tapped = press;
+	return press;
+}
+
 void GameWorld::pulse(const Drone& drone)
 {
 	const float reach = drone.pulseDistance + 0.01f;
@@ -8029,7 +8214,7 @@ void GameWorld::fireSentry(Drone& drone, float seconds)
 		drone.gunYaw = std::remainder(drone.gunYaw + kSentryScanningSpeed * 30 * seconds, 6.2831853f);
 	}
 	drone.gunDeviation.update(onTarget); // the auto controller holds the trigger while on target
-	if (!drone.weapon->tick(seconds, onTarget) || !onTarget || !drone.projectile) {
+	if (!drone.weapon->tick(seconds, autoTrigger(drone, onTarget)) || !onTarget || !drone.projectile) {
 		return;
 	}
 	physics::Vec3 direction = aim - drone.position;

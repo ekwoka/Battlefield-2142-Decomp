@@ -48,16 +48,28 @@ inline ViewFog viewFog(const std::array<float, 3>& fogColor, const std::array<fl
 	return fog;
 }
 
-// RaCommon.fx calcFog: how much of the surface shows at view depth `w`
-// (1 none of the fog, 0 all of it) from FogRange (0x100355c0: 1 / (e - s),
-// -base / (e - s), -s / (e - s), e / (e - s)) and FogColor.w (the fog's
-// fourth value): max((e - base w) / (e - s), w4) - ((w - s) / (e - s))^3.
-inline float fogVisibility(const std::array<float, 4>& startEndAndBase, float w)
+// RaCommon.fx's FogRange as 0x100355c0 makes it from the start, end and
+// base: (1 / (e - s), -base / (e - s), -s / (e - s), e / (e - s)). The
+// shaders evaluate it at their clip-space w (calcFog(Out.Pos.w)): the view
+// depth in metres, the same units the scripts give (Cerbere Landing fogs
+// out at 140 m, its GameLogic.MaximumLevelViewDistance; the exe's AI view
+// distance, BF2142.exe 0x008959f0, reads the same values as metres).
+inline std::array<float, 4> fogRange(const std::array<float, 4>& startEndAndBase)
 {
 	const float start = startEndAndBase[0], end = startEndAndBase[1];
-	const float span = std::max(end - start, 1e-3f);
-	const float far = std::clamp((w - start) / span, 0.0f, 1.0f);
-	const float close = std::max((end - startEndAndBase[2] * w) / span, startEndAndBase[3]);
+	const float inverse = 1.0f / std::max(end - start, 1e-3f);
+	return {inverse, -startEndAndBase[2] * inverse, -start * inverse, end * inverse};
+}
+
+// RaCommon.fx calcFog: how much of the surface shows at view depth `w`
+// (1 none of the fog, 0 all of it) from FogRange and FogColor.w (the fog's
+// fourth value): max((e - base w) / (e - s), w4) - ((w - s) / (e - s))^3,
+// saturated as the fog factor is (fog.glsl).
+inline float fogVisibility(const std::array<float, 4>& startEndAndBase, float w)
+{
+	const auto range = fogRange(startEndAndBase);
+	const float far = std::max(w * range[0] + range[2], 0.0f);
+	const float close = std::max(w * range[1] + range[3], startEndAndBase[3]);
 	return std::clamp(close - far * far * far, 0.0f, 1.0f);
 }
 

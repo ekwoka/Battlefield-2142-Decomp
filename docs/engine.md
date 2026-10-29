@@ -866,8 +866,12 @@ false with fewer than two; on true the sound component plays
 APCs' gunners `1`. The weapon HUD shows `firerate_<mode>.tga`
 (`0x007be640`) only with `weaponHud.hasFireRate`, which every shipped
 weapon sets to 0. Rewritten in `FireArm` (`tick`, `toggleFireMode`,
-`fireMode`); the drones' and sentry guns' firearms ignore the mode (their
-auto controller's trigger cadence isn't traced).
+`fireMode`). The drones' and sentry guns' guns keep their modes: their
+auto controllers are AIDLL bots whose fire statement (`0x100777a0`; the
+simple fire plan's BAPATrigger `0x100d3110`, button 8) holds the trigger
+for an automatic gun and taps it otherwise, pressed on one execution and
+let go on the next (`GameWorld::autoTrigger`); the recon drone's
+single-fire gun so still fires at its 10 a minute.
 
 **Tracers.** The GenericProjectile template (`0x005b3500`, saved by
 `0x005b5850` at base + 8) has `tracerTemplate` (`+0x2d0`, resolved at
@@ -901,8 +905,23 @@ seconds × speed × `*0x00a739c4` (1) and stops past 1; the kick is
 sin(phase × 2π) × size × `*0x00a739c0` (0.6) degrees, summed with the
 shakes into one turn about the camera's `+0x330` axis (`0x00610620` →
 `0x005b1a70`, degrees: `0x006ad210` scales by 0.01745). `CameraRecoil`,
-`PlayerCamera::shakeDegrees`. The gun's own recoil (recoilSize,
-recoilSpeed, recoilForce) is not rewritten.
+`PlayerCamera::shakeDegrees`.
+
+**Gun recoil.** The same component's own fields (template: recoilForce
+`+0xc`, recoilSpeed `+0x10`, recoilSpeedGB `+0x14`, recoilSize `+0x18`;
+the setters `0x005dda80` / `0x005ddac0` keep π / recoilSpeed at `+0x1c`
+and (π / 2) / recoilSpeedGB at `+0x20`). Each round (`0x005ddfc0`) stamps
+two tick counts: the kick ends round(`+0x1c` × 15) ticks on, the return
+round(`+0x20` × 30) after it. The update (`0x005ddd80`, with recoilSpeed
+above 0) slides the gun's local matrix back along its own z: during the
+kick by size × 0.025 × sin((`+0x1c` / 2 + t) × recoilSpeed), t the seconds
+left of it, during the return by size × 0.025 × t / `+0x20`, then back at
+rest. With recoilForce above 0 the round also pushes the root's physics
+by −forward × recoilForce at the gun (slot `0xa0`, `0x006c7b10`: into the
+acceleration with no mass, its moment into the torque; slot `0x160` wakes
+it); above 5 it also starts `0x005a6e70` (the explosions' camera shake
+for players near), which the rewrite leaves out. `GunRecoil`
+(Weapons.h), `GameWorld::partPose` (the gun's slide), `stepGunner`.
 
 **Armour effects.** `armor.addArmorEffect` and
 `armor.addArmorEffectSpectacular` share one map of levels (the template's
@@ -920,10 +939,26 @@ has one. Levels 0 and −100 are left in the world, the others follow the
 vehicle. The wreck's hit points drain to −wreckHitPoints over
 timeToStayAsWreck (see the Titans), so the −1 … −99 groups (the aircraft's
 burning) start on the way and the −100 group as it goes. Rewritten for
-vehicles in `GameWorld::armorEffectsAfterDamage` / `followArmorEffects`
-(the drain is linear over the rewrite's wreck time; the AI's ×3 is left
-out). Not done: `addWreckArmorEffect`, hideChildrenOnSpectacularDeath,
-destroyOnSpectacularDeath.
+vehicles in `GameWorld::armorEffectsAfterDamage` / `followArmorEffects`.
+
+The wreck (`0x00652380`): timeToStayAsWreck (template `+0x158`, 20 by
+default) drains the armour to −wreckHitPoints by wreckHitPoints /
+(timeToStayAsWreck × 30) a tick, three times that with the AI running and
+the object mobile (as for the Titans); drained or its time up, it fades
+for timeToStayAfterDestroyed (`+0x15c`, 0) and goes (`0x00651db0`).
+canBeDestroyed 0 or a time of −1: it never drains. A spectacular death
+(the killing hit's `+0x250`): with destroyOnSpectacularDeath (`+0x165`)
+`0x00654120` sets `+0x251` instead of making a wreck, and the next update
+(`0x00654d80`) starts the effects of the hit points now (`0x006549a0`) and
+removes the object; with hideChildrenOnSpectacularDeath (`+0x164`) the
+wreck's render objects (`0x00651c60`, over the tree) give every mesh part
+after the first the zero matrix (`0x006ae320`): only the hull part shows
+(`GameWorld::partTransforms`). `addWreckArmorEffect` (template slot
+`0x16c`, `0x00630c00`: names `+0x7c`, positions `+0x8c`, rotations `+0x9c`,
+levels `+0xac`) is resolved into the armour's second level map
+(`0x0062fb50`, `+0x1c`), which `0x00655630` hands to the armour's
+`+0x210`; nothing in BF2142.exe reads `+0x210`, and no shipped template
+calls it: kept (`armor.addWreckArmorEffect.list`), never started.
 
 **Leaving a seat.** The PlayerControlObject template (save at base + 8):
 soldierExitLocation `+0x308`, altSoldierExitPosition `+0x354`,
@@ -936,16 +971,62 @@ between the vehicle and it (`0x006f2530`) and the ground lies over 0.5 m
 below, then at once for an air vehicle (template `+0x3d0` 2 or 3), else
 when there is ground within 5 m below a point 0.25 m further out; the
 first that passed only the first tests is the fallback; with none the
-soldier stays in. (The soldier's fit there, interface `0xc4d7` slot
-`0x14`, and `0x005c6ff0`'s ray start are left to the ray from the
-vehicle's centre.) The exit (`0x004bb570`) gives the soldier the vehicle's
+soldier stays in. The test in full: the ray (`0x006f2530`, ignoring the
+vehicle) runs from `0x005c6ff0`'s start: with the root's soldier
+collision LOD (`+0x14` & 8, slot `0xc4(2)`), the place in the root's frame
+and the line from it to the root's origin; where that first meets the
+LOD's box (slot `0x54(2)`, the slab test `0x006ae680`), back in the world,
+else the root's position. Then the ground over 0.5 m below, then a
+standing soldier must fit (interface `0xc4d7` slot `0x14`, `0x00585d00`
+with pose 0 → `physics::soldierFits`); the further test's point is 0.25 m
+on along the way from the vehicle's centre (all three axes), and the
+fallback is the last place that got that far. `GameWorld::exitRayStart`. The exit (`0x004bb570`) gives the soldier the vehicle's
 velocity × exitSpeedMod (× 0.7 for an object that is no control object);
 with maintainCameraOnExit (`0x005cea00`) it faces the way the seat's camera
 looked (the camera matrix's yaw, `0x006ad2a0`). `GameWorld::restrictedExit`,
-`enterOrLeaveVehicle`. Not done: maintainCameraOnExitToOtherVehicle,
-dontClearTeamOnExit, takeOverInput, ToggleCameraComp (the weapon's zoom
-switching the seat's camera by `zoom.startCameraId` /
-`startCameraViewMode`).
+`enterOrLeaveVehicle`. The template's flags (its save at base + 8):
+maintainCameraOnExit `+0x480`, maintainCameraOnEnter `+0x481`,
+maintainCameraOnExitToOtherVehicle `+0x488` (getters slots `0x128`,
+`0x130`, `0x148` of the interface at `+0x298`). Going straight from one
+vehicle into another (GameServer `0x004b0b90`: the APCs' pod seats, the
+Titans' pod arrays) the seat's maintainCameraOnExit is set to true for
+that exit when it has maintainCameraOnExitToOtherVehicle and put back
+after: the soldier riding the pod faces the seat camera's way
+(`launchPod`). dontClearTeamOnExit (`+0x34f`): after an exit the server
+(`0x005c95b0`) gives the root's control objects the team of the players
+still aboard, none the default team (`+0x254`), except that with the left
+seat's flag and nobody aboard the team stays (`stepVehicleTeams`).
+
+**ToggleCameraComp** (template `0x005db120`; changeCameraId `+0x14` −1,
+changeCameraViewMode `+0x18` 2, startCameraId `+0x1c` −1,
+startCameraViewMode `+0x20` 2, useProjectileCamera `+0x24`,
+allowUntoggledFire `+0x25` 1). As its weapon is taken up (`0x005db260`)
+the seat's control object takes camera startCameraId (slot `0x4c`) and the
+camera the view mode (slot `0x18`): the static AV's scope and the
+gunship and hover bike missile seats' camera 11 (`SeatLayout::startCameraId`,
+`PlayerCamera::findSeatCamera`; a duck's camera 1 still wins). Event 7
+(`0x005db2f0`) toggles to changeCameraId and back (no shipped weapon sets
+one); without a changeCameraId it can always fire (`0x005daee0`), so
+allowUntoggledFire 0 changes nothing for the shipped ones. Not rewritten:
+useProjectileCamera and the Camera's takeOverInput (`+0x42c`, slot `0x88`
+of vtable `0x00979a50`: the PlayerControlObject's input `0x005ca2e0`
+hands the input to the active camera's root, the TV-guided missile, and
+stops), which need the missile's own camera (as_ag's
+`AAGuided_missile`, the hover bike's `as_bike_TV_missile`).
+
+**Not read.** The Camera's bounce (bounceLength `+0x3d8`,
+bounceSensitivity `+0x3dc`, bounceStrength `+0x3e0`, bounceDamping
+`+0x3e4`; only the FAVs' and the hover bike's cameras set them) and sway
+(cameraSwayRodLength `+0x3ac` .. cameraSwaySpringDamping `+0x3c8`, set by
+no shipped template) have their property accessors (`0x005258f9` ..
+`0x005268bf`) and the bounce its save (`0x006111b0`), and no other reader
+in BF2142.exe: retail does nothing with them.
+
+**Tracers in joined clients.** The rounds that carry tracers are not
+networked (the bullets have no networkable info), so a client makes them
+from other players' firing; the rewrite's client doesn't decode the
+server's shots (see "In joined games"), so it has no rounds of others to
+put tracers on. Not done.
 
 ## Animation systems
 
@@ -1705,18 +1786,22 @@ come from two places:
   `affectLightmappedObjects 1`.
 
 Spot lights (`lightType Spot`, one shipped template) light within a cone
-about their `direction` (default +z, turned with the object): full inside
-coneAngle1, gone outside coneAngle2, both taken as half angles in degrees
-with a smooth step between. Still a guess: the templates give degrees
-(BigSpot 25 / 25, ZurichLight01 20), the shaders want a cosine-space
-width c — SkinnedMesh.fx `saturate(cos − (1 − c)) / c`, LightGeom.fx
-`saturate(cos² − (1 − c))`, LightManager a conical texture over 1 − cos²
-— handed as ConeAngle from the light's slot 0x1c8 (`0x10060000` region,
-the "Spotlight" technique); where the degrees become c wasn't found (no
-degree-to-radian constant near the template's +0xd0 / +0xd4 in either
-binary; the exe's setters only clamp them to 180, `0x00617790` /
-`0x006177c0`, and the light manager's own spot techniques are never drawn:
-see "Projector lights" below). Directional
+about their `direction` (default +z, turned with the object). The degrees
+become the shaders' width in the exe: the LightSource object
+(constructor `0x0064b170`, vtable `0x00987290`, template at `+0x160`)
+clamps coneAngle1 / 2 to 180 and keeps each in degrees and radians
+(`+0x1a0` / `+0x1a4`, `+0x1a8` / `+0x1ac`, × 0.017453292); its slot 0x1c8
+(`0x0064aad0`) returns coneAngle2's radians, which RendDX9 hands to
+ConeAngle unchanged (`0x1006bf8a` → `0x1006c155`, the "Spotlight"
+technique of shaders/LightGeom). The same constructor clamps
+attenuationRange1 / 2 to 100 (`+0x17c` / `+0x180`; slot 0x198 is the
+second, slot 0x1a0 the colour). That pass is the lightmap generator's
+(`0x1006a990`, LightGeom.fx `saturate(cos² − (1 − c))`); in the game no
+shader is handed a cone: "ConeAngle" and "SpotDir" occur once in
+RendDX9_ori.dll, and the terrain's SPOTLIGHT handle (`0x100ae040`, `+0x248`)
+is fetched but never set. The rewrite lights in-game spots with
+SkinnedMesh.fx's form, `saturate(cos − (1 − c)) / c` with c = coneAngle2 in
+radians (full on the axis); coneAngle1 reaches no shader. Directional
 lights (the sun) are left to the level lighting.
 
 `Object.setLightSourceMask` (`0x006ed811`; 398 statics on Cerbere_Landing
@@ -2091,11 +2176,17 @@ view distance (`0x10028020`: the settings object's `+0x108`,
 (calcFog: max((e − base w) / (e − s), w₄) − ((w − s) / (e − s))³).
 Rewritten in `src/Render/Fog.h`: under the sea the clear colour and the
 shaders' fog are the water's, its end as scripted (Cerbere Landing 10 m),
-and the dome isn't drawn. Above it the level fog keeps the rewrite's
-(depth / 1400 m)² stand-in: with the scripted ends in metres (Cerbere 140,
-Camp Gibraltar 100) calcFog would fog the levels far closer than they
-look, so the depth the shaders take (`Out.Pos.w`) is not yet known to be
-metres. `terrain.waterSunIntensity` (`0x100766e2` → `0x100767e9`) sets the
+and the dome isn't drawn. Above it the level's fog is drawn the same
+way: the shaders take calcFog at the clip-space w (`Out.Pos.w`, the view
+depth in metres), FogRange as `0x100355c0` makes it from the start, end
+and base, FogColor.w the fourth value (`src/Render/Shaders/fog.glsl`,
+`Fog.h fogRange`). The units are metres: the scripts' ends match the
+levels' `GameLogic.MaximumLevelViewDistance` (Cerbere Landing 140 / 140,
+Sidi Power Plant 345 / 345) and the exe's AI reads the same values as
+metres (`0x008959f0`). Cerbere Landing's 0 / 140 / 1 / 0.5 leaves 62 % of a
+surface's colour to the fog at 70 m and all of it at 140 m. (A second
+caller sets 0 / 10000 / 1 / 0.5 around a pass of its own, `0x10020000`
+region, not followed.) `terrain.waterSunIntensity` (`0x100766e2` → `0x100767e9`) sets the
 water material's PointColor (`+0x4c` of its parameter block, `0x10040070`)
 to (1, intensity, 0.8, 1); without a water lightmap (none ship)
 RaShaderWaterBase.fx takes it as the lightmap: the sun's share scales the
@@ -2136,7 +2227,13 @@ times the square root of its speed (slots 0x40 / 0x4c, the instance's
 view narrower than its first. Not done: whether the started zoomed-mode
 systems with showInFirstPerson 0 draw unzoomed (the system's `+8` reader
 in RendDX9 isn't traced), so the rewrite starts first-person systems by
-showInFirstPerson alone.
+showInFirstPerson alone. `nearCullingEnable` (sprites; the exe's
+`0x00623740` / `0x00623760` forward to RendDX9's template slots 0x248 /
+0x24c, `+0x284`): in the sprite draw (`0x101318e0`) a particle less than
+6 m (`+0x270`) past the near plane and bigger than 0.15 (`+0x278`) has its
+distance fade replaced by (1 − t) + t f (t = (6 − d) × 0.5 at most 1, f =
+max(1 − (size − 0.15) × 4, 0)), and below 0.01 (`+0x280`) isn't drawn
+(`ParticleView::nearFade`).
 
 **Projector lights and the lights' shadows.** The LightSource template
 keeps `castsStaticShadow` / `castsDynamicShadow` / `selfShadows` /
@@ -2151,8 +2248,8 @@ besides the load and the release), and no "SpotProjector" string exists
 in RendDX9_ori.dll. So retail draws no projected textures and no per-light
 shadows; the rewrite keeps the templates' values unread. The cone
 angles' setters clamp to 180 (`0x00617790` / `0x006177c0`, the
-template's `+0xd8` / `+0xdc`); where the degrees become the shaders'
-width is still not found (see the spot lights above).
+template's `+0xd8` / `+0xdc`); the light object turns coneAngle2 into the
+shaders' radians (see the spot lights above).
 
 **Static-mesh and bundled material detail.** `setMaterialReflectionScale`
 and `setSpecularStaticGloss` (`0x10073caf` / `0x10073eb9`) act on bundled
@@ -2162,11 +2259,34 @@ material (`0x100a25d0` `+0xec`, `0x100a26b0` `+0xf8`);
 0x38, empty for bundled ones (`0x100a7d70`); `nrOfAnimatedUVMatrix`
 (`0x10073ba7`) the bundled template's `+0x110`. The rewrite keeps all
 four (`geom::GeometryTemplate`) and draws a bundled material's StaticGloss
-from its setSpecularStaticGloss (0.15 otherwise). Not drawn: the
-reflection scale (the rewrite draws no bundled envmaps), parallax and the
-static meshes' detail / crack normal maps (the static vertex format has no
-tangents; RaShaderSTM's parallax needs them), and the animated UV
-matrices (the exe's per-part UV transforms, the tracks', aren't traced).
+from its setSpecularStaticGloss (0.15 otherwise).
+
+*Static meshes per pixel.* Every shipped static mesh declares a FLOAT3
+position and a FLOAT3 TANGENT; the vertex format now carries the tangent
+and the binormal's sign (`Vertex::tangent`: RaShaderSTM
+getBinormalFlipping's 1 − 2 × Pos.w, −1 with Direct3D's default w of 1;
+bundled and skinned meshes' sign from the third blend-index byte as
+before, no longer packed into the layers' coordinates). The techniques'
+literals (RaShaderSTM.mfx) name the maps after the colour layers: NDetail's
+"_deb" map, NCrack's "_crb" (3,152 BaseDetailNDetail materials, 269 with
+NCrack, 24 parallaxdetail across the static archives). With any of them
+the material takes RaShaderSTM's PERPIXEL path (mesh.frag): the normal from
+the detail normal map, the crack normal map over it by the crack's alpha,
+the sun's N·L and the specular by it, the sky by
+`lightmap.b × dot(N, skyNormal (0.78, 0.52, 0.65))` in the tangent frame
+(getDiffusePixelLighting). Parallax (calculateParallaxCoordinatesFromAlpha):
+the detail normal map's alpha × scale − scale / 2 along the tangent-space
+eye's (x, −y), on the detail and normal maps' coordinates;
+ParallaxScaleBias's scale is the template's height scale (the
+setMaterialParallaxHeightScale map at `+0x80`, 15 by default, `0x100db690`)
+over the detail map's width and height (`0x100d9c00`; `0x100d9d90`'s
+default 1/512, 1/2048 is the shipped 512×2048 detail map's). The lighting
+level drops parallax at medium and the normal maps at low (the
+DeprecationList; `0x10151830` skips "_deb" / "_crb"). The reflection scale
+reaches no shader line: RaShaderBM.fx lerps by a fixed gloss / 4 (its
+comment names eyePos.w the reflection scale, nothing reads it). Not
+drawn: the animated UV matrices (the exe's per-part UV transforms, the
+tracks', aren't traced).
 
 **`undergrowth.simpleShaderEnable`** (`0x100862e7`) writes the
 undergrowth's slot 0x40, the value the quality switch also writes: the
@@ -2178,7 +2298,8 @@ size given (at most the device's texture size) and saves the hemi map: an
 editor tool no shipped script calls; still a stub.
 
 **Tests.** The renderer's GPU-free parts are headers the tests include
-(`bf2142_tests` doesn't link the renderer): `TitanParts.h`, `Fog.h`,
+(`bf2142_tests` doesn't link the renderer): `TitanParts.h`, `Fog.h`
+(with FogRange), `EnvMaps.h`,
 `SceneMath.h` (the shadow region and map size, BC3 alpha, the hemi maps'
 texels and the Titan maps' bilinear sample, HeightOverTerrain, the clouds'
 offsets, the normal maps' kinds) and `OverheadView.h` (the overhead
@@ -2330,9 +2451,8 @@ filled at `0x1002a4a0` / `0x1002cef0`):
   +0x100), else in object space (`_OBJSPACENORMALMAP_`: the first-person
   arms' "_b_os.dds"). The tangent is the vertex's TANGENT, the binormal
   cross(tangent, normal) × (1 − 2 × the third blend-index byte)
-  (createWorld2TanMat / getTangentBasis). Bundled and skinned meshes keep
-  the tangent in the static layers' coordinates (Vertex dirtCoord,
-  crackCoord), mesh.vert hands mesh.frag the map's frame in the world,
+  (createWorld2TanMat / getTangentBasis). The tangent and the sign are
+  the vertex's (`Vertex::tangent`), mesh.vert hands mesh.frag the map's frame in the world,
   and the map is bound in the dirt map's place; the bumped normal lights
   the sun, the point lights and the specular, a skinned mesh's hemi lerp
   too (per pixel at RAPATH 0), its alpha is the gloss unless the colour
@@ -2365,9 +2485,17 @@ names "envmap" and static meshes (BM `_HASENVMAP_`: `lerp(diffuse,
 texCUBE(R), gloss / 4)` with a Fresnel alpha; reflection scale
 `setMaterialReflectionScale`, default 0.25), and the Titan interiors bind
 `common/textures/indoorenvmap`. `generateEnvMaps` and `save` are the
-editor's. No retail level ships an .emi (only six community levels do;
-no script calls `envmapManager.*`), so in the retail game the cube stays
-unset: not drawn, as shipped.
+editor's. Every retail level ships its .emi in the server archive (Cerbere
+Landing, Belgrade: one map, `EnvMap0 -88,54,66,1`) and the cubes in the
+client's. The static drawables take the cube unconditionally (`0x100bdb00`,
+`+0x13c`), the bundled ones with an envmap material (`0x100c5030`,
+`+0x37` → `+0x120`; with no cube a technique without, `0x1014e570`).
+RaShaderSTM lerps the lit colour towards the cube: per pixel at the
+reflection off the bumped normal by (1 − saturate(0.95 (E·N)²)) × gloss,
+per vertex by gloss × 2 × (1 − |E·N|); RaShaderBM the diffuse by gloss / 4
+before lighting. Rewritten in `src/Render/EnvMaps.h` (the parse and the
+nearest map) and mesh.frag (sampler 10). Not done: the Titan interiors'
+indoor cube (`+0x6c`, `0x100c3880`).
 
 **Sky layers and the sun flare** (`0x100fd2f0`, `0x100fd900`, SkyDome.fx).
 With `skyDome.hasCloudLayer` the dome's technique is SkyDomeNV3x (one
@@ -4106,8 +4234,10 @@ them; fire.radioMessageDelay is the laser painter's, `0x005e1730`, its
 Team changes (`0x00656e80` from a control point's setTeam `0x005cc320`)
 play for the local player only (game slot 0x60, `0x0042e820`): to no team
 neutralTeamChangeMessage if it was the local team's, else friendly if the
-local player is on the new team and enemy if not (SiloSyncEvent's "_N"
-suffix, `0x00514030`, not added). The weapons' failMessage (a refused pull
+local player is on the new team and enemy if not, a missile silo's ending
+in SiloSyncEvent's "_N" (`0x00514030`: the silo's index, its ancestor's
+slot 0x38, as "_%d" into the Radio's `+0x18`; the voice table has
+AUTO_TITAN_C_friendlycapturedsilo_1..5 and the others). The weapons' failMessage (a refused pull
 of the trigger, `0x005c2ee0`) and useMessage (the shot) are the player's
 own on TCLocalTeam (10, game slot 0x50), once until a reload re-arms them
 (`0x005c58a0`). Takeable / not takeable: a control point's
@@ -4125,7 +4255,8 @@ SiloSyncEvent's "_N" (`0x00514030`, `sprintf("_%d")` into the Radio's
 `+0x18`) is appended to the team-change messages. `GameAudio::autoRadio`
 (objects, takeable), `GameWorld`'s fire (weapons) and the silos' launch.
 Not rewritten: a joined client's takeable radio (its ghost's bits aren't
-applied to a world), the "_N" suffix, destroyedGameEvent (no reader).
+applied to a world, and a joined game has no radio voice path yet),
+destroyedGameEvent (no reader).
 The
 closeToIndication* and indicationDistance* aren't radio: the server's
 0.2 s scan (`0x0059a6c0`) posts events 0x3e / 0x3f as a player comes
@@ -4496,8 +4627,17 @@ name>/scoreBoard_Flag.tga`. The lists are BF2142.exe's
   manager's slot `0x410` and the player's `+0x404` (slot `0x3bc`, set
   through `0x3b8`) also make a row black; what they mean isn't traced.
   `menu::scoreboardStyle` (`src/Main/HudMenus`).
-- Rows are sorted by the scripts' score. The original groups them by
-  squad under squad header rows (`0x007ba570`); the rewrite doesn't.
+- Rows are sorted by the scripts' score. The "Squads" tab
+  (`scoreboard.setToggleShow 1`, ToggleSquads) groups them
+  (`menu::scoreboardBySquad`): the commander under
+  "HUD_HUD_MENU_COMMANDER_HEADING" (`0x007bad00`, no totals), then each
+  squad under its header row (`0x007baed0`: its number and name, squad 0
+  "HUD_TEXT_MENU_SPAWN_SQUAD_UNASSIGNED" last) whose cells `0x007ba570`
+  fills with the squad's score, teamwork, kills, deaths and average ping;
+  the headers' text (0.5, 0.5, 0.5) (`0x00a0bc60`), the local player's
+  squad's (0.141, 0.502, 0.259) (`0x00a0bba0`), on (0.843, 0.847, 0.847,
+  0.9) (`0x00a0bc40`). The squad header's icon cell (`+0x330` at x
+  `+0x300`, 15 x 15) isn't drawn.
 
 Tab shows the scoreboard in play; `--scoreboard` forces it on.
 
@@ -4586,10 +4726,38 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   players' (`0x00b3be30`). Not done: the spotted state, the reload and
   background icons (`0x0077dee0` / `0x0077df60`).
 
-Not done: the Secondary* weapon block (a seat's second gun), the
-passengers' names (OccupyingPlayerName*), the vehicles' stamina, torque
-and the mech's foot animation, the weapons' range finder, distance counter
-and scan progress (TargetDistanceString, HudScanProgress), the blinks.
+- **The range finder and distance counter** (`0x007c1470`, the weapon's
+  hasRangeFinder `+0xd4` / hasDistanceCounter `+0xe0`, template `+0x118`
+  / `+0x124`): the distance counter sets TargetDistanceString "999"
+  (`0x009b7910`), then the projectile's distance (here the local
+  soldier's newest projectile's flight from its origin; the exe's chain of
+  the firearm's components `0x94d3` / `0xc4f1` / `0x94db` and its `+0x17c`
+  isn't traced further); the range finder casts the HUD's view ray 999 m
+  (DAT_00b2d148 slot `0x18c`, not with menu states 3-6, 8, 9) and sets
+  TargetDistanceString "%i" (the hit's distance from the controlled
+  object) and TargetCoordX/Y/ZString "%i" of x, -z and y, or "999" on a
+  miss. Here the ray is bisected against `GameWorld::lineOfSight` ten
+  times a second (to a metre). The scan (`0x007be380`, hasScanProgress:
+  HudScanInProgress / HudScanProgress from the weapon's `0xc4f2` slots
+  `0xf8` / `0xfc`) is wired but no game state feeds it (the handheld
+  pulse meter's scan isn't rewritten).
+- **The second gun** (`0x007c2d50`, the seat's weapon 1) sets the
+  Secondary* variables as `0x007c1f10` the Primary* ones
+  (`WeaponHud::update(..., true)`); the game's seats carry one gun, so
+  SecondaryAmmoShow stays 0.
+- **The passengers' names** (`0x007a34f0`): per occupied seat "%d. %s"
+  (the seat's number over every seat; a player whose slot `0x6c` says so
+  shows "R2D2"), coloured from `0x00b3c1e0` (team (0.4, 0.6, 1), enemy
+  (1, 0.4, 0.4)) or the squad's (0.4, 1, 0) (`0x00b3c380`), packed into
+  OccupyingPlayerName1..10 from the last filled line down
+  (`menu::passengerLines`).
+- The weapon and vehicle HUDs read their template fields once per
+  template (`WeaponHud::Fields`), not every frame.
+
+Not done: the vehicles' stamina, torque and the mech's foot animation,
+the blinks, the map's spotted vehicles and the silos' reload and
+background icons (`0x0077dee0` / `0x0077df60` by vehicleHud `+4`, 1 the
+reload icon, 2 both: only the Titan silos have them).
 
 ### Name tags
 
@@ -4659,14 +4827,60 @@ lower numbers are the Objects atlas) at the object and its
 `3dMapIconOffset`, faded to `maxDistance` (`maxEnemyDistance` for the
 enemy's), `showInside` / `showOutside` by the camera inside a Titan,
 `teamSpecific` / `inverseTeamSpecific` as the points', in ColorArray by
-`useTeamColor`. Not done: ranks and veteran icons on the players' tags
-(`ICRank`, `ICVeteran`: where the renderer's icon passes put them isn't
-decoded), the radio calls' icons (medic, ammo, repair, revive: events
-0x33-0x37 within maxCallDistance 150), orders and requests (TTOrder /
-TTRequest), the selection backgrounds (`selected3dMapIcon`, `selectable`:
-the commander's and squad leader's pick), `showIconOnTracker`,
-`useAliveArmor`, the camera's inside-a-Titan state (taken as outside), the
-fog factor on enemies, the spectator's rules. The HUD's object marker
+`useTeamColor`. The Nametag component's flags (component `+0x30`, the
+tag's `+0xb8`; the write-back lists them): showItem 1, showIcon 2,
+showName 4, showDistance 8, show3dIcon 0x10, glueToEdge 0x20,
+teamSpecific 0x200, inverseTeamSpecific 0x400, showIconOnTracker 0x4000,
+showInside 0x40000, showOutside 0x80000, selectable 0x100000,
+useTeamColor 0x200000, useAliveArmor 0x1000000; a player's tag starts
+with 7 and `0x100f3de0` adds 0x500201. The rewrite reads them once per
+template (`Nametags::TagTemplate`) and looks for tagged objects once a
+second.
+
+- **Ranks and veterans** (`0x100f0840`): the tag's `+0x50` is ICRank +
+  the stats' rank (player slot `0x1a8` `+0x20`), `+0x54` ICVeteran 0x4f
+  when the player's slot `0x3ac` (`+0x402`) says so, which only the
+  online profile's "Ent-3" entitlement sets (`0x0045c8a0`, `0x00513e70`):
+  never offline. The renderer (`0x1016b100`) copies both into the tag's
+  16-pixel text row before the name (each advancing by its width, then 2
+  pixels; the row centred), white, or the squad's colour for a squad
+  member; not when glued to the edge.
+- **The players' icons** (the selectable pass `0x1016a950`, same team,
+  selectable, the first occupant of a vehicle `0x100f33c0`): `+0x60`
+  (`0x100f0310`) ICObject + 10 for a soldier or vehicle, + 25 for the
+  commander, + 25 + the squad for a squad leader (the Objects atlas'
+  marker, star and numbered circles), in the tag's colour, at the icon
+  point (`0x100efb90(0)`: 0.6 m under a soldier's origin, times 30 / d
+  past 30 m; a vehicle's origin). Squad members glued to the edge
+  (flags 0x4020) show only the icon there (showIconOnTracker), no text,
+  with the location arrow (`0x10168d90`, Menu/Nametag/loactionArrow.dds,
+  outwards at 1.05 the edge, alpha 0.5).
+- **The radio calls** (`0x100f19c0`, events 0x33-0x37): a call within
+  maxCallDistance (150 m) that the local kit can answer (the HUD manager's
+  slot `0xac` `+0x74` slot `0x38`: heal, repair, ammunition; here the
+  kitType Assault, Engineer, Support) puts ICMedic 0x2d, ICAmmo 0x2f,
+  ICRepair 0x2e (12 s, `0x101f6740`) or ICRevive 0x2c (30 s) on the
+  caller's tag (`+0x64`, flags 0x26808: glued, "[d m]  name" under 300
+  m), crossfaded with the tag's icon and its text towards yellow by (1 -
+  min(d / 150, 1) / 2) x the blink 0.5 - 0.5 cos(2 pi t)
+  (`0x100f3490`); the local player's own call starts a 12 s timer
+  (`0x10211290` / 98 / a0) during which those who can answer show that
+  icon (`0x100f0310`). Here the calls come from Radio.callFor* and the
+  "medic" / "need_ammo" / "need_repair" messages the local player hears (a
+  man-down caller's "medic" is the revive call).
+- **The selection** (`0x100f16c0`): the selectable tag nearest the screen
+  centre within 0.08 is selected (a sound, 2/0x58); a selected object's
+  icon sits on its selected3dMapIcon (0x50 +, ICObjectFlagBackground 0x93
+  without one; `0x100f3ed0`) in ColorArray's yellow (ColorIndex3 4).
+  Glued objects off screen show only with showIconOnTracker; useAliveArmor
+  hides an object's icon once its armour is gone (the Titans' consoles).
+- **Inside a Titan**: the object drawer's slot 0x40, as the renderer
+  finds it (`LevelSources::cameraInTitanOut`).
+
+Not done: orders and requests (TTOrder / TTRequest), a vehicle's own icon
+(`0x100f0310`'s pick through the vehicle's 0xc4c4 and an unidentified
+manager), the fog factor on enemies, the spectator's rules, the poses'
+other icon offsets (crouched, prone). The HUD's object marker
 nodes (`createObjectMarkerNode`) are the AA and gunship lock-on markers;
 see "HUD nodes: transform lists, effects, markers and the map menus".
 
@@ -5723,10 +5937,29 @@ active node to):
   `+0x205`), the round time (> 3 s, 20 s, 60 s: `0x00666070`), alive, in a
   squad and not its leader, a squad leader, the commander screen (slot
   0x234), man down, the spawn screen (menu state 1), in a vehicle
-  (`HelpPopups::kTutorials`, `HelpPopups::tutorial`). Left: the event-only
-  messages (their events), the squad and commander tabs' menu states
-  (0x12, 0x13, 0x22), the parachute, ladders and vehicles in reach, and the
-  profile's play time (taken as 0).
+  (`HelpPopups::kTutorials`, `HelpPopups::tutorial`), and: the menu states
+  of the spawn screen's halves (`0x007b8b80`: 1 the kits, the members
+  0x12 for a squad leader, 0x13 for the rest; case 0x0a createSquad in
+  0x13 without a squad, 0x19 applyCommander in 0x12 or 0x13, 0x1d and
+  0x2d in 0x12, both showing 0x2d's text), 0x1b clickSquadList (the
+  commander screen with the team's squads), a ladder within 3 m (0x43,
+  `0x00646880`: class 40000; `GameWorld::ladderInReach`), a vehicle to
+  enter (0x47, `0x005a98e0`; `GameWorld::vehicleInReach`), and the
+  profile's play time (the local stats' timePlayed). The event-only
+  messages are let through by the HUD manager's slot 0x128
+  (`0x00751540` → player slot 0x24c → `0x00645c40(i, 0)`, unless done)
+  and held again by 0x12c (`0x00751580`, flag 1)
+  (`HelpPopups::enableTutorial` / `disableTutorial`); the tick then shows
+  them when their own case holds (always, a squad leader, the commander,
+  the commander screen, menu states 0x17 / 0x22, on foot). Raised here:
+  0x33 captureFlag as the player enters a control point's radius outside
+  Titan mode (`0x0044b560` on the capture state) and 0x18
+  commanderApply (`0x007d7050`) once he commands. Left: the other
+  callers (0x35 specificSpotted `0x0075be30`, 0x36-0x39 the commander
+  assets' damage `0x007a9500` / `0x007aa500` / `0x007aa6e0`, 0x2a
+  `0x0077e850`, 0x41 `0x0044e650`, 0x16 `0x007d8370`), the placement states 0x17 / 0x22, the parachute (case 0x0d asks
+  the HUD's slot 0xb0 object, which a soldier without a parachute doesn't
+  have).
 - **Supply sounds.** AbilityHud (`0xc4f2`, `abilityHud.healingSound`,
   `repairingSound`, `ammoSound` from `0x0055a41f`):
   the kits carry them (`S_Heal`, `S_Repair`, `S_Resupply`); the player's

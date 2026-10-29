@@ -460,6 +460,8 @@ private:
 // (Ingame/Scoreboard/scoreboard_icons.tga at x 233, 143 wide: score,
 // teamwork, kills, deaths, ping); the list's own drawing (RendDX9.dll) is
 // not decompiled, so the layout is read off the scripts.
+std::function<std::string(const std::string&)> g_localize; // strings.csv
+
 void setupScoreboard(hud::HudManager& hud)
 {
 	const std::vector<hud::HudManager::ListColumn> columns {
@@ -474,7 +476,8 @@ void setupScoreboard(hud::HudManager& hud)
 	players.push_back({196, 0, 0, 12});
 	for (int data : {1, 2}) {
 		hud.setListColumns(data, players);
-	}
+	}	// The "Players" tab first (scoreboard.setToggleShow picks the others).
+	hud.set("ToggleScore", 1);
 }
 
 void updateTeams(hud::HudManager& hud, const game::GameWorld& round, const game::GameLogic& logic)
@@ -534,6 +537,47 @@ void updateScoreboard(hud::HudManager& hud, const game::GameWorld& round, const 
 			totalKills += p.kills;
 			totalDeaths += p.deaths;
 		}
+		if (hud.number("ToggleSquads") != 0) {
+			// The "Squads" tab: grouped under the squads' header rows
+			// (menu::scoreboardBySquad, 0x007baed0 / 0x007ba570).
+			std::vector<dice::hfe::menu::ScoreboardMember> members;
+			for (size_t i = 0; i < players.size(); ++i) {
+				const auto& p = players[i];
+				members.push_back({static_cast<int>(i), p.squad, p.commander, score(p), 0, p.kills, p.deaths, 0});
+			}
+			std::vector<std::vector<std::string>> grouped;
+			std::vector<std::array<float, 4>> groupedColors, groupedBackgrounds;
+			const auto text = [](const std::string& id) { return g_localize ? g_localize(id) : id; };
+			const auto f1 = [](const std::string& t) { return "\xa7" "1" + t + "\xa7" "0"; };
+			int memberRow = 0;
+			for (const auto& line : dice::hfe::menu::scoreboardBySquad(members)) {
+				if (line.member >= 0) {
+					grouped.push_back(rows[static_cast<size_t>(line.member)]);
+					groupedColors.push_back(colors[static_cast<size_t>(line.member)]);
+					const bool local = players[static_cast<size_t>(line.member)].id == round.localPlayer();
+					groupedBackgrounds.push_back(local ? std::array<float, 4> {0.392157f, 0.392157f, 0.392157f, 0.35f}
+						: memberRow % 2 != 0           ? std::array<float, 4> {0.65098f, 0.65098f, 0.65098f, 0.8f}
+													   : std::array<float, 4> {0, 0, 0, 0});
+					++memberRow;
+					continue;
+				}
+				const std::string name = line.squad < 0 ? text("HUD_HUD_MENU_COMMANDER_HEADING")
+					: line.squad == 0                   ? text("HUD_TEXT_MENU_SPAWN_SQUAD_UNASSIGNED")
+														: std::to_string(line.squad) + "  " + dice::hfe::menu::squadName(line.squad);
+				if (line.totals) {
+					grouped.push_back({f1(name), f1(std::to_string(line.score)), f1(std::to_string(line.teamwork)),
+						f1(std::to_string(line.kills)), f1(std::to_string(line.deaths)), f1(std::to_string(line.ping))});
+				} else {
+					grouped.push_back({f1(name), "", "", "", "", ""});
+				}
+				const bool mine = side == 0 && line.squad > 0 && line.squad == me.squad;
+				groupedColors.push_back(mine ? std::array<float, 4> {0.1412f, 0.502f, 0.2588f, 1} : std::array<float, 4> {0.5f, 0.5f, 0.5f, 1});
+				groupedBackgrounds.push_back({0.8431f, 0.8471f, 0.8471f, 0.9f});
+			}
+			rows = std::move(grouped);
+			colors = std::move(groupedColors);
+			backgrounds = std::move(groupedBackgrounds);
+		}
 		hud.setList(side == 0 ? 2 : 1, std::move(rows));
 		hud.setListRowColors(side == 0 ? 2 : 1, std::move(colors));
 		hud.setListRowBackgrounds(side == 0 ? 2 : 1, std::move(backgrounds));
@@ -575,6 +619,8 @@ int g_inHandSlot = -1;
 float g_hudTime = -1;
 // The name tags' icons (Menu/Nametag/nametags.con).
 nametags::IconRegistry g_tagIcons;
+// The name tags of the game running now (the radio calls reach them).
+nametags::Nametags* g_nametags = nullptr;
 
 void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLogic& logic, bool commanderScreen)
 {
@@ -837,7 +883,6 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 	updateCommander(hud, round, commanderScreen);
 	updateTeams(hud, round, logic);
 	hud.set("ScoreboardShow", scoreboard ? 1 : 0);
-	hud.set("ToggleScore", 1);
 	if (scoreboard) {
 		updateScoreboard(hud, round, scoreOf);
 	}
@@ -905,6 +950,10 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 			const bool occupied = occupant >= 0 && round.playerInfo(occupant, who);
 			dot.state = dice::hfe::menu::seatDotState(occupied, occupied && who.id == me.id, occupied ? who.squad : 0,
 				known && me.team == who.team ? me.squad : 0, occupied && who.team == me.team);
+			if (occupied) {
+				dot.occupant = who.name;
+				dot.relation = who.team != me.team ? 1 : who.squad != 0 && who.squad == me.squad ? 3 : 2;
+			}
 			look.seats.push_back(dot);
 		}
 		g_vehicleHud.update(hud, look);
@@ -944,6 +993,9 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 	}
 	hud.set("UsingChildHud", weapon && !inVehicle ? 1 : 0);
 	hud.set("PrimaryAmmoShow", 0);
+	// A seat's second gun (0x007c2d50) would set the Secondary* block
+	// (WeaponHud::update's secondary); the game's seats carry one gun.
+	hud.set("SecondaryAmmoShow", 0);
 	if (heldGun) {
 		// The weapon HUD (0x007c1f10; see HudMenusVehicles.h). The game's
 		// magazines count the one in the gun (the firearm's slot 0xb0).
@@ -958,6 +1010,58 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 		in.heat = gun.heatAddWhenFire > 0 ? heldGun->heat() : 0;
 		in.overheated = heldGun->overheated();
 		in.fireRate = heldGun->fireMode(); // the fire component's mode (FireArm::fireMode)
+		// The range finder's ray and the distance counter's projectile
+		// (0x007c1470), only for the weapons with them (read once per
+		// template); the ray (999 m from the eye along the look, bisected
+		// against GameWorld::lineOfSight to a metre) at most ten times a
+		// second.
+		static const world::ObjectTemplate* rangeTemplate = nullptr;
+		static bool rangeFinder = false, distanceCounter = false;
+		if (heldGunTemplate != rangeTemplate) {
+			rangeTemplate = heldGunTemplate;
+			rangeFinder = dice::hfe::menu::hudNumber(heldGunTemplate, "weaponHud.hasRangeFinder", 0) != 0;
+			distanceCounter = dice::hfe::menu::hudNumber(heldGunTemplate, "weaponHud.hasDistanceCounter", 0) != 0;
+		}
+		game::GameWorld::PlayerInfo me;
+		if ((rangeFinder || distanceCounter) && round.playerInfo(round.localPlayer(), me) && me.alive) {
+			static float rangeAt = -1;
+			static bool rangeHit = false;
+			static float rangeDistance = 0;
+			static std::array<float, 3> rangePoint {};
+			if (rangeFinder && (now - rangeAt > 0.1f || now < rangeAt)) {
+				rangeAt = now;
+				const float yaw = me.yaw * 3.14159265f / 180, pitch = me.aimPitch * 3.14159265f / 180;
+				const physics::Vec3 eye {me.position.x, me.position.y + 1.6f, me.position.z};
+				const physics::Vec3 dir {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+				const auto at = [&](float d) { return physics::Vec3 {eye.x + dir.x * d, eye.y + dir.y * d, eye.z + dir.z * d}; };
+				const uint32_t self = me.vehicle ? me.vehicle : me.soldier;
+				rangeHit = !round.lineOfSight(eye, at(999), self);
+				if (rangeHit) {
+					float lo = 0, hi = 999;
+					for (int i = 0; i < 10; ++i) {
+						const float mid = (lo + hi) / 2;
+						(round.lineOfSight(eye, at(mid), self) ? lo : hi) = mid;
+					}
+					const physics::Vec3 hit = at(hi);
+					rangePoint = {hit.x, hit.y, hit.z};
+					const float dx = hit.x - me.position.x, dy = hit.y - me.position.y - 1, dz = hit.z - me.position.z;
+					rangeDistance = std::sqrt(dx * dx + dy * dy + dz * dz);
+				}
+			}
+			in.rangeHit = rangeHit;
+			in.targetDistance = rangeDistance;
+			in.target = rangePoint;
+			if (distanceCounter) {
+				float newest = 1e9f;
+				for (const game::Projectile& p : round.projectiles()) {
+					if (p.alive && p.shooter == me.soldier && p.age < newest) {
+						newest = p.age;
+						const float dx = p.position.x - p.origin.x, dy = p.position.y - p.origin.y, dz = p.position.z - p.origin.z;
+						in.travelled = static_cast<int>(std::lround(std::sqrt(dx * dx + dy * dy + dz * dz)));
+					}
+				}
+			}
+		}
 		const std::string sound = g_weaponHud.update(hud, in);
 		if (!sound.empty() && g_hudSound) {
 			g_hudSound(sound);
@@ -2134,6 +2238,7 @@ int runGame(Options& options, Session& session)
 		}
 	}
 	hudManager.setLocalizer([&localization](const std::string& id) { return localization.text(id); });
+	g_localize = [&localization](const std::string& id) { return localization.text(id); };
 	helpPopups.setLocalizer([&localization](const std::string& id) { return localization.text(id); });
 	setupScoreboard(hudManager);
 	// The comm roses, filled by the HUD's Communication scripts (HudMenusComm.h).
@@ -3145,7 +3250,15 @@ int runGame(Options& options, Session& session)
 				 {"Radio.callForRepair", 1, "need_repair"}}) {
 			const int c = channel;
 			const std::string v = voice;
-			bindMethod(console, command, ConsoleAccess::Anyone, [&round, c, v] { round.radioMessage(round.localPlayer(), c, v); });
+			// The HUD's codes 0x33..0x35 (the game's slot 0xd8) reach the
+			// NametagManager too (0x100f19c0): the local player's own call.
+			const int code = v == "medic" ? nametags::CallMedic : v == "need_ammo" ? nametags::CallAmmo : nametags::CallRepair;
+			bindMethod(console, command, ConsoleAccess::Anyone, [&round, c, v, code] {
+				round.radioMessage(round.localPlayer(), c, v);
+				if (g_nametags) {
+					g_nametags->radioCall(round.localPlayer(), code, true);
+				}
+			});
 		}
 		// The crosshair's enemy reported to the squad (0x007c8160: the game's
 		// slot 0xd4, GameWorld::spotCrosshair) as the rose closes.
@@ -3561,6 +3674,23 @@ int runGame(Options& options, Session& session)
 		// Sound, once a tick (GameAudio.h): the listener at the camera, what
 		// the round and the effects started, then the manager's update.
 		GameAudio gameAudio(round, objects, templates, sounds, gameSounds, options.dedicated ? nullptr : &voices);
+		// The calls the local player hears go on the callers' name tags
+		// (events 0x33..0x37, 0x100f19c0; a man-down player's "medic" is the
+		// revive call).
+		gameAudio.onHeard = [&round](int sender, const std::string& voice) {
+			if (!g_nametags || sender < 0) {
+				return;
+			}
+			game::GameWorld::PlayerInfo p;
+			const bool down = round.playerInfo(sender, p) && p.manDown;
+			const int code = voice == "medic" ? (down ? nametags::CallRevive : nametags::CallMedic)
+				: voice == "need_ammo"        ? nametags::CallAmmo
+				: voice == "need_repair"      ? nametags::CallRepair
+											  : 0;
+			if (code) {
+				g_nametags->radioCall(sender, code, false);
+			}
+		};
 		// The indoor level's rays (0x007fa100) against the level, the hit's
 		// distance found by halving.
 		sounds.setRayTest([&round](const sound::Vec3& from, const sound::Vec3& to, float& distance) {
@@ -4764,6 +4894,13 @@ int runGame(Options& options, Session& session)
 		sources.objectEffects = &objectEffects;
 		nametags::Nametags nametags(files);
 		nametags.setIcons(&g_tagIcons);
+		g_nametags = &nametags;
+		struct TagsReset {
+			~TagsReset() { g_nametags = nullptr; }
+		} tagsReset;
+		// The camera inside a Titan, as the renderer found it last frame.
+		static bool cameraInTitan = false;
+		sources.cameraInTitanOut = &cameraInTitan;
 		nametags::Nametags::View tagView;
 		// The lock-on weapons' markers (Bf2ObjectMarkerNode, 0x007e6520):
 		// the enemy objects carrying a target object of the marker's type
@@ -4952,6 +5089,53 @@ int runGame(Options& options, Session& session)
 					help.squadLeader = known && self.squadLeader;
 					help.roundTime = round.roundTime();
 					help.zoomed = playerCamera.zoomed();
+					// The menu state (0x007b8b80: the spawn screen's members half
+					// 0x12 for a squad leader, 0x13 for the rest; the kits 1).
+					help.menuState = help.spawnScreen ? (membersShown ? (help.squadLeader ? 0x12 : 0x13) : 1)
+						: help.menuOpen                ? -1
+													   : 0;
+					// The parachute's (case 0x0d) asks an object the rewrite's
+					// soldiers don't have (no soldier parachute): never.
+					help.parachute = false;
+					help.commander = known && self.commander;
+					// The game's reach tests (cases 0x43, 0x47).
+					help.ladderNear = help.onFoot && round.ladderInReach(round.localPlayer(), 3);
+					help.vehicleNear = help.onFoot && round.vehicleInReach(round.localPlayer());
+					// Event-only messages the HUD lets through (slot 0x128,
+					// 0x00751540): 0x33 captureFlag as the player comes into a
+					// control point's area outside Titan mode (0x0044b560 on the
+					// capture state), 0x18 commanderApply once he commands
+					// (0x007d.. after the commander screen opens for him).
+					static bool wasInArea = false, wasCommander = false;
+					bool inArea = false;
+					if (help.alive && options.gameMode.find("ti") == std::string::npos) {
+						for (const game::ControlPoint& cp : round.controlPoints()) {
+							if (!cp.object || !cp.object->objectTemplate()) {
+								continue;
+							}
+							const float r = static_cast<float>(dice::hfe::menu::hudNumber(cp.object->objectTemplate(), "radius", 1));
+							const float dx = cp.object->position().x - self.position.x, dz = cp.object->position().z - self.position.z;
+							inArea = inArea || dx * dx + dz * dz <= r * r;
+						}
+					}
+					if (inArea && !wasInArea) {
+						helpPopups.enableTutorial(0x33);
+					}
+					wasInArea = inArea;
+					if (help.commander && !wasCommander) {
+						helpPopups.enableTutorial(0x18);
+					}
+					wasCommander = help.commander;
+					std::set<int> squads;
+					for (const auto& p : round.playerList()) {
+						if (known && p.team == self.team && p.squad > 0) {
+							squads.insert(p.squad);
+						}
+					}
+					help.teamSquads = static_cast<int>(squads.size());
+					help.playTime = session.menuBindings && session.menuBindings->soldierStats()
+						? static_cast<float>(session.menuBindings->soldierStats()->timePlayed)
+						: 0;
 					// The kit's weapons' magazines (case 0x3b): the one in hand.
 					if (const game::FireArm* gun = round.playerWeapon(); gun && help.weapon && gun->settings().magSize > 0) {
 						help.ammo.push_back({help.weapon, static_cast<float>(gun->roundsInMag()) / static_cast<float>(gun->settings().magSize)});
@@ -4971,6 +5155,7 @@ int runGame(Options& options, Session& session)
 						}
 					}
 				}
+
 				for (const uint32_t id : me ? helpful : std::vector<uint32_t> {}) {
 					if (const world::Object* object = round.objects().find(id)) {
 						const float dx = object->position().x - me->position().x, dz = object->position().z - me->position().z;
@@ -5021,6 +5206,7 @@ int runGame(Options& options, Session& session)
 				}
 			}
 			// The 3D name tags under the HUD (RendDX9's NametagManager).
+			nametags.setInsideTitan(cameraInTitan);
 			std::vector<hud::HudQuad> quads = nametags.frame(round, round.objects(), tagView, seconds);
 			std::vector<hud::HudQuad> hud = hudManager.frame(seconds);
 			quads.insert(quads.end(), hud.begin(), hud.end());

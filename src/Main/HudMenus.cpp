@@ -468,4 +468,42 @@ ScoreboardStyle scoreboardStyle(const ScoreboardRow& row, int rowIndex)
 	return style;
 }
 
+std::vector<ScoreboardLine> scoreboardBySquad(const std::vector<ScoreboardMember>& members)
+{
+	std::vector<ScoreboardLine> lines;
+	for (size_t i = 0; i < members.size(); ++i) {
+		if (members[i].commander) {
+			if (lines.empty()) {
+				lines.push_back({-1, -1, 0, 0, 0, 0, 0, false});
+			}
+			lines.push_back({members[i].index});
+		}
+	}
+	const auto group = [&](int squad) {
+		ScoreboardLine header {-1, squad, 0, 0, 0, 0, 0, true};
+		std::vector<ScoreboardLine> rows;
+		for (const ScoreboardMember& m : members) {
+			if (!m.commander && m.squad == squad) {
+				header.score += m.score;
+				header.teamwork += m.teamwork;
+				header.kills += m.kills;
+				header.deaths += m.deaths;
+				header.ping += m.ping;
+				rows.push_back({m.index});
+			}
+		}
+		if (rows.empty()) {
+			return;
+		}
+		header.ping /= static_cast<int>(rows.size());
+		lines.push_back(header);
+		lines.insert(lines.end(), rows.begin(), rows.end());
+	};
+	for (int squad = 1; squad <= 9; ++squad) {
+		group(squad);
+	}
+	group(0);
+	return lines;
+}
+
 } // namespace dice::hfe::menu

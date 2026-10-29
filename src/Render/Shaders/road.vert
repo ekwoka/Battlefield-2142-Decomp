@@ -17,7 +17,6 @@ layout(set = 1, binding = 0) uniform Transforms {
 	mat4 worldViewProjection;
 	mat4 world;
 	vec4 lightmapTransform; // world xz -> terrain patch lightmap: scale xy, offset zw
-	mat4 parts[64];
 };
 
 layout(location = 0) out vec2 outTexCoord0;

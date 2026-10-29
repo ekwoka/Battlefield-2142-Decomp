@@ -546,3 +546,31 @@ TEST(Weapons_CameraRecoil)
 	recoil.update(1 / 30.0f); // past 1: done
 	CHECK(!recoil.on && recoil.update(1 / 30.0f) == 0);
 }
+
+// WeaponBasedRecoilComp's own slide (0x005ddfc0 / 0x005ddd80): eu_tank's
+// main gun (recoilSpeed 12, recoilSpeedGB 0.45, recoilSize 2): the kick
+// lasts round(pi / 12 x 15) = 4 ticks out to 2 x 0.025 = 5 cm back, then
+// the return over round(1.57 / 0.45 x 30) = 105 ticks, linear.
+TEST(Weapons_GunRecoil)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "GenericFireArm");
+	world::ObjectTemplate* gun = templates.create("GenericFireArm", "tank_gun");
+	gun->settings()["recoil.recoilSpeed"] = "12";
+	gun->settings()["recoil.recoilSpeedGB"] = "0.45";
+	gun->settings()["recoil.recoilSize"] = "2";
+	gun->settings()["recoil.recoilForce"] = "125";
+	CHECK(!game::GunRecoil::fromTemplate(*gun).any()); // without the component nothing
+	gun->components().push_back("WeaponBasedRecoilComp");
+	game::GunRecoil recoil = game::GunRecoil::fromTemplate(*gun);
+	CHECK(recoil.any() && recoil.force == 125);
+	CHECK(recoil.slide(100) == 0);
+	recoil.fired(100);
+	CHECK(recoil.kickEnd == 104 && recoil.returnEnd == 209);
+	CHECK(std::fabs(recoil.slide(100) - 0.05f * std::sin((3.14f / 12 * 0.5f + 4 / 30.0f) * 12)) < 1e-5f); // ~0
+	CHECK(recoil.slide(100) < 0.005f);
+	CHECK(std::fabs(recoil.slide(104) - 0.05f) < 1e-4f); // all the way back
+	const float half = recoil.slide(104 + 52);           // half the return gone
+	CHECK(std::fabs(half - 0.05f * (53 / 30.0f) / (1.57f / 0.45f)) < 1e-4f);
+	CHECK(recoil.slide(209) == 0 && recoil.slide(400) == 0);
+}

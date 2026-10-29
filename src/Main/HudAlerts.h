@@ -160,8 +160,14 @@ public:
 		bool commanderScreen = false; // HUD manager slot 0x234
 		int squad = 0;            // player slot 0x120
 		bool squadLeader = false; // slot 0x150
+		bool commander = false;   // slot 0x128
 		float roundTime = 0;      // 0x00666070
 		float playTime = 0;       // the profile's (seconds)
+		int menuState = 0;        // the HUD manager's (slot 0x228): 1 kits, 0x12 / 0x13 the members
+		bool parachute = false;   // descending under a parachute
+		bool ladderNear = false;  // a ladder within 3 m
+		bool vehicleNear = false; // an empty vehicle to enter within reach
+		int teamSquads = 0;       // the team's squads (the game manager's slot 0xa4)
 		// The objects near the player with closeTo keys: their template, the
 		// distance and whose (1 the player's team, 2 the enemy, 0 neutral).
 		struct Near {
@@ -185,6 +191,7 @@ public:
 		m_shown.clear();
 		m_tutorialDone.fill(false);
 		m_tutorialStarted = false;
+		m_eventFlagsSet = false;
 	}
 	static constexpr float kShowSeconds = 9; // the help manager's (0x00646cb0 hands slot 0x94 9.0)
 	// GeneralSettings' played help keys (setPlayedVOHelp), and the hook
@@ -202,9 +209,17 @@ public:
 	static const Tutorial kTutorials[83];
 	// The tick (0x00649d80); true when a message shows.
 	bool tutorial(hud::HudManager& hud, const Context& context, float seconds);
+	// The HUD manager's slots 0x128 / 0x12c (0x00751540 / 0x00751580): a
+	// game event lets the tick show an event-only message (its flag
+	// +0x53 + i cleared) or takes that back; nothing for a message done.
+	void enableTutorial(int index);
+	void disableTutorial(int index);
 
 private:
 	bool tutorialHolds(int index, const Context& context) const;
+	void startEventFlags();
+	std::array<bool, 83> m_eventOnly {}; // +0x53 + i
+	bool m_eventFlagsSet = false;
 	std::set<std::string> m_shown;
 	std::set<std::string> m_played;
 	std::array<bool, 83> m_tutorialDone {};

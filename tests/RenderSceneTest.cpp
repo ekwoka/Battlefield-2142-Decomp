@@ -7,6 +7,7 @@
 #include "Console/Console.h"
 #include "Effects/Effects.h"
 #include "Geometry/GeometryTemplateManager.h"
+#include "Render/EnvMaps.h"
 #include "Render/Fog.h"
 #include "Render/OverheadView.h"
 #include "Render/SceneMath.h"
@@ -113,6 +114,10 @@ TEST(RenderScene_ViewFogUnderTheSea)
 	CHECK(near(render::fogVisibility(fog, 0), 1));
 	CHECK(near(render::fogVisibility(fog, 70), 0.375f)); // max(0.5, 0.5) - 0.125
 	CHECK(near(render::fogVisibility(fog, 140), 0));
+	// FogRange as 0x100355c0 makes it, in metres (Suez Canal: -10 / 355 / 0.2 / 0).
+	const auto range = render::fogRange({-10, 355, 0.2f, 0});
+	CHECK(near(range[0], 1 / 365.0f) && near(range[1], -0.2f / 365) && near(range[2], 10 / 365.0f) &&
+		near(range[3], 355 / 365.0f));
 
 	// The console names (0x1004f4a0 / 0x1004f740, terrain.water*).
 	Console console;
@@ -336,4 +341,21 @@ TEST(RenderScene_BundleAgeSpeedAndRotation)
 		}
 	}
 	CHECK(set);
+}
+
+TEST(RenderScene_EnvMapsAndNearFade)
+{
+	// Belgrade's EnvironmentMapInfo.emi (0x10064770) and the nearest map (0x10064f30).
+	const auto maps = render::parseEnvMapInfo(
+		"# EnvironmentMapInformation file\n# Version 0\n#\nEnvMap0 -88,54,66,1 \r\nEnvMap1 100,20,-5,0\n");
+	CHECK(maps.size() == 2 && maps[0].name == "EnvMap0" && maps[0].flag && near(maps[0].position[2], 66));
+	CHECK(render::nearestEnvMap(maps, {90, 0, 0}) == 1 && render::nearestEnvMap(maps, {-80, 50, 60}) == 0);
+	CHECK(render::nearestEnvMap({}, {0, 0, 0}) == -1);
+	// nearCullingEnable (0x101318e0): beyond 6 m past the near plane or
+	// 0.15 m and smaller, none; a big particle at the near plane, gone.
+	CHECK(effects::ParticleView::nearFade(10, 0.1f, 1) < 0);
+	CHECK(effects::ParticleView::nearFade(1, 0.1f, 0.1f) < 0);
+	CHECK(near(effects::ParticleView::nearFade(0.1f, 0.1f, 1), 0));
+	// 5 m past it: t = 0.5, f = 1 - 0.05 x 4 = 0.8: 0.5 + 0.5 x 0.8.
+	CHECK(near(effects::ParticleView::nearFade(5.1f, 0.1f, 0.2f), 0.9f));
 }

@@ -147,9 +147,8 @@ void HelpPopups::bind(Console& console)
 //   screen (slot 0x234); 9 man down; 10 alive with no menu; 11 the spawn
 //   screen (menu state 1); 12 no menu; 13 alive in a vehicle;
 //   0 not by the tick here: an event's (the flag), the template keys'
-//   (handled by update()), or a condition on state the rewrite doesn't
-//   keep (the squad and commander tabs' menu states 0x12 / 0x13 / 0x22,
-//   the parachute, a ladder or a vehicle in reach).
+//   (handled by update()), or (the event-only ones) shown by the game's
+//   events, which the rewrite doesn't raise yet.
 // A voice "=" is the key itself (the cases ending at 0x00649c0e).
 const HelpPopups::Tutorial HelpPopups::kTutorials[83] = {
 	{"HUD_HELP_PLAYER_CONTROLS_moveMouseToLook", 0, false, 1, ""},
@@ -162,26 +161,26 @@ const HelpPopups::Tutorial HelpPopups::kTutorials[83] = {
 	{"HUD_HELP_PLAYER_CONTROLS_lieDown", 0, true, 1, ""},
 	{"HUD_HELP_PLAYER_CONTROLS_strafeLeftRight", 7200, false, 1, ""},
 	{"HUD_HELP_SQUAD_squadJoined", 0, false, 6, ""},
-	{"HUD_HELP_SPAWNSCREEN_SQUADTAB_createSquad", 36000, false, 0, "="},
-	{"HUD_HELP_SQUAD_squadCreated", 0, true, 0, ""},
-	{"HUD_HELP_SPAWNSCREEN_SQUADTAB_joinSquad", 0, true, 0, "="},
-	{"HUD_HELP_PLAYER_CONTROLS_parachute", 0, false, 0, "parachute_help"},
+	{"HUD_HELP_SPAWNSCREEN_SQUADTAB_createSquad", 36000, false, 14, "="},
+	{"HUD_HELP_SQUAD_squadCreated", 0, true, 22, ""},
+	{"HUD_HELP_SPAWNSCREEN_SQUADTAB_joinSquad", 0, true, 14, "="},
+	{"HUD_HELP_PLAYER_CONTROLS_parachute", 0, false, 15, "parachute_help"},
 	{"HUD_HELP_MENU_CONTROLS_callMedicWhenManDown", 0, false, 9, "man_down_help"},
 	{"HUD_HELP_MENU_CONTROLS_COMMOROSE_slcommoRoseAvailable", 0, false, 7, "="},
-	{"HUD_HELP_COMMANDER_placeArtillery", 0, true, 0, "place_artillery"},
-	{"HUD_HELP_COMMANDER_placeBombardment", 0, true, 0, "place_orbitalStrike"},
-	{"HUD_HELP_COMMANDER_placeSupplies", 0, true, 0, "place_supplies"},
+	{"HUD_HELP_COMMANDER_placeArtillery", 0, true, 23, "place_artillery"},
+	{"HUD_HELP_COMMANDER_placeBombardment", 0, true, 24, "place_orbitalStrike"},
+	{"HUD_HELP_COMMANDER_placeSupplies", 0, true, 21, "place_supplies"},
 	{"HUD_HELP_COMMANDER_place_UAV", 0, true, 0, ""},
-	{"HUD_HELP_COMMANDER_artilleryFired", 0, true, 0, "artillery_fired"},
-	{"HUD_HELP_COMMANDER_bombardmentFired", 0, true, 0, "orbitalStrike_fired"},
+	{"HUD_HELP_COMMANDER_artilleryFired", 0, true, 8, "artillery_fired"},
+	{"HUD_HELP_COMMANDER_bombardmentFired", 0, true, 8, "orbitalStrike_fired"},
 	{"HUD_HELP_COMMANDER_UAVplaced", 0, true, 0, ""},
-	{"HUD_HELP_SQUAD_callForTarget", 0, true, 0, ""},
-	{"HUD_HELP_COMMANDER_commanderApply", 0, true, 0, "="},
-	{"HUD_HELP_SPAWNSCREEN_SQUADTAB_applyCommander", 72000, false, 0, "="},
-	{"HUD_HELP_COMMANDER_SQUADLIST_squadList", 0, true, 0, "="},
-	{"HUD_HELP_COMMANDER_SQUADLIST_clickSquadList", 0, false, 0, "="},
+	{"HUD_HELP_SQUAD_callForTarget", 0, true, 21, ""},
+	{"HUD_HELP_COMMANDER_commanderApply", 0, true, 25, "="},
+	{"HUD_HELP_SPAWNSCREEN_SQUADTAB_applyCommander", 72000, false, 16, "="},
+	{"HUD_HELP_COMMANDER_SQUADLIST_squadList", 0, true, 8, "="},
+	{"HUD_HELP_COMMANDER_SQUADLIST_clickSquadList", 0, false, 17, "="},
 	{"HUD_HELP_COMMANDER_MINIMAP_description", 0, false, 0, ""},
-	{"HUD_HELP_COMMANDER_MAP_QUICKMENU", 0, false, 8, "="},
+	{"HUD_HELP_COMMANDER_MAP_QUICKMENU", 0, false, 18, "="},
 	{"HUD_HELP_COMMANDER_MAP_ZOOM_inOut", 0, false, 8, "="},
 	{"HUD_HELP_COMMANDER_SATELLITESCAN_description", 0, false, 8, "="},
 	{"HUD_HELP_COMMANDER_UAV_description", 0, false, 8, "="},
@@ -189,44 +188,44 @@ const HelpPopups::Tutorial HelpPopups::kTutorials[83] = {
 	{"HUD_HELP_COMMANDER_BOMBARDMENT_description", 0, false, 8, "="},
 	{"HUD_HELP_COMMANDER_SUPPLIES_description", 0, false, 8, "="},
 	{"", 0, false, 0, ""},
-	{"HUD_HELP_SQUAD_LEADER_VOIP_commanderChannel", 0, true, 0, "="},
-	{"HUD_HELP_COMMANDER_VOIP_allSquadLeadersChannel", 0, true, 0, "="},
-	{"HUD_HELP_COMMANDER_COMMUNICATION_VOIPTOGGLE", 0, true, 0, "="},
+	{"HUD_HELP_SQUAD_LEADER_VOIP_commanderChannel", 0, true, 21, "="},
+	{"HUD_HELP_COMMANDER_VOIP_allSquadLeadersChannel", 0, true, 8, "="},
+	{"HUD_HELP_COMMANDER_COMMUNICATION_VOIPTOGGLE", 0, true, 8, "="},
 	{"HUD_HELP_COMMANDER_MAP_REQUESTS_received", 0, true, 0, ""},
-	{"HUD_HELP_COMMANDER_SQUADLIST_orderIcon", 0, true, 0, "="},
-	{"HUD_HELP_COMMANDER_MAP_SATELLITEVIEW_moveKeys", 0, true, 0, "="},
+	{"HUD_HELP_COMMANDER_SQUADLIST_orderIcon", 0, true, 8, "="},
+	{"HUD_HELP_COMMANDER_MAP_SATELLITEVIEW_moveKeys", 0, true, 8, "="},
 	{"HUD_HELP_COMMANDER_SQUADLIST_commoMenu", 0, false, 0, ""},
 	{"HUD_HELP_COMMANDER_MAP_FILTERS", 0, false, 0, ""},
-	{"HUD_HELP_SQUAD_LEADER_mainMapRightMouseMenu", 0, false, 0, "="},
+	{"HUD_HELP_SQUAD_LEADER_mainMapRightMouseMenu", 0, false, 18, "="},
 	{"", 0, false, 0, ""}, // 0x2e: the vehicle's helpStringKey (update())
 	{"", 0, false, 0, ""},
 	{"HUD_HELP_KIT_MEDIC_NAMETAG_indicatorBar", 0, true, 0, ""},
 	{"HUD_HELP_KIT_SUPPORT_NAMETAG_indicatorBar", 0, true, 0, ""},
 	{"HUD_HELP_KIT_ENGINEER_NAMETAG_indicatorBar", 0, true, 0, ""},
-	{"HUD_HELP_GAMEPLAY_captureFlag", 0, true, 0, "="},
-	{"HUD_HELP_GAMEPLAY_exitToCapture", 0, true, 0, "="},
-	{"HUD_HELP_MENU_CONTROLS_COMMOROSE_specificSpotted", 0, true, 0, "="},
-	{"HUD_HELP_COMMANDER_uavDamaged", 0, true, 0, "="},
-	{"HUD_HELP_COMMANDER_radarDamaged", 0, true, 0, "="},
-	{"HUD_HELP_COMMANDER_artilleryDamaged", 0, true, 0, "="},
-	{"HUD_HELP_COMMANDER_bombardmentDamaged", 0, true, 0, "="},
+	{"HUD_HELP_GAMEPLAY_captureFlag", 0, true, 21, "="},
+	{"HUD_HELP_GAMEPLAY_exitToCapture", 0, true, 21, "="},
+	{"HUD_HELP_MENU_CONTROLS_COMMOROSE_specificSpotted", 0, true, 21, "="},
+	{"HUD_HELP_COMMANDER_uavDamaged", 0, true, 8, "="},
+	{"HUD_HELP_COMMANDER_radarDamaged", 0, true, 8, "="},
+	{"HUD_HELP_COMMANDER_artilleryDamaged", 0, true, 8, "="},
+	{"HUD_HELP_COMMANDER_bombardmentDamaged", 0, true, 8, "="},
 	{"", 0, false, 0, ""}, // 0x3a: low armour (update())
 	{"", 0, false, 0, ""}, // 0x3b: low ammunition (update())
-	{"HUD_HELP_SPAWNSCREEN_spawnOnSL", 0, true, 0, "="},
+	{"HUD_HELP_SPAWNSCREEN_spawnOnSL", 0, true, 21, "="},
 	{"HUD_HELP_MENU_CONTROLS_zoomMap", 0, false, 10, ""},
-	{"HUD_HELP_SQUAD_recievedTarget", 0, true, 0, "place_artillery"},
+	{"HUD_HELP_SQUAD_recievedTarget", 0, true, 21, "place_artillery"},
 	{"HUD_HELP_SPAWNSCREEN_KITTAB_pickArmyAndKit", 0, false, 11, "="},
 	{"HUD_HELP_SPAWNSCREEN_KITTAB_pickSpawnPoint", 0, false, 11, "="},
 	{"HUD_HELP_SPAWNSCREEN_KITTAB_useUnlock", 0, true, 0, "="},
 	{"HUD_HELP_SPAWNSCREEN_KITTAB_trySquads", 21600, false, 11, "="},
-	{"HUD_HELP_GAMEPLAY_climbLadder", 0, false, 0, "ladder_help"},
+	{"HUD_HELP_GAMEPLAY_climbLadder", 0, false, 19, "ladder_help"},
 	{"HUD_HELP_PLAYER_CONTROLS_radioMessages", 7200, false, 12, "comm_rose"},
-	{"HUD_HELP_MENU_COMMOROSE_slCommoRoseFirstUse", 0, true, 0, "="},
+	{"HUD_HELP_MENU_COMMOROSE_slCommoRoseFirstUse", 0, true, 22, "="},
 	{"", 7200, true, 0, "="},
-	{"HUD_HELP_VEHICLE_GENERAL_CONTROLS_enterVehicle", 0, false, 0, "enter_Vehicle_help"},
+	{"HUD_HELP_VEHICLE_GENERAL_CONTROLS_enterVehicle", 0, false, 20, "enter_Vehicle_help"},
 	{"HUD_HELP_VEHICLE_CONTROLS_exitVehicle", 0, false, 13, "exit_Vehicle_help"},
 	{"", 0, false, 0, ""}, // 0x49: the closeTo keys (update())
-	{"HUD_HELP_PLAYER_CONTROLS_sprint", 0, true, 0, "HUD_HELP_PLAYER_CONTROLS_sprint"},
+	{"HUD_HELP_PLAYER_CONTROLS_sprint", 0, true, 26, "HUD_HELP_PLAYER_CONTROLS_sprint"},
 	{"HUD_HELP_PLAYER_CONTROLS_lieDown", 18000, false, 1, ""},
 	{"HUD_HELP_MENU_CONTROLS_changeWeapon", 0, false, 4, "weapon_change"},
 	{"HUD_HELP_MENU_CONTROLS_largeMap", 7200, false, 5, "open_map"},
@@ -234,8 +233,37 @@ const HelpPopups::Tutorial HelpPopups::kTutorials[83] = {
 	{"HUD_HELP_MENU_CONTROLS_spawnScreen", 0, false, 0, ""},
 	{"", 0, false, 0, ""}, // 0x50: the weapon's help and alt help (update())
 	{"", 0, false, 0, ""}, // 0x51: the vehicle's help (update())
-	{"HUD_HELP_WORLD_PLAYER_Squadleader_inventory_selectunlock", 0, true, 0, "="},
+	{"HUD_HELP_WORLD_PLAYER_Squadleader_inventory_selectunlock", 0, true, 22, "="},
 };
+
+void HelpPopups::startEventFlags()
+{
+	if (!m_eventFlagsSet) {
+		m_eventFlagsSet = true;
+		for (size_t i = 0; i < m_eventOnly.size(); ++i) {
+			m_eventOnly[i] = kTutorials[i].eventOnly;
+		}
+	}
+}
+
+void HelpPopups::enableTutorial(int index)
+{
+	// 0x00751540 -> player slot 0x24c -> 0x00645c40(index, 0), unless done
+	// (slot 0x254).
+	startEventFlags();
+	if (index >= 0 && index < 83 && !m_tutorialDone[static_cast<size_t>(index)]) {
+		m_eventOnly[static_cast<size_t>(index)] = false;
+	}
+}
+
+void HelpPopups::disableTutorial(int index)
+{
+	// 0x00751580 -> slot 0x250 -> 0x00645c40(index, 1).
+	startEventFlags();
+	if (index >= 0 && index < 83 && !m_tutorialDone[static_cast<size_t>(index)]) {
+		m_eventOnly[static_cast<size_t>(index)] = true;
+	}
+}
 
 bool HelpPopups::tutorialHolds(int index, const Context& c) const
 {
@@ -254,6 +282,30 @@ bool HelpPopups::tutorialHolds(int index, const Context& c) const
 	case 11: return c.spawnScreen;
 	case 12: return noMenu;
 	case 13: return c.alive && c.inVehicle;
+	// The menu states (0x00646cb0's cases 0x0a, 0x19, 0x1d / 0x2d; the
+	// spawn screen's halves set by SpawnManager.toggleMembers, 0x007b8b80:
+	// 1 the kits, the members 0x12 for a squad leader and 0x13 for the
+	// rest), the parachute (case 0x0d: the HUD manager's slot 0xb0 object's
+	// slot 0x78), a ladder (0x43: a Ladder, class 40000, within 3 m,
+	// 0x00646880), a vehicle to enter (0x47: an entry within 3 m,
+	// 0x005a98e0), the commander screen with the team's squads (0x1b).
+	case 14: return c.menuState == 0x13 && c.squad == 0;
+	case 15: return c.onFoot && c.parachute;
+	case 16: return c.menuState == 0x13 || c.menuState == 0x12;
+	case 17: return c.commanderScreen && c.teamSquads > 0;
+	case 18: return c.menuState == 0x12;
+	case 19: return c.onFoot && c.ladderNear;
+	case 20: return c.onFoot && c.vehicleNear;
+	// The event-only messages' own cases (enabled by the HUD manager's slot
+	// 0x128, 0x00751540): unconditional, a squad leader (slot 0x150), the
+	// commander (0x128), the artillery's and the orbital strike's
+	// placement (menu states 0x17, 0x22), on foot (+0x205).
+	case 21: return true;
+	case 22: return c.squadLeader;
+	case 23: return c.menuState == 0x17;
+	case 24: return c.menuState == 0x22;
+	case 25: return c.commander;
+	case 26: return c.onFoot;
 	default: return false;
 	}
 }
@@ -263,6 +315,7 @@ bool HelpPopups::tutorial(hud::HudManager& hud, const Context& context, float se
 	if (!m_tutorialStarted) {
 		// 0x006467f0: the played keys and those past their play-time limit.
 		m_tutorialStarted = true;
+		startEventFlags();
 		for (size_t i = 0; i < m_tutorialDone.size(); ++i) {
 			const Tutorial& t = kTutorials[i];
 			if (*t.key && (played(t.key) || (t.limit > 0 && context.playTime >= t.limit))) {
@@ -287,12 +340,14 @@ bool HelpPopups::tutorial(hud::HudManager& hud, const Context& context, float se
 	}
 	for (int i = 0; i < 83; ++i) {
 		const Tutorial& t = kTutorials[i];
-		if (t.eventOnly || m_tutorialDone[static_cast<size_t>(i)] || !*t.key || !tutorialHolds(i, context)) {
+		if (m_eventOnly[static_cast<size_t>(i)] || m_tutorialDone[static_cast<size_t>(i)] || !*t.key || !tutorialHolds(i, context)) {
 			continue;
 		}
 		m_tutorialDone[static_cast<size_t>(i)] = true; // 0x006467a0
-		const std::string voice = std::string(t.voice) == "=" ? std::string(t.key) : std::string(t.voice);
-		if (!show(hud, t.key, voice.empty() ? std::string(" ") : voice)) {
+		// Case 0x1d shows message 0x2d's text (both cases share their code).
+		const Tutorial& shown = i == 0x1d ? kTutorials[0x2d] : t;
+		const std::string voice = std::string(shown.voice) == "=" ? std::string(shown.key) : std::string(shown.voice);
+		if (!show(hud, shown.key, voice.empty() ? std::string(" ") : voice)) {
 			continue;
 		}
 		m_tutorialShowing = true;

@@ -464,7 +464,15 @@ void PlayerCamera::stepViews(float seconds)
 			m_modeVehicle = me.vehicle;
 			m_modeSeat = me.seat;
 			m_mode = Mode::Inside;
-			if (!firstPerson ? !setMode(Mode::Chase) : !setMode(Mode::Inside)) {
+			// A ToggleCameraComp's startCameraViewMode (0x005db260: the
+			// camera's slot 0x18) wins over the player's choice.
+			const auto seats = m_round.vehicleSeats(me.vehicle);
+			const int forced = static_cast<size_t>(me.seat) < seats.size() && seats[static_cast<size_t>(me.seat)].startCameraId >= 0
+				? seats[static_cast<size_t>(me.seat)].startCameraViewMode
+				: -1;
+			if (forced >= static_cast<int>(Mode::Inside) && forced <= static_cast<int>(Mode::Trace)
+				&& setMode(static_cast<Mode>(forced))) {
+			} else if (!firstPerson ? !setMode(Mode::Chase) : !setMode(Mode::Inside)) {
 				setMode(nextMode(Mode::Inside, modeRules()));
 			}
 		} else if (!modeAllowed(m_mode, modeRules())) {
@@ -929,7 +937,11 @@ bool PlayerCamera::findSeatCamera(SeatView& out) const
 	const std::string& seatName = seats[static_cast<size_t>(me.seat)].name;
 	const world::ObjectTemplateManager& templates = m_round.templates();
 	const uint32_t object = vehicle->id();
-	const int wanted = ducking() ? 1 : 0;
+	// The gun's ToggleCameraComp (0x005db260): taken up, the seat's camera
+	// is its zoom.startCameraId (the static AV's scope, the hover bike's
+	// missile camera, CameraId 11), ducking aside.
+	const int start = seats[static_cast<size_t>(me.seat)].startCameraId;
+	const int wanted = ducking() ? 1 : start >= 0 ? start : 0;
 	// Depth-first through the tree: find the seat, then its cameras.
 	struct Found {
 		bool ok = false;

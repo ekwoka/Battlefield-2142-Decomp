@@ -14,17 +14,20 @@ layout(location = 6) in float inWeight;
 layout(location = 7) in vec2 inDetailCoord;
 layout(location = 8) in vec2 inDirtCoord;
 layout(location = 9) in vec2 inCrackCoord;
+layout(location = 10) in vec4 inTangent; // xyz, w: the binormal's sign
 
 layout(set = 1, binding = 0) uniform Transforms {
 	mat4 worldViewProjection;
 	mat4 world;
 	vec4 lightmapTransform; // xy scale, zw offset into the lightmap atlas
-	mat4 parts[64];         // bundled-mesh part transforms (identity for others)
 	// The leaves' sway (RaShaderLeaf.fx, not OVERGROWTH): x on, y ObjRadius,
 	// z WindSpeed + WIND_ADD, w GlobalTime.
 	vec4 sway;
-	// x: the normal map's space (0 none, 1 the tangent's, 2 the object's).
+	// x: the normal map's space (0 none, 1 the tangent's: bundled and static
+	// meshes, a skinned mesh's tangent-space map; 2 the object's).
 	vec4 normalSpace;
+	mat4 parts[64];         // bundled-mesh part transforms (identity for others; a
+	                        // static mesh is sent only the first)
 };
 
 layout(location = 0) out vec3 outNormal;
@@ -38,9 +41,10 @@ layout(location = 7) out vec3 outWorldPosition;
 layout(location = 8) out float outObjectY; // the object's origin height (the hemi lerp's World[3][1])
 // A normal map's frame in the world (its columns: what the map's x, y and
 // z are): the tangent, binormal and normal (RaShaderBM createWorld2TanMat,
-// RaShaderSM getTangentBasis; the binormal cross(tangent, normal) times the
-// sign the vertex carries), or the object's axes for an object-space map
-// (RaShaderSM _OBJSPACENORMALMAP_), skinned with the vertex.
+// RaShaderSM getTangentBasis, RaShaderSTM getTanBasisTranspose; the
+// binormal cross(tangent, normal) times the sign the vertex carries), or
+// the object's axes for an object-space map (RaShaderSM
+// _OBJSPACENORMALMAP_), skinned with the vertex.
 layout(location = 9) out vec3 outBasisX;
 layout(location = 10) out vec3 outBasisY;
 layout(location = 11) out vec3 outBasisZ;
@@ -64,11 +68,9 @@ void main()
 		outBasisX = toWorld[0];
 		outBasisY = toWorld[1];
 		outBasisZ = toWorld[2];
-	} else if (normalSpace.x > 0.5) {
-		// Bundled and skinned meshes carry the tangent in the layers' place.
-		vec3 tangent = vec3(inDirtCoord, inCrackCoord.x);
-		vec3 binormal = normalize(cross(tangent, inNormal)) * inCrackCoord.y;
-		outBasisX = toWorld * tangent;
+	} else if (normalSpace.x > 0.5 && dot(inTangent.xyz, inTangent.xyz) > 1e-8) {
+		vec3 binormal = normalize(cross(inTangent.xyz, inNormal)) * inTangent.w;
+		outBasisX = toWorld * inTangent.xyz;
 		outBasisY = toWorld * binormal;
 		outBasisZ = outNormal;
 	} else {

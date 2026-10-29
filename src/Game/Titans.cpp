@@ -1741,6 +1741,12 @@ bool GameWorld::launchPod(int id)
 		body->occupants[static_cast<size_t>(player->seat)] = -1;
 	}
 	raise("ExitVehicle", {ScriptValue::player(player->id), ScriptValue::object(body->object)});
+	// Straight into another vehicle (GameServer 0x004b0b90): the seat's
+	// maintainCameraOnExitToOtherVehicle stands in for maintainCameraOnExit
+	// for this exit (0x005cea00): the soldier faces the way the seat's
+	// camera looked, else the vehicle's way.
+	player->body.yawDegrees = body->body.rotation.yawPitchRoll().x
+		+ (seat.maintainCameraOnExitToOther || seat.maintainCameraOnExit ? gunYaw : 0.0f);
 	player->vehicle = 0;
 	player->seat = -1;
 	player->seatAnimation.reset();

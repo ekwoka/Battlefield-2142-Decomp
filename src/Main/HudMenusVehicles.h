@@ -44,6 +44,9 @@
 //   - the reload (PrimaryReloadTime the progress, PrimaryReloadTimeShow
 //     while between 0 and 1) and the heat (PrimaryHeatValue,
 //     PrimaryHeatShow above 0);
+//   - the distance counter and range finder (0x007c1470: TargetDistance-
+//     String, TargetCoordX/Y/ZString) and the scan (0x007be380:
+//     HudScanProgress, HudScanInProgress);
 //   - the overheat (the firearm's slot 0x2c): once each time it starts,
 //     the weapon's HUD component plays its sound (slot 0x44, latched at
 //     +0xb0): weaponHud.overheatSound.
@@ -120,16 +123,38 @@ struct WeaponHudInput {
 	float heat = 0;      // slot 0x24
 	bool overheated = false; // slot 0x2c
 	int fireRate = -1;   // slot 0x14 (-1: none)
+	// The range finder's ray (hasRangeFinder): what it met and how far from
+	// the controlled object; the distance counter's projectile distance
+	// (hasDistanceCounter, -1 none); the scan (hasScanProgress, 0..1).
+	bool rangeHit = false;
+	float targetDistance = 0;
+	std::array<float, 3> target {};
+	int travelled = -1;
+	bool scanning = false;
+	float scan = 0;
 };
 
 class WeaponHud {
 public:
-	// Sets the weapon variables (prefix "Primary"); returns the sound to
-	// start (the overheat's), or "".
-	std::string update(hud::HudManager& hud, const WeaponHudInput& in);
+	// Sets the weapon variables (prefix "Primary", or "Secondary" for a
+	// seat's second gun, 0x007c2d50); returns the sound to start (the
+	// overheat's), or "".
+	std::string update(hud::HudManager& hud, const WeaponHudInput& in, bool secondary = false);
+	// The weapon's weaponHud.* fields, read once per template.
+	struct Fields {
+		bool showAmmo = true, showClips = true, hasMag = true, hasFireRate = true, battery = false;
+		bool rangeFinder = false, distanceCounter = false, scanProgress = false, ignoreTargetDistance = false;
+		bool guiShown = true;
+		std::string name, crosshair, barFront, barBack, clipIcon, ammoIcon, overheatSound;
+		void read(const world::ObjectTemplate* w);
+	};
+	const Fields& fields() const { return m_fields; }
 
 private:
 	bool m_overheatPlayed = false; // +0xb0
+	bool m_read = false;
+	const world::ObjectTemplate* m_template = nullptr;
+	Fields m_fields;
 };
 
 struct SelectItem {
@@ -171,7 +196,24 @@ int seatDotState(bool occupied, bool local, int squad, int localSquad, bool same
 struct SeatDot {
 	int state = 0;
 	float x = 0, y = 0; // vehicleHud.vehicleIconPos of the seat's object
+	// Its occupant (the passengers' names): the name, and 0 none, 1 an
+	// enemy, 2 a teammate, 3 the local player's squad.
+	std::string occupant;
+	int relation = 0;
 };
+
+// The passengers' names (0x007a34f0, OccupyingPlayerName%iShow/String and
+// OccupyingPlayer%iColor*): per occupied seat "%d. %s" with the seat's
+// number (counted over every seat from 1; a player whose slot 0x6c says so
+// is "R2D2", never in the rewrite), in the colour table 0x00b3c1e0's
+// (0.4, 0.6, 1) for the team, (1, 0.4, 0.4) for the enemy, or the squad's
+// (0.4, 1, 0) (DAT_00b3c380); packed into the ten lines from the last
+// filled one down (the first name in line count - 1, the last in line 0).
+struct PassengerLine {
+	std::string text; // "" hidden
+	std::array<float, 3> colour {1, 1, 1};
+};
+std::array<PassengerLine, 10> passengerLines(const std::vector<SeatDot>& seats);
 
 struct VehicleHudInput {
 	const world::ObjectTemplate* vehicle = nullptr;
@@ -189,6 +231,11 @@ public:
 
 private:
 	float m_climbAngle = 0, m_climbPrevious = 0; // +0x204 / +0x208
+	// The template's fields, read when the vehicle changes.
+	const world::ObjectTemplate* m_template = nullptr;
+	std::string m_name;
+	bool m_turretIcon = false;
+	float m_climbSpeed = 10;
 };
 
 // The map relation of a vehicle (0x00781680).

@@ -188,6 +188,11 @@ struct ParticleTemplate {
 	// 0x00619f90 flags bit 2, the system's +8) is shown only with it set
 	// (the scoped muzzle flashes set 0).
 	bool showZoomed = true;
+	// nearCullingEnable (sprites; RendDX9 template +0x284, slots 0x248 /
+	// 0x24c, 0x00623740): within 6 m past the near plane (+0x270) a
+	// particle bigger than 0.15 m (+0x278) fades towards the camera
+	// (0x101318e0, ParticleView::nearFade).
+	bool nearCulling = false;
 	// noRotationFromParent (RendDX9 template +0x222, slots 0x11c / 0x120):
 	// the system takes only its parent's position, not its turn
 	// (0x1013eff0: its local matrix plus the parent's position).
@@ -352,6 +357,24 @@ struct ParticleView {
 	// The alpha a particle keeps at view depth `depth` in LOD class `lod`.
 	float fade(float depth, int lod) const;
 	bool shows(const ParticleTemplate& t) const { return !zoomed || t.showZoomed; }
+	float nearPlane = 0; // the camera's
+	// 0x101318e0's near fade of a particle of `size` at view depth `depth`
+	// (the factor that replaces the distance fade): with d the depth past
+	// the near plane under 6 m (+0x270) and the size over 0.15 (+0x278),
+	// f = max(1 - (size - 0.15) x 4 (+0x27c), 0) and t = (6 - d) x 0.5
+	// (+0x274): (1 - t) + t f while t <= 1, else f; below 0.01 (+0x280)
+	// the particle isn't drawn. -1: no near fade here.
+	static float nearFade(float depth, float nearPlane, float size)
+	{
+		const float d = depth - nearPlane;
+		if (d >= 6.0f || size <= 0.15f) {
+			return -1.0f;
+		}
+		const float s = (size - 0.15f) * 4.0f;
+		const float f = s <= 1.0f ? 1.0f - s : 0.0f;
+		const float t = (6.0f - d) * 0.5f;
+		return t <= 1.0f ? (1.0f - t) + t * f : f;
+	}
 };
 
 // A mesh particle: its mesh scaled by `size`, turned and placed
@@ -414,11 +437,11 @@ struct PointLight {
 	Vec3 color;   // at this moment (faded)
 	float range1 = 0;
 	float range2 = 1;
-	// lightType Spot: lit within the cone about `direction` (world space),
-	// full inside cosInner, gone outside cosOuter.
+	// lightType Spot: lit within the cone about `direction` (world space)
+	// of width `cone` (LightSourceLook::cone).
 	bool spot = false;
 	Vec3 direction {0, 0, 1};
-	float cosInner = 1, cosOuter = 1;
+	float cone = 0.3927f;
 	// affectLightmappedObjects: whether lightmapped surfaces take it too
 	// (the static lights of the levels leave them to their lightmaps).
 	bool affectsLightmapped = true;
@@ -442,7 +465,12 @@ struct LightSourceLook {
 	Vec3 color {1, 1, 1}; // times intensity
 	float range1 = 0, range2 = 1;
 	Vec3 direction {0, 0, 1}; // in the light's space
-	float cosInner = 1, cosOuter = 1;
+	// The shaders' ConeAngle: coneAngle2 in radians. BF2142.exe's light
+	// object (0x0064b170) clamps coneAngle1 / 2 to 180 and keeps each in
+	// degrees and radians (+0x1a0 / +0x1a4, +0x1a8 / +0x1ac); its slot
+	// 0x1c8 (0x0064aad0) hands RendDX9 coneAngle2's radians, which go to
+	// ConeAngle as they are (0x1006bf8a). coneAngle1 reaches no shader.
+	float cone = 0.3927f; // 22.5 degrees, the template's default
 	float flicker = 0;
 };
 LightSourceLook lightSourceOf(const world::ObjectTemplate& t);

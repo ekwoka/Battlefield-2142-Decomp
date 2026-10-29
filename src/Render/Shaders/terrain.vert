@@ -26,7 +26,6 @@ layout(set = 1, binding = 0) uniform Transforms {
 	mat4 worldViewProjection;
 	mat4 world;
 	vec4 lightmapTransform;
-	mat4 parts[64];
 };
 
 layout(set = 1, binding = 1) uniform Morph {

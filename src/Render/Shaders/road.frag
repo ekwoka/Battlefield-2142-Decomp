@@ -27,9 +27,11 @@ layout(set = 3, binding = 0) uniform Lighting {
 	vec4 sunDirection;
 	vec4 sunColor;     // terrain sun color
 	vec4 skyColor;     // terrain GI color
-	vec4 fogColor;
+	vec4 fogColor;     // rgb, w: the near term's floor (FogColor.w)
+	vec4 fogRange;     // RaCommon.fx FogRange (fog.glsl)
 	vec4 material;     // y: 1 with a lightmap
 };
+#include "fog.glsl"
 
 layout(set = 3, binding = 1) uniform Road {
 	vec4 road; // x: blend factor, y: fade start, z: fade end distance
@@ -54,6 +56,6 @@ void main()
 		light = (2.0 * lightmap.g * sun * shadowFactor(inWorldPosition, false) +
 			clamp(2.0 * lightmap.b * gi, 0.0, 1.0) * 0.5) * 2.0;
 	}
-	float fog = clamp(inDepth / fogColor.w, 0.0, 1.0);
-	outColor = vec4(mix(albedo * light, fogColor.rgb, fog * fog), t0.a * inAlpha * fade);
+	float fog = fogAmount(inDepth);
+	outColor = vec4(mix(albedo * light, fogColor.rgb, fog), t0.a * inAlpha * fade);
 }

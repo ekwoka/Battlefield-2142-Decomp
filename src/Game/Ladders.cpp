@@ -327,4 +327,18 @@ bool GameWorld::onLadder(int id) const
 	return player && player->ladder >= 0;
 }
 
+bool GameWorld::ladderInReach(int id, float radius) const
+{
+	const Player* player = findPlayer(id);
+	if (!player || !player->alive || player->vehicle) {
+		return false;
+	}
+	for (const Ladder& ladder : m_ladders) {
+		if (physics::lengthSquared(ladder.position - player->body.position) <= radius * radius) {
+			return true;
+		}
+	}
+	return false;
+}
+
 } // namespace dice::hfe::game

@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <map>
 #include <set>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -76,11 +77,21 @@ public:
 	// play only here, for the local player (game slot 0x60): to no team,
 	// neutralTeamChangeMessage if it was the local team's; else
 	// friendlyTeamChangeMessage if the local player is on the new team,
-	// enemyTeamChangeMessage if not. (The silo's "_N" suffix from
-	// SiloSyncEvent isn't added.) The weapons' fail and use messages are
+	// enemyTeamChangeMessage if not, a missile silo's with its "_N"
+	// (siloSuffix). The weapons' fail and use messages are
 	// GameWorld's (the players say them).
 	// Returns the messages sent this tick (team, message), for tests.
 	std::vector<std::pair<int, std::string>> autoRadio();
+
+	// Every radio message the local player hears, as it is heard (the
+	// name tags' calls).
+	std::function<void(int sender, const std::string& voice)> onHeard;
+
+	// The SiloSyncEvent's suffix (0x00514030: "_%d", DAT_00928708, of the
+	// silo's index, its ancestor's slot 0x38, into the Radio's +0x18) that
+	// the team-change messages (0x00656e80) end with: "_<index>" for a
+	// missile silo, else "".
+	static std::string siloSuffix(int index) { return index > 0 ? "_" + std::to_string(index) : std::string(); }
 
 	// Counters, for --verbose and tests.
 	int weaponSounds = 0, radioHeard = 0, voiceOvers = 0;

@@ -242,9 +242,10 @@ public:
 	// after the last; false (nothing changes) with fewer than two.
 	int fireMode() const { return m_mode; }
 	bool toggleFireMode();
-	// Off: the mode is ignored and the trigger fires as held (the rewrite's
-	// drones and sentry guns, whose auto controller holds it; how it pulses
-	// the trigger for their single-fire guns is not traced).
+	// Off: the mode is ignored and the trigger fires as held. (The drones
+	// and sentry guns keep the modes: their auto controllers, AIDLL bots,
+	// hold the trigger for an automatic gun and tap it otherwise,
+	// GameWorld::autoTrigger.)
 	void setUseFireModes(bool use) { m_useModes = use; }
 	// Whether the round fired now carries a tracer (0x005f2bb0, with a
 	// tracer template: the fire component's +0x78 counts down a round at a
@@ -285,6 +286,31 @@ struct CameraRecoil {
 	void start(float recoilSpeed, float recoilSize);
 	// One update; the kick in degrees.
 	float update(float seconds);
+};
+
+// The gun's own recoil (WeaponBasedRecoilComp, template 0x005de1b0:
+// recoilForce +0xc, recoilSpeed +0x10, recoilSpeedGB +0x14, recoilSize
+// +0x18; their setters 0x005dda80 / 0x005ddac0 keep pi / recoilSpeed at
+// +0x1c and (pi / 2) / recoilSpeedGB at +0x20). Each round (0x005ddfc0)
+// stamps two tick counts: the kick ends round(+0x1c x 15) ticks on, the
+// return round(+0x20 x 30) after that. The update (0x005ddd80, with
+// recoilSpeed above 0) slides the gun's local matrix back along its own z:
+// during the kick by size x 0.025 x sin((+0x1c / 2 + t) x recoilSpeed), t
+// the seconds left of it (0 to the full slide); during the return by size x
+// 0.025 x (t / +0x20), t the seconds left of it; then back at rest. With
+// recoilForce above 0 the round also pushes the vehicle's root body by
+// -forward x recoilForce at the gun (physics slot 0xa0, 0x006c7b10: added
+// to the acceleration, its moment to the torque; slot 0x160 wakes it).
+// (Above 5 the force also starts 0x005a6e70, the explosions' camera shake
+// for the players near, which the rewrite leaves out.)
+struct GunRecoil {
+	float force = 0, speed = 0, speedGB = 0, size = 0;
+	uint32_t kickEnd = 0, returnEnd = 0; // ticks (0: at rest)
+	static GunRecoil fromTemplate(const world::ObjectTemplate& firearm);
+	bool any() const { return force > 0 || (speed > 0 && size != 0); }
+	void fired(uint32_t tick);
+	// The slide back along the gun's z this tick (metres, >= 0 back).
+	float slide(uint32_t tick) const;
 };
 
 struct Projectile {

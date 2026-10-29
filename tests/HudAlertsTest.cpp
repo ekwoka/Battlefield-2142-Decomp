@@ -521,3 +521,75 @@ TEST(HudNodes_GameCommanderMapMenu)
 	const hud::HudQuad* marker = quadWith(quads, "crosshair_comrose");
 	CHECK(marker && marker->x0 == 280 && marker->y0 == 180); // -20 -20 from the click
 }
+
+// The help manager's menu-state, ladder and vehicle messages (0x00646cb0
+// cases 0x0a, 0x19, 0x1d / 0x2d, 0x43, 0x47) and the profile's play time.
+TEST(HudAlerts_TutorialMenuStatesAndReach)
+{
+	hud::HudManager hudManager(nullptr);
+	menu::HelpPopups tutor;
+	menu::HelpPopups::Context c;
+	c.playing = true;
+	c.spawnScreen = true;
+	c.menuState = 0x13; // the members half, not leading a squad
+	CHECK(tutor.tutorial(hudManager, c, 0.1f));
+	CHECK(hudManager.string("IngameHelpString") == "HUD_HELP_SPAWNSCREEN_SQUADTAB_createSquad");
+	// A ladder in reach on foot with a menu up (the movement ones need none).
+	menu::HelpPopups ladder;
+	menu::HelpPopups::Context l;
+	l.playing = l.onFoot = l.alive = l.ladderNear = true;
+	l.menuOpen = true;
+	CHECK(ladder.tutorial(hudManager, l, 0.1f));
+	CHECK(hudManager.string("IngameHelpString") == "HUD_HELP_GAMEPLAY_climbLadder");
+	l.ladderNear = false;
+	l.vehicleNear = true;
+	ladder.update(hudManager, {}, menu::HelpPopups::kShowSeconds);
+	CHECK(ladder.tutorial(hudManager, l, 10.5f));
+	CHECK(hudManager.string("IngameHelpString") == "HUD_HELP_VEHICLE_GENERAL_CONTROLS_enterVehicle");
+	// The squad leader's page (0x12): case 0x1d shows 0x2d's text.
+	menu::HelpPopups leader;
+	menu::HelpPopups::Context s;
+	s.playing = true;
+	s.menuState = 0x12;
+	s.squad = 1;
+	s.squadLeader = true;
+	s.menuOpen = true;
+	CHECK(leader.tutorial(hudManager, s, 0.1f));
+	CHECK(hudManager.string("IngameHelpString") == "HUD_HELP_SPAWNSCREEN_SQUADTAB_applyCommander");
+	leader.update(hudManager, {}, menu::HelpPopups::kShowSeconds);
+	CHECK(leader.tutorial(hudManager, s, 10.5f));
+	CHECK(hudManager.string("IngameHelpString") == "HUD_HELP_SQUAD_LEADER_mainMapRightMouseMenu");
+	// Past its play-time limit a message is done from the start (0x006467f0).
+	menu::HelpPopups old;
+	menu::HelpPopups::Context o;
+	o.playing = o.onFoot = o.alive = true;
+	o.roundTime = 1;
+	o.playTime = 1e6f;
+	CHECK(old.tutorial(hudManager, o, 0.1f));
+	CHECK(hudManager.string("IngameHelpString") == "HUD_HELP_PLAYER_CONTROLS_moveMouseToLook");
+	old.update(hudManager, {}, menu::HelpPopups::kShowSeconds);
+	CHECK(old.tutorial(hudManager, o, 10.5f));
+	CHECK(hudManager.string("IngameHelpString") != "HUD_HELP_PLAYER_CONTROLS_jump");
+}
+
+// Event-only messages wait for the HUD's slot 0x128 (0x00751540).
+TEST(HudAlerts_TutorialEvents)
+{
+	hud::HudManager hudManager(nullptr);
+	menu::HelpPopups tutor;
+	menu::HelpPopups::Context c;
+	c.playing = true;
+	c.menuOpen = true; // none of the tick's own hold
+	CHECK(!tutor.tutorial(hudManager, c, 0.1f));
+	tutor.enableTutorial(0x33);
+	CHECK(tutor.tutorial(hudManager, c, 0.1f));
+	CHECK(hudManager.string("IngameHelpString") == "HUD_HELP_GAMEPLAY_captureFlag");
+	tutor.update(hudManager, {}, menu::HelpPopups::kShowSeconds);
+	tutor.enableTutorial(0x18);
+	tutor.disableTutorial(0x18);
+	CHECK(!tutor.tutorial(hudManager, c, 10.5f));
+	c.commander = true;
+	tutor.enableTutorial(0x18);
+	CHECK(tutor.tutorial(hudManager, c, 0.1f));
+	CHECK(hudManager.string("IngameHelpString") == "HUD_HELP_COMMANDER_commanderApply");
+}

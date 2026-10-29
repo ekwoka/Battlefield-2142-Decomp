@@ -274,6 +274,14 @@ TEST(Effects_DecalsLightsAndMeshParticles)
 	CHECK(manager.lights().size() == 1);
 	const effects::PointLight lit = manager.lights()[0];
 	CHECK(lit.position.x == 10 && lit.position.y == 1 && lit.color.x == 4 && lit.range1 == 2 && lit.range2 == 5);
+	// A spot's ConeAngle: coneAngle2 in radians, at most 180 degrees; the
+	// ranges at most 100 (BF2142.exe 0x0064b170).
+	world::ObjectTemplate* spot = templates.create("LightSource", "spot");
+	spot->settings()["lightType"] = "Spot";
+	spot->settings()["coneAngle2"] = "25";
+	spot->settings()["attenuationRange2"] = "250";
+	const effects::LightSourceLook spotLook = effects::lightSourceOf(*spot);
+	CHECK(spotLook.spot && std::fabs(spotLook.cone - 25 * 3.14159265f / 180) < 1e-5f && spotLook.range2 == 100);
 	for (int i = 0; i < 6; ++i) {
 		manager.update(1 / 30.0f);
 	}

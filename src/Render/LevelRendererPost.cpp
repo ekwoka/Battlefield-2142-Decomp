@@ -344,7 +344,7 @@ void LevelRenderer::drawShadowCasters(SDL_GPUCommandBuffer* commands, SDL_GPUTex
 				? Mat4 {}
 				: instance.parts[static_cast<size_t>(i)];
 		}
-		SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
+		SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
 		const std::vector<anim::Matrix>* pose = bound->skinned ? &poseFor(instance, seconds) : nullptr;
 		for (const Submesh& submesh : bound->submeshes) {
 			if (submesh.blended || submesh.additive) {
@@ -358,7 +358,7 @@ void LevelRenderer::drawShadowCasters(SDL_GPUCommandBuffer* commands, SDL_GPUTex
 					continue;
 				}
 				skinPalette(*bound, submesh, *pose, transforms);
-				SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
+				SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
 			}
 			const float caster[4] = {submesh.alphaReference > 0 ? std::max(submesh.alphaReference, settings.alphaShadowThreshold) : 0.0f,
 				0, 0, 0};
@@ -442,7 +442,7 @@ void LevelRenderer::drawSky(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* p
 	SDL_PushGPUFragmentUniformData(commands, 0, &sky, sizeof(sky));
 	const Mat4 world = Mat4::rotationY(m_skyRotation * 3.14159265f / 180.0f) * Mat4::translation(camera.position);
 	TransformUniforms skyTransforms {world * viewProjection, world, {1, 1, 0, 0}, {}};
-	SDL_PushGPUVertexUniformData(commands, 0, &skyTransforms, sizeof(skyTransforms));
+	SDL_PushGPUVertexUniformData(commands, 0, &skyTransforms, pushUniformSize(skyTransforms));
 	SDL_GPUBufferBinding vertexBinding {m_skyMesh->vertices, 0};
 	SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
 	SDL_GPUBufferBinding indexBinding {m_skyMesh->indices, 0};
@@ -489,9 +489,9 @@ void LevelRenderer::drawSunFlare(SDL_GPUCommandBuffer* commands, SDL_GPURenderPa
 	SDL_BindGPUGraphicsPipeline(pass, m_gpu.additiveMeshPipeline());
 	useShadows(commands, pass, 1, 5, true);
 	TransformUniforms transforms {world * viewProjection, world, {1, 1, 0, 0}, {}};
-	SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
+	SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
 	LightingUniforms uniforms {};
-	uniforms.fogColor[3] = 1e9f; // unfogged
+	// Unfogged: FogRange (0, 0, 0, 1) keeps calcFog at 1.
 	uniforms.material[2] = kMaterialAdditive;
 	// flareParams[0]: the visible share (1 where the depth test lets it
 	// through) plus flareFadeAdd, times flareFadeMul, at most 1; brighter
@@ -508,6 +508,7 @@ void LevelRenderer::drawSunFlare(SDL_GPUCommandBuffer* commands, SDL_GPURenderPa
 		{m_gpu.whiteTexture(), m_gpu.repeatSampler()},
 	};
 	SDL_BindGPUFragmentSamplers(pass, 0, samplers, 5);
+	bindMeshLayers(pass, nullptr);
 	SDL_GPUBufferBinding vertexBinding {m_flareVertices, 0};
 	SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
 	SDL_DrawGPUPrimitives(pass, 6, 1, 0, 0);
@@ -653,7 +654,7 @@ void LevelRenderer::drawCamouflage(SDL_GPUCommandBuffer* commands, SDL_GPUTextur
 		for (size_t i = 0; i < instance.parts.size() && i < static_cast<size_t>(kMaxMeshParts); ++i) {
 			transforms.parts[i] = instance.parts[i];
 		}
-		SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
+		SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
 		const std::vector<anim::Matrix>* pose = gpuMesh.skinned ? &poseFor(instance, seconds) : nullptr;
 		for (const Submesh& submesh : gpuMesh.submeshes) {
 			if (gpuMesh.skinned) {
@@ -661,7 +662,7 @@ void LevelRenderer::drawCamouflage(SDL_GPUCommandBuffer* commands, SDL_GPUTextur
 					continue;
 				}
 				skinPalette(gpuMesh, submesh, *pose, transforms);
-				SDL_PushGPUVertexUniformData(commands, 0, &transforms, sizeof(transforms));
+				SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
 			}
 			SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
 		}

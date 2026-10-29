@@ -176,3 +176,27 @@ TEST(Nametags_IconRegistry)
 	CHECK(icons.find(0x35) && icons.find(0x35)->texture == "Menu/Nametag/bar_filler.dds");
 	CHECK(icons.find(0x35 | 0x100) && icons.find(0x35 | 0x100)->texture == "Menu/Nametag/bar_base.dds");
 }
+
+// The players' icons, the radio calls and the name's row (0x100f0310,
+// 0x100f19c0, 0x100f0840, 0x1016b100).
+TEST(Nametags_IconsCallsAndRanks)
+{
+	CHECK(nametags::playerIconId(false, 0, false) == 0x5a);
+	CHECK(nametags::playerIconId(true, 3, false) == 0x69 + 3);
+	CHECK(nametags::playerIconId(false, 2, true) == 0x69);
+	const nametags::Abilities medic = nametags::kitAbilities("Assault"), support = nametags::kitAbilities("Support");
+	CHECK(medic.heal && !medic.ammo && support.ammo && nametags::kitAbilities("Engineer").repair);
+	float seconds = 0;
+	CHECK(nametags::callIcon(nametags::CallMedic, medic, seconds) == 0x2d && seconds == 12);
+	CHECK(nametags::callIcon(nametags::CallAmmo, medic, seconds) == -1);
+	CHECK(nametags::callIcon(nametags::CallAmmo, support, seconds) == 0x2f);
+	CHECK(nametags::callIcon(nametags::CallRevive, medic, seconds) == 0x2c && seconds == 30);
+	nametags::CallTimers timers;
+	CHECK(nametags::helperIcon(timers, medic) == -1);
+	timers.medic = 12;
+	CHECK(nametags::helperIcon(timers, medic) == 0x2d && nametags::helperIcon(timers, support) == -1);
+	timers.tick(13);
+	CHECK(timers.medic == 0 && nametags::helperIcon(timers, medic) == -1);
+	CHECK(nametags::nameRow(5, false).rankIcon == 5 && nametags::nameRow(5, false).veteranIcon == -1);
+	CHECK(nametags::nameRow(44, true).rankIcon == -1 && nametags::nameRow(0, true).veteranIcon == 0x4f);
+}

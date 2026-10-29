@@ -14,6 +14,7 @@
 #include "World/ObjectTemplateManager.h"
 #include "World/WorldConsole.h"
 
+#include <cmath>
 #include <cstdlib>
 #include <set>
 #include <string>
@@ -445,4 +446,61 @@ TEST(HudVehicle_SeatsAndMarkers)
 	CHECK(menu::vehicleMarker(*tank, R::Enemy, false, true, marker)); // spotted
 	console.execute("ObjectTemplate.vehicleHud.showOnEnemyMinimap 1", out);
 	CHECK(menu::vehicleMarker(*tank, R::Enemy, false, false, marker));
+}
+
+// The passengers' names (0x007a34f0) and the scoreboard's squads
+// (0x007baed0 / 0x007ba570).
+TEST(HudVehicle_PassengersAndScoreboardSquads)
+{
+	std::vector<menu::SeatDot> seats(4);
+	seats[0].occupant = "Driver";
+	seats[0].relation = 3;
+	seats[2].occupant = "Gunner";
+	seats[2].relation = 2;
+	const auto lines = menu::passengerLines(seats);
+	CHECK(lines[1].text == "1. Driver" && lines[1].colour[1] == 1);
+	CHECK(lines[0].text == "3. Gunner" && std::fabs(lines[0].colour[1] - 0.6f) < 1e-6f);
+	CHECK(lines[2].text.empty());
+	hud::HudManager hudManager(nullptr);
+	menu::VehicleHud vehicleHud;
+	menu::VehicleHudInput in;
+	in.seats = seats;
+	vehicleHud.update(hudManager, in);
+	CHECK(hudManager.number("OccupyingPlayerName2Show") == 1 && hudManager.string("OccupyingPlayerName2String") == "1. Driver");
+	CHECK(hudManager.number("OccupyingPlayerName3Show") == 0);
+
+	std::vector<menu::ScoreboardMember> members {
+		{0, 2, false, 30, 0, 3, 1, 50}, {1, 0, false, 20, 0, 2, 2, 0}, {2, 1, true, 10, 0, 1, 0, 0}, {3, 2, false, 5, 0, 0, 4, 30}};
+	const auto rows = menu::scoreboardBySquad(members);
+	CHECK(rows.size() == 7);
+	CHECK(rows[0].member == -1 && rows[0].squad == -1 && !rows[0].totals && rows[1].member == 2);
+	CHECK(rows[2].member == -1 && rows[2].squad == 2 && rows[2].score == 35 && rows[2].deaths == 5 && rows[2].ping == 40);
+	CHECK(rows[3].member == 0 && rows[4].member == 3);
+	CHECK(rows[5].squad == 0 && rows[5].totals && rows[6].member == 1);
+}
+
+// The weapon HUD's range finder (0x007c1470) and the second gun's prefix.
+TEST(HudWeapon_RangeFinderAndSecondary)
+{
+	world::ObjectTemplate rifle(1, "GenericFireArm", "rifle", 1);
+	rifle.settings()["weaponHud.hasRangeFinder"] = "1";
+	hud::HudManager hudManager(nullptr);
+	menu::WeaponHud weaponHud;
+	menu::WeaponHudInput in;
+	in.weapon = &rifle;
+	in.magSize = 30;
+	in.rounds = 10;
+	in.mags = 2;
+	weaponHud.update(hudManager, in);
+	CHECK(hudManager.string("TargetDistanceString") == "999" && hudManager.string("TargetCoordXString") == "999");
+	in.rangeHit = true;
+	in.targetDistance = 123.4f;
+	in.target = {10.4f, 20.6f, 30.2f};
+	weaponHud.update(hudManager, in);
+	CHECK(hudManager.string("TargetDistanceString") == "123");
+	CHECK(hudManager.string("TargetCoordXString") == "10" && hudManager.string("TargetCoordYString") == "-30"
+		&& hudManager.string("TargetCoordZString") == "21");
+	menu::WeaponHud second;
+	second.update(hudManager, in, true);
+	CHECK(hudManager.string("SecondaryAmmoString") == "10" && hudManager.string("TotSecondaryAmmoString") == "/ 40");
 }

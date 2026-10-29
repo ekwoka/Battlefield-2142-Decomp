@@ -2,9 +2,9 @@
 //
 // The renderer reads these each frame. Colors are linear 0..1 except the
 // fog color, which scripts give as 0..255 (RendDX9 scales it by 1/255).
-// Fog start/end: RendDX9 (0x100355c0, called from 0x10020000) uses
-// fogStartEndAndBase.x as the start and scales .y by a view-distance factor
-// for the end; that factor isn't identified yet, so the end is fixed here.
+// Fog start/end/base: RendDX9 scales the end and the fourth value by the
+// view distance (0x10028020) and makes RaCommon.fx's FogRange of them
+// (0x100355c0), in metres (render/Fog.h, Shaders/fog.glsl).
 #pragma once
 
 #include <array>

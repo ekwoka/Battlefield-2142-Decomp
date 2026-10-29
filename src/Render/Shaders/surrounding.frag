@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 // The surrounding terrain: the secondary heightmaps around the level, as
 // TerrainShader_Shared.fx's Shared_SurroundingTerrain (Shared_PS_STNormal)
 // draws them. Their colormaps (<colormap base>_s<i>.dds) hold the light
@@ -20,9 +21,11 @@ layout(set = 3, binding = 0) uniform Lighting {
 	vec4 sunDirection;
 	vec4 sunColor;
 	vec4 skyColor;
-	vec4 fogColor; // w: fog end
+	vec4 fogColor;     // rgb, w: the near term's floor (FogColor.w)
+	vec4 fogRange;     // RaCommon.fx FogRange (fog.glsl)
 	vec4 material;
 };
+#include "fog.glsl"
 
 layout(set = 3, binding = 1) uniform Detail {
 	vec4 tiling0;
@@ -51,6 +54,6 @@ void main()
 		low = mix(0.5, yPlane.b, component.r) * mix(0.5, mountain, component.b);
 	}
 	vec3 color = low * colormap * 4.0;
-	float fog = clamp(inDepth / fogColor.w, 0.0, 1.0);
-	outColor = vec4(mix(color, fogColor.rgb, fog * fog), 1.0);
+	float fog = fogAmount(inDepth);
+	outColor = vec4(mix(color, fogColor.rgb, fog), 1.0);
 }

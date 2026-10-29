@@ -11,6 +11,8 @@
 
 #include <SDL3/SDL.h>
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -33,6 +35,14 @@ struct Vertex {
 	float detailCoord[2];
 	float dirtCoord[2];
 	float crackCoord[2];
+	// The mesh's TANGENT (xyz) and the binormal's sign (w): binormal =
+	// cross(tangent, normal) x w. Bundled and skinned meshes: 1 - 2 x the
+	// third blend-index byte (RaShaderBM createWorld2TanMat, RaShaderSM
+	// getTangentBasis); static meshes: RaShaderSTM getBinormalFlipping's
+	// 1 - 2 x Pos.w, the FLOAT3 position's w being Direct3D's default 1
+	// (every shipped static mesh declares FLOAT3 positions and a FLOAT3
+	// tangent).
+	float tangent[4];
 };
 
 // Uniform blocks (std140-compatible: only vec4 and mat4 members).
@@ -43,16 +53,25 @@ struct TransformUniforms {
 	Mat4 worldViewProjection;
 	Mat4 world;
 	float lightmapTransform[4] {1, 1, 0, 0}; // scale xy, offset zw into the atlas
-	Mat4 parts[kMaxMeshParts];              // bundled-mesh part transforms
 	// mesh.vert's leaf sway (RaShaderLeaf.fx without OVERGROWTH): x 1 for a
 	// tree's leaves, y the object's radius, z the wind's speed there plus
 	// WIND_ADD (5), w GlobalTime.
 	float sway[4] {};
-	// mesh.vert's normal map frame: x 0 none, 1 the tangent's (bundled and
-	// skinned meshes' tangents), 2 the object's (RaShaderSM
+	// mesh.vert's normal map frame: x 0 none, 1 the tangent's (bundled,
+	// static and skinned meshes' tangents), 2 the object's (RaShaderSM
 	// _OBJSPACENORMALMAP_).
 	float normalSpace[4] {};
+	Mat4 parts[kMaxMeshParts]; // bundled-mesh part transforms, skinned meshes' bones
+	// Not in the shaders' block: how many of `parts` pushUniformSize sends
+	// (a static mesh reads only the first; the other shaders none).
+	uint32_t partsUsed = kMaxMeshParts;
 };
+
+// The bytes of `t` to push: the block up to the parts it uses.
+inline uint32_t pushUniformSize(const TransformUniforms& t)
+{
+	return static_cast<uint32_t>(offsetof(TransformUniforms, parts) + sizeof(Mat4) * std::min<uint32_t>(t.partsUsed, kMaxMeshParts));
+}
 
 // Water fragment shader, second uniform block.
 struct WaterUniforms {
@@ -108,7 +127,11 @@ struct LightingUniforms {
 	float sunDirection[4];
 	float sunColor[4];
 	float skyColor[4];
-	float fogColor[4]; // w: fog end distance
+	// RaCommon.fx's FogColor (rgb; w the fog's fourth value, the least
+	// visibility the near term keeps) and FogRange (0x100355c0: 1 / (e - s),
+	// -base / (e - s), -s / (e - s), e / (e - s)); fog.glsl's calcFog.
+	float fogColor[4];
+	float fogRange[4] {0, 0, 0, 1};
 	float material[4]; // x: alpha reference, 0 for opaque; y: 1 with a lightmap;
 					   // z: mesh layers (1 detail, 2 dirt, 4 crack) plus the
 					   // material's kind (kMaterialBlended, kMaterialAdditive);
@@ -121,11 +144,11 @@ struct LightingUniforms {
 	float lightCount[4] {};
 	float lightPosition[kMaxPointLights][4] {};
 	float lightColor[kMaxPointLights][4] {};
-	// Spot lights: the cone's axis (xyz, world space) and the cosine it is
-	// gone outside (w; below -1 for a point light).
+	// Spot lights: the cone's axis (xyz, world space) and its ConeAngle c
+	// (w: coneAngle2 in radians; below -1 for a point light).
 	float lightSpot[kMaxPointLights][4] {};
-	// x: the cosine it is full inside; y: 1 when it lights lightmapped
-	// surfaces too (affectLightmappedObjects).
+	// y: 1 when it lights lightmapped surfaces too
+	// (affectLightmappedObjects).
 	float lightExtra[kMaxPointLights][4] {};
 	// mesh.frag's hemi map (RaShaderBM/SM): HemiMapConstantColor (rgb; a
 	// Titan interior map's colour under the object, else 1) and the
@@ -139,6 +162,11 @@ struct LightingUniforms {
 	// sunSpecColor for bundled meshes) and the gloss (w).
 	float eye[4] {};
 	float specular[4] {};
+	// mesh.frag's static per-pixel path and the envmaps: xy RaShaderSTM's
+	// ParallaxScaleBias scale (the height scale over the detail map's
+	// size, 0x100d9c00; the bias is -0.5 x it), z the kMaterialExtra*
+	// bits, w unused.
+	float layers[4] {};
 };
 
 // The dynamic shadows and the hemi map (shadow.glsl's Shadows block).
@@ -164,6 +192,16 @@ constexpr float kMaterialAdditive = 16; // unlit, added (additiveMeshPipeline)
 constexpr float kMaterialHemi = 32;     // a bundled or skinned mesh: the hemi map's ambient
 constexpr float kMaterialNormalMap = 64;  // a normal map (the dirt map's binding; RaShaderBM/SM _HASNORMALMAP_)
 constexpr float kMaterialNoShadows = 128; // receives no dynamic shadows (the low lighting level's BM/SM)
+// mesh.frag's samplers: 0-4 the material's maps, 5-7 the shadows and the
+// hemi map (shadow.glsl), 8 a static mesh's detail normal map, 9 its crack
+// normal map, 10 the envmap (a cube).
+constexpr uint32_t kMeshSamplers = 11;
+constexpr uint32_t kMeshLayerSamplers = 8;
+// LightingUniforms::layers[2] bits.
+constexpr float kLayerDetailNormal = 1; // a static mesh's detail normal map (RaShaderSTM _NDETAIL_)
+constexpr float kLayerCrackNormal = 2;  // its crack normal map (_NCRACK_)
+constexpr float kLayerParallax = 4;     // parallax on the detail coordinates (_PARALLAXDETAIL_)
+constexpr float kLayerEnvMap = 8;       // the level's nearest envmap (EnvMapManager +100)
 
 class GpuContext {
 public:
@@ -249,6 +287,7 @@ public:
 	SDL_GPUTexture* whiteTexture() const { return m_white; }
 	SDL_GPUTexture* blackTexture() const { return m_black; }
 	SDL_GPUTexture* whiteCubeTexture() const { return m_whiteCube; }
+	SDL_GPUTexture* flatNormalTexture() const { return m_flatNormal; }
 	SDL_GPUTexture* whiteVolumeTexture() const { return m_whiteVolume; }
 	SDL_GPUTextureFormat colorFormat() const { return m_colorFormat; }
 	// Depth with a stencil (the menus' masks): D32_FLOAT_S8_UINT, else
@@ -257,6 +296,13 @@ public:
 
 	// Uploads are recorded into one copy pass and submitted by flushUploads().
 	SDL_GPUBuffer* createBuffer(SDL_GPUBufferUsageFlags usage, const void* data, uint32_t size);
+	// A buffer rewritten every frame (particles, decals, the HUD): kept with
+	// its upload buffer and grown by half again when too small, the data
+	// written through cycled maps and uploads (SDL keeps the copies the GPU
+	// still reads). `buffer` is null at first; release it with
+	// releaseDynamicBuffer.
+	void uploadDynamic(SDL_GPUBuffer*& buffer, SDL_GPUBufferUsageFlags usage, const void* data, uint32_t size);
+	void releaseDynamicBuffer(SDL_GPUBuffer*& buffer);
 	// A 2D texture, or with `cube` a cube map (null if the file is the other kind).
 	SDL_GPUTexture* createTexture(const texture::DdsTexture& texture, bool cube = false);
 	SDL_GPUTexture* createRgbaTexture(uint32_t width, uint32_t height, const void* pixels);
@@ -315,10 +361,16 @@ private:
 	SDL_GPUTexture* m_white = nullptr;
 	SDL_GPUTexture* m_black = nullptr;
 	SDL_GPUTexture* m_whiteCube = nullptr;
+	SDL_GPUTexture* m_flatNormal = nullptr;
 	SDL_GPUTexture* m_whiteVolume = nullptr;
 	SDL_GPUCommandBuffer* m_uploadCommands = nullptr;
 	SDL_GPUCopyPass* m_uploadPass = nullptr;
 	std::vector<SDL_GPUTransferBuffer*> m_pendingTransfers;
+	struct DynamicBuffer {
+		uint32_t capacity = 0;
+		SDL_GPUTransferBuffer* transfer = nullptr;
+	};
+	std::map<SDL_GPUBuffer*, DynamicBuffer> m_dynamicBuffers;
 };
 
 } // namespace dice::hfe::render
