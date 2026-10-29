@@ -3478,7 +3478,7 @@ is set for an object held by `0x00a67410`'s singleton):
 Soldier (21-bit mask):
 
 - health as 8 bits of maxHitPoints and a bit (0x40); the EMP level (0x80);
-  two values 0-4 (0x20);
+  the pose and the pose asked for, 0-4 (0x20: `+0x268`, `+0x26c`);
 - in mode 3 (the control-object record) the soldier's movement goes at
   full precision: see [the control-object record](#the-control-object-record-and-prediction);
 - dead (0x10000): the ragdoll (`0x008a9ce0`): a 9-bit length, the first
@@ -3490,7 +3490,8 @@ Soldier (21-bit mask):
   degrees (2, 4, 8, 0x10);
 - always: the weapon's zoom level (0-3; its DefaultZoomComp), its fire
   comp's mode (0-1; only ExplosivesFireComp's `0x005e6350` uses it) and
-  three bits;
+  three bits (`+0x328`, the swimming `+0x30c`, the weapon put away
+  `+0x3e9`);
 - two leans of ±50 (0x800, 0x1000, 10 bits), a ResponsePhysics bit, a
   5-bit 0..1 (0x8000): sprint stamina (soldier `+0x378`; PCO vtable
   `0x108`/`0x10c`). In the control-object record (mode 3) it is 7 bits
@@ -3581,7 +3582,9 @@ fully decoded:
   Score and rplScore are sign + 11 bits, the others 12 bits. They go to
   the stats the scripts read (`0x0056b6f0`);
 - the flag holder (0x400000, player `+0x154`);
-- three kit slots;
+- the weapon groups' fire states (0x40, 0x80, 0x20000; 0x10000 all) and
+  the fire's presses (0x4000000): see [joined games' radio, tools and
+  menus](#joined-games-radio-tools-and-menus);
 - the ping in ms (0x100; 11 bits, 0-1023, player `+0xf0`). The server
   sets it from the connection's round trip (`0x0057ab30`);
 - the spawn tick and man-down (0x20; player `+0xdc`, `+0xe0`);
@@ -3765,6 +3768,8 @@ in `tests/NetGameTest.cpp` that speaks these formats.
 What a joined client does where a local round would act on its own world
 (`src/Main/main.cpp`'s console methods, with `joinedServer()`; the host's
 side in `HostedGame::event`; tests `NetHost_RadioCommanderToolsAndSquads`,
+`NetHost_StanceFireSpottedAndInvites`, `NetGame_PlayerFireStateAndSpotted`,
+`HudQuestions_AskAnswerAndTimeout`, `RadioSpam_CountBlockAndReset`,
 `Nametags_JoinedWorld`, `RagDoll_RemoteSoldierAnimated`):
 
 - **Radio** (RadioMessage 0x14, layout in the event table): every message
@@ -3782,13 +3787,57 @@ side in `HostedGame::event`; tests `NetHost_RadioCommanderToolsAndSquads`,
   now does too). The client plays and shows what it hears
   (`GameAudio::setHudWorld`: the server's players for the voices and the
   name tags' calls). The team-change radio stays local (game slot 0x60):
-  a client's control point objects take their ghost's team. The spam
-  check (player slot 0x340) isn't done.
+  a client's control point objects take their ghost's team.
+- **The spam check** (player slot 0x340, `0x00591d40`; `menu::RadioSpam`):
+  before a player's message goes out (the client's slot 0x50,
+  `0x004b2b60`; a server's `0x004a5a80` for its own player) and before a
+  spot (`0x0042d110`, counted only for a player other than the local one).
+  The limits come from the server's settings block: sv.radioSpamInterval
+  (`DAT_00a3fcc0 +0x44`, 6 s), radioMaxSpamFlagCount (`+0x48`, 6) and
+  radioBlockedDurationTime (`+0x4c`, 30 s); a commander (slot 0x128) may
+  say twice as many and is blocked half as long. With the count (`+0x17c`)
+  at the limit the message is refused, the first refusal starting the
+  block's clock (`+0x184`) and the refusals counted (`+0x180`); else the
+  first message starts the clock and the count goes up. The player's tick
+  (`0x0059bd80`) clears all three once radioSpamInterval has passed under
+  the limit, or radioBlockedDurationTime at it. A refused message plays the
+  local "spam" voice (game slot 0x60) and the personal line
+  HUD_HUD_MENU_CHAT_SPAM_MESSAGE with #SEC# = clock +
+  radioBlockedDurationTime + 1 - now. The radio calls (`0x0042d220`) aren't
+  checked. The rewrite's host sends the defaults (6, 6, 30) without sv
+  settings of its own.
+- **The radio calls and spots** (the Spotted event 0x1d, read `0x0050e770`,
+  written `0x0050e830`, made by `0x0042cfa0`): Radio.callForMedic / Ammo /
+  Repair (the game's slot 0xd8, `0x0042d220`) send the call's code (0x33
+  medic, 0x34 ammunition, 0x35 repair, 0x36 revive) with the caller's
+  soldier (its network id at `+0xc`) and team (`+0x10`), then say the line
+  (slot 0x54); Radio.sendSpottedMessage (slot 0xd4, `0x0042d110`, after the
+  spam check) sends message 0x2e with the object (`+0xe`), the point
+  (`+0x14`, `+0x18`) and a value (`+0x1c`). A client sends the event, a
+  server handles it at once (slot 0x90(-1)). The server's handler
+  (`0x0050e910`, `HostedGame::spotted`): the object reported, by network
+  id, goes to the world's category 3 message 0x16 with the team (the
+  rewrite: `reportBattlefieldObjects`, the squad's minimap; with no object
+  the server takes the reporter's crosshair object from its own view of
+  him, `spotCrosshair`); then every player of the team gets message
+  2/<code> with the event's 0x18 bytes from `+0xc` (spotter u16, spotted
+  u16, team u8 and 3 bytes, x, z, value; `net::spottedPayload`): the
+  server's own player posted there (`onSpotted`), the others as PostRemote
+  to their connection. A client takes 2/0x33..0x37 to its name tags
+  (the caller's tag by its soldier's ghost: `Nametags::radioCall`, the
+  NametagManager's events 0x33..0x37, `0x100f19c0`); the radio heard stays
+  the rewrite's stand-in for the bots' calls only (theirs don't go
+  through slot 0xd8).
 - **The commander** (the Commander event 0x13): applying (kind 4) and
   resigning (2) go up; the offer of command after the apply period is
   PostRemote 2/0x23 to the applicant (`0x004c5070`, `HostedGame::
-  trackCommanderOffers`), answered by `Commander.accept` (kind 0 takes it,
-  `0x004c8c20`; kind 1 passes it on). `Commander.commanderMutiny` (HUD
+  trackCommanderOffers`), which the client's HUD asks as a question (its
+  handler's case 0x23 → `0x0079e440` kind 3, see the HUD's questions
+  below), answered with c_GIYes / c_GINo or `Radio.answer` (yes: the
+  squad manager's slot 0x68, the Commander event's kind 0, `0x004c8c20`;
+  no: HUD_HUD_DECLINED_COMMANDER and slot 0x6c, kind 1, which passes it
+  on); `Commander.accept` answers it too. The local round asks its own
+  player the same way. `Commander.commanderMutiny` (HUD
   `0x007d7390` → `0x00573cb0`) starts a mutiny vote (Vote kind 3) against
   the team's commander.
 - **The commander's tools** (Artillery 0x1e for the artillery and the
@@ -3811,8 +3860,36 @@ side in `HostedGame::event`; tests `NetHost_RadioCommanderToolsAndSquads`,
   join (JoinSquad 0x10), leave (LeaveSquad 0x11), a new squad by naming it
   (ChangeSquadName 0x16), its lock (SetPrivateSquad 0x17), the leader's
   invites (Invite 0x19; the server lets a bot in no squad take it at once,
-  as offline, and passes it to a client's player) and removals (LeaveSquad
-  with the member: the server's leader check). The commander screen's
+  as offline) and removals (LeaveSquad with the member: the server's
+  leader check). The server's squad manager slot 0x30 (`0x004c3190`) sets
+  the squad's bit in the invited player's mask (player vtable 0x224 /
+  0x228) and posts it 2/0x10 (the squad); the client's HUD asks (the
+  question's kind 1, HUD_HUD_SQUAD_INVITED_TO with #SQUADNAME#). Yes joins
+  the squad (the squad menu's `0x007a5410`: JoinSquad), no clears the
+  invite (slot 0x30 with false: Invite without the leader bit, which the
+  server's `0x0050e700` takes from the invited player himself); unless
+  timed out the leader hears roger_that or negative (TCPlayer, the squad
+  manager's slot 0x40 giving the leader).
+- **The HUD's questions** (the HUD manager's `+0x90`; `menu::HudQuestions`):
+  seven kinds, one question each, with its seconds (the constructor's
+  `+0x70`..: 20, 20, 30, 20, 20, 15, none): 0 a join request
+  (HUD_HUD_SQUAD_HAS_ASKED_TO_JOIN), 1 an invite, 2 the commander's order
+  to a leader, 3 the offer of command (HUD_HUD_COMMANDER_ACCEPTED,
+  #TEAMNAME#), 4 the squad's leadership, 5 a team kill (forgive or punish,
+  HUD_HUD_YESNO), 6 a vote. `0x0079e440` replaces the kind's question and
+  shows the front (`0x0079d1b0`: the one with the least time left) as
+  personal lines (`0x0079c720`: its text, then
+  HUD_HUD_SQUAD_RECIEVED_ACCEPT_REJECT, "Press '#GIYes#' to Accept or
+  '#GINo#' to Reject"). The answer (`0x0079e320`) comes from the HUD's
+  input (`0x00754290`: c_GIYes / c_GINo; the window's Delete / End without
+  a control map) or `Radio.answer <bool>` (`0x00775d90`, executor
+  `0x00775e63`) and goes to `0x0079d6e0`, by kind; a question whose time
+  runs out (`0x0079e170` → `0x0079e050`) is answered no quietly (a team
+  kill is forgiven), with HUD_TEXT_MENU_INVITE_REQUEST_TIMED_OUT,
+  _INVITE_PROPOSAL_, _COMMANDER_ORDER_ or
+  _COMMANDER_APPLICATION_TIMED_OUT. ChoiceMenuShow is the HUD's menu state
+  0x1b (`0x0079ab90`), which the commander screen's squad list opens
+  (`0x007ab380`); the offer of command doesn't use it. The commander screen's
   squad list and the request pictures read the server's players and
   requests (`CommanderMenu::setWorld`).
 - **The HUD**: the spawn screen's kit (`spawnManager.setPlayerKit` sends
@@ -3830,13 +3907,55 @@ side in `HostedGame::event`; tests `NetHost_RadioCommanderToolsAndSquads`,
 - **The players' soldiers**: each living soldier ghost on foot is animated
   on the client from its networkable (`GameWorld::animateRemoteSoldier`:
   the body's and the weapon's animationSystem3P fed the speed and its
-  direction against the yaw and the turn rate, as stepAnimation feeds the
-  round's own; our own from its prediction, with its stance and fire) and
-  holds the kit's firearm of its selected item (mask 0x2000), an object of
-  the client's posed by the skeleton's mesh nodes (`partTransforms`); a
-  kit a living player carries is hidden as the round's worn kits are, a
-  dropped one shows. The others' stance isn't networked by the rewrite's
-  server: they stand.
+  direction against the look, the turn rate and the pose; our own from its
+  prediction) and holds the kit's firearm of its selected item (mask
+  0x2000), an object of the client's posed by the skeleton's mesh nodes
+  (`partTransforms`); a kit a living player carries is hidden as the
+  round's worn kits are, a dropped one shows. The server fills the soldier
+  ghost as `0x005fc1a0` does: the pose and the pose asked for (0x20,
+  soldier `+0x268` / `+0x26c`, 0 stand, 1 crouch, 2 prone, 3 swim: the
+  animation's PoseTrigger takes the first, the reader `0x005fcdb0` sets
+  both; `0x0058a6d0` makes it 3 in the water), the body's yaw (2, `+0x25c`)
+  and the look's twist ahead of it and still to catch up (4, 8: `+0x278`,
+  `+0x280`, in both modes; the look is the yaw plus the twist), the aim
+  (0x10, `+0x270`), the eased throttle and strafe (0x800, 0x1000), and the
+  always-sent bits (`+0x328`, the swimming `+0x30c`, the weapon put away
+  `+0x3e9`, which `0x005878b0` sets while sprinting, swimming, on a ladder
+  and so on). The player's networkable carries man-down and the spawn
+  tick (0x20, `+0xe0`, `+0xdc`) and the fire: per weapon group (masks
+  0x40, 0x80, 0x20000) the on bit, the player's `+0x19c` / `+0x19d` /
+  `+0x19e` (vtable 0x1d4 / 0x1dc / 0x1e4, which the server's input
+  handling `0x004bda00` sets from c_PIFire, c_PIAltFire and a third
+  trigger held), and while on the group's firearm (the client's
+  `0x00595c60` hands them to it): the rounds in its magazine (7 bits,
+  index + 1 of -1..62; firearm interface 0x94c0 slot 0x50, `0x005c3c40`),
+  its fire mode (2 bits; slot 0x54, `0x005c1cd0`, the fire comp's
+  "fire_mode_changed"), a flag (slot 0xac, `0x005c4900`: two magazines
+  kept, else one), a value of 0..10 in 8 bits (×0.1) when the firearm's
+  slot 0x30 holds and it is 1 or more, else 0..1 in 6 bits (slot 0x28,
+  `0x005c12c0`), and 4 bits (slot 0x13c, `0x005c2550`); and the fire's
+  presses (0x4000000, two bits of `+0x250`, which `0x0059b260` counts on
+  each rising edge; a change sets a client's `+0x24c`, so a press between
+  two updates still fires: vtable 0x1d8 reads `+0x19c` or `+0x24c`). The
+  reader sets them for the others' players only (`0x005981a0`); the
+  rewrite's server sends group 0 (the weapon in hand's rounds and fire
+  mode) and 1 (the alt fire) on foot. The client runs the weapon in the
+  soldier's hands from them, as the exe's client fires a remote player's
+  firearm: its rounds at the template's roundsPerMinute and fire mode
+  (single and burst a press, automatic while held), the magazine the
+  server's rounds while it fires and refilled after reloadTime when the
+  simulated one runs empty; each round the weapon animation's fire pulse
+  (its effect events start the muzzle's EffectBundles, as
+  `startEffectsOn` does) and the Fire sound (3P; 1P for our own in first
+  person), a reload the reload message (2) and the Reload sound. Our own
+  soldier fires from the input held, without the muzzle effects seen from
+  inside. A reload begun by the key with rounds left isn't seen on the
+  others' clients: the server's rounds arrive only while the fire is on
+  (the exe's mask 0x10000, all the groups' fields, is set by its `+0x280`,
+  whose setter on a server wasn't found). `bf2142 --connect ... --play 1
+  --remote-actions "<s>:<op> ..."` drives a headless client (crouch, prone,
+  stand, fire, hold, reload, forward, stop, turn:<deg>, face:<name>, still,
+  zoom, pitch:<deg>) for such checks.
 - **Orders** (IssueSquadOrder stores 0 and 1, SetAcceptOrder store 1): a
   joined leader's `SquadLeader.sendOrder` and a joined commander's orders
   (the map, the selected squads or the nearest leader's, the assets'
@@ -3850,12 +3969,11 @@ side in `HostedGame::event`; tests `NetHost_RadioCommanderToolsAndSquads`,
   the name tags' order icons, the world's order markers and the commander
   screen's pictures (`HudWorld::squadOrder`).
 
-Not done between machines: the spotted messages (Spotted 0x1d, whose
-server handler `0x0050e910` posts the code to the team) and the radio
-calls' code to other clients' name tags (the same event), a client
-player's answer to an invite, the commander's camera (CommanderCam is sent,
-not used), and the other players' stance and fire on a client (the
-rewrite's server doesn't fill the soldier networkable's groups for them).
+The commander's camera (CommanderCam 0x24, `Commander.<asset>Zoom`) is
+sent; the server's handler (`0x00510b30`: the team's commander, his
+overhead camera object of class 0x948c, `0x005f8410`) moves the camera only
+where game logic slot 0x144 says the game is a client's, so a server keeps
+nothing of it, as the rewrite's (`HostedGame::event`) does.
 
 ### The server's side (`bf2142 --host`)
 
@@ -6063,9 +6181,9 @@ the top.
   `+0x1f0`, the point to `+0x1f4`. `GameWorld::crosshairTarget` /
   `spotCrosshair` (the soldiers as 0.6 m spheres, the vehicles 2.5 m, along
   the view, nothing in between); the HUD binding (`src/Main`) spots the
-  local player's crosshair object (`spotCrosshair`) and closes the rose
-  (a joined game's spot isn't sent to the server: the Spotted event isn't
-  rewritten).
+  local player's crosshair object (`spotCrosshair`) and closes the rose;
+  a joined game's goes to the server as the Spotted event (see [joined
+  games' radio, tools and menus](#joined-games-radio-tools-and-menus)).
 - **`game.radioMessage <TargetChannel> <voice>`** (`0x00423e61` → the
   client's slot `0x50`, `0x004b2b60`: the voice's index in the game
   logic's radio table, the spam check, event 0x14 to the server, a local

@@ -578,6 +578,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.mapSize = c.pressed(map, "c_GIMapSize", down);
 				input.mapZoom = c.pressed(map, "c_GIMapZoom", down);
 				input.map3d = c.pressed(map, "c_GI3dMap", down);
+				input.yes = c.pressed(map, "c_GIYes", down);
+				input.no = c.pressed(map, "c_GINo", down);
 				for (int item = 0; item < 8; ++item) {
 					if (c.pressed(map, "c_PIWeaponSelect" + std::to_string(item + 1), down)) {
 						input.item = item + 1;
@@ -612,6 +614,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.mapSize = keys[SDL_SCANCODE_M];
 				input.mapZoom = keys[SDL_SCANCODE_N];
 				input.map3d = keys[SDL_SCANCODE_LALT];
+				input.yes = keys[SDL_SCANCODE_DELETE];
+				input.no = keys[SDL_SCANCODE_END];
 				for (int item = 0; item < 9; ++item) {
 					if (keys[SDL_SCANCODE_1 + item]) {
 						input.item = item + 1;

@@ -745,6 +745,143 @@ TEST(NetHost_PredictionAndSession)
 	CHECK(hosted.clientCount() == 0);
 }
 
+// The others' soldiers between machines: the soldier ghost's pose (mask
+// 0x20, +0x268 / +0x26c) and the look's twist (4), the player networkable's
+// fire state (0x40, +0x19c) and presses (0x4000000) and man-down (0x20);
+// the Spotted event (0x0050e910: a radio call's code to the team's players
+// as 2/<code> with the reporter's soldier); an invite asked of a client's
+// player (2/0x10, 0x004c3190) and its refusal (Invite without the bit).
+TEST(NetHost_StanceFireSpottedAndInvites)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	host::HostSetup setup;
+	setup.level = "Range";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, range.logic, range.templates, setup);
+	CHECK(hosted.start());
+	const int bot = round.addPlayer("Bot1", 2, true);
+	CHECK(round.spawnSoldier(bot));
+
+	net::GameClient a, b;
+	net::GameClientOptions options;
+	for (net::GameClient* c : {&a, &b}) {
+		c->world().setGhostTemplates([&range](uint32_t id) {
+			const dice::hfe::world::ObjectTemplate* t = range.templates.findById(id);
+			return t ? net::ghostTemplateFrom(range.templates, *t) : net::GhostTemplateNode {};
+		});
+	}
+	options.playerName = "Alpha";
+	CHECK(a.connect("127.0.0.1", hosted.gamePort(), options));
+	options.playerName = "Bravo";
+	CHECK(b.connect("127.0.0.1", hosted.gamePort(), options));
+	std::vector<net::PostRemoteInfo> messagesA, messagesB;
+	dice::hfe::game::SoldierInput botInput;
+	const auto step = [&] {
+		a.update();
+		b.update();
+		round.setInput(bot, botInput);
+		hosted.tick();
+		round.tick(1.0f / 30);
+		for (const net::PostRemoteInfo& m : a.world().takeMessages()) {
+			messagesA.push_back(m);
+		}
+		for (const net::PostRemoteInfo& m : b.world().takeMessages()) {
+			messagesB.push_back(m);
+		}
+	};
+	CHECK(pumpUntil(step, [&] {
+		return a.world().gameState() == 1 && b.world().gameState() == 1 && a.world().localPlayer() >= 0
+			&& b.world().localPlayer() >= 0;
+	}, 6000));
+	const int idA = a.world().localPlayer(), idB = b.world().localPlayer();
+	a.selectTeam(2);
+	b.selectTeam(2);
+	CHECK(pumpUntil(step, [&] {
+		dice::hfe::game::GameWorld::PlayerInfo pa, pb;
+		return round.playerInfo(idA, pa) && pa.team == 2 && round.playerInfo(idB, pb) && pb.team == 2;
+	}));
+	const auto botOf = [&](const net::GameClient& c) -> const net::RemotePlayer* { return c.world().player(bot); };
+	const auto botSoldier = [&](const net::GameClient& c) -> const net::RemoteObject* {
+		const net::RemotePlayer* p = botOf(c);
+		return p && p->soldierGhost ? c.world().object(p->soldierGhost) : nullptr;
+	};
+	// The bot crouches and fires: A sees its pose and its fire state.
+	botInput.pose = dice::hfe::game::SoldierPose::Crouch;
+	botInput.fire = true;
+	CHECK(pumpUntil(step, [&] {
+		const net::RemoteObject* o = botSoldier(a);
+		const net::RemotePlayer* p = botOf(a);
+		return o && o->pose == 1 && o->requestedPose == 1 && p && p->fire[0].on && p->firePresses == 1;
+	}));
+	botInput.pose = dice::hfe::game::SoldierPose::Prone;
+	botInput.fire = false;
+	CHECK(pumpUntil(step, [&] {
+		const net::RemoteObject* o = botSoldier(a);
+		const net::RemotePlayer* p = botOf(a);
+		return o && o->pose == 2 && p && !p->fire[0].on;
+	}));
+	// A second press between updates still counts (the presses' two bits).
+	botInput.fire = true;
+	step();
+	botInput.fire = false;
+	CHECK(pumpUntil(step, [&] {
+		const net::RemotePlayer* p = botOf(a);
+		return p && p->firePresses == 2;
+	}));
+
+	// A radio call (the game's slot 0xd8: Spotted with message 0x33): every
+	// player of the team gets 2/0x33 with the caller's soldier (A has none
+	// yet: 0).
+	net::SpottedInfo call;
+	call.message = 0x33;
+	call.team = 2;
+	a.sendEvent(net::makeSpotted(call));
+	CHECK(pumpUntil(step, [&] {
+		const auto has = [](const std::vector<net::PostRemoteInfo>& list) {
+			return std::any_of(list.begin(), list.end(), [](const net::PostRemoteInfo& m) {
+				net::SpottedInfo s;
+				return m.category == 2 && m.id == 0x33 && net::parseSpottedPayload(m.payload, m.id, s) && s.team == 2;
+			});
+		};
+		return has(messagesA) && has(messagesB);
+	}));
+	// The host's own report goes the same way, with the reporter's soldier.
+	call.message = 0x34;
+	hosted.spotted(call, bot);
+	CHECK(pumpUntil(step, [&] {
+		return std::any_of(messagesB.begin(), messagesB.end(), [&](const net::PostRemoteInfo& m) {
+			net::SpottedInfo s;
+			const net::RemotePlayer* p = botOf(b);
+			return m.id == 0x34 && net::parseSpottedPayload(m.payload, m.id, s) && p && s.spotter == p->soldierGhost && s.spotter;
+		});
+	}));
+	CHECK(hosted.playerOfGhost(botOf(b)->soldierGhost) == bot);
+
+	// B leads squad 1 and invites A: A's client is asked (2/0x10, the squad);
+	// A turns it down (Invite without the leader bit), then is invited
+	// again and joins (JoinSquad).
+	b.createSquad(1, "Alpha");
+	CHECK(pumpUntil(step, [&] {
+		const net::RemotePlayer* pb = b.world().player(idB);
+		return pb && pb->squad == 1 && pb->squadLeader;
+	}));
+	b.invite(idA, 1);
+	CHECK(pumpUntil(step, [&] {
+		return std::any_of(messagesA.begin(), messagesA.end(), [](const net::PostRemoteInfo& m) {
+			return m.category == 2 && m.id == 0x10 && m.payloadInt(0) == 1;
+		});
+	}));
+	a.invite(idA, 1, false);
+	a.joinSquad(1);
+	CHECK(pumpUntil(step, [&] {
+		dice::hfe::game::GameWorld::PlayerInfo pa;
+		return round.playerInfo(idA, pa) && pa.squad == 1;
+	}));
+}
+
 namespace {
 
 // The shipped object templates and materials on flat ground (as

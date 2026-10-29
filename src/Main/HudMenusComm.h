@@ -39,6 +39,8 @@
 // player's message on that channel.
 #pragma once
 
+#include <cmath>
+
 #include <functional>
 #include <map>
 #include <string>
@@ -119,6 +121,64 @@ private:
 	std::vector<CommRose> m_roses;
 	std::string m_shown;
 	std::function<void(const std::string&)> m_run;
+};
+
+// The radio's spam check (player slot 0x340, 0x00591d40; its reset in
+// the player's tick, 0x0059bd80), before a player's radio message goes out
+// (the client's game slot 0x50, 0x004b2b60; a server's 0x004a5a80) and a
+// spot (0x0042d110). The limits are the server's (data block 0):
+// sv.radioSpamInterval (DAT_00a3fcc0 +0x44, 6 s), radioMaxSpamFlagCount
+// (+0x48, 6) and radioBlockedDurationTime (+0x4c, 30 s); a commander
+// (player slot 0x128) may send twice as many and is blocked half as long.
+// - check (count): with the count (+0x17c, slots 0x344 / 0x348) at the
+//   limit the message is refused: the first refusal starts the block's
+//   clock (+0x184, slot 0x354) and the refusals are counted (+0x180,
+//   slots 0x34c / 0x350); else, when `count` (the callers pass whether
+//   to count it), the first message starts the clock and the count goes up.
+// - tick: under the limit, the count goes (all three cleared, the clock
+//   -1) once radioSpamInterval has passed since the clock started; at the
+//   limit, once radioBlockedDurationTime has.
+// A refused message plays the local "spam" voice and the personal line
+// HUD_HUD_MENU_CHAT_SPAM_MESSAGE with #SEC# the seconds left: clock +
+// radioBlockedDurationTime + 1 - now, rounded (0x004b2b60).
+struct RadioSpam {
+	int interval = 6, maxCount = 6, blockedTime = 30;
+	int count = 0, refused = 0;
+	double clock = -1;
+	bool check(bool countIt, bool commander, double now)
+	{
+		const int limit = commander ? maxCount * 2 : maxCount;
+		if (limit <= count) {
+			if (refused == 0) {
+				clock = now;
+			}
+			++refused;
+			return true;
+		}
+		if (countIt) {
+			if (clock < 0) {
+				clock = now;
+			}
+			++count;
+		}
+		return false;
+	}
+	void tick(bool commander, double now)
+	{
+		const int limit = commander ? maxCount * 2 : maxCount;
+		const int blocked = commander ? blockedTime / 2 : blockedTime;
+		const double elapsed = now - clock;
+		const bool reset = count < limit ? clock != now && !(static_cast<double>(interval) > elapsed)
+										 : !(static_cast<double>(blocked) > elapsed);
+		if (reset) {
+			count = refused = 0;
+			clock = -1;
+		}
+	}
+	int secondsLeft(double now) const
+	{
+		return static_cast<int>(std::lround(clock + blockedTime + 1.0 - now));
+	}
 };
 
 } // namespace dice::hfe::menu

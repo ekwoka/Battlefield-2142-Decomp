@@ -71,6 +71,12 @@ struct RemoteObject {
 	bool hasAngles = false;   // soldiers: degrees
 	float yaw = 0, pitch = 0, aimPitch = 0;
 	int weaponZoom = -1;      // soldiers: the weapon's zoom level (0-3)
+	// Soldiers: the pose and the pose asked for (mask 0x20, soldier +0x268 /
+	// +0x26c: 0 stand, 1 crouch, 2 prone, 3 swim; the animation's
+	// PoseTrigger takes the first), and the always-sent bits (+0x328, the
+	// swimming +0x30c, the weapon put away +0x3e9: 0x005878b0).
+	int pose = 0, requestedPose = 0;
+	bool swimming = false, weaponAway = false;
 	// Control points (0x006084b0): the flag's height (capture progress,
 	// cp +0x19c, 0..1), its rate per second (+0x194, signed) and which
 	// team's flag is up (+0x1b0).
@@ -129,6 +135,14 @@ struct RemotePlayer {
 	bool commander = false;    // mask 0x8000000 (player +0x10c)
 	int kit = -1;              // mask 0x1000: the selected kit
 	int rank = -1;             // mask 0x4000
+	bool manDown = false;      // mask 0x20 (player +0xe0)
+	// The weapon groups' fire states (masks 0x40, 0x80, 0x20000: the
+	// player's +0x19c..: firing, alt-firing; PlayerNetState::FireState) and
+	// the fire's presses (mask 0x4000000, two bits), for animating the
+	// others' soldiers (0x005981a0 sets them on a remote player only).
+	std::array<PlayerNetState::FireState, 3> fire {};
+	int firePresses = -1;
+	uint32_t fireUpdates = 0; // player states that carried mask 0x4000000
 };
 
 // KickBan (0x37; written by 0x0050cf30): a player leaves the server,

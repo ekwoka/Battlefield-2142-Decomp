@@ -150,6 +150,34 @@ struct PlayerNetState {
 	bool squadLeader = false;   // always sent: player +0x10d (vtable 0x150, "isql")
 	bool hasCommander = false;  // mask 0x8000000
 	bool commander = false;     // player +0x10c (vtable 0x128 "commander", set through 0x124)
+	// The fire states of the player's weapon groups 0-2 (masks 0x40, 0x80,
+	// 0x20000; 0x10000 all): on, the player's +0x19c / +0x19d / +0x19e
+	// (vtable 0x1d4 / 0x1dc / 0x1e4, which the server's input handling
+	// 0x004bda00 sets from c_PIFire, c_PIAltFire and a third trigger held,
+	// and a client's reader 0x005981a0 sets for the others' players), then
+	// the group's firearm (PCO slot 0x78(g), interface 0x94c0), which the
+	// reader hands back to it (0x00595c60): the rounds in its magazine
+	// (7 bits, index + 1 of -1..62; slot 0x50 0x005c3c40 into the
+	// magazines' list), its fire mode (2 bits; slot 0x54 0x005c1cd0, the
+	// fire comp's 0xe4 "fire_mode_changed"), a flag (slot 0xac 0x005c4900:
+	// two magazines kept when set, else one), a value of 0..10 (8 bits)
+	// or 0..1 (6 bits; slot 0x28 0x005c12c0, the heat's +0x4c) and 4 bits
+	// (slot 0x13c 0x005c2550: the fire comp's 0xf0 and 0xa0).
+	struct FireState {
+		bool on = false;
+		int rounds = -1;
+		int fireMode = 0;
+		bool twoMagazines = false;
+		float heat = 0;
+		int flags = 0;
+	};
+	std::array<FireState, 3> fire {};
+	uint32_t fireMask = 0;      // which of 0x40, 0x80, 0x20000 the state carried
+	// Mask 0x4000000: the fire's presses, two bits (player +0x250, counted
+	// by 0x0059b260 on each rising edge); a change sets a client's +0x24c,
+	// so a press between two updates still fires (vtable 0x1d8 reads
+	// +0x19c or +0x24c).
+	int firePresses = -1;
 };
 
 struct NetworkableState {

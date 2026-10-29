@@ -192,6 +192,15 @@ public:
 	// commander is the host's own player and whose leader isn't comes to
 	// onRequestStored (the host's 2/0x1d).
 	std::function<void(int team, int squad, int kind)> onRequestStored;
+	// The Spotted event's message for the host's own player (0x0050e910
+	// posts 2/<message> there): a radio call's code (0x33..0x36) or a spot
+	// (0x2e), the reporter's soldier ghost in `spotter`.
+	std::function<void(const net::SpottedInfo&)> onSpotted;
+	// The host's own player's report (the game's slots 0xd8 / 0xd4 on a
+	// server: the event handled at once).
+	void spotted(const net::SpottedInfo& spot, int reporter);
+	// The player whose soldier (or seat) a ghost id is, -1 for none.
+	int playerOfGhost(uint32_t ghost) const;
 	// The radio (net::RadioMessageInfo): the game logic's voice message
 	// table by name and by index (Sound/VoiceMessages.con's addMessage
 	// order, 0x004d8af0; the server has it too, 0x004cdab0). A client's
@@ -372,6 +381,7 @@ private:
 	std::set<uint32_t> m_static;
 	std::map<uint32_t, std::unique_ptr<std::vector<net::GhostPartLayout>>> m_layouts; // by template id
 	std::map<uint32_t, Ghost> m_ghosts; // by object id
+	std::map<int, uint32_t> m_invites;  // per player: the squads that invited it (player +0x224's mask)
 	uint16_t m_nextGhost = kFirstGhost;
 	// The teams' networkable takes 0x201 first (0x0042b8b0), so the ghost
 	// manager hands out ids from 0x202 (0x00678610).

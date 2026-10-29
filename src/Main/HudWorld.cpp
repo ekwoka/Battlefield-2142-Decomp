@@ -111,6 +111,8 @@ void RemoteHudWorld::fill(const net::RemotePlayer& p, PlayerInfo& out) const
 	out.squadLeader = p.squadLeader;
 	out.commander = p.commander;
 	out.rank = p.rank;
+	out.manDown = p.manDown; // the player networkable's 0x20 (+0xe0); ours below from our own state
+	out.firing = p.fire[0].on;
 	out.kit = objectOf(p.kitGhost);
 	// The seat (EnterVehicle's ghost, a PlayerControlObject of the vehicle's
 	// tree) and its vehicle (the root's ghost); ours from the control-object
@@ -136,8 +138,14 @@ void RemoteHudWorld::fill(const net::RemotePlayer& p, PlayerInfo& out) const
 		out.position = {where->position.x, where->position.y, where->position.z};
 	}
 	if (body && body->hasAngles) {
-		out.yaw = body->yaw;
+		out.yaw = body->yaw + body->pitch; // the body's and the twist ahead of it (+0x25c, +0x278)
 		out.aimPitch = body->aimPitch;
+	}
+	if (body && !p.local) {
+		out.pose = body->pose == 2 ? game::SoldierPose::Prone
+			: body->pose == 1      ? game::SoldierPose::Crouch
+			: body->pose == 3      ? game::SoldierPose::Swim
+								   : game::SoldierPose::Stand;
 	}
 	if (body && body->weapon >= 0) {
 		out.inHandSlot = body->weapon;

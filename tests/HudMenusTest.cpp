@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace dice::hfe;
@@ -640,4 +641,75 @@ TEST(HudMenus_CommanderSquadPanelAndInfo)
 	menu::updateSquadInfo(s.hud, s.world, a, false, {});
 	CHECK(s.hud.number("ShowSquadIcon") == 1 && s.hud.string("SquadInfoIconPath") == "Ingame/SquadInfo/icon_squad4.tga"
 		&& s.hud.string("SquadInfoText") == "HUD_HUD_SQUADINFO_SQUADLEADER");
+}
+
+// The HUD's questions (0x0079e440 / 0x0079d1b0 / 0x0079e320 / 0x0079e170):
+// one per kind, the front the one with the least time left, its lines,
+// the answer, the timeout's quiet no and line.
+TEST(HudQuestions_AskAnswerAndTimeout)
+{
+	menu::HudQuestions q;
+	std::vector<std::string> lines;
+	std::vector<std::tuple<int, int, bool, bool>> answers; // kind, value, yes, quiet
+	q.localize = [](const std::string& id) { return id; };
+	q.onLine = [&lines](const std::string& line) { lines.push_back(line); };
+	q.onAnswer = [&answers](const menu::HudQuestions::Question& asked, bool yes, bool quiet) {
+		answers.push_back({asked.kind, asked.value, yes, quiet});
+	};
+	q.ask(menu::HudQuestions::Invite, 3, "invited to Charlie");
+	CHECK(lines.size() == 2 && lines[0] == "invited to Charlie" && lines[1] == "HUD_HUD_SQUAD_RECIEVED_ACCEPT_REJECT");
+	q.tick(5);
+	q.ask(menu::HudQuestions::CommanderOffer, 1, "commander of the PAC");
+	// The invite has 15 s left, the offer 20: the invite stays in front.
+	CHECK(q.front() && q.front()->kind == menu::HudQuestions::Invite);
+	q.answer(true);
+	CHECK(answers.size() == 1 && std::get<0>(answers[0]) == menu::HudQuestions::Invite && std::get<1>(answers[0]) == 3
+		&& std::get<2>(answers[0]) && !std::get<3>(answers[0]));
+	CHECK(q.front() && q.front()->kind == menu::HudQuestions::CommanderOffer && lines.back() == "HUD_HUD_SQUAD_RECIEVED_ACCEPT_REJECT");
+	// Unanswered for its 20 s: a quiet no and the timed-out line.
+	q.tick(19.9f);
+	CHECK(answers.size() == 1);
+	q.tick(0.2f);
+	CHECK(answers.size() == 2 && std::get<0>(answers[1]) == menu::HudQuestions::CommanderOffer && !std::get<2>(answers[1])
+		&& std::get<3>(answers[1]));
+	CHECK(lines.back() == "HUD_TEXT_MENU_COMMANDER_APPLICATION_TIMED_OUT" && !q.front());
+	q.answer(true); // nothing asked
+	CHECK(answers.size() == 2);
+}
+
+// The radio's spam check (player slot 0x340, 0x00591d40; the reset in the
+// player's tick 0x0059bd80).
+TEST(RadioSpam_CountBlockAndReset)
+{
+	menu::RadioSpam spam; // 6 messages, 6 s, 30 s blocked
+	double now = 100;
+	for (int i = 0; i < 6; ++i) {
+		spam.tick(false, now);
+		CHECK(!spam.check(true, false, now));
+		now += 0.5;
+	}
+	spam.tick(false, now);
+	CHECK(spam.check(true, false, now)); // the seventh within the interval: refused
+	CHECK(spam.secondsLeft(now) == 31);  // the block's clock starts at the refusal
+	// Blocked for radioBlockedDurationTime from then.
+	now += 29;
+	spam.tick(false, now);
+	CHECK(spam.check(true, false, now));
+	now += 1.5;
+	spam.tick(false, now);
+	CHECK(!spam.check(true, false, now));
+	// Under the limit the count goes after radioSpamInterval; a commander may
+	// say twice as many.
+	now += 7;
+	spam.tick(true, now);
+	CHECK(spam.count == 0);
+	for (int i = 0; i < 12; ++i) {
+		CHECK(!spam.check(true, true, now));
+	}
+	CHECK(spam.check(true, true, now));
+	// Not counted (a spot by the local player): never refused under the limit.
+	menu::RadioSpam spots;
+	for (int i = 0; i < 20; ++i) {
+		CHECK(!spots.check(false, false, now));
+	}
 }

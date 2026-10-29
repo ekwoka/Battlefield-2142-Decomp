@@ -553,6 +553,19 @@ void RemoteWorld::apply(const GhostBlock& ghosts)
 				if (n.rank >= 0) {
 					p.rank = n.rank;
 				}
+				if (n.hasSpawnTick) {
+					p.manDown = n.manDown;
+				}
+				const uint32_t slots[3] = {0x40, 0x80, 0x20000};
+				for (size_t g = 0; g < 3; ++g) {
+					if (n.fireMask & slots[g]) {
+						p.fire[g] = n.fire[g];
+					}
+				}
+				if (n.firePresses >= 0) {
+					p.firePresses = n.firePresses;
+					++p.fireUpdates;
+				}
 			}
 			continue;
 		}
@@ -813,6 +826,16 @@ void RemoteWorld::applyState(RemoteObject& o, const NetworkableState& s)
 	}
 	if (s.weaponZoom >= 0) {
 		o.weaponZoom = s.weaponZoom;
+	}
+	if (s.kind == NetworkableKind::Soldier) {
+		if (s.mask & 0x20) {
+			o.pose = s.soldierValues[0];
+			o.requestedPose = s.soldierValues[1];
+		}
+		if (!(s.mask & 0x10000)) {
+			o.swimming = (s.soldierBits & 4) != 0;
+			o.weaponAway = (s.soldierBits & 8) != 0;
+		}
 	}
 	if (s.kind == NetworkableKind::Soldier && (s.mask & 0x2000)) {
 		o.weapon = s.weapon;

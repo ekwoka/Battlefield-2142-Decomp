@@ -149,6 +149,12 @@ struct Options {
 	bool host = false;           // --host: serve the local game to other clients (HostedGame.h)
 	bool playTeamGiven = false;  // --play 1|2: on a server, ask for that team (PostRemote 6/7)
 	bool walk = false;           // --walk: on a server without a window, walk and turn (the prediction's check)
+	// --remote-actions "<s>:<op> ...": on a server without a window, the
+	// inputs from that second of the round on (crouch, prone, stand, fire,
+	// hold (stop firing), reload, forward, stop, turn:<deg a tick>,
+	// face:<player name> (turn towards that soldier), still (no turning),
+	// zoom (the alternate fire's press), pitch:<deg> (the aim, up positive)).
+	std::string remoteActions;
 	std::string maps;            // --maps level[:mode[:size]],...: a playlist for --host (map changes on the same connections)
 	uint16_t hostPort = 17567;   // +port N (the original's "specifies the network port to be used")
 	uint16_t queryPort = 29900;  // --query-port N: the LAN query responder's (0: none)
@@ -250,6 +256,8 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.inputScript = argv[++i];
 		} else if (arg == "--actions" && hasValue) {
 			options.actions = argv[++i];
+		} else if (arg == "--remote-actions" && hasValue) {
+			options.remoteActions = argv[++i];
 		} else if (arg == "--menu-script" && hasValue) {
 			options.menuScript = argv[++i];
 			if (options.menu.empty()) {
@@ -3660,8 +3668,44 @@ int runGame(Options& options, Session& session)
 		// spam check and the local echo on: 0x004a5a80 on a server,
 		// 0x004b2b60 on a client): to the server of a joined game, else
 		// heard in the round; the sender hears his own at once (0x0042e0c0).
-		const auto sayRadio = [&](int channel, const std::string& voice, int value) {
+		// The spam check (player slot 0x340, HudMenusComm.h's RadioSpam)
+		// with the server's limits (data block 0, else our own settings).
+		dice::hfe::menu::RadioSpam radioSpam;
+		std::function<void(const std::string&)> spamLine; // the personal line (the chat, set below)
+		const auto spamRefused = [&](bool countIt) {
+			if (net::GameClient* server = joinedServer(); server && server->world().dataBlocks().count(0)) {
+				const net::RemoteWorld::ServerSettings sv = server->world().settings();
+				radioSpam.interval = sv.radioSpamInterval;
+				radioSpam.maxCount = sv.radioMaxSpamFlagCount;
+				radioSpam.blockedTime = sv.radioBlockedDurationTime;
+			} else if (session.admin) {
+				radioSpam.interval = session.admin->settings.radioSpamInterval;
+				radioSpam.maxCount = session.admin->settings.radioMaxSpamFlagCount;
+				radioSpam.blockedTime = session.admin->settings.radioBlockedDurationTime;
+			}
+			const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+			game::GameWorld::PlayerInfo me;
+			const bool commander = hudPlayer(hudLocal(), me) && me.commander;
+			radioSpam.tick(commander, now);
+			if (!radioSpam.check(countIt, commander, now)) {
+				return false;
+			}
+			// 0x004b2b60: the local "spam" voice (game slot 0x60) and the line.
+			round.hearRadio(hudLocal(), 2, "spam");
+			if (spamLine) {
+				std::string line = localization.text("HUD_HUD_MENU_CHAT_SPAM_MESSAGE");
+				if (const size_t at = line.find("#SEC#"); at != std::string::npos) {
+					line.replace(at, 5, std::to_string(radioSpam.secondsLeft(now)));
+				}
+				spamLine(line);
+			}
+			return true;
+		};
+		const auto sayRadio = [&](int channel, const std::string& voice, int value, bool checkSpam = true) {
 			if (channel < 0 || voice.empty()) {
+				return;
+			}
+			if (checkSpam && spamRefused(true)) {
 				return;
 			}
 			if (net::GameClient* server = joinedServer()) {
@@ -3686,20 +3730,50 @@ int runGame(Options& options, Session& session)
 			// The HUD's codes 0x33..0x35 (the game's slot 0xd8) reach the
 			// NametagManager too (0x100f19c0): the local player's own call.
 			const int code = v == "medic" ? nametags::CallMedic : v == "need_ammo" ? nametags::CallAmmo : nametags::CallRepair;
-			// 0x0042d220: the game's slot 0x54 (the radio, as slot 0x50).
-			bindMethod(console, command, ConsoleAccess::Anyone, [sayRadio, &hudLocal, c, v, code] {
-				sayRadio(c, v, 0);
+			// 0x0042d220: the Spotted event with the call's code (the caller's
+			// soldier and team: to the server from a client, handed out by a
+			// server, 0x0050e910: the team's name tags), then the game's slot
+			// 0x54 (the radio, as slot 0x50 without the spam check).
+			bindMethod(console, command, ConsoleAccess::Anyone, [sayRadio, &hudLocal, &joinedServer, &session, &round, c, v, code] {
+				net::SpottedInfo call;
+				call.message = static_cast<uint32_t>(code);
+				if (net::GameClient* server = joinedServer()) {
+					if (const net::RemotePlayer* me = server->world().player(server->world().localPlayer())) {
+						call.team = me->team;
+					}
+					server->sendEvent(net::makeSpotted(call));
+				} else if (session.hosted && round.localPlayer() >= 0) {
+					session.hosted->spotted(call, round.localPlayer());
+				}
+				sayRadio(c, v, 0, false);
 				if (g_nametags) {
 					g_nametags->radioCall(hudLocal(), code, true);
 				}
 			});
 		}
 		// The crosshair's enemy reported to the squad (0x007c8160: the game's
-		// slot 0xd4, GameWorld::spotCrosshair) as the rose closes.
-		bindMethod(console, "Radio.sendSpottedMessage", ConsoleAccess::Anyone, [&commRoses, &round](bool, std::string) {
-			round.spotCrosshair(round.localPlayer());
-			commRoses.close();
-		});
+		// slot 0xd4, 0x0042d110: the spam check, then the Spotted event with
+		// message 0x2e; GameWorld::spotCrosshair) as the rose closes. A
+		// joined client's server takes the object from its own view of us.
+		bindMethod(console, "Radio.sendSpottedMessage", ConsoleAccess::Anyone,
+			[&commRoses, &round, &joinedServer, &session, spamRefused](bool, std::string) {
+				commRoses.close();
+				if (spamRefused(false)) {
+					return;
+				}
+				net::SpottedInfo spot;
+				spot.message = 0x2e;
+				if (net::GameClient* server = joinedServer()) {
+					if (const net::RemotePlayer* me = server->world().player(server->world().localPlayer())) {
+						spot.team = me->team;
+					}
+					server->sendEvent(net::makeSpotted(spot));
+				} else if (session.hosted && round.localPlayer() >= 0) {
+					session.hosted->spotted(spot, round.localPlayer());
+				} else {
+					round.spotCrosshair(round.localPlayer());
+				}
+			});
 		dice::hfe::menu::SquadMenu squadMenu(round, hudManager);
 		squadMenu.setLocalizer([&localization](const std::string& id) { return localization.text(id); });
 		squadMenu.onMessage = [](const std::string& id) { std::printf("squad menu: %s\n", id.c_str()); };
@@ -3791,6 +3865,67 @@ int runGame(Options& options, Session& session)
 			}
 		});
 		squadRequests.onPersonal = [&chat](const std::string& line) { chat.addPersonal(line); };
+		spamLine = [&chat](const std::string& line) { chat.addPersonal(line); };
+		// The HUD's questions (HudMenusChat.h): an invite to a squad (2/0x10)
+		// and the offer of command (2/0x23), answered with Radio.answer and
+		// c_GIYes / c_GINo (0x0079e320); their answers (0x0079d6e0).
+		dice::hfe::menu::HudQuestions questions;
+		questions.localize = [&localization](const std::string& id) { return localization.text(id); };
+		questions.onLine = [&chat, &options](const std::string& line) {
+			chat.addPersonal(line);
+			if (options.verbose) {
+				std::printf("question: %s\n", line.c_str());
+			}
+		};
+		questions.onAnswer = [&](const dice::hfe::menu::HudQuestions::Question& q, bool yes, bool quiet) {
+			using Q = dice::hfe::menu::HudQuestions;
+			net::GameClient* server = joinedServer();
+			if (q.kind == Q::Invite) {
+				// Kind 1: yes joins the squad (the squad menu's 0x007a5410:
+				// JoinSquad), no clears the invite (squad manager slot 0x30
+				// with false: Invite without the leader bit); the leader
+				// hears roger_that or negative (TCPlayer, slot 0x40's leader).
+				int leader = -1;
+				for (const game::GameWorld::PlayerInfo& p : hudPlayers()) {
+					game::GameWorld::PlayerInfo me;
+					if (hudPlayer(hudLocal(), me) && p.team == me.team && p.squad == q.value && p.squadLeader) {
+						leader = p.id;
+					}
+				}
+				if (server) {
+					if (yes) {
+						server->joinSquad(q.value);
+					} else {
+						server->invite(server->world().localPlayer(), q.value, false);
+					}
+				} else if (yes) {
+					round.joinSquad(round.localPlayer(), q.value);
+				}
+				if (!quiet && leader >= 0) {
+					sayRadio(14, yes ? "roger_that" : "negative", leader);
+				}
+			} else if (q.kind == Q::CommanderOffer) {
+				// Kind 3: squad manager slot 0x68 (take it) or 0x6c (pass it
+				// on) with HUD_HUD_DECLINED_COMMANDER.
+				if (!yes && !quiet) {
+					chat.addPersonal(localization.text("HUD_HUD_DECLINED_COMMANDER"));
+				}
+				if (server) {
+					server->answerCommanderOffer(yes);
+				} else {
+					round.answerCommanderOffer(round.localPlayer(), yes);
+				}
+			}
+		};
+		bindMethod(console, "Radio.answer", ConsoleAccess::Anyone, [&questions](bool yes) { questions.answer(yes); });
+		int localOfferAsked = -1; // the local round's offer to our player, asked once
+		const auto askCommanderOffer = [&questions, &localization, &gameLogic](int team) {
+			std::string line = localization.text("HUD_HUD_COMMANDER_ACCEPTED");
+			if (const size_t at = line.find("#TEAMNAME#"); at != std::string::npos) {
+				line.replace(at, 10, localization.text("HUD_TEAMNAME_" + gameLogic.team(team == 1 ? 1 : 2).name));
+			}
+			questions.ask(dice::hfe::menu::HudQuestions::CommanderOffer, team, line);
+		};
 		squadRequests.onInfo = [&chat](const std::string& line) { chat.addInfo(line); };
 		mapVote.onVote = [&](int map) {
 			if (session.client && voteMessages.mayStart(1, map, false)) {
@@ -4171,12 +4306,19 @@ int runGame(Options& options, Session& session)
 				: from.team == me.team ? Speaker::Team : Speaker::Enemy;
 			chat.addChat(from.name, line, 0, speaker, !from.alive);
 		};
-		gameAudio.onHeard = [&hudPlayer](int sender, const std::string& voice) {
+		// The name tags' calls from the radio heard: the rewrite's stand-in
+		// for the bots' (theirs don't go through the game's slot 0xd8); a
+		// joined game's players' come with the Spotted event's message.
+		gameAudio.onHeard = [&hudPlayer, &joinedServer](int sender, const std::string& voice) {
 			if (!g_nametags || sender < 0) {
 				return;
 			}
 			game::GameWorld::PlayerInfo p;
-			const bool down = hudPlayer(sender, p) && p.manDown;
+			const bool known = hudPlayer(sender, p);
+			if (joinedServer() && (!known || !p.ai)) {
+				return;
+			}
+			const bool down = known && p.manDown;
 			const int code = voice == "medic" ? (down ? nametags::CallRevive : nametags::CallMedic)
 				: voice == "need_ammo"        ? nametags::CallAmmo
 				: voice == "need_repair"      ? nametags::CallRepair
@@ -4323,6 +4465,7 @@ int runGame(Options& options, Session& session)
 					hosted->onRemoteCommand = nullptr; // this round's scripts
 					hosted->onChat = nullptr;
 					hosted->onRequestStored = nullptr;
+					hosted->onSpotted = nullptr;
 					hosted->onVoteReply = nullptr;
 					hosted->radioIndex = nullptr;
 					hosted->radioVoice = nullptr;
@@ -4336,6 +4479,14 @@ int runGame(Options& options, Session& session)
 			// The radio's message table (the voices' indices, both ways).
 			hosted->radioIndex = [&voices](const std::string& voice) { return voices.message(voice); };
 			hosted->radioVoice = [&voices](int index) { return voices.messageName(index); };
+			// The Spotted event's message for the host's own player (0x0050e910
+			// posts it there): a client's radio call on its name tag.
+			hosted->onSpotted = [hosted, &round](const net::SpottedInfo& spot) {
+				const int caller = hosted->playerOfGhost(spot.spotter);
+				if (g_nametags && caller >= 0 && caller != round.localPlayer() && spot.message >= 0x33 && spot.message <= 0x37) {
+					g_nametags->radioCall(caller, static_cast<int>(spot.message), false);
+				}
+			};
 			hosted->onRequestStored = [&squadRequests, &round](int team, int squad, int kind) {
 				if (round.commander(team) == round.localPlayer() && round.localPlayer() >= 0) {
 					squadRequests.received(team, squad, kind);
@@ -4737,6 +4888,7 @@ int runGame(Options& options, Session& session)
 				it = timedConsole.erase(it);
 			}
 		};
+		float remoteActionsPitch = 0; // the aim the last --remote-actions move carried
 		const auto remoteStep = [&] {
 			runTimedConsole();
 			if (!session.client) {
@@ -4755,6 +4907,70 @@ int runGame(Options& options, Session& session)
 				walk.sprint = (t / 120) % 3 == 1;
 				walk.jump = t % 200 == 100;
 				client.setInput(net::playerInputFrom(walk));
+			}
+			if (!options.remoteActions.empty()) {
+				// --remote-actions: the inputs held from each step's second.
+				game::SoldierInput act;
+				bool reloadNow = false;
+				std::string facing; // face:<name>: turn towards that player's soldier
+				std::istringstream steps(options.remoteActions);
+				for (std::string step; steps >> step;) {
+					const size_t colon = step.find(':');
+					if (colon == std::string::npos || std::atof(step.c_str()) > gameLogic.elapsed) {
+						continue;
+					}
+					const std::string op = step.substr(colon + 1, step.find(':', colon + 1) - colon - 1);
+					const size_t second = step.find(':', colon + 1);
+					const float arg = second == std::string::npos ? 0.0f : static_cast<float>(std::atof(step.c_str() + second + 1));
+					if (op == "crouch") {
+						act.pose = game::SoldierPose::Crouch;
+					} else if (op == "prone") {
+						act.pose = game::SoldierPose::Prone;
+					} else if (op == "stand") {
+						act.pose = game::SoldierPose::Stand;
+					} else if (op == "fire") {
+						act.fire = true;
+					} else if (op == "hold") {
+						act.fire = false;
+					} else if (op == "forward") {
+						act.throttle = 1;
+					} else if (op == "stop") {
+						act.throttle = 0;
+						act.turn = 0;
+					} else if (op == "still") {
+						act.turn = 0;
+						facing.clear();
+					} else if (op == "turn") {
+						act.turn = arg;
+					} else if (op == "face") {
+						facing = second == std::string::npos ? std::string() : step.substr(second + 1);
+					} else if (op == "reload") {
+						// A press on the tick of its second only.
+						reloadNow = gameLogic.elapsed - std::atof(step.c_str()) < 0.05;
+					} else if (op == "pitch") {
+						act.aimPitch = arg; // degrees, up positive
+					} else if (op == "zoom") {
+						// The alternate fire's press (a rifle's sight).
+						act.altFire = gameLogic.elapsed - std::atof(step.c_str()) < 0.05;
+					}
+				}
+				act.reload = reloadNow;
+				for (const net::RemotePlayer& p : facing.empty() || !prediction.active() ? std::vector<net::RemotePlayer> {}
+																						: client.world().playerList()) {
+					const net::RemoteObject* them = p.name == facing ? client.world().object(p.soldierGhost) : nullptr;
+					if (them && them->hasPosition) {
+						const net::Vec3f me = prediction.feet();
+						const float want = std::atan2(them->position.x - me.x, them->position.z - me.z) * 57.29578f;
+						act.turn = std::clamp(std::remainder(want - remoteLook.yaw, 360.0f), -10.0f, 10.0f);
+					}
+				}
+				remoteLook.yaw = std::remainder(remoteLook.yaw + act.turn, 360.0f); // the camera's, as the window's mouse turns it
+				remoteLook.pitch = act.aimPitch;
+				playerCamera.setAltFire(act.altFire);
+				remoteLook.fire = act.fire;
+				remoteLook.stance = act.pose == game::SoldierPose::Prone ? 2 : act.pose == game::SoldierPose::Crouch ? 1 : 0;
+				client.setInput(net::playerInputFrom(act, remoteActionsPitch));
+				remoteActionsPitch = act.aimPitch;
 			}
 			client.update();
 			// The server's camera rules (its settings block): no chase view
@@ -4907,10 +5123,24 @@ int runGame(Options& options, Session& session)
 					continue;
 				}
 				game::GameWorld::RemoteSoldierState state;
-				state.yaw = body->hasAngles ? body->yaw : 0;
+				// The look: the body's yaw and the twist ahead of it (masks 2
+				// and 4, +0x25c / +0x278), the aim (0x10, +0x270); the pose
+				// (0x20, +0x268); the fire state from the player's networkable.
+				state.yaw = body->hasAngles ? body->yaw + body->pitch : 0;
+				state.aimPitch = body->aimPitch;
 				if (body->hasVelocity) {
 					state.velocity = {body->velocity.x, body->velocity.y, body->velocity.z};
 				}
+				state.pose = body->pose == 2 ? game::SoldierPose::Prone
+					: body->pose == 1        ? game::SoldierPose::Crouch
+					: body->pose == 3        ? game::SoldierPose::Swim
+											 : game::SoldierPose::Stand;
+				state.remoteFire = true;
+				state.player = p.id;
+				state.firing = p.fire[0].on;
+				state.firePresses = p.firePresses;
+				state.rounds = p.fire[0].on ? p.fire[0].rounds : -1;
+				state.fireMode = p.fire[0].on ? p.fire[0].fireMode : -1;
 				if (p.local && prediction.active()) {
 					state.yaw = prediction.yaw();
 					state.onGround = prediction.onGround();
@@ -4919,7 +5149,11 @@ int runGame(Options& options, Session& session)
 					state.pose = remoteLook.stance == 2 ? game::SoldierPose::Prone
 						: remoteLook.stance == 1     ? game::SoldierPose::Crouch
 													 : game::SoldierPose::Stand;
-					state.fired = remoteLook.fire;
+					// Our own: the fire held now (the server's rounds when it
+					// says it fires), no muzzle effects seen from inside.
+					state.firing = remoteLook.fire;
+					state.firePresses = -1;
+					state.muzzleEffects = !playerCamera.insideView();
 				}
 				const auto kit = ghostObjects.find(p.kitGhost);
 				const world::Object* worn = p.kitGhost && kit != ghostObjects.end() ? objects.find(kit->second) : nullptr;
@@ -4941,6 +5175,18 @@ int runGame(Options& options, Session& session)
 				}
 				round.animateRemoteSoldier(found->second, state, 1.0f / 30.0f);
 				animated.insert(found->second);
+				if (options.verbose && !p.local) {
+					// What the others' soldiers show: a line when it changes.
+					static std::map<int, std::string> shown;
+					char line[160];
+					std::snprintf(line, sizeof line, "pose %d firing %d presses %d rounds %d weapon %s at %.0f/%.0f/%.0f", body->pose,
+						state.firing ? 1 : 0, state.firePresses, p.fire[0].rounds, state.weapon.c_str(), body->position.x,
+						body->position.y, body->position.z);
+					if (shown[p.id] != line) {
+						shown[p.id] = line;
+						std::printf("remote soldier %s: %s\n", p.name.c_str(), line);
+					}
+				}
 			}
 			for (const auto& [ghost, id] : ghostObjects) {
 				if (round.isRemoteSoldier(id) && !animated.count(id)) {
@@ -5026,6 +5272,32 @@ int runGame(Options& options, Session& session)
 				if (message.category == 2 && message.id == 0x23) {
 					offers.push_back(message);
 				}
+				// An invite (2/0x10, the squad: 0x004c3190's message): the
+				// question's kind 1 (HUD_HUD_SQUAD_INVITED_TO, #SQUADNAME#).
+				if (message.category == 2 && message.id == 0x10) {
+					std::string line = localization.text("HUD_HUD_SQUAD_INVITED_TO");
+					if (const size_t at = line.find("#SQUADNAME#"); at != std::string::npos) {
+						line.replace(at, 11, dice::hfe::menu::squadName(message.payloadInt(0)));
+					}
+					questions.ask(dice::hfe::menu::HudQuestions::Invite, message.payloadInt(0), line);
+				}
+				// The Spotted event's messages (0x0050e910): a radio call's
+				// code on the caller's name tag (the NametagManager's events
+				// 0x33..0x37, 0x100f19c0); the caller by its soldier's ghost.
+				net::SpottedInfo spot;
+				if (message.category == 2 && message.id >= 0x33 && message.id <= 0x37
+					&& net::parseSpottedPayload(message.payload, message.id, spot)) {
+					for (const net::RemotePlayer& p : client.world().playerList()) {
+						if (spot.spotter && p.soldierGhost == spot.spotter && !p.local) {
+							if (g_nametags) {
+								g_nametags->radioCall(p.id, static_cast<int>(message.id), false);
+							}
+							if (options.verbose) {
+								std::printf("spotted message 0x%x: %s's call\n", message.id, p.name.c_str());
+							}
+						}
+					}
+				}
 				if (message.category == 2 && message.id == 0x1e && squadRequests.onPersonal) {
 					squadRequests.onPersonal(localization.text("HUD_HUD_SQUAD_REQUEST_TO_COMMANDER"));
 				} else if (message.category == 2 && message.id == 0x1d) {
@@ -5078,11 +5350,15 @@ int runGame(Options& options, Session& session)
 					}
 				}
 			}
-			// The offer of command (2/0x23, 0x004c5070): Commander.accept
-			// answers it (the commander screen's ChoiceMenu).
+			// The offer of command (2/0x23, 0x004c5070): the question's kind 3
+			// (0x0075xxxx's case 0x23 → 0x0079e440), answered by Radio.answer /
+			// c_GIYes / c_GINo, or Commander.accept.
 			for (const net::PostRemoteInfo& message : offers) {
-				std::printf("the server offers us command (Commander.accept 1 takes it)\n");
 				(void)message;
+				if (const net::RemotePlayer* me = client.world().player(client.world().localPlayer())) {
+					std::printf("the server offers us command (Radio.answer 1 takes it)\n");
+					askCommanderOffer(me->team);
+				}
 			}
 			// The server's ambient effects (AmbientEffectArea, 0x00510230).
 			for (const net::GameEvent& event : unhandled) {
@@ -6113,6 +6389,17 @@ int runGame(Options& options, Session& session)
 			commanderMenu.update(hudLocal());
 			squadRequests.localPlayer = hudLocal();
 			squadRequests.tick(seconds);
+			questions.tick(seconds);
+			// The local round's offer of command to our player (offline the
+			// game posts 2/0x23 itself, 0x004c5070).
+			if (!joinedServer() && round.localPlayer() >= 0) {
+				const int team = round.playerTeam();
+				const int offered = round.commanderOffer(team) == round.localPlayer() ? round.localPlayer() : -1;
+				if (offered >= 0 && localOfferAsked != offered) {
+					askCommanderOffer(team);
+				}
+				localOfferAsked = offered;
+			}
 			{
 				game::GameWorld::PlayerInfo me;
 				const host::HudWorld& shown = hudWorld();
@@ -6677,9 +6964,9 @@ int runGame(Options& options, Session& session)
 		if (viewer.onPlayerInput) {
 			// The comm roses while their keys are held (Q the radio, T the
 			// tactical rose), with the pointer to pick an entry.
-			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &commRoses, &round, &hudPlayer, &hudLocal, &helpPopups, &hudManager, radioWas = false,
-										tacticalWas = false, mapSizeWas = false, mapZoomWas = false,
-										map3dWas = false](const ViewerOptions::PlayerInput& in) mutable {
+			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &commRoses, &round, &hudPlayer, &hudLocal, &helpPopups, &hudManager,
+										&questions, radioWas = false, tacticalWas = false, mapSizeWas = false, mapZoomWas = false,
+										map3dWas = false, yesWas = false, noWas = false](const ViewerOptions::PlayerInput& in) mutable {
 				game::GameWorld::PlayerInfo me;
 				const bool alive = hudPlayer(hudLocal(), me) && me.alive;
 				if (alive && in.radioComm && !radioWas) {
@@ -6715,6 +7002,15 @@ int runGame(Options& options, Session& session)
 				if (in.map3d && !map3dWas && g_nametags) {
 					g_nametags->setShown(!g_nametags->shown());
 				}
+				// c_GIYes / c_GINo answer the HUD's front question (0x0079e320).
+				if (in.yes && !yesWas) {
+					questions.answer(true);
+				}
+				if (in.no && !noWas) {
+					questions.answer(false);
+				}
+				yesWas = in.yes;
+				noWas = in.no;
 				mapSizeWas = in.mapSize;
 				mapZoomWas = in.mapZoom;
 				map3dWas = in.map3d;

@@ -44,6 +44,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -211,5 +212,51 @@ struct VoipSpeaker {
 	int squad = 0;
 };
 void updateVoipList(hud::HudManager& hud, const std::vector<VoipSpeaker>& talking, bool sending, bool commander);
+
+// The HUD's questions (the HUD manager's +0x90, constructor ending at
+// 0x0079d0..: seven kinds, one question each, its seconds at +0x70 + 8 x
+// kind: 20, 20, 30, 20, 20, 15 and none): 0 a player asks to join the
+// leader's squad (HUD_HUD_SQUAD_HAS_ASKED_TO_JOIN), 1 an invite to a squad
+// (message 2/0x10 with the squad: HUD_HUD_SQUAD_INVITED_TO, #SQUADNAME#),
+// 2 the commander's order to the leader, 3 the offer of command (message
+// 2/0x23: HUD_HUD_COMMANDER_ACCEPTED, #TEAMNAME#), 4 the squad's
+// leadership, 5 a team kill's forgive or punish, 6 a vote.
+// - ask (0x0079e440): the kind's question replaced by the new one, its
+//   time started; the front shown.
+// - The front (0x0079d1b0): the question with the least time left. Shown
+//   (0x0079c720) as personal lines (HUD slot 0x174): its text, then
+//   HUD_HUD_SQUAD_RECIEVED_ACCEPT_REJECT ("Press '#GIYes#' to Accept or
+//   '#GINo#' to Reject"; HUD_HUD_YESNO for a team kill).
+// - answer (0x0079e320: Radio.answer <bool>, 0x00775d90 / 0x00775e63, and
+//   the HUD's input 0x00754290 with c_GIYes / c_GINo): the front answered
+//   (0x0079d6e0), the next shown.
+// - tick (0x0079e170): a question whose time runs out is answered no (a
+//   team kill forgiven), quietly, with its timed-out line (0x0079e050:
+//   HUD_TEXT_MENU_INVITE_REQUEST_TIMED_OUT, _INVITE_PROPOSAL_, _COMMANDER_ORDER_,
+//   _COMMANDER_APPLICATION_TIMED_OUT).
+class HudQuestions {
+public:
+	enum Kind { JoinRequest = 0, Invite = 1, CommanderOrder = 2, CommanderOffer = 3, SquadLeader = 4, TeamKill = 5, Vote = 6 };
+	struct Question {
+		Kind kind = Invite;
+		int value = 0; // the squad, the player...
+		std::string text; // its line (localised, filled)
+		float left = 0;   // seconds (-1 none)
+	};
+	std::function<std::string(const std::string&)> localize;
+	std::function<void(const std::string&)> onLine; // a personal line
+	// The answer (0x0079d6e0's per kind), `quiet` for a timed-out one.
+	std::function<void(const Question&, bool yes, bool quiet)> onAnswer;
+
+	void ask(Kind kind, int value, const std::string& text);
+	void answer(bool yes);
+	void tick(float seconds);
+	const Question* front() const;
+	static float seconds(Kind kind);
+
+private:
+	void show() const;
+	std::array<std::optional<Question>, 7> m_questions {};
+};
 
 } // namespace dice::hfe::menu

@@ -997,21 +997,27 @@ bool readPlayer(BitReader& in, NetworkableState& s)
 		in.read(1);
 	}
 	if (m & 0x4000000) {
-		in.read(2);
+		p.firePresses = static_cast<int>(in.read(2));
 	}
-	// Three kit slots (masks 0x40, 0x80, 0x20000; 0x10000 all).
+	// The weapon groups' fire states (masks 0x40, 0x80, 0x20000; 0x10000 all).
 	const uint32_t slots[3] = {0x40, 0x80, 0x20000};
-	for (uint32_t slot : slots) {
-		if (!(m & slot) && !(m & 0x10000)) {
+	for (size_t g = 0; g < 3; ++g) {
+		if (!(m & slots[g]) && !(m & 0x10000)) {
 			continue;
 		}
-		const bool present = in.read(1) == 1;
-		if (present || (m & 0x10000)) {
-			in.read(bitsFor(0x40));
-			in.read(2);
-			in.read(1);
-			in.read(in.read(1) == 1 ? 8 : 6);
-			in.read(4);
+		PlayerNetState::FireState& f = p.fire[g];
+		p.fireMask |= slots[g];
+		f.on = in.read(1) == 1;
+		if (f.on || (m & 0x10000)) {
+			f.rounds = static_cast<int>(in.read(bitsFor(0x40))) - 1;
+			f.fireMode = static_cast<int>(in.read(2));
+			f.twoMagazines = in.read(1) == 1;
+			if (in.read(1) == 1) {
+				f.heat = static_cast<float>(in.read(8)) * 0.003921569f * 10.0f;
+			} else {
+				f.heat = static_cast<float>(in.read(6)) * 0.015873017f;
+			}
+			f.flags = static_cast<int>(in.read(4));
 		}
 	}
 	if (m & 0x40000) {
@@ -1432,20 +1438,29 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 			out.write(0, 1);
 		}
 		if (m & 0x4000000) {
-			out.write(0, 2);
+			out.write(static_cast<uint32_t>(std::max(0, p.firePresses)) & 3, 2);
 		}
-		for (uint32_t slot : {0x40u, 0x80u, 0x20000u}) {
-			if (!(m & slot) && !(m & 0x10000)) {
+		const uint32_t slots[3] = {0x40u, 0x80u, 0x20000u};
+		for (size_t g = 0; g < 3; ++g) {
+			if (!(m & slots[g]) && !(m & 0x10000)) {
 				continue;
 			}
-			out.write(0, 1); // no kit item
-			if (m & 0x10000) {
-				out.write(0, bitsFor(0x40));
-				out.write(0, 2);
-				out.write(0, 1);
-				out.write(0, 1);
-				out.write(0, 6);
-				out.write(0, 4);
+			const PlayerNetState::FireState& f = p.fire[g];
+			out.write(f.on ? 1 : 0, 1);
+			if (f.on || (m & 0x10000)) {
+				out.write(static_cast<uint32_t>(std::clamp(f.rounds, -1, 62) + 1), bitsFor(0x40));
+				out.write(static_cast<uint32_t>(std::clamp(f.fireMode, 0, 3)), 2);
+				out.write(f.twoMagazines ? 1 : 0, 1);
+				// 0x00596100: the 8-bit form (x 0.1) for a firearm whose 0x94c0
+				// slot 0x30 holds and a value of 1 or more, else 6 bits of 0..1.
+				if (f.heat >= 1.0f) {
+					out.write(1, 1);
+					out.write(static_cast<uint32_t>(std::lround(std::clamp(f.heat * 0.1f, 0.0f, 1.0f) * 255.0f)), 8);
+				} else {
+					out.write(0, 1);
+					out.write(static_cast<uint32_t>(std::lround(std::clamp(f.heat, 0.0f, 1.0f) * 63.0f)), 6);
+				}
+				out.write(static_cast<uint32_t>(f.flags) & 15, 4);
 			}
 		}
 		if (m & 0x40000) {

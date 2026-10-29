@@ -192,7 +192,14 @@ build/native/src/Main/bf2142 --game "source/Battlefield 2142" \
 #     --console "50:Commander.commRoseAccept 1"
 #   bf2142 ... --connect 127.0.0.1 --name Leader --play 1 --simulate 70 --screenshot leader.png \
 #     --console "3:SquadMenu.setSquadCreateSelect 1" --console "4:SquadMenu.createSquad" \
-#     --console "40:SquadLeader.sendRequest 3 0")
+#     --console "40:SquadLeader.sendRequest 3 0";
+# the HUD's questions (an invite, the offer of command) are answered with
+# Del / End (c_GIYes / c_GINo) or "Radio.answer 1|0"; a headless client's
+# soldier can be driven from a second of the round on, and the others see
+# its stance and fire:
+#   --remote-actions "5:face:Alpha 6:forward 16:stop 21:crouch 31:fire 34:hold 35:prone"
+#   (crouch, prone, stand, fire, hold, reload, forward, stop, turn:<deg a tick>,
+#    face:<player>, still, zoom, pitch:<deg>))
 # run a dedicated server (no window, no sound): the install's
 # mods/bf2142/Settings/ServerSettings.con (sv.*) and maplist.con
 # (mapList.append <level> <mode> <size>), or +config <file> / +mapList

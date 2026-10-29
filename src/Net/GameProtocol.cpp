@@ -967,6 +967,67 @@ GameEvent makeAcceptOrder(const AcceptOrderInfo& info)
 	return e;
 }
 
+bool parseSpotted(const GameEvent& e, SpottedInfo& out)
+{
+	if (e.type != kEvSpotted || e.values.size() < 7) {
+		return false;
+	}
+	out.spotter = e.u(0);
+	out.spotted = e.u(1);
+	out.x = e.f(2);
+	out.z = e.f(3);
+	out.team = e.i(4);
+	out.value = e.u(5);
+	out.message = e.u(6);
+	return true;
+}
+
+GameEvent makeSpotted(const SpottedInfo& info)
+{
+	GameEvent e;
+	e.type = kEvSpotted;
+	uint32_t x = 0, z = 0;
+	std::memcpy(&x, &info.x, 4);
+	std::memcpy(&z, &info.z, 4);
+	e.values = {info.spotter & 0xffff, info.spotted & 0xffff, x, z, static_cast<uint32_t>(info.team) & 0xff, info.value,
+		info.message};
+	return e;
+}
+
+std::string spottedPayload(const SpottedInfo& info)
+{
+	std::string bytes(0x18, '\0');
+	const uint16_t spotter = static_cast<uint16_t>(info.spotter), spotted = static_cast<uint16_t>(info.spotted);
+	const uint8_t team = static_cast<uint8_t>(info.team);
+	std::memcpy(bytes.data() + 0, &spotter, 2);
+	std::memcpy(bytes.data() + 2, &spotted, 2);
+	std::memcpy(bytes.data() + 4, &team, 1);
+	std::memcpy(bytes.data() + 8, &info.x, 4);
+	std::memcpy(bytes.data() + 0xc, &info.z, 4);
+	std::memcpy(bytes.data() + 0x10, &info.value, 4);
+	return bytes;
+}
+
+bool parseSpottedPayload(const std::string& payload, uint32_t message, SpottedInfo& out)
+{
+	if (payload.size() < 0x14) {
+		return false;
+	}
+	uint16_t spotter = 0, spotted = 0;
+	uint8_t team = 0;
+	std::memcpy(&spotter, payload.data() + 0, 2);
+	std::memcpy(&spotted, payload.data() + 2, 2);
+	std::memcpy(&team, payload.data() + 4, 1);
+	std::memcpy(&out.x, payload.data() + 8, 4);
+	std::memcpy(&out.z, payload.data() + 0xc, 4);
+	std::memcpy(&out.value, payload.data() + 0x10, 4);
+	out.spotter = spotter;
+	out.spotted = spotted;
+	out.team = team;
+	out.message = message;
+	return true;
+}
+
 bool parseRadioMessage(const GameEvent& e, RadioMessageInfo& out)
 {
 	if (e.type != kEvRadioMessage || e.values.size() < 6) {

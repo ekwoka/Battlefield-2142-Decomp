@@ -2002,3 +2002,64 @@ TEST(Net_SquadRequestSpawnGroupAndTeamEvents)
 	world.apply(block);
 	CHECK(world.tickets(1) == 219 && world.tickets(2) == 9999 && world.objectList().empty());
 }
+
+// The player networkable's fire states (0x00596100 / 0x005981a0: masks
+// 0x40, 0x80, 0x20000, each the on bit and, when on, the group's firearm:
+// rounds + 1 in 7 bits, the fire mode, a flag, the 6- or 8-bit value, 4
+// bits) and the presses (0x4000000, 2 bits); the Spotted event (0x1d) and
+// its message's 0x18 bytes (0x0050e910).
+TEST(NetGame_PlayerFireStateAndSpotted)
+{
+	net::NetworkableHints h;
+	h.kind = net::NetworkableKind::Player;
+	net::NetworkableState s;
+	s.kind = net::NetworkableKind::Player;
+	s.mask = 0x1 | 0x20 | 0x40 | 0x80 | 0x20000 | 0x4000000;
+	s.player.alive = true;
+	s.player.manDown = true;
+	s.player.spawnTick = 1234;
+	s.player.fire[0].on = true;
+	s.player.fire[0].rounds = 17;
+	s.player.fire[0].fireMode = 2;
+	s.player.fire[0].heat = 0.5f;
+	s.player.fire[0].flags = 5;
+	s.player.fire[1].on = false;
+	s.player.fire[2].on = true;
+	s.player.fire[2].rounds = -1;
+	s.player.fire[2].heat = 4.0f; // the 8-bit form
+	s.player.firePresses = 3;
+	net::BitWriter out;
+	net::encodeNetworkable(out, h, nullptr, s);
+	net::BitReader in(out.data().data(), out.data().size());
+	net::NetworkableState back;
+	CHECK(net::decodeNetworkable(in, h, {}, back) && back.complete);
+	CHECK(back.player.hasSpawnTick && back.player.manDown && back.player.spawnTick == 1234);
+	CHECK(back.player.fireMask == (0x40u | 0x80u | 0x20000u) && back.player.firePresses == 3);
+	CHECK(back.player.fire[0].on && back.player.fire[0].rounds == 17 && back.player.fire[0].fireMode == 2
+		&& std::abs(back.player.fire[0].heat - 0.5f) < 0.02f && back.player.fire[0].flags == 5);
+	CHECK(!back.player.fire[1].on && back.player.fire[1].rounds == -1);
+	CHECK(back.player.fire[2].on && back.player.fire[2].rounds == -1 && std::abs(back.player.fire[2].heat - 4.0f) < 0.05f);
+
+	net::SpottedInfo spot;
+	spot.spotter = 545;
+	spot.spotted = 601;
+	spot.x = 12.5f;
+	spot.z = -3;
+	spot.team = 2;
+	spot.value = 7;
+	spot.message = 0x2e;
+	net::BitWriter ev;
+	CHECK(net::writeGameEvent(ev, net::makeSpotted(spot)));
+	net::BitReader evIn(ev.data().data(), ev.data().size());
+	net::GameEvent read;
+	net::SpottedInfo got;
+	CHECK(net::readGameEvent(evIn, read) && net::parseSpotted(read, got));
+	CHECK(got.spotter == 545 && got.spotted == 601 && got.x == 12.5f && got.z == -3 && got.team == 2 && got.value == 7
+		&& got.message == 0x2e);
+	const std::string bytes = net::spottedPayload(spot);
+	CHECK(bytes.size() == 0x18);
+	net::SpottedInfo fromBytes;
+	CHECK(net::parseSpottedPayload(bytes, 0x33, fromBytes));
+	CHECK(fromBytes.spotter == 545 && fromBytes.spotted == 601 && fromBytes.team == 2 && fromBytes.x == 12.5f
+		&& fromBytes.value == 7 && fromBytes.message == 0x33);
+}

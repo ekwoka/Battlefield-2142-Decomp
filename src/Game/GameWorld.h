@@ -242,14 +242,33 @@ public:
 	// direction against the yaw, the turn rate, the fire pulse), so it is
 	// drawn posed (skeletonPose) and holding its weapon (an object made here
 	// for it, posed by the skeleton's mesh nodes, partTransforms). The
-	// stance isn't networked by the rewrite's server: the others stand.
+	// pose comes from the soldier networkable's 0x20 (soldier +0x268, the
+	// PoseTrigger's), the aim from 0x4 / 0x10; the fire from the player
+	// networkable's fire state (player +0x19c, mask 0x40) and its presses
+	// (mask 0x4000000): the client runs the weapon in its hands as the
+	// exe's client does for a remote player (0x005981a0 sets the fire
+	// state, the firearm fires on it): its rounds at the template's rate
+	// of fire and fire mode, the magazine (the server's rounds while it
+	// fires, 0x00595c60) and its reload when empty, each round the weapon
+	// animation's fire pulse (its muzzle effects through the effect
+	// events) and the Fire sound (3P), a reload the reload message and the
+	// Reload sound.
 	struct RemoteSoldierState {
 		physics::Vec3 velocity;
-		float yaw = 0; // degrees
+		float yaw = 0; // degrees: the look (body yaw plus the head's twist)
+		float aimPitch = 0; // degrees, up positive
 		std::string weapon; // the template in its hands ("" none)
 		bool onGround = true;
-		bool fired = false;
-		SoldierPose pose = SoldierPose::Stand; // known for the client's own soldier
+		bool fired = false; // a round left (the client's own soldier: its prediction's)
+		bool reloading = false; // the client's own
+		SoldierPose pose = SoldierPose::Stand;
+		bool remoteFire = false; // run the weapon from the fire state below
+		bool firing = false;     // the fire state (player +0x19c)
+		int firePresses = -1;    // mask 0x4000000's count (-1 unknown)
+		int rounds = -1;         // the server's rounds in the magazine while firing (-1 unknown)
+		int fireMode = -1;       // 0 single, 1 burst, 2 automatic (-1 the template's first)
+		int player = -1;         // whose (the sounds' first person for the local player)
+		bool muzzleEffects = true; // off for our own soldier seen from inside
 	};
 	void animateRemoteSoldier(uint32_t object, const RemoteSoldierState& state, float seconds);
 	// The ghost gone, dead or in a vehicle: its animation and weapon go.
@@ -380,6 +399,18 @@ public:
 		int inHandSlot = 0;
 		float heat = 0; // the weapon in hand's (or the seat's gun's), 0..1
 		uint32_t gunShots = 0; // rounds the seats' guns have fired (the camera's recoil)
+		// The player's fire states (player +0x19c / +0x19d: vtable 0x1d4 /
+		// 0x1dc, set from c_PIFire / c_PIAltFire held by the game logic's
+		// input, 0x004bda00; the player networkable's masks 0x40 / 0x80) and
+		// the presses of the fire (+0x250, counted on each rising edge by
+		// 0x0059b260; mask 0x4000000's two bits).
+		bool firing = false, altFiring = false;
+		uint32_t firePresses = 0;
+		// The weapon in hand (group 0): its rounds in the magazine (-1 none),
+		// fire mode (FireArm::fireMode) and whether it reloads.
+		int roundsInMag = -1;
+		int fireMode = 0;
+		bool reloading = false;
 	};
 	std::vector<PlayerInfo> playerList() const;
 	bool playerInfo(int player, PlayerInfo& info) const;
@@ -1629,6 +1660,7 @@ private:
 		// The held weapon's Radio one-shots (the object component's +0x10
 		// fail, +0x11 use) and the trigger last tick.
 		bool radioFailArmed = true, radioUseArmed = true, triggerWas = false;
+		uint32_t firePresses = 0; // +0x250: the fire's presses (0x0059b260)
 		SoldierInput input;
 		std::vector<HitBone> hitBones;
 		int spawnChoice = -1;
@@ -1870,6 +1902,9 @@ private:
 	static constexpr uint32_t kSoldierFootStepsMaterial = 5500; // 0x157c
 	void playRagDollImpact(anim::RagDoll& ragDoll, const anim::Vec& at);
 	void startEffectsOn(const Player& player, int effect);
+	// The same for a weapon template at a muzzle point and its turn (a
+	// joined game's remote soldiers).
+	void startWeaponEffects(const std::string& weapon, const physics::Vec3& origin, const physics::Mat3& turn, int effect);
 	void playAnimationSound(const Player& player, int sound);
 	void applyAbility(const Ability& ability, const physics::Vec3& at, int team, float seconds, uint32_t skip,
 		AbilityScan* scan = nullptr, Player* holder = nullptr);
@@ -2054,6 +2089,16 @@ private:
 		std::vector<anim::Matrix> worldPose;
 		float lastYaw = 0;
 		bool started = false;
+		// The weapon run from the fire state: its settings, rounds in the
+		// magazine, the time to the next round, the reload left, the last
+		// press count, the burst's rounds still to go.
+		FireArmSettings fireArm;
+		int rounds = -1;
+		float nextRound = 0;
+		float reloadLeft = 0;
+		int presses = -1;
+		bool wasFiring = false;
+		int burstLeft = 0;
 	};
 	std::map<uint32_t, RemoteSoldier> m_remoteSoldiers;
 	void stepRemoteBodies(float seconds);

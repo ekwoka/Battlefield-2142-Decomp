@@ -329,6 +329,39 @@ struct AcceptOrderInfo {
 };
 bool parseAcceptOrder(const GameEvent& e, AcceptOrderInfo& out);
 GameEvent makeAcceptOrder(const AcceptOrderInfo& info);
+// kEvSpotted (0x1d; read 0x0050e770, written 0x0050e830, the event's
+// vtable 0x0091e6f0 made by 0x0042cfa0): +0xc the reporter's soldier
+// (its network id, 16 bits), +0xe the object reported (16), +0x14 / +0x18
+// two floats (the point; 0 from the radio calls), +0x10 the team (8),
+// +0x1c a value (32), +0x20 the message (32).
+//   - The game's slot 0xd8 (0x0042d220, Radio.callForMedic / Ammo /
+//     Repair and the revive call): message 0x33..0x36, the caller's
+//     soldier and team; a client sends it, a server hands it out itself
+//     (slot 0x90(-1)). No spam check; the radio line goes as its own
+//     message (slot 0x54).
+//   - The game's slot 0xd4 (0x0042d110, the spot of Radio.sendSpottedMessage
+//     and AIDLL's IAIGame slot 0x68): message 0x2e with the object, the
+//     point and the value, after the reporter's spam check (player slot
+//     0x340, counted for a player other than the local one).
+//   - The server's handler (0x0050e910): the object reported (by network
+//     id, with its +0x40) goes to the world's category 3 message 0x16 with
+//     the team; then every player of the event's team gets message 2/<the
+//     message> with the event's 0x18 bytes from +0xc: a server's own player
+//     posted there, the others' as PostRemote to their connection.
+struct SpottedInfo {
+	uint32_t spotter = 0; // network id (a ghost)
+	uint32_t spotted = 0;
+	float x = 0, z = 0;
+	int team = 0;
+	uint32_t value = 0;
+	uint32_t message = 0;
+};
+bool parseSpotted(const GameEvent& e, SpottedInfo& out);
+GameEvent makeSpotted(const SpottedInfo& info);
+// The 0x18 bytes message 2/<message> carries (from the event's +0xc:
+// spotter u16, spotted u16, team u8 and three bytes, x, z, value).
+std::string spottedPayload(const SpottedInfo& info);
+bool parseSpottedPayload(const std::string& payload, uint32_t message, SpottedInfo& out);
 // kEvRadioMessage (0x14; read 0x0050d100, written 0x0050d1f0): +0xc the
 // voice message's index in the game logic's message table (16 bits: the
 // order of Sound/VoiceMessages.con's addMessage, 0x004d8af0, looked up by

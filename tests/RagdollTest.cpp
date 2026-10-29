@@ -2168,6 +2168,73 @@ TEST(RagDoll_RemoteSoldierAnimated)
 	CHECK(held && held->objectTemplate() && held->objectTemplate()->name() == "eu_ar_rifle");
 	std::vector<anim::Matrix> parts(2);
 	CHECK(game.world->partTransforms(rifle, parts));
+	// Crouched: another pose than the standing run's.
+	std::vector<anim::Matrix> standing = pose;
+	state.velocity = {};
+	state.pose = game::SoldierPose::Crouch;
+	for (int i = 0; i < 30; ++i) {
+		game.world->animateRemoteSoldier(id, state, 1 / 30.0f);
+	}
+	CHECK(game.world->skeletonPose(id, *skeleton, pose));
+	float crouched = 0;
+	for (size_t i = 0; i < pose.size() && i < standing.size(); ++i) {
+		crouched = std::max(crouched, std::abs(pose[i][13] - standing[i][13]));
+	}
+	CHECK(crouched > 0.05f);
+	// Its fire state on (player +0x19c): the rifle fires at its rate, a Fire
+	// sound each round; the magazine empty, the Reload; the server's rounds
+	// while it fires set the magazine.
+	const game::FireArmSettings arm = game::FireArmSettings::fromTemplate(*game.templates.find("eu_ar_rifle"));
+	game.world->takeWeaponSounds();
+	state.remoteFire = true;
+	state.firing = true;
+	state.firePresses = 1;
+	state.rounds = 3;
+	state.fireMode = game::kFireAutomatic;
+	for (int i = 0; i < 30; ++i) {
+		game.world->animateRemoteSoldier(id, state, 1 / 30.0f);
+		state.rounds = -1; // the server said it once
+	}
+	int fires = 0, reloads = 0;
+	for (const auto& sound : game.world->takeWeaponSounds()) {
+		fires += sound.kind == game::GameWorld::WeaponSoundEvent::Fire && sound.weapon == "eu_ar_rifle";
+		reloads += sound.kind == game::GameWorld::WeaponSoundEvent::Reload;
+	}
+	CHECK(fires == 3 && reloads == 1);
+	// Reloaded after reloadTime: it fires on at roundsPerMinute.
+	state.firing = false;
+	for (int i = 0; i < static_cast<int>(arm.reloadTime * 30) + 2; ++i) {
+		game.world->animateRemoteSoldier(id, state, 1 / 30.0f);
+	}
+	game.world->takeWeaponSounds();
+	state.firing = true;
+	for (int i = 0; i < 30; ++i) {
+		game.world->animateRemoteSoldier(id, state, 1 / 30.0f);
+	}
+	fires = 0;
+	for (const auto& sound : game.world->takeWeaponSounds()) {
+		fires += sound.kind == game::GameWorld::WeaponSoundEvent::Fire;
+	}
+	const int expected = std::min(arm.magSize, arm.roundsPerMinute / 60);
+	CHECK(std::abs(fires - expected) <= 1);
+	// Single fire: one round a press (the presses' count).
+	state.firing = false;
+	state.fireMode = game::kFireSingle;
+	for (int i = 0; i < 10; ++i) {
+		game.world->animateRemoteSoldier(id, state, 1 / 30.0f);
+	}
+	game.world->takeWeaponSounds();
+	state.firePresses = 2; // a tap between two updates
+	for (int i = 0; i < 10; ++i) {
+		game.world->animateRemoteSoldier(id, state, 1 / 30.0f);
+	}
+	fires = 0;
+	for (const auto& sound : game.world->takeWeaponSounds()) {
+		fires += sound.kind == game::GameWorld::WeaponSoundEvent::Fire;
+	}
+	CHECK(fires == 1);
+	state.remoteFire = false;
+	state.pose = game::SoldierPose::Stand;
 	// Another weapon in hand replaces it; the ghost gone, both go.
 	state.weapon = "as_ar_rifle";
 	game.world->animateRemoteSoldier(id, state, 1 / 30.0f);

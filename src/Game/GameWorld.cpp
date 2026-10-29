@@ -2914,7 +2914,13 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 		info.heat = seatGun ? seatGun->heat() : 0.0f;
 	} else if (player->alive && player->weapon) {
 		info.heat = player->weapon->heat();
+		info.roundsInMag = player->weapon->roundsInMag();
+		info.fireMode = player->weapon->fireMode();
+		info.reloading = player->weapon->reloading();
 	}
+	info.firing = player->alive && player->input.fire;
+	info.altFiring = player->alive && player->input.altFire;
+	info.firePresses = player->firePresses;
 	info.kills = player->kills;
 	info.deaths = player->deaths;
 	info.teamKills = player->teamKills;
@@ -5490,6 +5496,16 @@ void GameWorld::startEffectsOn(const Player& player, int effect)
 	const float pitch = player.input.aimPitch;
 	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({look, -pitch, 0});
 	const physics::Vec3 origin = player.body.position + physics::Vec3 {0, 0.6f, 0} + turn.transform({0, 0, 0.5f});
+	startWeaponEffects(weapon->name(), origin, turn, effect);
+}
+
+void GameWorld::startWeaponEffects(const std::string& weaponName, const physics::Vec3& origin, const physics::Mat3& turn,
+	int effect)
+{
+	const world::ObjectTemplate* weapon = m_templates.find(weaponName);
+	if (!weapon) {
+		return;
+	}
 	const uint32_t bit = 1u << (9 + effect);
 	const std::function<void(const world::ObjectTemplate&, const physics::Vec3&, int)> visit =
 		[&](const world::ObjectTemplate& t, const physics::Vec3& offset, int depth) {
@@ -5662,6 +5678,9 @@ void GameWorld::animateRemoteSoldier(uint32_t object, const RemoteSoldierState& 
 		// The weapon in hand changed (selectItem's object, 0x00582xxx): its
 		// object and its animationSystem3P.
 		remote.weaponName = state.weapon;
+		remote.rounds = -1; // its magazine starts full
+		remote.reloadLeft = 0;
+		remote.burstLeft = 0;
 		if (remote.weaponObject) {
 			m_objects.remove(remote.weaponObject);
 			remote.weaponObject = 0;
@@ -5695,13 +5714,87 @@ void GameWorld::animateRemoteSoldier(uint32_t object, const RemoteSoldierState& 
 	if (state.fired) {
 		input.pulses |= 1;
 	}
+	if (state.reloading) {
+		input.messages |= 2;
+	}
+	// The look: the muzzle's point and turn (as startEffectsOn's), lower
+	// crouched and prone.
+	const float eye = state.pose == SoldierPose::Prone ? 0.35f : state.pose == SoldierPose::Crouch ? 1.1f : 1.6f;
+	const physics::Mat3 turnTo = physics::Mat3::fromYawPitchRoll({state.yaw, -state.aimPitch, 0});
+	const physics::Vec3 feet {soldier->position().x, soldier->position().y, soldier->position().z};
+	const physics::Vec3 muzzle = feet + physics::Vec3 {0, eye, 0} + turnTo.transform({0, 0, 0.5f});
+	if (state.remoteFire && !remote.weaponName.empty()) {
+		const auto round = [&](WeaponSoundEvent::Kind kind) {
+			m_weaponSounds.push_back({kind, state.player, object, remote.weaponName, muzzle});
+			if (m_weaponSounds.size() > 256) {
+				m_weaponSounds.erase(m_weaponSounds.begin(), m_weaponSounds.end() - 256);
+			}
+		};
+		FireArmSettings& arm = remote.fireArm;
+		if (remote.rounds < 0) {
+			arm = FireArmSettings {};
+			if (const world::ObjectTemplate* held = m_templates.find(remote.weaponName)) {
+				arm = FireArmSettings::fromTemplate(*held);
+			}
+			remote.rounds = arm.magSize > 0 ? arm.magSize : 1;
+			remote.presses = state.firePresses;
+		}
+		// The server's rounds while it fires (0x00595c60 hands them to the
+		// firearm's magazine list): a reload done there ends ours.
+		if (state.firing && state.rounds >= 0) {
+			if (state.rounds > remote.rounds) {
+				remote.reloadLeft = 0;
+			}
+			remote.rounds = state.rounds;
+		}
+		bool pressed = state.firing && !remote.wasFiring;
+		if (state.firePresses >= 0 && remote.presses >= 0 && state.firePresses != remote.presses) {
+			pressed = true; // a press between two updates (+0x24c)
+		}
+		remote.presses = state.firePresses;
+		remote.wasFiring = state.firing;
+		const int mode = state.fireMode >= 0 ? state.fireMode : arm.fireRates.empty() ? kFireAutomatic : arm.fireRates.front();
+		if (pressed && mode != kFireAutomatic) {
+			remote.burstLeft = mode == kFireBurst ? std::max(1, arm.burstSize) : 1;
+		}
+		remote.nextRound = std::max(0.0f, remote.nextRound - seconds);
+		if (remote.reloadLeft > 0) {
+			remote.reloadLeft -= seconds;
+			if (remote.reloadLeft <= 0) {
+				remote.reloadLeft = 0;
+				remote.rounds = arm.magSize > 0 ? arm.magSize : 1;
+			}
+		} else if (remote.nextRound <= 0 && remote.rounds != 0
+			&& (mode == kFireAutomatic ? state.firing : remote.burstLeft > 0)) {
+			input.pulses |= 1;
+			round(WeaponSoundEvent::Fire);
+			remote.nextRound = arm.roundsPerMinute > 0 ? 60.0f / static_cast<float>(arm.roundsPerMinute) : 0.1f;
+			remote.burstLeft = std::max(0, remote.burstLeft - 1);
+			if (arm.magSize > 0 && remote.rounds > 0) {
+				--remote.rounds;
+			}
+			if (remote.rounds == 0 && arm.magSize > 0) {
+				remote.reloadLeft = arm.reloadTime;
+				round(WeaponSoundEvent::Reload);
+			}
+		}
+		if (remote.reloadLeft > 0) {
+			input.messages |= 2;
+		}
+	}
 	if (remote.body) {
 		remote.body->update(input, seconds);
 		remote.body->takeEvents();
 	}
 	if (remote.weapon) {
 		remote.weapon->update(input, seconds);
-		remote.weapon->takeEvents();
+		// The weapon's effect events (the muzzle's flash and smoke), as
+		// stepAnimation hands them to startEffectsOn.
+		for (const anim::AnimationState::FiredEvent& event : remote.weapon->takeEvents()) {
+			if (event.type == anim::Bundle::EffectEvent && event.id >= 0 && event.id < 10 && state.muzzleEffects) {
+				startWeaponEffects(remote.weaponName, muzzle, turnTo, event.id);
+			}
+		}
 	}
 	if (remote.skeleton && remote.body) {
 		if (remote.pose.rotations.size() != remote.skeleton->nodes.size()) {
@@ -6244,6 +6337,9 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 			player.radioUseArmed = false;
 			radioMessage(player.id, 10, it->second);
 		}
+	}
+	if (input.fire && !player.triggerWas) {
+		++player.firePresses; // 0x0059b260: +0x250 on the fire's rising edge
 	}
 	player.triggerWas = input.fire;
 	if (shot) {

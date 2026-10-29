@@ -479,4 +479,76 @@ bool VoteMessages::mayStart(int kind, int target, bool targetIsHost)
 	return true;
 }
 
+float HudQuestions::seconds(Kind kind)
+{
+	static const float times[7] = {20, 20, 30, 20, 20, 15, -1}; // +0x70.. (the constructor)
+	return times[std::clamp(static_cast<int>(kind), 0, 6)];
+}
+
+void HudQuestions::ask(Kind kind, int value, const std::string& text)
+{
+	m_questions[static_cast<size_t>(kind)] = Question {kind, value, text, seconds(kind)};
+	show();
+}
+
+const HudQuestions::Question* HudQuestions::front() const
+{
+	const Question* best = nullptr;
+	for (const auto& q : m_questions) {
+		if (q && q->value >= 0 && (!best || (q->left >= 0 && (best->left < 0 || q->left < best->left)))) {
+			best = &*q;
+		}
+	}
+	return best;
+}
+
+void HudQuestions::show() const
+{
+	const Question* q = front();
+	if (!q || !onLine) {
+		return;
+	}
+	onLine(q->text);
+	const char* prompt = q->kind == TeamKill ? "HUD_HUD_YESNO" : "HUD_HUD_SQUAD_RECIEVED_ACCEPT_REJECT";
+	onLine(localize ? localize(prompt) : std::string(prompt));
+}
+
+void HudQuestions::answer(bool yes)
+{
+	const Question* q = front();
+	if (!q) {
+		return;
+	}
+	const Question asked = *q;
+	m_questions[static_cast<size_t>(asked.kind)].reset();
+	if (onAnswer) {
+		onAnswer(asked, yes, false);
+	}
+	show();
+}
+
+void HudQuestions::tick(float seconds)
+{
+	static const char* timedOut[4] = {"HUD_TEXT_MENU_INVITE_REQUEST_TIMED_OUT", "HUD_TEXT_MENU_INVITE_PROPOSAL_TIMED_OUT",
+		"HUD_TEXT_MENU_COMMANDER_ORDER_TIMED_OUT", "HUD_TEXT_MENU_COMMANDER_APPLICATION_TIMED_OUT"};
+	for (auto& q : m_questions) {
+		if (!q || q->left <= 0) {
+			continue;
+		}
+		q->left -= seconds;
+		if (q->left > 0) {
+			continue;
+		}
+		const Question asked = *q;
+		q.reset();
+		if (onAnswer) {
+			onAnswer(asked, asked.kind == TeamKill, true); // a team kill forgiven
+		}
+		if (asked.kind <= CommanderOffer && onLine) {
+			const char* id = timedOut[static_cast<int>(asked.kind)];
+			onLine(localize ? localize(id) : std::string(id));
+		}
+	}
+}
+
 } // namespace dice::hfe::menu

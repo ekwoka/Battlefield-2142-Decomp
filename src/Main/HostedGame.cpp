@@ -550,6 +550,12 @@ void HostedGame::sendJoinBlocks(int id)
 	settings.gamePort = m_server.port();
 	settings.gameSpyPort = m_setup.queryPort;
 	settings.playersNeededToStart = 1;
+	// The radio's spam limits (the client's spam check, player slot 0x340):
+	// the sv settings' defaults without settings of our own.
+	const net::ServerSettings defaults;
+	settings.radioSpamInterval = defaults.radioSpamInterval;
+	settings.radioMaxSpamFlagCount = defaults.radioMaxSpamFlagCount;
+	settings.radioBlockedDurationTime = defaults.radioBlockedDurationTime;
 	if (const net::ServerSettings* sv = m_setup.settings) {
 		// 0x00515bc0's fields from the sv settings (the welcome message in
 		// up to three 256-byte pieces).
@@ -1105,8 +1111,16 @@ void HostedGame::event(int id, const net::GameEvent& e)
 	case net::kEvInvite: { // 0x0050e700: team, player, squad, from the leader
 		// From the squad's leader (squad manager slot 0x40) only; slot 0x30
 		// invites. A bot in no squad takes it at once (as offline: the
-		// rewrite's stand-in for its answer); a client's player is told
-		// (the event to its client).
+		// rewrite's stand-in for its answer); a client's player is asked.
+		// Without the leader bit it is the invited player's own refusal
+		// (the HUD's answer, 0x0079d6e0 kind 1: slot 0x30 with false, which
+		// clears the squad's bit).
+		if (e.u(3) == 0) {
+			if (e.i(1) == player) {
+				m_invites[player] &= ~(1u << (e.u(2) & 31));
+			}
+			return;
+		}
 		game::GameWorld::PlayerInfo me, other;
 		if (!m_round->playerInfo(player, me) || !me.squadLeader || me.squad != e.i(2) || !m_round->playerInfo(e.i(1), other)
 			|| other.team != me.team || other.commander) {
@@ -1115,9 +1129,14 @@ void HostedGame::event(int id, const net::GameEvent& e)
 		if (other.ai && other.squad == 0) {
 			m_round->joinSquad(other.id, me.squad);
 		}
+		// Squad manager slot 0x30 (0x004c3190): the invited player's mask
+		// of the squads that invited it (player vtable 0x224 / 0x228) gets
+		// the squad's bit and its client message 2/0x10 (the squad), which
+		// its HUD asks about (the question queue's kind 1, 0x0079e440).
+		m_invites[other.id] |= 1u << (static_cast<uint32_t>(me.squad) & 31);
 		for (const auto& [id, c] : m_clients) {
 			if (c.player == other.id) {
-				sendTo(id, e);
+				sendTo(id, net::makePostRemote(2, 0x10, net::int32Payload(me.squad)));
 			}
 		}
 		return;
@@ -1238,6 +1257,20 @@ void HostedGame::event(int id, const net::GameEvent& e)
 		}
 		return;
 	}
+	case net::kEvSpotted: { // 0x0050e910
+		net::SpottedInfo spot;
+		game::GameWorld::PlayerInfo me;
+		if (!net::parseSpotted(e, spot) || player < 0 || !m_round->playerInfo(player, me)) {
+			return;
+		}
+		spotted(spot, player);
+		return;
+	}
+	case net::kEvCommanderCam:
+		// 0x00510b30: the team's commander moves his overhead camera there
+		// (0x005f8410), which returns at once unless the game is a client's
+		// (game logic slot 0x144): a server keeps nothing of it.
+		return;
 	case net::kEvArtillery:
 	case net::kEvUav:
 	case net::kEvSupplyDrop:
@@ -1251,6 +1284,61 @@ void HostedGame::event(int id, const net::GameEvent& e)
 	default:
 		return;
 	}
+}
+
+// The Spotted event's hand-out (0x0050e910): a spot (message 0x2e) is the
+// reporter's report of the object (the world's category 3 message 0x16,
+// here the round's reportBattlefieldObjects: the squad's minimap knows the
+// enemy; with no object, the reporter's crosshair object, as its client's
+// HUD would have found it, 0x0075be30); then every player of the team gets
+// message 2/<message> with the event's 0x18 bytes: a client's player as
+// PostRemote, the host's own through onSpotted.
+void HostedGame::spotted(const net::SpottedInfo& from, int reporter)
+{
+	// The reporter is the connection's player (or the host's own): its
+	// soldier and team (0x0042d220 / 0x0042d110 fill them from the player).
+	game::GameWorld::PlayerInfo me;
+	if (!m_round->playerInfo(reporter, me)) {
+		return;
+	}
+	net::SpottedInfo spot = from;
+	spot.spotter = me.soldier ? ghostOfObject(me.soldier) : 0;
+	spot.team = me.team;
+
+	if (spot.message == 0x2e) {
+		const int enemy = spot.spotted ? playerOfGhost(spot.spotted) : -1;
+		if (enemy >= 0) {
+			m_round->reportBattlefieldObjects(reporter, {enemy});
+		} else {
+			m_round->spotCrosshair(reporter);
+		}
+	}
+	const std::string payload = net::spottedPayload(spot);
+	for (const auto& p : m_round->playerList()) {
+		if (p.team != spot.team) {
+			continue;
+		}
+		bool remote = false;
+		for (const auto& [id, client] : m_clients) {
+			if (client.player == p.id && client.stage == Client::Stage::Playing) {
+				sendTo(id, net::makePostRemote(2, spot.message, payload));
+				remote = true;
+			}
+		}
+		if (!remote && p.id == m_round->localPlayer() && onSpotted) {
+			onSpotted(spot);
+		}
+	}
+}
+
+int HostedGame::playerOfGhost(uint32_t id) const
+{
+	for (const auto& [object, ghost] : m_ghosts) {
+		if (id >= ghost.first && id < ghost.first + ghost.layout->size()) {
+			return m_round->playerOf(object);
+		}
+	}
+	return -1;
 }
 
 // The commander's tools from a client: only the team's commander's
@@ -1614,9 +1702,27 @@ net::NetworkableState HostedGame::soldierState(uint32_t soldier, const world::Ob
 	}
 	const game::SoldierControl* control = known ? m_round->soldierControl(player) : nullptr;
 	const physics::SoldierBody* body = known ? m_round->soldierBody(player) : nullptr;
+	if (known) {
+		// The pose and the pose asked for (0x20: soldier +0x268 / +0x26c,
+		// 0..4; 3 swimming, which 0x0058a6d0 sets from the response's +0xfa),
+		// both the input's here (the rewrite's soldier takes the pose it is
+		// asked for at once).
+		s.mask |= 0x20;
+		s.soldierValues[0] = s.soldierValues[1] = static_cast<int>(info.pose);
+		// The always-sent bits (0x005fc1a0: +0x328, +0x30c the swimming,
+		// +0x3e9 the weapon put away, 0x005878b0: swimming among others).
+		const bool swimming = info.pose == game::SoldierPose::Swim;
+		s.soldierBits = (swimming ? 4u : 0u) | (swimming ? 8u : 0u);
+	}
 	if (control && body) {
 		s.yaw = body->yawDegrees;
 		s.velocity = {body->velocity.x, body->velocity.y, body->velocity.z};
+		// The look's twist ahead of the body and the twist still to catch
+		// up (+0x278, +0x280: masks 4 and 8 in both modes, 0x005fc1a0):
+		// the look is the body's yaw plus the twist.
+		s.mask |= 0x4 | 0x8;
+		s.pitch = control->twist();
+		s.roll = control->catchUp();
 		// The eased throttle and strafe (+0x264, +0x260), in both modes.
 		s.mask |= 0x800 | 0x1000;
 		s.soldierLean[0] = control->throttle();
@@ -1627,11 +1733,8 @@ net::NetworkableState HostedGame::soldierState(uint32_t soldier, const world::Ob
 			s.sprinting = control->stamina().sprinting();
 		}
 		if (mode == 3) {
-			// The control's twist and catch-up (+0x278, +0x280) and the
-			// node's acceleration and velocity change (slots 0x74, 0xc4).
-			s.mask |= 0x4 | 0x8 | 0x200 | 0x80000;
-			s.pitch = control->twist();
-			s.roll = control->catchUp();
+			// The node's acceleration and velocity change (slots 0x74, 0xc4).
+			s.mask |= 0x200 | 0x80000;
 			s.soldierAcceleration = {body->acceleration.x, body->acceleration.y, body->acceleration.z};
 			s.soldierImpulse = {body->impulse.x, body->impulse.y, body->impulse.z};
 		}
@@ -1974,6 +2077,24 @@ std::vector<uint8_t> HostedGame::playerStateOf(int player, size_t& bits) const
 		const float outside = m_round->outsideCombatArea(player);
 		s.mask |= 0x800;
 		s.player.value294 = outside > 0 ? static_cast<uint8_t>(static_cast<int>(std::floor(outside))) : 0;
+		// The spawn tick and man down (0x20: player +0xdc, +0xe0).
+		s.mask |= 0x20;
+		s.player.manDown = p.manDown;
+		s.player.spawnTick = m_tick + static_cast<uint32_t>(std::max(0.0f, p.respawnIn) * 30.0f);
+		// The fire states (0x00592410's loop: masks 0x40 / 0x80 / 0x20000
+		// from player +0x19c / +0x19d / +0x19e, the fire and alt fire held;
+		// the state goes whole every update here) with group 0's firearm,
+		// the weapon in hand: its rounds and fire mode; and the presses
+		// (0x4000000, +0x250).
+		s.mask |= 0x40 | 0x80 | 0x20000 | 0x4000000;
+		s.player.fire[0].on = p.alive && !p.vehicle && p.firing;
+		s.player.fire[1].on = p.alive && !p.vehicle && p.altFiring;
+		for (net::PlayerNetState::FireState& f : s.player.fire) {
+			f.rounds = p.roundsInMag;
+			f.fireMode = p.fireMode;
+			f.heat = p.heat;
+		}
+		s.player.firePresses = static_cast<int>(p.firePresses & 3);
 	}
 	net::NetworkableHints hints;
 	hints.kind = net::NetworkableKind::Player;
