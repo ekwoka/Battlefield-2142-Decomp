@@ -1,11 +1,14 @@
 #include "Nametags.h"
 
+#include "Console/Console.h"
+#include "Console/ConsoleBinding.h"
 #include "Game/GameWorld.h"
 #include "IO/File/FileManager.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -226,6 +229,91 @@ void TagFont::write(const std::string& text, float x, float y, const float colou
 	}
 }
 
+// --- The icon registry (nametags.con) ---
+
+int IconRegistry::idOf(const std::string& name)
+{
+	// NametagItemIDs (0x10070e1a's names).
+	static const std::pair<const char*, int> kIds[] = {{"ICRank", 0}, {"ICRevive", 0x2c}, {"ICMedic", 0x2d},
+		{"ICRepair", 0x2e}, {"ICAmmo", 0x2f}, {"ICVehicleArmor", 0x30}, {"ICVehicleMedic", 0x31},
+		{"ICVehicleRepair", 0x32}, {"ICVehicleAmmo", 0x33}, {"ICHealthBar", 0x34}, {"ICArmorBar", 0x35},
+		{"ICAmmoBar", 0x36}, {"ICSquadOrder", 0x3d}, {"ICCommanderOrder", 0x43}, {"ICTarget", 0x4e}, {"ICVeteran", 0x4f},
+		{"ICObject", 0x50}, {"ICObjectOrbitalStrikeRequestOrder", 0x79}, {"ICObjectOrbitalBombardmentRequestOrder", 0x7a},
+		{"ICObjectUAVRequestOrder", 0x7b}, {"ICObjectSupplyRequestOrder", 0x7c},
+		{"ICObjectOrbitalStrikeRequestOrderSelected", 0x7d}, {"ICObjectOrbitalBombardmentRequestOrderSelected", 0x7e},
+		{"ICObjectUAVRequestOrderSelected", 0x7f}, {"ICObjectSupplyRequestOrderSelected", 0x80},
+		{"ICObjectTeam1Titan", 0x81}, {"ICObjectTeam2Titan", 0x82}, {"ICObjectTeam1TitanBackground", 0x83},
+		{"ICObjectTeam2TitanBackground", 0x84}, {"ICObjectTeam1TitanBoardable", 0x85}, {"ICObjectTeam2TitanBoardable", 0x86},
+		{"ICObjectTeam1TitanBoardableBackground", 0x87}, {"ICObjectTeam2TitanBoardableBackground", 0x88},
+		{"ICObjectCannon01", 0x8c}, {"ICObjectCannon02", 0x8d}, {"ICObjectCannon03", 0x8e}, {"ICObjectCannon04", 0x8f},
+		{"ICObjectCannon05", 0x90}, {"ICObjectCannonBackground", 0x91}, {"ICObjectCoreBackground", 0x92},
+		{"ICObjectFlagBackground", 0x93}, {"ICObjectConsoleBackground", 0x94}, {"ICObjectCore", 0x96},
+		{"ICObjectConsole01", 0x97}, {"ICObjectConsole02", 0x98}, {"ICObjectConsole03", 0x99}, {"ICObjectConsole04", 0x9a},
+		{"ICNetworkFriendlySmallCircle", 0xa0}, {"ICNetworkFriendlyBar", 0xa1}, {"ICNetworkFriendlyBarBg", 0xa2},
+		{"ICNetworkEnemySmallCircle", 0xa3}, {"ICNetworkEnemyBar", 0xa4}, {"ICNetworkEnemyBarBg", 0xa5}};
+	for (const auto& [n, id] : kIds) {
+		if (name.size() == std::char_traits<char>::length(n)
+			&& std::equal(name.begin(), name.end(), n, [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); })) {
+			return id;
+		}
+	}
+	return -1;
+}
+
+void IconRegistry::setTexture(int rawFrames, const std::string& rawTexture, int x, int y, int w, int h)
+{
+	int frames = rawFrames;
+	if (current < 0 || w <= 0 || h <= 0) {
+		return;
+	}
+	std::string texture = rawTexture;
+	std::replace(texture.begin(), texture.end(), '\\', '/');
+	if (texture.find('.', texture.rfind('/') + 1) == std::string::npos) {
+		texture += ".dds";
+	}
+	int tw = 0, th = 0;
+	if (!textureSize || !textureSize(texture, tw, th) || tw <= 0 || th <= 0) {
+		tw = x + w * std::max(frames, 1);
+		th = y + h;
+	}
+	// 0x100ee9a0: a bar's (mode +0x4cc 1) first number picks its texture,
+	// 0 the fill and 1 the base (kept as id and id | 0x100); an icon's is
+	// its frame count (0x1016b790: frame k at x + k w).
+	if (bar) {
+		frames = 1;
+	}
+	const int base = bar && rawFrames == 1 ? current | 0x100 : current;
+	for (int k = 0; k < std::max(frames, 1); ++k) {
+		Icon icon;
+		icon.texture = texture;
+		icon.u0 = static_cast<float>(x + k * w) / static_cast<float>(tw);
+		icon.u1 = static_cast<float>(x + (k + 1) * w) / static_cast<float>(tw);
+		icon.v0 = static_cast<float>(y) / static_cast<float>(th);
+		icon.v1 = static_cast<float>(y + h) / static_cast<float>(th);
+		icon.width = static_cast<float>(w);
+		icon.height = static_cast<float>(h);
+		icons[base + k] = icon;
+	}
+}
+
+void IconRegistry::bind(Console& console)
+{
+	const uint32_t access = ConsoleAccess::Anyone;
+	bindMethod(console, "nametags.createIcon", access, [this](std::string name) {
+		current = idOf(name);
+		bar = false;
+	});
+	// createBar <id> <from> <to>: the fill's texels (ICArmorBar 1..45).
+	bindMethod(console, "nametags.createBar", access, [this](std::string name, int from, int to) {
+		current = idOf(name);
+		bar = true;
+		barSpan[current] = {from, to};
+	});
+	bindMethod(console, "nametags.setTexture", access, [this](int frames, std::string texture, int x, int y, int w, int h) {
+		setTexture(frames, texture, x, y, w, h);
+	});
+}
+
 Nametags::Nametags(const io::FileManager& files)
 {
 	std::vector<uint8_t> data;
@@ -433,6 +521,65 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			m_font.write(text, std::round(x - m_font.width(text) / 2), std::round(y + 16), c, d.quads);
 		}
 		drawn.push_back(std::move(d));
+	}
+
+	// The objects' 3D icons (Nametag.show3dIcon: the Titans' consoles and
+	// core, the silos, the Titans themselves): the icon ICObject +
+	// 3dMapIcon (0x50 + n, from nametags.con's frames) at the object and
+	// its 3dMapIconOffset, faded out to maxDistance (maxEnemyDistance for
+	// the enemy's); inside a Titan only those with showInside, outside
+	// those with showOutside (default on); teamSpecific / inverse as the
+	// control points'. The selection backgrounds (selected3dMapIcon) need
+	// the commander's or squad leader's pick, not kept here.
+	for (const auto& owned : objects.objects()) {
+		const world::ObjectTemplate* t = owned->objectTemplate();
+		if (!m_icons || !t || t->typeName() == "ControlPoint" || owned->hidden() || number(t, "Nametag.show3dIcon", 0) == 0) {
+			continue;
+		}
+		const int frame = static_cast<int>(number(t, "Nametag.3dMapIcon", -1));
+		const IconRegistry::Icon* icon = frame >= 0 ? m_icons->find(0x50 + frame) : nullptr;
+		if (!icon) {
+			continue;
+		}
+		const bool inside = number(t, "Nametag.showInside", 0) != 0;
+		const bool outside = number(t, "Nametag.showOutside", 1) != 0;
+		if (m_insideTitan ? !inside : !outside) {
+			continue;
+		}
+		const int team = owned->team();
+		if ((number(t, "Nametag.teamSpecific", 0) != 0 && team != me.team)
+			|| (number(t, "Nametag.inverseTeamSpecific", 0) != 0 && team == me.team)) {
+			continue;
+		}
+		const bool enemy = team != 0 && team != me.team;
+		const float most = enemy ? number(t, "Nametag.maxEnemyDistance", 1200) : number(t, "Nametag.maxDistance", 1200);
+		std::array<float, 3> at {owned->position().x, owned->position().y, owned->position().z};
+		if (const std::string* offset = setting(t, "Nametag.3dMapIconOffset")) {
+			float ox = 0, oy = 0, oz = 0;
+			std::sscanf(offset->c_str(), "%f/%f/%f", &ox, &oy, &oz);
+			at = {at[0] + ox, at[1] + oy, at[2] + oz};
+		}
+		const float dx = at[0] - eye.x, dy = at[1] - eye.y, dz = at[2] - eye.z;
+		const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+		const float alpha = most <= 0 ? 0.0f : clamp01(1 - distance / most);
+		float x = 0, y = 0;
+		if (alpha <= 0.01f || !project(view, at, x, y, number(t, "Nametag.glueToEdge", 0) != 0, m_settings.circleRadius)) {
+			continue;
+		}
+		const int colour = number(t, "Nametag.useTeamColor", 0) != 0 ? (team == 0 ? Neutral : enemy ? Enemy : Team) : Neutral;
+		hud::HudQuad q;
+		q.texture = icon->texture;
+		q.x0 = std::round(x - icon->width / 2);
+		q.y0 = std::round(y - icon->height / 2);
+		q.x1 = q.x0 + icon->width;
+		q.y1 = q.y0 + icon->height;
+		q.u0 = icon->u0;
+		q.v0 = icon->v0;
+		q.u1 = icon->u1;
+		q.v1 = icon->v1;
+		std::copy(kColours[colour], kColours[colour] + 4, q.color);
+		q.color[3] = alpha;
+		drawn.push_back({distance, {q}});
 	}
 
 	// The players' tags.

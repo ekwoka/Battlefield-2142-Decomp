@@ -11,8 +11,8 @@ layout(location = 4) in float inSize;
 layout(location = 5) in float inRotation;
 layout(location = 6) in float inAlpha;
 layout(location = 7) in vec2 inPivot; // pivotOffset: the centre moved by half-sizes
-layout(location = 8) in vec2 inUnusedDirtCoord;
-layout(location = 9) in vec2 inUnusedCrackCoord;
+layout(location = 8) in vec2 inFrameCorner; // the flipbook frame's u0 v0 (Effects' spriteFrame)
+layout(location = 9) in vec2 inFrameSize;   // and its size (0: the whole texture)
 
 layout(set = 1, binding = 0) uniform Particles {
 	mat4 viewProjection;
@@ -37,7 +37,8 @@ void main()
 		vec2 shifted = inCorner + inPivot;
 		vec2 corner = vec2(shifted.x * c - shifted.y * s, shifted.x * s + shifted.y * c);
 		position = inCenter + (cameraRight.xyz * corner.x + cameraUp.xyz * corner.y) * inSize;
-		outTexCoord = inCorner * vec2(0.5, -0.5) + 0.5;
+		vec2 frameSize = inFrameSize.x > 0.0 ? inFrameSize : vec2(1.0);
+		outTexCoord = inFrameCorner + (inCorner * vec2(0.5, -0.5) + 0.5) * frameSize;
 	}
 	gl_Position = viewProjection * vec4(position, 1.0);
 	outColor = vec4(inColor, inAlpha);

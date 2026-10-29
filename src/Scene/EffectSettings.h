@@ -168,6 +168,9 @@ struct QualitySettings {
 	int textureFiltering = 3;
 	float viewDistanceScale = 1; // VideoSettings.setViewDistanceScale
 	bool changed = true;         // set by the setters; the owner clears it once applied
+	// undergrowth.simpleShaderEnable as a script or the console set it (-1:
+	// the terrain quality's, until a VideoSettings setter applies them again).
+	int undergrowthSimpleShaderSet = -1;
 
 	// What the levels give (0x10010040, 0x100991b0).
 	int terrainLodSwitchDistance() const;

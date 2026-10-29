@@ -10,7 +10,9 @@
 
 #include "Animation/Pose.h"
 #include "Culling.h"
+#include "Fog.h"
 #include "TerrainLod.h"
+#include "TitanParts.h"
 #include "Effects/Effects.h"
 #include "Scene/EffectSettings.h"
 #include "GpuContext.h"
@@ -267,6 +269,10 @@ private:
 		// pow(N.H, SpecularPower 20) x the normal map's alpha, else
 		// StaticGloss); 0 none (additive).
 		int specularKind = 0;
+		// StaticGloss (BundledMesh.fx): GeometryTemplate.setSpecularStaticGloss
+		// for this geometry, LOD and material, else 0.15 (the material
+		// block's, 0x10040070 +0xe0).
+		float staticGloss = 0.15f;
 		// A bundled or skinned mesh's normal map (RaShaderBM/SM
 		// _HASNORMALMAP_) and its space: 1 the tangent's, 2 the object's
 		// (RaShaderSM _OBJSPACENORMALMAP_); 0 none.
@@ -284,6 +290,13 @@ private:
 		bool bundled = false;
 		bool skinned = false;
 		bool radiusShadowBounds = false; // GeometryTemplate.useRadiusForShadowDepth / Spatial
+		// GeometryTemplate.isTitanInterior / isTitanExterior /
+		// titanExteriorPartIndex (TitanParts.h) and the LOD's box (mesh
+		// space; the interiors' rooms tell whether the camera is inside).
+		bool titanInterior = false;
+		bool titanExterior = false;
+		int titanPart = 0;
+		Vec3f boxMin, boxMax;
 		size_t geometries = 1; // in its file
 		size_t lodCount = 1;   // of the geometry drawn
 		std::vector<float> lodDistances; // how far each LOD is drawn (empty: the defaults)
@@ -506,12 +519,19 @@ private:
 		Vec3f axes[3];   // its rotation's rows
 	};
 	std::vector<TitanHemiMap> m_titanHemiMaps;
+	// The camera inside a Titan this frame (the object drawer's slot 0x40,
+	// TitanParts.h), and the hull parts' LOD pairs.
 	bool m_cameraInTitan = false;
+	TitanExteriorLods m_titanExteriorLods;
+	bool cameraInTitan(const Camera& camera) const;
 	void loadTitanHemiMaps(const LevelSources& sources);
 	void placeTitanHemiMaps(const Camera& camera);
 	// HemiMapConstantColor and HeightOverTerrain of a bundled or skinned
 	// instance this frame (LightingUniforms::hemiObject).
 	void hemiObjectFor(const Instance& instance, const GpuMesh& mesh, float out[4]) const;
+
+	// The fog the camera is in this frame (Fog.h; draw()).
+	ViewFog m_viewFog;
 
 	// The sky's cloud layers and sun flare.
 	SDL_GPUTexture* m_cloudTextures[2] = {};
@@ -665,7 +685,7 @@ private:
 		const scene::LightSettings& lights, std::initializer_list<const effects::EffectManager*> managers);
 	// Effect managers' particles into a buffer (released and rebuilt).
 	void buildParticleBuffer(std::initializer_list<const effects::EffectManager*> managers, SDL_GPUBuffer*& buffer,
-		std::vector<ParticleGroup>& groups, const Camera& camera, bool weather = false);
+		std::vector<ParticleGroup>& groups, const Camera& camera, bool weather = false, bool zoomed = false);
 	// Rain and snow (LevelSources::rain), stepped by buildParticles.
 	effects::Weather m_weather;
 	uint64_t m_lastWeatherTicks = 0;

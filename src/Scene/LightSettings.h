@@ -97,6 +97,18 @@ struct WaterSettings {
 	float alphaHeightMul = 0;
 	std::array<float, 2> scroll {0, 0};
 	float animSpeed = 0;
+	// terrain.waterSunIntensity (0x100766e2 -> 0x100767e9): the water
+	// material's PointColor (+0x4c of its block, 0x10040070) becomes
+	// (1, intensity, 0.8, 1); RaShaderWaterBase.fx without a lightmap takes
+	// it as the lightmap, its g the sun's share (shadFac). No call leaves the
+	// block's 0.
+	float sunIntensity = 0;
+	// renderer.waterFogColor (0..255, kept / 255 at +0x54, 0x10049640) and
+	// renderer.waterFogStartEndAndBase (+0x60, 0x10049680) of the fog object
+	// (0x1004a590's defaults): the fog with the camera at or below the sea
+	// (0x100497a0 / 0x10049850; Fog.h).
+	std::array<float, 3> fogColor {51.5f, 51.5f, 128.0f};
+	std::array<float, 4> fogStartEndAndBase {10, 250, 1, 0.5f};
 };
 
 // Rain and snow (RendDX9's rainManager.*, 0x1007e761..0x1008009a; set by
@@ -144,6 +156,18 @@ struct RendererSettings {
 	float lod1SwitchStop = 2.7f;
 	float lod2Start = 3.0f;
 	int baseCellSize = 64;
+	// renderer.indoorSkinnedMeshCullDistance / indoorBundledMeshCullDistance
+	// (+0x598 / +0x59c, 53 at 0x1002aba0): with the camera inside a Titan
+	// the skinned (0x10162070) and bundled (0x100c5030) meshes farther than
+	// these aren't drawn.
+	float indoorSkinnedMeshCullDistance = 53;
+	float indoorBundledMeshCullDistance = 53;
+	// ObjectDrawer.isInsideTitanOverride / showAllTitanParts (0x1007597d /
+	// 0x10075a7e: the drawer's +0x91 / +0x92): the camera counts as inside a
+	// Titan (slot 0x40, 0x100b9db0: +0x90 or +0x91), and the static meshes
+	// skip the interior / exterior culling (slot 0x48; TitanParts.h).
+	bool insideTitanOverride = false;
+	bool showAllTitanParts = false;
 };
 
 void registerRendererConsoleMethods(Console& console, RendererSettings& settings);

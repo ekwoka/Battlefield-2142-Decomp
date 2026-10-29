@@ -1897,3 +1897,239 @@ TEST(GameWorld_WeaponLock)
 	lock = range.world->weaponLock(range.world->localPlayer());
 	CHECK(lock.target == 0 && lock.state == 0);
 }
+
+// The armour's effect levels (0x00654730) and the spectacular hit
+// (0x006525f0 with the generator 0x0042b230).
+TEST(GameWorld_ArmorEffectLevels)
+{
+	using Step = game::GameWorld::ArmorEffectStep;
+	const std::vector<int> levels {50, 50, 0, -1, -100};
+	int group = 0;
+	CHECK(game::GameWorld::armorEffectStep(levels, 100, 60, 0, group) == Step::Keep); // above every level
+	CHECK(game::GameWorld::armorEffectStep(levels, 60, 40, 0, group) == Step::Start && group == 50);
+	CHECK(game::GameWorld::armorEffectStep(levels, 40, 30, 50, group) == Step::Keep); // no level passed
+	CHECK(game::GameWorld::armorEffectStep(levels, 30, -20, 50, group) == Step::Start && group == -1);
+	CHECK(game::GameWorld::armorEffectStep(levels, 30, 0, 50, group) == Step::Start && group == 0);
+	CHECK(game::GameWorld::armorEffectStep(levels, -20, -100, -1, group) == Step::Start && group == -100);
+	CHECK(game::GameWorld::armorEffectStep(levels, 40, 80, 50, group) == Step::Stop); // repaired past them all
+	CHECK(game::GameWorld::armorPercent(40, 100, 50) == 40 && game::GameWorld::armorPercent(-10, 100, 50) == -20);
+	CHECK(game::GameWorld::armorPercent(0.5f, 100, 50) == 1);
+	// Object 3 can die spectacularly (the generator gives 1891080048 for
+	// it), 1 and 2 never; for 3 a hit of over 20 % of armor.hitPoints is,
+	// or one leaving over 25 %.
+	CHECK(game::GameWorld::spectacularHit(3, 10, -15, 100));
+	CHECK(!game::GameWorld::spectacularHit(3, 10, -5, 100));
+	CHECK(game::GameWorld::spectacularHit(3, 50, 40, 100));
+	CHECK(!game::GameWorld::spectacularHit(1, 10, -50, 100) && !game::GameWorld::spectacularHit(2, 10, -50, 100));
+}
+
+namespace {
+
+// An effect bundle of one sprite system `height` up (an emitter there to find).
+void effectBundle(world::ObjectTemplateManager& templates, const std::string& name, float height)
+{
+	world::ObjectTemplate* sparks = templates.create("SpriteParticleSystem", name + "_sparks");
+	sparks->settings()["emitFrequency"] = "10";
+	sparks->settings()["emitTime"] = "10";
+	sparks->settings()["timeToLive"] = "0.5";
+	sparks->settings()["textureName"] = "spark";
+	templates.create("EffectBundle", name)->children().push_back({name + "_sparks", {0, height, 0}, {}});
+}
+
+const effects::Emitter* emitterAt(const game::GameWorld& world, float height, uint32_t anchor, bool running)
+{
+	for (const auto& e : world.effects().emitterList()) {
+		if (e->anchor == anchor && e->stopped() != running && std::fabs(e->position().y - height) < 0.6f) {
+			return e.get();
+		}
+	}
+	return nullptr;
+}
+
+} // namespace
+
+// A vehicle's armour effects (0x006549a0): the level's group as its percent
+// falls past it, attached and following it above 0, left in the world at 0
+// and -100; a spectacular hit takes the level's spectacular group; the
+// wreck's -100 group goes off as it goes.
+TEST(GameWorld_VehicleArmorEffects)
+{
+	for (int spectacular = 0; spectacular < 2; ++spectacular) {
+		Range range;
+		range.collisionTemplates.add("crate_mesh", boxMesh(1));
+		range.templates.registerType(20, "PlayerControlObject");
+		range.templates.registerType(21, "EffectBundle");
+		range.templates.registerType(22, "SpriteParticleSystem");
+		effectBundle(range.templates, "e_smoke", 5);
+		effectBundle(range.templates, "e_boom", 10);
+		effectBundle(range.templates, "e_boom_spec", 20);
+		effectBundle(range.templates, "e_final", 30);
+		range.templates.registerType(23, "Engine");
+		range.templates.registerType(24, "SimpleObject");
+		range.templates.create("Engine", "crate_engine")->settings()["engineType"] = "c_ETCar";
+		world::ObjectTemplate* crate = range.templates.create("PlayerControlObject", "crate");
+		makeMobile(*crate, "crate_mesh");
+		crate->children().push_back({"crate_engine", {}, {}});
+		crate->settings()["armor.maxHitPoints"] = "100";
+		crate->settings()["armor.wreckHitPoints"] = "50";
+		crate->settings()["armor.timeToStayAsWreck"] = "1";
+		crate->settings()["armor.addArmorEffect.list"] =
+			"50 e_smoke 0/0/0 0/0/0;0 e_boom 0/0/0 0/0/0;-100 e_final 0/0/0 0/0/0;";
+		crate->settings()["armor.addArmorEffectSpectacular.list"] = "0 e_boom_spec 0/0/0 0/0/0;";
+		world::ObjectTemplate* blast = range.templates.create("GenericProjectile", "shell");
+		blast->components().push_back("DefaultDetonationComp");
+		blast->settings()["detonation.explosionDamage"] = "60";
+		blast->settings()["detonation.explosionRadius"] = "10";
+		blast->settings()["detonation.explosionMaterial"] = "0";
+		// Fillers until the next object's id can die spectacularly (or can't).
+		world::ObjectTemplate* filler = range.templates.create("SimpleObject", "filler");
+		for (int i = 0; i < 20; ++i) {
+			const uint32_t next = range.objects.create(filler, {500, 0, 500})->id() + 1;
+			if (game::GameWorld::spectacularHit(next, 50, -50, 100) == (spectacular != 0)) {
+				break;
+			}
+		}
+		const uint32_t id = range.objects.create(crate, {0, 1, 40})->id();
+		range.world->tick(1 / 30.0f); // its body
+		const int me = range.world->localPlayer() >= 0 ? range.world->localPlayer() : range.world->addPlayer("Me", 2, false);
+		CHECK(range.world->detonate("shell", {0, 1, 41}, me));
+		range.world->tick(1 / 30.0f);
+		const float left = range.world->hitPoints(id);
+		CHECK(left < 50 && left > 0);
+		CHECK(emitterAt(*range.world, 6, id, true) != nullptr); // e_smoke, following the crate
+		CHECK(range.world->detonate("shell", {0, 1, 41}, me));
+		range.world->tick(1 / 30.0f);
+		CHECK(range.world->hitPoints(id) <= 0);
+		CHECK(emitterAt(*range.world, 6, id, true) == nullptr); // the smoke's emitter stopped
+		const bool spec = game::GameWorld::spectacularHit(id, left, range.world->hitPoints(id), 100);
+		std::fprintf(stderr, "  crate %u: %.1f then %.1f hit points, spectacular %d\n", id, left, range.world->hitPoints(id), spec);
+		CHECK(spec == (spectacular != 0));
+		CHECK((emitterAt(*range.world, 21, 0, true) != nullptr) == spec);  // e_boom_spec, in the world
+		CHECK((emitterAt(*range.world, 11, 0, true) != nullptr) == !spec); // e_boom
+		CHECK(emitterAt(*range.world, 31, 0, true) == nullptr);
+		for (int i = 0; i < 40 && range.objects.find(id); ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		CHECK(!range.objects.find(id));
+		CHECK(emitterAt(*range.world, 31, 0, true) != nullptr); // e_final as the wreck went
+	}
+}
+
+// Tracer rounds and the fire modes for the player's rifle: one round a
+// press in single fire, the toggle (c_PIToggleFireRate) to automatic with
+// its SwitchFireRate sound, every second round a tracer the effects draw.
+TEST(GameWorld_TracersAndFireModes)
+{
+	Range range;
+	range.templates.registerType(20, "Particle");
+	range.templates.create("Particle", "p_tracer")->setGeometry("p_tracer_mesh");
+	world::ObjectTemplate* bullet = range.templates.find("bullet");
+	bullet->settings()["tracerTemplate"] = "p_tracer";
+	bullet->settings()["tracerInterval"] = "2";
+	bullet->settings()["tracerScaler"] = "10";
+	bullet->settings()["tracerSizeModifier"] = "0.5";
+	for (const char* rifle : {"eu_ar_rifle", "as_ar_rifle"}) {
+		range.templates.find(rifle)->settings()["fire.addFireRate.list"] = "0 2";
+	}
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const auto run = [&](int ticks, const game::SoldierInput& input) {
+		range.world->setPlayerInput(input);
+		for (int i = 0; i < ticks; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+	};
+	game::SoldierInput fire;
+	fire.fire = true;
+	game::GameWorld::PlayerInfo me;
+	const auto fired = [&] {
+		return range.world->playerWeapon() ? 30 - range.world->playerWeapon()->roundsInMag() : -1;
+	};
+	CHECK(range.world->playerFireMode() == game::kFireSingle);
+	run(1, fire);
+	CHECK(fired() == 1);
+	size_t tracers = 0;
+	float longest = 0;
+	std::string geometry;
+	range.world->effects().forEachMeshGroup([&](const std::string& g, bool, const std::vector<effects::MeshSprite>& list) {
+		geometry = g;
+		tracers += list.size();
+		for (const auto& s : list) {
+			longest = std::fmax(longest, std::sqrt(physics::lengthSquared(s.rotation.rows[2])));
+		}
+	});
+	CHECK(geometry == "p_tracer_mesh" && tracers == 1 && std::fabs(longest - 5) < 0.01f); // 10 m flown, 5 m long
+	run(29, fire);
+	CHECK(fired() == 1); // held: still one
+	run(1, {});
+	game::SoldierInput toggle;
+	toggle.toggleFireRate = true;
+	range.world->takeWeaponSounds();
+	run(1, toggle);
+	const auto sounds = range.world->takeWeaponSounds();
+	CHECK(range.world->playerFireMode() == game::kFireAutomatic);
+	CHECK(std::count_if(sounds.begin(), sounds.end(), [](const auto& s) {
+		return s.kind == game::GameWorld::WeaponSoundEvent::SwitchFireRate && s.weapon == "eu_ar_rifle";
+	}) == 1);
+	run(1, {});
+	run(30, fire);
+	CHECK(fired() == 11);
+	const auto& flying = range.world->projectiles();
+	const long withTracer = std::count_if(flying.begin(), flying.end(), [](const game::Projectile& p) { return p.tracer; });
+	std::fprintf(stderr, "  %zu rounds flying, %ld with tracers\n", flying.size(), withTracer);
+	CHECK(withTracer * 2 >= static_cast<long>(flying.size()) - 1 && withTracer * 2 <= static_cast<long>(flying.size()) + 1);
+}
+
+// Leaving a seat with hasRestrictedExit (0x005c7840): the exit location,
+// else the same mirrored across x, where nothing stands between; with
+// every place blocked the soldier stays in.
+TEST(GameWorld_RestrictedExit)
+{
+	for (int blocked = 0; blocked < 3; ++blocked) {
+		Range range;
+		range.collisionTemplates.add("jeep_mesh", boxMesh(1));
+		range.collisionTemplates.add("wall_mesh", wallMesh(4, 4));
+		range.templates.registerType(20, "PlayerControlObject");
+		range.templates.registerType(21, "SimpleObject");
+		range.templates.registerType(23, "Engine");
+		range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
+		world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+		makeMobile(*jeep, "jeep_mesh");
+		jeep->children().push_back({"jeep_engine", {}, {}});
+		jeep->settings()["soldierExitLocation"] = "-3/0/0";
+		jeep->settings()["hasRestrictedExit"] = "1";
+		jeep->settings()["exitSpeedMod"] = "0.5";
+		world::ObjectTemplate* wall = range.templates.create("SimpleObject", "wall");
+		wall->settings()["collisionMesh"] = "wall_mesh";
+		// Walls along z beside the jeep: none, on its left (-x), on both sides.
+		if (blocked >= 1) {
+			range.objects.create(wall, {-2, -1, 3}, {90, 0, 0});
+		}
+		if (blocked == 2) {
+			range.objects.create(wall, {2, -1, 3}, {90, 0, 0});
+		}
+		range.objects.create(jeep, {0, 1, 3});
+		range.world->startRound(); // the walls' collision
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		range.world->tick(1 / 30.0f); // the jeep's body
+		game::SoldierInput use;
+		use.use = true;
+		range.world->setPlayerInput(use);
+		range.world->tick(1 / 30.0f);
+		range.world->setPlayerInput({});
+		range.world->tick(1 / 30.0f);
+		game::GameWorld::PlayerInfo me;
+		CHECK(range.world->playerInfo(range.world->localPlayer(), me) && me.vehicle != 0);
+		range.world->setPlayerInput(use);
+		range.world->tick(1 / 30.0f);
+		range.world->setPlayerInput({});
+		range.world->tick(1 / 30.0f);
+		range.world->playerInfo(range.world->localPlayer(), me);
+		std::fprintf(stderr, "  blocked %d: %s at x %.2f\n", blocked, me.vehicle ? "still in" : "out", me.position.x);
+		if (blocked == 2) {
+			CHECK(me.vehicle != 0);
+		} else {
+			CHECK(me.vehicle == 0);
+			CHECK(blocked == 0 ? me.position.x < -2.5f : me.position.x > 2.5f);
+		}
+	}
+}

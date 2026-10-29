@@ -6,11 +6,13 @@
 #include "Hud/Hud.h"
 #include "Main/HudMenus.h"
 #include "Main/HudMenusComm.h"
+#include "Main/HudMenusVehicles.h"
 #include "Console/ConsoleBinding.h"
 #include "IO/File/FileManager.h"
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
+#include "World/WorldConsole.h"
 
 #include <cstdlib>
 #include <set>
@@ -267,4 +269,180 @@ TEST(CommRose_ShippedRadio)
 	roses.openTactical(false, true, true);
 	console.execute("SquadLeaderInterface.selectOrder 9", out);
 	CHECK(ran.size() == 1 && ran[0] == "SquadLeader.sendRequest 0 0");
+}
+
+// The scoreboard's rows (0x007bb540): black when dead, green for the
+// squad and the commanding player, blue friends and red enemies; the
+// local row's and every odd row's backgrounds.
+TEST(HudScoreboard_RowColours)
+{
+	menu::ScoreboardRow row;
+	CHECK(menu::scoreboardStyle(row, 0).text[0] == 0 && menu::scoreboardStyle(row, 0).text[2] == 0); // dead: black
+	row.alive = true;
+	CHECK(menu::scoreboardStyle(row, 0).text[0] > 0.9f); // an enemy: red
+	row.friendlyList = true;
+	CHECK(menu::scoreboardStyle(row, 0).text[2] == 1 && menu::scoreboardStyle(row, 0).text[0] == 0); // blue
+	row.sameSquad = true;
+	CHECK(menu::scoreboardStyle(row, 0).text[1] > 0.4f && menu::scoreboardStyle(row, 0).text[2] < 0.1f); // green
+	row.sameSquad = false;
+	row.local = row.localCommands = true;
+	const auto local = menu::scoreboardStyle(row, 3);
+	CHECK(local.text[1] > 0.4f && local.background[3] == 0.35f);
+	row.local = false;
+	CHECK(menu::scoreboardStyle(row, 1).background[3] == 0.8f);
+	CHECK(menu::scoreboardStyle(row, 2).background[3] == 0);
+	// The HUD fills the rows' backgrounds between the side borders.
+	hud::HudManager hud(nullptr);
+	Console console;
+	hud::registerHudConsoleMethods(console, hud);
+	std::string out;
+	console.execute("hudBuilder.createListNode Global Board 0 0 200 100 10 1", out);
+	console.execute("hudBuilder.setListNodeData 2", out);
+	console.execute("hudBuilder.setListNodeBorder 10 0 3 5", out);
+	hud.setListColumns(2, {{0, 50, 0}});
+	hud.setList(2, {{"a"}, {"b"}});
+	hud.setListRowBackgrounds(2, {{0, 0, 0, 0}, {0.5f, 0.5f, 0.5f, 0.8f}});
+	bool found = false;
+	for (const auto& q : hud.frame(0)) {
+		found = found || (q.color[3] == 0.8f && q.x0 == 3 && q.x1 == 195 && q.y1 - q.y0 == 10);
+	}
+	CHECK(found);
+}
+
+// The weapon HUD (0x007c1f10): the bar, the clips, the eternal and single
+// magazines, the colours, the fire rate's icon and the overheat sound once.
+TEST(HudWeapon_AmmoClipsAndHeat)
+{
+	Console console;
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "GenericFireArm");
+	world::registerWorldConsoleMethods(console, templates, objects);
+	world::registerUntypedTemplateProperties(console, templates,
+		{"weaponHud.clipIcon", "weaponHud.ammoIcon", "weaponHud.overheatSound", "weaponHud.hasFireRate", "weaponHud.selectIcon"});
+	std::string out;
+	for (const char* line : {"ObjectTemplate.create GenericFireArm rifle", "ObjectTemplate.weaponHud.clipIcon Ingame\\clip.tga",
+			 "ObjectTemplate.weaponHud.ammoIcon Ingame\\ammo.tga", "ObjectTemplate.weaponHud.overheatSound S_Overheat"}) {
+		console.execute(line, out);
+	}
+	const world::ObjectTemplate* rifle = templates.find("rifle");
+	CHECK(rifle);
+	hud::HudManager hud(nullptr);
+	menu::WeaponHud weaponHud;
+	menu::WeaponHudInput in;
+	in.weapon = rifle;
+	in.rounds = 6;
+	in.magSize = 30;
+	in.mags = 4;
+	in.nrOfMags = 5;
+	in.fireRate = 2;
+	CHECK(weaponHud.update(hud, in).empty());
+	CHECK(hud.number("PrimaryAmmoShow") == 1 && hud.number("PrimaryAmmoBarShow") == 1 && hud.number("PrimaryClipsShow") == 1);
+	CHECK(hud.string("PrimaryAmmoString") == "6" && hud.string("TotPrimaryAmmoString") == "/ 96");
+	CHECK(hud.string("PrimaryClipString") == "(3)" && hud.number("PrimaryClip3Show") == 1);
+	CHECK(hud.string("PrimaryClipPathString") == "Ingame/clip.tga" && hud.number("PrimaryAmmoIconShow") == 0);
+	CHECK(hud.number("PrimaryAmmoColorGreen") < 0.2f); // 6 / 30 is under 0.3: the low colour
+	CHECK(hud.string("FireRateIconPathString") == "Ingame/Weapons/Icons/Hud/firerate_2.tga" && hud.number("FireRateIconShow") == 1);
+	in.rounds = 20;
+	weaponHud.update(hud, in);
+	CHECK(hud.number("PrimaryAmmoColorGreen") == 1);
+	// No magazine: the eternal icon and no text.
+	in.magSize = -1;
+	weaponHud.update(hud, in);
+	CHECK(hud.number("PrimaryEternalShow") == 1 && hud.string("PrimaryAmmoString").empty());
+	CHECK(hud.number("PrimaryAmmoIconShow") == 1 && hud.string("PrimaryAmmoIconPathString") == "Ingame/ammo.tga");
+	// One round a magazine: single fire.
+	in.magSize = 1;
+	in.rounds = 1;
+	weaponHud.update(hud, in);
+	CHECK(hud.number("PrimarySingleFireShow") == 1);
+	// The overheat's sound once each time.
+	in.overheated = true;
+	CHECK(weaponHud.update(hud, in) == "S_Overheat");
+	CHECK(weaponHud.update(hud, in).empty());
+	in.overheated = false;
+	weaponHud.update(hud, in);
+	in.overheated = true;
+	CHECK(weaponHud.update(hud, in) == "S_Overheat");
+}
+
+// The item selection (0x0079c290, 0x0079be20, 0x0079c050): packed from slot
+// 0 by item index (reversed with ItemSelection.setReverseItems), the item
+// in hand selected, closed when the timer runs out.
+TEST(HudItemSelection_SlotsAndTimer)
+{
+	hud::HudManager hud(nullptr);
+	Console console;
+	menu::ItemSelection items;
+	items.bind(console);
+	items.open({{1, "knife.tga"}, {3, "rifle.tga"}, {5, "", false}}, 3);
+	items.update(hud, 0.1f);
+	CHECK(hud.number("ShowItemSelect") == 1 && hud.number("ItemSelectActive") == 1);
+	CHECK(hud.string("Item0Index") == "1" && hud.string("Item1Icon") == "rifle.tga" && hud.number("ItemSlot2Alpha") == 0.4f);
+	CHECK(hud.number("ItemSlot3Active") == 0);
+	items.update(hud, 2.0f);
+	CHECK(hud.number("ShowItemSelect") == 0);
+	std::string out;
+	console.execute("ItemSelection.setReverseItems 1", out);
+	items.open({{1, "knife.tga"}, {3, "rifle.tga"}}, 1);
+	items.update(hud, 0);
+	CHECK(hud.string("Item0Index") == "3" && hud.number("ItemSelectActive") == 1);
+}
+
+// The vehicle HUD's seat dots (0x007a28e0, BfOccupiedVehicleNode
+// 0x007e1520), its texts, and the map's vehicle markers (0x00781680,
+// 0x00793b60, 0x0077dd70).
+TEST(HudVehicle_SeatsAndMarkers)
+{
+	CHECK(menu::seatDotState(false, false, 0, 0, true) == 4);
+	CHECK(menu::seatDotState(true, true, 2, 2, true) == 1);
+	CHECK(menu::seatDotState(true, true, 0, 0, true) == 2);
+	CHECK(menu::seatDotState(true, false, 2, 2, true) == 7);
+	CHECK(menu::seatDotState(true, false, 0, 2, true) == 5);
+	CHECK(menu::seatDotState(true, false, 0, 2, false) == 6);
+	hud::HudManager hud(nullptr);
+	Console console;
+	hud::registerHudConsoleMethods(console, hud);
+	std::string out;
+	console.execute("hudBuilder.createOccupiedNode Global Dot1 0 6 -32 8 8", out);
+	console.execute("hudBuilder.setOccupiedNodePosVariable 0 OccupyingPlayerPos1X", out);
+	console.execute("hudBuilder.setOccupiedNodePosVariable 1 OccupyingPlayerPos1Y", out);
+	console.execute("hudBuilder.setOccupiedNodeData 1", out);
+	menu::VehicleHud vehicleHud;
+	menu::VehicleHudInput in;
+	in.armor = 0.25f;
+	in.speed = 12.4f;
+	in.altitude = 30.2f;
+	in.seats = {{2, 72, 12}};
+	vehicleHud.update(hud, in);
+	CHECK(hud.string("VehicleArmorString") == "25" && hud.string("SpeedString") == "120" && hud.string("AltitudeString") == "31");
+	CHECK(hud.number("VehicleArmorColorGreen") < 0.2f);
+	bool dot = false;
+	for (const auto& q : hud.frame(0)) {
+		dot = dot || (q.texture.find("vehiclePositionPlayerBlue") != std::string::npos && q.x0 == 72 && q.y0 == 12);
+	}
+	CHECK(dot);
+	using R = menu::MapRelation;
+	CHECK(menu::vehicleRelation(false, true, 0, 1, 1) == R::Own);
+	CHECK(menu::vehicleRelation(true, false, 2, 1, 1) == R::Enemy);
+	CHECK(menu::vehicleRelation(false, false, 0, 0, 1) == R::Neutral);
+	CHECK(menu::vehicleRelation(false, false, 0, 1, 1) == R::Friendly);
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "PlayerControlObject");
+	world::registerWorldConsoleMethods(console, templates, objects);
+	world::registerUntypedTemplateProperties(console, templates,
+		{"vehicleHud.miniMapIcon", "vehicleHud.miniMapIconSize", "vehicleHud.showOnEnemyMinimap"});
+	console.execute("ObjectTemplate.create PlayerControlObject tank", out);
+	console.execute("ObjectTemplate.vehicleHud.miniMapIcon Ingame\\mini_tank.tga", out);
+	console.execute("ObjectTemplate.vehicleHud.miniMapIconSize 20/35", out);
+	const world::ObjectTemplate* tank = templates.find("tank");
+	CHECK(tank);
+	menu::VehicleMarker marker;
+	CHECK(menu::vehicleMarker(*tank, R::Friendly, false, false, marker));
+	CHECK(marker.texture == "Ingame/mini_tank.tga" && marker.width == 20 && marker.height == 35);
+	CHECK(!menu::vehicleMarker(*tank, R::Enemy, false, false, marker));
+	CHECK(menu::vehicleMarker(*tank, R::Enemy, false, true, marker)); // spotted
+	console.execute("ObjectTemplate.vehicleHud.showOnEnemyMinimap 1", out);
+	CHECK(menu::vehicleMarker(*tank, R::Enemy, false, false, marker));
 }

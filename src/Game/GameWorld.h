@@ -253,7 +253,7 @@ public:
 	// a weapon taken in hand. `object` is the soldier, or the vehicle a
 	// seat's gun is on; at most the last 256 are kept.
 	struct WeaponSoundEvent {
-		enum Kind { Fire, Reload, Deploy } kind = Fire;
+		enum Kind { Fire, Reload, Deploy, SwitchFireRate } kind = Fire;
 		int player = -1;
 		uint32_t object = 0;
 		std::string weapon; // the weapon's template
@@ -348,6 +348,7 @@ public:
 		std::vector<std::pair<int, std::string>> carried; // (slot, weapon template)
 		int inHandSlot = 0;
 		float heat = 0; // the weapon in hand's (or the seat's gun's), 0..1
+		uint32_t gunShots = 0; // rounds the seats' guns have fired (the camera's recoil)
 	};
 	std::vector<PlayerInfo> playerList() const;
 	bool playerInfo(int player, PlayerInfo& info) const;
@@ -617,6 +618,38 @@ public:
 	// destroys the object.
 	void setHitPoints(uint32_t object, float hitPoints);
 	const FireArm* playerWeapon() const { return m_player && m_player->alive ? m_player->weapon.get() : nullptr; }
+	// The fire mode of the local player's weapon (the one in hand, or the
+	// seat's gun; FireMode), -1 without one: the HUD's fire-rate icon
+	// (0x007c1f10 with weaponHud.hasFireRate, firerate_<mode>.tga).
+	int playerFireMode() const;
+	// The bots' AI deviation (BF2142.exe 0x00892b70 -> the firearm's
+	// interface 0x94c0 slot 0xf4 -> its deviation component's slot 0xac,
+	// 0x00680290 / 0x008a1a90): kept by the weapon's deviation and added to
+	// its deviation while the holder is an AI (0x005de980's end, the
+	// SoldierDeviationComp's +0x44; 0x005dedb0's, the SimpleDeviationComp's
+	// +0x28), so the rounds spread by it through the normal deviation.
+	void setAiDeviation(int player, float deviation);
+	// An armour's effect levels as its percent falls (0x00654730, the
+	// percent ceil(hit points / maxHitPoints x 100), of wreckHitPoints
+	// below 0): `levels` highest first, `before` and `now` the percents,
+	// `current` the group running (0: none). Stop: the hit points are above
+	// every level (the group running stops, none starts); Start `group`:
+	// a level was passed on the way down and the lowest at or above `now`
+	// differs from `current`.
+	enum class ArmorEffectStep { Keep, Stop, Start };
+	static ArmorEffectStep armorEffectStep(const std::vector<int>& levels, int before, int now, int current, int& group);
+	static int armorPercent(float hitPoints, float maxHitPoints, float wreckHitPoints);
+	// Whether a hit is "spectacular" (0x006525f0, called by the armour's
+	// damage 0x00656320 when the damage has a giver, kept at +0x250): the
+	// object's id (its network id, else +0x20; the rewrite's object id) & 0x7fffffff
+	// through the engine's two-step generator (0x0042b230), h, gives
+	// ceil((((h | 0x80) >> 7) + 1) x 1.7881393e-07) = 3 for about a third
+	// of the objects; for them a hit taking more than 0.2 x armor.hitPoints
+	// (slot 0x38, +0xc4), or leaving more than 0.25 x armor.hitPoints, is.
+	// The group a spectacular level starts is its addArmorEffectSpectacular
+	// list when it has one (0x00652190 / 0x006521b0), else its
+	// addArmorEffect list.
+	static bool spectacularHit(uint32_t id, float before, float after, float hitPoints);
 	const effects::EffectManager& effects() const { return m_effects; }
 
 	// Animation systems for soldiers and their weapons: `load` gives the
@@ -675,6 +708,25 @@ public:
 		std::string camera;
 		RotationAxis cameraYaw, cameraPitch;
 		physics::Vec3 cameraPivot;
+		// Leaving (the seat's PlayerControlObject template, offsets as its
+		// save 0x005cb1xx gives them plus 8): its own place in the vehicle
+		// (frameAt, frameTurn), soldierExitLocation (+0x308) and
+		// altSoldierExitPosition (+0x354) in that frame, hasRestrictedExit
+		// (+0x353), maintainCameraOnExit (+0x480), exitSpeedMod (+0x40c, 1)
+		// and the vehicle category (vehicleCategory, the restricted exit's
+		// air test).
+		physics::Vec3 frameAt;
+		physics::Mat3 frameTurn;
+		physics::Vec3 exitLocal, altExitLocal;
+		bool restrictedExit = false, maintainCameraOnExit = false;
+		float exitSpeedMod = 1;
+		int category = 4;
+		// The gun's WeaponBasedRecoilComp camera recoil (cameraRecoilSpeed,
+		// cameraRecoilSize: CameraRecoil) and its SimpleDeviationComp
+		// (minDev, setFireDev: DeviationBuildUp; hasDeviation without one off).
+		float cameraRecoilSpeed = 0, cameraRecoilSize = 0;
+		DeviationBuildUp deviation;
+		bool hasDeviation = false;
 	};
 	struct VehicleLayout {
 		std::vector<SeatLayout> seats;
@@ -1102,6 +1154,8 @@ private:
 			std::unique_ptr<FireArm> weapon;
 			const ProjectileSettings* projectile = nullptr;
 			float yaw = 0, pitch = 0; // the bundles' rotation, degrees (pitch up positive)
+			DeviationBuildUp deviation; // its SimpleDeviationComp's state (SeatLayout::deviation)
+			float aiDeviation = 0;      // the component's +0x28 (setAiDeviation)
 		};
 		std::vector<Gun> guns;
 		// Each seat's camera angles and speeds (SeatLayout::camera), degrees.
@@ -1115,6 +1169,15 @@ private:
 		float empLevel = 0;
 		float wreckTime = -1; // >= 0 while a wreck
 		float wetTime = 0;    // seconds in water
+		// The armour's effects (ArmorEffects, stepArmorEffects): the hit
+		// points last seen (+0x254), the level started (+0x184), the last
+		// damage's spectacular flag (+0x250) and whether some follow it.
+		float effectHitPoints = 0;
+		int effectLevel = 0;
+		bool spectacular = false;
+		bool effectsAttached = false;
+		bool effectsSeen = false; // effectHitPoints set (its first look: the template's armor.hitPoints)
+		float wreckFor = 0; // its timeToStayAsWreck (the wreck's drain to -wreckHitPoints)
 		// The vehicle LOD's edges (indices into `points`) of its faces
 		// steeper than 30 degrees (|normal y| at most cos 30), each face's
 		// three in turn (the loader 0x006e12a0 -> 0x006e1430, LOD +0xe4).
@@ -1236,6 +1299,33 @@ private:
 	void stepSleep(Body& body, float seconds);
 	void destroyVehicle(Body& body, int attacker);
 	void stepVehicleDamage(float seconds);
+	// A vehicle's armour effects (VehicleParts.cpp): its template's lists
+	// (cached), the change after its hit points moved (0x00654730 /
+	// 0x006549a0) and the attached ones following it.
+	struct ArmorEffectList {
+		struct Effect {
+			int level = 0;
+			std::string effect;
+			physics::Vec3 position;
+			physics::Mat3 rotation;
+			bool spectacular = false;
+		};
+		std::vector<Effect> effects; // by level, highest first
+		std::vector<int> levels;     // the effects' levels, the same order
+		float maxHitPoints = 0, wreckHitPoints = 0, hitPoints = 0;
+	};
+	const ArmorEffectList& armorEffectList(const world::ObjectTemplate& t);
+	std::map<const world::ObjectTemplate*, ArmorEffectList> m_armorEffectLists;
+	void armorEffectsAfterDamage(Body& body, float hitPoints);
+	static constexpr uint32_t kArmorEffectTag = 0x7d000000u;
+	std::vector<uint32_t> m_armorAnchors; // the bodies whose armour effects follow them
+	void followArmorEffects();
+	// The tracer rounds' tracers this tick, handed to the effects to draw.
+	void placeTracers();
+	std::vector<std::pair<std::string, std::vector<effects::MeshSprite>>> m_tracerMeshes;
+	// The exit a restricted seat allows (0x005c7840 over 0x005c71a0's four
+	// places); false when none does.
+	bool restrictedExit(const Body& body, const VehicleLayout& layout, int seat, physics::Vec3& at) const;
 	// A vehicle's team is its first occupant's (0x005c9500), its own when
 	// empty: each tick from the seats.
 	void stepVehicleTeams();
@@ -1419,6 +1509,9 @@ private:
 		// (setZoomed: the world keeps no zoom of its own); the scope
 		// stabilizer (an unlock's ability.hasScopeStabilizerAbility).
 		SoldierDeviation deviation;
+		float aiDeviation = 0; // the deviation component's +0x44 (setAiDeviation)
+		uint32_t gunShots = 0;  // the seats' guns' rounds (PlayerInfo::gunShots)
+		bool toggleFireWas = false; // c_PIToggleFireRate last tick
 		GunSway sway;
 		std::string feelFor;
 		bool zoomed = false;

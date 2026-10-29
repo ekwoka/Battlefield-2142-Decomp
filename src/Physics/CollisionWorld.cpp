@@ -344,7 +344,19 @@ void CollisionWorld::sweepSphere(const Vec3& start, const Vec3& end, float radiu
 	const Vec3 middle = (start + end) * 0.5f;
 	const float reach = std::sqrt(lengthSquared(delta)) * 0.5f + radius * 1.01f; // *0x00a8517c
 	std::vector<const Triangle*> near;
-	forEachFaceIndexNear(middle, reach, [&](const Triangle& t) { near.push_back(&t); });
+	// Only the faces whose box meets the box the sphere sweeps can be met
+	// (the cells are columns: a building's floors share them).
+	const float pad = radius * 1.01f;
+	const Vec3 low {std::min(start.x, end.x) - pad, std::min(start.y, end.y) - pad, std::min(start.z, end.z) - pad};
+	const Vec3 high {std::max(start.x, end.x) + pad, std::max(start.y, end.y) + pad, std::max(start.z, end.z) + pad};
+	forEachFaceIndexNear(middle, reach, [&](const Triangle& t) {
+		if (std::max({t.a.y, t.b.y, t.c.y}) < low.y || std::min({t.a.y, t.b.y, t.c.y}) > high.y
+			|| std::max({t.a.x, t.b.x, t.c.x}) < low.x || std::min({t.a.x, t.b.x, t.c.x}) > high.x
+			|| std::max({t.a.z, t.b.z, t.c.z}) < low.z || std::min({t.a.z, t.b.z, t.c.z}) > high.z) {
+			return;
+		}
+		near.push_back(&t);
+	});
 	bool faceMet = false;
 	for (const Triangle* t : near) {
 		const Vec3 offset = t->normal * radius;
@@ -366,6 +378,12 @@ void CollisionWorld::sweepSphere(const Vec3& start, const Vec3& end, float radiu
 		return;
 	}
 	for (const Triangle* t : near) {
+		// The edges lie in the face's plane: a sweep that stays more than a
+		// radius off it on one side meets none of them.
+		const float fromPlane = dot(start - t->a, t->normal), toPlane = dot(end - t->a, t->normal);
+		if ((fromPlane > radius && toPlane > radius) || (fromPlane < -radius && toPlane < -radius)) {
+			continue;
+		}
 		const Vec3 corners[3] = {t->a, t->b, t->c};
 		for (int k = 0; k < 3; ++k) {
 			const Vec3& e0 = corners[k];

@@ -552,6 +552,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.fire = c.pressed(map, "c_PIFire", down);
 				input.altFire = c.pressed(map, "c_PIAltFire", down);
 				input.use = c.pressed(map, "c_PIUse", down);
+				input.toggleFireRate = c.pressed(map, "c_PIToggleFireRate", down);
 				input.scoreboard = c.pressed(map, "c_GIShowScoreboard", down);
 				input.commanderScreen = c.pressed(map, "c_GILeader", down);
 				input.crouch = c.pressed(map, "c_PICrouch", down);

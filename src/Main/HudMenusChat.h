@@ -61,7 +61,10 @@ public:
 	enum class Speaker { Commander, Squad, Team, Enemy, Neutral };
 	static std::array<float, 4> colorOf(Speaker speaker);
 	// The chat channels as the say boxes send them (net::ChatChannel).
-	enum Box { kNone = 0, kAll = 1, kTeam = 2, kSquad = 3 };
+	// kPlayer: the whisper box (HudManager.enableSayPlayerChatBox, slot
+	// 0xd8 → 0x007d95b0: SayPlayerShow, flag +0x3b), sent by 0x007d9e20 as
+	// HUD_TEXT_CHAT_WHIPSER + the text to the HUD manager's player +0x48.
+	enum Box { kNone = 0, kAll = 1, kTeam = 2, kSquad = 3, kPlayer = 4 };
 
 	void addChat(const std::string& name, const std::string& text, int channel, Speaker speaker, bool dead = false);
 	// A kill: HUD_HUD_KILLEDBY_* by who killed whom with what (the weapon's

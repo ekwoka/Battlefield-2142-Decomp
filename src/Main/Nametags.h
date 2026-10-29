@@ -16,11 +16,13 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
 
 namespace dice::hfe {
+class Console;
 namespace io {
 class FileManager;
 }
@@ -99,6 +101,42 @@ struct TagFont {
 	void write(const std::string& text, float x, float y, const float colour[4], std::vector<hud::HudQuad>& out) const;
 };
 
+// The tags' icons and bars (Menu/Nametag/nametags.con, run by the HUD
+// manager's set-up 0x0075cfa0 after HudSetupMain.con): nametags.createIcon
+// <NametagItemIDs> (0x10079004) picks an id by its name (the enum of
+// 0x10070e1a: ICRank 0 (44 ranks), ICRevive 0x2c, ICMedic, ICRepair,
+// ICAmmo, the vehicle ones 0x30-0x33, the bars 0x34-0x36, ICSquadOrder
+// 0x3d and ICCommanderOrder 0x43 (6 frames each), ICTarget 0x4e,
+// ICVeteran 0x4f, ICObject 0x50 (41 frames), the request orders
+// 0x79-0x80, the Titans 0x81-0x88, the silos 0x8c-0x91, 0x92-0x94 the
+// selected backgrounds, ICObjectCore 0x96, the consoles 0x97-0x9a, the
+// networkables 0xa0-0xa5) and nametags.setTexture <frames> <texture> x y w
+// h (0x100790e4 → the manager 0x100ee9a0 → 0x1016b790) its texture: frame
+// k of the id + k is the w x h texels at x + k w, y (one frame for 0);
+// nametags.createBar <id> <from> <to> starts a bar, its fill (texture 0)
+// and base (1) set after.
+struct IconRegistry {
+	struct Icon {
+		std::string texture; // with ".dds" when it had no extension
+		float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
+		float width = 16, height = 16;
+	};
+	std::map<int, Icon> icons;
+	int current = -1;
+	bool bar = false;
+	std::map<int, std::pair<int, int>> barSpan; // createBar's texels
+	// The textures' sizes (texels), to turn the frames into UVs.
+	std::function<bool(const std::string& texture, int& width, int& height)> textureSize;
+	static int idOf(const std::string& name); // -1 unknown
+	void bind(Console& console);
+	void setTexture(int frames, const std::string& texture, int x, int y, int w, int h);
+	const Icon* find(int id) const
+	{
+		const auto it = icons.find(id);
+		return it == icons.end() ? nullptr : &it->second;
+	}
+};
+
 class Nametags {
 public:
 	explicit Nametags(const io::FileManager& files);
@@ -114,6 +152,10 @@ public:
 		const View& view, float seconds);
 
 	const Settings& settings() const { return m_settings; }
+	// The icons nametags.con made (the objects' 3D icons draw with them).
+	void setIcons(const IconRegistry* icons) { m_icons = icons; }
+	// The camera inside a Titan (the objects' showInside / showOutside).
+	void setInsideTitan(bool inside) { m_insideTitan = inside; }
 
 	// A point in the 800 x 600 screen; false behind the camera. With
 	// `glue`, a point off the circle of radius circleRadius (normalised
@@ -129,6 +171,8 @@ private:
 		bool aimed = false;
 	};
 	Settings m_settings;
+	const IconRegistry* m_icons = nullptr;
+	bool m_insideTitan = false;
 	TagFont m_font;
 	bool m_fontLoaded = false;
 	std::map<int, Tag> m_players; // by player id

@@ -10,11 +10,14 @@
 //   R = reflect(P - camera, N)
 //   env = the level's water cube map (Water/envmap.dds) at R
 //   specular = pow(saturate(dot(towards sun, normalize(R))), SpecularPower) * SpecularColor.a
-//   color = specular * SpecularColor * shade + lerp(WaterColor, env, 0.4)
+//   color = specular * SpecularColor * shade + lerp(WaterColor, env, 0.4 + m)
+//   m = -(1 - saturate(shade + 0.75))   (SHADOW_FACTOR)
 //   alpha = depth alpha * (1.5 - pow(dot(normalize(P - camera), up), 30)) + alpha add
 // where the original's lightmap gives the depth alpha (r) and the sun's
-// shade (g); the grid has no lightmap, so the depth alpha grows with the
-// water's depth (renderer.waterAlphaHeightMul) and the shade is 1.
+// shade (g). The levels ship no water lightmaps, so the shader's
+// NO_LIGHTMAP lightmap is PointColor, (1, terrain.waterSunIntensity, 0.8,
+// 1) (0x100767e9): the shade is the sun intensity (waterColor.w here); the
+// depth alpha grows with the water's depth (renderer.waterAlphaHeightMul).
 layout(location = 0) in vec3 inWorldPosition;
 layout(location = 1) in float inWaterDepth;
 layout(location = 2) in float inDepth;
@@ -34,7 +37,7 @@ layout(set = 3, binding = 0) uniform Lighting {
 
 layout(set = 3, binding = 1) uniform Water {
 	vec4 cameraPosition; // w: time in seconds
-	vec4 waterColor;
+	vec4 waterColor;     // w: the sun's share (terrain.waterSunIntensity)
 	vec4 specularColor;  // w: intensity
 	vec4 parameters;     // x: alpha add, y: alpha height multiplier, z: specular power, w: 1 with an env map
 	vec4 animation;      // xy: WaterScroll, z: WaterCycleTime, w: 1 with the volume
@@ -58,7 +61,9 @@ void main()
 	vec3 reflected = reflect(lookup, normal);
 	vec3 env = parameters.w > 0.0 ? texture(envMap, reflected).rgb : fogColor.rgb;
 	float specular = pow(clamp(dot(sunDirection.xyz, normalize(reflected)), 0.0, 1.0), parameters.z) * specularColor.w;
-	vec3 color = specular * specularColor.rgb + mix(waterColor.rgb, env, 0.4);
+	float shade = waterColor.w;
+	float lerpMod = -(1.0 - clamp(shade + 0.75, 0.0, 1.0));
+	vec3 color = specular * specularColor.rgb * shade + mix(waterColor.rgb, env, 0.4 + lerpMod);
 	float fresnel = 1.5 - pow(abs(dot(normalize(lookup), vec3(0.0, 1.0, 0.0))), 30.0);
 	float depthAlpha = clamp(max(inWaterDepth, 0.0) * max(parameters.y, 0.08), 0.0, 1.0);
 	float alpha = clamp(depthAlpha * fresnel + parameters.x, 0.0, 1.0);

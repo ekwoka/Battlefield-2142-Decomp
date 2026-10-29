@@ -111,6 +111,60 @@ void registerGeometryConsoleMethods(Console& console, GeometryTemplateManager& g
 			active->maxSkipWreckLods = lods;
 		}
 	});
+	// isTitanInterior / isTitanExterior exclude each other (0x10148690 / 0x10148670).
+	bindProperty<bool>(console, "GeometryTemplate.isTitanInterior", ConsoleAccess::Anyone,
+		[&geometries] { return geometries.active() && geometries.active()->titanInterior; },
+		[&geometries](const bool& on) {
+			if (GeometryTemplate* active = geometries.active()) {
+				active->titanInterior = on;
+				if (on) {
+					active->titanExterior = false;
+				}
+			}
+		});
+	bindProperty<bool>(console, "GeometryTemplate.isTitanExterior", ConsoleAccess::Anyone,
+		[&geometries] { return geometries.active() && geometries.active()->titanExterior; },
+		[&geometries](const bool& on) {
+			if (GeometryTemplate* active = geometries.active()) {
+				active->titanExterior = on;
+				if (on) {
+					active->titanInterior = false;
+				}
+			}
+		});
+	bindProperty<int>(console, "GeometryTemplate.titanExteriorPartIndex", ConsoleAccess::Anyone,
+		[&geometries] { return geometries.active() ? geometries.active()->titanExteriorPart : 0; },
+		[&geometries](const int& part) {
+			if (GeometryTemplate* active = geometries.active()) {
+				active->titanExteriorPart = part;
+			}
+		});
+	// The bundled templates' material maps (0x100a25d0 / 0x100a26b0); the
+	// static ones' parallax (setMaterialParallaxHeightScale: bundled
+	// templates ignore it, 0x100a7d70).
+	const auto materialSetter = [&console, &geometries](const char* name, std::map<uint32_t, float> GeometryTemplate::*map,
+									bool bundledOnly, bool staticOnly) {
+		bindMethod(console, name, ConsoleAccess::Anyone,
+			[&geometries, map, bundledOnly, staticOnly](int geometry, int lod, int material, float value) {
+				GeometryTemplate* active = geometries.active();
+				if (!active || (bundledOnly && active->kind != MeshKind::Bundled) ||
+					(staticOnly && active->kind == MeshKind::Bundled)) {
+					return;
+				}
+				(active->*map)[GeometryTemplate::materialKey(geometry, lod, material)] = value;
+			});
+	};
+	materialSetter("GeometryTemplate.setMaterialReflectionScale", &GeometryTemplate::reflectionScale, true, false);
+	materialSetter("GeometryTemplate.setSpecularStaticGloss", &GeometryTemplate::staticGloss, true, false);
+	materialSetter("GeometryTemplate.setMaterialParallaxHeightScale", &GeometryTemplate::parallaxHeightScale, false, true);
+	bindProperty<int>(console, "GeometryTemplate.nrOfAnimatedUVMatrix", ConsoleAccess::Anyone,
+		[&geometries] { return geometries.active() ? geometries.active()->animatedUVMatrices : 0; },
+		[&geometries](const int& count) {
+			GeometryTemplate* active = geometries.active();
+			if (active && active->kind == MeshKind::Bundled) {
+				active->animatedUVMatrices = count;
+			}
+		});
 	bindMethod(console, "GeometryTemplate.setSubGeometryLodDistance", ConsoleAccess::Anyone,
 		[&geometries](int geometry, int lod, float distance) {
 			GeometryTemplate* active = geometries.active();

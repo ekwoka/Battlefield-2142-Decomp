@@ -427,3 +427,122 @@ TEST(Weapons_GunSway)
 	sway.update(1 / 30.0f, true, true, true, x, y, random);
 	CHECK(y == 0);
 }
+
+// The fire modes (0x005f28a0, 0x005f1370, 0x005f1820, 0x005f1da0): single
+// fire takes one round a press, burst burstSize a press (running on
+// released), automatic while held; the toggle steps through the rates.
+TEST(Weapons_FireModes)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "GenericFireArm");
+	world::ObjectTemplate* rifle = templates.create("GenericFireArm", "rifle");
+	rifle->settings()["fire.addFireRate.list"] = "0 2";
+	rifle->settings()["fire.roundsPerMinute"] = "600";
+	const game::FireArmSettings settings = game::FireArmSettings::fromTemplate(*rifle);
+	CHECK(settings.fireRates == (std::vector<int> {0, 2}) && settings.burstSize == 3);
+	game::FireArm arm(settings);
+	CHECK(arm.fireMode() == game::kFireSingle); // the first rate
+	const auto hold = [&](int ticks, bool trigger) {
+		int shots = 0;
+		for (int i = 0; i < ticks; ++i) {
+			shots += arm.tick(1 / 30.0f, trigger) ? 1 : 0;
+		}
+		return shots;
+	};
+	CHECK(hold(30, true) == 1); // held a second: one round
+	CHECK(hold(1, false) == 0);
+	// A second press a tick after a round waits for the gun (3 ticks a round).
+	CHECK(hold(1, true) == 1 && hold(1, false) == 0 && hold(1, true) == 0 && hold(3, false) == 1);
+	CHECK(arm.toggleFireMode() && arm.fireMode() == game::kFireAutomatic);
+	CHECK(hold(30, true) == 10); // 600 a minute
+	CHECK(arm.toggleFireMode() && arm.fireMode() == game::kFireSingle); // back to the first
+	hold(5, false);
+
+	game::FireArmSettings burstSettings = settings;
+	burstSettings.fireRates = {1};
+	burstSettings.burstSize = 4;
+	game::FireArm burst(burstSettings);
+	CHECK(burst.fireMode() == game::kFireBurst && !burst.toggleFireMode()); // one rate: no toggle
+	int shots = burst.tick(1 / 30.0f, true) ? 1 : 0; // a press, then let go
+	for (int i = 0; i < 30; ++i) {
+		shots += burst.tick(1 / 30.0f, false) ? 1 : 0;
+	}
+	CHECK(shots == 4);
+
+	// Without fire.addFireRate: automatic; with the modes off, as held.
+	game::FireArm plain(game::FireArmSettings {});
+	CHECK(plain.fireMode() == game::kFireAutomatic);
+	game::FireArm held(settings);
+	held.setUseFireModes(false);
+	int heldShots = 0;
+	for (int i = 0; i < 30; ++i) {
+		heldShots += held.tick(1 / 30.0f, true) ? 1 : 0;
+	}
+	CHECK(heldShots == 10);
+}
+
+// Tracers (0x005f2bb0, 0x005b3e60, 0x005b3cb0): every tracerInterval-th
+// round from the first; the tracer trails the round along its flight,
+// tracerScaler x tracerSizeModifier long at most and never past its start,
+// and closes on it from the muzzle over tracerConvergeDistance.
+TEST(Weapons_Tracers)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "GenericProjectile");
+	world::ObjectTemplate* round = templates.create("GenericProjectile", "round");
+	round->settings()["tracerTemplate"] = "p_tracer2_eu";
+	round->settings()["tracerInterval"] = "2";
+	round->settings()["tracerScaler"] = "40";
+	round->settings()["tracerSizeModifier"] = "0.25";
+	round->settings()["tracerConvergeDistance"] = "75";
+	const game::ProjectileSettings s = game::ProjectileSettings::fromTemplate(*round);
+	CHECK(s.tracerTemplate == "p_tracer2_eu" && s.tracerInterval == 2 && s.tracerScaler == 40);
+	CHECK(s.tracerSizeModifier == 0.25f && s.tracerConvergeDistance == 75 && s.maxTracerScaler == 0.1f);
+	game::FireArm gun(game::FireArmSettings {});
+	std::vector<bool> tracers;
+	for (int i = 0; i < 5; ++i) {
+		tracers.push_back(gun.takeTracer(s.tracerInterval));
+	}
+	CHECK(tracers == (std::vector<bool> {true, false, true, false, true}));
+
+	const physics::Vec3 origin {0, 1, 0}, offset {0.3f, -0.2f, 0};
+	const physics::Vec3 velocity {0, 0, 300};
+	// 5 m out: the length is the 5 m flown; 15 % of the way to converging.
+	game::TracerLook look = game::tracerLook(s, {0, 1, 5}, velocity, origin, origin, offset, false);
+	CHECK(look.shown);
+	CHECK(std::fabs(look.axes.rows[2].z - 5) < 1e-4f && std::fabs(look.axes.rows[0].x - 0.25f) < 1e-5f);
+	CHECK(std::fabs(look.axes.rows[1].y - 0.25f) < 1e-5f);
+	CHECK(std::fabs(look.position.x - 0.3f * (1 - 5 / 75.0f)) < 1e-5f);
+	// 50 m: the full 10 m; past 75 m on the round.
+	look = game::tracerLook(s, {0, 1, 50}, velocity, origin, origin, offset, false);
+	CHECK(std::fabs(look.axes.rows[2].z - 10) < 1e-4f);
+	look = game::tracerLook(s, {0, 1, 80}, velocity, origin, origin, offset, false);
+	CHECK(look.position.x == 0 && look.position.z == 80);
+	// After a hit it sits on the round; a converge distance of -1 always does.
+	look = game::tracerLook(s, {0, 1, 5}, velocity, origin, origin, offset, true);
+	CHECK(look.position.x == 0);
+	game::ProjectileSettings at = s;
+	at.tracerConvergeDistance = -1;
+	CHECK(game::tracerLook(at, {0, 1, 5}, velocity, origin, origin, offset, false).position.x == 0);
+	// Not yet out of the barrel, or not moving: nothing to draw.
+	CHECK(!game::tracerLook(s, {0, 1, 0}, velocity, origin, origin, offset, false).shown);
+	CHECK(!game::tracerLook(s, {0, 1, 5}, {0, 0, 0.1f}, origin, origin, offset, false).shown);
+}
+
+// The camera's recoil (0x00610180, 0x006101c0): one sine over 1 / speed
+// seconds, size x 0.6 degrees at its peak.
+TEST(Weapons_CameraRecoil)
+{
+	game::CameraRecoil recoil;
+	CHECK(recoil.update(1 / 30.0f) == 0);
+	recoil.start(7.5f, 2); // eu_tank's main gun: cameraRecoilSpeed 12, size 2 (here 7.5: a quarter at 1/30 s)
+	const float first = recoil.update(1 / 30.0f); // phase 0.25
+	CHECK(std::fabs(first - 1.2f) < 1e-4f);
+	const float second = recoil.update(1 / 30.0f); // 0.5
+	CHECK(std::fabs(second) < 1e-4f);
+	CHECK(std::fabs(recoil.update(1 / 30.0f) + 1.2f) < 1e-4f); // 0.75
+	recoil.update(1 / 30.0f);                                    // 1: still on
+	CHECK(recoil.on);
+	recoil.update(1 / 30.0f); // past 1: done
+	CHECK(!recoil.on && recoil.update(1 / 30.0f) == 0);
+}

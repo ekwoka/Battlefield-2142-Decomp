@@ -55,6 +55,7 @@
 #include "HudMenusChat.h"
 #include "HudMenusComm.h"
 #include "HudMenusKits.h"
+#include "HudMenusVehicles.h"
 #include "MenuBindings.h"
 #include "SettingsObjects.h"
 #include "PlayerCamera.h"
@@ -88,9 +89,9 @@
 #include "Voip/VoiceChat.h"
 #include "Voip/VoipNatives.h"
 
+#include "Nametags.h"
 #if BF2142_HAS_RENDERER
 #include "Render/LevelRenderer.h"
-#include "Nametags.h"
 #include "Viewer.h"
 #endif
 
@@ -98,6 +99,7 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <ctime>
 #include <chrono>
 #include <csignal>
 #include <functional>
@@ -495,6 +497,8 @@ void updateScoreboard(hud::HudManager& hud, const game::GameWorld& round, const 
 		return; // a joined game: the server's players fill it
 	}
 	const int friendly = round.playerTeam() == 1 ? 1 : 2;
+	game::GameWorld::PlayerInfo me;
+	round.playerInfo(round.localPlayer(), me);
 	for (int side = 0; side < 2; ++side) {
 		const int team = side == 0 ? friendly : 3 - friendly;
 		std::vector<game::GameWorld::PlayerInfo> players;
@@ -508,15 +512,31 @@ void updateScoreboard(hud::HudManager& hud, const game::GameWorld& round, const 
 		};
 		std::stable_sort(players.begin(), players.end(), [&](const auto& a, const auto& b) { return score(a) > score(b); });
 		std::vector<std::vector<std::string>> rows;
+		std::vector<std::array<float, 4>> colors, backgrounds;
 		int totalScore = 0, totalKills = 0, totalDeaths = 0;
 		for (const game::GameWorld::PlayerInfo& p : players) {
-			rows.push_back({p.name, std::to_string(score(p)), "0", std::to_string(p.kills), std::to_string(p.deaths),
-				p.ai ? "BOT" : "0"});
+			// The cells in the list's font 1 (0x007bb540: "\xa71%s\xa70" 0x009b4f1c,
+			// "\xa71%d\xa70" 0x009b6854).
+			const auto f1 = [](const std::string& text) { return "\xa7" "1" + text + "\xa7" "0"; };
+			rows.push_back({f1(p.name), f1(std::to_string(score(p))), f1("0"), f1(std::to_string(p.kills)),
+				f1(std::to_string(p.deaths)), f1(p.ai ? "BOT" : "0")});
+			// The row's colours (0x007bb540; see menu::scoreboardStyle).
+			dice::hfe::menu::ScoreboardRow look;
+			look.alive = p.alive;
+			look.friendlyList = side == 0;
+			look.local = p.id == round.localPlayer();
+			look.sameSquad = me.squad > 0 && p.squad == me.squad;
+			look.localCommands = me.commander;
+			const dice::hfe::menu::ScoreboardStyle style = dice::hfe::menu::scoreboardStyle(look, static_cast<int>(colors.size()));
+			colors.push_back(style.text);
+			backgrounds.push_back(style.background);
 			totalScore += score(p);
 			totalKills += p.kills;
 			totalDeaths += p.deaths;
 		}
 		hud.setList(side == 0 ? 2 : 1, std::move(rows));
+		hud.setListRowColors(side == 0 ? 2 : 1, std::move(colors));
+		hud.setListRowBackgrounds(side == 0 ? 2 : 1, std::move(backgrounds));
 		hud.setList(side == 0 ? 10 : 9, {{"", std::to_string(totalScore), "0", std::to_string(totalKills),
 											   std::to_string(totalDeaths), ""}});
 	}
@@ -545,6 +565,16 @@ float g_overheadFov = 0.3f, g_overheadHeight = 260.0f;
 // The map's right-click menu open (the HUD manager's menu states: 0x14
 // MapMenuShow, 0x15 SquadLeaderMenuShow, 0x16 CommanderMenuShow; 0 none).
 int g_mapMenu = 0;
+// The weapon, item selection and vehicle parts of the HUD
+// (HudMenusVehicles.h) and the sound the weapon HUD starts (its overheat).
+dice::hfe::menu::WeaponHud g_weaponHud;
+dice::hfe::menu::ItemSelection g_itemSelection;
+dice::hfe::menu::VehicleHud g_vehicleHud;
+std::function<void(const std::string&)> g_hudSound;
+int g_inHandSlot = -1;
+float g_hudTime = -1;
+// The name tags' icons (Menu/Nametag/nametags.con).
+nametags::IconRegistry g_tagIcons;
 
 void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLogic& logic, bool commanderScreen)
 {
@@ -619,6 +649,41 @@ void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 			spawn.id = kMarkerBeacon;
 			markers.push_back(spawn);
 		}
+	}
+	// The vehicles (Bf2MenuMapNode 0x00793b60; see HudMenusVehicles.h): by
+	// their relation to the player, filtered by Minimap.setPaintVehicle's
+	// vehicleType bits, tinted like the players (0x00b3be30: no team
+	// white, a team 0.7 grey), turned by the vehicle.
+	for (const auto& vehicle : round.vehicleList()) {
+		const world::Object* object = round.objects().find(vehicle.object);
+		if (!object || !object->objectTemplate()) {
+			continue;
+		}
+		const world::ObjectTemplate& t = *object->objectTemplate();
+		if (!hud.paintsVehicle(static_cast<int>(dice::hfe::menu::hudNumber(&t, "vehicleHud.vehicleType", -1)))) {
+			continue;
+		}
+		int occupantTeam = 0;
+		bool occupied = false;
+		for (const int occupant : round.vehicleOccupants(vehicle.object)) {
+			game::GameWorld::PlayerInfo who;
+			if (occupant >= 0 && round.playerInfo(occupant, who)) {
+				occupied = true;
+				occupantTeam = who.team;
+				break;
+			}
+		}
+		const bool mine = me.alive && me.vehicle == vehicle.object;
+		const auto relation = dice::hfe::menu::vehicleRelation(occupied, mine, occupantTeam, object->team(), me.team);
+		dice::hfe::menu::VehicleMarker look;
+		if (!dice::hfe::menu::vehicleMarker(t, relation, mine, false, look) || (look.asPlayer && occupied)) {
+			continue;
+		}
+		hud::HudManager::MapMarker icon {look.texture, vehicle.position.x, vehicle.position.z, look.width, vehicle.yaw};
+		icon.height = look.height;
+		const bool teamless = relation == dice::hfe::menu::MapRelation::Neutral;
+		icon.color[0] = icon.color[1] = icon.color[2] = teamless ? 1.0f : 0.7f;
+		markers.push_back(icon);
 	}
 	for (const auto& player : round.playerList()) {
 		if (!player.alive || player.team != me.team || player.id == me.id) {
@@ -794,6 +859,13 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 	hud.set("VehicleIconShow", inVehicle ? 1 : 0);
 	hud.set("PrimaryHeatShow", 0);
 	hud.set("TurretIconShow", 0);
+	// The frame's time (the item selection's timer).
+	const float now = round.roundTime();
+	const float dt = g_hudTime < 0 || now < g_hudTime ? 0.0f : now - g_hudTime;
+	g_hudTime = now;
+	// The gun in hand (the soldier's or the seat's) for the weapon HUD.
+	const game::FireArm* heldGun = nullptr;
+	const world::ObjectTemplate* heldGunTemplate = nullptr;
 	if (const world::Object* vehicle = round.playerVehicle()) {
 		const auto& settings = vehicle->objectTemplate()->settings();
 		const auto icon = settings.find("vehicleHud.vehicleIcon");
@@ -801,24 +873,55 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 		const float left = round.hitPoints(vehicle->id());
 		const auto most = settings.find("armor.maxHitPoints");
 		const float max = most != settings.end() ? static_cast<float>(std::atof(most->second.c_str())) : 0;
-		hud.set("VehicleArmor", max > 0 ? std::clamp(left / max, 0.0f, 1.0f) : 1.0f);
-		hud.setString("VehicleArmorString", std::to_string(static_cast<int>(std::max(left, 0.0f))));
+		// The vehicle's own HUD (0x007a3180 → 0x007a2e60, 0x007a18a0,
+		// 0x007a2b50): name, armour, speed, altitude, the seat dots.
+		dice::hfe::menu::VehicleHudInput look;
+		look.vehicle = vehicle->objectTemplate();
+		look.armor = max > 0 ? left / max : 1.0f;
+		for (const auto& info : round.vehicleList()) {
+			if (info.object == vehicle->id()) {
+				const physics::Vec3& v = info.velocity;
+				look.speed = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+				look.climb = v.y;
+			}
+		}
+		float sea = 0;
+		look.altitude = vehicle->position().y - (round.waterLevel(sea) ? sea : 0.0f);
 		game::GameWorld::PlayerInfo me;
+		const bool known = round.playerInfo(round.localPlayer(), me);
+		const auto seats = round.vehicleSeats(vehicle->id());
+		const auto occupants = round.vehicleOccupants(vehicle->id());
+		for (size_t i = 0; i < seats.size(); ++i) {
+			dice::hfe::menu::SeatDot dot;
+			const world::ObjectTemplate* part = round.templates().find(seats[i].name);
+			const std::string pos = dice::hfe::menu::hudSetting(part, "vehicleHud.vehicleIconPos");
+			if (!pos.empty()) {
+				dot.x = static_cast<float>(std::atof(pos.c_str()));
+				const size_t slash = pos.find('/');
+				dot.y = slash == std::string::npos ? dot.x : static_cast<float>(std::atof(pos.c_str() + slash + 1));
+			}
+			const int occupant = i < occupants.size() ? occupants[i] : -1;
+			game::GameWorld::PlayerInfo who;
+			const bool occupied = occupant >= 0 && round.playerInfo(occupant, who);
+			dot.state = dice::hfe::menu::seatDotState(occupied, occupied && who.id == me.id, occupied ? who.squad : 0,
+				known && me.team == who.team ? me.squad : 0, occupied && who.team == me.team);
+			look.seats.push_back(dot);
+		}
+		g_vehicleHud.update(hud, look);
+		hud.set("VehicleArmorBlink", 0);
 		float yaw = 0, pitch = 0;
-		if (round.playerInfo(round.localPlayer(), me) && round.gunAim(vehicle->id(), me.seat, yaw, pitch)) {
-			const auto seats = round.vehicleSeats(vehicle->id());
+		if (known && round.gunAim(vehicle->id(), me.seat, yaw, pitch)) {
 			const world::ObjectTemplate* gun = round.templates().find(seats[static_cast<size_t>(me.seat)].weapon);
 			const auto gui = gun ? gun->settings().find("weaponHud.guiIndex") : settings.end();
 			hud.set("GuiIndex", gun && gui != gun->settings().end() ? static_cast<float>(std::atoi(gui->second.c_str())) : 0);
 			hud.set("CrosshairIconShow", 1);
 			hud.set("TurretIconShow", 1);
 			hud.set("VehicleTurretAngle", yaw);
-			if (const game::FireArm* firearm = round.gun(vehicle->id(), me.seat); firearm && firearm->settings().heatAddWhenFire > 0) {
-				hud.set("PrimaryHeatShow", 1);
-				hud.set("PrimaryHeatValue", firearm->heat());
-				hud.set("PrimaryHeatBlink", firearm->overheated() ? 1 : 0);
-			}
+			heldGun = round.gun(vehicle->id(), me.seat);
+			heldGunTemplate = gun;
 		}
+	} else {
+		g_vehicleHud.clear(hud);
 	}
 	// Compass headings, degrees clockwise from north (+z): the vehicle's
 	// and, for the minimap's ring, the soldier's.
@@ -833,16 +936,48 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 	hud.set("PlayerHealth", 1);
 	hud.setString("PlayerHealthString", "100");
 	const game::FireArm* weapon = round.playerWeapon();
-	hud.set("PrimaryAmmoShow", weapon && !inVehicle ? 1 : 0);
-	hud.set("UsingChildHud", weapon && !inVehicle ? 1 : 0);
-	hud.set("PrimaryAmmoBarShow", 1);
-	if (weapon) {
-		const int magSize = std::max(weapon->settings().magSize, 1);
-		hud.set("PrimaryAmmo", static_cast<float>(weapon->roundsInMag()) / static_cast<float>(magSize));
-		hud.setString("PrimaryAmmoString", std::to_string(weapon->roundsInMag()));
-		// -1: magazines without end (ammo.nrOfMags -1).
-		hud.setString("PrimaryClipString", weapon->magsLeft() < 0 ? std::string() : std::to_string(weapon->magsLeft()));
+	if (weapon && !inVehicle) {
+		heldGun = weapon;
+		if (const world::Object* rifle = round.objects().find(round.playerWeaponObject())) {
+			heldGunTemplate = rifle->objectTemplate();
+		}
 	}
+	hud.set("UsingChildHud", weapon && !inVehicle ? 1 : 0);
+	hud.set("PrimaryAmmoShow", 0);
+	if (heldGun) {
+		// The weapon HUD (0x007c1f10; see HudMenusVehicles.h). The game's
+		// magazines count the one in the gun (the firearm's slot 0xb0).
+		const game::FireArmSettings& gun = heldGun->settings();
+		dice::hfe::menu::WeaponHudInput in;
+		in.weapon = heldGunTemplate;
+		in.rounds = heldGun->roundsInMag();
+		in.magSize = gun.magSize;
+		in.mags = heldGun->magsLeft() + 1;
+		in.nrOfMags = gun.nrOfMags;
+		in.reload = heldGun->reloading() && gun.reloadTime > 0 ? 1 - heldGun->reloadLeft() / gun.reloadTime : 0;
+		in.heat = gun.heatAddWhenFire > 0 ? heldGun->heat() : 0;
+		in.overheated = heldGun->overheated();
+		in.fireRate = heldGun->fireMode(); // the fire component's mode (FireArm::fireMode)
+		const std::string sound = g_weaponHud.update(hud, in);
+		if (!sound.empty() && g_hudSound) {
+			g_hudSound(sound);
+		}
+	}
+	// The item selection: opened when the weapon in hand changes, with the
+	// kit's weapons by slot (their weaponHud.selectIcon).
+	if (game::GameWorld::PlayerInfo me; round.playerInfo(round.localPlayer(), me) && me.alive && !inVehicle) {
+		if (g_inHandSlot >= 0 && me.inHandSlot != g_inHandSlot) {
+			std::vector<dice::hfe::menu::SelectItem> items;
+			for (const auto& [slot, name] : me.carried) {
+				items.push_back({slot, dice::hfe::menu::hudSetting(round.templates().find(name), "weaponHud.selectIcon"), true});
+			}
+			g_itemSelection.open(items, me.inHandSlot);
+		}
+		g_inHandSlot = me.inHandSlot;
+	} else {
+		g_inHandSlot = -1;
+	}
+	g_itemSelection.update(hud, dt);
 	const int team = round.playerTeam() == 1 ? 1 : 2, enemy = 3 - team;
 	hud.setString("FriendlyTicketsString", std::to_string(static_cast<int>(logic.team(team).tickets)));
 	hud.setString("EnemyTicketsString", std::to_string(static_cast<int>(logic.team(enemy).tickets)));
@@ -1957,12 +2092,32 @@ int runGame(Options& options, Session& session)
 	dice::hfe::menu::WarningHud warningHud;
 	dice::hfe::menu::HelpPopups helpPopups;
 	helpPopups.bind(console);
+	g_itemSelection.bind(console);
+	bindMethod(console, "IngameHelp.showIngameHelp", ConsoleAccess::Anyone,
+		[&helpPopups, &hudManager](std::string text, float seconds) { helpPopups.showText(hudManager, text, seconds); });
+	g_tagIcons.bind(console);
+	g_tagIcons.textureSize = [&files](const std::string& texture, int& width, int& height) {
+		std::vector<uint8_t> data;
+		if (!files.readFile(texture, data) || data.size() < 20) {
+			return false;
+		}
+		height = static_cast<int>(data[12] | data[13] << 8 | data[14] << 16 | data[15] << 24);
+		width = static_cast<int>(data[16] | data[17] << 8 | data[18] << 16 | data[19] << 24);
+		return true;
+	};
+	g_hudSound = [&sounds](const std::string& sound) { sounds.playSound(sound); };
 	// The warning tones through the sound layer (by sound name), the help
 	// voices through its voice messages (VoiceMessages::playHelp).
 	warningHud.setSoundHook([&sounds](const std::string& sound, bool start) {
 		start ? sounds.playSound(sound) : sounds.stopSound(sound);
 	});
 	helpPopups.setVoiceHook([&voices](const std::string& key) { voices.playHelp(key); });
+	// A help key shown goes on GeneralSettings' played list (saved with
+	// General.con; the settings object chains back to helpPopups).
+	helpPopups.onPlayed = [&console](const std::string& key) {
+		std::string output;
+		console.execute("GeneralSettings.setPlayedVOHelp \"" + key + "\"", output);
+	};
 	// The player's controls (Settings/Controls.con builds the maps once;
 	// the controls page's changes stay for the next maps).
 	input::ControlMaps& controls = session.controls;
@@ -2068,6 +2223,8 @@ int runGame(Options& options, Session& session)
 	session.moviesQueued = true;
 	run("Settings/RankSettings.con");
 	run("Menu/HUD/HudSetup/HudSetupMain.con");
+	// The name tags' icons and bars (the HUD manager's set-up, 0x0075cfa0).
+	run("Menu/Nametag/nametags.con");
 	if (!options.dedicated) {
 		// The player profile's options (the crosshair colour among them).
 		hudManager.set("CrossHairColorAlpha", 1);
@@ -3012,6 +3169,13 @@ int runGame(Options& options, Session& session)
 		const auto sayLocal = [&](Box box, const std::string& line) {
 			// A line said: to the server, else into our own list.
 			const uint32_t channel = box == Box::kTeam ? net::kChatTeam : box == Box::kSquad ? net::kChatSquad : net::kChatGlobal;
+			if (box == Box::kPlayer) {
+				// A whisper: no player is picked for it offline (+0x48 -1), and
+				// its network message isn't decoded, so it stays local.
+				chat.addChat(localization.text("HUD_TEXT_CHAT_WHIPSER"), line, static_cast<int>(net::kChatGlobal),
+					dice::hfe::menu::HudChat::Speaker::Neutral);
+				return;
+			}
 			if (session.client) {
 				session.client->say(line, channel);
 				return;
@@ -3026,6 +3190,27 @@ int runGame(Options& options, Session& session)
 		bindMethod(console, "HudManager.enableSayAllChatBox", ConsoleAccess::Anyone, [&chat](bool) { chat.open(Box::kAll); });
 		bindMethod(console, "HudManager.enableSayTeamChatBox", ConsoleAccess::Anyone, [&chat](bool) { chat.open(Box::kTeam); });
 		bindMethod(console, "HudManager.enableSaySquadChatBox", ConsoleAccess::Anyone, [&chat](bool) { chat.open(Box::kSquad); });
+		bindMethod(console, "HudManager.enableSayPlayerChatBox", ConsoleAccess::Anyone, [&chat](bool) { chat.open(Box::kPlayer); });
+		// HudManager.addFavouriteServer (0x00760987 → slot 0x434 →
+		// 0x00752580 → the HUD information layer's slot 0xa8, 0x00449180):
+		// 1 adds the joined server to GeneralSettings' favourites (its slot
+		// 0x17c with the address, the port, the name and time()), 0 removes
+		// it (slot 0x190); ServerIsFavourite (+0xb24) follows the list.
+		bindMethod(console, "HudManager.addFavouriteServer", ConsoleAccess::Anyone, [&](bool add) {
+			hudManager.set("ServerIsFavourite", add ? 1 : 0);
+			if (add && session.client) {
+				std::string host = options.connect;
+				int port = 17567;
+				if (const size_t colon = host.rfind(':'); colon != std::string::npos) {
+					port = std::atoi(host.c_str() + colon + 1);
+					host.resize(colon);
+				}
+				std::string output;
+				console.execute("GeneralSettings.addFavouriteServer \"" + host + "\" " + std::to_string(port) + " \""
+						+ session.client->world().serverName() + "\" " + std::to_string(static_cast<long long>(std::time(nullptr))),
+					output);
+			}
+		});
 		bindMethod(console, "Chat.sayAll", ConsoleAccess::Anyone, [sayLocal](std::string line) { sayLocal(Box::kAll, line); });
 		bindMethod(console, "Chat.sayTeam", ConsoleAccess::Anyone, [sayLocal](std::string line) { sayLocal(Box::kTeam, line); });
 		// The map vote (LevelsList): the playlist's maps, or the server's.
@@ -4578,6 +4763,7 @@ int runGame(Options& options, Session& session)
 		};
 		sources.objectEffects = &objectEffects;
 		nametags::Nametags nametags(files);
+		nametags.setIcons(&g_tagIcons);
 		nametags::Nametags::View tagView;
 		// The lock-on weapons' markers (Bf2ObjectMarkerNode, 0x007e6520):
 		// the enemy objects carrying a target object of the marker's type
@@ -4690,11 +4876,23 @@ int runGame(Options& options, Session& session)
 					}
 					std::stable_sort(players.begin(), players.end(), [](const auto& a, const auto& b) { return a.score > b.score; });
 					std::vector<std::vector<std::string>> rows;
+					std::vector<std::array<float, 4>> colors, backgrounds;
 					for (const net::RemotePlayer& p : players) {
+						dice::hfe::menu::ScoreboardRow look;
+						look.alive = p.alive;
+						look.friendlyList = side == 0;
+						look.local = p.local;
+						look.sameSquad = me && me->squad > 0 && p.squad == me->squad;
+						look.localCommands = me && me->commander;
+						const dice::hfe::menu::ScoreboardStyle style = dice::hfe::menu::scoreboardStyle(look, static_cast<int>(colors.size()));
+						colors.push_back(style.text);
+						backgrounds.push_back(style.background);
 						const bool muted = session.voice && session.voice->client().muted(p.id);
 						const bool talking = session.voice && session.voice->client().talking(p.id);
-						rows.push_back({p.name, std::to_string(p.score), std::to_string(p.teamwork), std::to_string(p.kills),
-							std::to_string(p.deaths), p.ai ? "BOT" : std::to_string(std::max(p.ping, 0)),
+						const auto f1 = [](const std::string& text) { return "\xa7" "1" + text + "\xa7" "0"; };
+						rows.push_back({f1(p.name), f1(std::to_string(p.score)), f1(std::to_string(p.teamwork)),
+							f1(std::to_string(p.kills)), f1(std::to_string(p.deaths)),
+							f1(p.ai ? "BOT" : std::to_string(std::max(p.ping, 0))),
 							p.local || p.ai ? ""
 								: muted ? "Ingame/Scoreboard/Icons/checkbox_voipMute.tga"
 								: talking ? "Ingame/Scoreboard/Icons/checkbox_voipTalk.tga"
@@ -4702,6 +4900,8 @@ int runGame(Options& options, Session& session)
 							std::to_string(p.id)});
 					}
 					hudManager.setList(side == 0 ? 2 : 1, std::move(rows));
+					hudManager.setListRowColors(side == 0 ? 2 : 1, std::move(colors));
+					hudManager.setListRowBackgrounds(side == 0 ? 2 : 1, std::move(backgrounds));
 				}
 			}
 			updateHud(hudManager, round, gameLogic, scoreboardHeld, scoreOf, commanderScreen);
@@ -4728,8 +4928,34 @@ int runGame(Options& options, Session& session)
 				dice::hfe::menu::HelpPopups::Context help;
 				help.vehicle = vehicle ? vehicle->objectTemplate() : nullptr;
 				help.vehicleHitPoints = vehicle ? round.hitPoints(vehicle->id()) : 0;
+				if (vehicle) {
+					const float most = static_cast<float>(
+						dice::hfe::menu::hudNumber(vehicle->objectTemplate(), "armor.maxHitPoints", 0));
+					help.vehicleShare = most > 0 ? help.vehicleHitPoints / most : 1;
+				}
 				if (const world::Object* held = round.objects().find(round.playerWeaponObject())) {
 					help.weapon = held->objectTemplate();
+				}
+				// The help manager's state (0x00649d80 / 0x00646cb0).
+				{
+					game::GameWorld::PlayerInfo self;
+					const bool known = round.playerInfo(round.localPlayer(), self);
+					help.playing = known;
+					help.alive = known && self.alive;
+					help.manDown = known && self.manDown;
+					help.inVehicle = vehicle != nullptr;
+					help.onFoot = help.alive && !vehicle;
+					help.spawnScreen = known && !self.alive && !self.manDown;
+					help.commanderScreen = commanderScreen;
+					help.menuOpen = scoreboardHeld || commanderScreen || g_mapMenu != 0;
+					help.squad = known ? self.squad : 0;
+					help.squadLeader = known && self.squadLeader;
+					help.roundTime = round.roundTime();
+					help.zoomed = playerCamera.zoomed();
+					// The kit's weapons' magazines (case 0x3b): the one in hand.
+					if (const game::FireArm* gun = round.playerWeapon(); gun && help.weapon && gun->settings().magSize > 0) {
+						help.ammo.push_back({help.weapon, static_cast<float>(gun->roundsInMag()) / static_cast<float>(gun->settings().magSize)});
+					}
 				}
 				static float nearbyCheck = 0;
 				static std::vector<uint32_t> helpful;
@@ -4753,6 +4979,7 @@ int runGame(Options& options, Session& session)
 					}
 				}
 				helpPopups.update(hudManager, help, seconds);
+				helpPopups.tutorial(hudManager, help, seconds);
 				// AbilityHud (on the kits: S_Heal, S_Repair, S_Resupply): the
 				// player's kit's sound while a hub or a repair treats him or
 				// his vehicle (its last treatment within half a second).
@@ -5027,6 +5254,7 @@ int runGame(Options& options, Session& session)
 				input.fire = in.fire;
 				input.altFire = in.altFire;
 				input.use = in.use;
+				input.toggleFireRate = in.toggleFireRate;
 				session.client->setInput(net::playerInputFrom(input, lastAimPitch));
 				lastAimPitch = input.aimPitch;
 			};
@@ -5070,6 +5298,7 @@ int runGame(Options& options, Session& session)
 				input.fire = in.fire;
 				input.altFire = in.altFire;
 				input.use = in.use;
+				input.toggleFireRate = in.toggleFireRate;
 				input.switchSeat = in.seat;
 				input.selectItem = in.item;
 				// C: first person or the chase view; the right button's press

@@ -9,6 +9,7 @@
 #include "Effects/Effects.h"
 #include "Game/Cameras.h"
 #include "Game/Random.h"
+#include "Game/Weapons.h"
 
 #include <array>
 #include <functional>
@@ -123,7 +124,11 @@ public:
 	// *0x00a73a10 = 2), u the share of the 0.6 s gone. The hit's measure
 	// (0x00610450's argument) is not traced to its caller: the rewrite
 	// gives the share of the vehicle's hit points one hit took.
-	float shakeDegrees() const { return m_speedShake + m_hitShake; }
+	// And the gun's camera recoil (game::CameraRecoil: the seat's
+	// WeaponBasedRecoilComp's cameraRecoilSpeed / cameraRecoilSize, started
+	// by each round its gun fires while the view is the inside or the nose
+	// one), summed into the same turn (0x00610620).
+	float shakeDegrees() const { return m_speedShake + m_hitShake + m_recoilShake; }
 	// The field of view of the seat's camera for the view now (0x00610150:
 	// insideFOV in the inside mode, worldFOV otherwise; both 1.1 by
 	// default, 0x00610fd0), radians; 0 when not in a seat with a camera.
@@ -295,6 +300,9 @@ private:
 	void stepShakes(float seconds);
 	float m_speedShake = 0, m_hitShake = 0, m_shakeTime = 0;
 	float m_hitLeft = 0, m_hitStrength = 0, m_lastVehicleHp = -1;
+	game::CameraRecoil m_cameraRecoil;
+	float m_recoilShake = 0;
+	uint32_t m_lastGunShots = 0;
 	uint32_t m_shakeVehicle = 0;
 	float m_clock = 0;
 };

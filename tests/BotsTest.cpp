@@ -112,6 +112,9 @@ struct Field {
 			rifle->settings()["fire.roundsPerMinute"] = "600";
 			rifle->settings()["ammo.magSize"] = "30";
 			rifle->settings()["ammo.nrOfMags"] = "50";
+			// As the shipped rifles: a SoldierDeviationComp (no deviation of its
+			// own here), which carries the bots' AI deviation.
+			rifle->components().push_back("SoldierDeviationComp");
 		}
 		templates.create("GenericProjectile", "bullet")->settings()["damage"] = "40";
 		for (int team = 1; team <= 2; ++team) {
@@ -1894,6 +1897,9 @@ TEST(Bots_SquadTargetAndGrenadeLob)
 		field.world->spawnSoldier(id);
 	}
 	const int enemy = field.soldier(1, false, 0, 50);
+	game::GameWorld::PlayerInfo target;
+	field.world->playerInfo(enemy, target);
+	field.world->setHitPoints(target.soldier, 1e6f); // the spotter's rounds don't end the fight
 	field.move(spotter, 0, 42);   // 8 m from the enemy: within the 9.6 m it sees
 	field.move(grenadier, 0, 30); // 20 m: out of its sight
 	bool knew = false, picked = false, threw = false;

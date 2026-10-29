@@ -189,7 +189,7 @@ void HudChat::update(float seconds)
 	m_hud.set("SayAllShow", m_box == kAll ? 1 : 0);
 	m_hud.set("SayTeamShow", m_box == kTeam ? 1 : 0);
 	m_hud.set("SaySquadShow", m_box == kSquad ? 1 : 0);
-	m_hud.set("SayPlayerShow", 0);
+	m_hud.set("SayPlayerShow", m_box == kPlayer ? 1 : 0);
 	m_hud.setEditText(1, m_typed);
 }
 

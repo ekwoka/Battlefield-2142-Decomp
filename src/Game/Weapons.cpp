@@ -34,6 +34,14 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	s.drag = number(t, "drag", s.drag);
 	s.mass = std::max(number(t, "mass", s.mass), 0.001f);
 	s.material = static_cast<int>(number(t, "material", 0));
+	if (const auto tracer = t.settings().find("tracerTemplate"); tracer != t.settings().end()) {
+		s.tracerTemplate = tracer->second;
+	}
+	s.tracerInterval = static_cast<int>(number(t, "tracerInterval", 1));
+	s.tracerScaler = number(t, "tracerScaler", 0);
+	s.tracerSizeModifier = number(t, "tracerSizeModifier", 1);
+	s.tracerConvergeDistance = number(t, "tracerConvergeDistance", 100);
+	s.maxTracerScaler = number(t, "maxTracerScaler", 0.1f);
 	// A detonation component (DefaultDetonationComp, template 0x953b) with
 	// its constructor's defaults (0x005e9df0): explosionMaterial -1,
 	// explosionForce 150, explosionYMod 1, explosionRadius 10,
@@ -221,12 +229,103 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 	if (projectile != t.settings().end()) {
 		s.projectileTemplate = projectile->second;
 	}
+	// fire.addFireRate keeps each value in order ("fire.addFireRate.list" =
+	// "0 2").
+	if (const auto rates = t.settings().find("fire.addFireRate.list"); rates != t.settings().end()) {
+		const char* p = rates->second.c_str();
+		char* end = nullptr;
+		for (long rate = std::strtol(p, &end, 10); end != p; rate = std::strtol(p, &end, 10)) {
+			s.fireRates.push_back(static_cast<int>(rate));
+			p = end;
+		}
+	}
+	s.burstSize = static_cast<int>(number(t, "fire.burstSize", static_cast<float>(s.burstSize)));
 	return s;
 }
 
 FireArm::FireArm(FireArmSettings settings)
 	: m_settings(std::move(settings)), m_rounds(m_settings.magSize), m_mags(m_settings.nrOfMags)
 {
+	m_mode = m_settings.fireRates.empty() ? kFireAutomatic : m_settings.fireRates.front();
+}
+
+bool FireArm::toggleFireMode()
+{
+	const std::vector<int>& rates = m_settings.fireRates;
+	if (rates.size() < 2) {
+		return false;
+	}
+	const auto at = std::find(rates.begin(), rates.end(), m_mode);
+	m_mode = at == rates.end() || at + 1 == rates.end() ? rates.front() : *(at + 1);
+	m_pending = false;
+	m_burstLeft = 0;
+	return true;
+}
+
+bool FireArm::takeTracer(int interval)
+{
+	if (--m_tracerCount >= 1) {
+		return false;
+	}
+	m_tracerCount = interval;
+	return true;
+}
+
+void CameraRecoil::start(float recoilSpeed, float recoilSize)
+{
+	speed = recoilSpeed;
+	size = recoilSize;
+	phase = 0;
+	on = true;
+}
+
+float CameraRecoil::update(float seconds)
+{
+	if (!on) {
+		phase = 0;
+		return 0;
+	}
+	phase += seconds * speed * 1.0f; // *0x00a739c4
+	if (phase > 1) {
+		phase = 0;
+		on = false;
+	}
+	return std::sin(phase * 6.2831855f) * size * 0.6f; // *0x00a739c0
+}
+
+TracerLook tracerLook(const ProjectileSettings& settings, const physics::Vec3& round, const physics::Vec3& velocity,
+	const physics::Vec3& origin, const physics::Vec3& start, const physics::Vec3& offset, bool hit)
+{
+	TracerLook look;
+	const float travelled = std::sqrt(physics::lengthSquared(round - origin));
+	look.position = round;
+	const float converge = settings.tracerConvergeDistance;
+	if (!hit && converge > 0 && travelled <= converge) {
+		look.position = round + offset * (1 - std::clamp(travelled / converge, 0.0f, 1.0f));
+	}
+	const float speed2 = physics::lengthSquared(velocity);
+	if (speed2 <= 0.025f) {
+		return look; // 0x005b3e60 keeps the last frame
+	}
+	const physics::Vec3 z = velocity * (1 / std::sqrt(speed2));
+	physics::Vec3 x, y;
+	if (std::fabs(z.x) >= 0.0001f || std::fabs(z.z) >= 0.0001f) {
+		x = physics::cross({0, 1, 0}, z);
+		x = x * (1 / std::sqrt(physics::lengthSquared(x)));
+		y = physics::cross(z, x);
+	} else {
+		x = {1, 0, 0};
+		y = {0, 0, z.y > 0 ? -1.0f : 1.0f};
+	}
+	const float s = settings.tracerSizeModifier;
+	const float along = std::max(0.0f, physics::dot(round - start, z));
+	const float length = std::min(settings.tracerScaler * s, along);
+	if (length <= 0 || s <= 0) {
+		return look;
+	}
+	look.axes.rows = {x * s, y * s, z * length};
+	look.shown = true;
+	return look;
 }
 
 bool FireArm::addMagazine()
@@ -244,8 +343,25 @@ bool FireArm::addMagazine()
 
 bool FireArm::tick(float seconds, bool trigger)
 {
+	const bool pressed = trigger && !m_triggerWas;
+	m_triggerWas = trigger;
+	const int mode = m_useModes ? m_mode : kFireAutomatic;
+	if (mode == kFireSingle && pressed) {
+		m_pending = true;
+	} else if (mode == kFireBurst && pressed && m_burstLeft <= 0) {
+		m_burstLeft = std::max(m_settings.burstSize, 1);
+	}
 	if (m_cooldown > 0) {
 		--m_cooldown;
+	}
+	if (m_reloadLeft > 0 || m_overheatLeft > 0) {
+		m_pending = false;
+		m_burstLeft = 0;
+	}
+	if (mode == kFireSingle) {
+		trigger = m_pending;
+	} else if (mode == kFireBurst) {
+		trigger = m_burstLeft > 0;
 	}
 	if (m_reloadLeft > 0) {
 		m_reloadLeft -= seconds;
@@ -265,8 +381,16 @@ bool FireArm::tick(float seconds, bool trigger)
 	}
 	// A magazine size of -1: no magazine (vehicle guns that heat up instead).
 	const bool unlimited = m_settings.magSize < 0;
+	if (!unlimited && m_rounds <= 0) {
+		m_pending = false;
+		m_burstLeft = 0;
+	}
 	if (!trigger || m_cooldown > 0 || (!unlimited && m_rounds <= 0)) {
 		return false;
+	}
+	m_pending = false;
+	if (m_burstLeft > 0) {
+		--m_burstLeft;
 	}
 	m_cooldown = m_settings.ticksBetweenShots();
 	if (m_settings.heatAddWhenFire > 0) {

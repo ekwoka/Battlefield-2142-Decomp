@@ -18,6 +18,7 @@
 #include <functional>
 #include <array>
 #include <string>
+#include <vector>
 
 namespace dice::hfe::world {
 class ObjectTemplate;
@@ -39,6 +40,20 @@ struct ProjectileSettings {
 	float drag = 0;
 	float mass = 1;
 	int material = 0;
+	// Tracers (the GenericProjectile template 0x005b3500; saved by
+	// 0x005b5850): tracerTemplate (+0x2d0, resolved at +0x2ec; its
+	// geometry: the tracer's mesh), tracerInterval (+0x2f0, 1),
+	// tracerScaler (+0x2c0, 0), tracerSizeModifier (+0x2c4, 1),
+	// tracerConvergeDistance (+0x2f4, 100), maxTracerScaler (+0x2b8, 0.1)
+	// and minTracerScaler (+0x2bc, 5; read by nothing). With a tracer
+	// template the firing (0x005f2bb0) makes every tracerInterval-th round a
+	// tracer round: a second projectile of the same template flagged a
+	// tracer (projectile slot 0xb8, 0x005b32b0: its geometry the tracer
+	// template's) tied to the round (slot 0xbc, +0x248). See TracerLook.
+	std::string tracerTemplate;
+	std::string tracerGeometry; // the tracer template's geometry (filled by the game world)
+	int tracerInterval = 1;
+	float tracerScaler = 0, tracerSizeModifier = 1, tracerConvergeDistance = 100, maxTracerScaler = 0.1f;
 	// Detonation (detonation.*): splash damage round the impact. With a
 	// DefaultDetonationComp the template's defaults (0x005e9df0) are
 	// damage 500, radius 10, force 150, yMod 1 and material -1 (no blast:
@@ -181,10 +196,19 @@ struct FireArmSettings {
 	float heatAddWhenFire = 0;
 	float coolDownPerSec = 0;
 	float overheatPenalty = 0;
+	// The fire modes (fire.addFireRate, in order; the template's list at
+	// +0x30): 0 single, 1 burst, 2 automatic. The fire component starts in
+	// the first (2 without one, 0x005f28a0). A burst is fire.burstSize
+	// rounds (template +0x4c, 3 by default, 0x005f2ad0).
+	std::vector<int> fireRates;
+	int burstSize = 3;
 
 	static FireArmSettings fromTemplate(const world::ObjectTemplate& firearm);
 	int ticksBetweenShots() const { return roundsPerMinute > 0 ? 1800 / roundsPerMinute : 1; }
 };
+
+// The fire modes (the fire component's +0x28, FireArm::fireMode).
+enum FireMode { kFireSingle = 0, kFireBurst = 1, kFireAutomatic = 2 };
 
 class FireArm {
 public:
@@ -194,14 +218,39 @@ public:
 	int roundsInMag() const { return m_rounds; }
 	int magsLeft() const { return m_mags; }
 	bool reloading() const { return m_reloadLeft > 0; }
+	float reloadLeft() const { return m_reloadLeft; } // seconds (the HUD's reload bar)
 	float heat() const { return m_heat; } // 0..1
 	// Resupply (ammo hubs): adds magazines up to the kit's number; false
 	// when full.
 	bool addMagazine();
 	bool overheated() const { return m_overheatLeft > 0; }
 
-	// One tick; true when a round leaves the barrel.
+	// One tick; true when a round leaves the barrel. `trigger` is the fire
+	// input held. In the automatic mode a round goes every
+	// ticksBetweenShots while it is held; single fire takes one round a
+	// press, burst burstSize rounds a press, the burst running on without
+	// the trigger until it is out (the fire component's trigger 0x005f1370
+	// keeps the press at +0x6c; the round's count 0x005f1820 ends the burst
+	// at burstSize - 1, +0x24). A press that finds the gun busy (between
+	// rounds) waits for it; one that finds it reloading, overheated or
+	// empty is dropped.
 	bool tick(float seconds, bool trigger);
+	// The fire mode now (the fire component's +0x28; kFireAutomatic for a
+	// gun without fire.addFireRate) and the toggle (c_PIToggleFireRate, the
+	// firearm's action 0xb in 0x005c50e0 -> fire component slot 0x94,
+	// 0x005f1da0): the next of the template's rates, back to the first
+	// after the last; false (nothing changes) with fewer than two.
+	int fireMode() const { return m_mode; }
+	bool toggleFireMode();
+	// Off: the mode is ignored and the trigger fires as held (the rewrite's
+	// drones and sentry guns, whose auto controller holds it; how it pulses
+	// the trigger for their single-fire guns is not traced).
+	void setUseFireModes(bool use) { m_useModes = use; }
+	// Whether the round fired now carries a tracer (0x005f2bb0, with a
+	// tracer template: the fire component's +0x78 counts down a round at a
+	// time and at below 1 a tracer goes with the round and the count starts
+	// again at tracerInterval; the first round has one).
+	bool takeTracer(int interval);
 
 private:
 	FireArmSettings m_settings;
@@ -211,6 +260,31 @@ private:
 	float m_reloadLeft = 0;
 	float m_heat = 0;
 	float m_overheatLeft = 0;
+	int m_mode = kFireAutomatic;
+	bool m_useModes = true;
+	bool m_triggerWas = false;
+	bool m_pending = false; // a press waiting for the gun
+	int m_burstLeft = 0;
+	int m_tracerCount = 0; // +0x78
+};
+
+// The camera's recoil (WeaponBasedRecoilComp's cameraRecoilSpeed and
+// cameraRecoilSize, template +0x24 / +0x28: the vehicle guns'): each round
+// the gun's component (0x005ddfc0's end) hands them to the camera of its
+// control object (the first PlayerControlObject up its tree, interface
+// 0xc4c5 slot 0x48) through 0x00610180, which takes them when the camera
+// is in its inside or nose view (+0x250 1 or 2): a phase from 0. The
+// camera's update (0x006101c0, for the local player's) moves the phase by
+// seconds x speed x *0x00a739c4 (1) and, past 1, stops; the kick is
+// sin(phase x 2 pi) x size x *0x00a739c0 (0.6) degrees, turned in with
+// the camera's shakes (0x00610620 -> 0x005b1a70).
+struct CameraRecoil {
+	float speed = 0, size = 0;
+	float phase = 0;
+	bool on = false;
+	void start(float recoilSpeed, float recoilSize);
+	// One update; the kick in degrees.
+	float update(float seconds);
 };
 
 struct Projectile {
@@ -236,7 +310,38 @@ struct Projectile {
 	int team = 0;         // the thrower's (mines spare their own side unless allowFriendlyFireDetonation)
 	float yaw = 0;        // the facing it was thrown with (mines' cones)
 	bool alive = true;
+	// A tracer round's tracer (ProjectileSettings' tracer*): it shows from
+	// `tracerFrom` (the muzzle as drawn) and closes on the round
+	// (tracerOffset, what it lies off the round's own start), and its
+	// length grows from where it (re)started (tracerStart: the start, or a
+	// bounce's point, 0x005b4980 restarting the growth at +0x1dc).
+	bool tracer = false;
+	physics::Vec3 tracerOffset;
+	physics::Vec3 tracerStart;
+	bool tracerHit = false; // +0x23c: it hit something (the tracer sits on the round from then on)
 };
+
+// A tracer's place and size this frame (0x005b3e60, 0x005b3cb0): `round`
+// the round's position, `velocity` its velocity. Its position is the
+// round's, until the round has gone tracerConvergeDistance from its start
+// (or hit something) moved by the muzzle offset x (1 - distance /
+// tracerConvergeDistance); a distance of -1 puts it on the round at once.
+// It points along the velocity (above 0.025 m^2/s^2: z forward, x = up x
+// z, y = z x x; straight up or down the frame of 0x005b3e60's else). Its
+// scale (interface 0xebc881fa slot 0x10) is (s, s, min(L, along)) with s
+// = tracerSizeModifier and L = tracerScaler x s: the growth time
+// (+0x264 = tracerScaler / speed x s at the start, 0x005b5300) has the
+// length grow with the round's travel, so it never reaches back past its
+// start; `along` is how far the round has gone along its heading from
+// `start`. The tracer mesh's tail runs along -z from its origin (the
+// p_tracer2 meshes 0..-0.98), so it trails the round.
+struct TracerLook {
+	physics::Vec3 position;
+	physics::Mat3 axes; // rows x, y, z: scaled
+	bool shown = false;
+};
+TracerLook tracerLook(const ProjectileSettings& settings, const physics::Vec3& round, const physics::Vec3& velocity,
+	const physics::Vec3& origin, const physics::Vec3& start, const physics::Vec3& offset, bool hit);
 
 // A RotationalPoint projectile's velocity after a contact (0x006c0d00):
 // the part along the normal reversed times `elasticity` (the mean of the

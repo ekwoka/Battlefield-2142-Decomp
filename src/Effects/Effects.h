@@ -165,6 +165,33 @@ struct ParticleTemplate {
 	// a row, each frameWidth x frameHeight of it.
 	int frameCount = 1, framesAcross = 1;
 	float frameWidth = 1, frameHeight = 1;
+	// A sprite's flipbook (the sprite template's +0xd8 animationEnable,
+	// +0xd4 animationSpeed 1, +0xd0 animationPlayOnce, +0xd1
+	// animationRandomizedStartFrame; 0x10138b40's defaults): each particle
+	// keeps a frame clock (+0x78), from 0 or floor((frames - 1) u) at birth
+	// (0x1013fdc0), advanced by animationSpeed x clamp(rotationGraph, 0, 1)
+	// a second when drawn (0x10131f80, the template's +0x100 graph); its
+	// frame is the clock's whole part modulo the frames. animationPlayOnce
+	// makes the speed frames / timeToLive (0x10138790, 0x101387f0): one
+	// pass over a life. Particles.fx as shipped (LOW) draws the frame
+	// alone, without blending in the next.
+	bool animated = false;
+	float animationSpeed = 1;
+	bool animationPlayOnce = false;
+	bool randomStartFrame = false;
+	// selfShadowIntensity (+0xa4, slot 0x1d0, 1 by default): copied into
+	// each particle (+0x8, 0x1013fdc0); neither the sprite collector
+	// (0x10130bd0 / 0x10131f80) nor the shipped Particles.fx reads it.
+	float selfShadowIntensity = 1;
+	// showInZoomedMode (the exe's template +0xaa, 1 by default, 0x00626d40):
+	// a system the bundle starts in a zoomed first person (EffectBundle
+	// 0x00619f90 flags bit 2, the system's +8) is shown only with it set
+	// (the scoped muzzle flashes set 0).
+	bool showZoomed = true;
+	// noRotationFromParent (RendDX9 template +0x222, slots 0x11c / 0x120):
+	// the system takes only its parent's position, not its turn
+	// (0x1013eff0: its local matrix plus the parent's position).
+	bool noRotationFromParent = false;
 	bool localSystem = false;    // isLocalSystem: particles in the system's space
 	// alphaCull (the sprite template's +0xa0, slot 0x154): a particle whose
 	// alpha is below it isn't drawn (the sprites' collector 0x10130bd0).
@@ -199,7 +226,12 @@ struct Particle {
 	float randomIntensity = 0; // randomIntensity x (-1..1) (+0x10)
 	float alpha = 1;         // the bundle's alpha intensity at birth (+0x2c)
 	Vec3 angles; // mesh particles: yaw/pitch/roll at birth, degrees
+	float frameClock = 0;    // the flipbook's (+0x78)
+	float selfShadow = 1;    // the template's selfShadowIntensity (+0x8)
 };
+
+// A sprite's flipbook frame (0x10131f80): its texture rectangle, u0 v0 u1 v1.
+std::array<float, 4> spriteFrame(const ParticleTemplate& t, float frameClock);
 
 // What an emitter's update sees: the wind, the water, the camera (the
 // distance LOD), the manager's settings and the sprite pool.
@@ -241,6 +273,13 @@ public:
 	// emit speed scale and age scale: the instance's +0x164, +0x138, +0x13c
 	// and +0x12c, set by Wheel/AirDraftEffectBundle each tick, 0x00618bc0..).
 	float alphaIntensity = 1, emitScale = 1, speedScale = 1, timeScale = 1;
+	// EffectBundle.speedFromPhysics (the exe's +0x45c, 0x00618ae0 each
+	// tick): the velocity the particles inherit is set from outside, the
+	// physics velocity's direction times the square root of its speed
+	// (slots 0x40 / 0x4c, the instance's +0xcc / +0xdc), not taken from the
+	// system's own moves.
+	bool physicsVelocity = false;
+	Vec3 inheritedVelocity;
 	// Whether it emits at all (started within the view distance and of a
 	// quality the manager draws).
 	bool active() const { return m_active; }
@@ -298,6 +337,7 @@ struct Sprite {
 	std::array<float, 4> color; // rgb, alpha
 	float lightMapOffset = 0;   // the template's lightMapIntensityOffset (calcParticleLighting)
 	std::array<float, 2> pivot {0, 0}; // the template's pivotOffset
+	std::array<float, 4> frame {0, 0, 1, 1}; // the flipbook frame's u0 v0 u1 v1
 };
 
 // The view the particles are drawn from: their fade by distance per LOD
@@ -307,8 +347,11 @@ struct ParticleView {
 	Vec3 eye;
 	Vec3 forward {0, 0, 1};
 	const scene::ParticleSystemSettings* settings = nullptr;
+	// A zoomed first person: the systems without showInZoomedMode aren't shown.
+	bool zoomed = false;
 	// The alpha a particle keeps at view depth `depth` in LOD class `lod`.
 	float fade(float depth, int lod) const;
+	bool shows(const ParticleTemplate& t) const { return !zoomed || t.showZoomed; }
 };
 
 // A mesh particle: its mesh scaled by `size`, turned and placed
@@ -460,6 +503,9 @@ public:
 		float timeScale = 1);
 	// Sprites alive in all the sprite systems (the pool's use).
 	int poolUsed() const { return m_poolUsed; }
+	// EffectBundle.speedFromPhysics: the physics velocity (world) at an
+	// anchor's bundles spawned with `tag` (0x00618ae0).
+	void setPhysicsVelocity(uint32_t anchor, uint32_t tag, const Vec3& velocity);
 
 	// The Sound children of the bundles started since the last call (the
 	// bundle's start sound, S_<bundle>_Start), where they start.
@@ -489,11 +535,11 @@ public:
 	// Calls `draw` for each mesh particle system's particles: its mesh, its
 	// blending and the particles.
 	template <class Draw>
-	void forEachMeshGroup(Draw draw) const
+	void forEachMeshGroup(Draw draw, bool zoomed = false) const
 	{
 		for (const auto& emitter : m_emitters) {
 			const ParticleTemplate& t = emitter->particleTemplate();
-			if (!t.mesh || t.geometry.empty()) {
+			if (!t.mesh || t.geometry.empty() || (zoomed && !t.showZoomed)) {
 				continue;
 			}
 			m_meshSprites.clear();
@@ -502,6 +548,18 @@ public:
 				draw(t.geometry, t.additive, m_meshSprites);
 			}
 		}
+		for (const auto& [geometry, sprites] : m_placedMeshes) {
+			if (!sprites.empty()) {
+				draw(geometry, true, sprites);
+			}
+		}
+	}
+	// Meshes placed from outside, replaced each tick (the projectiles'
+	// tracers, GameWorld::placeTracers): drawn by forEachMeshGroup after the
+	// mesh systems', added. A sprite's rotation rows may carry a scale.
+	void setPlacedMeshes(std::vector<std::pair<std::string, std::vector<MeshSprite>>> groups)
+	{
+		m_placedMeshes = std::move(groups);
 	}
 	// Calls `draw` for each group of sprites sharing a texture and blending
 	// (the heat shimmer's with `shimmer`: forEachShimmerGroup), faded by
@@ -516,7 +574,7 @@ public:
 	{
 		for (const auto& emitter : m_emitters) {
 			const ParticleTemplate& t = emitter->particleTemplate();
-			if (t.mesh || t.trail || t.nonScreenAligned || t.heatShimmer != shimmer) {
+			if (t.mesh || t.trail || t.nonScreenAligned || t.heatShimmer != shimmer || !view.shows(t)) {
 				continue; // forEachMeshGroup, forEachWorldGroup
 			}
 			m_sprites.clear();
@@ -547,7 +605,7 @@ public:
 	{
 		for (const auto& emitter : m_emitters) {
 			const ParticleTemplate& t = emitter->particleTemplate();
-			if (!t.trail && !t.nonScreenAligned) {
+			if ((!t.trail && !t.nonScreenAligned) || !view.shows(t)) {
 				continue;
 			}
 			m_worldVertices.clear();
@@ -601,6 +659,7 @@ private:
 	std::vector<Decal> m_decals;
 	game::Random m_decalRandom {0x2d5c1e37};
 	mutable std::vector<MeshSprite> m_meshSprites;
+	std::vector<std::pair<std::string, std::vector<MeshSprite>>> m_placedMeshes;
 	mutable std::vector<WorldVertex> m_worldVertices;
 
 	const world::ObjectTemplateManager& m_templates;
@@ -705,6 +764,7 @@ public:
 		Mat3 rotation;
 		uint32_t startOnEffects = 0, stopOnEffects = 0;
 		bool startAtCreation = false;
+		bool speedFromPhysics = false; // EffectBundle.speedFromPhysics (+0x45c)
 		// WheelEffectBundle / AirDraftEffectBundle: the ground picks the effect.
 		enum class Kind { Plain, Wheel, AirDraft, Wind } kind = Kind::Plain;
 	};

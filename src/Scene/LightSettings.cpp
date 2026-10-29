@@ -46,6 +46,13 @@ void registerRendererConsoleMethods(Console& console, RendererSettings& settings
 				settings.baseCellSize = v;
 			}
 		});
+	bindFloat("renderer.indoorSkinnedMeshCullDistance", settings.indoorSkinnedMeshCullDistance);
+	bindFloat("renderer.indoorBundledMeshCullDistance", settings.indoorBundledMeshCullDistance);
+	const auto bindBool = [&console, access](const char* name, bool& value) {
+		bindProperty<bool>(console, name, access, [&value] { return value; }, [&value](const bool& v) { value = v; });
+	};
+	bindBool("ObjectDrawer.isInsideTitanOverride", settings.insideTitanOverride);
+	bindBool("ObjectDrawer.showAllTitanParts", settings.showAllTitanParts);
 }
 
 void registerLightConsoleMethods(Console& console, LightSettings& settings)
@@ -124,6 +131,31 @@ void registerWaterConsoleMethods(Console& console, WaterSettings& settings)
 	bindProperty<ConsoleVec2>(console, "renderer.waterScroll", access,
 		[&settings] { return ConsoleVec2 {settings.scroll[0], settings.scroll[1]}; },
 		[&settings](const ConsoleVec2& v) { settings.scroll = {v.x, v.y}; });
+	// The terrain's own names for the same water (0x10075eb4..0x10076929
+	// call the terrain's slots renderer.water* call: 0x8c scroll, 0xac
+	// specular power ...).
+	bindVec3(console, "terrain.waterColor", settings.color);
+	bindProperty<ConsoleVec4>(console, "terrain.waterSpecularColor", access,
+		[&settings] {
+			const auto& c = settings.specularColor;
+			return ConsoleVec4 {c[0], c[1], c[2], c[3]};
+		},
+		[&settings](const ConsoleVec4& v) { settings.specularColor = {v.x, v.y, v.z, v.w}; });
+	bindFloat("terrain.waterSpecularPower", settings.specularPower);
+	bindFloat("terrain.waterAlphaAdd", settings.alphaAdd);
+	bindFloat("terrain.waterAlphaHeightMul", settings.alphaHeightMul);
+	bindFloat("terrain.waterAnimSpeed", settings.animSpeed);
+	bindProperty<ConsoleVec2>(console, "terrain.waterScroll", access,
+		[&settings] { return ConsoleVec2 {settings.scroll[0], settings.scroll[1]}; },
+		[&settings](const ConsoleVec2& v) { settings.scroll = {v.x, v.y}; });
+	bindFloat("terrain.waterSunIntensity", settings.sunIntensity);
+	bindVec3(console, "renderer.waterFogColor", settings.fogColor);
+	bindProperty<ConsoleVec4>(console, "renderer.waterFogStartEndAndBase", access,
+		[&settings] {
+			const auto& f = settings.fogStartEndAndBase;
+			return ConsoleVec4 {f[0], f[1], f[2], f[3]};
+		},
+		[&settings](const ConsoleVec4& v) { settings.fogStartEndAndBase = {v.x, v.y, v.z, v.w}; });
 }
 
 void registerRainConsoleMethods(Console& console, RainSettings& settings)

@@ -2,6 +2,7 @@
 // post-production (see LevelRenderer.h and PostProduction.h).
 #include "LevelRenderer.h"
 #include "MeshQueues.h"
+#include "SceneMath.h"
 
 #include "IO/File/FileManager.h"
 #include "Scene/EffectSettings.h"
@@ -42,14 +43,12 @@ constexpr float kShadowHeadroom = 400;
 // high) over shadowMapDepthDistance (40 m), and the map's size.
 float shadowRadius(const scene::ShadowSettings& s)
 {
-	const float scale = s.quality >= 3 ? 2.0f : s.quality == 2 ? 1.5f : 1.0f;
-	return std::max(s.shadowMapDepthDistance, 10.0f) * scale;
+	return shadowRegionRadius(s.quality, s.shadowMapDepthDistance);
 }
 
 uint32_t shadowMapSize(const scene::ShadowSettings& s)
 {
-	const int size = s.quality >= 3 ? s.shadowMapSize * 2 : s.shadowMapSize;
-	return static_cast<uint32_t>(std::clamp(size, 256, 4096));
+	return shadowMapTexels(s.quality, s.shadowMapSize);
 }
 
 } // namespace
@@ -133,25 +132,10 @@ void LevelRenderer::loadHemiMap(const LevelSources& sources)
 			if (at + 8 > l.data.size()) {
 				return;
 			}
-			const uint8_t* b = &l.data[at];
-			uint8_t table[8] = {b[0], b[1]};
-			if (b[0] > b[1]) {
-				for (int i = 1; i < 7; ++i) {
-					table[i + 1] = static_cast<uint8_t>(((7 - i) * b[0] + i * b[1]) / 7);
-				}
-			} else {
-				for (int i = 1; i < 5; ++i) {
-					table[i + 1] = static_cast<uint8_t>(((5 - i) * b[0] + i * b[1]) / 5);
-				}
-				table[6] = 0;
-				table[7] = 255;
-			}
-			uint64_t bits = 0;
-			for (int i = 0; i < 6; ++i) {
-				bits |= static_cast<uint64_t>(b[2 + i]) << (8 * i);
-			}
+			uint8_t alpha[16];
+			decodeBc3Alpha(&l.data[at], alpha);
 			for (int p = 0; p < 16; ++p) {
-				m_hemiAlpha[static_cast<size_t>(by * 4 + p / 4) * n + bx * 4 + p % 4] = table[(bits >> (3 * p)) & 7];
+				m_hemiAlpha[static_cast<size_t>(by * 4 + p / 4) * n + bx * 4 + p % 4] = alpha[p];
 			}
 		}
 	}
@@ -164,11 +148,9 @@ float LevelRenderer::hemiShadowAt(float x, float z) const
 		return 1;
 	}
 	const scene::HemiMapSettings& h = *m_sources->hemi;
-	const float u = (x + h.size / 2 - h.offset[0]) / h.size;
-	const float v = 1 - (z + h.size / 2 - h.offset[2]) / h.size;
 	const int n = static_cast<int>(m_hemiAlphaSize);
-	const int px = std::clamp(static_cast<int>(u * static_cast<float>(n)), 0, n - 1);
-	const int py = std::clamp(static_cast<int>(v * static_cast<float>(n)), 0, n - 1);
+	int px = 0, py = 0;
+	hemiMapTexel(x, z, h.offset[0], h.offset[2], h.size, n, px, py);
 	return static_cast<float>(m_hemiAlpha[static_cast<size_t>(py) * static_cast<size_t>(n) + static_cast<size_t>(px)]) / 255.0f;
 }
 
@@ -248,12 +230,7 @@ void LevelRenderer::renderShadows(SDL_GPUCommandBuffer* commands, const Camera& 
 	}
 	const float radius = shadowRadius(settings);
 	// Ahead of the camera by half the region, snapped to a quarter of it.
-	const Vec3f forward = camera.forward();
-	const Vec3f ahead = normalize(Vec3f {forward.x, 0, forward.z});
-	const Vec3f wanted = camera.position + ahead * (radius * 0.5f);
-	const float step = radius * 0.5f;
-	const Vec3f center {std::round(wanted.x / step) * step, std::round(camera.position.y / step) * step,
-		std::round(wanted.z / step) * step};
+	const Vec3f center = shadowRegionCenter(camera.position, camera.forward(), radius);
 	const Vec3f towardsLight = normalize(Vec3f {-lights.sunDirection[0], -lights.sunDirection[1], -lights.sunDirection[2]});
 	const Vec3f up = std::fabs(towardsLight.y) > 0.99f ? Vec3f {0, 0, 1} : Vec3f {0, 1, 0};
 	const Vec3f eye = center + towardsLight * kShadowHeadroom;
@@ -446,10 +423,10 @@ void LevelRenderer::drawSky(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* p
 	SkyUniforms sky {};
 	if (m_sources) {
 		const scene::SkySettings& s = m_sources->sky;
-		m_cloudOffsets[0] = std::fmod(m_cloudOffsets[0] + s.scrollDirection[0] * dt, 1.0f);
-		m_cloudOffsets[1] = std::fmod(m_cloudOffsets[1] + s.scrollDirection[1] * dt, 1.0f);
-		m_cloudOffsets[2] = std::fmod(m_cloudOffsets[2] + s.scrollDirection2[0] * dt, 1.0f);
-		m_cloudOffsets[3] = std::fmod(m_cloudOffsets[3] + s.scrollDirection2[1] * dt, 1.0f);
+		m_cloudOffsets[0] = cloudOffset(m_cloudOffsets[0], s.scrollDirection[0], dt);
+		m_cloudOffsets[1] = cloudOffset(m_cloudOffsets[1], s.scrollDirection[1], dt);
+		m_cloudOffsets[2] = cloudOffset(m_cloudOffsets[2], s.scrollDirection2[0], dt);
+		m_cloudOffsets[3] = cloudOffset(m_cloudOffsets[3], s.scrollDirection2[1], dt);
 		std::copy(std::begin(m_cloudOffsets), std::end(m_cloudOffsets), sky.cloudOffsets);
 		// CLOUDSFADEOUTDIST: the start and the length (y - x).
 		sky.cloudFade[0] = s.fadeCloudsDistances[0];

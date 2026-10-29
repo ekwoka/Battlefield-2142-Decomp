@@ -834,7 +834,8 @@ is put away. Rewritten in `GameWorld::poseSeated`.
 
 Rewritten in `GameWorld` (`vehicleLayout`, `seatPlayer`, `stepGunner`). Child
 placements turn their offsets by their parents' rotations, as the wheels'
-do. Gun heat isn't modelled yet. The vehicle HUD gets its
+do. Gun heat is modelled (see the heat under the weapons below,
+`Weapons.h` `heatAddWhenFire`). The vehicle HUD gets its
 icon, its armour, the gunner's `GuiIndex` (from the firearm's
 `weaponHud.guiIndex`) and the turret's angle. Compass nodes scroll a strip
 texture by a heading variable (`VehicleAngle`, `MinimapDelayedMapAngle`).
@@ -848,6 +849,103 @@ wraps the map angle, `0x0078fc80`) and draw a second copy a period away to
 fill the gap; snapping ones (the weapon HUDs' movement arrows) stop at the
 node's edge less the snap offsets and swap in the snap textures; tilt
 values slide the strip sideways.
+
+### Fire modes, tracers, camera recoil, armour effects and leaving a seat
+
+**Fire modes.** The fire component (constructor `0x005f28a0`) starts in
+the first `fire.addFireRate` (the template's list at `+0x30`; 2 without
+one) and keeps it at `+0x28`: 0 single, 1 burst, 2 automatic. The
+trigger (`0x005f1370`) keeps a press (`+0x6c`); the round's count
+(`0x005f1820`) ends a burst at `fire.burstSize` − 1 (template `+0x4c`, 3).
+c_PIToggleFireRate (input 46) is the firearm's action `0xb`
+(`0x005c50e0`): the fire component's slot `0x94` (`0x005f1da0`) moves to
+the next rate of the list, back to the first after the last, and returns
+false with fewer than two; on true the sound component plays
+`SwitchFireRate` (`0x005dc290`, first person). The assault rifles list
+`0 2` (they start in single fire), the machine guns and SMGs `2`, the
+APCs' gunners `1`. The weapon HUD shows `firerate_<mode>.tga`
+(`0x007be640`) only with `weaponHud.hasFireRate`, which every shipped
+weapon sets to 0. Rewritten in `FireArm` (`tick`, `toggleFireMode`,
+`fireMode`); the drones' and sentry guns' firearms ignore the mode (their
+auto controller's trigger cadence isn't traced).
+
+**Tracers.** The GenericProjectile template (`0x005b3500`, saved by
+`0x005b5850` at base + 8) has `tracerTemplate` (`+0x2d0`, resolved at
+`+0x2ec`), `tracerInterval` (`+0x2f0`, 1), `tracerScaler` (`+0x2c0`),
+`tracerSizeModifier` (`+0x2c4`, 1), `tracerConvergeDistance` (`+0x2f4`,
+100), `maxTracerScaler` (`+0x2b8`, 0.1; only the object's radius slot,
+`0x005b2e30`) and `minTracerScaler` (`+0x2bc`, never read). The firing
+(`0x005f2bb0`): with a tracer template, the fire component's `+0x78`
+counts down a round at a time and below 1 the round gets a tracer (the
+first round has one) and the count restarts at the interval: a second
+projectile of the same template (projectile slot `0xb8`, `0x005b32b0`:
+its geometry the tracer template's), tied to the round (slot `0xbc`,
+`+0x248`). Each update (`0x005b3e60`) the tracer sits on the round — or,
+until the round has gone `tracerConvergeDistance` from its start and
+hasn't hit anything, on the round plus its muzzle offset × (1 − distance /
+converge) — pointing along the velocity. Its scale (`0x005b3cb0`) is
+(s, s, min(t × L, along)) during the growth time `+0x264` = scaler /
+speed × s (set at the start, `0x005b5300`, and again at a bounce), then
+(s, s, L), with s = tracerSizeModifier and L = tracerScaler × s. The
+`p_tracer2_*` meshes run from 0 to −0.98 along z, so the streak trails the
+round. Rewritten as `tracerLook` (Weapons.h) and `GameWorld::placeTracers`,
+which hands the tracers to the EffectManager's placed meshes (drawn with
+the mesh particles, added: the Particle object's blend isn't traced).
+
+**Camera recoil.** WeaponBasedRecoilComp (the vehicle guns'; template
+`0x005de1b0`, cameraRecoilSpeed `+0x24`, cameraRecoilSize `+0x28`): each
+round (`0x005ddfc0`'s end) its control object's camera takes them
+(`0x00610180`) when its view mode (`+0x250`) is 1 or 2 (inside, nose).
+The camera's update for the local player (`0x006101c0`) moves a phase by
+seconds × speed × `*0x00a739c4` (1) and stops past 1; the kick is
+sin(phase × 2π) × size × `*0x00a739c0` (0.6) degrees, summed with the
+shakes into one turn about the camera's `+0x330` axis (`0x00610620` →
+`0x005b1a70`, degrees: `0x006ad210` scales by 0.01745). `CameraRecoil`,
+`PlayerCamera::shakeDegrees`. The gun's own recoil (recoilSize,
+recoilSpeed, recoilForce) is not rewritten.
+
+**Armour effects.** `armor.addArmorEffect` and
+`armor.addArmorEffectSpectacular` share one map of levels (the template's
+save `0x00620xxx` tells them apart by a bit at `+0x3c`); each level has a
+plain and a spectacular list (`0x00652190`, `0x006521b0`). After each
+change of the hit points (`0x006549a0` → `0x00654730`) the percent
+picks the group as for the Titans (above); a hit with a giver sets the
+armour's `+0x250` by `0x006525f0`: the object's id (network id, else
+`+0x20`) & 0x7fffffff through the generator `0x0042b230` (two steps,
+×0x5e30 and ×0x661f), h, gives ceil((((h | 0x80) >> 7) + 1) × 1.7881393e−7)
+= 3 for about a third of the objects; for them a hit taking over 0.2 ×
+armor.hitPoints (template slot `0x38`, `+0xc4`), or leaving over 0.25 ×,
+is spectacular, and the group started takes its spectacular list when it
+has one. Levels 0 and −100 are left in the world, the others follow the
+vehicle. The wreck's hit points drain to −wreckHitPoints over
+timeToStayAsWreck (see the Titans), so the −1 … −99 groups (the aircraft's
+burning) start on the way and the −100 group as it goes. Rewritten for
+vehicles in `GameWorld::armorEffectsAfterDamage` / `followArmorEffects`
+(the drain is linear over the rewrite's wreck time; the AI's ×3 is left
+out). Not done: `addWreckArmorEffect`, hideChildrenOnSpectacularDeath,
+destroyOnSpectacularDeath.
+
+**Leaving a seat.** The PlayerControlObject template (save at base + 8):
+soldierExitLocation `+0x308`, altSoldierExitPosition `+0x354`,
+hasRestrictedExit `+0x353`, exitSpeedMod `+0x40c` (1),
+maintainCameraOnExit `+0x480`. With hasRestrictedExit (`0x005c7840`) four
+places are tried (`0x005c71a0`: the exit location, it mirrored across x,
+the alternative, it mirrored; a zero one takes the parent control
+object's; in the seat's frame, 0.5 m up): one is taken when nothing lies
+between the vehicle and it (`0x006f2530`) and the ground lies over 0.5 m
+below, then at once for an air vehicle (template `+0x3d0` 2 or 3), else
+when there is ground within 5 m below a point 0.25 m further out; the
+first that passed only the first tests is the fallback; with none the
+soldier stays in. (The soldier's fit there, interface `0xc4d7` slot
+`0x14`, and `0x005c6ff0`'s ray start are left to the ray from the
+vehicle's centre.) The exit (`0x004bb570`) gives the soldier the vehicle's
+velocity × exitSpeedMod (× 0.7 for an object that is no control object);
+with maintainCameraOnExit (`0x005cea00`) it faces the way the seat's camera
+looked (the camera matrix's yaw, `0x006ad2a0`). `GameWorld::restrictedExit`,
+`enterOrLeaveVehicle`. Not done: maintainCameraOnExitToOtherVehicle,
+dontClearTeamOnExit, takeOverInput, ToggleCameraComp (the weapon's zoom
+switching the seat's camera by `zoom.startCameraId` /
+`startCameraViewMode`).
 
 ## Animation systems
 
@@ -1207,8 +1305,9 @@ CVMChase, CVMFlyBy and CVMFrontChase on, followStiffness 1, chaseDistance
 insideViewInterpolate 1, saturation 1, cockpitLod / cockpitSubGeom −1.
 `PlayerCamera::insideSun` serves the interior sun (the getters
 `0x006104d0`..`0x00610580`, the damage colour flickering below the
-threshold; the flicker's wave is the rewrite's); the renderer doesn't
-light by it yet. The chase view's field of view is the seat camera's
+threshold; the flicker's wave is the rewrite's); the renderer lights the
+first-person pass by it (`LevelSources::insideSun`, `InsideSun` in
+`LevelRenderer::drawFirstPerson`). The chase view's field of view is the seat camera's
 `worldFOV`. A joined client keeps first person when the server's
 settings block has `sv.allowExternalViews` off.
 
@@ -1615,7 +1714,9 @@ width c — SkinnedMesh.fx `saturate(cos − (1 − c)) / c`, LightGeom.fx
 — handed as ConeAngle from the light's slot 0x1c8 (`0x10060000` region,
 the "Spotlight" technique); where the degrees become c wasn't found (no
 degree-to-radian constant near the template's +0xd0 / +0xd4 in either
-binary). Directional
+binary; the exe's setters only clamp them to 180, `0x00617790` /
+`0x006177c0`, and the light manager's own spot techniques are never drawn:
+see "Projector lights" below). Directional
 lights (the sun) are left to the level lighting.
 
 `Object.setLightSourceMask` (`0x006ed811`; 398 statics on Cerbere_Landing
@@ -1937,6 +2038,152 @@ by its insideStaticSunDirection, Color (flickering to the damage colour
 below insideDamageThreshold) and AmbientColor instead of the level's,
 the effects' lights only with allowInsideDynamicLights
 (`LevelSources::insideSun`).
+
+## Titans' parts, the underwater view, particle and material detail (RendDX9)
+
+**Titan interiors and exteriors.** `GeometryTemplate.isTitanInterior` /
+`isTitanExterior` (property objects `0x1007352b` / `0x10073412` → the
+template's slots 0xd0 / 0xc8, `0x10148690` / `0x10148670`: `+0xc9` /
+`+0xc8`, setting one clears the other) and `titanExteriorPartIndex`
+(`0x10074341`, bundled template `+0x2bc`). The object drawer
+(`DAT_1020ef1c`, vtable `0x101d4e98`) answers "is the camera inside a
+Titan" at slot 0x40 (`0x100b9db0`: `+0x90`, set each frame from the game's
+slot 0x110 — the Titan the camera is in, BF2142.exe `0x006fa8b0`: the
+local soldier's Titan, else a ray from the camera up through each Titan's
+hull, `0x006f2b00` — or `+0x91`, `ObjectDrawer.isInsideTitanOverride`,
+`0x1007597d`) and slot 0x48 (`+0x92`, `ObjectDrawer.showAllTitanParts`,
+`0x10075a7e`). The mesh renderers:
+
+- static meshes (StaticMeshRenderer's draw `0x100bdb00`): unless all parts
+  are shown, an interior template is drawn only from inside (through the
+  interior path `0x100bd0a0`), and from inside nothing else is;
+- bundled meshes (`0x100c5030`): from inside, no exterior template and
+  nothing farther than `renderer.indoorBundledMeshCullDistance` (`+0x59c`,
+  53 at `0x1002aba0`); the rest by the interior path `0x100c3880`;
+- skinned meshes (`0x10162070`): from inside, nothing farther than
+  `renderer.indoorSkinnedMeshCullDistance` (`+0x598`, 53).
+
+The hull's exterior static parts (front 1 and back 2 on both Titans) share
+their LODs in pairs: each records the LOD its distance picks
+(`0x100baf40`: the renderer's `+0x9c..+0xa8` by part 1..4) and draws at
+its pair's smaller one of the last frame (`0x100baf90`: parts 1–2 `+0xac`,
+3–4 `+0xb0`, remade once a frame by `0x100bb470`, called from
+`0x10020000`'s frame), at most the LOD count. Rewritten in
+`src/Render/TitanParts.h` and `LevelRenderer::prepareInstances`; the
+rewrite takes the camera as inside a Titan when it is within the box of a
+room (a static mesh marked isTitanInterior), which also counts the cargo
+bays' open floors (seen from them, the world's statics below are left out,
+as the exe's ray up through the hull would). The Titan hemi maps
+(`hemiObjectFor`) follow the same test.
+
+**The view under water.** The fog object (`DAT_101fb808`, `0x1004a590`)
+keeps the level's fog and the water's (`renderer.waterFogColor`,
+`0x1004f740` → `0x10049640`, kept / 255 at `+0x54`, default 51.5 / 51.5 /
+128; `renderer.waterFogStartEndAndBase`, `0x1004f4a0` → `0x10049680`,
+`+0x60`, default 10 / 250 / 1 / 0.5). The colour (`0x100497a0`) and the
+start, end and base (`0x10049850`) are the water's with the camera at or
+below the heightmap cluster's sea level (slot 0x60; −1000 without a
+cluster), and the sky dome draws `SkyDomeUnderWater` (the water's fog
+colour, `0x100fd2f0`) below it. The end and the fourth value scale by the
+view distance (`0x10028020`: the settings object's `+0x108`,
+`VideoSettings.setViewDistanceScale` clamped to 0.5..1 by slot 0x28,
+`0x1000f0c0`) before `0x100355c0` makes RaCommon.fx's FogRange
+(calcFog: max((e − base w) / (e − s), w₄) − ((w − s) / (e − s))³).
+Rewritten in `src/Render/Fog.h`: under the sea the clear colour and the
+shaders' fog are the water's, its end as scripted (Cerbere Landing 10 m),
+and the dome isn't drawn. Above it the level fog keeps the rewrite's
+(depth / 1400 m)² stand-in: with the scripted ends in metres (Cerbere 140,
+Camp Gibraltar 100) calcFog would fog the levels far closer than they
+look, so the depth the shaders take (`Out.Pos.w`) is not yet known to be
+metres. `terrain.waterSunIntensity` (`0x100766e2` → `0x100767e9`) sets the
+water material's PointColor (`+0x4c` of its parameter block, `0x10040070`)
+to (1, intensity, 0.8, 1); without a water lightmap (none ship)
+RaShaderWaterBase.fx takes it as the lightmap: the sun's share scales the
+specular and lowers the envmap's share by 1 − saturate(share + 0.75)
+(`water.frag`). The other `terrain.water*` setters (`0x10075eb4`..
+`0x10076929`) call the terrain's slots `renderer.water*` call, so they are
+the same settings (`registerWaterConsoleMethods`).
+
+**Sprite flipbooks and the systems' flags.** The sprite template's
+`animationEnable` (`+0xd8`), `animationSpeed` (`+0xd4`, 1),
+`animationPlayOnce` (`+0xd0`: the setter `0x10138790` and the frame
+count's `0x101387f0` make the speed frames / timeToLive, one pass over a
+life) and `animationRandomizedStartFrame` (`+0xd1`): a particle's frame
+clock (`+0x78`) starts at 0 or floor((frames − 1) u), drawing that random
+before its life's (`0x1013fdc0`); when drawn (`0x10131f80`) it advances by
+animationSpeed × clamp(rotationGraph, 0, 1) × the frame time (the
+template's `+0x100` graph is the rotation graph, `0x101392c0`), and the
+frame is its whole part modulo the frames (u from frame % across, v from
+frame / across). Particles.fx as shipped is `LOW`: the frame alone, not
+blended with the next. `selfShadowIntensity` (`+0xa4`, 1) is copied into
+each particle (`+0x8`) and read nowhere in the sprite path or the shipped
+shader. `showInZoomedMode` (the exe's particle template `+0xaa`, 1 by
+default, `0x00626d40`) and `showInFirstPerson` / `showInThirdPerson`
+(`+0xa8` / `+0xa9`) are the flags an EffectBundle's start
+(`0x00619f90`) keeps per system (bits 0..2); in first person it starts
+those with bit 0 or 2 and marks them zoomed (the system's `+8`) when the
+bundle's holder is zoomed (`0x006187c0`); the scoped muzzle flashes set
+it 0. `noRotationFromParent` (RendDX9 `+0x222`, slots 0x11c / 0x120): the
+system takes its parent's position, not its turn (`0x1013eff0`). The
+bundle's `randomAgeFactor` (`+0x410`) is sampled once a start and scales
+its systems' age (`+0x12c`, slots 0x7c / 0x78), and `speedFromPhysics`
+(`+0x45c`) has the exe set, each tick (`0x00618ae0`), the velocity its
+particles inherit to the root object's physics velocity's direction
+times the square root of its speed (slots 0x40 / 0x4c, the instance's
+`+0xcc` / `+0xdc`). Rewritten in `src/Effects` (`spriteFrame`,
+`ParticleTemplate`, `EffectManager::setPhysicsVelocity`) and
+`particle.vert`; the rewrite's zoomed first person is the view's field of
+view narrower than its first. Not done: whether the started zoomed-mode
+systems with showInFirstPerson 0 draw unzoomed (the system's `+8` reader
+in RendDX9 isn't traced), so the rewrite starts first-person systems by
+showInFirstPerson alone.
+
+**Projector lights and the lights' shadows.** The LightSource template
+keeps `castsStaticShadow` / `castsDynamicShadow` / `selfShadows` /
+`objectShadows`, `softness` and `projectorTexture` / `Fov` / `Aspect` /
+`Near` / `Far` (the writer `0x00617030`; slots 0xfc..0x1e0). RendDX9's
+light manager loads `Shaders/LightManager_r3x0` (`0x100a9a00`, the
+manager's `+0x788`), whose SpotProjector, PointLightShadow and
+SpotLightShadow techniques take them, but only fetches its parameter
+handles (LIGHTPOS … PROJECTORMASK, `+0x79c..+0x7b4`) and releases them:
+nothing sets a technique of it or draws with it (no reader of `+0x788`
+besides the load and the release), and no "SpotProjector" string exists
+in RendDX9_ori.dll. So retail draws no projected textures and no per-light
+shadows; the rewrite keeps the templates' values unread. The cone
+angles' setters clamp to 180 (`0x00617790` / `0x006177c0`, the
+template's `+0xd8` / `+0xdc`); where the degrees become the shaders'
+width is still not found (see the spot lights above).
+
+**Static-mesh and bundled material detail.** `setMaterialReflectionScale`
+and `setSpecularStaticGloss` (`0x10073caf` / `0x10073eb9`) act on bundled
+templates only (`0x100713c4`): maps keyed geometry << 16 | lod << 8 |
+material (`0x100a25d0` `+0xec`, `0x100a26b0` `+0xf8`);
+`setMaterialParallaxHeightScale` (`0x10073208`) is any template's slot
+0x38, empty for bundled ones (`0x100a7d70`); `nrOfAnimatedUVMatrix`
+(`0x10073ba7`) the bundled template's `+0x110`. The rewrite keeps all
+four (`geom::GeometryTemplate`) and draws a bundled material's StaticGloss
+from its setSpecularStaticGloss (0.15 otherwise). Not drawn: the
+reflection scale (the rewrite draws no bundled envmaps), parallax and the
+static meshes' detail / crack normal maps (the static vertex format has no
+tangents; RaShaderSTM's parallax needs them), and the animated UV
+matrices (the exe's per-part UV transforms, the tracks', aren't traced).
+
+**`undergrowth.simpleShaderEnable`** (`0x100862e7`) writes the
+undergrowth's slot 0x40, the value the quality switch also writes: the
+script's or console's setting holds until the video settings are applied
+again (`QualitySettings::undergrowthSimpleShaderSet`).
+`HemiMapManager.makeHemiMap` (`0x10085a91` → the manager's slot 0x40,
+`0x100ed480`) renders the level from above into two render targets the
+size given (at most the device's texture size) and saves the hemi map: an
+editor tool no shipped script calls; still a stub.
+
+**Tests.** The renderer's GPU-free parts are headers the tests include
+(`bf2142_tests` doesn't link the renderer): `TitanParts.h`, `Fog.h`,
+`SceneMath.h` (the shadow region and map size, BC3 alpha, the hemi maps'
+texels and the Titan maps' bilinear sample, HeightOverTerrain, the clouds'
+offsets, the normal maps' kinds) and `OverheadView.h` (the overhead
+camera's place), with the quality's mip skips and lighting level;
+`tests/RenderSceneTest.cpp`.
 
 ## Shadows, hemi maps, sky and post-production (RendDX9)
 
@@ -3329,8 +3576,9 @@ and map list (`DAT_00a21940`, `MapList.cpp`) outlive the levels:
   of the list in turn. Round bans end. The clients stay connected through
   the change (`HostedGame::changeLevel`).
 - **`reservedSlots.*`** (`0x0041aa21..`): the nicks, `load`/`save`
-  (`reservedSlots.addNick` lines). Kept, not yet used to admit a player to
-  a full server.
+  (`reservedSlots.addNick` lines). A listed nick is admitted to a full
+  server (`HostedGame` reservedSlotCheck, 0x004ae6a0's rule; see the
+  reserved slots below).
 - **`Game.sayAll` / `Game.sayTeam`**: a chat line on channel 12 (13 to a
   team) from player 0xff with source 1.
 
@@ -4178,8 +4426,9 @@ beside it. Textures are under `Menu/HUD/Texture/`, mostly `.tga`.
 
 Rewritten in `src/Hud` (nodes, variables, fonts, quads), with the drawing
 in `src/Render` (`ui.vert/.frag`) and the variables set in `src/Main`. The
-corner roots' positions are approximate. The crosshair stays at the
-weapon's minimum deviation; soldier deviation isn't modelled yet.
+corner roots' positions are approximate. The crosshair spreads by the
+weapon's soldier deviation (`GameWorld::weaponDeviation`, see Soldier
+deviation), its minimum without one.
 
 ### Text and the scoreboard
 
@@ -4228,11 +4477,27 @@ name>/scoreBoard_Flag.tga`. The lists are BF2142.exe's
   shown share of the track less two rows (at least 4 pixels).
 - The cells sit under `scoreboard_icons.tga`: score, teamwork, kills,
   deaths, ping.
-- The text colour is the list data's per cell (`0x007ddb90`); the code
-  that fills the scoreboard's data sources is reached only through the HUD
-  manager's interface (slot `0x214`) and wasn't found, so the rows are
-  drawn black (`HudManager::setListTextColor` changes it).
-- Rows are sorted by the scripts' score.
+- The text colour is the list data's per cell (`0x007ddb90`). The data
+  sources come from the HUD manager's slot `0x214` (`0x007c6d70`: 1 and 2
+  are the scoreboard's +0x394 / +0x38c lists, 9 and 10 its totals
+  +0x398 / +0x390, made by `0x007b9aa0` with their 12 columns), and the
+  scoreboard's row filler `0x007bb540` writes each cell (`0x007e0be0` /
+  `0x007e0d60`: text, colour, flag) in font 1 (`"§1%s§0"` `0x009b4f1c`,
+  `"§1%d§0"` `0x009b6854`) and one colour a row from three static tables
+  (`0x008f24b0`, `0x008f2350`, `0x008f2400`), index 2 on the local
+  player's team's list and 1 on the other: a player not alive (slot
+  `0x74`, `+0xd5`) black (the scoreboard's grey rows take black text), the
+  local player's squad (slot `0x120`) and the commanding local player
+  (slot `0x128`) green (0.031, 0.467, 0.008), other friends blue (0, 0.38,
+  1) and enemies red (0.992, 0, 0.004). The local player's row has the
+  background (0.392, 0.392, 0.392, 0.35) and every odd row (0.651, 0.651,
+  0.651, 0.8) (`0x007dd5d0`: the row's cells +0x6c/+0x70, filled between
+  the side borders by `0x007de7d0` except on a selected row). The HUD
+  manager's slot `0x410` and the player's `+0x404` (slot `0x3bc`, set
+  through `0x3b8`) also make a row black; what they mean isn't traced.
+  `menu::scoreboardStyle` (`src/Main/HudMenus`).
+- Rows are sorted by the scripts' score. The original groups them by
+  squad under squad header rows (`0x007ba570`); the rewrite doesn't.
 
 Tab shows the scoreboard in play; `--scoreboard` forces it on.
 
@@ -4248,6 +4513,83 @@ Every node but a split places its children from its own position: the
 commander screen's tab pictures carry their buttons, labels and lists
 (`CommanderToolsTabSelected` at 3,519 with its button at 0,0), as do the
 transforms.
+
+### The weapon, item selection and vehicle HUD
+
+(`src/Main/HudMenusVehicles.*`.) The WeaponHud (class id `0xc4ee`,
+properties from `0x00556f94`, written back by `0x006381d0`) and VehicleHud
+(`0xc4ea`, from `0x005532c2`, written back by `0x00636440`, constructor
+defaults `0x00637b30`) keep their fields in the template; the HUD reads
+them through the component's slot 0x50 (weapon) / 0x78 (vehicle), a block
+0x44 bytes below the template's fields (the weapon's guiIndex at +0xa8 is
+the template's +0xec; hasMag +0x117, showAmmo +0x11a, showClips +0x11b,
+showBatteryIconInHud +0x127), and their textures through slot 0x4c.
+
+- **The weapon HUD** (`0x007c1f10`, the variables of `0x007bf6f0`):
+  PrimaryAmmoShow while guiIndex isn't -1, PrimaryAmmoBarShow and
+  PrimaryClipsShow by showAmmo and showClips (both default on),
+  PrimaryWeaponNameString the hudName, CrosshairIconPathString,
+  PrimaryAmmoBarFront/BackPathString; with hasMag and a magazine the clip
+  icon (PrimaryClipPathString), else the ammo icon
+  (PrimaryAmmoIconShow/PathString); FireRateIconShow and
+  "Ingame/Weapons/Icons/Hud/firerate_<n>.tga" for hasFireRate and a fire
+  rate n (`0x007be640`; the rewrite's firearms don't report one yet). The
+  ammunition (unless the bar is off or a reload runs, which hides the
+  texts, `0x007bede0`): no magazine (magSize < 0) shows PrimaryEternalShow
+  with a full bar; else PrimaryAmmo rounds / magSize, PrimaryAmmoString,
+  TotPrimaryAmmoString "/ %i" (all rounds), PrimarySingleFireShow for a
+  magazine of one round, PrimaryBatteryIconShow for showBatteryIconInHud,
+  PrimaryEternalMagsShow for endless magazines. The colours through the
+  HUD manager's slot 0xa8 (`0x0074eb60`: below the threshold (0.949,
+  0.184, 0.184), else white): the ammunition's below 0.3 of a magazine
+  (0.1 for single rounds), the clips' below 0.3 of the magazines. The clips
+  (`0x007be960`): PrimaryClip1..3Show for 1..3 spare magazines,
+  PrimaryClipStringShow and PrimaryClipString "(%i)". The reload
+  (PrimaryReloadTime / Show while between 0 and 1) and the heat. The
+  overheat (the firearm's slot 0x2c) starts the weapon's overheatSound once
+  each time (latched at +0xb0).
+- **The item selection** (`0x0079bc70`..`0x0079c720`, the HUD manager's
+  +0xf4, menu state 0xb): up to ten slots, the kit's weapons by item index
+  (`0x0079c290`; 10 - index with `ItemSelection.setReverseItems`), packed
+  from slot 0 at the bottom (`0x0079be20`): Item%iIcon the weapon's
+  selectIcon, Item%iIndex its index, ItemSlot%iActive, ItemSlot%iAlpha (0.4
+  for one that can't be used), ShowItemSelect and ItemSelectActive. The
+  mouse wheel opens it for 2 s (`0x00756601`) and moves the selection; its
+  timer closes it (`0x0079c050`). Here a change of the weapon in hand opens
+  it.
+- **The vehicle HUD** (`0x007a3180` → `0x007a2e60`, `0x007a18a0`,
+  `0x007a2b50`; the variables of `0x0079e5a0`): VehicleNameString the
+  hudName, TurretIconShow hasTurretIcon, VehicleArmor its share (with
+  useChildArmor the child's, `0x005c6460`), VehicleArmorString
+  ceil(share × 100) (per cent, not hit points) and its colour below 0.3,
+  SpeedString round(|v|) × 10, AltitudeString ceil(height over the sea)
+  (DAT_00a83e58 slot 0x60), VehicleElevationSpeedAngle eased by 4π /
+  maxClimbSpeed (default 10) × the climb × 0.1. The bottom-left panel's
+  faded alphas (`0x007a0a90`): the panel's alpha less 1 −
+  MenuBackgroundAlpha (the panels' swap, the HUD animation
+  "BottomLeft/Alpha", taken as done). The seat dots (`0x007a28e0` → the
+  "OccupiedData" list `0x007e1620`, drawn by BfOccupiedVehicleNode
+  `0x007e1520`): per seat a state at OccupyingPlayerPos<seat+1>X/Y, the
+  seat object's vehicleIconPos (0, 0: none): 4 an empty seat
+  (vehiclePositionEmpty), 1 / 2 the local player in a squad or not
+  (PlayerGreen / PlayerBlue), 7 his squad (Squad), 5 his team (TeamBlue),
+  6 the enemy (TeamRed).
+- **The map's vehicles** (Bf2MenuMapNode `0x00793b60`, their textures
+  `0x0077dd70`): the relation `0x00781680` (the local player's own 0x25, a
+  teammate's or his team's empty one 0x12, the enemy's 0x13, a neutral
+  empty one 0x10) shows his own, friends' and neutral ones, the enemy's
+  when spotted or with showOnEnemyMinimap, any with alwaysShowOnMinimap;
+  `Minimap.setPaintVehicle` filters by vehicleType (`0x0077e520`). The
+  texture is miniMapIcon (miniMapIconInside from inside), sized
+  miniMapIconSize (16 × 16), turned with the vehicle; with usePlayerIcon a
+  crewed vehicle shows as its occupant (slot 0x138). The tint is the
+  players' (`0x00b3be30`). Not done: the spotted state, the reload and
+  background icons (`0x0077dee0` / `0x0077df60`).
+
+Not done: the Secondary* weapon block (a seat's second gun), the
+passengers' names (OccupyingPlayerName*), the vehicles' stamina, torque
+and the mech's foot animation, the weapons' range finder, distance counter
+and scan progress (TargetDistanceString, HudScanProgress), the blinks.
 
 ### Name tags
 
@@ -4295,11 +4637,36 @@ ColorArray for player and object tags (types 0 and 3) is the table at
 `0x102112f8` the NametagManager's constructor fills (`0x100f24c0`):
 white, red (0.87, 0.094, 0.094), blue (0.254, 0.552, 0.89), green (74,
 227, 37 / 255), yellow (1, 1, 0). Guesses: the soldier's origin 1 m over its feet, the vehicle height (4 m; RendDX9 asks
-the render object), the bar's place. Not done: ranks and veteran icons
-(`ICRank`, `ICVeteran`), the radio calls' icons (medic, ammo, repair,
-revive: events 0x33-0x37 within maxCallDistance 150), orders and requests
-(TTOrder / TTRequest), the Titans' and other objects' `3dMapIcon` frames,
-the fog factor on enemies, the spectator's rules. The HUD's object marker
+the render object), the bar's place.
+
+The icons come from `Menu/Nametag/nametags.con`, which the HUD manager's
+set-up (`0x0075cfa0`) runs after HudSetupMain.con: `nametags.createIcon
+<NametagItemIDs>` (`0x10079004`) picks an id by name (the enum
+`0x10070e1a` prints: ICRank 0 with its 44 ranks, ICRevive 0x2c, ICMedic,
+ICRepair, ICAmmo, the vehicle ones 0x30-0x33, the bars 0x34-0x36,
+ICSquadOrder 0x3d and ICCommanderOrder 0x43 of six frames, ICTarget 0x4e,
+ICVeteran 0x4f, ICObject 0x50 of 41 frames, the request orders
+0x79-0x80, the Titans 0x81-0x88, the silos 0x8c-0x91, the selection
+backgrounds 0x92-0x94, ICObjectCore 0x96, the consoles 0x97-0x9a, the
+networkables 0xa0-0xa5); `nametags.setTexture <n> <texture> x y w h`
+(`0x100790e4` → the manager `0x100ee9a0`) gives an icon `n` frames along
+the texture (`0x1016b790`: frame k is the w × h texels at x + k w, so id
++ k), and a bar (`createBar`, mode +0x4cc 1) its fill (0) and base (1).
+`nametags::IconRegistry` keeps them. The objects' 3D icons
+(`Nametag.show3dIcon`): the icon 0x50 + `Nametag.3dMapIcon` (so 70 is
+ICObjectCore, 71-74 the consoles, 49/50 the two Titans, 60-64 the silos;
+lower numbers are the Objects atlas) at the object and its
+`3dMapIconOffset`, faded to `maxDistance` (`maxEnemyDistance` for the
+enemy's), `showInside` / `showOutside` by the camera inside a Titan,
+`teamSpecific` / `inverseTeamSpecific` as the points', in ColorArray by
+`useTeamColor`. Not done: ranks and veteran icons on the players' tags
+(`ICRank`, `ICVeteran`: where the renderer's icon passes put them isn't
+decoded), the radio calls' icons (medic, ammo, repair, revive: events
+0x33-0x37 within maxCallDistance 150), orders and requests (TTOrder /
+TTRequest), the selection backgrounds (`selected3dMapIcon`, `selectable`:
+the commander's and squad leader's pick), `showIconOnTracker`,
+`useAliveArmor`, the camera's inside-a-Titan state (taken as outside), the
+fog factor on enemies, the spectator's rules. The HUD's object marker
 nodes (`createObjectMarkerNode`) are the AA and gunship lock-on markers;
 see "HUD nodes: transform lists, effects, markers and the map menus".
 
@@ -4831,7 +5198,8 @@ Active camouflage (`unl_active_camo`, recognised by its
 heat as its charge (0.005 a round, cooling 0.08 a second, 1.5 s off when
 spent). Nothing else can be fired while it's in hand. Bots see a cloaked
 enemy only within `aiSettings.setDiscoverCloakedEnemiesDistance` (3 m).
-The soldier is drawn hidden as a stand-in for the shimmer.
+The cloaked soldier is drawn as the camouflage's refraction
+(`LevelRenderer::drawCamouflage`, the post-production's mask).
 
 Seeking projectiles (`seek.*`, `follow.*`):
 
@@ -5067,6 +5435,17 @@ while they have the keys. `src/Main/HudMenusChat`:
   one off, Enter sends (`0x007d9640`, `0x007d9900`, `0x007d9b50`: to the
   server, which echoes it to everyone; offline straight into the list)
   and closes. While a box is open the soldier gets no input.
+  `HudManager.enableSayPlayerChatBox` (slot 0xd8, `0x007d95b0`) opens the
+  whisper box (`SayPlayerShow`, flag +0x3b); `0x007d9e20` sends
+  HUD_TEXT_CHAT_WHIPSER + the text to the HUD manager's player (+0x48).
+  Nothing picks that player offline and the whisper's network message isn't
+  decoded, so the rewrite's whisper stays in the local list.
+  `HudManager.addFavouriteServer <bool>` (slot 0x434 → `0x00752580` → the
+  HUD information layer's slot 0xa8, `0x00449180`): 1 adds the joined
+  server to GeneralSettings' favourites (slot 0x17c: its address, port,
+  name and `time()`), 0 removes it (slot 0x190); ServerIsFavourite
+  (+0xb24) follows the list. Removing isn't rewritten (GeneralSettings has
+  no console method for it).
 - **ChatList** (the message list class `0x007b6d80`): a line is "§1" +
   text + "§0", chat "<prefix><name>: <text>" (`0x007b4cd0`; the prefixes
   `HUD_TEXT_CHAT_TEAM`, `_SQUAD`, `_COMMANDER`, `HUD_CHAT_DEADPREFIX`),
@@ -5303,18 +5682,51 @@ active node to):
   `alt`, `lowArmor` and `lowAmmo` pairs, `closeToHelp{String,Sound}Key
   {Neutral,Friendly,Enemy}`, `closeToDistance`): the help key shows when
   the player takes the vehicle or the weapon that has one, the low-armour
-  key when that vehicle's hit points fall to its `armor.criticalDamage`,
+  key when that vehicle's armour falls below 0.3 of its maximum,
   the close-to key for the object's side when the player comes within its
   distance. Showing (the HUD manager's slot `0x94`, `0x0074f2b0`) sets
   `IngameHelpString` (localised) and `IngameHelpShow`, and a timer
   (`+0x238`) the HUD manager's update counts down (`0x007539c0`) before
-  hiding it; the rewrite gives it 6 s (the help manager's own timers,
-  around `0x00645d40`, are not read). The matching sound key goes to the
+  hiding it; the help manager hands it 9 s (`0x00646cb0`: 9.0). The
+  matching sound key goes to the
   sound layer's `VoiceMessages::playHelp` (`gameLogic.messages.
   addHelpMessage` keeps the Help_VO files there).
   `GeneralSettings.setHelpPopups 0` turns them off; each key shows once a
-  round. The help manager's own tutorial messages (`0x00645d40`'s 75
-  HUD_HELP keys: controls, squads, the commander's tools) are not done.
+  round and once ever: a key shown goes on GeneralSettings' played list
+  (`0x00645c10` → its slot 0x174, `GeneralSettings.setPlayedVOHelp`,
+  saved in General.con; `0x00645cc0` → slot 0x178 asks it).
+  The help manager's update (`0x00646cb0`, one case a message) has the
+  template keys among its messages: case 0x3a low armour (the vehicle's
+  armour below 0.3 of its maximum, not `armor.criticalDamage`), 0x3b low
+  ammunition (a kit weapon's rounds below 0.3 of a magazine:
+  `lowAmmoHelpStringKey` / `lowAmmoHelpSoundKey`), 0x50 the weapon in
+  hand's key while its HUD shows `guiIndex` and its alt key
+  (`altHelpStringKey` / `altHelpSoundKey`) while it shows `altGuiIndex`
+  (zoomed; the HUD manager's slot 0x2b8 slot 0x24 against the weapon HUD's
+  +0xa8 / +0xac), 0x51 the vehicle's.
+- **The help manager's tutorial.** The player's helper (`+700`, built by
+  `0x00645d40`, ticked by `0x00649d80` from the player's update): 83
+  messages (`+0x208 + i × 0x1c`: HUD_HELP_PLAYER_CONTROLS_*, the squad
+  tab's, the commander's tools, the spawn screen's...), each with a limit
+  of the profile's play time (`+0xa8 + i × 4`, seconds:
+  LocalProfileManager slot 0xe0; jump and strafe 7,200, crouch 18,000,
+  createSquad 36,000, applyCommander 72,000) past which it no longer
+  applies, and an "event only" flag (`+0x53 + i`) for those the game's own
+  events show. At the round's start (`0x006467f0`) the played ones and
+  those past their limit are done. While the round plays (game logic slot
+  0x164 == 1) the tick waits 10 s (`+0x1f8`) after a message, then tries
+  the messages in order and shows the first whose condition holds, the
+  text for 9 s with its voice (`move_help`, `weapon_zoom`, `man_down_help`,
+  `comm_rose`, `exit_Vehicle_help`, `weapon_change`, `open_map`... or the
+  key itself), and marks it done and played. The conditions rewritten:
+  the HUD's menu state 0 and on foot (the controlled object a soldier,
+  `+0x205`), the round time (> 3 s, 20 s, 60 s: `0x00666070`), alive, in a
+  squad and not its leader, a squad leader, the commander screen (slot
+  0x234), man down, the spawn screen (menu state 1), in a vehicle
+  (`HelpPopups::kTutorials`, `HelpPopups::tutorial`). Left: the event-only
+  messages (their events), the squad and commander tabs' menu states
+  (0x12, 0x13, 0x22), the parachute, ladders and vehicles in reach, and the
+  profile's play time (taken as 0).
 - **Supply sounds.** AbilityHud (`0xc4f2`, `abilityHud.healingSound`,
   `repairingSound`, `ammoSound` from `0x0055a41f`):
   the kits carry them (`S_Heal`, `S_Repair`, `S_Resupply`); the player's
@@ -6690,7 +7102,7 @@ The urgencies:
   its conditions hold) only for a weapon whose fire mode is 2 (aiWeapon
   slot 0x104 → BF2142.exe 0x00892650: the fire component's `+0x18`, which
   starts at the first `fire.addFireRate`, or 2 without one, 0x005f28a0;
-  the bots never toggle it). Anything else gets Trigger (0x1008f1e0, once):
+  the bots never toggle it; burst fire then takes a burst a tap). Anything else gets Trigger (0x1008f1e0, once):
   pressed on one plan execution, let go on the next. Fire rate and
   distance play no part. So the assault rifles, machine guns and the like
   hold; pistols, shotguns, snipers, rockets and tank guns tap.
@@ -6792,7 +7204,13 @@ The urgencies:
   (0x100d9090). It does not fire while a teammate is in the line of fire.
 - **Deviation:** each round strays by (1 − acc)(1 − t/2) × deviation,
   with t the time on target over 15 s (BF2142.exe 0x00892b70). acc is
-  skill against soldiers.
+  skill against soldiers. The value goes to the firearm (interface
+  `0x94c0` vt+0xf4, 0x005c4cf0 → its deviation component's slot 0xac:
+  SoldierDeviationComp `+0x44`, 0x00680290; SimpleDeviationComp `+0x28`,
+  0x008a1a90), which adds it to its own deviation while the holder is an
+  AI (0x005de980's and 0x005dedb0's ends): the round's two normal numbers
+  × deviation × 0.01 (0x005f5540). A firearm without a deviation
+  component takes none. `GameWorld::setAiDeviation`.
 
 - **The ControlInfo plug-in** (BF2142.exe, constructor 0x00891d80, AI
   adaptor vtable 0x009d6b98): `+4` proportionalConstant (−7), `+8`
@@ -7317,9 +7735,8 @@ and walks there.
 - **Aim:** bots don't zoom. (The head twists before the body for every
   soldier: see `SoldierControl::twist`, 0x0058a6d0.)
 - **Deviation:** the AI deviation (0x00892b70) widens the weapon's own
-  deviation through the soldier (vt+0xf4); the rewrite's hand-held
-  firearms have no deviation model, so the bot spreads its aim uniformly
-  over ± half of it on each axis.
+  deviation (see Fire above): `GameWorld::setAiDeviation`; the bot's aim
+  stays on the target.
 - **Explosives and the weapon choice:** the rays bisect
   `GameWorld::lineOfSight`. `+0x248` is set by the fire plan (0x100795a0)
   when it adds a move to the order's spot (0x100d11c0; 0x100775f0 tests

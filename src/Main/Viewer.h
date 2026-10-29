@@ -43,6 +43,7 @@ struct ViewerOptions {
 		bool fire = false;
 		bool altFire = false; // the right button
 		bool use = false; // enter or leave a vehicle
+		bool toggleFireRate = false; // held: c_PIToggleFireRate (the weapon's next fire mode)
 		bool scoreboard = false; // held: the scoreboard (Tab)
 		bool commanderScreen = false; // pressed: the commander screen (Caps Lock)
 		bool crouch = false;          // held: crouch (c_PICrouch, left Ctrl)

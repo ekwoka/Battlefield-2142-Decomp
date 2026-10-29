@@ -150,6 +150,9 @@ float QualitySettings::undergrowthViewDistanceScale() const
 
 bool QualitySettings::undergrowthSimpleShader() const
 {
+	if (undergrowthSimpleShaderSet >= 0) {
+		return undergrowthSimpleShaderSet != 0;
+	}
 	return level3(terrain) < 3;
 }
 
@@ -267,6 +270,7 @@ void registerQualityConsoleMethods(Console& console, QualitySettings& s)
 		bindMethod(console, name, kAccess, [&s, field, lo, hi](int value) {
 			s.*field = std::clamp(value, lo, hi);
 			s.changed = true;
+			s.undergrowthSimpleShaderSet = -1; // the switch writes it again
 		});
 	};
 	level("VideoSettings.setTerrainQuality", &QualitySettings::terrain, 1, 3);
@@ -280,6 +284,11 @@ void registerQualityConsoleMethods(Console& console, QualitySettings& s)
 		s.viewDistanceScale = std::clamp(scale, 0.0f, 1.0f);
 		s.changed = true;
 	});
+	// undergrowth.simpleShaderEnable (0x100862e7: the undergrowth's slot
+	// 0x40, the one the quality switch 0x10010040 writes): holds until the
+	// video settings are applied again.
+	bindProperty<bool>(console, "undergrowth.simpleShaderEnable", kAccess, [&s] { return s.undergrowthSimpleShader(); },
+		[&s](const bool& on) { s.undergrowthSimpleShaderSet = on ? 1 : 0; });
 }
 
 } // namespace dice::hfe::scene

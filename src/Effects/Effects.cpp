@@ -190,7 +190,20 @@ ParticleTemplate ParticleTemplate::fromTemplate(const world::ObjectTemplate& t)
 		p.framesAcross = std::max(1, static_cast<int>(number(t, "animationFrameCountX", 1)));
 		p.frameWidth = number(t, "setAnimationFrameWidthRelative", 1);
 		p.frameHeight = number(t, "setAnimationFrameHeightRelative", 1);
+		p.animated = t.typeName() == "SpriteParticleSystem";
 	}
+	p.animationSpeed = number(t, "animationSpeed", p.animationSpeed);
+	p.animationPlayOnce = number(t, "animationPlayOnce", 0) != 0;
+	p.randomStartFrame = number(t, "animationRandomizedStartFrame", 0) != 0;
+	// animationPlayOnce (0x10138790) and the frame count's setter
+	// (0x101387f0) make the speed frames / timeToLive (the template's base
+	// life, +0x88) once both are known.
+	if (p.animationPlayOnce && p.timeToLive > 0) {
+		p.animationSpeed = static_cast<float>(p.frameCount) / p.timeToLive;
+	}
+	p.selfShadowIntensity = number(t, "selfShadowIntensity", p.selfShadowIntensity);
+	p.showZoomed = number(t, "showInZoomedMode", 1) != 0;
+	p.noRotationFromParent = number(t, "noRotationFromParent", 0) != 0;
 	p.localSystem = number(t, "isLocalSystem", 0) != 0;
 	p.showFirstPerson = number(t, "showInFirstPerson", 1) != 0;
 	p.showThirdPerson = number(t, "showInThirdPerson", 1) != 0;
@@ -338,9 +351,27 @@ void Emitter::simulate(Particle& p, float step, int steps, const EmitContext& co
 	if (t.forceToWaterSurface && context.hasWater && !t.localSystem) {
 		p.position.y = context.waterLevel + t.waterSurfaceOffset;
 	}
-	// Its rotation (0x10131f80): its speed times the rotation graph.
-	p.rotation = std::fmod(p.rotation + saturate(t.rotationGraph.at(f)) * step * static_cast<float>(steps) * p.rotationSpeed,
-		kTwoPi);
+	// Its rotation (0x10131f80): its speed times the rotation graph; the
+	// flipbook's clock by the same graph times animationSpeed.
+	const float turn = saturate(t.rotationGraph.at(f)) * step * static_cast<float>(steps);
+	p.rotation = std::fmod(p.rotation + turn * p.rotationSpeed, kTwoPi);
+	if (t.animated) {
+		p.frameClock += turn * t.animationSpeed;
+	}
+}
+
+std::array<float, 4> spriteFrame(const ParticleTemplate& t, float frameClock)
+{
+	if (!t.animated || t.frameCount <= 1) {
+		return {0, 0, 1, 1};
+	}
+	// The clock's whole part modulo the frames (0x10131f80: an unsigned
+	// floor; a clock below 0 never happens, the speeds being positive).
+	const int whole = static_cast<int>(std::floor(std::max(frameClock, 0.0f)));
+	const int frame = whole % t.frameCount;
+	const float u0 = static_cast<float>(frame % t.framesAcross) * t.frameWidth;
+	const float v0 = static_cast<float>(frame / t.framesAcross) * t.frameHeight;
+	return {u0, v0, u0 + t.frameWidth, v0 + t.frameHeight};
 }
 
 // A particle's birth (0x1013fdc0) at `at` (world), `age` seconds old.
@@ -355,6 +386,11 @@ void Emitter::emit(game::Random& random, const Vec3& at, float age, const EmitCo
 		return; // the sprite pool is empty (0x5efc)
 	}
 	Particle p;
+	// A random start frame takes its random first (0x1013fdc0, +0xd1).
+	if (t.animated && t.randomStartFrame && t.frameCount > 0) {
+		p.frameClock = std::floor(static_cast<float>(t.frameCount - 1) * unitRandom(random));
+	}
+	p.selfShadow = t.selfShadowIntensity;
 	p.life = std::max(0.01f, t.timeToLive + unitRandom(random) * t.randomTimeToLive);
 	p.age = age;
 	p.alpha = alphaIntensity;
@@ -415,8 +451,11 @@ void Emitter::step(float seconds, game::Random& random, const EmitContext& conte
 	if (span > 0 && seconds > span) {
 		seconds = span;
 	}
-	// The system's velocity, inherited by world particles born now.
-	if (!m_prewarming) {
+	// The system's velocity, inherited by world particles born now (set
+	// from outside with speedFromPhysics).
+	if (physicsVelocity) {
+		m_velocity = inheritedVelocity;
+	} else if (!m_prewarming) {
 		m_velocity = (m_position - m_previous) * (1 / seconds);
 	}
 	// The particles: fixed steps of 0.01 s, the remainder carried.
@@ -614,10 +653,40 @@ void EffectManager::spawnTemplate(const world::ObjectTemplate& t, const Vec3& po
 			span = std::max(span, particles->emitDelay + particles->emitTime + particles->timeToLive + particles->randomTimeToLive);
 		}
 	}
+	// The bundle's randomAgeFactor (the exe's +0x410, sampled once a start,
+	// 0x00619f90) scales each of its particle systems' age (their +0x12c,
+	// slots 0x7c / 0x78); speedFromPhysics (+0x45c) has the exe set their
+	// inherited velocity each tick (0x00618ae0: the root object's physics
+	// velocity, none for a bundle on its own).
+	float ageFactor = 1;
+	if (const std::string* factor = setting(t, "randomAgeFactor")) {
+		ageFactor = game::RandomDistribution::parse(*factor).sample(m_random);
+	}
+	const bool physicsSpeed = number(t, "speedFromPhysics", 0) != 0;
 	for (const world::ChildTemplate& child : t.children()) {
 		if (const world::ObjectTemplate* childTemplate = m_templates.find(child.name)) {
 			const Mat3 local = Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z});
-			const Vec3 at = position + rotation.transform({child.position.x, child.position.y, child.position.z});
+			Vec3 at = position + rotation.transform({child.position.x, child.position.y, child.position.z});
+			const std::string& childType = childTemplate->typeName();
+			const bool system = childType == "SpriteParticleSystem" || childType == "MeshParticleSystem" ||
+				childType == "NonScreenAlignedParticleSystem" || childType == "TrailSystem";
+			if (system) {
+				const ParticleTemplate* particles = particleTemplate(*childTemplate);
+				const Mat3 turn = particles->noRotationFromParent ? local : local * rotation;
+				if (particles->noRotationFromParent) {
+					at = position + Vec3 {child.position.x, child.position.y, child.position.z};
+				}
+				std::vector<Emitter*> started;
+				spawnTemplate(*childTemplate, at, turn, depth + 1, view, &started, spawnedLights);
+				for (Emitter* emitter : started) {
+					emitter->timeScale *= ageFactor;
+					emitter->physicsVelocity = physicsSpeed;
+					if (spawned) {
+						spawned->push_back(emitter);
+					}
+				}
+				continue;
+			}
 			if (childTemplate->typeName() == "LightSource") {
 				const LightSourceLook look = lightSourceOf(*childTemplate);
 				if (!look.enabled || look.directional) {
@@ -847,10 +916,28 @@ void EffectManager::placeAttached(Emitter& emitter) const
 {
 	const auto at = m_anchors.find(emitter.anchor);
 	const Anchor place = at != m_anchors.end() ? at->second : Anchor {};
+	if (emitter.particleTemplate().noRotationFromParent) {
+		// Only the bundle's position (0x1013eff0).
+		emitter.place(place.position + place.rotation.transform(emitter.mountPosition) + emitter.localPosition,
+			emitter.localRotation);
+		return;
+	}
 	// local, then the mount, then the anchor (row vectors: v * L * M * A).
 	const Vec3 mounted = emitter.mountPosition + emitter.mountRotation.transform(emitter.localPosition);
 	emitter.place(place.position + place.rotation.transform(mounted),
 		emitter.localRotation * emitter.mountRotation * place.rotation);
+}
+
+void EffectManager::setPhysicsVelocity(uint32_t anchor, uint32_t tag, const Vec3& velocity)
+{
+	// 0x00618ae0: the direction times the square root of the speed.
+	const float speed = std::sqrt(physics::lengthSquared(velocity));
+	const Vec3 inherited = speed > 1e-6f ? velocity * (std::sqrt(speed) / speed) : Vec3 {};
+	for (const auto& emitter : m_emitters) {
+		if (emitter->anchor == anchor && emitter->tag == tag && emitter->physicsVelocity) {
+			emitter->inheritedVelocity = inherited;
+		}
+	}
 }
 
 void EffectManager::setAnchor(uint32_t anchor, const Vec3& position, const Mat3& rotation)
@@ -1064,7 +1151,7 @@ void EffectManager::collect(const Emitter& emitter, std::vector<Sprite>& out, co
 		const Vec3 color = (t.color1 * (1 - blend) + t.color2 * blend) * p.intensity
 			+ Vec3 {p.randomIntensity, p.randomIntensity, p.randomIntensity};
 		out.push_back({at, size, p.rotation, {color.x, color.y, color.z, alpha}, t.lightMapIntensityOffset,
-			{t.pivot[0], t.pivot[1]}});
+			{t.pivot[0], t.pivot[1]}, spriteFrame(t, p.frameClock)});
 	}
 }
 
@@ -1294,6 +1381,7 @@ std::vector<ObjectEffects::Placed> ObjectEffects::bundlesOf(const world::ObjectT
 					placed.startOnEffects = flags(*c, "startOnEffects", "setStartOnEffects");
 					placed.stopOnEffects = flags(*c, "stopOnEffects", "setStopOnEffects");
 					placed.startAtCreation = number(*c, "startAtCreation", 0) != 0;
+					placed.speedFromPhysics = number(*c, "speedFromPhysics", 0) != 0;
 					out.push_back(std::move(placed));
 				} else {
 					if (hasWindAffector(*c)) {
@@ -1438,6 +1526,9 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 					place(b, object.id, partPose, b.position, b.rotation);
 				}
 				effects.spawnAttached(b.bundle->name(), object.id, b.position, b.rotation, view, tag);
+			}
+			if (b.speedFromPhysics) {
+				effects.setPhysicsVelocity(object.id, tag, object.velocity); // 0x00618ae0, each tick
 			}
 			if (!object.occupied && tracked.occupied && (b.stopOnEffects & kExited) != 0) {
 				effects.stopAttached(object.id, tag);

@@ -36,6 +36,7 @@
 // at once (a stand-in for the invite's answer).
 #pragma once
 
+#include <array>
 #include <functional>
 #include <map>
 #include <set>
@@ -163,5 +164,39 @@ private:
 	std::set<int> m_selected;
 	int m_current = -1; // +0xac: the squad whose members show
 };
+
+// A scoreboard player row's look (the scoreboard's row filler 0x007bb540,
+// reached through the HUD manager's list data, slot 0x214 → 0x007c6d70:
+// data 2 and 1 are the scoreboard's +0x38c friendly and +0x394 enemy
+// lists, 10 and 9 its totals +0x390 / +0x398, made by 0x007b9aa0). The
+// name and the numbers take one colour from three static tables
+// (0x008f24b0, 0x008f2350, 0x008f2400), indexed 2 on the local player's
+// team's list and 1 on the other:
+//   - a player not alive (player slot 0x74, +0xd5) is black (0x00b3bec0:
+//     (0, 0, 0, 1) at both indices); so is one the HUD manager's slot 0x410
+//     test or the player's +0x404 (slot 0x3bc) flags;
+//   - a member of the local player's squad (slot 0x120, squad > 0) on his
+//     team's list, and the local player himself while he commands (slot
+//     0x128, scoreboard +0x25), are green (0x00b3c050: (0.031, 0.467,
+//     0.008));
+//   - other players are blue on the friendly list (0x00b3c320 index 2:
+//     (0, 0.38, 1)) and red on the enemy one (index 1: (0.992, 0, 0.004)).
+// The rows' backgrounds (0x007dd5d0): the local player's row (0.392,
+// 0.392, 0.392, 0.35) (0x00a0bc50), else every odd row (0.651, 0.651,
+// 0.651, 0.8) (0x00a0bc30, alpha 0x3f4ccccd), over the list's (0.686)
+// grey.
+struct ScoreboardRow {
+	bool alive = false;
+	bool friendlyList = false; // on the local player's team's list
+	bool sameSquad = false;    // in the local player's squad (squad > 0)
+	bool local = false;        // the local player
+	bool localCommands = false; // the local player is the commander
+	bool hidden = false;       // the HUD manager's 0x410 or the player's +0x404
+};
+struct ScoreboardStyle {
+	std::array<float, 4> text;
+	std::array<float, 4> background; // alpha 0: none
+};
+ScoreboardStyle scoreboardStyle(const ScoreboardRow& row, int rowIndex);
 
 } // namespace dice::hfe::menu

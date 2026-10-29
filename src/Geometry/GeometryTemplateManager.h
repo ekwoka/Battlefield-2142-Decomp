@@ -7,6 +7,7 @@
 
 #include "MeshFile.h"
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
@@ -54,6 +55,32 @@ struct GeometryTemplate {
 	// skip their materials).
 	unsigned maxSkip3pLods = 1;
 	unsigned maxSkipWreckLods = 1;
+	// GeometryTemplate.isTitanInterior / isTitanExterior (RendDX9 property
+	// objects 0x1007352b / 0x10073412 -> template slots 0xd0 / 0xc8,
+	// 0x10148690 / 0x10148670: +0xc9 / +0xc8, setting one clears the
+	// other): the Titans' rooms, drawn only with the camera inside a Titan,
+	// and the hull parts and fittings left out from inside (TitanParts.h).
+	bool titanInterior = false;
+	bool titanExterior = false;
+	// GeometryTemplate.titanExteriorPartIndex (0x10074341, +0x2bc): a hull
+	// part's slot (1..4) in the static mesh renderer's LOD pairs (0x100baf40).
+	int titanExteriorPart = 0;
+	// Per material, keyed (geometry << 16 | lod << 8 | material):
+	// GeometryTemplate.setMaterialReflectionScale and setSpecularStaticGloss
+	// (0x10073caf / 0x10073eb9: bundled templates only, slots 0x40 / 0x48,
+	// 0x100a25d0 / 0x100a26b0: maps at +0xec / +0xf8) and
+	// setMaterialParallaxHeightScale (0x10073208, any template's slot 0x38;
+	// empty for bundled ones, 0x100a7d70).
+	std::map<uint32_t, float> reflectionScale;
+	std::map<uint32_t, float> staticGloss;
+	std::map<uint32_t, float> parallaxHeightScale;
+	static uint32_t materialKey(int geometry, int lod, int material)
+	{
+		return (static_cast<uint32_t>(geometry & 0xff) << 16) | (static_cast<uint32_t>(lod & 0xff) << 8) |
+			static_cast<uint32_t>(material & 0xff);
+	}
+	// GeometryTemplate.nrOfAnimatedUVMatrix (0x10073ba7, bundled +0x110).
+	int animatedUVMatrices = 0;
 };
 
 class GeometryTemplateManager {

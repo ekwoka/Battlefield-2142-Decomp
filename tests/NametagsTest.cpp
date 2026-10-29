@@ -1,6 +1,7 @@
 // The 3D name tags' rules (src/Main/Nametags: RendDX9's NametagManager,
 // 0x100f0e60, 0x100f0310, 0x100f0be0, 0x100ef210) and their font.
 #include "Main/Nametags.h"
+#include "Console/Console.h"
 #include "IO/File/FileManager.h"
 #include "TestMain.h"
 
@@ -143,4 +144,35 @@ TEST(Nametags_Font)
 		CHECK(shipped.parse(std::string(data.begin(), data.end())));
 		CHECK(shipped.present['B'] && shipped.cells['B'].x0 == 37 && shipped.cells['B'].y == 12);
 	}
+}
+
+// nametags.con's icons (0x10079004, 0x100790e4 → 0x1016b790): ids by name,
+// frames along the texture, a bar's fill and base.
+TEST(Nametags_IconRegistry)
+{
+	CHECK(nametags::IconRegistry::idOf("ICObject") == 0x50 && nametags::IconRegistry::idOf("icobjectcore") == 0x96);
+	CHECK(nametags::IconRegistry::idOf("ICNothing") == -1);
+	Console console;
+	nametags::IconRegistry icons;
+	icons.textureSize = [](const std::string& texture, int& w, int& h) {
+		w = texture.find("Objects") != std::string::npos ? 1024 : 64;
+		h = 16;
+		return true;
+	};
+	icons.bind(console);
+	std::string out;
+	console.execute("Nametags.createIcon ICObject", out);
+	console.execute("Nametags.setTexture 41 Menu/Nametag/Objects 0 0 16 16", out);
+	console.execute("Nametags.createBar ICArmorBar 1 45", out);
+	console.execute("Nametags.setTexture 0 Menu/Nametag/bar_filler.dds 0 0 64 8", out);
+	console.execute("Nametags.setTexture 1 Menu/Nametag/bar_base.dds 0 0 64 8", out);
+	const nametags::IconRegistry::Icon* nine = icons.find(0x50 + 9); // a 3dMapIcon 9: the atlas's tenth frame
+	CHECK(nine && nine->texture == "Menu/Nametag/Objects.dds" && std::fabs(nine->u0 - 9 * 16 / 1024.0f) < 1e-6f);
+	CHECK(icons.find(0x50 + 41) == nullptr); // past the 41 frames
+	// 3dMapIcon 70 (the Titan cores') is ICObjectCore, 0x50 + 70.
+	console.execute("Nametags.createIcon ICObjectCore", out);
+	console.execute("Nametags.setTexture 0 Menu/Nametag/Titan/core.dds 0 0 32 32", out);
+	CHECK(icons.find(0x50 + 70) && icons.find(0x50 + 70)->width == 32);
+	CHECK(icons.find(0x35) && icons.find(0x35)->texture == "Menu/Nametag/bar_filler.dds");
+	CHECK(icons.find(0x35 | 0x100) && icons.find(0x35 | 0x100)->texture == "Menu/Nametag/bar_base.dds");
 }

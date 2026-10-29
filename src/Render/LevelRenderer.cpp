@@ -1,5 +1,6 @@
 #include "LevelRenderer.h"
 #include "MeshQueues.h"
+#include "SceneMath.h"
 
 #include <array>
 
@@ -49,20 +50,23 @@ Mat4 objectTransform(const world::Vec3& position, const world::Vec3& rotation)
 		Mat4::translation({position.x, position.y, position.z});
 }
 
-// Fog end until the view-distance scaling is known (see LightSettings.h).
+// The level fog's end in the shaders' (depth / end)^2 stand-in for
+// RaCommon.fx calcFog (Fog.h); under water the water fog's scripted end
+// (ViewFog) is used as it is.
 constexpr float kFogEnd = 1400.0f;
 
-LightingUniforms lighting(const scene::LightSettings& lights, const std::array<float, 3>& sunColor,
+LightingUniforms lighting(const ViewFog& view, const scene::LightSettings& lights, const std::array<float, 3>& sunColor,
 	const std::array<float, 3>& skyColor, float alphaReference, bool lightmapped)
 {
 	const Vec3f sun = normalize(Vec3f {-lights.sunDirection[0], -lights.sunDirection[1], -lights.sunDirection[2]});
-	const auto& fog = lights.fogColor;
+	const auto& fog = view.color;
 	const float on = lights.enableSun ? 1.0f : 0.0f; // lightManager.enableSun
+	const float end = view.underwater ? std::max(view.startEndAndBase[1], 1.0f) : kFogEnd;
 	return LightingUniforms {
 		{sun.x, sun.y, sun.z, 0},
 		{sunColor[0] * on, sunColor[1] * on, sunColor[2] * on, 1},
 		{skyColor[0], skyColor[1], skyColor[2], 1},
-		{fog[0] / 255.0f, fog[1] / 255.0f, fog[2] / 255.0f, kFogEnd},
+		{fog[0], fog[1], fog[2], end},
 		{alphaReference, lightmapped ? 1.0f : 0.0f, 0, 0},
 	};
 }
@@ -102,7 +106,7 @@ void specularUniforms(LightingUniforms& uniforms, const S& submesh, const Camera
 	uniforms.specular[0] = color[0];
 	uniforms.specular[1] = color[1];
 	uniforms.specular[2] = color[2];
-	uniforms.specular[3] = 0.15f;
+	uniforms.specular[3] = submesh.staticGloss;
 }
 
 // A bundled or skinned mesh's kind bits (mesh.frag): the hemi map (not at
@@ -397,6 +401,11 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 	gpuMesh->bundled = bundled;
 	gpuMesh->skinned = skinned;
 	gpuMesh->radiusShadowBounds = geometry->useRadiusForShadowDepth || geometry->useRadiusForShadowSpatial;
+	gpuMesh->titanInterior = geometry->titanInterior;
+	gpuMesh->titanExterior = geometry->titanExterior;
+	gpuMesh->titanPart = geometry->titanExteriorPart;
+	gpuMesh->boxMin = {lod.bounds.min[0], lod.bounds.min[1], lod.bounds.min[2]};
+	gpuMesh->boxMax = {lod.bounds.max[0], lod.bounds.max[1], lod.bounds.max[2]};
 	gpuMesh->geometries = file->geometries.size();
 	gpuMesh->lodCount = file->geometries[geometryIndex].lods.size();
 	if (geometryIndex < geometry->lodDistances.size()) {
@@ -561,19 +570,24 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		// tangent space when its technique names "tangent" (+0x100), else in
 		// the object's (_OBJSPACENORMALMAP_, the first person's arms).
 		if ((bundled || skinned) && material.maps.size() > 1 && quality.meshNormalMaps() && !submesh.additive) {
-			const std::string second = lower(material.maps[1]);
-			const bool bump = second.size() >= 6 && second.compare(second.size() - 6, 6, "_b.dds") == 0;
-			const bool skinnedMap = skinned && second.find("specularlut") == std::string::npos;
-			if (bump || skinnedMap) {
+			const int kind = normalMapKind(bundled, skinned, lower(material.maps[1]), technique);
+			if (kind != 0) {
 				submesh.normalMap = texture(sources.files, material.maps[1], textureClass);
 				if (submesh.normalMap) {
-					submesh.normalKind = bundled || technique.find("tangent") != std::string::npos ? 1 : 2;
+					submesh.normalKind = kind;
 					++m_stats.normalMapped;
 				}
 			}
 		}
 		if (skinned && !submesh.additive) {
 			submesh.specularKind = 5; // RaShaderSM: pow(N.H, SpecularPower) x the gloss
+		}
+		if (bundled) {
+			const auto gloss = geometry->staticGloss.find(geom::GeometryTemplate::materialKey(
+				static_cast<int>(geometryIndex), static_cast<int>(lodIndex), static_cast<int>(m)));
+			if (gloss != geometry->staticGloss.end()) {
+				submesh.staticGloss = gloss->second;
+			}
 		}
 		gpuMesh->submeshes.push_back(submesh);
 	}
@@ -1489,8 +1503,8 @@ void LevelRenderer::drawUndergrowth(SDL_GPUCommandBuffer* commands, SDL_GPURende
 	useShadows(commands, pass, 1, 3, false, undergrowthShadows);
 	const auto& sun = m_terrainColorsFromData ? m_terrainSunColor : lights.terrainSunColor;
 	const auto& gi = m_terrainColorsFromData ? m_terrainGIColor : lights.terrainGIColor;
-	LightingUniforms lit = lighting(lights, sun, gi, m_undergrowthAlphaRef, true);
-	LightingUniforms unlit = lighting(lights, sun, gi, m_undergrowthAlphaRef, false);
+	LightingUniforms lit = lighting(m_viewFog, lights, sun, gi, m_undergrowthAlphaRef, true);
+	LightingUniforms unlit = lighting(m_viewFog, lights, sun, gi, m_undergrowthAlphaRef, false);
 
 	UndergrowthUniforms uniforms {};
 	uniforms.viewProjection = viewProjection;
@@ -1943,6 +1957,11 @@ void LevelRenderer::buildShimmer(const Camera& camera)
 					v.texCoord[1] = corner[1];
 					v.detailCoord[0] = sprite.pivot[0];
 					v.detailCoord[1] = sprite.pivot[1];
+					// The flipbook frame: its corner and size (particle.vert).
+					v.dirtCoord[0] = sprite.frame[0];
+					v.dirtCoord[1] = sprite.frame[1];
+					v.crackCoord[0] = sprite.frame[2] - sprite.frame[0];
+					v.crackCoord[1] = sprite.frame[3] - sprite.frame[1];
 					v.part = sprite.size;
 					v.part2 = sprite.rotation;
 					vertices.push_back(v);
@@ -1958,7 +1977,7 @@ void LevelRenderer::buildShimmer(const Camera& camera)
 }
 
 void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::EffectManager*> managers,
-	SDL_GPUBuffer*& buffer, std::vector<ParticleGroup>& groups, const Camera& camera, bool weather)
+	SDL_GPUBuffer*& buffer, std::vector<ParticleGroup>& groups, const Camera& camera, bool weather, bool zoomed)
 {
 	const Vec3f eye = camera.position;
 	groups.clear();
@@ -1970,7 +1989,8 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 		return;
 	}
 	std::vector<Vertex> vertices;
-	const effects::ParticleView view = particleView(camera);
+	effects::ParticleView view = particleView(camera);
+	view.zoomed = zoomed;
 	for (const effects::EffectManager* manager : managers) {
 		if (!manager) {
 			continue;
@@ -1997,6 +2017,11 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 					v.texCoord[1] = corner[1];
 					v.detailCoord[0] = sprite.pivot[0];
 					v.detailCoord[1] = sprite.pivot[1];
+					// The flipbook frame: its corner and size (particle.vert).
+					v.dirtCoord[0] = sprite.frame[0];
+					v.dirtCoord[1] = sprite.frame[1];
+					v.crackCoord[0] = sprite.frame[2] - sprite.frame[0];
+					v.crackCoord[1] = sprite.frame[3] - sprite.frame[1];
 					v.part = sprite.size;
 					v.part2 = sprite.rotation;
 					vertices.push_back(v);
@@ -2301,7 +2326,7 @@ void LevelRenderer::drawMeshParticles(SDL_GPUCommandBuffer* commands, SDL_GPURen
 			SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
 			SDL_GPUBufferBinding indexBinding {particleMesh->indices, 0};
 			SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
-			LightingUniforms base = lighting(lights, lights.sunColor, lights.skyColor, 0, false);
+			LightingUniforms base = lighting(m_viewFog, lights, lights.sunColor, lights.skyColor, 0, false);
 			applyPointLights(base);
 			for (const effects::MeshSprite& particle : particles) {
 				Mat4 world;
@@ -2346,7 +2371,7 @@ void LevelRenderer::drawParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderP
 	if (!buffer || groups.empty()) {
 		return;
 	}
-	const LightingUniforms fog = lighting(lights, lights.sunColor, lights.skyColor, 0, false);
+	const LightingUniforms fog = lighting(m_viewFog, lights, lights.sunColor, lights.skyColor, 0, false);
 	ParticleUniforms uniforms {};
 	uniforms.viewProjection = viewProjection;
 	const Vec3f right = camera.right();
@@ -2458,6 +2483,9 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 		const char* forced = std::getenv("BF2142_POST_EFFECT");
 		return forced && std::string(forced) == "camo";
 	}();
+	// The Titans' parts (TitanParts.h).
+	m_cameraInTitan = cameraInTitan(camera);
+	const TitanView titanView {m_cameraInTitan, renderer.showAllTitanParts};
 	for (Instance& instance : m_instances) {
 		const bool forceCloak = cloakAll && instance.mesh->skinned && !instance.hidden;
 		if ((instance.hidden || forceCloak) && instance.object != 0 && m_sources &&
@@ -2473,13 +2501,25 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 		if (instance.hidden || instance.fade <= 0.0f) {
 			continue;
 		}
+		const GpuMesh& base = *instance.mesh;
+		if (base.titanInterior || base.titanExterior || titanView.cameraInside) {
+			const Vec3f origin {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
+			const Vec3f d = origin - camera.position;
+			const float distance = std::sqrt(dot(d, d));
+			const TitanDraw how = base.skinned
+				? titanSkinnedDraw(titanView, distance, renderer.indoorSkinnedMeshCullDistance)
+				: base.bundled ? titanBundledDraw(titanView, base.titanExterior, distance, renderer.indoorBundledMeshCullDistance)
+							   : titanStaticDraw(titanView, base.titanInterior);
+			if (how == TitanDraw::Skip) {
+				continue;
+			}
+		}
 		const BoundingSphere sphere = instanceBounds(instance, *instance.mesh);
 		if (!frustum.containsSphere(sphere.center, sphere.radius)) {
 			++m_culledInstances;
 			continue;
 		}
 		DrawItem item {&instance, instance.mesh, instance.lightmap, instance.lightmapTransform};
-		const GpuMesh& base = *instance.mesh;
 		if (instance.overgrowth && m_sources) {
 			const Vec3f origin {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
 			const Vec3f d = (sphere.radius >= 0 ? sphere.center : origin) - camera.position;
@@ -2512,7 +2552,12 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 			const float scale = quality * (base.skinned ? renderer.skinnedMeshLodDistanceScale
 						: base.bundled               ? renderer.bundleMeshLodDistanceScale
 													 : renderer.staticMeshLodDistanceScale);
-			const int lod = base.skippedLods + lodForDistance(distance, distances, kept, scale);
+			int lod = base.skippedLods + lodForDistance(distance, distances, kept, scale);
+			// A Titan hull part draws at its pair's LOD (0x100bdb00).
+			if (base.titanExterior && !base.bundled && !base.skinned) {
+				lod = std::min(m_titanExteriorLods.resolve(base.titanPart, lod, static_cast<int>(base.lodCount)),
+					static_cast<int>(base.lodCount) - 1);
+			}
 			if (lod > 0) {
 				instance.lods.resize(base.lodCount);
 				Instance::Lod& entry = instance.lods[static_cast<size_t>(lod)];
@@ -2534,9 +2579,41 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 		}
 		m_drawList.push_back(item);
 	}
+	m_titanExteriorLods.endFrame();
 	if (uploaded) {
 		m_gpu.flushUploads();
 	}
+}
+
+bool LevelRenderer::cameraInTitan(const Camera& camera) const
+{
+	if (m_sources && m_sources->renderer && m_sources->renderer->insideTitanOverride) {
+		return true; // ObjectDrawer.isInsideTitanOverride (+0x91)
+	}
+	// The exe tells RendDX9 the Titan the camera is in (game slot 0x110:
+	// the player's soldier's Titan, else a ray from the camera up through
+	// the Titan's hull, 0x006fa8b0 / 0x006f2b00). The rewrite takes the
+	// camera inside a Titan when it is within the box of one of its rooms
+	// (a static mesh marked isTitanInterior).
+	for (const Instance& instance : m_instances) {
+		const GpuMesh& mesh = *instance.mesh;
+		if (!mesh.titanInterior || mesh.bundled || mesh.skinned || instance.hidden) {
+			continue;
+		}
+		const Vec3f d = camera.position - Vec3f {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
+		bool inside = true;
+		for (int axis = 0; axis < 3 && inside; ++axis) {
+			// The rows are the rotation's axes (no scale on placed objects).
+			const float along = d.x * instance.world.at(axis, 0) + d.y * instance.world.at(axis, 1) + d.z * instance.world.at(axis, 2);
+			const float lo = axis == 0 ? mesh.boxMin.x : axis == 1 ? mesh.boxMin.y : mesh.boxMin.z;
+			const float hi = axis == 0 ? mesh.boxMax.x : axis == 1 ? mesh.boxMax.y : mesh.boxMax.z;
+			inside = along >= lo && along <= hi;
+		}
+		if (inside) {
+			return true;
+		}
+	}
+	return false;
 }
 
 void LevelRenderer::build(const LevelSources& sources)
@@ -2595,21 +2672,14 @@ Camera LevelRenderer::suggestedCamera() const
 
 Camera LevelRenderer::overheadCamera(const OverheadView& view) const
 {
-	float x = view.x, z = view.z;
-	if (m_terrainExtent > 160) {
-		x = std::clamp(x, m_patchOrigin[0] + 80, m_patchOrigin[0] + m_terrainExtent - 80);
-		z = std::clamp(z, m_patchOrigin[1] + 80, m_patchOrigin[1] + m_terrainExtent - 80);
-	}
 	const terrain::Heightmap* heightmap = m_sources ? m_sources->heightmaps.primary() : nullptr;
-	float ground = 0;
-	if (heightmap) {
-		ground = (heightmap->heightAt(x, z) + heightmap->heightAt(x, z + 2) + heightmap->heightAt(x, z - 2) +
-					 heightmap->heightAt(x + 2, z) + heightmap->heightAt(x - 2, z)) *
-			0.2f;
+	float xs[5], zs[5], heights[5] = {0, 0, 0, 0, 0};
+	overheadGroundPoints(view, m_patchOrigin, m_terrainExtent, xs, zs);
+	for (int i = 0; heightmap && i < 5; ++i) {
+		heights[i] = heightmap->heightAt(xs[i], zs[i]);
 	}
-	ground = std::max(ground, m_terrainWater[3]);
 	Camera camera;
-	camera.position = {x, ground + view.height, z};
+	camera.position = overheadCameraPosition(view, m_patchOrigin, m_terrainExtent, heights, m_terrainWater[3]);
 	camera.yaw = 0;
 	// Straight down (the exe's rows 1 0 0 / 0 0 1 / 0 -1 0): screen right
 	// +x, up +z; a hair off vertical for lookAt's up vector.
@@ -2648,21 +2718,8 @@ void LevelRenderer::loadTitanHemiMaps(const LevelSources& sources)
 	}
 }
 
-namespace {
-
-// A point in a Titan hemi map's space: inverse(TitanWorld) then the
-// map's offset taken off (0x100eda70).
-Vec3f titanMapLocal(const Vec3f& origin, const Vec3f axes[3], const float offset[3], const Vec3f& point)
+void LevelRenderer::placeTitanHemiMaps(const Camera& /*camera*/)
 {
-	const Vec3f d = point - origin;
-	return {dot(d, axes[0]) - offset[0], dot(d, axes[1]) - offset[1], dot(d, axes[2]) - offset[2]};
-}
-
-} // namespace
-
-void LevelRenderer::placeTitanHemiMaps(const Camera& camera)
-{
-	m_cameraInTitan = false;
 	for (TitanHemiMap& map : m_titanHemiMaps) {
 		map.placed = false;
 		const uint32_t id = m_sources && m_sources->titanObject ? m_sources->titanObject(map.team) : 0;
@@ -2676,13 +2733,6 @@ void LevelRenderer::placeTitanHemiMaps(const Camera& camera)
 			map.axes[i] = {world.at(i, 0), world.at(i, 1), world.at(i, 2)};
 		}
 		map.placed = true;
-		// The exe asks the game which Titan the camera's soldier is in, else
-		// tests the camera against the Titans (0x006fa8b0); the rewrite takes
-		// the camera over a Titan map's square.
-		const Vec3f local = titanMapLocal(map.origin, map.axes, map.offset, camera.position);
-		if (local.y > 0 && std::fabs(local.x) < map.size / 2 && std::fabs(local.z) < map.size / 2) {
-			m_cameraInTitan = true;
-		}
 	}
 }
 
@@ -2692,16 +2742,8 @@ void LevelRenderer::hemiObjectFor(const Instance& instance, const GpuMesh& mesh,
 	// HeightOverTerrain (BM 0x100c2b70, SM 0x10160e90): the height over
 	// what a ray 4 radii down meets, less a radius, in radii (at least
 	// 2 m); the rewrite's ray meets only the terrain.
-	const float radius = mesh.bounds.radius > 0 ? mesh.bounds.radius : 1.0f;
 	const terrain::Heightmap* heightmap = m_sources ? m_sources->heightmaps.primary() : nullptr;
-	float height = 4 * radius;
-	if (heightmap) {
-		const float below = origin.y - heightmap->heightAt(origin.x, origin.z);
-		if (below >= 0 && below < 4 * radius) {
-			height = below;
-		}
-	}
-	out[3] = std::max(height - radius, 0.0f) / std::max(radius, 2.0f);
+	out[3] = heightOverTerrain(heightmap ? origin.y - heightmap->heightAt(origin.x, origin.z) : -1.0f, mesh.bounds.radius);
 	// HemiMapConstantColor: 1 with the hemi technique outside the Titans;
 	// with the camera in one (the interior path 0x100c3880 / 0x10162070),
 	// the Titan map the object's origin is over (the nearest above its
@@ -2719,27 +2761,13 @@ void LevelRenderer::hemiObjectFor(const Instance& instance, const GpuMesh& mesh,
 			continue;
 		}
 		const Vec3f local = titanMapLocal(map.origin, map.axes, map.offset, origin);
-		if (local.y > 0 && std::fabs(local.x) < map.size / 2 && std::fabs(local.z) < map.size / 2 &&
-			(!best || local.y < bestLocal.y)) {
+		if (overTitanMap(local, map.size) && (!best || local.y < bestLocal.y)) {
 			best = &map;
 			bestLocal = local;
 		}
 	}
 	if (best && best->width >= 2 && best->height >= 2) {
-		const float scaleU = static_cast<float>(best->width) / best->size;
-		const float scaleV = static_cast<float>(best->height) / best->size;
-		const float u = std::clamp((best->size / 2 - bestLocal.x) * scaleU, 0.0f, static_cast<float>(best->width - 2));
-		const float v = std::clamp((best->size / 2 + bestLocal.z) * scaleV, 0.0f, static_cast<float>(best->height - 2));
-		const uint32_t x = static_cast<uint32_t>(u), y = static_cast<uint32_t>(v);
-		const float fx = u - static_cast<float>(x), fy = v - static_cast<float>(y);
-		for (int c = 0; c < 3; ++c) {
-			const auto at = [&](uint32_t tx, uint32_t ty) {
-				return static_cast<float>(best->rgba[(static_cast<size_t>(ty) * best->width + tx) * 4 + static_cast<size_t>(c)]) / 255.0f;
-			};
-			const float top = at(x, y) * (1 - fx) + at(x + 1, y) * fx;
-			const float bottom = at(x, y + 1) * (1 - fx) + at(x + 1, y + 1) * fx;
-			instance.titanHemi[c] = top * (1 - fy) + bottom * fy;
-		}
+		titanHemiSample(best->rgba.data(), best->width, best->height, best->size, bestLocal, instance.titanHemi);
 	}
 	std::copy(instance.titanHemi, instance.titanHemi + 3, out);
 }
@@ -2762,7 +2790,17 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	}
 	SDL_GPUColorTargetInfo colorTarget {};
 	colorTarget.texture = post && m_sceneColor ? m_sceneColor : color;
-	colorTarget.clear_color = {lights.fogColor[0] / 255.0f, lights.fogColor[1] / 255.0f, lights.fogColor[2] / 255.0f, 1.0f};
+	// The fog the camera is in: the level's, or the water's below the sea (Fog.h).
+	{
+		const terrain::HeightmapCluster* cluster = m_sources ? &m_sources->heightmaps : nullptr;
+		const scene::WaterSettings* water = m_sources ? &m_sources->water : nullptr;
+		const scene::WaterSettings waterDefaults;
+		const scene::WaterSettings& w = water ? *water : waterDefaults;
+		const float viewScale = m_sources && m_sources->quality ? m_sources->quality->viewDistanceScale : 1.0f;
+		m_viewFog = viewFog(lights.fogColor, lights.fogStartEndAndBase, w.fogColor, w.fogStartEndAndBase,
+			cluster && cluster->hasSea(), cluster ? cluster->seaWaterLevel() : 0.0f, camera.position.y, viewScale);
+	}
+	colorTarget.clear_color = {m_viewFog.color[0], m_viewFog.color[1], m_viewFog.color[2], 1.0f};
 	colorTarget.load_op = SDL_GPU_LOADOP_CLEAR;
 	colorTarget.store_op = SDL_GPU_STOREOP_STORE;
 	SDL_GPUDepthStencilTargetInfo depthTarget {};
@@ -2796,8 +2834,11 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		}
 		m_gpu.flushUploads();
 	}
+	// A zoomed first person hides the systems without showInZoomedMode (the
+	// exe marks those its bundles start then, 0x00619f90; zoomed here: the
+	// view's field of view narrower than its first, 0x10066b30).
 	buildParticleBuffer({m_hasFirstPerson ? m_firstPerson.effects : nullptr}, m_firstPersonParticleVertices,
-		m_firstPersonParticleGroups, camera);
+		m_firstPersonParticleGroups, camera, false, viewZoom(camera) > 1.05f);
 	collectPointLights(camera);
 	if (m_hasFirstPerson && m_firstPerson.effects) {
 		m_firstPerson.effects->forEachMeshGroup([&](const std::string& geometry, bool, const std::vector<effects::MeshSprite>&) {
@@ -2831,7 +2872,11 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, &colorTarget, 1, &depthTarget);
 
 	// Sky dome around the camera, unlit and unfogged, behind everything.
-	drawSky(commands, pass, viewProjection, camera);
+	// Below the sea the dome is the water's fog colour (SkyDomeUnderWater,
+	// 0x100fd2f0): the clear colour already is.
+	if (!m_viewFog.underwaterSky) {
+		drawSky(commands, pass, viewProjection, camera);
+	}
 
 	// Terrain.
 	SDL_BindGPUGraphicsPipeline(pass, m_gpu.terrainPipeline());
@@ -2840,8 +2885,8 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// script values are the editor's (the game doesn't have them).
 	const auto& terrainSun = m_terrainColorsFromData ? m_terrainSunColor : lights.terrainSunColor;
 	const auto& terrainGI = m_terrainColorsFromData ? m_terrainGIColor : lights.terrainGIColor;
-	LightingUniforms terrainLit = lighting(lights, terrainSun, terrainGI, 0, true);
-	LightingUniforms terrainUnlit = lighting(lights, terrainSun, terrainGI, 0, false);
+	LightingUniforms terrainLit = lighting(m_viewFog, lights, terrainSun, terrainGI, 0, true);
+	LightingUniforms terrainUnlit = lighting(m_viewFog, lights, terrainSun, terrainGI, 0, false);
 	applyPointLights(terrainLit);
 	applyPointLights(terrainUnlit);
 	TransformUniforms transforms {viewProjection, Mat4 {}, {1, 1, 0, 0}, {}};
@@ -3040,10 +3085,10 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	useShadows(commands, pass, 1, 5, true);
 	// Lightmapped statics use the static sun/sky colors.
 	LightingUniforms uniformsFor[2][2] = {
-		{lighting(lights, lights.sunColor, lights.skyColor, 0, false),
-			lighting(lights, lights.sunColor, lights.skyColor, 0.5f, false)},
-		{lighting(lights, lights.staticSunColor, lights.staticSkyColor, 0, true),
-			lighting(lights, lights.staticSunColor, lights.staticSkyColor, 0.5f, true)},
+		{lighting(m_viewFog, lights, lights.sunColor, lights.skyColor, 0, false),
+			lighting(m_viewFog, lights, lights.sunColor, lights.skyColor, 0.5f, false)},
+		{lighting(m_viewFog, lights, lights.staticSunColor, lights.staticSkyColor, 0, true),
+			lighting(m_viewFog, lights, lights.staticSunColor, lights.staticSkyColor, 0.5f, true)},
 	};
 	for (auto& row : uniformsFor) {
 		for (LightingUniforms& uniforms : row) {
@@ -3143,7 +3188,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// Decals over the opaque surfaces.
 	if (m_decalVertices && !m_decalGroups.empty()) {
 		SDL_BindGPUGraphicsPipeline(pass, m_gpu.decalPipeline());
-		const LightingUniforms decalLighting = lighting(lights, lights.sunColor, lights.skyColor, 0, false);
+		const LightingUniforms decalLighting = lighting(m_viewFog, lights, lights.sunColor, lights.skyColor, 0, false);
 		SDL_PushGPUFragmentUniformData(commands, 0, &decalLighting, sizeof(decalLighting));
 		TransformUniforms decalTransforms {viewProjection, Mat4 {}, {1, 1, 0, 0}, {}};
 		SDL_PushGPUVertexUniformData(commands, 0, &decalTransforms, sizeof(decalTransforms));
@@ -3160,7 +3205,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// Water, blended over what is below it.
 	if (!m_waterBlocks.empty() && m_water) {
 		SDL_BindGPUGraphicsPipeline(pass, m_gpu.waterPipeline());
-		const LightingUniforms waterLighting = lighting(lights, lights.sunColor, lights.skyColor, 0, false);
+		const LightingUniforms waterLighting = lighting(m_viewFog, lights, lights.sunColor, lights.skyColor, 0, false);
 		SDL_PushGPUFragmentUniformData(commands, 0, &waterLighting, sizeof(waterLighting));
 		// WaterCycleTime (0x100b17d0; t the renderer's clock in seconds, a
 		// waterAnimSpeed of 0 taken as 0.01): the 3D variants (Water3D,
@@ -3184,7 +3229,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		const size_t frame1 = (frame0 + 1) % frameCount;
 		const WaterUniforms water {
 			{camera.position.x, camera.position.y, camera.position.z, seconds},
-			{m_water->color[0], m_water->color[1], m_water->color[2], 1},
+			{m_water->color[0], m_water->color[1], m_water->color[2], m_water->sunIntensity},
 			{m_water->specularColor[0], m_water->specularColor[1], m_water->specularColor[2], m_water->specularColor[3]},
 			{m_water->alphaAdd, m_water->alphaHeightMul, m_water->specularPower, m_waterEnvMap ? 1.0f : 0.0f},
 			{m_water->scroll[0], m_water->scroll[1], cycle, m_waterVolume ? 1.0f : 0.0f},
@@ -3372,8 +3417,8 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 	const scene::LightSettings& useLights = insideSun ? insideLights : lights;
 	const std::array<float, 3>& sunColor = insideSun ? inside.color : lights.sunColor;
 	const std::array<float, 3>& skyColor = insideSun ? inside.ambient : lights.skyColor;
-	LightingUniforms lit[2] = {lighting(useLights, sunColor, skyColor, 0, false),
-		lighting(useLights, sunColor, skyColor, 0.5f, false)};
+	LightingUniforms lit[2] = {lighting(m_viewFog, useLights, sunColor, skyColor, 0, false),
+		lighting(m_viewFog, useLights, sunColor, skyColor, 0.5f, false)};
 	if (!insideSun || inside.dynamicLights) {
 		applyPointLights(lit[0]);
 		applyPointLights(lit[1]);

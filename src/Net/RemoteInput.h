@@ -36,6 +36,7 @@ inline PlayerInput playerInputFrom(const game::SoldierInput& in, float previousA
 	out.set(kPIFire, in.fire ? 1.0f : 0.0f);
 	out.set(kPIAltFire, in.altFire ? 1.0f : 0.0f);
 	out.set(kPIUse, in.use ? 1.0f : 0.0f);
+	out.set(kPIToggleFireRate, in.toggleFireRate ? 1.0f : 0.0f);
 	out.set(kPIAction, in.jump ? 1.0f : 0.0f);
 	if (in.switchSeat >= 1 && in.switchSeat <= 8) {
 		out.set(kPIPositionSelect1 + in.switchSeat - 1, 1.0f);
@@ -73,6 +74,7 @@ inline game::SoldierInput soldierInputFromMove(const PlayerMove& move, MoveInput
 	input.fire = move.trigger(kPIFire);
 	input.altFire = move.trigger(kPIAltFire);
 	input.jump = move.trigger(kPIAction);
+	input.toggleFireRate = move.trigger(kPIToggleFireRate); // held: the world acts on the press
 	input.pose = move.trigger(kPILie) ? game::SoldierPose::Prone
 		: move.trigger(kPICrouch)     ? game::SoldierPose::Crouch
 									  : game::SoldierPose::Stand;

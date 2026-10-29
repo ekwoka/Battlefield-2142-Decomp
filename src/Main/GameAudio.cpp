@@ -74,6 +74,7 @@ void GameAudio::weapons(const Camera& camera)
 		using Kind = game::GameWorld::WeaponSoundEvent::Kind;
 		const sound::GameSounds::WeaponEvent kind = event.kind == Kind::Fire ? sound::GameSounds::WeaponEvent::Fire
 			: event.kind == Kind::Reload                                  ? sound::GameSounds::WeaponEvent::Reload
+			: event.kind == Kind::SwitchFireRate                          ? sound::GameSounds::WeaponEvent::SwitchFireRate
 																		  : sound::GameSounds::WeaponEvent::Deploy;
 		m_sounds.weapon(kind, event.weapon, firstPerson, toSound(event.position), muteOnFire);
 	}

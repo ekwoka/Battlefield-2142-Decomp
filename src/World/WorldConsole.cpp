@@ -295,6 +295,16 @@ void registerWorldConsoleMethods(Console& console, ObjectTemplateManager& templa
 				list += std::to_string(level) + " " + effect + " " + position + " " + rotation + ";";
 			}
 		});
+	// armor.addArmorEffectSpectacular, the same: the level's effects after a
+	// spectacular hit (GameWorld's armour effects), kept apart as
+	// "armor.addArmorEffectSpectacular.list".
+	bindMethod(console, "ObjectTemplate.armor.addArmorEffectSpectacular", access,
+		[&templates](int level, std::string effect, std::string position, std::string rotation) {
+			if (templates.active()) {
+				std::string& list = templates.active()->settings()["armor.addArmorEffectSpectacular.list"];
+				list += std::to_string(level) + " " + effect + " " + position + " " + rotation + ";";
+			}
+		});
 
 	// setGearRatios <5 ratios> (0x005406d1): an engine's ratio per gear, kept
 	// as "gearRatios" = "a/b/c/d/e".

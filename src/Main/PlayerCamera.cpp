@@ -189,8 +189,23 @@ void PlayerCamera::stepShakes(float seconds)
 		m_speedShake = m_hitShake = m_shakeTime = m_hitLeft = 0;
 		m_lastVehicleHp = -1;
 		m_shakeVehicle = 0;
+		m_cameraRecoil = {};
+		m_recoilShake = 0;
+		m_lastGunShots = me.gunShots;
 		return;
 	}
+	// The gun's camera recoil (0x00610180 on each round, taken in the
+	// inside and nose views; 0x006101c0 each update).
+	if (me.gunShots != m_lastGunShots && (m_mode == game::camera::Mode::Inside || m_mode == game::camera::Mode::Nose)) {
+		const auto seats = m_round.vehicleSeats(me.vehicle);
+		if (me.seat >= 0 && static_cast<size_t>(me.seat) < seats.size()
+			&& seats[static_cast<size_t>(me.seat)].cameraRecoilSize > 0) {
+			m_cameraRecoil.start(seats[static_cast<size_t>(me.seat)].cameraRecoilSpeed,
+				seats[static_cast<size_t>(me.seat)].cameraRecoilSize);
+		}
+	}
+	m_lastGunShots = me.gunShots;
+	m_recoilShake = m_cameraRecoil.update(seconds);
 	const world::ObjectTemplate& camera = *seat.camera;
 	// The speed shake.
 	const float start = number(camera, "cameraShakeStartSpeed", 0), most = number(camera, "cameraShakeMaxSpeed", 0);

@@ -4551,9 +4551,12 @@ bool BotManager::fireKeepsToOrder(const Bot& bot, const GameWorld::PlayerInfo& s
 // deviation (1 - acc)(1 - t/2) x deviation, t = time on the target / 15 s,
 // acc = skill against soldiers (1 - 0.5 (1 - skill) against vehicles,
 // 1 - 0.4 (1 - skill) with explosives) (BF2142.exe 0x00892b70). The game
-// hands that to the soldier (vt+0xf4), which widens the weapon's own
-// deviation; the rewrite's hand-held firearms have no deviation model, so
-// the bot spreads its aim instead, uniformly over +-half on each axis.
+// hands that to the firearm (interface 0x94c0 vt+0xf4 -> its deviation
+// component's slot 0xac: the SoldierDeviationComp's +0x44, 0x00680290;
+// the SimpleDeviationComp's +0x28, 0x008a1a90), which adds it to its own
+// deviation while its holder is an AI (0x005de980, 0x005dedb0): the
+// rounds stray by it (GameWorld::setAiDeviation). A firearm without a
+// deviation component takes none.
 void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds)
 {
 	GameWorld::PlayerInfo target;
@@ -4783,13 +4786,13 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 		}
 		const float onIt = std::min(1.0f, (m_time - bot.targetAcquired) / 15.0f);
 		const float deviation = (1 - acc) * (1 - onIt / 2) * weapon.deviation;
-		const float newYaw = (random() - 0.5f) * deviation;
-		const float newPitch = (random() - 0.5f) * deviation;
-		input.turn += newYaw - bot.devYaw;
-		input.aimPitch = bot.pitch + newPitch;
-		bot.devYaw = newYaw;
-		bot.devPitch = newPitch;
-	} else if (bot.devYaw != 0) {
+		// Handed to the weapon's deviation component (vt+0xf4 -> slot 0xac),
+		// which adds it to its own while the holder is an AI: the rounds
+		// spread by it through the deviation's normal numbers
+		// (GameWorld::setAiDeviation). The aim itself stays on the target.
+		m_world.setAiDeviation(self.id, deviation);
+	}
+	if (bot.devYaw != 0) {
 		input.turn -= bot.devYaw;
 		bot.devYaw = 0;
 		bot.devPitch = 0;

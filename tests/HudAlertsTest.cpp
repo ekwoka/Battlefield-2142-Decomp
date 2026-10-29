@@ -357,8 +357,13 @@ TEST(HudAlerts_HelpPopups)
 	help.update(hudManager, {}, 0.1f);
 	help.update(hudManager, context, 0.1f);
 	CHECK(hudManager.number("IngameHelpShow") == 0);
-	// The armour falls to the critical damage.
+	// The armour falls below 0.3 of its maximum (0x00646cb0 case 0x3a).
+	context.vehicleHitPoints = 35;
+	context.vehicleShare = 0.35f;
+	help.update(hudManager, context, 0.1f);
+	CHECK(hudManager.string("IngameHelpString") != "<HUD_HELP_LOWHEALTH>");
 	context.vehicleHitPoints = 15;
+	context.vehicleShare = 0.15f;
 	help.update(hudManager, context, 0.1f);
 	CHECK(hudManager.string("IngameHelpString") == "<HUD_HELP_LOWHEALTH>");
 	// Near an enemy's artillery, on foot.
@@ -369,11 +374,93 @@ TEST(HudAlerts_HelpPopups)
 	context.nearby.front().distance = 4;
 	help.update(hudManager, context, 0.1f);
 	CHECK(hudManager.string("IngameHelpString") == "<HUD_HELP_WORLD_PLAYER_ARTILLERY_enemy>");
-	// GeneralSettings.setHelpPopups 0: none.
+	// Shown keys go on the played list, and played keys don't show again
+	// next round (GeneralSettings.setPlayedVOHelp).
+	std::vector<std::string> played;
+	help.onPlayed = [&played](const std::string& key) { played.push_back(key); };
+	CHECK(help.played("HUD_HELP_WORLD_PLAYER_ARTILLERY_enemy"));
 	std::string out;
+	console.execute("GeneralSettings.setPlayedVOHelp \"HUD_HELP_OLD\"", out);
+	help.reset();
+	CHECK(!help.show(hudManager, "HUD_HELP_OLD"));
+	CHECK(help.show(hudManager, "HUD_HELP_NEW"));
+	CHECK((played == std::vector<std::string> {"HUD_HELP_NEW"}));
+	// GeneralSettings.setHelpPopups 0: none.
 	console.execute("GeneralSettings.setHelpPopups 0", out);
 	help.reset();
 	CHECK(!help.show(hudManager, "HUD_HELP_ANYTHING"));
+}
+
+// The weapon's alt and low-ammunition keys (0x00646cb0 cases 0x50, 0x3b)
+// and the help manager's own messages (0x00645d40, ticked by 0x00649d80).
+TEST(HudAlerts_AltLowAmmoAndTutorial)
+{
+	Console console;
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "GenericFireArm");
+	world::registerWorldConsoleMethods(console, templates, objects);
+	world::registerUntypedTemplateProperties(console, templates,
+		{"helpHud.altHelpStringKey", "helpHud.altHelpSoundKey", "helpHud.lowAmmoHelpStringKey", "helpHud.lowAmmoHelpSoundKey"});
+	menu::HelpPopups help;
+	help.bind(console);
+	run(console, {
+					 "ObjectTemplate.create GenericFireArm rifle",
+					 "ObjectTemplate.HelpHud.altHelpStringKey \"HUD_HELP_RIFLE_zoom\"",
+					 "ObjectTemplate.HelpHud.lowAmmoHelpStringKey \"HUD_HELP_RIFLE_lowAmmo\"",
+					 "ObjectTemplate.HelpHud.lowAmmoHelpSoundKey \"rifle_low_vo\"",
+				 });
+	const world::ObjectTemplate* rifle = templates.find("rifle");
+	CHECK(rifle);
+	if (!rifle) {
+		return;
+	}
+	hud::HudManager hudManager(nullptr);
+	std::vector<std::string> voices;
+	help.setVoiceHook([&voices](const std::string& key) { voices.push_back(key); });
+	menu::HelpPopups::Context context;
+	context.weapon = rifle;
+	help.update(hudManager, context, 0.1f);
+	CHECK(hudManager.number("IngameHelpShow") == 0); // no helpStringKey
+	context.zoomed = true;
+	help.update(hudManager, context, 0.1f);
+	CHECK(hudManager.string("IngameHelpString") == "HUD_HELP_RIFLE_zoom");
+	context.ammo.push_back({rifle, 0.5f});
+	help.update(hudManager, context, 0.1f);
+	CHECK(hudManager.string("IngameHelpString") == "HUD_HELP_RIFLE_zoom");
+	context.ammo.front().share = 0.2f;
+	help.update(hudManager, context, 0.1f);
+	CHECK(hudManager.string("IngameHelpString") == "HUD_HELP_RIFLE_lowAmmo");
+	CHECK(!voices.empty() && voices.back() == "rifle_low_vo");
+
+	// The tutorial: nothing until the round plays; then the first message
+	// that holds (on foot, no menu: move the mouse to look), shown 9 s with
+	// no voice; the next only 10 s later.
+	menu::HelpPopups tutor;
+	std::vector<std::string> said;
+	tutor.setVoiceHook([&said](const std::string& key) { said.push_back(key); });
+	menu::HelpPopups::Context round;
+	round.onFoot = round.alive = true;
+	CHECK(!tutor.tutorial(hudManager, round, 0.1f));
+	round.playing = true;
+	round.roundTime = 1;
+	CHECK(tutor.tutorial(hudManager, round, 0.1f));
+	CHECK(hudManager.string("IngameHelpString") == "HUD_HELP_PLAYER_CONTROLS_moveMouseToLook");
+	CHECK(said.empty());
+	CHECK(!tutor.tutorial(hudManager, round, 5));
+	tutor.update(hudManager, {}, menu::HelpPopups::kShowSeconds);
+	CHECK(hudManager.number("IngameHelpShow") == 0);
+	CHECK(tutor.tutorial(hudManager, round, 6)); // 11 s on: moving needs 3 s of the round (it is 1): firing
+	CHECK(hudManager.string("IngameHelpString") == "HUD_HELP_PLAYER_CONTROLS_fireLeftMouse");
+	CHECK((said == std::vector<std::string> {"HUD_HELP_PLAYER_CONTROLS_fireLeftMouse"}));
+	// Played keys are done at the start (0x006467f0).
+	Console settings;
+	menu::HelpPopups veteran;
+	veteran.bind(settings);
+	std::string out;
+	settings.execute("GeneralSettings.setPlayedVOHelp \"HUD_HELP_PLAYER_CONTROLS_moveMouseToLook\"", out);
+	CHECK(veteran.tutorial(hudManager, round, 0.1f));
+	CHECK(hudManager.string("IngameHelpString") == "HUD_HELP_PLAYER_CONTROLS_fireLeftMouse");
 }
 
 // The game's commander menu (HudElementsCommanderMenuConquest.con): its

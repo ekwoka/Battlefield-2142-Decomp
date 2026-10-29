@@ -131,6 +131,17 @@ public:
 	// Per row (the chat's lines by who said them); rows without one take
 	// the list's.
 	void setListRowColors(int data, std::vector<std::array<float, 4>> colors) { m_listRowColors[data] = std::move(colors); }
+	// A row's background (the list data's row fill, 0x007dd5d0: the row's
+	// cells +0x6c on, +0x70 its colour; the render 0x007de7d0 fills the
+	// row between the side borders, the row height high, except on a
+	// selected row). Alpha 0: none.
+	// An occupied-vehicle data source's seat states (BfOccupiedVehicleData,
+	// 0x007e15c0: by seat, 0..7; the vehicle HUD's "OccupiedData" is data 1).
+	void setOccupiedStates(int data, std::vector<int> states) { m_occupiedStates[data] = std::move(states); }
+	void setListRowBackgrounds(int data, std::vector<std::array<float, 4>> colors)
+	{
+		m_listRowBackgrounds[data] = std::move(colors);
+	}
 	void setListSelection(int data, int row) { m_listSelection[data] = row; }
 	int listSelection(int data) const
 	{
@@ -162,6 +173,7 @@ public:
 		float yaw = 0;       // degrees, clockwise (0 points north)
 		float color[4] = {1, 1, 1, 1};
 		int id = -1;         // >= 0: clickable (mapMarkerAt returns it)
+		float height = 0;    // > 0: not square (size is then the width)
 	};
 	void setMap(const std::string& texture, float originX, float originZ, float width, float depth);
 	void setMapFocus(float x, float z) { m_mapFocus[0] = x; m_mapFocus[1] = z; }
@@ -330,6 +342,8 @@ private:
 	std::vector<MouseOverHit> m_mouseOverHits;
 	std::map<int, std::vector<std::vector<std::string>>> m_lists;
 	std::map<int, std::vector<std::array<float, 4>>> m_listRowColors;
+	std::map<int, std::vector<std::array<float, 4>>> m_listRowBackgrounds;
+	std::map<int, std::vector<int>> m_occupiedStates;
 	std::map<int, std::string> m_editText;
 	std::map<int, int> m_editMaxLength;
 	int m_editFocus = -1;

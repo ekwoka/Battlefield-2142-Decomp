@@ -661,6 +661,28 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 	case kObjectMarker:
 		drawMarkers(node, x, y, color, out);
 		break;
+	case kOccupied: {
+		// BfOccupiedVehicleNode (0x007e1520): its seat's state in the data
+		// (0x007e14d0: below 1 none, above 7 the squad's) picks the texture
+		// the data loaded (0x007e1620), drawn at the position variables
+		// over the parent, the node's size.
+		static const char* const kSeatTextures[8] = {"",
+			"Ingame/Vehicles/Icons/Hud/Positions/vehiclePositionPlayerGreen.tga",
+			"Ingame/Vehicles/Icons/Hud/Positions/vehiclePositionPlayerBlue.tga",
+			"Ingame/Vehicles/Icons/Hud/Positions/vehiclePositionPlayerRed.tga",
+			"Ingame/Vehicles/Icons/Hud/Positions/vehiclePositionEmpty.tga",
+			"Ingame/Vehicles/Icons/Hud/Positions/vehiclePositionTeamBlue.tga",
+			"Ingame/Vehicles/Icons/Hud/Positions/vehiclePositionTeamRed.tga",
+			"Ingame/Vehicles/Icons/Hud/Positions/vehiclePositionSquad.tga"};
+		const auto states = m_occupiedStates.find(node.occupiedData);
+		int state = 0;
+		if (states != m_occupiedStates.end() && node.occupiedSeat >= 0
+			&& static_cast<size_t>(node.occupiedSeat) < states->second.size()) {
+			state = std::clamp(states->second[static_cast<size_t>(node.occupiedSeat)], 0, 7);
+		}
+		quad(kSeatTextures[state], x, y, x + w, y + h, 0, 0, 1, 1, 0);
+		break;
+	}
 	default:
 		break;
 	}
@@ -1074,6 +1096,9 @@ void HudManager::drawList(const Node& node, float x, float y, const float color[
 		}
 		if (node.listSelectable && static_cast<int>(r) == selected) {
 			fill(node.listSelectColor, x + left, rowY, x + w - right, rowY + node.rowHeight);
+		} else if (const auto back = m_listRowBackgrounds.find(node.listData);
+				   back != m_listRowBackgrounds.end() && r < back->second.size()) {
+			fill(back->second[r].data(), x + left, rowY, x + w - right, rowY + node.rowHeight);
 		}
 		const auto rowColors = m_listRowColors.find(node.listData);
 		const bool ownColor = rowColors != m_listRowColors.end() && r < rowColors->second.size();
@@ -1469,18 +1494,19 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 		const float v = 1 - (marker.z - m_mapOrigin[1]) / m_mapSize[1];
 		const float sx = mapX + u * mapW, sy = mapY + v * mapH;
 		const float side = std::floor(marker.size);
-		const float x0 = std::floor(sx - marker.size * 0.5f), y0 = std::floor(sy - marker.size * 0.5f);
-		if (x0 + side <= nx || x0 >= nx + nw || y0 + side <= ny || y0 >= ny + nh) {
+		const float tall = marker.height > 0 ? std::floor(marker.height) : side;
+		const float x0 = std::floor(sx - marker.size * 0.5f), y0 = std::floor(sy - (marker.height > 0 ? marker.height : marker.size) * 0.5f);
+		if (x0 + side <= nx || x0 >= nx + nw || y0 + tall <= ny || y0 >= ny + nh) {
 			continue;
 		}
-		HudQuad q {kTextureRoot + slashes(marker.texture), x0, y0, x0 + side, y0 + side, 0, 0, 1, 1,
+		HudQuad q {kTextureRoot + slashes(marker.texture), x0, y0, x0 + side, y0 + tall, 0, 0, 1, 1,
 			{marker.color[0], marker.color[1], marker.color[2], marker.color[3] * alpha}, marker.yaw};
 		if (!clipTo(q, nx, ny, nx + nw, ny + nh)) {
 			continue;
 		}
 		out.push_back(q);
 		if (marker.id >= 0) {
-			m_mapHits.push_back({std::max(x0, nx), std::max(y0, ny), std::min(x0 + side, nx + nw), std::min(y0 + side, ny + nh),
+			m_mapHits.push_back({std::max(x0, nx), std::max(y0, ny), std::min(x0 + side, nx + nw), std::min(y0 + tall, ny + nh),
 				marker.id});
 		}
 	}

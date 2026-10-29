@@ -448,4 +448,24 @@ void CommanderMenu::update(int player)
 	tabs.apply(m_hud);
 }
 
+ScoreboardStyle scoreboardStyle(const ScoreboardRow& row, int rowIndex)
+{
+	ScoreboardStyle style {{0, 0, 0, 1}, {0, 0, 0, 0}};
+	if (row.alive && !row.hidden) {
+		if ((row.sameSquad && row.friendlyList) || (row.local && row.localCommands)) {
+			style.text = {0.0313726f, 0.466667f, 0.00784314f, 1}; // 0x00a0beb0
+		} else if (row.friendlyList) {
+			style.text = {0, 0.380392f, 1, 1}; // 0x00a0bec0
+		} else {
+			style.text = {0.992157f, 0, 0.00392157f, 1}; // 0x00a0bd50
+		}
+	}
+	if (row.local) {
+		style.background = {0.392157f, 0.392157f, 0.392157f, 0.35f}; // 0x00a0bc50
+	} else if (rowIndex % 2 != 0) {
+		style.background = {0.65098f, 0.65098f, 0.65098f, 0.8f}; // 0x00a0bc30
+	}
+	return style;
+}
+
 } // namespace dice::hfe::menu

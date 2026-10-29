@@ -45,6 +45,38 @@ inline Mat4 overheadProjection(const OverheadView& view, float width, float heig
 	return r;
 }
 
+// Where the overhead camera stands (0x005f8170): over (x, z) kept 80 m
+// inside a terrain `extent` metres across from `origin` (when it is wider
+// than 160 m), at the mean of the ground's heights there and 2 m off along
+// both axes (`heights`: here, +z, -z, +x, -x), or the sea's when higher,
+// plus the view's height.
+inline Vec3f overheadCameraPosition(const OverheadView& view, const float origin[2], float extent,
+	const float heights[5], float seaLevel)
+{
+	float x = view.x, z = view.z;
+	if (extent > 160) {
+		x = std::clamp(x, origin[0] + 80, origin[0] + extent - 80);
+		z = std::clamp(z, origin[1] + 80, origin[1] + extent - 80);
+	}
+	const float ground = std::max((heights[0] + heights[1] + heights[2] + heights[3] + heights[4]) * 0.2f, seaLevel);
+	return {x, ground + view.height, z};
+}
+
+// Where the five ground heights are taken.
+inline void overheadGroundPoints(const OverheadView& view, const float origin[2], float extent, float xs[5], float zs[5])
+{
+	float x = view.x, z = view.z;
+	if (extent > 160) {
+		x = std::clamp(x, origin[0] + 80, origin[0] + extent - 80);
+		z = std::clamp(z, origin[1] + 80, origin[1] + extent - 80);
+	}
+	const float dx[5] = {0, 0, 0, 2, -2}, dz[5] = {0, 2, -2, 0, 0};
+	for (int i = 0; i < 5; ++i) {
+		xs[i] = x + dx[i];
+		zs[i] = z + dz[i];
+	}
+}
+
 // The ground width the view spans across its rectangle's height at its
 // height over the ground (0x0077c4b0: 2 tan(fov / 2) times the height).
 inline float overheadGroundWidth(float fovY, float height)
