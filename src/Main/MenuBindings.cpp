@@ -1679,6 +1679,15 @@ void MenuBindings::bindServerSettings()
 		{"GeneralSettings.BotSkill", Value(0.5)},
 		{"GeneralSettings.UseBots", Value(true)},
 		{"GeneralSettings.MaxBotsIncludeHumans", Value(true)},
+		// The HUD page's values as the object keeps them (0x004960a0's
+		// neighbours; SettingsObjects' defaults): alphas 0..255, the
+		// crosshair "r g b a"; the natives below convert for the page.
+		{"GeneralSettings.HUDTransparency", Value(255)},
+		{"GeneralSettings.MinimapTransparency", Value(170)},
+		{"GeneralSettings.MapIconTransparency", Value(255)},
+		{"GeneralSettings.CrosshairColor", Value("255 255 255 255")},
+		{"GeneralSettings.CameraShake", Value(1)},
+		{"GeneralSettings.HelpPopUps", Value(1)},
 		// The video page: qualities 1 low, 2 medium, 3 high (0 off for the
 		// dynamic ones); antialiasing by its VIDEOSETTINGS_ name.
 		{"VideoSettings.TerrainQuality", Value(3)},
@@ -1698,9 +1707,12 @@ void MenuBindings::bindServerSettings()
 		{"AudioSettings.MusicVolume", Value(1)},
 		{"AudioSettings.VoiceOverVolume", Value(1)},
 		{"AudioSettings.NumberOfVoices", Value(32)},
-		{"AudioSettings.SoundQuality", Value(2)},
+		// The audio page's radios by name (0x004960a0's defaults; the
+		// page sets "software", "hardware", "creative" and Low, Medium,
+		// High, UltraHigh).
+		{"AudioSettings.SoundQuality", Value("Medium")},
 		{"AudioSettings.SoundDetail", Value(2)},
-		{"AudioSettings.Provider", Value("Software")},
+		{"AudioSettings.Provider", Value("software")},
 		{"ControlSettings.MouseSensitivity", Value(0.5)},
 		{"ControlSettings.MouseSensitivityMultiplier", Value(1)},
 		{"ControlSettings.MouseYAWFactor", Value(1)},
@@ -1780,6 +1792,67 @@ void MenuBindings::bindServerSettings()
 		}
 		return Value(vm.newArray(std::move(modes)));
 	});
+	// 0x100108c0, 0x100109c0: the audio page's radios read the object's
+	// provider and sound quality, as getProvider and getSoundQuality do.
+	// The providers are lower case; files the rewrite wrote before it had
+	// 0x004960a0's default say "Software", which no radio would match.
+	n.setFunction(kAudioSettings, "getSelectedProvider", [this](Interpreter& vm, const Args&) {
+		std::string provider = vm.toString(m_settings["AudioSettings.Provider"]);
+		std::transform(provider.begin(), provider.end(), provider.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		return Value(provider);
+	});
+	n.setFunction(kAudioSettings, "getSelectedSoundQuality", [this](Interpreter& vm, const Args&) {
+		return Value(vm.toString(m_settings["AudioSettings.SoundQuality"]));
+	});
+	// 0x10010960: the sound detail the page no longer shows.
+	n.setFunction(kAudioSettings, "getSelectedSoundDetail", [](Interpreter&, const Args&) { return Value("Remove Me"); });
+	// The HUD page (SwiffPlayer 0x10030000..): its sliders are
+	// transparencies 0..1, the object's values alphas 0..255 (get
+	// 0x100326b0, 0x10032620, 0x10032590: 1 - alpha/255; set 0x100311b0,
+	// 0x10031140, 0x100310d0: 255 - t*255).
+	for (const char* name : {"HUDTransparency", "MinimapTransparency", "MapIconTransparency"}) {
+		const std::string key = std::string("GeneralSettings.") + name;
+		n.setFunction(kGeneralSettings, std::string("get") + name, [this, key](Interpreter& vm, const Args&) {
+			return Value(1.0 - vm.toNumber(m_settings[key]) / 255.0);
+		});
+		n.setFunction(kGeneralSettings, std::string("set") + name, [this, key](Interpreter& vm, const Args& args) {
+			m_settings[key] = Value(255.0 - vm.toNumber(arg(args, 0)) * 255.0);
+			return Value();
+		});
+	}
+	// 0x10032310: the crosshair as one number, alpha << 24 | red << 16 |
+	// green << 8 | blue; 0x10030d80 sets it from (red, green, blue, alpha).
+	n.setFunction(kGeneralSettings, "getCrosshairColor", [this](Interpreter& vm, const Args&) {
+		int c[4] = {255, 255, 255, 255};
+		std::sscanf(vm.toString(m_settings["GeneralSettings.CrosshairColor"]).c_str(), "%d %d %d %d", &c[0], &c[1], &c[2], &c[3]);
+		const auto byte = [](int v) { return static_cast<uint32_t>(std::clamp(v, 0, 255)); };
+		return Value(static_cast<double>(byte(c[3]) << 24 | byte(c[0]) << 16 | byte(c[1]) << 8 | byte(c[2])));
+	});
+	n.setFunction(kGeneralSettings, "setCrosshairColor", [this](Interpreter& vm, const Args& args) {
+		std::string color;
+		for (size_t i = 0; i < 4; ++i) {
+			color += (i ? " " : "") + std::to_string(static_cast<int>(std::lround(vm.toNumber(arg(args, i)))));
+		}
+		m_settings["GeneralSettings.CrosshairColor"] = Value(color);
+		return Value();
+	});
+	// 0x10030180 / 0x100315d0: the camera shake radio is "no shake" (1
+	// when the object's shake is off); 0x10030280 / 0x100316b0: help
+	// pop-ups as they are.
+	n.setFunction(kGeneralSettings, "getCameraShake", [this](Interpreter& vm, const Args&) {
+		return Value(vm.toNumber(m_settings["GeneralSettings.CameraShake"]) != 0 ? 0.0 : 1.0);
+	});
+	n.setFunction(kGeneralSettings, "setCameraShake", [this](Interpreter&, const Args& args) {
+		m_settings["GeneralSettings.CameraShake"] = Value(avm1::toBoolean(arg(args, 0)) ? 0.0 : 1.0);
+		return Value();
+	});
+	n.setFunction(kGeneralSettings, "getHelpPopUps", [this](Interpreter& vm, const Args&) {
+		return Value(vm.toNumber(m_settings["GeneralSettings.HelpPopUps"]) != 0 ? 1.0 : 0.0);
+	});
+	n.setFunction(kGeneralSettings, "setHelpPopUps", [this](Interpreter&, const Args& args) {
+		m_settings["GeneralSettings.HelpPopUps"] = Value(avm1::toBoolean(arg(args, 0)) ? 1.0 : 0.0);
+		return Value();
+	});
 	// 0x1005d2d0: the display mode in use, as the displayModes list writes it.
 	n.setFunction(kVideoSettings, "getSelectedResolution", [this](Interpreter&, const Args&) {
 		return m_settings.count("VideoSettings.Resolution") ? m_settings.at("VideoSettings.Resolution") : Value("");
@@ -1818,11 +1891,24 @@ constexpr std::pair<const char*, const char*> kSettingAliases[] = {
 	{"AudioSettings.VoiceOverVolume", "AudioSettings.HelpVoiceVolume"},
 	{"AudioSettings.NumberOfVoices", "AudioSettings.ForceNumberOfVoices"},
 	{"VideoSettings.BloomEnabled", "VideoSettings.UseBloom"},
+	{"GeneralSettings.MapIconTransparency", "GeneralSettings.MapIconAlphaTransparency"},
+	{"GeneralSettings.HelpPopUps", "GeneralSettings.HelpPopups"},
 };
-// Kept apart: the page's SoundQuality is a number, the object's a name.
-bool syncedSetting(const std::string& key)
+// Every page setting goes to its object (the sound quality by its name,
+// as AudioSettings.soundQuality keeps it).
+bool syncedSetting(const std::string&)
 {
-	return key != "AudioSettings.SoundQuality";
+	return true;
+}
+// An object's name that a page spells otherwise (kept under the page's).
+bool aliasedObjectKey(const std::string& key)
+{
+	for (const auto& [from, to] : kSettingAliases) {
+		if (key == to) {
+			return true;
+		}
+	}
+	return false;
 }
 std::string objectKey(const std::string& page)
 {
@@ -1850,7 +1936,7 @@ void MenuBindings::setSettingsObjects(SettingsObjects* objects)
 			continue;
 		}
 		const std::string text = objects->get(from);
-		if (text.empty() || text.find(' ') != std::string::npos) {
+		if (text.empty() || (text.find(' ') != std::string::npos && key != "GeneralSettings.CrosshairColor")) {
 			continue;
 		}
 		if (value.isBoolean()) {
@@ -1864,7 +1950,8 @@ void MenuBindings::setSettingsObjects(SettingsObjects* objects)
 	}
 	// The ones the pages had no default for.
 	for (const auto& [key, text] : objects->values()) {
-		if (!m_settings.count(key) && !text.empty() && text.find(' ') == std::string::npos && syncedSetting(key)) {
+		if (!m_settings.count(key) && !aliasedObjectKey(key) && !text.empty() && text.find(' ') == std::string::npos &&
+			syncedSetting(key)) {
 			char* end = nullptr;
 			const double number = std::strtod(text.c_str(), &end);
 			const Value value = *end == 0 ? Value(number) : Value(text);
@@ -1983,7 +2070,7 @@ void MenuBindings::bindControls()
 		}
 		const std::string key = input::ControlMaps::displayKey(*b);
 		const std::string text = m_natives.localize(key);
-		if (!text.empty() && text != key) {
+		if ((!text.empty() && text != key) || key.compare(0, 7, "Falcon_") == 0) {
 			return Value(text);
 		}
 		// No localization: "IDKey_W" as "W", "IDButton_0" as "Mouse 1".

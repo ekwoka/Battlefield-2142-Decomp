@@ -177,6 +177,22 @@ TEST(GameControllers_ControlMaps)
 	b = maps.binding(inf, "c_PIThrottle", 0, 1);
 	CHECK(b && b->kind == input::Binding::Kind::Key && b->control == "IDKey_Up");
 	CHECK(input::ControlMaps::displayKey(*b) == "CONTROLLER_IDKey_Up");
+	// 0x00498750 names the Falcon's axes X, Y and Z.
+	input::Binding falcon = *b;
+	falcon.device = "IDFFalcon";
+	falcon.control = "IDAxis_1";
+	CHECK(input::ControlMaps::displayKey(falcon) == "Falcon_Y");
+	falcon.control = "IDAxis_2";
+	CHECK(input::ControlMaps::displayKey(falcon) == "Falcon_Z");
+	// The help texts' keys (0x00752b70): #PI from the player's map, _2 the
+	// negative key, localized when the strings have it.
+	input::ControlMaps::Map& game = maps.create(input::ControlMaps::kGame);
+	game["c_GIYes"] = {{input::Binding::Kind::Key, "IDFKeyboard", "IDKey_PageUp", 1}};
+	maps.bind(inf, "c_PIThrottle", "IDKey_W", 0, 1);
+	maps.bind(inf, "c_PIThrottle", "IDKey_S", 0, -1);
+	const auto localize = [](const std::string& key) { return key == "CONTROLLER_IDKey_PageUp" ? std::string("Page Up") : key; };
+	CHECK(maps.withKeyNames("(#PIThrottle_1# and #PIThrottle_2#), '#GIYes#' #PINothing# #GI", localize) ==
+		"(W and S), 'Page Up' #PINothing# #GI");
 }
 
 // A stick and a hat flying: the air map's c_PIRoll and c_PIPitch from a

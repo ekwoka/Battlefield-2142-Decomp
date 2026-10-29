@@ -178,6 +178,7 @@ struct Options {
 	// move) on the HUD's 800 x 600 screen before the screenshot.
 	std::vector<std::string> hudClicks;
 	std::string inputScript;     // --input-script "<s>:<command> ...": scripted input in the window (Viewer.h)
+	std::string actions;         // --actions "<command> ...": the soldier's inputs before a screenshot (off screen)
 	std::string menuScript;      // --menu-script "wait:12 click:x,y type:text ...": drive the menu headless
 	std::string login;           // --login name:password[@soldier]: log in to the account service
 	std::string dumpTemplate;    // --dump-template: print a template's tree and settings
@@ -246,6 +247,8 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.hudClicks.push_back(argv[++i]);
 		} else if (arg == "--input-script" && hasValue) {
 			options.inputScript = argv[++i];
+		} else if (arg == "--actions" && hasValue) {
+			options.actions = argv[++i];
 		} else if (arg == "--menu-script" && hasValue) {
 			options.menuScript = argv[++i];
 			if (options.menu.empty()) {
@@ -706,8 +709,9 @@ void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 			continue;
 		}
 		const world::ObjectTemplate& t = *object->objectTemplate();
-		if (!hud.paintsVehicle(static_cast<int>(dice::hfe::menu::hudNumber(&t, "vehicleHud.vehicleType", -1)))) {
-			continue;
+		const dice::hfe::menu::MapIcons& icons = dice::hfe::menu::mapIcons(t);
+		if (icons.info != 0 || !hud.paintsVehicle(icons.vehicleType)) {
+			continue; // the reload icons (the silos) are drawn below
 		}
 		int occupantTeam = 0;
 		bool occupied = false;
@@ -730,6 +734,48 @@ void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 		const bool teamless = relation == dice::hfe::menu::MapRelation::Neutral;
 		icon.color[0] = icon.color[1] = icon.color[2] = teamless ? 1.0f : 0.7f;
 		markers.push_back(icon);
+	}
+	// The Titan silos (miniMapInfo "all"; HudMenusVehicles.h MapIcons): the
+	// background (0x0077df60) under the reload ring wiped over the time
+	// still to go (0x0077dee0, 0x0078a990), in the vehicles' tint.
+	const auto silos = round.missileSilos();
+	// The numbered frames (_01.._05): the silos in their control points'
+	// order (the shipped ids, 202 and 503..506 on Minsk, aren't 1..5).
+	std::vector<size_t> siloOrder(silos.size());
+	for (size_t i = 0; i < silos.size(); ++i) {
+		siloOrder[i] = i;
+	}
+	std::stable_sort(siloOrder.begin(), siloOrder.end(),
+		[&silos](size_t a, size_t b) { return silos[a].controlPoint < silos[b].controlPoint; });
+	for (size_t i = 0; i < silos.size(); ++i) {
+		const game::GameWorld::SiloInfo& silo = silos[i];
+		const world::Object* object = round.objects().find(silo.object);
+		if (!object || !object->objectTemplate()) {
+			continue;
+		}
+		const dice::hfe::menu::MapIcons& icons = dice::hfe::menu::mapIcons(*object->objectTemplate());
+		const auto relation = dice::hfe::menu::vehicleRelation(false, false, 0, silo.team, me.team);
+		if (icons.info == 0 || !hud.paintsVehicle(icons.vehicleType)
+			|| (relation == dice::hfe::menu::MapRelation::Enemy && !icons.showOnEnemy && !icons.always)) {
+			continue;
+		}
+		const int frame = static_cast<int>(std::find(siloOrder.begin(), siloOrder.end(), i) - siloOrder.begin()) + 1;
+		const float tint = relation == dice::hfe::menu::MapRelation::Neutral ? 1.0f : 0.7f;
+		const auto layer = [&](const std::string& texture, float sweep) {
+			hud::HudManager::MapMarker m {dice::hfe::menu::iconFrame(texture, frame), silo.position.x, silo.position.z,
+				icons.size[0]};
+			m.height = icons.size[1];
+			m.sweep = sweep;
+			m.color[0] = m.color[1] = m.color[2] = tint;
+			markers.push_back(m);
+		};
+		if (icons.info == 2 && !icons.background.empty()) {
+			layer(icons.background, -1);
+		}
+		const float sweep = dice::hfe::menu::reloadSweep(silo.reloadLeft, silo.reloadTime, relation);
+		if (!icons.reload.empty() && sweep > 0) {
+			layer(icons.reload, sweep);
+		}
 	}
 	for (const auto& player : round.playerList()) {
 		if (!player.alive || player.team != me.team || player.id == me.id) {
@@ -775,11 +821,26 @@ void updateMap(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 			revealed.push_back(id);
 		}
 	}
+	// What spotting shows is drawn as its kit's spottedIcon at
+	// spottedIconSize (0x0077dfe0 → 0x0077dd70 with the spotted flag: the
+	// kits' mini_Soldier), else the kit's own map icon.
 	for (const int id : revealed) {
 		game::GameWorld::PlayerInfo enemy;
 		if (round.playerInfo(id, enemy) && enemy.alive) {
-			hud::HudManager::MapMarker spotted {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", enemy.position.x,
-				enemy.position.z, 16};
+			std::string texture = "Ingame/Player/Icons/Minimap/mini_Soldier.dds";
+			float size = 16;
+			const world::Object* kit = enemy.kit ? round.objects().find(enemy.kit) : nullptr;
+			if (kit && kit->objectTemplate()) {
+				const dice::hfe::menu::MapIcons& icons = dice::hfe::menu::mapIcons(*kit->objectTemplate());
+				if (!icons.spotted.empty()) {
+					texture = icons.spotted;
+					size = icons.spottedSize;
+				} else if (!icons.icon.empty()) {
+					texture = icons.icon;
+					size = icons.size[0];
+				}
+			}
+			hud::HudManager::MapMarker spotted {texture, enemy.position.x, enemy.position.z, size};
 			spotted.color[1] = 0.3f;
 			spotted.color[2] = 0.3f;
 			markers.push_back(spotted);
@@ -1010,6 +1071,8 @@ void updateHud(hud::HudManager& hud, game::GameWorld& round, const game::GameLog
 		in.heat = gun.heatAddWhenFire > 0 ? heldGun->heat() : 0;
 		in.overheated = heldGun->overheated();
 		in.fireRate = heldGun->fireMode(); // the fire component's mode (FireArm::fireMode)
+		in.scanning = heldGun->scanning(); // the pulse meter's (0x007be380 → 0xc4f2 slots 0xf8 / 0xfc)
+		in.scan = heldGun->scan();
 		// The range finder's ray and the distance counter's projectile
 		// (0x007c1470), only for the weapons with them (read once per
 		// template); the ray (999 m from the eye along the look, bisected
@@ -2229,17 +2292,26 @@ int runGame(Options& options, Session& session)
 	session.menuHost.scroller = &session.menu.scroller();
 	dice::hfe::menu::registerMenuHostConsole(console, session.menuHost);
 	// Localized text (0x00405360: Localization/strings.csv in the
-	// profile's language, English here; strings_patch.csv over it).
+	// profile's language, English here; the game reads no other file).
 	io::Localization localization;
-	for (const char* file : {"Localization/strings.csv", "Localization/strings_patch.csv"}) {
+	{
 		std::vector<uint8_t> data;
-		if (files.readFile(file, data)) {
+		if (files.readFile("Localization/strings.csv", data)) {
 			localization.load(data, "English");
 		}
 	}
-	hudManager.setLocalizer([&localization](const std::string& id) { return localization.text(id); });
-	g_localize = [&localization](const std::string& id) { return localization.text(id); };
-	helpPopups.setLocalizer([&localization](const std::string& id) { return localization.text(id); });
+	// The texts' "#PISprint#" and "#GIYes#" as the keys bound to them
+	// (0x00752b70).
+	const auto localizeWithKeys = [&localization, &controls](const std::string& id) {
+		std::string text = localization.text(id);
+		if (text.find("#PI") != std::string::npos || text.find("#GI") != std::string::npos) {
+			text = controls.withKeyNames(text, [&localization](const std::string& key) { return localization.text(key); });
+		}
+		return text;
+	};
+	hudManager.setLocalizer(localizeWithKeys);
+	g_localize = localizeWithKeys;
+	helpPopups.setLocalizer(localizeWithKeys);
 	setupScoreboard(hudManager);
 	// The comm roses, filled by the HUD's Communication scripts (HudMenusComm.h).
 	dice::hfe::menu::CommRoses commRoses(hudManager);
@@ -2596,6 +2668,11 @@ int runGame(Options& options, Session& session)
 		dice::hfe::menu::MenuBindings* menuBindings = session.menuBindings.get();
 		menuBindings->setSettingsObjects(&session.settings);
 		menuBindings->setLocalProfiles(&session.profiles);
+		// The controls page's maps and the settings' hook: the two lines
+		// above only reach bindings made by an earlier map, so the first
+		// menu needs them here (without them its controls page shows no keys).
+		menuBindings->setControls(&controls);
+		menuBindings->onSettingsApplied = applySettings;
 		// The voice natives (dice.bf2.Sound.voip*) in place of MenuBindings' stand-ins.
 		if (!session.voice) {
 			session.voice = std::make_unique<dice::hfe::voip::VoiceChat>();
@@ -3449,7 +3526,13 @@ int runGame(Options& options, Session& session)
 				return false;
 			}
 			if (armedTool) {
-				round.commanderAction(myTeam(), *armedTool, worldX, worldZ);
+				// 0x007d8370: a UAV sent lets 0x16 UAVplaced through and holds
+				// 0x13 place_UAV again (neither has a case in 0x00646cb0, so
+				// neither shows).
+				if (round.commanderAction(myTeam(), *armedTool, worldX, worldZ) && *armedTool == Ability::Uav) {
+					helpPopups.enableTutorial(0x16);
+					helpPopups.disableTutorial(0x13);
+				}
 			} else {
 				if (leaderOrder) {
 					round.issueSquadLeaderOrder(round.localPlayer(), *armedOrder, worldX, worldZ);
@@ -3832,6 +3915,12 @@ int runGame(Options& options, Session& session)
 		// admin.* on this round (ServerAdmin.h): the players, kicks, and the
 		// map changes it asks for, which end the map at once.
 		bool serverNextMap = false;
+		if (!hosted && !session.client) {
+			// A local game is its own server (the menu's ServerSettings.TimeLimit,
+			// or --time-limit): the game logic raises TimeLimitReached at it, as
+			// it does for sv.timeLimit below.
+			gameLogic.timeLimit = static_cast<float>(std::max(options.timeLimit, 0));
+		}
 		if (hosted && session.admin) {
 			host::ServerAdmin& admin = *session.admin;
 			// The round's sv settings: the time limit (seconds), spawn and
@@ -4334,6 +4423,25 @@ int runGame(Options& options, Session& session)
 		round.setEventSink(raise);
 		gameLogic.setEventSink(raise);
 		bridge.events = raise;
+		// The players' ranks (stats +0x20): stats.py gives each 0 as it
+		// connects; rank.py asks the stats server for those with a profile
+		// id and sets its "rnk". The local store plays the stats server for
+		// the local soldier (Stats.h); bots and remote players without an
+		// account keep 0, as the original's did.
+		bridge.profileOf = [&round, &session](int player) -> int64_t {
+			if (player != round.localPlayer() || !session.menuBindings || !session.menuBindings->soldierStats()) {
+				return 0;
+			}
+			return stats::localProfileId(session.menuBindings->soldierName());
+		};
+		bridge.statsServer = [&session](int64_t profile, game::ScriptBridge::StatsRecord& record) {
+			stats::SoldierStats* soldier = session.menuBindings ? session.menuBindings->soldierStats() : nullptr;
+			if (!soldier || stats::localProfileId(session.menuBindings->soldierName()) != profile) {
+				return false;
+			}
+			record = stats::playerInfoKeys(*soldier);
+			return true;
+		};
 		gameLogic.onEndGame = [&](int winner, int victoryType) {
 			std::printf("round over: team %d won (victory type %d)\n", winner, victoryType);
 			scripts.setGameStatus(game::GameStatus::EndGame);
@@ -4386,6 +4494,7 @@ int runGame(Options& options, Session& session)
 			stepObjectEffects();
 			gameLogic.tick(1.0f / 30.0f);
 			scripts.update();
+			bridge.deliverStatsResponses();
 			session.adminScript.update(scripts);
 			stepSounds();
 		};
@@ -4415,12 +4524,8 @@ int runGame(Options& options, Session& session)
 				return;
 			}
 			endOfRoundShown = true;
-			std::vector<uint8_t> dfm;
-			std::string error;
-			if (!files.readFile("Menu/External/FlashMenu/endOfRound.dfm", dfm) || !endOfRound.loadDfm(dfm, &error)) {
-				std::fprintf(stderr, "cannot load endOfRound.dfm: %s\n", error.c_str());
-				return;
-			}
+			// The round's data first: the movie's first frame reads it
+			// (getMyTeam, isValidEOR) and keeps what it got.
 			dice::hfe::menu::RoundSummary summary = session.client
 				? remoteRoundSummary(options, session.client->world())
 				: roundSummary(options, round, gameLogic, scoreOf, "BF2142 server");
@@ -4428,6 +4533,12 @@ int runGame(Options& options, Session& session)
 				session.menuBindings->recordRound(summary); // the soldier's stats and rank
 			}
 			endOfRoundBindings.setSummary(summary);
+			std::vector<uint8_t> dfm;
+			std::string error;
+			if (!files.readFile("Menu/External/FlashMenu/endOfRound.dfm", dfm) || !endOfRound.loadDfm(dfm, &error)) {
+				std::fprintf(stderr, "cannot load endOfRound.dfm: %s\n", error.c_str());
+				return;
+			}
 			// JOIN GAME: on to the next map without waiting out sv.endDelay.
 			endOfRoundBindings.onReadyToPlay = [&](bool) { sinceEnd = std::max(sinceEnd, kEndDelay); };
 			showMenu = false;
@@ -4438,11 +4549,12 @@ int runGame(Options& options, Session& session)
 		for (int i = 0; i < ticks; ++i) {
 			step();
 		}
-		// A screenshot of a joined game waits (in real time, up to 5 s) for
-		// the server's first control-object record and a second more of
+		// A screenshot of a joined game waits (in real time, up to 5 s; 25 s
+		// with --play, the server's start delay and spawn time) for the
+		// server's first control-object record and a second more of
 		// updates, so the view has our soldier.
 		if (session.client && !options.screenshot.empty()) {
-			const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+			const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(options.playTeam != 0 ? 25 : 5);
 			int after = -1;
 			while (std::chrono::steady_clock::now() < until && after != 0 && session.client) {
 				step();
@@ -4645,6 +4757,65 @@ int runGame(Options& options, Session& session)
 						for (int i = 0; i < 30; ++i) {
 							round.setPlayerInput({});
 							step();
+						}
+					}
+					// --actions: the player's inputs, a tick each unless a count
+					// follows ("fire:30 reload wait:60 item:2 firemode prone:20
+					// crouch:20 jump turn:90 pitch:-10 sprint:30 forward:30"), and
+					// what the weapon in hand says after each.
+					std::istringstream actions(options.actions);
+					for (std::string command; actions >> command;) {
+						const size_t colon = command.find(':');
+						const std::string op = command.substr(0, colon);
+						const float value = colon == std::string::npos ? 1.0f : static_cast<float>(std::atof(command.c_str() + colon + 1));
+						const int ticks = std::max(1, static_cast<int>(value));
+						game::GameWorld::PlayerInfo me;
+						round.playerInfo(round.localPlayer(), me);
+						game::SoldierInput act;
+						act.aimPitch = me.aimPitch;
+						bool known = true;
+						if (op == "fire" || op == "wait" || op == "forward" || op == "sprint" || op == "prone" || op == "crouch") {
+							act.fire = op == "fire";
+							act.throttle = op == "forward" || op == "sprint" ? 1.0f : 0.0f;
+							act.sprint = op == "sprint";
+							act.pose = op == "prone" ? game::SoldierPose::Prone : op == "crouch" ? game::SoldierPose::Crouch
+																							   : game::SoldierPose::Stand;
+							for (int i = 0; i < ticks; ++i) {
+								round.setPlayerInput(act);
+								step();
+							}
+						} else if (op == "reload" || op == "firemode" || op == "jump" || op == "item" || op == "use") {
+							act.reload = op == "reload";
+							act.toggleFireRate = op == "firemode";
+							act.jump = op == "jump";
+							act.use = op == "use";
+							act.selectItem = op == "item" ? ticks : 0;
+							round.setPlayerInput(act);
+							step();
+							round.setPlayerInput({});
+							step();
+						} else if (op == "turn" || op == "pitch") {
+							act.turn = op == "turn" ? value : 0.0f;
+							act.aimPitch = op == "pitch" ? value : me.aimPitch;
+							round.setPlayerInput(act);
+							step();
+						} else {
+							known = false;
+							std::fprintf(stderr, "actions: unknown command %s\n", command.c_str());
+						}
+						if (known) {
+							round.playerInfo(round.localPlayer(), me);
+							const game::FireArm* gun = round.playerWeapon();
+							std::string held;
+							for (const auto& [slot, name] : me.carried) {
+								if (slot == me.inHandSlot) {
+									held = name;
+								}
+							}
+							std::printf("action %s: %s slot %d %s, %d rounds, %d magazines, fire mode %d%s%s\n", command.c_str(),
+								me.alive ? "alive" : "dead", me.inHandSlot, held.c_str(), gun ? gun->roundsInMag() : -1,
+								gun ? gun->magsLeft() : -1, gun ? gun->fireMode() : -1, gun && gun->reloading() ? ", reloading" : "",
+								me.vehicle ? ", in a vehicle" : "");
 						}
 					}
 					std::printf("first person: %s, eye %.2f m over the origin, field of view %.3f rad, zoom level %d%s;"
@@ -4894,6 +5065,7 @@ int runGame(Options& options, Session& session)
 		sources.objectEffects = &objectEffects;
 		nametags::Nametags nametags(files);
 		nametags.setIcons(&g_tagIcons);
+		nametags.setFog(lights.fogStartEndAndBase); // the enemies' fog fade (0x100f09b0)
 		g_nametags = &nametags;
 		struct TagsReset {
 			~TagsReset() { g_nametags = nullptr; }
@@ -5091,7 +5263,15 @@ int runGame(Options& options, Session& session)
 					help.zoomed = playerCamera.zoomed();
 					// The menu state (0x007b8b80: the spawn screen's members half
 					// 0x12 for a squad leader, 0x13 for the rest; the kits 1).
+					// The commander screen is 0x10, its artillery's and orbital
+					// strike's placement 0x17 and 0x22 (toggleArtilleryState →
+					// slot 0x360, 0x007d73a0; toggleOrbitalStrikeState → slot
+					// 0x340, 0x007d77a0).
+					const int commanderState = armedTool == Ability::Artillery ? 0x17
+						: armedTool == Ability::OrbitalStrike                 ? 0x22
+																			  : 0x10;
 					help.menuState = help.spawnScreen ? (membersShown ? (help.squadLeader ? 0x12 : 0x13) : 1)
+						: commanderScreen              ? commanderState
 						: help.menuOpen                ? -1
 													   : 0;
 					// The parachute's (case 0x0d) asks an object the rewrite's
@@ -5126,6 +5306,33 @@ int runGame(Options& options, Session& session)
 						helpPopups.enableTutorial(0x18);
 					}
 					wasCommander = help.commander;
+					// The commander HUD's asset updates (0x007aa9b0 each frame):
+					// a damaged asset (its armour share below 1, above 0) lets
+					// through 0x36 uavDamaged (0x007aa780), 0x37 radarDamaged
+					// (0x007aa6e0), 0x38 artilleryDamaged (0x007aa500), 0x39
+					// bombardmentDamaged (0x007a9500), unless the player leads
+					// a squad of a team without a commander (0x007a9240).
+					if (known && (help.commander || !help.squadLeader || round.commander(self.team) >= 0)) {
+						static const std::pair<Ability, int> kDamaged[] = {{Ability::Uav, 0x36},
+							{Ability::Satellite, 0x37}, {Ability::Artillery, 0x38}, {Ability::OrbitalStrike, 0x39}};
+						for (const auto& [ability, index] : kDamaged) {
+							const auto state = round.abilityState(self.team, ability);
+							if (state.available && state.armor > 0 && state.armor < 1) {
+								helpPopups.enableTutorial(index);
+							}
+						}
+					}
+					// The map's zoom step in the commander screen (0x0077e850):
+					// 0x1e ZOOM_inOut is held again, 0x2a SATELLITEVIEW_moveKeys
+					// let through once zoomed in.
+					static int commanderZoomWas = -1;
+					if (commanderScreen && hudManager.commanderMapZoom() != commanderZoomWas && commanderZoomWas >= 0) {
+						helpPopups.disableTutorial(0x1e);
+						if (hudManager.commanderMapZoom() > 0) {
+							helpPopups.enableTutorial(0x2a);
+						}
+					}
+					commanderZoomWas = commanderScreen ? hudManager.commanderMapZoom() : -1;
 					std::set<int> squads;
 					for (const auto& p : round.playerList()) {
 						if (known && p.team == self.team && p.squad > 0) {
@@ -5325,8 +5532,10 @@ int runGame(Options& options, Session& session)
 		viewer.screenshot = options.screenshot;
 		viewer.camera = options.camera;
 		// Before the first spawn the view is the level's before-spawn camera
-		// (GameLogic.setBeforeSpawnCamera).
-		if (viewer.camera.empty() && gameLogic.beforeSpawnCamera.set && !round.player()) {
+		// (GameLogic.setBeforeSpawnCamera); a joined game's soldier is the
+		// server's control object, which the view follows once it has one.
+		if (viewer.camera.empty() && gameLogic.beforeSpawnCamera.set && !round.player() &&
+			!(session.client && session.client->world().hasControlObject())) {
 			const auto& c = gameLogic.beforeSpawnCamera;
 			char text[128];
 			std::snprintf(text, sizeof(text), "%f/%f/%f/%f/%f", c.position[0], c.position[1], c.position[2], c.rotation[0],
@@ -5441,6 +5650,7 @@ int runGame(Options& options, Session& session)
 				input.altFire = in.altFire;
 				input.use = in.use;
 				input.toggleFireRate = in.toggleFireRate;
+				input.reload = in.reload;
 				session.client->setInput(net::playerInputFrom(input, lastAimPitch));
 				lastAimPitch = input.aimPitch;
 			};
@@ -5485,6 +5695,7 @@ int runGame(Options& options, Session& session)
 				input.altFire = in.altFire;
 				input.use = in.use;
 				input.toggleFireRate = in.toggleFireRate;
+				input.reload = in.reload;
 				input.switchSeat = in.seat;
 				input.selectItem = in.item;
 				// C: first person or the chase view; the right button's press
@@ -5677,12 +5888,15 @@ int runGame(Options& options, Session& session)
 		if (viewer.onPlayerInput) {
 			// The comm roses while their keys are held (Q the radio, T the
 			// tactical rose), with the pointer to pick an entry.
-			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &commRoses, &round, radioWas = false,
+			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &commRoses, &round, &helpPopups, radioWas = false,
 										tacticalWas = false](const ViewerOptions::PlayerInput& in) mutable {
 				game::GameWorld::PlayerInfo me;
 				const bool alive = round.playerInfo(round.localPlayer(), me) && me.alive;
 				if (alive && in.radioComm && !radioWas) {
 					commRoses.openRadio(me.vehicle != 0);
+					// 0x0075be30 opens the radio rose (menu state 5 / 6) and
+					// lets 0x35 specificSpotted through.
+					helpPopups.enableTutorial(0x35);
 				} else if (alive && in.tacticalComm && !tacticalWas) {
 					commRoses.openTactical(me.commander, me.squadLeader, me.squad != 0);
 				} else if ((!in.radioComm && radioWas) || (!in.tacticalComm && tacticalWas) || !alive) {

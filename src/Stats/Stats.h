@@ -34,6 +34,7 @@
 // game's rule (a credit per rank reached) stands in for it.
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
@@ -156,6 +157,16 @@ private:
 	const RankTable& m_ranks;
 	bool m_booster;
 };
+
+// The profile id a local soldier stands under (pmgr_p_get "profileid"):
+// the game's were the account's GameSpy pids, and the scripts ask the stats
+// server only for ids above 2000 (bf2/stats/rank.py). A local soldier has
+// no account, so its name (folded, FNV-1a) gives a stable one in
+// 0x10000000..0x1fffffff.
+int64_t localProfileId(const std::string& soldier);
+// The getplayerinfo.aspx keys a soldier's record answers: "rnk", the rank
+// (what rank.py's PlayerStatsResponse reads).
+std::map<std::string, std::string> playerInfoKeys(const SoldierStats& stats, const RankTable& ranks = stats::ranks());
 
 // --- The store: one file of every soldier's record.
 

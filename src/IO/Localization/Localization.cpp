@@ -37,6 +37,20 @@ std::vector<std::string> splitTabs(const std::string& line)
 	}
 }
 
+// The lexicon's key (0x0065b2c0 -> 0x0065af00): ids are upper-cased when
+// stored and when looked up, so lookups ignore case (the menu asks for
+// "BUTTON_CREATENEWACCOUNT", the file has "BUTTON_createnewaccount"). Ids
+// are ASCII; 0x0065af00's Latin-1 letters (å ä ö ü é) never occur in one.
+std::string lexiconKey(std::string id)
+{
+	for (char& c : id) {
+		if (c >= 'a' && c <= 'z') {
+			c = static_cast<char>(c - 'a' + 'A');
+		}
+	}
+	return id;
+}
+
 } // namespace
 
 std::string utf16ToUtf8(const uint8_t* data, size_t size)
@@ -94,14 +108,16 @@ bool Localization::load(const std::vector<uint8_t>& data, const std::string& lan
 		if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
 			value = value.substr(1, value.size() - 2);
 		}
-		m_strings[fields[0]] = std::move(value);
+		// 0x006956f0: an id already there keeps its first text
+		// (strings.csv has CREDITS_EA_earedwoodshores twice, in two cases).
+		m_strings.emplace(lexiconKey(fields[0]), std::move(value));
 	}
 	return !header;
 }
 
 const std::string* Localization::find(const std::string& id) const
 {
-	const auto it = m_strings.find(id);
+	const auto it = m_strings.find(lexiconKey(id));
 	return it != m_strings.end() ? &it->second : nullptr;
 }
 

@@ -70,6 +70,12 @@ struct GameClientOptions {
 class GameClient {
 public:
 	GameClient();
+	// A client going away says so (the disconnect packet), as the game
+	// does when it quits, so the server drops its player at once rather
+	// than at its time-out.
+	~GameClient();
+	GameClient(const GameClient&) = delete;
+	GameClient& operator=(const GameClient&) = delete;
 
 	// Starts connecting; update() completes it.
 	bool connect(const std::string& host, uint16_t port, const GameClientOptions& options = {});

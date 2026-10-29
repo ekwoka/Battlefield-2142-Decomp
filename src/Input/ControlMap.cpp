@@ -246,7 +246,64 @@ std::string ControlMaps::displayKey(const Binding& binding)
 	if (GameControllers::slotNamed(binding.device) >= 0) {
 		return "CONTROLLER_IDFGameController_" + binding.control;
 	}
+	// The Novint Falcon (device 0x400): "Falcon", then an axis as _X, _Y
+	// or _Z (0, 1, the rest), a button by its name; strings.csv has none
+	// of these, so the page shows them as they are (Settings/Controls.con
+	// puts the Falcon in the secondary column of look and pitch/roll).
+	if (binding.device == "IDFFalcon") {
+		if (binding.control.compare(0, 7, "IDAxis_") == 0) {
+			const int axis = std::atoi(binding.control.c_str() + 7);
+			return std::string("Falcon_") + (axis == 0 ? "X" : axis == 1 ? "Y" : "Z");
+		}
+		return "Falcon_" + binding.control;
+	}
 	return "CONTROLLER_" + binding.control;
+}
+
+std::string ControlMaps::withKeyNames(const std::string& text,
+	const std::function<std::string(const std::string&)>& localize, const std::string& playerMap) const
+{
+	std::string out = text;
+	for (size_t from = 0;;) {
+		const size_t gi = out.find("#GI", from), pi = out.find("#PI", from);
+		const size_t start = std::min(gi, pi);
+		if (start == std::string::npos) {
+			return out;
+		}
+		const size_t end = out.find('#', start + 1);
+		if (end == std::string::npos) {
+			return out;
+		}
+		std::string name = out.substr(start + 1, end - start - 1);
+		const bool negative = name.find("_2") != std::string::npos;
+		if (const size_t underscore = name.find('_'); underscore != std::string::npos) {
+			name.resize(underscore);
+		}
+		const bool game = name.compare(0, 2, "GI") == 0;
+		const std::string input = "c_" + name;
+		const Binding* b = game ? binding(kGame, input, 0, negative ? -1.0f : 1.0f) : nullptr;
+		if (!game) {
+			b = binding(playerMap, input, 0, negative ? -1.0f : 1.0f);
+			if (!b) {
+				b = binding(kPlayer, input, 0, negative ? -1.0f : 1.0f);
+			}
+		}
+		if (!b) {
+			from = end + 1;
+			continue;
+		}
+		const std::string key = displayKey(*b);
+		std::string shown = localize ? localize(key) : key;
+		if (shown.empty() || shown == key) {
+			// Unlocalized: "CONTROLLER_IDKey_W" as "W".
+			shown = b->control;
+			if (const size_t underscore = shown.find('_'); underscore != std::string::npos) {
+				shown = shown.substr(underscore + 1);
+			}
+		}
+		out.replace(start, end - start + 1, shown);
+		from = start + shown.size();
+	}
 }
 
 std::string ControlMaps::script() const

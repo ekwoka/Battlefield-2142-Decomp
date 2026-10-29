@@ -2124,6 +2124,133 @@ below insideDamageThreshold) and AmbientColor instead of the level's,
 the effects' lights only with allowInsideDynamicLights
 (`LevelSources::insideSun`).
 
+## Debris, emitter types, level ambience and template behaviours
+
+`src/Effects/Effects.cpp` (emitter types, `isStaticSystem`, the debris
+emitters), `src/Game/AmbientTriggers.cpp` / `Ambience.cpp` (the levels'
+triggers), `src/Game/LockFeedback.cpp`, `src/Game/TemplateBehaviours.cpp`,
+the renderer's `syncDebris`.
+
+**Where a particle is born** (RendDX9 template `+0x268`, the names
+`Standard`, `RadialDirection`, `Radial`, `Box` at BF2142.exe `0x00a04264`,
+setter `0x00625de0`; the sprites' `0x10140fa0` / `0x101410d0` /
+`0x101412c0`, the same in the mesh `0x1013d840` and trail `0x1013acb0`
+systems). Standard, the scripts' usual type (1,359 systems), ignores the
+emit ranges: the particle is born in the ellipsoid of `emitRadius`
+(template `+0x18`, set through slot `0x28` from `0x00626e30`): theta = 2 pi
+u, phi = pi u, then (cos theta sin phi u rx, sin theta sin phi u ry, cos
+phi u rz), each axis with its own u. Radial and RadialDirection put it on a
+ring about `emitRadius`'s longest axis (the first of equals) at
+`radialDirection` +- `randomRadialDirection` degrees, its distance along
+each axis from `emitRangeX/Y/Z` (sampled Z, Y, X); RadialDirection sends it
+out along the ring's radius, the others along `emitDirection`. Box puts it
+at (emitRangeX, emitRangeY, emitRangeZ). `randomDirectionAngle` then turns
+the direction for every type.
+
+**isStaticSystem** (setter `0x00626cf0` → slot `0x190`, `+0x26d`): on the
+system's first update it is run for its `timeToLive` (`+0x88`) in steps of
+0.1 s (`0x101407c0`), so standing smoke and fire start in their steady
+state.
+
+**Debris emitters.** BF2142.exe's own `Emitter` template (class `0x9475`,
+vtable `0x0097d310`; defaults `0x00620d50`: delay 0, timeToLive 0.1, intensity 11) makes
+objects, not particles (update `0x0061f360`): after its delay, for its
+timeToLive, one every 1 / intensity seconds (`0x0061ef80`; intensity times
+a 101-point curve, 1 unless scripted, and a distance factor of 1 unless
+`+0x24c` is set) of its `template` or of `alternateTemplate0..4` (index
+floor(u (n + 1)), the main one past the last). Each is placed at the
+emitter plus `relativePositionIn{Right,Up,Dof}` along its axes, moved on by
+its velocity for its share of the tick, turned about the emitter's forward
+by `startRotation` + `zRotation` rounded to `zRotationSnap` (radians,
+`0x005b1a70`), and sent off at `positionalSpeedIn{Right,Up,Dof}` along the
+emitter's axes (plus the emitter's velocity x `emitterSpeedScale` with
+`addEmitterSpeed`), spinning at `rotationalSpeedIn{Dof,Up,Right}` (handed
+to its physics node's slot `0x6c` in that order), unless `noPhysics`. A
+`Particle` (class `0x947b`, object `0x00621250`, update `0x00621480`) is a
+debris piece: life `timeToLive` (10 by default; below 0, 0.5 s), drawn at
+`size` x `sizeModifier` (the axes above 0), its alpha `transparencyGraph`
+at its life's share (clamped, `0x00621210`) x (1 - `Transparency`), its
+gravity x `gravityModifier`, its `drag`. Another template (an effect
+bundle, a particle system) is started there instead. The wrecks'
+`p_wreck_*` bundles are made of these (`em_wreck_*_Genericparts` throws
+`p_wreck_01/04/06`, each part emitter one piece of the hull's bundled mesh
+by `geometryPart`). **The rewrite's piece** is a point under Physics'
+gravity (-14.73) x `gravityModifier` and the 0.99-a-tick damping, bouncing
+off the terrain under it (0.3 of its fall, 0.6 of its slide and spin kept),
+where the exe gives it a Mesh or RotationalPoint physics node colliding
+with the world. `EffectManager::debris()` holds at most 384 (a guard of the
+rewrite's); the renderer draws each as an instance of its mesh with the
+other parts collapsed (`LevelRenderer::syncDebris`), faded by its alpha.
+
+**The object caps** `GSDestroyableObjectsLimit` (100),
+`GSDestroyableWindowsBundlesLimit` (50) and `GSDynamicObjectsLimit` (50)
+are read from the SettingsRepository (`DAT_00a7a008` slot `0x10`,
+`0x00659a40`: the value or the default) by `0x004d2250` and the results
+dropped: nothing in BF2142.exe limits by them. That function turns the
+level's DestroyableObjects, DestroyableWindowsBundles and physics objects
+into ObjectSpawners of their own (respawning them).
+
+**Level ambience: Trigger and AmbientEffectArea** (classes `0x9c45`,
+`0x9c44`; the levels' `AmbientObjects.con`: Liberation of Leipzig 49
+triggers, Port Bavaria 35, none on the Titan maps). A Trigger watches a
+sphere of `radius`; its `events` bits: 1 a player in it, 4 a player
+moving in it (above 0.1 m/s), 2 a weapon fired in it (`0x005c4500` →
+`0x005149d0`), 8 an explosion in it (`0x005a6e70`). The trigger manager
+(`DAT_00a3fc48`, `0x00514fc0`) looks at three idle triggers a tick, round
+robin, and every tick at those with players in them; a trigger with bit 1
+or 4 tests (`0x005d3890`) once `minimumTimeBetweenTriggering` (1 s by
+default) has passed since it fired: the first player in it (each, with
+`triggerForEachActivatingPlayer`) fires it with the chance 1 - (1 -
+chance / max(`averageTimeBetweenTests`, 1))^t, t the seconds since its
+last test clamped to 0..100 (`0x005d3600`); events 2 and 8 fire it with
+`chance` (`0x005d3540`). Its random number comes from a generator reseeded
+with the tick count each time (`0x005d2e60`). Firing (`0x005d3450`) sets
+off each AmbientEffectArea with the same `triggerId` (linked at the level's
+start, `0x005d33d0` / `0x005ba390`; a trigger with none is dropped). The
+area (`0x005ba9c0`) plays its `linkedEffectContainer`, an EffectBundle or a
+random child of a Bundle (the list `0x006f2f70` holds the bundle first), at
+a random point of its disc (x = r u, z = r (-1..1) sqrt(1 - u^2)), or at the
+activator or explosion with `playAtEventPosition`, on the terrain with
+`projectOnHeightmap`; at most ten of its effects alive, none whose bundle's
+`timeToLive` comes out -1 or 30 (`0x005ba490`). `numNetworkedEffects`
+above 0 makes the area the server's (the effect is sent to the clients,
+`0x00510270`); a hosted game is the server, a joined client plays none.
+
+**Lock-on feedback** (the target component: update `0x005e1b30`, fire
+`0x005e1ee0`). The lock is announced 35 ticks after its target was taken
+(`+0x4c`, set by `0x005e1e70`) once locked (`+0x44`, set when the lock
+delay `+0x90` ran out): "target_aquired"; a locked target gone or
+destroyed (`0x0058e3e0`): "target_lost"; both to the local player as radio
+(game slot `0x58`, `0x0042e8f0`, channel 2) and only for `TSLaserGuided`
+(`+0x80` = 2), which no shipped weapon uses. A round fired with a target
+says "missile_away" on TCPlayer to the target's player (game slot `0x50`)
+when the local player fires. `GameWorld::takeLockEvents` hands all three to
+the HUD for every lock system.
+
+**Hit reactions** (`0x005eda90`, from a round's first hit on a soldier left
+above 0 hit points, `0x005e7520`): by the hit bone's node of `3p_setup.ske` (`0xf`
+left_shoulder / `0x11` left_low_arm: Left, `0x1f` / `0x21`: Right, `0x2f`
+head: Head, else Body) and the round's flight against the soldier's facing
+(dot >= 0: Back, else Front), the 3P animation system's trigger
+`hitBackLeft` ... `hitFrontBody` (RandomTriggers of
+`AnimationSystem3p.inc`), not in a vehicle.
+
+**Template behaviours.** `hasOnTimeEffect` (GenericProjectile `+0x328`,
+1 by default, `0x005b3500`): a round whose time runs out (events
+`0x18`/`0x1d`) detonates (`0x1f`) with it, else is only removed (`0x20`;
+`0x005b62a0`). `ammo.reloadWithoutPlayer` (ammo template `+0x41`): a gun
+not held by a soldier finishes a reload begun while nobody uses it
+(`0x005f4bb0`); without it the reload is dropped when its user leaves
+(`0x005f3a40`). Settled: ControlPoint `isHemisphere` has no reader but
+the scripts' `cp_getParam` (`0x0056a010`; the template's field is otherwise only
+initialised, `0x005bd4c0`); LightSource `castsDynamicShadow` reaches no
+shader (the projector and per-light shadow passes are never drawn, see
+coverage-2 #13). Left: `keepProjectiles` (`+0x318`: read by `0x005f1cc0`,
+which hands the firearm's kept rounds to the object manager's slot `0xd0`;
+the seconds' use not traced), `replaceItem`, `allowEmoteAnimation`
+(`+0x31e`, the soldier's emote `0x005edbf0`: the rewrite has no emotes),
+`cullRadiusScale`.
+
 ## Titans' parts, the underwater view, particle and material detail (RendDX9)
 
 **Titan interiors and exteriors.** `GeometryTemplate.isTitanInterior` /
@@ -4565,10 +4692,12 @@ deviation), its minimum without one.
 
 Text ids such as `HUD_TEXT_MENU_SCORE_PLAYERS` are looked up in
 `Localization/strings.csv` (`0x00405360`: the profile's `GSLanguage`,
-falling back to English), with `strings_patch.csv` applied over it. The
-files are UTF-16LE, one row per line with tab-separated columns: the id,
-then one column per language named in the header row. Values may be
-quoted. This is rewritten in `src/IO/Localization`.
+falling back to English; `strings_patch.csv`, the patch installer's
+strings, is never read). The file is UTF-16LE, one row per line with
+tab-separated columns: the id, then one column per language named in the
+header row. Values may be quoted. Ids ignore case: the lexicon upper-cases
+them when it stores and when it looks up (`0x0065b2c0`), and an id seen
+twice keeps its first text (`0x006956f0`). This is rewritten in `src/IO/Localization`.
 
 The scoreboard (`ScoreboardShow`, menu state 0xd in `0x0079ab90`) is built
 from list nodes. Each node names a data source with `setListNodeData`:
@@ -4723,8 +4852,30 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   texture is miniMapIcon (miniMapIconInside from inside), sized
   miniMapIconSize (16 × 16), turned with the vehicle; with usePlayerIcon a
   crewed vehicle shows as its occupant (slot 0x138). The tint is the
-  players' (`0x00b3be30`). Not done: the spotted state, the reload and
-  background icons (`0x0077dee0` / `0x0077df60`).
+  players' (`0x00b3be30`). The template's fields are read once
+  (`menu::mapIcons`).
+- **miniMapInfo** (`0x00636220`, lower-cased: "icon" 0, "reload" 1, "all"
+  2, the component's +0x4c; "Icon" by default, `0x00637b30`) picks
+  `0x00793b60`'s drawing: 0 the icon; 1 the reload icon (slot 0x144,
+  `0x0077dee0`: the vehicle HUD's reload texture at miniMapIconSize) with
+  its wipe; 2, the Titan silos (missile_silo / _v2: miniMapIcon
+  mini_reloadComposite, miniMapReloadIcon mini_reload, miniMapBackground
+  Icon mini_titanSilo, 32 px), the background (slot 0x148, `0x0077df60`)
+  and the reload icon set as the composite icon's two layers (its texture's
+  slot 0x7c, stages 1 and 0). The wipe (`0x0078a990`): the reload
+  texture's alpha cleared, then a fan from the top centre over 2 pi - 2 pi
+  x the seat gun's progress (slot 0x94) written, none for a neutral one:
+  the white hexagon ring shows over the reload still to go and is gone
+  once loaded. The rewrite draws the background, then the ring cut to that
+  wedge (`HudQuad::sweep`, `hud::sweepPieces`; the silos' reloadLeft /
+  ammo.reloadTime); the numbered frames (mini_titanSilo_01..05: the silo's
+  number) by the silos' order of control point ids (the frame's pick isn't
+  traced).
+- **Spotted** (`0x0077dfe0` → `0x0077dd70` with its spotted flag, from
+  `0x007841e0` for what spotting reveals): the object's spottedIcon at
+  spottedIconSize (16 by default; the kits' mini_Soldier.dds), else its
+  own icon. The enemies the pulses and scans reveal are drawn by their
+  kit's.
 
 - **The range finder and distance counter** (`0x007c1470`, the weapon's
   hasRangeFinder `+0xd4` / hasDistanceCounter `+0xe0`, template `+0x118`
@@ -4739,8 +4890,15 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   miss. Here the ray is bisected against `GameWorld::lineOfSight` ten
   times a second (to a metre). The scan (`0x007be380`, hasScanProgress:
   HudScanInProgress / HudScanProgress from the weapon's `0xc4f2` slots
-  `0xf8` / `0xfc`) is wired but no game state feeds it (the handheld
-  pulse meter's scan isn't rewritten).
+  `0xf8` / `0xfc`): the handheld pulse meter's (Unl_Pulse_Meter, and
+  as_sni: a PulseMeterAmmoComp, vtable `0x009710c8`, those slots
+  `0x005bd7e0` / `0x006c6010` its +0x58 / +0x5c): a round starts the scan
+  (`0x005d9cf0` sets +0x58), the update (`0x005d99e0`) moves it by
+  seconds x pulse-meter-scan-step (a tweakable, 1 by default:
+  DAT_00a6e194) and clears both at 1, so a scan shows for a second
+  (`FireArm::scanning` / `scan`). The pulse itself goes out from the
+  firer's drone (`0x005d9cf0` looks for a 0x9493 object), as the recon
+  drones' does.
 - **The second gun** (`0x007c2d50`, the seat's weapon 1) sets the
   Secondary* variables as `0x007c1f10` the Primary* ones
   (`WeaponHud::update(..., true)`); the game's seats carry one gun, so
@@ -4877,10 +5035,49 @@ second.
 - **Inside a Titan**: the object drawer's slot 0x40, as the renderer
   finds it (`LevelSources::cameraInTitanOut`).
 
-Not done: orders and requests (TTOrder / TTRequest), a vehicle's own icon
-(`0x100f0310`'s pick through the vehicle's 0xc4c4 and an unidentified
-manager), the fog factor on enemies, the spectator's rules, the poses'
-other icon offsets (crouched, prone). The HUD's object marker
+- **A vehicle's own icon** (`0x100f0310`: aboard a vehicle, not a squad
+  leader or the commander): the "unidentified manager" is the
+  NametagManager itself (ECX on entry), its slot 0x74 (`0x100ee590`) on
+  the vehicle root template's 0xc4c4 interface: by setVehicleType (slot
+  0x34, template +0x3d8, 0x1b by default from the template's constructor
+  `0x005cd9e0`; the names `0x004d..`'s VTHeavyTank 0 .. VTInfantry 0x1a)
+  heavy and light tanks 0x5f, VTApc / VTNoVehicleType / VTArmoredCar /
+  VTTankHunter 0x5d, VTScoutCar 0x5c, the aircraft 0x61, VTAAGun 0x64,
+  VTStationaryMG 0x65, ships, the submarine and boats 0x60, VTATGun 0x66,
+  VTAA 0x5e, VTHelicopterAttack 0x62, VTHelicopterTransport 0x63; VTLcvp,
+  VTSniper, VTInfantry 0x5a; any other by vehicleCategory (slot 0x24:
+  VCLand 0x5b, VCSea 0x60, VCAir 0x61, VCHelicopter 0x62), 0x5a when the
+  vehicle draws its occupant (usePlayerIcon, the HUD data's +0xb8)
+  (`nametags::vehicleIconId`, read once per template).
+- **The poses** (`0x100efb90`, the soldier's slot 0x3c: 1 standing, 2
+  lying, 3 crouched, as the animation's `0x008b9840` has 2 for prone): the
+  text 0.6 / 0.3 / 0.7 m over the origin plus min(d x that x 0.05, 3), 1 m
+  for any other (swimming); the icon 0.6 / 1.2 / 1.2 m under it (none for
+  the others), times 30 / d past 30 m. The origin stays 1 m over the feet.
+- **The fog on enemies** (`0x100f09b0` from `0x100f0e60`): the enemy's
+  alpha is capped by fog x the cull range's last third at d / 0.95, the fog
+  factor clamp(max(r3, d r1 + r3) - (d r0 + r2)^3, 0, 1) on the fog
+  object's FogRange (+0xb8, `0x100355c0`: r0 = 1 / (e - s), r1 = -base /
+  (e - s), r2 = -s / (e - s), r3 = e / (e - s)); the CRT pow's exponent
+  isn't visible in the decompilation and is taken as calcFog's cube. The
+  level's renderer.fogStartEndAndBase feeds it (`Nametags::setFog`; the
+  water's under the sea and the view distance's scale aren't).
+- **Orders** (TTOrder: the exe's order object `0x005b8b20` → manager slot
+  0x2c `0x100f4620`, or 0x28 `0x100f4730` on an object): ICSquadOrder
+  0x3d for the squad leader's, ICCommanderOrder 0x43 for the commander's,
+  0x39 / 0x3f + the order's map kind (MapMove 4 .. MapRepair 7; a
+  comm-rose order is taken as its map kind), at the point 1.5 m up, white,
+  "[d m]" under it, glued to the edge (flags 0x4079), faded out to 1200 m
+  (DAT_101f67b4); the local player's squad's (commander's and leader's).
+- **Requests** (TTRequest: SquadManager `0x004c5720` → slot 0x24
+  `0x100f44d0`, only to the local commander): kind 0 the orbital
+  bombardment's ICObjectOrbitalBombardmentRequestOrder 0x7a, 1 the orbital
+  strike's 0x79, 2 the UAV's 0x7b, 3 the supplies' 0x7c (selected 0x7e /
+  0x7d / 0x7f / 0x80), selectable (`nametags::requestIconId`). Not drawn:
+  the rewrite's squad leaders send no requests (SquadLeader.sendRequest
+  `0x007708d4` and the squad manager's request store aren't rewritten).
+
+Not done: the requests (above), the spectator's rules. The HUD's object marker
 nodes (`createObjectMarkerNode`) are the AA and gunship lock-on markers;
 see "HUD nodes: transform lists, effects, markers and the map menus".
 
@@ -5954,11 +6151,27 @@ active node to):
   the commander screen, menu states 0x17 / 0x22, on foot). Raised here:
   0x33 captureFlag as the player enters a control point's radius outside
   Titan mode (`0x0044b560` on the capture state) and 0x18
-  commanderApply (`0x007d7050`) once he commands. Left: the other
-  callers (0x35 specificSpotted `0x0075be30`, 0x36-0x39 the commander
-  assets' damage `0x007a9500` / `0x007aa500` / `0x007aa6e0`, 0x2a
-  `0x0077e850`, 0x41 `0x0044e650`, 0x16 `0x007d8370`), the placement states 0x17 / 0x22, the parachute (case 0x0d asks
-  the HUD's slot 0xb0 object, which a soldier without a parachute doesn't
+  commanderApply (`0x007d7050`) once he commands; 0x35 specificSpotted
+  as the radio rose opens (`0x0075be30`, HUD slot 0x24c: menu state 5 /
+  6); the commander HUD's asset updates (`0x007aa9b0` each frame) with a
+  damaged asset (armour share below 1, above 0): 0x36 uavDamaged
+  (`0x007aa780`), 0x37 radarDamaged (`0x007aa6e0`, the satellite's), 0x38
+  artilleryDamaged (`0x007aa500`), 0x39 bombardmentDamaged (`0x007a9500`,
+  the orbital strike's), unless the player leads a squad of a team without
+  a commander (`0x007a9240`); the commander map's zoom step (`0x0077e850`:
+  0x1e ZOOM_inOut held again, 0x2a SATELLITEVIEW_moveKeys let through when
+  zoomed in); a UAV sent (`0x007d8370`: 0x16 UAVplaced let through, 0x13
+  place_UAV held; neither has a case in `0x00646cb0`, so neither shows).
+  The commander screen's menu state is 0x10, the artillery's placement
+  0x17 and the orbital strike's 0x22 (toggleArtilleryState → HUD slot
+  0x360 `0x007d73a0`, toggleOrbitalStrikeState → 0x340 `0x007d77a0`), so
+  callForTarget and the placement messages show there. 0x41 useUnlock's
+  case is the spawn screen's kits (menu state 1); its raiser (`0x0044e650`
+  as it builds the kit buttons) lets it through only for a kit whose
+  KitUnlockArrow%iShow (+0x304) is on: a field unlock to take, from the
+  HUD's flags +0x289 / +0x5f5 (`0x00449690`) that a server's field
+  unlocks set; offline never. Left: the parachute (case 0x0d asks the
+  HUD's slot 0xb0 object, which a soldier without a parachute doesn't
   have).
 - **Supply sounds.** AbilityHud (`0xc4f2`, `abilityHud.healingSound`,
   `repairingSound`, `ammoSound` from `0x0055a41f`):
@@ -8587,6 +8800,27 @@ answers the menu itself; nothing is sent.
   have points (40 at rank 1, 57,700 at rank 40); 41..43 are listed with 0
   (the leaderboard's top ranks) and are not reached by points. The rank is
   the highest one the experience (the global score) reaches.
+- **The players' ranks in a round** (the player's stats object, slot
+  0x1a8, its +0x20; -1 from its constructor `0x005a5fc0`): only three
+  writers call `0x005a53b0` (which also tells the NametagManager, slot
+  0x38): the scripts' `pmgr_setScore(player, "rank", n)` (`0x0056a9d0`),
+  the player's ghost (mask 0x4000, rank + 1, read by `0x005981a0`) and
+  the RankEvent (event 0x1a, `0x0050ce10`, sent by `0x004a6620`). The
+  game's scripts decide it: `bf2/stats/stats.py` gives every player 0 on
+  PlayerConnect (bots too: a bot stays 0), and `bf2/stats/rank.py` (not in
+  an AI game, with sv.useGlobalRank) asks the stats server for a player
+  with a profile id above 2000 (`host.pers_plrRequestStats(index, 1,
+  "&mode=base", 0)`, `0x00566930`) and on PlayerStatsResponse sets the
+  record's "rnk" (`pers_getStatsKeyVal`, `0x00566b90`). Here the local
+  store answers for the local soldier: it stands under a profile id made
+  from its name (`stats::localProfileId`, 0x10000000..0x1fffffff), the
+  request succeeds and the answer (`stats::playerInfoKeys`: "rnk") is
+  raised the next update (`ScriptBridge::deliverStatsResponses`); other
+  players' requests fail as with the server down (joined clients without
+  an account send profile id -1). The hosted game sends the rank in the
+  player ghosts (mask 0x4000); a joined client reads it from them and from
+  RankEvent. `GameWorld::setPlayerRank` holds it for the name tags'
+  ICRank and the commander's applicants (highest first).
 - **The record:** experience, kills, deaths, rounds, wins and losses,
   time played, the best round's score and the unlocks chosen, in order.
   The end-of-round code adds the round (`MenuBindings::recordRound`: the

@@ -292,3 +292,79 @@ TEST(ScriptHost_SquadAndStatsHooks)
 	CHECK(std::count(events.begin(), events.end(), "PlayerScore") == 1);
 	CHECK(round.logic.endOfRoundData() == "\\tp0\\B" && round.logic.endOfRoundSerial() == 1);
 }
+
+// The players' ranks (stats +0x20, -1 from 0x005a5fc0): stats.py gives
+// each 0 on PlayerConnect through pmgr_setScore "rank" (0x0056a9d0 →
+// 0x005a53b0); rank.py asks the stats server (pers_plrRequestStats
+// 0x00566930) for a player with a profile id above 2000 and sets the
+// PlayerStatsResponse's "rnk" (pers_getStatsKeyVal 0x00566b90).
+TEST(ScriptHost_RanksFromTheStatsServer)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Round round;
+	script::ScriptHost host(*round.bridge,
+		{std::string(gameDir) + "/python", std::string(gameDir) + "/mods/bf2142/python"}, [](const std::string&) {});
+	const auto raise = [&](const std::string& event, const game::ScriptArgs& args) { host.raise(event, args); };
+	round.world->setEventSink(raise);
+	round.logic.setEventSink(raise);
+	round.bridge->events = raise;
+	// The local soldier's profile (asked inside addPlayer, as it connects).
+	round.bridge->profileOf = [&round](int player) -> int64_t {
+		game::GameWorld::PlayerInfo p;
+		return round.world->playerInfo(player, p) && p.name == "Me" ? 0x10000123 : 0;
+	};
+	round.bridge->statsServer = [](int64_t profile, game::ScriptBridge::StatsRecord& record) {
+		if (profile != 0x10000123) {
+			return false;
+		}
+		record["rnk"] = "7";
+		return true;
+	};
+	CHECK(host.startGameMode("gpm_cq"));
+	const int bot = round.world->addPlayer("Bot", 1, true);
+	const int me = round.world->addPlayer("Me", 2, false);
+	game::GameWorld::PlayerInfo info;
+	CHECK(round.world->playerInfo(bot, info) && info.rank == 0); // stats.py
+	CHECK(round.world->playerInfo(me, info) && info.rank == 0);  // until the answer comes
+	round.bridge->deliverStatsResponses();
+	CHECK(round.world->playerInfo(me, info) && info.rank == 7);
+	CHECK(round.world->playerInfo(bot, info) && info.rank == 0);
+	CHECK(host.run("import host\nassert host.pmgr_getScore(" + std::to_string(me) + ", 'rank') == 7\n"
+				   "assert host.pers_getStatsKeyVal('rnk', 0x10000123) == '7'\n"));
+}
+
+// Python 2's "/" inside a class (py2compat's division helper): a name
+// with two leading underscores would be mangled there (ObjectStat's
+// accuracy, bf2/stats/stats.py, which the end of round reads).
+TEST(ScriptHost_DivisionInAClass)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Round round;
+	script::ScriptHost host(*round.bridge,
+		{std::string(gameDir) + "/python", std::string(gameDir) + "/mods/bf2142/python"}, [](const std::string&) {});
+	CHECK(host.startGameMode("gpm_cq"));
+	CHECK(host.run("import bf2.stats.stats as stats\n"
+				   "o = stats.ObjectStat(0)\n"
+				   "o.bulletsFired = 4\n"
+				   "o.bulletsHit = 1\n"
+				   "assert abs(o.accuracy - 0.25) < 1e-9\n"
+				   // Classic instances order (by address) as Python 2's do: the
+				   // end of round sorts (score, PlayerStat) pairs.
+				   "pairs = [((0, 0), stats.ObjectStat(1)), ((0, 0), stats.ObjectStat(2)), ((1, 0), o)]\n"
+				   "pairs.sort()\n"
+				   "assert pairs[-1][1] is o\n"
+				   // A classic class's __cmp__ orders it.
+				   "import py2compat\n"
+				   "g = {'__builtins__': py2compat.PY2_BUILTINS, '__name__': 't'}\n"
+				   "exec(compile(py2compat.translate('class Old:\\n"
+				   "  def __init__(self, v): self.v = v\\n"
+				   "  def __cmp__(self, other): return cmp(self.v, other.v)\\n"
+				   "first = sorted([Old(3), Old(1), Old(2)])[0].v\\n'), 't', 'exec'), g)\n"
+				   "assert g['first'] == 1\n"));
+}

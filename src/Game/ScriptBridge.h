@@ -9,6 +9,7 @@
 #include "GameWorld.h"
 #include "ScriptGame.h"
 
+#include <functional>
 #include <map>
 
 namespace dice::hfe::game {
@@ -22,6 +23,11 @@ struct ServerSettings {
 	int timeLimit = 0;
 	int scoreLimit = 0;
 	int maxRank = 0;
+	// sv.useGlobalRank / useGlobalUnlocks (on by default, as net::
+	// ServerSettings has them): rank.py and unlocks.py ask the stats
+	// server for the players with a profile id.
+	bool useGlobalRank = true;
+	bool useGlobalUnlocks = true;
 };
 
 class ScriptBridge : public ScriptGame {
@@ -61,6 +67,21 @@ public:
 	void setScoreEvents(bool enabled) override { m_scoreEvents = enabled; }
 	bool giveFieldUnlock(int player) override;
 	void endOfRoundData(const std::string& text) override;
+	int64_t profileId(int player) override { return profileOf ? profileOf(player) : 0; }
+	bool requestStats(int64_t playerOrProfile) override;
+	bool statsKeyValue(const std::string& key, int64_t profileId, std::string& value) override;
+	// Raises PlayerStatsResponse(1, player, keys) for the requests answered
+	// since the last call (the stats server's answer arrives a frame or
+	// more after the request; main calls this after the scripts' update).
+	void deliverStatsResponses();
+
+	// The stats server's part: a profile's record ("rnk" ... as
+	// getplayerinfo.aspx's keys), false for a profile it doesn't know.
+	// Main answers for the local soldier from the local store.
+	using StatsRecord = std::map<std::string, std::string>;
+	std::function<bool(int64_t profileId, StatsRecord& record)> statsServer;
+	// The players' profile ids (pmgr_p_get "profileid"); 0 without.
+	std::function<int64_t(int player)> profileOf;
 
 	// Where PlayerScore goes (the scripts' handlers; main sets it).
 	ScriptEventSink events;
@@ -80,6 +101,8 @@ private:
 	std::map<int, std::map<std::string, ScriptValue>> m_playerParams; // set by scripts, by player
 	std::map<int, std::map<std::string, ScriptValue>> m_scores;
 	bool m_scoreEvents = false;
+	std::map<int64_t, StatsRecord> m_downloaded;          // by profile id
+	std::vector<std::pair<int, int64_t>> m_statsAnswers; // (player, profile) answered, not yet raised
 };
 
 } // namespace dice::hfe::game

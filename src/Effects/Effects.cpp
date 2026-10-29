@@ -97,8 +97,19 @@ ParticleTemplate ParticleTemplate::fromTemplate(const world::ObjectTemplate& t)
 		p.timeToLive = 4;
 	}
 	if (const std::string* type = setting(t, "emitterType")) {
-		p.emitter = *type == "RadialDirection" ? Emitter::RadialDirection : Emitter::Standard;
+		// 0x00625de0: the names compared without case; another name leaves
+		// the type as it was.
+		std::string v = *type;
+		for (char& c : v) {
+			c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		}
+		p.emitter = v == "standard" ? Emitter::Standard
+			: v == "radialdirection" ? Emitter::RadialDirection
+			: v == "radial"          ? Emitter::Radial
+			: v == "box"             ? Emitter::Box
+									 : p.emitter;
 	}
+	p.emitRadius = vector(t, "emitRadius", p.emitRadius);
 	const char* ranges[3] = {"emitRangeX", "emitRangeY", "emitRangeZ"};
 	for (int i = 0; i < 3; ++i) {
 		if (const std::string* value = setting(t, ranges[i])) {
@@ -206,6 +217,7 @@ ParticleTemplate ParticleTemplate::fromTemplate(const world::ObjectTemplate& t)
 	p.nearCulling = number(t, "nearCullingEnable", 0) != 0;
 	p.noRotationFromParent = number(t, "noRotationFromParent", 0) != 0;
 	p.localSystem = number(t, "isLocalSystem", 0) != 0;
+	p.staticSystem = number(t, "isStaticSystem", 0) != 0;
 	p.showFirstPerson = number(t, "showInFirstPerson", 1) != 0;
 	p.showThirdPerson = number(t, "showInThirdPerson", 1) != 0;
 	return p;
@@ -402,23 +414,63 @@ void Emitter::emit(game::Random& random, const Vec3& at, float age, const EmitCo
 	p.rotation = signedRandom(random) * t.randomRotation;
 	const float spin = signedRandom(random) * t.randomRotationSpeed;
 	p.rotationSpeed = spin < 0 ? spin - t.rotationSpeed : spin + t.rotationSpeed;
-	const Vec3 offset {t.emitRange[0].sample(random), t.emitRange[1].sample(random), t.emitRange[2].sample(random)};
+	// Where it is born and its direction, by emitterType (0x10140fa0,
+	// 0x101410d0, 0x101412c0).
+	Vec3 offset;
+	Vec3 direction = normalized(t.emitDirection);
+	switch (t.emitter) {
+	case ParticleTemplate::Emitter::Standard: {
+		const float theta = unitRandom(random) * kTwoPi;
+		const float phi = unitRandom(random) * (kTwoPi / 2);
+		const float sinPhi = std::sin(phi);
+		const float uz = unitRandom(random), uy = unitRandom(random), ux = unitRandom(random);
+		offset = {std::cos(theta) * ux * t.emitRadius.x * sinPhi, std::sin(theta) * uy * t.emitRadius.y * sinPhi,
+			std::cos(phi) * uz * t.emitRadius.z};
+		break;
+	}
+	case ParticleTemplate::Emitter::RadialDirection:
+	case ParticleTemplate::Emitter::Radial: {
+		const float angle = (signedRandom(random) * t.randomRadialDirection + t.radialDirection) * kDegrees;
+		const float c = std::cos(angle), s = std::sin(angle);
+		// The ring's axis: emitRadius's longest (the first of equals).
+		const float r[3] = {t.emitRadius.x, t.emitRadius.y, t.emitRadius.z};
+		int axis = r[0] < r[1] ? 1 : 0;
+		if (r[axis] < r[2]) {
+			axis = 2;
+		}
+		const float fz = t.emitRange[2].sample(random);
+		const float fy = t.emitRange[1].sample(random);
+		const float fx = t.emitRange[0].sample(random);
+		Vec3 ring;
+		if (axis == 0) {
+			offset = {fx, fy * s, fz * c};
+			ring = {0, offset.y, offset.z};
+		} else if (axis == 1) {
+			offset = {fx * s, fy, fz * c};
+			ring = {offset.x, 0, offset.z};
+		} else {
+			offset = {fx * s, fy * c, fz};
+			ring = {offset.x, offset.y, 0};
+		}
+		if (t.emitter == ParticleTemplate::Emitter::RadialDirection) {
+			direction = physics::lengthSquared(ring) > 0 ? normalized(ring) : Vec3 {};
+		}
+		break;
+	}
+	case ParticleTemplate::Emitter::Box: {
+		const float fz = t.emitRange[2].sample(random);
+		const float fy = t.emitRange[1].sample(random);
+		const float fx = t.emitRange[0].sample(random);
+		offset = {fx, fy, fz};
+		break;
+	}
+	}
 	// A local system keeps its particles in its own space.
 	p.position = t.localSystem ? offset : at + m_rotation.transform(offset);
-	const Vec3 axis = normalized(t.emitDirection);
-	Vec3 direction = axis;
-	if (t.emitter == ParticleTemplate::Emitter::RadialDirection) {
-		// Around the axis, at radialDirection from the plane across it, give
-		// or take randomRadialDirection.
-		const float around = random.unit() * kTwoPi;
-		const float elevation = (t.radialDirection + signedRandom(random) * t.randomRadialDirection) * kDegrees;
-		const Vec3 u = perpendicular(axis), v = physics::cross(axis, u);
-		const Vec3 radial = u * std::cos(around) + v * std::sin(around);
-		direction = axis * std::sin(elevation) + radial * std::cos(elevation);
-	} else if (t.randomDirectionAngle.x != 0 || t.randomDirectionAngle.y != 0 || t.randomDirectionAngle.z != 0) {
+	if (t.randomDirectionAngle.x != 0 || t.randomDirectionAngle.y != 0 || t.randomDirectionAngle.z != 0) {
 		const Vec3 angles {signedRandom(random) * t.randomDirectionAngle.x, signedRandom(random) * t.randomDirectionAngle.y,
 			signedRandom(random) * t.randomDirectionAngle.z};
-		direction = Mat3::fromYawPitchRoll({angles.y, angles.x, angles.z}).transform(axis);
+		direction = Mat3::fromYawPitchRoll({angles.y, angles.x, angles.z}).transform(direction);
 	}
 	// The speed: emitSpeed less the shared random's randomSpeed, times the
 	// bundle's speed scale and emitSpeedGraph over the emit time.
@@ -475,6 +527,15 @@ void Emitter::step(float seconds, game::Random& random, const EmitContext& conte
 		m_particles.end());
 	if (sprite && context.poolUsed) {
 		*context.poolUsed -= static_cast<int>(alive - m_particles.size());
+	}
+	// isStaticSystem: once, its life run at once in steps of 0.1 s (0x101407c0).
+	if (t.staticSystem && !m_warmedStatic && m_active && !m_prewarming) {
+		m_warmedStatic = true;
+		m_prewarming = true;
+		for (float left = t.timeToLive; left > 0; left -= 0.1f) {
+			step(std::min(left, 0.1f) / std::max(timeScale, 1e-3f), random, context);
+		}
+		m_prewarming = false;
 	}
 	// The delay.
 	m_delay -= seconds;
@@ -634,8 +695,12 @@ void EffectManager::spawnTemplate(const world::ObjectTemplate& t, const Vec3& po
 		}
 		return;
 	}
+	if (type == "Emitter") {
+		startDebrisEmitter(t, position, rotation, depth, view); // debris (0x0061f360)
+		return;
+	}
 	if (type != "EffectBundle") {
-		return; // light sources, mesh emitters: not drawn here
+		return; // light sources: placed by their bundle
 	}
 	// How long the bundle's particle systems last (its lights' life).
 	float span = 0;
@@ -1063,6 +1128,236 @@ void EffectManager::update(float seconds)
 	m_lights.erase(std::remove_if(m_lights.begin(), m_lights.end(),
 					   [](const LiveLight& l) { return l.stopped || (l.life >= 0 && l.age >= l.life); }),
 		m_lights.end());
+	stepDebris(seconds);
+}
+
+namespace {
+
+game::RandomDistribution distribution(const world::ObjectTemplate& t, const char* name, float fallback)
+{
+	if (const std::string* value = setting(t, name)) {
+		return game::RandomDistribution::parse(*value);
+	}
+	game::RandomDistribution d;
+	d.a = fallback;
+	return d;
+}
+
+} // namespace
+
+DebrisEmitterTemplate DebrisEmitterTemplate::fromTemplate(const world::ObjectTemplate& t)
+{
+	DebrisEmitterTemplate d;
+	d.delay = distribution(t, "delay", 0);
+	d.timeToLive = distribution(t, "timeToLive", 0.1f);
+	d.intensity = distribution(t, "intensity", 11);
+	const char* relative[3] = {"relativePositionInRight", "relativePositionInUp", "relativePositionInDof"};
+	const char* positional[3] = {"positionalSpeedInRight", "positionalSpeedInUp", "positionalSpeedInDof"};
+	const char* rotational[3] = {"rotationalSpeedInDof", "rotationalSpeedInUp", "rotationalSpeedInRight"};
+	for (int i = 0; i < 3; ++i) {
+		d.relativePosition[i] = distribution(t, relative[i], 0);
+		d.positionalSpeed[i] = distribution(t, positional[i], 0);
+		d.rotationalSpeed[i] = distribution(t, rotational[i], 0);
+	}
+	d.startRotation = distribution(t, "startRotation", 0);
+	d.zRotation = distribution(t, "zRotation", 0);
+	d.zRotationSnap = number(t, "zRotationSnap", 1);
+	d.addEmitterSpeed = number(t, "addEmitterSpeed", 0) != 0;
+	d.emitterSpeedScale = number(t, "emitterSpeedScale", 1);
+	d.noPhysics = number(t, "noPhysics", 0) != 0;
+	if (const std::string* name = setting(t, "template")) {
+		d.objectTemplate = *name;
+	}
+	for (int i = 0; i < 5; ++i) {
+		const std::string key = "alternateTemplate" + std::to_string(i);
+		if (const std::string* name = setting(t, key.c_str()); name && !name->empty()) {
+			d.alternates.push_back(*name);
+		}
+	}
+	return d;
+}
+
+DebrisPieceTemplate DebrisPieceTemplate::fromTemplate(const world::ObjectTemplate& t)
+{
+	// The Particle template's defaults (0x00622960): timeToLive 10, size 1,
+	// Transparency 0, gravityModifier 1, drag 0, sizeModifier 1/1/1.
+	DebrisPieceTemplate d;
+	d.geometry = t.geometry();
+	d.part = static_cast<int>(number(t, "geometryPart", 0));
+	d.timeToLive = distribution(t, "timeToLive", 10);
+	d.size = distribution(t, "size", 1);
+	d.transparency = distribution(t, "transparency", 0);
+	d.gravityModifier = distribution(t, "gravityModifier", 1);
+	d.drag = distribution(t, "drag", 0);
+	d.transparencyGraph = graph(t, "transparencyGraph", d.transparencyGraph);
+	d.sizeModifier = vector(t, "sizeModifier", d.sizeModifier);
+	return d;
+}
+
+float DebrisPiece::alpha() const
+{
+	const float f = life > 0 ? std::min(age / life, 1.0f) : 0.0f;
+	return std::clamp(look->transparencyGraph.at(f), 0.0f, 1.0f) * (1 - transparency);
+}
+
+Vec3 DebrisPiece::scale() const
+{
+	const Vec3& m = look->sizeModifier;
+	if (m.x == 0 && m.y == 0 && m.z == 0) {
+		return {1, 1, 1};
+	}
+	return {m.x > 0 ? size * m.x : 1.0f, m.y > 0 ? size * m.y : 1.0f, m.z > 0 ? size * m.z : 1.0f};
+}
+
+void EffectManager::startDebrisEmitter(const world::ObjectTemplate& t, const Vec3& position, const Mat3& rotation,
+	int depth, View view)
+{
+	auto& slot = m_debrisEmitterTemplates[&t];
+	if (!slot) {
+		slot = std::make_unique<DebrisEmitterTemplate>(DebrisEmitterTemplate::fromTemplate(t));
+	}
+	LiveDebrisEmitter e;
+	e.look = slot.get();
+	e.position = position;
+	e.rotation = rotation;
+	e.view = view;
+	e.depth = depth;
+	e.delay = std::max(0.0f, slot->delay.sample(m_random));
+	e.timeToLive = std::max(slot->timeToLive.sample(m_random), 0.01f);
+	e.intensity = slot->intensity.sample(m_random);
+	// 0x0061ef80: the interval 1 / |intensity|, 100 s for none.
+	const float rate = std::fabs(e.intensity);
+	e.next = rate < 1.1920929e-07f || !std::isfinite(rate) ? 100.0f : 1.0f / rate;
+	m_debrisEmitters.push_back(e);
+}
+
+void EffectManager::emitDebris(LiveDebrisEmitter& e, float lead)
+{
+	const DebrisEmitterTemplate& d = *e.look;
+	// The template: one of the alternates or the main one.
+	std::string name = d.objectTemplate;
+	if (!d.alternates.empty()) {
+		const size_t n = d.alternates.size();
+		const size_t index = static_cast<size_t>(std::floor(m_random.unit() * static_cast<float>(n + 1)));
+		if (index < n) {
+			name = d.alternates[index];
+		}
+	}
+	const world::ObjectTemplate* t = m_templates.find(name);
+	if (!t) {
+		return;
+	}
+	const Vec3 right = e.rotation.transform({1, 0, 0}), up = e.rotation.transform({0, 1, 0}),
+			   dof = e.rotation.transform({0, 0, 1});
+	Vec3 velocity = right * d.positionalSpeed[0].sample(m_random) + up * d.positionalSpeed[1].sample(m_random)
+		+ dof * d.positionalSpeed[2].sample(m_random);
+	const Vec3 at = e.position + right * d.relativePosition[0].sample(m_random)
+		+ up * d.relativePosition[1].sample(m_random) + dof * d.relativePosition[2].sample(m_random) + velocity * lead;
+	const float snap = d.zRotationSnap != 0 ? d.zRotationSnap : 1.0f;
+	const float turn = std::round(d.zRotation.sample(m_random) / snap) * snap + d.startRotation.sample(m_random);
+	Mat3 rotation = e.rotation;
+	if (std::fabs(turn) > 1.1920929e-07f) {
+		rotation = rotation * Mat3::axisAngle(normalized(dof), turn);
+	}
+	if (t->typeName() != "Particle") {
+		spawnTemplate(*t, at, rotation, e.depth + 1, e.view, nullptr);
+		return;
+	}
+	auto& slot = m_debrisPieceTemplates[t];
+	if (!slot) {
+		slot = std::make_unique<DebrisPieceTemplate>(DebrisPieceTemplate::fromTemplate(*t));
+	}
+	if (slot->geometry.empty()) {
+		return;
+	}
+	DebrisPiece piece;
+	piece.look = slot.get();
+	piece.position = at;
+	piece.rotation = rotation;
+	piece.life = slot->timeToLive.sample(m_random);
+	if (piece.life < 0) {
+		piece.life = 0.5f; // 0x00621250
+	}
+	piece.size = slot->size.sample(m_random);
+	piece.transparency = slot->transparency.sample(m_random);
+	piece.gravity = slot->gravityModifier.sample(m_random);
+	piece.drag = slot->drag.sample(m_random);
+	if (!d.noPhysics) {
+		piece.velocity = velocity;
+		piece.spin = {d.rotationalSpeed[0].sample(m_random), d.rotationalSpeed[1].sample(m_random),
+			d.rotationalSpeed[2].sample(m_random)};
+	} else {
+		piece.resting = true;
+	}
+	if (m_debris.size() >= kMaxDebris) {
+		m_debris.erase(m_debris.begin());
+	}
+	m_debris.push_back(piece);
+}
+
+void EffectManager::stepDebris(float seconds)
+{
+	if (seconds <= 0) {
+		return;
+	}
+	// The emitters (0x0061f360): the delay, then a piece each interval
+	// over the emitter's life.
+	for (LiveDebrisEmitter& e : m_debrisEmitters) {
+		float dt = seconds;
+		if (e.delay > 0) {
+			e.delay -= dt;
+			if (e.delay >= 0) {
+				continue;
+			}
+			dt = -e.delay;
+			e.delay = 0;
+		}
+		const float start = e.elapsed;
+		e.elapsed += dt;
+		const float rate = std::fabs(e.intensity);
+		const float interval = rate < 1.1920929e-07f || !std::isfinite(rate) ? 100.0f : 1.0f / rate;
+		int guard = 0;
+		while (e.next <= e.elapsed && e.next <= e.timeToLive && guard++ < 256) {
+			emitDebris(e, e.elapsed - std::max(e.next, start));
+			e.next += interval;
+		}
+	}
+	m_debrisEmitters.erase(std::remove_if(m_debrisEmitters.begin(), m_debrisEmitters.end(),
+							   [](const LiveDebrisEmitter& e) { return e.delay <= 0 && e.elapsed >= e.timeToLive; }),
+		m_debrisEmitters.end());
+	// The pieces.
+	const float damping = std::pow(physics::tuning::kLinearDamping, seconds * 30.0f);
+	for (DebrisPiece& p : m_debris) {
+		p.age += seconds;
+		if (p.resting) {
+			continue;
+		}
+		p.velocity.y += physics::tuning::kGravity * p.gravity * seconds;
+		p.velocity = p.velocity * (damping * std::max(0.0f, 1.0f - p.drag * seconds));
+		p.position += p.velocity * seconds;
+		const float spinLength = std::sqrt(physics::lengthSquared(p.spin));
+		if (spinLength > 1e-4f) {
+			p.rotation = p.rotation * Mat3::axisAngle(p.spin * (1.0f / spinLength), spinLength * seconds);
+			p.spin = p.spin * damping;
+		}
+		if (m_context.groundHeight) {
+			const float ground = m_context.groundHeight(p.position.x, p.position.z);
+			if (p.position.y < ground) {
+				p.position.y = ground;
+				if (p.velocity.y < 0) {
+					p.velocity.y = -p.velocity.y * 0.3f;
+				}
+				p.velocity.x *= 0.6f;
+				p.velocity.z *= 0.6f;
+				p.spin = p.spin * 0.6f;
+				if (physics::lengthSquared(p.velocity) < 0.04f) {
+					p.resting = true;
+				}
+			}
+		}
+	}
+	m_debris.erase(std::remove_if(m_debris.begin(), m_debris.end(), [](const DebrisPiece& p) { return p.age >= p.life; }),
+		m_debris.end());
 }
 
 // A mesh particle at its age (MeshParticleMesh.fx vsDiffuse): the colour

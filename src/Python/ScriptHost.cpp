@@ -516,19 +516,30 @@ PyObject* host_pers_plrGiveFieldUnlock(PyObject*, PyObject* args)
 	return none();
 }
 
-// pers_plrRequestStats / pers_plrRequestUnlocks (0x00566930, 0x00567370)
-// queue a request to the stats server and return whether it was sent;
-// there is none to ask (Stats/Stats.h keeps the standing on this
-// machine), so the request fails: 0, as with the server down.
+// pers_plrRequestUnlocks (0x00567370) queues a request to the stats
+// server and returns whether it was sent; there is none to ask for unlocks
+// (Stats/Stats.h keeps the standing on this machine and the menu reads it
+// there), so the request fails: 0, as with the server down.
 PyObject* host_pers_request(PyObject*, PyObject*) { return PyLong_FromLong(0); }
+
+// pers_plrRequestStats(player, ?, query, ?) (0x00566930): a player index
+// below 0x100 stands for its profile id (slot 0x324); 1 when the request
+// went out. The game answers from the local record (ScriptGame::requestStats).
+PyObject* host_pers_plrRequestStats(PyObject*, PyObject* args)
+{
+	return PyLong_FromLong(g_host->game.requestStats(intArg(args, 0, -1)) ? 1 : 0);
+}
 
 PyObject* host_pers_getStatsKeyVal(PyObject*, PyObject* args)
 {
-	// 0x00566b90 with no persistence object downloaded (no request ever
-	// succeeds here).
-	(void)args;
-	PyErr_SetString(PyExc_RuntimeError, "there is no current persistence object downloaded");
-	return nullptr;
+	// 0x00566b90: the value as a string from the downloaded record.
+	std::string value;
+	const int64_t profile = intArg(args, 1);
+	if (!g_host->game.statsKeyValue(stringArg(args, 0), profile, value)) {
+		PyErr_SetString(PyExc_RuntimeError, "there is no current persistence object downloaded");
+		return nullptr;
+	}
+	return PyUnicode_FromStringAndSize(value.data(), static_cast<Py_ssize_t>(value.size()));
 }
 
 PyObject* host_gl_sendEndOfRoundData(PyObject*, PyObject* args)
@@ -605,7 +616,7 @@ PyMethodDef g_methods[] = {
 	{"pers_getStatsKeyVal", host_pers_getStatsKeyVal, METH_VARARGS, nullptr},
 	{"pers_plrGiveFieldUnlock", host_pers_plrGiveFieldUnlock, METH_VARARGS, nullptr},
 	{"pers_plrRequestUnlocks", host_pers_request, METH_VARARGS, nullptr},
-	{"pers_plrRequestStats", host_pers_request, METH_VARARGS, nullptr},
+	{"pers_plrRequestStats", host_pers_plrRequestStats, METH_VARARGS, nullptr},
 	{"gs_abortCurrentConnectionAttempt", host_nothing, METH_VARARGS, nullptr},
 	{"gl_sendEndOfRoundData", host_gl_sendEndOfRoundData, METH_VARARGS, nullptr},
 	{nullptr, nullptr, 0, nullptr},

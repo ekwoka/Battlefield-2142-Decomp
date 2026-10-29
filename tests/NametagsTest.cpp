@@ -200,3 +200,37 @@ TEST(Nametags_IconsCallsAndRanks)
 	CHECK(nametags::nameRow(5, false).rankIcon == 5 && nametags::nameRow(5, false).veteranIcon == -1);
 	CHECK(nametags::nameRow(44, true).rankIcon == -1 && nametags::nameRow(0, true).veteranIcon == 0x4f);
 }
+
+// A vehicle's own icon (0x100ee590 by setVehicleType / vehicleCategory /
+// usePlayerIcon), the orders' and requests' icons (0x100f4620,
+// 0x100f44d0) and the fog on enemies (0x100f09b0).
+TEST(Nametags_VehicleOrderAndFog)
+{
+	using nametags::vehicleIconId;
+	CHECK(nametags::vehicleTypeOf("VTApc") == 4 && nametags::vehicleTypeOf("VTInfantry") == 0x1a);
+	CHECK(nametags::vehicleTypeOf("") == 0x1b);
+	CHECK(vehicleIconId(4, 0, false) == 0x5d);   // an APC
+	CHECK(vehicleIconId(0, 0, false) == 0x5f);   // a heavy tank
+	CHECK(vehicleIconId(0x18, 3, false) == 0x63); // a transport helicopter
+	CHECK(vehicleIconId(0x1b, 0, false) == 0x5b); // untyped land vehicle
+	CHECK(vehicleIconId(0x1b, 2, false) == 0x61); // untyped aircraft
+	CHECK(vehicleIconId(0x1b, 2, true) == 0x5a);  // drawn as its occupant
+	CHECK(vehicleIconId(0x19, 0, false) == 0x5a); // VTSniper
+	CHECK(nametags::orderIconId(false, 5) == 0x3e && nametags::orderIconId(true, 4) == 0x43);
+	CHECK(nametags::orderIconId(false, 1) == 0x3e); // a comm-rose attack as the map's
+	CHECK(nametags::requestIconId(0, false) == 0x7a && nametags::requestIconId(1, true) == 0x7d);
+	// No fog: 1; Cerbere-like fog 0..140 m: clear near, gone past the end.
+	CHECK(nametags::tagFog({0, 0, 0, 0}, 500) == 1);
+	CHECK(nametags::tagFog({0, 140, 0, 0}, 10) > 0.99f);
+	CHECK(nametags::tagFog({0, 140, 0, 0}, 150) == 0);
+	nametags::Settings s;
+	s.fog = {0, 140, 0, 0};
+	nametags::PlayerTagInput in;
+	in.aimedAt = true;
+	in.distance = 120;
+	nametags::Fade fade;
+	const float fogged = run(s, in, fade, 5);
+	nametags::Fade clear;
+	const float plain = run(nametags::Settings {}, in, clear, 5);
+	CHECK(fogged < plain && plain > 0.9f);
+}

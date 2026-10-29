@@ -82,7 +82,7 @@ TEST(SettingsObjects_Console)
 	CHECK(general.find("GeneralSettings.setViewIntroMovie 1\n") != std::string::npos);
 	const std::string audio = settings.audioScript();
 	CHECK(audio.find("AudioSettings.setVoipEnabled 0\n") == 0);
-	CHECK(audio.find("AudioSettings.setProvider \"Software\"\n") != std::string::npos);
+	CHECK(audio.find("AudioSettings.setProvider \"software\"\n") != std::string::npos);
 	CHECK(audio.find("AudioSettings.setEffectsVolume 0.25\n") != std::string::npos);
 	CHECK(settings.videoScript().find("VideoSettings.setResolution 1024x768@60Hz\n") != std::string::npos);
 	CHECK(settings.globalScript().find("GlobalSettings.setDefaultUser \"Tester\"\n") == 0);
@@ -143,7 +143,34 @@ TEST(SettingsObjects_MenuPages)
 	call("dice.bf2.GeneralSettings", "setMaxBots", {ui::avm1::Value(12)});
 	call("dice.bf2.GeneralSettings", "apply", {});
 	CHECK(settings.get("GeneralSettings.MaxBots") == "12");
+	// The HUD page: transparencies against the object's alphas, the
+	// crosshair as one ARGB number, camera shake inverted (SwiffPlayer
+	// 0x100326b0, 0x10032310, 0x10030180 and their setters).
+	run(console, "GeneralSettings.setMinimapTransparency 170");
+	run(console, "GeneralSettings.setCrosshairColor 255 128 0 200");
+	run(console, "GeneralSettings.setCameraShake 1");
+	run(console, "GeneralSettings.setHelpPopups 1");
+	run(console, "GeneralSettings.setMapIconAlphaTransparency 51");
+	menu::MenuBindings page(natives, services);
+	page.setSettingsObjects(&settings);
+	const auto number = [&](const char* member) { return vm.toNumber(call("dice.bf2.GeneralSettings", member, {})); };
+	CHECK(std::fabs(number("getMinimapTransparency") - (1 - 170.0 / 255)) < 1e-6);
+	CHECK(std::fabs(number("getMapIconTransparency") - 0.8) < 1e-6);
+	CHECK(number("getHUDTransparency") == 0);
+	CHECK(number("getCrosshairColor") == static_cast<double>(200u << 24 | 255u << 16 | 128u << 8 | 0u));
+	CHECK(number("getCameraShake") == 0 && number("getHelpPopUps") == 1);
+	call("dice.bf2.GeneralSettings", "setHUDTransparency", {ui::avm1::Value(0.2)});
+	call("dice.bf2.GeneralSettings", "setCrosshairColor",
+		{ui::avm1::Value(10), ui::avm1::Value(20), ui::avm1::Value(30), ui::avm1::Value(40)});
+	call("dice.bf2.GeneralSettings", "setCameraShake", {ui::avm1::Value(true)});
+	call("dice.bf2.GeneralSettings", "setHelpPopUps", {ui::avm1::Value(false)});
+	call("dice.bf2.GeneralSettings", "apply", {});
+	CHECK(settings.get("GeneralSettings.HUDTransparency") == "204");
+	CHECK(settings.get("GeneralSettings.CrosshairColor") == "10 20 30 40");
+	CHECK(settings.get("GeneralSettings.CameraShake") == "0" && settings.get("GeneralSettings.HelpPopups") == "0");
+	CHECK(settings.get("GeneralSettings.MinimapTransparency") == "170");
 	bindings.finishJobs();
+	page.finishJobs();
 }
 
 // Several local profiles (LocalProfileManager): Default made at start-up,

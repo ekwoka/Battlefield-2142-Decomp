@@ -86,10 +86,24 @@ struct Graph {
 };
 
 struct ParticleTemplate {
-	enum class Emitter { Standard, RadialDirection } emitter = Emitter::Standard;
+	// emitterType (BF2142.exe's names 0x00a04264, setter 0x00625de0 ->
+	// RendDX9 template +0x268): where a particle is born and which way it
+	// leaves (the sprites' 0x10140fa0 / 0x101410d0 / 0x101412c0, the same
+	// for the mesh 0x1013d840 and trail 0x1013acb0 systems):
+	//  - Standard (0): in the ellipsoid of emitRadius (+0x18, slot 0x28:
+	//    theta = 2 pi u, phi = pi u, the point (cos theta sin phi u rx,
+	//    sin theta sin phi u ry, cos phi u rz)), along emitDirection;
+	//  - RadialDirection (1) / Radial (2): on a ring about emitRadius's
+	//    longest axis at radialDirection +- randomRadialDirection degrees,
+	//    the axes' distances from emitRangeX/Y/Z; RadialDirection leaves
+	//    along the ring's radius, Radial along emitDirection;
+	//  - Box (3): at (emitRangeX, emitRangeY, emitRangeZ), along emitDirection.
+	// randomDirectionAngle then turns the direction for each of them.
+	enum class Emitter { Standard, RadialDirection, Radial, Box } emitter = Emitter::Standard;
+	Vec3 emitRadius;
 	game::RandomDistribution emitRange[3];
 	float randomRadialDirection = 0; // degrees
-	float radialDirection = 0;       // degrees from the plane across emitDirection
+	float radialDirection = 0;       // degrees about the ring's axis
 	float emitFrequency = 0;         // particles per second (the sprite template's +0x10, default 32)
 	float emitTime = 0;
 	float emitDelay = 0;
@@ -198,6 +212,11 @@ struct ParticleTemplate {
 	// (0x1013eff0: its local matrix plus the parent's position).
 	bool noRotationFromParent = false;
 	bool localSystem = false;    // isLocalSystem: particles in the system's space
+	// isStaticSystem (setter 0x00626cf0 -> RendDX9 slot 0x190, +0x26d): on
+	// its first update the system is run for its timeToLive (+0x88) in
+	// steps of 0.1 s (0x101407c0), so a level's standing smoke or fire is
+	// seen in its steady state, not starting.
+	bool staticSystem = false;
 	// alphaCull (the sprite template's +0xa0, slot 0x154): a particle whose
 	// alpha is below it isn't drawn (the sprites' collector 0x10130bd0).
 	float alphaCull = 0;
@@ -305,7 +324,7 @@ private:
 	void step(float seconds, game::Random& random, const EmitContext& context);
 
 	const ParticleTemplate* m_template;
-	bool m_started = false, m_active = true, m_prewarming = false;
+	bool m_started = false, m_active = true, m_prewarming = false, m_warmedStatic = false;
 	float m_delay = 0;     // emitDelay left (+0xe4)
 	float m_emitLeft = 0;  // emitTime left (+0xe0)
 	float m_preWarm = 0;   // pre-warm left (+0xf8)
@@ -475,6 +494,64 @@ struct LightSourceLook {
 };
 LightSourceLook lightSourceOf(const world::ObjectTemplate& t);
 
+// The debris emitters: BF2142.exe's own Emitter template (class 0x9475,
+// vtable 0x0097d310, defaults 0x00620d50: delay 0, timeToLive 0.1,
+// intensity 11) and its object's update (0x0061f360). For timeToLive
+// seconds after its delay it makes one object of its `template` (or of one
+// of alternateTemplate0..4: index floor(u (n + 1)), the main one past the
+// last) every 1 / intensity seconds (0x0061ef80: intensity x its curve over
+// the life, 1 unless scripted), each:
+//  - at the emitter plus relativePositionIn{Right,Up,Dof} along its axes,
+//    moved on by its velocity for its share of the tick;
+//  - turned about the emitter's forward by startRotation + zRotation
+//    rounded to zRotationSnap (radians, 0x005b1a70);
+//  - leaving at positionalSpeedIn{Right,Up,Dof} along the emitter's axes
+//    (plus the emitter's own velocity x emitterSpeedScale with
+//    addEmitterSpeed), spinning at rotationalSpeedIn{Dof,Up,Right}
+//    (the physics node's slot 0x6c), unless noPhysics.
+// A Particle template (class 0x947b) object is a debris piece (its object
+// 0x00621250 / update 0x00621480): it lives timeToLive (below 0: 0.5 s)
+// seconds, drawn at size x sizeModifier (the axes above 0), its alpha the
+// transparencyGraph at its age's share of the life (clamped, 0x00621210)
+// times 1 - Transparency, its gravity times gravityModifier and drag. The
+// exe moves it with its physics node (Mesh or RotationalPoint, colliding
+// with the world); the rewrite's piece is a point under gravity (Physics'
+// -14.73 x gravityModifier) and the 0.99-a-tick damping, bouncing off the
+// ground under it. Another template made by an emitter (an effect bundle,
+// a particle system) is started there instead.
+struct DebrisEmitterTemplate {
+	game::RandomDistribution delay, timeToLive, intensity;
+	game::RandomDistribution relativePosition[3]; // right, up, dof
+	game::RandomDistribution positionalSpeed[3];  // right, up, dof
+	game::RandomDistribution rotationalSpeed[3];  // dof, up, right (as the exe hands them on)
+	game::RandomDistribution startRotation, zRotation;
+	float zRotationSnap = 1;
+	bool addEmitterSpeed = false;
+	float emitterSpeedScale = 1;
+	bool noPhysics = false;
+	std::string objectTemplate;
+	std::vector<std::string> alternates;
+	static DebrisEmitterTemplate fromTemplate(const world::ObjectTemplate& t);
+};
+struct DebrisPieceTemplate {
+	std::string geometry;
+	int part = 0; // geometryPart
+	game::RandomDistribution timeToLive, size, transparency, gravityModifier, drag;
+	Graph transparencyGraph {0, 0, 0, 1};
+	Vec3 sizeModifier {1, 1, 1};
+	static DebrisPieceTemplate fromTemplate(const world::ObjectTemplate& t);
+};
+struct DebrisPiece {
+	const DebrisPieceTemplate* look = nullptr;
+	Vec3 position, velocity, spin; // spin: radians a second about the world's axes
+	Mat3 rotation;
+	float age = 0, life = 10, size = 1, transparency = 0, gravity = 1, drag = 0;
+	bool resting = false;
+	// What it is drawn with now.
+	float alpha() const;
+	Vec3 scale() const;
+};
+
 class EffectManager {
 public:
 	explicit EffectManager(const world::ObjectTemplateManager& templates, uint32_t seed = 0x759dc150);
@@ -542,6 +619,17 @@ public:
 		Vec3 position;
 	};
 	std::vector<StartedSound> takeSounds() { return std::exchange(m_startedSounds, {}); }
+	// Those started since `mark` (soundsStarted() before a spawn), taken.
+	size_t soundsStarted() const { return m_startedSounds.size(); }
+	std::vector<StartedSound> takeSoundsFrom(size_t mark)
+	{
+		std::vector<StartedSound> taken;
+		if (mark < m_startedSounds.size()) {
+			taken.assign(m_startedSounds.begin() + static_cast<std::ptrdiff_t>(mark), m_startedSounds.end());
+			m_startedSounds.resize(mark);
+		}
+		return taken;
+	}
 
 	size_t emitters() const { return m_emitters.size(); }
 
@@ -657,6 +745,12 @@ public:
 
 	// The emitters (checks).
 	const std::vector<std::unique_ptr<Emitter>>& emitterList() const { return m_emitters; }
+	// The debris pieces alive (DebrisPiece) and the debris emitters still
+	// emitting; at most kMaxDebris pieces (the oldest go first: a guard of
+	// the rewrite's, the exe's GSDynamicObjectsLimit is read and dropped).
+	const std::vector<DebrisPiece>& debris() const { return m_debris; }
+	size_t debrisEmitters() const { return m_debrisEmitters.size(); }
+	static constexpr size_t kMaxDebris = 384;
 
 private:
 	struct Anchor {
@@ -683,6 +777,21 @@ private:
 	};
 	void placeLight(LiveLight& light) const;
 	std::vector<LiveLight> m_lights;
+	struct LiveDebrisEmitter {
+		const DebrisEmitterTemplate* look = nullptr;
+		Vec3 position;
+		Mat3 rotation;
+		View view = View::Any;
+		int depth = 0;
+		float delay = 0, timeToLive = 0.1f, elapsed = 0, next = 0, intensity = 11;
+	};
+	std::vector<LiveDebrisEmitter> m_debrisEmitters;
+	std::vector<DebrisPiece> m_debris;
+	std::map<const world::ObjectTemplate*, std::unique_ptr<DebrisEmitterTemplate>> m_debrisEmitterTemplates;
+	std::map<const world::ObjectTemplate*, std::unique_ptr<DebrisPieceTemplate>> m_debrisPieceTemplates;
+	void startDebrisEmitter(const world::ObjectTemplate& t, const Vec3& position, const Mat3& rotation, int depth, View view);
+	void stepDebris(float seconds);
+	void emitDebris(LiveDebrisEmitter& emitter, float lead);
 	std::map<const world::ObjectTemplate*, DecalTemplate> m_decalTemplates;
 	std::vector<Decal> m_decals;
 	game::Random m_decalRandom {0x2d5c1e37};

@@ -53,6 +53,8 @@ public:
 	uint32_t id() const { return m_id; }
 	uint32_t flags() const { return m_flags; }
 	void setFlags(uint32_t flags) { m_flags = flags; }
+	// The network id the manager numbers it with once it is made (0x0070a700, slot 0x3c).
+	void setId(uint32_t id) { m_id = id; }
 
 	// "geometry": the mesh (a GeometryTemplate name) drawn for this template.
 	const std::string& geometry() const { return m_geometry; }

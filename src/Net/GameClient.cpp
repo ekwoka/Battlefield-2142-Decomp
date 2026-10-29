@@ -31,6 +31,11 @@ bool GameClient::connect(const std::string& host, uint16_t port, const GameClien
 	return true;
 }
 
+GameClient::~GameClient()
+{
+	disconnect();
+}
+
 void GameClient::disconnect()
 {
 	if (m_state == State::Connected || m_state == State::Connecting) {

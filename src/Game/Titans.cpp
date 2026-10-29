@@ -1426,6 +1426,7 @@ std::vector<GameWorld::SiloInfo> GameWorld::missileSilos() const
 		info.position = {object->position().x, object->position().y, object->position().z};
 		info.loaded = silo.loaded;
 		info.reloadLeft = silo.loaded ? 0 : silo.reloadLeft;
+		info.reloadTime = silo.reloadTime;
 		info.launched = silo.launched;
 		for (const auto& spawner : m_spawners) {
 			if (std::find(spawner->spawned().begin(), spawner->spawned().end(), silo.object) != spawner->spawned().end()) {

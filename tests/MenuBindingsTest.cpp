@@ -567,6 +567,21 @@ TEST(MenuBindings_Controls)
 	CHECK(shown(fire, true, false) == "Joy Button 5 (loc)");
 }
 
+// The audio page's radios (0x100108c0, 0x100109c0): the provider and the
+// sound quality by name, what the page set coming back.
+TEST(MenuBindings_AudioRadios)
+{
+	Fake fake;
+	NativeRegistry natives;
+	menu::MenuBindings bindings(natives, fake.services());
+	avm1::Interpreter vm;
+	const auto get = [&](const char* member) { return vm.toString(call(vm, natives, "dice.bf2.AudioSettings", member)); };
+	CHECK(get("getSelectedProvider") == "software" && get("getSelectedSoundQuality") == "Medium");
+	call(vm, natives, "dice.bf2.AudioSettings", "setProvider", {avm1::Value("Hardware")});
+	call(vm, natives, "dice.bf2.AudioSettings", "setSoundQuality", {avm1::Value("UltraHigh")});
+	CHECK(get("getSelectedProvider") == "hardware" && get("getSelectedSoundQuality") == "UltraHigh");
+}
+
 // SwiffHost's and MenuTeamManager's console objects (credits.con,
 // gameModes.con, menuTeams.con) and the credits roll's slots: 40 lines 20 px
 // apart from the stage's bottom, moving up at the speed (twips a second,

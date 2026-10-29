@@ -363,13 +363,20 @@ std::vector<std::pair<int, std::string>> GameAudio::autoRadio()
 		}
 		if (object->team() != watched.team) {
 			const int to = object->team(), from = watched.team;
-			// A silo's index (the HUD's slot: its control point, else its
-			// place among the silos) as SiloSyncEvent hands it.
+			// A silo's index, 1..5 as the voice table has them: its place
+			// among the silos ordered by control point id, the order the
+			// map numbers them in (the levels' ids run 202, 503..506).
 			int silo = 0;
 			const auto silos = m_round.missileSilos();
 			for (size_t i = 0; i < silos.size(); ++i) {
-				if (silos[i].object == it->first) {
-					silo = silos[i].controlPoint > 0 ? silos[i].controlPoint : static_cast<int>(i) + 1;
+				if (silos[i].object != it->first) {
+					continue;
+				}
+				silo = 1;
+				for (const auto& other : silos) {
+					if (other.controlPoint < silos[i].controlPoint) {
+						++silo;
+					}
 				}
 			}
 			const auto suffixed = [&](const std::string& message) {

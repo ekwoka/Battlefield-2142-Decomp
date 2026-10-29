@@ -25,6 +25,7 @@ struct SoldierInput {
 	float aimPitch = 0; // degrees, up positive
 	bool use = false;   // PIUse: enter or leave a vehicle (on press)
 	bool toggleFireRate = false; // c_PIToggleFireRate (input 46), held: the weapon's next fire mode on a press
+	bool reload = false; // c_PIReload (input 32), held: a new magazine on a press (the firearm's action 10)
 	int switchSeat = 0; // PIPosition1..8: move to that seat (1-based; on press)
 	int selectItem = 0; // PIWeaponSelect1..9: the weapon in that kit slot (on press)
 	bool jump = false;  // PIAction (input 9, c_PIAction: Space), held: jumps on landing

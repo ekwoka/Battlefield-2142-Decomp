@@ -553,6 +553,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.altFire = c.pressed(map, "c_PIAltFire", down);
 				input.use = c.pressed(map, "c_PIUse", down);
 				input.toggleFireRate = c.pressed(map, "c_PIToggleFireRate", down);
+				input.reload = c.pressed(map, "c_PIReload", down);
 				input.scoreboard = c.pressed(map, "c_GIShowScoreboard", down);
 				input.commanderScreen = c.pressed(map, "c_GILeader", down);
 				input.crouch = c.pressed(map, "c_PICrouch", down);
@@ -588,6 +589,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.fire = (shown.mouseButtons() & SDL_BUTTON_LMASK) != 0 && !pointer;
 				input.altFire = (shown.mouseButtons() & SDL_BUTTON_RMASK) != 0 && !pointer;
 				input.use = keys[SDL_SCANCODE_E];
+				input.reload = keys[SDL_SCANCODE_R];
 				input.scoreboard = keys[SDL_SCANCODE_TAB];
 				input.crouch = keys[SDL_SCANCODE_LCTRL];
 				input.lie = keys[SDL_SCANCODE_Z];
@@ -713,7 +715,10 @@ Window::~Window()
 	if (impl->window) {
 		SDL_DestroyWindow(impl->window);
 	}
-	SDL_Quit();
+	// Only the video SDL_Init started: SDL_Quit would also close the
+	// audio streams the voice chat's thread and the menu's movies still
+	// use (SDL_INIT_AUDIO is theirs, counted per subsystem).
+	SDL_QuitSubSystem(SDL_INIT_VIDEO);
 }
 
 std::unique_ptr<Window> Window::open(int width, int height)
@@ -809,7 +814,7 @@ int runViewer(const render::LevelSources& sources, const ViewerOptions& options,
 		}
 		const int result = screenshot(sources, options);
 		if (!window) {
-			SDL_Quit();
+			SDL_QuitSubSystem(SDL_INIT_VIDEO); // not the voice chat's audio (see ~Window)
 		}
 		return result;
 	}

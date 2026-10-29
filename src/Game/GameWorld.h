@@ -23,6 +23,7 @@
 #include "Animation/AnimationSystem.h"
 #include "Animation/FirstPerson.h"
 #include "Animation/Ik.h"
+#include "AmbientTriggers.h"
 #include "Effects/Effects.h"
 #include "Physics/RigidBody.h"
 #include "Random.h"
@@ -335,13 +336,14 @@ public:
 		bool squadLeader = false;
 		bool commander = false;
 		bool cloaked = false; // active camouflage on
-		int rank = 0; // the stats' rank (player slot 0x1a8 +0x20; setPlayerRank): the name tags' ICRank
+		int rank = -1; // the stats' rank (player slot 0x1a8 +0x20; setPlayerRank, -1 unset): the name tags' ICRank
 		// The soldier's own EMP level (its armour's, 0x00652a00 through the
 		// player's 0x005921b0 on foot), 0 none.
 		int empLevel = 0;
 		// Spawned on the squad leader where only a prone soldier fits (the
 		// spawn point's +0x18a): the soldier starts lying down.
 		bool spawnedProne = false;
+		SoldierPose pose = SoldierPose::Stand; // on foot (the input's)
 		float battery = -1; // the ability battery, 0..1 (-1 without a kit)
 		physics::Vec3 position;  // the soldier's feet
 		float yaw = 0;           // degrees, 0 facing +z
@@ -507,6 +509,21 @@ public:
 		float maxDistance = 0; // target.maxDistance of the weapon (0: no lock-on weapon)
 	};
 	WeaponLockInfo weaponLock(int player) const;
+	// The lock-on feedback (the target component's update 0x005e1b30 and
+	// its fire handler 0x005e1ee0), for the HUD: a lock taken (Acquired,
+	// 35 ticks after the target was chosen, once locked), the locked
+	// target gone (Lost), a round fired at a target (MissileAway). The
+	// original voices them as radio too: "target_aquired" / "target_lost"
+	// to the local player (game slot 0x58, channel 2) for TSLaserGuided
+	// only, "missile_away" on TCPlayer to the target's player when the
+	// local player fires (slot 0x50). At most the last 64 kept.
+	struct LockEvent {
+		enum Kind { Acquired, Lost, MissileAway } kind = Acquired;
+		int player = -1;     // whose weapon
+		uint32_t target = 0;
+		int system = 0;      // as Lock::system
+	};
+	std::vector<LockEvent> takeLockEvents() { return std::exchange(m_lockEvents, {}); }
 	bool unlockAllByDefault = false; // players joining from now on have everything
 	// The local player's unlocks (its soldier's chosen ItemContainers,
 	// Stats/Stats.h), given when spawnPlayer adds the player.
@@ -884,7 +901,7 @@ public:
 	int commanderOffer(int team) const { return team == 1 || team == 2 ? m_commanders[team].candidate : -1; }
 	void answerCommanderOffer(int player, bool accept);
 	// The player's rank (the stats' rank, player slot 0x1a8 +0x20) the
-	// applicants are ranked by; 0 until set.
+	// applicants are ranked by; -1 until set (pmgr_setScore "rank").
 	void setPlayerRank(int player, int rank);
 	// The commander's tools (Commander.orbitalStrike, .artillery, .uav,
 	// .satellite, .supplies). All but the supply drop need the team's asset
@@ -1089,6 +1106,7 @@ public:
 		physics::Vec3 position;
 		bool loaded = false;
 		float reloadLeft = 0;   // seconds until it is loaded
+		float reloadTime = 120; // ammo.reloadTime (the map's reload wipe, 0x0078a990)
 		int launched = 0;       // missiles fired this round
 	};
 	std::vector<SiloInfo> missileSilos() const;
@@ -1129,7 +1147,17 @@ public:
 		physics::Vec3 a, b;
 		float radius;
 		uint32_t material;
+		int node = -1; // the bone's skeleton node (-1: no skeleton)
 	};
+	// The 3P hit reaction a round's hit on a living soldier plays (the
+	// soldier's 0x005eda90, from the projectile's first hit, 0x005e7520:
+	// the soldier still above 0 hit points): by the hit bone's node of
+	// 3p_setup.ske (0xf left_shoulder / 0x11 left_low_arm: Left, 0x1f /
+	// 0x21 the right ones: Right, 0x2f head: Head, else Body) and whether
+	// the round flew along the soldier's facing (dot >= 0: from the Back)
+	// or against it (Front): "hitBackLeft" ... "hitFrontBody", the
+	// RandomTriggers of AnimationSystem3p.inc. Not in a vehicle.
+	static const char* hitReaction(int node, const physics::Vec3& direction, float soldierYawDegrees);
 	std::vector<Capsule> soldierCapsules(uint32_t soldier) const;
 	// A downed soldier's or a body's ragdoll (null for others; docs/engine.md, "Ragdolls").
 	const anim::RagDoll* ragDoll(uint32_t soldier) const;
@@ -1176,6 +1204,7 @@ private:
 			float yaw = 0, pitch = 0; // the bundles' rotation, degrees (pitch up positive)
 			DeviationBuildUp deviation; // its SimpleDeviationComp's state (SeatLayout::deviation)
 			float aiDeviation = 0;      // the component's +0x28 (setAiDeviation)
+			bool manned = false;        // someone in its seat last tick (stepUnmannedGuns)
 		};
 		std::vector<Gun> guns;
 		// Each seat's camera angles and speeds (SeatLayout::camera), degrees.
@@ -1367,6 +1396,24 @@ private:
 	// A vehicle's team is its first occupant's (0x005c9500), its own when
 	// empty: each tick from the seats.
 	void stepVehicleTeams();
+	// The levels' Trigger and AmbientEffectArea objects (AmbientTriggers.h,
+	// Ambience.cpp): linked at the round's start, tested each tick, set off
+	// by shots (event 2) and explosions (event 8) too.
+	AmbientTriggers m_ambience;
+	std::map<int, physics::Vec3> m_ambiencePlaces; // the players' last places (their speed)
+	uint32_t m_ambienceTag = 0;
+	void linkAmbience();
+	void stepAmbience(float seconds);
+	void ambientShot(const Player& player);
+	void ambientExplosion(const physics::Vec3& at);
+	// The lock's transitions after stepWeaponLock (LockFeedback.cpp).
+	void lockFeedback(Player& player, uint32_t targetBefore, int stateBefore);
+	void missileAway(const Player& player);
+	void lockEvent(LockEvent::Kind kind, const Player& player, uint32_t target);
+	void playHitReaction(Player& victim, int node, const physics::Vec3& direction);
+	// The seats' guns nobody uses (ammo.reloadWithoutPlayer; TemplateBehaviours.cpp).
+	void stepUnmannedGuns(float seconds);
+	std::vector<LockEvent> m_lockEvents;
 	// The combat areas' rules each tick (0x004bbf60, 0x004bed00).
 	void stepCombatAreas(float seconds);
 	bool insideCombatArea(const Player& player) const;
@@ -1497,7 +1544,10 @@ private:
 		std::string name;
 		bool ai = false;
 		bool alive = false;
-		int rank = 0; // setPlayerRank (the commander's applicants)
+		// The stats' rank (stats +0x20, -1 from 0x005a5fc0 until the scripts
+		// set it: stats.py gives 0 on PlayerConnect, rank.py the stats
+		// server's "rnk"); setPlayerRank.
+		int rank = -1;
 		float respawnIn = 0;
 		int kills = 0, deaths = 0, teamKills = 0;
 		int killer = -1; // who killed it last (the player's slot 0x338: the death camera's other object)
@@ -1550,6 +1600,7 @@ private:
 		float aiDeviation = 0; // the deviation component's +0x44 (setAiDeviation)
 		uint32_t gunShots = 0;  // the seats' guns' rounds (PlayerInfo::gunShots)
 		bool toggleFireWas = false; // c_PIToggleFireRate last tick
+		bool reloadWas = false;     // c_PIReload last tick
 		GunSway sway;
 		std::string feelFor;
 		bool zoomed = false;
@@ -1565,6 +1616,9 @@ private:
 			int state = 0;
 			float held = 0, lost = 0;
 			float maxDistance = 0;
+			int system = 0;        // target.targetSystem: 1 TSHeatSeeking, 2 TSLaserGuided
+			double chosenAt = 0;   // the component's +0x4c: when the target was taken
+			bool announce = false; // +0x44: locked, "target_aquired" not said yet
 		} lock;
 		double diedAt = 0;          // soldier +0x290: the death's time
 		uint32_t object = 0;
@@ -1752,6 +1806,7 @@ private:
 		int attacker = -1, bool splash = false); // the attacking player; an explosion's splash
 	std::vector<std::unique_ptr<Player>> m_players; // by id
 	Player* m_player = nullptr; // the local player
+	bool m_addingLocal = false; // spawnPlayer is adding it (addPlayer sets m_player before PlayerConnect)
 	SoldierInput m_playerInput;
 	float m_spawnTime = 15;
 	Player* findPlayer(int id) const;

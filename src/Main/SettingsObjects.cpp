@@ -83,7 +83,7 @@ const Field kAudio[] = {
 	{"AudioSettings.voipCaptureThreshold", "f", "0.5", false, true},
 	{"AudioSettings.voipBoostEnabled", "b", "0", false, true},
 	{"AudioSettings.voipUsePushToTalk", "b", "1", false, true},
-	{"AudioSettings.provider", "q", "Software", false, true},
+	{"AudioSettings.provider", "q", "software", false, true}, // 0x004960a0
 	{"AudioSettings.soundQuality", "q", "Medium", false, true},
 	{"AudioSettings.effectsVolume", "f", "1", false, true},
 	{"AudioSettings.musicVolume", "f", "1", false, true},

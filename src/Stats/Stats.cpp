@@ -136,6 +136,20 @@ std::vector<int> unlockIds(bool booster)
 
 int Soldier::rank() const { return m_ranks.rankFor(m_stats.experience); }
 
+int64_t localProfileId(const std::string& soldier)
+{
+	uint32_t h = 2166136261u;
+	for (char c : soldier) {
+		h = (h ^ static_cast<unsigned char>(c)) * 16777619u;
+	}
+	return 0x10000000 | (h & 0x0fffffff);
+}
+
+std::map<std::string, std::string> playerInfoKeys(const SoldierStats& stats, const RankTable& ranks)
+{
+	return {{"rnk", std::to_string(ranks.rankFor(stats.experience))}};
+}
+
 int Soldier::nextRankPoints() const { return m_ranks.points(rank() + 1); }
 
 float Soldier::rankProgress() const { return m_ranks.progress(m_stats.experience); }

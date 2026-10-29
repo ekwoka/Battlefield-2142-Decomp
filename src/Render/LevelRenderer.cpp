@@ -1703,6 +1703,58 @@ void LevelRenderer::syncObjects()
 			}
 		}
 	}
+	syncDebris();
+}
+
+void LevelRenderer::syncDebris()
+{
+	m_instances.erase(std::remove_if(m_instances.begin(), m_instances.end(), [](const Instance& i) { return i.debris; }),
+		m_instances.end());
+	if (!m_sources || !m_sources->effects || m_sources->effects->debris().empty()) {
+		return;
+	}
+	// A part not shown collapses onto the piece's origin.
+	Mat4 collapsed;
+	collapsed.m = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+	bool uploaded = false;
+	for (const effects::DebrisPiece& piece : m_sources->effects->debris()) {
+		const float alpha = piece.alpha();
+		if (alpha <= 0.0f) {
+			continue;
+		}
+		const size_t before = m_stats.meshes;
+		const GpuMesh* gpuMesh = mesh(*m_sources, piece.look->geometry);
+		uploaded = uploaded || m_stats.meshes != before;
+		if (!gpuMesh) {
+			continue;
+		}
+		Instance instance {gpuMesh, Mat4 {}, 0, Mat4 {}, nullptr, {1, 1, 0, 0}, {}, nullptr, nullptr};
+		const effects::Vec3 scale = piece.scale();
+		const float axes[3] = {scale.x, scale.y, scale.z};
+		for (int row = 0; row < 3; ++row) {
+			const effects::Vec3& r = piece.rotation.rows[static_cast<size_t>(row)];
+			instance.world.at(row, 0) = r.x * axes[row];
+			instance.world.at(row, 1) = r.y * axes[row];
+			instance.world.at(row, 2) = r.z * axes[row];
+		}
+		instance.world.at(3, 0) = piece.position.x;
+		instance.world.at(3, 1) = piece.position.y;
+		instance.world.at(3, 2) = piece.position.z;
+		instance.local = instance.world;
+		instance.geometry = piece.look->geometry;
+		instance.fade = std::min(alpha, 1.0f);
+		instance.debris = true;
+		if (gpuMesh->bundled) {
+			instance.parts.assign(kMaxMeshParts, collapsed);
+			if (piece.look->part >= 0 && piece.look->part < kMaxMeshParts) {
+				instance.parts[static_cast<size_t>(piece.look->part)] = Mat4 {};
+			}
+		}
+		m_instances.push_back(std::move(instance));
+	}
+	if (uploaded) {
+		m_gpu.flushUploads();
+	}
 }
 
 // The HUD's quads for this frame: two triangles each, rotated about their
@@ -1762,19 +1814,24 @@ void LevelRenderer::buildOverlay()
 		if (polygon.size() < 3) {
 			continue;
 		}
+		// A wedge (HudQuad::sweep): the polygon cut to each quarter turn.
+		const auto pieces = q.sweep >= 0 ? hud::sweepPieces(polygon, (q.x0 + q.x1) * 0.5f, (q.y0 + q.y1) * 0.5f, q.sweep)
+										 : std::vector<std::vector<std::array<float, 4>>> {polygon};
 		const uint32_t first = static_cast<uint32_t>(vertices.size());
-		for (size_t i = 1; i + 1 < polygon.size(); ++i) {
-			for (const auto& corner : {polygon[0], polygon[i], polygon[i + 1]}) {
-				Vertex v {};
-				v.position[0] = corner[0];
-				v.position[1] = corner[1];
-				v.texCoord[0] = corner[2];
-				v.texCoord[1] = corner[3];
-				v.normal[0] = q.color[0];
-				v.normal[1] = q.color[1];
-				v.normal[2] = q.color[2];
-				v.weight = q.color[3];
-				vertices.push_back(v);
+		for (const auto& piece : pieces) {
+			for (size_t i = 1; i + 1 < piece.size(); ++i) {
+				for (const auto& corner : {piece[0], piece[i], piece[i + 1]}) {
+					Vertex v {};
+					v.position[0] = corner[0];
+					v.position[1] = corner[1];
+					v.texCoord[0] = corner[2];
+					v.texCoord[1] = corner[3];
+					v.normal[0] = q.color[0];
+					v.normal[1] = q.color[1];
+					v.normal[2] = q.color[2];
+					v.weight = q.color[3];
+					vertices.push_back(v);
+				}
 			}
 		}
 		const uint32_t count = static_cast<uint32_t>(vertices.size()) - first;

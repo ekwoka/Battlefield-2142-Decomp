@@ -1501,6 +1501,7 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 		}
 		HudQuad q {kTextureRoot + slashes(marker.texture), x0, y0, x0 + side, y0 + tall, 0, 0, 1, 1,
 			{marker.color[0], marker.color[1], marker.color[2], marker.color[3] * alpha}, marker.yaw};
+		q.sweep = marker.sweep;
 		if (!clipTo(q, nx, ny, nx + nw, ny + nh)) {
 			continue;
 		}
@@ -1510,6 +1511,48 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 				marker.id});
 		}
 	}
+}
+
+std::vector<std::vector<std::array<float, 4>>> sweepPieces(
+	const std::vector<std::array<float, 4>>& polygon, float cx, float cy, float sweep)
+{
+	constexpr float kTurn = 6.2831853f;
+	if (sweep >= kTurn) {
+		return {polygon};
+	}
+	// Keeps the side where cross(d, p - centre) x sign >= 0, d the
+	// direction at angle a (clockwise from up: sin a, -cos a).
+	const auto cut = [cx, cy](const std::vector<std::array<float, 4>>& in, float a, float sign) {
+		const float dx = std::sin(a), dy = -std::cos(a);
+		const auto side = [&](const std::array<float, 4>& p) { return sign * (dx * (p[1] - cy) - dy * (p[0] - cx)); };
+		std::vector<std::array<float, 4>> kept;
+		for (size_t i = 0; i < in.size(); ++i) {
+			const auto& a0 = in[i];
+			const auto& b0 = in[(i + 1) % in.size()];
+			const float sa = side(a0), sb = side(b0);
+			if (sa >= 0) {
+				kept.push_back(a0);
+			}
+			if ((sa >= 0) != (sb >= 0)) {
+				const float t = sa / (sa - sb);
+				std::array<float, 4> p;
+				for (int k = 0; k < 4; ++k) {
+					p[k] = a0[k] + (b0[k] - a0[k]) * t;
+				}
+				kept.push_back(p);
+			}
+		}
+		return kept;
+	};
+	std::vector<std::vector<std::array<float, 4>>> pieces;
+	for (float from = 0; from < sweep; from += kTurn / 4) {
+		const float to = std::min(sweep, from + kTurn / 4);
+		auto piece = cut(cut(polygon, from, 1), to, -1);
+		if (piece.size() >= 3) {
+			pieces.push_back(std::move(piece));
+		}
+	}
+	return pieces;
 }
 
 void registerHudConsoleMethods(Console& console, HudManager& hud)

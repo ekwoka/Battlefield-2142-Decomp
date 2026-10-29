@@ -1898,6 +1898,54 @@ TEST(GameWorld_WeaponLock)
 	CHECK(lock.target == 0 && lock.state == 0);
 }
 
+// The lock's feedback (0x005e1b30): a TSLaserGuided lock is announced
+// once locked, 35 ticks after the target was taken ("target_aquired" to
+// the local player), and its destroyed target is "target_lost".
+TEST(GameWorld_LockFeedback)
+{
+	Range range;
+	range.templates.registerType(8, "SimpleObject");
+	world::ObjectTemplate* launcher = range.templates.find("eu_ar_rifle");
+	launcher->settings()["target.targetSystem"] = "TSLaserGuided";
+	launcher->settings()["target.maxDistance"] = "450";
+	launcher->settings()["target.lockAngle"] = "10";
+	launcher->settings()["target.lockDelay"] = "0.5";
+	launcher->settings()["target.loseLockDelay"] = "0.2";
+	world::ObjectTemplate* tank = range.templates.create("SimpleObject", "painted");
+	tank->children().push_back({"LaserTarget", {}, {}});
+	range.templates.create("SimpleObject", "LaserTarget")->settings()["targetType"] = "TTLaser";
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	game::GameWorld::PlayerInfo me;
+	range.world->playerInfo(range.world->localPlayer(), me);
+	world::Object* enemy = range.objects.create(tank, {me.position.x, me.position.y + 1.6f, me.position.z + 60});
+	enemy->setTeam(1);
+	range.world->takeRadioHeard();
+	std::vector<game::GameWorld::LockEvent> events;
+	std::vector<std::string> heard;
+	const auto run = [&](int ticks) {
+		for (int i = 0; i < ticks; ++i) {
+			range.world->tick(1 / 30.0f);
+			for (const auto& e : range.world->takeLockEvents()) {
+				events.push_back(e);
+			}
+			for (const auto& h : range.world->takeRadioHeard()) {
+				heard.push_back(h.voice);
+			}
+		}
+	};
+	run(20); // locked after 0.5 s, not yet said
+	CHECK(range.world->weaponLock(range.world->localPlayer()).state == 2);
+	CHECK(events.empty());
+	run(20); // 35 ticks after the target was taken
+	CHECK(events.size() == 1 && events[0].kind == game::GameWorld::LockEvent::Acquired && events[0].target == enemy->id()
+		&& events[0].system == 2);
+	CHECK(heard.size() == 1 && heard[0] == "target_aquired");
+	enemy->setDestroyed(true);
+	run(15);
+	CHECK(events.size() == 2 && events[1].kind == game::GameWorld::LockEvent::Lost);
+	CHECK(heard.size() == 2 && heard[1] == "target_lost");
+}
+
 // The armour's effect levels (0x00654730) and the spectacular hit
 // (0x006525f0 with the generator 0x0042b230).
 TEST(GameWorld_ArmorEffectLevels)

@@ -138,6 +138,23 @@ public:
 	// pers_plrGiveFieldUnlock (0x00566850: "no such player" unless valid;
 	// the game logic's slot 0x68 with the player).
 	virtual bool giveFieldUnlock(int player) { (void)player; return false; }
+	// pmgr_p_get("profileid"): the player's account (player +0x328, slot
+	// 0x324), 0 without one.
+	virtual int64_t profileId(int player) { (void)player; return 0; }
+	// pers_plrRequestStats (0x00566930): asks the stats server for the
+	// record of a player (below 0x100, through its profile id) or of a
+	// profile id; true when asked. The answer comes later as the
+	// PlayerStatsResponse event.
+	virtual bool requestStats(int64_t playerOrProfile) { (void)playerOrProfile; return false; }
+	// pers_getStatsKeyVal (0x00566b90): a value of a profile's downloaded
+	// record; false when none was downloaded or it has no such key.
+	virtual bool statsKeyValue(const std::string& key, int64_t profileId, std::string& value)
+	{
+		(void)key;
+		(void)profileId;
+		(void)value;
+		return false;
+	}
 	// gl_sendEndOfRoundData (0x00568930): the end-of-round screen's text.
 	virtual void endOfRoundData(const std::string& text) { (void)text; }
 	// Remote administration (a server's; Main/ServerAdmin.h): rcon_invoke

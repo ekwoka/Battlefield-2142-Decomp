@@ -120,8 +120,21 @@ float playerTagAlpha(const Settings& s, const PlayerTagInput& in, Fade& fade, fl
 	} else {
 		fade.out(seconds, 1.0f);
 	}
-	const float far = d * 1.0526f; // the fog factor (0x100f09b0) is left out
-	return std::min(fade.alpha, clamp01(1 - (far - 200) / 100));
+	// The distance over 0.95, the cull range's last third and the fog
+	// (0x100f09b0) cap the alpha.
+	const float far = d * 1.0526316f;
+	return std::min(fade.alpha, tagFog(s.fog, far) * clamp01(1 - (far - most * 2 / 3) / (most / 3)));
+}
+
+float tagFog(const std::array<float, 4>& f, float distance)
+{
+	const float start = f[0], end = f[1];
+	if (end <= start) {
+		return 1;
+	}
+	const float r0 = 1 / (end - start), r1 = -f[2] * r0, r2 = -start * r0, r3 = end * r0;
+	const float far = distance * r0 + r2;
+	return clamp01(std::max(r3, distance * r1 + r3) - far * far * far);
 }
 
 Colour playerTagColour(const PlayerTagInput& in)
@@ -227,6 +240,70 @@ void TagFont::write(const std::string& text, float x, float y, const float colou
 		out.push_back(q);
 		x += w + static_cast<float>(between);
 	}
+}
+
+int orderIconId(bool fromCommander, int kind)
+{
+	// 0x100f4620: 0x39 + the kind for the squad leader's, 0x3f + it for
+	// the commander's; the kinds are the map's (4..7: frames 0..3 of the
+	// six). A comm-rose order (0..3) is taken as its map kind.
+	const int mapKind = kind < 4 ? kind + 4 : kind;
+	return (fromCommander ? 0x3f : 0x39) + mapKind;
+}
+
+int requestIconId(int kind, bool selected)
+{
+	// 0x100f44d0: +0x60 the icon, +0x58 the selected one.
+	switch (kind) {
+	case 1: return selected ? 0x7d : 0x79;
+	case 2: return selected ? 0x7f : 0x7b;
+	case 3: return selected ? 0x80 : 0x7c;
+	default: return selected ? 0x7e : 0x7a;
+	}
+}
+
+int vehicleIconId(int type, int category, bool usePlayerIcon)
+{
+	switch (type) {
+	case 0: case 1: return 0x5f;
+	case 4: case 0x10: case 0x12: case 0x13: return 0x5d;
+	case 5: return 0x5c;
+	case 6: case 7: case 8: case 0x11: return 0x61;
+	case 9: return 0x64;
+	case 10: return 0x65;
+	case 0xb: case 0xc: case 0xd: case 0xe: case 0x16: return 0x60;
+	case 0xf: case 0x19: case 0x1a: return 0x5a;
+	case 0x14: return 0x66;
+	case 0x15: return 0x5e;
+	case 0x17: return 0x62;
+	case 0x18: return 0x63;
+	default: break;
+	}
+	if (usePlayerIcon) {
+		return 0x5a;
+	}
+	switch (category) {
+	case 0: return 0x5b;
+	case 1: return 0x60;
+	case 2: return 0x61;
+	case 3: return 0x62;
+	default: return 0x5a;
+	}
+}
+
+int vehicleTypeOf(const std::string& name)
+{
+	static const char* const kNames[] = {"VTHeavyTank", "VTLightTank", "VTArtillery", "VTOrbitalStrike", "VTApc",
+		"VTScoutCar", "VTFighter", "VTDiveBomber", "VTBomber", "VTAAGun", "VTStationaryMG", "VTDestroyer",
+		"VTBattleship", "VTCarrier", "VTSubmarine", "VTLcvp", "VTNoVehicleType", "VTLevelBomber", "VTArmoredCar",
+		"VTTankHunter", "VTATGun", "VTAA", "VTBoat", "VTHelicopterAttack", "VTHelicopterTransport", "VTSniper",
+		"VTInfantry"};
+	for (int i = 0; i < 0x1b; ++i) {
+		if (name == kNames[i]) {
+			return i;
+		}
+	}
+	return name.empty() ? 0x1b : std::atoi(name.c_str());
 }
 
 int playerIconId(bool squadLeader, int squad, bool commander)
@@ -462,6 +539,9 @@ const Nametags::TagTemplate& Nametags::tagTemplate(const world::ObjectTemplate* 
 		if (const std::string* offset = setting(t, "Nametag.3dMapIconOffset")) {
 			std::sscanf(offset->c_str(), "%f/%f/%f", &tt.offset[0], &tt.offset[1], &tt.offset[2]);
 		}
+		const std::string* type = setting(t, "setVehicleType");
+		tt.vehicleIcon = vehicleIconId(vehicleTypeOf(type ? *type : std::string()), game::GameWorld::vehicleCategory(*t),
+			flag("vehicleHud.usePlayerIcon", false));
 	}
 	return m_templates.emplace(t, tt).first->second;
 }
@@ -547,10 +627,25 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			return true;
 		}
 		// The soldier's origin taken 1 m over its feet (the original's
-		// soldier is placed by its body); pose 1 (standing) adds 0.6.
-		const float k = 0.6f + std::min(distance * 0.6f * 0.05f, 3.0f);
+		// soldier is placed by its body). By the soldier's pose (its slot
+		// 0x3c: 1 standing, 2 lying, 3 crouched, as the animation's
+		// 0x008b9840 has 2 for prone) the text sits 0.6 / 0.3 / 0.7 m over
+		// it, plus min(d x that x 0.05, 3); the icon 0.6 / 1.2 / 1.2 m under
+		// it, times 30 / d past 30 m. Other poses (swimming): 1 m and none.
+		float name = 0.6f, under = -0.6f;
+		if (p.pose == game::SoldierPose::Prone) {
+			name = 0.3f;
+			under = -1.2f;
+		} else if (p.pose == game::SoldierPose::Crouch) {
+			name = 0.7f;
+			under = -1.2f;
+		} else if (p.pose == game::SoldierPose::Swim) {
+			name = 1.0f;
+			under = 0;
+		}
+		const float k = name + std::min(distance * name * 0.05f, 3.0f);
 		at = {p.position.x, p.position.y + 1.0f + k, p.position.z};
-		const float below = -0.6f * (distance > 30 ? 30 / distance : 1.0f);
+		const float below = under * (distance > 30 ? 30 / distance : 1.0f);
 		icon = {p.position.x, p.position.y + 1.0f + below, p.position.z};
 		return true;
 	};
@@ -754,6 +849,51 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		drawn.push_back({distance, {iconQuad(*icon, x, y, c)}});
 	}
 
+	// The squad's orders (TTOrder: the exe's order object 0x005b8b20 hands
+	// the manager its point, slot 0x2c → 0x100f4620): ICSquadOrder 0x3d for
+	// the squad leader's, ICCommanderOrder 0x43 for the commander's, its
+	// frame the order's kind (0x39 / 0x3f + the map kind 4..7), at the
+	// point 1.5 m up, white (+0x5c 0), with "[d m]" (flags 0x4079:
+	// showDistance, glued to the edge with the tracker), faded out to 1200 m
+	// (DAT_101f67b4) as the objects' icons. Only the local player's squad
+	// has them.
+	if (me.squad != 0 && m_icons) {
+		const game::GameWorld::SquadOrder* orders[] = {world.squadLeaderOrder(me.team, me.squad), world.squadOrder(me.team, me.squad)};
+		for (const game::GameWorld::SquadOrder* order : orders) {
+			if (!order || order->type == game::GameWorld::OrderType::None) {
+				continue;
+			}
+			const int id = orderIconId(order->fromCommander, static_cast<int>(order->type));
+			const IconRegistry::Icon* icon = m_icons->find(id);
+			if (!icon) {
+				continue;
+			}
+			const std::array<float, 3> at {order->position.x, order->position.y + 1.5f, order->position.z};
+			const float dx = at[0] - eye.x, dy = at[1] - eye.y, dz = at[2] - eye.z;
+			const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+			const float alpha = clamp01(1 - distance / kOrderDistance);
+			float x = 0, y = 0;
+			if (alpha <= 0.01f || !project(view, at, x, y, true, m_settings.circleRadius)) {
+				continue;
+			}
+			float c[4];
+			std::copy(kColours[Neutral], kColours[Neutral] + 4, c);
+			c[3] = alpha;
+			Drawn d {distance, {iconQuad(*icon, x, y, c)}};
+			char text[32];
+			std::snprintf(text, sizeof(text), "[%i m]", static_cast<int>(std::lround(distance)));
+			m_font.write(text, std::round(x - m_font.width(text) / 2), std::round(y + icon->height / 2), c, d.quads);
+			drawn.push_back(std::move(d));
+		}
+	}
+	// The commander's view of the squad leaders' requests (TTRequest:
+	// 0x004c5720 → slot 0x24, 0x100f44d0, only for the local commander):
+	// ICObjectOrbitalBombardmentRequestOrder 0x7a for kind 0, the orbital
+	// strike's 0x79 for 1, the UAV's 0x7b for 2, the supply drop's 0x7c for
+	// 3, selectable (0x100000: their Selected icons 0x7e / 0x7d / 0x7f /
+	// 0x80). The rewrite's squad leaders send no requests (the request
+	// rose's lines go only to the radio), so none is drawn.
+
 	// The players' tags.
 	std::map<int, Tag> seen;
 	for (const auto& p : players) {
@@ -913,7 +1053,13 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		// location arrow (Menu/Nametag/loactionArrow.dds, 0x10168d90:
 		// outwards at 1.05 the edge, alpha 0.5).
 		if (in.friendly && m_icons) {
-			const int own = playerIconId(p.squadLeader, p.squad, p.commander);
+			int own = playerIconId(p.squadLeader, p.squad, p.commander);
+			if (own == 0x5a && p.vehicle) {
+				// Aboard, the vehicle's own icon (0x100ee590 by its root's type).
+				if (const world::Object* v = objects.find(p.vehicle)) {
+					own = tagTemplate(v->objectTemplate()).vehicleIcon;
+				}
+			}
 			int overlay = calling ? tag.callIcon : -1;
 			if (overlay < 0) {
 				overlay = helperIcon(m_calls, kitAbilities(kitTypeOf(p.kit)));

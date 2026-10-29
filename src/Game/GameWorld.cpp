@@ -418,6 +418,7 @@ void GameWorld::startRound()
 	}
 	m_state = RoundState::Playing;
 	buildStaticCollision();
+	linkAmbience();
 }
 
 void GameWorld::buildStaticCollision()
@@ -614,12 +615,14 @@ void GameWorld::tick(float seconds)
 	stepAbilities(seconds);
 	stepCommander(seconds);
 	stepVehicleDamage(seconds);
+	stepUnmannedGuns(seconds);
 	followArmorEffects();
 	stepVehicleTeams();
 	stepCombatAreas(seconds);
 	stepProjectiles(seconds);
 	placeTracers();
 	stepControlPoints(seconds);
+	stepAmbience(seconds);
 	m_effects.update(seconds);
 }
 
@@ -1620,6 +1623,8 @@ void GameWorld::shockDowned(Player& victim, const ProjectileSettings& shock, flo
 // A round leaves from the soldier's eyes along the aim.
 void GameWorld::fire(const Player& player, float aimPitch)
 {
+	ambientShot(player); // the triggers' event 2
+	missileAway(player);  // a locked round's "missile_away" (0x005e1ee0)
 	const physics::SoldierBody& body = player.body;
 	const float look = lookYaw(player);
 	const float yaw = look * 3.14159265f / 180.0f;
@@ -1791,6 +1796,7 @@ void GameWorld::explode(const physics::Vec3& at, const ProjectileSettings& setti
 	if (!settings.endEffect.empty()) {
 		m_effects.spawn(settings.endEffect, at, physics::Mat3 {});
 	}
+	ambientExplosion(at); // the triggers' event 8 (0x005a6e70)
 	if (settings.explosionMaterial < 0) {
 		return;
 	}
@@ -2272,7 +2278,7 @@ std::vector<GameWorld::Capsule> GameWorld::soldierCapsules(uint32_t soldier) con
 		const physics::Vec3 start {bone.offset.x, bone.offset.z, bone.length >= 0 ? bone.offset.y : -bone.offset.y};
 		const physics::Vec3 a = transformPoint(m, start);
 		const physics::Vec3 b = transformPoint(m, start + physics::Vec3 {0, -bone.length, 0});
-		capsules.push_back({modelToWorld(*object, a), modelToWorld(*object, b), bone.radius, bone.material});
+		capsules.push_back({modelToWorld(*object, a), modelToWorld(*object, b), bone.radius, bone.material, bone.node});
 	}
 	return capsules;
 }
@@ -2292,9 +2298,10 @@ void GameWorld::stepProjectiles(float seconds)
 		} else {
 			moveProjectile(p, seconds);
 		}
-		// Out of time: a fused projectile goes off where it is.
+		// Out of time: a fused projectile goes off where it is (with
+		// hasOnTimeEffect; without, it is only removed, 0x005b62a0).
 		if (!p.alive) {
-			if (p.settings && p.settings->explosionRadius > 0 && !p.settings->remote) {
+			if (p.settings && p.settings->explosionRadius > 0 && !p.settings->remote && p.settings->onTimeEffect) {
 				explode(p.position, *p.settings, p.player, p.yaw);
 			}
 			continue;
@@ -2327,6 +2334,8 @@ void GameWorld::stepProjectiles(float seconds)
 		float best = 2.0f;
 		physics::CollisionWorld::Hit hit {};
 		uint32_t hitObject = 0;
+		uint32_t hitSoldier = 0; // a soldier's capsule hit, and its bone's node
+		int hitNode = -1;
 		physics::CollisionWorld::Hit candidate {};
 		const Body* hitBody = nullptr;
 		if (m_projectileCollision.raycast(from, to, candidate) && candidate.fraction < best) {
@@ -2403,6 +2412,8 @@ void GameWorld::stepProjectiles(float seconds)
 					out = length * length > 1e-5f ? out * (1.0f / length) : physics::Vec3 {0, 1, 0};
 					hit = {t, at, out, capsule.material, target.object};
 					hitObject = target.object;
+					hitSoldier = target.object;
+					hitNode = capsule.node;
 					hitBody = nullptr;
 				}
 				break; // the first capsule hit
@@ -2547,6 +2558,9 @@ void GameWorld::stepProjectiles(float seconds)
 					shockDowned(*downed, *p.settings, amount, hit.material, p.player);
 				} else {
 					damage(hitObject, amount, static_cast<uint32_t>(p.settings->material), hit.material, p.player);
+					if (Player* victim = hitObject == hitSoldier ? soldierPlayer(hitObject) : nullptr) {
+						playHitReaction(*victim, hitNode, p.velocity);
+					}
 				}
 			}
 			m_impacts.push_back({hit.point, hit.normal, hitObject, hit.material, amount});
@@ -2658,6 +2672,9 @@ int GameWorld::addPlayer(const std::string& name, int team, bool ai)
 	} else {
 		m_players.push_back(std::move(player));
 	}
+	if (m_addingLocal) {
+		m_player = m_players[slot].get(); // the scripts' PlayerConnect sees the local player as such
+	}
 	raise("PlayerConnect", {ScriptValue::player(static_cast<int>(slot))});
 	return static_cast<int>(slot);
 }
@@ -2733,7 +2750,9 @@ bool GameWorld::spawnSoldier(int id)
 world::Object* GameWorld::spawnPlayer(int team)
 {
 	if (!m_player) {
+		m_addingLocal = true;
 		m_player = findPlayer(addPlayer("Player", team, false));
+		m_addingLocal = false;
 		m_player->unlocked = localPlayerUnlocks;
 	}
 	if (m_player->alive) {
@@ -2794,6 +2813,7 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 	info.rank = player->rank;
 	info.empLevel = player->alive ? static_cast<int>(std::ceil(player->empLevel)) : 0;
 	info.spawnedProne = player->alive && player->spawnedProne;
+	info.pose = player->input.pose;
 	info.battery = player->battery;
 	info.squadLeader = player->squadLeader;
 	info.commander = commander(player->team) == player->id;
@@ -3314,6 +3334,7 @@ void GameWorld::stepWeaponLock(Player& player, float seconds)
 		lock = {};
 		return;
 	}
+	lock.system = wanted == 2 ? 1 : 2; // TSHeatSeeking 1, TSLaserGuided 2
 	lock.maxDistance = number(*weapon, "target.maxDistance", 0);
 	const float lockAngle = number(*weapon, "target.lockAngle", 0) * 3.14159265f / 180.0f;
 	const float lockDelay = number(*weapon, "target.lockDelay", 0);
@@ -5624,7 +5645,10 @@ void GameWorld::stepPlayers(float seconds)
 		if (player.alive) {
 			stepSoldier(player, seconds);
 			if (player.alive) {
+				const uint32_t lockedBefore = player.lock.target;
+				const int lockBefore = player.lock.state;
 				stepWeaponLock(player, seconds);
+				lockFeedback(player, lockedBefore, lockBefore);
 			}
 			player.input.turn = 0;
 		} else {
@@ -5971,6 +5995,12 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 	}
 	player.toggleFireWas = input.toggleFireRate;
 	const bool wasReloading = player.weapon && player.weapon->reloading();
+	// c_PIReload's press: a fresh magazine (Weapons.h, startReload); the
+	// Reload sound goes below as for an empty one.
+	if (player.weapon && input.reload && !player.reloadWas) {
+		player.weapon->startReload();
+	}
+	player.reloadWas = input.reload;
 	const bool emptyBefore = player.weapon && player.weapon->roundsInMag() <= 0 && !wasReloading;
 	const bool shot = player.weapon && player.weapon->tick(seconds, input.fire);
 	if (player.weapon && player.weapon->reloading() && !wasReloading) {

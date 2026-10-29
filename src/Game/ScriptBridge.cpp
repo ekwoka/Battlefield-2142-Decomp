@@ -82,7 +82,13 @@ ScriptValue ScriptBridge::serverSetting(const std::string& name)
 	if (name == "maxRank") {
 		return ScriptValue::integer(m_settings.maxRank);
 	}
-	return ScriptValue::integer(0); // autoBalance, tkp*, globRank, globUnlocks: off
+	if (name == "globRank") {
+		return ScriptValue::integer(m_settings.useGlobalRank ? 1 : 0);
+	}
+	if (name == "globUnlocks") {
+		return ScriptValue::integer(m_settings.useGlobalUnlocks ? 1 : 0);
+	}
+	return ScriptValue::integer(0); // autoBalance, tkp*: off
 }
 
 void ScriptBridge::textMessage(int, const std::string& text) { messages.push_back(text); }
@@ -434,7 +440,10 @@ ScriptValue ScriptBridge::playerParam(const std::string& name, int index, const 
 	if (name == "timeToSpawn") {
 		return ScriptValue::number(player.respawnIn);
 	}
-	if (name == "profileid" || name == "ping") {
+	if (name == "profileid") {
+		return ScriptValue::integer(profileId(index));
+	}
+	if (name == "ping") {
 		return ScriptValue::integer(0);
 	}
 	const auto& params = m_playerParams[index];
@@ -477,6 +486,10 @@ ScriptValue ScriptBridge::playerScore(int index, const std::string& name)
 		if (name == "TKs") {
 			return ScriptValue::integer(player.teamKills);
 		}
+		// The stats object's +0x20 (0x0056b6f0's getter), -1 until set.
+		if (name == "rank") {
+			return ScriptValue::integer(player.rank);
+		}
 	}
 	const auto& scores = m_scores[index];
 	const auto it = scores.find(name);
@@ -485,6 +498,15 @@ ScriptValue ScriptBridge::playerScore(int index, const std::string& name)
 
 void ScriptBridge::setPlayerScore(int index, const std::string& name, const ScriptValue& value)
 {
+	// "rank" goes to the player's stats (pmgr_setScore 0x0056a9d0 → 0x005a53b0:
+	// stats +0x20, which the name tags' ICRank and the commander's
+	// applicants read and the player's ghost carries, flag 0x4000).
+	if (name == "rank") {
+		if (playerValid(index)) {
+			m_world.setPlayerRank(index, static_cast<int>(value.asInt()));
+		}
+		return;
+	}
 	ScriptValue& score = m_scores[index][name];
 	const int64_t before = score.asInt();
 	score = value;
@@ -523,6 +545,60 @@ bool ScriptBridge::giveFieldUnlock(int player)
 	}
 	m_world.giveFieldUnlock(player);
 	return true;
+}
+
+bool ScriptBridge::requestStats(int64_t playerOrProfile)
+{
+	// 0x00566930: below 0x100 a player index ("no such player" otherwise),
+	// its profile id through slot 0x324.
+	int player = -1;
+	int64_t profile = playerOrProfile;
+	if (playerOrProfile < 0x100) {
+		if (!playerValid(static_cast<int>(playerOrProfile))) {
+			return false;
+		}
+		player = static_cast<int>(playerOrProfile);
+		profile = profileId(player);
+	}
+	StatsRecord record;
+	if (profile <= 0 || !statsServer || !statsServer(profile, record)) {
+		return false;
+	}
+	m_downloaded[profile] = std::move(record);
+	m_statsAnswers.emplace_back(player, profile);
+	return true;
+}
+
+bool ScriptBridge::statsKeyValue(const std::string& key, int64_t profileId, std::string& value)
+{
+	const auto record = m_downloaded.find(profileId);
+	if (record == m_downloaded.end()) {
+		return false;
+	}
+	const auto it = record->second.find(key);
+	if (it == record->second.end()) {
+		return false;
+	}
+	value = it->second;
+	return true;
+}
+
+void ScriptBridge::deliverStatsResponses()
+{
+	// PlayerStatsResponse(succeeded, player, keys): rank.py looks for
+	// "rnk" among the keys, then reads it with pers_getStatsKeyVal.
+	std::vector<std::pair<int, int64_t>> answers;
+	answers.swap(m_statsAnswers);
+	for (const auto& [player, profile] : answers) {
+		std::vector<ScriptValue> keys;
+		for (const auto& entry : m_downloaded[profile]) {
+			keys.push_back(ScriptValue::string(entry.first));
+		}
+		if (events) {
+			events("PlayerStatsResponse",
+				{ScriptValue::integer(1), ScriptValue::player(player), ScriptValue::makeList(std::move(keys))});
+		}
+	}
 }
 
 void ScriptBridge::endOfRoundData(const std::string& text) { m_logic.setEndOfRoundData(text); }

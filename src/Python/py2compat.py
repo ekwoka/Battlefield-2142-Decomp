@@ -316,14 +316,14 @@ class _Py2Semantics(ast.NodeTransformer):
 	def visit_BinOp(self, node):
 		self.generic_visit(node)
 		if isinstance(node.op, ast.Div):
-			return ast.copy_location(ast.Call(ast.Name('__py2_div', ast.Load()), [node.left, node.right], []), node)
+			return ast.copy_location(ast.Call(ast.Name('__py2_div__', ast.Load()), [node.left, node.right], []), node)
 		return node
 
 	def visit_AugAssign(self, node):
 		self.generic_visit(node)
 		if isinstance(node.op, ast.Div):
 			load = _as_load(node.target)
-			value = ast.Call(ast.Name('__py2_div', ast.Load()), [load, node.value], [])
+			value = ast.Call(ast.Name('__py2_div__', ast.Load()), [load, node.value], [])
 			return ast.copy_location(ast.Assign([node.target], value), node)
 		return node
 
@@ -349,7 +349,7 @@ class _Py2Semantics(ast.NodeTransformer):
 
 
 def _cmp_to_key(func):
-	return ast.Call(ast.Name('__py2_cmp_to_key', ast.Load()), [func], [])
+	return ast.Call(ast.Name('__py2_cmp_to_key__', ast.Load()), [func], [])
 
 
 def _as_load(target):
@@ -380,11 +380,45 @@ def _cmp(a, b):
 	return (a > b) - (a < b)
 
 
+def _classic_cmp(a, b):
+	cmp = getattr(type(a), '__cmp__', None)
+	if cmp is not None:
+		return cmp(a, b)
+	return (id(a) > id(b)) - (id(a) < id(b))
+
+
+class _Py2Classic:
+	"""The base of a class with no bases (Python 2's classic class): its
+	instances order by __cmp__ when the class has one, else by address, as
+	Python 2 orders them (bf2/stats/endofround.py sorts (score, PlayerStat)
+	tuples, which compare the PlayerStats on a tie)."""
+	__slots__ = ()
+
+	def __lt__(self, other):
+		return _classic_cmp(self, other) < 0 if isinstance(other, _Py2Classic) else NotImplemented
+
+	def __le__(self, other):
+		return _classic_cmp(self, other) <= 0 if isinstance(other, _Py2Classic) else NotImplemented
+
+	def __gt__(self, other):
+		return _classic_cmp(self, other) > 0 if isinstance(other, _Py2Classic) else NotImplemented
+
+	def __ge__(self, other):
+		return _classic_cmp(self, other) >= 0 if isinstance(other, _Py2Classic) else NotImplemented
+
+
+def _py2_build_class(func, name, *bases, **kwargs):
+	if not bases and 'metaclass' not in kwargs:
+		bases = (_Py2Classic,)
+	return builtins.__build_class__(func, name, *bases, **kwargs)
+
+
 def _make_builtins():
 	b = dict(builtins.__dict__)
 	b.update({
-		'__py2_div': _py2_div,
-		'__py2_cmp_to_key': functools.cmp_to_key,
+		'__py2_div__': _py2_div,
+		'__py2_cmp_to_key__': functools.cmp_to_key,
+		'__build_class__': _py2_build_class,
 		'map': lambda f, *s: list(map(f, *s)) if f is not None else list(zip(*s)),
 		'filter': lambda f, s: (type(s)() if isinstance(s, (str, tuple)) else []).__class__(filter(f, s))
 			if isinstance(s, (str, tuple)) else list(filter(f, s)),

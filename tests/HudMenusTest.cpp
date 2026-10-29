@@ -504,3 +504,57 @@ TEST(HudWeapon_RangeFinderAndSecondary)
 	second.update(hudManager, in, true);
 	CHECK(hudManager.string("SecondaryAmmoString") == "10" && hudManager.string("TotSecondaryAmmoString") == "/ 40");
 }
+
+// The Titan silos' map icons (miniMapInfo "all", 0x00636220; the layers of
+// 0x0077dee0 / 0x0077df60; the reload wipe of 0x0078a990) and the wedge's
+// pieces.
+TEST(HudVehicle_SiloReloadIcons)
+{
+	Console console;
+	std::string out;
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "PlayerControlObject");
+	world::registerWorldConsoleMethods(console, templates, objects);
+	world::registerUntypedTemplateProperties(console, templates,
+		{"vehicleHud.miniMapIcon", "vehicleHud.miniMapIconSize", "vehicleHud.miniMapInfo", "vehicleHud.miniMapReloadIcon",
+			"vehicleHud.miniMapBackgroundIcon", "vehicleHud.spottedIcon"});
+	console.execute("ObjectTemplate.create PlayerControlObject missile_silo", out);
+	console.execute("ObjectTemplate.vehicleHud.miniMapIcon Ingame\\Vehicles\\Icons\\Minimap\\mini_reloadComposite", out);
+	console.execute("ObjectTemplate.vehicleHud.miniMapReloadIcon Ingame\\Vehicles\\Icons\\Minimap\\mini_reload", out);
+	console.execute("ObjectTemplate.vehicleHud.miniMapBackgroundIcon Ingame\\Vehicles\\Icons\\Minimap\\mini_titanSilo", out);
+	console.execute("ObjectTemplate.vehicleHud.miniMapIconSize 32", out);
+	console.execute("ObjectTemplate.vehicleHud.miniMapInfo All", out);
+	const world::ObjectTemplate* silo = templates.find("missile_silo");
+	CHECK(silo);
+	const menu::MapIcons& icons = menu::mapIcons(*silo);
+	CHECK(icons.info == 2 && icons.size[0] == 32 && icons.size[1] == 32 && icons.spottedSize == 16);
+	CHECK(menu::iconFrame(icons.background, 3) == "Ingame/Vehicles/Icons/Minimap/mini_titanSilo_03.dds");
+	CHECK(menu::iconFrame("Ingame/x/kit.tga", 3) == "Ingame/x/kit.tga");
+	CHECK(&menu::mapIcons(*silo) == &icons); // read once
+	using R = menu::MapRelation;
+	CHECK(std::fabs(menu::reloadSweep(30, 120, R::Friendly) - 6.2831855f / 4) < 1e-5f);
+	CHECK(menu::reloadSweep(0, 120, R::Enemy) == 0 && menu::reloadSweep(60, 120, R::Neutral) == 0);
+	// A quarter turn of a 2 x 2 square about its centre: its top right
+	// quarter; three quarters: three of the four.
+	const std::vector<std::array<float, 4>> square {{0, 0, 0, 0}, {2, 0, 1, 0}, {2, 2, 1, 1}, {0, 2, 0, 1}};
+	const auto area = [](const std::vector<std::vector<std::array<float, 4>>>& pieces) {
+		float sum = 0;
+		for (const auto& p : pieces) {
+			for (size_t i = 0; i < p.size(); ++i) {
+				const auto& a = p[i];
+				const auto& b = p[(i + 1) % p.size()];
+				sum += (a[0] * b[1] - b[0] * a[1]) * 0.5f;
+			}
+		}
+		return std::fabs(sum);
+	};
+	const auto quarter = hud::sweepPieces(square, 1, 1, 6.2831853f / 4);
+	CHECK(quarter.size() == 1 && std::fabs(area(quarter) - 1) < 1e-4f);
+	for (const auto& corner : quarter[0]) {
+		CHECK(corner[0] >= 1 - 1e-4f && corner[1] <= 1 + 1e-4f); // right of centre, above it
+	}
+	CHECK(std::fabs(area(hud::sweepPieces(square, 1, 1, 6.2831853f * 0.75f)) - 3) < 1e-4f);
+	CHECK(std::fabs(area(hud::sweepPieces(square, 1, 1, 6.2831853f / 8)) - 0.5f) < 1e-4f);
+	CHECK(hud::sweepPieces(square, 1, 1, 7).size() == 1 && hud::sweepPieces(square, 1, 1, 0).empty());
+}

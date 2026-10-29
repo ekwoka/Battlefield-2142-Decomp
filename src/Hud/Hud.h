@@ -70,7 +70,18 @@ struct HudQuad {
 	// the rectangle's centre), in the 800 x 600 screen; unset, the centre.
 	bool pivotSet = false;
 	float pivot[2] = {0, 0};
+	// >= 0: only the wedge of this many radians clockwise from straight up
+	// about the quad's centre (the map's reload wipe, 0x0078a990's fan
+	// from the top centre through the corners); < 0 or 2 pi: all of it.
+	float sweep = -1;
 };
+
+// The parts of a convex polygon (x, y, u, v corners) inside the wedge of
+// `sweep` radians clockwise from straight up about (cx, cy) on the screen
+// (y down), as convex pieces of at most a quarter turn each; the whole
+// polygon for a sweep of 2 pi or more (HudQuad::sweep).
+std::vector<std::vector<std::array<float, 4>>> sweepPieces(
+	const std::vector<std::array<float, 4>>& polygon, float cx, float cy, float sweep);
 
 class HudManager {
 public:
@@ -174,6 +185,7 @@ public:
 		float color[4] = {1, 1, 1, 1};
 		int id = -1;         // >= 0: clickable (mapMarkerAt returns it)
 		float height = 0;    // > 0: not square (size is then the width)
+		float sweep = -1;    // >= 0: only this wedge (HudQuad::sweep)
 	};
 	void setMap(const std::string& texture, float originX, float originZ, float width, float depth);
 	void setMapFocus(float x, float z) { m_mapFocus[0] = x; m_mapFocus[1] = z; }

@@ -49,7 +49,18 @@ struct Settings {
 	float aimedFriendlyDistance = 500;      // an aimed-at friendly's range
 	float aimCone = 0.99999f;               // DAT_101f6744, 0x100ef4c0
 	float circleRadius = 0.65f;             // GSNameTagCircleRadius (glueToEdge)
+	// The view's fog (renderer.fogStartEndAndBase: start, end, base, the
+	// fourth), which fades the enemies' tags (0x100f09b0 on the fog's
+	// FogRange constants, the fog object's +0xb8, 0x100355c0); an end at
+	// or before the start: no fog.
+	std::array<float, 4> fog {0, 0, 0, 0};
 };
+
+// 0x100f09b0: how much of a tag at distance d shows through the fog,
+// FogRange (r0..r3 = 1 / (e - s), -base / (e - s), -s / (e - s), e / (e - s)):
+// clamp(max(r3, d r1 + r3) - (d r0 + r2)^3, 0, 1) (the CRT pow's exponent
+// taken as calcFog's cube); 1 without fog.
+float tagFog(const std::array<float, 4>& startEndAndBase, float distance);
 
 // A tag's fade (tag +0xa0 the timer, +0xa8 the alpha).
 struct Fade {
@@ -85,10 +96,32 @@ Colour playerTagColour(const PlayerTagInput& in);
 int shownDistance(int shown, float distance);
 
 // The player's own icon (tag +0x60, 0x100f0310): a squad leader's
-// ICObject + 25 + his squad, the commander's ICObject + 25, everyone else
-// ICObject + 10 (0x5a; a vehicle's too: the vehicle's own pick, its HUD
-// type, isn't traced).
+// ICObject + 25 + his squad, the commander's ICObject + 25, a soldier
+// ICObject + 10 (0x5a), one in a vehicle the vehicle's (vehicleIconId).
 int playerIconId(bool squadLeader, int squad, bool commander);
+// A vehicle's icon (0x100f0310 through the vehicle root template's 0xc4c4
+// interface → the NametagManager's slot 0x74, 0x100ee590): by its
+// setVehicleType (slot 0x34, template +0x3d8, 0x1b by default from
+// 0x005cd9e0; the VT names of 0x004d.. 0..0x1a): tanks 0x5f, the APC,
+// none, armoured cars and tank hunters 0x5d, scout cars 0x5c, aircraft
+// 0x61, AA guns 0x64, stationary MGs 0x65, ships and boats 0x60, AT guns
+// 0x66, VTAA 0x5e, attack helicopters 0x62, transport ones 0x63, landing
+// craft, snipers and infantry 0x5a; any other by its vehicleCategory
+// (slot 0x24: VCLand 0x5b, VCSea 0x60, VCAir 0x61, VCHelicopter 0x62)
+// unless the vehicle draws its occupant (vehicleHud.usePlayerIcon, the
+// HUD data's +0xb8): 0x5a.
+int vehicleIconId(int vehicleType, int vehicleCategory, bool usePlayerIcon);
+// setVehicleType's name (VTHeavyTank 0 .. VTInfantry 0x1a), 0x1b for none.
+int vehicleTypeOf(const std::string& name);
+// An order's 3D icon (0x100f4620): ICSquadOrder 0x3d.. for the squad
+// leader's, ICCommanderOrder 0x43.. for the commander's, by the order's
+// map kind (MapMove 4 .. MapRepair 7: 0x39 / 0x3f + it).
+int orderIconId(bool fromCommander, int kind);
+// A request's icon (0x100f44d0: kind 0 the orbital bombardment's 0x7a, 1
+// the orbital strike's 0x79, 2 the UAV's 0x7b, 3 the supplies' 0x7c; the
+// selected ones 0x7e / 0x7d / 0x7f / 0x80).
+int requestIconId(int kind, bool selected);
+constexpr float kOrderDistance = 1200; // DAT_101f67b4
 
 // What a kit lets its carrier answer (the HUD manager's slot 0xac -> +0x74
 // slot 0x38: [0] heal and revive, [1] repair, [2] ammunition); by the
@@ -198,6 +231,8 @@ public:
 		const View& view, float seconds);
 
 	const Settings& settings() const { return m_settings; }
+	// The level's fog, for the enemies' fade (Settings::fog).
+	void setFog(const std::array<float, 4>& startEndAndBase) { m_settings.fog = startEndAndBase; }
 	// The icons nametags.con made (the objects' 3D icons draw with them).
 	void setIcons(const IconRegistry* icons) { m_icons = icons; }
 	// The camera inside a Titan (the objects' showInside / showOutside;
@@ -240,6 +275,7 @@ private:
 		int icon = -1, selectedIcon = -1; // 3dMapIcon, selected3dMapIcon
 		float maxDistance = 1200, maxEnemyDistance = 1200;
 		std::array<float, 3> offset {};
+		int vehicleIcon = 0x5a; // vehicleIconId of its setVehicleType / vehicleCategory / usePlayerIcon
 		bool tagged() const { return (controlPoint && showItem) || (!controlPoint && show3dIcon); }
 	};
 	const TagTemplate& tagTemplate(const world::ObjectTemplate* t);

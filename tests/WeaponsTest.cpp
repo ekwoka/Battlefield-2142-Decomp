@@ -428,6 +428,37 @@ TEST(Weapons_GunSway)
 	CHECK(y == 0);
 }
 
+// c_PIReload (0x005c50e0's action 10, 0x005c0f40): a magazine not full is
+// replaced after reloadTime, using one of the spares; a full one, one
+// reloading already, or none to spare starts nothing.
+TEST(Weapons_ManualReload)
+{
+	game::FireArmSettings settings;
+	settings.magSize = 5;
+	settings.nrOfMags = 2;
+	settings.reloadTime = 1;
+	settings.roundsPerMinute = 1800;
+	game::FireArm arm(settings);
+	CHECK(!arm.startReload()); // full
+	CHECK(arm.tick(1 / 30.0f, true) && arm.roundsInMag() == 4);
+	CHECK(arm.startReload() && arm.reloading() && !arm.startReload());
+	for (int i = 0; i < 28; ++i) {
+		CHECK(!arm.tick(1 / 30.0f, true)); // no rounds while it reloads
+	}
+	for (int i = 0; i < 4; ++i) {
+		arm.tick(1 / 30.0f, false);
+	}
+	CHECK(!arm.reloading() && arm.roundsInMag() == 5 && arm.magsLeft() == 1);
+	arm.tick(1 / 30.0f, true);
+	CHECK(arm.startReload());
+	for (int i = 0; i < 32; ++i) {
+		arm.tick(1 / 30.0f, false);
+	}
+	CHECK(arm.magsLeft() == 0 && arm.roundsInMag() == 5);
+	arm.tick(1 / 30.0f, true);
+	CHECK(!arm.startReload()); // none to spare
+}
+
 // The fire modes (0x005f28a0, 0x005f1370, 0x005f1820, 0x005f1da0): single
 // fire takes one round a press, burst burstSize a press (running on
 // released), automatic while held; the toggle steps through the rates.
@@ -573,4 +604,32 @@ TEST(Weapons_GunRecoil)
 	const float half = recoil.slide(104 + 52);           // half the return gone
 	CHECK(std::fabs(half - 0.05f * (53 / 30.0f) / (1.57f / 0.45f)) < 1e-4f);
 	CHECK(recoil.slide(209) == 0 && recoil.slide(400) == 0);
+}
+
+// The handheld pulse meter's scan (PulseMeterAmmoComp: 0x005d9cf0 starts
+// it with a round, 0x005d99e0 runs it at pulse-meter-scan-step a second
+// and clears it at 1), which the weapon HUD's HudScanProgress shows.
+TEST(Weapons_PulseMeterScan)
+{
+	game::FireArmSettings s;
+	s.magSize = -1;
+	s.nrOfMags = -1;
+	s.roundsPerMinute = 60;
+	s.pulseScan = true;
+	game::FireArm meter(s);
+	CHECK(!meter.scanning() && meter.scan() == 0);
+	CHECK(meter.tick(1 / 30.0f, true));
+	CHECK(meter.scanning() && meter.scan() == 0);
+	for (int i = 0; i < 15; ++i) {
+		meter.tick(1 / 30.0f, false);
+	}
+	CHECK(meter.scanning() && std::fabs(meter.scan() - 0.5f) < 1e-3f);
+	for (int i = 0; i < 15; ++i) {
+		meter.tick(1 / 30.0f, false);
+	}
+	CHECK(!meter.scanning() && meter.scan() == 0);
+	game::FireArmSettings plain = s;
+	plain.pulseScan = false;
+	game::FireArm gun(plain);
+	CHECK(gun.tick(1 / 30.0f, true) && !gun.scanning());
 }

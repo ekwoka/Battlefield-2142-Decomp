@@ -249,4 +249,42 @@ struct VehicleMarker {
 };
 bool vehicleMarker(const world::ObjectTemplate& vehicle, MapRelation relation, bool inside, bool spotted, VehicleMarker& out);
 
+// A template's map fields (the VehicleHud component, 0x00637b30's
+// defaults), read once per template:
+//   - miniMapInfo (0x00636220, lower-cased: "icon" 0, "reload" 1, "all" 2;
+//     "Icon" by default): what the map draws (0x00793b60's switch). 0 the
+//     icon; 1 the reload icon (slot 0x144, 0x0077dee0: miniMapReloadIcon
+//     at miniMapIconSize) with its wipe; 2 (the Titan silos) the
+//     background (slot 0x148, 0x0077df60: miniMapBackgroundIcon) and the
+//     reload icon, both layers of the icon (mini_reloadComposite, through
+//     its texture's slot 0x7c), so the background and the wiped reload
+//     ring show.
+//   - the wipe (0x0078a990): a fan from the top centre over 2 pi - 2 pi x
+//     the seat's gun's progress (slot 0x94), none for a neutral one
+//     (relation 0x10); the reload texture's alpha is cleared and the fan
+//     written, so the ring shows over the time still to go.
+//   - spottedIcon / spottedIconSize (16; 0x0077dd70 with its spotted flag,
+//     from 0x0077dfe0 for what spotting reveals): the kits' mini_Soldier.
+// The silo icons' files are numbered frames (mini_titanSilo_01..06,
+// mini_reload_01..06); the frame is the silo's place in its control
+// points' order here (the frame's pick, through the texture's own frames,
+// isn't traced).
+struct MapIcons {
+	std::string icon, iconInside, reload, background, spotted;
+	std::array<float, 2> size {16, 16}, sizeInside {16, 16};
+	float spottedSize = 16;
+	int info = 0;
+	int vehicleType = -1;
+	bool showOnEnemy = false, always = false, usePlayerIcon = false;
+};
+// Cached by template (checked against its name and its number of
+// settings, as templates can be made again).
+const MapIcons& mapIcons(const world::ObjectTemplate& t);
+// A numbered frame of an icon without an extension (mini_titanSilo +
+// 2 -> mini_titanSilo_02.dds); a name with one stays.
+std::string iconFrame(const std::string& icon, int frame);
+// The reload wipe's sweep (radians): 2 pi x the share of the reload still
+// to go; 0 when loaded or for a neutral one.
+float reloadSweep(float reloadLeft, float reloadTime, MapRelation relation);
+
 } // namespace dice::hfe::menu

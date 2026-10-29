@@ -6,9 +6,11 @@
 #include "World/ObjectTemplate.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <unordered_map>
 
 namespace dice::hfe::menu {
 
@@ -420,30 +422,77 @@ MapRelation vehicleRelation(bool hasOccupant, bool localInside, int occupantTeam
 	return vehicleTeam == localTeam ? MapRelation::Friendly : MapRelation::Enemy;
 }
 
+const MapIcons& mapIcons(const world::ObjectTemplate& t)
+{
+	struct Entry {
+		std::string name;
+		size_t settings = 0; // a template given more settings is read again
+		MapIcons icons;
+	};
+	static std::unordered_map<const world::ObjectTemplate*, Entry> cache;
+	const auto known = cache.find(&t);
+	if (known != cache.end() && known->second.settings == t.settings().size() && known->second.name == t.name()) {
+		return known->second.icons;
+	}
+	MapIcons m;
+	m.icon = slashes(hudSetting(&t, "vehicleHud.miniMapIcon"));
+	m.iconInside = slashes(hudSetting(&t, "vehicleHud.miniMapIconInside"));
+	m.reload = slashes(hudSetting(&t, "vehicleHud.miniMapReloadIcon"));
+	m.background = slashes(hudSetting(&t, "vehicleHud.miniMapBackgroundIcon"));
+	m.spotted = slashes(hudSetting(&t, "vehicleHud.spottedIcon"));
+	m.size = pair(&t, "vehicleHud.miniMapIconSize", 16);
+	m.sizeInside = pair(&t, "vehicleHud.miniMapIconSizeInside", 16);
+	m.spottedSize = hudNumber(&t, "vehicleHud.spottedIconSize", 16);
+	std::string info = hudSetting(&t, "vehicleHud.miniMapInfo", "Icon");
+	std::transform(info.begin(), info.end(), info.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	m.info = info == "reload" ? 1 : info == "all" ? 2 : 0; // anything else keeps "icon"'s 0
+	m.vehicleType = static_cast<int>(hudNumber(&t, "vehicleHud.vehicleType", -1));
+	m.showOnEnemy = flag(&t, "vehicleHud.showOnEnemyMinimap", false);
+	m.always = flag(&t, "vehicleHud.alwaysShowOnMinimap", false);
+	m.usePlayerIcon = flag(&t, "vehicleHud.usePlayerIcon", false);
+	Entry& slot = cache[&t];
+	slot = {t.name(), t.settings().size(), std::move(m)};
+	return slot.icons;
+}
+
+std::string iconFrame(const std::string& icon, int frame)
+{
+	const size_t slash = icon.find_last_of('/');
+	if (icon.find('.', slash == std::string::npos ? 0 : slash) != std::string::npos) {
+		return icon;
+	}
+	char suffix[8];
+	std::snprintf(suffix, sizeof(suffix), "_%02d", std::clamp(frame, 1, 99));
+	return icon + suffix + ".dds";
+}
+
+float reloadSweep(float reloadLeft, float reloadTime, MapRelation relation)
+{
+	if (relation == MapRelation::Neutral || reloadTime <= 0 || reloadLeft <= 0) {
+		return 0;
+	}
+	return 6.2831855f * std::min(reloadLeft / reloadTime, 1.0f);
+}
+
 bool vehicleMarker(const world::ObjectTemplate& vehicle, MapRelation relation, bool inside, bool spotted, VehicleMarker& out)
 {
-	const std::string icon = hudSetting(&vehicle, inside ? "vehicleHud.miniMapIconInside" : "vehicleHud.miniMapIcon");
-	const std::string texture = icon.empty() ? hudSetting(&vehicle, "vehicleHud.miniMapIcon") : icon;
+	const MapIcons& m = mapIcons(vehicle);
+	const bool useInside = inside && !m.iconInside.empty();
+	const std::string& texture = useInside ? m.iconInside : m.icon;
 	if (texture.empty()) {
 		return false;
 	}
 	// 0x00793b60: friends', neutral and his own always; the enemy's while
 	// spotted or with showOnEnemyMinimap; any with alwaysShowOnMinimap.
-	bool shown = relation != MapRelation::Enemy || spotted;
-	if (relation == MapRelation::Enemy && flag(&vehicle, "vehicleHud.showOnEnemyMinimap", false)) {
-		shown = true;
-	}
-	if (flag(&vehicle, "vehicleHud.alwaysShowOnMinimap", false)) {
-		shown = true;
-	}
+	const bool shown = relation != MapRelation::Enemy || spotted || m.showOnEnemy || m.always;
 	if (!shown) {
 		return false;
 	}
-	out.texture = slashes(texture);
-	const auto size = pair(&vehicle, inside && !icon.empty() ? "vehicleHud.miniMapIconSizeInside" : "vehicleHud.miniMapIconSize", 16);
+	out.texture = texture;
+	const auto& size = useInside ? m.sizeInside : m.size;
 	out.width = size[0];
 	out.height = size[1];
-	out.asPlayer = flag(&vehicle, "vehicleHud.usePlayerIcon", false) && relation != MapRelation::Neutral;
+	out.asPlayer = m.usePlayerIcon && relation != MapRelation::Neutral;
 	return true;
 }
 

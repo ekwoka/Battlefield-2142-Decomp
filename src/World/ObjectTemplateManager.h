@@ -84,7 +84,7 @@ private:
 	std::map<uint32_t, ObjectTemplate*> m_byId;
 	ObjectTemplate* m_active = nullptr;
 	uint32_t m_nextId = 0;           // network-shared templates
-	uint32_t m_nextClientOnlyId = 0; // client-only templates
+	uint32_t m_nextClientOnlyId = 0x1000000; // client-only templates (the manager's +0x28, 0x0070ae90)
 	bool m_loading = false;
 	std::function<std::string()> m_currentFile;
 	std::vector<std::function<void(ObjectTemplate&)>> m_creationListeners;

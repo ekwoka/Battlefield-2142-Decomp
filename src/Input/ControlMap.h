@@ -171,6 +171,16 @@ public:
 	// (0x00498750: "CONTROLLER_IDKey_W", "CONTROLLER_IDFMouse_IDButton_0",
 	// "CONTROLLER_IDFGameController_IDAxis_1").
 	static std::string displayKey(const Binding& binding);
+	// Text with its "#PISprint#" and "#GIYes#" put as the keys bound to
+	// them (0x00752b70, which the help pop-ups' and the HUD's strings go
+	// through): #PI<input># from `playerMap` (the player's map, else
+	// defaultPlayerInputControlMap), #GI<input># from
+	// defaultGameControlMap, the primary key; "_2" after the name (#PIYaw_2#)
+	// is the axis' negative key. The key's CONTROLLER_ text is localized;
+	// one the localizer doesn't know shows without its IDKey_ part, and a
+	// name with no key keeps the text as it was.
+	std::string withKeyNames(const std::string& text, const std::function<std::string(const std::string&)>& localize,
+		const std::string& playerMap = kInfantry) const;
 	// All maps as the scripts that build them (2142's format), to keep
 	// rebound keys between runs.
 	std::string script() const;

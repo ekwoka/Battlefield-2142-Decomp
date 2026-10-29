@@ -54,6 +54,14 @@ TEST(HudLists_ChatLinesAndSayBoxes)
 	// Each category keeps its lines 5 s from the latest.
 	chat.update(4.95f);
 	CHECK(chat.chatRows().size() == 0 && hud.number("ChatListShow") == 0);
+	// A death of one's own: HUD_HUD_KILLEDBY_MYSELF's #PLAYERNAME# (0x007518d0).
+	chat.setLocalizer([](const std::string& key) {
+		return key == "HUD_HUD_KILLEDBY_MYSELF" ? std::string("#PLAYERNAME# is no more.") : key;
+	});
+	chat.addKill("", "Carol", "", false, menu::HudChat::Speaker::Team);
+	chat.update(0.1f);
+	CHECK(chat.chatRows().size() == 1 && chat.chatRows()[0] == "\xa7" "1Carol is no more.\xa7" "0");
+	chat.update(5.0f);
 
 	// Typing: the box opens, printable characters go in, Enter sends.
 	std::string said;

@@ -241,6 +241,9 @@ public:
 	// Follows the world's objects: moves instances with their objects, adds
 	// new objects and drops removed ones (call once a frame before draw).
 	void syncObjects();
+	// The effects' debris pieces (effects::DebrisPiece) as instances of their
+	// mesh with only their geometryPart shown, replaced each frame.
+	void syncDebris();
 
 	// Records a render pass into `commands` that clears and draws into
 	// `color` (a swapchain or offscreen texture) using `target`'s depth.
@@ -358,6 +361,7 @@ private:
 		mutable float titanHemi[3] = {0.5f, 0.5f, 0.5f};
 		bool overgrowth = false; // Object.isOvergrowth
 		Lod overgrowthLod;       // its "<geometry>_lod" mesh
+		bool debris = false;     // an effects' debris piece, placed afresh each frame (syncDebris)
 	};
 	// What the world pass draws of an instance this frame.
 	struct DrawItem {

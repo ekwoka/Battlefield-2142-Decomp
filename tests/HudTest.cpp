@@ -168,6 +168,20 @@ TEST(Hud_LocalizationAndLists)
 	io::Localization german;
 	CHECK(german.load(data, "German") && german.text("HUD_TEXT_MENU_SCORE_PLAYERS") == "SPIELER");
 	CHECK(!io::Localization().load(data, "Klingon"));
+	// Ids ignore case and the first of two keeps its text (0x0065b2c0,
+	// 0x006956f0): the login page asks for BUTTON_CREATENEWACCOUNT.
+	const std::u16string cased = u"StringID\tEnglish\r\nBUTTON_createnewaccount\tCREATE NEW ACCOUNT\r\n"
+								 u"BUTTON_CREATENEWACCOUNT\tSECOND\r\n";
+	std::vector<uint8_t> casedData;
+	for (char16_t c : cased) {
+		casedData.push_back(static_cast<uint8_t>(c));
+		casedData.push_back(static_cast<uint8_t>(c >> 8));
+	}
+	io::Localization folded;
+	CHECK(folded.load(casedData, "English") && folded.size() == 1);
+	CHECK(folded.text("BUTTON_CREATENEWACCOUNT") == "CREATE NEW ACCOUNT");
+	CHECK(folded.text("button_CreateNewAccount") == "CREATE NEW ACCOUNT");
+	CHECK(english.text("hud_text_menu_score_players") == "PLAYERS" && english.text("Missing_Id") == "Missing_Id");
 
 	// A list node draws its background (header band first, beneath earlier
 	// siblings) and its data source's rows at the columns.

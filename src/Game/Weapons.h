@@ -120,6 +120,10 @@ struct ProjectileSettings {
 	float coneAngle = 0;
 	// No trigger and no fuse to speak of (C4): set off by its owner.
 	bool remote = false;
+	// hasOnTimeEffect (template +0x328, 1 by default, 0x005b3500): its time
+	// run out (events 0x18 / 0x1d), the round detonates (event 0x1f, the
+	// detonation's slot 0x14), else it is only removed (0x20; 0x005b62a0).
+	bool onTimeEffect = true;
 
 	static ProjectileSettings fromTemplate(const world::ObjectTemplate& projectile);
 	// The damage after travelling `distance` metres.
@@ -202,6 +206,17 @@ struct FireArmSettings {
 	// rounds (template +0x4c, 3 by default, 0x005f2ad0).
 	std::vector<int> fireRates;
 	int burstSize = 3;
+	// A PulseMeterAmmoComp (the handheld pulse meter): each round starts its
+	// scan (0x005d9cf0 sets +0x58), which runs pulse-meter-scan-step (1, a
+	// tweakable of 0x008e..: DAT_00a6e194) a second until it is through
+	// (0x005d99e0, then both cleared): the HUD's HudScanProgress through
+	// the ammo component's 0xc4f2 slots 0xf8 / 0xfc (0x007be380).
+	bool pulseScan = false;
+	// ammo.reloadWithoutPlayer (the ammo template's +0x41): a gun not held
+	// by a soldier (a vehicle's, a stationary one) finishes a reload
+	// begun while nobody uses it (0x005f4bb0); without it the reload is
+	// dropped when its user leaves (0x005f3a40: +0x3c, +0x34, +0x20 cleared).
+	bool reloadWithoutPlayer = false;
 
 	static FireArmSettings fromTemplate(const world::ObjectTemplate& firearm);
 	int ticksBetweenShots() const { return roundsPerMinute > 0 ? 1800 / roundsPerMinute : 1; }
@@ -218,6 +233,15 @@ public:
 	int roundsInMag() const { return m_rounds; }
 	int magsLeft() const { return m_mags; }
 	bool reloading() const { return m_reloadLeft > 0; }
+	// Without a user (reloadWithoutPlayer): a reload under way runs on and
+	// fills the magazine; dropReload forgets one (the magazine stays as it is).
+	void runReload(float seconds)
+	{
+		if (m_reloadLeft > 0) {
+			fire(seconds, false);
+		}
+	}
+	void dropReload() { m_reloadLeft = 0; }
 	float reloadLeft() const { return m_reloadLeft; } // seconds (the HUD's reload bar)
 	float heat() const { return m_heat; } // 0..1
 	// Resupply (ammo hubs): adds magazines up to the kit's number; false
@@ -242,6 +266,12 @@ public:
 	// after the last; false (nothing changes) with fewer than two.
 	int fireMode() const { return m_mode; }
 	bool toggleFireMode();
+	// c_PIReload (the firearm's action 10 in 0x005c50e0: unless the ammo
+	// component is reloading already (its state 2), and when it can
+	// (0x005c0e70), 0x005c0f40 starts its reload): a magazine not full,
+	// with one to spare, is replaced after reloadTime as an empty one is.
+	// False when nothing starts.
+	bool startReload();
 	// Off: the mode is ignored and the trigger fires as held. (The drones
 	// and sentry guns keep the modes: their auto controllers, AIDLL bots,
 	// hold the trigger for an automatic gun and tap it otherwise,
@@ -252,8 +282,14 @@ public:
 	// time and at below 1 a tracer goes with the round and the count starts
 	// again at tracerInterval; the first round has one).
 	bool takeTracer(int interval);
+	// The pulse meter's scan (FireArmSettings::pulseScan): running, and its
+	// progress 0..1.
+	bool scanning() const { return m_scanning; }
+	float scan() const { return m_scan; }
+	static constexpr float kPulseScanStep = 1; // "pulse-meter-scan-step"
 
 private:
+	bool fire(float seconds, bool trigger); // tick's rounds
 	FireArmSettings m_settings;
 	int m_rounds;
 	int m_mags;
@@ -267,6 +303,8 @@ private:
 	bool m_pending = false; // a press waiting for the gun
 	int m_burstLeft = 0;
 	int m_tracerCount = 0; // +0x78
+	bool m_scanning = false; // the ammo component's +0x58
+	float m_scan = 0;        // +0x5c
 };
 
 // The camera's recoil (WeaponBasedRecoilComp's cameraRecoilSpeed and

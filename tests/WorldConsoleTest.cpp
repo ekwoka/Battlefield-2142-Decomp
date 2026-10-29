@@ -78,3 +78,24 @@ TEST(WorldConsole_BeforeSpawnCamera)
 	CHECK(console.execute("gameLogic.setBeforeSpawnCamera -180/29/-451 -138/-19/0", out) == ConsoleResult::Ok);
 	CHECK(logic.beforeSpawnCamera.set && logic.beforeSpawnCamera.position[2] == -451 && logic.beforeSpawnCamera.rotation[0] == -138);
 }
+
+// Template ids (0x0070a700): a template its class makes client-only (flag
+// 0x2000, the sounds) is numbered from 0x1000000, apart from the
+// network-shared ones, which go on counting as if it weren't there (a
+// dedicated server, which makes no sounds, numbers them alike).
+TEST(WorldConsole_ClientOnlyTemplateIds)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "GenericFireArm");
+	templates.registerType(2, "Sound", [](uint32_t classId, const std::string& type, const std::string& name, uint32_t id) {
+		auto t = std::make_unique<world::ObjectTemplate>(classId, type, name, id);
+		t->setFlags(t->flags() | world::TemplateFlags::ClientOnly);
+		return t;
+	});
+	const uint32_t first = templates.create("GenericFireArm", "a")->id();
+	world::ObjectTemplate* sound = templates.create("Sound", "s_a");
+	world::ObjectTemplate* second = templates.create("GenericFireArm", "b");
+	CHECK(sound->id() == 0x1000000 && (sound->flags() & world::TemplateFlags::ClientOnly) != 0);
+	CHECK(second->id() == first + 1);
+	CHECK(templates.findById(second->id()) == second && templates.findById(0x1000000) == sound);
+}

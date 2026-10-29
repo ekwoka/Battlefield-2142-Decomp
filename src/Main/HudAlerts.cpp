@@ -216,7 +216,7 @@ const HelpPopups::Tutorial HelpPopups::kTutorials[83] = {
 	{"HUD_HELP_SQUAD_recievedTarget", 0, true, 21, "place_artillery"},
 	{"HUD_HELP_SPAWNSCREEN_KITTAB_pickArmyAndKit", 0, false, 11, "="},
 	{"HUD_HELP_SPAWNSCREEN_KITTAB_pickSpawnPoint", 0, false, 11, "="},
-	{"HUD_HELP_SPAWNSCREEN_KITTAB_useUnlock", 0, true, 0, "="},
+	{"HUD_HELP_SPAWNSCREEN_KITTAB_useUnlock", 0, true, 27, "="},
 	{"HUD_HELP_SPAWNSCREEN_KITTAB_trySquads", 21600, false, 11, "="},
 	{"HUD_HELP_GAMEPLAY_climbLadder", 0, false, 19, "ladder_help"},
 	{"HUD_HELP_PLAYER_CONTROLS_radioMessages", 7200, false, 12, "comm_rose"},
@@ -306,6 +306,7 @@ bool HelpPopups::tutorialHolds(int index, const Context& c) const
 	case 24: return c.menuState == 0x22;
 	case 25: return c.commander;
 	case 26: return c.onFoot;
+	case 27: return c.menuState == 1; // 0x41: the spawn screen's kits half
 	default: return false;
 	}
 }

@@ -106,6 +106,7 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	if (ttl != t.settings().end()) {
 		s.timeToLive = RandomDistribution::parse(ttl->second);
 	}
+	s.onTimeEffect = number(t, "hasOnTimeEffect", 1) != 0;
 	s.remote = s.explosionMaterial >= 0 && s.explosionDamage > 0 && s.triggerRadius <= 0 && s.timeToLive.a > 1000; // CRD_NONE/9999
 	return s;
 }
@@ -221,6 +222,7 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 	s.magSize = static_cast<int>(number(t, "ammo.magSize", static_cast<float>(s.magSize)));
 	s.nrOfMags = static_cast<int>(number(t, "ammo.nrOfMags", static_cast<float>(s.nrOfMags)));
 	s.reloadTime = number(t, "ammo.reloadTime", s.reloadTime);
+	s.reloadWithoutPlayer = number(t, "ammo.reloadWithoutPlayer", 0) != 0;
 	s.velocity = number(t, "velocity", s.velocity);
 	s.heatAddWhenFire = number(t, "heatAddWhenFire", 0);
 	s.coolDownPerSec = number(t, "coolDownPerSec", 0);
@@ -240,6 +242,13 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 		}
 	}
 	s.burstSize = static_cast<int>(number(t, "fire.burstSize", static_cast<float>(s.burstSize)));
+	for (const std::string& c : t.components()) {
+		if (c.size() == 18 && std::equal(c.begin(), c.end(), "PulseMeterAmmoComp", [](char a, char b) {
+				return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+			})) {
+			s.pulseScan = true;
+		}
+	}
 	return s;
 }
 
@@ -257,6 +266,18 @@ bool FireArm::toggleFireMode()
 	}
 	const auto at = std::find(rates.begin(), rates.end(), m_mode);
 	m_mode = at == rates.end() || at + 1 == rates.end() ? rates.front() : *(at + 1);
+	m_pending = false;
+	m_burstLeft = 0;
+	return true;
+}
+
+bool FireArm::startReload()
+{
+	if (m_reloadLeft > 0 || m_settings.magSize < 0 || m_rounds >= m_settings.magSize ||
+		(m_mags <= 0 && m_settings.nrOfMags >= 0) || m_settings.reloadTime <= 0) {
+		return false;
+	}
+	m_reloadLeft = m_settings.reloadTime;
 	m_pending = false;
 	m_burstLeft = 0;
 	return true;
@@ -386,6 +407,23 @@ bool FireArm::addMagazine()
 }
 
 bool FireArm::tick(float seconds, bool trigger)
+{
+	// The pulse meter's scan runs on (0x005d99e0, after the ammo's update).
+	if (m_scanning) {
+		m_scan += seconds * kPulseScanStep;
+		if (m_scan >= 1) {
+			m_scan = 0;
+			m_scanning = false;
+		}
+	}
+	const bool fired = fire(seconds, trigger);
+	if (fired && m_settings.pulseScan) {
+		m_scanning = true; // 0x005d9cf0
+	}
+	return fired;
+}
+
+bool FireArm::fire(float seconds, bool trigger)
 {
 	const bool pressed = trigger && !m_triggerWas;
 	m_triggerWas = trigger;

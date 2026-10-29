@@ -83,6 +83,9 @@ void HudChat::addKill(const std::string& killer, const std::string& victim, cons
 	line = replaced(line, "#PLAYERNAME1#", killer.empty() ? victim : killer);
 	line = replaced(line, "#WEAPON#", weapon.empty() ? std::string() : text(weapon));
 	line = replaced(line, "#PLAYERNAME2#", victim);
+	// HUD_HUD_KILLEDBY_MYSELF names the one who died as #PLAYERNAME#
+	// (0x007518d0, 0x00759bf0 fill it with the player's name).
+	line = replaced(line, "#PLAYERNAME#", victim);
 	push({"\xa7" "1" + line + "\xa7" "0", colorOf(color), 1, false});
 }
 

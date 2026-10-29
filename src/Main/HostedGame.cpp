@@ -1445,6 +1445,10 @@ std::vector<uint8_t> HostedGame::playerStateOf(int player, size_t& bits) const
 		s.player.squad = p.squad;
 		s.player.squadLeader = p.squadLeader;
 		s.player.commander = p.commander;
+		// The stats' rank (mask 0x4000, rank + 1; the client's 0x005a53b0):
+		// the name tags' rank icons and the scoreboard.
+		s.mask |= 0x4000;
+		s.player.rank = p.rank;
 		// The time outside the combat area (+0x294, mask 0x800: the
 		// client's "TIME UNTIL PUNISH" countdown): the snapshot's byte is
 		// (u8)floor(+0x294) (0x00592410 at 0x592856), no clamp, in 9 bits

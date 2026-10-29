@@ -148,13 +148,19 @@ ObjectTemplate* ObjectTemplateManager::create(uint32_t classId, const std::strin
 		m_active = nullptr; // the class manager can't create it
 		return nullptr;
 	}
-	uint32_t flags = m_loading ? TemplateFlags::Loading : 0;
-	const uint32_t id = (flags & TemplateFlags::ClientOnly) ? m_nextClientOnlyId++ : m_nextId++;
+	const uint32_t flags = m_loading ? TemplateFlags::Loading : 0;
 	const auto factory = m_factories.find(classId);
 	std::unique_ptr<ObjectTemplate> objectTemplate = factory != m_factories.end()
-		? factory->second(classId, typeNameOf(classId), name, id)
-		: std::make_unique<ObjectTemplate>(classId, typeNameOf(classId), name, id);
-	objectTemplate->setFlags(flags);
+		? factory->second(classId, typeNameOf(classId), name, 0)
+		: std::make_unique<ObjectTemplate>(classId, typeNameOf(classId), name, 0);
+	// 0x0070a700: the loading flag added to what the class set, then the
+	// id from the client-only count (from 0x1000000) for a template its
+	// class made client-only (flag 0x2000: the sounds), else from the
+	// network-shared count, so a dedicated server (no sounds) and its
+	// clients number the shared templates alike.
+	objectTemplate->setFlags(objectTemplate->flags() | flags);
+	const uint32_t id = (objectTemplate->flags() & TemplateFlags::ClientOnly) ? m_nextClientOnlyId++ : m_nextId++;
+	objectTemplate->setId(id);
 	if (m_currentFile) {
 		objectTemplate->setCreationFile(m_currentFile());
 	}

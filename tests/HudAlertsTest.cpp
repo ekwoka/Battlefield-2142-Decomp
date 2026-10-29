@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -592,4 +593,52 @@ TEST(HudAlerts_TutorialEvents)
 	tutor.enableTutorial(0x18);
 	CHECK(tutor.tutorial(hudManager, c, 0.1f));
 	CHECK(hudManager.string("IngameHelpString") == "HUD_HELP_COMMANDER_commanderApply");
+}
+
+// The other raisers' messages: 0x39 bombardmentDamaged on the commander
+// screen (0x007a9500), 0x16 UAVplaced never shown (no case in 0x00646cb0),
+// 0x41 useUnlock on the spawn screen's kits (menu state 1), 0x17 / 0x22
+// placement states for the event-only callForTarget's neighbours.
+TEST(HudAlerts_TutorialEventCallers)
+{
+	hud::HudManager hudManager(nullptr);
+	menu::HelpPopups tutor;
+	menu::HelpPopups::Context c;
+	c.playing = true;
+	c.menuOpen = true;
+	c.menuState = 0x10;
+	tutor.enableTutorial(0x16);
+	tutor.enableTutorial(0x39);
+	CHECK(!tutor.tutorial(hudManager, c, 0.1f)); // not on the commander screen
+	c.commanderScreen = true;
+	// The commander screen's own messages come first; then the damaged
+	// asset's, never UAVplaced.
+	std::set<std::string> shown;
+	for (int i = 0; i < 40; ++i) {
+		if (tutor.tutorial(hudManager, c, 10.5f)) {
+			shown.insert(hudManager.string("IngameHelpString"));
+			tutor.update(hudManager, {}, menu::HelpPopups::kShowSeconds);
+		}
+	}
+	CHECK(shown.count("HUD_HELP_COMMANDER_bombardmentDamaged") == 1);
+	CHECK(shown.count("HUD_HELP_COMMANDER_UAVplaced") == 0);
+	menu::HelpPopups kits;
+	menu::HelpPopups::Context k;
+	k.playing = true;
+	k.spawnScreen = true;
+	k.menuState = 0x13;
+	kits.enableTutorial(0x41);
+	kits.disableTutorial(0x3f);
+	kits.disableTutorial(0x40);
+	kits.disableTutorial(0x42);
+	bool useUnlock = false;
+	for (int i = 0; i < 3 && !useUnlock; ++i) {
+		k.menuState = i == 2 ? 1 : 0x13;
+		if (kits.tutorial(hudManager, k, 10.5f)) {
+			useUnlock = hudManager.string("IngameHelpString") == "HUD_HELP_SPAWNSCREEN_KITTAB_useUnlock";
+			CHECK(!useUnlock || k.menuState == 1);
+			kits.update(hudManager, {}, menu::HelpPopups::kShowSeconds);
+		}
+	}
+	CHECK(useUnlock);
 }
