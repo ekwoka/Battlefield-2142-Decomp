@@ -8698,7 +8698,17 @@ ask whether it's done.
   folder, see Local profiles), run at start-up after the game's defaults. The options pages start from
   their values and write theirs back on apply (the pages' VoiceOverVolume
   is `helpVoiceVolume`, NumberOfVoices `forceNumberOfVoices`, BloomEnabled
-  `setUseBloom`). Applied: the volumes (also without the menu), the bots,
+  `setUseBloom`, MapIconTransparency `setMapIconAlphaTransparency`,
+  HelpPopUps `setHelpPopups`). SwiffPlayer converts on the HUD page: its
+  HUD, minimap and icon sliders are transparencies 0..1 against the
+  object's alphas 0..255 (get `1 - alpha/255`, 0x100326b0, 0x10032620,
+  0x10032590; set `255 - t*255`, 0x100311b0, 0x10031140, 0x100310d0), the
+  crosshair is one number `a << 24 | r << 16 | g << 8 | b` (0x10032310,
+  set from four arguments by 0x10030d80) and the camera-shake radio is
+  inverted (0x10030180 / 0x100315d0). The audio page's radios read
+  `getSelectedProvider` / `getSelectedSoundQuality` (0x100108c0,
+  0x100109c0: the object's provider and quality by name; the defaults
+  "software" and "Medium", 0x004960a0). Applied: the volumes (also without the menu), the bots,
   `setCrosshairColor` (the HUD's CrossHairColor* variables), help pop-ups,
   bloom and dynamic shadows (their own systems' methods still run).
   Stored and exposed only: the video qualities (the renderer's), camera

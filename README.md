@@ -133,12 +133,16 @@ build/native/src/Main/bf2142 --game "source/Battlefield 2142" \
 # E enters and leaves a vehicle nearby (then W/S drive and brake, A/D steer;
 # F1..F8 change seats: a gunner's seat aims with the mouse and fires;
 # 1..9 take the kit's weapon of that slot: 1 knife, 2 sidearm, 3 primary;
+# R reloads a magazine that isn't full;
 # the right button zooms a weapon that zooms and sets off your C4;
 # C switches between first person (the default: arms and weapon, a seat's
 # own camera in vehicles) and the chase view; --unlock-all gives every kit unlock)
 #   --play 2
 #   --camera-mode third          (start in the chase view; screenshots too)
 #   --zoom                       (a screenshot's soldier zooms in after firing)
+#   --actions "reload wait:60 firemode fire:10 item:2 prone:20 jump"
+#                                (a screenshot's soldier's inputs, a tick each or a count,
+#                                 printing the weapon in hand after each)
 # with --screenshot: put a vehicle before the soldier, get in and drive it
 # (--seat N: stay aboard in seat N for the shot)
 #   --drive eu_fav [--seat 2]
