@@ -370,6 +370,15 @@ TEST(NetGame_SoldierInputMapping)
 	const net::PlayerMove move = net::playerInputFrom(soldier).toMove(0);
 	CHECK(move.axes[net::kPIThrottle] == 100 && move.trigger(net::kPIFire) && move.trigger(net::kPILie));
 	CHECK(move.trigger(net::kPIWeaponSelect1 + 1) && !move.trigger(net::kPICrouch));
+	// The wheel: c_PINextItem / c_PIPrevItem (48 / 49), each move's own.
+	CHECK(!move.trigger(net::kPINextItem) && !move.trigger(net::kPIPrevItem));
+	for (const int step : {1, -1}) {
+		soldier.itemStep = step;
+		const net::PlayerMove wheel = net::playerInputFrom(soldier).toMove(1);
+		CHECK(wheel.trigger(net::kPINextItem) == (step > 0) && wheel.trigger(net::kPIPrevItem) == (step < 0));
+		net::MoveInputState state;
+		CHECK(net::soldierInputFromMove(wheel, state).itemStep == step);
+	}
 }
 
 namespace {
@@ -1059,6 +1068,28 @@ TEST(NetGame_RemoteWorldMovesGhosts)
 	const net::RemotePlayer* p = world.player(1);
 	CHECK(p && p->score == 40 && p->kills == 4 && p->deaths == 2 && p->ping == 60);
 	CHECK(!world.object(90)); // a player's ghost is no object
+	CHECK(s && s->ladder == 0);
+
+	// On a ladder (0x20000: the ladder's id and the place on it), then off (0).
+	for (const int ladder : {3, 0}) {
+		net::GhostBlock next;
+		next.present = true;
+		next.tick = 11;
+		next.control = control;
+		net::NetworkableState climbing = soldierState;
+		climbing.mask |= 0x20000;
+		climbing.ladder = ladder;
+		climbing.ladderPosition = 0.4f;
+		next.updates.push_back(stateUpdate(41, soldierHints, &reference, climbing));
+		net::BitWriter w;
+		net::writeGhostBlock(w, next);
+		net::BitReader r(w.data().data(), w.data().size());
+		net::GhostBlock read;
+		CHECK(net::readGhostBlock(r, read));
+		world.apply(read);
+		s = world.object(41);
+		CHECK(s && s->ladder == ladder && near(s->ladderPosition, ladder ? 0.4f : 0.0f, 0.001f));
+	}
 }
 
 namespace {

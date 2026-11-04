@@ -1419,6 +1419,24 @@ the twist, pitch within ±85. Rewritten: `GameWorld::stepSeatedLook`,
 `seatedSoldierView` and `PlayerCamera::view`. Not decoded: whether a
 passenger's own weapon fires there (the open seats carry none).
 
+On a joined client the seated look comes from the server: the soldier's
+networkable (`0x005fc1a0` fills masks 2 and 4 from `+0x25c` and `+0x278`
+whatever the soldier does; a seat without weapons carries the occupant's
+soldier state in its own networkable, `0x00605b00`), and the client's
+reader (`0x005fcdb0`) sets them back, so its `0x00587a30` turns the body
+and the seat's LookAroundTrigger takes it as on the server. The rewrite's
+server sends the seated `+0x25c` / `+0x278` (PlayerInfo `seatBodyYaw`,
+`seatTwist`; no catch-up) in both, and its client poses the other
+players' seated soldiers by the seat's animation system
+(`GameWorld::animateRemoteSeated`, main.cpp's ghost loop: the seat
+ghost's part is the seat, its occupant state's yaw the body's turn, else
+the soldier's own): Ry(+0x25c) × the seat's turn on the vehicle object's,
+at the ghost's place (the server's, which carries the seat's mount), the
+LookAroundTrigger at +0x25c / 360, hidden in a seat without
+seatAnimationSystem, the weapon put away. Not on the client: a mount's
+turret turn in the rotation and the hands' IK on the grips (neither is in
+the soldier's state) (`RagDoll_RemoteSoldierSeatedAndOnLadder`).
+
 **ToggleCameraComp** (template `0x005db120`; changeCameraId `+0x14` −1,
 changeCameraViewMode `+0x18` 2, startCameraId `+0x1c` −1,
 startCameraViewMode `+0x20` 2, useProjectileCamera `+0x24`,
@@ -6072,9 +6090,25 @@ Rewritten in `src/Voip`:
 - `VoipClient`: the client.
 - `VoiceChat`: settings, events, role and keys around the client, on its
   own thread in the game.
-- `VoipNatives`: the menu's `dice.bf2.Sound.voip*` natives.
+- `VoipNatives`: the menu's `dice.bf2.Sound.voip*` natives (SwiffPlayer
+  0x10059fa0..0x1005adf0). They work only after voipInitialize
+  (0x10059fa0, flag DAT_1012c004), which opens the devices and loads
+  AudioSettings' playback / capture volumes, boost and threshold into the
+  client. Every setter writes the client and the AudioSettings object
+  alike: voipSetEnable (0x1005a240) slot 0x3c and the client's disable
+  (0x98), voipSetRecieveVolume (0x1005a850) 0x44, voipSetTransmitVolume
+  (0x1005a6e0) 0x4c, voipSetThresholdVolume (0x1005a9c0) 0x54, voipSetBoost
+  (0x1005aac0) 0x5c. voipGetEnable (0x1005a350) reads AudioSettings (0x38),
+  false before voipInitialize; the other getters read the client.
+  voipStartTest (0x1005a470) runs the loopback with the threshold at 0 and
+  voipStopTest (0x1005a5b0) puts back the threshold set meanwhile (client
+  and AudioSettings). Push-to-talk (0x1005acb0 / 0x1005adf0) is the
+  client's alone. MenuBindings keeps inert stand-ins (voipInitialize
+  false) for a menu without voice chat (`Voip_NativesWriteAudioSettings`).
 
-`bf2142` binds the natives and applies `AudioSettings.Voip*`. On a joined
+`bf2142` binds the natives over MenuBindings' stand-ins, writing through
+to its AudioSettings (`MenuBindings::storeSetting`), and applies
+`AudioSettings.Voip*`. On a joined
 server it feeds the data block, the voice events and the squad to
 VoiceChat, and the viewer feeds the push-to-talk and leader-channel keys.
 
@@ -6435,10 +6469,37 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   weaponHud.displaySelectOnActivation (block `+0xd9`; 10 shipped
   templates) opens it, for 2 s (`+0x20` = 2.0, menu state 0xb). The
   rewrite: a seat's change of PIFire weapon with displaySelectOnActivation
-  opens the list for 2 s; a key's pick 0.4 s with the key flashing. Not
-  rewritten: the in-game mouse wheel (the rewrite's wheel reaches only the
-  menus, and how the wheel's selection is taken up isn't traced); on foot
-  any change of the weapon in hand opens the list.
+  opens the list for 2 s; a key's pick 0.4 s with the key flashing, on
+  foot as in a seat (the key's pick `0x004d2a50` works the control
+  object's weapon list 0 either way; `0x00755d50` sets the 0.4 s and state
+  0xb once the key's weapon is the active one).
+
+  **The wheel and the pick** (`0x00755d50`, the HUD's input pass, run on
+  the frame's input before the player's control object takes it): with
+  the list allowed (above), the menu state 0 or 0xb and fire (input 8) not
+  pressed, a wheel step (c_PINextItem 0x30 / c_PIPrevItem 0x31, Controls.con's
+  `addAxisToTriggerMapping c_PINextItem c_PIPrevItem IDFMouse IDAxis_2`)
+  sets the list's open time (`+0x20`) to 2.0 and state 0xb when it isn't
+  open, then moves the selection: `0x0079c1e0` the next slot if it is
+  usable (the entry's `+8`), else the first if usable, else nothing;
+  `0x0079c230` the previous if usable, else the last if usable, else the
+  first. A move selects by item index (`0x0079c120`: the open time anew,
+  the HUD sound "weaponOver"). The pick: in state 0xb a press of fire
+  takes the selected entry's item index + 0xd, clamped to 0xe..0x16
+  (`0x0079bdb0`), and presses that input (PIWeaponSelect1..9, `0x00583880`
+  sets the float when the mask has it), clears fire's float (input 8), and
+  sets the list's `+0x38` to the time + `+0x30` (0.3, its constructor's).
+  In states 0, 10 and 2 fire is cleared while the time is under `+0x38`:
+  the pick's click and a held fire don't shoot for 0.3 s after the list
+  shuts. The wheel's input is not cleared: it also reaches the weapon
+  (the airburst distance below), whose range mode is on only zoomed in,
+  and zoomed in (the firearm's slot 300) the list isn't allowed. The
+  rewrite: `menu::ItemListInput` (main.cpp's itemListInput in both input
+  handlers), `ItemSelection::next` / `previous` / `selectedItem`, the
+  Viewer counting the wheel in play by the control map's axis-to-trigger
+  bindings (`PlayerInput::itemStep`, `SoldierInput::itemStep`, sent as
+  PIPrevItem / PINextItem) (`HudItemSelection_MouseWheel`). Not traced:
+  the active weapon's `+0x14` bit 0 that also forbids the list.
 - **canBeSpotted** (block `+0xc2`, 1 by default): the map node's spot
   picks (`0x007925a0`, `0x007926c0`: within 70) skip an object without it
   unless it is alwaysShowOnMinimap (`+0xb1`); also read by `0x0075bfe0`
@@ -6462,9 +6523,27 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   PlayerStamina `+0x1d0`, PlayerStaminaShow `+0x2a9`,
   PlayerStaminaTextStringShow `+0x2b2` (`+0x238`) (main.cpp; a joined
   game's from the prediction's stamina, restored from the soldier
-  networkable's 0x8000 part). The rewrite's vehicles keep no stamina of
-  their own (a PCO's sprintRecoverTime / sprintDissipationTime, `+0x458` /
-  `+0x45c`, are the game rules'), so VehicleStamina stays 1.
+  networkable's 0x8000 part). The control object's slots `0x108` /
+  `0x100` are `0x0059d950` / `0x0059d210` on its `+0x184` interface, its
+  SprintStamina at `+0x2d4` (the soldier's at `+0x360`): `+0x2ec` its
+  stamina, `+0x2f2` its sprinting. A PlayerControlObject's (the vehicle
+  boost): entering (`0x005cdd60`, `0x005ce600`) configures it
+  (`0x00645790` with sprintDissipationTime `+0x45c`, sprintRecoverTime
+  `+0x458`, sprintLimit `+0x460`, 1, 1) and clears its flags
+  (`0x00645780`; the stamina stays); the driver's sprint key's events
+  (0x29 held, 0x2a pressed: `0x005cacf0` → `0x00645760`) ask for it, and
+  the PCO's update (`0x005c8e70`) steps it (`0x006457f0` with no block, no
+  recovery delay and the tick's time) while sprintFactor (`+0x464`, slot
+  `0x114`, 2.5 by the constructor) is over 0. Without a dissipation time
+  it never starts, so only the FAVs boost (eu_fav / as_fav.tweak: 5 s, 15
+  s, limit 0.2, factor 2.25). While it sprints a newCar2's driven wheels
+  (`0x006b7910`: the first parent with interface 0xc4c5) and an Engine's
+  thrust (`0x0064df20`) are times sprintFactor; the walkers' 1.3 is the
+  raw key's (`0x00650b20`, input 13). The rewrite: `Vehicle::sprint`
+  (`m_sprint`, `boosting`), `GameWorld::vehicleStamina`, and the HUD's
+  VehicleStamina* for the driver (a seat's own stamina, never configured,
+  is 1); a joined game's vehicles carry it to no client: 1 there
+  (`Vehicle_SprintBoost`).
 - **The child HUD** (vehicleHud.useChildHud, block `+0xb9`; the weapon
   HUD's frame `0x007c38c0`): a seat without a gun runs the weapon HUD again
   for the soldier (player slot `0xb4`) and, with or without one,
@@ -7328,8 +7407,9 @@ keep their own one-per-owner paths).
   PIAltFire toggles the mode: none ships). On fire (`0x005d4d80`) a
   GenericProjectile gets the distance (`+0x26c`, flag `0x800`) when on and
   at least 1; its update's end (`0x005b3e60`) sets it off that far from
-  its start. `GameWorld::stepBurstRange`, `stepBurstDistance` (the wheel's
-  binding isn't wired in main yet), `stepProjectiles`.
+  its start. `GameWorld::stepBurstRange`, `stepBurstDistance` (the
+  mouse wheel's c_PINextItem / c_PIPrevItem, `SoldierInput::itemStep`, a
+  step a tick on the server's input as on ours), `stepProjectiles`.
 - `collision.bouncing` (the collision template's `+0xd`): the projectile's
   slot 51 (`0x005b5390`, after a hit that doesn't go through, from
   `0x005a39d0`) gives the ricochet component the first say, then keeps a
@@ -8552,6 +8632,30 @@ forward by ladder-end-camera-offset (0.4) × (1 − cos(the metres past top −
 `AnimationState::setTimeOverride`, `GameWorld::ladderView` and
 `PlayerCamera::view` (no first-person models on a ladder). Not
 rewritten: the nudge (slot 103).
+
+On a joined client: the Ladder's id (`+0x184`) is a counter the
+constructor (`0x0059fb00`) takes from `DAT_00a01454` (from 1, back to 1
+when the registry `DAT_00a69c3c` empties, `0x0059f5a0`), so the level's
+ladders have the same ids, in the same order, on every machine. The
+soldier networkable's 0x20000 part (`0x005fc1a0`: the soldier's `+0x18c`
+interface slot 0x84, 8 bits) is that id, 0 off a ladder, and with one the
+place on it in 12 bits (`0x0059ebf0`: the container's height less the
+ladder's bottom `+0x198` over its length `+0x18c`, the box's height,
+clamped to 0..1). A client's reader (`0x005fcdb0`) leaves the old ladder
+on a change (`0x0059d440`), enters the new one (`0x0059fbf0`: a
+LadderContainer of its own at the ladder, the soldier seated in it) and
+each update moves the container to the height the place gives
+(`0x0059ec80`: the place × the length + the bottom); the container's own
+update then poses the soldier by that height (`0x0059f380`). The
+rewrite's server sends the id (the ladder's index + 1, `PlayerInfo`
+`ladder` / `ladderPosition`; always, as its states are whole, so the 0
+that ends it gets there) and its client (`RemoteObject::ladder`) poses the
+soldier ghost by the container's climb at that height
+(`GameWorld::animateRemoteSoldier` with `RemoteSoldierState::ladder`,
+`ladderPoseInput`, the climb's up speed from the height's change), the
+weapon put away (`NetGame_RemoteWorldMovesGhosts`,
+`RagDoll_RemoteSoldierSeatedAndOnLadder`). The ladder clips leave the
+weapon's mesh nodes unset; nothing is held.
 
 `Object.disableChildren 1` (`0x006ed98a`, the object's slot `0x13c`,
 `0x006f6fd0`) sets `+0x159` and gives each child updateFlags (slot `0x54`,
@@ -10992,8 +11096,12 @@ The commands (constructor / execute slot), and where the rewrite has them:
   aim's look and goes by throttle and strafe against it (the plan's move
   and aim share the look in the original). The rest of the 14.7 KB
   builder is the rewrite's BotManager::fire.
-  Stand-ins: the target's Mobile slot 0x78 (0x008a1960: a soldier's
-  interface 0xc4c5 slot 0x108, not traced) is its speed; a human's
+  The target's Mobile slot 0x78 (0x008a1960: its interface 0xc4c5 slot
+  0x108, 0x0059d950 on the soldier's and the PlayerControlObject's
+  interfaces) is its sprint stamina, not a speed: the SprintStamina's
+  +0x18 (0x006457f0 writes it), the soldier's +0x378 or a vehicle PCO's
+  +0x2ec, 1 when rested (`WeaponChoice::targetMotion`: PlayerInfo
+  `stamina`, a vehicle's `GameWorld::vehicleStamina`). Stand-ins: a human's
   attention on the bot (the sensing agent's stamp 0x100eb7f0, whose
   writer wasn't traced) is a round of it having passed the bot; every
   sighting is clear (no see-through materials); vehicle guns have no
@@ -11003,15 +11111,46 @@ The commands (constructor / execute slot), and where the rewrite has them:
   its per-side radius (+0x98 + 4 team: the spot's distance to the area's
   +0x118 point) the control point's radius. Left out: C4's guard on a
   moving target (|Mobile slot 0x18 · the bot object's +0x80| over 4, the
-  object field not traced); the guided weapons' own fire plan on foot
-  (0x10078570, picked when +0x6c isn't 0 and the bot is ITSoldier: the
-  same shape as the vehicle plan's Mobile branch, with its own fire
-  statements 0x100781e0, the guided statement 0x100d4f10 and a half-reach
-  distance condition 0x100d4480; not rewritten). The target's speed: the
-  soldier's slot 0x108 is 0x0059d950, the PlayerControlObject interface's
-  (vtable 0x0096dcb8 at the object's +0x184) +0x168, the object's +0x2ec;
-  its writer wasn't found, so the speed stays the stand-in. `+0x209` falling with the
+  object field not traced). `+0x209` falling with the
   target condition 0x100dc730 is taken as the aim no longer lobbing.
+- **The guided weapons' plan on foot** (0x10078570, which BBFire's plan
+  maker picks over 0x100795a0 for an ITSoldier bot whose weapon's +0x6c,
+  the AI weapon's slot 0xf8 — guidanceKind: heat-seeking 1, laser 2, wire
+  3, TV 4 — isn't 0). A Parallell (0x100cddb0, 4) of:
+  - the moves, under an If (forced, frozen) on the target in view, as the
+    vehicle plan's (not in view: the chase, ForgetObject, the failing
+    statement); in view an If (not forced) on OR (0x100cf1b0) of two
+    ObjectDistance conditions built by 0x100d4480 (vtable 0x1011a6d8,
+    evaluated by 0x100d4620; one distance, +0x14 the bot's memory of the
+    target, +0x16 "farther than"): farther than half the weapon's
+    maxRange, or within its minRange. Its move is MoveToObjectFinding
+    (0x100cff90, mode 2) keeping 0.85 maxRange with the near limit
+    max(15, 1.1 minRange) (0x100317e0 is a max) at the Mobile's speed and
+    half of it, MoveToFinding (0x100d11c0, 0.75 of it) at a target
+    without a Mobile part: done when the distance lies between the two,
+    nearer it backs off. Between minRange and half the reach the bot
+    holds its ground;
+  - the trigger: If (forced, frozen) AND (0x100d49a0) of the target
+    conditions' memo (0x100dc400 / 0x100dad60, not for a weapon of type
+    10) and ObjectDistance [0.9 minRange, 1.1 maxRange] (0x100d44c0, the
+    memory): the guided fire statements (0x100781e0), else the guided aim
+    alone (0x100d4f10). The statements: a Parallell (0xe) of the aim
+    (0x100d4f10 at the target) and BAPATrigger (0x100d3110) on the weapon's
+    fire input (slot 0x64), held unless an OR holds — the chosen weapon not
+    in hand (0x100da090, its 0x100da0c0); for guidance 1 and 2 no lock (NOT
+    0x100d9fd0: the weapon's slot 0xac for the bot gives no object,
+    0x100da010); the look more than 5 degrees off the aim for guidance 2,
+    3 otherwise (NOT 0x100d9d90, its 0x100d9e00 against cos of the bound:
+    DAT_101275c0 is pi/180, DAT_101275e0 5). No firing pose, teammate test
+    or explosive condition;
+  - the order's spot (0x100d11c0 when its memo 0x100d8e40 over AND of
+    0x100db550 and 0x100db3b0 at 40 m holds) and, at the end, the reload
+    (BAPATrigger 0x20).
+  Rewritten: `BotManager::fire`'s guided branch (`guidedMoveStep`,
+  `guidedFire`) (`Bots_GuidedPlanOnFoot`). Stand-ins: the order's spot is
+  the normal plan's (`fireKeepsToOrder`; 0x100db550 / 0x100db3b0 not
+  decoded), the moves are the rewrite's walk (steer to close in, the
+  throttle back), and a lock is `GameWorld::weaponLock`'s state 2.
 - **Change:** the infantry-map reach test for vehicles (the Mobile's
   per-map points +8/+0x1c/+0x30 aren't kept: every vehicle counts) and the
   room test for ITAir vehicles that aren't ITHelicopter (0x1006c3e0). The

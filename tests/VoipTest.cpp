@@ -21,6 +21,7 @@
 #include <cmath>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <thread>
 
@@ -719,6 +720,63 @@ TEST(Voip_VoiceActivityAndMicTest)
 	}
 	CHECK(!quietClient.transmitting());
 	CHECK(quiet.loudestSince(0) < 50);
+}
+
+// The options page's natives write through to AudioSettings (SwiffPlayer
+// 0x1005a240 and its neighbours) and work only after voipInitialize
+// (0x10059fa0); the mic test runs with the threshold at 0 (0x1005a470)
+// and puts the remembered one back (0x1005a5b0).
+TEST(Voip_NativesWriteAudioSettings)
+{
+	VoiceChat chat(std::make_unique<MemoryDevice>());
+	ui::NativeRegistry natives;
+	std::map<std::string, double> audio {{"AudioSettings.VoipPlaybackVolume", 0.75}, {"AudioSettings.VoipEnabled", 1}};
+	VoipSettingsStore store;
+	store.store = [&](const std::string& name, double value) { audio[name] = value; };
+	store.read = [&](const std::string& name, double fallback) {
+		const auto it = audio.find(name);
+		return it == audio.end() ? fallback : it->second;
+	};
+	bindVoipNatives(natives, chat, store);
+	ui::avm1::Interpreter vm;
+	const auto call = [&](const char* member, std::vector<ui::avm1::Value> args = {}) {
+		return natives.call(vm, "dice.bf2.Sound", member, args);
+	};
+	// Nothing before voipInitialize.
+	CHECK(!ui::avm1::toBoolean(call("voipGetEnable")));
+	call("voipSetEnable", {ui::avm1::Value(false)});
+	CHECK(chat.settings().enabled);
+	CHECK(audio["AudioSettings.VoipEnabled"] == 1);
+
+	CHECK(ui::avm1::toBoolean(call("voipInitialize")));
+	CHECK(std::fabs(chat.settings().playbackVolume - 0.75f) < 1e-6f); // loaded from AudioSettings
+	CHECK(ui::avm1::toBoolean(call("voipGetEnable")));
+	call("voipSetEnable", {ui::avm1::Value(false)});
+	CHECK(!chat.settings().enabled);
+	CHECK(audio["AudioSettings.VoipEnabled"] == 0);
+	CHECK(!ui::avm1::toBoolean(call("voipGetEnable")));
+	call("voipSetEnable", {ui::avm1::Value(true)});
+	CHECK(chat.settings().enabled && audio["AudioSettings.VoipEnabled"] == 1);
+	call("voipSetTransmitVolume", {ui::avm1::Value(0.4)});
+	CHECK(std::fabs(audio["AudioSettings.VoipCaptureVolume"] - 0.4) < 1e-6);
+	call("voipSetRecieveVolume", {ui::avm1::Value(0.3)});
+	CHECK(std::fabs(audio["AudioSettings.VoipPlaybackVolume"] - 0.3) < 1e-6);
+	call("voipSetBoost", {ui::avm1::Value(true)});
+	CHECK(audio["AudioSettings.VoipBoostEnabled"] == 1 && chat.settings().boost);
+
+	// The test: threshold 0; a new threshold only remembered until it stops.
+	call("voipSetThresholdVolume", {ui::avm1::Value(0.2)});
+	CHECK(std::fabs(chat.settings().captureThreshold - 0.2f) < 1e-6f);
+	call("voipStartTest");
+	CHECK(chat.testing() && chat.settings().captureThreshold == 0);
+	call("voipSetThresholdVolume", {ui::avm1::Value(0.35)});
+	CHECK(chat.settings().captureThreshold == 0);
+	CHECK(std::fabs(audio["AudioSettings.VoipCaptureThreshold"] - 0.2) < 1e-6);
+	CHECK(std::fabs(vm.toNumber(call("voipGetThresholdVolume")) - 0.35) < 1e-6);
+	call("voipStopTest");
+	CHECK(!chat.testing());
+	CHECK(std::fabs(chat.settings().captureThreshold - 0.35f) < 1e-6f);
+	CHECK(std::fabs(audio["AudioSettings.VoipCaptureThreshold"] - 0.35) < 1e-6);
 }
 
 TEST(Voip_ChatEventsAndNatives)

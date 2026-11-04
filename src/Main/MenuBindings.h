@@ -216,6 +216,8 @@ public:
 	std::function<void()> onSettingsApplied;
 	// A setting by "Object.Name" ("AudioSettings.EffectsVolume") as a number.
 	double setting(const std::string& name, double fallback) const;
+	// Sets a setting as if a page had applied it (written down at once).
+	void storeSetting(const std::string& name, const ui::avm1::Value& value);
 	// The same as text ("" when unset or not text).
 	std::string text(const std::string& name) const;
 

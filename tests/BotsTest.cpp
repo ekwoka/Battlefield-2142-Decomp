@@ -3945,3 +3945,66 @@ TEST(Bots_BoxAreaStatusRule)
 	CHECK(ai::boxAreaStatus(AreaStatus::Hostile, 1, 1, true, true) == AreaStatus::Hostile);
 	CHECK(ai::boxAreaStatus(AreaStatus::Owned, 0, 0, true, true) == AreaStatus::Owned);
 }
+
+// The guided weapons' plan on foot (AIDLL 0x10078570, its fire statements
+// 0x100781e0, the half-reach distance condition 0x100d4480): the move holds
+// between minRange and half the reach, closes to 0.85 maxRange from
+// farther and backs off to max(15, 1.1 minRange) from within minRange; a
+// soldier bot with a wire-guided launcher fires at a target within [0.9
+// minRange, 1.1 maxRange]; a heat-seeking one waits for a lock it can't
+// get on a soldier.
+TEST(Bots_GuidedPlanOnFoot)
+{
+	bool engaged = false;
+	CHECK(game::guidedMoveStep(engaged, 35, 20, 100) == 0 && !engaged); // holds
+	CHECK(game::guidedMoveStep(engaged, 95, 20, 100) == 1 && engaged);  // closes in...
+	CHECK(game::guidedMoveStep(engaged, 86, 20, 100) == 1);
+	CHECK(game::guidedMoveStep(engaged, 84, 20, 100) == 0 && !engaged); // ...to 85
+	CHECK(game::guidedMoveStep(engaged, 60, 20, 100) == 0 && !engaged); // past half the reach but within the band
+	CHECK(game::guidedMoveStep(engaged, 90, 20, 100) == 1 && engaged);
+	CHECK(game::guidedMoveStep(engaged, 80, 20, 100) == 0 && !engaged);
+	CHECK(game::guidedMoveStep(engaged, 12, 20, 100) == -1 && engaged); // within minRange: back
+	CHECK(game::guidedMoveStep(engaged, 21, 20, 100) == -1);            // to max(15, 22)
+	CHECK(game::guidedMoveStep(engaged, 22.5f, 20, 100) == 0 && !engaged);
+	CHECK(game::guidedMoveStep(engaged, 4, 5, 100) == -1 && game::guidedMoveStep(engaged, 14, 5, 100) == -1); // 15 m at least
+	CHECK(game::guidedMoveStep(engaged, 15.5f, 5, 100) == 0);
+
+	for (const char* system : {"TSWireGuided", "TSHeatSeeking"}) {
+		Field field;
+		world::ObjectTemplate* launcher = field.templates.find("eu_ar_rifle");
+		launcher->settings()["target.targetSystem"] = system;
+		world::ObjectTemplate* kit = field.templates.create("Kit", "test_kit");
+		kit->children().push_back({"eu_ar_rifle", {}, {}});
+		Console console;
+		game::BotSettings settings = scriptedSettings(console);
+		std::string out;
+		for (const char* line : {"weaponTemplate.create eu_ar_rifle", "weaponTemplate.minRange 20", "weaponTemplate.maxRange 100",
+				 "weaponTemplate.setStrength Infantry 5"}) {
+			console.execute(line, out);
+		}
+		game::BotManager bots(*field.world, settings);
+		const int bot = field.world->addPlayer("Bot", 2, true);
+		field.world->setKit(bot, "test_kit", "us_light_soldier");
+		field.world->spawnSoldier(bot);
+		field.move(bot, 0, 0);
+		const int enemy = field.soldier(1, false, 0, 35);
+		int nearRounds = 0;
+		for (int tick = 0; tick < 30 * 8; ++tick) {
+			// The target 35 m ahead of the bot, then 10 m (within 0.9 minRange).
+			game::GameWorld::PlayerInfo self;
+			field.world->playerInfo(bot, self);
+			const bool close = tick >= 30 * 6;
+			field.move(enemy, self.position.x, self.position.z + (close ? 10.0f : 35.0f));
+			const int before = field.fired(bot);
+			bots.update(1 / 30.0f);
+			field.world->tick(1 / 30.0f);
+			if (close && tick > 30 * 6 + 5) {
+				nearRounds += field.fired(bot) - before;
+			}
+		}
+		const bool wire = std::string(system) == "TSWireGuided";
+		std::printf("  %s: %d rounds, %d of them within 0.9 minRange\n", system, field.fired(bot), nearRounds);
+		CHECK(wire ? field.fired(bot) > 0 : field.fired(bot) == 0);
+		CHECK(nearRounds == 0);
+	}
+}

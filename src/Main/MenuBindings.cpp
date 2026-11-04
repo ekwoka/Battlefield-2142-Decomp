@@ -1857,16 +1857,21 @@ void MenuBindings::bindServerSettings()
 		n.setFunction(object, member, [](Interpreter&, const Args&) { return Value(); });
 	}
 	n.setFunction(kMessages, "getPunkBusterMessage", [](Interpreter&, const Args&) { return Value(""); });
-	// VoIP (no voice chat yet): off, the volumes at half.
-	n.setFunction("dice.bf2.Sound", "voipSetEnable", [](Interpreter&, const Args&) { return Value(); });
-	for (const char* member : {"voipInitialize", "voipStopTest", "voipStartTest", "voipSetBoost", "voipSetTransmitVolume",
-			 "voipSetRecieveVolume", "voipSetThresholdVolume"}) {
+	// The voice natives (dice.bf2.Sound.voip*) are Voip/VoipNatives'
+	// (voip::bindVoipNatives, which main.cpp binds over these with the
+	// voice chat and this object's AudioSettings). Without voice chat (a
+	// menu built alone, as in the tests) voipInitialize fails, as
+	// SwiffPlayer's (0x10059fa0) does without a voice manager, and the
+	// others do nothing.
+	n.setFunction("dice.bf2.Sound", "voipInitialize", [](Interpreter&, const Args&) { return Value(false); });
+	for (const char* member : {"voipSetEnable", "voipStopTest", "voipStartTest", "voipSetBoost", "voipSetTransmitVolume",
+			 "voipSetRecieveVolume", "voipSetThresholdVolume", "voipSetUsePushToTalk"}) {
 		n.setFunction("dice.bf2.Sound", member, [](Interpreter&, const Args&) { return Value(); });
 	}
 	n.setFunction("dice.bf2.Sound", "voipGetEnable", [](Interpreter&, const Args&) { return Value(false); });
-	n.setFunction("dice.bf2.Sound", "voipGetBoost", [](Interpreter&, const Args&) { return Value(false); });
-	for (const char* member : {"voipGetTransmitVolume", "voipGetRecieveVolume", "voipGetThresholdVolume"}) {
-		n.setFunction("dice.bf2.Sound", member, [](Interpreter&, const Args&) { return Value(0.5); });
+	for (const char* member : {"voipGetBoost", "voipGetTransmitVolume", "voipGetRecieveVolume", "voipGetThresholdVolume",
+			 "voipGetUsePushToTalk", "voipIsBoostEnabled", "voipSendingVoice", "voipGetSendingVoiceVolume"}) {
+		n.setFunction("dice.bf2.Sound", member, [](Interpreter&, const Args&) { return Value(); });
 	}
 	for (const auto& [key, value] : defaults) {
 		m_settings.emplace(key, value);
@@ -2092,6 +2097,20 @@ void MenuBindings::bindControls()
 	});
 	n.setFunction(kControlSettings, "getLastDuplicateInput", [](Interpreter&, const Args&) { return Value(""); });
 	n.setFunction(kControlSettings, "forceSetLastInput", [](Interpreter&, const Args&) { return Value(); });
+}
+
+// A value set outside the pages (the voice natives write the live
+// AudioSettings object, SwiffPlayer 0x1005a240 and the like): the page's
+// value and the applied one, written down at once.
+void MenuBindings::storeSetting(const std::string& name, const Value& value)
+{
+	m_settings[name] = value;
+	m_appliedSettings[name] = value;
+	saveSettings();
+	const size_t dot = name.find('.');
+	if (dot != std::string::npos) {
+		exportSettings(name.substr(0, dot + 1));
+	}
 }
 
 double MenuBindings::setting(const std::string& name, double fallback) const

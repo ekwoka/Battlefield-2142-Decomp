@@ -355,6 +355,16 @@ struct ExplosivePick {
 };
 bool explosivePick(const ExplosivePick& pick);
 
+// The guided weapons' plan's move on foot (AIDLL 0x10078570): an If (not
+// forced) whose condition is the target, by the bot's memory of it, farther
+// than half the weapon's maxRange (ObjectDistance 0x100d4480 with +0x16,
+// "farther than") or within its minRange, over MoveToObjectFinding
+// (0x100cff90, mode 2) keeping 0.85 maxRange with the near limit max(15,
+// 1.1 minRange) (0x100317e0 is a max), done when the distance lies between
+// the two. `engaged` is the If's running move; returns +1 to close in, -1
+// to back off, 0 to hold.
+int guidedMoveStep(bool& engaged, float distance, float minRange, float maxRange);
+
 // The AI weapon's guidance kind (+0x6c; BF2142.exe 0x00892be0 from the
 // weapon's slot 0x154 through 0x008923a0): GenericFireArm 0x005c1fa0 asks
 // its target component (+0x2c) slot 0xb4 (0x005f5b80), its template's
@@ -411,7 +421,7 @@ struct WeaponChoice {
 	bool targetInHandEmpty = false; // the target's weapon in hand has an empty magazine
 	bool targetTargetsMe = false; // the target's attention on the bot (see Bots.cpp)
 	bool targetMobile = true;     // the target has a Mobile part (+0x3c)
-	float targetMotion = 0;       // its Mobile slot 0x78 (see Bots.cpp)
+	float targetMotion = 0;       // its Mobile slot 0x78: the target's sprint stamina, 0..1 (see Bots.cpp)
 	bool c4Placed = false;        // the bot's +0x1b8 (vt+0x13c): a charge of its own is out
 	bool clearSighting = true;    // the memory item's flag 0x40 (seen clear) or 8
 	bool orderMove = false;       // the bot's +0x248 (vt+0x258)
@@ -815,6 +825,9 @@ private:
 		// back-off spot and when it was last chosen (a repath each second).
 		bool manoeuvre = false;
 		bool chase = false; // the lost target's chase (then forgotten)
+		// The guided plan's move on foot (0x10078570's If, not forced, over
+		// MoveToObjectFinding): running until the bot is within its band.
+		bool guidedMove = false;
 		physics::Vec3 backOff;
 		float backOffAt = -1e9f;
 		// The fire plan's target and weapon (0x1007cf10 keeps the plan, and
@@ -1101,6 +1114,10 @@ private:
 	// The goal object's urgency for the bot where it stands (its slot 1,
 	// as BBMoveTo asks it; bot +0x80, set by vt+0x38): no side effects.
 	float goalObjectUrgency(const Bot& bot, const GameWorld::PlayerInfo& self) const;
+	// The guided weapons' plan on foot (0x10078570): whether its trigger is
+	// held (see Bots.cpp); `guidance` the weapon's guidanceKind.
+	bool guidedFire(const Bot& bot, const GameWorld::PlayerInfo& self, const WeaponAi& weapon, int guidance,
+		const Known& known, bool inSight, const physics::Vec3& look, const physics::Vec3& toTarget) const;
 	bool fireKeepsToOrder(const Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& target,
 		physics::Vec3* spot = nullptr) const;
 	// Walks (InfanteryMoveTo) or drives (CarMoveTo/TankMoveTo) along a path

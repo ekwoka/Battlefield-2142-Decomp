@@ -190,6 +190,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | Left Ctrl / Z | Crouch / lie down |
 | R | Reload (weapons only reload by themselves when set to, as in the original) |
 | 1 … 9 | Kit slots: 1 knife, 2 sidearm, 3 primary … |
+| Mouse wheel | Item list: scroll through the kit (in a vehicle, where its HUD allows it), then fire to take the selected item; zoomed in with a rocket launcher that has a range counter, the airburst distance up / down |
 | E | Enter or leave a vehicle nearby |
 | F1 … F8 | Change seats |
 | F / X | In a seat: next weapon / flares or active defence (keys 1 … 9 pick a seat weapon; the alt-fire button arms a TV-guided missile) |

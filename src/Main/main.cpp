@@ -695,6 +695,24 @@ int g_remoteItemKey = 0;
 // (0x00754290 → the squad panel's +0x1e4, SELECTED_ALL_SQUADS).
 bool g_allSquads = false;
 bool g_remoteItemHeld = false;
+// A weapon key pressed on foot (0 none), until the weapon in hand changes
+// to it: the key's pick (0x004d2a50 -> 0x0079c190) opens the list.
+int g_footItemKey = 0;
+// The HUD's input pass over the item list (0x00755d50, ItemListInput),
+// which the input handlers run on the frame's input before the soldier
+// gets it; updateHud keeps what it needs.
+dice::hfe::menu::ItemListInput g_itemList;
+bool g_weaponZoomed = false;
+#if BF2142_HAS_RENDERER
+void itemListInput(ViewerOptions::PlayerInput& in)
+{
+	const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+	const std::string sound = g_itemList.apply(g_itemSelection, in.fire, in.item, in.itemStep, now);
+	if (!sound.empty() && g_hudSound) {
+		g_hudSound(sound);
+	}
+}
+#endif
 float g_hudTime = -1;
 // What the HUD shows now (HudWorld.h): the local round's, and a joined
 // game's while one runs (the console's HUD methods ask it).
@@ -1103,6 +1121,13 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		look.vehicle = vehicle->objectTemplate();
 		look.armor = max > 0 ? left / max : 1.0f;
 		look.seconds = dt;
+		// The control object's sprint (slots 0x108 / 0x100: the boost's
+		// stamina): the root PCO's for its driver, a seat's own (never
+		// configured: 1) for the others; a joined game's vehicles carry
+		// none to the client, 1.
+		if (game::GameWorld::PlayerInfo driver; !world.joined() && world.playerInfo(world.localPlayer(), driver) && driver.seat == 0) {
+			round.vehicleStamina(vehicle->id(), look.stamina, look.sprinting);
+		}
 		for (const auto& info : world.vehicleList()) {
 			if (info.object == vehicle->id()) {
 				const physics::Vec3& v = info.velocity;
@@ -1316,19 +1341,40 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			g_hudSound(sound);
 		}
 	}
-	// The item selection: opened when the weapon in hand changes, with the
-	// kit's weapons by slot (their weaponHud.selectIcon).
+	// The item selection on foot: the kit's weapons by slot (their
+	// weaponHud.selectIcon). A weapon key's pick opens it for 0.4 s with
+	// the key's slot flashing (0x004d2a50 -> 0x0079c190; the HUD's input
+	// 0x00755d50 sets +0x20 = 0.4 and state 0xb when the new weapon is the
+	// key's); the weapon-change event 2/0x20 (0x0079fd30(0)) for 2 s when
+	// the new weapon has weaponHud.displaySelectOnActivation.
+	g_itemList.allowed = false;
+	g_itemList.items.clear();
+	g_itemList.inHand = -1;
 	if (game::GameWorld::PlayerInfo me; world.playerInfo(world.localPlayer(), me) && me.alive && !inVehicle) {
+		std::vector<dice::hfe::menu::SelectItem> items;
+		for (const auto& [slot, name] : me.carried) {
+			items.push_back({slot, dice::hfe::menu::hudSetting(round.templates().find(name), "weaponHud.selectIcon"), true});
+		}
 		if (g_inHandSlot >= 0 && me.inHandSlot != g_inHandSlot) {
-			std::vector<dice::hfe::menu::SelectItem> items;
+			const world::ObjectTemplate* now = nullptr;
 			for (const auto& [slot, name] : me.carried) {
-				items.push_back({slot, dice::hfe::menu::hudSetting(round.templates().find(name), "weaponHud.selectIcon"), true});
+				now = slot == me.inHandSlot ? round.templates().find(name) : now;
 			}
-			g_itemSelection.open(items, me.inHandSlot);
+			if (g_footItemKey > 0 && g_footItemKey == me.inHandSlot) {
+				g_itemSelection.open(items, me.inHandSlot, 0.4f);
+				g_itemSelection.flash(me.inHandSlot);
+			} else if (dice::hfe::menu::hudNumber(now, "weaponHud.displaySelectOnActivation", 0) != 0) {
+				g_itemSelection.open(items, me.inHandSlot, 2.0f);
+			}
+			g_footItemKey = 0;
 		}
 		g_inHandSlot = me.inHandSlot;
+		g_itemList.allowed = !g_weaponZoomed;
+		g_itemList.items = std::move(items);
+		g_itemList.inHand = me.inHandSlot;
 	} else {
 		g_inHandSlot = -1;
+		g_footItemKey = 0;
 	}
 	// In a seat a weapon key's pick opens it (0x004d2a50 -> 0x0079c190): the
 	// list is the seat's PIFire group (0x0079c470: the control object's
@@ -1380,6 +1426,19 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		seatActiveWas = nullptr;
 		seatVehicleWas = 0;
 		seatWas = -1;
+	}
+	// In a seat the wheel's list is the seat's (0x0079c470), only with the
+	// seat's vehicleHud.useSelectionIcons; the active PIFire weapon selected.
+	if (game::GameWorld::PlayerInfo me; inVehicle && world.playerInfo(world.localPlayer(), me) && me.vehicle) {
+		const auto seats = round.vehicleSeats(me.vehicle);
+		if (me.seat >= 0 && static_cast<size_t>(me.seat) < seats.size()) {
+			const auto& seat = seats[static_cast<size_t>(me.seat)];
+			const world::ObjectTemplate* seatTemplate = round.templates().find(seat.name);
+			g_itemList.allowed = dice::hfe::menu::hudNumber(seatTemplate, "vehicleHud.useSelectionIcons", 0) != 0;
+			g_itemList.items = dice::hfe::menu::seatSelectItems(seat, seatTemplate,
+				[&round](const std::string& name) { return round.templates().find(name); }, me.carried);
+			g_itemList.inHand = static_cast<int>(dice::hfe::menu::hudNumber(world.seatGroupWeapon(0).weapon, "itemIndex", -1));
+		}
 	}
 	if (seatKey > 0 || seatActivation) {
 		game::GameWorld::PlayerInfo me;
@@ -3082,7 +3141,16 @@ int runGame(Options& options, Session& session)
 			session.voice = std::make_unique<dice::hfe::voip::VoiceChat>();
 			session.voice->runInBackground(true);
 		}
-		dice::hfe::voip::bindVoipNatives(menu.natives(), *session.voice);
+		dice::hfe::voip::VoipSettingsStore voiceStore;
+		voiceStore.store = [menuBindings](const std::string& name, double value) {
+			menuBindings->storeSetting(name, name == "AudioSettings.VoipEnabled" || name == "AudioSettings.VoipBoostEnabled"
+					? dice::hfe::ui::avm1::Value(value != 0)
+					: dice::hfe::ui::avm1::Value(value));
+		};
+		voiceStore.read = [menuBindings](const std::string& name, double fallback) {
+			return menuBindings->setting(name, fallback);
+		};
+		dice::hfe::voip::bindVoipNatives(menu.natives(), *session.voice, voiceStore);
 		applyVoiceSettings();
 		menuBindings->setProfileFile(dice::hfe::menu::MenuBindings::defaultProfileFile());
 		menuBindings->setStatsFile(dice::hfe::menu::MenuBindings::defaultStatsFile());
@@ -5762,6 +5830,24 @@ int runGame(Options& options, Session& session)
 				}
 				const net::RemoteObject* body = ghost ? client.world().object(ghost) : nullptr;
 				const auto found = ghost ? ghostObjects.find(ghost) : ghostObjects.end();
+				if (p.alive && p.vehicleGhost && p.soldierGhost && body && !body->ragdoll && found != ghostObjects.end()) {
+					// Seated: posed by the seat's system with its own look
+					// (GameWorld::animateRemoteSeated). The seat's occupant
+					// state (0x00605b00) carries the soldier's +0x25c, else
+					// the soldier's own networkable does.
+					const net::RemoteObject* seatGhost = client.world().object(p.vehicleGhost);
+					const auto vehicle = seatGhost ? ghostObjects.find(seatGhost->rootGhost ? seatGhost->rootGhost : p.vehicleGhost)
+												   : ghostObjects.end();
+					if (seatGhost && vehicle != ghostObjects.end()) {
+						float bodyYaw = body->hasAngles ? body->yaw : 0;
+						if (seatGhost->hasOccupantState && (seatGhost->occupantState.mask & 2)) {
+							bodyYaw = seatGhost->occupantState.yaw;
+						}
+						round.animateRemoteSeated(found->second, vehicle->second, seatGhost->part, bodyYaw, 1.0f / 30.0f);
+						animated.insert(found->second);
+					}
+					continue;
+				}
 				if (!p.alive || p.vehicleGhost || !body || body->ragdoll || found == ghostObjects.end()) {
 					continue;
 				}
@@ -5778,6 +5864,8 @@ int runGame(Options& options, Session& session)
 					: body->pose == 1        ? game::SoldierPose::Crouch
 					: body->pose == 3        ? game::SoldierPose::Swim
 											 : game::SoldierPose::Stand;
+				state.ladder = body->ladder; // 0x20000: the ladder and the place on it
+				state.ladderPosition = body->ladderPosition;
 				state.remoteFire = true;
 				state.player = p.id;
 				state.firing = p.fire[0].on;
@@ -6970,6 +7058,7 @@ int runGame(Options& options, Session& session)
 				};
 			}
 			localHud.scoreOf = scoreOf;
+			g_weaponZoomed = playerCamera.zoomLevel() > 0; // the firearm's slot 300 (its zoom)
 			updateHud(hudManager, hudWorld(), round, gameLogic, scoreboardHeld, commanderScreen);
 			{
 				// The vehicle's warnings: the seekers locked on it (their
@@ -7498,11 +7587,13 @@ int runGame(Options& options, Session& session)
 				return true;
 			};
 			viewer.onPlayerInput = [&session, &scoreboardHeld, &options, &playerCamera, &remoteLook, lastAimPitch = 0.0f,
-										toggleCameraWas = false](const ViewerOptions::PlayerInput& in) mutable {
-				scoreboardHeld = options.scoreboard || in.scoreboard;
+										toggleCameraWas = false](const ViewerOptions::PlayerInput& raw) mutable {
+				scoreboardHeld = options.scoreboard || raw.scoreboard;
 				if (!session.client) {
 					return;
 				}
+				ViewerOptions::PlayerInput in = raw;
+				itemListInput(in); // the HUD's pass first (0x00755d50)
 				// The look as we turn it (the server's angles lag behind).
 				remoteLook.yaw = std::remainder(remoteLook.yaw + in.turnDegrees, 360.0f);
 				remoteLook.pitch = in.aimPitchDegrees;
@@ -7537,8 +7628,10 @@ int runGame(Options& options, Session& session)
 				// updateHud).
 				input.switchSeat = in.seat;
 				input.selectItem = in.item;
+				input.itemStep = in.itemStep;
 				if (in.item > 0 && !g_remoteItemHeld) {
 					g_remoteItemKey = in.item;
+					g_footItemKey = in.item;
 				}
 				g_remoteItemHeld = in.item > 0;
 				session.client->setInput(net::playerInputFrom(input, lastAimPitch));
@@ -7563,9 +7656,10 @@ int runGame(Options& options, Session& session)
 		} else if (round.player()) {
 			viewer.onPlayerInput = [&round, &hudPlayer, &hudLocal, &scoreboardHeld, &options, &showMenu, &startedGame, &endOfRound, &commanderScreen,
 										&commanderKeyWas, &playerCamera, wasAlive = false, spawnedProne = false,
-										toggleCameraWas = false, actionWas = false, lastPitch = 0.0f](
-										const ViewerOptions::PlayerInput& in) mutable {
-				scoreboardHeld = options.scoreboard || in.scoreboard;
+										toggleCameraWas = false, actionWas = false, lastPitch = 0.0f, itemHeld = false](
+										const ViewerOptions::PlayerInput& raw) mutable {
+				scoreboardHeld = options.scoreboard || raw.scoreboard;
+				ViewerOptions::PlayerInput in = raw;
 				// Caps Lock opens and closes the commander's screen.
 				if (in.commanderScreen && !commanderKeyWas) {
 					game::GameWorld::PlayerInfo me;
@@ -7576,6 +7670,11 @@ int runGame(Options& options, Session& session)
 					round.setPlayerInput({}); // the menu has the keys
 					return;
 				}
+				itemListInput(in); // the HUD's pass first (0x00755d50)
+				if (in.item > 0 && !itemHeld) {
+					g_footItemKey = in.item;
+				}
+				itemHeld = in.item > 0;
 				game::SoldierInput input;
 				input.throttle = in.throttle;
 				input.strafe = in.strafe;
@@ -7593,6 +7692,7 @@ int runGame(Options& options, Session& session)
 				input.reload = in.reload;
 				input.switchSeat = in.seat;
 				input.selectItem = in.item;
+				input.itemStep = in.itemStep;
 				// C: first person or the chase view; the right button's press
 				// steps a zoomed weapon's zoom.
 				if (in.toggleCamera && !toggleCameraWas) {

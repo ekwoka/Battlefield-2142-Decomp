@@ -501,7 +501,9 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 			}
 		}
 	}
-	vehicle->m_sprintFactor = number(root, "sprintFactor", 0);
+	vehicle->m_sprintFactor = number(root, "sprintFactor", 2.5f);
+	vehicle->m_sprint.configure(number(root, "sprintDissipationTime", 0), number(root, "sprintRecoverTime", 0),
+		number(root, "sprintLimit", 0));
 	if (const std::string* input = setting(root, "regulateVerticalPosInput")) {
 		vehicle->m_vertical.input = vehicleInputIndex(*input);
 		const Vec3 ab = vector(root, "regulateVerticalPos");
@@ -615,6 +617,15 @@ void Vehicle::touchObject(size_t index, float height, const Vec3& normal, const 
 void Vehicle::tick(physics::RigidBody& body, const physics::Ground& ground, float seconds, float grip, float gravity)
 {
 	++m_tick;
+	// The sprint key's events, then the PCO's update (0x005c8e70) with the
+	// tick's time.
+	if (m_occupied && m_input.sprint) {
+		m_sprint.request(m_sprintHeld);
+	}
+	m_sprintHeld = m_occupied && m_input.sprint;
+	if (m_sprintFactor > 0) {
+		m_sprint.update(false, 0, seconds);
+	}
 	regulateInput(body, gravity);
 	for (GearPart& gear : m_gears) {
 		updateGear(gear, body, ground, seconds);
@@ -775,7 +786,10 @@ void Vehicle::updateWheel(Wheel& wheel, physics::RigidBody& body, const physics:
 		// (0x00629660: |rpm| up to 1, x torque), times the throttle, times
 		// the clutch with useClutchedTorque.
 		const float engineTorque = m_engine.torqueAt(m_rpm) * throttle * (m_engine.useClutchedTorque ? m_clutch : 1.0f);
-		const float driveTorque = engineTorque * m_engine.differential * ratio * kDriveTorqueScale;
+		float driveTorque = engineTorque * m_engine.differential * ratio * kDriveTorqueScale;
+		if (boosting()) {
+			driveTorque *= m_sprintFactor; // the PCO above sprints (slot 0x100): x sprintFactor (slot 0x114)
+		}
 		// 0x006b7460: the downhill part of the wheel's share of the weight,
 		// along the wheel, times the radius (all of it along the wheel off
 		// the ground).

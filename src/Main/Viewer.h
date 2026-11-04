@@ -41,6 +41,9 @@ struct ViewerOptions {
 		float aimPitchDegrees = 0;
 		bool sprint = false;
 		bool fire = false;
+		// The mouse wheel this frame: c_PINextItem (+1) or c_PIPrevItem (-1),
+		// inputs 0x30 / 0x31 (0 none).
+		int itemStep = 0;
 		bool altFire = false; // the right button
 		bool flareFire = false; // held: c_PIFlareFire (X), a seat's active defence
 		bool toggleWeapon = false; // held: c_PIToggleWeapon (F), a seat's next weapon

@@ -3688,6 +3688,14 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 	info.empLevel = player->alive ? static_cast<int>(std::ceil(player->empLevel)) : 0;
 	info.spawnedProne = player->alive && player->spawnedProne;
 	info.pose = player->input.pose;
+	if (player->alive && player->vehicle) {
+		info.seatBodyYaw = player->seatBodyYaw;
+		info.seatTwist = player->seatTwist;
+	}
+	if (player->alive && player->ladder >= 0 && static_cast<size_t>(player->ladder) < m_ladders.size()) {
+		info.ladder = player->ladder + 1;
+		info.ladderPosition = ladderFraction(m_ladders[static_cast<size_t>(player->ladder)], player->ladderY);
+	}
 	info.battery = player->battery;
 	info.squadLeader = player->squadLeader;
 	info.commander = commander(player->team) == player->id;
@@ -6809,21 +6817,14 @@ void GameWorld::stepAnimation(Player& player, float seconds)
 	}
 }
 
-void GameWorld::animateRemoteSoldier(uint32_t object, const RemoteSoldierState& state, float seconds)
+GameWorld::RemoteSoldier* GameWorld::startRemoteSoldier(uint32_t object)
 {
 	const world::Object* soldier = m_objects.find(object);
 	const world::ObjectTemplate* t = soldier ? soldier->objectTemplate() : nullptr;
 	if (!t || !m_animationSystems || !m_loadAnimationSystem) {
-		return;
+		return nullptr;
 	}
 	RemoteSoldier& remote = m_remoteSoldiers[object];
-	const auto system = [this](const world::ObjectTemplate* of) -> const anim::AnimationSystemTemplate* {
-		if (!of) {
-			return nullptr;
-		}
-		const auto it = of->settings().find("animationSystem3P");
-		return it != of->settings().end() ? m_loadAnimationSystem(it->second) : nullptr;
-	};
 	if (!remote.started) {
 		// As a soldier's set-up (spawnSoldier): skeleton3P, its mesh nodes
 		// for the weapon's parts, the body's animationSystem3P.
@@ -6835,10 +6836,11 @@ void GameWorld::animateRemoteSoldier(uint32_t object, const RemoteSoldierState& 
 				remote.weaponNodes.push_back(remote.skeleton->find("mesh" + std::to_string(part)));
 			}
 		}
-		if (const anim::AnimationSystemTemplate* body = system(t)) {
-			remote.body = std::make_unique<anim::AnimationState>(*m_animationSystems, *body);
+		const auto body = t->settings().find("animationSystem3P");
+		if (const anim::AnimationSystemTemplate* system = body != t->settings().end() ? m_loadAnimationSystem(body->second) : nullptr) {
+			remote.body = std::make_unique<anim::AnimationState>(*m_animationSystems, *system);
 		}
-		remote.lastYaw = state.yaw;
+		remote.lastYaw = soldier->rotation().x;
 		// Its hit capsules, as spawnSoldier reads them (the client's rounds
 		// hit the others' soldiers for their impact effects).
 		for (int index = 0; remote.skeleton; ++index) {
@@ -6858,6 +6860,139 @@ void GameWorld::animateRemoteSoldier(uint32_t object, const RemoteSoldierState& 
 			}
 		}
 	}
+	return &remote;
+}
+
+// The seat's (or the ladder container's) system for a remote soldier: a
+// new path starts it and the pose over (as poseSeated / poseOnLadder).
+bool GameWorld::remoteSeatSystem(RemoteSoldier& remote, const std::string& path)
+{
+	if (remote.seatPath != path) {
+		remote.seatPath = path;
+		remote.seat.reset();
+		if (!path.empty()) {
+			if (const anim::AnimationSystemTemplate* system = m_loadAnimationSystem(path)) {
+				remote.seat = std::make_unique<anim::AnimationState>(*m_animationSystems, *system);
+			}
+		}
+		if (remote.skeleton) {
+			remote.pose = anim::setupPose(*remote.skeleton);
+		}
+	}
+	return remote.seat && remote.skeleton;
+}
+
+// Off the seat or the ladder: the body's system again, the weapon in hand.
+void GameWorld::leaveRemoteSeat(RemoteSoldier& remote, world::Object& soldier)
+{
+	if (!remote.seatPath.empty() || remote.seat) {
+		remote.seat.reset();
+		remote.seatPath.clear();
+		if (remote.skeleton) {
+			remote.pose = anim::setupPose(*remote.skeleton);
+		}
+	}
+	remote.onLadder = false;
+	if (remote.hiddenBySeat) {
+		remote.hiddenBySeat = false;
+		soldier.setHidden(false);
+	}
+}
+
+void GameWorld::animateRemoteSeated(uint32_t object, uint32_t vehicle, int seatIndex, float bodyYaw, float seconds)
+{
+	RemoteSoldier* started = startRemoteSoldier(object);
+	world::Object* soldier = m_objects.find(object);
+	const world::Object* carrier = m_objects.find(vehicle);
+	if (!started || !soldier || !carrier || !carrier->objectTemplate()) {
+		return;
+	}
+	RemoteSoldier& remote = *started;
+	// The weapon is put away in a seat (0x005878b0).
+	if (remote.weaponObject) {
+		m_objects.remove(remote.weaponObject);
+		remote.weaponObject = 0;
+	}
+	remote.weapon.reset();
+	remote.weaponName.clear();
+	remote.onLadder = false;
+	const VehicleLayout& layout = vehicleLayout(*carrier->objectTemplate());
+	const SeatLayout* seat = seatIndex >= 0 && static_cast<size_t>(seatIndex) < layout.seats.size()
+		? &layout.seats[static_cast<size_t>(seatIndex)]
+		: nullptr;
+	const std::string path = seat ? seat->animationSystem : std::string();
+	if (!remoteSeatSystem(remote, path)) {
+		// No seatAnimationSystem: the sitter isn't shown (poseSeated).
+		remote.hiddenBySeat = true;
+		soldier->setHidden(true);
+		remote.worldPose.clear();
+		return;
+	}
+	if (remote.hiddenBySeat) {
+		remote.hiddenBySeat = false;
+		soldier->setHidden(false);
+	}
+	// 0x00587a30: Ry(+0x25c) x the seat's matrix (the seat's turn on the
+	// vehicle's).
+	const world::Vec3& turned = carrier->rotation();
+	const physics::Mat3 rotation = physics::Mat3::fromYawPitchRoll({bodyYaw, 0, 0})
+		* physics::Mat3::fromYawPitchRoll(seat->rotation) * physics::Mat3::fromYawPitchRoll({turned.x, turned.y, turned.z});
+	const physics::Vec3 ypr = rotation.yawPitchRoll();
+	soldier->setRotation({ypr.x, ypr.y, ypr.z});
+	remote.lastYaw = ypr.x;
+	// The seat's LookAroundTrigger: the body's turn / 360 (poseSeated).
+	anim::AnimationInput look;
+	look.lookAroundY = std::clamp(std::remainder(bodyYaw / 360.0f, 2.0f), -1.0f, 1.0f);
+	remote.seat->update(look, seconds);
+	remote.seat->takeEvents();
+	std::vector<bool> touched;
+	remote.seat->apply(*remote.skeleton, remote.pose, touched);
+	remote.worldPose = anim::worldMatrices(*remote.skeleton, remote.pose);
+}
+
+void GameWorld::animateRemoteSoldier(uint32_t object, const RemoteSoldierState& state, float seconds)
+{
+	RemoteSoldier* started = startRemoteSoldier(object);
+	world::Object* soldier = m_objects.find(object);
+	if (!started || !soldier) {
+		return;
+	}
+	RemoteSoldier& remote = *started;
+	const auto system = [this](const world::ObjectTemplate* of) -> const anim::AnimationSystemTemplate* {
+		if (!of) {
+			return nullptr;
+		}
+		const auto it = of->settings().find("animationSystem3P");
+		return it != of->settings().end() ? m_loadAnimationSystem(it->second) : nullptr;
+	};
+	// On a ladder (0x20000): the container's climb at the networked height.
+	if (state.ladder > 0 && static_cast<size_t>(state.ladder) <= m_ladders.size()) {
+		Ladder& ladder = m_ladders[static_cast<size_t>(state.ladder - 1)];
+		measureLadder(ladder);
+		const float y = ladderHeight(ladder, state.ladderPosition);
+		const float upSpeed = remote.onLadder && seconds > 0 ? (y - remote.ladderY) / seconds : 0.0f;
+		remote.onLadder = true;
+		remote.ladderY = y;
+		if (world::Object* held = remote.weaponObject ? m_objects.find(remote.weaponObject) : nullptr) {
+			held->setPosition(soldier->position());
+			held->setHidden(true); // put away (0x005878b0)
+		}
+		if (!remoteSeatSystem(remote, ladderAnimationPath())) {
+			return;
+		}
+		anim::AnimationInput in;
+		float phase = 0;
+		ladderPoseInput(ladder, y, upSpeed, in, phase);
+		remote.seat->setTimeOverride(phase);
+		remote.seat->update(in, seconds);
+		remote.seat->takeEvents();
+		std::vector<bool> touched;
+		remote.seat->apply(*remote.skeleton, remote.pose, touched);
+		remote.worldPose = anim::worldMatrices(*remote.skeleton, remote.pose);
+		remote.lastYaw = state.yaw;
+		return;
+	}
+	leaveRemoteSeat(remote, *soldier);
 	if (state.weapon != remote.weaponName) {
 		// The weapon in hand changed (selectItem's object, 0x00582xxx): its
 		// object and its animationSystem3P.
@@ -7009,6 +7144,11 @@ void GameWorld::removeRemoteSoldier(uint32_t object)
 	}
 	if (it->second.weaponObject) {
 		m_objects.remove(it->second.weaponObject);
+	}
+	if (it->second.hiddenBySeat) {
+		if (world::Object* soldier = m_objects.find(object)) {
+			soldier->setHidden(false);
+		}
 	}
 	m_remoteSoldiers.erase(it);
 }
@@ -7739,6 +7879,11 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 	player.reloadWas = input.reload;
 	const bool emptyBefore = player.weapon && player.weapon->roundsInMag() <= 0 && !wasReloading;
 	stepBurstRange(player, inHand);
+	// The wheel's c_PINextItem / c_PIPrevItem (inputs 48 / 49) on the input
+	// handler 0x005d5440: while the range is on, a step up or down.
+	if (input.itemStep != 0 && player.burstDistance > 0) {
+		stepBurstDistance(player.id, input.itemStep > 0 ? 1 : -1);
+	}
 	const bool held = input.fire && !activeMissile(player, player.object, player.weaponTemplate, player.projectile);
 	const bool shot = player.weapon && player.weapon->tick(seconds, held, input.altFire); // the alternate: a soft throw
 	if (player.weapon && player.weapon->takeClick()) {
@@ -9639,6 +9784,18 @@ bool GameWorld::seatTurnsGun(uint32_t vehicle, int seat) const
 		if (body.object == vehicle) {
 			return seat >= 0 && static_cast<size_t>(seat) < body.guns.size() && body.guns[static_cast<size_t>(seat)].weapon
 				&& seatAims(body, seat);
+		}
+	}
+	return false;
+}
+
+bool GameWorld::vehicleStamina(uint32_t vehicle, float& stamina, bool& sprinting) const
+{
+	for (const Body& body : m_bodies) {
+		if (body.object == vehicle && body.vehicle) {
+			stamina = body.vehicle->sprint().stamina();
+			sprinting = body.vehicle->sprint().sprinting();
+			return true;
 		}
 	}
 	return false;

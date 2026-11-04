@@ -384,6 +384,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		}
 		float pitch = -0.2f;
 		float turn = 0;
+		float wheelSteps = 0; // the mouse wheel in play (IDAxis_2), since the last input
 		// The game controllers, opened as SDL reports them.
 		std::unique_ptr<input::SdlGameControllers> sdlControllers;
 		if (options.gameControllers) {
@@ -449,6 +450,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					}
 				} else if (menuUp && event.type == SDL_EVENT_MOUSE_WHEEL) {
 					menu({ViewerOptions::MenuInput::Kind::Wheel, 0, 0, static_cast<int>(event.wheel.y)});
+				} else if (playing && !pointer && event.type == SDL_EVENT_MOUSE_WHEEL) {
+					wheelSteps += event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.y : event.wheel.y;
 				} else if (menuUp && (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP)) {
 					menu({event.type == SDL_EVENT_KEY_DOWN ? ViewerOptions::MenuInput::Kind::Key : ViewerOptions::MenuInput::Kind::KeyUp, 0, 0,
 						flashKeyCode(static_cast<int>(event.key.key))});
@@ -594,6 +597,25 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 						input.seat = seat + 1;
 					}
 				}
+				// The wheel's axis-to-trigger bindings (Controls.con's
+				// "addAxisToTriggerMapping c_PINextItem c_PIPrevItem IDFMouse
+				// IDAxis_2": the axis's positive way the first, its negative
+				// the second): a frame it turned presses one.
+				const auto wheelTo = [&](const char* name) {
+					const input::ControlMaps::Map* m = c.find(map);
+					if (!m || !m->count(name)) {
+						return false;
+					}
+					for (const input::Binding& b : m->at(name)) {
+						if (b.kind == input::Binding::Kind::Axis && !b.hold && b.device == "IDFMouse" && b.control == "IDAxis_2"
+							&& wheelSteps * b.sign > 0) {
+							return true;
+						}
+					}
+					return false;
+				};
+				input.itemStep = wheelTo("c_PINextItem") ? 1 : wheelTo("c_PIPrevItem") ? -1 : 0;
+				wheelSteps = 0;
 				options.onPlayerInput(input);
 				turn = 0;
 			} else if (playing && options.onPlayerInput) {
@@ -634,6 +656,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 						input.seat = seat + 1;
 					}
 				}
+				input.itemStep = wheelSteps > 0 ? 1 : wheelSteps < 0 ? -1 : 0; // up the next item, down the previous
+				wheelSteps = 0;
 				options.onPlayerInput(input);
 				turn = 0;
 			}

@@ -1069,6 +1069,58 @@ TEST(HudItemSelection_SeatLists)
 	CHECK(items.size() == 2 && items[0].index == 3 && items[0].icon == "gun.tga" && items[1].index == 1);
 }
 
+// The mouse wheel's item list (0x00755d50, inputs 0x30 / 0x31): a step
+// opens it for 2 s on the item in hand and moves (0x0079c1e0: the next if
+// usable, else the first; 0x0079c230: the previous if usable, else the
+// last, else the first), "weaponOver" each move; fire with it open is the
+// pick (the selected item's PIWeaponSelect key, fire cleared) and fire
+// stays cleared 0.3 s; not where the list may not open (a zoomed weapon).
+TEST(HudItemSelection_MouseWheel)
+{
+	menu::ItemSelection list;
+	menu::ItemListInput pass;
+	pass.allowed = true;
+	pass.items = {{1, "knife", true}, {2, "pistol", true}, {3, "rifle", true}, {4, "grenade", false}, {5, "medkit", true}};
+	pass.inHand = 3;
+	bool fire = false;
+	int item = 0;
+	// Opened on the rifle (3); the next, 4, isn't usable: the first.
+	CHECK(pass.apply(list, fire, item, 1, 10.0) == "weaponOver");
+	CHECK(list.shown() && list.selectedItem() == 1);
+	CHECK(list.next() && list.selectedItem() == 2);
+	CHECK(list.previous() && list.selectedItem() == 1);
+	CHECK(list.previous() && list.selectedItem() == 5); // from the first: the last
+	CHECK(list.previous() && list.selectedItem() == 5); // the previous (4) unusable: the last again
+	CHECK(list.next() && list.selectedItem() == 1);     // past the end: the first
+	CHECK(list.next() && list.selectedItem() == 2);
+	// The pick: fire takes the selected item's key and is cleared.
+	fire = true;
+	item = 0;
+	CHECK(pass.apply(list, fire, item, 0, 10.5).empty());
+	CHECK(!fire && item == list.selectedItem());
+	// Closed again: fire stays cleared until 0.3 s after the pick.
+	hud::HudManager hud(nullptr);
+	list.update(hud, 5.0f);
+	CHECK(!list.shown());
+	fire = true;
+	item = 0;
+	pass.apply(list, fire, item, 0, 10.7);
+	CHECK(!fire && item == 0);
+	fire = true;
+	pass.apply(list, fire, item, 0, 10.9);
+	CHECK(fire);
+	// Not allowed (zoomed): the wheel leaves the list shut.
+	pass.allowed = false;
+	fire = false;
+	CHECK(pass.apply(list, fire, item, -1, 11.0).empty());
+	CHECK(!list.shown());
+	// A step down from the item in hand: the previous usable one.
+	pass.allowed = true;
+	pass.inHand = 3;
+	CHECK(pass.apply(list, fire, item, -1, 12.0) == "weaponOver");
+	CHECK(list.shown() && list.selectedItem() == 2);
+}
+
 // minimumSquadSizeForSelection (0x005c3080, the firearm's slot 0x188): too
 // few in the squad refuses the weapon (one fewer for a bot), never without
 // a squad; the key's refusal goes to the HUD (message 0x52) once.

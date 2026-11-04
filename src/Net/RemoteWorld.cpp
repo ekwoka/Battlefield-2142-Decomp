@@ -969,6 +969,10 @@ void RemoteWorld::applyState(RemoteObject& o, const NetworkableState& s)
 			o.pose = s.soldierValues[0];
 			o.requestedPose = s.soldierValues[1];
 		}
+		if (s.mask & 0x20000) {
+			o.ladder = s.ladder;
+			o.ladderPosition = s.ladder != 0 ? s.ladderPosition : 0;
+		}
 		if (!(s.mask & 0x10000)) {
 			o.swimming = (s.soldierBits & 4) != 0;
 			o.weaponAway = (s.soldierBits & 8) != 0;

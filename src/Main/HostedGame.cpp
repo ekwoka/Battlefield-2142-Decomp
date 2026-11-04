@@ -2050,6 +2050,27 @@ net::NetworkableState HostedGame::soldierState(uint32_t soldier, const world::Ob
 			s.soldierImpulse = {body->impulse.x, body->impulse.y, body->impulse.z};
 		}
 	}
+	if (known && info.seat >= 0) {
+		// Seated (0x005fc1a0 fills the same fields): +0x25c is the body's
+		// turn from the seat and +0x278 the head's twist on it (0x0058a6d0),
+		// which a client's 0x00587a30 turns the body by and the seat's
+		// LookAroundTrigger takes; no catch-up.
+		s.mask |= 0x4 | 0x8;
+		s.yaw = info.seatBodyYaw;
+		s.pitch = info.seatTwist;
+		s.roll = 0;
+	}
+	if (known) {
+		// The ladder (0x20000): the soldier's +0x18c interface slot 0x84,
+		// the ladder's id (+0x184; 0 none), and the place on it
+		// (0x0059ebf0); a client seats the soldier in a container of its
+		// own at that ladder (0x0059fbf0) and moves it there (0x0059ec80),
+		// and takes it out on a 0 (0x0059d440). The original's dirty mask
+		// sends it on a change; the rewrite's states are whole, so always.
+		s.mask |= 0x20000;
+		s.ladder = std::min(info.ladder, 255);
+		s.ladderPosition = info.ladderPosition;
+	}
 	return s;
 }
 

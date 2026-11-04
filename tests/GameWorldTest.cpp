@@ -3615,6 +3615,16 @@ TEST(GameWorld_AirburstDistance)
 		CHECK(range.world->burstDistance(me) == (zoomed ? 20 : 0));
 		range.world->stepBurstDistance(me, 1);
 		CHECK(range.world->burstDistance(me) == (zoomed ? 22 : 0));
+		// The wheel's PINextItem / PIPrevItem (0x005d5440): a step each.
+		input.itemStep = 1;
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		CHECK(range.world->burstDistance(me) == (zoomed ? 24 : 0));
+		input.itemStep = -1;
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		input.itemStep = 0;
+		CHECK(range.world->burstDistance(me) == (zoomed ? 22 : 0));
 		input.fire = true;
 		range.world->setPlayerInput(input);
 		range.world->tick(1 / 30.0f);
@@ -3672,6 +3682,10 @@ TEST(GameWorld_LadderCamera)
 		view.position.z, info.position.x, info.position.y, info.position.z, view.yaw);
 	CHECK(std::fabs(view.position.y - (info.position.y + 1.5f)) < 0.05f);
 	CHECK(std::fabs(view.pitch - 20) < 1e-4f);
+	// The networked ladder (0x20000): its id (the first ladder, 1) and the
+	// container's height over the bottom (0 here) over the 6 m length.
+	CHECK(info.ladder == 1);
+	CHECK(std::fabs(info.ladderPosition - info.position.y / 6.0f) < 0.02f);
 	// The yaw: at most 250 degrees a second, within 140 to the right.
 	climb.turn = 100;
 	climb.throttle = 0;
@@ -3743,5 +3757,8 @@ TEST(GameWorld_OpenSeatLook)
 	CHECK(std::fabs(turnBy(30) - 70) < 0.01f);  // twist 40, the body 30
 	CHECK(std::fabs(turnBy(100) - 130) < 0.01f); // the body at its 90
 	CHECK(std::fabs(turnBy(-50) - 80) < 0.01f);  // the head alone back to -10, the body stays
+	// What the soldier networkable carries seated (+0x25c, +0x278).
+	CHECK(range.world->playerInfo(me, info) && std::fabs(info.seatBodyYaw - 90) < 0.01f
+		&& std::fabs(info.seatTwist + 10) < 0.01f && info.ladder == 0);
 	std::fprintf(stderr, "  open seat look ahead %.1f\n", ahead);
 }

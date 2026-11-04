@@ -319,15 +319,50 @@ void GameWorld::climbLadder(Player& player, SoldierInput& input, float seconds)
 // seat system its own vertical speed (0x005ef250 -> 0x008b99a0): 1.35 m/s
 // climbing, 4 times that down a skid. The first-person system has no
 // ladder states.
+std::string GameWorld::ladderAnimationPath() const
+{
+	if (const world::ObjectTemplate* container = m_templates.find("LadderContainer")) {
+		if (const auto it = container->settings().find("seatAnimationSystem"); it != container->settings().end()) {
+			return it->second;
+		}
+	}
+	return "Objects/Common/Ladder/animationSystemHandles.inc";
+}
+
+void GameWorld::ladderPoseInput(const Ladder& ladder, float y, float upSpeed, anim::AnimationInput& in, float& phase)
+{
+	if (kStartGetOff > 0 && ladder.top - kStartGetOff < y) {
+		in.messages = 2;
+		phase = 1 - (ladder.top - y) / kStartGetOff;
+	} else {
+		in.messages = 1;
+		phase = (y - ladder.bottom) / (2 * kLadderStepSize);
+		if (phase > 1) {
+			phase -= std::floor(phase);
+		}
+	}
+	in.upSpeed = upSpeed;
+}
+
+// 0x0059ebf0: the container's height (the soldier's 0xc378 object, its
+// matrix's y) less the ladder's bottom (+0x198), over the ladder's length
+// (+0x18c: its box's height, 0x0059d550), clamped to 0..1 (0x00402dd0).
+float GameWorld::ladderFraction(const Ladder& ladder, float y)
+{
+	const float length = ladder.boxMax.y - ladder.boxMin.y;
+	return length > 0 ? std::clamp((y - ladder.bottom) / length, 0.0f, 1.0f) : 0.0f;
+}
+
+// 0x0059ec80: the fraction times the length over the bottom.
+float GameWorld::ladderHeight(const Ladder& ladder, float fraction)
+{
+	return fraction * (ladder.boxMax.y - ladder.boxMin.y) + ladder.bottom;
+}
+
 void GameWorld::poseOnLadder(Player& player, world::Object& soldier, float seconds)
 {
 	const Ladder& ladder = m_ladders[static_cast<size_t>(player.ladder)];
-	std::string path = "Objects/Common/Ladder/animationSystemHandles.inc";
-	if (const world::ObjectTemplate* container = m_templates.find("LadderContainer")) {
-		if (const auto it = container->settings().find("seatAnimationSystem"); it != container->settings().end()) {
-			path = it->second;
-		}
-	}
+	const std::string path = ladderAnimationPath();
 	if (player.seatAnimationPath != path) {
 		player.seatAnimationPath = path;
 		player.seatAnimation.reset();
@@ -347,19 +382,8 @@ void GameWorld::poseOnLadder(Player& player, world::Object& soldier, float secon
 		return;
 	}
 	anim::AnimationInput in;
-	const float y = player.ladderY;
 	float phase = 0;
-	if (kStartGetOff > 0 && ladder.top - kStartGetOff < y) {
-		in.messages = 2;
-		phase = 1 - (ladder.top - y) / kStartGetOff;
-	} else {
-		in.messages = 1;
-		phase = (y - ladder.bottom) / (2 * kLadderStepSize);
-		if (phase > 1) {
-			phase -= std::floor(phase);
-		}
-	}
-	in.upSpeed = player.ladderSpeed;
+	ladderPoseInput(ladder, player.ladderY, player.ladderSpeed, in, phase);
 	player.seatAnimation->setTimeOverride(phase);
 	player.seatAnimation->update(in, seconds);
 	std::vector<bool> touched;

@@ -2134,6 +2134,131 @@ TEST(Vehicle_TeamOfItsOccupant)
 	CHECK(game.objects.find(vehicle)->team() == 0 && game.world->spawnVehicles(2).empty());
 }
 
+// A joined game's soldier ghost seated (EnterVehicle) or on a ladder (its
+// networkable's 0x20000): posed by the seat's system with its own look
+// (0x00587a30: Ry(+0x25c) x the seat), hidden in a seat without one; on a
+// ladder by the container's climb at the networked height (0x0059ec80,
+// 0x0059f380), its weapon put away. Back on foot, the body's system again.
+TEST(RagDoll_RemoteSoldierSeatedAndOnLadder)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	std::string out;
+	game.console.run("ClientArchives.con", {}, out); // the ladder's clips
+	// A 5 m ladder panel facing +z at 0/0/40.
+	physics::CollisionSubGeometry part;
+	for (uint32_t type = 0; type < 3; ++type) {
+		physics::CollisionLod lod;
+		lod.collisionType = type;
+		lod.vertices = {{-0.3f, 0, -0.05f}, {0.3f, 0, -0.05f}, {0.3f, 5, -0.05f}, {-0.3f, 5, -0.05f}};
+		lod.faces = {{{0, 1, 2}, 0}, {{0, 2, 3}, 0}};
+		lod.boundsMin = {-0.3f, 0, -0.05f};
+		lod.boundsMax = {0.3f, 5, -0.05f};
+		part.lods.push_back(lod);
+	}
+	physics::CollisionMeshFile panel;
+	panel.version = 10;
+	panel.geometries.resize(1);
+	panel.geometries[0].subGeometries = {part};
+	game.collisionTemplates.add("ladder_mesh", panel);
+	game.templates.registerType(40, "Ladder");
+	world::ObjectTemplate* ladder = game.templates.create("Ladder", "ladder_5m");
+	ladder->settings()["collisionMesh"] = "ladder_mesh";
+	game.objects.create(ladder, {0, 0, 40});
+	// A car: the driver's seat with the FAV's seat system, a back seat without one.
+	world::ObjectTemplate* car = game.templates.create("PlayerControlObject", "car");
+	car->settings()["seatInformation"] = "car 0/0.5/0.4 0/0/0";
+	car->settings()["seatAnimationSystem"] = "Objects/Vehicles/AS_FAV/3p_as_fav_driver_animSys.inc";
+	world::ObjectTemplate* back = game.templates.create("PlayerControlObject", "car_back");
+	back->settings()["seatInformation"] = "car_back 0/0.5/-1 0/0/0";
+	car->children().push_back({"car_back", {0, 0, -1}, {}});
+	game.start();
+	const uint32_t vehicle = game.objects.create(car, {3, 1, 0}, {30, 0, 0})->id();
+	const anim::Skeleton* skeleton = game.systems.skeleton("Objects/Soldiers/Common/Animations/3p_setup.ske");
+	CHECK(skeleton != nullptr);
+	if (!skeleton) {
+		return;
+	}
+	world::Object* ghost = game.objects.create(game.templates.find("us_light_soldier"), {3, 1, 0});
+	const uint32_t id = ghost->id();
+	const auto height = [](const std::vector<anim::Matrix>& pose, int bone) { return pose[static_cast<size_t>(bone)][13]; };
+	std::vector<anim::Matrix> standing, seated, turned, climbing, gettingOff;
+	game::GameWorld::RemoteSoldierState foot;
+	foot.weapon = "eu_ar_rifle";
+	for (int i = 0; i < 10; ++i) {
+		game.world->animateRemoteSoldier(id, foot, 1 / 30.0f);
+	}
+	CHECK(game.world->skeletonPose(id, *skeleton, standing) && standing.size() > 9);
+	CHECK(game.world->remoteSoldierWeapon(id) != 0);
+
+	// Seated, looking ahead: the seat's pose, turned with the car and seat.
+	for (int i = 0; i < 10; ++i) {
+		game.world->animateRemoteSeated(id, vehicle, 0, 0, 1 / 30.0f);
+	}
+	CHECK(game.world->skeletonPose(id, *skeleton, seated) && seated.size() > 9);
+	CHECK(game.world->remoteSoldierWeapon(id) == 0); // put away
+	CHECK(!ghost->hidden());
+	CHECK(std::abs(std::remainder(ghost->rotation().x - 30, 360.0f)) < 0.5f);
+	if (seated.size() > 9 && standing.size() > 9) {
+		std::fprintf(stderr, "  remote seated: hips %.2f knees %.2f (standing %.2f %.2f)\n", height(seated, 1),
+			height(seated, 2), height(standing, 1), height(standing, 2));
+		CHECK(height(standing, 1) - height(standing, 2) > 0.2f);
+		CHECK(height(seated, 1) - height(seated, 2) < 0.2f);
+	}
+	// The body turned 60 from the seat: the soldier with it.
+	for (int i = 0; i < 10; ++i) {
+		game.world->animateRemoteSeated(id, vehicle, 0, 60, 1 / 30.0f);
+	}
+	CHECK(std::abs(std::remainder(ghost->rotation().x - 90, 360.0f)) < 0.5f);
+	CHECK(game.world->skeletonPose(id, *skeleton, turned));
+	// The back seat has no seat system: not shown.
+	game.world->animateRemoteSeated(id, vehicle, 1, 0, 1 / 30.0f);
+	CHECK(ghost->hidden());
+	// Out: shown again, the rifle back in its hands.
+	game.world->animateRemoteSoldier(id, foot, 1 / 30.0f);
+	CHECK(!ghost->hidden());
+	CHECK(game.world->remoteSoldierWeapon(id) != 0);
+
+	// On the ladder (id 1) low down, then near the top: the climb's and the
+	// get-off's poses, not the standing one; the rifle put away.
+	ghost->setPosition({0, 1, 39.4f});
+	game::GameWorld::RemoteSoldierState onLadder = foot;
+	onLadder.ladder = 1;
+	onLadder.ladderPosition = 0.3f;
+	for (int i = 0; i < 10; ++i) {
+		game.world->animateRemoteSoldier(id, onLadder, 1 / 30.0f);
+	}
+	CHECK(game.world->skeletonPose(id, *skeleton, climbing) && climbing.size() == standing.size());
+	const world::Object* rifle = game.objects.find(game.world->remoteSoldierWeapon(id));
+	CHECK(rifle && rifle->hidden());
+	onLadder.ladderPosition = 0.95f;
+	for (int i = 0; i < 10; ++i) {
+		game.world->animateRemoteSoldier(id, onLadder, 1 / 30.0f);
+	}
+	CHECK(game.world->skeletonPose(id, *skeleton, gettingOff) && gettingOff.size() == standing.size());
+	float fromStanding = 0, fromClimb = 0;
+	for (size_t i = 0; i < standing.size() && i < climbing.size() && i < gettingOff.size(); ++i) {
+		if (skeleton->nodes[i].name.compare(0, 4, "mesh") == 0) {
+			continue; // the weapon's nodes (the ladder clips leave them unset; nothing is held)
+		}
+		for (size_t k = 12; k < 15; ++k) {
+			fromStanding = std::max(fromStanding, std::abs(climbing[i][k] - standing[i][k]));
+			fromClimb = std::max(fromClimb, std::abs(gettingOff[i][k] - climbing[i][k]));
+		}
+	}
+	std::fprintf(stderr, "  remote ladder: the climb %.2f m from standing, the get-off %.2f m from the climb\n",
+		fromStanding, fromClimb);
+	CHECK(fromStanding > 0.05f);
+	CHECK(fromClimb > 0.05f);
+	// Off the ladder (0): standing again, the rifle shown.
+	game.world->animateRemoteSoldier(id, foot, 1 / 30.0f);
+	rifle = game.objects.find(game.world->remoteSoldierWeapon(id));
+	CHECK(rifle && !rifle->hidden());
+}
+
 // A joined game's soldier ghost (no player of the client's round) is
 // posed by its animation and holds its weapon, as the round's own
 // soldiers are; it goes with its ghost.

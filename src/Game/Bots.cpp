@@ -2871,7 +2871,7 @@ void BotManager::planFire(Bot& bot, const GameWorld::PlayerInfo& self, bool gunn
 	bot.preferredRange = game::preferredRange(w, m_settings.skill, random(), dh, explosivePlan);
 	bot.planTarget = bot.target;
 	bot.planSlot = gunning ? bot.seatWeapon : bot.weaponSlot;
-	bot.manoeuvre = bot.chase = false; // a new plan's statements start afresh
+	bot.manoeuvre = bot.chase = bot.guidedMove = false; // a new plan's statements start afresh
 	bot.backOffAt = -1e9f;
 }
 
@@ -2880,9 +2880,10 @@ void BotManager::planFire(Bot& bot, const GameWorld::PlayerInfo& self, bool gunn
 // bot's object's weapons: on foot the kit's, at a gun the seat's. The
 // choice replaces the slot the targets' loop found (the original keeps the
 // last choice when none comes back). The distance and height are between
-// the bot and the target's remembered position. Stand-ins: the target's
-// Mobile slot 0x78 (BF2142.exe 0x008a1960: a soldier's interface 0xc4c5
-// slot 0x108, not traced) is its speed; the target attending to the bot
+// the bot and the target's remembered position. The target's Mobile slot
+// 0x78 (BF2142.exe 0x008a1960: its interface 0xc4c5 slot 0x108,
+// 0x0059d950) is its sprint stamina (0x006457f0's +0x18), not a speed.
+// Stand-ins: the target attending to the bot
 // (a bot: its target is this one, its vt+0x74; a human: the sensing
 // agent's stamp for it within 9995 s, AIDLL 0x100eb7f0 on the map at +0x74
 // +0x84, whose writer wasn't traced) is, for a human, a round of it having
@@ -2953,7 +2954,16 @@ void BotManager::pickWeapon(Bot& bot, const GameWorld::PlayerInfo& self, const s
 	} else {
 		c.targetTargetsMe = known->alertAt > -1e8f;
 	}
-	c.targetMotion = target->vehicle ? 0.0f : std::sqrt(physics::lengthSquared(target->velocity));
+	// The Mobile's slot 0x78 (0x008a1960): the target's interface 0xc4c5
+	// slot 0x108, 0x0059d950, is its sprint stamina (the SprintStamina's
+	// +0x18 that 0x006457f0 writes: the soldier's +0x378, a vehicle's PCO
+	// +0x2ec), 0..1, 1 when rested.
+	c.targetMotion = target->stamina;
+	if (target->vehicle) {
+		bool sprinting = false;
+		c.targetMotion = 1;
+		m_world.vehicleStamina(target->vehicle, c.targetMotion, sprinting);
+	}
 	c.c4Placed = bot.c4Placed;
 	c.orderMove = bot.orderMove;
 	if (!self.vehicle) {
@@ -5171,6 +5181,62 @@ bool BotManager::fireKeepsToOrder(const Bot& bot, const GameWorld::PlayerInfo& s
 	return keep;
 }
 
+int guidedMoveStep(bool& engaged, float distance, float minRange, float maxRange)
+{
+	const float keep = 0.85f * maxRange, nearLimit = std::max(15.0f, 1.1f * minRange);
+	if (!engaged) {
+		engaged = distance > 0.5f * maxRange || distance <= minRange;
+	}
+	if (!engaged) {
+		return 0;
+	}
+	if (distance > keep && keep > nearLimit) {
+		return 1;
+	}
+	if (distance < nearLimit) {
+		return -1;
+	}
+	engaged = false; // within [near limit, 0.85 maxRange]: the move is done
+	return 0;
+}
+
+// The guided weapons' plan on foot (0x10078570) decides its trigger in two
+// steps. The trigger's If (0x100d29f0, forced, frozen) holds while the
+// target is in view (the memo of the target conditions 0x100dc400 /
+// 0x100dad60, left out for a weapon of type 10) and, by the bot's memory
+// of it, lies within [0.9 minRange, 1.1 maxRange] (ObjectDistance
+// 0x100d44c0); then the guided fire statements (0x100781e0), else only the
+// guided aim (0x100d4f10). The statements, in a Parallell: the aim
+// (0x100d4f10) at the target, and BAPATrigger (0x100d3110) on the weapon's
+// fire input (its slot 0x64) held unless an OR (0x100cf1b0) holds: the
+// chosen weapon not in hand (0x100da090's condition 0x100da0c0); for a
+// heat-seeking or laser-guided weapon (guidance 1, 2) no lock (NOT
+// 0x100d9fd0: the weapon's slot 0xac for the bot gives no object,
+// 0x100da010); the look off the aim's point by more than 5 degrees for a
+// laser-guided weapon, 3 otherwise (NOT 0x100d9d90, its 0x100d9e00:
+// cos(angle) under the bound; DAT_101275c0 is pi/180, DAT_101275e0 5).
+// `look` and `toTarget` are unit vectors (the bot's look, to the aim).
+bool BotManager::guidedFire(const Bot& bot, const GameWorld::PlayerInfo& self, const WeaponAi& weapon, int guidance,
+	const Known& known, bool inSight, const physics::Vec3& look, const physics::Vec3& toTarget) const
+{
+	const float memory = std::sqrt(physics::lengthSquared(known.position - self.position));
+	const bool inView = weapon.type == WeaponAi::TitanWeapon || inSight;
+	if (!inView || memory < 0.9f * weapon.minRange || memory > 1.1f * weapon.maxRange) {
+		return false;
+	}
+	if (self.inHandSlot != bot.weaponSlot) {
+		return false;
+	}
+	if (guidance == 1 || guidance == 2) {
+		const GameWorld::WeaponLockInfo lock = m_world.weaponLock(self.id);
+		if (lock.target == 0 || lock.state != 2) {
+			return false;
+		}
+	}
+	const float bound = (guidance == 2 ? 5.0f : 3.0f) * 0.017453292f;
+	return physics::dot(look, toTarget) >= std::cos(bound);
+}
+
 // BBPFireInfantery's plan (0x1007cf10, 0x100795a0): the chosen weapon in
 // hand, the aim on the target (with its lead), the distance kept within
 // [minRange, 1.1 preferred], the weapon's firing pose taken when standing
@@ -5283,7 +5349,13 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 	const bool explosiveWeapon = weapon.explosionRadius > 0;
 	const bool high = weapon.type != WeaponAi::Sniper && !weapon.thrown && dh > 30;
 	const bool vehicleOnSoldier = !soldierBot && targetSoldier && explosiveWeapon;
-	const bool explosivePlan = bot.explosive && explosiveWeapon && targetSoldier
+	// A guided weapon's own plan on foot (0x10078570, which BBFire's plan
+	// maker picks for an ITSoldier bot when the weapon's +0x6c, its
+	// guidanceKind, isn't 0; see guidedFire): it has no explosive
+	// conditions, firing pose or teammate test.
+	const int guidance = soldierBot ? guidanceKind(m_world.templates().find(weaponTemplate)) : 0;
+	const bool guidedPlan = guidance != 0;
+	const bool explosivePlan = !guidedPlan && bot.explosive && explosiveWeapon && targetSoldier
 		&& (known->secondHand || high || vehicleOnSoldier);
 	const physics::Vec3 feet = inSight ? target.position : known->position;
 	const bool aimExplosive = explosiveWeapon && known->everSeen
@@ -5342,6 +5414,26 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 		if (driveFirePlan(bot, self, target, *known, inSight, weapon, explosivePlan, seconds, input)) {
 			return; // the target was forgotten
 		}
+	} else if (guidedPlan) {
+		// 0x10078570's move: If (not forced) the target, by the bot's memory
+		// of it (ObjectDistance 0x100d4480 with its +0x14 set), lies farther
+		// than half the weapon's maxRange (+0x16: "farther than") or within
+		// its minRange: MoveToObjectFinding (0x100cff90, mode 2) keeping
+		// 0.85 maxRange with the near limit max(15, 1.1 minRange): done when
+		// the distance lies between the two, nearer it backs off. Between
+		// minRange and half the reach the bot holds its ground.
+		const float memory = std::sqrt(physics::lengthSquared(known->position - self.position));
+		const int step = guidedMoveStep(bot.guidedMove, memory, weapon.minRange, weapon.maxRange);
+		if (step > 0) {
+			const float pitch = bot.pitch;
+			steer(bot, self, target.position, 400000 + target.id, seconds, input);
+			bot.pitch = pitch;
+			input.turn = 0;
+			moving = true;
+		} else if (step < 0) {
+			input.throttle = -1;
+			moving = true;
+		}
 	} else if (!self.vehicle && weapon.type != WeaponAi::FireAndForget) {
 		if (distance > 1.1f * std::max(bot.preferredRange, weapon.minRange + 1)) {
 			// The aim turns the soldier and keeps its pitch (steering
@@ -5376,7 +5468,9 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 	} else if (weapon.firingPose == 3) {
 		want = SoldierPose::Prone;
 	}
-	if (!self.vehicle) {
+	if (guidedPlan) {
+		input.pose = bot.pose; // the guided plan takes no firing pose
+	} else if (!self.vehicle) {
 		if (moving || std::fabs(input.turn) > 1) {
 			want = SoldierPose::Stand;
 		}
@@ -5454,8 +5548,11 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 	const float nearLimit = fireMinRange(weapon, dh, explosivePlan), farLimit = fireReach(weapon, dh);
 	const bool inReach = explosivePlan
 		|| (objectDistance >= 0.9f * nearLimit && (farLimit <= 0 || objectDistance <= 1.1f * farLimit));
-	const bool ready = m_time >= bot.triggerAt && onTarget && !blocked && poseSettled && (inSight || explosivePlan)
+	bool ready = m_time >= bot.triggerAt && onTarget && !blocked && poseSettled && (inSight || explosivePlan)
 		&& !bot.heatStop && (!explosivePlan || explosiveOk) && inReach;
+	if (guidedPlan) {
+		ready = guidedFire(bot, self, weapon, guidance, *known, inSight, cur, wantDir);
+	}
 	// Trigger (taps) or TriggerContinously (holds) (0x100777a0): held only
 	// when the weapon's fire mode (aiWeapon slot 0x104 -> BF2142.exe
 	// 0x00892650: the fire component's +0x18 == 2) is automatic. The mode
@@ -5463,7 +5560,9 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 	// bots never toggle it. Tapping presses on one plan execution and lets
 	// go on the next.
 	const bool automatic = fireMode(gun) == 2;
-	if (weapon.type == WeaponAi::FireAndForget) {
+	if (guidedPlan) {
+		input.fire = ready; // BAPATrigger (0x100d3110): held while nothing stops it
+	} else if (weapon.type == WeaponAi::FireAndForget) {
 		input.fire = ready && !bot.firedLast;
 	} else if (automatic) {
 		input.fire = ready;

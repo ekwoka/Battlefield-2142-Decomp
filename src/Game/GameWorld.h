@@ -279,8 +279,28 @@ public:
 		int fireMode = -1;       // 0 single, 1 burst, 2 automatic (-1 the template's first)
 		int player = -1;         // whose (the sounds' first person for the local player)
 		bool muzzleEffects = true; // off for our own soldier seen from inside
+		// On a ladder (the soldier networkable's 0x20000): the ladder's id
+		// (1 and up, 0 none) and the place on it (0..1). The client's
+		// reader (0x005fcdb0) seats the soldier in a LadderContainer of its
+		// own at that ladder (0x0059fbf0) and moves it to the height the
+		// place gives (0x0059ec80); the container's update poses it by that
+		// height (0x0059f380, as poseOnLadder), its weapon put away.
+		int ladder = 0;
+		float ladderPosition = 0;
 	};
 	void animateRemoteSoldier(uint32_t object, const RemoteSoldierState& state, float seconds);
+	// A joined game's soldier ghost seated in a vehicle ghost's seat
+	// `seat` (EnterVehicle's ghost part): posed by the seat's animation
+	// system as poseSeated poses the round's own, with its own look from
+	// the networked +0x25c / +0x278 (the seat's occupant state, 0x00605b00,
+	// or the soldier's: `bodyYaw` the body's turn from the seat, which
+	// 0x00587a30 turns the body by, Ry(+0x25c) x the seat, and the
+	// LookAroundTrigger takes / 360). Hidden in a seat without a
+	// seatAnimationSystem, its weapon put away. The place is the ghost's
+	// (the server's, which carries the seat's mount); the turn is the
+	// vehicle object's with the seat's own (a mount's turret turn and the
+	// hands' IK aren't networked to the client: not applied).
+	void animateRemoteSeated(uint32_t object, uint32_t vehicle, int seat, float bodyYaw, float seconds);
 	// A manual reload seen on a joined client (the player networkable's
 	// mask 0x10000: its reader 0x005981a0 sets the networkable's +0x280,
 	// player +0x28c, which the client's 0x00590e10 takes through player
@@ -345,6 +365,10 @@ public:
 	// An abandoned vehicle's countdown (0x005c8ba0): seconds of its
 	// spawner's timeToLive left, -1 when it has none.
 	float timeToLiveLeft(uint32_t object) const;
+	// A vehicle's own sprint (the PCO's +0x2d4: the boost; Vehicle::sprint):
+	// its stamina (slot 0x108) and whether it sprints (slot 0x100); false
+	// for an object without a vehicle model.
+	bool vehicleStamina(uint32_t vehicle, float& stamina, bool& sprinting) const;
 	// Changes a control point's owner and the teams of its spawners.
 	void setControlPointTeam(int controlPointId, int team);
 	ControlPoint* controlPointOf(uint32_t object);
@@ -427,6 +451,15 @@ public:
 		// spawn point's +0x18a): the soldier starts lying down.
 		bool spawnedProne = false;
 		SoldierPose pose = SoldierPose::Stand; // on foot (the input's)
+		// Seated, the soldier's own look (0x0058a6d0): the body's turn from
+		// the seat (+0x25c) and the head's twist on it (+0x278), degrees.
+		float seatBodyYaw = 0, seatTwist = 0;
+		// On a ladder: its id (the Ladder's +0x184, 0x0059fb00: 1, 2, ... in
+		// creation order; 0 none) and the place on it (0x0059ebf0: the
+		// container's height over the ladder's bottom +0x198, over its
+		// length +0x18c, within 0..1), the soldier networkable's 0x20000.
+		int ladder = 0;
+		float ladderPosition = 0;
 		float battery = -1; // the ability battery, 0..1 (-1 without a kit)
 		physics::Vec3 position;  // the soldier's feet
 		float yaw = 0;           // degrees, 0 facing +z
@@ -2279,6 +2312,15 @@ private:
 	};
 	std::vector<Ladder> m_ladders;
 	void measureLadder(Ladder& ladder) const;
+	// The networked place on a ladder (0x0059ebf0 on the server, 0x0059ec80
+	// on a client): (height - bottom) / length, length the box's height
+	// (+0x18c), within 0..1; and back.
+	static float ladderFraction(const Ladder& ladder, float y);
+	static float ladderHeight(const Ladder& ladder, float fraction);
+	// The climb's pose input at a height (0x0059f380): the message and
+	// the time override.
+	static void ladderPoseInput(const Ladder& ladder, float y, float upSpeed, anim::AnimationInput& in, float& phase);
+	std::string ladderAnimationPath() const;
 	bool tryLadder(Player& player, SoldierInput& input);
 	void climbLadder(Player& player, SoldierInput& input, float seconds);
 	bool leaveLadder(Player& player, int mode);
@@ -2639,8 +2681,18 @@ private:
 		int burstLeft = 0;
 		int tracerCount = 0;       // the fire comp's +0x78 (FireArm::takeTracer)
 		std::vector<HitBone> hitBones; // the soldier template's skeletonCollisionBone records
+		// Seated or on a ladder: the seat's (the container's) system in
+		// place of the body's, and the height it was last at.
+		std::unique_ptr<anim::AnimationState> seat;
+		std::string seatPath;
+		float ladderY = 0;
+		bool onLadder = false;
+		bool hiddenBySeat = false;
 	};
 	std::map<uint32_t, RemoteSoldier> m_remoteSoldiers;
+	RemoteSoldier* startRemoteSoldier(uint32_t object);
+	bool remoteSeatSystem(RemoteSoldier& remote, const std::string& path);
+	void leaveRemoteSeat(RemoteSoldier& remote, world::Object& soldier);
 	// A remote soldier's round: the projectile its firearm makes on a
 	// client (one without a networkable), from the muzzle along the aim.
 	void fireRemoteRound(RemoteSoldier& remote, uint32_t object, const physics::Vec3& muzzle, const physics::Mat3& turn,

@@ -46,6 +46,7 @@
 //    depth of the points the ground contact (slot 0x28) tests.
 #pragma once
 
+#include "Game/SoldierControl.h"
 #include "Physics/RigidBody.h"
 
 #include <array>
@@ -437,7 +438,28 @@ public:
 	// Someone aboard (the engines' messages 4 and 5: 0x0064c890; the force
 	// only with the PCO occupied, 0x005c87b0) and the tick (for the legs'
 	// latched inputs).
-	void setOccupied(bool occupied) { m_occupied = occupied; }
+	// Entering (0x005cdd60 / 0x005ce600) also sets the PCO's own sprint up
+	// again (0x00645790 with the template's sprintDissipationTime +0x45c,
+	// sprintRecoverTime +0x458, sprintLimit +0x460, 1, 1; 0x00645780 clears
+	// its flags, the stamina stays).
+	void setOccupied(bool occupied)
+	{
+		if (occupied && !m_occupied) {
+			m_sprint.restore(m_sprint.stamina(), false);
+			m_sprintHeld = false;
+		}
+		m_occupied = occupied;
+	}
+	// The PlayerControlObject's sprint, the vehicle's boost (its +0x2d4, the
+	// soldier's SprintStamina; slots 0x108 the stamina, 0x100 sprinting):
+	// the driver's sprint key asks for it (events 0x29 / 0x2a, 0x005cacf0 ->
+	// 0x00645760) and the PCO's update (0x005c8e70) steps it with no block
+	// and no recovery delay while sprintFactor (+0x464, 2.5 by the
+	// constructor) is over 0. While sprinting a newCar2's driven wheels
+	// (0x006b7910) and an engine's thrust (0x0064df20) are times
+	// sprintFactor. Only the FAVs set the times (5 s, 15 s, limit 0.2,
+	// x 2.25); without a dissipation time it never starts (0x006457f0).
+	const SprintStamina& sprint() const { return m_sprint; }
 	// A walker's response (MechLegs 0xc432) in place of the hull's ground
 	// points: its legs against the ground (0x006cf5c0), the solve
 	// (0x006ce740) and the drive (0x006cdca0). Call after the body steps.
@@ -519,7 +541,10 @@ private:
 	bool m_hasLegs = false;
 	Regulator m_vertical; // regulateVerticalPos (0x390) on its input (0x374)
 	bool m_occupied = false;
-	float m_sprintFactor = 0; // the PCO template's (0x464)
+	float m_sprintFactor = 2.5f; // the PCO template's (+0x464; the constructor's 2.5)
+	SprintStamina m_sprint;
+	bool m_sprintHeld = false;
+	bool boosting() const { return m_sprint.sprinting(); }
 	int m_tick = 0;
 	VehicleInput m_regulated; // the inputs after the PCO's regulator
 };

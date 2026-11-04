@@ -77,6 +77,10 @@ struct RemoteObject {
 	// swimming +0x30c, the weapon put away +0x3e9: 0x005878b0).
 	int pose = 0, requestedPose = 0;
 	bool swimming = false, weaponAway = false;
+	// Soldiers on a ladder (mask 0x20000): its id (the Ladder's +0x184, 1
+	// and up in the level's order; 0 none) and the place on it, 0..1.
+	int ladder = 0;
+	float ladderPosition = 0;
 	// Control points (0x006084b0): the flag's height (capture progress,
 	// cp +0x19c, 0..1), its rate per second (+0x194, signed) and which
 	// team's flag is up (+0x1b0).

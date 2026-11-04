@@ -47,7 +47,7 @@ struct Car {
 	std::vector<Vec3> chassis;
 	physics::Ground ground = flatGround();
 
-	Car()
+	explicit Car(bool boost = false)
 	{
 		templates.registerType(1, "PlayerControlObject");
 		templates.registerType(2, "Engine");
@@ -55,6 +55,12 @@ struct Car {
 		templates.registerType(4, "Spring");
 		world::ObjectTemplate* root = templates.create("PlayerControlObject", "car");
 		root->settings()["mass"] = "1800";
+		if (boost) { // eu_fav.tweak's
+			root->settings()["sprintRecoverTime"] = "15";
+			root->settings()["sprintDissipationTime"] = "5";
+			root->settings()["sprintLimit"] = "0.2";
+			root->settings()["sprintFactor"] = "2.25";
+		}
 		world::ObjectTemplate* engine = templates.create("Engine", "car_engine");
 		engine->settings()["engineType"] = "194";
 		engine->settings()["torque"] = "100";
@@ -250,6 +256,55 @@ TEST(Vehicle_CarSettlesDrivesTurnsAndBrakes)
 	std::fprintf(stderr, "  braking: %.1f -> %.1f m/s\n", before, car.forwardSpeed());
 	CHECK(car.forwardSpeed() < before - 2);
 	CHECK(car.vehicle->braking() || car.vehicle->gear() == 0);
+}
+
+// The FAV's boost: the PCO's own sprint (0x005c8e70 -> 0x006457f0 with no
+// block or delay; the key's events 0x005cacf0 -> 0x00645760) drains over
+// sprintDissipationTime and recovers over sprintRecoverTime; while it
+// sprints the driven wheels' torque is x sprintFactor (0x006b7910). A car
+// without the times never boosts (no dissipation time, 0x006457f0).
+TEST(Vehicle_SprintBoost)
+{
+	float speeds[2] {};
+	for (const bool boost : {false, true}) {
+		Car car(boost);
+		CHECK(car.vehicle != nullptr);
+		if (!car.vehicle) {
+			return;
+		}
+		car.vehicle->setOccupied(true);
+		car.run(60);
+		game::VehicleInput input;
+		input.throttle = 1;
+		input.sprint = true;
+		car.run(60, input); // two seconds, sprinting held
+		speeds[boost] = car.forwardSpeed();
+		const game::SprintStamina& sprint = car.vehicle->sprint();
+		std::fprintf(stderr, "  %s: %.1f m/s after 2 s, stamina %.2f%s\n", boost ? "boosted" : "plain", speeds[boost],
+			sprint.stamina(), sprint.sprinting() ? " (sprinting)" : "");
+		if (!boost) {
+			CHECK(!sprint.sprinting() && sprint.stamina() == 1);
+			continue;
+		}
+		CHECK(sprint.sprinting());
+		CHECK(std::fabs(sprint.stamina() - (1 - 2.0f / 5)) < 0.03f); // 5 s from full to empty
+		int ticks = 60;
+		while (sprint.sprinting() && ticks < 300) {
+			car.run(1, input);
+			++ticks;
+		}
+		std::fprintf(stderr, "  the boost ran out after %.2f s\n", ticks / 30.0f);
+		CHECK(ticks >= 148 && ticks <= 156); // empty after 5 s: no more boost
+		CHECK(!sprint.sprinting() && sprint.stamina() < 0.005f);
+		input.sprint = false;
+		car.run(30, input); // a second's recovery: 1/15
+		CHECK(std::fabs(sprint.stamina() - 1.0f / 15) < 0.01f);
+		// Not again until past sprintLimit (0.2).
+		input.sprint = true;
+		car.run(1, input);
+		CHECK(!sprint.sprinting());
+	}
+	CHECK(speeds[1] > speeds[0] + 1);
 }
 
 // Off the ground the driven wheel still runs (0x006b8230 -> 0x006b7910

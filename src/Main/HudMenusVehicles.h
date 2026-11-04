@@ -232,6 +232,19 @@ public:
 	// its seconds at each toggle), the last flash's slot shown again.
 	void flash(int itemIndex);
 	int flashing() const { return m_flash; }
+	// The mouse wheel's moves (the HUD's input 0x00755d50: c_PINextItem,
+	// input 0x30, 0x0079c1e0; c_PIPrevItem, 0x31, 0x0079c230): the next
+	// slot if it is usable, else the first if that is; the previous one if
+	// usable, else the last if usable, else the first. A move selects by
+	// the item index (0x0079c120: the open time starts again) and plays
+	// "weaponOver"; false when nothing was selected (an empty list, or
+	// 0x0079c1e0 finding neither usable).
+	bool next();
+	bool previous();
+	// The open time (+0x20) the next opening or move keeps it up for.
+	void setSeconds(float seconds) { m_seconds = seconds; }
+	// The selected slot's item index (0x0079bdb0; -1 for none).
+	int selectedItem() const;
 	// Each frame: the timer and the variables.
 	void update(hud::HudManager& hud, float dt);
 	bool shown() const { return m_shown; }
@@ -241,6 +254,7 @@ public:
 		int index = -1;
 		std::string icon;
 		float alpha = 1;
+		bool usable = true; // the entry's +8 (0x0079c290: slot 0x170)
 	};
 	const std::array<Slot, 10>& slots() const { return m_slots; }
 
@@ -248,12 +262,40 @@ private:
 	bool m_reverse = false; // +8
 	bool m_shown = false;   // +9
 	int m_selected = -1;    // +0xc
+	void select(int itemIndex); // 0x0079c120
 	int m_flash = -1;       // +0x18: the flashing slot
 	int m_flashCount = 0;   // +0x1c: toggles left
 	float m_seconds = 10;   // +0x20: how long it stays open (the constructor's 10)
 	float m_timer = -1;     // +0x24
 	float m_flashTimer = -1; // +0x28: to the next toggle
 	std::array<Slot, 10> m_slots;
+};
+
+// The HUD's input pass over the item list (part of 0x00755d50), run on
+// the frame's input before the soldier takes it. With the list open (menu
+// state 0xb: the wheel's, a key's or an activation's) a press of fire
+// (input 8) is the pick: the selected item's index + 0xd (0x0079bdb0,
+// clamped to 0xe..0x16) is pressed as that PIWeaponSelect key (0x00583880)
+// and fire is cleared, and fire stays cleared until 0.3 s after (the
+// list's +0x38 = the time + its +0x30, the constructor's 0.3). Without
+// fire, a wheel step (c_PINextItem / c_PIPrevItem, inputs 0x30 / 0x31)
+// where the list may open opens it for 2 s (+0x20 = 2.0, state 0xb) and
+// moves the selection (0x0079c1e0 / 0x0079c230, "weaponOver"). The wheel's
+// input still reaches the soldier (a zoomed launcher's airburst distance,
+// 0x005d5440).
+struct ItemListInput {
+	// Whether the list may open (0x00755d50's param_2 byte 3): on foot
+	// unless the weapon in hand is zoomed (its firearm's slot 300), in a
+	// vehicle only with the control object's vehicleHud.useSelectionIcons
+	// (block +0xbc); never in a demo. The active weapon's +0x14 bit 0,
+	// which also forbids it, isn't traced.
+	bool allowed = false;
+	std::vector<SelectItem> items; // 0x0079c470's list
+	int inHand = -1;               // the item index in hand (selected at opening)
+	double fireBlockUntil = -1;    // +0x38
+	// `item` is the frame's weapon key (0 none), set by a pick; returns the
+	// sound to play ("" none).
+	std::string apply(ItemSelection& list, bool& fire, int& item, int itemStep, double now);
 };
 
 // The item list in a seat (0x0079c470): the control object's PIFire

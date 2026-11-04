@@ -432,8 +432,8 @@ void Vehicle::engineForce(OldEngine& e, physics::RigidBody& body, const physics:
 		const float f = std::fabs(e.rpm) * 0.1f + std::fabs(d) * d;
 		e.feedback(f);
 		float thrust = ratio * f * k;
-		if (m_regulated.sprint && m_sprintFactor > 0) {
-			thrust *= m_sprintFactor;
+		if (boosting()) {
+			thrust *= m_sprintFactor; // 0x0064df20: the root PCO sprinting (slot 0x100), x sprintFactor (0x114)
 		}
 		body.addForce(offset, z * thrust);
 		return;

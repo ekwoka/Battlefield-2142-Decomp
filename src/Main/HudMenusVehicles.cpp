@@ -304,7 +304,7 @@ void ItemSelection::open(const std::vector<SelectItem>& items, int selectedIndex
 		if (item.index <= 0 || at < 0 || at >= 10) {
 			continue;
 		}
-		placed[static_cast<size_t>(at)] = {true, item.index, item.icon, item.usable ? 1.0f : 0.4f};
+		placed[static_cast<size_t>(at)] = {true, item.index, item.icon, item.usable ? 1.0f : 0.4f, item.usable};
 	}
 	m_slots = {};
 	size_t next = 0;
@@ -344,6 +344,104 @@ void ItemSelection::flash(int itemIndex)
 		}
 	}
 	m_timer = m_seconds;
+}
+
+void ItemSelection::select(int itemIndex)
+{
+	// 0x0079c120: the slot of that index (the first without one), the open
+	// time anew (+0x24 = +0x20).
+	int at = 0;
+	for (size_t i = 0; i < m_slots.size() && m_slots[i].active; ++i) {
+		if (m_slots[i].index == itemIndex) {
+			at = static_cast<int>(i);
+			break;
+		}
+	}
+	m_selected = at;
+	m_timer = m_seconds;
+}
+
+namespace {
+
+int activeSlots(const std::array<ItemSelection::Slot, 10>& slots)
+{
+	int n = 0;
+	while (n < static_cast<int>(slots.size()) && slots[static_cast<size_t>(n)].active) {
+		++n;
+	}
+	return n;
+}
+
+} // namespace
+
+bool ItemSelection::next()
+{
+	const int count = activeSlots(m_slots); // +0x14
+	if (count == 0) {
+		return false;
+	}
+	const int at = std::max(0, m_selected);
+	if (at + 1 < count && m_slots[static_cast<size_t>(at + 1)].usable) {
+		select(m_slots[static_cast<size_t>(at + 1)].index);
+	} else if (m_slots[0].usable) {
+		select(m_slots[0].index);
+	} else {
+		return false; // 0x0079c1e0 leaves it as it is (no sound)
+	}
+	m_shown = true;
+	return true;
+}
+
+bool ItemSelection::previous()
+{
+	const int count = activeSlots(m_slots);
+	if (count == 0) {
+		return false;
+	}
+	const int at = std::max(0, m_selected);
+	if (at > 0 && m_slots[static_cast<size_t>(at - 1)].usable) {
+		select(m_slots[static_cast<size_t>(at - 1)].index);
+	} else if (m_slots[static_cast<size_t>(count - 1)].usable) {
+		select(m_slots[static_cast<size_t>(count - 1)].index);
+	} else {
+		select(m_slots[0].index);
+	}
+	m_shown = true;
+	return true;
+}
+
+int ItemSelection::selectedItem() const
+{
+	if (m_selected < 0 || m_selected >= activeSlots(m_slots)) {
+		return -1;
+	}
+	return m_slots[static_cast<size_t>(m_selected)].index;
+}
+
+std::string ItemListInput::apply(ItemSelection& list, bool& fire, int& item, int itemStep, double now)
+{
+	if (fire) {
+		if (list.shown()) {
+			const int selected = list.selectedItem();
+			if (selected >= 1) {
+				item = std::min(selected, 9); // 0xe..0x16: PIWeaponSelect1..9
+			}
+			fire = false;
+			fireBlockUntil = now + 0.3;
+		} else if (now < fireBlockUntil) {
+			fire = false;
+		}
+		return {};
+	}
+	if (itemStep == 0 || !allowed || items.empty()) {
+		return {};
+	}
+	if (!list.shown()) {
+		list.setSeconds(2.0f);
+		list.open(items, inHand, 2.0f);
+	}
+	const bool moved = itemStep > 0 ? list.next() : list.previous();
+	return moved ? "weaponOver" : "";
 }
 
 void ItemSelection::update(hud::HudManager& hud, float dt)
