@@ -117,6 +117,9 @@ public:
 		// Menu/HUD/Texture/), this many pixels square (the VOIP list's
 		// kit and squad icons, the map vote's buttons).
 		float iconSize = 0;
+		// An icon column's own colour (the scoreboard's kit icons, drawn in
+		// 0x00b3bec0's black by 0x007bb540); red below 0: the row's.
+		std::array<float, 4> iconColor {-1, 0, 0, 0};
 	};
 	void setList(int data, std::vector<std::vector<std::string>> rows);
 	// Edit boxes by data id (setEditNodeData: 1 chat, 2 the squad name, 3

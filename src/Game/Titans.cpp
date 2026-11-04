@@ -1767,6 +1767,7 @@ bool GameWorld::launchPod(int id)
 	float velocity = 0, maxTilt = 0;
 	physics::Vec3 start;
 	bool found = false;
+	const world::ObjectTemplate* launcher = nullptr;
 	std::function<void(const world::ObjectTemplate&, int)> scan = [&](const world::ObjectTemplate& node, int depth) {
 		for (const world::ChildTemplate& child : node.children()) {
 			const world::ObjectTemplate* c = m_templates.find(child.name);
@@ -1786,6 +1787,7 @@ bool GameWorld::launchPod(int id)
 					start = s;
 					maxTilt = number(*c, "fire.maximumVehicleTiltForFire", 0);
 					found = true;
+					launcher = c;
 				}
 			}
 			scan(*c, depth + 1);
@@ -1802,6 +1804,25 @@ bool GameWorld::launchPod(int id)
 	gunAim(body->object, player->seat, gunYaw, gunPitch);
 	const float y = yaw + gunYaw * 3.14159265f / 180.0f, p = gunPitch * 3.14159265f / 180.0f;
 	const physics::Vec3 direction {std::sin(y) * std::cos(p), std::sin(p), std::cos(y) * std::cos(p)};
+	// setCheckObstruction (0x005c2310 from 0x005c50e0): anything along the
+	// launcher refuses the press (pod_launcher, pod_launcher_cq,
+	// eu_apc_alps': -1.5 2 1). The launcher's place: its seat weapon's,
+	// riding the seat's mount.
+	if (const std::string* check = launcher ? setting(*launcher, "checkObstruction") : nullptr) {
+		const physics::Vec3 limits = vec3Of(*check);
+		physics::Vec3 at = seat.position;
+		for (const SeatWeapon& w : seat.weapons) {
+			if (sameName(w.weapon, launcher->name())) {
+				at = w.weaponPosition;
+			}
+		}
+		at = body->body.position + body->body.rotation.transform(seatMount(*body, layout, seat.gunAnchor).place(at));
+		const physics::Vec3 right {std::cos(y), 0, -std::sin(y)};
+		const physics::Vec3 up = physics::cross(direction, right);
+		if (fireObstructed(at, direction, right, up, limits.x, limits.y, limits.z, body->object)) {
+			return false; // obstructed: the press is a release (event 9)
+		}
+	}
 	const physics::Vec3 from = body->body.position + body->body.rotation.transform(seat.position) + direction * (start.z + 1.5f)
 		+ physics::Vec3 {0, 1.5f, 0};
 	// Out of the seat first.
@@ -1820,6 +1841,33 @@ bool GameWorld::launchPod(int id)
 	player->seatAnimation.reset();
 	player->seatAnimationPath.clear();
 	return startPod(*player, projectile, from, direction * velocity + body->body.velocity, body->object);
+}
+
+bool GameWorld::fireObstructed(const physics::Vec3& at, const physics::Vec3& forward, const physics::Vec3& right,
+	const physics::Vec3& up, float start, float end, float radius, uint32_t ignore) const
+{
+	// The middle ray from start to end along the gun, then the four at the
+	// corners of the radius (0x005c2310: local_6c / local_7c).
+	// (lineOfSight samples the terrain between the ends; the ray's own ends
+	// count here too: one under the ground has met it.)
+	const auto met = [&](const physics::Vec3& a, const physics::Vec3& b) {
+		if (m_ground.height && (a.y < m_ground.height(a.x, a.z) || b.y < m_ground.height(b.x, b.z))) {
+			return true;
+		}
+		return !lineOfSight(a, b, ignore);
+	};
+	const physics::Vec3 from = at + forward * start, along = forward * (end - start);
+	if (met(from, from + along)) {
+		return true;
+	}
+	const float across[4] = {radius, radius, -radius, -radius}, upward[4] = {radius, -radius, -radius, radius};
+	for (int i = 0; i < 4; ++i) {
+		const physics::Vec3 moved = from + right * across[i] + up * upward[i];
+		if (met(moved, moved + along)) {
+			return true;
+		}
+	}
+	return false;
 }
 
 std::vector<GameWorld::PodInfo> GameWorld::pods() const

@@ -2065,6 +2065,9 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 			found = m_objects.insert_or_assign(object.id, std::move(tracked)).first;
 		}
 		Tracked& tracked = found->second;
+		// The local player's own vehicle seen from inside: its bundles'
+		// first-person form (0x006187c0).
+		const EffectManager::View bundleView = object.firstPerson ? EffectManager::View::FirstPerson : view;
 		if (created) {
 			tracked.groundEffects.assign(tracked.bundles.size(), std::string());
 			// A soldier's breathEffect (Soldier +0x3a0).
@@ -2119,7 +2122,7 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 				continue;
 			}
 			if (b.kind != Placed::Kind::Plain) {
-				updateGround(object, tracked.velocity, tracked, i, effects, partPose, view);
+				updateGround(object, tracked.velocity, tracked, i, effects, partPose, bundleView);
 				continue;
 			}
 			const bool start = (created && b.startAtCreation)
@@ -2129,7 +2132,7 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 				if (partPose && !created) {
 					place(b, object.id, partPose, b.position, b.rotation);
 				}
-				effects.spawnAttached(b.bundle->name(), object.id, b.position, b.rotation, view, tag);
+				effects.spawnAttached(b.bundle->name(), object.id, b.position, b.rotation, bundleView, tag);
 			}
 			// The depth gate (0x0061a760, BundleModifiers::maxUnderWater):
 			// the water's height at the bundle less its own.
@@ -2142,7 +2145,7 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 					if (partPose && !created) {
 						place(b, object.id, partPose, b.position, b.rotation);
 					}
-					effects.spawnAttached(b.bundle->name(), object.id, b.position, b.rotation, view, tag);
+					effects.spawnAttached(b.bundle->name(), object.id, b.position, b.rotation, bundleView, tag);
 				} else if (!in && running) {
 					effects.stopAttached(object.id, tag);
 				}

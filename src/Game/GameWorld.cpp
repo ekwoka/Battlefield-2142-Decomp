@@ -3637,12 +3637,21 @@ bool GameWorld::stickProjectile(Projectile& p, const physics::CollisionWorld::Hi
 
 bool GameWorld::rideStuck(Projectile& p)
 {
-	const Body* body = findBody(p.stuckTo);
-	if (!body) {
+	physics::Vec3 at;
+	physics::Mat3 rotation;
+	if (const Body* body = findBody(p.stuckTo)) {
+		at = body->body.position;
+		rotation = body->body.rotation;
+	} else if (const world::Object* object = p.visual ? m_objects.find(p.stuckTo) : nullptr) {
+		// A joined client's: the object of the ghost it stuck to, as the
+		// server's updates place it (its body is the server's).
+		at = {object->position().x, object->position().y, object->position().z};
+		rotation = physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+	} else {
 		return false;
 	}
-	p.position = body->body.position + body->body.rotation.transform(p.stuckLocal);
-	p.stuckNormal = body->body.rotation.transform(p.stuckLocalNormal);
+	p.position = at + rotation.transform(p.stuckLocal);
+	p.stuckNormal = rotation.transform(p.stuckLocalNormal);
 	p.velocity = {};
 	return true;
 }
@@ -6699,7 +6708,7 @@ void GameWorld::poseSeated(Player& player, world::Object& soldier, const Body& b
 	// entering, its targets set each frame by 0x005efc00).
 	std::vector<anim::IkTarget> targets;
 	const physics::Vec3 place {at.x, at.y, at.z};
-	if (seatIkTargets(player, seat, rotation, place, targets)) {
+	if (seatIkTargets(player.vehicle, player.skeleton, seat, rotation, place, targets)) {
 		player.worldPose = anim::worldMatricesWithIk(*player.skeleton, player.pose, targets);
 	} else {
 		player.worldPose = anim::worldMatrices(*player.skeleton, player.pose);
@@ -6743,14 +6752,24 @@ physics::Vec3 vec3Setting(const world::ObjectTemplate& t, const char* key)
 
 } // namespace
 
-bool GameWorld::seatIkTargets(const Player& player, const SeatLayout& seat, const physics::Mat3& soldierRotation,
-	const physics::Vec3& soldierPosition, std::vector<anim::IkTarget>& targets) const
+bool GameWorld::seatPartPose(uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation,
+	bool remote) const
 {
-	const world::Object* vehicle = player.vehicle ? m_objects.find(player.vehicle) : nullptr;
-	if (!vehicle || !vehicle->objectTemplate() || !player.skeleton) {
+	if (remote && m_remotePartPose && m_remotePartPose(object, part, offset, rotation)) {
+		return true;
+	}
+	return !remote && partPose(object, part, offset, rotation);
+}
+
+bool GameWorld::seatIkTargets(uint32_t vehicleId, const anim::Skeleton* skeleton, const SeatLayout& seat,
+	const physics::Mat3& soldierRotation, const physics::Vec3& soldierPosition, std::vector<anim::IkTarget>& targets,
+	bool remote) const
+{
+	const world::Object* vehicle = vehicleId ? m_objects.find(vehicleId) : nullptr;
+	if (!vehicle || !vehicle->objectTemplate() || !skeleton) {
 		return false;
 	}
-	const anim::IkArms arms = anim::ikArms(*player.skeleton);
+	const anim::IkArms arms = anim::ikArms(*skeleton);
 	if (arms.leftBone < 0 && arms.rightBone < 0) {
 		return false;
 	}
@@ -6760,7 +6779,7 @@ bool GameWorld::seatIkTargets(const Player& player, const SeatLayout& seat, cons
 			{child.position.x, child.position.y, child.position.z}};
 		f = f.in(parent);
 		world::Vec3 offset, turn;
-		if (partPose(object, child.name, offset, turn)) {
+		if (seatPartPose(object, child.name, offset, turn, remote)) {
 			const PartFrame posed {physics::Mat3::fromYawPitchRoll({turn.x, turn.y, turn.z}), {offset.x, offset.y, offset.z}};
 			f = posed.in(f);
 		}
@@ -7169,10 +7188,20 @@ void GameWorld::animateRemoteSeated(uint32_t object, uint32_t vehicle, int seatI
 		soldier->setHidden(false);
 	}
 	// 0x00587a30: Ry(+0x25c) x the seat's matrix (the seat's turn on the
-	// vehicle's).
+	// vehicle's), the seat riding the turret that carries it (seatMount:
+	// the carrier seat's yaw bundle about its pivot, the bundle's turn as
+	// its ghost's RotationalBundle networkable has it, read 0x00602070).
+	physics::Mat3 mount;
+	if (seat->seatAnchor.yawSeat >= 0 && static_cast<size_t>(seat->seatAnchor.yawSeat) < layout.seats.size()) {
+		const SeatLayout& turret = layout.seats[static_cast<size_t>(seat->seatAnchor.yawSeat)];
+		world::Vec3 offset, turn;
+		if (!turret.yawBundle.empty() && seatPartPose(vehicle, turret.yawBundle, offset, turn, true)) {
+			mount = physics::Mat3::fromYawPitchRoll({turn.x, 0, 0});
+		}
+	}
 	const world::Vec3& turned = carrier->rotation();
 	const physics::Mat3 rotation = physics::Mat3::fromYawPitchRoll({bodyYaw, 0, 0})
-		* physics::Mat3::fromYawPitchRoll(seat->rotation) * physics::Mat3::fromYawPitchRoll({turned.x, turned.y, turned.z});
+		* physics::Mat3::fromYawPitchRoll(seat->rotation) * mount * physics::Mat3::fromYawPitchRoll({turned.x, turned.y, turned.z});
 	const physics::Vec3 ypr = rotation.yawPitchRoll();
 	soldier->setRotation({ypr.x, ypr.y, ypr.z});
 	remote.lastYaw = ypr.x;
@@ -7183,7 +7212,16 @@ void GameWorld::animateRemoteSeated(uint32_t object, uint32_t vehicle, int seatI
 	remote.seat->takeEvents();
 	std::vector<bool> touched;
 	remote.seat->apply(*remote.skeleton, remote.pose, touched);
-	remote.worldPose = anim::worldMatrices(*remote.skeleton, remote.pose);
+	// The hands on the grips (0x005efc00 each frame, on the client as on the
+	// server: the IK object's world matrix, its parts turned as their ghosts
+	// turn them). The soldier object stands where the ghost put it.
+	std::vector<anim::IkTarget> targets;
+	const physics::Vec3 place {soldier->position().x, soldier->position().y, soldier->position().z};
+	if (seatIkTargets(vehicle, remote.skeleton, *seat, rotation, place, targets, true)) {
+		remote.worldPose = anim::worldMatricesWithIk(*remote.skeleton, remote.pose, targets);
+	} else {
+		remote.worldPose = anim::worldMatrices(*remote.skeleton, remote.pose);
+	}
 }
 
 void GameWorld::animateRemoteSoldier(uint32_t object, const RemoteSoldierState& state, float seconds)
@@ -7522,10 +7560,47 @@ bool GameWorld::hasRemoteProjectile(uint32_t ghostObject) const
 		[ghostObject](const Projectile& p) { return p.alive && p.ghostObject == ghostObject; });
 }
 
+bool GameWorld::stickRemoteProjectile(uint32_t ghostObject, uint32_t target, const physics::Vec3& local, const physics::Vec3& up)
+{
+	for (Projectile& p : m_projectiles) {
+		if (!p.alive || p.ghostObject != ghostObject) {
+			continue;
+		}
+		p.stuck = true;
+		p.resting = true;
+		p.velocity = {};
+		p.acceleration = {};
+		p.stuckTo = target;
+		if (target) {
+			p.stuckLocal = local;
+			p.stuckLocalNormal = up;
+			if (!rideStuck(p)) {
+				p.stuckTo = 0; // its parent isn't here: where the ghost put it
+			}
+		} else {
+			p.position = local;
+			p.stuckNormal = up;
+		}
+		p.tracerHit = true;
+		p.tracerStart = p.position;
+		return true;
+	}
+	return false;
+}
+
+bool GameWorld::remoteProjectileStuck(uint32_t ghostObject) const
+{
+	return std::any_of(m_projectiles.begin(), m_projectiles.end(),
+		[ghostObject](const Projectile& p) { return p.alive && p.ghostObject == ghostObject && p.stuck; });
+}
+
 void GameWorld::moveRemoteProjectile(uint32_t ghostObject, const physics::Vec3& at, const physics::Vec3* velocity)
 {
 	for (Projectile& p : m_projectiles) {
 		if (p.alive && p.ghostObject == ghostObject) {
+			if (p.stuck) {
+				return; // placed by its StickyProjectile event (0x0050f5d0 stops its physics)
+			}
 			p.position = at;
 			if (velocity) {
 				p.velocity = *velocity;

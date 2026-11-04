@@ -18,8 +18,11 @@
 //     weaponHud.showAmmo (default 1), PrimaryClipsShow weaponHud.showClips
 //     (1);
 //   - PrimaryWeaponNameString the hudName, CrosshairIconPathString the
-//     crosshairIcon, PrimaryAmmoBarFront/BackPathString the ammo bar's
-//     textures;
+//     crosshairIcon (the runtime WeaponHud's slot 0x3c, 0x00657bb0: its
+//     altCrosshairIcon, block +0x8c, instead while the firearm's fire
+//     state is above 0 when that is set: the TV-guided missiles' as_ag /
+//     us_ag, the IFV's and hover tank's AA lock icon),
+//     PrimaryAmmoBarFront/BackPathString the ammo bar's textures;
 //   - with hasMag (1) and a magazine (magSize >= 0) the clip icon
 //     (PrimaryClipPathString, PrimaryAmmoIconShow 0), else the ammo icon
 //     (PrimaryAmmoIconPathString, PrimaryAmmoIconShow 1);
@@ -209,6 +212,10 @@ struct WeaponHudInput {
 	bool scanning = false;
 	float scan = 0;
 	float seconds = 0; // the frame's time (the blinks)
+	// The fire component's state above 0 (the firearm's 0x94c0 slot 0x1c,
+	// 0x005c1b60: the fire component's slot 0xd8, 1 pressed, 2 held): the
+	// fire input held for the gun in hand.
+	bool firing = false;
 };
 
 class WeaponHud {
@@ -222,7 +229,7 @@ public:
 		bool showAmmo = true, showClips = true, hasMag = true, hasFireRate = true, battery = false;
 		bool rangeFinder = false, distanceCounter = false, scanProgress = false, ignoreTargetDistance = false;
 		bool guiShown = true;
-		std::string name, crosshair, barFront, barBack, clipIcon, ammoIcon, overheatSound;
+		std::string name, crosshair, altCrosshair, barFront, barBack, clipIcon, ammoIcon, overheatSound;
 		void read(const world::ObjectTemplate* w);
 	};
 	const Fields& fields() const { return m_fields; }
@@ -604,6 +611,14 @@ const world::ObjectTemplate* childArmorTemplate(const world::ObjectTemplate* con
 // cannons' guns, guiIndex 72), so it is taken to turn the pass on for the
 // seat's own view.
 bool seatPostProcessing(const world::ObjectTemplate* controlled, const world::ObjectTemplate* weapon, bool zoomed);
+// The weapon HUD's gui index (the runtime WeaponHud's slot 0x38,
+// 0x00657a70): altGuiIndex (the template's getter slot 0x38) while the
+// firearm is zoomed (its slot 300: the zoom level not 0, at once, before
+// the field of view gets there), unless it is -1 (unset); else guiIndex
+// (slot 0x30). (The block's switchGuiOnCamera branch, slot 0xd8, compares
+// the seat camera's id instead; no shipped template sets it.) 0 when
+// neither is set.
+int weaponGuiIndex(const world::ObjectTemplate* weapon, bool zoomed);
 // A numbered frame of an icon without an extension (mini_titanSilo +
 // 2 -> mini_titanSilo_02.dds); a name with one stays.
 std::string iconFrame(const std::string& icon, int frame);

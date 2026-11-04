@@ -1012,6 +1012,13 @@ void HostedGame::sendDatabase(int id)
 				ghostOfObject(seen.soldier), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}));
 		}
 	}
+	// The rounds stuck to an object (ServerConnection 0x0057dda0: those
+	// with a parent, +0x34).
+	for (const game::Projectile& p : m_round->projectiles()) {
+		if (p.alive && p.stuck && p.stuckTo && m_stuckSent.count(p.serial)) {
+			sendTo(id, stickyEvent(p));
+		}
+	}
 	// The spawn groups and the squads' requests standing (their events, as
 	// they went to the others).
 	for (const auto& [group, info] : m_spawnGroups) {
@@ -1860,6 +1867,34 @@ void HostedGame::moveOverheadCamera(int team, float x, float z)
 	camera->setRotation({0, -90, 0});
 }
 
+net::GameEvent HostedGame::stickyEvent(const game::Projectile& p) const
+{
+	net::StickyProjectileInfo info;
+	const auto it = m_ghosts.find(kProjectileKey | p.serial);
+	info.projectile = it != m_ghosts.end() ? it->second.first : 0;
+	info.target = p.stuckTo ? ghostOfObject(p.stuckTo) : 0;
+	info.player = p.player;
+	// Its matrix: up along the face's normal, facing as it was thrown;
+	// in the vehicle's frame on one (the sticky component's +0x18), else
+	// in the world.
+	const physics::Vec3 up = info.target ? p.stuckLocalNormal : p.stuckNormal;
+	physics::Vec3 forward {std::sin(p.yaw * 0.017453292f), 0, std::cos(p.yaw * 0.017453292f)};
+	if (info.target) {
+		if (const world::Object* parent = m_round->objects().find(p.stuckTo)) {
+			forward = physics::Mat3::fromYawPitchRoll({parent->rotation().x, parent->rotation().y, parent->rotation().z})
+						  .untransform(forward);
+		}
+	}
+	forward = forward - up * physics::dot(forward, up);
+	const float length = std::sqrt(physics::lengthSquared(forward));
+	forward = length > 1e-4f ? forward * (1 / length) : physics::Vec3 {0, 0, 1};
+	const physics::Vec3 right = physics::cross(up, forward);
+	const physics::Vec3 place = info.target ? p.stuckLocal : p.position;
+	info.rows = {net::Vec3f {right.x, right.y, right.z}, net::Vec3f {up.x, up.y, up.z},
+		net::Vec3f {forward.x, forward.y, forward.z}, net::Vec3f {place.x, place.y, place.z}};
+	return net::makeStickyProjectile(info);
+}
+
 void HostedGame::trackProjectiles()
 {
 	std::set<uint32_t> present;
@@ -1903,6 +1938,20 @@ void HostedGame::trackProjectiles()
 				client.created.insert(ghost.first);
 			}
 		}
+	}
+	// The rounds stuck since the last tick (0x005e81a0: sent once placed).
+	std::set<uint32_t> stuck;
+	for (const game::Projectile& p : m_round->projectiles()) {
+		if (!p.alive || !p.stuck || !p.serial || p.visual || !m_ghosts.count(kProjectileKey | p.serial)) {
+			continue;
+		}
+		stuck.insert(p.serial);
+		if (m_stuckSent.insert(p.serial).second) {
+			sendToPlaying(stickyEvent(p));
+		}
+	}
+	for (auto it = m_stuckSent.begin(); it != m_stuckSent.end();) {
+		it = stuck.count(*it) ? std::next(it) : m_stuckSent.erase(it); // fallen again, or gone
 	}
 	for (auto it = m_ghosts.begin(); it != m_ghosts.end();) {
 		if (!(it->first & kProjectileKey) || present.count(it->first)) {

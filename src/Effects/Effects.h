@@ -1070,6 +1070,14 @@ public:
 		bool coldBreath = false;
 		// Soldiers: seated in a vehicle (their depth-gated bundles stay off).
 		bool seated = false;
+		// Its bundles start in their first-person form (the EffectBundle's
+		// test 0x006187c0: the local player looks through the inside or nose
+		// view, player slot 0x1bc, sits under the same root, and neither his
+		// control object's nearest PlayerControlObject nor the bundle's is
+		// neverDrawAs1p, slot 0x14c; GameWorld::firstPersonEffects): their
+		// systems with showInFirstPerson or showInZoomedMode, else those
+		// with showInThirdPerson (0x0061a1c0). Taken as each bundle starts.
+		bool firstPerson = false;
 		// Its wheels' contact this tick (the vehicle's springs, by template
 		// name): a WheelEffectBundle under a wheel's spring is on while it
 		// touches, at its contact point (world). Empty: the bundle probes

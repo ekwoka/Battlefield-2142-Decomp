@@ -242,3 +242,62 @@ TEST(FirstPerson_ZoomFineTuning)
 	other.cycle(plain);
 	CHECK(other.cycle(plain) == 0.3f && !other.fineTune(plain, 1, true));
 }
+
+// A seat's zoom (anim::SeatZoom; 0x005c50e0 -> 0x005c0da0 -> 0x005da670,
+// 0x005da3f0, 0x005da5c0, 0x005da630): eu_tank's gun (factors 0, 0.25,
+// zoomDelay 0.55, zoomWhenBusy 1, zoomOutOnReload 0) under a camera of
+// insideFOV 1.1: the alternate fire narrows the view over the delay, a
+// second press widens it back to the camera's; busy, the press counts only
+// with zoomWhenBusy; leaving the inside or nose view zooms out at once.
+TEST(FirstPerson_SeatZoom)
+{
+	anim::ZoomSettings gun;
+	gun.factors = {0, 0.25f};
+	gun.delay = 0.55f;
+	gun.zoomWhenBusy = true;
+	gun.zoomOutOnReload = false;
+	anim::SeatZoom zoom;
+	zoom.reset(gun, 1.1f);
+	CHECK(zoom.fov.current == 1.1f && zoom.state.level() == 0);
+	zoom.step(true, false, true, 1.1f, 1 / 30.0f);
+	CHECK(zoom.state.level() == 1 && zoom.fov.target == 0.25f && !zoom.zoomed());
+	for (int i = 0; i < 17; ++i) {
+		zoom.step(false, false, true, 1.1f, 1 / 30.0f);
+	}
+	CHECK(zoom.zoomed() && zoom.fov.current == 0.25f); // 0.55 s
+	// Reloading doesn't zoom out (zoomOutOnReload 0), and a busy press
+	// still steps it (zoomWhenBusy).
+	zoom.step(false, true, true, 1.1f, 1 / 30.0f);
+	CHECK(zoom.state.level() == 1);
+	zoom.step(true, true, true, 1.1f, 1 / 30.0f);
+	CHECK(zoom.state.level() == 0 && zoom.fov.target == 1.1f);
+	// Without zoomWhenBusy the busy press is dropped; with
+	// zoomOutOnReload a reload's start zooms out.
+	anim::ZoomSettings launcher;
+	launcher.factors = {0, 0.7f};
+	launcher.delay = 0.62f;
+	anim::SeatZoom av;
+	av.reset(launcher, 1.1f);
+	av.step(true, true, true, 1.1f, 1 / 30.0f);
+	CHECK(av.state.level() == 0);
+	av.step(true, false, true, 1.1f, 1 / 30.0f);
+	CHECK(av.state.level() == 1);
+	av.step(false, true, true, 1.1f, 1 / 30.0f);
+	CHECK(av.state.level() == 0 && av.fov.target == 1.1f);
+	// A chase view zooms out at once, and presses do nothing there.
+	av.step(false, false, true, 1.1f, 1 / 30.0f);
+	av.step(true, false, true, 1.1f, 1 / 30.0f);
+	CHECK(av.state.level() == 1);
+	av.step(false, false, false, 1.1f, 1 / 30.0f);
+	CHECK(av.state.level() == 0 && av.fov.current == 1.1f);
+	av.step(true, false, false, 1.1f, 1 / 30.0f);
+	CHECK(av.state.level() == 0);
+	// Level 0 follows the camera's own field of view (0x005da290).
+	av.step(false, false, true, 0.9f, 1 / 30.0f);
+	CHECK(av.fov.current == 0.9f);
+	// A gun without a zoom never zooms.
+	anim::SeatZoom none;
+	none.reset({}, 1.1f);
+	none.step(true, false, true, 1.1f, 1 / 30.0f);
+	CHECK(none.state.level() == 0 && none.fov.current == 1.1f);
+}

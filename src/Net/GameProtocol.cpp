@@ -930,6 +930,49 @@ bool parseCreateKit(const GameEvent& e, CreateKitInfo& out)
 	return true;
 }
 
+bool parseStickyProjectile(const GameEvent& e, StickyProjectileInfo& out)
+{
+	out = {};
+	if (e.type != kEvStickyProjectile || e.values.size() < 15) {
+		return false;
+	}
+	out.projectile = static_cast<uint16_t>(e.u(0));
+	out.target = static_cast<uint16_t>(e.u(1));
+	size_t n = 2;
+	if (out.target) {
+		out.part = e.i(n++);
+		out.bundle = e.i(n++);
+	}
+	const uint32_t player = e.u(n++);
+	out.player = player == 0xff ? -1 : static_cast<int>(player);
+	if (e.values.size() < n + 12) {
+		return false;
+	}
+	// Read into +0x2c, +0x0c, +0x1c, +0x3c (0x0050f720).
+	static constexpr size_t kRows[4] = {2, 0, 1, 3};
+	for (size_t row : kRows) {
+		out.rows[row] = e.vec(n);
+		n += 3;
+	}
+	return true;
+}
+
+GameEvent makeStickyProjectile(const StickyProjectileInfo& info)
+{
+	GameEvent e;
+	e.type = kEvStickyProjectile;
+	e.values = {info.projectile, info.target};
+	if (info.target) {
+		e.values.push_back(static_cast<uint32_t>(info.part) & 0xff);
+		e.values.push_back(static_cast<uint32_t>(info.bundle) & 0xff);
+	}
+	e.values.push_back(info.player < 0 ? 0xffu : static_cast<uint32_t>(info.player) & 0xff);
+	for (size_t row : {2, 0, 1, 3}) { // 0x0050f460's order
+		pushVec(e, info.rows[row]);
+	}
+	return e;
+}
+
 bool parseSquadOrder(const GameEvent& e, SquadOrderInfo& out)
 {
 	if (e.type != kEvIssueSquadOrder || e.values.size() < 7) {

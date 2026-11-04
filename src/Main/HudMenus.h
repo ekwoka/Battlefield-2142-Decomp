@@ -443,6 +443,17 @@ struct ScoreboardStyle {
 	std::array<float, 4> background; // alpha 0: none
 };
 ScoreboardStyle scoreboardStyle(const ScoreboardRow& row, int rowIndex);
+// A scoreboard row's kit icon (the HUD manager's slot 0x64, 0x0074e940,
+// taken by the row filler 0x007bb540 and drawn 15 pixels square): a player
+// not alive (slot 0x74; or the HUD manager's slot 0x410 test) shows
+// Ingame/Scoreboard/Icons/icon_Spectator.tga when a spectator (+0x404,
+// slot 0x3bc), else icon_Death.tga; a living enemy of the local player
+// (teams by slot 0xf8, `localTeam` 0 for none) icon_Faded.tga; a living
+// teammate his kit's HUD icon (the kit, slot 0xb4, its HUD component 0xc4d7
+// slot 0x58's texture 0: vehicleHud.vehicleIcon, as the kit buttons show
+// it); "" without one. Textures cached by the HUD manager (+0x1ec, +0x138,
+// +0x134).
+std::string scoreboardIcon(const game::GameWorld::PlayerInfo& player, int localTeam, const world::ObjectTemplate* kit);
 
 // The scoreboard by squads (the "Squads" tab, scoreboard.setToggleShow 1):
 // 0x007bad00's commander header ("HUD_HUD_MENU_COMMANDER_HEADING", no

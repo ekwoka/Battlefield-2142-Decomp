@@ -167,6 +167,9 @@ void PlayerCamera::resetSoldier()
 	m_soldierTemplate = nullptr;
 	m_weaponTemplate = nullptr;
 	m_zoom.reset();
+	m_seatZoom = {};
+	m_seatGun = nullptr;
+	m_inSeat = false;
 	m_roundsWas = -1;
 	m_springState = {};
 	m_springOffset = {};
@@ -692,9 +695,65 @@ bool PlayerCamera::externalView(View& view, float aspect) const
 	}
 	view.position = {m_external.eye.x, m_external.eye.y, m_external.eye.z};
 	game::camera::anglesOf(m_external, view.yaw, view.pitch);
-	view.fovY = aspectFov(m_externalFov, aspect);
+	// The nose view through a zoomed seat gun: the player's field of view.
+	const bool zoomable = m_inSeat && m_mode == game::camera::Mode::Nose && m_seatGun && m_seatZoom.settings.present();
+	view.fovY = aspectFov(zoomable ? m_seatZoom.fov.current : m_externalFov, aspect);
 	view.roll = 0;
 	return true;
+}
+
+namespace {
+
+// A weapon's DefaultZoomComp (template defaults 0x005dacc0), none without one.
+anim::ZoomSettings zoomSettings(const world::ObjectTemplate& weapon)
+{
+	anim::ZoomSettings zoom;
+	const auto& components = weapon.components();
+	if (std::find(components.begin(), components.end(), "DefaultZoomComp") == components.end()) {
+		return zoom;
+	}
+	std::istringstream factors(text(weapon, "zoom.addZoomFactor.list"));
+	for (float f; factors >> f;) {
+		if (std::find(zoom.factors.begin(), zoom.factors.end(), f) == zoom.factors.end()) {
+			zoom.factors.push_back(f); // duplicates skipped (0x005dae50)
+		}
+	}
+	zoom.delay = number(weapon, "zoom.zoomDelay", 0.5f);
+	zoom.lod = static_cast<int>(number(weapon, "zoom.zoomLod", 0));
+	zoom.disableMuzzle = number(weapon, "zoom.disableMuzzleWhenZoomed", 0) != 0;
+	zoom.mouseSpeedMod = number(weapon, "zoom.mouseSpeedMod", 1);
+	zoom.zoomOutOnReload = number(weapon, "zoom.zoomOutOnReload", 1) != 0;
+	zoom.useFineTuning = number(weapon, "zoom.useZoomFineTuning", 0) != 0;
+	zoom.fineTuneSteps = static_cast<int>(number(weapon, "zoom.zoomFineTuneSteps", 1));
+	zoom.fineTuningNeedsUnlock = number(weapon, "zoom.zoomFineTuningNeedsUnlock", 1) != 0;
+	zoom.zoomWhenBusy = number(weapon, "zoom.zoomWhenBusy", 0) != 0;
+	return zoom;
+}
+
+} // namespace
+
+void PlayerCamera::stepSeatZoom(const Me& me, bool altPressed, float seconds)
+{
+	const world::ObjectTemplate* gun = nullptr;
+	if (me.vehicle && !m_remote) {
+		const auto seats = m_round.vehicleSeats(me.vehicle);
+		if (me.seat >= 0 && static_cast<size_t>(me.seat) < seats.size()) {
+			gun = m_round.templates().find(seats[static_cast<size_t>(me.seat)].weapon);
+		}
+	}
+	m_inSeat = me.vehicle != 0;
+	// The seat camera's own field of view (slot 0x58 of the active camera,
+	// 0x00610150: insideFOV in the inside view, else worldFOV).
+	const float camera = m_inSeat && gun ? seatFov(m_mode == game::camera::Mode::Inside) : 0.0f;
+	const float base = camera > 0 ? camera : m_baseFov;
+	if (gun != m_seatGun) {
+		// Another seat, gun or none: a new zoom component at level 0.
+		m_seatGun = gun;
+		m_seatZoom.reset(gun ? zoomSettings(*gun) : anim::ZoomSettings {}, base);
+	}
+	const game::FireArm* firearm = gun ? m_round.gun(me.vehicle, me.seat) : nullptr;
+	const bool looking = m_mode == game::camera::Mode::Inside || m_mode == game::camera::Mode::Nose;
+	m_seatZoom.step(altPressed && !duckingDisablesInput(), firearm && firearm->reloading(), looking, base, seconds);
 }
 
 void PlayerCamera::tick(float seconds)
@@ -804,25 +863,7 @@ void PlayerCamera::tick(float seconds)
 					}
 				};
 			bundles(*weaponTemplate, {0, 0, 0}, 0);
-			const auto& components = weaponTemplate->components();
-			if (std::find(components.begin(), components.end(), "DefaultZoomComp") != components.end()) {
-				std::istringstream factors(text(*weaponTemplate, "zoom.addZoomFactor.list"));
-				for (float f; factors >> f;) {
-					if (std::find(m_zoomSettings.factors.begin(), m_zoomSettings.factors.end(), f)
-						== m_zoomSettings.factors.end()) {
-						m_zoomSettings.factors.push_back(f); // duplicates skipped (0x005dae50)
-					}
-				}
-				m_zoomSettings.delay = number(*weaponTemplate, "zoom.zoomDelay", 0.5f);
-				m_zoomSettings.lod = static_cast<int>(number(*weaponTemplate, "zoom.zoomLod", 0));
-				m_zoomSettings.disableMuzzle = number(*weaponTemplate, "zoom.disableMuzzleWhenZoomed", 0) != 0;
-				m_zoomSettings.mouseSpeedMod = number(*weaponTemplate, "zoom.mouseSpeedMod", 1);
-				m_zoomSettings.zoomOutOnReload = number(*weaponTemplate, "zoom.zoomOutOnReload", 1) != 0;
-				m_zoomSettings.useFineTuning = number(*weaponTemplate, "zoom.useZoomFineTuning", 0) != 0;
-				m_zoomSettings.fineTuneSteps = static_cast<int>(number(*weaponTemplate, "zoom.zoomFineTuneSteps", 1));
-				m_zoomSettings.fineTuningNeedsUnlock = number(*weaponTemplate, "zoom.zoomFineTuningNeedsUnlock", 1) != 0;
-				m_zoomSettings.zoomWhenBusy = number(*weaponTemplate, "zoom.zoomWhenBusy", 0) != 0;
-			}
+			m_zoomSettings = zoomSettings(*weaponTemplate);
 			for (const world::ChildTemplate& child : weaponTemplate->children()) {
 				if (child.name.compare(0, 6, "e_muzz") != 0) {
 					continue;
@@ -887,6 +928,7 @@ void PlayerCamera::tick(float seconds)
 	}
 	m_zoom.tick();
 	m_fov.update(seconds);
+	stepSeatZoom(me, altPressed, seconds);
 	// The eye's height by pose (seated counts as crouching).
 	const int pose = me.vehicle ? 1 : me.stance >= 0 && me.stance < 3 ? me.stance : 0;
 	m_eye.tick(pose);
@@ -1170,7 +1212,9 @@ bool PlayerCamera::seatCamera(View& view) const
 	}
 	view.position = {seat.world.at(3, 0), seat.world.at(3, 1), seat.world.at(3, 2)};
 	anglesOf(seat.world, view.yaw, view.pitch);
-	view.fovY = number(*seat.camera, "insideFOV", 1.1f);
+	// The player's field of view (+0xc4): the seat gun's zoom, else the
+	// camera's insideFOV.
+	view.fovY = m_seatGun && m_seatZoom.settings.present() ? m_seatZoom.fov.current : number(*seat.camera, "insideFOV", 1.1f);
 	view.roll = shakeDegrees() * kDegrees;
 	return true;
 }
@@ -1284,12 +1328,15 @@ bool PlayerCamera::hides(uint32_t object) const
 
 bool PlayerCamera::zoomed() const
 {
+	if (m_inSeat) {
+		return m_seatZoom.zoomed();
+	}
 	return m_zoom.level() > 0 && m_fov.current == m_fov.target;
 }
 
 float PlayerCamera::mouseScale() const
 {
-	if (m_zoom.level() <= 0 || m_baseFov <= 0) {
+	if (m_inSeat || m_zoom.level() <= 0 || m_baseFov <= 0) {
 		return 1;
 	}
 	return m_fov.current / m_baseFov * m_zoomSettings.mouseSpeedMod;

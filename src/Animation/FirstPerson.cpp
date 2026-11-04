@@ -68,6 +68,38 @@ bool ZoomState::fineTune(const ZoomSettings& settings, int step, bool unlocked)
 	return m_fineTune != was;
 }
 
+void SeatZoom::reset(const ZoomSettings& gun, float cameraFov)
+{
+	settings = gun;
+	state = {};
+	fov.set(cameraFov, 0);
+	reloadingWas = false;
+}
+
+void SeatZoom::step(bool pressed, bool busy, bool looking, float cameraFov, float seconds)
+{
+	if (settings.present()) {
+		if (!looking) {
+			if (state.level() > 0) { // 0x005da5c0
+				state.reset();
+				fov.set(cameraFov, 0);
+			}
+		} else if (pressed && (!busy || settings.zoomWhenBusy)) { // 0x005c50e0 -> 0x005da670
+			const float factor = state.cycle(settings);
+			fov.set(factor > 0 ? factor : cameraFov, settings.delay); // 0x005da3f0
+		} else if (busy && !reloadingWas && state.level() > 0 && settings.zoomOutOnReload) { // 0x005da630
+			state.reset();
+			fov.set(cameraFov, settings.delay);
+		}
+	}
+	reloadingWas = busy;
+	if (state.level() == 0 && fov.target != cameraFov && fov.current == fov.target) {
+		fov.set(cameraFov, 0); // 0x005da290
+	}
+	state.tick();
+	fov.update(seconds);
+}
+
 int ZoomState::lod(const ZoomSettings& settings) const
 {
 	return m_level > 0 && m_ticks >= settings.delayTicks() ? settings.lod : 0;

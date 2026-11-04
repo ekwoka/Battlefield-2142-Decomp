@@ -2462,3 +2462,151 @@ TEST(RagDoll_RemoteSoldierRounds)
 	game.world->endRemoteProjectile(thrown->id());
 	CHECK(!game.world->hasRemoteProjectile(thrown->id()));
 }
+
+// A joined client's StickyProjectile event (0x0050f5d0): the server's C4
+// ghost stops where the event puts it (the ghost's updates move it no
+// more) and rides the client's object of the networkable it stuck to, at
+// its place in that object's frame (the object as its ghost places it).
+TEST(RagDoll_RemoteStickyProjectileRides)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	world::ObjectTemplate* c4 = game.templates.create("GenericProjectile", "remote_c4");
+	c4->settings()["networkableInfo"] = "BasicInfo";
+	world::ObjectTemplate* car = game.templates.create("PlayerControlObject", "remote_car");
+	game.start();
+	world::Object* vehicle = game.objects.create(car, {20, 0, 20});
+	world::Object* thrown = game.objects.create(c4, {20, 3, 18});
+	game.world->launchRemoteProjectile(thrown->id(), "remote_c4", {20, 3, 18}, {0, 0, 5});
+	CHECK(!game.world->remoteProjectileStuck(thrown->id()));
+	CHECK(game.world->stickRemoteProjectile(thrown->id(), vehicle->id(), {0, 1.5f, 1}, {0, 1, 0}));
+	CHECK(game.world->remoteProjectileStuck(thrown->id()));
+	game.world->tick(1 / 30.0f);
+	CHECK(std::fabs(thrown->position().x - 20) < 1e-3f && std::fabs(thrown->position().y - 1.5f) < 1e-3f
+		&& std::fabs(thrown->position().z - 21) < 1e-3f);
+	// The vehicle's ghost drives off and turns: the round goes with it.
+	vehicle->setPosition({30, 0.5f, 20});
+	vehicle->setRotation({90, 0, 0});
+	game.world->moveRemoteProjectile(thrown->id(), {0, 50, 0}, nullptr); // ignored once stuck
+	game.world->tick(1 / 30.0f);
+	const physics::Vec3 expected = physics::Vec3 {30, 0.5f, 20}
+		+ physics::Mat3::fromYawPitchRoll({90, 0, 0}).transform({0, 1.5f, 1});
+	std::fprintf(stderr, "  the round on the turned vehicle: %.2f %.2f %.2f\n", thrown->position().x, thrown->position().y,
+		thrown->position().z);
+	CHECK(std::fabs(thrown->position().x - expected.x) < 1e-3f && std::fabs(thrown->position().y - expected.y) < 1e-3f
+		&& std::fabs(thrown->position().z - expected.z) < 1e-3f && std::fabs(expected.x - 31) < 1e-3f);
+	// Stuck in the world (no parent): at the event's place.
+	world::Object* other = game.objects.create(c4, {5, 3, 5});
+	game.world->launchRemoteProjectile(other->id(), "remote_c4", {5, 3, 5}, {0, -5, 0});
+	CHECK(game.world->stickRemoteProjectile(other->id(), 0, {5, 0.01f, 6}, {0, 1, 0}));
+	game.world->tick(1 / 30.0f);
+	CHECK(std::fabs(other->position().z - 6) < 1e-3f && std::fabs(other->position().y - 0.01f) < 1e-3f);
+}
+
+// A joined client's seated players on a turret (GameWorld::
+// animateRemoteSeated with setRemotePartPose): a seat that rides another
+// seat's turret turns with that turret's yaw bundle as its ghost's
+// RotationalBundle networkable has it (read 0x00602070; the seatMount the
+// server's 0x00587a30 puts under the seat's matrix), and the hands take the
+// grips of the seat's IK object (0x005ee910, 0x005efc00) where the ghosts'
+// bundles put it.
+TEST(RagDoll_RemoteSeatedTurretAndGrips)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	game.templates.registerType(12, "RotationalBundle");
+	world::ObjectTemplate* tank = game.templates.create("PlayerControlObject", "remote_tank");
+	tank->settings()["seatInformation"] = "remote_tank 0/0.5/0.4 0/0/0";
+	world::ObjectTemplate* gunner = game.templates.create("PlayerControlObject", "remote_tank_gunner");
+	gunner->settings()["seatInformation"] = "remote_tank_gunner 0/1/0 0/0/0";
+	tank->children().push_back({"remote_tank_gunner", {0, 1, 0}, {}});
+	world::ObjectTemplate* turret = game.templates.create("RotationalBundle", "remote_tank_turret");
+	turret->settings()["inputToYaw"] = "PIMouseLookX";
+	gunner->children().push_back({"remote_tank_turret", {}, {}});
+	// The cupola rides the turret, its gun's grips on a bundle of its own.
+	world::ObjectTemplate* cupola = game.templates.create("PlayerControlObject", "remote_tank_cupola");
+	cupola->settings()["seatInformation"] = "remote_tank_cupola 0.5/1.5/-0.5 0/0/0";
+	cupola->settings()["seatAnimationSystem"] = "Objects/Vehicles/AS_FAV/3p_as_fav_driver_animSys.inc";
+	turret->children().push_back({"remote_tank_cupola", {0.5f, 0.5f, -0.5f}, {}});
+	world::ObjectTemplate* mount = game.templates.create("RotationalBundle", "remote_tank_cupola_mount");
+	mount->settings()["inputToYaw"] = "PIMouseLookX";
+	game.templates.addComponent(*mount, "Ik");
+	mount->settings()["ik.positionLeft"] = "-0.145199/-0.0447125/-0.186665";
+	mount->settings()["ik.rotationLeft"] = "-94.775/-2.18003/-58.2225";
+	mount->settings()["ik.poleVectorLeft"] = "-0.294253/-0.339534/-3.01e-6";
+	mount->settings()["ik.positionRight"] = "0.17838/-0.0352049/-0.155193";
+	mount->settings()["ik.rotationRight"] = "-114.531/21.6388/120.12";
+	mount->settings()["ik.poleVectorRight"] = "0.148879/-0.231249/0.143271";
+	cupola->children().push_back({"remote_tank_cupola_mount", {0, 0.35f, 0.45f}, {}});
+	game.start();
+	const uint32_t vehicle = game.objects.create(tank, {10, 1, 10}, {30, 0, 0})->id();
+	world::Object* ghost = game.objects.create(game.templates.find("us_light_soldier"), {10.5f, 2.5f, 9.5f});
+	const uint32_t id = ghost->id();
+	const anim::Skeleton* skeleton = game.systems.skeleton("Objects/Soldiers/Common/Animations/3p_setup.ske");
+	CHECK(skeleton != nullptr);
+	if (!skeleton) {
+		return;
+	}
+	const auto seats = game.world->vehicleSeats(vehicle);
+	CHECK(seats.size() == 3 && seats[2].name == "remote_tank_cupola");
+	// The ghosts' bundles: the turret 40 degrees round, the cupola's gun 0 then 50.
+	float turretYaw = 40, gunYaw = 0;
+	game.world->setRemotePartPose([&](uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation) {
+		if (object != vehicle) {
+			return false;
+		}
+		offset = {};
+		if (part == "remote_tank_turret") {
+			rotation = {turretYaw, 0, 0};
+			return true;
+		}
+		if (part == "remote_tank_cupola_mount") {
+			rotation = {gunYaw, 0, 0};
+			return true;
+		}
+		return false;
+	});
+	for (int i = 0; i < 5; ++i) {
+		game.world->animateRemoteSeated(id, vehicle, 2, 0, 1 / 30.0f);
+	}
+	std::fprintf(stderr, "  the cupola's sitter faces %.1f (the tank 30, its turret 40)\n", ghost->rotation().x);
+	CHECK(std::abs(std::remainder(ghost->rotation().x - 70, 360.0f)) < 0.5f);
+	const int leftWrist = skeleton->find("left_wrist1");
+	CHECK(leftWrist >= 0);
+	std::vector<anim::Matrix> ahead, aside;
+	CHECK(game.world->skeletonPose(id, *skeleton, ahead));
+	// The grip's bundle turned: the left hand moves with it, and lies on the
+	// grip (the IK object's frame through the soldier's).
+	gunYaw = 50;
+	game.world->animateRemoteSeated(id, vehicle, 2, 0, 1 / 30.0f);
+	CHECK(game.world->skeletonPose(id, *skeleton, aside));
+	if (leftWrist < 0 || ahead.size() != skeleton->nodes.size() || aside.size() != ahead.size()) {
+		return;
+	}
+	const auto at = [](const std::vector<anim::Matrix>& pose, int bone) {
+		const anim::Matrix& m = pose[static_cast<size_t>(bone)];
+		return physics::Vec3 {m[12], m[13], m[14]};
+	};
+	const float moved = std::sqrt(physics::lengthSquared(at(aside, leftWrist) - at(ahead, leftWrist)));
+	// Where the grip is in the soldier's space.
+	const world::Object* tankObject = game.objects.find(vehicle);
+	const physics::Mat3 tankTurn = physics::Mat3::fromYawPitchRoll({30, 0, 0});
+	const physics::Mat3 turretTurn = physics::Mat3::fromYawPitchRoll({turretYaw, 0, 0}) * tankTurn;
+	const physics::Vec3 cupolaAt = tankTurn.transform({0, 1, 0}) + turretTurn.transform({0.5f, 0.5f, -0.5f})
+		+ physics::Vec3 {tankObject->position().x, tankObject->position().y, tankObject->position().z};
+	const physics::Mat3 mountTurn = physics::Mat3::fromYawPitchRoll({gunYaw, 0, 0}) * turretTurn;
+	const physics::Vec3 mountAt = cupolaAt + turretTurn.transform({0, 0.35f, 0.45f});
+	const physics::Mat3 soldierTurn = physics::Mat3::fromYawPitchRoll({ghost->rotation().x, ghost->rotation().y, ghost->rotation().z});
+	const physics::Vec3 grip = soldierTurn.untransform(mountTurn.transform({-0.145199f, -0.0447125f, -0.186665f}) + mountAt
+		- physics::Vec3 {ghost->position().x, ghost->position().y, ghost->position().z});
+	const float off = std::sqrt(physics::lengthSquared(at(aside, leftWrist) - grip));
+	std::fprintf(stderr, "  the left wrist moved %.3f m with the grip, %.3f m from it\n", moved, off);
+	CHECK(moved > 0.05f);
+	CHECK(off < 0.25f);
+}

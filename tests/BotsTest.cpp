@@ -4178,3 +4178,24 @@ TEST(Bots_SightThroughSeeThrough)
 	c.targetAlongFacing = 3.5f;
 	CHECK(game::chooseWeapon(c, {charge}, explosive) == 0);
 }
+
+// The two AITemplatePlugIn rows the bipods and ATs set: the Unit's
+// setUseNoPathfindingToGetToObject (+0x15, 0x00884eaf; AIDLL 0x100aa570)
+// and the Mobile's vehicleNumber (+4, 0x008834f9; AIDLL 0x100a46c0), kept
+// on the plug-ins (no longer stubs).
+TEST(Bots_PlugInNoPathfindingAndVehicleNumber)
+{
+	Console console;
+	game::BotSettings settings;
+	game::registerBotConsoleMethods(console, settings);
+	std::string out;
+	CHECK(console.execute("aiTemplatePlugIn.create Unit hmg_bipod_unit", out) == ConsoleResult::Ok);
+	CHECK(!settings.aiPlugins["hmg_bipod_unit"].noPathfindingToObject);
+	CHECK(console.execute("aiTemplatePlugIn.setUseNoPathfindingToGetToObject 1", out) == ConsoleResult::Ok);
+	CHECK(settings.aiPlugins["hmg_bipod_unit"].noPathfindingToObject);
+	CHECK(console.execute("aiTemplatePlugIn.create Mobile as_at_mobile", out) == ConsoleResult::Ok);
+	CHECK(settings.aiPlugins["as_at_mobile"].vehicleNumber == -1);
+	CHECK(console.execute("aiTemplatePlugIn.vehicleNumber 2", out) == ConsoleResult::Ok);
+	CHECK(settings.aiPlugins["as_at_mobile"].vehicleNumber == 2);
+	CHECK(console.execute("aiTemplatePlugIn.vehicleNumber", out) == ConsoleResult::Ok && out.find('2') != std::string::npos);
+}

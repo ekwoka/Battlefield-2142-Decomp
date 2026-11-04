@@ -277,6 +277,13 @@ private:
 	// networkableInfo: missiles, grenades, mines, C4...; FireComp makes
 	// them on the server only, 0x005f31d0 / 0x005f1440) as ghosts.
 	void trackProjectiles();
+	// A sticky round stuck (StickyCollisionComp 0x005e81a0 -> the
+	// StickyProjectile event, 0x0050f850): to everyone once, and to a
+	// joining client for each one stuck to an object (ServerConnection
+	// 0x0057dda0). The rewrite's rounds ride the whole vehicle, so the
+	// event names the vehicle's root ghost, part 0, bundle 0 (the root).
+	net::GameEvent stickyEvent(const game::Projectile& p) const;
+	std::set<uint32_t> m_stuckSent; // the serials sent
 	// CommanderCam (0x00510b30 -> 0x005f8410 / 0x005f8170): the team's
 	// overhead camera, made on first use (squad manager slot 0x7c,
 	// 0x004c5120), over (x, z).

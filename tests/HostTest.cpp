@@ -1879,3 +1879,106 @@ TEST(NetHost_JoinAsSpectator)
 	second.disconnect();
 	client.disconnect();
 }
+
+// A sticky round stuck on the server (StickyCollisionComp 0x005e81a0)
+// reaches the clients as the StickyProjectile event (0x20: built
+// 0x0050f850, written 0x0050f460, read 0x0050f720): its ghost, no parent
+// (the ground), the thrower and its world matrix, up along the ground;
+// the event's fields survive the wire in the exe's order, a parent's two
+// bytes only with a parent.
+TEST(NetHost_StickyProjectileEvent)
+{
+	// The event alone: with a parent and without.
+	net::StickyProjectileInfo info;
+	info.projectile = 41;
+	info.target = 7;
+	info.part = 0;
+	info.bundle = 2;
+	info.player = 3;
+	info.rows = {net::Vec3f {1, 0, 0}, net::Vec3f {0, 1, 0}, net::Vec3f {0, 0, 1}, net::Vec3f {0.5f, 1.25f, -2}};
+	net::GameEvent e = net::makeStickyProjectile(info);
+	CHECK(e.values.size() == 17 && e.u(4) == 3); // 16, 16, 8, 8, 8, then the floats
+	CHECK(e.f(5) == 0 && e.f(7) == 1);              // +0x2c first: the third row
+	net::StickyProjectileInfo back;
+	CHECK(net::parseStickyProjectile(e, back) && back.projectile == 41 && back.target == 7 && back.bundle == 2
+		&& back.player == 3 && back.rows[3].y == 1.25f && back.rows[2].z == 1 && back.rows[0].x == 1);
+	info.target = 0;
+	info.player = -1;
+	e = net::makeStickyProjectile(info);
+	CHECK(e.values.size() == 15 && e.u(2) == 0xff);
+	CHECK(net::parseStickyProjectile(e, back) && back.target == 0 && back.player == -1 && back.rows[3].z == -2);
+
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	range.templates.registerType(4, "GenericFireArm");
+	range.templates.registerType(5, "GenericProjectile");
+	range.templates.registerType(6, "Kit");
+	dice::hfe::world::ObjectTemplate* launcher = range.templates.create("GenericFireArm", "test_c4_thrower");
+	launcher->settings()["projectileTemplate"] = "test_c4";
+	launcher->settings()["velocity"] = "6";
+	launcher->settings()["itemIndex"] = "3";
+	launcher->settings()["fire.roundsPerMinute"] = "60";
+	launcher->settings()["ammo.magSize"] = "4";
+	dice::hfe::world::ObjectTemplate* c4 = range.templates.create("GenericProjectile", "test_c4");
+	c4->settings()["networkableInfo"] = "BasicInfo";
+	c4->settings()["timeToLive"] = "60";
+	c4->settings()["collision.bouncing"] = "1";
+	c4->components().push_back("StickyCollisionComp");
+	dice::hfe::world::ObjectTemplate* kit = range.templates.create("Kit", "test_c4_kit");
+	kit->children().push_back({"test_c4_thrower", {}, {}});
+	host::HostSetup setup;
+	setup.level = "Range";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, range.logic, range.templates, setup);
+	CHECK(hosted.start());
+	const int bot = round.addPlayer("Bot1", 2, true);
+	round.setKit(bot, "test_c4_kit", "us_light_soldier");
+	CHECK(round.spawnSoldier(bot));
+	net::GameClient a;
+	a.world().setGhostTemplates([&range](uint32_t id) {
+		const dice::hfe::world::ObjectTemplate* t = range.templates.findById(id);
+		return t ? net::ghostTemplateFrom(range.templates, *t) : net::GhostTemplateNode {};
+	});
+	net::GameClientOptions options;
+	options.playerName = "Alpha";
+	CHECK(a.connect("127.0.0.1", hosted.gamePort(), options));
+	dice::hfe::game::SoldierInput botInput;
+	const auto step = [&] {
+		a.update();
+		round.setInput(bot, botInput);
+		hosted.tick();
+		round.tick(1.0f / 30);
+	};
+	CHECK(pumpUntil(step, [&] { return a.world().gameState() == 1 && a.world().localPlayer() >= 0; }, 6000));
+	CHECK(pumpUntil(step, [&] { return a.world().player(bot) && a.world().player(bot)->soldierGhost != 0; }));
+	botInput.fire = true;
+	const auto c4Ghost = [&]() -> uint16_t {
+		for (const net::RemoteObject& o : a.world().objectList()) {
+			if (o.templateId == c4->id()) {
+				return o.ghost;
+			}
+		}
+		return 0;
+	};
+	CHECK(pumpUntil(step, [&] { return c4Ghost() != 0; }));
+	botInput.fire = false;
+	// It lands and sticks: the event comes.
+	CHECK(pumpUntil(step, [&] { return a.world().stuckProjectile(c4Ghost()) != nullptr; }, 3000));
+	const net::StickyProjectileInfo* stuck = a.world().stuckProjectile(c4Ghost());
+	const dice::hfe::game::Projectile* served = nullptr;
+	for (const dice::hfe::game::Projectile& p : round.projectiles()) {
+		if (p.alive && p.stuck) {
+			served = &p;
+		}
+	}
+	CHECK(served && stuck->target == 0 && stuck->player == bot);
+	CHECK(std::fabs(stuck->rows[3].x - served->position.x) < 1e-3f && std::fabs(stuck->rows[3].y - served->position.y) < 1e-3f
+		&& std::fabs(stuck->rows[3].z - served->position.z) < 1e-3f);
+	CHECK(std::fabs(stuck->rows[1].x - served->stuckNormal.x) < 1e-4f && std::fabs(stuck->rows[1].y - served->stuckNormal.y) < 1e-4f);
+	// The rows are a rotation: unit and square to each other.
+	const auto dot = [](const net::Vec3f& u, const net::Vec3f& v) { return u.x * v.x + u.y * v.y + u.z * v.z; };
+	CHECK(std::fabs(dot(stuck->rows[0], stuck->rows[0]) - 1) < 1e-3f && std::fabs(dot(stuck->rows[0], stuck->rows[1])) < 1e-3f
+		&& std::fabs(dot(stuck->rows[1], stuck->rows[2])) < 1e-3f);
+}

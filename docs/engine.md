@@ -1455,8 +1455,18 @@ the soldier's own): Ry(+0x25c) × the seat's turn on the vehicle object's,
 at the ghost's place (the server's, which carries the seat's mount), the
 LookAroundTrigger at +0x25c / 360, hidden in a seat without
 seatAnimationSystem, the weapon put away. Not on the client: a mount's
-turret turn in the rotation and the hands' IK on the grips (neither is in
-the soldier's state) (`RagDoll_RemoteSoldierSeatedAndOnLadder`).
+turret turn in the rotation and the hands' IK on the grips: neither is in
+the soldier's state, and the exe's client needs neither there: the
+turrets are the vehicle ghost's RotationalBundle networkables (read
+`0x00602070`), which turn the client's own bundles, and the seat's mount
+and IK object (`0x005ee910`, `0x005efc00`) are found in that tree each
+frame as on the server. The rewrite's client does the same with the
+ghosts' bundle turns (`GameWorld::setRemotePartPose` from
+`RemoteWorld::partPose`): a seat riding another seat's turret turns with
+that seat's yaw bundle (its seatMount), and the hands take the grips
+(`seatIkTargets` with the ghosts' parts) (`RagDoll_RemoteSoldierSeatedAndOnLadder`,
+`RagDoll_RemoteSeatedTurretAndGrips`). Not done: a bone part's mount (the
+mechs' seats), whose bone pose isn't on the client.
 
 **ToggleCameraComp** (template `0x005db120`; changeCameraId `+0x14` −1,
 changeCameraViewMode `+0x18` 2, startCameraId `+0x1c` −1,
@@ -1904,9 +1914,16 @@ joinAsSpectator` / `spectatorCamera`, `RemotePlayer::spectator`,
 `GameWorld::setSpectator`; `bf2142 --connect <host> --spectate` joins as
 one. A joined spectator follows the server's players as its client has
 them (`PlayerCamera::setPlayers` with the RemoteHudWorld: their ghosts'
-places and looks, `FreeCam.togglePlayer` / `toggleCamera`). Not
-rewritten: the scoreboard's spectator icon (`0x0074e940` is the kit icon
-column's chooser, a column the rewrite's scoreboard doesn't draw).
+places and looks, `FreeCam.togglePlayer` / `toggleCamera`). The
+scoreboard's spectator icon: `0x0074e940` (the HUD
+manager's slot 0x64, taken by the row filler `0x007bb540` and drawn 15
+pixels square in `0x00b3bec0`'s black) is the kit icon column's chooser:
+not alive (or the HUD manager's slot 0x410) icon_Spectator.tga for a
+spectator, else icon_Death.tga; a living enemy icon_Faded.tga; a living
+teammate his kit's HUD icon. Now the rewrite's scoreboard draws the
+column (`menu::scoreboardIcon`, column 7 of the players' lists, the
+player's id moved to cell 8; the column's place is the rewrite's, the
+list's drawing being RendDX9's); the slot 0x410 test isn't modelled.
 
 **Seats.** In a vehicle the camera is the seat's (Player::getCamera
 `0x005948e0` → the PlayerControlObject's `0x005c7cb0`): the seat's Camera
@@ -7803,7 +7820,27 @@ keep their own one-per-owner paths).
   (`0x00561d90` with the terrain singleton `0x005628f0`) sticks; without
   stickToVehicles a root answering `0xc4c5` bounces; without
   stickToTerrain on no object, or without stickToStaticObjects on one,
-  bounces; else it sticks (`+0x14` = 1). The rewrite
+  bounces; else it sticks (`+0x14` = 1). Placed (`0x005e81a0`), the server
+  sends everyone the StickyProjectile event (0x20: built `0x0050f850`,
+  written `0x0050f460`, read `0x0050f720`): the round's ghost (16 bits),
+  the nearest ghosted ancestor of the hit part's root (16, 0 none;
+  `0x0050f3b0`) and with one the networkable index under it (8,
+  `0x0050f340`) and the RotationalBundle index along the way down (8,
+  `0x006f1ff0`), the thrower's player id (8, 0xff none), and a 3x4
+  matrix as four rows written +0x2c, +0x0c, +0x1c, +0x3c: its place in the
+  bundle's frame with a parent, its world matrix without; a joining client
+  gets one for each round with a parent (ServerConnection `0x0057dda0`).
+  The client (`0x0050f5d0`) stops its physics and places it (`0x005b3080`
+  in the bundle, `0x005b30a0` in the world), and the thrower's own client
+  hands it to his firearm (0x94c0 slot 0x16c). The rewrite
+  (`HostedGame::stickyEvent`, `net::StickyProjectileInfo`,
+  `RemoteWorld::stuckProjectile`, `GameWorld::stickRemoteProjectile`):
+  the vehicle's root ghost, part 0, bundle 0 (its rounds ride the whole
+  vehicle), up along the face's normal, facing as thrown; the client's
+  round ignores the ghost's updates from then and rides the client's
+  object of that ghost (`rideStuck` on the object's place without a body);
+  the thrower's firearm list isn't kept on a client (the server sets C4
+  off). The rewrite
   (`GameWorld::stickProjectile`, `rideStuck`; `Projectile::stuck`,
   `stuckTo`, `stuckNormal`): a stuck round lies at the contact and rides
   the vehicle's body (the whole vehicle: the rewrite doesn't pick the
@@ -7814,8 +7851,7 @@ keep their own one-per-owner paths).
   engine's place along the normal (a constant `*0x00a6fe94`, or the
   geometry's lowest y, plus a dot product) is 0.01 m here. Placed hubs,
   beacons and shields aren't thrown in the rewrite (set down a metre
-  ahead), so their stick flags have nothing to act on. The joined
-  client's StickyProjectile event (0x20, `0x0050f720`) isn't sent.
+  ahead), so their stick flags have nothing to act on.
 - **Radar sources** (the Ability component, template class `0xc4b2`,
   constructor `0x00631790`: showPlayers `+0x13` 1, showVehicles `+0x14`
   1, radialRadar `+0x15` 1, radarRadius `+0x18` 0, hasZoomUpgradeAbility
@@ -7851,9 +7887,14 @@ keep their own one-per-owner paths).
   own by name (the sound manager's slots 0x2c / 0x34: 2D loops); the zoom
   and fire-mode toggles and leaving the weapon force 0. Rewritten:
   `GameWorld::stepLockTone`, `takeLockTones` (played by `bf2142`).
-  `weaponHud.altCrosshairIcon` (`+0x1d4`): the runtime WeaponHud's slot
-  0x3c (`0x00657bb0`) gives it for crosshairIcon while the fire
-  component's state is above 0 (firing), when set (the HUD's part).
+  `weaponHud.altCrosshairIcon` (block `+0x8c`, executor `0x005576cc`):
+  the runtime WeaponHud's slot 0x3c (`0x00657bb0`) gives it for
+  crosshairIcon while the firearm's fire state is above 0 (0x94c0 slot
+  0x1c, `0x005c1b60`: the fire component's slot 0xd8, 1 pressed, 2 held),
+  when set: as_ag / us_ag's TV-guided crosshair, the heavy IFV's and the
+  light hover tank's AA icon_locked. Rewritten: `menu::WeaponHud` with
+  `WeaponHudInput::firing` (the local player's fire held,
+  `PlayerInfo::firing`).
   `target.setTargetAtMaxDistance` (`+0x7c`, 0): no reader found.
   `target.connectionEffectOnlyWhenZoomed` (`+0x74`): its executor
   (`0x004ee343`) writes 1 whatever it is given; read by `0x005f5b90` for
@@ -7877,8 +7918,36 @@ keep their own one-per-owner paths).
   firearm's handler (`0x005c50e0`) drops a zoom press while busy (drawing,
   reloading, between rounds, zooming, animating, overheated without
   allowZoomOnHeat) unless set; the rewrite's busy test is the reload's
-  (shipped only on the tanks' and ATs' seats, which the rewrite doesn't
-  zoom yet).
+  (shipped only on the tanks' and ATs' seats).
+- **Seat zoom.** A seat's active firearms poll PIFire, PIAltFire and
+  PIFlareFire (`0x005c58a0`, the table `0x0096cf0c`) as a soldier's do, and
+  the handler (`0x005c50e0`) hands the press of the zoom component's input
+  (its slot 0xa8) to it (`0x005c0da0` → slot 0x8c, `0x005da670`), so the
+  alternate fire zooms the seat's PIFire gun when it has a DefaultZoomComp
+  with factors: EU_TANK_Barrel and AS_TANK_Turretfirearm (0.25, zoomDelay
+  0.55), the ATs' guns and miniguns (0.33, 0.33 s), static_av_Launcher and
+  static_ap_Launcher (0.7, 0.62 s; zoomWhenBusy 0). The level's field of
+  view goes to the player (slot 0x9c, `0x00591740`): the factor, or for
+  level 0 the active camera's own (slot 0x58, `0x00610150`: insideFOV in
+  the inside view, worldFOV otherwise), and the view is drawn with the
+  player's (+0xc4); at level 0 it follows the camera's at once
+  (`0x005da290`). A camera change (the firearm's event 0x1c →
+  `0x005da5c0`) zooms out unless the local player looks through the
+  inside or nose view (player slot 0x1bc, `0x00591510`: camera modes 1
+  and 2). The zoomed mouse scale `0x00586420` is Soldier.cpp's: a seat's
+  turn isn't scaled. Zoomed (the firearm's slot 300, the level at once),
+  the HUD shows the gun's altGuiIndex (the runtime WeaponHud's slot 0x38,
+  `0x00657a70`; -1 unset: guiIndex; its switchGuiOnCamera branch, slot
+  0xd8, ships nowhere), and the seat post-processing follows the index
+  shown (EU_TANK_Barrel's 13, AS_TANK's 69; AS_AT's guns carry no
+  altGuiIndex, so their 65 is on either way). The seat's
+  surpressPlayerInputVector reads the same zoom. `zoom.preventZoomWhen3P`
+  (`+0xe`, set on both tanks' guns): no reader found. Rewritten:
+  `anim::SeatZoom`, `PlayerCamera::stepSeatZoom` (the seat camera's
+  `seatCamera` / nose `externalView` field of view),
+  `menu::weaponGuiIndex`, `PlayerCamera::zoomLevel` for the seat (the
+  item list, `GameWorld::setZoomed`). Not on a joined client (its seats
+  have no inside view).
 - **Thrown weapons and magazines.** `fire.showWeaponAfterReloadDelay`
   (ThrownFireComp `+0xa4`, ticks `+0xa8`, executor `0x004e4d1e`, setter
   `0x005e4c00`; 0 by default; 0.05 s on frag, EMP, the sonars and hubs,
@@ -7921,8 +7990,14 @@ keep their own one-per-owner paths).
   `0x005c67e0`; the Titans): read only by the effect bundles' first-person
   test (`0x006187c0`): a bundle starts in its first-person form only when
   the local player looks in first person, shares its root, and neither
-  his nor its nearest PCO is neverDrawAs1p. `GameWorld::firstPersonEffects`
-  (the rewrite's object bundles always start in their third-person form).
+  his nor its nearest PCO is neverDrawAs1p. `GameWorld::firstPersonEffects`;
+  the object bundles of the local player's vehicle seen through the
+  inside or nose view start in their first-person form (their
+  showInFirstPerson / showInZoomedMode systems, `0x0061a1c0`):
+  `effects::ObjectEffects::ObjectState::firstPerson`, set by `bf2142`'s
+  object-effects step. The rewrite takes the form as each bundle starts
+  (the exe's flags act each frame) and doesn't move the zoomed ones to the
+  first-person view (`+8`).
 - **AI hints.** `GameLogic.defaultTimeToNextAIWave` (executor `0x00428474`
   → slots 0xa0 / 0xa4: the server logic's `+0x28c`, 8 by default,
   `0x004c0bf0`; the client's keeps nothing): no reader in BF2142.exe or
@@ -7932,15 +8007,35 @@ keep their own one-per-owner paths).
   (`0x006f91e0`): crates and props on Hamburg_Harbour, Strike_at_Karkand,
   their co-op maps and tgw_*; `ObjectManager::setGameMode`.
   `ObjectTemplate.setCheckObstruction start end radius` (GenericFireArm
-  `+0x360..+0x36c`, executor `0x004e236e`; the pod launchers −1.5 2 1) is
-  a weapon rule, not a hint: five rays along the gun (`0x005c2310`) refuse
-  the trigger (`0x005c2ee0`, `0x005c50e0`); not rewritten.
+  `+0x360` flag, `+0x364` start, `+0x368` end, `+0x36c` radius, executor
+  `0x004e236e`; pod_launcher, pod_launcher_cq and eu_apc_alps' −1.5 2 1)
+  is a weapon rule, not a hint: five rays along the gun (`0x005c2310`: from
+  start to end metres along its forward axis, then the same moved by
+  (r, r), (r, −r), (−r, −r), (−r, r) along its right and up axes; the
+  scene's ray `0x00a85220` slot 0x68 past the gun's own root) refuse the
+  trigger (`0x005c2ee0`; `0x005c50e0` turns a press or hold into event 9).
+  Rewritten: kept as `checkObstruction` (WorldConsole),
+  `GameWorld::fireObstructed` (the rays' ends under the terrain count as
+  met), checked as an APC's pod seat launches (`launchPod`).
   weaponTemplate.fireRate / shouldRearm / isAntiAirWeapon (the exe's AI
   weapon record `0x0088a7b0`: `+0x10` −1, `+0x70` 1, `+0x71` 0; getters
   `0x00892500`, `0x00892720`, `0x00892740`) aren't read by AIDLL's weapon
   choice (`0x10074ef0`); isAntiAirWeapon is read by the AI interface's
   slot 39 (`0x008a57b0`). AITemplatePlugIn.setUseNoPathfindingToGetToObject
-  (Unit plug-in `+0x15`) and vehicleNumber (Mobile `+4`) stay stubs.
+  (Unit plug-in `+0x15`, executor `0x00884eaf`; 1 on the bipods and the
+  ATs) is read by AIDLL through the unit adaptor's slot 0x38
+  (`0x008a1d10`; AIDLL `0x100aa570`) in the vehicle choice `0x1006c520`,
+  the get-in plan `0x1006dac0` (three sites), `0x1006bd70`, MedicAssist
+  `0x10070200` / `0x10070da0` and AmmoAssist `0x10071a10` / `0x100724e0`:
+  with it (or without a Mobile part) the object is taken without the
+  distance tests on its infantry-map point. vehicleNumber (Mobile `+4`,
+  `0x008834f9`, −1; the ATs set −1) is the mobile adaptor's slot 0x24
+  (`0x008a1770`), read by `0x100a46c0` to pick which per-map point record
+  of the Mobile (+8 when it equals the pathfinder's slot 4, else +0x1c or
+  +0x30) those tests use. The rewrite doesn't keep the per-map points (it
+  counts every vehicle reachable), so both are bound and kept
+  (`AiPlugin::noPathfindingToObject`, `vehicleNumber`) and change no
+  decision.
 - `armor.deepWaterDamageDelay` (`+0x140`, 1 s by default; waterDamageDelay
   `+0x13c` 3 s): `0x006521d0` runs two timers side by side, in water
   (`+0xf8`, hpLostWhileInWater `+0x134`) and in deep water (`+0xf4`,

@@ -314,6 +314,34 @@ struct CreateKitInfo { // kEvCreateKit (0x0050ac80, built 0x0050ac20)
 };
 bool parseCreateKit(const GameEvent& e, CreateKitInfo& out);
 
+// kEvStickyProjectile (0x20; built 0x0050f850, written 0x0050f460, read
+// 0x0050f720, run on the client 0x0050f5d0): a sticky round (C4, the
+// mines, the sonars...) stuck (StickyCollisionComp 0x005e81a0 sends it to
+// everyone once placed, the server's ServerConnection 0x0057dda0 again to
+// a joining client for each round with a parent). The round's ghost (16,
+// +0x4c); the networkable it stuck to (16, +0x4e: the nearest ancestor of
+// the hit part's root with a ghost, 0x0050f3b0; 0 none) and, only with one,
+// which networkable under it the root is (8, +0x50: counted in pre-order,
+// 0x0050f340) and which RotationalBundle (8, +0x52: counted along the way
+// down from the root, 0x006f1ff0; 0 the root itself); the thrower's player
+// id (8, +0x51, 0xff none); then a 3x4 matrix as four rows of three floats
+// written +0x2c, +0x0c, +0x1c, +0x3c (the third row, the first, the second,
+// the translation): the round's place in the bundle's frame (the sticky
+// component's +0x18) with a parent, its world matrix without. The client
+// stops the round's physics (+0x184 slot 0x1c, flags 0x54(0, 1)) and puts it
+// there (0x005b3080 with the bundle, 0x005b30a0 without), and the thrower's
+// own client hands it to his firearm (0x94c0 slot 0x16c: the detonator's
+// list).
+struct StickyProjectileInfo {
+	uint16_t projectile = 0;
+	uint16_t target = 0;   // 0: stuck in the world
+	int part = 0, bundle = 0;
+	int player = -1;       // -1: none (0xff)
+	std::array<Vec3f, 4> rows {}; // right, up, forward, translation
+};
+bool parseStickyProjectile(const GameEvent& e, StickyProjectileInfo& out);
+GameEvent makeStickyProjectile(const StickyProjectileInfo& info);
+
 // kEvIssueSquadOrder (0x18; built 0x0050e170, written 0x0050dfe0, read
 // 0x0050e220): a squad's order or request: the squad (+0xd), the team
 // (+0xc), the kind (+0xe; an order's type, or a request's 0 artillery, 1

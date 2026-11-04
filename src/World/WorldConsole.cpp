@@ -341,6 +341,19 @@ void registerWorldConsoleMethods(Console& console, ObjectTemplateManager& templa
 			}
 		});
 
+	// setCheckObstruction <start> <end> <radius> (executor 0x004e236e): a
+	// GenericFireArm's obstruction test (the template's +0x360 flag set,
+	// +0x364 start, +0x368 end, +0x36c radius; the pod launchers' -1.5 2 1),
+	// kept as "checkObstruction" = "start/end/radius" (game::GameWorld::
+	// fireObstructed reads it).
+	bindMethod(console, "ObjectTemplate.setCheckObstruction", access, [&templates](float start, float end, float radius) {
+		if (templates.active()) {
+			char text[96];
+			std::snprintf(text, sizeof(text), "%g/%g/%g", start, end, radius);
+			templates.active()->settings()["checkObstruction"] = text;
+		}
+	});
+
 	// setGearRatios <5 ratios> (0x005406d1): an engine's ratio per gear, kept
 	// as "gearRatios" = "a/b/c/d/e".
 	bindMethod(console, "ObjectTemplate.setGearRatios", access,

@@ -19,6 +19,7 @@ void RemoteWorld::clear()
 {
 	m_objects.clear();
 	m_hidden.clear();
+	m_stuck.clear();
 	m_players.clear();
 	m_objectHints.clear();
 	m_playerGhosts.clear();
@@ -259,6 +260,14 @@ bool RemoteWorld::apply(const GameEvent& event)
 		}
 		return true;
 	}
+	case kEvStickyProjectile: {
+		StickyProjectileInfo info;
+		if (!parseStickyProjectile(event, info) || !info.projectile) {
+			return false;
+		}
+		m_stuck[info.projectile] = info;
+		return true;
+	}
 	case kEvCreateKit: {
 		CreateKitInfo info;
 		if (!parseCreateKit(event, info)) {
@@ -288,6 +297,7 @@ bool RemoteWorld::apply(const GameEvent& event)
 		for (uint16_t g : gone) {
 			m_objects.erase(g);
 			m_hidden.erase(g);
+			m_stuck.erase(g);
 			m_objectHints.erase(g);
 			m_ghostParts.erase(g);
 		}
@@ -1024,6 +1034,12 @@ std::vector<RemoteObject> RemoteWorld::objectList() const
 	return list;
 }
 
+const StickyProjectileInfo* RemoteWorld::stuckProjectile(uint16_t ghost) const
+{
+	const auto it = m_stuck.find(ghost);
+	return it != m_stuck.end() ? &it->second : nullptr;
+}
+
 const RemoteObject* RemoteWorld::object(uint16_t ghost) const
 {
 	const auto it = m_objects.find(ghost);
@@ -1378,6 +1394,7 @@ void RemoteWorld::onLevel(const std::string& data)
 		// new level's), and their templates with it.
 		m_objects.clear();
 		m_hidden.clear();
+		m_stuck.clear();
 		m_objectHints.clear();
 		m_ghostParts.clear();
 		m_layouts.clear();

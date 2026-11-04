@@ -156,6 +156,23 @@ struct AiPlugin {
 	float cullDistance = 1000;
 	// Unit: setHasExposedSoldier (+0x16; the seat value's armour bonus).
 	bool exposedSoldier = false;
+	// Unit: setUseNoPathfindingToGetToObject (executor 0x00884eaf, +0x15, 0
+	// by default; 1 on the bipods and the ATs). AIDLL reads it through the
+	// unit adaptor's slot 0x38 (0x008a1d10; AIDLL 0x100aa570) where it
+	// weighs reaching the object: the vehicle choice 0x1006c520 and the
+	// get-in plan 0x1006dac0 (with it, or without a Mobile part, the plans
+	// without the infantry-map point's distance tests), MedicAssist
+	// 0x10070200 / 0x10070da0, AmmoAssist 0x10071a10 / 0x100724e0, and
+	// 0x1006bd70. Those tests read the Mobile's per-map point records, which
+	// the rewrite doesn't keep (it counts every vehicle as reachable), so
+	// the flag is kept and changes no decision here.
+	bool noPathfindingToObject = false;
+	// Mobile: vehicleNumber (executor 0x008834f9, +4, -1 by default and
+	// shipped on the ATs): the adaptor's slot 0x24 (0x008a1770), read by
+	// AIDLL 0x100a46c0 to pick the Mobile's per-map point record (+8 when
+	// it is the pathfinder's slot 4, else +0x1c or +0x30): kept, unread
+	// here for the same reason.
+	int vehicleNumber = -1;
 	// Unit (constructor 0x008919d0): setBattleStrength <CombatStrengthType>
 	// <float> (0x00884b1e, +8: 8 floats) and setStrategicStrength <0|1>
 	// <int> (0x00884c6f, +0xc: attack 0, defence 1). The SAI's area

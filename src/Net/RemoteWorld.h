@@ -216,6 +216,10 @@ public:
 	// Objects and players.
 	std::vector<RemoteObject> objectList() const;
 	const RemoteObject* object(uint16_t ghost) const;
+	// A sticky round's StickyProjectile event (kEvStickyProjectile,
+	// 0x0050f5d0): where it was stuck, kept until its ghost goes; nullptr
+	// when it hasn't been.
+	const StickyProjectileInfo* stuckProjectile(uint16_t ghost) const;
 	// The team's overhead camera ghost (OverheadCamera, 0x00603980) where
 	// the server placed it: the commander's view at the map's zoom 2
 	// (0x00779680); false before the server made one.
@@ -465,6 +469,7 @@ private:
 	// hidden and leaves the active map, not destroyed); a kind-1 update
 	// brings one back (0x0057bdc0).
 	std::map<uint16_t, RemoteObject> m_hidden;
+	std::map<uint16_t, StickyProjectileInfo> m_stuck; // a projectile's ghost -> its StickyProjectile event
 	std::map<int, RemotePlayer> m_players;
 	int m_localPlayer = -1;
 	bool m_hasControl = false;

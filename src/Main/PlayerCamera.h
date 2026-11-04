@@ -202,13 +202,18 @@ public:
 	bool hides(uint32_t object) const;
 
 	// The weapon's zoom: its level (0 not zoomed) and whether the zoomed HUD
-	// (weaponHud.altGuiIndex) shows.
-	int zoomLevel() const { return m_zoom.level(); }
+	// (weaponHud.altGuiIndex) shows. In a seat, the seat's gun's (below).
+	int zoomLevel() const { return m_inSeat ? m_seatZoom.state.level() : m_zoom.level(); }
 	bool zoomed() const;
 	// The mouse's turn scale while zoomed (0x00586420): the field of view
-	// over the camera's, times the zoom's mouseSpeedMod.
+	// over the camera's, times the zoom's mouseSpeedMod. The soldier's only
+	// (0x00586420 is Soldier.cpp's): 1 in a seat.
 	float mouseScale() const;
-	float fieldOfView() const { return m_fov.current; }
+	float fieldOfView() const { return m_inSeat ? m_seatZoom.fov.current : m_fov.current; }
+	// A seat's zoom (anim::SeatZoom: the seat's weapon's DefaultZoomComp,
+	// stepped by the alternate fire). Not on a joined client (its seats have
+	// no inside view).
+	int seatZoomLevel() const { return m_seatZoom.state.level(); }
 	// The bundles the first-person systems play (checks).
 	std::vector<std::string> playing() const;
 	// The eye's height over the soldier's origin.
@@ -315,6 +320,11 @@ private:
 	anim::EyeHeight m_eye;
 	anim::ZoomState m_zoom;
 	anim::FieldOfView m_fov;
+	// The seat's gun's zoom (seatZoomLevel): the gun it was loaded for.
+	void stepSeatZoom(const Me& me, bool altPressed, float seconds);
+	bool m_inSeat = false;
+	const world::ObjectTemplate* m_seatGun = nullptr;
+	anim::SeatZoom m_seatZoom;
 	anim::CameraSpringState m_springState;
 	anim::CameraSpring::V m_springOffset;
 	float m_lastYaw = 0, m_lastPitch = 0;

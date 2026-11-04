@@ -535,9 +535,14 @@ void setupScoreboard(hud::HudManager& hud)
 	}
 	// The players' lists add the voice box (column 6, a click toggles the
 	// player's mute: 0x007bc590 type 7; where the exe draws it isn't known,
-	// so it sits at the name's end) and keep the player's id in cell 7.
+	// so it sits at the name's end), the kit icon (column 7, 15 pixels
+	// square as the row filler 0x007bb540 draws it, from the HUD manager's
+	// slot 0x64, 0x0074e940: menu::scoreboardIcon; before the voice box)
+	// and keep the player's id in cell 8.
 	auto players = columns;
+	players[0].width = 160; // the name, clear of the icons
 	players.push_back({196, 0, 0, 12});
+	players.push_back({176, 0, 0, 15, {0, 0, 0, 1}}); // black (0x00b3bec0)
 	for (int data : {1, 2}) {
 		hud.setListColumns(data, players);
 	}	// The "Players" tab first (scoreboard.setToggleShow picks the others).
@@ -562,7 +567,7 @@ void updateTeams(hud::HudManager& hud, const host::HudWorld& world, const game::
 // mute and talk state; "" none), set while a joined game has voice.
 std::function<std::string(int player)> g_scoreboardVoice;
 
-void updateScoreboard(hud::HudManager& hud, const host::HudWorld& world)
+void updateScoreboard(hud::HudManager& hud, const host::HudWorld& world, const world::ObjectManager& objects)
 {
 	const int friendly = world.playerTeam() == 1 ? 1 : 2;
 	game::GameWorld::PlayerInfo me;
@@ -589,6 +594,8 @@ void updateScoreboard(hud::HudManager& hud, const host::HudWorld& world)
 			rows.push_back({f1(p.name), f1(std::to_string(n.score)), f1(std::to_string(n.teamwork)), f1(std::to_string(p.kills)),
 				f1(std::to_string(p.deaths)), f1(p.ai ? "BOT" : std::to_string(std::max(n.ping, 0))),
 				g_scoreboardVoice && !p.ai && p.id != world.localPlayer() ? g_scoreboardVoice(p.id) : std::string(),
+				dice::hfe::menu::scoreboardIcon(p, me.id == world.localPlayer() ? me.team : 0,
+					p.kit && objects.find(p.kit) ? objects.find(p.kit)->objectTemplate() : nullptr),
 				std::to_string(p.id)});
 			totalTeamwork += n.teamwork;
 			// The row's colours (0x007bb540; see menu::scoreboardStyle).
@@ -1129,7 +1136,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	updateTeams(hud, world, logic);
 	hud.set("ScoreboardShow", scoreboard ? 1 : 0);
 	if (scoreboard) {
-		updateScoreboard(hud, world);
+		updateScoreboard(hud, world, round.objects());
 	}
 	const world::Object* soldier = world.soldier();
 	const bool alive = soldier != nullptr;
@@ -1255,8 +1262,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		float yaw = 0, pitch = 0;
 		if (known && round.gunAim(vehicle->id(), me.seat, yaw, pitch)) {
 			const world::ObjectTemplate* gun = round.templates().find(seats[static_cast<size_t>(me.seat)].weapon);
-			const auto gui = gun ? gun->settings().find("weaponHud.guiIndex") : settings.end();
-			hud.set("GuiIndex", gun && gui != gun->settings().end() ? static_cast<float>(std::atoi(gui->second.c_str())) : 0);
+			hud.set("GuiIndex", static_cast<float>(dice::hfe::menu::weaponGuiIndex(gun, g_weaponZoomed)));
 			hud.set("CrosshairIconShow", crosshairActive ? 1 : 0);
 			hud.set("TurretIconShow", 1);
 			hud.set("VehicleTurretAngle", yaw);
@@ -1360,6 +1366,10 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		dice::hfe::menu::WeaponHudInput in;
 		in.weapon = heldGunTemplate;
 		in.seconds = dt;
+		// The fire state (0x005c1b60): the fire held for the gun in hand.
+		if (game::GameWorld::PlayerInfo shooter; world.playerInfo(world.localPlayer(), shooter)) {
+			in.firing = shooter.firing;
+		}
 		in.magSize = gun.magSize;
 		in.nrOfMags = gun.nrOfMags;
 		if (heldGun) {
@@ -4587,10 +4597,10 @@ int runGame(Options& options, Session& session)
 			}
 		};
 		// The scoreboard's mute boxes (Scoreboard.singleClick → 0x007bc590,
-		// column 7): a player's voice on or off.
+		// column 6; the player's id in cell 8): a player's voice on or off.
 		bindMethod(console, "Scoreboard.singleClick", ConsoleAccess::Anyone, [&](int list) {
 			const auto& click = hudManager.lastListClick();
-			const std::string id = hudManager.listCell(list, click.row, 7);
+			const std::string id = hudManager.listCell(list, click.row, 8);
 			if (click.column == 6 && !id.empty() && session.voice) {
 				const int player = std::atoi(id.c_str());
 				session.voice->client().setMuted(player, !session.voice->client().muted(player));
@@ -5069,6 +5079,12 @@ int runGame(Options& options, Session& session)
 						state.wheels.push_back(contact);
 					}
 				}
+				// The local player's vehicle seen from inside (the inside or
+				// nose view): its bundles' first-person form, unless it or his
+				// seat is neverDrawAs1p (the Titans) (0x006187c0).
+				state.firstPerson = state.occupied
+					&& (playerCamera.mode() == game::camera::Mode::Inside || playerCamera.mode() == game::camera::Mode::Nose)
+					&& round.firstPersonEffects(state.id);
 				if (!fired.empty()) {
 					const auto it = fired.find(state.id);
 					state.effects = it != fired.end() ? it->second : 0;
@@ -5562,6 +5578,23 @@ int runGame(Options& options, Session& session)
 		std::optional<host::RemoteHudWorld> remoteHud;
 		if (session.client) {
 			remoteHud.emplace(session.client->world(), round, ghostObjects);
+			// The vehicles' turrets as their ghosts turn them, for the seated
+			// players' mounts and hands (GameWorld::animateRemoteSeated).
+			round.setRemotePartPose([&session, &ghostObjects](uint32_t object, const std::string& part, world::Vec3& offset,
+										world::Vec3& rotation) {
+				if (!session.client) {
+					return false;
+				}
+				for (const auto& [ghost, id] : ghostObjects) {
+					net::Vec3f o, r;
+					if (id == object && session.client->world().partPose(ghost, part, o, r)) {
+						offset = {o.x, o.y, o.z};
+						rotation = {r.x, r.y, r.z};
+						return true;
+					}
+				}
+				return false;
+			});
 			remoteHud->ownStamina = [&prediction](float& stamina, bool& sprinting) {
 				if (!prediction.active()) {
 					return false;
@@ -5957,6 +5990,20 @@ int runGame(Options& options, Session& session)
 						projectileUpdates[ghost.ghost] = ghost.updates;
 						const physics::Vec3 v {ghost.velocity.x, ghost.velocity.y, ghost.velocity.z};
 						round.moveRemoteProjectile(it->second, {at.x, at.y, at.z}, ghost.hasVelocity ? &v : nullptr);
+					}
+					// Its StickyProjectile event (0x0050f5d0): it stops and lies
+					// where the server stuck it, riding the object it stuck to.
+					if (flying && !round.remoteProjectileStuck(it->second)) {
+						if (const net::StickyProjectileInfo* stuck = client.world().stuckProjectile(ghost.ghost)) {
+							const auto target = stuck->target ? ghostObjects.find(stuck->target) : ghostObjects.end();
+							const net::Vec3f place = stuck->rows[3], up = stuck->rows[1];
+							if (!stuck->target) {
+								round.stickRemoteProjectile(it->second, 0, {place.x, place.y, place.z}, {up.x, up.y, up.z});
+							} else if (target != ghostObjects.end()) { // once its parent is placed here
+								round.stickRemoteProjectile(it->second, target->second, {place.x, place.y, place.z},
+									{up.x, up.y, up.z});
+							}
+						}
 					}
 					if (world::Object* object = round.remoteRagDoll(it->second) || flying ? nullptr : objects.find(it->second)) {
 						object->setPosition(at);

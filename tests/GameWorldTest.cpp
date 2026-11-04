@@ -3909,3 +3909,47 @@ TEST(GameWorld_LockTones)
 	}
 	CHECK(said().empty());
 }
+
+// ObjectTemplate.setCheckObstruction (executor 0x004e236e; the pod
+// launchers' -1.5 2 1) and its five rays (0x005c2310): the middle one from
+// 1.5 m behind the gun to 2 m ahead, then the four moved by the radius on
+// its right and up axes; anything met (here the ground, or a parked box
+// past the gun's own) refuses the trigger (0x005c50e0, 0x005c2ee0).
+TEST(GameWorld_FireObstruction)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "GenericFireArm");
+	templates.registerType(2, "PlayerControlObject");
+	templates.create("GenericFireArm", "pod_launcher");
+	Console console;
+	world::registerWorldConsoleMethods(console, templates, objects);
+	std::string out;
+	CHECK(console.execute("ObjectTemplate.activeSafe GenericFireArm pod_launcher", out) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.setCheckObstruction -1.5 2 1", out) == ConsoleResult::Ok);
+	CHECK(templates.find("pod_launcher")->settings()["checkObstruction"] == "-1.5/2/1");
+
+	io::FileManager files;
+	physics::CollisionTemplateManager collisionTemplates;
+	collisionTemplates.add("box_mesh", boxMesh(1));
+	world::ObjectTemplate* box = templates.create("PlayerControlObject", "box");
+	makeMobile(*box, "box_mesh");
+	const uint32_t parked = objects.create(box, {0, 1, 10})->id();
+	game::GameWorld world(templates, objects);
+	world.enablePhysics(files, collisionTemplates,
+		{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
+			 normal = {0, 1, 0};
+			 return 0.0f;
+		 }});
+	world.tick(1 / 30.0f); // the box's body
+	const physics::Vec3 ahead {0, 0, 1}, right {1, 0, 0}, up {0, 1, 0};
+	// Level at 1.5 m over flat ground, the sky clear: the lowest rays at 0.5 m.
+	CHECK(!world.fireObstructed({0, 1.5f, 0}, ahead, right, up, -1.5f, 2, 1, 0));
+	// At 0.8 m the lower corners' rays run under the ground.
+	CHECK(world.fireObstructed({0, 0.8f, 0}, ahead, right, up, -1.5f, 2, 1, 0));
+	// Aimed down: the middle ray meets the ground.
+	CHECK(world.fireObstructed({0, 1.5f, 0}, {0, -1, 0}, right, {0, 0, 1}, -1.5f, 2, 1, 0));
+	// A box 1.5 m ahead of the gun: met, unless it is the gun's own.
+	CHECK(world.fireObstructed({0, 1.5f, 8.5f}, ahead, right, up, -1.5f, 2, 1, 0));
+	CHECK(!world.fireObstructed({0, 1.5f, 8.5f}, ahead, right, up, -1.5f, 2, 1, parked));
+}

@@ -1013,3 +1013,32 @@ TEST(Effects_RainDeviationGroups)
 	weather.update(s, {}, 0.1f);
 	CHECK(weather.deviations()[0].speed[0] == 0 && weather.deviations()[0].speed[1] == 0);
 }
+
+// A vehicle's bundles seen from inside by its own occupant (0x006187c0:
+// the local player in the inside or nose view under the same root, no
+// neverDrawAs1p on the way; GameWorld::firstPersonEffects): their
+// first-person systems (showInFirstPerson), not the third-person ones
+// (0x0061a1c0); anyone else's vehicle, or a Titan's, the third-person ones.
+TEST(Effects_ObjectBundlesFirstPersonForm)
+{
+	world::ObjectTemplateManager templates;
+	addFlame(templates, true, "1", "0"); // a cockpit glow: first person only
+	world::ObjectTemplate* glow = templates.create("EffectBundle", "e_cockpit");
+	glow->settings()["startAtCreation"] = "1";
+	glow->children().push_back({"flame", {}, {}});
+	world::ObjectTemplate* car = templates.create("PlayerControlObject", "car");
+	car->children().push_back({"e_cockpit", {0, 1, 0}, {}});
+	effects::EffectManager manager(templates);
+	effects::ObjectEffects objects(templates);
+	effects::ObjectEffects::ObjectState theirs;
+	theirs.id = 7;
+	theirs.objectTemplate = car;
+	objects.update({theirs}, manager);
+	CHECK(manager.emitters() == 0); // the third-person form shows nothing of it
+	effects::ObjectEffects::ObjectState mine = theirs;
+	mine.id = 8;
+	mine.occupied = true;
+	mine.firstPerson = true;
+	objects.update({theirs, mine}, manager);
+	CHECK(manager.emitters() == 1 && manager.emitting(8, 1) && !manager.emitting(7, 1));
+}

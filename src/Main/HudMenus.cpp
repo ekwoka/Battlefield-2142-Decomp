@@ -719,6 +719,23 @@ std::string CommanderMenu::kitPicture(bool alive, bool manDown, uint32_t kitObje
 	return std::string("Ingame/Commander/kits/icon_kit_") + icon + ".tga";
 }
 
+std::string scoreboardIcon(const game::GameWorld::PlayerInfo& player, int localTeam, const world::ObjectTemplate* kit)
+{
+	if (!player.alive) {
+		return player.spectator ? "Ingame/Scoreboard/Icons/icon_Spectator.tga" : "Ingame/Scoreboard/Icons/icon_Death.tga";
+	}
+	if (localTeam != 0 && player.team != localTeam) {
+		return "Ingame/Scoreboard/Icons/icon_Faded.tga";
+	}
+	if (!kit) {
+		return {};
+	}
+	const auto icon = kit->settings().find("vehicleHud.vehicleIcon");
+	std::string path = icon != kit->settings().end() ? icon->second : std::string();
+	std::replace(path.begin(), path.end(), '\\', '/');
+	return path;
+}
+
 ScoreboardStyle scoreboardStyle(const ScoreboardRow& row, int rowIndex)
 {
 	ScoreboardStyle style {{0, 0, 0, 1}, {0, 0, 0, 0}};

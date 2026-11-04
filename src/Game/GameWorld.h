@@ -301,6 +301,15 @@ public:
 	// vehicle object's with the seat's own (a mount's turret turn and the
 	// hands' IK aren't networked to the client: not applied).
 	void animateRemoteSeated(uint32_t object, uint32_t vehicle, int seat, float bodyYaw, float seconds);
+	// A joined client's vehicles' part turns (the RotationalBundle
+	// networkables of their ghosts, net::RemoteWorld::partPose by the
+	// client's object): the turret a remote seat rides and the grips its
+	// hands hold turn as the ghosts say (animateRemoteSeated).
+	void setRemotePartPose(std::function<bool(uint32_t object, const std::string& part, world::Vec3& offset,
+			world::Vec3& rotation)> source)
+	{
+		m_remotePartPose = std::move(source);
+	}
 	// A manual reload seen on a joined client (the player networkable's
 	// mask 0x10000: its reader 0x005981a0 sets the networkable's +0x280,
 	// player +0x28c, which the client's 0x00590e10 takes through player
@@ -320,6 +329,14 @@ public:
 		const physics::Vec3& velocity);
 	void moveRemoteProjectile(uint32_t ghostObject, const physics::Vec3& at, const physics::Vec3* velocity);
 	void endRemoteProjectile(uint32_t ghostObject);
+	// The StickyProjectile event (0x0050f5d0) on a joined client: the round
+	// stops (the ghost's updates no longer move it) and lies at `local`
+	// (its place, `up` its normal) in `target`'s frame (the client's object
+	// of the networkable it stuck to; the vehicle's position and rotation as
+	// its ghost has them), riding it; with target 0 at `local` in the world.
+	// False when the round isn't known here.
+	bool stickRemoteProjectile(uint32_t ghostObject, uint32_t target, const physics::Vec3& local, const physics::Vec3& up);
+	bool remoteProjectileStuck(uint32_t ghostObject) const;
 	bool hasRemoteProjectile(uint32_t ghostObject) const;
 	// A round of `projectileTemplate` let go at `at` with `velocity`, as
 	// `player`'s (-1 none; its team and soldier the round's): it flies,
@@ -578,6 +595,15 @@ public:
 	// terrain) lies between two points.
 	// `ignore`: an object (a body) that doesn't count, such as the looker's own.
 	bool lineOfSight(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore = 0) const;
+	// A firearm's ObjectTemplate.setCheckObstruction (start, end, radius;
+	// the pod launchers' -1.5 2 1): five rays along the gun (0x005c2310),
+	// from start to end metres along its forward axis through `at`, then the
+	// same moved by (r, r), (r, -r), (-r, -r), (-r, r) along its right and
+	// up axes (the scene's ray 0x00a85220 slot 0x68 past the gun's own root,
+	// `ignore`): one meeting anything refuses the trigger (0x005c2ee0; the
+	// event handler 0x005c50e0 turns a press or hold into a release, 9).
+	bool fireObstructed(const physics::Vec3& at, const physics::Vec3& forward, const physics::Vec3& right,
+		const physics::Vec3& up, float start, float end, float radius, uint32_t ignore) const;
 	// The AI's sight ray (IAIObjectEnvironment slot 0x44, 0x00897df0: the
 	// terrain, then slot 0x90, 0x00898040, the scene's ray with the filter
 	// of vtable 0x009d6794): faces of a Material.isSeeThrough material
@@ -2574,8 +2600,15 @@ private:
 	// The hands' IK targets of a seated soldier (Animation/Ik.h): the
 	// seat's IK object (an Ik component in the seat's tree, 0x005ee910),
 	// its ik.* grips in the skeleton's space (0x005efc00).
-	bool seatIkTargets(const Player& player, const SeatLayout& seat, const physics::Mat3& soldierRotation,
-		const physics::Vec3& soldierPosition, std::vector<anim::IkTarget>& targets) const;
+	// `remote`: a joined client's seated soldier, its vehicle's parts as
+	// their ghosts turn them (setRemotePartPose).
+	bool seatIkTargets(uint32_t vehicle, const anim::Skeleton* skeleton, const SeatLayout& seat,
+		const physics::Mat3& soldierRotation, const physics::Vec3& soldierPosition, std::vector<anim::IkTarget>& targets,
+		bool remote = false) const;
+	// A part's turn for the seats: a joined client's from the ghosts
+	// (m_remotePartPose) first, else the round's own (partPose).
+	bool seatPartPose(uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation, bool remote) const;
+	std::function<bool(uint32_t, const std::string&, world::Vec3&, world::Vec3&)> m_remotePartPose;
 	// What becomes of the body at PlayerDeath: it stays (a corpse, see
 	// stepCorpses), it is slumped in its seat (m_seatCorpses), or it goes
 	// at once (the occupants of a destroyed vehicle, 0x005cacf0).

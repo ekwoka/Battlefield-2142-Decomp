@@ -184,7 +184,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 |---|---|
 | W A S D | Move (in a vehicle: drive, brake, steer) |
 | Mouse | Look and aim (driving: the turret or the barrel where the driver's seat has one, as a tank's or a walker's; the hover tank also turns on it) |
-| Left button / right button | Fire / zoom (sets off placed C4; in a seat, the seat's PIFire and PIAltFire weapons, also a ground vehicle's driver's) |
+| Left button / right button | Fire / zoom (sets off placed C4; in a seat, the seat's PIFire and PIAltFire weapons, also a ground vehicle's driver's; the right button also zooms a seat gun that has a zoom, such as the tanks' and walkers' guns, in the inside or nose view) |
 | Shift | Sprint |
 | Space | Jump |
 | Left Ctrl / Z | Crouch / lie down |

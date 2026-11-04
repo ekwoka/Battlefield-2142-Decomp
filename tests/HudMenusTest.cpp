@@ -1459,3 +1459,81 @@ TEST(HudCommander_OverheadCameraPan)
 	}
 	CHECK(camera.speedX == 0 && camera.speedZ == 0);
 }
+
+// The weapon HUD's gui index (0x00657a70): altGuiIndex while the firearm
+// is zoomed (eu_tank's barrel: 12, zoomed 13), guiIndex otherwise or
+// without one (AS_AT's barrel: 65 either way); the zoomed seats'
+// post-processing names the index shown (enablePostProcessingOnGuiIndex).
+TEST(HudVehicle_SeatZoomGuiIndex)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* tank = templates.create("GenericFireArm", "EU_TANK_Barrel");
+	tank->settings()["weaponHud.guiIndex"] = "12";
+	tank->settings()["weaponHud.altGuiIndex"] = "13";
+	tank->settings()["weaponHud.enablePostProcessingOnGuiIndex"] = "13";
+	world::ObjectTemplate* at = templates.create("GenericFireArm", "AS_AT_L_Gun_Barrel");
+	at->settings()["weaponHud.guiIndex"] = "65";
+	at->settings()["weaponHud.enablePostProcessingOnGuiIndex"] = "65";
+	CHECK(menu::weaponGuiIndex(tank, false) == 12 && menu::weaponGuiIndex(tank, true) == 13);
+	CHECK(menu::weaponGuiIndex(at, false) == 65 && menu::weaponGuiIndex(at, true) == 65);
+	CHECK(menu::weaponGuiIndex(nullptr, true) == 0);
+	CHECK(!menu::seatPostProcessing(nullptr, tank, false) && menu::seatPostProcessing(nullptr, tank, true));
+	CHECK(menu::seatPostProcessing(nullptr, at, false) && menu::seatPostProcessing(nullptr, at, true));
+	tank->settings()["weaponHud.altGuiIndex"] = "-1";
+	CHECK(menu::weaponGuiIndex(tank, true) == 12);
+}
+
+// weaponHud.altCrosshairIcon (0x00657bb0): the crosshair shown while the
+// firearm's fire state is above 0 (0x005c1b60), when the template has one
+// (as_ag's TV-guided missile); the crosshairIcon otherwise and for a
+// weapon without one.
+TEST(HudWeapon_AltCrosshairWhileFiring)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* missile = templates.create("GenericFireArm", "as_ag_tv");
+	missile->settings()["weaponHud.crosshairIcon"] = "Ingame/Vehicles/Icons/Hud/Air/crosshair.tga";
+	missile->settings()["weaponHud.altCrosshairIcon"] = "Ingame/Vehicles/Icons/Hud/Air/Attack/Su34/TVGuided/tvGuided_Crosshair.tga";
+	world::ObjectTemplate* rifle = templates.create("GenericFireArm", "rifle");
+	rifle->settings()["weaponHud.crosshairIcon"] = "Ingame\\Weapons\\Icons\\Hud\\Crosshair\\rifle.tga";
+	hud::HudManager hud(nullptr);
+	menu::WeaponHud weaponHud;
+	menu::WeaponHudInput in;
+	in.weapon = missile;
+	in.magSize = 1;
+	weaponHud.update(hud, in);
+	CHECK(hud.string("CrosshairIconPathString") == "Ingame/Vehicles/Icons/Hud/Air/crosshair.tga");
+	in.firing = true;
+	weaponHud.update(hud, in);
+	CHECK(hud.string("CrosshairIconPathString")
+		== "Ingame/Vehicles/Icons/Hud/Air/Attack/Su34/TVGuided/tvGuided_Crosshair.tga");
+	in.firing = false;
+	weaponHud.update(hud, in);
+	CHECK(hud.string("CrosshairIconPathString") == "Ingame/Vehicles/Icons/Hud/Air/crosshair.tga");
+	in.weapon = rifle;
+	in.firing = true;
+	weaponHud.update(hud, in);
+	CHECK(hud.string("CrosshairIconPathString") == "Ingame/Weapons/Icons/Hud/Crosshair/rifle.tga");
+}
+
+// The scoreboard's kit icon column (0x0074e940 through the row filler
+// 0x007bb540): a spectator's icon_Spectator, the dead's icon_Death, a
+// living enemy's icon_Faded, a living teammate's kit icon (its
+// vehicleHud.vehicleIcon, as the kit buttons show it).
+TEST(HudScoreboard_KitIconColumn)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "Kit");
+	world::ObjectTemplate* assault = templates.create("Kit", "eu_assault");
+	assault->settings()["vehicleHud.vehicleIcon"] = "Ingame\\Kits\\Icons\\Hud\\kit_assault.tga";
+	game::GameWorld::PlayerInfo p;
+	p.team = 2;
+	p.alive = true;
+	CHECK(menu::scoreboardIcon(p, 2, assault) == "Ingame/Kits/Icons/Hud/kit_assault.tga");
+	CHECK(menu::scoreboardIcon(p, 2, nullptr).empty());
+	CHECK(menu::scoreboardIcon(p, 1, assault) == "Ingame/Scoreboard/Icons/icon_Faded.tga");
+	CHECK(menu::scoreboardIcon(p, 0, assault) == "Ingame/Kits/Icons/Hud/kit_assault.tga"); // no local player
+	p.alive = false;
+	CHECK(menu::scoreboardIcon(p, 1, assault) == "Ingame/Scoreboard/Icons/icon_Death.tga");
+	p.spectator = true;
+	CHECK(menu::scoreboardIcon(p, 2, assault) == "Ingame/Scoreboard/Icons/icon_Spectator.tga");
+}

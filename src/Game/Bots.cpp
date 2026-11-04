@@ -7543,6 +7543,18 @@ void registerBotConsoleMethods(Console& console, BotSettings& settings)
 			p->exposedSoldier = exposed;
 		}
 	});
+	bindMethod(console, "aiTemplatePlugIn.setUseNoPathfindingToGetToObject", access, [plugin](bool on) {
+		if (AiPlugin* p = plugin()) {
+			p->noPathfindingToObject = on; // Unit +0x15 (0x00884eaf)
+		}
+	});
+	bindProperty<int>(console, "aiTemplatePlugIn.vehicleNumber", access,
+		[plugin] { return plugin() ? plugin()->vehicleNumber : -1; },
+		[plugin](int number) {
+			if (AiPlugin* p = plugin()) {
+				p->vehicleNumber = number; // Mobile +4 (0x008834f9)
+			}
+		});
 	// PIPositionSelectN: the key that moves a player to the seat (the Unit
 	// plug-in's, 0x100aa5f0 reads it for BBPChange's seat change).
 	bindMethod(console, "aiTemplatePlugIn.setSelectKey", access, [plugin](std::string key) {

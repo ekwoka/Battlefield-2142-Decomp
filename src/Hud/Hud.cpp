@@ -1159,7 +1159,9 @@ void HudManager::drawList(const Node& node, float x, float y, const float color[
 					const float size = columns[i].iconSize;
 					const float iy = std::floor(rowY + (node.rowHeight - size) * 0.5f);
 					const float ix = x + columns[i].x;
-					const float* tint = ownColor ? rowColors->second[r].data() : nullptr;
+					const float* tint = columns[i].iconColor[0] >= 0 ? columns[i].iconColor.data()
+						: ownColor                               ? rowColors->second[r].data()
+																 : nullptr;
 					out.push_back({kTextureRoot + slashes(rows[r][i]), ix, iy, ix + size, iy + size, 0, 0, 1, 1,
 						{tint ? tint[0] : 1.0f, tint ? tint[1] : 1.0f, tint ? tint[2] : 1.0f, color[3]}, 0});
 				}

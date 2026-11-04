@@ -98,6 +98,7 @@ void WeaponHud::Fields::read(const world::ObjectTemplate* w)
 	guiShown = hudNumber(w, "weaponHud.guiIndex", 5) != -1;
 	name = hudSetting(w, "weaponHud.hudName");
 	crosshair = slashes(hudSetting(w, "weaponHud.crosshairIcon"));
+	altCrosshair = slashes(hudSetting(w, "weaponHud.altCrosshairIcon")); // block +0x8c (executor 0x005576cc)
 	barFront = slashes(hudSetting(w, "weaponHud.ammoBarFrontIcon"));
 	barBack = slashes(hudSetting(w, "weaponHud.ammoBarBackIcon"));
 	clipIcon = slashes(hudSetting(w, "weaponHud.clipIcon"));
@@ -133,8 +134,10 @@ std::string WeaponHud::update(hud::HudManager& hud, const WeaponHudInput& in, bo
 	if (!f.name.empty()) {
 		hud.setString(var("WeaponNameString"), f.name);
 	}
-	if (!secondary && !f.crosshair.empty()) {
-		hud.setString("CrosshairIconPathString", f.crosshair);
+	// 0x00657bb0: the alternate one while firing, when it has one.
+	const std::string& crosshair = in.firing && !f.altCrosshair.empty() ? f.altCrosshair : f.crosshair;
+	if (!secondary && !crosshair.empty()) {
+		hud.setString("CrosshairIconPathString", crosshair);
 	}
 	if (!f.barFront.empty()) {
 		hud.setString(var("AmmoBarFrontPathString"), f.barFront);
@@ -891,8 +894,21 @@ bool seatPostProcessing(const world::ObjectTemplate* controlled, const world::Ob
 	}
 	const auto& settings = weapon->settings();
 	const auto on = settings.find("weaponHud.enablePostProcessingOnGuiIndex");
-	const auto shown = settings.find(zoomed ? "weaponHud.altGuiIndex" : "weaponHud.guiIndex");
-	return on != settings.end() && shown != settings.end() && std::atoi(on->second.c_str()) == std::atoi(shown->second.c_str());
+	return on != settings.end() && std::atoi(on->second.c_str()) == weaponGuiIndex(weapon, zoomed);
+}
+
+int weaponGuiIndex(const world::ObjectTemplate* weapon, bool zoomed)
+{
+	if (!weapon) {
+		return 0;
+	}
+	const auto& settings = weapon->settings();
+	const auto alt = settings.find("weaponHud.altGuiIndex");
+	if (zoomed && alt != settings.end() && std::atoi(alt->second.c_str()) != -1) {
+		return std::atoi(alt->second.c_str());
+	}
+	const auto gui = settings.find("weaponHud.guiIndex");
+	return gui != settings.end() ? std::atoi(gui->second.c_str()) : 0;
 }
 
 std::string iconFrame(const std::string& icon, int frame)

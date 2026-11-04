@@ -55,7 +55,7 @@ struct ZoomSettings {
 	// the firearm's event handler (0x005c50e0) drops the zoom press while
 	// it is busy (drawing, reloading, between rounds, zooming, animating,
 	// overheated) unless this is set (shipped 1 on the tanks' and the ATs'
-	// seats, whose zoom the rewrite's seats don't have yet).
+	// seats; SeatZoom).
 	bool zoomWhenBusy = false;
 	bool present() const { return factors.size() > 1; }
 	int delayTicks() const { return static_cast<int>(std::lround(delay * 30.0f)); }
@@ -93,6 +93,36 @@ private:
 	float m_fineTune = 0; // +0x24: kept over zooming out (0x005da530)
 	int m_level = 0;   // +0x1c of the component
 	int m_ticks = 0;   // since the last change
+};
+
+// A seat's zoom (the tanks' and ATs' guns, the static AV and AP launchers:
+// a DefaultZoomComp on the seat's weapon). The seat's active firearms poll
+// PIFire, PIAltFire and PIFlareFire (0x005c58a0, the table 0x0096cf0c) as a
+// soldier's do, and the event handler (0x005c50e0) hands the press of the
+// zoom's input (its slot 0xa8) to the zoom component (0x005c0da0 -> slot
+// 0x8c, 0x005da670) unless busy without zoomWhenBusy (slot 0xb8,
+// 0x0064a000). Its field of view goes to the player (slot 0x9c,
+// 0x00591740): the level's factor, or for level 0 the active camera's own
+// (slot 0x58: the seat camera's insideFOV), over zoomDelay; the view is
+// drawn with the player's (+0xc4). A camera change (the firearm's event
+// 0x1c -> 0x005da5c0) zooms out unless the local player looks through the
+// inside or nose view (player slot 0x1bc, 0x00591510: camera modes 1, 2);
+// a reload's start zooms out with zoomOutOnReload (0x005da630; the shipped
+// seats set 0). At level 0 the field of view follows the camera's at once
+// when it changes (0x005da290: another camera, ducking).
+struct SeatZoom {
+	ZoomSettings settings;
+	ZoomState state;
+	FieldOfView fov;
+	bool reloadingWas = false;
+	// A new gun (or seat): its settings, level 0 at the camera's view.
+	void reset(const ZoomSettings& gun, float cameraFov);
+	// One tick. pressed: the alternate fire's press (taken only when the
+	// seat's input isn't disabled); busy: the gun reloading; looking: the
+	// view is the inside or nose one; cameraFov: the seat camera's
+	// insideFOV.
+	void step(bool pressed, bool busy, bool looking, float cameraFov, float seconds);
+	bool zoomed() const { return state.level() > 0 && fov.current == fov.target; }
 };
 
 // The eye (the soldier camera's local position, 0x005890a0): only the y of
