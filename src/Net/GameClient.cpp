@@ -628,4 +628,21 @@ void GameClient::toggleFreeCamera()
 	sendEvent(event);
 }
 
+void GameClient::joinAsSpectator(bool spectator)
+{
+	JoinAsSpectatorInfo info;
+	info.player = m_world.localPlayer();
+	info.spectator = spectator;
+	sendEvent(makeJoinAsSpectator(info)); // SwiffHost slot 0x3c0 (0x0046c780): to the server
+}
+
+void GameClient::spectatorCamera(int kind, int follow)
+{
+	JoinAsSpectatorInfo info;
+	info.player = m_world.localPlayer();
+	info.kind = kind;
+	info.follow = follow;
+	sendEvent(makeJoinAsSpectator(info));
+}
+
 } // namespace dice::hfe::net

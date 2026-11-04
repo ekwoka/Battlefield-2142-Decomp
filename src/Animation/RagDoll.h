@@ -83,6 +83,8 @@ struct RagDollSettings {
 	float expForceMod = 1;            // rd_expForceMod: explosions' push on soldiers
 	float dieForce = 0;               // rd_dieForce (unused by the game: "don't use random die force yet")
 	float dieInVehicleForce = 100;    // rd_dieInVehicleForce: the push of a body thrown out of its seat
+	float hitForce = 9000;            // rd_hitForce (0x460ca000): the killing hit's push on its bone
+	float hitUp = 0;                  // rd_hitUp: the push's up share (0: level)
 	// ragdoll_clientMaxUpdateTime (milliseconds, 0x3b03126f): past it in a
 	// frame, the network-driven bodies still to update take level 2.
 	float clientMaxUpdateTime = 0.002f;

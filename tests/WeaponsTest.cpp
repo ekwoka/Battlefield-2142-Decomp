@@ -791,3 +791,52 @@ TEST(Weapons_SoldierDeviationSteadiesBackToZero)
 	}
 	CHECK(d.fire.value == 0);
 }
+
+// The underarm (soft) throw (ThrownFireComp with fire.altFireInput,
+// 0x005e4d80 / 0x005e4eb0 / 0x005e5720): the alternate press starts the
+// throw, the timer waits while it is held, the power is min(1, ticks held
+// / 30) and the round leaves pull-back + launch delay after the release at
+// the speed x the power; the primary press throws at full power.
+TEST(Weapons_SoftThrowScalesThePower)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "GenericFireArm");
+	world::ObjectTemplate* frag = templates.create("GenericFireArm", "Unl_Grenade_Frag");
+	frag->components().push_back("ThrownFireComp");
+	frag->settings()["fire.pullBackTime"] = "0.2";
+	frag->settings()["fire.altFireInput"] = "PIAltFire";
+	frag->settings()["ammo.magSize"] = "1";
+	frag->settings()["ammo.nrOfMags"] = "5";
+	frag->settings()["ammo.reloadTime"] = "0";
+	const game::FireArmSettings settings = game::FireArmSettings::fromTemplate(*frag);
+	CHECK(settings.softThrow && settings.pullbackTicks == 6);
+	const auto throwFor = [&](game::FireArm& g, int held) {
+		CHECK(!g.tick(1 / 30.0f, false, true)); // the press
+		for (int i = 1; i < held; ++i) {
+			CHECK(!g.tick(1 / 30.0f, false, true));
+		}
+		int ticks = 0;
+		while (!g.tick(1 / 30.0f, false, false) && ticks < 100) {
+			++ticks;
+		}
+		return ticks;
+	};
+	game::FireArm a(settings);
+	const int after = throwFor(a, 16);
+	CHECK(after == 6);                         // the pull-back after the release
+	CHECK(std::fabs(a.throwPower() - 0.5f) < 1e-4f); // 15 ticks held after the press
+	game::FireArm b(settings);
+	throwFor(b, 60);
+	CHECK(b.throwPower() == 1);
+	game::FireArm c(settings);
+	CHECK(!c.tick(1 / 30.0f, true));
+	int ticks = 0;
+	while (!c.tick(1 / 30.0f, false) && ticks < 100) {
+		++ticks;
+	}
+	CHECK(c.throwPower() == 1 && ticks == 5);
+	// No altFireInput: the alternate does nothing.
+	frag->settings().erase("fire.altFireInput");
+	game::FireArm d(game::FireArmSettings::fromTemplate(*frag));
+	CHECK(!d.tick(1 / 30.0f, false, true) && !d.throwing());
+}

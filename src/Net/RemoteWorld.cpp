@@ -162,12 +162,23 @@ bool RemoteWorld::apply(const GameEvent& event)
 		p.local = !info.remote;
 		p.ai = info.remote && info.ai;
 		p.profileId = info.profileId;
+		p.spectator = info.flag2;
 		if (info.object != 0) {
 			p.networkableGhost = info.object; // 0x0050a8c0 registers the player's networkable under it
 			m_playerGhosts[info.object] = info.id;
 		}
 		if (p.local) {
 			m_localPlayer = info.id;
+		}
+		return true;
+	}
+	case kEvJoinAsSpectator: { // 0x00514260: the player's slot 0x3b8 with the flag
+		JoinAsSpectatorInfo info;
+		if (!parseJoinAsSpectator(event, info)) {
+			return false;
+		}
+		if (auto it = m_players.find(info.player); it != m_players.end()) {
+			it->second.spectator = info.spectator;
 		}
 		return true;
 	}

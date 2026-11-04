@@ -845,6 +845,27 @@ GameEvent makeCreatePlayer(const CreatePlayerInfo& info)
 	return e;
 }
 
+bool parseJoinAsSpectator(const GameEvent& e, JoinAsSpectatorInfo& out)
+{
+	if (e.type != kEvJoinAsSpectator || e.values.size() < 4) {
+		return false;
+	}
+	out.player = e.i(0);
+	out.spectator = e.u(1) == 1; // 0x00514100: == 1
+	out.follow = e.u(2) == 0xff ? -1 : e.i(2);
+	out.kind = e.i(3);
+	return true;
+}
+
+GameEvent makeJoinAsSpectator(const JoinAsSpectatorInfo& info)
+{
+	GameEvent e;
+	e.type = kEvJoinAsSpectator;
+	e.values = {static_cast<uint32_t>(info.player) & 0xff, info.spectator ? 1u : 0u, static_cast<uint32_t>(info.follow) & 0xff,
+		static_cast<uint32_t>(info.kind) & 0xff};
+	return e;
+}
+
 bool parseCreateObject(const GameEvent& e, CreateObjectInfo& out)
 {
 	if (e.type != kEvCreateObject || e.values.size() < 5) {

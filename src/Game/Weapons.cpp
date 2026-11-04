@@ -27,6 +27,7 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	ProjectileSettings s;
 	s.name = t.name();
 	s.damage = number(t, "damage", s.damage);
+	s.hitImpactModifier = number(t, "hitImpactModifier", s.hitImpactModifier);
 	s.minDamage = number(t, "minDamage", s.minDamage);
 	s.distToStartLoseDamage = number(t, "distToStartLoseDamage", s.distToStartLoseDamage);
 	s.distToMinDamage = number(t, "distToMinDamage", s.distToMinDamage);
@@ -261,6 +262,8 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 	if (s.thrown) {
 		s.pullbackTicks = static_cast<int>(std::nearbyint(number(t, "fire.pullbackTime", 0.2f) * 30));
 		s.launchDelayTicks = static_cast<int>(std::nearbyint(number(t, "fire.fireLaunchDelay", 0) * 30));
+		const auto alt = t.settings().find("fire.altFireInput");
+		s.softThrow = alt != t.settings().end() && !alt->second.empty();
 	}
 	return s;
 }
@@ -419,8 +422,10 @@ bool FireArm::addMagazine()
 	return true;
 }
 
-bool FireArm::tick(float seconds, bool trigger)
+bool FireArm::tick(float seconds, bool trigger, bool altTrigger)
 {
+	const bool altPressed = altTrigger && !m_altWas;
+	m_altWas = altTrigger;
 	// The pulse meter's scan runs on (0x005d99e0, after the ammo's update).
 	if (m_scanning) {
 		m_scan += seconds * kPulseScanStep;
@@ -430,7 +435,16 @@ bool FireArm::tick(float seconds, bool trigger)
 		}
 	}
 	bool fired = false;
-	if (m_launchIn >= 0) {
+	if (m_launchIn >= 0 && m_soft) {
+		// The soft throw held: the power grows, the timer waits.
+		fire(seconds, false);
+		if (altTrigger) {
+			m_softTicks = std::min(m_softTicks + 1, 30);
+			m_power = static_cast<float>(m_softTicks) / 30;
+		} else {
+			m_soft = false;
+		}
+	} else if (m_launchIn >= 0) {
 		// 0x005e4c80: the thrown round leaves when its waits are through;
 		// meanwhile the component is busy (no new round).
 		fire(seconds, false);
@@ -441,10 +455,20 @@ bool FireArm::tick(float seconds, bool trigger)
 			--m_launchIn;
 		}
 	} else {
-		fired = fire(seconds, trigger);
-		if (fired && m_settings.thrown && m_settings.pullbackTicks + m_settings.launchDelayTicks > 0) {
-			m_launchIn = m_settings.pullbackTicks + m_settings.launchDelayTicks - 1;
-			fired = false;
+		const bool soft = m_settings.softThrow && altPressed && !trigger;
+		fired = fire(seconds, trigger || soft);
+		if (fired && m_settings.thrown) {
+			m_power = 1;
+			if (soft) {
+				m_soft = true;
+				m_softTicks = 0;
+				m_power = 0;
+				m_launchIn = std::max(m_settings.pullbackTicks + m_settings.launchDelayTicks - 1, 0);
+				fired = false;
+			} else if (m_settings.pullbackTicks + m_settings.launchDelayTicks > 0) {
+				m_launchIn = m_settings.pullbackTicks + m_settings.launchDelayTicks - 1;
+				fired = false;
+			}
 		}
 	}
 	if (fired && m_settings.pulseScan) {

@@ -377,7 +377,7 @@ void PlayerCamera::nextPlayer()
 	int first = -1;
 	bool passed = false;
 	for (const auto& p : m_round.playerList()) {
-		if (p.team != me.team || !p.alive || p.id == me.id) {
+		if (p.team != me.team || !p.alive || p.id == me.id || p.spectator) {
 			continue;
 		}
 		if (p.id == m_followPlayer) {
@@ -432,12 +432,52 @@ void PlayerCamera::spectatorAction()
 	}
 }
 
+int PlayerCamera::toggleSpectatorCamera()
+{
+	if (!spectator) {
+		return 0;
+	}
+	if (m_spectating == Spectating::Free && !m_remote) {
+		nextPlayer();
+		if (m_followPlayer >= 0) {
+			m_spectating = Spectating::Follow;
+			m_follow = {};
+			return 6;
+		}
+		return 1;
+	}
+	if (m_spectating != Spectating::Free) {
+		m_free.position = m_external.eye;
+		float yaw = 0, pitch = 0;
+		game::camera::anglesOf(m_external, yaw, pitch);
+		m_free.yaw = yaw / kDegrees;
+		m_free.pitch = pitch / kDegrees;
+		m_spectating = Spectating::Free;
+	}
+	return 1;
+}
+
 void PlayerCamera::stepViews(float seconds)
 {
 	using namespace game::camera;
 	m_hasExternal = false;
 	if (m_remote) {
-		return; // a joined game's views stay the first person and the chase
+		// A joined game's views stay the first person and the chase; a
+		// spectator flies the free camera (following another needs the
+		// ghosts' players, which the remote view doesn't take).
+		Remote r;
+		if (spectator && !(m_remote(r) && r.alive)) {
+			if (m_spectating != Spectating::Free) {
+				m_free.position = m_lastLook.eye;
+				m_spectating = Spectating::Free;
+			}
+			game::camera::freeMove(m_free, m_freeInput, seconds, ground());
+			m_freeInput.turnDegrees = m_freeInput.pitchDegrees = 0;
+			m_external = game::camera::freeLook(m_free);
+			m_externalFov = m_baseFov;
+			m_hasExternal = true;
+		}
+		return;
 	}
 	game::GameWorld::PlayerInfo me;
 	if (!m_round.playerInfo(m_round.localPlayer(), me)) {
@@ -539,6 +579,11 @@ void PlayerCamera::stepViews(float seconds)
 	}
 	// Dead: the death camera starts on the object the player was in (the
 	// death 0x004cd390: setMode 6 with the player's control object).
+	if (m_spectating == Spectating::None && spectator) {
+		// A spectator starts flying free where the view is.
+		m_free.position = m_lastLook.eye;
+		m_spectating = Spectating::Free;
+	}
 	if (m_spectating == Spectating::None) {
 		if (!m_alive || !m_lastControlObject) {
 			return; // never spawned yet: the before-spawn camera

@@ -665,6 +665,20 @@ float otherSeatFactor(bool driverTaken, bool rootMobile, uint32_t rootTypes)
 	return (rootTypes & kITGround) ? 0.77f : (rootTypes & kITAir) ? 0.5f : 1.0f;
 }
 
+float aiDeviationFactor(uint32_t botTypes, bool botPrimary, uint32_t targetTypes)
+{
+	if ((botTypes & kITAir) || !(targetTypes & kITAir) || botPrimary || (botTypes & kITNaval)) {
+		return 1;
+	}
+	return 3;
+}
+
+bool BotSettings::primary(const std::string& aiTemplate) const
+{
+	const auto t = aiTemplates.find(lower(aiTemplate));
+	return t == aiTemplates.end() || !t->second.secondary;
+}
+
 bool transportClose(bool own, float botToInfantrySpot2, float vehicleToVehicleSpot2, bool& noMove)
 {
 	if (own) {
@@ -785,6 +799,18 @@ int BotManager::target(int player) const
 {
 	const auto it = m_bots.find(player);
 	return it != m_bots.end() ? it->second.target : -1;
+}
+
+float BotManager::preferredRange(int player) const
+{
+	const auto it = m_bots.find(player);
+	return it != m_bots.end() ? it->second.preferredRange : 0.0f;
+}
+
+int BotManager::planSlot(int player) const
+{
+	const auto it = m_bots.find(player);
+	return it != m_bots.end() && it->second.planTarget >= 0 ? it->second.planSlot : -1;
 }
 
 std::string BotManager::equipment(int player) const
@@ -2391,7 +2417,6 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 	const float forward = gunning ? self.yaw + gunYaw : self.yaw;
 	float bestScore = 0, currentScore = 0;
 	int bestTarget = -1, bestSlot = 0;
-	float bestPreferred = 0;
 	for (const Known& known : bot.known) {
 		if (!known.everSeen) {
 			continue;
@@ -2406,7 +2431,6 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 		const bool facing = std::cos(angleBetween(forward, headingTo(eye, at)) * kRadians) >= 0.9f;
 		float best = 0, maxRange = 0;
 		int slot = 0;
-		WeaponAi chosen;
 		const auto consider = [&](int s, const std::string& name) {
 			const WeaponAi w = weaponAi(name);
 			float score = 0;
@@ -2436,7 +2460,6 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 			if (score > best) {
 				best = score;
 				slot = s;
-				chosen = w;
 			}
 		};
 		if (gunning) {
@@ -2453,7 +2476,6 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 					best = std::max(best, 1.0f);
 					maxRange = std::max(maxRange, 100.0f);
 				}
-				chosen = w;
 			}
 		} else {
 			for (const auto& [s, name] : armament(self)) {
@@ -2475,22 +2497,11 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 			bestScore = score;
 			bestTarget = known.player;
 			bestSlot = slot;
-			// The fighting distance (0x100795a0): minRange + (maxRange -
-			// minRange) f, f = optimal x max(0.2, skill) x U[0.8, 1.2].
-			float f = chosen.optimal;
-			if (chosen.type != WeaponAi::CloseCombat) {
-				f = std::max(0.2f, m_settings.skill) * f * (0.8f + random() * 0.4f);
-			}
-			const float dh = at.y - eye.y;
-			float reach = chosen.maxRange;
-			if (dh > 5 && chosen.type != WeaponAi::CloseCombat && !chosen.thrown) {
-				reach += 1.25f * dh;
-			}
-			bestPreferred = chosen.minRange + (reach - chosen.minRange) * f + (dh > 0 && !chosen.thrown ? 0.25f * dh : 0.0f);
 		}
 	}
 	if (bestScore <= 0) {
 		bot.target = -1;
+		bot.planTarget = -1;
 		return 0;
 	}
 	if (bot.target >= 0 && currentScore > 0 && bestScore <= currentScore * 1.2f) {
@@ -2500,6 +2511,7 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 			bot.weaponSlot = bestSlot;
 		}
 		pickWeapon(bot, self, players);
+		planFire(bot, self, gunning);
 		return 50;
 	}
 	if (bestTarget != bot.target) {
@@ -2508,11 +2520,61 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 		// The reaction time (0x100777a0): (1 - skill)(1.5 + U[0,1]) s.
 		const WeaponAi w = weaponAi(weaponName(self, bestSlot));
 		bot.triggerAt = m_time + (w.type == WeaponAi::CloseCombat ? 0.0f : (1 - m_settings.skill) * (1.5f + random()));
-		bot.preferredRange = bestPreferred;
 	}
 	bot.weaponSlot = bestSlot;
 	pickWeapon(bot, self, players);
+	planFire(bot, self, gunning);
 	return 50;
+}
+
+float preferredRange(const WeaponAi& w, float skill, float roll, float dh)
+{
+	float f = w.optimal;
+	if (w.type != WeaponAi::CloseCombat) {
+		f = std::max(0.2f, skill) * f * (0.8f + roll * 0.4f);
+	}
+	float reach = w.maxRange;
+	if (dh > 5 && w.type != WeaponAi::CloseCombat && !w.thrown) {
+		reach += 1.25f * dh;
+	}
+	return w.minRange + (reach - w.minRange) * f + (dh > 0 && !w.thrown ? 0.25f * dh : 0.0f);
+}
+
+// The fire plan (0x100795a0, built by BBFire's plan maker 0x1007cf10). The
+// running plan is kept while it is a fire plan (type 0xe) of this
+// behaviour, not done, for the same target (plan +0x20 against the
+// behaviour's per-bot target, +0xc[bot]), the same weapon (+0x24 against
+// +0x14[bot], the weapon the choice settled on) and the same flags
+// (+0x2c, +0x38 against bot vt+0x264); otherwise a new plan is built,
+// and with it the distance kept: minRange + (maxRange - minRange) f,
+// f = optimal x max(0.2, skill) x U[0.8, 1.2] (the weapon's +0x18 x
+// 0.01; a CloseCombat weapon, type 7, optimal alone), maxRange + 1.25 dh
+// for a target over 5 m up (not melee or thrown), + 0.25 dh for one above
+// (not thrown). So switching to the knife makes the plan, and the range,
+// the knife's.
+void BotManager::planFire(Bot& bot, const GameWorld::PlayerInfo& self, bool gunning)
+{
+	if (bot.target == bot.planTarget && bot.weaponSlot == bot.planSlot) {
+		return;
+	}
+	const auto known = std::find_if(bot.known.begin(), bot.known.end(), [&](const Known& k) { return k.player == bot.target; });
+	if (known == bot.known.end()) {
+		return;
+	}
+	std::string gun;
+	if (gunning) {
+		const auto seats = m_world.vehicleSeats(self.vehicle);
+		if (static_cast<size_t>(self.seat) < seats.size()) {
+			gun = seats[static_cast<size_t>(self.seat)].weapon;
+		}
+	} else {
+		gun = weaponName(self, bot.weaponSlot);
+	}
+	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight, 0};
+	const float dh = known->position.y + kChestHeight - eye.y;
+	bot.preferredRange = game::preferredRange(weaponAi(gun), m_settings.skill, random(), dh);
+	bot.planTarget = bot.target;
+	bot.planSlot = bot.weaponSlot;
 }
 
 // The weapon choice for the target BBFire settled on (0x10074ef0, called
@@ -4663,8 +4725,8 @@ bool BotManager::fireKeepsToOrder(const Bot& bot, const GameWorld::PlayerInfo& s
 // acc = skill against soldiers (1 - 0.5 (1 - skill) against vehicles,
 // 1 - 0.4 (1 - skill) with explosives, 1 - 0.8 (1 - skill) with them from
 // a vehicle; 1 thrown) (TriggerContinously 0x1008ecd0 -> BF2142.exe
-// 0x00892b70; its x3 for a bot not in the air at an ITAir target isn't
-// followed: a condition of the engine's 0xec slot is not decoded). The game
+// 0x00892b70; x3 for a secondary bot object that isn't ITAir or ITNaval
+// at an ITAir target: aiDeviationFactor). The game
 // hands that to the firearm (interface 0x94c0 vt+0xf4 -> its deviation
 // component's slot 0xac: the SoldierDeviationComp's +0x44, 0x00680290;
 // the SimpleDeviationComp's +0x28, 0x008a1a90), which adds it to its own
@@ -4908,7 +4970,30 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 			acc = 1 - 0.5f * (1 - s);
 		}
 		const float onIt = std::min(1.0f, (m_time - bot.targetAcquired) / 15.0f);
-		const float deviation = (1 - acc) * (1 - onIt / 2) * weapon.deviation;
+		// x3 (0x1008f03e..0x1008f043) for a bot object that isn't ITAir or
+		// ITNaval and is secondary (its engine adaptor's slot 0xec: 0 for an
+		// aiTemplate.secondary object, 0x0088d0d0's +0x19 -> vtables
+		// 0x009d5db8 / 0x009d5f30, 0x006a10f0; 1 otherwise, 0x009d60a8 /
+		// 0x009d6220, 0x006a10e0) at an ITAir target: the gunner pods and
+		// second positions shooting at aircraft.
+		const auto objectAi = [this](uint32_t vehicle, int seat, uint32_t soldier) {
+			const uint32_t root = vehicle ? vehicle : soldier;
+			const world::Object* o = m_world.objects().find(root);
+			std::string ai = o && o->objectTemplate() ? aiTemplateOf(o->objectTemplate()->name()) : std::string();
+			if (vehicle && seat > 0) {
+				const std::vector<GameWorld::SeatLayout> seats = m_world.vehicleSeats(vehicle);
+				if (static_cast<size_t>(seat) < seats.size()) {
+					if (std::string seatAi = aiTemplateOf(seats[static_cast<size_t>(seat)].name); !seatAi.empty()) {
+						ai = seatAi;
+					}
+				}
+			}
+			return ai;
+		};
+		const std::string botAi = objectAi(self.vehicle, self.seat, self.soldier);
+		const std::string targetAi = objectAi(target.vehicle, 0, target.soldier);
+		const float factor = aiDeviationFactor(m_settings.typeFlags(botAi), m_settings.primary(botAi), m_settings.typeFlags(targetAi));
+		const float deviation = (1 - acc) * (1 - onIt / 2) * weapon.deviation * factor;
 		// Handed to the weapon's deviation component (vt+0xf4 -> slot 0xac),
 		// which adds it to its own while the holder is an AI: the rounds
 		// spread by it through the deviation's normal numbers

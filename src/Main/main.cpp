@@ -153,6 +153,7 @@ struct Options {
 	bool host = false;           // --host: serve the local game to other clients (HostedGame.h)
 	bool playTeamGiven = false;  // --play 1|2: on a server, ask for that team (PostRemote 6/7)
 	bool walk = false;           // --walk: on a server without a window, walk and turn (the prediction's check)
+	bool spectate = false;       // --spectate: on a server, join as a spectator (the menu's SPECTATOR)
 	// --remote-actions "<s>:<op> ...": on a server without a window, the
 	// inputs from that second of the round on (crouch, prone, stand, fire,
 	// hold (stop firing), reload, forward, stop, turn:<deg a tick>,
@@ -386,6 +387,8 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.host = true;
 		} else if (arg == "--walk") {
 			options.walk = true;
+		} else if (arg == "--spectate") {
+			options.spectate = true;
 		} else if (arg == "--maps" && hasValue) {
 			options.maps = argv[++i];
 		} else if (arg == "--time-limit" && hasValue) {
@@ -1680,6 +1683,8 @@ struct Session {
 	int roundsOnMap = 0;
 	bool nextMap = false; // the round ended: the playlist goes on
 	bool joinSpawn = false; // --play on a server: ask to spawn once in the game
+	bool joinSpectate = false; // --spectate on a server: Logic.readyToPlay(true) once in the game
+	bool spectating = false;   // the server said our player spectates (JoinAsSpectator back)
 	int joinTeam = 0;       // --play 1|2 on a server: the team asked for first
 	// A game on a server (--connect, or the menu's join): the connection
 	// and the replicated world, for as long as it lasts.
@@ -3217,7 +3222,8 @@ int runGame(Options& options, Session& session)
 		}
 		options.bots = 0;     // the server's players
 		// --play: ask to spawn (the first kit, any point) once in the game.
-		session.joinSpawn = options.playTeam != 0;
+		session.joinSpawn = options.playTeam != 0 && !options.spectate;
+		session.joinSpectate = options.spectate;
 		session.joinTeam = options.playTeamGiven ? options.playTeam : 0;
 		options.playTeam = 0; // our soldier is the server's
 		gameLogic.mapSize = options.mapSize;
@@ -4393,8 +4399,19 @@ int runGame(Options& options, Session& session)
 		// FreeCam.* (the HUD manager's slots 0x130 / 0x134, 0x00752050 /
 		// 0x00752150): the next player to follow, the free and following
 		// cameras swapped.
-		bindMethod(console, "FreeCam.togglePlayer", ConsoleAccess::Anyone, [&playerCamera](bool) { playerCamera.nextPlayer(); });
-		bindMethod(console, "FreeCam.toggleCamera", ConsoleAccess::Anyone, [&playerCamera] { playerCamera.spectatorAction(); });
+		// For a spectator on a server each change goes up as JoinAsSpectator
+		// (kind 6 with the player followed; the new mode).
+		bindMethod(console, "FreeCam.togglePlayer", ConsoleAccess::Anyone, [&playerCamera, &session](bool) {
+			playerCamera.nextPlayer();
+			if (session.client && playerCamera.spectator) {
+				session.client->spectatorCamera(net::JoinAsSpectatorInfo::kCameraFollow, playerCamera.followedPlayer());
+			}
+		});
+		bindMethod(console, "FreeCam.toggleCamera", ConsoleAccess::Anyone, [&playerCamera, &session] {
+			if (const int mode = playerCamera.toggleSpectatorCamera(); mode != 0 && session.client) {
+				session.client->spectatorCamera(mode, playerCamera.followedPlayer());
+			}
+		});
 		if (session.admin) {
 			// A hosted or local game's own sv.* camera rules.
 			playerCamera.allowExternalViews = session.admin->settings.allowExternalViews;
@@ -5541,6 +5558,18 @@ int runGame(Options& options, Session& session)
 					++it;
 				}
 			}
+			if (session.joinSpectate && client.world().gameState() == 1 && client.world().localPlayer() >= 0) {
+				// The menu's SPECTATOR (Logic.readyToPlay(true), 0x0046c780).
+				session.joinSpectate = false;
+				client.joinAsSpectator();
+			}
+			if (const net::RemotePlayer* me = client.world().player(client.world().localPlayer())) {
+				if (me->spectator != session.spectating) {
+					session.spectating = me->spectator;
+					std::printf("%s\n", me->spectator ? "spectating" : "no longer spectating");
+				}
+				playerCamera.spectator = me->spectator;
+			}
 			if (session.joinSpawn && client.world().gameState() == 1 && client.world().localPlayer() >= 0) {
 				session.joinSpawn = false;
 				const net::RemotePlayer* me = client.world().player(client.world().localPlayer());
@@ -5880,7 +5909,21 @@ int runGame(Options& options, Session& session)
 				return;
 			}
 			// JOIN GAME: on to the next map without waiting out sv.endDelay.
-			endOfRoundBindings.onReadyToPlay = [&](bool) { sinceEnd = std::max(sinceEnd, kEndDelay); };
+			// SPECTATOR (readyToPlay(true): the host's event 0x10 -> SwiffHost
+			// slot 0x3c0, 0x0046c780): JoinAsSpectator to the server; a game
+			// of our own runs the server's handler (0x005142a0) itself.
+			endOfRoundBindings.onReadyToPlay = [&](bool asSpectator) {
+				sinceEnd = std::max(sinceEnd, kEndDelay);
+				if (!asSpectator) {
+					return;
+				}
+				if (session.client) {
+					session.client->joinAsSpectator();
+				} else if (session.admin && !session.admin->settings.ranked && session.admin->settings.allowSpectators) {
+					round.setSpectator(round.localPlayer(), true);
+					playerCamera.spectator = true;
+				}
+			};
 			showMenu = false;
 		};
 		const size_t before = objects.objects().size();

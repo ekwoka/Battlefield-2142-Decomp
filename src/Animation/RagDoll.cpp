@@ -295,7 +295,8 @@ bool RagDollTemplate::execute(const std::string& line, std::string* include, std
 			{"ragdoll_legpointforwardangle", &settings.legPointForwardAngle},
 			{"ragdoll_legpointforwardfactor", &settings.legPointForwardFactor},
 			{"rd_expforcemod", &settings.expForceMod}, {"rd_dieforce", &settings.dieForce},
-			{"rd_dieinvehicleforce", &settings.dieInVehicleForce},
+			{"rd_dieinvehicleforce", &settings.dieInVehicleForce}, {"rd_hitforce", &settings.hitForce},
+			{"rd_hitup", &settings.hitUp},
 			{"ragdoll_clientmaxupdatetime", &settings.clientMaxUpdateTime},
 			{"ragdoll_net_interpolate", &settings.netInterpolate}};
 		for (const Var& v : floats) {

@@ -1792,7 +1792,9 @@ void GameWorld::fire(const Player& player, float aimPitch)
 	Projectile p;
 	p.origin = body.position + physics::Vec3 {0, 0.6f, 0} + straight * 0.5f;
 	p.position = p.origin;
-	p.velocity = body.velocity + direction * player.weapon->settings().velocity;
+	// A thrown round at its throw's power (0x005e5720: 1, or the soft
+	// throw's hold), plus the thrower's velocity.
+	p.velocity = body.velocity + direction * (player.weapon->settings().velocity * player.weapon->throwPower());
 	p.settings = player.projectile;
 	p.timeLeft = player.projectile->timeToLive.sample(m_random);
 	p.shooter = player.object;
@@ -2922,8 +2924,15 @@ void GameWorld::stepProjectiles(float seconds)
 				if (Player* downed = downedPlayer(hitObject)) {
 					shockDowned(*downed, *p.settings, amount, hit.material, p.player);
 				} else {
+					Player* victim = hitObject == hitSoldier ? soldierPlayer(hitObject) : nullptr;
+					if (victim && hitPoints(hitObject) > 0 && physics::lengthSquared(p.velocity) > 0) {
+						victim->armourHitNode = hitNode;
+						victim->armourHitDirection = p.velocity * (1 / std::sqrt(physics::lengthSquared(p.velocity)));
+						victim->armourHitModifier = p.settings->hitImpactModifier;
+						victim->armourHitTick = m_ticks;
+					}
 					damage(hitObject, amount, static_cast<uint32_t>(p.settings->material), hit.material, p.player);
-					if (Player* victim = hitObject == hitSoldier ? soldierPlayer(hitObject) : nullptr) {
+					if (victim) {
 						playHitReaction(*victim, hitNode, p.velocity);
 					}
 				}
@@ -3082,6 +3091,16 @@ bool GameWorld::removePlayer(int id)
 	return true;
 }
 
+bool GameWorld::setSpectator(int id, bool spectator)
+{
+	Player* player = findPlayer(id);
+	if (!player) {
+		return false;
+	}
+	player->spectator = spectator; // 0x0059b740
+	return true;
+}
+
 bool GameWorld::setPlayerTeam(int id, int team)
 {
 	Player* player = findPlayer(id);
@@ -3156,6 +3175,7 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 	info.name = player->name;
 	info.team = player->team;
 	info.ai = player->ai;
+	info.spectator = player->spectator;
 	info.gunShots = player->gunShots;
 	info.alive = player->alive;
 	info.killer = player->killer;
@@ -5350,6 +5370,32 @@ GameWorld::Player* GameWorld::downedPlayer(uint32_t object) const
 // body's velocity and the explosion's push, if any (addForce, bone -2).
 // From then on the object sits at the middle particle, unturned, and the
 // pose is relative to it.
+int ragDollHitBone(int bone)
+{
+	switch (bone) {
+	case 1: return 1;
+	case 2: case 3: return 2;
+	case 6: return 6;
+	case 7: case 8: return 7;
+	case 0xb: case 0xc: case 0x2f: return 0x2f;
+	case 0xf: return 0xf;
+	case 0x11: return 0x10;
+	case 0x1f: return 0x1f;
+	case 0x21: return 0x20;
+	default: return 0x2f;
+	}
+}
+
+physics::Vec3 ragDollHitForce(physics::Vec3 direction, float hitUp, float hitForce, float modifier)
+{
+	direction.y = std::max(0.0f, direction.y) * hitUp;
+	const float l2 = physics::lengthSquared(direction);
+	if (l2 <= 0 || hitForce == 0) {
+		return {};
+	}
+	return direction * (hitForce * modifier / std::sqrt(l2));
+}
+
 bool GameWorld::startRagDoll(Player& victim, bool thrown)
 {
 	world::Object* body = m_objects.find(victim.object);
@@ -5388,8 +5434,22 @@ bool GameWorld::startRagDoll(Player& victim, bool thrown)
 			: physics::Vec3 {};
 		if (physics::lengthSquared(push) > 0) {
 			victim.ragDoll->addForce(-2, {push.x, push.y, push.z});
+		} else if (victim.armourHitNode != -1 || physics::lengthSquared(victim.armourHitDirection) > 0) {
+			// 0x005f0f50 without a blast's push: the armour's hit direction
+			// (slot 0xe4), its up part x rd_hitUp (and none down), at
+			// rd_hitForce x the hit's modifier (slot 0xec: the round's
+			// hitImpactModifier on the tick of the hit and the next, else
+			// 1), on the hit bone's particle (ragDollHitBone), pushed again.
+			const float mod = m_ticks <= victim.armourHitTick + 1 ? victim.armourHitModifier : 1.0f;
+			const physics::Vec3 f = ragDollHitForce(victim.armourHitDirection, ragDoll->settings.hitUp,
+				ragDoll->settings.hitForce, mod);
+			if (physics::lengthSquared(f) > 0) {
+				victim.ragDoll->addForce(ragDollHitBone(victim.armourHitNode), {f.x, f.y, f.z}, true);
+			}
 		}
 	}
+	victim.armourHitNode = -1;
+	victim.armourHitDirection = {};
 	victim.ragDollForce = {};
 	victim.ragDollForceAt = -1;
 	const anim::Vec mid = victim.ragDoll->middle();
@@ -6838,7 +6898,7 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 	}
 	player.reloadWas = input.reload;
 	const bool emptyBefore = player.weapon && player.weapon->roundsInMag() <= 0 && !wasReloading;
-	const bool shot = player.weapon && player.weapon->tick(seconds, input.fire);
+	const bool shot = player.weapon && player.weapon->tick(seconds, input.fire, input.altFire); // the alternate: a soft throw
 	if (player.weapon && player.weapon->reloading() && !wasReloading) {
 		weaponSound(WeaponSoundEvent::Reload, player, player.object, player.weaponTemplate, player.body.position);
 		// The reload re-arms the weapon's fail and use messages (0x005c58a0,

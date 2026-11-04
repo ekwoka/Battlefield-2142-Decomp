@@ -225,6 +225,15 @@ enum InformationType : uint32_t {
 // is taken; else, for a root with a Mobile part that isn't ITNaval, 0.77
 // for ITGround and 0.5 for ITAir; 1 otherwise.
 float otherSeatFactor(bool driverTaken, bool rootMobile, uint32_t rootTypes);
+// The last factor on a bot's AI deviation (TriggerContinously 0x1008ecd0 ->
+// BF2142.exe 0x00892b70's param_4): 3 for a bot object that isn't ITAir,
+// isn't ITNaval and isn't primary (the engine adaptor's slot 0xec, via
+// 0x100a8c60: 0 for an aiTemplate.secondary object) at an ITAir target;
+// 1 otherwise.
+float aiDeviationFactor(uint32_t botTypes, bool botPrimary, uint32_t targetTypes);
+// The fire plan's distance kept (0x100795a0) for a weapon, with roll the
+// U[0, 1] draw and dh the target's height over the bot's eye.
+float preferredRange(const WeaponAi& w, float skill, float roll, float dh);
 // The distances of 0x100d3730 (squared): whether the bot's order is close
 // for a vehicle (see BotManager::orderClose), and `noMove` (its param_5).
 // `own`: the bot is in the vehicle.
@@ -443,6 +452,11 @@ struct BotSettings {
 	// The template's ai::InformationType flags (aiTemplate.addType,
 	// BF2142.exe 0x00882ff1 with the names of 0x0088fbd0), 0 for none.
 	uint32_t typeFlags(const std::string& aiTemplate) const;
+	// Whether an AI template's objects are primary (not aiTemplate.secondary:
+	// the engine adaptor's slot 0xec, 1 from vtables 0x009d60a8 / 0x009d6220,
+	// 0 from 0x009d5db8 / 0x009d5f30, chosen by 0x0088d0d0 from the
+	// template's +0x19). No template: primary.
+	bool primary(const std::string& aiTemplate) const;
 
 	// The pathfinding maps (aiPathfinding.createMap in AI/AIPathfinding.ai:
 	// Infantry is map 0, Vehicle map 1; aiPathfinding.setActiveMap and
@@ -604,6 +618,10 @@ public:
 	// BBChange weighs it; 0 for no such bot.
 	float seatValueFor(int player, uint32_t vehicle, int seat) const;
 	int target(int player) const; // the enemy player it fights, -1 for none
+	// The fire plan's distance kept and the carried slot it was made for
+	// (planFire); 0 / -1 for no such bot.
+	float preferredRange(int player) const;
+	int planSlot(int player) const;
 	// The equipment type whose behaviours it runs (Infantery, Tank, ...).
 	std::string equipment(int player) const;
 	// Whether it knows of an enemy (seen, or still remembered).
@@ -705,6 +723,10 @@ private:
 		float targetAcquired = 0;
 		float triggerAt = 0;      // when the trigger may first be pulled
 		float preferredRange = 0; // the fighting distance kept
+		// The fire plan's target and weapon (0x1007cf10 keeps the plan, and
+		// its distance, while both hold).
+		int planTarget = -1;
+		int planSlot = 0;
 		physics::Vec3 lastAimPoint;
 		// The aim's ballistic lead (the aim object's solver record,
 		// 0x100d9a60 -> 0x100fa6f0).
@@ -876,6 +898,7 @@ private:
 	// The weapon choice for the bot's target (0x10074ef0): sets the slot
 	// and the explosive flag.
 	void pickWeapon(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players);
+	void planFire(Bot& bot, const GameWorld::PlayerInfo& self, bool gunning);
 	// The first message of a type a bot holds from a human alive and not
 	// down (the comm's list for the type, its first entry; the sender's
 	// slots 0x84, 0x20, 0x28), null for none.

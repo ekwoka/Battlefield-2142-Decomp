@@ -159,6 +159,9 @@ public:
 	// clients sent and sends them the world.
 	void tick();
 	size_t clientCount() const;
+	// A client's spectator camera as JoinAsSpectator last set it (the mode,
+	// 0 none; the player followed, -1 none); false for no such player.
+	bool spectatorCamera(int player, int& mode, int& follow) const;
 	size_t ghostCount() const { return m_ghosts.size(); }
 	uint32_t tickCount() const { return m_tick; } // the ghost blocks' tick (the last sent)
 	// Log lines (joins, leaves, chat).
@@ -269,6 +272,10 @@ private:
 		int player = -1;
 		std::string name;
 		int team = 0;
+		// JoinAsSpectator (0x005142a0): a spectator, its camera's mode (the
+		// kinds other than 8: 1 free, 6 following) and the player followed.
+		bool spectator = false;
+		int cameraMode = 0, cameraFollow = -1;
 		enum class Stage { Connected, Loading, Database, Playing } stage = Stage::Connected;
 		std::set<uint16_t> created;              // the ghosts it was told of
 		std::map<uint16_t, std::vector<uint8_t>> sent; // each ghost's last state sent

@@ -847,7 +847,20 @@ still stands leaves by the seat's "occupant died" exit (interface
 `0x005c7790`; `0x005ed890` sets `+0x2ea`) and is posed by it from then on
 (`0x005ef250`), slumped in the seat with no ragdoll. A seat without a
 die bundle ejects the body at its exit with a ragdoll pushed forward by
-`rd_dieInVehicleForce` (100); the rewrite's bodies don't outlive the
+`rd_dieInVehicleForce` (100). A soldier killed on foot without a blast's
+push gets the hit's push instead (`0x005f0f50`): the armour's last hit
+while it had hit points (SoldierResponse `0x006c1df0` → armour slots
+0xd8 bone, 0xe0 the round's direction, 0xe8 the projectile's
+`hitImpactModifier`, GenericProjectile `+0x338`, 1 by default, 1.5–8 on
+~45 vehicle rounds, kept for the tick and the next, slot 0xec
+`0x00652120`), its up part × `rd_hitUp` (0) and none down, at
+`rd_hitForce` (9000) × the modifier on the hit bone's particle (1, 2/3→2,
+6, 7/8→7, 0xb/0xc/0x2f→0x2f, 0xf, 0x11→0x10, 0x1f, 0x21→0x20, else 0x2f),
+pushed again (`GameWorld::startRagDoll`, `ragDollHitBone`,
+`ragDollHitForce`; the hit bone is the capsule's skeleton node, taken as
+the engine's bone). The values also go to clients (the soldier
+networkable `0x00604730`, event `0x0091e39c`), which the rewrite doesn't
+send. The rewrite's bodies don't outlive the
 player's death, so that one goes at once. In a destroyed vehicle the
 occupants die and are deleted (`0x005cacf0`). The rewrite keeps the
 slumped body (`GameWorld::seatCorpse`) until the vehicle is wrecked or
@@ -897,8 +910,18 @@ in between (`FireArm::fire`). The round's start and its wait:
   is then added in that frame. Rewritten for seat guns
   (`GameWorld::seatGunOrigin`): with the flag the round starts at the
   seat's first Camera (its place at rest turned with the gun's aim about
-  the yaw bundle), along the gun's aim; Locked (one shipped gun) is left
-  out. `projectileStartPosition` is added along the frame's right, up and
+  the yaw bundle), along the gun's aim. Locked (`+0x45`, only
+  AS_TANK_Turretfirearm): at the gun's setup (`0x005f25f0`) the pose of a
+  Camera that is a direct child of the weapon's control object
+  (`0x0042b2f0`, interface 0xc4c5; its children through 0xc378 slot 0xec
+  and their `+0x38` siblings) relative to the weapon is kept (`+0xcc`), and
+  each round takes that pose times the weapon's matrix (`0x005f1a20`)
+  instead of the live camera: the camera carried by the gun, its own
+  mounts' free look not steering the round. The rewrite's origin is
+  already the camera's rest place turned with the gun, which is what
+  Locked gives; the tank's camera sits under the barrel's mounts, not
+  directly under the control object, so the scan finds none and its rounds
+  leave from the gun's own frame (a nuance not followed). `projectileStartPosition` is added along the frame's right, up and
   forward (the rewrite's 1 m ahead without one).
 - `fire.pullbackTime` (ThrownFireComp `+0x94`, ticks `+0x98`, 0.2 s by
   default; the grenades 1, the sonar 0.05): the throw waits that long
@@ -906,8 +929,20 @@ in between (`FireArm::fire`). The round's start and its wait:
   slot 36 `0x005e5a10` starts state 2, the update is slot 5). Rewritten
   (`FireArmSettings::thrown`, `FireArm::throwing`): the round is decided
   and spent on the press and leaves pull-back + launch-delay ticks later
-  (a frag grenade's 30 + 12); the soft throw (`+0x168`, alt fire with
-  fireLaunchDelaySoft) is left out.
+  (a frag grenade's 30 + 12). **The underarm (soft) throw**: with
+  `fire.altFireInput` (PIAltFire on seven throwables) the alternate press
+  (slot 13 `0x005e4d80`) starts the throw with the soft flag (`+0x178`),
+  under which the timer (`0x005e4c80`) waits; while held the power
+  (`+0x168`) is min(1, ticks held × 1/30) (`0x005e4eb0`; `+0x90` is the
+  constructor's 1/30, not a property), the arm's animation taking min(power,
+  0.99); the release clears the flag and the round leaves after the
+  pull-back and launch delay at the weapon's speed × power plus the
+  thrower's velocity (`0x005e5720`; its random spin `+0xac` × power too). A
+  normal throw's power is 1 (`0x005e4b40`). `FireArmSettings::softThrow`,
+  `FireArm::throwPower`, `GameWorld::fire`. fireLaunchDelaySoft (`+0x9c`)
+  is read only by slot 11 (`0x005e4e70`: max(fireLaunchDelay, soft) +
+  `+0xa4`, the busy time) and isn't applied; the spin and the arm's
+  animation aren't either.
 - `fire.addBarrelName` (`0x004e45a6` → `0x005d6ae0`, MultiFireComp
   `+0x94`): the gun's children of those names are its barrels
   (`0x005d6d20`), fired in turn (`+0x9c` set by default, `+0x1a8`) from
@@ -1073,11 +1108,20 @@ then player slot `0x238(8)` and event 6; else the usual exit
 (`+0x491`, slots `0x160` / `0x15c`, 1 by default; the Titans' and the pod
 arrays' 0): the position keys (actions `0x1a`..`0x1e`) move a soldier only
 between two seats that both allow it. `seatLeftRotationLimit` /
-`seatRightRotationLimit` (`+0x300` / `+0x304`): the seated soldier's
-camera (`0x005890a0`) lets the look's yaw past ±40 only while the excess
-plus the body's yaw stays within them (the AT walkers' side passengers,
-the FAVs' open seat); not rewritten (the seated soldiers' look is the
-seat's).
+`seatRightRotationLimit` (`+0x300` / `+0x304`, read through the seat
+object's interface 0xc4c4 slots 0xd8 / 0xe0): the soldier's camera
+(`0x005890a0`, the soldier's control object `+0x240` set while seated)
+clamps the head's twist (`+0x278`) to ±40 (`*0x00a68eb0`) and the pitch
+(`+0x270`) to ±85; the twist plus the tick's yaw offset (`+0x27c`,
+zeroed each tick by `0x0058a788`) may pass ±40 only while the excess plus
+the body's yaw (`+0x25c`) stays within [left, right] (the AT walkers'
+side passengers −25 / 40 and −15 / 30, the FAVs' open position −90 /
+90). Not rewritten: the rewrite's seated soldier has no look of its own
+to bound (its body and twist stay as the seat poses them,
+`GameWorld::poseSeated`; its held weapon is hidden, so an open
+position's first-person view is the seat's fixed forward), so the limits
+have nothing to act on until open positions take the soldier's look and
+weapon.
 
 **ToggleCameraComp** (template `0x005db120`; changeCameraId `+0x14` −1,
 changeCameraViewMode `+0x18` 2, startCameraId `+0x1c` −1,
@@ -1450,7 +1494,7 @@ offset easing 1 − e^(−1/15) of the way a frame and lagging 0.6 of the
 root's velocity, a metre over the terrain (the PlayerControlObject's
 camera offset and scale, slots `0xd4` / `0xd8`, aren't taken).
 **Flying free** (mode 1 unattached, `0x00615290`; with sv.allowFreeCam
-`+0x35`, a demo, or a spectator): c_PIYaw strafes and c_PIThrottle goes
+`+0x35`, a demo, or a spectator, the player's slot 0x3bc): c_PIYaw strafes and c_PIThrottle goes
 along the look at 20 m/s × the speed (cam-normal 1, cam-fast 10 with
 c_PIAltSprint or once fast and going on, cam-slow 0.1 with c_PISprint;
 `*0x00a73a2c`, `*0x00a73a20`, `*0x00a73a30`), c_PILie up and c_PICrouch
@@ -1461,7 +1505,42 @@ again, else the next teammate), and in mode 6 c_PIToggleCameraMode takes
 the next living teammate (`0x00615e00` → `0x00615ce0`: the players' order,
 the one after the followed one, else the first). `FreeCam.togglePlayer`
 and `FreeCam.toggleCamera` (the HUD manager's slots `0x130` / `0x134`,
-`0x00752050` / `0x00752150`) do the same. `PlayerCamera::spectating`.
+`0x00752050` / `0x00752150`) are a spectator's: togglePlayer takes the
+next player (`0x00615ce0`) and tells the server (JoinAsSpectator kind 6
+with that player), toggleCamera (only for a spectator) swaps flying free
+(1) and following (6, through slot 0x130) and sends the new mode. The
+follow cycle takes the living players of the camera owner's team, not
+itself and not spectators. `PlayerCamera::spectating`,
+`PlayerCamera::spectator`, `toggleSpectatorCamera`.
+
+**Spectators** (the loading / end-of-round movie's SPECTATOR:
+`Logic.readyToPlay(true)`, SwiffPlayer `0x1003dba0`, posts host event
+0x10 with "1"; the host's loop `0x0040bd90` case 0x10 calls SwiffHost
+slot 0x3c0 `0x0046c780`): the event JoinAsSpectator (0x47, vtable
+`0x0091d308`, built `0x00469550`; fields player 8 bits, spectator 1, a
+player 8, a kind 8; read `0x00514100`, written `0x00514190`) with kind 8
+goes to the server (a game of one's own runs it at once). The server's
+handler (slot 9, `0x005142a0`) acts only when it isn't ranked
+(`0x00430a00`: a gpm_cq/ti/sl/nv/ca game with GameSpyRanked and the
+ranked flag `+0x26d`) and has sv.allowSpectators (`+0x290`, refused
+while running: `0x00431210`): kind 8 sets the player's spectator flag
+(slot 0x3b8 `0x0059b740`, `+0x404`; read by slot 0x3bc) and sends the
+event to everyone (slot 0x8c), whose handler (slot 8, `0x00514260`)
+sets it too; other kinds set the player's camera (slot `0x1b4(0)` →
+slot 0x18) to that mode, kind 6 with the player followed (`+0x9c`).
+CreatePlayer carries the flag (`0x0050a7c0` `+0x40`, set by the handler
+`0x0050a8c0` with slot 0x3b8) for those who join later. The server
+doesn't otherwise treat a spectator differently (no reader of `+0x404`
+outside the slot): it never spawns because its client never asks. On the
+client the flag lets the camera fly free (above), keeps it out of the
+follow cycle and out of one of the SwiffHost's per-team player lists
+(`0x0047c7a0` → `0x00478b10`), gives it the scoreboard's spectator icon
+(`0x0074e940`, `Ingame/Scoreboard/Icons/icon_Spectator.tga`), and the
+HUD manager's update (`0x007504c0`) skips its state-1 part for it. `HostedGame` (kEvJoinAsSpectator), `GameClient::
+joinAsSpectator` / `spectatorCamera`, `RemotePlayer::spectator`,
+`GameWorld::setSpectator`; `bf2142 --connect <host> --spectate` joins as
+one. Not rewritten: following another player in a joined game (the
+joined view has no other players' frames), the scoreboard's icon.
 
 **Seats.** In a vehicle the camera is the seat's (Player::getCamera
 `0x005948e0` → the PlayerControlObject's `0x005c7cb0`): the seat's Camera
@@ -6059,7 +6138,7 @@ second.
   `0x007d6d20`) into the squad manager's store (`0x004c5720`), see
   "Squad requests, asset feedback and the commander screen's panel".
 
-Not done: the spectator's rules. The HUD's object marker
+The spectator's rules: see "Spectators" (the cameras). The HUD's object marker
 nodes (`createObjectMarkerNode`) are the AA and gunship lock-on markers;
 see "HUD nodes: transform lists, effects, markers and the map menus".
 
@@ -6426,8 +6505,12 @@ ammo refills the team's soldiers (slot `0x10c`). `GameWorld::
 stepVehicleAbility` through `applyAbility` without the battery. Left: the
 first sphere's pass over the nearby vehicles and, when the player's
 slot `0x2a0` object has `+0x48` above 0, its message (`0x005910c0` with
-`0x400` and the material); `abilityInVehicleStrengthModifier`
-(PlayerControlObject `+0x298`) is not traced to a reader.
+`0x400` and the material). `abilityInVehicleStrengthModifier` (executor
+`0x004ff6df` → the template's interface at `+0x298`, slot 0x164
+`0x0059dbc0`: template `+0x4b0`, 1 by default; getter slot 0x168
+`0x0059dbd0`; saved by `0x005caff0`) has no reader: nothing reads
+`+0x4b0` and no call of slot 0x168 goes through that interface. Nothing to
+rewrite.
 
 **Unlock abilities.** `ability.setMaterialDamageMod <material> <mod>`
 (`0x0054eadc` → the Ability's slot `0x94`) scales the damage a projectile
@@ -6530,6 +6613,28 @@ Vehicles take damage through their armour settings:
   object (the sentry drone) neither turns nor fires above level 1. Only
   ActiveDefense ammo (`0x005d9560`) and camouflage (`0x005d9030`,
   `0x005d8ec0`) drain faster, × (level + 1).
+- **Active defence (ADS; not rewritten):** `ads_land` (ammo.protectionRadius
+  6: the APCs, tanks, heavy mechs) and `ads_air` (10: the gunships, the AT
+  walkers), GenericFireArms on PIFlareFire at 12 rounds a minute, one
+  round, a 12 s reload without a player, ActiveDefenseAmmoComp with
+  ammo.detonateMaterial 2142 (template `+0x68`, executor `0x004e7720`)
+  and protectionRadius (`+0x6c`, `0x004e75e5`). While the weapon's fire
+  state is 4 (`0x005c14d0`: one round's interval, 5 s) the component's
+  update (`0x005d97f0`) sets the shield {material, min(protectionRadius,
+  the root's slot 0x90 − 0.1)} on the vehicle's root (slot 0x118; cleared
+  with 0 otherwise; "ads-draw-sphere" draws it). A projectile whose
+  template has activeDefenseEnabled (`+0x336`; 25 shipped: the AA, AV and
+  TV-guided missiles and some guns' rounds) meeting an object with a
+  shield (slot 0x11c) that isn't its firer's root (`0x006c07a0`) is tested
+  as a segment from its last position against the sphere about the root
+  (`0x006bf220`: entering from outside, the entry point and inward
+  normal); on entry it is flagged (`+0x268`) and the contact recorded as
+  its collision at that point with material 2142 (`0x006c0430`), so it
+  detonates on the shield and never reaches the hull. The ammo's
+  can-fire test (`0x005d9560`) defers to the vehicle's slot 0x14c; EMP
+  drains it × (level + 1). The rewrite has no PIFlareFire seat weapons,
+  so none of this is done (about 200 lines: the input, the shield on the
+  body, the projectiles' sphere test before the mesh test, the effect).
 - **Critical damage:** below `armor.criticalDamage` a vehicle burns down at
   `hpLostWhileCriticalDamage` a second (FAV: 18 below 151, out in 5.6 s from
   100).
@@ -8572,7 +8677,20 @@ way. (The call site of `0x005eaca0` wasn't found: no virtual call through
 slot `0x1c` in `0x00400000`–`0x00900000` pushes its ten arguments, the
 only ones with ten or more, `0x00745945` and `0x0081749f`, being the
 menus' and the network's; its last two arguments
-are read as the damage left and the round's damage.)
+are read as the damage left and the round's damage.) The component's
+pointer is cached only by the projectile's `0x005b2b20` (interface
+0xc561 at `+0x1ac`, `0x005b2b95`); nothing else reads `+0x1ac` or asks
+for 0xc561, so `0x005eaca0` (slot 8 of `0x00975884`, its only reader of
+`penetrate.allowSolidPenetration` `+0xc` and `allowLiquidPenetration`
+`+0xd`, both 1 by default, executors `0x004f2c86` / `0x004f2db8`) looks
+uncalled in 1.51. Its rules: no object hit and not water, none; without
+overrideNeverPenetrate (material `+0x60`) water (`+0x68`) without the
+liquid flag, or a solid without the solid flag, stops the round, water
+with the liquid flag passes with no loss; then the loss above, the way
+out jittered by penetrationDeviation (`+0x58`) × (0.5 − U) on the face's
+axes. The rewrite's shield penetration is kept as it is (it follows the
+rules; whether retail rounds pass the forcefields at all is a game test
+away), and the two flags aren't applied.
 
 **The guns' seats.** The six gun hubs (eu_groundcanone3*_hub and
 eu_aacannon*_hub, the as_ ones alike) are PlayerControlObjects with
@@ -8940,7 +9058,17 @@ The urgencies:
   The current target stays unless another scores 1.2 times more.
 - **Distance kept:** the bot stays within [minRange, 1.1 × preferred],
   where preferred = minRange + (maxRange − minRange) × optimal ×
-  max(0.2, skill) × U[0.8, 1.2] (0x100795a0).
+  max(0.2, skill) × U[0.8, 1.2] (0x100795a0; a CloseCombat weapon takes
+  optimal alone; maxRange + 1.25 dh for a target over 5 m up, + 0.25 dh
+  for one above, neither for thrown weapons). It belongs to the fire plan:
+  BBFire's plan maker (0x1007cf10) keeps the running plan only while it is
+  this behaviour's fire plan (type 0xe), not done, for the same target
+  (plan `+0x20`), the same weapon (`+0x24` against the behaviour's per-bot
+  weapon, the one the choice settled on) and flags (`+0x2c`, `+0x38`
+  against bot slot 0x264); anything else builds a new plan and a new
+  distance. So a switch to the knife makes the distance the knife's (it
+  used to keep the rifle's and stab from 1.9 m against the knife's
+  1.375 m reach). `BotManager::planFire`, `game::preferredRange`.
 - **Firing pose:** taken when standing still, at most once a second, with
   no fire for 0.8 s after (Trigger 0x1008f1e0).
 - **Tap or hold** (0x100777a0): TriggerContinously (0x1008ecd0, held while
@@ -9066,9 +9194,17 @@ The urgencies:
   (1 − skill) from a vehicle, 1 for a thrown weapon. The shipped
   weaponTemplates set no `deviation`, so it is the template's 14
   (0x0088a7b0): 8.4 at skill 0.4, 4.2 after 15 s on the target, that × 0.01
-  rad on each axis. (The ×3 the call takes for a bot that isn't ITAir or
-  ITNaval at an ITAir target is not followed: a further condition, the
-  engine's slot 0xec on the bot, is not decoded.) The value goes to the firearm (interface
+  rad on each axis. × 3 (0x1008f03e) for a bot object that isn't ITAir or
+  ITNaval and isn't primary at an ITAir target: the object's engine
+  adaptor (AI object `+0x28`, 0x100a8c60 → its slot 0xec) is one of four
+  classes 0x0088d0d0 picks from the aiTemplate (`+0x19`, set by
+  `aiTemplate.secondary`, executor vtable 0x009d1e80 slot 23 0x00882eef;
+  `+0x18` commonKnowledge): secondary templates get 0x009d5db8 /
+  0x009d5f30, whose slot 0xec is 0x006a10f0 (0), the others 0x009d60a8 /
+  0x009d6220 with 0x006a10e0 (1). So the APCs', tanks' and walkers'
+  second positions and pod cannons (`aiTemplate.secondary 1`) spread three
+  times as wide at aircraft; drivers and soldiers don't
+  (`game::aiDeviationFactor`, `BotSettings::primary`). The value goes to the firearm (interface
   `0x94c0` vt+0xf4, 0x005c4cf0 → its deviation component's slot 0xac:
   SoldierDeviationComp `+0x44`, 0x00680290; SimpleDeviationComp `+0x28`,
   0x008a1a90), which adds it to its own deviation while the holder is an

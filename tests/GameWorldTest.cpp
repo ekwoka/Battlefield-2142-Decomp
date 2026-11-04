@@ -2891,3 +2891,25 @@ TEST(GameWorld_SeatGunBarrelsAndCameraFrame)
 	seats = again.vehicleSeats(id);
 	CHECK(seats.size() == 1 && seats[0].fireInCameraDof);
 }
+
+// The death ragdoll's hit push (0x005f0f50): the hit bone's particle, the
+// direction levelled by rd_hitUp 0, rd_hitForce (9000) x the round's
+// hitImpactModifier (template +0x338, 1 by default) while it is fresh.
+TEST(GameWorld_RagDollHitPush)
+{
+	using dice::hfe::game::ragDollHitBone;
+	using dice::hfe::game::ragDollHitForce;
+	CHECK(ragDollHitBone(3) == 2 && ragDollHitBone(8) == 7 && ragDollHitBone(0x11) == 0x10 && ragDollHitBone(0x21) == 0x20);
+	CHECK(ragDollHitBone(0xc) == 0x2f && ragDollHitBone(-1) == 0x2f && ragDollHitBone(40) == 0x2f && ragDollHitBone(6) == 6);
+	const dice::hfe::physics::Vec3 f = ragDollHitForce({0.6f, 0.8f, 0}, 0, 9000, 3);
+	CHECK(std::fabs(f.x - 27000) < 1 && f.y == 0 && f.z == 0); // levelled, x3
+	const dice::hfe::physics::Vec3 down = ragDollHitForce({0, -1, 0}, 1, 9000, 1);
+	CHECK(dice::hfe::physics::lengthSquared(down) == 0); // straight down: nothing left
+	CHECK(dice::hfe::physics::lengthSquared(ragDollHitForce({1, 0, 0}, 0, 0, 1)) == 0);
+	dice::hfe::world::ObjectTemplateManager templates;
+	templates.registerType(9, "GenericProjectile");
+	dice::hfe::world::ObjectTemplate* round = templates.create("GenericProjectile", "ifv_round");
+	CHECK(dice::hfe::game::ProjectileSettings::fromTemplate(*round).hitImpactModifier == 1);
+	round->settings()["hitImpactModifier"] = "4";
+	CHECK(dice::hfe::game::ProjectileSettings::fromTemplate(*round).hitImpactModifier == 4);
+}

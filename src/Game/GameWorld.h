@@ -66,6 +66,14 @@ namespace dice::hfe::game {
 
 class CombatAreas;
 
+// The death ragdoll's hit push (0x005f0f50): the particle bone for the
+// armour's hit bone (1, 2/3 -> 2, 6, 7/8 -> 7, 0xb/0xc/0x2f -> 0x2f, 0xf,
+// 0x11 -> 0x10, 0x1f, 0x21 -> 0x20, anything else 0x2f), and the push:
+// the hit's direction with its up part x rd_hitUp (none down), at
+// rd_hitForce x the modifier (zero for no direction or no force).
+int ragDollHitBone(int bone);
+physics::Vec3 ragDollHitForce(physics::Vec3 direction, float hitUp, float hitForce, float modifier);
+
 // The game logic's state (slot 0x164); spawners treat team changes before
 // the round starts as the round's starting teams.
 enum class RoundState { BeforeStart = 3, Playing = 1 };
@@ -363,6 +371,12 @@ public:
 	// leaves its squad and the command, and the scripts hear
 	// PlayerChangeTeams. False for a living player or a team other than 1, 2.
 	bool setPlayerTeam(int player, int team);
+	// A spectator (player slot 0x3b8, +0x404; JoinAsSpectator 0x47): the
+	// followed-player cycle skips it (0x00615ce0), it may fly the free
+	// camera (0x00615290), the scoreboard leaves it out of the teams'
+	// lists (0x0047c7a0) and shows the spectator icon (0x0074e940). False
+	// for no such player.
+	bool setSpectator(int player, bool spectator);
 	// A player leaving the game (the game server's destroyPlayer,
 	// 0x004acfb0, for a client that disconnected): a living soldier dies
 	// where it is (game logic slot 0x54, 0x004c1d20: the death 0x004cd390,
@@ -380,6 +394,7 @@ public:
 		std::string name;
 		int team = 0;
 		bool ai = false;
+		bool spectator = false; // player +0x404 (slots 0x3b8 / 0x3bc): setSpectator
 		bool alive = false;
 		uint32_t soldier = 0, vehicle = 0, kit = 0, weapon = 0;
 		// What the host module's pmgr_p_get hands the scripts (0x0056ae00's
@@ -1767,6 +1782,7 @@ private:
 		bool present = true; // false once removed: the slot is free
 		std::string name;
 		bool ai = false;
+		bool spectator = false; // +0x404
 		bool alive = false;
 		// The stats' rank (stats +0x20, -1 from 0x005a5fc0 until the scripts
 		// set it: stats.py gives 0 on PlayerConnect, rank.py the stats
@@ -1901,6 +1917,14 @@ private:
 		// 0x005f0a00).
 		physics::Vec3 hitPush;
 		double hitPushUntil = -1;
+		// The armour's last hit while it had hit points (SoldierResponse
+		// 0x006c1df0 -> armour slots 0xd8 / 0xe0 / 0xe8: the bone +0x44, the
+		// round's direction +0x48, the projectile's hitImpactModifier +0x290
+		// until the tick after, +0x294; slot 0xec 0x00652120 gives 1 later).
+		int armourHitNode = -1;
+		physics::Vec3 armourHitDirection;
+		float armourHitModifier = 1;
+		uint64_t armourHitTick = 0;
 		// The other material of the soldier's last collision event (its
 		// handler 0x00586a90 keeps it at +0x32c, -1 at first): the ground's
 		// or an object's face. The footstep set (0x007fda00 -> 0x007fd840)

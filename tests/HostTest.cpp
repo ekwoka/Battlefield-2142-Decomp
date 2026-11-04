@@ -12,7 +12,9 @@
 #include "Main/Prediction.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "Physics/MaterialManager.h"
+#include "Net/BitStream.h"
 #include "Net/ContentCheck.h"
+#include "Net/GameProtocol.h"
 #include "Net/GameClient.h"
 #include "Net/GameServer.h"
 #include "Net/ServerQuery.h"
@@ -1641,4 +1643,102 @@ TEST(NetHost_LoadCompleteAfterLoadAndKeepAlive)
 	CHECK(pumpUntil([&] { client.update(); host(); },
 		[&] { return client.world().localPlayer() >= 0 && client.world().roundStarted(); }, 6000));
 	CHECK(client.state() == net::GameClient::State::Connected);
+}
+
+// Joining as a spectator (the menu's SPECTATOR, Logic.readyToPlay(true)):
+// JoinAsSpectator (0x47) kind 8 goes up; a server that isn't ranked and
+// has sv.allowSpectators (0x005142a0) marks the player and sends the event
+// on to every client (0x00514260); later joiners have it in CreatePlayer
+// (0x0050a7c0's +0x40). The spectator's camera changes (kind 6 with the
+// player followed) set its camera on the server. Without
+// sv.allowSpectators nothing changes.
+TEST(NetHost_JoinAsSpectator)
+{
+	dice::hfe::world::ObjectTemplateManager templates;
+	dice::hfe::world::ObjectManager objects;
+	dice::hfe::game::GameWorld round(templates, objects);
+	dice::hfe::game::GameLogic logic;
+	round.startRound();
+	logic.startRound();
+	net::ServerSettings sv;
+	host::HostSetup setup;
+	setup.level = "Camp_Gibraltar";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	setup.settings = &sv;
+	host::HostedGame hosted(round, logic, templates, setup);
+	CHECK(hosted.start());
+	const int bot = round.addPlayer("Bot1", 1, true);
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Watcher";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	const auto step = [&] {
+		client.update();
+		hosted.tick();
+		round.tick(1.0f / 30);
+	};
+	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }));
+	const int me = client.world().localPlayer();
+	dice::hfe::game::GameWorld::PlayerInfo info;
+	// Refused: sv.allowSpectators is off by default.
+	client.joinAsSpectator();
+	for (int i = 0; i < 40; ++i) {
+		step();
+		std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	}
+	CHECK(round.playerInfo(me, info) && !info.spectator);
+	CHECK(client.world().player(me) && !client.world().player(me)->spectator);
+	// Allowed (and not ranked).
+	sv.allowSpectators = true;
+	client.joinAsSpectator();
+	CHECK(pumpUntil(step, [&] { return client.world().player(me) && client.world().player(me)->spectator; }));
+	CHECK(round.playerInfo(me, info) && info.spectator && !info.alive);
+	// The camera: following the bot (FreeCam.togglePlayer's kind 6).
+	client.spectatorCamera(net::JoinAsSpectatorInfo::kCameraFollow, bot);
+	int mode = 0, follow = -1;
+	CHECK(pumpUntil(step, [&] { return hosted.spectatorCamera(me, mode, follow) && mode == 6; }));
+	CHECK(mode == 6 && follow == bot);
+	CHECK(round.playerInfo(me, info) && info.spectator); // not a join: the flag stays
+	// A second client hears of the spectator in its CreatePlayer.
+	net::GameClient second;
+	options.playerName = "Later";
+	CHECK(second.connect("127.0.0.1", hosted.gamePort(), options));
+	const auto both = [&] {
+		client.update();
+		second.update();
+		hosted.tick();
+		round.tick(1.0f / 30);
+	};
+	CHECK(pumpUntil(both, [&] {
+		const net::RemotePlayer* p = second.world().player(me);
+		return second.world().localPlayer() >= 0 && p && p->spectator;
+	}));
+	const net::RemotePlayer* other = second.world().player(bot);
+	CHECK(other && !other->spectator);
+	// A ranked server refuses (0x00430a00).
+	sv.ranked = true;
+	second.joinAsSpectator();
+	for (int i = 0; i < 40; ++i) {
+		both();
+		std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	}
+	CHECK(round.playerInfo(second.world().localPlayer(), info) && !info.spectator);
+	// The wire: 8 + 1 + 8 + 8 bits after the type.
+	net::JoinAsSpectatorInfo j;
+	j.player = 5;
+	j.follow = -1;
+	const net::GameEvent e = net::makeJoinAsSpectator(j);
+	net::BitWriter w;
+	CHECK(net::writeGameEvent(w, e));
+	net::BitReader r(w.data().data(), w.data().size());
+	r.limit(w.bits());
+	net::GameEvent back;
+	CHECK(net::readGameEvent(r, back));
+	net::JoinAsSpectatorInfo parsed;
+	CHECK(net::parseJoinAsSpectator(back, parsed) && parsed.player == 5 && parsed.spectator && parsed.follow == -1
+		&& parsed.kind == 8);
+	second.disconnect();
+	client.disconnect();
 }

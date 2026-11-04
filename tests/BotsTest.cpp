@@ -3360,3 +3360,90 @@ TEST(Bots_GunFrameIsWhereTheRoundStarts)
 		CHECK(std::fabs(std::remainder(std::atan2(local.x, local.z) * 57.29578f - yaw, 360.0f)) < 1.0f);
 	}
 }
+
+// The x3 on the AI deviation (TriggerContinously 0x1008ecd0's last
+// argument to BF2142.exe 0x00892b70): a bot object that isn't ITAir or
+// ITNaval and isn't primary (aiTemplate.secondary 1: the engine adaptor's
+// slot 0xec is 0, vtables 0x009d5db8 / 0x009d5f30) at an ITAir target.
+TEST(Bots_DeviationTripledForSecondaryAtAircraft)
+{
+	using game::aiDeviationFactor;
+	const uint32_t ground = game::kITUnit | game::kITGround, air = game::kITAir | game::kITUnit;
+	CHECK(aiDeviationFactor(ground, false, air) == 3);
+	CHECK(aiDeviationFactor(ground, true, air) == 1);              // a primary object: a driver, a soldier
+	CHECK(aiDeviationFactor(ground, false, ground) == 1);          // not at an aircraft
+	CHECK(aiDeviationFactor(air, false, air) == 1);                // from the air
+	CHECK(aiDeviationFactor(ground | game::kITNaval, false, air) == 1);
+	CHECK(aiDeviationFactor(0, false, air) == 3);                  // no types (a pod's ITUnit-less template)
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	std::string out;
+	for (const char* line : {"aiTemplate.create AS_APC_Podcannon1", "aiTemplate.addType ITUnit", "aiTemplate.addType ITGround",
+			 "aiTemplate.secondary 1", "aiTemplate.create AS_APC", "aiTemplate.addType ITGround"}) {
+		console.execute(line, out);
+	}
+	CHECK(!settings.primary("AS_APC_Podcannon1") && settings.primary("as_apc") && settings.primary("no_such_template"));
+}
+
+// The distance kept is the fire plan's (0x100795a0), made again when the
+// weapon the choice settles on changes (0x1007cf10 keeps a plan only for
+// the same target and weapon): a bot that switches to the knife keeps the
+// knife's range, not the rifle's.
+TEST(Bots_PreferredRangeFollowsTheWeapon)
+{
+	game::WeaponAi knife;
+	knife.type = game::WeaponAi::CloseCombat;
+	knife.maxRange = 1.375f;
+	knife.optimal = 0.5f;
+	CHECK(near(game::preferredRange(knife, 0.4f, 0.9f, -0.3f), 0.6875f)); // optimal alone for melee
+	game::WeaponAi rifle;
+	rifle.maxRange = 72;
+	rifle.optimal = 0.35f;
+	CHECK(near(game::preferredRange(rifle, 0.4f, 0.5f, 0), 72 * 0.35f * 0.4f)); // x max(0.2, skill) x U[0.8, 1.2]
+	CHECK(near(game::preferredRange(rifle, 0.1f, 0.5f, 0), 72 * 0.35f * 0.2f));
+	CHECK(near(game::preferredRange(rifle, 0.4f, 0.5f, 8), (72 + 1.25f * 8) * 0.35f * 0.4f + 0.25f * 8));
+
+	Field field;
+	world::ObjectTemplate* blade = field.templates.create("GenericFireArm", "test_knife");
+	blade->settings()["itemIndex"] = "1";
+	blade->settings()["aiTemplate"] = "test_knife";
+	world::ObjectTemplate* kit = field.templates.create("Kit", "test_kit");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	kit->children().push_back({"test_knife", {}, {}});
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	std::string out;
+	for (const char* line : {"weaponTemplate.create eu_ar_rifle", "weaponTemplate.maxRange 72",
+			 "weaponTemplate.setStrength Infantry 5", "weaponTemplate.create test_knife", "weaponTemplate.weaponType CloseCombat",
+			 "weaponTemplate.maxRange 1.375", "weaponTemplate.optimalRangePercentage 50", "weaponTemplate.setStrength Infantry 1"}) {
+		console.execute(line, out);
+	}
+	game::BotManager bots(*field.world, settings);
+	const int bot = field.world->addPlayer("Bot", 2, true);
+	field.world->setKit(bot, "test_kit", "us_light_soldier");
+	field.world->spawnSoldier(bot);
+	field.move(bot, 0, 0);
+	const int enemy = field.soldier(1, false, 0, 30);
+	bool rifleFirst = false;
+	for (int tick = 0; tick < 30 * 10 && !rifleFirst; ++tick) {
+		field.move(enemy, 0, 30);
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+		rifleFirst = bots.planSlot(bot) == 3;
+	}
+	CHECK(rifleFirst);
+	CHECK(bots.preferredRange(bot) > 5);
+	// Close by, the choice takes the knife (soldier to soldier within 3 m):
+	// the plan, and the distance, are made again for it.
+	bool knifeNext = false;
+	for (int tick = 0; tick < 30 * 5 && !knifeNext; ++tick) {
+		game::GameWorld::PlayerInfo self;
+		field.world->playerInfo(bot, self);
+		field.move(enemy, self.position.x, self.position.z + 1.5f);
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+		knifeNext = bots.planSlot(bot) == 1;
+	}
+	CHECK(knifeNext);
+	CHECK(bots.preferredRange(bot) <= 1.375f);
+}

@@ -122,6 +122,9 @@ struct RemotePlayer {
 	bool local = false;
 	bool ai = false;
 	int32_t profileId = 0;
+	// A spectator (player +0x404): CreatePlayer's flag (+0x40) or
+	// JoinAsSpectator from the server (0x00514260).
+	bool spectator = false;
 	bool alive = false;
 	uint16_t soldierGhost = 0; // the soldier of HandlePickup / HandleDrop (or the control object)
 	uint16_t kitGhost = 0;     // the kit HandlePickup gave it (0 after HandleDrop)

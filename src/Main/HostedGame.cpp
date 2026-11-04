@@ -250,6 +250,18 @@ bool HostedGame::start()
 	return true;
 }
 
+bool HostedGame::spectatorCamera(int player, int& mode, int& follow) const
+{
+	for (const auto& [id, client] : m_clients) {
+		if (client.player == player) {
+			mode = client.cameraMode;
+			follow = client.cameraFollow;
+			return true;
+		}
+	}
+	return false;
+}
+
 size_t HostedGame::clientCount() const { return m_clients.size(); }
 
 bool HostedGame::kickPlayer(int player, bool ban, uint32_t reason)
@@ -948,6 +960,7 @@ net::GameEvent HostedGame::createPlayerEvent(const game::GameWorld::PlayerInfo& 
 	info.ai = player.ai;
 	info.object = ghost;
 	info.name = nameOf(player.id);
+	info.flag2 = player.spectator; // 0x0050a7c0: player slot 0x3bc
 	return net::makeCreatePlayer(info);
 }
 
@@ -1353,6 +1366,40 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			return;
 		}
 		spotted(spot, player);
+		return;
+	}
+	case net::kEvJoinAsSpectator: { // 0x005142a0
+		net::JoinAsSpectatorInfo info;
+		if (!net::parseJoinAsSpectator(e, info) || info.player != player) {
+			return;
+		}
+		// Only on a server that isn't ranked (0x00430a00) and allows
+		// spectators (sv.allowSpectators, +0x290); a game without settings
+		// has the default, off.
+		const net::ServerSettings* sv = m_setup.settings;
+		if (!sv || sv->ranked || !sv->allowSpectators) {
+			if (onLog) {
+				onLog("player " + std::to_string(player) + " may not spectate here");
+			}
+			return;
+		}
+		if (info.kind == net::JoinAsSpectatorInfo::kJoinSpectator) {
+			// The player's slot 0x3b8, then the event to everyone (game
+			// server slot 0x8c), whose handler (0x00514260) marks it too.
+			m_round->setSpectator(player, info.spectator);
+			client.spectator = info.spectator;
+			sendToPlaying(net::makeJoinAsSpectator(info));
+			if (onLog) {
+				onLog("player " + std::to_string(player) + (info.spectator ? " spectates" : " plays"));
+			}
+		} else {
+			// The spectator's camera (player slot 0x1b4(0) -> slot 0x18):
+			// the mode, and with 6 the player followed (+0x9c).
+			client.cameraMode = info.kind;
+			if (info.kind == net::JoinAsSpectatorInfo::kCameraFollow && info.follow != -1) {
+				client.cameraFollow = info.follow;
+			}
+		}
 		return;
 	}
 	case net::kEvCommanderCam:

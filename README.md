@@ -182,6 +182,8 @@ build/native/src/Main/bf2142 --game "source/Battlefield 2142" \
 # +joinServer is the original's spelling of --connect)
 #   bf2142 --game "source/Battlefield 2142" +level Camp_Gibraltar +gameMode gpm_cq --host --simulate 600
 #   bf2142 --game "source/Battlefield 2142" --connect 127.0.0.1 --name Joiner --play
+# (--spectate joins as a spectator, the menu's SPECTATOR: the host needs
+# sv.allowSpectators 1 in its settings, +config <file>, and not ranked)
 # (the joined game's HUD is the server's: its tickets, players, control
 # points and spawn groups; --scoreboard and --spawn-screen work joined too,
 # e.g. --connect 127.0.0.1 --play 2 --spawn-screen --screenshot out.png;

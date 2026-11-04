@@ -71,6 +71,16 @@ public:
 	void spectatorAction();
 	// FreeCam.togglePlayer: the next living teammate to follow (0x00615ce0).
 	void nextPlayer();
+	// The local player is a spectator (player slot 0x3bc; JoinAsSpectator):
+	// it flies the free camera whatever sv.allowFreeCam says (0x00615290's
+	// test), starting there rather than on a death camera, and
+	// FreeCam.toggleCamera swaps flying free and following.
+	bool spectator = false;
+	// FreeCam.toggleCamera (0x00752150): only for a spectator, the camera
+	// to following (mode 6, the next player: slot 0x130) from flying free,
+	// or back to flying free (mode 1). Returns the new mode (1 or 6; 0 when
+	// not a spectator) for the server (JoinAsSpectator's kind).
+	int toggleSpectatorCamera();
 	// The keys for the free camera (c_PIYaw, c_PIThrottle, the mouse, c_PILie
 	// up, c_PICrouch down, the sprints' speeds).
 	void setFreeInput(const game::camera::FreeInput& input) { m_freeInput = input; }

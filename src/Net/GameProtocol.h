@@ -262,10 +262,35 @@ struct CreatePlayerInfo { // kEvCreatePlayer (0x0050a4c0, handled 0x0050a8c0)
 	std::string name;      // 32 bytes
 	int32_t profileId = 0; // sign + 31 bits (player vtable +0x328)
 	int32_t flags = 0;     // sign + 3 bits: bit 0 vtable +0x3b0, bit 2 +0x3a8
-	bool flag2 = false;    // player vtable +0x3b8
+	bool flag2 = false;    // the spectator flag: the builder's player slot 0x3bc, set by the handler with 0x3b8 (+0x404)
 };
 bool parseCreatePlayer(const GameEvent& e, CreatePlayerInfo& out);
 GameEvent makeCreatePlayer(const CreatePlayerInfo& info);
+
+// JoinAsSpectator (0x47, vtable 0x0091d308, built by 0x00469550; read
+// 0x00514100, written 0x00514190): the player (8 bits), the spectator flag
+// (1), a followed player (8, -1 none) and a kind (8). Kind 8 is the menu's
+// SPECTATOR (Logic.readyToPlay(true) -> the host's event 0x10, 0x0040bd90
+// -> SwiffHost slot 0x3c0, 0x0046c780): the server (slot 9, 0x005142a0),
+// when it isn't ranked (0x00430a00) and has sv.allowSpectators (+0x290),
+// marks the player a spectator (player slot 0x3b8, +0x404) and sends the
+// event on to every client, whose handler (slot 8, 0x00514260) marks it
+// too. Any other kind is the spectator's camera (FreeCam.togglePlayer
+// 0x00752050 sends 6 with the followed player; FreeCam.toggleCamera
+// 0x00752150 the new mode): the server sets the player's camera to that
+// mode (player slot 0x1b4(0) -> camera slot 0x18), with kind 6 following
+// the player given (camera +0x9c).
+struct JoinAsSpectatorInfo {
+	int player = 0;
+	bool spectator = true;
+	int follow = -1;
+	int kind = kJoinSpectator;
+	static constexpr int kJoinSpectator = 8;
+	static constexpr int kCameraFollow = 6;
+	static constexpr int kCameraFree = 1;
+};
+bool parseJoinAsSpectator(const GameEvent& e, JoinAsSpectatorInfo& out);
+GameEvent makeJoinAsSpectator(const JoinAsSpectatorInfo& info);
 
 struct CreateObjectInfo { // kEvCreateObject (0x0050b150, built 0x0050b0f0, handled 0x0050b450)
 	uint32_t templateId = 0; // ObjectTemplate +0x44: creation index of network-shared templates (0x0070a700)

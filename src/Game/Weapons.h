@@ -30,6 +30,12 @@ namespace dice::hfe::game {
 struct ProjectileSettings {
 	std::string name; // the projectile's template (its S_<name>_Looping flight sound)
 	float damage = 0;
+	// hitImpactModifier (GenericProjectile template +0x338, 1 by default;
+	// executor 0x004f1292 -> 0x007e6c10; the round's interface 0x94c1 slot
+	// 65 0x005b3170): handed to the soldier it hits (SoldierResponse
+	// 0x006c1df0 -> armour slot 0xe8), it scales the death ragdoll's hit
+	// push for a tick (GameWorld::startRagDoll).
+	float hitImpactModifier = 1;
 	float minDamage = -1;
 	float distToStartLoseDamage = 0;
 	float distToMinDamage = 0;
@@ -245,6 +251,15 @@ struct FireArmSettings {
 	// update, slot 5 0x005e4c80). Ticks are the times x 30, rounded.
 	bool thrown = false;
 	int pullbackTicks = 0, launchDelayTicks = 0;
+	// The underarm (soft) throw: a ThrownFireComp with fire.altFireInput
+	// (PIAltFire on the grenades): the alternate press (0x005e4d80, slot 13)
+	// starts the throw with the soft flag (+0x178), under which the
+	// pull-back / launch-delay timer (0x005e4c80) waits; while it is held
+	// the power (+0x168) is min(1, ticks held / 30) (0x005e4eb0, the
+	// constructor's 1/30 at +0x90); the release lets the timer run and the
+	// round leaves at the weapon's speed x the power (0x005e5720). A
+	// normal throw's power is 1 (0x005e4b40).
+	bool softThrow = false;
 
 	static FireArmSettings fromTemplate(const world::ObjectTemplate& firearm);
 	int ticksBetweenShots() const { return roundsPerMinute > 0 ? 1800 / roundsPerMinute : 1; }
@@ -288,7 +303,9 @@ public:
 	// at burstSize - 1, +0x24). A press that finds the gun busy (between
 	// rounds) waits for it; one that finds it reloading, overheated or
 	// empty is dropped.
-	bool tick(float seconds, bool trigger);
+	bool tick(float seconds, bool trigger, bool altTrigger = false);
+	// The power of the thrown round that left last (1 unless thrown soft).
+	float throwPower() const { return m_power; }
 	// The fire mode now (the fire component's +0x28; kFireAutomatic for a
 	// gun without fire.addFireRate) and the toggle (c_PIToggleFireRate, the
 	// firearm's action 0xb in 0x005c50e0 -> fire component slot 0x94,
@@ -334,6 +351,10 @@ private:
 	bool m_pending = false; // a press waiting for the gun
 	int m_burstLeft = 0;
 	int m_launchIn = -1;   // a thrown round's ticks to go (states 2 and 3), -1 none
+	bool m_soft = false;   // the soft throw's flag (+0x178): the alternate input still held
+	bool m_altWas = false;
+	int m_softTicks = 0;
+	float m_power = 1;     // +0x168
 	int m_tracerCount = 0; // +0x78
 	bool m_scanning = false; // the ammo component's +0x58
 	float m_scan = 0;        // +0x5c

@@ -152,6 +152,13 @@ public:
 	// messages (world().takeMessages(): -1 and "rcon: <text>").
 	void remoteCommand(const std::string& command);
 	void toggleFreeCamera();                   // ToggleFreeCamera (0x28)
+	// The menu's SPECTATOR (Logic.readyToPlay(true)): JoinAsSpectator (0x47)
+	// with kind 8 for our player; the server answers by sending it on to
+	// everyone (RemotePlayer::spectator) when it allows spectators.
+	void joinAsSpectator(bool spectator = true);
+	// A spectator's camera for the server (FreeCam.togglePlayer 0x00752050:
+	// kind 6 and the followed player; FreeCam.toggleCamera 0x00752150: 1).
+	void spectatorCamera(int kind, int follow = -1);
 	// Squads (SquadManager): the team is our player's, the player us unless
 	// given. A squad must exist to be joined (0x004c6450 looks it up). A
 	// squad is made by naming one without a leader (createSquad).
