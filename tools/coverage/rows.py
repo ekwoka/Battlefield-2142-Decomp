@@ -17,7 +17,12 @@ bundles' modifiers in Effects.cpp; `"sway.gunSway" + axis + "Steps"`), so a
 name that two or three src literals concatenate to (the first at least 5
 characters, the others camel-case continuations, the last one appended
 with `+ "..."` somewhere in src) also counts as stored-read (`"composed": true`
-in rows.json). A lower bound is also given: unread names whose last segment
+in rows.json). So does a literal of at least 5 characters followed by a
+number, when src appends `std::to_string(...)` to that literal
+(`"alternateTemplate" + std::to_string(i)`, Effects.cpp), and a literal
+a concatenation starts with followed by a camel-case literal
+(`std::string("helpHud.closeToHelpStringKey") + side`, where side is one
+of "Friendly" / "Enemy" / "Neutral", HudAlerts.cpp; `"supplyValueTeam" + n`). A lower bound is also given: unread names whose last segment
 occurs nowhere in the src text.
 
 Script calls come from corpus.py's calls.json (lower-cased Object.method).
@@ -45,6 +50,8 @@ SUFFIX_RE = re.compile(r'\+\s*"((?:[^"\\\n]|\\.)*)"')
 # One a concatenation starts with (`"sway.gunSway" +`, also wrapped as
 # `std::string("sway.gunSway") + axis`): a three-piece key's first.
 PREFIX_RE = re.compile(r'"((?:[^"\\\n]|\\.)*)"\s*\)?\s*\+')
+# One src numbers (`"alternateTemplate" + std::to_string(i)`).
+NUMBERED_RE = re.compile(r'"((?:[^"\\\n]|\\.){5,})"\s*\+\s*std::to_string\(')
 SRC_EXT = (".cpp", ".h", ".hpp", ".c", ".cc", ".inl", ".py", ".glsl", ".frag", ".vert", ".comp")
 
 
@@ -53,6 +60,7 @@ def src_text(repo):
     suffixes = set()
     capped = set()
     prefixes = set()
+    numbered = set()
     chunks = []
     for dirpath, dirnames, filenames in os.walk(os.path.join(repo, "src")):
         for fn in filenames:
@@ -67,10 +75,12 @@ def src_text(repo):
                     capped.add(m.group(1).lower())
             for m in PREFIX_RE.finditer(t):
                 prefixes.add(m.group(1).lower())
+            for m in NUMBERED_RE.finditer(t):
+                numbered.add(m.group(1).lower())
             for m in SUFFIX_RE.finditer(t):
                 if m.group(1)[:1].isupper() or m.group(1)[:1].isdigit():
                     suffixes.add(m.group(1).lower())
-    return lits, "\n".join(chunks), (suffixes, capped, prefixes)
+    return lits, "\n".join(chunks), (suffixes, capped, prefixes, numbered)
 
 
 def composed(name, lits, pieces):
@@ -78,9 +88,15 @@ def composed(name, lits, pieces):
     least 5 characters (for three, one a concatenation starts with), the
     others camel-case continuations (an upper-case letter or a digit first)
     and the last one src appends (`+ "Range"`): the
-    keys src builds as `base + "Range"` or `"sway.gunSway" + axis + "Steps"`."""
-    suffixes, capped, prefixes = pieces
+    keys src builds as `base + "Range"` or `"sway.gunSway" + axis + "Steps"`.
+    Also two pieces whose first starts a concatenation and whose second is
+    any camel-case literal (`"supplyValueTeam" + n`, n "1" / "2"), and a
+    numbered literal (`"alternateTemplate" + std::to_string(i)`)."""
+    suffixes, capped, prefixes, numbered = pieces
     n = len(name)
+    stem = name.rstrip("0123456789")
+    if stem != name and len(stem) >= 5 and stem in numbered:
+        return True
     for i in range(5, n):
         if name[:i] not in lits:
             continue
@@ -88,6 +104,8 @@ def composed(name, lits, pieces):
             return True
         if name[:i] not in prefixes:
             continue
+        if name[i:] in capped:
+            return True
         for j in range(i + 1, n):
             if name[i:j] in capped and name[j:] in suffixes:
                 return True

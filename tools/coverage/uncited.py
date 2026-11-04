@@ -33,7 +33,8 @@ factors (EXE 0.84, RendDX9 0.69, AIDLL 0.48) are reused unless
 --recalibrate. "?" is split pro rata by (c) / ((c) + (d)).
 
 Output: <out>/<name>.json (per module: the byte buckets, the lower /
-calibrated / upper effective coverage, the (d) runs) and labels_<module>.json;
+calibrated / upper effective coverage, the (d) runs of --min-run bytes or
+more) and labels_<appendix or --name>_<module>.json;
 the report on stdout.
 """
 import argparse
@@ -476,6 +477,7 @@ def main():
     ap.add_argument("--name", default=None, help="output stem (default uncited_<appendix>)")
     ap.add_argument("--recalibrate", action="store_true", help="measure the propagation precision instead of reusing uncited.md's factors")
     ap.add_argument("--features", default=None, help="directory holding features_<module>.json (default <out>)")
+    ap.add_argument("--min-run", type=int, default=4096, help="smallest (d) run listed, in bytes (default 4096)")
     args = ap.parse_args()
     out = common.out_dir(args.out)
     fdir = args.features or out
@@ -501,10 +503,11 @@ def main():
             factor = tp / pc if pc else factor
         e = effective(b, total, factor)
         feats = extract.load(m, args.repo, fdir)
-        runs = d_runs(funcs, label, why, feats, 4096)
+        runs = d_runs(funcs, label, why, feats, args.min_run)
         result[m] = {"total": total, "buckets": b, "factor": factor, "effective": e,
                      "d_runs": [{"start": "0x%08x" % r[0], "end": "0x%08x" % r[1], "bytes": r[2], "examples": r[3]} for r in runs]}
-        common.save_json(os.path.join(out, "labels_%s_%s.json" % (args.appendix, m)),
+        # named by --name when given, so the headings / no-audit runs don't overwrite labels_with_*
+        common.save_json(os.path.join(out, "labels_%s_%s.json" % (args.name or args.appendix, m)),
                          {"0x%08x" % a: [label.get(a, "q"), why.get(a, "")] for a in sorted(funcs)})
         tot["needed"] += e["needed"]
         tot["lower"] += e["lower"] * e["needed"]

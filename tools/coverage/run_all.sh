@@ -50,5 +50,7 @@ $PY "$HERE/cite.py" $R --no-audit-docs --name cite_noaudit
 $PY "$HERE/uncited.py" $R --appendix with
 $PY "$HERE/uncited.py" $R --appendix without
 $PY "$HERE/uncited.py" $R --cite "$OUT/cite_headings.json" --name uncited_headings
-$PY "$HERE/uncited.py" $R --cite "$OUT/cite_noaudit.json" --name uncited_noaudit
+$PY "$HERE/uncited.py" $R --cite "$OUT/cite_noaudit.json" --name uncited_noaudit --min-run 2048
+# this classifier's own propagation precision, on the headline (no audit docs) citations
+$PY "$HERE/uncited.py" $R --cite "$OUT/cite_noaudit.json" --name uncited_noaudit_recal --recalibrate
 $PY "$HERE/hedges.py" $R
