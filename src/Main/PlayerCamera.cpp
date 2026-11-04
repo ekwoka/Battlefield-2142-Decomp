@@ -1028,7 +1028,14 @@ bool PlayerCamera::findSeatCamera(SeatView& out) const
 				}
 				render::Mat4 m = placement(child.position, child.rotation) * local;
 				world::Vec3 offset, rotation;
-				if (m_round.partPose(object, child.name, offset, rotation)) {
+				anim::Matrix bone;
+				if (m_round.partBone(object, child.name, bone)) {
+					// A bone part (boneIndex: the mechs' torso) where its bone
+					// puts it, as the drawing places it (0x0063d470 -> slot 0xe8).
+					render::Mat4 boned;
+					std::copy(bone.begin(), bone.end(), boned.m.begin());
+					m = boned * local;
+				} else if (m_round.partPose(object, child.name, offset, rotation)) {
 					m = placement(offset, rotation) * m;
 				}
 				const bool seat = c->settings().count("seatInformation") != 0;

@@ -10,7 +10,9 @@
 #include "Console/ConsoleBinding.h"
 #include "Game/GameWorld.h"
 #include "Game/Vehicle.h"
+#include "Hud/Hud.h"
 #include "IO/File/FileManager.h"
+#include "Main/HudMenusVehicles.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "Physics/MaterialManager.h"
 #include "TestMain.h"
@@ -1189,4 +1191,316 @@ TEST(Vehicles_IgnoreParentRotationPitch)
 		const auto favSeats = g.world->vehicleSeats(fav);
 		CHECK(!favSeats.empty() && favSeats[0].cameraIgnorePitch == 0.6f);
 	}
+}
+
+namespace {
+
+// The animation systems for a Garage (the client archives' .inc and .baf
+// files), as Vehicles_BundleSkeletonPosesBoneParts sets them up.
+struct Animations {
+	std::string out;
+	anim::AnimationSystems systems;
+	explicit Animations(Garage& g)
+		: systems([&g](const std::string& path, std::vector<uint8_t>& data) { return g.files.readFile(path, data); })
+	{
+		g.files.setMountingAllowed(true);
+		g.console.run("ClientArchives.con", {}, out);
+		g.files.setMountingAllowed(false);
+		anim::registerAnimationConsoleMethods(g.console, systems);
+		g.console.run("Objects/Soldiers/Common/Animations/ValueHolders.inc", {}, out);
+	}
+	void attach(Garage& g)
+	{
+		g.world->setAnimationSystems(&systems, [this, &g](const std::string& path) {
+			return systems.get(path, [&] { g.console.run(path, {}, out); });
+		});
+	}
+};
+
+float yawOf(const physics::Vec3& v) { return std::atan2(v.x, v.z) * 57.29578f; }
+
+} // namespace
+
+// A ground driver's guns (0x004bda00 -> 0x004cc7a0 -> 0x005cacf0, case 6:
+// the control object the player drives gets the fire event as any seat's):
+// eu_tank's driver turns the turret (EU_TANK_Turret, PIMouseLookX) and the
+// barrel (PIMouseLookY) with the look and fires the main gun along them;
+// the cupola (EU_TANK_CupolaBase under the turret) rides the turret. The
+// hover tank's barrel is its driver's on PIPitch (a firearm under it), its
+// gunner's pitch bundle the mouse's (AS_TANK_Cupola4), not the PICameraY
+// hatch; the FAV's driver has no gun to turn.
+TEST(Vehicles_GroundDriverAimsAndFires)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("as_tank") || !g.templates.find("eu_fav")) {
+		return;
+	}
+	const auto lowerName = [](std::string n) {
+		std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		return n;
+	};
+	{
+		const uint32_t hover = g.start("as_tank", {0, 3, 6});
+		const auto seats = g.world->vehicleSeats(hover);
+		CHECK(seats.size() >= 2);
+		if (seats.size() >= 2) {
+			CHECK(seats[0].yawBundle.empty() && lowerName(seats[0].pitchBundle) == "as_tank_barrelbase");
+			CHECK(lowerName(seats[1].pitchBundle) == "as_tank_cupola4" && seats[1].minPitch == -25 && seats[1].maxPitch == 17);
+		}
+		const uint32_t fav = g.start("eu_fav", {0, 2, 6});
+		const auto favSeats = g.world->vehicleSeats(fav);
+		CHECK(!favSeats.empty() && favSeats[0].yawBundle.empty() && favSeats[0].pitchBundle.empty());
+		CHECK(!g.world->seatTurnsGun(fav, 0));
+	}
+	const uint32_t tank = g.start("eu_tank", {0, 2, 6});
+	CHECK(g.enter(tank));
+	CHECK(g.world->seatTurnsGun(tank, 0));
+	g.run(2);
+	float yaw = 0, pitch = 0;
+	CHECK(g.world->gunAim(tank, 0, yaw, pitch));
+	const float hullYaw = g.yaw(tank);
+	game::SoldierInput look;
+	look.turn = 3; // degrees a tick
+	look.aimPitch = 4;
+	g.drive(look, 0.5f);
+	CHECK(g.world->gunAim(tank, 0, yaw, pitch));
+	std::fprintf(stderr, "  eu_tank turret %.1f, barrel %.1f (the hull turned %.1f)\n", yaw, pitch,
+		std::remainder(g.yaw(tank) - hullYaw, 360.0f));
+	CHECK(std::fabs(std::remainder(yaw - 45, 360.0f)) < 3);
+	CHECK(std::fabs(pitch - 4) < 1.5f); // the barrel's ignoreParentRotation (0/0.7/0) takes back the hull's settling
+	// The cupola's gun turns in the turret's frame.
+	physics::Vec3 origin;
+	physics::Mat3 frame;
+	CHECK(g.world->gunFrame(tank, 0, origin, frame));
+	const size_t before = g.world->projectiles().size();
+	game::SoldierInput fire;
+	fire.turn = 0;
+	fire.aimPitch = 4;
+	fire.fire = true;
+	g.drive(fire, 0.1f);
+	g.world->setPlayerInput({});
+	bool fired = false;
+	for (size_t i = before; i < g.world->projectiles().size(); ++i) {
+		const game::Projectile& p = g.world->projectiles()[i];
+		if (p.shooter != tank) {
+			continue;
+		}
+		fired = true;
+		const float along = std::remainder(yawOf(p.velocity) - g.yaw(tank), 360.0f);
+		std::fprintf(stderr, "  the main gun's round heads %.1f off the hull\n", along);
+		CHECK(std::fabs(std::remainder(along - 45, 360.0f)) < 4);
+	}
+	CHECK(fired);
+	// Up into the cupola: its gun's frame is the turret's.
+	game::SoldierInput move;
+	move.switchSeat = 2;
+	g.world->setPlayerInput(move);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	g.world->tick(1 / 30.0f);
+	CHECK(g.world->gunFrame(tank, 1, origin, frame));
+	const float cupolaFrame = std::remainder(frame.yawPitchRoll().x - g.yaw(tank), 360.0f);
+	std::fprintf(stderr, "  the cupola's frame %.1f off the hull\n", cupolaFrame);
+	CHECK(std::fabs(std::remainder(cupolaFrame - 45, 360.0f)) < 3);
+}
+
+// The heavy mech's guns ride its torso bone (AS_heavy_mech_torsospring,
+// boneIndex 1: 0x0063d470 -> its slot 0xe8): the main cannon's rounds start
+// where the posed torso holds it, so they rise and fall with it; parked
+// (unmanned) the torso sinks and the gun with it. The secondary position
+// sits on the torso's turret (the driver's yaw bundle).
+TEST(Vehicles_MechGunsRideTheTorsoBone)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("as_heavy_mech")) {
+		return;
+	}
+	Animations a(g);
+	const uint32_t mech = g.start("as_heavy_mech", {0, 4, 6});
+	a.attach(g);
+	const auto seats = g.world->vehicleSeats(mech);
+	CHECK(seats.size() >= 2);
+	if (seats.size() < 2) {
+		return;
+	}
+	const auto lowerName = [](std::string n) {
+		std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		return n;
+	};
+	CHECK(lowerName(seats[0].gunAnchor.bone) == "as_heavy_mech_torsospring" && seats[0].gunAnchor.yawSeat == -1);
+	CHECK(lowerName(seats[1].gunAnchor.bone) == "as_heavy_mech_torsospring" && seats[1].gunAnchor.yawSeat == 0);
+	CHECK(seats[0].morePitchBundles.size() >= 2); // the rocket rack and the cannon mount beside the camera mount
+	CHECK(g.enter(mech));
+	g.drive({}, 3);
+	const auto gunHeight = [&] {
+		physics::Vec3 origin;
+		physics::Mat3 frame;
+		CHECK(g.world->gunFrame(mech, 0, origin, frame));
+		const world::Object* o = g.objects.find(mech);
+		const physics::Mat3 hull = physics::Mat3::fromYawPitchRoll({o->rotation().x, o->rotation().y, o->rotation().z});
+		return hull.untransform(origin - g.position(mech)).y;
+	};
+	anim::Matrix standingBone {}, parkedBone {};
+	CHECK(g.world->partBone(mech, "AS_heavy_mech_torsospring", standingBone));
+	const float standing = gunHeight();
+	game::SoldierInput leave;
+	leave.use = true;
+	g.world->setPlayerInput(leave);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	CHECK(!g.world->playerVehicle());
+	g.run(4);
+	CHECK(g.world->partBone(mech, "AS_heavy_mech_torsospring", parkedBone));
+	const float parked = gunHeight();
+	std::fprintf(stderr, "  main cannon over the hull: standing %.2f, parked %.2f (the torso bone %.2f -> %.2f)\n", standing,
+		parked, standingBone[13], parkedBone[13]);
+	// Parked the torso also tips forward (its bone's rows turn by about 13
+	// degrees about x), so the cannon ahead of it drops further than the
+	// bone's own drop.
+	std::fprintf(stderr, "  parked torso's tip: %.2f\n", parkedBone[6]);
+	const float drop = standingBone[13] - parkedBone[13];
+	CHECK(standing - parked > drop - 0.05f && standing - parked < drop + 1.5f);
+	CHECK(std::fabs(parkedBone[6]) > 0.1f);
+}
+
+// The deployables' own systems (0x0063d530 builds the skeleton helper for
+// any template with a bundleSkeleton; 0x0063d5b0 -> 0x0063d470): the
+// portable shield's and the ammo hub's "idle" CountTrigger plays "open"
+// once, then stays in "stand"/"idle", and their boneIndex parts take the
+// bones' places (the shield's arms spread, the hub's lids open).
+TEST(Vehicles_DeployablesPoseTheirParts)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	world::ObjectTemplate* kit = g.loaded ? g.templates.find("EU_Assault") : nullptr;
+	if (!kit || !g.templates.find("unl_port_shield") || !g.templates.find("Unl_Hub_Ammo")) {
+		return;
+	}
+	kit->children() = {{"eu_ar_rifle", {}, {}}, {"Unl_Hub_Ammo", {}, {}}, {"unl_port_shield", {}, {}}};
+	Animations a(g);
+	g.start("eu_fav", {30, 2, 30});
+	a.attach(g);
+	CHECK(g.world->spawnPlayer(2) != nullptr);
+	g.run(1);
+	const auto placed = [&](const char* name) -> uint32_t {
+		for (const auto& object : g.objects.objects()) {
+			if (object->objectTemplate() && object->objectTemplate()->name() == name) {
+				return object->id();
+			}
+		}
+		return 0;
+	};
+	const auto deploy = [&](int item) {
+		game::SoldierInput take;
+		take.selectItem = item;
+		g.drive(take, 1.5f);
+		game::SoldierInput fire;
+		fire.fire = true;
+		g.drive(fire, 0.1f);
+		g.drive({}, 0.1f);
+	};
+	deploy(5);
+	const uint32_t shield = placed("portable_shield");
+	deploy(4);
+	const uint32_t hub = placed("unl_hub_ammo_stationary_model");
+	CHECK(shield != 0 && hub != 0);
+	anim::Matrix early {}, late {};
+	CHECK(g.world->partBone(shield, "portable_shield_arm1_anim", early));
+	g.run(4);
+	CHECK(g.world->partBone(shield, "portable_shield_arm1_anim", late));
+	float moved = 0;
+	for (size_t i = 0; i < 16; ++i) {
+		moved = std::max(moved, std::fabs(late[i] - early[i]));
+	}
+	std::fprintf(stderr, "  the shield's arm moved by %.2f (matrix entries) as it opened\n", moved);
+	CHECK(moved > 0.05f);
+	const auto playing = g.world->objectAnimation(shield);
+	CHECK(std::find(playing.begin(), playing.end(), "stand") != playing.end());
+	anim::Matrix lid {};
+	CHECK(hub == 0 || g.world->partBone(hub, "UNL_HUB_Ammo_lid1", lid));
+}
+
+// The player's may-use test (0x005921e0) and a weapon key's item selection
+// in a seat (0x004d2a50 -> 0x0079c190): the heavy mech's driver presses 3,
+// the rockets' key (PIAltFire group, already active): no new pick, no
+// popup; the gunship's gunner with both weapons made selectable: key 2
+// takes the missile and opens the selection on it. Each entry starts every
+// group at its first weapon again (0x005cdd60). The selection's flash: six
+// toggles of the key's slot 0.1 s apart, the list held open meanwhile.
+TEST(Vehicles_SeatItemSelectionAndFirstWeapons)
+{
+	{
+		hud::HudManager hud(nullptr);
+		menu::ItemSelection items;
+		items.open({{1, "cannon.tga"}, {2, "missile.tga"}}, 2, 0.4f);
+		items.flash(2);
+		CHECK(items.flashing() == 1);
+		int toggles = 0;
+		float last = 1;
+		for (int i = 0; i < 14; ++i) {
+			items.update(hud, 0.05f);
+			const float now = hud.number("ItemSlot1Active");
+			toggles += now != last;
+			last = now;
+		}
+		CHECK(toggles == 6 && last == 1);
+		CHECK(hud.number("ShowItemSelect") == 1); // 0.4 s after the last toggle at 0.6 s
+		for (int i = 0; i < 10; ++i) {
+			items.update(hud, 0.05f);
+		}
+		CHECK(hud.number("ShowItemSelect") == 0);
+	}
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("as_ag")) {
+		return;
+	}
+	for (const char* name : {"as_ag_GunnerCannon", "as_ag_GuidedMissileWeapon"}) {
+		if (world::ObjectTemplate* t = g.templates.find(name)) {
+			t->settings()["isSelectable"] = "1";
+		}
+	}
+	const uint32_t v = g.start("as_ag", {0, 4, 6});
+	CHECK(g.enter(v));
+	const int me = g.world->localPlayer();
+	game::SoldierInput input;
+	input.switchSeat = 2;
+	g.world->setPlayerInput(input);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	g.run(1);
+	g.world->takeSeatItemSelect(me);
+	const int first = g.world->seatWeaponIndex(v, 1);
+	game::SoldierInput press;
+	press.selectItem = 2;
+	g.world->setPlayerInput(press);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	g.world->tick(1 / 30.0f);
+	CHECK(g.world->seatWeaponIndex(v, 1) != first);
+	CHECK(g.world->takeSeatItemSelect(me) == 2);
+	CHECK(g.world->takeSeatItemSelect(me) == 0); // once
+	// Out and back in: the group's first weapon again.
+	input = {};
+	input.switchSeat = 1;
+	g.world->setPlayerInput(input);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	g.world->tick(1 / 30.0f);
+	input.switchSeat = 2;
+	g.world->setPlayerInput(input);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	g.world->tick(1 / 30.0f);
+	CHECK(g.world->seatWeaponIndex(v, 1) == first);
 }

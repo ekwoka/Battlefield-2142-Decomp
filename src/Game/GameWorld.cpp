@@ -6203,11 +6203,18 @@ const anim::RagDoll* GameWorld::ragDoll(uint32_t soldier) const
 // handheld weapon is put away.
 void GameWorld::poseSeated(Player& player, world::Object& soldier, const Body& body, const SeatLayout& seat, float seconds)
 {
-	const physics::Mat3 rotation = physics::Mat3::fromYawPitchRoll(seat.rotation) * body.body.rotation;
+	// The seat rides what carries it (seatMount: another seat's turret, a
+	// bone part).
+	const world::Object* vehicleObject = m_objects.find(body.object);
+	const SeatMount mount = vehicleObject && vehicleObject->objectTemplate()
+		? seatMount(body, vehicleLayout(*vehicleObject->objectTemplate()), seat.seatAnchor)
+		: SeatMount {};
+	const physics::Mat3 rotation = physics::Mat3::fromYawPitchRoll(seat.rotation) * mount.turn * body.body.rotation;
 	// The seat is where the soldier's object would be: the physics origin a
 	// metre over the skeleton's (0x005f0a00 poses the skeleton at 0/-1/0
 	// from it), so the model goes a metre below, in the seat's frame.
-	const physics::Vec3 at = body.body.position + body.body.rotation.transform(seat.position) + rotation.transform({0, -1, 0});
+	const physics::Vec3 at
+		= body.body.position + body.body.rotation.transform(mount.place(seat.position)) + rotation.transform({0, -1, 0});
 	soldier.setPosition({at.x, at.y, at.z});
 	soldier.setRotation({rotation.yawPitchRoll().x, rotation.yawPitchRoll().y, rotation.yawPitchRoll().z});
 	if (player.seatAnimationPath != seat.animationSystem) {
@@ -6985,17 +6992,28 @@ bool GameWorld::partBone(uint32_t object, const std::string& part, anim::Matrix&
 		// here, so they are posed once a tick when first asked.
 		if (!body.bonesPosed && body.animation && body.bundleSkeleton) {
 			Body& b = const_cast<Body&>(body);
-			std::vector<bool> touched;
-			b.animation->apply(*b.bundleSkeleton, b.bonePose, touched);
-			for (Body::BonePart& bone : b.boneParts) {
-				const size_t i = static_cast<size_t>(bone.bone);
-				if (i < b.bonePose.rotations.size() && i < b.bonePose.positions.size()) {
-					bone.matrix = anim::matrixFromRotationTranslation(b.bonePose.rotations[i], b.bonePose.positions[i]);
-				}
-			}
+			poseBoneParts(*b.animation, *b.bundleSkeleton, b.bonePose, b.boneParts);
 			b.bonesPosed = true;
 		}
 		for (const Body::BonePart& bone : body.boneParts) {
+			if (sameName(bone.part, part)) {
+				local = bone.matrix;
+				return true;
+			}
+		}
+		return false;
+	}
+	// A deployable's (stepDeployableAnimations).
+	for (const ObjectAnimation& a : m_objectAnimations) {
+		if (a.object != object || !a.animation || !a.skeleton) {
+			continue;
+		}
+		if (!a.posed) {
+			ObjectAnimation& m = const_cast<ObjectAnimation&>(a);
+			poseBoneParts(*m.animation, *m.skeleton, m.pose, m.boneParts);
+			m.posed = true;
+		}
+		for (const Body::BonePart& bone : a.boneParts) {
 			if (sameName(bone.part, part)) {
 				local = bone.matrix;
 				return true;
@@ -7182,14 +7200,24 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 				// PIPitch (a tick's look over 5 degrees, as PIMouseLook's
 				// units), A/D PIYaw, W/S PIThrottle, Z PICrouch.
 				body->vehicle->setInput(driverInput(input, scale, player.lastLookPitch));
-				// The pilot's own gun (the gunships' seat GenericFireArm,
-				// fixed along the hull): PIFire fires it; the mouse flies the
-				// vehicle, so the gun keeps its aim. (Ground drivers' guns
-				// turn on the mouse in the original, which the rewrite's
-				// drivers spend on PIRoll: not fired here, but their
-				// PIFlareFire weapon, the active defence, needs no aim.)
+				// The driver's guns. The fire inputs go to the control object
+				// the player drives as to any seat's (0x004bda00 -> 0x004cc7a0
+				// -> the PCO's event handler 0x005cacf0, case 6: each group's
+				// active weapon, 0x005c50e0), with no test of what kind of
+				// vehicle it is: a tank's, an APC's, a walker's driver fires
+				// the guns of the root's subtree (the turret, the torso's
+				// cannon, the rocket rack, the EMP launcher, the ads) as the
+				// pilot fires the gunship's. Their bundles take the driver's
+				// look as a gunner's take his (the bundle's input pass
+				// 0x00565700 under the root PCO): in the land map the mouse
+				// gives PIRoll / PIPitch and, from
+				// defaultPlayerInputControlMap, PIMouseLookX / PIMouseLookY at
+				// once (eu_tank's turret on PIMouseLookX beside the steering's
+				// PIYaw; the hover tank's hull turns on PIRoll and its barrel
+				// on PIPitch). A pilot's guns are fixed along the hull (the
+				// mouse flies it): they keep their aim.
 				if (!body->guns.empty()) {
-					stepGunner(player, *body, seconds, false, body->vehicle->flies() ? 7u : 4u);
+					stepGunner(player, *body, seconds, seatAims(*body, 0), 7u);
 				}
 			} else if (body->wreckTime < 0 && player.seat != 0 && input.altFire && launchPod(player.id)) {
 				return; // a pod seat's alternate fire (Titans.cpp): off in a drop pod
@@ -7213,7 +7241,7 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 				const VehicleLayout& layout = vehicleLayout(*vehicleObject->objectTemplate());
 				if (player.seat >= 0 && static_cast<size_t>(player.seat) < layout.seats.size()) {
 					seat = &layout.seats[static_cast<size_t>(player.seat)];
-					seatAt = seatAt + body->body.rotation.transform(seat->position);
+					seatAt = seatAt + body->body.rotation.transform(seatMount(*body, layout, seat->seatAnchor).place(seat->position));
 				}
 			}
 			player.body.position = {seatAt.x, seatAt.y + 1.0f, seatAt.z};
@@ -7748,6 +7776,15 @@ bool GameWorld::partPose(uint32_t object, const std::string& part, world::Vec3& 
 				rotation = {0, -body.guns[i].pitch, 0};
 				return true;
 			}
+			for (const SeatLayout::PitchPart& more : seat.morePitchBundles) {
+				if (sameName(more.name, part)) {
+					// Its own limits on the same input (down positive).
+					const float low = std::min(more.minPitch, more.maxPitch), high = std::max(more.minPitch, more.maxPitch);
+					offset = {};
+					rotation = {0, std::clamp(-body.guns[i].pitch, low, high), 0};
+					return true;
+				}
+			}
 			// The gun's recoil slide along its own z (GunRecoil, 0x005ddd80).
 			const int recoiled = body.guns[i].recoilWeapon;
 			const std::string& slid = recoiled >= 0 && static_cast<size_t>(recoiled) < seat.weapons.size()
@@ -7844,6 +7881,33 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 		return false;
 	};
 	const bool named = namesSeats(vehicle, 0);
+	// A bundle on the driver's PIRoll / PIPitch counts as the seat's look
+	// only with a firearm under it (the hover tank's barrel), not another
+	// seat's (the rotor heads' PIPitch / PIRoll fly the transports).
+	const std::function<bool(const world::ObjectTemplate&, int)> armsBelow = [&](const world::ObjectTemplate& t, int depth) {
+		if (depth > 12) {
+			return false;
+		}
+		for (const world::ChildTemplate& child : t.children()) {
+			const world::ObjectTemplate* c = m_templates.find(child.name);
+			if (c && c->typeName() == "GenericFireArm") {
+				return true;
+			}
+			if (c && c->typeName() != "PlayerControlObject" && armsBelow(*c, depth + 1)) {
+				return true;
+			}
+		}
+		return false;
+	};
+	// What carries the node being walked (SeatLayout::Anchor): the bone
+	// part above it (boneIndex, with the template's bundleSkeleton: the
+	// skeleton helper 0x0063d340 keeps such parts, 0x0063d5e0) and the
+	// seat whose yaw bundle it sits under; and the seat whose pitch bundle
+	// it is under (its other pitch bundles there would turn twice).
+	const bool skeleton = vehicle.settings().count("bundleSkeleton") != 0;
+	SeatLayout::Anchor carried;
+	int pitchSeat = -1;
+	std::vector<bool> anchored;
 	// Depth first from the root; `seat` is the seat whose subtree this is.
 	// Each child sits at its offset turned by its parents' rotations, and
 	// adds its own rotation (as Vehicle::fromTemplate places the wheels).
@@ -7895,9 +7959,18 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 						: sameName(toggle->second, "PIFire")                      ? 8
 																				  : -1;
 				}
+				added.seatAnchor = carried;
 				layout.seats.push_back(added);
+				anchored.push_back(false);
 				seat = static_cast<int>(layout.seats.size()) - 1;
 			}
+			const auto anchorGun = [&](SeatLayout& owner) {
+				if (!anchored[static_cast<size_t>(seat)]) {
+					anchored[static_cast<size_t>(seat)] = true;
+					owner.gunAnchor = carried;
+				}
+			};
+			bool yawHere = false, pitchHere = false;
 			if (seat >= 0) {
 				SeatLayout& owner = layout.seats[static_cast<size_t>(seat)];
 				const auto look = [&](const char* key, const char* input) {
@@ -7943,6 +8016,7 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 					owner.hasCameraAt = true;
 				}
 				if (t.typeName() == "GenericFireArm") {
+					anchorGun(owner);
 					SeatWeapon w;
 					w.weapon = t.name();
 					w.weaponPosition = at;
@@ -8006,7 +8080,12 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 					owner.weapons.push_back(std::move(w));
 				}
 				if (t.typeName() == "RotationalBundle") {
-					if (settings.count("inputToYaw") && owner.yawBundle.empty()) {
+					const bool mouseYaw = look("inputToYaw", "PIMouseLookX") || (look("inputToYaw", "PIRoll") && armsBelow(t, 0));
+					const bool mousePitch =
+						look("inputToPitch", "PIMouseLookY") || (look("inputToPitch", "PIPitch") && armsBelow(t, 0));
+					if (mouseYaw && owner.yawBundle.empty()) {
+						anchorGun(owner);
+						yawHere = true;
 						owner.yawBundle = t.name();
 						owner.yawPivot = at;
 						owner.frameYaw = turn.yawPitchRoll().x;
@@ -8027,7 +8106,9 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 							owner.maxYaw = parseVec3(high->second).x;
 						}
 					}
-					if (settings.count("inputToPitch") && owner.pitchBundle.empty()) {
+					if (mousePitch && owner.pitchBundle.empty()) {
+						anchorGun(owner);
+						pitchHere = true;
 						owner.pitchBundle = t.name();
 						if (const auto ignore = settings.find("ignoreParentRotation"); ignore != settings.end()) {
 							owner.ignoreParentPitch = parseVec3(ignore->second).y;
@@ -8040,8 +8121,28 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 						if (high != settings.end()) {
 							owner.maxPitch = parseVec3(high->second).y;
 						}
+					} else if (mousePitch && pitchSeat != seat) {
+						SeatLayout::PitchPart part;
+						part.name = t.name();
+						if (const auto low = settings.find("minRotation"); low != settings.end()) {
+							part.minPitch = parseVec3(low->second).y;
+						}
+						if (const auto high = settings.find("maxRotation"); high != settings.end()) {
+							part.maxPitch = parseVec3(high->second).y;
+						}
+						owner.morePitchBundles.push_back(part);
 					}
 				}
+			}
+			// Under this seat's yaw bundle the parts ride its turret; under
+			// its pitch bundle its other pitch bundles are left alone.
+			const SeatLayout::Anchor carriedBefore = carried;
+			const int pitchSeatBefore = pitchSeat;
+			if (yawHere) {
+				carried.yawSeat = seat;
+			}
+			if (pitchHere) {
+				pitchSeat = seat;
 			}
 			for (const world::ChildTemplate& child : t.children()) {
 				const world::ObjectTemplate* c = m_templates.find(child.name);
@@ -8059,8 +8160,18 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 					layout.entries.push_back({childAt, radius, depth == 0 ? -1 : seat});
 					continue;
 				}
+				const SeatLayout::Anchor above = carried;
+				if (skeleton && number(*c, "boneIndex", -1) >= 0) {
+					// A bone part (and its subtree) sits where its bone puts it.
+					carried.bone = c->name();
+					carried.boneAt = childAt;
+					carried.boneTurn = childTurn;
+				}
 				walk(*c, childAt, childTurn, seat, depth + 1);
+				carried = above;
 			}
+			carried = carriedBefore;
+			pitchSeat = pitchSeatBefore;
 		};
 	walk(vehicle, {}, physics::Mat3 {}, -1, 0);
 	// Each seat's SeatWeapon part: its first PIFire weapon, else its first.
@@ -8469,6 +8580,19 @@ void GameWorld::seatPlayer(Player& player, Body& body, int seat)
 			static_cast<Body::Arm&>(gun) = std::move(gun.arms[static_cast<size_t>(gun.active[0])]);
 		}
 	}
+	// Each entry starts every group at its first weapon again (the enter
+	// methods, interface 0xc4c5 slots 7 and 8, 0x005cdd60 / 0x005ce600:
+	// for each of the three lists at +0x7c the first one added through
+	// slot 0x7c, 0x005c9840, which changes nothing for the one already
+	// active): a gunner who left on the TV missile comes back to the gun.
+	for (int group = 0; group < 3; ++group) {
+		for (size_t i = 0; i < place.weapons.size(); ++i) {
+			if (place.weapons[i].group == group) {
+				activateSeatWeapon(body, seat, place, static_cast<int>(i));
+				break;
+			}
+		}
+	}
 }
 
 void GameWorld::activateSeatWeapon(Body& body, int seat, const SeatLayout& layout, int index)
@@ -8804,7 +8928,12 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 	}
 	Body::Gun& gun = body.guns[static_cast<size_t>(player.seat)];
 	const world::Object* object = m_objects.find(body.object);
-	const SeatLayout& seat = vehicleLayout(*object->objectTemplate()).seats[static_cast<size_t>(player.seat)];
+	const VehicleLayout& tree = vehicleLayout(*object->objectTemplate());
+	const SeatLayout& seat = tree.seats[static_cast<size_t>(player.seat)];
+	// The frame the seat's bundles turn in: the hull, or the turret the
+	// seat rides (eu_tank's cupola on the driver's turret) and the bone
+	// part under it (the mechs' torso).
+	const physics::Mat3 hull = gunHull(body, tree, seat);
 	// The projectile camera with takeOverInput: the input goes to the
 	// round's camera and stops (0x005ca2e0); the guns neither turn nor fire.
 	if (stepProjectileView(player, seconds)) {
@@ -8829,7 +8958,7 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 	// 0.7) from the hull's turn about the gun's right, kept as an offset on
 	// the look's pitch (the gunner's pitch is the look, input.aimPitch).
 	const bool continuing = gun.gunnedTick + 1 == m_ticks;
-	const float hullYaw = body.body.rotation.yawPitchRoll().x;
+	const float hullYaw = hull.yawPitchRoll().x;
 	if (seat.ignoreParentYaw != 0 && continuing && std::isfinite(gun.hullYaw)) {
 		const float turned = std::remainder(hullYaw - gun.hullYaw, 360.0f);
 		gun.yaw = std::clamp(std::remainder(gun.yaw - seat.ignoreParentYaw * turned, 360.0f), seat.minYaw, seat.maxYaw);
@@ -8841,11 +8970,11 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 		gun.pitchOffset = 0;
 	} else if (seat.ignoreParentPitch != 0) {
 		float yawTurn = 0, pitchTurn = 0;
-		parentTurn(gun.hullTurn, body.body.rotation, seat.frameYaw + gun.yaw, gun.pitch, yawTurn, pitchTurn);
+		parentTurn(gun.hullTurn, hull, seat.frameYaw + gun.yaw, gun.pitch, yawTurn, pitchTurn);
 		gun.pitchOffset += seat.ignoreParentPitch * pitchTurn;
 	}
 	gun.hullYaw = hullYaw;
-	gun.hullTurn = body.body.rotation;
+	gun.hullTurn = hull;
 	gun.gunnedTick = m_ticks;
 	if (aims) {
 		float turn = player.input.turn;
@@ -8898,15 +9027,49 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 // 0x004d2a50 for a seat: c_PIWeaponSelect1..9 (inputs 14..22) pick, in
 // each of the three groups, the weapon whose item index (slot 0x19c) is
 // the key's and that can be selected (slot 0x170 0x005c1150: isSelectable
-// +0x31c and its ammo) and that the player may use (player slot 0x384, not
-// traced; every seat weapon here); the key of the weapon already active
-// sends it event 0xb, the fire-rate toggle. Else c_PIToggleWeapon (input
+// +0x31c and its ammo) and that the player may use (player slot 0x384,
+// mayUseWeapon); the key of the weapon already active sends it event 0xb,
+// the fire-rate toggle. A weapon taken so opens the local player's item
+// selection on the key (seatItemSelect). Else c_PIToggleWeapon (input
 // 45) or a press of the seat's specialToggleWeaponInput (0x005c7f80: the
 // edge of PCO +0x14c) moves each group with an active weapon to the next
 // of its weapons by item index (the sort 0x004d2010 by LAB_004cc640, the
 // item interface's slot 0x30), round from the last, without the
 // selectable test: as_ag's and us_ag's gunners (both weapons isSelectable
 // 0) and the hover bike's take their TV missile so on PIAltFire.
+// The player's may-use test (player vtable 0x00966cd8 slot 0x384,
+// 0x005921e0(weapon, forced)): none without the weapon interface 0x94c0
+// or, unless `forced`, when it can't be selected (slot 0x170). Then,
+// unless the game's slot 0xe4 holds: on a client, another player's
+// weapons pass; and a human player's (not slot 0x150's AI) fail when the
+// game logic's slot 0x2c4 (0x004d68d0 with 3) finds the weapon among the
+// player's kit's item containers (the kit's +0x1ac set) of unlockBranch 3
+// (UB_SquadLeader, +0x2b0) by name (the template's slot 0x28). A vehicle's
+// guns are never a kit's: every seat weapon passes for every player.
+bool GameWorld::mayUseWeapon(const Player& player, const std::string& weapon, bool selectable, bool forced) const
+{
+	if (!selectable && !forced) {
+		return false;
+	}
+	if (player.ai || player.kitTemplate.empty()) {
+		return true;
+	}
+	const world::ObjectTemplate* kit = m_templates.find(player.kitTemplate);
+	if (!kit) {
+		return true;
+	}
+	for (const world::ChildTemplate& child : kit->children()) {
+		const world::ObjectTemplate* c = m_templates.find(child.name);
+		if (c && c->typeName() == "ItemContainer" && sameName(c->name(), weapon)) {
+			const auto branch = c->settings().find("unlockBranch");
+			if (branch != c->settings().end() && (branch->second == "3" || sameName(branch->second, "UB_SquadLeader"))) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
 void GameWorld::selectSeatWeapons(Player& player, Body& body, const SeatLayout& seat)
 {
 	Body::Gun& gun = body.guns[static_cast<size_t>(player.seat)];
@@ -8932,7 +9095,8 @@ void GameWorld::selectSeatWeapons(Player& player, Body& body, const SeatLayout& 
 			for (size_t i = 0; i < seat.weapons.size(); ++i) {
 				const SeatWeapon& w = seat.weapons[i];
 				FireArm* arm = firearm(static_cast<int>(i));
-				if (w.group != group || w.itemIndex != key || !w.selectable || !arm || !arm->selectable()) {
+				if (w.group != group || w.itemIndex != key || !w.selectable || !arm || !arm->selectable()
+					|| !mayUseWeapon(player, w.weapon, w.selectable && arm->selectable(), false)) {
 					continue;
 				}
 				if (gun.active[group] == static_cast<int>(i)) {
@@ -8941,6 +9105,14 @@ void GameWorld::selectSeatWeapons(Player& player, Body& body, const SeatLayout& 
 					}
 				} else {
 					activateSeatWeapon(body, player.seat, seat, static_cast<int>(i));
+					// The local player's item selection (0x004d2a50 at
+					// 0x004d2dfe): unless the seat's new PIFire weapon has the
+					// flag +0x14 bit 0 (not traced; taken as clear), the HUD's
+					// selection (HUD manager slot 0x2c8) gets 0.4 s (+0x20),
+					// the menu state 0xb (slot 0x224(0xb, 1)) and the key
+					// (0x0079c190: the slot of that item index selected, +0x18,
+					// flashing 6 times 0.1 s apart).
+					player.seatItemSelect = key;
 				}
 			}
 		}
@@ -9011,7 +9183,12 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 	const float yaw = (seat.frameYaw + gun.yaw) * 3.14159265f / 180.0f;
 	const float pitch = gun.pitch * 3.14159265f / 180.0f;
 	const physics::Vec3 local {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
-	physics::Vec3 direction = body.body.rotation.transform(local);
+	const world::Object* vehicleObject = m_objects.find(body.object);
+	const VehicleLayout* tree = vehicleObject && vehicleObject->objectTemplate()
+		? &vehicleLayout(*vehicleObject->objectTemplate())
+		: nullptr;
+	const SeatMount mount = tree ? seatMount(body, *tree, seat.gunAnchor) : SeatMount {};
+	physics::Vec3 direction = (mount.turn * body.body.rotation).transform(local);
 	const physics::Vec3 straight = direction;
 	// The round strays by the deviation (0x005f5540): (minDev + the
 	// build-up) and, for a bot, its AI deviation (0x005dedb0's end); two
@@ -9031,7 +9208,7 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 		}
 	}
 	Projectile p;
-	p.origin = body.body.position + body.body.rotation.transform(seatGunOrigin(seat, w, gun.yaw, gun.pitch, arm.barrel));
+	p.origin = body.body.position + body.body.rotation.transform(mount.place(seatGunOrigin(seat, w, gun.yaw, gun.pitch, arm.barrel)));
 	p.position = p.origin;
 	p.velocity = body.body.velocity + direction * arm.weapon->settings().velocity;
 	p.settings = arm.projectile;
@@ -9129,6 +9306,74 @@ physics::Vec3 GameWorld::seatGunOrigin(const SeatLayout& seat, const SeatWeapon&
 	return seatGunOrigin(seat, weapon, gun.yaw, gun.pitch, barrel);
 }
 
+GameWorld::SeatMount GameWorld::seatMount(const Body& body, const VehicleLayout& layout, const SeatLayout::Anchor& anchor) const
+{
+	SeatMount m;
+	// The turret it rides: about that seat's yaw pivot by its gun's yaw
+	// (the bundle's input turns it, 0x00565700, whoever sits there).
+	if (anchor.yawSeat >= 0 && static_cast<size_t>(anchor.yawSeat) < layout.seats.size()
+		&& static_cast<size_t>(anchor.yawSeat) < body.guns.size()) {
+		const SeatLayout& carrier = layout.seats[static_cast<size_t>(anchor.yawSeat)];
+		m.turn = physics::Mat3::fromYawPitchRoll({body.guns[static_cast<size_t>(anchor.yawSeat)].yaw, 0, 0});
+		m.at = carrier.yawPivot - m.turn.transform(carrier.yawPivot);
+	}
+	// The bone part: its bone's local matrix takes the place of the part's
+	// placement (0x0063d470 -> slot 0xe8), so a point at rest under it is
+	// taken into the part's frame and out by the bone's.
+	anim::Matrix bone;
+	if (!anchor.bone.empty() && partBone(body.object, anchor.bone, bone)) {
+		physics::Mat3 posed;
+		posed.rows[0] = {bone[0], bone[1], bone[2]};
+		posed.rows[1] = {bone[4], bone[5], bone[6]};
+		posed.rows[2] = {bone[8], bone[9], bone[10]};
+		const physics::Vec3 boneAt {bone[12], bone[13], bone[14]};
+		physics::Mat3 back; // the part's turn at rest, inverted (orthonormal: its transpose)
+		back.rows[0] = {anchor.boneTurn.rows[0].x, anchor.boneTurn.rows[1].x, anchor.boneTurn.rows[2].x};
+		back.rows[1] = {anchor.boneTurn.rows[0].y, anchor.boneTurn.rows[1].y, anchor.boneTurn.rows[2].y};
+		back.rows[2] = {anchor.boneTurn.rows[0].z, anchor.boneTurn.rows[1].z, anchor.boneTurn.rows[2].z};
+		const physics::Mat3 delta = back * posed;
+		// v -> ((v - boneAt0) * back) * posed + boneAt, after the turret's.
+		m.at = (m.at - anchor.boneAt);
+		m.at = delta.transform(m.at) + boneAt;
+		m.turn = m.turn * delta;
+	}
+	return m;
+}
+
+bool GameWorld::seatAims(const Body& body, int seat) const
+{
+	const world::Object* object = m_objects.find(body.object);
+	if (!object || !object->objectTemplate() || seat < 0) {
+		return false;
+	}
+	const auto known = m_layouts.find(object->objectTemplate()->name());
+	if (known == m_layouts.end() || static_cast<size_t>(seat) >= known->second.seats.size()) {
+		return false;
+	}
+	const SeatLayout& layout = known->second.seats[static_cast<size_t>(seat)];
+	if (layout.yawBundle.empty() && layout.pitchBundle.empty()) {
+		return false;
+	}
+	return seat != 0 || !body.vehicle || !body.vehicle->flies();
+}
+
+bool GameWorld::seatTurnsGun(uint32_t vehicle, int seat) const
+{
+	for (const Body& body : m_bodies) {
+		if (body.object == vehicle) {
+			return seat >= 0 && static_cast<size_t>(seat) < body.guns.size() && body.guns[static_cast<size_t>(seat)].weapon
+				&& seatAims(body, seat);
+		}
+	}
+	return false;
+}
+
+int GameWorld::takeSeatItemSelect(int player)
+{
+	Player* p = findPlayer(player);
+	return p ? std::exchange(p->seatItemSelect, 0) : 0;
+}
+
 bool GameWorld::gunFrame(uint32_t vehicle, int seat, physics::Vec3& origin, physics::Mat3& hull) const
 {
 	for (const Body& body : m_bodies) {
@@ -9147,8 +9392,10 @@ bool GameWorld::gunFrame(uint32_t vehicle, int seat, physics::Vec3& origin, phys
 			? layout.weapons[static_cast<size_t>(gun.active[0])]
 			: static_cast<const SeatWeapon&>(layout);
 		int barrel = gun.barrel;
-		origin = body.body.position + body.body.rotation.transform(seatGunOrigin(layout, weapon, gun.yaw, gun.pitch, barrel));
-		hull = body.body.rotation;
+		const SeatMount mount = seatMount(body, known->second, layout.gunAnchor);
+		origin = body.body.position
+			+ body.body.rotation.transform(mount.place(seatGunOrigin(layout, weapon, gun.yaw, gun.pitch, barrel)));
+		hull = mount.turn * body.body.rotation;
 		return true;
 	}
 	return false;
@@ -9684,6 +9931,139 @@ void GameWorld::addStaticSupplies(const std::vector<uint32_t>& objects)
 //   0x40 a landing gear's down (+0x18, 0x00650010: none on a walker), and
 //   the legs' movement messages (0x00650530).
 // Its effect events go to the object's tree (takeObjectEffectEvents).
+bool GameWorld::loadBundleAnimation(const world::ObjectTemplate& t, std::unique_ptr<anim::AnimationState>& animation,
+	const anim::Skeleton*& skeleton, anim::LocalPose& pose, std::vector<Body::BonePart>& parts)
+{
+	if (!m_loadAnimationSystem || !m_animationSystems) {
+		return false;
+	}
+	const auto found = t.settings().find("bundleAnimationSystem");
+	if (found == t.settings().end() || found->second.empty()) {
+		return false;
+	}
+	if (const anim::AnimationSystemTemplate* system = m_loadAnimationSystem(found->second)) {
+		animation = std::make_unique<anim::AnimationState>(*m_animationSystems, *system);
+	}
+	if (!animation) {
+		return false;
+	}
+	// The skeleton helper (0x0063d340): the template's bundleSkeleton
+	// (+0x274) as the system's skeleton instance (+0x24), and the parts it
+	// poses: the object's tree with a boneIndex (template slot 0xc8,
+	// SimpleObject +0x60; 0x0063d5e0), each by its bone.
+	const auto bones = t.settings().find("bundleSkeleton");
+	skeleton = bones != t.settings().end() ? m_animationSystems->skeleton(bones->second) : nullptr;
+	if (skeleton) {
+		pose = anim::setupPose(*skeleton);
+		const std::function<void(const world::ObjectTemplate&, int)> collect = [&](const world::ObjectTemplate& node, int depth) {
+			if (depth > 12) {
+				return;
+			}
+			for (const world::ChildTemplate& child : node.children()) {
+				const world::ObjectTemplate* c = m_templates.find(child.name);
+				if (!c) {
+					continue;
+				}
+				const int bone = static_cast<int>(number(*c, "boneIndex", -1));
+				if (bone >= 0 && static_cast<size_t>(bone) < skeleton->nodes.size()) {
+					parts.push_back({c->name(), bone, {}});
+				}
+				collect(*c, depth + 1);
+			}
+		};
+		collect(t, 0);
+	}
+	return true;
+}
+
+void GameWorld::poseBoneParts(anim::AnimationState& animation, const anim::Skeleton& skeleton, anim::LocalPose& pose,
+	std::vector<Body::BonePart>& parts)
+{
+	std::vector<bool> touched;
+	animation.apply(skeleton, pose, touched);
+	for (Body::BonePart& bone : parts) {
+		const size_t i = static_cast<size_t>(bone.bone);
+		if (i < pose.rotations.size() && i < pose.positions.size()) {
+			bone.matrix = anim::matrixFromRotationTranslation(pose.rotations[i], pose.positions[i]);
+		}
+	}
+}
+
+// The deployables' systems each tick (0x0063d5b0 -> 0x0063d470 -> 0x0063d2f0
+// for an object with the helper). Their messages (0x0063ce30): 0x20 once
+// the object's armour is destroyed (the sentry gun's "alive" switch takes
+// "dead"), 0x800 while a control object of its tree is occupied (none of
+// these is); the sentry's "still" switch on message 1 ("fire" with it,
+// "stand" without) has no sender in 0x0063ce30 (not traced): the rewrite
+// sets it while the sentry's auto controller has a target. Each plays its
+// "idle" CountTrigger once through ("open", then "stand"): the beacon's
+// covers and arm unfold, the hubs' lids open, the shield's arms spread,
+// the sentry's legs and mainframe rise.
+void GameWorld::stepDeployableAnimations(float seconds)
+{
+	if (!m_loadAnimationSystem || !m_animationSystems) {
+		return;
+	}
+	std::vector<std::pair<uint32_t, uint32_t>> live; // object, messages
+	for (const Supply& supply : m_supplies) {
+		live.push_back({supply.object, 0});
+	}
+	for (const auto& [key, object] : m_beacons) {
+		live.push_back({object, 0});
+	}
+	for (const auto& [key, object] : m_deployed) {
+		live.push_back({object, 0});
+	}
+	for (const Drone& drone : m_drones) {
+		live.push_back({drone.object, drone.target >= 0 ? 1u : 0u});
+	}
+	for (auto& [object, messages] : live) {
+		if (const auto hp = m_hitPoints.find(object); hp != m_hitPoints.end() && hp->second <= 0) {
+			messages |= 0x20;
+		}
+	}
+	// Gone: dropped.
+	for (auto it = m_objectAnimations.begin(); it != m_objectAnimations.end();) {
+		const bool kept = m_objects.find(it->object)
+			&& std::any_of(live.begin(), live.end(), [&](const auto& l) { return l.first == it->object; });
+		if (kept) {
+			++it;
+			continue;
+		}
+		m_bonedObjects.erase(it->object);
+		it = m_objectAnimations.erase(it);
+	}
+	for (const auto& entry : live) {
+		const uint32_t object = entry.first;
+		const uint32_t messages = entry.second;
+		auto it = std::find_if(m_objectAnimations.begin(), m_objectAnimations.end(),
+			[&](const ObjectAnimation& a) { return a.object == object; });
+		if (it == m_objectAnimations.end()) {
+			const world::Object* o = m_objects.find(object);
+			if (!o || !o->objectTemplate()) {
+				continue;
+			}
+			ObjectAnimation added;
+			added.object = object;
+			loadBundleAnimation(*o->objectTemplate(), added.animation, added.skeleton, added.pose, added.boneParts);
+			if (added.animation && added.skeleton && !added.boneParts.empty()) {
+				m_bonedObjects.insert(object);
+			}
+			m_objectAnimations.push_back(std::move(added));
+			it = std::prev(m_objectAnimations.end());
+		}
+		if (!it->animation) {
+			continue;
+		}
+		anim::AnimationInput input;
+		input.movementSeconds = seconds;
+		input.messages = messages;
+		it->animation->update(input, seconds);
+		it->animation->takeEvents();
+		it->posed = false;
+	}
+}
+
 void GameWorld::stepObjectAnimation(Body& b, float seconds)
 {
 	if (!b.animation) {
@@ -9698,43 +10078,11 @@ void GameWorld::stepObjectAnimation(Body& b, float seconds)
 			const auto found = t->settings().find("bundleAnimationSystem");
 			path = found != t->settings().end() ? found->second : std::string();
 		}
-		if (path.empty()) {
+		if (path.empty() || !loadBundleAnimation(*t, b.animation, b.bundleSkeleton, b.bonePose, b.boneParts)) {
 			return;
 		}
-		if (const anim::AnimationSystemTemplate* system = m_loadAnimationSystem(path)) {
-			b.animation = std::make_unique<anim::AnimationState>(*m_animationSystems, *system);
-		}
-		if (!b.animation) {
-			return;
-		}
-		// The skeleton helper (0x0063d340): the template's bundleSkeleton
-		// (+0x274) as the system's skeleton instance (+0x24), and the parts
-		// it poses: the object's tree with a boneIndex (template slot 0xc8,
-		// SimpleObject +0x60; 0x0063d5e0), each by its bone.
-		const auto skeleton = t->settings().find("bundleSkeleton");
-		b.bundleSkeleton = skeleton != t->settings().end() ? m_animationSystems->skeleton(skeleton->second) : nullptr;
-		if (b.bundleSkeleton) {
-			b.bonePose = anim::setupPose(*b.bundleSkeleton);
-			const std::function<void(const world::ObjectTemplate&, int)> collect = [&](const world::ObjectTemplate& node, int depth) {
-				if (depth > 12) {
-					return;
-				}
-				for (const world::ChildTemplate& child : node.children()) {
-					const world::ObjectTemplate* c = m_templates.find(child.name);
-					if (!c) {
-						continue;
-					}
-					const int bone = static_cast<int>(number(*c, "boneIndex", -1));
-					if (bone >= 0 && static_cast<size_t>(bone) < b.bundleSkeleton->nodes.size()) {
-						b.boneParts.push_back({c->name(), bone, {}});
-					}
-					collect(*c, depth + 1);
-				}
-			};
-			collect(*t, 0);
-			if (!b.boneParts.empty()) {
-				m_bonedObjects.insert(b.object);
-			}
+		if (!b.boneParts.empty()) {
+			m_bonedObjects.insert(b.object);
 		}
 	}
 	static const Vehicle::Legs kNoLegs {};
@@ -9785,6 +10133,11 @@ std::vector<std::string> GameWorld::objectAnimation(uint32_t object) const
 	for (const Body& b : m_bodies) {
 		if (b.object == object && b.animation) {
 			return b.animation->playing();
+		}
+	}
+	for (const ObjectAnimation& a : m_objectAnimations) {
+		if (a.object == object && a.animation) {
+			return a.animation->playing();
 		}
 	}
 	return {};
@@ -9911,6 +10264,7 @@ void GameWorld::stepPhysics(float seconds)
 			stepObjectAnimation(b, seconds);
 		}
 	}
+	stepDeployableAnimations(seconds);
 	collideBodies(seconds);
 	for (Body& b : m_bodies) {
 		world::Object* object = m_objects.find(b.object);

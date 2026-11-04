@@ -316,14 +316,62 @@ void ItemSelection::open(const std::vector<SelectItem>& items, int selectedIndex
 		}
 	}
 	m_shown = next > 0; // 0x0079c630
+	m_seconds = seconds;
 	m_timer = seconds;
+	m_flash = -1;
+	m_flashCount = 0;
+	m_flashTimer = -1;
+}
+
+void ItemSelection::flash(int itemIndex)
+{
+	// 0x0079c190: the old flash's slot shown, six toggles 0.1 s apart, the
+	// slot of the index (0 without one) and the open time anew.
+	if (m_flash >= 0 && static_cast<size_t>(m_flash) < m_slots.size()) {
+		m_slots[static_cast<size_t>(m_flash)].active = true;
+	}
+	m_flashCount = 6;
+	m_flashTimer = 0.1f;
+	m_flash = 0;
+	for (size_t i = 0; i < m_slots.size(); ++i) {
+		if (m_slots[i].active && m_slots[i].index == itemIndex) {
+			m_flash = static_cast<int>(i);
+			break;
+		}
+	}
+	m_timer = m_seconds;
 }
 
 void ItemSelection::update(hud::HudManager& hud, float dt)
 {
-	// 0x0079c050: the timer runs down; at its end the list closes.
-	if (m_shown) {
+	// 0x0079c050: the timer runs down; at its end the list closes (the
+	// flashing slot shown again). While a key's pick flashes, each 0.1 s
+	// its slot's Active flips and the open time starts again; after the
+	// sixth the flash ends.
+	if (!m_shown || m_timer < 0) {
+		if (m_flash >= 0 && static_cast<size_t>(m_flash) < m_slots.size()) {
+			m_slots[static_cast<size_t>(m_flash)].active = true;
+		}
+		m_shown = false;
+		m_timer = -1;
+		m_flash = -1;
+		m_flashCount = 0;
+		m_flashTimer = -1;
+	} else {
 		m_timer -= dt;
+		if (m_flashTimer >= 0) {
+			m_flashTimer -= dt;
+		}
+		if (m_flash >= 0 && m_flashCount > 0 && m_flashTimer <= 0) {
+			Slot& slot = m_slots[static_cast<size_t>(m_flash)];
+			slot.active = !slot.active;
+			m_timer = m_seconds;
+			m_flashTimer = 0.1f;
+			if (--m_flashCount < 1) {
+				m_flash = -1;
+				m_flashTimer = -1;
+			}
+		}
 		if (m_timer < 0) {
 			m_shown = false;
 			m_timer = -1;

@@ -1306,6 +1306,31 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	} else {
 		g_inHandSlot = -1;
 	}
+	// In a seat a weapon key's pick opens it (0x004d2a50 -> 0x0079c190): the
+	// list is the seat's PIFire group (0x0079c470: the control object's
+	// weapon list 0, the soldier's when it has none) by item index, each
+	// dimmed when it can't be selected (0x0079c290: slot 0x170), open
+	// 0.4 s (+0x20 = 0x3ecccccd) with the key's slot flashing.
+	if (inVehicle && !world.joined()) {
+		if (const int key = round.takeSeatItemSelect(world.localPlayer()); key > 0) {
+			game::GameWorld::PlayerInfo me;
+			if (world.playerInfo(world.localPlayer(), me) && me.vehicle) {
+				const auto seats = round.vehicleSeats(me.vehicle);
+				if (me.seat >= 0 && static_cast<size_t>(me.seat) < seats.size()) {
+					std::vector<dice::hfe::menu::SelectItem> items;
+					for (const game::GameWorld::SeatWeapon& w : seats[static_cast<size_t>(me.seat)].weapons) {
+						if (w.group == 0) {
+							items.push_back({w.itemIndex,
+								dice::hfe::menu::hudSetting(round.templates().find(w.weapon), "weaponHud.selectIcon"),
+								w.selectable});
+						}
+					}
+					g_itemSelection.open(items, key, 0.4f);
+					g_itemSelection.flash(key);
+				}
+			}
+		}
+	}
 	g_itemSelection.update(hud, dt);
 	const int team = world.playerTeam() == 1 ? 1 : 2, enemy = 3 - team;
 	hud.setString("FriendlyTicketsString", std::to_string(static_cast<int>(world.tickets(team))));

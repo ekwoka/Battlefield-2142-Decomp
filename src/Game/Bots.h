@@ -1127,6 +1127,16 @@ private:
 	// weaponTemplate, by index into the seat's SeatLayout::weapons; without
 	// the AI scripts (the tests) the seat's active weapon alone.
 	std::vector<std::pair<int, std::string>> seatArmament(const GameWorld::PlayerInfo& self) const;
+	// Whether the bot works a seat's gun (its aim the gun's, its weapons
+	// the seat's): a gunner's (`gunner`, the site's own test), or a ground
+	// driver's whose look turns the root's turret or barrel
+	// (GameWorld::seatTurnsGun: the driver's ControlInfo aims with
+	// PIMouseLookX / PIMouseLookY, the hover tank's with PIRoll / PIPitch;
+	// the Tank, FloatingTank, Mech and ArmedCar sets' Fire is
+	// BBFireInfantery, whose plan aims and triggers the driver's weapons
+	// as a gunner's, MouseTurretAimAt and Trigger among their interpreter
+	// entries).
+	bool drivesGun(const GameWorld::PlayerInfo& self) const;
 	std::string seatWeaponName(const GameWorld::PlayerInfo& self, int index) const; // -1: the active one
 	std::string weaponName(const GameWorld::PlayerInfo& self, int slot) const;
 	float projectileSpeed(const std::string& weapon) const;

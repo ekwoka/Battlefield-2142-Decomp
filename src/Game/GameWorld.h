@@ -949,8 +949,36 @@ public:
 		// does, and while it is held that input fires nothing (0x005c69a0 in
 		// 0x005c50e0). toggleWeapon (+0x420) has no reader in BF2142.exe.
 		int specialToggleInput = -1;
+		// The bundles the seat's look turns: the first RotationalBundle of its
+		// subtree with an inputToYaw / inputToPitch that the mouse gives
+		// (PIMouseLookX / PIMouseLookY; in the land and air maps the mouse's
+		// x and y are also PIRoll / PIPitch, which a driver's barrel takes on
+		// the hover tank, AS_TANK_barrelbase, only counted with a firearm
+		// under it); PICameraX / PICameraY bundles (hatches, AS_TANK_Cupola1)
+		// aren't the look's.
 		std::string yawBundle, pitchBundle;
 		float minPitch = -90, maxPitch = 90; // the pitch bundle's limits (its rotation's y; down positive)
+		// The seat's other bundles on the same pitch input (the heavy mechs'
+		// rocket racks, cannon mounts and camera mounts all take
+		// PIMouseLookY): each turns with the look within its own limits.
+		struct PitchPart {
+			std::string name;
+			float minPitch = -90, maxPitch = 90;
+		};
+		std::vector<PitchPart> morePitchBundles;
+		// What carries a part of the seat in the vehicle (seatMount): the
+		// seat whose yaw bundle it sits under (eu_tank's cupola on the
+		// driver's turret, the heavy mechs' second positions on the torso's
+		// turret; -1 none), and the bone part above it (boneIndex: the mechs'
+		// torsospring; empty none) with that part's place at rest.
+		struct Anchor {
+			int yawSeat = -1;
+			std::string bone;
+			physics::Vec3 boneAt;
+			physics::Mat3 boneTurn;
+		};
+		Anchor gunAnchor;  // the gun's bundles and firearms
+		Anchor seatAnchor; // the seat's own place (the sitter)
 		physics::Vec3 rotation;      // seatInformation's yaw/pitch/roll, degrees
 		std::string animationSystem; // seatAnimationSystem: the sitter's pose (empty: hidden)
 		// The yaw bundle's frame in the vehicle (its parents' turn: the
@@ -1024,6 +1052,14 @@ public:
 		float& pitchTurn);
 	static float regulatedInput(float input, float regulated);
 	bool gunAim(uint32_t vehicle, int seat, float& yaw, float& pitch) const;
+	// Whether the seat's look turns its gun (seatAims): every gunner with a
+	// gun bundle, and the ground drivers whose turret or barrel is theirs
+	// (eu_tank's turret, the APCs' first position, the mechs' torso, the
+	// hover tank's barrel); not a pilot.
+	bool seatTurnsGun(uint32_t vehicle, int seat) const;
+	// The item selection a weapon key opened in a seat (0x004d2a50 ->
+	// 0x0079c190 for the local player): the key's item index, once; 0 none.
+	int takeSeatItemSelect(int player);
 	// A seat gun's next round's start in the world and the hull's turn
 	// (the gun's yaw and pitch are in the hull's frame): what stepGunner
 	// fires from (seatGunOrigin, the next barrel), for the bots' aim.
@@ -1825,13 +1861,17 @@ private:
 
 	void seatPlayer(Player& player, Body& body, int seat);
 	// `groups`: which weapon groups fire (bit 0 PIFire, 1 PIAltFire, 2
-	// PIFlareFire; a ground driver's only the last).
+	// PIFlareFire); `aims`: the look turns the seat's bundles (not a
+	// pilot's, whose mouse flies the vehicle).
 	void stepGunner(Player& player, Body& body, float seconds, bool aims = true, unsigned groups = 7);
 	// A seat's weapon choice (0x004d2a50 for the player's control object):
 	// c_PIWeaponSelect1..9 take the weapon of that item index in each group
 	// (selectable and usable, slot 0x170), c_PIToggleWeapon and the seat's
 	// specialToggleWeaponInput the next of the group by item index.
 	void selectSeatWeapons(Player& player, Body& body, const SeatLayout& seat);
+	// The player's may-use test (player slot 0x384, 0x005921e0; see
+	// GameWorld.cpp): `selectable` the weapon's slot 0x170.
+	bool mayUseWeapon(const Player& player, const std::string& weapon, bool selectable, bool forced) const;
 	// Makes `index` its group's active weapon (0x005c9840): the old one's
 	// disable (slot 0x1a8), the new one's enable (0x1a4).
 	void activateSeatWeapon(Body& body, int seat, const SeatLayout& layout, int index);
@@ -1841,6 +1881,26 @@ private:
 	// The active defence (ADS): its shield on the body, and a projectile
 	// with activeDefenseEnabled entering it (0x006c07a0 -> 0x006bf220).
 	void raiseShield(Body& body, const SeatWeapon& weapon, const FireArm& firearm);
+	// Where a seat's part sits now (SeatLayout::Anchor): the layout's
+	// at-rest place (vehicle frame) carried by the yaw of the seat whose
+	// turret it rides (about that seat's yaw pivot) and by its bone part's
+	// posed matrix in place of that part's placement (0x0063d470 -> slot
+	// 0xe8, as partBone gives it to the drawing).
+	struct SeatMount {
+		physics::Mat3 turn;
+		physics::Vec3 at;
+		physics::Vec3 place(const physics::Vec3& v) const { return at + turn.transform(v); }
+	};
+	SeatMount seatMount(const Body& body, const VehicleLayout& layout, const SeatLayout::Anchor& anchor) const;
+	// The frame the seat's gun turns in (the mount's turn on the hull's).
+	physics::Mat3 gunHull(const Body& body, const VehicleLayout& layout, const SeatLayout& seat) const
+	{
+		return seatMount(body, layout, seat.gunAnchor).turn * body.body.rotation;
+	}
+	// Whether a seat's guns turn with its look: a bundle the look turns
+	// (yawBundle / pitchBundle); a flying vehicle's pilot keeps its guns
+	// along the hull (the mouse flies it).
+	bool seatAims(const Body& body, int seat) const;
 	static physics::Vec3 seatGunOrigin(const SeatLayout& seat, const SeatWeapon& weapon, Body::Gun& gun, int& barrel);
 	static physics::Vec3 seatGunOrigin(const SeatLayout& seat, const SeatWeapon& weapon, float gunYaw, float gunPitch, int& barrel);
 	Body* findBody(uint32_t object);
@@ -2020,6 +2080,7 @@ private:
 		float sentShake = 0;    // player +0x1d8 (cameraShake), for
 		int sentShakeRecords = 0; // +0x1dc more records (takeSentShake)
 		bool toggleFireWas = false; // c_PIToggleFireRate last tick
+		int seatItemSelect = 0;     // a seat weapon taken by its key, for the item selection (takeSeatItemSelect)
 		bool reloadWas = false;     // c_PIReload last tick
 		uint32_t reloadPresses = 0; // its presses (PlayerInfo::reloadPresses)
 		GunSway sway;
@@ -2375,6 +2436,30 @@ private:
 		DeviationBuildUp gunDeviation; // the gun's firing build-up (setFireDev)
 	};
 	std::vector<Drone> m_drones;
+	// The deployables' own animation systems (spawn_beacon, the hubs, the
+	// portable shield, the sentry gun): objects that aren't bodies here but
+	// get the skeleton helper as every object does (the object base's
+	// constructor 0x0063d530 builds it, 0x0063d340, for a template with a
+	// bundleSkeleton, +0x274; its update 0x0063d5b0 -> 0x0063d470 poses the
+	// boneIndex parts). Kept by object; `tried` with no system.
+	struct ObjectAnimation {
+		uint32_t object = 0;
+		std::unique_ptr<anim::AnimationState> animation;
+		const anim::Skeleton* skeleton = nullptr;
+		anim::LocalPose pose;
+		std::vector<Body::BonePart> boneParts;
+		bool posed = false;
+	};
+	std::vector<ObjectAnimation> m_objectAnimations;
+	void stepDeployableAnimations(float seconds);
+	// A template's bundleAnimationSystem and bundleSkeleton (0x0063d340) and
+	// its boneIndex parts (0x0063d5e0); false without a system.
+	bool loadBundleAnimation(const world::ObjectTemplate& t, std::unique_ptr<anim::AnimationState>& animation,
+		const anim::Skeleton*& skeleton, anim::LocalPose& pose, std::vector<Body::BonePart>& parts);
+	// The bone parts' matrices from the skeleton's pose (0x008b8880 then
+	// 0x0063d470's hand-out).
+	static void poseBoneParts(anim::AnimationState& animation, const anim::Skeleton& skeleton, anim::LocalPose& pose,
+		std::vector<Body::BonePart>& parts);
 	// Soldiers killed in a seat that has a die bundle: the body stays,
 	// slumped by the seat's animation system (0x005cea00, 0x005ed890).
 	struct SeatCorpse {

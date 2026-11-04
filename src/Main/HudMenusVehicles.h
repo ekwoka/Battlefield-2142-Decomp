@@ -217,8 +217,15 @@ public:
 	void bind(Console& console); // ItemSelection.setReverseItems
 	void setReverse(bool reverse) { m_reverse = reverse; }
 	bool reverse() const { return m_reverse; }
-	// Opens the list (for `seconds`) with the item in hand selected.
+	// Opens the list (for `seconds`, the selection's +0x20) with the item in
+	// hand selected.
 	void open(const std::vector<SelectItem>& items, int selectedIndex, float seconds = 2.0f);
+	// A weapon key's pick (0x0079c190): the slot of that item index (+0x18;
+	// the first without one) flashes, its ItemSlot%iActive toggled every
+	// 0.1 s six times (+0x1c, +0x28; 0x0079c050 opens the list again for
+	// its seconds at each toggle), the last flash's slot shown again.
+	void flash(int itemIndex);
+	int flashing() const { return m_flash; }
 	// Each frame: the timer and the variables.
 	void update(hud::HudManager& hud, float dt);
 	bool shown() const { return m_shown; }
@@ -235,7 +242,11 @@ private:
 	bool m_reverse = false; // +8
 	bool m_shown = false;   // +9
 	int m_selected = -1;    // +0xc
+	int m_flash = -1;       // +0x18: the flashing slot
+	int m_flashCount = 0;   // +0x1c: toggles left
+	float m_seconds = 10;   // +0x20: how long it stays open (the constructor's 10)
 	float m_timer = -1;     // +0x24
+	float m_flashTimer = -1; // +0x28: to the next toggle
 	std::array<Slot, 10> m_slots;
 };
 

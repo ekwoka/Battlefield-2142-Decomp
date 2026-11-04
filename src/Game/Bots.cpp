@@ -1166,6 +1166,11 @@ std::vector<std::pair<int, std::string>> BotManager::seatArmament(const GameWorl
 	return items;
 }
 
+bool BotManager::drivesGun(const GameWorld::PlayerInfo& self) const
+{
+	return self.vehicle && self.driving && m_world.seatTurnsGun(self.vehicle, self.seat);
+}
+
 std::string BotManager::seatWeaponName(const GameWorld::PlayerInfo& self, int index) const
 {
 	const auto seats = const_cast<GameWorld&>(m_world).vehicleSeats(self.vehicle);
@@ -1651,7 +1656,7 @@ void BotManager::sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::v
 	// frustum of half-angle fov/2), seen when one of
 	// clamp(round(30 radius / d), 1, 10) rays is clear.
 	float gunYaw = 0, gunPitch = 0;
-	const bool gunning = self.vehicle && !self.driving && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
+	const bool gunning = self.vehicle && (!self.driving || drivesGun(self)) && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
 	const float lookYaw = gunning ? self.yaw + gunYaw : self.yaw;
 	const float lookPitch = gunning ? gunPitch : bot.pitch;
 	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight - 0.1f, 0};
@@ -2610,7 +2615,7 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 {
 	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight, 0};
 	float gunYaw = 0, gunPitch = 0;
-	const bool gunning = self.vehicle && !self.driving && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
+	const bool gunning = self.vehicle && (!self.driving || drivesGun(self)) && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
 	if (self.vehicle && !gunning && !self.driving) {
 		bot.target = -1;
 		return 0; // a seat without a gun
@@ -2875,7 +2880,7 @@ void BotManager::pickWeapon(Bot& bot, const GameWorld::PlayerInfo& self, const s
 		return;
 	}
 	float gunYaw = 0, gunPitch = 0;
-	const bool gunning = self.vehicle && !self.driving && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
+	const bool gunning = self.vehicle && (!self.driving || drivesGun(self)) && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
 	std::vector<std::pair<int, std::string>> weapons;
 	if (gunning) {
 		weapons = seatArmament(self);
@@ -4950,7 +4955,7 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 	}
 	const AimGains& g = bot.gains;
 	float gunYaw = 0, gunPitch = 0;
-	const bool gunning = self.vehicle && self.seat > 0 && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
+	const bool gunning = self.vehicle && (self.seat > 0 || drivesGun(self)) && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
 	// A seat's gun aims from its round's start (the weapon's position,
 	// AIDLL 0x1008e940: FUN_100a4090) along its own forward, which turns with the
 	// hull: the angles are the hull's frame's, as the gun's yaw and pitch.
@@ -5191,7 +5196,7 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 		+ physics::Vec3 {0, target.vehicle ? 1.0f : kChestHeight, 0};
 	physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight, 0};
 	float gunYaw = 0, gunPitch = 0;
-	const bool gunning = self.vehicle && self.seat > 0 && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
+	const bool gunning = self.vehicle && (self.seat > 0 || drivesGun(self)) && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
 	physics::Mat3 hull;
 	if (gunning) {
 		m_world.gunFrame(self.vehicle, self.seat, eye, hull); // as the aim: from the gun, in the hull's frame
@@ -5227,7 +5232,7 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 			}
 		}
 	} else if (self.vehicle) {
-		return; // a driver's guns are not aimed by the bots yet
+		return; // a seat without a gun its look turns (the FAV's driver)
 	} else {
 		weaponTemplate = weaponName(self, bot.weaponSlot);
 		if (self.inHandSlot != bot.weaponSlot) {
@@ -5309,6 +5314,25 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 			walkAside = true;
 			input.turn = 0;
 			moving = !bot.lobHold;
+		}
+	} else if (self.vehicle && self.driving) {
+		// The vehicle's fire plan (0x100795a0 for a bot whose object has a
+		// Mobile part, +0x3c: from LAB_10079dde) keeps its distance by an
+		// ObjectDistance condition (0x100d44c0, vtable 0x1011a6d8: the
+		// squared distance against (minRange x 0.9)^2 and ((maxRange +
+		// 1.25 dh over 5 m up) x 1.1)^2, its evaluation 0x100d4620) over a
+		// move at the target (0x100cff90 at a Mobile target, else
+		// MoveToFinding 0x100d11c0, at its Mobile maxSpeed; the rest of the
+		// sequence isn't decoded). The rewrite: beyond that reach the driver
+		// drives at the target (the vehicles' MoveTo, drive), within it it
+		// stops; the aim and the trigger run beside it as a gunner's.
+		const float dh = known->position.y - self.position.y;
+		const float reach = (weapon.maxRange > 0 ? weapon.maxRange : 100.0f) + (dh > 5 ? 1.25f * dh : 0.0f);
+		if (distance > 1.1f * reach) {
+			drive(bot, self, target.position, 400000 + target.id, seconds, input);
+		} else {
+			input.throttle = 0;
+			input.strafe = 0;
 		}
 	} else if (!self.vehicle && weapon.type != WeaponAi::FireAndForget) {
 		if (distance > 1.1f * std::max(bot.preferredRange, weapon.minRange + 1)) {
