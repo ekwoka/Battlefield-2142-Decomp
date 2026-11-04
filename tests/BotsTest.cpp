@@ -34,6 +34,7 @@ using namespace dice::hfe;
 namespace {
 
 bool near(float a, float b, float eps = 1e-4f) { return std::fabs(a - b) <= eps; }
+float horizontal2(const physics::Vec3& d) { return d.x * d.x + d.z * d.z; }
 
 // The bot manager's frames for a while: a bot runs its plan on about half
 // of them, thinks after 0.3 s (0.5 s with a plan) of them and senses when
@@ -3017,4 +3018,236 @@ TEST(Bots_Fire3dScoresKnownEnemies)
 	(void)mate;
 	CHECK(bots.knows(bot, enemy));
 	CHECK(urgency > 0 && bots.target(bot) == enemy);
+}
+
+// The goal objects (src/AI/Goals): a waypoint goal is done within its
+// reach (0x1008aaa0); a patrol puts the head to the back within its reach
+// (0x1008b6c0, at least 5 m); Patrol3d compares the bot's height with the
+// point's x (0x1008b920, as the original does); a fly-to of several points
+// moves on within both reaches or once the bot gets farther (0x1008b230).
+TEST(Bots_ScriptedGoals)
+{
+	ai::Goal move = ai::moveToGoal(3, {10, 0, 0});
+	CHECK(move.kind == ai::Goal::Kind::Waypoints && move.areaRadius == 60);
+	CHECK(ai::goalUrgency(move, {0, 0, 0}, 100, 1.15f) > 0 && !move.done);
+	CHECK(ai::goalUrgency(move, {9, 0, 0}, 1, 1.15f) == 0 && move.done);
+
+	ai::Goal patrol = ai::patrolGoal(2, {{0, 0, 0}, {20, 0, 0}});
+	CHECK(patrol.radius == 5); // raised to 5
+	CHECK(ai::goalUrgency(patrol, {3, 50, 0}, 0, 1) == 1); // within 5 m horizontally
+	ai::Vec3 head;
+	CHECK(ai::goalPoint(patrol, head) && head.x == 20 && patrol.points.size() == 2);
+	CHECK(ai::goalUrgency(patrol, {10, 0, 0}, 0, 1) == 1 && ai::goalPoint(patrol, head) && head.x == 20);
+
+	ai::Goal ring = ai::patrol3dGoal(4, {{30, 0, 0}, {0, 0, 0}});
+	ai::goalUrgency(ring, {30, 0, 0}, 0, 1); // y 0 against x 30: no
+	CHECK(ai::goalPoint(ring, head) && head.x == 30);
+	ai::goalUrgency(ring, {30, 25, 0}, 0, 1); // |25 - 30| under 10
+	CHECK(ai::goalPoint(ring, head) && head.x == 0);
+
+	ai::Goal fly = ai::flyToGoal(10, 5, {0, 100, 0});
+	CHECK(fly.kind == ai::Goal::Kind::Fly);
+	CHECK(ai::goalUrgency(fly, {100, 100, 0}, 0, 1) == 1);
+	CHECK(near(ai::goalUrgency(fly, {3, 90, 4}, 0, 1), (100 + 25) / (25 + 100.0f))); // inside both reaches: (dy² + d²) / (h² + r²)
+	CHECK(ai::goalUrgency(fly, {3, 90, 4}, 0, 1, true) == 0); // holding within 50 m
+	ai::Goal route = ai::flyToGoal(10, 5, {0, 100, 0});
+	route.points.push_back({0, 100, 500});
+	ai::goalUrgency(route, {0, 100, -300}, 0, 1);
+	ai::goalUrgency(route, {0, 100, -200}, 0, 1); // closer: kept
+	CHECK(route.points.size() == 2);
+	ai::goalUrgency(route, {0, 100, 300}, 0, 1); // farther than at the last look: passed
+	CHECK(route.points.size() == 1 && route.newPoint);
+}
+
+// A side's knowledge of a unit (0x100a9b60, 0x100a9b90): 1 while sensed,
+// then 1 - S(t / degeneration); a degeneration of 0 keeps it at 1. The
+// strategy's time (0x100a0130): at once the first time, then after
+// timeLimit, 1.5 timeLimit...
+TEST(Bots_KnowledgeCertaintyAndStrategyTime)
+{
+	CHECK(ai::knowledgeCertainty(true, 100, 10) == 1);
+	CHECK(near(ai::knowledgeCertainty(false, 5, 10), 1 - ai::scurve(0.5f)));
+	CHECK(ai::knowledgeCertainty(false, 20, 10) == 0);
+	CHECK(ai::knowledgeCertainty(false, 20, 0) == 1);
+	CHECK(ai::strategyTimeUp(0, 0, 100));
+	CHECK(!ai::strategyTimeUp(99, 1, 100) && ai::strategyTimeUp(100, 1, 100));
+	CHECK(!ai::strategyTimeUp(149, 2, 100) && ai::strategyTimeUp(150, 2, 100));
+	CHECK(!ai::strategyTimeUp(1e8f, 5, 1e9f));
+}
+
+// The rest of AIDLL's settings commands (src/Game/BotsScript.cpp): the
+// bot names (a random order, the first six towards the front; the head
+// goes to the back), the auto controllers' templates over their defaults
+// (0x100a8ed0), the interpreter table, the scheduling.
+TEST(Bots_SettingsCommands)
+{
+	Console console;
+	game::BotSettings settings;
+	game::registerBotConsoleMethods(console, settings);
+	std::string out;
+	for (const char* line : {"aiSettings.addBotName S. Wallberg", "aiSettings.addBotName T. Karlsson",
+			 "aiSettings.setNSides 2", "aiSettings.setMaxNAutoControllers 256", "aiSettings.maxBotsIncludeHumans 0",
+			 "aiSettings.setInformationGridDimension 16", "aiSettings.setVehicleClusterMapping Car Tank",
+			 "aiSettings.setManDownEquipment ManDown", "aiSettings.addInterpreterEntry Tank TankMoveTo",
+			 "aiSettings.addInterpreterEntry Tank Sense", "aiSettings.removeInterpreterEntry Tank Sense",
+			 "autoControllerTemplate.create SentryGun", "autoControllerTemplate.fov 30",
+			 "autoControllerTemplate.viewDistance 63", "autoControllerTemplate.useSiren 1",
+			 "aiBotManager.setDecisionMakingInterleave 3 1", "aiBotManager.setPlannedDecisionMakingThreshold -0.25"}) {
+		CHECK(console.execute(line, out) == ConsoleResult::Ok);
+	}
+	CHECK(settings.sides == 2 && settings.maxAutoControllers == 256 && !settings.maxBotsIncludeHumans);
+	CHECK(settings.informationGridDimension == 16 && settings.clusterMapping.at("Car") == "Tank");
+	CHECK(settings.manDownEquipment == "ManDown");
+	CHECK(settings.interpreter.at("Tank") == std::vector<std::string> {"TankMoveTo"});
+	CHECK(settings.moveInterpreter("Tank") == "TankMoveTo" && settings.moveInterpreter("Mech") == "MechMoveTo"); // the table, the shipped one
+	const game::BotSettings::AutoControllerTemplate* sentry = settings.autoController("sentrygun");
+	CHECK(sentry && sentry->fov == 30 && sentry->viewDistance == 63 && sentry->useSiren);
+	CHECK(sentry && near(sentry->scanningSpeed, 0.03f) && sentry->accuracy == 0.5f && sentry->maxTrackingInput == 4);
+	CHECK(settings.plannedInterleave == 3 && settings.unplannedInterleave == 1 && settings.plannedThreshold == 0.25);
+	const std::string first = settings.nextBotName();
+	const std::string second = settings.nextBotName();
+	CHECK(first != second && (first == "S. Wallberg" || first == "T. Karlsson"));
+	CHECK(settings.nextBotName() == first);
+	CHECK(console.execute("ai.addUnspawnedBot Someone 1 x", out) == ConsoleResult::Ok && out == "-1");
+}
+
+// The scripted-bot commands on a running manager: ai.botMoveTo <radius>
+// <x/y/z> <bot> takes the place of the SAI's orders until the bot is
+// there (0x100284a0); ai.botSetWaypoints_Patrol walks a ring (0x10028680);
+// ai.deactivateBot takes the bot out of the AI (0x10055f80).
+TEST(Bots_ScriptedMoveToAndPatrol)
+{
+	Field field;
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	game::BotManager bots(*field.world, settings);
+	bots.attach(settings);
+	const int bot = field.soldier(2, true, -100, 0);
+	field.world->joinSquad(bot, 1);
+	std::string out;
+	console.execute("ai.botMoveTo 3 -100/0/50 " + std::to_string(bot), out);
+	CHECK(bots.scriptedGoal(bot) != nullptr);
+	game::GameWorld::PlayerInfo info;
+	float closest = 1e9f;
+	for (int tick = 0; tick < 30 * 20; ++tick) {
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+		field.world->playerInfo(bot, info);
+		closest = std::min(closest, horizontal2(info.position - physics::Vec3 {-100, 0, 50}));
+	}
+	CHECK(closest < 4 * 4);
+	CHECK(bots.scriptedGoal(bot) == nullptr); // done: the SAI's orders again
+
+	console.execute("ai.botSetWaypoints_Patrol " + std::to_string(bot) + " 5 2 -100/0/30 -70/0/30", out);
+	float nearA = 1e9f, nearB = 1e9f;
+	int laps = 0;
+	bool wasB = false;
+	for (int tick = 0; tick < 30 * 40; ++tick) {
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+		field.world->playerInfo(bot, info);
+		const float a = horizontal2(info.position - physics::Vec3 {-100, 0, 30});
+		const float b = horizontal2(info.position - physics::Vec3 {-70, 0, 30});
+		nearA = std::min(nearA, a);
+		nearB = std::min(nearB, b);
+		if (b < 36 && !wasB) {
+			++laps;
+		}
+		wasB = b < 36;
+	}
+	CHECK(nearA < 36 && nearB < 36 && laps >= 2);
+	CHECK(console.execute("ai.deactivateBot " + std::to_string(bot), out) == ConsoleResult::Ok && out == "1");
+	CHECK(bots.deactivated(bot) && bots.behaviour(bot).empty());
+	CHECK(console.execute("ai.getNumberOfDeactivedBots", out) == ConsoleResult::Ok && out == "1");
+}
+
+// aiStrategy.forceStrategy <name> <side> (0x1003a720): the side runs it at
+// every update; an unknown name clears it.
+TEST(Bots_ForceStrategy)
+{
+	Field field;
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	std::string out;
+	for (const char* line : {"aiStrategy.createStrategy attack", "aiStrategy.NumberOfAttacks 1", "aiStrategy.createStrategy hold",
+			 "aiStrategy.NumberOfDefences 1", "ai.addSAIStrategy 2 attack", "ai.addSAIStrategy 2 hold"}) {
+		console.execute(line, out);
+	}
+	game::BotManager bots(*field.world, settings);
+	bots.attach(settings);
+	const int bot = field.soldier(2, true, -100, 0);
+	field.world->joinSquad(bot, 1);
+	settle(bots, 2, field.world.get());
+	CHECK(console.execute("aiStrategy.forceStrategy hold 2", out) == ConsoleResult::Ok && out == "Strategy is activated : hold");
+	settle(bots, 2, field.world.get());
+	CHECK(bots.strategy(2) == "hold");
+	CHECK(console.execute("aiStrategy.forceStrategy hold 3", out) == ConsoleResult::Ok
+		&& out.rfind("Side must be 1 or 2", 0) == 0);
+	console.execute("aiStrategy.forceStrategy nothing 2", out);
+	CHECK(out == "No active strategy chosen : nothing" && bots.liveSettings().strategy.forced[2].empty());
+}
+
+// A side knows an enemy soldier only once its bots saw it (the side's AI
+// object of it, 0x008a2f00 -> 0x1003b900), fully while one sees it, then
+// fading over the template's degeneration (0x100a9b90).
+TEST(Bots_SideKnowledge)
+{
+	Field field;
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	std::string out;
+	for (const char* line : {"aiTemplate.create SoldierAi", "aiTemplate.degeneration 10"}) {
+		console.execute(line, out);
+	}
+	for (const char* name : {"us_light_soldier", "pac_light_soldier"}) {
+		field.templates.find(name)->settings()["aiTemplate"] = "SoldierAi";
+	}
+	game::BotManager bots(*field.world, settings);
+	const int bot = field.soldier(2, true, -100, 0);
+	const int enemy = field.soldier(1, false, -100, 300); // far out of sight
+	settle(bots, 2, field.world.get());
+	CHECK(bots.certainty(2, enemy) == 0 && bots.certainty(1, bot) == 0 && bots.certainty(2, bot) == 1);
+	game::GameWorld::PlayerInfo me;
+	field.world->playerInfo(bot, me);
+	field.move(enemy, me.position.x + 4, me.position.z + 1); // close: seen whatever the view
+	settle(bots, 1, field.world.get());
+	CHECK(bots.knows(bot, enemy) && bots.certainty(2, enemy) == 1);
+	field.move(enemy, -100, 400);
+	settle(bots, 6, field.world.get());
+	const float fading = bots.certainty(2, enemy);
+	CHECK(fading > 0 && fading < 1);
+	settle(bots, 10, field.world.get());
+	CHECK(bots.certainty(2, enemy) == 0);
+}
+
+// The shipped AI scripts give the settings these commands keep: the bot
+// names (BotNames.ai), the interpreter table and cluster mappings
+// (AIBehaviours.ai), the auto controllers (AutoControllers.ai).
+TEST(Bots_ShippedSettingsScripts)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	Console console {&files};
+	game::BotSettings settings;
+	game::registerBotConsoleMethods(console, settings);
+	std::string out;
+	CHECK(console.run("AI/AIBehaviours.ai", {}, out));
+	CHECK(console.run("AI/AIDefault.ai", {}, out));
+	CHECK(settings.botNames.size() >= 50);
+	CHECK(settings.interpreter.count("Tank") && settings.interpreter.at("Tank").front() == "InfoWrapper");
+	CHECK(settings.clusterMapping.count("Car") && settings.clusterMapping.at("Car") == "Tank");
+	CHECK(settings.moveInterpreter("ArmedCar") == "CarMoveTo" && settings.moveInterpreter("FloatingTank") == "FloatingTankMoveTo");
+	CHECK(settings.moveInterpreter("TransportHelicopter") == "HeliMoveTo");
+	CHECK(settings.manDownEquipment == "ManDown" && settings.maxBehaviours == 14 && settings.sides == 2);
+	const game::BotSettings::AutoControllerTemplate* uav = settings.autoController("UAVDrone");
+	CHECK(uav && uav->fov == 90 && uav->viewDistance == 100 && near(uav->scanningSpeed, 0.13f) && uav->neverAttackDeployer);
+	CHECK(uav && uav->onlyAttackNetworkBattlefieldObjects && uav->discoverCloakedEnemiesDistance == 8);
+	const game::BotSettings::AutoControllerTemplate* cannon = settings.autoController("CP_CANNON");
+	CHECK(cannon && cannon->fov == 179 && cannon->reloadOnTeamChange && cannon->maxTrackingInput == 0.5f);
+	CHECK(!settings.autoSpawnBots); // aiSettings.setAutoSpawnBots is no command of AIDLL's
 }

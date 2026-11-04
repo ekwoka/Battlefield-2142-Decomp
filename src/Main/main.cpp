@@ -3437,6 +3437,7 @@ int runGame(Options& options, Session& session)
 		// The bots see as far as the level's fog lets them (AIDLL 0x10056b20).
 		botSettings.levelFog = lights.fogStartEndAndBase;
 		game::BotManager bots(round, botSettings);
+		bots.attach(botSettings); // the scripted-bot commands (ai.botMoveTo...)
 		round.unlockAllByDefault = options.unlockAll;
 		if (heightmaps.hasSea()) {
 			round.setWaterLevel(heightmaps.seaWaterLevel());
@@ -5918,7 +5919,10 @@ int runGame(Options& options, Session& session)
 		round.setAiRunning(bots.enabled() && options.bots > 0);
 		for (int i = 0; i < (bots.enabled() ? options.bots : 0); ++i) {
 			const int team = i % 2 == 0 ? (options.playTeam == 1 ? 2 : 1) : (options.playTeam == 1 ? 1 : 2);
-			const int bot = round.addPlayer("Bot" + std::to_string(i + 1), team, true);
+			// A bot's name: the next of AI/BotNames.ai's (aiSettings.addBotName,
+			// AIDLL 0x10050a20 from the AI player factory 0x0089e7a0).
+			std::string botName = botSettings.nextBotName();
+			const int bot = round.addPlayer(botName.empty() ? "Bot" + std::to_string(i + 1) : botName, team, true);
 			// Bots take the team's kits in turn.
 			const auto& kits = gameLogic.team(team).kits;
 			if (!kits.empty()) {
@@ -6804,6 +6808,9 @@ int runGame(Options& options, Session& session)
 			// The 3D name tags under the HUD (RendDX9's NametagManager).
 			nametags.setInsideTitan(cameraInTitan);
 			std::vector<hud::HudQuad> quads = nametags.frame(round, round.objects(), tagView, seconds);
+			if (!rendererSettings.drawNametags) {
+				quads.clear(); // renderer.drawNametags (+0x697, 0x1002cef0)
+			}
 			std::vector<hud::HudQuad> hud = hudManager.frame(seconds);
 			quads.insert(quads.end(), hud.begin(), hud.end());
 			// The commander's pointer over the map: the armed tool's

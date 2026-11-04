@@ -8,6 +8,7 @@
 #include "Game/Bots.h"
 #include "TitanLevel.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -396,12 +397,21 @@ TEST(Titan_PodArrayDropsASoldier)
 	CHECK(level.world->launchPod(bot));
 	CHECK(level.world->ridingPod(bot) && level.world->pods().size() == 1);
 	float second = 0;
+	// Its keepUp ForceObject's couple (0x0062b750) holds it near upright in
+	// the air.
+	float tilt = 0;
 	for (; second < 60 && level.world->ridingPod(bot); second += 0.5f) {
 		level.run(0.5f);
+		for (const auto& pod : level.world->pods()) {
+			if (const world::Object* o = level.world->objects().find(pod.object)) {
+				tilt = std::max({tilt, std::fabs(o->rotation().y), std::fabs(o->rotation().z)});
+			}
+		}
 	}
 	level.world->playerInfo(bot, info);
-	std::fprintf(stderr, "  the pod landed after %.1f s at %.0f/%.0f/%.0f (from %.0f/%.0f/%.0f)\n", second, info.position.x,
-		info.position.y, info.position.z, entry.x, entry.y, entry.z);
+	std::fprintf(stderr, "  the pod landed after %.1f s at %.0f/%.0f/%.0f (from %.0f/%.0f/%.0f), tilted at most %.1f degrees\n",
+		second, info.position.x, info.position.y, info.position.z, entry.x, entry.y, entry.z, tilt);
+	CHECK(tilt < 30);
 	CHECK(!level.world->ridingPod(bot) && info.alive && info.vehicle == 0);
 	CHECK(info.position.y < 200); // down from the Titan's 287 to the ground
 }

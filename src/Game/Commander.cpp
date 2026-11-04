@@ -810,6 +810,21 @@ void GameWorld::stepCrates(float seconds)
 		}
 		crate.tick += kTick;
 		const physics::Vec3 at {p.x, p.y, p.z};
+		if (crate.teamFromClosestCP) {
+			// 0x005d1710 -> 0x005d0f20: the nearest control point's team.
+			float best = 9999;
+			int team = 0;
+			for (const ControlPoint& point : m_controlPoints) {
+				const world::Vec3 q = point.object ? point.object->position() : world::Vec3 {};
+				const float d = std::sqrt(physics::lengthSquared(physics::Vec3 {q.x, q.y, q.z} - at));
+				if (point.object && d < best) {
+					best = d;
+					team = point.team;
+				}
+			}
+			crate.team = team;
+			object->setTeam(team);
+		}
 		const float radius = t ? number(*t, "radius", 2) : 2;
 		const float heal = (t ? number(*t, "healSpeed", 0) : 0) * kTick;
 		const float ammo = (t ? number(*t, "refillAmmoSpeed", 0) : 0) * kTick;

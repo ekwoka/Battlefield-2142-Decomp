@@ -91,6 +91,29 @@ std::optional<std::vector<UndergrowthMaterial>> parseUndergrowthData(const std::
 // generator (Game/Random.h).
 uint32_t undergrowthRandom(uint32_t& state);
 
+// UndergrowthSystem's 16 sway offsets. Drawn once (0x1010ad20, from the
+// system's init 0x101100d0 before it opens Undergrowth.cfg, so with the
+// constructor's SwaySpeed / SwaySpeedDiff / SwayScale / SwayScaleDiff, +0x48
+// .. +0x54: 1 / 0.2 / 0.15 / 0.01, and the system's random state +0x2bc
+// seeded 0x759dc150 by 0x1010f600): per offset, each from a fresh number u,
+// r = ((u | 0x80) >> 7) + 1, speed (+0xf8) = r / 2^24 x speedDiff + speed,
+// amplitude (+0x138) = r / 2^24 x scaleDiff + scale, phase (+0x178) = r x
+// 3.7450704e-07 (r / 2^24 x 2 pi). Each frame (slot 0x24, 0x1010a900):
+// phase = fmod(phase + dt x speed, 2 pi), offset (+0x1b8, Undergrowth.fx's
+// SwayOffset) = (sin phase x amplitude, cos phase x amplitude). The shader
+// moves a vertex's xz by offset[its index] x its sway byte / 255 x 3.
+struct UndergrowthSway {
+	static constexpr uint32_t kSeed = 0x759dc150;
+	std::array<float, 16> speed {};
+	std::array<float, 16> amplitude {};
+	std::array<float, 16> phase {};
+
+	void seed(float swaySpeed = 1.0f, float swaySpeedDiff = 0.2f, float swayScale = 0.15f,
+		float swayScaleDiff = 0.01f, uint32_t state = kSeed);
+	void advance(float seconds);
+	std::array<float, 2> offset(int i) const;
+};
+
 // A generated vertex in world space.
 struct UndergrowthPatchVertex {
 	std::array<float, 3> position; // y is the ground height under the instance

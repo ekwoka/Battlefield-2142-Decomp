@@ -280,4 +280,19 @@ std::vector<int> selectAreas(std::vector<std::pair<float, int>> candidates, int 
 	return chosen;
 }
 
+bool strategyTimeUp(float sinceStart, int picks, float timeLimit)
+{
+	const double limit = (2.0 - 2.0 * std::pow(0.5, picks)) * timeLimit;
+	return !(sinceStart < limit);
+}
+
+float knowledgeCertainty(bool sensed, float sinceSeen, float degeneration)
+{
+	if (sensed) {
+		return 1;
+	}
+	const float t = sinceSeen / degeneration;
+	return std::isfinite(t) ? 1 - scurve(t) : 1.0f;
+}
+
 } // namespace dice::hfe::ai

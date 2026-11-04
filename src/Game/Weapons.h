@@ -124,6 +124,13 @@ struct ProjectileSettings {
 	// run out (events 0x18 / 0x1d), the round detonates (event 0x1f, the
 	// detonation's slot 0x14), else it is only removed (0x20; 0x005b62a0).
 	bool onTimeEffect = true;
+	// Where a hit round goes off (0x005e9300): deeper under water than
+	// detonation.maxDepthForExplosion (template +0x48, 2 by default,
+	// 0x005e9df0; the node's depth, slot 0xd8) nothing happens; the end
+	// effect stands on the face's normal with useCollisionNormal (+0x69, 1),
+	// else along the round's forward (its matrix's z row) (0x005e8f50).
+	float maxDepthForExplosion = 2;
+	bool useCollisionNormal = true;
 
 	static ProjectileSettings fromTemplate(const world::ObjectTemplate& projectile);
 	// The damage after travelling `distance` metres.
@@ -227,6 +234,14 @@ struct FireArmSettings {
 	// without its effect, else 0x21): the mines, hubs, sonars and
 	// beacons a soldier left (30 or 60 s for those, 0 for the AP mine).
 	float keepProjectiles = 5;
+	// A ThrownFireComp (the grenades, mines, hubs, sonars, the pod
+	// launchers): a round decided (slot 36, 0x005e5a10: state 2 from now,
+	// +0x15c) waits fire.pullbackTime (template +0x94, ticks +0x98, 0.2 s
+	// by default; the setter 0x005e4c40) and then fire.fireLaunchDelay
+	// (+0x1c, ticks +0x20: state 3, +0x160) before it leaves (state 4; the
+	// update, slot 5 0x005e4c80). Ticks are the times x 30, rounded.
+	bool thrown = false;
+	int pullbackTicks = 0, launchDelayTicks = 0;
 
 	static FireArmSettings fromTemplate(const world::ObjectTemplate& firearm);
 	int ticksBetweenShots() const { return roundsPerMinute > 0 ? 1800 / roundsPerMinute : 1; }
@@ -243,6 +258,8 @@ public:
 	int roundsInMag() const { return m_rounds; }
 	int magsLeft() const { return m_mags; }
 	bool reloading() const { return m_reloadLeft > 0; }
+	// A thrown round on its way out (ThrownFireComp states 2 and 3).
+	bool throwing() const { return m_launchIn >= 0; }
 	// Without a user (reloadWithoutPlayer): a reload under way runs on and
 	// fills the magazine; dropReload forgets one (the magazine stays as it is).
 	void runReload(float seconds)
@@ -313,6 +330,7 @@ private:
 	bool m_busyUntilRelease = false; // a round fired with busyUntilButtonRelease, trigger still held
 	bool m_pending = false; // a press waiting for the gun
 	int m_burstLeft = 0;
+	int m_launchIn = -1;   // a thrown round's ticks to go (states 2 and 3), -1 none
 	int m_tracerCount = 0; // +0x78
 	bool m_scanning = false; // the ammo component's +0x58
 	float m_scan = 0;        // +0x5c

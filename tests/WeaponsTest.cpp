@@ -685,3 +685,55 @@ TEST(Weapons_PulseMeterScan)
 	game::FireArm gun(plain);
 	CHECK(gun.tick(1 / 30.0f, true) && !gun.scanning());
 }
+
+// A ThrownFireComp's round (0x005e5a10 -> 0x005e4c80): decided on the
+// press, it leaves fire.pullbackTime + fire.fireLaunchDelay later (the frag
+// grenade's 1 + 0.39 s: 30 + 12 ticks), the magazine spent at once; other
+// fire components fire at once.
+TEST(Weapons_ThrownRoundsWaitForThePullBack)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "GenericFireArm");
+	world::ObjectTemplate* frag = templates.create("GenericFireArm", "Unl_Grenade_Frag");
+	frag->components().push_back("ThrownFireComp");
+	frag->settings()["fire.pullBackTime"] = "1";
+	frag->settings()["fire.fireLaunchDelay"] = "0.39";
+	frag->settings()["ammo.magSize"] = "1";
+	frag->settings()["ammo.nrOfMags"] = "2";
+	const game::FireArmSettings settings = game::FireArmSettings::fromTemplate(*frag);
+	CHECK(settings.thrown && settings.pullbackTicks == 30 && settings.launchDelayTicks == 12);
+	game::FireArm grenade(settings);
+	int tick = 0, left = -1;
+	CHECK(!grenade.tick(1 / 30.0f, true));
+	CHECK(grenade.throwing() && grenade.roundsInMag() == 0);
+	for (tick = 1; tick < 100; ++tick) {
+		if (grenade.tick(1 / 30.0f, false)) {
+			left = tick;
+			break;
+		}
+	}
+	CHECK(left == 42 && !grenade.throwing());
+	// The default pull-back is 0.2 s (the setter 0x005e4c40's template default).
+	world::ObjectTemplate* hub = templates.create("GenericFireArm", "Unl_Hub_Ammo");
+	hub->components().push_back("ThrownFireComp");
+	CHECK(game::FireArmSettings::fromTemplate(*hub).pullbackTicks == 6);
+	world::ObjectTemplate* rifle = templates.create("GenericFireArm", "eu_ar_rifle");
+	rifle->settings()["fire.fireLaunchDelay"] = "0.39";
+	game::FireArm gun(game::FireArmSettings::fromTemplate(*rifle));
+	CHECK(gun.tick(1 / 30.0f, true));
+}
+
+// The detonation component's defaults (0x005e9df0): maxDepthForExplosion
+// 2, useCollisionNormal on.
+TEST(Weapons_DetonationDepthAndNormal)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "GenericProjectile");
+	world::ObjectTemplate* shell = templates.create("GenericProjectile", "shell");
+	game::ProjectileSettings s = game::ProjectileSettings::fromTemplate(*shell);
+	CHECK(s.maxDepthForExplosion == 2 && s.useCollisionNormal);
+	shell->settings()["detonation.maxDepthForExplosion"] = "0.5";
+	shell->settings()["detonation.useCollisionNormal"] = "0";
+	s = game::ProjectileSettings::fromTemplate(*shell);
+	CHECK(s.maxDepthForExplosion == 0.5f && !s.useCollisionNormal);
+}

@@ -65,6 +65,10 @@
 // commander has AIDLL's AI commander (not a player): it shells its own
 // points being taken with the artillery (0x1009c050; BotManager::command).
 //
+// Scripted bots (src/Game/BotsScript.cpp: ai.botMoveTo, botFlyTo,
+// botSetWaypoints_Patrol/3d, deactivateBot): a goal object of AIDLL's
+// (src/AI/Goals) in place of the SAI's orders.
+//
 // The settings come from the game's own scripts (aiSettings.*, the
 // weaponTemplate.* lines of Objects/**/ai/Weapons.ai, aiStrategy.* and
 // aiStrategicArea.*, aiTemplate.*); without them the shipped values are
@@ -73,6 +77,7 @@
 
 #include "AI/Ballistics.h"
 #include "AI/Behaviour.h"
+#include "AI/Goals.h"
 #include "AI/Heli.h"
 #include "AI/NavMesh.h"
 #include "AI/PathFollower.h"
@@ -373,6 +378,8 @@ struct GuardArea {
 void strategicAreaGuard(const std::vector<GuardArea>& areas, const physics::Vec3& bot, bool moving,
 	const physics::Vec3& target, bool& hold, bool& targetInside);
 
+class BotManager;
+
 struct BotSettings {
 	float skill = 0.4f;   // aiSettings.setBotSkill (0..1)
 	int maxBots = 16;     // aiSettings.setMaxNBots
@@ -452,6 +459,108 @@ struct BotSettings {
 	// A map's climb limits (map 0's rays always climb 0.35 m, 0x1003f930).
 	ai::ClimbLimits climbLimits(int map) const;
 
+	// The rest of AIDLL's settings object (AISettings, constructor
+	// 0x10051aa0; IAISettings vtbl 0x101148c8, IAISettingsModifier vtbl
+	// 0x10114828, both of one object: offsets are the object's), set by the
+	// aiSettings.* commands (0x1000ac80..0x10011570, src/Game/BotsScript.cpp).
+	int maxAutoControllers = 0;      // setMaxNAutoControllers (+0xc; slot 1 is +8 plus +0xc)
+	bool maxBotsIncludeHumans = true;// +0x37
+	float ignoreCommanderDistance = 30; // setIgnoreCommanderDistance (+0x38)
+	int maxBehaviours = 0;           // setMaxNumberOfBehaviours (+0x10, also DAT_10139520)
+	float statsViewDistance = 300;   // setStatsViewDistance (+0x20)
+	int informationGridDimension = 32; // setInformationGridDimension (+0x2c)
+	int sides = 0;                   // setNSides (+0x30)
+	float saiUpdateFrequency = 35;   // setSAIUpdateFrequency (+0x28): the SAI's gate (see updateStrategy)
+	bool respawnAllowed = true;      // setRespawnAllowed (+0x34)
+	bool autoSpawnBots = false;      // autoSpawnBots (+0x36; aiSettings.setAutoSpawnBots, which the
+	                                 // shipped AIDefault.ai uses, is no command of AIDLL's)
+	bool overrideMenuSettings = false; // +0x184
+	// setVehicleClusterMapping <type> <type> (0x10050030): the first type
+	// takes the second's cluster index (+0x28 of its record; read through
+	// IAISettings slot 0x60).
+	std::map<std::string, std::string> clusterMapping;
+	std::string manDownEquipment;    // setManDownEquipment (+0x40)
+	std::string basicBotWeights;     // setBasicBotWeights (0x10028da0: the modifier set, modifier slot 0x30)
+	// setStandardPersonality <set> <side> (0x10027ff0 -> 0x100509d0, +0xf0
+	// by side): the modifier set a side's bots get.
+	std::map<int, std::string> standardPersonality;
+	// Vehicle groups (createVehicleGroup, addVehicleToVehicleGroup).
+	std::map<std::string, std::vector<std::string>> vehicleGroups;
+	// setSensingAgentPatternName / setSensingAgentNullPattern (0x10026c50,
+	// 0x10029d40): the sensing patterns' names.
+	std::vector<std::string> sensingPatternNames;
+	std::string sensingNullPattern;
+	// addInterpreterEntry <equipment> <statement> (0x10029e10): the plan
+	// statements an equipment type's interpreter runs (the implementations
+	// by name, registered by the AI object's constructor 0x1002a400); removeInterpreterEntry
+	// takes one out. The rewrite's patterns run their statements directly
+	// (see "Action plans" in docs/engine.md); the table picks the driver
+	// (moveInterpreter).
+	std::map<std::string, std::vector<std::string>> interpreter;
+	std::map<std::string, std::string> defaultInterpreter; // activateDefaultInterpreter <equipment> <type>
+	// The equipment type's MoveTo statement (the driver it runs: CarMoveTo,
+	// TankMoveTo, MechMoveTo, FloatingTankMoveTo, HeliMoveTo...).
+	std::string moveInterpreter(const std::string& equipment) const;
+	// The bot manager's scheduling (vtbl 0x101196b0 on the bot manager,
+	// DAT_10139504): setPlannedDecisionMakingThreshold (+0x6c, absolute),
+	// setUnplannedDecisionMakingThreshold (+0x74), setDecisionMakingInterleave
+	// <planned> <unplanned> (+0x60, +0x64). The quotients are shares of the
+	// real-time budget (setSensingQuotient a b: a/(a+b) at +0x94;
+	// setSystemQuotient d p s: +0x84, +0x8c, the rest), kept but not used
+	// (see Scheduling).
+	double plannedThreshold = 0.5, unplannedThreshold = 0.3;
+	int plannedInterleave = 2, unplannedInterleave = 2;
+	std::array<unsigned, 2> sensingQuotient {1, 1};
+	std::array<unsigned, 3> systemQuotient {1, 1, 1};
+	// autoControllerTemplate.* (AI/AutoControllers.ai, 0x10002210..0x10004b80;
+	// the template 0x100a8ed0, 0x3c bytes), by name as given.
+	struct AutoControllerTemplate {
+		bool sendFireWarning = false;  // +0
+		bool operatesAlone = false;    // +1
+		float scanningSpeed = 0.03f;   // +4
+		float accuracy = 0.5f;         // +8
+		float fov = 20;                // +0xc, degrees (the auto controller's frustum, 0x100e0..: x pi / 180)
+		float viewDistance = 30;       // +0x10
+		bool useSiren = false;         // +0x14
+		float reactionTime = 0;        // +0x18
+		float targetLostTimeout = 0;   // +0x1c
+		bool neverAttackDeployer = false; // +0x20
+		bool reportEnemiesToTeam = false; // +0x21
+		bool allowTakeOver = false;    // +0x22
+		float maxTrackingInput = 4;    // +0x24
+		bool checkLineOfFire = false;  // +0x28
+		float discoverCloakedEnemiesDistance = 0; // +0x2c
+		float flipOutAtHealth = 0;     // +0x30
+		float scanningInputScale = 1;  // +0x34
+		bool reloadOnTeamChange = false; // +0x38
+		bool onlyAttackNetworkBattlefieldObjects = false; // +0x39
+		bool simpleFirePlan = false;   // +0x3a
+	};
+	std::map<std::string, AutoControllerTemplate> autoControllers;
+	std::string editingAutoController;
+	const AutoControllerTemplate* autoController(const std::string& name) const;
+
+	// aiSettings.addBotName <first> <last> (0x10050720): "first last" goes
+	// into the name list at a random place (the list is kept by a key drawn
+	// U[0, 0.4) for the first six names, U[0, 1) after, ascending); the
+	// game names a bot added without a name by nextBotName (0x10050a20,
+	// from BF2142.exe's AI player factory 0x0089e7a0): the head, which then
+	// goes to the back.
+	struct BotName {
+		float key = 0;
+		std::string name;
+	};
+	std::vector<BotName> botNames;
+	uint32_t botNameSeed = 0x9e3779b9u; // the keys' U[0, 1) (the original's Mersenne twister, DAT_101394cc)
+	void addBotName(const std::string& first, const std::string& last, float u);
+	std::string nextBotName();
+
+	bool initiated = false; // ai.init (the level's AI/AI.ai)
+	// The running bot manager, for the scripted-bot commands (ai.botMoveTo
+	// and the rest); BotManager::attach sets it and the manager's
+	// destructor clears it.
+	BotManager* manager = nullptr;
+
 	float modifier(const std::string& behaviour) const;
 	// The behaviours of an equipment type: the scripts' or, without them,
 	// AIBehaviours.ai's Infantery set.
@@ -530,6 +639,45 @@ public:
 		float at = 0;
 	};
 	std::vector<RadioSent> radioSent(int player) const;
+
+	// The console's settings (registerBotConsoleMethods'): the scripted-bot
+	// commands reach this manager through them, and the run-time setters
+	// (forceStrategy, the scheduling) change both copies. The destructor
+	// lets go.
+	void attach(BotSettings& source);
+	BotSettings& liveSettings() { return m_settings; }
+	// AIDLL's scripted-bot commands (ai.*; 0x10005a30..0x10007a00): a goal
+	// for a bot (bot vt+0x38; its MoveTo, or a pilot's GotoWaypoint3d,
+	// follows it in place of the SAI's orders until it is done or the bot
+	// dies; see BotsScript.cpp). False when the player is no bot.
+	bool scriptGoal(int player, ai::Goal goal);
+	// ai.botMoveTo <radius> <x/y/z> <bot> (0x100284a0): a waypoint goal, or
+	// a fly-to with the radius as both reaches for a bot whose vehicle is
+	// ITAir.
+	bool scriptMoveTo(int player, float radius, const physics::Vec3& at);
+	// ai.botFlyTo <bot> <radius> <height> <unused> <x/y/z> (0x100285a0):
+	// only a bot whose vehicle is ITAir.
+	bool scriptFlyTo(int player, float radius, float height, const physics::Vec3& at);
+	const ai::Goal* scriptedGoal(int player) const;
+	// ai.deactivateBot <bot> (AIMain slot 5, 0x10055f80): the bot leaves the
+	// AI (its side's SAI and the bot manager) and stops steering; the
+	// player stays. ai.updateBot <bot> (0x10026f30, bot vt+0x24): it thinks
+	// at its next plan run.
+	bool deactivate(int player);
+	bool deactivated(int player) const { return m_deactivated.count(player) != 0; }
+	void thinkSoon(int player);
+	// The bots of the manager (ai.getBotCount, getNumberOfActiveBots,
+	// getNumberOfDeactivedBots: the bot manager's slots 2, 0x74).
+	int botCount() const;
+	// ai.addBot: a bot player of the team in an open squad (it spawns as
+	// the round spawns bots); its id, -1 for none.
+	int addBot(const std::string& name, int team);
+	int deactivatedCount() const { return static_cast<int>(m_deactivated.size()); }
+	// A unit's (player's) certainty for a side's SAI (ai::knowledgeCertainty):
+	// 1 for its own and the bots' current sightings, decaying from the last
+	// sighting by its template's degeneration, 0 for one the side's bots
+	// never saw.
+	float certainty(int team, int player) const;
 private:
 	// An enemy a bot knows of (the sensing agent's memory item).
 	struct Known {
@@ -714,6 +862,7 @@ private:
 		float nextUpdate = 0;
 		std::map<int, int> squadArea; // squad -> area index it attacks/defends
 		std::vector<int> attacks, defences;
+		std::map<std::string, int> picks; // the strategy records' +0xc (ai::strategyTimeUp)
 	};
 
 	void sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players);
@@ -871,6 +1020,19 @@ private:
 
 	const ai::NavMesh* m_navMesh = nullptr;
 	const ai::NavMesh* m_vehicleNavMesh = nullptr;
+	BotSettings* m_source = nullptr;
+	std::map<int, ai::Goal> m_goals; // the scripted goals by player
+	std::map<int, bool> m_deactivated;
+	// The sides' knowledge of the enemy players (the AI objects of
+	// ai::knowledgeCertainty): when its bots last saw each, and whether one
+	// sees it now; filled by sense().
+	struct Knowledge {
+		float lastSeen = -1e9f;
+		bool sensed = false;
+	};
+	std::map<int, Knowledge> m_knowledge[3];
+	void updateKnowledge();
+	float degenerationOf(const GameWorld::PlayerInfo& player) const;
 	bool m_noNavMesh = false;
 	bool m_oddFrame = false;
 	size_t m_cursor = 0; // plan execution's round robin (+0xfc)
@@ -929,6 +1091,9 @@ int hornTarget(const physics::Vec3& centre, const physics::Vec3& way, float ownR
 // behaviour sets), weaponTemplate.*, aiStrategy.*, aiStrategicArea.* and
 // ai.addSAIStrategy into `settings`.
 void registerBotConsoleMethods(Console& console, BotSettings& settings);
+// The rest of AIDLL's commands (src/Game/BotsScript.cpp); called by
+// registerBotConsoleMethods.
+void registerBotScriptMethods(Console& console, BotSettings& settings);
 
 // The game's view distance for the bots (IAIGame vt+0x58, BF2142.exe
 // 0x008959f0): the distance into the fog where its density reaches 0.8

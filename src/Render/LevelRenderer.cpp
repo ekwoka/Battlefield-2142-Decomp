@@ -7,6 +7,7 @@
 #include "Geometry/GeometryTemplateManager.h"
 #include "Geometry/MeshFile.h"
 #include "Geometry/RoadFile.h"
+#include "Hud/HudFont.h"
 #include "IO/File/FileManager.h"
 #include "Scene/EffectSettings.h"
 #include "Scene/LightSettings.h"
@@ -162,6 +163,14 @@ Mat4 Camera::view() const
 	const Vec3f up {kxUp.x * s + k.x * k.y * (1 - c), c + k.y * k.y * (1 - c), kxUp.z * s + k.z * k.y * (1 - c)};
 	return Mat4::lookAt(position, position + k, up);
 }
+
+struct LevelRenderer::FpsText {
+	std::optional<hud::HudFont> font;
+	std::string texture; // the .dds of the .dif's name
+	bool loaded = false;
+	uint64_t lastNs = 0;
+	double milliseconds = 0;
+};
 
 LevelRenderer::LevelRenderer(GpuContext& gpu) : m_gpu(gpu) {}
 
@@ -497,6 +506,7 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 	// The texture class of the mesh's materials (scene::TextureClass): a
 	// tree's are the overgrowth's (0x10151830 with the template's +0x2a2).
 	const bool tree = !bundled && !skinned && lower(geometry->path).find("vegitation") != std::string::npos;
+	gpuMesh->tree = tree;
 	const scene::TextureClass textureClass = skinned ? scene::TextureClass::SkinnedMesh
 		: bundled                                    ? scene::TextureClass::BundledMesh
 		: tree                                       ? scene::TextureClass::Overgrowth
@@ -1326,6 +1336,7 @@ void LevelRenderer::loadOvergrowth(const LevelSources& sources)
 			close = static_cast<float>(std::atof(value.c_str()));
 		}
 	}
+	m_overgrowthViewDistance = viewDistance > 0 ? viewDistance : 500.0f;
 	m_overgrowthCloseDistance = viewDistance * scale * close;
 	m_overgrowthCloseBase = viewDistance * close;
 	m_overgrowthScriptScale = scale;
@@ -1334,13 +1345,13 @@ void LevelRenderer::loadOvergrowth(const LevelSources& sources)
 
 float LevelRenderer::overgrowthCloseDistance() const
 {
-	if (m_sources && m_sources->quality) {
-		const float quality = m_sources->quality->overgrowthViewDistanceScale();
-		if (quality != m_overgrowthQualityScale) {
-			return m_overgrowthCloseBase * quality;
-		}
-	}
-	return m_overgrowthCloseBase * m_overgrowthScriptScale;
+	// 0x1008b7a0 / 0x1008b550: C = zoom x viewDistance (+0x24) x
+	// closeDistPercentage (+0xc8) x the geometry quality's factor (+0x110,
+	// 0x10010040: 0.4 / 0.7 / 1); a tree is near within its mesh radius plus
+	// C x Overgrowth.viewDistanceScale (+0x28, 0x1008763d) (0x1008b580; the
+	// type's +0x9c factor taken as 1). The zoom is applied by the caller.
+	const float quality = m_sources && m_sources->quality ? m_sources->quality->overgrowthViewDistanceScale() : 1.0f;
+	return m_overgrowthCloseBase * m_overgrowthScriptScale * quality;
 }
 
 // The sea: a grid at sea level over each heightmap of the cluster (the
@@ -1460,7 +1471,7 @@ void LevelRenderer::buildRoads(const LevelSources& sources)
 				if (const auto settings = geom::parseRoadSettings(data)) {
 					look.texture0 = settings->texture0.empty() ? nullptr : texture(sources.files, settings->texture0 + ".dds");
 					look.texture1 = settings->texture1.empty() ? nullptr : texture(sources.files, settings->texture1 + ".dds");
-					look.uniforms = {{settings->blendFactor, settings->fadeStart, settings->fadeEnd, 0}};
+					look.uniforms = {{settings->blendFactor, 0, 0, 0}, {}};
 					look.priority = settings->priority;
 				}
 			}
@@ -1499,6 +1510,16 @@ void LevelRenderer::buildRoads(const LevelSources& sources)
 		road.boundsMin[1] = file->boundsMin[2];
 		road.boundsMax[0] = file->boundsMax[0];
 		road.boundsMax[1] = file->boundsMax[2];
+		{
+			const Vec3f lo {file->boundsMin[0], file->boundsMin[1], file->boundsMin[2]};
+			const Vec3f hi {file->boundsMax[0], file->boundsMax[1], file->boundsMax[2]};
+			const Vec3f mid = (lo + hi) * 0.5f;
+			road.center = {mid.x * road.world.at(0, 0) + mid.y * road.world.at(1, 0) + mid.z * road.world.at(2, 0) + road.world.at(3, 0),
+				mid.x * road.world.at(0, 1) + mid.y * road.world.at(1, 1) + mid.z * road.world.at(2, 1) + road.world.at(3, 1),
+				mid.x * road.world.at(0, 2) + mid.y * road.world.at(1, 2) + mid.z * road.world.at(2, 2) + road.world.at(3, 2)};
+			const Vec3f half = (hi - lo) * 0.5f;
+			road.radius = std::sqrt(dot(half, half));
+		}
 		m_roads.push_back(road);
 	}
 	std::stable_sort(m_roads.begin(), m_roads.end(), [](const Road& a, const Road& b) { return a.priority < b.priority; });
@@ -1548,6 +1569,8 @@ void LevelRenderer::buildUndergrowth(const LevelSources& sources)
 	m_undergrowthViewDistance = config.viewDistance;
 	m_undergrowthFadeScale = config.viewDistanceFadeScale;
 	m_undergrowthSwayScale = config.swayScale;
+	m_undergrowthSway.seed(); // 0x1010ad20, before the cfg is read
+	m_undergrowthSwayTicks = 0;
 	m_undergrowthAlphaRef = config.alphaRef;
 	const std::string atlas = sources.levelPath + "UndergrowthAtlas_alphatest0.dds";
 	m_undergrowthAtlas = texture(sources.files,
@@ -1641,27 +1664,28 @@ void LevelRenderer::drawUndergrowth(SDL_GPUCommandBuffer* commands, SDL_GPURende
 	uniforms.cameraPosition[0] = camera.position.x;
 	uniforms.cameraPosition[1] = camera.position.y;
 	uniforms.cameraPosition[2] = camera.position.z;
-	// Plants reach full height at (1 - fade scale) of the view distance.
+	// FadeAndHeightScaleOffset (0x1010e270, handle +0x94): (D, 1 / (D x
+	// undergrowth.viewDistanceFade)), D = undergrowth.viewDistanceScale
+	// (+0x578) x ViewDistance (+0x30); plants grow out of the ground over the
+	// outer viewDistanceFade (+0x57c, 0.2) of D (Undergrowth.cfg's
+	// ViewDistanceFadeScale, +0x34, is read by nothing).
+	const scene::RendererSettings fadeDefaults;
+	const scene::RendererSettings& ug = m_sources && m_sources->renderer ? *m_sources->renderer : fadeDefaults;
 	uniforms.fade[0] = undergrowthViewDistance();
-	uniforms.fade[1] = 1.0f / std::max(undergrowthViewDistance() * m_undergrowthFadeScale, 0.01f);
+	uniforms.fade[1] = 1.0f / std::max(undergrowthViewDistance() * ug.undergrowthViewDistanceFade, 0.01f);
 	// undergrowth.simpleShaderEnable: the terrain quality's 1 / 1 / 0 (0x10010040, slot 0x40).
 	uniforms.fade[2] = m_sources && m_sources->quality && m_sources->quality->undergrowthSimpleShader() ? 1.0f : 0.0f;
-	// UndergrowthSystem's 16 sway offsets (slot 0x24, 0x1010a900, each
-	// frame; uploaded as SwayOffset from +0x1b8 by 0x1010e270): angle_i =
-	// fmod(angle_i + dt x speed_i, 2 pi) (+0x178 / +0xf8), the offset
-	// (sin angle_i x amp_i, cos angle_i x amp_i, 0, 0) (amp +0x138). The
-	// per-offset speeds and amplitudes come from Undergrowth.cfg's SwaySpeed
-	// / SwaySpeedDiff / SwayScale / SwayScaleDiff (+0x48..+0x54, defaults
-	// 1 / 0.2 / 0.15 / 0.01, 0x101100d0); how they are spread over the 16
-	// isn't traced, so the rewrite spreads them evenly over speed +- diff
-	// and keeps SwayScale as every amplitude, starting at even phases.
-	const float seconds = static_cast<float>(SDL_GetTicks() - m_startTicks) / 1000.0f;
+	// The 16 sway offsets (terrain::UndergrowthSway: 0x1010ad20, 0x1010a900),
+	// uploaded as SwayOffset from +0x1b8.
+	const uint64_t swayNow = SDL_GetTicksNS();
+	if (m_undergrowthSwayTicks) {
+		m_undergrowthSway.advance(static_cast<float>(static_cast<double>(swayNow - m_undergrowthSwayTicks) / 1e9));
+	}
+	m_undergrowthSwayTicks = swayNow;
 	for (int i = 0; i < 16; ++i) {
-		const float spread = (static_cast<float>(i) / 15.0f) * 2.0f - 1.0f; // -1..1
-		const float speed = 1.0f + 0.2f * spread;
-		const float angle = std::fmod(i * 0.3926991f + seconds * speed, 6.2831855f);
-		uniforms.swayOffsets[i][0] = std::sin(angle) * m_undergrowthSwayScale;
-		uniforms.swayOffsets[i][1] = std::cos(angle) * m_undergrowthSwayScale;
+		const auto offset = m_undergrowthSway.offset(i);
+		uniforms.swayOffsets[i][0] = offset[0];
+		uniforms.swayOffsets[i][1] = offset[1];
 	}
 	for (const auto& [index, buffers] : m_undergrowthPatches) {
 		if (!buffers.vertices) {
@@ -1873,14 +1897,22 @@ void LevelRenderer::syncDebris()
 void LevelRenderer::buildOverlay()
 {
 	m_overlayGroups.clear();
-	if (!m_sources || !m_sources->overlay) {
+	const bool fps = m_sources && m_sources->renderer && m_sources->renderer->drawFps == 1;
+	if (!m_sources || (!m_sources->overlay && !fps)) {
 		return;
 	}
 	const uint64_t now = SDL_GetTicks();
 	const float seconds = m_lastOverlayTicks ? static_cast<float>(now - m_lastOverlayTicks) / 1000.0f : 0.0f;
 	m_lastOverlayTicks = now;
 	std::vector<Vertex> vertices;
-	for (const hud::HudQuad& q : m_sources->overlay(seconds)) {
+	std::vector<hud::HudQuad> quads;
+	if (m_sources->overlay) {
+		quads = m_sources->overlay(seconds);
+	}
+	if (fps) {
+		appendFpsText(quads);
+	}
+	for (const hud::HudQuad& q : quads) {
 		SDL_GPUTexture* image = texture(m_sources->files, q.texture, scene::TextureClass::Interface);
 		if (!image) {
 			continue;
@@ -1959,6 +1991,58 @@ void LevelRenderer::buildOverlay()
 	m_gpu.uploadDynamic(m_overlayVertices, SDL_GPU_BUFFERUSAGE_VERTEX, vertices.data(),
 		static_cast<uint32_t>(vertices.size() * sizeof(Vertex)));
 	m_gpu.flushUploads();
+}
+
+void LevelRenderer::appendFpsText(std::vector<hud::HudQuad>& quads)
+{
+	if (!m_fpsText) {
+		m_fpsText = std::make_unique<FpsText>();
+	}
+	FpsText& fps = *m_fpsText;
+	const uint64_t now = SDL_GetTicksNS();
+	if (fps.lastNs) {
+		fps.milliseconds = static_cast<double>(now - fps.lastNs) / 1e6;
+	}
+	fps.lastNs = now;
+	if (!fps.loaded) {
+		fps.loaded = true;
+		for (const char* path : {"Fonts/800/system_8x11", "Fonts/system_8x11"}) {
+			std::string text;
+			if (m_sources->files.readText(std::string(path) + ".dif", text)) {
+				fps.font = hud::parseHudFont(text);
+				fps.texture = std::string(path) + ".dds";
+				break;
+			}
+		}
+	}
+	if (!fps.font || fps.font->textureWidth <= 0 || fps.font->textureHeight <= 0) {
+		return;
+	}
+	char line[64];
+	std::snprintf(line, sizeof(line), "%.1f / %.1f", fps.milliseconds,
+		fps.milliseconds > 0 ? 1000.0 / fps.milliseconds : 0.0);
+	const hud::HudFont& font = *fps.font;
+	float x = 6;
+	const float y = 6;
+	for (const char* c = line; *c; ++c) {
+		const hud::Glyph* glyph = font.glyph(static_cast<unsigned char>(*c));
+		if (!glyph) {
+			continue;
+		}
+		hud::HudQuad q {};
+		q.texture = fps.texture;
+		q.x0 = x + glyph->before;
+		q.y0 = y + static_cast<float>(glyph->top);
+		q.x1 = q.x0 + static_cast<float>(glyph->x1 - glyph->x0);
+		q.y1 = q.y0 + static_cast<float>(glyph->y1 - glyph->y0);
+		q.u0 = static_cast<float>(glyph->x0) / static_cast<float>(font.textureWidth);
+		q.v0 = static_cast<float>(glyph->y0) / static_cast<float>(font.textureHeight);
+		q.u1 = static_cast<float>(glyph->x1) / static_cast<float>(font.textureWidth);
+		q.v1 = static_cast<float>(glyph->y1) / static_cast<float>(font.textureHeight);
+		q.color[0] = q.color[1] = q.color[2] = q.color[3] = 1;
+		quads.push_back(q);
+		x += glyph->advance();
+	}
 }
 
 // An image made in memory, uploaded once while it lives (keyed by the
@@ -2427,6 +2511,37 @@ void LevelRenderer::applyPointLights(LightingUniforms& uniforms) const
 }
 
 // The decals as squares on their surfaces, lifted off them a little.
+// The terrain's triangles about a decal (0x10164d70: the 3 x 3 heightmap
+// cells about the hit, each split (4c, 4c + 1, 4c + 2), (4c + 2, 4c + 1,
+// 4c + 3) as the table 0x101f78f0 has it), and the decal clipped to them.
+// The cells reach far enough for a decal up to a cell across; larger ones
+// take the cells under their square.
+std::vector<effects::DecalVertex> LevelRenderer::clipDecalToTerrain(const terrain::Heightmap& ground,
+	const effects::Decal& decal, float normalOffset)
+{
+	const float sx = ground.scale()[0], sz = ground.scale()[2];
+	if (sx <= 0 || sz <= 0) {
+		return {};
+	}
+	const float half = decal.size * 0.5f;
+	const int reachX = std::max(1, static_cast<int>(std::ceil(half * 1.4143f / sx)));
+	const int reachZ = std::max(1, static_cast<int>(std::ceil(half * 1.4143f / sz)));
+	const int cx = static_cast<int>(std::floor((decal.position.x - ground.originX()) / sx));
+	const int cz = static_cast<int>(std::floor((decal.position.z - ground.originZ()) / sz));
+	std::vector<std::array<effects::Vec3, 3>> triangles;
+	for (int j = cz - reachZ; j <= cz + reachZ; ++j) {
+		for (int i = cx - reachX; i <= cx + reachX; ++i) {
+			const float x0 = ground.originX() + static_cast<float>(i) * sx, x1 = x0 + sx;
+			const float z0 = ground.originZ() + static_cast<float>(j) * sz, z1 = z0 + sz;
+			const effects::Vec3 c[4] = {{x0, ground.heightAt(x0, z0), z0}, {x1, ground.heightAt(x1, z0), z0},
+				{x0, ground.heightAt(x0, z1), z1}, {x1, ground.heightAt(x1, z1), z1}};
+			triangles.push_back({c[0], c[1], c[2]});
+			triangles.push_back({c[2], c[1], c[3]});
+		}
+	}
+	return effects::clipDecal(decal.position, decal.normal, decal.tangent, half, decal.frame, triangles, 0, normalOffset);
+}
+
 void LevelRenderer::buildDecals()
 {
 	m_decalGroups.clear();
@@ -2434,7 +2549,24 @@ void LevelRenderer::buildDecals()
 		return;
 	}
 	std::vector<Vertex> vertices;
+	// The objects drawn this frame (the ObjectDrawer marks their decal sets,
+	// +0x19: Decal::ownerDrawn).
+	std::vector<uint32_t> drawn;
 	for (const effects::Decal& decal : m_sources->effects->decals()) {
+		if (decal.object != 0) {
+			for (const DrawItem& item : m_drawList) {
+				if (item.instance->object != 0) {
+					drawn.push_back(item.instance->object);
+				}
+			}
+			std::sort(drawn.begin(), drawn.end());
+			break;
+		}
+	}
+	const scene::ParticleSystemSettings& ps = m_particleSettings;
+	const terrain::Heightmap* ground = m_sources->heightmaps.primary();
+	for (const effects::Decal& decal : m_sources->effects->decals()) {
+		decal.ownerDrawn = decal.object == 0 || std::binary_search(drawn.begin(), drawn.end(), decal.object);
 		SDL_GPUTexture* image = texture(m_sources->files, decal.texture + ".dds");
 		if (!image) {
 			continue;
@@ -2465,6 +2597,44 @@ void LevelRenderer::buildDecals()
 		const float alpha = m_particleSettings.decalAlpha(decal.age);
 		if (alpha < scene::ParticleSystemSettings::kDecalCullAlpha) {
 			continue;
+		}
+		// A world decal on the terrain, clipped to it once (effects::
+		// clipDecal; 0x10165f60 with the terrain's 3 x 3 cells about the hit,
+		// 0x10164d70, whose triangles it doesn't turn away by angle). Off
+		// the terrain (on a static object) or with decalGeomClipAngle 0 the
+		// flat square (0x10164940).
+		if (decal.object == 0 && ps.decalGeomClipAngle > 0 && ground && ground->loaded() &&
+			ground->covers(at.x, at.z)) {
+			if (!decal.clipped) {
+				decal.clipped = std::make_shared<const std::vector<effects::DecalVertex>>(
+					clipDecalToTerrain(*ground, decal, ps.decalNormalOffset));
+			}
+			if (!decal.clipped->empty()) {
+				const uint32_t first = static_cast<uint32_t>(vertices.size());
+				for (const effects::DecalVertex& p : *decal.clipped) {
+					Vertex vertex {};
+					vertex.position[0] = p.position.x;
+					vertex.position[1] = p.position.y;
+					vertex.position[2] = p.position.z;
+					vertex.normal[0] = n.x;
+					vertex.normal[1] = n.y;
+					vertex.normal[2] = n.z;
+					vertex.texCoord[0] = p.u;
+					vertex.texCoord[1] = p.v;
+					vertex.lightmapCoord[0] = decal.color.x;
+					vertex.lightmapCoord[1] = decal.color.y;
+					vertex.part = decal.color.z;
+					vertex.weight = alpha;
+					vertices.push_back(vertex);
+				}
+				const uint32_t count = static_cast<uint32_t>(vertices.size()) - first;
+				if (!m_decalGroups.empty() && m_decalGroups.back().texture == image) {
+					m_decalGroups.back().vertexCount += count;
+				} else {
+					m_decalGroups.push_back({image, false, first, count});
+				}
+				continue;
+			}
 		}
 		const effects::Vec3 u = tangent * (decal.size * 0.5f);
 		const effects::Vec3 v = physics::cross(n, tangent) * (decal.size * 0.5f);
@@ -2690,7 +2860,7 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 	const scene::RendererSettings& renderer =
 		m_sources && m_sources->renderer ? *m_sources->renderer : rendererDefaults;
 	const float zoom = viewZoom(camera);
-	const float closeOvergrowth = overgrowthCloseDistance();
+	const float closeOvergrowth = overgrowthCloseDistance() * zoom;
 	static const bool cloakAll = [] { // BF2142_POST_EFFECT=camo: every soldier cloaked (screenshots)
 		const char* forced = std::getenv("BF2142_POST_EFFECT");
 		return forced && std::string(forced) == "camo";
@@ -2717,6 +2887,16 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 			continue;
 		}
 		const GpuMesh& base = *instance.mesh;
+		// renderer.drawObjects / drawBundledMeshes / drawStaticMeshes /
+		// drawSkinnedMeshes / drawOvergrowth / drawTrees (RendererSettings).
+		if (!renderer.drawObjects ||
+			!(base.skinned       ? renderer.drawSkinnedMeshes
+				: base.bundled   ? renderer.drawBundledMeshes
+				: instance.overgrowth ? renderer.drawOvergrowth && renderer.drawStaticMeshes
+				: base.tree      ? renderer.drawTrees && renderer.drawStaticMeshes
+								 : renderer.drawStaticMeshes)) {
+			continue;
+		}
 		bool interior = false;
 		if (base.titanInterior || base.titanExterior || titanView.cameraInside) {
 			const Vec3f origin {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
@@ -2740,7 +2920,18 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 		if (instance.overgrowth && m_sources) {
 			const Vec3f origin {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
 			const Vec3f d = (sphere.radius >= 0 ? sphere.center : origin) - camera.position;
-			if (dot(d, d) > closeOvergrowth * closeOvergrowth) {
+			// Dropped beyond Overgrowth.viewDistance, faded over its last 30%.
+			if (m_overgrowthViewDistance > 0) {
+				const float share = std::sqrt(dot(d, d)) / m_overgrowthViewDistance;
+				if (share >= 1.0f) {
+					continue;
+				}
+				if (share > 0.7f) {
+					item.fade = instance.fade * std::clamp((1.0f - share) / 0.3f, 0.0f, 1.0f);
+				}
+			}
+			const float nearRadius = closeOvergrowth + std::max(sphere.radius, 0.0f);
+			if (dot(d, d) > nearRadius * nearRadius) {
 				Instance::Lod& entry = instance.overgrowthLod;
 				if (!entry.resolved) {
 					entry.resolved = true;
@@ -2757,7 +2948,8 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 				}
 			}
 		}
-		if (m_sources && instance.shownGeometry < 0 && base.lodCount > 1 && !instance.geometry.empty()) {
+		const bool noLods = renderer.staticNoLods && !base.skinned && !base.bundled;
+		if (m_sources && !noLods && instance.shownGeometry < 0 && base.lodCount > 1 && !instance.geometry.empty()) {
 			const Vec3f origin {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
 			const Vec3f toCamera = (sphere.radius >= 0 ? sphere.center : origin) - camera.position;
 			const float distance = lodDistance(std::sqrt(dot(toCamera, toCamera)), zoom, sphere.radius);
@@ -3016,7 +3208,14 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// The commander's overhead view takes the player's (0x00779680).
 	OverheadView overhead;
 	const bool overheadOn = m_sources && m_sources->overheadView && m_sources->overheadView(overhead);
-	const Camera camera = overheadOn ? overheadCamera(overhead) : viewCamera;
+	// The draw switches and near planes (renderer.draw*, tweakNearPlane*).
+	const scene::RendererSettings switchDefaults;
+	const scene::RendererSettings& switches =
+		m_sources && m_sources->renderer ? *m_sources->renderer : switchDefaults;
+	Camera camera = overheadOn ? overheadCamera(overhead) : viewCamera;
+	if (switches.tweakNearPlaneSet && switches.tweakNearPlane > 0) {
+		camera.nearPlane = switches.tweakNearPlane;
+	}
 	// With the post-production the world is drawn into the scene texture,
 	// then post.frag into `color` with the HUD over it.
 	const bool post = postEnabled() && m_gpu.postPipeline();
@@ -3060,7 +3259,6 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	depthTarget.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
 	updateUndergrowth(camera);
 	buildParticles(camera);
-	buildDecals();
 	// The mesh particles' meshes, loaded before the pass begins.
 	if (m_sources) {
 		for (const effects::EffectManager* manager : {m_sources->effects, m_sources->objectEffects}) {
@@ -3074,7 +3272,11 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	}
 	// The first-person models, loaded before the pass begins.
 	m_firstPerson = FirstPersonScene {};
-	m_hasFirstPerson = !overheadOn && m_sources && m_sources->firstPerson && m_sources->firstPerson(m_firstPerson);
+	m_hasFirstPerson = !overheadOn && m_sources && m_sources->firstPerson && m_sources->firstPerson(m_firstPerson) &&
+		switches.draw1pMeshes && switches.drawObjects;
+	if (m_hasFirstPerson && switches.tweakNearPlane1pSet && switches.tweakNearPlane1p > 0) {
+		m_firstPerson.nearPlane = switches.tweakNearPlane1p;
+	}
 	if (m_hasFirstPerson) {
 		for (const FirstPersonModel& model : m_firstPerson.models) {
 			mesh(*m_sources, model.geometry, model.geometryIndex, model.lod);
@@ -3105,6 +3307,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 					: Mat4::perspective(camera.fovY, static_cast<float>(target.width) / target.height, camera.nearPlane,
 						  6000.0f));
 	prepareInstances(camera, viewProjection);
+	buildDecals(); // after the draw list: it marks the sets whose owner is drawn
 	placeTitanHemiMaps(camera);
 	const float seconds = static_cast<float>(SDL_GetTicks() - m_startTicks) / 1000.0f;
 	m_poses.clear();
@@ -3121,7 +3324,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// Sky dome around the camera, unlit and unfogged, behind everything.
 	// Below the sea the dome is the water's fog colour (SkyDomeUnderWater,
 	// 0x100fd2f0): the clear colour already is.
-	if (!m_viewFog.underwaterSky) {
+	if (!m_viewFog.underwaterSky && switches.drawSkyDome) {
 		drawSky(commands, pass, viewProjection, camera);
 	}
 
@@ -3198,7 +3401,8 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		SDL_BindGPUFragmentSamplers(pass, 0, samplers, 5 + kMaxDetailLayers);
 	};
 	static const bool lodDebug = std::getenv("BF2142_TERRAIN_LODS") != nullptr;
-	if (!m_terrainCells.empty()) {
+	if (!switches.drawTerrain) {
+	} else if (!m_terrainCells.empty()) {
 		SDL_GPUBufferBinding indexBinding {m_terrainLodIndices, 0};
 		SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
 		const int perPatch = m_terrainCellsPerPatch;
@@ -3254,7 +3458,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		}
 	}
 	// The surrounding terrain.
-	if (!m_surrounding.empty()) {
+	if (!m_surrounding.empty() && switches.drawTerrain) {
 		SDL_BindGPUGraphicsPipeline(pass, m_gpu.surroundingPipeline());
 		SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
 		const TerrainMorphUniforms still = morphFor(2, false);
@@ -3284,15 +3488,34 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	}
 
 	// Roads, once per terrain patch they overlap, lit by that patch's lightmap.
-	if (!m_roads.empty() && m_patchSize > 0) {
+	if (!m_roads.empty() && m_patchSize > 0 && switches.drawRoads) {
 		SDL_BindGPUGraphicsPipeline(pass, m_gpu.roadPipeline());
 		useShadows(commands, pass, 2, 3, false);
+		// The road renderer's view distance (0x100baa70 / 0x100ba1d0): f =
+		// terrainCuller.lodSwitchDistance (the culler's +0x18) x
+		// Renderer.roadLodDistMod (+0x88, 1.3); a road farther than f plus
+		// its radius isn't drawn, and RoadCompiled.fx fades the rest out from
+		// f x lod0SwitchStart (the culler's +0x20) to f: FadeOut = (1 / (f -
+		// f0), f0 / (f - f0)).
+		const float roadFar = static_cast<float>(renderer.lodSwitchDistance) * renderer.roadLodDistMod;
+		const float roadNear = roadFar * renderer.lod0SwitchStart;
+		const float roadScale = roadFar > roadNear ? 1.0f / (roadFar - roadNear) : 0.0f;
 		for (const Road& road : m_roads) {
+			const Vec3f toRoad = road.center - camera.position;
+			if (std::sqrt(dot(toRoad, toRoad)) > roadFar + road.radius) {
+				continue;
+			}
+			RoadUniforms roadUniforms = road.uniforms;
+			roadUniforms.road[1] = roadScale;
+			roadUniforms.road[2] = roadScale * roadNear;
+			roadUniforms.eye[0] = camera.position.x;
+			roadUniforms.eye[1] = camera.position.y;
+			roadUniforms.eye[2] = camera.position.z;
 			SDL_GPUBufferBinding vertexBinding {road.vertices, 0};
 			SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
 			SDL_GPUBufferBinding indexBinding {road.indices, 0};
 			SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
-			SDL_PushGPUFragmentUniformData(commands, 1, &road.uniforms, sizeof(road.uniforms));
+			SDL_PushGPUFragmentUniformData(commands, 1, &roadUniforms, sizeof(roadUniforms));
 			const auto patchIndex = [this](float world, int axis) {
 				return static_cast<int>(std::floor((world - m_patchOrigin[axis]) / m_patchSize));
 			};
@@ -3323,7 +3546,9 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		}
 	}
 
-	drawUndergrowth(commands, pass, viewProjection, camera, lights);
+	if (switches.drawUndergrowth && switches.undergrowthEnabled) {
+		drawUndergrowth(commands, pass, viewProjection, camera, lights);
+	}
 
 	// Objects: the opaque materials first; then, after the water, the
 	// transparent ones (blended materials, and every material of an object
@@ -3352,7 +3577,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		const Instance& instance = *item.instance;
 		bool any = false;
 		for (const Submesh& submesh : item.mesh->submeshes) {
-			any = any || queueOf(submesh, instance.fade) == queue;
+			any = any || queueOf(submesh, item.drawnFade()) == queue;
 		}
 		if (!any) {
 			return;
@@ -3414,7 +3639,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		static const std::vector<anim::Matrix> unposed;
 		const std::vector<anim::Matrix>& pose = bound->skinned ? poseFor(instance, seconds) : unposed;
 		for (const Submesh& submesh : bound->submeshes) {
-			if (queueOf(submesh, instance.fade) != queue) {
+			if (queueOf(submesh, item.drawnFade()) != queue) {
 				continue;
 			}
 			const float space = bound->skinned ? static_cast<float>(submesh.normalKind) : transforms.normalSpace[0];
@@ -3438,7 +3663,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 				SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
 			}
 			LightingUniforms uniforms = uniformsFor[lightmapped][submesh.alphaReference > 0];
-			materialUniforms(uniforms, submesh, instance.fade, seconds);
+			materialUniforms(uniforms, submesh, item.drawnFade(), seconds);
 			specularUniforms(uniforms, submesh, camera, lights);
 			if (bound->skinned || bound->bundled) {
 				meshKindUniforms(uniforms, submesh, hemiAndShadows);
@@ -3542,8 +3767,11 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		bound = nullptr;
 	}
 
-	// The sun flare, behind what is in front of it.
-	drawSunFlare(commands, pass, viewProjection, camera);
+	// The sun flare, behind what is in front of it (0x1002cef0: with the
+	// sky dome's switch and its own).
+	if (switches.drawSkyDome && switches.drawSunFlare) {
+		drawSunFlare(commands, pass, viewProjection, camera);
+	}
 	// The transparent materials, farthest object first.
 	SDL_BindGPUGraphicsPipeline(pass, m_gpu.fadedMeshPipeline());
 	useShadows(commands, pass, 1, 5, true);
@@ -3562,9 +3790,11 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		drawInstance(item, MeshQueue::Additive);
 	}
 	// Particles, after what they are in front of: the mesh particles, then the sprites.
-	drawMeshParticles(commands, pass, viewProjection, lights,
-		{m_sources ? m_sources->effects : nullptr, m_sources ? m_sources->objectEffects : nullptr});
-	drawParticles(commands, pass, viewProjection, camera, lights, m_particleVertices, m_particleGroups);
+	if (switches.drawParticles) {
+		drawMeshParticles(commands, pass, viewProjection, lights,
+			{m_sources ? m_sources->effects : nullptr, m_sources ? m_sources->objectEffects : nullptr});
+		drawParticles(commands, pass, viewProjection, camera, lights, m_particleVertices, m_particleGroups);
+	}
 	if (shimmer) {
 		SDL_EndGPURenderPass(pass);
 		if (!m_shimmerSource || m_shimmerSize[0] != target.width || m_shimmerSize[1] != target.height) {
@@ -3806,6 +4036,12 @@ namespace dice::hfe::render {
 
 float LevelRenderer::undergrowthViewDistance() const
 {
+	// undergrowth.viewDistanceScale (+0x578, clamped to 0..1 by 0x101162c0):
+	// the quality switch's 0.5 / 0.75 / 1 (0x10010040) unless a script set it.
+	const scene::RendererSettings* r = m_sources ? m_sources->renderer : nullptr;
+	if (r && r->undergrowthViewDistanceScaleSet) {
+		return m_undergrowthViewDistance * r->undergrowthViewDistanceScale;
+	}
 	return m_undergrowthViewDistance * (m_sources && m_sources->quality ? m_sources->quality->undergrowthViewDistanceScale() : 1.0f);
 }
 

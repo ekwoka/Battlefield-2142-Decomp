@@ -332,3 +332,26 @@ TEST(TerrainLod_NoCracksOrPops)
 	std::fprintf(stderr, "  %d shared edge vertices, %d cracks, %d pops\n", shared, cracks, pops);
 	CHECK(shared > 1000 && cracks == 0 && pops == 0);
 }
+
+// The 16 sway offsets (0x1010ad20 / 0x1010a900): speeds and amplitudes in
+// [base, base + diff], phases in [0, 2 pi); each turns on its own circle.
+TEST(Undergrowth_SwayOffsets)
+{
+	terrain::UndergrowthSway sway;
+	sway.seed();
+	bool ranged = true, distinct = false;
+	for (int i = 0; i < 16; ++i) {
+		ranged = ranged && sway.speed[i] >= 1.0f && sway.speed[i] <= 1.2f && sway.amplitude[i] >= 0.15f &&
+			sway.amplitude[i] <= 0.16f && sway.phase[i] >= 0 && sway.phase[i] < 6.2832f;
+		distinct = distinct || sway.speed[i] != sway.speed[0];
+	}
+	CHECK(ranged && distinct);
+	const float before = sway.phase[3];
+	const auto o = sway.offset(3);
+	CHECK(std::fabs(std::hypot(o[0], o[1]) - sway.amplitude[3]) < 1e-5f);
+	sway.advance(0.5f);
+	CHECK(std::fabs(std::fmod(before + 0.5f * sway.speed[3], 6.2831855f) - sway.phase[3]) < 1e-4f);
+	terrain::UndergrowthSway again;
+	again.seed();
+	CHECK(again.speed == sway.speed && again.amplitude == sway.amplitude); // deterministic
+}

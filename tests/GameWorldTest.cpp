@@ -2764,3 +2764,130 @@ TEST(GameWorld_SpectacularDeathDestroysOrHides)
 		}
 	}
 }
+
+// A placed object's SupplyObject child (helipad_m_SupplyObject: workOn-
+// Vehicles, teamFromClosestCP) works as a supply object of its own at the
+// child's place; each 0.2 s update (0x005d1710 -> 0x005d0f20) it takes the
+// team of the nearest control point.
+TEST(GameWorld_StaticSupplyTakesTheClosestPointsTeam)
+{
+	Range range;
+	range.templates.registerType(20, "Bundle");
+	range.templates.registerType(21, "SupplyObject");
+	world::ObjectTemplate* pad = range.templates.create("Bundle", "helipad_m");
+	world::ObjectTemplate* supply = range.templates.create("SupplyObject", "helipad_m_SupplyObject");
+	supply->settings()["radius"] = "5";
+	supply->settings()["workOnSoldiers"] = "0";
+	supply->settings()["workOnVehicles"] = "1";
+	supply->settings()["healSpeed"] = "8";
+	supply->settings()["teamFromClosestCP"] = "1";
+	pad->children().push_back({"helipad_m_SupplyObject", {0, 1, 2}, {}});
+	range.objects.create(pad, {80, 0, 0}); // nearer cp_pac (team 1) at 100/0/0
+	range.world->tick(1 / 30.0f);
+	const world::Object* made = nullptr;
+	for (const auto& object : range.objects.objects()) {
+		if (object->objectTemplate() && object->objectTemplate()->name() == "helipad_m_SupplyObject") {
+			CHECK(made == nullptr); // one, not one per tick
+			made = object.get();
+		}
+	}
+	CHECK(made != nullptr);
+	for (int i = 0; i < 10; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(made && std::fabs(made->position().z - 2) < 1e-4f && std::fabs(made->position().y - 1) < 1e-4f);
+	CHECK(made && made->team() == 1);
+}
+
+// A seated engineer's kit ability (0x00599f30): an EU_Anti-Vehicle kit
+// (hasRepairingAbility, abilityInVehicleRadius 8, abilityInVehicleStrength
+// 0.075 a tick) repairs the vehicle it sits in, 2.25 per cent a second; a
+// kit without an Ability component does nothing.
+TEST(GameWorld_KitAbilityInAVehicle)
+{
+	for (int repairs = 0; repairs < 2; ++repairs) {
+		Range range;
+		range.collisionTemplates.add("jeep_mesh", boxMesh(1));
+		range.templates.registerType(6, "Kit");
+		range.templates.registerType(20, "PlayerControlObject");
+		range.templates.registerType(23, "Engine");
+		range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
+		world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+		makeMobile(*jeep, "jeep_mesh");
+		jeep->children().push_back({"jeep_engine", {}, {}});
+		jeep->settings()["armor.maxHitPoints"] = "100";
+		range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+		// Named as team 2's default kit, the local player's.
+		world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+		kit->children().push_back({"eu_ar_rifle", {}, {}});
+		kit->settings()["abilityInVehicleRadius"] = "8";
+		kit->settings()["abilityInVehicleStrength"] = "0.075";
+		if (repairs) {
+			kit->settings()["ability.hasRepairingAbility"] = "1";
+		}
+		const uint32_t car = range.objects.create(jeep, {0, 1, 3})->id();
+		range.world->startRound();
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		const int me = range.world->localPlayer();
+		range.world->tick(1 / 30.0f);
+		game::SoldierInput use;
+		use.use = true;
+		range.world->setPlayerInput(use);
+		range.world->tick(1 / 30.0f);
+		range.world->setPlayerInput({});
+		game::GameWorld::PlayerInfo info;
+		CHECK(range.world->playerInfo(me, info) && info.vehicle == car);
+		range.world->setHitPoints(car, 50);
+		for (int i = 0; i < 30; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		const float now = range.world->hitPoints(car);
+		std::fprintf(stderr, "  %s: %.2f after a second\n", repairs ? "repairing" : "no ability", now);
+		CHECK(repairs ? std::fabs(now - 52.25f) < 0.1f : now == 50);
+	}
+}
+
+// A seat gun's barrels and camera frame in the layout (0x005d6d20: the
+// gun's children named by fire.addBarrelName, in order; 0x005d5fb0 /
+// 0x005f1a20: fireInCameraDof's camera frame; projectileStartPosition).
+TEST(GameWorld_SeatGunBarrelsAndCameraFrame)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "PlayerControlObject");
+	templates.registerType(2, "RotationalBundle");
+	templates.registerType(3, "GenericFireArm");
+	templates.registerType(4, "Bundle");
+	templates.registerType(5, "Camera");
+	world::ObjectTemplate* mech = templates.create("PlayerControlObject", "mech");
+	mech->settings()["seatInformation"] = "mech 0/2/0 0/0/0";
+	mech->children().push_back({"mech_camera", {0, 3, 0.5f}, {}});
+	mech->children().push_back({"mech_turret", {0, 2, 0}, {}});
+	templates.create("Camera", "mech_camera");
+	world::ObjectTemplate* turret = templates.create("RotationalBundle", "mech_turret");
+	turret->settings()["inputToYaw"] = "PIMouseLookX";
+	turret->children().push_back({"mech_minigun", {0, 0, 1}, {}});
+	world::ObjectTemplate* gun = templates.create("GenericFireArm", "mech_minigun");
+	gun->settings()["fire.addBarrelName.list"] = "mech_barrel_L mech_barrel_R";
+	gun->settings()["fire.projectileStartPosition"] = "0/0/0.5";
+	gun->children().push_back({"mech_barrel_R", {1, 0, 0}, {}});
+	gun->children().push_back({"mech_barrel_L", {-1, 0, 0}, {}});
+	gun->children().push_back({"mech_other", {0, 5, 0}, {}});
+	templates.create("Bundle", "mech_barrel_L");
+	templates.create("Bundle", "mech_barrel_R");
+	templates.create("Bundle", "mech_other");
+	const uint32_t id = objects.create(mech, {0, 0, 0})->id();
+	game::GameWorld world(templates, objects);
+	auto seats = world.vehicleSeats(id);
+	CHECK(seats.size() == 1);
+	if (seats.size() == 1) {
+		const auto& seat = seats[0];
+		CHECK(seat.barrels.size() == 2 && seat.hasCameraAt && !seat.fireInCameraDof && seat.hasStartPosition);
+		CHECK(seat.barrels.size() == 2 && seat.barrels[0].x == 1 && seat.barrels[1].x == -1 && seat.barrels[0].z == 1);
+		CHECK(std::fabs(seat.cameraAt.y - 3) < 1e-6f && std::fabs(seat.yawPivot.y - 2) < 1e-6f);
+	}
+	gun->settings()["fire.fireInCameraDof"] = "1";
+	game::GameWorld again(templates, objects);
+	seats = again.vehicleSeats(id);
+	CHECK(seats.size() == 1 && seats[0].fireInCameraDof);
+}

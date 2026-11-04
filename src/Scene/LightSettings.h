@@ -137,6 +137,9 @@ struct RainSettings {
 	int randomDeviationAngleSpeed = 1;
 	bool lineDisplay = false;
 	float lineLength = 3;
+	// rainManager.freeze (the manager's +0x65, 0; 0x1007fc4b -> slot 0xa0):
+	// the box stays where it was (effects::Weather).
+	bool freeze = false;
 	std::string texture; // without ".dds"
 };
 
@@ -175,6 +178,97 @@ struct RendererSettings {
 	// skip the interior / exterior culling (slot 0x48; TitanParts.h).
 	bool insideTitanOverride = false;
 	bool showAllTitanParts = false;
+	// The renderer's draw switches (renderer.draw*, the console objects
+	// 0x1004c7a0..0x1004e0b0; the renderer's bytes, all 1 at 0x1002aba0),
+	// read by the frame 0x1002cef0 and the views 0x100264c0 / 0x10027630:
+	// drawObjects +0x68c (every mesh), drawBundledMeshes +0x690,
+	// drawStaticMeshes +0x691, drawSkinnedMeshes +0x692, draw1pMeshes +0x594
+	// (the first-person pass), drawParticles +0x68e (the particles and mesh
+	// particles), drawSkyDome +0x6a2 (the sun flare needs it too),
+	// drawSunFlare +0x6a3, drawRoads +0x693, drawTerrain +0x694,
+	// drawUndergrowth +0x695, drawOvergrowth +0x696, drawNametags +0x697,
+	// drawTrees +0x698 (the vegetation: 0x100e0000's quality copy sets it
+	// with the undergrowth and overgrowth; here the static meshes with
+	// leaves).
+	bool drawObjects = true;
+	bool drawBundledMeshes = true;
+	bool drawStaticMeshes = true;
+	bool drawSkinnedMeshes = true;
+	bool draw1pMeshes = true;
+	bool drawParticles = true;
+	bool drawSkyDome = true;
+	bool drawSunFlare = true;
+	bool drawRoads = true;
+	bool drawTerrain = true;
+	bool drawUndergrowth = true;
+	bool drawOvergrowth = true;
+	bool drawNametags = true;
+	bool drawTrees = true;
+	// renderer.drawFps (+0x69c, 0; 0x10053ae0): above 0 it becomes 1, and the
+	// frame (0x10028bb0 -> 0x10027570) prints "%.1f / %.1f", the frame's
+	// milliseconds and frames a second, at (6, 6) of the debug text.
+	int drawFps = 0;
+	// renderer.tweakNearPlane / tweakNearPlane1p (+0x584 0.041 / +0x588
+	// 0.16; 0x10051b40 / 0x10051ce0): the world view's and the first-person
+	// view's near planes (0x10028bb0 hands them to the views' slot 0x34; the
+	// first person's far plane stays +0x58c, 15). The world's is the device
+	// setting's until a script sets it: the rewrite keeps its camera's near
+	// plane unless one does (`*Set`).
+	float tweakNearPlane = 0.041f;
+	float tweakNearPlane1p = 0.16f;
+	bool tweakNearPlaneSet = false;
+	bool tweakNearPlane1pSet = false;
+	// renderer.minCullDistance (0x10051990: the renderer's slots 0x84 / 0x88,
+	// both the value): objects whose screen size falls under it are culled
+	// by the original's object drawer; kept, the rewrite culls by frustum.
+	float minCullDistance = 0;
+	// Kept for the console only: renderer.hud (+0x6a7, 0, read by its getter
+	// alone), renderer.vsync / presentAsync (the device's 0x1000adb0 /
+	// 0x1000adf0; the swapchain's present mode is the platform layer's),
+	// renderer.useSunScaling (device +0x41), renderer.alphaToMask (+0x57c),
+	// renderer.enableHWOcclusion (the occlusion query object's 0x10004900),
+	// renderer.drawGraphs (+0x6a0, the profiler's graphs),
+	// renderer.renderAheadLimit (slots 0xb0 / 0xb4), Renderer.fieldOfView1p
+	// (DAT_1020d424, read by nothing but its getter).
+	bool hud = false;
+	bool vsync = false;
+	bool presentAsync = false;
+	bool useSunScaling = false;
+	bool alphaToMask = false;
+	bool enableHWOcclusion = false;
+	bool drawGraphs = false;
+	int renderAheadLimit = 0;
+	float fieldOfView1p = 0;
+	// The road renderer's (RoadCompiledRenderer, constructor 0x100ba7e0;
+	// Renderer.road* 0x100727ee..0x10072b02): roadLodDistMod (+0x88, 1.3)
+	// scales the roads' view distance (LevelRenderer's roads);
+	// roadDepthBias / roadSlopeScaleDepthBias (+0x8c / +0x90, -1e-5 each)
+	// are D3DRS_DEPTHBIAS / SLOPESCALEDEPTHBIAS (0x100baa70), which the
+	// road pipeline's own bias stands for; disableFadeOnRoads (+0x84, 0) is
+	// read by nothing but its accessor.
+	float roadLodDistMod = 1.3f;
+	float roadDepthBias = -1e-5f;
+	float roadSlopeScaleDepthBias = -1e-5f;
+	bool disableFadeOnRoads = false;
+	// StaticMeshRenderer.enableRendering (0x10079e04) calls the static mesh
+	// renderer's slot 0x18, as renderer.drawStaticMeshes does (0x1004cfa0):
+	// the same switch. StaticMeshRenderer.noLods (+0x90 of the static mesh
+	// renderer, 0x10079f17): every static mesh at its first LOD.
+	bool staticNoLods = false;
+	// undergrowth.enabled (0x100860c9 -> the undergrowth's slot 0x30): no
+	// undergrowth drawn while clear.
+	bool undergrowthEnabled = true;
+	// undergrowth.viewDistanceScale / viewDistanceFade (the system's +0x578 /
+	// +0x57c, 1 / 0.2, both clamped to 0..1; 0x100867bd / 0x100868c4): the
+	// patches' view distance times ViewDistance, and the outer share of it
+	// over which plants grow out of the ground (0x1010e270). The scale is the
+	// quality switch's until a script sets it.
+	float undergrowthViewDistanceScale = 1;
+	bool undergrowthViewDistanceScaleSet = false;
+	float undergrowthViewDistanceFade = 0.2f;
+	// undergrowth.zPassPatchCount (+0x574, 0): the nearest N patches drawn
+	// depth-only first (ZOnly); the rewrite's single pass needs none.
+	int undergrowthZPassPatchCount = 0;
 };
 
 void registerRendererConsoleMethods(Console& console, RendererSettings& settings);

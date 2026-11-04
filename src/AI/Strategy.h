@@ -82,6 +82,16 @@ struct StrategicArea {
 	int side = 0;
 	float vehicleSearchRadius = 0;
 	bool controlPointFlag = false; // addObjectTypeFlag ControlPoint
+	// aiStrategicArea.create: an area of its own, a box over x/z at a
+	// height, without a control point (the rewrite's SAI skips these).
+	bool box = false;
+	float boxMin[2] = {}, boxMax[2] = {};
+	float height = 0;
+	// setTakeable <side> <bool> (+399 + side, 0x1001ab30): whether a side's
+	// units alone in an area without a control point make it theirs
+	// (0x1005f210's status rule; a control point's area takes it from its
+	// point, 0x100629e0). Not used by the rewrite's SAI (see above).
+	std::array<bool, 3> takeable {true, true, true};
 };
 
 struct StrategicWaypoint {
@@ -97,6 +107,11 @@ struct StrategySettings {
 	std::map<int, std::vector<std::string>> sideStrategies; // ai.addSAIStrategy (sides 1, 2)
 	std::vector<StrategicArea> areas;
 	std::vector<StrategicWaypoint> waypoints;
+	// aiStrategy.forceStrategy <name> <side> (0x1003a720, the strategy
+	// manager's +0x84 + 4 side): a side's forced strategy, which the SAI
+	// takes at every update in place of its choice (0x100a0130 reads it
+	// through 0x100398d0); empty for none (an unknown name clears it).
+	std::array<std::string, 3> forced;
 	// Being edited by the scripts.
 	std::string condition, prerequisite, strategy, area;
 
@@ -129,6 +144,24 @@ float prerequisiteValue(const StrategySettings& settings, const std::string& nam
 // Whether the strategy weights moved enough to pick again (0x100a0130):
 // some prev/cur outside [0.83, 1.2) (1 when both are 0, 0 when only cur is).
 bool strategyWeightsChanged(const std::vector<float>& previous, const std::vector<float>& current);
+// Whether the running strategy's time is up when the weights did not move
+// (0x100a0130, 0x100a02a8): after (2 - 2 x 0.5^picks) x its timeLimit
+// seconds (picks: the times this side's record of it was re-picked for
+// its time, +0xc), so at once the first time, then after timeLimit,
+// 1.5 timeLimit, ... towards 2 timeLimit. A re-pick spins the roulette
+// again and counts one more.
+bool strategyTimeUp(float sinceStart, int picks, float timeLimit);
+
+// A unit's certainty for a side: the side's AI object of it (vtbl
+// 0x10118838; made when the side first learns of the unit, 0x1003b900 from
+// BF2142.exe 0x008a2f00, with that time). Slot 9 (0x100a9b60): 1 while a
+// sensor of the side senses it (+0xa8 above 0, slots 5 and 6
+// 0x100aa040 / 0x100aa0f0); otherwise slot 10 (0x100a9b90):
+// 1 - S((now - last seen) / degeneration), the template's degeneration
+// (+0x50). A degeneration of 0 keeps it at 1 (S of a number that isn't
+// finite is 0, 0x100cc930). The side's own units and neutral ones have the
+// static object (0x008a3980's other kind): always 1.
+float knowledgeCertainty(bool sensed, float sinceSeen, float degeneration);
 
 // What the SAI knows of an area this update.
 struct AreaState {

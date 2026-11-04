@@ -34,7 +34,8 @@ layout(set = 3, binding = 0) uniform Lighting {
 #include "fog.glsl"
 
 layout(set = 3, binding = 1) uniform Road {
-	vec4 road; // x: blend factor, y: fade start, z: fade end distance
+	vec4 road; // x: blend factor, y / z: FadeOut (the distance's scale and offset)
+	vec4 eye;  // the camera, world space
 };
 
 layout(location = 0) out vec4 outColor;
@@ -47,7 +48,8 @@ void main()
 	vec4 t0 = texture(texture0, inTexCoord0);
 	vec4 t1 = texture(texture1, inTexCoord1);
 	vec3 albedo = mix(t1.rgb, t0.rgb, road.x);
-	float fade = 1.0 - clamp((inDepth - road.y) / max(road.z - road.y, 1.0), 0.0, 1.0);
+	// RoadCompiledVS: 1 - saturate(cameraDist * vFadeoutValues.x - vFadeoutValues.y).
+	float fade = 1.0 - clamp(length(inWorldPosition - eye.xyz) * road.y - road.z, 0.0, 1.0);
 	vec3 light = vec3(1.0);
 	if (material.y > 0.0) {
 		vec4 lightmap = texture(lightMap, inLightmapCoord);

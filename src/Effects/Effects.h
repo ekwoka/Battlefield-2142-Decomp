@@ -438,6 +438,13 @@ struct DecalTemplate {
 	static DecalTemplate fromTemplate(const world::ObjectTemplate& t);
 };
 
+// A vertex of a decal clipped to the surface it lies on (RendDX9 keeps
+// float3 position + float2 uv, 20 bytes, at decal +0x70 / count +0x74).
+struct DecalVertex {
+	Vec3 position;
+	float u = 0, v = 0;
+};
+
 struct Decal {
 	std::string texture;
 	Vec3 position;
@@ -453,7 +460,38 @@ struct Decal {
 	// released with it, slot 0x20).
 	uint32_t object = 0;
 	float age = 0; // seconds (RendDX9 0x10164f10; it goes at DecalManager.timeToLive)
+	// The renderer's: the decal clipped to the terrain (clipDecal), made the
+	// first time it is drawn; null until then.
+	mutable std::shared_ptr<const std::vector<DecalVertex>> clipped;
+	// Whether its owner object was drawn the last frame (the set's +0x19,
+	// set by the ObjectDrawer 0x100b84b0 / 0x100b8380 / 0x100b71c0 for the
+	// objects it draws and cleared by the decal draw 0x10164040): a set
+	// whose owner wasn't ages twice as fast (0x10164f10); world decals
+	// always count as drawn. The renderer keeps it.
+	mutable bool ownerDrawn = true;
 };
+
+// RendDX9's decal clipping (DecalSet slot 4 0x10166410 -> 0x10165f60 when
+// DecalManager.decalGeomClipAngle, +0x324c, is over 0 and there is terrain;
+// else the flat square 0x10164940). The decal's square (corners centre +-
+// tangent x half +- (normal x tangent) x half, the frame's coordinates at
+// them) is cut, per surface triangle (0x101655c0), to the prism of the
+// triangle's three edge planes (normalize(edge x n), 0x10165020,
+// Sutherland-Hodgman with uv carried along); what is left (3 or more
+// corners) is laid onto the triangle's plane (the flag 0x101f79d0),
+// lifted by normalOffset along the decal's normal and fanned (0, i, i + 1).
+// A triangle whose normal is more than maxAngleDegrees from the decal's is
+// skipped (acos(n . normal) > angle x 0.0174533; the terrain path passes an
+// angle of 0: none skipped). At most 128 vertices (0x7f). The original walks
+// the triangles from the hit one through their edge neighbours, at most 4
+// deep (0x101f79d4), stopping where the square lies inside a face; the
+// rewrite takes every triangle it is given (the terrain's 3 x 3 cells about
+// the hit, 0x10164d70), which gives the same pieces for decals that small.
+// Triangles facing away from the decal are skipped. Empty if nothing is
+// left: RendDX9 then frees the decal (0x10164660).
+std::vector<DecalVertex> clipDecal(const Vec3& centre, const Vec3& normal, const Vec3& tangent, float halfSize,
+	const std::array<float, 4>& frame, const std::vector<std::array<Vec3, 3>>& triangles, float maxAngleDegrees,
+	float normalOffset);
 
 // A LightSource of an effect bundle (an explosion's flash, a muzzle
 // flash): a point light of color * intensity, full up to
@@ -1114,6 +1152,8 @@ private:
 	bool m_deviationsBuilt = false;
 	uint32_t m_randState = 1;
 	std::vector<Vec3> m_positions; // without the sway
+	Vec3 m_centre;          // the box's centre (held while frozen)
+	bool m_centreSet = false;
 	std::vector<Drop> m_drops;
 	float m_time = 0;
 	game::Random m_random {0x5eed4a1};

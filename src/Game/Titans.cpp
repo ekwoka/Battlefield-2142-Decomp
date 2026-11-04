@@ -1640,6 +1640,48 @@ bool GameWorld::startPod(Player& player, const std::string& projectile, const ph
 				p.strafe = number(*c, "force", 0);
 			}
 		}
+		if (c && sameName(c->typeName(), "ForceObject") && number(*c, "keepUp", 0) != 0 && !p.keepUp) {
+			p.keepUp = true;
+			p.keepUpAt = {child.position.x, child.position.y, child.position.z};
+			const char* names[3] = {"regulatePosX", "regulatePosY", "regulatePosZ"};
+			for (size_t i = 0; i < 3; ++i) {
+				if (const std::string* v = setting(*c, names[i])) {
+					const physics::Vec3 ab = vec3Of(*v);
+					p.a[i] = ab.x;
+					p.b[i] = ab.y;
+					p.regulated[i] = ab.x != 0 || ab.y != 0;
+				}
+			}
+		}
+	}
+	// lookAtClosestTitanOnEnter (PlayerControlObject +0x298, read as the
+	// soldier enters by GameServer 0x004b0b90; eu_pod's 250): the nearest
+	// Titan (the game logic's objects of type 7) within it by the
+	// horizontal distance turns the pod and its rider to face it (a look-at
+	// 0x006ae080 with y left out). Its second look-at, the rider's camera
+	// pitch towards the Titan's foot (y 0), is left out.
+	if (const float reach = number(*t, "lookAtClosestTitanOnEnter", 0); reach > 0) {
+		float best = reach * reach;
+		const world::Object* closest = nullptr;
+		for (const Titan& titan : m_titans) {
+			const world::Object* o = m_objects.find(titan.object);
+			if (!o) {
+				continue;
+			}
+			const float dx = o->position().x - from.x, dz = o->position().z - from.z;
+			if (dx * dx + dz * dz < best) {
+				best = dx * dx + dz * dz;
+				closest = o;
+			}
+		}
+		if (closest && best > 1e-6f) {
+			const float face = std::atan2(closest->position().x - from.x, closest->position().z - from.z) * 57.29578f;
+			pod->setRotation({face, 0, 0});
+			if (Body* body = findBody(pod->id())) {
+				body->body.rotation = physics::Mat3::fromYawPitchRoll({face, 0, 0});
+			}
+			player.body.yawDegrees = face;
+		}
 	}
 	m_pods.push_back(p);
 	player.vehicle = pod->id();
@@ -1785,9 +1827,29 @@ void GameWorld::stepPods(float seconds)
 			body->body.velocity = body->body.velocity
 				+ (forward * (player->input.throttle * pod.forward) + right * (player->input.strafe * pod.strafe))
 					* (30.0f * seconds / pod.mass);
-			// keepUp: it stays upright.
-			body->body.rotation = physics::Mat3::fromYawPitchRoll({body->body.rotation.yawPitchRoll().x, 0, 0});
-			body->body.angularVelocity = {};
+			// keepUp (0x0062b750): the regulators' couple turns the
+			// ForceObject's offset p back over the centre: out = 2a (w x p) +
+			// (a^2 + b^2) ((0, |p|, 0) - p) on each regulated axis, x 15,
+			// pushed at p and its opposite at -p (as Vehicle::updateForce).
+			// Without one it is held upright.
+			if (pod.keepUp) {
+				const physics::Vec3 at = body->body.rotation.transform(pod.keepUpAt);
+				const physics::Vec3 v = physics::cross(body->body.angularVelocity, at);
+				const physics::Vec3 goal {0, std::sqrt(physics::lengthSquared(at)), 0};
+				const float pv[3] = {at.x, at.y, at.z}, vv[3] = {v.x, v.y, v.z}, gv[3] = {goal.x, goal.y, goal.z};
+				float out[3] = {};
+				for (size_t i = 0; i < 3; ++i) {
+					if (pod.regulated[i]) {
+						out[i] = (2 * pod.a[i] * vv[i] + (pod.a[i] * pod.a[i] + pod.b[i] * pod.b[i]) * (gv[i] - pv[i])) * 15;
+					}
+				}
+				const physics::Vec3 force {out[0], out[1], out[2]};
+				body->body.addForce(at, force);
+				body->body.addForce(-at, -force);
+			} else {
+				body->body.rotation = physics::Mat3::fromYawPitchRoll({body->body.rotation.yawPitchRoll().x, 0, 0});
+				body->body.angularVelocity = {};
+			}
 			const float speed = std::sqrt(physics::lengthSquared(body->body.velocity));
 			pod.still = speed < 1.5f && pod.age > 1.0f ? pod.still + seconds : 0;
 			player->body.position = body->body.position + physics::Vec3 {0, 1, 0};

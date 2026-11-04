@@ -107,6 +107,8 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 		s.timeToLive = RandomDistribution::parse(ttl->second);
 	}
 	s.onTimeEffect = number(t, "hasOnTimeEffect", 1) != 0;
+	s.maxDepthForExplosion = number(t, "detonation.maxDepthForExplosion", 2);
+	s.useCollisionNormal = number(t, "detonation.useCollisionNormal", 1) != 0;
 	s.remote = s.explosionMaterial >= 0 && s.explosionDamage > 0 && s.triggerRadius <= 0 && s.timeToLive.a > 1000; // CRD_NONE/9999
 	return s;
 }
@@ -250,6 +252,15 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 			})) {
 			s.pulseScan = true;
 		}
+		if (c.size() == 14 && std::equal(c.begin(), c.end(), "ThrownFireComp", [](char a, char b) {
+				return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+			})) {
+			s.thrown = true;
+		}
+	}
+	if (s.thrown) {
+		s.pullbackTicks = static_cast<int>(std::nearbyint(number(t, "fire.pullbackTime", 0.2f) * 30));
+		s.launchDelayTicks = static_cast<int>(std::nearbyint(number(t, "fire.fireLaunchDelay", 0) * 30));
 	}
 	return s;
 }
@@ -418,7 +429,24 @@ bool FireArm::tick(float seconds, bool trigger)
 			m_scanning = false;
 		}
 	}
-	const bool fired = fire(seconds, trigger);
+	bool fired = false;
+	if (m_launchIn >= 0) {
+		// 0x005e4c80: the thrown round leaves when its waits are through;
+		// meanwhile the component is busy (no new round).
+		fire(seconds, false);
+		if (m_launchIn == 0) {
+			m_launchIn = -1;
+			fired = true;
+		} else {
+			--m_launchIn;
+		}
+	} else {
+		fired = fire(seconds, trigger);
+		if (fired && m_settings.thrown && m_settings.pullbackTicks + m_settings.launchDelayTicks > 0) {
+			m_launchIn = m_settings.pullbackTicks + m_settings.launchDelayTicks - 1;
+			fired = false;
+		}
+	}
 	if (fired && m_settings.pulseScan) {
 		m_scanning = true; // 0x005d9cf0
 	}

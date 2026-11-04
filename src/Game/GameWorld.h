@@ -875,6 +875,20 @@ public:
 		bool dontClearTeamOnExit = false; // +0x34f (0x005c95b0)
 		DeviationBuildUp deviation;
 		bool hasDeviation = false;
+		// Where the gun's rounds start (MultiFireComp 0x005d5fb0, the fire
+		// component's slot 53 0x005f1a20): with fire.fireInCameraDof
+		// (template +0x44) the seat camera's frame (`cameraAt`: the seat's
+		// first Camera, at rest), else a barrel's (fire.addBarrelName,
+		// 0x004e45a6 -> 0x005d6ae0: the gun's children of those names,
+		// 0x005d6d20; one in turn, 0x005d64a0), else the gun's; then
+		// fire.projectileStartPosition (+0x5c) in that frame. Positions in
+		// the vehicle's frame at rest; `yawPivot` is the yaw bundle's place.
+		bool fireInCameraDof = false;
+		bool hasCameraAt = false;
+		physics::Vec3 cameraAt, yawPivot;
+		std::vector<physics::Vec3> barrels;
+		bool hasStartPosition = false;
+		physics::Vec3 startPosition;
 	};
 	struct VehicleLayout {
 		std::vector<SeatLayout> seats;
@@ -1402,6 +1416,7 @@ private:
 			DeviationBuildUp deviation; // its SimpleDeviationComp's state (SeatLayout::deviation)
 			float aiDeviation = 0;      // the component's +0x28 (setAiDeviation)
 			bool manned = false;        // someone in its seat last tick (stepUnmannedGuns)
+			int barrel = 0;             // the MultiFireComp's next barrel (+0x1a8)
 		};
 		std::vector<Gun> guns;
 		// Each seat's camera angles and speeds (SeatLayout::camera), degrees.
@@ -1635,6 +1650,7 @@ private:
 
 	void seatPlayer(Player& player, Body& body, int seat);
 	void stepGunner(Player& player, Body& body, float seconds, bool aims = true);
+	static physics::Vec3 seatGunOrigin(const SeatLayout& seat, Body::Gun& gun);
 	Body* findBody(uint32_t object);
 	int firstEngineType(const world::ObjectTemplate& root) const;
 	mutable std::map<const world::ObjectTemplate*, int> m_engineTypes; // firstEngineType's answers, by root
@@ -1967,7 +1983,7 @@ private:
 	// `hitObject`: what the round hit (0x005e9300's param_2; the camera
 	// shake's own-object test).
 	void explode(const physics::Vec3& at, const ProjectileSettings& settings, int attacker, float facing = 0,
-		uint32_t exclude = 0, uint32_t hitObject = 0);
+		uint32_t exclude = 0, uint32_t hitObject = 0, const physics::Vec3* up = nullptr);
 	// The object a segment meets first (static objects' projectile LOD,
 	// bodies, the terrain as 0); false when nothing is in the way.
 	bool firstHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t& object) const;
@@ -2020,8 +2036,17 @@ private:
 	void startWeaponEffects(const std::string& weapon, const physics::Vec3& origin, const physics::Mat3& turn, int effect);
 	void playAnimationSound(const Player& player, int sound);
 	void applyAbility(const Ability& ability, const physics::Vec3& at, int team, float seconds, uint32_t skip,
-		AbilityScan* scan = nullptr, Player* holder = nullptr);
+		AbilityScan* scan = nullptr, Player* holder = nullptr, bool soldiersOnly = false, bool vehiclesOnly = false);
 	void stepAbilities(float seconds);
+	// A seated soldier's kit ability (the player's update 0x00599f30, each
+	// tick from 0x0059bd80 while the soldier sits in a vehicle): the kit's
+	// Ability component (ability.hasHealingAbility / hasRepairingAbility /
+	// hasAmmoAbility, the kit object's +0x74 slot 0x38) works round the
+	// vehicle within abilityInVehicleRadius (Kit +0x328) at
+	// abilityInVehicleStrength (+0x324) of material abilityInVehicleMaterial
+	// (+0x320): healing the team's soldiers and repairing its vehicles
+	// (game logic slot 0x108) or rearming its soldiers (slot 0x10c).
+	void stepVehicleAbility(Player& player, float seconds);
 	void stepProjectiles(float seconds);
 	void steerSeeker(Projectile& projectile, float seconds);
 	void damage(uint32_t object, float amount, uint32_t projectileMaterial, uint32_t surfaceMaterial,
@@ -2222,7 +2247,11 @@ private:
 		const physics::Vec3& velocity);
 	// A visual projectile's detonation: its end effect and the ambient
 	// triggers' event, nothing hurt.
-	void explodeEffects(const physics::Vec3& at, const ProjectileSettings& settings);
+	void explodeEffects(const physics::Vec3& at, const ProjectileSettings& settings, const physics::Vec3* up = nullptr);
+	// A hit round's detonation (0x005e9300): the depth test
+	// (maxDepthForExplosion) and the end effect's up (useCollisionNormal);
+	// false when it doesn't go off.
+	bool detonateHit(Projectile& p, const physics::Vec3& point, const physics::Vec3& normal, uint32_t hitObject);
 	uint32_t m_projectileSerial = 0;
 	std::vector<BattlefieldReport> m_battlefieldReports;
 	void stepRemoteBodies(float seconds);
@@ -2318,7 +2347,18 @@ private:
 		// deployed hub's Unl_Hub_*_Supply); null: the object's own.
 		const world::ObjectTemplate* settings = nullptr;
 		bool carried = false; // on a Titan (its supply point): moved with it, not lowered to the ground
+		// teamFromClosestCP (SupplyObject +0x2e0; the helipads' and
+		// airstrips' pads): each update its team is the nearest control
+		// point's (0x005d0f20: the game logic's points, slot 0x180, by the
+		// 3-D distance from 9999 m; the point's team, interface 0xc4d1 slot
+		// 0x1c), its +0x188.
+		bool teamFromClosestCP = false;
 	};
+	// The static objects' SupplyObject children (helipad_m_SupplyObject,
+	// concreteblock_helipad_SupplyObject_helipad...): each placed one gets
+	// a supply object of its own at the child's place, its storage never
+	// spent (healStorageSize / ammoStorageSize -1, 0x005d0650 / 0x005d06a0).
+	void addStaticSupplies(const std::vector<uint32_t>& objects);
 	std::vector<Crate> m_crates;
 
 	// Spawned PlayerControlObjects' time to live (interface 0xc4c5: +0x258
@@ -2517,6 +2557,13 @@ private:
 		float forward = 0, strafe = 0; // the ForceObjects' force on PIThrottle / PIYaw
 		float age = 0;
 		float still = 0; // seconds at rest
+		// Its keepUp ForceObject (eu_pod_ForceObject: regulatePosX / Z
+		// -0.5/1 at 0/1.5/0; 0x0062b750 with the linear regulator
+		// 0x00667710): the couple Vehicle::updateForce gives a vehicle's.
+		bool keepUp = false;
+		physics::Vec3 keepUpAt;
+		float a[3] = {}, b[3] = {};
+		bool regulated[3] = {};
 	};
 	bool podLauncherOf(const world::ObjectTemplate& node, std::string& projectile, float& velocity,
 		physics::Vec3& start, bool altFire) const;

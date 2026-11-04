@@ -196,6 +196,33 @@ uint32_t undergrowthRandom(uint32_t& state)
 	return game::lehmerNext(state);
 }
 
+void UndergrowthSway::seed(float swaySpeed, float swaySpeedDiff, float swayScale, float swayScaleDiff, uint32_t state)
+{
+	const auto next = [&state] {
+		const uint32_t u = undergrowthRandom(state);
+		return static_cast<float>(((u | 0x80u) >> 7) + 1);
+	};
+	constexpr float kUnit = 1.0f / 16777216.0f; // 2^-24
+	for (int i = 0; i < 16; ++i) {
+		speed[static_cast<size_t>(i)] = next() * kUnit * swaySpeedDiff + swaySpeed;
+		amplitude[static_cast<size_t>(i)] = next() * kUnit * swayScaleDiff + swayScale;
+		phase[static_cast<size_t>(i)] = next() * 3.7450704e-07f;
+	}
+}
+
+void UndergrowthSway::advance(float seconds)
+{
+	for (size_t i = 0; i < 16; ++i) {
+		phase[i] = std::fmod(phase[i] + seconds * speed[i], 6.2831854820251465f);
+	}
+}
+
+std::array<float, 2> UndergrowthSway::offset(int i) const
+{
+	const size_t k = static_cast<size_t>(i & 15);
+	return {std::sin(phase[k]) * amplitude[k], std::cos(phase[k]) * amplitude[k]};
+}
+
 UndergrowthGenerator::UndergrowthGenerator(std::vector<UndergrowthMaterial> materials, Terrain terrain)
 	: m_materials(std::move(materials)), m_terrain(std::move(terrain))
 {

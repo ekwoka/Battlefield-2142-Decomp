@@ -15,6 +15,7 @@
 #include "Fog.h"
 #include "TerrainLod.h"
 #include "TitanParts.h"
+#include "Terrain/Undergrowth.h"
 #include "Effects/Effects.h"
 #include "Scene/EffectSettings.h"
 #include "GpuContext.h"
@@ -47,6 +48,7 @@ namespace geom {
 class GeometryTemplateManager;
 }
 namespace terrain {
+class Heightmap;
 class HeightmapCluster;
 struct TerrainData;
 class UndergrowthGenerator;
@@ -311,6 +313,7 @@ private:
 	struct GpuMesh {
 		bool bundled = false;
 		bool skinned = false;
+		bool tree = false; // a static mesh under "vegitation" (+0x2a2; renderer.drawTrees)
 		bool radiusShadowBounds = false; // GeometryTemplate.useRadiusForShadowDepth / Spatial
 		// GeometryTemplate.isTitanInterior / isTitanExterior /
 		// titanExteriorPartIndex (TitanParts.h) and the LOD's box (mesh
@@ -383,6 +386,10 @@ private:
 		// A bundled mesh drawn by the Titan interior path (0x100c3880): its
 		// envmap materials take the indoor cube.
 		bool interior = false;
+		// Its own fade this frame (the overgrowth's distance fade), else
+		// below 0: the instance's.
+		float fade = -1;
+		float drawnFade() const { return fade >= 0 ? fade : instance->fade; }
 	};
 	std::vector<DrawItem> m_drawList;
 	size_t m_culledInstances = 0;
@@ -410,6 +417,10 @@ private:
 		uint32_t priority = 0;
 		float boundsMin[2] {}; // world x, z
 		float boundsMax[2] {};
+		// The bounds' centre (world) and half diagonal: the road renderer's
+		// distance cull (0x100ba1d0, the road's +0x50 / +0x5c).
+		Vec3f center;
+		float radius = 0;
 	};
 	struct RoadLook {
 		bool loaded = false;
@@ -500,6 +511,11 @@ private:
 	// (+0x110) as Overgrowth.con set it and as the geometry quality's
 	// switch would (0x10010040: 0.4 / 0.7 / 1) when the quality was loaded.
 	float m_overgrowthCloseBase = 0;
+	// Overgrowth.viewDistance (+0x24, 500 at 0x1008f3b0): the base cell
+	// update (0x10120ef0) keeps a cell only while its nearest corner is
+	// nearer than it, fading it over the last 30% (+0x20, 0.3); no zoom or
+	// scale. The rewrite measures to each tree.
+	float m_overgrowthViewDistance = 0;
 	float m_overgrowthScriptScale = 1;
 	float m_overgrowthQualityScale = 1;
 	// This frame's close distance: the script's scale, or the quality's
@@ -652,6 +668,8 @@ private:
 	float m_undergrowthViewDistance = 0;
 	float m_undergrowthFadeScale = 0;
 	float m_undergrowthSwayScale = 0;
+	terrain::UndergrowthSway m_undergrowthSway; // the 16 offsets, advanced each frame
+	uint64_t m_undergrowthSwayTicks = 0;
 	float m_undergrowthAlphaRef = 0;
 	SDL_GPUTexture* m_undergrowthAtlas = nullptr;
 	std::map<int, UndergrowthPatchBuffers> m_undergrowthPatches; // by patch index
@@ -711,6 +729,14 @@ private:
 	uint64_t m_lastOverlayTicks = 0;
 	uint64_t m_lastMenuTicks = 0;
 	void buildOverlay();
+	std::vector<effects::DecalVertex> clipDecalToTerrain(const terrain::Heightmap& ground, const effects::Decal& decal,
+		float normalOffset);
+	// renderer.drawFps's text (0x10027570: "%.1f / %.1f", the frame's
+	// milliseconds and its frames a second, at 6, 6), in the debug text's
+	// font (Fonts/system_8x11.dif); the frame time is the time between draws.
+	struct FpsText;
+	std::unique_ptr<FpsText> m_fpsText;
+	void appendFpsText(std::vector<hud::HudQuad>& quads);
 	std::vector<ParticleGroup> m_particleGroups;
 	void buildParticles(const Camera& camera);
 	// This frame's point lights (the effects' LightSources nearest the

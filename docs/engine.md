@@ -188,6 +188,34 @@ buffer holds the worst case plus a tenth.
 Rewritten in `src/Terrain/Undergrowth` (data, generator) and
 `src/Render` (`undergrowth.vert/.frag`, after `Undergrowth.fx`).
 
+**Sway.** The system (`DAT_101ffc60`, vtable `0x101d7640`, constructor
+`0x1010f600`) draws its 16 sway offsets once (`0x1010ad20`, from the init
+`0x101100d0` before Undergrowth.cfg is opened, so with the constructor's
+SwaySpeed / SwaySpeedDiff / SwayScale / SwayScaleDiff +0x48..+0x54, 1 / 0.2 /
+0.15 / 0.01, and the random state +0x2bc seeded 0x759dc150): per offset,
+each from a fresh number u, r = ((u | 0x80) >> 7) + 1, speed = r / 2^24 x
+diff + speed, amplitude likewise, phase = r x 3.7450704e-07. Each frame
+(slot 0x24, `0x1010a900`, the frame's seconds from `0x10028bb0` /
+`0x10028ae0`) phase = fmod(phase + dt x speed, 2 pi) and the offset (+0x1b8,
+SwayOffset) is (sin phase, cos phase) x amplitude; the shader moves a vertex's
+xz by its offset x its sway byte / 255 x 3 (the byte the generator packs,
+`0x1010ba40`, from the vertex's height in its mesh x TypeSwayScale, mesh
+load `0x1010cb70`). There is no wind in it. `terrain::UndergrowthSway`; on
+later levels the original keeps what the previous cfg left in those fields,
+the rewrite the defaults.
+
+**View distance.** D = `undergrowth.viewDistanceScale` (+0x578, 1, clamped
+0..1; the quality switch `0x10010040` writes 0.5 / 0.75 / 1) x ViewDistance
+(+0x30). The draw (`0x1010e270`, slot 8) uploads FadeAndHeightScaleOffset =
+(D, 1 / (D x `undergrowth.viewDistanceFade`)) (+0x57c, 0.2): plants grow out
+of the ground over the outer fifth of D. The cfg's ViewDistanceFadeScale
+(+0x34) is read by nothing (the rewrite used it before). Patches are culled
+by a frustum whose far plane is D; streaming (`0x1010d240`) queues patches
+within 1.1 D and builds the nearest one a frame (all of them after a jump of
+D / 2). `undergrowth.zPassPatchCount` (+0x574, 0) draws the nearest N
+patches depth-only first (ZOnly); kept, unused. `undergrowth.enabled`
+(slot 0x30) gates the drawing.
+
 ## Physics of mobile objects
 
 **Collision mesh instances.** A `.collisionmesh` holds geometries, each
@@ -859,22 +887,35 @@ the rocket, AA and AV launchers): after a round (fire, slot 36
 (`0x005d4800`) keeps the weapon busy (`0x005c2da0`: weapon `+0x228` to now
 + wp-delay-ticks) until the release (slot 12 `0x005d3c20` sets `+0x164`,
 a new press clears it, slot 13 `0x005d3b00`): no round, reload or switch
-in between (`FireArm::fire`). Not rewritten:
+in between (`FireArm::fire`). The round's start and its wait:
 - `fire.fireInCameraDof` (`+0x44`) / `fireInCameraDofLocked` (`+0x45`):
   the round's frame (fire comp slot 53 `0x005f1a20`, MultiFireComp
   `0x005d5fb0`) is a seat gun's camera's (the player's camera, slot
   `0x1b4(0)`; with Locked the seat camera's pose fixed to the gun at the
   start, `0x005f25f0`), else the gun's; on foot the soldier's control
   object's frame always (the flag isn't read); `projectileStartPosition`
-  is then added in that frame. The rewrite fires seat guns along the gun's
-  aim.
+  is then added in that frame. Rewritten for seat guns
+  (`GameWorld::seatGunOrigin`): with the flag the round starts at the
+  seat's first Camera (its place at rest turned with the gun's aim about
+  the yaw bundle), along the gun's aim; Locked (one shipped gun) is left
+  out. `projectileStartPosition` is added along the frame's right, up and
+  forward (the rewrite's 1 m ahead without one).
 - `fire.pullbackTime` (ThrownFireComp `+0x94`, ticks `+0x98`, 0.2 s by
   default; the grenades 1, the sonar 0.05): the throw waits that long
-  (state 2), then fireLaunchDelay (state 3) before it goes (`0x005e4c80`).
+  (state 2), then fireLaunchDelay (state 3) before it goes (`0x005e4c80`;
+  slot 36 `0x005e5a10` starts state 2, the update is slot 5). Rewritten
+  (`FireArmSettings::thrown`, `FireArm::throwing`): the round is decided
+  and spent on the press and leaves pull-back + launch-delay ticks later
+  (a frag grenade's 30 + 12); the soft throw (`+0x168`, alt fire with
+  fireLaunchDelaySoft) is left out.
 - `fire.addBarrelName` (`0x004e45a6` → `0x005d6ae0`, MultiFireComp
   `+0x94`): the gun's children of those names are its barrels
   (`0x005d6d20`), fired in turn (`+0x9c` set by default, `+0x1a8`) from
-  each barrel's frame, or all at once.
+  each barrel's frame, or all at once. Rewritten: the seat's `barrels`
+  (the gun's direct children of those names, in the tree's order), one in
+  turn (`0x005d64a0`: one barrel always the first; past the last the first
+  again), each turned with the gun's aim; fireInCameraDof's camera frame
+  wins over them (`0x005d5fb0`).
 
 **Fire modes.** The fire component (constructor `0x005f28a0`) starts in
 the first `fire.addFireRate` (the template's list at `+0x30`; 2 without
@@ -1808,8 +1849,13 @@ mesh of that many (`GpuMesh::skippedLods`). Static meshes skip theirs
 too (0x100dd480): geometry 0 maxSkip3pLods (+0xc0), geometry 1
 maxSkipWreckLods (+0xc4), none for an isTitanExterior template (its slot
 0xcc reads +0xc8, the hedge "+0xc8 unknown" settled: the hull parts pair
-their LODs). Not done: the static meshes'
-`ObjectTemplate.lodDistance` High/Medium/Low.
+their LODs). `ObjectTemplate.lodDistance` is not a mesh setting: its three
+registrations (`0x0052e416` Emitter +0x250, `0x005337b9` the particle
+systems' LodDistance class Low / Medium / High, `0x0053f395` EffectBundle
++0x424) are the effects', and no static object sets it (the shipped 1,460
+uses are on particle systems and emitters); neither 0x100dd480 nor
+0x100bdb00 reads it. `StaticMeshRenderer.noLods` (+0x90 of the static mesh
+renderer, `0x10079f17`) keeps every static mesh at its first LOD.
 
 **Overgrowth.** Trees placed by `overgrowth/OvergrowthCollision.con`
 (`Object.isOvergrowth 1`, `0x006ed5bb`) are drawn whole within
@@ -1817,13 +1863,28 @@ their LODs). Not done: the static meshes'
 with their `<geometry>_lod` mesh, whose `*_lod.dds` textures exist only in
 the level's overgrowth atlases (`OvergrowthAtlas.tai`,
 `OvergrowthAtlas_alphatest.tai`: texture → atlas, offset, size; the mesh
-shader scales and offsets the coordinates). viewDistanceScale is
-Overgrowth +0x110, which the geometry quality's switch writes too
-(0x10010040: 0.4 / 0.7 / 1) and every level's Overgrowth.con sets to 1
-after it: the rewrite takes the script's value, and the quality's once
-the video settings change after the level loaded (the switch runs when
-they are applied). Not done: dropping trees beyond the view distance,
-the overgrowth shadow map.
+shader scales and offsets the coordinates). The object is `DAT_1020ded8`
+(vtable `0x101d3790`, constructor `0x1008f3b0`, its Growth base
+`0x10122130`): viewDistance +0x24 (500; both console rows `0x100873ba` /
+`0x10087478` call slot 3 `0x1008f510`), viewDistanceScale +0x28 (1,
+`0x1008763d`), closeDistPercentage +0xc8 (0.15), closeDistFade +0xcc (0.3),
+lodTimer +0x114 (0), and the geometry quality's factor +0x110 (only the
+switch 0x10010040 writes it: 0.4 / 0.7 / 1; an earlier note here took it for
+viewDistanceScale). The update (slot 7, `0x1008b7a0`) makes C = zoom x
+viewDistance x closeDistPercentage x quality; a tree is near within its
+mesh radius x scale + C x viewDistanceScale x the type's +0x9c
+(`0x1008b580`, 3D). Near trees cross-fade with their `_lod` meshes over
+closeDistFade (`0x1008da30`: the full mesh at alpha 2w, the LOD at 2(1 - w),
+w = sqrt(+0x9c) x (1 - sqrt(q)) / closeDistFade), at most 1 / lodTimer a
+second when lodTimer is over 0. The base cell update (`0x10120ef0`) keeps a
+cell only while its nearest corner is within viewDistance (no zoom or
+scale) and fades it over the last 30% (+0x20); the cell draw
+(`0x10121410`) fades near cells when the camera is low. Rewritten: the
+near radius (with the zoom and the quality factor; the type factor taken as
+1), and trees dropped beyond viewDistance and faded over its last 30%, by
+each tree's distance rather than its cell's (`DrawItem::fade`). Not done:
+the full / LOD cross-fade and lodTimer (the rewrite switches at the
+radius), the near-cell fade, the overgrowth shadow map.
 
 **Mesh particles.** A MeshParticleSystem's particles are copies of its
 `geometry` (a MeshParticleMesh template: a bundled-mesh file), scaled by
@@ -1951,9 +2012,28 @@ hasResponsePhysics; DynamicBundle (vehicles) sets 4 by default
 (`0x0060fea0`). So every object with collision physics and neither point
 physics gets its own set; the rewrite's rule (every body a decal lands
 on) is that for the bodies a projectile can hit. Rewritten in
-`EffectManager::spawnDecal`, `decal.vert/.frag`; not done: the
-normal-mapped technique, clipping decals to the geometry
-(`decalGeomClipAngle`, +0x324c, 60, read by 0x10165f60).
+`EffectManager::spawnDecal`, `decal.vert/.frag`.
+
+*Clipping.* A set's add (vtable `0x101da498` slot 4, `0x10166410`; the exe's
+`0x005a36d0` passes the hit's matrix, the template, a scale, the mesh and the
+hit) takes a record from the manager's pool (0x800 of 0x78 bytes,
+`0x100e6820`), drops the oldest when full, and builds the vertices: the flat
+square (`0x10164940`, lifted by decalNormalOffset) without terrain or with
+decalGeomClipAngle 0, else `0x10165f60`. That one cuts the square (corners
+(-1, 0, -1)..(1, 0, 1) of the template `0x101f7980`, uv from the frame) to
+surface triangles: on the terrain those of the 3 x 3 cells about the hit
+(`0x10164d70`, terrain slot 0x88, the triangle table `0x101f78f0`, no angle
+test), on an object its collision mesh's from the hit triangle through its
+neighbours (`0x101655c0`, at most 4 deep, faces more than decalGeomClipAngle
+from the normal rejected). Per triangle the square is clipped to the prism of
+its edge planes (`0x10165020`, Sutherland–Hodgman), laid onto its plane and
+lifted by decalNormalOffset, and fanned; at most 128 vertices; with none the
+decal is freed (`0x10164660`). Rewritten in `effects::clipDecal` and
+`LevelRenderer::clipDecalToTerrain` (made once per decal, the cells widened
+for decals bigger than one): world decals on the terrain. Decals on objects
+keep the flat square (the renderer has no collision-mesh triangles), and on
+static objects too (the original draws them only for objects with a set of
+their own). Not done: the normal-mapped technique.
 
 *Decal lifetime and fades.* `DecalManager.*` (the console objects
 `0x1007bdca..0x1007c4c0`; the manager DAT_101ffc78, constructor defaults):
@@ -1965,8 +2045,19 @@ DecalFadeDistanceAndInterval = (fadeDistance +0x3238 50, fadeDistance ×
 startFadePercentageOfFadeDistancel +0x3244 0.85) (`0x10163810`), and
 decalNormalOffset (+0x3248, 0.01) lifts them. Rewritten in
 `scene::ParticleSystemSettings` (`decal*`), `EffectManager::update` and
-`decal.vert` (the depth as the view's w). Not done: the doubled ageing of
-a set whose +0x19 is clear (its meaning not traced).
+`decal.vert` (the depth as the view's w).
+
+*Unseen sets age twice.* A set's +0x19 (with +0x1a; constructor `0x101647d0`
+sets both to 1, slot 1 `0x101646b0` writes them) is "its owner was drawn":
+the ObjectDrawer (vtable `0x101d4e98`, renderer +0x5bc) sets it for every
+object it draws (`0x100b84b0`, `0x100b8380`, `0x100b71c0`), the ageing
+(`0x10164f10`, via DecalManager slot 0x30 `0x100e6d50`) adds the frame's
+seconds once more while it is clear (the world's set forces it set), and the
+decal draw `0x10164040` clears it. So a vehicle's decals age at twice the
+rate while it is out of view (`Decal::ownerDrawn`, set from the draw list).
+Not done: +0x1a's refusal of new decals on an unseen owner's set (unless the
+template's byte +0x20), and the static decals' second list (+0x2c, never
+aged, removed by id through slot 5 `0x10164e70`).
 
 **Turning parts.** A vehicle's moving parts (RotationalBundle, Engine,
 Wing: rotors, thrusters, flaps, turrets and the like) are drawn turned by
@@ -6167,7 +6258,11 @@ Rewritten in `GameWorld::explode`, `blastShare` and `empBlast`;
   material pair's effect (game logic slot `0x114`) within 10 ticks of the
   hit; the end effect's up axis is the face's normal with
   `useCollisionNormal` (`+0x69`, 1), else the round's forward. Rewritten:
-  the offset (`detonationPoint`); the rest not. The direction is the object's axis
+  the offset (`detonationPoint`), the depth test against the water level
+  (`GameWorld::detonateHit`; the rewrite's rounds reach the bottom, so it
+  is the bottom's depth) and the end effect's up (`0x005e8f50`); not
+  useMMOnEndEffect (the rewrite plays the material pair's effect on every
+  hit already) nor preventDetonationFromDestroyedParent. The direction is the object's axis
   nearest the line plus the line (y only when strictly nearest). It wakes
   the node and goes in through slot `0xa4` at (blast − object) /
   max(distance, 1) from the object, itself over max(distance, 1); a
@@ -6299,6 +6394,25 @@ A knife kill's reward is the ranked stats scripts' (not shipped):
 ECGameLogicGLDogTag, which a client (`0x004cbea0`) shows as HUD event
 0x28 (the "dogtag" sound and `HUD_DOG_TAG_MESSAGE` for 5 s, `0x0074f0d0`)
 and counts per victim; not rewritten.
+
+**Kit abilities in a vehicle** (the player's update `0x00599f30`, each
+tick from `0x0059bd80` while the soldier sits in a vehicle). The kit's
+own Ability component (`ability.hasHealingAbility` on the assault kits,
+`hasRepairingAbility` on the anti-vehicle kits, `hasAmmoAbility` on the
+support kits; the kit object's `+0x74`, slot `0x38`'s three bytes) works
+round the vehicle: the object manager's sphere (`DAT_00a85220` slot
+`0x44`) of `abilityInVehicleRadius` (Kit `+0x328`: 7, 8 for the
+engineers), at `abilityInVehicleStrength` (`+0x324`: 0.35, 0.075, 0.4)
+per cent a tick of material `abilityInVehicleMaterial` (`+0x320`: 73,
+84, 91). Healing treats the team's soldiers, the seated ones too (game
+logic slot `0x108`); repairing (with neither of the others) the vehicles
+of the team or of none, the engineer's own among them (slot `0x108`);
+ammo refills the team's soldiers (slot `0x10c`). `GameWorld::
+stepVehicleAbility` through `applyAbility` without the battery. Left: the
+first sphere's pass over the nearby vehicles and, when the player's
+slot `0x2a0` object has `+0x48` above 0, its message (`0x005910c0` with
+`0x400` and the material); `abilityInVehicleStrengthModifier`
+(PlayerControlObject `+0x298`) is not traced to a reader.
 
 **Unlock abilities.** `ability.setMaterialDamageMod <material> <mod>`
 (`0x0054eadc` → the Ability's slot `0x94`) scales the damage a projectile
@@ -8010,6 +8124,17 @@ and takes the largest `minTimeBetweenActivation`.
   cent of a magazine (7 % a second; the ammo component's slot `0xa8`,
   `0x005f5110`). Both draw on 500 of shared storage, and the crate goes
   when that is spent (`destroyWhenEmptyStorage`).
+- **Static supply objects**: the levels' helipads and airstrips
+  (`helipad_m`, `concreteblock_helipad`, `concreteblock_airstrip_long*`,
+  `dummy_helipad_repair`: Bundles with a SupplyObject child, radius 5,
+  workOnVehicles, healSpeed 8, refillAmmoSpeed 12) work the same way at
+  the child's place, their storages -1 (never spent, `0x005d0650` /
+  `0x005d06a0`). With `teamFromClosestCP` (SupplyObject `+0x2e0`, 13
+  templates) each update first takes the team of the nearest control
+  point (`0x005d0f20`: the game logic's points, slot `0x180`, by the 3-D
+  distance from 9999 m; the point's team through interface `0xc4d1` slot
+  `0x1c`), so a pad serves whoever holds the base. The rewrite gives each
+  placed one a supply object of its own (`GameWorld::addStaticSupplies`).
 
 The gameLogic defaults come from its constructor (`0x004d69d0`);
 `GameLogicInit.con` sets the supply drop's height and time to live.
@@ -8495,15 +8620,18 @@ pod_launcher at 150 m/s; pod_launcher_cq in other modes). The pod is a
 rigid body of its own (gravityModifier 1.5, drag 1, dragModifier 3/1/3);
 its ForceObjects steer it (eu_pod_FOFWD 35 on PIThrottle, eu_pod_FOStrafe
 20 on PIYaw, × 30 / mass a second as the drones' are). At rest it lets the
-soldier out. Not rewritten: the pod's keepUp torque (it is kept
-upright; `eu_pod_ForceObject`, regulatePosX / Z −0.5/1 with keepUp: two
+soldier out. The pod's keepUp torque is rewritten (`stepPods`;
+`eu_pod_ForceObject`, regulatePosX / Z −0.5/1 with keepUp: two
 linear regulators (`0x006678a0`, out = 2am·v + (a² + b²)m(goal − p)) give
 the root node (slot `0xa4`) ±15 × out / m at ±p, a couple turning the
 ForceObject's offset p (R × (0, 1.5, 0)) back over the centre, `0x0062b750`;
-`Vehicle::updateForce` has it for vehicles), lookAtClosestTitanOnEnter
-(`eu_pod` 250, read on entering by GameServer `0x004b0b90`: the nearest
-RCTitan within it by the horizontal distance turns the pod to face it,
-and the soldier's look gets its pitch), pods against a shielded Titan.
+`Vehicle::updateForce` has it for vehicles; a pod without one is held
+upright), and lookAtClosestTitanOnEnter (`eu_pod` 250, read on entering by
+GameServer `0x004b0b90`: the nearest RCTitan, the game logic's objects of
+type 7 (`0x0058e400`), within it by the horizontal distance turns the pod
+and its rider to face it; rewritten in `startPod`, the rider's camera
+pitch from the second look-at left out). Not rewritten: pods against a
+shielded Titan.
 
 **Bots.** AIDLL has no Titan-mode strategy (its only Titan code is the
 CSTTitan strategic type); single-player BF2142 had no Titan mode. In the
@@ -8539,8 +8667,10 @@ silo is neutral.
 
 `AIDLL.dll` exports only `initDll` and `deinitDll`, and it has about 6,400
 functions. Rewritten in `src/AI/Behaviour` (selection), `src/AI/Strategy`
-(the strategic AI), `src/AI/PathFollower` (following paths, driving) and
-`src/Game/Bots` (scheduling, sensing, the patterns, aiming).
+(the strategic AI), `src/AI/PathFollower` (following paths, driving),
+`src/AI/Goals` (the goal objects), `src/Game/Bots` (scheduling, sensing,
+the patterns, aiming) and `src/Game/BotsScript` (the rest of AIDLL's
+console, the scripted bots).
 The settings come from the game's own scripts: `aiSettings.*` in
 `AI/AIBehaviours.ai`, `weaponTemplate.*` in `Objects/**/ai/Weapons.ai`,
 `aiTemplate.*` and `aiTemplatePlugIn.*` in `Objects/**/ai/Objects.ai`,
@@ -8932,8 +9062,14 @@ The urgencies:
   prerequisites, the weighted condition values with their
   Required/Advisory rules (0x100a9300). The choice is kept while no weight
   moves by about 20 %; otherwise it is picked by roulette (0x100a0130).
-  With the shipped data, both sides run basicAttackEnemy until the enemy
-  holds nothing.
+  When the weights hold, the running strategy's time can run out: after
+  (2 − 2 × 0.5^n) × its timeLimit (n: the times this side re-picked it
+  for its time, the record's +0xc; 0x100a02a8), so once at once, then
+  after timeLimit, 1.5 timeLimit...; the default timeLimit (1e9,
+  0x1005cb60) never runs out after that first spin. A forced strategy
+  (`aiStrategy.forceStrategy <name> <side>`, 0x1003a720, read through
+  0x100398d0) is taken instead at every update. With the shipped data,
+  both sides run basicAttackEnemy until the enemy holds nothing.
 - **Area values:** the strategy's modifiers scale area temperatures.
   - Attack value: `100 v / d − penalty` for areas not owned that border
     an owned one.
@@ -8960,11 +9096,22 @@ The urgencies:
   read through 0x100f0840): Fire3d's motion test and doubled temperature
   take it (0x1007d6c0); the fire plan's ITAir clause (1: fight from where
   it is; 2: hold the order spot) isn't rewritten.
-- **degeneration, allowedTimeDiff, commonKnowledge** go to AIDLL when an
-  object is registered (0x008a3980 → 0x1003b900): the knowledge decay out
-  of sight, the update throttle (0x100a9e70) and per-team (0, every
-  shipped template) or shared knowledge (0x0088d0d0). Stored, not used:
-  the rewrite's sides know every unit.
+- **Knowledge** (degeneration, allowedTimeDiff, commonKnowledge go to
+  AIDLL when an object is registered, 0x008a3980 → 0x1003b900): a side's
+  AI object of an enemy unit is made when the side first learns of it
+  (BF2142.exe 0x008a2f00, lazily per team; the unit's own team and
+  neutral ones get the static kind, always certain). Its certainty (vtbl
+  0x10118838 slot 9, 0x100a9b60) is 1 while a sensor of the side senses
+  it (+0xa8, counted up and down by slots 5 and 6, 0x100aa040 /
+  0x100aa0f0, which also copy the last position), otherwise 1 − S((now −
+  last seen) / degeneration) (slot 10, 0x100a9b90; S is 0x100cc930, and
+  a degeneration of 0 keeps it at 1). The SAI's area pass (0x1005f210)
+  walks the side's knowledge only, so an enemy soldier no bot of the side
+  has seen counts for nothing, and the others count by their certainty
+  (`ai::knowledgeCertainty`, `BotManager::certainty`, filled from the
+  bots' memory each update). commonKnowledge 1 (14 shipped templates) is
+  one shared object: certain. allowedTimeDiff (the update throttle,
+  0x100a9e70) is stored, not used. Stand-in: vehicles count as known.
 - **Orders:** attack or defend orders go to the area's order position.
   Squads under a human commander keep that player's orders.
 - **Goals** (0x10060300): a bot heads for a spot within 0.8 of the
@@ -9411,6 +9558,182 @@ bipods), one without Mobile, or one whose infantry-map spot lies within
 the two radii; a passenger any. The choice of another vehicle gets out
 and walks there.
 
+### Action plans
+
+A BBP pattern builds its plan from statements (Parallel, Serial, PlanEnd,
+If, Wait, While and the leaves: MoveTo, MoveToObject, AimAt, Trigger,
+TriggerContinously, Sense, SoldierPose, ChangeWeapon, PlaceC4...; the
+BAPStatementType names 0x1005b000, the conditions LookDeviation,
+ObjectDistance, WeaponReadyToFire... 0x10058ab0), and the bot's
+interpreter runs the leaves with the implementations its equipment type
+lists (`aiSettings.addInterpreterEntry <equipment> <statement>`,
+0x10029e10; the implementations by name, registered by the AI object's
+constructor 0x1002a400: TankMoveTo, CarMoveTo, MechMoveTo,
+FloatingTankMoveTo, InfanteryMoveTo, HeliMoveTo..., the sensing patterns
+Turret, MouseFreeLook, Soldier, Null). The rewrite doesn't build statement
+objects: each pattern is code running the same statements in the same
+order (BotManager::fire, flee, assist...), and the leaves are its
+functions (ai::driveControl, aim, the path follower). The interpreter's
+table is read (`BotSettings::moveInterpreter`: the MoveTo statement an
+equipment type lists picks its driver). Rewriting the patterns as trees
+for an interpreter would change no behaviour (the trees are fixed per
+pattern; no script builds plans) and was not done. The plan printers
+(0x10059000 the statement names, 0x100a4aa0, BotPlans.cpp's 0x100c65e0
+for `ai.writeBotPlans`) are debug output.
+
+### AIDLL's console and scripted bots (src/Game/BotsScript.cpp)
+
+AIDLL registers 282 console commands from its static initialisers
+(0x10100000..): each is an object whose constructor names it, its class
+(the `FUN_100fde20` calls: AutoControllerTemplate, AI, aiSettings,
+AIBotManager, aiStrategy, AIStrategicArea, AILandingZone, AIPathFinding,
+AIDebug, AIRandom; the console's names are case-insensitive) and its
+argument types, with a parser per argument (slots 24..) and an execute
+slot (23). The weapon, kit and AI templates (`weaponTemplate.*`,
+`kitTemplate.*`, `aiTemplate*`, `aiPathfinding.setActiveMap`,
+`aiPathfinding.map.*`) are BF2142.exe's, not these.
+
+- **The settings object** (AISettings, constructor 0x10051aa0; the
+  interface IAISettings, vtbl 0x101148c8, and IAISettingsModifier, vtbl
+  0x10114828, of one object, registered by 0x100c4910): the
+  `aiSettings.*` setters write it through the modifier slots
+  (maxBots +8 by slot 0 0x1008b9d0, auto controllers +0xc 0x1004f410,
+  maxBotsIncludeHumans +0x37 0x1004f420, ignoreCommanderDistance +0x38
+  (30) 0x1004f430, the behaviour count +0x10 0x1004f3d0 (and
+  DAT_10139520, 0x10096940), the view distance +0x1c 0x1004f460, the
+  stats view distance +0x20 (300) 0x1005ccd0, the information grid +0x2c
+  (32) 0x1004f4d0, the sides +0x30 0x1004f4f0, the skill 0x10051d10, the
+  SAI's gate +0x28 (35 s) 0x100d7ec0, respawn +0x34 0x1003c2c0, the
+  vehicle records 0x10051050 and cluster mappings 0x10050030, autoSpawn
+  +0x36 0x1004f660, the man-down equipment +0x40 0x1004f690, the menu
+  override +0x184 0x1004f6b0, the side's personality 0x100509d0) and the
+  game reads them through the interface (maxBots 0x1004f380 and with the
+  auto controllers 0x1004f390, 0x1004f3a0, 0x1004f3b0, 0x1004f3c0,
+  0x1004f450, 0x1004f4e0, 0x1004fc00, 0x1004fc20, 0x1004ffa0). The
+  rewrite's `BotSettings` holds them; the scheduling and skill are used,
+  the rest is kept.
+- **Bot names** (`aiSettings.addBotName <first> <last>`, 0x10050720):
+  "first last" goes into the list by a random key, U[0, 0.4) for the
+  first six names and U[0, 1) after, so those six tend to lead. The game
+  names a bot it adds without a name (BF2142.exe's AI player factory
+  0x0089e7a0 → IAISettings slot 0xc4, 0x10050a20): the head, which goes to
+  the back. `bf2142 --bots` names its bots so (BotNames.ai's 100 names).
+  The keys' U[0, 1) is a fixed sequence here.
+- **Scheduling** (`aiBotManager.*`, the bot manager's second vtable
+  0x101196b0): the thresholds (+0x6c, +0x74, absolute: 0x100c5cf0,
+  0x100c5d10) and interleave (+0x60, +0x64: 0x100c5d30) feed the think
+  queue (see Scheduling; 0x100c95f0 takes max(0, planned − planned
+  waiting) + unplanned unplanned bots); the sensing and system quotients
+  (0x100c5d50, 0x100c5da0) are shares of the real-time budget, kept.
+- **Auto controllers** (`autoControllerTemplate.*`, the template
+  0x100a8ed0 of 0x3c bytes, made by 0x10034320): sendFireWarning +0,
+  operatesAlone +1, scanningSpeed +4 (0.03), accuracy +8 (0.5), fov +0xc
+  (20°; the sensing agent 0x100ed700 makes an auto controller's frustum
+  (0x100feea0) of it in degrees, its reach viewDistance / cos(fov / 2)), viewDistance
+  +0x10 (30), useSiren +0x14, reactionTime +0x18, targetLostTimeout
+  +0x1c, neverAttackDeployer +0x20, reportEnemiesToTeam +0x21,
+  allowTakeOver +0x22, maxTrackingInput +0x24 (4), checkLineOfFire +0x28,
+  discoverCloakedEnemiesDistance +0x2c, flipOutAtHealth +0x30,
+  scanningInputScale +0x34 (1), reloadOnTeamChange +0x38,
+  onlyAttackNetworkBattlefieldObjects +0x39, simpleFirePlan +0x3a. The
+  sentry drone and the silos (GameWorld, Titans) use the shipped
+  UAVDrone and CP_CANNON values, which `BotSettings::autoController`
+  holds. AutoControllers.ai's `scanningSpeedWhenFlippingOut` is no
+  command.
+- **Not commands:** the shipped AIDefault.ai's `aiSettings.setAutoSpawnBots`
+  (AIDLL's is `aiSettings.autoSpawnBots`), so autoSpawn stays off.
+- **Scripted bots** (`ai.*`): `botMoveTo <radius> <x/y/z> <bot>`
+  (0x100284a0), `botFlyTo <bot> <radius> <height> <unused> <x/y/z>`
+  (0x100285a0, ITAir only), `botSetWaypoints_Patrol <bot> <radius>
+  <count> <p1> [<p2> <p3>]` (0x10028680) and `botSetWaypoints_Patrol3d`
+  (0x10028790) give the bot (the bot manager's slot 7, 0x100c6c80, by
+  player id) a goal object (vt+0x38; see Goals below) that its MoveTo, or a
+  pilot's GotoWaypoint3d, follows in place of the SAI's orders. In the
+  rewrite a goal lasts until it is done (a waypoint goal reached) or the
+  bot dies; the original's next SAI order would replace it.
+  `deactivateBot` (AIMain's slot 5, 0x10055f80: out of the SAI and the
+  bot manager) and `updateBot` (0x10026f30, the bot's vt+0x24) act on
+  the running `BotManager` (`attach`). `addBot <name> <team> ...`
+  (0x10005bc0) adds a bot player; `addUnspawnedBot` (0x10028d70) does
+  nothing and answers −1. `ai.init` (0x10004dc0) marks the level's AI.
+- **Goals** (src/AI/Goals; the vtables' slot 1 urgency, slot 2 the head,
+  slot 3 the kind): waypoints (kind 1, vtbl 0x1011747c, constructor
+  0x1008ae90: reach `radius`, done within max(ceil(radius), bot radius +
+  1), 0x1008aaa0), patrol (kind 2, 0x10117520, 0x1008b560: reach at least
+  5; urgency 1, the head to the back within the reach horizontally,
+  0x1008b6c0), fly (kind 6, 0x101174b8, 0x1008b450: horizontal and
+  vertical reaches; with several points the head is passed within both
+  or once the bot is farther from it than at the last look, 0x1008b230),
+  patrol 3d (kind 7, 0x10117560, 0x1008b7d0: urgency 1, the head to the
+  back within the reach and when |y − head.x| < 10, 0x1008b920: the
+  original compares the bot's height with the point's x, kept). Slot 4
+  (0x1008a9a0, 0x1008a9b0) suspends a goal.
+- **Strategic areas** of their own (`aiStrategicArea.create <name>
+  <x/z> <x/z> <height> <temperature>`, juneau and Strike_at_Karkand_Coop
+  use them): kept with their box and per-side takeable flags (`setTakeable
+  <side> <0|1>`, +399 + side, 0x1001ab30); the SAI's status rule for them
+  (0x1005f210: an area without a control point becomes a side's when
+  only its units are there and it is takeable for that side) isn't
+  rewritten, as the SAI weighs only control point areas.
+
+The commands (constructor / execute slot), and where the rewrite has them:
+
+**autoControllerTemplate.*** (22)
+
+- BotsScript.cpp: `create` 0x10002210/0x10002310, `active` 0x10002480/0x10002570, `operatesAlone` 0x10002680/0x100027d0, `sendFireWarning` 0x10002850/0x100029a0, `scanningSpeed` 0x10002a10/0x10002b60, `accuracy` 0x10002bf0/0x10002d40, `fov` 0x10002dd0/0x10002f20, `viewDistance` 0x10002fb0/0x10003100, `useSiren` 0x10003190/0x10003310, `reactionTime` 0x10003390/0x100034e0, `targetLostTimeout` 0x10003570/0x100036c0, `neverAttackDeployer` 0x10003750/0x100038a0, `reportEnemiesToTeam` 0x10003920/0x10003a70, `allowTakeOver` 0x10003af0/0x10003c40, `maxTrackingInput` 0x10003cc0/0x10003e10, `checkLineOfFire` 0x10003ea0/0x10003ff0, `discoverCloakedEnemiesDistance` 0x10004070/0x100041c0, `flipOutAtHealth` 0x10004250/0x100043a0, `scanningInputScale` 0x10004430/0x10004580, `reloadOnTeamChange` 0x10004610/0x10004760, `onlyAttackNetworkBattlefieldObjects` 0x100047e0/0x10004930, `simpleFirePlan` 0x100049b0/0x10004b00.
+
+**ai.*** (55)
+
+- Bots.cpp: `addSAIStrategy` 0x10008040/0x10008170.
+- BotsScript.cpp: `init` 0x10004dc0/0x10004f10, `getBotCount` 0x100057f0/0x10005880, `getNumberOfActiveBots` 0x100058b0/0x10005940, `getNumberOfDeactivedBots` 0x10005970/0x10005a00, `addBot` 0x10005a30/0x10005bc0, `addUnspawnedBot` 0x10005e30/0x10005f90, `deactivateBot` 0x10006160/0x100062b0, `updateBot` 0x10006300/0x10006450, `botSetWaypoints_Patrol` 0x100067a0/0x10006c70, `botSetWaypoints_Patrol3d` 0x10006dd0/0x10007230, `botMoveTo` 0x10007350/0x100075d0, `botFlyTo` 0x10007620/0x10007990.
+- not rewritten: `botGiveOrder` 0x10006480/0x100065e0, `createSAI` 0x10007a00/0x10007a90, `saiEnable` 0x10007ac0/0x10007c10, `saiMapXDimension` 0x10007ca0/0x10007df0, `saiMapYDimension` 0x10007e70/0x10007fc0, `addPlacement` 0x1000a3b0/0x1000a5c0, `spawnBot` 0x1000a920/0x1000aa80.
+- debug or tooling, not rewritten: `createHeightMap` 0x10004b80/0x10004cd0, `readHeightMapFromFile` 0x10004d10/0x10004da0, `debug` 0x10004f40/0x10004fd0, `writeBotPlans` 0x10004ff0/0x10005090, `aiSystemQuotient` 0x100050b0/0x10005200, `setAISystemComponentsQuotient` 0x10005290/0x10005480, `getBotManagerQuotient` 0x100054c0/0x10005550, `getSAIQuotient` 0x10005570/0x10005550, `botStatisticUpdateSpeed` 0x10005600/0x10005750, `validateDataStructuresEnabled` 0x10008290/0x100083e0, `drawBotPlan` 0x10008470/0x100085c0, `drawStrategicAreas` 0x10008640/0x10008790, `drawPathfinding` 0x10008810/0x10008960, `drawMovement` 0x100089e0/0x10008b30, `drawAiming` 0x10008bb0/0x10008d00, `executePlan` 0x10008d80/0x10008ed0, `drawChangeUrgency` 0x10008f50/0x100090a0, `drawOnlyClosestBot` 0x10009120/0x100091b0, `drawAddClosestBot` 0x100091e0/0x10009270, `drawRemoveAllBots` 0x100092f0/0x10009380, `drawAddAllBots` 0x100093b0/0x10009440, `drawAddBot` 0x10009470/0x10009560, `drawRemoveBot` 0x10009640/0x10009730, `drawAddClosestSecondaryBot` 0x10009830/0x100098c0, `pauseAllBots` 0x100098f0/0x10009980, `unpauseAllBots` 0x100099b0/0x10009a40, `pauseAllButClosestPrimaryBot` 0x10009a70/0x10009b00, `pauseAllButClosestSecondaryBot` 0x10009b30/0x10009bc0, `pauseBot` 0x10009bf0/0x10009d20, `showAll` 0x10009e50/0x10009fa0, `getRendCameraPosition` 0x10009fe0/0x1000a140, `getRendCameraRotation` 0x1000a190/0x1000a140, `getCurrentPitchAngle` 0x1000a230/0x1000a2c0, `getCurrentYawAngle` 0x1000a2f0/0x1000a380, `pause` 0x1000aac0/0x1000ac20.
+
+**aiSettings.*** (58)
+
+- Bots.cpp: `setMaxNBots` 0x1000ac80/0x1000ade0, `setViewDistance` 0x1000b400/0x1000b550, `setVehicle` 0x1000b880/0x1000b970, `setVehicleMaterialCost` 0x1000bcb0/0x1000be20, `getViewDistance` 0x1000c210/0x1000c2a0, `setBotSkill` 0x1000c930/0x1000ca80, `setVehicleMods` 0x1000dfc0/0x1000e0e0, `setVehicleBehaviour` 0x1000e470/0x1000e6b0, `setVehicleDefaultBehaviour` 0x1000eae0/0x1000ec00, `setBehaviour` 0x1000f680/0x1000f7b0, `createBehaviourModifiers` 0x1000fa80/0x1000fb70, `setBehaviourModifier` 0x1000fe40/0x1000ff70, `createUCConstant` 0x10010450/0x10010580, `createUCLinear` 0x100106a0/0x10010800, `createUCXInverse` 0x10010980/0x10010b70, `addSensingAgentPattern` 0x10011100/0x10011220.
+- BotsScript.cpp: `setMaxNAutoControllers` 0x1000ae00/0x1000af50, `maxBotsIncludeHumans` 0x1000af80/0x1000b0d0, `setIgnoreCommanderDistance` 0x1000b100/0x1000b250, `setMaxNumberOfBehaviours` 0x1000b280/0x1000b3d0, `setStatsViewDistance` 0x1000b580/0x1000b6d0, `setInformationGridDimension` 0x1000b700/0x1000b850, `setVehicleClusterMapping` 0x1000ba40/0x1000bb60, `setManDownEquipment` 0x1000bf90/0x1000c080, `getInformationGridDimension` 0x1000c150/0x1000c1e0, `getStatsViewDistance` 0x1000c2d0/0x1000c360, `getVehicleClusterMapping` 0x1000c520/0x1000c610, `setNSides` 0x1000c6f0/0x1000c840, `getNSides` 0x1000c870/0x1000c900, `getBotSkill` 0x1000ce10/0x1000cea0, `getNumberOfVehicleGroups` 0x1000ced0/0x1000cf60, `createVehicleGroup` 0x1000d2b0/0x1000d3a0, `addVehicleToVehicleGroup` 0x1000d470/0x1000d5b0, `getSAIUpdateFrequency` 0x1000d700/0x1000d790, `setSAIUpdateFrequency` 0x1000d7c0/0x1000d910, `setRespawnAllowed` 0x1000d940/0x1000da90, `addBotName` 0x1000dac0/0x1000dbe0, `isRespawnAllowed` 0x1000dd30/0x1000ddc0, `overrideMenuSettings` 0x1000ddf0/0x1000df50, `setStandardPersonality` 0x1000e230/0x1000e360, `addInterpreterEntry` 0x1000ed50/0x1000ee70, `removeInterpreterEntry` 0x1000efe0/0x1000f100, `activateDefaultInterpreter` 0x1000f270/0x1000f3a0, `setBasicBotWeights` 0x1000f4c0/0x1000f5b0, `activeBehaviourModifiers` 0x1000fc40/0x1000fd30, `getBehaviourModifier` 0x10010090/0x10010180, `listBehaviourModifiers` 0x10010270/0x10010310, `setSensingAgentPatternName` 0x10010d80/0x10010e70, `setSensingAgentNullPattern` 0x10010f40/0x10011030, `autoSpawnBots` 0x10011420/0x10011570.
+- not rewritten: `getVehicle` 0x1000c390/0x1000c4e0, `botSkill` 0x1000cab0/0x1000cc00, `discoverCloakedEnemiesDistance` 0x1000cc60/0x1000cdb0, `getVehicleGroup` 0x1000cf90/0x1000d0e0, `getVehicleGroupName` 0x1000d120/0x1000d270, `getBehaviour` 0x1000f8d0/0x1000fa20.
+- debug or tooling, not rewritten: `showAISettings` 0x10010360/0x10010400, `sensingAgentDebug` 0x10011370/0x10011400.
+
+**aiBotManager.*** (16)
+
+- BotsScript.cpp: `setPlannedDecisionMakingThreshold` 0x100115d0/0x10011720, `setUnplannedDecisionMakingThreshold` 0x10011750/0x100118a0, `setDecisionMakingInterleave` 0x100118d0/0x10011a90, `setSensingQuotient` 0x10011ac0/0x10011c80, `setSystemQuotient` 0x10011cb0/0x10011ef0, `getPlannedDecisionMakingThresholdFull` 0x10011ff0/0x10012080, `getUnplannedDecisionMakingThresholdFull` 0x100120b0/0x100121b0, `getPlannedDecisionMakingInterleave` 0x100121e0/0x100122e0, `getUnplannedDecisionMakingInterleave` 0x10012310/0x100123a0, `getSensingQuotient` 0x100123d0/0x10012460.
+- debug or tooling, not rewritten: `getLodLevelFullTicks` 0x10011f30/0x10011fc0, `getMemoryUpdateQuotient` 0x10012490/0x10012520, `getSystemDecisionMakingQuotient` 0x10012550/0x100125e0, `getSystemPathfindingQuotient` 0x10012610/0x100126a0, `getSystemSensingQuotient` 0x100126d0/0x10012760, `enableBotScriptDebugger` 0x10012790/0x100128f0.
+
+**aiStrategy.*** (43)
+
+- Bots.cpp: `createStrategy` 0x10012930/0x10012a20, `aggression` 0x10012da0/0x10012ef0, `numberOfAttacks` 0x10013d80/0x10013ed0, `numberOfDefences` 0x10013f50/0x10014110, `setPrerequisite` 0x10014190/0x10014280, `setStrategicObjectsModifier` 0x100146f0/0x10014940, `createPrerequisite` 0x10015080/0x10015170, `addCondition` 0x100155e0/0x10015710, `createConstantCondition` 0x10015c10/0x10015e50, `setConditionStrength` 0x10016c00/0x10016d40.
+- BotsScript.cpp: `setActiveStrategy` 0x10012af0/0x10012be0, `getActiveStrategyName` 0x10012cb0/0x10012d50, `timeLimit` 0x10012f90/0x100130e0, `getPrerequisiteWeight` 0x10013180/0x10013210, `setPrerequisiteWeight` 0x10013250/0x100133a0, `listStrategies` 0x10013400/0x100134a0, `getStrategicObjectsModifier` 0x100149f0/0x10014bf0, `clearAllStrategicObjectsModifiers` 0x10014c90/0x10014d20, `setActivePrerequisite` 0x10015240/0x10015330, `getActivePrerequisiteName` 0x10015400/0x100154a0, `setActiveCondition` 0x10015870/0x10015960, `getActiveConditionName` 0x10015a30/0x10015ad0, `forceStrategy` 0x10017420/0x10017560.
+- not rewritten: `setTreeModifier` 0x100134f0/0x100136c0, `getTreeModifier` 0x10013720/0x10013860, `setTreeModifierCombatStrength` 0x100138b0/0x10013b00, `getTreeModifierCombatStrength` 0x10013b60/0x10013d30, `addRequiredPrecedingStrategy` 0x10014350/0x10014440, `addProhibitedPrecedingStrategy` 0x10014520/0x10014610, `addSpecificObjectModifier` 0x10014d60/0x10014ea0, `completeStrategies` 0x10014fd0/0x10015060, `createHomogenousCondition` 0x100160b0/0x10016260, `createHeterogeneousCondition` 0x10016420/0x10016650, `createAreaCondition` 0x100168b0/0x10016a10, `getConditionStrength` 0x10016d90/0x10016e90, `setIsAbortCondition` 0x10016ed0/0x10017020, `isAbortCondition` 0x10017080/0x10017110, `completeConditions` 0x10017150/0x100171e0, `targetValue` 0x10017200/0x10017380, `thresholdSpeed` 0x10017850/0x100179a0.
+- debug or tooling, not rewritten: `listPrerequisites` 0x100154f0/0x10015590, `listConditions` 0x10015b20/0x10015bc0, `enableDebug` 0x100176a0/0x100177f0.
+
+**aiStrategicArea.*** (62)
+
+- Bots.cpp: `createFromControlPoint` 0x10018060/0x10018200, `setActive` 0x10018530/0x10018620, `addNeighbour` 0x100187f0/0x100188e0, `layer` 0x10018d50/0x10018ea0, `addObjectTypeFlag` 0x10019db0/0x10019ef0, `vehicleSearchRadius` 0x1001a700/0x1001a8c0, `setOrderPosition` 0x1001b0b0/0x1001b1e0, `addWayPoint` 0x1001b6d0/0x1001b860, `setSide` 0x1001c700/0x1001c850.
+- BotsScript.cpp: `create` 0x10017a00/0x10017c30, `getActive` 0x10018700/0x100187a0, `addTwoWayNeighbour` 0x100189c0/0x10018ae0, `getNeighbours` 0x10018c60/0x10018d00, `removeAllNeighbours` 0x10019350/0x100193e0, `removeObjectTypeFlag` 0x1001a180/0x1001a2c0, `setTakeable` 0x1001a960/0x1001ab30, `isTakeable` 0x1001ab80/0x1001acd0, `removeAllObjectTypeFlags` 0x1001ad20/0x1001adb0, `basicTemperature` 0x1001aec0/0x1001b010, `getOrderPosition` 0x1001b350/0x1001b4f0, `getSide` 0x1001c8a0/0x1001c960, `getTemperature` 0x1001cfd0/0x1001d120, `getStrategicAreaNames` 0x1001e110/0x1001e1b0, `isInside` 0x1001e200/0x1001e330.
+- not rewritten: `removeActive` 0x10018470/0x10018500, `setPosition` 0x10019400/0x100195a0, `getPosition` 0x10019600/0x10019740, `centerPosition` 0x10019790/0x10019930, `topLeftCorner` 0x100199e0/0x10019c10, `setObjectTypeFlags` 0x10019f30/0x1001a080, `getObjectTypeFlags` 0x1001a0c0/0x1001a150, `setStatus` 0x1001a300/0x1001a4d0, `category` 0x1001a520/0x1001a670, `getObjectTypeFlagMapping` 0x1001add0/0x1001ae70, `removeWayPoint` 0x1001bad0/0x1001bc60, `clearWayPoints` 0x1001c0b0/0x1001c200, `addAllowedVehicleGroup` 0x1001cb20/0x1001cc10, `attachLandingZone` 0x1001ccf0/0x1001cde0, `getStatus` 0x1001d170/0x1001d330, `getNumberOfPresentUnits` 0x1001d390/0x1001d4e0, `getNumberOfAvailableAttackers` 0x1001d530/0x1001d680, `getNumberOfAvailableDefenders` 0x1001d6d0/0x1001d820, `getNumberOfAssignedUnits` 0x1001d870/0x1001d9c0, `getCategoryName` 0x1001da10/0x1001db60, `getCategoryFromName` 0x1001dba0/0x1001dc90, `createNewCategory` 0x1001dd70/0x1001de60, `strategicAreaName` 0x1001e4c0/0x1001e5b0, `addAllowedUnit` 0x1001e940/0x1001ea30, `addExpelledUnit` 0x1001eb00/0x1001ebf0, `addLandingZoneUnit` 0x1001ecc0/0x1001edb0.
+- debug or tooling, not rewritten: `setVisible` 0x10018f30/0x10019080, `getVisible` 0x100190d0/0x10019160, `drawVehicleSearchRadi` 0x100191b0/0x10019300, `list` 0x10019cc0/0x10019d60, `listOrderPositions` 0x1001b5e0/0x1001b680, `removeClosestWayPoint` 0x1001bef0/0x1001c060, `setWayPointsToDraw` 0x1001c3e0/0x1001c500, `clearWaypointToDraw` 0x1001c650/0x1001c6e0, `enableDebug` 0x1001c9a0/0x1001caf0, `listLandingZones` 0x1001ced0/0x1001cf70, `showNeighbours` 0x1001df30/0x1001e080, `saveAll` 0x1001e6c0/0x1001e7e0.
+
+**aiLandingZone.*** (6)
+
+- not rewritten: `activeZone` 0x1001ee80/0x1001ef70, `createLandingZone` 0x1001f0b0/0x1001f2a0, `minCorner` 0x1001f660/0x1001f800, `maxCorner` 0x1001f8a0/0x1001fa40, `beachDirection` 0x1001fae0/0x1001fcc0.
+- debug or tooling, not rewritten: `listZones` 0x1001f560/0x1001f610.
+
+**aiPathfinding.*** (10)
+
+- Bots.cpp: `createMap` 0x1001fd40/0x1001fe30, `traceMap` 0x100200f0/0x100201e0, `maxWaterDepth` 0x10022430/0x10022580.
+- BotsScript.cpp: `activeMap` 0x1001ff10/0x10020000.
+- debug or tooling, not rewritten: `getMapList` 0x100202d0/0x10020370, `saveQuadTrees` 0x10021e80/0x10021f20, `loadQuadTrees` 0x10021f40/0x10021fd0, `loadGTSData` 0x10021ff0/0x10022080, `exportGTSMeshes` 0x100220a0/0x10022130, `exportGTSMeshesWithinBoundary` 0x10022160/0x100223d0.
+
+**aiDebug.*** (9)
+
+- debug or tooling, not rewritten: `drawDynamicAIObjects` 0x100225e0/0x10022690, `textGamma` 0x100226b0/0x10022810, `draw` 0x10022870/0x100229c0, `ToolPathfinding` 0x10022a20/0x10022b70, `pathfindingDebugToolVehicle` 0x10022bd0/0x10022cd0, `clusterSearch` 0x10022dd0/0x10022f90, `setPathfindingDebugToolVehicleId` 0x10022ff0/0x10023140, `tryPath` 0x10023170/0x10023390, `tryClusterPath` 0x100233f0/0x10023610.
+
+**aiRandom.*** (1)
+
+- debug or tooling, not rewritten: `seed` 0x10023670/0x100237d0.
+
 ### Not decoded, and the rewrite's stand-ins
 
 - **Scheduling:** the CPU budgets are real time (see Scheduling: they
@@ -9454,7 +9777,7 @@ and walks there.
   attention on the bot (the sensing agent's stamp 0x100eb7f0, whose
   writer wasn't traced) is a round of it having passed the bot; every
   sighting is clear (no see-through materials); vehicle guns have no
-  magazines; no bot is scripted; no wire-guided weapon holds a target
+  magazines; no bot is scripted (the +0x264 flag; the scripted-bot commands' goals don't set it here); no wire-guided weapon holds a target
   (LPTargetComp's target isn't modelled); the area guard's per-side spot
   is the control point (0x100623c0 starts it at the area's position) and
   its per-side radius (+0x98 + 4 team: the spot's distance to the area's
@@ -9487,9 +9810,8 @@ and walks there.
   vehicle and weapon has its `ai/*.ai`. Levels without
   `StrategicAreas.ai` (three of the 46 with a mesh) leave the original's
   SAI without areas; the rewrite deviates and makes one per control point.
-- **Strategy:** every unit's certainty is 1 (the side knows everyone; the
-  original's falls by 1 − S(t / degeneration) out of sight, 0x100a9b90),
-  a unit's ammo counts as full in its capability factor, and a seated
+- **Strategy:** vehicles are always known to a side (soldiers follow the
+  knowledge above), a unit's ammo counts as full in its capability factor, and a seated
   soldier counts only through its vehicle's Unit (whether it counts on
   its own isn't settled).
 - **Revive:** the time left uses the respawn countdown, or 15 s. The
@@ -10283,3 +10605,116 @@ amp_i, cos a · amp_i) (+0x138). Undergrowth.cfg's SwaySpeed, SwaySpeedDiff,
 SwayScale, SwayScaleDiff land at +0x48..+0x54 (defaults 1, 0.2, 0.15,
 0.01); how they are spread over the 16 isn't traced, so the rewrite
 spreads the speeds over 1 ± 0.2 and keeps SwayScale as each amplitude.
+
+## The renderer's switches, roads' view distance, debug fps, video textures (RendDX9)
+
+**Draw switches.** The renderer object (`DAT_101fa570`, constructor
+`0x1002aba0`) keeps one byte per pass, all 1 at start, written by the
+`renderer.draw*` rows (constructors `0x1004c7a0`..`0x1004e0b0`, the setters
+just after each) and read by the frame (`0x1002cef0`) and the overhead and
+top-world views (`0x100264c0`, `0x10027630`, which save, force and restore
+them): drawObjects +0x68c, drawBundledMeshes +0x690, drawStaticMeshes
++0x691 (also the static mesh renderer's slot 0x18, which
+`StaticMeshRenderer.enableRendering` `0x10079e04` calls too), drawSkinnedMeshes
++0x692, draw1pMeshes +0x594, drawParticles +0x68e, drawSkyDome +0x6a2,
+drawSunFlare +0x6a3 (drawn only with the dome's too), drawRoads +0x693,
+drawTerrain +0x694, drawUndergrowth +0x695, drawOvergrowth +0x696,
+drawNametags +0x697, drawTrees +0x698 (the quality copy in 0x100e0000's
+settings object sets it with the undergrowth and overgrowth; the rewrite
+takes it for the static meshes under "vegitation"). `scene::RendererSettings`;
+`LevelRenderer::draw` / `prepareInstances` and main.cpp's name tags honour
+them. renderer.hud (+0x6a7, 0) is read only by its getter; drawGraphs
+(+0x6a0) hands the profiler graphs their switch.
+
+**Near planes.** `renderer.tweakNearPlane` (+0x584, 0.041) and
+`tweakNearPlane1p` (+0x588, 0.16; far +0x58c, 15) are handed to the world and
+first-person views (`0x10028bb0`, the views' slot 0x34). The rewrite keeps
+its camera's near plane unless a script sets them. `Renderer.fieldOfView1p`
+(`DAT_1020d424`) is read by nothing but its getter.
+
+**Debug fps.** `renderer.drawFps` (+0x69c; any value over 0 becomes 1,
+`0x10027570`) prints "%.1f / %.1f", the frame's milliseconds (+0x5f0) and
+1000 over them, at (6, 6) of the debug text; the rewrite draws it with
+`Fonts/system_8x11.dif` over the HUD (`LevelRenderer::appendFpsText`).
+
+**Roads.** `RoadCompiledRenderer` (`DAT_101ffc7c`, constructor `0x100ba7e0`,
+looked up by name through `0x10070c42`) culls a road beyond f = the
+terrain culler's lodSwitchDistance (+0x18) x `Renderer.roadLodDistMod` (+0x88,
+1.3) plus its radius (the draw `0x100ba1d0`), and sets RoadCompiled.fx's
+FadeOut to (1 / (f − f0), f0 / (f − f0)) with f0 = f x lod0SwitchStart (the
+culler's +0x20) (`0x100baa70`): the vertex shader's alpha is
+1 − saturate(cameraDist x FadeOut.x − FadeOut.y). The rewrite used the road
+file's fade start / end before; road.frag now takes the camera distance and
+these values. roadDepthBias / roadSlopeScaleDepthBias (+0x8c / +0x90,
+−1e−5) become D3DRS_DEPTHBIAS / SLOPESCALEDEPTHBIAS (0xc3 / 0xaf) there; the
+road pipeline keeps its own bias. disableFadeOnRoads (+0x84) has no reader.
+
+**Rain freeze.** `rainManager.freeze` (slot 0xa0 `0x1011ab20`, +0x65): the
+update `0x1011d250` moves the box's centre (+0x70) to the camera plus offset
+only while it is clear (`effects::Weather`).
+
+**Video textures.** `dice.hfe.geom.Video` (vtable `0x101d7f24`; open
+`0x1011e0d0`, update `0x1011df80`, finished `0x1011df50`, pause / resume
+`0x1011dec0` / `0x1011dee0`) decodes a Bink file into a
+`dice.hfe.geom.VideoTarget` (constructor `0x1011dcc0`, its texture
+`0x1011dd00`: X8R8G8B8, dynamic where the device allows); every `_Bink*`
+import of the DLL is in it. BF2142.exe never makes one; the full-screen
+movies go through FSMoviePlayer (the exe's queue `0x00408680`). Inside Flash
+the bitmap loader `0x10178080` opens a `?`-prefixed URL as a Video (the map
+movies, `?titan_tutorial.bik`), reporting it as 256 x 256, and the bitmap
+fill's bind (`0x10118270`) advances it only while it is drawn. The rewrite
+routes these the same way (`ui::Player::setVideoOpener`, `movie::MenuVideo`);
+not matched: the 256 x 256 size the clip is told, and advancing only while
+drawn. `0x10117200` (a two-entry Video cache in SwiffRender) is unreachable.
+
+**Demo camera.** Its render side is all the exe's: `adjustDemoFov`
+(`0x00424947` → `0x004030b0`), `togglePlayerDemo` / `toggleCameraDemo`
+(`0x005fa440` / `0x005fa130`, the camera's slot 0x80) and the keyframe
+interpolation `0x005fa210` give RendDX9 an ordinary camera; RendDX9 has no
+demo code.
+
+## Appendix: where the rewrite reads the exe's template properties and console rows
+
+Generated from `symbols/BF2142.exe.template_properties.csv` and `symbols/BF2142.exe.console.csv`: each property the rewrite reads (its name a literal in a template read in that file) with its executor in BF2142.exe, and each console row the rewrite registers (its `Object.method` a literal there) with the row's constructor. Rows already cited elsewhere are left out. The executors and constructors are the exe's parsing glue for the behaviour the file implements; the behaviour's own functions are cited in the sections above. The table is matched by name, not checked by hand: a citation here means the rewrite registers or reads that row, and coverage figures that count these addresses measure registration, not verified behaviour.
+
+### Template property executors
+
+- `src/Game/Ambience.cpp`: sound.noisy `0x004ef035`.
+- `src/Game/AmbientTriggers.cpp`: averageTimeBetweenTests `0x0050245d`, chance `0x00502346`, events `0x00502232`, linkedEffectContainer `0x00501e27`, minimumTimeBetweenTriggering `0x0050257a`, numNetworkedEffects `0x00501d42`, playAtEventPosition `0x00501b1a`, projectOnHeightmap `0x00501c2e`, triggerForEachActivatingPlayer `0x005026a9`, triggerId `0x0050211e`, triggerId `0x00501a06`.
+- `src/Game/Commander.cpp`: ammoStorageSize `0x004fa645`, destroyWhenEmptyStorage `0x004fa87f`, deviation.subProjectileDev `0x004e7e99`, fire.batchSize `0x004e2d1a`, fire.burstSize `0x004e2e4c`, fire.fireLaunchDelay `0x004e275a`, fire.roundsPerMinute `0x004e24b3`, healSpeed `0x004fa1d1`, healStorageSize `0x004fa528`, minTimeBetweenActivation `0x0050107e`, rcType `0x00500dde`, refillAmmoSpeed `0x004fa40b`, sharedStorageSize `0x004fa762`, uavVehicleFlightHeight `0x0050156e`, uavVehicleRadius `0x00501451`, uavVehicleSampleResolution `0x0050169d`, uavVehicleSpeed `0x00501334`, uavVehicleTemplate `0x0050115a`, workOnSoldiers `0x004fa0bd`, workOnSoldiers `0x004f9c64`, workOnVehicles `0x004f9fa9`, workOnVehicles `0x004f9b3e`.
+- `src/Game/GameWorld.cpp`: ability.hasAmmoAbility `0x0054d7e5`, ability.hasHealingAbility `0x0054d5a7`, ability.hasRepairingAbility `0x0054d6c6`, ability.hasScopeStabilizerAbility `0x0054de9d`, ability.increasedRepairAbility `0x0054dfc2`, abilityInVehicleMaterial `0x004f8ff1`, abilityInVehicleRadius `0x004f8db7`, abilityInVehicleStrength `0x004f8ed4`, abilityRestoreRate `0x004f8b38`, activateOnEvent `0x004f81a3`, allowTogglePosition `0x004ff5b2`, altSoldierExitPosition `0x004fbbf0`, ammo.abilityDrain `0x004e6ddb`, ammo.abilityMaterial `0x004e701e`, ammo.abilityRadius `0x004e7138`, ammo.abilityStrength `0x004e7261`, ammo.onlyActiveWhileFiring `0x004e74c5`, ammo.replenishingType `0x004e7334`, animationSystem3P `0x004dfbf4`, animationSystem3P `0x004de69d`, armor.canBeDestroyed `0x0054bc26`, armor.criticalDamage `0x0054b413`, armor.deepWaterLevel `0x0054b0a0`, armor.defaultMaterial `0x0054917d`, armor.destroyOnSpectacularDeath `0x0054bb01`, armor.empDamageIgnoreRadius `0x0054c552`, armor.empDamageIgnoreRadiusModifier `0x0054c677`, armor.empDamageNumStep `0x0054c435`, armor.empDamageStepSize `0x0054c30c`, armor.empLevelTime `0x0054c1e3`, armor.explosionDamage `0x005493c3`, armor.explosionForceMax `0x00549732`, armor.explosionForceMod `0x0054985b`, armor.explosionMaterial `0x005494ec`, armor.explosionRadius `0x0054929a`, armor.hideChildrenOnSpectacularDeath `0x0054b9dc`, armor.hitPoints `0x00548cf1`, armor.holdsSlBeacon `0x0054be74`, armor.hpLostWhileCriticalDamage `0x0054a881`, armor.hpLostWhileInDeepWater `0x0054abfc`, armor.hpLostWhileInWater `0x0054aad3`, armor.hpLostWhileUpSideDown `0x0054a9aa`, armor.takesEmpDamage `0x0054c0be`, armor.timeToStayAfterDestroyed `0x0054b665`, armor.timeToStayAsWreck `0x0054b53c`, armor.waterDamageDelay `0x0054ad25`, armor.waterLevel `0x0054af77`, armor.wreckExplosionDamage `0x0054a2c0`, armor.wreckExplosionForce `0x0054a506`, armor.wreckExplosionForceMax `0x0054a62f`, armor.wreckExplosionForceMod `0x0054a758`, armor.wreckExplosionMaterial `0x0054a3e9`, armor.wreckExplosionRadius `0x0054a197`, armor.wreckHitPoints `0x00548bce`, autoControllerTemplateName `0x004fb9fd`, bundleAnimationSystem `0x00520662`, cameraShake `0x0053c83e`, cameraShakeForce `0x0053ca6f`, cameraShakeRadius `0x0053c952`, centerOfMassOffset `0x0051e4b6`, collisionGroups `0x00531760`, collisionGroups `0x0051d8d9`, collisionMesh `0x00530de1`, collisionMesh `0x0051c57b`, controlPointId `0x00503362`, ControlPointId `0x0055204b`, controlPointId `0x004f7f62`, criticalDamageScaleModifier `0x004ff93d`, destroyDistance `0x005484c5`, destroyWhenTargetLost `0x00547dc7`, detonation.explosionDamage `0x004f3475`, detonation.isEMPWeapon `0x004f4588`, detonation.triggerRadius `0x004f3bce`, disableCloseSpawnPoints `0x004fc446`, distance `0x004f73d4`, dontClearTeamOnExit `0x004fbfc4`, entryRadius `0x005284f1`, exitSpeedMod `0x004fbd54`, exitThroughPodLauncher `0x004ff485`, fire.fireInCameraDof `0x004e31a4`, fire.projectileStartPosition `0x004e305e`, floaterMod `0x0053245c`, floaterMod `0x0051ed30`, forwardTeamChangeToSpawnedVehicles `0x004f8076`, gravityModifier `0x00531ba3`, gravityModifier `0x0051eaf4`, handleCollisionSpeed `0x0051c9c8`, hasMobilePhysics `0x0051d4a7`, hasMobilePhysics `0x00531218`, hasRestrictedExit `0x004fb7fd`, holdObject `0x004f7d08`, inertiaModifier `0x005321d6`, inertiaModifier `0x0051e7f2`, inputToPitch `0x005227c7`, isDogtagReplacement `0x004e0db8`, isMajorActor `0x0051ef61`, itemIndex `0x004e127c`, maintainCameraOnExit `0x004fefd1`, maintainCameraOnExitToOtherVehicle `0x004feea4`, material `0x00520821`, maxNrOfObjectSpawned `0x004f773d`, maxSpawnDelay `0x004f7987`, minHeightAdjustDistance `0x0054827f`, minSpawnDelay `0x004f7ab2`, networkableInfo `0x006f37c3`, networkableInfo `0x0051b3d0`, noInitialCollisionWithLauncher `0x004ffcd7`, noInitialCollisionWithLauncher `0x004f1b6e`, nrOfObjectToSpawn `0x004f761e`, physicsType `0x00531643`, physicsType `0x00531643`, physicsType `0x0051dbf9`, positionToleranceXZ `0x00548156`, projectileTemplate `0x004e0e8b`, pulse.revealTime `0x004e7a98`, pulse.viewDistance `0x004e7975`, radio.failMessage `0x0054f0c3`, radio.useMessage `0x0054f249`, ragdollLandedDelay `0x004df6da`, recoil.cameraRecoilSize `0x004ed640`, recoil.cameraRecoilSpeed `0x004ed51d`, recoil.goBackOnRecoil `0x004ec687`, recoil.hasRecoilForce `0x004ec56d`, recoil.recoilForceLeftRight `0x004ec907`, recoil.recoilForceUp `0x004ec77d`, recoil.recoilGraphExponent `0x004ecd48`, recoil.recoilGraphFrameCount `0x004ecbe5`, recoil.recoilGraphTotalMovement `0x004ecf5f`, recoil.zoomModifier `0x004ecac2`, regulateVector `0x005233ed`, scaleInputOnCriticalDamage `0x004ff810`, seatAnimationSystem `0x004fafa1`, seatAnimationSystem `0x00500156`, seatInformation `0x004fb149`, seatInformation `0x004fb149`, setAIEnterOnSpawn `0x00552164`, setEnterOnSpawn `0x00552255`, setOnlyForAI `0x00552437`, setOnlyForHuman `0x00552528`, setScatterSpawnPositions `0x00552346`, skeleton3P `0x004de3ee`, sprintDissipationTime `0x004fe315`, sprintDissipationTime `0x004df2b4`, sprintLimit `0x004fe448`, sprintLimit `0x004df3d4`, sprintLossAtJump `0x004df5bd`, sprintRecoverTime `0x004fe1e2`, sprintRecoverTime `0x004df197`, startOnEffects `0x0053c2b7`, supplyGroupId `0x00503935`, target.lockAngle `0x004ee7c9`, target.lockDelay `0x004ee583`, target.loseLockDelay `0x004ee6a6`, target.maxDistance `0x004edf66`, target.targetSystem `0x004edcba`, targetType `0x005003da`, team `0x004f74ff`, team `0x004e0408`, team `0x004f9e95`, team `0x004f97d3`, team `0x005028e8`, teamFromClosestCP `0x004fa993`, teamOnVehicle `0x004f7e35`, timeToLive `0x004ef4d5`, timeToLive `0x0053bec0`, timeToLive `0x00531843`, timeToLive `0x0052e744`, timeToLive `0x004f72a9`, timeToLive `0x0050053b`, timeToLive `0x00537fdb`, treeCollisionDiameter `0x0051dae4`, unableToChangeTeam `0x00502f9b`, useButtonRadius `0x004f7bdd`, velocity `0x004e115f`, warningDistance `0x005483a8`, zoom.startCameraId `0x004ebfbc`, zoom.startCameraViewMode `0x004ec0bb`.
+- `src/Game/MeshCollision.cpp`: armor.angleMod `0x0054905a`.
+- `src/Game/Radio.cpp`: destroyWhenOutsideCombatArea `0x004fb911`.
+- `src/Game/ScriptBridge.cpp`: areaValueTeam2 `0x00502e76`, armor.maxHitPoints `0x00548e14`.
+- `src/Game/Titans.cpp`: ammo.reloadTime `0x004e60e9`, armor.destroyOnParentDamageLevel `0x00549d06`, armor.destroyOnRootParentDamageLevel `0x00549e29`, armor.onlyDamageFromChildrenLevel `0x00549f4c`, armor.parentDamageAlive `0x00549aa7`, armor.parentDamageWreck `0x00549984`, armor.takeDamageFromOwnTeam `0x00549bca`, fire.fireInput `0x004e287a`, fire.isPodLauncher `0x004e5250`, hasCollisionPhysics `0x0053132c`, isMissileSilo `0x004ffa6e`, lookAtClosestTitanOnEnter `0x00500052`, python.onDamageEvent `0x00551755`, python.onDestroyEvent `0x0055186c`, python.onSpawnEvent `0x00551a9a`, radio.enemyFireMessage `0x0054fe79`, radio.friendlyFireMessage `0x0054fcf3`, setCollisionMesh `0x0051c57b`.
+- `src/Game/Vehicle.cpp`: acceleration `0x00522241`, acceleration `0x004f0d13`, airFlowAffect `0x00541d34`, attackSpeed `0x00541455`, automaticReset `0x005229eb`, canReverse `0x00541f6e`, capMaxSpeed `0x0052432f`, collisionPart `0x00530f92`, collisionPart `0x0051ba5b`, constantForce `0x00546e9f`, continousRotationSpeed `0x00522551`, coolingFactor `0x00540c29`, dampHorizontalVel `0x005418c9`, dampHorizontalVelFactor `0x005419e6`, damping `0x00543e96`, deAcceleration `0x005223b7`, deAcceleration `0x004f0e30`, decreaseAngleToZero `0x00541b03`, decreaseAngleToZeroVerticalVel `0x00541c17`, defaultAngleOfAttack `0x005411ff`, differential `0x005401d4`, drag `0x00531d27`, drag `0x0051df11`, engineType `0x0053ff82`, flapLift `0x00545be0`, floatMaxLift `0x0054441f`, floatMinLift `0x0054453c`, force `0x00546bc4`, friLatBrakeMod `0x00543b3e`, gearChangeTime `0x00540651`, gearDown `0x00540534`, gearDownDelay `0x00544bfc`, gearDownHeight `0x00544788`, gearDownSpeed `0x005449c2`, gearUp `0x00540417`, gearUpDelay `0x00544d19`, gearUpHeight `0x005448a5`, gearUpSpeed `0x00544adf`, grip `0x0051f028`, heatIncrement `0x00540b0c`, horizontalDampAngle `0x00541572`, horizontalDampAngleFactor `0x0054168f`, horizontalSpeedMagnifier `0x005410d4`, hullHeight `0x00544302`, input `0x00546ab0`, inputToYaw `0x005226b5`, invertGear `0x00544e36`, keepUp `0x00547ca2`, length `0x0054616e`, mass `0x00531edc`, mass `0x0051e35f`, maxAngleOfAttack `0x0054132a`, maxForceOnObject `0x00548707`, maxRotation `0x00521bcd`, maxSpeed `0x00521f09`, maxSpeed `0x004f0f4d`, maxSpeedMod `0x00524455`, minRotation `0x00521a2f`, multiply `0x00523cb2`, newCar2.brakeTorque `0x00542a8b`, newCar2.engineBrakeTorque `0x00542ba8`, newCar2.engineFeedbackMod `0x0054296e`, newCar2.frictionMod `0x00542de2`, newCar2.frictionTorque `0x00542cc5`, newCar2.maxRpm `0x00542601`, newCar2.minRpm `0x005424e4`, newCar2.slopeTorqueMod `0x00542eff`, newCar2.useClutchedTorque `0x0054271e`, newCar2.wheelInertia `0x00542851`, newCar2.wheelLatDriveFrictionMod `0x005436ca`, newCar2.wheelLatFrictionMod `0x005435ad`, newCar2.wheelLatMinDynamicFriction `0x00543904`, newCar2.wheelLatPeakAt `0x005437e7`, newCar2.wheelLatScale `0x00543a21`, newCar2.wheelLongDriveFrictionMod `0x00543139`, newCar2.wheelLongFrictionMod `0x0054301c`, newCar2.wheelLongMinDynamicFriction `0x00543373`, newCar2.wheelLongPeakAt `0x00543256`, newCar2.wheelLongScale `0x00543490`, noEffectAtPerpSpeed `0x00541e51`, noPowerWhenUpsideDown `0x00543c6d`, noPropellerEffectAtSpeed `0x005409ef`, offset `0x00523b2a`, onlyWhenOccupied `0x005470e2`, pitchOffset `0x00545827`, positionOffset `0x0054597e`, pureRotational `0x00540fad`, radius `0x005027bd`, radius `0x004f785c`, radius `0x00546987`, radius `0x00502001`, radius `0x005018e9`, radius `0x004f9d78`, radius `0x004f96b6`, regulateVerticalPos `0x004fdb36`, regulateVerticalPosInput `0x004fdc80`, rememberExcessInput `0x00522d31`, snapToZeroOnNoInput `0x00522b09`, spinWhenNoEngineInAir `0x005417ac`, sprintFactor `0x004fe57e`, startDelay `0x005471f6`, startDelay `0x00546051`, startDelay `0x004f09ce`, stepHeight `0x00546297`, stopRegulateWhenUnoccupied `0x005485e2`, strength `0x00543d81`, torque `0x005400a1`, trackTurnAcceleration `0x00542082`, trackTurnSpeed `0x0054219f`, useDeAcceleration `0x00522c1d`, wingLift `0x00545ac3`.
+- `src/Game/Weapons.cpp`: ammo.magSize `0x004e5d9b`, ammo.nrOfMags `0x004e5eb5`, ammo.reloadWithoutPlayer `0x004e6943`, armingDelay `0x004f08b7`, collision.restoreHP `0x004f249a`, collision.resurrectDamage `0x004f235f`, coolDownPerSec `0x004e16e5`, damage `0x004faec5`, damage `0x004ef7ab`, damageMandownSoldiers `0x004ef9e5`, detonation.endEffectTemplate `0x004f38ff`, detonation.explosionConeAngle `0x004f310f`, detonation.explosionForce `0x004f3352`, detonation.explosionMaterial `0x004f2ed2`, detonation.explosionRadius `0x004f2fec`, detonation.explosionYMod `0x004f322f`, detonation.maxDepthForExplosion `0x004f430c`, detonation.triggerAngle `0x004f41ec`, detonation.triggerVictimMinSpeed `0x004f3e95`, detonation.useCollisionNormal `0x004f40d2`, deviation.minDev `0x004e7d76`, distToMinDamage `0x004efc29`, distToStartLoseDamage `0x004efb0c`, fire.pullbackTime `0x004e4bfb`, follow.armingSpeed `0x004f6373`, follow.magneticBehaviour `0x004f5ea0`, follow.maxPitch `0x004f58d9`, follow.maxYaw `0x004f57b6`, follow.predictionFactor `0x004f5d7d`, follow.speedModifier `0x004f6250`, follow.useTargetSpeed `0x004f6113`, hasOnTimeEffect `0x004ef3f2`, heatAddWhenFire `0x004e15c8`, keepProjectiles `0x004e1042`, maxTracerScaler `0x004f0443`, minDamage `0x004ef68f`, onlyDetonateOnMaterial `0x004f15ee`, onlyDetonateOnMaterialTimeLimit `0x004f1702`, overheatPenalty `0x004e1802`, recoil.recoilForce `0x004ed3fa`, recoil.recoilSize `0x004ed07f`, recoil.recoilSpeed `0x004ed1a2`, recoil.recoilSpeedGB `0x004ed2c2`, seek.distLoseLock `0x004f4deb`, seek.ignoreFriendly `0x004f514e`, seek.maxAngleLock `0x004f4ba7`, seek.maxDistLock `0x004f4cc8`, seek.targetType `0x004f564f`, seek.targetType `0x004f521b`, seek.trackingDelay `0x004f5564`, seek.trackingDelay `0x004f4f0e`, tracerConvergeDistance `0x004f079a`, tracerInterval `0x004f0207`, tracerScaler `0x004f0326`, tracerSizeModifier `0x004f067d`, tracerTemplate `0x004f0054`.
+- `src/Main/GameAudio.cpp`: audio.newStyleAudio `0x005422bc`, damagedAmbientSoundLimit `0x004feb40`, listenerObstruction `0x004fe8d9`, radio.damageMessage `0x0054f3cf`, radio.delay `0x005512b7`, radio.destroyedMessage `0x0054f555`, radio.enemyDestroyedMessage `0x0054f861`, radio.enemySpawnMessage `0x005510ea`, radio.friendlyDestroyedMessage `0x0054f6db`, radio.friendlySpawnMessage `0x00550f5e`, radio.friendlyTeamChangeMessage `0x0054ffff`, radio.neutralTeamChangeMessage `0x00550314`, radio.repairedMessage `0x0054f9e7`, sound.muteOnFire `0x004ef167`, vehicleHud.injurySound `0x005567fc`, vehicleHud.pantingSound `0x00556670`.
+- `src/Main/HudAlerts.cpp`: helpHud.altHelpSoundKey `0x0055b7e7`, helpHud.altHelpStringKey `0x0055b661`, helpHud.closeToDistance `0x0055c2e7`, helpHud.helpSoundKey `0x0055b4db`, helpHud.lowAmmoHelpSoundKey `0x0055c855`, helpHud.lowAmmoHelpStringKey `0x0055c6cf`, helpHud.lowArmorHelpSoundKey `0x0055c549`, helpHud.lowArmorHelpStringKey `0x0055c3c3`.
+- `src/Main/HudMenusKits.cpp`: unlockBranch `0x004e0691`, unlockLevel `0x004e0525`, vehicleHud.hudName `0x00553398`, vehicleHud.vehicleIcon `0x0055351e`, weaponHud.altWeaponIcon `0x0055819a`, weaponHud.descrString `0x00559c05`, weaponHud.hudName `0x00557181`, weaponHud.renderedPicture `0x00557858`, weaponHud.specialAbilityIcon `0x0055862c`, weaponHud.unlockIcon `0x00558320`, weaponHud.weaponIcon `0x00558014`.
+- `src/Main/HudMenusVehicles.cpp`: vehicleHud.alwaysShowOnMinimap `0x00556c13`, vehicleHud.hasTurretIcon `0x005544c4`, vehicleHud.sendDestroyedHudEvent `0x0055658c`, vehicleHud.showOnEnemyMinimap `0x00556aee`, weaponHud.hasDistanceCounter `0x00559fba`, weaponHud.hasFireRate `0x00558b62`, weaponHud.hasMag `0x005587f3`, weaponHud.hasRangeFinder `0x00558c87`, weaponHud.hasScanProgress `0x0055a0df`, weaponHud.ignoreTargetDistance `0x0055a204`, weaponHud.showAmmo `0x00558918`, weaponHud.showBatteryIconInHud `0x0055a329`, weaponHud.ShowClips `0x00558a3d`.
+- `src/Main/Nametags.cpp`: nametag.3dMapIcon `0x0055d1f8`, nametag.3dMapIconOffset `0x0055d460`, nametag.glueToEdge `0x0055dfc3`, nametag.inverseTeamSpecific `0x0055e329`, nametag.maxDistance `0x0055e56d`, nametag.maxEnemyDistance `0x0055e696`, nametag.selectable `0x0055ea06`, nametag.selected3dMapIcon `0x0055d59d`, nametag.show3dIcon `0x0055dea1`, nametag.showDistance `0x0055dd7f`, nametag.showIconOnTracker `0x0055e44b`, nametag.showInside `0x0055e7bf`, nametag.showItem `0x0055da19`, nametag.showOutside `0x0055e8e1`, nametag.teamSpecific `0x0055e207`, Nametag.useAliveArmor `0x0055ec50`, nametag.useTeamColor `0x0055eb2b`, setVehicleType `0x005043f1`, vehicleHud.usePlayerIcon `0x00554027`.
+- `src/Main/PlayerCamera.cpp`: allowDucking `0x004fe6b1`, allowInsideDynamicLights `0x00526c16`, allowInsideStaticSun `0x00526d2a`, animationSystem1P `0x004dfa6b`, animationSystem1P `0x004de526`, cameraId `0x00524776`, cameraShakeMaxSpeed `0x0052644b`, cameraShakeStartSpeed `0x0052632e`, chaseAngle `0x00525506`, chaseDistance `0x005253e9`, chaseOffset `0x0052565d`, chaseParentIndex `0x005257e5`, cockpitLod `0x00527804`, cockpitLod `0x004fcee1`, cockpitSubGeom `0x00527918`, cockpitSubGeom `0x004fcff5`, CVMChase `0x00524ab2`, CVMExternTrace `0x00524f02`, CVMFlyBy `0x00524cda`, CVMFrontChase `0x00524bc6`, CVMInside `0x0052488a`, CVMNose `0x0052499e`, CVMTrace `0x00524dee`, followStiffness `0x005252cc`, insideDamageFrequency `0x00527318`, insideDamageThreshold `0x00527435`, insideFOV `0x00528059`, insideFOV `0x00526af9`, nosePos `0x00525164`, skeleton1P `0x004de2c2`, worldFOV `0x00527f2a`, worldFOV `0x005269dc`, zoom.disableMuzzleWhenZoomed `0x004eb793`, zoom.mouseSpeedMod `0x004eb670`, zoom.zoomDelay `0x004eb1f8`, zoom.zoomLod `0x004eb318`, zoom.zoomOutOnReload `0x004ebc13`.
+- `src/Main/main.cpp`: disableBreathEffect `0x004f95a2`, geometry.dropGeom `0x004f8a24`, weaponHud.altGuiIndex `0x005570ab`, weaponHud.enablePostProcessingOnGuiIndex `0x00559597`.
+
+### Console row constructors
+
+- `src/Game/CombatAreas.cpp`: CombatArea.active `0x00428c8a`, CombatArea.addAreaPoint `0x00429528`, CombatArea.deleteActiveCombatArea `0x00428c1d`, CombatArea.getActiveCombatAreaName `0x00428daf`, CombatArea.layer `0x00428e52`, CombatArea.max `0x004291f4`, CombatArea.min `0x00429048`, CombatArea.team `0x00428f4d`, CombatArea.usedByPathFinding `0x0042942d`, CombatArea.vehicles `0x00429332`, CombatAreaManager.addVehicleDamage `0x00429720`, CombatAreaManager.addVehicleTimer `0x00429862`, CombatAreaManager.damage `0x004299a4`, CombatAreaManager.use `0x00429644`.
+- `src/Game/GameLogic.cpp`: GameLogic.getDefaultNumberOfTickets `0x00427c47`, GameLogic.getNumberOfTickets `0x00428270`, GameLogic.getTicketLossAtEndPerMin `0x004285aa`, GameLogic.getTicketLossPerMin `0x0042876f`, GameLogic.setDefaultNumberOfTickets `0x00427b08`, GameLogic.setDefaultNumberOfTicketsEx `0x00427e4f`, GameLogic.setKit `0x0042706a`, GameLogic.setNumberOfTickets `0x00428135`, GameLogic.setTeamFlag `0x00425c34`, GameLogic.setTeamLanguage `0x0042571e`, GameLogic.setTeamName `0x004259ac`, GameLogic.setTicketLossAtEndPerMin `0x004284c5`, GameLogic.setTicketLossPerMin `0x0042862a`.
+- `src/Game/GameWorld.cpp`: ObjectTemplate.team `0x0050282a`, ObjectTemplate.team `0x004f9dd7`, ObjectTemplate.team `0x004f9715`, ObjectTemplate.team `0x004f7441`, ObjectTemplate.team `0x004e0338`.
+- `src/Hud/Hud.cpp`: HudBuilder.addNodeAlphaShowEffect `0x0076db79`, HudBuilder.addNodeBlendEffect `0x0076dd58`, HudBuilder.addNodeMoveShowEffect `0x0076dbfe`, HudBuilder.addObjectMarkerNodeLockTextNode `0x007669f3`, HudBuilder.addTransformListNode `0x007645b4`, HudBuilder.createBarNode `0x00768f15`, HudBuilder.createCompassNode `0x0076a536`, HudBuilder.createListNode `0x00761e88`, HudBuilder.createMapNode `0x00760ab0`, HudBuilder.createMiniMapNode `0x00760c96`, HudBuilder.createOccupiedNode `0x007658fb`, HudBuilder.createSplitNode `0x00764017`, HudBuilder.createTransformListNode `0x007641fd`, HudBuilder.newLayer `0x0076f6ee`, HudBuilder.setActiveObject `0x0076f508`, HudBuilder.setAlphaMask `0x00761cf7`, HudBuilder.setBarNodeBorder `0x0076961a`, HudBuilder.setBarNodeIncreaseShow `0x00769e87`, HudBuilder.setBarNodeInverse `0x007699cf`, HudBuilder.setBarNodeRound `0x0076a37e`, HudBuilder.setBarNodeSnap `0x007697d6`, HudBuilder.setBarNodeSnapDir `0x007698ce`, HudBuilder.setBarNodeSpanValues `0x0076a225`, HudBuilder.setBarNodeTexture `0x007692cc`, HudBuilder.setBarNodeValueVariable `0x00769ad0`, HudBuilder.setButtonNodeAltConCmd `0x0076c268`, HudBuilder.setButtonNodeConCmd `0x0076c0c3`, HudBuilder.setButtonNodeDebug `0x0076c5b2`, HudBuilder.setButtonNodeMouseArea `0x0076bca5`, HudBuilder.setButtonNodeTexture `0x0076bafe`, HudBuilder.setCommanderPos `0x00761636`, HudBuilder.setCommanderSize `0x00761504`, HudBuilder.setCompassNodeBorder `0x0076ad03`, HudBuilder.setCompassNodeOffset `0x0076b407`, HudBuilder.setCompassNodeSnapOffset `0x0076af0d`, HudBuilder.setCompassNodeSnapTexture `0x0076b117`, HudBuilder.setCompassNodeTexture `0x0076a9b5`, HudBuilder.setCompassNodeTextureSize `0x0076b4ff`, HudBuilder.setCompassNodeTiltValues `0x0076b651`, HudBuilder.setCompassNodeValueVariable `0x0076b2bf`, HudBuilder.setCPFont `0x00761863`, HudBuilder.setCPFontColor `0x007619d9`, HudBuilder.setEditNodeColor `0x00765541`, HudBuilder.setEditNodeData `0x00765259`, HudBuilder.setEditNodeFont `0x00765755`, HudBuilder.setEditNodeMaxLength `0x00765449`, HudBuilder.setEditNodeString `0x00765351`, HudBuilder.setListNodeBorder `0x00762b86`, HudBuilder.setListNodeConCmd `0x007623a3`, HudBuilder.setListNodeData `0x007622ab`, HudBuilder.setListNodeFont `0x00763402`, HudBuilder.setListNodeOutline `0x007635c7`, HudBuilder.setListNodeRowSpacing `0x00762ee2`, HudBuilder.setListNodeScrollbar `0x00762d90`, HudBuilder.setMouseOverNodeConCmd `0x0076cbb5`, HudBuilder.setNodeAlphaVariable `0x0076e2d7`, HudBuilder.setNodeColor `0x0076e6a9`, HudBuilder.setNodeIntervalBlink `0x0076ee5a`, HudBuilder.setNodeInTime `0x0076ef55`, HudBuilder.setNodeLogicShowVariable `0x0076e090`, HudBuilder.setNodeOffset `0x0076ea0f`, HudBuilder.setNodeOutTime `0x0076f050`, HudBuilder.setNodePosVariable `0x0076eb61`, HudBuilder.setNodeRGBVariables `0x0076e41f`, HudBuilder.setNodeShowConCmd `0x0076d9d4`, HudBuilder.setNodeShowVariable `0x0076d88c`, HudBuilder.setNodeSize `0x0076f14b`, HudBuilder.setNodeTimesBlink `0x0076ed08`, HudBuilder.setObjectMarkerNodeLockOnType `0x00766b3b`, HudBuilder.setObjectMarkerNodeLockText `0x007666f9`, HudBuilder.setObjectMarkerNodeLockTextOffset `0x007668a1`, HudBuilder.setObjectMarkerNodeObjects `0x00766601`, HudBuilder.setObjectMarkerNodeRC `0x00766d2b`, HudBuilder.setObjectMarkerNodeTexture `0x007662ac`, HudBuilder.setObjectMarkerNodeTextureSize `0x00766453`, HudBuilder.setObjectMarkerNodeWeapon `0x00766c33`, HudBuilder.setObjectSelectionNodePointerSize `0x0076787f`, HudBuilder.setOccupiedNodeData `0x00765cb2`, HudBuilder.setOccupiedNodePosVariable `0x00765daa`, HudBuilder.setPictureNodeBorder `0x00768ae2`, HudBuilder.setPictureNodeBorderColor `0x00768d01`, HudBuilder.setPictureNodeCenterPoint `0x00768990`, HudBuilder.setPictureNodeRotateVariable `0x00768750`, HudBuilder.setPictureNodeRotation `0x00768898`, HudBuilder.setPictureNodeTexture `0x00768378`, HudBuilder.setPictureNodeVariableTexture `0x00768608`, HudBuilder.setTextNodeOutLine `0x0076d3a2`, HudBuilder.setTextNodeOutLineOffset `0x0076d4ea`, HudBuilder.setTextNodeString `0x0076d0b5`, HudBuilder.setTextNodeStringVariable `0x0076d643`, HudBuilder.setTextNodeStyle `0x0076d1fd`, HudBuilder.setTranformListNodeOffset `0x007648a3`, HudBuilder.setTranformListNodePosVariable `0x007646fc`, HudBuilder.setTruncate `0x0076d78b`, HudBuilder.setZoomIcons `0x00761768`, HudItems.setBool `0x0077024e`, HudItems.setFloat `0x007705cc`, HudItems.setString `0x007703ef`, HudManager.addTextureAtlas `0x0076035e`, HudManager.setDone `0x00760270`, Minimap.setCommanderOffset `0x0076fd10`, Minimap.setCurrOrderList `0x0076fa48`, Minimap.setDestinationBlend `0x0076ff2e`, Minimap.setFullScreenZoom `0x0076fba8`, Minimap.setPaintAllKits `0x0076f871`, Minimap.setPaintAllVehicles `0x0076f9d1`, Minimap.setPaintVehicle `0x0076f8e8`, Minimap.setSourceBlend `0x0076fe45`, Minimap.setZoom `0x0076fb31`, Minimap.toggleShowKits `0x0076fc93`, Scoreboard.setToggleShow `0x00777892`.
+- `src/Main/HudAlerts.cpp`: GeneralSettings.setHelpPopups `0x0041508d`, GeneralSettings.setPlayedVOHelp `0x00413483`.
+- `src/Main/HudMenus.cpp`: CommanderMenu.deselect `0x00771d75`, CommanderMenu.doubleClick `0x00771cfe`, CommanderMenu.rightClick `0x00771c87`, CommanderMenu.singleClick `0x00771bfb`, CommanderMenu.toggleCommanderToolsTab `0x00771eda`, CommanderMenu.toggleMapTab `0x00771e63`, CommanderMenu.toggleSquadTab `0x00771dec`, SquadMenu.applyInviteList `0x00772522`, SquadMenu.createSquad `0x007721d7`, SquadMenu.doubleClickInvite `0x00772599`, SquadMenu.setShowInviteList `0x0077242f`, SquadMenu.setSquadCreateSelect `0x0077224e`, SquadMenu.setSquadNameSelect `0x007723b8`, SquadMenu.singleClickInvite `0x007725eb`, SquadMenu.singleClickNew `0x00772160`, SquadMenu.squadCreateLockToggle `0x00772341`.
+- `src/Main/HudMenusComm.cpp`: Radio.setSpottedMenuActive `0x00775bd0`, RadioInterface.mouseOver `0x00773ab0`.
+- `src/Main/HudMenusKits.cpp`: KitInterface.chooseKitCustom `0x00776ff6`, KitInterface.chooseKitSelection `0x00776eb2`, KitInterface.resetInformationString `0x00777450`, KitInterface.resetMousePic `0x00777223`, KitInterface.selectDroppedItem `0x0077713a`, KitInterface.setInformationString `0x0077730c`, UnlockInterface.changeToKit `0x00776554`, UnlockInterface.resetInformationString `0x00776a84`, UnlockInterface.selectNextUnlock `0x007761eb`, UnlockInterface.selectUnlock `0x00776ccb`, UnlockInterface.selectUnlockItem `0x0077663d`, UnlockInterface.setFieldUnlock `0x00776b82`, UnlockInterface.setInformationString `0x0077693b`, UnlockInterface.showUnlockInterface `0x00776852`, UnlockInterface.spendFieldUnlock `0x0077640b`.
+- `src/Main/MenuBindings.cpp`: AudioSettings.helpVoiceVolume `0x00411e08`, AudioSettings.provider `0x00411902`, AudioSettings.soundQuality `0x00411a7b`, MenuTeamManager.addKit `0x004161f1`, MenuTeamManager.addTeam `0x00416038`, MenuTeamManager.addWeapon `0x00416316`, SwiffHost.addAward `0x0040ece5`, SwiffHost.addCredit `0x0040f098`, SwiffHost.addGameMode `0x0040eedc`, SwiffHost.disconnectGame `0x0040f9d0`, SwiffHost.enableScroller `0x0040f50d`, SwiffHost.joinServer `0x0040f7f0`, SwiffHost.loadImage `0x0040f21e`, SwiffHost.setLatestGameVersion `0x0040fa40`, SwiffHost.setScrollerRect `0x0040f5f9`, SwiffHost.setScrollFadeSpeed `0x0040f346`, SwiffHost.setScrollSpeed `0x0040f428`.
+- `src/Main/MenuBindings.h`: Object.name `0x006ecf7a`.
+- `src/Main/ServerAdmin.cpp`: GameServerSettings.setAutoRecordRounds `0x00419030`, GameServerSettings.setGameMode `0x00416ab8`, maplist.append `0x00421acd`, maplist.clear `0x004218b7`, maplist.configFile `0x0042165c`, maplist.currentMap `0x0042183b`, maplist.list `0x00421a27`, maplist.mapCount `0x004217bf`, maplist.remove `0x00421935`, maplist.save `0x004215d4`, reservedSlots.addNick `0x0041ac99`, reservedSlots.clear `0x0041aee5`, reservedSlots.configFile `0x0041ab3b`, reservedSlots.list `0x0041af53`, reservedSlots.removeNick `0x0041adbf`, reservedSlots.save `0x0041aabf`.
+- `src/Main/SettingsObjects.cpp`: AudioSettings.alwaysAllowSystemOpenAL `0x0041213f`, AudioSettings.enableEAX `0x0041202a`, AudioSettings.englishOnlyVoices `0x00411f15`, AudioSettings.voipBoostEnabled `0x004116e4`, AudioSettings.voipCaptureThreshold `0x004115dd`, AudioSettings.voipCaptureVolume `0x004114d6`, AudioSettings.voipPlaybackVolume `0x004113cf`, AudioSettings.voipUsePushToTalk `0x004117f3`, GeneralSettings.addFavouriteServer `0x00412f91`, GeneralSettings.addServerHistory `0x0041320a`, GeneralSettings.setAllowPunkBuster `0x00414856`, GeneralSettings.setAutoReload `0x00414b10`, GeneralSettings.setAutoScreenshot `0x00414cde`, GeneralSettings.setBFTVSaveDirectory `0x0041437f`, GeneralSettings.setBuddytagColor `0x00413ca9`, GeneralSettings.setCameraShake `0x00414eac`, GeneralSettings.setChatMessagesFilter `0x00415338`, GeneralSettings.setColorBlindFriendly `0x00414f93`, GeneralSettings.setConfirmDiscardBuddyMessages `0x0041579c`, GeneralSettings.setConfirmDuplicateKey `0x00415888`, GeneralSettings.setConfirmDuplicateKey `0x004155f2`, GeneralSettings.setConfirmInstantAction `0x00415974`, GeneralSettings.setConfirmLaunchBFWeb `0x00415506`, GeneralSettings.setConfirmLaunchEADownloader `0x0041541a`, GeneralSettings.setConfirmLogout `0x004156b0`, GeneralSettings.setConfirmQuit `0x004144b7`, GeneralSettings.setConfirmReservedSlotsWarning `0x00415a60`, GeneralSettings.setConnectionType `0x00414bfc`, GeneralSettings.setCrosshairColor `0x00413ab5`, GeneralSettings.setHUDTransparency `0x004139d3`, GeneralSettings.setIgnoreBuddyRequests `0x00414dc5`, GeneralSettings.setItemSelectionReverseItems `0x00414942`, GeneralSettings.setKillMessagesFilter `0x00415174`, GeneralSettings.setMapIconAlphaTransparency `0x004145a3`, GeneralSettings.setMaxBots `0x00414688`, GeneralSettings.setMaxBotsIncludeHumans `0x0041476a`, GeneralSettings.setMinimapRotate `0x00413fd9`, GeneralSettings.setMinimapTransparency `0x004140c2`, GeneralSettings.setNumRoundsPlayed `0x004137bf`, GeneralSettings.setOutOfVoting `0x00414293`, GeneralSettings.setRadioMessagesFilter `0x00415256`, GeneralSettings.setServerFilter `0x0041389e`, GeneralSettings.setSortKey `0x004135ab`, GeneralSettings.setSortOrder `0x004136e0`, GeneralSettings.setSquadtagColor `0x00413e41`, GeneralSettings.setToggleFilters `0x00414a2e`, GeneralSettings.setViewIntroMovie `0x004141a7`, GlobalSettings.setDefaultUser `0x00415b58`, GlobalSettings.setEncryptedLogin `0x00415dc2`, GlobalSettings.setLastOnlineUser `0x00415c8d`, GlobalSettings.setNamePrefix `0x00415ef7`, LocalProfile.addDemoBookmark `0x00410b76`, LocalProfile.setCareerPoints `0x0041049e`, LocalProfile.setCurrentProfileHeavyArmor `0x0041110a`, LocalProfile.setCurrentProfileKitSetting `0x00410f13`, LocalProfile.setCurrentProfileLatestAwards `0x00410708`, LocalProfile.setCurrentProfileMuted `0x00410a18`, LocalProfile.setEAOnlineMasterAccount `0x0040ffb8`, LocalProfile.setEAOnlineSubAccount `0x00410124`, LocalProfile.setEmail `0x0040fe4c`, LocalProfile.setGamespyNick `0x0040fce0`, LocalProfile.setLastBaseUpdate `0x004105a5`, LocalProfile.setName `0x0040fb74`, LocalProfile.setNumTimesLoggedIn `0x00410290`, LocalProfile.setRank `0x00410397`, LocalProfile.setTotalPlayedTime `0x00410e2e`, VideoSettings.setAntialiasing `0x00412b9a`, VideoSettings.setDynamicLightingQuality `0x00412607`, VideoSettings.setDynamicShadowsQuality `0x004126e6`, VideoSettings.setEffectsQuality `0x004127c5`, VideoSettings.setGeometryQuality `0x00412449`, VideoSettings.setLightingQuality `0x00412528`, VideoSettings.setResolution `0x00412a62`, VideoSettings.setTextureFilteringQuality `0x00412983`, VideoSettings.setTextureQuality `0x004128a4`, VideoSettings.setUseBloom `0x00412db7`, VideoSettings.setViewDistanceScale `0x00412cd2`.
+- `src/Main/main.cpp`: bf2Engine.playMovie `0x00424bab`, Chat.sayAll `0x0077775a`, Chat.sayTeam `0x00777622`, Commander.accept `0x007713f3`, Commander.artillery `0x00771165`, Commander.commanderApply `0x00770b7d`, Commander.commanderMutiny `0x00770c5d`, Commander.commanderResign `0x00770bed`, Commander.commRoseAccept `0x007714df`, Commander.defendMoveTitan `0x007719c9`, Commander.issueOrder `0x00771a39`, Commander.moveTitan `0x007711d5`, Commander.moveTitanZoom `0x00771959`, Commander.orbitalStrike `0x00771015`, Commander.satellite `0x00771245`, Commander.sendOrder `0x00770ccd`, Commander.supplies `0x0077135c`, Commander.toggleArtilleryState `0x00770de5`, Commander.toggleMoveTitanState `0x00770f35`, Commander.toggleOrbitalStrikeState `0x00770fa5`, Commander.toggleSupplyState `0x00770ec5`, Commander.toggleUAVState `0x00770e55`, Commander.uav `0x007712c5`, demo.recordDemo `0x0042468a`, demo.restartDemo `0x0042496b`, demo.shutdownDemo `0x0042481c`, demo.stopRecording `0x004247af`, demo.toggleDemoPauseOrPlay `0x00424b3d`, FileManager.mountArchive `0x0066f74e`, FileManager.mountArchive `0x0066f587`, FreeCam.toggleCamera `0x00777ee7`, FreeCam.togglePlayer `0x00777df9`, Game.radioMessage `0x00423d83`, HudManager.addFavouriteServer `0x007608c9`, HudManager.enableSayAllChatBox `0x0075fc0c`, HudManager.enableSayPlayerChatBox `0x0075fed0`, HudManager.enableSaySquadChatBox `0x0075fde4`, HudManager.enableSayTeamChatBox `0x0075fcf8`, IngameHelp.showIngameHelp `0x00777c60`, LevelsList.setVoteMapShow `0x00777a79`, LevelsList.singleClick `0x00777b62`, Radio.callForAmmo `0x00775cb0`, Radio.callForMedic `0x00775c40`, Radio.callForRepair `0x00775d20`, Radio.sendSpottedMessage `0x00775a84`, Scoreboard.singleClick `0x0077797b`, SpawnManager.commitSuicide `0x0077606c`, SpawnManager.setPlayerKit `0x00775f83`, SpawnManager.toggleMembers `0x007760e3`, SquadLeader.sendOrder `0x00770771`.
+- `src/Physics/CollisionTemplateManager.h`: ObjectTemplate.collisionMesh `0x0051c639`.
+- `src/Physics/MaterialManager.cpp`: Material.active `0x00518ac7`, MaterialManager.createCell `0x00519f6f`, MaterialManager.damageMod `0x0051a0ab`, MaterialManager.setRadioMessage `0x0051a60f`.
+- `src/Physics/RigidBody.h`: Physics.gravity `0x006b2792`.
+- `src/Sound/Game/SoundConsole.cpp`: GameLogic.messages.addEmoteTrigger `0x00426baa`, GameLogic.messages.addHelpMessage `0x00426e97`, GameLogic.messages.addMessage `0x00426659`, GameLogic.messages.addRadioFilter `0x00426cd0`, GameLogic.messages.addRadioVoice `0x0042678d`, GameLogic.messages.setVolumes `0x00426517`, ObjectTemplate.sound.addReloadTimeSound `0x004ef1c3`, Sound.addMenuSound `0x007f64f0`, Sound.addSound `0x007f6330`, Sound.addTrigger `0x007f7390`, Sound.dopplerEffect `0x007f5b10`, Sound.getAllSoundTemplates `0x007f7e90`, Sound.getProperty `0x007f7b10`, Sound.getVolumeForGroup `0x007f8b90`, Sound.initialize `0x007f6060`, Sound.loadMusic `0x007f8520`, Sound.masterVolume `0x007f5750`, Sound.playMusic `0x007f86e0`, Sound.playSound `0x007f69f0`, Sound.setProperty `0x007f78b0`, Sound.setReverb `0x007f7cd0`, Sound.setVolumeForGroup `0x007f8960`, Sound.stopMusic `0x007f87d0`, Sound.stopSound `0x007f6bb0`, Sound.tinnitusSetup `0x007f6d70`, Sound.tweakTemplate `0x007f8020`.
+- `src/World/ObjectTemplate.h`: Object.create `0x006f3a15`, ObjectTemplate.createComponent `0x0051b4c3`, ObjectTemplate.mass `0x00531e1e`, ObjectTemplate.mass `0x0051e2a1`.
+- `src/World/WorldConsole.cpp`: Object.absolutePosition `0x006ed0ea`, Object.absoluteTransformation `0x006ee05b`, Object.rotation `0x006edbad`, ObjectTemplate.active `0x006f4249`, ObjectTemplate.activeSafe `0x006f43bf`, ObjectTemplate.addTemplate `0x00520dd2`, ObjectTemplate.armor.addArmorEffect `0x0054ccaf`, ObjectTemplate.armor.addArmorEffectSpectacular `0x0054cf5b`, ObjectTemplate.armor.addWreckArmorEffect `0x0054d219`, ObjectTemplate.create `0x006ef9bd`, ObjectTemplate.geometry `0x00535ee5`, ObjectTemplate.geometry `0x005309cb`, ObjectTemplate.geometry `0x00528ded`, ObjectTemplate.geometry `0x0051b71b`, ObjectTemplate.mapMaterial `0x00532a3f`, ObjectTemplate.poseCameraPosition `0x004de797`, ObjectTemplate.replaceItem `0x004e06e7`, ObjectTemplate.setObjectTemplate `0x004f703a`, ObjectTemplate.setPosition `0x005210d4`, ObjectTemplate.setRotation `0x0052128a`, ObjectTemplate.setSkeletonCollisionBone `0x004dea35`.

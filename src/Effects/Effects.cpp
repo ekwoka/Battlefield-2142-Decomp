@@ -825,6 +825,84 @@ DecalTemplate DecalTemplate::fromTemplate(const world::ObjectTemplate& t)
 	return d;
 }
 
+std::vector<DecalVertex> clipDecal(const Vec3& centre, const Vec3& normal, const Vec3& tangent, float halfSize,
+	const std::array<float, 4>& frame, const std::vector<std::array<Vec3, 3>>& triangles, float maxAngleDegrees,
+	float normalOffset)
+{
+	constexpr size_t kMaxVertices = 128; // 0x7f
+	const Vec3 n0 = normalized(normal);
+	const Vec3 u = normalized(tangent) * halfSize;
+	const Vec3 v = physics::cross(n0, normalized(tangent)) * halfSize;
+	const auto dotv = [](const Vec3& a, const Vec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; };
+	// The square, as the flat path lays it out (LevelRenderer's corners).
+	const DecalVertex square[4] = {
+		{centre - u - v, frame[0], frame[3]},
+		{centre + u - v, frame[2], frame[3]},
+		{centre + u + v, frame[2], frame[1]},
+		{centre - u + v, frame[0], frame[1]},
+	};
+	const float cosLimit = maxAngleDegrees > 0 ? std::cos(maxAngleDegrees * 0.0174533f) : -2.0f;
+	std::vector<DecalVertex> out;
+	for (const auto& tri : triangles) {
+		Vec3 a = tri[0], b = tri[1], c = tri[2];
+		Vec3 n = physics::cross(b - a, c - a);
+		const float length = std::sqrt(physics::lengthSquared(n));
+		if (length < 1e-8f) {
+			continue;
+		}
+		n = n * (1.0f / length);
+		if (dotv(n, n0) < 0) { // wound the other way: face the decal
+			std::swap(b, c);
+			n = n * -1.0f;
+		}
+		const float facing = dotv(n, n0);
+		if (facing <= 1e-4f || facing < cosLimit) {
+			continue;
+		}
+		std::vector<DecalVertex> polygon(square, square + 4);
+		const Vec3 corners[3] = {a, b, c};
+		for (int e = 0; e < 3 && polygon.size() >= 3; ++e) {
+			const Vec3& start = corners[e];
+			const Vec3 edge = corners[(e + 1) % 3] - start;
+			const Vec3 plane = normalized(physics::cross(edge, n)); // outward
+			const auto side = [&](const DecalVertex& p) { return dotv(p.position - start, plane); };
+			std::vector<DecalVertex> kept;
+			for (size_t i = 0; i < polygon.size(); ++i) {
+				const DecalVertex& p = polygon[i];
+				const DecalVertex& q = polygon[(i + 1) % polygon.size()];
+				const float sp = side(p), sq = side(q);
+				if (sp <= 0) {
+					kept.push_back(p);
+				}
+				if ((sp <= 0) != (sq <= 0)) {
+					const float denominator = sp - sq;
+					if (std::fabs(denominator) < 1.19e-7f) {
+						continue;
+					}
+					const float t = sp / denominator;
+					kept.push_back({p.position + (q.position - p.position) * t, p.u + (q.u - p.u) * t, p.v + (q.v - p.v) * t});
+				}
+			}
+			polygon = std::move(kept);
+		}
+		if (polygon.size() < 3) {
+			continue;
+		}
+		for (DecalVertex& p : polygon) {
+			p.position = p.position - n * dotv(p.position - a, n) + n0 * normalOffset;
+		}
+		for (size_t i = 1; i + 1 < polygon.size(); ++i) {
+			if (out.size() + 3 > kMaxVertices) {
+				return out;
+			}
+			out.push_back(polygon[0]);
+			out.push_back(polygon[i]);
+			out.push_back(polygon[i + 1]);
+		}
+	}
+	return out;
+}
+
 bool EffectManager::spawnDecal(const std::string& name, const Vec3& position, const Vec3& normal)
 {
 	const world::ObjectTemplate* t = m_templates.find(name);
@@ -1117,8 +1195,11 @@ void EffectManager::update(float seconds)
 {
 	// The decals age and go at the decal manager's timeToLive (0x10164f10).
 	const float decalLife = m_settings ? m_settings->decalTimeToLive : scene::ParticleSystemSettings {}.decalTimeToLive;
+	// A set whose owner wasn't drawn ages twice (0x10164f10 adds the
+	// frame's seconds once more while +0x19 is clear; world sets force it
+	// set): Decal::ownerDrawn.
 	for (Decal& decal : m_decals) {
-		decal.age += seconds;
+		decal.age += decal.object != 0 && !decal.ownerDrawn ? 2 * seconds : seconds;
 	}
 	m_decals.erase(std::remove_if(m_decals.begin(), m_decals.end(),
 					   [decalLife](const Decal& decal) { return decal.age >= decalLife; }),
@@ -2288,7 +2369,14 @@ void Weather::update(const scene::RainSettings& s, const Vec3& camera, float sec
 	m_drops.clear();
 	const int count = s.enabled ? std::clamp(s.particleCount, 0, kMaxParticles) : 0;
 	const Vec3 radius {std::max(s.emitRadius[0], 0.1f), std::max(s.emitRadius[1], 0.1f), std::max(s.emitRadius[2], 0.1f)};
-	const Vec3 centre = camera + Vec3 {s.offset[0], s.offset[1], s.offset[2]};
+	// rainManager.freeze (+0x65, slot 0xa0 0x1011ab20): the box stops
+	// following the camera (0x1011d250 moves its centre, +0x70, to the
+	// camera plus offset only while it is clear).
+	if (!s.freeze || !m_centreSet) {
+		m_centre = camera + Vec3 {s.offset[0], s.offset[1], s.offset[2]};
+		m_centreSet = true;
+	}
+	const Vec3 centre = m_centre;
 	if (static_cast<int>(m_positions.size()) != count) {
 		m_positions.resize(static_cast<size_t>(count));
 		for (Vec3& p : m_positions) {

@@ -426,3 +426,107 @@ TEST(RenderScene_AnimatedUVFollowsThePartsTravel)
 	render::parseAnimatedUVVec2("0.2/0.285", v);
 	CHECK(near(v[0], 0.2f) && near(v[1], 0.285f));
 }
+
+// RendDX9's decal clipping (0x10165f60 / 0x101655c0 / 0x10165020): a decal
+// over a fold of the ground is cut to the faces it lies on and laid onto
+// each; faces turned too far from the decal are left out by the clip
+// angle; a decal off every face leaves nothing.
+TEST(RenderScene_DecalClippedToTheSurface)
+{
+	using effects::Vec3;
+	// Two faces meeting along x = 0: flat for x < 0, sloping up 45 degrees for x > 0.
+	const std::vector<std::array<Vec3, 3>> fold = {
+		{Vec3 {-4, 0, -4}, Vec3 {0, 0, -4}, Vec3 {-4, 0, 4}},
+		{Vec3 {-4, 0, 4}, Vec3 {0, 0, -4}, Vec3 {0, 0, 4}},
+		{Vec3 {0, 0, -4}, Vec3 {4, 4, -4}, Vec3 {0, 0, 4}},
+		{Vec3 {0, 0, 4}, Vec3 {4, 4, -4}, Vec3 {4, 4, 4}},
+	};
+	const std::array<float, 4> frame {0, 0, 1, 1};
+	const auto pieces = effects::clipDecal({0, 0, 0}, {0, 1, 0}, {1, 0, 0}, 1, frame, fold, 0, 0.01f);
+	CHECK(!pieces.empty() && pieces.size() % 3 == 0 && pieces.size() <= 128);
+	bool onSurface = true, inFrame = true, rises = false;
+	for (const auto& p : pieces) {
+		const float ground = p.position.x > 0 ? p.position.x : 0.0f;
+		onSurface = onSurface && std::fabs(p.position.y - ground - 0.01f) < 1e-3f;
+		inFrame = inFrame && p.u >= -1e-4f && p.u <= 1.0001f && p.v >= -1e-4f && p.v <= 1.0001f;
+		rises = rises || p.position.y > 0.5f;
+	}
+	CHECK(onSurface && inFrame && rises);
+	// decalGeomClipAngle 30: the 45-degree faces are left out.
+	const auto flatOnly = effects::clipDecal({0, 0, 0}, {0, 1, 0}, {1, 0, 0}, 1, frame, fold, 30, 0.01f);
+	bool flat = !flatOnly.empty();
+	for (const auto& p : flatOnly) {
+		flat = flat && p.position.x <= 1e-3f;
+	}
+	CHECK(flat);
+	// Nowhere near the faces.
+	CHECK(effects::clipDecal({50, 0, 50}, {0, 1, 0}, {1, 0, 0}, 1, frame, fold, 0, 0.01f).empty());
+}
+
+// The doubled ageing (0x10164f10): a decal set whose owner wasn't drawn the
+// last frame ages twice as fast; world decals don't.
+TEST(RenderScene_DecalSetsAgeTwiceUnseen)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(5, "Decal");
+	world::ObjectTemplate* hole = templates.create("Decal", "hole");
+	hole->settings()["decalTextureName"] = "hole";
+	effects::EffectManager manager(templates);
+	CHECK(manager.spawnDecal("hole", {0, 0, 0}, {0, 1, 0}));
+	CHECK(manager.spawnDecal("hole", {11, 1, 0}, {1, 0, 0}, 42, {10, 0, 0}, {0, 0, 0}));
+	CHECK(manager.spawnDecal("hole", {11, 1, 0}, {1, 0, 0}, 43, {10, 0, 0}, {0, 0, 0}));
+	manager.decals()[0].ownerDrawn = false; // ignored for the world's set
+	manager.decals()[2].ownerDrawn = false;
+	manager.update(1);
+	CHECK(std::fabs(manager.decals()[0].age - 1) < 1e-5f);
+	CHECK(std::fabs(manager.decals()[1].age - 1) < 1e-5f);
+	CHECK(std::fabs(manager.decals()[2].age - 2) < 1e-5f);
+}
+
+// rainManager.freeze (+0x65, 0x1011ab20 / 0x1011d250): the box stops
+// following the camera.
+TEST(RenderScene_RainFreezeHoldsTheBox)
+{
+	scene::RainSettings rain;
+	rain.enabled = true;
+	rain.particleCount = 200;
+	rain.emitRadius = {10, 10, 10};
+	rain.offset = {0, 0, 0};
+	effects::Weather weather;
+	weather.update(rain, {0, 0, 0}, 0);
+	rain.freeze = true;
+	weather.update(rain, {500, 0, 0}, 0.1f);
+	bool held = !weather.drops().empty();
+	for (const auto& drop : weather.drops()) {
+		held = held && std::fabs(drop.position.x) <= 11.0f;
+	}
+	CHECK(held);
+	rain.freeze = false;
+	weather.update(rain, {500, 0, 0}, 0.1f);
+	bool moved = !weather.drops().empty();
+	for (const auto& drop : weather.drops()) {
+		moved = moved && std::fabs(drop.position.x - 500) <= 11.0f;
+	}
+	CHECK(moved);
+}
+
+// The renderer's console switches (renderer.draw*, 0x1004c7a0..0x1004e0b0;
+// drawFps 0x10053ae0; the road renderer's Renderer.road*; undergrowth.*).
+TEST(RenderScene_RendererConsoleSwitches)
+{
+	Console console;
+	scene::RendererSettings settings;
+	scene::registerRendererConsoleMethods(console, settings);
+	std::string out;
+	CHECK(settings.drawTerrain && settings.drawSkyDome && settings.drawFps == 0);
+	console.execute("renderer.drawTerrain 0", out);
+	console.execute("renderer.drawFps 7", out);
+	console.execute("Renderer.roadLodDistMod 2", out);
+	console.execute("StaticMeshRenderer.enableRendering 0", out);
+	console.execute("undergrowth.viewDistanceFade 3", out);
+	console.execute("renderer.tweakNearPlane1p 0.1", out);
+	CHECK(!settings.drawTerrain && settings.drawFps == 1 && settings.roadLodDistMod == 2);
+	CHECK(!settings.drawStaticMeshes && settings.undergrowthViewDistanceFade == 1);
+	CHECK(settings.tweakNearPlane1pSet && std::fabs(settings.tweakNearPlane1p - 0.1f) < 1e-6f);
+	CHECK(!settings.tweakNearPlaneSet);
+}

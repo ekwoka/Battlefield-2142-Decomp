@@ -112,7 +112,10 @@ struct UndergrowthUniforms {
 
 // Road fragment shader, second uniform block.
 struct RoadUniforms {
-	float road[4]; // blend factor, fade start, fade end distance, unused
+	// The blend factor, then RoadCompiled.fx's FadeOut (vFadeoutValues: the
+	// camera distance's scale and offset, 0x100baa70), unused.
+	float road[4];
+	float eye[4]; // the camera, world space
 };
 
 // Terrain fragment shader, second uniform block.

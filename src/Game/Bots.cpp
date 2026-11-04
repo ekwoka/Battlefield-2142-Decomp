@@ -186,6 +186,25 @@ const std::map<std::string, ai::VehicleSetup>& defaultVehicles()
 
 } // namespace
 
+std::string BotSettings::moveInterpreter(const std::string& equipment) const
+{
+	// The interpreter's MoveTo statement (0x10029e10's table): the entry
+	// ending in "MoveTo"; without the scripts, AIBehaviours.ai's.
+	if (const auto it = interpreter.find(equipment); it != interpreter.end()) {
+		for (const std::string& statement : it->second) {
+			if (statement.size() > 6 && statement.compare(statement.size() - 6, 6, "MoveTo") == 0) {
+				return statement;
+			}
+		}
+	}
+	static const std::map<std::string, std::string> shipped = {{"Infantery", "InfanteryMoveTo"}, {"Tank", "TankMoveTo"},
+		{"FloatingTank", "FloatingTankMoveTo"}, {"Mech", "MechMoveTo"}, {"Car", "CarMoveTo"}, {"ArmedCar", "CarMoveTo"},
+		{"Plane", "PlaneMoveTo"}, {"Helicopter", "HeliMoveTo"}, {"TransportHelicopter", "HeliMoveTo"},
+		{"AirTransport", "AirTransportMoveTo"}};
+	const auto it = shipped.find(equipment);
+	return it != shipped.end() ? it->second : "TankMoveTo";
+}
+
 float BotSettings::modifier(const std::string& behaviour) const
 {
 	const auto set = modifiers.find(botModifiers);
@@ -715,6 +734,9 @@ float gameViewDistance(const std::array<float, 4>& fog, float levelViewDistance)
 
 BotManager::~BotManager()
 {
+	if (m_source && m_source->manager == this) {
+		m_source->manager = nullptr;
+	}
 	if (!std::getenv("BF2142_BOT_STATS")) {
 		return;
 	}
@@ -1172,14 +1194,19 @@ void BotManager::update(float seconds)
 	command(seconds);
 	const std::vector<GameWorld::PlayerInfo>& players = m_players;
 	std::vector<const GameWorld::PlayerInfo*> bots;
+	// The game's AI players are the bots (AIMain's IAI slots: a player made
+	// a bot, 0x10056020 -> 0x100581a0 under setMaxNBots -> the bot manager's
+	// 0x100c8950 "Activating bot"; one leaving, 0x10056d10; one changing
+	// team moves between the SAIs, 0x10056090; ai.deactivateBot, 0x10055f80).
 	for (const GameWorld::PlayerInfo& self : players) {
-		if (!self.ai) {
+		if (!self.ai || m_deactivated.count(self.id)) {
 			continue;
 		}
 		Bot& bot = m_bots[self.id];
 		if (!self.alive) {
 			bot = Bot();
 			bot.spawnedAt = -1;
+			m_goals.erase(self.id); // a scripted goal ends with the bot's life (the rewrite's choice)
 			// Spawn on the squad leader when there is a living one on foot.
 			bool leaderUp = false;
 			for (const GameWorld::PlayerInfo& other : players) {
@@ -1364,9 +1391,9 @@ void BotManager::update(float seconds)
 	for (const GameWorld::PlayerInfo* self : executed) {
 		Bot& bot = m_bots[self->id];
 		const bool hasPlan = bot.arbitration.running >= 0 && !bot.arbitration.replan;
-		if (hasPlan && bot.sinceThink > 0.5f) {
+		if (hasPlan && bot.sinceThink > m_settings.plannedThreshold) {
 			planned.push_back({bot.thinkAge, self->id});
-		} else if (!hasPlan && bot.sinceThink > 0.3f) {
+		} else if (!hasPlan && bot.sinceThink > m_settings.unplannedThreshold) {
 			unplanned.push_back({bot.thinkAge, self->id});
 		}
 	}
@@ -1374,11 +1401,13 @@ void BotManager::update(float seconds)
 	std::stable_sort(planned.begin(), planned.end(), oldestFirst);
 	std::stable_sort(unplanned.begin(), unplanned.end(), oldestFirst);
 	std::vector<int> thinkers;
-	const size_t unplannedLimit = static_cast<size_t>(std::max(0, 2 - static_cast<int>(planned.size())) + 2);
+	const int plannedLimit = m_settings.plannedInterleave;
+	const size_t unplannedLimit = static_cast<size_t>(
+		std::max(0, plannedLimit - static_cast<int>(planned.size())) + m_settings.unplannedInterleave);
 	for (size_t i = 0; i < unplanned.size() && i < unplannedLimit; ++i) {
 		thinkers.push_back(unplanned[i].second);
 	}
-	for (size_t i = 0; i < planned.size() && i < 2; ++i) {
+	for (size_t i = 0; i < planned.size() && i < static_cast<size_t>(std::max(0, plannedLimit)); ++i) {
 		thinkers.push_back(planned[i].second);
 	}
 	for (int id : thinkers) {
@@ -1603,6 +1632,27 @@ void BotManager::sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::v
 void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 {
 	ensureAreas();
+	// A scripted goal (ai.botMoveTo and the rest) takes the place of the
+	// SAI's orders: its head is the goal, with no areas on the way. A
+	// waypoint goal that is done gives the bot back to the SAI.
+	if (const auto scripted = m_goals.find(self.id); scripted != m_goals.end()) {
+		ai::Vec3 head;
+		if (!scripted->second.done && ai::goalPoint(scripted->second, head)) {
+			const physics::Vec3 at {head.x, head.y, head.z};
+			if (!bot.hasGoal || bot.goalOrder != -1 || horizontal2(bot.goal - at) > 0.01f) {
+				bot.goalAt = m_time;
+				bot.goalReached = false;
+			}
+			bot.goal = bot.orderPosition = at;
+			bot.goalOrder = -1;
+			bot.goalMap = self.vehicle && self.driving ? 1 : 0;
+			bot.via.clear();
+			bot.hasGoal = true;
+			return;
+		}
+		m_goals.erase(scripted);
+		bot.hasGoal = false;
+	}
 	const std::vector<GameWorld::ControlPointInfo> points = m_world.controlPointList();
 	const auto& areas = m_settings.strategy.areas;
 	physics::Vec3 orderAt;
@@ -2602,6 +2652,17 @@ float BotManager::moveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float
 {
 	if (!bot.hasGoal) {
 		return 0;
+	}
+	if (const auto scripted = m_goals.find(self.id); scripted != m_goals.end()) {
+		// The goal's own urgency (its slot 1); the same distance as the
+		// SAI's goals below.
+		const float u = ai::goalUrgency(scripted->second, toAi(self.position), horizontal2(bot.goal - self.position),
+			kSoldierRadius);
+		if (scripted->second.done && !bot.goalReached) {
+			bot.goalAt = m_time;
+			bot.goalReached = true;
+		}
+		return u * weight;
 	}
 	ai::GoalArea area;
 	float radius = 0;
@@ -5103,9 +5164,10 @@ bool BotManager::steer(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 
 // The Mobile plug-in's driving settings for a vehicle (its root aiTemplate),
 // the shipped FAV's without one. The Unit plug-in's equipment picks the
-// interpreter (0x10020000's map): Car and ArmedCar CarMoveTo, Mech
-// MechMoveTo, FloatingTank FloatingTankMoveTo (BotManager::drive), the rest
-// TankMoveTo.
+// interpreter: the MoveTo statement its aiSettings.addInterpreterEntry
+// lines name (AIBehaviours.ai: Car and ArmedCar CarMoveTo, Mech
+// MechMoveTo, FloatingTank FloatingTankMoveTo for BotManager::drive, Tank
+// TankMoveTo; BotSettings::moveInterpreter).
 ai::DriveSettings BotManager::driveSettings(const GameWorld::PlayerInfo& self) const
 {
 	ai::DriveSettings d;
@@ -5127,8 +5189,8 @@ ai::DriveSettings BotManager::driveSettings(const GameWorld::PlayerInfo& self) c
 	if (const AiPlugin* c = m_settings.plugin(ai, "ControlInfo")) {
 		d.yawScale = c->yawScale;
 	}
-	const std::string type = equipmentOf(self);
-	d.driver = type == "Car" || type == "ArmedCar" ? ai::Driver::Car : type == "Mech" ? ai::Driver::Mech : ai::Driver::Tank;
+	const std::string move = m_settings.moveInterpreter(equipmentOf(self));
+	d.driver = move == "CarMoveTo" ? ai::Driver::Car : move == "MechMoveTo" ? ai::Driver::Mech : ai::Driver::Tank;
 	return d;
 }
 
@@ -5188,7 +5250,7 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 		sense.obstacles.push_back(
 			{static_cast<int>(v.object), toAi(v.position), toAi(centre), toAi(v.velocity), other.radius, other.centreRadius});
 	}
-	const bool floating = equipmentOf(self) == "FloatingTank";
+	const bool floating = m_settings.moveInterpreter(equipmentOf(self)) == "FloatingTankMoveTo";
 	const physics::Vec3 lastVelocity = bot.lastVelocity;
 	bot.lastVelocity = vehicle->velocity;
 	const auto brake = [&] {
@@ -5605,6 +5667,7 @@ void BotManager::updateStrategy(float seconds)
 {
 	(void)seconds;
 	ensureAreas();
+	updateKnowledge();
 	ai::StrategySettings& s = m_settings.strategy;
 	const std::vector<GameWorld::PlayerInfo>& players = m_players;
 	const std::vector<GameWorld::ControlPointInfo> points = m_world.controlPointList();
@@ -5654,13 +5717,15 @@ void BotManager::updateStrategy(float seconds)
 				v.state.status = ai::AreaStatus::Hostile;
 				theirs.controlPoints += 1;
 			}
-			// Units in the area (0x1005f210): the temperature is the area's
-			// base plus each unit's basicTemp x its certainty (1 here: the
-			// rewrite's side knows every unit), empty vehicles and every
-			// seat included; the strengths count the manned units' battle
-			// strengths (friendly +0xc0, enemy +0xc8), and the required
-			// strength the enemies' strategic ones (round each, index 1 in
-			// an owned area, 0 elsewhere).
+			// Units in the area (0x1005f210, over the side's knowledge,
+			// DAT_101394b0 slot 0x28): the temperature is the area's base
+			// plus each unit's basicTemp x its certainty (certainty(): an
+			// enemy soldier the side's bots never saw isn't in it; vehicles
+			// count as known, the stand-in), empty vehicles and every seat
+			// included; the strengths count the manned units' battle
+			// strengths x certainty (friendly +0xc0, enemy +0xc8), and the
+			// required strength the enemies' strategic ones (round each,
+			// index 1 in an owned area, 0 elsewhere).
 			float temperature = s.areas[i].temperature;
 			float enemyStrategic = 0;
 			const bool owned = v.state.status == ai::AreaStatus::Owned;
@@ -5669,11 +5734,16 @@ void BotManager::updateStrategy(float seconds)
 				if (!p.alive || horizontal2(p.position - v.point->position) > r * r) {
 					continue;
 				}
+				const float known = certainty(team, p.id);
+				if (known <= 0) {
+					continue;
+				}
 				const world::Object* soldier = m_world.objects().find(p.soldier);
-				temperature += unitAiOf(soldier ? soldier->objectTemplate() : nullptr).basicTemp;
+				temperature += unitAiOf(soldier ? soldier->objectTemplate() : nullptr).basicTemp * known;
 				float battle = 0;
 				std::array<float, 2> strategic {};
 				unitStrengths(p, battle, strategic);
+				battle *= known;
 				if (p.team == team) {
 					v.state.friendlyStrength += battle;
 				} else {
@@ -5745,7 +5815,28 @@ void BotManager::updateStrategy(float seconds)
 				: ai::prerequisiteValue(s, it->second.prerequisite, mine, theirs) * it->second.prerequisiteWeight;
 			weights.push_back(std::max(0.0f, w));
 		}
-		if (!list.empty() && (side.strategy.empty() || ai::strategyWeightsChanged(side.weights, weights))) {
+		// A forced strategy (aiStrategy.forceStrategy) is taken at every
+		// update; otherwise the choice is made again when the weights move,
+		// or when the running one's time is up (its record's re-picks count
+		// one more).
+		const std::string& forced = s.forced[static_cast<size_t>(team)];
+		bool spin = !list.empty() && (side.strategy.empty() || ai::strategyWeightsChanged(side.weights, weights));
+		if (!forced.empty() && s.strategies.count(forced)) {
+			spin = false;
+			if (side.strategy != forced) {
+				side.strategy = forced;
+				side.startedAt = m_time;
+				side.squadArea.clear();
+			}
+		} else if (!spin && !list.empty()) {
+			const auto running = s.strategies.find(side.strategy);
+			int& picks = side.picks[side.strategy];
+			if (running != s.strategies.end() && ai::strategyTimeUp(m_time - side.startedAt, picks, running->second.timeLimit)) {
+				++picks;
+				spin = true;
+			}
+		}
+		if (spin) {
 			float total = 0;
 			for (float w : weights) {
 				total += w;
@@ -6537,6 +6628,7 @@ void registerBotConsoleMethods(Console& console, BotSettings& settings)
 	bindMethod(console, "aiStrategicArea.addWayPoint", access, [st](ConsoleVec3 at, std::string map, std::string from, std::string to) {
 		st->waypoints.push_back({{at.x, at.y, at.z}, lower(map) == "vehicle" ? 1 : 0, from, to});
 	});
+	registerBotScriptMethods(console, settings);
 }
 
 } // namespace dice::hfe::game

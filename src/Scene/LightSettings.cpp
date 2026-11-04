@@ -3,6 +3,8 @@
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
 
+#include <algorithm>
+
 namespace dice::hfe::scene {
 
 namespace {
@@ -53,6 +55,64 @@ void registerRendererConsoleMethods(Console& console, RendererSettings& settings
 	};
 	bindBool("ObjectDrawer.isInsideTitanOverride", settings.insideTitanOverride);
 	bindBool("ObjectDrawer.showAllTitanParts", settings.showAllTitanParts);
+	// The draw switches (RendererSettings; 0x1004c7a0..0x1004e0b0).
+	bindBool("renderer.drawObjects", settings.drawObjects);
+	bindBool("renderer.drawBundledMeshes", settings.drawBundledMeshes);
+	bindBool("renderer.drawStaticMeshes", settings.drawStaticMeshes);
+	bindBool("renderer.drawSkinnedMeshes", settings.drawSkinnedMeshes);
+	bindBool("renderer.draw1pMeshes", settings.draw1pMeshes);
+	bindBool("renderer.drawParticles", settings.drawParticles);
+	bindBool("renderer.drawSkyDome", settings.drawSkyDome);
+	bindBool("renderer.drawSunFlare", settings.drawSunFlare);
+	bindBool("renderer.drawRoads", settings.drawRoads);
+	bindBool("renderer.drawTerrain", settings.drawTerrain);
+	bindBool("renderer.drawUndergrowth", settings.drawUndergrowth);
+	bindBool("renderer.drawOvergrowth", settings.drawOvergrowth);
+	bindBool("renderer.drawNametags", settings.drawNametags);
+	bindBool("renderer.drawTrees", settings.drawTrees);
+	// renderer.drawFps (0x10053ae0; 0x10027570 makes any value over 0 a 1).
+	bindProperty<int>(console, "renderer.drawFps", access, [&settings] { return settings.drawFps; },
+		[&settings](const int& v) { settings.drawFps = v > 0 ? 1 : v; });
+	bindProperty<float>(console, "renderer.tweakNearPlane", access, [&settings] { return settings.tweakNearPlane; },
+		[&settings](const float& v) {
+			settings.tweakNearPlane = v;
+			settings.tweakNearPlaneSet = true;
+		});
+	bindProperty<float>(console, "renderer.tweakNearPlane1p", access, [&settings] { return settings.tweakNearPlane1p; },
+		[&settings](const float& v) {
+			settings.tweakNearPlane1p = v;
+			settings.tweakNearPlane1pSet = true;
+		});
+	bindFloat("renderer.minCullDistance", settings.minCullDistance);
+	bindBool("renderer.hud", settings.hud);
+	bindBool("renderer.vsync", settings.vsync);
+	bindBool("renderer.presentAsync", settings.presentAsync);
+	bindBool("renderer.useSunScaling", settings.useSunScaling);
+	bindBool("renderer.alphaToMask", settings.alphaToMask);
+	bindBool("renderer.enableHWOcclusion", settings.enableHWOcclusion);
+	bindBool("renderer.drawGraphs", settings.drawGraphs);
+	bindProperty<int>(console, "renderer.renderAheadLimit", access, [&settings] { return settings.renderAheadLimit; },
+		[&settings](const int& v) { settings.renderAheadLimit = v; });
+	bindFloat("Renderer.fieldOfView1p", settings.fieldOfView1p);
+	bindFloat("Renderer.roadLodDistMod", settings.roadLodDistMod);
+	bindFloat("Renderer.roadDepthBias", settings.roadDepthBias);
+	bindFloat("Renderer.roadSlopeScaleDepthBias", settings.roadSlopeScaleDepthBias);
+	bindBool("Renderer.disableFadeOnRoads", settings.disableFadeOnRoads);
+	bindBool("StaticMeshRenderer.enableRendering", settings.drawStaticMeshes);
+	bindBool("StaticMeshRenderer.noLods", settings.staticNoLods);
+	bindBool("undergrowth.enabled", settings.undergrowthEnabled);
+	bindProperty<float>(console, "undergrowth.viewDistanceScale", access,
+		[&settings] { return settings.undergrowthViewDistanceScale; },
+		[&settings](const float& v) {
+			settings.undergrowthViewDistanceScale = std::clamp(v, 0.0f, 1.0f);
+			settings.undergrowthViewDistanceScaleSet = true;
+		});
+	bindProperty<float>(console, "undergrowth.viewDistanceFade", access,
+		[&settings] { return settings.undergrowthViewDistanceFade; },
+		[&settings](const float& v) { settings.undergrowthViewDistanceFade = std::clamp(v, 0.0f, 1.0f); });
+	bindProperty<int>(console, "undergrowth.zPassPatchCount", access,
+		[&settings] { return settings.undergrowthZPassPatchCount; },
+		[&settings](const int& v) { settings.undergrowthZPassPatchCount = v; });
 }
 
 void registerLightConsoleMethods(Console& console, LightSettings& settings)
@@ -201,6 +261,7 @@ void registerRainConsoleMethods(Console& console, RainSettings& settings)
 		[&settings] { return settings.randomDeviationAngleSpeed; },
 		[&settings](const int& v) { settings.randomDeviationAngleSpeed = v; });
 	bindBool("rainManager.lineDisplay", settings.lineDisplay);
+	bindBool("rainManager.freeze", settings.freeze);
 	bindFloat("rainManager.lineLength", settings.lineLength);
 	bindProperty<std::string>(console, "rainManager.texture", access, [&settings] { return settings.texture; },
 		[&settings](const std::string& v) { settings.texture = v; });

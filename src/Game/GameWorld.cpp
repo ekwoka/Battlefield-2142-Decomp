@@ -2010,8 +2010,42 @@ bool GameWorld::detonate(const std::string& projectileTemplate, const physics::V
 	return true;
 }
 
+static physics::Vec3 detonationPoint(const physics::Vec3& point, const physics::Vec3& normal, const physics::Vec3& velocity);
+
+// An effect's frame standing on `up` (the impact effects' way).
+static physics::Mat3 standingOn(physics::Vec3 up)
+{
+	const float length = std::sqrt(physics::lengthSquared(up));
+	if (length < 1e-6f) {
+		return {};
+	}
+	up = up * (1.0f / length);
+	physics::Mat3 facing;
+	const physics::Vec3 other = std::fabs(up.x) < 0.9f ? physics::Vec3 {1, 0, 0} : physics::Vec3 {0, 0, 1};
+	physics::Vec3 side = physics::cross(other, up);
+	side = side * (1.0f / std::sqrt(physics::lengthSquared(side)));
+	facing.rows = {side, up, physics::cross(side, up)};
+	return facing;
+}
+
+bool GameWorld::detonateHit(Projectile& p, const physics::Vec3& point, const physics::Vec3& normal, uint32_t hitObject)
+{
+	// 0x005e9300: deeper under water than maxDepthForExplosion, nothing.
+	if (m_ground.waterLevel && m_ground.waterLevel(point.x, point.z) - point.y > p.settings->maxDepthForExplosion) {
+		return false;
+	}
+	const physics::Vec3 at = detonationPoint(point, normal, p.velocity);
+	const physics::Vec3 up = p.settings->useCollisionNormal ? normal : p.velocity;
+	if (p.visual) {
+		explodeEffects(at, *p.settings, &up);
+	} else {
+		explode(at, *p.settings, p.player, p.yaw, 0, hitObject, &up);
+	}
+	return true;
+}
+
 void GameWorld::explode(const physics::Vec3& at, const ProjectileSettings& settings, int attacker, float facing,
-	uint32_t exclude, uint32_t hitObject)
+	uint32_t exclude, uint32_t hitObject, const physics::Vec3* up)
 {
 	struct BlastSelf {
 		uint32_t& kept;
@@ -2027,7 +2061,7 @@ void GameWorld::explode(const physics::Vec3& at, const ProjectileSettings& setti
 		return std::fabs(std::remainder(heading - facing, 360.0f)) <= settings.coneAngle;
 	};
 	if (!settings.endEffect.empty()) {
-		m_effects.spawn(settings.endEffect, at, physics::Mat3 {});
+		m_effects.spawn(settings.endEffect, at, up ? standingOn(*up) : physics::Mat3 {});
 		bundleCameraShake(settings.endEffect, at);
 	}
 	ambientExplosion(at); // the triggers' event 8 (0x005a6e70)
@@ -2837,11 +2871,7 @@ void GameWorld::stepProjectiles(float seconds)
 		}
 		if (best <= 1.0f && p.settings->bounces && p.lockedOn && hitObject == p.lockedOn) {
 			// A magnet at its quarry: its collision sets it off.
-			if (p.visual) {
-				explodeEffects(detonationPoint(hit.point, hit.normal, p.velocity), *p.settings);
-			} else {
-				explode(detonationPoint(hit.point, hit.normal, p.velocity), *p.settings, p.player, p.yaw, 0, hitObject);
-			}
+			detonateHit(p, hit.point, hit.normal, hitObject);
 			p.alive = false;
 			continue;
 		}
@@ -2900,11 +2930,7 @@ void GameWorld::stepProjectiles(float seconds)
 			}
 			m_impacts.push_back({hit.point, hit.normal, hitObject, hit.material, amount});
 			if (p.settings->explosionRadius > 0) {
-				if (p.visual) {
-					explodeEffects(detonationPoint(hit.point, hit.normal, p.velocity), *p.settings);
-				} else {
-					explode(detonationPoint(hit.point, hit.normal, p.velocity), *p.settings, p.player, p.yaw, 0, hitObject);
-				}
+				detonateHit(p, hit.point, hit.normal, hitObject);
 			}
 			// The impact effect for the two materials, facing out of the surface.
 			const physics::MaterialCell* cell =
@@ -6216,10 +6242,10 @@ void GameWorld::fireRemoteRound(RemoteSoldier& remote, uint32_t object, const ph
 	m_projectiles.push_back(p);
 }
 
-void GameWorld::explodeEffects(const physics::Vec3& at, const ProjectileSettings& settings)
+void GameWorld::explodeEffects(const physics::Vec3& at, const ProjectileSettings& settings, const physics::Vec3* up)
 {
 	if (!settings.endEffect.empty()) {
-		m_effects.spawn(settings.endEffect, at, physics::Mat3 {});
+		m_effects.spawn(settings.endEffect, at, up ? standingOn(*up) : physics::Mat3 {});
 	}
 	ambientExplosion(at); // the triggers' event 8 (0x005a6e70)
 }
@@ -7216,9 +7242,34 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 					owner.cameraPitch = axis(1, look("inputToPitch", "PIMouseLookY"));
 					owner.cameraPivot = vec("pivotPosition");
 				}
+				if (t.typeName() == "Camera" && !owner.hasCameraAt) {
+					owner.cameraAt = at;
+					owner.hasCameraAt = true;
+				}
 				if (t.typeName() == "GenericFireArm" && owner.weapon.empty()) {
 					owner.weapon = t.name();
 					owner.weaponPosition = at;
+					owner.fireInCameraDof = number(t, "fire.fireInCameraDof", 0) != 0;
+					if (const auto start = settings.find("fire.projectileStartPosition"); start != settings.end()) {
+						owner.startPosition = parseVec3(start->second);
+						owner.hasStartPosition = true;
+					}
+					// 0x005d6d20: the gun's own children named by fire.addBarrelName, in the tree's order.
+					if (const auto names = settings.find("fire.addBarrelName.list"); names != settings.end()) {
+						std::vector<std::string> wanted;
+						for (size_t i = 0; i < names->second.size();) {
+							const size_t end = std::min(names->second.find(' ', i), names->second.size());
+							if (end > i) {
+								wanted.push_back(names->second.substr(i, end - i));
+							}
+							i = end + 1;
+						}
+						for (const world::ChildTemplate& child : t.children()) {
+							if (std::any_of(wanted.begin(), wanted.end(), [&](const std::string& w) { return sameName(w, child.name); })) {
+								owner.barrels.push_back(at + turn.transform({child.position.x, child.position.y, child.position.z}));
+							}
+						}
+					}
 					const auto& components = t.components();
 					const auto has = [&](const char* c) { return std::find(components.begin(), components.end(), c) != components.end(); };
 					if (has("WeaponBasedRecoilComp")) {
@@ -7238,6 +7289,7 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 				if (t.typeName() == "RotationalBundle") {
 					if (settings.count("inputToYaw") && owner.yawBundle.empty()) {
 						owner.yawBundle = t.name();
+						owner.yawPivot = at;
 						owner.frameYaw = turn.yawPitchRoll().x;
 						if (const auto reg = settings.find("regulateVector"); reg != settings.end()) {
 							owner.regulateYaw = parseVec3(reg->second).x;
@@ -7375,7 +7427,7 @@ std::vector<uint32_t> GameWorld::supplyObjects() const
 // the object: a hub's owner off foot or dead has none (0).
 // RTTeam (slot 0x110) is used by no ammo in the game's data: not here.
 void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, int team, float seconds, uint32_t skip,
-	AbilityScan* scan, Player* holder)
+	AbilityScan* scan, Player* holder, bool soldiersOnly, bool vehiclesOnly)
 {
 	const float drain = ability.drain * seconds;
 	float noBattery = 0;
@@ -7416,12 +7468,12 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 	if (rescan) {
 		for (const auto& owned : m_players) {
 			const Player& target = *owned;
-			if (target.alive && !target.vehicle && target.team == team && target.object != skip
+			if (!vehiclesOnly && target.alive && (!target.vehicle || soldiersOnly) && target.team == team && target.object != skip
 				&& inReach(target.body.position - physics::Vec3 {0, 1.0f, 0})) {
 				found.push_back(target.object);
 			}
 		}
-		if (!ability.ammo) {
+		if (!ability.ammo && !soldiersOnly) {
 			for (const Body& body : m_bodies) {
 				const world::Object* object = m_objects.find(body.object);
 				if (object && (object->team() == team || object->team() == 0) && inReach(body.body.position)) {
@@ -7516,6 +7568,9 @@ void GameWorld::stepAbilities(float seconds)
 			const float rate = kit ? number(*kit, "abilityRestoreRate", 0) : 0;
 			player.battery = std::min(1.0f, player.battery + rate * seconds);
 		}
+		if (player.alive && player.vehicle) {
+			stepVehicleAbility(player, seconds);
+		}
 		if (!player.alive || !player.abilityActive) {
 			m_abilityScans.erase(player.id);
 			continue;
@@ -7532,6 +7587,49 @@ void GameWorld::stepAbilities(float seconds)
 			}
 			applyAbility(ability, at, player.team, seconds, 0, &scan->second, &player);
 		}
+	}
+}
+
+// 0x00599f30: the vehicle's surroundings (the object manager's sphere,
+// DAT_00a85220 slot 0x44, round the vehicle) within the kit's radius; per
+// tick (30 a second) the strength in per cent, times the material table's
+// cell of the kit's material and the target's armour material, as the
+// in-hand abilities' (applyAbility, without the battery):
+// - healing: the team's soldiers (0x9493 of the player's team);
+// - repairing (and neither of the others): vehicles (the object's +0x17
+//   bit 0) of the team or of none, the player's own among them;
+// - ammo: the team's soldiers' magazines.
+void GameWorld::stepVehicleAbility(Player& player, float seconds)
+{
+	const world::Object* worn = player.kitObject ? m_objects.find(player.kitObject) : nullptr;
+	const world::ObjectTemplate* kit = worn && worn->objectTemplate() ? worn->objectTemplate()
+		: player.kitTemplate.empty()                                   ? nullptr
+																		: m_templates.find(player.kitTemplate);
+	const Body* vehicle = findBody(player.vehicle);
+	if (!kit || !vehicle) {
+		return;
+	}
+	const float radius = number(*kit, "abilityInVehicleRadius", 0);
+	const float strength = number(*kit, "abilityInVehicleStrength", 0);
+	const bool healing = integer(*kit, "ability.hasHealingAbility", 0) != 0;
+	const bool repairing = integer(*kit, "ability.hasRepairingAbility", 0) != 0;
+	const bool ammo = integer(*kit, "ability.hasAmmoAbility", 0) != 0;
+	if (radius <= 0 || strength <= 0 || (!healing && !repairing && !ammo)) {
+		return;
+	}
+	Ability ability;
+	ability.ammo = ammo && !healing && !repairing;
+	ability.radius = radius;
+	ability.strength = strength * 30; // per tick
+	ability.material = static_cast<uint32_t>(integer(*kit, "abilityInVehicleMaterial", 0));
+	const physics::Vec3 at = vehicle->body.position;
+	// The soldiers in the query are seated ones too (their objects ride in
+	// the vehicles): a medic heals the passengers.
+	if (healing || ammo) {
+		ability.ammo = !healing;
+		applyAbility(ability, at, player.team, seconds, 0, nullptr, nullptr, true, false);
+	} else {
+		applyAbility(ability, at, player.team, seconds, 0, nullptr, nullptr, false, true);
 	}
 }
 
@@ -7901,7 +7999,7 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims)
 		}
 	}
 	Projectile p;
-	p.origin = body.body.position + body.body.rotation.transform(seat.weaponPosition) + straight * 1.0f;
+	p.origin = body.body.position + body.body.rotation.transform(seatGunOrigin(seat, gun));
 	p.position = p.origin;
 	p.velocity = body.body.velocity + direction * gun.weapon->settings().velocity;
 	p.settings = gun.projectile;
@@ -7945,6 +8043,53 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims)
 	++player.roundsFired;
 	++player.gunShots;
 	weaponSound(WeaponSoundEvent::Fire, player, body.object, seat.weapon, p.origin);
+}
+
+// The round's start in the vehicle's frame (MultiFireComp 0x005d5fb0 /
+// the fire component's 0x005f1a20): the camera's frame with
+// fireInCameraDof, else the next barrel's (0x005d64a0: one barrel is
+// always the first; more go in turn, +0x1a8, from the first again past
+// the last), else the gun's; turned with the gun's aim about the yaw
+// bundle (the rewrite's parts sit at rest in the layout), then
+// projectileStartPosition along the frame's right, up and forward (the
+// rewrite's 1 m ahead without one). The camera's frame is the seat's
+// (0x005f1a20's player camera slot 0x1b4): Locked (+0x45, one gun)
+// is left out.
+physics::Vec3 GameWorld::seatGunOrigin(const SeatLayout& seat, Body::Gun& gun)
+{
+	physics::Vec3 from = seat.weaponPosition;
+	if (seat.fireInCameraDof && seat.hasCameraAt) {
+		from = seat.cameraAt;
+	} else if (!seat.barrels.empty()) {
+		if (gun.barrel < 0 || static_cast<size_t>(gun.barrel) >= seat.barrels.size()) {
+			gun.barrel = 0;
+		}
+		from = seat.barrels[static_cast<size_t>(gun.barrel)];
+		++gun.barrel;
+	}
+	const float yaw = (seat.frameYaw + gun.yaw) * 3.14159265f / 180.0f;
+	const float pitch = gun.pitch * 3.14159265f / 180.0f;
+	const physics::Vec3 forward {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+	const physics::Vec3 right {std::cos(yaw), 0, -std::sin(yaw)};
+	const physics::Vec3 up {-std::sin(yaw) * std::sin(pitch), std::cos(pitch), -std::cos(yaw) * std::sin(pitch)};
+	if (!seat.yawBundle.empty() && physics::lengthSquared(from - seat.yawPivot) > 1e-8f) {
+		// The rest offset from the pivot, turned by the aim's yaw about the
+		// vertical and its pitch about the turned right.
+		const physics::Vec3 d = from - seat.yawPivot;
+		const float turnBy = gun.yaw * 3.14159265f / 180.0f;
+		const physics::Vec3 yawed {d.x * std::cos(turnBy) + d.z * std::sin(turnBy), d.y,
+			-d.x * std::sin(turnBy) + d.z * std::cos(turnBy)};
+		const float c = std::cos(pitch), s = std::sin(pitch);
+		const float along = physics::dot(yawed, physics::Vec3 {std::sin(yaw), 0, std::cos(yaw)});
+		const float side = physics::dot(yawed, right);
+		from = seat.yawPivot + right * side
+			+ physics::Vec3 {std::sin(yaw), 0, std::cos(yaw)} * (along * c - yawed.y * s)
+			+ physics::Vec3 {0, 1, 0} * (along * s + yawed.y * c);
+	}
+	if (seat.hasStartPosition) {
+		return from + right * seat.startPosition.x + up * seat.startPosition.y + forward * seat.startPosition.z;
+	}
+	return from + forward * 1.0f;
 }
 
 void GameWorld::weaponSound(WeaponSoundEvent::Kind kind, const Player& player, uint32_t object,
@@ -8341,6 +8486,7 @@ bool GameWorld::buildBody(const world::ObjectTemplate& tRef, uint32_t id, const 
 
 void GameWorld::addBodies()
 {
+	std::vector<uint32_t> supplied;
 	for (const auto& owned : m_objects.objects()) {
 		world::Object& object = *owned;
 		const auto checked = std::lower_bound(m_checked.begin(), m_checked.end(), object.id());
@@ -8349,6 +8495,9 @@ void GameWorld::addBodies()
 		}
 		m_checked.insert(checked, object.id());
 		const world::ObjectTemplate* t = object.objectTemplate();
+		if (t && !flag(*t, "hasMobilePhysics", false) && sameName(t->typeName(), "Bundle")) {
+			supplied.push_back(object.id());
+		}
 		if (!t || !flag(*t, "hasMobilePhysics", false)) {
 			continue;
 		}
@@ -8375,6 +8524,43 @@ void GameWorld::addBodies()
 			}
 		}
 		m_bodies.push_back(std::move(body));
+	}
+	if (!supplied.empty()) {
+		addStaticSupplies(supplied);
+	}
+}
+
+void GameWorld::addStaticSupplies(const std::vector<uint32_t>& objects)
+{
+	for (const uint32_t id : objects) {
+		const world::Object* object = m_objects.find(id);
+		const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
+		if (!t) {
+			continue;
+		}
+		for (const world::ChildTemplate& child : t->children()) {
+			world::ObjectTemplate* c = m_templates.find(child.name);
+			if (!c || !sameName(c->typeName(), "SupplyObject")) {
+				continue;
+			}
+			const physics::Mat3 turn =
+				physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+			const physics::Vec3 at = physics::Vec3 {object->position().x, object->position().y, object->position().z}
+				+ turn.transform({child.position.x, child.position.y, child.position.z});
+			world::Object* made = m_objects.create(c, {at.x, at.y, at.z}, object->rotation());
+			if (!made) {
+				continue;
+			}
+			m_checked.insert(std::lower_bound(m_checked.begin(), m_checked.end(), made->id()), made->id());
+			Crate crate;
+			crate.object = made->id();
+			crate.team = object->team();
+			crate.storage = 1e30f;
+			crate.timeLeft = 1e30f;
+			crate.carried = true; // placed: not lowered
+			crate.teamFromClosestCP = number(*c, "teamFromClosestCP", 0) != 0;
+			m_crates.push_back(crate);
+		}
 	}
 }
 
