@@ -2784,13 +2784,22 @@ void GameWorld::steerSeeker(Projectile& p, float seconds)
 	if (!shooter || !shooter->alive || p.wireLost) {
 		return;
 	}
-	const float yaw = lookYaw(*shooter) * 3.14159265f / 180.0f;
-	const float pitch = shooter->input.aimPitch * 3.14159265f / 180.0f;
+	float yaw = lookYaw(*shooter) * 3.14159265f / 180.0f;
+	float pitch = shooter->input.aimPitch * 3.14159265f / 180.0f;
+	physics::Vec3 eye = shooter->body.position + physics::Vec3 {0, 0.6f, 0};
+	// The player's active camera (0x005e2e20: slot 0x1b4(1)): the round's
+	// own while it is the view (the projectile camera).
+	ProjectileCamera camera;
+	const bool fromRound = projectileCamera(shooter->id, camera);
+	if (fromRound) {
+		yaw = camera.yaw * 3.14159265f / 180.0f;
+		pitch = camera.pitch * 3.14159265f / 180.0f;
+		eye = camera.position;
+	}
 	const physics::Vec3 aim {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
-	const physics::Vec3 eye = shooter->body.position + physics::Vec3 {0, 0.6f, 0};
 	const physics::Vec3 toMissile = p.position - eye;
 	if ((p.wireMaxDistance > 0 && physics::lengthSquared(toMissile) > p.wireMaxDistance * p.wireMaxDistance)
-		|| (!p.wireKeepOnObstruction && !lineOfSight(eye, p.position, shooter->vehicle ? shooter->vehicle : shooter->object))) {
+		|| (!fromRound && !p.wireKeepOnObstruction && !lineOfSight(eye, p.position, shooter->vehicle ? shooter->vehicle : shooter->object))) {
 		p.wireLost = true;
 		return;
 	}
@@ -2798,6 +2807,108 @@ void GameWorld::steerSeeker(Projectile& p, float seconds)
 	// The follow's turn (followStep: follow.maxYaw / maxPitch degrees a
 	// tick, the AV missile's 0.4 and 0.7).
 	followStep(p, eye + aim * along, {}, seconds);
+}
+
+void GameWorld::startProjectileView(const Player& player, const Projectile& round, const world::ObjectTemplate& firearm)
+{
+	if (integer(firearm, "zoom.useProjectileCamera", 0) == 0) {
+		return;
+	}
+	const world::ObjectTemplate* projectile = m_templates.find(firearm.settings().count("projectileTemplate")
+			? firearm.settings().at("projectileTemplate")
+			: std::string());
+	if (!projectile || integer(*projectile, "useProjectileCamera", 0) == 0) {
+		return;
+	}
+	// The round's child Camera (0x005b38a0: the first child of class 0x9472).
+	for (const world::ChildTemplate& child : projectile->children()) {
+		const world::ObjectTemplate* t = m_templates.find(child.name);
+		if (!t || t->typeName() != "Camera") {
+			continue;
+		}
+		ProjectileView view;
+		view.serial = round.serial;
+		view.offset = {child.position.x, child.position.y, child.position.z};
+		view.takeOverInput = integer(*t, "takeOverInput", 0) != 0;
+		view.snapToZero = integer(*t, "snapToZeroOnNoInput", 0) != 0;
+		const auto vec = [t](const char* name) {
+			const auto it = t->settings().find(name);
+			return it != t->settings().end() ? parseVec3(it->second) : physics::Vec3 {};
+		};
+		view.minRotation = vec("minRotation");
+		view.maxRotation = vec("maxRotation");
+		view.maxSpeed = vec("maxSpeed");
+		view.fov = number(*t, "insideFOV", 1.1f);
+		view.lastAimPitch = player.input.aimPitch;
+		m_projectileViews[player.id] = view;
+		return;
+	}
+}
+
+bool GameWorld::stepProjectileView(Player& player, float seconds)
+{
+	const auto it = m_projectileViews.find(player.id);
+	if (it == m_projectileViews.end()) {
+		return false;
+	}
+	ProjectileView& view = it->second;
+	const auto round = std::find_if(m_projectiles.begin(), m_projectiles.end(),
+		[&](const Projectile& p) { return p.serial == view.serial && p.alive; });
+	if (round == m_projectiles.end() || !player.alive || !player.vehicle) {
+		m_projectileViews.erase(it); // the round went (0x005b4b00): the seat's camera again
+		return false;
+	}
+	if (!view.takeOverInput) {
+		view.lastAimPitch = player.input.aimPitch;
+		return false;
+	}
+	// The camera as a rotational bundle on the round (inputToYaw
+	// PIMouseLookX, inputToPitch PIMouseLookY): the look's change this tick,
+	// at most maxSpeed a second, within min/maxRotation; with no input and
+	// snapToZeroOnNoInput straight ahead again.
+	const float turn = player.input.turn;
+	const float tilt = std::isfinite(view.lastAimPitch) ? player.input.aimPitch - view.lastAimPitch : 0.0f;
+	view.lastAimPitch = player.input.aimPitch;
+	const auto step = [seconds](float angle, float delta, float speed, float lo, float hi) {
+		if (speed > 0) {
+			delta = std::clamp(delta, -speed * seconds, speed * seconds);
+		}
+		return lo < hi ? std::clamp(angle + delta, lo, hi) : angle + delta;
+	};
+	if (view.snapToZero && std::fabs(turn) < 1e-4f && std::fabs(tilt) < 1e-4f) {
+		view.yaw = view.pitch = 0;
+	} else {
+		view.yaw = step(view.yaw, turn, view.maxSpeed.x, view.minRotation.x, view.maxRotation.x);
+		// Bundle pitch is down positive, so its limits [min, max] bound the
+		// rise (kept up positive here) at [-max, -min].
+		view.pitch = step(view.pitch, tilt, view.maxSpeed.y, -view.maxRotation.y, -view.minRotation.y);
+	}
+	return true;
+}
+
+bool GameWorld::projectileCamera(int player, ProjectileCamera& out) const
+{
+	const auto it = m_projectileViews.find(player);
+	if (it == m_projectileViews.end()) {
+		return false;
+	}
+	const ProjectileView& view = it->second;
+	for (const Projectile& p : m_projectiles) {
+		if (p.serial != view.serial || !p.alive) {
+			continue;
+		}
+		const physics::Vec3 v = physics::lengthSquared(p.velocity) > 1e-6f ? p.velocity : physics::Vec3 {0, 0, 1};
+		const float yaw = std::atan2(v.x, v.z) * 57.29578f;
+		const float pitch = std::atan2(v.y, std::sqrt(v.x * v.x + v.z * v.z)) * 57.29578f;
+		const physics::Mat3 frame = physics::Mat3::fromYawPitchRoll({yaw, -pitch, 0});
+		out.position = p.position + frame.transform(view.offset);
+		out.yaw = yaw + view.yaw;
+		out.pitch = std::clamp(pitch + view.pitch, -89.0f, 89.0f);
+		out.fov = view.fov;
+		out.takeOverInput = view.takeOverInput;
+		return true;
+	}
+	return false;
 }
 
 std::vector<GameWorld::Capsule> GameWorld::soldierCapsules(uint32_t soldier) const
@@ -3373,6 +3484,7 @@ world::Object* GameWorld::spawnPlayer(int team)
 		m_player = findPlayer(addPlayer("Player", team, false));
 		m_addingLocal = false;
 		m_player->unlocked = localPlayerUnlocks;
+		m_player->owned = localPlayerOwned;
 	}
 	if (m_player->alive) {
 		return m_objects.find(m_player->object);
@@ -3735,7 +3847,7 @@ bool GameWorld::spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& 
 				return false;
 			}
 			bool prone = false;
-			if (scatterOnLeader(*leader, position, yaw, &prone)) {
+			if (scatterOnLeader(*leader, position, yaw, &prone, player.ai)) {
 				player.spawnedProne = prone;
 			} else {
 				// No try fits: the spawn is refused (ServerGameLogic's
@@ -3767,19 +3879,21 @@ bool GameWorld::spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& 
 // soldier's spheres fitting there standing, else prone (the spawn point's
 // +0x18a: the member starts prone), else the try fails. The member faces
 // the leader (0x005b1d30). Not rewritten: the extra test some callers ask
-// for (IAIPathfindingCourier slot 0xc, DAT_00b4bb94; the callers passing
-// it are not traced).
-bool GameWorld::scatterOnLeader(const Player& leader, physics::Vec3& feet, float& yaw, bool* prone)
+// for: with its AI flag (the server's spawn 0x004bef90 passes the
+// player's slot 0x68, a bot) a try that fits must also pass
+// IAIPathfindingCourier slot 0xc (DAT_00b4bb94: on the navigation mesh;
+// setAiSpawnTest), else the next try is taken.
+bool GameWorld::scatterOnLeader(const Player& leader, physics::Vec3& feet, float& yaw, bool* prone, bool ai)
 {
 	return scatterFrom(leader.body.position - physics::Vec3 {0, 0.875f, 0}, leader.body.yawDegrees,
-		leader.body.position, leader.object, feet, yaw, prone);
+		leader.body.position, leader.object, feet, yaw, prone, ai);
 }
 
 // The same scatter from any spawn point with setScatterSpawnPositions
 // (0x005b2200: `base` is the point's position, less 0.875 when its root
 // is a soldier; `heading` its yaw), facing `faceTo`.
 bool GameWorld::scatterFrom(const physics::Vec3& base, float heading, const physics::Vec3& faceTo, uint32_t ignore,
-	physics::Vec3& feet, float& yaw, bool* prone)
+	physics::Vec3& feet, float& yaw, bool* prone, bool ai)
 {
 	constexpr float kMinDistance = 3, kMaxDistance = 9; // spawnpoint-scatter-mindist/-maxdist
 	constexpr float kTerrainOffset = 1.01f;             // spawnpoint-terrain-offset
@@ -3812,6 +3926,11 @@ bool GameWorld::scatterFrom(const physics::Vec3& base, float heading, const phys
 					continue;
 				}
 				lying = true;
+			}
+			// A bot's try: on the navigation mesh too (0x005b2200 at the
+			// try's point, IAIPathfindingCourier slot 0xc).
+			if (ai && m_aiSpawnTest && !m_aiSpawnTest({p.x, y - 1.0f, p.z})) {
+				continue;
 			}
 			if (prone) {
 				*prone = lying;
@@ -4507,7 +4626,7 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 		const world::Object* vehicle = m_objects.find(player.spawnVehicle);
 		const Body* body = findBody(player.spawnVehicle);
 		physics::Vec3 offset;
-		if (vehicle && body && body->vehicle && !vehicle->destroyed() && vehicle->team() == team
+		if (vehicle && body && body->vehicle && !vehicle->destroyed() && vehicle->team() == team && teamHoldsControlPoint(team)
 			&& (mobile = spawnPointChild(m_templates, *vehicle->objectTemplate(), offset)) != nullptr) {
 			mobileAt = body->body.position + body->body.rotation.transform(offset);
 			squadAt = const_cast<world::Object*>(vehicle);
@@ -4533,7 +4652,7 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 		facing = at->rotation().x;
 		physics::Vec3 feet = pointAt + pointFlags.offset - physics::Vec3 {0, 1.0f, 0};
 		bool prone = false;
-		if (pointFlags.scatter && !mobile && scatterFrom(pointAt, facing, pointAt, at->id(), feet, facing, &prone)) {
+		if (pointFlags.scatter && !mobile && scatterFrom(pointAt, facing, pointAt, at->id(), feet, facing, &prone, player.ai)) {
 			player.spawnedProne = prone;
 		}
 		where = {feet.x, feet.y, feet.z};
@@ -4829,9 +4948,22 @@ void GameWorld::stepVehicleTeams()
 	}
 }
 
+// A mobile spawn point (its spawn group 0xc0 and on, slot 0x30) is
+// usable only while its player's team holds a control point: the point's
+// test (0x005b24f0) walks the game logic's control points (slot 0x180)
+// for one whose team (its object's +0x184 slot 0x1c) is the player's,
+// none refusing it (the flag *0x00a6b0c4 it also asks is never written).
+bool GameWorld::teamHoldsControlPoint(int team) const
+{
+	return std::any_of(m_controlPoints.begin(), m_controlPoints.end(), [team](const ControlPoint& cp) { return cp.team == team; });
+}
+
 std::vector<uint32_t> GameWorld::spawnVehicles(int team) const
 {
 	std::vector<uint32_t> found;
+	if (!teamHoldsControlPoint(team)) {
+		return found; // 0x005b24f0: no control point of the team, no mobile spawn
+	}
 	for (const Body& body : m_bodies) {
 		const world::Object* object = body.vehicle ? m_objects.find(body.object) : nullptr;
 		physics::Vec3 offset;
@@ -6560,7 +6692,9 @@ void GameWorld::animateRemoteSoldier(uint32_t object, const RemoteSoldierState& 
 			if (arm.magSize > 0 && remote.rounds > 0) {
 				--remote.rounds;
 			}
-			if (remote.rounds == 0 && arm.magSize > 0) {
+			// Only ammo.autoReload reloads by itself (0x005f45e0 / 0x005f4a40);
+			// the others wait for the server's reload (reloadRemoteSoldier).
+			if (remote.rounds == 0 && arm.magSize > 0 && arm.autoReload) {
 				remote.reloadLeft = arm.reloadTime;
 				round(WeaponSoundEvent::Reload);
 			}
@@ -7275,6 +7409,11 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 	player.reloadWas = input.reload;
 	const bool emptyBefore = player.weapon && player.weapon->roundsInMag() <= 0 && !wasReloading;
 	const bool shot = player.weapon && player.weapon->tick(seconds, input.fire, input.altFire); // the alternate: a soft throw
+	if (player.weapon && player.weapon->takeClick()) {
+		// The empty magazine's click (0x005c2ee0 -> the sound component's
+		// 0x005dc160): no reload starts by itself without ammo.autoReload.
+		weaponSound(WeaponSoundEvent::TriggerClick, player, player.object, player.weaponTemplate, player.body.position);
+	}
 	if (player.weapon && player.weapon->reloading() && !wasReloading) {
 		weaponSound(WeaponSoundEvent::Reload, player, player.object, player.weaponTemplate, player.body.position);
 		// The reload's start (0x005c0f40) tells each component (slot 0x48):
@@ -8401,6 +8540,12 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims)
 	Body::Gun& gun = body.guns[static_cast<size_t>(player.seat)];
 	const world::Object* object = m_objects.find(body.object);
 	const SeatLayout& seat = vehicleLayout(*object->objectTemplate()).seats[static_cast<size_t>(player.seat)];
+	// The projectile camera with takeOverInput: the input goes to the
+	// round's camera and stops (0x005ca2e0); the gun neither turns nor fires.
+	if (stepProjectileView(player, seconds)) {
+		aims = false;
+		player.input.fire = false;
+	}
 	// regulateVector (0x005644b0 through the input handler 0x00565180 or
 	// the input pass 0x00565700): the bundle's yaw input becomes
 	// clamp(regulateVector.x x the hull's yaw rate, -1, 1) where the
@@ -8492,7 +8637,21 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims)
 		p.tracer = true;
 		p.tracerStart = p.origin;
 	}
+	p.serial = ++m_projectileSerial;
+	if (p.settings->seek == ProjectileSettings::Seek::Aim) {
+		// The LPTargetComp guides one round, the last one fired (its +0x1c,
+		// slot 0xbc, which the update 0x005e2e20 steers): an earlier round
+		// of the same gun goes on unguided.
+		for (Projectile& earlier : m_projectiles) {
+			if (earlier.player == p.player && earlier.shooter == p.shooter && earlier.settings == p.settings) {
+				earlier.wireLost = true;
+			}
+		}
+	}
 	m_projectiles.push_back(p);
+	if (const world::ObjectTemplate* firearm = m_templates.find(seat.weapon)) {
+		startProjectileView(player, p, *firearm);
+	}
 	// WeaponBasedRecoilComp (0x005ddfc0): the gun's slide, and its push on
 	// the vehicle (slot 0xa0: -forward x recoilForce at the gun, no mass).
 	if (seat.gunRecoil.any()) {

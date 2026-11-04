@@ -179,6 +179,7 @@ TEST(RagDoll_KilledSoldierFallsToRestAndGetsUpWhenRevived)
 	defib->settings()["velocity"] = "60";
 	defib->settings()["ammo.magSize"] = "1";
 	defib->settings()["ammo.reloadTime"] = "0.6";
+	defib->settings()["ammo.autoReload"] = "1"; // as Unl_Defibrillator
 	world::ObjectTemplate* shock = game.templates.create("GenericProjectile", "shock");
 	shock->settings()["damage"] = "1000";
 	shock->settings()["damageMandownSoldiers"] = "1";
@@ -2200,7 +2201,14 @@ TEST(RagDoll_RemoteSoldierAnimated)
 		fires += sound.kind == game::GameWorld::WeaponSoundEvent::Fire && sound.weapon == "eu_ar_rifle";
 		reloads += sound.kind == game::GameWorld::WeaponSoundEvent::Reload;
 	}
-	CHECK(fires == 3 && reloads == 1);
+	// The rifle has no ammo.autoReload: the magazine stays empty until the
+	// server's reload (the snapshot's mask 0x10000, reloadRemoteSoldier).
+	CHECK(fires == 3 && reloads == 0);
+	game.world->reloadRemoteSoldier(id, 0);
+	for (const auto& sound : game.world->takeWeaponSounds()) {
+		reloads += sound.kind == game::GameWorld::WeaponSoundEvent::Reload;
+	}
+	CHECK(reloads == 1);
 	// Reloaded after reloadTime: it fires on at roundsPerMinute.
 	state.firing = false;
 	for (int i = 0; i < static_cast<int>(arm.reloadTime * 30) + 2; ++i) {

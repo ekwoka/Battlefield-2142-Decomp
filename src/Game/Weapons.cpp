@@ -623,6 +623,25 @@ bool FireArm::fire(float seconds, bool trigger)
 	if (!unlimited && m_rounds <= 0) {
 		m_pending = false;
 		m_burstLeft = 0;
+		// The fire attempt (0x005c2ee0) on a press: the ammo component's
+		// slot 0x34 (0x005f37c0: a round in the magazine, not state 2)
+		// refuses, the trigger is let go (0x005c1010) and the sound
+		// component's click plays (0x005dc160: TriggerClick, first person).
+		if (pressed) {
+			m_clicked = true;
+		}
+		// With ammo.autoReload the ammo's update (0x005f3c40) starts a
+		// reload of an empty magazine by itself once the firearm isn't busy
+		// (0x005c14f0) and a magazine can be taken (0x005f4140): +0x43, which
+		// the firearm's update (0x005c58a0, slot 0xc8) turns into the
+		// reload (0x005c0f40). A magazine given to an empty gun (a resupply)
+		// is so taken in.
+		if (m_settings.autoReload && m_cooldown <= 0 && (m_mags > 0 || m_settings.nrOfMags < 0)
+			&& m_settings.reloadTime > 0) {
+			m_reloadLeft = m_settings.reloadTime;
+			m_reloadFilled = false;
+			return false;
+		}
 	}
 	if (!trigger || m_cooldown > 0 || (!unlimited && m_rounds <= 0)) {
 		return false;
@@ -644,8 +663,15 @@ bool FireArm::fire(float seconds, bool trigger)
 		return true;
 	}
 	--m_rounds;
-	// ammo.nrOfMags -1: magazines without end (the drones' detonators).
-	if (m_rounds == 0 && (m_mags > 0 || m_settings.nrOfMags < 0)) {
+	// The round's ammo use (0x005f45e0, slot 0x38): an emptied magazine sets
+	// +0x41, and +0x44 only with ammo.autoReload (+0x28); after the round
+	// (0x005f4a40, slot 0x3c) +0x44 with a magazine to take (0x005f4140)
+	// starts the reload (state 2, 0x005f4830). Without autoReload (the
+	// rifles, handguns and launchers) nothing starts: the magazine stays
+	// empty, the trigger clicks (0x005c2ee0), until c_PIReload (the
+	// firearm's action 10). ammo.nrOfMags -1: magazines without end (the
+	// drones' detonators).
+	if (m_rounds == 0 && m_settings.autoReload && (m_mags > 0 || m_settings.nrOfMags < 0)) {
 		m_reloadLeft = m_settings.reloadTime;
 		m_reloadFilled = false;
 	}

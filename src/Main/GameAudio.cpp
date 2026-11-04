@@ -368,6 +368,7 @@ void GameAudio::weapons(const Camera& camera)
 		const sound::GameSounds::WeaponEvent kind = event.kind == Kind::Fire ? sound::GameSounds::WeaponEvent::Fire
 			: event.kind == Kind::Reload                                  ? sound::GameSounds::WeaponEvent::Reload
 			: event.kind == Kind::SwitchFireRate                          ? sound::GameSounds::WeaponEvent::SwitchFireRate
+			: event.kind == Kind::TriggerClick                            ? sound::GameSounds::WeaponEvent::TriggerClick
 																		  : sound::GameSounds::WeaponEvent::Deploy;
 		const uint64_t user = (static_cast<uint64_t>(static_cast<uint32_t>(event.player)) << 32) | event.object;
 		sound::GameSounds::FireInfo fire;

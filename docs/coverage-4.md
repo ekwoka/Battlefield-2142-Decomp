@@ -227,6 +227,15 @@ Effort: **S** = days, **M** = 1–3 weeks. "Unread" means the property name is i
 
   Left: the navmesh test for bots' spawn tries, the mobile spawn point's CP rule (`0x005b24f0`), rememberExcessInput, and the slumped body's time.
 
+**Status (reload, projectile camera, owned unlocks, spawn tests, gpm_ti bots; after HEAD 5d5403b):**
+- L2 done: retail's reload. Only `ammo.autoReload` reloads by itself (`0x005f45e0` / `0x005f4a40`, the ammo's update `0x005f3c40`); the rifles, handguns and launchers wait for c_PIReload, and a press on an empty magazine clicks (`0x005c2ee0` → `0x005dc160`, TriggerClick). Bots reload as AIDLL does: the weapon handling after each plan (`0x10099b70`: the primary topped up whenever not full, an integer-division quirk; the other weapon swapped back for the primary) and the guided plan's reload press (`0x10078570`). The rewrite's fire plan never ends between taps (retail's Trigger statements do, `0x1008f1e0`), so it presses the reload itself on an empty magazine (stand-in).
+- L3 done: one guided round per gun (LPTargetComp's `+0x1c`, `0x005e2e20`): a new round takes the guidance over. `targetObjectTemplate` is equivalent to the rewrite's point.
+- L4: `takeOverInput` / useProjectileCamera done as a mechanism (`0x005b38a0`, `0x005b4b00`, `0x005ca2e0`, `0x005e2e20`): the round's camera as the view, the input to it within its limits, the guidance after it, RendDX9's TVEffect (`0x10048f80`) on while viewing. The shipped launchers are their seats' second, unselectable weapons, and the rewrite's seats fire their first only, so the shipped gunships and hover bikes don't start it yet. Not done: `boneIndex` (`0x0063d470` decoded: a 0x48-byte bone record into each part's slot `0xe8`; needs the bundle skeletons and the parts' pose), ignoreParentRotation's pitch and the seat cameras' (the look, not the bundle, would have to keep the offset).
+- L5 done: the owned set (player slot `0x2a8`, bit maps `+0x2b4`) fed from the soldier profile's unlocks offline (`localPlayerOwned`).
+- L7 done: the bots' scattered spawn tries on the navigation mesh (`0x005b2200`'s AI flag → IAIPathfindingCourier slot `0xc`, AIDLL `0x10054ff0`), and mobile spawn points only while the team holds a control point (`0x005b24f0`).
+- gpm_ti: on Suez_Canal 48 nobody fires because the shipped gpm_ti levels have no `AI/StrategicAreas.ai` (the level load `0x004d3450` asks for one) and the only navigation mesh is the 16-player area's, which leaves the PAC Titan, its outposts and three silos off it. Retail bots would stand the same way, so it is left as is.
+- Bot rounds (15 bots, 300 s): Cerbere_Landing gpm_sp 16, 32 seeds: kills 16.75 ± 0.64 → 15.97 ± 0.66, rounds 1,207 → 1,165, CPU 4.86 → 4.83 s a run; minsk_coop gpm_coop 32 (31 bots), 12 seeds: kills 5.17 → 5.50, CPU 12.3 → 12.8 s. Suez_Canal gpm_ti 48: 0 rounds before and after.
+
 ### 2b. AI
 
 | # | Gap | What a player notices | Evidence | Effort |

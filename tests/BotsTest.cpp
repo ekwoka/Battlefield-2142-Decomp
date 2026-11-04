@@ -3636,3 +3636,44 @@ TEST(Bots_GiveOrderRefused)
 	CHECK(!bots.giveOrder(bot, "Idle", "NoSuchSet") && bots.lastOrder(bot) == "Fire StandardWeights");
 	CHECK(!bots.keepsToOrder(bot));
 }
+
+// The weapon handling (AIDLL 0x10099b70, after each execution's plan): out
+// of the fire plan (bot +0x188, set by 0x100d4da0) a bot with its primary
+// (c_PIWeaponSelect3) in hand presses c_PIReload while the magazine isn't
+// full (rounds / magazine size, an integer division, below 0.8): the
+// rifle, which has no ammo.autoReload, is topped up once the fight is over.
+TEST(Bots_ReloadAfterTheFight)
+{
+	Field field;
+	Console console;
+	// A kit carrying the rifle in slot 3 (its itemIndex): the primary.
+	field.templates.registerType(60, "Kit");
+	field.templates.create("Kit", "EU_Assault")->children().push_back({"eu_ar_rifle", {}, {}});
+	game::BotManager bots(*field.world, scriptedSettings(console));
+	const int bot = field.soldier(2, true, 0, 0);
+	const int enemy = field.soldier(1, false, 0, 25);
+	const auto rifle = [&] {
+		for (const auto& ammo : field.world->weaponAmmo(bot)) {
+			if (ammo.weapon == "eu_ar_rifle") {
+				return ammo;
+			}
+		}
+		return game::GameWorld::WeaponAmmo {};
+	};
+	const int roundsBefore = rifle().rounds; // in the magazine and the spares
+	for (int i = 0; i < 30 * 6 && field.fired(bot) < 5; ++i) {
+		settle(bots, 1 / 30.0f + 1e-4f, field.world.get());
+	}
+	CHECK(field.fired(bot) >= 5);
+	game::GameWorld::PlayerInfo info;
+	field.world->playerInfo(enemy, info);
+	field.world->setHitPoints(info.soldier, 0);
+	field.move(enemy, 0, 3000);
+	for (int i = 0; i < 30 * 8 && rifle().inMag < rifle().magSize; ++i) {
+		settle(bots, 1 / 30.0f + 1e-4f, field.world.get());
+	}
+	std::fprintf(stderr, "  %d rounds fired; the rifle %d/%d, %d -> %d rounds in all (%s)\n", field.fired(bot), rifle().inMag,
+		rifle().magSize, roundsBefore, rifle().rounds, bots.behaviour(bot).c_str());
+	// Topped up: a fresh magazine in, the partial one's rounds gone with it.
+	CHECK(rifle().inMag == rifle().magSize && rifle().rounds < roundsBefore - field.fired(bot));
+}

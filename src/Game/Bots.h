@@ -646,11 +646,9 @@ public:
 	// "ai.init" doesn't exist, so AIMain never initiates and ai.addBot is
 	// refused (0x10056b20, 0x100c84b0; BF2142.exe 0x004d3450). Setting a
 	// null mesh does the same: the manager runs no bots (enabled() false).
-	void setNavMesh(const ai::NavMesh* mesh)
-	{
-		m_navMesh = mesh;
-		m_noNavMesh = mesh == nullptr;
-	}
+	// It is also the bots' spawn test (GameWorld::setAiSpawnTest: the
+	// IAIPathfindingCourier, AIDLL vtable 0x10114b50 slot 0xc 0x10054ff0).
+	void setNavMesh(const ai::NavMesh* mesh);
 	bool enabled() const { return !m_noNavMesh; }
 	// The vehicles' (AIPathFinding/Vehicle.qtr), for driving bots.
 	void setVehicleNavMesh(const ai::NavMesh* mesh) { m_vehicleNavMesh = mesh; }
@@ -910,6 +908,7 @@ private:
 		bool usedLast = false;    // presses: use and the defibrillator want a release between
 		int titanGun = -1;        // Titan mode: the gun seat of its Titan it goes to man (claimed)
 		bool switchedLast = false;
+		bool reloadedLast = false; // c_PIReload pressed at the last execution (a release between presses)
 		// The comm object's received radio messages (bot vt+0xa4, +0xc: a
 		// list per type, 0x100a6fe0), each kept for its lifetime (0x100a7130).
 		struct Radio {
@@ -1209,6 +1208,9 @@ private:
 	float random(); // 0..1
 	void flee(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
 	void idle(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
+	// The weapon handling after each execution's plan (AIDLL 0x10099b70):
+	// the primary back in hand and its reload.
+	void handleWeapon(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
 	// A Helicopter / TransportHelicopter pilot's plans (BBPGotoWaypoint3d,
 	// BBPIdle3d, BBPHeliFire3d) with the flight controllers of src/AI/Heli;
 	// false for a behaviour they leave to the others (Change).

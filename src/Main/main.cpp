@@ -6214,7 +6214,11 @@ int runGame(Options& options, Session& session)
 		if (options.playTeam != 0) {
 			// The soldier's chosen unlocks (--unlock-all gives everything).
 			if (session.menuBindings) {
+				// The profile's unlocks are both the soldier's chosen ones and
+				// those it owns (player slot 0x2a8; the kit menu's equip below
+				// changes only the chosen).
 				round.localPlayerUnlocks = stats::containersFor(stats::unlockContainers(templates), session.menuBindings->soldierUnlocks());
+				round.localPlayerOwned = round.localPlayerUnlocks;
 			}
 			if (const world::Object* player = round.spawnPlayer(options.playTeam)) {
 				round.joinSquad(round.localPlayer(), round.openSquad(options.playTeam));
@@ -6569,6 +6573,20 @@ int runGame(Options& options, Session& session)
 					player.position.y, player.position.z, player.kills, player.deaths,
 					fired.empty() ? 0 : fired[0].count, hit.empty() ? 0 : hit[0].count, player.ai ? "  " : "",
 					player.ai ? bots.behaviour(player.id).c_str() : "", seated.c_str());
+				if (std::getenv("BF2142_BOT_STATS") && player.alive && !player.vehicle) {
+					// The weapons' magazines (in hand marked *): the bots' reloads.
+					std::string list;
+					for (const auto& ammo : round.weaponAmmo(player.id)) {
+						if (ammo.magSize > 0) {
+							const bool held = std::any_of(player.carried.begin(), player.carried.end(), [&](const auto& c) {
+								return c.first == player.inHandSlot && c.second == ammo.weapon;
+							});
+							list += " " + ammo.weapon + (held ? "*" : "") + " " + std::to_string(ammo.inMag) + "/"
+								+ std::to_string(ammo.rounds);
+						}
+					}
+					std::printf("    magazines:%s\n", list.c_str());
+				}
 			}
 			if (session.nextMap || (!options.view && options.screenshot.empty())) {
 				return 0;
@@ -6673,6 +6691,10 @@ int runGame(Options& options, Session& session)
 				effects.soldierEmpLevel = me.empLevel;
 			}
 			effects.tinnitusSeconds = round.takeTinnitus();
+			// Through a guided round's camera (useProjectileCamera): the
+			// TVEffect pass (RendDX9 0x10048f80, PostProduction's "TVEffect").
+			game::GameWorld::ProjectileCamera roundCamera;
+			effects.tv = round.projectileCamera(round.localPlayer(), roundCamera);
 			if (round.playerInfo(round.localPlayer(), me) && me.alive && me.vehicle) {
 				effects.vehicleEmpLevel = round.empLevel(me.vehicle);
 				const auto seats = round.vehicleSeats(me.vehicle);

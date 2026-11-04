@@ -83,7 +83,9 @@ public:
 	//     the world's effects duck while it fires (reason 4).
 	//   reload 0x005dbfe0: Reload1P or Reload3P.
 	//   deploy 0x005dc1d0: Deploy1P or Deploy3P, at most once in 10 ticks.
-	enum class WeaponEvent { Fire, Reload, Deploy, Zoom, SwitchFireRate };
+	//   click 0x005dc160 (the fire attempt 0x005c2ee0 on an empty magazine):
+	//     TriggerClick, first person only.
+	enum class WeaponEvent { Fire, Reload, Deploy, Zoom, SwitchFireRate, TriggerClick };
 	// The fire event's fields the sound reads (0x005c3cb0's record): the
 	// fire component's mode (slot 0xdc: 0 single, 1 burst, 2 automatic,
 	// +0x18), the rounds the burst will fire (0x005c3b50, +0x14), whether

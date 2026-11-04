@@ -18,6 +18,7 @@
 #include <functional>
 #include <array>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace dice::hfe::physics {
@@ -377,6 +378,9 @@ public:
 	// with one to spare, is replaced after reloadTime as an empty one is.
 	// False when nothing starts.
 	bool startReload();
+	// A press of the trigger that found the magazine empty since the last
+	// call (0x005c2ee0: the ammo's slot 0x34 refuses; the TriggerClick).
+	bool takeClick() { return std::exchange(m_clicked, false); }
 	// Off: the mode is ignored and the trigger fires as held. (The drones
 	// and sentry guns keep the modes: their auto controllers, AIDLL bots,
 	// hold the trigger for an automatic gun and tap it otherwise,
@@ -409,6 +413,7 @@ private:
 	bool m_triggerWas = false;
 	bool m_busyUntilRelease = false; // a round fired with busyUntilButtonRelease, trigger still held
 	bool m_pending = false; // a press waiting for the gun
+	bool m_clicked = false; // a press on an empty magazine (takeClick)
 	int m_burstLeft = 0;
 	int m_launchIn = -1;   // a thrown round's ticks to go (states 2 and 3), -1 none
 	bool m_soft = false;   // the soft throw's flag (+0x178): the alternate input still held

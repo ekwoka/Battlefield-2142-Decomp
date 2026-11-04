@@ -330,7 +330,7 @@ public:
 	// a weapon taken in hand. `object` is the soldier, or the vehicle a
 	// seat's gun is on; at most the last 256 are kept.
 	struct WeaponSoundEvent {
-		enum Kind { Fire, Reload, Deploy, SwitchFireRate } kind = Fire;
+		enum Kind { Fire, Reload, Deploy, SwitchFireRate, TriggerClick } kind = Fire;
 		int player = -1;
 		uint32_t object = 0;
 		std::string weapon; // the weapon's template
@@ -605,6 +605,30 @@ public:
 	static constexpr int kSpawnInVehicle = -4;
 	void setSpawnVehicle(int player, uint32_t vehicle);
 	std::vector<uint32_t> spawnVehicles(int team) const;
+	// The projectile camera: a seat's weapon with ToggleCameraComp's
+	// zoom.useProjectileCamera (as_ag's and us_ag's guided missile seats, the
+	// hover bike's) firing a round whose template has useProjectileCamera
+	// (GenericProjectile +0x32b; the round keeps its child Camera, class
+	// 0x9472, interface 0xc367, at +0x240: 0x005b38a0) makes that camera
+	// the player's until the round goes (0x005b4b00 hands the view back,
+	// slot 0x34). With the Camera's takeOverInput (+0x42c, vtable
+	// 0x00979a50 slot 0x88) the PlayerControlObject's input (0x005ca2e0)
+	// goes to the camera's root and stops there: the mouse turns the
+	// camera within its min/maxRotation at maxSpeed (snapToZeroOnNoInput:
+	// back to straight with none), the seat neither turns nor fires, and
+	// the wire guidance (0x005e2e20: the player's active camera, slot
+	// 0x1b4(1)) steers the round where its camera looks.
+	struct ProjectileCamera {
+		physics::Vec3 position;
+		float yaw = 0, pitch = 0; // degrees, pitch up positive
+		float fov = 1.1f;         // the camera's insideFOV (radians)
+		bool takeOverInput = false;
+	};
+	bool projectileCamera(int player, ProjectileCamera& out) const;
+	// The bots' spawn test (IAIPathfindingCourier slot 0xc, *0x00b4bb94):
+	// each scattered spawn try of a bot (0x005b2200's AI flag) must pass it;
+	// the bot manager sets its navigation mesh's polygon lookup.
+	void setAiSpawnTest(std::function<bool(const physics::Vec3&)> test) { m_aiSpawnTest = std::move(test); }
 	// Joins a squad of the player's team (0 leaves), false when full;
 	// a new squad's first member leads it.
 	bool joinSquad(int player, int squad);
@@ -674,6 +698,11 @@ public:
 	// The local player's unlocks (its soldier's chosen ItemContainers,
 	// Stats/Stats.h), given when spawnPlayer adds the player.
 	std::vector<std::string> localPlayerUnlocks;
+	// The ItemContainers the local player owns (player slot 0x2a8's bit
+	// maps, +0x2b4: the stats' unlocks, which the offline game takes from
+	// the soldier's profile; the kit build 0x00570ab0 applies the
+	// replaceWithoutEquip ones by them), given with localPlayerUnlocks.
+	std::vector<std::string> localPlayerOwned;
 	// The kit (and its soldier template) for the player's next spawn.
 	void setKit(int player, const std::string& kit, const std::string& soldier);
 	int spawnChoice(int player) const;
@@ -2153,9 +2182,25 @@ private:
 	std::map<std::pair<int, int>, uint32_t> m_beacons; // (team, squad) -> beacon object
 	std::vector<int> squadMembers(int team, int squad) const;
 	bool spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& position, float& yaw);
-	bool scatterOnLeader(const Player& leader, physics::Vec3& feet, float& yaw, bool* prone = nullptr);
+	bool scatterOnLeader(const Player& leader, physics::Vec3& feet, float& yaw, bool* prone = nullptr, bool ai = false);
 	bool scatterFrom(const physics::Vec3& base, float heading, const physics::Vec3& faceTo, uint32_t ignore,
-		physics::Vec3& feet, float& yaw, bool* prone);
+		physics::Vec3& feet, float& yaw, bool* prone, bool ai = false);
+	std::function<bool(const physics::Vec3&)> m_aiSpawnTest;
+	struct ProjectileView {
+		uint32_t serial = 0;    // the round (Projectile::serial)
+		physics::Vec3 offset;   // the camera's place on the round
+		bool takeOverInput = false;
+		bool snapToZero = false;
+		physics::Vec3 minRotation, maxRotation, maxSpeed; // degrees, degrees a second
+		float yaw = 0, pitch = 0; // the camera's turn on the round (pitch up positive)
+		float lastAimPitch = NAN;
+		float fov = 1.1f;
+	};
+	std::map<int, ProjectileView> m_projectileViews; // by player
+	void startProjectileView(const Player& player, const Projectile& round, const world::ObjectTemplate& firearm);
+	// Steps the view (its round gone: ended); true while it takes the input.
+	bool stepProjectileView(Player& player, float seconds);
+	bool teamHoldsControlPoint(int team) const;
 	bool spawnPointUsable(const world::Object& point, const Player& player, bool spotClear) const;
 	bool enterOnSpawn(Player& player, world::Object& soldier, const physics::Vec3& from, float radius, uint32_t only = 0);
 	bool soldierFits(const physics::Vec3& origin, SoldierPose pose, uint32_t ignore) const;

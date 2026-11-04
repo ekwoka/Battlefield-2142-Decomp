@@ -361,7 +361,8 @@ bool PlayerCamera::insideView() const
 	}
 	game::GameWorld::PlayerInfo me;
 	if (!m_remote && m_round.playerInfo(m_round.localPlayer(), me) && me.vehicle) {
-		return m_mode == game::camera::Mode::Inside;
+		game::GameWorld::ProjectileCamera round;
+		return m_mode == game::camera::Mode::Inside || m_round.projectileCamera(m_round.localPlayer(), round);
 	}
 	return firstPerson;
 }
@@ -947,6 +948,17 @@ bool PlayerCamera::view(View& view, float aspect) const
 		return false;
 	}
 	if (me.vehicle) {
+		// The round's camera while it is the player's (useProjectileCamera,
+		// GameWorld::projectileCamera).
+		game::GameWorld::ProjectileCamera round;
+		if (!m_remote && m_round.projectileCamera(m_round.localPlayer(), round)) {
+			view.position = {round.position.x, round.position.y, round.position.z};
+			view.yaw = round.yaw * kDegrees;
+			view.pitch = round.pitch * kDegrees;
+			view.fovY = aspectFov(round.fov, aspect);
+			view.roll = 0;
+			return true;
+		}
 		if (m_mode != game::camera::Mode::Inside || !seatCamera(view)) {
 			return false;
 		}
@@ -1113,8 +1125,9 @@ bool PlayerCamera::duckingDisablesInput() const
 
 bool PlayerCamera::cockpit(Cockpit& cockpit) const
 {
-	if (!insideView()) {
-		return false;
+	game::GameWorld::ProjectileCamera round;
+	if (!insideView() || (!m_remote && m_round.projectileCamera(m_round.localPlayer(), round))) {
+		return false; // through a round's camera: no cockpit
 	}
 	SeatView seat;
 	if (!findSeatCamera(seat)) {

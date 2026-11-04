@@ -339,7 +339,7 @@ struct Range {
 			rifle->settings()["ammo.reloadTime"] = "1";
 		}
 		templates.create("GenericProjectile", "bullet")->settings()["damage"] = "1";
-		for (const char* event : {"Fire1P", "Fire3P", "Reload1P", "Reload3P", "Deploy1P", "Deploy3P"}) {
+		for (const char* event : {"Fire1P", "Fire3P", "Reload1P", "Reload3P", "Deploy1P", "Deploy3P", "TriggerClick"}) {
 			addSoundTemplate(templates, std::string("S_eu_ar_rifle_") + event);
 			addSoundTemplate(templates, std::string("S_as_ar_rifle_") + event);
 		}
@@ -388,7 +388,27 @@ TEST(GameAudio_WeaponsOfARound)
 	range.world->setPlayerInput(fire);
 	GameAudio::Camera camera;
 	camera.firstPerson = true;
-	for (int tick = 0; tick < 20; ++tick) {
+	for (int tick = 0; tick < 12; ++tick) {
+		range.world->tick(1 / 30.0f);
+		audio.tick(camera);
+	}
+	// The rifle has no ammo.autoReload: run dry it stays empty, and a new
+	// press clicks (0x005c2ee0 -> 0x005dc160, first person).
+	CHECK(range.count("S_eu_ar_rifle_Reload1P") == 0);
+	game::SoldierInput idle;
+	range.world->setPlayerInput(idle);
+	range.world->tick(1 / 30.0f);
+	range.world->setPlayerInput(fire);
+	range.world->tick(1 / 30.0f);
+	audio.tick(camera);
+	CHECK(range.count("S_eu_ar_rifle_TriggerClick") == 1);
+	game::SoldierInput reload;
+	reload.reload = true;
+	range.world->setPlayerInput(reload);
+	range.world->tick(1 / 30.0f);
+	audio.tick(camera);
+	range.world->setPlayerInput(fire);
+	for (int tick = 0; tick < 30; ++tick) {
 		range.world->tick(1 / 30.0f);
 		audio.tick(camera);
 	}
@@ -396,6 +416,9 @@ TEST(GameAudio_WeaponsOfARound)
 	// (0x005dbdc0's +0x43) until the reload stops it, and again after.
 	CHECK(range.count("S_eu_ar_rifle_Fire1P") == 2 && range.count("S_eu_ar_rifle_Fire3P") == 0);
 	CHECK(range.count("S_eu_ar_rifle_Reload1P") == 1 && audio.weaponSounds >= 4);
+	range.world->setPlayerInput(reload);
+	range.world->tick(1 / 30.0f);
+	range.world->setPlayerInput(fire);
 	// From the chase camera the same rifle is a 3P sound.
 	camera.firstPerson = false;
 	for (int tick = 0; tick < 40; ++tick) {

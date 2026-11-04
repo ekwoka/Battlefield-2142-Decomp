@@ -758,8 +758,26 @@ float gameViewDistance(const std::array<float, 4>& fog, float levelViewDistance)
 	return std::min({(fog[1] - fog[0]) * t + fog[0], levelViewDistance, 300.0f});
 }
 
+void BotManager::setNavMesh(const ai::NavMesh* mesh)
+{
+	m_navMesh = mesh;
+	m_noNavMesh = mesh == nullptr;
+	// A bot's scattered spawn tries (BF2142.exe 0x005b2200 with its AI flag,
+	// the player's slot 0x68) must also pass IAIPathfindingCourier slot 0xc
+	// (*0x00b4bb94: AIDLL 0x10054ff0, the pathfinder's polygon lookup on the
+	// map, 0x101394d4 slots 4 and 0x30): a point on the navigation mesh.
+	if (mesh) {
+		m_world.setAiSpawnTest([mesh](const physics::Vec3& at) { return mesh->findPolygon(toAi(at)) >= 0; });
+	} else {
+		m_world.setAiSpawnTest({});
+	}
+}
+
 BotManager::~BotManager()
 {
+	if (m_navMesh) {
+		m_world.setAiSpawnTest({});
+	}
 	if (m_source && m_source->manager == this) {
 		m_source->manager = nullptr;
 	}
@@ -1446,6 +1464,7 @@ void BotManager::update(float seconds)
 		}
 		updateGoal(bot, *self);
 		act(bot, *self, input, elapsed);
+		handleWeapon(bot, *self, input);
 		m_behaviourSeconds[bot.behaviour + (self->vehicle ? (self->driving ? " (driving)" : " (seated)") : "")] += elapsed;
 		if (self->vehicle && self->driving) {
 			m_driven[self->vehicle] += std::sqrt(horizontal2(self->velocity)) * elapsed;
@@ -1456,6 +1475,7 @@ void BotManager::update(float seconds)
 		bot.usedLast = input.use;
 		bot.switchedLast = input.switchSeat > 0;
 		bot.firedLast = input.fire;
+		bot.reloadedLast = input.reload;
 		bot.lastInput = input;
 		m_world.setInput(self->id, input);
 	}
@@ -2378,6 +2398,81 @@ void BotManager::flee(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 		}
 		bot.fleePlanned = false;
 		bot.planLocked = false;
+	}
+}
+
+// The weapon handling (AIDLL 0x10099b70, called by the bot's execution
+// 0x1009a4c0 after its plan ran). For a soldier (the object's flag bit 9)
+// while no plan holds the weapon (bot +0x188, vt+0x124: set by the fire
+// plan's top statement 0x100d4da0 and DefuseMines' 0x100ddc30, cleared at
+// their ends 0x100d4e20 / 0x100ddc80):
+//   - falling faster than 1 m/s, input 22 (the parachute's) is pressed
+//     (the rewrite's soldiers open theirs by themselves);
+//   - the weapon in hand (the armament's selection) busies the hands when
+//     it is Healing (type 1) and the bot's own health is below 0.95, Ammo
+//     (2) and the product over its other weapons (not Healing or Ammo, with
+//     rounds, slot 0xc not -1, and a magazine size, 0xd8) of rounds /
+//     magazine size is below 0.9, or Camouflage (6);
+//   - otherwise, with the primary (bot +0x2b4: the weapon whose select
+//     input is 16, c_PIWeaponSelect3, found at the spawn by 0x1009a070) in
+//     hand and a magazine (the weapon adaptor's slot 0x14 above 0): when its
+//     rounds in the magazine / the magazine size (slot 8(0) / 0xdc, both
+//     ints, so an integer division) is below 0.8, c_PIReload (input 32,
+//     +0x80) is pressed. The division makes that any magazine not full;
+//     the firearm's reload (0x005c0f40 through 0x005c0e70) refuses one with
+//     no magazine to spare;
+//   - with another weapon in hand, the primary's select input is pressed.
+// The rewrite presses the reload every other execution (its presses act on
+// the rising edge) and, because its plans pick their tools through the
+// same one select key, leaves the selection to the plans that use a tool
+// (Revive, the assists, repair, C4, flee) and to a plan's own press.
+void BotManager::handleWeapon(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input)
+{
+	if (self.vehicle || !self.alive || self.manDown) {
+		return;
+	}
+	const std::string& p = bot.pattern;
+	if (p.rfind("BBPFire", 0) == 0 || p == "BBPHeliFire3d" || p == "BBPDefuseMines") {
+		return; // +0x188 held
+	}
+	const std::string inHand = weaponName(self, self.inHandSlot);
+	const int type = inHand.empty() ? -1 : weaponAi(inHand).type;
+	const std::vector<GameWorld::WeaponAmmo> ammo = m_world.weaponAmmo(self.id);
+	bool busy = type == WeaponAi::Camouflage;
+	if (type == WeaponAi::Healing) {
+		busy = healthOf(self.soldier) < 0.95f;
+	} else if (type == WeaponAi::Ammo) {
+		float product = 1;
+		for (const GameWorld::WeaponAmmo& w : ammo) {
+			const int t = weaponAi(w.weapon).type;
+			if (t != WeaponAi::Healing && t != WeaponAi::Ammo && w.magSize > 0 && w.rounds != -1) {
+				product *= static_cast<float>(w.rounds) / static_cast<float>(w.magSize);
+			}
+		}
+		busy = product < 0.9f;
+	}
+	int primary = -1;
+	for (const auto& [slot, name] : self.carried) {
+		if (slot == 3) {
+			primary = slot; // c_PIWeaponSelect3 (input 16)
+		}
+	}
+	if (busy || primary < 0) {
+		return;
+	}
+	if (self.inHandSlot == primary) {
+		const GameWorld::WeaponAmmo* a = nullptr;
+		for (const GameWorld::WeaponAmmo& w : ammo) {
+			a = w.weapon == inHand ? &w : a;
+		}
+		if (a && a->magSize > 0 && static_cast<float>(a->inMag / a->magSize) < 0.8f) {
+			input.reload = !bot.reloadedLast;
+		}
+		return;
+	}
+	if (input.selectItem == 0 && p != "BBPRevive" && p != "BBPMedicAssist" && p != "BBPAmmoAssist"
+		&& p != "BBPRepairVehicle" && p != "BBPC4" && p != "BBPFlee") {
+		input.selectItem = primary;
 	}
 }
 
@@ -5275,6 +5370,25 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 		input.fire = ready && !bot.tapped;
 	}
 	bot.tapped = input.fire;
+	// An empty magazine in hand on foot is reloaded here:
+	//  - a guided weapon's own plan (0x10078570, for a weapon whose +0x6c
+	//    isn't 0; the rewrite runs this plan for it) ends its sequence with
+	//    a press of c_PIReload (BAPATrigger 0x100d3110 with button 0x20
+	//    between the constant conditions 0x101166b0 / 0x10116648);
+	//  - the simple plan (0x100777a0) has no reload. Its Trigger statements
+	//    are done after a press and release (0x1008f1e0, 0x1008ecd0: the
+	//    outputs 1/1), so the plan ends, the plan maker (0x1007cf10) builds
+	//    another at the next think, and the executions in between run the
+	//    weapon handling (0x10099b70, handleWeapon) without the fire plan's
+	//    +0x188, which reloads the primary. The rewrite's fire plan keeps
+	//    running and doesn't model those windows; it presses the reload
+	//    for whatever weapon is in hand once its magazine is empty (the
+	//    rewrite's stand-in, also for a sidearm the original would only swap
+	//    for the primary there).
+	if (!self.vehicle && self.roundsInMag == 0) {
+		input.fire = false;
+		input.reload = !bot.reloadedLast;
+	}
 	// A bot in a squad reports its target to its squad as its trigger goes
 	// down and comes up (AIDLL 0x1009a1d0, 0x1009a2a0 -> IAIGame vt+0x6c ->
 	// BF2142.exe 0x008958a0: event 0x41, type 1; 30 s and 3 s on the

@@ -47,7 +47,7 @@ struct Field {
 			{"regulatePosX", "regulatePosY", "regulatePosZ", "destroyWhenTargetLost", "positionToleranceXZ",
 				"warningDistance", "destroyDistance", "minHeightAdjustDistance", "armor.maxHitPoints", "armor.hitPoints",
 				"armor.defaultMaterial", "armor.takesEmpDamage", "physicsType", "hasMobilePhysics", "fire.roundsPerMinute",
-				"fire.projectileStartPosition", "ammo.magSize", "ammo.nrOfMags", "ammo.reloadTime", "velocity",
+				"fire.projectileStartPosition", "ammo.magSize", "ammo.nrOfMags", "ammo.reloadTime", "ammo.autoReload", "velocity",
 				"projectileTemplate", "itemIndex", "pulse.fov", "pulse.viewDistance", "pulse.revealTime", "damage",
 				"minDamage", "distToStartLoseDamage", "distToMinDamage", "timeToLive", "material", "deviation.minDev",
 				"autoControllerTemplateName"});

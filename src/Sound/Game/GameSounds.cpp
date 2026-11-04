@@ -495,6 +495,13 @@ void GameSounds::weapon(WeaponEvent event, const std::string& weaponTemplate, bo
 			playFirstPerson(prefix + "SwitchFireRate");
 		}
 		break;
+	case WeaponEvent::TriggerClick:
+		// 0x005dc160: first person only (BoltClick instead while the
+		// component's +0x41 is set; its writer isn't traced).
+		if (firstPerson) {
+			playFirstPerson(prefix + "TriggerClick");
+		}
+		break;
 	}
 }
 

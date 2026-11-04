@@ -820,6 +820,15 @@ TEST(Vehicles_SpawnIntoTheApc)
 	const uint32_t apc = g.start("eu_apc_pods", {0, 2, 30}, 2);
 	CHECK(g.world->spawnVehicles(2) == std::vector<uint32_t> {apc});
 	CHECK(g.world->spawnVehicles(1).empty());
+	// A mobile spawn point needs a control point of its team (0x005b24f0):
+	// with the garage's point lost, the APC is no spawn.
+	g.world->setControlPointTeam(2, 1);
+	CHECK(g.world->spawnVehicles(2).empty());
+	const int early = g.world->addPlayer("Early", 2, false);
+	g.world->setSpawnVehicle(early, apc);
+	game::GameWorld::PlayerInfo earlyInfo;
+	CHECK(!g.world->spawnSoldier(early) || (g.world->playerInfo(early, earlyInfo) && earlyInfo.vehicle != apc));
+	g.world->setControlPointTeam(2, 2);
 	const int me = g.world->addPlayer("Me", 2, false);
 	g.world->setSpawnVehicle(me, apc);
 	CHECK(g.world->spawnSoldier(me));
@@ -840,4 +849,97 @@ TEST(Vehicles_SpawnIntoTheApc)
 	}
 	CHECK(g.world->spawnSoldier(bot));
 	CHECK(g.world->playerInfo(bot, info) && info.vehicle == apc && info.seat > 0);
+}
+
+// The gunship's TV-guided missile (as_ag's GuidedMissileWeapon: ToggleCameraComp
+// zoom.useProjectileCamera 1, AAGuided_missile useProjectileCamera 1 with
+// AAGuided_missile_Camera takeOverInput 1, wire guided with
+// useCameraDirectionToTarget): fired, the round's camera is the gunner's
+// view (0x005b38a0, the round's +0x240) and takes the input (0x005ca2e0):
+// the mouse turns the camera within 18 degrees (snapping back without
+// input) and the guidance (0x005e2e20, the active camera) turns the
+// missile after it; the seat's gun doesn't turn. When the round goes the
+// view is the seat's again (0x005b4b00).
+TEST(Vehicles_GunshipMissileCamera)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("as_ag")) {
+		return;
+	}
+	const uint32_t v = g.start("as_ag", {0, 4, 6});
+	CHECK(g.enter(v));
+	const int me = g.world->localPlayer();
+	const auto seats = g.world->vehicleSeats(v);
+	// The gunner's seat fires its first weapon (the cannon) only: the
+	// GuidedMissileWeapon is its second, isSelectable 0. The test lets the
+	// cannon fire the guided missile as GuidedMissileWeapon does.
+	const int seat = 1;
+	CHECK(seats.size() == 2);
+	world::ObjectTemplate* cannon = seats.size() == 2 ? g.templates.find(seats[1].weapon) : nullptr;
+	CHECK(cannon != nullptr);
+	if (!cannon) {
+		return;
+	}
+	for (const char* key : {"zoom.useProjectileCamera", "target.targetSystem", "target.useCameraDirectionToTarget",
+			 "target.maxDistance", "projectileTemplate", "velocity"}) {
+		const world::ObjectTemplate* missileWeapon = g.templates.find("AS_AG_GuidedMissileWeapon");
+		const auto it = missileWeapon ? missileWeapon->settings().find(key) : cannon->settings().end();
+		if (missileWeapon && it != missileWeapon->settings().end()) {
+			cannon->settings()[key] = it->second;
+		}
+	}
+	CHECK(cannon->settings()["projectileTemplate"] == "AAGuided_missile");
+	game::SoldierInput input;
+	input.switchSeat = seat + 1;
+	g.world->setPlayerInput(input);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	g.run(4); // past the draw and the first reload
+	game::GameWorld::PlayerInfo info;
+	CHECK(g.world->playerInfo(me, info) && info.seat == seat);
+	game::GameWorld::ProjectileCamera camera;
+	CHECK(!g.world->projectileCamera(me, camera));
+	input = {};
+	input.fire = true;
+	for (int i = 0; i < 4 && !g.world->projectileCamera(me, camera); ++i) {
+		g.world->setPlayerInput(input);
+		g.world->tick(1 / 30.0f);
+	}
+	CHECK(g.world->projectileCamera(me, camera) && camera.takeOverInput);
+	const float startYaw = camera.yaw;
+	// The mouse to the right for a second: the camera turns at most 18
+	// degrees off the round, and the round comes round after it.
+	input = {};
+	input.turn = 3;
+	for (int i = 0; i < 30; ++i) {
+		g.world->setPlayerInput(input);
+		g.world->tick(1 / 30.0f);
+	}
+	CHECK(g.world->projectileCamera(me, camera));
+	const auto& rounds = g.world->projectiles();
+	float roundYaw = 0;
+	for (const auto& p : rounds) {
+		if (p.player == me) {
+			roundYaw = std::atan2(p.velocity.x, p.velocity.z) * 57.29578f;
+		}
+	}
+	std::fprintf(stderr, "  camera yaw %.1f -> %.1f, the round's %.1f\n", startYaw, camera.yaw, roundYaw);
+	CHECK(std::remainder(camera.yaw - roundYaw, 360.0f) > 0 && std::remainder(camera.yaw - roundYaw, 360.0f) <= 18.01f);
+	CHECK(std::remainder(roundYaw - startYaw, 360.0f) > 1);
+	// No input: the camera snaps straight (snapToZeroOnNoInput).
+	g.world->setPlayerInput({});
+	g.world->tick(1 / 30.0f);
+	CHECK(g.world->projectileCamera(me, camera));
+	for (const auto& p : g.world->projectiles()) {
+		if (p.player == me) {
+			roundYaw = std::atan2(p.velocity.x, p.velocity.z) * 57.29578f;
+		}
+	}
+	CHECK(std::fabs(std::remainder(camera.yaw - roundYaw, 360.0f)) < 1);
+	// The round's life (5 s) runs out: the seat's camera again.
+	g.run(6);
+	CHECK(!g.world->projectileCamera(me, camera));
 }

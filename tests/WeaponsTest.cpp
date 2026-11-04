@@ -29,6 +29,7 @@ TEST(Weapons_FireRateAndReload)
 {
 	game::FireArmSettings settings; // 600 rounds per minute, 30 rounds, 5 mags, 2 s reload
 	settings.magSize = 4;
+	settings.autoReload = true; // ammo.autoReload: the reload starts by itself
 	game::FireArm arm(settings);
 	int shots = 0;
 	for (int tick = 0; tick < 30; ++tick) {
@@ -43,6 +44,40 @@ TEST(Weapons_FireRateAndReload)
 		shots += arm.tick(1 / 30.0f, true) ? 1 : 0;
 	}
 	CHECK(shots > 4 && arm.magsLeft() == 4);
+}
+
+// Without ammo.autoReload (the rifles, handguns and launchers) an empty
+// magazine stays empty (0x005f45e0 sets +0x44 only with autoReload): each
+// press clicks (0x005c2ee0 -> 0x005dc160) until c_PIReload starts the
+// reload (the firearm's action 10, 0x005c0f40).
+TEST(Weapons_ManualReloadOnly)
+{
+	game::FireArmSettings settings;
+	settings.magSize = 3;
+	settings.nrOfMags = 2;
+	settings.reloadTime = 1;
+	settings.roundsPerMinute = 1800;
+	game::FireArm gun(settings);
+	int rounds = 0;
+	for (int i = 0; i < 90; ++i) {
+		rounds += gun.tick(1 / 30.0f, true) ? 1 : 0;
+	}
+	CHECK(rounds == 3 && gun.roundsInMag() == 0 && !gun.reloading() && gun.magsLeft() == 2);
+	CHECK(!gun.takeClick()); // held since before it ran dry: no new press
+	gun.tick(1 / 30.0f, false);
+	CHECK(!gun.tick(1 / 30.0f, true) && gun.takeClick() && !gun.takeClick());
+	CHECK(gun.startReload() && gun.reloading());
+	for (int i = 0; i < 31; ++i) {
+		gun.tick(1 / 30.0f, false);
+	}
+	CHECK(!gun.reloading() && gun.roundsInMag() == 3 && gun.magsLeft() == 1);
+	// With autoReload the same gun reloads as it runs dry.
+	settings.autoReload = true;
+	game::FireArm automatic(settings);
+	for (int i = 0; i < 3; ++i) {
+		automatic.tick(1 / 30.0f, true);
+	}
+	CHECK(automatic.roundsInMag() == 0 && automatic.reloading());
 }
 
 TEST(Weapons_ProjectilesFall)
@@ -107,6 +142,7 @@ TEST(Weapons_ReloadWithoutPlayer)
 	settings.nrOfMags = 2;
 	settings.reloadTime = 1;
 	settings.roundsPerMinute = 1800;
+	settings.autoReload = true;
 	for (const bool runs : {true, false}) {
 		game::FireArm gun(settings);
 		int rounds = 0;
@@ -136,6 +172,7 @@ TEST(Weapons_BusyUntilButtonRelease)
 	settings.reloadTime = 0.5f;
 	settings.roundsPerMinute = 600;
 	settings.busyUntilButtonRelease = true;
+	settings.autoReload = true;
 	game::FireArm gun(settings);
 	int rounds = 0;
 	for (int i = 0; i < 60; ++i) { // two seconds held
@@ -909,6 +946,7 @@ TEST(Weapons_DrawDelayMagazineSwapAndToggle)
 	smg.nrOfMags = 3;
 	smg.reloadTime = 2;
 	smg.delayToUseTicks = 35; // eu_smg's 1.166 s
+	smg.autoReload = true;
 	game::FireArm a(smg);
 	a.enable(true);
 	CHECK(a.readying());

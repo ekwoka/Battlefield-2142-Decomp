@@ -508,10 +508,17 @@ TEST(GameWorld_GadgetsHealAndResupply)
 	spray.fire = true;
 	spray.aimPitch = 45;
 	range.world->setPlayerInput(spray);
-	for (int i = 0; i < 30 * 6 && range.world->playerWeapon()->magsLeft() == magsBefore; ++i) {
+	for (int i = 0; i < 30 * 6 && range.world->playerWeapon()->roundsInMag() > 0; ++i) {
 		range.world->tick(1 / 30.0f);
 	}
 	range.world->setPlayerInput({});
+	// The rifle has no ammo.autoReload: c_PIReload takes the next magazine.
+	game::SoldierInput reload;
+	reload.reload = true;
+	press(reload);
+	for (int i = 0; i < 30 * 3 && range.world->playerWeapon()->reloading(); ++i) {
+		range.world->tick(1 / 30.0f);
+	}
 	CHECK(range.world->playerWeapon()->magsLeft() == magsBefore - 1);
 	take.selectItem = 5;
 	press(take);
@@ -1034,6 +1041,18 @@ TEST(GameWorld_SquadsLeadersAndBeacons)
 	std::printf("  spawned on the leader %.2f m off, facing %.0f\n", off, info.yaw);
 	CHECK(off >= 1.5f - 1e-3f && off <= 9 + 1e-3f && std::abs(info.position.y) < 0.05f);
 	CHECK(std::abs(std::remainder(info.yaw - std::atan2(-dx, -dz) * 57.29578f, 360.0f)) < 1);
+	// A bot's tries must also be on the navigation mesh (0x005b2200's AI
+	// flag -> IAIPathfindingCourier slot 0xc): with only the ground east of
+	// the leader on it the bot lands there; with none it can't spawn.
+	range.world->setAiSpawnTest([](const physics::Vec3& at) { return at.x > 30; });
+	range.world->setSpawnChoice(eu[3], game::GameWorld::kSpawnOnLeader);
+	CHECK(range.world->spawnSoldier(eu[3]));
+	range.world->playerInfo(eu[3], info);
+	CHECK(info.position.x > 30);
+	range.world->setAiSpawnTest([](const physics::Vec3&) { return false; });
+	range.world->setSpawnChoice(eu[4], game::GameWorld::kSpawnOnLeader);
+	CHECK(!range.world->spawnSoldier(eu[4]));
+	range.world->setAiSpawnTest({});
 
 	// The leader sets down a beacon (slot 8) at (30, 31); a member spawns there.
 	game::SoldierInput input;
@@ -2388,6 +2407,19 @@ TEST(GameWorld_FirearmReplacementAndOwnedUnlocks)
 	CHECK(range.world->spawnSoldier(har2));
 	std::fprintf(stderr, "  %s\n", carried(har2).c_str());
 	CHECK(carried(har2) == "3:unl_har_rifle 5:unl_har_shotgun 7:unl_grenade_frag ");
+	// The local player's owned set comes from its profile
+	// (localPlayerOwned, main.cpp: the soldier's stats unlocks), apart from
+	// the chosen ones the kit menu equips.
+	range.world->localPlayerUnlocks = {};
+	range.world->localPlayerOwned = {"UnlockPlayer0"};
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int local = range.world->localPlayer();
+	range.world->setKit(local, "EU_Assault", "us_light_soldier");
+	range.world->setHitPoints(range.world->playerObject(), 0);
+	for (int i = 0; i < 30 * 30 && !range.world->spawnPlayer(2); ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(carried(local) == "3:eu_ar_rifle 5:as_ar_shotgun 7:unl_grenade_frag ");
 }
 
 // altItemIndex (template +0x2e4): the kit's add-item (0x00589510) puts an

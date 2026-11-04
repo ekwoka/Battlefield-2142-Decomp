@@ -643,7 +643,12 @@ are 0 with a maxSpeed, the angles kept at `+0x1e4`. About 90 shipped
 bundles (EU_TANK_Cupola_Gun 0/0.5/0, EU_FAV_MachineGun_Base 0.7/0/0,
 EU_APC_base1 0.5/0/0, the seat cameras). The rewrite does the gunners'
 yaw bundle's yaw (`SeatLayout::ignoreParentYaw`, `stepGunner`); the
-pitch (the rewrite's gun pitch is the aim's) and the seat cameras' aren't.
+pitch (the rewrite's gun pitch is the aim's) and the seat cameras' aren't:
+the gunner's pitch is set each tick from the look (`input.aimPitch`, in
+the hull's frame) and a seat camera's angles from the mouse, so taking
+back the hull's pitch needs an offset kept in the look itself (the
+camera's and the aim's, in main.cpp and PlayerCamera), not a turn of the
+bundle.
 
 **Not rewritten among the vehicles' details:** `boneIndex` (SimpleObject
 template `+0x60`, slots `0xc8` / `0xcc`): the object's skeleton helper
@@ -653,7 +658,14 @@ matrix to that bone of the bundle animation's skeleton each update
 (`0x0063d470` → slot `0xe8`), the walkers' legs and the deployables'
 moving parts (spawn_beacon's covers, the hubs, the sentry gun); the
 rewrite runs the walkers' bundleAnimationSystem but loads no
-bundleSkeleton. `autoUseAbility` (PlayerControlObject `+0x46a`, the 0xc4c5
+bundleSkeleton. The update (`0x0063d470`) runs the system
+(`0x0063d2f0`), then gives each kept part (`+0xc` list) the record of its
+bone in the skeleton instance (`+0x24`'s `+4`, 0x48 bytes a bone) through
+the part's slot `0xe8` (its local matrix); `0x0063d5e0` keeps a part
+whose boneIndex (template slot `0xc8`) isn't −1 and walks children with
+`+0x44` empty. Still not rewritten: it needs the bundle skeletons loaded
+for the vehicles and the parts' matrices overridden by the pose in
+`partTransforms`. `autoUseAbility` (PlayerControlObject `+0x46a`, the 0xc4c5
 interface's slot `0x13c` `0x005c6bd0`): its only reader is the help
 manager's tick (`0x00646cb0`, case `0x2e`, at `0x00646deb`): a vehicle's
 help popup shows only with it; it uses no ability (the HUD's).
@@ -1160,12 +1172,40 @@ gunship and hover bike missile seats' camera 11 (`SeatLayout::startCameraId`,
 `PlayerCamera::findSeatCamera`; a duck's camera 1 still wins). Event 7
 (`0x005db2f0`) toggles to changeCameraId and back (no shipped weapon sets
 one); without a changeCameraId it can always fire (`0x005daee0`), so
-allowUntoggledFire 0 changes nothing for the shipped ones. Not rewritten:
-useProjectileCamera and the Camera's takeOverInput (`+0x42c`, slot `0x88`
-of vtable `0x00979a50`: the PlayerControlObject's input `0x005ca2e0`
-hands the input to the active camera's root, the TV-guided missile, and
-stops), which need the missile's own camera (as_ag's
-`AAGuided_missile`, the hover bike's `as_bike_TV_missile`).
+allowUntoggledFire 0 changes nothing for the shipped ones.
+
+**The projectile camera** (`useProjectileCamera`, `takeOverInput`). A
+round whose GenericProjectile template has `useProjectileCamera`
+(`+0x32b`, executor `0x004f106a`; AAGuided_missile, TVGuided_missile,
+mech_ATmissile, as_bike_TV_missile) keeps its child Camera (class
+`0x9472`, interface `0xc367`) at `+0x240` when it starts (`0x005b38a0`);
+fired by a weapon with ToggleCameraComp's `zoom.useProjectileCamera`
+(as_ag's and us_ag's GuidedMissileWeapon, the hover bike's missile
+launcher) that camera is the player's view until the round goes, when
+`0x005b4b00` hands the view back (slot `0x34`). The Camera's
+`takeOverInput` (`+0x42c`, executor `0x005276f0`, vtable `0x00979a50`
+slot `0x88`): the PlayerControlObject's input (`0x005ca2e0`) goes to the
+active camera's root, the missile, and stops there: the mouse turns the
+camera as a rotational bundle (AAGuided_missile_Camera: min/maxRotation
+±18°, maxSpeed 50°/s, snapToZeroOnNoInput, inputToYaw PIMouseLookX,
+inputToPitch PIMouseLookY), and the seat's gun neither turns nor fires.
+The wire guidance takes the player's active camera (`0x005e2e20`: player
+slot `0x1b4(1)`, its `0xc378` matrix and position), so the steering point
+o + f × (max(0, (m − o)·f) + look-ahead) lies ahead of the round's own
+camera: the round flies where its camera looks. While the view is a
+round's the renderer's TVEffect pass runs (RendDX9 `0x10048f80`,
+PostProduction's `TVEffect`: `PostEffects::tv`). Rewritten in
+`GameWorld::startProjectileView` / `stepProjectileView` /
+`projectileCamera` (the seat's launch, `stepGunner`, the wire guidance),
+`PlayerCamera::view` (the view, no cockpit) and main.cpp's postEffects.
+The shipped launchers are their seats' second weapons (itemIndex 2,
+`isSelectable 0` on as_ag's), and the rewrite's seats fire their first
+firearm only, so in the shipped vehicles the projectile camera waits for
+the seats' weapon switching; a seat whose fired weapon has the flags gets
+the whole chain (`Vehicles_GunshipMissileCamera`). `targetObjectTemplate`
+(LPTargetComp `+0x88`, UniqueTarget) is the object the guidance places at
+the steering point for a TTUnique seeker; the rewrite steers the round at
+the point itself, which is where the object would be.
 
 **Not read.** The Camera's bounce (bounceLength `+0x3d8`,
 bounceSensitivity `+0x3dc`, bounceStrength `+0x3e0`, bounceDamping
@@ -6725,10 +6765,12 @@ camera o and forward f, m the missile; guidance goes beyond
 `target.maxDistance` or with the line o–m cut, unless
 `dontLooseGuidanceOnObstruction` (`+0xb8`); `disableGuidanceOnReload`
 (`+0xb1`, as_av / eu_av) lets the missile go unguided at the reload's
-start (`0x005c0f40` → slot `0x48`, `0x005e23b0`). Not rewritten: guidance
-passing to a later missile of the weapon after an obstruction, and
-`targetObjectTemplate` (`+0x88`, the object the guidance moves: the
-rewrite keeps the point). The
+start (`0x005c0f40` → slot `0x48`, `0x005e23b0`). The component guides
+one round, its last (`+0x1c`, slot `0xbc`, which `0x005e2e20` steers): a
+new round of the gun takes the guidance over and an earlier one flies on
+unguided (`GameWorld::stepGunner`). With a projectile camera the camera
+is the round's own (see **The projectile camera**). `targetObjectTemplate`
+(`+0x88`, the object the guidance moves): the rewrite keeps the point. The
 HUD's object markers (`Bf2ObjectMarkerNode`) show the state.
 
 - **Mines:** a mine fires when an enemy faster than
@@ -7034,8 +7076,12 @@ item, or its container's level held): the HAR's and LAR's shotgun and
 rocket add-ons replace as_ar_shotgun / as_ar_rocket by themselves once
 the HAR or LAR is chosen; `isRetailReplacement` (`+0x2e1`) needs the
 online stats' flag (player `+0x403`), never set offline; then each owned
-container's Ability (`0x005706b0`). The owned set isn't fed from the
-profile yet (`main.cpp` gives the chosen ones only).
+container's Ability (`0x005706b0`). The owned set is the player's bit
+maps (player `+0x2b4`, read by slot `0x2a8` `0x00597760`, written by slot
+`0x2b0` `0x00597850`, which the field unlocks also set, `0x004baaf0`):
+offline the soldier profile's unlocks (`main.cpp`: `localPlayerOwned`,
+given with `localPlayerUnlocks` from `Stats::containersFor`); the kit
+menu's equip changes only the chosen set.
 
 **Drawing, magazines and the kit's slots.** The firearm's main object
 reaches its template at `+0x220` (its `0x94c0` interface at `+0x1a0`, at
@@ -7072,9 +7118,23 @@ reloadWithoutPlayer 1, allowReplenish 1, the rest 0.
   network flags, `0x005c3120`), `damageOwner` (GenericProjectile `+0x32c`:
   only its executor, the constructor and the template's save, which writes
   it as "localPredictOnClient").
-- Not rewritten: retail reloads by itself only with `ammo.autoReload` (111
-  shipped; the rifles leave it 0) once the firearm isn't busy; the rewrite
-  reloads every empty magazine.
+- **Reloading.** The round's ammo use (`0x005f45e0`, slot `0x38`) marks an
+  emptied magazine (`+0x41`) and, only with `ammo.autoReload` (`+0x28`;
+  111 shipped: the grenades, mines, tools and the vehicles' guns; the
+  rifles, handguns and launchers leave it 0), its reload (`+0x44`), which
+  starts after the round (`0x005f4a40`); the ammo's update (`0x005f3c40`)
+  with autoReload also asks for one (`+0x43`, taken by the firearm's
+  update `0x005c58a0` through slot `0xc8` `0x005f39f0` → `0x005c0f40`)
+  whenever the magazine is empty, the firearm isn't busy and a magazine
+  can be taken (`0x005f4140`). Without autoReload nothing reloads but
+  c_PIReload (the firearm's action 10); a press of the trigger on the
+  empty magazine is refused by the ammo's slot `0x34` (`0x005f37c0`) and
+  clicks (`0x005c2ee0` → the sound component's `0x005dc160`:
+  TriggerClick in first person, BoltClick while its `+0x41` is set, whose
+  writer isn't traced). `FireArm::fire`, `takeClick`; a joined client's
+  copy of others' firing waits for the server's reload
+  (`reloadRemoteSoldier`) unless autoReload. The bots' reloads: see
+  Bots, Fire.
 
 **The use key's pick-up** (`0x004bce30`, from `0x004bda00` at
 `0x4be038`): the nearest object within 1.3 m (`*0x009fe420`) and in front
@@ -8156,7 +8216,13 @@ state, input, kills, deaths and team kills.
   `setEnterOnSpawn 1`) is a spawn group of its own (net ids from `0xc0`,
   SpawnManager `0x00635080`); `GameWorld::setSpawnVehicle` picks a team
   vehicle carrying one (`spawnVehicles` lists them) and the soldier
-  starts in its nearest free seat. The spawn menu doesn't list them yet.
+  starts in its nearest free seat. A mobile point (spawn group `0xc0` and
+  on, slot `0x30`) is usable only while its player's team holds a control
+  point: the point's test (`0x005b24f0`) walks the game logic's control
+  points (slot `0x180`) for one of the player's team (its object's
+  `+0x184` slot `0x1c`), refusing the point without one (the flag
+  `*0x00a6b0c4` it also asks is never written: 0). `GameWorld::
+  teamHoldsControlPoint`, in `spawnSoldier` and `spawnVehicles`.
 - **Hits:** soldiers are hit through their bones' capsules. In the soldier
   template, `setSkeletonCollisionBone bone material offset radius length`
   (`0x004deb29` → `0x005c0930` → `0x008b7db0` → `0x008b7d40`: 0x24-byte
@@ -8309,9 +8375,13 @@ stack of spheres from the lowest centre (origin − 1 + 0.25) up, five to
 1.7 m standing, three to 1.4 m crouched (`*0x00a84798`) and one to 0.8 m
 prone (`*0x00a84778`), clear of the static meshes and vehicles. Standing,
 else prone (the spawn point's `+0x18a`, `PlayerInfo::spawnedProne`), else
-the next try. With its AI flag each try must also pass
-IAIPathfindingCourier slot `0xc` (`*0x00b4bb94`, the navmesh; not
-rewritten). When no try fits (0, or a spot at −4000), ServerGameLogic's
+the next try. With its AI flag (the server's spawn `0x004bef90` passes
+the player's slot `0x68`, a bot; `0x005b2200`'s third argument) each try
+that fits must also pass IAIPathfindingCourier slot `0xc`
+(`*0x00b4bb94`: AIDLL's courier, vtable `0x10114b50`, `0x10054ff0`: the
+pathfinder's polygon lookup on the map, `*0x101394d4` slots 4 and
+`0x30`), else the next try is taken: the bot manager hands the infantry
+mesh's lookup to `GameWorld::setAiSpawnTest`. When no try fits (0, or a spot at −4000), ServerGameLogic's
 caller (`0x004bef90` at `0x4bf36c`) refuses the spawn (player slot
 `0x188(0)`): the member stays dead and asks again
 (`GameWorld::spawnAtSquad`).
@@ -9082,6 +9152,20 @@ rest walk to the nearest pod array and drop (the arrays'
 titan_pod_array_1_ai template makes them vehicles to the AI). Boarding the
 enemy Titan and attacking its consoles and core has no AI to rewrite.
 
+Why nobody fires on Suez_Canal gpm_ti 48 (15 bots, 300 s: 0 rounds, the
+silos left neutral), and why retail is the same: the level load
+(`0x004d3450`) runs `GameModes/%s/%d/AI/StrategicAreas.ai`, and no shipped
+gpm_ti level has one (of the 25 with a gpm_ti GamePlayObjects.con only the
+mod level Close_Encounter does), so AIDLL's strategy (`0x100a2dd0`) has
+no areas to order bots to; the only navigation mesh (`AIPathFinding`) is
+the 16-player area's (on Suez_Canal x −650..250, z −225..150), which
+leaves the PAC Titan (601/152/−242), its outposts' spawns and three of
+the five silos off the mesh, where bots stand. The rewrite's own areas
+(one per control point, `ensureAreas`) send the bots towards the Titans'
+uncapturable points, off the mesh too; the sides don't meet. Retail bots
+would stand at their spawns and Titans the same way, so this is left as
+retail has it.
+
 **The HUD** (main.cpp's update): GameMode 1 (the Titan HUD shows for 1 or
 3), FriendlyTickets / EnemyTickets for the bars, Friendly/EnemyStrategicObject1–4Show
 (a console destroyed) and 0Show (the Titan gone); the variables are the HUD
@@ -9417,6 +9501,38 @@ The urgencies:
   70 → 79 (hit rate 4.5 → 5.7 %). The default seed alone shows 2,879 →
   571, which is the runs' chaos (one round's sd is about 500 rounds), not
   the rebuild.
+- **Reloading** (the rifles, handguns and launchers have no
+  `ammo.autoReload`, see Kits): the bot's execution (`0x1009a4c0`) runs
+  the weapon handling (`0x10099b70`) after its plan. For a soldier while
+  no plan holds the weapon (bot `+0x188`, vt `0x124`: set by the fire
+  plan's top statement `0x100d4da0` and DefuseMines' `0x100ddc30`,
+  cleared at their ends `0x100d4e20` / `0x100ddc80`) and the weapon in
+  hand not busying the hands (Healing with the bot's health under 0.95,
+  Ammo with the product of its other weapons' rounds / magazine size
+  under 0.9, Camouflage): with the primary in hand (bot `+0x2b4`, set at
+  the spawn by `0x1009a070`: the weapon whose select input is 16,
+  c_PIWeaponSelect3) and a magazine (adaptor slot `0x14`, vtable
+  `0x10118b44`) it presses c_PIReload (input 32, `+0x80`) when the
+  rounds in the magazine / its size (slot 8(0) / `0xdc`, ints: an integer
+  division) is under 0.8, so whenever it isn't full; with another weapon
+  in hand it presses the primary's select input. (Falling faster than
+  1 m/s it also presses input 22.) The guided weapons' plan
+  (`0x10078570`) ends with a c_PIReload press (BAPATrigger `0x100d3110`,
+  button `0x20`, between the constant conditions `0x101166b0` /
+  `0x10116648`); the simple plan (`0x100777a0`) has none, but its Trigger
+  statements are done after a press and release (`0x1008f1e0`,
+  `0x1008ecd0`), so the plan ends and the executions until the next
+  think run the weapon handling without `+0x188`. `BotManager::
+  handleWeapon` (presses every other execution; the selection left to
+  the plans that use a tool and to a plan's own press). The rewrite's
+  fire plan doesn't end between its taps, so it presses the reload
+  itself once the magazine in hand is empty (its stand-in for those
+  windows, also for a sidearm). Measured (15 bots, 300 s): Cerbere_Landing
+  gpm_sp 16 over 32 seeds, kills 16.75 ± 0.64 → 15.97 ± 0.66, rounds
+  1,207 → 1,165, hits 74.9 → 72.9, CPU 4.86 → 4.83 s; minsk_coop
+  gpm_coop 32 (31 bots, 12 seeds) kills 5.17 → 5.50, rounds 1,861 →
+  1,593, CPU 12.3 → 12.8 s. Without the stand-in (the fire plan holding an
+  empty SMG or sniper rifle until it ends) Cerbere's kills fell to 13.1.
 - **Firing pose:** taken when standing still, at most once a second, with
   no fire for 0.8 s after (Trigger 0x1008f1e0).
 - **Tap or hold** (0x100777a0): TriggerContinously (0x1008ecd0, held while
