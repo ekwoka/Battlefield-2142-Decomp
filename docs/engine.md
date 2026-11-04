@@ -563,6 +563,21 @@ start the EffectBundles whose startOnEffects has bit 9 + N
 (`0x0061a4e0`): effect 1 the right foot's bundle (1024), 2 the left's
 (2048), 3 and 4 the walk cycle's sound (`e_sfx_MECH_Walk_Cycle`, 12288)
 (`GameWorld::takeObjectEffectEvents`, `ObjectEffects::ObjectState::effects`).
+The mechs' bundles carry no other events (effect:1..4 in every walk and
+turn bundle of `AnimationSystem.inc`).
+
+*No foot planting.* The feet meet the ground only through the clips: the
+five-clip slope bundles (level, up20, down20, side±20) that SlopeTrigger
+leans by the smoothed slope (above, "Animation systems"). Nothing plants
+them: the MechLegs node's leg probes are dead code (above), and the
+bundle skeleton's update (`0x0063d470`) has one more branch, a physical
+pose of the bundle's skeleton (`0x0063cbd0` → `0x008adc00`, run by
+`0x008acde0` in place of the system), which runs only while the global
+`*0x00a754fc` is set, and `0x00a754fc` and its neighbour `0x00a75500` (the
+other branch's switch, `0x008b6f40`) are written only by their static
+initialisers (`0x008eadf0` / `0x008eae00`, both 0; no other reference in
+the binary). So retail's walkers have no IK on their feet, and neither
+does the rewrite.
 
 **The legs against objects** (the MechLegs response's slot `0x24`,
 `0x006cec60`, for a pair the dispatch met, unless the other's response is
@@ -1681,7 +1696,8 @@ unless the template's `+0x3f4` is below 0. Shipped: `e_muzz_eu_av_reload`
 `Left` (1024, 2048: effects 1 and 2 of their walk). The rewrite starts a
 held weapon's bundles from its animation's effect events
 (`GameWorld::startEffectsOn`; one-shot, so the stop mask has nothing to
-end); the mechs' legs aren't animated, so theirs never fire.
+end); the walkers' own animation system fires theirs (see "The walker's
+own animation system": `takeObjectEffectEvents`).
 
 **Camera springs.** `animationSystem.cameraSpring.use 1` gives a system a
 spring (`0x008b9670`, 0x50 bytes, `0x008bbfe0`): amplitude, zoomDamping,
@@ -2310,8 +2326,15 @@ clamp(|the camera's height over the ground| / 1 (+0x2c), 0.4 (+0x30), 1),
 the near radius with the type factor; within it the cross-fade (both
 meshes blended, `DrawItem::fade`) and lodTimer's easing per tree; beyond it
 the `_lod` mesh with its cell's fades (the nearest corner's 30% and the
-near-cell fade). Not done: the doubling of both alphas while the renderer's
-`0x1000b500` / +0x50a hold (not traced). The overgrowth shadow map
+near-cell fade). The doubling of both alphas while the renderer's
+`0x1000b500` / +0x50a hold is alpha to coverage: `+0x50a` is set at the
+device's start (`0x1000aee0`) when CheckDeviceFormat takes the FourCC
+`ATOC` (NVIDIA's) or, on a card that reports it, `A2M1` (ATI's), and
+`0x1000b500` is whether antialiasing is in effect (`+0x508`: `0x1000b550`
+draws a probe with D3DRS_MULTISAMPLEANTIALIAS on and no multisample
+type and finds it antialiased, a driver forcing it; or a multisample
+type is chosen, `+0xc0`). The rewrite draws without multisampling, so
+the original's path without both: no doubling. The overgrowth shadow map
 (`OvergrowthShadowmap.raw`, +0x84, read by the preLoad `0x1008c7e0`) is
 the editor's: its only reader, `0x1008acd0`, copies it as grey into the
 terrain's textures when the terrain renderer's style is 6 (vtable
@@ -2336,7 +2359,7 @@ affectLightmappedObjects `+0x6d`, affectingType `+0x90`,
 attenuationRange1 / 2 `+0xa0` / `+0xa4`, color `+0xa8`, coneAngle1 / 2
 `+0xd0` / `+0xd4`, flicker `+0xe4` clamped to 0..1 by `0x00616cf0`) are
 read by `effects::lightSourceOf`. Enabled Point and Spot lights are lights
-of `color × intensity`, full up to attenuationRange1, gone at
+of `color` as it is, full up to attenuationRange1, gone at
 attenuationRange2 (the original reads a radial attenuation table over
 distance / range, LightManager_r3x0.fx; a linear ramp here), added to the
 mesh and terrain lighting (`N·L`; which mesh takes which: below). They
@@ -2416,11 +2439,68 @@ become the template's × f; the colour stays. Static meshes are lit with that
 range, bundled and skinned meshes with the template's. Rewritten:
 `collectPointLights` (the list, the placed static lights dropped, the
 flicker), `drawInstance` / `applyMeshLights` (each mesh's pick) and
-`mesh.frag`'s `meshPointLights`; the terrain, roads and particles keep the
-eight nearest the camera (maxLightsPerTerrainPatch's reader isn't traced).
-Not done: projector textures, the lights' shadows, the template's
-speccolor (the skinned meshes' specular takes the light's colour) and
-supportsEmitter in the bundled filter.
+`mesh.frag`'s `meshPointLights`; the roads and particles keep the eight
+nearest the camera.
+
+*The filter's bits and the template's other fields* (`MeshLights.h`). The
+filter (`0x100a7f00`; a must-hold and a must-not mask) asks the light
+object (slot 0x1d0, enabled) and the template (the light's `+0x160`; the
+template's getters sit 8 bytes past the writer's offsets): 1 enabled, 8
+isDynamic (slot 0xf8), 4 / 0x10 castsStaticShadow (0x100), 0x20
+castsDynamicShadow (0x108), 0x80 selfLights (0x110), 0x40 selfShadows
+(0x118), 0x400..0x2000 lightType 0..3 (Directional, Point, Spot; 0xf0),
+0x4000 supportsGlow (0x130), 0x8000 supportsEmitter (0x138), 0x10000
+affectLightmappedObjects (0x140). Its callers ask 0x1b09 / 0x11b09
+(static meshes), 0x8b09 (bundled and skinned meshes: supportsEmitter),
+0x909 (the terrain) and 0xb09 (the undergrowth), so the shadow, selfLights
+and glow bits are never asked. The template's constructor (`0x00616d60`)
+makes isDynamic 0 and supportsEmitter, affectLightmappedObjects,
+selfLights, supportsPerVertex and supportsGlow 1, both colours white; all
+83 shipped LightSources set supportsEmitter 1 and isDynamic themselves.
+The colour: every in-game reader takes the template's (slot 0x168: the
+three mesh kinds' Light records, `0x100bdb00` / `0x100c3880` /
+`0x10162070`) or the light object's copy of it (`+0x184`, slot 0x1a0:
+the terrain, the undergrowth), unscaled. `intensity` (template slot
+0x1e8) is read in RendDX9 only by the lightmap generator (`0x1006a310`,
+with objectShadows 0x1d0, shadowIntensity 0x1d8 and softness 0x1e0), so
+in game a light is its colour (the rewrite multiplied it by intensity
+before: the shipped dynamic lights' 0.5–0.7 dimmed them). speccolor
+(template slot 0x170, the light object's `+0x190`, slot 0x1a8) fills
+each Light record's specularColor (`+0x28`); only RaShaderSM reads it
+(its normal-mapped point-light pass: specular × specularColor), so the
+skinned meshes' specular takes the template's speccolor (a light of
+colour 0 with a speccolor, as the Titans' `*_titan_specular`, only gleams
+on them; one of speccolor 0 never shines on them). The light object's slot
+0x1a8 is otherwise read only for the sun (`0x1014adf0`, the manager's
+`+0x784`); HDRIntensity (light slot 0x1b0, `+0x19c`) has no caller in
+RendDX9; supportsPerVertex / PerPixel (template slots 0x120 / 0x128) none
+either.
+
+*The terrain's and the undergrowth's lights.* The terrain (`0x100b4d80`)
+lists every light passing 0x909 (dynamic Point lights, lightmapped or
+not; manager slot 0x18, `0x100a9630`) and, unless the device's mode is 4
+(`0x1000aed0`), draws each as one more additive pass over the patches
+its sphere meets (`0x100a03b0` with the light's radius, slot 0x8c;
+`0x1014e080`: Hi_Terrain's pass 13, PerPixelPointlight, or pass 1,
+pointlight, ONE/ONE): POINTLIGHT (`+0x244`) = (position, 1 / range², the
+light object's colour) with range its slot 0x198, and
+TerrainShader's calcPVPointTerrain × 0.5 = colour × N·L × saturate(1 −
+d²/R²) × 0.5, added to the lit terrain (not times its colour). The
+undergrowth (`0x1010e270`) asks, per patch, for the nearest 4 within reach
+of the patch's bounding sphere (the box of its square and its plants'
+heights, `0x1010a9a0` / `0x101a7b10`) passing 0xb09 (manager slot 0x1c),
+sets PointLightPosAtten / PointLightColor and picks technique
+`t0_l<n>`: Undergrowth.fx adds saturate(1 − d²/R²) × colour per light (no
+N·L) to the sun's term, (lightmap.g × sun × shadow + points) × 2 + GI.
+`lightManager.maxLightsPerTerrainPatch` (`+0xac`, 7 from the constructor)
+limits neither: its getter (slot 0x78) is called only by the renderer's
+state save and restore (`0x10028760` / `0x10028590`, which keep min(n,
+1)); the undergrowth's 4 is a literal. Rewritten: `collectPointLights`
+(`m_terrainLights`: the listed Point lights, the shader's 8 nearest the
+camera, where the original has no cap), `applyTerrainLights`,
+`terrain.frag` (after the fog, as the passes go over the finished
+terrain), `pickUndergrowthLights` / `applyUndergrowthLights` and
+`undergrowth.frag` (per pixel where the original lights per vertex).
 
 **Non-screen-aligned particles and trails.** A
 NonScreenAlignedParticleSystem's particles are squares lying across the
@@ -2480,7 +2560,11 @@ hasResponsePhysics; DynamicBundle (vehicles) sets 4 by default
 (`0x0060fea0`). So every object with collision physics and neither point
 physics gets its own set; the rewrite's rule (every body a decal lands
 on) is that for the bodies a projectile can hit. Rewritten in
-`EffectManager::spawnDecal`, `decal.vert/.frag`.
+`EffectManager::spawnDecal`, `decal.vert/.frag`. The Decal template's
+`randomColorIntensity` (its executor `0x0052d142` → the template's
+RendDX9 half `+0x6c`, slots 0x18 / 0x1c) and `isStatic` (`0x0052cd51`)
+are set to 0 by all ten shipped decal templates (`Objects/Effects/decals`),
+so they change nothing for the shipped content.
 
 *Clipping.* A set's add (vtable `0x101da498` slot 4, `0x10166410`; the exe's
 `0x005a36d0` passes the hit's matrix, the template, a scale, the mesh and the
@@ -2665,8 +2749,14 @@ the gunships' and transports' rotor Engines (RadialDir 0/0/−1, 20, 20,
 10) and some explosions (Point). The rewrite collects them from the
 world objects' template trees (`ObjectEffects::localWinds`, placed with
 their parts each tick) into `scene::WindSettings::localWinds`;
-`windAt(point)` sums them (the explosion effects' own affectors are not
-collected). RendDX9 steps it each
+`windAt(point)` sums them. A WindAffector's instance registers with the
+WindManager as its object is made (`0x0064b490`), counts windBlowTime
+(`+0x44`) down each tick and leaves at 0 (`0x0064b4c0`; −1 never) or when
+the object goes (its slot 6, `0x0064b510`); windIsDynamic is read by
+neither. The explosions' bundles (e_exp_micro … Xlarge and the Titan's:
+Point, 20 m/s, falloff 10, 20 s) are spawned on their own, so the
+rewrite keeps their winds in the EffectManager (`appendLocalWinds`) for
+windBlowTime, at most as long as the bundle's particle systems last. RendDX9 steps it each
 frame (`0x10028bb0`). Its readers: the particles (above), and static
 meshes' leaves: RendDX9 marks a geometry whose path has "vegitation" a
 tree (`0x100de8xx`, `+0x2a2`) and draws its leaves with RaShaderLeaf
@@ -2705,6 +2795,24 @@ spring's name, its contact and the point under it) a wheel bundle under
 a wheel's spring is on only while that wheel touches, at its contact
 point, the material probed there; FromEngine takes |PIThrottle| of an
 occupied vehicle.
+
+*The depth gate.* An EffectBundle whose minDistanceUnderwaterSurface
+(`+0x3f4`) is 0 or more runs only while the water's height over it
+(`DAT_00a83e58` slot 0x94, less its own) lies within [min,
+maxDistanceUnderwaterSurface] (`+0x3f8`, −1 by default, `0x0061a9b0`):
+each tick (`0x0061a760`) it is started on entering that range unless it
+runs (`+0x18e`, `0x0061a1c0`) and stopped on leaving it (`0x00619ee0`),
+whatever started it; on a soldier only while he isn't seated (his parent
+`+0x34`). Shipped: the amphibious APCs' wake, rear wake, bow spray and
+their sound (started on entering, so on land the next tick stops them),
+e_sinking_vehicle (2–10 m), the soldiers' e_sold_swim (0–5 m). Rewritten
+in `ObjectEffects::update` (`BundleModifiers::maxUnderWater`, the sea
+level from `EffectManager::waterDepthAt`; the soldier's seat as
+`ObjectState::seated`). The web wheels' water spray (0–1 m) comes from a
+material cell, not a tree, and isn't gated here. `addWorkOnMaterial`
+(80 calls, the web wheels' smoke: the template's list `+0x438`, appended
+by `0x0053f4c4`) is read only by the template's writer (`0x00619900`)
+and destructor (`0x0061bac0`): inert.
 
 **Cold breath.** `GameLogic.useColdBreath` (`0x00427d38`, the game
 logic's slots 0xd8 / 0xdc; 30 levels set it) and the Soldier's
@@ -2985,7 +3093,23 @@ the place of the kit items it names (`unl_har_rifle` for `eu_ar_rifle` and
 `unl_best_buy_rifle`), the one in hand if it replaced that (fillKit; the
 console keeps `replaceItem.list`). `cullRadiusScale` (template `+0x58`,
 slots 27 / 28: `0x00504987` / `0x00504994`; 239 lights and meshes) is the
-renderer's view culling and changes no play: not done here. Left:
+object manager's view fade and changes no play. The manager's visible-set
+walk (`0x006ff110`, its thunks `0x007003c0` / `0x007003f0`) builds two
+records per frame — p0 = S × m² with S the view settings' slot 0x2c
+(`DAT_00a2020c` slot 0x54) and m the manager's `+0x148`, p1 its slot
+0x40, p2 = 10 S, the camera's position (`+0x1a4..+0x1ac`), the frame's
+time — and for each object (`0x006fe3b0`, down its children) fades its
+render object (`+0x44`; `0x006fa520`: `+0x2c` = f, slot 0x104 gets f ×
+`+0x28`) by `0x006fb320` with R = cullRadiusScale × the object's radius
+(slot 0x8c): d² = max(|camera − origin|² − R², 0), A = max(π R² p3, p0)
+(p3 = the manager's `+0x140`² × p2, `+0x144` for soldiers 0x9493 / 0xc4c2,
+`0x006fb280`, which also scales p0 by 0.25 and R by 0.8,
+`*0x00a07f00..08`); hidden past (R + p1)² or (1 + 0.2) A, whole within
+(1 − 0.2) A, between them easing in or out by 4 a second (`*0x00a07f0c`,
+`*0x00a07f10`). Not rewritten: the manager's `+0x140` / `+0x144` /
+`+0x148` (setters in its vtable `0x0099aba8`, slots 48 / 50 / 46) have no
+caller found, nor what the settings' slots 0x2c / 0x40 return, so the
+distances can't be fixed. Left:
 `allowEmoteAnimation` (`+0x31e`, the soldier's emote `0x005edbf0`: the
 rewrite has no emotes).
 
@@ -3167,7 +3291,16 @@ handles (LIGHTPOS … PROJECTORMASK, `+0x79c..+0x7b4`) and releases them:
 nothing sets a technique of it or draws with it (no reader of `+0x788`
 besides the load and the release), and no "SpotProjector" string exists
 in RendDX9_ori.dll. So retail draws no projected textures and no per-light
-shadows; the rewrite keeps the templates' values unread. The cone
+shadows; the rewrite keeps the templates' values unread. Checked again:
+the load (`0x100a9a00`, called with the manager less 8, so its effect is
+the manager's `+0x788` and the handles STENCILFUNC … VIEWPROJ
+`+0x78c..+0x7c4`) is the only code that touches them besides the release
+(`0x100aa720`); no function reads a handle to set it, the effect's
+techniques are never looked up (FUN_1001dd30 / 1001dd90 are never given
+it), and the light filter's shadow bits (4, 0x10, 0x20, 0x40) are asked by
+no caller (MeshLights.h). The projector fields' template getters (slots
+0x18c..0x1b0) and objectShadows / shadowIntensity / softness (0x1d0 ..
+0x1e0) are read only by the lightmap generator (`0x1006a310`). The cone
 angles' setters clamp to 180 (`0x00617790` / `0x006177c0`, the
 template's `+0xd8` / `+0xdc`); the light object turns coneAngle2 into the
 shaders' radians (see the spot lights above).
@@ -3463,9 +3596,12 @@ at `0x1002df12`..`0x1002e6d0`). The order:
    (`0x1004ed50` → `+0x20`, default 0) and `renderer.glowStrength`
    (`0x1004eee0` → `+0xe8`, 0.5) are read only by that dead function, and
    `renderer.colorBrightness` (`0x1004fad0` → `0x10035c40`, `+0xa58`..)
-   only by its getter: all three are stored, and nothing glows (the
-   shipped `hasGlow 1`, on the EU Titan's monitor and the floodlight
-   cones, is the EXE's).
+   only by its getter: all three are stored, and nothing glows. The
+   shipped `hasGlow 1` (the EU Titan's monitor, the floodlight cones) and
+   its `glowFrequency` / `glowType` / `glowOffset` are the EXE's SimpleObject
+   template `+0x228..+0x234`, which only their console rows
+   (`0x0051be6e`, `0x0051c27a`, `0x0051c397`, `0x0051c4ab`) touch: no
+   getter in any vtable, no other access. Inert.
 2. *Bloom* (`0x10049140`): FSBMContrastFilter (pass 28: the backbuffer
    cubed, to luminance, less CONTRAST = `bloomFilterContrast`) into a
    small target, FSBMLargeBloomFilter across (pass 29: 13 taps 0.01 and
@@ -6357,7 +6493,16 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   miniMapIconSize (16 × 16), turned with the vehicle; with usePlayerIcon a
   crewed vehicle shows as its occupant (slot 0x138). The tint is the
   players' (`0x00b3be30`). The template's fields are read once
-  (`menu::mapIcons`).
+  (`menu::mapIcons`). miniMapIconOffset / miniMapIconOffsetInside (block
+  `+0x100` / `+0x108`, by the same inside index as the size; `0x0077dd70`
+  into the marker's `+0x20`): `0x0077c610` draws the rectangle at
+  floor(point + offset − size / 2) and turns it about its centre less the
+  offset, the point (the Titans' 0/8, inside 0/10.5 and the PAC's
+  0.94/11.2; `MapMarker::offsetX/Y`). zoomOnMinimap (block `+0xb0`,
+  `0x0079429c`): such a vehicle (the Titans) isn't drawn on a map node at
+  zoom index 2 (`+0x74c`) while the local player's slot `0xdc` (`+0x8f`,
+  set with `+0x8e` by `0x00593840`: the commander's overhead view) is on,
+  the view showing the Titan itself (`menu::hiddenOnZoomedMap`).
 - **miniMapInfo** (`0x00636220`, lower-cased: "icon" 0, "reload" 1, "all"
   2, the component's +0x4c; "Icon" by default, `0x00637b30`) picks
   `0x00793b60`'s drawing: 0 the icon; 1 the reload icon (slot 0x144,
@@ -6551,8 +6696,58 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   bottom-right block shows instead of the vehicle's bottom-left one
   (HudElementsPlayer.con / HudElementsVehicleBasic.con).
 
-Not done: the mech's foot animation, the blinks (VehicleStaminaBlink and
-PlayerStaminaBlink's setters aren't traced; 0). (The map's spotted vehicles and the silos' reload and
+- **The blinks** (the blinker `0x00778040`, vtable `0x009b264c`, ticked
+  with the frame's time by `0x00778080`; `menu::HudBlink`): 0x0079e5a0
+  makes four with its variables (`0x0079fa9f`..`0x0079fb89`):
+  PlayerHealthBlink (`+0x2ae`) on PlayerHealth (`+0x1cc`),
+  VehicleArmorBlink (`+0x2b9`) on VehicleArmor (`+0x1d8`),
+  PlayerStaminaBlink (`+0x2aa`) on PlayerStamina (`+0x1d0`) and
+  VehicleStaminaBlink (`+0x2ac`) on VehicleStamina (`+0x1d4`), each with
+  threshold 0.3, floor 0, periods 0.7 / 0.15, scaled. Below the threshold
+  (the threshold not 0, the value not negative) the timer runs; past the
+  period ((0.7 − 0.15) / 0.3 × value + 0.15) the flag toggles, or goes off
+  at or below the floor, and the timer restarts; above it a lit flag goes
+  out once the timer passes the period. The weapon HUD makes six more the
+  same way (`0x007bf20a`..`0x007bf393`: the ammunition, clips, heat...;
+  not rewritten, their blinks stay 0).
+- **The other seats' turrets** (`0x007a2b50` → `0x007a1e00` →
+  `0x007a07c0`; GunnerAngle `+0x20c`, SecondaryGunnerAngle `+0xb0`, used
+  by the tank, APC and mech drivers' HUDs and the gunships'): with the
+  local player in a vehicle, every PlayerControlObject of the root's list
+  (its slot `0x64`) that isn't a soldier (interface `0xc4d7`) or his own
+  seat is searched depth first for the first RotationalBundle (class
+  `0x947d`) whose maxSpeed (`0x006147c0`) turns on the yaw alone; with the
+  controlled object's showOneSecondaryGunnerAngle (block `+0xc1`, the
+  APCs) only the first such seat, found or not. Of the bundles found, the
+  first since entering is kept (`+0xa8`) and a second different one
+  (`+0xac`); `0x007a1ee0` clears both as the controlled object becomes the
+  soldier again. With one, GunnerAngle = clamp(−r, ±π) (r the bundle's
+  rotation, slot `0x188`, degrees × π / 180); with two, the second gives
+  SecondaryGunnerAngle = clamp(−(r + 1.5708)) and the first GunnerAngle =
+  clamp(r − 1.5708) (the exe adds π / 2 to the degrees before turning them
+  to radians). The rewrite keeps the HUD's angles in degrees (its picture
+  rotations and compasses), the bundles by seat (`GameWorld::seatYaw`: the
+  seat's yaw bundle's own rotation; a seat's yaw bundle is the look's
+  RotationalBundle, which for the shipped turrets is the yaw-only one),
+  in seat order (`menu::OtherSeat`, `VehicleHud::gunnerBundle`).
+- **displaySelectionOnEnter** (block `+0xbd`): entering a seat
+  (`0x007a3920`, from the enter event at `0x007a3cb0` for the local
+  player) with it opens the item list for 2 s (`+0x20` = 2.0, menu state
+  0xb) before `0x0079bdf0` packs it: the artillery guns as_ag / us_ag
+  (main.cpp). The vehicle HUD's `+0xb4` that also stops it isn't traced.
+- **standardHelpEnabled** (block `+0xbb`, 1 by default): the help
+  manager's exit message 0x48 (`0x00648948`: in a vehicle that isn't a
+  LadderContainer) and enter message 0x47 (`0x00648872`: the controlled
+  object, on foot the soldier) need the controlled object's flag; the
+  static guns, the parachute, the bipods and the overhead camera set 0
+  (`menu::standardHelpEnabled`, `HelpPopups::Context::standardHelp`).
+- **useVehicleCommRose** (block `+0xbe`, 1): the radio key (`0x0075be30`)
+  opens RadioVehicle (state 6) when the controlled object isn't the
+  soldier, that rose is enabled (its slot `0x1c`, `+5`, 1 from
+  `0x007b88e0`) and the flag is set; else Radio (state 5). The parachute,
+  LadderContainer and the bipods set 0 (`menu::usesVehicleCommRose`).
+
+Not done: the mech's foot animation. (The map's spotted vehicles and the silos' reload and
 background icons are above, under the map's vehicles, miniMapInfo and
 Spotted.)
 

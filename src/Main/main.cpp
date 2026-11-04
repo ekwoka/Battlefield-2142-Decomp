@@ -729,6 +729,26 @@ nametags::Nametags* g_nametags = nullptr;
 // toggles it while alive (0x00754290 → 0x0074fd90(2)).
 bool g_bigMap = false;
 
+// The template of the object a player controls in a vehicle (player slot
+// 0x4c: the seat's PlayerControlObject, the vehicle itself for the
+// driver); null on foot or when the vehicle isn't known here.
+const world::ObjectTemplate* controlledTemplate(game::GameWorld& round, const game::GameWorld::PlayerInfo& player)
+{
+	const world::Object* vehicle = player.vehicle ? round.objects().find(player.vehicle) : nullptr;
+	if (!vehicle || !vehicle->objectTemplate()) {
+		return nullptr;
+	}
+	if (player.seat > 0) {
+		const auto seats = round.vehicleSeats(player.vehicle);
+		if (static_cast<size_t>(player.seat) < seats.size()) {
+			if (const world::ObjectTemplate* seat = round.templates().find(seats[static_cast<size_t>(player.seat)].name)) {
+				return seat;
+			}
+		}
+	}
+	return vehicle->objectTemplate();
+}
+
 void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorld& round, const game::GameLogic& logic,
 	bool commanderScreen)
 {
@@ -818,6 +838,12 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		if (icons.info != 0 || !hud.paintsVehicle(icons.vehicleType)) {
 			continue; // the reload icons (the silos) are drawn below
 		}
+		// zoomOnMinimap (the Titans): not on the map at zoom 2 while the
+		// player's overhead view shows the Titan itself (0x0079429c).
+		if (dice::hfe::menu::hiddenOnZoomedMap(icons, commanderScreen ? hud.commanderMapZoom() : hud.mapZoom(),
+				commanderScreen && hud.commanderMapZoom() == 2)) {
+			continue;
+		}
 		int occupantTeam = 0;
 		bool occupied = false;
 		for (const int occupant : world.vehicleOccupants(vehicle.object)) {
@@ -836,6 +862,8 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		}
 		hud::HudManager::MapMarker icon {look.texture, vehicle.position.x, vehicle.position.z, look.width, vehicle.yaw};
 		icon.height = look.height;
+		icon.offsetX = look.offsetX;
+		icon.offsetY = look.offsetY;
 		const bool teamless = relation == dice::hfe::menu::MapRelation::Neutral;
 		icon.color[0] = icon.color[1] = icon.color[2] = teamless ? 1.0f : 0.7f;
 		markers.push_back(icon);
@@ -1161,8 +1189,21 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			}
 			look.seats.push_back(dot);
 		}
+		// The controlled object (the seat's PlayerControlObject, the vehicle
+		// for the driver) and the other seats' yaw bundles (0x007a2b50).
+		look.seat = known && me.seat > 0 && static_cast<size_t>(me.seat) < seats.size()
+			? round.templates().find(seats[static_cast<size_t>(me.seat)].name)
+			: vehicle->objectTemplate();
+		for (size_t i = 0; known && i < seats.size(); ++i) {
+			if (static_cast<int>(i) == me.seat) {
+				continue;
+			}
+			dice::hfe::menu::OtherSeat other;
+			other.bundle = static_cast<int>(i);
+			other.hasBundle = round.seatYaw(vehicle->id(), static_cast<int>(i), other.rotation);
+			look.others.push_back(other);
+		}
 		g_vehicleHud.update(hud, look);
-		hud.set("VehicleArmorBlink", 0);
 		float yaw = 0, pitch = 0;
 		if (known && round.gunAim(vehicle->id(), me.seat, yaw, pitch)) {
 			const world::ObjectTemplate* gun = round.templates().find(seats[static_cast<size_t>(me.seat)].weapon);
@@ -1244,7 +1285,11 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		hud.set("PlayerStamina", has ? stamina : 1);
 		hud.set("PlayerStaminaShow", has && (sprinting || stamina < 1) ? 1 : 0);
 		hud.set("PlayerStaminaTextStringShow", has && staminaTimer >= 0 ? 1 : 0);
-		hud.set("PlayerStaminaBlink", 0);
+		// The blinks (0x00778040 / 0x00778080, made by 0x0079e5a0):
+		// below 0.3, faster the nearer empty.
+		static dice::hfe::menu::HudBlink staminaBlink, healthBlink;
+		hud.set("PlayerStaminaBlink", staminaBlink.tick(has ? stamina : 1, dt) ? 1 : 0);
+		hud.set("PlayerHealthBlink", healthBlink.tick(alive ? health : 1, dt) ? 1 : 0);
 	}
 	hud.set("PrimaryAmmoShow", 0);
 	// A seat's second gun (0x007c2d50, the control object's slot 0x78(1):
@@ -1413,8 +1458,16 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	static uint32_t seatVehicleWas = 0;
 	static int seatWas = -1;
 	bool seatActivation = false;
+	// Entering a seat (0x007a3920, from the enter event 0x007a3cb0 for the
+	// local player): with the controlled object's
+	// vehicleHud.displaySelectionOnEnter (block +0xbd; the artillery guns
+	// as_ag / us_ag) the list opens for 2 s (+0x20 = 2.0, menu state 0xb).
+	bool seatEntered = false;
 	game::GameWorld::PlayerInfo seated;
 	if (inVehicle && world.playerInfo(world.localPlayer(), seated) && seated.vehicle) {
+		if (seated.vehicle != seatVehicleWas || seated.seat != seatWas) {
+			seatEntered = dice::hfe::menu::hudNumber(controlledTemplate(round, seated), "vehicleHud.displaySelectionOnEnter", 0) != 0;
+		}
 		const world::ObjectTemplate* active = world.seatGroupWeapon(0).weapon;
 		if (active && active != seatActiveWas && seated.vehicle == seatVehicleWas && seated.seat == seatWas) {
 			seatActivation = dice::hfe::menu::hudNumber(active, "weaponHud.displaySelectOnActivation", 0) != 0;
@@ -1440,7 +1493,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			g_itemList.inHand = static_cast<int>(dice::hfe::menu::hudNumber(world.seatGroupWeapon(0).weapon, "itemIndex", -1));
 		}
 	}
-	if (seatKey > 0 || seatActivation) {
+	if (seatKey > 0 || seatActivation || seatEntered) {
 		game::GameWorld::PlayerInfo me;
 		if (world.playerInfo(world.localPlayer(), me) && me.vehicle) {
 			const auto seats = round.vehicleSeats(me.vehicle);
@@ -4896,6 +4949,13 @@ int runGame(Options& options, Session& session)
 						state.coldBreath = info.vehicle == 0 && !disabled;
 					}
 				}
+				// A soldier seated in a vehicle: his depth-gated bundles
+				// (e_sold_swim) stay off (0x0061a760).
+				if (state.objectTemplate && state.objectTemplate->typeName() == "Soldier") {
+					game::GameWorld::PlayerInfo seat;
+					const int player = round.playerOf(state.id);
+					state.seated = player >= 0 && round.playerInfo(player, seat) && seat.soldier == state.id && seat.vehicle != 0;
+				}
 				// A vehicle's wheels and throttle (the wheel bundles' contact
 				// and FromEngine).
 				if (const game::Vehicle* vehicle = round.vehicle(state.id)) {
@@ -4927,6 +4987,7 @@ int runGame(Options& options, Session& session)
 				});
 			// The WindManager's local winds: the objects' WindAffectors.
 			windSettings.localWinds = objectEffectBundles.localWinds();
+			round.effects().appendLocalWinds(windSettings.localWinds); // the explosions'
 			objectEffects.update(1.0f / 30.0f);
 		};
 		// Sound, once a tick (GameAudio.h): the listener at the camera, what
@@ -7127,6 +7188,17 @@ int runGame(Options& options, Session& session)
 					// The game's reach tests (cases 0x43, 0x47).
 					help.ladderNear = help.onFoot && round.ladderInReach(round.localPlayer(), 3);
 					help.vehicleNear = help.onFoot && round.vehicleInReach(round.localPlayer());
+					// The controlled object's standardHelpEnabled (0x00648872 /
+					// 0x00648948): the seat's or vehicle's, on foot the soldier's.
+					{
+						const world::ObjectTemplate* controlled = nullptr;
+						if (known && self.vehicle) {
+							controlled = controlledTemplate(round, self);
+						} else if (const world::Object* soldier = round.player()) {
+							controlled = soldier->objectTemplate();
+						}
+						help.standardHelp = dice::hfe::menu::standardHelpEnabled(controlled);
+					}
 					// Event-only messages the HUD lets through (slot 0x128,
 					// 0x00751540): 0x33 captureFlag as the player comes into a
 					// control point's area outside Titan mode (0x0044b560 on the
@@ -7894,7 +7966,10 @@ int runGame(Options& options, Session& session)
 				game::GameWorld::PlayerInfo me;
 				const bool alive = hudPlayer(hudLocal(), me) && me.alive;
 				if (alive && in.radioComm && !radioWas) {
-					commRoses.openRadio(me.vehicle != 0);
+					// The vehicle's rose with the controlled object's
+					// useVehicleCommRose (0x0075bf68), else the soldier's.
+					commRoses.openRadio(me.vehicle != 0
+						&& dice::hfe::menu::usesVehicleCommRose(controlledTemplate(round, me)));
 					// 0x0075be30 opens the radio rose (menu state 5 / 6) and
 					// lets 0x35 specificSpotted through.
 					helpPopups.enableTutorial(0x35);

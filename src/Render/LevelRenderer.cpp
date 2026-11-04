@@ -1655,8 +1655,11 @@ void LevelRenderer::updateUndergrowth(const Camera& camera)
 				continue;
 			}
 			std::vector<Vertex> vertices(patch.vertices.size());
+			float lowY = std::numeric_limits<float>::max(), highY = -std::numeric_limits<float>::max();
 			for (size_t i = 0; i < vertices.size(); ++i) {
 				const terrain::UndergrowthPatchVertex& source = patch.vertices[i];
+				lowY = std::min(lowY, source.position[1]);
+				highY = std::max(highY, source.position[1]);
 				Vertex& v = vertices[i];
 				std::copy(source.position.begin(), source.position.end(), v.position);
 				v.normal[1] = 1;
@@ -1672,6 +1675,14 @@ void LevelRenderer::updateUndergrowth(const Camera& camera)
 			buffers.indices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_INDEX, patch.indices.data(),
 				static_cast<uint32_t>(patch.indices.size() * sizeof(uint32_t)));
 			buffers.indexCount = static_cast<uint32_t>(patch.indices.size());
+			// Its sphere: about the box the patch's square and its plants'
+			// heights make (0x1010a9a0, 0x101a7b10).
+			const auto origin = m_undergrowth->patchOrigin(index);
+			const float half = size * 0.5f, halfY = (highY - lowY) * 0.5f;
+			buffers.sphere[0] = origin[0] + half;
+			buffers.sphere[1] = lowY + halfY;
+			buffers.sphere[2] = origin[1] + half;
+			buffers.sphere[3] = std::sqrt(2 * half * half + halfY * halfY);
 			uploaded = true;
 		}
 	}
@@ -1741,7 +1752,13 @@ void LevelRenderer::drawUndergrowth(SDL_GPUCommandBuffer* commands, SDL_GPURende
 		uniforms.terrainTexCoord[2] = -(m_patchOrigin[0] / m_patchSize + tx);
 		uniforms.terrainTexCoord[3] = -(m_patchOrigin[1] / m_patchSize + tz);
 		SDL_PushGPUVertexUniformData(commands, 0, &uniforms, sizeof(uniforms));
-		SDL_PushGPUFragmentUniformData(commands, 0, patch.lightmap ? &lit : &unlit, sizeof(lit));
+		// The patch's point lights (MeshLights.h): the nearest 4 about its sphere.
+		LightingUniforms& patchLit = patch.lightmap ? lit : unlit;
+		int picked[kUndergrowthPatchLights];
+		const int pickedCount = m_listedLights.empty() ? 0
+			: pickUndergrowthLights(m_listedLights.data(), m_listedLights.size(), buffers.sphere, buffers.sphere[3], picked);
+		applyUndergrowthLights(patchLit, picked, pickedCount);
+		SDL_PushGPUFragmentUniformData(commands, 0, &patchLit, sizeof(patchLit));
 		SDL_GPUTextureSamplerBinding samplers[3] = {
 			{m_undergrowthAtlas, m_gpu.clampSampler()},
 			{patch.colormap ? patch.colormap : m_gpu.whiteTexture(), m_gpu.clampSampler()},
@@ -2480,6 +2497,7 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 	m_pointLights.clear();
 	m_listedLights.clear();
 	m_cameraLights.clear();
+	m_terrainLights.clear();
 	if (!m_sources) {
 		return;
 	}
@@ -2512,6 +2530,7 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 		listed.radius = reach;
 		listed.spot = light.spot;
 		listed.affectsLightmapped = light.affectsLightmapped;
+		listed.supportsEmitter = light.supportsEmitter;
 		m_listedLights.push_back(listed);
 	};
 	// VideoSettings' dynamic lighting 0 turns the dynamic lights off (the
@@ -2558,6 +2577,8 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 			a.x * world.at(0, 2) + a.y * world.at(1, 2) + a.z * world.at(2, 2)};
 		light.cone = placed.look.cone;
 		light.affectsLightmapped = placed.look.affectsLightmapped;
+		light.specColor = placed.look.specColor;
+		light.supportsEmitter = placed.look.supportsEmitter;
 		consider(light);
 	}
 	// The rest's: the nearest the camera first.
@@ -2570,6 +2591,13 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 	std::stable_sort(byCamera.begin(), byCamera.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
 	for (size_t i = 0; i < byCamera.size() && i < static_cast<size_t>(kMaxPointLights); ++i) {
 		m_cameraLights.push_back(byCamera[i].second);
+	}
+	// The terrain takes every listed Point light (0x909), a pass each; the
+	// shader's kMaxPointLights nearest the camera here.
+	for (size_t i = 0; i < byCamera.size() && m_terrainLights.size() < static_cast<size_t>(kMaxPointLights); ++i) {
+		if (terrainTakesLight(m_listedLights[static_cast<size_t>(byCamera[i].second)])) {
+			m_terrainLights.push_back(byCamera[i].second);
+		}
 	}
 }
 
@@ -2595,12 +2623,36 @@ void LevelRenderer::applyMeshLights(LightingUniforms& uniforms, const int* picke
 		const float range = kind == LightedMesh::Static || l.templateRange2 < 0 ? l.range2 : l.templateRange2;
 		const float position[4] = {l.position.x, l.position.y, l.position.z, range};
 		const float color[4] = {l.color.x, l.color.y, l.color.z, l.range1};
-		const float spot[4] = {l.direction.x, l.direction.y, l.direction.z, -2.0f};
+		// The meshes have no cone; lightSpot's xyz carries the skinned
+		// meshes' specular colour (the Light record's specularColor: the
+		// template's speccolor, 0x10162070).
+		const float spot[4] = {l.specColor.x, l.specColor.y, l.specColor.z, -2.0f};
 		const float extra[4] = {0, 1, 0, 0};
 		std::copy(position, position + 4, uniforms.lightPosition[i]);
 		std::copy(color, color + 4, uniforms.lightColor[i]);
 		std::copy(spot, spot + 4, uniforms.lightSpot[i]);
 		std::copy(extra, extra + 4, uniforms.lightExtra[i]);
+	}
+}
+
+void LevelRenderer::applyTerrainLights(LightingUniforms& uniforms) const
+{
+	applyUndergrowthLights(uniforms, m_terrainLights.data(), static_cast<int>(m_terrainLights.size()));
+}
+
+void LevelRenderer::applyUndergrowthLights(LightingUniforms& uniforms, const int* picked, int count) const
+{
+	uniforms.lightCount[0] = static_cast<float>(count);
+	uniforms.lightCount[1] = 0;
+	for (int i = 0; i < count; ++i) {
+		const effects::PointLight& l = m_pointLights[static_cast<size_t>(picked[i])];
+		// POINTLIGHT / PointLightPosAtten: the position and 1 / R^2 with R
+		// the light object's range (slot 0x198, flickered).
+		const float r = std::max(l.range2, 0.01f);
+		const float position[4] = {l.position.x, l.position.y, l.position.z, 1.0f / (r * r)};
+		const float color[4] = {l.color.x, l.color.y, l.color.z, 0};
+		std::copy(position, position + 4, uniforms.lightPosition[i]);
+		std::copy(color, color + 4, uniforms.lightColor[i]);
 	}
 }
 
@@ -3509,8 +3561,8 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	const auto& terrainGI = m_terrainColorsFromData ? m_terrainGIColor : lights.terrainGIColor;
 	LightingUniforms terrainLit = lighting(m_viewFog, lights, terrainSun, terrainGI, 0, true);
 	LightingUniforms terrainUnlit = lighting(m_viewFog, lights, terrainSun, terrainGI, 0, false);
-	applyPointLights(terrainLit);
-	applyPointLights(terrainUnlit);
+	applyTerrainLights(terrainLit);
+	applyTerrainLights(terrainUnlit);
 	TransformUniforms transforms {viewProjection, Mat4 {}, {1, 1, 0, 0}, {}};
 	transforms.partsUsed = 0; // terrain.vert has none
 	SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));

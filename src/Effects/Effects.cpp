@@ -732,6 +732,22 @@ void EffectManager::spawnTemplate(const world::ObjectTemplate& t, const Vec3& po
 		ageFactor = game::RandomDistribution::parse(*factor).sample(m_random);
 	}
 	const bool physicsSpeed = number(t, "speedFromPhysics", 0) != 0;
+	// A WindAffector component on a bundle spawned on its own (the
+	// explosions' Point winds): its instance registers with the WindManager
+	// as the object is made (0x0064b490), counts windBlowTime down each
+	// tick and leaves at 0 (0x0064b4c0; -1 never), or when the object goes
+	// (slot 6, 0x0064b510), which the rewrite takes as the bundle's span.
+	// The attached bundles' are ObjectEffects::localWinds.
+	if (!spawnedLights && setting(t, "windType")) {
+		LiveWind wind;
+		wind.wind = ObjectEffects::localWindOf(t, position, rotation);
+		const float blowTime = number(t, "windBlowTime", -1);
+		wind.life = looping ? -1.0f : std::max(span, 0.1f);
+		if (blowTime > 0) {
+			wind.life = wind.life < 0 ? blowTime : std::min(wind.life, blowTime);
+		}
+		m_winds.push_back(wind);
+	}
 	// Its modifiers at the start (0x0061a1c0 -> 0x00618e30): a bundle on
 	// its own has no physics to take speeds from, only its altitude.
 	const BundleModifiers& modifiers = bundleModifiers(t);
@@ -971,6 +987,9 @@ std::vector<PointLight> EffectManager::lights() const
 {
 	std::vector<PointLight> out;
 	for (const LiveLight& light : m_lights) {
+		if (!light.look.dynamic) {
+			continue; // every light filter asks for isDynamic (RendDX9 0x100a7f00, bit 8)
+		}
 		const float fade = light.life < 0 ? 1.0f : std::clamp(1.0f - light.age / light.life, 0.0f, 1.0f);
 		if (fade > 0) {
 			PointLight lit {light.position, light.color * fade, light.range1, light.range2};
@@ -978,6 +997,8 @@ std::vector<PointLight> EffectManager::lights() const
 			lit.direction = light.direction;
 			lit.cone = light.look.cone;
 			lit.affectsLightmapped = light.look.affectsLightmapped;
+			lit.specColor = light.look.specColor * fade;
+			lit.supportsEmitter = light.look.supportsEmitter;
 			out.push_back(lit);
 		}
 	}
@@ -1011,10 +1032,12 @@ LightSourceLook lightSourceOf(const world::ObjectTemplate& t)
 	};
 	look.spot = is("Spot");
 	look.directional = is("Directional");
-	look.dynamic = number(t, "isDynamic", 1) != 0;
+	look.dynamic = number(t, "isDynamic", 0) != 0;
 	look.affectsLightmapped = number(t, "affectLightmappedObjects", 1) != 0;
 	look.affectingType = static_cast<int>(number(t, "affectingType", 0));
-	look.color = vector(t, "color", {1, 1, 1}) * number(t, "intensity", 1);
+	look.color = vector(t, "color", {1, 1, 1});
+	look.specColor = vector(t, "speccolor", {1, 1, 1});
+	look.supportsEmitter = number(t, "supportsEmitter", 1) != 0;
 	// The light object clamps both ranges to 100 (BF2142.exe 0x0064b170,
 	// +0x17c / +0x180; RendDX9 reads the second through slot 0x198).
 	look.range1 = std::min(number(t, "attenuationRange1", 0), 100.0f);
@@ -1238,7 +1261,20 @@ void EffectManager::update(float seconds)
 	m_lights.erase(std::remove_if(m_lights.begin(), m_lights.end(),
 					   [](const LiveLight& l) { return l.stopped || (l.life >= 0 && l.age >= l.life); }),
 		m_lights.end());
+	for (LiveWind& wind : m_winds) {
+		wind.age += seconds;
+	}
+	m_winds.erase(std::remove_if(m_winds.begin(), m_winds.end(),
+					  [](const LiveWind& w) { return w.life >= 0 && w.age >= w.life; }),
+		m_winds.end());
 	stepDebris(seconds);
+}
+
+void EffectManager::appendLocalWinds(std::vector<scene::WindSettings::LocalWind>& out) const
+{
+	for (const LiveWind& wind : m_winds) {
+		out.push_back(wind.wind);
+	}
 }
 
 namespace {
@@ -1624,6 +1660,11 @@ const BundleModifiers& EffectManager::bundleModifiers(const world::ObjectTemplat
 		known = m_bundleModifiers.emplace(&bundle, BundleModifiers::fromTemplate(bundle)).first;
 	}
 	return known->second;
+}
+
+float EffectManager::waterDepthAt(const Vec3& at) const
+{
+	return m_context.hasWater ? m_context.waterLevel - at.y : -1.0f;
 }
 
 float EffectManager::altitudeAt(const Vec3& at, bool underWater) const
@@ -2059,13 +2100,28 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 				}
 				effects.spawnAttached(b.bundle->name(), object.id, b.position, b.rotation, view, tag);
 			}
+			// The depth gate (0x0061a760, BundleModifiers::maxUnderWater):
+			// the water's height at the bundle less its own.
+			const BundleModifiers& modifiers = effects.bundleModifiers(*b.bundle);
+			if (modifiers.depthGated()) {
+				const Vec3 point = object.position + object.rotation.transform(b.position);
+				const bool in = !object.seated && modifiers.inDepth(effects.waterDepthAt(point));
+				const bool running = effects.emitting(object.id, tag);
+				if (in && !running) {
+					if (partPose && !created) {
+						place(b, object.id, partPose, b.position, b.rotation);
+					}
+					effects.spawnAttached(b.bundle->name(), object.id, b.position, b.rotation, view, tag);
+				} else if (!in && running) {
+					effects.stopAttached(object.id, tag);
+				}
+			}
 			if (b.speedFromPhysics) {
 				effects.setPhysicsVelocity(object.id, tag, object.velocity); // 0x00618ae0, each tick
 			}
 			// Its modifiers each tick (0x0061a760 -> 0x00618e30) from the
 			// object's motion at the bundle; the rewrite takes the speeds
 			// from the bundle's moves over the tick (1/30 s).
-			const BundleModifiers& modifiers = effects.bundleModifiers(*b.bundle);
 			if (modifiers.anyMapping && effects.emitting(object.id, tag)) {
 				const Vec3 point = object.position + object.rotation.transform(b.position);
 				const Vec3 pointVelocity = b.hasLastPoint ? (point - b.lastPoint) * 30.0f : tracked.velocity;
@@ -2161,6 +2217,7 @@ BundleModifiers BundleModifiers::fromTemplate(const world::ObjectTemplate& t)
 		b.anyMapping = b.anyMapping || m.mapped();
 	}
 	b.minUnderWater = number(t, "minDistanceUnderWaterSurface", b.minUnderWater);
+	b.maxUnderWater = number(t, "maxDistanceUnderWaterSurface", b.maxUnderWater);
 	return b;
 }
 

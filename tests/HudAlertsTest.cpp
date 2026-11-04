@@ -642,3 +642,31 @@ TEST(HudAlerts_TutorialEventCallers)
 	}
 	CHECK(useUnlock);
 }
+
+// standardHelpEnabled (block +0xbb, 0x00648872 / 0x00648948): the enter and
+// exit messages wait for the controlled object's flag (the static guns'
+// 0 keeps the exit one off).
+TEST(HudAlerts_StandardHelpEnabled)
+{
+	hud::HudManager hudManager(nullptr);
+	menu::HelpPopups seated;
+	menu::HelpPopups::Context c;
+	c.playing = c.alive = c.inVehicle = true;
+	c.menuOpen = true; // the movement messages need no menu
+	c.standardHelp = false;
+	seated.tutorial(hudManager, c, 0.1f);
+	CHECK(hudManager.string("IngameHelpString") != "HUD_HELP_VEHICLE_CONTROLS_exitVehicle");
+	menu::HelpPopups open;
+	c.standardHelp = true;
+	hud::HudManager other(nullptr);
+	CHECK(open.tutorial(other, c, 0.1f));
+	CHECK(other.string("IngameHelpString") == "HUD_HELP_VEHICLE_CONTROLS_exitVehicle");
+	menu::HelpPopups foot;
+	menu::HelpPopups::Context f;
+	f.playing = f.onFoot = f.alive = f.vehicleNear = true;
+	f.menuOpen = true;
+	f.standardHelp = false;
+	hud::HudManager third(nullptr);
+	foot.tutorial(third, f, 0.1f);
+	CHECK(third.string("IngameHelpString") != "HUD_HELP_VEHICLE_GENERAL_CONTROLS_enterVehicle");
+}

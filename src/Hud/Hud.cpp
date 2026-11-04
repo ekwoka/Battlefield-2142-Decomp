@@ -1546,13 +1546,21 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 		const float sx = mapX + u * mapW, sy = mapY + v * mapH;
 		const float side = std::floor(marker.size);
 		const float tall = marker.height > 0 ? std::floor(marker.height) : side;
-		const float x0 = std::floor(sx - marker.size * 0.5f), y0 = std::floor(sy - (marker.height > 0 ? marker.height : marker.size) * 0.5f);
+		// 0x0077c610: the rectangle at floor(point + offset - size / 2), turned
+		// about its centre less the offset (the point).
+		const float x0 = std::floor(sx + marker.offsetX - marker.size * 0.5f);
+		const float y0 = std::floor(sy + marker.offsetY - (marker.height > 0 ? marker.height : marker.size) * 0.5f);
 		if (x0 + side <= nx || x0 >= nx + nw || y0 + tall <= ny || y0 >= ny + nh) {
 			continue;
 		}
 		HudQuad q {kTextureRoot + slashes(marker.texture), x0, y0, x0 + side, y0 + tall, 0, 0, 1, 1,
 			{marker.color[0], marker.color[1], marker.color[2], marker.color[3] * alpha}, marker.yaw};
 		q.sweep = marker.sweep;
+		if (marker.offsetX != 0 || marker.offsetY != 0) {
+			q.pivotSet = true;
+			q.pivot[0] = x0 + side * 0.5f - marker.offsetX;
+			q.pivot[1] = y0 + tall * 0.5f - marker.offsetY;
+		}
 		if (!clipTo(q, nx, ny, nx + nw, ny + nh)) {
 			continue;
 		}

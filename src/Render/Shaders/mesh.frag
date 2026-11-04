@@ -126,8 +126,9 @@ layout(location = 0) out vec4 outColor;
 //     StaticSpecularColor) (1 - saturate(|d|^2 / R^2));
 //   RaShaderBM: (saturate(N.L) + pow(N.H, 64) gloss) (1 - saturate(9 |d|^2 /
 //     R^2)), white (Lights[0].color isn't read);
-//   RaShaderSM: (saturate(N.L) colour + pow(saturate(N.H), 20) gloss colour)
-//     (1 - saturate(|d| / R^2)) (a length, not its square, as the shader has it).
+//   RaShaderSM: (saturate(N.L) colour + pow(saturate(N.H), 20) gloss
+//     specularColor) (1 - saturate(|d| / R^2)) (a length, not its square, as
+//     the shader has it); specularColor the template's speccolor.
 // The diffuse goes to `light` (times the albedo), the specular to `shine`.
 void meshPointLights(vec3 normal, float gloss, inout vec3 light, inout vec3 shine)
 {
@@ -150,9 +151,11 @@ void meshPointLights(vec3 normal, float gloss, inout vec3 light, inout vec3 shin
 			light += vec3(nl * attenuation);
 			shine += vec3(pow(nh, 64.0) * gloss * attenuation);
 		} else {
+			// The specular takes the Light record's specularColor: the
+			// template's speccolor (lightSpot.xyz, applyMeshLights).
 			float attenuation = 1.0 - clamp(sqrt(d2) / (r * r), 0.0, 1.0);
 			light += lightColor[i].rgb * nl * attenuation;
-			shine += pow(nh, 20.0) * gloss * lightColor[i].rgb * attenuation;
+			shine += pow(nh, 20.0) * gloss * lightSpot[i].rgb * attenuation;
 		}
 	}
 }

@@ -281,7 +281,7 @@ bool HelpPopups::tutorialHolds(int index, const Context& c) const
 	case 10: return c.alive && noMenu;
 	case 11: return c.spawnScreen;
 	case 12: return noMenu;
-	case 13: return c.alive && c.inVehicle;
+	case 13: return c.alive && c.inVehicle && c.standardHelp;
 	// The menu states (0x00646cb0's cases 0x0a, 0x19, 0x1d / 0x2d; the
 	// spawn screen's halves set by SpawnManager.toggleMembers, 0x007b8b80:
 	// 1 the kits, the members 0x12 for a squad leader and 0x13 for the
@@ -295,7 +295,7 @@ bool HelpPopups::tutorialHolds(int index, const Context& c) const
 	case 17: return c.commanderScreen && c.teamSquads > 0;
 	case 18: return c.menuState == 0x12;
 	case 19: return c.onFoot && c.ladderNear;
-	case 20: return c.onFoot && c.vehicleNear;
+	case 20: return c.onFoot && c.vehicleNear && c.standardHelp;
 	// The event-only messages' own cases (enabled by the HUD manager's slot
 	// 0x128, 0x00751540): unconditional, a squad leader (slot 0x150), the
 	// commander (0x128), the artillery's and the orbital strike's

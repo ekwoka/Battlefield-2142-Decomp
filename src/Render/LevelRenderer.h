@@ -688,6 +688,9 @@ private:
 		SDL_GPUBuffer* vertices = nullptr; // null when the patch is empty
 		SDL_GPUBuffer* indices = nullptr;
 		uint32_t indexCount = 0;
+		// The patch's bounding sphere (the box of its plants over the patch,
+		// 0x1010a9a0 / 0x101a7b10): xyz centre, w radius; the lights' pick.
+		float sphere[4] {};
 	};
 	std::unique_ptr<terrain::UndergrowthGenerator> m_undergrowth;
 	float m_undergrowthViewDistance = 0;
@@ -769,6 +772,7 @@ private:
 	std::vector<effects::PointLight> m_pointLights; // this frame's listed lights (collectPointLights)
 	std::vector<ListedLight> m_listedLights;        // the same, for the meshes' picks
 	std::vector<int> m_cameraLights;                // the nearest the camera of them (applyPointLights)
+	std::vector<int> m_terrainLights;               // the Point ones nearest the camera (applyTerrainLights)
 	LightLimits m_lightLimits;
 	MsvcRand m_flickerRand;
 	Frustum m_frameFrustum;
@@ -783,6 +787,12 @@ private:
 	};
 	std::vector<ObjectLight> m_objectLights;
 	void applyPointLights(LightingUniforms& uniforms) const;
+	// The terrain's lights (MeshLights.h, 0x100b4d80): lightCount.x of them,
+	// xyz position, w 1 / range2^2, colour.
+	void applyTerrainLights(LightingUniforms& uniforms) const;
+	// An undergrowth patch's (0x1010e270): the picked ones' position, 1 /
+	// range2^2 and colour.
+	void applyUndergrowthLights(LightingUniforms& uniforms, const int* picked, int count) const;
 	// A mesh's picked lights (MeshLights.h), lightCount.y its kind + 1.
 	void applyMeshLights(LightingUniforms& uniforms, const int* picked, int count, LightedMesh kind) const;
 	// mesh.frag's samplers 8-10: a static material's detail and crack

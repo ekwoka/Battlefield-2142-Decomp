@@ -186,6 +186,9 @@ public:
 		int id = -1;         // >= 0: clickable (mapMarkerAt returns it)
 		float height = 0;    // > 0: not square (size is then the width)
 		float sweep = -1;    // >= 0: only this wedge (HudQuad::sweep)
+		// Pixels the icon sits from its point (vehicleHud.miniMapIconOffset,
+		// 0x0077c610), turned with it about the point.
+		float offsetX = 0, offsetY = 0;
 	};
 	void setMap(const std::string& texture, float originX, float originZ, float width, float depth);
 	void setMapFocus(float x, float z) { m_mapFocus[0] = x; m_mapFocus[1] = z; }

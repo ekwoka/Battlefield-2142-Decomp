@@ -167,6 +167,10 @@ public:
 		bool parachute = false;   // descending under a parachute
 		bool ladderNear = false;  // a ladder within 3 m
 		bool vehicleNear = false; // an empty vehicle to enter within reach
+		// The controlled object's vehicleHud.standardHelpEnabled (block
+		// +0xbb, menu::standardHelpEnabled): the enter (0x47) and exit
+		// (0x48) messages need it.
+		bool standardHelp = true;
 		int teamSquads = 0;       // the team's squads (the game manager's slot 0xa4)
 		// The objects near the player with closeTo keys: their template, the
 		// distance and whose (1 the player's team, 2 the enemy, 0 neutral).

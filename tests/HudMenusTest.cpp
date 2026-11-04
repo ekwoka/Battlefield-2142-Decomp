@@ -1140,3 +1140,120 @@ TEST(HudItemSelection_SquadSizeRefusal)
 	CHECK(!s.world.squadTooSmall(me, beacon));
 	CHECK(s.world.takeSquadSizeRefused(me) == 0);
 }
+
+// The other seats' turrets (0x007a2b50 → 0x007a07c0): one other seat's
+// bundle gives GunnerAngle -r; a second makes the first r - 1.5708 and the
+// second SecondaryGunnerAngle -(r + 1.5708); showOneSecondaryGunnerAngle
+// stops at the first other seat; leaving forgets the bundles.
+TEST(HudVehicle_GunnerAngles)
+{
+	hud::HudManager hud(nullptr);
+	Console console;
+	std::string out;
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "PlayerControlObject");
+	world::registerWorldConsoleMethods(console, templates, objects);
+	world::registerUntypedTemplateProperties(console, templates, {"vehicleHud.showOneSecondaryGunnerAngle"});
+	console.execute("ObjectTemplate.create PlayerControlObject apc", out);
+	console.execute("ObjectTemplate.vehicleHud.showOneSecondaryGunnerAngle 1", out);
+	console.execute("ObjectTemplate.create PlayerControlObject tank", out);
+	menu::VehicleHud vehicleHud;
+	menu::VehicleHudInput in;
+	in.seat = templates.find("tank");
+	in.others = {{true, 1, 30}};
+	vehicleHud.update(hud, in);
+	CHECK(hud.number("GunnerAngle") == -30 && hud.number("SecondaryGunnerAngle") == 0);
+	in.others = {{true, 1, 30}, {false, 2, 0}, {true, 3, 200}};
+	vehicleHud.update(hud, in);
+	// The first seat was met before the second this frame: still -r.
+	CHECK(hud.number("GunnerAngle") == -30);
+	CHECK(hud.number("SecondaryGunnerAngle") == -180); // clamped
+	in.others = {{true, 1, 10}, {true, 3, -20}};
+	vehicleHud.update(hud, in);
+	CHECK(std::fabs(hud.number("GunnerAngle") - (10 - 1.5707964f)) < 1e-4f);
+	CHECK(std::fabs(hud.number("SecondaryGunnerAngle") - (20 - 1.5707964f)) < 1e-4f);
+	// The APC driver's: only the first other seat, even without a bundle.
+	vehicleHud.clear(hud);
+	in.seat = templates.find("apc");
+	in.others = {{false, 1, 0}, {true, 2, 45}};
+	vehicleHud.update(hud, in);
+	CHECK(std::fabs(hud.number("GunnerAngle") - (10 - 1.5707964f)) < 1e-4f); // kept
+	in.others = {{true, 1, 45}, {true, 2, 90}};
+	vehicleHud.update(hud, in);
+	CHECK(hud.number("GunnerAngle") == -45);
+}
+
+// The blinks (0x00778040 / 0x00778080): below 0.3 the flag toggles once
+// the timer passes (0.55 / 0.3) x value + 0.15 s; at 0 it stays off; above
+// it a lit flag goes out after the period.
+TEST(HudBlink_StaminaAndArmour)
+{
+	menu::HudBlink blink;
+	CHECK(!blink.tick(0.5f, 1.0f));
+	// 0.1: a period of 0.3333 s; the timer already ran past it above.
+	CHECK(blink.tick(0.1f, 0.0f));
+	CHECK(blink.tick(0.1f, 0.2f));
+	CHECK(!blink.tick(0.1f, 0.2f));
+	CHECK(!blink.tick(0.1f, 0.2f));
+	CHECK(blink.tick(0.1f, 0.2f));
+	// Empty: held off.
+	CHECK(!blink.tick(0.0f, 1.0f));
+	// Lit, then back above: off once the period (1.8 s at 0.9) passes.
+	CHECK(blink.tick(0.1f, 1.0f));
+	CHECK(blink.tick(0.9f, 1.0f));
+	CHECK(!blink.tick(0.9f, 1.0f));
+	// The vehicle HUD's armour and stamina blinks.
+	hud::HudManager hud(nullptr);
+	menu::VehicleHud vehicleHud;
+	menu::VehicleHudInput in;
+	in.armor = 0.1f;
+	in.stamina = 0.2f;
+	in.seconds = 1.0f;
+	vehicleHud.update(hud, in);
+	CHECK(hud.number("VehicleArmorBlink") == 1 && hud.number("VehicleStaminaBlink") == 1);
+	vehicleHud.clear(hud);
+	CHECK(hud.number("VehicleArmorBlink") == 0 && hud.number("VehicleStaminaBlink") == 0);
+}
+
+// zoomOnMinimap, miniMapIconOffset(Inside), standardHelpEnabled and
+// useVehicleCommRose as the shipped templates give them.
+TEST(HudVehicle_MapOffsetZoomAndFlags)
+{
+	Console console;
+	std::string out;
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "PlayerControlObject");
+	world::registerWorldConsoleMethods(console, templates, objects);
+	world::registerUntypedTemplateProperties(console, templates,
+		{"vehicleHud.miniMapIcon", "vehicleHud.miniMapIconInside", "vehicleHud.miniMapIconOffset",
+			"vehicleHud.miniMapIconOffsetInside", "vehicleHud.zoomOnMinimap", "vehicleHud.standardHelpEnabled",
+			"vehicleHud.useVehicleCommRose"});
+	console.execute("ObjectTemplate.create PlayerControlObject as_titan_wake", out);
+	console.execute("ObjectTemplate.vehicleHud.miniMapIcon Ingame\\mini_titan.dds", out);
+	console.execute("ObjectTemplate.vehicleHud.miniMapIconInside Ingame\\mini_titanInside.dds", out);
+	console.execute("ObjectTemplate.vehicleHud.miniMapIconOffset 0/8", out);
+	console.execute("ObjectTemplate.vehicleHud.miniMapIconOffsetInside 0.94/11.2", out);
+	console.execute("ObjectTemplate.vehicleHud.zoomOnMinimap 1", out);
+	console.execute("ObjectTemplate.create PlayerControlObject static_aa", out);
+	console.execute("ObjectTemplate.vehicleHud.standardHelpEnabled 0", out);
+	console.execute("ObjectTemplate.vehicleHud.useVehicleCommRose 1", out);
+	console.execute("ObjectTemplate.create PlayerControlObject parachute", out);
+	console.execute("ObjectTemplate.vehicleHud.useVehicleCommRose 0", out);
+	const world::ObjectTemplate* titan = templates.find("as_titan_wake");
+	CHECK(titan);
+	menu::VehicleMarker marker;
+	CHECK(menu::vehicleMarker(*titan, menu::MapRelation::Friendly, false, false, marker));
+	CHECK(marker.offsetX == 0 && marker.offsetY == 8);
+	CHECK(menu::vehicleMarker(*titan, menu::MapRelation::Own, true, false, marker));
+	CHECK(std::fabs(marker.offsetX - 0.94f) < 1e-5f && std::fabs(marker.offsetY - 11.2f) < 1e-5f);
+	const menu::MapIcons& icons = menu::mapIcons(*titan);
+	CHECK(menu::hiddenOnZoomedMap(icons, 2, true));
+	CHECK(!menu::hiddenOnZoomedMap(icons, 1, true) && !menu::hiddenOnZoomedMap(icons, 2, false));
+	CHECK(!menu::hiddenOnZoomedMap(menu::mapIcons(*templates.find("static_aa")), 2, true));
+	CHECK(!menu::standardHelpEnabled(templates.find("static_aa")));
+	CHECK(menu::standardHelpEnabled(titan) && menu::standardHelpEnabled(nullptr));
+	CHECK(menu::usesVehicleCommRose(templates.find("static_aa")) && menu::usesVehicleCommRose(titan));
+	CHECK(!menu::usesVehicleCommRose(templates.find("parachute")));
+}

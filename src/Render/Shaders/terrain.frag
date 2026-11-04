@@ -143,17 +143,6 @@ void main()
 		float sun = max(dot(normalize(inNormal), sunDirection.xyz), 0.0);
 		color = albedo * (skyColor.rgb * 0.5 + sunColor.rgb * sun * shadowFactor(inWorldPosition, false));
 	}
-	// Point lights, as mesh.frag's.
-	vec3 normal = normalize(inNormal);
-	int count = int(lightCount.x + 0.5);
-	for (int i = 0; i < count && i < 8; ++i) {
-		vec3 toLight = lightPosition[i].xyz - inWorldPosition;
-		float distance = length(toLight);
-		float range1 = lightColor[i].w, range2 = lightPosition[i].w;
-		float attenuation = 1.0 - clamp((distance - range1) / max(range2 - range1, 0.01), 0.0, 1.0);
-		vec3 direction = toLight / max(distance, 1e-3);
-		color += albedo * lightColor[i].rgb * attenuation * lightCone(i, -direction) * max(dot(normal, direction), 0.0);
-	}
 	if (water.w > -1e8) {
 		color = mix(color, water.rgb, clamp((water.w - inWorldPosition.y) / 3.0, 0.0, 1.0) * fade);
 	}
@@ -162,6 +151,18 @@ void main()
 	}
 	float fog = fogAmount(inDepth);
 	outColor = vec4(mix(color, fogColor.rgb, fog), 1.0);
+	// The dynamic Point lights, each an additive pass over the lit terrain
+	// in the original (0x1014e080, Hi_Terrain's PerPixelPointlight):
+	// calcPVPointTerrain x 0.5 = colour x N.L x saturate(1 - d^2 / R^2) x
+	// 0.5, not times the terrain's colour (lightPosition.w = 1 / R^2).
+	vec3 normal = normalize(inNormal);
+	int count = int(lightCount.x + 0.5);
+	for (int i = 0; i < count && i < 8; ++i) {
+		vec3 toLight = lightPosition[i].xyz - inWorldPosition;
+		float attenuation = clamp(1.0 - dot(toLight, toLight) * lightPosition[i].w, 0.0, 1.0);
+		float nl = max(dot(normalize(toLight), normal), 0.0);
+		outColor.rgb += lightColor[i].rgb * (nl * attenuation * 0.5);
+	}
 	if (shadowExtra.w > 0.5) { // BF2142_SHADOW_DEBUG: the dynamic shadow factor, the region tinted
 		vec4 p = shadowMatrix * vec4(inWorldPosition, 1.0);
 		bool inside = all(greaterThan(p.xy, vec2(0.0))) && all(lessThan(p.xy, vec2(1.0)));

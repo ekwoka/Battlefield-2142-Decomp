@@ -515,3 +515,46 @@ TEST(Hud_TextNodeStyles)
 		CHECK(at[6] == std::make_pair(100.0f, 52.0f) && at[8] == std::make_pair(100.0f, 64.0f));
 	}
 }
+
+// A vehicle's miniMapIconOffset (0x0077dd70 → 0x0077c610): the icon drawn
+// that many pixels from its point, turned about the point.
+TEST(Hud_MapMarkerOffset)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createMapNode Global Minimap",
+			 "hudBuilder.setMaxiPos -300/-300",
+			 "hudBuilder.setMaxiSize 600/600",
+			 "hudBuilder.setMiniPos 245/-291",
+			 "hudBuilder.setMiniSize 146/146",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.setMap("Levels/x/Hud/Minimap/ingameMap.dds", -512, -512, 1024, 1024);
+	hud::HudManager::MapMarker plain {"mark.dds", 0, 0, 16, 90};
+	hud::HudManager::MapMarker moved = plain;
+	moved.offsetX = 0;
+	moved.offsetY = 8;
+	manager.setMapMarkers({plain, moved});
+	manager.set("MapFullSize", 1);
+	std::vector<hud::HudQuad> marks;
+	for (const hud::HudQuad& q : manager.frame(0)) {
+		if (q.texture.find("mark.dds") != std::string::npos) {
+			marks.push_back(q);
+		}
+	}
+	CHECK(marks.size() == 2);
+	if (marks.size() == 2) {
+		const hud::HudQuad& a = marks[0];
+		const hud::HudQuad& b = marks[1];
+		CHECK(!a.pivotSet && b.pivotSet);
+		CHECK(b.x0 == a.x0 && b.y0 == a.y0 + 8);
+		// The pivot is the point (the plain icon's centre).
+		CHECK(b.pivot[0] == (a.x0 + a.x1) / 2 && b.pivot[1] == (a.y0 + a.y1) / 2);
+		CHECK(b.rotation == 90);
+	}
+}

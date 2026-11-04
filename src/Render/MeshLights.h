@@ -18,7 +18,32 @@
 //     supportsEmitter (0x8b09); maxLightsPerBundledMesh / ...SkinnedMesh.
 // A spot reaches a static mesh as a point light (the Light record's
 // direction, +0xc, isn't filled for meshes). The shaders' point-light
-// passes add one light each (RaShaderSTM / SM / BM "_pointlight_").
+// passes add one light each (RaShaderSTM / SM / BM "_pointlight_"). The
+// filter's bits (0x100a7f00; set = must hold, the second mask = must not)
+// ask the light object (slot 0x1d0, enabled) and its template (+0x160):
+// 1 enabled, 8 isDynamic (slot 0xf8), 4 / 0x10 castsStaticShadow (0x100),
+// 0x20 castsDynamicShadow (0x108), 0x80 selfLights (0x110), 0x40
+// selfShadows (0x118), 0x400 / 0x800 / 0x1000 / 0x2000 lightType 0..3
+// (Directional, Point, Spot, slot 0xf0), 0x4000 supportsGlow (0x130), 0x8000
+// supportsEmitter (0x138), 0x10000 affectLightmappedObjects (0x140). Every
+// shipped LightSource sets supportsEmitter 1 (the constructor's default,
+// 0x00616d60), so 0x8000 refuses none of them.
+//
+// Two more callers list lights without a mesh's maximum:
+//   the terrain (0x100b4d80): every listed light passing 0x909 (dynamic
+//     Point lights, lightmapped or not; slot 0x18, 0x100a9630), each drawn
+//     as one more additive pass over the patches its sphere meets
+//     (0x1014e080: Hi_Terrain's PerPixelPointlight, pass 13, or pointlight,
+//     pass 1): POINTLIGHT = (position, 1 / range2^2, colour) and
+//     TerrainShader's calcPVPointTerrain x 0.5;
+//   the undergrowth (0x1010e270): per patch, the nearest 4 within reach of
+//     its bounding sphere passing 0xb09 (slot 0x1c), PointLightPosAtten /
+//     PointLightColor, technique t0_l<n> (Undergrowth.fx: per vertex
+//     saturate(1 - d^2 / R^2) x colour, no N.L, added to the sun term).
+// lightManager.maxLightsPerTerrainPatch (+0xac, 7 from the constructor)
+// limits neither: its getter (slot 0x78) is called only by the renderer's
+// state save and restore (0x10028760 / 0x10028590, which keep min(n, 1)),
+// and the undergrowth's 4 is a literal.
 //
 // The dynamic shadows' quality (VideoSettings, RendDX9 settings +0x3c,
 // 0x10010040) sets the three maxima and lightCullDistance together: 0 / 0
@@ -80,15 +105,29 @@ struct ListedLight {
 	float radius = 0; // the (flickered) attenuationRange2
 	bool spot = false;
 	bool affectsLightmapped = true;
+	bool supportsEmitter = true;
 };
 
-// Picks at most kind's maximum of `lights` (count of them) for a mesh at
-// `origin` with `meshRadius`, nearest first, into `out` (indices); returns
-// how many.
-inline int pickMeshLights(const ListedLight* lights, size_t count, const float origin[3], float meshRadius,
-	LightedMesh kind, bool lightmapped, const LightLimits& limits, int* out, int capacity)
+// The terrain's filter 0x909 and the undergrowth's 0xb09: Point lights
+// (isDynamic and enabled are the list's already).
+inline bool terrainTakesLight(const ListedLight& l)
 {
-	const int max = std::min(limits.maxFor(kind), capacity);
+	return !l.spot;
+}
+
+// The undergrowth's per-patch pick (0x1010e270): the nearest 4 Point lights
+// within light radius + the patch sphere's radius, nearest first.
+constexpr int kUndergrowthPatchLights = 4;
+
+// The nearest `max` (at most 16) of `lights` that `accept` takes and whose
+// sphere meets the one at `origin` with `radius`, nearest first by the
+// squared distance to `origin` (0x100a9f80: 0x100ad8c0, 0x100ad040), into
+// `out` (indices); returns how many.
+template<class Accept>
+int pickNearestLights(const ListedLight* lights, size_t count, const float origin[3], float radius, int max,
+	Accept accept, int* out)
+{
+	max = std::min(max, 16);
 	if (max <= 0) {
 		return 0;
 	}
@@ -96,15 +135,12 @@ inline int pickMeshLights(const ListedLight* lights, size_t count, const float o
 	int n = 0;
 	for (size_t i = 0; i < count; ++i) {
 		const ListedLight& l = lights[i];
-		if (l.spot && kind != LightedMesh::Static) {
-			continue; // Point only (0x8b09)
-		}
-		if (lightmapped && !l.affectsLightmapped) {
-			continue; // 0x11b09
+		if (!accept(l)) {
+			continue;
 		}
 		const float dx = l.position[0] - origin[0], dy = l.position[1] - origin[1], dz = l.position[2] - origin[2];
 		const float d2 = dx * dx + dy * dy + dz * dz;
-		const float reach = l.radius + meshRadius;
+		const float reach = l.radius + radius;
 		if (d2 >= reach * reach) {
 			continue;
 		}
@@ -116,8 +152,7 @@ inline int pickMeshLights(const ListedLight* lights, size_t count, const float o
 		if (at >= max) {
 			continue;
 		}
-		const int last = std::min(n, max - 1);
-		for (int j = last; j > at; --j) {
+		for (int j = std::min(n, max - 1); j > at; --j) {
 			best[j] = best[j - 1];
 			out[j] = out[j - 1];
 		}
@@ -126,6 +161,29 @@ inline int pickMeshLights(const ListedLight* lights, size_t count, const float o
 		n = std::min(n + 1, max);
 	}
 	return n;
+}
+
+// Picks at most kind's maximum of `lights` (count of them) for a mesh at
+// `origin` with `meshRadius`, nearest first, into `out` (indices); returns
+// how many.
+inline int pickMeshLights(const ListedLight* lights, size_t count, const float origin[3], float meshRadius,
+	LightedMesh kind, bool lightmapped, const LightLimits& limits, int* out, int capacity)
+{
+	return pickNearestLights(lights, count, origin, meshRadius, std::min(limits.maxFor(kind), capacity),
+		[kind, lightmapped](const ListedLight& l) {
+			if (kind != LightedMesh::Static && (l.spot || !l.supportsEmitter)) {
+				return false; // Point only, supportsEmitter (0x8b09)
+			}
+			return !(lightmapped && !l.affectsLightmapped); // 0x11b09
+		},
+		out);
+}
+
+// The undergrowth patch's pick (0x1010e270): filter 0xb09, at most 4.
+inline int pickUndergrowthLights(const ListedLight* lights, size_t count, const float centre[3], float radius,
+	int* out)
+{
+	return pickNearestLights(lights, count, centre, radius, kUndergrowthPatchLights, terrainTakesLight, out);
 }
 
 } // namespace dice::hfe::render

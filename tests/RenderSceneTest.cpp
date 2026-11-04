@@ -621,6 +621,20 @@ TEST(RenderScene_MeshLightsPickedPerMesh)
 	CHECK(n == 2 && picked[0] == 1 && picked[1] == 0);
 	n = render::pickMeshLights(lights, 4, origin, 3, LightedMesh::Static, true, limits, picked, 8);
 	CHECK(n == 2 && picked[0] == 2 && picked[1] == 0);
+	// Bundled and skinned meshes only supportsEmitter lights (0x8b09's bit
+	// 0x8000); static meshes any.
+	lights[1].supportsEmitter = false;
+	n = render::pickMeshLights(lights, 4, origin, 3, LightedMesh::Skinned, false, limits, picked, 8);
+	CHECK(n == 1 && picked[0] == 0);
+	n = render::pickMeshLights(lights, 4, origin, 3, LightedMesh::Static, false, limits, picked, 8);
+	CHECK(n == 2 && picked[0] == 1 && picked[1] == 2);
+	// An undergrowth patch (0x1010e270): Point lights only (0xb09), the
+	// nearest 4 about its sphere, whatever the emitter flag.
+	n = render::pickUndergrowthLights(lights, 4, origin, 3, picked);
+	CHECK(n == 2 && picked[0] == 1 && picked[1] == 0);
+	n = render::pickUndergrowthLights(lights, 4, origin, 50, picked);
+	CHECK(n == 3 && picked[2] == 3);
+	CHECK(render::terrainTakesLight(lights[0]) && !render::terrainTakesLight(lights[2]));
 	// The flicker's factor lies in 1 - flicker .. 1; MSVC's rand from 1: 41.
 	render::MsvcRand rand;
 	CHECK(rand.next() == 41);

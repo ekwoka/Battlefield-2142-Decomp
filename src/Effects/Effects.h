@@ -520,16 +520,28 @@ struct PointLight {
 	// A placed light's template range (its range2 flickers: 0x0064a920);
 	// below 0 for the effects' lights.
 	float templateRange2 = -1;
+	// The template's speccolor: the skinned meshes' Light record's
+	// specularColor (+0x28, template slot 0x170, 0x10162070).
+	Vec3 specColor {1, 1, 1};
+	// supportsEmitter: bundled and skinned meshes take only lights with it
+	// (their filter 0x8b09's bit 0x8000, template slot 0x138).
+	bool supportsEmitter = true;
 };
 
 // What a LightSource template sets (BF2142.exe's LightSource template,
 // class 0x94c7, as its writer 0x00617030 lists the fields): lightType
 // (+0x70: Directional, Point, Spot ...), isDynamic (+0x64),
 // affectLightmappedObjects (+0x6d), affectingType (+0x90),
-// attenuationRange1 / 2 (+0xa0 / +0xa4), color (+0xa8), coneAngle1 / 2
-// (+0xd0 / +0xd4), enabled, intensity; flicker (+0xe4, clamped to 0..1 by
-// 0x00616cf0) is kept but not applied. The template has no lifetime of its
-// own (none of its setters, 0x00528f5a..0x0052b6ea, is one).
+// attenuationRange1 / 2 (+0xa0 / +0xa4), color (+0xa8), speccolor (+0xb4),
+// supportsEmitter (+0x6c), coneAngle1 / 2 (+0xd0 / +0xd4), enabled;
+// flicker (+0xe4, clamped to 0..1 by 0x00616cf0). The defaults are the
+// constructor's (0x00616d60: isDynamic 0, supportsEmitter and
+// affectLightmappedObjects 1, both colours white). The colour is used as it
+// is: every in-game reader takes the template's colour (slot 0x168) or the
+// light object's copy of it (`+0x184`, slot 0x1a0), and `intensity` (slot
+// 0x1e8) is read in RendDX9 only by the lightmap generator (0x1006a310).
+// The template has no lifetime of its own (none of its setters,
+// 0x00528f5a..0x0052b6ea, is one).
 struct LightSourceLook {
 	bool enabled = true;
 	bool spot = false;
@@ -537,7 +549,9 @@ struct LightSourceLook {
 	bool dynamic = true;
 	bool affectsLightmapped = true;
 	int affectingType = 0;
-	Vec3 color {1, 1, 1}; // times intensity
+	Vec3 color {1, 1, 1};
+	Vec3 specColor {1, 1, 1};
+	bool supportsEmitter = true;
 	float range1 = 0, range2 = 1;
 	Vec3 direction {0, 0, 1}; // in the light's space
 	// The shaders' ConeAngle: coneAngle2 in radians. BF2142.exe's light
@@ -665,6 +679,16 @@ struct BundleModifiers {
 	std::array<Modifier, 6> modifiers;
 	bool anyMapping = false;           // 0x0064be90
 	float minUnderWater = -0.25f;      // minDistanceUnderWaterSurface (+0x3f4)
+	// maxDistanceUnderWaterSurface (+0x3f8, -1 by default, 0x0061a9b0).
+	// With the minimum at 0 or more an attached bundle runs only while its
+	// depth under the water lies within [min, max] (0x0061a760): it starts
+	// on entering the range (unless running, +0x18e) and stops on leaving;
+	// on a soldier only while he isn't seated (the parent's +0x34). Shipped:
+	// the amphibious APCs' wakes and bow spray, the soldiers' e_sold_swim,
+	// e_sinking_vehicle, the web wheels' water spray.
+	float maxUnderWater = -1;
+	bool depthGated() const { return minUnderWater >= 0; }
+	bool inDepth(float depth) const { return depth >= 0 && depth >= minUnderWater && depth <= maxUnderWater; }
 	static BundleModifiers fromTemplate(const world::ObjectTemplate& t);
 	// The modifiers the update sets: bit i for modifier i, its value in out[i].
 	unsigned evaluate(const Inputs& inputs, std::array<float, 6>& out) const;
@@ -743,6 +767,12 @@ public:
 	// BundleModifiers' altitude at a point: over the ground (the
 	// collisionEnable ground), or under the water when `underWater`.
 	float altitudeAt(const Vec3& at, bool underWater) const;
+	// The WindAffectors of the bundles spawned on their own (explosions)
+	// still blowing, appended to `out` (the WindManager's local winds).
+	void appendLocalWinds(std::vector<scene::WindSettings::LocalWind>& out) const;
+	// The water's height over a point (below 0 above the water or with
+	// none): the depth gate's (BundleModifiers::maxUnderWater).
+	float waterDepthAt(const Vec3& at) const;
 	// Sprites alive in all the sprite systems (the pool's use).
 	int poolUsed() const { return m_poolUsed; }
 	// EffectBundle.speedFromPhysics: the physics velocity (world) at an
@@ -917,6 +947,11 @@ private:
 	};
 	void placeLight(LiveLight& light) const;
 	std::vector<LiveLight> m_lights;
+	struct LiveWind {
+		scene::WindSettings::LocalWind wind;
+		float age = 0, life = -1; // life below 0: as long as the manager
+	};
+	std::vector<LiveWind> m_winds;
 	struct LiveDebrisEmitter {
 		const DebrisEmitterTemplate* look = nullptr;
 		Vec3 position;
@@ -1001,6 +1036,8 @@ public:
 		// kit's disableBreathEffect, not in a vehicle, not the local player
 		// in first person).
 		bool coldBreath = false;
+		// Soldiers: seated in a vehicle (their depth-gated bundles stay off).
+		bool seated = false;
 		// Its wheels' contact this tick (the vehicle's springs, by template
 		// name): a WheelEffectBundle under a wheel's spring is on while it
 		// touches, at its contact point (world). Empty: the bundle probes

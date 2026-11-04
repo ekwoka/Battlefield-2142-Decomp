@@ -8643,6 +8643,29 @@ bool GameWorld::gunAim(uint32_t vehicle, int seat, float& yaw, float& pitch) con
 	return false;
 }
 
+bool GameWorld::seatYaw(uint32_t vehicle, int seat, float& yaw) const
+{
+	const world::Object* object = m_objects.find(vehicle);
+	if (!object || !object->objectTemplate() || seat < 0) {
+		return false;
+	}
+	const auto known = m_layouts.find(object->objectTemplate()->name());
+	if (known == m_layouts.end() || static_cast<size_t>(seat) >= known->second.seats.size()
+		|| known->second.seats[static_cast<size_t>(seat)].yawBundle.empty()) {
+		return false;
+	}
+	for (const Body& body : m_bodies) {
+		if (body.object == vehicle) {
+			if (static_cast<size_t>(seat) >= body.guns.size()) {
+				return false;
+			}
+			yaw = body.guns[static_cast<size_t>(seat)].yaw;
+			return true;
+		}
+	}
+	return false;
+}
+
 bool GameWorld::drivesSeat(uint32_t vehicle, int seat) const { return seat == 0 && this->vehicle(vehicle) != nullptr; }
 
 bool GameWorld::abilityOf(const world::ObjectTemplate& gadget, Ability& ability, bool& whileFiring)

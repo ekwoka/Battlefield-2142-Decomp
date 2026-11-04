@@ -335,8 +335,75 @@ struct PassengerLine {
 };
 std::array<PassengerLine, 10> passengerLines(const std::vector<SeatDot>& seats);
 
+// A HUD blink (BF2142.exe's blinker, constructor 0x00778040, vtable
+// 0x009b264c, its tick 0x00778080 with the frame's time): it watches a
+// value and toggles a show flag while the value is below `threshold`. The
+// vehicle and player HUD's four (made with its variables by 0x0079e5a0, at
+// 0x0079fa9f..0x0079fb89): PlayerHealthBlink (+0x2ae) on PlayerHealth
+// (+0x1cc), VehicleArmorBlink (+0x2b9) on VehicleArmor (+0x1d8),
+// PlayerStaminaBlink (+0x2aa) on PlayerStamina (+0x1d0) and
+// VehicleStaminaBlink (+0x2ac) on VehicleStamina (+0x1d4), each with
+// threshold 0.3, floor 0, periods 0.7 / 0.15 and the scaled period.
+//   - Below the threshold (and the threshold not 0, the value not below
+//     0) the timer runs; once it passes the period ((0.7 - 0.15) / 0.3 x
+//     the value + 0.15 scaled, else 0.7) the flag toggles (held off at or
+//     below the floor) and the timer starts again: the nearer empty the
+//     faster it blinks.
+//   - Otherwise a lit flag goes off once the timer passes the period.
+class HudBlink {
+public:
+	HudBlink(float threshold = 0.3f, float floor = 0, float slow = 0.7f, float fast = 0.15f, bool scaled = true)
+		: m_threshold(threshold), m_floor(floor), m_slow(slow), m_fast(fast), m_scaled(scaled)
+	{
+	}
+	// One frame (0x00778080): returns the flag.
+	bool tick(float value, float seconds);
+	bool lit() const { return m_lit; }
+	void reset()
+	{
+		m_lit = false;
+		m_timer = 0;
+	}
+
+private:
+	float m_threshold, m_floor, m_slow, m_fast; // +0xc, +0x10, +0x14, +0x18
+	bool m_scaled;                              // +0x1c
+	float m_timer = 0;                          // +0x20
+	bool m_lit = false;                         // *+8
+};
+
+// The other seats' turrets on the vehicle HUD (0x007a2b50 → 0x007a1e00 →
+// 0x007a07c0): GunnerAngle (+0x20c) and SecondaryGunnerAngle (+0xb0).
+// With the local player in a vehicle, every PlayerControlObject of the
+// root's list (its slot 0x64) that isn't a soldier (interface 0xc4d7) or
+// his own seat is searched (the seat's subtree, depth first) for the first
+// RotationalBundle whose maxSpeed turns on the yaw alone (x not 0, y and z
+// 0: 0x006147c0); with the controlled object's
+// vehicleHud.showOneSecondaryGunnerAngle (block +0xc1: the APCs' drivers)
+// the search stops after the first such seat, found or not. Each bundle
+// found (its rotation r, degrees: slot 0x188):
+//   - the first bundle seen since entering is kept (+0xa8), a second
+//     different one too (+0xac); 0x007a1ee0 clears both as the player's
+//     controlled object becomes his soldier again;
+//   - without a second one, GunnerAngle = clamp(-r, -180, 180);
+//   - with one, the second gives SecondaryGunnerAngle = clamp(-(r +
+//     1.5708), ...) and the first GunnerAngle = clamp(r - 1.5708, ...)
+//     (the exe adds pi / 2 to degrees before turning them to radians).
+// The rewrite's HUD keeps angles in degrees (its picture rotations and
+// compasses), so the values are the exe's radians x 180 / pi. The angles
+// keep their last values while no bundle is found.
+struct OtherSeat {
+	bool hasBundle = false; // a yaw-only RotationalBundle under the seat
+	int bundle = -1;        // which (the node's +0x20: the seat index here)
+	float rotation = 0;     // its yaw rotation, degrees
+};
+
 struct VehicleHudInput {
 	const world::ObjectTemplate* vehicle = nullptr;
+	// The controlled object's template (the seat's PlayerControlObject;
+	// the vehicle's for the driver): showOneSecondaryGunnerAngle.
+	const world::ObjectTemplate* seat = nullptr;
+	std::vector<OtherSeat> others; // the other seats in the root's list order
 	float armor = 1;      // its share, 0..1
 	float speed = 0;      // m/s
 	float climb = 0;      // m/s up
@@ -361,6 +428,10 @@ private:
 	float m_climbAngle = 0, m_climbPrevious = 0; // +0x204 / +0x208
 	float m_torque = 0, m_secondTorque = 1;     // +0x210 / +0x21c (the constructor's 0, 1)
 	float m_staminaWas = 1, m_staminaTimer = -1; // +0x1d4, +0x23c
+	HudBlink m_staminaBlink, m_armorBlink;       // +0x2ac, +0x2b9
+	int m_firstBundle = -1, m_secondBundle = -1; // +0xa8 / +0xac (-1: none)
+	float m_gunnerAngle = 0, m_secondaryAngle = 0; // +0x20c / +0xb0, degrees
+	void gunnerBundle(const OtherSeat& seat); // 0x007a07c0
 	// The template's fields, read when the vehicle changes.
 	const world::ObjectTemplate* m_template = nullptr;
 	std::string m_name;
@@ -376,6 +447,13 @@ struct VehicleMarker {
 	std::string texture;
 	float width = 16, height = 16;
 	bool asPlayer = false; // usePlayerIcon: draw the occupant
+	// miniMapIconOffset (miniMapIconOffsetInside while inside; block
+	// +0x100 / +0x108, 0x0077dd70 into the marker's +0x20): pixels, the icon
+	// drawn that far from its point in its own frame and turned about the
+	// point (0x0077c610: the rectangle floor(point + offset - size / 2), the
+	// turn's pivot the rectangle's centre - offset). The Titans' 0/8 and
+	// 0/10.5 (0.94/11.2 the PAC's inside).
+	float offsetX = 0, offsetY = 0;
 };
 bool vehicleMarker(const world::ObjectTemplate& vehicle, MapRelation relation, bool inside, bool spotted, VehicleMarker& out);
 
@@ -395,6 +473,12 @@ bool vehicleMarker(const world::ObjectTemplate& vehicle, MapRelation relation, b
 //     written, so the ring shows over the time still to go.
 //   - spottedIcon / spottedIconSize (16; 0x0077dd70 with its spotted flag,
 //     from 0x0077dfe0 for what spotting reveals): the kits' mini_Soldier.
+//   - miniMapIconOffset / miniMapIconOffsetInside (0, 0; VehicleMarker).
+//   - zoomOnMinimap (block +0xb0, 0x00793b60 at 0x0079429c): such a
+//     vehicle (the Titans) isn't drawn on a map node at zoom index 2
+//     (+0x74c) while the local player's overhead view is on (player slot
+//     0xdc, +0x8f, set with +0x8e by 0x00593840: the commander's overhead
+//     camera), whose picture shows the Titan itself.
 // The silo icons' files are numbered frames (mini_titanSilo_01..06,
 // mini_reload_01..06); the frame is the silo's place in its control
 // points' order here (the frame's pick, through the texture's own frames,
@@ -402,7 +486,9 @@ bool vehicleMarker(const world::ObjectTemplate& vehicle, MapRelation relation, b
 struct MapIcons {
 	std::string icon, iconInside, reload, background, spotted;
 	std::array<float, 2> size {16, 16}, sizeInside {16, 16};
+	std::array<float, 2> offset {0, 0}, offsetInside {0, 0};
 	float spottedSize = 16;
+	bool zoomOnMinimap = false;
 	int info = 0;
 	int vehicleType = -1;
 	bool showOnEnemy = false, always = false, usePlayerIcon = false;
@@ -410,6 +496,26 @@ struct MapIcons {
 // Cached by template (checked against its name and its number of
 // settings, as templates can be made again).
 const MapIcons& mapIcons(const world::ObjectTemplate& t);
+// zoomOnMinimap's test (0x00793b60): hidden on a map at zoom index 2 while
+// the local player's overhead view is on.
+bool hiddenOnZoomedMap(const MapIcons& icons, int zoomIndex, bool overheadView);
+
+// The controlled object's vehicleHud flags (its template: a seat's
+// PlayerControlObject, the vehicle's for the driver, the soldier's on
+// foot; 1 by default, 0x00637b30):
+//   - standardHelpEnabled (block +0xbb): the help manager's (0x00646cb0)
+//     exit-vehicle message 0x48 (case at 0x00648906: in a vehicle that isn't
+//     a LadderContainer, 0x9c46) and enter-vehicle message 0x47 (0x006487db:
+//     on foot, a vehicle within 3 m, the controlled object not a Ladder,
+//     0x9c40) need it; the static guns, the parachute and the bipods set 0.
+//   - useVehicleCommRose (block +0xbe): the radio key (0x0075be30) opens
+//     the vehicle's radio rose (menu state 6, RadioVehicle) when the
+//     controlled object isn't the soldier, that rose is enabled (its slot
+//     0x1c, +5: 1 from 0x007b88e0) and the flag is set; else the soldier's
+//     (state 5, Radio) if that is enabled. The static AA / AV guns set 1,
+//     the parachute, LadderContainer and the bipods 0.
+bool standardHelpEnabled(const world::ObjectTemplate* controlled);
+bool usesVehicleCommRose(const world::ObjectTemplate* controlled);
 // A numbered frame of an icon without an extension (mini_titanSilo +
 // 2 -> mini_titanSilo_02.dds); a name with one stays.
 std::string iconFrame(const std::string& icon, int frame);

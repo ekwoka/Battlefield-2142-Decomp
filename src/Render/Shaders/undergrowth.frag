@@ -2,7 +2,7 @@
 // Undergrowth (Undergrowth.fx PShader): the atlas texture tinted by the
 // terrain colormap under it (less so by TerrainColorScale) and lit by the
 // terrain lightmap:
-//   light = lightmap.g * sun * 2 + lightmap.b * GI
+//   light = (lightmap.g * sun + points) * 2 + lightmap.b * GI
 //   color = base * mix(terrain, 1, mix) * light * 2
 // Alpha-tested against the cfg's AlphaRef, using the atlas's "_alphatest"
 // variant (full-range alpha). With undergrowth.dynamicShadowsEnable the
@@ -30,6 +30,11 @@ layout(set = 3, binding = 0) uniform Lighting {
 	vec4 fogColor;     // rgb, w: the near term's floor (FogColor.w)
 	vec4 fogRange;     // RaCommon.fx FogRange (fog.glsl)
 	vec4 material;     // x: alpha reference, y: 1 with a lightmap
+	vec4 uvOffset;     // (LightingUniforms' layout; unused here)
+	vec4 tint;
+	vec4 lightCount;   // x: the patch's point lights (at most 4)
+	vec4 lightPosition[8]; // PointLightPosAtten: xyz, w 1 / R^2
+	vec4 lightColor[8];    // PointLightColor
 };
 #include "fog.glsl"
 
@@ -50,6 +55,13 @@ void main()
 		vec3 gi = clamp(skyColor.rgb * 0.5, 0.0, 1.0);
 		float shadow = shadowExtra.z > 0.5 ? shadowFactor(inWorldPosition, false) : 1.0;
 		light = lightmap.g * sun * 2.0 * shadow + lightmap.b * gi;
+	}
+	// The patch's point lights (t0_l1..l4): saturate(1 - d^2 / R^2) x
+	// colour each, no N.L, beside the sun's term: (sun + points) x 2.
+	int count = int(lightCount.x + 0.5);
+	for (int i = 0; i < count && i < 4; ++i) {
+		vec3 toLight = inWorldPosition - lightPosition[i].xyz;
+		light += clamp(1.0 - dot(toLight, toLight) * lightPosition[i].w, 0.0, 1.0) * lightColor[i].rgb * 2.0;
 	}
 	vec3 color = base.rgb * terrain * light * 2.0;
 	float fog = fogAmount(inDepth);

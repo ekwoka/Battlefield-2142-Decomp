@@ -217,6 +217,47 @@ TEST(Effects_ObjectBundlesStartAndStopAsTheOriginal)
 	CHECK(!manager.emitting(9) && objects.tracked() == 0);
 }
 
+// A bundle with minDistanceUnderWaterSurface >= 0 (the amphibious APCs'
+// wake, the soldiers' e_sold_swim) runs only while its depth under the
+// water is within [min, max], whatever started it; a seated soldier's
+// stays off (0x0061a760).
+TEST(Effects_DepthGatedBundlesFollowTheWater)
+{
+	world::ObjectTemplateManager templates;
+	addFlame(templates, true);
+	world::ObjectTemplate* wake = templates.create("EffectBundle", "e_amphib_wake");
+	wake->settings()["setStartOnEffects"] = "32";
+	wake->settings()["minDistanceUnderwaterSurface"] = "0";
+	wake->settings()["maxDistanceUnderwaterSurface"] = "5";
+	wake->children().push_back({"flame", {}, {}});
+	world::ObjectTemplate* apc = templates.create("PlayerControlObject", "as_apc_NP");
+	apc->children().push_back({"e_amphib_wake", {0, -1, 0}, {}});
+	effects::EffectManager manager(templates);
+	manager.setWater(true, 10);
+	effects::ObjectEffects objects(templates);
+	effects::ObjectEffects::ObjectState state;
+	state.id = 4;
+	state.objectTemplate = apc;
+	state.position = {0, 20, 0}; // on land: entering doesn't keep it on
+	state.occupied = true;
+	objects.update({state}, manager);
+	CHECK(!manager.emitting(4, 1));
+	state.position = {0, 9.5f, 0}; // the bundle 1.5 m under the surface
+	objects.update({state}, manager);
+	CHECK(manager.emitting(4, 1));
+	state.position = {0, 3, 0}; // 8 m under: past the maximum
+	objects.update({state}, manager);
+	CHECK(!manager.emitting(4, 1));
+	state.position = {0, 9.5f, 0};
+	state.seated = true;
+	objects.update({state}, manager);
+	CHECK(!manager.emitting(4, 1));
+	manager.setWater(false, 0);
+	state.seated = false;
+	objects.update({state}, manager);
+	CHECK(!manager.emitting(4, 1));
+}
+
 TEST(Effects_DecalsLightsAndMeshParticles)
 {
 	world::ObjectTemplateManager templates;
@@ -260,20 +301,28 @@ TEST(Effects_DecalsLightsAndMeshParticles)
 	spike->settings()["randomRotation"] = "0/0/90";
 	spike->setGeometry("mp_smokespike");
 	world::ObjectTemplate* light = templates.create("LightSource", "flash");
-	light->settings()["color"] = "2/1/0.5";
-	light->settings()["intensity"] = "2";
+	light->settings()["isDynamic"] = "1";
+	light->settings()["color"] = "4/1/0.5";
+	light->settings()["speccolor"] = "0.5/0.5/0.5";
+	light->settings()["intensity"] = "2"; // the lightmap generator's only (RendDX9 0x1006a310)
 	light->settings()["attenuationRange1"] = "2";
 	light->settings()["attenuationRange2"] = "5";
 	world::ObjectTemplate* off = templates.create("LightSource", "off");
+	off->settings()["isDynamic"] = "1";
 	off->settings()["enabled"] = "0";
+	// isDynamic 0 (the template's default, 0x00616d60): the lightmaps' only.
+	world::ObjectTemplate* baked = templates.create("LightSource", "baked");
 	world::ObjectTemplate* bundle = templates.create("EffectBundle", "e_boom");
 	bundle->children().push_back({"mp_spike", {}, {}});
 	bundle->children().push_back({"flash", {0, 1, 0}, {}});
 	bundle->children().push_back({"off", {}, {}});
+	bundle->children().push_back({"baked", {}, {}});
 	CHECK(manager.spawn("e_boom", {10, 0, 0}));
 	CHECK(manager.lights().size() == 1);
 	const effects::PointLight lit = manager.lights()[0];
 	CHECK(lit.position.x == 10 && lit.position.y == 1 && lit.color.x == 4 && lit.range1 == 2 && lit.range2 == 5);
+	CHECK(lit.specColor.x == 0.5f && lit.supportsEmitter);
+	CHECK(!effects::lightSourceOf(*baked).dynamic && effects::lightSourceOf(*baked).specColor.y == 1);
 	// A spot's ConeAngle: coneAngle2 in radians, at most 180 degrees; the
 	// ranges at most 100 (BF2142.exe 0x0064b170).
 	world::ObjectTemplate* spot = templates.create("LightSource", "spot");
@@ -760,6 +809,28 @@ TEST(Effects_LocalWinds)
 	const Wind& local = objects.localWinds()[0];
 	CHECK(local.type == Wind::Type::RadialDir && std::fabs(local.position[0] - 10) < 1e-4f
 		&& std::fabs(local.position[1] - 2) < 1e-4f && std::fabs(local.direction[2] + 1) < 1e-4f);
+
+	// An explosion bundle spawned on its own blows its Point wind for
+	// windBlowTime, at most as long as the bundle (0x0064b490 / 0x0064b4c0).
+	templates.registerType(1, "EffectBundle");
+	addFlame(templates, false);
+	world::ObjectTemplate* explosion = templates.create("EffectBundle", "e_exp_small");
+	explosion->components().push_back("WindAffector");
+	explosion->settings()["windType"] = "Point";
+	explosion->settings()["windSpeed"] = "20";
+	explosion->settings()["windFalloff"] = "10";
+	explosion->settings()["windBlowTime"] = "0.5";
+	explosion->children().push_back({"flame", {}, {}});
+	CHECK(manager.spawn("e_exp_small", {3, 0, 0}));
+	std::vector<Wind> blowing;
+	manager.appendLocalWinds(blowing);
+	CHECK(blowing.size() == 1 && blowing[0].type == Wind::Type::Point && std::fabs(blowing[0].position[0] - 3) < 1e-4f);
+	for (int i = 0; i < 18; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	blowing.clear();
+	manager.appendLocalWinds(blowing);
+	CHECK(blowing.empty());
 }
 
 // alphaCull, pivotOffset, drawOrder and collisionEnable of a sprite system.

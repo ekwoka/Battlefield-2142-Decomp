@@ -1101,6 +1101,10 @@ public:
 		float& pitchTurn);
 	static float regulatedInput(float input, float regulated);
 	bool gunAim(uint32_t vehicle, int seat, float& yaw, float& pitch) const;
+	// A seat's yaw bundle's own rotation (Gun::yaw, degrees, without the
+	// bundle's frame): what the vehicle HUD's GunnerAngle reads (the
+	// bundle's slot 0x188, 0x007a07c0); false for a seat without one.
+	bool seatYaw(uint32_t vehicle, int seat, float& yaw) const;
 	// Whether the seat's look turns its gun (seatAims): every gunner with a
 	// gun bundle, and the ground drivers whose turret or barrel is theirs
 	// (eu_tank's turret, the APCs' first position, the mechs' torso, the

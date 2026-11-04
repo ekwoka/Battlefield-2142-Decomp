@@ -576,10 +576,11 @@ void VehicleHud::update(hud::HudManager& hud, const VehicleHudInput& in)
 	hud.set("VehicleStamina", in.stamina);
 	hud.set("VehicleStaminaShow", in.sprinting || in.stamina < 1 ? 1 : 0);
 	hud.set("VehicleStaminaTextStringShow", m_staminaTimer >= 0 ? 1 : 0);
-	hud.set("VehicleStaminaBlink", 0);
+	hud.set("VehicleStaminaBlink", m_staminaBlink.tick(in.stamina, in.seconds) ? 1 : 0);
 	// 0x007a18a0: the armour's share, its text (per cent) and colour.
 	const float armor = std::clamp(in.armor, 0.0f, 1.0f);
 	hud.set("VehicleArmor", armor);
+	hud.set("VehicleArmorBlink", m_armorBlink.tick(armor, in.seconds) ? 1 : 0);
 	hud.setString("VehicleArmorString", std::to_string(static_cast<int>(std::ceil(armor * 100.0f))));
 	setColor(hud, "VehicleArmorColor", hudLevelColor(armor, 0.3f));
 	hud.set("VehicleArmorShow", 1);
@@ -590,6 +591,18 @@ void VehicleHud::update(hud::HudManager& hud, const VehicleHudInput& in)
 	const float angle = (12.566371f / climbSpeed) * in.climb * 0.1f - m_climbPrevious + m_climbAngle;
 	m_climbAngle = m_climbPrevious = angle;
 	hud.set("VehicleElevationSpeedAngle", angle);
+	// The other seats' turrets (0x007a2b50 → 0x007a1e00 / 0x007a07c0).
+	const bool one = in.seat && flag(in.seat, "vehicleHud.showOneSecondaryGunnerAngle", false);
+	for (const OtherSeat& other : in.others) {
+		if (other.hasBundle) {
+			gunnerBundle(other);
+		}
+		if (one) {
+			break;
+		}
+	}
+	hud.set("GunnerAngle", m_gunnerAngle);
+	hud.set("SecondaryGunnerAngle", m_secondaryAngle);
 	hud.setString("AltitudeString", std::to_string(static_cast<int>(std::ceil(in.altitude))));
 	// The seat dots (0x007a28e0): states 0 (unset) .. 7 per seat, at the
 	// seat's icon position.
@@ -644,8 +657,49 @@ std::array<PassengerLine, 10> passengerLines(const std::vector<SeatDot>& seats)
 	return lines;
 }
 
+void VehicleHud::gunnerBundle(const OtherSeat& seat)
+{
+	// 0x007a07c0: the first bundle kept (+0xa8), a second different one
+	// (+0xac); the angles clamped to [-pi, pi] (0x00402dd0), here degrees.
+	if (m_firstBundle >= 0 && m_firstBundle != seat.bundle) {
+		m_secondBundle = seat.bundle;
+	} else {
+		m_firstBundle = seat.bundle;
+	}
+	if (m_secondBundle < 0) {
+		m_gunnerAngle = std::clamp(-seat.rotation, -180.0f, 180.0f);
+	} else if (m_firstBundle >= 0 && m_firstBundle != seat.bundle) {
+		m_secondaryAngle = std::clamp(-(seat.rotation + 1.5707964f), -180.0f, 180.0f);
+	} else {
+		m_gunnerAngle = std::clamp(seat.rotation - 1.5707964f, -180.0f, 180.0f);
+	}
+}
+
+bool HudBlink::tick(float value, float seconds)
+{
+	// 0x00778080 (the watched value present).
+	const float period = m_scaled ? (m_slow - m_fast) / m_threshold * value + m_fast : m_slow;
+	m_timer += seconds;
+	if (value < m_threshold && m_threshold != 0 && !(value < 0)) {
+		if (m_timer > period) {
+			m_lit = value > m_floor ? !m_lit : false;
+			m_timer = 0;
+		}
+	} else if (m_lit && m_timer > period) {
+		m_timer = 0;
+		m_lit = false;
+	}
+	return m_lit;
+}
+
 void VehicleHud::clear(hud::HudManager& hud)
 {
+	// 0x007a1ee0 as the controlled object becomes the soldier again.
+	m_firstBundle = m_secondBundle = -1;
+	m_staminaBlink.reset();
+	m_armorBlink.reset();
+	hud.set("VehicleStaminaBlink", 0);
+	hud.set("VehicleArmorBlink", 0);
 	for (int i = 1; i <= 10; ++i) {
 		hud.set("OccupyingPlayerName" + std::to_string(i) + "Show", 0);
 	}
@@ -698,6 +752,9 @@ const MapIcons& mapIcons(const world::ObjectTemplate& t)
 	m.size = pair(&t, "vehicleHud.miniMapIconSize", 16);
 	m.sizeInside = pair(&t, "vehicleHud.miniMapIconSizeInside", 16);
 	m.spottedSize = hudNumber(&t, "vehicleHud.spottedIconSize", 16);
+	m.offset = pair(&t, "vehicleHud.miniMapIconOffset", 0);
+	m.offsetInside = pair(&t, "vehicleHud.miniMapIconOffsetInside", 0);
+	m.zoomOnMinimap = flag(&t, "vehicleHud.zoomOnMinimap", false);
 	std::string info = hudSetting(&t, "vehicleHud.miniMapInfo", "Icon");
 	std::transform(info.begin(), info.end(), info.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 	m.info = info == "reload" ? 1 : info == "all" ? 2 : 0; // anything else keeps "icon"'s 0
@@ -708,6 +765,21 @@ const MapIcons& mapIcons(const world::ObjectTemplate& t)
 	Entry& slot = cache[&t];
 	slot = {t.name(), t.settings().size(), std::move(m)};
 	return slot.icons;
+}
+
+bool hiddenOnZoomedMap(const MapIcons& icons, int zoomIndex, bool overheadView)
+{
+	return icons.zoomOnMinimap && zoomIndex == 2 && overheadView;
+}
+
+bool standardHelpEnabled(const world::ObjectTemplate* controlled)
+{
+	return flag(controlled, "vehicleHud.standardHelpEnabled", true);
+}
+
+bool usesVehicleCommRose(const world::ObjectTemplate* controlled)
+{
+	return flag(controlled, "vehicleHud.useVehicleCommRose", true);
 }
 
 std::string iconFrame(const std::string& icon, int frame)
@@ -747,6 +819,9 @@ bool vehicleMarker(const world::ObjectTemplate& vehicle, MapRelation relation, b
 	const auto& size = useInside ? m.sizeInside : m.size;
 	out.width = size[0];
 	out.height = size[1];
+	const auto& offset = useInside ? m.offsetInside : m.offset;
+	out.offsetX = offset[0];
+	out.offsetY = offset[1];
 	out.asPlayer = m.usePlayerIcon && relation != MapRelation::Neutral;
 	return true;
 }
