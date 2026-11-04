@@ -156,6 +156,9 @@ TEST(Nametags_IconRegistry)
 {
 	CHECK(nametags::IconRegistry::idOf("ICObject") == 0x50 && nametags::IconRegistry::idOf("icobjectcore") == 0x96);
 	CHECK(nametags::IconRegistry::idOf("ICNothing") == -1);
+	// 0x1007168d also takes an id by number, when it is one of the ids.
+	CHECK(nametags::IconRegistry::idOf("53") == 0x35 && nametags::IconRegistry::idOf("0") == 0);
+	CHECK(nametags::IconRegistry::idOf("1") == -1);
 	Console console;
 	nametags::IconRegistry icons;
 	icons.textureSize = [](const std::string& texture, int& w, int& h) {

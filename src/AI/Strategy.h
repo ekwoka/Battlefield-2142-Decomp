@@ -1,5 +1,6 @@
 // AIDLL.dll's strategic AI (the "SAI", one per side; vtbl 0x10118480,
-// update 0x100a2dd0), rewritten.
+// update 0x100a2dd0; constructor 0x100a39c0, destructor 0x100a3620 /
+// 0x100a3f60), rewritten.
 //
 // The scripts describe it (AI/AIDefaultStrategies.ai, the level's
 // GameModes/<mode>/<size>/ai/StrategicAreas.ai):
@@ -71,6 +72,10 @@ struct Strategy {
 	Strategy();
 };
 
+// The original's area object (vtable 0x10116280: constructed by
+// 0x10062e10 for a box area and 0x1005ffe0 from a control point,
+// destroyed by 0x10062f90 / 0x10062820; its strategic-object base, vtable
+// 0x10116340: constructor 0x10063fc0, destructor 0x10063f90 / 0x10063c30).
 struct StrategicArea {
 	std::string name;
 	int controlPoint = -1;     // createFromControlPoint

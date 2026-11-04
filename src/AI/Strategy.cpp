@@ -9,6 +9,7 @@ namespace dice::hfe::ai {
 
 Strategy::Strategy()
 {
+	// The record's modifier block, every entry 1 (0x100cca00 from 0x1005cb60).
 	for (auto& row : modifiers) {
 		row.fill(1.0f);
 	}

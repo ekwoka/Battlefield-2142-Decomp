@@ -55,6 +55,10 @@ GeometryTemplate* GeometryTemplateManager::create(const std::string& type, const
 		slot->name = name;
 		slot->kind = meshKind;
 		slot->meshParticle = kind == "meshparticlemesh";
+		// The templates' loads compose the same path: the script's folder,
+		// "Meshes/", the name and the kind's extension (bundled 0x100a1860,
+		// skinned 0x100d3080, MeshParticleMesh 0x100e9060, which takes a
+		// "gpu_<name>" file instead when there is one; none ship).
 		slot->path = extension ? scriptDirectory + "Meshes/" + name + extension
 								: scriptDirectory + name + "_compiled.dat";
 	}
@@ -70,7 +74,7 @@ GeometryTemplate* GeometryTemplateManager::find(const std::string& name) const
 
 void registerGeometryConsoleMethods(Console& console, GeometryTemplateManager& geometries)
 {
-	bindMethod(console, "GeometryTemplate.create", ConsoleAccess::Anyone,
+	bindMethod(console, "GeometryTemplate.create", ConsoleAccess::Anyone, // 0x10072c14, 0x10072ca0, 0x10072d75
 		[&console, &geometries](std::string type, std::string name) {
 			const std::string& file = console.currentFile();
 			const size_t slash = file.rfind('/');
@@ -78,22 +82,22 @@ void registerGeometryConsoleMethods(Console& console, GeometryTemplateManager& g
 			GeometryTemplate* created = geometries.create(type, name, directory);
 			return created ? created->name : std::string();
 		});
-	bindMethod(console, "GeometryTemplate.hasAdditiveAlpha", ConsoleAccess::Anyone, [&geometries](bool on) {
+	bindMethod(console, "GeometryTemplate.hasAdditiveAlpha", ConsoleAccess::Anyone, [&geometries](bool on) { // 0x100740c3, 0x10074134, 0x10074181
 		if (GeometryTemplate* active = geometries.active()) {
 			active->hasAdditiveAlpha = on;
 		}
 	});
-	bindMethod(console, "GeometryTemplate.useRadiusForShadowDepth", ConsoleAccess::Anyone, [&geometries](bool on) {
+	bindMethod(console, "GeometryTemplate.useRadiusForShadowDepth", ConsoleAccess::Anyone, [&geometries](bool on) { // 0x10074932, 0x100749a3, 0x100749f0
 		if (GeometryTemplate* active = geometries.active()) {
 			active->useRadiusForShadowDepth = on;
 		}
 	});
-	bindMethod(console, "GeometryTemplate.useRadiusForShadowSpatial", ConsoleAccess::Anyone, [&geometries](bool on) {
+	bindMethod(console, "GeometryTemplate.useRadiusForShadowSpatial", ConsoleAccess::Anyone, [&geometries](bool on) { // 0x10074a4b, 0x10074abc, 0x10074b09
 		if (GeometryTemplate* active = geometries.active()) {
 			active->useRadiusForShadowSpatial = on;
 		}
 	});
-	bindMethod(console, "GeometryTemplate.simpleUVTranslation", ConsoleAccess::Anyone, [&geometries](std::string uv) {
+	bindMethod(console, "GeometryTemplate.simpleUVTranslation", ConsoleAccess::Anyone, [&geometries](std::string uv) { // 0x100741cb, 0x10074257, 0x100742c2
 		if (GeometryTemplate* active = geometries.active()) {
 			float u = 0, v = 0;
 			std::sscanf(uv.c_str(), "%f/%f", &u, &v);
@@ -101,18 +105,18 @@ void registerGeometryConsoleMethods(Console& console, GeometryTemplateManager& g
 			active->simpleUVTranslation[1] = v;
 		}
 	});
-	bindMethod(console, "GeometryTemplate.maxSkip3pLods", ConsoleAccess::Anyone, [&geometries](unsigned lods) {
+	bindMethod(console, "GeometryTemplate.maxSkip3pLods", ConsoleAccess::Anyone, [&geometries](unsigned lods) { // 0x100739ea, 0x10073a37
 		if (GeometryTemplate* active = geometries.active()) {
 			active->maxSkip3pLods = lods;
 		}
 	});
-	bindMethod(console, "GeometryTemplate.maxSkipWreckLods", ConsoleAccess::Anyone, [&geometries](unsigned lods) {
+	bindMethod(console, "GeometryTemplate.maxSkipWreckLods", ConsoleAccess::Anyone, [&geometries](unsigned lods) { // 0x10073afb, 0x10073b54
 		if (GeometryTemplate* active = geometries.active()) {
 			active->maxSkipWreckLods = lods;
 		}
 	});
 	// isTitanInterior / isTitanExterior exclude each other (0x10148690 / 0x10148670).
-	bindProperty<bool>(console, "GeometryTemplate.isTitanInterior", ConsoleAccess::Anyone,
+	bindProperty<bool>(console, "GeometryTemplate.isTitanInterior", ConsoleAccess::Anyone, // 0x100735f6, 0x10073643
 		[&geometries] { return geometries.active() && geometries.active()->titanInterior; },
 		[&geometries](const bool& on) {
 			if (GeometryTemplate* active = geometries.active()) {
@@ -122,7 +126,7 @@ void registerGeometryConsoleMethods(Console& console, GeometryTemplateManager& g
 				}
 			}
 		});
-	bindProperty<bool>(console, "GeometryTemplate.isTitanExterior", ConsoleAccess::Anyone,
+	bindProperty<bool>(console, "GeometryTemplate.isTitanExterior", ConsoleAccess::Anyone, // 0x10073483, 0x100734d0
 		[&geometries] { return geometries.active() && geometries.active()->titanExterior; },
 		[&geometries](const bool& on) {
 			if (GeometryTemplate* active = geometries.active()) {
@@ -132,7 +136,7 @@ void registerGeometryConsoleMethods(Console& console, GeometryTemplateManager& g
 				}
 			}
 		});
-	bindProperty<int>(console, "GeometryTemplate.titanExteriorPartIndex", ConsoleAccess::Anyone,
+	bindProperty<int>(console, "GeometryTemplate.titanExteriorPartIndex", ConsoleAccess::Anyone, // 0x100743b2, 0x100743ff, 0x1007440b
 		[&geometries] { return geometries.active() ? geometries.active()->titanExteriorPart : 0; },
 		[&geometries](const int& part) {
 			if (GeometryTemplate* active = geometries.active()) {
@@ -154,10 +158,10 @@ void registerGeometryConsoleMethods(Console& console, GeometryTemplateManager& g
 				(active->*map)[GeometryTemplate::materialKey(geometry, lod, material)] = value;
 			});
 	};
-	materialSetter("GeometryTemplate.setMaterialReflectionScale", &GeometryTemplate::reflectionScale, true, false);
-	materialSetter("GeometryTemplate.setSpecularStaticGloss", &GeometryTemplate::staticGloss, true, false);
-	materialSetter("GeometryTemplate.setMaterialParallaxHeightScale", &GeometryTemplate::parallaxHeightScale, false, true);
-	bindProperty<int>(console, "GeometryTemplate.nrOfAnimatedUVMatrix", ConsoleAccess::Anyone,
+	materialSetter("GeometryTemplate.setMaterialReflectionScale", &GeometryTemplate::reflectionScale, true, false); // 0x10073d7a, 0x10073e71
+	materialSetter("GeometryTemplate.setSpecularStaticGloss", &GeometryTemplate::staticGloss, true, false); // 0x10073f84, 0x1007407b
+	materialSetter("GeometryTemplate.setMaterialParallaxHeightScale", &GeometryTemplate::parallaxHeightScale, false, true); // 0x100732d3, 0x100733ca
+	bindProperty<int>(console, "GeometryTemplate.nrOfAnimatedUVMatrix", ConsoleAccess::Anyone, // 0x10073c18, 0x10073c65
 		[&geometries] { return geometries.active() ? geometries.active()->animatedUVMatrices : 0; },
 		[&geometries](const int& count) {
 			GeometryTemplate* active = geometries.active();
@@ -165,7 +169,7 @@ void registerGeometryConsoleMethods(Console& console, GeometryTemplateManager& g
 				active->animatedUVMatrices = count;
 			}
 		});
-	bindMethod(console, "GeometryTemplate.setSubGeometryLodDistance", ConsoleAccess::Anyone,
+	bindMethod(console, "GeometryTemplate.setSubGeometryLodDistance", ConsoleAccess::Anyone, // 0x100730e9, 0x100731a8
 		[&geometries](int geometry, int lod, float distance) {
 			GeometryTemplate* active = geometries.active();
 			if (!active || geometry < 0 || lod < 0 || geometry > 16 || lod > 16) {

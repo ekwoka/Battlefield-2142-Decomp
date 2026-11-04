@@ -455,7 +455,21 @@ namespace {
 // The A* bookkeeping shared by both searches (the driver 0x10044880 with
 // its open list 0x100401d0 and the spaces' hash of visited nodes, 0x407
 // buckets keyed by polygon / cluster). Nodes live in a vector; the open
-// list is a heap with stale entries skipped.
+// list is a heap with stale entries skipped. The original's open list is a
+// binary tree ordered by f (+0x18): insert 0x1003d840 / 0x1003c650,
+// take the cheapest 0x1003d8d0 / 0x1003c830, remove a node 0x1003d9a0 /
+// 0x1003c6a0 / 0x1003c6f0 (the cluster space's: 0x1003dbb0 / 0x1003c740,
+// 0x1003dc40 / 0x1003c790 / 0x1003c7e0); the hash's insert / remove
+// 0x1003dab0 / 0x1003db30 (clusters 0x1003dd50 / 0x1003ddc0). The
+// drivers' steps on them: polygons 0x1003e890, 0x1003e900, 0x1003e970,
+// 0x1003e9a0, clusters 0x1003ea30, 0x1003ea90, 0x1003eaf0, 0x1003eb20;
+// 0x1003e860, 0x1003eb60, 0x1003e9f0 (emptying); set up 0x1003e630,
+// 0x1003e7e0, reset per search 0x1003e6c0 / 0x1003e750 (0x1003c4d0 /
+// 0x1003c550). The polygon search's records: made 0x100bca50 (a hash
+// table of 0x407 buckets), freed 0x100bcab0. The cheapest node is taken
+// from a short list refilled from the tree with its best (+0x14) when
+// empty: polygons 0x10044690 / 0x10043b50, clusters 0x100446d0 /
+// 0x10043de0.
 struct OpenEntry {
 	float f;
 	uint32_t node;
@@ -489,7 +503,7 @@ float stepCost(const NavMesh& mesh, const PathOptions& options, uint32_t a, cons
 	const float length = distance(from, to);
 	if (!options.vehicle) {
 		// On foot: uphill into a slope costs up to twice the distance, by
-		// the slope's angle (2/pi * acos(normal.y)).
+		// the slope's angle (2/pi * acos(normal.y), the clamped acos 0x10026960).
 		if (length > 0.35f) {
 			Vec3 dir {to.x - from.x, 0, to.z - from.z};
 			const float len = std::sqrt(dir.x * dir.x + dir.z * dir.z);
@@ -570,7 +584,9 @@ std::vector<PathStep> findPolygonPath(const NavMesh& mesh, uint32_t startPolygon
 		const uint32_t current = top.node;
 		const Polygon& poly = mesh.polygons[nodes[current].polygon];
 
-		// The successors (0x100bcbb0, one per edge with a neighbour).
+		// The successors (0x100bcbb0, one per edge with a neighbour; its
+		// first / next iterators 0x100be300 / 0x100be330; a node's
+		// constructor 0x100be350, its copy 0x100be390).
 		for (uint32_t k = 0; k < poly.vertexCount; ++k) {
 			const int32_t next = mesh.neighbour(nodes[current].polygon, k);
 			if (next < 0) {
@@ -647,6 +663,10 @@ std::vector<PathStep> findPolygonPath(const NavMesh& mesh, uint32_t startPolygon
 
 namespace {
 
+// The cluster search's node (its open and closed records in the original
+// a hash table by cluster index: made 0x100bda10 / 0x100bd390, insert
+// 0x100bd400, find 0x100bd480, remove 0x100bd4c0 / 0x100bd940, freed
+// 0x100bda80; the records pooled, 0x100bd540 / 0x100bd5c0).
 struct ClusterNode {
 	uint16_t cluster = 0;       // +0x14
 	uint16_t entry = kNoLink;   // +0x16 link index within the cluster
@@ -754,7 +774,9 @@ std::vector<ClusterStep> findClusterRoute(const NavMesh& mesh, uint32_t startPol
 		}
 		const uint32_t current = top.node;
 
-		// The successors (0x100bd630): each neighbouring cluster once.
+		// The successors (0x100bd630): each neighbouring cluster once (its
+		// first / next iterators 0x100be440 / 0x100be470; a node's
+		// constructor 0x100be3d0, its copy 0x100be400).
 		const Cluster& c = mesh.clusters[nodes[current].cluster];
 		targets.clear();
 		for (uint16_t i = 0; i < c.linkCount; ++i) {

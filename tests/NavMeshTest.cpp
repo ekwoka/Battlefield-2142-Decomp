@@ -692,6 +692,44 @@ TEST(PathFollower_MeshRayRefusesASteepClimb)
 	CHECK(ai::meshRaycast(m, high, low, nullptr, -1, nullptr, -1, 0, 0, &steep)); // down is fine
 }
 
+// The soldier's step ahead (0x10093150 -> the pathfinder's slot 0x90,
+// 0x1003cb90): the point max(0.5, half the radius) towards the current
+// waypoint, behind a near-vertical rise (over 85 degrees, more than
+// 0.35 m), makes the follower press jump while it is moved.
+TEST(PathFollower_SoldierJumpsAStepAhead)
+{
+	ai::NavMesh m = buildGrid();
+	for (Vec3& v : m.vertices) {
+		v.y = std::clamp((v.x - 5) * 20, 0.0f, 20.0f); // 87 degrees from x 5 to 6
+	}
+	for (ai::Polygon& p : m.polygons) {
+		p.costClass = 1;
+	}
+	computeNormals(m);
+	ai::RayHit hit;
+	const ai::ClimbLimits step {1.4835299f, 0.35f};
+	CHECK(!ai::meshRaycast(m, {4.7f, 0, 4.5f}, {5.2f, 4, 4.5f}, nullptr, -1, nullptr, -1, 0, 0, &step, &hit));
+	CHECK(hit.climbStopped);
+	ai::FollowerSettings settings;
+	settings.soldier = true;
+	ai::PathFollower follower;
+	follower.request(m, {1.5f, 0, 4.5f}, {8.5f, 20, 4.5f}, settings, 0);
+	CHECK(follower.planned());
+	float now = 0;
+	const auto jumps = [&](const Vec3& at, float input) {
+		bool jumped = false;
+		for (int i = 0; i < 3; ++i) {
+			now += 0.1f;
+			follower.progress(at, input, now);
+			jumped = follower.steer(m, at, now).jump || jumped;
+		}
+		return jumped;
+	};
+	CHECK(!jumps({2, 0, 4.5f}, 1));   // the step is farther than the point ahead
+	CHECK(!jumps({4.7f, 0, 4.5f}, 0)); // not moved
+	CHECK(jumps({4.7f, 0, 4.5f}, 1));
+}
+
 // Blocked for 2 s (0x10095720 -> 0x10095470): with a cluster path the
 // search goes on from the bot's cluster (no new trip from the start, no
 // failure); without one (a trip of 100 m or less) the move fails.

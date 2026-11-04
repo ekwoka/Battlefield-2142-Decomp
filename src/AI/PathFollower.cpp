@@ -126,11 +126,13 @@ bool steepAgainst(const Vec3& normal, const Vec3& dir, float maxSlope)
 	if (normal.y < 0) {
 		return true;
 	}
-	return std::acos(std::clamp(normal.y, -1.0f, 1.0f)) > maxSlope;
+	return std::acos(std::clamp(normal.y, -1.0f, 1.0f)) > maxSlope; // the clamp 0x10026930
 }
 
 // 0x1003f930 -> 0x1003ce50 (with the climb test) or 0x1003d1c0 (without),
-// with the edge step 0x100b82a0.
+// with the edge step 0x100b82a0 (also the pathfinder's slot 0x70,
+// 0x1003f6f0). Slot 0x88 (0x1003f810 -> 0x1003de90) is the same ray from
+// a point: its polygon looked up first.
 bool meshRaycast(const NavMesh& mesh, const Vec3& from, const Vec3& to, const CostProfile* profile, int maxPolygons,
 	float* reached, int32_t startPolygon, float width, uint8_t stopClass, const ClimbLimits* climb, RayHit* hit)
 {
@@ -197,6 +199,9 @@ bool meshRaycast(const NavMesh& mesh, const Vec3& from, const Vec3& to, const Co
 		float clearance = 1e9f;
 		const bool ok = exitPoint(mesh, static_cast<uint32_t>(current), previous, from, dir, exit, edge, clearance);
 		if (climbing && ok && exit.y - climbFrom > climb->stepHeight) {
+			if (hit) {
+				hit->climbStopped = true;
+			}
 			return done(false); // too steep a climb: the point stays where the run began
 		}
 		out = exit;
@@ -589,6 +594,30 @@ PathFollower::Steer PathFollower::steer(const NavMesh& mesh, const Vec3& positio
 	}
 	out.ok = true;
 	out.point = m_waypoints[m_current].p;
+	// A step ahead (0x10093150, from the follower's tick 0x10095ac0 while it
+	// follows, state 2, for a soldier, +0x104): with a move input of 0.2 or
+	// more (the largest of inputs 13, 3 and 0 the bot drives) the point
+	// max(0.5, half the bot's radius) ahead towards the current waypoint
+	// (the direction's height kept at 0 or above) is tried by the
+	// pathfinder's slot 0x90 (0x1003f8c0 -> 0x1003cb90): the mesh ray of
+	// 0x1003ce50 whose climb test, fixed at 85 degrees (DAT_101394f4,
+	// 1.4835299) and 0.35 m, answers true where the ray would stop on it.
+	// Then the jump (input 9) is pressed and +0xc0 stamped.
+	if (m_settings.soldier && m_inputLevel >= 0.2f) {
+		Vec3 dir = out.point - position;
+		dir.y = std::max(dir.y, 0.0f);
+		const float l = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+		if (l > 1e-6f) {
+			const float ahead = std::max(0.5f, 0.5f * m_settings.radius);
+			const ClimbLimits step {1.4835299f, 0.35f};
+			RayHit hit;
+			meshRaycast(mesh, position, position + dir * (ahead / l), nullptr, -1, nullptr, -1, 0, 0, &step, &hit);
+			if (hit.climbStopped) {
+				m_jump = true;
+				m_jumpAt = now;
+			}
+		}
+	}
 	out.jump = m_jump;
 	m_jump = false;
 	return out;
@@ -655,6 +684,7 @@ void PathFollower::progress(const Vec3& position, float input, float now)
 	if (!m_planned || m_failed || m_waypoints.empty()) {
 		return;
 	}
+	m_inputLevel = input;
 	if (input <= 0.1f) {
 		if (now - m_lastInput > (m_settings.soldier ? 0.1f : 0.5f)) {
 			m_lastProgress = now; // not trying to move: not stuck
@@ -752,7 +782,8 @@ float dot2(const Vec3& a, const Vec3& b) { return a.x * b.x + a.z * b.z; }
 float sign(float v) { return v > 0 ? 1.0f : v < 0 ? -1.0f : 0.0f; }
 
 // The signed angle from a to b across the ground (0x100a8710 and
-// 0x100a87f0): asin of their cross product, folded past a right angle.
+// 0x100a87f0; on two points' x/z 0x100a8970 / 0x100a89a0): asin of their
+// cross product, folded past a right angle.
 float angleTo(const Vec3& a, const Vec3& b)
 {
 	const float s = std::clamp(a.z * b.x - a.x * b.z, -1.0f, 1.0f);

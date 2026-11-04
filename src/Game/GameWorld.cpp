@@ -855,6 +855,20 @@ void GameWorld::loseHitPoints(uint32_t object, float amount, int attacker)
 	}
 	const float now = left - amount;
 	m_hitPoints[object] = now;
+	if (attacker >= 0 && amount > 0) {
+		const auto hit = [this, attacker](int victim) {
+			if (victim >= 0 && victim != attacker && m_aiHits.size() < 256) {
+				m_aiHits.push_back({victim, attacker});
+			}
+		};
+		if (const Player* victim = soldierPlayer(object)) {
+			hit(victim->id);
+		} else {
+			for (const int rider : vehicleOccupants(object)) {
+				hit(rider);
+			}
+		}
+	}
 	// The hit's spectacular flag (0x00656320 -> 0x006525f0, armour +0x250):
 	// for a hit with a giver (the rewrite: an attacker), else off.
 	Body* hitBody = findBody(object);
@@ -2702,7 +2716,7 @@ void GameWorld::steerClosest(Projectile& p, float seconds)
 		for (const auto& owned : m_objects.objects()) {
 			const world::Object* o = owned.get();
 			if (!o || o->id() == p.shooter || o->destroyed() || o->hidden() || !o->objectTemplate()
-				|| targetTypeOf(*o->objectTemplate()) != s.seekTargetType
+				|| targetTypeOf(*o->objectTemplate()) != s.seekTargetType || !targetEnabled(*o)
 				|| (s.ignoreFriendly && o->team() != 0 && o->team() == p.team)) {
 				continue;
 			}
@@ -2726,6 +2740,7 @@ void GameWorld::steerClosest(Projectile& p, float seconds)
 		candidate = query(s.loseDistance) == p.lockedOn ? p.lockedOn : 0;
 	}
 	const int64_t now = static_cast<int64_t>(m_ticks);
+	const uint32_t held = p.lockedOn;
 	if (s.reLockTicks == 0 || !candidate || !p.relockArmed || alive(p.lockedOn)) {
 		if (candidate != p.lockedOn) {
 			p.newTarget = true;
@@ -2743,6 +2758,12 @@ void GameWorld::steerClosest(Projectile& p, float seconds)
 			p.relockArmed = false;
 			p.pending = 0;
 		}
+	}
+	if (!held && p.lockedOn) {
+		p.followFrom = p.age + s.seekDelay; // a lock from none restarts the follow (0x005b3e60)
+	}
+	if (!followActive(p)) {
+		return;
 	}
 	if (const world::Object* target = p.lockedOn ? m_objects.find(p.lockedOn) : nullptr) {
 		const Body* body = findBody(p.lockedOn);
@@ -2762,6 +2783,9 @@ void GameWorld::launchLocked(Projectile& p, const Player& player) const
 	}
 	p.lockedOn = player.lock.state == 2 ? player.lock.target : 0;
 	p.newTarget = p.lockedOn != 0;
+	if (p.lockedOn) {
+		p.followFrom = p.age + p.settings->seekDelay;
+	}
 	p.relockArmed = true;
 }
 
@@ -2793,8 +2817,7 @@ void GameWorld::steerSeeker(Projectile& p, float seconds)
 		// The target's MagneticObject: where it is, and whether it counts.
 		const auto magnet = [this, &p, &s](const Body& body, physics::Vec3& at) {
 			const world::Object* object = m_objects.find(body.object);
-			if (!body.vehicle || !object || (s.ignoreFriendly && object->team() == p.team)
-				|| m_time - body.occupiedAt > 3.0) {
+			if (!body.vehicle || !object || (s.ignoreFriendly && object->team() == p.team) || !targetEnabled(*object)) {
 				return false;
 			}
 			physics::Vec3 offset;
@@ -2853,7 +2876,7 @@ void GameWorld::steerSeeker(Projectile& p, float seconds)
 				p.armed = false;
 			}
 		}
-		if (!target || p.age < p.followFrom) {
+		if (!target || !followActive(p)) {
 			return;
 		}
 		followMagnet(p, aim, target->body.velocity, seconds);
@@ -2888,6 +2911,9 @@ void GameWorld::steerSeeker(Projectile& p, float seconds)
 		|| (!fromRound && !p.wireKeepOnObstruction && !lineOfSight(eye, p.position, shooter->vehicle ? shooter->vehicle : shooter->object))) {
 		p.wireLost = true;
 		return;
+	}
+	if (!followActive(p)) {
+		return; // past follow.followTime (the mechs' rockets, 0.35 s)
 	}
 	const float along = std::max(0.0f, physics::dot(toMissile, aim)) + p.wireLookAhead;
 	// The follow's turn (followStep: follow.maxYaw / maxPitch degrees a
@@ -4444,6 +4470,52 @@ int GameWorld::targetTypeOf(const world::ObjectTemplate& t, int depth) const
 	return type;
 }
 
+const world::ObjectTemplate* GameWorld::targetObjectOf(const world::ObjectTemplate& t, int depth) const
+{
+	if (depth > 6) {
+		return nullptr;
+	}
+	if (t.settings().count("targetType")) {
+		return &t;
+	}
+	for (const world::ChildTemplate& child : t.children()) {
+		if (const world::ObjectTemplate* c = m_templates.find(child.name)) {
+			if (const world::ObjectTemplate* found = targetObjectOf(*c, depth + 1)) {
+				return found;
+			}
+		}
+	}
+	return nullptr;
+}
+
+// A TargetObject's switch (0x0058eba0, the target's update; template
+// TargetObject 0x94be, constructor 0x0058e720): with disableWhenWreck
+// (+0x2a4, setter 0x00500883) it is off while the vehicle above it is a
+// wreck (its armour's state 1); with disableWhenEmptyVehicle (+0x2a5,
+// 0x00500652) it goes off once the vehicle has stood empty for
+// disableWhenEmptyVehicleDelay seconds (+0x2ac, 0x00500766; default 0)
+// and comes back when someone gets in (0x0058e9a0). The shipped
+// HeatObject and LaserTarget_vehicle: both, 5 s; MagneticObject: empty
+// only, 3 s; HeatObject_aa / _flare: wrecks only. (On the client whose
+// player just left, the original drops it at once: the delay's -1 when
+// the leaver is the local player, a client-side nicety not modelled.)
+// Drones and Titans keep theirs: they are never sat in the way a
+// vehicle is.
+bool GameWorld::targetEnabled(const world::Object& root)
+{
+	const world::ObjectTemplate* t = root.objectTemplate() ? targetObjectOf(*root.objectTemplate()) : nullptr;
+	const Body* body = t ? findBody(root.id()) : nullptr;
+	const bool drone = std::any_of(m_drones.begin(), m_drones.end(), [&](const Drone& d) { return d.object == root.id(); });
+	if (!body || !body->vehicle || drone || isTitan(root.id())) {
+		return true;
+	}
+	if (integer(*t, "disableWhenWreck", 0) != 0 && body->wreckTime >= 0) {
+		return false;
+	}
+	return integer(*t, "disableWhenEmptyVehicle", 0) == 0
+		|| m_time - body->occupiedAt <= number(*t, "disableWhenEmptyVehicleDelay", 0);
+}
+
 // A lock-on weapon's lock each tick: the default target component's
 // update (template 0xc50c, runtime 0x005e1a70, interface slot 6
 // 0x005e1b30; target.targetSystem +0x80, maxDistance +0x78, lockAngle
@@ -4552,7 +4624,8 @@ void GameWorld::stepWeaponLock(Player& player, float seconds)
 	for (const auto& owned : m_objects.objects()) {
 		const world::Object* object = owned.get();
 		if (!object || object->destroyed() || object->hidden() || object->id() == ignore || !object->objectTemplate()
-			|| targetTypeOf(*object->objectTemplate()) != wanted || occupiedByTeam(object->id(), player.team)) {
+			|| targetTypeOf(*object->objectTemplate()) != wanted || occupiedByTeam(object->id(), player.team)
+			|| !targetEnabled(*object)) {
 			continue;
 		}
 		const physics::Vec3 at {object->position().x, object->position().y, object->position().z};

@@ -767,6 +767,14 @@ public:
 		bool play = false;
 	};
 	std::vector<LockTone> takeLockTones() { return std::exchange(m_lockTones, {}); }
+	// Hit points lost to a player's attack, for the AI (BF2142.exe's AI
+	// event adaptor 0x0089f8d0 -> AIDLL's collision handler slot 0x18,
+	// 0x1004f020): the soldier hit, or each rider of the vehicle hit, and
+	// the attacker; the last 256 kept.
+	struct AiHit {
+		int victim = -1, attacker = -1;
+	};
+	std::vector<AiHit> takeAiHits() { return std::exchange(m_aiHits, {}); }
 	// The level ambience over the network (AmbientTriggers.h): what the
 	// networked areas (numNetworkedEffects) played since the last call, for
 	// a server to send (the AmbientEffectArea event, 0x00510270; kept only
@@ -2052,6 +2060,7 @@ private:
 	void stepUnmannedGuns(float seconds);
 	std::vector<LockEvent> m_lockEvents;
 	std::vector<LockTone> m_lockTones;
+	std::vector<AiHit> m_aiHits;
 	struct {
 		std::string weapon; // the weapon whose tones play
 		int state = 0;      // the runtime WeaponHud's +0x10
@@ -2650,6 +2659,12 @@ private:
 	void stepWeaponFeel(Player& player, SoldierInput& turned, float seconds);
 	void stepWeaponLock(Player& player, float seconds);
 	int targetTypeOf(const world::ObjectTemplate& t, int depth = 0) const;
+	// The TargetObject template that gives a tree its targetType (the
+	// root's own or a child's), nullptr if none.
+	const world::ObjectTemplate* targetObjectOf(const world::ObjectTemplate& t, int depth = 0) const;
+	// Whether a target root's TargetObject is enabled (0x0058eba0):
+	// disableWhenWreck and disableWhenEmptyVehicle(Delay).
+	bool targetEnabled(const world::Object& root);
 	mutable std::map<const world::ObjectTemplate*, int> m_targetTypes;
 	FireArmSettings withExtraAmmo(const Player& player, const world::ObjectTemplate& item) const;
 	// Takes the carried weapon of a slot in hand.

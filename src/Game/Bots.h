@@ -105,7 +105,8 @@ struct WeaponAi {
 	float minRange = 0, maxRange = 0;
 	float optimal = 0.35f;   // optimalRangePercentage / 100
 	int firingPose = 1;      // NotAvailable 0, Standing 1, Crouching 2, Lying 3
-	// By CombatStrengthType: Infantry, LightArmour, HeavyArmour,
+	// By CombatStrengthType (the names 0x008902f0 reads, "CSTInfantry",
+	// "Infantry" or the misspelt "Infantery"): Infantry, LightArmour, HeavyArmour,
 	// NavalArmour, Helicopter, AirPlane, Titan, Missiles.
 	std::array<float, 8> strength {};
 	float deviation = 14;
@@ -328,7 +329,7 @@ uint32_t informationTypeFlag(const std::string& name);
 // of that box (0x006aeda0), sqrt(0.4^2 + 1 + 0.4^2) = 1.149 m.
 float soldierAiRadius();
 
-// KitType (BF2142.exe 0x0088f6b0: KTRecon/Recon/0, KTAssault 1, KTSupport 2,
+// KitType (BF2142.exe 0x0088f6b0, read by 0x00424ff0: KTRecon/Recon/0, KTAssault 1, KTSupport 2,
 // KTAT 3, KTEngineer 4, KTMedic 5, KTSpecops 6, KTSniper 7, KTExtended1 8,
 // KTExtended2 9), -1 for none. The player's +0x58 (player vt+0x1a4, read
 // by the AI player adaptor's slot 0x40, 0x008a5020) holds its kit's.
@@ -405,7 +406,7 @@ bool zoomStatementPress(bool moving, bool zoomed, bool ready);
 // weapon's slot 0x154 through 0x008923a0): GenericFireArm 0x005c1fa0 asks
 // its target component (+0x2c) slot 0xb4 (0x005f5b80), its template's
 // +0x80: ObjectTemplate.target.targetSystem (0x005f6020 writes it out,
-// names 0x004db008): TSNone 0, TSHeatSeeking 1, TSLaserGuided 2,
+// names 0x004db008, read back by 0x004dd315): TSNone 0, TSHeatSeeking 1, TSLaserGuided 2,
 // TSWireGuided 3, TSTVGuided 4; TSParabellic (5) and no target component 0.
 int guidanceKind(const world::ObjectTemplate* weapon);
 
@@ -590,7 +591,12 @@ struct BotSettings {
 	float ignoreCommanderDistance = 30; // setIgnoreCommanderDistance (+0x38)
 	int maxBehaviours = 0;           // setMaxNumberOfBehaviours (+0x10, also DAT_10139520)
 	float statsViewDistance = 300;   // setStatsViewDistance (+0x20)
-	int informationGridDimension = 32; // setInformationGridDimension (+0x2c)
+	// The information grid it sizes (vtable 0x1011b934, constructor 0x100f95c0,
+	// destructor 0x100f9690, cell range 0x100f7370; the circle query slot 6
+	// 0x100f88d0, the other shapes slots 7-10 0x100f8b00, 0x100f9090,
+	// 0x100f92c0, 0x100f93e0) only speeds up the object searches: the rewrite
+	// scans the player and vehicle lists instead.
+	int informationGridDimension = 32; // setInformationGridDimension (+0x2c; IAISettings slot 16 reads it, 0x100d2b40)
 	int sides = 0;                   // setNSides (+0x30)
 	float saiUpdateFrequency = 35;   // setSAIUpdateFrequency (+0x28): the SAI's gate (see updateStrategy)
 	bool respawnAllowed = true;      // setRespawnAllowed (+0x34)
@@ -621,7 +627,9 @@ struct BotSettings {
 	std::map<std::string, std::vector<std::string>> interpreter;
 	std::map<std::string, std::string> defaultInterpreter; // activateDefaultInterpreter <equipment> <type>
 	// The equipment type's MoveTo statement (the driver it runs: CarMoveTo,
-	// TankMoveTo, MechMoveTo, FloatingTankMoveTo, HeliMoveTo...).
+	// TankMoveTo, MechMoveTo, FloatingTankMoveTo, HeliMoveTo...; the
+	// interpreter table's dispatch 0x100c4780, constructor 0x100c46f0,
+	// destructors 0x100c4740 / 0x100c4620).
 	std::string moveInterpreter(const std::string& equipment) const;
 	// The bot manager's scheduling (vtbl 0x101196b0 on the bot manager,
 	// DAT_10139504): setPlannedDecisionMakingThreshold (+0x6c, absolute),
@@ -629,7 +637,9 @@ struct BotSettings {
 	// <planned> <unplanned> (+0x60, +0x64). The quotients are shares of the
 	// real-time budget (setSensingQuotient a b: a/(a+b) at +0x94;
 	// setSystemQuotient d p s: +0x84, +0x8c, the rest), kept but not used
-	// (see Scheduling).
+	// (see Scheduling). The defaults are the manager's reset's (0x100c9f40,
+	// also its console slot 0x80 0x100ca0d0; it sets the system quotient
+	// 30 40 30).
 	double plannedThreshold = 0.5, unplannedThreshold = 0.3;
 	int plannedInterleave = 2, unplannedInterleave = 2;
 	std::array<unsigned, 2> sensingQuotient {1, 1};
@@ -826,7 +836,8 @@ public:
 	// the object's team).
 	int vehicleTeam(uint32_t vehicle) const;
 private:
-	// An enemy a bot knows of (the sensing agent's memory item).
+	// An enemy a bot knows of (the sensing agent's memory item; the agent's
+	// constructor 0x100ecee0, its memory cleared on the bot's reset 0x100ed040).
 	struct Known {
 		int player = -1;
 		physics::Vec3 position; // where it was last seen
@@ -843,6 +854,9 @@ private:
 		// a new item's sighting 0x100ed2c0, set or cleared by a kept one's
 		// 0x100ee430).
 		bool seenClear = false;
+		// +0x68: the item was offered to the spotting report (once, on the
+		// bot's own first sighting, 0x100ed2c0).
+		bool spotted = false;
 	};
 	// An enemy vehicle in a bot's memory (its root AI object's item):
 	// when it was last seen, lost (-1 in sight) and heard (flag 1, -1e9
@@ -850,6 +864,10 @@ private:
 	struct KnownVehicle {
 		float seen = -1e9f, lostAt = -1, heardAt = -1e9f;
 	};
+	// A bot (AIDLL's bot object, vtbl 0x10118050: constructor 0x1009ac30 with
+	// its parts 0x10097470; bound to its player's input block by 0x100978d0
+	// -> 0x100974d0, which marks the inputs the AI drives; destructor
+	// 0x1009b620, deleting 0x1009b8c0).
 	struct Bot {
 		ai::Arbitration arbitration;
 		std::string equipment;
@@ -1055,6 +1073,20 @@ private:
 	};
 
 	void sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players);
+	// The bots' spotting (0x100a5850 -> 0x10030fb0): a first sighting
+	// near a strategic area reported to the team's minimap and said aloud,
+	// throttled per team and area. Whether it was spotted.
+	bool spotSighting(const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& other);
+	// The throttle (DAT_101394d0, vtable 0x10113b30; reset 0x10031560): per
+	// team (+0x1c + 0x10 (team - 1)) and area, the kind last spotted and
+	// when ({8, -1000} at the start), and one stamp for aircraft (+0x38).
+	struct SpotEntry {
+		int kind = 8;
+		float at = -1000;
+	};
+	std::array<std::vector<SpotEntry>, 2> m_spots;
+	float m_airSpotAt = -1000;
+	void hitBy(int victim, int attacker);
 	void noticeRounds(Bot& bot, const GameWorld::PlayerInfo& self);
 	void think(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players);
 	void act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
@@ -1324,6 +1356,10 @@ private:
 	void warnOfGrenades(Bot& bot, const GameWorld::PlayerInfo& self);
 	void horn(Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::VehicleInfo& vehicle, SoldierInput& input);
 	float m_time = 0;
+	// A xorshift in place of the AI's Mersenne twister (DAT_101394cc:
+	// constructor 0x100308a0, destructor 0x100308d0, seeded from the clock
+	// x 1e6 through the Park-Miller step 0x10030810 by 0x100309a0, the
+	// 624-word refill 0x100308f0).
 	uint32_t m_random = 0x2545f491;
 	float random(); // 0..1
 	void flee(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);

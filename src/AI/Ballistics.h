@@ -6,7 +6,8 @@
 // Every aim that leads a target owns one solver: the turret and soldier
 // aim at an object (vtable 0x1011ab40 slot 8, 0x100d9a60), HeliAimAt's aim
 // at an object (vtable 0x1011b0c0 slot 9, 0x100dcf10) and the aim at a
-// position (vtable 0x1011b1c8 slot 9, 0x100dd6a0). The interpreters
+// position (vtable 0x1011b1c8 slot 9, 0x100dd6a0; constructor 0x100dd5a0,
+// destructor 0x100dd640, its offset to the point 0x100dd820). The interpreters
 // (MouseTurretAimAt 0x1008e940, HeliAimAt 0x1008db80) hand them the round
 // the AI weapon describes (AIDLL 0x100a4130/0x100a4140/0x100a4150/
 // 0x100a4110 -> the AI weapon adaptor, BF2142.exe vtable 0x009d5be8 slots
@@ -63,7 +64,9 @@ public:
 	// caller gave it.
 	bool solve(double now, float precision, bool high, Vec3& direction, Vec3& impact, double* impactTime = nullptr);
 
-	// 0x100fa5c0: the target's position relative to the gun at `time`.
+	// 0x100fa5c0: the target's position relative to the gun at `time` (the
+	// aims' shared base, vtable 0x1011b078, constructor 0x100fbbd0, keeps the
+	// solver at +0x120; its slot 0x34, 0x100fbb70, asks it for now + t).
 	Vec3 targetAt(double time) const;
 	// 0x100fa100: the time a round leaving at `speed` (along the ground)
 	// takes to cover `distance` with the drag; 1000 when it never does.

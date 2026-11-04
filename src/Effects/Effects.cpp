@@ -1777,6 +1777,11 @@ std::array<float, 4> frameOf(const ParticleTemplate& t, float lifeFraction)
 // NonScreenAlignedParticles.fx: each particle a square of its size about
 // its centre in the plane across the system's y axis (its x and z axes;
 // the ripples and rings on the ground and water), turned by its rotation.
+// RendDX9's draw (0x1012e920, "NSAParticleSystem") fills four vertices a
+// particle (0x1012d720: its position and the corner offsets it keeps,
+// the age and the template's slot) and batches up to 10 templates' graphs
+// as shader constants (0x1012d660, 0x1012d5b0); the colour's / 2 there and
+// the pixel shader's x 2 cancel. Here the graphs are read on the CPU.
 void EffectManager::collectAligned(const Emitter& emitter, std::vector<WorldVertex>& out)
 {
 	const ParticleTemplate& t = emitter.particleTemplate();

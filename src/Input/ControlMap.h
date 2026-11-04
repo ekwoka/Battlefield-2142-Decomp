@@ -173,7 +173,7 @@ public:
 	static std::string displayKey(const Binding& binding);
 	// Text with its "#PISprint#" and "#GIYes#" put as the keys bound to
 	// them (0x00752b70, which the help pop-ups' and the HUD's strings go
-	// through): #PI<input># from `playerMap` (the player's map, else
+	// through; 0x00753060 is its twin for the localized wide strings): #PI<input># from `playerMap` (the player's map, else
 	// defaultPlayerInputControlMap), #GI<input># from
 	// defaultGameControlMap, the primary key; "_2" after the name (#PIYaw_2#)
 	// is the axis' negative key. The key's CONTROLLER_ text is localized;

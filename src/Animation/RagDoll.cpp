@@ -251,6 +251,18 @@ void RagDollTemplate::setParticleCollisionCriteria(float minSpeed, float minDela
 	m_collisionMinDelay = minDelay;
 }
 
+// The RagDoll console rows (registry 0x00b4d8dc; each row's execute sets
+// the active template DAT_00b4cb94's field or calls its method): gravity
+// 0x008ae850 (+4), skeleton 0x008ae921, addParticle 0x008aeaae (->
+// 0x008abe00), lockBone 0x008aecfe, toSkeleton 0x008aee8c, addConstraint
+// 0x008af109, addCapsuleCollision 0x008af243, addAngularConstraint
+// 0x008af42c, addDihedralAngleConstraint 0x008af67c, removeConstraint
+// 0x008af7d1, setParticleCollisionCriteria 0x008afa86, addJointConstraint
+// 0x008afbc7, addDistanceLessThanConstraint 0x008afd68. The rest are the
+// editor's: reset 0x008ae555, save 0x008ae5c0, active 0x008ae699,
+// drawConstraints 0x008ae775, linkMode 0x008aefce, addForce 0x008af936;
+// addBone (0x008aead8) has no execute. The rewrite reads the shipped
+// ragdoll .con files here rather than through the console.
 bool RagDollTemplate::execute(const std::string& line, std::string* include, std::string* skeletonPath)
 {
 	std::istringstream in(line);

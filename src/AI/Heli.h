@@ -1,5 +1,7 @@
 // The helicopters' flight AI (AIDLL.dll's HeliMoveTo 0x1008e2e0 with the
-// controller 0x100e50b0, HeliMoveToObject 0x1008e1c0, HeliAimAt 0x1008db80
+// controller 0x100e50b0, HeliMoveToObject 0x1008e1c0 (its statement
+// 0x100d1790: abort test 0x100d1760, destructor 0x100d18a0, the object's
+// point 0x100d18f0), HeliAimAt 0x1008db80
 // with 0x100e5590, HeliMoveAwayFromObject 0x1008d8b0, HeliResetControls
 // 0x100e47a0 / 0x1008da80). The primitives are the controllers of
 // 100e0000.c; their constants are AIDLL's .rdata (0x1012ad28...).
@@ -29,14 +31,21 @@ struct HeliControls {
 };
 
 // What the AI object gives the controllers (AIDLL vtbl 0x101187d0 and its
-// Mobile part): the hull's frame, its motion, and the terrain.
+// Mobile part): the hull's frame, its motion, and the terrain. (The AI
+// object: constructor 0x100a9790, destructor 0x100a9860, its update
+// 0x100a9890 / 0x100a97e0, the clock 0x100a9800, its position 0x100a9830
+// and the terrain's height under it 0x100a9810.)
 struct HeliSense {
 	Vec3 position;
 	Vec3 velocity;        // Mobile slot 0x18
 	Vec3 angularVelocity; // Mobile slot 0x20, rad/s, world
 	Vec3 forward, right, up;
 	Vec3 acceleration;    // (v - the last v) / dt, which the interpreters keep
-	// The terrain's height (0x10031a50's heightmap read).
+	// The terrain's height (0x10031a50's heightmap read). The original's
+	// grid is the level's AIPathFinding/AerialHeighMap.ahm (constructor
+	// 0x10031800: 16 m cells; loader 0x10031900 at ai.init; u16 heights
+	// read by 0x10031760 / 0x10031a10, 9999 without the file); the
+	// rewrite reads the terrain itself.
 	std::function<float(float x, float z)> terrain;
 };
 

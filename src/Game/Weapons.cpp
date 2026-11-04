@@ -123,6 +123,7 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 			: seek->second == "TTBeacon"    ? ProjectileSettings::Seek::Beacon
 			: seek->second == "TTHeat" || seek->second == "TTLaser" ? ProjectileSettings::Seek::Closest
 											: ProjectileSettings::Seek::None;
+		// TargetType's names (the argument reader 0x004dce2e).
 		static const char* const kTypes[] = {"TTNone", "TTLaser", "TTHeat", "TTMagnet", "TTUnique", "TTBeacon", "TTDecoy", "TTPod"};
 		for (int i = 0; i < 8; ++i) {
 			if (seek->second == kTypes[i]) {
@@ -135,6 +136,8 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 		s.loseDistance = number(t, "seek.distLoseLock", s.lockDistance);
 		s.maxYawRate = number(t, "follow.maxYaw", 1);
 		s.maxPitchRate = number(t, "follow.maxPitch", 1);
+		s.followTime = number(t, "follow.followTime", 0);
+		s.targetActivation = number(t, "follow.targetActivation", 0) != 0;
 		s.armingDelay = number(t, "armingDelay", 0);
 		s.armingSpeed = number(t, "follow.armingSpeed", 0);
 		s.speedModifier = number(t, "follow.speedModifier", 1);
@@ -866,6 +869,13 @@ void followMagnet(Projectile& p, const physics::Vec3& aim, const physics::Vec3& 
 		p.velocity = p.velocity + direction * (s.acceleration * seconds);
 		p.resting = false;
 	}
+}
+
+bool followActive(const Projectile& p)
+{
+	const ProjectileSettings& s = *p.settings;
+	const float from = p.followFrom >= 0 ? p.followFrom : s.seekDelay;
+	return p.age >= from && (s.followTime <= 0 || p.age <= from + s.followTime);
 }
 
 bool followStep(Projectile& p, const physics::Vec3& target, const physics::Vec3& targetVelocity, float seconds, bool newTarget)

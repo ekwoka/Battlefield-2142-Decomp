@@ -41,7 +41,7 @@ struct Ground {
 	float seaAt(float x, float z) const { return sea ? sea(x, z) : -1e9f; }
 };
 
-// CameraViewMode (0x004db0c0's names): setMode's argument.
+// CameraViewMode (0x004db0c0's names; read by 0x004dd759): setMode's argument.
 enum class Mode { FirstPerson = 0, Inside = 1, Nose, Chase, FrontChase, FlyBy, Trace, ExternTrace };
 
 // The Camera template's view flags (+0x378..+0x37e; 0x00610fd0 turns on

@@ -29,7 +29,10 @@ ObjectTemplate::ObjectTemplate(uint32_t classId, std::string typeName, std::stri
 const std::vector<TemplateTypeInfo>& engineTemplateTypes()
 {
 	// Registered by the world modules' init functions (e.g. 0x0051a8c4,
-	// 0x004da65b) through ObjectTemplateManager slot 0x14.
+	// 0x004da65b; 0x00504be6 registers Item, ItemContainer, the
+	// destroyables, Kit and the rest of its module's "dice.hfe.world.
+	// ObjectTemplate.<name>" factories under their class ids, through
+	// 0x0040db26) through ObjectTemplateManager slot 0x14.
 	static const std::vector<TemplateTypeInfo> types = {
 		{0x9471, "Bundle"},
 		{0x9472, "Camera"},

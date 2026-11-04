@@ -134,8 +134,13 @@ struct Vec3f {
 	float x = 0, y = 0, z = 0;
 };
 
-// Event types (the registry at 0x00a3ba44 is filled by 0x0042cxxx; the
-// names come from the table at 0x00420000.c:15306, "ChallengeEvent"...).
+// Event types (the registry at 0x00a3ba44 is filled by 0x0042ed10, which
+// registers each event's name and prototype under its id through
+// 0x005094f0, "ChallengeEvent" 1 to "VoteEvent" 0x27 and on; its helpers
+// each register one more: 0x0042d9e0, 0x0042da50 (0x18), 0x0042dad0,
+// 0x0042db20, 0x0042db70, 0x0042dbd0, 0x0042dc20, 0x0042dc80, 0x0042dce0,
+// 0x0042dd30, 0x0042dd80, 0x0042ddd0, 0x0042de40, 0x0042de90, 0x0042ec60
+// (0x41); 0x0042d980 HandleDropEvent).
 // A type is written in bitsFor(the highest registered id) bits (the
 // registry's +0x20, kept by 0x005094f0): 0x47, so 7. 69 ids are registered;
 // 0, 0x12 and 0x35 are not.

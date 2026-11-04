@@ -8,7 +8,8 @@
 //   - a quad tree (0xe0 bytes, constructor 0x100ba850, load 0x100baa90)
 //     from the .qtr: walkable polygons (triangles in shipped data), their
 //     vertices, per-edge neighbours and a quad tree over the x/z plane, and
-//   - a cluster map (0x3c bytes, constructor 0x100b3c40, load 0x100b1380)
+//   - a cluster map (0x3c bytes, constructor 0x100b3c40, load 0x100b1380,
+//     emptied first by 0x100b11f0)
 //     from the .clb: the polygons grouped into clusters, the links ("portals")
 //     between neighbouring clusters and, per cluster, the precomputed walking
 //     distances between each pair of its links.
@@ -77,7 +78,8 @@ struct QuadNode {
 struct Polygon {
 	uint8_t vertexCount = 0; // +0x00 (3 in shipped data)
 	// +0x01: the cost class, an index into a CostProfile (0x100b8010 reads,
-	// 0x100b8030 writes it; blocking an area at run time sets it to 0, which
+	// 0x100b8030 writes it, the pathfinder's slots 0x54 0x1003f5b0 and 0x5c
+	// 0x1003f600; blocking an area at run time sets it to 0, which
 	// costs -1 = impassable, 0x100b8dc0).
 	uint8_t costClass = 0;
 	uint16_t cluster = 0;    // +0x02 index into NavMesh::clusters
@@ -114,6 +116,8 @@ struct CostProfile {
 
 	// Classes past the table are treated as plain ground (the original would
 	// read past its vector).
+	// (The class's multiplier 0x100bdce0, set by 0x100bdcc0; passable when
+	// it isn't negative, 0x100bdd00.)
 	float cost(uint8_t costClass) const { return costClass < costs.size() ? costs[costClass] : 1.0f; }
 };
 
@@ -138,10 +142,13 @@ public:
 	std::vector<float> linkDistances;
 
 	// Edge k of a polygon runs from vertex k to vertex k+1 (wrapping).
+	// (The pathfinder's slot 0x6c, 0x1003f6c0 -> 0x1003caf0, gives an
+	// edge's two ends.)
 	const Vec3& vertex(uint32_t polygon, uint32_t k) const; // 0x100b7e80 / 0x100b8260
 	// The polygon across edge k, -1 at the mesh border (0x100b7df0).
 	int32_t neighbour(uint32_t polygon, uint32_t k) const;
-	// The average of the polygon's vertices (0x100b7ef0).
+	// The average of the polygon's vertices (0x100b7ef0; the pathfinder's
+	// slot 0x68, 0x1003f650).
 	Vec3 centroid(uint32_t polygon) const;
 	// The midpoint of edge k (0x100bc5f0): where paths cross into the
 	// neighbour.
@@ -156,12 +163,17 @@ public:
 	// at most 2 m above it. `heightOffset` gets surface y - point y.
 	bool standsOn(uint32_t polygon, const Vec3& point, float heightTolerance, float* heightOffset = nullptr) const;
 
-	// The polygon a point stands on (0x100b7d70 -> quad tree walk 0x100f40e0),
+	// The polygon a point stands on (0x100b7d70 -> quad tree walk 0x100f40e0;
+	// the pathfinder's slot 0x50, 0x1003f4a0),
 	// or -1. Inside the bounds, descend to the leaf holding the x/z, then
 	// among its upward-facing polygons the profile can walk on, pick the
 	// one whose surface is vertically closest. The bot manager uses a
 	// tolerance of 2.5 for one bot kind (3) and 5 for the others
-	// (0x1003f2d0). A null profile skips the cost check.
+	// (0x1003f2d0). A null profile skips the cost check. (The manager asks
+	// each of its trees in turn, 0x100ac590, the first to answer giving the
+	// island; 0x100ac5f0 first keeps the bot's last polygon while it still
+	// stands on it, 0x100b88e0; a tree and its cluster map by index,
+	// 0x100ac810 / 0x100ac830. Shipped meshes have one tree.)
 	int32_t findPolygon(const Vec3& point, float heightTolerance = 5.0f, const CostProfile* profile = nullptr,
 		float* heightOffset = nullptr) const;
 	// The quad tree leaf holding x/z, or -1.

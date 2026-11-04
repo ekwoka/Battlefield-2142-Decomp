@@ -194,6 +194,10 @@ int BotManager::addBot(const std::string& name, int team)
 	const std::string given = name.empty() && m_source ? m_source->nextBotName() : name;
 	const int id = m_world.addPlayer(given.empty() ? "Bot" : given, team, true);
 	if (id >= 0) {
+		// AIDLL's 0x10089000 puts a new bot in its side's squad with the
+		// fewest members (at most IAISettings slot 0x54 of them), the first
+		// when all are full, moving a member on to keep the squads even; here
+		// the first open squad.
 		m_world.joinSquad(id, m_world.openSquad(team));
 	}
 	return id;
@@ -687,6 +691,10 @@ void registerBotScriptMethods(Console& console, BotSettings& settings)
 			list.push_back(statement);
 		}
 	});
+	// The AIConsole halves: removeInterpreterEntry 0x10029e80,
+	// activateDefaultInterpreter 0x10027210, getBehaviourModifier
+	// 0x100278d0, activeBehaviourModifiers 0x10027f40 (the active set's
+	// name 0x10027890).
 	bindMethod(console, "aiSettings.removeInterpreterEntry", access, [s](std::string equipment, std::string statement) {
 		std::vector<std::string>& list = s->interpreter[equipment];
 		list.erase(std::remove(list.begin(), list.end(), statement), list.end());
@@ -752,7 +760,9 @@ void registerBotScriptMethods(Console& console, BotSettings& settings)
 	});
 
 	// autoControllerTemplate.* (AIDLL 0x10002210..0x100049b0; the template
-	// manager DAT_101394e8). A property before any create is lost.
+	// manager DAT_101394e8, constructor 0x10034520; the properties go to
+	// its active template, 0x10033270, whose name is 0x10033240). A
+	// property before any create is lost.
 	bindMethod(console, "autoControllerTemplate.create", access, [s](std::string name) {
 		s->autoControllers[name] = BotSettings::AutoControllerTemplate {};
 		s->editingAutoController = name;
@@ -793,7 +803,13 @@ void registerBotScriptMethods(Console& console, BotSettings& settings)
 		});
 	}
 
-	// aiStrategy.* left (the strategy manager DAT_101394f0).
+	// aiStrategy.* left (the strategy manager DAT_101394f0, got by
+	// 0x10039880). Its halves: setActiveStrategy 0x1003a2a0 (an unknown
+	// name makes the original's active one "NULL"), getActiveStrategyName
+	// 0x10039890, listStrategies 0x10039df0, setActivePrerequisite
+	// 0x1003a4f0, getActivePrerequisiteName 0x100398b0, setActiveCondition
+	// 0x1003a640, getActiveConditionName 0x10039f60; the active condition
+	// 0x10039f50.
 	ai::StrategySettings* st = &settings.strategy;
 	const auto strategy = [st]() -> ai::Strategy* {
 		const auto it = st->strategies.find(st->strategy);
@@ -869,7 +885,12 @@ void registerBotScriptMethods(Console& console, BotSettings& settings)
 		return (known ? "Strategy is activated : " : "No active strategy chosen : ") + name;
 	});
 
-	// aiStrategicArea.* left (AIStrategicArea).
+	// aiStrategicArea.* left (AIStrategicArea). The area manager's halves
+	// (DAT_101394ec, 0x10034590): create's argument parse 0x10017dc0 /
+	// 0x10018010, getActive 0x10036380, addTwoWayNeighbour 0x10036140,
+	// removeAllNeighbours 0x10036220, removeObjectTypeFlag 0x10036270,
+	// removeAllObjectTypeFlags 0x100362f0, getOrderPosition 0x10036420,
+	// isInside 0x10036780, getStrategicAreaNames 0x100365f0.
 	bindMethod(
 		console, "aiStrategicArea.create", access,
 		[st](std::string name, ConsoleVec2 corner, ConsoleVec2 other, float height, float temperature, std::string) {
@@ -978,6 +999,8 @@ void registerBotScriptMethods(Console& console, BotSettings& settings)
 			s->manager->scriptFlyTo(bot, radius, height, toPhysics(at));
 		}
 	});
+	// The patrols' argument parses: 0x100069d0 and, for Patrol3d,
+	// 0x10007000 (a point each, 0x10006c00).
 	bindMethod(
 		console, "ai.botSetWaypoints_Patrol", access,
 		[s](int bot, float radius, int count, ConsoleVec3 a, ConsoleVec3 b, ConsoleVec3 c) {
@@ -1017,7 +1040,8 @@ void registerBotScriptMethods(Console& console, BotSettings& settings)
 		[s](std::string name, int team, std::string, std::string) { return s->manager ? s->manager->addBot(name, team) : -1; },
 		2);
 	// ai.init (0x10004dc0): the level's AI/AI.ai starts the AI (AIMain's
-	// initiation; a level without it has no bots, see BotManager::setNavMesh).
+	// initiation 0x10026eb0: AIMain made and started, 0x10056b20; a level
+	// without it has no bots, see BotManager::setNavMesh).
 	bindMethod(console, "ai.init", access, [s]() { s->initiated = true; });
 	// addUnspawnedBot (0x10005f90 -> 0x10028d70) does nothing and answers -1.
 	bindMethod(console, "ai.addUnspawnedBot", access, [](std::string, int, std::string) { return -1; });

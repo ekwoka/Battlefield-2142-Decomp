@@ -316,6 +316,62 @@ L8, vehicle and seat details. None of these readers is traced, so the effects of
 - A5's AITemplatePlugIn rows bound: setUseNoPathfindingToGetToObject (Unit `+0x15`, `0x00884eaf`; AIDLL reads it through `0x008a1d10` / `0x100aa570` in `0x1006c520`, `0x1006dac0`, `0x1006bd70`, `0x10070200`, `0x10070da0`, `0x10071a10`, `0x100724e0`) and vehicleNumber (Mobile `+4`, `0x008834f9`; `0x008a1770` / `0x100a46c0`): both only steer the tests on the Mobile's per-map point records, which the rewrite doesn't keep, so they change no decision (`Bots_PlugInNoPathfindingAndVehicleNumber`).
 - Tests: 766 with `BF2142_GAME_DIR`, all passing (this pass adds 10); `ninja -C build/win32` builds. Bot rounds (`BF2142_BOT_SEED` 1–3 on Cerbere_Landing gpm_sp 16 and minsk_coop gpm_coop 32, 300 s) give the same kills as HEAD's build with the same CPU (4.6–5.0 s user on Cerbere_Landing, 7.7–8.5 s on minsk_coop; HEAD 4.6–4.9 and 7.3–8.1, run side by side).
 
+**Status (RendDX9 missing-code pass: §2g's RendDX9 runs, `uncited.py --cite cite_noaudit.json --min-run 1024`):**
+- Before → after (RendDX9, no audit docs, without the appendix): cited 458 functions / 293,470 B (17.5%) → 1,194 / 386,953 B (23.1%); raw (d) 154 → 109 KB; (d) runs of 1 KB or more 44 / 114.5 KB → 33 / 70.0 KB; calibrated effective 72.1% → 75.0%. Most of the citation gain is the present-uncited console rows below; classifying in uncited.md moves none of these figures (the no-audit run leaves it out).
+- The 44 (d) runs of 1 KB or more, by outcome (sizes as first measured): cited 7 / 14.4 KB, editor and tools (b) 26 / 80.5 KB, replaced by design 9 / 15.9 KB, still missing (d) 2 / 3.7 KB. None was rendering the rewrite lacked and could take within the frame budget; the two that are (SimpleShadowmap, the terrain as a shadow occluder) are written up in uncited.md's new "RendDX9: the missing-code pass" with the reasons.
+
+| Run | Size | Outcome |
+|---|---|---|
+| `0x100f96b0` | 10,030 | (b) GeometryOptimizer (already in uncited.md) |
+| `0x10170370` | 7,660 | (b) GeometryOptimizer base (already) |
+| `0x100ce6c0` | 6,408 | (b) TerrainEditable's `terraindata.raw` writer |
+| `0x100f7b80` | 6,287 | (b) GeometryOptimizer (already) |
+| `0x100ca150` | 4,299 | (b) nvdxt / tgasplit |
+| `0x1002bb90` | 4,071 | (b) draw statistics (already) |
+| `0x10158520` | 3,976 | (b) the terrain editor's .dds splitting |
+| `0x1001af30` | 3,715 | replaced: the .fx preprocessor |
+| `0x1016f370` | 3,693 | (b) the optimizer base's writer and slots |
+| `0x1002f3d0` | 2,976 | (b) statistics and profiler containers |
+| `0x100f6330` | 2,949 | (b) BundledMeshOptimizer's slots |
+| `0x10095810` | 2,630 | replaced: the overgrowth tiles' vertex streams |
+| `0x100793e1` | 2,595 | (d), low: `nametags.*` tuning rows, unbound, called by no shipped script |
+| `0x100b1bf0` | 2,571 | cited: the water patch quad `0x100b1f10` (LevelRenderer::buildWater); the rest TerrainEditable's (b) |
+| `0x10121790` | 2,455 | cited: the overgrowth type lookup `0x10121790` (LevelRenderer.cpp); `0x10121930`'s painted maps (b) |
+| `0x100118d0` | 2,380 | (b) the VertexBuffers dump |
+| `0x10179bf0` | 2,370 | (b) lightmap samples |
+| `0x10003b10` | 2,303 | (b) frame capture |
+| `0x1008fb30` | 2,262 | cited: gathering the trees into cells, with the preLoad `0x100909e0` (LevelRenderer.cpp) |
+| `0x100f6f90` | 2,210 | (b) BundledMeshOptimizer |
+| `0x10009cc0` | 2,186 | replaced: display modes |
+| `0x10042ca0` | 2,045 | (b) profiler sections |
+| `0x100a0dc0` | 1,950 | cited: the per-part bounds (LevelRenderer.cpp's partBounds) |
+| `0x100ff650` | 1,892 | (b) the road compiler |
+| `0x1014f1d0` | 1,817 | cited: TerrainMakeDynamicLightMap / TerrainDynamicShadow `0x1014f400` (terrain.frag) |
+| `0x1012d5b0` | 1,814 | cited: the NSA particles' fill `0x1012d720`, batch `0x1012d660`, draw `0x1012e920` (Effects.cpp collectAligned) |
+| `0x100cbc90` | 1,774 | (b) TerrainEditable |
+| `0x10030140` | 1,735 | (b) statistics |
+| `0x1008d1f0` | 1,707 | (b) Overgrowth.paintMaterial |
+| `0x1008767d` | 1,643 | (b) Overgrowth editor rows |
+| `0x1008bae0` | 1,637 | (b) Overgrowth.raw save |
+| `0x100b53c0` | 1,501 | cited: DrawWater (buildWater's comment, with what the rewrite does differently) |
+| `0x1017a690` | 1,426 | (b) lightmap samples |
+| `0x1007a01f` | 1,412 | (b) StaticMeshRenderer lightmap / index-list dev rows |
+| `0x1002b4d0` | 1,339 | (b) statistics |
+| `0x10034c10` | 1,332 | replaced: RaDefines.fx / GSLoadObfuscated |
+| `0x1001c040` | 1,308 | replaced: the effect loader's maps |
+| `0x1001d0f0` | 1,290 | replaced: the same |
+| `0x100092f0` | 1,245 | replaced: display modes |
+| `0x100c7400` | 1,189 | (b) the terraindata writer |
+| `0x100aa290` | 1,147 | (d): SimpleShadowmap.raw, not done (uncited.md) |
+| `0x10030950` | 1,103 | (b) statistics |
+| `0x1001a680` | 1,099 | replaced: the .fx preprocessor |
+| `0x1000af90` | 1,067 | replaced: the device's caps probe |
+
+- Under 1 KB, also cited: the `.font` reader `0x10180dd0` (Nametags.cpp), SkinnedMeshDrawShadowMap `0x10162c70` (the shadow casters), the MeshParticles draw `0x101351e0` / `0x10135460` (engine.md). Classified: TerrainOccluderShadows `0x1014d450` (d), LeafOG / TrunkOG `0x1008e400` (replaced); the rest are containers in the replaced effect and device code.
+- Present but uncited (c): every implemented RendDX9 console row's constructor and executors are now cited on the line that binds the row (260 rows, ≈75 KB: LightSettings.cpp, PostProductionSettings.cpp, EffectSettings.cpp, OvergrowthSettings.cpp, GeometryTemplateManager.cpp, TerrainData.cpp, Nametags.cpp), and the mesh loads' paths (`0x100a1860`, `0x100d3080`, `0x100e9060`, GeometryTemplateManager.cpp). The largest (c) runs left are propagated labels in the particle and mesh renderers (`0x10143980` 17.5 KB, `0x10135bb0`, `0x10141350`) with no evidence of their own.
+- Fixed on the way: `nametags.createIcon` / `createBar` take an icon id by number as the console's parser does (`0x1007168d`; `Nametags_IconRegistry`).
+- Frame cost (Cerbere_Landing gpm_sp 16, 15 bots, 300 frames): 2.78, 2.68, 2.66 ms; nothing drawn changed. Tests: 768 with `BF2142_GAME_DIR`, all passing; `ninja -C build/win32` builds.
+
 ### 2g. The remaining large uncited and missing code blocks, by size
 
 **Missing ((d) runs, no audit docs, ≥ 2 KB).** EXE: 20 runs / 103 KB (fec6f08: 23 / 111 KB). RendDX9: 21 / 80 KB. AIDLL: 5 / 21 KB. The other ~70% of raw (d) is in runs under 2 KB.
@@ -399,6 +455,174 @@ AIDLL (≥ 20 KB):
 |---|---|---|---|
 | `0x10044aa0` | 33 KB | c | containers, OvergrowthCollision.con |
 | `0x1002ae90` | 23 KB | | the bot debug printers |
+
+**Status (missing-runs pass after the seats pass):** the EXE's (d) runs of 1 KB or more (`uncited.py --cite cite_noaudit.json --min-run 1024`), biggest first, and the largest evidenced (c) functions; each implemented, cited where the rewrite already does it, or classified in uncited.md ("The missing-runs pass").
+
+| Run | Size | Outcome |
+|---|---|---|
+| `0x004f5900`..`0x004f6496` (follow.* setters, in run `0x004f63d8`) | 2.9 KB | implemented: follow.followTime / targetActivation (`0x005ed1a0`, `0x005ec7c0`, `0x005b2c10`, `0x005b3e60`); changeYaw / changePitch / minDist cited as never read |
+| `0x00500594`..`0x00500883` (TargetObject setters, run `0x00500594`) | 2.0 KB | implemented: disableWhenEmptyVehicle(Delay), disableWhenWreck (`0x0058eba0`, `0x0058e720`) |
+| `0x004f64fb`..`0x004f6efe` (DestroyableObject / DestroyableWindowsBundle rows) | 1.6 KB | classified: no shipped script sets them |
+| `0x0042ec60`..`0x0043031d`, `0x0042d9e0`..`0x0042df62` (the network event registry) | 7.0 KB | cited: `0x0042ed10`, its helpers `0x0042d9e0`..`0x0042de90`, `0x0042ec60` (GameProtocol.h's event ids are this registry's) |
+| `0x0070cb00`..`0x0070e120` | 5.6 KB | classified: the Logitech G15 LCD applet's pages (0x0070cc50 page state, 0x0070d880 the "1/3" page writer through the LCD SDK 0x0071fc50) |
+| `0x008ae4e8`..`0x008b00be` (RagDoll rows) | 6.9 KB | cited: the 19 row executes in RagDoll.cpp's `.con` reader (`0x008ae555`..`0x008afd68`); AnimationSystem.create / active / list (`0x008afd9a`..`0x008b007a`) are the editor's |
+| `0x00420bdc`..`0x0042154a` (awards.setData) | 2.4 KB | cited: `0x00420be8`, `0x004211d2` in Stats.h (parseAwards reads awards.con itself) |
+| `0x0066b175`..`0x0066cee1` (Console.get* reflection) | 6.7 KB | classified: dev (already in uncited.md (b), "Dev console methods") |
+| `0x006ee282`..`0x006ef9bd`, `0x006ec29f`..`0x006ecf7a`, `0x006efbdb`..`0x006f0cb9`, `0x006f0d36`..`0x006f1b6f` (Object.* / ObjectTemplate.* / Player.* editor rows) | 16.4 KB | classified: editor (no shipped script calls them; isNotSaveable / saveInSeparateFile / createdInEditor are the editor's save flags) |
+| `0x004196a4`..`0x0041aa21` (SquadManager.list*, renderer.screenMode / listScreenModes, pythonHost.sendCommand / reinitialize) | 5.0 KB | classified: dev console listings, no shipped caller |
+| `0x00504be6`..`0x00505cf0` (template class registration) | 4.4 KB | cited: `0x00504be6` in ObjectTemplateManager.cpp (its type table) |
+| (c) `0x004dc66d`, `0x004dce2e`, `0x004dd759`, `0x004dd315`, `0x004dc3c3`, `0x00424ff0`, `0x008902f0`, `0x0088eaa0` (enum argument readers) | 6.1 KB | cited where the rewrite reads the same names (Nametags.cpp, Weapons.cpp, Cameras.h, Bots.h, CombatAreas.cpp, Bots.cpp) |
+| `0x00525958`..`0x00526270` (Camera sway), `0x004fd1c3`..`0x004fda4b` (regulateYaw), `0x00544efd` (changeLodAt), `0x004fc895` (soldierExit*), `0x005234b3` (regulateFromParent), `0x004ed6a5` (useShiftAnimation), `0x00520880` (isPortalPassing), `0x0055360d` (addVehicleIcon), `0x0052796e` (insideViewInterpolate), `0x004e4667` (fire.isBarrel), `0x0055264c` (podSpawnVehicle), `0x00552d4b` (tvInterference), `0x004e39f3` (dropWeaponAfterReloadDelay), `0x004fdcd6` (maxVertRegAngle) | 20.6 KB | classified: stored rows no shipped script sets (the default is what plays); the runs' few called rows left (uncited.md) |
+| `0x0051ca27`..`0x0051cfaf` (anchor, 1,110 calls) | 1.4 KB | classified: editor (the roads' and statics' snap point) |
+| `0x007c3af0`..`0x007c40b9` (the HUD ability bar) | 1.5 KB | left (d): AbilityBarShow / AbilityIconPath / AbilityBar / AbilityValue aren't set |
+| `0x00500594` remainder (MagneticBait's overrideArmingSpeed / switchPlayerOnLock, PodTarget's activeOnCreate) | 0.7 KB | left (d): the booster's motion mine bait isn't a magnet target |
+| `0x00676c10`..`0x00677255` (the settings save) | 1.5 KB | cited: `0x00676c10` in SettingsObjects.cpp (userSettingsScript); the rest its stream helpers |
+| (c) `0x00753060` (the key names put into wide text) | 1.2 KB | cited in ControlMap.h (withKeyNames) |
+| `0x006e8570`..`0x006ebdbc`, `0x006af640`..`0x006afead` (the object grid) | 14.2 KB | classified: replaced by design |
+| `0x00683e40`..`0x00686e89` (IDKey / IDButton names) | 10.2 KB | classified: replaced by design (ControlMap.cpp composes them) |
+| `0x0047f5e0`..`0x00483b50`, (c) `0x00483e30` (BFHQ stats, leaderboards) | 19.8 KB | classified: online-only |
+| `0x0049eef0`, `0x0049e8b0`, `0x00479970`, `0x0046b900`, `0x00574550` | 6.1 KB | classified: online-only (logo and HTTP caches, account messages, downloads) |
+| `0x00436530`..`0x00436dd8` (the LCD applet's start-up) | 2.2 KB | classified: G15 LCD |
+| `0x006b3db1`, `0x006b2fc3`, `0x007636c8`, `0x008b0792`, `0x006f3d18`, `0x006f4558`, `0x00521440` (collisionManager, heightmapcluster, slider node, animation browser, Object / ObjectTemplate listings) | 9.8 KB | classified: editor / dev, no shipped caller |
+| `0x0070b600` (Effects.con writer) | 1.8 KB | classified: editor |
+| `0x0087bc00`, `0x0087a1c0`, `0x007b2f60`, `0x007b3750`, `0x00874cd0`, `0x007b2220`, `0x007dbd10`, `0x00870020` (dice::meme) | 12.1 KB | classified: replaced by design (src/Hud) |
+| `0x004f45e4` (allowFriendlyFireDetonation), `0x00499430` (the host page's settings) | 3.0 KB | left (d) (uncited.md) |
+
+- Implemented: `follow.followTime` and `targetActivation` (`followActive`, Weapons.cpp; the AA missiles stop turning 10 s after their lock, the mechs' rockets after 0.35 s; a lock taken mid-flight now waits trackingDelay) and the TargetObject switch (`GameWorld::targetEnabled`: HeatObject and LaserTarget_vehicle go off 5 s after their vehicle empties, the motion mines' MagneticObject reads its own 3 s, wrecks per disableWhenWreck). engine.md "Seeking projectiles".
+- Measured with `cite.py --no-audit-docs` and `uncited.py --min-run 1024` (rows re-measured at the same probe) on 8575796 and on this tree:
+  - EXE citations: 3,130 functions / 1,283,955 B (26.8%) → 3,194 / 1,310,132 B (27.3%) without engine.md's appendix; 4,030 / 1,388,567 B (29.0%) → 4,094 / 1,414,744 B (29.5%) with it.
+  - EXE raw (d): 398 KB → 379 KB (evidenced 304,788 → 288,799 B, propagated 103,124 → 99,822 B); runs ≥ 1 KB 90 / 189,408 B → 84 / 166,059 B; calibrated (d) 0.62 → 0.60 MB; effective lower / calibrated / upper 52.5 / 83.1 / 88.9% → 53.0 / 83.6 / 89.5%.
+  - Classifying in uncited.md moves none of these: the no-audit measurement leaves uncited.md out, so the ≈128 KB of (d) classified above still counts as (d) there.
+- Tests: 768 with `BF2142_GAME_DIR`, all passing (this pass adds `Weapons_FollowTimeLimitsTheGuidance` and `GameWorld_TargetObjectOffWhenEmpty`); `ninja -C build/win32` builds. Bot rounds (`BF2142_BOT_SEED` 1–3 on Cerbere_Landing gpm_sp 16 and minsk_coop gpm_coop 32, 15 bots, 300 s) give the same kills, rounds and hits as 8575796's build tick for tick (Cerbere 18 / 20 / 14 kills, minsk 1 / 3 / 1), with the same CPU (6.1–6.4 s user on Cerbere_Landing, 9.3–10.1 s on minsk_coop, both builds side by side, twelve runs at once).
+
+**Status (AIDLL missing-runs pass):** AIDLL's uncited runs of 512 B or more that the classifier calls (c), (d) or "?" (`uncited.py --cite cite_noaudit.json --min-run 512`; contiguous functions labelled anything but cited, (a) or (b)), biggest first: 267 runs / 353,516 B. Each run's functions were implemented, cited at the rewrite's code that does their job (comments in src/AI, src/Game/Bots*), or classified in uncited.md ("AIDLL: the missing-runs pass"). Outcomes in the table: *cited*; *(a)* STL, containers, accessors and plumbing; *(b)* debug drawing and printers, navmesh-generation tooling; *inert* (behaviour no shipped set or level can reach: planes, boats, broken bridges, the landing zones); *gap* (bot behaviour the rewrite lacks, decoded, not yet written: listed below); *not settled*; *impossible*.
+
+| Run | Size | Outcome |
+|---|---|---|
+| `0x1002d800`..`0x10030493` | 11,296 | (b) debug: the bot and team printers ("** NO PLAN **", `0x1002e180`, `0x1002eff0`, `0x1002db50`) and the debug drawer's primitives |
+| `0x10080590`..`0x1008275a` | 8,539 | inert: BBPFire3d's plan `0x100819b0` (the Plane set only) and BBCallForMedic (in no shipped set); cited: BBFireInfantery / BBRevive classes, the slot-11 gate `0x10082070` |
+| `0x100c2ee0`..`0x100c4905` | 6,442 | cited: the squad bookkeeping (`0x100c4080`, `0x100c3f10`, `0x100c34d0`, `0x100c32b0`), the round's event record `0x100c4500`, the move interpreters; gap: the squad update `0x100c4240`, its radio `0x100c2ee0` / `0x100c30f0`, bounding and flanking `0x100c4010` / `0x100c3af0` / `0x100c3390` |
+| `0x10053620`..`0x10054fe2` | 6,319 | (b) debug: IDPManager's text demo; the IAIStrategicEnvironment and pathfinding courier slots nothing reads |
+| `0x100bac90`..`0x100bbfef` | 4,875 | (b) tooling: GTSData `.qti` and the GTS build; bridge obstacles (no broken bridges) |
+| `0x100204b0`..`0x10021778` | 4,436 | cited: the `aiPathfinding.map.*` rows the rewrite reads (Bots.cpp); (b): minPolygonsInLeaf, maxDepthInTree, map.draw* |
+| `0x1008fec0`..`0x10091049` | 4,421 | cited: Car / Tank interpreters at drive(); inert: the Plane interpreters |
+| `0x100d4f60`..`0x100d5f96` | 3,938 | gap: the sensing agent's look-around (`0x100d50b0`..`0x100d5ca0`); cited the aim's `0x100d4f60` / `0x100d4fa0` |
+| `0x100f4c70`..`0x100f5c57` | 3,879 | gap: the squad formation (`0x100f4c70`, squad `+0x7c`) |
+| `0x10023e70`..`0x10024dfd` | 3,795 | (a): the behaviour-pattern factories and singleton fetches |
+| `0x10055020`..`0x10055eff` | 3,459 | cited: the courier's map by name `0x10055020`; (a) plumbing and debug console helpers |
+| `0x1008b9e0`..`0x1008c7b9` | 3,410 | cited: FloatingTank interpreters; gap (not decoded): the sensing patterns' look plans (Null / Soldier / MouseFreeLook / Turret) |
+| `0x100c0130`..`0x100c0ee2` | 3,408 | cited: the member's waypoint goal `0x100c0130`, re-goal `0x100c0a90`; gap: the member update `0x100c0bb0`, the formation consumer `0x100c0890` |
+| `0x100fad20`..`0x100fbac2` | 3,370 | (a): the root solver behind aim slot 0x44, which has no caller; cited the ray filter `0x100fba60` / `0x100fba80` |
+| `0x10046080`..`0x10046e32` | 3,365 | (b) tooling: exportGTSMeshes; cited the Mersenne twister's draw `0x10046770` / `0x10046a50` (the xorshift stand-in) |
+| `0x10043ac0`..`0x10044878` | 3,320 | cited: the A* open-list refill (NavMesh.cpp), createMap and the per-template map table; (a) resets; impossible: the path-cost slot 0x80 (no caller resolved) |
+| `0x10084c20`..`0x10085915` | 3,271 | cited: BBPBridgeRepair and BBFlee's class (the bridge stand-in: 0) |
+| `0x10035dc0`..`0x10036b41` | 3,244 | cited: the aiStrategicArea.* halves (setActive, addNeighbour, …; BotsScript.cpp); (a) containers |
+| `0x10065dd0`..`0x10066a67` | 3,168 | cited: BBPAvoidCollision2d (never runs, documented), BBMoveTo's class; inert: AvoidCollision3d (in no shipped set) |
+| `0x100f5f80`..`0x100f6c06` | 3,144 | gap: the squad formation's slots (`0x100f67d0`, `0x100f69a0`, `0x100f60a0`, `0x100f64a0`) |
+| `0x100efc10`..`0x100f083f` | 3,046 | gap: the SAI's respawn (`0x100f0590`, the spawn-point chooser `0x100eff20`, kit and unlocks `0x100f04a0`) |
+| `0x10067d70`..`0x1006897b` | 3,021 | cited: BBPGotoWaypoint2d; inert: GotoWaypointsBoat (no Boat set) |
+| `0x100d64f0`..`0x100d70f7` | 3,021 | gap: the sensing agent's reset and sector weights (`0x100d6b90`, `0x100d6630`, `0x100d67b0`) |
+| `0x100e0e60`..`0x100e1a39` | 3,009 | inert: AirTransportMoveTo (no AirTransport ships) |
+| `0x100b8e90`..`0x100b9a38` | 2,917 | (b) tooling: bridge obstacles, GTS helpers; gap: the mine zones' flood fills `0x100b94d0` / `0x100b9200` |
+| `0x100a0420`..`0x100a0f92` | 2,886 | gap: the SAI's loners split by aggression (`0x100a09c0`, `0x100a0420`) |
+| `0x100f88d0`..`0x100f93d1` | 2,773 | cited: the information grid's queries (Bots.h) |
+| `0x100b9d90`..`0x100ba84b` | 2,736 | (b) tooling: obstacle creation (bridges), GTS; `0x100b9d90` not settled |
+| `0x1003c2d0`..`0x1003ce4b` | 2,701 | cited: the flee's mesh lookup `0x1003c890`, the A* tree helpers; (b): the polygon-normal drawer, the "NO ACTIVE MAPPROPERTIES" printer; implemented: the step ahead behind slot 0x90 (`0x1003cb90`) |
+| `0x1005a5e0`..`0x1005aff7` | 2,569 | cited: createConstantCondition's parsers |
+| `0x100c1de0`..`0x100c2821` | 2,553 | cited: taking an order (`0x100c1eb0`, `0x100c21b0`, `0x100c1fe0`), the squad's strength `0x100c26d0`; gap: the radio inside `0x100c21b0` |
+| `0x100a3620`..`0x100a4088` | 2,532 | cited: the SAI's constructor `0x100a39c0` and destructor, the asset clocks |
+| `0x10051d20`..`0x1005279a` | 2,514 | (a): AISettings' modifier storage (BotSettings holds the values), IDPManager map nodes |
+| `0x100e77a0`..`0x100e8165` | 2,469 | inert: the Plane controllers |
+| `0x100ab080`..`0x100abb8b` | 2,356 | (a): the AI objects' plug-in part wrappers (the rewrite reads AiPlugin directly) |
+| `0x100cd170`..`0x100cdb0f` | 2,344 | cited: Parallell's list node and the combiners; (b) printers; not settled: the steering statement `0x100cd3b0` |
+| `0x10056110`..`0x10056aeb` | 2,343 | gap, low: AIMain's bot population (slots 0x50 / 0x1c: maxBots, includeHumans; `--bots` stands in) |
+| `0x100b0a00`..`0x100b1380` | 2,286 | (b) tooling: the `.cls` GTS reader and writer; cited `0x100b11f0`; (a) map iterators |
+| `0x1009ee00`..`0x1009f6a5` | 2,175 | not settled: SAI step 1 `0x1009ee00` (per-side strength sums) |
+| `0x1003d840`..`0x1003e0ff` | 2,166 | cited: the A* open list and visited hash, slot 0x88's ray `0x1003de90` |
+| `0x100016d5`..`0x10002034` | 2,154 | (a): AISingletonServerUpdater's start-up and teardown, the console base slots |
+| `0x100cae50`..`0x100cb6e1` | 2,095 | cited: the information environment's per-team grids (the documented stand-in) |
+| `0x100f0860`..`0x100f10ef` | 2,009 | cited: the armament's weapon list; (a) forwarders and STL; (b) mesh-generation geometry |
+| `0x10088f20`..`0x10089729` | 1,986 | cited: a player's squad, the nearest squad, joining (stand-in: the original fills the emptiest); not settled: order expiry `0x10088f20` |
+| `0x100c5420`..`0x100c5ccf` | 1,984 | (a): STL and the interfaces' RTTI constructors |
+| `0x10062b80`..`0x10063460` | 1,962 | cited: the strategic areas' constructors and destructors (Strategy.h); (a) accessors |
+| `0x10038d50`..`0x10039512` | 1,961 | cited: the level-start pass `0x10038d50` (routeVia), addWayPoint `0x10039000` |
+| `0x1005cfe0`..`0x1005d837` | 1,897 | (a): the area vtable's accessors |
+| `0x100d0700`..`0x100d0e5c` | 1,876 | cited: MoveToObject's distance and MoveToObjectFinding's re-path |
+| `0x1008a240`..`0x1008a9a0` | 1,852 | cited: the squad manager (`0x1008a720`, `0x1008a240`, update `0x1008a910`); not settled: the human tracking `0x1008a3b0` / `0x1008a690` |
+| `0x10098200`..`0x1009895f` | 1,799 | not settled: bot slot 8 `0x10098200` (rebinding to a new controlled object) |
+| `0x1006b1d0`..`0x1006b907` | 1,795 | gap: BBPIdle2d (`0x1006b2f0`): a driver answers a passenger's req_pickup with roger_that |
+| `0x100ff690`..`0x100ffd93` | 1,779 | (a): the box frustum of the ITAir room test (no Plane ships), matrix helpers |
+| `0x100a1a80`..`0x100a2199` | 1,777 | not settled: SAI step 4 `0x100a1a80` |
+| `0x1004beb0`..`0x1004c635` | 1,769 | cited: IAIMineManager's class and grids (the mine stand-in) |
+| `0x100da620`..`0x100dad53` | 1,737 | gap: the guided aim point (`0x100da6b0` / `0x100da710`); (b) printer |
+| `0x10026300`..`0x100269ce` | 1,701 | cited: the clamp `0x10026930`, the clamped acos `0x10026960`; (a) the BB factory registration |
+| `0x100d12d0`..`0x100d19b6` | 1,698 | cited: MoveToFinding, the 3d move, While |
+| `0x10096ab0`..`0x10097364` | 1,664 | (a): the bot's accessor slots |
+| `0x10026f60`..`0x1002762f` | 1,642 | cited: setVehicleDefaultBehaviour, addSAIStrategy, activateDefaultInterpreter; (b) the settings printer, the debug camera |
+| `0x100ecca0`..`0x100ed2bd` | 1,514 | cited: the sensing memory's constructor and clear (Bots.h); (a) STL |
+| `0x100cbd70`..`0x100cc34a` | 1,498 | (a): a 101-entry x^6 table with no reader |
+| `0x10091550`..`0x10091b39` | 1,489 | cited: the Tank interpreters |
+| `0x100d7190`..`0x100d77a7` | 1,489 | gap: the sensing agent's constructor and stimulus collection (`0x100d7210`, `0x100d7400`, `0x100d7590`) |
+| `0x100d9130`..`0x100d973c` | 1,489 | cited: LookDeviation and the aim's accessors |
+| `0x100304f0`..`0x10030b1b` | 1,476 | cited: the Mersenne twister (Bots.h, the xorshift stand-in); (b) the debug drawer's set-up |
+| `0x10097470`..`0x10097a60` | 1,462 | cited: the bot's parts and input binding (Bots.h); not settled: slots `0x100977f0`..`0x10097a40` |
+| `0x10059be0`..`0x1005a1b3` | 1,461 | cited: the CST, strength, Crisp / Fuzzy and side names |
+| `0x1003b970`..`0x1003bfa8` | 1,457 | (a): the information factory and map-properties slots |
+| `0x10057410`..`0x100579b8` | 1,429 | (a): AIMain's list bookkeeping |
+| `0x100db580`..`0x100dbbca` | 1,424 | cited: the area-not-held test, ChangeWeapon, the wait, weapon ready; impossible: `0x100db5c0` / `0x100db5e0` / `0x100dba60` (fields unidentified) |
+| `0x10061440`..`0x10061a15` | 1,423 | (a): the zone lookup (console), area accessors |
+| `0x100c4e30`..`0x100c5403` | 1,416 | (a): STL |
+| `0x10029e80`..`0x1002a3f4` | 1,373 | cited: removeInterpreterEntry; (b) the path printer |
+| `0x1009ce20`..`0x1009d3cb` | 1,345 | not settled: SAI slots and step 8 `0x1009cf90` |
+| `0x1006fc90`..`0x100701fa` | 1,339 | cited: BBPChangeLandingCraft; (a) containers |
+| `0x1002d1c0`..`0x1002d6e8` | 1,293 | (b) debug: the path drawer, the plan-name printer |
+| `0x100d23a0`..`0x100d28fe` | 1,275 | cited: the Idle statement, the pattern base, the empty-seat test; gap: the 2d path look `0x100d2500`; inert: the boat look |
+| `0x10100760`..`0x10100d68` | 1,272 | (b) debug: the PI* names for the statement printers |
+| `0x1002c180`..`0x1002c6a3` | 1,266 | (a): the debug drawer's containers |
+| `0x100ac300`..`0x100ac843` | 1,262 | (b) tooling: saveQuadTrees, the cluster-distance precompute; cited the island lookup; gap: the mine zones `0x100ac660` / `0x100ac690` |
+| `0x10092400`..`0x10092914` | 1,257 | not settled: the path follower's step count and point cache |
+| `0x1003a200`..`0x1003a720` | 1,247 | cited: the strategy manager's command halves; inert: the preceding-strategy commands (not rewritten) |
+| `0x100be300`..`0x100be86a` | 1,242 | cited: the A* successor iterators; (a) the interfaces' RTTI bases |
+| `0x10032e10`..`0x100332f5` | 1,235 | cited: the auto-controller template; inert: ai.spawnBot's placement spawner (not rewritten) |
+| `0x1006d5d0`..`0x1006dabd` | 1,234 | cited: BBPChange; inert: the exit spot for planes `0x1006d840` |
+| `0x1008cd70`..`0x1008d249` | 1,234 | cited: the Mech interpreters |
+| `0x100511a0`..`0x10051691` | 1,227 | (a): AISettings slot 0x84's storage |
+| `0x10058540`..`0x10058a3e` | 1,224 | (b): the material and strength-name printers, the AIMain destructor |
+| `0x10035440`..`0x10035935` | 1,215 | inert: the broken-bridge list (no broken bridges) |
+| `0x1005bb60`..`0x1005c032` | 1,214 | cited: Owned / Hostile / Neutral; inert: the landing zones' side names |
+| `0x100fff20`..`0x101003d1` | 1,201 | (a): a 4x4 inverse for the run-time obstacles |
+| `0x1003b400`..`0x1003b8f8` | 1,197 | cited: createStrategy, createPrerequisite; (a) the manager's construction |
+| `0x100c1820`..`0x100c1cdc` | 1,195 | gap: the squad's member-in-area test, mode choice and danger list (`0x100c1820`, `0x100c1940`, `0x100c1b60`) |
+| `0x1008e440`..`0x1008e939` | 1,176 | cited: InfoWrapper, SoldierPose, the turret look and aim; not settled: the Sense statement `0x1008e620` |
+| `0x100344b0`..`0x10034a08` | 1,169 | cited: the best area for a point `0x100349b0`; (a) accessors |
+| `0x100f4350`..`0x100f481f` | 1,169 | (b) tooling: the quad-tree build; gap: the formation's getters |
+| `0x100c1210`..`0x100c16af` | 1,156 | cited: the order's area, reachability `0x100c1300`, the 8 tries within 30 m `0x100c14a0` |
+| `0x1009b380`..`0x1009b8e1` | 1,154 | cited: the bot's destructor; (a) accessors |
+| `0x100ef370`..`0x100ef84b` | 1,138 | cited: the sensing step `0x100ef370`, the target reset `0x100ef3e0`; gap: the SAI's death and spawn hooks (with run 21) |
+| `0x10030f90`..`0x10031417` | 1,135 | implemented: the bots' spotting `0x10030fb0` (with `0x100a5850`); (a) vector code |
+| `0x100aa920`..`0x100aae65` | 1,124 | (a): the Unit and Physical part wrappers |
+| `0x100f7090`..`0x100f756f` | 1,117 | cited: the arbiter (Behaviour.h), the grid helpers; (a) RTTI |
+| `0x100cf910`..`0x100cfe14` | 1,103 | cited: the horn statement `0x100cfbd0`; (a) the plan framework's helpers |
+| `0x1002cad0`..`0x1002cf7e` | 1,101 | (a): the debug drawer's containers |
+| `0x1003ee10`..`0x1003f2c2` | 1,096 | (b) debug: the trace-map printers; cited slot 0x30 `0x1003f000` |
+| `0x100a9660`..`0x100a9b1c` | 1,089 | cited: the AI object (Heli.h); inert: the homogenous / heterogeneous conditions (no shipped script) |
+| `0x100fe500`..`0x100fe963` | 1,083 | (b): the assert reporter, box math |
+| `0x100259c0`..`0x10025e1f` | 1,078 | (a): the AIConsole name registry |
+| `0x100841e0`..`0x10084611` | 1,055 | cited: the BridgeRepair helper and class |
+| `0x10001000`..`0x100014aa` | 1,050 | (a): the singleton's slots; the menu's bot count and skill (main.cpp's stand-in) |
+| `0x10063f90`..`0x100643b6` | 1,047 | cited: the strategic objects' base |
+| `0x100d2b40`..`0x100d2f7e` | 1,032 | cited: the info-grid getter, If, NOT; (b) printers |
+| `0x1004a4d0`..`0x1004a907` | 1,008 | (a): the mine grid's insert and remove |
+
+The 153 runs under 1 KB (105 KB) were triaged the same way: mostly cited (the A* drivers, the aiStrategicArea / strategy / behaviour command halves, the botSetWaypoints_Patrol parsers, the aerial height map, the cluster search's hash, the comm object, the MoveTo statements, the target conditions, the sensing frustum) or (a) (vector `_Insert_n` instantiations, map inserts, accessors, the interfaces' RTTI constructors); the (b) ones are the landing-zone and placement parses, the camera commands and the GTS build; the gaps among them are the get-in plan's conditions and seated radio (`0x100d4190`, `0x100d4a90`), the pilot's weapon choice (`0x100dd4a0`), the pilot's take-off wait test (`0x100d1cb0`), Revive's crouch-then-fire (`0x100dda20`), the damage event (below, done) and the squads' manager radio slots (`0x100c5f00`, `0x100c60c0`).
+
+- Implemented:
+  - **The bots' spotting** (`0x100ed2c0` → `0x100a5850` → `0x10030fb0`, IAIGame slot 0x68 = BF2142.exe `0x00895ab0`): a memory item's first own sighting (`+0x68`), near a strategic area (30 m across, 100 m for aircraft), throttled per team and area for 60 s (an upgrade to HeavyArmour passes) and for aircraft by one stamp, is reported to the team (the human spotting's path) and its `radio.spottedMessage` said on TCTeam. `BotManager::spotSighting`; test `Bots_SpotSightingsNearAreas`.
+  - **A hit tells the squad** (IAICollisionHandler slot 0x18, `0x1004f020`, from BF2142.exe `0x0089f8d0`): the attacker goes to the victim's squad's memory and a human driver's squad; a bot victim is made aware of the attacker. `GameWorld::takeAiHits`, `BotManager::hitBy`; test `Bots_HitSharedWithSquad`.
+  - **The soldier's step ahead** (`0x10093150` → slot 0x90 `0x1003f8c0` → `0x1003cb90`: the mesh ray's climb test at 85° / 0.35 m half a radius ahead): the follower presses jump at a rise in its way while it moves. `PathFollower::steer`, `RayHit::climbStopped`; test `PathFollower_SoldierJumpsAStepAhead`.
+- Gaps decoded and left (bot behaviour, in order of size): the squads' formation, bounding and flanking, danger list and order radio (`0x100c4240`, `0x100f4c70`..`0x100f6c06`, `0x100c0bb0`, `0x100c2ee0`, `0x100c30f0`, `0x100c21b0`, `0x100c1940`); the sensing agent's look-around (`0x100d7210`, `0x100d7840`, `0x100d60f0`, `0x100d6630`); the SAI's respawn choice of spawn point and kit (`0x100f0590`, `0x100eff20`, `0x100f04a0`); the SAI's loners by aggression (`0x100a09c0`); avoiding known mines on the mesh (cost class 7 through slot 0x5c, `0x1004ae90`, `0x100b94d0`, `0x100b9200`); BBPIdle2d's req_pickup answer (`0x1006b2f0`); the guided aim point (`0x100da6b0`, `0x100da710`, `0x100da380`); the 2d path look (`0x100d2500`); the small ones above. Not settled (need a read against Bots.cpp / Strategy.cpp): SAI steps 1, 4, 6, 8 (`0x1009ee00`, `0x100a1a80`, `0x1009c7c0`, `0x1009cf90`), the steering statement `0x100cd3b0`, bot slots 7–9 (`0x10098d10`, `0x10098200`, `0x1009b9e0`).
+- Measured with `cite.py --no-audit-docs` and `uncited.py` on 8575796 (with the other passes' uncommitted work) and on this tree (AIDLL, without engine.md's appendix, which cites no AIDLL code): cited 1,099 functions / 391,276 B (38.9%) → 1,556 / 473,113 B (47.0%); raw (d) 49,501 → 37,139 B; (d) runs of 512 B or more 17 / 33,946 B → 12 / 24,828 B; calibrated (d) 0.26 → 0.22 MB; effective lower / calibrated 46.7 / 69.7% → 55.5 / 75.0%; uncited (c)/(d)/"?" runs of 512 B or more 267 / 353,516 B → 211 / 248,480 B. Classifying in uncited.md moves none of these (the no-audit run leaves it out).
+- Tests: 771 with `BF2142_GAME_DIR`, all passing (this pass adds three); `ninja -C build/win32` builds. Bot rounds, `BF2142_BOT_SEED` 1–3, 300 s, kills (rounds fired) before → after, run side by side: Cerbere_Landing gpm_sp 16: 18 (1,552), 20 (1,230), 14 (2,688) → 15 (1,166), 11 (1,592), 16 (1,752); minsk_coop gpm_coop 32: 1 (82), 3 (1,435), 1 (327) → 6 (187), 6 (568), 4 (281). CPU the same: 4.6–5.0 → 4.6–4.8 s user on Cerbere_Landing, 7.8–8.6 → 7.5–7.9 s on minsk_coop.
 
 ## 3. Remaining hedges a further pass could settle
 

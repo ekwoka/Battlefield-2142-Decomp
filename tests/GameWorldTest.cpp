@@ -2553,6 +2553,45 @@ TEST(GameWorld_WeaponLockTakesTheNearest)
 	CHECK(lock.target == far->id() && lock.state == 1);
 }
 
+// A vehicle's TargetObject switches itself off (0x0058eba0): with
+// HeatObject's disableWhenEmptyVehicle an empty one, never sat in, can't
+// be locked; without it, it can. (A wreck is out of the lock either way:
+// it counts as destroyed.)
+TEST(GameWorld_TargetObjectOffWhenEmpty)
+{
+	for (int off = 0; off < 2; ++off) {
+		Range range;
+		range.collisionTemplates.add("crate_mesh", boxMesh(1));
+		range.templates.registerType(8, "SimpleObject");
+		range.templates.registerType(20, "PlayerControlObject");
+		range.templates.registerType(23, "Engine");
+		world::ObjectTemplate* launcher = range.templates.find("eu_ar_rifle");
+		launcher->settings()["target.targetSystem"] = "TSHeatSeeking";
+		launcher->settings()["target.maxDistance"] = "450";
+		launcher->settings()["target.lockAngle"] = "20";
+		launcher->settings()["target.lockDelay"] = "0.1";
+		range.templates.create("Engine", "crate_engine")->settings()["engineType"] = "c_ETCar";
+		world::ObjectTemplate* heat = range.templates.create("SimpleObject", "HeatObject");
+		heat->settings()["targetType"] = "TTHeat";
+		heat->settings()["disableWhenEmptyVehicle"] = off ? "1" : "0";
+		heat->settings()["disableWhenEmptyVehicleDelay"] = "5";
+		world::ObjectTemplate* crate = range.templates.create("PlayerControlObject", "crate");
+		makeMobile(*crate, "crate_mesh");
+		crate->children().push_back({"crate_engine", {}, {}});
+		crate->children().push_back({"HeatObject", {}, {}});
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		game::GameWorld::PlayerInfo me;
+		range.world->playerInfo(range.world->localPlayer(), me);
+		world::Object* enemy = range.objects.create(crate, {me.position.x, 1, me.position.z + 40});
+		enemy->setTeam(1);
+		for (int i = 0; i < 10; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		const game::GameWorld::WeaponLockInfo lock = range.world->weaponLock(range.world->localPlayer());
+		CHECK(off ? lock.target == 0 : lock.target == enemy->id() && lock.state == 2);
+	}
+}
+
 // A heat seeker's round (SeekClosestTargetComp, TTHeat): fired locked it
 // has the launcher's target and turns after it (0x005e1ee0, 0x005ec260);
 // fired unlocked with reLockTime 9999 it never takes one.

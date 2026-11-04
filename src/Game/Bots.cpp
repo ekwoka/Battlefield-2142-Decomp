@@ -62,6 +62,7 @@ float headingTo(const physics::Vec3& from, const physics::Vec3& to)
 
 float angleBetween(float a, float b) { return std::remainder(b - a, 360.0f); }
 
+// The squared distance across the ground (AIDLL 0x100a86f0 of two points).
 float horizontal2(const physics::Vec3& d) { return d.x * d.x + d.z * d.z; }
 
 std::string lower(std::string text)
@@ -131,7 +132,8 @@ int fireMode(const world::ObjectTemplate* t)
 	return std::atoi(it->second.c_str());
 }
 
-// CombatStrengthType names (weaponTemplate.setStrength).
+// CombatStrengthType names (weaponTemplate.setStrength; the original's
+// parser 0x10059be0, which also takes a bare "Infantery").
 int strengthIndex(const std::string& name)
 {
 	static const char* names[] = {"infantry", "lightarmour", "heavyarmour", "navalarmour", "helicopter", "airplane", "titan",
@@ -357,6 +359,8 @@ int kitTypeIndex(const std::string& name)
 	return -1;
 }
 
+// The radio message names (0x0088eaa0 builds the same name-to-type map,
+// req_new_order 0xe, PLAYER_TACTICS_gogogo 0xb...).
 int radioMessageType(const std::string& voiceName)
 {
 	static const std::pair<const char*, int> names[] = {{"bail_out", 0}, {"get_in", 1}, {"req_pickup", 2},
@@ -798,6 +802,8 @@ BotManager::~BotManager()
 	}
 }
 
+// The bots' U[0, 1): a stand-in for AIDLL's Mersenne twister (DAT_101394cc;
+// genrand 0x10046770, U[0, 1) 0x10046a50).
 float BotManager::random()
 {
 	m_random ^= m_random << 13;
@@ -1138,6 +1144,9 @@ std::vector<std::pair<int, std::string>> BotManager::carried(const GameWorld::Pl
 // (0x10031d80) and skips one it has none for. Every kit carries the
 // ParachuteLauncher (itemIndex 9, no aiTemplate: a GenericFireArm with no
 // magazine limit and a 0 m/s "round"), which the bots must never pick.
+// (The Armament part's AI weapon list: its constructor 0x100f09c0, rebuilt
+// from the game's items through IInformationFactory slot 0x28, 0x100f09e0;
+// the weapon in hand's AI weapon, 0x100f0950.)
 std::vector<std::pair<int, std::string>> BotManager::armament(const GameWorld::PlayerInfo& self) const
 {
 	std::vector<std::pair<int, std::string>> items = carried(self);
@@ -1303,7 +1312,12 @@ std::string BotManager::aiTemplateOf(const std::string& objectTemplate) const
 //     At most 2 planned and 2 + (2 - planned waiting) unplanned bots think
 //     a frame, the longest waiting first (setDecisionMakingInterleave 2 2).
 //   - sensing (0x100c9980): the two bots that executed this frame and
-//     waited longest look about (0x100ed700).
+//     waited longest look about (0x100ed700). (The think and sense queues
+//     are heaps by waiting time: 0x100c6310 / 0x100c61f0, 0x100c6370 /
+//     0x100c6240.)
+//   - the path followers' refresh (0x100c6cc0): N / 16 + 1 bots a frame,
+//     round robin, gather the objects within 50 m and, a path followed
+//     within the last 3 s, update it (0x10095ac0); here every bot each tick.
 // Rounds flying past are noticed every frame (0x1004ed30 is an event).
 void BotManager::update(float seconds)
 {
@@ -1324,6 +1338,9 @@ void BotManager::update(float seconds)
 	// What the bots heard (the game's hand-out, GameWorld::hearsRadio).
 	for (const GameWorld::RadioHeard& heard : m_world.takeRadioHeard([this](int receiver) { return m_bots.count(receiver) != 0; })) {
 		radio(heard.sender, heard.voice, heard.receiver);
+	}
+	for (const GameWorld::AiHit& hit : m_world.takeAiHits()) {
+		hitBy(hit.victim, hit.attacker);
 	}
 	// A human player out of a vehicle stamps it for the team (BF2142.exe
 	// 0x00894860, exit event: the player not a bot (vt+0x84 -> player
@@ -1357,7 +1374,9 @@ void BotManager::update(float seconds)
 	// The game's AI players are the bots (AIMain's IAI slots: a player made
 	// a bot, 0x10056020 -> 0x100581a0 under setMaxNBots -> the bot manager's
 	// 0x100c8950 "Activating bot"; one leaving, 0x10056d10; one changing
-	// team moves between the SAIs, 0x10056090; ai.deactivateBot, AIDLL 0x10055f80).
+	// team moves between the SAIs, 0x10056090; ai.deactivateBot, AIDLL 0x10055f80;
+	// both take the bot out of its squad, 0x10089860, and the game's squad
+	// with it: the player's own squad membership here).
 	for (const GameWorld::PlayerInfo& self : players) {
 		if (!self.ai || m_deactivated.count(self.id)) {
 			continue;
@@ -1409,6 +1428,11 @@ void BotManager::update(float seconds)
 		bot.radio.erase(std::remove_if(bot.radio.begin(), bot.radio.end(),
 							[&](const Bot::Radio& r) { return m_time - r.at >= m_settings.radioLifeOf(r.type); }),
 			bot.radio.end());
+		// The comm's tick (0x100a8000, from the bot manager 0x100c6e00): the
+		// expiry (0x100a7130) every tick, its update (0x100a7af0) at most once
+		// a second there, every tick here. (The comm object: constructor
+		// 0x100a8140, its 22 types' settings from the radio table; destructor
+		// 0x100a7f70.)
 		updateComm(bot, self);
 		bots.push_back(&self);
 	}
@@ -1599,7 +1623,49 @@ void BotManager::update(float seconds)
 	}
 }
 
-// Rounds passing a bot (0x1004ed30).
+// A player losing hit points to another's attack (IAICollisionHandler slot
+// 0x18, 0x1004f020, from BF2142.exe's AI event adaptor 0x0089f8d0). Of
+// another team (the AI objects' slot 0x40), the attacker goes to the
+// victim's squad's memory (0x10089b70 -> 0x100c1ce0, as the fire plan's
+// share) and, when the victim rides a vehicle whose Unit has a driver
+// (0x100aa4e0) who is no bot (the player's slot 0x84), to that driver's
+// squad's too. A bot victim (vt+0xc4) is made aware of the attacker as a
+// round passing it is: the attacker's AI object stamped (its slot 0xc
+// with the clock) and the round's event record 0x100c4500 (from the
+// attacker to the hit, weight 1) handed to the bot's vt+0x158. The
+// round's own test 0x1004eca0 (an attacker that is the round itself) has
+// no counterpart: the rewrite's attacker is always a player.
+void BotManager::hitBy(int victim, int attacker)
+{
+	GameWorld::PlayerInfo self, from;
+	if (!m_world.playerInfo(victim, self) || !m_world.playerInfo(attacker, from) || from.team == self.team) {
+		return;
+	}
+	shareTarget(self, from);
+	if (self.vehicle) {
+		for (const GameWorld::PlayerInfo& p : m_players) {
+			if (p.vehicle == self.vehicle && p.driving && !p.ai && p.id != self.id && p.alive) {
+				shareTarget(p, from);
+			}
+		}
+	}
+	const auto bot = m_bots.find(victim);
+	if (bot == m_bots.end()) {
+		return;
+	}
+	auto it = std::find_if(bot->second.known.begin(), bot->second.known.end(), [&](const Known& k) { return k.player == attacker; });
+	if (it == bot->second.known.end()) {
+		bot->second.known.push_back({});
+		it = bot->second.known.end() - 1;
+		it->player = attacker;
+	}
+	it->alertAt = m_time;
+}
+
+// Rounds passing a bot (0x1004ed30; the round's event record 0x100c4500).
+// The game's events reach it through IAICollisionHandler (vtable 0x101147d8,
+// constructor 0x1004e7e0, destructor 0x1004e8e0; slots 8 and 0xc,
+// 0x1004efa0 / 0x1004ef80).
 void BotManager::noticeRounds(Bot& bot, const GameWorld::PlayerInfo& self)
 {
 	// Rounds passing within 10 m of a bot make it aware of the shooter for
@@ -1683,7 +1749,114 @@ void BotManager::warnOfGrenades(Bot& bot, const GameWorld::PlayerInfo& self)
 	}
 }
 
-// Sensing (the soldier's sensing agent, AIDLL 0x100ed700 and 0x100ee430).
+namespace {
+// An object template's radio.spottedMessage (its quotes taken off), "" for
+// none: the game's slot 0xd0 (0x0042e9d0) asks the spotted object's Radio
+// component.
+std::string spottedVoiceOf(const world::ObjectTemplate* t)
+{
+	if (!t) {
+		return {};
+	}
+	const auto it = t->settings().find("radio.spottedMessage");
+	if (it == t->settings().end()) {
+		return {};
+	}
+	std::string name = it->second;
+	if (name.size() >= 2 && name.front() == '"' && name.back() == '"') {
+		name = name.substr(1, name.size() - 2);
+	}
+	return name;
+}
+} // namespace
+
+// The bots' spotting. The memory pass (0x100ed2c0) hands an item's first
+// own sighting to the comm object (0x100a5850), whose report 0x10030fb0
+// (the bot's player, the sensed AI object, the bot's team) throttles it
+// against the table DAT_101394d0:
+// - the object's kind is its AI info's strength type (vt+0x40: Infantry 0,
+//   LightArmour 1, HeavyArmour 2, Helicopter 4, AirPlane 5);
+// - a player whose id is 256 or more (the player's slot 0x6c, +0x3d1:
+//   autonomous objects) spots without the throttle; a bot never;
+// - else the strategic areas are walked in order (0x10034640) for one
+//   whose position (0x1005d1c0) lies within 30 m across (100 m for kinds 4
+//   and 5) of the object. An aircraft whose last aircraft spot (+0x38) is
+//   over 60 s old is spotted and stamps it. Otherwise the team's entry for
+//   the area spots when its time is over 60 s old (taking the kind and
+//   the time), or upgrades Infantry or LightArmour to HeavyArmour (kind 2
+//   and the time); failing both the next area in range is tried. No area
+//   in range, no spot.
+// The spot is IAIGame slot 0x68 (BF2142.exe 0x00895ab0): the game's slot
+// 0xd4 with type 0x1b reports the object to the team's minimap (the
+// human's spotting path, reportBattlefieldObjects), then the spotted
+// object's voice (slot 0xd0, "spotted" without one) is said on TCTeam
+// (slot 0x54, channel 1).
+bool BotManager::spotSighting(const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& other)
+{
+	if (self.team < 1 || self.team > 2) {
+		return false;
+	}
+	const int kind = strengthTypeOf(other);
+	const bool air = kind == 4 || kind == 5;
+	const float range2 = air ? 10000.0f : 900.0f;
+	const auto& areas = m_settings.strategy.areas;
+	auto& entries = m_spots[static_cast<size_t>(self.team - 1)];
+	if (entries.size() < areas.size()) {
+		entries.resize(areas.size()); // the reset 0x10031560: {8, -1000}
+	}
+	bool spot = false;
+	for (size_t i = 0; i < areas.size() && !spot; ++i) {
+		physics::Vec3 at;
+		float radius = 0;
+		int owner = 0;
+		if (!areaPosition(static_cast<int>(i), at, radius, owner)) {
+			if (!areas[i].box) {
+				continue;
+			}
+			at = {(areas[i].boxMin[0] + areas[i].boxMax[0]) * 0.5f, areas[i].height,
+				(areas[i].boxMin[1] + areas[i].boxMax[1]) * 0.5f};
+		}
+		if (horizontal2(other.position - at) >= range2) {
+			continue;
+		}
+		if (air && m_time - m_airSpotAt > 60) {
+			m_airSpotAt = m_time;
+			spot = true;
+			break;
+		}
+		SpotEntry& entry = entries[i];
+		if (m_time - entry.at > 60) {
+			entry.kind = kind;
+			entry.at = m_time;
+			spot = true;
+		} else if ((entry.kind == 0 || entry.kind == 1) && kind == 2) {
+			entry.kind = 2;
+			entry.at = m_time;
+			spot = true;
+		}
+	}
+	if (!spot) {
+		return false;
+	}
+	m_world.reportBattlefieldObjects(self.id, {other.id});
+	const auto templateOf = [this](uint32_t id) -> const world::ObjectTemplate* {
+		const world::Object* o = id ? m_world.objects().find(id) : nullptr;
+		return o ? o->objectTemplate() : nullptr;
+	};
+	// The sensed AI object: the vehicle for a rider, else the soldier (its
+	// kit's Radio component, else its own).
+	std::string voice = other.vehicle ? spottedVoiceOf(templateOf(other.vehicle)) : spottedVoiceOf(templateOf(other.kit));
+	if (voice.empty() && !other.vehicle) {
+		voice = spottedVoiceOf(templateOf(other.soldier));
+	}
+	m_world.radioMessage(self.id, 1, voice.empty() ? "spotted" : voice);
+	return true;
+}
+
+// Sensing (the soldier's sensing agent, AIDLL 0x100ed700 and 0x100ee430;
+// its step 0x100ef370 runs the re-hearing, the threat and the memory pass;
+// its view frustum 0x100feea0 with the corners 0x100fed10 / 0x100feba0, an
+// object's sphere tested against its six planes by 0x100feac0, 0x100f7340).
 void BotManager::sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players)
 {
 	// The view: R = viewDistance, candidates within R cos(fov/2) (a square
@@ -1759,6 +1932,12 @@ void BotManager::sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::v
 			// material leaves a new item without it (0x100ed2c0) and clears
 			// a kept one's (0x100ee430).
 			it->seenClear = !seenThrough;
+			// The item's first own sighting is offered to the spotting
+			// report once (+0x68; the bot not scripted, vt+0x27c's +0x264).
+			if (!it->spotted) {
+				it->spotted = true;
+				spotSighting(self, other);
+			}
 			// Sightings go to the others in the same vehicle (0x100a8ce0;
 			// 0x100ed2c0 with "not the seer": a new memory item there gets
 			// flag 8, an old one keeps its flags).
@@ -1773,6 +1952,7 @@ void BotManager::sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::v
 						if (m == mate.known.end()) {
 							mate.known.push_back(*it);
 							mate.known.back().secondHand = true;
+							mate.known.back().spotted = false; // a new item there
 						} else {
 							m->position = other.position;
 							m->seen = m_time;
@@ -1862,7 +2042,11 @@ void BotManager::sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::v
 // inside); otherwise a spot round the order position
 // (order + U * W * 0.8 - 0.5 W on each axis, as the original's
 // asymmetric 0x10063460; W = twice the area's radius), up to 20 tries for
-// one on the mesh.
+// one on the mesh. (A squad member's goal from its squad's order when it
+// isn't in the formation: 0x100c0a90 re-goals it with the waypoint goal
+// 0x100c0130 with its reachability test 0x100c1300 and
+// up to 8 tries within 30 m 0x100c14a0, the order's area 0x100c1210; the
+// squad's accessors 0x100c0e40, 0x100c0e50, 0x100c0ea0.)
 void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 {
 	ensureAreas();
@@ -2036,7 +2220,7 @@ void BotManager::think(Bot& bot, const GameWorld::PlayerInfo& self, const std::v
 	const float sinceLast = bot.lastThink < 0 ? 0 : m_time - bot.lastThink;
 	bot.lastThink = m_time;
 	if (bot.planLocked) {
-		return; // LockPlan (0x100ce070 -> bot+0x7c): 0x100cd090 keeps the plan
+		return; // LockPlan (0x100ce070, run 0x100ce0a0 -> bot+0x7c): 0x100cd090 keeps the plan
 	}
 	// The personality ai.addBot gives (StandardWeights); AIBehaviours.ai's
 	// values when the scripts were not run.
@@ -2132,6 +2316,12 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 			}
 		}
 	} else if (pattern == "BBPChange" || pattern == "BBPChangeLandingCraft") {
+		// BBPChange (vtable 0x10116928: name 0x1006d5d0, constructor
+		// 0x1006d650, destructor 0x1006d710; the urgencies hand it the
+		// choice through 0x1006d760 and 0x1006d5f0). BBPChangeLandingCraft
+		// (vtable 0x101169d8: name 0x1006fc90, constructor 0x1006fd00,
+		// destructor 0x1006fd50, the choice 0x1006fcb0): its plan
+		// 0x1006fd90 presses the seat's select key (0x100aa5f0) or gets out.
 		bool working = false;
 		physics::Vec3 at;
 		for (const GameWorld::VehicleInfo& vehicle : m_vehicles) {
@@ -2205,10 +2395,13 @@ physics::Vec3 flatUnit(const physics::Vec3& v)
 //  - BBPGotoWaypoint3d (0x10067690): no mesh, no path, no strategic
 //    waypoints: straight to the goal, hovering 25 m over the highest of it
 //    and the terrain round it (0x100674f0), the plan done within 2 m
-//    (0x100cf320 for ITHelicopter). Not yet airborne it first sits 10 s with
+//    (0x100cf320 for ITHelicopter; its test 0x100cf400, destructor
+//    0x100cf370). Not yet airborne it first sits 10 s with
 //    the collective down (While(10 s) HeliMoveTo(its own spot, margin 0),
 //    0x100d1c60 / 0x100d19c0: a margin of 0 lets the collective go,
-//    0x1008e406), then climbs.
+//    0x1008e406), then climbs. (While: 0x100d1950, its run 0x100d1a20, type 0x100d19b0,
+//    slots 0x100d1ae0 / 0x100d1b00, destructor 0x100d1c00; the timed
+//    condition's slot 0x100d1ca0.)
 //  - BBPIdle3d (0x1006ab50): on the ground the controls let go; airborne
 //    (its flag, or faster than 3 m/s) a transport hovers 25 m over its goal
 //    or its own spot, a gunship (an Armament plug-in on the root) flies on
@@ -2221,7 +2414,8 @@ physics::Vec3 flatUnit(const physics::Vec3& v)
 //    0x100d7b30), HeliAimAt (margin 40) and the trigger tapped every 60 /
 //    round((1 - (1 - skill) x 0.8) x round(1.5 x roundsPerMinute)) s while
 //    lined up; all of it only inside the combat area: the plan's If
-//    (0x100d29f0) on 0x100dd3e0, which asks IAITerrain slot 0x1c
+//    (0x100d29f0) on 0x100dd3e0 (its test 0x100dd400; the target still
+//    there: 0x100dd430 / 0x100dd460), which asks IAITerrain slot 0x1c
 //    (0x008a0380 -> 0x004ca5d0, GameWorld::insideCombatArea; its 150 at +8
 //    is never read), its else HeliMoveToObject at the target, margin 25.
 //    The aim's lead point is HeliAimAt's solver (0x100dcf10: AIDLL 0x100fa060
@@ -2449,6 +2643,8 @@ void BotManager::flee(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 				break;
 			}
 			float offset = 0;
+			// The pathfinder's slot 0x30 (0x1003f000 -> 0x1003c890: the
+			// polygon within 5 m, 2.5 m on map 3).
 			if (m_navMesh->findPolygon(toAi(p), 5.0f, nullptr, &offset) >= 0) {
 				p.y += offset;
 				bot.fleePoint = p;
@@ -2486,7 +2682,9 @@ void BotManager::flee(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 // The weapon handling (AIDLL 0x10099b70, called by the bot's execution
 // 0x1009a4c0 after its plan ran). For a soldier (the object's flag bit 9)
 // while no plan holds the weapon (bot +0x188, vt+0x124: set by the fire
-// plan's top statement 0x100d4da0 and DefuseMines' 0x100ddc30, cleared at
+// plan's top statement 0x100d4da0 (an InfoWrapper: 0x100f96c0, which runs
+// the wrapped plan, 0x100f9710, and prints it, 0x100f9740; its interpreter
+// entry 0x1008e440 / 0x1008e450 hands it to the bot's interpreter) and DefuseMines' 0x100ddc30, cleared at
 // their ends 0x100d4e20 / 0x100ddc80):
 //   - falling faster than 1 m/s, input 22 (the parachute's) is pressed
 //     (the rewrite's soldiers open theirs by themselves);
@@ -2606,7 +2804,10 @@ void BotManager::stepZoom(Bot& bot, const GameWorld::PlayerInfo& self, float sec
 // 0x100d2900) and zooms in: If (forced) NOT the weapon zoomed (0x100d2f80
 // over 0x100d3070, whose 0x100d3090 is the adaptor's slot 0x70) a
 // BAPATrigger (0x100d3110) on its zoom input (slot 0x68), for a weapon that
-// has one (stepZoom).
+// has one (stepZoom). The Idle statement 0x100d2830 (destructor 0x100d28a0)
+// and the controls' reset statement 0x100d1fe0 (its run 0x100d2060, the
+// interpreters' test 0x100d2030); the Idle patterns' base 0x100d26d0
+// (destructors 0x100d26f0 / 0x100d2700).
 void BotManager::idle(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input)
 {
 	if (self.vehicle) {
@@ -2681,7 +2882,11 @@ float BotManager::urgency(Bot& bot, const ai::BehaviourSetup& behaviour, float w
 		return avoidUrgency(bot, self, weight);
 	}
 	// BBPBridgeRepair (0x10084620): broken bridges (the bridge-destroyed
-	// events 0x1004e4e0) don't exist in the rewrite: 0. BBPCallForMedic,
+	// events 0x1004e4e0) don't exist in the rewrite: 0. (Its helpers
+	// 0x100841e0, 0x10084e40; the BB class 0x10084490 / 0x10084590 /
+	// 0x100845f0; the pattern BBPBridgeRepair, name 0x10084c20,
+	// constructor 0x10084c40, destructor 0x10084dd0, its plan 0x10084f10,
+	// never built here.) BBPCallForMedic,
 	// the 3d and boat patterns: not in the shipped ground sets.
 	return 0;
 }
@@ -2696,7 +2901,10 @@ float BotManager::urgency(Bot& bot, const ai::BehaviourSetup& behaviour, float w
 // (freshness 1 in sight, 1 / (0.05 lost + 1.5) since lost), beyond
 // maxRange only when the bot could close in within 5 s. The current
 // target is kept unless another scores 1.2 times more. Any score above 0:
-// urgency 50 (the weight only gates it).
+// urgency 50 (the weight only gates it). (BBFireInfantery's class:
+// constructor 0x10081ef0, destructor 0x10081f40; its slot 13 0x10081f30
+// -> 0x10074cb0 hands the latched target to the bot, vt+0x70, and to the
+// pattern's slot 7: bot.target here.)
 float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players)
 {
 	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight, 0};
@@ -2820,7 +3028,7 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 	}
 	if (bestTarget != bot.target) {
 		bot.target = bestTarget;
-		bot.targetAcquired = m_time; // Bot::setTarget (0x10097af0)
+		bot.targetAcquired = m_time; // Bot::setTarget (0x10097af0; its target record's reset 0x100ef3e0)
 		// The reaction time (0x100777a0): (1 - skill)(1.5 + U[0,1]) s.
 		const WeaponAi w = weaponAi(gunning ? seatWeaponName(self, bestSlot) : weaponName(self, bestSlot));
 		bot.triggerAt = m_time + (w.type == WeaponAi::CloseCombat ? 0.0f : (1 - m_settings.skill) * (1.5f + random()));
@@ -3147,7 +3355,8 @@ void BotManager::pickWeapon(Bot& bot, const GameWorld::PlayerInfo& self, const s
 }
 
 // BBMoveTo's urgency (0x10066a70): the goal's (ai::gotoUrgency) times the
-// weight.
+// weight. (BBMoveTo, vtable 0x10116578: constructor 0x100669a0, destructor
+// 0x10066a40.)
 float BotManager::goalObjectUrgency(const Bot& bot, const GameWorld::PlayerInfo& self) const
 {
 	if (!bot.hasGoal) {
@@ -3204,9 +3413,11 @@ float BotManager::moveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float
 }
 
 // BBIdle's urgency (0x10069f50): the weight; 0.5 for a passenger; a driver
-// with seats free waits for a teammate heading for them within 40 m (30,
+// with seats free (0x100d2730: a seat with nobody in it) waits for a teammate heading for them within 40 m (30,
 // 70 when it faces the vehicle within 0.85) for up to 10 s (0x10069af0;
-// teammates are the bots, whose choice is known).
+// teammates are the bots, whose choice is known). (BBIdle, vtable
+// 0x10116760: constructor 0x100697e0, destructor 0x10069aa0, the per-bot
+// reset 0x10069970.)
 float BotManager::idleUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight,
 	const std::vector<GameWorld::PlayerInfo>& players)
 {
@@ -3247,6 +3458,7 @@ float BotManager::idleUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float
 // x10 for a human's; the best gets the bot: 100 x the squad factor of the
 // heal task (AIDLL 0x10089aa0, task 1). Not rewritten: the original leaves out
 // a body under more than 0.75 m of water and 0.5 m below its surface.
+// (BBRevive's class: constructor 0x10082630, destructor 0x10082700.)
 float BotManager::reviveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players)
 {
 	if (self.vehicle) {
@@ -3402,6 +3614,8 @@ float BotManager::seatValue(const Bot& bot, const GameWorld::PlayerInfo& self, u
 			const auto& areas = m_settings.strategy.areas;
 			if (mobile && bot.goalOrder >= 0 && static_cast<size_t>(bot.goalOrder) < areas.size()) {
 				const ai::StrategicArea& area = areas[static_cast<size_t>(bot.goalOrder)];
+				// The template's map by name (IAIPathfindingCourier slot 0x18
+				// 0x10055020 -> 0x10040570; the level's table 0x100442f0 / 0x100441e0).
 				const int map = lower(mobile->pathfindingMap) == "vehicle" ? 1 : 0;
 				for (const GameWorld::ControlPointInfo& point : m_world.controlPointList()) {
 					if (area.controlPointFlag && point.id == area.controlPoint) {
@@ -3577,6 +3791,8 @@ bool BotManager::threatened(const Bot& bot, const GameWorld::PlayerInfo& self) c
 // below. With the way out chosen and the vehicle's health at or under
 // 0.4 the bot says bail_out (see below). Not rewritten: an ITAir vehicle
 // that isn't ITHelicopter also needs room round it (0x1006c3e0).
+// (BBChange, vtable 0x101168c4: constructor 0x1006c1b0, destructor
+// 0x1006c2b0.)
 float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight)
 {
 	constexpr float kReach = 75; // 0x42960000
@@ -3799,7 +4015,12 @@ float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 // BBFire3d's urgency (behaviour vtable 0x10116d40 slot 9, 0x1007e1b0; the
 // gunships' Fire) with its target score 0x1007d6c0. Over the targets the
 // bot knows (memory flags 6) and then those the information environment
-// lists (DAT_101394b0 slot 0x18; here every enemy the bot knows), each
+// lists (DAT_101394b0 slot 0x18; here every enemy the bot knows; its
+// per-team static and dynamic grids: constructor 0x100cb4a0, destructor
+// 0x100cb6c0 / 0x100cb1e0 / 0x100cb280, slots 0x100cab50, 0x100cabd0,
+// 0x100cae50, 0x100caeb0, 0x100caf10, 0x100caf80, 0x100cafc0, 0x100cb000,
+// 0x100cb040, 0x100cb080, 0x100cb0c0, 0x100cb130, 0x100cb1a0, 0x100cb290,
+// 0x100cb340, 0x100cb3f0), each
 // scores:
 //   score = facing x reach x 0.5 x temperature x motion x freshness x
 //           strength x recency
@@ -4153,6 +4374,9 @@ float BotManager::landingCraftUrgency(Bot& bot, const GameWorld::PlayerInfo& sel
 // charge, so carrying it counts as charged) and more than 10 s since
 // spawning: 100, away from
 // the known enemies (x3 for players, x2 for bots that target this one).
+// (BBFlee's class: constructor 0x10085810, destructor 0x100858e0. Its
+// slot 11, shared with BBC4, 0x10082070: runs only for a soldier, the
+// object's flag bit 9, that isn't scripted, bot +0x264; every bot here.)
 float BotManager::fleeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players)
 {
 	if (self.vehicle || healthOf(self.soldier) >= 0.3f || m_time - bot.spawnedAt <= 10 || self.cloaked) {
@@ -4512,7 +4736,8 @@ float BotManager::medicUrgency(Bot& bot, const GameWorld::PlayerInfo& self, floa
 	return urgency * coordination(self, ammo ? 4 : 1, chosen, chosen, target.position);
 }
 
-// BBRepairVehicle (0x10073360): the vehicles within the repair tool's
+// BBRepairVehicle (0x10073360; vtable 0x10116b68, constructor 0x10073250,
+// destructor 0x10073300): the vehicles within the repair tool's
 // maxRange (50 m) between 0 and 60 % health (the threshold compares the
 // held weapon with the ammo hub's slot, a slip of the original, so it
 // stays 0.6), not the bot's own; score basicTemp / (f x distance), f =
@@ -4579,7 +4804,8 @@ float BotManager::repairUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 
 // BBC4 (0x10083750; the weight is not used). With a charge in the kit and
 // none placed: 100 inside a control point the team holds uncontested
-// (SAI 0x1009c280). With one placed (it lapses after 240 s): 100 to set
+// (SAI 0x1009c280, the area scoring the point highest 0x100349b0). With
+// one placed (it lapses after 240 s): 100 to set
 // it off once that point is contested with its flag below 0.75 and no
 // teammate within 15 m of the charge (0x1009c4d0, 0x1008a110).
 float BotManager::c4Urgency(Bot& bot, const GameWorld::PlayerInfo& self)
@@ -4645,6 +4871,9 @@ float BotManager::c4Urgency(Bot& bot, const GameWorld::PlayerInfo& self)
 // BBDefuseMines (0x10086870): an engineer (a Repair weapon), not
 // swimming, near an enemy mine lying in wait: its stand point 0.8 m
 // behind the mine's facing on the mesh and within 35 m: 42 x weight.
+// The original keeps the mines in IAIMineManager (constructor 0x1004c0e0,
+// destructor 0x1004c1b0 / 0x1004c010, its two mine grids 0x1004beb0 /
+// 0x1004bf60); the rewrite reads the world's mines.
 float BotManager::defuseUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight)
 {
 	if (self.vehicle || !kitSlot(self, WeaponAi::Repair)) {
@@ -4705,7 +4934,9 @@ float BotManager::runOverUrgency(Bot& bot, const GameWorld::PlayerInfo& self)
 }
 
 // BBAvoid (0x10064850), on foot only (the urgency wants a soldier: the 2d
-// pattern of the vehicles' sets never runs). Other soldiers are never
+// pattern of the vehicles' sets never runs: BBPAvoidCollision2d, vtable
+// 0x10116528, plan 0x10066440, constructor 0x100662f0, destructor
+// 0x10066370, name 0x100662d0). Other soldiers are never
 // avoided. For each vehicle within 50 m (not the one it is getting into
 // or repairing): a wreck or one below 30 % health within max(r, min(10,
 // r + 4)) adds 100; one moving at 2 m/s or more that will pass within
@@ -4830,7 +5061,9 @@ float BotManager::avoidUrgency(Bot& bot, const GameWorld::PlayerInfo& self, floa
 	return 0;
 }
 
-// BBPMedicAssist / BBPAmmoAssist (0x10070da0, AIDLL 0x100724e0): to the target
+// BBPMedicAssist / BBPAmmoAssist (0x10070da0, AIDLL 0x100724e0; BBPMedicAssist's
+// vtable 0x10116a7c: name 0x10070a90, constructor 0x10070b30, destructor
+// 0x10070bf0): to the target
 // (MoveToObject, stopping at the two soldiers' radii), looking at it,
 // standing; within half the hub's abilityRadius plus those radii the hub
 // in hand. The bot itself: crouch and take the hub. The plan never ends
@@ -4903,6 +5136,9 @@ void BotManager::repair(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInpu
 // one press of fire, the charge remembered (where, which area), then the
 // primary weapon. Setting off: the detonation (alternate fire here, as
 // the rewrite's soldiers set off their charges), the memory cleared.
+// (The charge's memory statement 0x100ddb30 / 0x100ddb70: bot vt+0x13c,
+// +0x138 to remember, +0x140 to clear; the 0.7 s wait, 0x100db860 run by
+// 0x100db8b0, destructor 0x100db8f0.)
 void BotManager::placeC4(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input)
 {
 	const int slot = kitSlot(self, WeaponAi::C4);
@@ -4934,7 +5170,7 @@ void BotManager::placeC4(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInp
 }
 
 // BBPDefuseMines (0x10086fe0): to the stand point, crouched, looking at
-// the mine, the trigger held on the tool. The original's tool is the first
+// the mine (the look at a point, 0x100da170 / 0x100da1c0 / 0x100da1f0), the trigger held on the tool. The original's tool is the first
 // Healing weapon (a slip: the urgency asks for a Repair one), which an
 // engineer's kit doesn't have, so nothing is fired; nothing ends the plan
 // but another behaviour.
@@ -4986,7 +5222,8 @@ void BotManager::runOver(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInp
 	input.throttle = 1;
 }
 
-// BBPAvoidCollisionInfantery (AIDLL 0x10065360): away from a standing wreck
+// BBPAvoidCollisionInfantery (AIDLL 0x10065360; what to avoid, its time and
+// spot handed over by the pattern's slot 0x18, 0x100663b0): away from a standing wreck
 // (10 m) or a grenade (15 m; the avoided object -1), or aside from a
 // vehicle's path (10 m across its motion, on the side the bot is on),
 // checked by a ray over the mesh (else across it, either way); walked to
@@ -5074,7 +5311,9 @@ AimGains BotManager::aimGainsOf(const GameWorld::PlayerInfo& self) const
 // there is nothing to aim at). lead = 0.4 x the aim point's angular speed,
 // halved when it turns the same way as the error. The bias pulls down when
 // the target has been below on average over the last 10 errors
-// (min(0.75, 20 x the average)).
+// (min(0.75, 20 x the average)). A look at a point (MouseTurretLookAt
+// 0x1008e6a0 / 0x1008e6e0) runs the same controller on the point, its
+// rate from the last angles; MouseTurretAimAt's constructor 0x1008e930.
 void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics::Vec3& point,
 	const physics::Vec3& pointVelocity, bool hasTarget, const std::string& leadWeapon, SoldierInput& input, float seconds)
 {
@@ -5109,7 +5348,9 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 		bot.pitch = std::clamp(bot.pitch + m_world.takeAimKick(self.id), -kPitchLimit, kPitchLimit);
 	}
 	const float truePitch = gunning ? gunPitch : bot.pitch;
-	// The lead (the aim object's slot 8, 0x100d9a60): the solver takes the
+	// The lead (the aim object's slot 8, 0x100d9a60; its accessors for the
+	// on-target test 0x100d96e0 / 0x100d96a0 / 0x100d96b0 / 0x100d96f0, the
+	// aim base's destructor 0x100d9650): the solver takes the
 	// point less the gun, the point's motion, the round's inherited motion
 	// (the shooter's) and the gun's forward, and gives the launch
 	// direction (precision 0.5, the high arc for an indirect weapon). The
@@ -5293,7 +5534,8 @@ bool BotManager::fireKeepsToOrder(const Bot& bot, const GameWorld::PlayerInfo& s
 // failing them; the vehicle map's order position for a bot on it). With
 // that spot within the team's radius of the team's spot (+0x98 / +0x7c + 8
 // team, across), the memo (0x100d8e40) of AND (0x100d49a0) of the area not
-// held by the team (0x100db550: +0x70 + 4 team not 0) and the bot within
+// held by the team (0x100db550: +0x70 + 4 team not 0; its test 0x100db580,
+// slot 0x100db5b0) and the bot within
 // 40 m of the spot across (0x100db3b0, ObjectDistance with its flag) starts
 // an If over MoveToFinding (0x100d11c0) to the spot at the Mobile's speed;
 // a copy of the memo (0x100d8f90) also opens the trigger's distance band
@@ -5396,7 +5638,7 @@ bool zoomStatementPress(bool moving, bool zoomed, bool ready)
 // of it, lies within [0.9 minRange, 1.1 maxRange] (ObjectDistance
 // 0x100d44c0); then the guided fire statements (0x100781e0), else only the
 // guided aim (0x100d4f10). The statements, in a Parallell: the aim
-// (0x100d4f10) at the target, and BAPATrigger (0x100d3110) on the weapon's
+// (0x100d4f10, destructor 0x100d4f60, its look direction 0x100d4fa0) at the target, and BAPATrigger (0x100d3110) on the weapon's
 // fire input (its slot 0x64) held unless an OR (0x100cf1b0) holds: the
 // chosen weapon not in hand (0x100da090's condition 0x100da0c0); for a
 // heat-seeking or laser-guided weapon (guidance 1, 2) no lock (NOT
@@ -5428,11 +5670,16 @@ bool BotManager::guidedFire(const Bot& bot, const GameWorld::PlayerInfo& self, c
 }
 
 // BBPFireInfantery's plan (0x1007cf10, 0x100795a0): the chosen weapon in
-// hand, the aim on the target (with its lead), the distance kept within
+// hand (ChangeWeapon 0x100db630, run by 0x100db6e0 through the select
+// input 0x1008d740; in-hand conditions 0x100d7c80 / 0x100d7cb0 and, with
+// it ready, 0x100db940 / 0x100db970; the fire patterns' per-bot base
+// 0x100d7ed0, destructors 0x100d7e10 / 0x100d7e60; TriggerContinously's
+// statement destructor 0x100d23a0), the aim on the target (with its lead), the distance kept within
 // [minRange, 1.1 preferred], the weapon's firing pose taken when standing
 // still (at most once a second, no fire 0.8 s after), and the trigger
 // (Trigger 0x1008f1e0 taps, TriggerContinously 0x1008ecd0 holds) while
-// the aim lies within allowedDeviation metres at the target (0x100d9090):
+// the aim lies within allowedDeviation metres at the target (0x100d9090;
+// the explosive plan's constructor 0x100d9130, the test 0x100d91d0):
 // across, |d| L < max(0.1, r); up and down |dy| L < sqrt(0.2) r (0.02 for
 // snipers); and within atan(0.02 max(r, 0.1)) of the line. Not while a
 // teammate stands in the line of fire (radius 0.5 + 0.02 t); a second's
@@ -5576,7 +5823,7 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 	bot.lobbing = lob; // vt+0x204
 	if (!lob) {
 		// +0x209 also falls when the plan's target condition (0x100dc730,
-		// vtable 0x1011afd8) fails while not lobbing; that condition isn't
+		// vtable 0x1011afd8; its point and sight test 0x100dc450) fails while not lobbing; that condition isn't
 		// rewritten, so the hold ends once the aim stops lobbing.
 		bot.lobHold = false;
 	}
@@ -5655,7 +5902,9 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 		input.strafe = m * std::sin(rel);
 	}
 
-	// The firing pose, standing still and not turning.
+	// The firing pose, standing still and not turning (the SoldierPose
+	// statement 0x1008e4e0 / 0x1008e4f0: standing while the throttle, strafe
+	// or sprint input is pressed, else the statement's pose, vt+0x170).
 	SoldierPose want = SoldierPose::Stand;
 	if (weapon.firingPose == 2) {
 		want = SoldierPose::Crouch;
@@ -5893,6 +6142,8 @@ void BotManager::shareTarget(const GameWorld::PlayerInfo& self, const GameWorld:
 	}
 }
 
+// `ignore`: the explosive conditions' ray filter (0x100fba60, vtable
+// 0x1011bac0: an object in its list is skipped, 0x100fba80).
 bool BotManager::firstBlocked(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore, physics::Vec3& hit) const
 {
 	if (m_world.lineOfSight(from, to, ignore)) {
@@ -6027,7 +6278,7 @@ bool BotManager::explosiveClear(Bot& bot, const GameWorld::PlayerInfo& self, con
 
 // Keeps the path follower on `to`: a new goal (another id), or the same one
 // moved more than 2 m (at most once a second: MoveToObjectFinding's stop
-// condition AIDLL 0x100d0e60 ends the move when its object leaves the radius;
+// condition AIDLL 0x100d0e60, its test 0x100d0e90, ends the move when its object leaves the radius;
 // the 2 m are the rewrite's), plans again. After a failure (no path, or no
 // progress) the next request waits a second (a think's delay in the
 // original, which plans the move anew).
@@ -6058,6 +6309,11 @@ bool BotManager::follow(Bot& bot, const ai::NavMesh& mesh, const physics::Vec3& 
 // controller turns the soldier) and the throttle at speed / maxSpeed
 // (0x100e6060; the order's speed is the soldier's top speed: 1). No
 // strafing. The move ends within the goal's radius (0x100d10f0).
+// MoveToFinding's statement: its step 0x100d1300 (the follower's path and
+// way, 0x100966c0 / 0x10095720), destructor 0x100d12d0, follower accessors
+// 0x100d1020 / 0x100d1040 / 0x100d1070 / 0x100d1090 and done test
+// 0x100d10b0; the Turn (0x100d0fc0, run by 0x100d0f50 / 0x100d0fb0) hands
+// the bot's sensing agent the point to look at (0x100d58b0).
 // Without a mesh or a path the bot walks straight at the goal. The jump
 // the follower asks for (AIDLL 0x10092bc0) holds PIAction for 0.4 s (see steer).
 ai::SidestepSense BotManager::sidestepSense(const Bot& bot, const physics::Vec3& at, uint32_t own, const ai::NavMesh& mesh,
@@ -6192,10 +6448,16 @@ physics::Vec3 backOffSpot(const physics::Vec3& target, physics::Vec3 forward, fl
 
 // The fire plan's moves for a bot object with a Mobile part (0x100795a0,
 // LAB_10079dde; the plan's statements named by their debug printers). The
-// moves run in a Parallell combiner (0x100cddb0) beside the trigger's If:
+// moves run in a Parallell combiner (0x100cddb0; its run 0x100cdca0, add
+// 0x100cdfb0 with list nodes 0x100cdaa0 / 0x100cdb30 / 0x100cdbb0,
+// destructors 0x100cdd70 / 0x100cdef0 / 0x100ce040) beside the trigger's If:
 //  - If (0x100d29f0, forced update, the false branch frozen) the target
 //    isn't in view (OR of NOT over the memo 0x100d8e40 of the target
-//    conditions 0x100dc400 / 0x100dad60): a Serial combiner (0x100ce370) of
+//    conditions 0x100dc400 / 0x100dad60, the latter's test 0x100db150: the
+//    memory item first-hand and no teammate in the line, 0x100dad90; the If's
+//    destructor 0x100d2d60, NOT's test 0x100d2f60 and destructor 0x100d2ee0;
+//    the target alive: NOT ObjectHealth <= 0, 0x100da2b0 / 0x100da320): a Serial combiner (0x100ce370;
+//    its run 0x100ce210, destructor 0x100ce2e0) of
 //    MoveToObjectFinding (0x100cff90) at the target with no distance kept,
 //    then ForgetObject (0x100da5f0: the memory item dropped, 0x100ec400),
 //    then a failing statement (0x100da480 with mode 0) that ends the plan.
@@ -6205,7 +6467,11 @@ physics::Vec3 backOffSpot(const physics::Vec3& target, physics::Vec3 forward, fl
 //    the target within [minRange, 1.1 D]: MoveToObjectFinding with D kept
 //    (the plan's distance, preferredRange), its near limit ec = min(1.1
 //    minRange, D). It ends when ec <= d <= D (0x100cfe20 on the squared
-//    distance, 0x100f9970). At ec or beyond it paths at the target; nearer
+//    distance, 0x100f9970; its base MoveToObject 0x100f9830, vtable
+//    0x10119dd0, is done within D or on its abort condition, 0x100f98a0,
+//    and prints its name and distance, 0x100f9900; its distance to the
+//    object 0x100d0700, MoveToObjectFinding's step 0x100d07a0 re-paths at
+//    the moving target, the base's slot 7 0x100d2400). At ec or beyond it paths at the target; nearer
 //    it backs off (0x100d00e0) to the first clear of three spots ec + min(10,
 //    0.2 (D - ec)) from the target: ahead of it (its forward, a driver being
 //    no ITSoldier), then to either side (the original rays each from the
@@ -6307,7 +6573,8 @@ ai::DriveSettings BotManager::driveSettings(const GameWorld::PlayerInfo& self) c
 	return d;
 }
 
-// MoveTo at the wheel (BBPGotoWaypoint2d 0x10068980; CarMoveTo 0x10091050,
+// MoveTo at the wheel (BBPGotoWaypoint2d 0x10068980, named "GotoWaypoints2d"
+// 0x10068960, constructor 0x10068940; CarMoveTo 0x10091050,
 // TankMoveTo 0x10091b40): the follower on the vehicle mesh, then
 // ai::driveControl with the mesh rays round the vehicle (0x100e8170) and
 // the other vehicles as obstacles (the AI objects of the bots' world
@@ -6315,6 +6582,15 @@ ai::DriveSettings BotManager::driveSettings(const GameWorld::PlayerInfo& self) c
 // the mech's 0x100e3f00 lets go); an obstacle on the goal ends the move.
 // The hover tank (FloatingTankMoveTo 0x1008c7c0) has no state machine:
 // ai::floatingTankControl strafes it along the way to the steering point.
+// The MoveToObject interpreters are the same drive with the object's
+// position as the goal, braking on the gap to it less its radius and
+// 0.5 m (CarMoveToObject 0x10090b30 / 0x10090b40, TankMoveToObject
+// 0x10091680 / 0x10091690, MechMoveToObject 0x1008cd70 / 0x1008cd80,
+// FloatingTankMoveToObject 0x1008c330 / 0x1008c340); the resets are the
+// brake below (CarResetControls 0x100909f0 / 0x10090a00 -> 0x100ea170,
+// TankResetControls 0x10091550 / 0x10091570 -> 0x100e0930). The MoveTo
+// interpreters' constructors: CarMoveTo 0x10091040, TankMoveTo
+// 0x10091b30, MechMoveTo 0x1008d240, FloatingTankMoveTo 0x1008c7b0.
 bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physics::Vec3& to, int goalId, float seconds,
 	SoldierInput& input, float radius)
 {
@@ -6464,7 +6740,8 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 	return true;
 }
 
-// The horn (AIDLL 0x100a5c00, from the end of 0x100fc660's scan of what is
+// The horn (AIDLL 0x100a5c00, also the driving plan's horn statement
+// 0x100cfbd0, made by 0x100cfb80; from the end of 0x100fc660's scan of what is
 // ahead; let go by 0x100a5cf0 through 0x100a7af0 every frame). Moving at
 // 2 m/s or more along its motion, the driver looks at the soldiers of the
 // world list (alive, with a Mobile part): one of its own team (slot 0x40)
@@ -6644,7 +6921,8 @@ std::vector<int> BotManager::areaRoute(int from, int to, int team) const
 // the level's waypoints between the two areas (aiStrategicArea.addWayPoint,
 // either direction; for the map the bot moves on), three random tries: one
 // ahead of the bot for the first step, closer to the step's area than the
-// bot and on the mesh (0x100a8fd0); then a point within 0.8 of each
+// bot and on the mesh (0x100a8fd0, which the level's start, 0x10038d50,
+// also runs once on every waypoint); then a point within 0.8 of each
 // intermediate area's radius. A pair without waypoints ("Areas a & b do
 // not have waypoints.", 0x10036b50) goes straight. The original keeps the
 // first pick for the next order between the same areas (not kept here).
@@ -7014,6 +7292,15 @@ void BotManager::updateStrategy(float seconds)
 		const ai::Strategy& strategy = strategyIt->second;
 
 		// Squads: where they are and how strong (2 round(members + 0.5)).
+		// (AIDLL's squad: constructor 0x100c4080, destructor 0x100c38f0,
+		// members joining 0x100c3f10 and leaving 0x100c3630 / 0x100c36d0 /
+		// 0x100c1de0, the leader from the game's squad 0x100c34d0, its spot
+		// the leader's 0x100c32b0, the strength 0x100c26d0, a member by id
+		// 0x100c27d0; the side's lists: a player's squad 0x10089260 /
+		// 0x10089340 / 0x100892b0, a squad by index 0x100893a0, its leader
+		// refreshed 0x10089320; their manager: constructor 0x1008a720, the
+		// sides' squads made up front, destructor 0x1008a240, update 0x1008a910:
+		// one squad a frame round robin, here every squad each second.)
 		struct Squad {
 			physics::Vec3 at;
 			int strength = 0;
@@ -7045,6 +7332,7 @@ void BotManager::updateStrategy(float seconds)
 			}
 			v.state.temperature = ai::modifiedTemperature(strategy, v.state.temperature, v.state.status,
 				s.areas[i].controlPointFlag || s.areas[i].controlPoint >= 0, v.state.hostileNeighbour);
+			// The nearest squad of the side (0x10089550: its leader's spot).
 			float nearest = 0;
 			for (const auto& [id, squad] : squads) {
 				const float d = std::sqrt(physics::lengthSquared(squad.at - v.order));
@@ -7135,7 +7423,8 @@ void BotManager::updateStrategy(float seconds)
 			assigned[neediest] += squads[bestSquad].strength;
 		}
 		// The orders: defend an owned area that is not contested, attack
-		// otherwise.
+		// otherwise. (AIDLL's squad takes a new order, 0x100c1eb0 then
+		// 0x100c21b0 / 0x100c1fe0, its leader accepting it.)
 		for (const auto& [id, area] : side.squadArea) {
 			const AreaView& v = views[static_cast<size_t>(area)];
 			const bool defend = v.point->team == team;
@@ -7169,7 +7458,9 @@ void BotManager::updateStrategy(float seconds)
 // UAV (0x2c, 60 s) it uses only to answer its squads' requests
 // (0x1009e200, 0x1009e3e0, 0x1009e500), which the rewrite's bots don't
 // send; it gives no orders of its own (the SAI orders the squads,
-// updateStrategy).
+// updateStrategy). The SAI's constructor (0x100a39c0) starts the four
+// clocks at 120, 90, 60 and 35 s from the level's start (read back by
+// 0x100a3980 / 0x100a3990 / 0x100a39a0 / 0x100a39b0): m_firstStrikeAt.
 void BotManager::command(float seconds)
 {
 	using A = GameWorld::CommanderAbility;
@@ -7251,7 +7542,12 @@ void registerBotConsoleMethods(Console& console, BotSettings& settings)
 			s->modifiers[s->editing][behaviour] = value;
 		}
 	});
-	// The equipment types' behaviours.
+	// The equipment types' behaviours (AIDLL's AIConsole halves:
+	// setBehaviourModifier 0x10027940, setVehicleMods 0x10027fa0,
+	// setVehicleBehaviour 0x10027df0 with its argument parse 0x1000e7e0 and
+	// the named-behaviour lookup 0x10025e70, setVehicleDefaultBehaviour
+	// 0x100271b0, createUCConstant / UCLinear / UCXInverse 0x10026020 /
+	// 0x10026070 / 0x100260c0).
 	bindMethod(console, "aiSettings.setVehicle", access, [s](std::string name) { s->vehicles[name]; });
 	bindMethod(console, "aiSettings.setVehicleMods", access, [s](std::string vehicle, std::string mods) {
 		s->vehicles[vehicle].modifiers = mods;
@@ -7363,8 +7659,16 @@ void registerBotConsoleMethods(Console& console, BotSettings& settings)
 		}
 	});
 
-	// aiStrategy.* and ai.addSAIStrategy.
+	// aiStrategy.* and ai.addSAIStrategy. The strategy manager's halves:
+	// createConstantCondition 0x1003a9f0, createPrerequisite 0x1003b540,
+	// addCondition 0x1003a970 (0x1003a9b0 without a weight: 1; the
+	// condition by name 0x1003a6b0), createStrategy 0x1003b470 (filed by
+	// 0x1003b400), addSAIStrategy 0x10027260 (the strategy by name
+	// 0x1003a380).
 	ai::StrategySettings* st = &settings.strategy;
+	// The argument parsers: Crisp/Fuzzy/FuzzySqr 0x1005a060, the compares
+	// 0x1005a5e0, Friendly/Enemy/Both 0x1005a110, the types 0x1005a880;
+	// setConditionStrength's names 0x10059f30.
 	bindMethod(console, "aiStrategy.createConstantCondition", access,
 		[st](std::string name, std::string conditional, std::string compare, std::string side, std::string type, float value) {
 			using C = ai::StrategyCondition;
@@ -7454,7 +7758,7 @@ void registerBotConsoleMethods(Console& console, BotSettings& settings)
 			if (!x || t < 0) {
 				return;
 			}
-			const std::string st2 = lower(status);
+			const std::string st2 = lower(status); // Owned/Hostile/Neutral (0x1005bd50)
 			const int which = st2 == "owned" ? 0 : st2 == "hostile" ? 1 : st2 == "neutral" ? 2 : -1;
 			for (int i = 0; i < 3; ++i) {
 				if (which < 0 || which == i) {
@@ -7474,6 +7778,11 @@ void registerBotConsoleMethods(Console& console, BotSettings& settings)
 		st->areas.push_back(area);
 		st->area = name;
 	});
+	// The area manager's halves of these (DAT_101394ec): setActive
+	// 0x10036310, addNeighbour 0x100360a0 (the original links only areas
+	// on the same layer, +0x1d4), addObjectTypeFlag 0x10036240,
+	// setOrderPosition 0x100363c0, addWayPoint 0x10039000 (kept per area
+	// pair, lower index first, a list per map).
 	bindMethod(console, "aiStrategicArea.setActive", access, [st](std::string name) { st->area = name; });
 	bindMethod(console, "aiStrategicArea.layer", access, [st](int layer) {
 		if (ai::StrategicArea* a = st->findArea(st->area)) {
@@ -7689,6 +7998,9 @@ void registerBotConsoleMethods(Console& console, BotSettings& settings)
 			? &s->pathfindingMaps[static_cast<size_t>(s->activeMap)]
 			: nullptr;
 	};
+	// createMap: DAT_101394fc vt+0xc (0x10044590), the map object
+	// (vtable 0x10114378: constructor 0x100440d0, destructor 0x10044160 /
+	// 0x10044710).
 	bindMethod(console, "aiPathfinding.createMap", access, [s](std::string name) {
 		s->pathfindingMaps.push_back({name});
 		s->activeMap = static_cast<int>(s->pathfindingMaps.size()) - 1;
@@ -7700,6 +8012,13 @@ void registerBotConsoleMethods(Console& console, BotSettings& settings)
 			}
 		}
 	});
+	// The map.* command objects (constructor / argument parse, slot 0x64 /
+	// execute on the active map, slot 0x5c): maxSlope 0x100203c0 /
+	// 0x100204b0 / 0x10020510, allowedThresholdHeight 0x10020790 /
+	// 0x10020880 / 0x100208e0, headClearance 0x100205a0 / 0x100206a0 /
+	// 0x10020700; below, radius 0x10020970 / 0x10020a60 / 0x10020ac0,
+	// allowedHeightDiff 0x10020b50 / 0x10020c40 / 0x10020ca0,
+	// addVehicleForClusterCost 0x100210d0 / 0x10021210 / 0x100211c0.
 	bindMethod(console, "aiPathfinding.map.maxSlope", access, [activeMap](float degrees) {
 		if (BotSettings::PathfindingMap* m = activeMap()) {
 			m->maxSlope = degrees;

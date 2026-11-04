@@ -26,7 +26,11 @@
 // up. The low-detail pass (Shared_PS_LowDetail) also tints the ground under
 // the sea: lerp(color, TerrainWaterColor, saturate((WaterHeight - y) / 3)),
 // here by f too so it fades in with the LOD.
-// The dynamic objects' shadows darken the sun term (shadow.glsl).
+// The dynamic objects' shadows darken the sun term (shadow.glsl). RendDX9
+// draws the patches twice for it, per patch kind (+0xf8, 0..2): those within
+// the shadow distance into a dynamic light map (TerrainMakeDynamicLightMap,
+// 0x1014f1d0), then again with it (TerrainDynamicShadow, 0x1014f400, from the
+// terrain pass 0x100b4d80); here the map is sampled in the one pass.
 #extension GL_GOOGLE_include_directive : require
 layout(location = 0) in vec3 inNormal;
 layout(location = 1) in vec2 inTexCoord;

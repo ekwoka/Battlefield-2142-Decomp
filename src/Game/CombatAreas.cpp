@@ -145,7 +145,8 @@ void registerCombatAreaConsoleMethods(Console& console, CombatAreas& areas)
 																				: nullptr;
 	};
 	bindMethod(console, "CombatAreaManager.use", access, [a](int use) { a->use = use != 0; });
-	// The vehicle categories by name (world::VehicleCategory).
+	// The vehicle categories by name (world::VehicleCategory; the
+	// argument reader 0x004dc3c3 takes "VCLand" or "Land", or the number).
 	const auto category = [](const std::string& name) {
 		static const char* const names[] = {"VCLand", "VCSea", "VCAir", "VCHelicopter", "VCNoVehicleCategory"};
 		for (int i = 0; i < 5; ++i) {

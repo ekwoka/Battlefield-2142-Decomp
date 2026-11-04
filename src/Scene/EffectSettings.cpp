@@ -243,33 +243,33 @@ void registerColdBreathConsoleMethods(Console& console, ColdBreathSettings& s)
 
 void registerParticleSystemConsoleMethods(Console& console, ParticleSystemSettings& s)
 {
-	bindBool(console, "ParticleSystemManager.drawStats", s.drawStats);
-	bindMethod(console, "ParticleSystemManager.resetStats", kAccess, [] {});
-	bindBool(console, "ParticleSystemManager.drawBoundingBoxEnable", s.drawBoundingBoxEnable);
-	bindFloat(console, "ParticleSystemManager.startFadePercentageOfViewDistance", s.startFadePercentageOfViewDistance);
-	bindFloat(console, "ParticleSystemManager.viewDistance", s.viewDistance);
-	bindFloat(console, "ParticleSystemManager.startLodPercentageOfLodDistance", s.startLodPercentageOfLodDistance);
-	bindBool(console, "ParticleSystemManager.affectedByWind", s.affectedByWind);
-	bindInt(console, "ParticleSystemManager.particleSystemShaderQuality", s.particleSystemShaderQuality);
-	bindFloat(console, "ParticleSystemManager.overdrawScale", s.overdrawScale);
-	bindInt(console, "ParticleSystemManager.qualityLevel", s.qualityLevel);
-	bindFloat(console, "ParticleSystemManager.shimmerIntensity", s.shimmerIntensity);
-	bindFloat(console, "ParticleSystemManager.shimmerPhases", s.shimmerPhases);
-	bindFloat(console, "ParticleSystemManager.shimmerSpeed", s.shimmerSpeed);
-	bindFloat(console, "ParticleSystemManager.nsaShimmerIntensity", s.nsaShimmerIntensity);
-	bindFloat(console, "ParticleSystemManager.nsaShimmerPhases", s.nsaShimmerPhases);
-	bindFloat(console, "ParticleSystemManager.nsaShimmerSpeed", s.nsaShimmerSpeed);
-	bindFloat(console, "ParticleSystemManager.trailShimmerIntensity", s.trailShimmerIntensity);
-	bindFloat(console, "ParticleSystemManager.trailShimmerPhases", s.trailShimmerPhases);
-	bindFloat(console, "ParticleSystemManager.trailShimmerSpeed", s.trailShimmerSpeed);
+	bindBool(console, "ParticleSystemManager.drawStats", s.drawStats); // 0x1007aa7a, 0x1007aac7, 0x1007ab38
+	bindMethod(console, "ParticleSystemManager.resetStats", kAccess, [] {}); // 0x1007abd6, 0x1007ac28
+	bindBool(console, "ParticleSystemManager.drawBoundingBoxEnable", s.drawBoundingBoxEnable); // 0x1007ac43, 0x1007acb4, 0x1007ad01
+	bindFloat(console, "ParticleSystemManager.startFadePercentageOfViewDistance", s.startFadePercentageOfViewDistance); // 0x1007ad52, 0x1007adc3, 0x1007ae10
+	bindFloat(console, "ParticleSystemManager.viewDistance", s.viewDistance); // 0x1007ae59, 0x1007aeca, 0x1007af17
+	bindFloat(console, "ParticleSystemManager.startLodPercentageOfLodDistance", s.startLodPercentageOfLodDistance); // 0x1007af60, 0x1007afd1, 0x1007b01e
+	bindBool(console, "ParticleSystemManager.affectedByWind", s.affectedByWind); // 0x1007b067, 0x1007b0d8, 0x1007b125
+	bindInt(console, "ParticleSystemManager.particleSystemShaderQuality", s.particleSystemShaderQuality); // 0x1007b179, 0x1007b1ea, 0x1007b237
+	bindFloat(console, "ParticleSystemManager.overdrawScale", s.overdrawScale); // 0x1007b27a, 0x1007b2eb, 0x1007b338
+	bindInt(console, "ParticleSystemManager.qualityLevel", s.qualityLevel); // 0x1007b37e, 0x1007b3ef, 0x1007b43c
+	bindFloat(console, "ParticleSystemManager.shimmerIntensity", s.shimmerIntensity); // 0x1007b47f, 0x1007b4f0, 0x1007b53d
+	bindFloat(console, "ParticleSystemManager.shimmerPhases", s.shimmerPhases); // 0x1007b586, 0x1007b5f7, 0x1007b644
+	bindFloat(console, "ParticleSystemManager.shimmerSpeed", s.shimmerSpeed); // 0x1007b68d, 0x1007b6fe, 0x1007b74b
+	bindFloat(console, "ParticleSystemManager.nsaShimmerIntensity", s.nsaShimmerIntensity); // 0x1007b794, 0x1007b805, 0x1007b852
+	bindFloat(console, "ParticleSystemManager.nsaShimmerPhases", s.nsaShimmerPhases); // 0x1007b89b, 0x1007b90c, 0x1007b959
+	bindFloat(console, "ParticleSystemManager.nsaShimmerSpeed", s.nsaShimmerSpeed); // 0x1007b9a2, 0x1007ba13, 0x1007ba60
+	bindFloat(console, "ParticleSystemManager.trailShimmerIntensity", s.trailShimmerIntensity); // 0x1007baa9, 0x1007bb1a, 0x1007bb67
+	bindFloat(console, "ParticleSystemManager.trailShimmerPhases", s.trailShimmerPhases); // 0x1007bbb0, 0x1007bc21, 0x1007bc6e
+	bindFloat(console, "ParticleSystemManager.trailShimmerSpeed", s.trailShimmerSpeed); // 0x1007bd34, 0x1007bd81
 	// The decal manager's (RendDX9 0x1007bdca..0x1007c4c0).
-	bindBool(console, "DecalManager.drawStats", s.decalDrawStats);
-	bindFloat(console, "DecalManager.decalNormalOffset", s.decalNormalOffset);
-	bindFloat(console, "DecalManager.decalGeomClipAngle", s.decalGeomClipAngle);
-	bindFloat(console, "DecalManager.fadeDistance", s.decalFadeDistance);
-	bindFloat(console, "DecalManager.startFadePercentageOfFadeDistancel", s.decalStartFadePercentage);
-	bindFloat(console, "DecalManager.timeToLive", s.decalTimeToLive);
-	bindFloat(console, "DecalManager.fadeOutAtPercentageOfTimeToLive", s.decalFadeOutPercentage);
+	bindBool(console, "DecalManager.drawStats", s.decalDrawStats); // 0x1007be3b, 0x1007be88
+	bindFloat(console, "DecalManager.decalNormalOffset", s.decalNormalOffset); // 0x1007bed9, 0x1007bf4a, 0x1007bf97
+	bindFloat(console, "DecalManager.decalGeomClipAngle", s.decalGeomClipAngle); // 0x1007bfdd, 0x1007c04e, 0x1007c09b
+	bindFloat(console, "DecalManager.fadeDistance", s.decalFadeDistance); // 0x1007c0e1, 0x1007c152, 0x1007c19f
+	bindFloat(console, "DecalManager.startFadePercentageOfFadeDistancel", s.decalStartFadePercentage); // 0x1007c1e8, 0x1007c259, 0x1007c2a6
+	bindFloat(console, "DecalManager.timeToLive", s.decalTimeToLive); // 0x1007c2ef, 0x1007c360, 0x1007c3ad
+	bindFloat(console, "DecalManager.fadeOutAtPercentageOfTimeToLive", s.decalFadeOutPercentage); // 0x1007c3f6, 0x1007c473
 }
 
 float ParticleSystemSettings::decalAlpha(float age) const
@@ -305,7 +305,7 @@ void registerQualityConsoleMethods(Console& console, QualitySettings& s)
 	// undergrowth.simpleShaderEnable (0x100862e7: the undergrowth's slot
 	// 0x40, the one the quality switch 0x10010040 writes): holds until the
 	// video settings are applied again.
-	bindProperty<bool>(console, "undergrowth.simpleShaderEnable", kAccess, [&s] { return s.undergrowthSimpleShader(); },
+	bindProperty<bool>(console, "undergrowth.simpleShaderEnable", kAccess, [&s] { return s.undergrowthSimpleShader(); }, // 0x10086358, 0x100863a5
 		[&s](const bool& on) { s.undergrowthSimpleShaderSet = on ? 1 : 0; });
 }
 

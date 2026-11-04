@@ -288,6 +288,9 @@ void LevelRenderer::drawShadowCasters(SDL_GPUCommandBuffer* commands, SDL_GPUTex
 		if (!gpuMesh || instance.fade < 1.0f) {
 			continue;
 		}
+		// The dynamic map takes the bundled and skinned meshes (RendDX9's
+		// SkinnedMeshDrawShadowMap 0x10162c70 for the skinned ones, at the LOD
+		// the light manager's slot 0x230 allows).
 		const bool dynamic = gpuMesh->skinned || gpuMesh->bundled;
 		if (dynamic == statics) {
 			continue;

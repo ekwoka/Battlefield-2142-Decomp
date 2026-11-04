@@ -290,6 +290,42 @@ TEST(Weapons_MotionMineFollow)
 	CHECK(armed > 16 && armed < 20);
 }
 
+// DefaultFollowComp's followTime (0x005ed1a0): the AA missile (TTHeat,
+// trackingDelay 0, followTime 10) turns only from its lock plus the
+// tracking delay until followTime after it; a lock taken from none
+// restarts that (0x005b3e60).
+TEST(Weapons_FollowTimeLimitsTheGuidance)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "GenericProjectile");
+	world::ObjectTemplate* aa = templates.create("GenericProjectile", "aa");
+	aa->settings()["seek.targetType"] = "TTHeat";
+	aa->settings()["seek.trackingDelay"] = "0.2";
+	aa->settings()["follow.followTime"] = "10";
+	aa->settings()["follow.targetActivation"] = "1";
+	aa->settings()["timeToLive"] = "CRD_NONE/20/0/0";
+	const auto s = game::ProjectileSettings::fromTemplate(*aa);
+	CHECK(s.followTime == 10 && s.targetActivation && std::fabs(s.seekDelay - 0.2f) < 1e-6f);
+	game::Projectile p;
+	p.settings = &s;
+	p.age = 0.1f;
+	CHECK(!game::followActive(p)); // no lock: trackingDelay after the launch
+	p.age = 0.3f;
+	CHECK(game::followActive(p));
+	p.followFrom = 1.2f; // locked at 1 s
+	p.age = 1.1f;
+	CHECK(!game::followActive(p));
+	p.age = 11.2f;
+	CHECK(game::followActive(p));
+	p.age = 11.3f;
+	CHECK(!game::followActive(p)); // flies on unguided
+	const auto open = game::ProjectileSettings::fromTemplate(*templates.create("GenericProjectile", "plain"));
+	game::Projectile q;
+	q.settings = &open;
+	q.age = 1000;
+	CHECK(open.followTime == 0 && !open.targetActivation && game::followActive(q)); // 0: no limit
+}
+
 // The deviation components' spread (0x005b28d0, 0x005f5540): normal(0, 1)
 // numbers; a round deviating by `dev` moves dev x 0.01 x the firearm's
 // velocity per unit along its up and right axes; 0.01 or less is none.

@@ -250,8 +250,8 @@ void registerTerrainDataConsoleMethods(Console& console, const io::FileManager& 
 	std::optional<TerrainData>& terrain)
 {
 	const uint32_t access = ConsoleAccess::Anyone;
-	bindMethod(console, "terrain.create", access, [](std::string) {});
-	bindMethod(console, "terrain.load", access, [&files, &terrain](std::string path) {
+	bindMethod(console, "terrain.create", access, [](std::string) {}); // 0x10075b8e, 0x10075c02, 0x10075c3a
+	bindMethod(console, "terrain.load", access, [&files, &terrain](std::string path) { // 0x10076aa6, 0x10076b23, 0x10076b62
 		std::vector<uint8_t> data;
 		terrain.reset();
 		if (files.readFile(path, data)) {

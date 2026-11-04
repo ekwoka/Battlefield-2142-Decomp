@@ -28,6 +28,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -4177,6 +4178,77 @@ TEST(Bots_SightThroughSeeThrough)
 	CHECK(game::chooseWeapon(c, {charge}, explosive) == -1);
 	c.targetAlongFacing = 3.5f;
 	CHECK(game::chooseWeapon(c, {charge}, explosive) == 0);
+}
+
+// The bots' spotting (0x100a5850 -> 0x10030fb0): a first own sighting near
+// a strategic area (30 m across for soldiers) is said on TCTeam and
+// reported; the team's entry for the area holds the next infantry spot
+// for 60 s; far from every area nothing is spotted.
+TEST(Bots_SpotSightingsNearAreas)
+{
+	for (const bool nearArea : {true, false}) {
+		Field field;
+		Console console;
+		game::BotSettings settings = scriptedSettings(console);
+		std::string out;
+		console.execute(nearArea ? "aiStrategicArea.create spot 10/10 30/30 0 50" : "aiStrategicArea.create spot 200/200 220/220 0 50", out);
+		game::BotManager bots(*field.world, settings);
+		const int bot = field.soldier(2, true, 0, 0);
+		field.soldier(2, false, -5, -5); // a teammate to hear it
+		const int first = field.soldier(1, false, 20, 20);
+		const int second = field.soldier(1, false, 22, 18);
+		field.world->takeRadioHeard();
+		int spots = 0;
+		bool secondKnown = false;
+		for (int tick = 0; tick < 30 * 4; ++tick) {
+			field.move(bot, 0, 0);
+			field.move(first, 20, 20);
+			field.move(second, 22, 18);
+			bots.update(1 / 30.0f);
+			field.world->tick(1 / 30.0f);
+			std::set<std::string> said;
+			for (const auto& heard : field.world->takeRadioHeard()) {
+				if (heard.sender == bot && heard.channel == 1 && heard.voice.find("spotted") != std::string::npos) {
+					said.insert(heard.voice);
+				}
+			}
+			spots += static_cast<int>(!said.empty());
+			secondKnown = secondKnown || bots.knows(bot, second);
+		}
+		std::printf("  near an area %d: knows %d %d, spots %d\n", nearArea, bots.knows(bot, first), secondKnown, spots);
+		CHECK(bots.knows(bot, first) && secondKnown);
+		CHECK(spots == (nearArea ? 1 : 0));
+	}
+}
+
+// A squadmate hit by an enemy tells the squad's bots of the attacker
+// (IAICollisionHandler slot 0x18, 0x1004f020 -> 0x10089b70), even one far
+// out of their sight; a teammate's hit doesn't.
+TEST(Bots_HitSharedWithSquad)
+{
+	for (const bool enemy : {true, false}) {
+		Field field;
+		Console console;
+		game::BotSettings settings = scriptedSettings(console);
+		game::BotManager bots(*field.world, settings);
+		const int mate = field.world->addPlayer("Mate", 2, true);
+		field.world->joinSquad(mate, 1);
+		field.world->spawnSoldier(mate);
+		field.move(mate, 0, 0);
+		const int victim = field.world->addPlayer("Victim", 2, false);
+		field.world->joinSquad(victim, 1);
+		field.world->spawnSoldier(victim);
+		field.move(victim, 5, 0);
+		const int attacker = field.soldier(enemy ? 1 : 2, false, 0, 900);
+		bots.update(1 / 30.0f);
+		CHECK(!bots.knows(mate, attacker));
+		game::GameWorld::PlayerInfo info;
+		field.world->playerInfo(victim, info);
+		field.world->applyDamage(info.soldier, 10, attacker);
+		bots.update(1 / 30.0f);
+		std::printf("  enemy %d: the mate knows the attacker %d\n", enemy, bots.knows(mate, attacker));
+		CHECK(bots.knows(mate, attacker) == enemy);
+	}
 }
 
 // The two AITemplatePlugIn rows the bipods and ATs set: the Unit's

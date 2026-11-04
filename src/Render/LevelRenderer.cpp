@@ -487,6 +487,9 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 				all.push_back(p);
 			}
 		}
+		// RendDX9's bundled-mesh load (0x100a0dc0, with GSCreateSubPartBoundingBoxes)
+		// grows a box per part from its vertices' part byte (+0x18); here a
+		// sphere per part.
 		for (const auto& points : partPoints) {
 			gpuMesh->partBounds.push_back(sphereAround(points));
 		}
@@ -1395,6 +1398,18 @@ float LevelRenderer::overgrowthCloseDistance() const
 // there (sea level minus the terrain's height) for its opacity, and a ring
 // of deep water beyond them to the horizon (RendDX9's WaterSurrounding and
 // WaterDistant shader variants draw those parts).
+//
+// The original draws it per frame in terrain patches (DrawWater, 0x100b53c0):
+// each patch of the heightmap's grid that passes the view tests is a
+// quad at sea level (0x100b1f10), skipped where the patch's height (+0x98) is
+// above the water; outside the heightmap a patch takes WaterSurrounding,
+// beyond 40 m (+0x674) of the camera or with the camera over 40 m above the
+// sea WaterDistant, and near it the full Water technique only where one of
+// the light manager's +0x6f8 boxes meets the patch (slot 0xf8, 0x101a9b90;
+// else WaterDistant again). Those differ by USE_SHADOWS (the shade
+// the rewrite doesn't draw) against USE_HEIGHTALPHA, so the rewrite's grids
+// take one technique; their opacity from the depth stands in for the
+// lightmap's.
 void LevelRenderer::buildWater(const LevelSources& sources)
 {
 	const terrain::Heightmap* primary = sources.heightmaps.primary();
@@ -1793,7 +1808,12 @@ void LevelRenderer::addObject(const LevelSources& sources, const world::Object& 
 				continue;
 			}
 			// The type's factor from its geometry's radius, and the cell the
-			// tree is in (OvergrowthLod.h).
+			// tree is in (OvergrowthLod.h). The original gathers them once at
+			// load: the preLoad 0x100909e0 makes a record per cell at the
+			// ground's height under its centre, then 0x1008fb30 puts each
+			// isOvergrowth object (slot 0x124) with a "<geometry>_lod" mesh in
+			// the cell under it, its type found or added by name (0x10121790)
+			// and its own draw left to the overgrowth.
 			instance.overgrowthTypeFactor = OvergrowthBlend::typeFactor(std::max(instance.mesh->bounds.radius, 0.0f));
 			const float size = m_overgrowthCellSize;
 			const float x = std::floor(instance.world.at(3, 0) / size) * size;

@@ -70,6 +70,7 @@ struct RayHit {
 	bool started = false;
 	Vec3 point;
 	int lastClass = -1;
+	bool climbStopped = false; // stopped by the climb test (a run of steep polygons rising past stepHeight)
 };
 
 // A ray over the mesh (the pathfinder's vslot 0x84, 0x1003f930 ->
@@ -193,6 +194,7 @@ private:
 	float m_jumpAt = -100;    // +0xc0
 	Vec3 m_sample;            // +0xc8
 	bool m_jump = false;
+	float m_inputLevel = 0; // the last move input handed to progress
 	// The bend look-ahead's cache.
 	float m_bendAt = -100;
 	float m_bend = 0;

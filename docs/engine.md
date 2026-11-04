@@ -2377,7 +2377,8 @@ the size graph, turned by `randomRotation` + `rotationSpeed` (yaw / pitch /
 roll), coloured by the colour graph and faded by the transparency graph
 (MeshParticleMesh.fx `vsDiffuse`): blended and lit, or added
 (`psAdditive`). Drawn before the sprites, in the world and the first-person
-pass.
+pass (RendDX9's MeshParticles draw `0x101351e0`: the hemi map constants `0x10135460`, then
+`0x10135020`).
 
 **Lights.** LightSource templates (class `0x94c7`; the fields as the
 writer `0x00617030` lists them: lightType `+0x70`, isDynamic `+0x64`,
@@ -8201,7 +8202,25 @@ Seeking projectiles (`seek.*`, `follow.*`):
   projectile (`0x005b3e60`, `hasDirection` `+0x335`, 1) keeps its speed
   along the new heading and thrusts along it (acceleration `+0x31c`) while
   under maxSpeed (`+0x324`), not with magneticBehaviour and no target.
-  `followStep` (Weapons.cpp).
+  `followStep` (Weapons.cpp). The follow's start (its `+0x18`) is the
+  tick a lock is taken from none plus the seek's trackingDelay ticks
+  (`0x005b3e60` through the seek's slot `0x28`, `0x005b2c10`); from it,
+  `followTime` (`+0x30`, setter `0x004f6496`) seconds on the follow stops
+  turning the round (`0x005ed1a0`): the AA missiles' 10, the AG's 2.5, the
+  mechs' 6 and their FixedTargetComp rockets' 0.35. `targetActivation`
+  (`+0x34`, `0x005ec7c0`) starts the chase at that lock (`0x005b2c10`)
+  and ends it when the target goes (`0x005b2ca0`) instead of at the
+  launch (`0x005b3990`); both only fire the round's child events, the
+  turn needing a target anyway. `followActive` (Weapons.cpp).
+- **TargetObject** (template 0x94be, constructor `0x0058e720`; its update
+  `0x0058eba0`): `disableWhenWreck` (`+0x2a4`) keeps it off while the
+  vehicle above it is a wreck; `disableWhenEmptyVehicle` (`+0x2a5`) turns
+  it off once the vehicle has stood empty for
+  `disableWhenEmptyVehicleDelay` (`+0x2ac`) seconds, on again when someone
+  gets in (`0x0058e9a0`). HeatObject and LaserTarget_vehicle: both, 5 s;
+  MagneticObject: empty only, 3 s. Off, the launchers can't lock it and
+  the heat and laser rounds and the motion mines don't take it
+  (`GameWorld::targetEnabled`).
 - **TTMagnet (the motion mine,** `Unl_Mine_Motion`; the projectile's
   update `0x005b3e60`, seek component `+0x1a0` (0xc555), follow `+0x1a4`
   (0xc559)): once `armingDelay` (3.5 s, template `+0x2fc`) and
@@ -8209,7 +8228,7 @@ Seeking projectiles (`seek.*`, `follow.*`):
   target (`0x005ec260` → gameLogic slot `0x1c8`, `0x004cf290`): the
   registered TTMagnet targets (the vehicles' `MagneticObject` children,
   aimed at; `disableWhenEmptyVehicle` turns one off 3 s after the vehicle
-  empties, wrecks stay), not of its side (`ignoreFriendly`), within
+  empties, wrecks stay: TargetObject above), not of its side (`ignoreFriendly`), within
   `maxDistLock` (20 m) and `maxAngleLock` of its facing, in line of sight
   (terrain and objects), the nearest. A held target is kept out to
   `distLoseLock` (24 m). The chase starts `trackingDelay` after the lock
@@ -10777,6 +10796,36 @@ The urgencies:
   of the frustum within the target's cull distance. The rewrite's bots
   never target neutral objects, so it is stored and has no effect.
 
+**Spotting** (`BotManager::spotSighting`): the memory pass (0x100ed2c0)
+offers a memory item's first sighting by the bot itself (the item's
+`+0x68`, set once; not for a scripted bot, vt+0x27c) to the comm object
+(0x100a5850), whose report 0x10030fb0 throttles it with the table
+DAT_101394d0 (vtable 0x10113b30, reset 0x10031560 at the level's start:
+per team and strategic area {kind 8, time -1000}, and one aircraft stamp
+`+0x38`). The kind is the sensed object's strength type (its AI info's
+vt+0x40). A player whose id is 256 or more (the player's slot 0x6c,
+`+0x3d1`) spots at once; a bot walks the areas in order (0x10034640) for
+one within 30 m across (100 m for Helicopter and AirPlane) of the object
+(0x1005d1c0): an aircraft with the stamp over 60 s old spots and stamps
+it; else the team's entry for the area spots when over 60 s old (taking
+the kind and the time) or when it upgrades Infantry or LightArmour to
+HeavyArmour; else the next area in range. No area, no spot. The spot is
+IAIGame slot 0x68 (BF2142.exe 0x00895ab0): the game's slot 0xd4 with
+type 0x1b (the team learns of the object, as from a human's
+sendSpottedMessage) and the spotted object's voice (slot 0xd0: a
+vehicle's own `radio.spottedMessage`, a soldier's kit's, "spotted") said
+on TCTeam (slot 0x54). Stand-in: a box area's position is its box's
+centre.
+
+**Hits** (`BotManager::hitBy`, `GameWorld::takeAiHits`): hit points lost
+to another player reach IAICollisionHandler slot 0x18 (0x1004f020) through
+the exe's AI event adaptor (0x0089f8d0). Of another team, the attacker goes
+to the victim's squad's memory (0x10089b70, the fire plan's share) and,
+when the victim rides a vehicle whose driver is no bot, to the driver's
+squad's; a bot victim is alerted to the attacker as by a round passing it
+(the round event record 0x100c4500 to vt+0x158). The rewrite reports a hit
+vehicle's riders as hit.
+
 ### Fire
 
 - **Weapon choice:** each weapon's strength against the target's type
@@ -11276,6 +11325,14 @@ changes (0x100966c0 → 0x10095fc0).
   pair without waypoints ("do not have waypoints.", 0x10036b50) goes
   straight. Drivers use the areas' Vehicle order positions and the
   vehicle mesh.
+
+**The step ahead** (0x10093150, from the follower's tick 0x10095ac0
+while following, for a soldier): with a move input of 0.2 or more, the
+point max(0.5, half the bot's radius) ahead towards the current waypoint
+(the direction's height not below 0) is tried by the pathfinder's slot
+0x90 (0x1003f8c0 → 0x1003cb90), the mesh ray with the climb test fixed at
+85 degrees and 0.35 m that answers where the ray would stop on it; then
+jump (input 9) is pressed and `+0xc0` stamped (`PathFollower::steer`).
 
 ### Levels without a navigation mesh
 

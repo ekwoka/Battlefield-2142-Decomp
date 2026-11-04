@@ -239,7 +239,9 @@ struct UnlocksInfo {
 UnlocksInfo parseUnlocksInfo(const StatsResponse& response);
 
 // --- Awards (Menu/External/FlashMenu/awards.con, run at start-up by
-// 0x0046a0c0; "awards.setData <id> <criterion>..." parsed by 0x004a4e50).
+// 0x0046a0c0; "awards.setData <id> <criterion>..." parsed by 0x004a4e50:
+// the row's execute 0x00420be8 passes its one to six criteria on, its
+// argument reader 0x004211d2).
 // 126 entries: badges 100-121 in levels _1.._3, medals 200-219, ribbons
 // 300-323, pins 400-416. Each criterion is "<flags>,<critId>,<keys>,<target>":
 // flag 1 a career (global) criterion, else one within a round; 4 shown as a

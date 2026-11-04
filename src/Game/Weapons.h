@@ -129,6 +129,18 @@ struct ProjectileSettings {
 	float lockDistance = 0;
 	float loseDistance = 0;
 	float maxYawRate = 0, maxPitchRate = 0;
+	// DefaultFollowComp's time limit (template +0x30, setter 0x004f6496,
+	// default 0 = none; read by the follow's step 0x005ed1a0): the follow
+	// turns the round only until followTime seconds after its start, the
+	// lock taken from none plus trackingDelay (followFrom). The AA
+	// missiles' 10, the AG's 2.5, the mechs' 6 and 0.35. targetActivation
+	// (+0x34, setter 0x004f5fba, read by 0x005ec7c0) starts the chase at
+	// that lock (0x005b2c10) and stops it when the target goes (0x005b2ca0)
+	// instead of at the launch (0x005b3990); both only switch the round's
+	// child effects (events 0x44 / 0 and 1 / 0x45), since without a target
+	// the follow doesn't turn it either way.
+	float followTime = 0;
+	bool targetActivation = false;
 	// The magnet's chase (GameWorld::steerSeeker): armingDelay (template
 	// +0x2fc), follow.armingSpeed, speedModifier, predictionFactor,
 	// useTargetSpeed, magneticBehaviour; the projectile's acceleration
@@ -621,8 +633,9 @@ struct Projectile {
 	int64_t pendingSince = 0;
 	float damageScale = 1;  // what is left of its damage after penetrating (DefaultPenetrateComp)
 	float burstDistance = 0; // the airburst: off at this far from its origin (fire.useDistanceCounter, 0 none)
-	// A magnet's follow state (0x005ecb30): chasing from when (the seek's
-	// trackingDelay after the lock), the fastest the target has gone
+	// The follow's state (0x005ecb30): chasing from when (the seek's
+	// trackingDelay after the lock taken from none, the follow's +0x18:
+	// 0x005b2c10, 0x005b3e60), the fastest the target has gone
 	// (+0x90) and whether that armed it (+0x95).
 	float followFrom = -1;
 	float targetTopSpeed = 0;
@@ -698,10 +711,16 @@ void followMagnet(Projectile& projectile, const physics::Vec3& aim, const physic
 // kept. With the target behind (z <= 0) it doesn't turn, unless
 // magneticBehaviour, which turns it at the full rates; magneticBehaviour
 // also lifts the caps while it is still or on the tick its target changed
-// (`newTarget`). follow.changeYaw, changePitch and minDist are stored and
-// saved but never read. False when it didn't turn.
+// (`newTarget`). follow.changeYaw, changePitch and minDist (+0x14, +0x18,
+// +0x1c; setters 0x004f59fc, 0x004f5b1f, 0x004f5c5a) are stored and saved
+// but never read. False when it didn't turn.
 bool followStep(Projectile& projectile, const physics::Vec3& target, const physics::Vec3& targetVelocity, float seconds,
 	bool newTarget = false);
+
+// Whether the follow turns the round this tick (0x005ed1a0): from its
+// start (followFrom, else trackingDelay after the launch) until
+// follow.followTime seconds after it, when that is set.
+bool followActive(const Projectile& projectile);
 
 // A normal(0, 1) number (0x005b28d0: Marsaglia's polar method on the
 // engine's generator, the second of each pair kept for the next call).

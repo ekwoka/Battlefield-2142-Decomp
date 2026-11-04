@@ -167,6 +167,9 @@ int shownDistance(int shown, float distance)
 	return shown;
 }
 
+// RendDX9's .font reader (0x10180dd0) takes the same header lines (Texture,
+// TextureWidth, TextureHeight, BetweenWidth, SpaceWidth, Height, AlphaTest,
+// AlphaBlend) and then a cell a line ("%c %f %f %f").
 bool TagFont::parse(const std::string& text)
 {
 	std::istringstream in(text);
@@ -303,6 +306,8 @@ int vehicleIconId(int type, int category, bool usePlayerIcon)
 	}
 }
 
+// The VehicleType argument's reader (0x004dc66d): "VTHeavyTank" or
+// "HeavyTank" (case aside), or the number.
 int vehicleTypeOf(const std::string& name)
 {
 	static const char* const kNames[] = {"VTHeavyTank", "VTLightTank", "VTArtillery", "VTOrbitalStrike", "VTApc",
@@ -386,7 +391,11 @@ NameRow nameRow(int rank, bool veteran)
 
 int IconRegistry::idOf(const std::string& name)
 {
-	// NametagItemIDs (0x10070e1a's names).
+	// NametagItemIDs (0x10070e1a's names), as the console's parser reads
+	// them (0x1007168d: a name, or a number that is one of the ids).
+	const bool numeric = !name.empty()
+		&& std::all_of(name.begin(), name.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)) != 0; });
+	const int number = numeric ? std::atoi(name.c_str()) : -1;
 	static const std::pair<const char*, int> kIds[] = {{"ICRank", 0}, {"ICRevive", 0x2c}, {"ICMedic", 0x2d},
 		{"ICRepair", 0x2e}, {"ICAmmo", 0x2f}, {"ICVehicleArmor", 0x30}, {"ICVehicleMedic", 0x31},
 		{"ICVehicleRepair", 0x32}, {"ICVehicleAmmo", 0x33}, {"ICHealthBar", 0x34}, {"ICArmorBar", 0x35},
@@ -405,6 +414,9 @@ int IconRegistry::idOf(const std::string& name)
 		{"ICNetworkFriendlySmallCircle", 0xa0}, {"ICNetworkFriendlyBar", 0xa1}, {"ICNetworkFriendlyBarBg", 0xa2},
 		{"ICNetworkEnemySmallCircle", 0xa3}, {"ICNetworkEnemyBar", 0xa4}, {"ICNetworkEnemyBarBg", 0xa5}};
 	for (const auto& [n, id] : kIds) {
+		if (id == number) {
+			return id;
+		}
 		if (name.size() == std::char_traits<char>::length(n)
 			&& std::equal(name.begin(), name.end(), n, [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); })) {
 			return id;
@@ -452,17 +464,17 @@ void IconRegistry::setTexture(int rawFrames, const std::string& rawTexture, int 
 void IconRegistry::bind(Console& console)
 {
 	const uint32_t access = ConsoleAccess::Anyone;
-	bindMethod(console, "nametags.createIcon", access, [this](std::string name) {
+	bindMethod(console, "nametags.createIcon", access, [this](std::string name) { // 0x10079075, 0x10079097
 		current = idOf(name);
 		bar = false;
 	});
 	// createBar <id> <from> <to>: the fill's texels (ICArmorBar 1..45).
-	bindMethod(console, "nametags.createBar", access, [this](std::string name, int from, int to) {
+	bindMethod(console, "nametags.createBar", access, [this](std::string name, int from, int to) { // 0x10078e68, 0x10078f15, 0x10078f45
 		current = idOf(name);
 		bar = true;
 		barSpan[current] = {from, to};
 	});
-	bindMethod(console, "nametags.setTexture", access, [this](int frames, std::string texture, int x, int y, int w, int h) {
+	bindMethod(console, "nametags.setTexture", access, [this](int frames, std::string texture, int x, int y, int w, int h) { // 0x100791e7, 0x10079254
 		setTexture(frames, texture, x, y, w, h);
 	});
 }

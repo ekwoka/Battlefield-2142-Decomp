@@ -405,7 +405,9 @@ std::string SettingsObjects::profileScript() const
 	return writeFields(*this, kProfile, m_lists);
 }
 
-// The format of the shipped Settings/Usersettings.con.
+// The format of the shipped Settings/Usersettings.con (the
+// SettingsManager's save, 0x00676c10: the header, then each setting as
+// "SettingsManager.<type>Set <name> <value>").
 std::string SettingsObjects::userSettingsScript() const
 {
 	std::string out = "rem\nrem Settingsfile automatically saved by bf2142\nrem\n";

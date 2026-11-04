@@ -67,28 +67,28 @@ void registerOvergrowthConsoleMethods(Console& console, OvergrowthSettings& s)
 		bindProperty<float>(console, name, kAccess, [&value] { return value; }, [&value](const float& v) { value = v; });
 	};
 	// The object's own rows (constructors 0x10086920..0x10088136).
-	bindProperty<std::string>(console, "Overgrowth.path", kAccess, [&s] { return s.path; },
+	bindProperty<std::string>(console, "Overgrowth.path", kAccess, [&s] { return s.path; }, // 0x1008699d, 0x10086a07
 		[&s](const std::string& v) { s.path = v; });
-	bindMethod(console, "Overgrowth.preLoad", kAccess, [&s] { s.preLoaded = true; });
-	bindDistance("Overgrowth.viewDistance", s.viewDistance);
-	bindDistance("Overgrowth.viewDistanceScale", s.viewDistanceScale);
-	bindDistance("Overgrowth.closeDistPercentage", s.closeDistPercentage);
-	bindFloat("Overgrowth.closeDistFade", s.closeDistFade);
-	bindFloat("Overgrowth.lodTimer", s.lodTimer);
-	bindFloat("Overgrowth.editorEnable", s.editorEnable);
-	bindMethod(console, "Overgrowth.addMaterial", kAccess,
+	bindMethod(console, "Overgrowth.preLoad", kAccess, [&s] { s.preLoaded = true; }); // 0x10086a7c
+	bindDistance("Overgrowth.viewDistance", s.viewDistance); // 0x1008742b, 0x100874e9
+	bindDistance("Overgrowth.viewDistanceScale", s.viewDistanceScale); // 0x1008757f, 0x100875f0
+	bindDistance("Overgrowth.closeDistPercentage", s.closeDistPercentage); // 0x10087ce8, 0x10087d59, 0x10087da6
+	bindFloat("Overgrowth.closeDistFade", s.closeDistFade); // 0x10087f2e, 0x10087f9f, 0x10087fec
+	bindFloat("Overgrowth.lodTimer", s.lodTimer); // 0x10088032, 0x100880a3, 0x100880f0
+	bindFloat("Overgrowth.editorEnable", s.editorEnable); // 0x100881a7, 0x100881f4
+	bindMethod(console, "Overgrowth.addMaterial", kAccess, // 0x10086c04, 0x10086ce7
 		[&s](std::string name, unsigned index) { return s.addMaterial(name, index); });
-	bindMethod(console, "Overgrowth.setActiveMaterial", kAccess, [&s](std::string name) {
+	bindMethod(console, "Overgrowth.setActiveMaterial", kAccess, [&s](std::string name) { // 0x10086e0f, 0x10086e80, 0x10086ebf
 		for (size_t i = 0; i < s.materials.size(); ++i) {
 			if (sameName(s.materials[i].name, name)) {
 				s.activeMaterial = static_cast<int>(i);
 			}
 		}
 	});
-	bindMethod(console, "Overgrowth.getActiveMaterialName", kAccess, [&s] {
+	bindMethod(console, "Overgrowth.getActiveMaterialName", kAccess, [&s] { // 0x10086f34, 0x10086f93
 		return s.activeMaterial >= 0 ? s.materials[static_cast<size_t>(s.activeMaterial)].name : std::string();
 	});
-	bindMethod(console, "Overgrowth.removeActiveMaterial", kAccess, [&s] {
+	bindMethod(console, "Overgrowth.removeActiveMaterial", kAccess, [&s] { // 0x10086d94, 0x10086de7
 		if (s.activeMaterial < 0) {
 			return false;
 		}
@@ -96,15 +96,15 @@ void registerOvergrowthConsoleMethods(Console& console, OvergrowthSettings& s)
 		s.activeMaterial = -1;
 		return true;
 	});
-	bindMethod(console, "Overgrowth.addType", kAccess, [&s](std::string name) { return s.addType(name); });
-	bindMethod(console, "Overgrowth.setActiveType", kAccess, [&s](std::string name) {
+	bindMethod(console, "Overgrowth.addType", kAccess, [&s](std::string name) { return s.addType(name); }); // 0x1008707a, 0x100870ed, 0x10087138
+	bindMethod(console, "Overgrowth.setActiveType", kAccess, [&s](std::string name) { // 0x10087228, 0x10087299, 0x100872d8
 		for (size_t i = 0; i < s.types.size(); ++i) {
 			if (sameName(s.types[i].name, name)) {
 				s.activeType = static_cast<int>(i);
 			}
 		}
 	});
-	bindMethod(console, "Overgrowth.removeActiveType", kAccess, [&s] {
+	bindMethod(console, "Overgrowth.removeActiveType", kAccess, [&s] { // 0x100871ad, 0x10087200
 		if (s.activeType < 0) {
 			return false;
 		}
@@ -126,7 +126,7 @@ void registerOvergrowthConsoleMethods(Console& console, OvergrowthSettings& s)
 				}
 			});
 	};
-	bindProperty<std::string>(console, "OvergrowthType.geometry", kAccess,
+	bindProperty<std::string>(console, "OvergrowthType.geometry", kAccess, // 0x100882df, 0x10088356
 		[&s] {
 			const OvergrowthSettings::Type* t = s.active();
 			return t ? t->geometry : std::string();
@@ -136,12 +136,12 @@ void registerOvergrowthConsoleMethods(Console& console, OvergrowthSettings& s)
 				t->geometry = v;
 			}
 		});
-	bindType("OvergrowthType.density", &OvergrowthSettings::Type::density);
-	bindType("OvergrowthType.normalScale", &OvergrowthSettings::Type::normalScale);
-	bindType("OvergrowthType.rotationScale", &OvergrowthSettings::Type::rotationScale);
-	bindType("OvergrowthType.minRadiusToSame", &OvergrowthSettings::Type::minRadiusToSame);
-	bindType("OvergrowthType.minRadiusToOthers", &OvergrowthSettings::Type::minRadiusToOthers);
-	bindProperty<ConsoleVec2>(console, "OvergrowthType.randomScale", kAccess,
+	bindType("OvergrowthType.density", &OvergrowthSettings::Type::density); // 0x100883cb, 0x1008843c, 0x10088489
+	bindType("OvergrowthType.normalScale", &OvergrowthSettings::Type::normalScale); // 0x100884d2, 0x10088543, 0x10088590
+	bindType("OvergrowthType.rotationScale", &OvergrowthSettings::Type::rotationScale); // 0x100885d9, 0x10088656, 0x100886a3
+	bindType("OvergrowthType.minRadiusToSame", &OvergrowthSettings::Type::minRadiusToSame); // 0x100886ec, 0x1008875d, 0x100887aa
+	bindType("OvergrowthType.minRadiusToOthers", &OvergrowthSettings::Type::minRadiusToOthers); // 0x100887f3, 0x10088864, 0x100888b1
+	bindProperty<ConsoleVec2>(console, "OvergrowthType.randomScale", kAccess, // 0x1008897a, 0x100889e5
 		[&s] {
 			const OvergrowthSettings::Type* t = s.active();
 			return t ? ConsoleVec2 {t->randomScale[0], t->randomScale[1]} : ConsoleVec2 {1, 1};

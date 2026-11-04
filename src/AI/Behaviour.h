@@ -1,5 +1,6 @@
 // AIDLL.dll's behaviour selection, rewritten (Bot::think 0x10099280 and
-// the arbiter vtbl_1011b868).
+// the arbiter vtbl_1011b868: constructor 0x100f70d0, destructor 0x100f7100,
+// slot 8 0x100f7090 handing a call on to every behaviour's slot 0x20).
 //
 // Each equipment type (aiSettings.setVehicle: Infantery, Tank, Car, ...)
 // has a set of behaviours (aiSettings.setVehicleBehaviour <vehicle>
@@ -67,8 +68,8 @@ struct VehicleSetup {
 struct Arbitration {
 	int running = -1;               // index into the set, -1 before the first plan
 	bool replan = true;             // Bot +0x10: the next think picks anew
-	std::vector<float> latched;     // urgencies as of the last pick
-	std::vector<float> urgency;     // as computed this think
+	std::vector<float> latched;     // urgencies as of the last pick (the BB's per-bot +0x1c: 0x100ccd50, latched by 0x100ccd70)
+	std::vector<float> urgency;     // as computed this think (+0x10: 0x100ccd30; the BB base's destructor 0x100cccf0)
 };
 
 // Weights for this think (above); `personality` and the inhibitor sets
