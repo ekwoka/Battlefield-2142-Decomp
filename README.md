@@ -111,133 +111,13 @@ ninja -C build/native && build/native/tests/bf2142_tests
 # tests run in parallel processes, one per core (about 30 s); -j 1 runs them
 # one by one (about 4 min under ASan); a name runs only the tests containing it
 
+# Release build for playing (much faster than the ASan debug build above)
+cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release
+ninja -C build/release src/Main/bf2142
+
 # 32-bit Windows build: drop-in replacements for the retail DLLs
 cmake -S . -B build/win32 -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-i686.cmake -DCMAKE_BUILD_TYPE=Release
 ninja -C build/win32
-
-# Run the start-up and level scripts against your install, and look at the level
-# (the engine's console tables in symbols/ load by themselves; --api names others)
-build/native/src/Main/bf2142 --game "source/Battlefield 2142" \
-    +level Camp_Gibraltar --view          # or --screenshot shot.png [--camera x/y/z/yaw/pitch]
-# run around as a soldier (team 1 PAC, 2 EU): WASD, shift sprints, the mouse turns,
-# Space jumps, left Ctrl crouches, Z lies down, Caps Lock opens the commander screen,
-# (keys from the game's Settings/Controls.con; rebind them on the Options page),
-# joysticks and gamepads (SDL3, plugged in or out at any time) bind on the same
-# Options controls page: pick an action and press a button or push a stick
-# (a gamepad reads as an Xbox 360 pad: sticks IDAxis_0/1 and 3/4, triggers 2,
-# A B X Y = buttons 0-3, the d-pad buttons 10-13),
-# in vehicles and aircraft the vehicle maps' pitch and roll take sticks and keys
-# as well as the mouse (bind them on the Air/Helicopter/Land pages),
-# each local profile (Profiles/0001...: an offline account or a soldier) keeps
-# its own options and keys,
-# E enters and leaves a vehicle nearby (then W/S drive and brake, A/D steer;
-# F1..F8 change seats: a gunner's seat aims with the mouse and fires;
-# 1..9 take the kit's weapon of that slot: 1 knife, 2 sidearm, 3 primary;
-# R reloads a magazine that isn't full;
-# the right button zooms a weapon that zooms and sets off your C4;
-# C switches between first person (the default: arms and weapon, a seat's
-# own camera in vehicles) and the chase view; --unlock-all gives every kit unlock)
-#   --play 2
-#   --camera-mode third          (start in the chase view; screenshots too)
-#   --zoom                       (a screenshot's soldier zooms in after firing)
-#   --actions "reload wait:60 firemode fire:10 item:2 prone:20 jump"
-#                                (a screenshot's soldier's inputs, a tick each or a count,
-#                                 printing the weapon in hand after each)
-# with --screenshot: put a vehicle before the soldier, get in and drive it
-# (--seat N: stay aboard in seat N for the shot)
-#   --drive eu_fav [--seat 2]
-# bots (the game's AI settings; paths on levels with a navigation mesh),
-# and a headless run that prints the scores afterwards
-#   --bots 8 --simulate 120     (e.g. +level minsk_coop +gameMode gpm_coop)
-# the scoreboard (Tab while playing; this forces it on), the spawn screen
-# (dying first; while dead, click a spawn icon on the map to pick it)
-#   --scoreboard
-#   --spawn-screen
-#   --commander-screen          (take command of the team and open its screen)
-# the Flash main menu (no level needed): a window, or a screenshot after 10 s
-#   bf2142 --game "source/Battlefield 2142" --menu --view
-#   bf2142 --game "source/Battlefield 2142" --menu --screenshot menu.png
-# start a game from it: log in (or play offline), then Singleplay ->
-# Instant Action or a playlist; the chosen map loads with the menu's bots
-# and settings; the playlist goes on map after map, Esc shows the menu over
-# the game (Disconnect leaves it). --offline skips the account service;
-# --console "<command>" runs a console command once the round has started
-# ("<seconds>:<command>" once the round is that old);
-# --menu-script drives
-# the menu without a window ("wait:<s> click:<x>,<y> type:<text>"), e.g.
-#   bf2142 --game "source/Battlefield 2142" --menu --view --offline
-# unattended runs in the window: timed input and screenshots, e.g.
-#   --input-script "12:click:0.49,0.37 12.5:text:Tester 40:shot:out.png 41:down:W 44:up:W 60:quit"
-#   (key:/down:/up: SDL key names, click:/move: window fractions, look:dx,dy,
-#   button:n,0|1, text:, shot:file.png, quit; seconds from the window's opening)
-# list the servers on the master server (the local emulator; OpenSpy's with --online)
-#   bf2142 --game "source/Battlefield 2142" --servers
-# play on one (loads its map, shows the server's objects; servers expect a
-# logged-in account and a CD key), or only shake hands and print what it sends
-#   bf2142 --game "source/Battlefield 2142" --connect 1.2.3.4:17567
-#   bf2142 --game "source/Battlefield 2142" --probe 1.2.3.4:17567
-# host a game for other bf2142 clients on this machine (port 17567, +port N;
-# the LAN query port 29900 answers the menu's LOCAL page), for 10 minutes,
-# and join it (--play asks to spawn; --name gives the player's name;
-# +joinServer is the original's spelling of --connect)
-#   bf2142 --game "source/Battlefield 2142" +level Camp_Gibraltar +gameMode gpm_cq --host --simulate 600
-#   bf2142 --game "source/Battlefield 2142" --connect 127.0.0.1 --name Joiner --play
-# (--spectate joins as a spectator, the menu's SPECTATOR: the host needs
-# sv.allowSpectators 1 in its settings, +config <file>, and not ranked)
-# (the joined game's HUD is the server's: its tickets, players, control
-# points and spawn groups; --scoreboard and --spawn-screen work joined too,
-# e.g. --connect 127.0.0.1 --play 2 --spawn-screen --screenshot out.png;
-# the radio, squads, requests and the commander's tools go to the server,
-# e.g. a headless commander and squad leader on the loopback host:
-#   bf2142 ... --connect 127.0.0.1 --name Cmdr --play 1 --simulate 70 --screenshot cmdr.png \
-#     --console "2:Commander.commanderApply" --console "22:Commander.accept 1" \
-#     --console "50:Commander.commRoseAccept 1"
-#   bf2142 ... --connect 127.0.0.1 --name Leader --play 1 --simulate 70 --screenshot leader.png \
-#     --console "3:SquadMenu.setSquadCreateSelect 1" --console "4:SquadMenu.createSquad" \
-#     --console "40:SquadLeader.sendRequest 3 0";
-# the HUD's questions (an invite, the offer of command) are answered with
-# Del / End (c_GIYes / c_GINo) or "Radio.answer 1|0"; a headless client's
-# soldier can be driven from a second of the round on, and the others see
-# its stance and fire:
-#   --remote-actions "5:face:Alpha 6:forward 16:stop 21:crouch 31:fire 34:hold 35:prone"
-#   (crouch, prone, stand, fire, hold, reload, forward, stop, turn:<deg a tick>,
-#    face:<player>, still, zoom, pitch:<deg>))
-# run a dedicated server (no window, no sound): the install's
-# mods/bf2142/Settings/ServerSettings.con (sv.*) and maplist.con
-# (mapList.append <level> <mode> <size>), or +config <file> / +mapList
-# <file>; +overlayPath <dir/> reads <dir>/Settings/ and <dir>/admin/default.cfg
-# instead. It runs the map list in turn (sv.roundsPerMap rounds a map,
-# sv.endDelay seconds between rounds) until Ctrl+C or "quit" (--simulate N:
-# N seconds over all maps). sv.adminScript "default" starts the install's
-# admin/default.py: the TCP remote console on 127.0.0.1, port and password
-# from admin/default.cfg (port=4711, password=<yours>), with standard_admin's
-# team auto-balance (sv.autoBalanceTeam) and team-kill punishing
-# (sv.tkPunishEnabled)
-#   bf2142 --game "source/Battlefield 2142" --host --dedicated
-#   bf2142 --game "source/Battlefield 2142" --host --dedicated +overlayPath ~/bf2142-server/
-# talk to its remote console: maplist.list, admin.listPlayers,
-# admin.kickPlayer <id>, admin.banPlayer <id> [perm|round|<seconds>],
-# admin.runNextLevel, admin.nextLevel <i>, Game.sayAll "<text>", sv.*
-#   bf2142 --rcon 127.0.0.1:4711 --rcon-password <yours> --rcon-command "admin.listPlayers"
-# the Bink movies (FFmpeg: brew install ffmpeg; BF2142_MOVIES=OFF builds
-# without): the start-up movies play before the menu (--no-movies skips
-# them; Esc skips the intro), --movie plays one, or renders one frame
-#   bf2142 --game "source/Battlefield 2142" --movie Intro --movie-seconds 20 --screenshot intro.png
-# the menu's LOCAL page searches 255.255.255.255 as the original; --lan
-# 127.0.0.1 keeps the search on this machine
-# online services: nothing leaves this machine unless --online is given
-# (see "Networking (OpenSpy)" below). Locally, run the OpenSpy emulator
-# (FESL, GameSpy Presence, master server, CD-key and stats services on
-# 127.0.0.1), log in to it, list and join a host that checks logins as a
-# retail server does:
-#   bf2142 --game "source/Battlefield 2142" --openspy-emulator --emulator-account tester:secret@Tester
-#   bf2142 --game "source/Battlefield 2142" +level Camp_Gibraltar +gameMode gpm_cq --host --require-login --simulate 600
-#   bf2142 --game "source/Battlefield 2142" --login tester:secret@Tester --servers
-#   bf2142 --game "source/Battlefield 2142" --login tester:secret@Tester --connect 127.0.0.1 --play
-# (--login alone takes the credentials from the environment or
-# bf2142-online.cfg; --fesl only greets the account service)
-# add objects and play an animation on skinned ones:
-#   --spawn us_light_soldier@-38/38.3/-55/90 --animation Objects/Soldiers/Common/Animations/3P/3p_standfire.baf
 
 # Ghidra analysis of the retail binaries
 DECOMPILE=1 tools/ghidra/analyze.sh BF2142Audio.dll
@@ -254,6 +134,232 @@ options page's microphone test); without it voice still builds and runs
 without audio devices. [docs/workflow.md](docs/workflow.md) covers
 analysis, the decompilation helpers, and how to test a rewritten module inside
 the retail game under CrossOver.
+
+## Running the game
+
+The program is `bf2142`. Build it as above; then run one of:
+
+| Binary | Use |
+|---|---|
+| `build/release/src/Main/bf2142` | Playing and anything timed. Use this one. |
+| `build/native/src/Main/bf2142` | Debugging. Built with ASan/UBSan, so 10–15 times slower; a real-time game crawls. |
+
+Every run needs the game folder: `--game "source/Battlefield 2142"`, or set
+`BF2142_GAME_DIR` once. The engine's console tables in `symbols/` are found
+by themselves (from the working directory, else the source tree).
+
+```sh
+B=build/release/src/Main/bf2142
+G="source/Battlefield 2142"
+
+$B --game "$G" --menu --view                       # the main menu in a window: log in or play offline, then Singleplay
+$B --game "$G" +level Camp_Gibraltar --play --view # straight into a level as an EU soldier
+$B --game "$G" +level Cerbere_Landing +gameMode gpm_sp +mapSize 16 --bots 15 --simulate 120   # a headless bot round
+```
+
+### How a run behaves
+
+What a run does depends on three options:
+
+| You give | You get |
+|---|---|
+| `--view` (or `--menu`, `--play`, `--connect` without the next two) | A window with sound. Runs until you quit. |
+| `--screenshot out.png` | No window: the frame is drawn off screen, saved, and the program exits. |
+| `--simulate N` | No window: N seconds of game time run as fast as possible, then the scores print. Only `--view` adds a window to it. |
+
+`--screenshot` and `--simulate` can be combined with almost everything below,
+which is how the tests and the agents check the game without a window.
+
+Options that start with `+` are the original game's own command-line
+settings (`+level`, `+joinServer`, …); the rest are the rewrite's.
+
+### Controls (in a window)
+
+The keys come from the game's `Settings/Controls.con` and can be rebound on
+the Options → Controls page; joysticks and gamepads (SDL3, plugged in or out
+at any time) bind there too, by picking an action and pressing a button or
+pushing a stick. A gamepad reads as an Xbox 360 pad.
+
+| Key | Action |
+|---|---|
+| W A S D | Move (in a vehicle: drive, brake, steer) |
+| Mouse | Look and aim |
+| Left button / right button | Fire / zoom (sets off placed C4) |
+| Shift | Sprint |
+| Space | Jump |
+| Left Ctrl / Z | Crouch / lie down |
+| R | Reload (weapons only reload by themselves when set to, as in the original) |
+| 1 … 9 | Kit slots: 1 knife, 2 sidearm, 3 primary … |
+| E | Enter or leave a vehicle nearby |
+| F1 … F8 | Change seats |
+| C | First person ↔ chase view |
+| Tab | Scoreboard |
+| M / N / Left Alt | Big map / minimap zoom / 3D name tags |
+| Q / T | Radio menu / squad and commander menu |
+| Caps Lock | Commander screen |
+| K / L | Chat to all / to the team |
+| Del / End | Answer yes / no to an invite or the offer of command |
+| Esc | Menu over the game (Disconnect leaves it) |
+
+### Option reference
+
+**Game and level**
+
+| Option | What it does |
+|---|---|
+| `--game <dir>` | The BF2142 install. Required (or `BF2142_GAME_DIR`). |
+| `+level <name>` | The level to load, e.g. `Camp_Gibraltar`, `Cerbere_Landing`, `Suez_Canal`. |
+| `+gameMode <mode>` | `gpm_cq` (default) conquest, `gpm_ti` Titan, `gpm_sp` / `gpm_coop` single player and co-op, `gpm_sl` Assault Lines, `gpm_nv`, `gpm_ca`. |
+| `+mapSize <n>` | The layout: 16, 32 (default), 48 or 64. The level must ship that mode and size. |
+| `+modPath <dir>` | The mod folder, default `mods/bf2142`. |
+| `--api <file.csv>` | Extra console tables (by default the two in `symbols/`). |
+| `--verbose` | More output. |
+
+**Window, sound and pictures**
+
+| Option | What it does |
+|---|---|
+| `--view` | Open a window (with sound). |
+| `--screenshot <file.png>` | Draw one frame off screen, save it and exit. |
+| `--camera x/y/z/yaw/pitch` | Where a screenshot's camera stands (degrees for yaw and pitch). |
+| `--camera-mode first\|third` | Start in first person (default) or the chase view. |
+| `--nosound` / `--sound` | No audio at all / the audio engine even without a window. |
+| `--play-sound <name>` | Play a named sound after start-up. |
+| `--no-movies` | Skip the start-up movies. |
+| `--movie <name>` / `--movie-seconds <s>` | Play one movie (`Movies/<name>.bik`); with `--screenshot`, save its frame at that time. |
+
+**Playing a level yourself**
+
+| Option | What it does |
+|---|---|
+| `--play [1\|2]` | Spawn and control a soldier of team 1 (PAC) or 2 (EU, the default). |
+| `--drive <vehicle>` | Put a vehicle (e.g. `eu_fav`) in front of the soldier and get in. |
+| `--seat <n>` | With `--drive`, stay in seat n (1 is the driver). |
+| `--zoom` | A screenshot's soldier zooms in after firing. |
+| `--actions "<cmd> …"` | A screenshot's soldier's inputs before the shot, e.g. `"reload wait:60 firemode fire:10 item:2 prone:20 jump"`. |
+| `--unlock-all` | Every kit unlock. |
+| `--scoreboard` / `--spawn-screen` / `--commander-screen` | Show the scoreboard; die first and show the spawn screen; take command and open the commander screen. |
+| `--hud-click x/y[/right\|/move]` | A click or pointer move on the HUD's 800 × 600 screen before a screenshot (repeatable). |
+| `--console "<command>"` | Run a console command once the round starts; `"<s>:<command>"` runs it when the round is that many seconds old (repeatable). |
+| `--spawn <template>@x/y/z[/yaw]` | Add an object to look at (repeatable). |
+| `--animation <file.baf>` | Play an animation on the skinned objects. |
+| `--dump-template <name>` | Print a template's tree and settings. |
+
+**Bots and headless rounds**
+
+| Option | What it does |
+|---|---|
+| `--bots <n>` | Add n AI players, alternately PAC and EU. Bots only move on levels with a navigation mesh. |
+| `--simulate <s>` | Run s seconds of game time without a window, then print tickets, control points and each player's score. |
+
+**Menus**
+
+| Option | What it does |
+|---|---|
+| `--menu [mainMenu\|endOfRound]` | Show the Flash menu (no level needed). With `--screenshot`, it plays for `--menu-seconds` (default 10) first. |
+| `--offline` | The menu finds no account service, so it plays offline. |
+| `--menu-script "<steps>"` | Drive the menu without a window: `wait:<s>`, `click:<x>,<y>`, `type:<text>`, `call:<clip>.<method>,<args>`. |
+| `--input-script "<s>:<cmd> …"` | Timed input in a window: `key:` / `down:` / `up:` (SDL key names), `click:` / `move:` (window fractions), `look:dx,dy`, `button:n,0\|1`, `text:`, `shot:file.png`, `quit`. |
+
+**Hosting a game**
+
+| Option | What it does |
+|---|---|
+| `--host` | Serve the level to other `bf2142` clients (port 17567). |
+| `--dedicated` / `+dedicated 1` | A dedicated server: no window, no sound. Runs the map list until Ctrl+C or an rcon `quit`. |
+| `+port <n>` / `--query-port <n>` | The game port / the LAN query port (default 29900; 0 for none). |
+| `+config <file>` / `+mapList <file>` | Server settings (default `mods/bf2142/Settings/ServerSettings.con`) / map list (default `maplist.con`). |
+| `+overlayPath <dir/>` | Read `Settings/` and `admin/default.cfg` from that folder instead. |
+| `--maps level[:mode[:size]],…` | A playlist for `--host`, replacing the map list. |
+| `--time-limit <s>` | The round's time limit. |
+| `--require-login` | Check players' logins as a retail server does. |
+
+**Joining a game**
+
+| Option | What it does |
+|---|---|
+| `--connect host[:port]` / `+joinServer host[:port]` | Join a server. Real servers also need `--online` and a login. |
+| `--name <name>` | Your player name on the server. |
+| `--play [1\|2]` | On a server, spawn, and ask for that team. |
+| `--spectate` | Join as a spectator (the host needs `sv.allowSpectators 1`). |
+| `--walk` | Without a window, walk and turn (a check of the client's prediction). |
+| `--remote-actions "<s>:<op> …"` | Without a window, the soldier's inputs from that second on: `crouch`, `prone`, `stand`, `fire`, `hold`, `reload`, `forward`, `stop`, `turn:<deg>`, `face:<player>`, `still`, `zoom`, `pitch:<deg>`. |
+| `--probe host[:port]` | Only shake hands and print what the server sends. |
+| `--servers` | List the servers the master server knows. |
+| `--lan <address>` | Where the menu's LOCAL search probes (default 255.255.255.255; `127.0.0.1` keeps it on this machine). |
+| `--demo <file>` | Play a recorded demo back. |
+
+**Network diagnostics**
+
+| Option | What it does |
+|---|---|
+| `--net-log <file>` | Log every datagram in and out, hex and decoded. |
+| `--net-strict` | Report every decode problem on stderr as it happens, with a summary at the end. |
+| `--net-capture <file>` / `--net-replay <file>` | Record a session's datagrams / replay a recording into the client offline (nothing is sent). |
+
+**Online services** (see [Networking (OpenSpy)](#networking-openspy))
+
+| Option | What it does |
+|---|---|
+| `--online` | Allow the real OpenSpy services. **Without it nothing leaves this machine or the local network.** |
+| `--login [name:password[@soldier]]` | Log in (EA's FESL, then GameSpy Presence). Bare, it takes the credentials from the environment or `bf2142-online.cfg`. |
+| `--fesl` | Only greet the account service. |
+| `--openspy-emulator` | Run local stand-ins of OpenSpy's services on 127.0.0.1. |
+| `--emulator-account name:password@soldier[,soldier]` | An account the emulator accepts (repeatable). |
+| `--emulator-cdkey <key>` | Make the emulator's CD-key service accept only these keys (repeatable). |
+| `--emulator-list host:port[:queryport]` | A server the emulator's master server lists (repeatable). |
+
+**Remote console**
+
+| Option | What it does |
+|---|---|
+| `--rcon host[:port]` | Talk to a server's remote console (port 4711 by default, from `admin/default.cfg`). |
+| `--rcon-password <password>` | Its password. |
+| `--rcon-command "<command>"` | A command to run, e.g. `admin.listPlayers` (repeatable). |
+
+### Environment variables
+
+| Variable | What it does |
+|---|---|
+| `BF2142_GAME_DIR` | The install, instead of `--game`. |
+| `BF2142_ACCOUNT`, `BF2142_PASSWORD`, `BF2142_SOLDIER`, `BF2142_CDKEY` | Online credentials, instead of `bf2142-online.cfg`. |
+| `BF2142_FRAME_BENCH=<n>` | With `--screenshot`, print the mean cost of n rendered frames. |
+| `BF2142_BOT_SEED=<n>` | The bots' random seed, to compare rounds. |
+| `BF2142_BOT_STATS=1` | Per-bot statistics at the end of a run. |
+| `BF2142_SOUND_LOG=1` | Print every sound played. |
+| `BF2142_POST_EFFECT=emp:N\|soldieremp:N\|tinnitus\|tv\|camera\|flash\|camo` | Force one screen effect, for screenshots. |
+| `BF2142_SHADOW_DEBUG`, `BF2142_SHADOW_STATS`, `BF2142_SHADOW_REDRAW` | Shadow debugging: show the shadow factor, print the casters, redraw every frame. |
+| `BF2142_TERRAIN_LODS=1` | Tint each terrain cell by its detail level. |
+
+### More examples
+
+```sh
+# a screenshot of a level (the camera is placed for you; --camera x/y/z/yaw/pitch
+# picks the spot, but keep it within the level's fog: Camp Gibraltar's ends at 100 m)
+$B --game "$G" +level Cerbere_Landing --screenshot shot.png
+
+# drive the FAV and shoot from the gunner's seat, as a screenshot
+$B --game "$G" +level Camp_Gibraltar --play 2 --drive eu_fav --seat 2 --screenshot gunner.png
+
+# a Titan-mode bot round
+$B --game "$G" +level Suez_Canal +gameMode gpm_ti +mapSize 48 --bots 15 --simulate 300
+
+# host on this machine and join it from a second terminal
+$B --game "$G" +level Camp_Gibraltar +gameMode gpm_cq --host --bots 8 --simulate 600
+$B --game "$G" --connect 127.0.0.1 --name Joiner --play --view
+
+# a dedicated server and its remote console
+$B --game "$G" --host --dedicated
+$B --rcon 127.0.0.1:4711 --rcon-password <yours> --rcon-command "admin.listPlayers"
+
+# the menu, driven without a window: offline login, then a screenshot
+$B --game "$G" --menu --menu-script "wait:12 click:500,283 type:Tester click:500,330 type:pw click:510,364 wait:4 click:437,363 wait:4 click:450,258 click:510,398 wait:6" --screenshot menu.png
+
+# the whole online chain against the local emulator (nothing leaves this machine)
+$B --game "$G" --openspy-emulator --emulator-account tester:secret@Tester
+$B --game "$G" +level Camp_Gibraltar +gameMode gpm_cq --host --require-login --simulate 600
+$B --game "$G" --login tester:secret@Tester --connect 127.0.0.1 --play --view
+```
 
 ## Progress
 
