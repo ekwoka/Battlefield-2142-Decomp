@@ -39,17 +39,30 @@ void GameWorld::playHitReaction(Player& victim, int node, const physics::Vec3& d
 void GameWorld::stepUnmannedGuns(float seconds)
 {
 	for (Body& body : m_bodies) {
+		// The active defence's shield lasts the ADS weapon's fire state 4
+		// (raiseShield); out of it the root's shield is cleared.
+		body.shieldLeft = std::max(0.0f, body.shieldLeft - seconds);
 		for (size_t seat = 0; seat < body.guns.size(); ++seat) {
 			Body::Gun& gun = body.guns[seat];
 			const bool manned = seat < body.occupants.size() && body.occupants[seat] >= 0;
-			if (!gun.weapon || manned) {
+			if (manned) {
 				gun.manned = manned;
 				continue;
 			}
-			if (gun.weapon->settings().reloadWithoutPlayer) {
-				gun.weapon->runReload(seconds); // 0x005f4bb0: the reload runs on
-			} else if (gun.manned) {
-				gun.weapon->dropReload(); // 0x005f3a40: its user gone
+			// Each of the seat's firearms (the active one in the Gun's Arm part).
+			const auto unmanned = [&](FireArm* weapon) {
+				if (!weapon) {
+					return;
+				}
+				if (weapon->settings().reloadWithoutPlayer) {
+					weapon->runReload(seconds); // 0x005f4bb0: the reload runs on
+				} else if (gun.manned) {
+					weapon->dropReload(); // 0x005f3a40: its user gone
+				}
+			};
+			unmanned(gun.weapon.get());
+			for (Body::Arm& arm : gun.arms) {
+				unmanned(arm.weapon.get());
 			}
 			gun.manned = false;
 		}

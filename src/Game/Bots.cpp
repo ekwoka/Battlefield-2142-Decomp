@@ -1143,6 +1143,40 @@ std::vector<std::pair<int, std::string>> BotManager::armament(const GameWorld::P
 	return items;
 }
 
+std::vector<std::pair<int, std::string>> BotManager::seatArmament(const GameWorld::PlayerInfo& self) const
+{
+	std::vector<std::pair<int, std::string>> items;
+	const auto seats = const_cast<GameWorld&>(m_world).vehicleSeats(self.vehicle);
+	if (self.seat < 0 || static_cast<size_t>(self.seat) >= seats.size()) {
+		return items;
+	}
+	const GameWorld::SeatLayout& seat = seats[static_cast<size_t>(self.seat)];
+	if (m_settings.weapons.empty()) {
+		if (!seat.weapon.empty()) {
+			items.push_back({m_world.seatWeaponIndex(self.vehicle, self.seat), seat.weapon});
+		}
+		return items;
+	}
+	for (size_t i = 0; i < seat.weapons.size(); ++i) {
+		const GameWorld::SeatWeapon& w = seat.weapons[i];
+		if (w.group >= 0 && !w.podLauncher && !w.aiTemplate.empty() && m_settings.weapons.count(lower(w.aiTemplate))) {
+			items.push_back({static_cast<int>(i), w.weapon});
+		}
+	}
+	return items;
+}
+
+std::string BotManager::seatWeaponName(const GameWorld::PlayerInfo& self, int index) const
+{
+	const auto seats = const_cast<GameWorld&>(m_world).vehicleSeats(self.vehicle);
+	if (self.seat < 0 || static_cast<size_t>(self.seat) >= seats.size()) {
+		return {};
+	}
+	const GameWorld::SeatLayout& seat = seats[static_cast<size_t>(self.seat)];
+	return index >= 0 && static_cast<size_t>(index) < seat.weapons.size() ? seat.weapons[static_cast<size_t>(index)].weapon
+																		   : seat.weapon;
+}
+
 std::string BotManager::weaponName(const GameWorld::PlayerInfo& self, int slot) const
 {
 	for (const auto& [s, name] : carried(self)) {
@@ -2581,6 +2615,9 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 		bot.target = -1;
 		return 0; // a seat without a gun
 	}
+	if (!gunning) {
+		bot.seatWeapon = -1;
+	}
 	const float forward = gunning ? self.yaw + gunYaw : self.yaw;
 	float bestScore = 0, currentScore = 0;
 	int bestTarget = -1, bestSlot = 0;
@@ -2630,18 +2667,25 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 			}
 		};
 		if (gunning) {
-			const auto seats = m_world.vehicleSeats(self.vehicle);
-			if (static_cast<size_t>(self.seat) < seats.size()) {
-				const std::string& gun = seats[static_cast<size_t>(self.seat)].weapon;
+			// Each of the seat's weapons (seatArmament), as the kit's are.
+			slot = -1;
+			for (const auto& [index, gun] : seatArmament(self)) {
 				WeaponAi w = weaponAi(gun);
-				best = w.strength[static_cast<size_t>(targetType)];
-				maxRange = w.maxRange;
+				float score = w.strength[static_cast<size_t>(targetType)];
+				float range = w.maxRange;
 				if (!m_settings.weapons.count(lower(gun))) {
 					// No weaponTemplate for the gun (the vehicles' ai/Weapons.ai
 					// not run, as in the tests; the shipped vehicles have one):
 					// any target, out to 100 m.
-					best = std::max(best, 1.0f);
-					maxRange = std::max(maxRange, 100.0f);
+					score = std::max(score, 1.0f);
+					range = std::max(range, 100.0f);
+				}
+				if (score > 0) {
+					maxRange = std::max(maxRange, range);
+				}
+				if (score > best) {
+					best = score;
+					slot = index;
 				}
 			}
 		} else {
@@ -2675,7 +2719,7 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 		// Keep the current target, with the weapon that scores best on it
 		// (a sentry detonator scores nothing once its drone is out).
 		if (bestTarget == bot.target) {
-			bot.weaponSlot = bestSlot;
+			(gunning ? bot.seatWeapon : bot.weaponSlot) = bestSlot;
 		}
 		pickWeapon(bot, self, players);
 		planFire(bot, self, gunning);
@@ -2685,10 +2729,10 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 		bot.target = bestTarget;
 		bot.targetAcquired = m_time; // Bot::setTarget (0x10097af0)
 		// The reaction time (0x100777a0): (1 - skill)(1.5 + U[0,1]) s.
-		const WeaponAi w = weaponAi(weaponName(self, bestSlot));
+		const WeaponAi w = weaponAi(gunning ? seatWeaponName(self, bestSlot) : weaponName(self, bestSlot));
 		bot.triggerAt = m_time + (w.type == WeaponAi::CloseCombat ? 0.0f : (1 - m_settings.skill) * (1.5f + random()));
 	}
-	bot.weaponSlot = bestSlot;
+	(gunning ? bot.seatWeapon : bot.weaponSlot) = bestSlot;
 	pickWeapon(bot, self, players);
 	planFire(bot, self, gunning);
 	return 50;
@@ -2788,27 +2832,19 @@ float fire3dUnitScale(float summedStrength)
 // the knife's.
 void BotManager::planFire(Bot& bot, const GameWorld::PlayerInfo& self, bool gunning)
 {
-	if (bot.target == bot.planTarget && bot.weaponSlot == bot.planSlot) {
+	if (bot.target == bot.planTarget && (gunning ? bot.seatWeapon : bot.weaponSlot) == bot.planSlot) {
 		return;
 	}
 	const auto known = std::find_if(bot.known.begin(), bot.known.end(), [&](const Known& k) { return k.player == bot.target; });
 	if (known == bot.known.end()) {
 		return;
 	}
-	std::string gun;
-	if (gunning) {
-		const auto seats = m_world.vehicleSeats(self.vehicle);
-		if (static_cast<size_t>(self.seat) < seats.size()) {
-			gun = seats[static_cast<size_t>(self.seat)].weapon;
-		}
-	} else {
-		gun = weaponName(self, bot.weaponSlot);
-	}
+	const std::string gun = gunning ? seatWeaponName(self, bot.seatWeapon) : weaponName(self, bot.weaponSlot);
 	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight, 0};
 	const float dh = known->position.y + kChestHeight - eye.y;
 	bot.preferredRange = game::preferredRange(weaponAi(gun), m_settings.skill, random(), dh);
 	bot.planTarget = bot.target;
-	bot.planSlot = bot.weaponSlot;
+	bot.planSlot = gunning ? bot.seatWeapon : bot.weaponSlot;
 }
 
 // The weapon choice for the target BBFire settled on (0x10074ef0, called
@@ -2842,10 +2878,7 @@ void BotManager::pickWeapon(Bot& bot, const GameWorld::PlayerInfo& self, const s
 	const bool gunning = self.vehicle && !self.driving && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
 	std::vector<std::pair<int, std::string>> weapons;
 	if (gunning) {
-		const auto seats = m_world.vehicleSeats(self.vehicle);
-		if (static_cast<size_t>(self.seat) < seats.size()) {
-			weapons.push_back({-1, seats[static_cast<size_t>(self.seat)].weapon});
-		}
+		weapons = seatArmament(self);
 	} else if (!self.vehicle) {
 		weapons = armament(self);
 	}
@@ -2973,6 +3006,8 @@ void BotManager::pickWeapon(Bot& bot, const GameWorld::PlayerInfo& self, const s
 	bot.explosive = explosive;
 	if (chosen >= 0 && !self.vehicle) {
 		bot.weaponSlot = weapons[static_cast<size_t>(chosen)].first;
+	} else if (chosen >= 0 && gunning) {
+		bot.seatWeapon = weapons[static_cast<size_t>(chosen)].first;
 	}
 }
 
@@ -5162,9 +5197,35 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 		m_world.gunFrame(self.vehicle, self.seat, eye, hull); // as the aim: from the gun, in the hull's frame
 	}
 	std::string weaponTemplate;
+	int fireGroup = 0;
 	if (gunning) {
+		// The seat's chosen weapon: pressed on its own fire input (the AI
+		// weapon's slot 0x60, BF2142.exe 0x008927c0: the fire component's
+		// fireInput, BAPATrigger's button); one of the PIFire group that
+		// isn't active is taken first, by its item key when it can be
+		// selected, else by c_PIToggleWeapon (0x004d2a50).
 		const auto seats = m_world.vehicleSeats(self.vehicle);
-		weaponTemplate = static_cast<size_t>(self.seat) < seats.size() ? seats[static_cast<size_t>(self.seat)].weapon : "";
+		const int active = m_world.seatWeaponIndex(self.vehicle, self.seat);
+		const int chosen = bot.seatWeapon >= 0 ? bot.seatWeapon : active;
+		if (static_cast<size_t>(self.seat) < seats.size()) {
+			const GameWorld::SeatLayout& seat = seats[static_cast<size_t>(self.seat)];
+			if (chosen >= 0 && static_cast<size_t>(chosen) < seat.weapons.size()) {
+				const GameWorld::SeatWeapon& w = seat.weapons[static_cast<size_t>(chosen)];
+				weaponTemplate = w.weapon;
+				fireGroup = w.group;
+				if (w.group == 0 && chosen != active) {
+					if (w.selectable && w.itemIndex > 0) {
+						input.selectItem = bot.seatSelectTap ? 0 : w.itemIndex;
+					} else {
+						input.toggleWeapon = !bot.seatSelectTap;
+					}
+					bot.seatSelectTap = !bot.seatSelectTap; // a press, then a release
+					return;
+				}
+			} else {
+				weaponTemplate = seat.weapon;
+			}
+		}
 	} else if (self.vehicle) {
 		return; // a driver's guns are not aimed by the bots yet
 	} else {
@@ -5370,6 +5431,9 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 		input.fire = ready && !bot.tapped;
 	}
 	bot.tapped = input.fire;
+	if (fireGroup == 1) {
+		input.altFire = std::exchange(input.fire, false); // a PIAltFire weapon (the mechs' rockets)
+	}
 	// An empty magazine in hand on foot is reloaded here:
 	//  - a guided weapon's own plan (0x10078570, for a weapon whose +0x6c
 	//    isn't 0; the rewrite runs this plan for it) ends its sequence with

@@ -816,7 +816,14 @@ void LevelRenderer::collectParts(const LevelSources& sources, const world::Objec
 		}
 		Mat4 local = objectTransform(child.position, child.rotation) * relative;
 		world::Vec3 offset, rotation;
-		if (object != 0 && sources.partPose && sources.partPose(object, child.name, offset, rotation)) {
+		anim::Matrix bone;
+		if (object != 0 && sources.partBone && sources.partBone(object, child.name, bone)) {
+			// boneIndex (0x0063d470 -> the part's slot 0xe8): the bone's
+			// local matrix is the part's.
+			Mat4 boned;
+			std::copy(bone.begin(), bone.end(), boned.m.begin());
+			local = boned * relative;
+		} else if (object != 0 && sources.partPose && sources.partPose(object, child.name, offset, rotation)) {
 			// A Spring with rotateUV keeps its mesh unturned: 0x006cace0
 			// and 0x006b7261 skip the set rotation (0x00614b50); its
 			// texture turns instead (AnimatedUV.h).

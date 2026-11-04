@@ -912,6 +912,9 @@ void GameWorld::stepCrates(float seconds)
 				mend(body.object, vt);
 				for (size_t g = 0; g < body.guns.size(); ++g) {
 					refill(body.guns[g].weapon.get());
+					for (Body::Arm& arm : body.guns[g].arms) {
+						refill(arm.weapon.get());
+					}
 				}
 			}
 		}

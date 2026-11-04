@@ -2245,6 +2245,31 @@ net::PlayerOwnState HostedGame::ownState(int player) const
 			break;
 		}
 	}
+	// In a seat, the seat's three groups (0x005a98b0's group indices: each
+	// group's active weapon's place in the group's list, 0x005cc5e0's order).
+	if (info.alive && info.vehicle) {
+		const auto seats = m_round->vehicleSeats(info.vehicle);
+		if (info.seat >= 0 && static_cast<size_t>(info.seat) < seats.size()) {
+			const auto& weapons = seats[static_cast<size_t>(info.seat)].weapons;
+			for (int g = 0; g < 3; ++g) {
+				const int active = m_round->seatWeaponIndex(info.vehicle, info.seat, g);
+				if (active < 0 || static_cast<size_t>(active) >= weapons.size()) {
+					continue;
+				}
+				int place = 0;
+				for (int i = 0; i < active; ++i) {
+					place += weapons[static_cast<size_t>(i)].group == g ? 1 : 0;
+				}
+				net::PlayerOwnState::Weapon& w = s.weapons[g];
+				w.active = g == 0;
+				w.index = place;
+				if (const game::FireArm* arm = m_round->seatFireArm(info.vehicle, info.seat, active)) {
+					w.ammo = arm->roundsInMag();
+					w.magazines = arm->magsLeft();
+				}
+			}
+		}
+	}
 	return s;
 }
 

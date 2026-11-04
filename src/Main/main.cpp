@@ -7173,6 +7173,9 @@ int runGame(Options& options, Session& session)
 		sources.partTransforms = [&round](uint32_t object, std::vector<anim::Matrix>& parts) {
 			return round.partTransforms(object, parts);
 		};
+		sources.partBone = [&round](uint32_t object, const std::string& part, anim::Matrix& local) {
+			return round.partBone(object, part, local);
+		};
 		sources.partPose = [&round, &session, &ghostObjects](uint32_t object, const std::string& part, world::Vec3& offset,
 							   world::Vec3& rotation) {
 			if (round.partPose(object, part, offset, rotation)) {
@@ -7378,6 +7381,8 @@ int runGame(Options& options, Session& session)
 				input.aimPitch = in.aimPitchDegrees;
 				input.fire = in.fire;
 				input.altFire = in.altFire;
+				input.flareFire = in.flareFire;
+				input.toggleWeapon = in.toggleWeapon;
 				input.use = in.use;
 				input.toggleFireRate = in.toggleFireRate;
 				input.reload = in.reload;
@@ -7426,6 +7431,8 @@ int runGame(Options& options, Session& session)
 				input.aimPitch = in.aimPitchDegrees;
 				input.fire = in.fire;
 				input.altFire = in.altFire;
+				input.flareFire = in.flareFire;
+				input.toggleWeapon = in.toggleWeapon;
 				input.use = in.use;
 				input.toggleFireRate = in.toggleFireRate;
 				input.reload = in.reload;
@@ -7443,7 +7450,7 @@ int runGame(Options& options, Session& session)
 				playerCamera.setCrouch(in.crouch);
 				if (playerCamera.duckingDisablesInput()) {
 					input.throttle = input.strafe = input.turn = input.pitchAxis = input.rollAxis = 0;
-					input.fire = input.altFire = false;
+					input.fire = input.altFire = input.flareFire = false;
 				}
 				// Stance: crouch or lie while their keys are held. A spawn where
 				// only lying fits (the squad leader's scatter, 0x006c3340) starts

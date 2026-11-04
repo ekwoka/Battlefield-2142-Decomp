@@ -42,6 +42,8 @@ struct ViewerOptions {
 		bool sprint = false;
 		bool fire = false;
 		bool altFire = false; // the right button
+		bool flareFire = false; // held: c_PIFlareFire (X), a seat's active defence
+		bool toggleWeapon = false; // held: c_PIToggleWeapon (F), a seat's next weapon
 		bool use = false; // enter or leave a vehicle
 		bool toggleFireRate = false; // held: c_PIToggleFireRate (the weapon's next fire mode)
 		bool reload = false;         // held: c_PIReload (R), a new magazine on the press

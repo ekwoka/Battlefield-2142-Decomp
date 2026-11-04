@@ -559,6 +559,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.aimPitchDegrees = pitch * 57.29578f;
 				input.fire = c.pressed(map, "c_PIFire", down);
 				input.altFire = c.pressed(map, "c_PIAltFire", down);
+				input.flareFire = c.pressed(map, "c_PIFlareFire", down);
+				input.toggleWeapon = c.pressed(map, "c_PIToggleWeapon", down);
 				input.use = c.pressed(map, "c_PIUse", down);
 				input.toggleFireRate = c.pressed(map, "c_PIToggleFireRate", down);
 				input.reload = c.pressed(map, "c_PIReload", down);
@@ -582,7 +584,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.map3d = c.pressed(map, "c_GI3dMap", down);
 				input.yes = c.pressed(map, "c_GIYes", down);
 				input.no = c.pressed(map, "c_GINo", down);
-				for (int item = 0; item < 8; ++item) {
+				for (int item = 0; item < 9; ++item) {
 					if (c.pressed(map, "c_PIWeaponSelect" + std::to_string(item + 1), down)) {
 						input.item = item + 1;
 					}
@@ -603,6 +605,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.aimPitchDegrees = pitch * 57.29578f;
 				input.fire = (shown.mouseButtons() & SDL_BUTTON_LMASK) != 0 && !pointer;
 				input.altFire = (shown.mouseButtons() & SDL_BUTTON_RMASK) != 0 && !pointer;
+				input.flareFire = keys[SDL_SCANCODE_X];
+				input.toggleWeapon = keys[SDL_SCANCODE_F];
 				input.use = keys[SDL_SCANCODE_E];
 				input.reload = keys[SDL_SCANCODE_R];
 				input.scoreboard = keys[SDL_SCANCODE_TAB];

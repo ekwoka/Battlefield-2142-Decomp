@@ -641,39 +641,62 @@ last time (the old world in the new parent's frame, `0x006ad420` /
 `0x006ad2a0`, wrapped to ±180), within the bundle's limits unless both
 are 0 with a maxSpeed, the angles kept at `+0x1e4`. About 90 shipped
 bundles (EU_TANK_Cupola_Gun 0/0.5/0, EU_FAV_MachineGun_Base 0.7/0/0,
-EU_APC_base1 0.5/0/0, the seat cameras). The rewrite does the gunners'
-yaw bundle's yaw (`SeatLayout::ignoreParentYaw`, `stepGunner`); the
-pitch (the rewrite's gun pitch is the aim's) and the seat cameras' aren't:
-the gunner's pitch is set each tick from the look (`input.aimPitch`, in
-the hull's frame) and a seat camera's angles from the mouse, so taking
-back the hull's pitch needs an offset kept in the look itself (the
-camera's and the aim's, in main.cpp and PlayerCamera), not a turn of the
-bundle.
+EU_APC_base1 0.5/0/0; 21 pitch bundles at 0/0.7/0) and ten seat cameras
+(eu_fav_driver_camera and as_fav_PilotCamera 0/0.6/0, the as_apc pod
+cannons' 0/0.3/0). The rewrite does the gunners' yaw bundle's yaw from the
+hull's heading (`SeatLayout::ignoreParentYaw`, `stepGunner`); the pitch
+bundle's pitch from the hull's turn measured at the gun's aim (the aim's
+direction in the old hull seen from the new one, `GameWorld::parentTurn`,
+as `0x006ad420` / `0x006ad2a0` do with the matrices), kept as an offset on
+top of the look (`Body::Gun::pitchOffset`: the gunner's pitch is the
+look's, `input.aimPitch`, not a change, so the offset stays in the
+world's gun state, which the seat camera follows through the bundles,
+`partPose`), within the bundle's limits; and a seat camera's yaw and
+pitch, which the world keeps as the bundle's own angles (`Body::Look`,
+`stepSeatCamera`), within the camera axis' limits. A seat taken anew
+starts without an offset. The parent is taken as the hull (the bundles'
+own parents' turns, a yaw bundle under a turning hub, aren't separated).
 
-**Not rewritten among the vehicles' details:** `boneIndex` (SimpleObject
-template `+0x60`, slots `0xc8` / `0xcc`): the object's skeleton helper
-(`0x0063d340`, built when the template has a bundleSkeleton `+0x274`)
-keeps every descendant with a boneIndex (`0x0063d5e0`) and sets its local
-matrix to that bone of the bundle animation's skeleton each update
-(`0x0063d470` → slot `0xe8`), the walkers' legs and the deployables'
-moving parts (spawn_beacon's covers, the hubs, the sentry gun); the
-rewrite runs the walkers' bundleAnimationSystem but loads no
-bundleSkeleton. The update (`0x0063d470`) runs the system
-(`0x0063d2f0`), then gives each kept part (`+0xc` list) the record of its
-bone in the skeleton instance (`+0x24`'s `+4`, 0x48 bytes a bone) through
-the part's slot `0xe8` (its local matrix); `0x0063d5e0` keeps a part
-whose boneIndex (template slot `0xc8`) isn't −1 and walks children with
-`+0x44` empty. Still not rewritten: it needs the bundle skeletons loaded
-for the vehicles and the parts' matrices overridden by the pose in
-`partTransforms`. `autoUseAbility` (PlayerControlObject `+0x46a`, the 0xc4c5
+**boneIndex** (SimpleObject template `+0x60`, slots `0xc8` / `0xcc`): the
+object's skeleton helper (`0x0063d340`, built when the template has a
+bundleSkeleton `+0x274`) keeps every descendant with a boneIndex
+(`0x0063d5e0`) and sets its local matrix to that bone of the bundle
+animation's skeleton each update (`0x0063d470` → slot `0xe8`): the heavy
+mechs' pelvis, torso, legs, feet and toes (as_heavy_mech.ske, 36 nodes),
+eu_at's landing legs (eu_at.ske, boneIndex 0..6) and the deployables'
+moving parts (spawn_beacon's covers, the hubs, the sentry gun). The update
+(`0x0063d470`) runs the system (`0x0063d2f0`), whose skeleton instance's
+matrices (`0x008b8880`: each bone's local record at `+4`, 0x48 bytes,
+times its parent's world into `+0x10`) are then handed out: each kept
+part (`+0xc` list) gets its bone's local record through its slot `0xe8`;
+`0x0063d5e0` keeps a part whose boneIndex (template slot `0xc8`) isn't −1
+and walks children with `+0x44` empty. The shipped bundle skeletons' bones
+are all roots, so a bone's local is the object's frame. The system's
+messages (`0x0063ce30`) also have 0x40 from the landing gear
+(`0x00650010`: up with its up delay run out, or down with its down delay
+still running), which eu_at's root switch reads (message 64: the legs
+in). Rewritten: `stepObjectAnimation` runs any body's
+bundleAnimationSystem (not only the walkers'), loads its bundleSkeleton,
+poses it (`AnimationState::apply`) and keeps each bone part's matrix
+(`Body::boneParts`); `GameWorld::partBone` gives it and the renderer's
+part placement (`collectParts`, `LevelSources::partBone`) puts it in
+place of the template's placement (`Vehicles_BundleSkeletonPosesBoneParts`:
+the parked mech's torso at −0.01 against 0.58 standing). The deployables
+aren't bodies with an animation system here (their parts keep their
+placement); the simulation's seats and guns on a mech's torso don't ride
+the torso's bone.
+
+**Not rewritten among the vehicles' details:** `autoUseAbility`
+(PlayerControlObject `+0x46a`, the 0xc4c5
 interface's slot `0x13c` `0x005c6bd0`): its only reader is the help
 manager's tick (`0x00646cb0`, case `0x2e`, at `0x00646deb`): a vehicle's
 help popup shows only with it; it uses no ability (the HUD's).
 
 **Pilots' guns.** A pilot (a vehicle that flies) fires the seat's own
-GenericFireArm, fixed along the hull, with PIFire. The ground drivers'
-guns turn on the mouse in the original, which the rewrite's drivers spend
-on PIRoll: they aren't fired.
+GenericFireArms, fixed along the hull: PIFire's, PIAltFire's and the
+active defence's. The ground drivers' guns turn on the mouse in the
+original, which the rewrite's drivers spend on PIRoll: only their
+PIFlareFire weapon (the ads, no aim) is fired.
 
 **Spawned in the ground** (a deviation): the shipped spawners stand on the
 ground and spawn at their spot (`0x005aeb80`). The rewrite lifts a vehicle
@@ -683,9 +706,10 @@ the gunships and APCs on their pads.
 
 Not rewritten: the wing's liftRegulated, regulateToLift and
 wingToRegulatorRatio (no shipped Wing sets them, so they never act); the
-yaw/pitch/roll PCO regulators (no shipped vehicle sets them); the other
-bundle animation systems (eu_at, us_ag, the sentry gun, the deployables)
-aren't fed, as nothing of theirs reaches the simulation.
+yaw/pitch/roll PCO regulators (no shipped vehicle sets them). The other
+bundle animation systems run for the bodies that have them (eu_at's legs
+by its landing gear, us_ag's); the sentry gun's and the deployables'
+aren't fed.
 
 ### Mobile meshes against objects (0x006dc7b0, 0x006bb050)
 
@@ -929,6 +953,66 @@ wraps the map angle, `0x0078fc80`) and draw a second copy a period away to
 fill the gap; snapping ones (the weapon HUDs' movement arrows) stop at the
 node's edge less the snap offsets and swap in the snap textures; tilt
 values slide the strip sideways.
+
+**A seat's weapons.** Every GenericFireArm under a seat's
+PlayerControlObject (not under another seat's) registers with it in the
+tree's order: the add-weapon (interface `0xc4c5` slot `0x6c`,
+`0x005cc5e0`) gives the firearm its index (slot `0x1a0`), keeps it in the
+list at `+0x68` and, by its fire component's `fire.fireInput` (template
+`+0x50`, PIFire 8 by default; slot `0x38`), in one of three groups: PIFire
+at `+0x78`, PIAltFire (31) at `+0x88`, PIFlareFire (47) at `+0x98` (any
+other input joins none). Each group has one active weapon (`+0xa8` +
+group × 4; slot `0x78` gets it, slot `0x7c` `0x005c9840` sets it: the old
+one's disable, slot `0x1a8`, and the new one's enable, `0x1a4`: delayToUse,
+instantReloadOnEnable). The player's fire inputs (`0x004bda00`: PIFire bit
+8, PIAltFire bit 31, PIFlareFire bit 47) go as the fire event 6 (`0x004cc7a0`,
+the player's current input set first, slot `0x238`) to the control
+object, which hands it to the three active weapons (`0x005cacf0`); each
+firearm (`0x005c50e0`) fires only when the input is its fire component's
+fireInput (slot `0x114`) or altFireInput (`0x118`). So the heavy mechs'
+dumb rockets (PIAltFire), the APCs' EMP launchers, the IFV's laser-guided
+mine, the pod seats' launchers and the ads (PIFlareFire) fire on their
+own keys beside the selected gun. **Choosing** (`0x004d2a50`, run from the
+player's input `0x004bda00` for its control object):
+c_PIWeaponSelect1..9 (inputs 14..22) take, in each group, the weapon whose
+item index (slot `0x19c`: altItemIndex's override, else itemIndex) is the
+key's and that can be selected (slot `0x170`, `0x005c1150`: isSelectable,
+template `+0x31c`, and its ammo's usable test) and that the player may use
+(player slot `0x384`, not traced; every seat weapon in the rewrite); the
+key of the weapon already active sends it event `0xb`, the fire-rate
+toggle. Without a key, c_PIToggleWeapon (input 45) or a press of the
+seat's specialToggleWeaponInput (PCO template `+0x46c`, `0x40` none; the
+edge of `+0x14c`, `0x005c7f80`) moves each group with an active weapon to
+the next of its weapons sorted by item index (`0x004d2010` with
+`LAB_004cc640`: the item interface's slot `0x30`), round from the last,
+with no selectable test: as_ag's and us_ag's gunners (cannon itemIndex 1,
+GuidedMissileWeapon 2, both isSelectable 0) and the hover bike's gunner
+switch to their TV missiles on PIAltFire. While the special toggle input
+is held it fires nothing (`0x005c69a0` in `0x005c50e0`). toggleWeapon
+(template `+0x420`) has its executor and save only: no reader. Each
+group's first weapon in the tree's order starts active (the start isn't
+traced past the add-weapon; the ghosts' group indices, `0x00605b00`,
+take a server's). Rewritten: `SeatLayout::weapons` (`SeatWeapon`: group,
+item index, selectable, the per-weapon start, barrels, recoil, toggle
+camera, deviation, active defence), `Body::Gun`'s `arms` and `active`,
+`GameWorld::selectSeatWeapons`, `activateSeatWeapon`, `fireSeatWeapon`;
+`vehicleSeats` gives each seat's selected PIFire weapon as its
+`SeatWeapon` part (the HUD's GuiIndex, icons and crosshair, the seat
+camera's startCameraId, the camera recoil follow it). The shipped
+TV-guided launchers so start the projectile camera. The rewrite's ground
+drivers fire their PIFlareFire group only (the active defence; their
+guns aim with the mouse the rewrite spends on PIRoll); pilots all three.
+The item selection HUD the key opens (`0x0079c190`, the local player's)
+isn't opened for seats. **Bots** (AIDLL): the seat's armament is its
+weapons with a weaponTemplate (the Armament list `0x10075170`); the
+targets' loop and the weapon choice (`0x10074ef0`) score them as a kit's,
+and the trigger statement presses the chosen one's fire input (the AI
+weapon's slot `0x60`, BF2142.exe `0x008927c0`: the fire component's
+fireInput; BAPATrigger's button), so a PIAltFire weapon gets PIAltFire.
+A PIFire weapon that isn't active is taken first by its key when
+selectable, else by c_PIToggleWeapon (a rewrite stand-in: no shipped
+gunner seat has two weapons with a weaponTemplate, and the TV missiles
+and the ads have none, so bots never use them). `BotManager::seatArmament`.
 
 ### Fire modes, tracers, camera recoil, armour effects and leaving a seat
 
@@ -1199,10 +1283,9 @@ PostProduction's `TVEffect`: `PostEffects::tv`). Rewritten in
 `projectileCamera` (the seat's launch, `stepGunner`, the wire guidance),
 `PlayerCamera::view` (the view, no cockpit) and main.cpp's postEffects.
 The shipped launchers are their seats' second weapons (itemIndex 2,
-`isSelectable 0` on as_ag's), and the rewrite's seats fire their first
-firearm only, so in the shipped vehicles the projectile camera waits for
-the seats' weapon switching; a seat whose fired weapon has the flags gets
-the whole chain (`Vehicles_GunshipMissileCamera`). `targetObjectTemplate`
+`isSelectable 0` on as_ag's), taken by the seat's specialToggleWeaponInput
+(PIAltFire; see a seat's weapons above): the gunner's PIAltFire, then
+PIFire, launches the round and its camera (`Vehicles_GunshipMissileCamera`). `targetObjectTemplate`
 (LPTargetComp `+0x88`, UniqueTarget) is the object the guidance places at
 the steering point for a TTUnique seeker; the rewrite steers the round at
 the point itself, which is where the object would be.
@@ -6809,7 +6892,7 @@ Vehicles take damage through their armour settings:
   object (the sentry drone) neither turns nor fires above level 1. Only
   ActiveDefense ammo (`0x005d9560`) and camouflage (`0x005d9030`,
   `0x005d8ec0`) drain faster, × (level + 1).
-- **Active defence (ADS; not rewritten):** `ads_land` (ammo.protectionRadius
+- **Active defence (ADS):** `ads_land` (ammo.protectionRadius
   6: the APCs, tanks, heavy mechs) and `ads_air` (10: the gunships, the AT
   walkers), GenericFireArms on PIFlareFire at 12 rounds a minute, one
   round, a 12 s reload without a player, ActiveDefenseAmmoComp with
@@ -6828,9 +6911,15 @@ Vehicles take damage through their armour settings:
   its collision at that point with material 2142 (`0x006c0430`), so it
   detonates on the shield and never reaches the hull. The ammo's
   can-fire test (`0x005d9560`) defers to the vehicle's slot 0x14c; EMP
-  drains it × (level + 1). The rewrite has no PIFlareFire seat weapons,
-  so none of this is done (about 200 lines: the input, the shield on the
-  body, the projectiles' sphere test before the mesh test, the effect).
+  drains it × (level + 1). Rewritten: the PIFlareFire group's weapon
+  (a seat's weapons, under Seats) fires on PIFlareFire (X), not while the
+  EMP level is up; its round raises `Body::shieldRadius` for one round's
+  interval (`GameWorld::raiseShield`; the root's radius is its collision
+  points' farthest); a projectile with activeDefenseEnabled entering the
+  sphere from outside is hit there with the shield's material (2142:
+  damageMod 0, e_ActiveDef, the force-field sounds), goes off there and
+  doesn't penetrate (`stepProjectiles`). The bots never fire it (the ads
+  have no aiTemplate).
 - **Critical damage:** below `armor.criticalDamage` a vehicle burns down at
   `hpLostWhileCriticalDamage` a second (FAV: 18 below 151, out in 5.6 s from
   100).

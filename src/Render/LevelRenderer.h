@@ -155,6 +155,9 @@ struct LevelSources {
 	// Parts the game moves (wheels, steering): an offset and yaw/pitch/roll
 	// before the part's placement in its parent; asked each frame.
 	std::function<bool(uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation)> partPose;
+	// Parts posed by the object's bundle skeleton (boneIndex): the part's
+	// whole local matrix in its parent's frame, in place of its placement.
+	std::function<bool(uint32_t object, const std::string& part, anim::Matrix& local)> partBone;
 	// The HUD drawn over the frame (quads in its 800 x 600 screen), asked
 	// each frame with the seconds since the last one.
 	std::function<std::vector<hud::HudQuad>(float seconds)> overlay;

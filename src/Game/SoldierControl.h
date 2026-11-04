@@ -22,6 +22,8 @@ struct SoldierInput {
 	SoldierPose pose = SoldierPose::Stand;
 	bool fire = false;  // PIFire
 	bool altFire = false; // PIAltFire: sets off the soldier's C4
+	bool flareFire = false; // PIFlareFire (input 47, X): a seat's PIFlareFire weapon (the active defence)
+	bool toggleWeapon = false; // c_PIToggleWeapon (input 45, F), held: a seat's next weapon on a press
 	float aimPitch = 0; // degrees, up positive
 	bool use = false;   // PIUse: enter or leave a vehicle (on press)
 	bool toggleFireRate = false; // c_PIToggleFireRate (input 46), held: the weapon's next fire mode on a press

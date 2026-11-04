@@ -406,7 +406,19 @@ HudWorld::Weapon RemoteHudWorld::heldWeapon() const
 		// A seat's gun (its template's weapon).
 		const auto seats = m_round.vehicleSeats(me.vehicle);
 		if (me.seat >= 0 && static_cast<size_t>(me.seat) < seats.size()) {
-			w.weapon = m_round.templates().find(seats[static_cast<size_t>(me.seat)].weapon);
+			const auto& seat = seats[static_cast<size_t>(me.seat)];
+			w.weapon = m_round.templates().find(seat.weapon);
+			// The server's PIFire group's active weapon (its place in the group).
+			const net::ControlState* state = m_world.controlState();
+			if (state && state->hasOwn && state->own.weapons[0].index >= 0) {
+				int place = 0;
+				for (const auto& candidate : seat.weapons) {
+					if (candidate.group == 0 && place++ == state->own.weapons[0].index) {
+						w.weapon = m_round.templates().find(candidate.weapon);
+						break;
+					}
+				}
+			}
 		}
 	} else if (const world::Object* kit = m_round.objects().find(me.kit); kit && kit->objectTemplate()) {
 		// The kit's firearm in the selected slot (the soldier's mask 0x2000;

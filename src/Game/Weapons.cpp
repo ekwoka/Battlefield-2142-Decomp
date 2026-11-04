@@ -56,6 +56,7 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	s.name = t.name();
 	s.damage = number(t, "damage", s.damage);
 	s.hitImpactModifier = number(t, "hitImpactModifier", s.hitImpactModifier);
+	s.activeDefenseEnabled = number(t, "activeDefenseEnabled", 0) != 0;
 	s.minDamage = number(t, "minDamage", s.minDamage);
 	s.distToStartLoseDamage = number(t, "distToStartLoseDamage", s.distToStartLoseDamage);
 	s.distToMinDamage = number(t, "distToMinDamage", s.distToMinDamage);

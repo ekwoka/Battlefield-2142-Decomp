@@ -793,6 +793,10 @@ private:
 		// Fire.
 		int target = -1;
 		int weaponSlot = 0;
+		// At a seat: the chosen one of the seat's weapons (an index into its
+		// SeatLayout::weapons, -1 the active one).
+		int seatWeapon = -1;
+		bool seatSelectTap = false; // its selection key pressed last execution
 		float targetAcquired = 0;
 		float triggerAt = 0;      // when the trigger may first be pulled
 		float preferredRange = 0; // the fighting distance kept
@@ -1118,6 +1122,12 @@ private:
 	// aiTemplate that is a weaponTemplate (with the AI scripts loaded; all
 	// of it without them, the tests' built-in rifle stand-in).
 	std::vector<std::pair<int, std::string>> armament(const GameWorld::PlayerInfo& self) const;
+	// A seat's armament (the Armament list at 0x10075170 over the bot's
+	// object's weapons): its weapons whose aiTemplate names a
+	// weaponTemplate, by index into the seat's SeatLayout::weapons; without
+	// the AI scripts (the tests) the seat's active weapon alone.
+	std::vector<std::pair<int, std::string>> seatArmament(const GameWorld::PlayerInfo& self) const;
+	std::string seatWeaponName(const GameWorld::PlayerInfo& self, int index) const; // -1: the active one
 	std::string weaponName(const GameWorld::PlayerInfo& self, int slot) const;
 	float projectileSpeed(const std::string& weapon) const;
 	// The ControlInfo gains of a player's control object (its seat's

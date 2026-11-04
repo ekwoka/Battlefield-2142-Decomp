@@ -41,6 +41,10 @@ struct ProjectileSettings {
 	// 0x006c1df0 -> armour slot 0xe8), it scales the death ragdoll's hit
 	// push for a tick (GameWorld::startRagDoll).
 	float hitImpactModifier = 1;
+	// activeDefenseEnabled (+0x336, 25 shipped: the AA, AV and TV-guided
+	// missiles and some guns' rounds): it goes off on an active defence's
+	// shield (0x006c07a0, see stepProjectiles).
+	bool activeDefenseEnabled = false;
 	float minDamage = -1;
 	float distToStartLoseDamage = 0;
 	float distToMinDamage = 0;
