@@ -73,7 +73,7 @@ void SprintStamina::update(bool blocked, float recoverDelay, float seconds)
 	m_requested = false;
 }
 
-int soldierSpeedIndex(SoldierPose pose, bool sprinting)
+int soldierSpeedIndex(SoldierPose pose, bool sprinting, bool zoomed)
 {
 	switch (pose) {
 	case SoldierPose::Crouch:
@@ -84,8 +84,11 @@ int soldierSpeedIndex(SoldierPose pose, bool sprinting)
 		return sprinting ? 6 : 5;
 	case SoldierPose::Stand:
 	default:
-		// (Index 2, 1.5 m/s, is for a slowed state not rewritten yet.)
-		return sprinting ? 4 : 3;
+		// 0x00586020: sprinting (interface slot 0x100) 4; else 2 (1.5 m/s)
+		// when 0x00585e90 says the item in hand is zoomed (interface 0x94c0
+		// slot 0x12c -> its zoom component +0x1bc, 0xc506, slot 0xa0: the
+		// zoom index +0x1c not 0), otherwise 3.
+		return sprinting ? 4 : zoomed ? 2 : 3;
 	}
 }
 
@@ -158,7 +161,7 @@ void SoldierControl::update(const SoldierInput& input, physics::SoldierBody& bod
 	const float yaw = body.yawDegrees * 3.14159265f / 180.0f;
 	const physics::Vec3 forward {std::sin(yaw), 0, std::cos(yaw)};
 	const physics::Vec3 right {std::cos(yaw), 0, -std::sin(yaw)};
-	const float speed = soldierSpeed(soldierSpeedIndex(input.pose, sprinting)); // +0x310 (0x00586020)
+	const float speed = soldierSpeed(soldierSpeedIndex(input.pose, sprinting, m_zoomed)); // +0x310 (0x00586020)
 	// The jump (0x0058a6d0): PIAction under 0.001 is none; none while the
 	// get-up time runs or swimming, nor unless standing.
 	m_jumped = false;

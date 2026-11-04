@@ -111,6 +111,24 @@ bool BotManager::scriptGoal(int player, ai::Goal goal)
 	return true;
 }
 
+bool BotManager::giveOrder(int player, const std::string& behaviour, const std::string& modifierSet)
+{
+	const auto bot = m_bots.find(player);
+	const auto& names = m_settings.behaviours;
+	if (bot == m_bots.end() || std::find(names.begin(), names.end(), behaviour) == names.end()
+		|| !m_settings.modifiers.count(modifierSet)) {
+		return false;
+	}
+	m_orders[player] = behaviour + " " + modifierSet;
+	return false; // the bot's +0x50 not set: 0x10098b80 refuses it
+}
+
+std::string BotManager::lastOrder(int player) const
+{
+	const auto it = m_orders.find(player);
+	return it != m_orders.end() ? it->second : std::string();
+}
+
 bool BotManager::scriptMoveTo(int player, float radius, const physics::Vec3& at)
 {
 	GameWorld::PlayerInfo info;
@@ -202,61 +220,413 @@ float BotManager::degenerationOf(const GameWorld::PlayerInfo& player) const
 	return it != m_settings.aiTemplates.end() ? it->second.degeneration : 0.0f;
 }
 
-// What the sides' bots know of the enemy soldiers: a bot that sees one now
-// (its memory item in sight, by itself or a vehicle mate) senses it; the
-// time of the last sighting stays after the bots forget it. A soldier that
-// died is a new unit when it spawns again.
+const GameWorld::PlayerInfo* BotManager::playerOf(int id) const
+{
+	const auto it = m_playerIndex.find(id);
+	return it != m_playerIndex.end() && it->second < m_players.size() ? &m_players[it->second] : nullptr;
+}
+
+int BotManager::vehicleTeam(uint32_t vehicle) const
+{
+	if (const auto it = m_vehicleTeams.find(vehicle); it != m_vehicleTeams.end()) {
+		return it->second; // those aboard
+	}
+	const world::Object* o = m_world.objects().find(vehicle);
+	return o ? o->team() : 0;
+}
+
+// The side's AI object's update (vtbl 0x10118838 slot 3, 0x100a9e70):
+// within allowedTimeDiff (the template's +0x10, the object's +0xc) of the
+// last full update (+0x20) only the stamp (+0x48) moves. A full update
+// copies the position while no sensor senses it (+0xa8 at 0), the team
+// (+0xa0, adaptor slot 0x120) and the capability (+0x44, 0x100aa420), and
+// stamps +0x20. Hearing forces one (0x100a9bb0 sets +0x20 to -1 first).
+void BotManager::refreshKnowledge(Knowledge& k, float allowedTimeDiff, float health, const physics::Vec3& live, bool force)
+{
+	if (!force && k.updatedAt + allowedTimeDiff >= m_time) {
+		return;
+	}
+	if (!k.sensed) {
+		k.position = live;
+		k.hasPosition = true;
+	}
+	k.health = health;
+	k.updatedAt = m_time;
+}
+
+// What the sides know (the AI objects of BF2142.exe 0x008a2f00, one per
+// side for each enemy unit): a unit is sensed while one of the side's bots
+// has it in sight and for 2 s after it lost it (the memory pass 0x100ee430
+// counts the sensor down, slot 6 0x100aa0f0, once the item has been out of
+// sight over 2 s); the count reaching 0 copies the unit's position and
+// matrix (+0x54, +0x60), where the side then places it (slot 0x2c,
+// 0x100a9b20; the information grid, slot 0x34). Each sighting is an update
+// (slot 3, from 0x100ed2c0 and 0x100ee430), throttled by allowedTimeDiff.
+// Soldiers by their memory items; vehicles by the bots' sightings of them
+// or of anyone aboard (a vehicle's seats' sightings are its own, 0x100a8ce0).
+// A soldier that died is a new unit when it spawns again.
 void BotManager::updateKnowledge()
 {
-	for (int team = 1; team <= 2; ++team) {
-		for (auto& [id, k] : m_knowledge[team]) {
-			k.sensed = false;
+	std::map<int64_t, bool> sensedNow[3];
+	std::map<int64_t, float> seenAt[3];
+	const auto note = [&](int team, int64_t key, float seen, bool sensed) {
+		float& s = seenAt[team].try_emplace(key, -1e9f).first->second;
+		s = std::max(s, seen);
+		bool& now = sensedNow[team][key];
+		now = now || sensed;
+	};
+	std::map<int, uint32_t> vehicleOf;
+	for (const GameWorld::PlayerInfo& p : m_players) {
+		if (p.alive && p.vehicle) {
+			vehicleOf[p.id] = p.vehicle;
 		}
 	}
 	for (const auto& [id, bot] : m_bots) {
-		GameWorld::PlayerInfo self;
-		if (!m_world.playerInfo(id, self) || self.team < 1 || self.team > 2 || !self.alive) {
+		const GameWorld::PlayerInfo* me = playerOf(id);
+		if (!me || me->team < 1 || me->team > 2 || !me->alive) {
 			continue;
 		}
+		const GameWorld::PlayerInfo& self = *me;
 		for (const Known& known : bot.known) {
 			if (!known.everSeen) {
 				continue;
 			}
-			Knowledge& k = m_knowledge[self.team][known.player];
-			k.lastSeen = std::max(k.lastSeen, known.seen);
-			k.sensed = k.sensed || known.lostAt < 0;
+			const bool sensed = known.lostAt < 0 || m_time - known.lostAt <= 2;
+			note(self.team, known.player, known.seen, sensed);
+			if (const auto v = vehicleOf.find(known.player); v != vehicleOf.end()) {
+				note(self.team, vehicleKey(v->second), known.seen, sensed);
+			}
+		}
+		for (const auto& [vehicle, known] : bot.knownVehicles) {
+			if (known.seen > -1e8f) {
+				note(self.team, vehicleKey(vehicle), known.seen, known.lostAt < 0 || m_time - known.lostAt <= 2);
+			}
 		}
 	}
+	const auto liveOf = [this](int64_t key, physics::Vec3& at, float& health, std::string& ai) {
+		if (key >= 0) {
+			const GameWorld::PlayerInfo* found = playerOf(static_cast<int>(key));
+			if (!found || !found->alive) {
+				return false;
+			}
+			const GameWorld::PlayerInfo& p = *found;
+			at = p.position;
+			health = healthOf(p.soldier);
+			const world::Object* soldier = m_world.objects().find(p.soldier);
+			ai = soldier && soldier->objectTemplate() ? aiTemplateOf(soldier->objectTemplate()->name()) : std::string();
+			return true;
+		}
+		const uint32_t vehicle = static_cast<uint32_t>(-(key + 1));
+		for (const GameWorld::VehicleInfo& v : m_vehicles) {
+			if (v.object == vehicle) {
+				at = v.position;
+				health = healthOf(vehicle);
+				const world::Object* o = m_world.objects().find(vehicle);
+				ai = o && o->objectTemplate() ? aiTemplateOf(o->objectTemplate()->name()) : std::string();
+				return true;
+			}
+		}
+		return false;
+	};
 	for (int team = 1; team <= 2; ++team) {
+		for (const auto& [key, seen] : seenAt[team]) {
+			m_knowledge[team].try_emplace(key);
+			(void)seen;
+		}
 		for (auto it = m_knowledge[team].begin(); it != m_knowledge[team].end();) {
-			GameWorld::PlayerInfo p;
-			it = m_world.playerInfo(it->first, p) && p.alive ? std::next(it) : m_knowledge[team].erase(it);
+			physics::Vec3 live;
+			float health = 1;
+			std::string ai;
+			if (!liveOf(it->first, live, health, ai)) {
+				it = m_knowledge[team].erase(it);
+				continue;
+			}
+			Knowledge& k = it->second;
+			const auto s = seenAt[team].find(it->first);
+			const bool sensed = s != seenAt[team].end() && sensedNow[team][it->first];
+			if (s != seenAt[team].end() && s->second > k.lastSeen) {
+				// A new sighting: the update (slot 3), then the count.
+				const auto t = m_settings.aiTemplates.find(lowerCase(ai));
+				refreshKnowledge(k, t != m_settings.aiTemplates.end() ? t->second.allowedTimeDiff : 0.0f, health, live, false);
+				k.lastSeen = s->second;
+			}
+			if (k.sensed && !sensed) {
+				k.position = live; // the count at 0 (0x100aa0f0)
+				k.hasPosition = true;
+			}
+			k.sensed = sensed;
+			if (sensed) {
+				k.position = live;
+				k.hasPosition = true;
+			}
+			++it;
 		}
 	}
 }
 
-float BotManager::certainty(int team, int player) const
+float BotManager::knowledgeCertainty(int team, int64_t key, const std::string& aiTemplate) const
 {
-	GameWorld::PlayerInfo p;
-	if (!m_world.playerInfo(player, p)) {
-		return 0;
-	}
-	if (p.team == team || p.team < 1 || p.team > 2 || team < 1 || team > 2) {
-		return 1;
-	}
 	// commonKnowledge (the template's +0x18): one object for every side,
 	// the owner's static kind.
-	if (const world::Object* soldier = m_world.objects().find(p.soldier); soldier && soldier->objectTemplate()) {
-		const auto t = m_settings.aiTemplates.find(lowerCase(aiTemplateOf(soldier->objectTemplate()->name())));
-		if (t != m_settings.aiTemplates.end() && t->second.commonKnowledge) {
-			return 1;
-		}
+	const auto t = m_settings.aiTemplates.find(lowerCase(aiTemplate));
+	if (t != m_settings.aiTemplates.end() && t->second.commonKnowledge) {
+		return 1;
 	}
-	const auto it = m_knowledge[team].find(player);
+	const auto it = m_knowledge[team].find(key);
 	if (it == m_knowledge[team].end()) {
 		return 0;
 	}
-	return ai::knowledgeCertainty(it->second.sensed, m_time - it->second.lastSeen, degenerationOf(p));
+	const float degeneration = t != m_settings.aiTemplates.end() ? t->second.degeneration : 0.0f;
+	return ai::knowledgeCertainty(it->second.sensed, m_time - it->second.lastSeen, degeneration);
+}
+
+float BotManager::certainty(int team, int player) const
+{
+	GameWorld::PlayerInfo info;
+	const GameWorld::PlayerInfo* found = playerOf(player);
+	if (!found && m_world.playerInfo(player, info)) {
+		found = &info;
+	}
+	if (!found) {
+		return 0;
+	}
+	const GameWorld::PlayerInfo& p = *found;
+	if (p.team == team || p.team < 1 || p.team > 2 || team < 1 || team > 2) {
+		return 1;
+	}
+	const world::Object* soldier = m_world.objects().find(p.soldier);
+	return knowledgeCertainty(team, player,
+		soldier && soldier->objectTemplate() ? aiTemplateOf(soldier->objectTemplate()->name()) : std::string());
+}
+
+float BotManager::vehicleCertainty(int team, uint32_t vehicle) const
+{
+	const int owner = vehicleTeam(vehicle);
+	if (owner == team || owner < 1 || owner > 2 || team < 1 || team > 2) {
+		return 1; // its own side's or neutral: the static kind
+	}
+	const world::Object* o = m_world.objects().find(vehicle);
+	return knowledgeCertainty(team, vehicleKey(vehicle),
+		o && o->objectTemplate() ? aiTemplateOf(o->objectTemplate()->name()) : std::string());
+}
+
+bool BotManager::knownPosition(int team, int player, physics::Vec3& at) const
+{
+	GameWorld::PlayerInfo info;
+	const GameWorld::PlayerInfo* found = playerOf(player);
+	if (!found && m_world.playerInfo(player, info)) {
+		found = &info;
+	}
+	if (!found || team < 1 || team > 2) {
+		return false;
+	}
+	const GameWorld::PlayerInfo& p = *found;
+	if (p.team == team || p.team < 1 || p.team > 2) {
+		at = p.position;
+		return true;
+	}
+	if (const world::Object* soldier = m_world.objects().find(p.soldier); soldier && soldier->objectTemplate()) {
+		const auto t = m_settings.aiTemplates.find(lowerCase(aiTemplateOf(soldier->objectTemplate()->name())));
+		if (t != m_settings.aiTemplates.end() && t->second.commonKnowledge) {
+			at = p.position; // one object for all: live
+			return true;
+		}
+	}
+	const auto it = m_knowledge[team].find(player);
+	if (it == m_knowledge[team].end() || !it->second.hasPosition) {
+		return false;
+	}
+	at = it->second.sensed ? p.position : it->second.position;
+	return true;
+}
+
+std::vector<uint32_t> BotManager::heardVehicles(int player) const
+{
+	std::vector<uint32_t> out;
+	const auto it = m_bots.find(player);
+	if (it != m_bots.end()) {
+		for (const auto& [vehicle, known] : it->second.knownVehicles) {
+			if (known.heardAt > -1e8f) {
+				out.push_back(vehicle);
+			}
+		}
+	}
+	return out;
+}
+
+// Hearing. The dispatcher (BotManager 0x100ca280, its share of the AI's
+// budget: 0.025, case 3 of 0x100ca590) walks the AI objects round robin;
+// each with a team (adaptor slot 0x120) and an Armament or Mobile part
+// makes a sound sphere (hearingReach), and every bot of another team
+// within it (3-D), not dead (slot 0xb8) or slot 0x18c, is told (bot slot
+// 0x164 = 0x100969b0, not for a scripted bot, +0x264) -> 0x100ec100: not
+// within 1.5 s of the bot's own last round (+0xc0, 0x10097a60 from the
+// rounds' event 0x1004e910), not its own object, not its team, and a
+// soldier source only for a soldier listener (the listener's flag bit 9);
+// then the roll (0x100ea820, hearingOdds). Heard: the memory item gets
+// flag 1 and the source's position (0x100ea620), the side's object the
+// certainty max(p, 0.1) (slot 2, 0x100a9bb0: heardLastSeen), and the item
+// goes on the re-hearing list (0x100ec930: re-rolled, dropped 30 s after
+// the last success). The listener is the bot's controlled object: on foot
+// its soldier, at the wheel the vehicle, at a gun the seat's object, and a
+// listener with a Mobile part never succeeds (hearingOdds), so of the
+// shipped templates only the gunners' seats without one hear, and as they
+// aren't soldiers only units that aren't soldiers: vehicles. A heard item
+// has flag 1 only, which the fire behaviours' target loops pass over
+// (they want flag 2 or 4, 0x1007e1b0's & 6): hearing feeds the side's
+// knowledge. The rewrite runs the pass every tick over every unit, the
+// weapon's "taken in hand" stamp (0x008a6d80) from the players' weapon in
+// hand (a vehicle's from anyone aboard).
+void BotManager::hear()
+{
+	struct Source {
+		int team = 0;
+		physics::Vec3 at;
+		bool soldier = false;
+		bool weapon3 = false, weapon5 = false;
+		float weaponSphere = 50;
+		float mobileSphere = 0;
+		float health = 1;
+		int64_t key = 0;
+		uint32_t vehicle = 0;
+		std::string ai;
+	};
+	std::vector<Source> sources;
+	const auto weaponOf = [this](const GameWorld::PlayerInfo& p, Source& s) {
+		const auto held = m_inHand.find(p.id);
+		if (held == m_inHand.end() || held->second.weapon.empty()) {
+			return;
+		}
+		const float age = m_time - held->second.since;
+		if (age < 5) {
+			const float sphere = weaponAi(held->second.weapon).soundSphere;
+			s.weaponSphere = s.weapon5 ? std::max(s.weaponSphere, sphere) : sphere;
+			s.weapon3 = s.weapon3 || age < 3;
+			s.weapon5 = true;
+		}
+	};
+	for (const GameWorld::PlayerInfo& p : m_players) {
+		if (!p.alive || p.vehicle || p.team < 1 || p.team > 2) {
+			continue;
+		}
+		Source s;
+		s.team = p.team;
+		s.at = p.position;
+		s.soldier = true;
+		s.key = p.id;
+		s.health = healthOf(p.soldier);
+		const world::Object* soldier = m_world.objects().find(p.soldier);
+		s.ai = soldier && soldier->objectTemplate() ? aiTemplateOf(soldier->objectTemplate()->name()) : std::string();
+		s.mobileSphere = soundSphereRadius(m_settings.plugin(s.ai, "Mobile"), std::sqrt(physics::lengthSquared(p.velocity)));
+		weaponOf(p, s);
+		sources.push_back(s);
+	}
+	for (const GameWorld::VehicleInfo& v : m_vehicles) {
+		Source s;
+		s.team = vehicleTeam(v.object);
+		if (s.team < 1 || s.team > 2 || !v.working) {
+			continue;
+		}
+		s.at = v.position;
+		s.vehicle = v.object;
+		s.key = vehicleKey(v.object);
+		s.health = healthOf(v.object);
+		const world::Object* o = m_world.objects().find(v.object);
+		s.ai = o && o->objectTemplate() ? aiTemplateOf(o->objectTemplate()->name()) : std::string();
+		s.soldier = (m_settings.typeFlags(s.ai) & kITSoldier) != 0;
+		s.mobileSphere = soundSphereRadius(m_settings.plugin(s.ai, "Mobile"), std::sqrt(physics::lengthSquared(v.velocity)));
+		for (const GameWorld::PlayerInfo& p : m_players) {
+			if (p.alive && p.vehicle == v.object) {
+				weaponOf(p, s);
+			}
+		}
+		sources.push_back(s);
+	}
+	struct Listener {
+		Bot* bot = nullptr;
+		const GameWorld::PlayerInfo* self = nullptr;
+		bool soldier = true;
+		const AiPlugin* mobile = nullptr;
+		float speed = 0;
+	};
+	std::vector<Listener> listeners;
+	for (auto& [id, bot] : m_bots) {
+		const GameWorld::PlayerInfo* self = playerOf(id);
+		if (!self || !self->alive || self->team < 1 || self->team > 2 || m_deactivated.count(id) || m_time - bot.firedAt < 1.5f) {
+			continue;
+		}
+		// The listener's controlled object (slot 0xcc).
+		Listener l;
+		l.bot = &bot;
+		l.self = self;
+		std::string ai;
+		physics::Vec3 velocity = self->velocity;
+		if (self->vehicle) {
+			const world::Object* o = m_world.objects().find(self->vehicle);
+			ai = o && o->objectTemplate() ? aiTemplateOf(o->objectTemplate()->name()) : std::string();
+			if (!self->driving) {
+				const std::vector<GameWorld::SeatLayout> seats = m_world.vehicleSeats(self->vehicle);
+				if (self->seat >= 0 && static_cast<size_t>(self->seat) < seats.size()) {
+					if (std::string seatAi = aiTemplateOf(seats[static_cast<size_t>(self->seat)].name); !seatAi.empty()) {
+						ai = seatAi;
+					}
+				}
+			}
+			for (const GameWorld::VehicleInfo& v : m_vehicles) {
+				velocity = v.object == self->vehicle ? v.velocity : velocity;
+			}
+			l.soldier = (m_settings.typeFlags(ai) & kITSoldier) != 0;
+		} else if (const world::Object* soldier = m_world.objects().find(self->soldier); soldier && soldier->objectTemplate()) {
+			ai = aiTemplateOf(soldier->objectTemplate()->name());
+		}
+		l.mobile = m_settings.plugin(ai, "Mobile");
+		l.speed = std::sqrt(physics::lengthSquared(velocity));
+		listeners.push_back(l);
+	}
+	for (Source& s : sources) {
+		const float reach = hearingReach(s.weapon3, s.weaponSphere, s.mobileSphere);
+		if (reach <= 0 || s.health <= 0) {
+			continue;
+		}
+		for (const Listener& l : listeners) {
+			const GameWorld::PlayerInfo& self = *l.self;
+			if (self.team == s.team || (s.vehicle && self.vehicle == s.vehicle) || (!l.soldier && s.soldier)) {
+				continue;
+			}
+			const float d2 = physics::lengthSquared(s.at - self.position);
+			if (d2 > reach * reach) {
+				continue;
+			}
+			float p = 0;
+			const float odds = hearingOdds(std::sqrt(d2), s.weapon5, s.weaponSphere, s.mobileSphere, l.mobile, l.speed, p);
+			if (odds <= 0 || !(random() <= odds)) {
+				continue;
+			}
+			if (s.vehicle) {
+				l.bot->knownVehicles[s.vehicle].heardAt = m_time;
+			}
+			// The side's object: certainty max(p, 0.1) (0x100317e0).
+			const float c = std::max(p, 0.1f);
+			if (knowledgeCertainty(self.team, s.key, s.ai) < c) {
+				Knowledge& k = m_knowledge[self.team][s.key];
+				const auto t = m_settings.aiTemplates.find(lowerCase(s.ai));
+				refreshKnowledge(k, 0, s.health, s.at, true);
+				k.position = s.at;
+				k.hasPosition = true;
+				k.lastSeen = heardLastSeen(m_time, c, t != m_settings.aiTemplates.end() ? t->second.degeneration : 0.0f);
+			}
+		}
+	}
+	// The re-hearing list's 30 s (0x100ec930: an item no longer heard is
+	// dropped 30 s after it last was).
+	for (auto& [id, bot] : m_bots) {
+		for (auto it = bot.knownVehicles.begin(); it != bot.knownVehicles.end();) {
+			if (it->second.heardAt > -1e8f && m_time - it->second.heardAt > 30) {
+				it->second.heardAt = -1e9f;
+			}
+			it = it->second.heardAt <= -1e8f && it->second.seen <= -1e8f ? bot.knownVehicles.erase(it) : std::next(it);
+		}
+	}
 }
 
 // --- The commands ---
@@ -266,7 +636,7 @@ void registerBotScriptMethods(Console& console, BotSettings& settings)
 	const uint32_t access = ConsoleAccess::Anyone;
 	BotSettings* s = &settings;
 
-	// aiSettings.* (the settings object; the execute slots 0x1000ade0..
+	// aiSettings.* (the settings object; the execute slots AIDLL 0x1000ade0..
 	// 0x10011570 call its modifier vtable 0x10114828).
 	bindMethod(console, "aiSettings.setMaxNAutoControllers", access, [s](int n) { s->maxAutoControllers = n; });
 	bindMethod(console, "aiSettings.maxBotsIncludeHumans", access, [s](bool on) { s->maxBotsIncludeHumans = on; });
@@ -381,7 +751,7 @@ void registerBotScriptMethods(Console& console, BotSettings& settings)
 		return total > 0 ? s->sensingQuotient[0] / total : 0.0;
 	});
 
-	// autoControllerTemplate.* (0x10002210..0x100049b0; the template
+	// autoControllerTemplate.* (AIDLL 0x10002210..0x100049b0; the template
 	// manager DAT_101394e8). A property before any create is lost.
 	bindMethod(console, "autoControllerTemplate.create", access, [s](std::string name) {
 		s->autoControllers[name] = BotSettings::AutoControllerTemplate {};
@@ -623,6 +993,11 @@ void registerBotScriptMethods(Console& console, BotSettings& settings)
 			}
 		},
 		4);
+	bindMethod(console, "ai.botGiveOrder", access, [s](int bot, std::string behaviour, std::string set) {
+		if (s->manager) {
+			s->manager->giveOrder(bot, behaviour, set);
+		}
+	});
 	bindMethod(console, "ai.deactivateBot", access, [s](int bot) { return s->manager && s->manager->deactivate(bot); });
 	bindMethod(console, "ai.updateBot", access, [s](int bot) {
 		if (s->manager) {

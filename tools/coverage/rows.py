@@ -12,9 +12,13 @@ RendDX9_ori.dll.console.csv is one of:
                  literal in src (case-insensitive);
   stored-unread  the same, not a literal in src;
   stub           everything else.
-The literal rule misses composed keys (`"sway.gunSway" + axis + "Steps"`),
-so a lower bound is also given: unread names whose last segment occurs
-nowhere in the src text.
+The literal rule alone misses composed keys (`base + "Range"`, the effect
+bundles' modifiers in Effects.cpp; `"sway.gunSway" + axis + "Steps"`), so a
+name that two or three src literals concatenate to (the first at least 5
+characters, the others camel-case continuations, the last one appended
+with `+ "..."` somewhere in src) also counts as stored-read (`"composed": true`
+in rows.json). A lower bound is also given: unread names whose last segment
+occurs nowhere in the src text.
 
 Script calls come from corpus.py's calls.json (lower-cased Object.method).
 
@@ -35,11 +39,19 @@ import common  # noqa: E402
 
 TABLES = [("BF2142.exe", "BF2142.exe.console.csv"), ("RendDX9", "RendDX9_ori.dll.console.csv")]
 LIT_RE = re.compile(r'"((?:[^"\\\n]|\\.)*)"')
+# A literal appended in a concatenation (`+ "Range"`): the last piece of a
+# composed key.
+SUFFIX_RE = re.compile(r'\+\s*"((?:[^"\\\n]|\\.)*)"')
+# One a concatenation starts with (`"sway.gunSway" +`): a three-piece key's first.
+PREFIX_RE = re.compile(r'"((?:[^"\\\n]|\\.)*)"\s*\+')
 SRC_EXT = (".cpp", ".h", ".hpp", ".c", ".cc", ".inl", ".py", ".glsl", ".frag", ".vert", ".comp")
 
 
 def src_text(repo):
     lits = set()
+    suffixes = set()
+    capped = set()
+    prefixes = set()
     chunks = []
     for dirpath, dirnames, filenames in os.walk(os.path.join(repo, "src")):
         for fn in filenames:
@@ -50,11 +62,39 @@ def src_text(repo):
             chunks.append(t.lower())
             for m in LIT_RE.finditer(t):
                 lits.add(m.group(1).lower())
-    return lits, "\n".join(chunks)
+                if m.group(1)[:1].isupper() or m.group(1)[:1].isdigit():
+                    capped.add(m.group(1).lower())
+            for m in PREFIX_RE.finditer(t):
+                prefixes.add(m.group(1).lower())
+            for m in SUFFIX_RE.finditer(t):
+                if m.group(1)[:1].isupper() or m.group(1)[:1].isdigit():
+                    suffixes.add(m.group(1).lower())
+    return lits, "\n".join(chunks), (suffixes, capped, prefixes)
+
+
+def composed(name, lits, pieces):
+    """Whether `name` is two or three literals put together, the first at
+    least 5 characters (for three, one a concatenation starts with), the
+    others camel-case continuations (an upper-case letter or a digit first)
+    and the last one src appends (`+ "Range"`): the
+    keys src builds as `base + "Range"` or `"sway.gunSway" + axis + "Steps"`."""
+    suffixes, capped, prefixes = pieces
+    n = len(name)
+    for i in range(5, n):
+        if name[:i] not in lits:
+            continue
+        if name[i:] in suffixes:
+            return True
+        if name[:i] not in prefixes:
+            continue
+        for j in range(i + 1, n):
+            if name[i:j] in capped and name[j:] in suffixes:
+                return True
+    return False
 
 
 def classify(repo, probe, calls):
-    lits, text = src_text(repo)
+    lits, text, suffixes = src_text(repo)
     rows = []
     for module, t in TABLES:
         with open(os.path.join(repo, "symbols", t), newline="") as f:
@@ -63,18 +103,24 @@ def classify(repo, probe, calls):
                     continue
                 name = r["object"] + "." + r["method"]
                 state = "stub"
+                glued = False
                 if probe.get(name) == "impl":
                     state = "impl"
                 elif module == "BF2142.exe" and r["object"] == "ObjectTemplate" and (
                         r["kind"] == "property" or (r["kind"] == "method" and r["min"] == "1" and r["max"] == "1")):
                     m = r["method"].lower()
-                    state = "stored-read" if (m in lits or m + ".list" in lits) else "stored-unread"
+                    if m in lits or m + ".list" in lits:
+                        state = "stored-read"
+                    elif composed(m, lits, suffixes):
+                        state, glued = "stored-read", True
+                    else:
+                        state = "stored-unread"
                 last = r["method"].split(".")[-1].lower()
                 rows.append({
                     "module": module, "object": r["object"], "method": r["method"], "name": name,
                     "kind": r["kind"], "min": r["min"], "max": r["max"], "constructor": r.get("constructor", ""),
                     "state": state, "calls": calls.get(name.lower(), 0),
-                    "last_in_src": last in text,
+                    "last_in_src": last in text, "composed": glued,
                 })
     return rows
 

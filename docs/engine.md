@@ -631,6 +631,33 @@ regulates the gunners' yaw and the seat cameras' yaw
 (`GameWorld::regulation`); pitch and roll regulation and
 regulateFromParent(Pos) aren't (the rewrite's gun pitch is the aim's).
 
+**ignoreParentRotation** (RotationalBundle `+0x344` yaw/pitch/roll
+factors, `ignoreParentRotationAlways` `+0x350`, which nothing ships):
+`0x00562bc0` (bundle slot `0xd8`) turns flag `0x80000` on under a
+PlayerControlObject; the world-matrix getters (`0x005636f0`,
+`0x00563930`) then run `0x00563180`: while the PCO is occupied (slot
+`0x18(0)`), each axis takes back its factor of the parent's turn since
+last time (the old world in the new parent's frame, `0x006ad420` /
+`0x006ad2a0`, wrapped to ±180), within the bundle's limits unless both
+are 0 with a maxSpeed, the angles kept at `+0x1e4`. About 90 shipped
+bundles (EU_TANK_Cupola_Gun 0/0.5/0, EU_FAV_MachineGun_Base 0.7/0/0,
+EU_APC_base1 0.5/0/0, the seat cameras). The rewrite does the gunners'
+yaw bundle's yaw (`SeatLayout::ignoreParentYaw`, `stepGunner`); the
+pitch (the rewrite's gun pitch is the aim's) and the seat cameras' aren't.
+
+**Not rewritten among the vehicles' details:** `boneIndex` (SimpleObject
+template `+0x60`, slots `0xc8` / `0xcc`): the object's skeleton helper
+(`0x0063d340`, built when the template has a bundleSkeleton `+0x274`)
+keeps every descendant with a boneIndex (`0x0063d5e0`) and sets its local
+matrix to that bone of the bundle animation's skeleton each update
+(`0x0063d470` → slot `0xe8`), the walkers' legs and the deployables'
+moving parts (spawn_beacon's covers, the hubs, the sentry gun); the
+rewrite runs the walkers' bundleAnimationSystem but loads no
+bundleSkeleton. `autoUseAbility` (PlayerControlObject `+0x46a`, the 0xc4c5
+interface's slot `0x13c` `0x005c6bd0`): its only reader is the help
+manager's tick (`0x00646cb0`, case `0x2e`, at `0x00646deb`): a vehicle's
+help popup shows only with it; it uses no ability (the HUD's).
+
 **Pilots' guns.** A pilot (a vehicle that flies) fires the seat's own
 GenericFireArm, fixed along the hull, with PIFire. The ground drivers'
 guns turn on the mouse in the original, which the rewrite's drivers spend
@@ -1958,12 +1985,28 @@ w = sqrt(+0x9c) x (1 - sqrt(q)) / closeDistFade), at most 1 / lodTimer a
 second when lodTimer is over 0. The base cell update (`0x10120ef0`) keeps a
 cell only while its nearest corner is within viewDistance (no zoom or
 scale) and fades it over the last 30% (+0x20); the cell draw
-(`0x10121410`) fades near cells when the camera is low. Rewritten: the
-near radius (with the zoom and the quality factor; the type factor taken as
-1), and trees dropped beyond viewDistance and faded over its last 30%, by
-each tree's distance rather than its cell's (`DrawItem::fade`). Not done:
-the full / LOD cross-fade and lodTimer (the rewrite switches at the
-radius), the near-cell fade, the overgrowth shadow map.
+(`0x10121410`) fades near cells when the camera is low. The cells are
+viewDistance / 4 across (`0x10120420`), fitted to the terrain
+(`0x1008f510`); a cell's batch holds the `_lod` meshes of its trees outside
+their near radius (`0x1008e790`). The type's factor (+0x9c) is
+clamp((its geometry's radius / 5)², 0.3, 1) (`0x100917e0`). The cell draw's
+near fade: × clamp(the distance to the cell's centre / 12 (+0x34),
+clamp(|the camera's height over the ground| / 1 (+0x2c), 0.4 (+0x30), 1),
+1). Rewritten (`render/OvergrowthLod.h`, `LevelRenderer::prepareInstances`):
+the near radius with the type factor; within it the cross-fade (both
+meshes blended, `DrawItem::fade`) and lodTimer's easing per tree; beyond it
+the `_lod` mesh with its cell's fades (the nearest corner's 30% and the
+near-cell fade). Not done: the doubling of both alphas while the renderer's
+`0x1000b500` / +0x50a hold (not traced). The overgrowth shadow map
+(`OvergrowthShadowmap.raw`, +0x84, read by the preLoad `0x1008c7e0`) is
+the editor's: its only reader, `0x1008acd0`, copies it as grey into the
+terrain's textures when the terrain renderer's style is 6 (vtable
+`0x101d5a18` slot 0x88, `0x101609f0` → `0x1008b380`), and paintShadowmap /
+save (`0x1008c160`) write it; nothing in a game draws it, so it isn't
+rewritten. The `Overgrowth.*` / `OvergrowthType.*` rows the levels' scripts
+call are registered (`scene/OvergrowthSettings.h`; the editor's paint, save,
+generate and atlas rows aren't) and the renderer takes them, reading
+`Overgrowth.con` itself only without them.
 
 **Mesh particles.** A MeshParticleSystem's particles are copies of its
 `geometry` (a MeshParticleMesh template: a bundled-mesh file), scaled by
@@ -1982,7 +2025,7 @@ read by `effects::lightSourceOf`. Enabled Point and Spot lights are lights
 of `color × intensity`, full up to attenuationRange1, gone at
 attenuationRange2 (the original reads a radial attenuation table over
 distance / range, LightManager_r3x0.fx; a linear ramp here), added to the
-mesh and terrain lighting (`N·L`; the eight nearest the camera). They
+mesh and terrain lighting (`N·L`; which mesh takes which: below). They
 come from two places:
 
 - an effect bundle's LightSource children (explosions, muzzle flashes).
@@ -2029,9 +2072,41 @@ static mesh's slot 57 (`0x100e54e0`), and BF2142.exe calls that only
 from the object's getter (slot 0x134 = `0x006f6fb0`, 7 without a render
 object) for the console (`0x006ed952`); every other `+0x2b0` read in
 RendDX9 is another class's. So the mask is inert in the shipped renderer
-and the rewrite leaves it unread on purpose. Not done: projector
-textures, specular, flicker, shadows, the per-mesh light choice
-(`lightManager.maxLightsPer*Mesh`, `lightCullDistance`).
+and the rewrite leaves it unread on purpose.
+
+*The per-mesh light choice, specular and flicker* (`render/MeshLights.h`).
+Each frame the light manager (`0x100a93f0`) lists the enabled lights whose
+sphere (position, the object's attenuationRange2, `0x0064aa10`) meets the
+view with its far plane at lightCullDistance (+0xa0; none when it is 0);
+each mesh asks (`0x100a81a0` → `0x100a9f80`) with its object's origin and
+radius for the listed lights within light radius + mesh radius that pass
+its filter (`0x100a7f00`), nearest first by the light's squared distance to
+the origin, cut to its maximum. Every filter asks for isDynamic, so a
+placed static light is the lightmaps' only. Static meshes (`0x100bdb00`)
+take Point and Spot lights (0x1b09; with a lightmap also
+affectLightmappedObjects, 0x11b09) up to maxLightsPerStaticMesh, bundled
+(`0x100c3880`) and skinned (`0x10162070`) meshes Point lights (0x8b09) up
+to theirs; a spot reaches a static mesh as a point light (the Light
+record's direction isn't filled). The shaders add a pass per light:
+RaShaderSTM (N·L × colour + pow(N·H, 32) × gloss × StaticSpecularColor) ×
+(1 − saturate(d²/R²)); RaShaderBM (N·L + SpecLUT64(N·H) × gloss) × (1 −
+saturate(9d²/R²)), white (its Lights[0].color isn't read); RaShaderSM
+(N·L × colour + pow(N·H, SpecularPower) × gloss × the speccolor) × (1 −
+saturate(d/R²)), a length as the shader has it. The dynamic shadows'
+quality (settings +0x3c, `0x10010040`) sets the three maxima and
+lightCullDistance together: 0/0 m, 1/50 m, 2/100 m, 3/200 m (the
+constructor `0x100aafe0`: 300 m, 3, 3, 3, terrain 7). Flicker (the
+LightSource's slot 0xa4, `0x0064a920`): with flicker over 0 each update
+draws f = (rand()/32767 − 1) × flicker + 1 (MSVC's rand) and the ranges
+become the template's × f; the colour stays. Static meshes are lit with that
+range, bundled and skinned meshes with the template's. Rewritten:
+`collectPointLights` (the list, the placed static lights dropped, the
+flicker), `drawInstance` / `applyMeshLights` (each mesh's pick) and
+`mesh.frag`'s `meshPointLights`; the terrain, roads and particles keep the
+eight nearest the camera (maxLightsPerTerrainPatch's reader isn't traced).
+Not done: projector textures, the lights' shadows, the template's
+speccolor (the skinned meshes' specular takes the light's colour) and
+supportsEmitter in the bundled filter.
 
 **Non-screen-aligned particles and trails.** A
 NonScreenAlignedParticleSystem's particles are squares lying across the
@@ -2109,10 +2184,16 @@ its edge planes (`0x10165020`, Sutherland–Hodgman), laid onto its plane and
 lifted by decalNormalOffset, and fanned; at most 128 vertices; with none the
 decal is freed (`0x10164660`). Rewritten in `effects::clipDecal` and
 `LevelRenderer::clipDecalToTerrain` (made once per decal, the cells widened
-for decals bigger than one): world decals on the terrain. Decals on objects
-keep the flat square (the renderer has no collision-mesh triangles), and on
-static objects too (the original draws them only for objects with a set of
-their own). Not done: the normal-mapped technique.
+for decals bigger than one): world decals on the terrain. Decals on a
+static object or a vehicle are clipped to that object's collision faces
+(the projectile LOD's, the mesh the hit came from: the round passes the
+static object it hit, `Decal::surface`, and `GameWorld::
+projectileCollision` gives the faces, in world space for the statics and
+in the body's space for a vehicle, whose clipped decal is placed with it
+each frame), faces turned more than decalGeomClipAngle away skipped; the
+rewrite takes the object's faces about the hit rather than walking from
+the hit face through its neighbours, which gives the same pieces for decals
+that small. Not done: the normal-mapped technique.
 
 *Decal lifetime and fades.* `DecalManager.*` (the console objects
 `0x1007bdca..0x1007c4c0`; the manager DAT_101ffc78, constructor defaults):
@@ -4320,8 +4401,20 @@ manager's slot `0x7c`, when its class is the overhead camera's 0x948c)
 moves that camera there (`0x005f8410`: it returns unless game logic slot
 `0x144`, the server test, holds; the object's slot `0x64` and
 `0x005f8170`), which then goes to the commander as its OverheadCamera
-ghost. The rewrite's client moves its own commander view at once
-(`g_commanderView`) and the server keeps no overhead camera. The ghost
+ghost. The camera is one a team, made on the server on first use
+(`0x004c5120` through slot 0x7c: the first application for command,
+`0x004c7160`, or any later caller) from MultiPlayerOverheadCamera
+(GhostAlwaysWithPrediction; fOV 0.3, speed 50, height 260); `0x005f8170`
+keeps it 80 m inside the terrain over the mean ground (or the sea) plus its
+height, looking straight down, so the event's height isn't kept; it pans
+(`0x005f8510`) only for a local commander. The ghost (networkable vtable
+`0x009404d0`; capture `0x006033a0`, write `0x006037a0`, read `0x00603980`)
+carries the pan (mask 1), the position (2), the fov's byte (4) and a
+global's bit (8). The rewrite's host makes and moves the object
+(`HostedGame::moveOverheadCamera`; ghosted as every object, with its
+OverheadCamera state from `statesOf`) and a joined commander's view at the
+map's zoom 2 is where the ghost stands (`RemoteWorld::overheadCamera`,
+`0x00779680`); his own client also moves `g_commanderView` at once. The ghost
 manager's alternate eye (player vtable `0xd4`, `0x0059afd0`: commander
 `+0x10c`, `+0x8d` and `+0x8e`, the commander screen and its overhead view,
 set by vtable `0xc8` / `0xd0`, `0x00591aa0` / `0x00593840`) would score
@@ -4361,8 +4454,18 @@ client's player on a server it never holds.
   template's `+0x70` as `0x005d9cf0` sends it; 3 otherwise), the host
   sends them (`HostedGame::sendBattlefieldReports`) and the client keeps
   them for their seconds (`RemoteWorld::radarPlayers`), the minimap's
-  revealed enemies there (`HudWorld::revealedPlayers`). The 60 m sight
-  test and the vehicle's 2/0x2e aren't rewritten.
+  revealed enemies there (`HudWorld::revealedPlayers`). The client's
+  handler puts a player on the minimap (the NametagManager `DAT_00a20a00`)
+  with the enemy flag when the report is of kind 0 and he isn't of our team
+  (a friend with flag 0, which draws nothing more); for an enemy on foot
+  a TargetObject of TTDecoy (the Bp1_Decoy) within 60 m across shows
+  instead of him (HudManager slot 0x70, `0x0075bd30`): the "60 m sight
+  test". A reported player alive in a vehicle, for a report over 5 s, has
+  the vehicle spotted: a local 2/0x2e (spotter 0, the vehicle's ghost, our
+  team, x = z = 0, value 0x1b) that the map node keeps as a 16 × 16 marker
+  (`0x007918d0` case 0x2e, `0x00790d60`). Rewritten in `RemoteWorld`
+  (`radarPlayers` the enemies, `radarVehicles`), `updateMap` (the decoy,
+  the vehicles' red markers).
 
 ### The server's side (`bf2142 --host`)
 
@@ -4769,9 +4872,27 @@ carry an empty payload (`0x00516950`).
   toggleDemoPauseOrPlay (slot 0x5c, `0x004b32d0`: the game speed 0 or
   100), restartDemo (slot 0x48, `0x004b3190`: world and ghosts reset,
   `0x00582340`, the demo again from its start), shutdownDemo
-  (`0x00404750`). `bf2142 --demo` binds them. Not rewritten: the demo
-  camera and its controls (togglePlayerDemo `0x005fa440` / `0x005fa470`,
-  toggleCameraDemo `0x005fa130`, adjustDemoFov), playing camera files,
+  (`0x00404750` → `0x00403c50`: the speed back to 100, the game left).
+  `bf2142 --demo` binds them, with `Game.simulationRate` (`0x00424029`:
+  the speed, client slots 0xec / 0xe8, `0x004b3b90`, set only while a demo
+  is read; the DemoRecorder rose's 10..300) and the demo camera
+  (`src/Main/DemoCamera.h`; the reader's +0xf0, constructor `0x005f93d0`):
+  it starts free; togglePlayerDemo 1 / 0 (`0x005fa440` / `0x005fa470` via
+  `0x005f9e30`) follows the next / previous player alive with a control
+  object (from (the current id or 0) ± 1, 256 ids wrapping at 0xff, any
+  team; free without one), toggleCameraDemo (`0x005fa130`) follows the
+  current one from free and goes free from follow; the follow view
+  (`0x005f8f40`) stands distance (+0x98, 2) behind the target along the
+  camera's yaw and pitch, height (+0x9c) and side (+0xa0) off the object,
+  and looks at it; adjustDemoFov <deg> (`0x00424947` → `0x004030b0`) sets
+  demo.renderfieldofview as given, the view's fov π/180 × fov × 300/400
+  each frame (`0x00434610`); restartDemo makes a new camera
+  (`0x005178d0` → `0x005177b0`) and keeps the speed; pausing is refused
+  at the demo's end. Free, the view is the viewer's own camera. Not
+  rewritten: the camera's own input (`0x005fa5e0`: the follow input
+  `0x005f9970` with demo-cam-* vars, the number keys' speeds 0..1000, the
+  free camera's `0x00615290`), the HUD's Demo* strings and the roses'
+  opening keys, playing and recording camera files (cameramode 1 / 2),
   render and timedemo modes (`0x00432ee0`: timedemo_report.txt).
 
 ### The control-object record and prediction
@@ -6569,12 +6690,45 @@ player from `DAT_00b43878` slot `0x78`): the tinnitus.
 **Lock-on weapons** (the target components: `MultiFireArmTargetComp` on
 the AA and AT launchers, the walkers' and gunships' guided guns; template
 `0xc50c`: `target.targetSystem` `+0x80`, `maxDistance` `+0x78`,
-`lockAngle` `+0x88`, `lockDelay` `+0x8c`, `loseLockDelay` `+0x94`). The
-component's object update is not decoded; the rewrite's rule from those
-settings (`GameWorld::weaponLock`): the enemy object carrying the system's
-target type (TSHeatSeeking: TTHeat; TSLaserGuided: TTLaser) nearest the
-aim within lockAngle, maxDistance and sight is locking at once and locked
-after lockDelay in the cone; out of it for loseLockDelay it is lost. The
+`lockAngle` `+0x88` (45 by default), `lockDelay` `+0x8c` (round(× 30)
+ticks at `+0x90`), `loseLockDelay` `+0x94` (0.2, ticks `+0x98`)). The
+default component (runtime `0x005e1a70`, interface vtable `0x009733a8`)
+updates in slot 6 (`0x005e1b30`) for TSHeatSeeking and TSLaserGuided
+while the weapon is one of its holder's three in use: the candidate
+(game logic slot `0x1c8`, `0x004cf290`) is the nearest registered target
+object of the round's `seek.targetType` (not the system's), alive, not
+under the shooter's root and not in a root occupied by his team (an empty
+vehicle of either side counts), within min(maxDistance, the round's
+`seek.maxDistLock`) and lockAngle of the direction (the camera's with
+`target.useCameraDirectionToTarget` `+0x7d`, else the weapon's), in
+sight; with the candidate the target, a loss in progress ends; unlocked,
+the target becomes the candidate at once and its clock restarts; locked
+and another (or none), after more than loseLockDelay ticks the candidate
+replaces it unlocked; locked once the tick passes the target's start +
+lockDelay ticks. The shot (`0x005e1ee0`) gives the round the target only
+when locked. The heat and laser rounds (SeekClosestTargetComp, template
+`0x9540`, ctor `0x005ec300`: maxAngleLock 45°, maxDistLock 9999,
+distLoseLock 0, `seek.reLockTime` `+0x28` / ticks `+0x2c`) home from
+`seek.trackingDelay` on (`0x005ec260`): a destroyed target dropped, the
+nearest candidate from the round along its heading (none: with
+distLoseLock, asked again out to it and the target kept only if found);
+with reLockTime 0, nothing found, the relock flag clear or the target
+alive it takes the candidate at once, else only once the same one has
+lasted more than reLockTime ticks, clearing the flag the shot set
+(`0x005b2e70`, `0x005ebea0`); DefaultFollowComp turns it
+(`GameWorld::steerClosest`; 9999 on the AA missiles and static_aa: an
+unlocked shot never acquires). Wire guidance (LPTargetComp, the 11
+TSWireGuided weapons, ctor `0x005e2100`; `0x005e2e20` → `0x005e27a0`
+every tick): the steering point is o + f × (max(0, (m − o)·f) +
+`target.wireGuidedLookAheadDistance` (`+0xb4`, 20)) from the shooter's
+camera o and forward f, m the missile; guidance goes beyond
+`target.maxDistance` or with the line o–m cut, unless
+`dontLooseGuidanceOnObstruction` (`+0xb8`); `disableGuidanceOnReload`
+(`+0xb1`, as_av / eu_av) lets the missile go unguided at the reload's
+start (`0x005c0f40` → slot `0x48`, `0x005e23b0`). Not rewritten: guidance
+passing to a later missile of the weapon after an obstruction, and
+`targetObjectTemplate` (`+0x88`, the object the guidance moves: the
+rewrite keeps the point). The
 HUD's object markers (`Bf2ObjectMarkerNode`) show the state.
 
 - **Mines:** a mine fires when an enemy faster than
@@ -6870,6 +7024,68 @@ grenade at 5. The local player gets the containers of its soldier's chosen
 unlocks ([Soldier stats](#soldier-stats-ranks-and-unlocks)); `--unlock-all`
 unlocks everything. The customise screen's choice (below) gives the
 containers chosen.
+The kit build (`0x00570ab0`) applies a container when chosen (the
+SelectKit mask, kit `[0x70 + branch]` has its level's bit); with
+`replaceWithoutEquip` (`+0x2e0`; every kit's ...Player0 frag grenade)
+when owned (player slot `0x2a8`, `GameWorld::setOwnedUnlocks`); with
+`isFirearmReplacement` (`+0x2c0`) when its `firearmReplacement` (`+0x2c4`)
+and its first replaceItem are both the player's (`0x0056dc10`: a base
+item, or its container's level held): the HAR's and LAR's shotgun and
+rocket add-ons replace as_ar_shotgun / as_ar_rocket by themselves once
+the HAR or LAR is chosen; `isRetailReplacement` (`+0x2e1`) needs the
+online stats' flag (player `+0x403`), never set offline; then each owned
+container's Ability (`0x005706b0`). The owned set isn't fed from the
+profile yet (`main.cpp` gives the chosen ones only).
+
+**Drawing, magazines and the kit's slots.** The firearm's main object
+reaches its template at `+0x220` (its `0x94c0` interface at `+0x1a0`, at
+its own `+0x80`); the ammo template's constructor (`0x005f4340`) gives
+reloadTime 2, changeMagAt 0.7, magSize 30, nrOfMags 5,
+reloadWithoutPlayer 1, allowReplenish 1, the rest 0.
+- `delayToUse` (template `+0x2b8`, round(× 30) ticks at `+0x2bc` by the
+  setter `0x005c2270`; 61 shipped, eu_smg 1.166 s): the enable
+  (`0x005c47d0`, slot 105; a draw, the spawn's primary included) sets the
+  ready tick (`+0x208`) that far on, and until then the busy test
+  (`0x005c14f0`) holds: no round (`0x005d4800`), no fire input
+  (`0x005c50e0`), no reload (`0x005f3c40` via `0x005c26a0`); a reload
+  under way runs on (`FireArm::enable`, `readying`).
+- The ammo's on-enable (`0x005f4bb0`): held by a soldier (or without
+  reloadWithoutPlayer) a reload under way is dropped; with
+  `ammo.autoReload` (`+0x28`) and `instantReloadOnEnable` (`+0x29`) an
+  empty magazine that can be reloaded (`0x005f4140`) is filled at once
+  (the grenades, C4, mines: drawn again, ready).
+- `changeMagAt` (`+0x24`): the reload start (`0x005f4830`) puts the swap at
+  round(reload ticks × changeMagAt) and the end at the reload's ticks; the
+  magazine is filled at the swap, the weapon busy to the end.
+- `toggleWhenNoAmmo` (`+0x40`, 17 shipped): with an empty magazine that
+  can't be reloaded the weapon can't be selected (`0x005f39c0` via
+  `0x005c1150`), and after its last round its soldier switches to the
+  item before (`0x005f4a40` → slot `0xe0`, `0x005883d0`: soldier `+0x1f4`;
+  the rewrite at the next tick, else the kit's first selectable).
+- `altItemIndex` (`+0x2e4`, −1 by default; 29 shipped at 6): the kit's
+  add-item (`0x00589510`) puts an item whose itemIndex is taken in its
+  altItemIndex when that is above 0 and free (the firearm's override
+  `+0x60`, slot `0x19c`), else it isn't added (base items and unlocks
+  alike; `fillKit`'s `place`).
+- Not read at run time in 1.51: `ammo.ammoType` (template `+8`),
+  `allowReplenish` (`+0x42`: only packed into the vehicle weapons'
+  network flags, `0x005c3120`), `damageOwner` (GenericProjectile `+0x32c`:
+  only its executor, the constructor and the template's save, which writes
+  it as "localPredictOnClient").
+- Not rewritten: retail reloads by itself only with `ammo.autoReload` (111
+  shipped; the rifles leave it 0) once the firearm isn't busy; the rewrite
+  reloads every empty magazine.
+
+**The use key's pick-up** (`0x004bce30`, from `0x004bda00` at
+`0x4be038`): the nearest object within 1.3 m (`*0x009fe420`) and in front
+(the horizontal dot with the facing at least 0.9), of the soldier's team,
+fired by one of his carried items with `pickupEnabled` (GenericFireArm
+`+0x2ec`, slot `0xc0` `0x005c1830`; the Beacon, Unl_c4, the mines, the
+sonars, Bp1_Decoy, the sentry gun's deployer, the shield) whose
+projectile template (slot `0x1b4`) is the object's: the item gets a round
+back (slot `0x84(1, 0, 0, 0)`), the object goes, and no kit is picked up
+(`GameWorld::pickUpPlaced`). `0x004c5950` does the same within 9 m for a
+deployable on another object (not rewritten).
 
 Guns without magazines (`ammo.magSize -1`, most vehicle guns) heat up
 instead. Each round adds `heatAddWhenFire`, the heat cools by
@@ -7702,6 +7918,13 @@ for `*PTR_DAT_00a06ee0` ticks) comes off the relative velocity; no caller
 of the setter was found, so it is none. `SoldierBody::Mover` (`ignoring`,
 `ignoresThis`, `pushed`, `own`, `collisionGroups`), `SoldierBody::team`.
 
+**The speed index** (`0x00586020`, by the pose `+0x268`): crouched 1,
+prone 0, swimming 5 (6 sprinting); standing 4 sprinting (interface slot
+`0x100`), else 2 (1.5 m/s) while the item in hand is zoomed
+(`0x00585e90`: interface `0x94c0` slot `0x12c` → its zoom component
+`+0x1bc`, `0xc506`, slot `0xa0`: the zoom index `+0x1c` not 0), else 3
+(`soldierSpeedIndex`, `SoldierControl::setZoomed`).
+
 **The jump** (the Soldier's `0x0058a6d0`, PIAction: input 9, mask
 `0x200`): while the action is held, a soldier standing (pose 0), on the
 ground (the response's `+0xf9`), not swimming and without get-up time left
@@ -7970,9 +8193,10 @@ state, input, kills, deaths and team kills.
   stands up where the ragdoll lies with no get-up animation: BF2142.exe
   never names the `reviveOnBack`/`reviveOnStomach` triggers (its named
   trigger lookups, `0x008c0e70`, are the prone transitions), it only leaves
-  ragdoll mode (`0x005f0f20`). An enemy's shock finishes the body off (a
-  team test of the rewrite's: `0x004c1960`'s man-down branch reads none,
-  and its caller `0x005a3bd0` is not traced that far).
+  ragdoll mode (`0x005f0f20`). The team test is the paddles' hit's (game
+  logic slot `0x100`, `0x004ba5c0`, before `0x005a3bd0`): it goes on only
+  for a teammate on a downed body or an enemy on a standing one, so an
+  enemy's shock leaves a downed body as it is (`shockDowned`).
 - **Final death:** at the end of man down, or when the player respawns
   (after `sv.spawnTime`, 15 s), the scripts get `PlayerDeath`. With the
   real `bf2/stats` and game-mode scripts, this is when the team loses its
@@ -8034,7 +8258,14 @@ radius + 0.1 (slot `0x90`) — inside when the nearest face it crosses is
 crossed on its way out (two queries of mesh slot `0x58`, `0x006e5920`,
 with the normals negated, then as stored). `GameWorld::stepTitanHullKills`,
 `insideTitanHull`. Not rewritten: the HUD's text (the HUD's), the
-minimap's area texture.
+minimap's area texture. The text's data is all there: the HUD
+(`0x0044c7b0`, around `0x0044cfe0`..`0x0044d220`) shows max(0, timer −
+time outside), ceiled, in HUD_CENTERINFOBOX_timeuntildamage with the
+use flag (`*0x00a25134` `+0x14`) set and the player outside (slot
+`0xf0`), plus HUD_TEXT_MENU_LEAVING_COMBATAREA while the game runs (slot
+`0x164` = 1), and plays "leaving_the_combat_area" once (latch `+0x24f`,
+not for an AI player); `GameWorld::combatAreaTimeLeft` and
+`outsideCombatArea` give it.
 
 **A vehicle's team** (a PlayerControlObject's slot 0x9c, `0x005c9500`):
 the root's seats in order, the first with a player gives its team; none,
@@ -8078,9 +8309,12 @@ stack of spheres from the lowest centre (origin − 1 + 0.25) up, five to
 1.7 m standing, three to 1.4 m crouched (`*0x00a84798`) and one to 0.8 m
 prone (`*0x00a84778`), clear of the static meshes and vehicles. Standing,
 else prone (the spawn point's `+0x18a`, `PlayerInfo::spawnedProne`), else
-the next try. Not traced: an extra test some callers ask for
-(IAIPathfindingCourier slot `0xc`, `DAT_00b4bb94`). When no try fits, the
-rewrite puts the member a metre behind the leader.
+the next try. With its AI flag each try must also pass
+IAIPathfindingCourier slot `0xc` (`*0x00b4bb94`, the navmesh; not
+rewritten). When no try fits (0, or a spot at −4000), ServerGameLogic's
+caller (`0x004bef90` at `0x4bf36c`) refuses the spawn (player slot
+`0x188(0)`): the member stays dead and asks again
+(`GameWorld::spawnAtSquad`).
 The spawn screen's squad menu (`SquadMenu`, BF2142.exe `0x007a4000` ..
 `0x007a8800`; `src/Main/HudMenus`): `SpawnManager.toggleMembers 0/1`
 (`0x007b8b80`, menu states 1 and `0x12`/`0x13`) switches the kit half
@@ -8233,7 +8467,10 @@ and takes the largest `minTimeBetweenActivation`.
 - **Supply drop** (`0x0043d6d0`): every `SupplyDrop-Reload-Time` (60 s,
   less 0.1) per team, without an asset. `0x0043d510` creates a
   `supply_crate` at the ground's height plus `gameLogic.supplyDropHeight`
-  (50). `0x0043d880` removes it after `supplyDropNumSecsToLive` (300). The
+  (50; game logic `+0x1b8`, slots `0x240`/`0x244`, console `0x00425fcc`).
+  `0x0043d880` removes it after `supplyDropNumSecsToLive` (300; `+0x1bc`,
+  `0x004260db`; both GameLogic properties, handed to the round's
+  `CommanderSettings`). The
   crate is a `SupplyObject` (template `0x005d1940`), updated every 0.2 s
   (timer event 0x1d, `0x005d1710`). Its team's soldiers, and vehicles
   (`workOnVehicles`), within its radius (5) plus their own (`0x005d0e80`)
@@ -8316,8 +8553,8 @@ In `bf2142` the commander's HUD buttons run console commands:
 `commRoseAccept` answers one. `SquadLeader.sendOrder` and `Commander.sendOrder
 <kind> <add>` share one handler (0x00770889): the squad leader's order goes to
 his own squad, the commander's to the squads selected in the screen's squad
-list (below; `0x007a9f60` sends one to each squad slot `0x34` reports
-selected), or, with none selected, to the squad whose leader is nearest the
+list (below; the order handler `0x007d6ab0` sends one to each squad slot
+`0x34` reports selected), or, with none selected, to the squad whose leader is nearest the
 click. `Commander.defendArtillery` / `defendSatellite` / `defendUAV` /
 `defendOrbitalStrike` (HUD manager slots `0x374`, `0x37c`, `0x384`, ...:
 `0x007d7b50`, `0x007d7ac0`, `0x007d7a30`) send a defend order (kind 6, on
@@ -8325,8 +8562,30 @@ the map) at the asset (`0x007d92f0`: the team's object of class `0x9c42`
 whose `+0x29c` is the asset's kind, 1 artillery, 2 the satellite, 3 the
 UAV) the same way, and `defendMoveTitan` at the team's Titan. The zoom
 buttons (`<asset>Zoom`, slots `0x370` / `0x378` / `0x380` → `0x398`,
-`0x007d8e00`) send the server event `0xf` with the asset's position (the
-commander's camera there), which is not rewritten. `Commander.accept 0/1`
+`0x007d8e00`) move the commander's camera to the asset's position: the
+CommanderCam event (0x24, the camera's height `+0x2d0`) through slot 0x398;
+the "0xf" there is a local dispatch (`DAT_00a7d06c` slot 0x18), not an
+event. `Commander.zoomCommander` (`0x0077168e` → slot 0x39c,
+`0x007d7be0`; the CommanderZoomFCT button) steps the map's zoom
+(`0x0077e850`) and sends the camera to the map's cursor (`0x007d8ec0`);
+`Commander.detailedView` (`0x0077161d` → slot 0x394, `0x007d8db0`) holds
+the screen open at the overhead view (HUD `+0x2f4`) and sends the camera on
+leaving; `Commander.spottedMouseOver <n>` (`0x00771b67` → `0x00751f80`) sets
+`Spotted<i>MouseOver` for i 1..11. `CommanderMenu.sendRadioMessage
+<voice> <channel>` (`0x00771fe2` → `0x007a9f60`) sends the voice message to
+each selected squad (Game slot 0x50, the spam check on the first), then no
+squad's members show. The squad rows: `SquadManager.joinSquad` /
+`leaveSquad <squad>` (`0x004192c1` / `0x004193a3` → Game slots 0xb4 / 0xb8:
+JoinSquad / LeaveSquad), `Squad.leaveSquad` (`0x00771bdd` → `0x007d6750`:
+out of our squad and its invite cleared), `SquadManager.changeSquadName`
+(`0x004195aa` → `0x0042cff0`; the server's `0x004c6720` refuses a squad
+that isn't empty, so it names only a new one), `SquadLeader.
+sendRequestForOrder` (`0x00770a7e` → `0x007c7cd0`: req_new_order to the
+commander, then the Request event of kind 1) and `issueSquadRequest`
+(`0x00770b5f` → `0x007d6820`: the armed order at the rose's point). Not
+rewritten: `SquadLeader.addRemoveCP` (`0x007d6840`: a squad rally point
+dropped where the leader stands, SetBeacon 0x3c; no shipped script calls
+it and its rose entry is unused). `Commander.accept 0/1`
 answers the offer of command that follows the 15 s apply period. Caps Lock
 opens the commander's screen (the full map and `CommanderShow`;
 `--commander-screen` takes command and opens it); the tools'
@@ -8341,14 +8600,20 @@ CommanderSquadTabShowFull, CommanderMapTabShowFull and
 CommanderToolsTabShowFull (registered by `0x007a8770` with
 ShowSquadMemberList `+0x1c1`, ShowSquadLeaderStats `+0x1c2` and
 ShowSquadOrderPicture `+0x1c5`); closing the squad tab clears
-ShowSquadMemberList. Their first state isn't known (open here). The squad
+ShowSquadMemberList. The menu's constructor (`0x007ac090`, vtable
+`0x009b5860`) opens the squad, map and tools tabs and closes the other
+three. The squad
 list (list data 15, `CommanderMenu.singleClick` → `0x007ab380`) has a row
 per squad with members, its id in cell 13 and its kind (0) in cell 14
 (`0x007a9c90`, `0x007a9c00`). A click on column 4 makes it the only squad
 selected and shows its members (`0x007a9f10`: menu state `0x11`, list
 data 14, CurrentSquadName, CurrentSquadLeaderName); elsewhere it selects
-it alone too (slot `0x1c`; Shift adds it, slot `0x20`, not done); column 3
-mutes the leader's voice (slot `0x300`, not done). `CommanderMenu.deselect`
+it alone, or clears it when it was the only one (slot `0x1c`,
+`0x007ab2b0`); with Ctrl (HUD `+0x235`) slot `0x20` (`0x007aa9f0`) toggles it
+among the others, with Shift (`+0x236`) slot `0x30` (`0x007a9d30`) adds
+every squad from the anchor (`+0xcc`) to it; column 3 mutes or unmutes the
+leader's voice (his player slot `0x300`, VoipPlayerMute 0x26 to the
+server). `CommanderMenu.deselect`
 (`0x007a9db0`) closes the members. The list's columns are fitted to the
 script's widths.
 
@@ -8657,40 +8922,52 @@ corridor and spawn room fields name their meshes with setCollisionMesh and
 no CollisionManager.createTemplate; they are looked for in Meshes/ beside
 the template's file (as OpenBattlefield2 resolves such names).
 
-**The penetrable shields** (materials 4112 / 4118, the outer forcefields:
-damageLoss and minDamageLoss 1000, overrideNeverPenetrate 1,
-maxDamageLoss 100000 by default). DefaultPenetrateComp (`0x005eaca0`,
-vtable `0x00975884` slot 7; class `0x953e` on every round): with
-overrideNeverPenetrate the solid/liquid tests are skipped; damageLoss −1
-means no penetration; the round's damage at its range less the loss must
-stay at or above a tenth of its damage, else it hits the face; the loss
-is minDamageLoss for a one-sided material, otherwise the thickness to the
-way out through the object's mesh (over 2.1 × its radius) × damageLoss,
-within minDamageLoss and maxDamageLoss (maxDamageLoss without a way out);
-it flies on from a centimetre past the way out with what is left. The
-shields are thin shells (about 1.6 m: a loss of about 1,640), so only
-rounds over about 1,111 pass: the silo missiles (110,000), static_aa
-(2,500) and the EMP strike (3,000); bullets and rockets stop at the
-shield. In the rewrite (the projectiles' hit, `Projectile::damageScale`)
-the way out is the first face of the same material on along the round's
-way. (The call site of `0x005eaca0` wasn't found: no virtual call through
-slot `0x1c` in `0x00400000`–`0x00900000` pushes its ten arguments, the
-only ones with ten or more, `0x00745945` and `0x0081749f`, being the
-menus' and the network's; its last two arguments
-are read as the damage left and the round's damage.) The component's
-pointer is cached only by the projectile's `0x005b2b20` (interface
-0xc561 at `+0x1ac`, `0x005b2b95`); nothing else reads `+0x1ac` or asks
-for 0xc561, so `0x005eaca0` (slot 8 of `0x00975884`, its only reader of
-`penetrate.allowSolidPenetration` `+0xc` and `allowLiquidPenetration`
-`+0xd`, both 1 by default, executors `0x004f2c86` / `0x004f2db8`) looks
-uncalled in 1.51. Its rules: no object hit and not water, none; without
-overrideNeverPenetrate (material `+0x60`) water (`+0x68`) without the
-liquid flag, or a solid without the solid flag, stops the round, water
-with the liquid flag passes with no loss; then the loss above, the way
-out jittered by penetrationDeviation (`+0x58`) × (0.5 − U) on the face's
-axes. The rewrite's shield penetration is kept as it is (it follows the
-rules; whether retail rounds pass the forcefields at all is a game test
-away), and the two flags aren't applied.
+**Penetration and the penetrable shields.** DefaultPenetrateComp (class
+`0x953e`, created by 111 of the 114 shipped rounds; vtable `0x00975884`
+slot 8, `0x005eaca0`) is live: the projectile caches its interface
+`0xc561` at `+0x1ac` (`0x005b2b20`), and the projectile's `+0x184`
+interface (vtable `0x00969b98`) reads it there as its own `+0x28` in slot
+`0xd4` (`0x005b54e0`), which hands it the hit object, the contact's offset,
+both materials, the round's damage scale, the template's damage (`+0x30c`)
+and three outputs. (An earlier note here had it uncalled: it looked for
+reads of `+0x1ac` from the projectile's own base only.) The game logic's
+hit (`0x004ba440` → `0x005a4dd0`, slot `0xf8`) first applies the hit's
+damage (the cell of the two materials) and then, unless the round
+ricochets (slot `0xcc`), asks slot `0xd4`; refused, the round is removed
+(slot `0x100(0x1f)`) and goes off. The component's rules
+(`allowSolidPenetration` `+0xc`, `allowLiquidPenetration` `+0xd`, both 1
+by default, executors `0x004f2c86` / `0x004f2db8`; the material's fields
+from its constructor `0x0060a9b0`: damageLoss `+0x1c` −1, minDamageLoss
+`+0x20` 0, maxDamageLoss `+0x24` 100000, penetrationDeviation `+0x28` 0.1,
+overrideNeverPenetrate `+0x2c`, hasWaterPhysics `+0x2d`, isOneSided
+`+0x30`): no object and not water, no; without overrideNeverPenetrate,
+water without the liquid flag no and with it yes at no loss, a solid
+without the solid flag no; damageLoss −1 no; the damage left (the damage
+at its range × the scale) under a tenth of the template's damage, no;
+the loss is minDamageLoss on a one-sided material (going on 0.05 m past
+the face), else a ray through the hit object over 2.1 × its radius finds
+the way out: thickness × damageLoss within minDamageLoss and
+maxDamageLoss, going on 0.01 m past the way out with an impact there
+(game logic slot `0x114`, type 2), or maxDamageLoss without one; what is
+left must still be a tenth; the heading turns by penetrationDeviation ×
+(0.5 − U) along the round's right and up (U from a generator started at
+the tick count mod `0x3ff`, `*0x00a02e80`). So bullets (the solid flag
+left at 1) pass grass, bushes, cloth, wood, glass and thin metal
+(`Penetrable_*`, damageLoss 0..50 with their minimum), losing that much;
+rockets and missiles (68 rounds set the solid flag 0) pass only the
+overrideNeverPenetrate materials: bushes (16) and the Titans' **penetrable
+shields** (4112 / 4118, the outer forcefields: damageLoss and
+minDamageLoss 1000). The shields are thin shells (about 1.6 m, a loss of
+about 1,640), so only rounds over about 1,111 pass: the silo missiles
+(110,000; their cell against the shield, 56 × 4118, is damageMod 0 with
+the forcefield impact e_mexp_m_forcefield_red), static_aa (2,500) and the
+EMP strike (3,000); bullets and rockets stop at the shield. In the
+rewrite: `GameWorld::penetrate` after the hit's damage and effects
+(`game::penetration`, `penetrationLoss`, `penetrationLeft`); the way out
+is the first face of the hit object (its body's projectile mesh, or the
+statics' world with the object's projectile-LOD radius) on along the
+round's way; a soldier's capsule has none (maxDamageLoss). The rewrite's
+rounds don't meet water, so the liquid rule has no use yet.
 
 **The guns' seats.** The six gun hubs (eu_groundcanone3*_hub and
 eu_aacannon*_hub, the as_ ones alike) are PlayerControlObjects with
@@ -8721,6 +8998,29 @@ at its spawner each tick, so it rides along. The supply's vehicle types
 `0xc4c4`, slot `0x24`: `0x0059d880`, the template's `+0x3d0`, which
 `ObjectTemplate.vehicleCategory` sets through slot `0x20`, `0x00504086` /
 `0x0059d870`) are its `vehicleCategory`.
+
+**Hidden control points and the Titans' name tags.** A ControlPoint's
+`isVisible` lives in its template's ControlPointInfo block (vtable
+`0x0096a930`, block `+0x58` = template `+0x2f0`, 1 by default; the
+runtime point, ctor `0x005bb620`, copies it to `+0x1a1`, interface
+`0xc4d1` slot `0x3c` `0x005bb3d0`). Its only reader is the point's start
+on clients (`0x005bbe30`): with 0 the point's object and its three team
+flags (`0x005bbb30`) get object flag 2 (`0x006f68f0`), which only the
+scene's cull tests (`0x00705650`): they aren't drawn; capture, spawning,
+the AI and the network don't read it. `showOnMinimap` (`+0x2f1`, slot
+`0x44` `0x005bb440`) is what the minimap, the map and the spawn screen
+read (`0x00780410`, `0x00789b50`, `0x0078bd00`...). The 48-player
+gpm_ti GamePlayObjects set both 0 on their points
+(`ControlPointInfo::visible`, `showOnMinimap`; drawing and the maps are
+the HUD's). The Titans' roots carry `armor.addNametagOnDestroy` 1
+(Armor `+0x195`, slot `0x1f4`) and `nametag.healthActivationLevel` 60
+(Nametag `+0x24`, 100 by default; the cores 99): each drop of the hit
+points re-pushes the tag to the NametagManager (`0x00655460` at
+`0x6555e0` → `*0x00a20a00` slot `0x30`), whose refresh (RendDX9
+`0x100f40d0`) below 100 takes the secondary icon (slot `0x44(1)`, tag
+flag `0x1000000`) once the first armour's percent is at or below the
+level, a change of icon blinking the tag (`TitanInfo` /
+`TitanPartInfo::healthActivationLevel`, `nametagPushes`, `percent`).
 
 **Missile silos** (`isMissileSilo`, missile_silo_v2): the auto controller
 CP_CANNON (AI/AutoControllers.ai: fov 179, viewDistance 2000,
@@ -8839,7 +9139,7 @@ each slice to its count, as a machine on which no budget runs out would:
   after that, or standing, 0x10097e60 clears the movement, the look and
   the buttons, and a driver brakes (PIThrottle −clamp(0.5 v·forward,
   ±0.4)).
-- **Thinking** (0x100c95f0): a bot gathers the time of the frames it
+- **Thinking** (AIDLL 0x100c95f0): a bot gathers the time of the frames it
   executed. With a plan it thinks again after 0.5 s of them
   (`setPlannedDecisionMakingThreshold`), without one after 0.3 s
   (`setUnplannedDecisionMakingThreshold`). Each frame up to 2 planned and
@@ -8890,7 +9190,7 @@ The urgencies:
 | Idle (0x10069f50) | The weight. A passenger gets 0.5. A driver with free seats gets 30 while a teammate within 40 m heads for it (70 when that teammate faces the vehicle within 0.85), for up to 10 s. |
 | Fire (0x10075fb0) | 50 while a known enemy scores above 0. The weight only gates it. |
 | Revive (0x10082760) | 100 × the squad factor (task 1) for a downed teammate within the Revive weapon's maxRange. Each candidate scores 1 − min(1, d / speed / time left), × 10 for a human's body. |
-| Flee (0x100859d0) | 100 below 30 % health, with the camouflage over 70 % charged (0x10085920: its ammo over its maximum), 10 s after spawning. 0x10085d90 keeps the way out: the sum of the directions away from known enemies (×3 for players, ×2 for bots targeting it). |
+| Flee (0x100859d0) | 100 below 30 % health, with the camouflage over 70 % charged (AIDLL 0x10085920: its ammo over its maximum), 10 s after spawning. 0x10085d90 keeps the way out: the sum of the directions away from known enemies (×3 for players, ×2 for bots targeting it). |
 | Change (0x1006c520) | best seat / current seat × weight × 10 (best × weight with the current worth nothing), ÷ (1 + 14 clamp((d − 10) / 60, 0, 1)) for the distance to it (0x1006bc50), 0 for a seat another bot reserved (0x1006f320). See Seat values. |
 | MedicAssist (0x10070200) | Teammates on foot within the hub's maxRange (70 m) below 75 % health (99 % for a human), the bot itself unless it holds the hub. Score basicTemp / (fuzzy(1 − health) × distance), distance 1 for itself. fuzzy(best) × weight × 2, × 10 for a human; × the squad factor. A "medic" radio call (see Radio) from the candidate: its score × 3 from a human, × 1.5 from a bot; with a human's call heard and the best a human within 50 m: 100 (× the squad factor). |
 | AmmoAssist (0x10071a10) | Human players only. A weapon (FireArm, Sniper, C4) with ceil(rounds / magSize) / magazines below 0.6 (0.99 while the bot holds the hub). Score basicTemp / (scurve(ratio) × distance). fuzzy(best) × weight × 4 × the squad factor. A candidate that called "need_ammo" needs only a ratio below 1, scores × 70, and makes the urgency × 100. |
@@ -8901,7 +9201,7 @@ The urgencies:
 | Avoid (0x10064850) | On foot only (the 2d pattern of the vehicles' sets never runs); soldiers are never avoided. A wreck or vehicle below 30 % health within max(r, min(10, r + 4)) adds 100. A vehicle at 2 m/s or more, closing at 3 m/s or more, that will pass within 0.6 (r + own radius) × √1.5 in the look-ahead time adds closing speed / distance × its size factor, which is always 0 (see below). Sum × weight, × 2 in the level's first 5 s (see below). With a sum of 0: 1000 while a grenade warning lasts (the weight not applied). |
 | BridgeRepair (0x10084620) | 0: the rewrite has no broken bridges. |
 
-- **Squad factor** (0x10089aa0): 0 outside squads; 1 for the bot's own
+- **Squad factor** (AIDLL 0x10089aa0): 0 outside squads; 1 for the bot's own
   task (Medic 1, Repair 2, Ammo 4). For a target outside squads: 0 when a
   teammate has the task or the bot's squad is more than 141 m away. In the
   bot's squad: 0 when a squadmate has it, or (medic and ammo) when the
@@ -8920,7 +9220,7 @@ The urgencies:
   7, need_ammo 10, ..., req_new_order 14, defend 15, attack_position 16,
   move 17) with its sender, a newer one replacing the older, for its
   receive time to live (`aiComm.addAIRadioMessage`, AI/AIRadioMessages.ai:
-  20 s for medic and need_ammo; 0x100a7130). Who hears is the game
+  20 s for medic and need_ammo; AIDLL 0x100a7130). Who hears is the game
   server's 0x004a6f70 (see the HUD's comm roses: `GameWorld::hearsRadio`);
   `BotManager::update` takes the bots' share of what the world heard.
   The bots' own radio, the comm object's sends (0x100a7860): a type is
@@ -8942,7 +9242,7 @@ The urgencies:
   0x100a61c0: a choice that isn't that vehicle answers "negative" within
   15 m of it, 0x1006be70; heading for it, "roger_that", 0x1006dac0; both
   channel 6, 1 s on); a hornless driver's "PLAYER_TACTICS_gogogo" to the
-  soldier in the way (0x100a5c00 → 0x100a5990, at once).
+  soldier in the way (0x100a5c00 → AIDLL 0x100a5990, at once).
   `BotManager::radioSent` lists what a bot said.
 - **Curves:** `ai::fuzzy` (0x100cbce0, table 0x100cb6f0) takes the entry
   at trunc(100 x); `ai::scurve` (0x100cc930, table 0x100cc350)
@@ -8954,7 +9254,7 @@ The urgencies:
     a hub (no `onlyActiveWhileFiring`) works round its holder while in
     hand (the ReplenishingAmmoComp's tick, BF2142.exe 0x005d8740), so
     holding it heals or resupplies.
-  - RepairVehicle (0x10073da0): walk to the vehicle's radius, take the
+  - RepairVehicle (AIDLL 0x10073da0): walk to the vehicle's radius, take the
     tool, hold the trigger while facing it (dot above 0.1). Crouch when it
     is more than 0.5 m lower.
   - c4 (0x10083ae0): no movement. The charge in hand, 0.7 s, fire, then the
@@ -9044,8 +9344,50 @@ The urgencies:
 - **Forgetting:** a target out of sight is lost; it is forgotten after
   60 s, or at once for one in a vehicle.
 - **Skill:** it does not change sensing.
-- **Hearing:** the roll (0x100ec930) cannot succeed for a listener with a
-  Mobile plugin, so soldiers never hear. This is kept.
+- **Vehicles** (their root AI objects, returned by the agent's query with
+  the soldiers, 0x100ed700 case 0): an enemy vehicle is seen when anyone
+  aboard is, or (from a bot on foot) by the same view and
+  clamp(round(30 r / d), 1, 10) rays, r its AI radius. Out of sight it is
+  kept 60 s. They feed the side's knowledge (Strategy, Knowledge).
+- **Hearing** (AIDLL; `BotManager::hear`): the dispatcher (0x100ca280, case
+  3 of 0x100ca590, 0.025 of the budget) walks the AI objects with a team
+  and an Armament or Mobile part; each makes a sound sphere: its current
+  weapon's (the AI weapon's slot 0x12c → 0x00892880, the template's +0x24,
+  `weaponTemplate.soundSphereRadius`, 50 m by default) while that weapon
+  was taken in hand under 3 s ago (slot 0x100), or the Mobile part's
+  sphere at its speed if larger (adaptor slot 0x54, 0x008a1880:
+  lerp(setSoundSphereRadius min, max, speed / maxSpeed), 0..30 m by
+  default, 0x008917b0; the soldiers 0..15, the transport helicopters
+  0..75). Over 0.1 m, every bot of another team within it (3-D), not
+  dead nor scripted (0x100969b0), is told (0x100ec100): not within 1.5 s
+  of its own last round (+0xc0, stamped by the rounds' event 0x1004e910 →
+  slot 0x314 0x10097a60), and a soldier source only for a soldier
+  listener. The roll (0x100ea820): r = min(d / weapon sphere while the
+  weapon is under 5 s in hand, d / Mobile sphere), heard only for r < 1;
+  with the listener's Mobile part, p = far r + near (1 − r)
+  (`setHearingProbability near far`, 0.01 / 0.1; slots 0x60 / 0x64) and
+  the roll succeeds when U[0, 1) ≤ (1 − q) p with q = 0x100317e0(1, speed
+  / maxSpeed), which is a max: q ≥ 1, so a listener with a Mobile part
+  never hears. One without (a gun seat whose template has none) has p =
+  1. A success flags the memory item 1 with the source's position, raises
+  the side's certainty to max(p, 0.1) (slot 2, 0x100a9bb0: the position
+  copied, the last sighting set to now − 1 / (c × degeneration)) and puts
+  the item on the re-hearing list (0x100ec930: rolled again, dropped 30 s
+  after the last success). Of the shipped templates only gunners in seats
+  without a Mobile part hear, and as their seats aren't soldiers, only
+  vehicles. A heard item has flag 1 only; the fire behaviours' loops want
+  2 or 4 (0x1007e1b0's `& 6`), so hearing feeds the side's knowledge, not
+  the targets. The shipped `Weapons.ai` write
+  `weaponTemplate.setSoundSphereRadius`, which is no command: every shipped
+  weapon keeps 50 m. The rewrite's "taken in hand" stamp is the player's
+  weapon in hand (a vehicle's from anyone aboard), and the pass runs every
+  tick.
+- **Cull distance** (`aiTemplatePlugIn.cullDistance`, the Unit's +0x18,
+  1000 by default, 0x008919d0; soldiers 100, vehicles 250): read only by
+  the memory pass (0x100ee430 through 0x100aa5d0): a neutral object (team
+  0) that is the bot's current target stays among the ones it looks at out
+  of the frustum within the target's cull distance. The rewrite's bots
+  never target neutral objects, so it is stored and has no effect.
 
 ### Fire
 
@@ -9069,6 +9411,12 @@ The urgencies:
   distance. So a switch to the knife makes the distance the knife's (it
   used to keep the rifle's and stab from 1.9 m against the knife's
   1.375 m reach). `BotManager::planFire`, `game::preferredRange`.
+  Measured (Cerbere_Landing gpm_sp 16, 15 bots, 300 s, 48 seeds of
+  `BF2142_BOT_SEED`): against 69c8fbc (the range fixed at the target's
+  choice), rounds 1,572 → 1,371 (−13 %, ±7 %), kills 14.5 → 16.4, hits
+  70 → 79 (hit rate 4.5 → 5.7 %). The default seed alone shows 2,879 →
+  571, which is the runs' chaos (one round's sd is about 500 rounds), not
+  the rebuild.
 - **Firing pose:** taken when standing still, at most once a second, with
   no fire for 0.8 s after (Trigger 0x1008f1e0).
 - **Tap or hold** (0x100777a0): TriggerContinously (0x1008ecd0, held while
@@ -9090,7 +9438,7 @@ The urgencies:
 - **Reaction time:** (1 − skill)(1.5 + U[0, 1]) s at a new target
   (0x100777a0).
 - **Explosives** (the weapon choice 0x10074ef0, the plan 0x100777a0, the
-  aim 0x100dbd10): a weapon with an explosion radius against a soldier
+  aim AIDLL 0x100dbd10): a weapon with an explosion radius against a soldier
   scores × 100 and sets the bot's `+0x249` when (a soldier bot) the target
   is 5 m away (10 m when not over 3 m higher) up to maxRange (+ 1.25 dh
   over 5 m higher, not thrown), seen within 10 s and known only from
@@ -9117,7 +9465,7 @@ The urgencies:
   weapons (the AI weapon's slots through BF2142.exe's adaptor, vtable
   0x009d5be8; the armament list at 0x10075170 holds an AI weapon only for
   an item whose `ObjectTemplate.aiTemplate` names a weaponTemplate, each
-  looked up by 0x10031d80: `BotManager::armament`. Every kit's
+  looked up by AIDLL 0x10031d80: `BotManager::armament`. Every kit's
   ParachuteLauncher, itemIndex 9 with no aiTemplate, no magazine limit and
   a 0 m/s round, is not one; the bots used to pick it when the target
   stayed out of reach and fire it for the rest of the round): usable ones (slot 0x1c) of type FireArm, C4, Revive,
@@ -9154,7 +9502,7 @@ The urgencies:
   that isn't thrown sets it (0x100d8910, vt+0x20c(1)); the move plans'
   throttle (0x100e6060) then stops: the follower's timers restart
   (0x100923a0) and the bot crouches (vt+0x170(2, forced)). It falls when
-  the lob's condition fails, when the fire plan ends (0x100d4e20, with
+  the lob's condition fails, when the fire plan ends (AIDLL 0x100d4e20, with
   `+0x248`) and when the plan's target condition fails while not lobbing
   (0x100dc730).
 - **Aim:** the PID controller of the ControlInfo plugin (0x100e5820:
@@ -9179,7 +9527,7 @@ The urgencies:
   (0x005890a0). Standing still, the head turns up to ±40° before the body
   follows at 4° a call (the rewrite's soldiers turn the body at once). A
   seat's gun aims from where its next round starts (the weapon's position,
-  0x1008e940's FUN_100a4090; `GameWorld::gunFrame`) along its own forward,
+  0x1008e940's AIDLL FUN_100a4090; `GameWorld::gunFrame`) along its own forward,
   the errors taken in the hull's frame, in which the gun's yaw and pitch
   turn (it used to aim from 1.6 m over the hull's centre with the hull
   taken as level: an APC's pod cannon missed by 4 m at 15 m). The trigger holds while the aim lies
@@ -9270,9 +9618,10 @@ The urgencies:
   − S(the friendly share of the strengths)) × 1.25. An area releases a
   spare squad.
 - **Anti-aircraft** (the Armament plug-in's setIsAntiAircraft, 0x00884739;
-  read through 0x100f0840): Fire3d's motion test and doubled temperature
-  take it (0x1007d6c0); the fire plan's ITAir clause (1: fight from where
-  it is; 2: hold the order spot) isn't rewritten.
+  read through AIDLL 0x100f0840): Fire3d's motion test and doubled temperature
+  take it (0x1007d6c0); the fire plan's ITAir clause (0x100795a0): at an
+  ITAir target, 2 keeps the plan at the order's spot (`fireKeepsToOrder`);
+  1 sets a flag the builder overwrites before it reads it (no effect).
 - **Knowledge** (degeneration, allowedTimeDiff, commonKnowledge go to
   AIDLL when an object is registered, 0x008a3980 → 0x1003b900): a side's
   AI object of an enemy unit is made when the side first learns of it
@@ -9287,8 +9636,19 @@ The urgencies:
   has seen counts for nothing, and the others count by their certainty
   (`ai::knowledgeCertainty`, `BotManager::certainty`, filled from the
   bots' memory each update). commonKnowledge 1 (14 shipped templates) is
-  one shared object: certain. allowedTimeDiff (the update throttle,
-  0x100a9e70) is stored, not used. Stand-in: vehicles count as known.
+  one shared object: certain. Vehicles are units too (`vehicleCertainty`,
+  keyed by the root object): an enemy vehicle counts once a bot of the side
+  has seen it (or anyone aboard) or heard it, by its certainty; neutral and
+  own ones are certain. A unit stays sensed until 2 s after the last of
+  the side's bots lost it (0x100ee430 counts the sensor down past 2 s);
+  the count reaching 0 copies its position (+0x54), and the area pass
+  places an unsensed unit there (slot 0x2c, 0x100a9b20; the information
+  grid, slot 0x34): `knownPosition`. allowedTimeDiff (+0xc): a sighting
+  is an update (slot 3, 0x100a9e70) that within allowedTimeDiff of the
+  last full one (+0x20) only stamps the time (+0x48); a full one copies
+  the position while unsensed, the team (+0xa0) and the capability
+  (+0x44, 0x100aa420: here the health the area pass then uses for an enemy
+  unit's strengths). Hearing forces one (+0x20 to −1).
 - **Orders:** attack or defend orders go to the area's order position.
   Squads under a human commander keep that player's orders.
 - **Goals** (0x10060300): a bot heads for a spot within 0.8 of the
@@ -9302,7 +9662,7 @@ The urgencies:
 
 ### Following paths (src/AI/PathFollower)
 
-BBPGotoWaypointInfantery (0x10066d80) and BBPGotoWaypoint2d (0x10068980)
+BBPGotoWaypointInfantery (AIDLL 0x10066d80) and BBPGotoWaypoint2d (0x10068980)
 plan a Turn then MoveToFinding (0x100d11c0) to the goal. At the wheel the
 move ends within half the goal's radius. MoveToFinding asks the bot's path
 follower (bot +0xd8, constructor 0x10094f10) for a path when the goal
@@ -9370,7 +9730,7 @@ changes (0x100966c0 → 0x10095fc0).
     0.5 on foot, `0x101287a8`; 0 at the wheel) where an edge leaves less
     than the width beside the crossing (the original also compares twice
     that with a local it never sets; the edge's length is meant). It also
-    fails a climb (0x1003ce50 / 0x1003c220): a run of polygons steeper
+    fails a climb (0x1003ce50 / AIDLL 0x1003c220): a run of polygons steeper
     than the map's slope limit along the ray may rise no more than the
     step height. The limits are the level `AI/AI.ai`'s
     `aiPathfinding.map.maxSlope` (stored as its cosine, 0x1003bfb0 →
@@ -9401,7 +9761,7 @@ changes (0x100966c0 → 0x10095fc0).
     - bend = 1 − maxAngleDiffSlowDown × min(1, angleSlowDownScale × (a −
       minAngleDiffForSlowDown)). a is the sharpest bend within max(3,
       speed × lookAheadTime) m ahead (0x10093c00), or the heading error.
-  - **Size:** the AI object's box (0x100fe990): radius r = its farthest
+  - **Size:** the AI object's box (AIDLL 0x100fe990): radius r = its farthest
     corner from the origin (vt+0x28), the centre radius (vt+0x30), width
     and length. The rewrite takes the box of the vehicle collision LOD's
     points.
@@ -9435,7 +9795,7 @@ changes (0x100966c0 → 0x10095fc0).
     5 s (20 s when that soldier is a bot, player slot `0x84`): a vehicle
     with ITHasCarHorn (the FAVs' `Car_horn`) holds PIFire for 2 s
     (`0x100a5cf0` lets go); any other sends the radio request
-    (`0x100a5990`: 0xb, 6, 3), which the rewrite's bots don't have. Not
+    (`AIDLL 0x100a5990`: 0xb, 6, 3), which the rewrite's bots don't have. Not
     rewritten: the other driver being told (its +0x28 calls).
   - **Car** (0x100e9d40): the error mirrored when moving against the
     direction wanted; turn = 3 × yawScale × error − turn rate; the target
@@ -9466,7 +9826,7 @@ changes (0x100966c0 → 0x10095fc0).
     direction: no speed regulation, the speed wanted only says when to
     sprint (at maxSpeed and over 0.7 of it). The bend counts the
     machine's error too. Stopping (0x100e3f00) lets go of everything.
-  - **Hover tank** (FloatingTankMoveTo 0x1008c7c0, controller
+  - **Hover tank** (FloatingTankMoveTo AIDLL 0x1008c7c0, controller
     0x100de350): no machine, no mesh rays, no avoidance. The way to the
     steering point comes from the infantry steering (0x100ce860), sidestep
     included.
@@ -9595,11 +9955,24 @@ Avoid.
   outside the order's area, 1 − d/(3 maxRange), or for an air target
   1 − d/(1.5 maxRange) with the temperature doubled by anti-air guns,
   max(0.5, 1 + facing)); the target kept unless another scores 1.2 times
-  more; urgency fuzzy(2 best) × weight. Left out: the 20 s a failed
-  target is passed over (+0x30, whose writer isn't traced), the unit-count
-  scaling (0x100d2b30) and the Unit's capability flags (0x100cf5c0/a0,
-  bot vt+0x180).
-- **BBChangeLandingCraft** (vtable 0x10116970, 0x1006f460; the transport
+  more; urgency fuzzy(2 best) × weight. A target whose units (the
+  vehicle's root and seats, 0x100a8cb0's walk) sum battle strengths (the
+  Unit part's +8, capability scaled) against the bot's own type (its
+  Physical's slot 0x40) of 1 or less scores × 0.01 (against the bot's
+  +0x24, 0x100d2b30, which is 1 for every bot, 0x1009ac30): a gunship's
+  soldiers with rifles (battle strength 0 against Helicopter) count for
+  little (`fire3dUnitScale`). An enemy aircraft whose bot pilot targets
+  this bot (slot 0x74 against 0xa8) is passed over. When the current
+  target isn't among the memory's items, a second loop weighs the manned
+  enemy units the side knows within 75 m (600 m for an ITAir bot: the
+  information environment's slot 0x18, 0x100caab0 with −1, filtered by
+  0x100ca960 and 0x100d3530) at a freshness of 1; the one chosen enters
+  the bot's memory as known from others. The "20 s a failed target is
+  passed over" (+0x30) never happens: the map's only accessor
+  (0x1007df70; BBFire's 0x10075ec0 the same) makes a missing stamp at
+  −10000 and nothing writes one; every 60 s dead entries are purged.
+  Left out: the Unit's capability flags (0x100cf5c0/a0, bot vt+0x180).
+- **BBChangeLandingCraft** (vtable 0x10116970, AIDLL 0x1006f460; the transport
   helicopters' pilots and their ParatrooperFixed passengers;
   `BotManager::landingCraftUrgency`): the vehicle's seats weighed as
   BBChange weighs them (0x100d3e70) × 1 for the bot's own when it drives or
@@ -9772,7 +10145,7 @@ slot (23). The weapon, kit and AI templates (`weaponTemplate.*`,
 
 - **The settings object** (AISettings, constructor 0x10051aa0; the
   interface IAISettings, vtbl 0x101148c8, and IAISettingsModifier, vtbl
-  0x10114828, of one object, registered by 0x100c4910): the
+  0x10114828, of one object, registered by AIDLL 0x100c4910): the
   `aiSettings.*` setters write it through the modifier slots
   (maxBots +8 by slot 0 0x1008b9d0, auto controllers +0xc 0x1004f410,
   maxBotsIncludeHumans +0x37 0x1004f420, ignoreCommanderDistance +0x38
@@ -9798,7 +10171,7 @@ slot (23). The weapon, kit and AI templates (`weaponTemplate.*`,
   The keys' U[0, 1) is a fixed sequence here.
 - **Scheduling** (`aiBotManager.*`, the bot manager's second vtable
   0x101196b0): the thresholds (+0x6c, +0x74, absolute: 0x100c5cf0,
-  0x100c5d10) and interleave (+0x60, +0x64: 0x100c5d30) feed the think
+  AIDLL 0x100c5d10) and interleave (+0x60, +0x64: 0x100c5d30) feed the think
   queue (see Scheduling; 0x100c95f0 takes max(0, planned − planned
   waiting) + unplanned unplanned bots); the sensing and system quotients
   (0x100c5d50, 0x100c5da0) are shares of the real-time budget, kept.
@@ -9857,38 +10230,39 @@ The commands (constructor / execute slot), and where the rewrite has them:
 
 **autoControllerTemplate.*** (22)
 
-- BotsScript.cpp: `create` 0x10002210/0x10002310, `active` 0x10002480/0x10002570, `operatesAlone` 0x10002680/0x100027d0, `sendFireWarning` 0x10002850/0x100029a0, `scanningSpeed` 0x10002a10/0x10002b60, `accuracy` 0x10002bf0/0x10002d40, `fov` 0x10002dd0/0x10002f20, `viewDistance` 0x10002fb0/0x10003100, `useSiren` 0x10003190/0x10003310, `reactionTime` 0x10003390/0x100034e0, `targetLostTimeout` 0x10003570/0x100036c0, `neverAttackDeployer` 0x10003750/0x100038a0, `reportEnemiesToTeam` 0x10003920/0x10003a70, `allowTakeOver` 0x10003af0/0x10003c40, `maxTrackingInput` 0x10003cc0/0x10003e10, `checkLineOfFire` 0x10003ea0/0x10003ff0, `discoverCloakedEnemiesDistance` 0x10004070/0x100041c0, `flipOutAtHealth` 0x10004250/0x100043a0, `scanningInputScale` 0x10004430/0x10004580, `reloadOnTeamChange` 0x10004610/0x10004760, `onlyAttackNetworkBattlefieldObjects` 0x100047e0/0x10004930, `simpleFirePlan` 0x100049b0/0x10004b00.
+- AIDLL BotsScript.cpp: `create` 0x10002210/0x10002310, `active` 0x10002480/0x10002570, `operatesAlone` 0x10002680/0x100027d0, `sendFireWarning` 0x10002850/0x100029a0, `scanningSpeed` 0x10002a10/0x10002b60, `accuracy` 0x10002bf0/0x10002d40, `fov` 0x10002dd0/0x10002f20, `viewDistance` 0x10002fb0/0x10003100, `useSiren` 0x10003190/0x10003310, `reactionTime` 0x10003390/0x100034e0, `targetLostTimeout` 0x10003570/0x100036c0, `neverAttackDeployer` 0x10003750/0x100038a0, `reportEnemiesToTeam` 0x10003920/0x10003a70, `allowTakeOver` 0x10003af0/0x10003c40, `maxTrackingInput` 0x10003cc0/0x10003e10, `checkLineOfFire` 0x10003ea0/0x10003ff0, `discoverCloakedEnemiesDistance` 0x10004070/0x100041c0, `flipOutAtHealth` 0x10004250/0x100043a0, `scanningInputScale` 0x10004430/0x10004580, `reloadOnTeamChange` 0x10004610/0x10004760, `onlyAttackNetworkBattlefieldObjects` 0x100047e0/0x10004930, `simpleFirePlan` 0x100049b0/0x10004b00.
 
 **ai.*** (55)
 
 - Bots.cpp: `addSAIStrategy` 0x10008040/0x10008170.
 - BotsScript.cpp: `init` 0x10004dc0/0x10004f10, `getBotCount` 0x100057f0/0x10005880, `getNumberOfActiveBots` 0x100058b0/0x10005940, `getNumberOfDeactivedBots` 0x10005970/0x10005a00, `addBot` 0x10005a30/0x10005bc0, `addUnspawnedBot` 0x10005e30/0x10005f90, `deactivateBot` 0x10006160/0x100062b0, `updateBot` 0x10006300/0x10006450, `botSetWaypoints_Patrol` 0x100067a0/0x10006c70, `botSetWaypoints_Patrol3d` 0x10006dd0/0x10007230, `botMoveTo` 0x10007350/0x100075d0, `botFlyTo` 0x10007620/0x10007990.
-- not rewritten: `botGiveOrder` 0x10006480/0x100065e0, `createSAI` 0x10007a00/0x10007a90, `saiEnable` 0x10007ac0/0x10007c10, `saiMapXDimension` 0x10007ca0/0x10007df0, `saiMapYDimension` 0x10007e70/0x10007fc0, `addPlacement` 0x1000a3b0/0x1000a5c0, `spawnBot` 0x1000a920/0x1000aa80.
+- AIDLL BotsScript.cpp: `botGiveOrder` 0x10006480/0x100065e0 (→ 0x10028dd0: the behaviour's index, 0x10025350, and the modifier set's weights go to the bot's slot 0x40, 0x10098b80, which takes them only while its +0x50 holds; then +0x44 multiplies the personality, 0x10096a50, and +0x9c names the hinted behaviour. No writer of the bot's +0x50 was found, so the order is refused: `BotManager::giveOrder`).
+- not rewritten: `createSAI` 0x10007a00/0x10007a90, `saiEnable` 0x10007ac0/0x10007c10, `saiMapXDimension` 0x10007ca0/0x10007df0, `saiMapYDimension` 0x10007e70/0x10007fc0, `addPlacement` 0x1000a3b0/0x1000a5c0, `spawnBot` 0x1000a920/0x1000aa80.
 - debug or tooling, not rewritten: `createHeightMap` 0x10004b80/0x10004cd0, `readHeightMapFromFile` 0x10004d10/0x10004da0, `debug` 0x10004f40/0x10004fd0, `writeBotPlans` 0x10004ff0/0x10005090, `aiSystemQuotient` 0x100050b0/0x10005200, `setAISystemComponentsQuotient` 0x10005290/0x10005480, `getBotManagerQuotient` 0x100054c0/0x10005550, `getSAIQuotient` 0x10005570/0x10005550, `botStatisticUpdateSpeed` 0x10005600/0x10005750, `validateDataStructuresEnabled` 0x10008290/0x100083e0, `drawBotPlan` 0x10008470/0x100085c0, `drawStrategicAreas` 0x10008640/0x10008790, `drawPathfinding` 0x10008810/0x10008960, `drawMovement` 0x100089e0/0x10008b30, `drawAiming` 0x10008bb0/0x10008d00, `executePlan` 0x10008d80/0x10008ed0, `drawChangeUrgency` 0x10008f50/0x100090a0, `drawOnlyClosestBot` 0x10009120/0x100091b0, `drawAddClosestBot` 0x100091e0/0x10009270, `drawRemoveAllBots` 0x100092f0/0x10009380, `drawAddAllBots` 0x100093b0/0x10009440, `drawAddBot` 0x10009470/0x10009560, `drawRemoveBot` 0x10009640/0x10009730, `drawAddClosestSecondaryBot` 0x10009830/0x100098c0, `pauseAllBots` 0x100098f0/0x10009980, `unpauseAllBots` 0x100099b0/0x10009a40, `pauseAllButClosestPrimaryBot` 0x10009a70/0x10009b00, `pauseAllButClosestSecondaryBot` 0x10009b30/0x10009bc0, `pauseBot` 0x10009bf0/0x10009d20, `showAll` 0x10009e50/0x10009fa0, `getRendCameraPosition` 0x10009fe0/0x1000a140, `getRendCameraRotation` 0x1000a190/0x1000a140, `getCurrentPitchAngle` 0x1000a230/0x1000a2c0, `getCurrentYawAngle` 0x1000a2f0/0x1000a380, `pause` 0x1000aac0/0x1000ac20.
 
 **aiSettings.*** (58)
 
-- Bots.cpp: `setMaxNBots` 0x1000ac80/0x1000ade0, `setViewDistance` 0x1000b400/0x1000b550, `setVehicle` 0x1000b880/0x1000b970, `setVehicleMaterialCost` 0x1000bcb0/0x1000be20, `getViewDistance` 0x1000c210/0x1000c2a0, `setBotSkill` 0x1000c930/0x1000ca80, `setVehicleMods` 0x1000dfc0/0x1000e0e0, `setVehicleBehaviour` 0x1000e470/0x1000e6b0, `setVehicleDefaultBehaviour` 0x1000eae0/0x1000ec00, `setBehaviour` 0x1000f680/0x1000f7b0, `createBehaviourModifiers` 0x1000fa80/0x1000fb70, `setBehaviourModifier` 0x1000fe40/0x1000ff70, `createUCConstant` 0x10010450/0x10010580, `createUCLinear` 0x100106a0/0x10010800, `createUCXInverse` 0x10010980/0x10010b70, `addSensingAgentPattern` 0x10011100/0x10011220.
-- BotsScript.cpp: `setMaxNAutoControllers` 0x1000ae00/0x1000af50, `maxBotsIncludeHumans` 0x1000af80/0x1000b0d0, `setIgnoreCommanderDistance` 0x1000b100/0x1000b250, `setMaxNumberOfBehaviours` 0x1000b280/0x1000b3d0, `setStatsViewDistance` 0x1000b580/0x1000b6d0, `setInformationGridDimension` 0x1000b700/0x1000b850, `setVehicleClusterMapping` 0x1000ba40/0x1000bb60, `setManDownEquipment` 0x1000bf90/0x1000c080, `getInformationGridDimension` 0x1000c150/0x1000c1e0, `getStatsViewDistance` 0x1000c2d0/0x1000c360, `getVehicleClusterMapping` 0x1000c520/0x1000c610, `setNSides` 0x1000c6f0/0x1000c840, `getNSides` 0x1000c870/0x1000c900, `getBotSkill` 0x1000ce10/0x1000cea0, `getNumberOfVehicleGroups` 0x1000ced0/0x1000cf60, `createVehicleGroup` 0x1000d2b0/0x1000d3a0, `addVehicleToVehicleGroup` 0x1000d470/0x1000d5b0, `getSAIUpdateFrequency` 0x1000d700/0x1000d790, `setSAIUpdateFrequency` 0x1000d7c0/0x1000d910, `setRespawnAllowed` 0x1000d940/0x1000da90, `addBotName` 0x1000dac0/0x1000dbe0, `isRespawnAllowed` 0x1000dd30/0x1000ddc0, `overrideMenuSettings` 0x1000ddf0/0x1000df50, `setStandardPersonality` 0x1000e230/0x1000e360, `addInterpreterEntry` 0x1000ed50/0x1000ee70, `removeInterpreterEntry` 0x1000efe0/0x1000f100, `activateDefaultInterpreter` 0x1000f270/0x1000f3a0, `setBasicBotWeights` 0x1000f4c0/0x1000f5b0, `activeBehaviourModifiers` 0x1000fc40/0x1000fd30, `getBehaviourModifier` 0x10010090/0x10010180, `listBehaviourModifiers` 0x10010270/0x10010310, `setSensingAgentPatternName` 0x10010d80/0x10010e70, `setSensingAgentNullPattern` 0x10010f40/0x10011030, `autoSpawnBots` 0x10011420/0x10011570.
+- AIDLL Bots.cpp: `setMaxNBots` 0x1000ac80/0x1000ade0, `setViewDistance` 0x1000b400/0x1000b550, `setVehicle` 0x1000b880/0x1000b970, `setVehicleMaterialCost` 0x1000bcb0/0x1000be20, `getViewDistance` 0x1000c210/0x1000c2a0, `setBotSkill` 0x1000c930/0x1000ca80, `setVehicleMods` 0x1000dfc0/0x1000e0e0, `setVehicleBehaviour` 0x1000e470/0x1000e6b0, `setVehicleDefaultBehaviour` 0x1000eae0/0x1000ec00, `setBehaviour` 0x1000f680/0x1000f7b0, `createBehaviourModifiers` 0x1000fa80/0x1000fb70, `setBehaviourModifier` 0x1000fe40/0x1000ff70, `createUCConstant` 0x10010450/0x10010580, `createUCLinear` 0x100106a0/0x10010800, `createUCXInverse` 0x10010980/0x10010b70, `addSensingAgentPattern` 0x10011100/0x10011220.
+- AIDLL BotsScript.cpp: `setMaxNAutoControllers` 0x1000ae00/0x1000af50, `maxBotsIncludeHumans` 0x1000af80/0x1000b0d0, `setIgnoreCommanderDistance` 0x1000b100/0x1000b250, `setMaxNumberOfBehaviours` 0x1000b280/0x1000b3d0, `setStatsViewDistance` 0x1000b580/0x1000b6d0, `setInformationGridDimension` 0x1000b700/0x1000b850, `setVehicleClusterMapping` 0x1000ba40/0x1000bb60, `setManDownEquipment` 0x1000bf90/0x1000c080, `getInformationGridDimension` 0x1000c150/0x1000c1e0, `getStatsViewDistance` 0x1000c2d0/0x1000c360, `getVehicleClusterMapping` 0x1000c520/0x1000c610, `setNSides` 0x1000c6f0/0x1000c840, `getNSides` 0x1000c870/0x1000c900, `getBotSkill` 0x1000ce10/0x1000cea0, `getNumberOfVehicleGroups` 0x1000ced0/0x1000cf60, `createVehicleGroup` 0x1000d2b0/0x1000d3a0, `addVehicleToVehicleGroup` 0x1000d470/0x1000d5b0, `getSAIUpdateFrequency` 0x1000d700/0x1000d790, `setSAIUpdateFrequency` 0x1000d7c0/0x1000d910, `setRespawnAllowed` 0x1000d940/0x1000da90, `addBotName` 0x1000dac0/0x1000dbe0, `isRespawnAllowed` 0x1000dd30/0x1000ddc0, `overrideMenuSettings` 0x1000ddf0/0x1000df50, `setStandardPersonality` 0x1000e230/0x1000e360, `addInterpreterEntry` 0x1000ed50/0x1000ee70, `removeInterpreterEntry` 0x1000efe0/0x1000f100, `activateDefaultInterpreter` 0x1000f270/0x1000f3a0, `setBasicBotWeights` 0x1000f4c0/0x1000f5b0, `activeBehaviourModifiers` 0x1000fc40/0x1000fd30, `getBehaviourModifier` 0x10010090/0x10010180, `listBehaviourModifiers` 0x10010270/0x10010310, `setSensingAgentPatternName` 0x10010d80/0x10010e70, `setSensingAgentNullPattern` AIDLL 0x10010f40/0x10011030, `autoSpawnBots` 0x10011420/0x10011570.
 - not rewritten: `getVehicle` 0x1000c390/0x1000c4e0, `botSkill` 0x1000cab0/0x1000cc00, `discoverCloakedEnemiesDistance` 0x1000cc60/0x1000cdb0, `getVehicleGroup` 0x1000cf90/0x1000d0e0, `getVehicleGroupName` 0x1000d120/0x1000d270, `getBehaviour` 0x1000f8d0/0x1000fa20.
 - debug or tooling, not rewritten: `showAISettings` 0x10010360/0x10010400, `sensingAgentDebug` 0x10011370/0x10011400.
 
 **aiBotManager.*** (16)
 
-- BotsScript.cpp: `setPlannedDecisionMakingThreshold` 0x100115d0/0x10011720, `setUnplannedDecisionMakingThreshold` 0x10011750/0x100118a0, `setDecisionMakingInterleave` 0x100118d0/0x10011a90, `setSensingQuotient` 0x10011ac0/0x10011c80, `setSystemQuotient` 0x10011cb0/0x10011ef0, `getPlannedDecisionMakingThresholdFull` 0x10011ff0/0x10012080, `getUnplannedDecisionMakingThresholdFull` 0x100120b0/0x100121b0, `getPlannedDecisionMakingInterleave` 0x100121e0/0x100122e0, `getUnplannedDecisionMakingInterleave` 0x10012310/0x100123a0, `getSensingQuotient` 0x100123d0/0x10012460.
+- AIDLL BotsScript.cpp: `setPlannedDecisionMakingThreshold` 0x100115d0/0x10011720, `setUnplannedDecisionMakingThreshold` 0x10011750/0x100118a0, `setDecisionMakingInterleave` 0x100118d0/0x10011a90, `setSensingQuotient` 0x10011ac0/0x10011c80, `setSystemQuotient` 0x10011cb0/0x10011ef0, `getPlannedDecisionMakingThresholdFull` 0x10011ff0/0x10012080, `getUnplannedDecisionMakingThresholdFull` 0x100120b0/0x100121b0, `getPlannedDecisionMakingInterleave` 0x100121e0/0x100122e0, `getUnplannedDecisionMakingInterleave` 0x10012310/0x100123a0, `getSensingQuotient` 0x100123d0/0x10012460.
 - debug or tooling, not rewritten: `getLodLevelFullTicks` 0x10011f30/0x10011fc0, `getMemoryUpdateQuotient` 0x10012490/0x10012520, `getSystemDecisionMakingQuotient` 0x10012550/0x100125e0, `getSystemPathfindingQuotient` 0x10012610/0x100126a0, `getSystemSensingQuotient` 0x100126d0/0x10012760, `enableBotScriptDebugger` 0x10012790/0x100128f0.
 
 **aiStrategy.*** (43)
 
 - Bots.cpp: `createStrategy` 0x10012930/0x10012a20, `aggression` 0x10012da0/0x10012ef0, `numberOfAttacks` 0x10013d80/0x10013ed0, `numberOfDefences` 0x10013f50/0x10014110, `setPrerequisite` 0x10014190/0x10014280, `setStrategicObjectsModifier` 0x100146f0/0x10014940, `createPrerequisite` 0x10015080/0x10015170, `addCondition` 0x100155e0/0x10015710, `createConstantCondition` 0x10015c10/0x10015e50, `setConditionStrength` 0x10016c00/0x10016d40.
-- BotsScript.cpp: `setActiveStrategy` 0x10012af0/0x10012be0, `getActiveStrategyName` 0x10012cb0/0x10012d50, `timeLimit` 0x10012f90/0x100130e0, `getPrerequisiteWeight` 0x10013180/0x10013210, `setPrerequisiteWeight` 0x10013250/0x100133a0, `listStrategies` 0x10013400/0x100134a0, `getStrategicObjectsModifier` 0x100149f0/0x10014bf0, `clearAllStrategicObjectsModifiers` 0x10014c90/0x10014d20, `setActivePrerequisite` 0x10015240/0x10015330, `getActivePrerequisiteName` 0x10015400/0x100154a0, `setActiveCondition` 0x10015870/0x10015960, `getActiveConditionName` 0x10015a30/0x10015ad0, `forceStrategy` 0x10017420/0x10017560.
+- AIDLL BotsScript.cpp: `setActiveStrategy` 0x10012af0/0x10012be0, `getActiveStrategyName` 0x10012cb0/0x10012d50, `timeLimit` 0x10012f90/0x100130e0, `getPrerequisiteWeight` 0x10013180/0x10013210, `setPrerequisiteWeight` 0x10013250/0x100133a0, `listStrategies` 0x10013400/0x100134a0, `getStrategicObjectsModifier` 0x100149f0/0x10014bf0, `clearAllStrategicObjectsModifiers` 0x10014c90/0x10014d20, `setActivePrerequisite` 0x10015240/0x10015330, `getActivePrerequisiteName` 0x10015400/0x100154a0, `setActiveCondition` 0x10015870/0x10015960, `getActiveConditionName` 0x10015a30/0x10015ad0, `forceStrategy` 0x10017420/0x10017560.
 - not rewritten: `setTreeModifier` 0x100134f0/0x100136c0, `getTreeModifier` 0x10013720/0x10013860, `setTreeModifierCombatStrength` 0x100138b0/0x10013b00, `getTreeModifierCombatStrength` 0x10013b60/0x10013d30, `addRequiredPrecedingStrategy` 0x10014350/0x10014440, `addProhibitedPrecedingStrategy` 0x10014520/0x10014610, `addSpecificObjectModifier` 0x10014d60/0x10014ea0, `completeStrategies` 0x10014fd0/0x10015060, `createHomogenousCondition` 0x100160b0/0x10016260, `createHeterogeneousCondition` 0x10016420/0x10016650, `createAreaCondition` 0x100168b0/0x10016a10, `getConditionStrength` 0x10016d90/0x10016e90, `setIsAbortCondition` 0x10016ed0/0x10017020, `isAbortCondition` 0x10017080/0x10017110, `completeConditions` 0x10017150/0x100171e0, `targetValue` 0x10017200/0x10017380, `thresholdSpeed` 0x10017850/0x100179a0.
 - debug or tooling, not rewritten: `listPrerequisites` 0x100154f0/0x10015590, `listConditions` 0x10015b20/0x10015bc0, `enableDebug` 0x100176a0/0x100177f0.
 
 **aiStrategicArea.*** (62)
 
-- Bots.cpp: `createFromControlPoint` 0x10018060/0x10018200, `setActive` 0x10018530/0x10018620, `addNeighbour` 0x100187f0/0x100188e0, `layer` 0x10018d50/0x10018ea0, `addObjectTypeFlag` 0x10019db0/0x10019ef0, `vehicleSearchRadius` 0x1001a700/0x1001a8c0, `setOrderPosition` 0x1001b0b0/0x1001b1e0, `addWayPoint` 0x1001b6d0/0x1001b860, `setSide` 0x1001c700/0x1001c850.
-- BotsScript.cpp: `create` 0x10017a00/0x10017c30, `getActive` 0x10018700/0x100187a0, `addTwoWayNeighbour` 0x100189c0/0x10018ae0, `getNeighbours` 0x10018c60/0x10018d00, `removeAllNeighbours` 0x10019350/0x100193e0, `removeObjectTypeFlag` 0x1001a180/0x1001a2c0, `setTakeable` 0x1001a960/0x1001ab30, `isTakeable` 0x1001ab80/0x1001acd0, `removeAllObjectTypeFlags` 0x1001ad20/0x1001adb0, `basicTemperature` 0x1001aec0/0x1001b010, `getOrderPosition` 0x1001b350/0x1001b4f0, `getSide` 0x1001c8a0/0x1001c960, `getTemperature` 0x1001cfd0/0x1001d120, `getStrategicAreaNames` 0x1001e110/0x1001e1b0, `isInside` 0x1001e200/0x1001e330.
+- Bots.cpp: `createFromControlPoint` AIDLL 0x10018060/0x10018200, `setActive` 0x10018530/0x10018620, `addNeighbour` 0x100187f0/0x100188e0, `layer` 0x10018d50/0x10018ea0, `addObjectTypeFlag` 0x10019db0/0x10019ef0, `vehicleSearchRadius` 0x1001a700/0x1001a8c0, `setOrderPosition` 0x1001b0b0/0x1001b1e0, `addWayPoint` 0x1001b6d0/0x1001b860, `setSide` 0x1001c700/0x1001c850.
+- AIDLL BotsScript.cpp: `create` 0x10017a00/0x10017c30, `getActive` 0x10018700/0x100187a0, `addTwoWayNeighbour` 0x100189c0/0x10018ae0, `getNeighbours` 0x10018c60/0x10018d00, `removeAllNeighbours` 0x10019350/0x100193e0, `removeObjectTypeFlag` 0x1001a180/0x1001a2c0, `setTakeable` 0x1001a960/0x1001ab30, `isTakeable` 0x1001ab80/0x1001acd0, `removeAllObjectTypeFlags` 0x1001ad20/0x1001adb0, `basicTemperature` 0x1001aec0/0x1001b010, `getOrderPosition` 0x1001b350/0x1001b4f0, `getSide` 0x1001c8a0/0x1001c960, `getTemperature` 0x1001cfd0/0x1001d120, `getStrategicAreaNames` 0x1001e110/0x1001e1b0, `isInside` 0x1001e200/0x1001e330.
 - not rewritten: `removeActive` 0x10018470/0x10018500, `setPosition` 0x10019400/0x100195a0, `getPosition` 0x10019600/0x10019740, `centerPosition` 0x10019790/0x10019930, `topLeftCorner` 0x100199e0/0x10019c10, `setObjectTypeFlags` 0x10019f30/0x1001a080, `getObjectTypeFlags` 0x1001a0c0/0x1001a150, `setStatus` 0x1001a300/0x1001a4d0, `category` 0x1001a520/0x1001a670, `getObjectTypeFlagMapping` 0x1001add0/0x1001ae70, `removeWayPoint` 0x1001bad0/0x1001bc60, `clearWayPoints` 0x1001c0b0/0x1001c200, `addAllowedVehicleGroup` 0x1001cb20/0x1001cc10, `attachLandingZone` 0x1001ccf0/0x1001cde0, `getStatus` 0x1001d170/0x1001d330, `getNumberOfPresentUnits` 0x1001d390/0x1001d4e0, `getNumberOfAvailableAttackers` 0x1001d530/0x1001d680, `getNumberOfAvailableDefenders` 0x1001d6d0/0x1001d820, `getNumberOfAssignedUnits` 0x1001d870/0x1001d9c0, `getCategoryName` 0x1001da10/0x1001db60, `getCategoryFromName` 0x1001dba0/0x1001dc90, `createNewCategory` 0x1001dd70/0x1001de60, `strategicAreaName` 0x1001e4c0/0x1001e5b0, `addAllowedUnit` 0x1001e940/0x1001ea30, `addExpelledUnit` 0x1001eb00/0x1001ebf0, `addLandingZoneUnit` 0x1001ecc0/0x1001edb0.
 - debug or tooling, not rewritten: `setVisible` 0x10018f30/0x10019080, `getVisible` 0x100190d0/0x10019160, `drawVehicleSearchRadi` 0x100191b0/0x10019300, `list` 0x10019cc0/0x10019d60, `listOrderPositions` 0x1001b5e0/0x1001b680, `removeClosestWayPoint` 0x1001bef0/0x1001c060, `setWayPointsToDraw` 0x1001c3e0/0x1001c500, `clearWaypointToDraw` 0x1001c650/0x1001c6e0, `enableDebug` 0x1001c9a0/0x1001caf0, `listLandingZones` 0x1001ced0/0x1001cf70, `showNeighbours` 0x1001df30/0x1001e080, `saveAll` 0x1001e6c0/0x1001e7e0.
 
@@ -9899,7 +10273,7 @@ The commands (constructor / execute slot), and where the rewrite has them:
 
 **aiPathfinding.*** (10)
 
-- Bots.cpp: `createMap` 0x1001fd40/0x1001fe30, `traceMap` 0x100200f0/0x100201e0, `maxWaterDepth` 0x10022430/0x10022580.
+- AIDLL Bots.cpp: `createMap` 0x1001fd40/0x1001fe30, `traceMap` 0x100200f0/0x100201e0, `maxWaterDepth` 0x10022430/0x10022580.
 - BotsScript.cpp: `activeMap` 0x1001ff10/0x10020000.
 - debug or tooling, not rewritten: `getMapList` 0x100202d0/0x10020370, `saveQuadTrees` 0x10021e80/0x10021f20, `loadQuadTrees` 0x10021f40/0x10021fd0, `loadGTSData` 0x10021ff0/0x10022080, `exportGTSMeshes` 0x100220a0/0x10022130, `exportGTSMeshesWithinBoundary` 0x10022160/0x100223d0.
 
@@ -9932,23 +10306,28 @@ The commands (constructor / execute slot), and where the rewrite has them:
   stays on the target.
 - **Explosives and the weapon choice:** the rays bisect
   `GameWorld::lineOfSight`. `+0x248` is set by the fire plan (0x100795a0)
-  when it adds a move to the order's spot (0x100d11c0; 0x100775f0 tests
+  when it adds a move to the order's spot (AIDLL 0x100d11c0; 0x100775f0 tests
   the spot set): bot vt+0x254 (slot 149, 0x1009b370) with 1, from the
   builder's two MoveToFinding sites; cleared by the statement 0x100d4e20
   and the bot's resets (0x10097..). The builder decides it for a new
   target (the pattern's per-bot byte, set by its slot 7 0x10077650 when
   the target changes): the spot (the order's area position for the bot's
-  map, 0x100c1150) set and reachable (the follower's slots 4 and 8), and
-  either the target can't be approached (no Mobile part of its own or its
-  root's, and the pathfinder's slot 0x94 refuses the way 30 m from it
-  towards the bot) or the bot stands more than 30 m (50 m when neither it
-  nor the target is ITSoldier) from the spot with the target on the far
-  side (dot under 0); never with a close-combat weapon (type 7).
-  `BotManager::fireKeepsToOrder`; the plan then walks to the spot while
-  it fights. Stand-ins: reachability and the approach are "on the mesh";
-  the air-target clause (target ITAir and the plan weapon's slot 0x28 at
-  2) isn't traced. The rest of the 14.7 KB builder is the rewrite's
-  BotManager::fire.
+  map, 0x100c1150, with the area set, 0x100c0ef0) replaced by the head of
+  the bot's goal object (bot slot 0x34 → +0x80, set by vt+0x38: its slot
+  8) when the goal's urgency where the bot stands (slot 4) is over 0.1,
+  else no spot; and either the target can't be approached (no Mobile part
+  of its own or its root's, the bot with one, and the pathfinder's slot
+  0x94, 0x1003fa60 → 0x1003d460, finds none of 10 points evenly from the
+  target to 30 m towards the bot on the bot's map, height tolerance 2.5 m
+  for a soldier, 5 m otherwise), or the target is ITAir and the bot's
+  Armament setIsAntiAircraft (slot 0x28, 0x100f0840) is 2, or the bot
+  stands more than 30 m (50 m when neither it nor the target is ITSoldier)
+  from the spot with the target on the far side (dot under 0); never with
+  a close-combat weapon (type 7). `BotManager::fireKeepsToOrder`; the plan
+  then walks to the spot while it fights. Stand-in: the walk keeps the
+  aim's look and goes by throttle and strafe against it (the plan's move
+  and aim share the look in the original). The rest of the 14.7 KB
+  builder is the rewrite's BotManager::fire.
   Stand-ins: the target's Mobile slot 0x78 (0x008a1960: a soldier's
   interface 0xc4c5 slot 0x108, not traced) is its speed; a human's
   attention on the bot (the sensing agent's stamp 0x100eb7f0, whose
@@ -9967,7 +10346,7 @@ The commands (constructor / execute slot), and where the rewrite has them:
   per-map points +8/+0x1c/+0x30 aren't kept: every vehicle counts) and the
   room test for ITAir vehicles that aren't ITHelicopter (0x1006c3e0). The
   get_in answers are rewritten (see Radio), and the bail_out radio on
-  taking the way out: 0x100a5990(type 0, the AI's channel 7) when the
+  taking the way out: AIDLL 0x100a5990(type 0, the AI's channel 7) when the
   bot's object's health is at or under the slot 0x68 value + 0.1. That
   slot is the bot manager's (`DAT_10139500`, constructor 0x100c9c50,
   vtable 0x10119738 slot 0x68 = 0x100c5cd0: its +0xdc, 0.3), not
@@ -9987,8 +10366,7 @@ The commands (constructor / execute slot), and where the rewrite has them:
   vehicle and weapon has its `ai/*.ai`. Levels without
   `StrategicAreas.ai` (three of the 46 with a mesh) leave the original's
   SAI without areas; the rewrite deviates and makes one per control point.
-- **Strategy:** vehicles are always known to a side (soldiers follow the
-  knowledge above), a unit's ammo counts as full in its capability factor, and a seated
+- **Strategy:** a unit's ammo counts as full in its capability factor, and a seated
   soldier counts only through its vehicle's Unit (whether it counts on
   its own isn't settled).
 - **Revive:** the time left uses the respawn countdown, or 15 s. The
@@ -10016,6 +10394,8 @@ The commands (constructor / execute slot), and where the rewrite has them:
 `bf2142 --bots N [--simulate S]` adds bots and, with `--simulate`, runs S
 seconds headless and prints the scores. With `BF2142_BOT_STATS` set, it
 also prints how long the bots ran each behaviour and how far they drove.
+`BF2142_BOT_SEED=<n>` starts the bots' own draws elsewhere (the default
+sequence is fixed): one round's figures are chaotic, so compare seeds.
 
 ### Navigation mesh
 
@@ -10780,8 +11160,10 @@ uploaded as SwayOffset from +0x1b8 by `0x1010e270`): angle_i =
 fmod(angle_i + dt × speed_i, 2π) (+0x178, +0xf8), offset = (sin a ·
 amp_i, cos a · amp_i) (+0x138). Undergrowth.cfg's SwaySpeed, SwaySpeedDiff,
 SwayScale, SwayScaleDiff land at +0x48..+0x54 (defaults 1, 0.2, 0.15,
-0.01); how they are spread over the 16 isn't traced, so the rewrite
-spreads the speeds over 1 ± 0.2 and keeps SwayScale as each amplitude.
+0.01); the 16 are drawn once from them by `0x1010ad20` (speed = r / 2^24 ×
+SwaySpeedDiff + SwaySpeed, amplitude likewise, phase r × 3.7450704e-07:
+see [the undergrowth](#undergrowth-renddx9-undergrowthsystem) above and `Undergrowth.h`), before Undergrowth.cfg
+is read, so with the constructor's defaults.
 
 ## The renderer's switches, roads' view distance, debug fps, video textures (RendDX9)
 
@@ -10844,7 +11226,8 @@ routes these the same way (`ui::Player::setVideoOpener`, `movie::MenuVideo`);
 not matched: the 256 x 256 size the clip is told, and advancing only while
 drawn. `0x10117200` (a two-entry Video cache in SwiffRender) is unreachable.
 
-**Demo camera.** Its render side is all the exe's: `adjustDemoFov`
+**Demo camera.** Its render side is all the exe's (the rewrite's:
+`src/Main/DemoCamera.h`, above): `adjustDemoFov`
 (`0x00424947` → `0x004030b0`), `togglePlayerDemo` / `toggleCameraDemo`
 (`0x005fa440` / `0x005fa130`, the camera's slot 0x80) and the keyframe
 interpolation `0x005fa210` give RendDX9 an ordinary camera; RendDX9 has no

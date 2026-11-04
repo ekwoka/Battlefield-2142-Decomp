@@ -559,6 +559,18 @@ public:
 		// +0x298; IAIGame vt+0x24, BF2142.exe 0x00895d90, answers it to
 		// the AI).
 		bool capturable = true;
+		// ControlPoint isVisible (the template's ControlPointInfo block
+		// +0x58, template +0x2f0, 1 by default; the runtime +0x1a1 through
+		// interface 0xc4d1 slot 0x3c, 0x005bb3d0): on clients the point's
+		// start (0x005bbe30) hides its object and its three team flags from
+		// the scene's cull (object flag 2, 0x00705650) when 0; nothing in
+		// capture, spawning, the AI or the network reads it. The 48-player
+		// Titan maps' GamePlayObjects set it 0 on their Conquest points.
+		bool visible = true;
+		// showOnMinimap (+0x2f1, 1 by default; slot 0x44 0x005bb440): read
+		// by the minimap, the map and the spawn screen (0x00780410,
+		// 0x00789b50, 0x0078bd00 ...).
+		bool showOnMinimap = true;
 	};
 	std::vector<ControlPointInfo> controlPointList() const;
 	// The control points of a supply group (host.sgl_getControlPointsInGroup,
@@ -605,6 +617,9 @@ public:
 	// unlocked item for it (the customise screen's choice is not in yet).
 	// Without a stats server nothing is unlocked; `all` unlocks everything.
 	void setUnlocks(int player, std::vector<std::string> containers, bool all = false);
+	// The unlocks the player owns besides those chosen (player slot 0x2a8):
+	// replaceWithoutEquip containers apply by them (the kit build 0x00570ab0).
+	void setOwnedUnlocks(int player, std::vector<std::string> containers);
 	void setBattery(int player, float battery); // tests and the scripts' view
 	// The player's totalDogtagCount (player +0x104, set by the stats
 	// scripts' pmgr_p_set; the kit-selection event carries it to clients):
@@ -724,6 +739,11 @@ public:
 	// Whether a player's soldier is on a ladder (its LadderContainer).
 	bool onLadder(int player) const;
 	const physics::CollisionWorld& staticCollision() const { return m_collision; }
+	// The projectile LOD's faces a round's hit lands on, for its decal's
+	// clipping (RendDX9 0x101655c0 walks the hit mesh's faces): the static
+	// objects' (world space) for object 0, else that body's (object space);
+	// null without one.
+	const physics::CollisionWorld* projectileCollision(uint32_t object) const;
 	// The ground the soldiers and bodies stand on (enablePhysics').
 	const physics::Ground& ground() const { return m_ground; }
 	// A living player's soldier movement (its control and physics body),
@@ -852,6 +872,7 @@ public:
 		// The yaw bundle's regulateVector x (template +0x314) and maxSpeed x:
 		// the bundle counter-turns with the hull (0x005644b0, see stepGunner).
 		float regulateYaw = 0, yawSpeed = 0;
+		float ignoreParentYaw = 0; // the yaw bundle's ignoreParentRotation x (+0x344, see stepGunner)
 		float cameraRegulateYaw = 0; // the camera's regulateVector x
 		// The seat's camera when it turns on the mouse (a Camera with
 		// inputToYaw PIMouseLookX / inputToPitch PIMouseLookY: the drivers'
@@ -1295,6 +1316,17 @@ public:
 		// ECGameLogicGLTitanCoreExplosion (event 0x14) at -38 %.
 		int effectLevel = 0;      // the armour effect group last started (0: none)
 		bool coreExplosion = false;
+		// Its name tag's data (the Nametag component, object +0x8c):
+		// nametag.healthActivationLevel (template +0x24, 100 by default,
+		// getter slot 0x50): RendDX9's refresh (0x100f40d0) under 100 sets
+		// tag flag 0x1000000 and the secondary icon (slot 0x44(1)) once the
+		// first armour's percent is at or below it (a change of icon or
+		// team blinks the tag); armor.addNametagOnDestroy (+0x195, getter
+		// slot 0x1f4): each drop of the hit points re-pushes the tag to the
+		// NametagManager (0x00655460 at 0x6555e0 -> *0x00a20a00 slot 0x30),
+		// counted here.
+		float healthActivationLevel = 100;
+		int nametagPushes = 0;
 	};
 	std::vector<TitanInfo> titans() const;
 	// The AI runs on the server (AIDLL's interface 0xb47ce4, its slots 0x18
@@ -1318,6 +1350,9 @@ public:
 		float hitPoints = 0, maxHitPoints = 0;
 		bool wreck = false;
 		physics::Vec3 position; // in the world
+		float percent = 0;      // the armour's (vtable 0x40)
+		float healthActivationLevel = 100; // as TitanInfo's
+		int nametagPushes = 0;
 	};
 	std::vector<TitanPartInfo> titanParts(int team) const;
 	// The game logic's damage (0x004c0e40) as a shot's hit: through the
@@ -1436,6 +1471,8 @@ private:
 			float aiDeviation = 0;      // the component's +0x28 (setAiDeviation)
 			bool manned = false;        // someone in its seat last tick (stepUnmannedGuns)
 			int barrel = 0;             // the MultiFireComp's next barrel (+0x1a8)
+			float hullYaw = NAN;        // the hull's yaw at the last tick (ignoreParentRotation)
+			uint64_t gunnedTick = 0;    // the last tick its seat was taken (stepGunner)
 		};
 		std::vector<Gun> guns;
 		// Each seat's camera angles and speeds (SeatLayout::camera), degrees.
@@ -1692,6 +1729,9 @@ private:
 	std::vector<Body> m_bodies;
 	physics::CollisionWorld m_collision; // static objects, soldier LOD
 	physics::CollisionWorld m_projectileCollision; // static objects, projectile LOD
+	// The static objects' projectile-LOD radius (the largest part's), for
+	// the penetration's way out (2.1 x the object's radius).
+	std::unordered_map<uint32_t, float> m_staticProjectileRadius;
 
 	// The mobile mesh physics between objects (BF2/Physics, see
 	// MeshCollision.cpp): the static objects' parts (each template of a
@@ -1803,7 +1843,8 @@ private:
 		int squad = 0;
 		bool squadLeader = false;
 		std::string kitTemplate, soldierTemplate; // the next spawn's kit (empty: the team's assault kit)
-		std::vector<std::string> unlocked; // ItemContainer templates
+		std::vector<std::string> unlocked; // ItemContainer templates chosen (equipped)
+		std::vector<std::string> owned;    // and owned but not chosen (replaceWithoutEquip's test)
 		bool allUnlocked = false;
 		// The kit's weapons by slot (itemIndex: 1 knife, 2 sidearm, 3
 		// primary, then gadgets); the one in hand is `weapon`, the others
@@ -1815,6 +1856,7 @@ private:
 		};
 		std::vector<Carried> carried;
 		int inHand = -1; // index into carried
+		int previousSlot = -1; // the slot drawn before (0x005883d0's pick: soldier +0x1f4)
 		bool selectHeld = false;
 		bool abilityActive = false; // the gadget in hand is working this tick
 		bool cloaked = false;       // CamouflageAmmoComp held with the trigger down
@@ -1866,7 +1908,8 @@ private:
 		struct Lock {
 			uint32_t target = 0;
 			int state = 0;
-			float held = 0, lost = 0;
+			int64_t lockStart = 0;    // the tick the target was taken (the lock's clock)
+			int64_t losingSince = -1; // locked, another candidate since this tick
 			float maxDistance = 0;
 			int system = 0;        // target.targetSystem: 1 TSHeatSeeking, 2 TSLaserGuided
 			double chosenAt = 0;   // the component's +0x4c: when the target was taken
@@ -2078,6 +2121,9 @@ private:
 	void stepVehicleAbility(Player& player, float seconds);
 	void stepProjectiles(float seconds);
 	void steerSeeker(Projectile& projectile, float seconds);
+	void wireSettings(Projectile& projectile, const world::ObjectTemplate& firearm) const;
+	void steerClosest(Projectile& projectile, float seconds);
+	void launchLocked(Projectile& projectile, const Player& player) const;
 	void damage(uint32_t object, float amount, uint32_t projectileMaterial, uint32_t surfaceMaterial,
 		int attacker = -1, bool splash = false); // the attacking player; an explosion's splash
 	std::vector<std::unique_ptr<Player>> m_players; // by id
@@ -2214,6 +2260,8 @@ private:
 	void dropKit(Player& player);
 	void fillKit(Player& player, world::ObjectTemplate* kitTemplate, world::ObjectTemplate* primary);
 	bool pickUpClosestKit(Player& player, float radius);
+	// The use key's pick-up of a placed item (0x004bce30): see Kits.cpp.
+	bool pickUpPlaced(Player& player);
 	void stepDroppedKits();
 	std::vector<SoundEvent> m_sounds;
 	std::vector<WeaponSoundEvent> m_weaponSounds;
@@ -2281,6 +2329,10 @@ private:
 	// (maxDepthForExplosion) and the end effect's up (useCollisionNormal);
 	// false when it doesn't go off.
 	bool detonateHit(Projectile& p, const physics::Vec3& point, const physics::Vec3& normal, uint32_t hitObject);
+	// DefaultPenetrateComp (0x005eaca0): whether the round goes on through
+	// what it hit; if so it is moved past it with what is left of its damage.
+	bool penetrate(Projectile& p, const physics::CollisionWorld::Hit& hit, uint32_t hitObject, const Body* hitBody,
+		bool soldier);
 	uint32_t m_projectileSerial = 0;
 	std::vector<BattlefieldReport> m_battlefieldReports;
 	void stepRemoteBodies(float seconds);
@@ -2437,6 +2489,9 @@ private:
 		float criticalTime = 0; // +0xf0: seconds burnt since the last loss
 		int state = 0;          // vtable 0x60 (0x00651c20): 0 alive, 1 wreck, 2 destroyed
 		bool off = false;       // its subtree's collision gone (0x00651c60)
+		bool addNametagOnDestroy = false; // armor.addNametagOnDestroy (+0x195)
+		float healthActivationLevel = 100; // nametag.healthActivationLevel (+0x24)
+		int nametagPushes = 0;
 		int destroyEvent = 0;   // Python.onDestroyEvent
 		TitanPartInfo::Kind kind = TitanPartInfo::Other;
 		std::string seat;       // the gun seat (a hub PlayerControlObject) it lies under

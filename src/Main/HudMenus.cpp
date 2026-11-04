@@ -453,13 +453,42 @@ void CommanderMenu::click(int player, int row, int column)
 	}
 	const int squad = std::atoi(m_hud.listCell(15, row, kCellId).c_str());
 	if (column == 3) {
-		return; // the leader's voice
+		// The leader's voice (player slot 0x300; VoipPlayerMute to the server).
+		if (onMuteLeader) {
+			for (const auto& other : playerList()) {
+				if (other.team == me.team && other.squad == squad && other.squadLeader) {
+					onMuteLeader(other.id);
+				}
+			}
+		}
+		return;
 	}
-	m_selected = {squad};
 	if (column == 4) {
+		m_selected = {squad};
 		m_current = squad;
 		tabs.squadMembers = true;
+	} else if (ctrlHeld && ctrlHeld()) {
+		// Slot 0x20 (0x007aa9f0): this one toggled, the others kept.
+		if (!m_selected.erase(squad)) {
+			m_selected.insert(squad);
+		}
+	} else if (shiftHeld && shiftHeld()) {
+		// Slot 0x30 (0x007a9d30): every squad from the anchor to this one.
+		if (m_anchor < 0) {
+			return;
+		}
+		for (int s = std::min(m_anchor, squad); s <= std::max(m_anchor, squad); ++s) {
+			m_selected.insert(s);
+		}
+	} else {
+		// Slot 0x1c (0x007ab2b0): the others cleared, this one toggled.
+		const bool was = m_selected.count(squad) && m_selected.size() == 1;
+		m_selected.clear();
+		if (!was) {
+			m_selected.insert(squad);
+		}
 	}
+	m_anchor = m_selected.count(squad) ? squad : -1;
 }
 
 void CommanderMenu::update(int player)

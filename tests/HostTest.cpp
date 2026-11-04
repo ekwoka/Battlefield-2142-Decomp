@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -373,6 +374,12 @@ TEST(NetHost_RadioCommanderToolsAndSquads)
 	dice::hfe::world::ObjectTemplateManager templates;
 	templates.registerType(1, "SupplyObject");
 	templates.create("SupplyObject", "supply_crate")->settings()["sharedStorageSize"] = "500";
+	templates.registerType(2, "OverheadCamera");
+	{
+		auto* camera = templates.create("OverheadCamera", "MultiPlayerOverheadCamera");
+		camera->settings()["height"] = "260";
+		camera->settings()["networkableInfo"] = "GhostAlwaysWithPrediction";
+	}
 	dice::hfe::world::ObjectManager objects;
 	dice::hfe::game::GameWorld round(templates, objects);
 	dice::hfe::game::GameLogic logic;
@@ -401,6 +408,12 @@ TEST(NetHost_RadioCommanderToolsAndSquads)
 	CHECK(hosted.start());
 
 	net::GameClient a, b;
+	for (net::GameClient* c : {&a, &b}) {
+		c->world().setGhostTemplates([&templates](uint32_t id) {
+			const dice::hfe::world::ObjectTemplate* t = templates.findById(id);
+			return t ? net::ghostTemplateFrom(templates, *t) : net::GhostTemplateNode {};
+		});
+	}
 	net::GameClientOptions options;
 	options.playerName = "Alpha";
 	CHECK(a.connect("127.0.0.1", hosted.gamePort(), options));
@@ -469,6 +482,29 @@ TEST(NetHost_RadioCommanderToolsAndSquads)
 		const net::RemotePlayer* pa = a.world().player(idA);
 		return round.commander(team) == idA && pa && pa->commander;
 	}));
+
+	// The commander's camera (CommanderCam 0x24: x, height, z): the server
+	// makes the team's overhead camera and places it over the point at its
+	// template's height (0x005f8170); the clients see it as its ghost. B's
+	// (not the commander) moves nothing.
+	const auto commanderCam = [](float x, float y, float z) {
+		net::GameEvent cam;
+		cam.type = net::kEvCommanderCam;
+		for (const float v : {x, y, z}) {
+			uint32_t bits = 0;
+			std::memcpy(&bits, &v, 4);
+			cam.values.push_back(bits);
+		}
+		return cam;
+	};
+	b.sendEvent(commanderCam(-50, 80, 70));
+	a.sendEvent(commanderCam(120, 80, -30));
+	net::Vec3f overhead;
+	CHECK(pumpUntil(step, [&] { return b.world().overheadCamera(team, overhead); }));
+	CHECK(std::abs(overhead.x - 120) < 0.01f && std::abs(overhead.z + 30) < 0.01f && std::abs(overhead.y - 260) < 0.01f);
+	CHECK(hosted.overheadCamera(team) != 0 && hosted.overheadCamera(3 - team) == 0);
+	a.sendEvent(commanderCam(40, 80, 10));
+	CHECK(pumpUntil(step, [&] { return a.world().overheadCamera(team, overhead) && std::abs(overhead.x - 40) < 0.01f; }));
 
 	// The commander's supply drop from his client; B's is refused.
 	b.commanderTool(net::CommanderToolUse::Supplies, 30, 40);

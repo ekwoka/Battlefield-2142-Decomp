@@ -1,5 +1,6 @@
 // Firearms and projectiles.
 #include "Game/Weapons.h"
+#include "Physics/MaterialManager.h"
 #include "TestMain.h"
 #include "World/ObjectTemplateManager.h"
 #include "World/Object.h"
@@ -839,4 +840,117 @@ TEST(Weapons_SoftThrowScalesThePower)
 	frag->settings().erase("fire.altFireInput");
 	game::FireArm d(game::FireArmSettings::fromTemplate(*frag));
 	CHECK(!d.tick(1 / 30.0f, false, true) && !d.throwing());
+}
+
+// DefaultPenetrateComp (0x005eaca0, called from the round's 0x005b54e0):
+// the material default damageLoss -1 stops everything; a solid needs
+// allowSolidPenetration unless the material has overrideNeverPenetrate
+// (the Titans' shields, 4112 / 4118); one-sided materials cost
+// minDamageLoss, others thickness x damageLoss within min and max, or max
+// without a way out; the round goes on with at least a tenth of its
+// template damage.
+TEST(Weapons_PenetrationRules)
+{
+	game::ProjectileSettings bullet;
+	bullet.penetrator = true;
+	bullet.damage = 40;
+	game::ProjectileSettings rocket = bullet;
+	rocket.allowSolidPenetration = false;
+	rocket.allowLiquidPenetration = false;
+	rocket.damage = 110000;
+	game::ProjectileSettings none = bullet;
+	none.penetrator = false;
+
+	physics::Material concrete; // the defaults (0x0060a9b0)
+	CHECK(concrete.damageLoss == -1 && concrete.maxDamageLoss == 100000);
+	CHECK(game::penetration(bullet, concrete, true) == game::Penetration::No);
+
+	physics::Material glass; // Penetrable_Glass_common
+	glass.damageLoss = 0;
+	glass.minDamageLoss = 10;
+	glass.isOneSided = true;
+	CHECK(game::penetration(bullet, glass, true) == game::Penetration::Loss);
+	CHECK(game::penetration(rocket, glass, true) == game::Penetration::No);
+	CHECK(game::penetration(none, glass, true) == game::Penetration::No);
+	CHECK(game::penetration(bullet, glass, false) == game::Penetration::No); // the terrain
+	CHECK(game::penetrationLoss(glass, false, 0) == 10);
+	CHECK(game::penetrationLeft(bullet, 40 - 10) && !game::penetrationLeft(bullet, 3.9f));
+
+	physics::Material shield; // veh_titan_penetrate_shield_red
+	shield.damageLoss = 1000;
+	shield.minDamageLoss = 1000;
+	shield.penetrationDeviation = 0;
+	shield.overrideNeverPenetrate = true;
+	CHECK(game::penetration(rocket, shield, true) == game::Penetration::Loss);
+	const float loss = game::penetrationLoss(shield, true, 1.64f);
+	CHECK(std::fabs(loss - 1640) < 0.5f);
+	CHECK(game::penetrationLeft(rocket, 110000 - loss));
+	CHECK(!game::penetrationLeft(bullet, 40 - loss));
+	CHECK(game::penetrationLoss(shield, false, 0) == 100000);
+
+	physics::Material water; // Water_deep
+	water.damageLoss = 25;
+	water.hasWaterPhysics = true;
+	CHECK(game::penetration(bullet, water, false) == game::Penetration::Free);
+	CHECK(game::penetration(rocket, water, false) == game::Penetration::No);
+}
+
+// delayToUse (template +0x2b8, round(x 30) ticks at +0x2bc): after the
+// draw (0x005c47d0) the busy test (0x005c14f0) holds that many ticks; the
+// magazine swaps at changeMagAt (0.7) of the reload (0x005f4830), the
+// weapon busy to its end; autoReload + instantReloadOnEnable fill an
+// empty magazine at the draw (0x005f4bb0); toggleWhenNoAmmo makes an
+// empty weapon without magazines unselectable (0x005f39c0).
+TEST(Weapons_DrawDelayMagazineSwapAndToggle)
+{
+	game::FireArmSettings smg;
+	smg.roundsPerMinute = 1800;
+	smg.magSize = 2;
+	smg.nrOfMags = 3;
+	smg.reloadTime = 2;
+	smg.delayToUseTicks = 35; // eu_smg's 1.166 s
+	game::FireArm a(smg);
+	a.enable(true);
+	CHECK(a.readying());
+	int ticks = 0;
+	while (!a.tick(1 / 30.0f, true) && ticks < 100) {
+		++ticks;
+	}
+	CHECK(ticks == 35);
+	// Empty it: the reload starts by itself, the swap at 1.4 s, the end at 2 s.
+	while (a.roundsInMag() > 0) {
+		a.tick(1 / 30.0f, true);
+	}
+	CHECK(a.reloading());
+	int swapAt = -1, readyAt = -1;
+	for (int t = 1; t <= 90 && readyAt < 0; ++t) {
+		a.tick(1 / 30.0f, false);
+		if (swapAt < 0 && a.roundsInMag() == 2) {
+			swapAt = t;
+		}
+		if (!a.reloading()) {
+			readyAt = t;
+		}
+	}
+	CHECK(swapAt >= 41 && swapAt <= 43);
+	CHECK(readyAt >= 59 && readyAt <= 61);
+	CHECK(a.magsLeft() == 2);
+
+	game::FireArmSettings c4;
+	c4.magSize = 1;
+	c4.nrOfMags = 1;
+	c4.reloadTime = 1;
+	c4.autoReload = true;
+	c4.instantReloadOnEnable = true;
+	c4.toggleWhenNoAmmo = true;
+	game::FireArm b(c4);
+	b.enable(true);
+	CHECK(b.tick(1 / 30.0f, true) && b.roundsInMag() == 0);
+	b.dropReload();       // put away before its reload
+	b.enable(true);       // drawn again: filled at once
+	CHECK(b.roundsInMag() == 1 && b.magsLeft() == 0 && b.selectable());
+	CHECK(b.tick(1 / 30.0f, false) == false);
+	for (int t = 0; t < 5 && !b.tick(1 / 30.0f, t % 2 == 0); ++t) {
+	}
+	CHECK(b.roundsInMag() == 0 && !b.selectable()); // the last one gone
 }

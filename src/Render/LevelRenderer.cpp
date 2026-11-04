@@ -1,8 +1,12 @@
 #include "LevelRenderer.h"
+#include "OvergrowthLod.h"
+#include "MeshLights.h"
+#include "Scene/OvergrowthSettings.h"
 #include "MeshQueues.h"
 #include "SceneMath.h"
 
 #include <array>
+#include <limits>
 
 #include "Geometry/GeometryTemplateManager.h"
 #include "Geometry/MeshFile.h"
@@ -1317,26 +1321,50 @@ void LevelRenderer::loadOvergrowth(const LevelSources& sources)
 	};
 	readAtlas(directory + "OvergrowthAtlas.tai", m_overgrowthAtlas);
 	readAtlas(directory + "OvergrowthAtlas_alphatest.tai", m_overgrowthAlphaTestAtlas);
-	std::string text;
-	if (m_overgrowthAtlas.empty() || !sources.files.readText(directory + "Overgrowth.con", text)) {
+	if (m_overgrowthAtlas.empty()) {
 		return;
 	}
+	// The console's Overgrowth.* rows as the level's Overgrowth.con set
+	// them (scene::OvergrowthSettings); without a console (--view of a
+	// level whose scripts didn't run) the file's view distances are read.
 	float viewDistance = 0, scale = 1, close = 0;
-	std::istringstream lines(text);
-	std::string command;
-	while (lines >> command) {
-		std::string value;
-		std::getline(lines, value);
-		const std::string name = lower(command);
-		if (name == "overgrowth.viewdistance") {
-			viewDistance = static_cast<float>(std::atof(value.c_str()));
-		} else if (name == "overgrowth.viewdistancescale") {
-			scale = static_cast<float>(std::atof(value.c_str()));
-		} else if (name == "overgrowth.closedistpercentage") {
-			close = static_cast<float>(std::atof(value.c_str()));
+	m_overgrowthCloseDistFade = 0.3f;
+	m_overgrowthLodTimer = 0;
+	if (sources.overgrowth && sources.overgrowth->configured) {
+		viewDistance = sources.overgrowth->viewDistance;
+		scale = sources.overgrowth->viewDistanceScale;
+		close = sources.overgrowth->closeDistPercentage;
+		m_overgrowthCloseDistFade = sources.overgrowth->closeDistFade;
+		m_overgrowthLodTimer = sources.overgrowth->lodTimer;
+	} else {
+		std::string text;
+		if (!sources.files.readText(directory + "Overgrowth.con", text)) {
+			return;
+		}
+		std::istringstream lines(text);
+		std::string command;
+		while (lines >> command) {
+			std::string value;
+			std::getline(lines, value);
+			const std::string name = lower(command);
+			if (name == "overgrowth.viewdistance") {
+				viewDistance = static_cast<float>(std::atof(value.c_str()));
+			} else if (name == "overgrowth.viewdistancescale") {
+				scale = static_cast<float>(std::atof(value.c_str()));
+			} else if (name == "overgrowth.closedistpercentage") {
+				close = static_cast<float>(std::atof(value.c_str()));
+			} else if (name == "overgrowth.closedistfade") {
+				m_overgrowthCloseDistFade = static_cast<float>(std::atof(value.c_str()));
+			} else if (name == "overgrowth.lodtimer") {
+				m_overgrowthLodTimer = static_cast<float>(std::atof(value.c_str()));
+			}
 		}
 	}
 	m_overgrowthViewDistance = viewDistance > 0 ? viewDistance : 500.0f;
+	// The cells' size (0x10120420 / 0x1008f510), fitted to the terrain.
+	const terrain::Heightmap* primary = sources.heightmaps.primary();
+	const float side = primary && primary->loaded() ? std::min(primary->worldWidth(), primary->worldDepth()) : 0.0f;
+	m_overgrowthCellSize = OvergrowthCells::cellSize(m_overgrowthViewDistance, side);
 	m_overgrowthCloseDistance = viewDistance * scale * close;
 	m_overgrowthCloseBase = viewDistance * close;
 	m_overgrowthScriptScale = scale;
@@ -1732,8 +1760,22 @@ void LevelRenderer::addObject(const LevelSources& sources, const world::Object& 
 	if (const world::ObjectTemplate* objectTemplate = object.objectTemplate()) {
 		const size_t first = m_instances.size();
 		addTemplate(sources, *objectTemplate, Mat4 {}, objectTransform(object.position(), object.rotation()), object.id(), 0);
+		const terrain::Heightmap* ground = sources.heightmaps.primary();
 		for (size_t i = first; i < m_instances.size(); ++i) {
-			m_instances[i].overgrowth = object.isOvergrowth() && m_overgrowthCloseDistance > 0;
+			Instance& instance = m_instances[i];
+			instance.overgrowth = object.isOvergrowth() && m_overgrowthCloseDistance > 0;
+			if (!instance.overgrowth) {
+				continue;
+			}
+			// The type's factor from its geometry's radius, and the cell the
+			// tree is in (OvergrowthLod.h).
+			instance.overgrowthTypeFactor = OvergrowthBlend::typeFactor(std::max(instance.mesh->bounds.radius, 0.0f));
+			const float size = m_overgrowthCellSize;
+			const float x = std::floor(instance.world.at(3, 0) / size) * size;
+			const float z = std::floor(instance.world.at(3, 2) / size) * size;
+			instance.overgrowthCell[0] = x;
+			instance.overgrowthCell[1] = ground && ground->loaded() ? ground->heightAt(x + size * 0.5f, z + size * 0.5f) : 0.0f;
+			instance.overgrowthCell[2] = z;
 		}
 	}
 }
@@ -2420,20 +2462,50 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 	m_gpu.flushUploads();
 }
 
-// The lights of this frame: the effect managers' LightSources and the
-// placed objects' (the levels' light bundles), the ones nearest the camera
-// first (the shaders take kMaxPointLights; RendDX9 picks per mesh,
-// lightManager.maxLightsPer*Mesh, within lightCullDistance).
+// The lights of this frame (MeshLights.h): the effect managers'
+// LightSources and the placed objects' dynamic ones (the levels' light
+// bundles; a static one, isDynamic 0, is the lightmaps' only), flickered,
+// listed when their spheres meet the view within lightCullDistance. The
+// meshes pick their own from the list (drawInstance); the terrain, roads
+// and particles take the nearest the camera.
 void LevelRenderer::collectPointLights(const Camera& camera)
 {
 	m_pointLights.clear();
+	m_listedLights.clear();
+	m_cameraLights.clear();
 	if (!m_sources) {
 		return;
 	}
-	std::vector<std::pair<float, effects::PointLight>> found;
+	// The light manager's limits: the dynamic shadows' quality sets them
+	// (0x10010040), else lightManager.* as the scripts left them.
+	if (m_sources->shadows) {
+		m_lightLimits = LightLimits::forShadowQuality(m_sources->shadows->quality);
+	} else {
+		m_lightLimits.cullDistance = m_sources->lights.lightCullDistance;
+		m_lightLimits.staticMesh = m_sources->lights.maxLightsPerStaticMesh;
+		m_lightLimits.bundledMesh = m_sources->lights.maxLightsPerBundledMesh;
+		m_lightLimits.skinnedMesh = m_sources->lights.maxLightsPerSkinnedMesh;
+	}
+	const float cull = m_lightLimits.cullDistance;
+	if (cull <= 0) {
+		return;
+	}
 	const auto consider = [&](const effects::PointLight& light) {
-		const Vec3f d = Vec3f {light.position.x, light.position.y, light.position.z} - camera.position;
-		found.push_back({std::sqrt(dot(d, d)) - light.range2, light});
+		const Vec3f at {light.position.x, light.position.y, light.position.z};
+		const Vec3f d = at - camera.position;
+		const float reach = std::max(light.range2, 0.0f);
+		if (std::sqrt(dot(d, d)) - reach > cull || !m_frameFrustum.containsSphere(at, reach)) {
+			return;
+		}
+		m_pointLights.push_back(light);
+		ListedLight listed;
+		listed.position[0] = at.x;
+		listed.position[1] = at.y;
+		listed.position[2] = at.z;
+		listed.radius = reach;
+		listed.spot = light.spot;
+		listed.affectsLightmapped = light.affectsLightmapped;
+		m_listedLights.push_back(listed);
 	};
 	// VideoSettings' dynamic lighting 0 turns the dynamic lights off (the
 	// light manager's slot 0xf4, 0x10010040): the effects' lights.
@@ -2450,6 +2522,9 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 	const world::Object* current = nullptr;
 	Mat4 objectWorld;
 	for (const ObjectLight& placed : m_objectLights) {
+		if (!placed.look.dynamic) {
+			continue; // every caller's filter asks for isDynamic (0x100a7f00 bit 8)
+		}
 		if (!current || current->id() != placed.object) {
 			current = m_sources->objects.find(placed.object);
 			if (!current) {
@@ -2464,22 +2539,30 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 		effects::PointLight light;
 		light.position = {world.at(3, 0), world.at(3, 1), world.at(3, 2)};
 		light.color = placed.look.color;
-		light.range1 = placed.look.range1;
-		light.range2 = placed.look.range2;
+		// 0x0064a920: the ranges flickered, the colour not.
+		const float f = flickerFactor(placed.look.flicker, placed.look.flicker > 0 ? m_flickerRand.next() : 0);
+		light.range1 = placed.look.range1 * f;
+		light.range2 = placed.look.range2 * f;
+		light.templateRange2 = placed.look.range2;
 		light.spot = placed.look.spot;
 		const effects::Vec3& a = placed.look.direction;
 		light.direction = {a.x * world.at(0, 0) + a.y * world.at(1, 0) + a.z * world.at(2, 0),
 			a.x * world.at(0, 1) + a.y * world.at(1, 1) + a.z * world.at(2, 1),
 			a.x * world.at(0, 2) + a.y * world.at(1, 2) + a.z * world.at(2, 2)};
 		light.cone = placed.look.cone;
-		// A static light (isDynamic 0) is in the lightmaps already (the
-		// lightmap generator's lights): only unlightmapped surfaces take it.
-		light.affectsLightmapped = placed.look.affectsLightmapped && placed.look.dynamic;
+		light.affectsLightmapped = placed.look.affectsLightmapped;
 		consider(light);
 	}
-	std::stable_sort(found.begin(), found.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
-	for (size_t i = 0; i < found.size() && i < static_cast<size_t>(kMaxPointLights); ++i) {
-		m_pointLights.push_back(found[i].second);
+	// The rest's: the nearest the camera first.
+	std::vector<std::pair<float, int>> byCamera;
+	for (size_t i = 0; i < m_pointLights.size(); ++i) {
+		const effects::PointLight& l = m_pointLights[i];
+		const Vec3f d = Vec3f {l.position.x, l.position.y, l.position.z} - camera.position;
+		byCamera.push_back({std::sqrt(dot(d, d)) - l.range2, static_cast<int>(i)});
+	}
+	std::stable_sort(byCamera.begin(), byCamera.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+	for (size_t i = 0; i < byCamera.size() && i < static_cast<size_t>(kMaxPointLights); ++i) {
+		m_cameraLights.push_back(byCamera[i].second);
 	}
 }
 
@@ -2494,11 +2577,32 @@ void LevelRenderer::bindMeshLayers(SDL_GPURenderPass* pass, const Submesh* subme
 	SDL_BindGPUFragmentSamplers(pass, kMeshLayerSamplers, samplers, 3);
 }
 
+void LevelRenderer::applyMeshLights(LightingUniforms& uniforms, const int* picked, int count, LightedMesh kind) const
+{
+	uniforms.lightCount[0] = static_cast<float>(count);
+	uniforms.lightCount[1] = static_cast<float>(static_cast<int>(kind) + 1);
+	for (int i = 0; i < count; ++i) {
+		const effects::PointLight& l = m_pointLights[static_cast<size_t>(picked[i])];
+		// Static meshes by the light's (flickered) range, bundled and
+		// skinned ones by the template's; a spot is a point light here.
+		const float range = kind == LightedMesh::Static || l.templateRange2 < 0 ? l.range2 : l.templateRange2;
+		const float position[4] = {l.position.x, l.position.y, l.position.z, range};
+		const float color[4] = {l.color.x, l.color.y, l.color.z, l.range1};
+		const float spot[4] = {l.direction.x, l.direction.y, l.direction.z, -2.0f};
+		const float extra[4] = {0, 1, 0, 0};
+		std::copy(position, position + 4, uniforms.lightPosition[i]);
+		std::copy(color, color + 4, uniforms.lightColor[i]);
+		std::copy(spot, spot + 4, uniforms.lightSpot[i]);
+		std::copy(extra, extra + 4, uniforms.lightExtra[i]);
+	}
+}
+
 void LevelRenderer::applyPointLights(LightingUniforms& uniforms) const
 {
-	uniforms.lightCount[0] = static_cast<float>(m_pointLights.size());
-	for (size_t i = 0; i < m_pointLights.size(); ++i) {
-		const effects::PointLight& l = m_pointLights[i];
+	uniforms.lightCount[0] = static_cast<float>(m_cameraLights.size());
+	uniforms.lightCount[1] = 0;
+	for (size_t i = 0; i < m_cameraLights.size(); ++i) {
+		const effects::PointLight& l = m_pointLights[static_cast<size_t>(m_cameraLights[i])];
 		const float position[4] = {l.position.x, l.position.y, l.position.z, l.range2};
 		const float color[4] = {l.color.x, l.color.y, l.color.z, l.range1};
 		const float spot[4] = {l.direction.x, l.direction.y, l.direction.z, l.spot ? l.cone : -2.0f};
@@ -2577,64 +2681,83 @@ void LevelRenderer::buildDecals()
 		if (decal.object != 0 && m_sources->quality && !m_sources->quality->decalsEnabled()) {
 			continue;
 		}
+		Mat4 place;
+		const auto turn = [&place](const effects::Vec3& d) {
+			return effects::Vec3 {d.x * place.at(0, 0) + d.y * place.at(1, 0) + d.z * place.at(2, 0),
+				d.x * place.at(0, 1) + d.y * place.at(1, 1) + d.z * place.at(2, 1),
+				d.x * place.at(0, 2) + d.y * place.at(1, 2) + d.z * place.at(2, 2)};
+		};
+		const auto objectPlace = [&](const effects::Vec3& p) {
+			return turn(p) + effects::Vec3 {place.at(3, 0), place.at(3, 1), place.at(3, 2)};
+		};
 		if (decal.object != 0) {
 			// On a moving object: from its space to the world's.
 			const world::Object* holder = m_sources->objects.find(decal.object);
 			if (!holder || holder->hidden()) {
 				continue;
 			}
-			const Mat4 place = objectTransform(holder->position(), holder->rotation());
-			const auto turn = [&place](const effects::Vec3& d) {
-				return effects::Vec3 {d.x * place.at(0, 0) + d.y * place.at(1, 0) + d.z * place.at(2, 0),
-					d.x * place.at(0, 1) + d.y * place.at(1, 1) + d.z * place.at(2, 1),
-					d.x * place.at(0, 2) + d.y * place.at(1, 2) + d.z * place.at(2, 2)};
-			};
+			place = objectTransform(holder->position(), holder->rotation());
 			n = turn(n);
 			tangent = turn(tangent);
-			at = turn(at) + effects::Vec3 {place.at(3, 0), place.at(3, 1), place.at(3, 2)};
+			at = objectPlace(at);
 		}
 		// Its age's fade (0x10163570: not drawn below 0x3240's 0.05).
 		const float alpha = m_particleSettings.decalAlpha(decal.age);
 		if (alpha < scene::ParticleSystemSettings::kDecalCullAlpha) {
 			continue;
 		}
-		// A world decal on the terrain, clipped to it once (effects::
-		// clipDecal; 0x10165f60 with the terrain's 3 x 3 cells about the hit,
-		// 0x10164d70, whose triangles it doesn't turn away by angle). Off
-		// the terrain (on a static object) or with decalGeomClipAngle 0 the
-		// flat square (0x10164940).
-		if (decal.object == 0 && ps.decalGeomClipAngle > 0 && ground && ground->loaded() &&
-			ground->covers(at.x, at.z)) {
-			if (!decal.clipped) {
-				decal.clipped = std::make_shared<const std::vector<effects::DecalVertex>>(
-					clipDecalToTerrain(*ground, decal, ps.decalNormalOffset));
+		// Clipped once (effects::clipDecal, 0x10165f60) to the surface it hit,
+		// in the decal's own space: a world decal on the terrain to its 3 x 3
+		// cells about the hit (0x10164d70, whose triangles it doesn't turn
+		// away by angle); one on a static object or a vehicle to that
+		// object's collision faces (the projectile LOD's, the mesh the
+		// exe's add 0x005a36d0 passes) about the hit, turned away past
+		// decalGeomClipAngle as 0x101655c0 does. With decalGeomClipAngle 0,
+		// off the terrain without faces, or with nothing left, the flat
+		// square (0x10164940).
+		if (ps.decalGeomClipAngle > 0 && !decal.clipped) {
+			std::vector<effects::DecalVertex> pieces;
+			if (decal.object == 0 && decal.surface == 0 && ground && ground->loaded() &&
+				ground->covers(decal.position.x, decal.position.z)) {
+				pieces = clipDecalToTerrain(*ground, decal, ps.decalNormalOffset);
+			} else if ((decal.object != 0 || decal.surface != 0) && m_sources->collisionFaces) {
+				std::vector<std::array<effects::Vec3, 3>> faces;
+				m_sources->collisionFaces(decal.object, decal.object != 0 ? 0 : decal.surface, decal.position,
+					decal.size * 0.5f * 1.4143f, faces);
+				pieces = effects::clipDecal(decal.position, decal.normal, decal.tangent, decal.size * 0.5f, decal.frame,
+					faces, ps.decalGeomClipAngle, ps.decalNormalOffset);
 			}
-			if (!decal.clipped->empty()) {
-				const uint32_t first = static_cast<uint32_t>(vertices.size());
-				for (const effects::DecalVertex& p : *decal.clipped) {
-					Vertex vertex {};
-					vertex.position[0] = p.position.x;
-					vertex.position[1] = p.position.y;
-					vertex.position[2] = p.position.z;
-					vertex.normal[0] = n.x;
-					vertex.normal[1] = n.y;
-					vertex.normal[2] = n.z;
-					vertex.texCoord[0] = p.u;
-					vertex.texCoord[1] = p.v;
-					vertex.lightmapCoord[0] = decal.color.x;
-					vertex.lightmapCoord[1] = decal.color.y;
-					vertex.part = decal.color.z;
-					vertex.weight = alpha;
-					vertices.push_back(vertex);
+			decal.clipped = std::make_shared<const std::vector<effects::DecalVertex>>(std::move(pieces));
+		}
+		if (decal.clipped && !decal.clipped->empty()) {
+			const uint32_t first = static_cast<uint32_t>(vertices.size());
+			for (const effects::DecalVertex& p : *decal.clipped) {
+				effects::Vec3 position = p.position;
+				if (decal.object != 0) {
+					position = objectPlace(position);
 				}
-				const uint32_t count = static_cast<uint32_t>(vertices.size()) - first;
-				if (!m_decalGroups.empty() && m_decalGroups.back().texture == image) {
-					m_decalGroups.back().vertexCount += count;
-				} else {
-					m_decalGroups.push_back({image, false, first, count});
-				}
-				continue;
+				Vertex vertex {};
+				vertex.position[0] = position.x;
+				vertex.position[1] = position.y;
+				vertex.position[2] = position.z;
+				vertex.normal[0] = n.x;
+				vertex.normal[1] = n.y;
+				vertex.normal[2] = n.z;
+				vertex.texCoord[0] = p.u;
+				vertex.texCoord[1] = p.v;
+				vertex.lightmapCoord[0] = decal.color.x;
+				vertex.lightmapCoord[1] = decal.color.y;
+				vertex.part = decal.color.z;
+				vertex.weight = alpha;
+				vertices.push_back(vertex);
 			}
+			const uint32_t count = static_cast<uint32_t>(vertices.size()) - first;
+			if (!m_decalGroups.empty() && m_decalGroups.back().texture == image) {
+				m_decalGroups.back().vertexCount += count;
+			} else {
+				m_decalGroups.push_back({image, false, first, count});
+			}
+			continue;
 		}
 		const effects::Vec3 u = tangent * (decal.size * 0.5f);
 		const effects::Vec3 v = physics::cross(n, tangent) * (decal.size * 0.5f);
@@ -2855,12 +2978,23 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 	m_cloakedList.clear();
 	m_culledInstances = 0;
 	const Frustum frustum = Frustum::fromViewProjection(viewProjection);
+	m_frameFrustum = frustum; // the lights' list (collectPointLights)
 	bool uploaded = false;
 	const scene::RendererSettings rendererDefaults;
 	const scene::RendererSettings& renderer =
 		m_sources && m_sources->renderer ? *m_sources->renderer : rendererDefaults;
 	const float zoom = viewZoom(camera);
 	const float closeOvergrowth = overgrowthCloseDistance() * zoom;
+	// lodTimer's seconds, and the camera's height over the ground (the
+	// cells' near fade).
+	const uint64_t overgrowthNow = SDL_GetTicks();
+	const float overgrowthSeconds =
+		m_lastOvergrowthTicks ? std::min(static_cast<float>(overgrowthNow - m_lastOvergrowthTicks) / 1000.0f, 0.1f) : 0.0f;
+	m_lastOvergrowthTicks = overgrowthNow;
+	const terrain::Heightmap* groundMap = m_sources ? m_sources->heightmaps.primary() : nullptr;
+	const float cameraAboveGround = groundMap && groundMap->loaded()
+		? camera.position.y - groundMap->heightAt(camera.position.x, camera.position.z)
+		: 100.0f;
 	static const bool cloakAll = [] { // BF2142_POST_EFFECT=camo: every soldier cloaked (screenshots)
 		const char* forced = std::getenv("BF2142_POST_EFFECT");
 		return forced && std::string(forced) == "camo";
@@ -2918,20 +3052,13 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 		}
 		DrawItem item {&instance, instance.mesh, instance.lightmap, instance.lightmapTransform, interior};
 		if (instance.overgrowth && m_sources) {
+			// OvergrowthLod.h: the near pass's cross-fade within R, the
+			// cells' fades for the "_lod" meshes beyond.
 			const Vec3f origin {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
 			const Vec3f d = (sphere.radius >= 0 ? sphere.center : origin) - camera.position;
-			// Dropped beyond Overgrowth.viewDistance, faded over its last 30%.
-			if (m_overgrowthViewDistance > 0) {
-				const float share = std::sqrt(dot(d, d)) / m_overgrowthViewDistance;
-				if (share >= 1.0f) {
-					continue;
-				}
-				if (share > 0.7f) {
-					item.fade = instance.fade * std::clamp((1.0f - share) / 0.3f, 0.0f, 1.0f);
-				}
-			}
-			const float nearRadius = closeOvergrowth + std::max(sphere.radius, 0.0f);
-			if (dot(d, d) > nearRadius * nearRadius) {
+			const float distance = std::sqrt(dot(d, d));
+			const float nearRadius = closeOvergrowth * instance.overgrowthTypeFactor + std::max(sphere.radius, 0.0f);
+			const auto lodMesh = [&]() -> const GpuMesh* {
 				Instance::Lod& entry = instance.overgrowthLod;
 				if (!entry.resolved) {
 					entry.resolved = true;
@@ -2940,12 +3067,50 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 					}
 					uploaded = true;
 				}
-				if (entry.mesh) {
-					item.mesh = entry.mesh;
-					item.lightmap = nullptr;
-					m_drawList.push_back(item);
+				return entry.mesh;
+			};
+			if (distance >= nearRadius) {
+				// In its cell's batch: kept while the cell's nearest corner is
+				// within viewDistance, faded over its last 30% and near the
+				// camera (0x10120ef0, 0x10121410).
+				const float size = m_overgrowthCellSize;
+				const float* cell = instance.overgrowthCell;
+				float nearest = std::numeric_limits<float>::max();
+				for (int corner = 0; corner < 4; ++corner) {
+					const Vec3f at {cell[0] + (corner & 1 ? size : 0.0f), cell[1], cell[2] + (corner & 2 ? size : 0.0f)};
+					const Vec3f e = at - camera.position;
+					nearest = std::min(nearest, dot(e, e));
+				}
+				const float kept = OvergrowthCells::distanceFade(std::sqrt(nearest), m_overgrowthViewDistance);
+				if (kept < 0) {
 					continue;
 				}
+				const Vec3f centre = Vec3f {cell[0] + size * 0.5f, cell[1], cell[2] + size * 0.5f} - camera.position;
+				const float fade = kept * OvergrowthCells::nearFade(std::sqrt(dot(centre, centre)), cameraAboveGround);
+				if (const GpuMesh* lod = lodMesh()) {
+					item.mesh = lod;
+					item.lightmap = nullptr;
+					item.fade = instance.fade * fade;
+					m_drawList.push_back(item);
+				}
+				continue;
+			}
+			float w = OvergrowthBlend::weight(distance, nearRadius, instance.overgrowthTypeFactor, m_overgrowthCloseDistFade);
+			w = OvergrowthBlend::eased(w, instance.overgrowthLodState, overgrowthSeconds, m_overgrowthLodTimer);
+			if (w < 1) {
+				if (const GpuMesh* lod = lodMesh()) {
+					DrawItem far = item;
+					far.mesh = lod;
+					far.lightmap = nullptr;
+					far.fade = instance.fade * OvergrowthBlend::lodAlpha(w);
+					m_drawList.push_back(far);
+				}
+			}
+			if (w <= 0) {
+				continue;
+			}
+			if (w < 1) {
+				item.fade = instance.fade * OvergrowthBlend::fullAlpha(w);
 			}
 		}
 		const bool noLods = renderer.staticNoLods && !base.skinned && !base.bundled;
@@ -3564,11 +3729,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		{lighting(m_viewFog, lights, lights.staticSunColor, lights.staticSkyColor, 0, true),
 			lighting(m_viewFog, lights, lights.staticSunColor, lights.staticSkyColor, 0.5f, true)},
 	};
-	for (auto& row : uniformsFor) {
-		for (LightingUniforms& uniforms : row) {
-			applyPointLights(uniforms);
-		}
-	}
+	// The objects' point lights are their own (drawInstance).
 	const float windSpeed = m_sources && m_sources->wind ? m_sources->wind->speedAt() : 0.0f;
 	// The lighting level's bundled and skinned meshes (QualitySettings).
 	const bool hemiAndShadows = !m_sources || !m_sources->quality || m_sources->quality->meshHemiAndShadows();
@@ -3576,6 +3737,18 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	const auto drawInstance = [&](const DrawItem& item, MeshQueue queue) {
 		const Instance& instance = *item.instance;
 		bool any = false;
+		// Its point lights (MeshLights.h): the listed ones about its origin.
+		const LightedMesh lightKind = item.mesh->skinned ? LightedMesh::Skinned
+			: item.mesh->bundled                         ? LightedMesh::Bundled
+														 : LightedMesh::Static;
+		int picked[kMaxPointLights];
+		int pickedCount = 0;
+		if (!m_listedLights.empty()) {
+			const float origin[3] = {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
+			pickedCount = pickMeshLights(m_listedLights.data(), m_listedLights.size(), origin,
+				std::max(item.mesh->bounds.radius, 0.0f), lightKind, item.lightmap != nullptr, m_lightLimits, picked,
+				kMaxPointLights);
+		}
 		for (const Submesh& submesh : item.mesh->submeshes) {
 			any = any || queueOf(submesh, item.drawnFade()) == queue;
 		}
@@ -3663,6 +3836,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 				SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
 			}
 			LightingUniforms uniforms = uniformsFor[lightmapped][submesh.alphaReference > 0];
+			applyMeshLights(uniforms, picked, pickedCount, lightKind);
 			materialUniforms(uniforms, submesh, item.drawnFade(), seconds);
 			specularUniforms(uniforms, submesh, camera, lights);
 			if (bound->skinned || bound->bundled) {

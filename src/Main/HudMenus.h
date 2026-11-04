@@ -153,8 +153,10 @@ private:
 // menu's +0x1c0, +0x1c3 and +0x1c4, the HUD variables
 // CommanderSquadTabShowFull, CommanderMapTabShowFull and
 // CommanderToolsTabShowFull; closing the squad tab also clears +0x1c1,
-// ShowSquadMemberList). Their first state isn't known (the menu's
-// constructor wasn't found): open.
+// ShowSquadMemberList). The menu's constructor (0x007ac090, vtable
+// 0x009b5860, the HUD's +0xe4) opens the squad, map and tools tabs
+// (+0x1c0 / +0x1c3 / +0x1c4 = 1) and closes the members, the leader's
+// stats and the order picture (+0x1c1 / +0x1c2 / +0x1c5 = 0).
 struct CommanderTabs {
 	bool squad = true, squadMembers = false, map = true, tools = true;
 	void toggleSquad()
@@ -173,10 +175,16 @@ struct CommanderTabs {
 // 0x007a9c00). A click on column 4 makes that squad the only one selected
 // and shows its members (0x007a9f10: menu state 0x11, list data 14 and
 // CurrentSquadName, CurrentSquadLeaderName); a click elsewhere selects it
-// alone too (slot 0x1c; with Shift slot 0x20 adds it, not done here).
-// Column 3 mutes the squad leader's voice (slot 0x300), not done here.
-// The commander's orders go to the selected squads (0x007a9f60 sends one
-// to each squad slot 0x34 reports selected).
+// alone, or deselects it when it was the only one (slot 0x1c, 0x007ab2b0);
+// with Ctrl (HUD +0x235: c_GILeftCtrl / c_GIRightCtrl) slot 0x20
+// (0x007aa9f0) toggles it among the others, with Shift (+0x236) slot 0x30
+// (0x007a9d30) adds every squad from the anchor (+0xcc, the last one
+// clicked into the selection; nothing without one) to it. Column 3 mutes
+// or unmutes the squad leader's voice (his player slot 0x300 and
+// VoipPlayerMute 0x26 to the server).
+// The commander's orders go to the selected squads (the order handler 0x007d6ab0
+// sends one to each squad slot 0x34 reports selected; 0x007a9f60 is the
+// radio messages', CommanderMenu.sendRadioMessage).
 class CommanderMenu {
 public:
 	CommanderMenu(game::GameWorld& round, hud::HudManager& hud);
@@ -186,6 +194,11 @@ public:
 	void click(int player, int row, int column);
 	void deselect();
 	const std::set<int>& selected() const { return m_selected; }
+	// The modifiers held, and the leader's voice toggled (column 3).
+	std::function<bool()> ctrlHeld, shiftHeld;
+	std::function<void(int leader)> onMuteLeader;
+	// The squad whose members show (+0xac; -1 none).
+	void showSquad(int squad) { m_current = squad; }
 	CommanderTabs tabs;
 	// A joined game's players and requests (the server's, HudWorld.h).
 	void setWorld(const host::HudWorld* world) { m_world = world; }
@@ -201,6 +214,7 @@ private:
 	hud::HudManager& m_hud;
 	std::set<int> m_selected;
 	int m_current = -1; // +0xac: the squad whose members show
+	int m_anchor = -1;  // +0xcc: the range's start
 };
 
 // The squad leaders' requests and the commander's answers (BF2142.exe's

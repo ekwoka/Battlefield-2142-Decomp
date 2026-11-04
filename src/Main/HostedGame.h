@@ -155,6 +155,17 @@ public:
 	uint16_t gamePort() const { return m_server.port(); }
 	// Objects the clients load themselves (the level's static objects): never ghosts.
 	void setStaticObjects(std::set<uint32_t> ids) { m_static = std::move(ids); }
+	// The terrain the teams' overhead cameras are kept over (0x005f8170:
+	// 80 m inside an extent over 160 m; none if never set).
+	void setTerrainExtent(float originX, float originZ, float extent)
+	{
+		m_terrainOrigin[0] = originX;
+		m_terrainOrigin[1] = originZ;
+		m_terrainExtent = extent;
+	}
+	// A team's overhead camera object (MultiPlayerOverheadCamera, class
+	// 0x948c), 0 before its commander first moved it.
+	uint32_t overheadCamera(int team) const { return team == 1 || team == 2 ? m_overheadCameras[team] : 0; }
 	// One simulation tick (call before GameWorld::tick): takes what the
 	// clients sent and sends them the world.
 	void tick();
@@ -266,6 +277,13 @@ private:
 	// networkableInfo: missiles, grenades, mines, C4...; FireComp makes
 	// them on the server only, 0x005f31d0 / 0x005f1440) as ghosts.
 	void trackProjectiles();
+	// CommanderCam (0x00510b30 -> 0x005f8410 / 0x005f8170): the team's
+	// overhead camera, made on first use (squad manager slot 0x7c,
+	// 0x004c5120), over (x, z).
+	void moveOverheadCamera(int team, float x, float z);
+	uint32_t m_overheadCameras[3] {};
+	float m_terrainOrigin[2] {};
+	float m_terrainExtent = 0;
 	void sendBattlefieldReports();
 	const game::Projectile* projectileOf(const Ghost& ghost) const;
 	struct Client {

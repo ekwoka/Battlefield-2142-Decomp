@@ -800,3 +800,15 @@ TEST(SoldierPhysics_IgnoredAndPushedObjects)
 	mover.own = true;
 	CHECK(walk(mover, ignored, pushes, push) > 0.6f && pushes == 0);
 }
+
+// The speed index (0x00586020): standing, a zoomed weapon in hand
+// (0x00585e90) walks at index 2 (1.5 m/s); sprinting wins.
+TEST(SoldierControl_ZoomedWalkIsSlowed)
+{
+	using game::SoldierPose;
+	CHECK(game::soldierSpeedIndex(SoldierPose::Stand, false) == 3);
+	CHECK(game::soldierSpeedIndex(SoldierPose::Stand, false, true) == 2);
+	CHECK(game::soldierSpeedIndex(SoldierPose::Stand, true, true) == 4);
+	CHECK(game::soldierSpeedIndex(SoldierPose::Crouch, false, true) == 1);
+	CHECK(game::soldierSpeed(2) == 1.5f);
+}

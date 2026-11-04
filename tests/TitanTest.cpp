@@ -31,6 +31,18 @@ TEST(Titan_MinskTitansSpawn)
 		return;
 	}
 	CHECK(level.world->titans().size() == 2);
+	// gpm_ti 48's GamePlayObjects hide their points (isVisible 0,
+	// showOnMinimap 0: the scene's cull and the maps), which stay
+	// capturable.
+	int hidden = 0;
+	for (const auto& point : level.world->controlPointList()) {
+		hidden += !point.visible && !point.showOnMinimap;
+		if (point.id == 503) {
+			CHECK(!point.visible && point.capturable);
+		}
+	}
+	std::fprintf(stderr, "  %d of %zu control points hidden\n", hidden, level.world->controlPointList().size());
+	CHECK(hidden > 0);
 	for (int team = 1; team <= 2; ++team) {
 		const auto* titan = level.titan(team);
 		CHECK(titan != nullptr);
@@ -141,6 +153,9 @@ TEST(Titan_SilosWearTheShieldThenTheHull)
 	CHECK(through > 110000 - 5000 && through <= 110000 - 1000 + 1);
 	CHECK(level.titan(2)->shield);
 	CHECK(level.count("VehicleDamage") == 1);
+	// The root's name tag (addNametagOnDestroy 1, healthActivationLevel 60):
+	// re-pushed on the drop, its secondary icon from 60 % down.
+	CHECK(level.titan(2)->nametagPushes == 1 && level.titan(2)->healthActivationLevel == 60);
 	CHECK(fired != silos.end() && fired->launched == 1 && !fired->loaded);
 
 	// The shield down: at 61 % and below the forcefield is destroyed

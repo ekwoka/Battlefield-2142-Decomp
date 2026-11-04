@@ -30,10 +30,13 @@ struct Material {
 	float resistance = 0;
 	bool multiplyFriction = false;
 	float projectileCollisionHardness = 0;
-	float damageLoss = 0;
+	// The penetration defaults (the material's constructor 0x0060a9b0):
+	// damageLoss -1 (no penetration), minDamageLoss 0, maxDamageLoss
+	// 100000, penetrationDeviation 0.1.
+	float damageLoss = -1;
 	float minDamageLoss = 0;
-	float maxDamageLoss = 100000; // 0x50's default
-	float penetrationDeviation = 0;
+	float maxDamageLoss = 100000;
+	float penetrationDeviation = 0.1f;
 	bool overrideNeverPenetrate = false;
 	bool hasWaterPhysics = false;
 	bool isOneSided = false;

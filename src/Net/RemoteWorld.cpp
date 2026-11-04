@@ -451,11 +451,42 @@ bool RemoteWorld::apply(const GameEvent& event)
 		if (event.values.size() < 4) {
 			return false;
 		}
+		// Each player goes to the minimap with the enemy flag when the
+		// report is of kind 0 and he isn't on our team (a friend is passed
+		// with the flag 0: nothing more of him is drawn). One alive in a
+		// vehicle, for a report over 5 s, has his vehicle spotted: a local
+		// message 2/0x2e (the spotter 0, the vehicle's ghost, our team, x
+		// and z 0, value 0x1b) that the minimap's node (0x007918d0 case
+		// 0x2e) keeps as a marker (0x00790d60).
+		const uint32_t kind = event.values[0];
 		const uint32_t count = event.values[2];
-		const uint32_t ticks = event.values[3] * 30;
+		const uint32_t seconds = event.values[3];
+		const uint32_t ticks = seconds * 30;
+		const auto local = m_players.find(m_localPlayer);
+		const int ourTeam = local != m_players.end() ? local->second.team : 0;
 		for (size_t i = 0; i < count && 4 + i < event.values.size(); ++i) {
-			uint32_t& until = m_radar[static_cast<int>(event.values[4 + i])];
+			const int id = static_cast<int>(event.values[4 + i]);
+			const auto p = m_players.find(id);
+			const bool enemy = kind == 0 && (p == m_players.end() || p->second.team != ourTeam);
+			if (!enemy) {
+				continue;
+			}
+			uint32_t& until = m_radar[id];
 			until = std::max(until, m_tick + ticks);
+			if (p != m_players.end() && p->second.alive && p->second.vehicleGhost && seconds > 5) {
+				SpottedInfo spot;
+				spot.spotted = p->second.vehicleGhost;
+				spot.team = ourTeam;
+				spot.value = 0x1b;
+				spot.message = 0x2e;
+				PostRemoteInfo message;
+				message.category = 2;
+				message.id = 0x2e;
+				message.payload = spottedPayload(spot);
+				m_messages.push_back(message);
+				uint32_t& vehicleUntil = m_radarVehicles[p->second.vehicleGhost];
+				vehicleUntil = std::max(vehicleUntil, m_tick + ticks);
+			}
 		}
 		++m_radarReports;
 		return true;
@@ -879,6 +910,17 @@ void RemoteWorld::applyParts(RemoteObject& o, const GhostPartLayout& layout, con
 			}
 		}
 	}
+}
+
+bool RemoteWorld::overheadCamera(int team, Vec3f& position) const
+{
+	for (const auto& [ghost, o] : m_objects) {
+		if (o.kind == NetworkableKind::OverheadCamera && o.team == team && o.hasPosition) {
+			position = o.position;
+			return true;
+		}
+	}
+	return false;
 }
 
 void RemoteWorld::applyState(RemoteObject& o, const NetworkableState& s)

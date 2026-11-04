@@ -17,6 +17,7 @@
 // symbols/*.console.csv (one --api each): methods listed there but not
 // implemented are registered as stubs with the original's argument counts.
 #include "Animation/AnimationConsole.h"
+#include "DemoCamera.h"
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
 #include "Game/CombatAreas.h"
@@ -77,6 +78,7 @@
 #include "Geometry/GeometryTemplateManager.h"
 #include "Scene/EffectSettings.h"
 #include "Scene/LightSettings.h"
+#include "Scene/OvergrowthSettings.h"
 #include "Scene/PostProductionSettings.h"
 #include "Sound/Game/SoundConsole.h"
 #include "Sound/Game/GameSounds.h"
@@ -669,6 +671,10 @@ uint32_t g_spawnVehicle = 0;
 // Where the commander's zoom buttons put the commander's view (0x007d8e00:
 // the asset's position); the commander screen's map centres on it.
 std::optional<std::pair<float, float>> g_commanderView;
+// The demo being played (its speed, fov and camera), null otherwise.
+std::shared_ptr<dice::hfe::host::DemoPlayback> g_demo;
+// The modifiers as of the last input (the commander's squad list clicks).
+bool g_ctrlHeld = false, g_shiftHeld = false;
 // The team's overhead camera (MultiPlayerOverheadCamera: fOV, height), the
 // commander screen's view at its map zoom 2 (render::OverheadView).
 float g_overheadFov = 0.3f, g_overheadHeight = 260.0f;
@@ -899,9 +905,32 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// What spotting shows is drawn as its kit's spottedIcon at
 	// spottedIconSize (0x0077dfe0 → 0x0077dd70 with the spotted flag: the
 	// kits' mini_Soldier), else the kit's own map icon.
+	// 0x00508590's decoy: a TargetObject of TTDecoy (the Bp1_Decoy) within
+	// 60 m across of an enemy on foot shows on the minimap instead of him
+	// (HudManager slot 0x70, 0x0075bd30).
+	std::vector<const world::Object*> decoys;
+	if (!revealed.empty()) {
+		for (const auto& object : round.objects().objects()) {
+			const world::ObjectTemplate* t = object->objectTemplate();
+			const auto type = t ? t->settings().find("targetType") : decltype(t->settings().end()) {};
+			if (t && t->typeName() == "TargetObject" && type != t->settings().end()
+				&& dice::hfe::menu::targetTypeIndex(type->second) == 6) {
+				decoys.push_back(object.get());
+			}
+		}
+	}
 	for (const int id : revealed) {
 		game::GameWorld::PlayerInfo enemy;
 		if (world.playerInfo(id, enemy) && enemy.alive) {
+			if (!enemy.vehicle) {
+				for (const world::Object* decoy : decoys) {
+					const float dx = decoy->position().x - enemy.position.x, dz = decoy->position().z - enemy.position.z;
+					if (dx * dx + dz * dz < 60.0f * 60.0f) {
+						enemy.position = {decoy->position().x, decoy->position().y, decoy->position().z};
+						break;
+					}
+				}
+			}
 			std::string texture = "Ingame/Player/Icons/Minimap/mini_Soldier.dds";
 			float size = 16;
 			const world::Object* kit = enemy.kit ? round.objects().find(enemy.kit) : nullptr;
@@ -916,6 +945,23 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 				}
 			}
 			hud::HudManager::MapMarker spotted {texture, enemy.position.x, enemy.position.z, size};
+			spotted.color[1] = 0.3f;
+			spotted.color[2] = 0.3f;
+			markers.push_back(spotted);
+		}
+	}
+	// The vehicles the reports spotted (2/0x2e: the map node's markers,
+	// 0x00790d60, 16 x 16), in red.
+	for (const uint32_t id : world.spottedVehicles()) {
+		if (const world::Object* vehicle = round.objects().find(id)) {
+			std::string texture = "Ingame/Player/Icons/Minimap/mini_Soldier.dds";
+			if (vehicle->objectTemplate()) {
+				const dice::hfe::menu::MapIcons& icons = dice::hfe::menu::mapIcons(*vehicle->objectTemplate());
+				if (!icons.icon.empty()) {
+					texture = icons.icon;
+				}
+			}
+			hud::HudManager::MapMarker spotted {texture, vehicle->position().x, vehicle->position().z, 16};
 			spotted.color[1] = 0.3f;
 			spotted.color[2] = 0.3f;
 			markers.push_back(spotted);
@@ -936,8 +982,14 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// The overhead view over the commander's point (else his own), its
 	// ground width 2 tan(fov / 2) height (0x0077c4b0).
 	const bool overhead = commanderScreen && hud.commanderMapZoom() == 2;
-	hud.setOverhead(overhead, g_commanderView ? g_commanderView->first : me.position.x,
-		g_commanderView ? g_commanderView->second : me.position.z, 2 * std::tan(g_overheadFov / 2) * g_overheadHeight);
+	float viewX = g_commanderView ? g_commanderView->first : me.position.x;
+	float viewZ = g_commanderView ? g_commanderView->second : me.position.z;
+	// Joined: the team's overhead camera where the server put it (its
+	// ghost, moved by our CommanderCam), as 0x00779680 takes it.
+	if (overhead && world.joined()) {
+		world.overheadCamera(me.team, viewX, viewZ);
+	}
+	hud.setOverhead(overhead, viewX, viewZ, 2 * std::tan(g_overheadFov / 2) * g_overheadHeight);
 	hud.set("MinimapZoomDisplay", static_cast<float>(commanderScreen ? hud.commanderMapZoom() : hud.mapZoom()));
 	hud.setMapMarkers(std::move(markers));
 }
@@ -2436,6 +2488,9 @@ int runGame(Options& options, Session& session)
 	scene::registerQualityConsoleMethods(console, qualitySettings);
 	scene::ColdBreathSettings coldBreath;
 	scene::registerColdBreathConsoleMethods(console, coldBreath);
+	// The overgrowth's rows (Overgrowth.con; scene/OvergrowthSettings.h).
+	scene::OvergrowthSettings overgrowthSettings;
+	scene::registerOvergrowthConsoleMethods(console, overgrowthSettings);
 
 	// Sound, as 0x007fcd50: the engine from getSoundEngine() reading files
 	// through the virtual file system, wrapped by the game's sound manager.
@@ -3120,34 +3175,46 @@ int runGame(Options& options, Session& session)
 			auto player = std::make_shared<net::DemoPlayer>(std::move(records));
 			auto started = std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
 			auto ticked = std::make_shared<int>(0);
-			auto paused = std::make_shared<bool>(false);
-			client.playDemo([player, started, ticked, paused](std::vector<uint8_t>& payload) {
+			auto playback = std::make_shared<host::DemoPlayback>();
+			auto carry = std::make_shared<double>(0);
+			g_demo = playback;
+			client.playDemo([player, started, ticked, playback, carry](std::vector<uint8_t>& payload) {
 				const auto elapsed = std::chrono::steady_clock::now() - *started;
 				const int due = static_cast<int>(std::chrono::duration<double>(elapsed).count() * 30.0);
 				if (due > *ticked) {
-					if (!*paused) { // the game speed 0 (0x004b32f0: client slot 0xe8(0))
-						player->advance(due - *ticked);
-					}
+					// The game speed (0x004b3b90: the time manager's scale).
+					player->advance(playback->advance(due - *ticked, *carry));
 					*ticked = due;
 				}
+				playback->ended = player->finished();
 				return player->next(payload);
 			});
 			// The playback controls (the demo interface 0x00928fa8 through
-			// QueryInterface 0x1d4c2): toggleDemoPauseOrPlay (slot 0x5c,
-			// 0x004b32d0: the speed 0 or 100), restartDemo (slot 0x48,
-			// 0x004b3190: the world and ghosts reset, 0x00582340, and the
-			// demo again from its start; the join's level block makes the
-			// client start over), shutdownDemo (0x00404750: the game ends).
-			// togglePlayerDemo / toggleCameraDemo (the demo camera's follow
-			// and free modes, 0x005fa440, 0x005fa130) and adjustDemoFov have
-			// no demo camera to act on (no .bf2142cam playback).
-			bindMethod(console, "demo.toggleDemoPauseOrPlay", ConsoleAccess::Anyone, [paused] { *paused = !*paused; });
-			bindMethod(console, "demo.restartDemo", ConsoleAccess::Anyone, [player, started, ticked] {
+			// QueryInterface 0x1d4c2) and the demo camera: DemoCamera.h. The
+			// view follows the camera (playerView); free, it is the viewer's.
+			bindMethod(console, "demo.toggleDemoPauseOrPlay", ConsoleAccess::Anyone, [playback] { playback->togglePause(); });
+			bindMethod(console, "demo.restartDemo", ConsoleAccess::Anyone, [player, started, ticked, playback] {
 				player->restart();
+				playback->restart();
 				*started = std::chrono::steady_clock::now();
 				*ticked = 0;
 			});
-			bindMethod(console, "demo.shutdownDemo", ConsoleAccess::Anyone, [player] { player->finish(); });
+			bindMethod(console, "demo.shutdownDemo", ConsoleAccess::Anyone, [player, playback] {
+				playback->speed = 100;
+				player->finish();
+			});
+			bindProperty<int>(console, "Game.simulationRate", ConsoleAccess::Anyone, [playback] { return playback->speed; },
+				[playback](const int& v) { playback->speed = std::max(v, 0); });
+			bindMethod(console, "demo.adjustDemoFov", ConsoleAccess::Anyone, [playback](float fov) { playback->fov = fov; });
+			net::GameClient* demoClient = &client;
+			const auto eligible = [demoClient](int id) {
+				const net::RemotePlayer* p = demoClient->world().player(id);
+				return p && p->alive && p->soldierGhost != 0;
+			};
+			bindMethod(console, "demo.togglePlayerDemo", ConsoleAccess::Anyone,
+				[playback, eligible](bool next) { playback->camera.step(next ? 1 : -1, eligible); });
+			bindMethod(console, "demo.toggleCameraDemo", ConsoleAccess::Anyone,
+				[playback, eligible] { playback->camera.toggle(eligible); });
 		} else {
 			client.connect(host, port, clientOptions);
 		}
@@ -3787,6 +3854,24 @@ int runGame(Options& options, Session& session)
 		// The commander screen's tabs and squad list (CommanderMenu.*).
 		dice::hfe::menu::CommanderMenu commanderMenu(round, hudManager);
 		commanderMenu.bind(console);
+		commanderMenu.ctrlHeld = [] { return g_ctrlHeld; };
+		commanderMenu.shiftHeld = [] { return g_shiftHeld; };
+		// The leader's voice on or off (as the scoreboard's mute box), and
+		// VoipPlayerMute to the server (0x00510de0: the bit, our id, his).
+		commanderMenu.onMuteLeader = [&](int leader) {
+			if (!session.voice) {
+				return;
+			}
+			const bool mute = !session.voice->client().muted(leader);
+			session.voice->client().setMuted(leader, mute);
+			if (net::GameClient* server = joinedServer()) {
+				net::GameEvent e;
+				e.type = net::kEvVoipPlayerMute;
+				e.values = {mute ? 1u : 0u, static_cast<uint32_t>(server->world().localPlayer()) & 0xff,
+					static_cast<uint32_t>(leader) & 0xff};
+				server->sendEvent(e);
+			}
+		};
 		// The assets' defend buttons (Commander.defend<Asset>: HUD manager
 		// slots 0x374, 0x37c, 0x384, ..., 0x007d7a30 / 0x007d7ac0 /
 		// 0x007d7b50): the asset object (0x007d92f0: the team's object of
@@ -4200,6 +4285,143 @@ int runGame(Options& options, Session& session)
 				zoomTo(titan->position().x, titan->position().z);
 			}
 		});
+		// Commander.zoomCommander (0x0077168e -> HUD slot 0x39c, 0x007d7be0;
+		// the CommanderZoomFCT button): the map's zoom index steps
+		// (0x0077e850(-1, 1): up while below the last, then back to 0; the
+		// overhead view at 2), the map's cursor becomes the world's point
+		// (slot 0x3a0, 0x007d8ec0) and the camera goes there (slot 0x398:
+		// CommanderCam).
+		const auto sendCommanderCam = [&](float x, float z) {
+			g_commanderView = std::make_pair(x, z);
+			if (net::GameClient* server = joinedServer()) {
+				net::GameEvent cam;
+				cam.type = net::kEvCommanderCam;
+				const float xyz[3] = {x, 80.0f, z};
+				for (const float v : xyz) {
+					uint32_t bits = 0;
+					std::memcpy(&bits, &v, 4);
+					cam.values.push_back(bits);
+				}
+				server->sendEvent(cam);
+			}
+		};
+		bindMethod(console, "Commander.zoomCommander", ConsoleAccess::Anyone, [&] {
+			const int zoom = hudManager.commanderMapZoom();
+			float x = 0, z = 0;
+			const bool at = hudManager.mapWorldAt(hudManager.pointerX(), hudManager.pointerY(), x, z);
+			hudManager.setCommanderMapZoom(zoom < 2 ? zoom + 1 : 0);
+			if (at) {
+				sendCommanderCam(x, z);
+			}
+			return true;
+		});
+		// Commander.detailedView (0x0077161d -> slot 0x394, 0x007d8db0; the
+		// Commander rose's DETAILVIEW): HUD +0x2f4 holds the commander screen
+		// open (0x00754290 forces its input while set) and keeps the overhead
+		// camera's point (+0x2f8..+0x300); leaving the screen sends
+		// CommanderCam there and sets the map's zoom 2.
+		bindMethod(console, "Commander.detailedView", ConsoleAccess::Anyone, [&] {
+			float x = 0, z = 0;
+			game::GameWorld::PlayerInfo me;
+			if (g_commanderView) {
+				x = g_commanderView->first;
+				z = g_commanderView->second;
+			} else if (hudPlayer(hudLocal(), me)) {
+				x = me.position.x;
+				z = me.position.z;
+			}
+			sendCommanderCam(x, z);
+			hudManager.setCommanderMapZoom(2);
+			commanderScreen = true;
+		});
+		// Commander.spottedMouseOver <n> (0x00771b67 -> slot 0x450,
+		// 0x00751f80): Spotted<i>MouseOver = (i == n) for i 1..11.
+		bindMethod(console, "Commander.spottedMouseOver", ConsoleAccess::Anyone, [&](int n) {
+			for (int i = 1; i <= 11; ++i) {
+				hudManager.set("Spotted" + std::to_string(i) + "MouseOver", i == n ? 1.0f : 0.0f);
+			}
+		});
+		// CommanderMenu.sendRadioMessage <voice> <channel> (0x00771fe2 ->
+		// slot 0x2c4 -> 0x007a9f60): the message to each selected squad
+		// (Game slot 0x50, the spam check on the first only), then no squad
+		// shows (+0xac) and state 0x11 goes back to 0x10.
+		bindMethod(console, "CommanderMenu.sendRadioMessage", ConsoleAccess::Anyone,
+			[&](std::string voice, std::string channel) {
+				const int target = game::GameWorld::targetChannel(channel);
+				bool first = true;
+				for (const int squad : std::set<int>(commanderMenu.selected())) {
+					sayRadio(target, voice, squad, first);
+					first = false;
+				}
+				commanderMenu.showSquad(-1);
+			});
+		// SquadManager.joinSquad <squad> / leaveSquad <squad> (0x004192c1 /
+		// 0x004193a3 -> Game slots 0xb4 / 0xb8 -> the squad manager's 0x34 /
+		// 0x38 with our team and id: a client's JoinSquad / LeaveSquad).
+		bindMethod(console, "SquadManager.joinSquad", ConsoleAccess::Anyone, [&](int squad) {
+			if (net::GameClient* server = joinedServer()) {
+				server->joinSquad(squad);
+			} else {
+				round.joinSquad(round.localPlayer(), squad);
+			}
+		});
+		const auto leave = [&](int squad) {
+			if (net::GameClient* server = joinedServer()) {
+				server->leaveSquad(squad);
+				return;
+			}
+			game::GameWorld::PlayerInfo me;
+			if (round.playerInfo(round.localPlayer(), me) && me.squad == squad && squad > 0) {
+				round.joinSquad(round.localPlayer(), 0);
+			}
+		};
+		bindMethod(console, "SquadManager.leaveSquad", ConsoleAccess::Anyone, leave);
+		// Squad.leaveSquad (0x00771bdd -> slot 0x30c, 0x007d6750): out of our
+		// squad (slot 0x38) and its invite cleared (slot 0x30, no leader bit).
+		bindMethod(console, "Squad.leaveSquad", ConsoleAccess::Anyone, [&] {
+			game::GameWorld::PlayerInfo me;
+			if (!hudPlayer(hudLocal(), me) || me.squad <= 0) {
+				return;
+			}
+			leave(me.squad);
+			if (net::GameClient* server = joinedServer()) {
+				server->invite(server->world().localPlayer(), me.squad, false);
+			}
+		});
+		// SquadManager.changeSquadName <name> <bool> (0x004195aa -> slot
+		// 0xc4, 0x0042cff0; the bool unused): our squad named, the server
+		// refusing a squad that isn't empty (0x004c6720) with 2/0xf. So in
+		// effect it names a new squad.
+		bindMethod(console, "SquadManager.changeSquadName", ConsoleAccess::Anyone, [&](std::string name, bool) {
+			game::GameWorld::PlayerInfo me;
+			if (!hudPlayer(hudLocal(), me)) {
+				return;
+			}
+			// Offline the local round's squad has us in it: refused, as
+			// the server would.
+			if (net::GameClient* server = joinedServer()) {
+				server->setSquadName(me.squad, name);
+			}
+		}, 1);
+		// SquadLeader.sendRequestForOrder (0x00770a7e -> slot 0x314,
+		// 0x007c7cd0; the SquadLeader rose's needorders): req_new_order to
+		// the commander, then the Request event of kind 1 (0x007c7d50).
+		bindMethod(console, "SquadLeader.sendRequestForOrder", ConsoleAccess::Anyone, [&] {
+			sayRadio(2, "req_new_order", 0, true);
+			if (net::GameClient* server = joinedServer()) {
+				server->squadRequest(1);
+			}
+		});
+		// SquadLeader.issueSquadRequest (0x00770b5f -> slot 0x3b0,
+		// 0x007d6820): the armed order (+0x284) at the rose's point
+		// (+0x28c), through sendOrder's handler.
+		bindMethod(console, "SquadLeader.issueSquadRequest", ConsoleAccess::Anyone, [&] {
+			float x = 0, z = 0;
+			if (armedOrder && placeAt && rosePoint(x, z)) {
+				leaderOrder = true;
+				placeAt(x, z);
+			}
+		});
 		// The kills seen since the last frame (players' counters), for the
 		// kill messages (0x00759bf0).
 		std::map<int, std::array<int, 3>> killCounts;
@@ -4298,7 +4520,7 @@ int runGame(Options& options, Session& session)
 						round.issueSquadLeaderOrder(round.localPlayer(), *armedOrder, worldX, worldZ);
 					}
 				} else if (!commanderMenu.selected().empty()) {
-					// The squads selected on the commander screen (0x007a9f60).
+					// The squads selected on the commander screen (0x007d6ab0).
 					for (const int squad : commanderMenu.selected()) {
 						orderSquad(squad, *armedOrder, worldX, worldZ);
 					}
@@ -4659,6 +4881,9 @@ int runGame(Options& options, Session& session)
 			};
 			round.enablePhysics(files, collisionTemplates, std::move(surface), &materials);
 		}
+		// The game logic's supply drop settings (GameLogicInit.con).
+		round.commanderSettings.supplyDropHeight = gameLogic.supplyDropHeight;
+		round.commanderSettings.supplyDropNumSecsToLive = gameLogic.supplyDropNumSecsToLive;
 		round.startRound();
 		// --host: the round served to clients (HostedGame.h).
 		host::HostedGame* hosted = nullptr;
@@ -4691,14 +4916,23 @@ int runGame(Options& options, Session& session)
 				setup.bans = &session.admin->bans;
 				setup.reserved = &session.admin->reserved;
 			}
+			// The terrain the teams' overhead cameras stay over (0x005f8170).
+			const auto overheadTerrain = [&heightmaps](host::HostedGame& host) {
+				if (const terrain::Heightmap* primary = heightmaps.primary(); primary && primary->loaded()) {
+					host.setTerrainExtent(primary->originX(), primary->originZ(),
+						std::min(primary->worldWidth(), primary->worldDepth()));
+				}
+			};
 			if (session.hosted) {
 				// The next map on the same connections.
 				session.hosted->changeLevel(round, gameLogic, templates, setup);
 				session.hosted->setStaticObjects(levelObjects);
+				overheadTerrain(*session.hosted);
 				hosted = session.hosted.get();
 			} else {
 				session.hosted = std::make_unique<host::HostedGame>(round, gameLogic, templates, setup);
 				session.hosted->setStaticObjects(levelObjects);
+				overheadTerrain(*session.hosted);
 				session.hosted->onLog = [](const std::string& line) { std::printf("host: %s\n", line.c_str()); };
 				if (session.hosted->start()) {
 					hosted = session.hosted.get();
@@ -6374,6 +6608,21 @@ int runGame(Options& options, Session& session)
 		sources.shadows = &shadowSettings;
 		sources.hemi = &hemiSettings;
 		sources.particles = &particleSettings;
+		sources.overgrowth = &overgrowthSettings;
+		// The decals' surfaces: the hit object's collision faces.
+		sources.collisionFaces = [&round](uint32_t object, uint32_t owner, const effects::Vec3& center, float radius,
+									 std::vector<std::array<effects::Vec3, 3>>& faces) {
+			const physics::CollisionWorld* mesh = round.projectileCollision(object);
+			if (!mesh) {
+				return;
+			}
+			mesh->forEachFaceNear(center, radius,
+				[&](const physics::Vec3& a, const physics::Vec3& b, const physics::Vec3& c, uint32_t, uint32_t by) {
+					if (owner == 0 || by == owner) {
+						faces.push_back({a, b, c});
+					}
+				});
+		};
 		sources.wind = &windSettings;
 		sources.quality = &qualitySettings;
 		// The seat camera's static interior sun (PlayerCamera::insideSun).
@@ -7040,6 +7289,26 @@ int runGame(Options& options, Session& session)
 			// keys go up as moves, a click on a spawn point asks for it (with
 			// the first kit).
 			viewer.playerView = [&session, &playerCamera, &ownFeet](ViewerOptions::PlayerView& view) {
+				// A demo's camera following a player (0x005f8f40), with the
+				// demo's fov (0x00434610); free, the viewer's own camera.
+				if (session.client && g_demo && g_demo->camera.mode == host::DemoCamera::Mode::Follow) {
+					const net::RemotePlayer* p = session.client->world().player(g_demo->camera.followed);
+					const net::RemoteObject* o =
+						p ? session.client->world().object(p->vehicleGhost ? p->vehicleGhost : p->soldierGhost) : nullptr;
+					if (o && o->hasPosition) {
+						const float at[3] = {o->position.x, o->position.y + 1.6f, o->position.z};
+						const host::DemoCamera::Look look = g_demo->camera.follow(at, o->hasAngles ? o->yaw : o->rotation.x);
+						const float aspect = view.aspect;
+						view = {at[0], o->position.y, at[2], 0};
+						view.aspect = aspect;
+						view.external = true;
+						std::copy(look.eye, look.eye + 3, view.eye);
+						view.eyeYaw = look.yaw;
+						view.eyePitch = look.pitch;
+						view.fovY = g_demo->fovY();
+						return true;
+					}
+				}
 				if (!session.client || !session.client->world().hasControlObject()) {
 					return false;
 				}
@@ -7336,6 +7605,8 @@ int runGame(Options& options, Session& session)
 			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &commRoses, &round, &hudPlayer, &hudLocal, &helpPopups, &hudManager,
 										&questions, radioWas = false, tacticalWas = false, mapSizeWas = false, mapZoomWas = false,
 										map3dWas = false, yesWas = false, noWas = false](const ViewerOptions::PlayerInput& in) mutable {
+				g_ctrlHeld = in.ctrl;
+				g_shiftHeld = in.shift;
 				game::GameWorld::PlayerInfo me;
 				const bool alive = hudPlayer(hudLocal(), me) && me.alive;
 				if (alive && in.radioComm && !radioWas) {

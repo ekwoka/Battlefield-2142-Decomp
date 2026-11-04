@@ -205,6 +205,28 @@ Effort: **S** = days, **M** = 1–3 weeks. "Unread" means the property name is i
 | L6 | **Titan-mode details** | Control points that the 48-player Titan maps mark invisible are treated as visible; what `isVisible` governs (map icon, HUD, capture) isn't traced. Titan parts get no name tag on destroy and no health activation level. There is no combat-area text and no minimap area texture. | Unread: `isVisible` 111 (ControlPoint +0x298, 0x00503481; every gpm_ti 48 GamePlayObjects.con sets it 0), `armor.addNametagOnDestroy` 22, `nametag.healthActivationLevel` 24. engine.md:7931 "Not rewritten: the HUD's text …, the minimap's area texture". | S |
 | L7 | **Game-logic leftovers** | The commander's radial menu level, the supply drop's height and life, the slowed movement state, banked excess input, and where a squad member spawns when no spot fits. | Stubs: `GameLogic.radialLevelIndex` 30, `supplyDropHeight` / `supplyDropNumSecsToLive` / `enableVoHelp` 1 each. SoldierControl.cpp:87 (speed index 2), GameWorld.cpp:7894 (rememberExcessInput), GameWorld.cpp:3455 (0x005b2200's caller), 3509–3511 and engine.md:7976 (the spawn's extra test), GameWorld.cpp:1747 and engine.md:7870 (0x005a3bd0), GameWorld.cpp:4844 (how long a slumped body stays). | S each |
 
+**Status (local gameplay pass: L1 penetration, L2–L7, after HEAD 9c4af0b):**
+- L1 penetration, decided: retail rounds do pass. DefaultPenetrateComp (`0x005eaca0`) is called from the projectile's `+0x184` interface, slot `0xd4` (`0x005b54e0`), which reads the component at the projectile's `+0x1ac` as its own `+0x28`. The game logic's hit (`0x005a4dd0`) asks it after the hit's damage, when the round doesn't ricochet. The rewrite now applies the whole rule to every round with the component (`GameWorld::penetrate`): the solid/liquid flags, overrideNeverPenetrate, the material defaults (damageLoss −1, `0x0060a9b0`), one-sided minDamageLoss, the way out over 2.1 radii, the tenth-of-damage floor, the exit impact, and penetrationDeviation. So bullets go through grass, bushes, glass, cloth and thin metal. Silo missiles pass the Titans' shields (cell 0 at the shield, about 1,640 lost); bullets and rockets don't.
+- L2 done: `delayToUse` (the enable `0x005c47d0`, the busy test `0x005c14f0`), `altItemIndex` (the kit's add-item `0x00589510`), `instantReloadOnEnable` with `autoReload` (`0x005f4bb0`), `toggleWhenNoAmmo` (`0x005f39c0`, `0x005f4a40`), `changeMagAt` (`0x005f4830`), and the reloadWithoutPlayer default 1. Found no runtime reader: `ammoType`, `allowReplenish` (network flag only), `damageOwner`. Left: retail's automatic reload only with `ammo.autoReload`.
+- L3 done:
+  - the lock-on update (`0x005e1b30`/`0x004cf290`): the nearest candidate of the round's target type, empty vehicles of either side, the losing timer in ticks;
+  - `useCameraDirectionToTarget`;
+  - heat and laser rounds home (SeekClosestTargetComp `0x005ec260`/`0x005ebea0`, `seek.reLockTime`; TTHeat rounds didn't home before);
+  - the wire-guided look-ahead (`0x005e27a0`) with its range and obstruction drop;
+  - `disableGuidanceOnReload` (`0x005e23b0`).
+
+  Left: guidance passing to the next missile, `targetObjectTemplate`'s object.
+- L4: `ignoreParentRotation` is done for the gunners' yaw (`0x00563180`); its pitch and the seat cameras' aren't. Decoded, not rewritten: `takeOverInput` (needs the projectile camera), `boneIndex` (needs bundleSkeleton posing, `0x0063d470`), `autoUseAbility` (only the help popup, `0x00646cb0`, a HUD matter). `damageOwner` has no reader.
+- L5 done: firearm replacement and `replaceWithoutEquip` (`0x00570ab0`, `GameWorld::setOwnedUnlocks`; the profile doesn't feed the owned set yet), `altItemIndex`, the use key's pick-up of placed items and beacons (`0x004bce30`). `alternateTemplate*` are Emitter properties (effects), not kit ones.
+- L6 done: `isVisible` / `showOnMinimap` in the control point info (`0x005bbe30`; only the scene's cull reads isVisible, the maps read showOnMinimap). The Titans' name-tag data: healthActivationLevel, the re-push count, the parts' percent (`0x00655460`, RendDX9 `0x100f40d0`). The combat-area text needs nothing more from the game side (HUD `0x0044c7b0`).
+- L7 done:
+  - `GameLogic.supplyDropHeight` / `NumSecsToLive` / `radialLevelIndex` / `enableVoHelp` are bound; radialLevelIndex is IGA's texture key, `0x10017f20`;
+  - the zoomed walk (speed index 2, `0x00585e90`);
+  - a squad spawn with no room is refused (`0x004bef90`);
+  - an enemy's paddles do nothing (`0x004ba5c0`).
+
+  Left: the navmesh test for bots' spawn tries, the mobile spawn point's CP rule (`0x005b24f0`), rememberExcessInput, and the slumped body's time.
+
 ### 2b. AI
 
 | # | Gap | What a player notices | Evidence | Effort |
@@ -212,6 +234,13 @@ Effort: **S** = days, **M** = 1–3 weeks. "Unread" means the property name is i
 | A1 | **Bot perception** | Bots know every vehicle, ignore hearing, and aren't culled by distance. | Stubs `AITemplatePlugIn.cullDistance` 17, `setSoundSphereRadius` / `setHearingProbability` 3; engine.md:9155 and Bots.cpp:5786 "Stand-in: vehicles count as known"; allowedTimeDiff stored, not used. | M |
 | A2 | **Bot fire-plan and behaviour stand-ins** | Bots never use the guided weapons' own plan on foot. C4 isn't guarded on moving targets. The air-target clause and the target's speed and attention are the rewrite's. | engine.md:9812–9828; Bots.cpp:2523–2536, 3814 (the upright test), 2769 (heal task), 4606; PathFollower.cpp:1229; the grenade warning's sender (engine.md:8886, Bots.cpp:1510); `weaponTemplate.shouldRearm` / `fireRate` / `isAntiAirWeapon` stubs. | M |
 | A3 | **Scripted-bot commands left** | Mods' coop scripts that use them. | engine.md:9730, 9737, 9749, 9756, 9761: `botGiveOrder`, `createSAI`, `addPlacement`, the tree modifiers, landing zones. Shipped scripts barely call them. | S |
+
+**Status (bot perception and plan pass, after 9c4af0b):**
+- **A1 done.** Enemy vehicles are known per side (seen, or anyone aboard seen, or heard; certainty by degeneration). A unit stays sensed 2 s after it is lost and is placed where the side last had it (0x100ee430, 0x100a9b20). allowedTimeDiff throttles the knowledge's update (0x100a9e70). Hearing is rewritten (0x100ca280 → 0x100ec100 → 0x100ea820). Only listeners without a Mobile part hear, because 0x100317e0 is a max, and the shipped `weaponTemplate.setSoundSphereRadius` is no command, so every weapon keeps 50 m. `cullDistance` is decoded: it applies to neutral current targets only, so it has no effect on the rewrite. The three plug-in rows and `weaponTemplate.soundSphereRadius` are bound.
+- **A2 partly done.** Done: BBFire3d's unit-count scale (0x100d2b30), its pass over the side's known manned units (0x100caab0) and the aircraft-targeting-us skip. Its and BBFire's 20 s stamps are decoded as never written (0x1007df70, 0x10075ec0). In the fire plan's +0x248, the spot is now the goal object's head (bot +0x80 slots 4/8, not the follower), the approach test is the pathfinder's 10-point test (0x1003fa60 → 0x1003d460), and the air clause is setIsAntiAircraft 2 (value 1 is overwritten unread). Still open: the guided weapons' plan on foot, C4 on moving targets, the target's speed and attention, and the ground transports' way out.
+- **A3:** `botGiveOrder` is decoded and bound. It is refused, because no writer of the bot's +0x50 was found. The SAI's status rule for areas without a control point is still not rewritten.
+- **Citations (strict rule):** AIDLL 823 / 333,582 B (33.2%) → 1,059 / 381,557 B (37.9%). Ambiguous occurrences: 429 → 130. With `--headings`: 1,042 → 1,089 functions. Most of the gain comes from naming AIDLL in the Bots code's comments and engine.md's Bots section (70 code occurrences). Some is the console table rows, whose "not rewritten" and debug rows now attribute too.
+- **Rounds:** over 48 seeds of `BF2142_BOT_SEED` on Cerbere, 9c4af0b fires 13 % fewer rounds than 69c8fbc, with more kills and hits. The rebuild per weapon (0x1007cf10) is faithful. The single default seed's −80 % is chaos (engine.md, Fire).
 
 ### 2c. Joined and hosted play
 
@@ -269,6 +298,14 @@ Effort: **S** = days, **M** = 1–3 weeks. "Unread" means the property name is i
 | 13 | R2: overgrowth cross-fade and shadow map, decals on objects | rendering | S–M |
 | 14 | M1: squad and commander menu remainder | menus | S |
 | 15 | M2: demo playback controls | menus | S–M |
+
+**Status (gaps 11–15, rendering/HUD/menus pass, after HEAD 9c4af0b):**
+- **J2 done.** The server makes each team's overhead camera (MultiPlayerOverheadCamera, class 0x948c; 0x004c5120) on the commander's first CommanderCam and places it (0x00510b30 → 0x005f8410 / 0x005f8170); it goes out as its OverheadCamera ghost, and a joined commander's overhead view stands where the ghost is (0x00779680). The squad radar (0x00508590): enemies only (kind 0, other team), the Bp1_Decoy within 60 m shown instead of an enemy on foot (0x0075bd30), and a reported player's vehicle spotted (the local 2/0x2e) as a red map marker.
+- **R1 done** except projector textures, the lights' shadows and the template speccolor: the per-frame light list within lightCullDistance (0x100a93f0), each mesh's nearest maxLightsPer*Mesh by its kind's filter (0x100a9f80 / 0x100a7f00; isDynamic only), the dynamic shadows' quality's table (0x10010040), each shader's point-light diffuse, specular and falloff, and flicker on the ranges (0x0064a920).
+- **R2 done** except the alpha doubling (0x1000b500, not traced) and the normal-mapped decal technique: the full / LOD cross-fade and lodTimer (0x1008da30), the type factor (0x100917e0), the cells' nearest-corner fade (0x10120ef0) and near-cell fade (0x10121410); decals clipped to the hit object's collision faces. The overgrowth shadow map is settled as editor-only (read only by 0x1008acd0 for terrain style 6).
+- **M1 done** but `SquadLeader.addRemoveCP` (an unused rally-point toggle): joinSquad / leaveSquad / changeSquadName, Squad.leaveSquad, zoomCommander, detailedView, spottedMouseOver, sendRadioMessage, sendRequestForOrder, issueSquadRequest; the squad list's Ctrl / Shift selection and the leader mute; the tabs' first state (0x007ac090).
+- **M2 mostly done:** the game speed (Game.simulationRate, pause, restart keeping it), adjustDemoFov, togglePlayerDemo / toggleCameraDemo and the follow view (0x005f8f40). Left: the camera's own key input (0x005fa5e0), the HUD's Demo* strings, camera files.
+- Inconsistencies 1, 2 (the sway), 4 (the composed keys: `rows.py` now counts a name two or three src literals concatenate to: 51 names, the bundles' modifiers, sway.* and alternateTemplate0) and 5 (the `Overgrowth.*` rows the levels call are registered, `scene/OvergrowthSettings.h`) are fixed.
 
 ## 3. Remaining hedges a further pass could settle
 

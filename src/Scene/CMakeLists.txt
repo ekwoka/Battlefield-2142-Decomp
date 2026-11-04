@@ -1,6 +1,7 @@
 add_library(Scene STATIC
 	EffectSettings.cpp
 	LightSettings.cpp
+	OvergrowthSettings.cpp
 	PostProductionSettings.cpp
 )
 target_include_directories(Scene PUBLIC ${PROJECT_SOURCE_DIR}/src)

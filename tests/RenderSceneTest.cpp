@@ -8,6 +8,8 @@
 #include "Effects/Effects.h"
 #include "Geometry/GeometryTemplateManager.h"
 #include "Render/AnimatedUV.h"
+#include "Render/MeshLights.h"
+#include "Render/OvergrowthLod.h"
 #include "Render/EnvMaps.h"
 #include "Render/Fog.h"
 #include "Render/OverheadView.h"
@@ -15,9 +17,11 @@
 #include "Render/TitanParts.h"
 #include "Scene/EffectSettings.h"
 #include "Scene/LightSettings.h"
+#include "Scene/OvergrowthSettings.h"
 #include "TestMain.h"
 #include "World/ObjectTemplateManager.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <string>
@@ -529,4 +533,97 @@ TEST(RenderScene_RendererConsoleSwitches)
 	CHECK(!settings.drawStaticMeshes && settings.undergrowthViewDistanceFade == 1);
 	CHECK(settings.tweakNearPlane1pSet && std::fabs(settings.tweakNearPlane1p - 0.1f) < 1e-6f);
 	CHECK(!settings.tweakNearPlaneSet);
+}
+
+// The overgrowth's cells, cross-fade and lodTimer (OvergrowthLod.h,
+// 0x1008da30 / 0x10120ef0 / 0x10121410) and its console rows.
+TEST(RenderScene_OvergrowthCrossFadeAndCells)
+{
+	using render::OvergrowthBlend;
+	using render::OvergrowthCells;
+	// 500 / 4 = 125, fitted to a 1024 m terrain: 8 cells of 128.
+	CHECK(near(OvergrowthCells::cellSize(500, 1024), 128));
+	CHECK(near(OvergrowthCells::cellSize(140, 0), 35));
+	// Kept up to 70% at 1, to 0 at the view distance, gone beyond.
+	CHECK(near(OvergrowthCells::distanceFade(300, 500), 1));
+	CHECK(near(OvergrowthCells::distanceFade(425, 500), 0.5f));
+	CHECK(OvergrowthCells::distanceFade(500, 500) < 0);
+	// The cell about a camera on the ground fades to 0.4 at its centre.
+	CHECK(near(OvergrowthCells::nearFade(0, 0), 0.4f));
+	CHECK(near(OvergrowthCells::nearFade(6, 0), 0.5f));
+	CHECK(near(OvergrowthCells::nearFade(6, 10), 1));
+	// The type factor: (radius / 5)^2 within 0.3..1.
+	CHECK(near(OvergrowthBlend::typeFactor(1), 0.3f));
+	CHECK(near(OvergrowthBlend::typeFactor(4), 0.64f));
+	CHECK(near(OvergrowthBlend::typeFactor(10), 1));
+	// w: 1 within 70% of R (factor 1, closeDistFade 0.3), 0 at R.
+	CHECK(near(OvergrowthBlend::weight(50, 100, 1, 0.3f), 1));
+	CHECK(near(OvergrowthBlend::weight(85, 100, 1, 0.3f), 0.5f));
+	CHECK(near(OvergrowthBlend::weight(100, 100, 1, 0.3f), 0));
+	// Both meshes at full alpha in the middle, one of them fading at the ends.
+	CHECK(near(OvergrowthBlend::fullAlpha(0.5f), 1) && near(OvergrowthBlend::lodAlpha(0.5f), 1));
+	CHECK(near(OvergrowthBlend::fullAlpha(0.25f), 0.5f) && near(OvergrowthBlend::lodAlpha(0.25f), 1));
+	CHECK(near(OvergrowthBlend::lodAlpha(1), 0) && near(OvergrowthBlend::fullAlpha(0), 0));
+	// lodTimer 0: w as it is; 2 s: eased at 0.5 a second.
+	float t = 0;
+	CHECK(near(OvergrowthBlend::eased(0.3f, t, 0.1f, 0), 0.3f));
+	t = 0;
+	CHECK(near(OvergrowthBlend::eased(0.4f, t, 0.1f, 2), 0.8f)); // at least 1 - 2w = 0.2
+	CHECK(near(OvergrowthBlend::eased(0.4f, t, 0.2f, 2), 0.7f)); // 0.2 + 0.1
+	CHECK(near(OvergrowthBlend::eased(0.9f, t, 0.2f, 2), 0.8f)); // at most 2 - 2w = 0.2
+	CHECK(near(OvergrowthBlend::eased(1, t, 0.2f, 2), 1) && t == 0);
+
+	Console console;
+	std::string out;
+	scene::OvergrowthSettings og;
+	scene::registerOvergrowthConsoleMethods(console, og);
+	console.execute("Overgrowth.viewDistance 350", out);
+	console.execute("Overgrowth.closeDistPercentage 0.15", out);
+	console.execute("Overgrowth.addMaterial wood 7", out);
+	console.execute("Overgrowth.setActiveMaterial wood", out);
+	console.execute("Overgrowth.addType spruce", out);
+	console.execute("Overgrowth.setActiveType spruce", out);
+	console.execute("OvergrowthType.geometry eu_spruce_b01", out);
+	console.execute("OvergrowthType.density 50", out);
+	console.execute("Overgrowth.preLoad", out);
+	CHECK(og.configured && og.preLoaded && near(og.viewDistance, 350) && near(og.closeDistPercentage, 0.15f));
+	CHECK(og.materials.size() == 1 && og.materials[0].index == 7 && og.activeMaterial == 0);
+	CHECK(!og.addMaterial("other", 7)); // the index is taken (0x10092840)
+	const scene::OvergrowthSettings::Type* spruce = og.typeForGeometry("EU_Spruce_b01");
+	CHECK(spruce && near(spruce->density, 50) && near(spruce->randomScale[0], 1));
+	console.execute("Overgrowth.getActiveMaterialName", out);
+	CHECK(out == "wood");
+}
+
+// The meshes' point lights (MeshLights.h, 0x100a9f80 / 0x100a7f00) and
+// the flicker (0x0064a920).
+TEST(RenderScene_MeshLightsPickedPerMesh)
+{
+	using render::LightedMesh;
+	render::LightLimits limits = render::LightLimits::forShadowQuality(2);
+	CHECK(limits.staticMesh == 2 && near(limits.cullDistance, 100));
+	CHECK(render::LightLimits::forShadowQuality(0).maxFor(LightedMesh::Bundled) == 0);
+	render::ListedLight lights[4];
+	const float at[4][3] = {{10, 0, 0}, {2, 0, 0}, {5, 0, 0}, {50, 0, 0}};
+	for (int i = 0; i < 4; ++i) {
+		std::copy(at[i], at[i] + 3, lights[i].position);
+		lights[i].radius = 8;
+	}
+	lights[2].spot = true;
+	lights[1].affectsLightmapped = false;
+	const float origin[3] = {0, 0, 0};
+	int picked[8];
+	// Within light radius + mesh radius, nearest first, at most 2.
+	int n = render::pickMeshLights(lights, 4, origin, 3, LightedMesh::Static, false, limits, picked, 8);
+	CHECK(n == 2 && picked[0] == 1 && picked[1] == 2);
+	// Bundled meshes take no spots; lightmapped statics only affectLightmappedObjects.
+	n = render::pickMeshLights(lights, 4, origin, 3, LightedMesh::Bundled, false, limits, picked, 8);
+	CHECK(n == 2 && picked[0] == 1 && picked[1] == 0);
+	n = render::pickMeshLights(lights, 4, origin, 3, LightedMesh::Static, true, limits, picked, 8);
+	CHECK(n == 2 && picked[0] == 2 && picked[1] == 0);
+	// The flicker's factor lies in 1 - flicker .. 1; MSVC's rand from 1: 41.
+	render::MsvcRand rand;
+	CHECK(rand.next() == 41);
+	CHECK(near(render::flickerFactor(0.5f, 32767), 1) && near(render::flickerFactor(0.5f, 0), 0.5f));
+	CHECK(near(render::flickerFactor(0, 0), 1));
 }

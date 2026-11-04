@@ -543,6 +543,11 @@ TEST(Bots_ReactionTimeBySkill)
 		std::printf("  skill %.1f: first round %.2f s after the target\n", skill, seconds);
 		if (skill < 1) {
 			CHECK(first > 0 && seconds >= (1 - skill) * 1.5f - 0.05f && seconds <= (1 - skill) * 2.5f + 0.5f);
+		} else if (bots.keepsToOrder(bot)) {
+			// The target lies across the way to the goal's head (the goal
+			// about +x, the target +z): the plan walks to that spot while it
+			// fights (fireKeepsToOrder), standing, so no pose change waits.
+			CHECK(first >= 0 && seconds < 1.0f);
 		} else {
 			CHECK(first >= 0 && seconds >= 0.75f && seconds < 1.0f);
 		}
@@ -3446,4 +3451,188 @@ TEST(Bots_PreferredRangeFollowsTheWeapon)
 	}
 	CHECK(knifeNext);
 	CHECK(bots.preferredRange(bot) <= 1.375f);
+}
+
+// Hearing (AIDLL 0x100ca280 -> 0x100ec100 -> 0x100ea820): the source's
+// sphere by speed (BF2142.exe 0x008a1880), the dispatcher's reach, the
+// roll's odds (a listener with a Mobile part never hears: 0x100317e0 is a
+// max), the side's knowledge after a hearing (0x100a9bb0), and BBFire3d's
+// unit-count scale (0x1007d6c0 against 0x100d2b30).
+TEST(Bots_HearingAndUnitScale)
+{
+	game::AiPlugin mobile;
+	mobile.maxSpeed = 5;
+	mobile.soundSphereMin = 0;
+	mobile.soundSphereMax = 15; // the soldiers' (Common/ai/Objects.ai)
+	CHECK(near(game::soundSphereRadius(&mobile, 0), 0) && near(game::soundSphereRadius(&mobile, 2.5f), 7.5f));
+	CHECK(near(game::soundSphereRadius(&mobile, 9), 15) && game::soundSphereRadius(nullptr, 3) == 0);
+	game::AiPlugin defaults; // the Mobile constructor's (0x008917b0): 0 .. 30 m, 0.01 .. 0.1
+	CHECK(defaults.soundSphereMin == 0 && defaults.soundSphereMax == 30 && near(defaults.hearingNear, 0.01f)
+		&& near(defaults.hearingFar, 0.1f) && defaults.cullDistance == 1000);
+	CHECK(game::WeaponAi().soundSphere == 50); // weaponTemplate +0x24 (0x0088a7b0)
+	// The reach: the weapon's 50 m only within 3 s of taking it in hand.
+	CHECK(game::hearingReach(true, 50, 10) == 50 && game::hearingReach(false, 50, 10) == 10);
+	CHECK(game::hearingReach(false, 50, 0.05f) == 0);
+	// The odds: a listener with no Mobile part (a gun seat) hears for sure
+	// inside a sphere; one with a Mobile part never (the speed fraction is
+	// at least 1).
+	float p = 0;
+	CHECK(game::hearingOdds(20, false, 50, 30, nullptr, 0, p) == 1 && p == 1);
+	CHECK(game::hearingOdds(40, false, 50, 30, nullptr, 0, p) == 0); // outside both
+	CHECK(game::hearingOdds(40, true, 50, 30, nullptr, 0, p) == 1);  // the weapon's 50 m
+	CHECK(game::hearingOdds(10, true, 50, 30, &mobile, 0, p) <= 0 && near(p, 0.1f * 0.2f + 0.01f * 0.8f)); // r = 10 / 50
+	CHECK(game::hearingOdds(10, true, 50, 30, &mobile, 20, p) <= 0);
+	// Heard with certainty c: the last sighting set back 1 / (c deg).
+	CHECK(near(game::heardLastSeen(100, 1, 15), 100 - 1 / 15.0f) && near(game::heardLastSeen(100, 0.1f, 10), 99));
+	CHECK(game::heardLastSeen(100, 1, 0) == 100 && game::heardLastSeen(100, 0, 10) < -1e8f);
+	CHECK(near(ai::knowledgeCertainty(false, 1 / 15.0f, 15), 1 - ai::scurve(1 / 225.0f)));
+	// BBFire3d: summed battle strengths against the bot's type of 1 or less: x 0.01.
+	CHECK(game::fire3dUnitScale(0) == 0.01f && game::fire3dUnitScale(1) == 0.01f && game::fire3dUnitScale(1.5f) == 1);
+	// The commands: the plug-in's sphere and odds, its cull distance; the
+	// weapon's sphere is weaponTemplate.soundSphereRadius (the shipped
+	// scripts' setSoundSphereRadius is no command).
+	Console console;
+	game::BotSettings settings;
+	game::registerBotConsoleMethods(console, settings);
+	std::string out;
+	for (const char* line : {"aiTemplatePlugIn.create Mobile M", "aiTemplatePlugIn.setSoundSphereRadius 0.0 75.0",
+			 "aiTemplatePlugIn.setHearingProbability 0.01 0.3", "aiTemplatePlugIn.create Unit U",
+			 "aiTemplatePlugIn.cullDistance 250", "weaponTemplate.create W", "weaponTemplate.soundSphereRadius 120"}) {
+		console.execute(line, out);
+	}
+	CHECK(settings.aiPlugins.at("m").soundSphereMax == 75 && near(settings.aiPlugins.at("m").hearingFar, 0.3f));
+	CHECK(settings.aiPlugins.at("u").cullDistance == 250 && settings.weapons.at("w").soundSphere == 120);
+	console.execute("weaponTemplate.setSoundSphereRadius 30", out);
+	CHECK(settings.weapons.at("w").soundSphere == 120);
+}
+
+// Vehicles are known per side (AIDLL's per-side AI objects, BF2142.exe
+// 0x008a2f00): an enemy car no bot of the side has seen counts for
+// nothing; seen it is certain, and 2 s after the bots lose it (0x100ee430
+// counting the sensor down) its certainty decays by the template's
+// degeneration from where the side last placed it (0x100a9b20).
+TEST(Bots_VehicleKnowledgePerSide)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	Console console {&files};
+	bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+		[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+	std::string out;
+	console.run("ServerArchives.con", {}, out);
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	physics::CollisionTemplateManager collisionTemplates;
+	templates.registerType(1, "ControlPoint");
+	templates.registerType(2, "SpawnPoint");
+	templates.registerType(3, "Soldier");
+	templates.registerType(7, "PlayerControlObject");
+	templates.registerType(8, "EntryPoint");
+	templates.registerType(9, "Engine");
+	templates.registerType(10, "Spring");
+	for (const char* name : {"us_light_soldier", "pac_light_soldier"}) {
+		templates.create("Soldier", name)->settings()["armor.maxHitPoints"] = "100";
+	}
+	for (int team = 1; team <= 2; ++team) {
+		world::ObjectTemplate* point = templates.create("ControlPoint", team == 1 ? "cp_pac" : "cp_eu");
+		point->settings()["controlPointId"] = std::to_string(team);
+		point->settings()["team"] = std::to_string(team);
+		point->settings()["unableToChangeTeam"] = "1";
+		objects.create(point, {team == 1 ? 100.0f : -100.0f, 0, 0});
+	}
+	world::ObjectTemplate* spawn = templates.create("SpawnPoint", "sp");
+	objects.create(spawn, {0, 0, 0}, {0, 0, 0})->setControlPointId(2);
+	collisionTemplates.create("as_fav", "Objects/Vehicles/as_fav/");
+	world::ObjectTemplate* car = templates.create("PlayerControlObject", "car");
+	car->settings()["hasMobilePhysics"] = "1";
+	car->settings()["physicsType"] = "Mesh";
+	car->settings()["collisionMesh"] = "as_fav";
+	car->settings()["seatInformation"] = "car 0/0.5/0.4 0/0/0";
+	car->settings()["mass"] = "1800";
+	car->settings()["aiTemplate"] = "TestCar";
+	car->children().push_back({"car_entry", {-1.5f, 0, 0}, {}});
+	world::ObjectTemplate* engine = templates.create("Engine", "car_engine");
+	engine->settings()["engineType"] = "194";
+	world::ObjectTemplate* wheel = templates.create("Spring", "car_wheel");
+	wheel->settings()["strength"] = "40";
+	wheel->settings()["damping"] = "8";
+	car->children().push_back({"car_engine", {0, -0.44f, 0}, {}});
+	for (float x : {-0.95f, 0.95f}) {
+		for (float z : {-1.4f, 1.6f}) {
+			engine->children().push_back({"car_wheel", {x, -0.15f, z}, {}});
+		}
+	}
+	templates.create("EntryPoint", "car_entry")->settings()["entryRadius"] = "3";
+	game::BotSettings settings;
+	game::registerBotConsoleMethods(console, settings);
+	for (const char* line : {"aiTemplatePlugIn.create Mobile TestCar_Mobile", "aiTemplatePlugIn.maxSpeed 20",
+			 "aiTemplate.create TestCar", "aiTemplate.addType ITGround", "aiTemplate.addPlugIn TestCar_Mobile",
+			 "aiTemplate.degeneration 10"}) {
+		console.execute(line, out);
+	}
+	game::GameWorld world(templates, objects);
+	world.enablePhysics(files, collisionTemplates,
+		{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
+			 normal = {0, 1, 0};
+			 return 0.0f;
+		 }});
+	world.autoRespawn = false;
+	world.startRound();
+	world::Object* made = objects.create(car, {0, 1.2f, 400}, {0, 0, 0});
+	made->setTeam(1);
+	const uint32_t vehicle = made->id();
+	const int bot = world.addPlayer("Bot", 2, true);
+	CHECK(world.spawnSoldier(bot));
+	game::GameWorld::PlayerInfo info;
+	world.playerInfo(bot, info);
+	world.setSoldierPosition(info.soldier, {0, 0, 0});
+	game::BotManager bots(world, settings);
+	const auto run = [&](float seconds) {
+		for (int tick = 0; tick < static_cast<int>(seconds * 30); ++tick) {
+			bots.update(1 / 30.0f);
+			world.tick(1 / 30.0f);
+		}
+	};
+	run(2);
+	CHECK(bots.vehicleTeam(vehicle) == 1 && bots.vehicleCertainty(2, vehicle) == 0 && bots.vehicleCertainty(1, vehicle) == 1);
+	world.playerInfo(bot, info);
+	world.setSoldierPosition(info.soldier, {0, 0, 393}); // 7 m off: seen whatever the view
+	run(1);
+	CHECK(bots.vehicleCertainty(2, vehicle) == 1);
+	world.playerInfo(bot, info);
+	world.setSoldierPosition(info.soldier, {0, 0, 0});
+	run(1.5f);
+	CHECK(bots.vehicleCertainty(2, vehicle) == 1); // still sensed: 2 s after losing it
+	run(4);
+	const float fading = bots.vehicleCertainty(2, vehicle);
+	CHECK(fading > 0 && fading < 1);
+	run(12);
+	CHECK(bots.vehicleCertainty(2, vehicle) == 0);
+	// A soldier never hears (its Mobile part): the car is never "heard".
+	CHECK(bots.heardVehicles(bot).empty());
+}
+
+// ai.botGiveOrder <bot> <behaviour> <modifier set> (AIDLL 0x100065e0 ->
+// 0x10028dd0 -> the bot's slot 0x40, 0x10098b80): refused while the bot's
+// +0x50 isn't set (no writer of it was found), an unknown behaviour or set
+// before that. The fire plan's keep-to-the-order uses the goal object's
+// head, so a bot without a goal never keeps to one.
+TEST(Bots_GiveOrderRefused)
+{
+	Field field;
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	settings.behaviours = {"Idle", "MoveTo", "Fire"}; // aiSettings.setBehaviour <id> <name>
+	game::BotManager bots(*field.world, settings);
+	const int bot = field.soldier(2, true, 0, 0);
+	settle(bots, 1, field.world.get());
+	CHECK(!bots.giveOrder(bot, "Fire", "StandardWeights") && bots.lastOrder(bot) == "Fire StandardWeights");
+	CHECK(!bots.giveOrder(bot, "NoSuchBehaviour", "StandardWeights") && bots.lastOrder(bot) == "Fire StandardWeights");
+	CHECK(!bots.giveOrder(bot, "Idle", "NoSuchSet") && bots.lastOrder(bot) == "Fire StandardWeights");
+	CHECK(!bots.keepsToOrder(bot));
 }

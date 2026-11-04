@@ -58,6 +58,20 @@ public:
 	float ticketLossAtEndPerMin = 0;
 	float timeLimit = 0; // seconds; 0: none
 	float elapsed = 0;
+	// GameLogic.supplyDropHeight / supplyDropNumSecsToLive (the game
+	// logic's +0x1b8 / +0x1bc, slots 0x240-0x24c; GameLogicInit.con sets 50
+	// and 300): the commander's supply drop, handed to the round's
+	// CommanderSettings.
+	float supplyDropHeight = 50;
+	float supplyDropNumSecsToLive = 300;
+	// GameLogic.radialLevelIndex (0x004256d0 -> slots 0xc0 / 0xc4: the
+	// settings key GSRadialLevelIndex, clamped to 0..100, 100 when unset):
+	// read only by RendDX9's texture loader (0x10017f20) for the in-game
+	// advertising's "rad_*" textures (IGA, not rewritten): kept.
+	int radialLevelIndex = 100;
+	// GameLogic.enableVoHelp (+0x1b5, slot 0x238): the HUD's voice-over
+	// help (event 0x4c, 0x00756b60): kept.
+	bool enableVoHelp = true;
 
 	bool ended() const { return m_ended; }
 	int winner() const { return m_winner; }

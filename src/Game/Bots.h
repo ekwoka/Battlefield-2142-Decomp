@@ -23,7 +23,7 @@
 //   MedicAssist (0x10070200), AmmoAssist (0x10071a10), RepairVehicle
 //           (0x10073360): the best teammate (human players only for ammo)
 //           or vehicle in reach by need over distance, x the squad
-//           coordination factor (0x10089aa0);
+//           coordination factor (AIDLL 0x10089aa0);
 //   c4      (0x10083750): 100 to place a charge in a point the team holds,
 //           100 to set it off once that point is contested;
 //   DefuseMines (0x10086870), RunOver (0x10087820), Avoid (0x10064850,
@@ -116,6 +116,13 @@ struct WeaponAi {
 	// weapon choice wants the target seen clear or known from others.
 	bool firesThroughTransparent = true;
 	bool emp = false; // +0x4d (isEmpWeapon): x (3 - the target's EMP level) in the weapon choice
+	// +0x24 weaponTemplate.soundSphereRadius (BF2142.exe row 0x00887198,
+	// executor 0x00887256; 50 m
+	// by default, 0x0088a7b0), the AI weapon's slot 0x12c (0x00892880): how
+	// far its firing is heard. The shipped Weapons.ai write
+	// `weaponTemplate.setSoundSphereRadius`, which is no command (the
+	// console has only the property), so every shipped weapon keeps 50 m.
+	float soundSphere = 50;
 };
 
 // An AI template plug-in (aiTemplatePlugIn.create <kind> <name>; BF2142.exe
@@ -135,6 +142,17 @@ struct AiPlugin {
 	float lookAheadTime = 0, minSpeedForLookAhead = 0;
 	float minAngleDiffForSlowDown = 0, angleSlowDownScale = 0, maxAngleDiffSlowDown = 0;
 	bool floating = false;
+	// Mobile (template constructor 0x008917b0): setSoundSphereRadius <min>
+	// <max> (0x0088394e -> 0x00891840: +0x38 min 0, +0x34 max 30) and
+	// setHearingProbability <near> <far> (0x00883a93 -> 0x00891860: +0x40
+	// 0.01, +0x3c 0.1); the adaptor's slots 0x54 (0x008a1880: the sphere at
+	// the unit's speed), 0x60 / 0x64.
+	float soundSphereMin = 0, soundSphereMax = 30;
+	float hearingNear = 0.01f, hearingFar = 0.1f;
+	// Unit: cullDistance (0x00884818: +0x18 and its square +0x1c; 1000 by
+	// default, 0x008919d0), the adaptor's slot 0x50 (0x008a1d60) read
+	// through AIDLL 0x100aa5d0 by the memory pass 0x100ee430 alone.
+	float cullDistance = 1000;
 	// Unit: setHasExposedSoldier (+0x16; the seat value's armour bonus).
 	bool exposedSoldier = false;
 	// Unit (constructor 0x008919d0): setBattleStrength <CombatStrengthType>
@@ -234,6 +252,34 @@ float aiDeviationFactor(uint32_t botTypes, bool botPrimary, uint32_t targetTypes
 // The fire plan's distance kept (0x100795a0) for a weapon, with roll the
 // U[0, 1] draw and dh the target's height over the bot's eye.
 float preferredRange(const WeaponAi& w, float skill, float roll, float dh);
+// Hearing (AIDLL). A unit's sound sphere (the Mobile adaptor's slot 0x54,
+// BF2142.exe 0x008a1880): max at maxSpeed or faster, else lerp(min, max,
+// speed / maxSpeed). No Mobile part: 0.
+float soundSphereRadius(const AiPlugin* mobile, float speed);
+// The hearing dispatcher's reach for a source (0x100ca280): the weapon's
+// sphere while its weapon was taken in hand under 3 s ago, the Mobile
+// sphere if larger; heard only past 0.1 m.
+float hearingReach(bool weaponWithin3s, float weaponSphere, float mobileSphere);
+// The roll's odds (0x100ea820) for a listener `distance` from a source:
+// r = min(d / weapon sphere while the weapon is under 5 s in hand and d
+// is inside it, d / Mobile sphere inside that), 1 otherwise; nothing at r
+// = 1. Then p = far r + near (1 - r) with the listener's Mobile part, its
+// speed fraction q = max(1, speed / maxSpeed) (0x100317e0 is a max), and
+// the roll succeeds when U[0, 1) <= (1 - q) p, so never in practice; a
+// listener without a Mobile part has q = 0, p = 1. `p` is what a success
+// hands on; the return value is the threshold.
+float hearingOdds(float distance, bool weaponWithin5s, float weaponSphere, float mobileSphere,
+	const AiPlugin* listenerMobile, float listenerSpeed, float& p);
+// The side's knowledge after a unit is heard with certainty c
+// (0x100a9bb0, slot 2 of vtbl 0x10118838): nothing when its certainty is
+// at least c; else the position copied and the last sighting set to now -
+// 1 / (c degeneration), i.e. lastSeen returned (c clamped to [0, 1]; 0:
+// long ago).
+float heardLastSeen(float now, float c, float degeneration);
+// BBFire3d's unit-count clause (0x1007d6c0 against 0x100d2b30, the bot's
+// +0x24, 1 for every bot, 0x1009ac30): a target whose units' summed
+// battle strengths against the bot's own type are at most 1 scores x 0.01.
+float fire3dUnitScale(float summedStrength);
 // The distances of 0x100d3730 (squared): whether the bot's order is close
 // for a vehicle (see BotManager::orderClose), and `noMove` (its param_5).
 // `own`: the bot is in the vehicle.
@@ -379,7 +425,7 @@ struct GuardArea {
 };
 // The guard: of the areas the team doesn't hold, the one with the most
 // radius / max(1, d^2) for the bot (d across, from the team's spot; slot
-// 0x68 = 0x1005dd10 -> 0x1005dd50 -> 0x1005dd90); with the spot inside
+// 0x68 = AIDLL 0x1005dd10 -> 0x1005dd50 -> 0x1005dd90); with the spot inside
 // that radius of the centre, a bot within 40 m of the centre pushing its
 // PIYaw, PIThrottle or PISprint (the bot's input +4, mask +0x100 bits 0, 3,
 // 13) holds the bonus (`hold`); so does a target within the radius of the
@@ -526,7 +572,7 @@ struct BotSettings {
 	int plannedInterleave = 2, unplannedInterleave = 2;
 	std::array<unsigned, 2> sensingQuotient {1, 1};
 	std::array<unsigned, 3> systemQuotient {1, 1, 1};
-	// autoControllerTemplate.* (AI/AutoControllers.ai, 0x10002210..0x10004b80;
+	// autoControllerTemplate.* (AI/AutoControllers.ai, AIDLL 0x10002210..0x10004b80;
 	// the template 0x100a8ed0, 0x3c bytes), by name as given.
 	struct AutoControllerTemplate {
 		bool sendFireWarning = false;  // +0
@@ -641,7 +687,7 @@ public:
 	bool keepsToOrder(int player) const;
 	// A behaviour's urgency at the bot's last think (0 for none).
 	float lastUrgency(int player, const std::string& behaviour) const;
-	// A radio message (the game's AI event 0x1004e140 -> 0x10030b20 ->
+	// A radio message (the game's AI event 0x1004e140 -> AIDLL 0x10030b20 ->
 	// 0x100a6fe0): `voiceName` from AI/AIRadioMessages.ai ("medic",
 	// "need_ammo", ...) said by `sender`, heard by `receiver`, or with -1 by
 	// every bot of the sender's team (the game's hand-out, 0x004a6f70, is
@@ -673,6 +719,16 @@ public:
 	// a fly-to with the radius as both reaches for a bot whose vehicle is
 	// ITAir.
 	bool scriptMoveTo(int player, float radius, const physics::Vec3& at);
+	// ai.botGiveOrder <bot> <behaviour> <modifier set> (execute 0x100065e0
+	// -> 0x10028dd0): with the behaviour named (its index, 0x10025350) and
+	// the set known, the set's weights and the index go to the bot (slot
+	// 0x40, 0x10098b80), which takes them only while its +0x50 holds; then
+	// they replace +0x44 (multiplying the personality in 0x10096a50) and
+	// name the hinted behaviour (+0x9c, slots 0x68 / 0x44). No writer of
+	// the bot's +0x50 was found (its constructor 0x1009ac30 leaves it), so
+	// the order is refused (returns false) and only kept for inspection.
+	bool giveOrder(int player, const std::string& behaviour, const std::string& modifierSet);
+	std::string lastOrder(int player) const;
 	// ai.botFlyTo <bot> <radius> <height> <unused> <x/y/z> (0x100285a0):
 	// only a bot whose vehicle is ITAir.
 	bool scriptFlyTo(int player, float radius, float height, const physics::Vec3& at);
@@ -696,6 +752,17 @@ public:
 	// sighting by its template's degeneration, 0 for one the side's bots
 	// never saw.
 	float certainty(int team, int player) const;
+	// The same for a vehicle (its root AI object): enemy vehicles too are
+	// known per side (sensed, heard), neutral and own ones certain.
+	float vehicleCertainty(int team, uint32_t vehicle) const;
+	// Where the side places a unit (vtbl 0x10118838 slot 0x2c, 0x100a9b20):
+	// live while sensed, else the remembered position; false for none.
+	bool knownPosition(int team, int player, physics::Vec3& at) const;
+	// The vehicles a bot heard (0x100ec100 / 0x100ec930's flag-1 items).
+	std::vector<uint32_t> heardVehicles(int player) const;
+	// A vehicle's team as the AI sees it (its Unit's: those aboard, else
+	// the object's team).
+	int vehicleTeam(uint32_t vehicle) const;
 private:
 	// An enemy a bot knows of (the sensing agent's memory item).
 	struct Known {
@@ -710,6 +777,12 @@ private:
 		bool secondHand = false;
 		float seenAt = -1e9f;   // +0x58: when anyone last saw it
 	};
+	// An enemy vehicle in a bot's memory (its root AI object's item):
+	// when it was last seen, lost (-1 in sight) and heard (flag 1, -1e9
+	// none; dropped 30 s after, 0x100ec930).
+	struct KnownVehicle {
+		float seen = -1e9f, lostAt = -1, heardAt = -1e9f;
+	};
 	struct Bot {
 		ai::Arbitration arbitration;
 		std::string equipment;
@@ -717,6 +790,8 @@ private:
 		float lastThink = -1;
 		float spawnedAt = 0;
 		std::vector<Known> known;
+		std::map<uint32_t, KnownVehicle> knownVehicles;
+		float firedAt = -1e9f; // +0xc0: the bot's last round (slot 0x314, 0x10097a60); hearing waits 1.5 s
 		// Fire.
 		int target = -1;
 		int weaponSlot = 0;
@@ -747,9 +822,10 @@ private:
 		bool reportedFiring = false;
 		// Explosives (0x10074ef0, 0x100777a0, 0x100d8910, 0x100d8450).
 		bool explosive = false;          // +0x249: the weapon choice's bonus applied
-		bool lobbing = false;            // +0x208: the aim lobs (0x100dbd10)
+		bool lobbing = false;            // +0x208: the aim lobs (AIDLL 0x100dbd10)
 		bool lobHold = false;            // +0x209: a lob's condition held (vt+0x20c; read by 0x100e6060)
 		bool orderMove = false;          // +0x248: the fire plan moves to the order's spot (vt+0x254)
+		physics::Vec3 orderSpot;         // that spot: the goal object's head (bot +0x80 slot 8)
 		float conditionFailedAt = -1e9f; // +0x1f8
 		float vehicleFailedAt = -1e9f;   // +0x250
 		float lobFailedAt = -1e9f;       // +0x200: a lob's condition failed
@@ -779,7 +855,7 @@ private:
 		int followId = -1;           // what it follows (a goal id)
 		physics::Vec3 followTo;
 		float followAt = -100;
-		float jumpUntil = -1;        // PIAction held (the follower's jump, 0x10095720 / 0x10092bc0)
+		float jumpUntil = -1;        // PIAction held (the follower's jump, 0x10095720 / AIDLL 0x10092bc0)
 		ai::DriveState drive;
 		ai::SidestepState sidestep;  // the move's (0x100ce860 +0x64..+0x80)
 		float lastYaw = 0;           // the vehicle's, for its turn rate
@@ -827,7 +903,7 @@ private:
 		// the thrower took the weapon in hand.
 		physics::Vec3 grenadeAt;
 		float grenadeStamp = -1e9f;
-		bool avoidGrenade = false; // the avoided object is -1: a grenade (0x10065360)
+		bool avoidGrenade = false; // the avoided object is -1: a grenade (AIDLL 0x10065360)
 		float hornAt = -1e9f;      // the comm object's +0x80 (0x100a5c00)
 		bool hornHeld = false;
 		float waitingSince = -1;  // Idle: a driver waiting for a passenger
@@ -933,7 +1009,7 @@ private:
 	float defuseUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight);
 	float runOverUrgency(Bot& bot, const GameWorld::PlayerInfo& self);
 	float avoidUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight);
-	// The squad coordination factor (0x10089aa0): whether this bot should
+	// The squad coordination factor (AIDLL 0x10089aa0): whether this bot should
 	// take the task (Medic 1, Repair 2, Ammo 4) on a target.
 	float coordination(const GameWorld::PlayerInfo& self, int type, int64_t target, int targetPlayer,
 		const physics::Vec3& at) const;
@@ -981,7 +1057,13 @@ private:
 	// 0.25 S(health) (0x100aa420; ammo counts as full here). A soldier's
 	// battle strengths are the most of its weapons' (their setStrength), its
 	// strategic ones its kit's kitTemplate's (0x008a1e80).
-	void unitStrengths(const GameWorld::PlayerInfo& p, float& battle, std::array<float, 2>& strategic) const;
+	// `health` < 0: the unit's own now; else the side's kept value (the
+	// knowledge's capability, refreshed under allowedTimeDiff).
+	void unitStrengths(const GameWorld::PlayerInfo& p, float& battle, std::array<float, 2>& strategic, float health = -1) const;
+	// The unit's battle strengths by CombatStrengthType, capability scaled
+	// (the Unit part's +8, 0x100aa740): a soldier's, or (vehicle) its
+	// root's and every seat's Unit summed.
+	std::array<float, 8> battleArray(const GameWorld::PlayerInfo& p) const;
 	// Plans (what the chosen behaviour does).
 	void fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
 	// `leadWeapon`: the weapon whose round the aim leads the point for
@@ -996,7 +1078,11 @@ private:
 	float landingCraftUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight);
 	float fire3dUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight,
 		const std::vector<GameWorld::PlayerInfo>& players);
-	bool fireKeepsToOrder(const Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& target) const;
+	// The goal object's urgency for the bot where it stands (its slot 1,
+	// as BBMoveTo asks it; bot +0x80, set by vt+0x38): no side effects.
+	float goalObjectUrgency(const Bot& bot, const GameWorld::PlayerInfo& self) const;
+	bool fireKeepsToOrder(const Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& target,
+		physics::Vec3* spot = nullptr) const;
 	// Walks (InfanteryMoveTo) or drives (CarMoveTo/TankMoveTo) along a path
 	// to `to`; false once it has arrived. `radius` is the goal's.
 	// `object`: a MoveToObject's object (a vehicle to enter or repair),
@@ -1011,7 +1097,7 @@ private:
 	bool follow(Bot& bot, const ai::NavMesh& mesh, const physics::Vec3& from, const physics::Vec3& to, int goalId,
 		const ai::FollowerSettings& settings);
 	ai::DriveSettings driveSettings(const GameWorld::PlayerInfo& self) const;
-	// What the infantry steering's sidestep (0x100ce860, 0x100e63c0) sees:
+	// What the infantry steering's sidestep (AIDLL 0x100ce860, 0x100e63c0) sees:
 	// the vehicles of the world list round the bot's controlled object
 	// `own` at `at`.
 	ai::SidestepSense sidestepSense(const Bot& bot, const physics::Vec3& at, uint32_t own, const ai::NavMesh& mesh,
@@ -1049,15 +1135,37 @@ private:
 	const ai::NavMesh* m_vehicleNavMesh = nullptr;
 	BotSettings* m_source = nullptr;
 	std::map<int, ai::Goal> m_goals; // the scripted goals by player
+	std::map<int, std::string> m_orders; // ai.botGiveOrder's refused orders, "behaviour set"
 	std::map<int, bool> m_deactivated;
 	// The sides' knowledge of the enemy players (the AI objects of
 	// ai::knowledgeCertainty): when its bots last saw each, and whether one
 	// sees it now; filled by sense().
+	// Per side and unit (players by id, vehicles by -(object) - 1), the
+	// side's AI object (vtbl 0x10118838): +0x48 the last sighting, +0xa8
+	// the sensors' count (sensed), +0x54 the position kept while unsensed,
+	// +0x20 the last full update (allowedTimeDiff's throttle, 0x100a9e70)
+	// and what it refreshed (+0x44's capability: here the health).
 	struct Knowledge {
 		float lastSeen = -1e9f;
 		bool sensed = false;
+		physics::Vec3 position;
+		bool hasPosition = false;
+		float updatedAt = -1e9f;
+		float health = 1;
 	};
-	std::map<int, Knowledge> m_knowledge[3];
+	std::map<int64_t, Knowledge> m_knowledge[3];
+	// This tick's players by id and vehicles' teams (from m_players).
+	std::map<int, size_t> m_playerIndex;
+	std::map<uint32_t, int> m_vehicleTeams;
+	const GameWorld::PlayerInfo* playerOf(int id) const;
+	static int64_t vehicleKey(uint32_t vehicle) { return -static_cast<int64_t>(vehicle) - 1; }
+	// A sighting or hearing reaching the side (slot 3, 0x100a9e70): within
+	// allowedTimeDiff of the last full update only the stamp moves.
+	void refreshKnowledge(Knowledge& k, float allowedTimeDiff, float health, const physics::Vec3& live, bool force);
+	// Hearing: the dispatcher (0x100ca280) and the roll (0x100ec100 ->
+	// 0x100ea820).
+	void hear();
+	float knowledgeCertainty(int team, int64_t key, const std::string& aiTemplate) const;
 	void updateKnowledge();
 	float degenerationOf(const GameWorld::PlayerInfo& player) const;
 	bool m_noNavMesh = false;

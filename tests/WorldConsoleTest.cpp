@@ -79,6 +79,22 @@ TEST(WorldConsole_BeforeSpawnCamera)
 	CHECK(logic.beforeSpawnCamera.set && logic.beforeSpawnCamera.position[2] == -451 && logic.beforeSpawnCamera.rotation[0] == -138);
 }
 
+// GameLogic.supplyDropHeight / supplyDropNumSecsToLive (+0x1b8 / +0x1bc)
+// and radialLevelIndex (0..100, the IGA textures' key) as properties.
+TEST(WorldConsole_GameLogicSupplyDropAndRadialLevel)
+{
+	Console console;
+	game::GameLogic logic;
+	game::registerGameLogicConsoleMethods(console, logic);
+	std::string out;
+	CHECK(logic.supplyDropHeight == 50 && logic.supplyDropNumSecsToLive == 300 && logic.radialLevelIndex == 100);
+	CHECK(console.execute("GameLogic.supplyDropHeight 80", out) == ConsoleResult::Ok);
+	CHECK(console.execute("GameLogic.supplyDropNumSecsToLive 120", out) == ConsoleResult::Ok);
+	CHECK(console.execute("GameLogic.radialLevelIndex 250", out) == ConsoleResult::Ok);
+	CHECK(logic.supplyDropHeight == 80 && logic.supplyDropNumSecsToLive == 120 && logic.radialLevelIndex == 100);
+	CHECK(console.execute("GameLogic.supplyDropHeight", out) == ConsoleResult::Ok && std::stof(out) == 80);
+}
+
 // Template ids (0x0070a700): a template its class makes client-only (flag
 // 0x2000, the sounds) is numbered from 0x1000000, apart from the
 // network-shared ones, which go on counting as if it weren't there (a

@@ -1,5 +1,6 @@
 #include "Weapons.h"
 
+#include "Physics/MaterialManager.h"
 #include "World/ObjectTemplate.h"
 
 #include <algorithm>
@@ -21,6 +22,33 @@ float number(const world::ObjectTemplate& t, const char* name, float fallback)
 }
 
 } // namespace
+
+Penetration penetration(const ProjectileSettings& round, const physics::Material& material, bool object)
+{
+	if (!round.penetrator || (!object && !material.hasWaterPhysics)) {
+		return Penetration::No;
+	}
+	if (!material.overrideNeverPenetrate) {
+		if (material.hasWaterPhysics) {
+			return round.allowLiquidPenetration ? Penetration::Free : Penetration::No;
+		}
+		if (!round.allowSolidPenetration) {
+			return Penetration::No;
+		}
+	}
+	return material.damageLoss == -1.0f ? Penetration::No : Penetration::Loss;
+}
+
+float penetrationLoss(const physics::Material& material, bool wayOut, float thickness)
+{
+	if (material.isOneSided) {
+		return material.minDamageLoss;
+	}
+	if (!wayOut) {
+		return material.maxDamageLoss;
+	}
+	return std::clamp(thickness * material.damageLoss, material.minDamageLoss, material.maxDamageLoss);
+}
 
 ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate& t)
 {
@@ -75,7 +103,15 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 		s.seek = seek->second == "TTMagnet" ? ProjectileSettings::Seek::Magnet
 			: seek->second == "TTUnique"    ? ProjectileSettings::Seek::Aim
 			: seek->second == "TTBeacon"    ? ProjectileSettings::Seek::Beacon
+			: seek->second == "TTHeat" || seek->second == "TTLaser" ? ProjectileSettings::Seek::Closest
 											: ProjectileSettings::Seek::None;
+		static const char* const kTypes[] = {"TTNone", "TTLaser", "TTHeat", "TTMagnet", "TTUnique", "TTBeacon", "TTDecoy", "TTPod"};
+		for (int i = 0; i < 8; ++i) {
+			if (seek->second == kTypes[i]) {
+				s.seekTargetType = i;
+			}
+		}
+		s.reLockTicks = static_cast<int>(std::nearbyint(number(t, "seek.reLockTime", 0) * 30));
 		s.seekDelay = number(t, "seek.trackingDelay", 0);
 		s.lockDistance = number(t, "seek.maxDistLock", 0);
 		s.loseDistance = number(t, "seek.distLoseLock", s.lockDistance);
@@ -91,11 +127,23 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 		s.deAcceleration = number(t, "deAcceleration", 0);
 		s.maxSpeed = number(t, "maxSpeed", 0);
 		s.maxAngleLock = number(t, "seek.maxAngleLock", 360);
+		if (s.seek == ProjectileSettings::Seek::Closest) {
+			// SeekClosestTargetComp's defaults (0x005ec300): maxAngleLock
+			// pi/4, maxDistLock 9999, distLoseLock 0.
+			s.maxAngleLock = number(t, "seek.maxAngleLock", 45);
+			s.lockDistance = number(t, "seek.maxDistLock", 9999);
+			s.loseDistance = number(t, "seek.distLoseLock", 0);
+		}
 		s.ignoreFriendly = number(t, "seek.ignoreFriendly", 1) != 0;
 	}
 	s.startDelay = number(t, "startDelay", 0);
 	s.onlyDetonateOnMaterial = static_cast<int>(number(t, "onlyDetonateOnMaterial", -1));
 	s.onlyDetonateOnMaterialTime = number(t, "onlyDetonateOnMaterialTimeLimit", 0);
+	s.penetrator = std::any_of(components.begin(), components.end(), [](const std::string& c) {
+		return c == "DefaultPenetrateComp";
+	}) || t.settings().count("penetrate.allowSolidPenetration") || t.settings().count("penetrate.allowLiquidPenetration");
+	s.allowSolidPenetration = number(t, "penetrate.allowSolidPenetration", 1) != 0;
+	s.allowLiquidPenetration = number(t, "penetrate.allowLiquidPenetration", 1) != 0;
 	s.triggerRadius = number(t, "detonation.triggerRadius", 0);
 	s.triggerAngle = number(t, "detonation.triggerAngle", 180);
 	s.triggerMinSpeed = number(t, "detonation.triggerVictimMinSpeed", 0);
@@ -225,7 +273,12 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 	s.magSize = static_cast<int>(number(t, "ammo.magSize", static_cast<float>(s.magSize)));
 	s.nrOfMags = static_cast<int>(number(t, "ammo.nrOfMags", static_cast<float>(s.nrOfMags)));
 	s.reloadTime = number(t, "ammo.reloadTime", s.reloadTime);
-	s.reloadWithoutPlayer = number(t, "ammo.reloadWithoutPlayer", 0) != 0;
+	s.reloadWithoutPlayer = number(t, "ammo.reloadWithoutPlayer", 1) != 0;
+	s.delayToUseTicks = static_cast<int>(std::nearbyint(number(t, "delayToUse", 0) * 30));
+	s.autoReload = number(t, "ammo.autoReload", 0) != 0;
+	s.instantReloadOnEnable = number(t, "ammo.instantReloadOnEnable", 0) != 0;
+	s.toggleWhenNoAmmo = number(t, "ammo.toggleWhenNoAmmo", 0) != 0;
+	s.changeMagAt = number(t, "ammo.changeMagAt", s.changeMagAt);
 	s.busyUntilButtonRelease = number(t, "fire.busyUntilButtonRelease", 0) != 0;
 	s.keepProjectiles = number(t, "keepProjectiles", s.keepProjectiles);
 	s.velocity = number(t, "velocity", s.velocity);
@@ -287,13 +340,39 @@ bool FireArm::toggleFireMode()
 	return true;
 }
 
+void FireArm::enable(bool soldier)
+{
+	m_readyIn = m_settings.delayToUseTicks;
+	if (soldier || !m_settings.reloadWithoutPlayer) {
+		m_reloadLeft = 0;
+	}
+	// canReload (0x005f4140): not full (allowReloadWithFullMag aside) and
+	// a magazine to take, or magazines without end.
+	if (m_reloadLeft <= 0 && m_settings.autoReload && m_settings.instantReloadOnEnable && m_settings.magSize > 0
+		&& m_rounds == 0 && (m_mags > 0 || m_settings.nrOfMags < 0)) {
+		m_rounds = m_settings.magSize;
+		if (m_settings.nrOfMags >= 0) {
+			--m_mags;
+		}
+	}
+	m_pending = false;
+	m_burstLeft = 0;
+}
+
+bool FireArm::selectable() const
+{
+	return !(m_settings.toggleWhenNoAmmo && m_settings.magSize >= 0 && m_rounds <= 0 && m_reloadLeft <= 0
+		&& !(m_mags > 0 || m_settings.nrOfMags < 0));
+}
+
 bool FireArm::startReload()
 {
-	if (m_reloadLeft > 0 || m_settings.magSize < 0 || m_rounds >= m_settings.magSize ||
+	if (m_readyIn > 0 || m_reloadLeft > 0 || m_settings.magSize < 0 || m_rounds >= m_settings.magSize ||
 		(m_mags <= 0 && m_settings.nrOfMags >= 0) || m_settings.reloadTime <= 0) {
 		return false;
 	}
 	m_reloadLeft = m_settings.reloadTime;
+	m_reloadFilled = false;
 	m_pending = false;
 	m_burstLeft = 0;
 	return true;
@@ -510,14 +589,27 @@ bool FireArm::fire(float seconds, bool trigger)
 		}
 		m_busyUntilRelease = false;
 	}
+	if (m_readyIn > 0) {
+		--m_readyIn; // delayToUse: busy (0x005c14f0)
+		m_pending = false;
+		m_burstLeft = 0;
+		if (m_reloadLeft <= 0) {
+			return false;
+		}
+	}
 	if (m_reloadLeft > 0) {
 		m_reloadLeft -= seconds;
-		if (m_reloadLeft <= 0) {
-			m_reloadLeft = 0;
+		// The swap at changeMagAt of the reload (0x005f4830 / 0x005f3c40),
+		// busy on to its end.
+		if (!m_reloadFilled && m_reloadLeft <= m_settings.reloadTime * (1 - m_settings.changeMagAt) + 1e-4f) {
+			m_reloadFilled = true;
 			m_rounds = m_settings.magSize;
 			if (m_settings.nrOfMags >= 0) {
 				--m_mags;
 			}
+		}
+		if (m_reloadLeft <= 0) {
+			m_reloadLeft = 0;
 		}
 		return false;
 	}
@@ -555,6 +647,7 @@ bool FireArm::fire(float seconds, bool trigger)
 	// ammo.nrOfMags -1: magazines without end (the drones' detonators).
 	if (m_rounds == 0 && (m_mags > 0 || m_settings.nrOfMags < 0)) {
 		m_reloadLeft = m_settings.reloadTime;
+		m_reloadFilled = false;
 	}
 	return true;
 }

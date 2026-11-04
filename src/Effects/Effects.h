@@ -459,9 +459,14 @@ struct Decal {
 	// DecalManager slot 0x14, RendDX9 0x100e6b70, kept at object +0x164 and
 	// released with it, slot 0x20).
 	uint32_t object = 0;
+	// A world decal's static object (0: the terrain): the exe's add
+	// (0x005a36d0 -> DecalSet slot 4 0x10166410) passes the hit's mesh,
+	// whose faces 0x10165f60 clips it to.
+	uint32_t surface = 0;
 	float age = 0; // seconds (RendDX9 0x10164f10; it goes at DecalManager.timeToLive)
-	// The renderer's: the decal clipped to the terrain (clipDecal), made the
-	// first time it is drawn; null until then.
+	// The renderer's: the decal clipped to the terrain or its object's faces
+	// (clipDecal; in the object's space on a moving one), made the first
+	// time it is drawn; null until then.
 	mutable std::shared_ptr<const std::vector<DecalVertex>> clipped;
 	// Whether its owner object was drawn the last frame (the set's +0x19,
 	// set by the ObjectDrawer 0x100b84b0 / 0x100b8380 / 0x100b71c0 for the
@@ -512,6 +517,9 @@ struct PointLight {
 	// affectLightmappedObjects: whether lightmapped surfaces take it too
 	// (the static lights of the levels leave them to their lightmaps).
 	bool affectsLightmapped = true;
+	// A placed light's template range (its range2 flickers: 0x0064a920);
+	// below 0 for the effects' lights.
+	float templateRange2 = -1;
 };
 
 // What a LightSource template sets (BF2142.exe's LightSource template,
@@ -764,7 +772,9 @@ public:
 
 	// Leaves a decal template's decal at a surface point (the oldest go
 	// beyond kMaxDecals); false if there is no such decal template.
-	bool spawnDecal(const std::string& name, const Vec3& position, const Vec3& normal);
+	// `surface` is the static object the round hit (0: the terrain), whose
+	// collision faces the renderer clips the decal to.
+	bool spawnDecal(const std::string& name, const Vec3& position, const Vec3& normal, uint32_t surface = 0);
 	// The same on a moving object placed at `objectPosition`, turned by
 	// `objectRotation` (yaw / pitch / roll degrees): kept in its space so it
 	// moves with it.

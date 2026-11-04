@@ -11,6 +11,7 @@
 #include "Animation/Pose.h"
 #include "AnimatedUV.h"
 #include "Culling.h"
+#include "MeshLights.h"
 #include "EnvMaps.h"
 #include "Fog.h"
 #include "TerrainLod.h"
@@ -59,6 +60,7 @@ class EffectManager;
 namespace scene {
 struct HemiMapSettings;
 struct LightSettings;
+struct OvergrowthSettings;
 struct ParticleSystemSettings;
 struct QualitySettings;
 struct WindSettings;
@@ -187,6 +189,16 @@ struct LevelSources {
 	const scene::ParticleSystemSettings* particles = nullptr;
 	const scene::WindSettings* wind = nullptr;
 	const scene::QualitySettings* quality = nullptr;
+	// The collision faces (the projectile LOD's) of `object` within `radius`
+	// of `center`, for a decal's clipping (RendDX9 0x10165f60 / 0x101655c0):
+	// object 0 the static objects' in world space, only those of `owner`
+	// when it isn't 0; else that moving object's in its own space. None if
+	// null.
+	std::function<void(uint32_t object, uint32_t owner, const effects::Vec3& center, float radius,
+		std::vector<std::array<effects::Vec3, 3>>& faces)>
+		collisionFaces;
+	// Overgrowth.* as the level's Overgrowth.con set them (else the file is read).
+	const scene::OvergrowthSettings* overgrowth = nullptr;
 	// The interior sun of the seat camera now; false when there is none.
 	std::function<bool(InsideSun& sun)> insideSun;
 	// The game state the post-production follows (EMP, tinnitus, the Titan
@@ -369,6 +381,12 @@ private:
 		mutable float titanHemi[3] = {0.5f, 0.5f, 0.5f};
 		bool overgrowth = false; // Object.isOvergrowth
 		Lod overgrowthLod;       // its "<geometry>_lod" mesh
+		// Its type's factor (+0x9c, OvergrowthBlend::typeFactor), its cell's
+		// corner (x, the ground at the centre, z: OvergrowthLod.h) and its
+		// lodTimer state (+0x5c).
+		float overgrowthTypeFactor = 1;
+		float overgrowthCell[3] {};
+		mutable float overgrowthLodState = 0;
 		bool debris = false;     // an effects' debris piece, placed afresh each frame (syncDebris)
 		// The mesh instance's UV matrices (RendDX9 +0x28c) and its parts'
 		// animated-UV states (BF2142.exe's SimpleObject +0x160), in the
@@ -518,6 +536,10 @@ private:
 	float m_overgrowthViewDistance = 0;
 	float m_overgrowthScriptScale = 1;
 	float m_overgrowthQualityScale = 1;
+	float m_overgrowthCloseDistFade = 0.3f; // +0xcc
+	float m_overgrowthLodTimer = 0;         // +0x114
+	float m_overgrowthCellSize = 125;       // the cells' side (OvergrowthCells::cellSize)
+	uint64_t m_lastOvergrowthTicks = 0;     // lodTimer's clock
 	// This frame's close distance: the script's scale, or the quality's
 	// once the video settings change it after the level's script ran (the
 	// switch writes +0x110 when they are applied).
@@ -741,7 +763,12 @@ private:
 	void buildParticles(const Camera& camera);
 	// This frame's point lights (the effects' LightSources nearest the
 	// camera), copied into the lit shaders' uniforms.
-	std::vector<effects::PointLight> m_pointLights;
+	std::vector<effects::PointLight> m_pointLights; // this frame's listed lights (collectPointLights)
+	std::vector<ListedLight> m_listedLights;        // the same, for the meshes' picks
+	std::vector<int> m_cameraLights;                // the nearest the camera of them (applyPointLights)
+	LightLimits m_lightLimits;
+	MsvcRand m_flickerRand;
+	Frustum m_frameFrustum;
 	void collectPointLights(const Camera& camera);
 	// The LightSources in the placed objects' template trees (the levels'
 	// light bundles: ambient_small, houselight_big ...; lights carried by
@@ -753,6 +780,8 @@ private:
 	};
 	std::vector<ObjectLight> m_objectLights;
 	void applyPointLights(LightingUniforms& uniforms) const;
+	// A mesh's picked lights (MeshLights.h), lightCount.y its kind + 1.
+	void applyMeshLights(LightingUniforms& uniforms, const int* picked, int count, LightedMesh kind) const;
 	// mesh.frag's samplers 8-10: a static material's detail and crack
 	// normal maps (flat without) and this frame's envmap.
 	void bindMeshLayers(SDL_GPURenderPass* pass, const Submesh* submesh, SDL_GPUTexture* envMap) const;

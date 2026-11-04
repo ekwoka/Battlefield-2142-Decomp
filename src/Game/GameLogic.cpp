@@ -198,6 +198,14 @@ void registerGameLogicConsoleMethods(Console& console, GameLogic& logic)
 	const uint32_t access = ConsoleAccess::Anyone;
 	GameLogic* l = &logic;
 	bindMethod(console, "GameLogic.setTeamName", access, [l](int team, std::string name) { l->team(team).name = name; });
+	bindProperty<float>(console, "GameLogic.supplyDropHeight", access, [l] { return l->supplyDropHeight; },
+		[l](const float& v) { l->supplyDropHeight = v; });
+	bindProperty<float>(console, "GameLogic.supplyDropNumSecsToLive", access, [l] { return l->supplyDropNumSecsToLive; },
+		[l](const float& v) { l->supplyDropNumSecsToLive = v; });
+	bindProperty<int>(console, "GameLogic.radialLevelIndex", access, [l] { return l->radialLevelIndex; },
+		[l](const int& v) { l->radialLevelIndex = std::clamp(v, 0, 100); });
+	bindProperty<bool>(console, "GameLogic.enableVoHelp", access, [l] { return l->enableVoHelp; },
+		[l](const bool& v) { l->enableVoHelp = v; });
 	bindMethod(console, "GameLogic.setBeforeSpawnCamera", access, [l](std::string position, std::string rotation) {
 		GameLogic::BeforeSpawnCamera& c = l->beforeSpawnCamera;
 		c.set = std::sscanf(position.c_str(), "%f/%f/%f", &c.position[0], &c.position[1], &c.position[2]) == 3;

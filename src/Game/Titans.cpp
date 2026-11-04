@@ -373,6 +373,8 @@ void GameWorld::buildTitanParts(Titan& titan)
 		part.destroyOnRootLevel = number(t, "armor.destroyOnRootParentDamageLevel", -1);
 		part.onlyFromChildrenLevel = number(t, "armor.onlyDamageFromChildrenLevel", -100);
 		part.destroyEvent = integer(t, "Python.onDestroyEvent", 0);
+		part.addNametagOnDestroy = integer(t, "armor.addNametagOnDestroy", 0) != 0;
+		part.healthActivationLevel = number(t, "nametag.healthActivationLevel", 100);
 		// The armour effects, highest level first (the list's order).
 		if (const std::string* list = setting(t, "armor.addArmorEffect.list")) {
 			size_t from = 0;
@@ -808,6 +810,8 @@ std::vector<GameWorld::TitanInfo> GameWorld::titans() const
 		info.radius = titan.radius;
 		info.effectLevel = root.effectLevel;
 		info.coreExplosion = titan.coreExplosion;
+		info.healthActivationLevel = root.healthActivationLevel;
+		info.nametagPushes = root.nametagPushes;
 		for (auto it = titan.targets.rbegin(); it != titan.targets.rend(); ++it) {
 			if (it->first <= m_ticks) {
 				info.hasTarget = true;
@@ -851,6 +855,9 @@ std::vector<GameWorld::TitanPartInfo> GameWorld::titanParts(int team) const
 			info.maxHitPoints = part.maxHitPoints;
 			info.wreck = part.state != 0;
 			info.position = at + rotation.transform(part.position);
+			info.percent = titanPercent(part);
+			info.healthActivationLevel = part.healthActivationLevel;
+			info.nametagPushes = part.nametagPushes;
 			list.push_back(info);
 		}
 	}
@@ -1199,7 +1206,12 @@ bool GameWorld::titanDamage(uint32_t id, float amount, int attacker, bool fromCh
 void GameWorld::setTitanPartHitPoints(Titan& titan, int index, float value, int attacker)
 {
 	TitanPart& part = titan.parts[static_cast<size_t>(index)];
+	const float before = part.hitPoints;
 	part.hitPoints = std::clamp(value, -part.wreckHitPoints, part.maxHitPoints);
+	// addNametagOnDestroy: each drop re-pushes the name tag (0x00655460).
+	if (part.addNametagOnDestroy && part.hitPoints < before) {
+		++part.nametagPushes;
+	}
 	const int state = part.hitPoints > 0 ? 0 : part.hitPoints <= -part.wreckHitPoints ? 2 : 1;
 	const bool wrecked = part.state == 0 && state != 0;
 	part.state = state;

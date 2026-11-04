@@ -903,7 +903,7 @@ std::vector<DecalVertex> clipDecal(const Vec3& centre, const Vec3& normal, const
 	return out;
 }
 
-bool EffectManager::spawnDecal(const std::string& name, const Vec3& position, const Vec3& normal)
+bool EffectManager::spawnDecal(const std::string& name, const Vec3& position, const Vec3& normal, uint32_t surface)
 {
 	const world::ObjectTemplate* t = m_templates.find(name);
 	if (!t || (t->typeName() != "Decal" && t->typeName() != "decal")) {
@@ -921,6 +921,7 @@ bool EffectManager::spawnDecal(const std::string& name, const Vec3& position, co
 	decal.texture = look.texture;
 	decal.normal = normalized(normal);
 	decal.position = position;
+	decal.surface = surface;
 	decal.size = look.size + m_decalRandom.unit() * look.randomSize;
 	decal.color = look.color;
 	// Turned about the normal from any perpendicular axis.

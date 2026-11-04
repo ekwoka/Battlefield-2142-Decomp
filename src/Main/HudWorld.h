@@ -79,6 +79,15 @@ public:
 	// the level (nullptr: none, or dead).
 	virtual const world::Object* soldier() const = 0;
 	virtual const world::Object* vehicle() const = 0;
+	// The team's overhead camera as the server placed it (its OverheadCamera
+	// ghost, 0x00603980): the commander's view at the map's zoom 2
+	// (0x00779680). False offline (the local view is the camera) or before
+	// the server made one.
+	virtual bool overheadCamera(int team, float& x, float& z) const
+	{
+		(void)team, (void)x, (void)z;
+		return false;
+	}
 	// The soldier's health, 0..1 (the player's own state on a client).
 	virtual float health() const = 0;
 	// The weapon in hand: the local round's firearm, or (a joined game) its
@@ -98,6 +107,9 @@ public:
 		(void)team;
 		return {};
 	}
+	// The vehicles (objects) those reports spotted, a joined game's (the
+	// local 2/0x2e of 0x00508590 for a reported player in a vehicle).
+	virtual std::vector<uint32_t> spottedVehicles() const { return {}; }
 };
 
 // A local round (also a hosting server's own player).
@@ -165,6 +177,7 @@ public:
 	Scores scores(int player) const override;
 	float tickets(int team) const override;
 	int commander(int team) const override;
+	bool overheadCamera(int team, float& x, float& z) const override;
 	std::vector<ControlPointInfo> controlPointList() const override;
 	std::vector<int> spawnablePoints(int team) const override;
 	int spawnChoice(int player) const override { return player == localPlayer() ? chosenSpawn : -1; }
@@ -179,6 +192,7 @@ public:
 	float health() const override;
 	Weapon heldWeapon() const override;
 	std::vector<int> revealedPlayers(int team) const override;
+	std::vector<uint32_t> spottedVehicles() const override;
 
 	// The object of a ghost (0 none) and the ghost of an object.
 	uint32_t objectOf(uint16_t ghost) const;

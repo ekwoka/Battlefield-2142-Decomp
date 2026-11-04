@@ -208,6 +208,10 @@ public:
 	// Objects and players.
 	std::vector<RemoteObject> objectList() const;
 	const RemoteObject* object(uint16_t ghost) const;
+	// The team's overhead camera ghost (OverheadCamera, 0x00603980) where
+	// the server placed it: the commander's view at the map's zoom 2
+	// (0x00779680); false before the server made one.
+	bool overheadCamera(int team, Vec3f& position) const;
 	// How a vehicle ghost's part stands as its groups last said (the
 	// root's ghost and its seats' ghosts searched): a RotationalBundle's
 	// angles (degrees) or a Spring's offset; false for a part no group
@@ -382,6 +386,17 @@ public:
 		}
 		return players;
 	}
+	// The vehicles those reports spotted (2/0x2e), while their seconds last.
+	std::vector<uint16_t> radarVehicles() const
+	{
+		std::vector<uint16_t> vehicles;
+		for (const auto& [ghost, until] : m_radarVehicles) {
+			if (until > m_tick) {
+				vehicles.push_back(ghost);
+			}
+		}
+		return vehicles;
+	}
 	uint32_t radarReports() const { return m_radarReports; }
 	std::vector<PostRemoteInfo> takeMessages() { return std::exchange(m_messages, {}); }
 	std::vector<GameEvent> takeUnhandled() { return std::exchange(m_unhandled, {}); }
@@ -474,6 +489,7 @@ private:
 	std::vector<KillReport> m_kills;
 	std::vector<TakeableSet> m_takeable;
 	std::map<int, uint32_t> m_radar; // a player -> the server tick it leaves the minimap
+	std::map<uint16_t, uint32_t> m_radarVehicles; // a vehicle's ghost -> the same
 	uint32_t m_radarReports = 0;
 	std::vector<PostRemoteInfo> m_messages;
 	std::vector<GameEvent> m_unhandled;

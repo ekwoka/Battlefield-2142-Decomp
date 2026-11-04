@@ -4,6 +4,7 @@
 #include "Console/Console.h"
 #include "Game/GameWorld.h"
 #include "Hud/Hud.h"
+#include "Main/DemoCamera.h"
 #include "Main/HudMenus.h"
 #include "Main/HudMenusChat.h"
 #include "Main/HudMenusComm.h"
@@ -191,6 +192,30 @@ TEST(HudMenus_CommanderSquadList)
 	commander.click(me, 0, 1);
 	commander.update(me);
 	CHECK(commander.selected() == std::set<int> {1} && s.hud.listCell(15, 0, 1) == "|cAlpha");
+	// 0x007ab380's modifiers: Ctrl toggles one among the others, Shift
+	// takes the range from the anchor, a plain click on the only one
+	// selected clears it.
+	bool ctrl = false, shift = false;
+	commander.ctrlHeld = [&ctrl] { return ctrl; };
+	commander.shiftHeld = [&shift] { return shift; };
+	ctrl = true;
+	commander.click(me, 1, 1);
+	CHECK((commander.selected() == std::set<int> {1, 4}));
+	commander.click(me, 1, 1);
+	CHECK(commander.selected() == std::set<int> {1});
+	ctrl = false;
+	shift = true;
+	commander.click(me, 1, 1); // no anchor (4 went out): nothing
+	CHECK(commander.selected() == std::set<int> {1});
+	shift = false;
+	commander.click(me, 0, 1); // the only one: cleared
+	CHECK(commander.selected().empty());
+	commander.click(me, 0, 1); // the anchor 1
+	shift = true;
+	commander.click(me, 1, 1); // 1 .. 4
+	CHECK((commander.selected() == std::set<int> {1, 2, 3, 4}));
+	shift = false;
+	commander.click(me, 0, 1);
 	// The tabs: closing the squad tab hides the members.
 	commander.tabs.toggleSquad();
 	commander.update(me);
@@ -761,4 +786,39 @@ TEST(HudTitan_StrategicObjects)
 	CHECK(hudManager.number("FriendlyStrategicObject0Show") == 0 && hudManager.number("EnemyStrategicObject0Show") == 1);
 	objects.reset();
 	CHECK(objects.shown(2, 0) && objects.shown(2, 2));
+}
+
+// The demo's playback and camera (DemoCamera.h: 0x004b32d0, 0x004b3b90,
+// 0x005f9e30, 0x005fa130, 0x005f8f40, 0x00434610).
+TEST(HudMenus_DemoPlaybackAndCamera)
+{
+	dice::hfe::host::DemoPlayback demo;
+	double carry = 0;
+	CHECK(demo.advance(30, carry) == 30);
+	demo.speed = 50;
+	CHECK(demo.advance(3, carry) == 1 && demo.advance(1, carry) == 1); // 1.5, then 0.5 + 0.5
+	CHECK(demo.togglePause() && demo.speed == 0 && demo.advance(30, carry) == 0);
+	demo.ended = true;
+	CHECK(!demo.togglePause() && demo.speed == 0); // refused at the end
+	demo.restart();
+	CHECK(demo.togglePause() && demo.speed == 100);
+	CHECK(std::abs(demo.fovY() - 1.1780972f) < 1e-4f); // 90 degrees x 300 / 400
+	dice::hfe::host::DemoCamera& camera = demo.camera;
+	CHECK(camera.mode == dice::hfe::host::DemoCamera::Mode::Free);
+	const auto eligible = [](int id) { return id == 3 || id == 7; };
+	camera.toggle(eligible); // from free: the current (none: 0) on
+	CHECK(camera.mode == dice::hfe::host::DemoCamera::Mode::Follow && camera.followed == 3);
+	camera.step(1, eligible);
+	CHECK(camera.followed == 7);
+	camera.step(1, eligible); // wraps through 255
+	CHECK(camera.followed == 3);
+	camera.step(-1, eligible);
+	CHECK(camera.followed == 7);
+	camera.toggle(eligible);
+	CHECK(camera.mode == dice::hfe::host::DemoCamera::Mode::Free);
+	CHECK(!camera.step(1, [](int) { return false; }) && camera.mode == dice::hfe::host::DemoCamera::Mode::Free);
+	// Following: 2 m behind along the camera's yaw, looking at the target.
+	const float at[3] = {10, 5, 20};
+	const auto look = camera.follow(at, 0);
+	CHECK(std::abs(look.eye[0] - 10) < 1e-4f && std::abs(look.eye[2] - 18) < 1e-4f && std::abs(look.yaw) < 1e-4f);
 }

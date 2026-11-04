@@ -356,6 +356,7 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 	stopAutoDemo(); // the round's restart (0x004ba0c0 -> 0x00585920)
 	stopDemo();
 	m_lastRoundState = -1;
+	m_overheadCameras[1] = m_overheadCameras[2] = 0; // the old round's objects
 	m_round = &round;
 	m_logic = &logic;
 	m_templates = &templates;
@@ -1403,9 +1404,23 @@ void HostedGame::event(int id, const net::GameEvent& e)
 		return;
 	}
 	case net::kEvCommanderCam:
-		// 0x00510b30: the team's commander moves his overhead camera there
-		// (0x005f8410), which returns at once unless the game is a client's
-		// (game logic slot 0x144): a server keeps nothing of it.
+		// 0x00510b30: the sender's team's overhead camera (squad manager
+		// slot 0x7c, class 0x948c, made on first use by 0x004c5120) moves
+		// there when he commands (0x005f8410: on the server, game logic slot
+		// 0x144; position, then 0x005f8170(0, 0, -1) places it over the
+		// point, so the event's height isn't kept). It goes to the clients
+		// as its OverheadCamera ghost (GhostAlwaysWithPrediction).
+		if (e.values.size() >= 3) {
+			game::GameWorld::PlayerInfo info;
+			if (m_round->playerInfo(player, info) && info.commander && (info.team == 1 || info.team == 2)) {
+				float x = 0, z = 0;
+				std::memcpy(&x, &e.values[0], 4);
+				std::memcpy(&z, &e.values[2], 4);
+				if (std::isfinite(x) && std::isfinite(z)) {
+					moveOverheadCamera(info.team, x, z);
+				}
+			}
+		}
 		return;
 	case net::kEvArtillery:
 	case net::kEvUav:
@@ -1800,6 +1815,51 @@ const game::Projectile* HostedGame::projectileOf(const Ghost& ghost) const
 // it goes, as the server's object manager does with a projectile object.
 // The rounds without a networkable (bullets, shells) aren't ghosted: each
 // client makes them from the firing (0x005f31d0).
+void HostedGame::moveOverheadCamera(int team, float x, float z)
+{
+	world::Object* camera = m_overheadCameras[team] ? m_round->objects().find(m_overheadCameras[team]) : nullptr;
+	world::ObjectTemplate* t = m_round->templates().find("MultiPlayerOverheadCamera");
+	if (!camera) {
+		if (!t) {
+			return;
+		}
+		camera = m_round->objects().create(t);
+		if (!camera) {
+			return;
+		}
+		camera->setTeam(team);
+		m_overheadCameras[team] = camera->id();
+	}
+	// 0x005f8170: kept 80 m inside the terrain, over the mean of the ground
+	// at the point and 2 m off along both axes (or the sea's level when
+	// higher), plus the template's height (+0x2a4, 260); looking straight
+	// down, north up.
+	if (m_terrainExtent > 160) {
+		x = std::clamp(x, m_terrainOrigin[0] + 80, m_terrainOrigin[0] + m_terrainExtent - 80);
+		z = std::clamp(z, m_terrainOrigin[1] + 80, m_terrainOrigin[1] + m_terrainExtent - 80);
+	}
+	const physics::Ground& ground = m_round->ground();
+	float y = 0;
+	if (ground.height) {
+		const float dx[5] = {0, 0, 0, 2, -2}, dz[5] = {0, 2, -2, 0, 0};
+		for (int i = 0; i < 5; ++i) {
+			y += ground.height(x + dx[i], z + dz[i]) * 0.2f;
+		}
+	}
+	if (ground.waterLevel) {
+		y = std::max(y, ground.waterLevel(x, z));
+	}
+	float height = 260;
+	if (t) {
+		const auto it = t->settings().find("height");
+		if (it != t->settings().end()) {
+			height = static_cast<float>(std::atof(it->second.c_str()));
+		}
+	}
+	camera->setPosition({x, y + height, z});
+	camera->setRotation({0, -90, 0});
+}
+
 void HostedGame::trackProjectiles()
 {
 	std::set<uint32_t> present;
@@ -2057,6 +2117,16 @@ std::vector<net::NetworkableState> HostedGame::statesOf(const Ghost& ghost, size
 			if (h.kind == net::NetworkableKind::SimpleObject && h.armoredChildrenKnown && !h.armoredChildren.empty()) {
 				s.mask |= 0x800000;
 				s.childDamage.assign(h.armoredChildren.size(), 8);
+			}
+			break;
+		case net::NetworkableKind::OverheadCamera:
+			// 0x006033a0 / 0x006037a0: the pan (1), where it stands (2), the
+			// fov's byte (4). The server's camera doesn't pan (0x005f8510
+			// runs for a local commander only).
+			if (root) {
+				s.mask = 0x2 | 0x4;
+				s.position = position;
+				s.cameraValue = 0;
 			}
 			break;
 		case net::NetworkableKind::ControlPoint:

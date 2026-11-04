@@ -47,6 +47,7 @@ struct ViewerOptions {
 		bool reload = false;         // held: c_PIReload (R), a new magazine on the press
 		bool scoreboard = false; // held: the scoreboard (Tab)
 		bool commanderScreen = false; // pressed: the commander screen (Caps Lock)
+		bool ctrl = false, shift = false; // held (c_GILeftCtrl / c_GIRightCtrl, c_GILeftShift / c_GIRightShift)
 		bool crouch = false;          // held: crouch (c_PICrouch, left Ctrl)
 		bool lie = false;             // held: lie down (c_PILie, Z)
 		bool jump = false;            // held: jump (c_PIAction, Space)

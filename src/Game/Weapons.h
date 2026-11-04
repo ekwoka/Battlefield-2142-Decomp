@@ -20,6 +20,10 @@
 #include <string>
 #include <vector>
 
+namespace dice::hfe::physics {
+struct Material;
+}
+
 namespace dice::hfe::world {
 class ObjectTemplate;
 }
@@ -89,7 +93,11 @@ struct ProjectileSettings {
 	// TTBeacon (the missile silos' msilo_missile, FixedTargetComp): chases
 	// the target object its launcher locked (the silo's TitanBeacon on the
 	// enemy Titan) after trackingDelay, by the magnet's follow.
-	enum class Seek { None, Magnet, Aim, Beacon };
+	// Closest: SeekClosestTargetComp (template 0x9540, ctor 0x005ec300) of
+	// TTHeat / TTLaser rounds, see GameWorld::steerClosest.
+	enum class Seek { None, Magnet, Aim, Beacon, Closest };
+	int seekTargetType = -1;  // seek.targetType's index (TTNone 0 .. TTPod 7)
+	int reLockTicks = 0;      // seek.reLockTime (+0x28) x 30, rounded (+0x2c)
 	Seek seek = Seek::None;
 	float seekDelay = 0;
 	float lockDistance = 0;
@@ -116,6 +124,13 @@ struct ProjectileSettings {
 	// (0x005b4ff0).
 	int onlyDetonateOnMaterial = -1;
 	float onlyDetonateOnMaterialTime = 0;
+	// DefaultPenetrateComp (class 0x953e, cached at the projectile's
+	// +0x1ac by 0x005b2b20; 111 of the 114 shipped rounds create it):
+	// allowSolidPenetration (+0xc) and allowLiquidPenetration (+0xd), both 1
+	// by default (executors 0x004f2c86 / 0x004f2db8). See penetrates().
+	bool penetrator = false;
+	bool allowSolidPenetration = true;
+	bool allowLiquidPenetration = true;
 	// Mines: an enemy inside triggerRadius and triggerAngle (degrees either
 	// side of the mine's facing) moving faster than triggerVictimMinSpeed
 	// sets it off; the blast reaches explosionConeAngle either side of the
@@ -232,7 +247,31 @@ struct FireArmSettings {
 	// by a soldier (a vehicle's, a stationary one) finishes a reload
 	// begun while nobody uses it (0x005f4bb0); without it the reload is
 	// dropped when its user leaves (0x005f3a40: +0x3c, +0x34, +0x20 cleared).
-	bool reloadWithoutPlayer = false;
+	bool reloadWithoutPlayer = true; // 1 by default (the ammo template's constructor 0x005f4340)
+	// delayToUse (the GenericFireArm template's +0x2b8; its setter
+	// 0x005c2270 keeps round(x 30) ticks at +0x2bc): the firearm's enable
+	// (0x005c47d0, interface slot 105) sets its ready tick (+0x208) that far
+	// on; until then the busy test (0x005c14f0) holds: no round
+	// (SingleFireComp 0x005d4800), no fire input to the fire components
+	// (0x005c50e0), no reload (the ammo's update 0x005f3c40 via 0x005c26a0).
+	int delayToUseTicks = 0;
+	// ammo.autoReload (+0x28) and ammo.instantReloadOnEnable (+0x29): the
+	// ammo's on-enable (0x005f4bb0, slot 0x60) with both and an empty
+	// magazine that can be reloaded (0x005f4140) fills it at once
+	// (0x005f46f0): a magazine taken, no reload time.
+	bool autoReload = false;
+	bool instantReloadOnEnable = false;
+	// ammo.toggleWhenNoAmmo (+0x40): with it, an empty magazine that can't
+	// be reloaded makes the weapon unselectable (0x005f39c0, slot 0x1c,
+	// asked by the firearm's 0x005c1150) and, after its last round, its
+	// soldier switches away (0x005f4a40 -> firearm slot 0xe0, the pick
+	// 0x005883d0: the item before).
+	bool toggleWhenNoAmmo = false;
+	// ammo.changeMagAt (+0x24, 0.7 by default): the reload start (0x005f4830)
+	// puts the magazine's swap at round(reloadTicks x changeMagAt) and the
+	// end at reloadTicks; the update (0x005f3c40) fills at the swap and is
+	// busy until the end.
+	float changeMagAt = 0.7f;
 	// fire.busyUntilButtonRelease (SingleFireComp +0x9c, setter 0x004e3f33):
 	// see FireArm::fire.
 	bool busyUntilButtonRelease = false;
@@ -287,6 +326,25 @@ public:
 		}
 	}
 	void dropReload() { m_reloadLeft = 0; }
+	// The firearm's enable (0x005c47d0: drawn): delayToUse starts, and the
+	// ammo's on-enable runs (0x005f4bb0): held by a soldier (or without
+	// reloadWithoutPlayer) a reload under way is dropped; instantReloadOnEnable.
+	void enable(bool soldier);
+	bool readying() const { return m_readyIn > 0; }
+	// A placed round picked up again (the firearm's slot 0x84(1, ...), from
+	// 0x004bce30): one round back, into the magazine if there is room,
+	// else a magazine's worth on the spares.
+	void giveRoundBack()
+	{
+		if (m_settings.magSize >= 0 && m_rounds < m_settings.magSize) {
+			++m_rounds;
+		} else if (m_settings.nrOfMags >= 0) {
+			++m_mags;
+		}
+	}
+	// toggleWhenNoAmmo's test (0x005f39c0): false with an empty magazine
+	// that can't be reloaded.
+	bool selectable() const;
 	float reloadLeft() const { return m_reloadLeft; } // seconds (the HUD's reload bar)
 	float heat() const { return m_heat; } // 0..1
 	// Resupply (ammo hubs): adds magazines up to the kit's number; false
@@ -342,6 +400,8 @@ private:
 	int m_mags;
 	int m_cooldown = 0;
 	float m_reloadLeft = 0;
+	bool m_reloadFilled = false; // the magazine swapped (changeMagAt) in this reload
+	int m_readyIn = 0;           // ticks of delayToUse left
 	float m_heat = 0;
 	float m_overheatLeft = 0;
 	int m_mode = kFireAutomatic;
@@ -405,6 +465,19 @@ struct GunRecoil {
 	float slide(uint32_t tick) const;
 };
 
+// DefaultPenetrateComp's first tests (0x005eaca0) for a round meeting a
+// face of `material`: No, Free (water with allowLiquidPenetration: no
+// loss), or Loss (the damage loss decides). `object`: the face is an
+// object's (not the terrain's).
+enum class Penetration { No, Free, Loss };
+Penetration penetration(const ProjectileSettings& round, const physics::Material& material, bool object);
+// Its loss: minDamageLoss on a one-sided material; else with a way out
+// thickness x damageLoss within minDamageLoss and maxDamageLoss, without
+// one maxDamageLoss.
+float penetrationLoss(const physics::Material& material, bool wayOut, float thickness);
+// Whether the damage left goes on: at or above a tenth of the template's.
+inline bool penetrationLeft(const ProjectileSettings& round, float left) { return left >= 0.1f * round.damage; }
+
 struct Projectile {
 	physics::Vec3 origin;
 	physics::Vec3 position;
@@ -417,7 +490,21 @@ struct Projectile {
 	bool resting = false; // a grenade lying still
 	float age = 0;
 	uint32_t lockedOn = 0; // the vehicle a seeker chases
+	// Wire guidance (LPTargetComp, 0x005e2e20 -> 0x005e27a0) from its
+	// firearm: target.wireGuidedLookAheadDistance (+0xb4, 20 by default),
+	// target.maxDistance (+0x78), dontLooseGuidanceOnObstruction (+0xb8);
+	// wireLost once guidance is gone (out of range, the line cut, or a
+	// reload with disableGuidanceOnReload +0xb1).
+	float wireLookAhead = 20;
+	float wireMaxDistance = 0;
+	bool wireKeepOnObstruction = false;
+	bool wireLost = false;
 	bool newTarget = false; // the follow's +0x94: its target set since its last turn
+	// SeekClosestTargetComp's relock: armed at each shot (0x005b2e70 ->
+	// setTarget(t, 1)); a candidate held since pendingSince.
+	bool relockArmed = false;
+	uint32_t pending = 0;
+	int64_t pendingSince = 0;
 	float damageScale = 1;  // what is left of its damage after penetrating (DefaultPenetrateComp)
 	// A magnet's follow state (0x005ecb30): chasing from when (the seek's
 	// trackingDelay after the lock), the fastest the target has gone

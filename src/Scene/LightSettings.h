@@ -46,11 +46,13 @@ struct LightSettings {
 	float defaultEffectLightAffectionFactor = 1;
 	std::string groundHemi;
 	float hemiLerpBias = 1;
-	float lightCullDistance = 100;
-	int maxLightsPerBundledMesh = 4;
-	int maxLightsPerStaticMesh = 4;
-	int maxLightsPerSkinnedMesh = 4;
-	int maxLightsPerTerrainPatch = 4;
+	// The light manager's constructor's (0x100aafe0); the dynamic shadows'
+	// quality sets the first four again (0x10010040, render/MeshLights.h).
+	float lightCullDistance = 300;
+	int maxLightsPerBundledMesh = 3;
+	int maxLightsPerStaticMesh = 3;
+	int maxLightsPerSkinnedMesh = 3;
+	int maxLightsPerTerrainPatch = 7;
 	float skinnedMeshShaderLodDistance = 50;
 	std::array<float, 2> lightMapAmbientAlphaCutoffRange {0, 1};
 	bool enableSun = true;

@@ -564,6 +564,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.reload = c.pressed(map, "c_PIReload", down);
 				input.scoreboard = c.pressed(map, "c_GIShowScoreboard", down);
 				input.commanderScreen = c.pressed(map, "c_GILeader", down);
+				input.ctrl = c.pressed(map, "c_GILeftCtrl", down) || c.pressed(map, "c_GIRightCtrl", down);
+				input.shift = c.pressed(map, "c_GILeftShift", down) || c.pressed(map, "c_GIRightShift", down);
 				input.crouch = c.pressed(map, "c_PICrouch", down);
 				input.lie = c.pressed(map, "c_PILie", down);
 				input.jump = c.pressed(map, "c_PIAction", down);
@@ -609,6 +611,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.jump = keys[SDL_SCANCODE_SPACE];
 				input.toggleCamera = keys[SDL_SCANCODE_C];
 				input.commanderScreen = keys[SDL_SCANCODE_CAPSLOCK];
+				input.ctrl = keys[SDL_SCANCODE_LCTRL] || keys[SDL_SCANCODE_RCTRL];
+				input.shift = keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT];
 				input.sayAll = keys[SDL_SCANCODE_K];
 				input.sayTeam = keys[SDL_SCANCODE_L];
 				input.mapSize = keys[SDL_SCANCODE_M];

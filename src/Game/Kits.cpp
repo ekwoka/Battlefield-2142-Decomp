@@ -46,6 +46,8 @@
 #include "World/ObjectTemplateManager.h"
 
 #include <algorithm>
+#include <cctype>
+#include <climits>
 #include <cmath>
 #include <cstdlib>
 
@@ -171,6 +173,121 @@ void GameWorld::dropKit(Player& player)
 	}
 	kit->setHidden(false);
 	m_droppedKits.push_back(std::move(dropped));
+}
+
+// The use key's pick-up of a placed item (0x004bce30, from 0x004bda00 at
+// 0x4be038; the same for an item on another object, 0x004c5950, within
+// 9 m): the nearest object within 1.3 m (*0x009fe420) of the soldier and
+// in front of him (the horizontal direction's dot with his facing at
+// least 0.9), of his team, that one of his carried items fired: the item
+// (interface 0x94c0) has pickupEnabled (the GenericFireArm template's
+// +0x2ec, slot 0xc0 0x005c1830) and its projectile template (slot 0x1b4)
+// is the object's. The item gets a round back (slot 0x84(1, 0, 0, 0)),
+// the object goes (the object manager's slot 0x14), and no kit is picked
+// up. Shipped: the squad leader's Beacon, Unl_c4, the mines, the sonars,
+// Bp1_Decoy, the sentry gun's deployer, the shield.
+bool GameWorld::pickUpPlaced(Player& player)
+{
+	if (!player.alive || player.vehicle) {
+		return false;
+	}
+	constexpr float kReach = 1.3f; // *0x009fe420
+	const float yaw = lookYaw(player) * 3.14159265f / 180.0f;
+	const physics::Vec3 facing {std::sin(yaw), 0, std::cos(yaw)};
+	const physics::Vec3 feet = player.body.position - physics::Vec3 {0, 1.0f, 0};
+	const auto near = [&](const physics::Vec3& at, float& distance) {
+		const physics::Vec3 d = at - feet;
+		distance = std::sqrt(physics::lengthSquared(d));
+		const float across = std::sqrt(d.x * d.x + d.z * d.z);
+		return distance <= kReach && (across < 1e-4f || (d.x * facing.x + d.z * facing.z) / across >= 0.9f);
+	};
+	// The carried item that fired `name` with pickupEnabled.
+	const auto source = [&](const std::string& name) -> int {
+		for (size_t i = 0; i < player.carried.size(); ++i) {
+			const world::ObjectTemplate* item = m_templates.find(player.carried[i].name);
+			if (!item || templateNumber(*item, "pickupEnabled", 0) == 0) {
+				continue;
+			}
+			const auto round = item->settings().find("projectileTemplate");
+			if (round != item->settings().end() && round->second.size() == name.size()
+				&& std::equal(name.begin(), name.end(), round->second.begin(),
+					[](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); })) {
+				return static_cast<int>(i);
+			}
+		}
+		return -1;
+	};
+	float best = 1e9f;
+	int item = -1;
+	uint32_t object = 0;
+	size_t projectile = SIZE_MAX;
+	const auto consider = [&](uint32_t id, size_t round) {
+		const world::Object* o = m_objects.find(id);
+		float distance = 0;
+		if (!o || !o->objectTemplate() || o->team() != player.team
+			|| !near({o->position().x, o->position().y, o->position().z}, distance) || distance >= best) {
+			return;
+		}
+		const int from = source(o->objectTemplate()->name());
+		if (from >= 0) {
+			best = distance;
+			item = from;
+			object = id;
+			projectile = round;
+		}
+	};
+	for (const auto& [key, id] : m_beacons) {
+		consider(id, SIZE_MAX);
+	}
+	for (const auto& [key, id] : m_deployed) {
+		if (key.first == player.id) {
+			consider(id, SIZE_MAX);
+		}
+	}
+	for (size_t i = 0; i < m_projectiles.size(); ++i) {
+		const Projectile& p = m_projectiles[i];
+		float distance = 0;
+		if (!p.alive || !p.settings || p.team != player.team || !near(p.position, distance) || distance >= best) {
+			continue;
+		}
+		const int from = source(p.settings->name);
+		if (from >= 0) {
+			best = distance;
+			item = from;
+			object = 0;
+			projectile = i;
+		}
+	}
+	if (item < 0) {
+		return false;
+	}
+	FireArm* weapon = item == player.inHand ? player.weapon.get() : player.carried[static_cast<size_t>(item)].weapon.get();
+	if (weapon) {
+		weapon->giveRoundBack(); // a fresh one (never drawn) is full already
+	}
+	if (projectile != SIZE_MAX) {
+		m_projectiles[projectile].alive = false;
+		m_projectiles[projectile].keepLeft = -1;
+		if (m_projectiles[projectile].ghostObject) {
+			m_objects.remove(m_projectiles[projectile].ghostObject);
+			m_projectiles[projectile].ghostObject = 0;
+		}
+		return true;
+	}
+	for (auto it = m_beacons.begin(); it != m_beacons.end(); ++it) {
+		if (it->second == object) {
+			m_beacons.erase(it);
+			break;
+		}
+	}
+	for (auto it = m_deployed.begin(); it != m_deployed.end(); ++it) {
+		if (it->second == object) {
+			m_deployed.erase(it);
+			break;
+		}
+	}
+	m_objects.remove(object);
+	return true;
 }
 
 bool GameWorld::pickUpClosestKit(Player& player, float radius)

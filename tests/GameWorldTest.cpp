@@ -684,6 +684,53 @@ void throwGadget(Range& range)
 
 } // namespace
 
+// The use key's pick-up (0x004bce30): a placed round of a carried
+// pickupEnabled item, within 1.3 m and in front, goes and the item gets
+// the round back; out of reach, nothing.
+TEST(GameWorld_PlacedRoundsArePickedUp)
+{
+	Range range;
+	world::ObjectTemplate* c4 = nullptr;
+	giveGadget(range, "Unl_c4", c4);
+	range.templates.find("Unl_c4")->settings()["pickupEnabled"] = "1";
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	throwGadget(range);
+	CHECK(range.world->projectilesInFlight() == 1);
+	const auto inMag = [&] {
+		for (const auto& w : range.world->weaponAmmo(range.world->localPlayer())) {
+			if (w.weapon == "Unl_c4") {
+				return w.inMag;
+			}
+		}
+		return -9;
+	};
+	CHECK(inMag() == 1);
+	const physics::Vec3 at = range.world->projectiles().front().position;
+	game::GameWorld::PlayerInfo me;
+	range.world->playerInfo(range.world->localPlayer(), me);
+	const auto use = [&] {
+		game::SoldierInput press;
+		press.use = true;
+		range.world->setPlayerInput(press);
+		range.world->tick(1 / 30.0f);
+		range.world->setPlayerInput({});
+		range.world->tick(1 / 30.0f);
+	};
+	const float y = me.yaw * 3.14159265f / 180.0f;
+	const physics::Vec3 ahead {std::sin(y), 0, std::cos(y)};
+	std::fprintf(stderr, "  c4 at %.2f %.2f %.2f (resting %d), soldier at %.2f %.2f %.2f, yaw %.1f\n", at.x, at.y, at.z,
+		range.world->projectiles().front().resting, me.position.x, me.position.y, me.position.z, me.yaw);
+	// 3 m short of it: nothing.
+	range.world->setSoldierPosition(me.soldier, at - ahead * 3.0f);
+	use();
+	CHECK(range.world->projectilesInFlight() == 1);
+	// 1 m short of it, facing it: taken back.
+	range.world->setSoldierPosition(me.soldier, at - ahead * 1.0f);
+	use();
+	CHECK(range.world->projectilesInFlight() == 0);
+	CHECK(inMag() == 2);
+}
+
 TEST(GameWorld_MinesAndC4)
 {
 	// An anti-personnel mine at the EU soldier's feet facing PAC's spawn:
@@ -836,6 +883,56 @@ TEST(GameWorld_DefibrillatorRevives)
 	}
 	range.world->playerInfo(bot, info);
 	CHECK(!info.alive && !info.manDown && info.soldier == 0 && range.count("PlayerDeath") == 1);
+}
+
+// An enemy's paddles (0x004ba5c0's team test) leave a downed body down.
+TEST(GameWorld_EnemyDefibrillatorDoesNothing)
+{
+	// A downed EU bot lies 1.5 m ahead; the EU soldier's defibrillator
+	// (damageMandownSoldiers, short range) brings it back, and the
+	// scripts hear PlayerRevived instead of PlayerDeath.
+	Range range;
+	range.templates.registerType(6, "Kit");
+	world::ObjectTemplate* defib = range.templates.create("GenericFireArm", "unl_defibrillator");
+	defib->settings()["itemIndex"] = "5";
+	defib->settings()["projectileTemplate"] = "shock";
+	defib->settings()["velocity"] = "60";
+	defib->settings()["ammo.magSize"] = "1"; // one shock, then 0.6 s to recharge
+	defib->settings()["ammo.reloadTime"] = "0.6";
+	world::ObjectTemplate* shock = range.templates.create("GenericProjectile", "shock");
+	shock->settings()["damage"] = "1000";
+	shock->settings()["damageMandownSoldiers"] = "1";
+	shock->settings()["collision.resurrectDamage"] = "20000"; // its ResurrectCollisionComp
+	shock->settings()["collision.restoreHP"] = "120";
+	shock->settings()["timeToLive"] = "CRD_NONE/0.05/0/0";
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	kit->children().push_back({"unl_defibrillator", {}, {}});
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int bot = range.world->addPlayer("Foe", 1, true);
+	CHECK(range.world->spawnSoldier(bot));
+	game::GameWorld::PlayerInfo info, me;
+	range.world->playerInfo(range.world->localPlayer(), me);
+	range.world->playerInfo(bot, info);
+	range.world->setSoldierPosition(info.soldier, me.position + physics::Vec3 {0, 0, 1.0f});
+	range.world->setSpawnTime(30);
+	range.world->setHitPoints(info.soldier, 0);
+	range.world->playerInfo(bot, info);
+	CHECK(!info.alive && info.manDown);
+	game::SoldierInput input;
+	input.selectItem = 5;
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	input = {};
+	input.fire = true;
+	input.aimPitch = -60; // down at the body
+	range.world->setPlayerInput(input);
+	for (int i = 0; i < 5; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	range.world->playerInfo(bot, info);
+	CHECK(!info.alive && info.manDown && range.count("PlayerRevived") == 0 && range.count("PlayerDeath") == 0);
 }
 
 TEST(Bots_ReviveTeammates)
@@ -2234,6 +2331,101 @@ TEST(GameWorld_UnlockReplacesItem)
 	CHECK(carried(equipped) == std::vector<std::string> {"unl_har_rifle"});
 }
 
+// The kit build (0x00570ab0): a firearm replacement (isFirearmReplacement,
+// firearmReplacement unl_har_rifle) applies by itself once its rifle is
+// the player's, putting its shotgun in place of the base one; a
+// replaceWithoutEquip container (the ...Player0 frag grenade) applies when
+// owned, chosen or not.
+TEST(GameWorld_FirearmReplacementAndOwnedUnlocks)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "ItemContainer");
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	const auto firearm = [&](const char* name, int slot) {
+		world::ObjectTemplate* t = range.templates.create("GenericFireArm", name);
+		t->settings()["itemIndex"] = std::to_string(slot);
+		t->settings()["projectileTemplate"] = "bullet";
+	};
+	firearm("as_ar_shotgun", 5);
+	firearm("unl_har_rifle", 3);
+	firearm("unl_har_shotgun", 5);
+	firearm("unl_grenade_frag", 7);
+	world::ObjectTemplate* har = range.templates.create("ItemContainer", "UnlockHAR");
+	har->children().push_back({"unl_har_rifle", {}, {}});
+	har->settings()["replaceItem.list"] = "eu_ar_rifle;";
+	world::ObjectTemplate* add = range.templates.create("ItemContainer", "UnlockHARShotgun");
+	add->children().push_back({"unl_har_shotgun", {}, {}});
+	add->settings()["isFirearmReplacement"] = "1";
+	add->settings()["firearmReplacement"] = "unl_har_rifle";
+	add->settings()["replaceItem.list"] = "as_ar_shotgun;";
+	world::ObjectTemplate* frag = range.templates.create("ItemContainer", "UnlockPlayer0");
+	frag->children().push_back({"unl_grenade_frag", {}, {}});
+	frag->settings()["replaceWithoutEquip"] = "1";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	for (const char* child : {"eu_ar_rifle", "as_ar_shotgun", "UnlockHAR", "UnlockHARShotgun", "UnlockPlayer0"}) {
+		kit->children().push_back({child, {}, {}});
+	}
+	const auto carried = [&](int player) {
+		game::GameWorld::PlayerInfo info;
+		range.world->playerInfo(player, info);
+		std::vector<std::pair<int, std::string>> slots(info.carried.begin(), info.carried.end());
+		std::sort(slots.begin(), slots.end());
+		std::string list;
+		for (const auto& [slot, name] : slots) {
+			list += std::to_string(slot) + ":" + name + " ";
+		}
+		return list;
+	};
+	const int plain = range.world->addPlayer("Plain", 2, true);
+	range.world->setKit(plain, "EU_Assault", "us_light_soldier");
+	CHECK(range.world->spawnSoldier(plain));
+	CHECK(carried(plain) == "3:eu_ar_rifle 5:as_ar_shotgun ");
+	const int har2 = range.world->addPlayer("HAR", 2, true);
+	range.world->setKit(har2, "EU_Assault", "us_light_soldier");
+	range.world->setUnlocks(har2, {"UnlockHAR"});
+	range.world->setOwnedUnlocks(har2, {"UnlockPlayer0"});
+	CHECK(range.world->spawnSoldier(har2));
+	std::fprintf(stderr, "  %s\n", carried(har2).c_str());
+	CHECK(carried(har2) == "3:unl_har_rifle 5:unl_har_shotgun 7:unl_grenade_frag ");
+}
+
+// altItemIndex (template +0x2e4): the kit's add-item (0x00589510) puts an
+// unlock whose itemIndex is held in its altItemIndex when that is free
+// (unl_shotgun_02: 5 -> 6); with no free alternative it isn't added.
+TEST(GameWorld_UnlockTakesItsAlternativeSlot)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "ItemContainer");
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	world::ObjectTemplate* mine = range.templates.create("GenericFireArm", "unl_mine");
+	mine->settings()["itemIndex"] = "5";
+	world::ObjectTemplate* shotgun = range.templates.create("GenericFireArm", "unl_shotgun_02");
+	shotgun->settings()["itemIndex"] = "5";
+	shotgun->settings()["altItemIndex"] = "6";
+	world::ObjectTemplate* other = range.templates.create("GenericFireArm", "unl_other");
+	other->settings()["itemIndex"] = "5";
+	world::ObjectTemplate* unlock = range.templates.create("ItemContainer", "UnlockShotgun");
+	unlock->children().push_back({"unl_shotgun_02", {}, {}});
+	unlock->children().push_back({"unl_other", {}, {}});
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	kit->children().push_back({"unl_mine", {}, {}});
+	kit->children().push_back({"UnlockShotgun", {}, {}});
+	const int player = range.world->addPlayer("P", 2, true);
+	range.world->setKit(player, "EU_Assault", "us_light_soldier");
+	range.world->setUnlocks(player, {"UnlockShotgun"});
+	CHECK(range.world->spawnSoldier(player));
+	game::GameWorld::PlayerInfo info;
+	CHECK(range.world->playerInfo(player, info));
+	std::vector<std::pair<int, std::string>> slots(info.carried.begin(), info.carried.end());
+	std::sort(slots.begin(), slots.end());
+	CHECK(slots.size() == 3);
+	CHECK(slots.size() == 3 && slots[1] == std::make_pair(5, std::string("unl_mine")));
+	CHECK(slots.size() == 3 && slots[2] == std::make_pair(6, std::string("unl_shotgun_02")));
+}
+
 // A lock-on weapon (target.targetSystem TSHeatSeeking): an enemy carrying
 // a TTHeat target object in the lock cone is locking at once and locked
 // after lockDelay; turned away, the lock holds for loseLockDelay, then
@@ -2276,6 +2468,111 @@ TEST(GameWorld_WeaponLock)
 	}
 	lock = range.world->weaponLock(range.world->localPlayer());
 	CHECK(lock.target == 0 && lock.state == 0);
+}
+
+// The lock-on update's candidate (0x005e1b30 -> 0x004cf290): the nearest
+// target object in the cone, not the one nearest the aim; an empty
+// vehicle of the shooter's own side is a candidate too. Locked, another
+// candidate replaces the target only after more than loseLockDelay ticks,
+// unlocked.
+TEST(GameWorld_WeaponLockTakesTheNearest)
+{
+	Range range;
+	range.templates.registerType(8, "SimpleObject");
+	world::ObjectTemplate* launcher = range.templates.find("eu_ar_rifle");
+	launcher->settings()["target.targetSystem"] = "TSHeatSeeking";
+	launcher->settings()["target.maxDistance"] = "450";
+	launcher->settings()["target.lockAngle"] = "20";
+	launcher->settings()["target.lockDelay"] = "0.5";
+	launcher->settings()["target.loseLockDelay"] = "0.2";
+	world::ObjectTemplate* jet = range.templates.create("SimpleObject", "jet");
+	jet->children().push_back({"HeatObject", {}, {}});
+	range.templates.create("SimpleObject", "HeatObject")->settings()["targetType"] = "TTHeat";
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	game::GameWorld::PlayerInfo me;
+	range.world->playerInfo(range.world->localPlayer(), me);
+	const float eye = me.position.y + 1.6f;
+	world::Object* far = range.objects.create(jet, {me.position.x, eye, me.position.z + 200});
+	far->setTeam(1);
+	world::Object* nearer = range.objects.create(jet, {me.position.x + 20, eye, me.position.z + 80}); // ~14 degrees off
+	nearer->setTeam(2); // an empty one of our own side
+	range.world->tick(1 / 30.0f);
+	game::GameWorld::WeaponLockInfo lock = range.world->weaponLock(range.world->localPlayer());
+	CHECK(lock.target == nearer->id() && lock.state == 1);
+	int ticks = 1;
+	while (range.world->weaponLock(range.world->localPlayer()).state != 2 && ticks < 60) {
+		range.world->tick(1 / 30.0f);
+		++ticks;
+	}
+	std::fprintf(stderr, "  locked after %d ticks\n", ticks);
+	CHECK(ticks == 17); // the 16th tick after the one it was taken on: strictly past lockDelay's 15
+	// The nearer one goes: the far one replaces it after more than 6 ticks.
+	nearer->setPosition({me.position.x - 200, eye, me.position.z});
+	for (int i = 0; i < 6; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->weaponLock(range.world->localPlayer()).target == nearer->id());
+	range.world->tick(1 / 30.0f);
+	range.world->tick(1 / 30.0f);
+	lock = range.world->weaponLock(range.world->localPlayer());
+	CHECK(lock.target == far->id() && lock.state == 1);
+}
+
+// A heat seeker's round (SeekClosestTargetComp, TTHeat): fired locked it
+// has the launcher's target and turns after it (0x005e1ee0, 0x005ec260);
+// fired unlocked with reLockTime 9999 it never takes one.
+TEST(GameWorld_HeatSeekerChasesItsLock)
+{
+	for (const bool locked : {true, false}) {
+		Range range;
+		range.templates.registerType(8, "SimpleObject");
+		world::ObjectTemplate* launcher = range.templates.find("eu_ar_rifle");
+		launcher->settings()["target.targetSystem"] = "TSHeatSeeking";
+		launcher->settings()["target.maxDistance"] = "450";
+		launcher->settings()["target.lockAngle"] = "40";
+		launcher->settings()["target.lockDelay"] = locked ? "0.2" : "30";
+		launcher->settings()["projectileTemplate"] = "heat_missile";
+		launcher->settings()["velocity"] = "40";
+		world::ObjectTemplate* missile = range.templates.create("GenericProjectile", "heat_missile");
+		missile->settings()["damage"] = "100";
+		missile->settings()["gravityModifier"] = "0";
+		missile->settings()["timeToLive"] = "CRD_NONE/10/0/0";
+		missile->settings()["seek.targetType"] = "TTHeat";
+		missile->settings()["seek.reLockTime"] = "9999";
+		missile->settings()["seek.maxAngleLock"] = "40";
+		missile->settings()["follow.maxYaw"] = "3";
+		missile->settings()["follow.maxPitch"] = "3";
+		world::ObjectTemplate* jet = range.templates.create("SimpleObject", "jet");
+		jet->children().push_back({"HeatObject", {}, {}});
+		range.templates.create("SimpleObject", "HeatObject")->settings()["targetType"] = "TTHeat";
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		game::GameWorld::PlayerInfo me;
+		range.world->playerInfo(range.world->localPlayer(), me);
+		world::Object* enemy = range.objects.create(jet, {me.position.x + 40, me.position.y + 1.6f, me.position.z + 80});
+		enemy->setTeam(1);
+		for (int i = 0; i < 10; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		CHECK((range.world->weaponLock(range.world->localPlayer()).state == 2) == locked);
+		game::SoldierInput fire;
+		fire.fire = true;
+		range.world->setPlayerInput(fire);
+		range.world->tick(1 / 30.0f);
+		range.world->setPlayerInput({});
+		CHECK(range.world->projectiles().size() == 1);
+		for (int i = 0; i < 30 && !range.world->projectiles().empty(); ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		CHECK(!range.world->projectiles().empty());
+		if (range.world->projectiles().empty()) {
+			continue;
+		}
+		const auto& round = range.world->projectiles().front();
+		std::fprintf(stderr, "  %s: after 1 s at x %.1f, target %u\n", locked ? "locked" : "unlocked", round.position.x - me.position.x,
+			round.lockedOn);
+		CHECK((round.lockedOn == enemy->id()) == locked);
+		CHECK(locked ? round.position.x - me.position.x > 5 : std::fabs(round.position.x - me.position.x) < 1);
+	}
 }
 
 // The lock's feedback (0x005e1b30): a TSLaserGuided lock is announced

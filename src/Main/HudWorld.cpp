@@ -212,6 +212,17 @@ float RemoteHudWorld::tickets(int team) const
 	return static_cast<float>(std::max(m_world.tickets(team), 0));
 }
 
+bool RemoteHudWorld::overheadCamera(int team, float& x, float& z) const
+{
+	net::Vec3f at;
+	if (!m_world.overheadCamera(team, at)) {
+		return false;
+	}
+	x = at.x;
+	z = at.z;
+	return true;
+}
+
 int RemoteHudWorld::commander(int team) const
 {
 	for (const net::RemotePlayer& p : m_world.playerList()) {
@@ -430,6 +441,17 @@ HudWorld::Weapon RemoteHudWorld::heldWeapon() const
 std::vector<int> RemoteHudWorld::revealedPlayers(int) const
 {
 	return m_world.radarPlayers();
+}
+
+std::vector<uint32_t> RemoteHudWorld::spottedVehicles() const
+{
+	std::vector<uint32_t> out;
+	for (const uint16_t ghost : m_world.radarVehicles()) {
+		if (const auto it = m_ghostObjects.find(ghost); it != m_ghostObjects.end()) {
+			out.push_back(it->second);
+		}
+	}
+	return out;
 }
 
 } // namespace dice::hfe::host

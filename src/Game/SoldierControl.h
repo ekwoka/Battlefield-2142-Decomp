@@ -100,7 +100,7 @@ constexpr float kAirSpeed = 2.0f;          // *0x00a68eb4: the air control's spe
 // Speeds in m/s by speed index (0x00a68f4c, filled from 0x00a689a8...).
 float soldierSpeed(int index);
 // The speed index of a pose (0x00586020).
-int soldierSpeedIndex(SoldierPose pose, bool sprinting);
+int soldierSpeedIndex(SoldierPose pose, bool sprinting, bool zoomed = false);
 
 // The turn: the body (the soldier object's yaw, +0x25c) follows the look
 // with a lag: the look is the body plus the head's twist (+0x278); see
@@ -118,6 +118,9 @@ public:
 	// steeper than 0.8), the input steers (0x00588420 with its second
 	// argument set).
 	void update(const SoldierInput& input, physics::SoldierBody& body, float seconds = 1 / 30.0f);
+	// The weapon in hand zoomed (its zoom index not 0): standing, not
+	// sprinting, the soldier walks at speed index 2.
+	void setZoomed(bool zoomed) { m_zoomed = zoomed; }
 	SprintStamina& stamina() { return m_stamina; }
 	const SprintStamina& stamina() const { return m_stamina; }
 	float jumpLoss = 0;     // the soldier template's sprintLossAtJump (+0x308)
@@ -148,6 +151,7 @@ public:
 	}
 
 private:
+	bool m_zoomed = false;
 	float m_throttle = 0; // 0x264
 	float m_strafe = 0;   // 0x260
 	float m_twist = 0;    // 0x278

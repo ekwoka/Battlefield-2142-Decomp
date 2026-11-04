@@ -62,7 +62,8 @@ layout(set = 3, binding = 0) uniform Lighting {
 	vec4 uvOffset;     // xy: added to the diffuse coordinates (additive scrolling,
 					   // an atlas's offset); zw: their scale in an atlas (0: none)
 	vec4 tint;         // multiplies the texture (mesh particles' colour)
-	vec4 lightCount;   // x: point lights in use
+	vec4 lightCount;   // x: point lights in use, y: the mesh's own (MeshLights.h):
+					   // 1 static, 2 bundled, 3 skinned; 0 the camera's
 	vec4 lightPosition[8]; // xyz, w: the range where it is gone
 	vec4 lightColor[8];    // rgb, w: the range it is full up to
 	vec4 lightSpot[8];     // a spot light's axis, w: its ConeAngle (radians;
@@ -118,6 +119,43 @@ float lightCone(int i, vec3 fromLight)
 }
 
 layout(location = 0) out vec4 outColor;
+
+// A mesh's own lights, the shaders' "_pointlight_" passes added up (d the
+// surface-to-light vector, R the range, H the half vector to the eye):
+//   RaShaderSTM: (saturate(N.L) colour + pow(saturate(N.H), 32) gloss
+//     StaticSpecularColor) (1 - saturate(|d|^2 / R^2));
+//   RaShaderBM: (saturate(N.L) + pow(N.H, 64) gloss) (1 - saturate(9 |d|^2 /
+//     R^2)), white (Lights[0].color isn't read);
+//   RaShaderSM: (saturate(N.L) colour + pow(saturate(N.H), 20) gloss colour)
+//     (1 - saturate(|d| / R^2)) (a length, not its square, as the shader has it).
+// The diffuse goes to `light` (times the albedo), the specular to `shine`.
+void meshPointLights(vec3 normal, float gloss, inout vec3 light, inout vec3 shine)
+{
+	int kind = int(lightCount.y + 0.5);
+	int count = int(lightCount.x + 0.5);
+	vec3 toEye = normalize(eye.xyz - inWorldPosition);
+	for (int i = 0; i < count && i < 8; ++i) {
+		vec3 toLight = lightPosition[i].xyz - inWorldPosition;
+		float d2 = dot(toLight, toLight);
+		float r = max(lightPosition[i].w, 0.01);
+		vec3 direction = toLight * inversesqrt(max(d2, 1e-6));
+		float nl = clamp(dot(normal, direction), 0.0, 1.0);
+		float nh = clamp(dot(normal, normalize(direction + toEye)), 0.0, 1.0);
+		if (kind == 1) {
+			float attenuation = 1.0 - clamp(d2 / (r * r), 0.0, 1.0);
+			light += lightColor[i].rgb * nl * attenuation;
+			shine += pow(nh, 32.0) * gloss * specular.rgb * attenuation;
+		} else if (kind == 2) {
+			float attenuation = 1.0 - clamp(9.0 * d2 / (r * r), 0.0, 1.0);
+			light += vec3(nl * attenuation);
+			shine += vec3(pow(nh, 64.0) * gloss * attenuation);
+		} else {
+			float attenuation = 1.0 - clamp(sqrt(d2) / (r * r), 0.0, 1.0);
+			light += lightColor[i].rgb * nl * attenuation;
+			shine += pow(nh, 20.0) * gloss * lightColor[i].rgb * attenuation;
+		}
+	}
+}
 
 vec3 pointLights(vec3 normal)
 {
@@ -230,7 +268,11 @@ void main()
 		light = hemi.rgb + sun * sunVisible;
 		shine = specularTerm(lit, sunVisible * (sunColor.a > 0.0 ? 1.0 : 0.0), gloss);
 	}
-	light += pointLights(lit);
+	if (lightCount.y > 0.5) {
+		meshPointLights(lit, gloss, light, shine);
+	} else {
+		light += pointLights(lit);
+	}
 	float alpha = (layers & 8) != 0 ? albedo.a * fade : material.w > 0.0 ? material.w : albedo.a;
 	vec3 color = albedo.rgb * light + shine;
 	// RaShaderSTM's envmap, after the lighting: per pixel towards the cube
