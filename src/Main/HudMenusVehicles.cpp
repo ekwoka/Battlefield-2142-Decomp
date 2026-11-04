@@ -111,6 +111,14 @@ std::string WeaponHud::update(hud::HudManager& hud, const WeaponHudInput& in, bo
 		m_read = true;
 	}
 	const Fields& f = m_fields;
+	if (!m_blinksMade) {
+		// 0x007bee10: the secondary's clip blink starts at 0.7 spare
+		// magazines, the primary's at 1.5.
+		m_blinksMade = true;
+		if (secondary) {
+			m_clipBlink = HudBlink {0.7f, 0, 0.3f, 0.15f};
+		}
+	}
 	// The seat's second gun (0x007c2d50, the PIAltFire group's active
 	// weapon) sets the Secondary* variables as 0x007c1f10 the Primary* ones.
 	const std::string P = secondary ? "Secondary" : "Primary";
@@ -185,12 +193,14 @@ std::string WeaponHud::update(hud::HudManager& hud, const WeaponHudInput& in, bo
 		setColor(hud, var("AmmoColor"), hudLevelColor(1, 0.3f));
 		hud.setString(var("AmmoString"), "");
 		hud.setString("Tot" + P + "AmmoString", "");
+		m_ammo = 1;
 		hud.set(var("Ammo"), 1);
-		hud.set(var("AmmoBlink"), 0);
+		m_ammoBlink.off();
 		hud.set(var("EternalShow"), 1);
 		hud.set(var("SingleFireShow"), 0);
 	} else {
 		const float share = in.magSize > 0 ? static_cast<float>(in.rounds) / static_cast<float>(in.magSize) : 0;
+		m_ammo = share;
 		hud.set(var("Ammo"), share);
 		hud.setString(var("AmmoString"), std::to_string(in.rounds));
 		hud.setString("Tot" + P + "AmmoString", "/ " + std::to_string((in.mags - 1) * in.magSize + in.rounds));
@@ -208,7 +218,6 @@ std::string WeaponHud::update(hud::HudManager& hud, const WeaponHudInput& in, bo
 	hud.set(var("ReloadTimeShow"), reloading ? 1 : 0);
 	hud.set(var("HeatValue"), in.heat);
 	hud.set(var("HeatShow"), in.heat > 0 ? 1 : 0);
-	hud.set(var("HeatBlink"), in.overheated ? 1 : 0);
 	std::string sound;
 	if (in.overheated && !m_overheatPlayed) {
 		sound = f.overheatSound;
@@ -226,19 +235,42 @@ std::string WeaponHud::update(hud::HudManager& hud, const WeaponHudInput& in, bo
 		if (spare > -1) {
 			hud.setString(var("ClipString"), "(" + std::to_string(spare) + ")");
 		}
-		hud.set(var("Clips"), static_cast<float>(spare));
+		m_clips = static_cast<float>(spare);
+		hud.set(var("Clips"), m_clips);
 		const float clipShare = in.nrOfMags > 0 ? static_cast<float>(spare) / static_cast<float>(in.nrOfMags) : 1.0f;
 		setColor(hud, var("ClipColor"), hudLevelColor(clipShare, 0.3f));
 	} else {
 		setColor(hud, var("ClipColor"), hudLevelColor(-10, 0.3f));
-		hud.set(var("ClipBlink"), 0);
+		m_clipBlink.off();
+		m_clips = -1;
 		hud.set(var("Clips"), -1);
 		hud.set(var("Clip1Show"), 0);
 		hud.set(var("Clip2Show"), 0);
 		hud.set(var("Clip3Show"), 0);
 		hud.set(var("ClipStringShow"), 0);
 	}
+	// The blinks, after the update (0x007c40c0 → 0x00778420).
+	hud.set(var("AmmoBlink"), m_ammoBlink.tick(m_ammo, in.seconds) ? 1 : 0);
+	hud.set(var("ClipBlink"), m_clipBlink.tick(m_clips, in.seconds) ? 1 : 0);
+	hud.set(var("HeatBlink"), m_heatBlink.tick(in.heat, in.seconds) ? 1 : 0);
+	if (!secondary) {
+		hud.set("TVBlink", m_tvBlink.tickFree(in.seconds) ? 1 : 0);
+	}
 	return sound;
+}
+
+void WeaponHud::hide(hud::HudManager& hud, bool secondary)
+{
+	// 0x007c40c0's other branch: +0xb4 / +0xc4 = 0 and the ammunition and
+	// clip blinks (+0x15e, +0x165, +0x16a, +0x172) off; the heat and TV
+	// blinks keep their flags.
+	const std::string P = secondary ? "Secondary" : "Primary";
+	m_ammo = 0;
+	m_ammoBlink.off();
+	m_clipBlink.off();
+	hud.set(P + "Ammo", 0);
+	hud.set(P + "AmmoBlink", 0);
+	hud.set(P + "ClipBlink", 0);
 }
 
 // --- The crosshair's parts (0x007be770) ---
@@ -677,17 +709,40 @@ void VehicleHud::gunnerBundle(const OtherSeat& seat)
 
 bool HudBlink::tick(float value, float seconds)
 {
-	// 0x00778080 (the watched value present).
+	// 0x00778080 / 0x00778330 (the watched value present).
 	const float period = m_scaled ? (m_slow - m_fast) / m_threshold * value + m_fast : m_slow;
 	m_timer += seconds;
-	if (value < m_threshold && m_threshold != 0 && !(value < 0)) {
+	const bool past = m_watch == Watch::below ? value < m_threshold : value > m_threshold;
+	if (past && m_threshold != 0 && !(value < 0)) {
 		if (m_timer > period) {
-			m_lit = value > m_floor ? !m_lit : false;
+			// Held off at or below the floor (below), at or above it (above).
+			const bool held = m_watch == Watch::below ? value <= m_floor : m_floor <= value;
+			m_lit = held ? false : !m_lit;
 			m_timer = 0;
 		}
 	} else if (m_lit && m_timer > period) {
 		m_timer = 0;
 		m_lit = false;
+	}
+	return m_lit;
+}
+
+bool displaySelectionOnEnter(const world::ObjectTemplate* controlled, const world::ObjectTemplate* lastOccupied)
+{
+	// 0x007a28e0: +0xb4 = a non-pod Parachute; 0x007a3920 opens the list
+	// only while it is 0.
+	const bool held = lastOccupied && lastOccupied->typeName() == "Parachute" && hudNumber(lastOccupied, "isPod", 0) == 0;
+	return !held && hudNumber(controlled, "vehicleHud.displaySelectionOnEnter", 0) != 0;
+}
+
+bool HudBlink::tickFree(float seconds)
+{
+	// 0x00778080's branch without a watched value (+4 null): toggle every
+	// `slow` (+0x14) seconds.
+	m_timer += seconds;
+	if (m_slow < m_timer) {
+		m_lit = !m_lit;
+		m_timer = 0;
 	}
 	return m_lit;
 }

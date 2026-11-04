@@ -855,6 +855,12 @@ public:
 	const std::vector<Projectile>& projectiles() const { return m_projectiles; }
 	// Armor: hit points left (from armor.hitPoints), -1 without armor.
 	float hitPoints(uint32_t object) const;
+	// An object's radius (Body::objectRadius: its collision mesh's, or a
+	// child's farther out), 0 for one without a body. Object slot 0x8c
+	// (0x006f7ec0), which the name tags read, is the same figure for an
+	// object with a collision mesh (+0x4c slot 0x74) and BundledMesh
+	// geometry (its template's slot 0xe4, 0x100a7da0, adds 0).
+	float objectRadius(uint32_t object) const;
 	// Sets them (the scripts' setDamage); none left kills a soldier or
 	// destroys the object.
 	void setHitPoints(uint32_t object, float hitPoints);

@@ -1,4 +1,5 @@
 #include "LevelRenderer.h"
+#include "DistanceFade.h"
 #include "OvergrowthLod.h"
 #include "MeshLights.h"
 #include "Scene/OvergrowthSettings.h"
@@ -1865,6 +1866,21 @@ void LevelRenderer::syncObjects()
 			}
 		}
 		instance.fade = current->fade();
+		instance.objectOrigin = {current->position().x, current->position().y, current->position().z};
+		if (instance.cullRadius < 0) {
+			// The object's radius (slot 0x8c) as the mesh's sphere, x the
+			// template's cullRadiusScale (+0x58, 1 by default; read once).
+			const world::ObjectTemplate* t = current->objectTemplate();
+			float scale = 1;
+			if (t) {
+				const auto it = t->settings().find("cullRadiusScale");
+				if (it != t->settings().end()) {
+					scale = static_cast<float>(std::atof(it->second.c_str()));
+				}
+				instance.cullActor = t->typeName() == "Soldier" || t->typeName() == "PlayerControlObject";
+			}
+			instance.cullRadius = std::max(instance.mesh->bounds.radius, 0.0f) * scale;
+		}
 		if (!instance.parts.empty() && m_sources->partTransforms) {
 			std::vector<anim::Matrix> placed(instance.parts.size(), anim::Matrix {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});
 			if (m_sources->partTransforms(instance.object, placed)) {
@@ -3064,6 +3080,14 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 		*m_sources->cameraInTitanOut = m_cameraInTitan;
 	}
 	const TitanView titanView {m_cameraInTitan, renderer.showAllTitanParts};
+	// The object manager's distance fade (DistanceFade.h): the geometry
+	// quality's scales, the view distance GSViewDistance x the view
+	// distance scale, the frame's seconds.
+	const ObjectCullScales cullScales = objectCullScales(m_sources && m_sources->quality ? m_sources->quality->geometry : 3);
+	const float viewFar = viewFarDistance(m_sources && m_sources->viewDistance ? m_sources->viewDistance() : 500.0f,
+		m_sources && m_sources->quality ? m_sources->quality->viewDistanceScale : 1.0f);
+	const CullRecord cullRoot = cullRecord(cullScales, zoom, viewFar, false, overgrowthSeconds);
+	const CullRecord cullActor = cullRecord(cullScales, zoom, viewFar, true, overgrowthSeconds);
 	for (Instance& instance : m_instances) {
 		const bool forceCloak = cloakAll && instance.mesh->skinned && !instance.hidden;
 		if ((instance.hidden || forceCloak) && instance.object != 0 && m_sources &&
@@ -3110,6 +3134,18 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 			continue;
 		}
 		DrawItem item {&instance, instance.mesh, instance.lightmap, instance.lightmapTransform, interior};
+		if (m_distanceFadeOn && instance.object != 0 && !instance.overgrowth && !instance.debris) {
+			// 0x006fb320 on the objects in view; one faded out isn't drawn.
+			const Vec3f d = instance.objectOrigin - camera.position;
+			instance.distanceFade = stepDistanceFade(instance.distanceFade, instance.cullRadius, dot(d, d),
+				instance.cullActor ? cullActor : cullRoot);
+			if (instance.distanceFade <= 0.0f) {
+				continue;
+			}
+			if (instance.distanceFade < 1.0f) {
+				item.fade = instance.fade * instance.distanceFade;
+			}
+		}
 		if (instance.overgrowth && m_sources) {
 			// OvergrowthLod.h: the near pass's cross-fade within R, the
 			// cells' fades for the "_lod" meshes beyond.
@@ -3437,6 +3473,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	const scene::RendererSettings& switches =
 		m_sources && m_sources->renderer ? *m_sources->renderer : switchDefaults;
 	Camera camera = overheadOn ? overheadCamera(overhead) : viewCamera;
+	m_distanceFadeOn = !overheadOn;
 	if (switches.tweakNearPlaneSet && switches.tweakNearPlane > 0) {
 		camera.nearPlane = switches.tweakNearPlane;
 	}

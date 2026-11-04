@@ -305,6 +305,12 @@ public:
 	// emit speed scale and age scale: the instance's +0x164, +0x138, +0x13c
 	// and +0x12c, set by Wheel/AirDraftEffectBundle each tick, 0x00618bc0..).
 	float alphaIntensity = 1, emitScale = 1, speedScale = 1, timeScale = 1;
+	// The emit direction's scale (the system's slot 0x70, RendDX9 0x1013e8b0
+	// / 0x10143950 / 0x1013bfe0: +0x150 sprite, +0x148 mesh, +0x168 trail),
+	// applied to emitDirection axis by axis (0x1013e930). Only the wheel
+	// bundle's tick sets it (0x0061bd20 → 0x00618c80): (1, 1, -1) while its
+	// vehicle runs backwards, so the spray flies the other way.
+	Vec3 directionScale {1, 1, 1};
 	// EffectBundle.speedFromPhysics (the exe's +0x45c, 0x00618ae0 each
 	// tick): the velocity the particles inherit is set from outside, the
 	// physics velocity's direction times the square root of its speed
@@ -762,6 +768,8 @@ public:
 		float timeScale = 1);
 	// One of them (BundleModifiers' 0..3) of those emitters.
 	void setModifier(uint32_t anchor, uint32_t tag, int modifier, float value);
+	// Their emit direction's scale (Emitter::directionScale).
+	void setDirectionScale(uint32_t anchor, uint32_t tag, const Vec3& scale);
 	// A bundle's modifiers (read once per template).
 	const BundleModifiers& bundleModifiers(const world::ObjectTemplate& bundle);
 	// BundleModifiers' altitude at a point: over the ground (the

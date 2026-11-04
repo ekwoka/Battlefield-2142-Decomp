@@ -1067,7 +1067,7 @@ void updateKitAbilities(hud::HudManager& hud, const game::GameWorld& round, cons
 dice::hfe::menu::WeaponHud g_secondaryWeaponHud;
 
 void updateSecondaryWeapon(hud::HudManager& hud, const host::HudWorld& world, const world::Object* vehicle,
-	bool commanderScreen)
+	bool commanderScreen, float dt)
 {
 	const host::HudWorld::Weapon second = vehicle && !commanderScreen ? world.seatGroupWeapon(1) : host::HudWorld::Weapon {};
 	if (!second.weapon || (!second.gun && second.rounds < 0)) {
@@ -1077,6 +1077,7 @@ void updateSecondaryWeapon(hud::HudManager& hud, const host::HudWorld& world, co
 	const game::FireArmSettings gun = second.gun ? second.gun->settings() : game::FireArmSettings::fromTemplate(*second.weapon);
 	dice::hfe::menu::WeaponHudInput in;
 	in.weapon = second.weapon;
+	in.seconds = dt;
 	in.magSize = gun.magSize;
 	in.nrOfMags = gun.nrOfMags;
 	in.rounds = second.rounds;
@@ -1298,7 +1299,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// ones; without one, or with guiIndex -1 (block +0xd0), the block's show
 	// (+0x16d) is cleared. A joined game's from our own state's group 1
 	// (its place in the group, rounds and magazines).
-	updateSecondaryWeapon(hud, world, playerVehicle, commanderScreen);
+	updateSecondaryWeapon(hud, world, playerVehicle, commanderScreen, dt);
 	// With the commander screen open (the HUD manager's slot 0x234) the
 	// weapon HUD's frame (0x007c40c0) skips the update and clears its show
 	// flags (PrimaryAmmoShow +0x15d, the clips, the reload, the crosshair
@@ -1311,6 +1312,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		const game::FireArmSettings gun = heldGun ? heldGun->settings() : game::FireArmSettings::fromTemplate(*heldGunTemplate);
 		dice::hfe::menu::WeaponHudInput in;
 		in.weapon = heldGunTemplate;
+		in.seconds = dt;
 		in.magSize = gun.magSize;
 		in.nrOfMags = gun.nrOfMags;
 		if (heldGun) {
@@ -1385,6 +1387,8 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		if (!sound.empty() && g_hudSound) {
 			g_hudSound(sound);
 		}
+	} else {
+		g_weaponHud.hide(hud);
 	}
 	// The item selection on foot: the kit's weapons by slot (their
 	// weaponHud.selectIcon). A weapon key's pick opens it for 0.4 s with
@@ -1466,7 +1470,21 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	game::GameWorld::PlayerInfo seated;
 	if (inVehicle && world.playerInfo(world.localPlayer(), seated) && seated.vehicle) {
 		if (seated.vehicle != seatVehicleWas || seated.seat != seatWas) {
-			seatEntered = dice::hfe::menu::hudNumber(controlledTemplate(round, seated), "vehicleHud.displaySelectionOnEnter", 0) != 0;
+			// The vehicle HUD's +0xb4 (0x007a28e0): the last occupied seat's
+			// controlled object a parachute that isn't a pod holds it back.
+			const auto seats = round.vehicleSeats(seated.vehicle);
+			const auto occupants = world.vehicleOccupants(seated.vehicle);
+			const world::ObjectTemplate* lastOccupied = nullptr;
+			for (size_t i = 0; i < occupants.size(); ++i) {
+				game::GameWorld::PlayerInfo who;
+				if (occupants[i] >= 0 && world.playerInfo(occupants[i], who)) {
+					const world::Object* root = round.objects().find(seated.vehicle);
+					lastOccupied = i > 0 && i < seats.size() ? round.templates().find(seats[i].name)
+						: root ? root->objectTemplate()
+							   : nullptr;
+				}
+			}
+			seatEntered = dice::hfe::menu::displaySelectionOnEnter(controlledTemplate(round, seated), lastOccupied);
 		}
 		const world::ObjectTemplate* active = world.seatGroupWeapon(0).weapon;
 		if (active && active != seatActiveWas && seated.vehicle == seatVehicleWas && seated.seat == seatWas) {
@@ -6923,6 +6941,9 @@ int runGame(Options& options, Session& session)
 		};
 		sources.wind = &windSettings;
 		sources.quality = &qualitySettings;
+		// GSViewDistance (GameLogic.maximumLevelViewDistance, 0x004cc870):
+		// where the objects' distance fade cuts (render/DistanceFade.h).
+		sources.viewDistance = [&botSettings] { return botSettings.levelViewDistance; };
 		// The seat camera's static interior sun (PlayerCamera::insideSun).
 		sources.insideSun = [&playerCamera](render::InsideSun& sun) {
 			PlayerCamera::InsideSun inside;

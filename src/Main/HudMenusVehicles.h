@@ -119,6 +119,71 @@ float hudNumber(const world::ObjectTemplate* t, const char* key, float otherwise
 // `threshold` the low colour (0.949, 0.184, 0.184, 1), else white.
 std::array<float, 4> hudLevelColor(float value, float threshold);
 
+
+
+// A HUD blink (BF2142.exe's blinker, constructor 0x00778040, vtable
+// 0x009b264c, its tick 0x00778080 with the frame's time): it watches a
+// value and toggles a show flag while the value is below `threshold`. The
+// vehicle and player HUD's four (made with its variables by 0x0079e5a0, at
+// 0x0079fa9f..0x0079fb89): PlayerHealthBlink (+0x2ae) on PlayerHealth
+// (+0x1cc), VehicleArmorBlink (+0x2b9) on VehicleArmor (+0x1d8),
+// PlayerStaminaBlink (+0x2aa) on PlayerStamina (+0x1d0) and
+// VehicleStaminaBlink (+0x2ac) on VehicleStamina (+0x1d4), each with
+// threshold 0.3, floor 0, periods 0.7 / 0.15 and the scaled period.
+//   - Below the threshold (and the threshold not 0, the value not below
+//     0) the timer runs; once it passes the period ((0.7 - 0.15) / 0.3 x
+//     the value + 0.15 scaled, else 0.7) the flag toggles (held off at or
+//     below the floor) and the timer starts again: the nearer empty the
+//     faster it blinks.
+//   - Otherwise a lit flag goes off once the timer passes the period.
+// Its twin (constructor 0x007782f0, vtable 0x009b2654, tick 0x00778330)
+// watches the other way (`Watch::above`): the timer runs while the value is
+// above the threshold (the threshold not 0, the value not below 0), and at
+// the period the flag goes off once the value reaches `floor` (here a
+// ceiling), else toggles. Without a watched value (the blinker's +4 null:
+// TVBlink) both toggle the flag every `slow` seconds (`tickFree`).
+//
+// The weapon HUD's eight (0x007bee10, at 0x007bf20a..0x007bf393, ticked
+// after the frame's update by 0x007c40c0 → 0x00778420):
+//   PrimaryAmmoBlink (+0x15e) on PrimaryAmmo (+0xb4)       0.3 / 0   0.7 / 0.15
+//   PrimaryClipBlink (+0x165) on PrimaryClips (+0x178)     1.5 / 0   0.3 / 0.15
+//   PrimaryHeatBlink (+0x15f) on PrimaryHeatValue (+0xf8)  above 0.7 / 1  0.3 / 0.15
+//   TVBlink (+0x15c), no value                              every 0.7 s
+//   FlareBlink (+0x1de) on FlaresReloadTime (+0x1e0)       0.98 / 0  0.7 / 0.15
+//   SecondaryAmmoBlink (+0x16a) on SecondaryAmmo (+0xc4)   0.3 / 0   0.7 / 0.15
+//   SecondaryClipBlink (+0x172) on SecondaryClips (+0x1a4) 0.7 / 0   0.3 / 0.15
+//   SecondaryHeatBlink (+0x16b) on SecondaryHeatValue (+0xf4) above 0.7 / 1  0.3 / 0.15
+// all scaled but the TV's.
+class HudBlink {
+public:
+	enum class Watch { below, above };
+	HudBlink(float threshold = 0.3f, float floor = 0, float slow = 0.7f, float fast = 0.15f, bool scaled = true,
+		Watch watch = Watch::below)
+		: m_threshold(threshold), m_floor(floor), m_slow(slow), m_fast(fast), m_scaled(scaled), m_watch(watch)
+	{
+	}
+	// One frame (0x00778080 / 0x00778330): returns the flag.
+	bool tick(float value, float seconds);
+	// One frame without a watched value: the flag toggles once the timer
+	// passes `slow`.
+	bool tickFree(float seconds);
+	bool lit() const { return m_lit; }
+	// The owner clearing the flag byte (the timer runs on).
+	void off() { m_lit = false; }
+	void reset()
+	{
+		m_lit = false;
+		m_timer = 0;
+	}
+
+private:
+	float m_threshold, m_floor, m_slow, m_fast; // +0xc, +0x10, +0x14, +0x18
+	bool m_scaled;                              // +0x1c
+	Watch m_watch;                              // the vtable
+	float m_timer = 0;                          // +0x20
+	bool m_lit = false;                         // *+8
+};
+
 struct WeaponHudInput {
 	const world::ObjectTemplate* weapon = nullptr; // its weaponHud.*
 	int rounds = 0;      // in the magazine (the firearm's slot 0xbc)
@@ -138,6 +203,7 @@ struct WeaponHudInput {
 	int travelled = -1;
 	bool scanning = false;
 	float scan = 0;
+	float seconds = 0; // the frame's time (the blinks)
 };
 
 class WeaponHud {
@@ -155,9 +221,23 @@ public:
 		void read(const world::ObjectTemplate* w);
 	};
 	const Fields& fields() const { return m_fields; }
+	// The HUD hidden (0x007c40c0's other branch: no gun, the commander
+	// screen): the ammunition and clip blinks off, their values 0; the
+	// blinks aren't ticked.
+	void hide(hud::HudManager& hud, bool secondary = false);
 
 private:
 	bool m_overheatPlayed = false; // +0xb0
+	// The blinks (see HudBlink) and their watched values: the ammunition's
+	// share (+0xb4 / +0xc4, kept through a reload), the spare magazines
+	// (+0x178 / +0x1a4) and the heat (+0xf8 / +0xf4); one set for the
+	// Primary block, one for the Secondary (the two WeaponHud objects).
+	HudBlink m_ammoBlink {0.3f, 0, 0.7f, 0.15f};
+	HudBlink m_clipBlink {1.5f, 0, 0.3f, 0.15f}; // the secondary's 0.7
+	HudBlink m_heatBlink {0.7f, 1, 0.3f, 0.15f, true, HudBlink::Watch::above};
+	HudBlink m_tvBlink {0, 0, 0.7f, 0.7f, false};
+	bool m_blinksMade = false;
+	float m_ammo = 0, m_clips = 0;
 	bool m_read = false;
 	const world::ObjectTemplate* m_template = nullptr;
 	Fields m_fields;
@@ -313,6 +393,19 @@ std::vector<SelectItem> seatSelectItems(const game::GameWorld::SeatLayout& seat,
 // A seat dot's state (0x007a28e0).
 int seatDotState(bool occupied, bool local, int squad, int localSquad, bool sameTeam);
 
+// vehicleHud.displaySelectionOnEnter on entering a seat (0x007a3920, from
+// the enter event 0x007a3cb0 for the local player): with the controlled
+// object's flag (block +0xbd) the item list opens for 2 s, unless the
+// vehicle HUD's +0xb4 is set. 0x007a28e0 (the seat dots, run just before)
+// writes +0xb4 for each occupied seat whose occupant and the local player
+// are known: 1 when that occupant's controlled object (player slot 0x4c)
+// is a Parachute (class 0xc5a8) whose template's isPod (+0x4cc) is 0, else
+// 0; so the last occupied seat decides (0x007a3180 clears it off a
+// vehicle). The shipped parachutes don't set displaySelectionOnEnter, so
+// only the artillery guns open the list. `lastOccupied` is the last
+// occupied seat's controlled template (the vehicle's for the driver).
+bool displaySelectionOnEnter(const world::ObjectTemplate* controlled, const world::ObjectTemplate* lastOccupied);
+
 struct SeatDot {
 	int state = 0;
 	float x = 0, y = 0; // vehicleHud.vehicleIconPos of the seat's object
@@ -334,43 +427,6 @@ struct PassengerLine {
 	std::array<float, 3> colour {1, 1, 1};
 };
 std::array<PassengerLine, 10> passengerLines(const std::vector<SeatDot>& seats);
-
-// A HUD blink (BF2142.exe's blinker, constructor 0x00778040, vtable
-// 0x009b264c, its tick 0x00778080 with the frame's time): it watches a
-// value and toggles a show flag while the value is below `threshold`. The
-// vehicle and player HUD's four (made with its variables by 0x0079e5a0, at
-// 0x0079fa9f..0x0079fb89): PlayerHealthBlink (+0x2ae) on PlayerHealth
-// (+0x1cc), VehicleArmorBlink (+0x2b9) on VehicleArmor (+0x1d8),
-// PlayerStaminaBlink (+0x2aa) on PlayerStamina (+0x1d0) and
-// VehicleStaminaBlink (+0x2ac) on VehicleStamina (+0x1d4), each with
-// threshold 0.3, floor 0, periods 0.7 / 0.15 and the scaled period.
-//   - Below the threshold (and the threshold not 0, the value not below
-//     0) the timer runs; once it passes the period ((0.7 - 0.15) / 0.3 x
-//     the value + 0.15 scaled, else 0.7) the flag toggles (held off at or
-//     below the floor) and the timer starts again: the nearer empty the
-//     faster it blinks.
-//   - Otherwise a lit flag goes off once the timer passes the period.
-class HudBlink {
-public:
-	HudBlink(float threshold = 0.3f, float floor = 0, float slow = 0.7f, float fast = 0.15f, bool scaled = true)
-		: m_threshold(threshold), m_floor(floor), m_slow(slow), m_fast(fast), m_scaled(scaled)
-	{
-	}
-	// One frame (0x00778080): returns the flag.
-	bool tick(float value, float seconds);
-	bool lit() const { return m_lit; }
-	void reset()
-	{
-		m_lit = false;
-		m_timer = 0;
-	}
-
-private:
-	float m_threshold, m_floor, m_slow, m_fast; // +0xc, +0x10, +0x14, +0x18
-	bool m_scaled;                              // +0x1c
-	float m_timer = 0;                          // +0x20
-	bool m_lit = false;                         // *+8
-};
 
 // The other seats' turrets on the vehicle HUD (0x007a2b50 → 0x007a1e00 →
 // 0x007a07c0): GunnerAngle (+0x20c) and SecondaryGunnerAngle (+0xb0).

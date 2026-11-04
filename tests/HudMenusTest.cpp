@@ -1216,6 +1216,87 @@ TEST(HudBlink_StaminaAndArmour)
 	CHECK(hud.number("VehicleArmorBlink") == 0 && hud.number("VehicleStaminaBlink") == 0);
 }
 
+// The weapon HUD's blinks (0x007bee10's eight, ticked by 0x007c40c0 after
+// the update): the ammunition below 0.3 of a magazine, the spare
+// magazines below 1.5 (0.7 for the Secondary block), the heat above 0.7
+// (0x007782f0 / 0x00778330: off again at 1), TVBlink every 0.7 s.
+TEST(HudBlink_WeaponHud)
+{
+	// The heat's twin: above 0.7 it toggles; at 1 it is held off.
+	menu::HudBlink heat(0.7f, 1, 0.3f, 0.15f, true, menu::HudBlink::Watch::above);
+	CHECK(!heat.tick(0.5f, 1.0f));
+	CHECK(heat.tick(0.8f, 0.0f)); // the timer already past (0.15 / 0.7 x 0.8 + 0.15)
+	CHECK(!heat.tick(0.8f, 0.4f));
+	CHECK(heat.tick(0.8f, 0.4f));
+	CHECK(!heat.tick(1.0f, 1.0f));
+	// No watched value: every `slow` seconds.
+	menu::HudBlink tv(0, 0, 0.7f, 0.7f, false);
+	CHECK(!tv.tickFree(0.5f));
+	CHECK(tv.tickFree(0.3f));
+	CHECK(tv.tickFree(0.5f));
+	CHECK(!tv.tickFree(0.3f));
+
+	hud::HudManager hud(nullptr);
+	menu::WeaponHud weaponHud;
+	menu::WeaponHudInput in;
+	in.rounds = 3;
+	in.magSize = 30;
+	in.mags = 2; // one spare
+	in.nrOfMags = 5;
+	in.heat = 0.8f;
+	in.seconds = 1.0f;
+	weaponHud.update(hud, in);
+	CHECK(hud.number("PrimaryAmmoBlink") == 1 && hud.number("PrimaryClipBlink") == 1);
+	CHECK(hud.number("PrimaryHeatBlink") == 1 && hud.number("TVBlink") == 1);
+	// A reload keeps the share the blink watches (+0xb4 isn't written).
+	in.reload = 0.5f;
+	in.rounds = 30;
+	weaponHud.update(hud, in);
+	CHECK(hud.number("PrimaryAmmoBlink") == 0);
+	weaponHud.update(hud, in);
+	CHECK(hud.number("PrimaryAmmoBlink") == 1);
+	// No magazine: the blink cleared and the share 1.
+	in.reload = 0;
+	in.magSize = -1;
+	weaponHud.update(hud, in);
+	CHECK(hud.number("PrimaryAmmoBlink") == 0 && hud.number("PrimaryClipBlink") == 0);
+	// Hidden: the ammunition's and clips' flags off.
+	in.magSize = 30;
+	in.rounds = 3;
+	weaponHud.update(hud, in);
+	CHECK(hud.number("PrimaryAmmoBlink") == 1);
+	weaponHud.hide(hud);
+	CHECK(hud.number("PrimaryAmmoBlink") == 0 && hud.number("PrimaryAmmo") == 0);
+	// The Secondary block: one spare magazine is above its 0.7.
+	menu::WeaponHud second;
+	in.mags = 2;
+	second.update(hud, in, true);
+	CHECK(hud.number("SecondaryClipBlink") == 0 && hud.number("SecondaryAmmoBlink") == 1);
+}
+
+// displaySelectionOnEnter's gate (0x007a3920 on the vehicle HUD's +0xb4,
+// written by the seat dots 0x007a28e0): the last occupied seat's
+// controlled object a Parachute that isn't a pod holds the list back.
+TEST(HudVehicle_SelectionOnEnterGate)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "PlayerControlObject");
+	templates.registerType(2, "Parachute");
+	world::ObjectTemplate* gun = templates.create("PlayerControlObject", "us_ag");
+	gun->settings()["vehicleHud.displaySelectionOnEnter"] = "1";
+	world::ObjectTemplate* chute = templates.create("Parachute", "parachute");
+	chute->settings()["vehicleHud.displaySelectionOnEnter"] = "1";
+	world::ObjectTemplate* pod = templates.create("Parachute", "pod");
+	pod->settings()["vehicleHud.displaySelectionOnEnter"] = "1";
+	pod->settings()["isPod"] = "1";
+	world::ObjectTemplate* tank = templates.create("PlayerControlObject", "tank");
+	CHECK(menu::displaySelectionOnEnter(gun, gun));
+	CHECK(menu::displaySelectionOnEnter(gun, nullptr));
+	CHECK(!menu::displaySelectionOnEnter(chute, chute));
+	CHECK(menu::displaySelectionOnEnter(pod, pod));
+	CHECK(!menu::displaySelectionOnEnter(tank, tank));
+}
+
 // zoomOnMinimap, miniMapIconOffset(Inside), standardHelpEnabled and
 // useVehicleCommRose as the shipped templates give them.
 TEST(HudVehicle_MapOffsetZoomAndFlags)

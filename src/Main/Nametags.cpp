@@ -40,6 +40,16 @@ float number(const world::ObjectTemplate* t, const char* name, float fallback)
 	return value ? static_cast<float>(std::atof(value->c_str())) : fallback;
 }
 
+// An object's armour as a share of its maxHitPoints (LocalHudWorld's
+// objectHealth), -1 without armour.
+float objectShare(const game::GameWorld& world, const world::Object& owned)
+{
+	const float hp = world.hitPoints(owned.id());
+	const world::ObjectTemplate* t = owned.objectTemplate();
+	const float most = number(t, "armor.maxHitPoints", number(t, "armor.hitPoints", 0));
+	return hp >= 0 && most > 0 ? hp / most : -1;
+}
+
 // ColorArray (Shaders/Nametag) for the player and object tags: the
 // NametagManager's constructor (0x100f24c0) fills the table at 0x102112f8
 // that tag types 0 and 3 point at: white, red, blue, green, yellow.
@@ -536,6 +546,9 @@ const Nametags::TagTemplate& Nametags::tagTemplate(const world::ObjectTemplate* 
 		tt.useAliveArmor = flag("Nametag.useAliveArmor", false);
 		tt.icon = static_cast<int>(number(t, "Nametag.3dMapIcon", -1));
 		tt.selectedIcon = static_cast<int>(number(t, "Nametag.selected3dMapIcon", -1));
+		tt.secondaryIcon = static_cast<int>(number(t, "Nametag.secondary3dMapIcon", -1));
+		tt.healthActivationLevel = number(t, "Nametag.healthActivationLevel", 100);
+		tt.useBoundingRadius = flag("Nametag.useBoundingRadius", true);
 		tt.maxDistance = number(t, "Nametag.maxDistance", 1200);
 		tt.maxEnemyDistance = number(t, "Nametag.maxEnemyDistance", 1200);
 		if (const std::string* offset = setting(t, "Nametag.3dMapIconOffset")) {
@@ -546,6 +559,21 @@ const Nametags::TagTemplate& Nametags::tagTemplate(const world::ObjectTemplate* 
 			flag("vehicleHud.usePlayerIcon", false));
 	}
 	return m_templates.emplace(t, tt).first->second;
+}
+
+int objectTagIcon(int icon, int secondaryIcon, float healthActivationLevel, float percent)
+{
+	// 0x100f40d0: below 100 the first armour's percent at or below the
+	// level sets flag 0x1000000, whose top byte picks slot 0x44's icon.
+	return healthActivationLevel < 100 && percent <= healthActivationLevel ? secondaryIcon : icon;
+}
+
+std::array<float, 3> objectTagPoint(const std::array<float, 3>& position, const std::array<float, 3>& offset,
+	bool useBoundingRadius, float radius)
+{
+	// 0x100f40d0: tag +0x2c..+0x34 the offset, +0x30 raised by the
+	// object's slot 0x8c with the block's +0x18.
+	return {position[0] + offset[0], position[1] + offset[1] + (useBoundingRadius ? radius : 0.0f), position[2] + offset[2]};
 }
 
 void Nametags::radioCall(int caller, int code, bool local)
@@ -737,11 +765,16 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 	if (m_taggedCheck <= 0) {
 		m_taggedCheck = 1;
 		m_tagged.clear();
+		std::map<uint32_t, ObjectTag> kept;
 		for (const auto& owned : objects.objects()) {
 			if (owned && tagTemplate(owned->objectTemplate()).tagged()) {
 				m_tagged.push_back(owned->id());
+				const auto had = m_objectTags.find(owned->id());
+				ObjectTag& tag = kept[owned->id()] = had != m_objectTags.end() ? had->second : ObjectTag {};
+				tag.radius = tagTemplate(owned->objectTemplate()).useBoundingRadius ? world.objectRadius(owned->id()) : 0;
 			}
 		}
+		m_objectTags = std::move(kept);
 	}
 	const std::vector<game::GameWorld::ControlPointInfo> points = hud ? hud->controlPointList() : world.controlPointList();
 	for (const uint32_t id : m_tagged) {
@@ -820,7 +853,21 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		// those with showOutside (default on); teamSpecific / inverse as the
 		// control points'; with useAliveArmor none once the object's armour
 		// is gone (the selectable pass, 0x1016a950: its armour's slot 0x60).
-		const IconRegistry::Icon* icon = m_icons && tt.icon >= 0 ? m_icons->find(0x50 + tt.icon) : nullptr;
+		// The secondary icon (0x100f40d0, objectTagIcon) chosen at each
+		// refresh: the first and each drop of the armour (the pushes of
+		// addNametagOnDestroy).
+		ObjectTag& state = m_objectTags[id];
+		if (tt.healthActivationLevel < 100 && tt.secondaryIcon >= 0) {
+			const float share = hud ? hud->objectHealth(id) : objectShare(world, *owned);
+			if (share >= 0 && share < state.share) {
+				state.secondary = objectTagIcon(tt.icon, tt.secondaryIcon, tt.healthActivationLevel, share * 100) == tt.secondaryIcon;
+				state.share = share;
+			} else if (share > state.share) {
+				state.share = share; // a repair: no push, the icon stays
+			}
+		}
+		const int iconIndex = state.secondary ? tt.secondaryIcon : tt.icon;
+		const IconRegistry::Icon* icon = m_icons && iconIndex >= 0 ? m_icons->find(0x50 + iconIndex) : nullptr;
 		if (!icon || (m_insideTitan ? !tt.showInside : !tt.showOutside)) {
 			continue;
 		}
@@ -833,8 +880,8 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		}
 		const bool enemy = team != 0 && team != me.team;
 		const float most = enemy ? tt.maxEnemyDistance : tt.maxDistance;
-		const std::array<float, 3> at {owned->position().x + tt.offset[0], owned->position().y + tt.offset[1],
-			owned->position().z + tt.offset[2]};
+		const std::array<float, 3> at = objectTagPoint({owned->position().x, owned->position().y, owned->position().z},
+			tt.offset, tt.useBoundingRadius, state.radius);
 		const float dx = at[0] - eye.x, dy = at[1] - eye.y, dz = at[2] - eye.z;
 		const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
 		const float alpha = most <= 0 ? 0.0f : clamp01(1 - distance / most);

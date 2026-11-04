@@ -341,3 +341,19 @@ TEST(Nametags_JoinedWorld)
 	CHECK(hasTexture(quads, "supplyRequest.dds") || hasTexture(quads, "supplyRequestSelected.dds"));
 	CHECK(tags.selectedRequest() == 1 * 4 + 3);
 }
+
+// An object tag's refresh (0x100f40d0): below healthActivationLevel (the
+// Titans' 60) the secondary icon (slot 0x44(1), secondary3dMapIcon); the
+// point raised by the object's radius with useBoundingRadius (1 by
+// default, 0x0063b760).
+TEST(Nametags_ObjectTagIconAndRadius)
+{
+	CHECK(nametags::objectTagIcon(49, 53, 60, 61) == 49);
+	CHECK(nametags::objectTagIcon(49, 53, 60, 60) == 53);
+	CHECK(nametags::objectTagIcon(49, 53, 60, 10) == 53);
+	CHECK(nametags::objectTagIcon(49, 53, 100, 10) == 49); // 100: never
+	const std::array<float, 3> lifted = nametags::objectTagPoint({1, 2, 3}, {0, -3, 0}, true, 4.5f);
+	CHECK(lifted[0] == 1 && lifted[1] == 3.5f && lifted[2] == 3);
+	const std::array<float, 3> flat = nametags::objectTagPoint({1, 2, 3}, {0, 0.3f, 0}, false, 4.5f);
+	CHECK(std::fabs(flat[1] - 2.3f) < 1e-6f);
+}

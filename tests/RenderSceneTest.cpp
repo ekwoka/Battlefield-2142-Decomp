@@ -8,6 +8,7 @@
 #include "Effects/Effects.h"
 #include "Geometry/GeometryTemplateManager.h"
 #include "Render/AnimatedUV.h"
+#include "Render/DistanceFade.h"
 #include "Render/MeshLights.h"
 #include "Render/OvergrowthLod.h"
 #include "Render/EnvMaps.h"
@@ -640,4 +641,40 @@ TEST(RenderScene_MeshLightsPickedPerMesh)
 	CHECK(rand.next() == 41);
 	CHECK(near(render::flickerFactor(0.5f, 32767), 1) && near(render::flickerFactor(0.5f, 0), 0.5f));
 	CHECK(near(render::flickerFactor(0, 0), 1));
+}
+
+// The object manager's distance fade (0x006ff110 / 0x006fb280 / 0x006fb320):
+// at high geometry quality (8 / 10 / 80) an object of R = 1 is whole within
+// 0.8 x 6400 m^2 of its edge, eases out to 6400 and is gone past 1.2 x 6400;
+// a vehicle's area takes +0x144's 10.
+TEST(RenderScene_ObjectDistanceFade)
+{
+	using namespace dice::hfe::render;
+	const ObjectCullScales high = objectCullScales(3);
+	CHECK(high.area == 8 && high.actorArea == 10 && high.minimum == 80);
+	CHECK(objectCullScales(1).minimum == 40 && objectCullScales(2).actorArea == 8);
+	CHECK(viewFarDistance(330.4f, 1) == 330 && viewFarDistance(5000, 0.5f) == 1500 && viewFarDistance(5, 1) == 20);
+	const CullRecord prop = cullRecord(high, 1, 1000, false, 0.1f);
+	CHECK(prop.minArea == 6400 && prop.areaScale == 640);
+	// R = 1: pi x 640 < 6400, so A = 6400.
+	CHECK(stepDistanceFade(0, 1, 1 + 5000, prop) == 1);                  // d^2 5000 <= 5120
+	CHECK(stepDistanceFade(1, 1, 1 + 6000, prop) == 1);                  // whole stays whole in the near band
+	const float in = stepDistanceFade(0, 1, 1 + 6000, prop);             // 1 - 880 / 1200 = 0.2667 vs 0.4
+	CHECK(std::fabs(in - 0.4f) < 1e-5f);
+	const float out = stepDistanceFade(1, 1, 1 + 7000, prop);            // 1 - 600 / 1400 = 0.571 vs 0.6
+	CHECK(std::fabs(out - (1 - 600.0f / 1400.0f)) < 1e-5f);
+	CHECK(stepDistanceFade(0, 1, 1 + 7000, prop) == 0);                  // gone stays gone in the far band
+	CHECK(stepDistanceFade(1, 1, 1 + 7700, prop) == 0);                  // past 1.2 A
+	// The view distance cuts first: (R + p1)^2.
+	const CullRecord shortView = cullRecord(high, 1, 50, false, 0.1f);
+	CHECK(stepDistanceFade(1, 1, 1 + 2700, shortView) == 0);
+	// A big object (R = 10): pi x 100 x 640 = 201062 m^2, whole to ~401 m.
+	CHECK(stepDistanceFade(0, 10, 100 + 400 * 400, prop) == 1);
+	// A vehicle of R = 5 at 260 m: pi x 25 x 1000 = 78540; 0.8 of it is 62832.
+	const CullRecord vehicle = cullRecord(high, 1, 1000, true, 0.1f);
+	CHECK(stepDistanceFade(0, 5, 25 + 240 * 240, vehicle) == 1);
+	CHECK(stepDistanceFade(0, 5, 25 + 240 * 240, prop) < 1); // as a prop: 50265, past 0.8 A
+	// Zoomed 4x: p0 and p2 grow with it.
+	const CullRecord zoomed = cullRecord(high, 4, 1000, false, 0.1f);
+	CHECK(stepDistanceFade(0, 1, 1 + 15000, zoomed) == 1);
 }

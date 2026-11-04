@@ -220,6 +220,10 @@ struct LevelSources {
 	// drawer's slot 0x40, which RendDX9's NametagManager reads too,
 	// 0x100f3490: the 3D icons' showInside / showOutside); may be null.
 	bool* cameraInTitanOut = nullptr;
+	// GameLogic.maximumLevelViewDistance (GSViewDistance): the view
+	// distance the objects' distance fade cuts at (DistanceFade.h); null:
+	// 500, the unset GSViewDistance BF2142.exe 0x00434610 reads.
+	std::function<float()> viewDistance;
 };
 
 struct LevelStats {
@@ -365,6 +369,14 @@ private:
 		std::shared_ptr<anim::Animation> animation;
 		bool hidden = false; // its object is hidden
 		float fade = 1;      // its object's fade (below 1: drawn blended, after the opaque ones)
+		// The object manager's distance fade (DistanceFade.h: the render
+		// object's +0x2c), its object's origin, its cull radius (the mesh's
+		// radius x cullRadiusScale; below 0 not yet read) and whether its
+		// template is a Soldier or PlayerControlObject (+0x144's scale).
+		float distanceFade = 1;
+		Vec3f objectOrigin {};
+		float cullRadius = -1;
+		bool cullActor = false;
 		const world::ObjectTemplate* partsTemplate = nullptr; // whose children place the parts
 		std::string geometry;  // its geometry template
 		int shownGeometry = -1; // the geometry drawn (-1: the exterior)
@@ -543,6 +555,11 @@ private:
 	float m_overgrowthLodTimer = 0;         // +0x114
 	float m_overgrowthCellSize = 125;       // the cells' side (OvergrowthCells::cellSize)
 	uint64_t m_lastOvergrowthTicks = 0;     // lodTimer's clock
+	// The objects' distance fade this frame (DistanceFade.h): off for the
+	// commander's overhead view, whose camera sits hundreds of metres up
+	// (the walk's filter flag 0x1000000 keeps every object; which views set
+	// it isn't traced).
+	bool m_distanceFadeOn = true;
 	// This frame's close distance: the script's scale, or the quality's
 	// once the video settings change it after the level's script ran (the
 	// switch writes +0x110 when they are applied).

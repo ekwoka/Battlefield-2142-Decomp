@@ -8056,6 +8056,16 @@ const physics::CollisionWorld* GameWorld::projectileCollision(uint32_t object) c
 	return nullptr;
 }
 
+float GameWorld::objectRadius(uint32_t object) const
+{
+	for (const Body& body : m_bodies) {
+		if (body.object == object) {
+			return body.objectRadius;
+		}
+	}
+	return 0;
+}
+
 GameWorld::Body* GameWorld::findBody(uint32_t object)
 {
 	for (Body& body : m_bodies) {

@@ -124,6 +124,31 @@ int orderIconId(bool fromCommander, int kind);
 // the orbital strike's 0x79, 2 the UAV's 0x7b, 3 the supplies' 0x7c; the
 // selected ones 0x7e / 0x7d / 0x7f / 0x80).
 int requestIconId(int kind, bool selected);
+
+// An object tag's refresh (RendDX9 0x100f40d0, each time BF2142.exe pushes
+// the object's runtime Nametag, vtable 0x00989450, to the manager's slot
+// 0x30: as it's made, on its team's change, on each drop of the hit points
+// with armor.addNametagOnDestroy). The tag info's block (slot 0x38: the
+// template component's +0x10..: the offset, type, colour,
+// healthActivationLevel +0x14, useBoundingRadius +0x18, the distances, the
+// flags +0x24) and icons (slot 0x44(i), 0x006585a0: 3dMapIcon (component
+// +0x38) for 0, secondary3dMapIcon (+0x3c, the component's getter slot
+// 0x38) for 1, each plus the object's own offset +0x10 / +0x14, 0 unless
+// slot 0x40 sets it).
+//   - The icon: with healthActivationLevel under 100, the first armour up
+//     from the object (+0x48, then the parents +0x34) whose percent
+//     (armour slot 0x40) is at or below the level sets tag flag 0x1000000
+//     and takes icon 1, the secondary; else icon 0. (Shipped: the Titans,
+//     49 / 50 to 53 / 54 at 60 %.)
+int objectTagIcon(int icon, int secondaryIcon, float healthActivationLevel, float percent);
+//   - The point: the offset (+0x2c..+0x34), its height raised by the
+//     object's radius (object slot 0x8c) when useBoundingRadius (block
+//     +0x18, the component's +0x28, getter slot 0x100; 1 by default from
+//     0x0063b760). Shipped with it on: the sentry gun, the missile silos,
+//     the spawn beacon, the supply hubs and the MiniMed; every other
+//     show3dIcon template sets it 0.
+std::array<float, 3> objectTagPoint(const std::array<float, 3>& position, const std::array<float, 3>& offset,
+	bool useBoundingRadius, float radius);
 constexpr float kOrderDistance = 1200; // DAT_101f67b4
 
 // What a kit lets its carrier answer (the HUD manager's slot 0xac -> +0x74
@@ -289,6 +314,9 @@ private:
 		bool teamSpecific = false, inverse = false, tracker = false, showInside = false, showOutside = true;
 		bool selectable = false, useTeamColor = false, useAliveArmor = false;
 		int icon = -1, selectedIcon = -1; // 3dMapIcon, selected3dMapIcon
+		int secondaryIcon = -1;           // secondary3dMapIcon (component +0x3c)
+		float healthActivationLevel = 100; // component +0x24
+		bool useBoundingRadius = true;    // component +0x28
 		float maxDistance = 1200, maxEnemyDistance = 1200;
 		std::array<float, 3> offset {};
 		int vehicleIcon = 0x5a; // vehicleIconId of its setVehicleType / vehicleCategory / usePlayerIcon
@@ -297,6 +325,15 @@ private:
 	const TagTemplate& tagTemplate(const world::ObjectTemplate* t);
 	std::map<const world::ObjectTemplate*, TagTemplate> m_templates;
 	std::vector<uint32_t> m_tagged; // the objects with tags, looked for once a second
+	// Per tagged object: its radius (with useBoundingRadius, read as the
+	// list is made) and the icon chosen at its last refresh (redone as its
+	// armour drops: the pushes).
+	struct ObjectTag {
+		float radius = 0;
+		float share = 2; // the armour's share at the last refresh (2: none yet)
+		bool secondary = false;
+	};
+	std::map<uint32_t, ObjectTag> m_objectTags;
 	float m_taggedCheck = 0;
 	CallTimers m_calls;
 	struct PendingCall {

@@ -420,7 +420,9 @@ void Emitter::emit(game::Random& random, const Vec3& at, float age, const EmitCo
 	// Where it is born and its direction, by emitterType (0x10140fa0,
 	// 0x101410d0, 0x101412c0).
 	Vec3 offset;
-	Vec3 direction = normalized(t.emitDirection);
+	// emitDirection x the bundle's direction scale (0x1013e930).
+	Vec3 direction = normalized({t.emitDirection.x * directionScale.x, t.emitDirection.y * directionScale.y,
+		t.emitDirection.z * directionScale.z});
 	switch (t.emitter) {
 	case ParticleTemplate::Emitter::Standard: {
 		const float theta = unitRandom(random) * kTwoPi;
@@ -1637,6 +1639,15 @@ float ParticleView::fade(float depth, int lod) const
 	return (1 - f) * (1 - f);
 }
 
+void EffectManager::setDirectionScale(uint32_t anchor, uint32_t tag, const Vec3& scale)
+{
+	for (const auto& emitter : m_emitters) {
+		if (emitter->anchor == anchor && emitter->tag == tag) {
+			emitter->directionScale = scale;
+		}
+	}
+}
+
 void EffectManager::setModifier(uint32_t anchor, uint32_t tag, int modifier, float value)
 {
 	for (const auto& emitter : m_emitters) {
@@ -2385,6 +2396,14 @@ void ObjectEffects::updateGround(const ObjectState& object, const Vec3& velocity
 	effects.setMount(object.id, tag, object.rotation.untransform(hit - object.position), upright);
 	const float inDof = physics::dot(velocity, object.rotation.transform({0, 0, 1}));
 	const float engine = object.engine > 0 ? object.engine : object.occupied ? 1.0f : 0.0f;
+	if (b.kind == Placed::Kind::Wheel) {
+		// 0x0061bd20: every system of the wheel's effect takes (1, 1, sign
+		// of the speed along the vehicle's forward) through slot 0x70
+		// (0x00618c80), whatever emitDirectionZFromSpeedDof says: that
+		// flag (the template's +0x398, 1 from 0x0061cb80, slots 0x100 /
+		// 0x104) is read only by its console row and the write-back.
+		effects.setDirectionScale(object.id, tag, {1, 1, inDof < 0 ? -1.0f : 1.0f});
+	}
 	// Only the modifiers with a mapping set are set (0x0061bd20's bVar1).
 	for (int i = 0; i < 4; ++i) {
 		const GroundBundle::Modifier& m = g.modifiers[static_cast<size_t>(i)];

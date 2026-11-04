@@ -751,6 +751,25 @@ TEST(Effects_WheelBundlesFollowTheirContact)
 	state.wheels[0].contact = true;
 	objects.update({state}, manager);
 	CHECK(manager.emitting(8, 1));
+	// The wheel's tick hands its effect's systems (1, 1, sign of the speed
+	// along the vehicle's forward) (0x0061bd20 -> 0x00618c80), whatever
+	// emitDirectionZFromSpeedDof says.
+	const auto directionZ = [&manager] {
+		float z = 0;
+		for (const auto& emitter : manager.emitterList()) {
+			if (emitter->anchor == 8 && emitter->tag == 1) {
+				z = emitter->directionScale.z;
+			}
+		}
+		return z;
+	};
+	dust->settings()["emitDirectionZFromSpeedDof"] = "0";
+	state.velocity = {0, 0, 5};
+	objects.update({state}, manager);
+	CHECK(directionZ() == 1);
+	state.velocity = {0, 0, -5};
+	objects.update({state}, manager);
+	CHECK(directionZ() == -1);
 }
 
 // The WindAffector winds (0x0064b5f0) and the WindManager's sum (0x00703b20).

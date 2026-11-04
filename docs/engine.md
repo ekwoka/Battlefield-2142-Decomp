@@ -2783,8 +2783,16 @@ running (`engineName`'s, `+0x24c`). Each tick (`0x0061bd20`,
 (`+0xd8`) and the sound's intensity — are min + (max − min) × the
 product of the mappings set (a/b: 0 at a, 1 at b): FromSpeed the
 vehicle's speed at the bundle (slot 0xac), FromSpeedInDof its forward
-part (at least 0; its sign turns emitDirectionZFromSpeedDof's emit
-direction), FromAltitude the ray's length, FromEngine the throttle. The
+part (at least 0; its sign turns the emit direction: the wheel's tick
+hands every system of its effect (1, 1, ±1) through slot 0x70,
+`0x00618c80` → RendDX9 `0x1013e8b0` / `0x10143950` / `0x1013bfe0`, which
+`0x1013e930` multiplies into emitDirection axis by axis, −1 while the
+point's velocity runs against the vehicle's forward. That happens
+whatever emitDirectionZFromSpeedDof says: the flag, the template's
+`+0x398`, 1 from `0x0061cb80`, setter / getter slots 0x100 / 0x104
+`0x0061cc00` / `0x0061cc10`, is read only by its console row
+`0x0053c719` and the write-back; `Emitter::directionScale`,
+`ObjectEffects::updateGround`), FromAltitude the ray's length, FromEngine the throttle. The
 rewrite (ObjectEffects::updateGround) probes with the game's collision
 (`setGround`: the water, else `groundMaterialAlong`, the point on the
 terrain under it), a wheel 1.5 m straight down from its bundle (no
@@ -3106,10 +3114,38 @@ render object (`+0x44`; `0x006fa520`: `+0x2c` = f, slot 0x104 gets f ×
 `0x006fb280`, which also scales p0 by 0.25 and R by 0.8,
 `*0x00a07f00..08`); hidden past (R + p1)² or (1 + 0.2) A, whole within
 (1 − 0.2) A, between them easing in or out by 4 a second (`*0x00a07f0c`,
-`*0x00a07f10`). Not rewritten: the manager's `+0x140` / `+0x144` /
-`+0x148` (setters in its vtable `0x0099aba8`, slots 48 / 50 / 46) have no
-caller found, nor what the settings' slots 0x2c / 0x40 return, so the
-distances can't be fixed. Left:
+`*0x00a07f10`). Settled: the render view (the Renderer's slot 0x54,
+RendDX9 `0x1000d0c0`: renderer `+0xf8`, built by `0x100671d0`, vtable
+`0x101c6610`) answers slot 0x2c with its zoom `+0x1c` (`0x10066bf0`;
+`0x10066b30` sets it to tan(first fov / 2) / tan(fov / 2)) and slot 0x40
+with its view distance `+0x30` (`0x10066ca0`), which BF2142.exe
+`0x00434610` sets each frame (slot 0x3c) to GSViewDistance × the
+VideoSettings view distance scale (GSViewDistance: GameLogic
+.maximumLevelViewDistance through GameLogic slot 0xb8, `0x004cc870`,
+rounded and clamped to 20..3000; 500 when unset). The manager's scales
+are 4 / 5 / 100 from its constructor (`0x00702de0`); RendDX9's frame
+(`0x1002cef0`) sets them around the scene's draw (manager slots 0xb8 /
+0xc0 / 0xc8 on `DAT_10221a50`) from the renderer's `+0x6b0` / `+0x6a8` /
+`+0x6ac` and restores them after — the geometry quality's (`0x10010040`:
+low 40 / 6 / 6, medium 60 / 7 / 8, high 80 / 8 / 10; the renderer's
+constructor `0x1002aba0` 100 / 4 / 5; `+0x6b0` is also
+renderer.minCullDistance, slots 0x84 / 0x88); `0x10028bb0` sets only
+`+0x148` for its pass, `0x100ed480` (the top-world screen) 2000. The
+0.25 and 0.5 (`*0x00a07f04` / `*0x00a07f08`) make a second record for
+the children: p0 / 4 and 0.5 × `+0x140`² × p2, taken by a child whose own
+R is under 0.8 (`*0x00a07f00`) × its root's. Rewritten in
+`render/DistanceFade.h` and `LevelRenderer::prepareInstances`: each
+object's instance in view steps its fade (`Instance::distanceFade`) with
+R = its mesh's sphere × cullRadiusScale (the exe's slot 0x8c is the
+collision mesh's radius, else the render object's, and the children's),
+the actor scale for Soldier and PlayerControlObject templates, the
+geometry quality's scales, the view's zoom, GSViewDistance from
+GameLogic.maximumLevelViewDistance × the view distance scale; faded out
+it isn't drawn, part-faded it is drawn blended. Not done: the
+children's second record (the rewrite draws a vehicle's parts with its
+root's instance) and the walk's filter flag 0x1000000 that skips the fade
+(which views set it isn't traced; the commander's overhead view, 260 m
+up, draws unfaded). Left:
 `allowEmoteAnimation` (`+0x31e`, the soldier's emote `0x005edbf0`: the
 rewrite has no emotes).
 
@@ -6707,9 +6743,28 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   (the threshold not 0, the value not negative) the timer runs; past the
   period ((0.7 − 0.15) / 0.3 × value + 0.15) the flag toggles, or goes off
   at or below the floor, and the timer restarts; above it a lit flag goes
-  out once the timer passes the period. The weapon HUD makes six more the
-  same way (`0x007bf20a`..`0x007bf393`: the ammunition, clips, heat...;
-  not rewritten, their blinks stay 0).
+  out once the timer passes the period. The weapon HUD's constructor
+  (`0x007bee10`, at `0x007bf20a`..`0x007bf393`) makes eight more, ticked
+  by its frame (`0x007c40c0` → `0x00778420`) after the update:
+  PrimaryAmmoBlink (`+0x15e`) on PrimaryAmmo (`+0xb4`) and
+  SecondaryAmmoBlink (`+0x16a`) on SecondaryAmmo (`+0xc4`), 0.3 / 0 /
+  0.7 / 0.15; PrimaryClipBlink (`+0x165`) on PrimaryClips (`+0x178`, the
+  spare magazines) 1.5 / 0 / 0.3 / 0.15 and SecondaryClipBlink (`+0x172`)
+  on SecondaryClips (`+0x1a4`) 0.7 / 0 / 0.3 / 0.15; FlareBlink (`+0x1de`)
+  on FlaresReloadTime (`+0x1e0`) 0.98 / 0 / 0.7 / 0.15; TVBlink
+  (`+0x15c`) with no value, toggling every 0.7 s; and the heat's two of
+  the twin class (`0x007782f0`, vtable `0x009b2654`, tick `0x00778330`,
+  which watches the value above the threshold and holds the flag off at
+  or above the floor): PrimaryHeatBlink (`+0x15f`) on PrimaryHeatValue
+  (`+0xf8`) and SecondaryHeatBlink (`+0x16b`) on SecondaryHeatValue
+  (`+0xf4`), 0.7 / 1 / 0.3 / 0.15. The update (`0x007c1f10`) clears the
+  ammunition's flag and sets its value to 1 without a magazine, clears
+  the clips' and sets −1 without clips, leaves the ammunition's value
+  as it was during a reload; the hidden HUD (`0x007c40c0`'s other
+  branch) zeroes the ammunition values and the ammunition and clip
+  flags and doesn't tick. Rewritten in `menu::WeaponHud` (`HudBlink`'s
+  `Watch::above` and `tickFree`); FlareBlink isn't (the rewrite has no
+  FlaresReloadTime: `0x007be490`'s flare launcher).
 - **The other seats' turrets** (`0x007a2b50` → `0x007a1e00` →
   `0x007a07c0`; GunnerAngle `+0x20c`, SecondaryGunnerAngle `+0xb0`, used
   by the tank, APC and mech drivers' HUDs and the gunships'): with the
@@ -6734,7 +6789,13 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   (`0x007a3920`, from the enter event at `0x007a3cb0` for the local
   player) with it opens the item list for 2 s (`+0x20` = 2.0, menu state
   0xb) before `0x0079bdf0` packs it: the artillery guns as_ag / us_ag
-  (main.cpp). The vehicle HUD's `+0xb4` that also stops it isn't traced.
+  (main.cpp). The vehicle HUD's `+0xb4` that also stops it is written by
+  the seat dots (`0x007a28e0`, called just before): for each occupied
+  seat, 1 when its occupant's controlled object (player slot 0x4c) is a
+  Parachute (class 0xc5a8) whose template's isPod (`+0x4cc`) is 0, else
+  0, so the last occupied seat decides; `0x007a3180` clears it off a
+  vehicle. No shipped parachute sets displaySelectionOnEnter
+  (`menu::displaySelectionOnEnter`).
 - **standardHelpEnabled** (block `+0xbb`, 1 by default): the help
   manager's exit message 0x48 (`0x00648948`: in a vehicle that isn't a
   LadderContainer) and enter message 0x47 (`0x00648872`: the controlled
@@ -6796,6 +6857,28 @@ answers the sight lines and the seats):
   with "[d m]" under it, alpha `1 − d / max`.
 - The distance shown changes only by more than 0 / 2 / 5 / 9 m below 25 /
   250 / 400 m / beyond (`0x100f0be0`).
+- **The object tag's refresh** (`0x100f40d0`, each push of an object's
+  runtime Nametag, vtable `0x00989450`, to the manager's slot 0x30). The
+  tag info hands a block (slot 0x38, `0x00658590`: the template
+  component's `+0x10`..: the offset, type, colour, healthActivationLevel
+  `+0x14`, useBoundingRadius `+0x18`, maxDistance / maxEnemyDistance,
+  the flags `+0x24`) and its icons (slot 0x44(i), `0x006585a0`:
+  3dMapIcon, component `+0x38`, for 0; secondary3dMapIcon, `+0x3c`, the
+  component's getter slot 0x38, for 1; each plus the object's own offset
+  `+0x10` / `+0x14`, set by slot 0x40). With healthActivationLevel under
+  100 the first armour up from the object whose percent is at or below
+  it sets flag 0x1000000 and the tag takes icon 1 (the Titans: 49 / 50 to
+  53 / 54 at 60 %). With useBoundingRadius (block `+0x18`, the
+  component's `+0x28`, getter slot 0x100; 1 from the constructor
+  `0x0063b760`) the tag's height (`+0x30`) is raised by the object's
+  radius (object slot 0x8c). 35 of the shipped show3dIcon templates set
+  it 0; the sentry gun, the missile silos (offset 0/−3/0), the spawn
+  beacon, the supply hubs and the MiniMed keep it. Rewritten:
+  `nametags::objectTagIcon` / `objectTagPoint` (the icon chosen at each
+  drop of the armour, the radius `GameWorld::objectRadius`, the
+  collision radius slot 0x90 gives, which is slot 0x8c's for an object
+  with a collision mesh and bundled geometry). The blink a change of icon
+  starts (`+0x68` = 4, `+0x6c`) isn't.
 
 ColorArray for player and object tags (types 0 and 3) is the table at
 `0x102112f8` the NametagManager's constructor fills (`0x100f24c0`):
