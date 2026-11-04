@@ -1514,3 +1514,131 @@ TEST(Net_ContentFingerprintsMatchShippedMd5)
 		CHECK(checker.matches(ordinal, net::computeContentDigests(gameDir, "mods/bf2142", "levels/Suez_Canal/", ordinal)));
 	}
 }
+
+// The strict diagnostics on a loopback session (NetDiagnostics.h): every
+// datagram both ways logged and walked, every ghost state checked against
+// its length with the client's layouts; our own host must give no problem.
+// The session's capture then plays back offline into a fresh client, which
+// ends with the same world and, again, no problem.
+TEST(NetHost_StrictDiagnosticsAndCaptureReplay)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	host::HostSetup setup;
+	setup.level = "Range";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, range.logic, range.templates, setup);
+	CHECK(hosted.start());
+	const int bot = round.addPlayer("Bot1", 2, true);
+	CHECK(round.spawnSoldier(bot));
+
+	const auto layouts = [&range](uint32_t id) {
+		const dice::hfe::world::ObjectTemplate* t = range.templates.findById(id);
+		return t ? net::ghostTemplateFrom(range.templates, *t) : net::GhostTemplateNode {};
+	};
+	const auto names = [&range](uint32_t id) {
+		const dice::hfe::world::ObjectTemplate* t = range.templates.findById(id);
+		return t ? t->name() : std::string();
+	};
+	const std::filesystem::path dir = std::filesystem::temp_directory_path() / ("bf2142-netcap-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+	std::filesystem::create_directories(dir);
+	const std::string capture = (dir / "session.bf2142cap").string();
+
+	size_t received = 0;
+	{
+		net::NetDiagnostics diagnostics;
+		CHECK(diagnostics.openLog((dir / "session.log").string()));
+		diagnostics.captureTo(capture);
+		net::GameClient client;
+		client.setDiagnostics(&diagnostics);
+		client.world().setGhostTemplates(layouts);
+		client.world().setTemplateResolver(names);
+		net::GameClientOptions options;
+		options.playerName = "Joiner";
+		CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+		int frame = 0;
+		const auto step = [&] {
+			++frame;
+			dice::hfe::game::SoldierInput walk;
+			walk.throttle = 1;
+			walk.turn = (frame / 30) % 2 ? 3.0f : 0.0f;
+			client.setInput(net::playerInputFrom(walk));
+			client.update();
+			hosted.tick();
+			round.tick(1.0f / 30);
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		};
+		CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 6000));
+		client.selectSpawnGroup(-1);
+		CHECK(pumpUntil(step, [&] { return client.world().controlStates() > 20; }, 6000));
+		client.say("strict");
+		for (int i = 0; i < 30; ++i) {
+			step();
+		}
+		received = client.world().controlStates();
+		for (const std::string& p : diagnostics.problemList()) {
+			std::printf("  %s\n", p.c_str());
+		}
+		std::printf("  %zu datagrams, %zu problems; %zu control states\n", diagnostics.datagrams(), diagnostics.problems(),
+			received);
+		CHECK(diagnostics.datagrams() > 40 && diagnostics.problems() == 0);
+		client.disconnect();
+		CHECK(diagnostics.saveCapture());
+	}
+	std::vector<net::CaptureRecord> records;
+	CHECK(net::readCapture(capture, records) && records.size() > 40);
+	CHECK(std::count_if(records.begin(), records.end(), [](const net::CaptureRecord& r) { return r.outgoing; }) > 10);
+
+	// The capture into a fresh client, offline (nothing reaches the host).
+	net::NetDiagnostics replayed;
+	net::GameClient again;
+	again.setDiagnostics(&replayed);
+	again.world().setGhostTemplates(layouts);
+	again.world().setTemplateResolver(names);
+	again.playCapture(records, false);
+	size_t updates = 0;
+	while (again.update() && ++updates < 100000) {
+	}
+	CHECK(replayed.problems() == 0 && replayed.datagrams() > 40);
+	CHECK(again.world().controlStates() == received);
+	CHECK(again.world().localPlayer() >= 0 && again.world().roundStarted());
+	if (!std::getenv("BF2142_KEEP_NETCAP")) {
+		std::filesystem::remove_all(dir);
+	}
+}
+
+// LoadComplete after the level has loaded (0x004b5eb0 case 2), and the
+// loading keep-alive (the exe's NetClientThread): while the game "loads"
+// without calling update(), pings are answered and the rest waits; then
+// LoadComplete goes and the join goes on.
+TEST(NetHost_LoadCompleteAfterLoadAndKeepAlive)
+{
+	HostRange range;
+	host::HostSetup setup;
+	setup.level = "Range";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(*range.round, range.logic, range.templates, setup);
+	CHECK(hosted.start());
+	net::GameClient client;
+	client.answerLoadAfterLevel = true;
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), {}));
+	const auto host = [&] {
+		hosted.tick();
+		range.round->tick(1.0f / 30);
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	};
+	CHECK(pumpUntil([&] { client.update(); host(); }, [&] { return client.world().hasLevel(); }));
+	client.loadingLevel();
+	for (int i = 0; i < 100; ++i) { // a second of "loading"
+		host();
+	}
+	CHECK(hosted.clientCount() == 1 && client.world().localPlayer() < 0);
+	client.levelLoaded();
+	CHECK(pumpUntil([&] { client.update(); host(); },
+		[&] { return client.world().localPlayer() >= 0 && client.world().roundStarted(); }, 6000));
+	CHECK(client.state() == net::GameClient::State::Connected);
+}

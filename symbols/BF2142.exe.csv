@@ -31,3 +31,22 @@ address,kind,name,comment
 # --- Bug fixes applied by OpenSpy (must be carried into the recompiled code) ---
 0x00833F7F,comment,OPENSPY_FIX_ERROR_NEG206,OpenSpy patches 3 bytes here to EB 2E 90 (jmp) to bypass login error -206
 0x0069F7CD,comment,OPENSPY_FIX_DELETE_SOLDIER_HANG,OpenSpy NOPs this 6-byte jnz: FindNextFile loop hangs when deleting a soldier profile
+0x00579410,function,guess:nameChecksum,Adler-32 (start 0) of a name; whole 16-byte runs lower-cased (src/Net/PlayerAuth)
+0x005795f0,function,guess:setNameChecksum,stores nameChecksum(name) at 0x00a6801c (LoginSubAccount reply)
+0x005850a0,function,guess:PlayerInfoBlock::write,data block 1: name, checksum, pid, clan tag, auth, voice bit
+0x00584ff0,function,guess:PlayerInfoBlock::read,server side of data block 1
+0x00584c00,function,guess:GameSpyAuth::validatePlayer,ValidatePlayer.aspx?auth=&tid=0&SoldierNick=&pid=
+0x00584560,function,guess:GameSpyAuth::onValidatePlayer,result Ok / InvalidAuthProfileID / InvalidReportedNick / InvalidReportedProfileID
+0x004aef10,function,guess:GameServer::onClientDataBlock,type 1 player info -> 0x004ae6a0, type 6
+0x00802580,function,guess:fesl::GameSpyPreAuth::build,acct GameSpyPreAuth request
+0x00802450,function,guess:fesl::LoginSubAccount::build,acct LoginSubAccount name=
+0x0049f700,function,guess:fesl::GameSpyPreAuthReply,reads ticket and challenge
+0x0049f9e0,function,guess:EAOnlineManager::setAuth,stores the GP login ticket with + / = made [ ] _
+0x0048b880,function,guess:GpLogin::update,gpInitialize(10709, 20) then gpConnectPreAuthenticated
+0x0048b350,function,guess:GpLogin::onConnect,gpGetLoginTicket -> EAOnlineManager::setAuth
+0x00717460,function,gpConnectPreAuthenticatedA,GameSpy GP SDK
+0x00717fb0,function,gpGetLoginTicket,GameSpy GP SDK (+0x488, 25 bytes)
+0x00729660,function,gpiSendLogin,GameSpy GP SDK login message and response hash
+0x00729c40,function,gpiProcessConnect,GameSpy GP SDK lc 1 / lc 2 / proof check
+0x00642f90,function,guess:CdKeyAuth::authenticate,gcd_authenticate_user(0x52c) then continues at once
+0x00576d20,function,guess:readCdKey,registry HKLM ...\Battlefield 2142\ergc

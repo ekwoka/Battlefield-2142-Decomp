@@ -24,6 +24,7 @@
 #include "EventChannel.h"
 #include "GameConnection.h"
 #include "GameProtocol.h"
+#include "PlayerAuth.h"
 #include "Socket.h"
 
 #include <chrono>
@@ -53,6 +54,8 @@ public:
 	void stop();
 	bool running() const { return m_running; }
 	uint16_t port() const { return m_socket.port(); }
+	// The CD-key challenge sent in event 1 (its first nine letters).
+	std::string challenge() const { return m_options.challenge.substr(0, 9); }
 
 	// Receives and handles everything that has arrived (never blocks).
 	void poll();
@@ -82,6 +85,10 @@ public:
 		int packetsPerSecond = 20;
 		int packetBytes = 0x578;
 		std::string cdKeyHash;         // the response's first 32 characters: md5 of the key
+		std::string cdKeyResponse;     // the whole response (for GameSpy's CD-key service)
+		// The player info (data block 1, PlayerAuth.h), once it came.
+		bool hasPlayerInfo = false;
+		PlayerInfoBlock playerInfo;
 		int32_t lastMove = -1;         // the last move index taken
 		uint32_t lagMs = 0;            // the input block's 9-bit view delay
 		uint32_t roundTrip = 0;        // ms, from our pings
@@ -92,6 +99,8 @@ public:
 
 	std::function<void(int client)> onJoined;
 	std::function<void(int client)> onLeft;
+	// A joined client's player info (data block 1) arrived.
+	std::function<void(int client)> onPlayerInfo;
 	std::function<void(int client, const GameEvent& event)> onEvent;
 	std::function<void(int client, const PlayerMove& move)> onMove;
 	// A data packet we sent (its 6-bit sequence) was delivered or lost, as
@@ -111,6 +120,10 @@ private:
 		NotifyState notify;
 		EventChannel events;
 		std::set<uint32_t> unsettled; // data sequences sent, not yet reported
+		// A data block coming in (the client's player info).
+		bool inData = false;
+		uint32_t dataType = 0, dataSize = 0;
+		std::string dataBuffer;
 		std::chrono::steady_clock::time_point lastHeard, lastPing;
 	};
 	void handle(const std::vector<uint8_t>& datagram, const UdpServerSocket::Address& from);

@@ -1,5 +1,7 @@
 #include "Networkables.h"
 
+#include <cstring>
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -55,7 +57,7 @@ float readSnorm(BitReader& in, unsigned bits, float range)
 void writeSnorm(BitWriter& out, float value, unsigned bits, float range)
 {
 	const float max = static_cast<float>((1u << bits) - 1);
-	const float u = std::clamp((value / range + 1.0f) * 0.5f, 0.0f, 1.0f);
+	const float u = range == 0 ? 0.5f : std::clamp((value / range + 1.0f) * 0.5f, 0.0f, 1.0f);
 	out.write(static_cast<uint32_t>(std::lround(u * max)), bits);
 }
 
@@ -76,6 +78,24 @@ void writeSnormTrunc(BitWriter& out, float value, unsigned bits, float range)
 	const float u = range == 0 ? 0.5f : (value / range + 1.0f) * 0.5f;
 	writeUnit(out, u, bits);
 }
+
+// The Soldier writer's (0x005fb8c0): trunc(clamp((v x k + 1) / 2) x max)
+// with k the float reciprocal of the range (1/360 = 0x3b360b61...).
+void writeSoldierSnorm(BitWriter& out, float value, unsigned bits, float range)
+{
+	const float k = 1.0f / range;
+	const float max = static_cast<float>((1u << bits) - 1);
+	out.write(static_cast<uint32_t>(std::clamp((value * k + 1.0f) * 0.5f, 0.0f, 1.0f) * max), bits);
+}
+
+// The Soldier's mode-2 velocity step: both sides push 0x3c23d70b
+// (0.010000001, 0x005fd00f / 0x005fbab3), one ulp over 0.01f.
+const float kSoldierVelocityStep = [] {
+	const uint32_t bits = 0x3c23d70bu;
+	float f;
+	std::memcpy(&f, &bits, 4);
+	return f;
+}();
 
 // A value in min..max as 0x00508370 reads it (bits for the count).
 uint32_t readRanged(BitReader& in, uint32_t count) { return in.read(bitsFor(count)); }
@@ -141,8 +161,11 @@ void writeDelta(BitWriter& out, DeltaTable table, float scale, const Vec3f& valu
 	static const unsigned kNarrow[4] = {32, 12, 10, 8};
 	const unsigned* bits = table == DeltaTable::Wide ? kWide : kNarrow;
 	uint32_t mode = 0;
+	// The exe multiplies by the float 1 / scale and truncates toward zero
+	// (fmul, then fistp with the control word's chop bits).
+	const float inv = 1.0f / scale;
 	if (reference) {
-		const float steps = length(value, *reference) / scale;
+		const float steps = length(value, *reference) * inv;
 		for (uint32_t m = 3; m >= 1; --m) {
 			if (steps < static_cast<float>(1u << (bits[m] - 1))) {
 				mode = m;
@@ -157,9 +180,9 @@ void writeDelta(BitWriter& out, DeltaTable table, float scale, const Vec3f& valu
 		out.writeFloat(value.z);
 		return;
 	}
-	out.writeSigned(static_cast<int32_t>(std::lround((value.x - reference->x) / scale)), bits[mode]);
-	out.writeSigned(static_cast<int32_t>(std::lround((value.y - reference->y) / scale)), bits[mode]);
-	out.writeSigned(static_cast<int32_t>(std::lround((value.z - reference->z) / scale)), bits[mode]);
+	out.writeSigned(static_cast<int32_t>((value.x - reference->x) * inv), bits[mode]);
+	out.writeSigned(static_cast<int32_t>((value.y - reference->y) * inv), bits[mode]);
+	out.writeSigned(static_cast<int32_t>((value.z - reference->z) * inv), bits[mode]);
 }
 
 Vec3f readDelta3(BitReader& in, float scale, const Vec3f& reference)
@@ -190,7 +213,8 @@ void writeDelta3(BitWriter& out, float scale, const Vec3f& value, const Vec3f& r
 		out.write(7, 3);
 		return;
 	}
-	const float steps = distance / scale;
+	const float inv = 1.0f / scale; // 0x006879d0: times the inverse, truncated
+	const float steps = distance * inv;
 	uint32_t mode = 0;
 	for (uint32_t m = 6; m >= 1; --m) {
 		if (steps < static_cast<float>(1u << (kBits[m] - 1))) {
@@ -205,9 +229,9 @@ void writeDelta3(BitWriter& out, float scale, const Vec3f& value, const Vec3f& r
 		out.writeFloat(value.z);
 		return;
 	}
-	out.writeSigned(static_cast<int32_t>(std::lround((value.x - reference.x) / scale)), kBits[mode]);
-	out.writeSigned(static_cast<int32_t>(std::lround((value.y - reference.y) / scale)), kBits[mode]);
-	out.writeSigned(static_cast<int32_t>(std::lround((value.z - reference.z) / scale)), kBits[mode]);
+	out.writeSigned(static_cast<int32_t>((value.x - reference.x) * inv), kBits[mode]);
+	out.writeSigned(static_cast<int32_t>((value.y - reference.y) * inv), kBits[mode]);
+	out.writeSigned(static_cast<int32_t>((value.z - reference.z) * inv), kBits[mode]);
 }
 
 Quat readQuaternion(BitReader& in, unsigned bits)
@@ -331,7 +355,8 @@ NetworkableKind networkableKindForTemplateType(const std::string& templateType, 
 	}
 	// Slot 94 0x0058cc40 makes none, whatever the networkableInfo says.
 	static const char* const kNone[] = {"genericfirearm", "ladder", "laddercontainer", "spawnpoint", "particle",
-		"spriteparticle", "forceobject", "lightsource", "sound", "envmap"};
+		"spriteparticle", "forceobject", "lightsource", "sound", "envmap",
+		"destroyablewindow"}; // 0x005bed50's vtable 0x0096b538: slot 94 is 0x0058cc40
 	for (const char* none : kNone) {
 		if (t == none) {
 			return NetworkableKind::Unknown;
@@ -342,7 +367,7 @@ NetworkableKind networkableKindForTemplateType(const std::string& templateType, 
 	// from the template's create slot to the object's slot 94: SimpleObject,
 	// Bundle, DynamicBundle, AnimatedBundle, ItemContainer, KitPart,
 	// Obstacle, UAVVehicle, SupplyObject, SupplyDepot, AreaObject,
-	// AmbientEffectArea, AntennaObject, DestroyableWindow, Emitter,
+	// AmbientEffectArea, AntennaObject, Emitter,
 	// EntryPoint, LookAtObject, ObjectSpawner, (Turnable)RemoteControlledObject,
 	// Rotor, Trigger, GroundEffectBundle, and the effect bundles (Effect-,
 	// AirDraft-, WheelEffectBundle), which a dedicated server doesn't make
@@ -531,7 +556,7 @@ bool readSoldier(BitReader& in, const NetworkableHints& h, const Vec3f& referenc
 		}
 	} else if (m & 0x100) {
 		s.hasVelocity = true;
-		s.velocity = readDelta(in, DeltaTable::Wide, 0.01f, kZero);
+		s.velocity = readDelta(in, DeltaTable::Wide, kSoldierVelocityStep, kZero);
 	}
 	if (m & 0x1e) {
 		s.hasAngles = true;
@@ -644,10 +669,7 @@ bool readProjectile(BitReader& in, const NetworkableHints& h, const Vec3f& refer
 			}
 		}
 	}
-	if (s.mask & 0x10) {
-		if (!h.hasArmor) {
-			return !in.bad();
-		}
+	if ((s.mask & 0x10) && h.hasArmor) { // 0x00606f20: no armour, no hit points (the 0x20 bit still follows)
 		s.hasHealth = readHitPoints(in, h, s.health);
 	}
 	if (s.mask & 0x20) {
@@ -943,6 +965,9 @@ bool readSeat(BitReader& in, const NetworkableHints& h, const Vec3f& reference, 
 			auto occupant = std::make_shared<NetworkableState>();
 			NetworkableHints soldier;
 			soldier.kind = NetworkableKind::Soldier;
+			// The occupant's own inventorySize sets its item field's width
+			// (0x005fcdb0 mask 0x2000): the seat's hints carry the level's.
+			soldier.soldierItemSlots = h.soldierItemSlots;
 			// The seat hands its mode on (0x00605b00: the soldier's slot 0x30
 			// with the same last argument).
 			if (readSoldier(in, soldier, reference, *occupant, mode) && in.position() <= start + s.occupantBits) {
@@ -1227,7 +1252,10 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 	case NetworkableKind::Soldier: { // 0x005fb8c0
 		out.write(m, 21);
 		if (m & 0x40) {
-			out.write(static_cast<uint32_t>(std::lround(std::clamp(s.health, 0.0f, 1.0f) * 255.0f)), 8);
+			// 0x005fc1a0: trunc(ceil(hp) / maxHitPoints x 255).
+			const float hp = std::clamp(s.health, 0.0f, 1.0f);
+			const float whole = h.maxHitPoints > 0 ? std::ceil(hp * h.maxHitPoints) / h.maxHitPoints : hp;
+			out.write(static_cast<uint32_t>(std::min(whole, 1.0f) * 255.0f), 8);
 			out.write(s.soldierBits & 1, 1);
 		}
 		if (m & 0x80) {
@@ -1286,19 +1314,19 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 			}
 		} else {
 			if (m & 0x100) {
-				writeDelta(out, DeltaTable::Wide, 0.01f, s.velocity, &kZero);
+				writeDelta(out, DeltaTable::Wide, kSoldierVelocityStep, s.velocity, &kZero);
 			}
 			if (m & 2) {
-				writeSnorm(out, s.yaw, 12, 360.0f);
+				writeSoldierSnorm(out, s.yaw, 12, 360.0f);
 			}
 			if (m & 4) {
-				writeSnorm(out, s.pitch, 12, 90.0f);
+				writeSoldierSnorm(out, s.pitch, 12, 90.0f);
 			}
 			if (m & 8) {
-				writeSnorm(out, s.roll, 12, 180.0f);
+				writeSoldierSnorm(out, s.roll, 12, 180.0f);
 			}
 			if (m & 0x10) {
-				writeSnorm(out, s.aimPitch, 12, 90.0f);
+				writeSoldierSnorm(out, s.aimPitch, 12, 90.0f);
 			}
 		}
 		writeRanged(out, static_cast<uint32_t>(std::clamp(s.weaponZoom, 0, 3)), 4);
@@ -1307,21 +1335,21 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 			out.write(s.soldierBits >> (i + 1) & 1, 1);
 		}
 		if (m & 0x800) {
-			writeSnorm(out, s.soldierLean[0], full ? 16 : 10, 50.0f);
+			writeSoldierSnorm(out, s.soldierLean[0], full ? 16 : 10, 50.0f);
 		}
 		if (m & 0x1000) {
-			writeSnorm(out, s.soldierLean[1], full ? 16 : 10, 50.0f);
+			writeSoldierSnorm(out, s.soldierLean[1], full ? 16 : 10, 50.0f);
 		}
 		out.write(s.responseFlag ? 1 : 0, 1);
 		if (m & 0x8000) {
-			// ROUND(clamp(stamina) x 127) and the sprinting bit (0x005fb300) in
+			// trunc(clamp(stamina) x 127) and the sprinting bit (0x005fb300) in
 			// mode 3; 5 bits otherwise.
 			const float stamina = std::clamp(s.stamina, 0.0f, 1.0f);
 			if (full) {
-				out.write(static_cast<uint32_t>(std::lround(stamina * 127.0f)), 7);
+				out.write(static_cast<uint32_t>(stamina * 127.0f), 7);
 				out.write(s.sprinting ? 1 : 0, 1);
 			} else {
-				out.write(static_cast<uint32_t>(std::lround(stamina * 31.0f)), 5);
+				out.write(static_cast<uint32_t>(stamina * 31.0f), 5);
 			}
 		}
 		if (m & 0x2000) {
@@ -1332,7 +1360,7 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 			out.write(static_cast<uint32_t>(s.soldierValues[2]) & 3, 2);
 		}
 		if (full && (m & 0x40000)) {
-			writeSnorm(out, s.soldierValue40000, 7, 1.0f);
+			writeSoldierSnorm(out, s.soldierValue40000, 7, 1.0f);
 		}
 		if (m & 0x20000) {
 			writeRanged(out, static_cast<uint32_t>(std::clamp(s.ladder, 0, 255)), 256);
@@ -1576,7 +1604,9 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 			writeSnorm(out, s.engineRotation[0], 16, rx);
 		}
 		if (m & 0x10) {
-			writeSnorm(out, s.engineTarget, 16, rz); // the original scales by 1.25 |maxSpeed.z| here
+			// 0x00608df0 scales by 1.25 |maxSpeed.z| (the reader, 0x00609340,
+			// by the rotation range: the exe's own asymmetry).
+			writeSnorm(out, s.engineTarget, 16, 1.25f * std::fabs(h.maxSpeed.z));
 		}
 		for (int i = 0; i < 3; ++i) {
 			if (m & (0x20u << i)) {
@@ -1682,6 +1712,7 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 			BitWriter soldier;
 			NetworkableHints sh;
 			sh.kind = NetworkableKind::Soldier;
+			sh.soldierItemSlots = h.soldierItemSlots;
 			encodeNetworkable(soldier, sh, reference, *s.occupant, mode);
 			out.write(static_cast<uint32_t>(soldier.bits()), 11);
 			out.append(soldier);
@@ -1830,7 +1861,7 @@ constexpr TeamField kTeamFields[] = {
 	{0x1, 1}, {0x2, 1}, {0x1000000, 2}, {0x4000000, 1}, {0x10000000, 1}, {0x4, 1}, {0x8, 1}, {0x10, 2}, {0x20, 1},
 	{0x40, 1}, {0x80, 1}, {0x100, 1}, {0x200, 1}, {0x400, 3}, {0x800, 1}, {0x1000, 1}, {0x2000, 1}, {0x2000000, 2},
 	{0x8000000, 1}, {0x20000000, 1}, {0x4000, 1}, {0x8000, 1}, {0x10000, 2}, {0x20000, 1}, {0x40000, 1}, {0x80000, 1},
-	{0x100000, 1}, {0x200000, 1}, {0x400000, 3}, {0x800000, 1}, {0x40000000, 1}, {0x80000000, 1}};
+	{0x100000, 1}, {0x200000, 1}, {0x400000, 3}, {0x800000, 1}, {0x40000000, 1}, {0x80000000, 3}};
 
 int bitIndex(uint32_t bit)
 {
@@ -1868,8 +1899,14 @@ bool decodeTeamState(BitReader& in, TeamNetState& out)
 			continue;
 		}
 		auto& v = out.values[static_cast<size_t>(bitIndex(f.bit))];
-		if (f.bit == 0x40000000 || f.bit == 0x80000000) {
+		if (f.bit == 0x40000000) {
 			v[0] = in.readSigned(3);
+		} else if (f.bit == 0x80000000) {
+			// 0x00560ff0: sign + 2 (+1, a team byte), then sign + 17 for
+			// +0x38 and +0x88.
+			v[0] = in.readSigned(3);
+			v[1] = in.readSigned(18);
+			v[2] = in.readSigned(18);
 		} else if (f.values == 3) {
 			v[0] = in.readSigned(18);
 			v[1] = static_cast<int32_t>(in.read(1));
@@ -1892,8 +1929,12 @@ void encodeTeamState(BitWriter& out, const TeamNetState& state)
 			continue;
 		}
 		const auto& v = state.values[static_cast<size_t>(bitIndex(f.bit))];
-		if (f.bit == 0x40000000 || f.bit == 0x80000000) {
+		if (f.bit == 0x40000000) {
 			out.writeSigned(v[0], 3);
+		} else if (f.bit == 0x80000000) { // 0x0055fe30
+			out.writeSigned(v[0], 3);
+			out.writeSigned(v[1], 18);
+			out.writeSigned(v[2], 18);
 		} else if (f.values == 3) {
 			out.writeSigned(v[0], 18);
 			out.write(v[1] ? 1 : 0, 1);

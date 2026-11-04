@@ -12,7 +12,9 @@ namespace dice::hfe::net {
 
 namespace {
 
-constexpr size_t kMaxGroups = 12; // 0x0067c690 warns "has to many statemasks" above this
+// 0x0067c690 warns "has to many statemasks" above 12 groups but keeps them
+// all, and the readers take every group; so does ours.
+constexpr size_t kMaxGroups = 64;
 
 struct Flat {
 	const GhostTemplateNode* node;
@@ -47,6 +49,10 @@ void findControlObjects(const GhostTemplateNode& node, bool isRoot, std::vector<
 
 std::vector<GhostPartLayout> buildGhostLayout(const GhostTemplateNode& root)
 {
+	// 0x0067c690: a tree whose root has no networkable has no ghosts.
+	if (root.hints.kind == NetworkableKind::Unknown) {
+		return {};
+	}
 	std::vector<std::pair<const GhostTemplateNode*, bool>> roots;
 	findControlObjects(root, true, roots);
 	if (roots.empty()) {
@@ -92,7 +98,11 @@ std::vector<GhostPartLayout> buildGhostLayout(const GhostTemplateNode& root)
 			}
 			part.nodes.push_back(node);
 		}
-		parts.push_back(std::move(part));
+		// A ghost without a group (a PlayerControlObject without a
+		// networkable) never takes an id (0x0067c690).
+		if (!part.groups.empty()) {
+			parts.push_back(std::move(part));
+		}
 	}
 	return parts;
 }
@@ -162,6 +172,7 @@ bool decodeControlState(BitReader& in, const GhostPartLayout& ghost, const Ghost
 	out.ownBits = in.read(10);
 	const size_t start = in.position();
 	out.hasOwn = decodePlayerOwnState(in, own, out.own);
+	out.ownDecodedBits = in.position() - start;
 	if (in.bad() || in.position() > start + out.ownBits) {
 		out.hasOwn = false; // 0x00580cd0: more than the length is an error
 		return false;
@@ -339,13 +350,16 @@ GhostTemplateNode build(const world::ObjectTemplateManager& templates, const wor
 	node.name = t.name();
 	node.type = t.typeName();
 	const std::string type = lower(t.typeName());
-	node.controlObject = type == "playercontrolobject" || type == "parachute";
+	// Interface 0xc4c5 starts a ghost: the PCO and Parachute, and FreeCamera
+	// (QI 0x00616600), LadderContainer (0x0059d2d0) and Soldier (0x00585af0).
+	node.controlObject = type == "playercontrolobject" || type == "parachute" || type == "freecamera"
+		|| type == "laddercontainer" || type == "soldier";
 	node.projectile = type == "genericprojectile";
 	const std::string info = setting(t, "networkableInfo");
 	node.unique = contains(infos.unique, info);
 	node.forceNetworkableId = contains(infos.forceNetworkableId, info);
 	node.hints = networkableHintsFrom(templates, t, hasParent);
-	inVehicle = inVehicle || node.controlObject;
+	inVehicle = inVehicle || node.controlObject || type == "soldier";
 	node.hints.inVehicle = inVehicle;
 	node.hints.armoredChildrenKnown = true; // filled for the root below; others' lists are empty
 	node.fullChildSync = std::atoi(setting(t, "armor.fullChildSync").c_str()) != 0;
@@ -357,10 +371,13 @@ GhostTemplateNode build(const world::ObjectTemplateManager& templates, const wor
 		// template's grip (+0xfc), and 8 is EngineGrip.
 		node.hints.springExtra = (ancestorEngineType & 0x80) != 0 && (node.hints.responseGrip & 8) != 0;
 	}
-	// 0x00678070: RotationalBundles (and Cameras) with the same rotation
-	// settings share a group even when their templates differ.
-	if (type == "rotationalbundle" || type == "camera") {
-		node.groupKey = "rotationalbundle";
+	// 0x00678070: kinds of RotationalBundle (template slot 0x4c: also Wing,
+	// FloatingBundle and LandingGear) of the same type id (RotationalBundle
+	// and Camera counted as one) with the same rotation settings share a
+	// group even when their templates differ.
+	if (type == "rotationalbundle" || type == "camera" || type == "wing" || type == "floatingbundle"
+		|| type == "landinggear") {
+		node.groupKey = type == "camera" ? "rotationalbundle" : type;
 		for (const char* key : {"automaticReset", "inputToYaw", "inputToPitch", "inputToRoll", "maxRotation",
 				 "minRotation", "maxSpeed", "acceleration"}) {
 			node.groupKey += "|" + lower(setting(t, key));
@@ -373,6 +390,15 @@ GhostTemplateNode build(const world::ObjectTemplateManager& templates, const wor
 	for (const world::ChildTemplate& child : t.children()) {
 		const world::ObjectTemplate* c = templates.find(child.name);
 		if (!c || path.count(c)) {
+			continue;
+		}
+		// What a dedicated server never makes (its tree is the one the
+		// ghosts follow): the effect bundles (0x006198c0, 0x0061cb50 return
+		// 0 there, 0x0042b800), and what makes no object anywhere (Sound's
+		// create slot 0x007ff0f0; the particle systems).
+		const std::string childType = lower(c->typeName());
+		if (childType == "effectbundle" || childType == "wheeleffectbundle" || childType == "sound"
+			|| childType.find("particle") != std::string::npos) {
 			continue;
 		}
 		node.children.push_back(build(templates, *c, infos, true, inVehicle, ancestorEngineType, path));
@@ -392,8 +418,15 @@ NetworkableHints networkableHintsFrom(const world::ObjectTemplateManager& templa
 	if (setting(t, "networkableInfo").empty() && lower(t.typeName()) != "soldier") {
 		return h;
 	}
-	const bool collisionPhysics = std::atoi(setting(t, "hasCollisionPhysics").c_str()) != 0; // template +0xf1 bit 4
-	const bool mobilePhysics = std::atoi(setting(t, "hasMobilePhysics").c_str()) != 0;       // template +0xf1 bit 2
+	// The Engine template's constructor (0x006291d0) sets hasMobilePhysics,
+	// DynamicBundle's (0x0060fea0) both.
+	const std::string typeName = lower(t.typeName());
+	const auto flag = [&t](const char* key, bool fallback) {
+		const std::string v = setting(t, key);
+		return v.empty() ? fallback : std::atoi(v.c_str()) != 0;
+	};
+	const bool mobilePhysics = flag("hasMobilePhysics", typeName == "engine" || typeName == "dynamicbundle"); // +0xf1 bit 2
+	const bool collisionPhysics = flag("hasCollisionPhysics", typeName == "dynamicbundle"); // template +0xf1 bit 4
 	const int physicsType = physicsTypeOf(t);
 	h.kind = networkableKindForTemplateType(t.typeName(), hasParent, mobilePhysics);
 	// The physics node (object +0x50, made by template slot 29, 0x005f6ba0):
@@ -415,6 +448,8 @@ NetworkableHints networkableHintsFrom(const world::ObjectTemplateManager& templa
 	h.parachute = lower(t.typeName()) == "parachute";
 	if (const std::string slots = setting(t, "inventorySize"); !slots.empty()) {
 		h.soldierItemSlots = std::atoi(slots.c_str()); // Soldier mask 0x2000 (template +0x298)
+	} else if (h.kind == NetworkableKind::Soldier) {
+		h.soldierItemSlots = 6; // the Soldier template's constructor (0x005c0a50: +0x2c0 = 6)
 	}
 	h.maxHitPoints = std::atoi(setting(t, "armor.maxHitPoints").c_str());
 	h.wreckHitPoints = std::atoi(setting(t, "armor.wreckHitPoints").c_str());
@@ -422,12 +457,25 @@ NetworkableHints networkableHintsFrom(const world::ObjectTemplateManager& templa
 	h.minRotation = vec3Setting(t, "minRotation");
 	h.maxRotation = vec3Setting(t, "maxRotation");
 	h.engineType = engineTypeOf(setting(t, "engineType"));
-	h.engineGears = std::atoi(setting(t, "numberOfGears").c_str());
-	h.maxAngleOfAttack = static_cast<float>(std::atof(setting(t, "maxAngleOfAttack").c_str()));
-	h.minRpm = static_cast<float>(std::atof(setting(t, "newCar2.minRpm").c_str()));
-	h.maxRpm = static_cast<float>(std::atof(setting(t, "newCar2.maxRpm").c_str()));
-	if (const std::string w = setting(t, "numWindows"); !w.empty()) {
+	// The Engine template's defaults (0x006291d0): one gear (the setter
+	// 0x005402f1 clamps to 1..5), an angle of attack of 20, rpm 1000..4000.
+	const auto number = [&t](const char* key, float fallback) {
+		const std::string v = setting(t, key);
+		return v.empty() ? fallback : static_cast<float>(std::atof(v.c_str()));
+	};
+	h.engineGears = std::clamp(static_cast<int>(number("numberOfGears", 1)), 1, 5);
+	h.maxAngleOfAttack = number("maxAngleOfAttack", 20);
+	h.minRpm = number("newCar2.minRpm", 1000);
+	h.maxRpm = number("newCar2.maxRpm", 4000);
+	// ObjectTemplate.setNumWindows is a method, kept under its own name.
+	std::string windowCount = setting(t, "setNumWindows");
+	if (windowCount.empty()) {
+		windowCount = setting(t, "numWindows");
+	}
+	if (const std::string& w = windowCount; !w.empty()) {
 		h.windows = std::atoi(w.c_str());
+	} else if (h.kind == NetworkableKind::DestroyableWindowsBundle) {
+		h.windows = 0; // the template's default (0x005b13b0: +0x2a4 = 0)
 	}
 	h.overheadRange = static_cast<float>(std::atof(setting(t, "speed").c_str()));
 	if (h.kind == NetworkableKind::PlayerControlObject) {
@@ -456,6 +504,19 @@ NetworkableHints networkableHintsFrom(const world::ObjectTemplateManager& templa
 		};
 		count(t, 0);
 		h.seatCameras = cameras;
+		// An occupant's Soldier state takes its item field's width from the
+		// soldier's inventorySize (0x005fcdb0 mask 0x2000), whichever soldier
+		// sits there: the level's soldiers' (all the shipped ones set 10), or
+		// the Soldier template's 6.
+		h.soldierItemSlots = 6;
+		for (const auto& other : templates.templates()) {
+			if (other && lower(other->typeName()) == "soldier") {
+				if (const std::string slots = setting(*other, "inventorySize"); !slots.empty()) {
+					h.soldierItemSlots = std::atoi(slots.c_str());
+					break;
+				}
+			}
+		}
 	}
 	return h;
 }

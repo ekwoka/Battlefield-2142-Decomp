@@ -136,7 +136,9 @@ struct Vec3f {
 
 // Event types (the registry at 0x00a3ba44 is filled by 0x0042cxxx; the
 // names come from the table at 0x00420000.c:15306, "ChallengeEvent"...).
-// A type is written in 7 bits (enough for the 0x48 registered).
+// A type is written in bitsFor(the highest registered id) bits (the
+// registry's +0x20, kept by 0x005094f0): 0x47, so 7. 69 ids are registered;
+// 0, 0x12 and 0x35 are not.
 enum GameEventType : uint32_t {
 	kEvChallenge = 0x01,          // s->c CD-key challenge
 	kEvChallengeResponse = 0x02,  // c->s
@@ -501,6 +503,14 @@ bool parseDataBlock(const GameEvent& e, DataBlockChunk& out);   // kEvDataBlock
 bool parseStringBlock(const GameEvent& e, DataBlockChunk& out); // kEvStringBlock: start carries the size only
 GameEvent makeDataBlockStart(uint32_t type, uint32_t size);
 GameEvent makeDataBlockChunk(const std::string& bytes);
+// A whole block as the sender sends it (0x00643720): the start, then
+// chunks of 63 bytes. Never empty: an exe receiver (0x006434b0) completes a
+// block only at its size, so a size-0 one wedges every later block.
+std::vector<GameEvent> dataBlockEvents(uint32_t type, const std::string& data);
+
+// Data block 1, the player info a client sends after the first settings
+// block (the server makes the player only on it): PlayerAuth.h.
+
 
 // Chat travels as a StringBlock (0x00643370 queues it, 0x006431c0 sends it,
 // 0x006430c0 reassembles it): the text followed by a 12-byte header
@@ -560,7 +570,9 @@ struct KilledByInfo { // kEvKilledBy (0x0050d620 reads, 0x0050d750 writes; built
 bool parseKilledBy(const GameEvent& e, KilledByInfo& out);
 
 // kEvPythonCommand (0x00511a50, handled 0x00511ba0): a scripted message:
-// 32-bit type, 8 bits, up to 15 32-bit arguments. Type 100 with arguments
+// 32-bit type, 8 bits, a 4-bit count and that many 32-bit arguments. The
+// exe's event holds four (+0x18..+0x24, the count at +0x28): a fifth read
+// overwrites the count, so a server never sends more than four. Type 100 with arguments
 // (kind, victim, attacker, ...) are kills: kind 0 and 1 the attacker's
 // view, 2 the victim's.
 struct PythonCommandInfo {
@@ -630,6 +642,8 @@ struct ControlObjectRecord {
 	uint16_t vehicle = 0;
 	std::vector<uint8_t> rest; // the bits after these fields, packed from bit 0
 	size_t restBits = 0;
+	size_t bitOffset = 0; // where the 12-bit length starts in the payload (read only; diagnostics)
+	size_t length = 0;    // the 12-bit length as read
 };
 
 struct GhostUpdate {
@@ -638,6 +652,7 @@ struct GhostUpdate {
 	bool full = false;
 	std::vector<uint8_t> state; // kind 1: the state's bits, packed from bit 0
 	size_t stateBits = 0;
+	size_t bitOffset = 0; // where the update's kind starts in the payload (read only; diagnostics)
 };
 
 struct GhostBlock {

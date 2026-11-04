@@ -39,6 +39,16 @@ void startup() {}
 void closeSocket(intptr_t s) { ::close(static_cast<int>(s)); }
 #endif
 
+bool waitForMs(intptr_t s, bool write, int milliseconds)
+{
+	fd_set set;
+	FD_ZERO(&set);
+	FD_SET(static_cast<Native>(s), &set);
+	timeval timeout {milliseconds / 1000, (milliseconds % 1000) * 1000};
+	const int ready = select(static_cast<int>(s) + 1, write ? nullptr : &set, write ? &set : nullptr, nullptr, &timeout);
+	return ready > 0;
+}
+
 bool waitFor(intptr_t s, bool write, int seconds)
 {
 	fd_set set;
@@ -117,6 +127,92 @@ int TcpSocket::receive(std::vector<uint8_t>& out, int timeoutSeconds)
 	}
 	out.insert(out.end(), buffer, buffer + n);
 	return static_cast<int>(n);
+}
+
+int TcpSocket::receiveFor(std::vector<uint8_t>& out, int timeoutMilliseconds)
+{
+	if (m_socket == -1) {
+		return -1;
+	}
+	if (!waitForMs(m_socket, false, timeoutMilliseconds)) {
+		return 0;
+	}
+	char buffer[8192];
+	const auto n = ::recv(static_cast<Native>(m_socket), buffer, sizeof(buffer), 0);
+	if (n <= 0) {
+		return -1;
+	}
+	out.insert(out.end(), buffer, buffer + n);
+	return static_cast<int>(n);
+}
+
+void TcpSocket::adopt(intptr_t socket)
+{
+	close();
+	m_socket = socket;
+}
+
+uint16_t TcpSocket::localPort() const
+{
+	if (m_socket == -1) {
+		return 0;
+	}
+	sockaddr_in address {};
+	socklen_t length = sizeof(address);
+	if (getsockname(static_cast<Native>(m_socket), reinterpret_cast<sockaddr*>(&address), &length) != 0) {
+		return 0;
+	}
+	return ntohs(address.sin_port);
+}
+
+TcpListener::TcpListener() { startup(); }
+TcpListener::~TcpListener() { close(); }
+
+void TcpListener::close()
+{
+	if (m_socket != -1) {
+		closeSocket(m_socket);
+		m_socket = -1;
+	}
+	m_port = 0;
+}
+
+bool TcpListener::listen(uint16_t port, bool loopbackOnly)
+{
+	close();
+	const auto s = static_cast<intptr_t>(::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
+	if (s == -1) {
+		return false;
+	}
+	int on = 1;
+	setsockopt(static_cast<Native>(s), SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&on), sizeof(on));
+	sockaddr_in address {};
+	address.sin_family = AF_INET;
+	address.sin_port = htons(port);
+	address.sin_addr.s_addr = htonl(loopbackOnly ? INADDR_LOOPBACK : INADDR_ANY);
+	if (::bind(static_cast<Native>(s), reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0
+		|| ::listen(static_cast<Native>(s), 5) != 0) {
+		closeSocket(s);
+		return false;
+	}
+	socklen_t length = sizeof(address);
+	getsockname(static_cast<Native>(s), reinterpret_cast<sockaddr*>(&address), &length);
+	m_port = ntohs(address.sin_port);
+	m_socket = s;
+	return true;
+}
+
+bool TcpListener::accept(TcpSocket& out, int timeoutMilliseconds)
+{
+	if (m_socket == -1 || !waitForMs(m_socket, false, timeoutMilliseconds)) {
+		return false;
+	}
+	const auto s = static_cast<intptr_t>(::accept(static_cast<Native>(m_socket), nullptr, nullptr));
+	if (s == -1) {
+		return false;
+	}
+	out.adopt(s);
+	return true;
 }
 
 UdpSocket::UdpSocket() { startup(); }

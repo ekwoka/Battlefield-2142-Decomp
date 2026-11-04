@@ -278,7 +278,30 @@ void GameServer::deliver(Client& client, const GameEvent& event)
 	if (event.type == kEvChallengeResponse) {
 		// 0x00509eb0's fields: the response, a number, the build, the profile.
 		client.info.cdKeyHash = event.text(0).substr(0, 32);
+		client.info.cdKeyResponse = event.text(0).substr(0, std::min<size_t>(72, event.text(0).find('\0')));
 		client.info.profileId = event.u(2);
+		return;
+	}
+	if (DataBlockChunk chunk; event.type == kEvDataBlock && parseDataBlock(event, chunk)) {
+		// The client's transfers (0x004aef10): type 1 is its player info.
+		if (chunk.start) {
+			client.inData = true;
+			client.dataType = chunk.type;
+			client.dataSize = chunk.size;
+			client.dataBuffer.clear();
+		} else if (client.inData) {
+			client.dataBuffer += chunk.bytes;
+		}
+		if (client.inData && client.dataBuffer.size() >= client.dataSize) {
+			client.inData = false;
+			client.dataBuffer.resize(client.dataSize);
+			if (client.dataType == kPlayerInfoBlock && decodePlayerInfo(client.dataBuffer, client.info.playerInfo)) {
+				client.info.hasPlayerInfo = true;
+				if (onPlayerInfo) {
+					onPlayerInfo(client.info.id);
+				}
+			}
+		}
 		return;
 	}
 	if (event.type == kEvConnectionType) {

@@ -3,6 +3,11 @@ add_library(Net STATIC
 	ContentCheck.cpp
 	Demo.cpp
 	Fesl.cpp
+	GameSpyPresence.cpp
+	OnlineConfig.cpp
+	OnlineSession.cpp
+	OpenSpyEmulator.cpp
+	PlayerAuth.cpp
 	GameClient.cpp
 	GameConnection.cpp
 	EventChannel.cpp
@@ -16,6 +21,7 @@ add_library(Net STATIC
 	RemoteWorld.cpp
 	ServerSettings.cpp
 	Md5.cpp
+	NetDiagnostics.cpp
 	GameSpyCrypt.cpp
 	ServerBrowser.cpp
 	ServerQuery.cpp

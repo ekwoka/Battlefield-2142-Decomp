@@ -1,6 +1,7 @@
 #include "GameProtocol.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 
@@ -39,9 +40,13 @@ void PlayerMove::setTrigger(int input, bool on)
 
 void PlayerMove::setAxis(int input, float value)
 {
-	// 0x005837d0: value x 100 clamped to +-32768, rounded.
-	const float scaled = std::clamp(value * 100.0f, -32768.0f, 32767.0f);
-	axes[static_cast<size_t>(input)] = static_cast<int16_t>(std::lround(scaled));
+	// 0x005837d0: value x 100 clamped to +-32767 and truncated toward zero
+	// (_ftol2, 0x008c9694); -32768 can't travel as sign + 15 bits. The
+	// builder (0x00583b83) then multiplies the short's x 0.01 by 100 and
+	// truncates again, which gives the same value or one less in magnitude
+	// depending on the x87 precision mode; the single truncation is kept.
+	const float scaled = std::clamp(value * 100.0f, -32767.0f, 32767.0f);
+	axes[static_cast<size_t>(input)] = static_cast<int16_t>(scaled);
 }
 
 PlayerMove PlayerInput::toMove(int32_t index) const
@@ -91,18 +96,20 @@ void readMove(BitReader& in, PlayerMove& move)
 
 void writeInputBlock(BitWriter& out, const InputBlock& block)
 {
-	if (!block.present) {
+	// 0x00590740: a lone 0 without a player or without moves; at most the
+	// last three (0x00590450), the reader's array holding six.
+	if (!block.present || block.moves.empty()) {
 		out.write(0, 1);
 		return;
 	}
+	const size_t count = std::min<size_t>(block.moves.size(), 3);
+	const size_t first = block.moves.size() - count;
 	out.write(1, 1);
-	out.write(static_cast<uint32_t>(std::min<size_t>(block.moves.size(), 15)), 4);
+	out.write(static_cast<uint32_t>(count), 4);
 	out.write(block.value9, 9);
-	if (!block.moves.empty()) {
-		out.writeSigned(block.moves.front().index, 32);
-		for (size_t m = 0; m < block.moves.size() && m < 15; ++m) {
-			writeMove(out, block.moves[m]);
-		}
+	out.writeSigned(block.moves[first].index, 32);
+	for (size_t m = first; m < block.moves.size(); ++m) {
+		writeMove(out, block.moves[m]);
 	}
 }
 
@@ -753,7 +760,7 @@ const std::string& GameEvent::text(size_t n) const
 bool readGameEvent(BitReader& in, GameEvent& event)
 {
 	event = {};
-	event.type = in.read(bitsFor(kEventTypeCount));
+	event.type = in.read(bitsFor(kEventTypeCount - 1)); // the highest id, 0x47: 7 bits
 	if (in.bad() || !gameEventName(event.type)) {
 		return false;
 	}
@@ -766,7 +773,7 @@ bool writeGameEvent(BitWriter& out, const GameEvent& event)
 	if (!gameEventName(event.type)) {
 		return false;
 	}
-	out.write(event.type, bitsFor(kEventTypeCount));
+	out.write(event.type, bitsFor(kEventTypeCount - 1));
 	Codec codec(out, event);
 	return codeFields(codec, event.type);
 }
@@ -1255,6 +1262,16 @@ GameEvent makeDataBlockChunk(const std::string& bytes)
 	return e;
 }
 
+std::vector<GameEvent> dataBlockEvents(uint32_t type, const std::string& data)
+{
+	// 0x00643720: the start, then chunks of at most 63 bytes.
+	std::vector<GameEvent> events {makeDataBlockStart(type, static_cast<uint32_t>(data.size()))};
+	for (size_t at = 0; at < data.size(); at += 63) {
+		events.push_back(makeDataBlockChunk(data.substr(at, 63)));
+	}
+	return events;
+}
+
 std::string encodeChat(const ChatMessage& message)
 {
 	std::string block = message.text.substr(0, 255 - 12);
@@ -1408,7 +1425,9 @@ bool readGhostBlock(BitReader& in, GhostBlock& block, unsigned lengthBits)
 	const bool control = in.read(1) == 1;
 	if (control) {
 		ControlObjectRecord record;
+		record.bitOffset = in.position();
 		const uint32_t length = in.read(12);
+		record.length = length;
 		const size_t start = in.position();
 		record.lastMove = in.readSigned(32);
 		record.position.x = in.readFloat();
@@ -1431,6 +1450,7 @@ bool readGhostBlock(BitReader& in, GhostBlock& block, unsigned lengthBits)
 	}
 	for (uint32_t i = 0; i < count && !in.bad(); ++i) {
 		GhostUpdate update;
+		update.bitOffset = in.position();
 		update.kind = in.read(2);
 		update.ghost = static_cast<uint16_t>(in.read(16));
 		if (update.kind == 1) {

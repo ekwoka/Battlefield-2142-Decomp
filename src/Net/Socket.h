@@ -20,11 +20,39 @@ public:
 	// timeout, -1 once the peer has closed or on errors.
 	int receive(std::vector<uint8_t>& out, int timeoutSeconds);
 	void close();
+	// The same with a timeout in milliseconds (0: only what is waiting).
+	int receiveFor(std::vector<uint8_t>& out, int timeoutMilliseconds);
 	// The native socket (for TlsSocket), -1 when not connected.
 	intptr_t native() const { return m_socket; }
+	bool connected() const { return m_socket != -1; }
+	// Takes over an accepted socket (TcpListener).
+	void adopt(intptr_t socket);
+	// The local port (0 when not connected).
+	uint16_t localPort() const;
 
 private:
 	intptr_t m_socket = -1;
+};
+
+// A listening TCP socket (the local service emulators; GameSpy's GP SDK
+// also listens for its peer connections and reports the port at login).
+class TcpListener {
+public:
+	TcpListener();
+	~TcpListener();
+	TcpListener(const TcpListener&) = delete;
+	TcpListener& operator=(const TcpListener&) = delete;
+
+	// Binds 127.0.0.1 (or any address) at `port`; 0 picks a free one.
+	bool listen(uint16_t port, bool loopbackOnly = true);
+	uint16_t port() const { return m_port; }
+	// A waiting connection within `timeoutMilliseconds` into `out`.
+	bool accept(TcpSocket& out, int timeoutMilliseconds);
+	void close();
+
+private:
+	intptr_t m_socket = -1;
+	uint16_t m_port = 0;
 };
 
 // A UDP socket talking to one address.

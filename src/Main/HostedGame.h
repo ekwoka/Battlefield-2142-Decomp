@@ -105,6 +105,21 @@ struct HostSetup {
 	// clients must send their content's fingerprint or are kicked (0x1b).
 	// Empty: not pure.
 	std::string contentRoot;
+	// A retail server's pre-authorisation (Net/PlayerAuth.h), for trying a
+	// login against the local services: the server sends its settings and
+	// map list and waits for the client's player info (data block 1); the
+	// name's checksum must match (else refused 0x24), the profile id be set
+	// (0xd, as a ranked server: 0x004ae6a0), the CD-key answer pass
+	// GameSpy's CD-key service at `cdKeyService` and the stats service at
+	// `statsService` say "Ok" to ValidatePlayer for the GP login ticket.
+	// Only then is the player made (CreatePlayer, the level). The retail
+	// server asks the last two without waiting and bans afterwards
+	// (admin/standard_admin/playerconnect.py); here they are asked first.
+	struct LoginCheck {
+		bool required = false;
+		std::string cdKeyHost, statsHost;
+		uint16_t cdKeyPort = 0, statsPort = 0;
+	} login;
 };
 
 // The engine's yaw/pitch/roll (degrees) as the networkables' quaternion
@@ -310,7 +325,11 @@ private:
 	void joined(int client);
 	void left(int client);
 	bool reservedSlotCheck(int client);
-	void sendJoinBlocks(int client);
+	void sendJoinBlocks(int client, bool withSettings = true);
+	void sendSettings(int client);
+	void playerInfo(int client);
+	std::set<int> m_awaitingLogin; // connections whose player info isn't checked yet
+	std::vector<int> m_loginChecks; // player infos come, checked after the poll (a refusal drops the connection)
 	void sendTo(int client, const net::GameEvent& event); // the demo's connection: its file
 	void flushDemo(int32_t time, bool ghosts);
 	static constexpr int kDemoClient = 0x81;

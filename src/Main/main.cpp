@@ -25,6 +25,9 @@
 #include "Input/ControlMap.h"
 #include "Input/GameControllers.h"
 #include "Net/Fesl.h"
+#include "Net/OnlineConfig.h"
+#include "Net/OnlineSession.h"
+#include "Net/OpenSpyEmulator.h"
 #include "Net/Demo.h"
 #include "Net/GameClient.h"
 #include "Net/GameConnection.h"
@@ -172,6 +175,11 @@ struct Options {
 	std::string lanAddress = "255.255.255.255"; // --lan <address>: where the LOCAL page's search probes
 	std::string playerName;      // --name N: our name on a server (ChangePlayerName)
 	std::string probe;           // --probe host[:port]: shake hands and show what the server sends
+	// Network diagnostics for a joined game (Net/NetDiagnostics.h):
+	std::string netLog;          // --net-log <file>: every datagram in and out, hex and decoded, and the problems
+	bool netStrict = false;      // --net-strict: each problem on stderr as found, a summary at the end
+	std::string netCapture;      // --net-capture <file>: the datagrams, for --net-replay
+	std::string netReplay;       // --net-replay <file>: play a capture into the client (offline, nothing sent)
 	uint32_t profileId = 0xffffffff; // the soldier's profile from --login
 	bool fesl = false;           // --fesl: greet the account service (no login)
 	bool scoreboard = false;     // --scoreboard: show it (as Tab does)
@@ -188,7 +196,16 @@ struct Options {
 	std::string inputScript;     // --input-script "<s>:<command> ...": scripted input in the window (Viewer.h)
 	std::string actions;         // --actions "<command> ...": the soldier's inputs before a screenshot (off screen)
 	std::string menuScript;      // --menu-script "wait:12 click:x,y type:text ...": drive the menu headless
-	std::string login;           // --login name:password[@soldier]: log in to the account service
+	std::string login;           // --login [name:password[@soldier]]: log in (FESL, then GameSpy Presence); bare: the configured credentials
+	bool online = false;         // --online: the live services (OpenSpy); without it only this machine (Net/OnlineConfig.h)
+	bool openspyEmulator = false; // --openspy-emulator: run the local stand-ins of OpenSpy's services (Net/OpenSpyEmulator.h)
+	std::vector<std::string> emulatorAccounts; // --emulator-account name:password@soldier[,soldier]
+	std::vector<std::string> emulatorCdKeys;   // --emulator-cdkey KEY: the CD-key service takes only these
+	std::vector<std::string> emulatorServers;  // --emulator-list host:gameport[:queryport]: what the master lists
+	bool requireLogin = false;   // --require-login: a host checks logins as a retail server (HostSetup::login)
+	// The login's results for the game connection (Net/OnlineSession.h).
+	std::string onlineSoldier, onlineTicket;
+	uint32_t onlineNameChecksum = 0;
 	std::string dumpTemplate;    // --dump-template: print a template's tree and settings
 	std::string cameraMode = "first"; // --camera-mode first|third: the player's view (C toggles it)
 	bool zoom = false;           // --zoom: a screenshot's soldier zooms in after its burst
@@ -239,6 +256,18 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.view = options.screenshot.empty();
 		} else if (arg == "--probe" && hasValue) {
 			options.probe = argv[++i];
+		} else if (arg == "--net-log" && hasValue) {
+			options.netLog = argv[++i];
+		} else if (arg == "--net-strict") {
+			options.netStrict = true;
+		} else if (arg == "--net-capture" && hasValue) {
+			options.netCapture = argv[++i];
+		} else if (arg == "--net-replay" && hasValue) {
+			// A capture plays as a joined game whose datagrams come from the
+			// file (the connect reply on); nothing is sent.
+			options.netReplay = argv[++i];
+			options.connect = "replay";
+			options.view = options.screenshot.empty();
 		} else if (arg == "--servers") {
 			options.servers = true;
 		} else if (arg == "--simulate" && hasValue) {
@@ -277,8 +306,20 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.scoreboard = true;
 		} else if (arg == "--fesl") {
 			options.fesl = true;
-		} else if (arg == "--login" && hasValue) {
-			options.login = argv[++i];
+		} else if (arg == "--login") {
+			options.login = hasValue && argv[i + 1][0] != '-' && argv[i + 1][0] != '+' ? argv[++i] : "config";
+		} else if (arg == "--online") {
+			options.online = true;
+		} else if (arg == "--openspy-emulator") {
+			options.openspyEmulator = true;
+		} else if (arg == "--emulator-account" && hasValue) {
+			options.emulatorAccounts.push_back(argv[++i]);
+		} else if (arg == "--emulator-cdkey" && hasValue) {
+			options.emulatorCdKeys.push_back(argv[++i]);
+		} else if (arg == "--emulator-list" && hasValue) {
+			options.emulatorServers.push_back(argv[++i]);
+		} else if (arg == "--require-login") {
+			options.requireLogin = true;
 		} else if (arg == "--drive" && hasValue) {
 			options.drive = argv[++i];
 			if (options.playTeam == 0) {
@@ -1642,6 +1683,9 @@ struct Session {
 	int joinTeam = 0;       // --play 1|2 on a server: the team asked for first
 	// A game on a server (--connect, or the menu's join): the connection
 	// and the replicated world, for as long as it lasts.
+	// --net-log / --net-strict / --net-capture, for every client: before
+	// the client, which still sends its disconnect as it goes.
+	std::unique_ptr<net::NetDiagnostics> netDiagnostics;
 	std::unique_ptr<net::GameClient> client;
 	bool joinRequested = false; // the menu joined a server
 	bool levelChange = false;   // the server changed maps: load its new level
@@ -1695,6 +1739,7 @@ void stopServer(int) { g_stopServer = true; }
 int runRemoteConsole(const Options& options);
 // --movie: one movie, in a window or (with --screenshot) one frame of it.
 int runMovieCommand(const Options& options);
+int runOpenSpyEmulator(const Options& options);
 // --host: the server's settings and map list, and its playlist from them.
 bool setupServer(Options& options, Session& session);
 // A map list entry as a level to load: the level folder's own name and a
@@ -1718,54 +1763,89 @@ int main(int argc, char** argv)
 	if (options.host) {
 		std::setvbuf(stdout, nullptr, _IOLBF, 0); // a server's log as it happens
 	}
-	// The account service: a greeting, or a login whose soldier's profile
-	// id goes to the game server.
+	// Where the online services are and who logs in (Net/OnlineConfig.h):
+	// this machine's emulators unless --online.
+	net::setOnlineConfig(net::loadOnlineConfig(options.online));
+	if (options.online) {
+		std::printf("online: the live services (%s, %s, %s)\n", net::onlineConfig().endpoints.fesl.text().c_str(),
+			net::onlineConfig().endpoints.gpcm.text().c_str(), net::onlineConfig().endpoints.master.text().c_str());
+	}
+	if (options.openspyEmulator) {
+		return runOpenSpyEmulator(options);
+	}
+	// The account service: a greeting, or the whole login (FESL, the
+	// soldier, GameSpy Presence) whose profile id, name checksum and login
+	// ticket go to the game server.
 	uint32_t profileId = 0xffffffff;
-	net::FeslClient fesl;
-	if (options.fesl || !options.login.empty()) {
+	static net::OnlineSession onlineSession; // open while the game runs
+	if (options.fesl) {
+		net::FeslClient fesl;
 		std::string error;
-		if (!fesl.connect(net::kFeslHost, net::kFeslPort, 10, &error)) {
-			std::printf("%s:%u: %s\n", net::kFeslHost, net::kFeslPort, error.c_str());
+		const net::ServiceEndpoint endpoint = net::onlineConfig().endpoints.fesl;
+		if (!fesl.connectConfigured(10, &error)) {
+			std::printf("%s: %s\n", endpoint.text().c_str(), error.c_str());
 			return 1;
 		}
-		if (options.login.empty()) {
-			const auto hello = fesl.hello();
-			if (!hello) {
-				std::printf("%s: no greeting\n", net::kFeslHost);
-				return 1;
-			}
-			std::printf("%s greeted us:\n", net::kFeslHost);
-			for (const auto& [key, value] : hello->fields) {
-				std::printf("  %s = %s\n", key.c_str(), net::feslUnquote(value).c_str());
-			}
-			fesl.goodbye();
-			if (options.connect.empty() && options.probe.empty()) {
-				return 0;
-			}
-		} else {
+		const auto hello = fesl.hello();
+		if (!hello) {
+			std::printf("%s: no greeting\n", endpoint.text().c_str());
+			return 1;
+		}
+		std::printf("%s greeted us:\n", endpoint.text().c_str());
+		for (const auto& [key, value] : hello->fields) {
+			std::printf("  %s = %s\n", key.c_str(), net::feslUnquote(value).c_str());
+		}
+		fesl.goodbye();
+		if (options.connect.empty() && options.probe.empty() && options.login.empty()) {
+			return 0;
+		}
+	}
+	if (!options.login.empty()) {
+		net::OnlineCredentials credentials = net::onlineConfig().credentials;
+		if (options.login != "config") {
 			const size_t colon = options.login.find(':');
 			const size_t at = options.login.rfind('@');
-			const std::string name = options.login.substr(0, colon);
-			const std::string password = colon == std::string::npos
+			credentials.account = options.login.substr(0, colon);
+			credentials.password = colon == std::string::npos
 				? std::string()
 				: options.login.substr(colon + 1, (at == std::string::npos || at < colon ? options.login.size() : at) - colon - 1);
-			const std::string soldier = at == std::string::npos || at < colon ? std::string() : options.login.substr(at + 1);
-			const auto session = net::feslLogin(fesl, name, password, soldier, &error);
-			if (!session) {
-				std::printf("login failed: %s\n", error.c_str());
-				return 1;
-			}
-			std::printf("logged in as %s (user %ld); soldiers:", session->account.displayName.c_str(), session->account.userId);
-			for (const std::string& s : session->account.soldiers) {
-				std::printf(" %s", s.c_str());
-			}
-			std::printf("\nplaying as %s (profile %ld)\n", session->soldier.c_str(), session->soldierProfileId);
-			profileId = static_cast<uint32_t>(session->soldierProfileId);
-			if (options.connect.empty() && options.probe.empty()) {
-				fesl.goodbye();
-				return 0;
-			}
+			credentials.soldier = at == std::string::npos || at < colon ? std::string() : options.login.substr(at + 1);
 		}
+		if (!credentials.complete()) {
+			std::printf("login: no account and password (BF2142_ACCOUNT / BF2142_PASSWORD, or bf2142-online.cfg: see README)\n");
+			return 1;
+		}
+		onlineSession.onLog = [](const std::string& line) { std::printf("online: %s\n", line.c_str()); };
+		std::string error;
+		const auto account = onlineSession.loginAccount(credentials.account, credentials.password, &error);
+		if (!account) {
+			std::printf("login failed: %s\n", error.c_str());
+			return 1;
+		}
+		std::printf("logged in as %s (user %ld); soldiers:", account->displayName.c_str(), account->userId);
+		for (const std::string& s : account->soldiers) {
+			std::printf(" %s", s.c_str());
+		}
+		std::printf("\n");
+		if (!onlineSession.loginSoldier(credentials.soldier, &error)) {
+			std::printf("login failed: %s\n", error.c_str());
+			return 1;
+		}
+		const net::OnlineIdentity identity = onlineSession.identity();
+		std::printf("playing as %s (profile %ld, name checksum %08x, GP login ticket %s)\n", identity.soldier.c_str(),
+			identity.profileId, identity.nameChecksum, identity.loginTicket.empty() ? "missing" : "received");
+		profileId = static_cast<uint32_t>(identity.profileId);
+		options.onlineSoldier = identity.soldier;
+		options.onlineTicket = identity.loginTicket;
+		options.onlineNameChecksum = identity.nameChecksum;
+		if (options.playerName.empty()) {
+			options.playerName = identity.soldier;
+		}
+		if (options.connect.empty() && options.probe.empty()) {
+			onlineSession.logout();
+			return 0;
+		}
+		onlineSession.keepAlive();
 	}
 	options.profileId = profileId;
 	if (!options.probe.empty()) {
@@ -1773,6 +1853,10 @@ int main(int argc, char** argv)
 		const std::string host = options.probe.substr(0, colon);
 		const uint16_t port = colon == std::string::npos ? net::kGamePort
 														  : static_cast<uint16_t>(std::atoi(options.probe.c_str() + colon + 1));
+		if (!net::hostAllowed(host)) {
+			std::printf("%s\n", net::hostRefusal(host).c_str());
+			return 1;
+		}
 		net::GameConnection connection;
 		const net::ConnectResult result = connection.connect(host, port, {}, 6000);
 		switch (result.outcome) {
@@ -1807,7 +1891,8 @@ int main(int argc, char** argv)
 						if (event.type == net::kCdKeyChallenge) {
 							// Answer with a key (this tool has none of its own: a fixed test key).
 							const uint32_t random = static_cast<uint32_t>(std::rand()) << 16 ^ static_cast<uint32_t>(std::rand());
-							const std::string response = net::cdKeyResponse("XXXX-XXXX-XXXX-XXXX", event.challenge, random);
+							const std::string key = net::onlineConfig().credentials.cdKey;
+							const std::string response = net::cdKeyResponse(key.empty() ? "XXXX-XXXX-XXXX-XXXX" : key, event.challenge, random);
 							connection.sendData(net::cdKeyResponsePayload(eventSequence++, response,
 								static_cast<uint32_t>(std::rand()), profileId));
 							std::printf("  answered the challenge\n");
@@ -1851,9 +1936,10 @@ int main(int argc, char** argv)
 		// The server browser's query (fields as the game's browser asks).
 		const std::vector<std::string> fields {"hostname", "gamever", "mapname", "gametype", "gamevariant", "numplayers",
 			"maxplayers", "password", "hostport"};
-		const std::string host = net::masterServerHost(net::kGameName);
+		const net::ServiceEndpoint master = net::onlineConfig().endpoints.master;
+		const std::string host = master.text();
 		std::string error;
-		const auto list = net::fetchServerList(host, "", fields, 15, &error);
+		const auto list = net::fetchServerList(master.host, "", fields, 15, &error, master.port);
 		if (!list) {
 			std::fprintf(stderr, "%s: %s\n", host.c_str(), error.c_str());
 			return 1;
@@ -2070,6 +2156,71 @@ bool playMovies(Window& window, dice::hfe::movie::MovieQueue& queue, const Optio
 	return true;
 }
 #endif
+
+// --openspy-emulator: OpenSpy's services on 127.0.0.1 (Net/OpenSpyEmulator.h)
+// at their usual ports, until Ctrl+C (or --simulate N seconds).
+int runOpenSpyEmulator(const Options& options)
+{
+	std::setvbuf(stdout, nullptr, _IOLBF, 0);
+	net::OpenSpyEmulatorOptions e;
+	const net::OnlineEndpoints ports = net::localEndpoints();
+	e.feslPort = ports.fesl.port;
+	e.gpcmPort = ports.gpcm.port;
+	e.masterPort = ports.master.port;
+	e.stellaPort = ports.stella.port;
+	e.cdkeyPort = ports.cdkey.port;
+	long id = 1001;
+	std::vector<std::string> accounts = options.emulatorAccounts;
+	if (accounts.empty()) {
+		const net::OnlineCredentials& c = net::onlineConfig().credentials;
+		accounts.push_back(c.complete() ? c.account + ":" + c.password + "@" + (c.soldier.empty() ? c.account : c.soldier)
+										: "tester:secret@Tester");
+	}
+	for (const std::string& spec : accounts) {
+		e.accounts.push_back(net::OpenSpyEmulator::account(spec, id, id * 1000));
+		++id;
+	}
+	e.cdKeys = options.emulatorCdKeys;
+	std::vector<std::string> servers = options.emulatorServers;
+	if (servers.empty()) {
+		servers.push_back("127.0.0.1:17567:29900");
+	}
+	for (const std::string& spec : servers) {
+		net::ServerEntry server;
+		const size_t a = spec.find(':');
+		const size_t b = a == std::string::npos ? std::string::npos : spec.find(':', a + 1);
+		server.ip = spec.substr(0, a);
+		const std::string gamePort = a == std::string::npos ? "17567" : spec.substr(a + 1, b == std::string::npos ? std::string::npos : b - a - 1);
+		server.port = static_cast<uint16_t>(b == std::string::npos ? 29900 : std::atoi(spec.c_str() + b + 1));
+		server.fields = {{"hostname", "local test server"}, {"gamever", "1.51"}, {"mapname", ""}, {"gametype", "gpm_cq"},
+			{"numplayers", "0"}, {"maxplayers", "32"}, {"password", "0"}, {"hostport", gamePort}};
+		e.servers.push_back(server);
+	}
+	net::OpenSpyEmulator emulator;
+	emulator.onLog = [](const std::string& line) { std::printf("emulator: %s\n", line.c_str()); };
+	std::string error;
+	if (!emulator.start(e, &error)) {
+		std::fprintf(stderr, "%s\n", error.c_str());
+		return 1;
+	}
+	const net::OnlineEndpoints at = emulator.endpoints();
+	std::printf("OpenSpy emulator on 127.0.0.1: FESL %u (plain TCP), GP %u, master %u, stats %u (HTTP), CD key %u (UDP)\n",
+		at.fesl.port, at.gpcm.port, at.master.port, at.stella.port, at.cdkey.port);
+	for (const net::EmulatorAccount& a : e.accounts) {
+		std::printf("  account %s, soldiers:", a.name.c_str());
+		for (const net::EmulatorSoldier& s : a.soldiers) {
+			std::printf(" %s (profile %ld)", s.nick.c_str(), s.profileId);
+		}
+		std::printf("\n");
+	}
+	std::fflush(stdout);
+	const auto started = std::chrono::steady_clock::now();
+	while (options.simulate <= 0 || std::chrono::steady_clock::now() - started < std::chrono::seconds(options.simulate)) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	}
+	emulator.stop();
+	return 0;
+}
 
 int runMovieCommand(const Options& options)
 {
@@ -2896,6 +3047,10 @@ int runGame(Options& options, Session& session)
 		const std::string host = options.connect.substr(0, colon);
 		const uint16_t port = colon == std::string::npos ? net::kGamePort
 														  : static_cast<uint16_t>(std::atoi(options.connect.c_str() + colon + 1));
+		if (options.netReplay.empty() && !net::hostAllowed(host)) {
+			std::printf("%s\n", net::hostRefusal(host).c_str());
+			return 1;
+		}
 		session.client = std::make_unique<net::GameClient>();
 		if (!session.voice) {
 			// Voice chat for a game joined without the menu.
@@ -2910,9 +3065,42 @@ int runGame(Options& options, Session& session)
 		if (clientOptions.playerName.empty() && session.menuBindings) {
 			clientOptions.playerName = session.menuBindings->soldierName(); // the soldier the menu plays as
 		}
+		// The login's part (Net/PlayerAuth.h): the CD key for the challenge,
+		// the player info's checksum and GP login ticket, from --login or
+		// the menu's soldier login.
+		if (const std::string key = net::onlineConfig().credentials.cdKey; !key.empty()) {
+			clientOptions.cdKey = key;
+		}
+		clientOptions.nameChecksum = options.onlineNameChecksum;
+		clientOptions.auth = options.onlineTicket;
+		if (session.menuBindings && session.menuBindings->soldierLogin().profileId > 0) {
+			const dice::hfe::menu::AccountReply& login = session.menuBindings->soldierLogin();
+			clientOptions.profileId = static_cast<uint32_t>(login.profileId);
+			clientOptions.nameChecksum = login.nameChecksum;
+			clientOptions.auth = login.loginTicket;
+		}
 		showMenu = false; // the menu's join hands over to the game
 		net::GameClient& client = *session.client;
-		if (!options.demo.empty()) {
+		if (!session.netDiagnostics && (!options.netLog.empty() || options.netStrict || !options.netCapture.empty())) {
+			session.netDiagnostics = std::make_unique<net::NetDiagnostics>();
+			session.netDiagnostics->strict = options.netStrict;
+			if (!options.netLog.empty() && !session.netDiagnostics->openLog(options.netLog)) {
+				std::printf("%s: cannot write the net log\n", options.netLog.c_str());
+			}
+			session.netDiagnostics->captureTo(options.netCapture);
+		}
+		client.setDiagnostics(session.netDiagnostics.get());
+		client.answerLoadAfterLevel = true; // LoadComplete once our level has loaded (0x004b5eb0 case 2)
+		if (!options.netReplay.empty()) {
+			std::vector<net::CaptureRecord> records;
+			if (!net::readCapture(options.netReplay, records)) {
+				std::printf("%s: not a capture\n", options.netReplay.c_str());
+				session.client.reset();
+				return 1;
+			}
+			std::printf("capture %s: %zu datagrams\n", options.netReplay.c_str(), records.size());
+			client.playCapture(std::move(records), true, clientOptions);
+		} else if (!options.demo.empty()) {
 			net::DemoHeader header;
 			std::vector<net::DemoRecord> records;
 			if (!net::readDemo(options.demo, header, records)) {
@@ -3093,6 +3281,9 @@ int runGame(Options& options, Session& session)
 #endif
 	};
 	loadingStep(0);
+	if (session.client) {
+		session.client->loadingLevel(); // pings answered while the level loads
+	}
 	std::set<uint32_t> levelObjects; // the static objects, before the game mode's
 	// Level loading, after FUN_004d3450: the level's archives are mounted at
 	// its directory, then materials, static objects and the game mode's
@@ -4463,6 +4654,16 @@ int runGame(Options& options, Session& session)
 			setup.queryPort = options.queryPort;
 			setup.contentRoot = options.gameDir; // pure with the mod's std_archive.md5 (Net/ContentCheck.h)
 			setup.modDirectory = options.modPath;
+			if (options.requireLogin) {
+				// The retail pre-authorisation against the configured
+				// services' CD-key and stats hosts (the local emulators).
+				const net::OnlineEndpoints& e = net::onlineConfig().endpoints;
+				setup.login.required = true;
+				setup.login.cdKeyHost = e.cdkey.host;
+				setup.login.cdKeyPort = e.cdkey.port;
+				setup.login.statsHost = e.stella.host;
+				setup.login.statsPort = e.stella.port;
+			}
 			if (session.admin) {
 				const net::ServerSettings& sv = session.admin->settings;
 				setup.serverName = sv.serverName;
@@ -4927,12 +5128,17 @@ int runGame(Options& options, Session& session)
 			}
 		};
 		float remoteActionsPitch = 0; // the aim the last --remote-actions move carried
+		bool joinedLevelLoaded = false; // told the client (LoadComplete goes now)
 		const auto remoteStep = [&] {
 			runTimedConsole();
 			if (!session.client) {
 				return;
 			}
 			net::GameClient& client = *session.client;
+			if (!joinedLevelLoaded) {
+				joinedLevelLoaded = true;
+				client.levelLoaded();
+			}
 			round.setAmbienceClient(true); // the networked ambient areas are the server's
 			// --walk without a window: forward, turning, sprinting now and
 			// then (a check on the prediction against the server).
@@ -5514,6 +5720,7 @@ int runGame(Options& options, Session& session)
 				if (session.voice) {
 					session.voice->leave();
 				}
+				gameAudio.setHudWorld(nullptr); // its world goes with the client
 				session.client.reset();
 				session.disconnect = true;
 			}

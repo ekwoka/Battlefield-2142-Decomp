@@ -18,7 +18,8 @@
 //   one (NetworkableInfo.setIsUnique) joins the first group whose first
 //   member is the same template, or a RotationalBundle (or Camera) with the
 //   same rotation settings (0x00678070); else it starts a group.
-// - An update holds each group's state in turn (at most 12; 0x0057f420),
+// - An update holds each group's state in turn (0x0057f420; over 12 only
+//   warns),
 //   and every member of a group takes the same bits (0x0057f670 rewinds the
 //   stream for each one).
 #pragma once
@@ -121,6 +122,7 @@ struct ControlState {
 	bool hasOwn = false;
 	PlayerOwnState own;
 	size_t ownBits = 0;
+	size_t ownDecodedBits = 0; // what decodePlayerOwnState took of ownBits (read only)
 	bool complete = false;
 };
 // `slots`: the client's eight history slots, for a relative record (none:

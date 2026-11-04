@@ -64,7 +64,8 @@ std::optional<ServerList> parseListReply(std::vector<uint8_t> reply, const std::
 
 // Connects to the master server and fetches the list (blocking, with a
 // timeout in seconds).
+// Refuses hosts OnlineConfig's hostAllowed() refuses.
 std::optional<ServerList> fetchServerList(const std::string& host, const std::string& filter,
-	const std::vector<std::string>& fields, int timeoutSeconds, std::string* error = nullptr);
+	const std::vector<std::string>& fields, int timeoutSeconds, std::string* error = nullptr, uint16_t port = kMasterPort);
 
 } // namespace dice::hfe::net

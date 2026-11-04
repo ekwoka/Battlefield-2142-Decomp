@@ -101,6 +101,8 @@ struct AccountReply {
 	long error = 0;
 	std::vector<std::string> soldiers; // the account's soldiers (login)
 	long profileId = 0;                // the soldier's profile (soldier login)
+	uint32_t nameChecksum = 0;         // of the soldier's name (0x00579410)
+	std::string loginTicket;           // GameSpy Presence's, the auth a game server is shown
 };
 
 // A level the menu can start: its folder name, a game mode it has and a
@@ -145,8 +147,10 @@ struct MenuServices {
 	// Tries a game server's connect handshake (empty: not tried).
 	std::function<net::ConnectResult(const std::string& host, uint16_t port)> connectServer;
 
-	// OpenSpy: FESL at fesl.openspy.net, the master at
-	// stella.ms5.openspy.net, the handshake with GameConnection.
+	// The services net::onlineConfig() names (OpenSpy with --online: FESL
+	// at fesl.openspy.net, GP at gpcm.openspy.net, the master at
+	// stella.ms5.openspy.net; else the local emulators on 127.0.0.1), the
+	// handshake with GameConnection.
 	static MenuServices openSpy();
 };
 
@@ -266,6 +270,8 @@ public:
 	bool offlineMode() const { return m_offline; }
 	const std::string& accountName() const { return m_account.name; }
 	const std::string& soldierName() const { return m_soldier; }
+	// The soldier's online login (profile id 0 when offline or not logged in).
+	const AccountReply& soldierLogin() const { return m_soldierLogin; }
 	size_t serverCount() const { return m_servers.size(); }
 	// The last server the menu joined ("" before).
 	const std::string& joinedHost() const { return m_joinHost; }
@@ -341,6 +347,7 @@ private:
 		bool connected = false; // to the account service
 	} m_account;
 	std::string m_soldier, m_namePrefix;
+	AccountReply m_soldierLogin;
 	std::shared_ptr<Job> m_transaction; // the running login
 	enum class Transaction { None, Account, Soldier } m_transactionKind = Transaction::None;
 	bool m_transactionRemember = false;

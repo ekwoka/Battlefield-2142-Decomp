@@ -5,3 +5,6 @@ images/
 reference/
 __pycache__/
 *.pyc
+
+# local online credentials (never commit)
+bf2142-online.cfg

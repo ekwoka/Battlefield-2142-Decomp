@@ -23,7 +23,11 @@
 
 #include "Socket.h"
 
+#include <atomic>
 #include <chrono>
+#include <deque>
+#include <mutex>
+#include <thread>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -132,6 +136,12 @@ public:
 	// Sends a data packet (type 15): our next sequence, the notify header,
 	// the payload's 16-bit length and the payload (0x0068ef80).
 	bool sendData(const std::vector<uint8_t>& payload);
+	// False while the next data packet would be more than 30 ahead of the
+	// last the peer acknowledged (0x006aa140 holds it): sendData refuses it.
+	bool canSendData() const;
+	// Pongs that came back within a second (the client pings every 200 ms
+	// until 32 of them, then every 3 s: 0x0068f280, 0x0068ef80).
+	uint32_t fastPongs() const { return m_fastPongs; }
 	// The sequence the last sendData used (6 bits).
 	uint32_t lastSentSequence() const { return static_cast<uint32_t>(m_notify.sendSequence) & 0x3f; }
 	// Called for each connected packet with the peer's acknowledgement of
@@ -146,12 +156,38 @@ public:
 	// Sends a ping (type 7) carrying our clock; the server's pong gives the round trip.
 	void ping();
 
+	// Every datagram as it goes out (true) or comes in (false), for the
+	// diagnostics (NetDiagnostics.h: the log and the capture).
+	std::function<void(bool outgoing, const std::vector<uint8_t>& datagram)> onDatagram;
+	// A recorded session played back (NetDiagnostics.h's capture): no
+	// socket; inject() hands in each datagram the server sent, from the
+	// connect reply on, and what we would send goes only to onDatagram.
+	void beginReplay();
+	bool replaying() const { return m_replay; }
+	bool inject(const std::vector<uint8_t>& datagram, const std::function<void(const ConnectedPacket&)>& onData);
+	// While the game is busy (a level loading): a thread answers the
+	// server's pings and pings it every 3 s, as the exe's "NetClientThread"
+	// (0x0068eed0) runs the connection's loop through a load, so the server
+	// (which drops a client silent for 10 s, 0x0068a950) keeps us; the rest
+	// waits for the next poll(). Nothing else may use the connection until
+	// endKeepAlive().
+	void beginKeepAlive();
+	void endKeepAlive();
+	~GameConnection() { endKeepAlive(); }
+
 private:
+	bool send(const std::vector<uint8_t>& datagram);
+	bool receive(std::vector<uint8_t>& datagram, int milliseconds);
+	void takeConnectReply(const std::vector<uint8_t>& datagram);
 	void handleDatagram(const std::vector<uint8_t>& datagram, const std::function<void(const ConnectedPacket&)>& onData);
 
 	UdpSocket m_socket;
 	bool m_connected = false;
 	bool m_connecting = false;
+	bool m_replay = false;
+	std::thread m_keepAlive;
+	std::atomic<bool> m_keepAliveRunning {false};
+	std::deque<std::vector<uint8_t>> m_backlog; // datagrams the keep-alive left for poll()
 	int m_attempts = 0;
 	std::vector<uint8_t> m_connectPacket;
 	std::chrono::steady_clock::time_point m_lastAttempt;
@@ -160,6 +196,7 @@ private:
 	NotifyState m_notify;
 	uint32_t m_disconnectReason = 0;
 	uint32_t m_roundTrip = 0;
+	uint32_t m_fastPongs = 0;
 	std::chrono::steady_clock::time_point m_start = std::chrono::steady_clock::now();
 };
 

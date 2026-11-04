@@ -421,7 +421,8 @@ constexpr uint16_t kTeamStateGhost = 0x201;
 struct TeamNetState {
 	uint32_t mask = 0;
 	// Per mask bit, its values (most bits one; 0x10, 0x10000, 0x1000000,
-	// 0x2000000 two; the tickets' a value, a bit, a value).
+	// 0x2000000 two; the tickets' a value, a bit, a value; 0x80000000 a
+	// sign + 2 and two sign + 17s).
 	std::array<std::array<int32_t, 3>, 32> values {};
 	int tickets(int team) const;   // -1 when this state hasn't them
 	void setTickets(int team, int tickets, bool flag = false, int value = 0);

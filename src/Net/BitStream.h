@@ -33,6 +33,9 @@ private:
 class BitReader {
 public:
 	BitReader(const uint8_t* data, size_t bytes) : m_data(data), m_size(bytes * 8) {}
+	// Ends the stream after `bits` (a record's own length): reading past it
+	// marks the stream bad, as reading past the data does.
+	void limit(size_t bits) { m_size = bits < m_size ? bits : m_size; }
 	// False (and the stream marked bad) past the end, as 0x006871b0.
 	bool read(uint32_t& value, unsigned bits);
 	uint32_t read(unsigned bits)

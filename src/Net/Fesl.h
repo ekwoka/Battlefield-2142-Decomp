@@ -21,10 +21,23 @@
 //   acct Login (name, password, machineId, macAddr) <- lkey, userId, profileId
 //   acct GetSubAccounts <- subAccounts.N (soldier names)
 //   acct LoginSubAccount (name) <- profileId of that soldier
-//   acct GameSpyPreAuth <- ticket (for GameSpy's presence and stats)
-// The server sends fsys Ping now and then; the client answers it.
+//   acct GameSpyPreAuth <- ticket and challenge (0x00802580; the reply
+//     0x0049f700 copies both into EAOnlineManager +0xa0 and +0xbc for
+//     GameSpy Presence's pre-authenticated login, GameSpyPresence.h)
+// The server sends fsys Ping now and then (OpenSpy: every 120 s, and it
+// drops a connection silent for 240 s); the client answers it.
+// The 1.51 client speaks this "acct" set (the TXN table 0x008017e0: Login,
+// GetSubAccounts, LoginSubAccount, GameSpyPreAuth, AddSubAccount, ...),
+// not the later Nu* one (NuLogin, NuGetPersonas, NuLoginPersona) nor
+// GetTelemetryToken, which OpenSpy keeps for other games.
+//
+// OpenSpy's FESL reads one message per socket read (FESLPeer.cpp
+// on_stream_read parses a single header), so the client never writes two
+// messages back to back: an answer to a ping or memory check is followed
+// by a short pause before the next request.
 #pragma once
 
+#include "Socket.h"
 #include "TlsSocket.h"
 
 #include <cstdint>
@@ -76,8 +89,12 @@ struct FeslAccount {
 
 class FeslClient {
 public:
+	// TLS to OpenSpy; plain TCP (`tls` false) to the local emulator.
+	// Refuses hosts hostAllowed() refuses.
 	bool connect(const std::string& host = kFeslHost, uint16_t port = kFeslPort, int timeoutSeconds = 10,
-		std::string* error = nullptr);
+		std::string* error = nullptr, bool tls = true);
+	// The configured service (OnlineConfig.h).
+	bool connectConfigured(int timeoutSeconds = 10, std::string* error = nullptr);
 	// Each sends one request and waits for its reply (answering pings and
 	// memory checks meanwhile); empty on a timeout or a closed connection.
 	std::optional<FeslMessage> hello(int timeoutMilliseconds = 10000);
@@ -86,6 +103,8 @@ public:
 	std::optional<FeslMessage> loginSubAccount(const std::string& soldier, int timeoutMilliseconds = 10000);
 	std::optional<FeslMessage> gameSpyPreAuth(int timeoutMilliseconds = 10000);
 	void goodbye();
+	// Answers what the server sent meanwhile (pings); false once closed.
+	bool pump(int timeoutMilliseconds = 0);
 
 	std::optional<FeslMessage> request(uint32_t type, std::vector<std::pair<std::string, std::string>> fields,
 		int timeoutMilliseconds);
@@ -94,8 +113,12 @@ public:
 private:
 	bool send(const FeslMessage& message);
 	void answer(const FeslMessage& message);
+	int receive(int timeoutMilliseconds);
 
 	TlsSocket m_socket;
+	TcpSocket m_plain;
+	bool m_tls = true;
+	std::vector<FeslMessage> m_pending; // taken off the stream, not asked for yet
 	std::vector<uint8_t> m_received;
 	uint32_t m_nextTid = 1;
 	bool m_connected = false;
@@ -107,7 +130,11 @@ struct FeslSession {
 	FeslAccount account;
 	std::string soldier;
 	long soldierProfileId = 0;
-	std::string ticket;
+	// The checksum of the soldier's name (0x00579410), kept at 0x00a6801c
+	// on LoginSubAccount's reply (0x004a1d70 case 0xb).
+	uint32_t soldierNameChecksum = 0;
+	std::string ticket;    // GameSpyPreAuth's
+	std::string challenge; // GameSpyPreAuth's: GP's partner challenge
 };
 std::optional<FeslSession> feslLogin(FeslClient& client, const std::string& name, const std::string& password,
 	const std::string& soldier, std::string* error = nullptr);

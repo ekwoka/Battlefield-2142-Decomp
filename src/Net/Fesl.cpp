@@ -1,6 +1,10 @@
 #include "Fesl.h"
 
+#include "OnlineConfig.h"
+#include "PlayerAuth.h"
+
 #include <chrono>
+#include <thread>
 #include <cstdlib>
 #include <cstring>
 
@@ -163,17 +167,44 @@ std::vector<FeslMessage> takeFeslMessages(std::vector<uint8_t>& buffer, bool* ba
 	return messages;
 }
 
-bool FeslClient::connect(const std::string& host, uint16_t port, int timeoutSeconds, std::string* error)
+bool FeslClient::connect(const std::string& host, uint16_t port, int timeoutSeconds, std::string* error, bool tls)
 {
-	m_connected = m_socket.connect(host, port, timeoutSeconds, error);
 	m_received.clear();
+	m_pending.clear();
 	m_nextTid = 1;
+	m_tls = tls;
+	if (!hostAllowed(host)) {
+		if (error) {
+			*error = hostRefusal(host);
+		}
+		m_connected = false;
+		return false;
+	}
+	if (tls) {
+		m_connected = m_socket.connect(host, port, timeoutSeconds, error);
+	} else {
+		m_connected = m_plain.connect(host, port, timeoutSeconds);
+		if (!m_connected && error) {
+			*error = "cannot connect to " + host + ":" + std::to_string(port);
+		}
+	}
 	return m_connected;
+}
+
+bool FeslClient::connectConfigured(int timeoutSeconds, std::string* error)
+{
+	const OnlineEndpoints& e = onlineConfig().endpoints;
+	return connect(e.fesl.host, e.fesl.port, timeoutSeconds, error, e.feslTls);
+}
+
+int FeslClient::receive(int timeoutMilliseconds)
+{
+	return m_tls ? m_socket.receive(m_received, timeoutMilliseconds) : m_plain.receiveFor(m_received, timeoutMilliseconds);
 }
 
 bool FeslClient::send(const FeslMessage& message)
 {
-	if (!m_connected || !m_socket.send(encodeFesl(message))) {
+	if (!m_connected || !(m_tls ? m_socket.send(encodeFesl(message)) : m_plain.send(encodeFesl(message)))) {
 		m_connected = false;
 		return false;
 	}
@@ -190,10 +221,42 @@ void FeslClient::answer(const FeslMessage& message)
 	if (txn == "Ping") {
 		send({kFeslSystem, 0x80000000, {{"TXN", "Ping"}}});
 	} else if (txn == "MemCheck") {
-		// 0x008151c0: the result is the checked memory's hash XOR the salt;
-		// with no regions asked (memcheck.[]=0) it stays empty.
+		// 0x00815360 / 0x008151c0: the result is the checked memory's hash
+		// XOR the salt; with no regions asked (memcheck.[]=0) it stays empty.
 		send({kFeslSystem, 0x80000000, {{"TXN", "MemCheck"}, {"result", ""}}});
+	} else {
+		return;
 	}
+	// OpenSpy parses one message per read: keep the next one apart.
+	std::this_thread::sleep_for(std::chrono::milliseconds(50));
+}
+
+bool FeslClient::pump(int timeoutMilliseconds)
+{
+	if (!m_connected) {
+		return false;
+	}
+	if (receive(timeoutMilliseconds) < 0) {
+		m_connected = false;
+		return false;
+	}
+	bool bad = false;
+	for (FeslMessage& message : takeFeslMessages(m_received, &bad)) {
+		m_pending.push_back(std::move(message));
+	}
+	std::vector<FeslMessage> keep;
+	for (FeslMessage& message : m_pending) {
+		if (message.type == kFeslSystem && (message.txn() == "Ping" || message.txn() == "MemCheck")) {
+			answer(message);
+		} else {
+			keep.push_back(std::move(message));
+		}
+	}
+	m_pending = std::move(keep);
+	if (bad) {
+		m_connected = false;
+	}
+	return m_connected;
 }
 
 std::optional<FeslMessage> FeslClient::request(uint32_t type, std::vector<std::pair<std::string, std::string>> fields,
@@ -209,26 +272,43 @@ std::optional<FeslMessage> FeslClient::request(uint32_t type, std::vector<std::p
 		return std::nullopt;
 	}
 	const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMilliseconds);
-	std::vector<FeslMessage> waiting;
-	while (std::chrono::steady_clock::now() < deadline) {
-		const int received = m_socket.receive(m_received, 100);
-		if (received < 0) {
+	const auto matches = [&](const FeslMessage& reply) {
+		return reply.type == type && reply.txn() == txn && (reply.find("TID") == nullptr || reply.number("TID") == tid);
+	};
+	for (;;) {
+		// Messages that came with an earlier reply (the greeting's
+		// MemCheck) are answered first.
+		std::vector<FeslMessage> pending = std::move(m_pending);
+		m_pending.clear();
+		std::optional<FeslMessage> found;
+		for (FeslMessage& reply : pending) {
+			if (!found && matches(reply)) {
+				found = std::move(reply);
+			} else if (reply.type == kFeslSystem && (reply.txn() == "Ping" || reply.txn() == "MemCheck")) {
+				answer(reply);
+			} else {
+				m_pending.push_back(std::move(reply));
+			}
+		}
+		if (found) {
+			return found;
+		}
+		if (std::chrono::steady_clock::now() >= deadline) {
+			return std::nullopt;
+		}
+		if (receive(100) < 0) {
 			m_connected = false;
 			return std::nullopt;
 		}
 		bool bad = false;
 		for (FeslMessage& reply : takeFeslMessages(m_received, &bad)) {
-			if (reply.type == type && reply.txn() == txn && (reply.find("TID") == nullptr || reply.number("TID") == tid)) {
-				return reply;
-			}
-			answer(reply);
+			m_pending.push_back(std::move(reply));
 		}
 		if (bad) {
 			m_connected = false;
 			return std::nullopt;
 		}
 	}
-	return std::nullopt;
 }
 
 std::optional<FeslMessage> FeslClient::hello(int timeoutMilliseconds)
@@ -272,6 +352,7 @@ void FeslClient::goodbye()
 		send({kFeslSystem, kClientRequest | m_nextTid++, {{"TXN", "Goodbye"}, {"reason", "GOODBYE_CLIENT_NORMAL"}}});
 	}
 	m_socket.close();
+	m_plain.close();
 	m_connected = false;
 }
 
@@ -288,7 +369,7 @@ std::optional<FeslSession> feslLogin(FeslClient& client, const std::string& name
 	};
 	if (!client.connected()) {
 		std::string why;
-		if (!client.connect(kFeslHost, kFeslPort, 10, &why)) {
+		if (!client.connectConfigured(10, &why)) {
 			if (error) {
 				*error = why;
 			}
@@ -325,11 +406,13 @@ std::optional<FeslSession> feslLogin(FeslClient& client, const std::string& name
 		return fail("soldier login", reply);
 	}
 	session.soldierProfileId = reply->number("profileId");
+	session.soldierNameChecksum = nameChecksum(session.soldier);
 	reply = client.gameSpyPreAuth();
 	if (!reply || reply->isError()) {
 		return fail("GameSpy pre-authentication", reply);
 	}
 	session.ticket = reply->text("ticket");
+	session.challenge = reply->text("challenge");
 	return session;
 }
 

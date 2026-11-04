@@ -170,7 +170,7 @@ build/native/src/Main/bf2142 --game "source/Battlefield 2142" \
 #   --input-script "12:click:0.49,0.37 12.5:text:Tester 40:shot:out.png 41:down:W 44:up:W 60:quit"
 #   (key:/down:/up: SDL key names, click:/move: window fractions, look:dx,dy,
 #   button:n,0|1, text:, shot:file.png, quit; seconds from the window's opening)
-# list the servers on OpenSpy's master server
+# list the servers on the master server (the local emulator; OpenSpy's with --online)
 #   bf2142 --game "source/Battlefield 2142" --servers
 # play on one (loads its map, shows the server's objects; servers expect a
 # logged-in account and a CD key), or only shake hands and print what it sends
@@ -223,10 +223,17 @@ build/native/src/Main/bf2142 --game "source/Battlefield 2142" \
 #   bf2142 --game "source/Battlefield 2142" --movie Intro --movie-seconds 20 --screenshot intro.png
 # the menu's LOCAL page searches 255.255.255.255 as the original; --lan
 # 127.0.0.1 keeps the search on this machine
-# greet OpenSpy's account service (FESL, over TLS), or log in with an
-# OpenSpy account (the first soldier unless one is named) and join with it
-#   bf2142 --game "source/Battlefield 2142" --fesl
-#   bf2142 --game "source/Battlefield 2142" --login name:password[@soldier] [--connect 1.2.3.4:17567]
+# online services: nothing leaves this machine unless --online is given
+# (see "Networking (OpenSpy)" below). Locally, run the OpenSpy emulator
+# (FESL, GameSpy Presence, master server, CD-key and stats services on
+# 127.0.0.1), log in to it, list and join a host that checks logins as a
+# retail server does:
+#   bf2142 --game "source/Battlefield 2142" --openspy-emulator --emulator-account tester:secret@Tester
+#   bf2142 --game "source/Battlefield 2142" +level Camp_Gibraltar +gameMode gpm_cq --host --require-login --simulate 600
+#   bf2142 --game "source/Battlefield 2142" --login tester:secret@Tester --servers
+#   bf2142 --game "source/Battlefield 2142" --login tester:secret@Tester --connect 127.0.0.1 --play
+# (--login alone takes the credentials from the environment or
+# bf2142-online.cfg; --fesl only greets the account service)
 # add objects and play an animation on skinned ones:
 #   --spawn us_light_soldier@-38/38.3/-55/90 --animation Objects/Soldiers/Common/Animations/3P/3p_standfire.baf
 
@@ -351,6 +358,76 @@ come from OpenSpy's server code
 ([openspy-core](https://github.com/openspy/openspy-core),
 [bf2142-stella_stats](https://github.com/openspy/bf2142-stella_stats)) and the
 GameSpy SDK it's compatible with, not from blind reverse engineering.
+
+### Offline by default
+
+The rewrite contacts nothing outside this machine (and its LAN) unless
+the command line has `--online`. Without it every service (FESL, GameSpy
+Presence, the master server, the stats and CD-key services) is
+`127.0.0.1`, FESL is plain TCP there, and connecting to any public address
+is refused with "live servers need --online". `bf2142 --openspy-emulator`
+runs local stand-ins of OpenSpy's services built from OpenSpy's code
+(`src/Net/OpenSpyEmulator.h`); `--emulator-account name:password@soldier`
+(repeatable), `--emulator-cdkey KEY` (then only that key passes) and
+`--emulator-list host:gameport[:queryport]` set what they know. A host
+started with `--require-login` checks a joining player as a retail server
+does (name checksum, profile, CD key, ValidatePlayer) before making it.
+
+### Credentials
+
+Nothing is stored in the repository. `--login` with no value, the menu's
+login page, and the CD-key answer read, in order of precedence:
+
+- the environment: `BF2142_ACCOUNT`, `BF2142_PASSWORD`, `BF2142_SOLDIER`,
+  `BF2142_CDKEY`;
+- a key=value file: `$BF2142_ONLINE_CONFIG`, else `./bf2142-online.cfg`
+  (git-ignored), else `~/.config/bf2142/online.cfg`:
+
+```
+# bf2142-online.cfg — keep it out of git
+account = your OpenSpy account name
+password = your password
+soldier = the soldier to play (empty: the first)
+cdkey = XXXX-XXXX-XXXX-XXXX-XXXX
+```
+
+`--login name:password[@soldier]` overrides the account part. The retail
+game reads the CD key from the registry
+(`HKLM\SOFTWARE\Electronic Arts\EA Games\Battlefield 2142\ergc`); OpenSpy's
+CD-key service accepts any key, but the key you send should be yours.
+
+### Your first live test
+
+Everything below happens on your machine and talks to OpenSpy only
+because of `--online`; do it yourself, once you are happy with the local
+run above.
+
+1. Make an OpenSpy account and a soldier (in the retail game's login
+   page, or on openspy.net), then write `bf2142-online.cfg` as above (or
+   export the `BF2142_*` variables).
+2. Log in only (FESL, the soldier, GameSpy Presence):
+   ```
+   bf2142 --game "source/Battlefield 2142" --online --login 2>&1 | tee login.log
+   ```
+   It should end with `playing as <soldier> (profile N, name checksum …,
+   GP login ticket received)`.
+3. List the servers:
+   ```
+   bf2142 --game "source/Battlefield 2142" --online --servers | tee servers.log
+   ```
+4. Join one (pick an IP and its `hostport` from the list; an unranked,
+   non-PunkBuster server with free slots), headless for two minutes, with
+   the network log:
+   ```
+   bf2142 --game "source/Battlefield 2142" --online --login --connect <ip>:<port> --play 1 \
+       --simulate 120 --net-log join-net.log --net-capture join.cap 2>&1 | tee join.log
+   ```
+5. Send back `login.log`, `servers.log`, `join.log`, `join-net.log` and
+   `join.cap` (they hold no password; the logs show the soldier name and
+   profile id, and the capture the GP login ticket, which expires — log out
+   or wait a day before sharing them publicly). What to look for: in
+   `join.log`, whether the server sent CreatePlayer for us (a local player
+   id and the level loading) or disconnected us (the reason number).
 
 ## Conventions
 

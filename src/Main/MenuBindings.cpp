@@ -10,6 +10,8 @@
 #include "Input/GameControllers.h"
 #include "SettingsObjects.h"
 #include "Net/Fesl.h"
+#include "Net/OnlineConfig.h"
+#include "Net/OnlineSession.h"
 #include "Net/ServerQuery.h"
 #include "Net/Socket.h"
 #include "UI/Player/Natives.h"
@@ -199,84 +201,69 @@ struct MenuBindings::Job {
 MenuServices MenuServices::openSpy()
 {
 	// One account session at a time, kept between the account and the
-	// soldier login.
-	struct Session {
-		std::mutex mutex;
-		std::unique_ptr<net::FeslClient> client;
-	};
-	auto session = std::make_shared<Session>();
-	const auto failed = [](const std::optional<net::FeslMessage>& reply) {
-		AccountReply out;
-		if (!reply) {
-			out.reached = false;
-		} else {
-			out.error = reply->number("errorCode", 99);
-		}
-		return out;
-	};
+	// soldier login, and open while the game runs (net::OnlineSession: FESL,
+	// then GameSpy Presence with the pre-authentication ticket). Where it
+	// goes is net::onlineConfig(): the local emulators unless --online.
+	auto session = std::make_shared<net::OnlineSession>();
+	session->onLog = [](const std::string& line) { std::printf("online: %s\n", line.c_str()); };
 
 	MenuServices services;
 	services.browseLan = [] { return net::browseLan(); };
 	services.checkOnline = []() {
+		const net::ServiceEndpoint fesl = net::onlineConfig().endpoints.fesl;
+		if (!net::hostAllowed(fesl.host)) {
+			return false;
+		}
 		net::TcpSocket socket;
-		return socket.connect(net::kFeslHost, net::kFeslPort, 5);
+		return socket.connect(fesl.host, fesl.port, 5);
 	};
-	services.loginAccount = [session, failed](const std::string& name, const std::string& password) {
-		std::lock_guard<std::mutex> lock(session->mutex);
-		session->client = std::make_unique<net::FeslClient>();
-		net::FeslClient& client = *session->client;
+	services.loginAccount = [session](const std::string& name, const std::string& password) {
 		AccountReply out;
-		if (!client.connect(net::kFeslHost, net::kFeslPort, 10)) {
-			out.reached = false;
+		std::string error;
+		long code = 0;
+		const auto account = session->loginAccount(name, password, &error, &code);
+		if (!account) {
+			out.reached = code != 0;
+			out.error = code != 0 ? code : 99;
 			return out;
 		}
-		auto reply = client.hello();
-		if (!reply || reply->isError()) {
-			return failed(reply);
-		}
-		reply = client.login(name, password);
-		if (!reply || reply->isError()) {
-			return failed(reply);
-		}
-		reply = client.subAccounts();
-		if (!reply || reply->isError()) {
-			return failed(reply);
-		}
-		out.soldiers = reply->list("subAccounts");
+		out.soldiers = account->soldiers;
 		return out;
 	};
-	services.loginSoldier = [session, failed](const std::string& soldier) {
-		std::lock_guard<std::mutex> lock(session->mutex);
+	services.loginSoldier = [session](const std::string& soldier) {
 		AccountReply out;
-		if (!session->client || !session->client->connected()) {
-			out.reached = false;
+		std::string error;
+		long code = 0;
+		if (!session->loginSoldier(soldier, &error, &code)) {
+			out.reached = code != 0;
+			out.error = code != 0 ? code : 99;
+			std::printf("online: %s\n", error.c_str());
 			return out;
 		}
-		auto reply = session->client->loginSubAccount(soldier);
-		if (!reply || reply->isError()) {
-			return failed(reply);
-		}
-		out.profileId = reply->number("profileId");
-		session->client->gameSpyPreAuth(); // the ticket for GameSpy's services, not needed to play
+		const net::OnlineIdentity identity = session->identity();
+		out.profileId = identity.profileId;
+		out.nameChecksum = identity.nameChecksum;
+		out.loginTicket = identity.loginTicket;
+		session->keepAlive();
 		return out;
 	};
-	services.logoutAccount = [session]() {
-		std::lock_guard<std::mutex> lock(session->mutex);
-		if (session->client && session->client->connected()) {
-			session->client->goodbye();
-		}
-		session->client.reset();
-	};
+	services.logoutAccount = [session]() { session->logout(); };
 	services.fetchServers = [](std::string* error) {
 		// The fields the game's browser asks for.
 		const std::vector<std::string> fields {"hostname", "gamever", "mapname", "gametype", "gamevariant", "numplayers",
 			"maxplayers", "password", "hostport", "bf2142_pure", "bf2142_ranked", "bf2142_ranked_tournament",
 			"bf2142_reservedslots", "bf2142_sponsortext", "bf2142_communitylogo_url", "bf2142_sponsorlogo_url",
 			"bf2142_maxrank"};
-		return net::fetchServerList(net::masterServerHost(net::kGameName), "", fields, 15, error);
+		const net::ServiceEndpoint master = net::onlineConfig().endpoints.master;
+		return net::fetchServerList(master.host, "", fields, 15, error, master.port);
 	};
 	services.connectServer = [](const std::string& host, uint16_t port) {
 		net::GameConnection connection;
+		if (!net::hostAllowed(host)) {
+			net::ConnectResult refused;
+			refused.outcome = net::ConnectResult::Outcome::Error;
+			return refused;
+		}
 		net::ConnectResult result = connection.connect(host, port, {}, 6000);
 		if (result.outcome == net::ConnectResult::Outcome::Accepted) {
 			connection.disconnect();
@@ -929,8 +916,10 @@ void MenuBindings::finishAccountLogin()
 void MenuBindings::finishSoldierLogin()
 {
 	m_transactionKind = Transaction::None;
+	AccountReply login;
 	if (m_transaction) {
 		const AccountReply reply = m_transaction->account;
+		login = reply;
 		m_transaction.reset();
 		m_lastFeslError = reply.error;
 		m_lastError = reply.reached ? profileErrorFromFesl(reply.error) : kProfileErrorNoConnection;
@@ -940,6 +929,7 @@ void MenuBindings::finishSoldierLogin()
 		}
 	}
 	m_soldier = m_transactionName;
+	m_soldierLogin = login;
 	log("playing as " + m_soldier + (m_account.connected ? "" : " (offline)"));
 	if (m_account.connected) {
 		takeProfile(m_account.name, m_soldier);

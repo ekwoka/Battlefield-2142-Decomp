@@ -1334,11 +1334,12 @@ TEST(NetGame_PartNetworkablesRoundTrip)
 		CHECK(b.ragdollParticles.size() == 4 && b.ragdollBits == 96 + 3 * (3 + 3 * 8));
 		CHECK(bits == 21 + 9 + 9 + b.ragdollBits);
 		for (size_t i = 0; i < b.ragdollParticles.size() && i < 4; ++i) {
-			CHECK(near(b.ragdollParticles[i].x, s.ragdollParticles[i].x, 0.006f)
-				&& near(b.ragdollParticles[i].y, s.ragdollParticles[i].y, 0.006f)
-				&& near(b.ragdollParticles[i].z, s.ragdollParticles[i].z, 0.006f));
+			// The writers truncate (0x006879d0): within one step of 0.01.
+			CHECK(near(b.ragdollParticles[i].x, s.ragdollParticles[i].x, 0.0101f)
+				&& near(b.ragdollParticles[i].y, s.ragdollParticles[i].y, 0.0101f)
+				&& near(b.ragdollParticles[i].z, s.ragdollParticles[i].z, 0.0101f));
 		}
-		CHECK(near(b.position.x, 10.2f, 0.006f) && near(b.position.y, 5.0f, 0.006f));
+		CHECK(near(b.position.x, 10.2f, 0.0101f) && near(b.position.y, 5.0f, 0.0101f));
 	}
 }
 
@@ -1807,10 +1808,10 @@ TEST(NetGame_ControlRecordMode3)
 	CHECK(full.yaw == s.yaw && full.pitch == s.pitch && full.roll == s.roll && full.aimPitch == s.aimPitch);
 	CHECK(near(full.velocity.x, 1.2345f, 0.0006f) && near(coarse.velocity.x, 1.2345f, 0.006f));
 	CHECK(near(full.soldierAcceleration.y, -9.81f, 0.0001f) && near(full.soldierNode88.z, -0.0456f, 0.0001f));
-	CHECK(near(full.soldierImpulse.y, 6, 0.001f) && near(full.position.x, 100.25f, 0.0006f));
+	CHECK(near(full.soldierImpulse.y, 6, 0.0011f) && near(full.position.x, 100.25f, 0.0011f)); // truncated: one step
 	CHECK(near(full.soldierLean[0], 0.4567f, 0.002f) && near(full.soldierLean[1], -0.25f, 0.002f));
 	CHECK(near(full.stamina, 0.75f, 0.005f) && full.sprinting && near(full.soldierValue40000, -0.5f, 0.02f));
-	CHECK(full.weapon == 3 && coarse.weapon == 3 && near(coarse.yaw, s.yaw, 0.1f) && coarse.soldierValue40000 == 0);
+	CHECK(full.weapon == 3 && coarse.weapon == 3 && near(coarse.yaw, s.yaw, 0.18f) && coarse.soldierValue40000 == 0);
 
 	// RotationalBundle: 16 bits an angle and speed in mode 3.
 	net::NetworkableHints bundle;

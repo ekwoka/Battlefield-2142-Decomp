@@ -234,6 +234,15 @@ bool RemoteWorld::apply(const GameEvent& event)
 				seats.push_back(ghost);
 			}
 		}
+		if (onProblem && (m_resolver || m_ghostTemplates) && !layout
+			&& (!m_resolver || m_resolver(info.templateId).empty())) {
+			onProblem("unknown template", "CreateObject of template id " + std::to_string(info.templateId) + " (ghost "
+				+ std::to_string(info.ghost) + ", " + std::to_string(info.count) + " ghosts)");
+		} else if (onProblem && layout && layout->size() != info.count) {
+			onProblem("ghost count", "CreateObject of " + std::string(m_resolver ? m_resolver(info.templateId) : "")
+				+ " (template id " + std::to_string(info.templateId) + ") says " + std::to_string(info.count)
+				+ " ghosts, its layout has " + std::to_string(layout->size()));
+		}
 		if (info.count > 0) {
 			m_objects[info.ghost].seats = seats;
 		}
@@ -470,6 +479,15 @@ bool RemoteWorld::apply(const GameEvent& event)
 	}
 }
 
+namespace {
+
+std::string describeBits(size_t decoded, size_t length)
+{
+	return "decoded " + std::to_string(decoded) + " bits of " + std::to_string(length);
+}
+
+} // namespace
+
 void RemoteWorld::apply(const GhostBlock& ghosts)
 {
 	if (!ghosts.present) {
@@ -520,8 +538,14 @@ void RemoteWorld::apply(const GhostBlock& ghosts)
 			// The teams' networkable (0x00560ff0), registered by 0x0042b8b0
 			// as the client connects: only the bits sent change.
 			BitReader in(u.state.data(), (u.stateBits + 7) / 8);
+			in.limit(u.stateBits);
 			TeamNetState state;
-			if (decodeTeamState(in, state)) {
+			const bool decoded = decodeTeamState(in, state);
+			if (onProblem && (!decoded || in.position() != u.stateBits)) {
+				onProblem("ghost length", "the teams' state (ghost 0x201): " + describeBits(in.position(), u.stateBits)
+					+ (decoded ? "" : ", not decoded"));
+			}
+			if (decoded) {
 				for (int bit = 0; bit < 32; ++bit) {
 					if (state.mask & (1u << bit)) {
 						m_teamState.values[static_cast<size_t>(bit)] = state.values[static_cast<size_t>(bit)];
@@ -534,10 +558,17 @@ void RemoteWorld::apply(const GhostBlock& ghosts)
 		}
 		if (auto pg = m_playerGhosts.find(u.ghost); pg != m_playerGhosts.end()) {
 			BitReader in(u.state.data(), u.state.size());
+			in.limit(u.stateBits);
 			NetworkableState state;
 			NetworkableHints hints;
 			hints.kind = NetworkableKind::Player;
-			if (decodeNetworkable(in, hints, reference, state) && state.complete) {
+			const bool decoded = decodeNetworkable(in, hints, reference, state) && state.complete;
+			if (onProblem && (!decoded || in.position() != u.stateBits)) {
+				onProblem("ghost length", "player " + std::to_string(pg->second) + "'s state (ghost "
+					+ std::to_string(u.ghost) + "): " + describeBits(in.position(), u.stateBits)
+					+ (decoded ? "" : ", not decoded"));
+			}
+			if (decoded) {
 				RemotePlayer& p = m_players[pg->second];
 				const PlayerNetState& n = state.player;
 				if (n.hasStats) {
@@ -591,6 +622,10 @@ void RemoteWorld::apply(const GhostBlock& ghosts)
 			}
 			continue;
 		}
+		if (onProblem && !m_objects.count(u.ghost)) {
+			onProblem("unknown ghost", "an update of ghost " + std::to_string(u.ghost) + " (" + std::to_string(u.stateBits)
+				+ " bits), never created");
+		}
 		RemoteObject& o = m_objects[u.ghost];
 		o.ghost = u.ghost;
 		++o.updates;
@@ -600,8 +635,15 @@ void RemoteWorld::apply(const GhostBlock& ghosts)
 		if (const auto part = m_ghostParts.find(u.ghost); part != m_ghostParts.end() && part->second.first) {
 			const GhostPartLayout& layout = (*part->second.first)[part->second.second];
 			BitReader in(u.state.data(), (u.stateBits + 7) / 8);
+			in.limit(u.stateBits);
 			std::vector<NetworkableState> states;
 			o.decodedAll = decodeGhostState(in, layout, reference, states);
+			if (onProblem && (!o.decodedAll || in.position() != u.stateBits)) {
+				onProblem(o.decodedAll ? "ghost length" : "ghost undecoded",
+					"ghost " + std::to_string(u.ghost) + " (" + o.templateName + ", part " + std::to_string(o.part) + ", "
+						+ std::to_string(layout.groups.size()) + " groups, " + std::to_string(states.size())
+						+ " decoded): " + describeBits(in.position(), u.stateBits));
+			}
 			o.decoded = !states.empty() || layout.groups.empty();
 			if (!states.empty()) {
 				applyState(o, states.front());
@@ -615,8 +657,14 @@ void RemoteWorld::apply(const GhostBlock& ghosts)
 			continue;
 		}
 		BitReader in(u.state.data(), (u.stateBits + 7) / 8);
+		in.limit(u.stateBits);
 		NetworkableState state;
-		if (decodeNetworkable(in, hint->second, reference, state)) {
+		const bool decoded = decodeNetworkable(in, hint->second, reference, state);
+		if (onProblem && (!decoded || in.position() != u.stateBits)) {
+			onProblem(decoded ? "ghost length" : "ghost undecoded", "ghost " + std::to_string(u.ghost) + " ("
+				+ o.templateName + ", " + networkableKindName(hint->second.kind) + "): " + describeBits(in.position(), u.stateBits));
+		}
+		if (decoded) {
 			applyState(o, state);
 		}
 	}
@@ -641,10 +689,21 @@ void RemoteWorld::decodeControl()
 		second = &(*other->second.first)[other->second.second];
 	}
 	BitReader in(m_control.rest.data(), m_control.rest.size());
+	in.limit(m_control.restBits);
 	ControlState state;
 	PlayerOwnStateHints hints;
-	if (!decodeControlState(in, layout, second, m_control.position, hints, state, &m_historySlots)
-		|| in.position() > m_control.restBits) {
+	const bool decoded = decodeControlState(in, layout, second, m_control.position, hints, state, &m_historySlots);
+	if (onProblem && (!decoded || in.position() != m_control.restBits)) {
+		onProblem(decoded ? "control length" : "control undecoded",
+			"the control-object record of ghost " + std::to_string(m_control.ghost) + ": "
+				+ describeBits(in.position(), m_control.restBits) + " after its header"
+				+ (state.ownBits ? ", own state " + std::to_string(state.ownBits) + " bits" : std::string()));
+	}
+	if (onProblem && decoded && state.ownDecodedBits != state.ownBits) {
+		onProblem("own state length", "the player's own state: decoded " + std::to_string(state.ownDecodedBits)
+			+ " bits of " + std::to_string(state.ownBits));
+	}
+	if (!decoded || in.position() > m_control.restBits) {
 		return;
 	}
 	// A fresh state goes into its history slot (0x00580800 -> 0x0057f750),

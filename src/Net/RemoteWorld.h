@@ -191,6 +191,11 @@ public:
 	}
 	// The layout used for a template (nullptr without setGhostTemplates).
 	const std::vector<GhostPartLayout>* ghostLayout(uint32_t templateId);
+	// Each disagreement with the server's records (NetDiagnostics.h): an
+	// object of a template we don't have, an update of a ghost never made,
+	// a ghost state or control-object record we can't decode or whose
+	// decoding doesn't end at its length. (category, text)
+	std::function<void(const std::string&, const std::string&)> onProblem;
 
 	// Applies a received event; false for events the world doesn't use
 	// (they are kept in unhandled()).

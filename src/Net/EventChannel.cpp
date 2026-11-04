@@ -19,7 +19,7 @@ std::optional<ReliableEventBlock> EventChannel::next()
 			return block;
 		}
 	}
-	if (m_outgoing.empty() || m_unacked.size() >= 15) {
+	if (m_outgoing.empty() || ((m_nextOutgoing - m_lastInOrder) & 0x1f) >= 15) {
 		return std::nullopt;
 	}
 	ReliableEventBlock block;
@@ -50,7 +50,12 @@ void EventChannel::acknowledge(uint32_t acknowledged, uint32_t mask)
 		}
 		const uint32_t blockSequence = it->second;
 		if ((mask >> behind & 1u) != 0) {
-			m_unacked.erase(blockSequence);
+			if (m_unacked.erase(blockSequence)) {
+				m_delivered[blockSequence] = true;
+				while (m_delivered.erase((m_lastInOrder + 1) & 0x1f)) {
+					m_lastInOrder = (m_lastInOrder + 1) & 0x1f;
+				}
+			}
 		} else if (m_unacked.count(blockSequence)
 			&& std::find(m_resend.begin(), m_resend.end(), blockSequence) == m_resend.end()) {
 			m_resend.push_back(blockSequence);

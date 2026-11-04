@@ -3263,8 +3263,11 @@ input, clients no ghosts.
 A move (`0x00590570` reads) holds:
 
 - six axes, each a sign bit and 15 bits: the player inputs 0-5 (yaw,
-  pitch, roll, throttle, mouse look x and y) times 100, clamped
-  (`0x005837d0`);
+  pitch, roll, throttle, mouse look x and y) times 100, clamped to
+  ±32767 and truncated toward zero (`0x005837d0`, `_ftol2` at
+  `0x008c9694`; the builder `0x00583b83` multiplies the short × 0.01 by
+  100 and truncates again, which by the x87 precision mode gives the same
+  value or one less in magnitude: the rewrite truncates once);
 - 32 + 11 trigger bits: bit `id - 8` for each input in the table at
   `0x009653a8` that is above 0.5 (fire 8, action 9, use 10, sprint 13,
   weapon 1-9 14-22, seat 1-8 23-30, alt fire 31, reload 32, lie 37, crouch
@@ -3273,19 +3276,30 @@ A move (`0x00590570` reads) holds:
   from a device axis; the server stores it and nothing reads it).
 
 The client keeps its last three moves and sends them all each time
-(`0x00590450`). It writes no input until it has a player: `0x00590740`
-writes the lone 0 bit while its player (`+0x84`) is unset, and the
-server's reader hands moves to the connection's player
-(`0x005904b0`). One live server stopped answering after getting moves
-before the player existed and didn't take a new connect a minute later.
+(`0x00590450`; the server's reader has room for six, so never more than
+three). It writes no input until it has a player, nor without a move:
+`0x00590740` writes the lone 0 bit while its player (`+0x84`) is unset,
+which ServerConnection's setPlayer (`0x00579ff0`, vtable `0x00964c88`
+slot 6) sets when CreatePlayer for our own player arrives (`0x0050a8c0`,
+the remote bit clear). The server's reader hands moves to the
+connection's player (`0x005904b0`: `(**(+0x84) + 0xa8)()`) without a null
+check: moves before the player crash a retail server. That is the live
+server that stopped answering after getting moves before the player
+existed and didn't take a new connect a minute later.
 
 **Events** (both ways): 1 bit present, 8 bits the count, 5 bits the block
 sequence, 1 bit set when the block is a resend, then the events, each a
 7-bit type and its fields. The receiver keeps blocks by sequence and
 handles them in order (`0x006447b0`). The sender keeps a block until the
 notify layer reports the packet that carried it: delivered, it is dropped;
-lost, it goes again with the resend bit. At most 15 blocks are in flight
-(`0x00644bf0`).
+lost, it goes again with the resend bit, in a packet of its own before
+anything new. A new block goes only while it is under 15 ahead of the
+last block delivered with every one before it (`+0x6c`, 31 at the start),
+so at most 14 are in flight (`0x00644bf0`, `0x006450d0`). A packet that
+carries no block must forget any block its sequence carried 64 packets
+before: an acknowledgement settling the wrong block makes a spurious
+resend, and a block whose sequence the receiver already holds is fatal to
+the connection (`0x006447b0`: `+0x14 = 2`).
 
 The event types register at `0x00a3ba44` (`0x005094f0`) with a factory
 each. Each event class has the reader in vtable slot 10, the writer in 11,
@@ -3489,9 +3503,21 @@ Particle systems, decals and trails create no object at all.
 
 A ghost covers a subtree of objects (`0x0067c690`, cached per template):
 
-- Every PlayerControlObject of the tree (interface `0xc4c5`) starts a
-  ghost, in pre-order (`0x0067a270`), numbered from CreateObject's ghost
-  id; CreateObject's count is how many. A vehicle is its driver's ghost
+- Every object of the tree answering interface `0xc4c5` (PlayerControlObject
+  and Parachute, and FreeCamera `0x00616600`, LadderContainer
+  `0x0059d2d0` and Soldier `0x00585af0`) starts a ghost, in pre-order
+  (`0x0067a270`), numbered from CreateObject's ghost id; CreateObject's
+  count is how many. A tree whose root has no networkable has no ghosts,
+  and a ghost without a group takes no id (`0x0067c690`: the roots
+  as_drone, missile_silo_closed and tgw_helipad_spawn are PCOs without a
+  networkableInfo). The tree is the objects' as both machines build them
+  from the templates at creation (the cache is filled from the first
+  instance registered, `0x004b3f70` → `0x0067d3d0` on a client,
+  `0x004ab8a0` on a server): children in template order (`0x0060ec00`),
+  without what a dedicated server doesn't make (EffectBundle's and
+  WheelEffectBundle's create slots `0x006198c0`, `0x0061cb50` return 0
+  there, `0x0042b800`) or what makes no object anywhere (Sound's create
+  slot `0x007ff0f0`, the particle systems). A vehicle is its driver's ghost
   and one per other seat (as_fav: the driver, AS_FAV_SecondPosition and
   as_fav_openPosition).
 - A ghost's objects are its root's subtree without other
@@ -3500,11 +3526,16 @@ A ghost covers a subtree of objects (`0x0067c690`, cached per template):
 - They are grouped in order. A projectile (interface `0x94c1`) with a
   parent is left out, and so is one whose info forces a networkable id
   unless it is the root or has no parent. A non-unique one joins the first
-  group whose first member has the same template, or is a
-  RotationalBundle or Camera with the same rotation settings (inputs,
-  automatic reset, rotation limits, speed, acceleration; `0x00678070`);
-  else it starts a group. More than 12 groups is an error ("has to many
-  statemasks").
+  group whose first member has the same template, or is a kind of
+  RotationalBundle (template slot `0x4c`: also Wing, FloatingBundle,
+  LandingGear) of the same type (RotationalBundle and Camera counting as
+  one) with the same rotation settings (`+0x304` automaticReset,
+  `+0x2f8`..`+0x300` the inputs, `+0x2a4` / `+0x298` the rotation limits,
+  `+0x2bc` maxSpeed, `+0x2d4` acceleration, vectors within 1.19e-7;
+  `0x00678070`); else it starts a group. More than 12 groups only warns
+  ("has to many statemasks"): the groups stay and the readers take them
+  all (custom maps' xpak_civ2 has 75). DestroyableWindow makes no
+  networkable (`0x005bed50`'s vtable `0x0096b538`, slot 94 `0x0058cc40`).
 - An update is each group's state in turn, and every member of a group
   takes the same bits (`0x0057f670` rewinds the stream for each).
 
@@ -3637,7 +3668,9 @@ Vehicle parts:
   a position and a 0-100 value (10 bits), a bit per armored part.
 - **Kit:** a bit, then the position.
 - **GenericProjectile:** a 6-bit mask, the position (0.01), a 12-bit
-  quaternion, then a speed block and hit points.
+  quaternion, then a speed block, hit points (only with armour: without,
+  mask 0x10 reads nothing and the 0x20 bit still follows, `0x00606f20`)
+  and a bit.
 - **ControlPoint:** a 6-bit mask, the team (sign + 3 bits), and a flag
   (cp `+0x1a0`). Reset (`0x005bb980`) sets that flag when the point starts
   with team 0. Then come the flag's height (the capture progress, 0..1)
@@ -3654,8 +3687,9 @@ Its ghost id is fixed: `0x0042b8b0` registers it as ghost `0x201`
 `0x202`), on the server as it starts (GameServer.cpp's `0x004ab030`) and
 on a client as it connects (`0x004b4d10`) or plays a demo
 (`0x004b4a80`), so no CreateObject announces it. Its state is a 32-bit
-mask, then per bit sign + 17 bits (`0x0050a460`), the top two bits sign +
-2. The tickets are team `+0x84` (`0x0055f180` clamps them to 0..9999; the
+mask, then per bit sign + 17 bits (`0x0050a460`); bit `0x40000000` sign +
+2; bit `0x80000000` sign + 2 (a team byte + 1), then sign + 17 twice
+(`+0x38`, `+0x88`; reader `0x00560ff0`, writer `0x0055fe30`). The tickets are team `+0x84` (`0x0055f180` clamps them to 0..9999; the
 HUD's `0x00449860` shows them, low under 101): bit `0x400` for team 1,
 `0x400000` for team 2, each followed by a bit (team `+0x90`) and a value
 (`+0x8c`). The other bits are kept unnamed (`net::TeamNetState`). The
@@ -3726,9 +3760,28 @@ client:
 | 5 | 30 | 20 | 320 | 640 |
 
 Type 6 is ignored. For every type but 0, a client also sends after each
-simulated tick (`0x004b3df0`), which comes to 30 a second. Once
-connected, a client pings every 3 s (`0x0068f280`). The ping's sequenced
-bit (`0x006a9bb0`) is set once data has gone out, as it is in a pong.
+simulated tick (`0x004b3df0`), which comes to 30 a second; packets go
+from the connect on, before any player (a lone 0 bit per empty block).
+Once connected, a client pings every 200 ms (`+0xc`) until 32 pongs have
+come back within a second (`0x0068ef80` sets `+0x11`), then every 3 s
+(`0x0068f280`). The ping's sequenced bit (`0x006a9bb0`) is set once data
+has gone out, as it is in a pong. Only data packets advance the 6-bit
+sequence (`+0x48` from 1, `0x006a9ff0`); pings and pongs carry the last
+data sequence sent (63 before any), unlike BF2's every-packet rule that
+OpenBattlefield2 describes. A data packet more than 30 ahead of the
+peer's last acknowledgement is held (`0x006aa140`): past 31 the peer
+drops it as too far ahead (`0x0068e150`), and a stale or repeated one is
+dropped before its acknowledgement is looked at. An accept (type 2) that
+comes again while connected means our type 4 was lost: the client
+acknowledges again (`0x0068f280` case 2), else the server stays in its
+state 1 and ignores our data. A disconnect goes three times
+(`0x0068e520`). A server drops a client silent for 10 s (`+0x48c`,
+`0x0068a950`, reason 10); any packet resets it, pongs included. The
+exe's client keeps the connection's loop on its own thread
+("NetClientThread", `0x0068eed0`), so pings are answered while a level
+loads; the rewrite's client does the same (`GameClient::loadingLevel` →
+`GameConnection::beginKeepAlive`, ended by `levelLoaded` or the next
+`update`).
 
 ### Joining
 
@@ -3740,16 +3793,30 @@ bit (`0x006a9bb0`) is set once data has gone out, as it is in a pong.
 3. The server checks the build (refusing old and new ones with 0x17 and
    0x18) and the profile, then validates the key with GameSpy's CD-key
    service (`0x004af940`).
-4. The client tells its connection type (event 3; `0x004b48a0`, also
-   called when the connection is made).
+4. The client told its connection type (event 3) as soon as the
+   connection was made (`0x004b4d10` runs `0x004b48a0`), before the
+   challenge; the challenge handler (`0x004b2790`) sends only event 2.
 5. The server sends its settings (data block 0) and the map list (5)
    (`0x004a7ce0`).
-6. With the player accepted (`0x004ae6a0`), the server sends
+6. The client answers the first settings block (written with argument 1)
+   with its player info, data block 1 (`0x004b5eb0` case 0; written by
+   `0x005850a0`, read by `0x00584ff0`): the name, the checksum of the
+   soldier's name, the profile id, the clan tag, GameSpy Presence's login
+   ticket and the voice bit (see [Account login](#account-login-eas-fesl-via-openspy)).
+   The server (`0x004aef10` type 1 → `0x004ae6a0`) checks the checksum
+   (0x24 otherwise), on a ranked server the profile (0xd), and asks the
+   stats service's ValidatePlayer.
+7. With the player accepted (`0x004ae6a0`), the server sends
    CreatePlayer (the client's own player has the remote bit clear) and
    the level to load (data block 2), and marks the connection loading.
-7. The client answers the level block at once with PostRemote 6/2
-   (LoadComplete; `0x004b5eb0`) and loads it.
-8. The server sends the objects (CreateObject) and 6/4, which the client
+8. The client loads the level (`0x004b5eb0` case 2: vtable `0x1c`,
+   `0x004b3990`, "GSLoadLevel") and only then answers with PostRemote 6/2
+   (LoadComplete), and the ContentCheck event when the settings ask for
+   it; a load that fails sends nothing (`LAB_004b6316`). The rewrite's
+   game sets `GameClient::answerLoadAfterLevel` and calls `levelLoaded()`
+   once its level is up; the tests' clients, which load nothing, answer at
+   once.
+9. The server sends the objects (CreateObject) and 6/4, which the client
    echoes; 6/5 (the networkable checksum), echoed when it matches; then
    (`0x004af710`) 6/3 StartSimulation, on which the client sends its
    connection type again, and the game status (PostRemote 0/1). A pure
@@ -3846,12 +3913,14 @@ for the ghost layouts); seat ghosts are drawn with their vehicle. Another
 level block on the connection is a map change: the level reloads and the
 connection stays. A lost connection or the
 menu's Disconnect goes back to the menu. `--probe host[:port]` only shakes
-hands and prints what the server sends. A vanilla 1.51 server on OpenSpy (2026-10) takes the
-handshake and the CD-key answer, sends its settings and map list, and
-then waits; it sends no CreatePlayer, most likely because it needs a
-logged-in profile id and a valid CD key (GameSpy pre-authorisation).
-Without an OpenSpy account the rest is tested against a loopback server
-in `tests/NetGameTest.cpp` that speaks these formats.
+hands and prints what the server sends. A vanilla 1.51 server on OpenSpy (2026-10) took the
+handshake and the CD-key answer, sent its settings and map list, and
+then waited, sending no CreatePlayer: the client of then never sent the
+player info (step 6), which is what the server waits for. The client
+sends it now; whether a live server then accepts the login is still to
+be tried (README, "Your first live test"). The rest is tested against
+loopback servers in `tests/NetGameTest.cpp` and `tests/OnlineTest.cpp`
+(a host doing the retail checks against the local OpenSpy emulator).
 
 #### Joined games' radio, tools and menus
 
@@ -4705,6 +4774,99 @@ connection's own timer (every 200 ms) and the server steps the ticks in
 between with the last move held: those records correct it by tens of
 centimetres until the client's loop runs. `bf2142 --connect ... --verbose`
 prints any correction over half a metre.
+
+### The wire audit (a retail 1.51 server)
+
+Until 2026-11 the client had only met the rewrite's own server, so both
+sides could have agreed on a wrong format. Every message of a basic
+session was re-derived from BF2142.exe's own reader and writer (the
+decompiled code, and the disassembly where Ghidra lost arguments or
+rounding modes), not from our server, and cross-checked with
+OpenBattlefield2's readers where BF2 shares the layout. "audited" means
+the field order, widths, signedness, conditions and quantization were
+compared bit for bit; `tests/NetWireTest.cpp` builds each from the exe's
+field list and checks that ours reads it to exactly its length and
+writes it back bit for bit.
+
+| Message | Exe reader | Exe writer | Ours | Status |
+|---|---|---|---|---|
+| Connect (type 1) | `0x00689d30` | `0x0068dd00` | `connectPacket` | audited; fixed: header id 1 (`0x0068ddd1`) |
+| Accept / refuse / acknowledge (2, 3, 4) | `0x0068e580`, `0x0068de90` | `0x00689400`, `0x0068df20` | `readConnectReply`, `acknowledgePacket` | audited; fixed: an accept while connected is acknowledged again |
+| Disconnect (5) | `0x0068ee60` | `0x0068dfa0` (×3, `0x0068e520`) | `disconnectPacket` | audited; fixed: sent three times |
+| Ping / pong (7, 8) | `0x0068e050`, `0x0068d490` | `0x006a9bb0`, `0x006a9c30` | `pingPacket`, `pongPacket` | audited; fixed: 200 ms until 32 fast pongs |
+| Data (15), notify header | `0x0068e150`, `0x006a9cd0` | `0x006a9ff0`, `0x006aa140`, `0x006aa980` | `dataPacket`, `NotifyState` | audited; fixed: the 30-packet send window, stale packets' acknowledgements ignored |
+| Payload's three blocks | `0x0057a170` | `0x0057b040`, `0x0057b380` | `readGamePayload` | audited |
+| Input block, moves | `0x00590990`, `0x00590570` | `0x00590740`, `0x00590650`, `0x00583b50` | `writeInputBlock`, `PlayerMove` | audited; fixed: axes truncated and clamped to ±32767, at most 3 moves, a lone 0 without moves |
+| Event block | `0x006447b0` | `0x00644bf0`, `0x006450d0` | `EventChannel`, `readEventBlock` | audited; fixed: 14 blocks in flight, a block-less packet clears its sequence's entry |
+| Events 0x01-0x1f | slot `+0x28` of each class | slot `+0x2c` | `codeFields` | audited: all match |
+| Events 0x20-0x47 (0, 0x12, 0x35 unregistered) | slot `+0x28` | slot `+0x2c` | `codeFields` | audited: all match |
+| Data block 0, settings | `0x00516230` | `0x00515bc0` | `RemoteWorld::applyDataBlock` | audited |
+| Data block 1, player info (c→s) | `0x00584ff0` (`0x004aef10` → `0x004ae6a0`) | `0x005850a0` (`0x004b5eb0` case 0) | `PlayerAuth`, `GameClient::sendPlayerInfo` | audited; was missing: no CreatePlayer without it |
+| Data block 2, level | `0x00515650` | `0x005156f0` | `RemoteWorld` | audited |
+| Data block 5, map list | `0x00441e40` | `0x00441410` | `RemoteWorld` | audited |
+| Data block 8, end of round | `0x0059c740` | `0x0059cbc0` | `RemoteWorld::endOfRoundData` | audited |
+| DataBlock / StringBlock transfer, chat | `0x0050a1a0`, `0x006434b0`, `0x006430c0` | `0x0050a250`, `0x00643720`, `0x00643370` | `dataBlockEvents`, `encodeChat` | audited |
+| Ghost block, updates | `0x00581290`, `0x0057fce0` | `0x00582cd0`, `0x0057fbc0` | `readGhostBlock` | audited |
+| Control-object record | `0x00580cd0` | `0x00580830` | `readGhostBlock`, `decodeControlState` | audited |
+| Player networkable | `0x005981a0` | `0x00596100` | `readPlayer` | audited |
+| Player's own state | `0x00596ed0` | `0x00594cc0` | `decodePlayerOwnState` | audited |
+| Teams' networkable (ghost `0x201`) | `0x00560ff0` | `0x0055fe30` | `decodeTeamState` | audited; fixed: bit `0x80000000` carries three values |
+| Quantizers (delta, delta3, quaternion, units, ranged) | `0x006876c0`, `0x00687920`, `0x00687c20`, `0x00687f40`, `0x0050d450`, `0x00508370` | `0x00687510`, `0x00687770`, `0x006879d0`, `0x00687dc0`, `0x0050d4b0`, `0x005083c0` | `Networkables.cpp` | audited; fixed: the delta writers truncate (×1/step) |
+| SimpleObject | `0x005ffec0` | `0x005ff5d0` | `readSimpleObject` | audited |
+| Soldier | `0x005fcdb0` | `0x005fb8c0`, `0x005fc1a0`; ragdoll `0x008acce0` / `0x008a9ce0` | `readSoldier` | audited; fixed: the mode-2 velocity step `0x3c23d70b`, the writer truncates (×1/range), health `ceil`, inventorySize 6 by default |
+| Seat (PlayerControlObject) | `0x00605b00` | `0x00605650` | `readSeat` | audited; fixed: the occupant's item width from the level's soldiers |
+| RotationalBundle | `0x00602070` | `0x006015a0` | `readRotationalBundle` | audited |
+| Engine | `0x00609340` | `0x00608df0` | `readEngine` | audited; fixed: the template's defaults (1 gear, clamp 1..5; angle of attack 20; rpm 1000..4000), mask 0x10's writer scale |
+| Spring, MechLegs, TargetObject, Item, Kit, ControlPoint, DestroyableObject, FreeCamera, OverheadCamera | (their slot 12) | (slot 11) | `Networkables.cpp` | audited |
+| GenericProjectile | `0x00606f20` | `0x006067c0` | `readProjectile` | audited; fixed: mask 0x10 without armour still reads the 0x20 bit |
+| DestroyableWindowsBundle | `0x00604e00` | `0x00604d70` | `readWindows` | audited; fixed: `setNumWindows` read, 0 by default |
+| Ghost layouts from templates | `0x0067c690`, `0x0067a270`, `0x0067a5e0`, `0x00678070` | | `buildGhostLayout`, `ghostTemplateFrom` | audited; fixed: Wing / FloatingBundle / LandingGear grouping, FreeCamera / LadderContainer / Soldier start ghosts, no ghosts without a root networkable, effect bundles and object-less types left out, over 12 groups kept, DestroyableWindow makes none, Engine / DynamicBundle physics defaults |
+| Template network ids | `0x0070a700` | | `world::ObjectTemplateManager` | audited: match |
+
+Mismatches the audit found, besides the table's: the client sent its
+connection type with the challenge answer instead of at the connect
+(`0x004b4d10`), and LoadComplete before loading the level instead of after
+(`0x004b5eb0` case 2); it couldn't keep a server's pings answered through
+a long load (10 s of silence drops a client). What only a live server can
+confirm: the player info's acceptance (the login, the name checksum, the
+stats service), the x87 precision a client runs its axis quantization
+in (one unit either way), whether templates a custom level's client.zip
+creates shift the shared ids (they would in the exe too), and anything
+a retail server sends that a basic round didn't need.
+
+**Diagnostics.** `bf2142 --connect host[:port] --net-strict --net-log
+<file> --net-capture <file.bf2142cap>` (`src/Net/NetDiagnostics`):
+
+- `--net-log` writes every datagram in and out: its time, the header
+  (type, connection, sequence, acknowledgement, mask), the bytes in hex,
+  and for data the three blocks decoded: the moves, each event with its
+  bit offset, name and fields, the ghost block's record and each update's
+  kind, ghost, length and offset.
+- `--net-strict` prints each problem to stderr as it is found
+  (`net-strict !! #<datagram> <category>: ...`) and a count per category
+  at the end. The problems: an unknown packet type; a data packet whose
+  16-bit length isn't what the datagram holds; an unregistered event type
+  or an event read past the payload's end; ghost kind 2; bits left after
+  the ghost block beyond the byte's padding, or padding that isn't zero;
+  and from `RemoteWorld` (with the level's templates): a CreateObject of a
+  template we don't have or whose layout's ghost count differs from the
+  event's, an update of a ghost never created, a ghost state (the teams',
+  a player's, an object's, by its layout) or the control-object record or
+  the player's own state in it whose decoding doesn't end exactly at its
+  length. One live session gives the full list of what to fix.
+- `--net-capture` keeps the datagrams (`BF2142NETCAP`, version 1: u8
+  direction, u32 milliseconds, u16 size and the bytes per record) and
+  `bf2142 --net-replay <file>` plays one back into the client offline, at
+  its recorded pace, from the connect reply on: the level loads, the world
+  fills, nothing is sent (`GameClient::playCapture`, `GameConnection::
+  beginReplay` / `inject`). With `--net-strict` a replay re-checks a live
+  session after a fix. `NetHost_StrictDiagnosticsAndCaptureReplay`
+  records a loopback session, checks it has no problem, and replays it into
+  a fresh client that ends with the same world.
+
+Measured on 127.0.0.1 (`--host --dedicated +level Cerbere_Landing --bots 6`
+and `--connect --play 2 --walk --simulate 30 --net-strict`): 1732 datagrams,
+no problem; its capture replayed with `--net-replay`: no problem.
 
 ### Asking servers directly (QR2) and the LAN search
 
@@ -7428,12 +7590,76 @@ The game's login runs:
 
 The server pings (`fsys Ping`) and the client answers.
 
-Rewritten in `src/Net/Fesl` and `TlsSocket` (OpenSSL; optional at build
-time). `bf2142 --fesl` greets the live service. `bf2142 --login
-name:password[@soldier]` runs the whole login, and with `--connect` it joins
-with the soldier's profile id. Live: OpenSpy answers the greeting, and an
-unknown name gets error 101. A full login needs an OpenSpy account; none was
-used here.
+The 1.51 client uses this `acct` set (the TXN table `0x008017e0`), not
+the later `Nu*` transactions (NuLogin, NuGetPersonas, NuLoginPersona) or
+GetTelemetryToken that OpenSpy also serves for other games. What it keeps
+(EAOnlineManager, `src BF2/Game/Persistence/EAOnlineManager.cpp`; its
+FESL callback `0x004a1d70`): Login's `lkey`, `userId` and
+`encryptedLoginInfo` (`0x0049f550`); LoginSubAccount's profile, and the
+checksum of the soldier's name (`0x005795f0` → `0x00579410`, kept at
+`0x00a6801c`); GameSpyPreAuth's `ticket` and `challenge` (`0x0049f700`,
+at `+0xa0` and `+0xbc`). OpenSpy reads one message per socket read
+(`FESLPeer.cpp`), so the rewrite pauses after answering a ping or memory
+check before its next request; OpenSpy pings every 120 s and drops a
+connection silent for 240 s.
+
+### GameSpy Presence
+
+After GameSpyPreAuth the game logs in to GameSpy Presence (the GP SDK,
+`gpcm.gamespy.com:29900`, host string `0x00a08b80`; the OpenSpy patch
+makes it `gpcm.openspy.net`) with the ticket
+(gpConnectPreAuthenticated `0x00717460`, called from `0x0048b880`;
+gpInitialize: product 10709, namespace 20). The server opens with
+`\lc\1\challenge\<10 letters>\id\1\final\`; the client (`0x00729660`)
+sends `\login\\challenge\<32 random letters and digits>\authtoken\<ticket>
+\response\<md5>\port\<its peer socket's port, as a signed short>\productid\10709
+\gamename\stella\namespaceid\20\sdkrevision\3\id\1\final\`. The response is
+md5(md5(pw) + 48 spaces + user + client challenge + server challenge +
+md5(pw)), with the ticket as the user and the FESL challenge as the
+password. The answer `\lc\2` carries the session key, user and profile
+ids, the unique nick, the login ticket `lt` (24 characters, `+0x488`) and
+a proof (the same hash with the challenges swapped; `0x00729c40` checks
+it: "Could not authenticate server."). The game's GP callback
+(`0x0048b350`) takes the login ticket (gpGetLoginTicket `0x00717fb0`)
+into EAOnlineManager slot 0x70 (`0x0049f9e0`: `+` → `[`, `/` → `]`, `=` →
+`_`): that is the auth a game server is shown in the player info.
+
+### What a server checks
+
+- Event 2 (`0x004af940`): the build (0x17 / 0x18), on a ranked server
+  slot 0xe8 (`0x004a61e0`), then GameSpy's CD-key SDK
+  (`0x00642f90` → gcd_authenticate_user `0x007184b0`, game id 0x52c),
+  which doesn't hold the join up, and the ban list.
+- The player info (`0x004ae6a0`): the name's checksum (0x24), on a
+  ranked server (gpm_cq/ti/sl/nv/ca with GameSpyRanked, `0x00430a00`) a
+  profile (0xd); then GameSpyAuth's
+  `ValidatePlayer.aspx?auth=<lt>&tid=0&SoldierNick=<name>&pid=<pid>`
+  (`0x00584c00`) on the stats host, and the player is made. A result
+  other than `Ok` (`0x00584560`: InvalidAuthProfileID, InvalidReportedNick,
+  InvalidReportedProfileID) reaches the admin script's
+  `onPlayerNameValidated` (`admin/standard_admin/playerconnect.py`),
+  which bans. OpenSpy's stats service (bf2142-stella_stats
+  `API/Auth.js`) takes a 24-digit hex auth as a session key; its CD-key
+  service answers every `\auth\` with `\uok\`.
+- The client reads its CD key from
+  `HKLM\SOFTWARE\Electronic Arts\EA Games\Battlefield 2142\ergc`
+  (`0x00576d20`; scrambled with an "x9392" prefix, `0x00576e30`), and the
+  event-2 answer's profile from the menu's soldier (SwiffHost slot 0x250 →
+  0x1c4, `+0x20`).
+
+Rewritten in `src/Net`: `Fesl`, `TlsSocket` (OpenSSL; optional at build
+time), `GameSpyPresence`, `PlayerAuth` (the player info, the checksum,
+ValidatePlayer, the CD-key service's request), `OnlineSession` (the
+three steps, then a thread keeping both connections up), `OnlineConfig`
+(the endpoints, the credentials, and the offline guard: only `--online`
+lets anything reach a public address) and `OpenSpyEmulator` (local
+FESL, GP, CD-key, master and stats services from openspy-core's code).
+`HostedGame` with `HostSetup::login` (`--require-login`) does the retail
+server's checks. `bf2142 --fesl` greets the account service; `bf2142
+--login [name:password[@soldier]]` runs the whole login, and with
+`--connect` joins with it. Live (2026-10): OpenSpy answered the greeting
+and an unknown name got error 101; a full live login is still to be run by
+the user.
 
 ## Players, deaths and respawning
 

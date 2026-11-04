@@ -1,6 +1,7 @@
 #include "ServerBrowser.h"
 
 #include "GameSpyCrypt.h"
+#include "OnlineConfig.h"
 #include "Socket.h"
 
 #include <cctype>
@@ -239,15 +240,21 @@ std::optional<ServerList> parseListReply(std::vector<uint8_t> reply, const std::
 }
 
 std::optional<ServerList> fetchServerList(const std::string& host, const std::string& filter,
-	const std::vector<std::string>& fields, int timeoutSeconds, std::string* error)
+	const std::vector<std::string>& fields, int timeoutSeconds, std::string* error, uint16_t port)
 {
+	if (!hostAllowed(host)) {
+		if (error) {
+			*error = hostRefusal(host);
+		}
+		return std::nullopt;
+	}
 	std::array<uint8_t, 8> challenge {};
 	std::mt19937 random(static_cast<uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count()));
 	for (uint8_t& c : challenge) {
 		c = static_cast<uint8_t>(0x21 + random() % 94); // printable, as the SDK makes it
 	}
 	TcpSocket socket;
-	if (!socket.connect(host, kMasterPort, timeoutSeconds)) {
+	if (!socket.connect(host, port, timeoutSeconds)) {
 		if (error) {
 			*error = "cannot connect to " + host;
 		}

@@ -14,7 +14,7 @@
 //     the input block with the last three moves (0x00590450), and, when there are
 //     queued events, a reliable event block. Blocks whose packet the server
 //     reports lost (its notify acknowledgement) go out again with the
-//     resent bit, as 0x00644bf0 does; at most 15 blocks are in flight.
+//     resent bit, as 0x00644bf0 does; at most 14 blocks are in flight.
 //
 // Requests a player makes (team, kit, spawn point, chat, suicide) are
 // queued as events. Joining a real server additionally needs an account
@@ -24,6 +24,7 @@
 #include "EventChannel.h"
 #include "GameConnection.h"
 #include "GameProtocol.h"
+#include "NetDiagnostics.h"
 #include "RemoteWorld.h"
 
 #include <array>
@@ -61,6 +62,14 @@ struct GameClientOptions {
 	// (0x0050bb90 compares the id with the connection's). Empty: the
 	// server's name for us stays.
 	std::string playerName;
+	// The player info the client sends after the server's settings (data
+	// block 1, PlayerAuth.h; 0x004b5eb0 case 0): the soldier's name
+	// (playerName, else "Player"), its checksum (0 without a soldier
+	// login), the clan tag and GP's login ticket. A retail server makes
+	// the player only after this block.
+	uint32_t nameChecksum = 0;
+	std::string clanTag;
+	std::string auth;
 	// The input block's 9-bit value (0x0057b040): the networkable manager's
 	// +0x50 (the rate table's 200 ms) plus 1000 x 0x006b4e70's
 	// interpolation time (from settings at 0x00a83e4c-0x00a83e54, taken as 0).
@@ -104,6 +113,16 @@ public:
 	// it returns 1; 0 is none due yet, -1 the end. Nothing is sent.
 	void playDemo(std::function<int(std::vector<uint8_t>& payload)> next);
 	bool playingDemo() const { return static_cast<bool>(m_demo); }
+
+	// Plays a captured session back (NetDiagnostics.h): the datagrams the
+	// server sent go in as if from the socket, from the connect reply on,
+	// and nothing is sent. Paced: each at its recorded time after the
+	// first; else one a call of update(). update() returns false at the end.
+	void playCapture(std::vector<CaptureRecord> records, bool paced, const GameClientOptions& options = {});
+	bool playingCapture() const { return m_replay; }
+	// Logs every datagram and checks every record (NetDiagnostics.h); the
+	// diagnostics must outlive the client's use of them. nullptr: none.
+	void setDiagnostics(NetDiagnostics* diagnostics);
 
 	RemoteWorld& world() { return m_world; }
 	const RemoteWorld& world() const { return m_world; }
@@ -202,6 +221,18 @@ public:
 	// checksum: ours isn't computed), and the connection type again on 6/3
 	// (StartSimulation, 0x004b6630).
 	bool autoAnswer = true;
+	// LoadComplete (and a pure server's content check) only once the game
+	// has loaded the level and says so with levelLoaded(), as 0x004b5eb0
+	// sends them after its load; off: at once (the tests' clients load
+	// nothing).
+	bool answerLoadAfterLevel = false;
+	// The game loaded the level the server named: LoadComplete goes (with
+	// answerLoadAfterLevel) and the loading keep-alive ends.
+	void levelLoaded();
+	// The game starts loading (and won't call update() until levelLoaded()):
+	// the connection keeps answering pings meanwhile (GameConnection's
+	// keep-alive, the exe's NetClientThread).
+	void loadingLevel() { m_connection.beginKeepAlive(); }
 
 	// Observers (logging): each event as it is handled, in block order, and
 	// each received payload as decoded.
@@ -224,11 +255,20 @@ private:
 	void onPacket(const ConnectedPacket& packet);
 	void handlePayload(const std::vector<uint8_t>& payload, unsigned lengthBits = kGhostStateLengthBits);
 	std::function<int(std::vector<uint8_t>&)> m_demo;
+	bool m_replay = false, m_replayPaced = false;
+	std::vector<CaptureRecord> m_replayRecords;
+	size_t m_replayNext = 0;
+	std::chrono::steady_clock::time_point m_replayStart;
+	NetDiagnostics* m_diagnostics = nullptr;
 	void handleEvents(const ReliableEventBlock& block);
 	void deliver(const GameEvent& event);
-	void sendTick();
+	void sendTick(bool newMove = true);
 	void answer(const GameEvent& event);
+	void answerLevels();
+	void answerMessage(const GameEvent& event);
+	void sendPlayerInfo();
 	uint32_t m_levelsAnswered = 0;
+	uint32_t m_levelsLoaded = 0;
 
 	GameConnection m_connection;
 	GameClientOptions m_options;
@@ -238,6 +278,7 @@ private:
 	// Our events and the server's, in reliable ordered blocks.
 	EventChannel m_events;
 	bool m_nameSent = false;
+	bool m_playerInfoSent = false; // data block 1 (PlayerAuth.h)
 
 	std::deque<PlayerMove> m_moves; // the last three
 	int32_t m_moveIndex = 0;

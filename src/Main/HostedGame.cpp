@@ -1,5 +1,7 @@
 #include "HostedGame.h"
 
+#include "Net/PlayerAuth.h"
+
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
 #include "Game/GameLogic.h"
@@ -148,6 +150,7 @@ HostedGame::HostedGame(game::GameWorld& round, game::GameLogic& logic, world::Ob
 		client.freshIn.erase(fresh);
 	};
 	m_server.onLeft = [this](int client) { left(client); };
+	m_server.onPlayerInfo = [this](int client) { m_loginChecks.push_back(client); };
 	m_server.onEvent = [this](int client, const net::GameEvent& e) { event(client, e); };
 	m_server.onMove = [this](int client, const net::PlayerMove& move) {
 		if (const auto it = m_clients.find(client); it != m_clients.end()) {
@@ -507,6 +510,18 @@ void HostedGame::joined(int id)
 		m_server.kick(id, 0x16);
 		return;
 	}
+	// The retail pre-authorisation: the settings and the map list now, the
+	// player once its info has been checked (playerInfo).
+	const net::GameServer::ClientInfo* connection = m_server.client(id);
+	const bool afterLogin = m_setup.login.required && connection && connection->hasPlayerInfo;
+	if (m_setup.login.required && !afterLogin) {
+		m_awaitingLogin.insert(id);
+		sendSettings(id);
+		if (onLog) {
+			onLog("client " + std::to_string(id) + " (" + connection->address + ") waits for its login to be checked");
+		}
+		return;
+	}
 	// A full server (0x004ae6a0: the players at sv.maxPlayers): decided when
 	// the client's name comes (reservedSlotCheck).
 	int humans = 0;
@@ -526,22 +541,78 @@ void HostedGame::joined(int id)
 	int team = counts[1] <= counts[2] ? 1 : 2;
 	// A left client's id is free again (GameWorld::removePlayer): the
 	// lowest free one is taken.
-	client.player = m_round->addPlayer("Player" + std::to_string(id), team, false);
-	client.name = "Player" + std::to_string(id);
+	const std::string name = afterLogin ? connection->playerInfo.name : "Player" + std::to_string(id);
+	client.player = m_round->addPlayer(name, team, false);
+	client.name = name;
 	client.team = team;
 	m_names[client.player] = client.name;
 	if (const auto& kits = m_logic->team(team).kits; !kits.empty()) {
 		m_round->setKit(client.player, kits.front().name, kits.front().soldier);
 	}
 	client.stage = Client::Stage::Loading;
-	sendJoinBlocks(id);
+	sendJoinBlocks(id, !afterLogin);
 	if (onLog) {
 		onLog("client " + std::to_string(id) + " (" + m_server.client(id)->address + ") joined as player "
 			+ std::to_string(client.player) + ", team " + std::to_string(team));
 	}
 }
 
-void HostedGame::sendJoinBlocks(int id)
+void HostedGame::playerInfo(int id)
+{
+	const net::GameServer::ClientInfo* info = m_server.client(id);
+	if (!m_setup.login.required || !info || !m_awaitingLogin.erase(id)) {
+		return;
+	}
+	const net::PlayerInfoBlock& p = info->playerInfo;
+	const auto refuse = [&](uint32_t reason, const std::string& why) {
+		if (onLog) {
+			onLog("client " + std::to_string(id) + " (" + p.name + ", profile " + std::to_string(p.profileId) + ") refused: " + why);
+		}
+		m_server.kick(id, reason);
+	};
+	// 0x004ae6a0: the name against the checksum the login kept.
+	if (net::nameChecksum(p.name) != p.nameChecksum) {
+		refuse(0x24, "the name's checksum differs");
+		return;
+	}
+	// A ranked server takes no player without a profile (reason 0xd).
+	if (p.profileId <= 0 || static_cast<int32_t>(info->profileId) != p.profileId) {
+		refuse(0xd, "no logged-in profile");
+		return;
+	}
+	// GameSpy's CD-key service (0x00642f90 -> 0x007184b0, game 0x52c).
+	std::string why;
+	if (!net::cdKeyAuthenticate(m_setup.login.cdKeyHost, m_setup.login.cdKeyPort, m_server.challenge(), info->cdKeyResponse, 0,
+			&why)) {
+		refuse(0x14, "CD key: " + why); // the reason is the rewrite's (the retail server's gcd callback, 0x00642e70, isn't traced)
+		return;
+	}
+	// The stats service's ValidatePlayer (0x00584c00).
+	std::string body;
+	const std::string path = net::validatePlayerPath(p.auth, p.name, p.profileId);
+	if (!net::httpGet(m_setup.login.statsHost, m_setup.login.statsPort, path, body)) {
+		refuse(0x16, "the stats service did not answer");
+		return;
+	}
+	if (const std::string result = net::validatePlayerResult(body); result != "Ok") {
+		refuse(0x16, "ValidatePlayer: " + (result.empty() ? std::string("no result") : result)); // playerconnect.py bans
+		return;
+	}
+	if (onLog) {
+		onLog("client " + std::to_string(id) + " logged in as " + p.name + " (profile " + std::to_string(p.profileId) + ")");
+	}
+	joined(id);
+}
+
+void HostedGame::sendJoinBlocks(int id, bool withSettings)
+{
+	if (withSettings) {
+		sendSettings(id);
+	}
+	sendLevel(id);
+}
+
+void HostedGame::sendSettings(int id)
 {
 	// The settings (block 0), the map list (5) and the level (2).
 	net::RemoteWorld::ServerSettings settings;
@@ -587,7 +658,6 @@ void HostedGame::sendJoinBlocks(int id)
 	};
 	settings.contentCheck = m_content.pure();
 	block(0, net::RemoteWorld::encodeSettings(settings));
-	sendLevel(id);
 }
 
 void HostedGame::sendTo(int client, const net::GameEvent& event)
@@ -843,6 +913,7 @@ bool HostedGame::reservedSlotCheck(int id)
 
 void HostedGame::left(int id)
 {
+	m_awaitingLogin.erase(id);
 	const auto it = m_clients.find(id);
 	if (it == m_clients.end()) {
 		return;
@@ -2688,6 +2759,9 @@ void HostedGame::tick()
 		m_motion[v.object] = {v.velocity, v.angularVelocity};
 	}
 	m_server.poll();
+	for (const int id : std::exchange(m_loginChecks, {})) {
+		playerInfo(id);
+	}
 	// The votes (0x0058fdc0): their ends, and what passed.
 	{
 		const net::ServerSettings* sv = m_setup.settings;

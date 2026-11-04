@@ -122,7 +122,7 @@ TEST(Net_ConnectPacketLayout)
 	// 4 + 8 + 32 + 32 + 1 + 32 + 256 + 256 bits.
 	CHECK(packet.size() == (621 + 7) / 8);
 	net::BitReader in(packet.data(), packet.size());
-	CHECK(in.read(4) == 1 && in.read(8) == 0);
+	CHECK(in.read(4) == 1 && in.read(8) == 1); // 0x0068ddd1: the header id 1
 	CHECK(in.read(32) == 0x1002 && in.read(32) == 0x1a007000 && in.read(1) == 0);
 	in.read(32);
 	CHECK(in.readText(32) == "secret" && in.readText(32) == "mods/bf2142");
