@@ -254,6 +254,13 @@ public:
 		bool rememberExcess = false; // 0x30a: input over 1 is kept for later ticks (+-40)
 		bool canReverse = true;      // an Engine's 0x744: an input against the axis's acceleration is 0
 		bool moves = false;          // an axis with a speed
+		// startAutoRotateOnEnter (+0x310): an enter (event 2, 0x00565600)
+		// turns its auto-rotation on (+0x1dd), an exit (3) off with the
+		// speeds zeroed and restoreRotationOnExit's angles back; while on,
+		// the update (0x00565a20's start) sets each axis's input to 1.
+		bool autoRotateOnEnter = false;
+		bool restoreRotationOnExit = false;
+		bool autoRotating = false;
 		// This tick, in object space.
 		physics::Mat3 rotation;
 		Vec3 position;

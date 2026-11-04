@@ -89,12 +89,14 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 		s.explosionForce = number(t, "detonation.explosionForce", 150);
 		s.explosionYMod = number(t, "detonation.explosionYMod", 1);
 	}
-	// Thrown objects (grenades, mines, C4, hubs) have physicsType
-	// RotationalPoint or Mesh and a collision mesh of their own; rounds and
-	// missiles are Points (they set hasCollisionPhysics too).
-	if (const auto type = t.settings().find("physicsType"); type != t.settings().end()) {
-		s.bounces = type->second == "RotationalPoint" || type->second == "Mesh";
-	}
+	// collision.bouncing (the collision template's +0xd, 0 by default): a
+	// hit that doesn't go through (the game logic's hit 0x005a39d0 ->
+	// projectile slot 51, 0x005b5390) leaves the round in the world when
+	// it bounces (collision slot 17), else the round goes off (event 0x1f,
+	// 0x005b62a0). Shipped 1: the frag and radar grenades, C4, the mines,
+	// hubs, sonars, decoy, beacon, shield, eu_ifv_laserguided_mine; the EMP
+	// grenade (unset) and the smoke grenade (0) go off where they land.
+	s.bounces = number(t, "collision.bouncing", 0) != 0;
 	s.damageMandown = number(t, "damageMandownSoldiers", 0) != 0;
 	s.resurrect = t.settings().count("collision.resurrectDamage") || t.settings().count("collision.restoreHP");
 	s.resurrectDamage = number(t, "collision.resurrectDamage", 0);
@@ -267,6 +269,15 @@ float addEmpDamage(float level, float amount, float stepSize, int numSteps)
 	return std::min(static_cast<float>(numSteps), std::ceil(level + amount / stepSize));
 }
 
+bool tiltAllowsFire(const physics::Mat3& root, float maxTilt)
+{
+	if (maxTilt == 0) {
+		return true;
+	}
+	const float y = std::clamp(root.rows[1].y, -1.0f, 1.0f);
+	return std::acos(y) * 57.29578f < maxTilt;
+}
+
 FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 {
 	FireArmSettings s;
@@ -281,6 +292,10 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 	s.toggleWhenNoAmmo = number(t, "ammo.toggleWhenNoAmmo", 0) != 0;
 	s.changeMagAt = number(t, "ammo.changeMagAt", s.changeMagAt);
 	s.busyUntilButtonRelease = number(t, "fire.busyUntilButtonRelease", 0) != 0;
+	if (const auto delay = t.settings().find("fire.fireStartDelay"); delay != t.settings().end()) {
+		s.fireStartDelay = RandomDistribution::parse(delay->second);
+	}
+	s.maximumVehicleTiltForFire = number(t, "fire.maximumVehicleTiltForFire", 0);
 	s.keepProjectiles = number(t, "keepProjectiles", s.keepProjectiles);
 	s.velocity = number(t, "velocity", s.velocity);
 	s.heatAddWhenFire = number(t, "heatAddWhenFire", 0);
@@ -306,6 +321,11 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 				return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
 			})) {
 			s.pulseScan = true;
+		}
+		if (c.size() == 13 && std::equal(c.begin(), c.end(), "MultiFireComp", [](char a, char b) {
+				return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+			})) {
+			s.multiFire = true;
 		}
 		if (c.size() == 14 && std::equal(c.begin(), c.end(), "ThrownFireComp", [](char a, char b) {
 				return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
@@ -641,6 +661,27 @@ bool FireArm::fire(float seconds, bool trigger)
 			&& m_settings.reloadTime > 0) {
 			m_reloadLeft = m_settings.reloadTime;
 			m_reloadFilled = false;
+			return false;
+		}
+	}
+	// fireStartDelay: the spin-up (see FireArmSettings).
+	if (m_startDelay >= 0) {
+		if (!m_triggerWas) {
+			m_startDelay = -1; // released: dropped (0x005f1630)
+			m_pending = false;
+			m_burstLeft = 0;
+			return false;
+		}
+		if (m_startDelay > 0) {
+			--m_startDelay;
+			return false;
+		}
+		m_startDelay = -1; // through: the round goes (0x005f18b0)
+	} else if (pressed && trigger && m_settings.fireStartDelay.a != 0 && !m_settings.multiFire && m_cooldown <= 0
+		&& (unlimited || m_rounds > 0) && (mode != kFireBurst || m_burstLeft >= std::max(m_settings.burstSize, 1))) {
+		const int ticks = static_cast<int>(std::nearbyint(30 * std::max(0.0f, m_settings.fireStartDelay.sample(m_startRandom))));
+		if (ticks > 0) {
+			m_startDelay = ticks - 1;
 			return false;
 		}
 	}

@@ -55,6 +55,9 @@ public:
 	void addMesh(const CollisionMeshFile& mesh, CollisionUser user, const Mat3& rotation, const Vec3& position,
 		uint32_t owner = 0, const std::vector<uint32_t>& materials = {});
 	size_t triangles() const { return m_triangles.size(); }
+	// Takes `owner`'s faces out of the queries (an object whose physics goes:
+	// a destroyed prop's, 0x00651c60's slot 0xd4 -> 0xc). Returns how many.
+	size_t removeOwner(uint32_t owner);
 
 	// The faces a sphere touches (0x006bf010 per face): inside a face the
 	// contact has the face's normal, also with the centre behind the face

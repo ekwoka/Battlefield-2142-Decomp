@@ -294,6 +294,7 @@ TEST(Nametags_JoinedWorld)
 		const world::Object* vehicle() const override { return nullptr; }
 		float health() const override { return 1; }
 		Weapon heldWeapon() const override { return {}; }
+		Weapon seatGroupWeapon(int) const override { return {}; }
 	} joined;
 	game::GameWorld::PlayerInfo me;
 	me.id = 0;

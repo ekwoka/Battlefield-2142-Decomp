@@ -412,3 +412,55 @@ TEST(Vehicles_IdleBundlesAreNotDrawnWithTheObject)
 	CHECK(!reaches(true));
 	CHECK(render::drawnWithObject("PlayerControlObject") && render::drawnWithObject("RotationalBundle"));
 }
+
+// startAutoRotateOnEnter (0x00565600, 0x00565a20): a bundle with it (the
+// APC's flaps, bay doors, rotors) turns with an input of 1 on each axis
+// while someone is aboard; on the exit its speeds go to 0 and
+// restoreRotationOnExit puts it back.
+TEST(Vehicle_AutoRotateOnEnter)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "PlayerControlObject");
+	templates.registerType(2, "RotationalBundle");
+	world::ObjectTemplate* root = templates.create("PlayerControlObject", "apc");
+	world::ObjectTemplate* flap = templates.create("RotationalBundle", "apc_flap");
+	flap->settings()["maxRotation"] = "0/90/0";
+	flap->settings()["minRotation"] = "0/0/0";
+	flap->settings()["maxSpeed"] = "0/45/0";
+	flap->settings()["acceleration"] = "0/1000/0";
+	flap->settings()["startAutoRotateOnEnter"] = "1";
+	flap->settings()["restoreRotationOnExit"] = "1";
+	templates.registerType(3, "Engine");
+	templates.create("Engine", "apc_engine")->settings()["engineType"] = "c_ETCar";
+	root->children().push_back({"apc_engine", {}, {}});
+	root->children().push_back({"apc_flap", {0, 1, 0}, {}});
+	auto vehicle = game::Vehicle::fromTemplate(*root, templates, nullptr);
+	CHECK(vehicle != nullptr);
+	if (!vehicle) {
+		return;
+	}
+	physics::RigidBody body;
+	body.position = {0, 1, 0};
+	const physics::Ground ground = flatGround();
+	const auto flapAngle = [&] {
+		for (const auto& part : vehicle->parts()) {
+			if (part.name == "apc_flap") {
+				return part.angle[1];
+			}
+		}
+		return -1.0f;
+	};
+	for (int i = 0; i < 30; ++i) {
+		vehicle->tick(body, ground, 1 / 30.0f, 0);
+	}
+	CHECK(flapAngle() == 0);
+	vehicle->setOccupied(true);
+	for (int i = 0; i < 30; ++i) {
+		vehicle->tick(body, ground, 1 / 30.0f, 0);
+	}
+	std::fprintf(stderr, "  the flap after a second aboard: %.1f\n", flapAngle());
+	CHECK(flapAngle() > 40 && flapAngle() <= 90);
+	vehicle->setOccupied(false);
+	vehicle->tick(body, ground, 1 / 30.0f, 0);
+	CHECK(flapAngle() == 0);
+}

@@ -919,3 +919,70 @@ TEST(AnimationSystem_SoldierJumpValue)
 	CHECK(jump.update(false, falling, ground, sound) == -5); // landing: the vertical speed
 	CHECK(jump.update(true, falling, ground, sound) == 0 && !jump.landing && !jump.jumping);
 }
+
+// The ladder's seat system (Objects/Common/Ladder/animationSystemHandles.inc,
+// 0x0059f380): message 1 plays the climb, message 2 the get-off, and the
+// time override (0x008bbab0) poses each by the phase alone: the same phase
+// gives the same pose whatever the time between, another phase another.
+TEST(AnimationSystem_LadderClimbByPhase)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	Console console(&files);
+	bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+		[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+	std::string out;
+	console.run("ServerArchives.con", {}, out);
+	console.run("ClientArchives.con", {}, out);
+	anim::AnimationSystems systems([&files](const std::string& path, std::vector<uint8_t>& data) {
+		return files.readFile(path, data);
+	});
+	anim::registerAnimationConsoleMethods(console, systems);
+	console.run("Objects/Soldiers/Common/Animations/ValueHolders.inc", {}, out);
+	const std::string path = "Objects/Common/Ladder/animationSystemHandles.inc";
+	const anim::AnimationSystemTemplate* ladder = systems.get(path, [&] { console.run(path, {}, out); });
+	const anim::Skeleton* skeleton = systems.skeleton("Objects/Soldiers/Common/Animations/3p_setup.ske");
+	CHECK(ladder != nullptr && skeleton != nullptr);
+	if (!ladder || !skeleton) {
+		return;
+	}
+	CHECK(ladder->findBundle("climb") >= 0 && ladder->findBundle("climbgetoff") >= 0 && ladder->findBundle("skid") >= 0);
+	const auto poseAt = [&](uint32_t message, float phase, int ticks, float up, std::string& playing) {
+		anim::AnimationState state(systems, *ladder);
+		anim::AnimationInput in;
+		in.messages = message;
+		in.upSpeed = up;
+		for (int i = 0; i < ticks; ++i) {
+			state.setTimeOverride(phase);
+			state.update(in, 1 / 30.0f);
+		}
+		playing.clear();
+		for (const std::string& name : state.playing()) {
+			playing += name + " ";
+		}
+		anim::LocalPose pose = anim::setupPose(*skeleton);
+		std::vector<bool> touched;
+		state.apply(*skeleton, pose, touched);
+		return pose;
+	};
+	std::string a, b, c, d;
+	const anim::LocalPose early = poseAt(1, 0.25f, 3, 1.35f, a);
+	const anim::LocalPose late = poseAt(1, 0.25f, 40, 1.35f, b);
+	const anim::LocalPose other = poseAt(1, 0.75f, 3, 1.35f, c);
+	poseAt(2, 0.5f, 3, 1.35f, d);
+	std::fprintf(stderr, "  climbing: %s; getting off: %s\n", a.c_str(), d.c_str());
+	CHECK(a.find("climb ") != std::string::npos && d.find("climbgetoff") != std::string::npos);
+	float same = 0, apart = 0;
+	for (size_t i = 0; i < skeleton->nodes.size(); ++i) {
+		for (size_t k = 0; k < 4; ++k) {
+			same = std::max(same, std::fabs(early.rotations[i][k] - late.rotations[i][k]));
+			apart = std::max(apart, std::fabs(early.rotations[i][k] - other.rotations[i][k]));
+		}
+	}
+	CHECK(same < 1e-4f && apart > 0.01f);
+}

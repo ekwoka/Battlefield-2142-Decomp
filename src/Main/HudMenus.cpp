@@ -407,7 +407,7 @@ void CommanderTabs::apply(hud::HudManager& hud) const
 CommanderMenu::CommanderMenu(game::GameWorld& round, hud::HudManager& hud) : m_round(round), m_hud(hud)
 {
 	// Fitted to the 182-pixel list of HudElementsCommander.con.
-	m_hud.setListColumns(15, {{4, 14, 2}, {20, 84, 0}, {106, 15, 2, 15}, {-1, 0, 0}, {124, 50, 2}});
+	m_hud.setListColumns(15, {{4, 14, 2}, {20, 66, 0}, {106, 15, 2, 15}, {88, 15, 2, 13}, {124, 50, 2}});
 	m_hud.setListColumns(14, {{4, 13, 2, 13}, {22, 190, 0}});
 }
 
@@ -436,6 +436,57 @@ void CommanderMenu::bind(Console& console)
 	bindMethod(console, "CommanderMenu.doubleClick", ConsoleAccess::Anyone, [] {});
 	bindMethod(console, "CommanderMenu.rightClick", ConsoleAccess::Anyone, [] {});
 	bindMethod(console, "CommanderMenu.deselect", ConsoleAccess::Anyone, [this] { deselect(); });
+}
+
+void CommanderMenu::sendRadioMessage(const std::function<void(int squad, bool first)>& say)
+{
+	bool first = true;
+	for (const int squad : std::set<int>(m_selected)) {
+		say(squad, first);
+		first = false;
+	}
+	showSquad(-1);
+	tabs.squadMembers = false;
+}
+
+int commanderZoomStep(int zoom)
+{
+	return zoom < 2 ? zoom + 1 : 0;
+}
+
+std::pair<float, float> detailedViewPoint(const std::pair<float, float>* view, const game::GameWorld::PlayerInfo* me)
+{
+	if (view) {
+		return *view;
+	}
+	return me ? std::make_pair(me->position.x, me->position.z) : std::make_pair(0.0f, 0.0f);
+}
+
+void spottedMouseOver(hud::HudManager& hud, int n)
+{
+	for (int i = 1; i <= 11; ++i) {
+		hud.set("Spotted" + std::to_string(i) + "MouseOver", i == n ? 1.0f : 0.0f);
+	}
+}
+
+void sendRequestForOrder(const std::function<void(int channel, const std::string& voice)>& say,
+	const std::function<void(int kind)>& request)
+{
+	say(2, "req_new_order");
+	if (request) {
+		request(1);
+	}
+}
+
+bool issueSquadRequest(bool armed, const std::function<bool(float& x, float& z)>& rosePoint,
+	const std::function<void(float x, float z)>& place)
+{
+	float x = 0, z = 0;
+	if (!armed || !place || !rosePoint || !rosePoint(x, z)) {
+		return false;
+	}
+	place(x, z);
+	return true;
 }
 
 void CommanderMenu::deselect()
@@ -517,11 +568,42 @@ void CommanderMenu::update(int player)
 		row[1] = (m_selected.count(squad) ? "|c" : "") + std::string(squadName(squad));
 		row[4] = std::to_string(members.size()) + "/" + std::to_string(kSquadSize);
 		row[2] = orderPicture(me.team, squad);
+		// The leader's voice (0x007aaf10).
+		if (voice) {
+			for (const auto& member : members) {
+				if (!member.squadLeader) {
+					continue;
+				}
+				switch (voice(member.id)) {
+				case 1: row[3] = "Ingame/Commander/voip/voip_icon_blocked.tga"; break;
+				case 2:
+					row[3] = "Ingame/Commander/voip/voip_icon_transmitting.tga";
+					if (onTutorial) {
+						onTutorial(0x26);
+						if (++m_transmitting > 1) {
+							onTutorial(0x27);
+						}
+					}
+					break;
+				case 3: row[3] = "Ingame/Commander/voip/voip_icon_distorted.tga"; break;
+				default: break;
+				}
+			}
+		}
 		row[kCellId] = std::to_string(squad);
 		row[kCellKind] = "0";
 		if (squad == m_current) {
 			selectedRow = static_cast<int>(rows.size());
 		}
+		rows.push_back(std::move(row));
+	}
+	if (allSquads) {
+		// 0x007ac8f0's row 11 (0xb) with the selected squad's background
+		// (+0x1bc): " " + SELECTED_ALL_SQUADS.
+		std::vector<std::string> row(15);
+		row[1] = "|c " + (localize ? localize("SELECTED_ALL_SQUADS") : std::string("SELECTED_ALL_SQUADS"));
+		row[kCellKind] = "1";
+		selectedRow = static_cast<int>(rows.size());
 		rows.push_back(std::move(row));
 	}
 	m_hud.setList(15, std::move(rows));

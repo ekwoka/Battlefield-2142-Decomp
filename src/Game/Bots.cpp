@@ -2743,17 +2743,29 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 	return 50;
 }
 
-float preferredRange(const WeaponAi& w, float skill, float roll, float dh)
+float fireReach(const WeaponAi& w, float dh)
+{
+	// 0x100795a0 (LAB_10079dde): maxRange + 1.25 dh over 5 m up, not for a
+	// close-combat (type 7) or thrown weapon.
+	return w.maxRange + (dh > 5 && w.type != WeaponAi::CloseCombat && !w.thrown ? 1.25f * dh : 0.0f);
+}
+
+float fireMinRange(const WeaponAi& w, float dh, bool explosivePlan)
+{
+	// The plan's near limit: minRange, 5 m for a thrown weapon in the
+	// explosive plan at a target over 3 m up.
+	return dh > 3 && explosivePlan && w.thrown ? 5.0f : w.minRange;
+}
+
+float preferredRange(const WeaponAi& w, float skill, float roll, float dh, bool explosivePlan)
 {
 	float f = w.optimal;
 	if (w.type != WeaponAi::CloseCombat) {
 		f = std::max(0.2f, skill) * f * (0.8f + roll * 0.4f);
 	}
-	float reach = w.maxRange;
-	if (dh > 5 && w.type != WeaponAi::CloseCombat && !w.thrown) {
-		reach += 1.25f * dh;
-	}
-	return w.minRange + (reach - w.minRange) * f + (dh > 0 && !w.thrown ? 0.25f * dh : 0.0f);
+	const float lo = fireMinRange(w, dh, explosivePlan);
+	// + 0.25 dh above only in the explosive plan (+0x249 bonus) and not thrown.
+	return lo + (fireReach(w, dh) - lo) * f + (explosivePlan && dh > 0 && !w.thrown ? 0.25f * dh : 0.0f);
 }
 
 float soundSphereRadius(const AiPlugin* mobile, float speed)
@@ -2833,7 +2845,8 @@ float fire3dUnitScale(float summedStrength)
 // f = optimal x max(0.2, skill) x U[0.8, 1.2] (the weapon's +0x18 x
 // 0.01; a CloseCombat weapon, type 7, optimal alone), maxRange + 1.25 dh
 // for a target over 5 m up (not melee or thrown), + 0.25 dh for one above
-// (not thrown). So switching to the knife makes the plan, and the range,
+// in the explosive plan (not thrown; minRange 5 m for a thrown weapon at
+// a target over 3 m up in it). So switching to the knife makes the plan, and the range,
 // the knife's.
 void BotManager::planFire(Bot& bot, const GameWorld::PlayerInfo& self, bool gunning)
 {
@@ -2847,9 +2860,19 @@ void BotManager::planFire(Bot& bot, const GameWorld::PlayerInfo& self, bool gunn
 	const std::string gun = gunning ? seatWeaponName(self, bot.seatWeapon) : weaponName(self, bot.weaponSlot);
 	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight, 0};
 	const float dh = known->position.y + kChestHeight - eye.y;
-	bot.preferredRange = game::preferredRange(weaponAi(gun), m_settings.skill, random(), dh);
+	// The explosive plan's flag (local_60 of 0x100795a0, as in fire): the
+	// weapon choice's bonus, an explosive at a soldier known only from
+	// others or over 30 m up (not a sniper rifle or thrown weapon).
+	const WeaponAi w = weaponAi(gun);
+	GameWorld::PlayerInfo target;
+	const bool targetSoldier = m_world.playerInfo(bot.target, target) && !target.vehicle;
+	const bool high = w.type != WeaponAi::Sniper && !w.thrown && known->position.y - self.position.y > 30;
+	const bool explosivePlan = bot.explosive && w.explosionRadius > 0 && targetSoldier && (known->secondHand || high);
+	bot.preferredRange = game::preferredRange(w, m_settings.skill, random(), dh, explosivePlan);
 	bot.planTarget = bot.target;
 	bot.planSlot = gunning ? bot.seatWeapon : bot.weaponSlot;
+	bot.manoeuvre = bot.chase = false; // a new plan's statements start afresh
+	bot.backOffAt = -1e9f;
 }
 
 // The weapon choice for the target BBFire settled on (0x10074ef0, called
@@ -5316,23 +5339,8 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 			moving = !bot.lobHold;
 		}
 	} else if (self.vehicle && self.driving) {
-		// The vehicle's fire plan (0x100795a0 for a bot whose object has a
-		// Mobile part, +0x3c: from LAB_10079dde) keeps its distance by an
-		// ObjectDistance condition (0x100d44c0, vtable 0x1011a6d8: the
-		// squared distance against (minRange x 0.9)^2 and ((maxRange +
-		// 1.25 dh over 5 m up) x 1.1)^2, its evaluation 0x100d4620) over a
-		// move at the target (0x100cff90 at a Mobile target, else
-		// MoveToFinding 0x100d11c0, at its Mobile maxSpeed; the rest of the
-		// sequence isn't decoded). The rewrite: beyond that reach the driver
-		// drives at the target (the vehicles' MoveTo, drive), within it it
-		// stops; the aim and the trigger run beside it as a gunner's.
-		const float dh = known->position.y - self.position.y;
-		const float reach = (weapon.maxRange > 0 ? weapon.maxRange : 100.0f) + (dh > 5 ? 1.25f * dh : 0.0f);
-		if (distance > 1.1f * reach) {
-			drive(bot, self, target.position, 400000 + target.id, seconds, input);
-		} else {
-			input.throttle = 0;
-			input.strafe = 0;
+		if (driveFirePlan(bot, self, target, *known, inSight, weapon, explosivePlan, seconds, input)) {
+			return; // the target was forgotten
 		}
 	} else if (!self.vehicle && weapon.type != WeaponAi::FireAndForget) {
 		if (distance > 1.1f * std::max(bot.preferredRange, weapon.minRange + 1)) {
@@ -5438,8 +5446,16 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 	if (explosivePlan && !bot.heatStop && (soldierBot || onTarget)) {
 		explosiveOk = explosiveClear(bot, self, eye, soldierBot ? wantDir : cur, feet, weapon, weaponTemplate, soldierBot);
 	}
+	// The trigger's If (0x100d29f0, forced update): outside the explosive
+	// plan the statements fire only with the target within [0.9 minRange,
+	// 1.1 reach] (ObjectDistance 0x100d44c0 between the two objects); else
+	// the plan's other branch (0x100d9740) only aims.
+	const float objectDistance = std::sqrt(physics::lengthSquared(target.position - self.position));
+	const float nearLimit = fireMinRange(weapon, dh, explosivePlan), farLimit = fireReach(weapon, dh);
+	const bool inReach = explosivePlan
+		|| (objectDistance >= 0.9f * nearLimit && (farLimit <= 0 || objectDistance <= 1.1f * farLimit));
 	const bool ready = m_time >= bot.triggerAt && onTarget && !blocked && poseSettled && (inSight || explosivePlan)
-		&& !bot.heatStop && (!explosivePlan || explosiveOk);
+		&& !bot.heatStop && (!explosivePlan || explosiveOk) && inReach;
 	// Trigger (taps) or TriggerContinously (holds) (0x100777a0): held only
 	// when the weapon's fire mode (aiWeapon slot 0x104 -> BF2142.exe
 	// 0x00892650: the fire component's +0x18 == 2) is automatic. The mode
@@ -5836,6 +5852,108 @@ bool BotManager::steer(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 	aim(bot, self, eye + d * 5.0f, {}, false, {}, input, seconds);
 	bot.follower.progress(toAi(self.position), std::fabs(input.throttle), m_time);
 	return true;
+}
+
+physics::Vec3 backOffSpot(const physics::Vec3& target, physics::Vec3 forward, float near, float keep,
+	const std::function<bool(const physics::Vec3&)>& clear)
+{
+	forward.y = 0;
+	const float flat = std::sqrt(forward.x * forward.x + forward.z * forward.z);
+	forward = flat > 1e-4f ? forward * (1 / flat) : physics::Vec3 {0, 0, 1};
+	const float length = near + std::min(10.0f, (keep - near) * 0.2f);
+	const physics::Vec3 ways[3] = {forward, {forward.z, 0, -forward.x}, {-forward.z, 0, forward.x}};
+	for (const physics::Vec3& way : ways) {
+		const physics::Vec3 spot = target + way * length;
+		if (clear(spot)) {
+			return spot;
+		}
+	}
+	return target + ways[0] * length; // none clear: the first (the original keeps the farthest ray hit)
+}
+
+// The fire plan's moves for a bot object with a Mobile part (0x100795a0,
+// LAB_10079dde; the plan's statements named by their debug printers). The
+// moves run in a Parallell combiner (0x100cddb0) beside the trigger's If:
+//  - If (0x100d29f0, forced update, the false branch frozen) the target
+//    isn't in view (OR of NOT over the memo 0x100d8e40 of the target
+//    conditions 0x100dc400 / 0x100dad60): a Serial combiner (0x100ce370) of
+//    MoveToObjectFinding (0x100cff90) at the target with no distance kept,
+//    then ForgetObject (0x100da5f0: the memory item dropped, 0x100ec400),
+//    then a failing statement (0x100da480 with mode 0) that ends the plan.
+//    A target without a Mobile part is driven at by MoveToFinding
+//    (0x100d11c0) to the spot beside it instead.
+//  - else If (not forced) NOT ObjectDistance (0x100d44c0, 0x100d4620) holds
+//    the target within [minRange, 1.1 D]: MoveToObjectFinding with D kept
+//    (the plan's distance, preferredRange), its near limit ec = min(1.1
+//    minRange, D). It ends when ec <= d <= D (0x100cfe20 on the squared
+//    distance, 0x100f9970). At ec or beyond it paths at the target; nearer
+//    it backs off (0x100d00e0) to the first clear of three spots ec + min(10,
+//    0.2 (D - ec)) from the target: ahead of it (its forward, a driver being
+//    no ITSoldier), then to either side (the original rays each from the
+//    target, 0x101394d4 slot 0x84; the rewrite asks the vehicle mesh), and
+//    chooses again each second (+0x100).
+// The rewrite drives with the vehicles' MoveTo (drive) at the Mobile
+// maxSpeed (the move's half-speed approach isn't modelled).
+bool BotManager::driveFirePlan(Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& target,
+	const Known& known, bool inSight, const WeaponAi& weapon, bool explosivePlan, float seconds, SoldierInput& input)
+{
+	const float dh = known.position.y - self.position.y;
+	const float lo = fireMinRange(weapon, dh, explosivePlan);
+	const float keep = bot.preferredRange > 0 ? bot.preferredRange : lo + 0.5f * (fireReach(weapon, dh) - lo);
+	const float d = std::sqrt(physics::lengthSquared(target.position - self.position));
+	const auto stop = [&] {
+		input.throttle = 0;
+		input.strafe = 0;
+	};
+	if (!inSight || bot.chase) {
+		bot.manoeuvre = false;
+		bot.chase = true; // the then-branch runs to its end
+		if (!drive(bot, self, target.position, 400000 + target.id, seconds, input)) {
+			// Arrived: ForgetObject, and the failing statement ends the plan.
+			bot.chase = false;
+			bot.known.erase(std::remove_if(bot.known.begin(), bot.known.end(), [&](const Known& k) { return k.player == target.id; }),
+				bot.known.end());
+			bot.target = -1;
+			bot.planTarget = -1;
+			stop();
+			return true;
+		}
+		return false;
+	}
+	if (!bot.manoeuvre && (d < lo || d > 1.1f * keep)) {
+		bot.manoeuvre = true;
+		bot.backOffAt = -1e9f;
+	}
+	if (!bot.manoeuvre) {
+		stop();
+		return false;
+	}
+	const float near = std::min(1.1f * lo, keep);
+	if (d >= near && d <= keep) {
+		bot.manoeuvre = false; // arrived (0x100cfe20)
+		stop();
+		return false;
+	}
+	if (d >= near) {
+		drive(bot, self, target.position, 400000 + target.id, seconds, input);
+		return false;
+	}
+	if (m_time - bot.backOffAt > 1.0f) {
+		bot.backOffAt = m_time;
+		physics::Vec3 forward {std::sin(target.yaw * kRadians), 0, std::cos(target.yaw * kRadians)};
+		for (const GameWorld::VehicleInfo& v : m_vehicles) {
+			if (target.vehicle && v.object == target.vehicle) {
+				forward = {v.forward.x, 0, v.forward.z};
+			}
+		}
+		const ai::NavMesh* mesh = m_vehicleNavMesh;
+		bot.backOff = backOffSpot(target.position, forward, near, keep,
+			[mesh](const physics::Vec3& spot) { return !mesh || mesh->findPolygon(toAi(spot)) >= 0; });
+	}
+	if (!drive(bot, self, bot.backOff, 410000 + target.id, seconds, input)) {
+		bot.backOffAt = -1e9f; // at the spot: choose again
+	}
+	return false;
 }
 
 // The Mobile plug-in's driving settings for a vehicle (its root aiTemplate),
@@ -6372,6 +6490,23 @@ void BotManager::updateStrategy(float seconds)
 				}
 			}
 			if (!v.point) {
+				ai::StrategicArea& a = s.areas[i];
+				if (a.box) {
+					// 0x1005f210 for an area of its own: the units each side
+					// has in the box (as the side knows them), then the rule.
+					int friendly = 0, enemy = 0;
+					for (const GameWorld::PlayerInfo& p : players) {
+						physics::Vec3 at = p.position;
+						if (!p.alive || p.team < 1 || p.team > 2 || !knownPosition(team, p.id, at) || certainty(team, p.id) <= 0
+							|| at.x < a.boxMin[0] || at.x > a.boxMax[0] || at.z < a.boxMin[1] || at.z > a.boxMax[1]) {
+							continue;
+						}
+						(p.team == team ? friendly : enemy) += 1;
+					}
+					a.boxStatus[static_cast<size_t>(team)] = ai::boxAreaStatus(a.boxStatus[static_cast<size_t>(team)], friendly, enemy,
+						a.takeable[static_cast<size_t>(team)], a.takeable[static_cast<size_t>(3 - team)]);
+					v.state.status = a.boxStatus[static_cast<size_t>(team)];
+				}
 				continue;
 			}
 			v.order = s.areas[i].hasOrderPosition[0]
@@ -6488,7 +6623,7 @@ void BotManager::updateStrategy(float seconds)
 			}
 			for (const std::string& name : s.areas[i].neighbours) {
 				for (size_t j = 0; j < s.areas.size(); ++j) {
-					if (s.areas[j].name == name && views[j].point) {
+					if (s.areas[j].name == name && (views[j].point || s.areas[j].box)) {
 						views[i].state.hostileNeighbour |= views[j].state.status == ai::AreaStatus::Hostile;
 						views[i].state.neutralNeighbour |= views[j].state.status == ai::AreaStatus::Neutral;
 						views[i].state.ownedNeighbour |= views[j].state.status == ai::AreaStatus::Owned;

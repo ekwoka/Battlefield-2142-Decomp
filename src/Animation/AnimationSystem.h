@@ -394,6 +394,17 @@ public:
 	// 0x78: the weight of the whole system's pose over what was there
 	// before it, below 1 while a trigger with a fadeInTime fades in.
 	float weight() const { return m_weight; }
+	// 0x008bbab0 (slot 0x48): a time override (+0x84, its flag +0x88):
+	// each update hands it to every queued instance (0x008baed0: +0x24,
+	// +0x28) and the drawing (0x008c2a90) samples each clip at its length
+	// times it, whatever the instance's own time. Only the constructor
+	// clears the flag. The ladder (0x0059f380) sets the climb's phase so.
+	void setTimeOverride(float fraction)
+	{
+		m_timeOverride = fraction;
+		m_hasTimeOverride = true;
+	}
+	bool hasTimeOverride() const { return m_hasTimeOverride; }
 	// 0x4c: where in its step the last movement bundle was (0..1), which
 	// the next one starts from (0x008c46d0).
 	float stepPhase() const { return m_phase; }
@@ -479,6 +490,8 @@ private:
 	std::map<size_t, float> m_idleNext; // IdleTrigger 0x3c, per trigger
 	uint32_t m_random = 0x759dc150;
 	uint32_t nextRandom();
+	float m_timeOverride = 0;       // 0x84
+	bool m_hasTimeOverride = false; // 0x88
 };
 
 // The soldier's up value for its system (0x005ef250 with 0x005eef80; the

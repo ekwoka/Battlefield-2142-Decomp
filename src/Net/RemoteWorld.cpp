@@ -645,6 +645,9 @@ void RemoteWorld::apply(const GhostBlock& ghosts)
 				if (n.hasSpawnTick) {
 					p.manDown = n.manDown;
 				}
+				if (n.value294 >= 0) {
+					p.outsideSeconds = n.value294;
+				}
 				const uint32_t slots[3] = {0x40, 0x80, 0x20000};
 				for (size_t g = 0; g < 3; ++g) {
 					if (n.fireMask & slots[g]) {

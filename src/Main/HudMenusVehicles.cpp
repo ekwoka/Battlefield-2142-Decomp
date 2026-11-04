@@ -1,8 +1,12 @@
 #include "HudMenusVehicles.h"
 
+#include "HudAlerts.h"
+#include "HudWorld.h"
+
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
 #include "Hud/Hud.h"
+#include "World/Object.h"
 #include "World/ObjectTemplate.h"
 
 #include <algorithm>
@@ -107,8 +111,8 @@ std::string WeaponHud::update(hud::HudManager& hud, const WeaponHudInput& in, bo
 		m_read = true;
 	}
 	const Fields& f = m_fields;
-	// The seat's second gun (0x007c2d50, the seat's weapon 1) sets the
-	// Secondary* variables as 0x007c1f10 the Primary* ones.
+	// The seat's second gun (0x007c2d50, the PIAltFire group's active
+	// weapon) sets the Secondary* variables as 0x007c1f10 the Primary* ones.
 	const std::string P = secondary ? "Secondary" : "Primary";
 	const auto var = [&P](const char* name) { return P + name; };
 	const bool showAmmo = f.showAmmo, showClips = f.showClips, battery = f.battery;
@@ -391,6 +395,31 @@ void ItemSelection::update(hud::HudManager& hud, float dt)
 
 // --- The vehicle HUD ---
 
+std::vector<SelectItem> seatSelectItems(const game::GameWorld::SeatLayout& seat, const world::ObjectTemplate* seatTemplate,
+	const std::function<const world::ObjectTemplate*(const std::string&)>& find,
+	const std::vector<std::pair<int, std::string>>& carried)
+{
+	size_t fire = 0, alt = 0;
+	for (const auto& w : seat.weapons) {
+		fire += w.group == 0 ? 1 : 0;
+		alt += w.group == 1 ? 1 : 0;
+	}
+	std::vector<SelectItem> items;
+	if (fire == 0) {
+		for (const auto& [slot, name] : carried) {
+			items.push_back({slot, hudSetting(find(name), "weaponHud.selectIcon"), true});
+		}
+		return items;
+	}
+	const int group = flag(seatTemplate, "vehicleHud.useSelectionIcons", false) && alt > fire ? 1 : 0;
+	for (const auto& w : seat.weapons) {
+		if (w.group == group) {
+			items.push_back({w.itemIndex, hudSetting(find(w.weapon), "weaponHud.selectIcon"), w.selectable});
+		}
+	}
+	return items;
+}
+
 int seatDotState(bool occupied, bool local, int squad, int localSquad, bool sameTeam)
 {
 	if (!occupied) {
@@ -419,6 +448,37 @@ void VehicleHud::update(hud::HudManager& hud, const VehicleHudInput& in)
 		hud.setString("VehicleNameString", m_name);
 	}
 	hud.set("TurretIconShow", m_turretIcon ? 1 : 0);
+	// 0x007a2e60: the torque, eased a hundredth of the way each frame:
+	// Torque (+0x210) toward max(0, torque), TorqueString ceil(x 100) "%d",
+	// TorqueAngle (+0x218) 2 pi x Torque; SecondTorque (+0x21c) toward
+	// clamp(torque + 1, 0, 1), SecondTorqueAngle (+0x224) 2 pi x that (the
+	// gunships' and transports' arrows, the mechs' step control).
+	m_torque += (std::max(in.torque, 0.0f) - m_torque) * 0.01f;
+	m_secondTorque += (std::clamp(in.torque + 1.0f, 0.0f, 1.0f) - m_secondTorque) * 0.01f;
+	hud.set("Torque", m_torque);
+	hud.setString("TorqueString", std::to_string(static_cast<int>(std::ceil(m_torque * 100.0f))));
+	hud.set("TorqueAngle", m_torque * 6.2831855f);
+	hud.set("SecondTorque", m_secondTorque);
+	hud.set("SecondTorqueAngle", m_secondTorque * 6.2831855f);
+	// The vehicle's sprint (0x007a2e60's end, the controlled object not the
+	// soldier): VehicleStamina (+0x1d4) the control object's slot 0x108,
+	// VehicleStaminaShow (+0x2ab) while sprinting or below 1,
+	// VehicleStaminaTextStringShow (+0x2b4) for 3 s after it last fell
+	// (+0x23c, run by 0x007a05c0 with the frame's time).
+	if (m_staminaTimer >= 0) {
+		m_staminaTimer += in.seconds;
+		if (m_staminaTimer >= 3) {
+			m_staminaTimer = -1;
+		}
+	}
+	if (in.stamina < m_staminaWas) {
+		m_staminaTimer = 0;
+	}
+	m_staminaWas = in.stamina;
+	hud.set("VehicleStamina", in.stamina);
+	hud.set("VehicleStaminaShow", in.sprinting || in.stamina < 1 ? 1 : 0);
+	hud.set("VehicleStaminaTextStringShow", m_staminaTimer >= 0 ? 1 : 0);
+	hud.set("VehicleStaminaBlink", 0);
 	// 0x007a18a0: the armour's share, its text (per cent) and colour.
 	const float armor = std::clamp(in.armor, 0.0f, 1.0f);
 	hud.set("VehicleArmor", armor);
@@ -492,6 +552,10 @@ void VehicleHud::clear(hud::HudManager& hud)
 		hud.set("OccupyingPlayerName" + std::to_string(i) + "Show", 0);
 	}
 	m_climbAngle = m_climbPrevious = 0;
+	m_staminaWas = 1;
+	m_staminaTimer = -1;
+	hud.set("VehicleStaminaShow", 0);
+	hud.set("VehicleStaminaTextStringShow", 0);
 	hud.setOccupiedStates(1, {});
 	hud.set("BottomLeftVehicleAlpha", 0);
 	hud.set("BottomLeftHealthAlpha", 1);
@@ -587,6 +651,71 @@ bool vehicleMarker(const world::ObjectTemplate& vehicle, MapRelation relation, b
 	out.height = size[1];
 	out.asPlayer = m.usePlayerIcon && relation != MapRelation::Neutral;
 	return true;
+}
+
+std::vector<RadarMarker> radarMarkers(const host::HudWorld& world, game::GameWorld& round, const std::vector<int>& revealed)
+{
+	std::vector<RadarMarker> out;
+	std::vector<game::GameWorld::PlayerInfo> enemies;
+	bool onFoot = false;
+	for (const int id : revealed) {
+		game::GameWorld::PlayerInfo enemy;
+		if (world.playerInfo(id, enemy) && enemy.alive) {
+			onFoot = onFoot || !enemy.vehicle;
+			enemies.push_back(enemy);
+		}
+	}
+	// The decoys, looked for only with an enemy on foot to stand in for.
+	std::vector<const world::Object*> decoys;
+	if (onFoot) {
+		for (const auto& object : round.objects().objects()) {
+			const world::ObjectTemplate* t = object->objectTemplate();
+			if (!t || t->typeName() != "TargetObject") {
+				continue;
+			}
+			const auto type = t->settings().find("targetType");
+			if (type != t->settings().end() && targetTypeIndex(type->second) == 6) {
+				decoys.push_back(object.get());
+			}
+		}
+	}
+	for (game::GameWorld::PlayerInfo& enemy : enemies) {
+		if (!enemy.vehicle) {
+			for (const world::Object* decoy : decoys) {
+				const float dx = decoy->position().x - enemy.position.x, dz = decoy->position().z - enemy.position.z;
+				if (dx * dx + dz * dz < 60.0f * 60.0f) {
+					enemy.position = {decoy->position().x, decoy->position().y, decoy->position().z};
+					break;
+				}
+			}
+		}
+		RadarMarker m {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", enemy.position.x, enemy.position.z, 16};
+		const world::Object* kit = enemy.kit ? round.objects().find(enemy.kit) : nullptr;
+		if (kit && kit->objectTemplate()) {
+			const MapIcons& icons = mapIcons(*kit->objectTemplate());
+			if (!icons.spotted.empty()) {
+				m.texture = icons.spotted;
+				m.size = icons.spottedSize;
+			} else if (!icons.icon.empty()) {
+				m.texture = icons.icon;
+				m.size = icons.size[0];
+			}
+		}
+		out.push_back(std::move(m));
+	}
+	for (const uint32_t id : world.spottedVehicles()) {
+		if (const world::Object* vehicle = round.objects().find(id)) {
+			RadarMarker m {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", vehicle->position().x, vehicle->position().z, 16};
+			if (vehicle->objectTemplate()) {
+				const MapIcons& icons = mapIcons(*vehicle->objectTemplate());
+				if (!icons.icon.empty()) {
+					m.texture = icons.icon;
+				}
+			}
+			out.push_back(std::move(m));
+		}
+	}
+	return out;
 }
 
 } // namespace dice::hfe::menu

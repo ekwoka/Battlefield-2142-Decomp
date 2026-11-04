@@ -84,6 +84,7 @@
 #include "AI/Strategy.h"
 #include "GameWorld.h"
 
+#include <functional>
 #include <array>
 #include <map>
 #include <optional>
@@ -251,7 +252,16 @@ float otherSeatFactor(bool driverTaken, bool rootMobile, uint32_t rootTypes);
 float aiDeviationFactor(uint32_t botTypes, bool botPrimary, uint32_t targetTypes);
 // The fire plan's distance kept (0x100795a0) for a weapon, with roll the
 // U[0, 1] draw and dh the target's height over the bot's eye.
-float preferredRange(const WeaponAi& w, float skill, float roll, float dh);
+float preferredRange(const WeaponAi& w, float skill, float roll, float dh, bool explosivePlan = false);
+// The plan's far reach (maxRange + 1.25 dh over 5 m up) and near limit.
+float fireReach(const WeaponAi& w, float dh);
+float fireMinRange(const WeaponAi& w, float dh, bool explosivePlan);
+// MoveToObjectFinding's back-off spot (0x100d00e0) for a mover that isn't
+// ITSoldier: near + min(10, 0.2 (keep - near)) from the target along its
+// horizontal forward, else its right (z, -x), else its left; the first
+// `clear` passes.
+physics::Vec3 backOffSpot(const physics::Vec3& target, physics::Vec3 forward, float near, float keep,
+	const std::function<bool(const physics::Vec3&)>& clear);
 // Hearing (AIDLL). A unit's sound sphere (the Mobile adaptor's slot 0x54,
 // BF2142.exe 0x008a1880): max at maxSpeed or faster, else lerp(min, max,
 // speed / maxSpeed). No Mobile part: 0.
@@ -800,6 +810,13 @@ private:
 		float targetAcquired = 0;
 		float triggerAt = 0;      // when the trigger may first be pulled
 		float preferredRange = 0; // the fighting distance kept
+		// The driving plan's manoeuvre (0x100795a0's If over
+		// MoveToObjectFinding 0x100cff90): running until it arrives, the
+		// back-off spot and when it was last chosen (a repath each second).
+		bool manoeuvre = false;
+		bool chase = false; // the lost target's chase (then forgotten)
+		physics::Vec3 backOff;
+		float backOffAt = -1e9f;
 		// The fire plan's target and weapon (0x1007cf10 keeps the plan, and
 		// its distance, while both hold).
 		int planTarget = -1;
@@ -1094,6 +1111,11 @@ private:
 		SoldierInput& input, float radius = 0, uint32_t object = 0);
 	bool drive(Bot& bot, const GameWorld::PlayerInfo& self, const physics::Vec3& to, int goalId, float seconds,
 		SoldierInput& input, float radius = 0);
+	// The fire plan's moves for a bot at the wheel (0x100795a0 for an object
+	// with a Mobile part); true when the lost target was chased down and
+	// forgotten.
+	bool driveFirePlan(Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& target, const Known& known,
+		bool inSight, const WeaponAi& weapon, bool explosivePlan, float seconds, SoldierInput& input);
 	// The point MoveTo heads for now (the next strategic waypoint or area
 	// on the way, else the goal), popping those reached (0x1008aaa0).
 	physics::Vec3 moveTarget(Bot& bot, const GameWorld::PlayerInfo& self);

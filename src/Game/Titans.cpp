@@ -247,8 +247,11 @@ bool GameWorld::titanPart(uint32_t id, const Titan*& titan, int& part) const
 
 bool GameWorld::isTitan(uint32_t object) const { return titanByObject(object) != nullptr; }
 
-// A Titan gun seat fires while its Titan and its armour are whole (the guns'
-// armour: disableInputOnDestroy 1).
+// A Titan gun seat fires while its Titan stands and its armour, with
+// armor.disableInputOnDestroy (+0x194; the 12 gun Bundles 1), is whole:
+// its destruction (0x00654120 -> the PlayerControlObject's slot 0xb4,
+// 0x005cc570) rebuilds the input parts (0x0058bfd0) without those whose
+// armour is out.
 bool GameWorld::titanGunWorks(uint32_t object, int seat) const
 {
 	const Titan* titan = titanByObject(object);
@@ -259,7 +262,11 @@ bool GameWorld::titanGunWorks(uint32_t object, int seat) const
 		return true;
 	}
 	const int part = titan->seatParts[static_cast<size_t>(seat)];
-	return part < 0 || titan->parts[static_cast<size_t>(part)].state == 0;
+	if (part < 0) {
+		return true;
+	}
+	const TitanPart& armour = titan->parts[static_cast<size_t>(part)];
+	return armour.state == 0 || !armour.t || number(*armour.t, "armor.disableInputOnDestroy", 0) == 0;
 }
 
 // The Titan's wreck puts its gunners out at their seats' exits (the hubs'
@@ -500,6 +507,7 @@ void GameWorld::buildTitanParts(Titan& titan)
 								array.velocity = velocity;
 								array.launcher = here + local.transform(start);
 								array.direction = local.transform({0, 0, 1});
+								array.maxTilt = number(*c, "fire.maximumVehicleTiltForFire", 0);
 							}
 							scan(*c, local, here, d + 1);
 						}
@@ -1730,6 +1738,10 @@ bool GameWorld::launchPod(int id)
 				for (const auto& [entry, radius] : array.entries) {
 					const physics::Vec3 e = at + rotation.transform(entry);
 					if (physics::lengthSquared(e - player->body.position) <= (radius + 1) * (radius + 1)) {
+						const Body* hull = findBody(titan.object);
+						if (!tiltAllowsFire(hull ? hull->body.rotation : rotation, array.maxTilt)) {
+							return false;
+						}
 						return startPod(*player, array.projectile, at + rotation.transform(array.launcher),
 							rotation.transform(array.direction) * array.velocity + titan.velocity, titan.object);
 					}
@@ -1752,7 +1764,7 @@ bool GameWorld::launchPod(int id)
 	const SeatLayout& seat = layout.seats[static_cast<size_t>(player->seat)];
 	const world::ObjectTemplate* seatTemplate = m_templates.find(seat.name);
 	std::string projectile;
-	float velocity = 0;
+	float velocity = 0, maxTilt = 0;
 	physics::Vec3 start;
 	bool found = false;
 	std::function<void(const world::ObjectTemplate&, int)> scan = [&](const world::ObjectTemplate& node, int depth) {
@@ -1772,6 +1784,7 @@ bool GameWorld::launchPod(int id)
 					projectile = p;
 					velocity = v;
 					start = s;
+					maxTilt = number(*c, "fire.maximumVehicleTiltForFire", 0);
 					found = true;
 				}
 			}
@@ -1781,8 +1794,8 @@ bool GameWorld::launchPod(int id)
 	if (seatTemplate) {
 		scan(*seatTemplate, 0);
 	}
-	if (!found) {
-		return false;
+	if (!found || !tiltAllowsFire(body->body.rotation, maxTilt)) {
+		return false; // the press refused: the vehicle tilted too far (air_pod_launcher's 70)
 	}
 	const float yaw = body->body.rotation.yawPitchRoll().x * 3.14159265f / 180.0f;
 	float gunYaw = 0, gunPitch = player->input.aimPitch;

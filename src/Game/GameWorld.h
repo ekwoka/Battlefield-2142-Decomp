@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <functional>
 #include <array>
+#include <deque>
 #include <map>
 #include <optional>
 #include <memory>
@@ -435,6 +436,7 @@ public:
 		int inHandSlot = 0;
 		float heat = 0; // the weapon in hand's (or the seat's gun's), 0..1
 		float stamina = 1; // the sprint's (SprintStamina, the soldier's +0x378), 0..1
+		bool sprinting = false; // the sprint on (PCO vtable 0x100)
 		uint32_t gunShots = 0; // rounds the seats' guns have fired (the camera's recoil)
 		// The player's fire states (player +0x19c / +0x19d: vtable 0x1d4 /
 		// 0x1dc, set from c_PIFire / c_PIAltFire held by the game logic's
@@ -653,6 +655,11 @@ public:
 	// Whether the player looks through the weapon's zoom (the local
 	// player's camera; the deviation's devModZoom and the gun sway use it).
 	void setZoomed(int player, bool zoomed);
+	// The distance counter (fire.useDistanceCounter, the rocket launchers'
+	// airburst): the range set (0: off), and the wheel's steps
+	// (PINextItem +1, PIPrevItem -1) while it is on.
+	int burstDistance(int player) const;
+	void stepBurstDistance(int player, int steps);
 	// The weapon in hand's deviation now (SoldierDeviationComp; 0 without).
 	float weaponDeviation(int player) const;
 	// A lock-on weapon's lock (the target components: MultiFireArmTargetComp
@@ -981,6 +988,11 @@ public:
 		Anchor seatAnchor; // the seat's own place (the sitter)
 		physics::Vec3 rotation;      // seatInformation's yaw/pitch/roll, degrees
 		std::string animationSystem; // seatAnimationSystem: the sitter's pose (empty: hidden)
+		// seatLeftRotationLimit / seatRightRotationLimit (the seat's +0x300 /
+		// +0x304, interface 0xc4c4 slots 0xd8 / 0xe0): how far the seated
+		// soldier's body turns from the seat (the FAVs' open position
+		// -90 / 90, the air transports' side seats -15 / 40 and -25 / 30).
+		float leftLimit = 0, rightLimit = 0;
 		// The yaw bundle's frame in the vehicle (its parents' turn: the
 		// Titans' gun hubs sit turned 180 or +-90 degrees) and its limits
 		// (minRotation / maxRotation x; free without them).
@@ -990,6 +1002,10 @@ public:
 		// the bundle counter-turns with the hull (0x005644b0, see stepGunner).
 		float regulateYaw = 0, yawSpeed = 0;
 		float ignoreParentYaw = 0; // the yaw bundle's ignoreParentRotation x (+0x344, see stepGunner)
+		// The yaw bundle's surpressPlayerInputVector x (+0x354; the air
+		// transports' gun mounts 0.6, the static AP / AV guns' cockpits 0.1):
+		// see stepGunner.
+		float suppressYaw = 0;
 		float ignoreParentPitch = 0; // the pitch bundle's ignoreParentRotation y (see stepGunner)
 		float cameraRegulateYaw = 0; // the camera's regulateVector x
 		// The camera's ignoreParentRotation (yaw x, pitch y: see stepSeatCamera).
@@ -1060,6 +1076,17 @@ public:
 	// The item selection a weapon key opened in a seat (0x004d2a50 ->
 	// 0x0079c190 for the local player): the key's item index, once; 0 none.
 	int takeSeatItemSelect(int player);
+	// minimumSquadSizeForSelection (GenericFireArm template +0x320, executor
+	// 0x004e1ed9; the beacon 2, the recon drone's detonator 3, the sentry
+	// drone's 4): the firearm's slot 0x188 (0x005c3080) says it can't be
+	// selected (part of slot 0x170's test, 0x005c1150) while its owner's
+	// squad (the squad manager's slot 0x2c) has fewer members (+0x17c) than
+	// that, one fewer for a bot (player slot 0x68); never without a squad.
+	bool squadTooSmall(int player, const world::ObjectTemplate& weapon) const;
+	// A weapon key that found its weapon refused by that test (0x004d2a50
+	// at 0x004d2ea9: the local player's, the HUD's help message 0x52): the
+	// key, once; 0 none.
+	int takeSquadSizeRefused(int player);
 	// A seat gun's next round's start in the world and the hull's turn
 	// (the gun's yaw and pitch are in the hull's frame): what stepGunner
 	// fires from (seatGunOrigin, the next barrel), for the bots' aim.
@@ -1400,6 +1427,7 @@ public:
 	// The level's combat areas (CombatAreas.h): the Titans keep inside those
 	// binding vehicle category 4 (0x005ab740).
 	void setCombatAreas(const CombatAreas* areas) { m_combatAreas = areas; }
+	const CombatAreas* combatAreas() const { return m_combatAreas; }
 	// Whether a player's controlled object (its vehicle aboard, else its
 	// soldier) is inside the combat areas (0x004ca5d0, the AI's IAITerrain
 	// slot 0x1c 0x008a0380; CombatAreas.cpp).
@@ -1450,7 +1478,35 @@ public:
 	// The AI runs on the server (AIDLL's interface 0xb47ce4, its slots 0x18
 	// and 0x20): a wreck's armour then drains three times as fast (0x00652380).
 	void setAiRunning(bool on) { m_aiRunning = on; }
+	// The ladder's camera (the LadderContainer's LadderContainerCamera,
+	// DummyObjects.con: 1.5 m over the container and 0.4 m behind it, the
+	// mouse's PIMouseLookX / Y within -130..140 and -60..60 degrees of the
+	// ladder, 250 degrees a second), pushed over the top near it
+	// (0x0059e730). False off a ladder.
+	struct LadderView {
+		physics::Vec3 position;
+		float yaw = 0, pitch = 0; // degrees (pitch up positive)
+	};
+	bool ladderView(int player, LadderView& view) const;
+	// The seated soldier's own camera (the SoldierCamera, 0x005890a0),
+	// which a seat without a camera of its own looks through (0x005c7cb0:
+	// no camera in the seat's subtree, +0x2c 0, gives the occupant's): the
+	// seat's place (the soldier's physics origin there; the camera adds the
+	// crouch pose's eye, seated being pose 1), the yaw of the seat plus the
+	// body's turn and the twist, the aim's pitch within 85 degrees.
+	bool seatedSoldierView(int player, LadderView& view);
 	bool isTitan(uint32_t object) const; // the Titan's root (0x00561d90)
+	// Destroyable props (DestroyableObject, Props.cpp): broken this round,
+	// and the geometry its wreck shows (-1: its own; 1: a render object of
+	// two geometries shows its second, 0x00651c60's slot 0xcc(1)).
+	bool propWrecked(uint32_t object) const;
+	int propGeometry(uint32_t object) const;
+	// Whether heals and repairs may mend `object` (gameLogic slot 0x108's
+	// test 0x004cc380 and the armour's 0x00655a00): its armour template's
+	// canBeRepaired (+0x14c, 1 by default), a wreck (no hit points left)
+	// only with canBeRepairedWhenWreck (+0x14d, 0 by default), never a
+	// Titan's own armour (0x00561d90).
+	bool repairable(uint32_t object) const;
 	uint32_t titanOf(int team) const;     // 0 without one
 	// The commander's move order (Commander.moveTitan, the order event's
 	// server side 0x0050f1f0 -> 0x005abba0): the point must leave the Titan
@@ -1635,7 +1691,10 @@ private:
 		// for timeToStayAsWreck.
 		float empLevel = 0;
 		float wreckTime = -1; // >= 0 while a wreck
-		float wetTime = 0;    // seconds in water
+		// The armour's water timers (0x006521d0): in water (+0xf8, from
+		// waterDamageDelay) and in deep water (+0xf4, from
+		// deepWaterDamageDelay); -1 while out of it.
+		float waterTimer = -1, deepWaterTimer = -1;
 		// The armour's effects (ArmorEffects, stepArmorEffects): the hit
 		// points last seen (+0x254), the level started (+0x184), the last
 		// damage's spectacular flag (+0x250) and whether some follow it.
@@ -2081,11 +2140,16 @@ private:
 		int sentShakeRecords = 0; // +0x1dc more records (takeSentShake)
 		bool toggleFireWas = false; // c_PIToggleFireRate last tick
 		int seatItemSelect = 0;     // a seat weapon taken by its key, for the item selection (takeSeatItemSelect)
+		int squadSizeRefused = 0;   // a key whose weapon the squad is too small for (takeSquadSizeRefused)
 		bool reloadWas = false;     // c_PIReload last tick
 		uint32_t reloadPresses = 0; // its presses (PlayerInfo::reloadPresses)
 		GunSway sway;
 		std::string feelFor;
 		bool zoomed = false;
+		// fire.useDistanceCounter's range mode (SingleFireComp +0x178 /
+		// +0x17c): metres, 0 off; and the zoom last tick.
+		int burstDistance = 0;
+		bool burstZoomWas = false;
 		bool scopeStabilizer = false;
 		// The unlocks' Ability lists: damage taken by projectile material
 		// (setMaterialDamageMod) and extra magazines / rounds per item
@@ -2116,6 +2180,10 @@ private:
 		physics::SoldierBody body;
 		SoldierControl control;
 		std::unique_ptr<FireArm> weapon;
+		// Each firearm's rounds in the world, oldest first (the fire comp's
+		// list +0x14..+0x1c of weak handles, by serial): kept for
+		// fire.maxProjectilesInWorld; it goes with the kit's firearms.
+		std::map<std::string, std::deque<uint32_t>> inWorld;
 		const ProjectileSettings* projectile = nullptr;
 		std::string muzzleEffect; // the weapon's e_muzz_* child
 		physics::Vec3 muzzleOffset; // its place on the weapon (the child's position and rotation)
@@ -2187,8 +2255,16 @@ private:
 		std::string seatAnimationPath;
 		// On a ladder (its LadderContainer, 0x0059dec0): the ladder (an index
 		// into m_ladders, -1 for none), the container's height.
+		// Seated, the soldier's own look (0x0058a6d0): the body's turn
+		// from the seat (+0x25c, within the seat's limits) and the head's
+		// twist on it (+0x278, within 40 degrees).
+		float seatBodyYaw = 0, seatTwist = 0;
 		int ladder = -1;
 		float ladderY = 0;
+		// The ladder's camera (LadderContainerCamera): its yaw off the
+		// ladder's, by the mouse, within -130..140 degrees.
+		float ladderLook = 0;
+		float ladderSpeed = 0; // the container's climb this tick (m/s, up positive)
 	};
 	// Ladders (template class Ladder, 0x0059fb00): placed with their
 	// buildings; their soldier LOD's box (mesh slot 0x54(2)) gives the
@@ -2206,6 +2282,8 @@ private:
 	bool tryLadder(Player& player, SoldierInput& input);
 	void climbLadder(Player& player, SoldierInput& input, float seconds);
 	bool leaveLadder(Player& player, int mode);
+	void poseOnLadder(Player& player, world::Object& soldier, float seconds);
+	void stepSeatedLook(Player& player, const SeatLayout& seat, const SoldierInput& input);
 	physics::Vec3 ladderSeat() const;
 	int ladderRays(const Ladder& ladder, const physics::Vec3& p, const physics::Vec3& back, bool container, bool up,
 		bool down, bool skid) const;
@@ -2245,7 +2323,16 @@ private:
 	std::vector<Impact> m_impacts;
 	std::map<uint32_t, float> m_hitPoints;
 	effects::EffectManager m_effects;
+	void stepBurstRange(Player& player, const world::ObjectTemplate* inHand);
 	void fire(const Player& player, float aimPitch);
+	// target.disableFireWhenActiveMissile: `firearm`'s guided round (of
+	// `player`, from `shooter`) is still flying (0x005e2430).
+	bool activeMissile(const Player& player, uint32_t shooter, const std::string& firearm,
+		const ProjectileSettings* projectile) const;
+	// fire.maxProjectilesInWorld (FireComp template +0x74, 0 no limit):
+	// before `round` joins the world, the firearm's oldest rounds go until
+	// fewer than the limit are left (0x005f2bb0).
+	void limitInWorld(Player& player, const world::ObjectTemplate& firearm, Projectile& round);
 	// `exclude`: the object whose own blast it is (its armour, 0x005a9090's
 	// param_6: neither hurt nor pushed by it).
 	// `hitObject`: what the round hit (0x005e9300's param_2; the camera
@@ -2798,6 +2885,7 @@ private:
 			physics::Vec3 direction;
 			std::string projectile;
 			float velocity = 100;
+			float maxTilt = 0; // its launcher's fire.maximumVehicleTiltForFire
 		};
 		std::vector<PodArray> podArrays;
 		bool meshesDirty = true;
@@ -2838,6 +2926,22 @@ private:
 	void stepTitanWreck(Titan& titan, float seconds);
 	bool m_aiRunning = false;
 	std::set<uint32_t> m_hiddenChildren; // wrecks with hideChildren (partTransforms' quick test)
+	// Destroyable props (Props.cpp): the level's DestroyableObjects with
+	// armour (rescanned when the object count changes) and the broken ones.
+	struct BrokenProp {
+		uint32_t object = 0;
+		double removeAt = 1e30; // a draining wreck's end (canBeDestroyed, timeToStayAsWreck)
+		int geometry = -1;
+	};
+	std::vector<BrokenProp> m_brokenProps;
+	std::vector<uint32_t> m_props;
+	size_t m_propsScanned = static_cast<size_t>(-1);
+	bool isProp(uint32_t object) const;
+	const std::vector<uint32_t>& props();
+	bool breakProp(uint32_t object, int attacker);
+	void stepProps();
+	void resetProps();
+	void removeStaticParts(uint32_t object); // the mobile mesh physics' parts of a static object
 	std::set<uint32_t> m_bonedObjects;   // bodies with bone parts (partBone's quick test)
 	bool titanTerrainClear(const Titan& titan, float x, float z) const;
 	void findTitanObstacles();

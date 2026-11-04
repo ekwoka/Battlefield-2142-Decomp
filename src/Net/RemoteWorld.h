@@ -151,6 +151,10 @@ struct RemotePlayer {
 	// set by a c_PIReload press: 0x004bda00 -> 0x0059b330): each is a
 	// reload seen (the client's 0x00590e10: soldier input message 10).
 	uint32_t reloads = 0;
+	// The time outside the combat area (player +0x294, the networkable's
+	// mask 0x800: whole seconds, 0 inside or after a respawn), the HUD's
+	// countdown (0x0044c7b0 through slot 0xf0).
+	int outsideSeconds = 0;
 };
 
 // KickBan (0x37; written by 0x0050cf30): a player leaves the server,

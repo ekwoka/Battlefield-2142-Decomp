@@ -15,9 +15,9 @@
 // The rays (0x0059ed10) that stop the container or put the soldier off on
 // the way, the bottom's ray down (0x0059d550), the jump key (PIAction)
 // that leaves the ladder anywhere and the soldier's place in the container
-// (the LadderContainer template's seat, 0/1/0) are rewritten; not the
-// nudge (slot 103), the climbing animation and camera (0x0059f380,
-// 0x0059e730).
+// (the LadderContainer template's seat, 0/1/0), the climbing animation
+// (0x0059f380) and the camera (LadderContainerCamera, 0x0059e730) are
+// rewritten; not the nudge (slot 103).
 #include "GameWorld.h"
 
 #include "Physics/MaterialManager.h"
@@ -49,6 +49,12 @@ constexpr float kDownRay = 0.2f;         // ladder-down-ray-mag (0x00a69c50)
 constexpr float kDownRaySkid = 0.3f;     // ladder-down-ray-mag-skid (0x00a69c28)
 constexpr float kUpRay = 1.7f;           // ladder-up-ray-mag-skid (0x00a69c18)
 constexpr float kGetOffRayMin = 0.3f;    // ladder-getoff-ray-min (0x00a69c38)
+constexpr float kLadderStepSize = 0.3f;  // ladder-step-size (0x00a69c30)
+constexpr float kEndCameraOffset = 0.4f; // ladder-end-camera-offset (0x00a69c2c)
+// LadderContainerCamera (DummyObjects.con): setPosition 0/1.5/-0.4,
+// setMinRotation -130/-60/0, setMaxRotation 140/60/0.
+const Vec3 kCameraOffset {0, 1.5f, -0.4f};
+constexpr float kCameraMinYaw = -130, kCameraMaxYaw = 140, kCameraPitch = 60;
 
 float length(const Vec3& v) { return std::sqrt(physics::lengthSquared(v)); }
 
@@ -218,6 +224,8 @@ bool GameWorld::tryLadder(Player& player, SoldierInput& input)
 		// 0x0059fbf0: seated in the container at the ladder.
 		player.ladder = static_cast<int>(i);
 		player.ladderY = at;
+		player.ladderLook = 0;
+		player.ladderSpeed = 0;
 		player.body.velocity = {};
 		return true;
 	}
@@ -251,6 +259,11 @@ void GameWorld::climbLadder(Player& player, SoldierInput& input, float seconds)
 	if (input.jump && leaveLadder(player, 3)) {
 		return;
 	}
+	const float yBefore = player.ladderY;
+	const auto speedOut = [&] { player.ladderSpeed = seconds > 0 ? (player.ladderY - yBefore) / seconds : 0.0f; };
+	// The camera's yaw (PIMouseLookX, 250 degrees a second at most).
+	player.ladderLook = std::clamp(player.ladderLook + std::clamp(input.turn, -250 * seconds, 250 * seconds),
+		kCameraMinYaw, kCameraMaxYaw);
 	const float pitch = -input.aimPitch;
 	float sign = pitch >= kDownAngle ? -1.0f : 1.0f;
 	float in = std::clamp(input.throttle, -1.0f, 1.0f);
@@ -290,7 +303,94 @@ void GameWorld::climbLadder(Player& player, SoldierInput& input, float seconds)
 	} else if (rays == 1) {
 		leaveLadder(player, 3);
 	}
+	speedOut();
 	seat();
+}
+
+// The climb's pose (0x0059f380, from the container's update slot 40,
+// 0x0059fac0): the LadderContainer's seat system
+// (Objects/Common/Ladder/animationSystemHandles.inc: message 1
+// normal_climb's climb, 3p_climbup; message 2 getoff_climb's climbgetoff,
+// 3p_climbendofladderhandles; the skid, 3p_climbdownfast, on the up value
+// at -3 or less) at a phase the height sets, not the time: within 1.8 m
+// (soldier-start-getoff) of the top the get-off at 1 - (top - y) / 1.8,
+// else the climb at (y - bottom) / (2 x ladder-step-size 0.3), wrapped
+// past 1 (0.6 m a cycle); still, the pose holds. The soldier hands the
+// seat system its own vertical speed (0x005ef250 -> 0x008b99a0): 1.35 m/s
+// climbing, 4 times that down a skid. The first-person system has no
+// ladder states.
+void GameWorld::poseOnLadder(Player& player, world::Object& soldier, float seconds)
+{
+	const Ladder& ladder = m_ladders[static_cast<size_t>(player.ladder)];
+	std::string path = "Objects/Common/Ladder/animationSystemHandles.inc";
+	if (const world::ObjectTemplate* container = m_templates.find("LadderContainer")) {
+		if (const auto it = container->settings().find("seatAnimationSystem"); it != container->settings().end()) {
+			path = it->second;
+		}
+	}
+	if (player.seatAnimationPath != path) {
+		player.seatAnimationPath = path;
+		player.seatAnimation.reset();
+		if (m_loadAnimationSystem && m_animationSystems) {
+			if (const anim::AnimationSystemTemplate* system = m_loadAnimationSystem(path)) {
+				player.seatAnimation = std::make_unique<anim::AnimationState>(*m_animationSystems, *system);
+			}
+		}
+		if (player.skeleton) {
+			player.pose = anim::setupPose(*player.skeleton);
+		}
+	}
+	if (world::Object* held = player.weaponObject ? m_objects.find(player.weaponObject) : nullptr) {
+		held->setHidden(true); // put away (0x005878b0)
+	}
+	if (!player.seatAnimation || !player.skeleton) {
+		return;
+	}
+	anim::AnimationInput in;
+	const float y = player.ladderY;
+	float phase = 0;
+	if (kStartGetOff > 0 && ladder.top - kStartGetOff < y) {
+		in.messages = 2;
+		phase = 1 - (ladder.top - y) / kStartGetOff;
+	} else {
+		in.messages = 1;
+		phase = (y - ladder.bottom) / (2 * kLadderStepSize);
+		if (phase > 1) {
+			phase -= std::floor(phase);
+		}
+	}
+	in.upSpeed = player.ladderSpeed;
+	player.seatAnimation->setTimeOverride(phase);
+	player.seatAnimation->update(in, seconds);
+	std::vector<bool> touched;
+	player.seatAnimation->apply(*player.skeleton, player.pose, touched);
+	player.worldPose = anim::worldMatrices(*player.skeleton, player.pose);
+	(void)soldier;
+}
+
+bool GameWorld::ladderView(int id, LadderView& view) const
+{
+	const Player* player = findPlayer(id);
+	if (!player || player->ladder < 0 || static_cast<size_t>(player->ladder) >= m_ladders.size()) {
+		return false;
+	}
+	const Ladder& ladder = m_ladders[static_cast<size_t>(player->ladder)];
+	const Vec3 container {ladder.position.x, player->ladderY, ladder.position.z};
+	const Vec3& forward = ladder.rotation.rows[2];
+	const float ladderYaw = std::atan2(forward.x, forward.z) * 57.29578f;
+	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({ladderYaw, 0, 0});
+	view.position = container + turn.transform(kCameraOffset);
+	// 0x0059e730 (the Inside camera's 0x00610620, through the seat's slot
+	// 0x140): past the get-off height the camera moves on along the
+	// container's forward by ladder-end-camera-offset (0.4) x (1 - cos(the
+	// metres over it, as radians)).
+	const float over = player->ladderY - (ladder.top - kStartGetOff);
+	if (over > 0) {
+		view.position = view.position + turn.rows[2] * (kEndCameraOffset * (1 - std::cos(over)));
+	}
+	view.yaw = ladderYaw + player->ladderLook;
+	view.pitch = std::clamp(player->input.aimPitch, -kCameraPitch, kCameraPitch);
+	return true;
 }
 
 // 0x0059e820 / 0x0059ea20: the ends' exits (1 the top: over it, 0.75 m on
@@ -318,6 +418,11 @@ bool GameWorld::leaveLadder(Player& player, int mode)
 	player.body.position = origin;
 	player.body.velocity = {};
 	player.ladder = -1;
+	player.seatAnimation.reset(); // the container's system goes with it
+	player.seatAnimationPath.clear();
+	if (player.skeleton) {
+		player.pose = anim::setupPose(*player.skeleton);
+	}
 	return true;
 }
 

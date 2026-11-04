@@ -80,8 +80,8 @@ struct ProjectileSettings {
 	float explosionForce = 0;
 	float explosionYMod = 1; // the height difference counts times this
 	std::string endEffect; // detonation.endEffectTemplate
-	// physicsType RotationalPoint or Mesh: it bounces off what it hits
-	// (grenades) and detonates when its time to live runs out, not on impact.
+	// collision.bouncing: it bounces off what it hits (grenades, mines, C4)
+	// and detonates when its time to live runs out, not on impact.
 	bool bounces = false;
 	bool damageMandown = false; // damageMandownSoldiers: it reaches downed soldiers (the defibrillator)
 	// ResurrectCollisionComp (template 0x005e7d20): collision.resurrectDamage
@@ -220,6 +220,12 @@ std::array<BlastForce, 3> blastTwist(const physics::Mat3& axes, const physics::V
 // up in whole steps of `stepSize`, at most `numSteps`.
 float addEmpDamage(float level, float amount, float stepSize, int numSteps);
 
+// fire.maximumVehicleTiltForFire (0x005f1780, the press of every fire
+// component): 0 lets any tilt through; otherwise the root object's up axis
+// (`root`'s second row) must lie less than that many degrees off the
+// world's (acos of its y, clamped).
+bool tiltAllowsFire(const physics::Mat3& root, float maxTilt);
+
 struct FireArmSettings {
 	int roundsPerMinute = 600;
 	int magSize = 30;
@@ -280,6 +286,26 @@ struct FireArmSettings {
 	// fire.busyUntilButtonRelease (SingleFireComp +0x9c, setter 0x004e3f33):
 	// see FireArm::fire.
 	bool busyUntilButtonRelease = false;
+	// fire.fireStartDelay (the fire template's RandomDistribution at
+	// +0x08, its value +0x0c; 0 by default): a spin-up before the first
+	// round of a press. SingleFireComp / SpawnObjectFireComp (slot 36,
+	// 0x005d4d80) and ExplosivesFireComp (0x005e6bc0) on a fresh press
+	// (+0x6c, the press 0x005f1370) at the burst's first round (+0x24 0)
+	// with a value other than 0 start it (+0x60; 0x005f1650: round(30 x
+	// max(0, sample)) ticks) and fire nothing; the update (0x005f18b0, slot
+	// 5) lets the round go once the ticks are past; a release (slot 12,
+	// 0x005f1630) drops it. MultiFireComp's slot 36 (0x005d6e10) never
+	// starts it (the heavy mech's minigun's 0.5 does nothing). Shipped:
+	// EU_AAcannon_Firearm_Barrel 0.6, the AT's miniguns 0.5,
+	// US_AG_Cannon_fireArm 0.227.
+	RandomDistribution fireStartDelay;
+	bool multiFire = false; // a MultiFireComp
+	// fire.maximumVehicleTiltForFire (the fire template's +0x7c, 0 none):
+	// the press (slot 13 of each fire component, 0x005f1780) is refused
+	// while the root object's up axis is that many degrees or more off the
+	// world's (the pod launchers: 30, the air transports' 70); a thrown
+	// one's second click of a double click isn't tested (0x005e4d80).
+	float maximumVehicleTiltForFire = 0;
 	// keepProjectiles (the firearm template's +0x318, 5 by default,
 	// 0x005c2800): when the firearm goes, its rounds still in the world
 	// (its list +0x18) are removed this many seconds later (0x005f1cc0:
@@ -416,6 +442,8 @@ private:
 	bool m_useModes = true;
 	bool m_triggerWas = false;
 	bool m_busyUntilRelease = false; // a round fired with busyUntilButtonRelease, trigger still held
+	int m_startDelay = -1;   // fireStartDelay's ticks left (-1: none pending)
+	Random m_startRandom {0xcfb}; // 0x005f1650's draws (its seed: the owner's +0x214 or the time, + 0xcfb)
 	bool m_pending = false; // a press waiting for the gun
 	bool m_clicked = false; // a press on an empty magazine (takeClick)
 	int m_burstLeft = 0;
@@ -515,6 +543,7 @@ struct Projectile {
 	uint32_t pending = 0;
 	int64_t pendingSince = 0;
 	float damageScale = 1;  // what is left of its damage after penetrating (DefaultPenetrateComp)
+	float burstDistance = 0; // the airburst: off at this far from its origin (fire.useDistanceCounter, 0 none)
 	// A magnet's follow state (0x005ecb30): chasing from when (the seek's
 	// trackingDelay after the lock), the fastest the target has gone
 	// (+0x90) and whether that armed it (+0x95).

@@ -12,6 +12,7 @@
 #include <unistd.h>
 #endif
 
+#include <atomic>
 #include <cstring>
 
 namespace dice::hfe::net {
@@ -310,16 +311,27 @@ bool UdpServerSocket::bind(uint16_t port, bool loopbackOnly)
 	return true;
 }
 
+namespace {
+std::atomic<uint64_t> g_datagramsSent {0}, g_datagramsReceived {0};
+}
+
+uint64_t UdpServerSocket::datagramsSent() { return g_datagramsSent.load(); }
+uint64_t UdpServerSocket::datagramsReceived() { return g_datagramsReceived.load(); }
+
 bool UdpServerSocket::sendTo(const Address& to, const std::vector<uint8_t>& data)
 {
 	sockaddr_in address {};
 	address.sin_family = AF_INET;
 	address.sin_port = to.port;
 	address.sin_addr.s_addr = to.ip;
-	return m_socket != -1
+	const bool sent = m_socket != -1
 		&& ::sendto(static_cast<Native>(m_socket), reinterpret_cast<const char*>(data.data()), static_cast<int>(data.size()),
 			   0, reinterpret_cast<sockaddr*>(&address), sizeof(address))
-		== static_cast<int>(data.size());
+			== static_cast<int>(data.size());
+	if (sent) {
+		++g_datagramsSent;
+	}
+	return sent;
 }
 
 bool UdpServerSocket::enableBroadcast()
@@ -373,6 +385,7 @@ int UdpServerSocket::receiveFrom(std::vector<uint8_t>& out, Address& from, int t
 	from.ip = address.sin_addr.s_addr;
 	from.port = address.sin_port;
 	out.assign(buffer, buffer + n);
+	++g_datagramsReceived;
 	return static_cast<int>(n);
 }
 

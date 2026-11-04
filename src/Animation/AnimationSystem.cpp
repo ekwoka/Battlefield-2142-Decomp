@@ -1305,6 +1305,15 @@ void AnimationState::apply(const Skeleton& skeleton, LocalPose& pose, std::vecto
 			continue;
 		}
 		const Bundle& bundle = m_system.bundles()[instance.bundle];
+		if (m_hasTimeOverride) {
+			// The override (0x008c2a90 with the instance's +0x28): each clip
+			// at its length times the fraction.
+			for (const Bundle::Entry& entry : bundle.clips) {
+				const Clip& clip = m_system.clips()[entry.clip];
+				drawClip(clip, m_systems.clipLength(clip) * m_timeOverride, std::min(weight, 1.0f));
+			}
+			continue;
+		}
 		const float time = bundle.playBackward ? bundle.length - instance.time : instance.time;
 		if (!instance.layers.empty()) {
 			// SlopeTrigger's layers (0x008c2a90 each, from time 0): none

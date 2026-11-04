@@ -9,6 +9,7 @@
 #include "Main/HudMenusChat.h"
 #include "Main/HudMenusComm.h"
 #include "Main/HudMenusVehicles.h"
+#include "Main/HudWorld.h"
 #include "Console/ConsoleBinding.h"
 #include "IO/File/FileManager.h"
 #include "TestMain.h"
@@ -821,4 +822,269 @@ TEST(HudMenus_DemoPlaybackAndCamera)
 	const float at[3] = {10, 5, 20};
 	const auto look = camera.follow(at, 0);
 	CHECK(std::abs(look.eye[0] - 10) < 1e-4f && std::abs(look.eye[2] - 18) < 1e-4f && std::abs(look.yaw) < 1e-4f);
+}
+
+// The commander rose's and squad leader rose's rows (main.cpp's
+// Commander.zoomCommander 0x007d7be0, detailedView 0x007d8db0,
+// spottedMouseOver 0x00751f80, CommanderMenu.sendRadioMessage 0x007a9f60,
+// SquadLeader.sendRequestForOrder 0x007c7cd0, issueSquadRequest 0x007d6820).
+TEST(HudMenus_CommanderRoseRows)
+{
+	CHECK(menu::commanderZoomStep(0) == 1 && menu::commanderZoomStep(1) == 2 && menu::commanderZoomStep(2) == 0);
+	game::GameWorld::PlayerInfo me;
+	me.position = {5, 0, 7};
+	const std::pair<float, float> view {100, 200};
+	CHECK(menu::detailedViewPoint(&view, &me) == view);
+	CHECK((menu::detailedViewPoint(nullptr, &me) == std::pair<float, float> {5, 7}));
+	Squads s;
+	menu::spottedMouseOver(s.hud, 3);
+	CHECK(s.hud.number("Spotted3MouseOver") == 1 && s.hud.number("Spotted1MouseOver") == 0 && s.hud.number("Spotted11MouseOver") == 0);
+	menu::spottedMouseOver(s.hud, 11);
+	CHECK(s.hud.number("Spotted3MouseOver") == 0 && s.hud.number("Spotted11MouseOver") == 1);
+	// sendRadioMessage: each selected squad, the spam check on the first.
+	menu::CommanderMenu commander(s.world, s.hud);
+	const int cmd = s.world.addPlayer("Me", 2, false);
+	const int a = s.world.addPlayer("A", 2, true);
+	const int b = s.world.addPlayer("B", 2, true);
+	s.world.joinSquad(a, 1);
+	s.world.joinSquad(b, 4);
+	s.world.setCommanderEnabled(true);
+	CHECK(s.world.setCommander(2, cmd));
+	commander.update(cmd);
+	bool ctrl = true;
+	commander.ctrlHeld = [&ctrl] { return ctrl; };
+	commander.click(cmd, 0, 1);
+	commander.click(cmd, 1, 4); // squad 4's members shown
+	commander.click(cmd, 0, 1);
+	CHECK(commander.tabs.squadMembers);
+	std::vector<std::pair<int, bool>> said;
+	commander.sendRadioMessage([&said](int squad, bool first) { said.push_back({squad, first}); });
+	CHECK((said == std::vector<std::pair<int, bool>> {{1, true}, {4, false}}));
+	CHECK(!commander.tabs.squadMembers);
+	// sendRequestForOrder: req_new_order to the commander, then kind 1.
+	std::vector<std::string> voices;
+	int kind = -1;
+	menu::sendRequestForOrder([&voices](int channel, const std::string& voice) { voices.push_back(std::to_string(channel) + voice); },
+		[&kind](int k) { kind = k; });
+	CHECK(voices == std::vector<std::string> {"2req_new_order"} && kind == 1);
+	// issueSquadRequest: the armed order at the rose's point, nothing else.
+	float placedX = -1, placedZ = -1;
+	const auto place = [&](float x, float z) { placedX = x, placedZ = z; };
+	const auto point = [](float& x, float& z) { return x = 30, z = 40, true; };
+	CHECK(!menu::issueSquadRequest(false, point, place) && placedX < 0);
+	CHECK(!menu::issueSquadRequest(true, [](float&, float&) { return false; }, place) && placedX < 0);
+	CHECK(menu::issueSquadRequest(true, point, place) && placedX == 30 && placedZ == 40);
+}
+
+// The squad panel's voice icons (0x007aaf10) and the tactical rose's
+// all-squads row (0x007ac8f0 with +0x1e4).
+TEST(HudMenus_CommanderVoiceAndAllSquads)
+{
+	Squads s;
+	menu::CommanderMenu commander(s.world, s.hud);
+	const int cmd = s.world.addPlayer("Me", 2, false);
+	const int a = s.world.addPlayer("A", 2, true);
+	const int b = s.world.addPlayer("B", 2, true);
+	const int c = s.world.addPlayer("C", 2, true);
+	s.world.joinSquad(a, 1);
+	s.world.joinSquad(b, 2);
+	s.world.joinSquad(c, 3);
+	s.world.setCommanderEnabled(true);
+	CHECK(s.world.setCommander(2, cmd));
+	std::vector<int> tutorials;
+	commander.voice = [&](int player) { return player == a ? 1 : player == b ? 2 : 0; };
+	commander.onTutorial = [&tutorials](int index) { tutorials.push_back(index); };
+	commander.update(cmd);
+	CHECK(s.hud.listCell(15, 0, 3) == "Ingame/Commander/voip/voip_icon_blocked.tga");
+	CHECK(s.hud.listCell(15, 1, 3) == "Ingame/Commander/voip/voip_icon_transmitting.tga");
+	CHECK(s.hud.listCell(15, 2, 3).empty());
+	CHECK(tutorials == std::vector<int> {0x26});
+	commander.voice = [&](int player) { return player == c ? 3 : player == b ? 2 : 0; };
+	commander.update(cmd);
+	CHECK(s.hud.listCell(15, 2, 3) == "Ingame/Commander/voip/voip_icon_distorted.tga");
+	CHECK((tutorials == std::vector<int> {0x26, 0x26, 0x27}));
+	// The all-squads row: last, selected, not a squad to click.
+	commander.localize = [](const std::string& id) { return id == "SELECTED_ALL_SQUADS" ? "All squads" : id; };
+	commander.allSquads = true;
+	commander.update(cmd);
+	CHECK(s.hud.listCell(15, 3, 1) == "|c All squads");
+	commander.click(cmd, 3, 1);
+	CHECK(commander.selected().empty());
+	commander.allSquads = false;
+	commander.update(cmd);
+	CHECK(s.hud.listCell(15, 3, 1).empty());
+}
+
+namespace {
+
+// A world for the HUD with the players given (a joined game's, as
+// NametagsTest's).
+struct RadarWorld : host::HudWorld {
+	std::vector<PlayerInfo> players;
+	std::vector<uint32_t> vehicles;
+	bool joined() const override { return true; }
+	int localPlayer() const override { return 0; }
+	bool playerInfo(int player, PlayerInfo& out) const override
+	{
+		for (const PlayerInfo& p : players) {
+			if (p.id == player) {
+				out = p;
+				return true;
+			}
+		}
+		return false;
+	}
+	std::vector<PlayerInfo> playerList() const override { return players; }
+	Scores scores(int) const override { return {}; }
+	float tickets(int) const override { return 0; }
+	int commander(int) const override { return -1; }
+	std::vector<ControlPointInfo> controlPointList() const override { return {}; }
+	std::vector<int> spawnablePoints(int) const override { return {}; }
+	int spawnChoice(int) const override { return -1; }
+	std::vector<VehicleInfo> vehicleList() const override { return {}; }
+	std::vector<int> vehicleOccupants(uint32_t) const override { return {}; }
+	float hitPoints(uint32_t) const override { return 100; }
+	float objectHealth(uint32_t) const override { return 1; }
+	bool squadOrder(int, int, bool, SquadOrder&) const override { return false; }
+	std::vector<SquadRequest> squadRequests(int) const override { return {}; }
+	const world::Object* soldier() const override { return nullptr; }
+	const world::Object* vehicle() const override { return nullptr; }
+	float health() const override { return 1; }
+	Weapon heldWeapon() const override { return {}; }
+	Weapon seatGroupWeapon(int) const override { return {}; }
+	std::vector<uint32_t> spottedVehicles() const override { return vehicles; }
+};
+
+} // namespace
+
+// The squad radar's markers (menu::radarMarkers): a decoy within 60 m of an
+// enemy on foot shows instead of him (0x00508590), one in a vehicle stays
+// where he is; the reports' vehicles by their miniMapIcon (0x00790d60).
+TEST(HudRadar_DecoyAndVehicleMarkers)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	game::GameWorld round(templates, objects);
+	templates.registerType(1, "TargetObject");
+	templates.registerType(2, "PlayerControlObject");
+	world::ObjectTemplate* decoyTemplate = templates.create("TargetObject", "Bp1_Decoy");
+	decoyTemplate->settings()["targetType"] = "TTDecoy";
+	world::ObjectTemplate* tank = templates.create("PlayerControlObject", "tank");
+	tank->settings()["vehicleHud.miniMapIcon"] = "Ingame/mini_tank.tga";
+	objects.create(decoyTemplate, {40, 0, 10});
+	const uint32_t car = objects.create(tank, {100, 0, 100})->id();
+	RadarWorld world;
+	game::GameWorld::PlayerInfo onFoot;
+	onFoot.id = 5;
+	onFoot.alive = true;
+	onFoot.position = {10, 0, 10};
+	game::GameWorld::PlayerInfo riding = onFoot;
+	riding.id = 6;
+	riding.vehicle = car;
+	riding.position = {20, 0, 10};
+	game::GameWorld::PlayerInfo far = onFoot;
+	far.id = 7;
+	far.position = {-200, 0, 10};
+	world.players = {onFoot, riding, far};
+	auto markers = menu::radarMarkers(world, round, {5, 6, 7});
+	CHECK(markers.size() == 3);
+	if (markers.size() == 3) {
+		CHECK(markers[0].x == 40 && markers[0].z == 10); // at the decoy
+		CHECK(markers[1].x == 20 && markers[1].z == 10); // in a vehicle: his own place
+		CHECK(markers[2].x == -200);                     // too far from it
+		CHECK(markers[0].texture == "Ingame/Player/Icons/Minimap/mini_Soldier.dds" && markers[0].size == 16);
+	}
+	// Without a decoy template's targetType the enemy is where he is.
+	decoyTemplate->settings()["targetType"] = "TTHeat";
+	markers = menu::radarMarkers(world, round, {5});
+	CHECK(markers.size() == 1 && markers[0].x == 10);
+	// The reports' vehicle.
+	world.vehicles = {car};
+	markers = menu::radarMarkers(world, round, {});
+	CHECK(markers.size() == 1 && markers[0].texture == "Ingame/mini_tank.tga" && markers[0].x == 100 && markers[0].size == 16);
+}
+
+// The vehicle HUD's torque arrows and sprint (0x007a2e60): the torque eased
+// a hundredth a frame (its source +0x2f4 has no writer: 0), the stamina
+// bar while sprinting or below 1 and its text for 3 s after it fell.
+TEST(HudVehicle_TorqueAndStamina)
+{
+	hud::HudManager hud(nullptr);
+	menu::VehicleHud vehicleHud;
+	menu::VehicleHudInput in;
+	in.seconds = 0.5f;
+	vehicleHud.update(hud, in);
+	CHECK(hud.number("TorqueAngle") == 0 && hud.string("TorqueString") == "0");
+	CHECK(std::fabs(hud.number("SecondTorqueAngle") - 6.2831855f) < 1e-4f);
+	CHECK(hud.number("VehicleStaminaShow") == 0 && hud.number("VehicleStamina") == 1);
+	in.torque = 1;
+	vehicleHud.update(hud, in);
+	CHECK(std::fabs(hud.number("Torque") - 0.01f) < 1e-5f && hud.string("TorqueString") == "1");
+	in.sprinting = true;
+	in.stamina = 0.8f;
+	vehicleHud.update(hud, in);
+	CHECK(hud.number("VehicleStaminaShow") == 1 && hud.number("VehicleStaminaTextStringShow") == 1);
+	in.sprinting = false;
+	for (int i = 0; i < 6; ++i) {
+		vehicleHud.update(hud, in);
+	}
+	CHECK(hud.number("VehicleStaminaShow") == 1 && hud.number("VehicleStaminaTextStringShow") == 0);
+	in.stamina = 1;
+	vehicleHud.update(hud, in);
+	CHECK(hud.number("VehicleStaminaShow") == 0);
+}
+
+// The item list in a seat (0x0079c470): the PIFire group by item index
+// (dimmed when not selectable); with useSelectionIcons a longer PIAltFire
+// group instead; without a PIFire group the soldier's own.
+TEST(HudItemSelection_SeatLists)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "GenericFireArm");
+	templates.registerType(2, "PlayerControlObject");
+	world::ObjectTemplate* gun = templates.create("GenericFireArm", "gun");
+	gun->settings()["weaponHud.selectIcon"] = "gun.tga";
+	world::ObjectTemplate* seatTemplate = templates.create("PlayerControlObject", "seat");
+	const auto find = [&templates](const std::string& name) -> const world::ObjectTemplate* { return templates.find(name); };
+	game::GameWorld::SeatLayout seat;
+	game::GameWorld::SeatWeapon w;
+	w.weapon = "gun";
+	w.group = 0;
+	w.itemIndex = 1;
+	seat.weapons.push_back(w);
+	w.group = 1;
+	w.itemIndex = 2;
+	seat.weapons.push_back(w);
+	w.itemIndex = 3;
+	w.selectable = false;
+	seat.weapons.push_back(w);
+	auto items = menu::seatSelectItems(seat, seatTemplate, find, {});
+	CHECK(items.size() == 1 && items[0].index == 1 && items[0].icon == "gun.tga" && items[0].usable);
+	seatTemplate->settings()["vehicleHud.useSelectionIcons"] = "1";
+	items = menu::seatSelectItems(seat, seatTemplate, find, {});
+	CHECK(items.size() == 2 && items[0].index == 2 && items[1].index == 3 && !items[1].usable);
+	seat.weapons.erase(seat.weapons.begin());
+	seat.weapons[0].group = seat.weapons[1].group = 2;
+	items = menu::seatSelectItems(seat, seatTemplate, find, {{3, "gun"}, {1, "knife"}});
+	CHECK(items.size() == 2 && items[0].index == 3 && items[0].icon == "gun.tga" && items[1].index == 1);
+}
+
+// minimumSquadSizeForSelection (0x005c3080, the firearm's slot 0x188): too
+// few in the squad refuses the weapon (one fewer for a bot), never without
+// a squad; the key's refusal goes to the HUD (message 0x52) once.
+TEST(HudItemSelection_SquadSizeRefusal)
+{
+	Squads s;
+	world::ObjectTemplate beacon(1, "GenericFireArm", "beacon", 1);
+	beacon.settings()["minimumSquadSizeForSelection"] = "2";
+	const int me = s.world.addPlayer("Me", 1, false);
+	const int bot = s.world.addPlayer("Bot", 1, true);
+	CHECK(!s.world.squadTooSmall(me, beacon)); // no squad
+	s.world.joinSquad(me, 1);
+	CHECK(s.world.squadTooSmall(me, beacon));
+	s.world.joinSquad(bot, 2);
+	CHECK(!s.world.squadTooSmall(bot, beacon)); // a bot needs one fewer
+	s.world.joinSquad(bot, 1);
+	CHECK(!s.world.squadTooSmall(me, beacon));
+	CHECK(s.world.takeSquadSizeRefused(me) == 0);
 }

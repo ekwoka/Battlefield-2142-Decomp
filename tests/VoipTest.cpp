@@ -116,9 +116,12 @@ struct Session {
 	VoipServerConnection connection;
 	std::vector<std::unique_ptr<Player>> players;
 	double now = 100.0;
+	// Datagrams earlier sessions left unread (their sockets are closed).
+	int64_t unread = 0;
 
 	bool start(const std::string& serverPassword, const std::string& connectionPassword)
 	{
+		unread = static_cast<int64_t>(net::UdpServerSocket::datagramsSent() - net::UdpServerSocket::datagramsReceived());
 		VoipServerInstance::Options options;
 		options.port = 0;
 		options.password = serverPassword;
@@ -179,8 +182,28 @@ struct Session {
 			for (auto& p : players) {
 				p->client.update(now);
 			}
-			if (i % 8 == 7) {
-				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			settle();
+		}
+	}
+
+	// Loopback delivery can lag the send (Darwin queues it to an input
+	// thread; a loaded machine delays it further), so a step doesn't end
+	// until every datagram sent has been read: the updates run again at the
+	// same time (they only read and answer what came in) until the step's
+	// datagrams are all read. Each step thus sees what a synchronous loopback
+	// would give it. Answers sent meanwhile aren't waited for: a challenge
+	// and a wrong answer would bounce for ever.
+	void settle()
+	{
+		const uint64_t target = net::UdpServerSocket::datagramsSent();
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+		while (static_cast<int64_t>(target - net::UdpServerSocket::datagramsReceived()) > unread
+			&& std::chrono::steady_clock::now() < deadline) {
+			std::this_thread::sleep_for(std::chrono::microseconds(50));
+			connection.update(now);
+			server.update(now);
+			for (auto& p : players) {
+				p->client.update(now);
 			}
 		}
 	}
@@ -616,9 +639,11 @@ TEST(Voip_RefusedGameServers)
 		CHECK(resolveAddress("127.0.0.1", other.port(), otherAddress));
 		std::vector<uint8_t> reply;
 		net::UdpServerSocket::Address from;
-		// Updates the voice server at `at` until `done` (the packet arrived).
+		// Updates the voice server at `at` until `done` (the packet arrived),
+		// for up to 2 s of wall time (loopback delivery can lag; see settle).
 		const auto pump = [&](double at, const std::function<bool()>& done) {
-			for (int i = 0; i < 200; ++i) {
+			const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+			while (std::chrono::steady_clock::now() < deadline) {
 				if (done()) {
 					return true;
 				}

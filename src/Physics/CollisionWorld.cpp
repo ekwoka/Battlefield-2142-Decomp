@@ -488,4 +488,17 @@ void CollisionWorld::capsuleEdgeContacts(const Vec3& a, const Vec3& b, float rad
 	}
 }
 
+size_t CollisionWorld::removeOwner(uint32_t owner)
+{
+	size_t removed = 0;
+	for (auto& [key, indices] : m_cells) {
+		const size_t before = indices.size();
+		indices.erase(std::remove_if(indices.begin(), indices.end(),
+						  [&](uint32_t index) { return m_triangles[index].owner == owner; }),
+			indices.end());
+		removed += before - indices.size();
+	}
+	return removed;
+}
+
 } // namespace dice::hfe::physics

@@ -72,6 +72,7 @@ public:
 	float lookYaw() const { return m_body.yawDegrees + m_control.twist(); }
 	float aimPitch() const { return m_input.pitch; }
 	bool onGround() const { return m_body.onGround(); }
+	const game::SoldierControl& control() const { return m_control; }
 	int32_t lastMove() const { return m_lastMove; }
 
 	struct Stats {

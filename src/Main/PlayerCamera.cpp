@@ -959,10 +959,37 @@ bool PlayerCamera::view(View& view, float aspect) const
 			view.roll = 0;
 			return true;
 		}
-		if (m_mode != game::camera::Mode::Inside || !seatCamera(view)) {
+		if (m_mode != game::camera::Mode::Inside) {
 			return false;
 		}
+		if (!seatCamera(view)) {
+			// A seat without a camera of its own (the FAVs' open position, the
+			// air transports' side seats): the seated soldier's camera
+			// (0x005c7cb0 -> the occupant's, 0x005890a0), at the crouch
+			// pose's eye (seated is pose 1).
+			game::GameWorld::LadderView seated;
+			if (m_remote || !m_round.seatedSoldierView(m_round.localPlayer(), seated)) {
+				return false;
+			}
+			view.position = {seated.position.x, seated.position.y + m_eye.poses[1], seated.position.z};
+			view.yaw = seated.yaw * kDegrees;
+			view.pitch = seated.pitch * kDegrees;
+			view.fovY = aspectFov(m_baseFov, aspect);
+			view.roll = 0;
+			return true;
+		}
 		view.fovY = aspectFov(view.fovY, aspect);
+		return true;
+	}
+	// On a ladder the LadderContainer's camera (GameWorld::ladderView): the
+	// seat's, held by maintainCameraOnEnter / OnExit.
+	game::GameWorld::LadderView ladder;
+	if (!m_remote && m_round.ladderView(m_round.localPlayer(), ladder)) {
+		view.position = {ladder.position.x, ladder.position.y, ladder.position.z};
+		view.yaw = ladder.yaw * kDegrees;
+		view.pitch = ladder.pitch * kDegrees;
+		view.fovY = aspectFov(m_fov.current, aspect);
+		view.roll = m_hitShake * kDegrees;
 		return true;
 	}
 	// The soldier camera: its local position is (0, eye, 0) in the body's
@@ -1158,6 +1185,11 @@ std::vector<PlayerCamera::Model> PlayerCamera::models() const
 	View eye;
 	Me me;
 	if (!m_rig || !view(eye, 4.0f / 3.0f) || !current(me) || me.vehicle) {
+		return out;
+	}
+	// On a ladder the weapon is put away (0x005878b0) and the first-person
+	// system has no ladder states: nothing of the soldier is drawn.
+	if (!m_remote && m_round.onLadder(m_round.localPlayer())) {
 		return out;
 	}
 	const anim::Skeleton& skeleton = m_rig->skeleton();

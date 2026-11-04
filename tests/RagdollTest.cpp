@@ -9,7 +9,9 @@
 #include "Game/CombatAreas.h"
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
+#include "Game/GameLogic.h"
 #include "Game/GameWorld.h"
+#include "Main/HudWorld.h"
 #include "IO/File/FileManager.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "Physics/CollisionWorld.h"
@@ -2051,6 +2053,12 @@ TEST(CombatArea_OutsideTimerThenDamage)
 	game.run(1);
 	CHECK(game.world->outsideCombatArea(me) > 0.9f);
 	CHECK(std::abs(game.world->combatAreaTimeLeft(me) - 1) < 0.1f);
+	// The HUD's countdown (0x0044c7b0): the round's while the game runs.
+	game::GameLogic logic;
+	host::LocalHudWorld hudWorld(*game.world, logic);
+	CHECK(std::abs(hudWorld.combatAreaTimeLeft() - 1) < 0.1f);
+	logic.endGame(1, 3);
+	CHECK(hudWorld.combatAreaTimeLeft() < 0);
 	const auto heard = game.world->takeRadioHeard();
 	CHECK(std::count_if(heard.begin(), heard.end(), [](const auto& h) { return h.voice == "leaving_the_combat_area"; }) == 1);
 	game::GameWorld::PlayerInfo info;

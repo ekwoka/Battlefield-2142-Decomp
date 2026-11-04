@@ -101,6 +101,13 @@ public:
 	int receiveFrom(std::vector<uint8_t>& out, Address& from, int timeoutMilliseconds);
 	void close();
 
+	// Datagrams this process's UdpServerSockets sent and received so far.
+	// Loopback delivery is asynchronous on some systems (Darwin hands it to
+	// an input thread), so tests that pump several sockets in one thread
+	// wait until the two agree instead of assuming a send is readable at once.
+	static uint64_t datagramsSent();
+	static uint64_t datagramsReceived();
+
 private:
 	intptr_t m_socket = -1;
 	uint16_t m_port = 0;

@@ -759,6 +759,17 @@ void GameWorld::wheelProbes(Body& body, MeshActor& b, float seconds)
 	}
 }
 
+// A static object's parts leave the grid (a broken prop's physics,
+// 0x00651c60's slot 0xd4 -> 0xc).
+void GameWorld::removeStaticParts(uint32_t object)
+{
+	for (auto& [key, indices] : m_staticGrid) {
+		indices.erase(std::remove_if(indices.begin(), indices.end(),
+						  [&](uint32_t index) { return m_staticParts[index].object == object; }),
+			indices.end());
+	}
+}
+
 // The static objects' parts, each template of a static object's tree with
 // a collision mesh, in a grid of 16 m cells by their sphere.
 void GameWorld::addStaticPart(StaticPart part)
@@ -871,9 +882,21 @@ void GameWorld::collisionEvent(uint32_t self, uint32_t other, const Vec3& veloci
 	if (!t) {
 		return;
 	}
-	// PlayerControlObject (0x005c72f0): material 0x29a is the helicopter
-	// exit's (MeshCollision's meshPair destroys it), anything else the base.
-	if (otherMaterial == kKillMaterial && sameName(t->typeName(), "PlayerControlObject")) {
+	// PlayerControlObject (0x005c72f0): the other's material 0x29a destroys
+	// it (the server's damage, slot 0xe4 -> 0x004c0e40: 1e10, no attacker),
+	// anything else the base. The Parachute's (0x005cf750: the pods) sees
+	// to its landing and then chains to it. 0x29a is the helicopter exit's
+	// and the Titans' force fields' vehicle LOD (eu_forcefield,
+	// as_titan_forcefield, the vehicle bays' eu_forcefield_big and
+	// as_titan_vb_shield: every face of it); the team rule lets a team's
+	// own through, so an enemy pod or vehicle meeting a standing shield is
+	// destroyed with its riders. A shield wrecked at 61 per cent of its
+	// Titan (destroyOnParentDamageLevel) has left the parts (Titans.cpp).
+	if (otherMaterial == kKillMaterial
+		&& (sameName(t->typeName(), "PlayerControlObject") || sameName(t->typeName(), "Parachute"))) {
+		if (hitPoints(self) > 0) {
+			damage(self, 1e10f, kKillMaterial, kKillMaterial, -1);
+		}
 		return;
 	}
 	// The base (0x0063c9e0): the material's veto (slot 0x70) is never set in

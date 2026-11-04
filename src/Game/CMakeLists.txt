@@ -4,6 +4,7 @@ add_library(Game STATIC
 	GameWorld.cpp
 	MeshCollision.cpp
 	Ladders.cpp
+	Props.cpp
 	Commander.cpp
 	Titans.cpp
 	Kits.cpp

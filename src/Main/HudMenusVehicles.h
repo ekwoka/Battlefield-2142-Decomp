@@ -89,12 +89,18 @@
 // is drawn as its occupant instead (slot 0x138).
 #pragma once
 
+#include "Game/GameWorld.h"
+
 #include <array>
+#include <functional>
 #include <string>
 #include <vector>
 
 namespace dice::hfe {
 class Console;
+namespace host {
+class HudWorld;
+}
 namespace hud {
 class HudManager;
 }
@@ -250,6 +256,18 @@ private:
 	std::array<Slot, 10> m_slots;
 };
 
+// The item list in a seat (0x0079c470): the control object's PIFire
+// group (its weapon list 0, slot 0x70(0)) by item index, each dimmed when it
+// can't be selected (0x0079c290: slot 0x170, isSelectable); a seat without
+// one lists the soldier's own (player slot 0xb4's list: the kit's weapons,
+// `carried`); with the seat's vehicleHud.useSelectionIcons (block +0xbc) and
+// a PIAltFire group (slot 0x70(1)) longer than that, the PIAltFire group
+// (the list's +0x10 = 1). `find` gives a weapon's template (its
+// weaponHud.selectIcon).
+std::vector<SelectItem> seatSelectItems(const game::GameWorld::SeatLayout& seat, const world::ObjectTemplate* seatTemplate,
+	const std::function<const world::ObjectTemplate*(const std::string&)>& find,
+	const std::vector<std::pair<int, std::string>>& carried);
+
 // A seat dot's state (0x007a28e0).
 int seatDotState(bool occupied, bool local, int squad, int localSquad, bool sameTeam);
 
@@ -282,6 +300,14 @@ struct VehicleHudInput {
 	float climb = 0;      // m/s up
 	float altitude = 0;   // over the sea
 	std::vector<SeatDot> seats;
+	// The torque the HUD eases toward (the vehicle HUD's +0x2f4: nothing in
+	// BF2142.exe writes it, so 0) and the control object's sprint (its slots
+	// 0x108 stamina, 0x100 sprinting; the rewrite's vehicles have no
+	// stamina of their own, so 1 and not sprinting).
+	float torque = 0;
+	float seconds = 0; // the frame's time (the stamina text's timer)
+	float stamina = 1;
+	bool sprinting = false;
 };
 
 class VehicleHud {
@@ -291,6 +317,8 @@ public:
 
 private:
 	float m_climbAngle = 0, m_climbPrevious = 0; // +0x204 / +0x208
+	float m_torque = 0, m_secondTorque = 1;     // +0x210 / +0x21c (the constructor's 0, 1)
+	float m_staminaWas = 1, m_staminaTimer = -1; // +0x1d4, +0x23c
 	// The template's fields, read when the vehicle changes.
 	const world::ObjectTemplate* m_template = nullptr;
 	std::string m_name;
@@ -346,5 +374,21 @@ std::string iconFrame(const std::string& icon, int frame);
 // The reload wipe's sweep (radians): 2 pi x the share of the reload still
 // to go; 0 when loaded or for a neutral one.
 float reloadSweep(float reloadLeft, float reloadTime, MapRelation relation);
+
+// The squad radar's markers on the minimap (drawn in red, (1, 0.3, 0.3)):
+//   - each enemy in `revealed` alive: what spotting shows, its kit's
+//     spottedIcon at spottedIconSize (0x0077dfe0 -> 0x0077dd70 with the
+//     spotted flag: the kits' mini_Soldier), else the kit's own map icon,
+//     else mini_Soldier at 16; one on foot within 60 m across of a decoy (a
+//     TargetObject of targetType TTDecoy, the Bp1_Decoy; 0x00508590 through
+//     HudManager slot 0x70, 0x0075bd30) is drawn at the decoy instead;
+//   - the vehicles the battlefield reports spotted (2/0x2e: the map node's
+//     markers, 0x00790d60, 16 x 16) by their miniMapIcon (mini_Soldier
+//     without one).
+struct RadarMarker {
+	std::string texture;
+	float x = 0, z = 0, size = 16;
+};
+std::vector<RadarMarker> radarMarkers(const host::HudWorld& world, game::GameWorld& round, const std::vector<int>& revealed);
 
 } // namespace dice::hfe::menu

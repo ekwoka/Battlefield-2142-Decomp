@@ -83,16 +83,29 @@ struct StrategicArea {
 	float vehicleSearchRadius = 0;
 	bool controlPointFlag = false; // addObjectTypeFlag ControlPoint
 	// aiStrategicArea.create: an area of its own, a box over x/z at a
-	// height, without a control point (the rewrite's SAI skips these).
+	// height, without a control point. The rewrite's SAI keeps its status
+	// (boxAreaStatus) for the neighbours' flags; it orders no unit there.
 	bool box = false;
 	float boxMin[2] = {}, boxMax[2] = {};
 	float height = 0;
 	// setTakeable <side> <bool> (+399 + side, 0x1001ab30): whether a side's
 	// units alone in an area without a control point make it theirs
 	// (0x1005f210's status rule; a control point's area takes it from its
-	// point, 0x100629e0). Not used by the rewrite's SAI (see above).
+	// point, 0x100629e0).
 	std::array<bool, 3> takeable {true, true, true};
+	// Such an area's status for each side (+0x70 + 4 side), kept from one
+	// update to the next; Neutral at the start (the area's constructor
+	// wasn't traced).
+	std::array<AreaStatus, 3> boxStatus {AreaStatus::Neutral, AreaStatus::Neutral, AreaStatus::Neutral};
 };
+
+// 0x1005f210's status rule for an area without a control point (+0x164
+// -1), from the units of each side in it as the side knows them: with any
+// there, the side's own alone (one or more, no enemy) make it Owned when
+// it is takeable for the side; else the enemy's alone make it Hostile
+// when it is takeable for the enemy (the other side's byte, 0x191 - (side
+// != 1)); otherwise, and with nobody there, the status stays.
+AreaStatus boxAreaStatus(AreaStatus previous, int friendly, int enemy, bool takeableMine, bool takeableTheirs);
 
 struct StrategicWaypoint {
 	float position[3];

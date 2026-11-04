@@ -169,6 +169,34 @@ struct CommanderTabs {
 	void apply(hud::HudManager& hud) const;
 };
 
+// The commander rose's rows (main.cpp binds them to the console):
+//   - Commander.zoomCommander (0x0077168e -> HUD slot 0x39c, 0x007d7be0):
+//     the map's zoom index steps (0x0077e850(-1, 1): up while below the
+//     last, 2 the overhead view, then back to 0); the map's cursor becomes
+//     the world's point (slot 0x3a0, 0x007d8ec0) and CommanderCam goes
+//     there (slot 0x398).
+int commanderZoomStep(int zoom);
+//   - Commander.detailedView (0x0077161d -> slot 0x394, 0x007d8db0): the
+//     overhead camera's point kept (+0x2f8..+0x300): the view's own, else
+//     the player's; the map at zoom 2 and the screen held open.
+std::pair<float, float> detailedViewPoint(const std::pair<float, float>* view, const game::GameWorld::PlayerInfo* me);
+//   - Commander.spottedMouseOver <n> (0x00771b67 -> slot 0x450,
+//     0x00751f80): Spotted<i>MouseOver = (i == n) for i 1..11.
+void spottedMouseOver(hud::HudManager& hud, int n);
+// The squad leader rose's rows:
+//   - SquadLeader.sendRequestForOrder (0x00770a7e -> slot 0x314,
+//     0x007c7cd0, the rose's needorders): "req_new_order" to the commander
+//     (channel 2) with the spam check, then the Request event of kind 1
+//     (0x007c7d50; a joined game's IssueSquadOrder).
+void sendRequestForOrder(const std::function<void(int channel, const std::string& voice)>& say,
+	const std::function<void(int kind)>& request);
+//   - SquadLeader.issueSquadRequest (0x00770b5f -> slot 0x3b0,
+//     0x007d6820): the armed order (+0x284) placed at the rose's point
+//     (+0x28c) through sendOrder's handler; nothing without an armed order
+//     or a point. True when placed.
+bool issueSquadRequest(bool armed, const std::function<bool(float& x, float& z)>& rosePoint,
+	const std::function<void(float x, float z)>& place);
+
 // The commander screen's squad list (list data 15, "CommanderSquadList";
 // CommanderMenu.singleClick, 0x007ab380): a row per squad of the team
 // with members, its id in cell 13 and its kind (0) in cell 14 (0x007a9c90,
@@ -197,8 +225,29 @@ public:
 	// The modifiers held, and the leader's voice toggled (column 3).
 	std::function<bool()> ctrlHeld, shiftHeld;
 	std::function<void(int leader)> onMuteLeader;
+	// The leaders' voice icons in column 3 (0x007aaf10, the panel's
+	// textures of 0x007ac090): a leader with voice (player slot 0x2e4)
+	// shows voip_icon_blocked when the commander mutes him (+0x298's list,
+	// +0x124) or he is blocked (slot 0x2f0, +0x128), voip_icon_transmitting
+	// while he talks (slot 0x2f4, +0x12c; each such frame counts +0xb0 and
+	// lets the help message 0x26 through, from the second 0x27 too),
+	// voip_icon_distorted otherwise (+0x130); without voice the cell is
+	// empty. `voice` gives a player's: 0 none, 1 muted, 2 talking, 3 idle.
+	std::function<int(int player)> voice;
+	std::function<void(int tutorial)> onTutorial;
+	// The tactical rose's all-squads row (0x007ac8f0 with the panel's +0x1e4:
+	// set by 0x00754290 as the commander, or a player with a squad, opens
+	// the rose with c_GITacticalComm, cleared each frame the key isn't
+	// held): an extra row, selected, "SELECTED_ALL_SQUADS".
+	bool allSquads = false;
+	std::function<std::string(const std::string&)> localize;
 	// The squad whose members show (+0xac; -1 none).
 	void showSquad(int squad) { m_current = squad; }
+	// CommanderMenu.sendRadioMessage (0x00771fe2 -> HUD slot 0x2c4 ->
+	// 0x007a9f60): `say` for each selected squad (the spam check on the
+	// first only), then no squad shows (+0xac) and the members' state 0x11
+	// goes back to 0x10.
+	void sendRadioMessage(const std::function<void(int squad, bool first)>& say);
 	CommanderTabs tabs;
 	// A joined game's players and requests (the server's, HudWorld.h).
 	void setWorld(const host::HudWorld* world) { m_world = world; }
@@ -215,6 +264,7 @@ private:
 	std::set<int> m_selected;
 	int m_current = -1; // +0xac: the squad whose members show
 	int m_anchor = -1;  // +0xcc: the range's start
+	int m_transmitting = 0; // +0xb0
 };
 
 // The squad leaders' requests and the commander's answers (BF2142.exe's

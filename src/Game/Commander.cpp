@@ -834,7 +834,7 @@ void GameWorld::stepCrates(float seconds)
 		const auto mend = [&](uint32_t target, const world::ObjectTemplate* tt) {
 			const float left = hitPoints(target);
 			const float most = tt ? number(*tt, "armor.maxHitPoints", left) : left;
-			if (heal <= 0 || healSpent() || left < 0 || left >= most) {
+			if (heal <= 0 || healSpent() || left < 0 || left >= most || !repairable(target)) {
 				return;
 			}
 			// gameLogic slot 0x108 -> the armour's slot 0x48 (0x00655a00):

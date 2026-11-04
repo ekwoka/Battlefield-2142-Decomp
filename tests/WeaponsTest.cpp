@@ -196,10 +196,10 @@ TEST(Weapons_ProjectileKinds)
 	emp->settings()["detonation.isEMPWeapon"] = "1";
 	emp->settings()["detonation.explosionRadius"] = "9";
 	emp->settings()["detonation.explosionMaterial"] = "0";
-	emp->settings()["physicsType"] = "RotationalPoint";
+	emp->settings()["physicsType"] = "RotationalPoint"; // no collision.bouncing: it goes off where it lands
 	emp->settings()["timeToLive"] = "CRD_NONE/8/0/0";
 	const auto e = game::ProjectileSettings::fromTemplate(*emp);
-	CHECK(e.emp && e.bounces && e.explosionRadius == 9 && e.explosionDamage == 500 && !e.remote);
+	CHECK(e.emp && !e.bounces && e.explosionRadius == 9 && e.explosionDamage == 500 && !e.remote);
 	// Unl_c4_Projectile: no trigger, no fuse to speak of, no radius of its
 	// own (the default 10).
 	world::ObjectTemplate* c4 = templates.create("GenericProjectile", "c4");
@@ -991,4 +991,63 @@ TEST(Weapons_DrawDelayMagazineSwapAndToggle)
 	for (int t = 0; t < 5 && !b.tick(1 / 30.0f, t % 2 == 0); ++t) {
 	}
 	CHECK(b.roundsInMag() == 0 && !b.selectable()); // the last one gone
+}
+
+// fire.fireStartDelay (0x005d4d80 / 0x005f18b0 / 0x005f1630): a press
+// waits round(30 x delay) ticks before its first round, the rounds after
+// it in the same hold come at the fire rate; a release during the wait
+// drops it; a MultiFireComp has none.
+TEST(Weapons_FireStartDelay)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* cannon = templates.create("GenericFireArm", "EU_AAcannon_Firearm_Barrel");
+	cannon->settings()["fire.fireStartDelay"] = "CRD_NONE/0.6/0/0";
+	cannon->settings()["ammo.magSize"] = "-1";
+	cannon->components().push_back("SingleFireComp");
+	game::FireArmSettings settings = game::FireArmSettings::fromTemplate(*cannon);
+	CHECK(settings.fireStartDelay.a == 0.6f && !settings.multiFire);
+	{
+		game::FireArm arm(settings);
+		int first = -1, shots = 0;
+		for (int tick = 0; tick < 30; ++tick) {
+			if (arm.tick(1 / 30.0f, true)) {
+				++shots;
+				if (first < 0) {
+					first = tick;
+				}
+			}
+		}
+		std::printf("  first round at tick %d, %d in a second\n", first, shots);
+		CHECK(first == 18);          // 0.6 s
+		CHECK(shots == 1 + (29 - 18) / 3); // then every 3 ticks (600 a minute)
+	}
+	{
+		game::FireArm arm(settings);
+		int shots = 0;
+		for (int tick = 0; tick < 10; ++tick) {
+			shots += arm.tick(1 / 30.0f, true) ? 1 : 0;
+		}
+		shots += arm.tick(1 / 30.0f, false) ? 1 : 0; // let go: dropped
+		for (int tick = 0; tick < 10; ++tick) {
+			shots += arm.tick(1 / 30.0f, true) ? 1 : 0; // a new press waits again
+		}
+		CHECK(shots == 0);
+	}
+	cannon->components().push_back("MultiFireComp");
+	game::FireArm multi(game::FireArmSettings::fromTemplate(*cannon));
+	CHECK(multi.tick(1 / 30.0f, true));
+}
+
+// fire.maximumVehicleTiltForFire (0x005f1780): the pod launchers' 30
+// degrees; 0 lets anything through.
+TEST(Weapons_MaximumVehicleTiltForFire)
+{
+	const physics::Mat3 level;
+	const physics::Mat3 rolled20 = physics::Mat3::fromYawPitchRoll({0, 0, 20});
+	const physics::Mat3 pitched40 = physics::Mat3::fromYawPitchRoll({90, 40, 0});
+	CHECK(game::tiltAllowsFire(level, 30));
+	CHECK(game::tiltAllowsFire(rolled20, 30));
+	CHECK(!game::tiltAllowsFire(pitched40, 30));
+	CHECK(game::tiltAllowsFire(pitched40, 70));
+	CHECK(game::tiltAllowsFire(physics::Mat3::fromYawPitchRoll({0, 0, 180}), 0));
 }

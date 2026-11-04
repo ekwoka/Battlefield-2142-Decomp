@@ -1664,6 +1664,7 @@ TEST(Bots_GrenadeWarning)
 		frag->settings()["ammo.nrOfMags"] = "3";
 		world::ObjectTemplate* shell = field.templates.create("GenericProjectile", "test_frag_shell");
 		shell->settings()["physicsType"] = "RotationalPoint";
+		shell->settings()["collision.bouncing"] = "1";
 		shell->settings()["timeToLive"] = "CRD_NONE/2.8/0/0";
 		shell->settings()["detonation.explosionDamage"] = "1";
 		shell->settings()["detonation.explosionRadius"] = "9";
@@ -1885,6 +1886,7 @@ TEST(Bots_SquadTargetAndGrenadeLob)
 	world::ObjectTemplate* shell = field.templates.create("GenericProjectile", "test_frag_shell");
 	shell->settings()["physicsType"] = "RotationalPoint";
 	shell->settings()["timeToLive"] = "CRD_NONE/3/0/0";
+	shell->settings()["collision.bouncing"] = "1";
 	shell->settings()["detonation.explosionDamage"] = "1";
 	shell->settings()["detonation.explosionRadius"] = "9";
 	world::ObjectTemplate* kit = field.templates.create("Kit", "test_grenadier_kit");
@@ -3406,7 +3408,19 @@ TEST(Bots_PreferredRangeFollowsTheWeapon)
 	rifle.optimal = 0.35f;
 	CHECK(near(game::preferredRange(rifle, 0.4f, 0.5f, 0), 72 * 0.35f * 0.4f)); // x max(0.2, skill) x U[0.8, 1.2]
 	CHECK(near(game::preferredRange(rifle, 0.1f, 0.5f, 0), 72 * 0.35f * 0.2f));
-	CHECK(near(game::preferredRange(rifle, 0.4f, 0.5f, 8), (72 + 1.25f * 8) * 0.35f * 0.4f + 0.25f * 8));
+	// + 0.25 dh above only in the explosive plan (0x100795a0 local_60).
+	CHECK(near(game::preferredRange(rifle, 0.4f, 0.5f, 8), (72 + 1.25f * 8) * 0.35f * 0.4f));
+	CHECK(near(game::preferredRange(rifle, 0.4f, 0.5f, 8, true), (72 + 1.25f * 8) * 0.35f * 0.4f + 0.25f * 8));
+	// A thrown weapon in the explosive plan at a target over 3 m up keeps
+	// 5 m at least (and no 1.25 dh or 0.25 dh).
+	game::WeaponAi grenade;
+	grenade.maxRange = 30;
+	grenade.minRange = 1;
+	grenade.optimal = 0.5f;
+	grenade.thrown = true;
+	CHECK(near(game::fireMinRange(grenade, 4, true), 5) && near(game::fireMinRange(grenade, 4, false), 1));
+	CHECK(near(game::preferredRange(grenade, 0.4f, 0.5f, 8, true), 5 + 25 * 0.5f * 0.4f));
+	CHECK(near(game::fireReach(rifle, 8), 82) && near(game::fireReach(grenade, 8), 30));
 
 	Field field;
 	world::ObjectTemplate* blade = field.templates.create("GenericFireArm", "test_knife");
@@ -3763,4 +3777,171 @@ TEST(Bots_DriverAimsAndFiresTheTurret)
 	CHECK(fromTank >= 2);
 	CHECK(std::fabs(std::remainder(yaw + hull - 35, 360.0f)) < 8);
 	CHECK(physics::lengthSquared(now - start) < 3.0f * 3.0f);
+}
+
+// The vehicle plan's move (0x100795a0: If NOT ObjectDistance [minRange,
+// 1.1 D] then MoveToObjectFinding 0x100cff90): a target nearer than the
+// move's near limit min(1.1 minRange, D) sends the driver off to a spot
+// ahead of the target (0x100d00e0: its forward, the first of three spots
+// clear) rather than at it.
+TEST(Bots_DriverBacksOffInsideMinRange)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	CarField field(gameDir);
+	field.templates.create("GenericProjectile", "bullet")->settings()["damage"] = "1";
+	world::ObjectTemplate* tank = field.templates.create("PlayerControlObject", "tank");
+	for (const auto& [key, value] : field.templates.find("car")->settings()) {
+		tank->settings()[key] = value;
+	}
+	tank->settings()["seatInformation"] = "tank 0/0.5/0.4 0/0/0";
+	tank->settings()["aiTemplate"] = "TestTank";
+	tank->children().push_back({"car_entry", {-1.5f, 0, 0}, {}});
+	tank->children().push_back({"car_engine", {0, -0.44f, 0}, {}});
+	tank->children().push_back({"tank_turret", {0, 0.9f, 0}, {}});
+	world::ObjectTemplate* turret = field.templates.create("RotationalBundle", "tank_turret");
+	turret->settings()["inputToYaw"] = "PIMouseLookX";
+	turret->children().push_back({"tank_barrel", {0, 0.2f, 0.5f}, {}});
+	world::ObjectTemplate* barrel = field.templates.create("RotationalBundle", "tank_barrel");
+	barrel->settings()["inputToPitch"] = "PIMouseLookY";
+	barrel->settings()["minRotation"] = "0/-20/0";
+	barrel->settings()["maxRotation"] = "0/10/0";
+	barrel->children().push_back({"tank_gun", {0, 0, 1}, {}});
+	world::ObjectTemplate* gun = field.templates.create("GenericFireArm", "tank_gun");
+	gun->settings()["projectileTemplate"] = "bullet";
+	gun->settings()["velocity"] = "300";
+	gun->settings()["aiTemplate"] = "tank_gun";
+	gun->settings()["fire.roundsPerMinute"] = "120";
+	std::string out;
+	for (const char* line : {"aiTemplatePlugIn.create Mobile TestTank_Mobile", "aiTemplatePlugIn.maxSpeed 12",
+			 "aiTemplatePlugIn.create Unit TestTank_Unit", "aiTemplatePlugIn.equipmentTypeName Tank",
+			 "aiTemplate.create TestTank", "aiTemplate.addType ITGround", "aiTemplate.addPlugIn TestTank_Mobile",
+			 "aiTemplate.addPlugIn TestTank_Unit", "weaponTemplate.create tank_gun", "weaponTemplate.setStrength Infantry 5",
+			 "weaponTemplate.maxRange 150", "weaponTemplate.minRange 25", "weaponTemplate.weaponType FireArm",
+			 "weaponTemplate.allowedDeviation 2", "aiSettings.setBehaviourModifier Fire 7.5",
+			 "aiSettings.createBehaviourModifiers UnitWeights", "aiSettings.setBehaviourModifier Idle 1.0",
+			 "aiSettings.setBehaviourModifier Fire 1.0",
+			 "aiSettings.setVehicleBehaviour Tank Idle BBIdle BBPIdle2d 5 UCUnion UnitWeights",
+			 "aiSettings.setVehicleBehaviour Tank Fire BBFireInfantery BBPFireInfantery 4 UCUnion UnitWeights",
+			 "aiSettings.setVehicleDefaultBehaviour Tank Idle", "aiSettings.setViewDistance 200"}) {
+		field.console.execute(line, out);
+	}
+	const uint32_t id = field.objects.create(tank, {3, 1.2f, 0}, {0, 0, 0})->id();
+	const int bot = field.soldier("Bot", true, 0, 0);
+	field.ticks(90);
+	field.board(bot, 0);
+	CHECK(field.info(bot).vehicle == id && field.info(bot).seat == 0);
+	CHECK(field.world->seatTurnsGun(id, 0));
+	// An enemy 8 m off, 35 degrees right, facing +z (yaw 0): inside
+	// minRange. The spot is ~30 m ahead of the enemy; the tank drives there.
+	field.templates.create("Soldier", "pac_light_soldier")->settings()["armor.maxHitPoints"] = "100";
+	const int enemy = field.world->addPlayer("Enemy", 1, false);
+	field.world->spawnSoldier(enemy);
+	const physics::Vec3 at = field.info(bot).position;
+	field.world->setSoldierPosition(field.info(enemy).soldier, {at.x + 8 * std::sin(0.6108652f), 0, at.z + 8 * std::cos(0.6108652f)});
+	game::BotManager bots(*field.world, field.settings);
+	const physics::Vec3 start = field.info(bot).position;
+	size_t fromTank = 0;
+	for (int tick = 0; tick < 30 * 30; ++tick) {
+		const size_t before = field.world->projectiles().size();
+		field.ticks(1, &bots);
+		for (size_t i = before; i < field.world->projectiles().size(); ++i) {
+			fromTank += field.world->projectiles()[i].shooter == id;
+		}
+	}
+	const physics::Vec3 enemyAt = field.info(enemy).position;
+	const physics::Vec3 spot = game::backOffSpot(enemyAt, {0, 0, 1}, 25 * 1.1f, bots.preferredRange(bot), [](const physics::Vec3&) { return true; });
+	const float before = std::sqrt(horizontal2(start - spot)), after = std::sqrt(horizontal2(field.info(bot).position - spot));
+	std::printf("  the driver %.1f m from its back-off spot (%.1f m ahead of an enemy inside minRange 25), then %.1f m\n", before,
+		std::sqrt(horizontal2(spot - enemyAt)), after);
+	CHECK(after < before - 2);
+	// The spot: 1.1 minRange + min(10, 0.2 (D - 1.1 minRange)) along the
+	// target's forward, else its right, else its left.
+	const physics::Vec3 o {10, 0, 10};
+	const auto same = [](const physics::Vec3& a, const physics::Vec3& b) { return std::fabs(a.x - b.x) < 1e-3f && std::fabs(a.z - b.z) < 1e-3f; };
+	CHECK(same(game::backOffSpot(o, {0, 0, 2}, 20, 30, [](const physics::Vec3&) { return true; }), {10, 0, 32}));
+	CHECK(same(game::backOffSpot(o, {0, 0, 1}, 20, 200, [](const physics::Vec3&) { return true; }), {10, 0, 40}));
+	CHECK(same(game::backOffSpot(o, {1, 0, 0}, 20, 30, [](const physics::Vec3& p) { return p.x < 15; }), {10, 0, -12}));
+}
+
+// BF2142_BOT_SEED (Bots.cpp, BotManager's constructor) starts the bots' own
+// draws elsewhere: the same seed plays the same round twice over, tick for
+// tick; another seed plays a different one.
+TEST(Bots_SeedRepeatsTheRound)
+{
+	auto setSeed = [](const char* seed) {
+#ifdef _WIN32
+		_putenv_s("BF2142_BOT_SEED", seed);
+#else
+		setenv("BF2142_BOT_SEED", seed, 1);
+#endif
+	};
+	// Bots_KillsAStationaryEnemy's fight, two bots against a soldier who
+	// stands 30 m off: their moves, looks, rounds and hits each tick.
+	auto play = [&](const char* seed) {
+		setSeed(seed);
+		Field field;
+		world::ObjectTemplate* kit = field.templates.create("Kit", "test_kit");
+		kit->children().push_back({"eu_ar_rifle", {}, {}});
+		Console console;
+		game::BotSettings settings = scriptedSettings(console);
+		std::string out;
+		for (const char* line : {"weaponTemplate.create eu_ar_rifle", "weaponTemplate.maxRange 72",
+				 "weaponTemplate.setStrength Infantry 5"}) {
+			console.execute(line, out);
+		}
+		game::BotManager bots(*field.world, settings);
+		std::vector<int> ids;
+		for (const float x : {-3.0f, 3.0f}) {
+			const int id = field.world->addPlayer("Bot", 2, true);
+			field.world->setKit(id, "test_kit", "us_light_soldier");
+			field.world->spawnSoldier(id);
+			field.move(id, x, 0);
+			ids.push_back(id);
+		}
+		const int enemy = field.soldier(1, false, 0, 30);
+		std::vector<float> trace;
+		for (int tick = 0; tick < 10 * 30; ++tick) {
+			field.move(enemy, 0, 30);
+			bots.update(1 / 30.0f);
+			field.world->tick(1 / 30.0f);
+			for (const int id : ids) {
+				game::GameWorld::PlayerInfo info;
+				field.world->playerInfo(id, info);
+				trace.push_back(info.position.x);
+				trace.push_back(info.position.z);
+				trace.push_back(info.yaw);
+				trace.push_back(static_cast<float>(field.fired(id)));
+				trace.push_back(static_cast<float>(field.hits(id)));
+			}
+			game::GameWorld::PlayerInfo them;
+			field.world->playerInfo(enemy, them);
+			trace.push_back(them.alive ? field.world->hitPoints(them.soldier) : -1.0f);
+		}
+		setSeed(""); // empty: the default sequence
+		return trace;
+	};
+	const std::vector<float> first = play("7"), again = play("7"), other = play("8");
+	CHECK(first.size() == again.size());
+	CHECK(first == again);
+	CHECK(first != other);
+	// Something happened: rounds were fired.
+	CHECK(first.size() > 11 && (first[first.size() - 8] > 0 || first[first.size() - 3] > 0));
+}
+
+// The SAI's status rule for an area without a control point (0x1005f210):
+// a side's units alone take it when it is takeable for that side, the
+// enemy's alone make it hostile when takeable for them; mixed or empty
+// keeps the last status.
+TEST(Bots_BoxAreaStatusRule)
+{
+	using ai::AreaStatus;
+	CHECK(ai::boxAreaStatus(AreaStatus::Neutral, 2, 0, true, true) == AreaStatus::Owned);
+	CHECK(ai::boxAreaStatus(AreaStatus::Neutral, 2, 0, false, true) == AreaStatus::Neutral);
+	CHECK(ai::boxAreaStatus(AreaStatus::Owned, 0, 1, true, true) == AreaStatus::Hostile);
+	CHECK(ai::boxAreaStatus(AreaStatus::Owned, 0, 1, true, false) == AreaStatus::Owned);
+	CHECK(ai::boxAreaStatus(AreaStatus::Hostile, 1, 1, true, true) == AreaStatus::Hostile);
+	CHECK(ai::boxAreaStatus(AreaStatus::Owned, 0, 0, true, true) == AreaStatus::Owned);
 }

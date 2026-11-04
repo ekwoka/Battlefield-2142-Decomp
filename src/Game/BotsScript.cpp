@@ -873,9 +873,10 @@ void registerBotScriptMethods(Console& console, BotSettings& settings)
 	bindMethod(
 		console, "aiStrategicArea.create", access,
 		[st](std::string name, ConsoleVec2 corner, ConsoleVec2 other, float height, float temperature, std::string) {
-			// An area of its own (0x10017a00): a box, no control point. Kept
-			// for the names; the rewrite's SAI weighs only the control
-			// point areas (see docs/engine.md, Strategy).
+			// An area of its own (0x10017a00): a box, no control point. The
+			// rewrite's SAI keeps its per-side status (ai::boxAreaStatus,
+			// 0x1005f210) for its neighbours; it orders units only to the
+			// control point areas (see docs/engine.md, Strategy).
 			ai::StrategicArea area;
 			area.name = name;
 			area.temperature = temperature;

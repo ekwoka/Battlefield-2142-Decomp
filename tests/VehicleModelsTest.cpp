@@ -8,6 +8,7 @@
 #include "Animation/FirstPerson.h"
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
+#include "Game/GameLogic.h"
 #include "Game/GameWorld.h"
 #include "Game/Vehicle.h"
 #include "Hud/Hud.h"
@@ -15,6 +16,8 @@
 #include "Main/HudMenusVehicles.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "Physics/MaterialManager.h"
+#include "Main/HudWorld.h"
+#include "Render/PostProduction.h"
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
@@ -960,6 +963,10 @@ TEST(Vehicles_GunshipMissileCamera)
 	g.run(4); // its delay and reload
 	game::GameWorld::ProjectileCamera camera;
 	CHECK(!g.world->projectileCamera(me, camera));
+	// The TVEffect (RendDX9 0x10048f80) only through a round's camera.
+	render::PostEffects effects;
+	host::roundCameraEffects(*g.world, me, effects);
+	CHECK(!effects.tv);
 	input = {};
 	input.fire = true;
 	for (int i = 0; i < 4 && !g.world->projectileCamera(me, camera); ++i) {
@@ -967,6 +974,8 @@ TEST(Vehicles_GunshipMissileCamera)
 		g.world->tick(1 / 30.0f);
 	}
 	CHECK(g.world->projectileCamera(me, camera) && camera.takeOverInput);
+	host::roundCameraEffects(*g.world, me, effects);
+	CHECK(effects.tv);
 	const float startYaw = camera.yaw;
 	// The mouse to the right for a second: the camera turns at most 18
 	// degrees off the round, and the round comes round after it.
@@ -1081,6 +1090,46 @@ TEST(Vehicles_SeatWeaponGroupsAndKeys)
 	g.world->setPlayerInput({});
 	g.world->tick(1 / 30.0f);
 	CHECK(weapon() == "as_ag_guidedmissileweapon");
+}
+
+// The second gun's HUD (0x007c2d50: the control object's slot 0x78(1), the
+// PIAltFire group's active weapon): the heavy mech's driver's dumb rockets
+// fill the Secondary* block beside the cannon's Primary* one.
+TEST(Vehicles_SecondWeaponHud)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("as_heavy_mech")) {
+		return;
+	}
+	const uint32_t mech = g.start("as_heavy_mech", {0, 4, 6});
+	CHECK(g.enter(mech));
+	g.run(1);
+	const auto lowerName = [](std::string n) {
+		std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		return n;
+	};
+	game::GameLogic logic;
+	host::LocalHudWorld world(*g.world, logic);
+	const host::HudWorld::Weapon first = world.seatGroupWeapon(0), second = world.seatGroupWeapon(1);
+	CHECK(first.weapon && lowerName(first.weapon->name()) == "as_heavy_mech_main_cannon");
+	CHECK(second.weapon && lowerName(second.weapon->name()) == "as_heavy_mech_dumrockets_firearm");
+	CHECK(second.gun != nullptr && second.rounds > 0);
+	if (!second.weapon || !second.gun) {
+		return;
+	}
+	hud::HudManager hud(nullptr);
+	menu::WeaponHud secondary;
+	menu::WeaponHudInput in;
+	in.weapon = second.weapon;
+	in.magSize = second.gun->settings().magSize;
+	in.nrOfMags = second.gun->settings().nrOfMags;
+	in.rounds = second.rounds;
+	in.mags = second.mags;
+	secondary.update(hud, in, true);
+	CHECK(hud.number("SecondaryAmmoShow") == 1 && hud.string("SecondaryAmmoString") == std::to_string(second.rounds));
 }
 
 // The active defence (ads_land on the tank's driver, PIFlareFire): a press
@@ -1503,4 +1552,56 @@ TEST(Vehicles_SeatItemSelectionAndFirstWeapons)
 	g.world->setPlayerInput({});
 	g.world->tick(1 / 30.0f);
 	CHECK(g.world->seatWeaponIndex(v, 1) == first);
+}
+
+// surpressPlayerInputVector (0x00565700): the air transports' gun mounts
+// (0.6 on the yaw) turn at 0.6 of the gunner's input while zoomed, at the
+// whole of it otherwise.
+TEST(VehicleModels_SuppressedInputWhileZoomed)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("as_at")) {
+		return;
+	}
+	const uint32_t at = g.start("as_at", {0, 2, 6});
+	const auto seats = g.world->vehicleSeats(at);
+	int seat = -1;
+	for (size_t i = 0; i < seats.size(); ++i) {
+		if (seats[i].suppressYaw != 0 && seat < 0) {
+			seat = static_cast<int>(i);
+		}
+	}
+	CHECK(seat >= 0);
+	if (seat < 0) {
+		return;
+	}
+	std::fprintf(stderr, "  as_at seat %d (%s): %.2f\n", seat, seats[static_cast<size_t>(seat)].yawBundle.c_str(),
+		seats[static_cast<size_t>(seat)].suppressYaw);
+	CHECK(seats[static_cast<size_t>(seat)].suppressYaw == 0.6f);
+	CHECK(g.enter(at));
+	game::SoldierInput input;
+	input.switchSeat = seat + 1;
+	g.world->setPlayerInput(input);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	g.world->tick(1 / 30.0f);
+	const int me = g.world->localPlayer();
+	float turned[2] = {};
+	for (const bool zoomed : {false, true}) {
+		g.world->setZoomed(me, zoomed);
+		float yaw0 = 0, yaw1 = 0, pitch = 0;
+		g.world->gunAim(at, seat, yaw0, pitch);
+		input = {};
+		input.turn = 2;
+		g.world->setPlayerInput(input);
+		g.world->tick(1 / 30.0f);
+		g.world->setPlayerInput({});
+		g.world->gunAim(at, seat, yaw1, pitch);
+		turned[zoomed ? 1 : 0] = yaw1 - yaw0;
+	}
+	std::fprintf(stderr, "  turned %.2f, zoomed %.2f\n", turned[0], turned[1]);
+	CHECK(std::fabs(turned[0] - 2) < 0.01f && std::fabs(turned[1] - 1.2f) < 0.01f);
 }

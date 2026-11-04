@@ -218,6 +218,20 @@ int requiredStrength(float enemyStrategicStrength, bool owned, float friendlyRat
 	return static_cast<int>(std::lround(required));
 }
 
+AreaStatus boxAreaStatus(AreaStatus previous, int friendly, int enemy, bool takeableMine, bool takeableTheirs)
+{
+	if (friendly <= 0 && enemy <= 0) {
+		return previous;
+	}
+	if (takeableMine && friendly >= 1 && enemy == 0) {
+		return AreaStatus::Owned;
+	}
+	if (takeableTheirs && enemy > 0 && friendly == 0) {
+		return AreaStatus::Hostile;
+	}
+	return previous;
+}
+
 float modifiedTemperature(const Strategy& strategy, float temperature, AreaStatus status, bool controlPoint,
 	bool hostileNeighbour)
 {

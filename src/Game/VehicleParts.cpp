@@ -225,6 +225,15 @@ void Vehicle::updateParts(float seconds)
 {
 	for (size_t i = 0; i < m_parts.size(); ++i) {
 		Part& part = m_parts[i];
+		if (part.autoRotateOnEnter && part.autoRotating != m_occupied) {
+			part.autoRotating = m_occupied;
+			if (!m_occupied) {
+				part.rate = {};
+				if (part.restoreRotationOnExit) {
+					part.angle = {};
+				}
+			}
+		}
 		if (part.type != "Engine" && part.type != "LandingGear" && part.moves) {
 			for (size_t axis = 0; axis < 3; ++axis) {
 				if (part.type == "Wing" && axis != 1) {
@@ -233,7 +242,9 @@ void Vehicle::updateParts(float seconds)
 				if (part.axes[axis].maxSpeed == 0 && part.axes[axis].continuousSpeed == 0) {
 					continue;
 				}
-				float in = part.inputs[axis] >= 0 ? vehicleInputValue(m_regulated, part.inputs[axis]) : 0.0f;
+				float in = part.autoRotating ? 1.0f
+					: part.inputs[axis] >= 0  ? vehicleInputValue(m_regulated, part.inputs[axis])
+											  : 0.0f;
 				if (part.rememberExcess) {
 					part.excess[axis] = std::clamp(part.excess[axis] + in, -40.0f, 40.0f);
 					in = std::clamp(part.excess[axis], -1.0f, 1.0f);

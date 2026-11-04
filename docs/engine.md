@@ -1071,8 +1071,18 @@ one), six toggles of its ItemSlot%iActive 0.1 s apart (`+0x1c` = 6,
 (`0x0079c470`) is the control object's weapon list 0 (the PIFire group;
 the soldier's own when it has none), each by its item index and dimmed
 (alpha 0.4) when slot `0x170` says it can't be selected (`0x0079c290`).
-A key that finds nothing to take (slot `0x188` of the weapon of that
-index) sends the HUD message 0x52 instead (`0x004d2ea9`, not rewritten). Without a key, c_PIToggleWeapon (input 45) or a press of the
+For the local player a key whose weapon of that index can't be taken
+because its slot `0x188` says so (`0x005c3080`, part of slot `0x170`'s
+test: the firearm's minimumSquadSizeForSelection, template `+0x320`,
+executor `0x004e1ed9` — the beacon 2, the recon drone's detonator 3, the
+sentry drone's 4 — against its owner's squad's members, the squad
+manager's slot `0x2c` and the squad's `+0x17c`, one fewer for a bot,
+player slot `0x68`; never without a squad) lets the help message 0x52
+through (HUD manager slot `0x128` at `0x004d2ea9`:
+HUD_HELP_WORLD_PLAYER_Squadleader_inventory_selectunlock, shown to a squad
+leader). `GameWorld::squadTooSmall` (the soldier's `equip` refuses such a
+weapon) and `takeSquadSizeRefused`, which main.cpp hands the help
+manager. Without a key, c_PIToggleWeapon (input 45) or a press of the
 seat's specialToggleWeaponInput (PCO template `+0x46c`, `0x40` none; the
 edge of `+0x14c`, `0x005c7f80`) moves each group with an active weapon to
 the next of its weapons sorted by item index (`0x004d2010` with
@@ -1100,7 +1110,10 @@ three groups (see the drivers' and pilots' guns above). Each entry sets
 the groups' first weapons again (`seatPlayer`); a key's pick sets the
 player's `seatItemSelect` (`takeSeatItemSelect`), which the HUD turns
 into the popup with the seat's PIFire group (`ItemSelection::flash`, a
-local round's player; a joined client's isn't opened)
+local round's player; a joined client runs the same pick for its own
+control object: its weapon key goes to the server as PIWeaponSelect and,
+for a selectable PIFire weapon of that index that our own state's group 0
+doesn't already hold, opens the popup there too)
 (`Vehicles_SeatItemSelectionAndFirstWeapons`). **Bots** (AIDLL): the seat's armament is its
 weapons with a weaponTemplate (the Armament list `0x10075170`); the
 targets' loop and the weapon choice (`0x10074ef0`) score them as a kit's,
@@ -1118,21 +1131,49 @@ among their interpreter entries), and the drivers' ControlInfo aims with
 PIMouseLookX / PIMouseLookY (eu_tank_Ctrl −12 / −1, the APCs' −7 / −1,
 the mechs' −3 / −3) or, on the hover tank, PIRoll / PIPitch
 (as_tank_Ctrl −1.5 / −20 / 0: its aim turns the hull). The sensing view
-follows the turret (the Tank set's `addSensingAgentPattern Turret`). The
-vehicle's fire plan (`0x100795a0` for a bot object with a Mobile part,
-from `LAB_10079dde`) holds its move by an ObjectDistance condition
-(`0x100d44c0`, vtable `0x1011a6d8`, evaluated by `0x100d4620`: the
-squared distance against (minRange × 0.9)² and ((maxRange + 1.25 dh
-over 5 m up) × 1.1)²) over a move at the target (`0x100cff90` at a
-Mobile target at its Mobile maxSpeed and half of it, else MoveToFinding
-`0x100d11c0` at 0.75 of it); the rest of that sequence isn't decoded. The
-rewrite drives at the target (`drive`) beyond that reach and stops within
-it, the aim and trigger beside it (`Bots_DriverAimsAndFiresTheTurret`).
-Measured (15 bots, 300 s, `BF2142_BOT_SEED`): Cerbere_Landing gpm_sp 16
-over 24 seeds, kills 15.96 ± 0.81 → 18.88 ± 0.80, rounds 1,136 → 1,631,
-hits 73.4 → 86.0; minsk_coop gpm_coop 32 over 16 seeds, kills 2.19 ±
-0.32 → 2.75 ± 0.32, rounds 260 → 509, hits 13.2 → 31.6; CPU a run
-(measured apart, 12 and 8 seeds) 4.84 → 4.78 s and 7.15 → 7.83 s.
+follows the turret (the Tank set's `addSensingAgentPattern Turret`).
+
+**The vehicle's fire plan** (`0x100795a0` for a bot object with a Mobile
+part, from `LAB_10079dde`; soldiers have one too). Its statements name
+themselves in their debug printers: If (`0x100d29f0`, vtable
+`0x1011a378`: condition, then, else, a forced update `+0x30` and "freeze
+false-statement" `+0x31`), the Serial (`0x100ce370`) and Parallell
+(`0x100cddb0`) combiners, OR / AND / NOT (`0x100cf1b0`, `0x100d49a0`,
+`0x100d2f80`), a shared memo (`0x100d8e40` / `0x100d8f90`),
+MoveToObjectFinding (`0x100cff90`, vtable `0x10119e28`), MoveToFinding
+(`0x100d11c0`), ObjectDistance (`0x100d44c0`, evaluated by `0x100d4620`),
+ForgetObject (`0x100da5f0`: the memory item dropped, `0x100ec400`) and a
+failing statement (`0x100da480` with mode 0). In a Parallell combiner:
+- the moves: If (forced, frozen) the target isn't in view (NOT the memo
+  of the target conditions `0x100dc400` / `0x100dad60`): Serial of
+  MoveToObjectFinding at the target with no distance kept, ForgetObject,
+  the failing statement (the plan ends); else If (not forced) NOT
+  ObjectDistance [minRange, 1.1 D]: MoveToObjectFinding keeping D (the
+  plan's distance, below) with its near limit ec = min(1.1 minRange, D),
+  at the Mobile maxSpeed and half of it (MoveToFinding to the spot beside
+  a target without a Mobile part, at 0.75 of it). The move is done when
+  ec ≤ d ≤ D (`0x100cfe20` over the squared distance `0x100f9970`).
+  Beyond ec it paths at the target; nearer it backs off (`0x100d00e0`) to
+  the first clear of three spots ec + min(10, 0.2 (D − ec)) from the
+  target: along its forward (a mover that isn't ITSoldier), then to its
+  right and its left (rays from the target, `0x101394d4` slot `0x84`), and
+  chooses again each second (`+0x100`);
+- the trigger: If (forced) the target lies within [0.9 minRange, 1.1
+  reach] (ObjectDistance; nothing in the explosive plan): the fire
+  statements (`0x100777a0`), else only the aim (`0x100d9740`).
+The distance D: minRange + (reach − minRange) f, reach = maxRange + 1.25
+dh over 5 m up (not melee or thrown), + 0.25 dh above only in the
+explosive plan (`local_60`) and not thrown; minRange is 5 m for a thrown
+weapon at a target over 3 m up in that plan. `BotManager::driveFirePlan`,
+`backOffSpot`, `fireReach`, `fireMinRange`
+(`Bots_DriverAimsAndFiresTheTurret`, `Bots_DriverBacksOffInsideMinRange`,
+`Bots_PreferredRangeFollowsTheWeapon`). Stand-ins: the rewrite drives
+with the vehicles' MoveTo (`drive`) at the Mobile maxSpeed (no
+half-speed approach); the spots are tested on the vehicle mesh; "in view"
+is the rewrite's sight. Soldiers keep the walk of the foot branch (to
+1.1 D, back from minRange). Measured (15 bots, 300 s, `BF2142_BOT_SEED`
+1–16, against the same tree without the change): see coverage-5's A1
+status.
 
 ### Fire modes, tracers, camera recoil, armour effects and leaving a seat
 
@@ -1357,14 +1398,26 @@ object's interface 0xc4c4 slots 0xd8 / 0xe0): the soldier's camera
 clamps the head's twist (`+0x278`) to ±40 (`*0x00a68eb0`) and the pitch
 (`+0x270`) to ±85; the twist plus the tick's yaw offset (`+0x27c`,
 zeroed each tick by `0x0058a788`) may pass ±40 only while the excess plus
-the body's yaw (`+0x25c`) stays within [left, right] (the AT walkers'
-side passengers −25 / 40 and −15 / 30, the FAVs' open position −90 /
-90). Not rewritten: the rewrite's seated soldier has no look of its own
-to bound (its body and twist stay as the seat poses them,
-`GameWorld::poseSeated`; its held weapon is hidden, so an open
-position's first-person view is the seat's fixed forward), so the limits
-have nothing to act on until open positions take the soldier's look and
-weapon.
+the body's yaw (`+0x25c`) stays within [left, right] (the air
+transports' side passengers, as_at / eu_at `Passenger2/3_Left` −15 / 40
+and `_Right` −25 / 30; the FAVs' open position −90 / 90). The vehicle
+hands every occupant its input (`0x005ca2e0` → the soldier's slot `0xfc`,
+`0x0058a6d0`): seated (parent `+0x34`), no movement, strafe or jump; the
+mouse's x goes on the twist, which takes it all within ±40; past that the
+twist stays at ±40 and the body turns instead (`+0x25c`, wrapped, clamped
+to [left, right]; on foot the limits are ±9999 and the body catches up
+instead). `0x00587a30` sets the soldier's matrix to Ry(`+0x25c`) × the
+seat's (slot `0x108`), so the whole third-person body turns about the
+seat; the seat's LookAroundTrigger takes (`0x005ef250`'s seated branch)
+the RotationalBundles' share above it plus `+0x25c` / 360 (wrapped,
+within ±1) as its y (`3p_passenger_C`'s `lookAround` scrubs to y × 0.5 +
+0.5). A seat with no camera in its subtree (the camera count `+0x2c` 0,
+`0x005c7cb0`) gives the occupant's camera: the seated soldier's
+SoldierCamera, at the crouch pose's eye, yaw the seat's + the body's +
+the twist, pitch within ±85. Rewritten: `GameWorld::stepSeatedLook`,
+`poseSeated` (the bundles' share above the seat left at 0),
+`seatedSoldierView` and `PlayerCamera::view`. Not decoded: whether a
+passenger's own weapon fires there (the open seats carry none).
 
 **ToggleCameraComp** (template `0x005db120`; changeCameraId `+0x14` −1,
 changeCameraViewMode `+0x18` 2, startCameraId `+0x1c` −1,
@@ -2784,11 +2837,47 @@ are read from the SettingsRepository (`DAT_00a7a008` slot `0x10`,
 dropped: nothing in BF2142.exe limits by them. That function turns the
 level's DestroyableObjects (class `0xc4d0`), DestroyableWindowsBundles
 (`0xc4dc`) and mobile physics objects into ObjectSpawners (class `0x94a1`)
-of their own, respawning them (10 s, `setTimeToSpawn`; a DestroyableObject
-its template's own times, `+0x29c` / `+0x2a0`). Not done: the shipped
-content has six DestroyableObject templates (barrels, crates, a bridge
-piece, rail bars, a Titan console) and the rewrite destroys none of them,
-so a respawn would change nothing; the moved props' return is cosmetic.
+of their own (one per template, `0x94a1`): distance 10 (slot `0x48`,
+`+0x2cc`: the 10.0 is the spawner's abandoned-vehicle distance, not a
+time), min / max spawn delay 0, maxNrOfObjectSpawned 1 and
+nrOfObjectToSpawn 1; for a DestroyableObject unpaused, the time its
+`respawnDelay` (`+0x29c`, 0 in every shipped template; `0x005afb20`:
+min = max) and nrOfObjectToSpawn its `+0x2a0` (1, no script property).
+With one to spawn the spawner (`0x005af230`) makes the prop once at the
+round's start and never again: a broken prop comes back only with the
+next round (`0x005ae580`'s reset).
+
+**Destroyable props** (DestroyableObject, class `0xc4d0`, template
+constructor `0x005bf100`; `src/Game/Props.cpp`). Five armoured templates
+ship: `barrel_big_dest_c` and `crate01_dest_c` (40 hit points,
+wreckHitPoints 100, canBeDestroyed 0, explosionDamage 150 over 7 m,
+material 70, force 10; level-0 armour effects e_sfx_exp_close,
+e_wreck_barrel_big / e_wreck_crate_c and e_exp_small; placed by most
+levels' StaticObjects.con), `train_rail_bar_des` / `jbtrain_rail_bar_des`
+(1 hit point, e_destruction_trainbar; placed on Strike_at_Karkand and a
+few custom maps) and the bridge piece
+`bp1_bridge_industrial_01_c_sjbvfindes` (1000, canBeRepairedWhenWreck,
+placed nowhere); `eu_console3` has no armour. Any armoured object is hit:
+the blasts' sphere query (`0x005a9090`, objectManager slot `0x44` with the
+filter `0x00968210`: an armour, statics too) and the rounds' hits. At 0
+hit points the armour's `0x00654120` sets the wreck flags and, with
+wreckDelay at most 0.01 and no dontUseWreck (`+0x169`), at once (else
+event `0x27` later) `0x00651c60`: the physics body goes (slot `0xd4` →
+`0xc`); a render object of two geometries or more shows its second (slot
+`0xcc(1)`), a single-geometry one takes slot `0x54(0, 2)` (read by the
+rewrite as hidden); the children likewise. With explosionDamage above 0
+the armour's blast goes off at the object (game logic slot `0xe8`, its
+own object left out, the giver `+0x24` the attacker): barrels and crates
+set off their neighbours. The level-0 effects are left in the world. The
+wreck drains (`0x00652380`) only with canBeDestroyed and a
+timeToStayAsWreck other than −1: the rail bars go after 20 s
+(`0x00651db0`), barrels, crates and the bridge stay until the round ends.
+Rewritten: `GameWorld::breakProp` (the collision taken out of the static
+worlds, `CollisionWorld::removeOwner`, `removeStaticParts`; the second
+geometry through `propGeometry` and the renderer's `geometryFor`, the
+collision mesh's geometry count standing in for the render object's),
+`stepProps`, `resetProps` at the round's start and the props in
+`explode`.
 
 **Level ambience: Trigger and AmbientEffectArea** (classes `0x9c45`,
 `0x9c44`; the levels' `AmbientObjects.con`: Liberation of Leipzig 49
@@ -3417,9 +3506,13 @@ at `0x1002df12`..`0x1002e6d0`). The order:
 7. *TVEffect* (`0x10048f80`, `ps_TVEffect20`: grey image, rolled by the
    noise and `1 − x²` bands, the random texture's interference; the
    PostProcess component's `tvInterference`, `tvDistortionRoll`,
-   `tvDistortionFreq`, `tvDistortionScale`): nothing in RendDX9 calls it
-   (no caller, no vtable slot) and the game has no TV-guided view, so it
-   is implemented (`PostEffects::tv`) but never on.
+   `tvDistortionFreq`, `tvDistortionScale`): no direct call or vtable
+   slot reaches it in RendDX9, but it is the view through a guided
+   round's camera (`useProjectileCamera`, see the projectile camera
+   above). The rewrite (`PostEffects::tv`) turns it on while
+   `GameWorld::projectileCamera` gives the local player a round's camera
+   (main.cpp's postEffects), and off when the round goes and the view
+   comes back (`0x005b4b00`).
 
 The rewrite does all of these in one full-screen pass: the passes that
 move pixels (the roll, the fisheye, the TV's bands) read the earlier
@@ -6276,10 +6369,17 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   (`FireArm::scanning` / `scan`). The pulse itself goes out from the
   firer's drone (`0x005d9cf0` looks for a 0x9493 object), as the recon
   drones' does.
-- **The second gun** (`0x007c2d50`, the seat's weapon 1) sets the
-  Secondary* variables as `0x007c1f10` the Primary* ones
-  (`WeaponHud::update(..., true)`); the game's seats carry one gun, so
-  SecondaryAmmoShow stays 0.
+- **The second gun** (`0x007c2d50`, the control object's slot `0x78(1)`:
+  the active weapon of its PIAltFire group, `+0x88`) sets the Secondary*
+  variables as `0x007c1f10` the Primary* ones (`WeaponHud::update(...,
+  true)`, its own WeaponHud so neither block re-reads its template each
+  frame); without one, or with guiIndex -1 (block `+0xd0`), the block's
+  show (`+0x16d`, SecondaryAmmoShow) is cleared. The PIFlareFire group has
+  no HUD of its own. So the heavy mechs' dumb rockets, the APCs' EMP
+  launchers and the IFV's mine show beside the main gun
+  (`HudWorld::seatGroupWeapon`: a joined game's from our own state's
+  group 1, its place in the group, rounds and magazines; main.cpp's
+  `updateSecondaryWeapon`).
 - **The passengers' names** (`0x007a34f0`): per occupied seat "%d. %s"
   (the seat's number over every seat; a player whose slot `0x6c` says so
   shows "R2D2"), coloured from `0x00b3c1e0` (team (0.4, 0.6, 1), enemy
@@ -6321,21 +6421,59 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   while sprinting; vehicleHud.typeIcon (string `+0x1f0`, its texture
   `+0x258` set by `0x00635ef0`, getter slot 0x11c `0x00637660`).
 - **useSelectionIcons** (block `+0xbc`, component `+0x104`, 0 by
-  default): the mouse wheel's item selection (`0x00755d50`) opens for the
-  controlled vehicle only with it (on foot always); the weapon-change
-  event 0x20 opens it (`0x0079fd30`) only for a vehicle with it or a
-  weapon with weaponHud.displaySelectOnActivation (block `+0xd9`; 10
-  shipped templates); `0x0079c470` lists a vehicle's positions with it.
-  The rewrite's seats carry one gun, and it opens the list on any change
-  of the weapon in hand (it doesn't tell the wheel from the keys).
+  default): the HUD's input (`0x00755d50`) lets the mouse wheel (inputs
+  0x30 / 0x31: 2 s open, `0x0079c1e0` / `0x0079c230` move the selection)
+  and the item keys (0.4 s) work the list for a control object with a
+  vehicle HUD only with it (on foot unless the active weapon's `+0x14`
+  bit 0, or its slot 300, says no; never in a demo). The list in a seat
+  (`0x0079c470`): the control object's PIFire group by item index, the
+  soldier's own (player slot `0xb4`) when it has none, and with
+  useSelectionIcons a PIAltFire group longer than the PIFire one instead
+  (the list's `+0x10` = 1) (`menu::seatSelectItems`). The weapon-change
+  event 2/0x20 (`0x00756b60`'s case) asks `0x0079fd30(0)`: the 0 skips
+  its useSelectionIcons half, so only a new active PIFire weapon with
+  weaponHud.displaySelectOnActivation (block `+0xd9`; 10 shipped
+  templates) opens it, for 2 s (`+0x20` = 2.0, menu state 0xb). The
+  rewrite: a seat's change of PIFire weapon with displaySelectOnActivation
+  opens the list for 2 s; a key's pick 0.4 s with the key flashing. Not
+  rewritten: the in-game mouse wheel (the rewrite's wheel reaches only the
+  menus, and how the wheel's selection is taken up isn't traced); on foot
+  any change of the weapon in hand opens the list.
 - **canBeSpotted** (block `+0xc2`, 1 by default): the map node's spot
   picks (`0x007925a0`, `0x007926c0`: within 70) skip an object without it
   unless it is alwaysShowOnMinimap (`+0xb1`); also read by `0x0075bfe0`
   and AIDLL-side `0x00729c40`. The rewrite's spotting reports players
   (GameWorld::spotCrosshair), not objects, so it has no use for it yet.
 
-Not done: the vehicles' stamina, torque and the mech's foot animation,
-the blinks. (The map's spotted vehicles and the silos' reload and
+- **The torque** (`0x007a2e60`): Torque (`+0x210`, the constructor's 0)
+  eased a hundredth of the way each frame toward max(0, `+0x2f4`),
+  TorqueString ceil(× 100), TorqueAngle (`+0x218`) 2π × Torque;
+  SecondTorque (`+0x21c`, 1) toward clamp(`+0x2f4` + 1, 0, 1),
+  SecondTorqueAngle (`+0x224`) 2π × that: the gunships' and transports'
+  arrows and the mech's step control. Nothing in BF2142.exe writes
+  `+0x2f4` (no store to it in the HUD's code; the registrations of
+  `0x0079e5a0` skip it), so the arrows rest at 0 and 2π. `VehicleHud`.
+- **The stamina** (the controlled object not the soldier, `0x007a2e60`'s
+  end): VehicleStamina (`+0x1d4`) the control object's slot `0x108`,
+  VehicleStaminaShow (`+0x2ab`) while it sprints (slot `0x100`, `+0x2a8`;
+  a change posts 2/0x1f) or below 1, VehicleStaminaTextStringShow
+  (`+0x2b4`) for 3 s after it fell (`+0x23c`, run by `0x007a05c0`). On
+  foot the player HUD (`0x007a0f80`) does the same with the soldier's:
+  PlayerStamina `+0x1d0`, PlayerStaminaShow `+0x2a9`,
+  PlayerStaminaTextStringShow `+0x2b2` (`+0x238`) (main.cpp; a joined
+  game's from the prediction's stamina, restored from the soldier
+  networkable's 0x8000 part). The rewrite's vehicles keep no stamina of
+  their own (a PCO's sprintRecoverTime / sprintDissipationTime, `+0x458` /
+  `+0x45c`, are the game rules'), so VehicleStamina stays 1.
+- **The child HUD** (vehicleHud.useChildHud, block `+0xb9`; the weapon
+  HUD's frame `0x007c38c0`): a seat without a gun runs the weapon HUD again
+  for the soldier (player slot `0xb4`) and, with or without one,
+  UsingChildHud (`+0x176`) is set (on foot always): the soldier's
+  bottom-right block shows instead of the vehicle's bottom-left one
+  (HudElementsPlayer.con / HudElementsVehicleBasic.con).
+
+Not done: the mech's foot animation, the blinks (VehicleStaminaBlink and
+PlayerStaminaBlink's setters aren't traced; 0). (The map's spotted vehicles and the silos' reload and
 background icons are above, under the map's vehicles, miniMapInfo and
 Spotted.)
 
@@ -6597,9 +6735,22 @@ out of reach. Only the holder's team or team 0 for RTHeal and RTAmmo,
 only enemies for RTTeam (`0x005d7d40`). Each tick each target gets the
 tick's strength × the cell (`0x005d7a40`):
 
-- **RTHeal** (gameLogic slot `0x108` → `0x004cc380` → armour slot `0x48`,
-  `0x00655a00`): that many per cent of its maximum hit points, when it
-  can be repaired, is alive and not full;
+- **RTHeal** (gameLogic slot `0x108`: the server's `0x004bc410`, which asks
+  `0x004cc380` and then the armour's slot `0x48`, `0x00655a00`): that many
+  per cent of its maximum hit points, when it can be repaired, is alive
+  and not full. "Can be repaired" is the armour template's
+  `armor.canBeRepaired` (`+0x14c`, 1 by default; constructor `0x00630040`,
+  setters `0x006304e0` / `0x00630500` through the executors `0x0054b1c9` /
+  `0x0054b2ee`) and, for a wreck, `armor.canBeRepairedWhenWreck` (`+0x14d`,
+  0 by default); `0x004cc380`'s check (the target filter `0x005d7d40`, the
+  seated kit's first pass `0x00599f30`) tests hit points over 0, the
+  armour (`0x00655a00`) its wreck flag `+0x15`, and the latter never mends
+  a Titan's own armour (`0x00561d90`). Shipped 0: the Titans' cores, core
+  doors, shield generators and force fields and the Titan hulls; 1 when
+  wrecked: the Titans' gun bundles, the commander's assets and the bridge
+  piece. A wreck mended over 0 works again (`0x00654120`). Every heal
+  goes this way: tools, hubs, crates and pads, the seated kit
+  (`GameWorld::repairable`);
 - **RTAmmo** (slot `0x10c` → `0x004cf7b0`): min(100, it) per cent of a
   magazine for each weapon (`0x005f5110`, the fraction kept a second).
 
@@ -6714,6 +6865,17 @@ Rewritten in `GameWorld::explode`, `blastShare` and `empBlast`;
   soldier's node (`0x00993aa0` slot `0xa4` → `0x7c`) takes it as
   acceleration, a tenth of it under water (the node's `+0x5c` over 0, set
   by the ground pass `0x006c28c0`). `game::blastPush`.
+- **Read by nothing in BF2142.exe** (the DefaultDetonationComp's
+  constructor `0x005e9df0`, its write-back `0x005e97b0`):
+  `detonation.detonateOnWaterCollision` (executor `0x004f3fb8`, byte
+  `+0x68`, 1 by default; 34 calls in the shipped scripts) and
+  `detonation.detectionRadius` (executor `0x004f35b0` through the
+  component's slots `0x2c` / `0x30`, float `+0x58`, 1.5 by default; the
+  write-back's own default test at `0x005e9b56` is 2; 62 calls). Each is
+  read only by the write-back; the float getter `0x006c5fe0` (`+0x58`) is
+  shared by many vtables, and none of its callers is the detonation's. So
+  a round under water goes off as on land (the depth test above is
+  `maxDepthForExplosion`'s); the rewrite reads neither field.
 - **The torque pair** (`0x005a66e0`'s `bVar5`): when the projectile has a
   detonation component (`0xc54d`, the object's slot `0x50`; the
   Default/ReplenishDetonationComp at `+0x10`, `0x005e91b0`) whose slot
@@ -7112,6 +7274,101 @@ Deployables: a gadget whose projectile has mesh physics and armour, and
 neither explodes nor holds a beacon (`portable_shield`: 600 hit points),
 is set down a metre ahead, one per owner and gadget. Its mesh then blocks
 rounds like any body's, and shot to pieces it is gone.
+
+**`fire.maxProjectilesInWorld`** (the fire template's `+0x74`, 0 by
+default in the base constructor `0x005f2ad0`, executor `0x004e33d8`). The
+runtime fire component (`0x005f28a0`; template `+0x98`, firearm `+0x0c`)
+keeps a list of weak handles to the rounds it made (`+0x14`..`+0x1c`). Its
+projectile creation (`0x005f2bb0`), unless the round is a client's own
+predicted one (`0x005f1440`), with a limit above 0 drops the list's dead
+entries, then deletes the oldest (the game's slot `0xa4` → `0x004a5f90` →
+the object manager's delete `0x006fdd90`: no detonation) while the count
+is at the limit, and adds the new round: the firearm never refuses to
+fire. The list belongs to the firearm instance: a new kit's firearms start
+empty, and the old ones' rounds go keepProjectiles seconds after their
+firearm (`0x005f1cc0`). Shipped: Unl_c4, Unl_Mine_EMP, Unl_Mine_Motion,
+Beacon 5; Unl_Mine_AntiPersonnel, unl_sonar 2; Unl_Deployer_Sentrygun,
+Bp1_Decoy, Bp1_sonar, the drone detonators, Unl_Hub_Ammo, Unl_Hub_Medic,
+Unl_Port_Shield 1; eu_aa, eu_av 8. `fire.destroyProjectilesOnDestroy`
+(`+0x80`) has no reader besides its setter `0x004e34f2` (the template's
+13 slots don't read it) and no template sets it. Rewritten:
+`GameWorld::limitInWorld` (the hubs, the shield, the drones and the beacon
+keep their own one-per-owner paths).
+
+**Weapon and armour flags, from their readers.**
+- `fire.fireStartDelay` (the fire template's RandomDistribution at `+0x08`,
+  its value `+0x0c`): SingleFireComp / SpawnObjectFireComp's fire slot 36
+  (`0x005d4d80`) and ExplosivesFireComp's (`0x005e6bc0`), on a fresh press
+  (`+0x6c`) at a burst's first round with a value other than 0, start the
+  wait (`+0x60`; `0x005f1650`: round(30 × max(0, sample)) ticks, its seed
+  the owner's `+0x214` or the time + 0xcfb) and fire nothing; the update
+  (`0x005f18b0`) lets the round go once past; a release (`0x005f1630`)
+  drops it. MultiFireComp's slot 36 (`0x005d6e10`) never starts it.
+  EU_AAcannon_Firearm_Barrel 0.6, the AT miniguns 0.5, US_AG_Cannon_fireArm
+  0.227 (the heavy mech's minigun's 0.5 is a MultiFireComp's). `FireArm::fire`.
+- `fire.maximumVehicleTiltForFire` (`+0x7c`): every fire component's press
+  (base `0x005f1370` through slot 74, Multi `0x005d5d50`, LP `0x005e3d20`,
+  Thrown `0x005e4d80`) asks `0x005f1780`: 0 passes, else acos(the root
+  object's up.y) in degrees must be under it; a double-click launcher's
+  second click isn't tested. The pod launchers 30, the air transports'
+  70. `tiltAllowsFire`, `GameWorld::launchPod`.
+- `target.disableFireWhenActiveMissile` (LPTargetComp `+0xb0`, constructor
+  `0x005e2100`): its press slot 13 (`0x005e2430`) refuses while the guided
+  round (`+0x54`) lives; a reload with disableGuidanceOnReload (`+0xb1`,
+  `0x005e23b0`) lets it go. as_ag_GuidedMissileWeapon,
+  us_ag_TAD_GuidedMissile_firearm, as_hov_light_Gunner_missile_launcher.
+  `GameWorld::activeMissile`.
+- `fire.useDistanceCounter` / `distanceStep` / `minimumDistance`
+  (SingleFireComp `+0xa8` / `+0xac` / `+0xb0`, constructor `0x005d5790`;
+  the rifles' rocket launchers, 2 and 20): the input handler `0x005d5440`
+  with a zoom component turns the range mode (`+0x178`) on when zoomed in,
+  the distance (`+0x17c`) the view ray's rounded (`0x005d4f70`, 999 m at
+  most), and off zoomed out; PIPrevItem / PINextItem step it by
+  distanceStep, never under minimumDistance (without a zoom component
+  PIAltFire toggles the mode: none ships). On fire (`0x005d4d80`) a
+  GenericProjectile gets the distance (`+0x26c`, flag `0x800`) when on and
+  at least 1; its update's end (`0x005b3e60`) sets it off that far from
+  its start. `GameWorld::stepBurstRange`, `stepBurstDistance` (the wheel's
+  binding isn't wired in main yet), `stepProjectiles`.
+- `collision.bouncing` (the collision template's `+0xd`): the projectile's
+  slot 51 (`0x005b5390`, after a hit that doesn't go through, from
+  `0x005a39d0`) gives the ricochet component the first say, then keeps a
+  bouncing round, else sets it off (event `0x1f`, `0x005b62a0`). The EMP
+  grenade (unset) and the smoke grenade (0) go off where they land.
+  `ProjectileSettings::bounces` (it was the physics type).
+  `collision.maxStickAngle` only works through StickyCollisionComp
+  (`0x005e83d0`), which the rewrite has none of; `collision.hasCollisionEffect`
+  (`+0xc`) has getters (`0x005e7840`, `0x005b3000`) and no caller found;
+  `fire.projectileStartRotation` (ThrownFireComp `+0xb4`..`+0xbc`) only
+  turns the thrown object's matrix (`0x005e5720`), not its velocity, and
+  the rewrite's rounds have no orientation of their own.
+- `armor.deepWaterDamageDelay` (`+0x140`, 1 s by default; waterDamageDelay
+  `+0x13c` 3 s): `0x006521d0` runs two timers side by side, in water
+  (`+0xf8`, hpLostWhileInWater `+0x134`) and in deep water (`+0xf4`,
+  `+0x138`), each dealing its whole amount at once through the game
+  logic's damage when it runs out and starting again at 1 s.
+  `GameWorld::stepVehicleDamage`.
+- `armor.dontUseWreck` (`+0x169`): gates the wreck's look (`0x00651c60`,
+  `0x006539f0`) in `0x00654120` and its restorers (`0x00654070`,
+  `0x00655320`, `0x00655630`); only the Titans' wake / playtest hulls set
+  it; the props honour it (`breakProp`).
+- `armor.disableInputOnDestroy` (`+0x194`): on the destruction, the
+  owning PlayerControlObject's slot `0xb4` (`0x005cc570`) rebuilds its
+  input parts (`0x0058bfd0`) without those whose armour is out: the 12
+  Titan gun Bundles. `titanGunWorks` reads it.
+- `startAutoRotateOnEnter` (RotationalBundle `+0x310`, constructor
+  `0x00562ee0`): the enter (event 2, `0x00565600`) turns auto-rotation on
+  (`+0x1dd`), the exit (3) off with the speeds zeroed and
+  restoreRotationOnExit's angles back; while on, each axis's input is 1
+  (`0x00565a20`). The APCs' flaps, US_AG's bay doors, AS_AT's arms, the
+  tank cupolas, the heavy mech's pods, the silo barrel, the drones' rotors.
+  `Vehicle::updateParts`.
+- `surpressPlayerInputVector` (`+0x354`..`+0x35c`, setter `0x004fbc72`): the
+  input pass (`0x00565700`), when the vector isn't 0 and the control
+  object's weapon is zoomed (its zoom component's slot `0xa0`), multiplies
+  each axis's input by its component (0 leaves it). The air transports'
+  gun and camera mounts 0.6, the static AP / AV 0.1. `stepGunner` (the
+  yaw bundle's; the pitch is the look's own).
 
 Squad leader drones: the recon and sentry drones' detonators
 (`Unl_Drone_Recon_Detonator`, `Unl_Drone_Sentry_Detonator`, slot 8) fire a
@@ -8267,8 +8524,34 @@ back from 1.7 m over the container meeting anything stops it (2); within
 top (s = max(0.3, 1 − the way left / 1.8) up, forward 0.75 × s + 0.75)
 stops it; getting on, the same rays from the soldier's origin (back against
 its facing, the up ray 1.9 m) must meet nothing, and it must not be under
-the floor (`0x0059e210`) unless near the top. Not rewritten: the
-animation and camera.
+the floor (`0x0059e210`) unless near the top.
+
+The ladder's look. The LadderContainer (Common_server.zip
+DummyObjects.con) is a seat: `seatAnimationSystem
+Objects/Common/Ladder/animationSystemHandles.inc` and a child camera
+`LadderContainerCamera` at 0/1.5/−0.4 (setMinRotation −130/−60/0,
+setMaxRotation 140/60/0, setMaxSpeed 250/250/0, PIMouseLookX / Y,
+maintainCameraOnEnter / OnExit). The system: message 1 (`normal_climb`)
+plays `climb` (3p_climbup.baf) under the UpTrigger `climbNormal` (value
+holder `3p_climb`, 0..100), message 2 (`getoff_climb`) `climbgetoff`
+(3p_climbendofladderhandles.baf), and `skid` (3p_climbdownfast.baf) at an
+up value of −3 or less (`3p_climb_skid`). The first-person system has no
+ladder states, and the weapon is put away (`0x005878b0`). `0x0059f380`
+(each update, from the container's slot 40 `0x0059fac0`) poses by the
+height, not the time: within soldier-start-getoff (1.8) of the top it sets
+message 2 and the system's time override (slot `0x48`, `0x008bbab0`: `+0x84`
+the fraction, `+0x88` set; each update hands it to the queued instances,
+`0x008baed0`, and the drawing `0x008c2a90` samples each clip at its length
+× it) to 1 − (top − y) / 1.8; else message 1 and (y − bottom) / (2 ×
+ladder-step-size 0.3), wrapped past 1. The soldier hands the seat system
+its vertical speed (`0x005ef250` → `0x008b99a0`): 1.35 m/s climbing, 4
+times down a skid. The camera: the Inside mode (`0x00610620`) asks the
+seat (slot `0x140`, `0x0059e730`) to push it on along the container's
+forward by ladder-end-camera-offset (0.4) × (1 − cos(the metres past top −
+1.8, as radians)). Rewritten: `GameWorld::poseOnLadder`,
+`AnimationState::setTimeOverride`, `GameWorld::ladderView` and
+`PlayerCamera::view` (no first-person models on a ladder). Not
+rewritten: the nudge (slot 103).
 
 `Object.disableChildren 1` (`0x006ed98a`, the object's slot `0x13c`,
 `0x006f6fd0`) sets `+0x159` and gives each child updateFlags (slot `0x54`,
@@ -8534,15 +8817,27 @@ collision type 5 (only `eu_titan_coreroom` / `as_titan_coreroom`, a
 radius + 0.1 (slot `0x90`) — inside when the nearest face it crosses is
 crossed on its way out (two queries of mesh slot `0x58`, `0x006e5920`,
 with the normals negated, then as stored). `GameWorld::stepTitanHullKills`,
-`insideTitanHull`. Not rewritten: the HUD's text (the HUD's), the
-minimap's area texture. The text's data is all there: the HUD
-(`0x0044c7b0`, around `0x0044cfe0`..`0x0044d220`) shows max(0, timer −
-time outside), ceiled, in HUD_CENTERINFOBOX_timeuntildamage with the
-use flag (`*0x00a25134` `+0x14`) set and the player outside (slot
-`0xf0`), plus HUD_TEXT_MENU_LEAVING_COMBATAREA while the game runs (slot
-`0x164` = 1), and plays "leaving_the_combat_area" once (latch `+0x24f`,
-not for an AI player); `GameWorld::combatAreaTimeLeft` and
-`outsideCombatArea` give it.
+`insideTitanHull`. Not rewritten: the minimap's area texture.
+
+**The warning** (the HUD information layer's frame `0x0044c7b0`, alive,
+`0x0044cfe0`..`0x0044d220`): with the manager's use flag (`*0x00a25134`
+`+0x14`) and the player outside (slot `0xf0` > 0), the seconds left,
+max(0, the controlled object's timer `0x004cac70` − the time outside),
+ceiled (`0x004480f0`), go as "%d" for #TIME# into
+HUD_CENTERINFOBOX_timeuntildamage in the layer's `+0xa70`
+(SpawnInfoString: the spawn screen's bar) and, while the game runs (game
+logic slot `0x164` = 1), into HUD_TEXT_MENU_LEAVING_COMBATAREA ("Where do
+you think you're going? Get back in the fight! (Time until punish:
+#TIME#)") through the HUD manager's slot `0x144` (`0x007c6fd0`:
+PauseMessageActive, the manager's `+0x4d`, and the layer's slot `0x64`,
+`0x0044e210`, DisconnectMessage `+0xa4`: HudElementsGameInfo.con's centre
+line, which the round's start and pause messages share); the playing
+frame first takes it down (slot `0x148`, `0x007c7020`). It plays
+"leaving_the_combat_area" once (latch `+0x24f`, not for an AI player:
+GameWorld's radio line). A joined client's time outside is its player
+networkable's 0x800 part (whole seconds, so nothing in the first second)
+and the timer its level's areas' (`HudWorld::combatAreaTimeLeft`,
+`RemotePlayer::outsideSeconds`; main.cpp's updateHud).
 
 **A vehicle's team** (a PlayerControlObject's slot 0x9c, `0x005c9500`):
 the root's seats in order, the first with a player gives its team; none,
@@ -8995,11 +9290,29 @@ menus](#joined-games-radio-tools-and-menus). His request is the one his
 name tags select (the server's requests are the tags there), else the
 team's first standing one.
 
+The squad panel's voice icons (`0x007aaf10`, the panel's textures of
+`0x007ac090`): column 3 of a squad's row shows its leader's voice, with
+voice (player slot `0x2e4`): `voip_icon_blocked` when the commander mutes
+him (`+0x298`'s list, `+0x124`) or he is blocked (slot `0x2f0`, `+0x128`),
+`voip_icon_transmitting` while he talks (slot `0x2f4`, `+0x12c`; each such
+frame counts `+0xb0` and lets help 0x26 through, from the second 0x27
+too), `voip_icon_distorted` otherwise (`+0x130`); none, an empty cell
+(`CommanderMenu::voice`: a joined game's voice client; the column's place
+in the list is fitted). The all-squads row (`0x007ac8f0` with the panel's
+`+0x1e4`): pressing c_GITacticalComm (input 33, `0x00754290`) as the
+commander or a player in a squad, alive and outside menus, opens the
+tactical rose (the NametagManager's slot `0x68`) and sets it; any frame
+the key isn't held clears it. While set the list has row 11 (0xb) with
+the selected squad's background and " " + SELECTED_ALL_SQUADS
+(`CommanderMenu::allSquads`). The order points bar (event 2/`0x56`: the
+squad's points `+0x160` added by the squad's slot `0x3c`, `0x004c4c90`,
+and their maximum, `0x004c6c80`) runs only when the squad's `+0x184` is
+set, which needs `0x00430a00`: a GameSpyRanked server of gpm_cq / ti / sl
+/ nv / ca with the settings' `+0x26d` (the online stats); offline it is
+never shown.
+
 Not done: the AI commander's answers
-to bot squad leaders (they send none), the squad panel's voice icons
-(`voip_icon_*`), `SELECTED_ALL_SQUADS` (no select-all), the order points
-bar (`SquadOrderInfoBarShow`, from the server's field-unlock progress),
-the marker's height from its geometry (`+0x8c` / 2 over the ground: the
+to bot squad leaders (they send none), the marker's height from its geometry (`+0x8c` / 2 over the ground: the
 rewrite puts it on the ground).
 
 ## Titans (gpm_ti)
@@ -9344,8 +9657,24 @@ upright), and lookAtClosestTitanOnEnter (`eu_pod` 250, read on entering by
 GameServer `0x004b0b90`: the nearest RCTitan, the game logic's objects of
 type 7 (`0x0058e400`), within it by the horizontal distance turns the pod
 and its rider to face it; rewritten in `startPod`, the rider's camera
-pitch from the second look-at left out). Not rewritten: pods against a
-shielded Titan.
+pitch from the second look-at left out).
+
+Pods against a shielded Titan: no shield-state code, a material. The
+Titans' fields map their vehicle LOD to material 666 (`0x29a`; eu_forcefield
+`death_mat`, eu_forcefield_big and as_titan_vb_shield `force_deathmat`,
+as_titan_forcefield `force_col1`: every face of that LOD; the projectile
+LOD keeps 4111..4118). The mesh pair's collision events go out for a face
+of `0x29a` whatever the speed (`0x6bc764` on), and a PlayerControlObject's
+handler (`0x005c72f0`, vtable `0x0096de60` slot 43) destroys itself on the
+server for the other's `0x29a` (game logic slot `0xe4` → `0x004c0e40`,
+1e10, no attacker); the Parachute's (`0x005cf750`, vtable `0x0096e818`:
+eu_pod's `activeSafe Parachute`) sees to its landing timer and chains to
+it. The team rule (collisionGroups `0x100` / `0x200`) lets a team's own
+through, so an enemy pod, or any enemy vehicle, meeting a standing field
+dies with its riders (`0x005cacf0`); a field wrecked at 61 % of its Titan
+(destroyOnParentDamageLevel) loses its collision (`0x00651c60`), and the
+vehicle bays' fields, without armour, stand the whole round. Rewritten in
+`GameWorld::collisionEvent` (MeshCollision.cpp).
 
 **Bots.** AIDLL has no Titan-mode strategy (its only Titan code is the
 CSTTitan strategic type); single-player BF2142 had no Titan mode. In the
@@ -10312,7 +10641,11 @@ Avoid.
   10 m (40 m), urgency 4. Otherwise a better seat: fuzzy(best / current /
   2) × 4, × 6 within 15 s of taking the seat, 0 for a seat another bot
   reserved (0x1006f320). Not followed: the ground transports' way out (no
-  shipped ground vehicle runs it).
+  shipped ground vehicle runs it). Decoded as far as: a root that isn't
+  ITAir takes it when its Physical part's slot 0x64 holds and slot 0x5c
+  gives a point, its Mobile speed (slot 0x24) is under 2 and the bot
+  stands within 4 m of the Mobile's +0x10 point (0x1006f460); those
+  adaptor slots weren't traced into BF2142.exe.
 - **The ballistic lead** (`src/AI/Ballistics`, `ai::LeadSolver`; the
   solver record 0x100f9fd0, set up by 0x100fa060, solved by 0x100fa6f0):
   every aim that leads (the turret and soldier aim at an object 0x100d9a60,
@@ -10548,10 +10881,14 @@ slot (23). The weapon, kit and AI templates (`weaponTemplate.*`,
 - **Strategic areas** of their own (`aiStrategicArea.create <name>
   <x/z> <x/z> <height> <temperature>`, juneau and Strike_at_Karkand_Coop
   use them): kept with their box and per-side takeable flags (`setTakeable
-  <side> <0|1>`, +399 + side, 0x1001ab30); the SAI's status rule for them
-  (0x1005f210: an area without a control point becomes a side's when
-  only its units are there and it is takeable for that side) isn't
-  rewritten, as the SAI weighs only control point areas.
+  <side> <0|1>`, +399 + side, 0x1001ab30) and the SAI's status rule for
+  them (0x1005f210 with +0x164 −1: with units there, the side's own alone
+  make it Owned when it is takeable for the side, the enemy's alone make
+  it Hostile when takeable for the enemy, else the status stays;
+  `ai::boxAreaStatus`, `Bots_BoxAreaStatusRule`). The status, counted over
+  the units the side knows in the box, feeds the neighbours' flags; the
+  SAI still orders units only to control point areas, and the starting
+  status is taken as neutral (the area's constructor wasn't traced).
 
 The commands (constructor / execute slot), and where the rewrite has them:
 
@@ -10667,7 +11004,13 @@ The commands (constructor / execute slot), and where the rewrite has them:
   +0x118 point) the control point's radius. Left out: C4's guard on a
   moving target (|Mobile slot 0x18 · the bot object's +0x80| over 4, the
   object field not traced); the guided weapons' own fire plan on foot
-  (0x10078570, picked when +0x6c isn't 0). `+0x209` falling with the
+  (0x10078570, picked when +0x6c isn't 0 and the bot is ITSoldier: the
+  same shape as the vehicle plan's Mobile branch, with its own fire
+  statements 0x100781e0, the guided statement 0x100d4f10 and a half-reach
+  distance condition 0x100d4480; not rewritten). The target's speed: the
+  soldier's slot 0x108 is 0x0059d950, the PlayerControlObject interface's
+  (vtable 0x0096dcb8 at the object's +0x184) +0x168, the object's +0x2ec;
+  its writer wasn't found, so the speed stays the stand-in. `+0x209` falling with the
   target condition 0x100dc730 is taken as the aim no longer lobbing.
 - **Change:** the infantry-map reach test for vehicles (the Mobile's
   per-map points +8/+0x1c/+0x30 aren't kept: every vehicle counts) and the

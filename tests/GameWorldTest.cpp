@@ -609,6 +609,7 @@ TEST(GameWorld_GrenadesBounceAndGoOff)
 	world::ObjectTemplate* shell = range.templates.create("GenericProjectile", "frag_projectile");
 	shell->settings()["physicsType"] = "RotationalPoint";
 	shell->settings()["timeToLive"] = "CRD_NONE/2.8/0/0";
+	shell->settings()["collision.bouncing"] = "1";
 	shell->settings()["detonation.explosionDamage"] = "140";
 	shell->settings()["detonation.explosionRadius"] = "9";
 	shell->settings()["detonation.explosionMaterial"] = "69"; // Unl_Grenade_Frag's
@@ -665,6 +666,7 @@ void giveGadget(Range& range, const char* name, world::ObjectTemplate*& projecti
 	gadget->settings()["ammo.magSize"] = "2";
 	projectile = range.templates.create("GenericProjectile", std::string(name) + "_projectile");
 	projectile->settings()["physicsType"] = "Mesh";
+	projectile->settings()["collision.bouncing"] = "1"; // the mines', C4's: they lie where they land
 	projectile->settings()["timeToLive"] = "CRD_NONE/9999/0/0";
 	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
 	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
@@ -2054,6 +2056,7 @@ TEST(GameWorld_OnTimeEffect)
 		grenade->settings()["timeToLive"] = "0.2";
 		grenade->settings()["hasOnTimeEffect"] = effect ? "1" : "0";
 		grenade->settings()["physicsType"] = "RotationalPoint";
+		grenade->settings()["collision.bouncing"] = "1";
 		range.templates.find("eu_ar_rifle")->settings()["projectileTemplate"] = "grenade";
 		range.templates.find("eu_ar_rifle")->settings()["velocity"] = "1";
 		CHECK(range.world->spawnPlayer(2) != nullptr);
@@ -3241,4 +3244,504 @@ TEST(GameWorld_RagDollHitPush)
 	CHECK(dice::hfe::game::ProjectileSettings::fromTemplate(*round).hitImpactModifier == 1);
 	round->settings()["hitImpactModifier"] = "4";
 	CHECK(dice::hfe::game::ProjectileSettings::fromTemplate(*round).hitImpactModifier == 4);
+}
+
+// target.disableGuidanceOnReload (LPTargetComp +0xb1, as_av / eu_av): the
+// reload's start (0x005c0f40 -> the component's slot 0x48, 0x005e23b0)
+// lets the wire-guided missile in flight go unguided, so it no longer
+// turns after the aim. Without the flag the missile keeps following.
+TEST(GameWorld_GuidanceLostOnReload)
+{
+	for (const bool disable : {false, true}) {
+		Range range;
+		world::ObjectTemplate* launcher = range.templates.find("eu_ar_rifle");
+		launcher->settings()["projectileTemplate"] = "missile";
+		launcher->settings()["velocity"] = "40";
+		launcher->settings()["ammo.magSize"] = "1";
+		launcher->settings()["ammo.nrOfMags"] = "4";
+		launcher->settings()["ammo.reloadTime"] = "3";
+		if (disable) {
+			launcher->settings()["target.disableGuidanceOnReload"] = "1";
+		}
+		world::ObjectTemplate* missile = range.templates.create("GenericProjectile", "missile");
+		missile->settings()["seek.targetType"] = "TTUnique";
+		missile->settings()["seek.trackingDelay"] = "0.01";
+		missile->settings()["follow.maxYaw"] = "0.45";
+		missile->settings()["follow.maxPitch"] = "0.85";
+		missile->settings()["gravityModifier"] = "0";
+		missile->settings()["timeToLive"] = "CRD_NONE/10/0/0";
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		game::SoldierInput input;
+		input.fire = true;
+		input.aimPitch = 3;
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		input.fire = false;
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		input.reload = true; // a press: the reload starts
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		input.reload = false;
+		input.turn = 30;
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		input.turn = 0;
+		range.world->setPlayerInput(input);
+		for (int i = 0; i < 30; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		CHECK(range.world->projectiles().size() == 1);
+		if (!range.world->projectiles().empty()) {
+			const game::Projectile& round = range.world->projectiles().front();
+			const float heading = std::atan2(round.velocity.x, round.velocity.z);
+			CHECK(round.wireLost == disable);
+			if (disable) {
+				CHECK(std::fabs(heading) < 0.01f); // flies straight on
+			} else {
+				CHECK(heading > 0.2f); // turned after the aim
+			}
+		}
+	}
+}
+
+// fire.maxProjectilesInWorld (FireComp +0x74, 0x005f2bb0): the firearm
+// never refuses to fire; its oldest rounds go (without going off) so that
+// no more than the limit are in the world. A new kit's firearms start a
+// new count.
+TEST(GameWorld_MaxProjectilesInWorld)
+{
+	Range range;
+	world::ObjectTemplate* mines = range.templates.find("eu_ar_rifle");
+	mines->settings()["projectileTemplate"] = "mine";
+	mines->settings()["velocity"] = "10";
+	mines->settings()["fire.roundsPerMinute"] = "60";
+	mines->settings()["ammo.magSize"] = "10";
+	mines->settings()["fire.maxProjectilesInWorld"] = "2";
+	world::ObjectTemplate* mine = range.templates.create("GenericProjectile", "mine");
+	mine->settings()["gravityModifier"] = "0";
+	mine->settings()["timeToLive"] = "CRD_NONE/100/0/0";
+	mine->settings()["damage"] = "0";
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	std::vector<uint32_t> fired;
+	for (int shot = 0; shot < 4; ++shot) {
+		game::SoldierInput input;
+		input.fire = true;
+		input.aimPitch = 30;
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		input.fire = false;
+		range.world->setPlayerInput(input);
+		for (int i = 0; i < 40; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		CHECK(range.world->projectiles().size() == static_cast<size_t>(std::min(shot + 1, 2)));
+		if (!range.world->projectiles().empty()) {
+			fired.push_back(range.world->projectiles().back().serial);
+		}
+	}
+	// The two newest are left.
+	CHECK(fired.size() == 4);
+	if (fired.size() == 4 && range.world->projectiles().size() == 2) {
+		CHECK(range.world->projectiles()[0].serial == fired[2]);
+		CHECK(range.world->projectiles()[1].serial == fired[3]);
+	}
+	// Without a limit every round stays.
+	mines->settings().erase("fire.maxProjectilesInWorld");
+	for (int shot = 0; shot < 2; ++shot) {
+		game::SoldierInput input;
+		input.fire = true;
+		input.aimPitch = 30;
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		input.fire = false;
+		range.world->setPlayerInput(input);
+		for (int i = 0; i < 40; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+	}
+	CHECK(range.world->projectiles().size() == 4);
+}
+
+// armor.canBeRepaired 0 (template +0x14c; the Titans' cores, doors and
+// fields): neither the repair test 0x004cc380 nor the armour's 0x00655a00
+// lets a repair through, so the seated engineer of
+// GameWorld_KitAbilityInAVehicle mends nothing. The test itself
+// (GameWorld::repairable) also refuses a wreck without
+// canBeRepairedWhenWreck (+0x14d).
+TEST(GameWorld_CanBeRepaired)
+{
+	for (int repairable = 0; repairable < 2; ++repairable) {
+		Range range;
+		range.collisionTemplates.add("jeep_mesh", boxMesh(1));
+		range.templates.registerType(6, "Kit");
+		range.templates.registerType(20, "PlayerControlObject");
+		range.templates.registerType(23, "Engine");
+		range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
+		world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+		makeMobile(*jeep, "jeep_mesh");
+		jeep->children().push_back({"jeep_engine", {}, {}});
+		jeep->settings()["armor.maxHitPoints"] = "100";
+		jeep->settings()["armor.canBeRepaired"] = repairable ? "1" : "0";
+		range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+		world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+		kit->children().push_back({"eu_ar_rifle", {}, {}});
+		kit->settings()["abilityInVehicleRadius"] = "8";
+		kit->settings()["abilityInVehicleStrength"] = "0.075";
+		kit->settings()["ability.hasRepairingAbility"] = "1";
+		const uint32_t car = range.objects.create(jeep, {0, 1, 3})->id();
+		range.world->startRound();
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		range.world->tick(1 / 30.0f);
+		game::SoldierInput use;
+		use.use = true;
+		range.world->setPlayerInput(use);
+		range.world->tick(1 / 30.0f);
+		range.world->setPlayerInput({});
+		CHECK(range.world->repairable(car) == (repairable != 0));
+		range.world->setHitPoints(car, 50);
+		for (int i = 0; i < 30; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		const float now = range.world->hitPoints(car);
+		CHECK(repairable ? std::fabs(now - 52.25f) < 0.1f : now == 50);
+	}
+}
+
+// Material 0x29a (666) under a PlayerControlObject or a Parachute (the
+// pods): 0x005c72f0 / 0x005cf750 destroy it (1e10, no attacker). The
+// Titans' force fields carry it on every face of their vehicle LOD, so an
+// enemy pod or vehicle meeting a standing shield goes with its riders;
+// here a car falls onto a slab of it, and onto one of another material.
+TEST(GameWorld_DeathMaterialDestroysVehicles)
+{
+	for (const char* parent : {"PlayerControlObject", "Parachute"}) {
+		for (int deadly = 0; deadly < 2; ++deadly) {
+			Range range;
+			range.templates.registerType(6, "SimpleObject");
+			range.templates.registerType(7, "PlayerControlObject");
+			range.templates.registerType(8, "Parachute");
+			range.collisionTemplates.add("slab_mesh", panelMesh({{-10, 0, -10}, {10, 0, -10}, {10, 0, 10}, {-10, 0, 10}},
+														  {{{0, 2, 3}, 0}, {{0, 1, 2}, 0}}));
+			range.collisionTemplates.add("car_mesh", boxMesh(1));
+			world::ObjectTemplate* slab = range.templates.create("SimpleObject", "slab");
+			slab->settings()["collisionMesh"] = "slab_mesh";
+			slab->settings()["mapMaterial.0"] = deadly ? "666" : "42";
+			range.objects.create(slab, {0, 0, 50});
+			world::ObjectTemplate* car = range.templates.create(parent, "car");
+			makeMobile(*car, "car_mesh");
+			car->settings()["armor.maxHitPoints"] = "10000";
+			const uint32_t id = range.objects.create(car, {0, 2, 50})->id();
+			physics::Ground ground;
+			ground.height = [](float, float) { return -5.0f; };
+			ground.heightAndNormal = [](float, float, physics::Vec3& normal) {
+				normal = {0, 1, 0};
+				return -5.0f;
+			};
+			range.world->enablePhysics(range.files, range.collisionTemplates, ground);
+			range.world->startRound();
+			for (int i = 0; i < 60; ++i) {
+				range.world->tick(1 / 30.0f);
+			}
+			const world::Object* o = range.objects.find(id);
+			const float left = range.world->hitPoints(id);
+			std::fprintf(stderr, "  %s on material %s: %.0f hit points left, y %.2f\n", parent, deadly ? "666" : "42", left,
+				o ? o->position().y : -99.0f);
+			CHECK(deadly ? left <= 0 : left > 9000); // the fall itself hurts a little
+		}
+	}
+}
+
+// Destroyable props (DestroyableObject, Props.cpp): at 0 hit points the
+// armour's 0x00654120 wrecks one (its physics gone, 0x00651c60: a mesh
+// of two geometries shows its second, one of one is hidden), its armour
+// explosion (barrel_big_dest_c: 150 over 7 m) goes off at it, setting off
+// its neighbour and hurting a soldier; with canBeDestroyed 0 the wreck
+// stays, a draining one (the rail bars: timeToStayAsWreck 20) is removed
+// after it; a new round has them whole (spawned once a round).
+TEST(GameWorld_DestroyablePropsBreak)
+{
+	Range range;
+	range.templates.registerType(6, "DestroyableObject");
+	physics::CollisionMeshFile twoGeometries = boxMesh(0.5f);
+	twoGeometries.geometries.push_back(boxMesh(0.2f).geometries[0]);
+	range.collisionTemplates.add("barrel_mesh", twoGeometries);
+	range.collisionTemplates.add("bar_mesh", boxMesh(0.5f));
+	world::ObjectTemplate* barrel = range.templates.create("DestroyableObject", "barrel_big_dest_c");
+	barrel->settings()["collisionMesh"] = "barrel_mesh";
+	barrel->settings()["armor.maxHitPoints"] = "40";
+	barrel->settings()["armor.explosionDamage"] = "150";
+	barrel->settings()["armor.explosionRadius"] = "7";
+	barrel->settings()["armor.explosionForce"] = "10";
+	barrel->settings()["armor.canBeDestroyed"] = "0";
+	barrel->settings()["armor.timeToStayAsWreck"] = "100";
+	world::ObjectTemplate* bar = range.templates.create("DestroyableObject", "train_rail_bar_des");
+	bar->settings()["collisionMesh"] = "bar_mesh";
+	bar->settings()["armor.maxHitPoints"] = "1";
+	const uint32_t first = range.objects.create(barrel, {0, 0.5f, 40})->id();
+	const uint32_t second = range.objects.create(barrel, {3, 0.5f, 40})->id();
+	const uint32_t rail = range.objects.create(bar, {-3, 0.5f, 40})->id();
+	const uint32_t far = range.objects.create(barrel, {30, 0.5f, 40})->id();
+	range.world->startRound();
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	CHECK(range.world->setSoldierPosition(range.world->playerObject(), {0, 0, 36}));
+	range.world->tick(1 / 30.0f);
+	// A segment through the first barrel meets it.
+	CHECK(!range.world->lineOfSight({0, 0.5f, 38}, {0, 0.5f, 42}));
+	range.world->setHitPoints(first, 0);
+	CHECK(range.world->propWrecked(first) && range.world->propWrecked(second) && range.world->propWrecked(rail));
+	CHECK(!range.world->propWrecked(far) && range.world->hitPoints(far) == 40);
+	CHECK(range.world->propGeometry(first) == 1 && !range.objects.find(first)->hidden());
+	CHECK(range.world->propGeometry(rail) == -1 && range.objects.find(rail)->hidden());
+	CHECK(range.world->lineOfSight({0, 0.5f, 38}, {0, 0.5f, 42})); // its physics went
+	game::GameWorld::PlayerInfo me;
+	range.world->playerInfo(range.world->localPlayer(), me);
+	std::fprintf(stderr, "  the soldier 4 m off: %.1f\n", range.world->hitPoints(me.soldier));
+	CHECK(range.world->hitPoints(me.soldier) < 100);
+	// The rail bar drains: removed after its 20 s; the barrels stay.
+	range.world->setHitPoints(me.soldier, 100);
+	for (int i = 0; i < 21 * 30; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.objects.find(rail)->hidden() && range.world->propWrecked(second) && !range.objects.find(second)->hidden());
+	// The next round: whole again.
+	range.world->startRound();
+	CHECK(!range.world->propWrecked(first) && range.world->hitPoints(first) == 40 && !range.objects.find(rail)->hidden());
+	CHECK(!range.world->lineOfSight({0, 0.5f, 38}, {0, 0.5f, 42}));
+}
+
+// target.disableFireWhenActiveMissile (LPTargetComp +0xb0, 0x005e2430):
+// while the guided round flies, a new press fires nothing.
+TEST(GameWorld_NoFireWhileTheMissileFlies)
+{
+	for (const bool disable : {false, true}) {
+		Range range;
+		world::ObjectTemplate* launcher = range.templates.find("eu_ar_rifle");
+		launcher->settings()["projectileTemplate"] = "missile";
+		launcher->settings()["velocity"] = "40";
+		if (disable) {
+			launcher->settings()["target.disableFireWhenActiveMissile"] = "1";
+		}
+		world::ObjectTemplate* missile = range.templates.create("GenericProjectile", "missile");
+		missile->settings()["seek.targetType"] = "TTUnique";
+		missile->settings()["gravityModifier"] = "0";
+		missile->settings()["timeToLive"] = "CRD_NONE/10/0/0";
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		for (int press = 0; press < 3; ++press) {
+			game::SoldierInput input;
+			input.fire = true;
+			input.aimPitch = 3;
+			range.world->setPlayerInput(input);
+			range.world->tick(1 / 30.0f);
+			input.fire = false;
+			range.world->setPlayerInput(input);
+			for (int i = 0; i < 10; ++i) {
+				range.world->tick(1 / 30.0f);
+			}
+		}
+		CHECK(range.world->projectiles().size() == (disable ? 1u : 3u));
+	}
+}
+
+// A vehicle in water (the armour's 0x006521d0): over waterLevel a timer
+// from waterDamageDelay (3 s by default), past deepWaterLevel another from
+// deepWaterDamageDelay; each run out takes its whole hpLost at once and
+// starts again at a second.
+TEST(GameWorld_WaterDamageDelays)
+{
+	Range range;
+	range.collisionTemplates.add("jeep_mesh", boxMesh(1));
+	range.templates.registerType(20, "PlayerControlObject");
+	range.templates.registerType(23, "Engine");
+	range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
+	world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+	makeMobile(*jeep, "jeep_mesh");
+	jeep->children().push_back({"jeep_engine", {}, {}});
+	jeep->settings()["armor.maxHitPoints"] = "100";
+	jeep->settings()["armor.waterLevel"] = "0.5";
+	jeep->settings()["armor.deepWaterLevel"] = "1.5";
+	jeep->settings()["armor.hpLostWhileInWater"] = "5";
+	jeep->settings()["armor.hpLostWhileInDeepWater"] = "20";
+	jeep->settings()["armor.deepWaterDamageDelay"] = "0.5";
+	const uint32_t car = range.objects.create(jeep, {0, 1, 3})->id();
+	range.world->startRound();
+	range.world->tick(1 / 30.0f);
+	range.world->setWaterLevel(range.objects.find(car)->position().y + 2);
+	const auto run = [&](float seconds) {
+		for (int i = 0; i < static_cast<int>(seconds * 30 + 0.5f); ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+	};
+	run(0.4f);
+	CHECK(range.world->hitPoints(car) == 100);
+	run(0.2f); // the deep timer's 0.5 s
+	CHECK(range.world->hitPoints(car) == 80);
+	run(2.3f); // 2.9 s: deep at 1.5 and 2.5
+	CHECK(range.world->hitPoints(car) == 40);
+	run(0.2f); // the water timer's 3 s
+	std::fprintf(stderr, "  after 3.1 s: %.0f\n", range.world->hitPoints(car));
+	CHECK(range.world->hitPoints(car) == 35);
+}
+
+// fire.useDistanceCounter (0x005d5440, 0x005d4d80, 0x005b3e60): zoomed
+// in, the launcher's range is the view's (999 m with nothing in the way),
+// stepped by distanceStep and never under minimumDistance; its round goes
+// off that far from its start. Not zoomed: no range, the round flies on.
+TEST(GameWorld_AirburstDistance)
+{
+	for (const bool zoomed : {false, true}) {
+		Range range;
+		world::ObjectTemplate* launcher = range.templates.find("eu_ar_rifle");
+		launcher->settings()["projectileTemplate"] = "rocket";
+		launcher->settings()["velocity"] = "40";
+		launcher->settings()["fire.useDistanceCounter"] = "1";
+		launcher->settings()["fire.distanceStep"] = "2";
+		launcher->settings()["fire.minimumDistance"] = "20";
+		world::ObjectTemplate* rocket = range.templates.create("GenericProjectile", "rocket");
+		rocket->settings()["gravityModifier"] = "0";
+		rocket->settings()["timeToLive"] = "CRD_NONE/10/0/0";
+		rocket->settings()["detonation.explosionDamage"] = "10";
+		rocket->settings()["detonation.explosionRadius"] = "3";
+		rocket->settings()["detonation.explosionMaterial"] = "0";
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		const int me = range.world->localPlayer();
+		range.world->setZoomed(me, zoomed);
+		game::SoldierInput input;
+		input.aimPitch = 10;
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		CHECK(range.world->burstDistance(me) == (zoomed ? 999 : 0));
+		range.world->stepBurstDistance(me, -1000);
+		CHECK(range.world->burstDistance(me) == (zoomed ? 20 : 0));
+		range.world->stepBurstDistance(me, 1);
+		CHECK(range.world->burstDistance(me) == (zoomed ? 22 : 0));
+		input.fire = true;
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		input.fire = false;
+		range.world->setPlayerInput(input);
+		for (int i = 0; i < 15; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		CHECK(range.world->projectiles().size() == 1); // 20 m in half a second
+		for (int i = 0; i < 10; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		CHECK(range.world->projectiles().size() == (zoomed ? 0u : 1u));
+	}
+}
+
+// The ladder's camera (LadderContainerCamera: 0/1.5/-0.4 off the
+// container, the mouse's yaw within -130..140 and the pitch within 60
+// degrees of the ladder; 0x0059e730 pushes it on over the top).
+TEST(GameWorld_LadderCamera)
+{
+	Range range;
+	range.collisionTemplates.add("ladder_mesh",
+		panelMesh({{-0.3f, 0, -0.05f}, {0.3f, 0, -0.05f}, {0.3f, 6, -0.05f}, {-0.3f, 6, -0.05f}},
+			{{{0, 1, 2}, 0}, {{0, 2, 3}, 0}}));
+	range.templates.registerType(8, "Ladder");
+	world::ObjectTemplate* ladder = range.templates.create("Ladder", "ladder_5m_c");
+	ladder->settings()["collisionMesh"] = "ladder_mesh";
+	range.objects.create(ladder, {0, 0, 40});
+	range.world->startRound();
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int me = range.world->localPlayer();
+	game::GameWorld::PlayerInfo info;
+	range.world->playerInfo(me, info);
+	range.world->setSoldierPosition(info.soldier, {0, 0, 39.5f});
+	game::GameWorld::LadderView view;
+	CHECK(!range.world->ladderView(me, view));
+	game::SoldierInput climb;
+	climb.aimPitch = 20;
+	climb.throttle = 1;
+	climb.turn = -info.yaw;
+	bool on = false;
+	for (int i = 0; i < 30 && !on; ++i) {
+		range.world->setInput(me, climb);
+		climb.turn = 0;
+		range.world->tick(1 / 30.0f);
+		on = range.world->onLadder(me);
+	}
+	CHECK(on);
+	CHECK(range.world->ladderView(me, view));
+	range.world->playerInfo(me, info);
+	// 1.5 m over the container (the feet, a metre under the origin), 0.4 m
+	// behind it along the ladder's facing (+z here).
+	std::fprintf(stderr, "  camera %.2f/%.2f/%.2f, soldier %.2f/%.2f/%.2f, yaw %.1f\n", view.position.x, view.position.y,
+		view.position.z, info.position.x, info.position.y, info.position.z, view.yaw);
+	CHECK(std::fabs(view.position.y - (info.position.y + 1.5f)) < 0.05f);
+	CHECK(std::fabs(view.pitch - 20) < 1e-4f);
+	// The yaw: at most 250 degrees a second, within 140 to the right.
+	climb.turn = 100;
+	climb.throttle = 0;
+	climb.aimPitch = 80;
+	const float before = view.yaw;
+	range.world->setInput(me, climb);
+	range.world->tick(1 / 30.0f);
+	range.world->ladderView(me, view);
+	CHECK(std::fabs(std::remainder(view.yaw - before, 360.0f) - 250.0f / 30) < 0.01f);
+	CHECK(view.pitch == 60);
+	for (int i = 0; i < 30; ++i) {
+		range.world->setInput(me, climb);
+		range.world->tick(1 / 30.0f);
+	}
+	range.world->ladderView(me, view);
+	CHECK(std::fabs(std::remainder(view.yaw - before, 360.0f) - 140) < 0.01f);
+}
+
+// An open seat's look (0x0058a6d0, 0x005890a0, 0x005c7cb0): the mouse
+// turns the head up to 40 degrees, then the body within the seat's limits
+// (seatLeftRotationLimit -90 / seatRightRotationLimit 90, the FAVs' open
+// position); the seat has no camera, so the view is the seated soldier's
+// own, along the seat plus the body's turn plus the twist.
+TEST(GameWorld_OpenSeatLook)
+{
+	Range range;
+	range.collisionTemplates.add("jeep_mesh", boxMesh(1));
+	range.templates.registerType(20, "PlayerControlObject");
+	range.templates.registerType(23, "Engine");
+	range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
+	world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+	makeMobile(*jeep, "jeep_mesh");
+	jeep->settings()["seatInformation"] = "jeep 0/1/0 0/0/0";
+	jeep->children().push_back({"jeep_engine", {}, {}});
+	world::ObjectTemplate* open = range.templates.create("PlayerControlObject", "jeep_openPosition");
+	open->settings()["seatInformation"] = "jeep_openPosition 0/1/-1 0/0/0";
+	open->settings()["seatLeftRotationLimit"] = "-90";
+	open->settings()["seatRightRotationLimit"] = "90";
+	jeep->children().push_back({"jeep_openPosition", {0, 0, -1}, {}});
+	const uint32_t car = range.objects.create(jeep, {0, 1, 3})->id();
+	range.world->startRound();
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int me = range.world->localPlayer();
+	range.world->tick(1 / 30.0f);
+	game::SoldierInput use;
+	use.use = true;
+	range.world->setPlayerInput(use);
+	range.world->tick(1 / 30.0f);
+	use = {};
+	use.switchSeat = 2;
+	range.world->setPlayerInput(use);
+	range.world->tick(1 / 30.0f);
+	game::GameWorld::PlayerInfo info;
+	CHECK(range.world->playerInfo(me, info) && info.vehicle == car && info.seat == 1);
+	const auto seats = range.world->vehicleSeats(car);
+	CHECK(seats.size() == 2 && seats.size() == 2 && seats[1].leftLimit == -90 && seats[1].rightLimit == 90);
+	game::GameWorld::LadderView view;
+	CHECK(range.world->seatedSoldierView(me, view));
+	const float ahead = view.yaw;
+	const auto turnBy = [&](float degrees) {
+		game::SoldierInput look;
+		look.turn = degrees;
+		range.world->setPlayerInput(look);
+		range.world->tick(1 / 30.0f);
+		range.world->seatedSoldierView(me, view);
+		return std::remainder(view.yaw - ahead, 360.0f);
+	};
+	CHECK(std::fabs(turnBy(30) - 30) < 0.01f);  // the head
+	CHECK(std::fabs(turnBy(30) - 70) < 0.01f);  // twist 40, the body 30
+	CHECK(std::fabs(turnBy(100) - 130) < 0.01f); // the body at its 90
+	CHECK(std::fabs(turnBy(-50) - 80) < 0.01f);  // the head alone back to -10, the body stays
+	std::fprintf(stderr, "  open seat look ahead %.1f\n", ahead);
 }

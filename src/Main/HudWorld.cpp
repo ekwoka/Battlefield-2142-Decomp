@@ -1,8 +1,10 @@
 #include "HudWorld.h"
 
+#include "Game/CombatAreas.h"
 #include "Game/GameLogic.h"
 #include "Game/Weapons.h"
 #include "Net/RemoteWorld.h"
+#include "Render/PostProduction.h"
 #include "World/Object.h"
 #include "World/ObjectTemplate.h"
 #include "World/ObjectTemplateManager.h"
@@ -71,6 +73,37 @@ HudWorld::Weapon LocalHudWorld::heldWeapon() const
 		w.mags = w.gun->magsLeft() + 1;
 	}
 	return w;
+}
+
+HudWorld::Weapon LocalHudWorld::seatGroupWeapon(int group) const
+{
+	Weapon w;
+	PlayerInfo me;
+	if (!m_round.playerInfo(m_round.localPlayer(), me) || !me.alive || !me.vehicle || me.seat < 0) {
+		return w;
+	}
+	const int index = m_round.seatWeaponIndex(me.vehicle, me.seat, group);
+	const auto seats = m_round.vehicleSeats(me.vehicle);
+	if (index < 0 || static_cast<size_t>(me.seat) >= seats.size()
+		|| static_cast<size_t>(index) >= seats[static_cast<size_t>(me.seat)].weapons.size()) {
+		return w;
+	}
+	w.weapon = m_round.templates().find(seats[static_cast<size_t>(me.seat)].weapons[static_cast<size_t>(index)].weapon);
+	w.gun = m_round.seatFireArm(me.vehicle, me.seat, index);
+	if (w.gun) {
+		w.rounds = w.gun->roundsInMag();
+		w.mags = w.gun->magsLeft() + 1;
+	}
+	return w;
+}
+
+float LocalHudWorld::combatAreaTimeLeft() const
+{
+	// The game runs: the round plays (game logic slot 0x164 = 1).
+	if (m_logic.ended() || m_logic.roundState() != 3) {
+		return -1;
+	}
+	return m_round.combatAreaTimeLeft(m_round.localPlayer());
 }
 
 // --- a joined game
@@ -450,6 +483,51 @@ HudWorld::Weapon RemoteHudWorld::heldWeapon() const
 	return w;
 }
 
+float RemoteHudWorld::combatAreaTimeLeft() const
+{
+	// The server's game status (game logic +0x40: 1 playing) and our
+	// player's time outside (the networkable's 0x800 part, whole seconds;
+	// the HUD's slot 0xf0 test needs more than 0).
+	const net::RemotePlayer* me = m_world.player(localPlayer());
+	const game::CombatAreas* areas = m_round.combatAreas();
+	if (m_world.gameState() != 1 || !me || !me->alive || me->outsideSeconds <= 0 || !areas || !areas->use) {
+		return -1;
+	}
+	// The controlled object's timer (0x004cac70): a vehicle's category's,
+	// else timeAllowedOutside.
+	const world::Object* car = vehicle();
+	const int category = car && car->objectTemplate() ? game::GameWorld::vehicleCategory(*car->objectTemplate()) : 4;
+	return std::max(0.0f, areas->timerFor(category, car == nullptr) - static_cast<float>(me->outsideSeconds));
+}
+
+HudWorld::Weapon RemoteHudWorld::seatGroupWeapon(int group) const
+{
+	Weapon w;
+	PlayerInfo me;
+	const net::ControlState* state = m_world.controlState();
+	if (group < 0 || group > 2 || !playerInfo(localPlayer(), me) || !me.alive || !me.vehicle || me.seat < 0 || !state
+		|| !state->hasOwn) {
+		return w;
+	}
+	const auto& own = state->own.weapons[group];
+	const auto seats = m_round.vehicleSeats(me.vehicle);
+	if (own.index < 0 || static_cast<size_t>(me.seat) >= seats.size()) {
+		return w;
+	}
+	int place = 0;
+	for (const auto& candidate : seats[static_cast<size_t>(me.seat)].weapons) {
+		if (candidate.group == group && place++ == own.index) {
+			w.weapon = m_round.templates().find(candidate.weapon);
+			break;
+		}
+	}
+	if (w.weapon) {
+		w.rounds = own.ammo;
+		w.mags = own.magazines;
+	}
+	return w;
+}
+
 std::vector<int> RemoteHudWorld::revealedPlayers(int) const
 {
 	return m_world.radarPlayers();
@@ -464,6 +542,12 @@ std::vector<uint32_t> RemoteHudWorld::spottedVehicles() const
 		}
 	}
 	return out;
+}
+
+void roundCameraEffects(game::GameWorld& round, int player, render::PostEffects& effects)
+{
+	game::GameWorld::ProjectileCamera camera;
+	effects.tv = round.projectileCamera(player, camera);
 }
 
 } // namespace dice::hfe::host
