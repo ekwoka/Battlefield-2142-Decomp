@@ -8057,18 +8057,45 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims)
 // is left out.
 physics::Vec3 GameWorld::seatGunOrigin(const SeatLayout& seat, Body::Gun& gun)
 {
+	return seatGunOrigin(seat, gun.yaw, gun.pitch, gun.barrel);
+}
+
+bool GameWorld::gunFrame(uint32_t vehicle, int seat, physics::Vec3& origin, physics::Mat3& hull) const
+{
+	for (const Body& body : m_bodies) {
+		if (body.object != vehicle || seat < 0 || static_cast<size_t>(seat) >= body.guns.size()
+			|| !body.guns[static_cast<size_t>(seat)].weapon) {
+			continue;
+		}
+		const world::Object* object = m_objects.find(vehicle);
+		const auto known = object ? m_layouts.find(object->objectTemplate()->name()) : m_layouts.end();
+		if (known == m_layouts.end() || static_cast<size_t>(seat) >= known->second.seats.size()) {
+			return false;
+		}
+		const Body::Gun& gun = body.guns[static_cast<size_t>(seat)];
+		int barrel = gun.barrel;
+		origin = body.body.position
+			+ body.body.rotation.transform(seatGunOrigin(known->second.seats[static_cast<size_t>(seat)], gun.yaw, gun.pitch, barrel));
+		hull = body.body.rotation;
+		return true;
+	}
+	return false;
+}
+
+physics::Vec3 GameWorld::seatGunOrigin(const SeatLayout& seat, float gunYaw, float gunPitch, int& barrel)
+{
 	physics::Vec3 from = seat.weaponPosition;
 	if (seat.fireInCameraDof && seat.hasCameraAt) {
 		from = seat.cameraAt;
 	} else if (!seat.barrels.empty()) {
-		if (gun.barrel < 0 || static_cast<size_t>(gun.barrel) >= seat.barrels.size()) {
-			gun.barrel = 0;
+		if (barrel < 0 || static_cast<size_t>(barrel) >= seat.barrels.size()) {
+			barrel = 0;
 		}
-		from = seat.barrels[static_cast<size_t>(gun.barrel)];
-		++gun.barrel;
+		from = seat.barrels[static_cast<size_t>(barrel)];
+		++barrel;
 	}
-	const float yaw = (seat.frameYaw + gun.yaw) * 3.14159265f / 180.0f;
-	const float pitch = gun.pitch * 3.14159265f / 180.0f;
+	const float yaw = (seat.frameYaw + gunYaw) * 3.14159265f / 180.0f;
+	const float pitch = gunPitch * 3.14159265f / 180.0f;
 	const physics::Vec3 forward {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
 	const physics::Vec3 right {std::cos(yaw), 0, -std::sin(yaw)};
 	const physics::Vec3 up {-std::sin(yaw) * std::sin(pitch), std::cos(pitch), -std::cos(yaw) * std::sin(pitch)};
@@ -8076,7 +8103,7 @@ physics::Vec3 GameWorld::seatGunOrigin(const SeatLayout& seat, Body::Gun& gun)
 		// The rest offset from the pivot, turned by the aim's yaw about the
 		// vertical and its pitch about the turned right.
 		const physics::Vec3 d = from - seat.yawPivot;
-		const float turnBy = gun.yaw * 3.14159265f / 180.0f;
+		const float turnBy = gunYaw * 3.14159265f / 180.0f;
 		const physics::Vec3 yawed {d.x * std::cos(turnBy) + d.z * std::sin(turnBy), d.y,
 			-d.x * std::sin(turnBy) + d.z * std::cos(turnBy)};
 		const float c = std::cos(pitch), s = std::sin(pitch);

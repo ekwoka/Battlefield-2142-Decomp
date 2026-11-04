@@ -737,3 +737,57 @@ TEST(Weapons_DetonationDepthAndNormal)
 	s = game::ProjectileSettings::fromTemplate(*shell);
 	CHECK(s.maxDepthForExplosion == 0.5f && !s.useCollisionNormal);
 }
+
+// A GenericFireArm without ObjectTemplate.velocity fires at 600 m/s (its
+// template's constructor, 0x005c2800: +0x2f0 = 600): the shipped SMGs and
+// handguns set none.
+TEST(Weapons_FireArmVelocityDefault)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "GenericFireArm");
+	world::ObjectTemplate* smg = templates.create("GenericFireArm", "smg");
+	smg->settings()["projectileTemplate"] = "smg_round";
+	CHECK(game::FireArmSettings::fromTemplate(*smg).velocity == 600);
+	smg->settings()["velocity"] = "0"; // ParachuteLauncher's
+	CHECK(game::FireArmSettings::fromTemplate(*smg).velocity == 0);
+	smg->settings()["velocity"] = "900";
+	CHECK(game::FireArmSettings::fromTemplate(*smg).velocity == 900);
+}
+
+// The soldier deviation's firing build-up off the trigger (0x005de980):
+// it decays by `decay` and stops at 0 on the side it builds from. A machine
+// gun's (setFireDev -1 -0.09 -0.009) steadies with firing, then comes back
+// up to 0 and no further, however long it rests (it used to grow without
+// bound: 0.27 a second, tens of degrees after a minute).
+TEST(Weapons_SoldierDeviationSteadiesBackToZero)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "GenericFireArm");
+	world::ObjectTemplate* mg = templates.create("GenericFireArm", "mg");
+	mg->components().push_back("SoldierDeviationComp");
+	mg->settings()["deviation.setFireDev"] = "-1 -0.09 -0.009";
+	mg->settings()["deviation.minDev"] = "1.15";
+	mg->settings()["deviation.devModStand"] = "2";
+	game::SoldierDeviation d = game::SoldierDeviation::fromTemplate(*mg);
+	for (int i = 0; i < 20; ++i) {
+		d.fire.fired();
+		d.update(0, 0, 0, 0, false, true, 0, false);
+	}
+	CHECK(std::fabs(d.fire.value + 1) < 1e-5f); // held at max -1
+	CHECK(std::fabs(d.deviation() - 0.15f * 2) < 1e-4f);
+	d.update(0, 0, 0, 0, false, false, 0, false);
+	CHECK(std::fabs(d.fire.value + 0.991f) < 1e-5f);
+	for (int i = 0; i < 30 * 120; ++i) {
+		d.update(0, 0, 0, 0, false, false, 0, false);
+	}
+	CHECK(d.fire.value == 0);
+	CHECK(std::fabs(d.deviation() - 1.15f * 2) < 1e-4f);
+	// A rifle's (positive perShot) stops at 0 from above, as before.
+	mg->settings()["deviation.setFireDev"] = "2.0 0.24 0.09";
+	d = game::SoldierDeviation::fromTemplate(*mg);
+	d.fire.fired();
+	for (int i = 0; i < 10; ++i) {
+		d.update(0, 0, 0, 0, false, false, 0, false);
+	}
+	CHECK(d.fire.value == 0);
+}

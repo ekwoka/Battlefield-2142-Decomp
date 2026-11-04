@@ -575,6 +575,16 @@ void DeviationBuildUp::update(bool firing)
 	}
 }
 
+void DeviationBuildUp::updateSoldier(bool firing)
+{
+	if (!firing) {
+		value -= decay;
+		if ((perShot > 0 && value < 0) || (perShot < 0 && value > 0)) {
+			value = 0;
+		}
+	}
+}
+
 void DeviationBuildUp::fired()
 {
 	value += perShot;
@@ -802,7 +812,7 @@ void SoldierDeviation::update(float throttle, float strafe, float lookX, float l
 	accumulate(turn, turning != 0, turning - turnDecay, turnDecay, turnMax);
 	// The misc part (+0x2c).
 	accumulate(misc, inMisc && miscAdd != 0, miscAdd - miscDecay, miscDecay, miscMax);
-	fire.update(firing);
+	fire.updateSoldier(firing);
 	const float stanceMod = stance == 1 ? modCrouch : stance == 2 ? modLie : modStand;
 	const float zoom = zoomed ? modZoom : 1;
 	const float minZoom = zoomed ? minModZoom : 1;

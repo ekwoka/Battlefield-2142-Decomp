@@ -21,7 +21,14 @@ constexpr float kRadians = 3.14159265f / 180.0f;
 // under it + 0.1.
 constexpr float kVehicleFloor = 0.3f;
 constexpr float kEyeHeight = 1.6f;    // above the feet (the soldier fires from here)
-constexpr float kChestHeight = 1.3f;  // where bots aim
+// Where the bots look at and aim at a soldier: its physics node (BF2142.exe
+// IAIObjectEnvironment slot 0x54, 0x008999a0: the soldier's node, its
+// interface 0xc378's slot 0x60 in the world and 0xdc in the soldier's
+// frame), the physics origin a metre over the feet. The sensing rays
+// (0x100ed700) all go there for a soldier (its ITSoldier bit takes slot
+// 0x54 for every ray) and the memory item keeps the point (+4, 0x100ed2c0),
+// which the aim (0x100d9a60) takes through the soldier's matrix again.
+constexpr float kChestHeight = 1.0f;
 // A soldier's AI radius (see soldierAiRadius: the built-in soldier
 // collision mesh's, sqrt(1.32) m).
 constexpr float kSoldierRadius = 1.1489125f;
@@ -1065,6 +1072,28 @@ std::vector<std::pair<int, std::string>> BotManager::carried(const GameWorld::Pl
 	return {};
 }
 
+// The soldier's AI armament (the AI object's +0x34 list, read by the
+// weapon choice 0x10074ef0 at 0x10075170): AIDLL makes a weapon object
+// only for an item whose template's aiTemplate (ObjectTemplate.aiTemplate,
+// BF2142.exe 0x0051bab3) names a weaponTemplate; the loop looks each up
+// (0x10031d80) and skips one it has none for. Every kit carries the
+// ParachuteLauncher (itemIndex 9, no aiTemplate: a GenericFireArm with no
+// magazine limit and a 0 m/s "round"), which the bots must never pick.
+std::vector<std::pair<int, std::string>> BotManager::armament(const GameWorld::PlayerInfo& self) const
+{
+	std::vector<std::pair<int, std::string>> items = carried(self);
+	if (m_settings.weapons.empty()) {
+		return items; // no AI scripts: everything counts (the tests)
+	}
+	items.erase(std::remove_if(items.begin(), items.end(),
+					[this](const std::pair<int, std::string>& item) {
+						const std::string ai = aiTemplateOf(item.second);
+						return ai.empty() || !m_settings.weapons.count(lower(ai));
+					}),
+		items.end());
+	return items;
+}
+
 std::string BotManager::weaponName(const GameWorld::PlayerInfo& self, int slot) const
 {
 	for (const auto& [s, name] : carried(self)) {
@@ -1077,7 +1106,8 @@ std::string BotManager::weaponName(const GameWorld::PlayerInfo& self, int slot) 
 
 float BotManager::projectileSpeed(const std::string& weapon) const
 {
-	return settingNumber(m_world.templates().find(weapon), "velocity", 0);
+	const world::ObjectTemplate* t = m_world.templates().find(weapon);
+	return t ? settingNumber(t, "velocity", FireArmSettings {}.velocity) : 0.0f;
 }
 
 // The equipment type (aiSettings.setVehicle) whose behaviours a bot runs:
@@ -1557,11 +1587,15 @@ void BotManager::sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::v
 			visible = alerted || close || (yawOff < halfFov && pitchOff < halfFov);
 		}
 		if (visible) {
-			const int rays = std::clamp(static_cast<int>(std::lround(30 * kSoldierRadius / std::max(distance, 0.01f))), 1, 10);
+			// A soldier's rays all go to its physics node (kChestHeight): one
+			// tells. Others' after the first to points about the object.
+			const int rays = other.vehicle
+				? std::clamp(static_cast<int>(std::lround(30 * kSoldierRadius / std::max(distance, 0.01f))), 1, 10)
+				: 1;
 			bool clear = false;
 			for (int ray = 0; ray < rays && !clear; ++ray) {
 				physics::Vec3 point = chest;
-				if (ray > 0) {
+				if (ray > 0 && other.vehicle) {
 					point = other.position
 						+ physics::Vec3 {(random() * 2 - 1) * 0.3f, 0.2f + random() * 1.5f, (random() * 2 - 1) * 0.3f};
 				}
@@ -2422,7 +2456,7 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 				chosen = w;
 			}
 		} else {
-			for (const auto& [s, name] : carried(self)) {
+			for (const auto& [s, name] : armament(self)) {
 				consider(s, name);
 			}
 		}
@@ -2517,7 +2551,7 @@ void BotManager::pickWeapon(Bot& bot, const GameWorld::PlayerInfo& self, const s
 			weapons.push_back({-1, seats[static_cast<size_t>(self.seat)].weapon});
 		}
 	} else if (!self.vehicle) {
-		weapons = carried(self);
+		weapons = armament(self);
 	}
 	if (weapons.empty()) {
 		return;
@@ -4448,8 +4482,23 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 	const AimGains& g = bot.gains;
 	float gunYaw = 0, gunPitch = 0;
 	const bool gunning = self.vehicle && self.seat > 0 && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
-	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight, 0};
-	const float trueYaw = (gunning ? self.yaw + gunYaw : self.yaw) - bot.devYaw;
+	// A seat's gun aims from its round's start (the weapon's position,
+	// 0x1008e940: FUN_100a4090) along its own forward, which turns with the
+	// hull: the angles are the hull's frame's, as the gun's yaw and pitch.
+	physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight, 0};
+	physics::Mat3 hull;
+	if (gunning) {
+		m_world.gunFrame(self.vehicle, self.seat, eye, hull);
+	}
+	const auto yawOf = [&](const physics::Vec3& at) {
+		const physics::Vec3 d = gunning ? hull.untransform(at - eye) : at - eye;
+		return std::atan2(d.x, d.z) * kDegrees;
+	};
+	const auto pitchOf = [&](const physics::Vec3& at) {
+		const physics::Vec3 d = gunning ? hull.untransform(at - eye) : at - eye;
+		return std::atan2(d.y, std::sqrt(horizontal2(d))) * kDegrees;
+	};
+	const float trueYaw = (gunning ? gunYaw : self.yaw) - bot.devYaw;
 	// The weapon's recoil kicked the soldier's pitch (GameWorld::takeAimKick):
 	// the bot's own angle takes it, and the aim corrects from there.
 	if (!gunning) {
@@ -4469,7 +4518,10 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 	const ai::RoundModel round = leadWeapon.empty() ? ai::RoundModel {} : roundModel(leadWeapon, &indirect);
 	if (round.speed > 0) {
 		const float yr = trueYaw * kRadians, pr = truePitch * kRadians;
-		const physics::Vec3 forward {std::sin(yr) * std::cos(pr), std::sin(pr), std::cos(yr) * std::cos(pr)};
+		physics::Vec3 forward {std::sin(yr) * std::cos(pr), std::sin(pr), std::cos(yr) * std::cos(pr)};
+		if (gunning) {
+			forward = hull.transform(forward);
+		}
 		bot.lead.setup(toAi(point - eye), toAi(pointVelocity), toAi(self.velocity), toAi(forward), m_time, round);
 		const float reach = std::sqrt(physics::lengthSquared(point - eye));
 		ai::Vec3 direction = toAi((point - eye) * (1 / std::max(reach, 1e-3f))), impact;
@@ -4477,16 +4529,14 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 			want = eye + physics::Vec3 {direction.x, direction.y, direction.z} * reach;
 		}
 	}
-	const physics::Vec3 d = want - eye;
-	const float wantYaw = headingTo(eye, want);
-	const float wantPitch = std::atan2(d.y, std::sqrt(horizontal2(d))) * kDegrees;
+	const float wantYaw = yawOf(want);
+	const float wantPitch = pitchOf(want);
 	const float ey = angleBetween(trueYaw, wantYaw) * kRadians;
 	const float ep = (wantPitch - truePitch) * kRadians;
 	float wy = 0, wp = 0;
 	if (seconds > 0 && physics::lengthSquared(bot.lastAimPoint) > 0) {
-		const physics::Vec3 last = bot.lastAimPoint - eye;
-		wy = angleBetween(headingTo(eye, bot.lastAimPoint), wantYaw) * kRadians / seconds;
-		wp = (wantPitch - std::atan2(last.y, std::sqrt(horizontal2(last))) * kDegrees) * kRadians / seconds;
+		wy = angleBetween(yawOf(bot.lastAimPoint), wantYaw) * kRadians / seconds;
+		wp = (wantPitch - pitchOf(bot.lastAimPoint)) * kRadians / seconds;
 	}
 	bot.lastAimPoint = want;
 	bot.pitchErrors[static_cast<size_t>(bot.pitchErrorCount++ % 10)] = ep;
@@ -4611,7 +4661,10 @@ bool BotManager::fireKeepsToOrder(const Bot& bot, const GameWorld::PlayerInfo& s
 // 0x100d9040). Each round strays by the AI
 // deviation (1 - acc)(1 - t/2) x deviation, t = time on the target / 15 s,
 // acc = skill against soldiers (1 - 0.5 (1 - skill) against vehicles,
-// 1 - 0.4 (1 - skill) with explosives) (BF2142.exe 0x00892b70). The game
+// 1 - 0.4 (1 - skill) with explosives, 1 - 0.8 (1 - skill) with them from
+// a vehicle; 1 thrown) (TriggerContinously 0x1008ecd0 -> BF2142.exe
+// 0x00892b70; its x3 for a bot not in the air at an ITAir target isn't
+// followed: a condition of the engine's 0xec slot is not decoded). The game
 // hands that to the firearm (interface 0x94c0 vt+0xf4 -> its deviation
 // component's slot 0xac: the SoldierDeviationComp's +0x44, 0x00680290;
 // the SimpleDeviationComp's +0x28, 0x008a1a90), which adds it to its own
@@ -4639,9 +4692,13 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 	}
 	const physics::Vec3 targetAt = (inSight ? target.position : known->position)
 		+ physics::Vec3 {0, target.vehicle ? 1.0f : kChestHeight, 0};
-	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight, 0};
+	physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight, 0};
 	float gunYaw = 0, gunPitch = 0;
 	const bool gunning = self.vehicle && self.seat > 0 && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
+	physics::Mat3 hull;
+	if (gunning) {
+		m_world.gunFrame(self.vehicle, self.seat, eye, hull); // as the aim: from the gun, in the hull's frame
+	}
 	std::string weaponTemplate;
 	if (gunning) {
 		const auto seats = m_world.vehicleSeats(self.vehicle);
@@ -4757,9 +4814,12 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 	}
 
 	// The gate.
-	const float yaw = ((gunning ? self.yaw + gunYaw : self.yaw) - bot.devYaw + input.turn) * kRadians;
+	const float yaw = ((gunning ? gunYaw : self.yaw) - bot.devYaw + input.turn) * kRadians;
 	const float pitch = bot.pitch * kRadians;
-	const physics::Vec3 cur {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+	physics::Vec3 cur {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+	if (gunning) {
+		cur = hull.transform(cur);
+	}
 	const physics::Vec3 wantDir = (bot.lastAimPoint - eye) * (1 / std::max(std::sqrt(physics::lengthSquared(bot.lastAimPoint - eye)), 0.001f));
 	const float r = weapon.allowedDeviation;
 	const float across = (cur.x - wantDir.x) * (cur.x - wantDir.x) * distance * distance
@@ -4841,7 +4901,9 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 		if (weapon.thrown) {
 			acc = 1;
 		} else if (weapon.explosionRadius > 0) {
-			acc = 1 - 0.4f * (1 - s);
+			// 0x1008ecd0: 0.4 for a soldier (the bot's ITSoldier bit), 0.8
+			// for a bot in a vehicle.
+			acc = 1 - (self.vehicle ? 0.8f : 0.4f) * (1 - s);
 		} else if (target.vehicle) {
 			acc = 1 - 0.5f * (1 - s);
 		}
@@ -4940,7 +5002,7 @@ ai::RoundModel BotManager::roundModel(const std::string& weaponTemplate, bool* i
 void BotManager::ballistics(const std::string& weaponTemplate, float& speed, float& gravity) const
 {
 	const world::ObjectTemplate* t = const_cast<GameWorld&>(m_world).templates().find(weaponTemplate);
-	speed = settingNumber(t, "velocity", 0);
+	speed = t ? settingNumber(t, "velocity", FireArmSettings {}.velocity) : 0.0f;
 	const world::ObjectTemplate* round = nullptr;
 	if (t) {
 		const auto it = t->settings().find("projectileTemplate");

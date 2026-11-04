@@ -108,6 +108,7 @@ struct Field {
 		for (const char* name : {"eu_ar_rifle", "as_ar_rifle"}) {
 			world::ObjectTemplate* rifle = templates.create("GenericFireArm", name);
 			rifle->settings()["itemIndex"] = "3";
+			rifle->settings()["aiTemplate"] = name; // the AI's weaponTemplate, where a test makes one
 			rifle->settings()["projectileTemplate"] = "bullet";
 			rifle->settings()["velocity"] = "300";
 			rifle->settings()["fire.roundsPerMinute"] = "600";
@@ -1084,6 +1085,7 @@ struct CerbereLanding {
 		for (const char* name : {"eu_ar_rifle", "as_ar_rifle"}) {
 			world::ObjectTemplate* gun = templates.find(name) ? templates.find(name) : templates.create("GenericFireArm", name);
 			gun->settings()["projectileTemplate"] = "test_bullet";
+			gun->settings()["aiTemplate"] = name; // as the shipped rifles: the AI knows them by it
 			gun->settings()["velocity"] = "300";
 			gun->settings()["fire.roundsPerMinute"] = "600";
 			gun->settings()["ammo.magSize"] = "30";
@@ -1650,6 +1652,7 @@ TEST(Bots_GrenadeWarning)
 		Field field;
 		world::ObjectTemplate* frag = field.templates.create("GenericFireArm", "test_frag");
 		frag->settings()["itemIndex"] = "4";
+		frag->settings()["aiTemplate"] = "test_frag";
 		frag->settings()["projectileTemplate"] = "test_frag_shell";
 		frag->settings()["velocity"] = "6";
 		frag->settings()["ammo.magSize"] = "1";
@@ -1869,6 +1872,7 @@ TEST(Bots_SquadTargetAndGrenadeLob)
 	Field field;
 	world::ObjectTemplate* frag = field.templates.create("GenericFireArm", "test_frag");
 	frag->settings()["itemIndex"] = "4";
+	frag->settings()["aiTemplate"] = "test_frag";
 	frag->settings()["projectileTemplate"] = "test_frag_shell";
 	frag->settings()["velocity"] = "20";
 	frag->settings()["ammo.magSize"] = "1";
@@ -2324,6 +2328,7 @@ TEST(Bots_LobHoldsTheMove)
 	Field field;
 	world::ObjectTemplate* launcher = field.templates.create("GenericFireArm", "test_launcher");
 	launcher->settings()["itemIndex"] = "4";
+	launcher->settings()["aiTemplate"] = "test_launcher";
 	launcher->settings()["projectileTemplate"] = "test_launcher_shell";
 	launcher->settings()["velocity"] = "40";
 	launcher->settings()["ammo.magSize"] = "1";
@@ -3250,4 +3255,108 @@ TEST(Bots_ShippedSettingsScripts)
 	const game::BotSettings::AutoControllerTemplate* cannon = settings.autoController("CP_CANNON");
 	CHECK(cannon && cannon->fov == 179 && cannon->reloadOnTeamChange && cannon->maxTrackingInput == 0.5f);
 	CHECK(!settings.autoSpawnBots); // aiSettings.setAutoSpawnBots is no command of AIDLL's
+}
+
+// A bot against a stationary enemy 30 m off, with the game's AI scripts'
+// weapon set-up: the rifle has an aiTemplate naming its weaponTemplate and
+// no ObjectTemplate.velocity (as the shipped SMGs and handguns: 600 m/s,
+// the GenericFireArm template's default, 0x005c2800); the kit also carries
+// a ParachuteLauncher-like item (no aiTemplate, no magazine limit, 0 m/s),
+// which AIDLL has no weapon object for and never picks (0x10074ef0). At the
+// default skill the AI deviation spreads the rounds by 8.4 x 0.01 rad, yet
+// the enemy goes down within 30 s, each hit taking the round's damage.
+TEST(Bots_KillsAStationaryEnemy)
+{
+	Field field;
+	for (const char* name : {"eu_ar_rifle", "as_ar_rifle"}) {
+		field.templates.find(name)->settings().erase("velocity");
+	}
+	world::ObjectTemplate* chute = field.templates.create("GenericFireArm", "test_parachute");
+	chute->settings()["itemIndex"] = "9";
+	chute->settings()["projectileTemplate"] = "bullet";
+	chute->settings()["velocity"] = "0";
+	chute->settings()["ammo.magSize"] = "-1";
+	chute->settings()["ammo.nrOfMags"] = "-1";
+	world::ObjectTemplate* kit = field.templates.create("Kit", "test_kit");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	kit->children().push_back({"test_parachute", {}, {}});
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	std::string out;
+	for (const char* line : {"weaponTemplate.create eu_ar_rifle", "weaponTemplate.maxRange 72",
+			 "weaponTemplate.setStrength Infantry 5"}) {
+		console.execute(line, out);
+	}
+	CHECK(settings.skill == 0.4f && settings.weapons.at("eu_ar_rifle").deviation == 14);
+	game::BotManager bots(*field.world, settings);
+	const int bot = field.world->addPlayer("Bot", 2, true);
+	field.world->setKit(bot, "test_kit", "us_light_soldier");
+	field.world->spawnSoldier(bot);
+	field.move(bot, 0, 0);
+	const int enemy = field.soldier(1, false, 0, 30);
+	game::GameWorld::PlayerInfo target;
+	field.world->playerInfo(enemy, target);
+	CHECK(field.world->hitPoints(target.soldier) == 100);
+	bool parachute = false, killed = false;
+	float firstHit = 0;
+	int tick = 0;
+	for (; tick < 30 * 30 && !killed; ++tick) {
+		field.move(enemy, 0, 30);
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+		game::GameWorld::PlayerInfo self, them;
+		field.world->playerInfo(bot, self);
+		field.world->playerInfo(enemy, them);
+		parachute = parachute || self.inHandSlot == 9;
+		if (them.alive && firstHit == 0 && field.world->hitPoints(them.soldier) < 100) {
+			firstHit = 100 - field.world->hitPoints(them.soldier);
+		}
+		killed = !them.alive;
+	}
+	std::printf("  killed after %.1f s: %d rounds, %d hits\n", tick / 30.0f, field.fired(bot), field.hits(bot));
+	CHECK(killed);
+	CHECK(!parachute);
+	CHECK(near(firstHit, 40)); // the bullet's damage, one hit's worth
+	CHECK(field.hits(bot) >= 3 && field.fired(bot) > field.hits(bot));
+}
+
+// A seat gun's round leaves from where the bots aim it from
+// (GameWorld::gunFrame: the seat's next barrel, turned with the gun and the
+// hull), not from over the hull's centre.
+TEST(Bots_GunFrameIsWhereTheRoundStarts)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	CarField field(gameDir);
+	field.templates.find("car_firearm")->settings()["velocity"] = "100";
+	field.templates.create("GenericProjectile", "bullet")->settings()["damage"] = "1";
+	const uint32_t car = field.car("car", 3, 0);
+	const int gunner = field.soldier("Gunner", false, 0, 0);
+	field.ticks(90);
+	field.board(gunner, 1);
+	CHECK(field.info(gunner).vehicle == car && field.info(gunner).seat == 1);
+	game::SoldierInput input;
+	input.turn = 40;
+	field.world->setInput(gunner, input);
+	field.world->tick(1 / 30.0f);
+	physics::Vec3 origin;
+	physics::Mat3 hull;
+	CHECK(field.world->gunFrame(car, 1, origin, hull));
+	const size_t before = field.world->projectiles().size();
+	input = {};
+	input.fire = true;
+	field.world->setInput(gunner, input);
+	field.world->tick(1 / 30.0f);
+	CHECK(field.world->projectiles().size() > before);
+	if (field.world->projectiles().size() > before) {
+		const game::Projectile& p = field.world->projectiles().back();
+		CHECK(physics::lengthSquared(p.origin - origin) < 0.05f * 0.05f);
+		float yaw = 0, pitch = 0;
+		CHECK(field.world->gunAim(car, 1, yaw, pitch));
+		// Its heading is the gun's in the hull's frame.
+		const physics::Vec3 local = hull.untransform(p.velocity * (1 / std::sqrt(physics::lengthSquared(p.velocity))));
+		CHECK(std::fabs(std::remainder(std::atan2(local.x, local.z) * 57.29578f - yaw, 360.0f)) < 1.0f);
+	}
 }

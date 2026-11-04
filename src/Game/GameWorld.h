@@ -913,6 +913,10 @@ public:
 	static float regulation(float regulate, const physics::RigidBody& body);
 	static float regulatedInput(float input, float regulated);
 	bool gunAim(uint32_t vehicle, int seat, float& yaw, float& pitch) const;
+	// A seat gun's next round's start in the world and the hull's turn
+	// (the gun's yaw and pitch are in the hull's frame): what stepGunner
+	// fires from (seatGunOrigin, the next barrel), for the bots' aim.
+	bool gunFrame(uint32_t vehicle, int seat, physics::Vec3& origin, physics::Mat3& hull) const;
 	const FireArm* gun(uint32_t vehicle, int seat) const;
 	// Vehicles (for the bots): where, which way, how many seats are free.
 	struct VehicleInfo {
@@ -1651,6 +1655,7 @@ private:
 	void seatPlayer(Player& player, Body& body, int seat);
 	void stepGunner(Player& player, Body& body, float seconds, bool aims = true);
 	static physics::Vec3 seatGunOrigin(const SeatLayout& seat, Body::Gun& gun);
+	static physics::Vec3 seatGunOrigin(const SeatLayout& seat, float gunYaw, float gunPitch, int& barrel);
 	Body* findBody(uint32_t object);
 	int firstEngineType(const world::ObjectTemplate& root) const;
 	mutable std::map<const world::ObjectTemplate*, int> m_engineTypes; // firstEngineType's answers, by root

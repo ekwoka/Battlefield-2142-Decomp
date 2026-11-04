@@ -6361,8 +6361,23 @@ holds (the rewrite: in the air; eu_ar_rifle's `7 7 0.14` puts a jump at
 the maximum). The deviation = (minDev × minDevModZoom + misc + turn +
 speed + the firing's build-up) × devModZoom × the stance's (zoom
 modifiers 1 when not zoomed). Rounds stray by it as above, and the
-crosshair (`0x007be770`) spreads by it. Its `+0x44` extra (a condition of
-the holder's slot `0x1a0`) is left out.
+crosshair (`0x007be770`) spreads by it. Its `+0x44` extra is a bot's AI
+deviation (below, Bots: Deviation), added while the holder is an AI
+(its slot `0x1a0` → `0x6c(0)` → `0x68`). Unlike the simple component's,
+the soldier component's build-up stops at 0 on the side it builds from
+when it decays off the trigger (`0x005de980`: below 0 for a positive
+round's addition, above 0 for a negative one): the machine guns'
+`setFireDev -1 -0.09 -0.009` steadies them as they fire (to −1) and comes
+back up to 0, no further (`DeviationBuildUp::updateSoldier`; the rewrite
+used to let it climb by 0.009 a tick for ever, tens of degrees after a
+minute's rest).
+
+**Muzzle speed** (`ObjectTemplate.velocity`, the firearm template's
+`+0x2f0`, property `0x004e115f`): 600 m/s unless set (the GenericFireArm
+template's constructor `0x005c2800`). The SMGs (as_smg, eu_smg), the
+handguns, as_at_r_gun_barrel and the recon drone's gun set none
+(`FireArmSettings::velocity`; it used to default to 0, the rounds
+dropping at the shooter's feet).
 
 **Gun sway** (`DefaultGunSwayComp`, class `0x94f6`, object `0x005e0640`,
 update `0x005e0da0`; `game::GunSway`): it moves the aim by nudging the
@@ -8893,7 +8908,14 @@ The urgencies:
 - **Reach:** viewDistance × cos(fov / 2), with fov 100° from the table at
   0x1012b074. This reaches into a square frustum of half-angle 50°.
 - **Rays:** `clamp(round(30 r / d), 1, 10)`. The target is seen if any ray
-  is clear.
+  is clear. A soldier's rays all go to one point (its ITSoldier bit takes
+  IAIObjectEnvironment slot 0x54, BF2142.exe 0x008999a0: its physics
+  node, a metre over the feet), so one ray tells; another object's first
+  goes to its centre and the rest to points about it (slot 0x50). The
+  point, in the target's frame, is the memory item's `+4` (0x100ed2c0),
+  which the aim takes through the target's matrix again (0x100d9a60): the
+  bots aim at a soldier's physics node (the rewrite's `kChestHeight`, 1 m;
+  it used to be 1.3 m, over a crouched or prone soldier's head).
 - **Sharing:** sightings go to the others in the same vehicle (0x100a8ce0),
   and a bot's fire plan tells its squad of its target (0x100795a0 →
   0x10089b70 → 0x100c1ce0). A memory item learnt so is flagged 8
@@ -8965,7 +8987,12 @@ The urgencies:
   plan may fire at a target out of the bot's sight.
 - **Weapon choice** (0x10074ef0, `chooseWeapon`), over the bot's object's
   weapons (the AI weapon's slots through BF2142.exe's adaptor, vtable
-  0x009d5be8): usable ones (slot 0x1c) of type FireArm, C4, Revive,
+  0x009d5be8; the armament list at 0x10075170 holds an AI weapon only for
+  an item whose `ObjectTemplate.aiTemplate` names a weaponTemplate, each
+  looked up by 0x10031d80: `BotManager::armament`. Every kit's
+  ParachuteLauncher, itemIndex 9 with no aiTemplate, no magazine limit and
+  a 0 m/s round, is not one; the bots used to pick it when the target
+  stayed out of reach and fire it for the rest of the round): usable ones (slot 0x1c) of type FireArm, C4, Revive,
   CloseCombat, Sniper, FireAndForget or TitanWeapon; without
   `setFiresThroughTransparent` (+0x4c, 1 by default) only at a target
   seen clear (memory flag 0x40) or known from others; C4 not while the
@@ -9022,12 +9049,26 @@ The urgencies:
   second at 30 calls), scaled down by the field of view when zoomed
   (0x00586420), under 0.001 none; the pitch is clamped to ±85°
   (0x005890a0). Standing still, the head turns up to ±40° before the body
-  follows at 4° a call (the rewrite's soldiers turn the body at once). The trigger holds while the aim lies
+  follows at 4° a call (the rewrite's soldiers turn the body at once). A
+  seat's gun aims from where its next round starts (the weapon's position,
+  0x1008e940's FUN_100a4090; `GameWorld::gunFrame`) along its own forward,
+  the errors taken in the hull's frame, in which the gun's yaw and pitch
+  turn (it used to aim from 1.6 m over the hull's centre with the hull
+  taken as level: an APC's pod cannon missed by 4 m at 15 m). The trigger holds while the aim lies
   within allowedDeviation at the target, plus an angle check
   (0x100d9090). It does not fire while a teammate is in the line of fire.
 - **Deviation:** each round strays by (1 − acc)(1 − t/2) × deviation,
-  with t the time on target over 15 s (BF2142.exe 0x00892b70). acc is
-  skill against soldiers. The value goes to the firearm (interface
+  with t the time on target over 15 s (BF2142.exe 0x00892b70; set by
+  TriggerContinously 0x1008ecd0 while the trigger holds). acc is
+  skill (IAISettings slot 0x48, `aiSettings.setBotSkill`, 0.4 in
+  AIDefault.ai) against soldiers, 1 − 0.5 (1 − skill) against vehicles,
+  1 − 0.4 (1 − skill) with an explosive from a soldier and 1 − 0.8
+  (1 − skill) from a vehicle, 1 for a thrown weapon. The shipped
+  weaponTemplates set no `deviation`, so it is the template's 14
+  (0x0088a7b0): 8.4 at skill 0.4, 4.2 after 15 s on the target, that × 0.01
+  rad on each axis. (The ×3 the call takes for a bot that isn't ITAir or
+  ITNaval at an ITAir target is not followed: a further condition, the
+  engine's slot 0xec on the bot, is not decoded.) The value goes to the firearm (interface
   `0x94c0` vt+0xf4, 0x005c4cf0 → its deviation component's slot 0xac:
   SoldierDeviationComp `+0x44`, 0x00680290; SimpleDeviationComp `+0x28`,
   0x008a1a90), which adds it to its own deviation while the holder is an

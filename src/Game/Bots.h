@@ -1006,6 +1006,10 @@ private:
 	// Helpers.
 	float healthOf(uint32_t object) const;
 	std::vector<std::pair<int, std::string>> carried(const GameWorld::PlayerInfo& self) const;
+	// What of that the AI has a weapon for: an item whose object names an
+	// aiTemplate that is a weaponTemplate (with the AI scripts loaded; all
+	// of it without them, the tests' built-in rifle stand-in).
+	std::vector<std::pair<int, std::string>> armament(const GameWorld::PlayerInfo& self) const;
 	std::string weaponName(const GameWorld::PlayerInfo& self, int slot) const;
 	float projectileSpeed(const std::string& weapon) const;
 	// The ControlInfo gains of a player's control object (its seat's

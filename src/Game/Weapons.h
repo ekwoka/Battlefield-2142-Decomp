@@ -199,7 +199,10 @@ struct FireArmSettings {
 	int magSize = 30;
 	int nrOfMags = 5;
 	float reloadTime = 2;
-	float velocity = 0;
+	// The muzzle speed (ObjectTemplate.velocity, template +0x2f0): 600 m/s
+	// unless set (the GenericFireArm template's constructor 0x005c2800);
+	// the SMGs and handguns don't set it.
+	float velocity = 600;
 	std::string projectileTemplate;
 	// Heat (guns without magazines): each round adds heatAddWhenFire, it
 	// cools by coolDownPerSec, and at 1 the gun stops for overheatPenalty
@@ -505,6 +508,11 @@ struct DeviationBuildUp {
 	float value = 0; // +8
 	static DeviationBuildUp fromTemplate(const world::ObjectTemplate& t);
 	void update(bool firing);
+	// The SoldierDeviationComp's own decay (0x005de980): the build-up
+	// stops at 0 on the side it grows from, below 0 for a positive perShot
+	// and above it for a negative one (the machine guns' steadiness,
+	// setFireDev -1 -0.09 -0.009, decays back up to 0, not past it).
+	void updateSoldier(bool firing);
 	void fired();
 	float deviation() const { return minDev + value; }
 };
