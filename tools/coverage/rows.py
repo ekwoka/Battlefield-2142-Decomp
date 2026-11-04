@@ -42,8 +42,9 @@ LIT_RE = re.compile(r'"((?:[^"\\\n]|\\.)*)"')
 # A literal appended in a concatenation (`+ "Range"`): the last piece of a
 # composed key.
 SUFFIX_RE = re.compile(r'\+\s*"((?:[^"\\\n]|\\.)*)"')
-# One a concatenation starts with (`"sway.gunSway" +`): a three-piece key's first.
-PREFIX_RE = re.compile(r'"((?:[^"\\\n]|\\.)*)"\s*\+')
+# One a concatenation starts with (`"sway.gunSway" +`, also wrapped as
+# `std::string("sway.gunSway") + axis`): a three-piece key's first.
+PREFIX_RE = re.compile(r'"((?:[^"\\\n]|\\.)*)"\s*\)?\s*\+')
 SRC_EXT = (".cpp", ".h", ".hpp", ".c", ".cc", ".inl", ".py", ".glsl", ".frag", ".vert", ".comp")
 
 

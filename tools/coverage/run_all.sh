@@ -44,8 +44,11 @@ fi
 $PY "$HERE/cite.py" $R
 $PY "$HERE/cite.py" $R --tests --name cite_tests
 $PY "$HERE/cite.py" $R --headings --name cite_headings
+# without the audits' own reports (their gap lists cite unimplemented code)
+$PY "$HERE/cite.py" $R --no-audit-docs --name cite_noaudit
 # the decompilation's features are cached in $OUT (they don't depend on the tree)
 $PY "$HERE/uncited.py" $R --appendix with
 $PY "$HERE/uncited.py" $R --appendix without
 $PY "$HERE/uncited.py" $R --cite "$OUT/cite_headings.json" --name uncited_headings
+$PY "$HERE/uncited.py" $R --cite "$OUT/cite_noaudit.json" --name uncited_noaudit
 $PY "$HERE/hedges.py" $R

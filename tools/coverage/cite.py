@@ -13,6 +13,10 @@ src/UI -> SwiffPlayer, src/Voip -> BF2VoipServer, src/Sound -> BF2142Audio).
 Otherwise it is dropped as ambiguous (with --headings, docs first try the
 DLL named in the enclosing "##" heading: an extra rule, not coverage-3's).
 
+With --no-audit-docs, docs/coverage*.md and docs/uncited.md are left out:
+the audits' own gap lists cite addresses that nothing implements, and
+each new audit adds some (coverage-3's rule, the default, counts them).
+
 docs/engine.md's generated appendix ("## Appendix: where the rewrite reads
 the exe's template properties ...", to the end of the file) is a separate
 source, so every figure is given with and without it. tests/ is left out
@@ -69,8 +73,13 @@ def dir_module(rel):
     return None
 
 
-def iter_sources(repo, with_tests):
-    """(group, relative path, text): group is src, docs, appendix or tests."""
+AUDIT_DOCS = re.compile(r"^docs/(coverage(-\d+)?|uncited)\.md$")
+
+
+def iter_sources(repo, with_tests, skip_audits=False):
+    """(group, relative path, text): group is src, docs, appendix or tests.
+    skip_audits leaves out the audits' own reports (docs/coverage*.md,
+    docs/uncited.md), whose gap lists cite addresses nothing implements."""
     roots = ["src", "docs"] + (["tests"] if with_tests else [])
     for root in roots:
         base = os.path.join(repo, root)
@@ -79,6 +88,8 @@ def iter_sources(repo, with_tests):
             for fn in sorted(filenames):
                 path = os.path.join(dirpath, fn)
                 rel = os.path.relpath(path, repo)
+                if skip_audits and AUDIT_DOCS.match(rel.replace(os.sep, "/")):
+                    continue
                 if fn.endswith((".pyc", ".png", ".jpg", ".bin", ".spv", ".metallib")):
                     continue
                 try:
@@ -100,6 +111,8 @@ def main():
     ap.add_argument("--headings", action="store_true",
                     help="extra fallback: in docs, the DLL named in the enclosing '## ' heading (not coverage-3's rule)")
     ap.add_argument("--name", default="cite", help="output file stem (default cite)")
+    ap.add_argument("--no-audit-docs", action="store_true",
+                    help="leave out docs/coverage*.md and docs/uncited.md (the audits' gap lists cite unimplemented addresses)")
     args = ap.parse_args()
     out = common.out_dir(args.out)
 
@@ -115,7 +128,7 @@ def main():
     cited = {m: {} for m in common.MODULES}
     ambiguous = 0
     ambiguous_examples = []
-    for group, rel, text, line0 in iter_sources(args.repo, args.tests):
+    for group, rel, text, line0 in iter_sources(args.repo, args.tests, args.no_audit_docs):
         lower_map = {k.lower(): mod for k, mod in DLL_NAMES}
         name_pos, name_mod = [], []
         for mt in DLL_NAME_RE.finditer(text):
