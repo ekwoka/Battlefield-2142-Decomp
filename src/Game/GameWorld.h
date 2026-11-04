@@ -321,6 +321,11 @@ public:
 	void moveRemoteProjectile(uint32_t ghostObject, const physics::Vec3& at, const physics::Vec3* velocity);
 	void endRemoteProjectile(uint32_t ghostObject);
 	bool hasRemoteProjectile(uint32_t ghostObject) const;
+	// A round of `projectileTemplate` let go at `at` with `velocity`, as
+	// `player`'s (-1 none; its team and soldier the round's): it flies,
+	// bounces, sticks and goes off as a fired one. False without the template.
+	bool launchProjectile(const std::string& projectileTemplate, const physics::Vec3& at, const physics::Vec3& velocity,
+		int player = -1);
 	// The ghost gone, dead or in a vehicle: its animation and weapon go.
 	void removeRemoteSoldier(uint32_t object);
 	bool isRemoteSoldier(uint32_t object) const { return m_remoteSoldiers.count(object) != 0; }
@@ -573,6 +578,13 @@ public:
 	// terrain) lies between two points.
 	// `ignore`: an object (a body) that doesn't count, such as the looker's own.
 	bool lineOfSight(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore = 0) const;
+	// The AI's sight ray (IAIObjectEnvironment slot 0x44, 0x00897df0: the
+	// terrain, then slot 0x90, 0x00898040, the scene's ray with the filter
+	// of vtable 0x009d6794): faces of a Material.isSeeThrough material
+	// (material slot 0x88; the filter's slot 4, 0x00897d50) don't stop it;
+	// `seenThrough` tells whether one lay on the way (the out flag: the
+	// nearest such face before the ray's end).
+	bool lineOfSight(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore, bool& seenThrough) const;
 	// Whether a team's soldier could pass from one point to the other through
 	// the moving objects' soldier meshes (a Titan's: with the other team's
 	// forcefields, not its own).
@@ -720,6 +732,15 @@ public:
 		int system = 0;      // as Lock::system
 	};
 	std::vector<LockEvent> takeLockEvents() { return std::exchange(m_lockEvents, {}); }
+	// The local player's lock tones (weaponHud.firstLockSound while
+	// tracking, secondLockSound once locked: 0x00657ce0, from the lock box
+	// 0x007e5a10): sounds to start (play) or stop, by name, for the sound
+	// manager (Sound.playSound / stopSound). See stepLockTone.
+	struct LockTone {
+		std::string sound;
+		bool play = false;
+	};
+	std::vector<LockTone> takeLockTones() { return std::exchange(m_lockTones, {}); }
 	// The level ambience over the network (AmbientTriggers.h): what the
 	// networked areas (numNetworkedEffects) played since the last call, for
 	// a server to send (the AmbientEffectArea event, 0x00510270; kept only
@@ -807,6 +828,27 @@ public:
 	float bodySubmerged(uint32_t object) const;
 	// Whether a player's soldier is on a ladder (its LadderContainer).
 	bool onLadder(int player) const;
+	// The weapon in hand put away after a throw (FireArm::hidden): not drawn.
+	bool weaponHidden(int player) const;
+	// The player's unlocks give the zoom upgrade (ability.hasZoomUpgradeAbility,
+	// the Ability template's +0x54, executor 0x0054dd78; copied to the
+	// player's ability block +0x44 by 0x005706b0 and read only by the zoom's
+	// fine tuning 0x005da890): UnlockEU / UnlockPac_ReconSni1.
+	bool zoomUpgrade(int player) const;
+	// The radio filter of `player`'s voice (the radio handler 0x0042e0c0):
+	// the soundFilter of the nearest PlayerControlObject over his control
+	// object (PCO +0x424, executor 0x004fd0c8; slot 0xf0 of 0xc4c5,
+	// 0x005c6830): his seat's, else his vehicle's; "" on foot (the
+	// soldier's own +0x3c0, 0x004ded9a, ships unset). The filters are
+	// gameLogic.messages.addRadioFilter's: ground / vehicle / airplane a
+	// static loop, heli / commander a click.
+	std::string radioFilter(int player) const;
+	// Whether `object`'s effect bundles may start in their first-person
+	// form for the local player (the EffectBundle's test 0x006187c0, when
+	// he looks in first person): he sits in it and neither its
+	// PlayerControlObject nor his seat's is neverDrawAs1p (PCO +0x481, 0;
+	// executor 0x004ff358, getter 0x005c67e0; shipped on the Titans).
+	bool firstPersonEffects(uint32_t object) const;
 	const physics::CollisionWorld& staticCollision() const { return m_collision; }
 	// The projectile LOD's faces a round's hit lands on, for its decal's
 	// clipping (RendDX9 0x101655c0 walks the hit mesh's faces): the static
@@ -1290,6 +1332,48 @@ public:
 	// (revealed for pulse.revealTime seconds), and every player that does.
 	bool isRevealed(int player, int byTeam) const;
 	std::vector<int> revealedPlayers(int byTeam) const;
+	// Radar sources: the sonar balls, the radar grenade, the recon drone's
+	// rounds (a projectile whose Ability has radarRadius; registered at
+	// its creation, 0x00656550, no arming or rest needed). In BF2142.exe
+	// they live in each client's minimap only (nothing networked, no
+	// server scan): the minimap's update (0x0078f680, every 5th frame,
+	// 0x00789f30) keeps those of the local player's team (the shooter's
+	// root's team) within max(view distance, 500) m of the player's
+	// controlled object (0x00789a10), and draws each as icon_uav_circle
+	// (0x0078f060): with radialRadar a full ring turned by the sweep, else
+	// one of diameter 2 x radius x sweep / 2pi fading as 1 - sweep / 2pi.
+	struct RadarSource {
+		uint32_t serial = 0; // Projectile::serial
+		physics::Vec3 position;
+		float radius = 0;
+		bool radial = true, showPlayers = true, showVehicles = true;
+	};
+	std::vector<RadarSource> radarSources(int team) const;
+	// The minimap's sweep (+0xb5c): 4 rad/s (+0xb60), wrapping at 2pi
+	// (0x00788600); kept here with the round's ticks.
+	float radarSweep() const { return m_radarSweep; }
+	// Whether the ring of `source` at `sweep` passes `target` (0x00791660):
+	// within the radius across the ground, and radial: the sweep within
+	// 0.1 rad of the bearing (atan2 of the x and z offsets here; the
+	// engine's is in minimap coordinates), else the expanding ring within
+	// 2.5 m of the target's distance.
+	static bool radarPasses(const RadarSource& source, const physics::Vec3& target, float sweep);
+	// What the rings of `team`'s sources pass now (0x007926c0 from
+	// 0x00792980 and 0x00793b60): enemy soldiers on foot, alive and not
+	// man-down (with showPlayers), enemy vehicles with a living occupant
+	// (with showVehicles); none whose template has
+	// vehicleHud.alwaysShowOnMinimap or lacks canBeSpotted. The HUD puts
+	// each on the minimap as a short blip (0x00790d60, once while listed)
+	// and plays HUD_Uav_target. (The decoy's stand-in, HudManager slot
+	// 0x70 with 70 m, is the HUD's.)
+	struct RadarContact {
+		uint32_t object = 0; // the soldier's or the vehicle's
+		int player = -1;     // the soldier's player, or the vehicle's first occupant
+		bool vehicle = false;
+		physics::Vec3 position;
+		uint32_t source = 0; // the RadarSource's serial
+	};
+	std::vector<RadarContact> radarContacts(int team) const;
 
 	// The commander (one per team; docs/engine.md, "Commander"). The game
 	// mode's script enables it (host.sh_setEnableCommander). Players apply
@@ -1941,6 +2025,12 @@ private:
 	// The seats' guns nobody uses (ammo.reloadWithoutPlayer; TemplateBehaviours.cpp).
 	void stepUnmannedGuns(float seconds);
 	std::vector<LockEvent> m_lockEvents;
+	std::vector<LockTone> m_lockTones;
+	struct {
+		std::string weapon; // the weapon whose tones play
+		int state = 0;      // the runtime WeaponHud's +0x10
+	} m_lockTone;
+	void stepLockTone();
 	std::map<std::pair<int, int>, std::array<std::optional<SquadRequest>, 4>> m_squadRequests; // (team, squad)
 	// The combat areas' rules each tick (0x004bbf60, 0x004bed00).
 	void stepCombatAreas(float seconds);
@@ -2194,6 +2284,7 @@ private:
 		int burstDistance = 0;
 		bool burstZoomWas = false;
 		bool scopeStabilizer = false;
+		bool zoomUpgrade = false; // hasZoomUpgradeAbility (GameWorld::zoomUpgrade)
 		// The unlocks' Ability lists: damage taken by projectile material
 		// (setMaterialDamageMod) and extra magazines / rounds per item
 		// (addExtraAmmoItem).
@@ -2217,6 +2308,7 @@ private:
 			int system = 0;        // target.targetSystem: 1 TSHeatSeeking, 2 TSLaserGuided
 			double chosenAt = 0;   // the component's +0x4c: when the target was taken
 			bool announce = false; // +0x44: locked, "target_aquired" not said yet
+			std::string weapon;    // the weapon looked at (in hand, or the seat's active gun)
 		} lock;
 		double diedAt = 0;          // soldier +0x290: the death's time
 		uint32_t object = 0;
@@ -2455,6 +2547,14 @@ private:
 	// (game logic slot 0x108) or rearming its soldiers (slot 0x10c).
 	void stepVehicleAbility(Player& player, float seconds);
 	void stepProjectiles(float seconds);
+	// StickyCollisionComp's response (0x005e83d0) to a bouncing round's
+	// contact: whether it sticks (and if so it is stuck: placed, its
+	// vehicle taken), else it bounces as usual.
+	bool stickProjectile(Projectile& projectile, const physics::CollisionWorld::Hit& hit, uint32_t hitObject,
+		const Body* hitBody, bool soldier);
+	// A stuck round rides its vehicle (its place and normal in the
+	// vehicle's frame); false when the vehicle has gone.
+	bool rideStuck(Projectile& projectile);
 	void steerSeeker(Projectile& projectile, float seconds);
 	void wireSettings(Projectile& projectile, const world::ObjectTemplate& firearm) const;
 	void steerClosest(Projectile& projectile, float seconds);
@@ -2720,6 +2820,7 @@ private:
 		bool soldier);
 	uint32_t m_projectileSerial = 0;
 	std::vector<BattlefieldReport> m_battlefieldReports;
+	float m_radarSweep = 0; // radarSweep()
 	void stepRemoteBodies(float seconds);
 	struct RemoteWreck {
 		double wreckedAt = 0;  // armour +0x60

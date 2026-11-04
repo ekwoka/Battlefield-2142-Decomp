@@ -40,6 +40,7 @@
 #pragma once
 
 #include <cmath>
+#include <cstdint>
 
 #include <functional>
 #include <map>
@@ -50,6 +51,15 @@ namespace dice::hfe {
 class Console;
 namespace hud {
 class HudManager;
+}
+namespace host {
+class HudWorld;
+}
+namespace game {
+class GameWorld;
+}
+namespace world {
+class ObjectTemplate;
 }
 } // namespace dice::hfe
 
@@ -180,5 +190,44 @@ struct RadioSpam {
 		return static_cast<int>(std::lround(clock + blockedTime + 1.0 - now));
 	}
 };
+
+// What Radio.sendSpottedMessage spots and says (0x007c8160).
+// - The crosshair object (0x0075be30 with the HUD's ray 0x0075bfe0): the
+//   ray meets an object; when it and its root are canBeSpotted (vehicleHud
+//   block +0xc2, 1 by default) the root is taken; the last player in the
+//   seats of its first seat holder up the parents (0x0042b2f0, component
+//   0xc4c5), when of the other team, makes it the spotted object, which
+//   becomes that player's soldier (slot 0xb4) when the object's template
+//   has usePlayerIcon (+0xb8). Its network id goes to the event (+0x1f0).
+//   An empty vehicle is never spotted. Here the vehicle is the root (the
+//   rewrite's vehicles are whole objects); one that isn't canBeSpotted
+//   leaves its rider's soldier spotted.
+// - The voice (with the method's first argument; the comm rose's "Radio.
+//   sendSpottedMessage 1 VTNoVehicleType"): the game's slot 0xd0
+//   (0x0042e9d0) names it, then slot 0x50 says it on channel 1 (TCTeam,
+//   with its own spam check). The name is the radio.spottedMessage
+//   (comp 0xc4b7 +0x74, executor 0x0054fb6d) of the spotted object's
+//   Radio component's owner: a soldier's kit (Pac_Recon "sniper_spotted",
+//   the other kits "infantry_spotted"), a vehicle's own template
+//   (apc_spotted, titan_spotted, heli_spotted ...; 40 templates); an object
+//   without one with usePlayerIcon takes its occupants' soldiers' kits';
+//   empty or nothing spotted, "spotted". The voice is said even when the
+//   spot itself was refused (no object and no point, or the spam check).
+struct SpotChoice {
+	int player = -1;     // the enemy reported (-1: none)
+	uint32_t object = 0; // the spotted object: the vehicle or the soldier
+	std::string voice = "spotted";
+};
+// For the enemy player `enemy` under the crosshair (-1 for none).
+SpotChoice spotChoice(const host::HudWorld& world, game::GameWorld& round, int enemy);
+// The radio.spottedMessage of a template (its quotes taken off), "" without one.
+std::string spottedMessage(const world::ObjectTemplate* t);
+// The crosshair's enemy of `viewer` as a joined client sees it (GameWorld::
+// crosshairTarget's test over the HudWorld's players: a soldier as a 0.6 m
+// sphere about its middle, a vehicle as a 2.5 m one about its origin, the
+// nearest along the ray from `eye` along the unit `dir` within `reach`
+// with nothing in between); -1 for none.
+int crosshairEnemy(const host::HudWorld& world, game::GameWorld& round, int viewer, const float eye[3], const float dir[3],
+	float reach = 300);
 
 } // namespace dice::hfe::menu

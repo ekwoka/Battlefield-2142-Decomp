@@ -682,7 +682,9 @@ void EffectManager::spawnTemplate(const world::ObjectTemplate& t, const Vec3& po
 	if (type == "SpriteParticleSystem" || type == "MeshParticleSystem" || type == "NonScreenAlignedParticleSystem"
 		|| type == "TrailSystem") {
 		const ParticleTemplate* particles = particleTemplate(t);
-		if ((view == View::FirstPerson && !particles->showFirstPerson)
+		// First person: showInFirstPerson or showInZoomedMode (0x0061a1c0's
+		// flags & 5); third person: showInThirdPerson (& 2).
+		if ((view == View::FirstPerson && !particles->showFirstPerson && !particles->showZoomed)
 			|| (view == View::ThirdPerson && !particles->showThirdPerson)) {
 			return;
 		}
@@ -828,6 +830,15 @@ DecalTemplate DecalTemplate::fromTemplate(const world::ObjectTemplate& t)
 			}
 		}
 	}
+	if (const std::string* normalMap = setting(t, "decalNormalMapName")) {
+		d.normalMap = *normalMap;
+		for (char& c : d.normalMap) {
+			if (c == '\\') {
+				c = '/';
+			}
+		}
+	}
+	d.isStatic = number(t, "isStatic", 0) != 0;
 	d.size = number(t, "size", d.size);
 	d.randomSize = number(t, "randomSize", d.randomSize);
 	d.color = vector(t, "color", d.color);
@@ -937,6 +948,7 @@ bool EffectManager::spawnDecal(const std::string& name, const Vec3& position, co
 	}
 	Decal decal;
 	decal.texture = look.texture;
+	decal.normalMap = look.normalMap;
 	decal.normal = normalized(normal);
 	decal.position = position;
 	decal.surface = surface;
@@ -964,6 +976,14 @@ bool EffectManager::spawnDecal(const std::string& name, const Vec3& position, co
 bool EffectManager::spawnDecal(const std::string& name, const Vec3& position, const Vec3& normal, uint32_t object,
 	const Vec3& objectPosition, const Vec3& objectRotation)
 {
+	if (object != 0) {
+		const bool unseen = std::any_of(m_decals.begin(), m_decals.end(),
+			[object](const Decal& d) { return d.object == object && !d.ownerDrawn; });
+		const world::ObjectTemplate* t = unseen ? m_templates.find(name) : nullptr;
+		if (t && !DecalTemplate::fromTemplate(*t).isStatic) {
+			return false;
+		}
+	}
 	if (!spawnDecal(name, position, normal)) {
 		return false;
 	}

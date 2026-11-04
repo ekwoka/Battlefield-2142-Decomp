@@ -2,9 +2,11 @@
 // commander screen's tabs, on a world of players without a level, and the
 // HUD's list clicks they read.
 #include "Console/Console.h"
+#include "Game/CombatAreas.h"
 #include "Game/GameWorld.h"
 #include "Hud/Hud.h"
 #include "Main/DemoCamera.h"
+#include "Main/HudCombatArea.h"
 #include "Main/HudMenus.h"
 #include "Main/HudMenusChat.h"
 #include "Main/HudMenusComm.h"
@@ -19,6 +21,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <set>
 #include <string>
 #include <tuple>
@@ -1337,4 +1340,122 @@ TEST(HudVehicle_MapOffsetZoomAndFlags)
 	CHECK(menu::standardHelpEnabled(titan) && menu::standardHelpEnabled(nullptr));
 	CHECK(menu::usesVehicleCommRose(templates.find("static_aa")) && menu::usesVehicleCommRose(titan));
 	CHECK(!menu::usesVehicleCommRose(templates.find("parachute")));
+}
+
+// The minimap's combat-area layer (0x0078b490, 0x10187e70's texture
+// operations, 0x0077d200): the shipped texture's alpha (255 - coverage) x
+// its own / 256, 0xff in the areas binding soldiers, 0x80 in the applying
+// vehicle-only ones; rebuilt only when the applying areas change, framed
+// on them, and drawn over the map under the markers.
+TEST(HudCombatArea_MinimapLayer)
+{
+	using namespace dice::hfe;
+	game::CombatAreas areas;
+	areas.use = true;
+	game::CombatArea land; // everyone's: the west half of a 1024 m level
+	land.name = "land";
+	land.polygon = true;
+	land.points = {{-512, -512}, {0, -512}, {0, 512}, {-512, 512}};
+	areas.areas.push_back(land);
+	game::CombatArea air; // team 1's aircraft (VCAir 2): the north-east quarter
+	air.name = "air";
+	air.minX = 0, air.minZ = 0, air.maxX = 512, air.maxZ = 512;
+	air.team = 1;
+	air.vehicles = 2;
+	areas.areas.push_back(air);
+	CHECK(menu::combatAreaMask(areas, 1, 0) == 1u && menu::combatAreaMask(areas, 1, 2) == 3u && menu::combatAreaMask(areas, 2, 2) == 1u);
+	float minX = 0, minZ = 0, maxX = 0, maxZ = 0;
+	CHECK(menu::combatAreaBounds(areas, 2, 0, minX, minZ, maxX, maxZ) && minX == -512 && maxX == 0 && maxZ == 512);
+	CHECK(menu::combatAreaBounds(areas, 1, 2, minX, minZ, maxX, maxZ) && minX == 0 && minZ == 0 && maxX == 512);
+	// 4 x 4 over the level: row 0 the north edge.
+	const std::vector<uint8_t> cover = menu::combatAreaCoverage(areas, 1, 2, -512, -512, 1024, 1024, 4);
+	CHECK(cover.size() == 16 && cover[0] == 0xff && cover[1] == 0xff && cover[2] == 0x80 && cover[3] == 0x80);
+	CHECK(cover[12] == 0xff && cover[14] == 0 && cover[15] == 0);
+	CHECK(menu::combatAreaCoverage(areas, 2, 2, -512, -512, 1024, 1024, 4)[2] == 0);
+	// A 4 x 4 A8R8G8B8 DDS at alpha 0xc0, as the shipped one.
+	std::vector<uint8_t> dds(128 + 64, 0);
+	std::memcpy(dds.data(), "DDS ", 4);
+	const auto put = [&dds](size_t at, uint32_t v) { std::memcpy(dds.data() + at, &v, 4); };
+	put(4, 124), put(12, 4), put(16, 4), put(76, 32), put(80, 0x41), put(88, 32);
+	for (size_t i = 0; i < 16; ++i) {
+		dds[128 + i * 4 + 2] = 0xff, dds[128 + i * 4 + 3] = 0xc0;
+	}
+	const std::vector<uint8_t> layer = menu::combatAreaTexture(dds, cover, 4);
+	CHECK(layer.size() == dds.size());
+	if (layer.size() == dds.size()) {
+		CHECK(layer[128 + 3] == 0 && layer[128 + 2 * 4 + 3] == 0x7f * 0xc0 / 256 && layer[128 + 15 * 4 + 3] == 0xff * 0xc0 / 256);
+		CHECK(layer[128 + 15 * 4 + 2] == 0xff);
+	}
+	CHECK(menu::combatAreaTexture({1, 2, 3}, cover, 4).empty());
+	// The layer: built from the shipped texture through the file manager.
+	io::FileManager files;
+	files.addMemoryFile("Menu/HUD/Texture/Ingame/Minimap/map_CombatArea32.dds", dds);
+	hud::HudManager hud(nullptr);
+	menu::CombatAreaLayer area;
+	area.setLevel("test", -512, -512, 1024, 1024);
+	area.update(files, areas, 1, 0, hud);
+	const std::string first = hud.mapLayer();
+	std::vector<uint8_t> bytes;
+	CHECK(!first.empty() && files.readFile(first, bytes) && bytes.size() == dds.size());
+	area.update(files, areas, 1, 0, hud);
+	CHECK(hud.mapLayer() == first);
+	area.update(files, areas, 1, 2, hud); // in an aircraft: the air area applies too
+	CHECK(!hud.mapLayer().empty() && hud.mapLayer() != first);
+	areas.use = false;
+	area.update(files, areas, 1, 2, hud);
+	CHECK(hud.mapLayer().empty());
+	// Drawn with the map, before its markers.
+	Console console;
+	hud::registerHudConsoleMethods(console, hud);
+	std::string out;
+	for (const char* line : {"hudBuilder.createMapNode Global Minimap", "hudBuilder.setMaxiPos -122/-271",
+			 "hudBuilder.setMaxiSize 512/512", "hudBuilder.setMiniPos 245/-291", "hudBuilder.setMiniSize 146/146"}) {
+		console.execute(line, out);
+	}
+	hud.setMap("Levels/x/Hud/Minimap/ingameMap.dds", -512, -512, 1024, 1024);
+	hud.setMapLayer(first);
+	hud.setMapMarkers({{"spawn.dds", 256, 256, 32}});
+	hud.set("MapFullSize", 1);
+	const auto quads = hud.frame(0);
+	size_t map = quads.size();
+	for (size_t i = 0; i < quads.size(); ++i) {
+		if (quads[i].texture == "Levels/x/Hud/Minimap/ingameMap.dds") {
+			map = i;
+		}
+	}
+	CHECK(map + 2 < quads.size());
+	if (map + 2 < quads.size()) {
+		CHECK(quads[map + 1].texture == first && quads[map + 1].x0 == quads[map].x0 && quads[map + 1].y1 == quads[map].y1);
+		CHECK(quads[map + 2].texture == "Menu/HUD/Texture/spawn.dds");
+	}
+	// A marker sized in metres (the radar rings): 256 m of the 1024 m map
+	// drawn 512 pixels across is 128 pixels.
+	hud::HudManager::MapMarker ring {"Ingame/Minimap/icon_uav_circle.tga", 0, 0, 1};
+	ring.worldSize = 256;
+	hud.setMapMarkers({ring});
+	const auto ringed = hud.frame(0);
+	CHECK(!ringed.empty() && ringed.back().x1 - ringed.back().x0 == 128 && ringed.back().y1 - ringed.back().y0 == 128);
+}
+
+// The local round's overhead camera (0x005f8170 / 0x005f8510): kept 80 m
+// inside the terrain; the keys speed it up by 250 m/s^2 to the template's
+// 50 m/s and it slows back to rest at the same rate.
+TEST(HudCommander_OverheadCameraPan)
+{
+	dice::hfe::menu::OverheadCamera camera;
+	camera.originX = camera.originZ = -512;
+	camera.width = camera.depth = 1024;
+	camera.moveTo(600, -600);
+	CHECK(camera.x == 512 - 80 && camera.z == -512 + 80);
+	camera.moveTo(0, 0);
+	camera.pan(1, 0, 0.1f);
+	CHECK(std::abs(camera.speedX - 25) < 1e-4f && std::abs(camera.x - 2.5f) < 1e-4f && camera.z == 0);
+	for (int i = 0; i < 10; ++i) {
+		camera.pan(1, -1, 0.1f);
+	}
+	CHECK(camera.speedX == 50 && camera.speedZ == -50 && camera.z < 0);
+	for (int i = 0; i < 3; ++i) {
+		camera.pan(0, 0, 0.1f);
+	}
+	CHECK(camera.speedX == 0 && camera.speedZ == 0);
 }

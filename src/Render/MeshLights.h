@@ -60,6 +60,9 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstddef>
+#include <cmath>
+#include <utility>
+#include <vector>
 
 namespace dice::hfe::render {
 
@@ -113,6 +116,50 @@ struct ListedLight {
 inline bool terrainTakesLight(const ListedLight& l)
 {
 	return !l.spot;
+}
+
+// The terrain's lights (Hi_Terrain's PerPixelPointlight passes, one per
+// listed Point light, 0x1014e080): the rewrite's shader takes `max` of
+// them in one pass, the Point ones (0x909) nearest the camera by their
+// distance less their radius (a light reaching over the camera first),
+// in that order (ties as listed); into `out`, returns how many.
+inline int pickTerrainLights(const ListedLight* lights, size_t count, const float camera[3], int max, int* out)
+{
+	std::vector<std::pair<float, int>> byCamera;
+	for (size_t i = 0; i < count; ++i) {
+		const ListedLight& l = lights[i];
+		const float dx = l.position[0] - camera[0], dy = l.position[1] - camera[1], dz = l.position[2] - camera[2];
+		byCamera.push_back({std::sqrt(dx * dx + dy * dy + dz * dz) - l.radius, static_cast<int>(i)});
+	}
+	std::stable_sort(byCamera.begin(), byCamera.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+	int n = 0;
+	for (size_t i = 0; i < byCamera.size() && n < max; ++i) {
+		if (terrainTakesLight(lights[static_cast<size_t>(byCamera[i].second)])) {
+			out[n++] = byCamera[i].second;
+		}
+	}
+	return n;
+}
+
+// PointLightPosAtten's w for the terrain and the undergrowth: 1 / R^2,
+// R the light's (flickered) attenuationRange2, at least 0.01.
+inline float pointLightInverseRange2(float range)
+{
+	const float r = std::max(range, 0.01f);
+	return 1.0f / (r * r);
+}
+
+// What one Point light adds to a terrain pixel (terrain.frag; the
+// original's calcPVPointTerrain x 0.5 in an additive pass): its colour x
+// N.L x saturate(1 - d^2 / R^2) x 0.5, not times the terrain's colour.
+inline float terrainPointLight(const float toLight[3], float inverseRange2, const float normal[3])
+{
+	const float d2 = toLight[0] * toLight[0] + toLight[1] * toLight[1] + toLight[2] * toLight[2];
+	const float attenuation = std::clamp(1.0f - d2 * inverseRange2, 0.0f, 1.0f);
+	const float d = std::sqrt(d2);
+	const float nl = d > 0 ? std::max((toLight[0] * normal[0] + toLight[1] * normal[1] + toLight[2] * normal[2]) / d, 0.0f)
+						   : 0.0f;
+	return nl * attenuation * 0.5f;
 }
 
 // The undergrowth's per-patch pick (0x1010e270): the nearest 4 Point lights

@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 namespace dice::hfe::game {
 
@@ -454,6 +455,63 @@ bool GameWorld::onLadder(int id) const
 {
 	const Player* player = findPlayer(id);
 	return player && player->ladder >= 0;
+}
+
+bool GameWorld::weaponHidden(int id) const
+{
+	const Player* player = findPlayer(id);
+	return player && player->weapon && player->weapon->hidden();
+}
+
+bool GameWorld::zoomUpgrade(int id) const
+{
+	const Player* player = findPlayer(id);
+	return player && player->zoomUpgrade;
+}
+
+std::string GameWorld::radioFilter(int id) const
+{
+	const Player* player = findPlayer(id);
+	const world::Object* vehicle = player && player->vehicle ? m_objects.find(player->vehicle) : nullptr;
+	if (!vehicle || !vehicle->objectTemplate()) {
+		return {};
+	}
+	const world::ObjectTemplate* control = vehicle->objectTemplate();
+	if (player->seat > 0) {
+		const auto seats = const_cast<GameWorld*>(this)->vehicleSeats(player->vehicle); // its layout cache
+		const world::ObjectTemplate* seat = static_cast<size_t>(player->seat) < seats.size()
+			? m_templates.find(seats[static_cast<size_t>(player->seat)].name)
+			: nullptr;
+		if (seat && seat->typeName() == "PlayerControlObject") {
+			control = seat;
+		}
+	}
+	const auto filter = control->settings().find("soundFilter");
+	return filter != control->settings().end() ? filter->second : std::string();
+}
+
+bool GameWorld::firstPersonEffects(uint32_t object) const
+{
+	const Player* player = m_player;
+	if (!player || !player->alive || player->vehicle != object) {
+		return false;
+	}
+	const auto never = [](const world::ObjectTemplate* t) {
+		const auto it = t ? t->settings().find("neverDrawAs1p") : decltype(t->settings().end()) {};
+		return t && it != t->settings().end() && std::atoi(it->second.c_str()) != 0;
+	};
+	const world::Object* vehicle = m_objects.find(object);
+	if (!vehicle || never(vehicle->objectTemplate())) {
+		return false;
+	}
+	if (player->seat > 0) {
+		const auto seats = const_cast<GameWorld*>(this)->vehicleSeats(object); // its layout cache
+		if (static_cast<size_t>(player->seat) < seats.size()
+			&& never(m_templates.find(seats[static_cast<size_t>(player->seat)].name))) {
+			return false;
+		}
+	}
+	return true;
 }
 
 bool GameWorld::ladderInReach(int id, float radius) const

@@ -613,6 +613,7 @@ void GameAudio::radio()
 			in.commander = sender.commander;
 			in.squadLeader = sender.squadLeader;
 			in.onFoot = sender.alive && sender.vehicle == 0;
+			in.senderFilter = m_round.radioFilter(sender.id);
 			in.sender.id = sender.id;
 			in.sender.team = sender.team;
 			in.sender.position = toSound(sender.position) + sound::Vec3 {0, 1.6f, 0};

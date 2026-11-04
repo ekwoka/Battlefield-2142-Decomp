@@ -1051,3 +1051,111 @@ TEST(Weapons_MaximumVehicleTiltForFire)
 	CHECK(game::tiltAllowsFire(pitched40, 70));
 	CHECK(game::tiltAllowsFire(physics::Mat3::fromYawPitchRoll({0, 0, 180}), 0));
 }
+
+// The sticky, radar and dud settings (StickyCollisionComp 0x005e8820 /
+// 0x005e8030, the Ability template 0x00631790, GenericProjectile +0x33c /
+// +0x340) and the thrown weapon's settings (ThrownFireComp +0xa4).
+TEST(Weapons_StickyRadarAndDudSettings)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "GenericProjectile");
+	templates.registerType(2, "GenericFireArm");
+	world::ObjectTemplate* mine = templates.create("GenericProjectile", "mine");
+	mine->components().push_back("StickyCollisionComp");
+	mine->settings()["collision.maxStickAngle"] = "45";
+	mine->settings()["collision.stickToVehicles"] = "0";
+	const auto m = game::ProjectileSettings::fromTemplate(*mine);
+	CHECK(m.sticky && std::fabs(m.maxStickCos - 0.70711f) < 1e-4f && !m.stickToVehicles && m.stickToTerrain
+		&& m.stickToStaticObjects);
+	world::ObjectTemplate* c4 = templates.create("GenericProjectile", "c4");
+	c4->components().push_back("StickyCollisionComp");
+	const auto c = game::ProjectileSettings::fromTemplate(*c4);
+	CHECK(c.sticky && c.maxStickCos == -1.0f && c.stickToVehicles); // the constructor's -1: any face
+	CHECK(!game::ProjectileSettings::fromTemplate(*templates.create("GenericProjectile", "frag")).sticky);
+	// unl_sonar_Projectile: radius 100, an expanding ring, vehicles only.
+	world::ObjectTemplate* sonar = templates.create("GenericProjectile", "sonar");
+	sonar->settings()["ability.radarRadius"] = "100";
+	sonar->settings()["ability.radialRadar"] = "0";
+	sonar->settings()["ability.showPlayers"] = "0";
+	const auto s = game::ProjectileSettings::fromTemplate(*sonar);
+	CHECK(s.radarRadius == 100 && !s.radialRadar && !s.radarShowPlayers && s.radarShowVehicles);
+	// eu_rifle_missile: a dud for its first half second.
+	world::ObjectTemplate* rocket = templates.create("GenericProjectile", "rocket");
+	rocket->settings()["detonateDelay"] = "0.5";
+	rocket->settings()["dudMaterial"] = "30";
+	const auto r = game::ProjectileSettings::fromTemplate(*rocket);
+	CHECK(r.detonateDelay == 0.5f && r.dudMaterial == 30);
+	// The frag grenade's firearm: shown 0.05 s (2 ticks) after the reload starts.
+	world::ObjectTemplate* frag = templates.create("GenericFireArm", "fragArm");
+	frag->components().push_back("ThrownFireComp");
+	frag->settings()["fire.showWeaponAfterReloadDelay"] = "0.05";
+	frag->settings()["ammo.magLinkWeapon"] = "eu_ar_Rocket";
+	frag->settings()["ammo.allowReloadWithFullMag"] = "1";
+	const auto f = game::FireArmSettings::fromTemplate(*frag);
+	CHECK(f.thrown && f.showAfterReloadTicks == 2 && f.magLinkWeapon == "eu_ar_Rocket" && f.allowReloadWithFullMag);
+}
+
+// A thrown weapon is put away at the launch (0x005e5720) and shown again
+// showAfterReloadTicks after its reload starts (0x005e49d0, 0x005e5610).
+TEST(Weapons_ThrownWeaponHiddenUntilShown)
+{
+	game::FireArmSettings settings;
+	settings.thrown = true;
+	settings.magSize = 1;
+	settings.nrOfMags = 2;
+	settings.reloadTime = 1;
+	settings.autoReload = true;
+	settings.showAfterReloadTicks = 6; // 0.2 s
+	game::FireArm arm(settings);
+	CHECK(!arm.hidden());
+	CHECK(arm.tick(1 / 30.0f, true) && arm.hidden());
+	int ticks = 0;
+	while (arm.hidden() && ticks < 100) {
+		arm.tick(1 / 30.0f, false);
+		++ticks;
+	}
+	std::fprintf(stderr, "  shown after %d ticks, reloading %d\n", ticks, arm.reloading());
+	// The reload starts once the gun is ready again (3 ticks at 600 a
+	// minute); shown 6 ticks on.
+	CHECK(!arm.hidden() && ticks >= 6 && ticks <= 9 && arm.reloading());
+	// The last one thrown with nothing to reload: it stays away.
+	game::FireArmSettings last = settings;
+	last.nrOfMags = 0;
+	game::FireArm lastArm(last);
+	CHECK(lastArm.tick(1 / 30.0f, true));
+	for (int i = 0; i < 60; ++i) {
+		lastArm.tick(1 / 30.0f, false);
+	}
+	CHECK(lastArm.hidden());
+	lastArm.enable(true); // drawn again
+	CHECK(!lastArm.hidden());
+}
+
+// allowReloadWithFullMag (0x005f4140) and the magazine link's copy
+// (0x005c3c40 / 0x005c4900).
+TEST(Weapons_FullMagReloadAndMagazineLink)
+{
+	game::FireArmSettings settings;
+	settings.magSize = 1;
+	settings.nrOfMags = -1;
+	settings.reloadTime = 120;
+	game::FireArm silo(settings);
+	CHECK(!silo.startReload());
+	settings.allowReloadWithFullMag = true;
+	game::FireArm silo2(settings);
+	CHECK(silo2.startReload() && silo2.reloading());
+	game::FireArmSettings gun;
+	gun.magSize = 4;
+	gun.nrOfMags = 3;
+	game::FireArm shotgun(gun), rocket(gun);
+	CHECK(shotgun.tick(1 / 30.0f, true) && shotgun.roundsInMag() == 3);
+	rocket.shareMagazine(shotgun, false);
+	CHECK(rocket.roundsInMag() == 3 && rocket.magsLeft() == 3);
+	CHECK(shotgun.startReload());
+	for (int i = 0; i < 90; ++i) {
+		shotgun.tick(1 / 30.0f, false);
+	}
+	CHECK(shotgun.magsLeft() == 2 && shotgun.roundsInMag() == 4);
+	rocket.shareMagazine(shotgun, true);
+	CHECK(rocket.magsLeft() == 2 && rocket.roundsInMag() == 4);
+}

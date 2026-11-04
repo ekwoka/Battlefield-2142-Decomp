@@ -1605,3 +1605,144 @@ TEST(VehicleModels_SuppressedInputWhileZoomed)
 	std::fprintf(stderr, "  turned %.2f, zoomed %.2f\n", turned[0], turned[1]);
 	CHECK(std::fabs(turned[0] - 2) < 0.01f && std::fabs(turned[1] - 1.2f) < 0.01f);
 }
+
+// StickyCollisionComp (0x005e83d0): C4 (maxStickAngle 180, every stick
+// flag 1) dropped on the tank sticks to it and rides it; the AP mine
+// (stickToVehicles 0, maxStickAngle 45) bounces off the tank and sticks
+// to the flat ground beside it.
+TEST(Vehicles_StickyProjectilesRideVehicles)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t tank = g.start("eu_tank", {0, 2, 6});
+	CHECK(g.enter(tank));
+	const physics::Vec3 top = g.position(tank) + physics::Vec3 {0, 6, 0};
+	CHECK(g.world->launchProjectile("Unl_c4_Projectile", top, {0, -4, 0}));
+	g.run(2);
+	const game::Projectile* c4 = nullptr;
+	for (const auto& p : g.world->projectiles()) {
+		c4 = p.settings && p.settings->name == "Unl_c4_Projectile" ? &p : c4;
+	}
+	CHECK(c4 && c4->settings->sticky && c4->settings->maxStickCos < -0.99f);
+	CHECK(c4 && c4->stuck && c4->stuckTo == tank);
+	if (!c4) {
+		return;
+	}
+	const physics::Vec3 before = c4->position;
+	const physics::Vec3 offset = before - g.position(tank);
+	std::fprintf(stderr, "  c4 stuck at %.2f %.2f %.2f, %.2f m over the tank's origin\n", before.x, before.y, before.z,
+		offset.y);
+	CHECK(offset.y > 0.3f && offset.y < 4);
+	game::SoldierInput input;
+	input.throttle = 1;
+	g.drive(input, 3);
+	const physics::Vec3 after = c4->position;
+	const physics::Vec3 moved = after - before;
+	std::fprintf(stderr, "  the tank drove: c4 moved %.1f m, now %.2f m off its place on the tank\n",
+		std::sqrt(physics::lengthSquared(moved)),
+		std::sqrt(physics::lengthSquared(after - g.position(tank) - offset)));
+	CHECK(physics::lengthSquared(moved) > 4 * 4);
+	CHECK(c4->stuck && std::sqrt(physics::lengthSquared(after - g.position(tank))) < 4);
+
+	// The AP mine on the same tank: stickToVehicles 0, so it ends on the ground.
+	g.drive({}, 3);
+	const physics::Vec3 roof = g.position(tank) + physics::Vec3 {0, 6, 0};
+	CHECK(g.world->launchProjectile("Unl_Mine_AntiPersonnel_Projectile", roof, {0, -4, 0}));
+	g.run(4);
+	const game::Projectile* mine = nullptr;
+	for (const auto& p : g.world->projectiles()) {
+		mine = p.settings && p.settings->name == "Unl_Mine_AntiPersonnel_Projectile" ? &p : mine;
+	}
+	CHECK(mine && mine->settings->sticky && !mine->settings->stickToVehicles
+		&& std::fabs(mine->settings->maxStickCos - 0.7071f) < 0.001f);
+	if (mine) {
+		std::fprintf(stderr, "  ap mine at %.2f %.2f %.2f, stuck %d to %u\n", mine->position.x, mine->position.y,
+			mine->position.z, mine->stuck, mine->stuckTo);
+		CHECK(!mine->stuck && mine->stuckTo == 0);
+		// Lying on the roof, it falls once the tank drives off, and sticks
+		// to the flat ground (45 degrees at most).
+		g.drive(input, 2);
+		g.run(2);
+		std::fprintf(stderr, "  the tank gone: ap mine at %.2f %.2f %.2f, stuck %d\n", mine->position.x, mine->position.y,
+			mine->position.z, mine->stuck);
+		CHECK(mine->stuck && mine->stuckTo == 0 && mine->position.y < 0.3f);
+	}
+}
+
+// The seat's radio filter (soundFilter, the radio handler 0x0042e0c0) and
+// neverDrawAs1p's first-person effects (0x006187c0): as_tank's driver
+// talks through "vehicle"; its effects may take their first-person form,
+// a Titan's (neverDrawAs1p) not.
+TEST(Vehicles_RadioFilterAndFirstPersonEffects)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t tank = g.start("as_tank", {0, 2, 6});
+	CHECK(g.enter(tank));
+	const int me = g.world->localPlayer();
+	CHECK(g.world->radioFilter(me) == "vehicle");
+	CHECK(g.world->firstPersonEffects(tank));
+	world::ObjectTemplate* titan = g.templates.find("eu_titan_wake");
+	CHECK(titan && titan->settings().count("neverDrawAs1p"));
+	g.templates.find("as_tank")->settings()["neverDrawAs1p"] = "1";
+	CHECK(!g.world->firstPersonEffects(tank));
+}
+
+// c_PIReload in a seat: the player's update (0x00590e10) sends event 10 to
+// his control object, the seat's PCO hands it down its tree (0x005cacf0 ->
+// 0x0063ca60) and each active firearm reloads (0x005c62c0 -> 0x005c50e0
+// case 10): eu_apc's second turret's grenade launcher (3 a magazine,
+// 2.1 s) reloads a part-used magazine.
+TEST(Vehicles_SeatReloadPress)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t apc = g.start("eu_apc", {0, 2, 6});
+	CHECK(g.enter(apc));
+	game::SoldierInput input;
+	input.switchSeat = 2;
+	g.world->setPlayerInput(input);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	g.run(3);
+	game::GameWorld::PlayerInfo info;
+	CHECK(g.world->playerInfo(g.world->localPlayer(), info) && info.seat == 1);
+	const game::FireArm* launcher = g.world->gun(apc, 1);
+	CHECK(launcher && launcher->settings().magSize == 3);
+	if (!launcher) {
+		return;
+	}
+	// Its fire mode is the 3-round burst (225 a minute: 8 ticks a round):
+	// the first round out, the reload's press drops the rest of the burst.
+	input = {};
+	input.fire = true;
+	for (int i = 0; i < 4 && launcher->roundsInMag() == 3; ++i) {
+		g.world->setPlayerInput(input);
+		g.world->tick(1 / 30.0f);
+	}
+	std::fprintf(stderr, "  launcher: %d in the magazine, reloading %d\n", launcher->roundsInMag(), launcher->reloading());
+	CHECK(launcher->roundsInMag() == 2 && !launcher->reloading());
+	input = {};
+	input.reload = true;
+	g.world->setPlayerInput(input);
+	g.world->tick(1 / 30.0f);
+	CHECK(launcher->reloading());
+	g.world->setPlayerInput({});
+	g.run(2.5f);
+	CHECK(!launcher->reloading() && launcher->roundsInMag() == 3);
+}

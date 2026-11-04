@@ -2609,12 +2609,11 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 		m_cameraLights.push_back(byCamera[i].second);
 	}
 	// The terrain takes every listed Point light (0x909), a pass each; the
-	// shader's kMaxPointLights nearest the camera here.
-	for (size_t i = 0; i < byCamera.size() && m_terrainLights.size() < static_cast<size_t>(kMaxPointLights); ++i) {
-		if (terrainTakesLight(m_listedLights[static_cast<size_t>(byCamera[i].second)])) {
-			m_terrainLights.push_back(byCamera[i].second);
-		}
-	}
+	// shader's kMaxPointLights nearest the camera here (pickTerrainLights).
+	const float eye[3] = {camera.position.x, camera.position.y, camera.position.z};
+	int terrainPicked[kMaxPointLights];
+	m_terrainLights.assign(terrainPicked,
+		terrainPicked + pickTerrainLights(m_listedLights.data(), m_listedLights.size(), eye, kMaxPointLights, terrainPicked));
 }
 
 void LevelRenderer::bindMeshLayers(SDL_GPURenderPass* pass, const Submesh* submesh, SDL_GPUTexture* envMap) const
@@ -2664,8 +2663,7 @@ void LevelRenderer::applyUndergrowthLights(LightingUniforms& uniforms, const int
 		const effects::PointLight& l = m_pointLights[static_cast<size_t>(picked[i])];
 		// POINTLIGHT / PointLightPosAtten: the position and 1 / R^2 with R
 		// the light object's range (slot 0x198, flickered).
-		const float r = std::max(l.range2, 0.01f);
-		const float position[4] = {l.position.x, l.position.y, l.position.z, 1.0f / (r * r)};
+		const float position[4] = {l.position.x, l.position.y, l.position.z, pointLightInverseRange2(l.range2)};
 		const float color[4] = {l.color.x, l.color.y, l.color.z, 0};
 		std::copy(position, position + 4, uniforms.lightPosition[i]);
 		std::copy(color, color + 4, uniforms.lightColor[i]);
@@ -2750,6 +2748,19 @@ void LevelRenderer::buildDecals()
 		if (!image) {
 			continue;
 		}
+		// The normal-mapped technique (Decals.fx pass 2, RendDX9 0x10163810
+		// with (1, 1) from 0x100e6a80): the draw (0x10164040) sends a set
+		// whose owner object was stamped this frame (owner slot 0xb0 against
+		// the renderer's frame count +0x108, slot 0x60 0x1000d0f0, bumped by
+		// 0x10006b50) to the objects' list (+0xe08); those sets' decals with
+		// a normal map (+0x38, 0x10163570's filter) go through technique 2
+		// with their map (+0x34 to "NormalMap", +0x317c, 0x101631f0) and the
+		// camera (WorldCamPos +0x3180). The world's set (no owner) draws all
+		// its decals with technique 0, the normal map unused.
+		SDL_GPUTexture* normalImage = nullptr;
+		if (decal.object != 0 && decal.ownerDrawn && !decal.normalMap.empty()) {
+			normalImage = texture(m_sources->files, decal.normalMap + ".dds");
+		}
 		effects::Vec3 n = decal.normal, tangent = decal.tangent, at = decal.position;
 		// Below VideoSettings' effects 2 objects get no decal sets of their own
 		// (DecalManager +0x322e, 0x100e6b70; set by 0x10010040).
@@ -2824,13 +2835,17 @@ void LevelRenderer::buildDecals()
 				vertex.lightmapCoord[1] = decal.color.y;
 				vertex.part = decal.color.z;
 				vertex.weight = alpha;
+				vertex.tangent[0] = tangent.x;
+				vertex.tangent[1] = tangent.y;
+				vertex.tangent[2] = tangent.z;
+				vertex.tangent[3] = normalImage ? 1.0f : 0.0f;
 				vertices.push_back(vertex);
 			}
 			const uint32_t count = static_cast<uint32_t>(vertices.size()) - first;
-			if (!m_decalGroups.empty() && m_decalGroups.back().texture == image) {
+			if (!m_decalGroups.empty() && m_decalGroups.back().texture == image && m_decalGroups.back().normalMap == normalImage) {
 				m_decalGroups.back().vertexCount += count;
 			} else {
-				m_decalGroups.push_back({image, false, first, count});
+				m_decalGroups.push_back({image, false, first, count, false, normalImage});
 			}
 			continue;
 		}
@@ -2854,12 +2869,16 @@ void LevelRenderer::buildDecals()
 			vertex.lightmapCoord[1] = decal.color.y;
 			vertex.part = decal.color.z;
 			vertex.weight = alpha;
+			vertex.tangent[0] = tangent.x;
+			vertex.tangent[1] = tangent.y;
+			vertex.tangent[2] = tangent.z;
+			vertex.tangent[3] = normalImage ? 1.0f : 0.0f;
 			vertices.push_back(vertex);
 		}
-		if (!m_decalGroups.empty() && m_decalGroups.back().texture == image) {
+		if (!m_decalGroups.empty() && m_decalGroups.back().texture == image && m_decalGroups.back().normalMap == normalImage) {
 			m_decalGroups.back().vertexCount += 6;
 		} else {
-			m_decalGroups.push_back({image, false, first, 6});
+			m_decalGroups.push_back({image, false, first, 6, false, normalImage});
 		}
 	}
 	if (vertices.empty()) {
@@ -3544,11 +3563,13 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		}
 		m_gpu.flushUploads();
 	}
-	// A zoomed first person hides the systems without showInZoomedMode (the
-	// exe marks those its bundles start then, 0x00619f90; zoomed here: the
-	// view's field of view narrower than its first, 0x10066b30).
+	// A zoomed first person (the systems' +8, 0x0061a1c0; zoomed here: the
+	// view's field of view narrower than its first, 0x10066b30) has its
+	// particles drawn with the first-person meshes' view, an unzoomed one
+	// with the world's (0x100990b0; see effects::ParticleTemplate::showZoomed).
+	m_firstPersonZoomed = viewZoom(camera) > 1.05f;
 	buildParticleBuffer({m_hasFirstPerson ? m_firstPerson.effects : nullptr}, m_firstPersonParticleVertices,
-		m_firstPersonParticleGroups, camera, false, viewZoom(camera) > 1.05f);
+		m_firstPersonParticleGroups, camera, false, m_firstPersonZoomed);
 	collectPointLights(camera);
 	if (m_hasFirstPerson && m_firstPerson.effects) {
 		m_firstPerson.effects->forEachMeshGroup([&](const std::string& geometry, bool, const std::vector<effects::MeshSprite>&) {
@@ -3969,12 +3990,18 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		TransformUniforms decalTransforms {viewProjection, Mat4 {},
 			{m_particleSettings.decalFadeDistance, m_particleSettings.decalFadeDistance * m_particleSettings.decalStartFadePercentage, 0, 0}, {}};
 		decalTransforms.partsUsed = 0;
+		// WorldCamPos (+0x3180, set per batch by 0x101631f0): the eye, for the
+		// normal-mapped technique's half vector.
+		decalTransforms.sway[0] = camera.position.x;
+		decalTransforms.sway[1] = camera.position.y;
+		decalTransforms.sway[2] = camera.position.z;
 		SDL_PushGPUVertexUniformData(commands, 0, &decalTransforms, pushUniformSize(decalTransforms));
 		SDL_GPUBufferBinding vertexBinding {m_decalVertices, 0};
 		SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
 		for (const ParticleGroup& group : m_decalGroups) {
-			SDL_GPUTextureSamplerBinding sampler {group.texture, m_gpu.clampSampler()};
-			SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
+			SDL_GPUTextureSamplerBinding sampler[2] = {{group.texture, m_gpu.clampSampler()},
+				{group.normalMap ? group.normalMap : m_gpu.whiteTexture(), m_gpu.clampSampler()}};
+			SDL_BindGPUFragmentSamplers(pass, 0, sampler, 2);
 			SDL_DrawGPUPrimitives(pass, group.vertexCount, 1, group.firstVertex, 0);
 		}
 		bound = nullptr;
@@ -4283,10 +4310,15 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 	for (const FirstPersonModel& model : scene.models) {
 		drawModel(model, MeshQueue::Additive);
 	}
-	// The first-person particles, then RSMT1PersonTransparency back to front
-	// (the sights' glass, the displays).
-	drawMeshParticles(commands, pass, viewProjection, lights, {scene.effects});
-	drawParticles(commands, pass, viewProjection, camera, lights, m_firstPersonParticleVertices,
+	// The first-person particles (0x1002ea10 / 0x1002cef0 -> the particle
+	// manager's slot 0x30, 0x10099860, after the first-person opaque
+	// queues): unzoomed with the world's camera (renderer slot 0x5c), zoomed
+	// with the first-person meshes' view (slot 0xdc, +0xfc); then
+	// RSMT1PersonTransparency back to front (the sights' glass, the displays).
+	const Mat4 particleViewProjection = m_firstPersonZoomed ? viewProjection
+		: camera.view() * Mat4::perspective(camera.fovY, aspect, camera.nearPlane, 6000.0f);
+	drawMeshParticles(commands, pass, particleViewProjection, lights, {scene.effects});
+	drawParticles(commands, pass, particleViewProjection, camera, lights, m_firstPersonParticleVertices,
 		m_firstPersonParticleGroups);
 	std::vector<std::pair<float, const FirstPersonModel*>> transparent;
 	for (const FirstPersonModel& model : scene.models) {

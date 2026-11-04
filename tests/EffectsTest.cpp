@@ -164,6 +164,10 @@ TEST(Effects_ViewsPickTheirSystems)
 {
 	world::ObjectTemplateManager templates;
 	addFlame(templates, false, "0", "1"); // a third-person-only system (like glow3p)
+	// showInZoomedMode 0 too, as the one shipped template with
+	// showInFirstPerson 0 has: in first person either flag shows a system
+	// (0x0061a1c0's flags & 5).
+	templates.find("flame")->settings()["showInZoomedMode"] = "0";
 	effects::EffectManager manager(templates);
 	CHECK(manager.spawn("e_flame", {}, {}, effects::EffectManager::View::FirstPerson));
 	CHECK(manager.emitters() == 0);
@@ -480,8 +484,23 @@ TEST(Effects_DecalsOnMovingObjects)
 	CHECK(d.object == 42);
 	CHECK(std::fabs(d.position.x) < 1e-4f && std::fabs(d.position.y - 1) < 1e-4f && std::fabs(d.position.z - 1) < 1e-4f);
 	CHECK(std::fabs(d.normal.z - 1) < 1e-4f);
+	CHECK(d.normalMap.empty());
 	manager.dropDecals(42);
 	CHECK(manager.decals().empty());
+	// decalNormalMapName (0x0052cf97) rides with the decal (RendDX9 +0x34 /
+	// +0x38), for the vehicles' normal-mapped technique.
+	world::ObjectTemplate* armour = templates.create("Decal", "armour");
+	armour->settings()["decalTextureName"] = "objects\\effects\\decals\\textures\\Decal_metalsolid_s01_c";
+	armour->settings()["decalNormalMapName"] = "objects\\effects\\decals\\textures\\Decal_metalsolid_s01_b";
+	CHECK(manager.spawnDecal("armour", {11, 1, 0}, {1, 0, 0}, 42, {10, 0, 0}, {90, 0, 0}));
+	CHECK(manager.decals().back().normalMap == "objects/effects/decals/textures/Decal_metalsolid_s01_b");
+	// Its owner unseen at the set's last ageing (+0x1a): refused, unless
+	// the template isStatic (0x10166410).
+	manager.decals().back().ownerDrawn = false;
+	CHECK(!manager.spawnDecal("armour", {11, 1, 0}, {1, 0, 0}, 42, {10, 0, 0}, {90, 0, 0}));
+	CHECK(manager.spawnDecal("armour", {11, 1, 0}, {1, 0, 0}, 7, {10, 0, 0}, {90, 0, 0})); // another object's set
+	armour->settings()["isStatic"] = "1";
+	CHECK(manager.spawnDecal("armour", {11, 1, 0}, {1, 0, 0}, 42, {10, 0, 0}, {90, 0, 0}));
 }
 
 namespace {

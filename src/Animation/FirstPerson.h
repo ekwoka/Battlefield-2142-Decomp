@@ -39,6 +39,24 @@ struct ZoomSettings {
 	bool disableMuzzle = false;  // +0x40: zoom.disableMuzzleWhenZoomed
 	float mouseSpeedMod = 1;     // +0x3c: zoom.mouseSpeedMod
 	bool zoomOutOnReload = true; // +0x4a
+	// Fine tuning (the sniper rifles): zoom.useZoomFineTuning (+0x48, 0,
+	// executor 0x004eb9c7), zoomFineTuneSteps (+0x44, 1, 0x004eb8ad),
+	// zoomFineTuningNeedsUnlock (+0x49, 1, 0x004ebae1). With it the toggle
+	// (0x005da670) knows only levels 0 and 1; the wheel (the input step
+	// 0x005da890, from the firearm's input 0x005c21d0: PINextItem in,
+	// PIPrevItem out) moves an offset t by (f1 - f2) / steps within
+	// [0, f1 - f2], needing the player's hasZoomUpgradeAbility when the
+	// unlock is asked for; level n's field of view is fn - t (0x005da820)
+	// and a changed one is set at once (0x005da290).
+	bool useFineTuning = false;
+	int fineTuneSteps = 1;
+	bool fineTuningNeedsUnlock = true;
+	// zoom.zoomWhenBusy (+0xd, 0x004eaebd; getter slot 0xb8 0x0064a000):
+	// the firearm's event handler (0x005c50e0) drops the zoom press while
+	// it is busy (drawing, reloading, between rounds, zooming, animating,
+	// overheated) unless this is set (shipped 1 on the tanks' and the ATs'
+	// seats, whose zoom the rewrite's seats don't have yet).
+	bool zoomWhenBusy = false;
 	bool present() const { return factors.size() > 1; }
 	int delayTicks() const { return static_cast<int>(std::lround(delay * 30.0f)); }
 };
@@ -65,8 +83,14 @@ public:
 	// The weapon's first-person LOD now (0x005da770).
 	int lod(const ZoomSettings& settings) const;
 	float factor(const ZoomSettings& settings) const;
+	// The wheel's fine-tune step (0x005da890): +1 in (PINextItem), -1 out;
+	// false when nothing changes (no fine tuning, fewer than three
+	// factors, the unlock missing, at the end).
+	bool fineTune(const ZoomSettings& settings, int step, bool unlocked);
+	float fineTuneOffset() const { return m_fineTune; }
 
 private:
+	float m_fineTune = 0; // +0x24: kept over zooming out (0x005da530)
 	int m_level = 0;   // +0x1c of the component
 	int m_ticks = 0;   // since the last change
 };

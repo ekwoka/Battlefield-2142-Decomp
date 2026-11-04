@@ -462,6 +462,39 @@ std::pair<float, float> detailedViewPoint(const std::pair<float, float>* view, c
 	return me ? std::make_pair(me->position.x, me->position.z) : std::make_pair(0.0f, 0.0f);
 }
 
+void OverheadCamera::moveTo(float px, float pz)
+{
+	x = px;
+	z = pz;
+	speedX = speedZ = 0;
+	if (width > 160 && depth > 160) {
+		x = std::clamp(x, originX + 80, originX + width - 80);
+		z = std::clamp(z, originZ + 80, originZ + depth - 80);
+	}
+}
+
+void OverheadCamera::pan(float yawInput, float throttleInput, float seconds)
+{
+	const auto axis = [this, seconds](float input, float& v) {
+		input = std::clamp(input, -1.0f, 1.0f);
+		if (input != 0) {
+			v = std::clamp(v + input * acceleration * seconds, -speed, speed);
+		} else if (v > 0) {
+			v = std::max(v - seconds * acceleration, 0.0f);
+		} else if (v < 0) {
+			v = std::min(v + seconds * acceleration, 0.0f);
+		}
+	};
+	axis(yawInput, speedX);
+	axis(throttleInput, speedZ);
+	if (speedX != 0 || speedZ != 0) {
+		const float vx = speedX, vz = speedZ;
+		moveTo(x + vx * seconds, z + vz * seconds);
+		speedX = vx;
+		speedZ = vz;
+	}
+}
+
 void spottedMouseOver(hud::HudManager& hud, int n)
 {
 	for (int i = 1; i <= 11; ++i) {

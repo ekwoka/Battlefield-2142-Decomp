@@ -13,6 +13,7 @@
 #include "Game/GameWorld.h"
 #include "IO/File/FileManager.h"
 #include "Physics/CollisionTemplateManager.h"
+#include "Physics/MaterialManager.h"
 #include "Terrain/Heightmap.h"
 #include "TestMain.h"
 #include "World/Object.h"
@@ -24,6 +25,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -98,8 +100,12 @@ struct Field {
 	physics::CollisionTemplateManager collisionTemplates;
 	std::unique_ptr<game::GameWorld> world;
 	std::vector<std::string> events;
+	physics::MaterialManager materials;
 
-	Field()
+	Field() : Field(nullptr) {}
+	// `setup` runs before the world is made (static objects, materials);
+	// with one the world takes the field's materials.
+	explicit Field(const std::function<void(Field&)>& setup)
 	{
 		templates.registerType(3, "Soldier");
 		for (const char* name : {"us_light_soldier", "pac_light_soldier"}) {
@@ -129,12 +135,16 @@ struct Field {
 		world::ObjectTemplate* spawn = templates.create("SpawnPoint", "sp");
 		objects.create(spawn, {0, 0, 20}, {90, 0, 0})->setControlPointId(1);
 		objects.create(spawn, {0, 0, 0}, {0, 0, 0})->setControlPointId(2);
+		if (setup) {
+			setup(*this);
+		}
 		world = std::make_unique<game::GameWorld>(templates, objects);
 		world->enablePhysics(files, collisionTemplates,
 			{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
 				 normal = {0, 1, 0};
 				 return 0.0f;
-			 }});
+			 }},
+			setup ? &materials : nullptr);
 		world->setEventSink([this](const std::string& event, const game::ScriptArgs&) { events.push_back(event); });
 		world->autoRespawn = false;
 		world->startRound();
@@ -4007,4 +4017,164 @@ TEST(Bots_GuidedPlanOnFoot)
 		CHECK(wire ? field.fired(bot) > 0 : field.fired(bot) == 0);
 		CHECK(nearRounds == 0);
 	}
+}
+
+// The bots' zoom (0x100d8250 and the moves' 0x100e5f70): a soldier bot
+// with a scoped rifle zooms in standing to fire, the world hears it
+// (setZoomed), and walking zooms it out again.
+TEST(Bots_ZoomScopedWeapon)
+{
+	CHECK(game::zoomStatementPress(false, false, true));  // still, unzoomed: in
+	CHECK(!game::zoomStatementPress(false, true, true));  // still, zoomed: let go
+	CHECK(game::zoomStatementPress(true, true, true));    // moving, zoomed: out
+	CHECK(!game::zoomStatementPress(true, false, true));
+	CHECK(!game::zoomStatementPress(false, false, false)); // not ready
+	CHECK(!game::zoomStatementPress(true, true, false));
+
+	Field field;
+	world::ObjectTemplate* rifle = field.templates.find("eu_ar_rifle");
+	CHECK(!game::zoomSettingsOf(rifle).present()); // no DefaultZoomComp
+	rifle->components().push_back("DefaultZoomComp");
+	rifle->settings()["zoom.addZoomFactor.list"] = "0 0.4 0.4";
+	rifle->settings()["zoom.zoomDelay"] = "0.2";
+	const anim::ZoomSettings zoom = game::zoomSettingsOf(rifle);
+	CHECK(zoom.present() && zoom.factors.size() == 2 && zoom.factors[1] == 0.4f && zoom.delay == 0.2f);
+	world::ObjectTemplate* kit = field.templates.create("Kit", "test_kit");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	std::string out;
+	for (const char* line : {"weaponTemplate.create eu_ar_rifle", "weaponTemplate.minRange 0", "weaponTemplate.maxRange 100",
+			 "weaponTemplate.setStrength Infantry 5"}) {
+		console.execute(line, out);
+	}
+	game::BotManager bots(*field.world, settings);
+	const int bot = field.world->addPlayer("Bot", 2, true);
+	field.world->setKit(bot, "test_kit", "us_light_soldier");
+	field.world->spawnSoldier(bot);
+	field.move(bot, 0, 0);
+	const int enemy = field.soldier(1, false, 15, 0); // towards its goal (PAC's point at +x)
+	bool zoomedFiring = false;
+	for (int tick = 0; tick < 30 * 6; ++tick) {
+		game::GameWorld::PlayerInfo self;
+		field.world->playerInfo(bot, self);
+		field.move(enemy, self.position.x + 15, self.position.z);
+		const int before = field.fired(bot);
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+		zoomedFiring = zoomedFiring || (field.fired(bot) > before && bots.zoomLevel(bot) > 0);
+	}
+	std::printf("  zoom level %d, rounds %d\n", bots.zoomLevel(bot), field.fired(bot));
+	CHECK(zoomedFiring);
+	// The target far off: the plan walks after it and zooms out.
+	bool walkedOut = false;
+	for (int tick = 0; tick < 30 * 4; ++tick) {
+		game::GameWorld::PlayerInfo self;
+		field.world->playerInfo(bot, self);
+		field.move(enemy, self.position.x + 95, self.position.z);
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+		walkedOut = walkedOut || bots.zoomLevel(bot) == 0;
+	}
+	CHECK(walkedOut);
+}
+
+namespace {
+
+// A wall across z = 10 (both faces) of mesh material 0, 40 m wide.
+physics::CollisionMeshFile wallMesh()
+{
+	physics::CollisionSubGeometry part;
+	for (uint32_t type = 0; type < 3; ++type) {
+		physics::CollisionLod lod;
+		lod.collisionType = type;
+		lod.vertices = {{-20, -1, 0}, {20, -1, 0}, {20, 20, 0}, {-20, 20, 0}};
+		lod.boundsMin = {-20, -1, 0};
+		lod.boundsMax = {20, 20, 0};
+		lod.faces = {{{0, 1, 2}, 0}, {{0, 2, 3}, 0}, {{0, 2, 1}, 0}, {{0, 3, 2}, 0}};
+		part.lods.push_back(lod);
+	}
+	physics::CollisionGeometry geometry;
+	geometry.subGeometries = {part};
+	physics::CollisionMeshFile mesh;
+	mesh.version = 10;
+	mesh.geometries = {geometry};
+	return mesh;
+}
+
+} // namespace
+
+// The sight ray passes see-through materials (BF2142.exe 0x00898040 with
+// the filter 0x00897d50) and says so; the sighting then isn't clear (flag
+// 0x40), and a weapon without setFiresThroughTransparent isn't chosen.
+TEST(Bots_SightThroughSeeThrough)
+{
+	for (const bool glass : {false, true}) {
+		for (const bool throughTransparent : {true, false}) {
+			Field field([glass](Field& f) {
+				f.materials.define(7).isSeeThrough = glass;
+				f.collisionTemplates.add("wall_mesh", wallMesh());
+				world::ObjectTemplate* wall = f.templates.create("SimpleObject", "test_wall");
+				wall->settings()["collisionMesh"] = "wall_mesh";
+				wall->settings()["mapMaterial.0"] = "7";
+				f.objects.create(wall, {0, 0, 10});
+			});
+			bool through = false;
+			const bool clear = field.world->lineOfSight({0, 1.5f, 0}, {0, 1.5f, 20}, 0, through);
+			CHECK(clear == glass && through == glass);
+			CHECK(field.world->lineOfSight({0, 1.5f, 0}, {0, 1.5f, 8}, 0, through) && !through);
+			world::ObjectTemplate* kit = field.templates.create("Kit", "test_kit");
+			kit->children().push_back({"eu_ar_rifle", {}, {}});
+			Console console;
+			game::BotSettings settings = scriptedSettings(console);
+			std::string out;
+			for (const char* line : {"weaponTemplate.create eu_ar_rifle", "weaponTemplate.minRange 0", "weaponTemplate.maxRange 100",
+					 "weaponTemplate.setStrength Infantry 5"}) {
+				console.execute(line, out);
+			}
+			console.execute(throughTransparent ? "weaponTemplate.setFiresThroughTransparent 1" : "weaponTemplate.setFiresThroughTransparent 0", out);
+			game::BotManager bots(*field.world, settings);
+			const int bot = field.world->addPlayer("Bot", 2, true);
+			field.world->setKit(bot, "test_kit", "us_light_soldier");
+			field.world->spawnSoldier(bot);
+			field.move(bot, 0, 0);
+			const int enemy = field.soldier(1, false, 0, 20);
+			for (int tick = 0; tick < 30 * 4; ++tick) {
+				field.move(bot, 0, 0);
+				field.move(enemy, 0, 20);
+				bots.update(1 / 30.0f);
+				field.world->tick(1 / 30.0f);
+			}
+			std::printf("  glass %d, firesThroughTransparent %d: knows %d, rounds %d\n", glass, throughTransparent,
+				bots.knows(bot, enemy), field.fired(bot));
+			CHECK(bots.knows(bot, enemy) == glass);
+			// The weapon choice leaves the rifle out without the transparent
+			// flag but keeps the targets' loop's choice (none comes back).
+			CHECK((field.fired(bot) > 0) == glass);
+		}
+	}
+	// The choice itself (0x10074ef0: the memory item's flags 0x48).
+	game::WeaponChoice c;
+	c.distance = 20;
+	game::WeaponOption o;
+	o.usable = true;
+	o.strength = 5;
+	o.maxRange = 100;
+	o.firesThroughTransparent = false;
+	bool explosive = false;
+	c.clearSighting = false;
+	CHECK(game::chooseWeapon(c, {o}, explosive) == -1);
+	c.clearSighting = true;
+	CHECK(game::chooseWeapon(c, {o}, explosive) == 0);
+	o.firesThroughTransparent = true;
+	c.clearSighting = false;
+	CHECK(game::chooseWeapon(c, {o}, explosive) == 0);
+	// C4 against a target moving along the bot's facing at over 4 m/s.
+	game::WeaponOption charge = o;
+	charge.type = game::WeaponAi::C4;
+	c.distance = 2;
+	c.targetAlongFacing = -4.5f;
+	CHECK(game::chooseWeapon(c, {charge}, explosive) == -1);
+	c.targetAlongFacing = 3.5f;
+	CHECK(game::chooseWeapon(c, {charge}, explosive) == 0);
 }

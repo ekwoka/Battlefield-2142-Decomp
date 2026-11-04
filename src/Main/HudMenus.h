@@ -180,6 +180,32 @@ int commanderZoomStep(int zoom);
 //     overhead camera's point kept (+0x2f8..+0x300): the view's own, else
 //     the player's; the map at zoom 2 and the screen held open.
 std::pair<float, float> detailedViewPoint(const std::pair<float, float>* view, const game::GameWorld::PlayerInfo* me);
+
+// The commander's overhead camera in a local round (the server's
+// OverheadCamera object, MultiPlayerOverheadCamera: a local game is its
+// own server, so 0x005f8410 / 0x005f8170 / 0x005f8510 run for its
+// commander as for a host's clients; HostedGame::moveOverheadCamera).
+// - The point (0x005f8170): kept 80 m inside the terrain (its half
+//   extents from the heightmap cluster's slot 0x2c, less 80, about the
+//   centre); the height is the mean ground's plus the template's, which the
+//   overhead view takes itself.
+// - The pan (0x005f8510, each frame for the commander on the overhead
+//   view): input 0 (PIYaw, A / D) moves it east and west, input 3
+//   (PIThrottle, W / S) north and south: each axis's speed (+0x274 /
+//   +0x27c) grows by the input x the acceleration (*0x00a7303c: the
+//   "overheadCamera-acceleration" tweak, 250) x the frame's time, kept
+//   within the template's speed (+0x2a0, 50; x +0x270, not traced: 1),
+//   and without input falls back to 0 at the same rate; then the point
+//   moves by speed x time (0x005f8170 with the speeds).
+struct OverheadCamera {
+	float x = 0, z = 0;
+	float speedX = 0, speedZ = 0;
+	float acceleration = 250, speed = 50;
+	// The terrain (origin and size, metres) the point keeps 80 m inside.
+	float originX = 0, originZ = 0, width = 0, depth = 0;
+	void moveTo(float px, float pz); // 0x005f8170 without a time: the speeds cleared
+	void pan(float yawInput, float throttleInput, float seconds);
+};
 //   - Commander.spottedMouseOver <n> (0x00771b67 -> slot 0x450,
 //     0x00751f80): Spotted<i>MouseOver = (i == n) for i 1..11.
 void spottedMouseOver(hud::HudManager& hud, int n);

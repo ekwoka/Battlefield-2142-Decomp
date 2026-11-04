@@ -63,6 +63,7 @@ public:
 	// and 300): the commander's supply drop, handed to the round's
 	// CommanderSettings.
 	float supplyDropHeight = 50;
+	float defaultTimeToNextAIWave = 8; // see registerGameLogicConsoleMethods
 	float supplyDropNumSecsToLive = 300;
 	// GameLogic.radialLevelIndex (0x004256d0 -> slots 0xc0 / 0xc4: the
 	// settings key GSRadialLevelIndex, clamped to 0..100, 100 when unset):

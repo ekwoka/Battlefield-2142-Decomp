@@ -365,6 +365,25 @@ bool explosivePick(const ExplosivePick& pick);
 // to back off, 0 to hold.
 int guidedMoveStep(bool& engaged, float distance, float minRange, float maxRange);
 
+// The bots' zoom. The AI weapon's zoom input (BF2142.exe's adaptor slot
+// 0x68, 0x00892800: the AI weapon template's +0x5c, which 0x00892be0 fills
+// through 0x0088a8c0 with the zoom component's input, its slot 0xa8, when
+// the item's zoom template, class 0x94e5, has a factor that isn't 0,
+// 0x005da9a0; 0x40, PINone, otherwise): the weapon's DefaultZoomComp
+// levels (zoom.addZoomFactor, as the player's camera reads them).
+anim::ZoomSettings zoomSettingsOf(const world::ObjectTemplate* weapon);
+// The fire plans' zoom statement (0x100d8250, vtable 0x1011a9f0, made by
+// 0x100d8160; added by the fire statements 0x100777a0 and the guided ones
+// 0x100781e0 for a soldier bot, the object's flag bit 9, whose weapon has
+// a zoom input). Its key is pressed when the bot pushes PIYaw, PIThrottle
+// or PISprint (its input mask +0x100 bits 0, 3, 13 with a value) while
+// zoomed (the adaptor's slot 0x70, 0x00892820: the firearm's slot 0x12c,
+// its zoom level not 0), or stands still unzoomed; either only with the
+// weapon ready (the AI weapon's slot 0x18, the adaptor's 0x118 -> the
+// firearm's slot 0x90, 0x005c4e90: past its next-fire tick, no component
+// busy). Otherwise the key is let go.
+bool zoomStatementPress(bool moving, bool zoomed, bool ready);
+
 // The AI weapon's guidance kind (+0x6c; BF2142.exe 0x00892be0 from the
 // weapon's slot 0x154 through 0x008923a0): GenericFireArm 0x005c1fa0 asks
 // its target component (+0x2c) slot 0xb4 (0x005f5b80), its template's
@@ -423,6 +442,12 @@ struct WeaponChoice {
 	bool targetMobile = true;     // the target has a Mobile part (+0x3c)
 	float targetMotion = 0;       // its Mobile slot 0x78: the target's sprint stamina, 0..1 (see Bots.cpp)
 	bool c4Placed = false;        // the bot's +0x1b8 (vt+0x13c): a charge of its own is out
+	// C4's guard on a moving target (0x10074ef0, type 5 with the target's
+	// Mobile part): the target's velocity (its Mobile slot 0x18) along the
+	// bot's facing (the bot's AI object's slot 0x3c, the direction the
+	// strategy's 0.9 test at 0x10075fb0 also takes); over 4 m/s either way
+	// no C4.
+	float targetAlongFacing = 0;
 	bool clearSighting = true;    // the memory item's flag 0x40 (seen clear) or 8
 	bool orderMove = false;       // the bot's +0x248 (vt+0x258)
 	bool areaHold = false, targetInArea = false; // strategicAreaGuard
@@ -703,6 +728,8 @@ public:
 	bool holdingForLob(int player) const;
 	// Whether its fire plan keeps to its order's spot (+0x248, 0x100795a0).
 	bool keepsToOrder(int player) const;
+	// The bot's weapon zoom level (0: unzoomed; see stepZoom).
+	int zoomLevel(int player) const;
 	// A behaviour's urgency at the bot's last think (0 for none).
 	float lastUrgency(int player, const std::string& behaviour) const;
 	// A radio message (the game's AI event 0x1004e140 -> AIDLL 0x10030b20 ->
@@ -794,6 +821,11 @@ private:
 		// someone in the same vehicle) and not seen by the bot itself since.
 		bool secondHand = false;
 		float seenAt = -1e9f;   // +0x58: when anyone last saw it
+		// Flag 0x40: the last sighting was clear, not through a see-through
+		// material (the sight ray's out flag, BF2142.exe 0x00898040: set by
+		// a new item's sighting 0x100ed2c0, set or cleared by a kept one's
+		// 0x100ee430).
+		bool seenClear = false;
 	};
 	// An enemy vehicle in a bot's memory (its root AI object's item):
 	// when it was last seen, lost (-1 in sight) and heard (flag 1, -1e9
@@ -960,6 +992,15 @@ private:
 		std::map<int, float> radioNext;
 		std::vector<RadioSent> radioSent;
 		bool firedLast = false;
+		// The weapon's zoom as the bot's key steps it (stepZoom): the zoom
+		// component's level (+0x1c) and the player's field of view moving
+		// towards it, the weapon they belong to, the key's press this
+		// execution and at the last, the reload last time.
+		anim::ZoomSettings zoomSettings;
+		anim::ZoomState zoom;
+		anim::FieldOfView fov;
+		std::string zoomWeapon;
+		bool zoomPress = false, zoomKey = false, zoomReloadWas = false;
 		// A helicopter's pilot (src/AI/Heli): the controller's inputs and
 		// airborne flag (bot +0x140), the plan's hover point and its take-off
 		// wait (BBPGotoWaypoint3d 0x10067690), the last velocity and aim
@@ -1118,6 +1159,9 @@ private:
 	// held (see Bots.cpp); `guidance` the weapon's guidanceKind.
 	bool guidedFire(const Bot& bot, const GameWorld::PlayerInfo& self, const WeaponAi& weapon, int guidance,
 		const Known& known, bool inSight, const physics::Vec3& look, const physics::Vec3& toTarget) const;
+	// The guided plan's order spot (0x10078570; see Bots.cpp): whether it
+	// walks there while it fights, and the spot.
+	bool guidedOrderSpot(const GameWorld::PlayerInfo& self, physics::Vec3& spot);
 	bool fireKeepsToOrder(const Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& target,
 		physics::Vec3* spot = nullptr) const;
 	// Walks (InfanteryMoveTo) or drives (CarMoveTo/TankMoveTo) along a path
@@ -1269,7 +1313,15 @@ private:
 	void idle(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
 	// The weapon handling after each execution's plan (AIDLL 0x10099b70):
 	// the primary back in hand and its reload.
+	std::vector<GameWorld::WeaponAmmo> seatAmmo(const GameWorld::PlayerInfo& self,
+		const std::vector<std::pair<int, std::string>>& weapons) const;
 	void handleWeapon(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
+	// The zoom key's press (Bot::zoomPress, set by the plans' statements)
+	// on the weapon in hand: a press steps the level (0x005da670; not while
+	// reloading), a weapon change, a seat and a reload with zoomOutOnReload
+	// (0x005da630) zoom out; the world hears the zoom (setZoomed: the
+	// deviation's devModZoom, the walk's speed).
+	void stepZoom(Bot& bot, const GameWorld::PlayerInfo& self, float seconds);
 	// A Helicopter / TransportHelicopter pilot's plans (BBPGotoWaypoint3d,
 	// BBPIdle3d, BBPHeliFire3d) with the flight controllers of src/AI/Heli;
 	// false for a behaviour they leave to the others (Change).

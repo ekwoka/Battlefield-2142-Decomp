@@ -120,6 +120,10 @@ public:
 		bool senderIsListener = false;
 		bool commander = false, squadLeader = false;
 		bool onFoot = true;
+		// The sender's seat's soundFilter (its nearest PlayerControlObject's,
+		// slot 0xf0 of 0xc4c5: "ground", "vehicle", "heli"...): the radio
+		// filter under his voice (0x0042e0c0); "" on foot.
+		std::string senderFilter;
 		Speaker sender;
 		int listenerTeam = 0;
 		Vec3 listener;

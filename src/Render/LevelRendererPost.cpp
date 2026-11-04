@@ -378,6 +378,16 @@ void LevelRenderer::drawShadowCasters(SDL_GPUCommandBuffer* commands, SDL_GPUTex
 
 // ---- the sky's clouds and sun flare ----------------------------------------------
 
+// The SkyDome's technique (0x100fc410 when its cloud count +0x7c is set,
+// again per frame in 0x100fd2f0; the effect "Shaders/SkyDome" and its
+// handles from 0x100fcd80): SkyDomeNV3xDualClouds with hasCloudLayer
+// (slot 0x40) and hasCloudLayer2 (slot 0x48) and two clouds, SkyDomeNV3x
+// with the first and any, else SkyDomeNV3xNoClouds (SkyDomeUnderWater
+// below the sea, 0x100fd2f0): sky.frag by m_cloudLayers 2 / 1 / 0. The
+// flare's texture (Skydome.flareTexture, 0x100fc9f0): the old one let go,
+// none (+0x1ad clear) for an empty name; the "flaresprite" quad made once
+// (its +0xe8, the dome's slot 0x84), then the texture loaded, the flare on
+// (+0x1ad) when it is there.
 void LevelRenderer::buildSkyLayers(const LevelSources& sources)
 {
 	const scene::SkySettings& sky = sources.sky;

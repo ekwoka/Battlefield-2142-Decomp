@@ -17,6 +17,9 @@
 #include <string>
 #include <vector>
 
+namespace dice::hfe::host {
+class HudWorld;
+}
 namespace dice::hfe::game {
 class GameWorld;
 }
@@ -87,6 +90,9 @@ public:
 
 	// The alternate fire as held now (its press cycles the zoom).
 	void setAltFire(bool held) { m_altFire = held; }
+	// The mouse wheel's step this frame (+1 c_PINextItem, -1 c_PIPrevItem):
+	// a zoomed fine-tuning scope's step (ZoomState::fineTune).
+	void setItemStep(int step) { m_itemStep = step; }
 	// The crouch key (c_PICrouch) as held now: in a seat with allowDucking
 	// it ducks (the PlayerControlObject's input, 0x005ca2e0 -> 0x005c7cf0).
 	void setCrouch(bool held) { m_crouch = held; }
@@ -113,6 +119,10 @@ public:
 		bool firing = false; // the fire input held
 	};
 	void setRemote(std::function<bool(Remote&)> source) { m_remote = std::move(source); }
+	// The players a joined game's spectator follows (the server's players
+	// as the client has them: their ghosts' places and looks, the HudWorld
+	// of the joined game). Without it only the local round's are followed.
+	void setPlayers(const host::HudWorld* players) { m_players = players; }
 
 	// The first-person camera now: false when it isn't shown (third person,
 	// dead, no soldier).
@@ -260,10 +270,12 @@ private:
 	game::camera::Ground ground() const;
 
 	game::GameWorld& m_round;
+	const host::HudWorld* m_players = nullptr;
 	anim::AnimationSystems& m_systems;
 	Loader m_load;
 	effects::EffectManager m_effects;
 	bool m_altFire = false, m_altFireWas = false;
+	int m_itemStep = 0;
 	bool m_crouch = false;
 
 	// The soldier this was set up for.

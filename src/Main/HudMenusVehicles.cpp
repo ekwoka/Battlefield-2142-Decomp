@@ -8,11 +8,14 @@
 #include "Hud/Hud.h"
 #include "World/Object.h"
 #include "World/ObjectTemplate.h"
+#include "World/ObjectTemplateManager.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <functional>
 #include <cstdlib>
 #include <unordered_map>
 
@@ -835,6 +838,61 @@ bool standardHelpEnabled(const world::ObjectTemplate* controlled)
 bool usesVehicleCommRose(const world::ObjectTemplate* controlled)
 {
 	return flag(controlled, "vehicleHud.useVehicleCommRose", true);
+}
+
+const world::ObjectTemplate* childArmorTemplate(const world::ObjectTemplate* controlled,
+	const world::ObjectTemplateManager& templates)
+{
+	if (!controlled || !flag(controlled, "vehicleHud.useChildArmor", false)) {
+		return nullptr;
+	}
+	// An Armor component (createComponent Armor; the settings' armor.* for
+	// one that only sets values).
+	const auto armoured = [](const world::ObjectTemplate& t) {
+		for (const std::string& c : t.components()) {
+			std::string lower = c;
+			for (char& ch : lower) {
+				ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+			}
+			if (lower == "armor") {
+				return true;
+			}
+		}
+		return t.settings().count("armor.maxHitPoints") != 0;
+	};
+	// 0x005c6460: the object itself, then each child's subtree in order.
+	const std::function<const world::ObjectTemplate*(const world::ObjectTemplate&, int)> walk =
+		[&](const world::ObjectTemplate& t, int depth) -> const world::ObjectTemplate* {
+		if (armoured(t)) {
+			return &t;
+		}
+		if (depth > 8) {
+			return nullptr;
+		}
+		for (const world::ChildTemplate& child : t.children()) {
+			if (const world::ObjectTemplate* c = templates.find(child.name)) {
+				if (const world::ObjectTemplate* found = walk(*c, depth + 1)) {
+					return found;
+				}
+			}
+		}
+		return nullptr;
+	};
+	return walk(*controlled, 0);
+}
+
+bool seatPostProcessing(const world::ObjectTemplate* controlled, const world::ObjectTemplate* weapon, bool zoomed)
+{
+	if (controlled && hudNumber(controlled, "vehicleHud.enablePostProcessingOnGuiIndex", 0) != 0) {
+		return true;
+	}
+	if (!weapon) {
+		return false;
+	}
+	const auto& settings = weapon->settings();
+	const auto on = settings.find("weaponHud.enablePostProcessingOnGuiIndex");
+	const auto shown = settings.find(zoomed ? "weaponHud.altGuiIndex" : "weaponHud.guiIndex");
+	return on != settings.end() && shown != settings.end() && std::atoi(on->second.c_str()) == std::atoi(shown->second.c_str());
 }
 
 std::string iconFrame(const std::string& icon, int frame)

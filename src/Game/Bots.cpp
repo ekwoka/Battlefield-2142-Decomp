@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <sstream>
 
 namespace dice::hfe::game {
 
@@ -39,12 +40,15 @@ constexpr float kSoldierSpeed = 5.0f;  // SoldierMobile's maxSpeed (Objects/Sold
 // static_init 0x008dfe00/0x008dfe20), without the time step: it runs once
 // a 1/30 s tick, so a unit is 150 degrees a second. Under 0.001 counts as
 // none (0x0091fdc0). Zoomed in, both are scaled by the field of view over
-// the base one (0x00586420; the zoom's mouseSpeedMod is 1 everywhere);
-// bots don't zoom. The pitch is clamped to +-85 degrees (*0x00a68eb0 + 4,
+// the base one (0x00586420; the zoom's mouseSpeedMod is 1 everywhere):
+// the bots' too (stepZoom). The pitch is clamped to +-85 degrees (*0x00a68eb0 + 4,
 // 0x005890a0).
 constexpr float kInputDegreesPerTick = 5.0f;
 constexpr float kInputTicksPerSecond = 30.0f;
 constexpr float kPitchLimit = 85.0f;
+// The soldier camera's field of view (the camera template's default,
+// 0x00610fd0), radians.
+constexpr float kBaseFieldOfView = 1.1f;
 // The soldier's ControlInfo plugin (SoldierCtrl): proportionalConstant -7,
 // derivativeConstant -0.01, angleSpeedConstant 0.4.
 constexpr float kProportional = -7.0f;
@@ -546,7 +550,7 @@ int chooseWeapon(const WeaponChoice& c, const std::vector<WeaponOption>& weapons
 		if (!w.firesThroughTransparent && !c.clearSighting) {
 			continue;
 		}
-		if (w.type == WeaponAi::C4 && c.c4Placed) {
+		if (w.type == WeaponAi::C4 && (c.c4Placed || (c.targetMobile && std::fabs(c.targetAlongFacing) > 4))) {
 			continue;
 		}
 		if (melee && c.soldierBot && c.targetMobile && !w.meleeReachable) {
@@ -899,6 +903,12 @@ bool BotManager::keepsToOrder(int player) const
 	return it != m_bots.end() && it->second.orderMove;
 }
 
+int BotManager::zoomLevel(int player) const
+{
+	const auto it = m_bots.find(player);
+	return it == m_bots.end() ? 0 : it->second.zoom.level();
+}
+
 bool BotManager::explosive(int player) const
 {
 	const auto it = m_bots.find(player);
@@ -1166,6 +1176,28 @@ std::vector<std::pair<int, std::string>> BotManager::seatArmament(const GameWorl
 	return items;
 }
 
+// The seat's weapons' rounds, as the AI weapons read them through the
+// adaptor (BF2142.exe vtable 0x009d5be8: slot 0xc, all magazines' rounds,
+// -1 without a limit; slot 0xe4, 0x00892580, the magazine's): the seat's
+// firearms (GameWorld::seatFireArm), as the template gives them while one
+// isn't made yet.
+std::vector<GameWorld::WeaponAmmo> BotManager::seatAmmo(const GameWorld::PlayerInfo& self,
+	const std::vector<std::pair<int, std::string>>& weapons) const
+{
+	std::vector<GameWorld::WeaponAmmo> list;
+	for (const auto& [index, name] : weapons) {
+		if (const FireArm* gun = m_world.seatFireArm(self.vehicle, self.seat, index)) {
+			const FireArmSettings& settings = gun->settings();
+			list.push_back({name, gun->roundsInMag() + gun->magsLeft() * std::max(settings.magSize, 0), settings.magSize,
+				settings.nrOfMags, gun->roundsInMag()});
+		} else if (const world::ObjectTemplate* t = m_world.templates().find(name)) {
+			const FireArmSettings settings = FireArmSettings::fromTemplate(*t);
+			list.push_back({name, settings.magSize * (settings.nrOfMags + 1), settings.magSize, settings.nrOfMags, settings.magSize});
+		}
+	}
+	return list;
+}
+
 bool BotManager::drivesGun(const GameWorld::PlayerInfo& self) const
 {
 	return self.vehicle && self.driving && m_world.seatTurnsGun(self.vehicle, self.seat);
@@ -1334,6 +1366,7 @@ void BotManager::update(float seconds)
 		if (!self.alive) {
 			bot = Bot();
 			bot.spawnedAt = -1;
+			m_world.setZoomed(self.id, false);
 			m_goals.erase(self.id); // a scripted goal ends with the bot's life (the rewrite's choice)
 			// Spawn on the squad leader when there is a living one on foot.
 			bool leaderUp = false;
@@ -1504,6 +1537,7 @@ void BotManager::update(float seconds)
 		updateGoal(bot, *self);
 		act(bot, *self, input, elapsed);
 		handleWeapon(bot, *self, input);
+		stepZoom(bot, *self, elapsed);
 		m_behaviourSeconds[bot.behaviour + (self->vehicle ? (self->driving ? " (driving)" : " (seated)") : "")] += elapsed;
 		if (self->vehicle && self->driving) {
 			m_driven[self->vehicle] += std::sqrt(horizontal2(self->velocity)) * elapsed;
@@ -1688,12 +1722,16 @@ void BotManager::sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::v
 			const float pitchOff = std::fabs(std::atan2(d.y, std::sqrt(horizontal2(d))) * kDegrees - lookPitch);
 			visible = alerted || close || (yawOff < halfFov && pitchOff < halfFov);
 		}
+		bool seenThrough = false;
 		if (visible) {
 			// A soldier's rays all go to its physics node (kChestHeight): one
 			// tells. Others' after the first to points about the object.
 			const int rays = other.vehicle
 				? std::clamp(static_cast<int>(std::lround(30 * kSoldierRadius / std::max(distance, 0.01f))), 1, 10)
 				: 1;
+			// The ray (IAIObjectEnvironment slot 0x44, BF2142.exe 0x00897df0)
+			// passes see-through materials, telling whether it went
+			// through one (its last argument, handed to 0x100ed2c0).
 			bool clear = false;
 			for (int ray = 0; ray < rays && !clear; ++ray) {
 				physics::Vec3 point = chest;
@@ -1701,7 +1739,7 @@ void BotManager::sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::v
 					point = other.position
 						+ physics::Vec3 {(random() * 2 - 1) * 0.3f, 0.2f + random() * 1.5f, (random() * 2 - 1) * 0.3f};
 				}
-				clear = m_world.lineOfSight(eye, point, self.vehicle);
+				clear = m_world.lineOfSight(eye, point, self.vehicle, seenThrough);
 			}
 			visible = clear;
 		}
@@ -1717,6 +1755,10 @@ void BotManager::sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::v
 			it->lostAt = -1;
 			it->everSeen = true;
 			it->secondHand = false; // seen by the bot itself: flag 8 cleared (0x100ed2c0)
+			// Flag 0x40: set by a clear sighting; one through a see-through
+			// material leaves a new item without it (0x100ed2c0) and clears
+			// a kept one's (0x100ee430).
+			it->seenClear = !seenThrough;
 			// Sightings go to the others in the same vehicle (0x100a8ce0;
 			// 0x100ed2c0 with "not the seer": a new memory item there gets
 			// flag 8, an old one keeps its flags).
@@ -1737,6 +1779,7 @@ void BotManager::sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::v
 							m->seenAt = m_time;
 							m->lostAt = -1;
 							m->everSeen = true;
+							m->seenClear = m->seenClear || !seenThrough; // 0x100ed2c0 only sets it
 						}
 					}
 				}
@@ -2515,14 +2558,55 @@ void BotManager::handleWeapon(Bot& bot, const GameWorld::PlayerInfo& self, Soldi
 	}
 }
 
+// The bot's zoom. The statements press the AI weapon's zoom input (its
+// slot 0x68) through the bot's input (0x1008d740); the game's zoom
+// component steps on the press (0x005da670: the next level, past the last
+// back to 0, not while reloading), zooms out on a reload with
+// zoomOutOnReload (0x005da630) and on a weapon change, and asks the
+// player's field of view for the level's factor over zoomDelay
+// (0x005da3f0 -> 0x00591740). The soldier turns by its look inputs times
+// that field of view over the camera's (1.1, 0x00610fd0) and the zoom's
+// mouseSpeedMod (0x00586420; see aim), walks at the zoomed speed index and
+// its deviation takes devModZoom (GameWorld::setZoomed). The sight is the
+// same zoomed or not: the sensing's cone (0x100ed700) takes its row of the
+// table at 0x1012b074 from the object's flag bit 10, not the zoom.
+void BotManager::stepZoom(Bot& bot, const GameWorld::PlayerInfo& self, float seconds)
+{
+	const std::string weapon = self.alive && !self.vehicle && !self.manDown ? weaponName(self, self.inHandSlot) : std::string();
+	if (weapon != bot.zoomWeapon) {
+		bot.zoomWeapon = weapon;
+		bot.zoomSettings = zoomSettingsOf(m_world.templates().find(weapon));
+		bot.zoom.reset();
+		bot.fov.set(kBaseFieldOfView, 0);
+	}
+	const anim::ZoomSettings& settings = bot.zoomSettings;
+	const bool pressed = bot.zoomPress && !bot.zoomKey;
+	if (settings.present()) {
+		if (pressed && !self.reloading) {
+			const float factor = bot.zoom.cycle(settings);
+			bot.fov.set(factor > 0 ? factor : kBaseFieldOfView, settings.delay);
+		} else if (self.reloading && !bot.zoomReloadWas && bot.zoom.level() > 0 && settings.zoomOutOnReload) {
+			bot.zoom.reset();
+			bot.fov.set(kBaseFieldOfView, settings.delay);
+		}
+	}
+	bot.zoomReloadWas = self.reloading;
+	bot.zoomKey = bot.zoomPress;
+	bot.zoomPress = false;
+	bot.zoom.tick();
+	bot.fov.update(seconds);
+	m_world.setZoomed(self.id, bot.zoom.level() > 0);
+}
+
 // BBPIdleInfantery's plan (0x1006a500): Parallel(Idle) under While(True).
 // The Idle statement's interpreter (0x1008f840 -> 0x100e6120) lets go of
 // the move and the trigger and levels the view: no yaw input, the pitch
 // back to level. Inside the bot's own strategic area (within its order
 // position's radius + 2 m, 0x10034a10) it also crouches (SoldierPose 2,
-// 0x100d2900) and taps its weapon's alternate key once when that is not
-// on (the weapon adaptor's vt+0x68/0x70; the rewrite's weapons have no
-// such state, so it is left out).
+// 0x100d2900) and zooms in: If (forced) NOT the weapon zoomed (0x100d2f80
+// over 0x100d3070, whose 0x100d3090 is the adaptor's slot 0x70) a
+// BAPATrigger (0x100d3110) on its zoom input (slot 0x68), for a weapon that
+// has one (stepZoom).
 void BotManager::idle(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input)
 {
 	if (self.vehicle) {
@@ -2544,6 +2628,7 @@ void BotManager::idle(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 		if (physics::lengthSquared(self.position - order) < (radius + 2) * (radius + 2)) {
 			bot.pose = SoldierPose::Crouch;
 			input.pose = bot.pose;
+			bot.zoomPress = bot.zoomSettings.present() && bot.zoom.level() == 0;
 		}
 		break;
 	}
@@ -2603,7 +2688,8 @@ float BotManager::urgency(Bot& bot, const ai::BehaviourSetup& behaviour, float w
 
 // BBFire's urgency (0x10075fb0) and the choice of target and weapon. For
 // each known enemy and each carried weapon: the weapon's strength against
-// the target's type (FireAndForget only when facing it within 0.9, C4
+// the target's type (FireAndForget only when facing it within 0.9 and
+// seen clear, C4
 // within 4 m; Healing/Ammo/Repair/Camouflage none), x1.03 for the weapon
 // in hand. The target scores
 //   max(0, 1 - d / (1.2 maxRange)) x best strength x freshness x 5
@@ -2655,7 +2741,9 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 				score = distance <= 4 && std::fabs(at.y - eye.y) <= 4 ? w.strength[static_cast<size_t>(targetType)] : 0;
 				break;
 			case WeaponAi::FireAndForget:
-				score = facing && m_world.drone(self.id) == 0 ? w.strength[static_cast<size_t>(targetType)] : 0;
+				// Facing within 0.9 and the last sighting clear (flag 0x40;
+				// 0x10075fb0's type 9 test).
+				score = facing && known.seenClear && m_world.drone(self.id) == 0 ? w.strength[static_cast<size_t>(targetType)] : 0;
 				break;
 			default:
 				break;
@@ -2887,9 +2975,7 @@ void BotManager::planFire(Bot& bot, const GameWorld::PlayerInfo& self, bool gunn
 // (a bot: its target is this one, its vt+0x74; a human: the sensing
 // agent's stamp for it within 9995 s, AIDLL 0x100eb7f0 on the map at +0x74
 // +0x84, whose writer wasn't traced) is, for a human, a round of it having
-// passed the bot (the rewrite's alert). The rewrite's sight has no
-// see-through materials, so every sighting counts as clear (flag 0x40). A
-// gun of a vehicle has no magazines here (rounds -1). No bot is scripted
+// passed the bot (the rewrite's alert). No bot is scripted
 // (+0x264, set by the scripted-bot commands 0x1004d140/0x1004d8e0), and
 // no wire-guided weapon holds a target for a bot (the LPTargetComp's
 // target isn't modelled). The fire plan's move to the order's spot that
@@ -2914,7 +3000,9 @@ void BotManager::pickWeapon(Bot& bot, const GameWorld::PlayerInfo& self, const s
 	if (weapons.empty()) {
 		return;
 	}
-	const std::vector<GameWorld::WeaponAmmo> ammo = self.vehicle ? std::vector<GameWorld::WeaponAmmo> {} : m_world.weaponAmmo(self.id);
+	const std::vector<GameWorld::WeaponAmmo> ammo = gunning ? seatAmmo(self, weapons)
+		: self.vehicle                                   ? std::vector<GameWorld::WeaponAmmo> {}
+														 : m_world.weaponAmmo(self.id);
 	const std::vector<GameWorld::WeaponAmmo> targetAmmo = target->vehicle ? std::vector<GameWorld::WeaponAmmo> {}
 		: m_world.weaponAmmo(target->id);
 	const auto ammoOf = [](const std::vector<GameWorld::WeaponAmmo>& list, const std::string& name) -> const GameWorld::WeaponAmmo* {
@@ -2965,6 +3053,12 @@ void BotManager::pickWeapon(Bot& bot, const GameWorld::PlayerInfo& self, const s
 		m_world.vehicleStamina(target->vehicle, c.targetMotion, sprinting);
 	}
 	c.c4Placed = bot.c4Placed;
+	if (target->vehicle && !m_settings.aiTemplates.empty()) {
+		const world::Object* o = m_world.objects().find(target->vehicle);
+		c.targetMobile = o && o->objectTemplate() && m_settings.plugin(aiTemplateOf(o->objectTemplate()->name()), "Mobile");
+	}
+	const float facing = self.yaw * kRadians;
+	c.targetAlongFacing = target->velocity.x * std::sin(facing) + target->velocity.z * std::cos(facing);
 	c.orderMove = bot.orderMove;
 	if (!self.vehicle) {
 		std::vector<GuardArea> areas;
@@ -2994,6 +3088,9 @@ void BotManager::pickWeapon(Bot& bot, const GameWorld::PlayerInfo& self, const s
 	pick.now = m_time;
 	pick.conditionFailedAt = bot.conditionFailedAt;
 	pick.vehicleFailedAt = bot.vehicleFailedAt;
+	// The weapons without setFiresThroughTransparent want the target seen
+	// clear or known from others (the memory item's flags 0x48).
+	c.clearSighting = known->seenClear || known->secondHand;
 	pick.seen = known->everSeen;
 	pick.secondHand = known->secondHand;
 	pick.seenAt = known->seenAt;
@@ -5079,13 +5176,18 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 	}
 	bot.pitchError = ep;
 	bot.yawError = ey;
-	float turn = right * kInputDegreesPerTick * kInputTicksPerSecond * seconds;
+	// Zoomed in, a unit turns the soldier by the field of view over the
+	// camera's times mouseSpeedMod (0x00586420).
+	const float zoomScale = !self.vehicle && bot.zoom.level() > 0
+		? bot.fov.current / kBaseFieldOfView * bot.zoomSettings.mouseSpeedMod
+		: 1.0f;
+	float turn = right * kInputDegreesPerTick * kInputTicksPerSecond * seconds * zoomScale;
 	// Not past the target in one tick.
 	const float errorDegrees = ey * kDegrees;
 	if ((errorDegrees >= 0 && turn > errorDegrees) || (errorDegrees < 0 && turn < errorDegrees)) {
 		turn = errorDegrees;
 	}
-	float pitchStep = up * kInputDegreesPerTick * kInputTicksPerSecond * seconds;
+	float pitchStep = up * kInputDegreesPerTick * kInputTicksPerSecond * seconds * zoomScale;
 	const float pitchErrorDegrees = ep * kDegrees;
 	if ((pitchErrorDegrees >= 0 && pitchStep > pitchErrorDegrees) || (pitchErrorDegrees < 0 && pitchStep < pitchErrorDegrees)) {
 		pitchStep = pitchErrorDegrees;
@@ -5181,6 +5283,64 @@ bool BotManager::fireKeepsToOrder(const Bot& bot, const GameWorld::PlayerInfo& s
 	return keep;
 }
 
+// The guided plan's order spot (0x10078570, when it is built): the
+// strategic area 0x10034a10 picks for the bot's team at its position (of
+// the areas the team doesn't hold, +0x70 + 4 team not 0, the most radius /
+// max(1, d^2) from the team's spot, slot 0x68), one with a control point
+// (+0x164 not -1); its spot for the bot (0x1005d940: the bot's own
+// position when it stands within 0.8 of the control point's radius, else
+// one of 20 tries within that on the bot's mesh, the control point's own
+// failing them; the vehicle map's order position for a bot on it). With
+// that spot within the team's radius of the team's spot (+0x98 / +0x7c + 8
+// team, across), the memo (0x100d8e40) of AND (0x100d49a0) of the area not
+// held by the team (0x100db550: +0x70 + 4 team not 0) and the bot within
+// 40 m of the spot across (0x100db3b0, ObjectDistance with its flag) starts
+// an If over MoveToFinding (0x100d11c0) to the spot at the Mobile's speed;
+// a copy of the memo (0x100d8f90) also opens the trigger's distance band
+// (OR 0x100cf1b0). The rewrite's areas keep the team's spot and radius at
+// the control point's (see pickWeapon).
+bool BotManager::guidedOrderSpot(const GameWorld::PlayerInfo& self, physics::Vec3& spot)
+{
+	const GameWorld::ControlPointInfo* best = nullptr;
+	float bestValue = -1;
+	const std::vector<GameWorld::ControlPointInfo> points = m_world.controlPointList();
+	for (const ai::StrategicArea& area : m_settings.strategy.areas) {
+		for (const GameWorld::ControlPointInfo& point : points) {
+			if (point.id != area.controlPoint || point.team == self.team) {
+				continue;
+			}
+			const float d2 = horizontal2(self.position - point.position);
+			const float value = d2 < 1 ? point.radius : point.radius / d2;
+			if (bestValue < value) {
+				bestValue = value;
+				best = &point;
+			}
+		}
+	}
+	if (!best) {
+		return false;
+	}
+	const float r = best->radius * 0.8f;
+	if (horizontal2(self.position - best->position) <= r * r) {
+		spot = self.position;
+	} else {
+		spot = best->position;
+		for (int attempt = 0; attempt < 20; ++attempt) {
+			const float angle = random() * 6.2831853f;
+			const float distance = std::sqrt(random()) * r;
+			const physics::Vec3 at = best->position + physics::Vec3 {std::sin(angle) * distance, 0, std::cos(angle) * distance};
+			if (!m_navMesh || m_navMesh->findPolygon(toAi(at)) >= 0) {
+				spot = at;
+				break;
+			}
+		}
+	}
+	if (horizontal2(spot - best->position) >= best->radius * best->radius) {
+		return false;
+	}
+	return horizontal2(spot - self.position) < 40.0f * 40.0f;
+}
+
 int guidedMoveStep(bool& engaged, float distance, float minRange, float maxRange)
 {
 	const float keep = 0.85f * maxRange, nearLimit = std::max(15.0f, 1.1f * minRange);
@@ -5198,6 +5358,35 @@ int guidedMoveStep(bool& engaged, float distance, float minRange, float maxRange
 	}
 	engaged = false; // within [near limit, 0.85 maxRange]: the move is done
 	return 0;
+}
+
+anim::ZoomSettings zoomSettingsOf(const world::ObjectTemplate* weapon)
+{
+	anim::ZoomSettings settings;
+	if (!weapon) {
+		return settings;
+	}
+	const auto& components = weapon->components();
+	if (std::find(components.begin(), components.end(), "DefaultZoomComp") == components.end()) {
+		return settings;
+	}
+	if (const auto it = weapon->settings().find("zoom.addZoomFactor.list"); it != weapon->settings().end()) {
+		std::istringstream factors(it->second);
+		for (float f; factors >> f;) {
+			if (std::find(settings.factors.begin(), settings.factors.end(), f) == settings.factors.end()) {
+				settings.factors.push_back(f); // duplicates skipped (0x005dae50)
+			}
+		}
+	}
+	settings.delay = settingNumber(weapon, "zoom.zoomDelay", 0.5f);
+	settings.mouseSpeedMod = settingNumber(weapon, "zoom.mouseSpeedMod", 1);
+	settings.zoomOutOnReload = settingNumber(weapon, "zoom.zoomOutOnReload", 1) != 0;
+	return settings;
+}
+
+bool zoomStatementPress(bool moving, bool zoomed, bool ready)
+{
+	return ready && (moving ? zoomed : !zoomed);
 }
 
 // The guided weapons' plan on foot (0x10078570) decides its trigger in two
@@ -5221,8 +5410,9 @@ bool BotManager::guidedFire(const Bot& bot, const GameWorld::PlayerInfo& self, c
 {
 	const float memory = std::sqrt(physics::lengthSquared(known.position - self.position));
 	const bool inView = weapon.type == WeaponAi::TitanWeapon || inSight;
-	if (!inView || memory < 0.9f * weapon.minRange || memory > 1.1f * weapon.maxRange) {
-		return false;
+	const bool inBand = memory >= 0.9f * weapon.minRange && memory <= 1.1f * weapon.maxRange;
+	if (!inView || !(inBand || bot.orderMove)) {
+		return false; // the order spot's memo opens the band (OR 0x100cf1b0)
 	}
 	if (self.inHandSlot != bot.weaponSlot) {
 		return false;
@@ -5279,7 +5469,9 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 	if (bot.sharedTarget != bot.target) {
 		bot.sharedTarget = bot.target;
 		shareTarget(self, target);
-		bot.orderMove = fireKeepsToOrder(bot, self, target, &bot.orderSpot);
+		// A guided weapon's plan on foot keeps its own order spot.
+		const bool guided = !self.vehicle && guidanceKind(m_world.templates().find(weaponName(self, bot.weaponSlot))) != 0;
+		bot.orderMove = guided ? guidedOrderSpot(self, bot.orderSpot) : fireKeepsToOrder(bot, self, target, &bot.orderSpot);
 	}
 	const physics::Vec3 targetAt = (inSight ? target.position : known->position)
 		+ physics::Vec3 {0, target.vehicle ? 1.0f : kChestHeight, 0};
@@ -5292,6 +5484,7 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 	}
 	std::string weaponTemplate;
 	int fireGroup = 0;
+	int seatIndex = -1; // the seat weapon fought with (SeatLayout::weapons)
 	if (gunning) {
 		// The seat's chosen weapon: pressed on its own fire input (the AI
 		// weapon's slot 0x60, BF2142.exe 0x008927c0: the fire component's
@@ -5301,6 +5494,7 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 		const auto seats = m_world.vehicleSeats(self.vehicle);
 		const int active = m_world.seatWeaponIndex(self.vehicle, self.seat);
 		const int chosen = bot.seatWeapon >= 0 ? bot.seatWeapon : active;
+		seatIndex = chosen;
 		if (static_cast<size_t>(self.seat) < seats.size()) {
 			const GameWorld::SeatLayout& seat = seats[static_cast<size_t>(self.seat)];
 			if (chosen >= 0 && static_cast<size_t>(chosen) < seat.weapons.size()) {
@@ -5592,6 +5786,19 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 		input.fire = false;
 		input.reload = !bot.reloadedLast;
 	}
+	// A gun of a seat: the vehicle plan (0x100795a0) built while the
+	// weapon's magazine is empty (the AI weapon's slot 0x14 not 1, its
+	// adaptor's slot 0xe4, 0x00892580, 0) and without ammo.autoReload adds
+	// If (the chosen weapon in hand, 0x100da090) BAPATrigger (0x100d3110)
+	// on c_PIReload (input 32) between the constant conditions; the
+	// rewrite's continuous plan presses it whenever that holds.
+	if (gunning) {
+		const FireArm* gun = m_world.seatFireArm(self.vehicle, self.seat, seatIndex);
+		if (gun && gun->settings().magSize > 0 && gun->roundsInMag() == 0 && !gun->settings().autoReload && !gun->reloading()) {
+			input.fire = input.altFire = false;
+			input.reload = !bot.reloadedLast;
+		}
+	}
 	// A bot in a squad reports its target to its squad as its trigger goes
 	// down and comes up (AIDLL 0x1009a1d0, 0x1009a2a0 -> IAIGame vt+0x6c ->
 	// BF2142.exe 0x008958a0: event 0x41, type 1; 30 s and 3 s on the
@@ -5643,6 +5850,15 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 		// spread by it through the deviation's normal numbers
 		// (GameWorld::setAiDeviation). The aim itself stays on the target.
 		m_world.setAiDeviation(self.id, deviation);
+	}
+	// The zoom statement (0x100d8250) for a soldier bot with a zoom on the
+	// weapon: in when it stands still, out when it moves, with the weapon
+	// ready (not reloading, the chosen weapon in hand: the firearm's busy
+	// test 0x005c4e90 in the rewrite's terms).
+	if (!self.vehicle && bot.zoomWeapon == weaponTemplate && bot.zoomSettings.present()) {
+		const bool moving = input.throttle != 0 || input.strafe != 0 || input.sprint;
+		const bool ready = !self.reloading && self.inHandSlot == bot.weaponSlot;
+		bot.zoomPress = zoomStatementPress(moving, bot.zoom.level() > 0, ready);
 	}
 	if (bot.devYaw != 0) {
 		input.turn -= bot.devYaw;
@@ -5947,6 +6163,10 @@ bool BotManager::steer(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 		d = length > 0.001f ? d * (1 / length) : physics::Vec3 {std::sin(self.yaw * kRadians), 0, std::cos(self.yaw * kRadians)};
 	}
 	input.throttle = 1;
+	// InfanteryMoveTo and InfanteryMoveToObject (0x1008fc90, 0x1008f920)
+	// zoom out on every step (0x100e5f70): the weapon's zoom key pressed
+	// while it is zoomed and the key was let go, else let go.
+	bot.zoomPress = bot.zoom.level() > 0 && !bot.zoomKey;
 	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight, 0};
 	aim(bot, self, eye + d * 5.0f, {}, false, {}, input, seconds);
 	bot.follower.progress(toAi(self.position), std::fabs(input.throttle), m_time);

@@ -41,6 +41,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace dice::hfe {
@@ -189,6 +190,9 @@ public:
 		// Pixels the icon sits from its point (vehicleHud.miniMapIconOffset,
 		// 0x0077c610), turned with it about the point.
 		float offsetX = 0, offsetY = 0;
+		// > 0: the icon's side in metres (it scales with the map's zoom:
+		// the radar rings, 0x0078f060), over `size`.
+		float worldSize = 0;
 	};
 	void setMap(const std::string& texture, float originX, float originZ, float width, float depth);
 	void setMapFocus(float x, float z) { m_mapFocus[0] = x; m_mapFocus[1] = z; }
@@ -202,6 +206,11 @@ public:
 	// (made square, with a margin; 0x0078b490). Unset: the whole level.
 	void setMapArea(float minX, float minZ, float maxX, float maxZ);
 	void clearMapArea() { m_mapAreaSet = false; }
+	// A texture laid over the whole map under the markers, at the map's
+	// alpha (the combat-area layer, 0x0077d200; Main/HudCombatArea.h); ""
+	// for none. A full path (not under Menu/HUD/Texture/).
+	void setMapLayer(std::string texture) { m_mapLayer = std::move(texture); }
+	const std::string& mapLayer() const { return m_mapLayer; }
 	void setMapMarkers(std::vector<MapMarker> markers) { m_mapMarkers = std::move(markers); }
 	// The clickable marker at a point of the 800 x 600 screen, as last
 	// drawn; -1 for none.
@@ -369,6 +378,7 @@ private:
 	size_t m_parentStart = 0; // where the drawing node's parent's quads began
 	void drawMap(const Node& node, float alpha, float seconds, std::vector<HudQuad>& out);
 	std::string m_mapTexture;
+	std::string m_mapLayer;
 	int m_mapZoomIndex = 1;
 	int m_commanderZoomIndex = 0;
 	bool m_overhead = false;

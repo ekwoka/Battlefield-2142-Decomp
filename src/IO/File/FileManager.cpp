@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <set>
 #include <system_error>
+#include <utility>
 
 namespace dice::hfe::io {
 
@@ -168,6 +169,12 @@ std::string FileManager::resolveLooseFile(const std::string& normalized) const
 bool FileManager::exists(const std::string& path) const
 {
 	std::string normalized = normalizePath(path);
+	{
+		const std::lock_guard<std::mutex> lock(m_memoryMutex);
+		if (m_memoryFiles.count(normalized)) {
+			return true;
+		}
+	}
 	if (startsWith(normalized, kLegacyContentPrefix)) {
 		normalized.erase(0, sizeof(kLegacyContentPrefix) - 1);
 	}
@@ -182,9 +189,30 @@ bool FileManager::exists(const std::string& path) const
 	return !resolveLooseFile(normalized).empty();
 }
 
+void FileManager::addMemoryFile(const std::string& path, std::vector<uint8_t> data)
+{
+	const std::lock_guard<std::mutex> lock(m_memoryMutex);
+	m_memoryFiles[normalizePath(path)] = std::move(data);
+}
+
+void FileManager::removeMemoryFile(const std::string& path)
+{
+	const std::lock_guard<std::mutex> lock(m_memoryMutex);
+	m_memoryFiles.erase(normalizePath(path));
+}
+
 bool FileManager::readFile(const std::string& path, std::vector<uint8_t>& out) const
 {
 	const std::string normalized = normalizePath(path);
+	{
+		const std::lock_guard<std::mutex> lock(m_memoryMutex);
+		if (!m_memoryFiles.empty()) {
+			if (const auto it = m_memoryFiles.find(normalized); it != m_memoryFiles.end()) {
+				out = it->second;
+				return true;
+			}
+		}
+	}
 	std::string relative;
 	if (const MountPoint* mount = findMount(normalized, relative)) {
 		for (const auto& archive : mount->archives) {

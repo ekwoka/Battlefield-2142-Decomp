@@ -1539,17 +1539,26 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 	if (map.color[3] > 0 && clipTo(map, nx, ny, nx + nw, ny + nh)) {
 		out.push_back(map);
 	}
+	// The combat-area layer over the same rectangle, at the map's alpha
+	// times the node's (0x0077d200: +0x7b4 x +0x7b0), before the markers.
+	if (!m_mapLayer.empty()) {
+		HudQuad layer {m_mapLayer, mapX, mapY, mapX + mapW, mapY + mapH, 0, 0, 1, 1, {1, 1, 1, alpha * m_mapAlpha}, 0};
+		if (layer.color[3] > 0 && clipTo(layer, nx, ny, nx + nw, ny + nh)) {
+			out.push_back(layer);
+		}
+	}
 	m_mapView = {true, nx, ny, nx + nw, ny + nh, mapX, mapY, mapW, mapH};
 	for (const MapMarker& marker : m_mapMarkers) {
 		const float u = (marker.x - m_mapOrigin[0]) / m_mapSize[0];
 		const float v = 1 - (marker.z - m_mapOrigin[1]) / m_mapSize[1];
 		const float sx = mapX + u * mapW, sy = mapY + v * mapH;
-		const float side = std::floor(marker.size);
+		const float pixels = marker.worldSize > 0 ? marker.worldSize / m_mapSize[0] * mapW : marker.size;
+		const float side = std::floor(pixels);
 		const float tall = marker.height > 0 ? std::floor(marker.height) : side;
 		// 0x0077c610: the rectangle at floor(point + offset - size / 2), turned
 		// about its centre less the offset (the point).
-		const float x0 = std::floor(sx + marker.offsetX - marker.size * 0.5f);
-		const float y0 = std::floor(sy + marker.offsetY - (marker.height > 0 ? marker.height : marker.size) * 0.5f);
+		const float x0 = std::floor(sx + marker.offsetX - pixels * 0.5f);
+		const float y0 = std::floor(sy + marker.offsetY - (marker.height > 0 ? marker.height : pixels) * 0.5f);
 		if (x0 + side <= nx || x0 >= nx + nw || y0 + tall <= ny || y0 >= ny + nh) {
 			continue;
 		}

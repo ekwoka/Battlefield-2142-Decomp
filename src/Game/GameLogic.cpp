@@ -202,6 +202,13 @@ void registerGameLogicConsoleMethods(Console& console, GameLogic& logic)
 		[l](const float& v) { l->supplyDropHeight = v; });
 	bindProperty<float>(console, "GameLogic.supplyDropNumSecsToLive", access, [l] { return l->supplyDropNumSecsToLive; },
 		[l](const float& v) { l->supplyDropNumSecsToLive = v; });
+	// GameLogic.defaultTimeToNextAIWave (executor 0x00428474 -> the game
+	// logic's slots 0xa0 / 0xa4: the server's +0x28c, 8 by default from
+	// 0x004c0bf0; the client's logic keeps nothing and answers 0). The
+	// co-op maps set 8 or 0. Nothing in BF2142.exe or AIDLL reads it (the
+	// slot's only caller is this executor): kept, no wave timer.
+	bindProperty<float>(console, "GameLogic.defaultTimeToNextAIWave", access,
+		[l] { return l->defaultTimeToNextAIWave; }, [l](const float& v) { l->defaultTimeToNextAIWave = v; });
 	bindProperty<int>(console, "GameLogic.radialLevelIndex", access, [l] { return l->radialLevelIndex; },
 		[l](const int& v) { l->radialLevelIndex = std::clamp(v, 0, 100); });
 	bindProperty<bool>(console, "GameLogic.enableVoHelp", access, [l] { return l->enableVoHelp; },

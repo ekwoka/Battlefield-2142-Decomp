@@ -1,5 +1,7 @@
 #include "PlayerCamera.h"
 
+#include "HudWorld.h"
+
 #include "Game/GameWorld.h"
 #include "Render/RenderMath.h"
 #include "World/Object.h"
@@ -372,12 +374,13 @@ void PlayerCamera::nextPlayer()
 	// 0x00615ce0: the living teammates (not spectators) in the players'
 	// order, the one after the followed one, else the first.
 	game::GameWorld::PlayerInfo me;
-	if (!m_round.playerInfo(m_round.localPlayer(), me)) {
+	const bool joined = m_remote && m_players;
+	if (joined ? !m_players->playerInfo(m_players->localPlayer(), me) : !m_round.playerInfo(m_round.localPlayer(), me)) {
 		return;
 	}
 	int first = -1;
 	bool passed = false;
-	for (const auto& p : m_round.playerList()) {
+	for (const auto& p : joined ? m_players->playerList() : m_round.playerList()) {
 		if (p.team != me.team || !p.alive || p.id == me.id || p.spectator) {
 			continue;
 		}
@@ -438,7 +441,7 @@ int PlayerCamera::toggleSpectatorCamera()
 	if (!spectator) {
 		return 0;
 	}
-	if (m_spectating == Spectating::Free && !m_remote) {
+	if (m_spectating == Spectating::Free && (!m_remote || m_players)) {
 		nextPlayer();
 		if (m_followPlayer >= 0) {
 			m_spectating = Spectating::Follow;
@@ -458,6 +461,31 @@ int PlayerCamera::toggleSpectatorCamera()
 	return 1;
 }
 
+namespace {
+
+// The followed player's view (0x00614d00 from his frame: his vehicle's, else
+// his soldier camera's at the eye).
+game::camera::Look followLookOf(game::GameWorld& round, game::camera::FollowState& state,
+	const game::GameWorld::PlayerInfo& other, const game::camera::Ground& g)
+{
+	using namespace game::camera;
+	Frame frame;
+	const uint32_t object = other.vehicle ? other.vehicle : other.soldier;
+	const world::Object* o = object ? round.objects().find(object) : nullptr;
+	if (other.vehicle && o) {
+		frame.rotation = Mat3::fromYawPitchRoll({o->rotation().x, o->rotation().y, o->rotation().z});
+		frame.position = {o->position().x, o->position().y, o->position().z};
+	} else {
+		// Its soldier camera: at the eye, turned by the look.
+		frame.rotation = Mat3::fromYawPitchRoll({other.yaw, -other.aimPitch, 0});
+		frame.position = {other.position.x, other.position.y + 1.47f, other.position.z};
+	}
+	const Vec3 velocity = other.velocity;
+	return follow(state, frame, radiusOf(round, object), &velocity, g);
+}
+
+} // namespace
+
 void PlayerCamera::stepViews(float seconds)
 {
 	using namespace game::camera;
@@ -467,6 +495,28 @@ void PlayerCamera::stepViews(float seconds)
 		// spectator flies the free camera (following another needs the
 		// ghosts' players, which the remote view doesn't take).
 		Remote r;
+		if (spectator && !(m_remote(r) && r.alive) && m_spectating == Spectating::Follow && m_players) {
+			// Following another player: his ghost's place and look, as the
+			// local round's (0x00614d00); gone, the next one, else free.
+			game::GameWorld::PlayerInfo other;
+			if (!m_players->playerInfo(m_followPlayer, other) || !other.alive) {
+				const int was = m_followPlayer;
+				m_followPlayer = -1;
+				nextPlayer();
+				if (m_followPlayer < 0 || m_followPlayer == was || !m_players->playerInfo(m_followPlayer, other)) {
+					m_followPlayer = -1;
+					m_free.position = m_lastLook.eye;
+					m_spectating = Spectating::Free;
+				}
+			}
+			if (m_spectating == Spectating::Follow) {
+				m_external = followLookOf(m_round, m_follow, other, ground());
+				m_lastLook = m_external;
+				m_externalFov = m_baseFov;
+				m_hasExternal = true;
+				return;
+			}
+		}
 		if (spectator && !(m_remote(r) && r.alive)) {
 			if (m_spectating != Spectating::Free) {
 				m_free.position = m_lastLook.eye;
@@ -611,19 +661,7 @@ void PlayerCamera::stepViews(float seconds)
 	if (m_spectating == Spectating::Follow) {
 		game::GameWorld::PlayerInfo other;
 		m_round.playerInfo(m_followPlayer, other);
-		Frame frame;
-		const uint32_t object = other.vehicle ? other.vehicle : other.soldier;
-		const world::Object* o = m_round.objects().find(object);
-		if (other.vehicle && o) {
-			frame.rotation = Mat3::fromYawPitchRoll({o->rotation().x, o->rotation().y, o->rotation().z});
-			frame.position = {o->position().x, o->position().y, o->position().z};
-		} else {
-			// Its soldier camera: at the eye, turned by the look.
-			frame.rotation = Mat3::fromYawPitchRoll({other.yaw, -other.aimPitch, 0});
-			frame.position = {other.position.x, other.position.y + 1.47f, other.position.z};
-		}
-		const Vec3 velocity = other.velocity;
-		look = follow(m_follow, frame, radiusOf(m_round, object), &velocity, g);
+		look = followLookOf(m_round, m_follow, other, g);
 	} else if (m_spectating == Spectating::Free) {
 		freeMove(m_free, m_freeInput, seconds, g);
 		m_freeInput.turnDegrees = m_freeInput.pitchDegrees = 0;
@@ -780,6 +818,10 @@ void PlayerCamera::tick(float seconds)
 				m_zoomSettings.disableMuzzle = number(*weaponTemplate, "zoom.disableMuzzleWhenZoomed", 0) != 0;
 				m_zoomSettings.mouseSpeedMod = number(*weaponTemplate, "zoom.mouseSpeedMod", 1);
 				m_zoomSettings.zoomOutOnReload = number(*weaponTemplate, "zoom.zoomOutOnReload", 1) != 0;
+				m_zoomSettings.useFineTuning = number(*weaponTemplate, "zoom.useZoomFineTuning", 0) != 0;
+				m_zoomSettings.fineTuneSteps = static_cast<int>(number(*weaponTemplate, "zoom.zoomFineTuneSteps", 1));
+				m_zoomSettings.fineTuningNeedsUnlock = number(*weaponTemplate, "zoom.zoomFineTuningNeedsUnlock", 1) != 0;
+				m_zoomSettings.zoomWhenBusy = number(*weaponTemplate, "zoom.zoomWhenBusy", 0) != 0;
 			}
 			for (const world::ChildTemplate& child : weaponTemplate->children()) {
 				if (child.name.compare(0, 6, "e_muzz") != 0) {
@@ -792,7 +834,7 @@ void PlayerCamera::tick(float seconds)
 				}
 			}
 		}
-		m_zoom.reset();
+		m_zoom = {}; // the new weapon's zoom component (its fine tuning too)
 		m_fov.set(m_baseFov, 0);
 		m_roundsWas = -1;
 	}
@@ -824,9 +866,15 @@ void PlayerCamera::tick(float seconds)
 	// zooms out (0x005da630); the player's field of view follows over
 	// zoomDelay (0x005da3f0 -> 0x00591740).
 	if (!me.vehicle && m_zoomSettings.present()) {
-		if (altPressed && !reloading) {
+		const int step = std::exchange(m_itemStep, 0);
+		if (altPressed && (!reloading || m_zoomSettings.zoomWhenBusy)) {
 			const float factor = m_zoom.cycle(m_zoomSettings);
 			m_fov.set(factor > 0 ? factor : m_baseFov, m_zoomSettings.delay);
+		} else if (step != 0 && m_zoom.level() > 0 && !m_remote
+			&& m_zoom.fineTune(m_zoomSettings, step, m_round.zoomUpgrade(m_round.localPlayer()))) {
+			// The wheel's fine tuning (0x005da890): the new field of view at
+			// once (0x005da290). (Unzoomed the wheel is the item list's.)
+			m_fov.set(m_zoom.factor(m_zoomSettings), 0);
 		} else if (reloading && !m_reloadingWas && m_zoom.level() > 0 && m_zoomSettings.zoomOutOnReload) {
 			m_zoom.reset();
 			m_fov.set(m_baseFov, m_zoomSettings.delay);
@@ -1205,7 +1253,9 @@ std::vector<PlayerCamera::Model> PlayerCamera::models() const
 		out.push_back(std::move(arms));
 	}
 	// The weapon's first-person geometry, its parts on mesh1, mesh2...
-	if (m_weaponTemplate && !m_weaponTemplate->geometry().empty()) {
+	// (none while a thrown one is put away, GameWorld::weaponHidden).
+	if (m_weaponTemplate && !m_weaponTemplate->geometry().empty()
+		&& (m_remote || !m_round.weaponHidden(m_round.localPlayer()))) {
 		Model weapon;
 		weapon.geometry = m_weaponTemplate->geometry();
 		weapon.lod = m_zoom.lod(m_zoomSettings);

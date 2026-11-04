@@ -194,6 +194,8 @@ The definitions are coverage-4's:
 
 ## 2. Remaining decodable gaps, ranked by player visibility
 
+> **Read with the status blocks.** The tables below and the Top 15 are the gaps as first written at 4912c02. Most were done afterwards: the **Status** blocks after the Top 15 say which, and [coverage-6.md](coverage-6.md) §2 lists what is still open (its own status blocks after that). A row here is not open unless coverage-6 still lists it.
+
 Effort: **S** = days, **M** = 1–3 weeks. Calls are from this corpus. Offsets and executors are from `symbols/BF2142.exe.template_properties.csv`. Every gap in coverage-4's §2 that its status lines mark done has been left out. Some new ones come from the code that went in since: the seats now have three weapon groups, but the HUD and the docs still assume one gun.
 
 ### 2a. Local play
@@ -338,6 +340,8 @@ Effort: **S** = days, **M** = 1–3 weeks. Calls are from this corpus. Offsets a
 - Frame cost (`BF2142_FRAME_BENCH=300`, Cerbere_Landing gpm_sp 16, 15 bots, `--play 2`, release): 2.56 ms. Tests (738, all passing): `HudBlink_WeaponHud`, `Nametags_ObjectTagIconAndRadius`, `RenderScene_ObjectDistanceFade`, `HudVehicle_SelectionOnEnterGate`; checks added to `Effects_WheelBundlesFollowTheirContact`.
 
 ## 3. Remaining hedges a further pass could settle
+
+> The line numbers are 4912c02's, and some items are settled since (maxLightsPerTerrainPatch, `0x1000b500`, the Mobile branch); see [coverage-6.md](coverage-6.md) §3 for HEAD's list.
 
 From `hedges.py`: 214 hits at HEAD, 219 at 69c8fbc. These can be settled by decompilation; line numbers are HEAD's.
 

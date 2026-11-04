@@ -4,10 +4,12 @@
 
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
+#include "Game/CombatAreas.h"
 #include "Game/GameLogic.h"
 #include "Game/GameWorld.h"
 #include "IO/File/FileManager.h"
 #include "Main/HostedGame.h"
+#include "Main/HudMenusComm.h"
 #include "Main/HudWorld.h"
 #include "Main/Prediction.h"
 #include "Physics/CollisionTemplateManager.h"
@@ -1378,6 +1380,105 @@ TEST(GameWorld_SpottedCrosshairTarget)
 	CHECK(!round.squadKnows(1, 0, b));
 	CHECK(round.spotCrosshair(a) == b);
 	CHECK(round.squadKnows(1, 0, b));
+}
+
+// A joined client's combat-area countdown (0x0044c7b0 on the client): the
+// server's time outside comes in the player networkable's 0x800 part as
+// whole seconds (0x00592410 / 0x599209: RemotePlayer::outsideSeconds), and
+// the HUD shows the level's timer less it (RemoteHudWorld::
+// combatAreaTimeLeft); back inside, nothing.
+TEST(NetHost_JoinedCombatAreaCountdown)
+{
+	using namespace dice::hfe;
+	HostRange range;
+	game::GameWorld& round = *range.round;
+	game::CombatAreas areas;
+	areas.use = true;
+	game::CombatArea far; // a box well away from both spawns
+	far.minX = 500, far.minZ = 500, far.maxX = 600, far.maxZ = 600;
+	areas.areas.push_back(far);
+	round.setCombatAreas(&areas);
+	host::HostSetup setup;
+	setup.level = "Camp_Gibraltar";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, range.logic, range.templates, setup);
+	CHECK(hosted.start());
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Outsider";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	const auto step = [&] {
+		client.update();
+		hosted.tick();
+		round.tick(1.0f / 30);
+	};
+	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }));
+	const int me = client.world().localPlayer();
+	CHECK(round.spawnSoldier(me));
+	// The client's round has the level's areas too (the same .con).
+	world::ObjectManager clientObjects;
+	game::GameWorld clientRound(range.templates, clientObjects);
+	clientRound.setCombatAreas(&areas);
+	std::map<uint16_t, uint32_t> ghostObjects;
+	host::RemoteHudWorld hud(client.world(), clientRound, ghostObjects);
+	CHECK(hud.combatAreaTimeLeft() < 0);
+	CHECK(pumpUntil(step, [&] {
+		const net::RemotePlayer* p = client.world().player(me);
+		return p && p->alive && p->outsideSeconds >= 2;
+	}, 8000));
+	const net::RemotePlayer* p = client.world().player(me);
+	CHECK(p && hud.combatAreaTimeLeft() == areas.timeAllowedOutside - static_cast<float>(p->outsideSeconds));
+	CHECK(hud.combatAreaTimeLeft() > 0 && hud.combatAreaTimeLeft() <= 13);
+	// Inside again: the time goes back to 0 and the countdown with it.
+	areas.areas[0].minX = areas.areas[0].minZ = -1000;
+	CHECK(pumpUntil(step, [&] {
+		const net::RemotePlayer* q = client.world().player(me);
+		return q && q->outsideSeconds == 0;
+	}, 8000));
+	CHECK(hud.combatAreaTimeLeft() < 0);
+	client.disconnect();
+}
+
+// What Radio.sendSpottedMessage says (0x007c8160 -> slot 0xd0, 0x0042e9d0):
+// the spotted object's radio.spottedMessage (a soldier's kit's, quotes
+// off), "spotted" without one or with nothing spotted; a joined client's
+// own pick of the crosshair's enemy agrees with the server's.
+TEST(GameWorld_SpottedMessageVoice)
+{
+	using namespace dice::hfe;
+	HostRange range;
+	game::GameWorld& round = *range.round;
+	const int a = round.addPlayer("A", 1, false);
+	const int b = round.addPlayer("B", 2, false);
+	CHECK(round.spawnSoldier(a) && round.spawnSoldier(b));
+	round.tick(1.0f / 30);
+	game::GameWorld::PlayerInfo me, enemy;
+	round.playerInfo(a, me);
+	round.playerInfo(b, enemy);
+	const float yaw = me.yaw * 3.14159265f / 180.0f;
+	const physics::Vec3 ahead {std::sin(yaw), 0, std::cos(yaw)};
+	round.setSoldierPosition(enemy.soldier, me.position + ahead * 30.0f);
+	round.tick(1.0f / 30);
+	round.playerInfo(a, me);
+	const host::LocalHudWorld local(round, range.logic);
+	CHECK(menu::spotChoice(local, round, -1).voice == "spotted" && menu::spotChoice(local, round, -1).player == -1);
+	menu::SpotChoice choice = menu::spotChoice(local, round, round.crosshairTarget(a));
+	CHECK(choice.player == b && choice.object == enemy.soldier && choice.voice == "spotted");
+	// The kit's Radio component names it.
+	world::ObjectTemplate* soldier = range.templates.find("pac_light_soldier");
+	CHECK(soldier != nullptr);
+	soldier->settings()["Radio.spottedMessage"] = "\"sniper_spotted\"";
+	CHECK(menu::spottedMessage(soldier) == "sniper_spotted");
+	range.templates.find("us_light_soldier")->settings()["Radio.spottedMessage"] = "sniper_spotted";
+	CHECK(menu::spotChoice(local, round, b).voice == "sniper_spotted");
+	// The client-side pick: the same enemy along the same view.
+	const float eye[3] = {me.position.x, me.position.y + 1.6f, me.position.z};
+	const float pitch = me.aimPitch * 3.14159265f / 180.0f;
+	const float dir[3] = {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+	CHECK(menu::crosshairEnemy(local, round, a, eye, dir) == b);
+	CHECK(menu::crosshairEnemy(local, round, a, eye, dir, 10) == -1);
 }
 
 // NetworkableInfo.* (Objects/Common/Networkables.con): c_NIGhostAlways is

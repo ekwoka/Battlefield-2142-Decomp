@@ -3762,3 +3762,150 @@ TEST(GameWorld_OpenSeatLook)
 		&& std::fabs(info.seatTwist + 10) < 0.01f && info.ladder == 0);
 	std::fprintf(stderr, "  open seat look ahead %.1f\n", ahead);
 }
+
+// The radar sources (0x00656550, the minimap's 0x00789f30 / 0x00791660):
+// a sonar round of EU's lying 30 m from a PAC soldier: its expanding ring
+// (radialRadar 0) passes him once a sweep; with showPlayers 0 never; the
+// other team has no source.
+TEST(GameWorld_RadarRingsPassEnemies)
+{
+	Range range;
+	world::ObjectTemplate* sonar = range.templates.create("GenericProjectile", "sonar_projectile");
+	sonar->settings()["ability.radarRadius"] = "40";
+	sonar->settings()["ability.radialRadar"] = "0";
+	sonar->settings()["collision.bouncing"] = "1";
+	sonar->settings()["timeToLive"] = "CRD_NONE/9999/0/0";
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int me = range.world->localPlayer();
+	const int bot = range.world->addPlayer("Bot", 1, true);
+	CHECK(range.world->spawnSoldier(bot));
+	game::GameWorld::PlayerInfo info;
+	range.world->playerInfo(bot, info);
+	const physics::Vec3 at = info.position + physics::Vec3 {30, 0, 0};
+	CHECK(range.world->launchProjectile("sonar_projectile", at + physics::Vec3 {0, 0.5f, 0}, {0, -1, 0}, me));
+	range.world->tick(1 / 30.0f);
+	CHECK(range.world->radarSources(2).size() == 1 && range.world->radarSources(1).empty());
+	CHECK(range.world->radarSources(2)[0].radius == 40 && !range.world->radarSources(2)[0].radial);
+	int seen = 0;
+	for (int i = 0; i < 48; ++i) { // 1.6 s: a sweep (2 pi / 4 rad/s)
+		range.world->setInput(bot, {});
+		range.world->tick(1 / 30.0f);
+		for (const auto& contact : range.world->radarContacts(2)) {
+			seen += contact.player == bot && !contact.vehicle;
+		}
+	}
+	std::fprintf(stderr, "  the ring passed the bot on %d ticks\n", seen);
+	CHECK(seen >= 1 && seen <= 7);
+	CHECK(range.world->radarContacts(1).empty());
+	// The pure test: radial and expanding.
+	game::GameWorld::RadarSource ring;
+	ring.radius = 40;
+	ring.radial = false;
+	CHECK(game::GameWorld::radarPasses(ring, {20, 0, 0}, 3.14159f));
+	CHECK(!game::GameWorld::radarPasses(ring, {30, 0, 0}, 3.14159f));
+	CHECK(!game::GameWorld::radarPasses(ring, {50, 0, 0}, 6.28f));
+	ring.radial = true;
+	CHECK(game::GameWorld::radarPasses(ring, {10, 0, 0}, 1.5708f)); // the bearing atan2(x, z)
+	CHECK(!game::GameWorld::radarPasses(ring, {0, 0, 10}, 1.5708f));
+	// showPlayers 0 (unl_sonar's): no soldier.
+	sonar->settings()["ability.showPlayers"] = "0";
+	Range other;
+	other.templates.create("GenericProjectile", "sonar2")->settings() = sonar->settings();
+	CHECK(other.world->spawnPlayer(2) != nullptr);
+	const int bot2 = other.world->addPlayer("Bot", 1, true);
+	CHECK(other.world->spawnSoldier(bot2));
+	other.world->playerInfo(bot2, info);
+	CHECK(other.world->launchProjectile("sonar2", info.position + physics::Vec3 {30, 0.5f, 0}, {0, -1, 0},
+		other.world->localPlayer()));
+	seen = 0;
+	for (int i = 0; i < 48; ++i) {
+		other.world->tick(1 / 30.0f);
+		seen += static_cast<int>(other.world->radarContacts(2).size());
+	}
+	CHECK(seen == 0);
+}
+
+// detonateDelay / dudMaterial (0x005b4ff0, 0x005b54e0): a rocket hitting
+// within its delay goes without its blast; later it goes off.
+TEST(GameWorld_DudsDontGoOff)
+{
+	Range range;
+	world::ObjectTemplate* rocket = range.templates.create("GenericProjectile", "rifle_rocket");
+	rocket->settings()["damage"] = "1";
+	rocket->settings()["detonation.explosionDamage"] = "500";
+	rocket->settings()["detonation.explosionRadius"] = "6";
+	rocket->settings()["detonation.explosionMaterial"] = "45";
+	rocket->settings()["detonateDelay"] = "0.5";
+	rocket->settings()["dudMaterial"] = "30";
+	rocket->settings()["timeToLive"] = "CRD_NONE/10/0/0";
+	rocket->settings()["gravityModifier"] = "0";
+	const int bot = range.world->addPlayer("Bot", 1, true);
+	CHECK(range.world->spawnSoldier(bot));
+	game::GameWorld::PlayerInfo info;
+	range.world->playerInfo(bot, info);
+	// Fired into the ground 2 m from the bot: hit at once, a dud.
+	CHECK(range.world->launchProjectile("rifle_rocket", info.position + physics::Vec3 {2, 0, 0}, {0, -60, 0}));
+	for (int i = 0; i < 10; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	range.world->playerInfo(bot, info);
+	CHECK(info.alive && range.world->projectilesInFlight() == 0);
+	// From 40 m up at 60 m/s (0.65 s): past the delay, it goes off.
+	CHECK(range.world->launchProjectile("rifle_rocket", info.position + physics::Vec3 {2, 40, 0}, {0, -60, 0}));
+	for (int i = 0; i < 40; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	range.world->playerInfo(bot, info);
+	CHECK(!info.alive);
+}
+
+// The lock tones (0x00657ce0 from the lock box 0x007e5a10): tracking
+// starts weaponHud.firstLockSound, locked stops it and starts
+// secondLockSound, the lock lost stops both.
+TEST(GameWorld_LockTones)
+{
+	Range range;
+	range.templates.registerType(8, "SimpleObject");
+	world::ObjectTemplate* launcher = range.templates.find("eu_ar_rifle");
+	launcher->settings()["target.targetSystem"] = "TSHeatSeeking";
+	launcher->settings()["target.maxDistance"] = "450";
+	launcher->settings()["target.lockAngle"] = "10";
+	launcher->settings()["target.lockDelay"] = "1.5";
+	launcher->settings()["target.loseLockDelay"] = "0.35";
+	launcher->settings()["weaponHud.firstLockSound"] = "TargetTrack";
+	launcher->settings()["weaponHud.secondLockSound"] = "TargetLock";
+	world::ObjectTemplate* jet = range.templates.create("SimpleObject", "jet");
+	jet->children().push_back({"HeatObject", {}, {}});
+	range.templates.create("SimpleObject", "HeatObject")->settings()["targetType"] = "TTHeat";
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	game::GameWorld::PlayerInfo me;
+	range.world->playerInfo(range.world->localPlayer(), me);
+	world::Object* enemy = range.objects.create(jet, {me.position.x, me.position.y + 1.6f, me.position.z + 60});
+	enemy->setTeam(1);
+	const auto said = [&] {
+		std::string out;
+		for (const auto& tone : range.world->takeLockTones()) {
+			out += (tone.play ? "+" : "-") + tone.sound + " ";
+		}
+		return out;
+	};
+	range.world->tick(1 / 30.0f);
+	CHECK(said() == "-TargetLock +TargetTrack ");
+	for (int i = 0; i < 46; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(said() == "-TargetTrack +TargetLock ");
+	game::SoldierInput turn;
+	turn.turn = 90;
+	range.world->setPlayerInput(turn);
+	range.world->tick(1 / 30.0f);
+	range.world->setPlayerInput({});
+	for (int i = 0; i < 12; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(said() == "-TargetTrack -TargetLock ");
+	for (int i = 0; i < 10; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(said().empty());
+}

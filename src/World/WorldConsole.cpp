@@ -507,6 +507,26 @@ void registerWorldConsoleMethods(Console& console, ObjectTemplateManager& templa
 	};
 	console.registerMethod(transformation);
 
+	// Object.notInAI (executor 0x006ed7a4 -> the object's slot 0x128,
+	// 0x006f6ef0; kept at +0x158): set in a single-player or co-op game
+	// mode ("sp1", "gpm_sp", "gpm_coop"), the object and its tree are
+	// destroyed at once (slot 0x30(1), 0x006f91e0): the crates and props
+	// some levels leave out where bots play (Hamburg_Harbour,
+	// Strike_at_Karkand and their co-op maps, tgw_*). Kept by nothing else.
+	ConsoleMethod notInAI = position;
+	notInAI.name = "Object.notInAI";
+	notInAI.invoke = [&objects](const std::vector<std::string>& args) -> std::string {
+		if (args.empty()) {
+			return "0"; // a kept object has the flag clear
+		}
+		const std::string& mode = objects.gameMode();
+		if (parseConsoleValue<bool>(args[0]) && (mode == "sp1" || mode == "gpm_sp" || mode == "gpm_coop")) {
+			objects.remove(objects.active()->id());
+		}
+		return {};
+	};
+	console.registerMethod(notInAI);
+
 	// 0x004ddfb0.
 	ConsoleMethod controlPointId = position;
 	controlPointId.name = "Object.setControlPointId";

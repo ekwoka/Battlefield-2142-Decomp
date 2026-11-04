@@ -96,8 +96,12 @@ public:
 	Object* find(uint32_t id) const;
 	void remove(uint32_t id);
 	void clear();
+	// The game mode being loaded (gpm_cq, gpm_sp, ...), for Object.notInAI.
+	void setGameMode(const std::string& mode) { m_gameMode = mode; }
+	const std::string& gameMode() const { return m_gameMode; }
 
 private:
+	std::string m_gameMode;
 	std::vector<std::unique_ptr<Object>> m_objects;
 	std::unordered_map<uint32_t, Object*> m_byId; // find's index
 	Object* m_active = nullptr;

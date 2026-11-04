@@ -206,9 +206,20 @@ struct ParticleTemplate {
 	// (0x10130bd0 / 0x10131f80) nor the shipped Particles.fx reads it.
 	float selfShadowIntensity = 1;
 	// showInZoomedMode (the exe's template +0xaa, 1 by default, 0x00626d40):
-	// a system the bundle starts in a zoomed first person (EffectBundle
-	// 0x00619f90 flags bit 2, the system's +8) is shown only with it set
-	// (the scoped muzzle flashes set 0).
+	// the bundle's start (0x00619f90) keeps it as bit 2 of the system's
+	// flags (bit 0 showInFirstPerson, bit 1 showInThirdPerson). Each frame
+	// (0x0061a1c0) a first-person bundle (0x006187c0: its holder the local
+	// player in first person) hands RendDX9 the systems with bit 0 or 2
+	// (a third-person one those with bit 1), each with its +8 set while the
+	// holder is zoomed. So in first person a system shows with either flag,
+	// zoomed or not: the flag never hides one (shipped, the one template
+	// with showInFirstPerson 0 has showInZoomedMode 0 too). What +8 changes
+	// is the view: RendDX9's first-person particle pass (0x10099860 ->
+	// 0x100990b0 with param 0, then 1; the sprite list 0x10131680 and the
+	// others draw only the systems whose +8 matches) draws the unzoomed
+	// ones with the world's camera (renderer slot 0x5c, +0xf8) and the
+	// zoomed ones with the first-person meshes' view (slot 0xdc
+	// 0x1000d0d0, +0xfc: 0.82 rad).
 	bool showZoomed = true;
 	// nearCullingEnable (sprites; RendDX9 template +0x284, slots 0x248 /
 	// 0x24c, 0x00623740): within 6 m past the near plane (+0x270) a
@@ -385,11 +396,12 @@ struct ParticleView {
 	Vec3 eye;
 	Vec3 forward {0, 0, 1};
 	const scene::ParticleSystemSettings* settings = nullptr;
-	// A zoomed first person: the systems without showInZoomedMode aren't shown.
+	// A zoomed first person (the systems' +8: drawn with the first-person
+	// meshes' view, see showZoomed). It hides none of them.
 	bool zoomed = false;
 	// The alpha a particle keeps at view depth `depth` in LOD class `lod`.
 	float fade(float depth, int lod) const;
-	bool shows(const ParticleTemplate& t) const { return !zoomed || t.showZoomed; }
+	bool shows(const ParticleTemplate&) const { return true; }
 	float nearPlane = 0; // the camera's
 	// 0x101318e0's near fade of a particle of `size` at view depth `depth`
 	// (the factor that replaces the distance fade): with d the depth past
@@ -430,6 +442,14 @@ struct MeshSprite {
 // of it; animationRandomizedStartFrame picks one at random).
 struct DecalTemplate {
 	std::string texture; // decalTextureName, without ".dds"
+	// decalNormalMapName (the exe's row 0x0052cf1a, executor 0x0052cf97;
+	// 8 shipped decals: the scorches, concrete, glass and armour), without
+	// ".dds": RendDX9 keeps the map at the decal's +0x34 and flags it +0x38.
+	std::string normalMap;
+	// isStatic (exe 0x0052cd51 -> the RendDX9 template's slot 10,
+	// 0x10167b70: its byte +0x20): such a decal is added to an object's set
+	// even while its owner is out of view (DecalSet slot 4 0x10166410).
+	bool isStatic = false;
 	float size = 1;
 	float randomSize = 0;
 	Vec3 color {1, 1, 1};
@@ -453,6 +473,7 @@ struct DecalVertex {
 
 struct Decal {
 	std::string texture;
+	std::string normalMap; // the template's decalNormalMapName (empty: none; decal +0x34 / +0x38)
 	Vec3 position;
 	Vec3 normal;
 	Vec3 tangent; // the square's u axis
@@ -815,7 +836,10 @@ public:
 	bool spawnDecal(const std::string& name, const Vec3& position, const Vec3& normal, uint32_t surface = 0);
 	// The same on a moving object placed at `objectPosition`, turned by
 	// `objectRotation` (yaw / pitch / roll degrees): kept in its space so it
-	// moves with it.
+	// moves with it. Refused (false) while the object's set saw its owner
+	// unseen at its last ageing (the set's +0x1a, copied from +0x19 by
+	// 0x10164f10; 0x10166410 refuses a decal there unless its template
+	// isStatic): the rewrite's set is the object's decals' ownerDrawn.
 	bool spawnDecal(const std::string& name, const Vec3& position, const Vec3& normal, uint32_t object,
 		const Vec3& objectPosition, const Vec3& objectRotation);
 	// Drops an object's decals (the object is gone).
@@ -828,11 +852,11 @@ public:
 	// Calls `draw` for each mesh particle system's particles: its mesh, its
 	// blending and the particles.
 	template <class Draw>
-	void forEachMeshGroup(Draw draw, bool zoomed = false) const
+	void forEachMeshGroup(Draw draw) const
 	{
 		for (const auto& emitter : m_emitters) {
 			const ParticleTemplate& t = emitter->particleTemplate();
-			if (!t.mesh || t.geometry.empty() || (zoomed && !t.showZoomed)) {
+			if (!t.mesh || t.geometry.empty()) {
 				continue;
 			}
 			m_meshSprites.clear();

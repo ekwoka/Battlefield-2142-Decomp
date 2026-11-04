@@ -115,3 +115,29 @@ TEST(WorldConsole_ClientOnlyTemplateIds)
 	CHECK(second->id() == first + 1);
 	CHECK(templates.findById(second->id()) == second && templates.findById(0x1000000) == sound);
 }
+
+// GameLogic.defaultTimeToNextAIWave (+0x28c, 8; read by nothing) as the
+// co-op maps set it, and Object.notInAI (0x006ed7a4 -> 0x006f6ef0): the
+// object goes in the single-player and co-op modes, stays in the others.
+TEST(WorldConsole_AiWaveTimeAndNotInAI)
+{
+	Console console;
+	game::GameLogic logic;
+	game::registerGameLogicConsoleMethods(console, logic);
+	std::string out;
+	CHECK(logic.defaultTimeToNextAIWave == 8);
+	CHECK(console.execute("gameLogic.setDefaultTimeToNextAIWave 0", out) == ConsoleResult::Ok);
+	CHECK(logic.defaultTimeToNextAIWave == 0);
+	for (const char* mode : {"gpm_cq", "gpm_coop", "gpm_sp"}) {
+		world::ObjectTemplateManager templates;
+		world::ObjectManager objects;
+		templates.registerType(1, "SimpleObject");
+		templates.create("SimpleObject", "crate");
+		Console world;
+		world::registerWorldConsoleMethods(world, templates, objects);
+		objects.setGameMode(mode);
+		CHECK(world.execute("Object.create crate", out) == ConsoleResult::Ok);
+		CHECK(world.execute("Object.notInAI 1", out) == ConsoleResult::Ok);
+		CHECK(objects.objects().size() == (std::string(mode) == "gpm_cq" ? 1u : 0u));
+	}
+}

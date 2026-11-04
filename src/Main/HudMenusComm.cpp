@@ -2,8 +2,13 @@
 
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
+#include "Game/GameWorld.h"
 #include "Hud/Hud.h"
+#include "HudWorld.h"
+#include "World/Object.h"
+#include "World/ObjectTemplate.h"
 
+#include <cmath>
 #include <utility>
 
 namespace dice::hfe::menu {
@@ -193,6 +198,104 @@ void CommRoses::close()
 		rose.setOpen(false);
 	}
 	show("");
+}
+
+std::string spottedMessage(const world::ObjectTemplate* t)
+{
+	if (!t) {
+		return {};
+	}
+	const auto it = t->settings().find("radio.spottedMessage");
+	if (it == t->settings().end()) {
+		return {};
+	}
+	std::string name = it->second;
+	if (name.size() >= 2 && name.front() == '"' && name.back() == '"') {
+		name = name.substr(1, name.size() - 2);
+	}
+	return name;
+}
+
+SpotChoice spotChoice(const host::HudWorld& world, game::GameWorld& round, int enemy)
+{
+	SpotChoice out;
+	game::GameWorld::PlayerInfo e;
+	if (enemy < 0 || !world.playerInfo(enemy, e)) {
+		return out;
+	}
+	out.player = enemy;
+	out.object = e.soldier;
+	const auto templateOf = [&round](uint32_t id) -> const world::ObjectTemplate* {
+		const world::Object* o = id ? round.objects().find(id) : nullptr;
+		return o ? o->objectTemplate() : nullptr;
+	};
+	const world::ObjectTemplate* kit = templateOf(e.kit);
+	const auto setting = [](const world::ObjectTemplate* t, const char* key, bool otherwise) {
+		if (!t) {
+			return otherwise;
+		}
+		const auto it = t->settings().find(key);
+		return it == t->settings().end() ? otherwise : std::atof(it->second.c_str()) != 0;
+	};
+	if (const world::ObjectTemplate* vehicle = templateOf(e.vehicle)) {
+		// 0x0075bfe0: the root only when canBeSpotted; 0x0075be30: its
+		// rider's soldier with usePlayerIcon.
+		if (setting(vehicle, "vehicleHud.canBeSpotted", true) && !setting(vehicle, "vehicleHud.usePlayerIcon", false)) {
+			out.object = e.vehicle;
+			// 0x0042e9d0: the vehicle's own Radio component.
+			out.voice = spottedMessage(vehicle);
+			if (out.voice.empty()) {
+				out.voice = "spotted";
+			}
+			return out;
+		}
+	}
+	// A soldier: its kit's Radio component (else the soldier's own).
+	out.voice = spottedMessage(kit);
+	if (out.voice.empty()) {
+		out.voice = spottedMessage(templateOf(e.soldier));
+	}
+	if (out.voice.empty()) {
+		out.voice = "spotted";
+	}
+	return out;
+}
+
+int crosshairEnemy(const host::HudWorld& world, game::GameWorld& round, int viewer, const float eye[3], const float dir[3], float reach)
+{
+	game::GameWorld::PlayerInfo me;
+	if (!world.playerInfo(viewer, me) || !me.alive) {
+		return -1;
+	}
+	const physics::Vec3 from {eye[0], eye[1], eye[2]};
+	const physics::Vec3 along {dir[0], dir[1], dir[2]};
+	int found = -1;
+	float best = reach;
+	for (const game::GameWorld::PlayerInfo& p : world.playerList()) {
+		if (!p.alive || p.id == me.id || p.team == me.team) {
+			continue;
+		}
+		// The body's centre (the feet + 1 m, as PlayerInfo has them).
+		physics::Vec3 centre = p.position + physics::Vec3 {0, 1.0f, 0};
+		float radius = 0.6f;
+		if (p.vehicle) {
+			if (const world::Object* v = round.objects().find(p.vehicle)) {
+				centre = {v->position().x, v->position().y, v->position().z};
+				radius = 2.5f;
+			}
+		}
+		const physics::Vec3 d = centre - from;
+		const float t = physics::dot(d, along);
+		if (t <= 0 || t >= best || physics::lengthSquared(d) - t * t > radius * radius) {
+			continue;
+		}
+		if (!round.lineOfSight(from, centre, p.vehicle ? p.vehicle : me.vehicle)) {
+			continue;
+		}
+		best = t;
+		found = p.id;
+	}
+	return found;
 }
 
 } // namespace dice::hfe::menu

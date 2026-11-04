@@ -66,7 +66,8 @@
 // variables of 0x0079e5a0):
 //   - VehicleNameString the vehicleHud.hudName; TurretIconShow
 //     hasTurretIcon;
-//   - VehicleArmor the armour's share (with useChildArmor the child's,
+//   - VehicleArmor the armour's share (with useChildArmor the child's:
+//     childArmorTemplate,
 //     0x005c6460), VehicleArmorString ceil(share x 100) and its colour
 //     below 0.3;
 //   - SpeedString round(|velocity|) x 10, AltitudeString ceil(height over
@@ -108,6 +109,10 @@ namespace world {
 class ObjectTemplate;
 }
 } // namespace dice::hfe
+
+namespace dice::hfe::world {
+class ObjectTemplateManager;
+}
 
 namespace dice::hfe::menu {
 
@@ -572,6 +577,33 @@ bool hiddenOnZoomedMap(const MapIcons& icons, int zoomIndex, bool overheadView);
 //     the parachute, LadderContainer and the bipods 0.
 bool standardHelpEnabled(const world::ObjectTemplate* controlled);
 bool usesVehicleCommRose(const world::ObjectTemplate* controlled);
+// The armour the vehicle HUD shows (0x007a18a0): the first armour up the
+// controlled object's parents (+0x34, from the object itself: a gunner's
+// seat without one shows its vehicle's); with vehicleHud.useChildArmor
+// (block +0xba, the template's +0x102, setter 0x006375f0; executor
+// 0x0055427a) the object's own armour or the first of its children's
+// with one, depth first (0x005c6460: +0x48, then slot 0xec's first child
+// and its +0x38 siblings). The 12 Titan gun hubs (eu_aacannon_hub,
+// as_groundcanone3_00_hub ...) set it: the hub has no armour of its own,
+// its gun (eu_aacannon ...) has, and the hub's parent is the Titan. The
+// template with that armour here (the controlled template itself when it
+// has an Armor component), null when the template doesn't set the flag
+// or nothing below it has armour.
+const world::ObjectTemplate* childArmorTemplate(const world::ObjectTemplate* controlled,
+	const world::ObjectTemplateManager& templates);
+// The zoomed vehicle views' post-processing (RendDX9's TVEffect pass,
+// asked through the HUD manager's slot 0x2b8 -> 0x007a0080): on in the
+// inside view of a seat whose controlled template sets
+// vehicleHud.enablePostProcessingOnGuiIndex (a 32-bit flag at the
+// template's +0x11c, executor 0x00554a71 through template slot 0x158 /
+// 0x15c, 0x006376c0; 48 seats: the APCs' pod cannons and second turret,
+// the walkers' and tanks' gunner seats, the drivers' cameras), or whose
+// weapon's weaponHud.enablePostProcessingOnGuiIndex names the gui index
+// shown (altGuiIndex zoomed, else guiIndex). The vehicle flag's reader
+// isn't traced; the seats that set it carry no weapon-side index (the pod
+// cannons' guns, guiIndex 72), so it is taken to turn the pass on for the
+// seat's own view.
+bool seatPostProcessing(const world::ObjectTemplate* controlled, const world::ObjectTemplate* weapon, bool zoomed);
 // A numbered frame of an icon without an extension (mini_titanSilo +
 // 2 -> mini_titanSilo_02.dds); a name with one stays.
 std::string iconFrame(const std::string& icon, int frame);

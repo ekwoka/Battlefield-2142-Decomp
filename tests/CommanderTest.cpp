@@ -224,17 +224,21 @@ TEST(Commander_OrdersAndBots)
 	world.acceptOrder(leader, true);
 	CHECK(world.squadOrder(2, 1)->accepted);
 	// The squad's bots make for the order rather than the enemy's point
-	// (100 m the other way).
-	Console console;
-	game::BotSettings settings;
-	game::registerBotConsoleMethods(console, settings);
-	game::BotManager bots(world, settings);
-	for (int i = 0; i < 30 * 4; ++i) {
-		bots.update(1 / 30.0f);
-		world.tick(1 / 30.0f);
+	// (100 m the other way). Their walk needs the game's templates (the
+	// soldier and its kit, $BF2142_GAME_DIR): without them it is skipped.
+	CHECK(field.loaded || !std::getenv("BF2142_GAME_DIR"));
+	if (field.loaded) {
+		Console console;
+		game::BotSettings settings;
+		game::registerBotConsoleMethods(console, settings);
+		game::BotManager bots(world, settings);
+		for (int i = 0; i < 30 * 4; ++i) {
+			bots.update(1 / 30.0f);
+			world.tick(1 / 30.0f);
+		}
+		game::GameWorld::PlayerInfo info;
+		CHECK(world.playerInfo(member, info) && info.position.z > 5 && std::fabs(info.position.x) < 5);
 	}
-	game::GameWorld::PlayerInfo info;
-	CHECK(world.playerInfo(member, info) && info.position.z > 5 && std::fabs(info.position.x) < 5);
 	// Turned down, it goes.
 	world.acceptOrder(leader, false);
 	CHECK(world.squadOrder(2, 1) == nullptr);

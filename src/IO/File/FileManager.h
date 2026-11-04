@@ -7,6 +7,8 @@
 //      after the base game only adds files);
 //   2. loose files under each search path, in the order they were added
 //      (normally just "mods/<mod>/").
+// Files the game makes at run time (addMemoryFile: the HUD's combat-area
+// map texture) come before both.
 // "@ROOT@/..." names the installation directory and "@HOME@/..." the user's
 // profile directory; both bypass archives.
 //
@@ -19,6 +21,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
@@ -46,6 +49,10 @@ public:
 	bool exists(const std::string& path) const;
 	bool readFile(const std::string& path, std::vector<uint8_t>& out) const;
 	bool readText(const std::string& path, std::string& out) const;
+	// A file kept in memory under `path` (replacing one there), and its
+	// removal. readFile and exists find it first; safe from any thread.
+	void addMemoryFile(const std::string& path, std::vector<uint8_t> data);
+	void removeMemoryFile(const std::string& path);
 
 	// Expands @ROOT@/@HOME@ and search paths into a real path for writing.
 	std::string expandPath(const std::string& path) const;
@@ -69,6 +76,8 @@ private:
 	std::map<std::string, MountPoint> m_mounts; // normalised mount point -> archives
 	std::set<std::string> m_mountedFiles;
 	bool m_mountingAllowed = true;
+	mutable std::mutex m_memoryMutex;
+	std::map<std::string, std::vector<uint8_t>> m_memoryFiles; // normalised path -> bytes
 };
 
 // Finds `relative` under `base` ignoring case, for case-sensitive file

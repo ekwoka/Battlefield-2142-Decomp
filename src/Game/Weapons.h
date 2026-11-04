@@ -83,6 +83,27 @@ struct ProjectileSettings {
 	// collision.bouncing: it bounces off what it hits (grenades, mines, C4)
 	// and detonates when its time to live runs out, not on impact.
 	bool bounces = false;
+	// StickyCollisionComp (component 0xc54b, its template's constructor
+	// 0x005e8820; the response 0x005e83d0; 11 shipped: C4, the sonars, the
+	// decoy, the mines, the explosive shotgun round, the hubs, the shield
+	// and the beacon): a bouncing round that meets a face it may stick to
+	// stays there, riding the vehicle it hit (see GameWorld::stickProjectile).
+	// collision.maxStickAngle (+0x10, executor 0x004f27f1) is kept as the
+	// cosine of the angle clamped to +-180 (0x005e8030; default -1: any
+	// face); stickToTerrain (+0x14), stickToStaticObjects (+0x15) and
+	// stickToVehicles (+0x16) are 1 by default (shipped 0 on the mines,
+	// decoy, hubs, shield and beacon).
+	bool sticky = false;
+	float maxStickCos = -1;
+	bool stickToTerrain = true, stickToStaticObjects = true, stickToVehicles = true;
+	// The Ability component's radar (template class 0xc4b2, its
+	// constructor 0x00631790; read through the runtime component
+	// 0x00656640's block, 0x00658590): radarRadius (+0x18, 0), radialRadar
+	// (+0x15, 1), showPlayers (+0x13, 1), showVehicles (+0x14, 1). A
+	// projectile with a radius is a radar source (0x00656550 -> the set at
+	// 0x00a79ff8) the minimap rings for its team (GameWorld::radarSources).
+	float radarRadius = 0;
+	bool radialRadar = true, radarShowPlayers = true, radarShowVehicles = true;
 	bool damageMandown = false; // damageMandownSoldiers: it reaches downed soldiers (the defibrillator)
 	// ResurrectCollisionComp (template 0x005e7d20): collision.resurrectDamage
 	// (default 0) and collision.restoreHP (default 0.1), handed to the game
@@ -127,6 +148,16 @@ struct ProjectileSettings {
 	// then it sets off only on that material, and anything else it meets
 	// that is no Titan the server destroys (3e10 damage) while it flies on
 	// (0x005b4ff0).
+	// detonateDelay (template +0x33c, 0) and dudMaterial (+0x340, -1;
+	// executors 0x004f13bd / 0x004f14da): a hit within detonateDelay
+	// seconds of the round's start (0x005b4ff0) is a dud: handed on with
+	// dudMaterial for the round's own (its damage and effect that cell's),
+	// and the round is then removed without going off (0x005b54e0: the
+	// game logic's slot 0xa4). Shipped: the AT minigun rounds 0.001 (40),
+	// static_aa_cannon 0.01 (29), the under-rifle rocket eu_rifle_missile
+	// 0.5 (30).
+	float detonateDelay = 0;
+	int dudMaterial = -1;
 	int onlyDetonateOnMaterial = -1;
 	float onlyDetonateOnMaterialTime = 0;
 	// DefaultPenetrateComp (class 0x953e, cached at the projectile's
@@ -330,6 +361,30 @@ struct FireArmSettings {
 	// round leaves at the weapon's speed x the power (0x005e5720). A
 	// normal throw's power is 1 (0x005e4b40).
 	bool softThrow = false;
+	// fire.showWeaponAfterReloadDelay (ThrownFireComp +0xa4, ticks +0xa8:
+	// round(s x 30), the setter 0x005e4c00, executor 0x004e4d1e; 0 by
+	// default, constructor 0x005e5b10): the launch (0x005e5720's end)
+	// hides the firearm (object flag 2 cleared, 0x006f68f0); the reload
+	// start (0x005c0f40 -> the component's slot 18, 0x005e49d0) notes the
+	// time (+0x164, +0x169) and the update (slot 6, 0x005e5610) shows it
+	// again once that many ticks have passed (FireArm::hidden). Shipped
+	// 0.05 (frag, EMP, the sonars, the hubs) and 0.2 (smoke, the radar
+	// grenade, the motion mine bait). fire.fireLaunchDelaySoft (+0x9c,
+	// ticks +0xa0, 0x005e64b0; 0.8 on five grenades) delays no round: its
+	// only reader (slot 11, 0x005e4e70) adds max(fireLaunchDelay, soft) +
+	// this to the busy time a reload start sets (0x005c2da0), which the
+	// rewrite's reload doesn't model.
+	int showAfterReloadTicks = 0;
+	// ammo.allowReloadWithFullMag (+0x43, executor 0x004e6b77): canReload
+	// (0x005f4140) lets a full magazine be reloaded (the missile silos).
+	bool allowReloadWithFullMag = false;
+	// ammo.magLinkWeapon (+0x48, executor 0x004e6528): the sibling firearm
+	// (the parent's children, 0x005f3aa0, by name without case) whose
+	// magazine this one shares: each round used (0x005f45e0) sets its
+	// rounds in the magazine to ours (slot 0x50), a reload or added ammo
+	// (0x005f46f0, 0x005f4ef0) its magazines too (slot 0xac, 0x005c4900).
+	// The under-rifle shotgun and rocket link each other (not the rifle).
+	std::string magLinkWeapon;
 
 	static FireArmSettings fromTemplate(const world::ObjectTemplate& firearm);
 	int ticksBetweenShots() const { return roundsPerMinute > 0 ? 1800 / roundsPerMinute : 1; }
@@ -348,6 +403,12 @@ public:
 	bool reloading() const { return m_reloadLeft > 0; }
 	// A thrown round on its way out (ThrownFireComp states 2 and 3).
 	bool throwing() const { return m_launchIn >= 0; }
+	// Put away after a throw until showAfterReloadTicks past the reload's
+	// start (FireArmSettings::showAfterReloadTicks); drawn again by enable.
+	bool hidden() const { return m_hidden; }
+	// magLinkWeapon: take the linked firearm's magazine (its rounds, and
+	// with `mags` its magazines too, at most our nrOfMags).
+	void shareMagazine(const FireArm& from, bool mags);
 	// Without a user (reloadWithoutPlayer): a reload under way runs on and
 	// fills the magazine; dropReload forgets one (the magazine stays as it is).
 	void runReload(float seconds)
@@ -452,6 +513,9 @@ private:
 	bool m_altWas = false;
 	int m_softTicks = 0;
 	float m_power = 1;     // +0x168
+	bool m_hidden = false; // the object's flag 2 cleared by the launch
+	int m_showIn = -1;     // ticks to showing again (-1 none)
+	void reloadStarted();
 	int m_tracerCount = 0; // +0x78
 	bool m_scanning = false; // the ammo component's +0x58
 	float m_scan = 0;        // +0x5c
@@ -525,6 +589,19 @@ struct Projectile {
 	uint32_t shooter = 0;
 	int player = -1; // who fired it (-1 for none)
 	bool resting = false; // a grenade lying still
+	// Stuck (StickyCollisionComp's +0x14, 0x005e83d0): it lies where it
+	// met the face, its up along the face's normal (stuckNormal). On a
+	// vehicle (stuckTo, the component's +0x10 handle) it keeps its place
+	// and normal in the vehicle's frame (+0x18 / +0x48) and rides it.
+	bool stuck = false;
+	uint32_t stuckTo = 0;
+	physics::Vec3 stuckLocal;  // its place in stuckTo's frame
+	physics::Vec3 stuckLocalNormal;
+	physics::Vec3 stuckNormal {0, 1, 0}; // in the world
+	// A round lying (not stuck) on a vehicle: the rewrite's stand-in for
+	// the engine's rigid body resting on it (ResponsePhysics) falls again
+	// once the vehicle moves from under it.
+	uint32_t lyingOn = 0;
 	float age = 0;
 	uint32_t lockedOn = 0; // the vehicle a seeker chases
 	// Wire guidance (LPTargetComp, 0x005e2e20 -> 0x005e27a0) from its

@@ -97,6 +97,21 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	// hubs, sonars, decoy, beacon, shield, eu_ifv_laserguided_mine; the EMP
 	// grenade (unset) and the smoke grenade (0) go off where they land.
 	s.bounces = number(t, "collision.bouncing", 0) != 0;
+	s.sticky = std::find(components.begin(), components.end(), "StickyCollisionComp") != components.end();
+	if (s.sticky) {
+		// 0x005e8030: the angle clamped to +-180 degrees, kept as its cosine.
+		const float angle = std::clamp(number(t, "collision.maxStickAngle", 180), -180.0f, 180.0f);
+		s.maxStickCos = std::cos(angle * 3.14159265f / 180.0f);
+		s.stickToTerrain = number(t, "collision.stickToTerrain", 1) != 0;
+		s.stickToStaticObjects = number(t, "collision.stickToStaticObjects", 1) != 0;
+		s.stickToVehicles = number(t, "collision.stickToVehicles", 1) != 0;
+	}
+	s.radarRadius = std::max(number(t, "ability.radarRadius", 0), 0.0f);
+	s.radialRadar = number(t, "ability.radialRadar", 1) != 0;
+	s.radarShowPlayers = number(t, "ability.showPlayers", 1) != 0;
+	s.radarShowVehicles = number(t, "ability.showVehicles", 1) != 0;
+	s.detonateDelay = number(t, "detonateDelay", 0);
+	s.dudMaterial = static_cast<int>(number(t, "dudMaterial", -1));
 	s.damageMandown = number(t, "damageMandownSoldiers", 0) != 0;
 	s.resurrect = t.settings().count("collision.resurrectDamage") || t.settings().count("collision.restoreHP");
 	s.resurrectDamage = number(t, "collision.resurrectDamage", 0);
@@ -338,6 +353,11 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 		s.launchDelayTicks = static_cast<int>(std::nearbyint(number(t, "fire.fireLaunchDelay", 0) * 30));
 		const auto alt = t.settings().find("fire.altFireInput");
 		s.softThrow = alt != t.settings().end() && !alt->second.empty();
+		s.showAfterReloadTicks = static_cast<int>(std::nearbyint(number(t, "fire.showWeaponAfterReloadDelay", 0) * 30));
+	}
+	s.allowReloadWithFullMag = number(t, "ammo.allowReloadWithFullMag", 0) != 0;
+	if (const auto link = t.settings().find("ammo.magLinkWeapon"); link != t.settings().end()) {
+		s.magLinkWeapon = link->second;
 	}
 	return s;
 }
@@ -378,6 +398,23 @@ void FireArm::enable(bool soldier)
 	}
 	m_pending = false;
 	m_burstLeft = 0;
+	m_hidden = false; // drawn (0x005c1650 sets flag 2)
+	m_showIn = -1;
+}
+
+void FireArm::reloadStarted()
+{
+	if (m_settings.thrown) {
+		m_showIn = m_settings.showAfterReloadTicks; // 0x005e49d0
+	}
+}
+
+void FireArm::shareMagazine(const FireArm& from, bool mags)
+{
+	if (mags && m_settings.nrOfMags >= 0 && from.m_mags <= m_settings.nrOfMags) {
+		m_mags = from.m_mags; // slot 0xac (0x005c4900): refused above its limit
+	}
+	m_rounds = m_settings.magSize >= 0 ? std::min(from.m_rounds, m_settings.magSize) : from.m_rounds; // slot 0x50
 }
 
 bool FireArm::selectable() const
@@ -388,10 +425,12 @@ bool FireArm::selectable() const
 
 bool FireArm::startReload()
 {
-	if (m_readyIn > 0 || m_reloadLeft > 0 || m_settings.magSize < 0 || m_rounds >= m_settings.magSize ||
-		(m_mags <= 0 && m_settings.nrOfMags >= 0) || m_settings.reloadTime <= 0) {
+	if (m_readyIn > 0 || m_reloadLeft > 0 || m_settings.magSize < 0
+		|| (m_rounds >= m_settings.magSize && !m_settings.allowReloadWithFullMag)
+		|| (m_mags <= 0 && m_settings.nrOfMags >= 0) || m_settings.reloadTime <= 0) {
 		return false;
 	}
+	reloadStarted();
 	m_reloadLeft = m_settings.reloadTime;
 	m_reloadFilled = false;
 	m_pending = false;
@@ -535,6 +574,10 @@ bool FireArm::tick(float seconds, bool trigger, bool altTrigger)
 		}
 	}
 	bool fired = false;
+	// 0x005e5610: shown again once the ticks from the reload's start are past.
+	if (m_showIn >= 0 && m_showIn-- == 0) {
+		m_hidden = false;
+	}
 	if (m_launchIn >= 0 && m_soft) {
 		// The soft throw held: the power grows, the timer waits.
 		fire(seconds, false);
@@ -573,6 +616,9 @@ bool FireArm::tick(float seconds, bool trigger, bool altTrigger)
 	}
 	if (fired && m_settings.pulseScan) {
 		m_scanning = true; // 0x005d9cf0
+	}
+	if (fired && m_settings.thrown) {
+		m_hidden = true; // the launch (0x005e5720) puts the firearm away
 	}
 	return fired;
 }
@@ -659,6 +705,7 @@ bool FireArm::fire(float seconds, bool trigger)
 		// is so taken in.
 		if (m_settings.autoReload && m_cooldown <= 0 && (m_mags > 0 || m_settings.nrOfMags < 0)
 			&& m_settings.reloadTime > 0) {
+			reloadStarted();
 			m_reloadLeft = m_settings.reloadTime;
 			m_reloadFilled = false;
 			return false;
@@ -714,6 +761,7 @@ bool FireArm::fire(float seconds, bool trigger)
 	// firearm's action 10). ammo.nrOfMags -1: magazines without end (the
 	// drones' detonators).
 	if (m_rounds == 0 && m_settings.autoReload && (m_mags > 0 || m_settings.nrOfMags < 0)) {
+		reloadStarted();
 		m_reloadLeft = m_settings.reloadTime;
 		m_reloadFilled = false;
 	}

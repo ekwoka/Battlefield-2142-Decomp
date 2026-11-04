@@ -1293,7 +1293,13 @@ speed × s (set at the start, `0x005b5300`, and again at a bounce), then
 `p_tracer2_*` meshes run from 0 to −0.98 along z, so the streak trails the
 round. Rewritten as `tracerLook` (Weapons.h) and `GameWorld::placeTracers`,
 which hands the tracers to the EffectManager's placed meshes (drawn with
-the mesh particles, added: the Particle object's blend isn't traced).
+the mesh particles, added: a Particle object's mesh goes to the mesh
+particle drawer's own list, `+0x1d78` (cleared each frame by
+`0x1009c380`), which `0x10135020` draws with MeshParticleMesh.fx's
+Additive technique (`0x10167d90` with 1; the systems pick Diffuse,
+Additive or DiffuseWithZWrite by their own template, `0x10134450`), its
+`+0x80` / `+0x81` choosing the first-person pass and view as a system's
+`+8` does; the list's filler wasn't found).
 
 **Camera recoil.** WeaponBasedRecoilComp (the vehicle guns'; template
 `0x005de1b0`, cameraRecoilSpeed `+0x24`, cameraRecoilSize `+0x28`): each
@@ -1896,8 +1902,11 @@ follow cycle and out of one of the SwiffHost's per-team player lists
 HUD manager's update (`0x007504c0`) skips its state-1 part for it. `HostedGame` (kEvJoinAsSpectator), `GameClient::
 joinAsSpectator` / `spectatorCamera`, `RemotePlayer::spectator`,
 `GameWorld::setSpectator`; `bf2142 --connect <host> --spectate` joins as
-one. Not rewritten: following another player in a joined game (the
-joined view has no other players' frames), the scoreboard's icon.
+one. A joined spectator follows the server's players as its client has
+them (`PlayerCamera::setPlayers` with the RemoteHudWorld: their ghosts'
+places and looks, `FreeCam.togglePlayer` / `toggleCamera`). Not
+rewritten: the scoreboard's spectator icon (`0x0074e940` is the kit icon
+column's chooser, a column the rewrite's scoreboard doesn't draw).
 
 **Seats.** In a vehicle the camera is the seat's (Player::getCamera
 `0x005948e0` → the PlayerControlObject's `0x005c7cb0`): the seat's Camera
@@ -2486,6 +2495,9 @@ pointlight, ONE/ONE): POINTLIGHT (`+0x244`) = (position, 1 / range², the
 light object's colour) with range its slot 0x198, and
 TerrainShader's calcPVPointTerrain × 0.5 = colour × N·L × saturate(1 −
 d²/R²) × 0.5, added to the lit terrain (not times its colour). The
+rewrite's shader takes the 8 listed Point lights nearest the camera (by
+distance less radius) in one pass (`pickTerrainLights`,
+`terrainPointLight`; `RenderScene_TerrainPointLightPasses`). The
 undergrowth (`0x1010e270`) asks, per patch, for the nearest 4 within reach
 of the patch's bounding sphere (the box of its square and its plants'
 heights, `0x1010a9a0` / `0x101a7b10`) passing 0xb09 (manager slot 0x1c),
@@ -2591,7 +2603,27 @@ in the body's space for a vehicle, whose clipped decal is placed with it
 each frame), faces turned more than decalGeomClipAngle away skipped; the
 rewrite takes the object's faces about the hit rather than walking from
 the hit face through its neighbours, which gives the same pieces for decals
-that small. Not done: the normal-mapped technique.
+that small.
+
+*Normal-mapped decals.* A decal template's `decalNormalMapName` (exe row
+`0x0052cf1a`, executor `0x0052cf97`; shipped on the scorches, concrete,
+glass and armour decals) gives the decal its map (`+0x34`) and flag
+(`+0x38`). The manager's draw (`0x100e6a80`) runs three passes of
+Decals.fx (`0x10163810` → `0x10164190`: technique 0, 1 or 2 by its two
+flags): the sets whose owner isn't stamped this frame, the world's set
+among them, with technique 0 whatever their decals carry (`0x10164040`
+gathers both kinds, `0x10163570`'s filter); the sets of objects stamped
+this frame (owner slot `0xb0` against the renderer's frame count `+0x108`,
+slot 0x60 `0x1000d0f0`, bumped at `0x10006b50`; kept in `+0xe08`) with
+technique 1 for their plain decals (shipped, its shadow lookup is switched
+off, so it is technique 0's look) and technique 2 for those with a map
+(`0x10163930` with the flag; the map to `NormalMap` `+0x317c` and the eye
+to `WorldCamPos` `+0x3180` per batch, `0x101631f0`). Technique 2 lights
+per pixel in the square's frame: texture × (ambient + sun × N·L +
+(N·H)³ × the map's alpha), H halfway between the sun and the eye, without
+the decal's colour. Rewritten: `DecalTemplate::normalMap`, the decal
+groups' map in `LevelRenderer::buildDecals` (a moving object's decals
+while it is drawn) and `decal.frag`.
 
 *Decal lifetime and fades.* `DecalManager.*` (the console objects
 `0x1007bdca..0x1007c4c0`; the manager DAT_101ffc78, constructor defaults):
@@ -2613,9 +2645,13 @@ object it draws (`0x100b84b0`, `0x100b8380`, `0x100b71c0`), the ageing
 seconds once more while it is clear (the world's set forces it set), and the
 decal draw `0x10164040` clears it. So a vehicle's decals age at twice the
 rate while it is out of view (`Decal::ownerDrawn`, set from the draw list).
-Not done: +0x1a's refusal of new decals on an unseen owner's set (unless the
-template's byte +0x20), and the static decals' second list (+0x2c, never
-aged, removed by id through slot 5 `0x10164e70`).
+The add (`0x10166410`) refuses a decal on an object's set whose `+0x1a`
+is clear (the ageing `0x10164f10` copies `+0x19` into it: the owner unseen
+since the last draw) unless the decal template's byte `+0x20` is set:
+`isStatic` (exe `0x0052cd51` → the template's slot 10, `0x10167b70`)
+(`EffectManager::spawnDecal` on an object, by its decals' `ownerDrawn`).
+Not done: the static decals' second list (+0x2c, never aged, removed by
+id through slot 5 `0x10164e70`).
 
 **Turning parts.** A vehicle's moving parts (RotationalBundle, Engine,
 Wing: rotors, thrusters, flaps, turrets and the like) are drawn turned by
@@ -3305,10 +3341,17 @@ times the square root of its speed (slots 0x40 / 0x4c, the instance's
 `+0xcc` / `+0xdc`). Rewritten in `src/Effects` (`spriteFrame`,
 `ParticleTemplate`, `EffectManager::setPhysicsVelocity`) and
 `particle.vert`; the rewrite's zoomed first person is the view's field of
-view narrower than its first. Not done: whether the started zoomed-mode
-systems with showInFirstPerson 0 draw unzoomed (the system's `+8` reader
-in RendDX9 isn't traced), so the rewrite starts first-person systems by
-showInFirstPerson alone. `nearCullingEnable` (sprites; the exe's
+view narrower than its first. The flags act each frame (`0x0061a1c0`):
+a first-person bundle (`0x006187c0`) hands RendDX9 its systems with bit 0
+or 2, zoomed or not, a third-person one those with bit 1, each with `+8`
+set while the holder is zoomed. So showInZoomedMode hides nothing; it
+shows a system in first person as showInFirstPerson does. `+8` is read by
+the first-person particle pass (`0x10099860` → `0x100990b0` with 0, then
+1; the sprite list `0x10131680` and the others draw only the systems
+whose `+8` matches): the unzoomed systems with the world's camera
+(renderer slot 0x5c, `+0xf8`), the zoomed ones with the first-person
+meshes' view (slot 0xdc `0x1000d0d0`, `+0xfc`). Rewritten in
+`EffectManager::spawnTemplate` and `LevelRenderer::drawFirstPerson`. `nearCullingEnable` (sprites; the exe's
 `0x00623740` / `0x00623760` forward to RendDX9's template slots 0x248 /
 0x24c, `+0x284`): in the sprite draw (`0x101318e0`) a particle less than
 6 m (`+0x270`) past the near plane and bigger than 0.15 (`+0x278`) has its
@@ -3374,9 +3417,9 @@ default 1/512, 1/2048 is the shipped 512×2048 detail map's). The lighting
 level drops parallax at medium and the normal maps at low (the
 DeprecationList; `0x10151830` skips "_deb" / "_crb"). The reflection scale
 reaches no shader line: RaShaderBM.fx lerps by a fixed gloss / 4 (its
-comment names eyePos.w the reflection scale, nothing reads it). Not
-drawn: the animated UV matrices (the exe's per-part UV transforms, the
-tracks', aren't traced).
+comment names eyePos.w the reflection scale, nothing reads it). The
+animated UV matrices (the per-part UV transforms, the tracks') are drawn
+since d9a49fe: see "Animated UVs" (`src/Render/AnimatedUV.h`).
 
 **`undergrowth.simpleShaderEnable`** (`0x100862e7`) writes the
 undergrowth's slot 0x40, the value the quality switch also writes: the
@@ -3594,10 +3637,16 @@ interior path binds none of its own (`LevelRenderer::DrawItem::interior`).
 With `skyDome.hasCloudLayer` the dome's technique is SkyDomeNV3x (one
 cloud texture on the dome's second coordinate set, scrolled by TEXOFFSET),
 with `hasCloudLayer2` SkyDomeNV3xDualClouds (`cloud × lerp.x + cloud2 ×
-lerp.y`); both fade out from CLOUDSFADEOUTDIST = (fadeCloudsDistances.x,
+lerp.y`; the choice, `0x100fc410` when the cloud count changes and
+again each frame in `0x100fd2f0`: DualClouds needs both flags and two
+clouds, SkyDomeNV3x the first and one, else SkyDomeNV3xNoClouds; the
+effect and its handles `0x100fcd80`; `LevelRenderer::buildSkyLayers`'s
+cloud count); both fade out from CLOUDSFADEOUTDIST = (fadeCloudsDistances.x,
 y − x) along the dome's radius and below its horizon, then `lerp(sky, c,
 c.a)`. The offsets grow by `scrollDirection` a second. The flare is the
-flare template's sprite towards `-flareDirection`, added (SkyDomeSunFlare:
+flare template's sprite (`Skydome.flareTexture`, loaded by `0x100fc9f0`:
+none for an empty name, the "flaresprite" quad made once) towards
+`-flareDirection`, added (SkyDomeSunFlare:
 ONE/ONE, no depth test) at a strength of the occlusion query's visible
 share (`(visible / total + flareFadeAdd) × flareFadeMul`, `SkyDomeFlareOccludeCheck`
 every few frames); the rewrite draws a camera-facing quad of the flare
@@ -3679,7 +3728,15 @@ at `0x1002df12`..`0x1002e6d0`). The order:
    weapon's `weaponHud.enablePostProcessingOnGuiIndex` names the HUD shown
    (`altGuiIndex` zoomed, else `guiIndex`: the tanks' and walkers' zoomed
    sights, and unzoomed guns such as the FAV gunner's machine gun, whose
-   `guiIndex` and `enablePostProcessingOnGuiIndex` are both 74).
+   `guiIndex` and `enablePostProcessingOnGuiIndex` are both 74). Also on
+   in the inside view of a seat whose controlled template sets
+   `vehicleHud.enablePostProcessingOnGuiIndex` (a 32-bit flag at the
+   template's `+0x11c`, setter slot 0x158 `0x006376c0`, executor
+   `0x00554a71`; 48 seats: the APCs' pod cannons and second turret, the
+   tanks' cupolas and driver cameras, the ATs' passenger guns, whose guns
+   carry no weapon-side index). That flag's reader isn't traced; the seats
+   that set it are taken to turn the pass on for their own view
+   (`menu::seatPostProcessing`).
 5. *EMP* (`0x10049d70`): a vehicle's EMP level (the player's slot 0x380)
    loads the static from the table `0x10048950` builds (`0x10048a30`:
    INTERFERENCE 0 then 8 for levels 1-5, DISTORTIONROLL 0 then 0.02, no
@@ -4947,7 +5004,17 @@ set by vtable `0xc8` / `0xd0`, `0x00591aa0` / `0x00593840`) would score
 from that camera, but `+0x8d` / `+0x8e` are only set by the HUD's console
 executors (`0x00414914`, `0x00555d64`, `0x006f0cb9`, `0x0075fdb6`) on the
 machine that shows the screen, never from the network, so for a remote
-client's player on a server it never holds.
+client's player on a server it never holds. A local round is its own
+server, so its commander has the same camera: the zoom buttons,
+zoomCommander and detailedView move it kept 80 m inside the terrain
+(`0x005f8170`), and on the overhead view the movement keys pan it
+(`0x005f8510`: PIYaw east-west, PIThrottle north-south, each axis's speed
+growing by the input × 250 m/s² — `*0x00a7303c`, the
+"overheadCamera-acceleration" tweak, `0x008e8877` — within the template's
+speed, 50, and falling back to rest at that rate), the soldier then
+getting no movement (`menu::OverheadCamera`, main.cpp's
+`g_overheadCamera`; the speed's factor `+0x270` isn't traced, taken as
+1).
 
 - **Whispers** (`HudManager.enableSayPlayerChatBox`, `0x007d9e20`): after
   the spam check, chat channel 14 (TCPlayer) through the game client's
@@ -6025,7 +6092,11 @@ The
 closeToIndication* and indicationDistance* aren't radio: the server's
 0.2 s scan (`0x0059a6c0`) posts events 0x3e / 0x3f as a player comes
 within or leaves them; not rewritten. spottedMessage is the HUD's and the
-bots' (game slot 52, `0x0042e9d0`).
+bots' (game slot 52, `0x0042e9d0`): the voice `Radio.sendSpottedMessage 1`
+says on TCTeam, the spotted object's Radio component's (a soldier's kit:
+infantry_spotted, sniper_spotted; a vehicle's own: apc_spotted,
+titan_spotted ...), "spotted" without one (`menu::spotChoice`,
+HudMenusComm.h).
 
 **Cost** (`bf2142 ... --simulate N --sound` prints it; ASan build): 20 s on
 Camp_Gibraltar 32 without bots, 0.27 ms of sound work a tick; 40 s on
@@ -6505,7 +6576,10 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
 - **The vehicle HUD** (`0x007a3180` → `0x007a2e60`, `0x007a18a0`,
   `0x007a2b50`; the variables of `0x0079e5a0`): VehicleNameString the
   hudName, TurretIconShow hasTurretIcon, VehicleArmor its share (with
-  useChildArmor the child's, `0x005c6460`), VehicleArmorString
+  useChildArmor, the template's `+0x102`, the controlled object's own
+  armour or its first armoured child's, depth first, `0x005c6460`: the
+  Titans' gun hubs show their gun's, `menu::childArmorTemplate`; without
+  it the first armour up the parents), VehicleArmorString
   ceil(share × 100) (per cent, not hit points) and its colour below 0.3,
   SpeedString round(|v|) × 10, AltitudeString ceil(height over the sea)
   (DAT_00a83e58 slot 0x60), VehicleElevationSpeedAngle eased by 4π /
@@ -6685,7 +6759,15 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   picks (`0x007925a0`, `0x007926c0`: within 70) skip an object without it
   unless it is alwaysShowOnMinimap (`+0xb1`); also read by `0x0075bfe0`
   and AIDLL-side `0x00729c40`. The rewrite's spotting reports players
-  (GameWorld::spotCrosshair), not objects, so it has no use for it yet.
+  (GameWorld::spotCrosshair). In the crosshair pick (`0x0075bfe0`) the
+  hit object's root is taken only when both are canBeSpotted; the spotted
+  object (`0x0075be30`) is that root, or its enemy rider's soldier when
+  its template has usePlayerIcon (`+0xb8`); an empty vehicle is never
+  spotted. The rewrite (`menu::spotChoice`): the enemy under the
+  crosshair's vehicle when canBeSpotted and not usePlayerIcon, else his
+  soldier; a joined client picks it from its own view
+  (`menu::crosshairEnemy`) and sends its ghost's id, as the exe's client
+  does (the server's `playerOf` takes a vehicle's occupant).
 
 - **The torque** (`0x007a2e60`): Torque (`+0x210`, the constructor's 0)
   eased a hundredth of the way each frame toward max(0, `+0x2f4`),
@@ -7694,12 +7776,171 @@ keep their own one-per-owner paths).
   bouncing round, else sets it off (event `0x1f`, `0x005b62a0`). The EMP
   grenade (unset) and the smoke grenade (0) go off where they land.
   `ProjectileSettings::bounces` (it was the physics type).
-  `collision.maxStickAngle` only works through StickyCollisionComp
-  (`0x005e83d0`), which the rewrite has none of; `collision.hasCollisionEffect`
+  `collision.hasCollisionEffect`
   (`+0xc`) has getters (`0x005e7840`, `0x005b3000`) and no caller found;
   `fire.projectileStartRotation` (ThrownFireComp `+0xb4`..`+0xbc`) only
   turns the thrown object's matrix (`0x005e5720`), not its velocity, and
   the rewrite's rounds have no orientation of their own.
+- **Sticky projectiles** (StickyCollisionComp, component `0xc54b`; its
+  template's constructor `0x005e8820`; 11 shipped: C4, both sonars, the
+  decoy, the AP and EMP mines, the explosive shotgun round, both hubs, the
+  shield and the beacon). `collision.maxStickAngle` (`+0x10`, executor
+  `0x004f27f1`) is kept as the cosine of the angle clamped to ±180
+  (`0x005e8030`; default −1, any face); `stickToTerrain` `+0x14`,
+  `stickToStaticObjects` `+0x15`, `stickToVehicles` `+0x16` are 1 by
+  default (0 shipped on the mines, decoy, hubs, shield and beacon). The
+  response (`0x005e83d0`), on a contact the ordinary collision handler
+  (game logic slot `0xf8`) took: an object answering PlayerControlObject's
+  interface (`0xc4c5`) whose template isn't exactly a PCO (`0xc4c2`: so a
+  soldier, a parachute, a drone) is bounced off; once stuck (`+0x14`) it
+  answers nothing; a normal whose y is under the cosine bounces. Otherwise
+  it is placed at the contact, its up turned to the normal, and on an
+  object whose root isn't a control point (`0x94a5`) its matrix kept
+  relative to the hit part's RotationalBundle (`0x006f2d70(.., 0x947d)`,
+  the handle at `+0x10`, the relative matrix at `+0x18`). Then: the
+  surface's material (manager slot `0x30`) unknown or with water physics
+  (material slot `0x68`, `+0x2d`) bounces; stickToTerrain on the terrain
+  (`0x00561d90` with the terrain singleton `0x005628f0`) sticks; without
+  stickToVehicles a root answering `0xc4c5` bounces; without
+  stickToTerrain on no object, or without stickToStaticObjects on one,
+  bounces; else it sticks (`+0x14` = 1). The rewrite
+  (`GameWorld::stickProjectile`, `rideStuck`; `Projectile::stuck`,
+  `stuckTo`, `stuckNormal`): a stuck round lies at the contact and rides
+  the vehicle's body (the whole vehicle: the rewrite doesn't pick the
+  turret's bundle); the vehicle gone, it falls again (the engine's case
+  isn't traced). A round only lying on a vehicle (not stuck: the mines
+  have stickToVehicles 0) falls again once the vehicle moves from under
+  it (`Projectile::lyingOn`, a stand-in for the engine's rigid body). The
+  engine's place along the normal (a constant `*0x00a6fe94`, or the
+  geometry's lowest y, plus a dot product) is 0.01 m here. Placed hubs,
+  beacons and shields aren't thrown in the rewrite (set down a metre
+  ahead), so their stick flags have nothing to act on. The joined
+  client's StickyProjectile event (0x20, `0x0050f720`) isn't sent.
+- **Radar sources** (the Ability component, template class `0xc4b2`,
+  constructor `0x00631790`: showPlayers `+0x13` 1, showVehicles `+0x14`
+  1, radialRadar `+0x15` 1, radarRadius `+0x18` 0, hasZoomUpgradeAbility
+  `+0x54` 0; read through the runtime component `0x00656640`'s block,
+  slot 0x38 `0x00658590`, cached at the object's `+0x74`). A
+  GenericProjectile with a radius registers its id in a global set
+  (`0x00656550` → `0x00a79ff8`; out by `0x006565e0`) when created: no
+  arming, rest or age test. Nothing else reads the radar fields: no server
+  scan and nothing networked. Each client's minimap (`0x0078f680`, every
+  5th frame `0x00789f30`) keeps those of the local player's team (the
+  shooter's root's team) within max(view distance, 500) m of his control
+  object (`0x00789a10`), draws them (`0x0078f060`) and tests enemies
+  against the ring (`0x007926c0` from `0x00792980` soldiers on foot, alive,
+  not man-down, with showPlayers; `0x00793b60` vehicles with a living
+  occupant, with showVehicles; none with alwaysShowOnMinimap or without
+  canBeSpotted): within the radius across the ground and, radial, the
+  sweep within 0.1 rad of the bearing, else the growing ring
+  (radius × sweep / 2π) within 2.5 m (`0x00791660`); a hit is a blip
+  (`0x00790d60`) and HUD_Uav_target. The sweep turns 4 rad/s (`0x00788600`).
+  Shipped: unl_sonar 100 m, rings, vehicles only (showPlayers 0);
+  Bp1_sonar and the radar grenade 40 m, soldiers only; the recon drone's
+  rounds 65 m with both 0 (a ring without blips; its reveals are the
+  pulse's). commander_uav_drone sets no Ability (a PCO couldn't register).
+  The rewrite: `ProjectileSettings::radarRadius` and its flags,
+  `GameWorld::radarSources`, `radarSweep`, `radarPasses`, `radarContacts`
+  (the game side; the HUD draws them).
+- **Lock tones** (weaponHud.firstLockSound `+0x80`, secondLockSound
+  `+0x9c`, "" by default, constructor `0x006390e0`; shipped TargetTrack /
+  TargetLock on as_aa, eu_aa, static_aa and the heavy mechs): the HUD's
+  lock box (`0x007e6520`, `0x007e5a10`) hands the local weapon's state (0
+  none, 1 tracking, 2 locked) to its runtime WeaponHud (slot 0x40,
+  `0x00657ce0`), which on a change stops the other sound and starts its
+  own by name (the sound manager's slots 0x2c / 0x34: 2D loops); the zoom
+  and fire-mode toggles and leaving the weapon force 0. Rewritten:
+  `GameWorld::stepLockTone`, `takeLockTones` (played by `bf2142`).
+  `weaponHud.altCrosshairIcon` (`+0x1d4`): the runtime WeaponHud's slot
+  0x3c (`0x00657bb0`) gives it for crosshairIcon while the fire
+  component's state is above 0 (firing), when set (the HUD's part).
+  `target.setTargetAtMaxDistance` (`+0x7c`, 0): no reader found.
+  `target.connectionEffectOnlyWhenZoomed` (`+0x74`): its executor
+  (`0x004ee343`) writes 1 whatever it is given; read by `0x005f5b90` for
+  the wire's connection effect (`0x005f5d20`), which no shipped template
+  has (`target.connectionEffect` unset). `zoom.allowUntoggledFire`
+  (ToggleCameraComp `+0x25`) needs a changeCameraId nothing ships.
+- **Zoom** (DefaultZoomComp, constructor `0x005dacc0`): fine tuning
+  (useZoomFineTuning `+0x48` 0, zoomFineTuneSteps `+0x44` 1,
+  zoomFineTuningNeedsUnlock `+0x49` 1): the toggle (`0x005da670`) cycles
+  levels 0 and 1 only; level n's field of view is fn − t (`0x005da820`);
+  the wheel (`0x005da890`, from the firearm's input `0x005c21d0`:
+  PINextItem in, PIPrevItem out) moves t by (f1 − f2) / steps within
+  [0, f1 − f2], needing the player's hasZoomUpgradeAbility (copied from the
+  unlock by `0x005706b0`) unless the unlock isn't asked for; a changed
+  view is set at once (`0x005da290`); t is kept over zooming out. The
+  three sniper rifles: 0.312 to 0.106 in 12 steps, only with
+  UnlockEU/Pac_ReconSni1. Rewritten: `anim::ZoomSettings::useFineTuning`,
+  `ZoomState::fineTune`, `GameWorld::zoomUpgrade`, the camera's wheel
+  (`PlayerCamera::setItemStep`; unzoomed the wheel stays the item list's,
+  where the exe's step also moves t). `zoom.zoomWhenBusy` (`+0xd`): the
+  firearm's handler (`0x005c50e0`) drops a zoom press while busy (drawing,
+  reloading, between rounds, zooming, animating, overheated without
+  allowZoomOnHeat) unless set; the rewrite's busy test is the reload's
+  (shipped only on the tanks' and ATs' seats, which the rewrite doesn't
+  zoom yet).
+- **Thrown weapons and magazines.** `fire.showWeaponAfterReloadDelay`
+  (ThrownFireComp `+0xa4`, ticks `+0xa8`, executor `0x004e4d1e`, setter
+  `0x005e4c00`; 0 by default; 0.05 s on frag, EMP, the sonars and hubs,
+  0.2 s on smoke, the radar grenade and the motion-mine bait): the launch
+  (`0x005e5720`) hides the firearm (object flag 2, `0x006f68f0`); the
+  reload's start (`0x005c0f40` → slot 18 `0x005e49d0`) notes the time and
+  the update (`0x005e5610`) shows it that many ticks later; drawing it
+  (`0x005c1650`) shows it too. Without a magazine left it stays away.
+  `FireArm::hidden`, `GameWorld::weaponHidden` (the held object hidden,
+  the first-person model skipped). `fire.fireLaunchDelaySoft` (`+0x9c`)
+  delays no round: its only reader (`0x005e4e70`) adds max(launch delay,
+  soft) + the show delay to the busy time a reload start sets
+  (`0x005c2da0`), which the rewrite doesn't model. `ammo.magLinkWeapon`
+  (`+0x48`, executor `0x004e6528`): the sibling firearm by name
+  (`0x005f3aa0`) whose magazine is set to ours on each round
+  (`0x005f45e0`, slot 0x50) and whose magazines too on a reload or added
+  ammo (`0x005f46f0`, `0x005f4ef0`, slot 0xac `0x005c4900`); the
+  under-rifle shotgun and rocket link each other, not the rifle
+  (`FireArm::shareMagazine`, from the weapon in hand when its count
+  changes). `ammo.allowReloadWithFullMag` (`+0x43`): canReload
+  (`0x005f4140`) lets a full magazine be reloaded (the silos;
+  `FireArm::startReload`). Duds: detonateDelay (GenericProjectile
+  `+0x33c`, 0) and dudMaterial (`+0x340`, −1): a hit within that long of
+  the round's start (`0x005b4ff0`) is handed on with dudMaterial for the
+  round's own, and the round is removed without going off (`0x005b54e0`):
+  the AT miniguns (0.001 s), static_aa_cannon (0.01 s), the under-rifle
+  rocket (0.5 s); `stepProjectiles`. `dropHeadwear` (Kit `+0x2d8`, "helmet"
+  on the EU kits): the soldier's drop (`0x005ee2f0`, a client's, from the
+  timer `+0x298`; undone at a revive `0x005ee530`) is never started (no
+  writer of `+0x298` found) and no "helmet" template ships, so it does
+  nothing in BF2142.exe; not rewritten.
+- **Seats' radio filter and first-person effects.** `soundFilter` (PCO
+  `+0x424`, executor `0x004fd0c8`; the soldier's `+0x3c0`, `0x004ded9a`,
+  unset): the radio handler (`0x0042e0c0`) plays a sender's voice over the
+  filter of the nearest PlayerControlObject above his control object
+  (slot 0xf0 of 0xc4c5): heli, vehicle or ground (`addRadioFilter`'s
+  static loop or click); the commander's is "commander", the listener's
+  own none. `GameWorld::radioFilter` → `VoiceMessages::Heard::senderFilter`.
+  `neverDrawAs1p` (PCO `+0x481`, executor `0x004ff358`, getter
+  `0x005c67e0`; the Titans): read only by the effect bundles' first-person
+  test (`0x006187c0`): a bundle starts in its first-person form only when
+  the local player looks in first person, shares its root, and neither
+  his nor its nearest PCO is neverDrawAs1p. `GameWorld::firstPersonEffects`
+  (the rewrite's object bundles always start in their third-person form).
+- **AI hints.** `GameLogic.defaultTimeToNextAIWave` (executor `0x00428474`
+  → slots 0xa0 / 0xa4: the server logic's `+0x28c`, 8 by default,
+  `0x004c0bf0`; the client's keeps nothing): no reader in BF2142.exe or
+  AIDLL; bound and kept (`GameLogic::defaultTimeToNextAIWave`).
+  `Object.notInAI` (`0x006ed7a4` → `0x006f6ef0`, `+0x158`): set in "sp1",
+  "gpm_sp" or "gpm_coop" the object and its tree are destroyed at once
+  (`0x006f91e0`): crates and props on Hamburg_Harbour, Strike_at_Karkand,
+  their co-op maps and tgw_*; `ObjectManager::setGameMode`.
+  `ObjectTemplate.setCheckObstruction start end radius` (GenericFireArm
+  `+0x360..+0x36c`, executor `0x004e236e`; the pod launchers −1.5 2 1) is
+  a weapon rule, not a hint: five rays along the gun (`0x005c2310`) refuse
+  the trigger (`0x005c2ee0`, `0x005c50e0`); not rewritten.
+  weaponTemplate.fireRate / shouldRearm / isAntiAirWeapon (the exe's AI
+  weapon record `0x0088a7b0`: `+0x10` −1, `+0x70` 1, `+0x71` 0; getters
+  `0x00892500`, `0x00892720`, `0x00892740`) aren't read by AIDLL's weapon
+  choice (`0x10074ef0`); isAntiAirWeapon is read by the AI interface's
+  slot 39 (`0x008a57b0`). AITemplatePlugIn.setUseNoPathfindingToGetToObject
+  (Unit plug-in `+0x15`) and vehicleNumber (Mobile `+4`) stay stubs.
 - `armor.deepWaterDamageDelay` (`+0x140`, 1 s by default; waterDamageDelay
   `+0x13c` 3 s): `0x006521d0` runs two timers side by side, in water
   (`+0xf8`, hpLostWhileInWater `+0x134`) and in deep water (`+0xf4`,
@@ -7785,7 +8026,11 @@ The drones' guns are run by auto controllers (`AI/AutoControllers.ai`):
   every player whose object is within `viewDistance` (60 m) of the drone,
   with no line of sight needed. The server sends them to the drone's team
   with `revealTime` (3 s) for its minimap. The projectile's
-  `Ability.radarRadius` (65) is the minimap's ring and isn't drawn yet.
+  `Ability.radarRadius` (65) is the minimap's ring: the HUD draws each of
+  `GameWorld::radarSources` as icon_uav_circle (`0x0078f060`; the radial
+  ones 2 × radius across turned by `radarSweep`, the others growing to it
+  and fading over the sweep's turn; `MapMarker::worldSize`), and puts the
+  enemies `radarContacts` lists on the minimap with the reported ones.
   `GameWorld::isRevealed` and `revealedPlayers` answer for the HUD.
 - **Sentry drone (`UAVDrone`):** `unl_drone_sentry_FireArm` fires at 600 a
   minute at the nearest enemy soldier on foot within `viewDistance`
@@ -7943,7 +8188,12 @@ reloadWithoutPlayer 1, allowReplenish 1, the rest 0.
   `allowReplenish` (`+0x42`: only packed into the vehicle weapons'
   network flags, `0x005c3120`), `damageOwner` (GenericProjectile `+0x32c`:
   only its executor, the constructor and the template's save, which writes
-  it as "localPredictOnClient").
+  it as "localPredictOnClient"). The real `localPredictOnClient`
+  (executor `0x004efe5a`: the template's interface at `+0x298`, vtable
+  `0x00969318`, slots 0x30 / 0x34 → `+0x9c`, the template's `+0x334`; 24
+  templates set 1) has no reader either: nothing else calls that slot or
+  reads `+0x334` of a projectile template, so a 1.51 client doesn't
+  predict its own networked rounds; they appear with the server's ghost.
 - **Reloading.** The round's ammo use (`0x005f45e0`, slot `0x38`) marks an
   emptied magazine (`+0x41`) and, only with `ammo.autoReload` (`+0x28`;
   111 shipped: the grenades, mines, tools and the vehicles' guns; the
@@ -7960,7 +8210,14 @@ reloadWithoutPlayer 1, allowReplenish 1, the rest 0.
   writer isn't traced). `FireArm::fire`, `takeClick`; a joined client's
   copy of others' firing waits for the server's reload
   (`reloadRemoteSoldier`) unless autoReload. The bots' reloads: see
-  Bots, Fire.
+  Bots, Fire. In a seat the press goes the same way: the game's player
+  update (`0x00590e10`) sends event 10 to the player's control object
+  (slot `0x100`) while c_PIReload is down (player slot `0x200`); the
+  seat's PlayerControlObject (`0x005cacf0`) hands it down its tree
+  (`0x0063ca60`) and each active firearm (`0x005c62c0`, `+0x204`), the
+  one of each fire group, starts its reload (`0x005c50e0` case 10 →
+  `0x005c0f40`). (The firearm's own update `0x005c58a0` polls only
+  PIFire, PIAltFire and PIFlareFire, `0x0096cf0c`.) `GameWorld::stepGunner`.
 
 **The use key's pick-up** (`0x004bce30`, from `0x004bda00` at
 `0x4be038`): the nearest object within 1.3 m (`*0x009fe420`) and in front
@@ -8091,17 +8348,24 @@ the top.
   <type>` (`0x17c`, `0x007c8160`) spots the HUD's crosshair object
   (`+0x1f0`, through the game's slot `0xd4`, which AIDLL's IAIGame slot `0x68`,
   `0x00895ab0`, calls too, with type 0x1b)
-  and with 1 says it on the chat. The crosshair object is filled as a rose
-  opens (`0x0075be30`): the HUD's ray (vt+0x18c, out to the local player's
-  slot `0x98(1)`) meets an object; the player it belongs to, when of the
-  other team, gives it, or that player's vehicle where the object's
-  template says so (`+0x64` slot `0x78`'s `+0xb8`); its network id goes to
-  `+0x1f0`, the point to `+0x1f4`. `GameWorld::crosshairTarget` /
-  `spotCrosshair` (the soldiers as 0.6 m spheres, the vehicles 2.5 m, along
-  the view, nothing in between); the HUD binding (`src/Main`) spots the
-  local player's crosshair object (`spotCrosshair`) and closes the rose;
-  a joined game's goes to the server as the Spotted event (see [joined
-  games' radio, tools and menus](#joined-games-radio-tools-and-menus)).
+  and with 1 says the spotted object's voice (the game's slot `0xd0`,
+  `0x0042e9d0`, then slot `0x50` on channel 1, TCTeam, with its own spam
+  check; said even when the spot itself was skipped, "spotted" with no
+  object). The crosshair object is filled as a rose opens (`0x0075be30`):
+  the HUD's ray (vt+0x18c, `0x0075bfe0`, out to the local player's slot
+  `0x98(1)`) meets an object, taken at its root when both are
+  canBeSpotted; the last rider of its seats (`0x0042b2f0`), when of the
+  other team, makes it the spotted object, or that rider's soldier where
+  the object's template has usePlayerIcon (`+0x64` slot `0x78`'s `+0xb8`);
+  its network id goes to `+0x1f0`, the point to `+0x1f4`.
+  `GameWorld::crosshairTarget` / `spotCrosshair` (the soldiers as 0.6 m
+  spheres, the vehicles 2.5 m, along the view, nothing in between); the
+  HUD binding (`src/Main`, `menu::spotChoice`) reports the enemy (a local
+  round's `reportBattlefieldObjects`), says the voice and closes the rose;
+  a joined game's client picks the enemy from its own view
+  (`menu::crosshairEnemy`) and sends the Spotted event with the spotted
+  object's ghost (see [joined games' radio, tools and
+  menus](#joined-games-radio-tools-and-menus)).
 - **`game.radioMessage <TargetChannel> <voice>`** (`0x00423e61` → the
   client's slot `0x50`, `0x004b2b60`: the voice's index in the game
   logic's radio table, the spam check, event 0x14 to the server, a local
@@ -9199,7 +9463,19 @@ collision type 5 (only `eu_titan_coreroom` / `as_titan_coreroom`, a
 radius + 0.1 (slot `0x90`) — inside when the nearest face it crosses is
 crossed on its way out (two queries of mesh slot `0x58`, `0x006e5920`,
 with the normals negated, then as stored). `GameWorld::stepTitanHullKills`,
-`insideTitanHull`. Not rewritten: the minimap's area texture.
+`insideTitanHull`. The minimap's area layer (`0x0078b490`, `0x0077d200`;
+`src/Main/HudCombatArea`): map_CombatArea32.dds (512 × 512, hazard
+stripes at alpha 0xc0) with its alpha cleared (RendDX9 `0x10187e70` op
+0x500), each applying area that doesn't bind category 0 rasterised at
+0x80 and each area that does at 0xff (op 0x402 ORs them in), then op
+0x703: alpha = (255 − that) × the texture's own / 256. Rebuilt only when
+the mask of applying areas (`DAT_00b3c4a0`; `0x004d9d50`: team 0 or the
+player's, binding his controlled object's category) changes, which also
+frames the map on those areas (`0x0078b490(1)`: the applying non-land
+areas' bounds, else every land area's; `HudManager::setMapArea`). Drawn
+over the map at its alpha before the markers. The rewrite lays it over
+the whole map (the exe's covers the framed square) and keeps the texture
+in the file manager's memory (`FileManager::addMemoryFile`).
 
 **The warning** (the HUD information layer's frame `0x0044c7b0`, alive,
 `0x0044cfe0`..`0x0044d220`): with the manager's use flag (`*0x00a25134`
@@ -10322,8 +10598,9 @@ The urgencies:
     go of the move and the trigger, gives no yaw and levels the pitch: an
     idle soldier never turns. Within its own strategic area (its order
     position's radius + 2 m, 0x10034a10) it crouches (SoldierPose 2) and
-    taps its weapon's alternate key once (the weapon adaptor's vt+0x68,
-    on when vt+0x70; not in the rewrite's weapons).
+    zooms in: If (forced) NOT zoomed (0x100d2f80 over 0x100d3070, whose
+    0x100d3090 reads the adaptor's slot 0x70) BAPATrigger on the weapon's
+    zoom input (the adaptor's slot 0x68) (`BotManager::idle`, see Aim).
   - The assist plans and DefuseMines never end on their own; the urgency
     drops them.
 
@@ -10332,7 +10609,17 @@ The urgencies:
 - **Reach:** viewDistance × cos(fov / 2), with fov 100° from the table at
   0x1012b074. This reaches into a square frustum of half-angle 50°.
 - **Rays:** `clamp(round(30 r / d), 1, 10)`. The target is seen if any ray
-  is clear. A soldier's rays all go to one point (its ITSoldier bit takes
+  is clear. The ray (IAIObjectEnvironment slot 0x44, BF2142.exe
+  0x00897df0: the terrain, then slot 0x90, 0x00898040, the scene's ray
+  whose filter, vtable 0x009d6794 slot 4 0x00897d50, passes faces of a
+  `Material.isSeeThrough` material, material slot 0x88, keeping the
+  nearest) reports whether it went through one; a sighting that did
+  leaves a new memory item without flag 0x40 (0x100ed2c0) and clears a
+  kept one's (0x100ee430). The weapon choice wants flag 0x40 or 8 for a
+  weapon without `setFiresThroughTransparent`; the targets' loop
+  (0x10075fb0) wants 0x40 for FireAndForget (`GameWorld::lineOfSight`'s
+  four-argument form, `Known::seenClear`, `Bots_SightThroughSeeThrough`).
+  A soldier's rays all go to one point (its ITSoldier bit takes
   IAIObjectEnvironment slot 0x54, BF2142.exe 0x008999a0: its physics
   node, a metre over the feet), so one ray tells; another object's first
   goes to its centre and the rest to points about it (slot 0x50). The
@@ -11345,7 +11632,27 @@ The commands (constructor / execute slot), and where the rewrite has them:
   evaluates every behaviour (the original's think stops at its budget,
   the same real-time clock, and the rest move up a priority level for the
   next).
-- **Aim:** bots don't zoom. (The head twists before the body for every
+- **Zoom** (`BotManager::stepZoom`, `Bots_ZoomScopedWeapon`): the AI
+  weapon's zoom input is the adaptor's slot 0x68 (0x00892800: the AI
+  weapon template's +0x5c, filled by 0x00892be0 → 0x0088a8c0 with the
+  zoom component's input, slot 0xa8, when the item's zoom template, class
+  0x94e5, has a factor that isn't 0, 0x005da9a0; 0x40 none), whether it is
+  zoomed slot 0x70 (0x00892820: the firearm's slot 0x12c). The fire
+  statements of both plans (0x100777a0, 0x100781e0) add, for a soldier
+  bot, the zoom statement 0x100d8250 (vtable 0x1011a9f0): with the weapon
+  ready (the AI weapon's slot 0x18 → adaptor 0x118 → the firearm's
+  0x005c4e90: past its next-fire tick, no component busy) its key is
+  pressed when the bot pushes PIYaw, PIThrottle or PISprint while zoomed,
+  or stands still unzoomed. The infantry moves (InfanteryMoveTo
+  0x1008fc90, InfanteryMoveToObject 0x1008f920) zoom out each step
+  (0x100e5f70); Idle in its own area zooms in. The game's component
+  steps on the press (0x005da670), zooms out on a reload (0x005da630) and
+  a weapon change; the zoom narrows the field of view over zoomDelay, the
+  look's units turn by that over the camera's 1.1 times mouseSpeedMod
+  (0x00586420), the walk takes the zoomed speed and the deviation
+  devModZoom (`GameWorld::setZoomed`). Sensing is the same zoomed or not
+  (the cone's row of 0x1012b074 comes from the object's flag bit 10).
+- **Aim:** (The head twists before the body for every
   soldier: see `SoldierControl::twist`, 0x0058a6d0.)
 - **Deviation:** the AI deviation (0x00892b70) widens the weapon's own
   deviation (see Fire above): `GameWorld::setAiDeviation`; the bot's aim
@@ -11381,15 +11688,22 @@ The commands (constructor / execute slot), and where the rewrite has them:
   +0x2ec, 1 when rested (`WeaponChoice::targetMotion`: PlayerInfo
   `stamina`, a vehicle's `GameWorld::vehicleStamina`). Stand-ins: a human's
   attention on the bot (the sensing agent's stamp 0x100eb7f0, whose
-  writer wasn't traced) is a round of it having passed the bot; every
-  sighting is clear (no see-through materials); vehicle guns have no
-  magazines; no bot is scripted (the +0x264 flag; the scripted-bot commands' goals don't set it here); no wire-guided weapon holds a target
+  writer wasn't traced: in AIDLL's decompilation only that find and the
+  agent's destructor 0x100ed5b0 touch the map at +0x84) is a round of it
+  having passed the bot; no bot is scripted (the +0x264 flag; the scripted-bot commands' goals don't set it here); no wire-guided weapon holds a target
   (LPTargetComp's target isn't modelled); the area guard's per-side spot
   is the control point (0x100623c0 starts it at the area's position) and
   its per-side radius (+0x98 + 4 team: the spot's distance to the area's
-  +0x118 point) the control point's radius. Left out: C4's guard on a
-  moving target (|Mobile slot 0x18 · the bot object's +0x80| over 4, the
-  object field not traced). `+0x209` falling with the
+  +0x118 point) the control point's radius. C4's guard on a moving
+  target: no C4 when |the target's Mobile slot 0x18 (velocity) · the bot
+  object's slot 0x3c (its facing, the direction 0x10075fb0's 0.9 test
+  takes)| is over 4 (`WeaponChoice::targetAlongFacing`). A seat's guns
+  are read with their magazines (`BotManager::seatAmmo`: the seat's
+  firearms through `GameWorld::seatFireArm`); the vehicle plan built with
+  the weapon's magazine empty (adaptor slot 0xe4, 0x00892580) and no
+  ammo.autoReload adds If (the weapon in hand, 0x100da090) BAPATrigger
+  c_PIReload (0x100d3110, input 32), which the rewrite presses while that
+  holds (a seat's press reloads its active firearms: see Reloading). `+0x209` falling with the
   target condition 0x100dc730 is taken as the aim no longer lobbing.
 - **The guided weapons' plan on foot** (0x10078570, which BBFire's plan
   maker picks over 0x100795a0 for an ITSoldier bot whose weapon's +0x6c,
@@ -11425,9 +11739,16 @@ The commands (constructor / execute slot), and where the rewrite has them:
     0x100db550 and 0x100db3b0 at 40 m holds) and, at the end, the reload
     (BAPATrigger 0x20).
   Rewritten: `BotManager::fire`'s guided branch (`guidedMoveStep`,
-  `guidedFire`) (`Bots_GuidedPlanOnFoot`). Stand-ins: the order's spot is
-  the normal plan's (`fireKeepsToOrder`; 0x100db550 / 0x100db3b0 not
-  decoded), the moves are the rewrite's walk (steer to close in, the
+  `guidedFire`) (`Bots_GuidedPlanOnFoot`). The order's spot
+  (`BotManager::guidedOrderSpot`): the area 0x10034a10 picks for the team
+  (not held, the most radius / max(1, d²), with a control point), its
+  spot for the bot (0x1005d940: the bot's place within 0.8 of the
+  point's radius, else one of 20 tries within it on the mesh), kept when
+  it lies within the team's radius of the team's spot (+0x98 / +0x7c + 8
+  team, across, 0x100269d0); the memo is AND of the area not held
+  (0x100db550: +0x70 + 4 team not 0) and the bot within 40 m of the spot
+  across (0x100db3b0, flag 1); a copy (0x100d8f90) also opens the
+  trigger's distance band (OR 0x100cf1b0). Stand-ins: the moves are the rewrite's walk (steer to close in, the
   throttle back), and a lock is `GameWorld::weaponLock`'s state 2.
 - **Change:** the infantry-map reach test for vehicles (the Mobile's
   per-map points +8/+0x1c/+0x30 aren't kept: every vehicle counts) and the

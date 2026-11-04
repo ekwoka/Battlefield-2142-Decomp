@@ -301,12 +301,23 @@ TEST(RenderScene_SpriteFlipbooks)
 		}
 	});
 	CHECK(advanced);
-	// A zoomed first person leaves it out.
+	// A zoomed first person keeps it (showInZoomedMode 0, showInFirstPerson
+	// 1: 0x0061a1c0's flags & 5 still hold; zoomed only picks the view).
 	effects::ParticleView zoomed;
 	zoomed.zoomed = true;
 	size_t shown = 0;
 	manager.forEachGroup(zoomed, [&](const std::string&, bool, const std::vector<effects::Sprite>& s) { shown += s.size(); });
-	CHECK(shown == 0);
+	CHECK(shown > 0);
+	// In first person a system shows with either flag; neither: not started.
+	world::ObjectTemplate* neither = templates.find("anim");
+	neither->settings()["showInFirstPerson"] = "0";
+	effects::EffectManager firstPerson(templates);
+	CHECK(firstPerson.spawn("e_anim", {}, {}, effects::EffectManager::View::FirstPerson));
+	CHECK(firstPerson.emitters() == 0);
+	neither->settings()["showInZoomedMode"] = "1"; // showInZoomedMode alone: started
+	effects::EffectManager zoomedOnly(templates);
+	CHECK(zoomedOnly.spawn("e_anim", {}, {}, effects::EffectManager::View::FirstPerson));
+	CHECK(zoomedOnly.emitters() == 1);
 }
 
 TEST(RenderScene_BundleAgeSpeedAndRotation)
@@ -641,6 +652,42 @@ TEST(RenderScene_MeshLightsPickedPerMesh)
 	CHECK(rand.next() == 41);
 	CHECK(near(render::flickerFactor(0.5f, 32767), 1) && near(render::flickerFactor(0.5f, 0), 0.5f));
 	CHECK(near(render::flickerFactor(0, 0), 1));
+}
+
+// The terrain's point-light passes (Hi_Terrain's PerPixelPointlight,
+// 0x1014e080; LevelRenderer::applyTerrainLights): every listed Point light
+// (filter 0x909, no spots), the shader's 8 nearest the camera by distance
+// less radius, each adding colour x N.L x saturate(1 - d^2 / R^2) x 0.5.
+TEST(RenderScene_TerrainPointLightPasses)
+{
+	render::ListedLight lights[11];
+	for (int i = 0; i < 11; ++i) {
+		lights[i].position[0] = 10.0f * static_cast<float>(i + 1); // 10 .. 110 m along x
+		lights[i].radius = 5;
+	}
+	lights[0].spot = true;    // a spot: not the terrain's
+	lights[10].radius = 200;  // far, but reaching over the camera: first
+	const float camera[3] = {0, 0, 0};
+	int picked[8];
+	const int n = render::pickTerrainLights(lights, 11, camera, 8, picked);
+	CHECK(n == 8);
+	CHECK(picked[0] == 10 && picked[1] == 1 && picked[2] == 2 && picked[7] == 7);
+	for (int i = 0; i < n; ++i) {
+		CHECK(!lights[picked[i]].spot);
+	}
+	CHECK(render::pickTerrainLights(lights, 1, camera, 8, picked) == 0); // the spot alone
+	CHECK(near(render::pointLightInverseRange2(10), 0.01f) && near(render::pointLightInverseRange2(0), 10000));
+	// One light's term over a flat patch (normal up), R = 10 m.
+	const float up[3] = {0, 1, 0};
+	const float inv = render::pointLightInverseRange2(10);
+	const float above[3] = {0, 5, 0};    // straight up, 5 of 10 m: 1 - 0.25
+	CHECK(near(render::terrainPointLight(above, inv, up), 0.375f));
+	const float aside[3] = {5, 5, 0};    // 45 degrees, d^2 50: 0.7071 x 0.5 x 0.5
+	CHECK(near(render::terrainPointLight(aside, inv, up), 0.70710678f * 0.5f * 0.5f));
+	const float below[3] = {0, -5, 0};   // behind the surface: none
+	CHECK(render::terrainPointLight(below, inv, up) == 0);
+	const float beyond[3] = {0, 11, 0};  // past R: none
+	CHECK(render::terrainPointLight(beyond, inv, up) == 0);
 }
 
 // The object manager's distance fade (0x006ff110 / 0x006fb280 / 0x006fb320):

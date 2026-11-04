@@ -725,6 +725,9 @@ private:
 		uint32_t firstVertex;
 		uint32_t vertexCount;
 		bool repeat = false; // trails tile their texture along themselves
+		// Decals: the normal map of the group's normal-mapped decals (Decals.fx
+		// technique 2, decalNormalMapName); null for the plain ones.
+		SDL_GPUTexture* normalMap = nullptr;
 	};
 	SDL_GPUBuffer* m_particleVertices = nullptr;
 	// The heat shimmer's sprites (ParticleHeatShimmer) and the copy of the
@@ -819,6 +822,9 @@ private:
 	// This frame's decals: one buffer, drawn in groups by texture.
 	SDL_GPUBuffer* m_decalVertices = nullptr;
 	std::vector<ParticleGroup> m_decalGroups;
+	// The first person zoomed this frame: its particles take the
+	// first-person meshes' view, else the world's (0x100990b0).
+	bool m_firstPersonZoomed = false;
 	void buildDecals();
 	// Mesh particles (MeshParticleSystems) of the effect managers.
 	void drawMeshParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Mat4& viewProjection,

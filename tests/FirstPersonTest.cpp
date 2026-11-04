@@ -204,3 +204,41 @@ TEST(FirstPerson_CameraShakes)
 	CHECK(most > 0.5f && most < 1.0f);
 	CHECK(anim::cameraHitShake(0, 1) == 0);
 }
+
+// The sniper scopes' fine tuning (0x005da670, 0x005da820, 0x005da890):
+// factors 0, 0.312, 0.106 with 12 steps: the toggle knows two levels, the
+// wheel moves the field of view by (0.312 - 0.106) / 12 between them,
+// only with the zoom upgrade when the unlock is asked for.
+TEST(FirstPerson_ZoomFineTuning)
+{
+	anim::ZoomSettings settings;
+	settings.factors = {0, 0.312f, 0.106f};
+	settings.useFineTuning = true;
+	settings.fineTuneSteps = 12;
+	anim::ZoomState zoom;
+	CHECK(std::fabs(zoom.cycle(settings) - 0.312f) < 1e-6f);
+	CHECK(zoom.cycle(settings) == 0 && zoom.level() == 0); // two levels only
+	zoom.cycle(settings);
+	CHECK(!zoom.fineTune(settings, 1, false)); // needs the unlock
+	CHECK(zoom.fineTune(settings, 1, true));
+	CHECK(std::fabs(zoom.factor(settings) - (0.312f - 0.206f / 12)) < 1e-5f);
+	for (int i = 0; i < 20; ++i) {
+		zoom.fineTune(settings, 1, true);
+	}
+	CHECK(std::fabs(zoom.factor(settings) - 0.106f) < 1e-5f && !zoom.fineTune(settings, 1, true));
+	// Zoomed out and in again: the offset is kept (0x005da530).
+	zoom.cycle(settings);
+	CHECK(std::fabs(zoom.cycle(settings) - 0.106f) < 1e-5f);
+	for (int i = 0; i < 20; ++i) {
+		zoom.fineTune(settings, -1, true);
+	}
+	CHECK(std::fabs(zoom.factor(settings) - 0.312f) < 1e-5f && !zoom.fineTune(settings, -1, true));
+	settings.fineTuningNeedsUnlock = false;
+	CHECK(zoom.fineTune(settings, 1, false));
+	// Without fine tuning: every level, no offset.
+	anim::ZoomSettings plain;
+	plain.factors = {0, 0.5f, 0.3f};
+	anim::ZoomState other;
+	other.cycle(plain);
+	CHECK(other.cycle(plain) == 0.3f && !other.fineTune(plain, 1, true));
+}

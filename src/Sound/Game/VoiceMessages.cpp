@@ -439,7 +439,7 @@ VoiceMessages::Result VoiceMessages::heard(const Heard& in)
 	}
 	std::string voiceName = "commander", filterName = "commander";
 	if (in.hasSender) {
-		filterName.clear();
+		filterName = in.senderFilter; // the seat's soundFilter (0x0042e0c0)
 		if (!in.commander) {
 			voiceName = in.squadLeader ? "squadleader" : "grunt";
 		}

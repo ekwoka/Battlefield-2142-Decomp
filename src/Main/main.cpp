@@ -56,6 +56,7 @@
 #include "Movie/MovieQueue.h"
 #include "Movie/MenuVideo.h"
 #include "HudAlerts.h"
+#include "HudCombatArea.h"
 #include "HudMenus.h"
 #include "HudMenusChat.h"
 #include "HudMenusComm.h"
@@ -728,6 +729,9 @@ nametags::Nametags* g_nametags = nullptr;
 // The big map (the HUD's menu state 2, MapShow at full size): c_GIMapSize
 // toggles it while alive (0x00754290 → 0x0074fd90(2)).
 bool g_bigMap = false;
+// The local round's overhead camera (the commander's, HudMenus.h): its
+// point is g_commanderView's.
+dice::hfe::menu::OverheadCamera g_overheadCamera;
 
 // The template of the object a player controls in a vehicle (player slot
 // 0x4c: the seat's PlayerControlObject, the vehicle itself for the
@@ -954,6 +958,30 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			revealed.push_back(id);
 		}
 	}
+	// The radar rings of the team's sonars, radar grenades and recon
+	// drones (GameWorld::radarSources; 0x0078f060: icon_uav_circle, a full
+	// ring turned by the sweep with radialRadar, else one growing to the
+	// radius over the sweep's turn and fading as 1 - sweep / 2 pi), and
+	// the enemies the rings pass (radarContacts) with the reported ones.
+	{
+		const float sweep = round.radarSweep();
+		for (const game::GameWorld::RadarSource& source : round.radarSources(me.team)) {
+			hud::HudManager::MapMarker ring {"Ingame/Minimap/icon_uav_circle.tga", source.position.x, source.position.z, 1};
+			if (source.radial) {
+				ring.worldSize = 2 * source.radius;
+				ring.yaw = sweep * 57.29578f;
+			} else {
+				ring.worldSize = std::max(2 * source.radius * sweep / 6.2831853f, 0.01f);
+				ring.color[3] = 1 - sweep / 6.2831853f;
+			}
+			markers.push_back(ring);
+		}
+	}
+	for (const game::GameWorld::RadarContact& contact : round.radarContacts(me.team)) {
+		if (contact.player >= 0 && std::find(revealed.begin(), revealed.end(), contact.player) == revealed.end()) {
+			revealed.push_back(contact.player);
+		}
+	}
 	// The squad radar's enemies (their kits' spotted icons, a decoy's place
 	// for one on foot near it) and the vehicles the reports spotted, in red
 	// (menu::radarMarkers).
@@ -1149,6 +1177,25 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		dice::hfe::menu::VehicleHudInput look;
 		look.vehicle = vehicle->objectTemplate();
 		look.armor = max > 0 ? left / max : 1.0f;
+		// vehicleHud.useChildArmor (0x007a18a0 -> 0x005c6460): the
+		// controlled seat's own armour or its first armoured child's: a
+		// Titan gun hub shows its gun's (the Titan's part of that name),
+		// not the Titan's.
+		if (game::GameWorld::PlayerInfo seated; world.playerInfo(world.localPlayer(), seated)) {
+			if (const world::ObjectTemplate* armour =
+					dice::hfe::menu::childArmorTemplate(controlledTemplate(round, seated), round.templates())) {
+				if (armour != vehicle->objectTemplate()) {
+					for (const auto& part : round.titanParts(seated.team)) {
+						if (part.maxHitPoints > 0 && part.name.size() == armour->name().size() &&
+							std::equal(part.name.begin(), part.name.end(), armour->name().begin(),
+								[](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); })) {
+							look.armor = part.hitPoints / part.maxHitPoints;
+							break;
+						}
+					}
+				}
+			}
+		}
 		look.seconds = dt;
 		// The control object's sprint (slots 0x108 / 0x100: the boost's
 		// stamina): the root PCO's for its driver, a seat's own (never
@@ -2859,6 +2906,7 @@ int runGame(Options& options, Session& session)
 	game::registerGameLogicConsoleMethods(console, gameLogic);
 	// The level's combat areas (CombatArea.*): the Titans keep inside them.
 	game::CombatAreas combatAreas;
+	dice::hfe::menu::CombatAreaLayer combatAreaLayer; // the minimap's (HudCombatArea.h)
 	game::registerCombatAreaConsoleMethods(console, combatAreas);
 	gameLogic.mapSize = options.mapSize;
 
@@ -3639,6 +3687,7 @@ int runGame(Options& options, Session& session)
 		run("Common/Material/MaterialManagerSettings.con");
 		run((levelPath + "Init.con").c_str());
 		loadingStep(0.6f);
+		objects.setGameMode(options.gameMode); // Object.notInAI's test
 		run((levelPath + "StaticObjects.con").c_str());
 		// The level's own objects: a client loads them too (no ghosts).
 		for (const auto& object : objects.objects()) {
@@ -4153,8 +4202,9 @@ int runGame(Options& options, Session& session)
 		// the map) goes to the selected squads (slot 0x3f4); here the squad
 		// whose leader is nearest the asset, as for a map click. The zoom
 		// buttons (<asset>Zoom, slots 0x370 / 0x378 / 0x380 → 0x398,
-		// 0x007d8e00) send the server event 0xf with the asset's position
-		// for the commander's camera, which isn't rewritten.
+		// 0x007d8e00) move the commander's camera to the asset (the "0xf"
+		// there is a local dispatch): CommanderCam to a server, a local
+		// round's own camera (g_overheadCamera) here.
 		const auto assetAt = [&](Ability ability, float& x, float& z) {
 			const auto state = round.abilityState(myTeam(), ability);
 			const world::Object* asset = state.available ? round.objects().find(state.asset) : nullptr;
@@ -4327,25 +4377,46 @@ int runGame(Options& options, Session& session)
 		}
 		// The crosshair's enemy reported to the squad (0x007c8160: the game's
 		// slot 0xd4, 0x0042d110: the spam check, then the Spotted event with
-		// message 0x2e; GameWorld::spotCrosshair) as the rose closes. A
-		// joined client's server takes the object from its own view of us.
+		// message 0x2e and the spotted object's network id) as the rose
+		// closes; with its first argument the spotted object's voice
+		// (radio.spottedMessage: "apc_spotted", "infantry_spotted", ...; the
+		// game's slot 0xd0 then 0x50 on TCTeam; HudMenusComm.h SpotChoice).
+		// A joined client picks the object from its own view (its ghost's
+		// id goes up); a server takes the reporter's crosshair from its view.
 		bindMethod(console, "Radio.sendSpottedMessage", ConsoleAccess::Anyone,
-			[&commRoses, &round, &joinedServer, &session, spamRefused](bool, std::string) {
+			[&commRoses, &round, &gameLogic, &joinedServer, &session, spamRefused, sayRadio](bool say, std::string) {
 				commRoses.close();
-				if (spamRefused(false)) {
-					return;
-				}
-				net::SpottedInfo spot;
-				spot.message = 0x2e;
-				if (net::GameClient* server = joinedServer()) {
-					if (const net::RemotePlayer* me = server->world().player(server->world().localPlayer())) {
-						spot.team = me->team;
+				dice::hfe::menu::SpotChoice choice;
+				if (net::GameClient* server = joinedServer(); server && g_remoteHud) {
+					game::GameWorld::PlayerInfo me;
+					if (g_remoteHud->playerInfo(g_remoteHud->localPlayer(), me) && me.alive) {
+						const float yaw = me.yaw * 3.14159265f / 180.0f, pitch = me.aimPitch * 3.14159265f / 180.0f;
+						const float eye[3] = {me.position.x, me.position.y + 1.6f, me.position.z};
+						const float dir[3] = {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+						choice = dice::hfe::menu::spotChoice(*g_remoteHud, round,
+							dice::hfe::menu::crosshairEnemy(*g_remoteHud, round, me.id, eye, dir));
 					}
-					server->sendEvent(net::makeSpotted(spot));
-				} else if (session.hosted && round.localPlayer() >= 0) {
-					session.hosted->spotted(spot, round.localPlayer());
-				} else {
-					round.spotCrosshair(round.localPlayer());
+				} else if (round.localPlayer() >= 0) {
+					const host::LocalHudWorld local(round, gameLogic);
+					choice = dice::hfe::menu::spotChoice(local, round, round.crosshairTarget(round.localPlayer()));
+				}
+				if (!spamRefused(false)) {
+					net::SpottedInfo spot;
+					spot.message = 0x2e;
+					if (net::GameClient* server = joinedServer()) {
+						if (const net::RemotePlayer* me = server->world().player(server->world().localPlayer())) {
+							spot.team = me->team;
+						}
+						spot.spotted = g_remoteHud && choice.object ? g_remoteHud->ghostOf(choice.object) : 0;
+						server->sendEvent(net::makeSpotted(spot));
+					} else if (session.hosted && round.localPlayer() >= 0) {
+						session.hosted->spotted(spot, round.localPlayer());
+					} else if (choice.player >= 0) {
+						round.reportBattlefieldObjects(round.localPlayer(), {choice.player});
+					}
+				}
+				if (say) {
+					sayRadio(1, choice.voice, 0);
 				}
 			});
 		dice::hfe::menu::SquadMenu squadMenu(round, hudManager);
@@ -4529,6 +4600,12 @@ int runGame(Options& options, Session& session)
 		// 0x380 → 0x398, 0x007d8e00): the view to the asset; on a server
 		// the CommanderCam event (0x24: x, the camera's height, z).
 		const auto zoomTo = [&](float x, float z) {
+			// A local round's camera keeps 80 m inside the terrain (0x005f8170).
+			if (!session.client) {
+				g_overheadCamera.moveTo(x, z);
+				x = g_overheadCamera.x;
+				z = g_overheadCamera.z;
+			}
 			g_commanderView = std::make_pair(x, z);
 			hudManager.setCommanderMapZoom(2); // the overhead view (0x007d7f90: the map's zoom 2)
 			if (session.client) {
@@ -4565,6 +4642,11 @@ int runGame(Options& options, Session& session)
 		// (slot 0x3a0, 0x007d8ec0) and the camera goes there (slot 0x398:
 		// CommanderCam).
 		const auto sendCommanderCam = [&](float x, float z) {
+			if (!joinedServer()) {
+				g_overheadCamera.moveTo(x, z);
+				x = g_overheadCamera.x;
+				z = g_overheadCamera.z;
+			}
 			g_commanderView = std::make_pair(x, z);
 			if (net::GameClient* server = joinedServer()) {
 				net::GameEvent cam;
@@ -5135,6 +5217,12 @@ int runGame(Options& options, Session& session)
 		if (const terrain::Heightmap* ground = heightmaps.primary(); ground && ground->loaded()) {
 			hudManager.setMap("Levels/" + options.level + "/Hud/Minimap/ingameMap.dds", ground->originX(), ground->originZ(),
 				ground->worldWidth(), ground->worldDepth());
+			combatAreaLayer.setLevel(options.level, ground->originX(), ground->originZ(), ground->worldWidth(),
+				ground->worldDepth());
+			g_overheadCamera.originX = ground->originX();
+			g_overheadCamera.originZ = ground->originZ();
+			g_overheadCamera.width = ground->worldWidth();
+			g_overheadCamera.depth = ground->worldDepth();
 		}
 		if (const terrain::Heightmap* ground = heightmaps.primary(); ground && ground->loaded()) {
 			physics::Ground surface;
@@ -5505,6 +5593,7 @@ int runGame(Options& options, Session& session)
 		g_hudWorld = &localHud;
 		g_remoteHud = remoteHud ? &*remoteHud : nullptr;
 		gameAudio.setHudWorld(g_remoteHud); // a joined game's radio: the server's players
+		playerCamera.setPlayers(g_remoteHud); // a joined spectator follows the server's players
 		// A joined game's squad and commander menus: the server's players,
 		// the squad changes sent as the ClientSquadManager's events.
 		commanderMenu.setWorld(g_remoteHud);
@@ -6964,6 +7053,7 @@ int runGame(Options& options, Session& session)
 			};
 			g_overheadFov = value("fOV", g_overheadFov);
 			g_overheadHeight = value("height", g_overheadHeight);
+			g_overheadCamera.speed = value("speed", g_overheadCamera.speed);
 		}
 		sources.titanObject = [&round](int team) { return round.titanOf(team); };
 		sources.overheadView = [&hudManager](render::OverheadView& view) {
@@ -7001,12 +7091,11 @@ int runGame(Options& options, Session& session)
 				const world::ObjectTemplate* gun = me.seat >= 0 && static_cast<size_t>(me.seat) < seats.size()
 					? round.templates().find(seats[static_cast<size_t>(me.seat)].weapon)
 					: nullptr;
-				if (gun && playerCamera.insideView()) {
-					const auto& settings = gun->settings();
-					const auto on = settings.find("weaponHud.enablePostProcessingOnGuiIndex");
-					const auto shown = settings.find(playerCamera.zoomed() ? "weaponHud.altGuiIndex" : "weaponHud.guiIndex");
-					effects.cameraEffect = on != settings.end() && shown != settings.end() &&
-						std::atoi(on->second.c_str()) == std::atoi(shown->second.c_str());
+				// The seat's vehicleHud.enablePostProcessingOnGuiIndex, or the
+				// gun's weaponHud index naming the HUD shown (HudMenusVehicles.h).
+				if (playerCamera.insideView()) {
+					effects.cameraEffect =
+						dice::hfe::menu::seatPostProcessing(controlledTemplate(round, me), gun, playerCamera.zoomed());
 				}
 			}
 			for (const auto& titan : round.titans()) {
@@ -7142,6 +7231,20 @@ int runGame(Options& options, Session& session)
 			localHud.scoreOf = scoreOf;
 			g_weaponZoomed = playerCamera.zoomLevel() > 0; // the firearm's slot 300 (its zoom)
 			updateHud(hudManager, hudWorld(), round, gameLogic, scoreboardHeld, commanderScreen);
+			// The minimap's combat-area layer and framing (HudCombatArea.h):
+			// the areas that apply to the local player's team and the
+			// category of what he controls (0 on foot).
+			{
+				game::GameWorld::PlayerInfo me;
+				int category = 0;
+				const bool known = hudWorld().playerInfo(hudWorld().localPlayer(), me);
+				if (known && me.alive && me.vehicle) {
+					if (const world::ObjectTemplate* controlled = controlledTemplate(round, me)) {
+						category = game::GameWorld::vehicleCategory(*controlled);
+					}
+				}
+				combatAreaLayer.update(files, combatAreas, known ? me.team : 0, category, hudManager);
+			}
 			{
 				// The vehicle's warnings: the seekers locked on it (their
 				// seek's target type; chasing once past the tracking delay).
@@ -7317,6 +7420,10 @@ int runGame(Options& options, Session& session)
 				}
 				helpPopups.update(hudManager, help, seconds);
 				helpPopups.tutorial(hudManager, help, seconds);
+				// The lock tones (GameWorld::takeLockTones, 0x00657ce0).
+				for (const auto& tone : round.takeLockTones()) {
+					tone.play ? sounds.playSound(tone.sound) : sounds.stopSound(tone.sound);
+				}
 				// AbilityHud (on the kits: S_Heal, S_Repair, S_Resupply): the
 				// player's kit's sound while a hub or a repair treats him or
 				// his vehicle (its last treatment within half a second).
@@ -7748,6 +7855,7 @@ int runGame(Options& options, Session& session)
 			};
 		} else if (round.player()) {
 			viewer.onPlayerInput = [&round, &hudPlayer, &hudLocal, &scoreboardHeld, &options, &showMenu, &startedGame, &endOfRound, &commanderScreen,
+										&session, &hudManager,
 										&commanderKeyWas, &playerCamera, wasAlive = false, spawnedProne = false,
 										toggleCameraWas = false, actionWas = false, lastPitch = 0.0f, itemHeld = false](
 										const ViewerOptions::PlayerInput& raw) mutable {
@@ -7762,6 +7870,22 @@ int runGame(Options& options, Session& session)
 				if ((showMenu && startedGame) || endOfRound.loaded()) {
 					round.setPlayerInput({}); // the menu has the keys
 					return;
+				}
+				// The local round's commander on the overhead view pans its
+				// camera with the movement keys (0x005f8510), which then
+				// don't reach the soldier.
+				{
+					static auto last = std::chrono::steady_clock::now();
+					const auto now = std::chrono::steady_clock::now();
+					const float seconds = std::min(std::chrono::duration<float>(now - last).count(), 0.1f);
+					last = now;
+					if (commanderScreen && !session.client && g_commanderView && hudManager.commanderMapZoom() == 2) {
+						g_overheadCamera.x = g_commanderView->first;
+						g_overheadCamera.z = g_commanderView->second;
+						g_overheadCamera.pan(in.strafe, in.throttle, seconds);
+						g_commanderView = std::make_pair(g_overheadCamera.x, g_overheadCamera.z);
+						in.strafe = in.throttle = 0;
+					}
 				}
 				itemListInput(in); // the HUD's pass first (0x00755d50)
 				if (in.item > 0 && !itemHeld) {
@@ -7793,6 +7917,7 @@ int runGame(Options& options, Session& session)
 				}
 				toggleCameraWas = in.toggleCamera;
 				playerCamera.setAltFire(in.altFire);
+				playerCamera.setItemStep(in.itemStep);
 				// Crouch in a seat with allowDucking ducks (0x005ca2e0), and the
 				// seat's inputs are cleared while it does (0x005c9ec0).
 				playerCamera.setCrouch(in.crouch);

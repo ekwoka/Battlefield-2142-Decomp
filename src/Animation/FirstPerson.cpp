@@ -30,7 +30,9 @@ float ZoomState::cycle(const ZoomSettings& settings)
 	if (!settings.present()) {
 		return 0;
 	}
-	m_level = (m_level + 1) % static_cast<int>(settings.factors.size());
+	const int levels = settings.useFineTuning ? std::min<int>(2, static_cast<int>(settings.factors.size()))
+											  : static_cast<int>(settings.factors.size());
+	m_level = (m_level + 1) % levels;
 	m_ticks = 0;
 	return factor(settings);
 }
@@ -49,8 +51,21 @@ void ZoomState::tick()
 float ZoomState::factor(const ZoomSettings& settings) const
 {
 	return m_level > 0 && static_cast<size_t>(m_level) < settings.factors.size()
-		? settings.factors[static_cast<size_t>(m_level)]
+		? settings.factors[static_cast<size_t>(m_level)] - (settings.useFineTuning ? m_fineTune : 0.0f)
 		: 0.0f;
+}
+
+bool ZoomState::fineTune(const ZoomSettings& settings, int step, bool unlocked)
+{
+	if (!settings.useFineTuning || settings.factors.size() < 3 || step == 0
+		|| (settings.fineTuningNeedsUnlock && !unlocked)) {
+		return false;
+	}
+	const float span = settings.factors[1] - settings.factors[2];
+	const float by = span / static_cast<float>(std::max(settings.fineTuneSteps, 1));
+	const float was = m_fineTune;
+	m_fineTune = step > 0 ? std::min(m_fineTune + by, span) : std::max(m_fineTune - by, 0.0f);
+	return m_fineTune != was;
 }
 
 int ZoomState::lod(const ZoomSettings& settings) const
