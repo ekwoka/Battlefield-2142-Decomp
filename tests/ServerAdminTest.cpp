@@ -559,6 +559,9 @@ TEST(ServerAdmin_DemoRecordAndPlayBack)
 	CHECK(viewer.world().localPlayer() < 0); // no player of its own
 	std::remove(path.c_str());
 	CHECK(net::demoPath("match1") == "Demos/match1.bf2142demo" && net::demoPath("a\\b.dem") == "a/b.dem");
+	// The extension is the text after the last '.', across slashes (0x0065b5c0).
+	CHECK(net::demoPath("my.dir/run") == "my.dir/run");
+	CHECK(net::demoPath("../run") == "../run" && net::demoPath("a/../run") == "Demos/a/../run.bf2142demo");
 }
 
 // sv.autoRecord (AutoRecorder 0x00585860 / 0x00585920): a demo from the

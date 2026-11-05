@@ -380,6 +380,15 @@ int DemoPlayer::next(std::vector<uint8_t>& payload)
 	return -1;
 }
 
+std::string fileExtension(const std::string& name)
+{
+	const size_t dot = name.rfind('.');
+	if (dot == std::string::npos || (dot > 1 && name[dot - 1] == '.')) {
+		return {};
+	}
+	return name.substr(dot + 1);
+}
+
 std::string demoPath(const std::string& name)
 {
 	std::string path = name;
@@ -388,8 +397,7 @@ std::string demoPath(const std::string& name)
 			c = '/';
 		}
 	}
-	const size_t slash = path.rfind('/');
-	if (path.find('.', slash == std::string::npos ? 0 : slash) == std::string::npos) {
+	if (fileExtension(path).empty()) {
 		path = "Demos/" + path + ".bf2142demo";
 	}
 	return path;

@@ -134,8 +134,7 @@ struct DemoCamera {
 inline std::string demoCameraPath(std::string name)
 {
 	std::replace(name.begin(), name.end(), '\\', '/');
-	const size_t slash = name.rfind('/');
-	if (name.find('.', slash == std::string::npos ? 0 : slash) == std::string::npos) {
+	if (net::fileExtension(name).empty()) {
 		name = "Demos/" + name;
 	}
 	return name + "-def.bf2142cam";

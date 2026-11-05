@@ -127,6 +127,11 @@ bool decodeCameraKeyframes(const std::vector<uint8_t>& inflated, std::vector<Cam
 bool writeCameraFile(const std::string& path, const std::vector<CameraKeyframe>& frames);
 bool readCameraFile(const std::string& path, std::vector<CameraKeyframe>& frames);
 
+// A file name's extension (0x0065b5c0): the text after its last '.', none
+// when that '.' past the second character follows another '.' (so "a/../x"
+// has none, "../x" has "/x"); slashes aren't looked at.
+std::string fileExtension(const std::string& name);
+
 // demo.recordDemo's name (0x00432cc0): '\\' as '/', and with no extension
 // Demos/<name>.bf2142demo.
 std::string demoPath(const std::string& name);
