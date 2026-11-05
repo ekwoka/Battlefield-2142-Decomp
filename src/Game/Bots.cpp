@@ -3808,6 +3808,65 @@ bool bodyUnderWater(float y, float water, float ground)
 	return y < water + 0.5f && water - ground > 0.75f;
 }
 
+bool uprightOnGround(const physics::Vec3& up, const physics::Vec3& normal)
+{
+	return physics::dot(up, normal) >= 0.7071f; // 0x3f350481
+}
+
+bool sphereInRoomBox(const physics::Vec3& origin, const physics::Vec3& forward, float width, float height, float length,
+	const physics::Vec3& at, float radius)
+{
+	physics::Vec3 ahead {forward.x, 0, forward.z};
+	const float flat = std::sqrt(physics::lengthSquared(ahead));
+	ahead = flat > 1e-6f ? ahead * (1 / flat) : physics::Vec3 {0, 0, 1};
+	const physics::Vec3 right = physics::cross({0, 1, 0}, ahead);
+	const physics::Vec3 d = at - origin;
+	const float x = physics::dot(d, right), y = d.y, z = physics::dot(d, ahead);
+	const float halfWidth = width * 1.2f * 0.5f, halfHeight = height * 1.2f * 0.5f;
+	return x >= -halfWidth - radius && x <= halfWidth + radius && y >= -halfHeight - radius && y <= halfHeight + radius
+		&& z >= length * -0.6f - radius && z <= length * 12.0f + radius;
+}
+
+// 0x1006c3e0 asks the information environment (DAT_101394b0, vtable
+// 0x10119858 slot 0x2c, 0x100caf10) for the dynamic objects of grid 0 and
+// of the bot's team's grid in the box, filtered by 0x1006c040 (vtable
+// 0x101168b0): not the vehicle, not the bot's own object, ITMobile, not
+// ITSoldier, not ITNaval. Room is none found. The seat object (the AG
+// gunships' second positions, AS_AG_SecondPosition_AI / US_...: ITUnit
+// ITAir) has no collision mesh of its own; its box and matrix are its
+// vehicle's here (BF2142.exe's AIObjectPhysical box, 0x008a43f0, asserts
+// the object has collision LOD 1, so the box is the hull's). A grid
+// entry's radius is the AI object's r (vehicleBox).
+bool BotManager::roomAhead(const GameWorld::VehicleInfo& vehicle, const GameWorld::PlayerInfo& self) const
+{
+	const physics::Vec3 size = vehicle.boxMax - vehicle.boxMin;
+	for (const GameWorld::VehicleInfo& other : m_vehicles) {
+		if (other.object == vehicle.object || other.object == self.vehicle) {
+			continue;
+		}
+		const world::Object* object = m_world.objects().find(other.object);
+		const uint32_t types
+			= object && object->objectTemplate() ? m_settings.typeFlags(aiTemplateOf(object->objectTemplate()->name())) : 0;
+		const int team = vehicleTeam(other.object);
+		if (!(types & kITMobile) || (types & (kITSoldier | kITNaval)) || (team != 0 && team != self.team)) {
+			continue;
+		}
+		if (sphereInRoomBox(vehicle.position, vehicle.forward, size.x, size.y, size.z, other.position, vehicleBox(other).radius)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool BotManager::uprightOnTerrain(const physics::Vec3& at, const physics::Vec3& up) const
+{
+	physics::Vec3 normal {0, 1, 0};
+	if (m_world.ground().heightAndNormal) {
+		m_world.ground().heightAndNormal(at.x, at.z, normal);
+	}
+	return uprightOnGround(up, normal);
+}
+
 float BotManager::reviveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players)
 {
 	if (self.vehicle) {
@@ -4142,8 +4201,9 @@ bool BotManager::threatened(const Bot& bot, const GameWorld::PlayerInfo& self) c
 // Mobile's per-map points +8/+0x1c/+0x30, which the rewrite doesn't keep:
 // every vehicle counts); a passenger takes any. The get_in answers are
 // below. With the way out chosen and the vehicle's health at or under
-// 0.4 the bot says bail_out (see below). Not rewritten: an ITAir vehicle
-// that isn't ITHelicopter also needs room round it (0x1006c3e0).
+// 0.4 the bot says bail_out (see below). A seat whose AI object is ITAir
+// but not ITHelicopter (the AG gunships' second positions) also needs room
+// ahead to be chosen (roomAhead, 0x1006c3e0).
 // (BBChange, vtable 0x101168c4: constructor 0x1006c1b0, destructor
 // 0x1006c2b0.)
 float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight)
@@ -4302,9 +4362,14 @@ float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 		// Mobile part that isn't ITNaval, 0.77 for ITGround, 0.5 for ITAir.
 		const uint32_t types = m_settings.typeFlags(rootAi);
 		const float others = otherSeatFactor(!occupants.empty() && occupants[0] >= 0, mobile, types);
+		const std::vector<GameWorld::SeatLayout> layout = m_world.vehicleSeats(vehicle.object);
 		for (size_t seat = 0; seat < seats; ++seat) {
 			const float value = seatValue(bot, self, vehicle.object, static_cast<int>(seat), true) * f * (seat > 0 ? others : 1.0f);
-			if (value > best) {
+			// The seat's AI object's types (its own aiTemplate, else the root's).
+			const std::string seatAi = seat < layout.size() ? aiTemplateOf(layout[seat].name) : std::string();
+			const uint32_t seatTypes = seatAi.empty() ? (seat == 0 ? types : 0) : m_settings.typeFlags(seatAi);
+			const bool fixedWing = (seatTypes & kITAir) && !(seatTypes & kITHelicopter);
+			if (value > best && (!fixedWing || roomAhead(vehicle, self))) {
 				best = value;
 				chosen = vehicle.object;
 				chosenSeat = -1;
@@ -5004,8 +5069,8 @@ float BotManager::coordination(const GameWorld::PlayerInfo& self, int type, int6
 // human's call, x1.5 for a bot's, and with a human's call heard and the
 // best a human within 50 m the urgency is 100; ammo for a caller needs only
 // some weapon short (ratio below 1), scores x70, and the urgency is x100.
-// Not rewritten: the terrain-normal "upright" test (soldiers on foot always
-// pass it here).
+// A candidate past the health / ammo test must stand upright on the
+// terrain (uprightOnGround: the slope under him at most 45 degrees).
 float BotManager::medicUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight, bool ammo)
 {
 	const int slot = kitSlot(self, ammo ? WeaponAi::Ammo : WeaponAi::Healing);
@@ -5060,6 +5125,9 @@ float BotManager::medicUrgency(Bot& bot, const GameWorld::PlayerInfo& self, floa
 				continue;
 			}
 		}
+		if (!uprightOnTerrain(o.position, {0, 1, 0})) {
+			continue;
+		}
 		const float d = std::sqrt(physics::lengthSquared(o.position - self.position));
 		if (d > range) {
 			continue;
@@ -5108,7 +5176,8 @@ float BotManager::medicUrgency(Bot& bot, const GameWorld::PlayerInfo& self, floa
 // stays 0.6), not the bot's own; score basicTemp / (f x distance), f =
 // fuzzy(1 - health), 1 for the vehicle it repairs already. Urgency:
 // fuzzy(best) x weight x 10 with a human aboard, x 2 otherwise, times the
-// coordination factor (task 2).
+// coordination factor (task 2). A vehicle not upright on the terrain
+// (uprightOnGround: on its side or roof) is left out.
 float BotManager::repairUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight)
 {
 	const int slot = kitSlot(self, WeaponAi::Repair);
@@ -5124,7 +5193,7 @@ float BotManager::repairUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 	physics::Vec3 chosenAt;
 	for (const GameWorld::VehicleInfo& v : m_vehicles) {
 		const float h = healthOf(v.object);
-		if (h <= 0 || h >= 0.6f) {
+		if (h <= 0 || h >= 0.6f || !uprightOnTerrain(v.position, physics::cross(v.forward, v.right))) {
 			continue;
 		}
 		const float d = std::sqrt(physics::lengthSquared(v.position - self.position));

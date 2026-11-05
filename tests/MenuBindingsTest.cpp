@@ -778,10 +778,13 @@ TEST(MenuBindings_OfflineNatives)
 		CHECK(natives.isBound("dice.bf2.Singleplay", member));
 		CHECK(call(vm, natives, "dice.bf2.Singleplay", member).isUndefined());
 	}
-	CHECK(vm.toString(call(vm, natives, "dice.bf2.Cursor", "getCursor")) == "undefined");
+	// The cursor: setCursor's name stops at SwiffRender's stub (0x101177b0)
+	// and shows the window's cursor; getCursor answers "" (0x101177c0).
+	CHECK(vm.toString(call(vm, natives, "dice.bf2.Cursor", "getCursor")).empty() && !bindings.cursorShown());
 	call(vm, natives, "dice.bf2.Cursor", "setCursor", {avm1::Value("hand")});
 	call(vm, natives, "dice.bf2.Cursor", "enableCursor", {avm1::Value(false)});
-	CHECK(vm.toString(call(vm, natives, "dice.bf2.Cursor", "getCursor")) == "hand" && !bindings.cursorEnabled());
+	CHECK(vm.toString(call(vm, natives, "dice.bf2.Cursor", "getCursor")).empty() && bindings.cursorShown());
+	CHECK(!bindings.cursorEnabled());
 
 	// Logic: the activate reason, the frame label, the wait cursor, decimals.
 	call(vm, natives, "dice.bf2.Logic", "setActivateReason", {avm1::Value(2)});
@@ -831,15 +834,47 @@ TEST(MenuBindings_SelectBoxes)
 	const avm1::Value hard = vm.callMember(skills, "selectRow", {avm1::Value(2)});
 	CHECK(vm.toString(vm.getMember(hard, "rowValue")) == "HEADER_hard");
 
+	// gpm_sp and sp1 are not offered (0x10069160).
 	const avm1::Value modes = box("gameModes 4 1");
-	CHECK(vm.toNumber(vm.getMember(modes, "m_rowCount")) == 4); // All, then each mode once
+	CHECK(vm.toNumber(vm.getMember(modes, "m_rowCount")) == 3); // All, then each mode once
 	const avm1::Value all = vm.callMember(modes, "selectRow", {avm1::Value(0)});
 	CHECK(vm.toNumber(vm.getMember(all, "rowIndex")) == -1 && vm.toString(vm.getMember(all, "rowData")) == "all");
-	const avm1::Value cq = vm.callMember(modes, "selectRow", {avm1::Value(2)});
-	CHECK(vm.toNumber(vm.getMember(cq, "rowIndex")) == 1 && vm.toString(vm.getMember(cq, "rowData")) == "gpm_cq");
+	const avm1::Value cq = vm.callMember(modes, "selectRow", {avm1::Value(1)});
+	CHECK(vm.toNumber(vm.getMember(cq, "rowIndex")) == 0 && vm.toString(vm.getMember(cq, "rowData")) == "gpm_cq");
 	const avm1::Value plain = box("gameModes 3 0");
-	CHECK(vm.toNumber(vm.getMember(plain, "m_rowCount")) == 3);
-	CHECK(vm.toNumber(vm.getMember(plain, "m_selectedIndex")) == 0); // the server settings' mode (gpm_sp)
+	CHECK(vm.toNumber(vm.getMember(plain, "m_rowCount")) == 2);
+	CHECK(vm.toNumber(vm.getMember(plain, "m_selectedIndex")) == 0); // none set: gpm_cq
+	// setGameModeIndex (0x10057870): the mode of that row becomes the
+	// server's and the available maps' (Minsk's Titan map only).
+	call(vm, natives, "dice.bf2.ServerSettings", "setGameModeIndex", {avm1::Value(1)});
+	CHECK(vm.toString(call(vm, natives, "dice.bf2.ServerSettings", "getGameMode")) == "gpm_ti");
+	CHECK(natives.listRows("mapListAvailable").size() == 1);
+	// The box chooses the settings' mode, found before gpm_sp left the list
+	// (Belgrade gpm_sp, Minsk gpm_cq, Minsk gpm_ti: gpm_ti was row 2, now
+	// past the end; the original reads it the same way).
+	CHECK(vm.toNumber(vm.getMember(box("gameModes 3 0"), "m_selectedIndex")) == 2);
+
+	// A fill that chooses a row calls the holder's rowRelease with that row
+	// as this once it is shown (0x10081800), as a click would.
+	auto holder = vm.newObject();
+	std::vector<avm1::ObjectRef> rows;
+	for (int i = 0; i < 3; ++i) {
+		rows.push_back(vm.newObject());
+		vm.setMember(avm1::Value(holder), std::to_string(i), avm1::Value(rows.back()));
+	}
+	avm1::Value released;
+	int releases = 0;
+	vm.setMember(avm1::Value(holder), "rowRelease", avm1::Value(vm.newFunction([&](avm1::Interpreter&, avm1::CallArgs& c) {
+		released = avm1::Value(c.thisObject);
+		++releases;
+		return avm1::Value();
+	})));
+	const avm1::Value shown = vm.constructWith(
+		vm.getMember(bf2, "List"), {avm1::Value(holder), avm1::Value("selectBoxLarge"), avm1::Value("botSkill 3")});
+	vm.callMember(shown, "fillList", {avm1::Value(true)});
+	CHECK(releases == 1 && released.object() == rows[1]); // Normal
+	vm.callMember(shown, "scrollDown", {});
+	CHECK(releases == 1); // once a fill
 }
 
 // dice.bf2.Mod over the installed mods (each Mod.desc).
@@ -905,9 +940,8 @@ const NativeKind kUnboundNatives[] = {
 	// Online only: the master server's revisions and query filters, HTTP,
 	// news, the EA account and registration, BFHQ, buddies, leaderboards,
 	// sponsors, demo and logo downloads.
-	{"online", "dice.General", {"flushList", "getListRevision", "getListEntries", "getHostVersion", "setFilter",
-		"setSortOrder", "cacheExtendedServerInfo", "setEquipmentIndex", "getHttpFile", "getHttpFileAsync", "isDownloading",
-		"getDownloadedContent"}},
+	{"online", "dice.General", {"getHostVersion", "cacheExtendedServerInfo", "setEquipmentIndex", "getHttpFile",
+		"getHttpFileAsync", "isDownloading", "getDownloadedContent"}},
 	{"online", "dice.bf2.Logic", {"getEANews", "getNextNewsTicker", "getBFWebsiteUrl", "useEreg2", "launchEreg2"}},
 	{"online", "dice.bf2.Multiplay", {"setBrowser", "getBrowser", "setFilter", "sort",
 		"updateFilter", "setHighestPing", "getSponsorText", "getSponsorLogoUrl", "isDownloadingDemo", "getDownloadingHostname",
@@ -938,12 +972,11 @@ const NativeKind kUnboundNatives[] = {
 	{"dev", "dice.bf2.Logic", {"assert"}},
 	{"dev", "dice.bf2.Shader", {"setShader"}},
 	{"dev", "dice.bf2.Mouse", {"registerContextMenu"}},
-	// Missing: would work offline, not bound yet (docs/uncited.md says why).
-	{"missing", "dice.bf2.Logic", {"cacheCredits", "getRandomCreditsTexture"}},
-	{"missing", "dice.bf2.Profile", {"getEquipmentName", "getEquipmentDescription", "setSelectedEquipment",
-		"setSelectedUnlockEquipment", "getSprint"}},
-	{"missing", "dice.bf2.VideoSettings", {"detectVideoScheme", "isRunningWithUnsupportedDrivers"}},
-	{"missing", "dice.bf2.AudioSettings", {"isInCriticalState"}},
+	// Unreached: dice.lists.List's data source (getListEntries 0x10026e90
+	// and its revision, flush, filter and sort), whose only user, the AS
+	// class dice.UIs.Lists.ColumnList (sprite 821), neither movie places or
+	// attaches; the pages' lists are dice.bf2.List's.
+	{"unreached", "dice.General", {"flushList", "getListRevision", "getListEntries", "setFilter", "setSortOrder"}},
 };
 
 } // namespace
@@ -993,7 +1026,10 @@ TEST(MenuBindings_NativeCoverage)
 		}
 	}
 	CHECK(kNativeSlotCount == 702);
-	CHECK(bound + counts["elsewhere"] + counts["online"] + counts["external"] + counts["dev"] + counts["missing"] == kNativeSlotCount);
+	CHECK(bound + counts["elsewhere"] + counts["online"] + counts["external"] + counts["dev"] + counts["unreached"]
+			  + counts["missing"]
+		  == kNativeSlotCount);
+	CHECK(counts["missing"] == 0);
 }
 
 // The command line's join and host (0x00404780's activation types, the
@@ -1190,4 +1226,150 @@ TEST(EndOfRoundBindings_ClientAndTexts)
 		"gpm_cq", 16);
 	CHECK(desc.briefing == "Brief" && desc.gameModeText == "Sixteen");
 	CHECK(desc.modes.size() == 2 && desc.modes[1] == "gpm_ti");
+}
+
+// The create-server page of the shipped menu, offline: the GAME MODE box
+// shows the mode the page's own setValue chose, not its TEXT_ key.
+TEST(MenuBindings_CreateServerGameMode)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Fake fake;
+	fake.reachable = false;
+	Menu menu;
+	menu::MenuBindings bindings(menu.player.natives(), fake.services());
+	bindings.setMaps({{"Belgrade", "gpm_coop", 16}, {"Belgrade", "gpm_cq", 32}, {"Belgrade", "gpm_sp", 16},
+		{"Minsk", "gpm_ti", 64}, {"Minsk", "sp1", 16}});
+	CHECK(menu.load(gameDir));
+	menu.run(3);
+	CHECK(menu.click("login.mcAccountName.mcInput.inputField"));
+	menu.type("tester");
+	CHECK(menu.click("login.btnLogin"));
+	menu.run(0.5);
+	bindings.finishJobs();
+	menu.run(2);
+	CHECK(menu.click("MessageHandler.btnOk"));
+	menu.run(2);
+	CHECK(menu.click("login.ScrollTainer.m_mcContainer.contents.holder_list.holder_list.row0"));
+	CHECK(menu.click("login.btnLogin"));
+	menu.run(5);
+	CHECK(menu.click("FlashMenu.btnMultiplay"));
+	menu.run(3);
+	CHECK(menu.click("FlashMenu.local_join"));
+	menu.run(3);
+	// The CREATE tab.
+	menu.player.mouseMove(470, 61);
+	menu.player.tick();
+	menu.player.mouseDown();
+	menu.player.tick();
+	menu.player.mouseUp();
+	menu.run(3);
+	const std::string page = "multiplay.mc_local_create.";
+	// The page's createServerInit calls mcGameMode.setValue("TEXT_gpm_ti", 2):
+	// the label takes the key and the change handler picks the third mode
+	// (setGameModeIndex, 0x10057870: sp1 and gpm_sp left out, so gpm_ti).
+	// Its fillList (0x10069160) chooses that mode (found before gpm_sp left
+	// the list: row 3, out of view) and marks the box (+0x18); its
+	// selectRow(2) (0x10081260) redraws the rows, and the drawer calls row
+	// 2's rowRelease (0x10081800), whose setValue gives the label the
+	// mode's name.
+	CHECK(menu.text(page + "mcGameMode.mcSelectBox.labelSelectBox.text") == menu.strings.text("TEXT_gpm_ti"));
+	avm1::Interpreter& vm = *menu.player.interpreter();
+	CHECK(vm.toString(call(vm, menu.player.natives(), "dice.bf2.ServerSettings", "getGameMode")) == "gpm_ti");
+	CHECK(menu.player.natives().listRows("gameModes").size() == 3); // coop, cq, ti
+	// The available maps follow the mode (SwiffHost slot 0x170, 0x00479e80).
+	CHECK(menu.player.natives().listRows("mapListAvailable").size() == 1);
+	CHECK(menu.player.scriptErrors().empty());
+}
+
+// The LAN server's rules in the info popup (0x10068150 / 0x10068380), the
+// lists' time cells (0x100657b0 / 0x1006a840), the credits' images, the
+// Profile equipment natives from the kit files and the hardware probes.
+TEST(MenuBindings_ServerRulesTimesKitsAndProbes)
+{
+	Fake fake;
+	menu::MenuServices services = fake.services();
+	net::ServerEntry lan;
+	lan.ip = "192.168.1.5";
+	lan.port = 29900;
+	lan.fields = {{"hostname", "Lan Party"}, {"hostport", "17567"}, {"bf2142_friendlyfire", "1"}, {"roundtime", "3"},
+		{"bf2142_spawntime", "14.6"}, {"timelimit", "1800"}, {"bf2142_ticketratio", "150"}, {"bf2142_teamratio", "100"},
+		{"bf2142_autobalanced", "0"}, {"bf2142_allow_spectators", "1"}};
+	services.browseLan = [lan] { return std::vector<net::ServerEntry> {lan}; };
+	NativeRegistry natives;
+	natives.setLocalizer([](const std::string& key) {
+		return key == "HEADER_on" ? std::string("ON") : key == "HEADER_off" ? std::string("OFF")
+			: key == "TEXT_timeformat_hhmm" ? std::string("#HH#:#MM#") : key;
+	});
+	menu::MenuBindings bindings(natives, services);
+	avm1::Interpreter vm;
+	natives.install(vm);
+	const avm1::Value bf2 = vm.getMember(vm.getMember(avm1::Value(vm.global()), "dice"), "bf2");
+	const auto list = [&](const char* id, const char* args) {
+		return vm.constructWith(vm.getMember(bf2, "List"), {avm1::Value::null(), avm1::Value(id), avm1::Value(args)});
+	};
+	const avm1::Value servers = list("serverListLAN", "");
+	vm.callMember(servers, "fillList", {avm1::Value(true)});
+	bindings.finishJobs();
+	vm.callMember(servers, "fillList", {avm1::Value(false)});
+	CHECK(natives.listRows("serverListLAN").size() == 1);
+
+	// The rules: label and value, the minutes of the time limit, on / off.
+	vm.callMember(list("serverExtendedInfo", "192.168.1.5 17567 29900"), "fillList", {avm1::Value(true)});
+	const auto& rules = natives.listRows("serverExtendedInfo");
+	CHECK(rules.size() == 8);
+	if (rules.size() == 8) {
+		CHECK(rules[0][0] == "SERVERINFO_friendlyfire" && rules[0][1] == "ON");
+		CHECK(rules[1][1] == "3" && rules[2][1] == "15" && rules[3][1] == "30" && rules[4][1] == "150");
+		CHECK(rules[5][1] == "100" && rules[6][1] == "OFF" && rules[7][0] == "HEADER_allowspectator" && rules[7][1] == "ON");
+	}
+	// An unknown server: the labels alone.
+	vm.callMember(list("serverExtendedInfo", "10.0.0.1 17567 29900"), "fillList", {avm1::Value(true)});
+	CHECK(natives.listRows("serverExtendedInfo").size() == 8 && natives.listRows("serverExtendedInfo")[0][1].empty());
+
+	// #HH#:#MM# from minutes and from seconds.
+	CHECK(menu::MenuBindings::hoursMinutes("#HH#:#MM#", 125) == "02:05");
+	CHECK(menu::MenuBindings::hoursMinutesFromSeconds("#HH#:#MM#", 3 * 3600 + 7 * 60 + 59) == "03:07");
+	CHECK(menu::MenuBindings::hoursMinutes("#MM# min", 61) == "01 min");
+
+	// The credits' images: those that exist of images/credits/1..113.png.
+	std::map<std::string, std::string> files = {{"Menu/External/FlashMenu/images/credits/2.png", "png"},
+		{"objects/kits/eu/EU_Recon.con",
+			"ObjectTemplate.create Kit EU_Recon\nObjectTemplate.addTemplate Knife\nObjectTemplate.addTemplate eu_sni\n"
+			"ObjectTemplate.sprintStaminaDissipationFactor \t0.2\n"},
+		{"objects/weapons/handheld/eu_sni/Weapon.desc",
+			"<weapon>\n\t<name locid=\"KILLMESSAGE_WEAPON_eu_sni\">Dummy</name>\n"
+			"\t<description locid=\"WEAPON_DESCRIPTION_eu_sni\">Dummy</description>\n</weapon>\n"}};
+	bindings.readFile = [&files](const std::string& path, std::string& text) {
+		const auto it = files.find(path);
+		if (it == files.end()) {
+			return false;
+		}
+		text = it->second;
+		return true;
+	};
+	CHECK(vm.toString(call(vm, natives, "dice.bf2.Logic", "getRandomCreditsTexture")).empty());
+	call(vm, natives, "dice.bf2.Logic", "cacheCredits");
+	CHECK(vm.toString(call(vm, natives, "dice.bf2.Logic", "getRandomCreditsTexture")) == "images/credits/2.png");
+
+	// The equipment of menuTeams.con's kits.
+	menu::MenuHost host;
+	host.teams = {{"EU", "objects/kits/eu", {"EU_Recon.con"}}};
+	bindings.menuHost = &host;
+	const auto profile = [&](const char* member, std::vector<avm1::Value> args) {
+		return call(vm, natives, "dice.bf2.Profile", member, std::move(args));
+	};
+	CHECK(vm.toString(profile("getEquipmentName", {avm1::Value("EU_SNI")})) == "KILLMESSAGE_WEAPON_eu_sni");
+	CHECK(vm.toString(profile("getEquipmentDescription", {avm1::Value("eu_sni")})) == "WEAPON_DESCRIPTION_eu_sni");
+	CHECK(vm.toString(profile("getEquipmentName", {avm1::Value("Knife")})) == "Knife"); // no Weapon.desc
+	CHECK(vm.toString(profile("getEquipmentName", {avm1::Value("nothing")})).empty());
+	CHECK(std::fabs(vm.toNumber(profile("getSprint", {avm1::Value(0), avm1::Value(0)})) - 0.8) < 1e-6);
+	CHECK(profile("setSelectedEquipment", {avm1::Value("eu_sni")}).isUndefined());
+
+	// The probes, as on supported hardware.
+	CHECK(vm.toNumber(call(vm, natives, "dice.bf2.VideoSettings", "detectVideoScheme")) == 2);
+	CHECK(!avm1::toBoolean(call(vm, natives, "dice.bf2.VideoSettings", "isRunningWithUnsupportedDrivers")));
+	CHECK(!avm1::toBoolean(call(vm, natives, "dice.bf2.AudioSettings", "isInCriticalState")));
 }

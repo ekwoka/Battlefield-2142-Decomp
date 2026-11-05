@@ -64,7 +64,6 @@ constexpr float kStillHeight = 8.0f;   // *0x00a02000 (static_init 0x008e42e0)
 constexpr float kLandingTime = 0.05f;  // *0x00a02004 / *0x00a02008 (0x008e42f0 / 0x008e4300)
 constexpr float kLandingNormal = 0.3f; // *0x00a0200c (0x008e4310)
 constexpr float kRemoveDelay = 0.1f;   // timer event 0x21's 0x3dcccccd (0x005cff20)
-constexpr float kCanopyHeight = 5.0f;  // the start's 2 m and parachute_WingMiddle's 3 m (the room's stand-in)
 
 const std::string* setting(const world::ObjectTemplate& t, const char* name)
 {
@@ -194,7 +193,7 @@ bool GameWorld::soldierRayHit(int team, const physics::Vec3& from, const physics
 }
 
 // 0x005e4750 with 0x005e4330 and 0x005e45e0.
-bool GameWorld::mayOpenParachute(const Player& player) const
+bool GameWorld::mayOpenParachute(const Player& player, const std::string& projectile, const physics::Vec3& start) const
 {
 	if (!player.alive || player.manDown || player.vehicle || player.ladder >= 0 || !m_ground.height) {
 		return false;
@@ -220,19 +219,49 @@ bool GameWorld::mayOpenParachute(const Player& player) const
 	if (!clear(feet, feet - physics::Vec3 {0, kOpenHeight, 0})) {
 		return false;
 	}
-	// The room (0x005e45e0: the parachute's collision against every
-	// object within 15 m but projectiles, 0x006f2e90): the rewrite's
-	// stand-in asks that nothing solid lie between him and the canopy, its
-	// wing 3 m over the parachute's start (a ceiling over him: a Titan's
-	// rooms, a building).
-	return clear(feet, feet + physics::Vec3 {0, kCanopyHeight, 0});
+	return parachuteRoom(player, projectile, start);
+}
+
+// 0x005e45e0: without the round's collision mesh (0x1a4 cleared once the
+// manager has none) there is room. Else the objects within 15 m of the
+// soldier (the scene's slot 0x44, radius 15, with flag 0x100, 0x006f4b60,
+// the soldier left out; the canopy's few metres stay inside it), projectiles (0x9493) aside, are asked 0x006f2e90 with the
+// mesh in the round's frame (the fire comp's slot 0xd4, 0x005e4460: the
+// soldier's heading at his feet plus projectileStartPosition, where
+// openParachute makes it): one with a mesh response (0xc42d, 0xc430,
+// 0xc431) and a soldier LOD (slot 0xc4(2)) that a segment from that point
+// to any vertex of the mesh's vehicle LOD (type 1) crosses (0x006f2760, slot
+// 0x58 both sides of the faces) leaves no room. The legs' probe
+// (0x006f28e0) isn't asked (its argument is 0). The static objects' and
+// the bodies' soldier LODs answer here (soldierRayHit, team 0: the plain
+// soldier LOD).
+bool GameWorld::parachuteRoom(const Player& player, const std::string& projectile, const physics::Vec3& start) const
+{
+	const world::ObjectTemplate* round = m_templates.find(projectile);
+	const world::Object* soldier = m_objects.find(player.object);
+	if (!round || !soldier) {
+		return true;
+	}
+	const std::vector<physics::Vec3> vertices = vehicleLodVertices(*round);
+	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({player.body.yawDegrees, 0, 0});
+	const physics::Vec3 feet {soldier->position().x, soldier->position().y, soldier->position().z};
+	return canopyClear(feet + turn.transform(start), turn, vertices, [&](const physics::Vec3& a, const physics::Vec3& b) {
+		float fraction = 1;
+		return soldierRayHit(0, a, b, player.object, fraction);
+	});
+}
+
+bool canopyClear(const physics::Vec3& from, const physics::Mat3& turn, const std::vector<physics::Vec3>& vertices,
+	const std::function<bool(const physics::Vec3&, const physics::Vec3&)>& crosses)
+{
+	return std::none_of(vertices.begin(), vertices.end(), [&](const physics::Vec3& v) { return crosses(from, from + turn.transform(v)); });
 }
 
 bool GameWorld::openParachute(Player& player)
 {
 	std::string projectile;
 	physics::Vec3 start;
-	if (!m_files || !parachuteLauncher(player, projectile, start) || !mayOpenParachute(player)) {
+	if (!m_files || !parachuteLauncher(player, projectile, start) || !mayOpenParachute(player, projectile, start)) {
 		return false;
 	}
 	world::ObjectTemplate* t = m_templates.find(projectile);

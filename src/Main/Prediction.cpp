@@ -38,7 +38,7 @@ void SoldierPrediction::start(const world::ObjectTemplate* soldier, int32_t last
 	m_control.jumpLoss = setting(soldier, "sprintLossAtJump");
 	m_body.world = &m_round.staticCollision();
 	m_body.server = false;
-	m_body.friction = m_round.soldierFriction();
+	m_body.frictionOf = [this](uint32_t own, uint32_t other) { return m_round.soldierFriction(own, other); };
 	m_active = true;
 	// The moves sent since the record's are stepped on top of it.
 	const Stats before = m_stats;

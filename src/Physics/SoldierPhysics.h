@@ -84,18 +84,30 @@ constexpr float kCrushDamage = 1000;      // the game logic's damage (slot 0xe4)
 float stanceHeight(int stance);
 } // namespace soldier
 
+// The built-in soldier mesh's face material (0x006e4880: 0x18).
+constexpr uint32_t kSoldierMeshMaterial = 24;
+
 class SoldierBody {
 public:
 	Vec3 position;
 	float yawDegrees = 0;
 	float gravityModifier = 1;
 	float friction = 1;   // of the ground material (MaterialManager slot 0x88)
+	// The MaterialManager's friction of a material pair (slot 0x88): each
+	// contact (0x006c24b0, its first material non-zero) sets `friction` from
+	// the soldier's material and the surface's (the terrain's material map
+	// under the point, or the mesh face's). Empty: `friction` stays.
+	std::function<float(uint32_t own, uint32_t other)> frictionOf;
 	// How deep the feet are under the water (node +0x5c, slot 0x140 / 0x144;
 	// 0 out of it), set by the ground pass.
 	float waterDepth = 0;
 	// The stance (0 stand, 1 crouch, 2 prone, 3 swim): the sphere stack.
 	int stance = 0;
-	uint32_t material = 0; // the soldier's own, for the collision events
+	// The soldier's own, for the collision events and the friction: the
+	// built-in Soldier_CollisionMesh's faces' (0x006e4880 makes every face
+	// with material 0x18, Human_body; the contacts read it through the
+	// mesh's slot 0x44(1, i), 0x006c28c0 / 0x006c3890).
+	uint32_t material = kSoldierMeshMaterial;
 	// Static objects the soldier collides with (their soldier collision LOD).
 	const CollisionWorld* world = nullptr;
 	// Moving objects near it: their soldier LOD in their own frame.
@@ -211,6 +223,7 @@ private:
 		float& deepest);
 	void collideWithSoldiers(float scale);        // 0x006c2620
 	void addContact(const Vec3& normal, float depth, const Vec3& velocity); // 0x006c24b0
+	void touchMaterial(uint32_t other);                                      // 0x006c24b0's friction
 	void solve(float seconds, const Ground& ground, float gravity); // 0x006c48c0
 	void runOver();                               // 0x006c2e50
 	void segmentTest(float seconds);              // 0x006c48c0's server part

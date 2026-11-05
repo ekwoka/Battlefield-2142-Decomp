@@ -75,6 +75,7 @@ class ControlMaps;
 namespace dice::hfe::menu {
 
 struct RoundSummary;
+struct MenuHost;
 class SettingsObjects;
 class LocalProfileManager;
 
@@ -218,6 +219,8 @@ public:
 	// A setting by "Object.Name" ("AudioSettings.EffectsVolume") as a number.
 	double setting(const std::string& name, double fallback) const;
 	// The mod's game modes for the "gameModes" select box, each once.
+	std::vector<std::string> allGameModes() const;
+	int serverInfoRows(const std::string& host, int port);
 	std::vector<std::string> selectBoxGameModes() const;
 	// Sets a setting as if a page had applied it (written down at once).
 	void storeSetting(const std::string& name, const ui::avm1::Value& value);
@@ -279,6 +282,15 @@ public:
 	};
 	// A Mod.desc's tags (<title> HEADER_MODTITLE </title> ...), trimmed.
 	static ModEntry parseModDesc(const std::string& path, const std::string& text);
+	// The lists' time cells: TEXT_timeformat_hhmm's text ("#HH#:#MM#")
+	// with its first #HH# and first #MM# replaced by %02d of the hours and
+	// the minutes past them. From minutes (0x100657b0, the end-of-round
+	// debriefing's) or from seconds (0x1006a840 / 0x1007ada0, the stats').
+	static std::string hoursMinutes(std::string format, int minutes);
+	static std::string hoursMinutesFromSeconds(const std::string& format, int seconds)
+	{
+		return hoursMinutes(format, seconds / 3600 * 60 + seconds / 60 % 60);
+	}
 	// Every <gameDir>/mods/<name>/Mod.desc, in folder order.
 	static std::vector<ModEntry> findMods(const std::string& gameDir);
 	// The mods the Mod page lists (dice.bf2.Mod, its "mods" list) and the
@@ -347,8 +359,29 @@ public:
 	// the window's Caps Lock (false without one).
 	std::function<bool()> capsLock;
 	// Reads a file of the game (Levels/<level>/Info/<level>.desc for the
-	// map texts); false when missing.
+	// map texts, the kits and Weapon.desc files, the credits' images);
+	// false when missing.
 	std::function<bool(const std::string& path, std::string& text)> readFile;
+	// What menuTeams.con gave MenuTeamManager (the teams and their kit
+	// files), for Profile's equipment natives; none without.
+	const MenuHost* menuHost = nullptr;
+
+	// MenuTeamManager's kit records as addKit (0x00494da0) reads them from
+	// a kit file (0x00492dc0): the kit's name (ObjectTemplate.create Kit),
+	// ObjectTemplate.sprintStaminaDissipationFactor (+0x58, 0 unless set)
+	// and an equipment record (0x88 bytes) per ObjectTemplate.addTemplate:
+	// the template (+0x1c) and its Weapon.desc's <name> and <description>
+	// (+0x38 / +0x54: the locid, else the text; the name defaults to the
+	// template).
+	struct MenuEquipment {
+		std::string templateName, name, description;
+	};
+	struct MenuKit {
+		std::string name;
+		float sprintStaminaDissipationFactor = 0;
+		std::vector<MenuEquipment> equipment;
+	};
+	static MenuKit parseMenuKit(const std::string& text, const std::function<bool(const std::string&, std::string&)>& readFile);
 	// A game mode's name from the mod (ModInfo slot 0x48, "N/A" unknown).
 	std::function<std::string(const std::string& mode)> gameModeName;
 	// Client.get/setPlayerName (SwiffHost slots 0x98 / 0x9c: GSPlayerName).
@@ -376,9 +409,11 @@ public:
 	// The menu's wait state (Logic.beginWaitState n / endWaitState,
 	// SwiffHost slots 0x2e8 / 0x2ec: +0xd90, the cursor slot 0x84 picks:
 	// 0 the arrow, 1 busy, 2 key binding; the .ani files it loads are not
-	// shipped) and the cursor name and switch of dice.bf2.Cursor.
+	// shipped) and dice.bf2.Cursor's state: whether setCursor cleared the
+	// window's hide flag, and enableCursor's switch.
 	int waitCursor() const { return m_waitCursor; }
 	bool cursorEnabled() const { return m_cursorEnabled; }
+	bool cursorShown() const { return m_cursorShown; }
 	// SwiffPlayer's action names for the duplicate prompt (0x10014ef0):
 	// "HEADER_forward" for the infantry map's c_PIThrottle, "" for none.
 	static std::string controlHeader(const std::string& map, const std::string& input, bool negative);
@@ -571,10 +606,19 @@ private:
 	int m_activateReason = 0;
 	std::string m_frameLabel;
 	int m_waitCursor = 0;
-	std::string m_cursorName;
+	bool m_cursorShown = false; // Cursor.setCursor cleared the window's hide flag
+	// Profile's equipment natives: the kits per team (read once), the
+	// selections (0x1012bd48 / 0x1012bcb4).
+	std::vector<std::vector<MenuKit>> m_menuKits;
+	bool m_menuKitsRead = false;
+	std::string m_selectedEquipment, m_selectedUnlockEquipment;
+	const MenuEquipment* findEquipment(const std::string& templateName);
+	// SwiffRender's credits textures (+0x45c, Logic.cacheCredits).
+	std::vector<std::string> m_creditTextures;
 	bool m_cursorEnabled = true;
 
 	std::string m_infoHost; // the server info popup's server
+	int m_serverInfoRows = 0; // the rules rows with values (0x10068080's +0x24)
 
 	CommandLine m_commandLine;
 	int m_commandLineType = 0;         // SwiffHost +0xd94

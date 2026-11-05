@@ -54,6 +54,13 @@ constexpr const char* kHistoryList = "GeneralSettings.ServerHistory";     // add
 constexpr int kDefaultConnectPort = 0x449f;
 
 Value arg(const Args& args, size_t i) { return i < args.size() ? args[i] : Value(); }
+std::string lowerText(std::string text)
+{
+	for (char& c : text) {
+		c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+	}
+	return text;
+}
 int intArg(Interpreter& vm, const Args& args, size_t i) { return static_cast<int>(std::lround(vm.toNumber(arg(args, i)))); }
 
 // "ip gameport queryport", as the server rows give serverAddress (the
@@ -693,23 +700,124 @@ void MenuBindings::bindOffline()
 		n.setFunction(kSingleplay, member, [](Interpreter&, const Args&) { return Value(); });
 	}
 
-	// --- dice.bf2.Cursor (0x1001b6e0). setCursor (0x1001b520) hands the
-	// name to the player object "SwiffPlayer" (slot 100, its movie's slot
-	// 50); getCursor (0x1001b5d0) gives it back, "undefined" without one;
-	// enableCursor (0x1001b580) is SwiffHost slot 0x8c (0x00469e50: +0x48,
-	// read by slot 0x90). The shipped menus call none of them; the window
-	// shows the system's arrow.
-	n.setFunction(kCursor, "setCursor", [this](Interpreter& vm, const Args& args) {
-		m_cursorName = vm.toString(arg(args, 0));
+	// --- dice.bf2.Cursor (0x1001b6e0). The shipped menus call none of these.
+	// setCursor (0x1001b520) is SwiffHost slot 0x80 (0x00469c60): the
+	// "SwiffPlayer" object's slot 0x64 (0x10008ed0) asks its SwiffRender
+	// (the player's +0xc, given by slot 0x24) to set the cursor, slot 50,
+	// which RendDX9 leaves a stub answering true (0x101177b0): the name is
+	// dropped. On that true the window object (0x0056c1d0, DAT_00a6779c)
+	// gets +0x3b cleared, the flag its WM_SETCURSOR answer (0x0056bc40)
+	// reads to hide the cursor (SetCursor(NULL)); so setCursor, whatever the
+	// name, shows the window's cursor. The rewrite's menu never hides it
+	// (ViewerOptions::menuCursor), so that is already the case; cursorShown()
+	// keeps the flag. getCursor (0x1001b5d0, slots 0x88 -> 0x68 -> 51, the
+	// stub 0x101177c0) answers true without filling the name: "" (it is
+	// "undefined" only with no SwiffRender).
+	n.setFunction(kCursor, "setCursor", [this](Interpreter&, const Args&) {
+		m_cursorShown = true;
 		return Value();
 	});
-	n.setFunction(kCursor, "getCursor", [this](Interpreter&, const Args&) {
-		return Value(m_cursorName.empty() ? std::string("undefined") : m_cursorName);
-	});
+	n.setFunction(kCursor, "getCursor", [](Interpreter&, const Args&) { return Value(std::string()); });
+	// enableCursor (0x1001b580) is SwiffHost slot 0x8c (0x00469e50: +0x48).
+	// Its only reader, slot 0x90 (0x00469e60), is reached through the
+	// player's second interface (vtable 0x10101bd0, slot 30 0x10008e40),
+	// which neither BF2142.exe nor SwiffPlayer.dll calls: the switch is kept
+	// and reaches nothing, as in the original.
 	n.setFunction(kCursor, "enableCursor", [this](Interpreter&, const Args& args) {
 		m_cursorEnabled = avm1::toBoolean(arg(args, 0));
 		return Value();
 	});
+
+	// --- The credits' images (no shipped menu calls these).
+	// Logic.cacheCredits (0x1003b0e0) is SwiffRender's slot 0xf4 (the
+	// player's +0xc; RendDX9 0x10119670): when it holds none yet, it loads
+	// images/credits/1.png .. 113.png (0x71), keeping each that loads
+	// (+0x45c). getRandomCreditsTexture (0x1003c440, slot 0x100,
+	// 0x10118080) gives one of them at random (0x101aa890: rand() over
+	// [0, count - 1], seeded with time() once), "" with none (0x101181e0).
+	// The game ships no credits images.
+	n.setFunction(kLogic, "cacheCredits", [this](Interpreter&, const Args&) {
+		if (m_creditTextures.empty() && readFile) {
+			for (int i = 1; i <= 0x71; ++i) {
+				const std::string path = "images/credits/" + std::to_string(i) + ".png";
+				std::string data;
+				// Beside the movie, as the menu's other images.
+				if (readFile("Menu/External/FlashMenu/" + path, data)) {
+					m_creditTextures.push_back(path);
+				}
+			}
+		}
+		return Value();
+	});
+	n.setFunction(kLogic, "getRandomCreditsTexture", [this](Interpreter&, const Args&) {
+		static const bool seeded = (std::srand(static_cast<unsigned>(std::time(nullptr))), true);
+		(void)seeded;
+		const int count = static_cast<int>(m_creditTextures.size());
+		// min - round(rand() * (max - min) * -1/32767), MSVC's 15-bit rand().
+		const int index = static_cast<int>(std::lround((std::rand() & 0x7fff) * (count - 1) / 32767.0));
+		return Value(index >= 0 && index < count ? m_creditTextures[static_cast<size_t>(index)] : std::string());
+	});
+
+	// --- Profile's equipment (MenuTeamManager's kits; no shipped menu
+	// calls these). getEquipmentName / getEquipmentDescription (0x1004e670
+	// / 0x1004e7a0): the equipment record of that template in any team's
+	// kit (0x1004e510, without regard to case), its name (+0x38, else the
+	// template +0x1c) or description (+0x54) localized (0x10049770) as a
+	// String; an empty String for none. setSelectedEquipment /
+	// setSelectedUnlockEquipment (0x1004af70 / 0x1004afa0) keep a template
+	// name (0x1012bd48 / 0x1012bcb4) that nothing in SwiffPlayer reads.
+	// getSprint(team, kit) (0x1004e410): 1 - the kit's
+	// sprintStaminaDissipationFactor (MenuTeamManager slot 0x2c's team,
+	// +0x40 its kits, +0x58).
+	n.setFunction(kProfile, "getEquipmentName", [this](Interpreter& vm, const Args& args) {
+		const MenuEquipment* e = findEquipment(vm.toString(arg(args, 0)));
+		return Value(e ? m_natives.localize(e->name.empty() ? e->templateName : e->name) : std::string());
+	});
+	n.setFunction(kProfile, "getEquipmentDescription", [this](Interpreter& vm, const Args& args) {
+		const MenuEquipment* e = findEquipment(vm.toString(arg(args, 0)));
+		return Value(e ? m_natives.localize(e->description) : std::string());
+	});
+	n.setFunction(kProfile, "setSelectedEquipment", [this](Interpreter& vm, const Args& args) {
+		m_selectedEquipment = vm.toString(arg(args, 0));
+		return Value();
+	});
+	n.setFunction(kProfile, "setSelectedUnlockEquipment", [this](Interpreter& vm, const Args& args) {
+		m_selectedUnlockEquipment = vm.toString(arg(args, 0));
+		return Value();
+	});
+	n.setFunction(kProfile, "getSprint", [this](Interpreter& vm, const Args& args) {
+		findEquipment(std::string()); // reads the kits once
+		const int team = intArg(vm, args, 0), kit = intArg(vm, args, 1);
+		if (team < 0 || team >= static_cast<int>(m_menuKits.size()) || kit < 0
+			|| kit >= static_cast<int>(m_menuKits[static_cast<size_t>(team)].size())) {
+			return Value(); // the original reads past its records
+		}
+		return Value(1.0 - m_menuKits[static_cast<size_t>(team)][static_cast<size_t>(kit)].sprintStaminaDissipationFactor);
+	});
+
+	// --- The hardware probes (no shipped menu calls these), answered as the
+	// original does on hardware it supports.
+	// VideoSettings.detectVideoScheme (0x1005c4c0) is VideoSettings slot
+	// 0x2c (0x00497090): the renderer's adapter object slot 0x40 (RendDX9
+	// 0x1000fa50), 1 without a renderer. That rates the machine 0 low,
+	// 1 medium, 2 high: by the CPU (below 2350 or under 1 GB of memory 0,
+	// below 2950 1, else 2), 0 for pixel shader 1.x, then capped by the
+	// card's row in the NVIDIA (0x101f35a0) and ATI (0x101f29e0) tables (a
+	// Radeon 9600 SE 0); a card in neither stays at 1 unless it is an ATI
+	// card with shader model 3. A current machine with a listed card rates
+	// 2; the rewrite has no adapter tables and answers that.
+	n.setFunction(kVideoSettings, "detectVideoScheme", [](Interpreter&, const Args&) { return Value(2); });
+	// isRunningWithUnsupportedDrivers (0x1005d0d0, SwiffHost slot 0x35c
+	// 0x0046c220): SwiffRender's driver version (slots 0xe8 / 0xe4) below
+	// 0xa1e0b. False with a current driver, and the rewrite has no Direct3D
+	// driver to ask.
+	n.setFunction(kVideoSettings, "isRunningWithUnsupportedDrivers", [](Interpreter&, const Args&) { return Value(false); });
+	// AudioSettings.isInCriticalState (0x10010750): AudioSettings slot 0x34
+	// (0x006da520, +8) is 1, which applying the settings (0x00496830) sets
+	// when the sound engine's provider fails to open (noprovider,
+	// noproviderdll, openaldenied, openalerror; 0 when it opens). False with
+	// a working sound device.
+	n.setFunction(kAudioSettings, "isInCriticalState", [](Interpreter&, const Args&) { return Value(false); });
 
 	// --- dice.bf2.Logic's small ones.
 	// 0x1003b7b0 / 0x1003b930: SwiffHost slots 0xd8 / 0xd4 (0x0046adc0 /
@@ -1084,6 +1192,153 @@ const MenuBindings::Server* MenuBindings::infoServer() const
 		for (const Server& server : *servers) {
 			if (server.entry.ip == host) {
 				return &server;
+			}
+		}
+	}
+	return nullptr;
+}
+
+// The server info popup's rules (the "serverExtendedInfo" list, 0x10068150;
+// rows drawn by 0x10068380): eight rows, each a localized label (cell0, the
+// table 0x1012c354 the first list fills) and the server record's value
+// (cell1). The record is the browser's (SwiffHost's "serverInfo" object,
+// slot 0x3c with the address and game port), its fields read from the
+// server's query keys by 0x004661a0. Without the server only the labels
+// show.
+int MenuBindings::serverInfoRows(const std::string& host, int port)
+{
+	static const char* const kLabels[] = {"SERVERINFO_friendlyfire", "SERVERINFO_roundspermap", "SERVERINFO_spawntime",
+		"SERVERINFO_timelimit", "SERVERINFO_ticketratio", "SERVERINFO_teamratio", "SERVERINFO_autobalance",
+		"HEADER_allowspectator"};
+	const Server* found = nullptr;
+	for (const auto* servers : {&m_servers, &m_lanServers, &m_favouriteServers}) {
+		for (const Server& server : *servers) {
+			if (!found && server.entry.ip == host && (port <= 0 || server.gamePort == port)) {
+				found = &server;
+			}
+		}
+	}
+	const auto key = [&](const char* name) -> std::string {
+		if (!found) {
+			return {};
+		}
+		const auto it = found->entry.fields.find(name);
+		return it == found->entry.fields.end() ? std::string() : it->second;
+	};
+	const auto number = [&](const char* name) { return std::atoi(key(name).c_str()); };
+	// The two float fields (spawn time +0x1ac, team ratio +0x20c), rounded
+	// as ROUND() does (to nearest).
+	const auto rounded = [&](const char* name) { return static_cast<int>(std::lround(std::atof(key(name).c_str()))); };
+	const auto onOff = [this](bool on) { return m_natives.localize(on ? "HEADER_on" : "HEADER_off"); };
+	const std::string values[] = {
+		onOff(number("bf2142_friendlyfire") != 0),         // +0xfc
+		std::to_string(number("roundtime")),               // +0x1b4 (rounds per map)
+		std::to_string(rounded("bf2142_spawntime")),       // +0x1ac
+		std::to_string(number("timelimit") / 60),          // +0x1b0, seconds, shown in minutes
+		std::to_string(number("bf2142_ticketratio")),      // +0x210
+		std::to_string(rounded("bf2142_teamratio")),       // +0x20c
+		onOff(number("bf2142_autobalanced") == 1),         // +0xfd
+		onOff(number("bf2142_allow_spectators") == 1),     // +0x228
+	};
+	ui::NativeRegistry::Rows rows;
+	for (size_t i = 0; i < std::size(kLabels); ++i) {
+		rows.push_back({m_natives.localize(kLabels[i]), found ? values[i] : std::string()});
+	}
+	m_natives.setListRows("serverExtendedInfo", rows);
+	return found ? static_cast<int>(rows.size()) : 0;
+}
+
+// 0x00492dc0: a kit file's lines, split at spaces, tabs and quotes.
+MenuBindings::MenuKit MenuBindings::parseMenuKit(const std::string& text,
+	const std::function<bool(const std::string&, std::string&)>& readFile)
+{
+	// A Weapon.desc element's locid, else its text ("" without the element).
+	const auto element = [](const std::string& xml, const std::string& tag) {
+		std::string lower = xml;
+		std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		const size_t open = lower.find("<" + tag);
+		if (open == std::string::npos) {
+			return std::string();
+		}
+		const size_t close = lower.find('>', open);
+		if (close == std::string::npos) {
+			return std::string();
+		}
+		if (const size_t at = lower.find("locid=\"", open); at != std::string::npos && at < close) {
+			const size_t end = xml.find('"', at + 7);
+			if (end != std::string::npos && end > at + 7) {
+				return xml.substr(at + 7, end - at - 7);
+			}
+		}
+		const size_t end = lower.find("</" + tag, close);
+		return end == std::string::npos ? std::string() : xml.substr(close + 1, end - close - 1);
+	};
+	MenuKit kit;
+	std::istringstream lines(text);
+	for (std::string line; std::getline(lines, line);) {
+		std::vector<std::string> words;
+		std::string word;
+		for (const char c : line) {
+			if (c == ' ' || c == '\t' || c == '"' || c == '\r') {
+				if (!word.empty()) {
+					words.push_back(word);
+					word.clear();
+				}
+			} else {
+				word += c;
+			}
+		}
+		if (!word.empty()) {
+			words.push_back(word);
+		}
+		if (words.size() < 2) {
+			continue;
+		}
+		if (words[0] == "ObjectTemplate.addTemplate") {
+			MenuEquipment e;
+			e.templateName = e.name = words[1];
+			std::string desc;
+			if (readFile && readFile("objects/weapons/handheld/" + words[1] + "/Weapon.desc", desc)) {
+				if (std::string name = element(desc, "name"); !name.empty()) {
+					e.name = name;
+				}
+				e.description = element(desc, "description");
+			}
+			kit.equipment.push_back(std::move(e));
+		} else if (words[0] == "ObjectTemplate.create" && words.size() >= 3 && lowerText(words[1]) == "kit") {
+			kit.name = words[2];
+		} else if (words[0] == "ObjectTemplate.sprintStaminaDissipationFactor") {
+			kit.sprintStaminaDissipationFactor = static_cast<float>(std::atof(words[1].c_str()));
+		}
+	}
+	return kit;
+}
+
+// 0x1004e510: the teams in order, each kit, each record, the template
+// compared without regard to case. The kits are read on first use, as
+// addKit (0x00494da0) read them: <team folder>/<kit file>.
+const MenuBindings::MenuEquipment* MenuBindings::findEquipment(const std::string& templateName)
+{
+	if (!m_menuKitsRead && menuHost) {
+		m_menuKitsRead = true;
+		for (const MenuHost::Team& team : menuHost->teams) {
+			std::vector<MenuKit> kits;
+			for (const std::string& file : team.kits) {
+				std::string text;
+				if (readFile && readFile(team.path + "/" + file, text)) {
+					kits.push_back(parseMenuKit(text, readFile));
+				}
+			}
+			m_menuKits.push_back(std::move(kits));
+		}
+	}
+	const std::string wanted = lowerText(templateName);
+	for (const auto& kits : m_menuKits) {
+		for (const MenuKit& kit : kits) {
+			for (const MenuEquipment& e : kit.equipment) {
+				if (lowerText(e.templateName) == wanted) {
+					return &e;
+				}
 			}
 		}
 	}

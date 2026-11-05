@@ -2510,7 +2510,9 @@ std::vector<net::SpawnGroupInfo> HostedGame::spawnGroupsNow() const
 	// The control points a team may spawn at (the spawn manager's groups
 	// the team's spawn screen offers, 0x0078e830): a group each, its id the
 	// point's (what the client's 6/6 picks, setSpawnChoice), at the point's
-	// ghost. The flags and bytes stay 0 (not traced).
+	// ghost, with spawn points (hasPoints). The map bytes stay 0: the
+	// rewrite's clients place a group by its ghost's object, and its points'
+	// slot 0x4c flag (pointFlag) isn't kept.
 	std::vector<net::SpawnGroupInfo> out;
 	std::map<int, uint16_t> ghosts;
 	for (const game::ControlPoint& cp : m_round->controlPoints()) {
@@ -2528,6 +2530,7 @@ std::vector<net::SpawnGroupInfo> HostedGame::spawnGroupsNow() const
 			info.id = id;
 			info.team = team;
 			info.ghost = ghost->second;
+			info.hasPoints = true;
 			out.push_back(info);
 		}
 	}

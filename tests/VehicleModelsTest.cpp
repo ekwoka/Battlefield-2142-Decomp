@@ -1999,6 +1999,42 @@ TEST(Vehicles_SoldierParachuteOpensFallsAndLands)
 	CHECK(me.alive && me.vehicle == 0);
 	CHECK(g.position(me.soldier).y < 3);
 }
+// The parachute's room (0x005e45e0 / 0x006f2760): the round's collision
+// mesh (parachute.collisionmesh's vehicle LOD) placed at its start, 2 m over
+// the feet; a ceiling a metre over the head crosses the segments to the
+// canopy's top, one 4 m up doesn't.
+TEST(Vehicles_ParachuteNeedsRoomForItsCanopy)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	g.start("supply_crate", {50, 0.5f, 50}, 0.5f);
+	const world::ObjectTemplate* round = g.templates.find("parachute");
+	CHECK(round != nullptr);
+	if (!round) {
+		return;
+	}
+	const std::vector<physics::Vec3> vertices = g.world->vehicleLodVertices(*round);
+	float low = 1e9f, high = -1e9f;
+	for (const physics::Vec3& v : vertices) {
+		low = std::min(low, v.y);
+		high = std::max(high, v.y);
+	}
+	std::fprintf(stderr, "  parachute mesh: %zu vertices, y %.2f..%.2f\n", vertices.size(), low, high);
+	CHECK(!vertices.empty() && high > 0.5f && low < -2);
+	const physics::Vec3 start {0, 102, 0}; // feet at 100
+	const auto ceiling = [](float y) {
+		return [y](const physics::Vec3& a, const physics::Vec3& b) { return (a.y - y) * (b.y - y) <= 0; };
+	};
+	CHECK(!game::canopyClear(start, {}, vertices, ceiling(102.8f)));
+	CHECK(game::canopyClear(start, {}, vertices, ceiling(104)));
+	CHECK(game::canopyClear(start, {}, vertices, ceiling(98.5f))); // below the feet: the 2 m ray's business
+}
+
 // The stationary guns (eu_bipod: a PlayerControlObject whose
 // hasMobilePhysics is 0; Body::fixed): a soldier takes the seat at its
 // entry point, sits there seen (its seatInformation names the bipod,

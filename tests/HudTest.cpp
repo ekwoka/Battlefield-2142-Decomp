@@ -60,6 +60,33 @@ TEST(Hud_ShowLogicAndBars)
 	CHECK(manager.frame(0).empty());
 }
 
+// The corner roots (the "Ingame" MemeFile's transforms): a picture at 0, 0
+// under BottomLeftStatic and BottomRightStatic draws at -1, 563 and 401, 563.
+TEST(Hud_CornerRootsFromTheMemeFile)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createPictureNode BottomLeftStatic Left 0 0 10 10",
+			 "hudBuilder.setPictureNodeTexture Ingame/a.tga",
+			 "hudBuilder.createPictureNode BottomRightStatic Right 0 0 10 10",
+			 "hudBuilder.setPictureNodeTexture Ingame/b.tga",
+		 }) {
+		console.execute(line, out);
+	}
+	// (Drawn in both passes.)
+	const auto quads = manager.frame(0);
+	const auto at = [&](const char* texture, float x, float y) {
+		return std::any_of(quads.begin(), quads.end(), [&](const hud::HudQuad& q) {
+			return q.texture == std::string("Menu/HUD/Texture/Ingame/") + texture && q.x0 == x && q.y0 == y;
+		});
+	};
+	CHECK(at("a.tga", -1, 563));
+	CHECK(at("b.tga", 401, 563));
+}
+
 TEST(Hud_PassesAndOrTerms)
 {
 	Console console;

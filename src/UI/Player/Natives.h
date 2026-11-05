@@ -77,6 +77,12 @@ public:
 	avm1::ObjectRef holder;        // the clip with rows "0", "1", ...
 	int firstIndex = 0;
 	int selectedIndex = -1;
+	// Set by the fills that choose a row themselves (SwiffPlayer.dll's +0x18:
+	// the bot skills 0x10061310, the game modes 0x10069160, the display
+	// modes 0x10065250): the next populate() that shows the chosen row calls
+	// that row's rowRelease() as if it were clicked (0x10081800), so the
+	// select box takes its text, then clears it.
+	bool releasePending = false;
 
 	// The rows the game set for this list id (empty if none).
 	const std::vector<std::vector<std::string>>& rows() const;
@@ -85,7 +91,8 @@ public:
 	int visibleRows(avm1::Interpreter& vm) const;
 	std::string rowPrefix(avm1::Interpreter& vm) const;
 	// Writes rows [firstIndex, firstIndex + visibleRows) into the holder's
-	// row clips: cellN.text, isClickable and isSelected.
+	// row clips: cellN.text, isClickable and isSelected; then, with
+	// releasePending, the chosen row's rowRelease().
 	void populate(avm1::Interpreter& vm);
 
 	bool getMember(avm1::Interpreter& vm, const std::string& name, avm1::Value& out) override;

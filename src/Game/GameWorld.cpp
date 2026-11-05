@@ -5589,26 +5589,38 @@ physics::Vec3 GameWorld::dropSpawnSpot(const physics::Vec3& spot, const physics:
 	return spot;
 }
 
-ObjectSpawner::SpotTest GameWorld::testSpawnSpot(const world::ObjectTemplate& objectTemplate, const world::Vec3& spot,
-	const world::Vec3& rotation, const world::Vec3& spawner) const
+std::vector<physics::Vec3> GameWorld::vehicleLodVertices(const world::ObjectTemplate& objectTemplate,
+	const physics::CollisionLod** lod) const
 {
-	ObjectSpawner::SpotTest test;
+	std::vector<physics::Vec3> vertices;
 	const auto meshName = objectTemplate.settings().find("collisionMesh");
 	const physics::CollisionMeshFile* mesh = (!m_files || !m_collisionTemplates || meshName == objectTemplate.settings().end())
 		? nullptr
 		: m_collisionTemplates->mesh(meshName->second, *m_files);
 	if (!mesh || mesh->geometries.empty()) {
-		return test; // 0x005ad4d0 finds none: no test
+		return vertices;
 	}
-	std::vector<physics::Vec3> vertices;
-	const physics::CollisionLod* vehicleLod = nullptr;
 	for (const auto& part : physics::collisionParts(*mesh, 0)) {
-		if (const physics::CollisionLod* lod = physics::collisionLodFor(*mesh, part, 1)) {
-			vehicleLod = lod;
-			for (const auto& v : lod->vertices) {
+		if (const physics::CollisionLod* found = physics::collisionLodFor(*mesh, part, 1)) {
+			if (lod) {
+				*lod = found;
+			}
+			for (const auto& v : found->vertices) {
 				vertices.push_back({v[0], v[1], v[2]});
 			}
 		}
+	}
+	return vertices;
+}
+
+ObjectSpawner::SpotTest GameWorld::testSpawnSpot(const world::ObjectTemplate& objectTemplate, const world::Vec3& spot,
+	const world::Vec3& rotation, const world::Vec3& spawner) const
+{
+	ObjectSpawner::SpotTest test;
+	const physics::CollisionLod* vehicleLod = nullptr;
+	const std::vector<physics::Vec3> vertices = vehicleLodVertices(objectTemplate, &vehicleLod);
+	if (!vehicleLod) {
+		return test; // 0x005ad4d0 finds none: no test
 	}
 	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({rotation.x, rotation.y, rotation.z});
 	physics::Vec3 from {spot.x, spot.y, spot.z};
@@ -5973,9 +5985,12 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	player.body.world = &m_collision;
 	// The kit's rifle (EU_Assault / Pac_Assault) and what else it carries.
 	fillKit(player, kitTemplate, primary);
-	// The ground's material is not known yet: material 0 ("Default") on both sides.
+	// The friction until the first contact (the response's +0xd4, 1 from its
+	// constructor, 0x006c1ca0) and at each contact the
+	// pair's of the soldier mesh's Human_body and what it touches.
+	player.body.friction = 1;
 	if (m_materials) {
-		player.body.friction = m_materials->friction(0, 0);
+		player.body.frictionOf = [this](uint32_t own, uint32_t other) { return m_materials->friction(own, other); };
 	}
 	if (m_loadAnimationSystem) {
 		const auto system = [this](const world::ObjectTemplate* t) -> const anim::AnimationSystemTemplate* {
@@ -9163,7 +9178,8 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 		return m_objects.find(soldierId) != nullptr;
 	};
 	if (const world::ObjectTemplate* t = object->objectTemplate()) {
-		player.body.material = static_cast<uint32_t>(integer(*t, "material", 0));
+		// The contacts' own material is the soldier mesh's (SoldierBody::material,
+		// Human_body), not the template's (the soldier templates set none).
 		// The sprint's stamina from the soldier template (0x00645790 from
 		// 0x0058b680 on spawning, with the unlocks' modifiers: player slot
 		// 0x2a0's +0x50 the use, +0x4c the recharge) and the jump's loss
@@ -9561,7 +9577,7 @@ const Vehicle* GameWorld::vehicle(uint32_t object) const
 	return nullptr;
 }
 
-float GameWorld::soldierFriction() const { return m_materials ? m_materials->friction(0, 0) : 1.0f; }
+float GameWorld::soldierFriction(uint32_t own, uint32_t other) const { return m_materials ? m_materials->friction(own, other) : 1.0f; }
 
 const SoldierControl* GameWorld::soldierControl(int id) const
 {

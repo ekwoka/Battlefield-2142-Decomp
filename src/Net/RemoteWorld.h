@@ -178,8 +178,10 @@ struct RemotePlayer {
 	int outsideSeconds = 0;
 };
 
-// KickBan (0x37; written by 0x0050cf30): a player leaves the server,
-// kicked or banned, with a byte (the server's reason; meaning not traced).
+// KickBan (0x37; written by 0x0050cf30, constructor 0x0050d000): a player
+// leaves the server, kicked or banned, with a byte the retail server always
+// sends 0 (its ban 0x00505fa0 and kick 0x00506050 pass 0); the client's
+// handler (0x0050cfd0) posts the three in game event 0x4d.
 struct KickInfo {
 	int player = -1;
 	bool banned = false;

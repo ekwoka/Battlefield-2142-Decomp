@@ -290,6 +290,24 @@ struct IconRegistry {
 // 0x100c2b00, else 0) at LOD 0 (0x100c3260). 0 without one.
 float meshRenderRadius(const geom::MeshFile& mesh);
 
+// The same radius as the instance's LOD follows the camera: RendDX9's LOD
+// pick for a drawn BundledMesh (0x100c3390, once a frame) sets the LOD
+// index (+0x274) and, through slot 0x6c (0x100c3260), the box (+0x268)
+// that 0x100c7000 reads. `radii` the shown geometry's LOD box radii (LOD 0
+// first), `switchDistances` its switch distances (render::lodSwitchDistances
+// of the template's setSubGeometryLodDistance), `scale` the renderer's
+// globalBundleMeshLodDistanceScale (or the skinned / static one) x the
+// geometry quality (+0x974).
+struct MeshLods {
+	std::vector<float> radii;
+	std::vector<float> switchDistances;
+	float scale = 1;
+};
+MeshLods meshLods(const geom::MeshFile& mesh, const std::vector<std::vector<float>>& setDistances, float scale);
+// The radius at `cameraDistance` with the view's `zoom` (RenderView slot
+// 0x30: the distance over the zoom, less LOD 0's radius, picks the LOD).
+float lodRenderRadius(const MeshLods& lods, float cameraDistance, float zoom);
+
 class Nametags {
 public:
 	explicit Nametags(const io::FileManager& files);
@@ -318,10 +336,11 @@ public:
 	// RendDX9's object drawer slot 0x40, which the manager's frame reads,
 	// 0x100f3490).
 	void setInsideTitan(bool inside) { m_insideTitan = inside; }
-	// A template's render object radius (RendDX9's mesh instance slot 0x44,
-	// 0x100c7000: its box's radius about the centre), for a vehicle tag's
-	// height; without it, 4 m.
-	void setRenderRadius(std::function<float(const world::ObjectTemplate&)> radius) { m_renderRadius = std::move(radius); }
+	// A template's render object LODs (RendDX9's mesh instance slot 0x44,
+	// 0x100c7000: its shown LOD's box radius about the centre, lodRenderRadius
+	// by the camera's distance), for a vehicle tag's height; without them,
+	// 4 m.
+	void setMeshLods(std::function<const MeshLods*(const world::ObjectTemplate&)> lods) { m_meshLods = std::move(lods); }
 	// Where the order tags stand (the order object 0x005b8b20 hands the
 	// manager's slot 0x2c a place: GameWorld::orderTagPoint by the marker's
 	// height), per order (0 the squad leader's, 1 the commander's), for
@@ -416,7 +435,8 @@ private:
 		std::array<float, 3> tag {};
 	};
 	std::array<OrderTag, 2> m_orderTags;
-	std::function<float(const world::ObjectTemplate&)> m_renderRadius;
+	std::function<const MeshLods*(const world::ObjectTemplate&)> m_meshLods;
+	float m_baseFovY = 0; // the first view's fov: the zoom is against it (RenderView +0x1c, 0x10066b30)
 	TagFont m_font;
 	bool m_fontLoaded = false;
 	std::map<int, Tag> m_players; // by player id

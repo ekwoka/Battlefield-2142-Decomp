@@ -520,6 +520,21 @@ uint32_t botRandomSeed(bool fromClock = false);
 // over the `water` where that is more than 0.75 m over the `ground` is
 // left out.
 bool bodyUnderWater(float y, float water, float ground);
+// The assist behaviours' "upright" test (BBMedicAssist 0x10070200,
+// BBAmmoAssist 0x10071a10, BBRepairVehicle 0x10073360): the target's up
+// axis (its matrix's second row, AI object vt+0x38 +0x10..+0x18) against
+// the terrain's normal under it (the AI terrain's slot 0x20): within 45
+// degrees (dot at least 0.7071). A soldier stands upright, so for him it
+// is the slope under him; a vehicle on its side or roof is left out.
+bool uprightOnGround(const physics::Vec3& up, const physics::Vec3& normal);
+// BBChange's room for a fixed-wing seat (0x1006c3e0): the box 0x100ff690
+// builds from the AI object's box (width w, height h, length l: its x, y
+// and z extents) in its matrix levelled to its heading (the forward row's
+// y zeroed, 0x100fe6f0): x within +-0.6 w, y within +-0.6 h, z from -0.6 l
+// to 12 l ahead. The grid's query (0x100f8b00) takes an object whose
+// sphere (`at`, `radius`) is inside all six planes by its radius.
+bool sphereInRoomBox(const physics::Vec3& origin, const physics::Vec3& forward, float width, float height, float length,
+	const physics::Vec3& at, float radius);
 // The clock's word (0x100309a0 with the seed 0): `seconds` x 1e6, rounded
 // to 64 bits, the low 32.
 uint32_t clockSeedWord(double seconds);
@@ -1511,6 +1526,10 @@ private:
 
 	// Helpers.
 	float healthOf(uint32_t object) const;
+	// uprightOnGround for an object at `at` with the up axis `up`.
+	bool uprightOnTerrain(const physics::Vec3& at, const physics::Vec3& up) const;
+	// Whether `vehicle`'s fixed-wing seat has room ahead (0x1006c3e0).
+	bool roomAhead(const GameWorld::VehicleInfo& vehicle, const GameWorld::PlayerInfo& self) const;
 	std::vector<std::pair<int, std::string>> carried(const GameWorld::PlayerInfo& self) const;
 	// What of that the AI has a weapon for: an item whose object names an
 	// aiTemplate that is a weaponTemplate (with the AI scripts loaded; all

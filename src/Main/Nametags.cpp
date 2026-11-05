@@ -7,6 +7,7 @@
 #include "Game/GameWorld.h"
 #include "Geometry/MeshFile.h"
 #include "IO/File/FileManager.h"
+#include "Render/Culling.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
 
@@ -31,6 +32,37 @@ float meshRenderRadius(const geom::MeshFile& mesh)
 		d2 += (box.max[i] - box.min[i]) * (box.max[i] - box.min[i]);
 	}
 	return 0.5f * std::sqrt(d2);
+}
+
+MeshLods meshLods(const geom::MeshFile& mesh, const std::vector<std::vector<float>>& setDistances, float scale)
+{
+	MeshLods lods;
+	lods.scale = scale;
+	const size_t shown = mesh.geometries.size() > 1 ? 1 : 0;
+	if (shown >= mesh.geometries.size()) {
+		return lods;
+	}
+	for (const auto& lod : mesh.geometries[shown].lods) {
+		float d2 = 0;
+		for (size_t i = 0; i < 3; ++i) {
+			d2 += (lod.bounds.max[i] - lod.bounds.min[i]) * (lod.bounds.max[i] - lod.bounds.min[i]);
+		}
+		lods.radii.push_back(0.5f * std::sqrt(d2));
+	}
+	const std::vector<float> set = shown < setDistances.size() ? setDistances[shown] : std::vector<float> {};
+	lods.switchDistances = render::lodSwitchDistances(set, static_cast<int>(lods.radii.size()));
+	return lods;
+}
+
+float lodRenderRadius(const MeshLods& lods, float cameraDistance, float zoom)
+{
+	if (lods.radii.empty()) {
+		return 0;
+	}
+	const int count = static_cast<int>(lods.radii.size());
+	const float distance = render::lodDistance(cameraDistance, zoom, lods.radii[0]);
+	const int lod = std::clamp(render::lodForDistance(distance, lods.switchDistances, count, lods.scale), 0, count - 1);
+	return lods.radii[static_cast<size_t>(lod)];
 }
 
 namespace {
@@ -673,6 +705,13 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 	const Vec eye {view.position[0], view.position[1], view.position[2]};
 	const Vec forward = forwardOf(view);
 	const physics::Vec3 eyeP {eye.x, eye.y, eye.z};
+	// The view's zoom for the meshes' LODs (RenderView +0x1c, 0x10066b30:
+	// tan(first fov / 2) / tan(fov / 2)).
+	if (m_baseFovY <= 0) {
+		m_baseFovY = view.fovY;
+	}
+	const float zoomTan = std::tan(view.fovY * 0.5f);
+	const float zoom = zoomTan > 1e-6f ? std::tan(m_baseFovY * 0.5f) / zoomTan : 1.0f;
 	const auto kitTypeOf = [&](uint32_t kit) -> std::string {
 		const world::Object* o = kit ? objects.find(kit) : nullptr;
 		const std::string* type = setting(o ? o->objectTemplate() : nullptr, "kitType");
@@ -721,8 +760,9 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			}
 			// The root's render object's radius (0x100c26a0's root, +0x44
 			// slot 0x44: RendDX9 0x100c7000, the shown geometry's box radius
-			// about its centre).
-			const float height = m_renderRadius && v->objectTemplate() ? m_renderRadius(*v->objectTemplate()) : 4.0f;
+			// about its centre at the LOD the camera's distance picks).
+			const MeshLods* lods = m_meshLods && v->objectTemplate() ? m_meshLods(*v->objectTemplate()) : nullptr;
+			const float height = lods ? lodRenderRadius(*lods, distance, zoom) : 4.0f;
 			at = {v->position().x, v->position().y
 					+ m_settings.vehicleNametagOffsetFactor * height + m_settings.vehicleNametagOffset,
 				v->position().z};

@@ -11,7 +11,8 @@ few rules of its own; they are collected here.
   register them (named per object in src/UI/Player/NativeTable.cpp), with
   the member's status in docs/uncited.md's natives table ("The menu
   natives"): bound / bound elsewhere -> (c), online-only / leaves the game
-  -> (o), dev -> (b), missing -> (d). MenuBindings_NativeCoverage
+  -> (o), dev -> (b), unreached by the shipped movies -> (u), missing ->
+  (d). MenuBindings_NativeCoverage
   (tests/MenuBindingsTest.cpp) keeps that table equal to what the rewrite
   binds, so it is the natives' equivalent of the EXE's console rows.
 - `HAND`: hand-checked labels of single functions (gameswf's parts the
@@ -78,12 +79,12 @@ HAND = {
     0x1006db20: ("o", "online: BFHQ's stats page rows (KILLMESSAGE_*, TEXT_bestroundscore)"),
     0x1007d000: ("o", "online: BFHQ's weapon / unlock names"),
     0x1007dbf0: ("o", "online: BFHQ's game mode names"),
-    0x1007ada0: ("o", "online: BFHQ's time format (#HH#:#MM#)"),
+    0x1007ada0: ("c", "present: the stats rows' time format, #HH#:#MM# of seconds (MenuBindings::hoursMinutesFromSeconds)"),
     0x10071120: ("o", "online: BFHQ's leaderboard rows (TEXT_risingstar)"),
     0x1000c090: ("o", "online: GameSpy's stats host (stella.prod.gamespy.com)"),
     0x10063ad0: ("o", "online: the new account page's parentalAge row (selectBoxNewAcc, with the countries)"),
     0x100776e0: ("o", "online: the master server's filter text (gamever=, bf2142_ranked=1, bf2142_anticheat=1)"),
-    0x10023590: ("o", "online: the totalCount row of dice.General.getListEntries (0x10026e90, its only caller)"),
+    0x10023590: ("u", "the totalCount row of dice.General.getListEntries (0x10026e90, its only caller; unreached, see STATUS_LABEL)"),
     0x100d4270: ("u", "XML.load (no XML in the shipped movies)"),
     # --- never reached by the shipped movies (u): neither mainMenu.dfm nor
     # endOfRound.dfm has DefineSound / StartSound / DefineButtonSound /
@@ -110,7 +111,13 @@ HAND = {
     0x100d4e80: ("u", "XML's methods (no XML in the shipped movies)"),
 }
 
-STATUS_LABEL = {"Bound": "c", "Elsewhere": "c", "Online-only": "o", "External": "o", "Dev": "b", "Missing": "d"}
+# "Unreached": dice.lists.List's data source (dice.General.getListEntries
+# 0x10026e90 and its revision, flush, filter and sort natives). Its only
+# user, the AS class dice.UIs.Lists.ColumnList (sprite 821), is placed and
+# attached by neither movie; the pages fill their lists through
+# dice.bf2.List. Not needed, like the movies' unused tags (u).
+STATUS_LABEL = {"Bound": "c", "Elsewhere": "c", "Online-only": "o", "External": "o", "Dev": "b", "Unreached": "u",
+                "Missing": "d"}
 
 
 def identifier_strings(strings):
@@ -135,7 +142,7 @@ def _constructors(repo):
 def _statuses(repo):
     """{(object, member): status} from docs/uncited.md's natives table."""
     path = os.path.join(repo, "docs", "uncited.md")
-    cols = ["Bound", "Elsewhere", "Online-only", "External", "Dev", "Missing"]
+    cols = ["Bound", "Elsewhere", "Online-only", "External", "Dev", "Unreached", "Missing"]
     out = {}
     with open(path, encoding="utf-8") as f:
         for line in f:

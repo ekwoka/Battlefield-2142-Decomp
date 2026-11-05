@@ -393,6 +393,28 @@ TEST(Nametags_ObjectSupplyBar)
 	CHECK(nametags::objectTagBar(in) < 0); // neither: not in the pass
 }
 
+// A vehicle tag's radius follows the LOD the camera's distance picks
+// (0x100c3390 -> 0x100c3260 -> +0x268): LOD 0 within its switch distance
+// (plus LOD 0's radius), then the next LODs' boxes; the zoom shortens the
+// distance.
+TEST(Nametags_RenderRadiusFollowsTheLod)
+{
+	geom::MeshFile mesh;
+	mesh.geometries.resize(2);
+	mesh.geometries[1].lods.resize(3);
+	mesh.geometries[1].lods[0].bounds = {{0, 0, 0}, {6, 8, 0}}; // radius 5
+	mesh.geometries[1].lods[1].bounds = {{0, 0, 0}, {3, 4, 0}}; // 2.5
+	mesh.geometries[1].lods[2].bounds = {{0, 0, 0}, {0, 2, 0}}; // 1
+	const nametags::MeshLods lods = nametags::meshLods(mesh, {{}, {30, 60}}, 1);
+	CHECK(lods.radii.size() == 3 && lods.switchDistances.size() == 2);
+	CHECK(nametags::lodRenderRadius(lods, 34, 1) == 5);   // 29 m past the radius
+	CHECK(nametags::lodRenderRadius(lods, 36, 1) == 2.5f); // 31 m
+	CHECK(nametags::lodRenderRadius(lods, 66, 1) == 1);
+	CHECK(nametags::lodRenderRadius(lods, 66, 4) == 5); // zoomed in: 11.5 m
+	const nametags::MeshLods halved = nametags::meshLods(mesh, {{}, {30, 60}}, 0.5f);
+	CHECK(nametags::lodRenderRadius(halved, 21, 1) == 2.5f); // the low geometry quality
+}
+
 // A mesh's render radius (RendDX9 0x100c7000 on the instance 0x100c35c0
 // makes): half the diagonal of the shown geometry's LOD 0 box, geometry 1
 // when there are two or more (0x100c2b00). The order marker's.

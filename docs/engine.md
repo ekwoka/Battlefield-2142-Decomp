@@ -1330,8 +1330,14 @@ the Parachute `parachute` (class `0xc5a8`, vtables `0x0096e518` /
   2 m or more over the terrain and the water with nothing 2 m below
   (`0x005e4330`, the scene's ray; unless `*0x00a6ef84`, 0 shipped),
   falling at 10 m/s or more, and room for the parachute (`0x005e45e0`:
-  its collision against the objects within 15 m; the rewrite's
-  stand-in: nothing solid 5 m over him). Taken, it opens at his frame
+  the round template's collision mesh, the collision manager's
+  `DAT_00a82510` slot `0x28`, placed in the fire comp's frame (slot
+  `0xd4`, `0x005e4460`: his heading at his feet plus the start position)
+  against the objects within 15 m but projectiles: `0x006f2e90` /
+  `0x006f2760`, a segment from that point to any vertex of the mesh's
+  vehicle LOD crossing an object's soldier LOD leaves no room;
+  `GameWorld::parachuteRoom`, `canopyClear`; parachute.collisionmesh's
+  24 vertices span −3.21..1.10 m about the start). Taken, it opens at his frame
   plus fire.projectileStartPosition (`0x005e4460`, slot 53: 0/2/0), the
   round taking his velocity, and enterOnSpawn seats him (the press that
   lets the round go after the choice isn't traced; AIDLL's bots press
@@ -4817,7 +4823,7 @@ PostRemotes:
 | 0x32 | Request | squad, team, 0-3 (the leader asks the commander; forwarded as PostRemote 2/0x19, `ECHudHESquadLeaderRequest`) |
 | 0x18 | IssueSquadOrder | squad, team, kind (bytes), 1 bit: the order's object ghost (16), else 9 floats (the record's `+8`..`+0x28`, written `+0x10`, `+0x1c`, `+0x28`, `+0x14`, `+0x20`, `+0x2c`, `+0x18`, `+0x24`, `+0x30`: the point is `+0x10`..`+0x18`), the store (8: 0 the squad's order, squad manager slot `0x48`; 1 the commander's, `0x4c`; 2 a request, `0x50`), 1 bit (built `0x0050e170`, written `0x0050dfe0`, read `0x0050e220`; server `0x0050e3a0` takes it from the squad's leader or the commander, client `0x0050e4d0` only stores it) |
 | 0x1b | SetAcceptOrder | squad, team, 1 bit, the store, the kind (bytes; built `0x0050dd50`, written `0x0050de40`, read `0x0050dd90`): squad manager slot `0x24`, a request or order taken off; server `0x0050df60` (from the leader or the commander, passed on to everyone by `0x004c3300`), client `0x0050df20` |
-| 0x39, 0x3a | CreateSpawnGroup, RemoveSpawnGroup | the group's id (8), team (4), three bits and two bytes not traced, the ghost of the object it is at (16) (`0x005125c0` / `0x005126b0`, handled `0x005127f0` → the client spawn manager's slot `0x44`); Remove: id, ghost (`0x00512880`, `0x00512970` → slot `0x48`) |
+| 0x39, 0x3a | CreateSpawnGroup, RemoveSpawnGroup | the group's id (8), team (4), three bits (0 always; its +0x8e, its points' slot 0x4c flag, `0x00634f10`; its +0x94, it has points), two bytes (its place on the map, x and z: (position + half) / GLSWorldSize × 255, `0x006329c0`; the server's sender `0x00632e50`), the ghost of the object it is at (16) (`0x005125c0` / `0x005126b0`, handled `0x005127f0` → the client spawn manager's slot `0x44`); Remove: id, ghost (`0x00512880`, `0x00512970` → slot `0x48`) |
 | 0x14 | RadioMessage | `+0xc` the voice message's index in the game logic's message table (16 bits: VoiceMessages.con's `addMessage` order, `0x004d8af0`, looked up by name with `0x004d8040` at game logic `+0x170`), `+0xe` the sender's player id (8), `+0xf` its team (2), `+0x10` the team, squad or player the channel names (8), `+0x14` the target channel (0..0x13), `+0x18` the source (0..4: 3 a player's, 0 the game's) (read `0x0050d100`, written `0x0050d1f0`). A player's (the client's slot 0x50, `0x004b2b60` → `0x004b26b0`) carries its id and team (slots 0x58, 0xf8) and source 3; `0x004b3020` (no spam check) puts the team in `+0xf` and `+0x10` and source 0. The server (`0x0050d3b0`) says it with the connection's player as the sender (`0x004a54d0`) and hands it out (slot 0xa8 → `0x004a7800`, who hears: `0x004a6f70`); each hearer's client gets the event again (`0x004a6c60`: the sender into `+0xe`); a client's handler (`0x0050d300`) posts it (category 6) for the voice and the text (`0x0042e0c0`) |
 | 0x1e | Artillery | kind (2 bits; 1 an RC object's use), team (32, a byte), x, z (floats), then kind 1: the rcType (32: 1 RCArtillery, 4 RCOrbitalStrike), kind 2: 16 + 32 bits (vtable `0x0091e42c`, built `0x007d7c20`, read `0x0050ec60`; server `0x0050ee10`: from the team's commander or no player, slot 0x128, the team's asset of that kind, `DAT_00a69cb8`, fires, `0x005a11c0` / `0x005a1270`) |
 | 0x2d | Uav | x, z (floats), team (8), a bit: the satellite scan (vtable `0x0091e3fc`, built `0x007d7ca0`, read `0x0050ea60`; server `0x0050eb90`: from the team's commander, game logic slot 0x78; events 0/0x11 the UAV at the point, 0/0x12 the scan) |
@@ -5645,8 +5651,8 @@ growing by the input × 250 m/s² — `*0x00a7303c`, the
 "overheadCamera-acceleration" tweak, `0x008e8877` — within the template's
 speed, 50, and falling back to rest at that rate), the soldier then
 getting no movement (`menu::OverheadCamera`, main.cpp's
-`g_overheadCamera`; the speed's factor `+0x270` isn't traced, taken as
-1).
+`g_overheadCamera`; the speed's factor `+0x270` is 1, set by the
+constructor `0x005f8870` and written nowhere else).
 
 - **Whispers** (`HudManager.enableSayPlayerChatBox`, `0x007d9e20`): after
   the spam check, chat channel 14 (TCPlayer) through the game client's
@@ -5776,7 +5782,8 @@ server is `src/Net/GameServer` (the protocol) and `src/Main/HostedGame`
   ghosts on the new level block and sends no moves until its new
   CreatePlayer (`0x00590740`).
 - **Kicks** (`HostedGame::kickPlayer`): KickBan (0x37, written by
-  `0x0050cf30`: the player, banned, a byte) to every playing client, whose
+  `0x0050cf30`: the player, banned, a byte the retail server's ban
+  `0x00505fa0` and kick `0x00506050` always send 0) to every playing client, whose
   handler (`0x0050cfd0`) posts message 2/0x4d for the HUD, then the
   disconnect, sent three times as `0x0068e520` does. The client prints who
   left and why, and a disconnect's reason (`net::disconnectReason`).
@@ -7178,7 +7185,14 @@ objects). What only the local round has (gun aims, projectiles, Titans,
 silos) it still asks the round, which a client has empty; the commanders'
 assets are a client's ghosts (their tools' reloads its own uses') and the
 range finder's ray the level's. The
-corner roots' positions are approximate. The crosshair spreads by the
+corner roots stand where the "Ingame" MemeFile 2.0 (Menu_server.zip)
+places them: BF2142.exe has no such strings, the names are that dice::meme
+tree's (Global and TopLayer at 0, 0; BottomLeftStatic and
+BottomRightStatic under transforms at −1, 563 and 401, 563; the Animate
+pair under BfTransformNodes, factory `0x007edcf0`, serializer
+`0x007ed800`, whose X follows BottomLeft_XPos — the slide `0x007a0a90`,
+−295 / −137 / 54 — or BottomRight_XPos, 503, `0x007bee10`, plus their
+350, 10 and 10, 10; no shipped script draws in them). The crosshair spreads by the
 weapon's soldier deviation (`GameWorld::weaponDeviation`, see Soldier
 deviation; a joined client's from its own moves), its minimum without
 one.
@@ -7900,8 +7914,13 @@ feet (the built-in Soldier_CollisionMesh, `0x006e4880`: the feet at −1).
 The vehicle's "height" is its root's render object's radius (`0x100c26a0`
 the root, `+0x44` slot `0x44`: RendDX9 `0x100c7000`, the shown
 geometry's box radius about its centre, as for the order markers;
-`Nametags::setRenderRadius`), taken at LOD 0 (the instance's LOD,
-`+0x274`, follows the camera's distance). Not determined: the bar's
+`Nametags::setMeshLods`) at the LOD the instance shows: RendDX9's pick
+for a drawn BundledMesh (`0x100c3390`: the camera's distance over the
+view's zoom less LOD 0's radius against the switch distances times the
+global scale and the geometry quality) sets `+0x274` and, through slot
+`0x6c` (`0x100c3260`), the box `+0x268` (`lodRenderRadius`). The order
+markers' height takes LOD 0: it is read as the marker is made, before it
+is drawn. Not determined: the bar's
 place.
 
 The icons come from `Menu/Nametag/nametags.con`, which the HUD manager's
@@ -10073,7 +10092,15 @@ velocity the soldier's response is asked for (`0x00588420`, response slot
   velocity and the wanted one, along the ground, corrected by at most
   `normal.y^5 * friction * 1.5712` m/s per tick (2.3568 before slipping),
   as an acceleration for the soldier's physics node, which integrates
-  without rotation, damped 0.99 per tick (0.9 in water).
+  without rotation, damped 0.99 per tick (0.9 in water). The friction
+  (`+0xd4`, 1 from the response's constructor `0x006c1ca0`) is set at
+  each contact (`0x006c24b0`) to MaterialManager slot `0x88` of the
+  soldier mesh's material and the surface's: the built-in mesh's faces
+  all carry material 0x18 (Human_body; `0x006e4880`'s `0x006e3420` calls,
+  read per point through the mesh's slot `0x44(1, i)`), the surface the
+  terrain's material map under the point or the mesh face's
+  (`SoldierBody::frictionOf`, `touchMaterial`). That material is also
+  the soldier's side of its collision events (the templates set none).
 
 The look turns the head before the body (`0x0058a6d0`,
 `SoldierControl::twist`): standing (the shaped throttle within 0.01) the
@@ -11760,7 +11787,7 @@ The urgencies:
 | Revive (0x10082760) | 100 × the squad factor (task 1) for a downed teammate within the Revive weapon's maxRange. Each candidate scores 1 − min(1, d / speed / time left), × 10 for a human's body. |
 | Flee (0x100859d0) | 100 below 30 % health, with the camouflage over 70 % charged (AIDLL 0x10085920: its ammo over its maximum), 10 s after spawning. 0x10085d90 keeps the way out: the sum of the directions away from known enemies (×3 for players, ×2 for bots targeting it). |
 | Change (0x1006c520) | best seat / current seat × weight × 10 (best × weight with the current worth nothing), ÷ (1 + 14 clamp((d − 10) / 60, 0, 1)) for the distance to it (0x1006bc50), 0 for a seat another bot reserved (0x1006f320). See Seat values. |
-| MedicAssist (0x10070200) | Teammates on foot within the hub's maxRange (70 m) below 75 % health (99 % for a human), the bot itself unless it holds the hub. Score basicTemp / (fuzzy(1 − health) × distance), distance 1 for itself. fuzzy(best) × weight × 2, × 10 for a human; × the squad factor. A "medic" radio call (see Radio) from the candidate: its score × 3 from a human, × 1.5 from a bot; with a human's call heard and the best a human within 50 m: 100 (× the squad factor). |
+| MedicAssist (0x10070200) | Teammates on foot within the hub's maxRange (70 m) below 75 % health (99 % for a human), standing upright on the terrain (their up within 45° of its normal, dot ≥ 0.7071: `uprightOnGround`, as in AmmoAssist and RepairVehicle, where a vehicle on its side or roof is left out), the bot itself unless it holds the hub. Score basicTemp / (fuzzy(1 − health) × distance), distance 1 for itself. fuzzy(best) × weight × 2, × 10 for a human; × the squad factor. A "medic" radio call (see Radio) from the candidate: its score × 3 from a human, × 1.5 from a bot; with a human's call heard and the best a human within 50 m: 100 (× the squad factor). |
 | AmmoAssist (0x10071a10) | Human players only. A weapon (FireArm, Sniper, C4) with ceil(rounds / magSize) / magazines below 0.6 (0.99 while the bot holds the hub). Score basicTemp / (scurve(ratio) × distance). fuzzy(best) × weight × 4 × the squad factor. A candidate that called "need_ammo" needs only a ratio below 1, scores × 70, and makes the urgency × 100. |
 | RepairVehicle (0x10073360) | Vehicles within the tool's maxRange (50 m) between 0 and 60 % health. Score basicTemp / (f × distance), f = fuzzy(1 − health), or 1 for the one it repairs. fuzzy(best) × weight × 10 with a human aboard, × 2 otherwise; × the squad factor. |
 | c4 (0x10083750) | 100 to place a charge inside a point the team holds uncontested; 100 to set it off once that point is contested below 0.75 with no teammate within 15 m of it. A charge lapses after 240 s. The weight is not used. |
@@ -13540,8 +13567,18 @@ keeps no copy). Kept as the binary does it.
   trigger's distance band (OR 0x100cf1b0). Stand-ins: the moves are the rewrite's walk (steer to close in, the
   throttle back), and a lock is `GameWorld::weaponLock`'s state 2.
 - **Change:** the infantry-map reach test for vehicles (the Mobile's
-  per-map points +8/+0x1c/+0x30 aren't kept: every vehicle counts) and the
-  room test for ITAir vehicles that aren't ITHelicopter (0x1006c3e0). The
+  per-map points +8/+0x1c/+0x30 aren't kept: every vehicle counts). A
+  seat whose AI object is ITAir but not ITHelicopter (the AG gunships'
+  second positions, AS_AG_SecondPosition_AI / US_AG_SecondPosition_AI)
+  needs room ahead (0x1006c3e0, `BotManager::roomAhead`): the box
+  0x100ff690 builds from the AI object's box, levelled to its heading,
+  ±0.6 of the width and height, 0.6 lengths behind to 12 ahead, asked of
+  the information environment (vtable 0x10119858 slot 0x2c, 0x100caf10:
+  the dynamic grids 0 and the bot's team's, each entry's sphere against
+  the six planes, 0x100f8b00) through the filter 0x1006c040 (not the
+  vehicle or the bot's object, ITMobile, not ITSoldier or ITNaval); the
+  seat's PCO has no collision mesh, so the box is its hull's
+  (AIObjectPhysical 0x008a43f0 asserts collision LOD 1). The
   get_in answers are rewritten (see Radio), and the bail_out radio on
   taking the way out: AIDLL 0x100a5990(type 0, the AI's channel 7) when the
   bot's object's health is at or under the slot 0x68 value + 0.1. That
@@ -13907,6 +13944,38 @@ ask whether it's done.
   menu runs alone; `createServer` closes it and loads the level as
   `+level … +gameMode … +mapSize …` would, with the bots, their skill and
   the ticket ratio from the menu.
+- **The create-server page** (`mc_local_create`): the GAME MODE box lists
+  the mod's modes without `sp1` and `gpm_sp` (0x10069160). The page's
+  `createServerInit` calls `setValue("TEXT_gpm_ti", 2)`, which puts the
+  key in the label and, through `changeGameMode`, calls
+  `ServerSettings.setGameModeIndex(2)` (0x10057870: the third mode becomes
+  the server's and the available maps' filter, SwiffHost slot 0x170). Its
+  `fillList(true)` chooses the server's mode, found before `sp1` and
+  `gpm_sp` leave the list, and marks the box (+0x18); its `selectRow(2)`
+  redraws the rows (0x10081260), and a row drawer that shows the chosen
+  row of a marked box calls the holder's `rowRelease` on it once
+  (0x10081800), so the label becomes that row's text ("Titan"). The bot
+  skill and display mode boxes are marked the same way
+  (`NativeList::releasePending`).
+- **Server rules** (the info popup's `serverExtendedInfo`, 0x10068150 /
+  0x10068380): friendly fire, rounds per map, spawn time, time limit (in
+  minutes), ticket ratio, team ratio, autobalance and spectators, from the
+  server's query keys (`bf2142_friendlyfire`, `roundtime`,
+  `bf2142_spawntime`, `timelimit`, `bf2142_ticketratio`,
+  `bf2142_teamratio`, `bf2142_autobalanced`, `bf2142_allow_spectators`;
+  0x004661a0), each beside its SERVERINFO_ label; HEADER_on / HEADER_off.
+- **Time cells:** TEXT_timeformat_hhmm (`#HH#:#MM#`, each `%02d`) from
+  minutes (0x100657b0) or seconds (0x1006a840, 0x1007ada0; the stats
+  rows' time played).
+- **dice.bf2.Cursor:** `setCursor`'s name ends in RendDX9's stub
+  (SwiffRender slot 50, 0x101177b0); on its true the window clears its
+  hide-cursor flag (+0x3b, read by WM_SETCURSOR 0x0056bc40), so any name
+  shows the cursor, which the rewrite's menu always does. `getCursor`
+  answers "" (slot 51, 0x101177c0). `enableCursor`'s switch (SwiffHost
+  +0x48) has no caller of its reader. The hardware probes answer as on
+  supported hardware: `detectVideoScheme` 2 (RendDX9 0x1000fa50's high),
+  `isRunningWithUnsupportedDrivers` and `AudioSettings.isInCriticalState`
+  false.
 - **The playlist and the game under the menu:** each map runs in
   `runGame` (`src/Main/main.cpp`), whose managers all start empty, so the
   next map loads from nothing. The menu (its movie and the login) lives on
@@ -13945,14 +14014,22 @@ ask whether it's done.
   (0x101774b0, 0x10183570), opaque white, cut to the rectangle (a
   scissor, no fade); 40 slots from the stage's bottom 20 px apart, moving
   up at the speed, the top one recycled 20 px below the last, looping
-  (0x10177210, 0x10177290, 0x10177190). `cacheCredits` and
-  `getRandomCreditsTexture` have no caller in the shipped menus.
+  (0x10177210, 0x10177290, 0x10177190). `cacheCredits` (0x1003b0e0,
+  SwiffRender slot 0xf4, RendDX9 0x10119670) keeps whichever of
+  `images/credits/1.png` .. `113.png` load, and `getRandomCreditsTexture`
+  (0x1003c440) answers one at random, "" with none; no shipped menu calls
+  them, and the game ships no such images.
   `gameModes.con`'s `SwiffHost.addGameMode` names the modes (ModInfo,
   0x00461740 / 0x00460ff0, "N/A" when unknown) behind the end-of-round
   `HEADER_<mode>` texts (0x1001beb0); `menuTeams.con`'s
-  `MenuTeamManager.addTeam` / `addKit` and `addWeapon` are kept (their
-  readers, `Profile.getEquipmentName/Description`, `getSprint` and the
-  unlock lists, have no caller in the shipped menus); `addAward` keeps
+  `MenuTeamManager.addTeam` / `addKit` and `addWeapon` are kept. Their
+  readers have no caller in the shipped menus, but are bound: the kit
+  files (0x00494da0 / 0x00492dc0: `ObjectTemplate.create Kit`, each
+  `addTemplate`'s Weapon.desc `<name>` / `<description>` locid, the
+  `sprintStaminaDissipationFactor`) give `Profile.getEquipmentName` /
+  `getEquipmentDescription` (0x1004e670 / 0x1004e7a0, by template without
+  regard to case, localized) and `getSprint(team, kit)` (0x1004e410, 1 −
+  the factor); `addAward` keeps
   the record 0x00459250 makes. `Logic.getDateString` (0x1003d370,
   YYYYMMDD) and `getMaxRank` (0x1003b620, 12) answer as the DLL.
 - **Options:** the game, controls, video and audio pages read

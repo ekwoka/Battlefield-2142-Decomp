@@ -164,7 +164,7 @@ ParticleTemplate ParticleTemplate::fromTemplate(const world::ObjectTemplate& t)
 		p.pivot[1] = pivot.y;
 	}
 	if (const std::string* order = setting(t, "drawOrder")) {
-		p.drawNewestFirst = order->size() == 4 && std::tolower(static_cast<unsigned char>((*order)[0])) == 'b';
+		p.drawBack = order->size() == 4 && std::tolower(static_cast<unsigned char>((*order)[0])) == 'b';
 	}
 	p.collision = number(t, "collisionEnable", 0) != 0;
 	p.collisionAlongNormal = number(t, "collisionSpeedAlongNormal", p.collisionAlongNormal);
@@ -2133,8 +2133,17 @@ void EffectManager::collect(const Emitter& emitter, std::vector<Sprite>& out, co
 {
 	const ParticleTemplate& t = emitter.particleTemplate();
 	const auto& particles = emitter.particles();
+	// Back to front by the squared distance to the camera (0x10130bd0's
+	// +0x14, sorted by 0x1012f800).
+	std::vector<size_t> order(particles.size());
+	std::vector<float> distances(particles.size());
 	for (size_t i = 0; i < particles.size(); ++i) {
-		const Particle& p = particles[t.drawNewestFirst ? particles.size() - 1 - i : i];
+		order[i] = i;
+		distances[i] = physics::lengthSquared(emitter.worldPosition(particles[i]) - view.eye);
+	}
+	std::stable_sort(order.begin(), order.end(), [&distances](size_t a, size_t b) { return distances[a] > distances[b]; });
+	for (const size_t index : order) {
+		const Particle& p = particles[index];
 		const float f = std::min(p.age / p.life, 1.0f);
 		const float blend = std::min(t.colorBlendGraph.at(f), 1.0f);
 		float alpha = std::clamp(std::min(t.transparencyGraph.at(f), 1.0f) * p.alpha, 0.0f, 1.0f);

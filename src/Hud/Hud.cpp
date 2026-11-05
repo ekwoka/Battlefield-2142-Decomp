@@ -47,7 +47,25 @@ enum NodeType {
 	kOther,
 };
 
-// The corners the engine creates, in the 800 x 600 screen (approximate).
+// The roots the scripts hang their nodes from. BF2142.exe has no such
+// strings: they are node names in the "Ingame" MemeFile 2.0 (Menu_server.zip,
+// a dice::meme tree the HUD manager loads: name records, then each node's
+// fields), whose transforms give these places in the 800 x 600 screen:
+//   - Global: a split node at the root's 0, 0 (800 x 600); TopLayer: under
+//     a TransformNode 0, 0, 800 x 600 (the file also has Top 0, 0, 400 x
+//     470 and TopRight 504, 0, 512 x 256, which no script uses);
+//   - BottomLeftStatic and BottomRightStatic: under TransformNodes at -1,
+//     563 and 401, 563 (400 x 64);
+//   - BottomLeftAnimate and BottomRightAnimate: TransformNodes at 350, 10
+//     and 10, 10 under a BfTransformNode (factory 0x007edcf0, serializer
+//     0x007ed800: its X and Y data, Width / Height, the "Transformed node")
+//     whose X is BottomLeft/BottomLeft_XPos (the exe slides it, 0x007a0a90:
+//     -295 hidden, -137 with the health panel or a vehicle's, 54 with both;
+//     the rewrite keeps -137, the HUD menus' BottomLeftHealthAlpha /
+//     BottomLeftVehicleAlpha being set at once) and Y 563, and
+//     BottomRight/BottomRight_XPos (the constructor 0x007bee10's 503) and
+//     Y 497. No shipped script draws in them (HudElementsPlayer's
+//     BottomLeftBar is between beginrem / endrem).
 struct Root {
 	const char* name;
 	int x, y;
@@ -55,10 +73,10 @@ struct Root {
 constexpr Root kRoots[] = {
 	{"Global", 0, 0},
 	{"TopLayer", 0, 0},
-	{"BottomLeftStatic", 0, 566},
-	{"BottomLeftAnimate", 0, 566},
-	{"BottomRightStatic", 400, 566},
-	{"BottomRightAnimate", 400, 566},
+	{"BottomLeftStatic", -1, 563},
+	{"BottomLeftAnimate", -137 + 350, 563 + 10},
+	{"BottomRightStatic", 401, 563},
+	{"BottomRightAnimate", 503 + 10, 497 + 10},
 };
 
 } // namespace

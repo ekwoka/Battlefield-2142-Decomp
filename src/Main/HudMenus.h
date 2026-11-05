@@ -195,7 +195,9 @@ std::pair<float, float> detailedViewPoint(const std::pair<float, float>* view, c
 //   (PIThrottle, W / S) north and south: each axis's speed (+0x274 /
 //   +0x27c) grows by the input x the acceleration (*0x00a7303c: the
 //   "overheadCamera-acceleration" tweak, 250) x the frame's time, kept
-//   within the template's speed (+0x2a0, 50; x +0x270, not traced: 1),
+//   within the template's speed (+0x2a0, 50) x the camera's +0x270 (1
+//   from its constructor 0x005f8870, written nowhere else; 0x005f8120
+//   reads the product too),
 //   and without input falls back to 0 at the same rate; then the point
 //   moves by speed x time (0x005f8170 with the speeds).
 struct OverheadCamera {

@@ -154,7 +154,9 @@ TEST(Effects_WorldSystemsLeaveTheirParticles)
 	manager.update(1 / 30.0f);
 	manager.update(1 / 30.0f);
 	const auto trail = sprites(manager);
-	CHECK(trail.back().position.x > 40);
+	// (The sprites come back to front from the camera, 0x1012f800: the
+	// newest, at the emitter's new place, is the farthest from the origin.)
+	CHECK(!trail.empty() && trail.front().position.x > 40);
 	// Releasing the anchor stops the emission.
 	manager.releaseAnchor(1);
 	CHECK(!manager.emitting(1));
@@ -884,7 +886,7 @@ TEST(Effects_SpriteDrawAndCollision)
 	puff->settings()["collisionSpeedAlongNormal"] = "0.5";
 	puff->settings()["gravity"] = "-10";
 	const auto t = effects::ParticleTemplate::fromTemplate(*puff);
-	CHECK(t.alphaCull == 0.2f && t.pivot[1] == -0.5f && !t.drawNewestFirst && t.collision
+	CHECK(t.alphaCull == 0.2f && t.pivot[1] == -0.5f && !t.drawBack && t.collision
 		&& t.collisionAlongNormal == 0.5f);
 	effects::EffectManager manager(templates);
 	manager.setGround([](float, float) { return 0.0f; });
@@ -1144,4 +1146,47 @@ TEST(Effects_TrailPointsMove)
 		CHECK(std::fabs(first.position.y - 2 * first.age) < 0.1f);
 		CHECK(std::fabs(first.velocity.y - 2) < 1e-4f);
 	}
+}
+
+// drawOrder (0x006232e0 -> RendDX9 0x10139aa0, the collector 0x10130bd0,
+// the frame 0x10131b70): the Back systems' particles are drawn before the
+// Front ones', and each system's go back to front from the camera (0x1012f800).
+TEST(Effects_DrawOrderAndDepthSort)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "EffectBundle");
+	templates.registerType(2, "SpriteParticleSystem");
+	const auto system = [&](const char* name, const char* order, const char* texture) {
+		world::ObjectTemplate* t = templates.create("SpriteParticleSystem", name);
+		t->settings()["emitFrequency"] = "30";
+		t->settings()["emitTime"] = "1";
+		t->settings()["emitSpeed"] = "4";
+		t->settings()["emitDirection"] = "0/0/1";
+		t->settings()["timeToLive"] = "5";
+		t->settings()["gravity"] = "0";
+		t->settings()["textureName"] = texture;
+		t->settings()["drawOrder"] = order;
+	};
+	system("front", "Front", "front");
+	system("back", "Back", "back");
+	world::ObjectTemplate* bundle = templates.create("EffectBundle", "e_two");
+	bundle->children().push_back({"front", {}, {}});
+	bundle->children().push_back({"back", {}, {}});
+	effects::EffectManager manager(templates);
+	CHECK(manager.spawn("e_two", {}));
+	for (int i = 0; i < 15; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	effects::ParticleView view;
+	view.eye = {0, 0, -10}; // behind the start: the newest are the nearest
+	std::vector<std::string> order;
+	bool farFirst = true;
+	manager.forEachGroup(view, [&](const std::string& texture, bool, const std::vector<effects::Sprite>& list) {
+		order.push_back(texture);
+		for (size_t i = 1; i < list.size(); ++i) {
+			farFirst = farFirst && list[i - 1].position.z >= list[i].position.z;
+		}
+	});
+	CHECK(order.size() == 2 && order[0] == "back" && order[1] == "front");
+	CHECK(farFirst);
 }

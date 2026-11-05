@@ -61,11 +61,12 @@ float SoldierBody::collideWithGround(const Ground& ground, float gravity, float 
 			depth *= soldier::kSolvePush / scale;
 		}
 		// The collision event (object slot 0xac) over |v|^2 0.1 (*0x00a8477c).
+		const uint32_t terrain = ground.material ? ground.material(world.x, world.z) : 0;
 		if (onContact && lengthSquared(velocity) > soldier::kContactSpeed) {
-			const uint32_t terrain = ground.material ? ground.material(world.x, world.z) : 0;
 			onContact({0, velocity, normal, {world.x, height, world.z}, material, terrain});
 		}
 		addContact(normal, normal.y * depth, velocity);
+		touchMaterial(terrain);
 		if (i == 0 && m_groundNormal.y < normal.y) {
 			m_groundNormal = normal;
 			m_onGround = true;
@@ -103,6 +104,16 @@ float SoldierBody::collideWithGround(const Ground& ground, float gravity, float 
 		m_contactVelocity = velocity;
 	}
 	return deepest;
+}
+
+// 0x006c24b0's last part: with the soldier's material set, the friction
+// from MaterialManager slot 0x88 (the pair's; slots 0x80 / 0x84, the
+// pair's mean elasticity and resistance, aren't read by the movement).
+void SoldierBody::touchMaterial(uint32_t other)
+{
+	if (material != 0 && frictionOf) {
+		friction = frictionOf(material, other);
+	}
 }
 
 // 0x006c24b0: push out along the normal, stop motion into the surface.
@@ -377,6 +388,7 @@ bool SoldierBody::collideWithMesh(const CollisionWorld& mesh, const Mover* mover
 			continue;
 		}
 		addContact(normal, depth, relative);
+		touchMaterial(contact.material);
 		// Something underfoot holds the soldier up like the ground.
 		if (contact.point.y < lowest + soldier::kFloorTolerance && m_groundNormal.y < normal.y) {
 			m_groundNormal = normal;

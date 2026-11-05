@@ -195,6 +195,20 @@ void NativeList::populate(Interpreter& vm)
 		vm.setMember(row, "isSelected", Value(filled && index == selectedIndex));
 		vm.setMember(row, "rowIndex", Value(index));
 	}
+	// The row drawers (e.g. the game modes' 0x100689a0) highlight the chosen
+	// row when it is shown (0x10081490) and, once after a fill that chose it
+	// (+0x18), call the holder's rowRelease with that row as this
+	// (0x10081800; "No rowRelease() found" when the holder has none). A
+	// chosen row out of view keeps the flag for a later draw.
+	if (releasePending && selectedIndex >= firstIndex && selectedIndex < firstIndex + shown
+		&& selectedIndex < static_cast<int>(data.size())) {
+		releasePending = false;
+		const Value row = vm.getMember(Value(holder), prefix + std::to_string(selectedIndex - firstIndex));
+		const Value release = vm.getMember(Value(holder), "rowRelease");
+		if (row.isObject() && release.isFunction()) {
+			vm.callFunction(release, row, {});
+		}
+	}
 }
 
 bool NativeList::getMember(Interpreter& vm, const std::string& name, Value& out)

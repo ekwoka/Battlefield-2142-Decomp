@@ -205,6 +205,12 @@ struct ControlPoint {
 	int supplyValue[3] = {};
 };
 
+// The parachute's room (0x006f2760 for 0x005e45e0): no segment from the
+// round's place `from` to one of its mesh's vertices (turned by `turn`)
+// `crosses` a soldier LOD.
+bool canopyClear(const physics::Vec3& from, const physics::Mat3& turn, const std::vector<physics::Vec3>& vertices,
+	const std::function<bool(const physics::Vec3&, const physics::Vec3&)>& crosses);
+
 class GameWorld {
 public:
 	GameWorld(world::ObjectTemplateManager& templates, world::ObjectManager& objects, uint32_t seed = 0x759dc150);
@@ -728,6 +734,10 @@ public:
 	// along `up` at `spot` put on what is under its top, or on the terrain.
 	bool groundMaterialAlong(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore, uint32_t& material) const;
 	physics::Vec3 dropSpawnSpot(const physics::Vec3& spot, const physics::Vec3& up, float bottom, float top) const;
+	// A template's collision-mesh vertices of its vehicle LOD (type 1), in
+	// object space (empty without a mesh); `lod` the last part's LOD.
+	std::vector<physics::Vec3> vehicleLodVertices(const world::ObjectTemplate& objectTemplate,
+		const physics::CollisionLod** lod = nullptr) const;
 	// The spawn spot's test for a spawner (see ObjectSpawner::SpotTest).
 	ObjectSpawner::SpotTest testSpawnSpot(const world::ObjectTemplate& objectTemplate, const world::Vec3& spot,
 		const world::Vec3& rotation, const world::Vec3& spawner) const;
@@ -1026,9 +1036,9 @@ public:
 	// A living player's soldier movement (its control and physics body),
 	// null otherwise: what a server sends a client's prediction (the
 	// control-object record, src/Main/HostedGame).
-	// The friction a spawned soldier's body starts with (material 0 on
-	// both sides, as spawnSoldier sets it; 1 without materials).
-	float soldierFriction() const;
+	// The MaterialManager's friction of a material pair (slot 0x88), which a
+	// soldier's contacts take (SoldierBody::frictionOf); 1 without materials.
+	float soldierFriction(uint32_t own, uint32_t other) const;
 	const SoldierControl* soldierControl(int player) const;
 	const physics::SoldierBody* soldierBody(int player) const;
 
@@ -3762,8 +3772,15 @@ private:
 	// The kit's parachute launcher: its slot, its projectile and
 	// fire.projectileStartPosition; false without one.
 	bool parachuteLauncher(const Player& player, std::string& projectile, physics::Vec3& start) const;
-	// The SpawnObjectFireComp's fire test (slot 7, 0x005e4750).
-	bool mayOpenParachute(const Player& player) const;
+	// The SpawnObjectFireComp's fire test (slot 7, 0x005e4750); `projectile`
+	// and `start` the launcher's round and its start (parachuteRoom).
+	bool mayOpenParachute(const Player& player, const std::string& projectile, const physics::Vec3& start) const;
+	// The room for the canopy (0x005e45e0): the round template's collision
+	// mesh (the collision manager's, DAT_00a82510 slot 0x28) placed in the
+	// round's frame (the soldier's heading, at `start` from his feet)
+	// against the objects within 15 m.
+	bool parachuteRoom(const Player& player, const std::string& projectile, const physics::Vec3& start) const;
+
 	bool openParachute(Player& player);
 	// The rider's tick in place of a seat's (stepSoldier).
 	void rideParachute(Player& player, world::Object& soldier, Body& body, float seconds);

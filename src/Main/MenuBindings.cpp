@@ -304,7 +304,7 @@ void MenuBindings::finishJobs()
 {
 	for (int i = 0; i < 2000; ++i) {
 		if (!Job::running(m_onlineCheck) && !Job::running(m_transaction) && !Job::running(m_query)
-			&& !Job::running(m_joinProbe)) {
+			&& !Job::running(m_joinProbe) && !Job::running(m_lanQuery)) {
 			return;
 		}
 		std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -609,9 +609,9 @@ std::vector<std::vector<std::string>> MenuBindings::statsRows(int category)
 		std::snprintf(buffer, sizeof(buffer), "%.*f", decimals, value);
 		return std::string(buffer);
 	};
-	const long long seconds = static_cast<long long>(s.timePlayed);
-	char played[32];
-	std::snprintf(played, sizeof(played), "%lld:%02lld:%02lld", seconds / 3600, seconds / 60 % 60, seconds % 60);
+	// Time played as the stats rows show times (0x1007ada0: TEXT_timeformat_hhmm).
+	const std::string played =
+		hoursMinutesFromSeconds(m_natives.localize("TEXT_timeformat_hhmm"), static_cast<int>(s.timePlayed));
 	const double minutes = s.timePlayed / 60.0;
 	const auto per = [&](double count, double over) { return over > 0 ? count / over : 0.0; };
 	std::vector<std::pair<const char*, std::string>> rows;
@@ -1390,6 +1390,21 @@ void MenuBindings::bindLists()
 		const int shown = std::max(1, list.visibleRows(vm));
 		list.firstIndex = std::clamp(list.firstIndex, 0, std::max(0, count - shown));
 		list.populate(vm);
+		if (list.listId == "serverExtendedInfo" && list.holder) {
+			// 0x10068380: bg1 shows on the even rows of a known server's
+			// rules; no row is clickable.
+			const std::string prefix = list.rowPrefix(vm);
+			for (int i = 0; i < list.visibleRows(vm); ++i) {
+				const Value row = vm.getMember(Value(list.holder), prefix + std::to_string(i));
+				const int index = list.firstIndex + i;
+				const Value bg = vm.getMember(row, "bg1");
+				if (bg.isObject()) {
+					vm.setMember(bg, "_visible", Value(index < m_serverInfoRows && index % 2 == 0));
+				}
+				vm.setMember(row, "isClickable", Value(0));
+			}
+			return;
+		}
 		if (list.listId == "awardProgress" && list.holder) {
 			// The rows' check mark and bar (0x1005f1e0).
 			const std::string prefix = list.rowPrefix(vm);
@@ -1484,6 +1499,16 @@ void MenuBindings::bindLists()
 			show(vm, list);
 			return Value(false);
 		}
+		if (list.listId == "serverExtendedInfo") {
+			// The server info popup's rules (0x10068150 / 0x10068080): the
+			// server its arguments name ("ip gameport queryport").
+			const std::string host = list.args.empty() ? std::string() : list.args[0];
+			const int port = list.args.size() > 1 ? std::atoi(list.args[1].c_str()) : 0;
+			m_serverInfoRows = serverInfoRows(host, port);
+			show(vm, list);
+			return Value(false);
+		}
+
 		// The BFHQ details page: its category list ("statsTypes", 0x10080cb0)
 		// and the category's rows ("stats" with "<category> 21").
 		if (list.listId.compare(0, 9, "selectBox") == 0 && !list.args.empty() && list.args[0] == "statsTypes") {
@@ -1499,6 +1524,22 @@ void MenuBindings::bindLists()
 			m_natives.setListRows("botSkill", ui::NativeRegistry::Rows {{m_natives.localize("HEADER_easy")},
 					{m_natives.localize("HEADER_normal")}, {m_natives.localize("HEADER_hard")}});
 			list.selectedIndex = 1;
+			list.releasePending = true; // +0x18
+		} else if (list.listId.compare(0, 9, "selectBox") == 0 && !list.args.empty() && list.args[0] == "displayModes") {
+			// The display modes' box (0x10065360 fills with 0x10065250): the
+			// mode in use (VideoSettings slot 0x80) chosen, +0x18 set.
+			const auto setting = m_settings.find("VideoSettings.Resolution");
+			const std::string current = setting != m_settings.end() ? setting->second.isString() ? setting->second.asString() : std::string()
+			                                                        : std::string("1280x720@60Hz");
+			const auto& modes = m_natives.listRows("displayModes");
+			list.selectedIndex = -1;
+			for (size_t i = 0; i < modes.size(); ++i) {
+				if (!modes[i].empty() && modes[i][0] == current) {
+					list.selectedIndex = static_cast<int>(i);
+					break;
+				}
+			}
+			list.releasePending = true;
 		} else if (list.listId.compare(0, 9, "selectBox") == 0 && !list.args.empty() && list.args[0] == "gameModes") {
 			// The game modes' select box (0x100690b0; filled by 0x10069160,
 			// rows drawn by 0x100689a0): "gameModes <rows> <all>" lists the
@@ -1508,7 +1549,10 @@ void MenuBindings::bindLists()
 			// TEXT_<id> when that has a translation, else its name in the mod
 			// (ModInfo slot 0x48) unless "N/A", else its id. Chosen: "All"
 			// with the row, else the server settings' mode (gpm_cq without
-			// one).
+			// one), found before "sp1" and "gpm_sp" leave the list (so a
+			// mode after a removed one is chosen one row late, as in the
+			// original). +0x18 is set: the chosen row's rowRelease then
+			// gives the box its text (NativeList::populate).
 			const int all = list.args.size() > 2 ? std::max(0, std::atoi(list.args[2].c_str())) : 0;
 			const std::vector<std::string> modes = selectBoxGameModes();
 			ui::NativeRegistry::Rows rows;
@@ -1529,9 +1573,11 @@ void MenuBindings::bindLists()
 			if (all == 0) {
 				const auto setting = m_settings.find("ServerSettings.GameMode");
 				std::string current = setting != m_settings.end() && setting->second.isString() ? setting->second.asString() : std::string();
-				const auto chosen = std::find(modes.begin(), modes.end(), current.empty() ? std::string("gpm_cq") : current);
-				list.selectedIndex = chosen == modes.end() ? -1 : static_cast<int>(chosen - modes.begin());
+				const std::vector<std::string> scanned = allGameModes();
+				const auto chosen = std::find(scanned.begin(), scanned.end(), current.empty() ? std::string("gpm_cq") : current);
+				list.selectedIndex = chosen == scanned.end() ? -1 : static_cast<int>(chosen - scanned.begin());
 			}
+			list.releasePending = true;
 		}
 		show(vm, list);
 		return Value(false); // the others are filled at once
@@ -1989,6 +2035,21 @@ void MenuBindings::bindServerSettings()
 	n.setFunction(kVideoSettings, "getSelectedResolution", [this](Interpreter&, const Args&) {
 		return m_settings.count("VideoSettings.Resolution") ? m_settings.at("VideoSettings.Resolution") : Value("");
 	});
+	// setGameModeIndex (0x10057870): the create-server page's choice by its
+	// row in the game modes' box (sp1 and gpm_sp left out). The mode becomes
+	// GameServerSettings' (slot 0x4c, then 0x18) and SwiffHost's filter mode
+	// (slot 0x170, 0x00479e80: the available maps follow it).
+	n.setFunction(kServerSettings, "setGameModeIndex", [this](Interpreter& vm, const Args& args) {
+		const std::vector<std::string> modes = selectBoxGameModes();
+		const int index = static_cast<int>(vm.toNumber(arg(args, 0)));
+		if (index >= 0 && index < static_cast<int>(modes.size())) {
+			const std::string& mode = modes[static_cast<size_t>(index)];
+			m_settings["ServerSettings.GameMode"] = Value(mode);
+			m_filterGameMode = mode;
+			showMapLists();
+		}
+		return Value();
+	});
 	// The anti-cheat (PunkBuster) is not part of the rewrite: always off.
 	for (const auto& [object, member] : std::vector<std::pair<const char*, const char*>> {
 			 {kGeneralSettings, "getAllowPunkBuster"}, {kServerSettings, "getSvPunkBuster"}}) {
@@ -2324,12 +2385,40 @@ double MenuBindings::setting(const std::string& name, double fallback) const
 	return fallback;
 }
 
-std::vector<std::string> MenuBindings::selectBoxGameModes() const
+std::string MenuBindings::hoursMinutes(std::string format, int minutes)
+{
+	const auto replace = [&format](const char* marker, int value) {
+		if (const size_t at = format.find(marker); at != std::string::npos) {
+			char digits[16];
+			std::snprintf(digits, sizeof(digits), "%02d", value);
+			format.replace(at, 4, digits);
+		}
+	};
+	replace("#HH#", minutes / 60);
+	replace("#MM#", minutes % 60);
+	return format;
+}
+
+std::vector<std::string> MenuBindings::allGameModes() const
 {
 	std::vector<std::string> modes;
 	for (const MenuMap& map : m_maps) { // sorted by level, then mode
 		if (!map.gameMode.empty() && std::find(modes.begin(), modes.end(), map.gameMode) == modes.end()) {
 			modes.push_back(map.gameMode);
+		}
+	}
+	return modes;
+}
+
+// The modes the create-server page offers: the mod's without the first
+// "sp1" and the first "gpm_sp" (0x10069160's fill, and setGameModeIndex
+// 0x10057870, take them out the same way).
+std::vector<std::string> MenuBindings::selectBoxGameModes() const
+{
+	std::vector<std::string> modes = allGameModes();
+	for (const char* hidden : {"sp1", "gpm_sp"}) {
+		if (const auto it = std::find(modes.begin(), modes.end(), hidden); it != modes.end()) {
+			modes.erase(it);
 		}
 	}
 	return modes;

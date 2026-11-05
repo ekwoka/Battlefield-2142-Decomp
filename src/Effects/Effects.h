@@ -259,9 +259,15 @@ struct ParticleTemplate {
 	// pivotOffset (+0x1b0 / +0x1b4, slot 0x1c8): the quad's centre moved by
 	// this many half-sizes off the particle (0/-0.5: standing on it).
 	float pivot[2] = {0, 0};
-	// drawOrder Back / Front (the name's sense; its use not decoded): Front
-	// draws the newest particles over the older, Back under them.
-	bool drawNewestFirst = false;
+	// drawOrder Front / Back (BF2142.exe 0x006232e0: the index in {Front,
+	// Back} to RendDX9's template slot 0x1a8, the sprite template's +0x80,
+	// 0x10139aa0): the sprite collector (0x10130bd0) files a Back system's
+	// particles in the second batch list (+0xc20, 256 systems) and a Front
+	// one's in the first (+0x20), and the frame (0x10131b70) draws the Back
+	// list before the Front one. Each system's particles go back to front
+	// by their squared distance to the camera (+0x14, the radix sort
+	// 0x1012f800) whichever its order.
+	bool drawBack = false;
 	// collisionEnable (+0xf0) with collisionSpeedAlongNormal / AlongPlane:
 	// world particles bounce off the ground (here the terrain under them,
 	// taken as flat: the original's system ground planes not decoded),
@@ -984,15 +990,18 @@ public:
 	template <class Draw>
 	void forEachGroup(const ParticleView& view, Draw draw, bool shimmer = false) const
 	{
-		for (const auto& emitter : m_emitters) {
-			const ParticleTemplate& t = emitter->particleTemplate();
-			if (t.mesh || t.trail || t.nonScreenAligned || t.heatShimmer != shimmer || !view.shows(t)) {
-				continue; // forEachMeshGroup, forEachWorldGroup
-			}
-			m_sprites.clear();
-			collect(*emitter, m_sprites, view);
-			if (!m_sprites.empty()) {
-				draw(emitter->particleTemplate().texture, emitter->particleTemplate().additive, m_sprites);
+		// The Back systems first, then the Front ones (0x10131b70).
+		for (const bool back : {true, false}) {
+			for (const auto& emitter : m_emitters) {
+				const ParticleTemplate& t = emitter->particleTemplate();
+				if (t.mesh || t.trail || t.nonScreenAligned || t.heatShimmer != shimmer || !view.shows(t) || t.drawBack != back) {
+					continue; // forEachMeshGroup, forEachWorldGroup
+				}
+				m_sprites.clear();
+				collect(*emitter, m_sprites, view);
+				if (!m_sprites.empty()) {
+					draw(emitter->particleTemplate().texture, emitter->particleTemplate().additive, m_sprites);
+				}
 			}
 		}
 	}

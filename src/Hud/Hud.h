@@ -29,8 +29,8 @@
 // slide nodes in and out and set their blend; object markers
 // (Bf2ObjectMarkerNode, 0x007e6880) mark the lock-on weapons' targets the
 // game hands in (setMarkerSource).
-// What is approximate: the corner roots' positions (the engine places them
-// by the screen size); see docs/engine.md "HUD nodes" for the rest.
+// The corner roots' places come from the "Ingame" MemeFile (Hud.cpp's
+// kRoots); see docs/engine.md "HUD nodes" for the rest.
 #pragma once
 
 #include "HudFont.h"

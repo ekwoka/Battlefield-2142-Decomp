@@ -3935,6 +3935,36 @@ TEST(Bots_ReviveSkipsDrownedBodies)
 	CHECK(game::bodyUnderWater(0.4f, 0, -0.8f));
 }
 
+// The assist behaviours' upright test (0x10070200 / 0x10071a10 /
+// 0x10073360): the target's up within 45 degrees of the terrain's normal.
+TEST(Bots_AssistTargetsStandUpright)
+{
+	const auto unit = [](const physics::Vec3& v) { return v * (1 / std::sqrt(physics::lengthSquared(v))); };
+	CHECK(game::uprightOnGround({0, 1, 0}, {0, 1, 0}));
+	CHECK(game::uprightOnGround({0, 1, 0}, unit({0, 1, 0.99f}))); // a 44.7-degree slope
+	CHECK(!game::uprightOnGround({0, 1, 0}, unit({0, 1, 1.02f}))); // past 45 degrees
+	CHECK(!game::uprightOnGround({1, 0, 0}, {0, 1, 0}));  // a vehicle on its side
+	CHECK(!game::uprightOnGround({0, -1, 0}, {0, 1, 0})); // on its roof
+}
+
+// BBChange's room ahead of a fixed-wing seat (0x1006c3e0, 0x100ff690):
+// +-0.6 of the width and height, from 0.6 lengths behind to 12 ahead, level
+// on the heading; a sphere counts by its radius.
+TEST(Bots_FixedWingSeatNeedsRoomAhead)
+{
+	const physics::Vec3 o {0, 0, 0}, ahead {0, 0.5f, 1}; // nose up: the box stays level
+	CHECK(game::sphereInRoomBox(o, ahead, 10, 4, 20, {0, 0, 239}, 0));
+	CHECK(!game::sphereInRoomBox(o, ahead, 10, 4, 20, {0, 0, 241}, 0));
+	CHECK(game::sphereInRoomBox(o, ahead, 10, 4, 20, {0, 0, 241}, 2));
+	CHECK(game::sphereInRoomBox(o, ahead, 10, 4, 20, {0, 0, -11.9f}, 0));
+	CHECK(!game::sphereInRoomBox(o, ahead, 10, 4, 20, {0, 0, -12.1f}, 0));
+	CHECK(!game::sphereInRoomBox(o, ahead, 10, 4, 20, {6.1f, 0, 50}, 0));
+	CHECK(!game::sphereInRoomBox(o, ahead, 10, 4, 20, {0, 2.5f, 50}, 0));
+	// Turned to +x: the box runs along x.
+	CHECK(game::sphereInRoomBox(o, {1, 0, 0}, 10, 4, 20, {200, 0, 0}, 0));
+	CHECK(!game::sphereInRoomBox(o, {1, 0, 0}, 10, 4, 20, {0, 0, 200}, 0));
+}
+
 // The AI's clock seed (0x100309a0 with the word 0): the game clock's
 // seconds x 1e6, rounded, the low 32 bits; the tests' word repeats.
 TEST(Bots_SeedFromTheClock)

@@ -507,14 +507,22 @@ bool parseStrikeFire(const GameEvent& e, StrikeFireInfo& out);
 // 0x005127f0 → the client's spawn manager slot 0x44) and
 // kEvRemoveSpawnGroup (0x3a; read 0x00512880, written 0x005128e0, handled
 // 0x00512970 → slot 0x48 with the id): a spawn group the spawn screen
-// offers: its id (8 bits), team (4), three bits (+0x14..+0x16) and two
-// bytes (+0x17, +0x18) whose meanings weren't traced, and the ghost of the
-// object it is at (16 bits: a control point, or a vehicle carrying a
-// SpawnPoint).
+// offers: its id (8 bits), team (4), three bits and two bytes, and the
+// ghost of the object it is at (16 bits: a control point, or a vehicle
+// carrying a SpawnPoint). The server's sender (0x00632e50, the constructor
+// 0x00512570) fills the bits and bytes from the group (SpawnManager.cpp):
+// +0x14 always 0 (the client passes it to the group's slot 0x24), +0x15 the
+// group's +0x8e (its spawn points' slot 0x4c flag: set by the first point
+// added to an empty group that has it, cleared by a later one without,
+// 0x00634f10), +0x16 its +0x94 (it has spawn points), +0x17 / +0x18 its
+// place on the map, x and z (0x006329c0: (position + half the world) /
+// the world's GLSWorldSizeX / Z x 255, 0 and 255 past the edges). The
+// client's spawn manager (slot 0x44, 0x00634640) sets those on its group
+// and moves it to the place (byte / 255 x size - half).
 struct SpawnGroupInfo {
 	int id = 0, team = 0;
-	bool flag14 = false, flag15 = false, flag16 = false;
-	int byte17 = 0, byte18 = 0;
+	bool unused14 = false, pointFlag = false, hasPoints = false;
+	int mapX = 0, mapZ = 0;
 	uint16_t ghost = 0;
 };
 bool parseSpawnGroup(const GameEvent& e, SpawnGroupInfo& out);

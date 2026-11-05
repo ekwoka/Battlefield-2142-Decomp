@@ -3506,6 +3506,7 @@ int runGame(Options& options, Session& session)
 			menuBindings->setDemoDirectory((std::filesystem::path(profiles) / "Default" / "demos").string());
 		}
 		menuBindings->readFile = [&files](const std::string& path, std::string& text) { return files.readText(path, text); };
+		menuBindings->menuHost = &session.menuHost;
 		menuBindings->gameModeName = [&session](const std::string& mode) { return session.menuHost.gameModeName(mode); };
 		menuBindings->setPlayerName(options.playerName);
 #if BF2142_HAS_RENDERER
@@ -4277,8 +4278,10 @@ int runGame(Options& options, Session& session)
 		};
 		std::array<OrderMarker, 2> orderMarkers; // the leader's, the commander's
 		// A mesh object's render radius (RendDX9's instance slot 0x44,
-		// nametags::meshRenderRadius), for the order markers and the
-		// vehicles' name tags; read once a template. A marker's radius (its
+		// nametags::meshRenderRadius), for the order markers: the marker's
+		// height is taken as it is made, its instance still at LOD 0 (the
+		// LOD pick 0x100c3390 runs as it is drawn); read once a template.
+		// A marker's radius (its
 		// object's slot 0x8c, 0x006f7ec0): these Bundles have no collision
 		// mesh, so the render object's plus its geometry template's slot
 		// 0xe4 (the BundledMesh's 0x100a7da0: 0) and the object's slot 0x94
@@ -7763,7 +7766,28 @@ int runGame(Options& options, Session& session)
 		};
 		sources.objectEffects = &objectEffects;
 		nametags::Nametags nametags(files);
-		nametags.setRenderRadius(markerRadius); // the same render-object radius (0x100c7000)
+		// The vehicles' render LODs for their tags' height (0x100c7000 at the
+		// LOD 0x100c3390 picks; read once a template).
+		std::map<std::string, nametags::MeshLods> tagLods;
+		nametags.setMeshLods([&tagLods, &geometries, &files, &rendererSettings, &qualitySettings](const world::ObjectTemplate& t) {
+			auto known = tagLods.find(t.name());
+			if (known == tagLods.end()) {
+				nametags::MeshLods lods;
+				const geom::GeometryTemplate* geometry = geometries.find(t.geometry());
+				std::vector<uint8_t> data;
+				if (geometry && files.readFile(geometry->path, data)) {
+					if (const std::optional<geom::MeshFile> mesh = geom::parseMesh(data, geometry->kind)) {
+						const scene::RendererSettings& r = rendererSettings;
+						const float scale = geometry->kind == geom::MeshKind::Skinned ? r.skinnedMeshLodDistanceScale
+							: geometry->kind == geom::MeshKind::Bundled            ? r.bundleMeshLodDistanceScale
+																				   : r.staticMeshLodDistanceScale;
+						lods = nametags::meshLods(*mesh, geometry->lodDistances, scale * qualitySettings.geometryLodFactor());
+					}
+				}
+				known = tagLods.emplace(t.name(), std::move(lods)).first;
+			}
+			return &known->second;
+		});
 		nametags.setIcons(&g_tagIcons);
 		nametags.setFog(lights.fogStartEndAndBase); // the enemies' fog fade (0x100f09b0)
 		nametags.setWorld(g_remoteHud); // a joined game's: the server's players and requests
