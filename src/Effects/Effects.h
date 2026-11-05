@@ -307,6 +307,10 @@ struct EmitContext {
 	int* poolUsed = nullptr; // sprites alive in all systems
 	// The ground's height at a point (collisionEnable); none if empty.
 	std::function<float(float x, float z)> groundHeight;
+	// The frames drawn so far (the renderer's count, DAT_101f8e58 slot
+	// 0x60; EffectManager::markViewed counts them): 0 while none is drawn,
+	// so a run that draws nothing never holds an emission.
+	uint32_t frame = 0;
 };
 
 // A particle system placed in the world.
@@ -334,6 +338,15 @@ public:
 	// emit speed scale and age scale: the instance's +0x164, +0x138, +0x13c
 	// and +0x12c, set by Wheel/AirDraftEffectBundle each tick, 0x00618bc0..).
 	float alphaIntensity = 1, emitScale = 1, speedScale = 1, timeScale = 1;
+	// The bundle's start age (modifier 4; BF2142.exe 0x00618d00 -> the
+	// system's slot 0x80: RendDX9 0x1013ee80 sprite +0xd8, 0x10143ee0 mesh
+	// +0xe0, 0x1013a2b0 trail +0xe0, 0x1013c690 non-screen-aligned +0xd8):
+	// every particle or point born after it is set starts this many seconds
+	// old (the births 0x1013fdc0, 0x10145660, 0x1013acb0, 0x1013d840: age
+	// and age / life from it). Shipped: the land vehicles' damage smoke and
+	// fire (StartAgeFromSpeed 0/8..0/12), so a moving wreck's smoke is born
+	// older; the amphibious wake's range.
+	float startAge = 0;
 	// The emit direction's scale (the system's slot 0x70, RendDX9 0x1013e8b0
 	// / 0x10143950 / 0x1013bfe0: +0x150 sprite, +0x148 mesh, +0x168 trail),
 	// applied to emitDirection axis by axis (0x1013e930). Only the wheel
@@ -350,6 +363,23 @@ public:
 	// Whether it emits at all (started within the view distance and of a
 	// quality the manager draws).
 	bool active() const { return m_active; }
+	// The frame of its last draw (sprite +0x124, trail +0x120, mesh +0x124;
+	// stamped by the start 0x1013fb30 / 0x10144ab0 / 0x1013aa00 and by the
+	// draws 0x10131680 / 0x10133920 / 0x10134b90 / 0x1013d570 when its box
+	// meets the view frustum). Its emission (0x101403b0, 0x1013b4b0,
+	// 0x10144d90, 0x1013e070) does nothing once the renderer's frame count
+	// (DAT_101f8e58 slot 0x60) is more than 60 past it: a system out of
+	// sight for 60 frames stops emitting, its clock running on, so that
+	// when it is seen again the missed time is emitted at once (up to its
+	// pool), as if it had never stopped. EffectManager::markViewed stamps it.
+	uint32_t lastSeenFrame = 0;
+	static constexpr uint32_t kUnseenFrames = 60; // 0x3c
+	// Whether it is out of sight long enough to hold its emission.
+	bool unseen(uint32_t frame) const { return lastSeenFrame + kUnseenFrames < frame; }
+	// The box its particles span (+0xfc..+0x110: their positions grown by
+	// the template's particleMaxSize, the system's place when it has none;
+	// 0x101407c0), as a centre and radius (0x1012ea80 / 0x1012ea30).
+	void bounds(Vec3& centre, float& radius) const;
 	// The distance LOD's emission scale now (+0x134).
 	float lodScale() const { return m_lodScale; }
 
@@ -357,6 +387,7 @@ public:
 	// in the anchor's space) and the system's place in the bundle.
 	uint32_t anchor = 0;
 	uint32_t tag = 0;
+	uint32_t bundle = 0; // the AttachedBundle it belongs to (0: none)
 	Vec3 mountPosition, localPosition;
 	Mat3 mountRotation, localRotation;
 
@@ -509,6 +540,13 @@ struct Decal {
 	// whose faces 0x10165f60 clips it to.
 	uint32_t surface = 0;
 	float age = 0; // seconds (RendDX9 0x10164f10; it goes at DecalManager.timeToLive)
+	// A static decal's id in its set (+0x1d, 1..255; 0 for the others).
+	// The add (DecalSet slot 4 0x10166410) puts a decal whose template
+	// isStatic in the set's second list (+0x2c, 0x10164710) under the set's
+	// next id (+0x30, back to 1 after 255) and returns it; that list is
+	// never aged nor cut to the ring's size, and only slot 5 (0x10164e70)
+	// takes one out, by its id. No shipped decal template sets isStatic.
+	uint8_t staticId = 0;
 	// The renderer's: the decal clipped to the terrain or its object's faces
 	// (clipDecal; in the object's space on a moving one), made the first
 	// time it is drawn; null until then.
@@ -752,9 +790,12 @@ public:
 	// false if there is no such template.
 	bool spawn(const std::string& name, const Vec3& position, const Mat3& rotation = {}, View view = View::Any);
 	// The same following an anchor: `position` and `rotation` are its place
-	// in the anchor's space, `tag` names it for stopAttached.
+	// in the anchor's space, `tag` names it for stopAttached. Unless
+	// `driven` is false (ObjectEffects drives its own), a bundle with
+	// speed mappings or speedFromPhysics follows the anchor's motion each
+	// update (stepAttachedBundles).
 	bool spawnAttached(const std::string& name, uint32_t anchor, const Vec3& position, const Mat3& rotation = {},
-		View view = View::Any, uint32_t tag = 0);
+		View view = View::Any, uint32_t tag = 0, bool driven = true);
 	// Moves an anchor (and what is attached to it).
 	void setAnchor(uint32_t anchor, const Vec3& position, const Mat3& rotation);
 	// Moves the bundles spawned with `tag` within their anchor (a turning part).
@@ -795,6 +836,13 @@ public:
 		std::function<physics::ContactMaterial(uint32_t piece, uint32_t surface)> material;
 	};
 	void setDebrisWorld(DebrisWorld world) { m_debrisWorld = std::move(world); }
+	// After a frame's view is known: one more frame drawn, and every system
+	// whose box `inView` (centre, radius) accepts is stamped as seen
+	// (Emitter::lastSeenFrame; RendDX9's draws 0x10131680, 0x10133920,
+	// 0x10134b90, 0x1013d570 stamp the systems they draw that meet the
+	// view frustum, 0x101a4720). Const as setCamera: the draw's bookkeeping.
+	void markViewed(const std::function<bool(const Vec3& centre, float radius)>& inView) const;
+	uint32_t framesViewed() const { return m_context.frame; }
 	void setCamera(const Vec3& position, float tanHalfFov) const
 	{
 		m_context.hasCamera = true;
@@ -860,6 +908,12 @@ public:
 	// isStatic): the rewrite's set is the object's decals' ownerDrawn.
 	bool spawnDecal(const std::string& name, const Vec3& position, const Vec3& normal, uint32_t object,
 		const Vec3& objectPosition, const Vec3& objectRotation);
+	// The id the last spawnDecal gave its decal (0x10166410's result: a
+	// static decal's id in its set, else 0).
+	uint8_t lastDecalId() const { return m_lastDecalId; }
+	// Takes a static decal out of an object's set (0: the world's) by its
+	// id (DecalSet slot 5, 0x10164e70); false if there is none.
+	bool removeStaticDecal(uint32_t object, uint8_t id);
 	// Drops an object's decals (the object is gone).
 	void dropDecals(uint32_t object);
 	static constexpr size_t kMaxDecals = 256;
@@ -1022,6 +1076,8 @@ private:
 	void emitDebris(LiveDebrisEmitter& emitter, float lead);
 	std::map<const world::ObjectTemplate*, DecalTemplate> m_decalTemplates;
 	std::vector<Decal> m_decals;
+	std::map<uint32_t, uint32_t> m_staticDecalIds; // each set's +0x30, by object (0: the world's)
+	uint8_t m_lastDecalId = 0;
 	game::Random m_decalRandom {0x2d5c1e37};
 	mutable std::vector<MeshSprite> m_meshSprites;
 	std::vector<std::pair<std::string, std::vector<MeshSprite>>> m_placedMeshes;
@@ -1032,6 +1088,26 @@ private:
 	std::map<const world::ObjectTemplate*, std::unique_ptr<ParticleTemplate>> m_particleTemplates;
 	std::vector<std::unique_ptr<Emitter>> m_emitters;
 	std::map<uint32_t, Anchor> m_anchors;
+	// A bundle spawned on an anchor whose tick (BF2142.exe 0x0061a760) sets
+	// its systems from its motion: the modifiers (0x00618e30) and the
+	// speedFromPhysics velocity (0x00618ae0). The armour's damage smoke and
+	// fire (armor.addArmorEffect) are such bundles: their alpha, emission,
+	// speed, age scale and start age grow with the vehicle's speed.
+	struct AttachedBundle {
+		uint32_t id = 0, anchor = 0, tag = 0;
+		const world::ObjectTemplate* bundle = nullptr;
+		Vec3 mountPosition;
+		Mat3 mountRotation;
+		bool speedFromPhysics = false;
+		bool hasLast = false;
+		Vec3 lastPoint, lastPointVelocity, lastOrigin;
+	};
+	std::vector<AttachedBundle> m_attachedBundles;
+	uint32_t m_nextBundle = 0;
+	void stepAttachedBundles(float seconds);
+	// spawnDecal into the set of `set` (an object's id, 0 the world's).
+	bool addDecal(const std::string& name, const Vec3& position, const Vec3& normal, uint32_t surface, uint32_t set);
+	uint8_t nextStaticDecalId(uint32_t object);
 	std::vector<StartedSound> m_startedSounds;
 	mutable std::vector<Sprite> m_sprites;
 	mutable const scene::ParticleSystemSettings* m_settings = nullptr;

@@ -1471,8 +1471,23 @@ ghosts' bundle turns (`GameWorld::setRemotePartPose` from
 `RemoteWorld::partPose`): a seat riding another seat's turret turns with
 that seat's yaw bundle (its seatMount), and the hands take the grips
 (`seatIkTargets` with the ghosts' parts) (`RagDoll_RemoteSoldierSeatedAndOnLadder`,
-`RagDoll_RemoteSeatedTurretAndGrips`). Not done: a bone part's mount (the
-mechs' seats), whose bone pose isn't on the client.
+`RagDoll_RemoteSeatedTurretAndGrips`). A bone part's mount (the mechs'
+seats on the torso): the exe's client runs every object's skeleton helper
+in its own update (the object base's `0x0063d5b0` → `0x0063d2f0`, then
+`0x0063d470` poses the boneIndex parts), so the walker's bundle animation
+plays on the client too. The rewrite's client feeds it from the ghost
+(`GameWorld::animateRemoteVehicle`, called by the client loop for every
+vehicle ghost with a bundleAnimationSystem): the ghost's velocity against
+its heading, its turn rate from the yaw's change, 0x800 while a player
+sits in one of its seats (the client's round has no occupants of its
+own, so the Body's system took "unmanned"); a ghost without a Body gets
+an ObjectAnimation of its own. The bone parts are then posed (partBone):
+the legs walk and the torso stands, and `animateRemoteSeated` turns the
+seated soldier by the bone part's mount as well as the turret's
+(`boneMount`, seatMount's bone half) (`Vehicles_RemoteMechPosesItsBoneParts`).
+Not on the client: the legs' own messages (walking 0x80 and the turns,
+from the MechLegs state, 0x00650530), which no ghost carries; the speed
+and turn drive the system's value triggers instead.
 
 **ToggleCameraComp** (template `0x005db120`; changeCameraId `+0x14` −1,
 changeCameraViewMode `+0x18` 2, startCameraId `+0x1c` −1,
@@ -1739,9 +1754,16 @@ amplitude goes towards amplitude / (zoomDamping × 6,
 The rewrite applies them to its first-person view (see below); `hit` is
 never read by the soldier.
 
-Not rewritten: the per-instance time override (system `+0x84`/`+0x88`),
-the vehicles' (the mechs') effect events. The first-person weapon's are
-played (see below).
+The per-instance time override (system `+0x84`/`+0x88`, slot 0x48
+`0x008bbab0`: each update hands it to the queued instances, `0x008baed0`,
+and the drawing samples each clip at its length times it, `0x008c2a90`) is
+done (`AnimationState::setTimeOverride`; the ladders' climb, `0x0059f380`).
+So are the mechs' effect events: the walker's own system fires `effect:1..4`
+into the object's tree (above, "The walker's own animation system";
+`GameWorld::takeObjectEffectEvents`). The first-person weapon's are played
+(see below). (coverage-7's P5 cited this paragraph when it still listed
+both as not rewritten; the particle systems' own per-instance time, the
+bundles' start age, is in "Bundle modifiers" below.)
 
 ### The hands' IK (`ik.*`)
 
@@ -2562,6 +2584,15 @@ terrain), `pickUndergrowthLights` / `applyUndergrowthLights` and
 NonScreenAlignedParticleSystem's particles are squares lying across the
 system's y axis (its x and z axes; NonScreenAlignedParticles.fx displaces
 each corner by world vectors the CPU gives): water ripples, ground rings.
+With forceToWaterSurface (the template's +0xa4, slot 0x124) the system's
+world frame (+0x74, composed by `0x1013c800` from its local frame and its
+parent's) is stood upright by `0x100989f0(position, (0, 1, 0), z row)`:
+x = normalize(z × up), y = x × z, z kept as it was (not levelled nor
+normalised; within 0.9999 of up the rotation is the identity; x comes out
+mirrored against the identity, z = (0, 0, 1) giving x = (−1, 0, 0)). The
+bullet and explosion hits' ripples on water, the swimmers' and the sinking
+vehicles' rings and the amphibious wake's cavitation (15 shipped systems)
+lie level whatever the hit's frame (`Emitter`'s frameFor).
 A TrailSystem (Trail.fx) leaves a point at emitFrequency while its system
 moves faster than `minTrailVelocity` and keeps doing so as long as an
 anchor carries it. The points then move (`0x1013a600`, from the
@@ -2703,8 +2734,14 @@ is clear (the ageing `0x10164f10` copies `+0x19` into it: the owner unseen
 since the last draw) unless the decal template's byte `+0x20` is set:
 `isStatic` (exe `0x0052cd51` → the template's slot 10, `0x10167b70`)
 (`EffectManager::spawnDecal` on an object, by its decals' `ownerDrawn`).
-Not done: the static decals' second list (+0x2c, never aged, removed by
-id through slot 5 `0x10164e70`).
+*The static list.* A decal whose template isStatic goes to the set's
+second list (+0x2c, `0x10164710`) under the set's next id (+0x30, 1..255,
+back to 1 after 255; the decal's byte +0x1d), which the add returns (the
+ring's decals get 0, `0x10164740`); the list is never aged nor cut to the
+ring's size, and only slot 5 (`0x10164e70`) takes a decal out, by its id.
+No shipped decal template sets isStatic (all ten have 0), and no caller of
+slot 5 was found in BF2142.exe. Rewritten: `Decal::staticId`,
+`EffectManager::lastDecalId` / `removeStaticDecal`.
 
 **Turning parts.** A vehicle's moving parts (RotationalBundle, Engine,
 Wing: rotors, thrusters, flaps, turrets and the like) are drawn turned by
@@ -2768,8 +2805,22 @@ transparency and size graphs), randomSize `+0x1b8`, randomIntensity
   QualityLevel is above the manager's `qualityLevel` (`+0x8cb4`); emitDelay,
   emitTime and preWarmTime are taken; a system beyond the manager's view
   distance of the camera doesn't emit (`+0x128`), nor one unseen for 60
-  frames (`0x101403b0`: the frame of its last draw `+0x124`; the rewrite
-  checks the distance only).
+  frames (`0x101403b0`: the frame of its last draw `+0x124` against the
+  renderer's count, `DAT_101f8e58` slot 0x60). The draws (`0x10131680`
+  sprites, `0x10134b90` meshes, `0x10133920` trails, `0x1013d570`
+  non-screen-aligned) stamp a system that is emitting or has particles
+  when its box (`+0xfc`: the particles grown by particleMaxSize, the
+  system's place with none) meets the view frustum (`0x101a4720`), unless
+  its owner object's instance has bit 0 of `+0x14`; the start stamps it
+  too. The emission returns before advancing its clock (`+0xf0`), so when
+  the system is seen again the missed time is emitted at once, up to the
+  pool (each particle moved on for its share of the time, the lerp of its
+  place unclamped back along the last move). The mesh (`0x10144d90`,
+  `+0x124`) and trail (`0x1013b4b0`, `+0x120`, after its speed test)
+  emissions do the same. Rewritten: `Emitter::lastSeenFrame` / `unseen`,
+  `EffectManager::markViewed` (LevelRenderer, after the frame's draw list);
+  a birth too old to live is skipped rather than lerped far back, and the
+  owner's hidden bit isn't read. A run that draws no frame never holds.
 - *update* (slot 0xa0, `0x101407c0`): the time is scaled by the
   instance's `+0x12c` (the bundle's age scale) and cut to the longest
   life; the particles move in steps of 0.01 s (`DAT_101f7030`, the
@@ -6667,13 +6718,29 @@ one.
 ### Text and the scoreboard
 
 Text ids such as `HUD_TEXT_MENU_SCORE_PLAYERS` are looked up in
-`Localization/strings.csv` (`0x00405360`: the profile's `GSLanguage`,
-falling back to English; `strings_patch.csv`, the patch installer's
+`Localization/strings.csv` (`0x00405360`: the registry's `Language`,
+English by default, kept as the `GSLanguage` setting; English when the
+file has no such column; the rewrite takes `--language`, and
+`hud::language()` keeps it for the fonts and `Locale.getLanguage`; `strings_patch.csv`, the patch installer's
 strings, is never read). The file is UTF-16LE, one row per line with
 tab-separated columns: the id, then one column per language named in the
 header row. Values may be quoted. Ids ignore case: the lexicon upper-cases
 them when it stores and when it looks up (`0x0065b2c0`), and an id seen
 twice keeps its first text (`0x006956f0`). This is rewritten in `src/IO/Localization`.
+
+The fonts are per language: the `*Local*` HUD fonts exist only in
+`Fonts/<language>/` (and `Fonts/<language>/800/` for 800 x 600), the
+others also in `Fonts/` and `Fonts/800/`, and their glyphs are by Unicode
+code point (Chinese_Simplified's hudFontLocalBold_9 has 1,447, up to the
+0x9xxx ideographs). The HUD reads its text as UTF-8 (`hud::nextCode`: a
+valid UTF-8 sequence is one code point, a lone byte stays itself, for the
+lists' `\xa7` font switch and Latin-1 names), and looks for a font in the
+language's folders first, then English's; the menus' engine fonts
+(SwiffRender's `0x10185e90`) do the same (`Hud_NonEnglishTextHasGlyphs`:
+every character of a sample of German, Russian, Chinese_Simplified and
+Polish strings is a glyph of that language's font). Not checked: the
+menus' own SWF fonts in those languages, and RendDX9's font path for the
+console (`0x1017af30`).
 
 The scoreboard (`ScoreboardShow`, menu state 0xd in `0x0079ab90`) is built
 from list nodes. Each node names a data source with `setListNodeData`:
@@ -8962,8 +9029,18 @@ while they have the keys. `src/Main/HudMenusChat`:
   `0x007c7520`). The host's own player has a vote object too: HostedGame
   hands it the replies for everyone and those for a player no client has
   (`onVoteReply`), and its map votes go to the server's votes as a
-  client's Vote event would (`localVote`, the sender its player). Not
-  done: the kick vote's start from the scoreboard's Manage tab.
+  client's Vote event would (`localVote`, the sender its player). The
+  kick vote's start from the scoreboard's Manage tab (`Scoreboard.singleClick`
+  → `0x007bc590`, the clicked column's type 10 / 11): the vote object
+  (`0x00572320`), its gate (`0x005722e0`), and the start (`0x00573f20`:
+  nothing while a vote runs, `+4`; not oneself, not the host, not within
+  the wait, else the line; a client sends the Vote event, kind 2, a host's
+  own player's goes to its votes, the exe's local event 0/0xf). The
+  rewrite's players' lists carry the kick box (`kickbutton_up.tga`, column
+  8 at the tab's HUD_TEXT_MENU_SQUAD_MANAGE_KICKVOTE label; the player's id
+  moved to cell 9) on the other players' rows while ToggleManage is on, the
+  score columns blank there (`VoteMessages::mayStartKick`,
+  `HudVotes_ScoreboardKickStart`).
 - **Radio text** (`GameAudio::onRadioText`): a heard message's sample text
   (`0x0042e0c0` → `0x0042d7f0` → `0x0042bef0`) is a chat line with its
   sender (HUD slot `0x158` → ChatList `0x007b4cd0`) or a game line without
@@ -10003,8 +10080,13 @@ z: nearly along z for a drop). The server's spawn (`0x004bef90`) then
 makes the vehicle the point's slot 0x60 names at the soldier's spot and
 rotation (slot 0x58 the flag), seats the soldier in it (the game server's
 slot 0xa8, seat 0) and gives the pod's PlayerControlObject slot 0x178
-(`0x0059d2a0`, `+0x444`: its input mask) the point template's `+0x95`
-(1 by default; not rewritten). eu_pod_drop is a Parachute with isPod,
+(`0x0059d2a0`, `+0x444`: its input mask) the point template's `+0x95`,
+disablePodControls (executor `0x00552a2b`; 1 by default, ctor
+`0x00635590`; no shipped template sets it). The input filter
+`0x005ca2e0` reads it: on, the control object's inputs 0..3 (steering,
+pitch, roll, throttle) are zeroed, so a beacon's pod falls unsteered
+(`Pod::controlsOff`, from the beacon's SpawnPoint child; the Titans' and
+the APCs' launched pods keep their controls). eu_pod_drop is a Parachute with isPod,
 dontAllowExit and copySoldierRotationOnEnter: it falls (gravityModifier
 1.5) steered by its ForceObjects and lets the soldier out when it lands,
 as a launched pod (`GameWorld::startPod`, `stepPods`; about 6.5 s from
@@ -10224,9 +10306,10 @@ its own being taken and shells it with the artillery (slot `0x20`,
 `0x00896f00`: the tool event with rcType 1 and no sender, which
 `0x0050ee10` lets through) when no teammate is within 40 m of the spot,
 else an enemy human off the navigation mesh for over a minute, then
-waits 120 s (`0x1009c050`; see Bots, "AI commander"). The orbital
-strike (90 s), supply drop (35 s) and UAV (60 s) answer its squads'
-requests (`0x1009e200`, `0x1009e3e0`, `0x1009e500`).
+waits 120 s (`0x1009c050`; see Bots, "AI commander"). The artillery,
+the orbital strike (90 s), the UAV (35 s) and the supply drop (60 s)
+answer the squad leaders' requests (`0x1009e020`, `0x1009e200`,
+`0x1009e3e0`, `0x1009e500`; see Bots, "AI commander").
 
 Rewritten in `src/Game/Commander.cpp` (`GameWorld::setCommander`,
 `applyForCommander`, `answerCommanderOffer`, `resignCommander`,
@@ -10295,6 +10378,26 @@ opens the commander's screen (the full map and `CommanderShow`;
 `CommanderNo*Show`, `*Armor`, `*Reloading`, `*TimeUntilReloaded` and
 `*ShowFullStatus` come from `abilityState`, and the minimap shows the UAV,
 strikes on their way, supply crates and the squad's order.
+
+The map tab's mini-map (`dice::meme::Bf2MiniMenuMapNode`: factory
+`0x007e8fb0`, constructor `0x007e8a90`, vtable `0x009bb688`; the HUD
+script's `createMiniMapNode CommanderMapTabSelected CommanderMiniMap 6 0
+133 163`) is a map node of its own: the level's ingameMap.tga (event 8,
+`0x007e8910`) at zoom level 0 and half the map's alpha (`+0x714` 0,
+`+0x7b0` 0.5), the shown area filling the node, its draw `0x007e7a60`
+taking GLSWorldSizeX / Z and the layers by its flags. Players are untextured
+dots (`0x007e8320`): 2 pixels, 4 for the local player's squad, coloured by
+`0x007e7580` (the squad (0.4, 1, 0) from `0x00b3c360`, the team
+(0.254, 0.552, 0.89) and the enemy (0.87, 0.094, 0.094) from
+`0x00b3c260`, the leader and the local player white; the constants
+`0x00a0bb60`, `0x00a0be60`, `0x00a0bcf0`); the local player's mark is the
+zoom square (micromap_zoomSquare, 120 pixels, `0x007e7f30`) at the
+commander map's point, 120 / clamp(zoom / 2, 1, 100) a side by that map's
+zoom. A click inside (`0x007e7d00`, button 1) sends the commander's
+camera to the point (slot `0x398`). The rewrite: `HudManager::drawMiniMap`
+(node kind kMiniMap; `setMiniMapDots` from `updateMap`, the team's
+players), `miniMapWorldAt` for the click, which `commanderClick` turns
+into the CommanderCam (`Hud_CommanderMiniMapTab`).
 
 The screen's tabs (`CommanderMenu.toggleSquadTab`, `toggleMapTab`,
 `toggleCommanderToolsTab`: `0x007a9de0`, `0x007a9e50`, `0x007a9eb0`) flip
@@ -10438,8 +10541,9 @@ set, which needs `0x00430a00`: a GameSpyRanked server of gpm_cq / ti / sl
 / nv / ca with the settings' `+0x26d` (the online stats); offline it is
 never shown.
 
-Not done: the AI commander's answers
-to bot squad leaders (they send none), the marker's height from its geometry (`+0x8c` / 2 over the ground: the
+The AI commander's answers to the requests are under Bots ("AI
+commander"); bot squad leaders send none (AIDLL never calls the store).
+Not done: the marker's height from its geometry (`+0x8c` / 2 over the ground: the
 rewrite puts it on the ground).
 
 ## Titans (gpm_ti)
@@ -10610,8 +10714,43 @@ templates use them): 25 VehicleDestroyed, 26 VehicleDamage, 27
 VehicleRepair, 28 VehicleSpawn, 46/47 TitanPartDestroyed/Repaired (the
 consoles), 48/49 TitanCore*, 50/51 TitanWeapon* (the guns), 52/53
 GroundCannon* (the silos), 54 MissileDestroyed, 55
-CommanderAssetRepaired, 56 VehicleShieldDestroyed. VehicleDestroyed is
-raised for every destroyed vehicle.
+CommanderAssetRepaired, 56 VehicleShieldDestroyed (the host's table at
+`0x009fce60`, name and id pairs to 63; 64 ends it and is the component's
+"none", the template's default, ctor `0x00631ad0`: damage `+0xc`, destroy
+`+0x10`, repair `+0x14`, spawn `+0x18`, read through the component's slot
+0x38). VehicleDestroyed is raised for every destroyed vehicle.
+
+**The repair and destroy events.** `python.onRepairEvent` (setter
+`0x005518c5`, executor `0x00551983`, template `+0x14`) is read by the
+server game logic's heal `0x004bc410`: after the armour's heal (slot 0x48
+`0x00655a00`), when its state was 1 (wreck) and is 0 (alive) now, the
+nearest Python component up the tree (`0x004a5570`, the object's `+0x78`
+through the parents `+0x34`) raises its repair id with (object, repairer)
+(`0x004bb080`) unless its repair flag (`+0x11`, slot 0x48) is set; it
+then sets that flag (slot 0x44(1)) and clears the destroy flag (slot
+0x3c(0)). The damage path `0x005b7680` is the mirror: an armour alive
+before and a wreck after raises the object's own component's
+onDestroyEvent (`+0x10`) with (object, attacker) unless `+0x10` is set,
+sets it and clears the repair flag. So each goes once until the other has.
+Which of them can happen: the Titans' gun hubs (eu_aacannon /
+eu_groundcanone3 hubs, canBeRepairedWhenWreck 1: TitanWeaponDestroyed /
+Repaired) and the commander's assets (canBeRepairedWhenWreck 1,
+canBeDestroyed 0: CommanderAssetRepaired, no destroy id). The consoles'
+TitanPartRepaired (47) and the cores' TitanCoreRepaired (49) never go: a
+console's wreck can't be repaired (canBeRepairedWhenWreck 0) and the cores
+have canBeRepaired 0; the silos (52 / 53) have no armour; the Titan
+playtest/wake roots' VehicleRepair (27) would need the Titan's own armour
+healed (never, `0x00561d90`). The rewrite: the Titan parts are repair
+targets of the hubs and the repair tool (`applyAbility`'s scan takes
+`titanParts`; `GameWorld::healTitanPart`: the part's own canBeRepaired /
+canBeRepairedWhenWreck, out of the wreck its collision back,
+`0x00654120`'s repaired branch, and its seat's gun working again), the
+flags per part (`TitanPart::destroySent` / `repairSent`) and per object
+(`m_pythonSent`, `pythonWrecked` from `loseHitPoints`, `pythonRepaired`
+from `healHitPoints`); `GameWorld::repair` is the game logic's heal as an
+entry point (`Titan_GunHubsRepairedOutOfTheWreck`). Not hooked: the
+commander's supply crate's heal (Commander.cpp's mend), whose giver the
+crate doesn't know; scoringCommon.py's handler needs a player.
 
 **The interior.** The Titan's body carries its whole tree's soldier and
 projectile LODs, each face reporting its part; soldiers walk its decks and
@@ -10862,6 +11001,17 @@ The settings come from the game's own scripts: `aiSettings.*` in
 the level's `GameModes/<mode>/<size>/ai/StrategicAreas.ai`. Without those
 scripts the shipped values are assumed: the built-in rifle stand-in and
 one area per control point, each a neighbour of every other.
+
+Every random draw of the AI comes from one generator, AIRandom
+(`DAT_101394cc`, src/AI/Random): made at the AI's start (0x10001740 →
+0x100308a0) and seeded once (0x100309a0) from the clock x 1e6 through a
+Park-Miller run (0x10030810, x 630360016 mod 2^31 − 1, filling the 624
+words); a Mersenne twister (refill 0x100308f0, word 0x10046770, U[0, 1)
+0x10046a50) whose tempering masks are DICE's (`(y & 0x56b64a) << 7`,
+`(y & 0xffffb716) << 15`), not MT19937's. The bot names' keys draw from
+it as AIDefault.ai runs, the bots, squads, SAI and AI commander after.
+The rewrite seeds it from `BF2142_BOT_SEED`, else a fixed word in place
+of the clock, so a run repeats.
 
 The AI templates name, per seat (`ObjectTemplate.aiTemplate` on the
 PlayerControlObject), the equipment type whose behaviours a bot there
@@ -11436,7 +11586,23 @@ vehicle's riders as hit.
   and its strategic ones its kit's kitTemplate's (the one its kit's AI
   template names, 0x0088c0d0; kitTemplate.create name kitType, vtable
   0x009d5d68). `BotManager::unitStrengths`, `unitAiOf` (cached per
-  template).
+  template). The object a bot of the side controls (its soldier on foot,
+  its seat aboard) counts 4/3 of its basicTemp: bot slot 8 (0x10098200,
+  vtable 0x10118050, run by Bot::think 0x10099280 when the controlled
+  object changes and by the man down, death and spawn events) multiplies
+  the side's AI object's +0x14 of the object it leaves by 0.75 and of the
+  one it takes by 1.3333334 (it also resets the path follower and clears
+  the inputs, as the rewrite's seat changes do).
+- **Step 1's strength sums** (0x1009ee00): over the side's knowledge,
+  each unit's eight battle / strategic strengths x certainty into a
+  friendly (+0x1ac, counts +0x1cc) or enemy (+0x16c, counts +0x18c)
+  total, then every total over 0.001 halved: a running sum that decays
+  by half each SAI update. Read only through the SAI's slots 11..14
+  (0x1009bd70..0x1009bda0), which no AIDLL code calls through an SAI
+  pointer (the courier's SAI calls are other slots) and BF2142.exe can't
+  reach; the conditions that might (createHomogenous /
+  HeterogeneousCondition) aren't in any shipped .ai file, whose four
+  conditions are constant. Not rewritten: inert.
 - **Assignment:** the best NumberOfAttacks and NumberOfDefences areas
   (0x100a21a0, 0x100a2630) get squads, nearest first, until each has its
   required strength: the enemies' strategic strengths (each rounded; index
@@ -11491,7 +11657,32 @@ vehicle's riders as hit.
   0x1008a3b0, refreshed each time the squads' round robin wraps: humans
   alive, up and on foot whose position isn't on their map). At most every
   120 s and not before 120 s. Each strike goes to the squad manager
-  (0x10088040, see Squads).
+  (0x10088040, see Squads). The look itself waits 10 s (+0x98) and is
+  only made with the artillery standing (IBFCommander 0x34 / 0x38: an
+  asset not a wreck) and its clock (+0x78) passed.
+- **Requests** (`BotManager::answerRequests`): a squad leader's request
+  stored by the game (0x004c5720, where the AI runs and the squad has a
+  leader) is posted as AI event 3/0xf (team, squad, point), which the
+  AI's event listener (0x00894860) hands by kind to IAIEventCourier slots
+  24..27 (0x1004e6e0..0x1004e7a0) and so to the team's SAI (vtable
+  0x10118480 slots 20..23). Only humans request: AIDLL never calls the
+  store. Without a human commander the SAI answers at once on its four
+  clocks (+0x78 artillery 120 s, +0x80 orbital strike 90 s, +0x90 UAV
+  35 s, +0x88 supplies 60 s; the constructor 0x100a39c0 and a commander
+  leaving, 0x1009bcd0, start them at those times): artillery
+  (0x1009e020) and orbital strike (0x1009e200) need their asset standing
+  (IBFCommander 0x34/0x38, 0x3c/0x40); clock passed, the tool at the
+  request's point (IBFCommander 0x20 0x00896f00, 0x24 0x00896f80, 0x28
+  0x00897000 the UAV, 0x2c 0x00897070 the drop; each takes the squad's
+  request of its kind off) and the clock restarted; else a turn-down
+  queued 2 + 3U s on (+0xa0) that the SAI's update (slot 24, 0x1009ce20,
+  first in 0x100a2dd0) says in the commander's voice on the AI's machine
+  and takes off: type 0 `supply_deny` (0x00896d10, kind 3), 1
+  `artillery_deny` (0x00896b10, kind 0), 2 `artillery_unavailable`
+  (0x00896c30, kind 0; an asset gone), 3 `uav_deny` (0x00896df0, kind
+  2). The orbital strike's turn-downs are the artillery's (its line, and
+  the squad's artillery request taken off, its own left standing), as in
+  the original. A commander coming drops the queue.
 
 ### Following paths (src/AI/PathFollower)
 
@@ -12176,7 +12367,8 @@ The commands (constructor / execute slot), and where the rewrite has them:
 
 **aiRandom.*** (1)
 
-- debug or tooling, not rewritten: `seed` 0x10023670/0x100237d0.
+- BotsScript.cpp: `seed` 0x10023670/0x100237d0 (the seed word only: it
+  doesn't seed again).
 
 ### Squads (src/Game/BotsSquad.cpp, src/AI/Formation)
 
@@ -12303,16 +12495,23 @@ squad every 18 frames.
   from 11.5 to 19.4 a round over 50 seeds, and the leader at full speed
   instead of the squad's changes nothing (11.9). With the +0x4d and
   slot-move fixes (30 seeds, 300 s): 11.9 → 13.3 kills a round
-  (minsk_coop gpm_coop 32: 2.2 → 3.0, within noise).
+  (minsk_coop gpm_coop 32: 2.2 → 3.0, within noise). With AIDLL's own twister, the commander's
+  answers, slot 8's 4/3 and no flank spots (20 seeds, 300 s): 12.7 →
+  13.1 kills a round (sd 2.8 / 3.0), within noise.
 - **Mode** (0x100c4010 / 0x100c1940): bounding with two or more of the
   squad's bots fighting a soldier within 90 m (0x100c3af0, every 4 s:
   halves in turn, a bot facing its target over 40 m off holds); flanking
   for a commander's order 50..173 m off into an area the enemy holds
-  (0x100c3390: once, 65 %, the area's two flank spots reachable mark it
-  and re-goal the leader). The hold (bot +400, vt+0x128) is read only by
-  the look-around (0x100d7840 via vt+0x12c: a held bot looks along its
-  walk). The flank spots are a stand-in (0x1005e820 not decoded: across the
-  way in at the area's radius); nothing reads them (+0xc8).
+  (0x100c3390: once, 65 %, the area's two flank spots reachable would mark
+  it and re-goal the leader). The hold (bot +400, vt+0x128) is read only
+  by the look-around (0x100d7840 via vt+0x12c: a held bot looks along its
+  walk). The flank spots are never found: 0x1005e820 takes the pair
+  nearest the squad's spot from the area's list (+0x1c4 / +0x1c8, 0x20-byte
+  nodes of two points), which nothing in 1.51 fills (written only by the
+  area's constructors 0x1005ffe0 / 0x10062e10 and destructor, copied by
+  0x1005f0d0 / 0x10061240, read by 0x1005e820 and the debug printer
+  0x1002eff0). So the 65 % draw is made, +0xc0 stays clear and no leader
+  is re-goaled; nothing reads +0xc8 either.
 - **Danger list** (+0x14, pruned by 0x100c1b60: gone, timed out or moved
   5 m, re-goaling everyone): no writer was found among AIDLL's functions,
   so it stays empty. The repair marker (+0xd4, 0x100c0fa0, 60 s; the
@@ -13461,7 +13660,20 @@ not scale (so a Used age scale overrides randomAgeFactor). The wheel
 bundle (`0x0061bd20`) sets only modifiers with a mapping. Rewritten in
 `effects::BundleModifiers`, `EffectManager::spawnTemplate` and
 `ObjectEffects::update` (the speeds from the bundle's moves over a tick).
-Not done: start age (4) and the sound's intensity (5, the bundle's
+Start age (4) is done: slot 0x80 (`0x00618d00`; RendDX9 `0x1013ee80`
+sprite +0xd8, `0x10143ee0` mesh +0xe0, `0x1013a2b0` trail +0xe0,
+`0x1013c690` non-screen-aligned +0xd8) is the age a particle or trail point
+is born with (the births `0x1013fdc0`, `0x10145660`, `0x1013acb0`,
+`0x1013d840`: age, and age / life). Shipped on the land vehicles' damage
+states (e_dstate_land_lightsmoke / MediumSmoke 0..1 s from 0..12 m/s,
+fire 0..0.1 s and sparks from 0..8 m/s) and the amphibious wake. Those
+bundles are the armour's (armor.addArmorEffect), spawned on the vehicle
+as an anchor, so the manager now steps an anchored bundle with speed
+mappings or speedFromPhysics itself each update from the anchor's moves
+(`EffectManager::stepAttachedBundles`; ObjectEffects keeps driving the
+template tree's bundles): the damage smoke thickens, quickens and is born
+older as the vehicle drives. No Engine input there (an armour effect sits
+on the vehicle's root). Not done: the sound's intensity (5, the bundle's
 +0x1d8).
 
 **Mesh particles' directionalScale.** RendDX9's mesh particle template
@@ -13538,6 +13750,29 @@ file's fade start / end before; road.frag now takes the camera distance and
 these values. roadDepthBias / roadSlopeScaleDepthBias (+0x8c / +0x90,
 −1e−5) become D3DRS_DEPTHBIAS / SLOPESCALEDEPTHBIAS (0xc3 / 0xaf) there; the
 road pipeline keeps its own bias. disableFadeOnRoads (+0x84) has no reader.
+
+*Road static meshes' techniques.* The static template's loader
+(`0x100de6d0`) flags a template by its geometry's path: "vegitation"
+(+0x2a2), "objects/water/" (+0x2a8), "objects/roads/" (+0x2a0) and, for a
+road, "noBlend" in the path (+0x2a1). The static mesh's draw (`0x100bdb00`)
+picks the material's technique key from them (the keys and their
+RaShader*.fx names are registered by `0x100db190`: 0xf1000000 Road,
+0xf2000000 RoadDetail, 0xf4000000 RoadDetailNoBlend, 0xf8000000 Water,
+0xf9 / 0xfa TrunkSTMDetail / Base, 0xf0 Leaf, 0x01000000 Default): a road
+template's material with no detail map (`+0xe0` 0) takes Road, one with
+it RoadDetail, or RoadDetailNoBlend with +0x2a1. Shipped: the 3
+`objects/roads/statics/` intersections and the 8
+`objects/roads/staticsnoblend/` concrete blocks (airstrips, helipads;
+Wake_Island_2142, Strike_at_Karkand, tgw_sharqi_peninsula, delhi_river).
+RaShaderRoad*.fx draw them as roads: lifted 0.01 m, diffuse (× detail),
+lit by the screen-space light buffer as RoadCompiled.fx (×
+(a × TerrainSunColor × 2 + rgb) × 2), alpha × the road fade (the NoBlend
+variant: alpha = the fade alone), alpha-blended without depth writes.
+**Not done**: the rewrite draws these as ordinary lightmapped static
+meshes. The road pipeline lights from the terrain lightmap per patch, so
+it would take a mesh-vertex variant of road.vert / road.frag; left for a
+later pass (the visible difference is their lighting and the distance
+fade, not their shape).
 
 **Rain freeze.** `rainManager.freeze` (slot 0xa0 `0x1011ab20`, +0x65): the
 update `0x1011d250` moves the box's centre (+0x70) to the camera plus offset

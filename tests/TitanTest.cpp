@@ -702,3 +702,76 @@ TEST(Titan_EnemyInsideTheHullDies)
 	std::fprintf(stderr, "  in EU's Titan: PAC %s, EU %s\n", a.alive ? "alive" : "dead", b.alive ? "alive" : "dead");
 	CHECK(!a.alive && b.alive);
 }
+
+// python.onRepairEvent (0x004bc410 after the heal): a gun hub brought to
+// its wreck raises TitanWeaponDestroyed (onDestroyEvent 50) and its seat
+// stops working; repaired out of the wreck (canBeRepairedWhenWreck 1) it
+// works again and raises TitanWeaponRepaired (51) once, with the Titan and
+// the repairer; the next wreck and repair raise each again (the
+// component's sent flags, +0x10 / +0x11). A console's wreck can't be
+// repaired (canBeRepairedWhenWreck 0), so TitanPartRepaired never goes.
+TEST(Titan_GunHubsRepairedOutOfTheWreck)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Minsk", 48);
+	if (!level.loaded) {
+		return;
+	}
+	const int engineer = level.world->addPlayer("Engineer", 2, true);
+	const int enemy = level.world->addPlayer("Pac", 1, true);
+	uint32_t gun = 0, console = 0;
+	for (const auto& part : level.world->titanParts(2)) {
+		if (!gun && part.kind == game::GameWorld::TitanPartInfo::Gun) {
+			gun = part.id;
+		}
+		if (!console && part.kind == game::GameWorld::TitanPartInfo::Console) {
+			console = part.id;
+		}
+	}
+	CHECK(gun && console);
+	if (!gun || !console) {
+		return;
+	}
+	const auto repaired = [&] { return level.count("TitanWeaponRepaired"); };
+	// Whole: nothing to repair.
+	CHECK(!level.world->repair(gun, 10, engineer));
+	level.world->applyDamage(gun, 1e6f, enemy);
+	CHECK(level.world->hitPoints(gun) <= 0);
+	CHECK(level.count("TitanWeaponDestroyed") == 1);
+	// A little: still a wreck, no event.
+	CHECK(level.world->repair(gun, 1, engineer));
+	CHECK(repaired() == 0);
+	int steps = 0;
+	while (level.world->hitPoints(gun) <= 0 && steps++ < 1000) {
+		level.world->repair(gun, 1, engineer);
+	}
+	CHECK(level.world->hitPoints(gun) > 0);
+	CHECK(repaired() == 1);
+	const auto it = std::find_if(level.events.rbegin(), level.events.rend(),
+		[](const auto& e) { return e.first == "TitanWeaponRepaired"; });
+	CHECK(it != level.events.rend() && it->second.size() == 2);
+	if (it != level.events.rend() && it->second.size() == 2) {
+		CHECK(static_cast<uint32_t>(it->second[0].i) == level.world->titanOf(2));
+		CHECK(it->second[1].i == engineer);
+	}
+	// Up to full: no second event.
+	while (level.world->repair(gun, 10, engineer)) {
+	}
+	CHECK(repaired() == 1);
+	// Again: each once more.
+	level.world->applyDamage(gun, 1e6f, enemy);
+	CHECK(level.count("TitanWeaponDestroyed") == 2);
+	steps = 0;
+	while (level.world->hitPoints(gun) <= 0 && steps++ < 1000) {
+		level.world->repair(gun, 5, engineer);
+	}
+	CHECK(repaired() == 2);
+	// The console's wreck stays one.
+	level.world->applyDamage(console, 1e6f, enemy);
+	CHECK(level.world->hitPoints(console) <= 0);
+	CHECK(!level.world->repair(console, 50, engineer));
+	CHECK(level.count("TitanPartRepaired") == 0);
+}

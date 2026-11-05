@@ -120,6 +120,7 @@ void registerMaterialConsoleMethods(Console& console, MaterialManager& materials
 	property("isOneSided", &Material::isOneSided);
 	property("isSeeThrough", &Material::isSeeThrough);
 	property("triggerRadio", &Material::triggerRadio);
+	property("pythonEvent", &Material::pythonEvent);
 
 	bindMethod(console, "MaterialManager.createCell", access, [&materials](int a, int b) {
 		materials.createCell(static_cast<uint32_t>(a), static_cast<uint32_t>(b));

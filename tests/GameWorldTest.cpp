@@ -1669,6 +1669,9 @@ TEST(GameWorld_BeaconSpawnDropsInPod)
 	range.world->setSpawnChoice(member, game::GameWorld::kSpawnOnBeacon);
 	CHECK(range.world->spawnSoldier(member));
 	CHECK(range.world->ridingPod(member) && range.world->pods().size() == 1);
+	// The spawn point's disablePodControls (1 by default, 0x00635590):
+	// the pod takes no steering (0x0059d2a0 -> 0x005ca2e0).
+	CHECK(!range.world->pods().empty() && range.world->pods()[0].controlsOff);
 	range.world->playerInfo(member, info);
 	const float dx = info.position.x - at.x, dz = info.position.z - at.z;
 	const float off = std::sqrt(dx * dx + dz * dz);

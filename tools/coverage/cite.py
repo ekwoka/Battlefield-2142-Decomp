@@ -8,7 +8,7 @@ as `0x...`, a bare 8-digit hex word, or `FUN_`/`LAB_` + 8 hex digits.
 The DLLs share the base 0x10000000. An address that starts a function in
 more than one DLL goes to the DLL named nearest before it in the text
 (within 1,500 characters); failing that, to the DLL the src directory
-implies (src/AI -> AIDLL, src/Render... -> RendDX9,
+implies (src/AI and src/Game/Bots* -> AIDLL, src/Render... -> RendDX9,
 src/UI -> SwiffPlayer, src/Voip -> BF2VoipServer, src/Sound -> BF2142Audio).
 Otherwise it is dropped as ambiguous (with --headings, docs first try the
 DLL named in the enclosing "##" heading: an extra rule, not coverage-3's).
@@ -53,7 +53,9 @@ THRESHOLD = {"BF2142.exe": 30 * 1024}
 def dir_module(rel):
     """The DLL a src path implies, or None."""
     p = rel.replace("\\", "/")
-    if p.startswith("src/AI/"):
+    if p.startswith("src/AI/") or os.path.basename(p).startswith("Bots") and p.startswith("src/Game/"):
+        # src/Game/Bots*.cpp/.h are the bots' half of AIDLL (the game side's
+        # adaptor and the AI players), cited with AIDLL addresses
         return "AIDLL.dll"
     for d in ("src/Render/", "src/Scene/", "src/Terrain/", "src/Geometry/", "src/Texture/", "src/Effects/", "src/Movie/"):
         if p.startswith(d):

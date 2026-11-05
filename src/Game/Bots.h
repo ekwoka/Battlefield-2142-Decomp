@@ -83,6 +83,7 @@
 #include "AI/Heli.h"
 #include "AI/NavMesh.h"
 #include "AI/PathFollower.h"
+#include "AI/Random.h"
 #include "AI/Strategy.h"
 #include "GameWorld.h"
 
@@ -92,6 +93,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace dice::hfe {
@@ -505,6 +507,12 @@ void strategicAreaGuard(const std::vector<GuardArea>& areas, const physics::Vec3
 
 class BotManager;
 
+// The seed of the AI's random numbers (AIRandom, 0x100309a0): the original
+// takes the clock x 1e6 when the word is 0, so no two runs draw alike.
+// Here BF2142_BOT_SEED gives it (for measuring rounds over several seeds),
+// else a fixed word stands in for the clock, so runs repeat.
+uint32_t botRandomSeed();
+
 struct BotSettings {
 	float skill = 0.4f;   // aiSettings.setBotSkill (0..1)
 	int maxBots = 16;     // aiSettings.setMaxNBots
@@ -690,7 +698,11 @@ struct BotSettings {
 		std::string name;
 	};
 	std::vector<BotName> botNames;
-	uint32_t botNameSeed = 0x9e3779b9u; // the keys' U[0, 1) (the original's Mersenne twister, DAT_101394cc)
+	// The AI's random numbers (DAT_101394cc), made at the AI's start
+	// (0x10001740), before the scripts: the names' keys draw from it as
+	// AIDefault.ai runs, and the bot manager's copy goes on from there
+	// (handed back when it goes, so the next round's goes on again).
+	ai::Random random = ai::Random::seeded(botRandomSeed());
 	void addBotName(const std::string& first, const std::string& last, float u);
 	std::string nextBotName();
 
@@ -791,6 +803,12 @@ public:
 		float at = 0;
 	};
 	std::vector<RadioSent> radioSent(int player) const;
+	// The AI commander's turn-downs of squad requests, as said (0x1009ce20).
+	struct CommanderLine {
+		int team = 0, squad = 0;
+		std::string voice;
+	};
+	const std::vector<CommanderLine>& commanderSaid() const { return m_commanderSaid; }
 
 	// The console's settings (registerBotConsoleMethods'): the scripted-bot
 	// commands reach this manager through them, and the run-time setters
@@ -907,7 +925,7 @@ public:
 		int mode = 0;               // +0xb8: 0, 1 bounding, 2 flanking (0x100c1940)
 		int boundPhase = 0;         // +0xbc
 		float boundNext = 0;        // +0xb0
-		bool flanking = false;      // +0xc0
+		bool flanking = false;      // +0xc0 (never set in 1.51: the areas have no flank spots, 0x1005e820)
 		bool flankTried = false;    // +0xc1
 		physics::Vec3 flank[2];     // +0xc8
 		std::vector<SquadDanger> dangers; // +0x14
@@ -1572,9 +1590,20 @@ private:
 	bool m_noNavMesh = false;
 	bool m_oddFrame = false;
 	size_t m_cursor = 0; // plan execution's round robin (+0xfc)
-	float m_commandIn = 0; // seconds to the commander's next look
-	float m_firstStrikeAt = 120;
-	float m_lastStrike[3] = {-1e9f, -1e9f, -1e9f};
+	// The SAI's tool clocks by request kind (artillery +0x78, orbital
+	// strike +0x80, UAV +0x90, supplies +0x88; 0x100a39c0) and the AI
+	// commander's look clock (+0x98).
+	std::array<std::array<float, 4>, 3> m_assetNext {{{120, 90, 35, 60}, {120, 90, 35, 60}, {120, 90, 35, 60}}};
+	float m_lookNext[3] = {};
+	// The requests answered, by (team, squad, kind): the store's time.
+	std::map<std::tuple<int, int, int>, float> m_requestSeen;
+	struct TurnDown {
+		int team = 0, squad = 0, type = 0; // 0 supplies, 1 artillery denied, 2 artillery unavailable, 3 UAV
+		float due = 0;
+	};
+	std::vector<TurnDown> m_turnDowns; // the SAI's +0xa0
+	std::vector<CommanderLine> m_commanderSaid;
+	void answerRequests();
 	bool m_humanCommander[3] = {}; // the team had a commander at the last look (AIDLL's +0x241)
 	GameWorld& m_world;
 	BotSettings m_settings;
@@ -1606,11 +1635,8 @@ private:
 	void warnOfGrenades(Bot& bot, const GameWorld::PlayerInfo& self);
 	void horn(Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::VehicleInfo& vehicle, SoldierInput& input);
 	float m_time = 0;
-	// A xorshift in place of the AI's Mersenne twister (DAT_101394cc:
-	// constructor 0x100308a0, destructor 0x100308d0, seeded from the clock
-	// x 1e6 through the Park-Miller step 0x10030810 by 0x100309a0, the
-	// 624-word refill 0x100308f0).
-	uint32_t m_random = 0x2545f491;
+	// The AI's U[0, 1) (0x10046a50 over the twister in m_settings.random,
+	// src/AI/Random).
 	float random(); // 0..1
 	void flee(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
 	void idle(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);

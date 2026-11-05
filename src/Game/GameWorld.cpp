@@ -890,6 +890,9 @@ void GameWorld::loseHitPoints(uint32_t object, float amount, int attacker)
 	if (now > 0) {
 		return;
 	}
+	if (left > 0) {
+		pythonWrecked(object, attacker); // 0x005b7680: alive before, a wreck after
+	}
 	if (isCommanderAsset(object)) {
 		m_hitPoints[object] = 0; // a wreck until repaired (armor.canBeDestroyed 0)
 		return;
@@ -5757,10 +5760,25 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	// its rotation, the soldier seated in it (game server slot 0xa8, seat
 	// 0); eu_pod_drop's copySoldierRotationOnEnter keeps the soldier's
 	// heading. The pod then drops as a fired one does, without a push.
-	// Not rewritten: the PlayerControlObject's slot 0x178 (0x0059d2a0,
-	// +0x444: its input mask on) given the spawn point template's +0x95.
-	if (withSquad && !squadPod.empty()) {
-		startPod(player, squadPod, player.body.position, {}, 0, facing);
+	// The pod's PlayerControlObject then takes the spawn point template's
+	// disablePodControls (+0x95, 1 by default: ctor 0x00635590; executor
+	// 0x00552a2b) through its slot 0x178 (0x0059d2a0: the interface's
+	// +0x2c0, the object's +0x444), which the input filter (0x005ca2e0)
+	// reads: on, the pod's inputs 0..3 (steering, pitch, roll, throttle)
+	// are zeroed, so a beacon's pod drops unsteered. The beacon's spawn
+	// point is its SpawnPoint child (none of the shipped ones sets it).
+	if (withSquad && !squadPod.empty() && startPod(player, squadPod, player.body.position, {}, 0, facing)) {
+		bool off = true;
+		if (const world::ObjectTemplate* beacon = at && at->objectTemplate() ? at->objectTemplate() : nullptr) {
+			for (const world::ChildTemplate& child : beacon->children()) {
+				const world::ObjectTemplate* c = m_templates.find(child.name);
+				if (c && sameName(c->typeName(), "SpawnPoint")) {
+					off = integer(*c, "disablePodControls", 1) != 0;
+					break;
+				}
+			}
+		}
+		m_pods.back().controlsOff = off;
 	}
 	return created;
 }
@@ -7717,14 +7735,18 @@ void GameWorld::animateRemoteSeated(uint32_t object, uint32_t vehicle, int seatI
 	// vehicle's), the seat riding the turret that carries it (seatMount:
 	// the carrier seat's yaw bundle about its pivot, the bundle's turn as
 	// its ghost's RotationalBundle networkable has it, read 0x00602070).
-	physics::Mat3 mount;
+	SeatMount mounted;
 	if (seat->seatAnchor.yawSeat >= 0 && static_cast<size_t>(seat->seatAnchor.yawSeat) < layout.seats.size()) {
 		const SeatLayout& turret = layout.seats[static_cast<size_t>(seat->seatAnchor.yawSeat)];
 		world::Vec3 offset, turn;
 		if (!turret.yawBundle.empty() && seatPartPose(vehicle, turret.yawBundle, offset, turn, true)) {
-			mount = physics::Mat3::fromYawPitchRoll({turn.x, 0, 0});
+			mounted.turn = physics::Mat3::fromYawPitchRoll({turn.x, 0, 0});
 		}
 	}
+	// The bone part it rides (the mechs' torsospring), as the client's own
+	// bundle animation poses it (animateRemoteVehicle).
+	boneMount(vehicle, seat->seatAnchor, mounted);
+	const physics::Mat3& mount = mounted.turn;
 	const world::Vec3& turned = carrier->rotation();
 	const physics::Mat3 rotation = physics::Mat3::fromYawPitchRoll({bodyYaw, 0, 0})
 		* physics::Mat3::fromYawPitchRoll(seat->rotation) * mount * physics::Mat3::fromYawPitchRoll({turned.x, turned.y, turned.z});
@@ -9704,8 +9726,7 @@ std::vector<uint32_t> GameWorld::supplyObjects() const
 // back to working above 0 hit points, 0x00654120).
 bool GameWorld::repairable(uint32_t object) const
 {
-	const world::Object* o = m_objects.find(object);
-	const world::ObjectTemplate* t = o ? o->objectTemplate() : nullptr;
+	const world::ObjectTemplate* t = armourTemplate(object);
 	if (!t || isTitan(object)) {
 		return false;
 	}
@@ -9726,13 +9747,16 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 	float& battery = holder && holder->alive && !holder->vehicle && holder->battery >= 0 ? holder->battery : noBattery;
 	const float modifier = holder && holder->abilityModifier > 0 ? holder->abilityModifier : 1.0f;
 	const auto cellOf = [&](uint32_t object) {
-		const world::Object* target = m_objects.find(object);
-		const world::ObjectTemplate* t = target ? target->objectTemplate() : nullptr;
+		const world::ObjectTemplate* t = armourTemplate(object);
 		const uint32_t material = t ? static_cast<uint32_t>(integer(*t, "armor.defaultMaterial", 0)) : 0;
 		return m_materials ? m_materials->damageMod(ability.material, material) : 1.0f;
 	};
 	const auto amountFor = [&](uint32_t object) { return modifier * ability.strength * seconds * cellOf(object); };
+	const int repairer = giver ? giver->id : -1;
 	const auto heal = [&](uint32_t object, float percent) {
+		if (object >= kTitanPartIds) {
+			return healTitanPart(object, percent, repairer);
+		}
 		const world::Object* target = m_objects.find(object);
 		const world::ObjectTemplate* t = target ? target->objectTemplate() : nullptr;
 		const float left = hitPoints(object);
@@ -9743,7 +9767,7 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 		if (left >= most) {
 			return false;
 		}
-		m_hitPoints[object] = std::min(left + percent * 0.01f * most, most);
+		healHitPoints(object, std::min(left + percent * 0.01f * most, most), repairer);
 		return true;
 	};
 	// Each target treated draws on the battery, when it holds that much.
@@ -9772,6 +9796,14 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 				if (object && (object->team() == team || object->team() == 0) && inReach(body.body.position)
 					&& repairable(body.object)) {
 					found.push_back(body.object);
+				}
+			}
+			// A Titan's parts are objects of its tree to the sphere (each
+			// node one): those of the team, repairable (the gun hubs'
+			// wrecks too: canBeRepairedWhenWreck 1).
+			for (const TitanPartInfo& part : titanParts(team)) {
+				if (part.id >= kTitanPartIds && inReach(part.position) && repairable(part.id)) {
+					found.push_back(part.id);
 				}
 			}
 			// The commander's assets are mended as well (wrecks too: their
@@ -10798,11 +10830,17 @@ GameWorld::SeatMount GameWorld::seatMount(const Body& body, const VehicleLayout&
 		m.turn = physics::Mat3::fromYawPitchRoll({body.guns[static_cast<size_t>(anchor.yawSeat)].yaw, 0, 0});
 		m.at = carrier.yawPivot - m.turn.transform(carrier.yawPivot);
 	}
+	boneMount(body.object, anchor, m);
+	return m;
+}
+
+void GameWorld::boneMount(uint32_t object, const SeatLayout::Anchor& anchor, SeatMount& m) const
+{
 	// The bone part: its bone's local matrix takes the place of the part's
 	// placement (0x0063d470 -> slot 0xe8), so a point at rest under it is
 	// taken into the part's frame and out by the bone's.
 	anim::Matrix bone;
-	if (!anchor.bone.empty() && partBone(body.object, anchor.bone, bone)) {
+	if (!anchor.bone.empty() && partBone(object, anchor.bone, bone)) {
 		physics::Mat3 posed;
 		posed.rows[0] = {bone[0], bone[1], bone[2]};
 		posed.rows[1] = {bone[4], bone[5], bone[6]};
@@ -10818,7 +10856,6 @@ GameWorld::SeatMount GameWorld::seatMount(const Body& body, const VehicleLayout&
 		m.at = delta.transform(m.at) + boneAt;
 		m.turn = m.turn * delta;
 	}
-	return m;
 }
 
 bool GameWorld::seatAims(const Body& body, int seat) const
@@ -11535,7 +11572,7 @@ void GameWorld::stepDeployableAnimations(float seconds)
 	// Gone: dropped.
 	for (auto it = m_objectAnimations.begin(); it != m_objectAnimations.end();) {
 		const bool kept = m_objects.find(it->object)
-			&& std::any_of(live.begin(), live.end(), [&](const auto& l) { return l.first == it->object; });
+			&& (it->remote || std::any_of(live.begin(), live.end(), [&](const auto& l) { return l.first == it->object; }));
 		if (kept) {
 			++it;
 			continue;
@@ -11574,6 +11611,70 @@ void GameWorld::stepDeployableAnimations(float seconds)
 	}
 }
 
+void GameWorld::animateRemoteVehicle(uint32_t object, const physics::Vec3& velocity, bool occupied, float seconds)
+{
+	const world::Object* o = m_objects.find(object);
+	if (!o || !o->objectTemplate() || seconds <= 0) {
+		return;
+	}
+	const float yaw = o->rotation().x;
+	// A body of the client's round (a ghost with mobile physics): its own
+	// system, fed from the ghost (stepObjectAnimation).
+	if (Body* body = findBody(object)) {
+		Body::RemoteDrive& drive = body->remoteDrive;
+		drive.turn = drive.on ? std::remainder(yaw - drive.lastYaw, 360.0f) * 3.14159265f / 180.0f / seconds : 0.0f;
+		drive.on = true;
+		drive.lastYaw = yaw;
+		drive.velocity = velocity;
+		drive.occupied = occupied;
+		return;
+	}
+	auto it = std::find_if(m_objectAnimations.begin(), m_objectAnimations.end(),
+		[&](const ObjectAnimation& a) { return a.object == object; });
+	if (it == m_objectAnimations.end()) {
+		ObjectAnimation added;
+		added.object = object;
+		added.remote = true;
+		added.lastYaw = o->rotation().x;
+		loadBundleAnimation(*o->objectTemplate(), added.animation, added.skeleton, added.pose, added.boneParts);
+		if (added.animation && added.skeleton && !added.boneParts.empty()) {
+			m_bonedObjects.insert(object);
+		}
+		m_objectAnimations.push_back(std::move(added));
+		it = std::prev(m_objectAnimations.end());
+	}
+	if (!it->animation) {
+		return;
+	}
+	// stepObjectAnimation's input, from the ghost: the heading's frame,
+	// the speed along and across it, the turn rate (radians a second).
+	const physics::Mat3 m = physics::Mat3::fromYawPitchRoll({o->rotation().x, o->rotation().y, o->rotation().z});
+	anim::AnimationInput input;
+	input.movementSeconds = seconds;
+	float speed = std::sqrt(physics::lengthSquared(velocity));
+	if (speed > 0.001f) {
+		input.forward = velocity.x * m.rows[2].x + velocity.z * m.rows[2].z;
+		input.side = velocity.x * m.rows[0].x + velocity.z * m.rows[0].z;
+		speed = std::sqrt(input.forward * input.forward + input.side * input.side);
+	}
+	const float factor = it->animation->speedFactor();
+	input.speed = factor > 0 ? speed / factor : speed;
+	const float turn = std::remainder(o->rotation().x - it->lastYaw, 360.0f) * 3.14159265f / 180.0f / seconds;
+	it->lastYaw = o->rotation().x;
+	input.turn = turn;
+	input.lookAroundY = turn;
+	if (m_ground.heightAndNormal) {
+		physics::Vec3 n {0, 1, 0};
+		m_ground.heightAndNormal(o->position().x, o->position().z, n);
+		input.slopeForward = std::clamp(physics::dot(n, m.rows[2]) * 3.2f, -1.0f, 1.0f);
+		input.slopeSide = std::clamp(physics::dot(n, m.rows[0]) * 3.2f, -1.0f, 1.0f);
+	}
+	input.messages = occupied ? 0x800u : 0u;
+	it->animation->update(input, seconds);
+	it->animation->takeEvents();
+	it->posed = false;
+}
+
 void GameWorld::stepObjectAnimation(Body& b, float seconds)
 {
 	if (!b.animation) {
@@ -11598,7 +11699,8 @@ void GameWorld::stepObjectAnimation(Body& b, float seconds)
 	static const Vehicle::Legs kNoLegs {};
 	const Vehicle::Legs& legs = b.vehicle && b.vehicle->legs() ? *b.vehicle->legs() : kNoLegs;
 	const physics::Mat3& m = b.body.rotation;
-	const physics::Vec3& v = b.body.velocity;
+	const Body::RemoteDrive& drive = b.remoteDrive;
+	const physics::Vec3& v = drive.on ? drive.velocity : b.body.velocity;
 	anim::AnimationInput input;
 	input.movementSeconds = seconds;
 	float speed = std::sqrt(physics::lengthSquared(v));
@@ -11609,16 +11711,17 @@ void GameWorld::stepObjectAnimation(Body& b, float seconds)
 	}
 	const float factor = b.animation->speedFactor();
 	input.speed = factor > 0 ? speed / factor : speed;
-	input.lookAroundX = b.body.angularVelocity.x;
-	input.turn = b.body.angularVelocity.y;
-	input.lookAroundY = b.body.angularVelocity.y;
+	input.lookAroundX = drive.on ? 0.0f : b.body.angularVelocity.x;
+	input.turn = drive.on ? drive.turn : b.body.angularVelocity.y;
+	input.lookAroundY = input.turn;
 	if (m_ground.heightAndNormal) {
 		physics::Vec3 n {0, 1, 0};
 		m_ground.heightAndNormal(b.body.position.x, b.body.position.z, n);
 		input.slopeForward = std::clamp(physics::dot(n, m.rows[2]) * 3.2f, -1.0f, 1.0f);
 		input.slopeSide = std::clamp(physics::dot(n, m.rows[0]) * 3.2f, -1.0f, 1.0f);
 	}
-	const bool occupied = std::any_of(b.occupants.begin(), b.occupants.end(), [](int p) { return p >= 0; });
+	const bool occupied = drive.on ? drive.occupied
+								   : std::any_of(b.occupants.begin(), b.occupants.end(), [](int p) { return p >= 0; });
 	// 0x40 by the landing gear (0x00650010 at 0x0063ce30's +0x18): up with
 	// its up delay run out, or down with its down delay still running.
 	bool gear = false;

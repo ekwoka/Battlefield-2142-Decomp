@@ -746,11 +746,16 @@ BotManager::BotManager(GameWorld& world, BotSettings settings) : m_world(world),
 	if (m_settings.viewDistance <= 0) {
 		m_settings.viewDistance = gameViewDistance(m_settings.levelFog, m_settings.levelViewDistance);
 	}
-	// BF2142_BOT_SEED: another start for the bots' own draws (measuring
-	// rounds over several seeds; the default sequence is fixed).
+}
+
+uint32_t botRandomSeed()
+{
 	if (const char* seed = std::getenv("BF2142_BOT_SEED"); seed && *seed) {
-		m_random = static_cast<uint32_t>(std::strtoul(seed, nullptr, 0)) * 2654435761u | 1u;
+		if (const uint32_t word = static_cast<uint32_t>(std::strtoul(seed, nullptr, 0)); word != 0) {
+			return word;
+		}
 	}
+	return 0x2545f491u; // in place of the clock
 }
 
 float gameViewDistance(const std::array<float, 4>& fog, float levelViewDistance)
@@ -794,6 +799,7 @@ BotManager::~BotManager()
 	}
 	if (m_source && m_source->manager == this) {
 		m_source->manager = nullptr;
+		m_source->random = m_settings.random; // the one stream goes on
 	}
 	if (!std::getenv("BF2142_BOT_STATS")) {
 		return;
@@ -808,14 +814,12 @@ BotManager::~BotManager()
 	}
 }
 
-// The bots' U[0, 1): a stand-in for AIDLL's Mersenne twister (DAT_101394cc;
-// genrand 0x10046770, U[0, 1) 0x10046a50).
+// The bots' U[0, 1): AIDLL's twister (DAT_101394cc; genrand 0x10046770,
+// U[0, 1) 0x10046a50). The callers that draw the word themselves
+// (0x10046770 then x 2.3283064e-10) take the same number.
 float BotManager::random()
 {
-	m_random ^= m_random << 13;
-	m_random ^= m_random >> 17;
-	m_random ^= m_random << 5;
-	return static_cast<float>(m_random & 0xffffff) / static_cast<float>(0x1000000);
+	return m_settings.random.uniform();
 }
 
 float BotManager::seatValueFor(int player, uint32_t vehicle, int seat) const
@@ -4736,6 +4740,18 @@ int BotManager::kitSlot(const GameWorld::PlayerInfo& self, int type) const
 	return 0;
 }
 
+// Bot slot 8 (0x10098200, vtable 0x10118050; run by Bot::think 0x10099280
+// when the bot's controlled object changes, and by the bot manager's man
+// down, death and spawn events 0x100c5ea0 / 0x100c64d0 / 0x100c72a0): the
+// side's AI object of the object the bot leaves has its +0x14 (the
+// basicTemp the area pass 0x1005f210 adds) x 0.75, the one it takes
+// x 1.3333334; then the path follower is reset (0x10095120), the AI
+// object set (vt+0xd0), +600 / +0x25c / +0x260 cleared and the inputs
+// cleared (0x10097e60). So the object a bot of the side controls (its
+// soldier on foot, its seat aboard) counts 4/3 of its basicTemp in the
+// side's area temperatures, and goes back as the bot leaves it.
+constexpr float kBotTempFactor = 1.3333334f;
+
 // An object's AI template's basicTemp (aiTemplate.basicTemp, taken as the
 // AI object's +0x14 that the assist scores weigh targets by; the store to
 // +0x14 was not found).
@@ -7538,7 +7554,10 @@ void BotManager::updateStrategy(float seconds)
 					continue;
 				}
 				const world::Object* soldier = m_world.objects().find(p.soldier);
-				temperature += unitAiOf(soldier ? soldier->objectTemplate() : nullptr).basicTemp * known;
+				// A bot of the side on foot controls its soldier, whose
+				// object the side holds at 4/3 of its basicTemp (botTempFactor).
+				const float controlled = p.ai && p.team == team && !p.vehicle ? kBotTempFactor : 1.0f;
+				temperature += unitAiOf(soldier ? soldier->objectTemplate() : nullptr).basicTemp * controlled * known;
 				float battle = 0;
 				std::array<float, 2> strategic {};
 				unitStrengths(p, battle, strategic);
@@ -7585,7 +7604,17 @@ void BotManager::updateStrategy(float seconds)
 					}
 					w.seatsKnown = true;
 				}
-				temperature += (u.basicTemp + u.seatsTemp) * vehicleKnown;
+				float aboard = 0; // the seats the side's bots control, at 4/3 (botTempFactor)
+				for (const GameWorld::PlayerInfo& p : players) {
+					if (!p.ai || !p.alive || p.team != team || p.vehicle != vehicle.object || p.seat < 0) {
+						continue;
+					}
+					const std::vector<GameWorld::SeatLayout> seats = m_world.vehicleSeats(vehicle.object);
+					const world::ObjectTemplate* st = static_cast<size_t>(p.seat) < seats.size()
+						? m_world.templates().find(seats[static_cast<size_t>(p.seat)].name) : nullptr;
+					aboard += (st && st != o->objectTemplate() ? unitAiOf(st).basicTemp : u.basicTemp) * (kBotTempFactor - 1);
+				}
+				temperature += (u.basicTemp + u.seatsTemp + aboard) * vehicleKnown;
 			}
 			v.state.temperature = temperature;
 			side.temperature.resize(s.areas.size(), 0.0f);
@@ -7862,39 +7891,42 @@ void BotManager::updateStrategy(float seconds)
 }
 
 // AIDLL's commander is the team's strategic AI, not a player: it never
-// applies for command. Every 10 s (0x1009c050), for a team with bots
-// (IAIPlayerFactory slot 0x2c, 0x008973e0: the team's AI players) and no
-// commander (its +0x241, set by 0x1009bcd0; when a commander leaves, its
-// next strike waits 120 s again), with an artillery asset standing
-// (IBFCommander slots 0x34, 0x38 → 0x008970e0, 0x005a1050): no sooner
-// than 120 s after its last strike, at a random spot of the first point
-// the team holds whose flag is below 0.75 (being taken; the SAI's slot
-// 0x68, 0x1009c4d0), nine times in ten, with no teammate within 40 m of
-// it (0x1008a110 with the squad manager's strike radius +0xb8; the
-// terrain's height there), it fires the artillery (IBFCommander slot
-// 0x20, 0x00896f00: the commander's tool event with rcType 1 and no
-// sender, which 0x0050ee10 lets through). Failing that, at an enemy human
-// off the navigation mesh for over 60 s (0x100888d0 over 0x1008a3b0's
-// list: one the bots can't reach). Either strike goes to the squad
-// manager (0x10088040, BotsSquad.cpp's noteStrike) and waits 120 s. The
-// earlier stand-in kept 15 m and tested the teammates before the draw.
+// applies for command. For a team with no commander (the SAI's +0x241, set
+// by 0x1009bcd0) it uses the team's tools itself, through the game's
+// IBFCommander (DAT_10139498, BF2142.exe vtable 0x009d6618) on four clocks
+// (+0x78 artillery, +0x80 orbital strike, +0x88 supplies, +0x90 UAV),
+// which the SAI's constructor (0x100a39c0) starts at 120, 90, 60 and 35 s
+// from the level's start and a commander leaving (0x1009bcd0) starts again
+// from then (read back by 0x100a3980 / 0x100a3990 / 0x100a39a0 /
+// 0x100a39b0).
+//
+// Its own strikes (slot 25, 0x1009c050): for a team with bots
+// (IAIPlayerFactory slot 0x2c, 0x008973e0: the team's AI players), with an
+// artillery asset standing (IBFCommander slots 0x34, 0x38 → 0x008970e0,
+// 0x005a1050: one not a wreck), once its clock +0x78 and its look clock
+// +0x98 (10 s, set as it looks) have passed: at a random spot of the first
+// point the team holds whose flag is below 0.75 (being taken; the SAI's
+// slot 0x68, 0x1009c4d0), nine times in ten, with no teammate within 40 m
+// of it (0x1008a110 with the squad manager's strike radius +0xb8; the
+// terrain's height there), it fires the artillery (IBFCommander slot 0x20,
+// 0x00896f00: the commander's tool event with rcType 1 and no sender,
+// which 0x0050ee10 lets through). Failing that, at an enemy human off the
+// navigation mesh for over 60 s (0x100888d0 over 0x1008a3b0's list: one
+// the bots can't reach). Either strike goes to the squad manager
+// (0x10088040, BotsSquad.cpp's noteStrike) and restarts +0x78 at 120 s.
 // (0x1008a110 counts the side's players whose AI info has flag 4 or not
-// flag 2; the rewrite counts every one alive.) The orbital
-// strike (slot 0x24, every 90 s), the supply drop (0x28, 35 s) and the
-// UAV (0x2c, 60 s) it uses only to answer its squads' requests
-// (0x1009e200, 0x1009e3e0, 0x1009e500), which the rewrite's bots don't
-// send; it gives no orders of its own (the SAI orders the squads,
-// updateStrategy). The SAI's constructor (0x100a39c0) starts the four
-// clocks at 120, 90, 60 and 35 s from the level's start (read back by
-// 0x100a3980 / 0x100a3990 / 0x100a39a0 / 0x100a39b0): m_firstStrikeAt.
+// flag 2; the rewrite counts every one alive.) It gives no orders of its
+// own (the SAI orders the squads, updateStrategy).
 void BotManager::command(float seconds)
 {
+	(void)seconds;
 	using A = GameWorld::CommanderAbility;
 	const std::vector<GameWorld::PlayerInfo> players = m_world.playerList();
 	for (int team = 1; team <= 2; ++team) {
 		const bool human = m_world.commander(team) != -1;
 		if (m_humanCommander[team] && !human) {
-			m_lastStrike[team] = std::max(m_lastStrike[team], m_time); // 0x1009bcd0: 120 s from now
+			// 0x1009bcd0: the four clocks from now.
+			m_assetNext[team] = {m_time + 120, m_time + 90, m_time + 35, m_time + 60};
 			// 0x1009bcd0 -> 0x10089440: every squad of the side drops its order (0x100c0f00).
 			for (auto& [key, squad] : m_squads) {
 				if (key.first == team) {
@@ -7905,22 +7937,17 @@ void BotManager::command(float seconds)
 		}
 		m_humanCommander[team] = human;
 	}
-	m_commandIn -= seconds;
-	if (m_commandIn > 0) {
-		return;
-	}
-	m_commandIn = 10;
+	answerRequests();
 	const std::vector<GameWorld::ControlPointInfo> points = m_world.controlPointList();
 	for (int team = 1; team <= 2; ++team) {
 		const bool bots = std::any_of(players.begin(), players.end(), [&](const GameWorld::PlayerInfo& p) {
 			return p.ai && p.team == team;
 		});
-		if (!bots || m_humanCommander[team]) {
+		if (!bots || m_humanCommander[team] || !m_world.abilityState(team, A::Artillery).available
+			|| !(m_assetNext[team][0] < m_time) || !(m_lookNext[team] < m_time)) {
 			continue;
 		}
-		if (m_time < m_firstStrikeAt || m_time - m_lastStrike[team] < 120 || !m_world.abilityReady(team, A::Artillery)) {
-			continue;
-		}
+		m_lookNext[team] = m_time + 10;
 		bool fired = false;
 		for (const ControlPoint& cp : m_world.controlPoints()) {
 			if (cp.team != team || cp.flagHeight >= 0.75f || cp.flag != team) {
@@ -7939,17 +7966,145 @@ void BotManager::command(float seconds)
 					const physics::Vec3 d = mate.position - physics::Vec3 {x, y, z};
 					return mate.alive && mate.team == team && d.x * d.x + d.y * d.y + d.z * d.z < 40.0f * 40.0f;
 				});
-				if (clear && m_world.commanderAction(team, A::Artillery, x, z, true)) {
-					m_lastStrike[team] = m_time;
+				if (clear) {
+					m_assetNext[team][0] = m_time + 120;
+					m_world.commanderAction(team, A::Artillery, x, z, true);
 					fired = true;
 				}
 			}
 			break;
 		}
 		physics::Vec3 camper;
-		if (!fired && offMeshEnemy(team, camper) && m_world.commanderAction(team, A::Artillery, camper.x, camper.z, true)) {
-			m_lastStrike[team] = m_time;
+		if (!fired && offMeshEnemy(team, camper)) {
+			m_assetNext[team][0] = m_time + 120;
+			m_world.commanderAction(team, A::Artillery, camper.x, camper.z, true);
 		}
+	}
+}
+
+// The squad leaders' requests (SquadLeader.sendRequest; GameWorld's
+// SquadRequest). BF2142.exe's squad manager stores one (slot 0x50,
+// 0x004c5720) and, where the AI runs and the squad has a leader (+0x24),
+// posts AI event 3/0xf with the request (0x004c3d60 / 0x004c4790: team
+// +0x30, squad +0x34, the point +0x38..+0x40); the AI's event listener
+// (0x00894860) hands it by kind to IAIEventCourier slots 24..27
+// (0x1004e6e0 / 0x1004e720 / 0x1004e760 / 0x1004e7a0, vtable 0x101146d0),
+// which call the team's SAI's slots 20..23 with the squad and the point.
+// Only squad leaders request, and only humans have the HUD and console
+// that send them: AIDLL has no caller of the store, so its bot leaders
+// never ask (they ask a human commander for orders, req_new_order). Here
+// a request new in the world's store (stored since the last look) is the
+// event.
+//
+// With no human commander (+0x241) the SAI answers at once:
+// - artillery (0x1009e020) and orbital strike (0x1009e200): with the asset
+//   standing (IBFCommander 0x34 / 0x38, 0x3c / 0x40: 0x00897100,
+//   0x00896c10) and its clock passed (+0x78, 120 s; +0x80, 90 s), the tool
+//   at the request's point (slot 0x20 0x00896f00 / slot 0x24 0x00896f80,
+//   which take the squad's request of kind 0 / 1 off, slot 0x24 of the
+//   squad manager) and the strike to the squad manager (0x10088040);
+//   the clock not passed, a turn-down of type 1, the asset gone one of
+//   type 2;
+// - the UAV (0x1009e3e0, +0x90, 35 s; slot 0x28 0x00897000, kind 2 off)
+//   and supplies (0x1009e500, +0x88, 60 s; slot 0x2c 0x00897070, kind 3
+//   off) need no asset test; the clock not passed, a turn-down of type 3
+//   (UAV) or 0 (supplies).
+// A turn-down (0x18 bytes: type, time, squad) waits 2 + 3U s (the word
+// through 0x10046770; queued at +0xa0), then the SAI's update (slot 24,
+// 0x1009ce20, first in 0x100a2dd0) says it: type 0 supply_deny (slot
+// 0x48, 0x00896d10, kind 3 off), 1 artillery_deny (0x30, 0x00896b10,
+// kind 0 off), 2 artillery_unavailable (0x44, 0x00896c30, kind 0 off), 3
+// uav_deny (0x4c, 0x00896df0, kind 2 off). An orbital strike turned down
+// thus says the artillery's lines and takes the squad's artillery request
+// off, leaving its own standing (as the original). The lines are the
+// commander's voice ("commander") over the team's radio on the machine
+// running the AI (0x004cd1b0 / 0x004d7950, no listener test): here the
+// local player hears them. A commander coming drops the queue (0x1009ce20
+// with +0x241 set).
+void BotManager::answerRequests()
+{
+	using A = GameWorld::CommanderAbility;
+	for (int team = 1; team <= 2; ++team) {
+		std::vector<GameWorld::SquadRequest> standing = m_world.squadRequests(team);
+		for (const GameWorld::SquadRequest& r : standing) {
+			float& seen = m_requestSeen.try_emplace({team, r.squad, r.kind}, -1.0f).first->second;
+			if (seen == r.storedAt) {
+				continue;
+			}
+			seen = r.storedAt;
+			if (m_humanCommander[team]) {
+				continue; // 0x1009e020..0x1009e500 return with +0x241 set
+			}
+			const auto turnDown = [&](int type) {
+				// The time: (float)word x 2.3283064e-10 x 3 + now + 2.
+				const float delay = ai::wordToFloat(m_settings.random.next()) * 2.3283064e-10f * 3.0f;
+				m_turnDowns.push_back({team, r.squad, type, m_time + delay + 2});
+			};
+			std::array<float, 4>& next = m_assetNext[team];
+			switch (r.kind) {
+			case 0: // 0x1009e020
+			case 1: { // 0x1009e200
+				const A ability = r.kind == 0 ? A::Artillery : A::OrbitalStrike;
+				if (!m_world.abilityState(team, ability).available) {
+					turnDown(2);
+				} else if (next[static_cast<size_t>(r.kind)] < m_time) {
+					next[static_cast<size_t>(r.kind)] = m_time + (r.kind == 0 ? 120.0f : 90.0f);
+					m_world.commanderAction(team, ability, r.position.x, r.position.z, true);
+					m_world.removeSquadRequest(team, r.squad, r.kind);
+				} else {
+					turnDown(1);
+				}
+				break;
+			}
+			case 2: // 0x1009e3e0
+				if (next[2] < m_time) {
+					next[2] = m_time + 35;
+					m_world.commanderAction(team, A::Uav, r.position.x, r.position.z, true);
+					m_world.removeSquadRequest(team, r.squad, 2);
+				} else {
+					turnDown(3);
+				}
+				break;
+			case 3: // 0x1009e500
+				if (next[3] < m_time) {
+					next[3] = m_time + 60;
+					m_world.commanderAction(team, A::Supplies, r.position.x, r.position.z, true);
+					m_world.removeSquadRequest(team, r.squad, 3);
+				} else {
+					turnDown(0);
+				}
+				break;
+			default:
+				break;
+			}
+		}
+		for (auto it = m_requestSeen.begin(); it != m_requestSeen.end();) {
+			const auto& [t, squad, kind] = it->first;
+			const bool stands = t != team || std::any_of(standing.begin(), standing.end(), [&](const GameWorld::SquadRequest& r) {
+				return r.squad == squad && r.kind == kind;
+			});
+			it = stands ? std::next(it) : m_requestSeen.erase(it);
+		}
+	}
+	// 0x1009ce20: the turn-downs due.
+	for (auto it = m_turnDowns.begin(); it != m_turnDowns.end();) {
+		if (m_humanCommander[it->team]) {
+			it = m_turnDowns.erase(it);
+			continue;
+		}
+		if (m_time <= it->due) {
+			++it;
+			continue;
+		}
+		static const char* const kLines[] = {"supply_deny", "artillery_deny", "artillery_unavailable", "uav_deny"};
+		static const int kKinds[] = {3, 0, 0, 2};
+		const size_t type = static_cast<size_t>(it->type);
+		if (const int local = m_world.localPlayer(); local >= 0) {
+			m_world.hearRadio(local, 2, kLines[type]);
+		}
+		m_world.removeSquadRequest(it->team, it->squad, kKinds[type]);
+		m_commanderSaid.push_back({it->team, it->squad, kLines[type]});
+		it = m_turnDowns.erase(it);
 	}
 }
 

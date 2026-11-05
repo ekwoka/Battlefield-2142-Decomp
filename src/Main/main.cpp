@@ -150,6 +150,7 @@ struct Options {
 	std::string drive;           // --drive <vehicle>: put one before the player and drive it
 	int bots = 0;                // --bots N: AI players, alternately PAC and EU
 	int simulate = 0;            // --simulate N: run N seconds headless, then show the scores
+	std::string language = "English"; // --language: the registry's Language (0x00405360), strings.csv's column
 	bool servers = false;        // --servers: list the servers OpenSpy's master server knows
 	std::string connect;         // --connect host[:port] (the original's +joinServer): play on a game server
 	std::string demo;            // --demo <file.bf2142demo>: play a recorded game back (Net/Demo.h)
@@ -285,6 +286,8 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.servers = true;
 		} else if (arg == "--simulate" && hasValue) {
 			options.simulate = std::atoi(argv[++i]);
+		} else if (arg == "--language" && hasValue) {
+			options.language = argv[++i]; // German, Russian, Chinese_Simplified, ... (strings.csv's header)
 		} else if (arg == "--bots" && hasValue) {
 			options.bots = std::atoi(argv[++i]);
 		} else if (arg == "--menu") {
@@ -535,6 +538,8 @@ private:
 // not decompiled, so the layout is read off the scripts.
 std::function<std::string(const std::string&)> g_localize; // strings.csv
 
+constexpr float tabKickColumn = 279; // the KICKVOTE label's 285..373 less the list's 10, the 12-pixel box centred near its start
+
 void setupScoreboard(hud::HudManager& hud)
 {
 	const std::vector<hud::HudManager::ListColumn> columns {
@@ -547,11 +552,14 @@ void setupScoreboard(hud::HudManager& hud)
 	// so it sits at the name's end), the kit icon (column 7, 15 pixels
 	// square as the row filler 0x007bb540 draws it, from the HUD manager's
 	// slot 0x64, 0x0074e940: menu::scoreboardIcon; before the voice box)
-	// and keep the player's id in cell 8.
+	// and the Manage tab's kick-vote button (column 8, 0x007bc590 types
+	// 10 / 11, under the tab's HUD_TEXT_MENU_SQUAD_MANAGE_KICKVOTE label at
+	// 285 / 675, the lists at 10 / 402), and keep the player's id in cell 9.
 	auto players = columns;
 	players[0].width = 160; // the name, clear of the icons
 	players.push_back({196, 0, 0, 12});
 	players.push_back({176, 0, 0, 15, {0, 0, 0, 1}}); // black (0x00b3bec0)
+	players.push_back({tabKickColumn, 0, 0, 12});
 	for (int data : {1, 2}) {
 		hud.setListColumns(data, players);
 	}	// The "Players" tab first (scoreboard.setToggleShow picks the others).
@@ -600,11 +608,17 @@ void updateScoreboard(hud::HudManager& hud, const host::HudWorld& world, const w
 			// "\xa71%d\xa70" 0x009b6854), then the voice box and the id.
 			const auto f1 = [](const std::string& text) { return "\xa7" "1" + text + "\xa7" "0"; };
 			const host::HudWorld::Scores n = world.scores(p.id);
-			rows.push_back({f1(p.name), f1(std::to_string(n.score)), f1(std::to_string(n.teamwork)), f1(std::to_string(p.kills)),
-				f1(std::to_string(p.deaths)), f1(p.ai ? "BOT" : std::to_string(std::max(n.ping, 0))),
+			// The Manage tab (ToggleManage): the score columns give way to
+			// its VOIP, buddy and kick-vote boxes; the kick box for the
+			// others' rows.
+			const bool manage = hud.number("ToggleManage") != 0;
+			const auto cell = [&](const std::string& text) { return manage ? std::string() : f1(text); };
+			rows.push_back({f1(p.name), cell(std::to_string(n.score)), cell(std::to_string(n.teamwork)), cell(std::to_string(p.kills)),
+				cell(std::to_string(p.deaths)), cell(p.ai ? "BOT" : std::to_string(std::max(n.ping, 0))),
 				g_scoreboardVoice && !p.ai && p.id != world.localPlayer() ? g_scoreboardVoice(p.id) : std::string(),
 				dice::hfe::menu::scoreboardIcon(p, me.id == world.localPlayer() ? me.team : 0,
 					p.kit && objects.find(p.kit) ? objects.find(p.kit)->objectTemplate() : nullptr),
+				manage && p.id != world.localPlayer() ? "Ingame/Scoreboard/Icons/kickbutton_up.tga" : std::string(),
 				std::to_string(p.id)});
 			totalTeamwork += n.teamwork;
 			// The row's colours (0x007bb540; see menu::scoreboardStyle).
@@ -940,6 +954,25 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		mate.color[0] = mate.color[1] = mate.color[2] = 0.7f;
 		markers.push_back(mate);
 	}
+	// The commander screen's mini-map tab (HudManager::drawMiniMap): the
+	// team's players as dots coloured by 0x007e7580 (the local player's
+	// squad (0.4, 1, 0), its leader white, the team (0.254, 0.552, 0.89)),
+	// the local player's mark the commander map's zoom square.
+	std::vector<hud::HudManager::MiniMapDot> dots;
+	for (const auto& player : world.playerList()) {
+		if (!player.alive || player.team != me.team || player.id == me.id) {
+			continue;
+		}
+		hud::HudManager::MiniMapDot dot;
+		dot.x = player.position.x;
+		dot.z = player.position.z;
+		dot.squad = me.squad != 0 && player.squad == me.squad;
+		const float squad[4] = {0.4f, 1, 0, 1}, team[4] = {0.254f, 0.552f, 0.89f, 1}, white[4] = {1, 1, 1, 1};
+		const float* color = !dot.squad ? team : player.squadLeader ? white : squad;
+		std::copy(color, color + 4, dot.color);
+		dots.push_back(dot);
+	}
+	hud.setMiniMapDots(std::move(dots), commanderScreen);
 	// The commanders' work: the UAV's ring, strikes on their way, supply
 	// crates, and the squad's order.
 	physics::Vec3 uav;
@@ -2908,12 +2941,19 @@ int runGame(Options& options, Session& session)
 	session.menuHost.scroller = &session.menu.scroller();
 	dice::hfe::menu::registerMenuHostConsole(console, session.menuHost);
 	// Localized text (0x00405360: Localization/strings.csv in the
-	// profile's language, English here; the game reads no other file).
+	// registry's Language, here --language, kept as GSLanguage; English
+	// when the file has no such column; the game reads no other file).
+	// The fonts follow it (hud::language: Fonts/<language>/).
 	io::Localization localization;
 	{
 		std::vector<uint8_t> data;
 		if (files.readFile("Localization/strings.csv", data)) {
-			localization.load(data, "English");
+			std::string language = options.language;
+			if (!localization.load(data, language)) {
+				language = "English";
+				localization.load(data, language);
+			}
+			hud::setLanguage(language);
 		}
 	}
 	// The texts' "#PISprint#" and "#GIYes#" as the keys bound to them
@@ -4681,14 +4721,37 @@ int runGame(Options& options, Session& session)
 				session.roundsOnMap = session.roundsPerMap;
 			}
 		};
-		// The scoreboard's mute boxes (Scoreboard.singleClick → 0x007bc590,
-		// column 6; the player's id in cell 8): a player's voice on or off.
+		// The scoreboard's boxes (Scoreboard.singleClick → 0x007bc590, by the
+		// clicked column's type; the player's id in cell 9): the mute box
+		// (column 6, type 7) turns a player's voice on or off; the Manage
+		// tab's kick box (column 8, types 10 / 11) starts a kick vote
+		// against him (the vote object 0x00572320, its gate 0x005722e0 and
+		// start 0x00573f20: not oneself, not the host, none running or
+		// within the wait, else the line; a client sends the Vote event,
+		// kind 2, a host's goes to its own votes, 0x00573f20's event 0/0xf).
 		bindMethod(console, "Scoreboard.singleClick", ConsoleAccess::Anyone, [&](int list) {
 			const auto& click = hudManager.lastListClick();
-			const std::string id = hudManager.listCell(list, click.row, 8);
-			if (click.column == 6 && !id.empty() && session.voice) {
-				const int player = std::atoi(id.c_str());
+			const std::string id = hudManager.listCell(list, click.row, 9);
+			if (id.empty()) {
+				return;
+			}
+			const int player = std::atoi(id.c_str());
+			if (click.column == 6 && session.voice) {
 				session.voice->client().setMuted(player, !session.voice->client().muted(player));
+			}
+			if (click.column == 8 && hudManager.number("ToggleManage") != 0
+				&& !hudManager.listCell(list, click.row, 8).empty()) {
+				if (!voteMessages.mayStartKick(player, false)) {
+					return;
+				}
+				if (net::GameClient* server = joinedServer()) {
+					server->startVote(game::Votes::kKick, player);
+				} else if (session.hosted) {
+					game::GameWorld::PlayerInfo me;
+					if (hudPlayer(hudLocal(), me)) {
+						session.hosted->localVote(me.id, game::Votes::kKick, 0, player, 0);
+					}
+				}
 			}
 		});
 		// The commander's zoom buttons (Commander.<asset>Zoom, slots 0x370..
@@ -4915,6 +4978,12 @@ int runGame(Options& options, Session& session)
 		// A click on the map with a tool or order armed: used there.
 		const auto commanderClick = [&](float x, float y) {
 			float worldX = 0, worldZ = 0;
+			// The mini-map tab (0x007e7d00, button 1): the commander's camera
+			// to the point under the click (slot 0x398).
+			if (commanderScreen && hudManager.miniMapWorldAt(x, y, worldX, worldZ)) {
+				sendCommanderCam(worldX, worldZ);
+				return true;
+			}
 			if (moveTitanArmed && hudManager.mapWorldAt(x, y, worldX, worldZ)) {
 				moveTitanArmed = false;
 				if (net::GameClient* server = joinedServer()) {
@@ -6022,9 +6091,14 @@ int runGame(Options& options, Session& session)
 			std::set<uint16_t> seen;
 			// Soldiers with a player: their wrecks wait for the player (0x00652380).
 			std::set<uint16_t> attached;
+			std::set<uint16_t> occupied; // vehicle ghosts with a seat taken
 			for (const net::RemotePlayer& p : client.world().playerList()) {
 				if (p.soldierGhost) {
 					attached.insert(p.soldierGhost);
+				}
+				if (p.alive && p.vehicleGhost) {
+					const net::RemoteObject* seat = client.world().object(p.vehicleGhost);
+					occupied.insert(seat && seat->rootGhost ? seat->rootGhost : p.vehicleGhost);
 				}
 			}
 			for (const net::RemoteObject& ghost : client.world().objectList()) {
@@ -6108,6 +6182,16 @@ int runGame(Options& options, Session& session)
 						// (the team-change radio, the name tags, the assets').
 						if (object->team() != ghost.team) {
 							object->setTeam(ghost.team);
+						}
+						// A walker's bundle animation, run here as the exe's
+						// client runs it (GameWorld::animateRemoteVehicle): its
+						// legs and the seats on its torso follow.
+						if (ghost.kind != net::NetworkableKind::Soldier && object->objectTemplate()
+							&& object->objectTemplate()->settings().count("bundleAnimationSystem")) {
+							const physics::Vec3 v = ghost.hasVelocity
+								? physics::Vec3 {ghost.velocity.x, ghost.velocity.y, ghost.velocity.z}
+								: physics::Vec3 {};
+							round.animateRemoteVehicle(it->second, v, occupied.count(ghost.ghost) > 0, 1.0f / 30.0f);
 						}
 					}
 				} else if (world::ObjectTemplate* t = ghost.templateName.empty() ? templates.findById(ghost.templateId)

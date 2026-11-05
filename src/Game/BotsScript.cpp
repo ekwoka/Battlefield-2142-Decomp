@@ -640,6 +640,12 @@ void registerBotScriptMethods(Console& console, BotSettings& settings)
 	const uint32_t access = ConsoleAccess::Anyone;
 	BotSettings* s = &settings;
 
+	// aiRandom.seed (u32; 0x10023670 / 0x100237d0): the twister's seed word,
+	// read or written; writing it doesn't seed again (only the AI's start
+	// does, 0x100309a0), so it changes no draw.
+	bindProperty<int>(console, "aiRandom.seed", access, [s] { return static_cast<int>(s->random.seedWord()); },
+		[s](int seed) { s->random.setSeedWord(static_cast<uint32_t>(seed)); });
+
 	// aiSettings.* (the settings object; the execute slots AIDLL 0x1000ade0..
 	// 0x10011570 call its modifier vtable 0x10114828).
 	bindMethod(console, "aiSettings.setMaxNAutoControllers", access, [s](int n) { s->maxAutoControllers = n; });
@@ -681,9 +687,10 @@ void registerBotScriptMethods(Console& console, BotSettings& settings)
 	});
 	bindMethod(console, "aiSettings.getNumberOfVehicleGroups", access, [s]() { return static_cast<int>(s->vehicleGroups.size()); });
 	bindMethod(console, "aiSettings.addBotName", access, [s](std::string first, std::string last) {
-		// The key's U[0, 1): a fixed sequence here.
-		s->botNameSeed = s->botNameSeed * 1664525u + 1013904223u;
-		s->addBotName(first, last, static_cast<float>(s->botNameSeed >> 8) / static_cast<float>(1u << 24));
+		// 0x10050720: the key is the AI's next word as a float x 2^-32
+		// (x 0.4 x 2^-32, 9.313226e-11, for the first six; addBotName
+		// applies the 0.4).
+		s->addBotName(first, last, ai::wordToFloat(s->random.next()) * 2.3283064e-10f);
 	});
 	bindMethod(console, "aiSettings.addInterpreterEntry", access, [s](std::string equipment, std::string statement) {
 		std::vector<std::string>& list = s->interpreter[equipment];
@@ -717,6 +724,7 @@ void registerBotScriptMethods(Console& console, BotSettings& settings)
 			s->editing = set;
 		}
 	});
+	// The list's text: the settings' 0x10027990 (a name a line).
 	bindMethod(console, "aiSettings.listBehaviourModifiers", access, [s]() {
 		std::string out;
 		for (const auto& [name, set] : s->modifiers) {
@@ -1035,6 +1043,13 @@ void registerBotScriptMethods(Console& console, BotSettings& settings)
 	// ai.addBot <name> <team> <personality> <equipment> (0x10005bc0): a
 	// bot player through the game's AI player factory (BF2142.exe
 	// 0x0089e7a0, which names a nameless one by nextBotName); its id.
+	// The original's body (0x10028c00) answers -1 without an SAI, for a
+	// team outside 0..2, an equipment type it doesn't know ("NoEquipment"
+	// is none) or a personality it doesn't have (+4's map), and otherwise
+	// the bot manager's count less one (slot 8) after AIMain's add
+	// 0x100580c0; the rewrite answers the new player's id and doesn't
+	// check the personality or equipment names (the shipped scripts don't
+	// read the answer).
 	bindMethod(
 		console, "ai.addBot", access,
 		[s](std::string name, int team, std::string, std::string) { return s->manager ? s->manager->addBot(name, team) : -1; },

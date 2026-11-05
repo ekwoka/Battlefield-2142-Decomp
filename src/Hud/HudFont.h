@@ -52,4 +52,19 @@ private:
 
 std::optional<HudFont> parseHudFont(const std::string& text);
 
+// The next character of HUD text from `at` (moved past it): a UTF-8
+// sequence's code point (the strings come from the UTF-16 strings.csv,
+// and the fonts' glyphs are by Unicode code point: the Chinese fonts'
+// 1,447 run to 0x9xxx), or a lone byte as itself (Latin-1 names, the
+// lists' font switch "\xa7").
+uint32_t nextCode(const std::string& text, size_t& at);
+
+// The game's language (BF2142.exe 0x00405360: the registry's Language,
+// "English" by default, kept as the GSLanguage setting): the column of
+// strings.csv and the fonts' folder (Fonts/<language>/, its 800 x 600
+// fonts in Fonts/<language>/800/), English when that has none. One for
+// the process, as the setting is.
+const std::string& language();
+void setLanguage(const std::string& name);
+
 } // namespace dice::hfe::hud

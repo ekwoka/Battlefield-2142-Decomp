@@ -2,10 +2,12 @@
 
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
+#include "InertRows.h"
 #include "Object.h"
 #include "ObjectTemplateManager.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <string>
 #include <utility>
@@ -62,6 +64,20 @@ std::string firstWord(const std::string& text)
 	}
 	const size_t end = text.find_first_of(" \t", start);
 	return text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+}
+
+// A VehicleCategory argument: its name (VCLand 0, VCSea 1, VCAir 2,
+// VCHelicopter 3, VCNoVehicleCategory 4, with or without c_) or its number.
+int vehicleCategoryNumber(const std::string& text)
+{
+	static const char* const names[] = {"VCLand", "VCSea", "VCAir", "VCHelicopter", "VCNoVehicleCategory"};
+	const std::string word = firstWord(text);
+	for (int i = 0; i < 5; ++i) {
+		if (word == names[i] || word == std::string("c_") + names[i]) {
+			return i;
+		}
+	}
+	return std::atoi(word.c_str());
 }
 
 } // namespace
@@ -197,6 +213,62 @@ void registerWorldConsoleMethods(Console& console, ObjectTemplateManager& templa
 		return {};
 	};
 	console.registerMethod(supplyGroup);
+
+	// addVehicleType has two rows. With one argument it is the
+	// SupplyObject's (0x004fad25, executor 0x00504752 -> 0x00504789: the
+	// VehicleCategory appended to the template's list at +0x2d0): the
+	// vehicles a repair and rearm pad serves (0x005d1710 compares each
+	// vehicle's vehicleCategory with the list; the helipads 3, VCHelicopter,
+	// the airstrips 2, VCAir). Kept as "addVehicleType.list", the categories'
+	// numbers in order ("3 2"), which the supply step reads (Commander.cpp).
+	// With four (<name> <int> <float> <float>, 0x004f9829, executor
+	// 0x004f98f9 -> 0x005b11e0) it is the SupplyDepot's, which no shipped
+	// script calls: kept as "addVehicleType.supplyDepot.list" = "args;...".
+	ConsoleMethod vehicleType;
+	vehicleType.name = "ObjectTemplate.addVehicleType";
+	vehicleType.kind = ConsoleMethodKind::Method;
+	vehicleType.access = access;
+	vehicleType.minArgs = 1;
+	vehicleType.maxArgs = 4;
+	vehicleType.isActive = activeTemplate;
+	vehicleType.invoke = [&templates](const std::vector<std::string>& args) -> std::string {
+		auto& settings = templates.active()->settings();
+		if (args.size() == 1) {
+			std::string& list = settings["addVehicleType.list"];
+			list += (list.empty() ? "" : " ") + std::to_string(vehicleCategoryNumber(args[0]));
+		} else if (args.size() == 4) {
+			settings["addVehicleType.supplyDepot.list"] +=
+				firstWord(args[0]) + " " + args[1] + " " + args[2] + " " + args[3] + ";";
+		}
+		return {};
+	};
+	console.registerMethod(vehicleType);
+
+	// setIfTitanChangeToWeapon <weapon> <distance> (GenericFireArm, executor
+	// 0x004e20d4: the name at +0x340, the distance at +0x35c; pod_launcher_cq
+	// and eu_apc_alps' "pod_launcher 250"). In the firearm's input handler
+	// (0x005c50e0) a fire press (event 7) of a weapon that has one looks for
+	// the nearest Titan (the game logic's objects of type 7, 0x0058e400) by
+	// the horizontal distance; within it, the vehicle's weapon of that name
+	// (0x0065aed0 on the template names of its weapons, slot 0x74) is
+	// selected (slot 0x1a4) and fires instead (slot 0x100, event 6): the
+	// APC's conquest pod launcher becomes the Titan pod launcher near a
+	// Titan. Kept as "setIfTitanChangeToWeapon" = "<weapon> <distance>".
+	ConsoleMethod titanWeapon;
+	titanWeapon.name = "ObjectTemplate.setIfTitanChangeToWeapon";
+	titanWeapon.kind = ConsoleMethodKind::Method;
+	titanWeapon.access = access;
+	titanWeapon.minArgs = 2;
+	titanWeapon.maxArgs = 2;
+	titanWeapon.isActive = activeTemplate;
+	titanWeapon.invoke = [&templates](const std::vector<std::string>& args) -> std::string {
+		templates.active()->settings()["setIfTitanChangeToWeapon"] =
+			firstWord(args[0]) + " " + firstWord(args[1]);
+		return {};
+	};
+	console.registerMethod(titanWeapon);
+
+	registerInertConsoleRows(console);
 
 	// activeSafe <type> <name>: the type is only checked in debug builds.
 	bindMethod(console, "ObjectTemplate.activeSafe", access, [&templates](std::string, std::string name) {

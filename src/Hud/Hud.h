@@ -221,6 +221,22 @@ public:
 	// The world point (x, z) under a point of the map as last drawn; false
 	// off the map.
 	bool mapWorldAt(float x, float y, float& worldX, float& worldZ) const;
+	// The commander screen's mini-map tab (Bf2MiniMenuMapNode, drawMiniMap):
+	// the players' dots (world x, z; `squad` the local player's squad's,
+	// 4 pixels) and whether the commander map's zoom square shows (at the
+	// map's focus). miniMapWorldAt: the world point under a point of the
+	// tab as last drawn (its click, 0x007e7d00); false off it.
+	struct MiniMapDot {
+		float x = 0, z = 0;
+		float color[4] = {1, 1, 1, 1};
+		bool squad = false;
+	};
+	void setMiniMapDots(std::vector<MiniMapDot> dots, bool zoomSquare)
+	{
+		m_miniMapDots = std::move(dots);
+		m_miniMapSquare = zoomSquare;
+	}
+	bool miniMapWorldAt(float x, float y, float& worldX, float& worldZ) const;
 	// The pointer (menus) in the 800 x 600 screen, and a click there:
 	// buttons run their console commands (setButtonNodeConCmd; with
 	// `alternate`, the right button, setButtonNodeAltConCmd) through the
@@ -380,6 +396,8 @@ private:
 	std::function<std::string(const std::string&)> m_localize;
 	size_t m_parentStart = 0; // where the drawing node's parent's quads began
 	void drawMap(const Node& node, float alpha, float seconds, std::vector<HudQuad>& out);
+	void drawMiniMap(float x, float y, float w, float h, float alpha, std::vector<HudQuad>& out);
+	void shownArea(float refX, float refY, float area[4]) const;
 	std::string m_mapTexture;
 	std::string m_mapLayer;
 	int m_mapZoomIndex = 1;
@@ -407,7 +425,11 @@ private:
 		bool drawn = false;
 		float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
 		float mapX = 0, mapY = 0, mapW = 1, mapH = 1;
-	} m_mapView;
+	} m_mapView, m_miniMapView;
+	float m_mapReference[2] = {0, 0}; // the big map's size (setMaxiSize), the shown area's pixels
+	float m_mapZoomShown[2] = {1, 1}; // the map's zoom as last drawn (2.3^level / the area)
+	std::vector<MiniMapDot> m_miniMapDots;
+	bool m_miniMapSquare = false;
 	struct ButtonHit {
 		float x0, y0, x1, y1;
 		const Node* node;

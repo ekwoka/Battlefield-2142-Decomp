@@ -166,6 +166,7 @@ What a run does depends on three options:
 | `--view` (or `--menu`, `--play`, `--connect` without the next two) | A window with sound. Runs until you quit. |
 | `--screenshot out.png` | No window: the frame is drawn off screen, saved, and the program exits. |
 | `--simulate N` | No window: N seconds of game time run as fast as possible, then the scores print. Only `--view` adds a window to it. |
+| `--language L` | The game's language (the original's registry Language): strings.csv's column and the fonts of `Fonts/L/` (German, French, Russian, Chinese_Simplified, ...; English when the file has no such column). |
 
 `--screenshot` and `--simulate` can be combined with almost everything below,
 which is how the tests and the agents check the game without a window.

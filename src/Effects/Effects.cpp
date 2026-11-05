@@ -232,8 +232,41 @@ ParticleTemplate ParticleTemplate::fromTemplate(const world::ObjectTemplate& t)
 	return p;
 }
 
+namespace {
+
+// A non-screen-aligned system with forceToWaterSurface (template +0xa4,
+// slot 0x124) takes an upright frame (0x1013c800 after composing its world
+// matrix +0x74; 0x100989f0 with up (0, 1, 0) and the frame's z row +0x94):
+// x = normalize(z x up), y = x x z, z kept as it is (not made level, nor
+// normalised); with z within 0.9999 of up the rotation is the identity. So
+// its rings lie across the world's up whatever the frame of the hit or the
+// swimmer that started them. (x comes out mirrored against the identity:
+// z = (0, 0, 1) gives x = (-1, 0, 0), as in the binary.)
+Mat3 uprightFrame(const Mat3& frame)
+{
+	const Vec3 up {0, 1, 0};
+	const Vec3 z = frame.rows[2];
+	Mat3 out;
+	if (std::fabs(physics::dot(up, z)) <= 0.9999f) {
+		Vec3 x = physics::cross(z, up);
+		const float length = std::sqrt(physics::lengthSquared(x));
+		if (length > 0) {
+			x = x * (1 / length);
+		}
+		out.rows = {x, physics::cross(x, z), z};
+	}
+	return out;
+}
+
+Mat3 frameFor(const ParticleTemplate& t, const Mat3& rotation)
+{
+	return t.nonScreenAligned && t.forceToWaterSurface ? uprightFrame(rotation) : rotation;
+}
+
+} // namespace
+
 Emitter::Emitter(const ParticleTemplate& t, const Vec3& position, const Mat3& rotation)
-	: m_template(&t), m_position(position), m_rotation(rotation), m_previous(position)
+	: m_template(&t), m_previous(position), m_position(position), m_rotation(frameFor(t, rotation))
 {
 	// The instance's pool (0x1013f6a0): (ttl + random ttl) x frequency + 10.
 	const float span = t.timeToLive + t.randomTimeToLive;
@@ -261,7 +294,26 @@ bool Emitter::alive() const
 void Emitter::place(const Vec3& position, const Mat3& rotation)
 {
 	m_position = position;
-	m_rotation = rotation;
+	m_rotation = frameFor(*m_template, rotation);
+}
+
+void Emitter::bounds(Vec3& centre, float& radius) const
+{
+	if (m_particles.empty()) {
+		centre = m_position;
+		radius = 0;
+		return;
+	}
+	Vec3 lo = worldPosition(m_particles.front()), hi = lo;
+	for (const Particle& p : m_particles) {
+		const Vec3 at = worldPosition(p);
+		lo = {std::min(lo.x, at.x), std::min(lo.y, at.y), std::min(lo.z, at.z)};
+		hi = {std::max(hi.x, at.x), std::max(hi.y, at.y), std::max(hi.z, at.z)};
+	}
+	const float grow = m_template->particleMaxSize; // the template's +0x14c
+	const Vec3 half = (hi - lo) * 0.5f + Vec3 {grow, grow, grow};
+	centre = (lo + hi) * 0.5f;
+	radius = std::sqrt(physics::lengthSquared(half));
 }
 
 Vec3 Emitter::worldPosition(const Particle& p) const
@@ -325,6 +377,7 @@ void Emitter::start(const EmitContext& context)
 	m_clock = m_emitClock = m_carry = 0;
 	m_previous = m_position;
 	m_active = true;
+	lastSeenFrame = context.frame; // the start stamps it (0x1013fb30)
 	if (context.settings && t.qualityLevel > context.settings->qualityLevel) {
 		m_active = false;
 		return;
@@ -438,7 +491,7 @@ void Emitter::emit(game::Random& random, const Vec3& at, float age, const EmitCo
 	}
 	p.selfShadow = t.selfShadowIntensity;
 	p.life = std::max(0.01f, t.timeToLive + unitRandom(random) * t.randomTimeToLive);
-	p.age = age;
+	p.age = age + startAge; // the bundle's start age (+0xd8 / +0xe0)
 	p.alpha = alphaIntensity;
 	// Size and speed share one random (0x1013fdc0's local_8).
 	const float shared = signedRandom(random);
@@ -598,6 +651,13 @@ void Emitter::step(float seconds, game::Random& random, const EmitContext& conte
 		m_previous = m_position;
 		return;
 	}
+	// Unseen for 60 frames (0x101403b0 / 0x10144d90): no emission, and the
+	// emit clock (+0xf0) stays behind, so the missed time is emitted when
+	// it is seen again.
+	if (unseen(context.frame)) {
+		m_previous = m_position;
+		return;
+	}
 	// The emission (0x101403b0): the frequency times the distance LOD and
 	// the bundle's scale, throttled by priority once the pool is loaded.
 	float frequency = t.emitFrequency * m_lodScale * emitScale;
@@ -625,6 +685,14 @@ void Emitter::step(float seconds, game::Random& random, const EmitContext& conte
 			}
 		}
 		m_emitClock += interval;
+		// One born so long ago that it would be dead by now (a catch-up
+		// after the system was out of sight) isn't made: its update would
+		// drop it before it is drawn. (The binary lerps such a birth's
+		// place back along the system's last move, unclamped; here it
+		// stays at the update's start.)
+		if (span > 0 && m_clock - m_emitClock >= span) {
+			continue;
+		}
 		// Its place lerped over the update, then moved on for the rest of it.
 		const float share = m_clock > before ? std::clamp((m_emitClock - before) / (m_clock - before), 0.0f, 1.0f) : 1.0f;
 		const Vec3 at = m_previous + (m_position - m_previous) * share;
@@ -727,7 +795,11 @@ void Emitter::update(float seconds, game::Random& random, const EmitContext& con
 		const bool emitting = t.isLooping || anchor != 0 || active - seconds < t.emitTime;
 		if (!m_stopped && m_active && active > 0 && emitting && m_speed >= t.minTrailVelocity) {
 			m_pending += t.emitFrequency * emitScale * seconds;
-			while (m_pending >= 1.0f) {
+			// Unseen for 60 frames (0x1013b4b0: the draw's frame +0x120):
+			// the points wait, and come at once (up to the pool, +0x150)
+			// when it is seen again.
+			m_pending = std::min(m_pending, static_cast<float>(m_capacity) + 1.0f);
+			while (!unseen(context.frame) && m_pending >= 1.0f) {
 				emit(random, m_position, 0, context);
 				m_pending -= 1.0f;
 			}
@@ -878,9 +950,11 @@ void EffectManager::spawnTemplate(const world::ObjectTemplate& t, const Vec3& po
 				for (Emitter* emitter : started) {
 					emitter->timeScale *= ageFactor;
 					emitter->physicsVelocity = physicsSpeed;
-					float* const targets[4] = {&emitter->alphaIntensity, &emitter->emitScale, &emitter->speedScale,
-						&emitter->timeScale};
-					for (int m = 0; m < 4; ++m) {
+					// 0..4 go to the systems (0x00618bc0..0x00618d00); the
+					// sound's (5) is the bundle's.
+					float* const targets[5] = {&emitter->alphaIntensity, &emitter->emitScale, &emitter->speedScale,
+						&emitter->timeScale, &emitter->startAge};
+					for (int m = 0; m < 5; ++m) {
 						if ((modifierMask & (1u << m)) != 0) {
 							*targets[m] = modifierValues[static_cast<size_t>(m)];
 						}
@@ -1032,6 +1106,12 @@ std::vector<DecalVertex> clipDecal(const Vec3& centre, const Vec3& normal, const
 
 bool EffectManager::spawnDecal(const std::string& name, const Vec3& position, const Vec3& normal, uint32_t surface)
 {
+	return addDecal(name, position, normal, surface, 0);
+}
+
+bool EffectManager::addDecal(const std::string& name, const Vec3& position, const Vec3& normal, uint32_t surface,
+	uint32_t set)
+{
 	const world::ObjectTemplate* t = m_templates.find(name);
 	if (!t || (t->typeName() != "Decal" && t->typeName() != "decal")) {
 		return false;
@@ -1064,10 +1144,43 @@ bool EffectManager::spawnDecal(const std::string& name, const Vec3& position, co
 		const float v0 = (frame / look.framesAcross) * look.frameHeight;
 		decal.frame = {u0, v0, u0 + look.frameWidth, v0 + look.frameHeight};
 	}
-	if (m_decals.size() >= kMaxDecals) {
-		m_decals.erase(m_decals.begin());
+	m_lastDecalId = 0;
+	if (look.isStatic) {
+		// The set's second list (0x10166410 -> 0x10164710): the next id,
+		// past 255 back to 1.
+		m_decals.push_back(decal);
+		m_decals.back().staticId = m_lastDecalId = nextStaticDecalId(set);
+		return true;
+	}
+	// The ring of aged decals (+0x28): the oldest goes when it is full.
+	if (std::count_if(m_decals.begin(), m_decals.end(), [](const Decal& d) { return d.staticId == 0; })
+		>= static_cast<std::ptrdiff_t>(kMaxDecals)) {
+		m_decals.erase(std::find_if(m_decals.begin(), m_decals.end(), [](const Decal& d) { return d.staticId == 0; }));
 	}
 	m_decals.push_back(decal);
+	return true;
+}
+
+uint8_t EffectManager::nextStaticDecalId(uint32_t object)
+{
+	uint32_t& id = m_staticDecalIds[object];
+	if (id > 0xfe) {
+		id = 0;
+	}
+	return static_cast<uint8_t>(++id);
+}
+
+bool EffectManager::removeStaticDecal(uint32_t object, uint8_t id)
+{
+	if (id == 0) {
+		return false; // 0x10164e70 does nothing for 0
+	}
+	const auto found = std::find_if(m_decals.begin(), m_decals.end(),
+		[object, id](const Decal& d) { return d.object == object && d.staticId == id; });
+	if (found == m_decals.end()) {
+		return false;
+	}
+	m_decals.erase(found);
 	return true;
 }
 
@@ -1082,7 +1195,7 @@ bool EffectManager::spawnDecal(const std::string& name, const Vec3& position, co
 			return false;
 		}
 	}
-	if (!spawnDecal(name, position, normal)) {
+	if (!addDecal(name, position, normal, 0, object)) {
 		return false;
 	}
 	if (object != 0) {
@@ -1098,6 +1211,7 @@ bool EffectManager::spawnDecal(const std::string& name, const Vec3& position, co
 
 void EffectManager::dropDecals(uint32_t object)
 {
+	m_staticDecalIds.erase(object);
 	m_decals.erase(std::remove_if(m_decals.begin(), m_decals.end(),
 					   [object](const Decal& decal) { return decal.object == object; }),
 		m_decals.end());
@@ -1181,7 +1295,7 @@ bool EffectManager::spawn(const std::string& name, const Vec3& position, const M
 }
 
 bool EffectManager::spawnAttached(const std::string& name, uint32_t anchor, const Vec3& position, const Mat3& rotation,
-	View view, uint32_t tag)
+	View view, uint32_t tag, bool driven)
 {
 	const world::ObjectTemplate* t = m_templates.find(name);
 	if (!t) {
@@ -1200,9 +1314,23 @@ bool EffectManager::spawnAttached(const std::string& name, uint32_t anchor, cons
 		light.mountRotation = rotation;
 		placeLight(light);
 	}
+	uint32_t bundle = 0;
+	if (driven && !spawned.empty()
+		&& (bundleModifiers(*t).anyMapping || number(*t, "speedFromPhysics", 0) != 0)) {
+		AttachedBundle b;
+		b.id = bundle = ++m_nextBundle;
+		b.anchor = anchor;
+		b.tag = tag;
+		b.bundle = t;
+		b.mountPosition = position;
+		b.mountRotation = rotation;
+		b.speedFromPhysics = number(*t, "speedFromPhysics", 0) != 0;
+		m_attachedBundles.push_back(b);
+	}
 	for (Emitter* emitter : spawned) {
 		emitter->anchor = anchor;
 		emitter->tag = tag;
+		emitter->bundle = bundle;
 		emitter->localPosition = emitter->position();
 		emitter->localRotation = emitter->rotation();
 		emitter->mountPosition = position;
@@ -1342,11 +1470,14 @@ void EffectManager::update(float seconds)
 	// A set whose owner wasn't drawn ages twice (0x10164f10 adds the
 	// frame's seconds once more while +0x19 is clear; world sets force it
 	// set): Decal::ownerDrawn.
+	// The static list (+0x2c) isn't aged.
 	for (Decal& decal : m_decals) {
-		decal.age += decal.object != 0 && !decal.ownerDrawn ? 2 * seconds : seconds;
+		if (decal.staticId == 0) {
+			decal.age += decal.object != 0 && !decal.ownerDrawn ? 2 * seconds : seconds;
+		}
 	}
 	m_decals.erase(std::remove_if(m_decals.begin(), m_decals.end(),
-					   [decalLife](const Decal& decal) { return decal.age >= decalLife; }),
+					   [decalLife](const Decal& decal) { return decal.staticId == 0 && decal.age >= decalLife; }),
 		m_decals.end());
 	// Emitters attached to nothing that is still known end.
 	for (const auto& emitter : m_emitters) {
@@ -1354,6 +1485,7 @@ void EffectManager::update(float seconds)
 			emitter->stop();
 		}
 	}
+	stepAttachedBundles(seconds);
 	EmitContext context = m_context;
 	context.settings = m_settings;
 	context.wind = m_wind;
@@ -1388,6 +1520,89 @@ void EffectManager::update(float seconds)
 					  [](const LiveWind& w) { return w.life >= 0 && w.age >= w.life; }),
 		m_winds.end());
 	stepDebris(seconds);
+}
+
+// The attached bundles' tick (0x0061a760): the speeds at the bundle from
+// the anchor's moves over the update, as ObjectEffects takes them from an
+// object's (the anchor's own velocity standing in for the root physics';
+// no Engine input: an armour effect sits on the vehicle's root).
+void EffectManager::stepAttachedBundles(float seconds)
+{
+	m_attachedBundles.erase(std::remove_if(m_attachedBundles.begin(), m_attachedBundles.end(),
+								[this](const AttachedBundle& b) {
+									if (!m_anchors.count(b.anchor)) {
+										return true;
+									}
+									return std::none_of(m_emitters.begin(), m_emitters.end(),
+										[&b](const std::unique_ptr<Emitter>& e) { return e->bundle == b.id && !e->stopped(); });
+								}),
+		m_attachedBundles.end());
+	if (seconds <= 0) {
+		return;
+	}
+	for (AttachedBundle& b : m_attachedBundles) {
+		const Anchor& anchor = m_anchors.at(b.anchor);
+		const Vec3 point = anchor.position + anchor.rotation.transform(b.mountPosition);
+		if (!b.hasLast) {
+			b.lastPoint = point;
+			b.lastOrigin = anchor.position;
+			b.hasLast = true;
+			continue;
+		}
+		const Vec3 velocity = (anchor.position - b.lastOrigin) * (1 / seconds);
+		const Vec3 pointVelocity = (point - b.lastPoint) * (1 / seconds);
+		const auto each = [&](const std::function<void(Emitter&)>& f) {
+			for (const auto& emitter : m_emitters) {
+				if (emitter->bundle == b.id) {
+					f(*emitter);
+				}
+			}
+		};
+		if (b.speedFromPhysics) {
+			const float speed = std::sqrt(physics::lengthSquared(velocity));
+			const Vec3 inherited = speed > 1e-6f ? velocity * (std::sqrt(speed) / speed) : Vec3 {};
+			each([&](Emitter& e) {
+				if (e.physicsVelocity) {
+					e.inheritedVelocity = inherited;
+				}
+			});
+		}
+		const BundleModifiers& modifiers = bundleModifiers(*b.bundle);
+		if (modifiers.anyMapping) {
+			BundleModifiers::Inputs inputs;
+			inputs.speed = std::sqrt(physics::lengthSquared(pointVelocity));
+			inputs.rotationalSpeed = std::sqrt(physics::lengthSquared(pointVelocity - velocity));
+			inputs.acceleration = std::sqrt(physics::lengthSquared((pointVelocity - b.lastPointVelocity) * (1 / seconds)));
+			inputs.altitude = altitudeAt(point, modifiers.minUnderWater >= 0);
+			inputs.speedInDof = physics::dot(pointVelocity, (b.mountRotation * anchor.rotation).transform({0, 0, 1}));
+			std::array<float, 6> values {};
+			const unsigned mask = modifiers.evaluate(inputs, values);
+			each([&](Emitter& e) {
+				float* const targets[5] = {&e.alphaIntensity, &e.emitScale, &e.speedScale, &e.timeScale, &e.startAge};
+				for (int m = 0; m < 5; ++m) {
+					if ((mask & (1u << m)) != 0) {
+						*targets[m] = values[static_cast<size_t>(m)];
+					}
+				}
+			});
+		}
+		b.lastPoint = point;
+		b.lastOrigin = anchor.position;
+		b.lastPointVelocity = pointVelocity;
+	}
+}
+
+void EffectManager::markViewed(const std::function<bool(const Vec3& centre, float radius)>& inView) const
+{
+	const uint32_t frame = ++m_context.frame;
+	for (const auto& emitter : m_emitters) {
+		Vec3 centre;
+		float radius = 0;
+		emitter->bounds(centre, radius);
+		if (!inView || inView(centre, radius)) {
+			emitter->lastSeenFrame = frame;
+		}
+	}
 }
 
 void EffectManager::appendLocalWinds(std::vector<scene::WindSettings::LocalWind>& out) const
@@ -1776,6 +1991,7 @@ void EffectManager::setModifier(uint32_t anchor, uint32_t tag, int modifier, flo
 		case 1: emitter->emitScale = value; break;
 		case 2: emitter->speedScale = value; break;
 		case 3: emitter->timeScale = value; break;
+		case 4: emitter->startAge = value; break; // 0x00618d00 -> slot 0x80
 		default: break;
 		}
 	}
@@ -2204,7 +2420,7 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 		// in the cold, on its head (the bundle's own place in the soldier).
 		if (!tracked.breath.empty() && object.coldBreath != tracked.breathing) {
 			if (object.coldBreath) {
-				effects.spawnAttached(tracked.breath, object.id, {0, 1.6f, 0.15f}, {}, view, kBreathTag);
+				effects.spawnAttached(tracked.breath, object.id, {0, 1.6f, 0.15f}, {}, view, kBreathTag, false);
 			} else {
 				effects.stopAttached(object.id, kBreathTag);
 			}
@@ -2234,7 +2450,7 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 				if (partPose && !created) {
 					place(b, object.id, partPose, b.position, b.rotation);
 				}
-				effects.spawnAttached(b.bundle->name(), object.id, b.position, b.rotation, bundleView, tag);
+				effects.spawnAttached(b.bundle->name(), object.id, b.position, b.rotation, bundleView, tag, false);
 			}
 			// The depth gate (0x0061a760, BundleModifiers::maxUnderWater):
 			// the water's height at the bundle less its own.
@@ -2247,7 +2463,7 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 					if (partPose && !created) {
 						place(b, object.id, partPose, b.position, b.rotation);
 					}
-					effects.spawnAttached(b.bundle->name(), object.id, b.position, b.rotation, bundleView, tag);
+					effects.spawnAttached(b.bundle->name(), object.id, b.position, b.rotation, bundleView, tag, false);
 				} else if (!in && running) {
 					effects.stopAttached(object.id, tag);
 				}
@@ -2270,7 +2486,7 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 				inputs.speedInDof = physics::dot(pointVelocity, (b.rotation * object.rotation).transform({0, 0, 1}));
 				std::array<float, 6> values {};
 				const unsigned mask = modifiers.evaluate(inputs, values);
-				for (int m = 0; m < 4; ++m) {
+				for (int m = 0; m < 5; ++m) {
 					if ((mask & (1u << m)) != 0) {
 						effects.setModifier(object.id, tag, m, values[static_cast<size_t>(m)]);
 					}
@@ -2507,7 +2723,7 @@ void ObjectEffects::updateGround(const ObjectState& object, const Vec3& velocity
 		}
 		current = effect;
 		if (!effect.empty()) {
-			effects.spawnAttached(effect, object.id, {}, {}, view, tag);
+			effects.spawnAttached(effect, object.id, {}, {}, view, tag, false);
 		}
 	}
 	if (current.empty()) {

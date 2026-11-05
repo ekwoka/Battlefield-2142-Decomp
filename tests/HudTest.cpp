@@ -558,3 +558,143 @@ TEST(Hud_MapMarkerOffset)
 		CHECK(b.rotation == 90);
 	}
 }
+
+// The commander's mini-map tab (Bf2MiniMenuMapNode, 0x007e8a90): the
+// level's map at zoom 0 and half alpha filling the node, the players as
+// 2-pixel dots (4 for the squad's), the zoom square at the map's focus
+// shrunk by the commander map's zoom (120 / clamp(zoom / 2, 1, 100)), and
+// a click's world point (0x007e7d00).
+TEST(Hud_CommanderMiniMapTab)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createMapNode Global Minimap",
+			 "hudBuilder.setMaxiPos -122/-271",
+			 "hudBuilder.setMaxiSize 512/512",
+			 "hudBuilder.setMiniPos 245/-291",
+			 "hudBuilder.setMiniSize 146/146",
+			 "hudBuilder.createPictureNode Global CommanderMapTabSelected 651 0 146 188",
+			 "hudBuilder.createMiniMapNode CommanderMapTabSelected CommanderMiniMap 6 0 133 163",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.setMap("Levels/x/Hud/Minimap/ingameMap.dds", -512, -512, 1024, 1024);
+	manager.set("MapFullSize", 1);
+	hud::HudManager::MiniMapDot mate, squad;
+	mate.x = 0;
+	mate.z = 0;
+	squad.x = 256;
+	squad.z = 256;
+	squad.squad = true;
+	manager.setMiniMapDots({mate, squad}, true);
+	manager.setMapFocus(-256, -256);
+	std::vector<hud::HudQuad> quads;
+	for (int i = 0; i < 3; ++i) {
+		quads = manager.frame(1);
+	}
+	// The node at 657, 0, 133 x 163: the map over it at half alpha.
+	const auto mini = std::find_if(quads.begin(), quads.end(), [](const hud::HudQuad& q) {
+		return q.texture.find("ingameMap") != std::string::npos && q.x0 == 657;
+	});
+	CHECK(mini != quads.end());
+	if (mini != quads.end()) {
+		CHECK(mini->y0 == 0 && mini->x1 == 657 + 133 && mini->y1 == 163 && std::abs(mini->color[3] - 0.5f) < 1e-5f);
+	}
+	std::vector<hud::HudQuad> dots;
+	for (const hud::HudQuad& q : quads) {
+		if (q.texture == "Menu/Console/white.dds" && q.x1 - q.x0 <= 4) { // not the tab's own fill
+			dots.push_back(q);
+		}
+	}
+	// (The test's nodes have no AffectedByEMPShow logic: both passes draw them.)
+	CHECK(dots.size() == 4);
+	dots.resize(std::min<size_t>(dots.size(), 2));
+	if (dots.size() == 2) {
+		CHECK(dots[0].x1 - dots[0].x0 == 2 && dots[1].x1 - dots[1].x0 == 4);
+		// The middle of the node; three quarters across, a quarter down.
+		CHECK(std::abs(dots[0].x0 + 1 - (657 + 66.5f)) <= 1 && std::abs(dots[0].y0 + 1 - 81.5f) <= 1);
+		CHECK(std::abs(dots[1].x0 + 2 - (657 + 133 * 0.75f)) <= 1 && std::abs(dots[1].y0 + 2 - 163 * 0.25f) <= 1);
+	}
+	// The big map at zoom level 0 (zoom 1): a 120-pixel square.
+	const auto square = std::find_if(quads.begin(), quads.end(),
+		[](const hud::HudQuad& q) { return q.texture.find("micromap_zoomSquare") != std::string::npos; });
+	CHECK(square != quads.end());
+	if (square != quads.end()) {
+		CHECK(square->x1 - square->x0 <= 120 && square->x1 > square->x0);
+	}
+	// A click a quarter across and down: the level's north-west quarter's middle.
+	float x = 0, z = 0;
+	CHECK(manager.miniMapWorldAt(657 + 133 * 0.25f, 163 * 0.25f, x, z));
+	CHECK(std::abs(x + 256) < 1 && std::abs(z - 256) < 1);
+	CHECK(!manager.miniMapWorldAt(100, 300, x, z));
+}
+
+// Non-English text (coverage-7 P8; BF2142.exe 0x00405360): the strings in
+// the game's language and its own fonts (Fonts/<language>/), whose glyphs
+// are by Unicode code point; HUD text is read as UTF-8 (hud::nextCode), so
+// every character of the German, Russian and Chinese strings is a glyph of
+// the language's hudFontLocalBold_9.
+TEST(Hud_NonEnglishTextHasGlyphs)
+{
+	std::string s = "a\xc3\xa9\xe4\xb8\xad\xa7" "1";
+	size_t at = 0;
+	std::vector<uint32_t> codes;
+	while (at < s.size()) {
+		codes.push_back(hud::nextCode(s, at));
+	}
+	CHECK((codes == std::vector<uint32_t> {'a', 0xe9, 0x4e2d, 0xa7, '1'}));
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	Console console(&files);
+	bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+		[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+	std::string out;
+	console.run("ClientArchives.con", {}, out);
+	std::vector<uint8_t> csv;
+	CHECK(files.readFile("Localization/strings.csv", csv));
+	for (const char* language : {"German", "Russian", "Chinese_Simplified", "Polish"}) {
+		io::Localization strings;
+		CHECK(strings.load(csv, language));
+		hud::setLanguage(language);
+		size_t checked = 0, missing = 0;
+		for (const char* id : {"HUD_TEXT_MENU_SCORE_PLAYERNAME", "HUD_TEXT_COMMANDER_MINIMAP", "HUD_HUD_KICKVOTE_IN_PROGRESS",
+				 "HUD_TEXT_MENU_SQUAD_MANAGE_KICKVOTE", "HUD_TEXT_MENU_SCORE_ROUNDSWON"}) {
+			hud::HudManager manager([&files](const std::string& path, std::string& text) {
+				std::vector<uint8_t> data;
+				if (!files.readFile(path, data)) {
+					return false;
+				}
+				text.assign(data.begin(), data.end());
+				return true;
+			});
+			manager.setLocalizer([&strings](const std::string& key) { return strings.text(key); });
+			Console builder;
+			hud::registerHudConsoleMethods(builder, manager);
+			builder.execute("hudBuilder.createTextNode Global T 0 0 800 20", out);
+			builder.execute("hudBuilder.setTextNodeStyle Fonts/hudFontLocalBold_9.dif 0", out);
+			builder.execute(std::string("hudBuilder.setTextNodeString ") + id, out);
+			const std::string text = strings.text(id);
+			const auto quads = manager.frame(0);
+			size_t visible = 0;
+			for (size_t at2 = 0; at2 < text.size();) {
+				const uint32_t c = hud::nextCode(text, at2);
+				visible += c != ' ' ? 1 : 0;
+				++checked;
+			}
+			// Both passes draw the test's node (no AffectedByEMPShow logic).
+			const size_t drawn = quads.size() / 2;
+			missing += visible > drawn ? visible - drawn : 0;
+		}
+		std::fprintf(stderr, "  %s: %zu characters, %zu without a glyph\n", language, checked, missing);
+		CHECK(checked > 20 && missing == 0);
+	}
+	hud::setLanguage("English");
+}

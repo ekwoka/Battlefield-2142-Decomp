@@ -7,6 +7,7 @@
 #include "AI/Formation.h"
 #include "AI/NavMesh.h"
 #include "AI/PathFollower.h"
+#include "AI/Random.h"
 #include "AI/Strategy.h"
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
@@ -530,6 +531,9 @@ TEST(Bots_ReactionTimeBySkill)
 		Field field;
 		Console console;
 		game::BotSettings settings = scriptedSettings(console);
+		// Seed 2 of the AI's twister: a stream whose draws have the skill-1 bot
+		// change its pose first, so its round waits out the 0.8 s.
+		settings.random = ai::Random::seeded(2);
 		settings.skill = skill;
 		game::BotManager bots(*field.world, settings);
 		const int bot = field.soldier(2, true, 0, 0);
@@ -1946,6 +1950,9 @@ TEST(Bots_SquadTargetAndGrenadeLob)
 	kit->children().push_back({"test_frag", {}, {}});
 	Console console;
 	game::BotSettings settings = scriptedSettings(console);
+	// Seed 2 of the AI's twister: a stream whose first weapon choice (before
+	// the fire plan keeps to the order) doesn't draw the grenade.
+	settings.random = ai::Random::seeded(2);
 	std::string out;
 	for (const char* line : {"aiSettings.setViewDistance 15", "weaponTemplate.create test_frag", "weaponTemplate.isThrown 1",
 			 "weaponTemplate.setExplosionRadius 9", "weaponTemplate.maxRange 40", "weaponTemplate.setStrength Infantry 1",
@@ -4169,6 +4176,9 @@ TEST(Bots_SightThroughSeeThrough)
 			kit->children().push_back({"eu_ar_rifle", {}, {}});
 			Console console;
 			game::BotSettings settings = scriptedSettings(console);
+			// Seed 2 of the AI's twister: a stream whose draws let the
+			// sighting's rounds go (some streams' aim never fires here).
+			settings.random = ai::Random::seeded(2);
 			std::string out;
 			for (const char* line : {"weaponTemplate.create eu_ar_rifle", "weaponTemplate.minRange 0", "weaponTemplate.maxRange 100",
 					 "weaponTemplate.setStrength Infantry 5"}) {
@@ -4903,4 +4913,38 @@ TEST(Bots_FormationStaysPackedWhenTheLeaderFalls)
 		CHECK(!(u && squad->formation.slots[i].member == first));
 	}
 	CHECK(used == 5 && packed);
+}
+
+// AIDLL's random numbers (AIRandom, DAT_101394cc): the Park-Miller step
+// 0x10030810 is x 630360016 mod 2^31 - 1; the seed 0x100309a0 fills the
+// 624 words with its run; the twister 0x100308f0 / 0x10046770 tempers with
+// DICE's masks (0x56b64a << 7, 0xffffb716 << 15), so its words aren't
+// MT19937's (whose first word for this state would differ).
+TEST(Bots_AiRandomIsDicesTwister)
+{
+	uint32_t x = 12345;
+	for (int i = 0; i < 1000; ++i) {
+		const uint32_t want = static_cast<uint32_t>((static_cast<uint64_t>(x) * 630360016u) % 0x7fffffffu);
+		CHECK(ai::parkMillerStep(x) == want);
+		x = want;
+	}
+	CHECK(ai::parkMillerStep(0x7ffffffe) == static_cast<uint32_t>((0x7ffffffeull * 630360016u) % 0x7fffffffu));
+	ai::Random random = ai::Random::seeded(1);
+	CHECK(random.seedWord() == 1);
+	CHECK(random.next() == 0x77f5ba93u);
+	CHECK(random.next() == 0x171e5b46u);
+	CHECK(random.next() == 0xc38f3094u);
+	// aiRandom.seed writes the word only: the draws go on as before.
+	ai::Random again = ai::Random::seeded(1);
+	again.next();
+	again.next();
+	again.setSeedWord(99);
+	CHECK(again.next() == 0xc38f3094u && again.seedWord() == 99);
+	// U[0, 1) stays below 1 as a float.
+	float top = 0;
+	for (int i = 0; i < 100000; ++i) {
+		top = std::max(top, random.uniform());
+	}
+	CHECK(top < 1.0f && top > 0.999f);
+	CHECK(ai::wordToFloat(0xffffffffu) == 4294967296.0f && ai::wordToFloat(0x80000000u) == 2147483648.0f);
 }

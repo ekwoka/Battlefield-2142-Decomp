@@ -142,8 +142,9 @@ bool meshBox(const physics::CollisionMeshFile& mesh, physics::Vec3& low, physics
 	return false;
 }
 
-// The Python component's events by id: the host module's event names,
-// numbered as the shipped templates use them (Python.onDamageEvent 26 on
+// The Python component's events by id: the host module's event names
+// (the table at 0x009fce60, name and id pairs; 64 ends it and is the
+// component's "none", ctor 0x00631ad0), numbered as the shipped templates use them (Python.onDamageEvent 26 on
 // the Titans, onDestroyEvent 46 on the consoles, 48 on the cores, 50 on the
 // Titans' guns, 52 on the missile silos, 54 on the silo missile).
 const char* pythonEvent(int id)
@@ -164,6 +165,10 @@ const char* pythonEvent(int id)
 	case 54: return "MissileDestroyed";
 	case 55: return "CommanderAssetRepaired";
 	case 56: return "VehicleShieldDestroyed";
+	case 57: return "RemoteSettings";
+	case 58: return "PlayerDisconnectResponse"; // the drones' and sentry gun's onDestroyEvent
+	case 59: return "PrePlayerConnect";
+	case 60: return "AutoControllerDestroyed";
 	default: return nullptr;
 	}
 }
@@ -380,6 +385,7 @@ void GameWorld::buildTitanParts(Titan& titan)
 		part.destroyOnRootLevel = number(t, "armor.destroyOnRootParentDamageLevel", -1);
 		part.onlyFromChildrenLevel = number(t, "armor.onlyDamageFromChildrenLevel", -100);
 		part.destroyEvent = integer(t, "Python.onDestroyEvent", 0);
+		part.repairEvent = integer(t, "Python.onRepairEvent", 0);
 		part.addNametagOnDestroy = integer(t, "armor.addNametagOnDestroy", 0) != 0;
 		part.healthActivationLevel = number(t, "nametag.healthActivationLevel", 100);
 		// The armour effects, highest level first (the list's order).
@@ -1362,7 +1368,129 @@ void GameWorld::titanPartWrecked(Titan& titan, int index, int attacker)
 	}
 	part.off = true;
 	titan.meshesDirty = true;
-	raiseTitanEvent(part.destroyEvent, titan.object, attacker);
+	// 0x005b7680: once until a repair has gone; the repair's flag cleared.
+	const bool sent = part.destroySent;
+	part.repairSent = false;
+	if (!sent && part.destroyEvent > 0 && part.destroyEvent != 64) {
+		part.destroySent = true;
+		raiseTitanEvent(part.destroyEvent, titan.object, attacker);
+	}
+}
+
+// The heal of a Titan part (the armour's 0x00655a00 on the node's own
+// armour: canBeRepaired, a wreck only with canBeRepairedWhenWreck; the
+// Titan's root never, 0x00561d90). Out of the wreck (0x00654120's
+// repaired branch: 0x00654070 puts the subtree's nodes back, +0x15 off)
+// the part's collision is back and, as 0x004bc410 has it after the heal,
+// its Python component's onRepairEvent goes with the Titan and the
+// repairer (the gun hubs' TitanWeaponRepaired; the consoles' and cores'
+// TitanPart/CoreRepaired can't, their wrecks being unrepairable).
+bool GameWorld::healTitanPart(uint32_t id, float percent, int repairer)
+{
+	Titan* titan = nullptr;
+	int index = 0;
+	if (percent <= 0 || !titanPart(id, titan, index) || index == 0 || titan->wrecked) {
+		return false;
+	}
+	TitanPart& part = titan->parts[static_cast<size_t>(index)];
+	if (!part.t || !part.armoured || integer(*part.t, "armor.canBeRepaired", 1) == 0) {
+		return false;
+	}
+	if (part.state != 0 && integer(*part.t, "armor.canBeRepairedWhenWreck", 0) == 0) {
+		return false;
+	}
+	if (part.hitPoints >= part.maxHitPoints) {
+		return false;
+	}
+	const int before = part.state;
+	setTitanPartHitPoints(*titan, index, part.hitPoints + percent * 0.01f * part.maxHitPoints, repairer);
+	if (before == 1 && part.state == 0) {
+		part.off = false;
+		titan->meshesDirty = true;
+		const bool sent = part.repairSent;
+		part.destroySent = false;
+		if (!sent && part.repairEvent > 0 && part.repairEvent != 64) {
+			part.repairSent = true;
+			raiseTitanEvent(part.repairEvent, titan->object, repairer);
+		}
+	}
+	return true;
+}
+
+bool GameWorld::repair(uint32_t object, float percent, int repairer)
+{
+	if (object >= kTitanPartIds) {
+		return healTitanPart(object, percent, repairer);
+	}
+	const world::ObjectTemplate* t = armourTemplate(object);
+	const float left = hitPoints(object);
+	if (!t || left < 0 || percent <= 0 || !repairable(object)) {
+		return false;
+	}
+	const float most = number(*t, "armor.maxHitPoints", left);
+	if (left >= most) {
+		return false;
+	}
+	healHitPoints(object, std::min(left + percent * 0.01f * most, most), repairer);
+	return true;
+}
+
+const world::ObjectTemplate* GameWorld::armourTemplate(uint32_t id) const
+{
+	const Titan* titan = nullptr;
+	int index = 0;
+	if (titanPart(id, titan, index)) {
+		return titan->parts[static_cast<size_t>(index)].t;
+	}
+	const world::Object* object = m_objects.find(id);
+	return object ? object->objectTemplate() : nullptr;
+}
+
+void GameWorld::pythonWrecked(uint32_t object, int attacker)
+{
+	const world::Object* o = m_objects.find(object);
+	const world::ObjectTemplate* t = o ? o->objectTemplate() : nullptr;
+	if (!t) {
+		return;
+	}
+	PythonSent& sent = m_pythonSent[object];
+	const int event = integer(*t, "Python.onDestroyEvent", 64);
+	if (event != 64 && !sent.destroyed) {
+		sent.destroyed = true;
+		if (const char* name = pythonEvent(event)) {
+			raise(name, {ScriptValue::object(object), ScriptValue::player(attacker)});
+		}
+	}
+	sent.repaired = false; // the component's slot 0x44(0)
+}
+
+void GameWorld::pythonRepaired(uint32_t object, int repairer)
+{
+	const world::Object* o = m_objects.find(object);
+	const world::ObjectTemplate* t = o ? o->objectTemplate() : nullptr;
+	if (!t) {
+		return;
+	}
+	PythonSent& sent = m_pythonSent[object];
+	const int event = integer(*t, "Python.onRepairEvent", 64);
+	if (event != 64 && !sent.repaired) {
+		sent.repaired = true; // slot 0x44(1)
+		if (const char* name = pythonEvent(event)) {
+			raise(name, {ScriptValue::object(object), ScriptValue::player(repairer)});
+		}
+	}
+	sent.destroyed = false; // slot 0x3c(0)
+}
+
+void GameWorld::healHitPoints(uint32_t object, float value, int repairer)
+{
+	const float before = hitPoints(object);
+	m_hitPoints[object] = value;
+	// The armour's state: a wreck at no hit points left (the commander's
+	// assets hold at 0), working above.
+	if (before <= 0 && value > 0) {
+		pythonRepaired(object, repairer);
+	}
 }
 
 void GameWorld::raiseTitanEvent(int eventId, uint32_t object, int attacker)
@@ -1874,13 +2002,13 @@ std::vector<GameWorld::PodInfo> GameWorld::pods() const
 {
 	std::vector<PodInfo> list;
 	for (const Pod& pod : m_pods) {
-		list.push_back({pod.object, pod.player, pod.position, pod.velocity});
+		list.push_back({pod.object, pod.player, pod.position, pod.velocity, pod.controlsOff});
 	}
 	return list;
 }
 
 // Each pod: steered by its rider's throttle and strafe along the rider's
-// heading, the rider carried in it; at rest for half a second (landed) or
+// heading (none with its controls off: a beacon's drop), the rider carried in it; at rest for half a second (landed) or
 // gone, the rider steps out beside it (the Parachute's landing) and the pod
 // stays as it lies.
 void GameWorld::stepPods(float seconds)
@@ -1897,9 +2025,10 @@ void GameWorld::stepPods(float seconds)
 			pod.velocity = body->body.velocity;
 			const float yaw = player->body.yawDegrees * 3.14159265f / 180.0f;
 			const physics::Vec3 forward {std::sin(yaw), 0, std::cos(yaw)}, right {std::cos(yaw), 0, -std::sin(yaw)};
+			const float throttle = pod.controlsOff ? 0.0f : player->input.throttle;
+			const float strafe = pod.controlsOff ? 0.0f : player->input.strafe;
 			body->body.velocity = body->body.velocity
-				+ (forward * (player->input.throttle * pod.forward) + right * (player->input.strafe * pod.strafe))
-					* (30.0f * seconds / pod.mass);
+				+ (forward * (throttle * pod.forward) + right * (strafe * pod.strafe)) * (30.0f * seconds / pod.mass);
 			// keepUp (0x0062b750): the regulators' couple turns the
 			// ForceObject's offset p back over the centre: out = 2a (w x p) +
 			// (a^2 + b^2) ((0, |p|, 0) - p) on each regulated axis, x 15,

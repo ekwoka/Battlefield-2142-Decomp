@@ -643,6 +643,26 @@ TEST(HudVotes_Lines)
 	CHECK(lines.back() == "HUD_HUD_KICKVOTE_UNABLE_TO_START_VOTE");
 }
 
+// The scoreboard's kick box (0x007bc590 types 10 / 11 -> 0x00573f20):
+// silent while a vote runs, else the start's checks (self, the host, the
+// wait after one's own start).
+TEST(HudVotes_ScoreboardKickStart)
+{
+	menu::VoteMessages votes;
+	std::vector<std::string> lines;
+	votes.onLine = [&](const std::string& s) { lines.push_back(s); };
+	votes.playerName = [](int) { return std::string("P"); };
+	votes.localPlayer = 1;
+	CHECK(votes.mayStartKick(2, false));
+	CHECK(!votes.mayStartKick(1, false) && lines.back() == "HUD_HUD_KICKVOTE_CANNOT_KICK_SELF");
+	CHECK(!votes.mayStartKick(2, true) && lines.back() == "HUD_HUD_KICKVOTE_CANNOT_KICK_HOST");
+	votes.handle({2, 0, 3, 4, 0, 2, 90}); // another's kick runs
+	const size_t before = lines.size();
+	CHECK(!votes.mayStartKick(2, false) && lines.size() == before);
+	votes.handle({2, 1, 3, 4, 0, 0, 0}); // it fails
+	CHECK(!votes.running() && votes.mayStartKick(2, false));
+}
+
 // The commander screen's squad panel (0x007ab790): a squad's order picture
 // in its row and the panel, orderNew while it has a request; the squad info
 // bar (0x007a0f80).

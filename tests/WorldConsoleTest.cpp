@@ -1,9 +1,11 @@
 // World script methods: placing objects.
 #include "Console/Console.h"
+#include "Console/ConsoleBinding.h"
 #include "Game/GameLogic.h"
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
+#include "World/InertRows.h"
 #include "World/WorldConsole.h"
 
 #include <cmath>
@@ -140,4 +142,54 @@ TEST(WorldConsole_AiWaveTimeAndNotInAI)
 		CHECK(world.execute("Object.notInAI 1", out) == ConsoleResult::Ok);
 		CHECK(objects.objects().size() == (std::string(mode) == "gpm_cq" ? 1u : 0u));
 	}
+}
+
+// ObjectTemplate.addVehicleType: one argument is the SupplyObject's list of
+// vehicle categories (0x00504752, +0x2d0), kept as their numbers in order;
+// four the SupplyDepot's (0x004f98f9). setIfTitanChangeToWeapon <weapon>
+// <distance> (0x004e20d4) keeps both.
+TEST(WorldConsole_AddVehicleTypeAndTitanWeapon)
+{
+	Console console;
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "SupplyObject");
+	templates.registerType(2, "GenericFireArm");
+	world::registerWorldConsoleMethods(console, templates, objects);
+	std::string out;
+	CHECK(console.execute("ObjectTemplate.create SupplyObject pad", out) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.addVehicleType 3", out) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.addVehicleType VCAir", out) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.addVehicleType depot 1 2.5 3", out) == ConsoleResult::Ok);
+	const world::ObjectTemplate* pad = templates.find("pad");
+	CHECK(pad->settings().at("addVehicleType.list") == "3 2");
+	CHECK(pad->settings().at("addVehicleType.supplyDepot.list") == "depot 1 2.5 3;");
+	CHECK(console.execute("ObjectTemplate.create GenericFireArm pod_launcher_cq", out) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.setIfTitanChangeToWeapon pod_launcher 250", out) == ConsoleResult::Ok);
+	CHECK(templates.find("pod_launcher_cq")->settings().at("setIfTitanChangeToWeapon") == "pod_launcher 250");
+}
+
+// The inert rows take the original's argument counts and do nothing; a real
+// binding registered afterwards replaces one. The level's texture suffix
+// (texturemanager.customTextureSuffix) is kept.
+TEST(WorldConsole_InertRows)
+{
+	Console console;
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	world::registerWorldConsoleMethods(console, templates, objects);
+	std::string out;
+	CHECK(console.execute("Object.setLightSourceMask 6", out) == ConsoleResult::Ok);
+	CHECK(console.execute("RagDoll.toSkeleton 1 2 3", out) == ConsoleResult::Ok);
+	CHECK(console.execute("RagDoll.toSkeleton 1 2", out) == ConsoleResult::Error);
+	CHECK(console.execute("GeometryTemplate.setLightmapSizeAll 0 0 64", out) == ConsoleResult::Ok);
+	CHECK(console.execute("terrain.init 1", out) == ConsoleResult::Error);
+	CHECK(console.execute("awards.setData 100_1 \"6,9, ,15\"", out) == ConsoleResult::Ok);
+	bool replaced = false;
+	bindMethod(console, "undergrowth.load", ConsoleAccess::Anyone, [&replaced](std::string) { replaced = true; });
+	CHECK(console.execute("undergrowth.load Levels/Minsk/", out) == ConsoleResult::Ok);
+	CHECK(replaced);
+	CHECK(console.execute("texturemanager.customTextureSuffix \"Snow\"", out) == ConsoleResult::Ok);
+	CHECK(world::customTextureSuffix() == "Snow");
+	world::setCustomTextureSuffix("");
 }

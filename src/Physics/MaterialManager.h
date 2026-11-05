@@ -44,6 +44,12 @@ struct Material {
 	// Material.triggerRadio (slots 0x74 / 0x78): a soldier touching it
 	// looks for its cells' radio messages (0x00586a90; the Titans' floors).
 	bool triggerRadio = false;
+	// Material.pythonEvent (vtable 0x00978b80 slots 0x8c / 0x90, +0x34; 0x40,
+	// none, by default): the Python host event a projectile hit on it
+	// raises for the hit's players and weapon (0x005b7680 -> 0x00444140).
+	// The shipped Human_head sets 8, HeadShot, which only bf2.stats counts
+	// (a weapon's headShots, sent to the stats server). Not raised here yet.
+	int pythonEvent = 0x40;
 };
 
 // A pair of materials meeting (a projectile's and a surface's, ...).

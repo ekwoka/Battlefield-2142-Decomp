@@ -43,6 +43,7 @@ enum NodeType {
 	kEdit,
 	kMouseOver,
 	kOccupied,
+	kMiniMap,
 	kOther,
 };
 
@@ -324,10 +325,14 @@ const HudFont* HudManager::font(const std::string& path)
 	const std::string key = lower(slashes(path));
 	auto& slot = m_fonts[key];
 	if (!slot) {
-		// "Fonts/x.dif": the English, 800 x 600 one first.
+		// "Fonts/x.dif": the language's 800 x 600 one first (the HUD is
+		// laid out for 800 x 600), then the language's own, then English's
+		// (hud::language(); the Local fonts exist only per language).
 		const std::string file = key.substr(key.rfind('/') + 1);
+		const std::string folder = "Fonts/" + language() + "/";
 		std::string text;
-		for (const std::string& candidate : {"Fonts/English/800/" + file, "Fonts/800/" + file, "Fonts/English/" + file, key}) {
+		for (const std::string& candidate : {folder + "800/" + file, "Fonts/800/" + file, folder + file,
+				 "Fonts/English/800/" + file, "Fonts/English/" + file, key}) {
 			if (m_reader && m_reader(candidate, text)) {
 				if (auto parsed = parseHudFont(text)) {
 					slot = std::make_unique<HudFont>(std::move(*parsed));
@@ -659,6 +664,9 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 	case kMap:
 		drawMap(node, alpha, seconds, out);
 		break;
+	case kMiniMap:
+		drawMiniMap(x, y, static_cast<float>(w), static_cast<float>(h), alpha, out);
+		break;
 	case kCompass:
 		drawCompass(node, x, y, color, out);
 		break;
@@ -721,7 +729,14 @@ void HudManager::drawText(const Node& node, float x, float y, const float color[
 		// setTruncate: the text cut where it leaves the node.
 		if (const HudFont* f = font(node.font)) {
 			while (!text.empty() && f->width(text) > static_cast<float>(node.w)) {
-				text.pop_back();
+				// The last whole character (a UTF-8 sequence's continuation
+				// bytes, then its lead).
+				while (!text.empty() && (static_cast<unsigned char>(text.back()) & 0xc0) == 0x80) {
+					text.pop_back();
+				}
+				if (!text.empty()) {
+					text.pop_back();
+				}
 			}
 		}
 	}
@@ -802,7 +817,8 @@ void HudManager::drawString(const std::string& fontPath, const std::string& text
 	const float tw = static_cast<float>(std::max(f->textureWidth, 1));
 	const float th = static_cast<float>(std::max(f->textureHeight, 1));
 	uint32_t previous = 0;
-	for (unsigned char c : text) {
+	for (size_t at = 0; at < text.size();) {
+		const uint32_t c = nextCode(text, at);
 		const Glyph* g = f->glyph(c);
 		if (!g) {
 			continue;
@@ -1383,6 +1399,63 @@ void HudManager::setMapArea(float minX, float minZ, float maxX, float maxZ)
 	m_mapArea[3] = maxZ;
 }
 
+// The shown area as parts of the map (0x0078b490), for a big map of
+// refX x refY pixels: the combat area's bounds in its pixels, widened by
+// 20 pixels a side (when that leaves the map, by half the overshoot, and
+// the whole map if that's negative), kept off the negative side, made
+// square about its centre and kept inside the map. The whole map unset.
+void HudManager::shownArea(float refX, float refY, float area[4]) const
+{
+	area[0] = area[1] = 0; // offset x, y
+	area[2] = area[3] = 1; // size x, y
+	refX = refX > 0 ? refX : 600;
+	refY = refY > 0 ? refY : 600;
+	if (m_mapAreaSet) {
+		float minX = (m_mapArea[0] - m_mapOrigin[0]) / m_mapSize[0] * refX;
+		float minY = (1 - (m_mapArea[3] - m_mapOrigin[1]) / m_mapSize[1]) * refY;
+		float sizeX = (m_mapArea[2] - m_mapArea[0]) / m_mapSize[0] * refX;
+		float sizeY = (m_mapArea[3] - m_mapArea[1]) / m_mapSize[1] * refY;
+		float margin = 20; // 0xc38
+		if (refX < minX + sizeX + margin) {
+			margin = (minX + sizeX - refX) / 2;
+		}
+		if (refY < minY + sizeY + margin) {
+			margin = (minY + sizeY - refY) / 2;
+		}
+		if (margin >= 0) {
+			sizeX += margin * 2;
+			sizeY += margin * 2;
+			minX -= margin;
+			minY -= margin;
+		} else {
+			sizeX = refX;
+			sizeY = refY;
+			minX = minY = 0;
+		}
+		minX = std::max(minX, 0.0f);
+		minY = std::max(minY, 0.0f);
+		if (sizeX <= sizeY) {
+			float d = sizeY - sizeX;
+			sizeX = sizeY;
+			if (refX < minX - d / 2 + sizeX) {
+				d = (minX + sizeX - refX) * 2;
+			}
+			minX -= d / 2;
+		} else {
+			float d = sizeX - sizeY;
+			sizeY = sizeX;
+			if (refY < minY - d / 2 + sizeY) {
+				d = (minY + sizeY - refY) * 2;
+			}
+			minY -= d / 2;
+		}
+		area[0] = minX / refX;
+		area[1] = minY / refY;
+		area[2] = sizeX / refX;
+		area[3] = sizeY / refY;
+	}
+}
+
 // Bf2MenuMapNode::render (0x00795620) with its zoom (0x0077b7b0,
 // 0x0077a390; eased at 0x007901f0) and its shown area (0x0078b490).
 //
@@ -1453,58 +1526,14 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 	} else {
 		m_mapLevel += (1 - std::exp(-seconds * 6)) * (target - m_mapLevel);
 	}
-	// The shown area as parts of the map: the combat area's bounds in the
-	// big map's pixels, widened by 20 pixels a side (when that leaves the
-	// map, by half the overshoot, and the whole map if that's negative),
-	// kept off the negative side, made square about its centre and kept
-	// inside the map.
-	float area[4] = {0, 0, 1, 1}; // offset x, y; size x, y
-	if (m_mapAreaSet) {
-		const float refX = node.maxiSize[0], refY = node.maxiSize[1];
-		float minX = (m_mapArea[0] - m_mapOrigin[0]) / m_mapSize[0] * refX;
-		float minY = (1 - (m_mapArea[3] - m_mapOrigin[1]) / m_mapSize[1]) * refY;
-		float sizeX = (m_mapArea[2] - m_mapArea[0]) / m_mapSize[0] * refX;
-		float sizeY = (m_mapArea[3] - m_mapArea[1]) / m_mapSize[1] * refY;
-		float margin = 20; // 0xc38
-		if (refX < minX + sizeX + margin) {
-			margin = (minX + sizeX - refX) / 2;
-		}
-		if (refY < minY + sizeY + margin) {
-			margin = (minY + sizeY - refY) / 2;
-		}
-		if (margin >= 0) {
-			sizeX += margin * 2;
-			sizeY += margin * 2;
-			minX -= margin;
-			minY -= margin;
-		} else {
-			sizeX = refX;
-			sizeY = refY;
-			minX = minY = 0;
-		}
-		minX = std::max(minX, 0.0f);
-		minY = std::max(minY, 0.0f);
-		if (sizeX <= sizeY) {
-			float d = sizeY - sizeX;
-			sizeX = sizeY;
-			if (refX < minX - d / 2 + sizeX) {
-				d = (minX + sizeX - refX) * 2;
-			}
-			minX -= d / 2;
-		} else {
-			float d = sizeX - sizeY;
-			sizeY = sizeX;
-			if (refY < minY - d / 2 + sizeY) {
-				d = (minY + sizeY - refY) * 2;
-			}
-			minY -= d / 2;
-		}
-		area[0] = minX / refX;
-		area[1] = minY / refY;
-		area[2] = sizeX / refX;
-		area[3] = sizeY / refY;
-	}
+	// The shown area as parts of the map (shownArea).
+	float area[4];
+	shownArea(node.maxiSize[0], node.maxiSize[1], area);
+	m_mapReference[0] = node.maxiSize[0];
+	m_mapReference[1] = node.maxiSize[1];
 	const float zoom = std::pow(2.3f, m_mapLevel);
+	m_mapZoomShown[0] = zoom / area[2]; // 0x0077b7b0's zoom
+	m_mapZoomShown[1] = zoom / area[3];
 	// Where the whole map goes.
 	float mapW = nw * zoom / area[2], mapH = nh * zoom / area[3];
 	const float fu = (m_mapFocus[0] - m_mapOrigin[0]) / m_mapSize[0];
@@ -1581,6 +1610,79 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 				marker.id});
 		}
 	}
+}
+
+// dice::meme::Bf2MiniMenuMapNode (factory 0x007e8fb0, constructor
+// 0x007e8a90, vtable 0x009bb688): the commander screen's mini-map tab
+// (hudBuilder.createMiniMapNode CommanderMapTabSelected CommanderMiniMap
+// 6 0 133 163). A map node of its own: the level's ingameMap.tga (its event
+// 8, 0x007e8910) at zoom level 0 and half the map's alpha (+0x714 0,
+// +0x7b0 0.5), so the shown area fills the node; its draw (0x007e7a60)
+// takes the world's size (GLSWorldSizeX / Z) and draws the layers its
+// flags hold. The players are dots (0x007e8320): 2 pixels, 4 for one of
+// the local player's squad, untextured, coloured by 0x007e7580 (the
+// local player white, his squad (0.4, 1, 0) from 0x00b3c360, his team
+// (0.254, 0.552, 0.89) and the enemy (0.87, 0.094, 0.094) from
+// 0x00b3c260; the squad leader white). The local player's mark is the
+// zoom square instead (micromap_zoomSquare, 120 pixels, 0x007e7f30),
+// placed at the commander map's point and shrunk by its zoom: 120 /
+// clamp(zoom / 2, 1, 100) a side. A click inside (0x007e7d00, button 1)
+// sends the commander's camera to the point under it (slot 0x398;
+// miniMapWorldAt).
+void HudManager::drawMiniMap(float nx, float ny, float nw, float nh, float alpha, std::vector<HudQuad>& out)
+{
+	m_miniMapView.drawn = false;
+	if (m_mapTexture.empty() || nw <= 0 || nh <= 0) {
+		return;
+	}
+	float area[4];
+	shownArea(m_mapReference[0], m_mapReference[1], area);
+	const float mapW = nw / area[2], mapH = nh / area[3];
+	const float mapX = nx - area[0] * mapW, mapY = ny - area[1] * mapH;
+	HudQuad map {m_mapTexture, mapX, mapY, mapX + mapW, mapY + mapH, 0, 0, 1, 1, {1, 1, 1, alpha * 0.5f}, 0};
+	if (clipTo(map, nx, ny, nx + nw, ny + nh)) {
+		out.push_back(map);
+	}
+	m_miniMapView = {true, nx, ny, nx + nw, ny + nh, mapX, mapY, mapW, mapH};
+	const auto screen = [&](float worldX, float worldZ, float& sx, float& sy) {
+		sx = mapX + (worldX - m_mapOrigin[0]) / m_mapSize[0] * mapW;
+		sy = mapY + (1 - (worldZ - m_mapOrigin[1]) / m_mapSize[1]) * mapH;
+	};
+	for (const MiniMapDot& dot : m_miniMapDots) {
+		float sx = 0, sy = 0;
+		screen(dot.x, dot.z, sx, sy);
+		const float side = dot.squad ? 4.0f : 2.0f;
+		const float x0 = std::floor(sx - side * 0.5f), y0 = std::floor(sy - side * 0.5f);
+		HudQuad q {"Menu/Console/white.dds", x0, y0, x0 + side, y0 + side, 0, 0, 1, 1,
+			{dot.color[0], dot.color[1], dot.color[2], dot.color[3] * alpha}, 0};
+		if (clipTo(q, nx, ny, nx + nw, ny + nh)) {
+			out.push_back(q);
+		}
+	}
+	if (m_miniMapSquare) {
+		const float zoomX = std::clamp(m_mapZoomShown[0] * 0.5f, 1.0f, 100.0f);
+		const float zoomY = std::clamp(m_mapZoomShown[1] * 0.5f, 1.0f, 100.0f);
+		const float w = std::floor(120 / zoomX), h = std::floor(120 / zoomY);
+		float sx = 0, sy = 0;
+		screen(m_mapFocus[0], m_mapFocus[1], sx, sy);
+		HudQuad q {kTextureRoot + std::string("Ingame/Commander/micromap_zoomSquare.tga"), std::floor(sx - w * 0.5f),
+			std::floor(sy - h * 0.5f), std::floor(sx - w * 0.5f) + w, std::floor(sy - h * 0.5f) + h, 0, 0, 1, 1,
+			{1, 1, 1, alpha}, 0};
+		if (clipTo(q, nx, ny, nx + nw, ny + nh)) {
+			out.push_back(q);
+		}
+	}
+}
+
+bool HudManager::miniMapWorldAt(float x, float y, float& worldX, float& worldZ) const
+{
+	const MapView& m = m_miniMapView;
+	if (!m.drawn || x < m.x0 || x > m.x1 || y < m.y0 || y > m.y1) {
+		return false;
+	}
+	worldX = m_mapOrigin[0] + (x - m.mapX) / m.mapW * m_mapSize[0];
+	worldZ = m_mapOrigin[1] + (1 - (y - m.mapY) / m.mapH) * m_mapSize[1];
+	return true;
 }
 
 std::vector<std::vector<std::array<float, 4>>> sweepPieces(
@@ -2371,7 +2473,7 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 	// --- The maps' and selection nodes' settings, kept ---
 	bindMethod(console, "HudBuilder.createMiniMapNode", access,
 		[m](std::string parent, std::string name, int x, int y, int w, int h) {
-			return m->create(kOther, parent, name, x, y, w, h) != nullptr;
+			return m->create(kMiniMap, parent, name, x, y, w, h) != nullptr;
 		});
 	const auto keep = [&console, m](const char* method) {
 		bindMethod(console, std::string("HudBuilder.") + method, access, [m, method](std::string value) {

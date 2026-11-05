@@ -303,3 +303,149 @@ TEST(EffectsDetail_DebrisBodiesMeetTheWorld)
 		CHECK(p.resting); // asleep after a second still
 	}
 }
+
+// The bundle's start age (modifier 4, 0x00618d00 -> the systems' slot 0x80:
+// a particle is born that old, 0x1013fdc0), set each tick from the motion
+// of an anchored bundle as the armour's damage smoke has it
+// (StartAgeFromSpeed 0/12: 0 standing, 1 s at 12 m/s and over).
+TEST(EffectsDetail_StartAgeFollowsTheAnchorsSpeed)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "EffectBundle");
+	templates.registerType(2, "SpriteParticleSystem");
+	sprites(templates, "smoke", "Standard")->settings()["emitTime"] = "0"; // looping below
+	templates.find("smoke")->settings()["isLooping"] = "1";
+	world::ObjectTemplate* bundle = templates.create("EffectBundle", "e_dstate_smoke");
+	bundle->children().push_back({"smoke", {}, {}});
+	bundle->settings()["startAgeRange"] = "0/1";
+	bundle->settings()["startAgeFromSpeed"] = "0/12";
+	// The last particle born (they are kept in birth order).
+	const auto newest = [](const effects::EffectManager& manager) {
+		const auto& particles = manager.emitterList().front()->particles();
+		return particles.empty() ? -1.0f : particles.back().age;
+	};
+	for (const bool driven : {true, false}) {
+		effects::EffectManager manager(templates);
+		manager.setAnchor(1, {}, {});
+		CHECK(manager.spawnAttached("e_dstate_smoke", 1, {}, {}, effects::EffectManager::View::Any, 9, driven));
+		for (int i = 0; i < 10; ++i) {
+			manager.update(1 / 30.0f);
+		}
+		CHECK(manager.emitterList().front()->startAge == 0);
+		CHECK(newest(manager) < 0.05f);
+		// Driving at 15 m/s: the start age reaches its maximum, 1 s.
+		for (int i = 0; i < 10; ++i) {
+			manager.setAnchor(1, {0, 0, 0.5f * static_cast<float>(i + 1)}, {});
+			manager.update(1 / 30.0f);
+		}
+		const float startAge = manager.emitterList().front()->startAge;
+		if (driven) {
+			CHECK(std::fabs(startAge - 1) < 1e-3f);
+			CHECK(newest(manager) >= 1.0f);
+		} else {
+			CHECK(startAge == 0); // ObjectEffects drives its own bundles
+		}
+	}
+}
+
+// RendDX9's emissions stop for a system not drawn for 60 frames
+// (0x101403b0: the draw's frame +0x124 against the renderer's count) and
+// make up the missed time when it is seen again; nothing holds while no
+// frame is drawn at all.
+TEST(EffectsDetail_UnseenSystemsHoldTheirEmission)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(2, "SpriteParticleSystem");
+	world::ObjectTemplate* smoke = sprites(templates, "smoke", "Standard");
+	smoke->settings()["emitFrequency"] = "30";
+	smoke->settings()["emitTime"] = "100";
+	smoke->settings()["timeToLive"] = "2";
+	effects::EffectManager manager(templates);
+	CHECK(manager.spawn("smoke", {}));
+	const auto count = [&manager] { return particlesOf(manager).size(); };
+	for (int i = 0; i < 30; ++i) {
+		manager.update(1 / 30.0f); // no frame drawn: it emits
+	}
+	CHECK(count() >= 28 && count() <= 31);
+	const auto hidden = [](const effects::Vec3&, float) { return false; };
+	const auto shown = [](const effects::Vec3&, float) { return true; };
+	for (int i = 0; i < 60; ++i) {
+		manager.markViewed(hidden);
+		manager.update(1 / 30.0f);
+	}
+	const size_t atSixty = count(); // still emitting up to the 60th frame
+	CHECK(atSixty >= 55);
+	for (int i = 0; i < 90; ++i) {
+		manager.markViewed(hidden);
+		manager.update(1 / 30.0f);
+	}
+	CHECK(count() == 0); // three seconds unseen: the last ones have died
+	CHECK(manager.emitters() == 1);
+	// Seen again: the last two seconds' worth comes at once.
+	manager.markViewed(shown);
+	manager.update(1 / 30.0f);
+	CHECK(count() >= 55 && count() <= 62);
+	CHECK(manager.framesViewed() == 151);
+}
+
+// forceToWaterSurface on a non-screen-aligned system: its frame stood
+// upright (0x1013c800 -> 0x100989f0), its rings level whatever the hit's
+// frame; others keep theirs.
+TEST(EffectsDetail_WaterRingsStandUpright)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(3, "NonScreenAlignedParticleSystem");
+	for (const char* name : {"rings", "tilted"}) {
+		world::ObjectTemplate* t = templates.create("NonScreenAlignedParticleSystem", name);
+		t->settings()["emitFrequency"] = "30";
+		t->settings()["timeToLive"] = "1";
+		t->settings()["textureName"] = "ring";
+	}
+	templates.find("rings")->settings()["forceToWaterSurface"] = "1";
+	effects::EffectManager manager(templates);
+	const physics::Mat3 rolled = physics::Mat3::fromYawPitchRoll({0, 0, 30});
+	CHECK(manager.spawn("rings", {0, 1, 0}, rolled));
+	CHECK(manager.spawn("tilted", {0, 1, 0}, rolled));
+	const physics::Mat3& upright = manager.emitterList()[0]->rotation();
+	CHECK(std::fabs(upright.rows[0].x + 1) < 1e-4f); // z x up: mirrored as the binary
+	CHECK(std::fabs(upright.rows[1].y - 1) < 1e-4f);
+	CHECK(std::fabs(upright.rows[2].z - 1) < 1e-4f);
+	CHECK(std::fabs(manager.emitterList()[1]->rotation().rows[1].y - 1) > 0.1f);
+	// Straight up (|z . up| > 0.9999): the identity.
+	CHECK(manager.spawn("rings", {0, 1, 0}, physics::Mat3::fromYawPitchRoll({0, 90, 0})));
+	const physics::Mat3& level = manager.emitterList()[2]->rotation();
+	CHECK(level.rows[0].x == 1 && level.rows[1].y == 1 && level.rows[2].z == 1);
+}
+
+// isStatic decals go to their set's second list (0x10166410 -> 0x10164710):
+// numbered 1..255 per set, never aged, taken out by id (slot 5, 0x10164e70).
+TEST(EffectsDetail_StaticDecalsSecondList)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(5, "Decal");
+	world::ObjectTemplate* mark = templates.create("Decal", "mark");
+	mark->settings()["decalTextureName"] = "mark";
+	mark->settings()["isStatic"] = "1";
+	world::ObjectTemplate* hole = templates.create("Decal", "hole");
+	hole->settings()["decalTextureName"] = "hole";
+	effects::EffectManager manager(templates);
+	CHECK(manager.spawnDecal("mark", {0, 0, 0}, {0, 1, 0}) && manager.lastDecalId() == 1);
+	CHECK(manager.spawnDecal("mark", {1, 0, 0}, {0, 1, 0}) && manager.lastDecalId() == 2);
+	CHECK(manager.spawnDecal("hole", {2, 0, 0}, {0, 1, 0}) && manager.lastDecalId() == 0);
+	// An object's set counts on its own.
+	CHECK(manager.spawnDecal("mark", {11, 1, 0}, {1, 0, 0}, 42, {10, 0, 0}, {0, 0, 0}) && manager.lastDecalId() == 1);
+	for (int i = 0; i < 30; ++i) {
+		manager.update(1.0f); // past DecalManager.timeToLive (20 s)
+	}
+	CHECK(manager.decals().size() == 3); // the hole went, the static ones stay
+	CHECK(manager.removeStaticDecal(0, 1));
+	CHECK(!manager.removeStaticDecal(0, 1));
+	CHECK(manager.decals().size() == 2);
+	// After 255 the ids start again at 1.
+	for (int i = 0; i < 253; ++i) {
+		manager.spawnDecal("mark", {0, 0, 0}, {0, 1, 0});
+	}
+	CHECK(manager.lastDecalId() == 255);
+	manager.spawnDecal("mark", {0, 0, 0}, {0, 1, 0});
+	CHECK(manager.lastDecalId() == 1);
+}

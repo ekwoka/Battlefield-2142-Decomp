@@ -8,5 +8,6 @@ add_library(AI STATIC
 	PathFollower.cpp
 	NavMesh.cpp
 	Strategy.cpp
+	Random.cpp
 )
 target_include_directories(AI PUBLIC ${PROJECT_SOURCE_DIR}/src)

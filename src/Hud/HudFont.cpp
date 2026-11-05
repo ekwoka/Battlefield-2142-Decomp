@@ -68,7 +68,8 @@ float HudFont::width(const std::string& text) const
 {
 	float x = 0;
 	uint32_t previous = 0;
-	for (unsigned char c : text) {
+	for (size_t at = 0; at < text.size();) {
+		const uint32_t c = nextCode(text, at);
 		if (const Glyph* g = glyph(c)) {
 			x += kern(previous, c) + g->advance();
 		}
@@ -76,6 +77,39 @@ float HudFont::width(const std::string& text) const
 	}
 	return x;
 }
+
+uint32_t nextCode(const std::string& text, size_t& at)
+{
+	const auto byte = [&](size_t i) { return static_cast<unsigned char>(text[i]); };
+	const unsigned char lead = byte(at);
+	const size_t length = lead >= 0xf0 && lead < 0xf8 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc2 && lead < 0xe0 ? 2 : 1;
+	if (length > 1 && at + length <= text.size()) {
+		uint32_t code = lead & (0x7fu >> length);
+		bool valid = true;
+		for (size_t k = 1; k < length && valid; ++k) {
+			valid = (byte(at + k) & 0xc0) == 0x80;
+			code = code << 6 | (byte(at + k) & 0x3fu);
+		}
+		if (valid) {
+			at += length;
+			return code;
+		}
+	}
+	++at;
+	return lead;
+}
+
+namespace {
+std::string& languageSetting()
+{
+	static std::string name = "English";
+	return name;
+}
+} // namespace
+
+const std::string& language() { return languageSetting(); }
+
+void setLanguage(const std::string& name) { languageSetting() = name.empty() ? std::string("English") : name; }
 
 std::optional<HudFont> parseHudFont(const std::string& text)
 {

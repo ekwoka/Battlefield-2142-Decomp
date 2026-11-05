@@ -187,6 +187,9 @@ public:
 	void tick(float seconds);
 	// The client's checks before it sends a start (true: send it).
 	bool mayStart(int kind, int target, bool targetIsHost);
+	// The scoreboard's kick box (0x007bc590 types 10 / 11 -> 0x00573f20):
+	// nothing while a vote runs (+4), else mayStart's checks for a kick.
+	bool mayStartKick(int target, bool targetIsHost) { return !running() && mayStart(2, target, targetIsHost); }
 	bool running() const { return m_kind != 0; }
 
 private:

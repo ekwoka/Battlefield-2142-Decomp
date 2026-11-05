@@ -3622,6 +3622,19 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 					: Mat4::perspective(camera.fovY, static_cast<float>(target.width) / target.height, camera.nearPlane,
 						  6000.0f));
 	prepareInstances(camera, viewProjection);
+	// The particle systems seen this frame (RendDX9's draws stamp the frame
+	// of each system whose box meets the view frustum, 0x101a4720): one
+	// unseen for 60 frames stops emitting (Emitter::lastSeenFrame). The
+	// first-person manager's systems ride the view, so they aren't counted.
+	if (m_sources) {
+		for (const effects::EffectManager* manager : {m_sources->effects, m_sources->objectEffects}) {
+			if (manager) {
+				manager->markViewed([this](const effects::Vec3& centre, float radius) {
+					return m_frameFrustum.containsSphere({centre.x, centre.y, centre.z}, radius);
+				});
+			}
+		}
+	}
 	buildDecals(); // after the draw list: it marks the sets whose owner is drawn
 	placeTitanHemiMaps(camera);
 	const float seconds = static_cast<float>(SDL_GetTicks() - m_startTicks) / 1000.0f;

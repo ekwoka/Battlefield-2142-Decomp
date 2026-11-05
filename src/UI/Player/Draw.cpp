@@ -321,7 +321,8 @@ std::string Drawer::engineFontName(uint16_t fontId) const
 // then "Fonts/<res>/"). <res> is "800" at an 800-pixel-wide window and
 // empty from 1024 on, where the font is scaled by width / 1024; the menu
 // stage is 1024 wide, so the fonts here are the 1024 ones at their own
-// size, one font pixel a stage pixel. The language is the menu's (English).
+// size, one font pixel a stage pixel. The language is the game's
+// (hud::language(), English's fonts when it has none).
 const hud::HudFont* Drawer::engineFont(const std::string& name, int pixels) const
 {
 	if (name.empty()) {
@@ -330,7 +331,8 @@ const hud::HudFont* Drawer::engineFont(const std::string& name, int pixels) cons
 	const std::string key = name + "_" + std::to_string(pixels);
 	auto [it, added] = m_engineFonts.try_emplace(key);
 	if (added && m_fontReader) {
-		for (const std::string& path : {"Fonts/English/" + key + ".dif", "Fonts/" + key + ".dif"}) {
+		for (const std::string& path :
+			{"Fonts/" + hud::language() + "/" + key + ".dif", "Fonts/English/" + key + ".dif", "Fonts/" + key + ".dif"}) {
 			std::string text;
 			if (m_fontReader(path, text)) {
 				if (auto font = hud::parseHudFont(text)) {

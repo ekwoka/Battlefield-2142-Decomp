@@ -1776,3 +1776,44 @@ TEST(Vehicles_SeatReloadPress)
 	g.run(2.5f);
 	CHECK(!launcher->reloading() && launcher->roundsInMag() == 3);
 }
+
+// A joined client's mech ghost (GameWorld::animateRemoteVehicle): the
+// client's round has no occupants for it, so its bundleAnimationSystem is
+// fed from the ghost (its movement and taken seats) as the exe's client
+// runs every object's skeleton helper (0x0063d5b0 -> 0x0063d2f0 ->
+// 0x0063d470): parked the torso sits low, manned (0x800) it stands up, as
+// the round's own mech's does; the seats on the torso ride it (seatMount's
+// bone, animateRemoteSeated).
+TEST(Vehicles_RemoteMechPosesItsBoneParts)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("as_heavy_mech")) {
+		return;
+	}
+	Animations a(g);
+	g.start("eu_fav", {0, 4, 6}, 0.1f);
+	a.attach(g);
+	world::Object* ghost = g.objects.create(g.templates.find("as_heavy_mech"), {20, 0, 20}, {30, 0, 0});
+	const uint32_t mech = ghost->id();
+	anim::Matrix parked {}, standing {};
+	CHECK(!g.world->partBone(mech, "AS_heavy_mech_torsospring", parked));
+	for (int i = 0; i < 60; ++i) {
+		g.world->animateRemoteVehicle(mech, {}, false, 1 / 30.0f);
+		g.world->tick(1 / 30.0f);
+	}
+	CHECK(g.world->partBone(mech, "AS_heavy_mech_torsospring", parked));
+	for (int i = 0; i < 90; ++i) {
+		g.world->animateRemoteVehicle(mech, {}, true, 1 / 30.0f);
+		g.world->tick(1 / 30.0f);
+	}
+	CHECK(g.world->partBone(mech, "AS_heavy_mech_torsospring", standing));
+	std::fprintf(stderr, "  remote as_heavy_mech torso: parked y %.2f, manned y %.2f\n", parked[13], standing[13]);
+	CHECK(standing[13] > parked[13] + 0.2f);
+	// Gone with its object.
+	g.objects.remove(mech);
+	g.world->tick(1 / 30.0f);
+	CHECK(!g.world->partBone(mech, "AS_heavy_mech_torsospring", parked));
+}

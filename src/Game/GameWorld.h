@@ -302,6 +302,16 @@ public:
 	// vehicle object's with the seat's own (a mount's turret turn and the
 	// hands' IK aren't networked to the client: not applied).
 	void animateRemoteSeated(uint32_t object, uint32_t vehicle, int seat, float bodyYaw, float seconds);
+	// A joined client's vehicle ghost with a bundleAnimationSystem (the
+	// mechs): the exe's client runs every object's skeleton helper in its
+	// own update (the object base's 0x0063d5b0 -> 0x0063d2f0, then
+	// 0x0063d470 poses the boneIndex parts), so the walker's system plays
+	// here from the ghost's movement as stepObjectAnimation's does from the
+	// body's (the speed and its direction against the heading, the turn
+	// rate, 0x800 when a seat is taken), and its bone parts are posed
+	// (partBone): the legs drawn walking, and the seats on the torso
+	// (seatMount's bone) carried by it (animateRemoteSeated).
+	void animateRemoteVehicle(uint32_t object, const physics::Vec3& velocity, bool occupied, float seconds);
 	// A joined client's vehicles' part turns (the RotationalBundle
 	// networkables of their ghosts, net::RemoteWorld::partPose by the
 	// client's object): the turret a remote seat rides and the grips its
@@ -1760,6 +1770,11 @@ public:
 	// armour's rules (a Titan's floors and parts' parent damage), `attacker`
 	// the player (-1 for none). No material cell (a cell of 1).
 	void applyDamage(uint32_t object, float amount, int attacker = -1) { loseHitPoints(object, amount, attacker); }
+	// The game logic's heal (slot 0x108 -> 0x004cc380's gates -> the
+	// armour's 0x00655a00, then 0x004bc410): `percent` of the object's
+	// maximum hit points by `repairer` (-1 none), raising its Python
+	// component's onRepairEvent out of a wreck. False when nothing moved.
+	bool repair(uint32_t object, float percent, int repairer = -1);
 	// Missile silos (templates with isMissileSilo): each fires its
 	// GenericFireArm's projectile at the enemy Titan when loaded (the auto
 	// controller CP_CANNON, AI/AutoControllers.ai), reloading
@@ -1804,6 +1819,7 @@ public:
 		uint32_t object = 0;
 		int player = -1;
 		physics::Vec3 position, velocity;
+		bool controlsOff = false; // the spawn point's disablePodControls (0x0059d2a0)
 	};
 	std::vector<PodInfo> pods() const;
 
@@ -1870,6 +1886,15 @@ private:
 		};
 		std::vector<BonePart> boneParts;
 		bool bonesPosed = false; // boneParts' matrices are this tick's (partBone)
+		// A joined client's ghost (animateRemoteVehicle): the system's input
+		// from the ghost (its velocity, turn and taken seats) in place of the
+		// body's own, which a client's round has no occupants for.
+		struct RemoteDrive {
+			bool on = false;
+			physics::Vec3 velocity;
+			float turn = 0, lastYaw = 0;
+			bool occupied = false;
+		} remoteDrive;
 		// Seats: who sits in each (player id, -1 for nobody) and the guns.
 		std::vector<int> occupants;
 		// Its own team while nobody sits in it (the PlayerControlObject's
@@ -2214,6 +2239,9 @@ private:
 		physics::Vec3 place(const physics::Vec3& v) const { return at + turn.transform(v); }
 	};
 	SeatMount seatMount(const Body& body, const VehicleLayout& layout, const SeatLayout::Anchor& anchor) const;
+	// The bone part's share of a mount (0x0063d470 -> slot 0xe8): its
+	// bone's local matrix in place of the part's placement, after `m`'s turret turn.
+	void boneMount(uint32_t object, const SeatLayout::Anchor& anchor, SeatMount& m) const;
 	// The frame the seat's gun turns in (the mount's turn on the hull's).
 	physics::Mat3 gunHull(const Body& body, const VehicleLayout& layout, const SeatLayout& seat) const
 	{
@@ -2848,6 +2876,10 @@ private:
 		anim::LocalPose pose;
 		std::vector<Body::BonePart> boneParts;
 		bool posed = false;
+		// A joined client's vehicle ghost (animateRemoteVehicle): kept while
+		// its object is; its last yaw (degrees) for the turn rate.
+		bool remote = false;
+		float lastYaw = 0;
 	};
 	std::vector<ObjectAnimation> m_objectAnimations;
 	void stepDeployableAnimations(float seconds);
@@ -3139,6 +3171,10 @@ private:
 		float healthActivationLevel = 100; // nametag.healthActivationLevel (+0x24)
 		int nametagPushes = 0;
 		int destroyEvent = 0;   // Python.onDestroyEvent
+		int repairEvent = 0;    // Python.onRepairEvent
+		// The Python component's sent flags (+0x10 destroy, +0x11 repair):
+		// each event goes once until the other has gone (0x005b7680, 0x004bc410).
+		bool destroySent = false, repairSent = false;
 		TitanPartInfo::Kind kind = TitanPartInfo::Other;
 		std::string seat;       // the gun seat (a hub PlayerControlObject) it lies under
 		// armor.addArmorEffect (0x00654730's list, by level, highest first):
@@ -3303,6 +3339,10 @@ private:
 		float gravityModifier = 1, drag = 0, mass = 1;
 		physics::Vec3 dragModifier {1, 1, 1};
 		float forward = 0, strafe = 0; // the ForceObjects' force on PIThrottle / PIYaw
+		// The PlayerControlObject's +0x444 (slot 0x178, 0x0059d2a0; a spawn
+		// point's disablePodControls): the input filter 0x005ca2e0 zeroes
+		// its inputs 0..3, so the ForceObjects get none.
+		bool controlsOff = false;
 		float age = 0;
 		float still = 0; // seconds at rest
 		// Its keepUp ForceObject (eu_pod_ForceObject: regulatePosX / Z
@@ -3322,6 +3362,32 @@ private:
 	void stepPods(float seconds);
 	void stepTitanSpawnPoints(Titan& titan);
 	void raiseTitanEvent(int eventId, uint32_t object, int attacker);
+	// The Python component's destroy and repair events (template +0x10 /
+	// +0x14, the ids of the host's event table 0x009fce60; 64 is none) for
+	// objects outside a Titan's tree, with the component's sent flags:
+	// - wrecked by damage (0x005b7680: the armour alive before, a wreck
+	//   after): its own component's onDestroyEvent with (object, attacker)
+	//   unless already sent; the repair's flag cleared either way;
+	// - repaired out of the wreck (0x004bc410 after the heal: the armour's
+	//   state 1 before, 0 after): the nearest component up the tree
+	//   (0x004a5570), its onRepairEvent with (object, repairer) unless
+	//   already sent; the destroy's flag cleared either way.
+	struct PythonSent {
+		bool destroyed = false, repaired = false;
+	};
+	std::map<uint32_t, PythonSent> m_pythonSent;
+	void pythonWrecked(uint32_t object, int attacker);
+	void pythonRepaired(uint32_t object, int repairer);
+	// The armour heal (0x00655a00 -> the setter 0x00655460) of `object` to
+	// `value` by `repairer` (-1 none), then 0x004bc410's repair event.
+	void healHitPoints(uint32_t object, float value, int repairer);
+	// The same on a Titan's part (index > 0): `percent` of its maximum,
+	// kept within -wreckHitPoints and maxHitPoints; out of the wreck the
+	// part's subtree is back (0x00654120's repaired branch, 0x00654070) and
+	// its onRepairEvent goes. False when nothing moved.
+	bool healTitanPart(uint32_t id, float percent, int repairer);
+	// The armour's template: a Titan part's node, else the object's.
+	const world::ObjectTemplate* armourTemplate(uint32_t id) const;
 };
 
 class GameWorld::LoneVehicle {

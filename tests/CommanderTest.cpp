@@ -581,3 +581,71 @@ TEST(Commander_SquadRequests)
 	personal.clear();
 	CHECK(!requests.send(leader, 2, 40, 41) && personal.size() == 1 && personal[0] == "HUD_HUD_SQUAD_ALIVE_TO_REQUEST");
 }
+
+// The AI commander's answers to the squad leaders' requests (AIDLL: the
+// store's AI event 3/0xf → IAIEventCourier 0x1004e6e0.. → the SAI's
+// 0x1009e020 artillery, 0x1009e200 orbital strike, 0x1009e3e0 UAV,
+// 0x1009e500 supplies; turn-downs said by 0x1009ce20 after 2 + 3U s).
+TEST(Commander_AiAnswersSquadRequests)
+{
+	Field field;
+	if (!field.loaded) {
+		return;
+	}
+	game::GameWorld& world = *field.world;
+	world.setCommanderEnabled(true);
+	field.place("commander_orbital_strike_64", 1, 200, 200); // the artillery; no orbital strike, no UAV
+	const int leader = world.addPlayer("Lead", 1, false);
+	CHECK(world.spawnSoldier(leader));
+	world.joinSquad(leader, 1);
+	field.soldier(1, 60, 60); // the team has a bot
+	Console console;
+	game::BotSettings settings;
+	game::registerBotConsoleMethods(console, settings);
+	game::BotManager bots(world, settings);
+	const auto step = [&](float seconds) {
+		for (int i = 0; i < static_cast<int>(seconds * 30 + 0.5f); ++i) {
+			bots.update(1 / 30.0f);
+			world.tick(1 / 30.0f);
+		}
+	};
+	const auto said = [&](const std::string& voice) {
+		return std::count_if(bots.commanderSaid().begin(), bots.commanderSaid().end(),
+			[&](const game::BotManager::CommanderLine& l) { return l.voice == voice && l.team == 1 && l.squad == 1; });
+	};
+	step(0.1f);
+	// Artillery before its clock (120 s from the level's start): turned
+	// down 2..5 s on with artillery_deny, and taken off.
+	CHECK(world.storeSquadRequest(1, 1, 0, {0, 0, -60}));
+	step(1.9f);
+	CHECK(said("artillery_deny") == 0 && world.squadRequest(1, 1, 0));
+	step(3.2f);
+	CHECK(said("artillery_deny") == 1 && !world.squadRequest(1, 1, 0));
+	// The orbital strike with no asset: the artillery's line, and the
+	// squad's artillery request taken off rather than its own (the
+	// original's 0x1009e200 queues the artillery's turn-downs).
+	CHECK(world.storeSquadRequest(1, 1, 0, {0, 0, -60}) && world.storeSquadRequest(1, 1, 1, {0, 0, -60}));
+	step(5.5f);
+	CHECK(said("artillery_unavailable") == 1 && world.squadRequest(1, 1, 1));
+	world.removeSquadRequest(1, 1, 1);
+	// The UAV after 35 s and the supplies after 60 s: used at once, taken off.
+	step(49.8f); // to 60.5 s
+	CHECK(world.storeSquadRequest(1, 1, 3, {40, 0, 41}));
+	step(0.1f);
+	CHECK(!world.squadRequest(1, 1, 3) && world.supplyCrates().size() == 1);
+	// Asked again within its 60 s: supply_deny.
+	CHECK(world.storeSquadRequest(1, 1, 3, {40, 0, 41}));
+	step(5.1f);
+	CHECK(said("supply_deny") == 1 && !world.squadRequest(1, 1, 3));
+	// The artillery after its 120 s: fired at the request's point.
+	step(55.3f); // to 121 s
+	CHECK(world.storeSquadRequest(1, 1, 0, {0, 0, -60}));
+	step(0.1f);
+	CHECK(!world.squadRequest(1, 1, 0) && !world.strikes().empty() && std::fabs(world.strikes()[0].target.z + 60) < 0.01f);
+	// A human commander answers for himself: the AI leaves the request.
+	const int boss = world.addPlayer("Boss", 1, false);
+	world.setCommander(1, boss);
+	CHECK(world.storeSquadRequest(1, 1, 2, {0, 0, 0}));
+	step(6);
+	CHECK(world.squadRequest(1, 1, 2) && said("uav_deny") == 0);
+}

@@ -221,8 +221,8 @@ void BotManager::updateSquads()
 	}
 	// The commanders' strikes reach the squad manager as they are called
 	// (0x10088040): the AI commander's from its own artillery (0x1009c050,
-	// below; its answers to requests 0x1009e020 / 0x1009e200, which the
-	// rewrite's bots don't send), a human commander's orbital strike and
+	// below; its answers to requests 0x1009e020 / 0x1009e200, Bots.cpp's
+	// answerRequests), a human commander's orbital strike and
 	// artillery through IAIEventCourier slot 0x5c (0x1004e690, from
 	// BF2142.exe 0x007d7d80 / 0x007d88d0 as the tool is used). Here: a
 	// strike new in the world's list since the last tick.
@@ -1173,8 +1173,8 @@ void BotManager::updateFormation(Squad& squad)
 // (0.85) more than 40 m off holds (vt+0x128 0).
 //   Flanking (0x100c3390): all may advance; once, with the formation's
 // slot 0 used and an area, 65 % of the time the area's two flank spots
-// (0x1005e820) reachable for slot 0's member mark the squad flanking
-// (+0xc0) and re-goal that member.
+// (0x1005e820) reachable for slot 0's member would mark the squad flanking
+// (+0xc0) and re-goal that member; the area never has flank spots (below).
 // The bots' +400 is read by the sensing agent's look-around (0x100d7840,
 // vt+0x12c): a bot told to hold looks along its walk, not about it
 // (BotsLook.cpp).
@@ -1246,27 +1246,18 @@ void BotManager::squadMode(Squad& squad)
 		}
 	} else if (mode == 2 && !squad.flankTried && squad.state == 2 && squad.formation.slots[0].used && squad.area >= 0) {
 		squad.flankTried = true;
-		if (random() < 0.65f) {
-			// The area's flank spots (0x1005e820): the two points across the
-			// way in at the area's radius.
-			physics::Vec3 way = squad.orderAt - squad.at;
-			way.y = 0;
-			const float length = std::sqrt(physics::lengthSquared(way));
-			const float r = m_settings.strategy.areas[static_cast<size_t>(squad.area)].temperature;
-			if (length > 0) {
-				way = way * (1 / length);
-				const physics::Vec3 across {way.z, 0, -way.x};
-				squad.flank[0] = squad.orderAt + across * r;
-				squad.flank[1] = squad.orderAt - across * r;
-				if (reachable(squad.flank[0]) && reachable(squad.flank[1])) {
-					squad.flanking = true;
-					if (SquadMember* m = memberOf(squad, squad.formation.slots[0].member)) {
-						m->goalSet = false;
-						m->regoal = true;
-					}
-				}
-			}
-		}
+		// The draw is made (0x10046770 against 0.65), but the flank spots
+		// are never found: 0x1005e820 takes the record of the area's list
+		// (+0x1c4 / +0x1c8: 0x20-byte nodes, a point at +8 and a second at
+		// +0x14) nearest the squad's spot, and nothing in AIDLL 1.51 adds to
+		// that list. Its only writers are the area's constructors
+		// (0x1005ffe0, 0x10062e10: an empty head) and its destructor; its
+		// node maker 0x1005ebc0 is reached only through the list copy
+		// 0x1005f0d0 / 0x1005ff40 / 0x10061240, whose sources are such lists;
+		// its readers are 0x1005e820 and the SAI debug printer
+		// (0x1002eff0 via 0x10061440, which draws each pair). So +0xc0 is
+		// never set, no member is re-goaled, and +0xc8 stays at zero.
+		(void)random();
 	}
 }
 

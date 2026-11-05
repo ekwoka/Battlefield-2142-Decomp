@@ -1,5 +1,7 @@
 #include "Player.h"
 
+#include "Hud/HudFont.h"
+
 #include "DisplayList.h"
 #include "Draw.h"
 #include "Stage.h"
@@ -1804,7 +1806,7 @@ void Player::installDefaults()
 		std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
 		return Value(s);
 	});
-	n.setDefaultFunction("dice.bf2.Locale", "getLanguage", [](Interpreter&, const std::vector<Value>&) { return Value("English"); });
+	n.setDefaultFunction("dice.bf2.Locale", "getLanguage", [](Interpreter&, const std::vector<Value>&) { return Value(hud::language()); });
 	n.setDefaultFunction("dice.bf2.Locale", "convertToWide", [arg](Interpreter& vm, const std::vector<Value>& args) {
 		return Value(vm.toString(arg(args, 0)));
 	});
