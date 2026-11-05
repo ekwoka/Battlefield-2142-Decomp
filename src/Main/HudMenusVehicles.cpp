@@ -304,6 +304,111 @@ CrosshairParts crosshairParts(float deviation, const world::ObjectTemplate* weap
 
 // --- The Titans' consoles (0x0044b680 case 0x32, 0x00448850) ---
 
+// --- The ability bar (0x007c3af0) ---
+
+namespace {
+constexpr const char* kAbilityAmmoIcon = "Ingame/Player/Bars/abilitybar_smallAmmoIcon.tga";
+constexpr const char* kAbilityMedicIcon = "Ingame/Player/Bars/abilitybar_smallMedicIcon.tga";
+constexpr const char* kAbilityRepairIcon = "Ingame/Player/Bars/abilitybar_smallRepairIcon.tga";
+constexpr int64_t kGiftTicks = 15; // the stamp's tick + 0xf
+} // namespace
+
+const AbilityBar::Out& AbilityBar::update(const game::GameWorld::AbilityBarInfo& info, bool inVehicle)
+{
+	m_out.show = m_out.wrench = m_out.valueShow = false;
+	const auto recent = [](int64_t since) { return since >= 0 && since < kGiftTicks; };
+	if (inVehicle) {
+		if (info.healFlag && recent(info.sinceHeal)) {
+			m_out.icon = info.repairFlag ? kAbilityRepairIcon : kAbilityMedicIcon;
+			m_out.show = true;
+		} else if (info.ammoFlag && recent(info.sinceAmmo)) {
+			m_out.icon = kAbilityAmmoIcon;
+			m_out.show = true;
+		}
+		if (m_out.show) {
+			m_out.bar = 1;
+		}
+		m_out.sound = !m_out.show ? -1
+			: info.healFlag      ? (info.repairFlag ? 1 : 0)
+			: info.ammoFlag      ? 2
+								 : -1;
+		return m_out;
+	}
+	if (!info.kitAbility) {
+		m_out.sound = -1; // no Ability component (every shipped kit has one)
+		return m_out;
+	}
+	float value = 0;
+	for (size_t i = 0; i < info.targets.size(); ++i) {
+		float share = info.targets[i];
+		if (!info.kitAmmo && share < 0) {
+			continue; // no armour
+		}
+		if (i != 0) {
+			share = (share + value) * 0.5f;
+		}
+		value = share;
+		m_out.show = true;
+		m_out.wrench = !info.kitAmmo;
+	}
+	if (info.alive) {
+		int kind = -1;
+		if (info.kitAmmo) {
+			kind = 2;
+			if (m_out.show) {
+				m_out.icon = kAbilityAmmoIcon;
+				m_out.bar = value;
+			}
+		} else if (info.kitRepairing) {
+			kind = 1;
+			if (m_out.show) {
+				m_out.icon = kAbilityRepairIcon;
+				m_out.bar = value;
+			}
+		} else if (info.kitHealing) {
+			kind = 0;
+			if (m_out.show) {
+				m_out.icon = kAbilityMedicIcon;
+				m_out.bar = value;
+			}
+		} else if (m_out.show) {
+			m_out.icon = kAbilityRepairIcon;
+			m_out.bar = 1 - value;
+		}
+		m_out.sound = kind >= 0 && info.active && m_out.show ? kind : -1;
+	} else {
+		m_out.sound = -1;
+	}
+	if (info.replenishingType != 3) {
+		m_out.valueShow = true;
+		m_out.value = info.battery;
+	}
+	if (!info.alive) {
+		m_out.show = false;
+	}
+	return m_out;
+}
+
+const AbilityBar::Out& AbilityBar::hide()
+{
+	m_out.show = m_out.wrench = false;
+	m_out.sound = -1;
+	return m_out;
+}
+
+void AbilityBar::apply(hud::HudManager& hud) const
+{
+	hud.set("AbilityBarShow", m_out.show ? 1 : 0);
+	hud.set("WrenchRepairingShow", m_out.wrench ? 1 : 0);
+	hud.set("AbilityValueShow", m_out.valueShow ? 1 : 0);
+	hud.set("AbilityBar", m_out.bar);
+	hud.set("AbilityValue", m_out.value);
+	hud.setString("AbilityIconPath", m_out.icon);
+	if (m_out.valueShow) {
+		hud.set("PrimaryAmmo", m_out.value);
+	}
+}
+
 void StrategicObjects::destroyed(int team, const world::ObjectTemplate* t)
 {
 	if (!t || (team != 1 && team != 2) || !flag(t, "vehicleHud.sendDestroyedHudEvent", false)) {

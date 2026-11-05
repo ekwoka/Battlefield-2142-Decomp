@@ -373,17 +373,27 @@ void SquadMenu::update(int player)
 		}
 	}
 	m_hud.setList(5, std::move(rows));
-	// The invite list: the team's players but the leader, selected ones
-	// highlighted ("|c").
+	// The invite list (0x007a7ff0 with InviteListShow): a header row
+	// (0x007a4680: HUD_SQUADTAB_SQUAD / HUD_SQUADTAB_KICK) over the
+	// leader's members, then one (HUD_SQUADTAB_TEAM / HUD_SQUADTAB_INVITE)
+	// over the team's players outside the squad (0x007a7450: not the
+	// commander, not the leader himself), a row each (0x007a6e30: the name,
+	// its icon cell, the player id in cell 2); the chosen ones highlighted
+	// ("|c"). A header's id cell is "-1": a click on it does nothing.
 	if (m_inviteShow) {
 		std::vector<std::vector<std::string>> invite;
-		for (const auto& other : players) {
-			if (other.team != me.team || other.id == player || other.commander) {
-				continue;
+		const auto section = [&](const char* title, const char* action, bool members) {
+			invite.push_back({text(title), text(action), "-1"});
+			for (const auto& other : players) {
+				if (other.team != me.team || other.id == player || other.commander || (other.squad == me.squad) != members) {
+					continue;
+				}
+				const bool chosen = members ? !m_unselected.count(other.id) : m_selected.count(other.id) != 0;
+				invite.push_back({(chosen ? "|c" : "") + other.name, "", std::to_string(other.id)});
 			}
-			const bool chosen = other.squad == me.squad ? !m_unselected.count(other.id) : m_selected.count(other.id) != 0;
-			invite.push_back({(chosen ? "|c" : "") + other.name, "", std::to_string(other.id)});
-		}
+		};
+		section("HUD_SQUADTAB_SQUAD", "HUD_SQUADTAB_KICK", true);
+		section("HUD_SQUADTAB_TEAM", "HUD_SQUADTAB_INVITE", false);
 		m_hud.setList(8, std::move(invite));
 	}
 	m_hud.set("SquadCreateShow", m_createShow ? 1 : 0);

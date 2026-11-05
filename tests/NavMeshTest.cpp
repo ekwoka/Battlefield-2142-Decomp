@@ -1,6 +1,7 @@
 // The bots' navigation mesh: .qtr/.clb parsing, locating points and path
 // finding on a small synthetic mesh, then a real level's Infantry mesh when
 // $BF2142_GAME_DIR is set.
+#include "AI/MineZones.h"
 #include "AI/NavMesh.h"
 #include "AI/PathFollower.h"
 #include "IO/File/ZipArchive.h"
@@ -823,4 +824,53 @@ TEST(PathFollower_SidestepRoundAVehicle)
 	CHECK(!ai::sidestepSteer(s2, near, way)); // 3 m from the goal
 	near.position = {21, 0, 24};
 	CHECK(ai::sidestepSteer(s2, near, way));
+}
+
+// The mine manager's zones (AIDLL 0x100b94d0, 0x100b9200, 0x10048230): a
+// circle and a triangle flood over a 20 x 2 m corridor, and the marks'
+// quirk: one zone leaves the cost classes; a polygon under two zones of
+// different kinds (counter A and B) turns class 7, and stays so after the
+// zones go.
+TEST(NavMesh_MineZonesAndMarks)
+{
+	ai::NavMesh m = buildCorridor(20, 1.0f, -1);
+	const auto at = [&](float x, float z) {
+		for (uint32_t p = 0; p < m.polygons.size(); ++p) {
+			if (m.containsXZ(p, {x, 0, z})) {
+				return p;
+			}
+		}
+		return 0u;
+	};
+	const uint32_t centre = at(10.3f, 1.2f);
+	const std::vector<uint32_t> circle = ai::floodCircle(m, centre, {10.3f, 0, 1.2f}, 1.5f);
+	CHECK(circle.size() >= 6 && circle.front() == centre);
+	for (uint32_t p : circle) {
+		const ai::Vec3 c = m.centroid(p);
+		CHECK(std::fabs(c.x - 10.3f) < 3.0f); // nothing far off joins
+	}
+	CHECK(std::find(circle.begin(), circle.end(), at(15.5f, 0.5f)) == circle.end());
+	// The cone: 7.5 m along +x from x 2, 22.5 degrees either side.
+	const float a = 22.5f * 3.14159265f / 180;
+	const ai::Vec3 p0 {2, 0, 1}, p1 {2 + 7.5f * std::cos(a), 0, 1 + 7.5f * std::sin(a)},
+		p2 {2 + 7.5f * std::cos(a), 0, 1 - 7.5f * std::sin(a)};
+	const std::vector<uint32_t> cone = ai::floodTriangle(m, at(2.2f, 1.0f), p0, p1, p2);
+	CHECK(std::find(cone.begin(), cone.end(), at(8.5f, 1.0f)) != cone.end());
+	CHECK(std::find(cone.begin(), cone.end(), at(12.5f, 1.0f)) == cone.end());
+	CHECK(std::find(cone.begin(), cone.end(), at(0.5f, 1.0f)) == cone.end());
+	// Too high: a polygon with a vertex over 2 m off p0 is left out.
+	const std::vector<uint32_t> high = ai::floodTriangle(m, at(2.2f, 1.0f), {2, 3, 1}, {9, 3, 4}, {9, 3, -2});
+	CHECK(high.size() == 1);
+	ai::MineMarks marks;
+	const uint32_t shared = at(8.5f, 1.0f);
+	marks.mark(m, 0, shared, false);
+	CHECK(marks.marked(0, shared) && m.polygons[shared].costClass == 1);
+	marks.mark(m, 0, shared, false); // a second cone: counter A at 1, no class
+	CHECK(m.polygons[shared].costClass == 1);
+	marks.mark(m, 0, shared, true); // a circle's mark: B at 0 -> class 7
+	CHECK(m.polygons[shared].costClass == 7);
+	marks.unmark(0, shared, false);
+	marks.unmark(0, shared, false);
+	marks.unmark(0, shared, true);
+	CHECK(!marks.marked(0, shared) && m.polygons[shared].costClass == 7);
 }

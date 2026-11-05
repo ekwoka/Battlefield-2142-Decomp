@@ -9,6 +9,7 @@
 #include "Scene/LightSettings.h"
 #include "Texture/DdsFile.h"
 #include "Scene/PostProductionSettings.h"
+#include "Terrain/Heightmap.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
 
@@ -154,6 +155,58 @@ float LevelRenderer::hemiShadowAt(float x, float z) const
 	return static_cast<float>(m_hemiAlpha[static_cast<size_t>(py) * static_cast<size_t>(n) + static_cast<size_t>(px)]) / 255.0f;
 }
 
+// ---- the SimpleShadowmap -----------------------------------------------------
+
+void LevelRenderer::loadSimpleShadowmap(const LevelSources& sources)
+{
+	// 0x100aa290: GSLevelDirectory + GSLoadLevel + "/SimpleShadowmap.raw"
+	// and "/SimpleShadowmapIO.raw" (server.zip; the archive's name is
+	// lower case, the file system's lookups aren't case-sensitive), N half
+	// the cluster's heightmapSize (its slot 0x2c).
+	std::vector<uint8_t> occlusion, io;
+	if (!sources.files.readFile(sources.levelPath + "SimpleShadowmap.raw", occlusion)) {
+		occlusion.clear();
+	}
+	if (!sources.files.readFile(sources.levelPath + "SimpleShadowmapIO.raw", io)) {
+		io.clear();
+	}
+	int n = sources.heightmaps.heightmapSize() / 2;
+	if (n <= 0 && !occlusion.empty()) {
+		n = static_cast<int>(std::lround(std::sqrt(static_cast<double>(occlusion.size()))));
+	}
+	m_simpleShadowmap.load(n, occlusion, io);
+}
+
+// The factor on a bundled or skinned mesh's sun and specular colours
+// (0x100c3880 / 0x100c5030 / 0x10162070, SimpleShadowmap.h), encoded for
+// LightingUniforms::layers[3]: 0 for none, else 1 + the factor.
+//   - A bundled mesh takes it unless it is drawn with the shadowed
+//     technique (flag 0x1000: the shadow quality (video setting 4) over 2
+//     and the mesh in the dynamic map this frame, 0x80); a skinned mesh
+//     always.
+//   - The original casts three rays a mesh every other frame (0x100c2b70 /
+//     0x10160e90): the height over the ground 6 m down (the rewrite's
+//     meets only the terrain, as HeightOverTerrain's) and the one 150 m up
+//     (+600 / +0x54), for which the rewrite takes the IO map's indoors: a
+//     roof over what the lightmapper called indoors and none outdoors.
+float LevelRenderer::simpleShadowFor(const Mat4& world, bool skinned, bool shadowCaster) const
+{
+	if (!m_simpleShadowmap.loaded()) {
+		return 0;
+	}
+	const scene::ShadowSettings* settings = m_sources ? m_sources->shadows : nullptr;
+	if (!skinned && shadowCaster && m_shadow.enabled && settings && settings->quality > 2) {
+		return 0;
+	}
+	const float x = world.at(3, 0), y = world.at(3, 1), z = world.at(3, 2);
+	const terrain::Heightmap* heightmap = m_sources ? m_sources->heightmaps.primary() : nullptr;
+	const float height = simpleShadowHeight(heightmap ? y - heightmap->heightAt(x, z) : -1.0f);
+	const float occlusion = m_simpleShadowmap.occlusionAt(x, z);
+	const float outdoors = m_simpleShadowmap.outdoorsAt(x, z);
+	const bool useSunScaling = skinned && m_sources && m_sources->renderer && m_sources->renderer->useSunScaling;
+	return 1 + simpleShadowSunScale(occlusion, outdoors, outdoors < 0.5f, height, useSunScaling);
+}
+
 // ---- the dynamic shadows -------------------------------------------------------
 
 void LevelRenderer::useShadows(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, uint32_t slot,
@@ -283,6 +336,11 @@ void LevelRenderer::drawShadowCasters(SDL_GPUCommandBuffer* commands, SDL_GPUTex
 	const GpuMesh* bound = nullptr;
 	TransformUniforms transforms {};
 	size_t casters = 0, draws = 0;
+	if (!statics) {
+		for (const Instance& instance : m_instances) {
+			instance.shadowCaster = false;
+		}
+	}
 	for (const Instance& instance : m_instances) {
 		const GpuMesh* gpuMesh = instance.mesh;
 		if (!gpuMesh || instance.fade < 1.0f) {
@@ -333,6 +391,7 @@ void LevelRenderer::drawShadowCasters(SDL_GPUCommandBuffer* commands, SDL_GPUTex
 			}
 		}
 		++casters;
+		instance.shadowCaster = !statics;
 		if (gpuMesh != bound) {
 			bound = gpuMesh;
 			SDL_GPUBufferBinding vertexBinding {bound->vertices, 0};

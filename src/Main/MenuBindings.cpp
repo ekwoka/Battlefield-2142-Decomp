@@ -4,6 +4,7 @@
 #include "UI/Player/Scroller.h"
 
 #include "Net/ServerQuery.h"
+#include "Net/ServerSettings.h"
 
 #include "EndOfRoundBindings.h"
 #include "Input/ControlMap.h"
@@ -1654,16 +1655,27 @@ void MenuBindings::bindMultiplay()
 void MenuBindings::bindServerSettings()
 {
 	ui::NativeRegistry& n = m_natives;
-	// What a setting is before the menu sets it (the game's defaults).
+	// What a setting is before the menu sets it (the game's defaults). The
+	// host page's (the swf natives ask the exe's "GameServerSettings"
+	// object, e.g. getRoundsPerMap 0x10056710 its slot 0x78) start as the
+	// server settings the mod's Settings/ServerSettings.con gave (its
+	// constructor 0x00499430, with the FileManager up: the file loaded,
+	// then sv's serverName, maxPlayers (0x00431690: at least 16 ranked),
+	// spawnTime and ticketRatio (0x00430f60 / 0x00430fa0: 15 and 100
+	// ranked), roundsPerMap, autoBalanceTeam, teamRatioPercent and the
+	// rest copied): the shipped file's are net::ServerSettings' defaults.
+	// (Its other branch, "Battlefield-2142 Server", 16 players, gpm_cq,
+	// spawn time 5 and 3 rounds, is for no FileManager: never in a game.)
+	static const net::ServerSettings sv;
 	static const std::map<std::string, Value> defaults = {
-		{"ServerSettings.MaxPlayers", Value(16)},
-		{"ServerSettings.RoundsPerMap", Value(1)},
-		{"ServerSettings.TicketRatio", Value(100)},
-		{"ServerSettings.TeamRatio", Value(100)},
-		{"ServerSettings.SpawnTime", Value(15)},
-		{"ServerSettings.FriendlyFire", Value(true)},
-		{"ServerSettings.AutoBalanceTeam", Value(true)},
-		{"ServerSettings.ServerName", Value("BF2142 server")},
+		{"ServerSettings.MaxPlayers", Value(sv.maxPlayers)},
+		{"ServerSettings.RoundsPerMap", Value(sv.roundsPerMap)},
+		{"ServerSettings.TicketRatio", Value(sv.ticketRatio)},
+		{"ServerSettings.TeamRatio", Value(sv.teamRatioPercent)},
+		{"ServerSettings.SpawnTime", Value(sv.spawnTime)},
+		{"ServerSettings.FriendlyFire", Value(sv.soldierFriendlyFire > 0)},
+		{"ServerSettings.AutoBalanceTeam", Value(sv.autoBalanceTeam)},
+		{"ServerSettings.ServerName", Value(sv.serverName)},
 		{"ServerSettings.GameMode", Value("gpm_sp")},
 		{"GeneralSettings.MaxBots", Value(16)},
 		{"GeneralSettings.BotSkill", Value(0.5)},
@@ -2181,7 +2193,7 @@ GameSetup MenuBindings::gameSetup() const
 {
 	GameSetup setup;
 	setup.maps = m_mapList;
-	setup.maxPlayers = static_cast<int>(setting("ServerSettings.MaxPlayers", 16));
+	setup.maxPlayers = static_cast<int>(setting("ServerSettings.MaxPlayers", 64));
 	const bool useBots = setting("GeneralSettings.UseBots", 1) != 0;
 	setup.bots = useBots ? static_cast<int>(setting("GeneralSettings.MaxBots", 16)) : 0;
 	setup.botsIncludeHumans = setting("GeneralSettings.MaxBotsIncludeHumans", 1) != 0;
@@ -2195,7 +2207,7 @@ GameSetup MenuBindings::gameSetup() const
 	setup.timeLimit = static_cast<int>(setting("ServerSettings.TimeLimit", 0));
 	setup.scoreLimit = static_cast<int>(setting("ServerSettings.ScoreLimit", 0));
 	setup.friendlyFire = setting("ServerSettings.FriendlyFire", 1) != 0;
-	setup.roundsPerMap = std::max(1, static_cast<int>(setting("ServerSettings.RoundsPerMap", 1)));
+	setup.roundsPerMap = std::max(1, static_cast<int>(setting("ServerSettings.RoundsPerMap", 3)));
 	return setup;
 }
 

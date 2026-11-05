@@ -168,6 +168,15 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	s.triggerRadius = number(t, "detonation.triggerRadius", 0);
 	s.triggerAngle = number(t, "detonation.triggerAngle", 180);
 	s.triggerMinSpeed = number(t, "detonation.triggerVictimMinSpeed", 0);
+	if (const auto type = t.settings().find("detonation.triggerType"); type != t.settings().end()) {
+		static const char* const kTypes[] = {"MTYNone", "MTYPersonnel", "MTYVehicle", "MTYPco"};
+		for (int i = 0; i < 4; ++i) {
+			if (type->second == kTypes[i]) {
+				s.triggerType = i;
+			}
+		}
+	}
+	s.allowFriendlyFireDetonation = number(t, "detonation.allowFriendlyFireDetonation", 0) != 0;
 	s.coneAngle = number(t, "detonation.explosionConeAngle", 0);
 	if (const auto effect = t.settings().find("detonation.endEffectTemplate"); effect != t.settings().end()) {
 		s.endEffect = effect->second;
@@ -841,14 +850,14 @@ physics::Vec3 deviateVelocity(const physics::Vec3& velocity, const physics::Vec3
 	return velocity + up * (scale * alongUp) + right * (scale * alongRight);
 }
 
-void followMagnet(Projectile& p, const physics::Vec3& aim, const physics::Vec3& targetVelocity, float seconds)
+void followMagnet(Projectile& p, const physics::Vec3& aim, const physics::Vec3& targetVelocity, float seconds, bool overrideArming)
 {
 	const ProjectileSettings& s = *p.settings;
 	const float targetSpeed = std::sqrt(physics::lengthSquared(targetVelocity));
 	if (targetSpeed > p.targetTopSpeed || (targetSpeed < s.armingSpeed && !p.armed)) {
 		p.targetTopSpeed = targetSpeed;
 	}
-	p.armed = p.targetTopSpeed > s.armingSpeed;
+	p.armed = p.targetTopSpeed > s.armingSpeed || overrideArming;
 	const float ownSpeed = std::sqrt(physics::lengthSquared(p.velocity));
 	physics::Vec3 point = aim;
 	if (ownSpeed > 0) {
@@ -858,7 +867,7 @@ void followMagnet(Projectile& p, const physics::Vec3& aim, const physics::Vec3& 
 	const float length = std::sqrt(physics::lengthSquared(direction));
 	direction = length > 1e-4f ? direction * (1 / length) : physics::Vec3 {};
 	float cap = s.maxSpeed;
-	if (s.useTargetSpeed) {
+	if (s.useTargetSpeed && !overrideArming) {
 		cap = (p.armed ? s.speedModifier : 1.0f) * p.targetTopSpeed; // 0x005ec770, 0x005ec7a0
 	}
 	if (ownSpeed >= cap) {

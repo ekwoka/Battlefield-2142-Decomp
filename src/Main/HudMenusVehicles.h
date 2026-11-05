@@ -274,6 +274,61 @@ CrosshairParts crosshairParts(float deviation, int deviationFactor, int minVisua
 // The same with the weapon template's weaponHud.* (defaults as above).
 CrosshairParts crosshairParts(float deviation, const world::ObjectTemplate* weapon, float length = 20);
 
+// The ability bar (0x007c3af0, each frame from the weapon HUD's frame
+// 0x007c40c0 after the weapon block, while the player's soldier lives and
+// the commander screen is closed; its other branch clears AbilityBarShow
+// and WrenchRepairingShow and stops the kit's AbilityHud sounds, slot
+// 0x60). HudElementsPlayer.con's AbilityInfoPlayer (on foot) and
+// AbilityInfo (in a vehicle) show by AbilityBarShow (+0x20c) the icon
+// AbilityIconPath (+0x210) in a round bar of AbilityBar (+0x208);
+// AbilityValue / AbilityValueShow (+0x214 / +0x20d) feed bars the script
+// comments out. The variables are the weapon HUD's (0x007bf6f0).
+// - In a vehicle (+0x21e) whose control object's slot 0x148 is false (all
+//   shipped ones): what the player gave in the last 15 ticks (player slots
+//   0x278 / 0x25c, 0x280 / 0x264, 0x284 / 0x26c): a heal the medic icon,
+//   a repair the repair icon, ammunition the ammo icon (abilitybar_small*
+//   Icon.tga), the bar full. The kit's AbilityHud plays repairingSound
+//   (slot 0x40) for the shown bar with the healed and repaired flags,
+//   healingSound (0x3c) with healed alone, ammoSound (0x44) with the ammo
+//   flag and not healed (the flags, not the ticks: they stay set).
+// - On foot, the gun in hand's ReplenishingAmmoComp: with targets, the bar
+//   shows (and WrenchRepairingShow, +0xf2, but for the ammo kit) their
+//   state: a target's armour share, or the ammo kit's the soldiers'
+//   ammunition / 15, each averaged into the running value from the second
+//   on. The kit's Ability decides the icon and the sound (on while the
+//   comp treats): ammo (the ammo icon, ammoSound), repairing (repair,
+//   repairingSound), healing (medic, healingSound); none (the recon's
+//   defuser) the repair icon over 1 - the value, silent. A comp's
+//   AbilityValueShow is on with AbilityValue the holder's battery, which
+//   also replaces PrimaryAmmo (+0xb4: the tools' ammunition bar is the
+//   battery). Dead or man down the bar goes off.
+// RTTeam's branch (a ReplenishingType of 2: the targets' first armoured
+// part's share summed) and slot 0x284's stamp (0x004bd4d0's) are used by
+// no shipped weapon.
+class AbilityBar {
+public:
+	struct Out {
+		bool show = false;      // AbilityBarShow
+		bool wrench = false;    // WrenchRepairingShow
+		bool valueShow = false; // AbilityValueShow
+		float bar = 0;          // AbilityBar
+		float value = 0;        // AbilityValue (and PrimaryAmmo when valueShow)
+		std::string icon;       // AbilityIconPath (kept from the last time it was set)
+		int sound = -1;         // the AbilityHud sound on: 0 healing, 1 repairing, 2 ammo
+	};
+	// `info`: GameWorld::abilityBar for the local player; `inVehicle` the
+	// weapon HUD's +0x21e.
+	const Out& update(const game::GameWorld::AbilityBarInfo& info, bool inVehicle);
+	// The hide branch (0x007c40c0): no bar, no wrench, no sound.
+	const Out& hide();
+	const Out& out() const { return m_out; }
+	// Sets the HUD variables (PrimaryAmmo too when valueShow).
+	void apply(hud::HudManager& hud) const;
+
+private:
+	Out m_out;
+};
+
 // The Titans' consoles and shields on the HUD (Friendly/EnemyStrategic-
 // Object%iShow, 0..9; the HUD information layer's +0xa89 + (team - 1) x
 // 10, copied for the local team and the other by 0x00448850). Every

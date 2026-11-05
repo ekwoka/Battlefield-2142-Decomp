@@ -327,6 +327,11 @@ PyObject* host_sgl_getWorldSize(PyObject*, PyObject*)
 	return Py_BuildValue("(ii)", size, size);
 }
 
+// BF2142.exe's host module (its method table at 0x009fd25c..): sgl_endGame
+// 0x00567cc0, sgl_sendGameLogicEvent 0x00567d40 (an event id 0..24, else
+// "only one event ID byte allowed"), sgl_sendPythonEvent 0x00567e00,
+// sgl_sendMedalEvent 0x00568010, sgl_sendRankEvent 0x00568130,
+// sgl_sendHudEvent 0x005681b0, sgl_sendTextMessage 0x00568270.
 PyObject* host_sgl_endGame(PyObject*, PyObject* args)
 {
 	g_host->game.endGame(static_cast<int>(intArg(args, 0)), static_cast<int>(intArg(args, 1)));

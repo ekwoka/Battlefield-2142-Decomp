@@ -4,6 +4,7 @@
 // set, the game's own AI scripts and a round on Cerbere_Landing (gpm_sp).
 #include "AI/Ballistics.h"
 #include "AI/Behaviour.h"
+#include "AI/Formation.h"
 #include "AI/NavMesh.h"
 #include "AI/PathFollower.h"
 #include "AI/Strategy.h"
@@ -1019,7 +1020,8 @@ TEST(Bots_StrategyOrdersSquadsToAttack)
 	for (int id : team) {
 		game::GameWorld::PlayerInfo info;
 		field.world->playerInfo(id, info);
-		closer += info.position.z > 15 || info.position.x > 15;
+		// (The members walk to their slots beside the leader, a little behind.)
+		closer += info.position.z > 10 || info.position.x > 10;
 	}
 	CHECK(closer == 4);
 }
@@ -1915,7 +1917,7 @@ TEST(Bots_SquadTargetAndGrenadeLob)
 	const int spotter = field.world->addPlayer("Spotter", 2, true);
 	const int grenadier = field.world->addPlayer("Grenadier", 2, true);
 	field.world->setKit(grenadier, "test_grenadier_kit", "us_light_soldier");
-	for (int id : {spotter, grenadier}) {
+	for (int id : {grenadier, spotter}) { // the grenadier leads: it heads for the order, not a slot
 		field.world->joinSquad(id, 1);
 		field.world->spawnSoldier(id);
 	}
@@ -4270,4 +4272,194 @@ TEST(Bots_PlugInNoPathfindingAndVehicleNumber)
 	CHECK(console.execute("aiTemplatePlugIn.vehicleNumber 2", out) == ConsoleResult::Ok);
 	CHECK(settings.aiPlugins["as_at_mobile"].vehicleNumber == 2);
 	CHECK(console.execute("aiTemplatePlugIn.vehicleNumber", out) == ConsoleResult::Ok && out.find('2') != std::string::npos);
+}
+
+// The squad formation's pure parts (AIDLL 0x100f58c0 / 0x100f53a0,
+// 0x100f5c70, 0x100f4d30): a line abreast whose slots alternate right and
+// left of their parents at 3 (r + r') apart, turned to the leader's way,
+// and the trail dropped every 6 m.
+TEST(Bots_FormationLineAndTrail)
+{
+	ai::Formation f;
+	for (int i = 0; i < ai::Formation::kSlots; ++i) {
+		ai::takeSlot(f, 10 + i);
+	}
+	CHECK(f.slots[5].used && f.slots[5].member == 15);
+	ai::layOutFormation(f, [](int) { return 1.0f; });
+	const float expect[6] = {0, 6, -6, 12, -12, 18};
+	const int parents[6] = {0, 0, 0, 1, 2, 3};
+	for (int i = 0; i < 6; ++i) {
+		CHECK(near(f.slots[static_cast<size_t>(i)].offset.x, expect[i]) && near(f.slots[static_cast<size_t>(i)].offset.z, 0));
+		CHECK(f.slots[static_cast<size_t>(i)].parent == parents[i]);
+	}
+	// Facing +x, the right is -z.
+	f.dirX = 1;
+	f.dirZ = 0;
+	const ai::Vec3 turned = ai::turnOffset(f, {6, 0, 0});
+	CHECK(near(turned.x, 0) && near(turned.z, -6));
+	const ai::Vec3 ahead = ai::turnOffset(f, {0, 0, 2});
+	CHECK(near(ahead.x, 2) && near(ahead.z, 0));
+	// The wedge steps back 0.6 per 0.8 aside.
+	f.shape = 1;
+	ai::layOutFormation(f, [](int) { return 1.0f; });
+	CHECK(near(f.slots[1].offset.x, 4.8f) && near(f.slots[1].offset.z, -3.6f));
+	// The trail: the first spot is kept, a point dropped past 6 m.
+	f.centre = {1, 0, 0};
+	ai::dropCrumb(f);
+	CHECK(!f.crumbs[0].valid && near(f.lastCrumb.x, 1));
+	f.centre = {6, 0, 0};
+	ai::dropCrumb(f);
+	CHECK(!f.crumbs[0].valid);
+	f.centre = {8, 0, 0};
+	ai::dropCrumb(f);
+	CHECK(f.crumbs[0].valid && near(f.crumbs[0].at.x, 1) && near(f.lastCrumb.x, 8));
+	// Moved: forced, or 2 m on after 0.2 s.
+	ai::markMoved(f, true, 0);
+	CHECK(f.moved && near(f.movedFrom.x, 8));
+	f.centre = {9, 0, 0};
+	ai::markMoved(f, false, 0.1);
+	CHECK(!f.moved);
+	f.centre = {11, 0, 0};
+	ai::markMoved(f, false, 0.3);
+	CHECK(f.moved);
+}
+
+// The squad taking an order (0x100c1eb0, 0x100c21b0) and its formation
+// (0x100c0890): three EU bots in a squad take the SAI's attack order (on
+// PAC's point); the leader accepts it, says attack_position (16) on the
+// squad's channel (3), the game's order is accepted; the leader heads for
+// the order, the members for their slots in the line beside its spot
+// (3 (r + r) = 6.89 m aside). A second order is ignored while this one is
+// under way and no member is near it.
+TEST(Bots_SquadTakesAnOrderInFormation)
+{
+	Field field;
+	game::BotSettings settings;
+	game::BotManager bots(*field.world, settings);
+	std::vector<int> team;
+	for (int i = 0; i < 3; ++i) {
+		const int id = field.world->addPlayer("Eu", 2, true);
+		field.world->joinSquad(id, 1);
+		field.world->spawnSoldier(id);
+		field.move(id, static_cast<float>(i) * 3, 0);
+		team.push_back(id);
+	}
+	// Over six of the squad's looks (one every 18 frames): the offsets are
+	// laid out for the members on the sixth (0x100f6dc0).
+	for (int tick = 0; tick < 18 * 7; ++tick) {
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+	}
+	const game::BotManager::Squad* squad = bots.squad(2, 1);
+	const game::GameWorld::SquadOrder* order = field.world->squadOrder(2, 1);
+	CHECK(squad && order && squad->members.size() == 3 && squad->state == 2 && squad->kind == 0);
+	CHECK(squad && order && order->accepted && std::fabs(squad->orderAt.x - order->position.x) < 1
+		&& std::fabs(squad->orderAt.z - order->position.z) < 1);
+	bool said = false;
+	for (const auto& r : bots.radioSent(team[0])) {
+		said = said || (r.type == 16 && r.channel == 3);
+	}
+	CHECK(said);
+	physics::Vec3 slot;
+	CHECK(!bots.formationGoal(team[0], slot)); // the leader's goal is the order's
+	bots.updateSquadNow(2, 1);
+	for (int i = 1; i < 3; ++i) {
+		CHECK(bots.formationGoal(team[static_cast<size_t>(i)], slot));
+		const float aside = std::sqrt((slot.x - squad->at.x) * (slot.x - squad->at.x) + (slot.z - squad->at.z) * (slot.z - squad->at.z));
+		CHECK(std::fabs(aside - 6.8934751f) < 1.0f);
+	}
+	CHECK(bots.mayAdvance(team[1]));
+	const physics::Vec3 was = squad->orderAt;
+	CHECK(field.world->issueOrder(2, 1, game::GameWorld::OrderType::Attack, 0, 100, -1));
+	bots.updateSquadNow(2, 1);
+	CHECK(squad->state == 2 && std::fabs(squad->orderAt.x - was.x) < 0.01f);
+}
+
+// The sensing agent's look-around (0x100d7840): a bot walking to PAC's
+// point with nobody about looks along its walk most of the time and
+// glances aside now and then (the sector weights growing 0.0125 off the
+// walk), the walk going on by throttle and strafe against the look
+// (0x100cd3b0).
+TEST(Bots_LookAroundWhileWalking)
+{
+	Field field;
+	game::BotSettings settings;
+	game::BotManager bots(*field.world, settings);
+	const int id = field.world->addPlayer("Eu", 2, true);
+	field.world->joinSquad(id, 1);
+	field.world->spawnSoldier(id);
+	field.move(id, -60, 0);
+	int aside = 0, ticks = 0;
+	std::set<int> sectors;
+	for (int tick = 0; tick < 30 * 40; ++tick) {
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+		game::GameWorld::PlayerInfo info;
+		field.world->playerInfo(id, info);
+		if (bots.lookPlanned(id)) {
+			sectors.insert(bots.lookSector(id));
+		}
+		if (bots.behaviour(id) == "MoveTo" && info.velocity.x * info.velocity.x + info.velocity.z * info.velocity.z > 1) {
+			++ticks;
+			const float walk = std::atan2(info.velocity.x, info.velocity.z) * 57.29578f;
+			aside += std::fabs(std::remainder(info.yaw - walk, 360.0f)) > 30;
+		}
+	}
+	game::GameWorld::PlayerInfo info;
+	field.world->playerInfo(id, info);
+	CHECK(info.position.x > -40); // it made its way east
+	CHECK(ticks > 30 * 10);
+	CHECK(aside > 0 && aside < ticks / 2);
+	CHECK(sectors.size() >= 2);
+}
+
+// The SAI's respawn choice (0x100f0590): a dead EU bot gets EU's point
+// (the only one it holds with a spawn point) and one of the four kits.
+// AIMain refuses bots over aiSettings.setMaxNBots (0x100581a0).
+TEST(Bots_RespawnChoiceAndMaxBots)
+{
+	Field field;
+	game::BotSettings settings;
+	settings.maxBots = 1;
+	game::BotManager bots(*field.world, settings);
+	bots.setTeamKits(2, {{"k0", "us_light_soldier"}, {"k1", "us_light_soldier"}, {"k2", "us_light_soldier"},
+							{"k3", "us_light_soldier"}});
+	const int id = field.world->addPlayer("Eu", 2, true);
+	field.world->joinSquad(id, 1);
+	field.world->spawnSoldier(id);
+	const int other = field.world->addPlayer("Eu2", 2, true);
+	field.world->joinSquad(other, 1);
+	field.world->spawnSoldier(other);
+	bots.update(1 / 30.0f);
+	CHECK(!bots.refused(id) && bots.refused(other));
+	game::GameWorld::PlayerInfo info;
+	field.world->playerInfo(id, info);
+	field.world->setHitPoints(info.soldier, 0);
+	for (int tick = 0; tick < 5; ++tick) {
+		field.world->tick(1 / 30.0f);
+		bots.update(1 / 30.0f);
+	}
+	field.world->playerInfo(id, info);
+	CHECK(!info.alive);
+	CHECK(bots.respawnPoint(id) == 2 && field.world->spawnChoice(id) == 2);
+	CHECK(bots.respawnKit(id) >= 0 && bots.respawnKit(id) <= 3);
+}
+
+// SAI steps 10 / 11 (0x100a0420, 0x100a09c0): the shares by Aggression and
+// the running split.
+TEST(Bots_AggressionSplit)
+{
+	float a = 0, d = 0;
+	ai::aggressionShares(0.7f, 0, 2, 1, a, d);
+	CHECK(a == 1 && d == 0); // nothing held: all attack
+	ai::aggressionShares(0.7f, 3, 0, 0, a, d);
+	CHECK(a == 0 && d == 1); // all held: all defend
+	ai::aggressionShares(0.7f, 1, 1, 1, a, d);
+	CHECK(near(a, 0.7f) && near(d, 0.3f));
+	CHECK(ai::assignsAttack(0.7f, 0.3f, 0, 0));
+	CHECK(!ai::assignsAttack(0.4f, 0.6f, 0, 0));
+	CHECK(ai::assignsAttack(0.7f, 0.3f, 2, 1));  // 2/3 <= 0.7
+	CHECK(!ai::assignsAttack(0.7f, 0.3f, 3, 1)); // 3/4 > 0.7
+	CHECK(ai::assignsAttack(1, 0, 5, 0));
+	CHECK(!ai::assignsAttack(0, 1, 0, 3));
 }

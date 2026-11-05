@@ -157,12 +157,34 @@ The classifier's (d) runs of 1 KB or more (no audit docs), each settled. Those t
 | `0x10009cc0`..`0x1000a667`, `0x100092f0`, `0x1000fb60`, `0x1000af90` | 2.2, 1.2, 1.0, 1.1 KB | the display-mode lists (`%ix%i@%iHz`, WideScreenEx, `%dSamples`, GSWindowSizeX/Y) and the device's caps probe (`0x1000b550`, the alpha-to-coverage check engine.md describes) | replaced by design (SDL window and GPU device) |
 | `0x10095810`..`0x10096277`, `0x1008e400` | 2.6 KB, 0.8 KB | the overgrowth tiles' D3D9 vertex streams (`Vtx_Position` / `Vtx_Normal` / `Vtx_TBase`, vtables `0x101d36d4` / `0x101d3690`) and their LeafOG / TrunkOG technique handles | replaced by design (OvergrowthLod.h draws the `_lod` meshes as meshes) |
 | `0x100793e1`..`0x10079e04` | 2.6 KB | `nametags.get/setCullDistance` (TagType: TTPlayer 100/300, TTOrder, TTRequest 100/1200, TTObject 0/1200, table `0x101f67a8`), `maxCallDistance`, `vehicleNametagOffset(Factor)`, `maxFriendlyDistance`, `deathFadeOutTime`, `manDownFadeOutTime`, `deployableDistance` | (d), low: the rows aren't bound; no shipped script calls them, and their defaults are Nametags.h's |
-| `0x100aa290`..`0x100aa70b` | 1.1 KB | the light manager's `SimpleShadowmap.raw` / `SimpleShadowmapIO.raw` (every level's server.zip): a sun-occlusion map in 2-bit steps and an inside/outside bit, 2 m a texel about the origin (slots 153 / 154, `0x100a8cb0` / `0x100a9160`, bilinear) | (d): see below |
-| `0x1014d450` (0.7 KB) | | TerrainOccluderShadows: the terrain patches drawn into the occluders' map (`ShadowOccluderMap`) that the bundled meshes multiply in | (d): see below |
+| `0x100aa290`..`0x100aa70b` | 1.1 KB | the light manager's `SimpleShadowmap.raw` / `SimpleShadowmapIO.raw` (every level's server.zip): a sun-occlusion map in 2-bit steps and an inside/outside bit, 2 m a texel about the origin (slots 153 / 154, `0x100a8cb0` / `0x100a9160`, bilinear) | done since (below) |
+| `0x1014d450` (0.7 KB) | | TerrainOccluderShadows: the terrain patches drawn into the occluders' map by `0x100b0a40` | dead code in RendDX9 (below) |
 
-The two (d) rendering items:
-- **SimpleShadowmap.** The bundled meshes' draw (`0x100c3880`, `0x100c5030`) scales the sun's colour and specular by pow(f, k) (k the light manager's `+0xcc`, 1) when the mesh isn't drawn with the shadowed technique (flag 0x1000: shadow quality over 2 and the material's flag 0x80): without a hit on the mesh's third ray (`+600`), outdoors (the IO bit set) f is the map at the mesh blended to 1 by its height over the ground across `+0xd8` (3..6 m) and indoors 1; with a hit, indoors f is the map and outdoors 1; indoors also takes the 0x200 technique. The height and the hit are collision rays per mesh (`0x10221a50` slot 0x68, from `0x100c2b70`). Not done: the rewrite draws every vehicle and soldier with both shadow maps, which cover what this stands in for near the camera; beyond the region the map would darken parked vehicles under roofs, at the cost of two rays a mesh.
-- **TerrainOccluderShadows.** Hills don't shade vehicles in the rewrite (its terrain isn't a shadow caster). Drawing the patches into the dynamic map would add a terrain pass to each map redraw, against the frame budget.
+The two rendering items, settled:
+- **SimpleShadowmap: done** (`src/Render/SimpleShadowmap.h`, `LevelRenderer::loadSimpleShadowmap` / `simpleShadowFor`, mesh.frag). The maps are the lightmapper's: they are loaded at the level's load, not generated. They hold the terrain's and the static meshes' shade, so this is how RendDX9 has hills shade vehicles. Their layout is in the header: N half the cluster's heightmapSize, the file's first row at +z, a grid with a lit outdoors border, `0x100a8f40` / `0x100a84c0` / `0x100a9080`.
+  - The bundled meshes' draw (`0x100c3880`, `0x100c5030`) scales the sun's colour and specular by pow(f, k), k the light manager's `+0xcc` (1), when the mesh isn't drawn with the shadowed technique (flag 0x1000: the shadow quality, video setting 4, over 2, and the mesh in this frame's dynamic map, 0x80).
+  - The skinned meshes' draw (`0x10162070`) always scales; with `renderer.useSunScaling` (device `+0x41`, slot 0xbc) it takes the mesh as indoors.
+  - With nothing above (the third ray, 150 m up, `+0xc8`): outdoors, f is the map faded to 1 by the height over the ground across `+0xd8` / `+0xdc` (3..6 m, a ray 6 m down); indoors, f is 1. With something above: indoors, f is the map; outdoors, 1.
+  - The rewrite has no per-mesh collision rays (`0x100c2b70` / `0x10160e90`). The height comes from the terrain, as HeightOverTerrain's does. For the upward ray the IO map's bit stands in: a roof indoors, open sky outdoors.
+  - The rewrite also draws every vehicle and soldier with its two shadow maps. Where both apply, the shader takes the darker of the factor and the maps.
+- **TerrainOccluderShadows: dead code.** `0x1014d450`'s only caller, `0x100b0a40` (technique "TerrainOccludershadow", vpLightMat, vpLightTrapezMat), is unreachable: no vtable holds it, and no call, jump or absolute pointer in the image reaches it. RendDX9 never makes the terrain a shadow caster. It has the SimpleShadowmap above instead, so the rewrite adds no terrain shadow pass.
+
+The three largest present-but-uncited runs are the particle manager's other system kinds: `0x10143980` (17.5 KB), `0x10135bb0` (9.6 KB) and `0x10141350` (9.4 KB). Slot 0x1c `0x1009a120` makes a template by kind; `0x10099970` makes the instance from the template's type id. The kinds are:
+
+| Kind | System | Template vtable | Instance vtable |
+|---|---|---|---|
+| 1 | MeshParticleSystem | `0x101d8800` | `0x101d9348` |
+| 2 | TrailSystem | `0x101d95a8` | |
+| 3 | ParticleSystemEmitter | `0x101d9420` | `0x101d9268` |
+| 4 | NonScreenAlignedParticleSystem | `0x101d89f8` | |
+
+The mesh system's code and the templates' code are cited in Effects.h. Decoding them added the mesh particles' randomRotationSpeed, their rotation graph, one shared random per axis set, the 1/60 s pre-warm, and no isStaticSystem for meshes.
+
+| Run | Size | What it is | Class |
+|---|---|---|---|
+| `0x10143980`..`0x10148430` | 17.5 KB | the mesh system's instance (start `0x10144ab0`, update `0x10145bf0`, emission `0x10144d90`, one particle `0x10145660`, motion `0x10144110`, placements `0x10145fc0` / `0x101460f0` / `0x101462e0`), the trail and ParticleSystemEmitter templates, the mesh geometry's load steps `0x101482f0` / `0x101483f0` / `0x10148370` | (c) cited (Effects.h, MeshFile.cpp); the plane ring `0x10144cf0` is not done (the terrain instead) |
+| `0x10135bb0`..`0x10138740` | 9.6 KB | the mesh and non-screen-aligned templates: constructors `0x10136720` / `0x10137fe0`, defaults `0x10135f30` / `0x10137290`, compile `0x10135e20` / `0x10137eb0`, LOD `0x10136570` / `0x10137a90`, texture `0x10137c60`, property accessors | (c) cited |
+| `0x10141350`..`0x10143940` | 9.4 KB | the ParticleSystemEmitter instance (constructor `0x10142010`, update `0x10143540`, emission `0x101426f0`, motion `0x10141720`): particles that each carry a child system | (d) unused: only levels without an archive.md5 (BF2 leftovers) create one |
 
 ## (d) Genuinely missing, ranked by player visibility
 
@@ -212,11 +234,44 @@ Also seen; most of these are names the rewrite spells differently, or debug-only
 | EXE `0x0070b600`..`0x0070bd31` | 1.8 KB | editor | The effects editor's `Objects/Effects/…/Effects.con` writer ("Untitled"). |
 | EXE `0x0087bc00`, `0x0087a1c0`, `0x007b2f60`, `0x007b3750`, `0x00874cd0`, `0x007b2220`, `0x007dbd10`, `0x00870020` | 12.1 KB | replaced by design | dice::meme nodes, actions and effects (EditNode, ButtonNode, OccupiedNode, IfElseEventActionNode, %sMoveEffect, BfNewListBoxNode, MovePointer): the HUD substrate src/Hud replaces (see (c), "Not needed one-to-one"). |
 
-Left (d), with what is missing:
-- EXE `0x007c3af0` (1.5 KB): the HUD's ability bar. HudElementsPlayer.con's AbilityBarShow, AbilityIconPath (abilitybar_small{Ammo,Medic,Repair}Icon), AbilityBar and AbilityValue aren't set: the icon of the supply being received (15 ticks after the last), and the deployable's charge.
-- EXE `0x00500594`'s MagneticBait rows (overrideArmingSpeed, switchPlayerOnLock) and PodTarget's activeOnCreate: the booster's motion mine bait (Bp1_Motion_Mine_Bait_Stationary) isn't a magnet target.
-- EXE `0x004f45e4`: `detonation.allowFriendlyFireDetonation` (the three mines). The collision test (`0x005e8aa0`) also reads the server's friendly-fire switch (`+0x58`); the rewrite spares the thrower's side always.
-- EXE `0x00499430` (1.8 KB): the host page's server settings (copied from the GameServerSettings or reset: "Battlefield-2142 Server", gpm_cq, `rotate_demo.py`, `http://server.com/demos/…`, 127.0.0.1); not compared with HostedGame.cpp.
+Left (d) by that pass, done by the next (coverage-6.md, "Status (EXE missing-runs pass, second)"): the HUD ability bar `0x007c3af0`, `detonation.allowFriendlyFireDetonation` with `sv.friendlyFireWithMines` (`0x005e8aa0`), the motion mine bait (`0x00500594`'s MagneticBait rows), the host page's settings (`0x00499430`).
+
+### The second pass (2026-11-05)
+
+| Run | Size | Class | Reason |
+|---|---|---|---|
+| EXE `0x00475cd0`..`0x00476483` | 1.9 KB | online-only / (a) | SwiffHost (vtable `0x00924d50`) slot 241 `0x00475cd0` (the page listener: kept in `+0xe68`, told `+0x770` and the page `+0xe50`; MenuBindings' pages replace it), slot 247 `0x00475d60` (the menu's news line: the next of the fetched strings `+0xcc`, else a fetch through the HTTP object `+0x80` / `+0xbc`, every 300 calls), slot 64 `0x00475ec0` (event 0x17 to itself); the rest vector assignments (`0x00475f10`, `0x00476050`, ...). |
+| EXE `0x0047a8e0`..`0x0047b0b9` | 1.8 KB | (a) | SwiffHost's data copies: `vector<0x38-byte record>::operator=` (`0x0047a8e0`), the end-of-round block's constructor `0x0047ac90` / destructor `0x0047ae10` (SwiffHost `+0x7b8`) and copy `0x0047af00`, their element loops and catch handlers. EndOfRoundBindings keeps its own. |
+| EXE `0x007a6e30` | 1.1 KB | implemented | The invite list's player row (from `0x007a7450` for `0x007a7ff0`); with the header rows (`0x007a4680`) in `SquadMenu::update`. |
+| EXE `0x00567cc0`..`0x00568344` | 1.6 KB | cited | The host module's sgl_endGame / sendGameLogicEvent / sendPythonEvent / sendMedalEvent / sendRankEvent / sendHudEvent / sendTextMessage (ScriptHost.cpp). |
+| EXE `0x007a7620`..`0x007a7ab5` | 1.2 KB | cited | SquadMenu's constructor (HudMenus.h; its icons are the scripts'). |
+| EXE `0x00453bf0`..`0x00454c98` | 2.0 KB | online-only | The server's GameSpy session key ("%04x%ld%04x%04x%04x%04x": sv.gameSpyPort, the time, four randoms, `0x00453ca0`) and its reporting neighbours. |
+| EXE `0x005fa890`..`0x005fb1b1` | 1.8 KB | replaced by design | GSWindowSizeX / GSWindowSizeY, the window's size in the settings (`0x005fa8e0`): the rewrite's window is main.cpp's. |
+| EXE `0x00571220`..`0x005718c9` | 1.7 KB | not settled | A kit-side update (its neighbours are the Kit's `0x0056cc50`, `0x0056e5c0`) that looks up a "recycle bin" object; needs a read. |
+| EXE `0x00477e60`..`0x0047849e` | 1.5 KB | not needed | The menu's mod switch: CommandLine.cmd written for the restart ("no mod specified", `0x00477e60`); the rewrite runs one mod. |
+| EXE `0x00577870`..`0x005782c8` | 1.4 KB | replaced by design | The language table (`0x00577f60`: English, French, German, ... Polish, Chinese, Czech, by name into DAT_00a67f74): the rewrite's localisation reads the mod's own language folders. |
+| EXE `0x008e87a0`..`0x008e9005` | 1.4 KB | (a) | Static registration of the networkable classes' names (SoldierNetworkable, SimpleObjectNetworkable, ...: DAT_00a73384); net::networkableInfos keys them. |
+| EXE `0x007e8a90`..`0x007e8fd8` | 1.3 KB | not settled | A map node's subclass constructor (over `0x00784cf0`, vtable `0x009b29d0`: map_Line, micromap_zoomSquare): the commander's micro map's; needs a read against HudMenus' map. |
+| EXE `0x005172f0`..`0x005177a3` | 1.2 KB | gap | The demo reader's camera files (Settings/demo-recordcam.con, demo-playcam.con); DemoCamera keeps its defaults. |
+| EXE `0x006694eb`..`0x00669969` | 1.1 KB | dev | The console's object-function test ("ERROR: Objectname or/and functionname are invalid"). |
+| EXE `0x0040e5fc`..`0x0040eaac` | 1.1 KB | (a) | Vector growth and a delta-compression helper's "No Delta" assert. |
+| EXE `0x0051aaa9`..`0x0051b215` | 1.1 KB | not settled | The wheels' grip flags' names (PGFRollGrip, PGFEngineGrip, PGFDummyGrip, PGFStaticFriction...): their reader. |
+| EXE `0x0088d1a0`..`0x0088d607` | 1.1 KB | not settled | A "_wreck" template child made for a destroyable (flag `+9 & 0x10`). |
+| EXE `0x0042737f`..`0x004278ef` | 1.4 KB | dev | GameLogic.remoteCommand / createObject / spawnAtCameraPosition (1 call between them); setBeforeSpawnCamera is implemented. |
+
+Stored template rows still unread, with their shipped calls (runs of 1 KB or more; each a (d) gap):
+- `0x0052930c` (2.1 KB): castsStaticShadow, castsDynamicShadow (252), selfLights, selfShadows, supportsPerVertex / PerPixel / Glow / Emitter (94 each): the light sources' flags (rendering).
+- `0x0055c95e` (2.0 KB): strategicObject.* (strategicObjectName 7, destroyedIcon 7, intactIcon 8, part, 3dMapIcon, isOnePiece), nametag.3dMapIcon (102).
+- `0x0052a79a` (1.8 KB): the projector lights' projectorTexture / Fov / Aspect / Near / Far, enabled (93) (rendering).
+- `0x004dfcee` (1.6 KB): antenna.* (2 each; team is read elsewhere).
+- `0x004e52b2` (1.5 KB): fire.hasAlternateOrigin (2), spawn.spawnVehicle / spawnInPod (1), fire.detonatorObject (4), fire.showWeaponAfterReloadDelay (18).
+- `0x00546302` (1.2 KB): the walkers' foot spacing / footLength / testCount (2).
+- `0x0051ffae` (1.2 KB): rotateAsAnimatedUV* (1 each), bundleSkeleton (20).
+- `0x004f9047` (1.2 KB): kitCustomPic (8), dogTagRewardTemplate / dogTagExchangeTemplate (32), disableBreathEffect (8).
+- `0x00550a65` (1.1 KB): radio.destroyedGameEvent (6), indicationDistance2D (13), closeToIndicationDist (16), closeToIndicationType (13), friendlySpawnMessage (1).
+- `0x004e1f2f` (1.1 KB): allowZoomOnHeat (3); setIfTitanChangeToWeapon, setCheckObstruction stubs here.
+- `0x005264aa` (1.0 KB): bounceLength / Strength / Damping (3).
+- `0x004e4d83` (1.0 KB): fire.projectileStartRotation (24), randomRotationSpeed (6), isPodLauncher (13).
 
 ## AIDLL: the missing-runs pass (2026-11-05)
 

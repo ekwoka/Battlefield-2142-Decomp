@@ -116,7 +116,7 @@ struct MenuMap {
 // What Multiplay.createServer starts: the map list and the settings.
 struct GameSetup {
 	std::vector<MenuMap> maps; // the first is played first
-	int maxPlayers = 16;
+	int maxPlayers = 64;         // the host page's defaults: ServerSettings.con's (0x00499430)
 	int bots = 16;               // GeneralSettings.setMaxBots
 	bool botsIncludeHumans = true; // the bots fill up to `bots` players
 	float botSkill = 0.5f;       // 0..1
@@ -125,7 +125,7 @@ struct GameSetup {
 	int timeLimit = 0;           // minutes, 0 for none
 	int scoreLimit = 0;
 	bool friendlyFire = true;
-	int roundsPerMap = 1;
+	int roundsPerMap = 3;
 };
 
 // The network behind the menu, replaceable (tests use fakes). Each
@@ -426,7 +426,10 @@ private:
 // menuTeams.con, run once when the menu starts: SwiffHost slot 5
 // 0x004697c0, MenuTeamManager slot 4 0x004957f0), as the console objects
 // SwiffHost (singleton 0x00a0f7ac, vtable 0x00924d50) and MenuTeamManager
-// (0x00a0f7b8, vtable 0x00925c40) keep it.
+// (0x00a0f7b8, vtable 0x00925c40) keep it. SwiffHost's page listeners
+// (slot 241 0x00475cd0), its online news line (slot 247 0x00475d60) and
+// its data copies (0x0047a8e0, the end-of-round block 0x0047ac90 /
+// 0x0047af00) the menu bindings replace with their own state.
 struct MenuHost {
 	// SwiffHost.addCredit, setScroll*, enableScroller (Scroller.h).
 	ui::CreditsScroller* scroller = nullptr;

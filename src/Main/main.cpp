@@ -692,6 +692,7 @@ int g_mapMenu = 0;
 // The weapon, item selection and vehicle parts of the HUD
 // (HudMenusVehicles.h) and the sound the weapon HUD starts (its overheat).
 dice::hfe::menu::WeaponHud g_weaponHud;
+dice::hfe::menu::AbilityBar g_abilityBar;
 dice::hfe::menu::ItemSelection g_itemSelection;
 dice::hfe::menu::StrategicObjects g_strategicObjects;
 dice::hfe::menu::VehicleHud g_vehicleHud;
@@ -1447,6 +1448,16 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	} else {
 		g_weaponHud.hide(hud);
 	}
+	// The ability bar (0x007c3af0, after the weapon block; see
+	// HudMenusVehicles.h): the gifts in a vehicle, the tool's targets on
+	// foot, the tools' battery as PrimaryAmmo. Its sound is the kit's
+	// AbilityHud's (updateHud's caller plays it).
+	if (game::GameWorld::AbilityBarInfo ability; alive && !commanderScreen && world.abilityBar(ability)) {
+		g_abilityBar.update(ability, inVehicle);
+	} else {
+		g_abilityBar.hide();
+	}
+	g_abilityBar.apply(hud);
 	// The item selection on foot: the kit's weapons by slot (their
 	// weaponHud.selectIcon). A weapon key's pick opens it for 0.4 s with
 	// the key's slot flashing (0x004d2a50 -> 0x0079c190; the HUD's input
@@ -3823,6 +3834,7 @@ int runGame(Options& options, Session& session)
 			const net::ServerSettings& sv = session.admin->settings;
 			round.setFriendlyFire({static_cast<float>(sv.soldierFriendlyFire), static_cast<float>(sv.vehicleFriendlyFire),
 				static_cast<float>(sv.soldierSplashFriendlyFire), static_cast<float>(sv.vehicleSplashFriendlyFire)});
+			round.setFriendlyFireWithMines(sv.friendlyFireWithMines);
 		}
 		// The bots see as far as the level's fog lets them (AIDLL 0x10056b20).
 		botSettings.levelFog = lights.fogStartEndAndBase;
@@ -6628,6 +6640,15 @@ int runGame(Options& options, Session& session)
 		// The AI runs on this server (AIDLL's interface; a wreck's armour
 		// drains three times as fast, 0x00652380).
 		round.setAiRunning(bots.enabled() && options.bots > 0);
+		// The SAI's kit choice at a bot's respawn (AIDLL 0x100f04a0) draws
+		// from the team's kits.
+		for (int team = 1; team <= 2; ++team) {
+			std::vector<std::pair<std::string, std::string>> teamKits;
+			for (const game::Kit& kit : gameLogic.team(team).kits) {
+				teamKits.push_back({kit.name, kit.soldier});
+			}
+			bots.setTeamKits(team, std::move(teamKits));
+		}
 		for (int i = 0; i < (bots.enabled() ? options.bots : 0); ++i) {
 			const int team = i % 2 == 0 ? (options.playTeam == 1 ? 2 : 1) : (options.playTeam == 1 ? 1 : 2);
 			// A bot's name: the next of AI/BotNames.ai's (aiSettings.addBotName,
@@ -7472,18 +7493,15 @@ int runGame(Options& options, Session& session)
 					tone.play ? sounds.playSound(tone.sound) : sounds.stopSound(tone.sound);
 				}
 				// AbilityHud (on the kits: S_Heal, S_Repair, S_Resupply): the
-				// player's kit's sound while a hub or a repair treats him or
-				// his vehicle (its last treatment within half a second).
+				// ability bar's (0x007c3af0 through the kit's AbilityHud
+				// slots 0x3c / 0x40 / 0x44): in a vehicle while what the
+				// player gave shows, on foot while the tool in hand treats.
 				static std::string supplySound;
 				std::string wanted;
 				game::GameWorld::PlayerInfo self;
-				const world::Object* receiver = vehicle ? vehicle : me;
 				const world::Object* kit = round.playerInfo(round.localPlayer(), self) ? round.objects().find(self.kit) : nullptr;
-				if (receiver && kit) {
-					const auto got = round.received(receiver->id());
-					if (got.what >= 0 && round.roundTime() - got.at < 0.5) {
-						wanted = dice::hfe::menu::abilitySound(*kit->objectTemplate(), got.what);
-					}
+				if (kit && g_abilityBar.out().sound >= 0) {
+					wanted = dice::hfe::menu::abilitySound(*kit->objectTemplate(), g_abilityBar.out().sound);
 				}
 				if (wanted != supplySound) {
 					if (!supplySound.empty()) {

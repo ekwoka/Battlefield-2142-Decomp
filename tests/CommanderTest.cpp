@@ -232,12 +232,12 @@ TEST(Commander_OrdersAndBots)
 		game::BotSettings settings;
 		game::registerBotConsoleMethods(console, settings);
 		game::BotManager bots(world, settings);
-		for (int i = 0; i < 30 * 4; ++i) {
+		for (int i = 0; i < 30 * 8; ++i) { // the member follows its slot beside the leader (AIDLL 0x100c0890)
 			bots.update(1 / 30.0f);
 			world.tick(1 / 30.0f);
 		}
 		game::GameWorld::PlayerInfo info;
-		CHECK(world.playerInfo(member, info) && info.position.z > 5 && std::fabs(info.position.x) < 5);
+		CHECK(world.playerInfo(member, info) && info.position.z > 5 && std::fabs(info.position.x) < 10); // beside its leader in the line (AIDLL 0x100f53a0: 6.9 m)
 	}
 	// Turned down, it goes.
 	world.acceptOrder(leader, false);

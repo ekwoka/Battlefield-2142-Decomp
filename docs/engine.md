@@ -2697,7 +2697,21 @@ console names `0x1007aa09`..`0x1007bcb7`, all 20 registered). Slot 0x1c
 `0x101d8c48`, constructor `0x10139910`, defaults `0x10138b40`: 32 a
 second, 4 s, gravity −9.82, LodDistance and emitPrio High, QualityLevel
 Low, minimum emit scale 0.05), 1 mesh, 2, 3, 4 (the trail and
-non-screen-aligned ones). BF2142.exe's templates hand every property to
+non-screen-aligned ones). The kinds are the exe's classes:
+- 0 SpriteParticleSystem (0x94cf);
+- 1 MeshParticleSystem (0x94d0; template `0x101d8800`, defaults `0x10135f30`, instance `0x101d9348`);
+- 2 TrailSystem (0x94d1; `0x101d95a8`, instance `0x1013b1e0`);
+- 3 ParticleSystemEmitter (0x94d2; `0x101d9420`, instance `0x101d9268`; no shipped md5 level uses it);
+- 4 NonScreenAlignedParticleSystem (0x9537; `0x101d89f8`, defaults `0x10137290`, instance `0x1013d150`).
+
+The mesh instance has its own copy of the sprite's update (start `0x10144ab0`, update `0x10145bf0`, emission `0x10144d90`, motion `0x10144110`). It differs from the sprite's in these ways:
+- pre-warm runs in steps of 1/60 s;
+- there is no isStaticSystem run;
+- there is no emitPrio throttle; the system keeps its own pool (`+0x7c90`);
+- each particle starts at randomRotation × one random;
+- each particle spins at rotationSpeed + randomRotationSpeed × another random, taking that random's sign;
+- the draw turns the particle by spin × clamp(rotationGraph, 0, 1) (`0x101357c0`);
+- with collisionEnable, the system stores its plane every 1/3 s in a ring of 10 (`0x10144cf0`), and each particle bounces off the plane from its birth time. BF2142.exe's templates hand every property to
 it (`0x00625e40`..`0x00626cf0`: slot calls on `+0xa4`); the sprite
 template's offsets: emitFrequency `+0x10`, preWarmTime `+0xc`, emitPrio /
 LodDistance / QualityLevel `+0x60` / `+0x64` / `+0x68` (Low, Medium, High
@@ -2757,8 +2771,8 @@ transparency and size graphs), randomSize `+0x1b8`, randomIntensity
   bounces off the ground (the rewrite: the terrain under it taken flat,
   the speed across it reversed times collisionSpeedAlongNormal, along it
   times collisionSpeedAlongPlane; the original's system ground planes
-  aren't decoded, nor the two speeds' defaults: 0.7 / 0.8, the commonest
-  shipped values); forceToWaterSurface puts it
+  aren't followed; the two speeds' defaults are 0.7 / 0.8, the mesh
+  template's `0x10135f30`); forceToWaterSurface puts it
   on the water (the manager's water, `+0x8c18` slot 0x94; the rewrite
   the sea level plus waterSurfaceOffset); its rotation turns by its speed
   × clamp(rotationGraph(age), 0, 1) (`0x10131f80`).
@@ -2958,8 +2972,8 @@ the renderer's `syncDebris`.
 **Where a particle is born** (RendDX9 template `+0x268`, the names
 `Standard`, `RadialDirection`, `Radial`, `Box` at BF2142.exe `0x00a04264`,
 setter `0x00625de0`; the sprites' `0x10140fa0` / `0x101410d0` /
-`0x101412c0`, the same in the mesh `0x1013d840` and trail `0x1013acb0`
-systems). Standard, the scripts' usual type (1,359 systems), ignores the
+`0x101412c0`, the mesh `0x10145fc0` / `0x101460f0` / `0x101462e0`, the non-screen-aligned
+`0x1013d840` and the trail `0x1013acb0` systems). Standard, the scripts' usual type (1,359 systems), ignores the
 emit ranges: the particle is born in the ellipsoid of `emitRadius`
 (template `+0x18`, set through slot `0x28` from `0x00626e30`): theta = 2 pi
 u, phi = pi u, then (cos theta sin phi u rx, sin theta sin phi u ry, cos
@@ -3524,6 +3538,39 @@ longer be kept between moves of the region (its redraw costs up to ~1 ms
 a frame, see above), and per-object maps add a pass per caster; both
 would raise the frame cost well beyond the current 0.2-0.4 ms, so they
 are left out on purpose.
+
+**The SimpleShadowmap** (`src/Render/SimpleShadowmap.h`;
+`LevelRenderer::loadSimpleShadowmap` / `simpleShadowFor`; mesh.frag).
+The light manager loads two lightmapper files at the level's load
+(`0x100aa290`): `SimpleShadowmap.raw` (the sun's occlusion by the terrain
+and the statics, kept in 2-bit steps) and `SimpleShadowmapIO.raw` (an
+outdoors bit), both from the level's server.zip.
+- Each file is N x N bytes, N half the cluster's heightmapSize, a texel
+  2 m, centred on the origin, the first row at +z. The lookups are
+  bilinear (`0x100a8cb0` / `0x100a9160`).
+- The bundled meshes (`0x100c3880` / `0x100c5030`; unless drawn with the
+  shadowed technique: quality 3 and in the dynamic map) and the skinned
+  meshes (`0x10162070`, always) multiply their sun and specular colours by
+  f at their origin:
+  - outdoors with nothing above, the map faded to 1 between 3 and 6 m over
+    the ground;
+  - indoors under a roof, the map;
+  - otherwise 1.
+- This is how RendDX9 has hills shade vehicles and soldiers. Its terrain
+  occluder pass (TerrainOccluderShadows `0x1014d450`, from `0x100b0a40`)
+  is dead code that nothing reaches.
+- The original casts collision rays for the height and the roof
+  (`0x100c2b70`). The rewrite takes the height over the terrain and the
+  IO bit for the roof.
+- Where the shadow maps also apply, the shader takes the darker of the
+  two.
+
+Note on the hemi map's scale: Cerbere_Landing's `groundhemi` (and its
+SimpleShadowmap) cover the 1024 m primary heightmap. Sky.con gives
+2048, and RendDX9 uploads that size unchanged as HemiMapConstants.z
+(the base map's `+0x40`, `0x100ed200` → `0x100ecae0`, copied by
+the frame `0x1002cef0`). So the original, like the rewrite, samples
+that level's hemi map at half its scale.
 
 **Hemi maps.** `HemiMapManager.setBaseHemiMap <texture> <corner> <size>
 [<height>]` (`0x100857b8`; every level's Sky.con: `groundhemi`, 0/0/0,
@@ -5284,6 +5331,26 @@ and map list (`DAT_00a21940`, `MapList.cpp`) outlive the levels:
   host page's setters, set the same settings (`setSoldierFF` is
   `soldierFriendlyFire`, `setPunishTeamKills` `tkPunishEnabled`,
   `setTeamRatio` `teamRatioPercent`, `setDemoHook` `autoDemoHook`...).
+  The page's object (the swf natives ask "GameServerSettings": e.g.
+  `getRoundsPerMap`, SwiffPlayer `0x10056710`, its slot `0x78`; its
+  writer `0x00499be0` puts it out as `GameServerSettings.set*` lines)
+  starts (`0x00499430`) by loading `<GSModDirectory>/Settings/
+  serversettings.con` and copying the sv settings: serverName, password,
+  internet, bandwidthChoke, maxPlayers (`0x00431690`: at least 16 ranked),
+  start / end delays, spawn and man-down times and ticketRatio (15, 15 and
+  100 ranked: `0x00430f60`, `0x00430f80`, `0x00430fa0`), roundsPerMap,
+  the limits, the four friendly-fire percentages, tkPunishEnabled, the
+  voting, VoIP, GameSpy, demo and admin-script settings,
+  timeBeforeRestartMap, autoBalanceTeam, teamRatioPercent (100 ranked)
+  and internet && (ranked || punkBuster) (`0x004310a0`). So the host
+  page's defaults are the shipped file's: 64 players, 3 rounds a map, 15
+  s spawns, 100 tickets, no autobalance, "Battlefield 2142"
+  (`MenuBindings`' ServerSettings.*). Its other branch (no FileManager,
+  never in a game) resets to "Battlefield-2142 Server", 16 players,
+  gpm_cq, start delay 2, end delay 10, spawn time 5, man-down 10, 3
+  rounds, vote time 60, VoIP quality 5 at 127.0.0.1, the demo URLs
+  `http://server.com/demos/...` and `rotate_demo.py`. `HostedGame`'s
+  own settings are sv's (`HostSetup::settings`), as the exe's server.
 - **`maplist.*`** (`0x0042154a..0x00421d50`): `append level mode [size]`
   and `insert index level mode [size]` check the level and its mode are
   installed (`0x00441090`: "could not add to maplist. map not found:" /
@@ -6654,6 +6721,48 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   own icon. The enemies the pulses and scans reveal are drawn by their
   kit's.
 
+- **The ability bar** (`0x007c3af0`, after the weapon block each frame
+  from `0x007c40c0` while the soldier lives and the commander screen is
+  closed; its other branch clears AbilityBarShow and WrenchRepairingShow
+  and stops the kit's AbilityHud sounds; the variables `0x007bf6f0`'s:
+  AbilityBarShow `+0x20c`, AbilityIconPath `+0x210`, AbilityBar `+0x208`,
+  AbilityValue `+0x214`, AbilityValueShow `+0x20d`, WrenchRepairingShow
+  `+0xf2`). HudElementsPlayer.con draws AbilityInfoPlayer (on foot) and
+  AbilityInfo (in a vehicle): the icon in a round bar. In a vehicle
+  (`+0x21e`) it shows what the player gave in the last 15 ticks: player
+  slots `0x278` / `0x25c` (healed or repaired, `+0x168` / tick `+0x15c`;
+  `0x27c` repaired, `+0x169`) the medic or repair icon, else `0x280` /
+  `0x264` (ammo, `+0x16a` / `+0x160`) the ammo icon
+  (`Ingame/Player/Bars/abilitybar_small{Medic,Repair,Ammo}Icon.tga`), the
+  bar full. The giver is stamped by the game logic: the heal `0x004bc410`
+  (slot `0x258`: (tick, 1, 0) for a soldier of his team, (tick, 1, 1) for
+  a vehicle of his team with a driver) and the ammo `0x004bd5f0` (slot
+  `0x260`: the giver of the same team and the soldier rearmed; a refill
+  that gave nothing puts the giver's tick to 0); the flags stay set from
+  then on (the constructor `0x0059c010` clears them). The kit's sound:
+  repairing with the healed and repaired flags, healing with healed alone,
+  ammo with the ammo flag and not healed. On foot, the gun in hand's
+  ReplenishingAmmoComp (`0x007bea60`: its template component's
+  `ammo.replenishingType`, `+0x84`; 3 without one): with targets (the
+  comp's list, slot `0x20` `0x0059d8b0`) the bar shows their state, a
+  target's armour share (hit points over `maxHitPoints`) or, for a kit
+  with `hasAmmoAbility`, its ammunition (`0x00588ba0`: over the
+  soldier's refillable weapons the magazines, one less with the gun's
+  empty, over `nrOfMags`, × 15, floored; 15 for anything but a soldier)
+  / 15, each averaged into the running value from the second on;
+  WrenchRepairingShow but for the ammo kit. The kit's Ability (kit `+0x74`
+  slot `0x38`: healing, repairing, ammo) picks the icon and the sound
+  (while the comp treats, slot `0x24` `0x005d7e90`): ammo, repair, medic;
+  none (the recon's defuser) the repair icon over 1 − the value, silent.
+  A comp's AbilityValueShow is on with AbilityValue the holder's battery
+  (slot `0x28`, `0x005d8160`), which also replaces PrimaryAmmo (`+0xb4`):
+  the tools' ammunition bar is the battery. Dead or man down (slot
+  `0x114`) it goes off. The AbilityValue bars are inside `beginrem` in
+  the shipped scripts. RTTeam's branch (no shipped weapon) and slot
+  `0x284`'s stamp (`0x004bd4d0`'s, RTTeam's) aren't needed. A joined game
+  shows none (the server networks the flags, player networkable bits read
+  by `0x00596ed0`, but not the ticks or the tools' targets).
+  (`menu::AbilityBar`, `GameWorld::abilityBar`.)
 - **The range finder and distance counter** (`0x007c1470`, the weapon's
   hasRangeFinder `+0xd4` / hasDistanceCounter `+0xe0`, template `+0x118`
   / `+0x124`): the distance counter sets TargetDistanceString "999"
@@ -7597,10 +7706,23 @@ is the round's own (see **The projectile camera**). `targetObjectTemplate`
 (`+0x88`, the object the guidance moves): the rewrite keeps the point. The
 HUD's object markers (`Bf2ObjectMarkerNode`) show the state.
 
-- **Mines:** a mine fires when an enemy faster than
+- **Mines:** a mine fires when someone faster than
   `triggerVictimMinSpeed` (3.6 m/s: walking past is safe) comes within its
-  `triggerRadius`, inside `triggerAngle` of its facing. Its blast reaches
-  only `explosionConeAngle` of that facing.
+  `triggerRadius`, inside `triggerAngle` of its facing (the radius
+  trigger's test `0x005e8aa0`). Its blast reaches only
+  `explosionConeAngle` of that facing. Who sets it off is its
+  `detonation.triggerType` (`+0x64`, RadiusTriggerType): MTYNone (the
+  default) nobody, MTYPersonnel soldiers, MTYVehicle anything but soldiers
+  (the EMP and motion mines; a vehicle within the radius of its bounds),
+  MTYPco both (the anti-personnel mine). Its owner's side is spared when
+  the one crossing it is a bot (player slot `0x68`, `+0xd4`), or when the
+  server's `sv.friendlyFireWithMines` (settings `+0x288`, copied to
+  `DAT_00a3fcc0 +0x58` by `0x00430e20`; on by default) is off and the mine
+  has `detonation.allowFriendlyFireDetonation` (`+0x7c`; the three mines
+  have it); a human teammate sets it off otherwise. A vehicle's player is
+  its driver; a mine whose owner has gone spares nobody. Not traced: the
+  angle test's bounding-box form (the rewrite takes the cone to the
+  vehicle's centre) and `radiusDetonateWithAirVehicles`.
 - **C4:** it has neither a trigger nor a fuse to speak of (9999 s), so its
   owner sets it off with alternate fire (the right mouse button). It has
   no radius of its own: the detonation's default, 10 m.
@@ -8240,9 +8362,26 @@ Seeking projectiles (`seek.*`, `follow.*`):
   is `maxSpeed` (300), or with `useTargetSpeed` the target's top speed,
   × `speedModifier` (2) once armed (`0x005ec770`, `0x005ec7a0`). A parked
   vehicle is never chased. It goes off on hitting the vehicle (its
-  collision, gameLogic slot `0xf8`). Not traced: the detonation
-  component's 0.05 m MTYVehicle trigger test, its `ForceObjectHoverTest`
-  and `drag`.
+  collision, gameLogic slot `0xf8`). Not traced: its
+  `ForceObjectHoverTest` and `drag`.
+- **The motion mine bait** (the booster's `Bp1_Motion_Mine_Bait`, its
+  thrown `Bp1_Motion_Mine_Bait_Stationary` with a `MagneticBait` child: a
+  TTMagnet TargetObject, `disableWhenEmptyVehicle` 0, `overrideArmingSpeed`
+  1, `switchPlayerOnLock` 1): a magnet takes it as it takes a vehicle's
+  MagneticObject (the same query of the registered TTMagnet targets).
+  `overrideArmingSpeed` (`+0x2a7`, `0x0058e410`) arms the follow at once
+  (`0x005ecb30`) and keeps `maxSpeed` as the cap (`0x005b3e60` through the
+  follow's slot `0x44`, `0x005ed310`), so the still bait is chased;
+  `switchPlayerOnLock` (`+0x2a9`, `0x0058e420`) makes the round the bait
+  owner's, of his side, when its target changes to the bait (`0x005b3e60`:
+  its networkable's slots `0x4c` / `0x5c` from the target's `0x50` /
+  `0x60`). Of his side, the bait no longer counts for it
+  (`ignoreFriendly`) and the mine looks for that side's enemies: the bait
+  takes the mine over. Without the switch it chases the bait and goes off
+  on reaching it (its collision with the bait's mesh; here within half a
+  metre). `activeOnCreate` (`+0x2a8`, the constructor `0x0058ee60`
+  registers the target at once; PodTarget's) needs nothing here: the
+  rewrite's targets count from their creation.
 
 Unlocks are the kits' `ItemContainer` children, one per branch and level
 (`unlockLevel`). An unlocked container adds its items to free slots: the
@@ -8934,10 +9073,12 @@ active node to):
   have).
 - **Supply sounds.** AbilityHud (`0xc4f2`, `abilityHud.healingSound`,
   `repairingSound`, `ammoSound` from `0x0055a41f`):
-  the kits carry them (`S_Heal`, `S_Repair`, `S_Resupply`); the player's
-  kit plays its sound while a hub, a repair or a supply crate treats him
-  or his vehicle (`GameWorld::received`: the last treatment
-  within half a second; when the exe starts and stops it is not traced).
+  the kits carry them (`S_Heal`, `S_Repair`, `S_Resupply`). They are the
+  giver's, not the receiver's: the weapon HUD's ability bar
+  (`0x007c3af0`, see **The ability bar**) switches the kit's AbilityHud
+  sounds (slots `0x3c` healing, `0x40` repairing, `0x44` ammo, `0x60`
+  all off) each frame: in a vehicle while what the player gave shows, on
+  foot while the tool in hand treats its targets.
 
 ## Game scripts
 
@@ -9694,7 +9835,13 @@ SquadCreateLockedShow `+0xee`, SquadCreateTagString `+0xf0`, InviteListShow
 `+0xa5`, IsInSquad `+0xa6`, IsSquadLeader `+0xa0`.
 
 The leader's invite list (list data 8, `setShowInviteList 1`,
-`0x007a7dc0`) lists the team's players with the members selected
+`0x007a7dc0`; built by `0x007a7ff0`: a header row, `0x007a4680`,
+HUD_SQUADTAB_SQUAD / HUD_SQUADTAB_KICK, over the squad's members, then
+HUD_SQUADTAB_TEAM / HUD_SQUADTAB_INVITE over the team's players outside
+the squad, `0x007a7450` leaving out the commander and the leader; each
+player's row `0x007a6e30`: the name coloured by relation, an icon cell by
+the selected sets, the player id in cell 2, every other row's background;
+a header's id cell "-1") lists the team's players with the members selected
 (`0x007a7ac0` fills the selected set `+0x104`). A click
 (`singleClickInvite`, `0x007a8420`: the player id in cell 2 →
 `0x007a7e20`) selects a player outside the squad while there is room (six
@@ -10715,6 +10862,8 @@ The urgencies:
     zooms in: If (forced) NOT zoomed (0x100d2f80 over 0x100d3070, whose
     0x100d3090 reads the adaptor's slot 0x70) BAPATrigger on the weapon's
     zoom input (the adaptor's slot 0x68) (`BotManager::idle`, see Aim).
+    The statement doesn't turn the soldier; the sensing agent's look-around
+    does, after the plan (see Look-around).
   - The assist plans and DefuseMines never end on their own; the urgency
     drops them.
 
@@ -11769,6 +11918,212 @@ The commands (constructor / execute slot), and where the rewrite has them:
 **aiRandom.*** (1)
 
 - debug or tooling, not rewritten: `seed` 0x10023670/0x100237d0.
+
+### Squads (src/Game/BotsSquad.cpp, src/AI/Formation)
+
+AIDLL's squad object (0x110 bytes, 0x100c4080; reset 0x100c1700,
+destructor 0x100c38f0) is the game's squad seen by the AI: its members
+(0x70-byte member objects, 0x100bf550), the game's leader among them
+(0x100c34d0), its spot (the leader's, 0x100c32b0), the order and a
+formation. The squad manager (0x1008a720) makes nine a side up front
+(IAIGame slot 0x50, BF2142.exe 0x00895850: 10); each AIMain frame
+(0x1008a910) updates one squad of one side, the sides taking turns: a
+squad every 18 frames.
+
+- **Orders** (state +0x98: 0 none, 1 taken, 2 under way; kind +0x38: 0
+  attack, 1 defend, 2 move, 4 none). The game's order event (0x10089480;
+  here a change of `GameWorld::squadOrder`) reaches 0x100c1eb0: a
+  commander's order (the SAI's are) is taken only by a squad with none,
+  and without a human commander only while no member stands within 30 m
+  (+0x50 900) of the old order's spot in an area the side doesn't hold
+  (0x100c1e50 / 0x100bf780): state 1 for 10 s. A squad leader's own order
+  hands the formation's lead to a human leader (0x100f52d0). The leader
+  (or the member asking) accepts it in its member update (0x100c21b0):
+  without a human commander an attack on a held area is dropped; an area
+  whose radius (+ `aiSettings.setIgnoreCommanderDistance`, IAISettings
+  slot 0x10, 30) holds the spot and isn't the side's takes the area's
+  position (the area lookup 0x100349b0: the most radius / max(1, d²),
+  slot 0x68); else a spot within 30 m on the mesh (0x100c14a0: the spot,
+  then 8 tries ±30 m); none: the bot says negative (7) to the commander
+  (channel 4, 2 s) and the order goes. Accepted: a bot leader says
+  roger_that (6, channel 4, 2.5 s) to a human commander and
+  attack_position (16) / defend (15) / move (17) to the squad (channel 3,
+  2 s); the game's order is accepted for it (IBFSquad 0x28; 0x2c
+  refuses). Every member re-goals.
+- **Ending:** an attack ends once the side holds the area; a defence of a
+  held area while the enemy holds an area whose point can change hands
+  (0x1009c660 over IAIGame slot 0x24, 0x00895d90). The SAI letting go of
+  an area (0x100893c0, on reassignment and strategy changes) drops its
+  squads' orders unless a member is near the spot; a human commander
+  leaving drops every order of the side (0x1009bcd0 → 0x10089440). A new
+  leader drops the order unless a human commands and the leader is a bot.
+- **Formation** (+0x7c, 0x100f67d0): six slots (IAIGame slot 0x54,
+  0x008c0360), slot 0 the leader's. A member is in it (0x100bf950) while
+  alive, up and on foot, but not within 30 m of the spot of an order under
+  way (it heads for the order then). Slots are taken in order (0x100f5760)
+  and given up with the last moving into the hole (0x100f64a0: the
+  leader's hole takes the bot nearest the order's spot); a member leaving
+  re-hands them in member order (0x100f57f0). The shape (+0x14, 0x100f58c0)
+  is 0 always (only the constructor and the update's third tick write it):
+  a line abreast, slots 1 / 2 right and left of slot 0, 3 / 4 off them, 5
+  off 3, each 3 (r + r') from its parent (0x100f53a0; the wedge and
+  echelons 0x100f54c0 / 0x100f55f0 are unused), turned to the leader's
+  walk (+0x34, 0x100f51f0, over 0.5 m/s; 0x100f5c70: x' = z side + x
+  ahead, z' = -x side + z ahead). A slot off the mesh or on cost class 4
+  (0x100c0ff0) takes a trail point (0x100f4d30: dropped every 6 m the
+  leader goes; 0x100f5950, 0x100f6c10), else the order's spot or slot 0's
+  member. Slots are swapped to the nearest member (0x100f69a0); slot 0 is
+  kept for the game's leader (0x100f60a0). Every sixth update the offsets
+  are laid out again with the members' radii. Human members lagging
+  (0x100f4f30) clear "together" (+0x28); bots never lag.
+- **Members** (0x100c0bb0): every 9 s a goal unchanged since the last look
+  is given again when the bot's goal reads reached (urgency below 0.5) or
+  it stands still over 4 m from it. In the formation the leader goes to
+  the order (0x100c0130, the SAI goal path of `updateGoal`) at the squad's
+  speed (the slowest member's x 0.9, 0x100f5120, read by InfanteryMoveTo's
+  throttle 0x100e6060), the others to their slot by a waypoint goal (reach
+  0, area 60, 0x100bff90) whenever re-goaled, or at every look for the
+  members reset at the round's start (+0x4d, set by 0x100bf640 and never
+  cleared). Out of it a member heads for the order (0x100c0a90).
+  `BotManager::formationGoal`.
+- **Mode** (0x100c4010 / 0x100c1940): bounding with two or more of the
+  squad's bots fighting a soldier within 90 m (0x100c3af0, every 4 s:
+  halves in turn, a bot facing its target over 40 m off holds); flanking
+  for a commander's order 50..173 m off into an area the enemy holds
+  (0x100c3390: once, 65 %, the area's two flank spots reachable mark it
+  and re-goal the leader). The hold (bot +400, vt+0x128) is read only by
+  the look-around (0x100d7840 via vt+0x12c: a held bot looks along its
+  walk). The flank spots are a stand-in (0x1005e820 not decoded: across the
+  way in at the area's radius); nothing reads them (+0xc8).
+- **Danger list** (+0x14, pruned by 0x100c1b60: gone, timed out or moved
+  5 m, re-goaling everyone): no writer was found among AIDLL's functions,
+  so it stays empty. The repair marker (+0xd4, 0x100c0fa0, 60 s; the
+  bridge repair) has no broken bridges to serve.
+- **Radio:** req_new_order (14, channel 4, 1 s, every 20 s) from a bot
+  leader near the spot of an attack or move with a human commander
+  (0x100c30f0); a human leader's "followme" (12) answered roger_that by
+  the first bot (channel 3) and the formation released; a bot leader under
+  a human commander answers commend (18) thankyou (8), rebuke (19) and
+  followorders (20) sorry (9), divide (21) negative (7), channel 4
+  (0x100c2ee0).
+- Not rewritten: the member's vehicle pick through the squad manager
+  (0x100bfcb0 / 0x100880e0; the bots choose seats by Change).
+
+### Look-around (src/Game/BotsLook.cpp)
+
+The sensing agent (bot +0xdc, 0x100d7210; reset 0x100d6b90) decides where
+a soldier looks when no plan aims; its update (0x100d7840) runs after the
+main plan (0x1009a4c0). Any plan's aim (MouseTurretLookAt 0x1008e6e0,
+MouseTurretAimAt 0x1008e940 → 0x100d51c0) pauses it for 2 s; each walk
+step (InfanteryMoveTo → 0x1008f8e0) hands it the walk's way and clears
+the pause's stamp.
+
+- Eight world sectors (+z, +x, -z, -x, then +x+z, +x-z, -x-z, -x+z) with
+  weights (+0x3c): faced ones (within ~10°, 0.9848) go to 0 at each
+  sensing pass (0x100d6d60); at each choice those within 20° of the walk
+  grow 0.05 (0.25 when the walk turned off the chosen look), the others
+  0.0125 (0x100d6630).
+- Stimuli into their cardinal and diagonal sectors, × the side's
+  certainty: memory items (0x100d7400: not yet seen 0.3 heard + 0.25 the
+  fire plan's target; seen first-hand 0.5; second-hand 0.25 targeted or
+  heard) and the rounds that passed it (0x100d7590: an enemy's 0.7, 0.5
+  after 5 s, at the shooter, forcing one re-decision; a friend's 0.5 at
+  the impact). The heaviest sector wins with its stimuli's mean point;
+  none above 0: a random one, round(U × 7) (0x100d60f0).
+- The look lasts (0x100d5ad0): with no walk yet U(1.5, 2) s; walking,
+  U(7, 10) s along the walk, U(1.5, 2) s aside; standing U(3, 4) s. Prone
+  it looks about only when forced; a bot the squad holds (vt+0x12c) looks
+  along its walk. A plan whose sector isn't chosen again is replaced
+  (0x100d6300). The look (0x100d5ca0): a sector's way at the current
+  pitch, or the stimulus's point; before the first walk step the
+  GotoWaypoint plans' Turn (0x100d0fc0 → 0x100d58b0, weight 0.5) at the
+  goal may win.
+- The Soldier pattern's steering (0x100cd3b0) turns the walk into
+  throttle and strafe against the look: clamp(sign(c)·√|c|) of its
+  forward and side components (`BotManager::steer`). The vehicles' Turret
+  and Null patterns aren't rewritten (gunners aim by their own plans); the
+  sprint branch of 0x100cd3b0 and the MouseFreeLook pattern (unused by the
+  shipped sets) aren't either.
+- The 2d path look (0x100d2500, BBPGotoWaypoint2d when the seat's
+  ControlInfo slot 0x38 holds, 0x100cf660; stand-in: a driver whose look
+  turns the gun): along the path, the follower's point 20 m ahead, level.
+
+### Respawn, kit and the bots' population
+
+- **Respawn** (SAI step 4 0x100a1a80 → 0x100f0590, after the death hook
+  0x100a1270; the game's timer decides when, the SAI where and with
+  what; `BotManager::chooseRespawn`): 20 % of the time the last spawn
+  point is kept while usable; else the chooser (0x100eff20): unless (U ≤
+  0.3 and the leader is a bot), with the leader alive and up, the usable
+  spawn point nearest the squad's spot on the mesh; else a roulette over
+  the usable points by their area: max(1, (1 + 0.033 E) T − 0.1 D), T the
+  area's temperature for the side, E the basicTemp of empty vehicles
+  within 50 m, D the area's distance to the squad's spot. The kit
+  (0x100f04a0): floor(U × 4), the four kits alike; unlock levels one over
+  the best human's, at most 4 (1 with no humans: no unlocks here). The
+  rewrite's choice is the point's control point
+  (`GameWorld::setSpawnChoice`); the bots no longer spawn on their leader
+  (the original's bots don't).
+- **Bots outside squads** (steps 10 / 11, 0x100a0420 / 0x100a09c0): in
+  turn to attack or to defend by the strategy's Aggression (all attack
+  with no area held, all defend with every area held), A / (A + D) of the
+  rounded strategic strengths kept to the share (`ai::assignsAttack`). In
+  the shipped game every bot is in a squad, so this is bookkeeping (its
+  release flags feed 0x100a21a0 / 0x100a2630 branches not decoded); the
+  rewrite's bot outside squads takes its role's areas first.
+- **Population** (AIMain, vtable 0x10114d30): a new bot is refused once
+  the active bots reach `aiSettings.setMaxNBots` (slot 30, 0x100581a0;
+  `BotManager::refused`). Not rewritten: a joining human kicking a bot of
+  the bigger team over the server's maximum with maxBotsIncludeHumans
+  (slot 7, 0x10056110) and the fill on leave (slot 8 / 20, 0x10056d10 /
+  0x10056680, which needs autoSpawnBots, never set by the shipped
+  scripts: `aiSettings.setAutoSpawnBots` isn't a command): hosting has no
+  server maximum to test yet.
+
+### Mines on the navigation mesh (src/AI/MineZones, BotsMines.cpp)
+
+IAIMineManager (vtable 0x101145f0): BF2142.exe registers every mine of
+both teams (the AI event adaptor 0x0089f8d0 / 0x0089fdd0 → slot 0x14
+0x100496f0; the rewrite takes the trigger-armed rounds) and takes it off
+as it goes (slot 0x10 0x1004b880). Every 0.5 s (slot 3, 0x1004b640) a
+resting mine gets its zone (0x1004ae90): a soldier mine a 7.5 m cone,
+22.5° either side of its facing, flooded over the infantry mesh
+(0x100b9200: on x/z, a vertex inside or an edge crossing, nothing 2 m
+above or below); a vehicle mine (MTYVehicle: EMP, motion) a 9 m circle
+(0x100b94d0) on the vehicle mesh and another on the infantry mesh. The
+start polygon: under the mine, else along the facing a metre at a time,
+or 15 random tries round it. The marks (0x10048230) count per polygon
+(A for a zone's own mesh, B for the circle's second): a polygon's first
+mark only makes its record; a later one finding that counter at 0 sets
+its cost class to 7 (×1000, the pathfinder's slot 0x5c). So only
+infantry polygons under both a cone and a circle turn 7 in the shipped
+game, and nothing puts the class back when the mines go (the original
+keeps no copy). Kept as the binary does it.
+
+### Smaller behaviours
+
+- **BBPIdle2d** (0x1006b2f0): the driver answers the passenger it waits
+  for (BBIdle's 0x1006b1f0) when that one asked for a pickup
+  (req_pickup 2, unanswered) within 40 m (a bot only while a seat is free):
+  roger_that (6) on channel 6, 1 s.
+- **The get-in plan** (0x1006dac0): walking to a vehicle whose driver's
+  seat is taken (0x100d4190) and holding no get_in: req_pickup (2) to the
+  driver, channel 6, once. Seated (0x100d4a90): out of the root's seat
+  with a driver and no other seat reserved, gogogo (11); else, when
+  someone aboard holds a get_in from it, thankyou (8): channel 7, 1 s.
+- **Guided aim point** (0x100da710): the target's point; a soldier target
+  over 1 m/s whose distance less the round's speed is under the round's
+  distance is aimed lower by its pose (1.21 / 0.73 / 0.1 m); a wire-guided
+  round 20 m past the target aims 10 m under it, else beyond 0.5 m of the
+  target's distance at the point led by the target's x/z motion over the
+  time to it at the closing speed, under 2.5 s. The aim leads no more.
+- **The pilot's weapon** (0x100dd4a0): of the pilot seat's weapons, the
+  strongest against the target's CombatStrengthType (above 0), the one in
+  use counting twice.
+- **The take-off wait** (0x100d1cb0, 10 s): it ends early with no soldier
+  within 75 m (a human always counts, a bot while a seat is free).
+- **Revive** (0x10082f10, 0x100dda20): within 1.6 m of the body the bot
+  crouches; crouched, one press of the trigger, then its release.
 
 ### Not decoded, and the rewrite's stand-ins
 

@@ -134,6 +134,10 @@ TEST(HudMenus_InviteList)
 		return -1;
 	};
 	CHECK(s.hud.listCell(8, rowOf(mate), 0) == "|cMate" && s.hud.listCell(8, rowOf(loner), 0) == "Loner");
+	// The squad's header and members, then the team's header and players
+	// (0x007a7ff0); a header's click does nothing.
+	CHECK(s.hud.listCell(8, 0, 2) == "-1" && rowOf(mate) == 1 && s.hud.listCell(8, 2, 2) == "-1" && rowOf(loner) > 2);
+	s.squads.clickInviteList(me, 0);
 	// Select the loner and the one in another squad, unselect the mate.
 	s.squads.clickInviteList(me, rowOf(loner));
 	s.squads.clickInviteList(me, rowOf(other));
@@ -1536,4 +1540,81 @@ TEST(HudScoreboard_KitIconColumn)
 	CHECK(menu::scoreboardIcon(p, 1, assault) == "Ingame/Scoreboard/Icons/icon_Death.tga");
 	p.spectator = true;
 	CHECK(menu::scoreboardIcon(p, 2, assault) == "Ingame/Scoreboard/Icons/icon_Spectator.tga");
+}
+
+TEST(AbilityBar_GiftsInAVehicleAndToolsOnFoot)
+{
+	// 0x007c3af0. In a vehicle: what the player gave in the last 15 ticks,
+	// the bar full; the AbilityHud sound by the (lasting) flags.
+	hud::HudManager hud(nullptr);
+	menu::AbilityBar bar;
+	game::GameWorld::AbilityBarInfo info;
+	info.alive = true;
+	info.kitAbility = true;
+	info.healFlag = true;
+	info.sinceHeal = 3;
+	bar.update(info, true);
+	bar.apply(hud);
+	CHECK(hud.number("AbilityBarShow") == 1 && hud.number("AbilityBar") == 1);
+	CHECK(hud.string("AbilityIconPath") == "Ingame/Player/Bars/abilitybar_smallMedicIcon.tga");
+	CHECK(bar.out().sound == 0 && hud.number("WrenchRepairingShow") == 0);
+	info.repairFlag = true;
+	CHECK(bar.update(info, true).icon == "Ingame/Player/Bars/abilitybar_smallRepairIcon.tga" && bar.out().sound == 1);
+	// Past 15 ticks the heal is old: the ammo given shows, its sound only
+	// without the heal flag.
+	info.sinceHeal = 15;
+	info.ammoFlag = true;
+	info.sinceAmmo = 14;
+	CHECK(bar.update(info, true).show && bar.out().icon == "Ingame/Player/Bars/abilitybar_smallAmmoIcon.tga");
+	CHECK(bar.out().sound == 1); // the flags: healed and repaired
+	info.healFlag = info.repairFlag = false;
+	CHECK(bar.update(info, true).sound == 2);
+	info.sinceAmmo = 15;
+	CHECK(!bar.update(info, true).show && bar.out().sound == -1);
+
+	// On foot: the engineer's repair tool on two vehicles at half and full
+	// armour: (1 + 0.5) / 2, the wrench, its sound while treating.
+	info = {};
+	info.alive = true;
+	info.kitAbility = info.kitRepairing = true;
+	info.replenishingType = 0;
+	info.battery = 0.6f;
+	info.active = true;
+	info.targets = {0.5f, 1.0f};
+	bar.update(info, false);
+	bar.apply(hud);
+	CHECK(hud.number("AbilityBarShow") == 1 && std::abs(hud.number("AbilityBar") - 0.75f) < 1e-5f);
+	CHECK(hud.number("WrenchRepairingShow") == 1 && bar.out().sound == 1);
+	CHECK(hud.string("AbilityIconPath") == "Ingame/Player/Bars/abilitybar_smallRepairIcon.tga");
+	// The tool's battery is AbilityValue and the ammunition bar.
+	CHECK(hud.number("AbilityValueShow") == 1 && std::abs(hud.number("PrimaryAmmo") - 0.6f) < 1e-5f);
+	// A target without armour counts in the averaging's order only.
+	info.targets = {-1.0f, 0.4f};
+	CHECK(std::abs(bar.update(info, false).bar - 0.2f) < 1e-5f);
+	// The support's: the soldiers' ammunition, no wrench, the ammo sound.
+	info.kitRepairing = false;
+	info.kitAmmo = true;
+	info.targets = {10.0f / 15, 1.0f};
+	CHECK(bar.update(info, false).show && !bar.out().wrench && bar.out().sound == 2);
+	CHECK(std::abs(bar.out().bar - (10.0f / 15 + 1) / 2) < 1e-5f);
+	// A kit with no ability (the recon's defuser): the repair icon over
+	// 1 - the value, no sound.
+	info.kitAmmo = false;
+	info.targets = {0.25f};
+	CHECK(std::abs(bar.update(info, false).bar - 0.75f) < 1e-5f && bar.out().sound == -1);
+	CHECK(bar.out().icon == "Ingame/Player/Bars/abilitybar_smallRepairIcon.tga");
+	// Not treating: shown, silent. No targets: hidden.
+	info.kitHealing = true;
+	info.active = false;
+	CHECK(bar.update(info, false).show && bar.out().icon == "Ingame/Player/Bars/abilitybar_smallMedicIcon.tga" && bar.out().sound == -1);
+	info.targets.clear();
+	CHECK(!bar.update(info, false).show);
+	// A rifle (no ReplenishingAmmoComp) leaves PrimaryAmmo alone; man down
+	// hides the bar.
+	info.replenishingType = 3;
+	info.targets = {0.5f};
+	CHECK(!bar.update(info, false).valueShow);
+	info.alive = false;
+	CHECK(!bar.update(info, false).show);
+	CHECK(!bar.hide().show && bar.out().sound == -1);
 }

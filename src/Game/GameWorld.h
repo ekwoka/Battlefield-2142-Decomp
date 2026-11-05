@@ -822,6 +822,9 @@ public:
 		float soldier = 100, vehicle = 100, soldierSplash = 100, vehicleSplash = 100;
 	};
 	void setFriendlyFire(const FriendlyFire& ff) { m_friendlyFire = ff; }
+	// sv.friendlyFireWithMines (settings +0x288, copied to DAT_00a3fcc0
+	// +0x58 by 0x00430e20; on by default): see the mines' trigger.
+	void setFriendlyFireWithMines(bool on) { m_friendlyFireWithMines = on; }
 	// The sea's height, or none (false).
 	bool waterLevel(float& level) const
 	{
@@ -915,18 +918,35 @@ public:
 	};
 	const std::vector<Impact>& impacts() const { return m_impacts; }
 	size_t projectilesInFlight() const { return m_projectiles.size(); }
-	// What a soldier or vehicle was last given by a hub or a repair (0
-	// healed, 1 repaired, 2 rearmed) and when (round seconds; what -1:
-	// never), for the HUD's AbilityHud sounds.
-	struct Received {
-		int what = -1;
-		double at = -1;
+	// The weapon HUD's ability bar's inputs (0x007c3af0) for a player:
+	// - what he last gave (player +0x158..+0x16b through slots 0x25c..0x284:
+	//   the game logic's heal 0x004bc410 stamps the giver (tick, 1, 0) for
+	//   a soldier of his team healed and (tick, 1, 1) for a vehicle of his
+	//   team with a player in it repaired, slot 0x258; its ammo 0x004bd5f0
+	//   stamps the giver and the soldier rearmed (slot 0x260; a refill
+	//   that gave nothing puts the giver's time back to 0). The flags stay
+	//   set once set (the player's constructor 0x0059c010 clears them);
+	// - the gun in hand's ReplenishingAmmoComp (0x007bea60: the template
+	//   component's ammo.replenishingType, +0x84; 3 without one): whether it
+	//   treats (the comp's slot 0x24, 0x005d7e90: targets and on), the
+	//   holder's battery (slot 0x28, 0x005d8160) and per target (the list
+	//   slot 0x20, 0x0059d8b0) its armour's share of maxHitPoints or, for a
+	//   kit with hasAmmoAbility, the control object's slot 0x154 / 15 (a
+	//   soldier's ammunition, 0x00588ba0; 15 for anything else);
+	// - the kit's Ability flags (kit +0x74 slot 0x38: healing, repairing,
+	//   ammo).
+	struct AbilityBarInfo {
+		bool alive = false;
+		bool healFlag = false, repairFlag = false, ammoFlag = false;
+		int64_t sinceHeal = -1, sinceAmmo = -1; // ticks since the stamps (-1: none)
+		int replenishingType = 3; // 0 RTHeal, 1 RTAmmo, 2 RTTeam, 3 no comp
+		bool active = false;
+		float battery = 0;
+		std::vector<float> targets;
+		bool kitAbility = false; // the kit has an Ability component
+		bool kitHealing = false, kitRepairing = false, kitAmmo = false;
 	};
-	Received received(uint32_t object) const
-	{
-		const auto it = m_received.find(object);
-		return it == m_received.end() ? Received {} : it->second;
-	}
+	bool abilityBar(int player, AbilityBarInfo& out) const;
 	double roundTime() const { return m_time; }
 	const std::vector<Projectile>& projectiles() const { return m_projectiles; }
 	// Armor: hit points left (from armor.hitPoints), -1 without armor.
@@ -2075,6 +2095,7 @@ private:
 	bool insideCombatArea(const Player& player) const;
 	std::map<uint32_t, float> m_outsideVehicles; // +0x304: abandoned vehicles' seconds outside
 	FriendlyFire m_friendlyFire;
+	bool m_friendlyFireWithMines = true;
 	// The seats' IK objects (seatIkTargets): the template path from the
 	// vehicle's root, by root template and seat (ik null: none).
 	struct IkPath {
@@ -2293,6 +2314,10 @@ private:
 		// The ability battery (soldier +0x338, read and drawn through
 		// component 0xc4d7 slots 0x90/0x98): 0..1, -1 without a kit.
 		float battery = -1;
+		// What he last gave (abilityBar): player +0x168 healed or repaired,
+		// +0x169 repaired, +0x16a ammo; the ticks +0x15c / +0x160.
+		bool gaveHeal = false, gaveRepair = false, gaveAmmo = false;
+		int64_t gaveHealTick = -1, gaveAmmoTick = -1;
 		// The unlocks' ability.increasedRepairAbility (player +0x30c
 		// +0x48, copied by 0x005706b0 when above 0): scales the
 		// abilities' strength when above 0.
@@ -2559,7 +2584,6 @@ private:
 	std::map<int, AbilityScan> m_abilityScans;
 	std::vector<Supply> m_supplies;
 	std::map<uint32_t, float> m_resupply; // ammo owed to soldiers (fractions of a magazine)
-	std::map<uint32_t, Received> m_received; // received()
 	// `holder`: the player whose battery pays and whose unlocks scale it
 	// (the gadget's holder, or the hub's owner); none: no battery.
 	static constexpr uint32_t kSoldierFootStepsMaterial = 5500; // 0x157c
@@ -2570,8 +2594,14 @@ private:
 	void startWeaponEffects(const std::string& weapon, const physics::Vec3& origin, const physics::Mat3& turn, int effect);
 	void playAnimationSound(const Player& player, int sound);
 	void applyAbility(const Ability& ability, const physics::Vec3& at, int team, float seconds, uint32_t skip,
-		AbilityScan* scan = nullptr, Player* holder = nullptr, bool soldiersOnly = false, bool vehiclesOnly = false);
+		AbilityScan* scan = nullptr, Player* holder = nullptr, bool soldiersOnly = false, bool vehiclesOnly = false,
+		Player* giver = nullptr); // whose gifts are stamped (abilityBar): the holder by default
 	void stepAbilities(float seconds);
+	// A soldier's ammunition for the ability bar (0x00588ba0): over its
+	// weapons that can be refilled (ammo.allowReplenish, nrOfMags not
+	// -1) the magazines (one less with the gun's empty) over nrOfMags,
+	// each averaged into the running value, times 15, floored, 0..15.
+	int soldierAmmoLevel(const Player& player) const;
 	// A seated soldier's kit ability (the player's update 0x00599f30, each
 	// tick from 0x0059bd80 while the soldier sits in a vehicle): the kit's
 	// Ability component (ability.hasHealingAbility / hasRepairingAbility /

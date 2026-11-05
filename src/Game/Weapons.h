@@ -187,6 +187,14 @@ struct ProjectileSettings {
 	float triggerAngle = 180;
 	float triggerMinSpeed = 0;
 	float coneAngle = 0;
+	// detonation.triggerType (template +0x64, RadiusTriggerType): what sets
+	// it off (0x005e8aa0): MTYNone 0 nothing (the default), MTYPersonnel 1
+	// soldiers, MTYVehicle 2 anything but soldiers, MTYPco 3 both. Shipped:
+	// the anti-personnel mine MTYPco, the EMP and motion mines MTYVehicle.
+	int triggerType = 0;
+	// detonation.allowFriendlyFireDetonation (+0x7c): see GameWorld's
+	// mines (with the server's friendlyFireWithMines).
+	bool allowFriendlyFireDetonation = false;
 	// No trigger and no fuse to speak of (C4): set off by its owner.
 	bool remote = false;
 	// hasOnTimeEffect (template +0x328, 1 by default, 0x005b3500): its time
@@ -616,6 +624,7 @@ struct Projectile {
 	uint32_t lyingOn = 0;
 	float age = 0;
 	uint32_t lockedOn = 0; // the vehicle a seeker chases
+	uint32_t lockedBait = 0; // or the round (serial) carrying a TTMagnet target (the booster's MagneticBait)
 	// Wire guidance (LPTargetComp, 0x005e2e20 -> 0x005e27a0) from its
 	// firearm: target.wireGuidedLookAheadDistance (+0xb4, 20 by default),
 	// target.maxDistance (+0x78), dontLooseGuidanceOnObstruction (+0xb8);
@@ -640,7 +649,7 @@ struct Projectile {
 	float followFrom = -1;
 	float targetTopSpeed = 0;
 	bool armed = false;
-	int team = 0;         // the thrower's (mines spare their own side unless allowFriendlyFireDetonation)
+	int team = 0;         // the thrower's
 	float yaw = 0;        // the facing it was thrown with (mines' cones)
 	bool alive = true;
 	// Its firearm went (its player left): removed, without its effect, when
@@ -699,7 +708,12 @@ physics::Vec3 bounceVelocity(const physics::Vec3& velocity, const physics::Vec3&
 // accelerating while under the cap (maxSpeed, or with useTargetSpeed the
 // top speed, x speedModifier once armed) and braking along its velocity
 // at it.
-void followMagnet(Projectile& projectile, const physics::Vec3& aim, const physics::Vec3& targetVelocity, float seconds);
+// A target with overrideArmingSpeed (the bait, TargetObject +0x2a7 through
+// 0x0058e410: 0x005ecb30 arms the follow, and 0x005b3e60 through the
+// follow's slot 0x44, 0x005ed310, keeps maxSpeed as the cap) arms it at
+// once and lifts the useTargetSpeed cap.
+void followMagnet(Projectile& projectile, const physics::Vec3& aim, const physics::Vec3& targetVelocity, float seconds,
+	bool overrideArming = false);
 
 // DefaultFollowComp's turn (0x005ed1a0 -> 0x005ecb30, once a 30 Hz tick:
 // follow.maxYaw / maxPitch are degrees a tick): towards `target` plus its

@@ -1,6 +1,7 @@
 // The HUD's menus that the game drives from console methods: the spawn
-// screen's squad menu (BF2142.exe's SquadMenu, 0x007a4000-0x007a8800: the
-// squad list, creating a squad, locking it, the leader's invite list) and
+// screen's squad menu (BF2142.exe's SquadMenu, 0x007a4000-0x007a8800,
+// constructor 0x007a7620: the squad list, creating a squad, locking it,
+// the leader's invite list) and
 // the commander screen's tabs (CommanderMenu, 0x007a9de0-0x007a9eb0).
 //
 // The squad list (list data 5, "SquadMemberList", built by 0x007a5f10 and

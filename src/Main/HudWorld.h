@@ -128,6 +128,15 @@ public:
 	// the player networkable's 0x800 part (0x599209), and the timer the
 	// level's own areas'.
 	virtual float combatAreaTimeLeft() const { return -1; }
+	// The ability bar's inputs (GameWorld::abilityBar) for the local player:
+	// a local round's. A joined game's: none (the server networks the
+	// players' gift flags, player networkable bits read by 0x00596ed0, but
+	// not their ticks or the tools' targets).
+	virtual bool abilityBar(game::GameWorld::AbilityBarInfo& out) const
+	{
+		(void)out;
+		return false;
+	}
 	// The local soldier's sprint stamina (0..1) and whether it sprints (the
 	// soldier's slots 0x108 / 0x100): the round's, or a joined game's
 	// prediction (restored from the soldier networkable's 0x8000 part).
@@ -179,6 +188,7 @@ public:
 	Weapon seatGroupWeapon(int group) const override;
 	std::vector<int> revealedPlayers(int team) const override { return m_round.revealedPlayers(team); }
 	float combatAreaTimeLeft() const override;
+	bool abilityBar(game::GameWorld::AbilityBarInfo& out) const override { return m_round.abilityBar(m_round.localPlayer(), out); }
 
 private:
 	game::GameWorld& m_round;

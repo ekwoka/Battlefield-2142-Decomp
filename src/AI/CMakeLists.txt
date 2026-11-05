@@ -1,6 +1,8 @@
 add_library(AI STATIC
 	Ballistics.cpp
 	Goals.cpp
+	Formation.cpp
+	MineZones.cpp
 	Behaviour.cpp
 	Heli.cpp
 	PathFollower.cpp

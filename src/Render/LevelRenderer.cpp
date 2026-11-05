@@ -3357,6 +3357,7 @@ void LevelRenderer::build(const LevelSources& sources)
 	buildSky(sources);
 	buildSkyLayers(sources);
 	loadHemiMap(sources);
+	loadSimpleShadowmap(sources);
 	loadTitanHemiMaps(sources);
 	loadPostTextures(sources);
 	buildWater(sources);
@@ -3943,8 +3944,10 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		bool swaying = false;
 		const bool lightmapped = item.lightmap != nullptr;
 		float hemiObject[4] = {1, 1, 1, 0};
+		float simpleShadow = 0;
 		if (bound->skinned || bound->bundled) {
 			hemiObjectFor(instance, *bound, hemiObject);
+			simpleShadow = simpleShadowFor(instance.world, bound->skinned, instance.shadowCaster);
 		}
 		static const std::vector<anim::Matrix> unposed;
 		const std::vector<anim::Matrix>& pose = bound->skinned ? poseFor(instance, seconds) : unposed;
@@ -3984,6 +3987,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			// EnvMapManager +0x6c) for the envmap materials.
 			SDL_GPUTexture* const envMap = item.interior && m_indoorEnvMap ? m_indoorEnvMap : m_envMap;
 			layerUniforms(uniforms, submesh, envMap != nullptr);
+			uniforms.layers[3] = simpleShadow;
 			SDL_PushGPUFragmentUniformData(commands, 0, &uniforms, sizeof(uniforms));
 			const auto orWhite = [this](SDL_GPUTexture* t) { return t ? t : m_gpu.whiteTexture(); };
 			SDL_GPUTextureSamplerBinding samplers[5] = {
@@ -4302,6 +4306,9 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 			uniforms.material[2] = submesh.additive ? kMaterialAdditive : submesh.blended ? kMaterialBlended : 0.0f;
 			if (gpuMesh->skinned || gpuMesh->bundled) {
 				meshKindUniforms(uniforms, submesh, hemiAndShadows);
+				// The first person's meshes go through the same draws (not in
+				// the dynamic map: the bundled ones take it too).
+				uniforms.layers[3] = simpleShadowFor(model.world, gpuMesh->skinned, false);
 			}
 			layerUniforms(uniforms, submesh, m_envMap != nullptr);
 			SDL_PushGPUFragmentUniformData(commands, 0, &uniforms, sizeof(uniforms));

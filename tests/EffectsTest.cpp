@@ -414,6 +414,7 @@ TEST(Effects_TrailsAndNonScreenAlignedQuads)
 	ripples->settings()["emitFrequency"] = "30";
 	ripples->settings()["emitTime"] = "0.1";
 	ripples->settings()["timeToLive"] = "1";
+	ripples->settings()["gravity"] = "0"; // the template's default is -9.82 (RendDX9 0x10137290)
 	ripples->settings()["particleMaxSize"] = "2";
 	ripples->settings()["sizeGraph"] = "0/0/0/1";
 	ripples->settings()["transparencyGraph"] = "0/0/0/1";
@@ -982,6 +983,47 @@ TEST(Effects_MeshParticlesDirectionalScale)
 		}
 	});
 	CHECK(checked > 0);
+}
+
+// A mesh particle's turn (RendDX9 0x10144d90, 0x101357c0): one random
+// start for the three axes, a speed of rotationSpeed + randomRotationSpeed
+// x a random with its sign, scaled by the rotation graph; isStaticSystem
+// doesn't run a mesh system ahead (0x10145bf0).
+TEST(Effects_MeshParticlesSpin)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(3, "MeshParticleSystem");
+	world::ObjectTemplate* chunk = templates.create("MeshParticleSystem", "mp_chunk");
+	chunk->settings()["emitFrequency"] = "100";
+	chunk->settings()["emitTime"] = "0.05";
+	chunk->settings()["timeToLive"] = "10";
+	chunk->settings()["gravity"] = "0";
+	chunk->settings()["randomRotation"] = "10/20/40";
+	chunk->settings()["rotationSpeed"] = "100/0/0";
+	chunk->settings()["randomRotationSpeed"] = "0/50/0";
+	chunk->settings()["rotationGraph"] = "0/0/0/0.5";
+	chunk->settings()["isStaticSystem"] = "1";
+	chunk->setGeometry("mp_chunk");
+	effects::EffectManager manager(templates);
+	CHECK(manager.spawn("mp_chunk", {0, 0, 0}));
+	manager.update(0.05f);
+	const effects::Emitter& emitter = *manager.emitterList().back();
+	CHECK(!emitter.particles().empty());
+	std::vector<effects::Particle> before(emitter.particles().begin(), emitter.particles().end());
+	for (const effects::Particle& p : before) {
+		CHECK(p.age < 0.1f); // not run ahead
+		// The start (less its turn since): one random x (10, 20, 40).
+		const effects::Vec3 start = p.angles - p.spin * (0.5f * p.age);
+		CHECK(std::fabs(start.y - 2 * start.x) < 0.1f && std::fabs(start.z - 4 * start.x) < 0.1f);
+		// The speed: 100 with the random's sign on x, 50 x it on y.
+		CHECK(std::fabs(std::fabs(p.spin.x) - 100) < 1e-3f && std::fabs(p.spin.y) <= 50 && p.spin.z == 0);
+		CHECK((p.spin.x > 0) == (p.spin.y >= 0));
+	}
+	manager.update(1.0f);
+	const effects::Particle& p = emitter.particles().front();
+	const effects::Particle& q = before.front();
+	// A second at half speed (the graph's 0.5).
+	CHECK(std::fabs((p.angles.x - q.angles.x) - q.spin.x * 0.5f) < 1.0f);
 }
 
 // The rain's 16 deviation groups (RendDX9 0x1011a790 / 0x1011a860).

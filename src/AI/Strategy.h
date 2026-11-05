@@ -159,6 +159,19 @@ float conditionValue(const StrategyCondition& condition, const SideStatus& frien
 float prerequisiteValue(const StrategySettings& settings, const std::string& name, const SideStatus& friendly,
 	const SideStatus& enemy);
 
+// SAI step 11 (0x100a09c0): the shares of the bots outside the areas'
+// assignments to send to attack and to defend. No area held: all attack;
+// no neutral nor hostile: all defend; else the running strategy's
+// Aggression (aiStrategy.Aggression, the record's +4, 0.5 by default) and
+// its complement.
+void aggressionShares(float aggression, float friendlyAreas, float neutralAreas, float hostileAreas, float& attack,
+	float& defence);
+// Whether the next bot attacks, with A and D the attack and defence
+// strengths assigned so far (rounded, the step 10 tally 0x100a0420): with
+// none, an attack share of 0.5 or more; else a share above 0 and (no
+// defence share, or A / (A + D) not over it).
+bool assignsAttack(float attack, float defence, float attacking, float defending);
+
 // Whether the strategy weights moved enough to pick again (0x100a0130):
 // some prev/cur outside [0.83, 1.2) (1 when both are 0, 0 when only cur is).
 bool strategyWeightsChanged(const std::vector<float>& previous, const std::vector<float>& current);

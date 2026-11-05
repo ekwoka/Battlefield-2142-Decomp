@@ -1369,6 +1369,21 @@ void BotManager::update(float seconds)
 	}
 	updateStrategy(seconds);
 	command(seconds);
+	for (const GameWorld::PlayerInfo& p : m_players) {
+		if (p.ai && !m_deactivated.count(p.id) && !m_refused.count(p.id) && !m_bots.count(p.id)) {
+			// AIMain's slot 30 (0x100581a0): a new bot is refused once the
+			// bot manager's bots less the deactivated ones (its slots 8 and
+			// 0x74) reach aiSettings.setMaxNBots (+8); else activated
+			// (0x100c8950) and handed to its side's SAI (slot 3).
+			if (static_cast<int>(m_bots.size()) >= m_settings.maxBots) {
+				m_refused.insert(p.id);
+				continue;
+			}
+			m_bots.try_emplace(p.id);
+		}
+	}
+	updateSquads();
+	updateMines();
 	const std::vector<GameWorld::PlayerInfo>& players = m_players;
 	std::vector<const GameWorld::PlayerInfo*> bots;
 	// The game's AI players are the bots (AIMain's IAI slots: a player made
@@ -1378,7 +1393,7 @@ void BotManager::update(float seconds)
 	// both take the bot out of its squad, 0x10089860, and the game's squad
 	// with it: the player's own squad membership here).
 	for (const GameWorld::PlayerInfo& self : players) {
-		if (!self.ai || m_deactivated.count(self.id)) {
+		if (!self.ai || m_deactivated.count(self.id) || m_refused.count(self.id)) {
 			continue;
 		}
 		Bot& bot = m_bots[self.id];
@@ -1387,17 +1402,14 @@ void BotManager::update(float seconds)
 			bot.spawnedAt = -1;
 			m_world.setZoomed(self.id, false);
 			m_goals.erase(self.id); // a scripted goal ends with the bot's life (the rewrite's choice)
-			// Spawn on the squad leader when there is a living one on foot.
-			bool leaderUp = false;
-			for (const GameWorld::PlayerInfo& other : players) {
-				leaderUp = leaderUp || (other.squadLeader && other.alive && !other.vehicle && other.team == self.team
-										   && other.squad == self.squad && other.id != self.id);
-			}
-			m_world.setSpawnChoice(self.id, self.squad != 0 && leaderUp ? GameWorld::kSpawnOnLeader : -1);
+			// The SAI's choice of spawn point and kit (step 4 0x100a1a80 ->
+			// 0x100f0590), once a death (BotsSquad.cpp).
+			chooseRespawn(self);
 			continue;
 		}
 		if (bot.spawnedAt < 0) {
 			bot.spawnedAt = m_time;
+			m_respawn[self.id].chosen = false; // the spawn hook (0x1009fc90)
 		}
 		noticeRounds(bot, self);
 		warnOfGrenades(bot, self);
@@ -1693,6 +1705,16 @@ void BotManager::noticeRounds(Bot& bot, const GameWorld::PlayerInfo& self)
 				it->player = round.player;
 			}
 			it->alertAt = m_time;
+			// The round's record for the sensing agent (0x100c4500 on the
+			// perception's list +0x6c): the shooter, the time, the impact.
+			auto seen = std::find_if(bot.roundsSeen.begin(), bot.roundsSeen.end(),
+				[&](const Bot::RoundSeen& r) { return r.shooter == round.player; });
+			if (seen == bot.roundsSeen.end()) {
+				bot.roundsSeen.push_back({round.player, m_time, round.position, false});
+			} else {
+				seen->at = m_time;
+				seen->impact = round.position;
+			}
 		}
 	}
 
@@ -1859,6 +1881,9 @@ bool BotManager::spotSighting(const GameWorld::PlayerInfo& self, const GameWorld
 // object's sphere tested against its six planes by 0x100feac0, 0x100f7340).
 void BotManager::sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players)
 {
+	if (!self.vehicle) {
+		faceSectors(bot, self); // 0x100d6d60 (bot vt+0x308, from this pass)
+	}
 	// The view: R = viewDistance, candidates within R cos(fov/2) (a square
 	// frustum of half-angle fov/2), seen when one of
 	// clamp(round(30 radius / d), 1, 10) rays is clear.
@@ -2071,6 +2096,24 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 		m_goals.erase(scripted);
 		bot.hasGoal = false;
 	}
+	// The squad's goal for a member in its formation (0x100c0890 ->
+	// 0x100bff90): its slot, with no areas on the way.
+	if (bot.squadGoal) {
+		ai::Vec3 head;
+		if (ai::goalPoint(bot.formation, head)) {
+			const physics::Vec3 at {head.x, head.y, head.z};
+			if (!bot.hasGoal || bot.goalOrder != -1 || horizontal2(bot.goal - at) > 0.01f) {
+				bot.goalAt = m_time;
+				bot.goalReached = false;
+			}
+			bot.goal = bot.orderPosition = at;
+			bot.goalOrder = -1;
+			bot.goalMap = 0;
+			bot.via.clear();
+			bot.hasGoal = true;
+			return;
+		}
+	}
 	const std::vector<GameWorld::ControlPointInfo> points = m_world.controlPointList();
 	const auto& areas = m_settings.strategy.areas;
 	physics::Vec3 orderAt;
@@ -2078,13 +2121,28 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 	// A driver heads for the areas' vehicle order positions over the
 	// vehicle mesh.
 	const int map = self.vehicle && self.driving ? 1 : 0;
-	if (const GameWorld::SquadOrder* order = self.squad ? m_world.squadOrder(self.team, self.squad) : nullptr) {
-		orderAt = order->position;
+	// A squad member heads for its squad's order under way (squad +0x2c,
+	// state 2: 0x100c0130); without one it keeps the goal it had, or, with
+	// none, goes as a bot outside squads would.
+	const Squad* squad = self.squad ? this->squad(self.team, self.squad) : nullptr;
+	if (squad && squad->state == 2 && squad->kind != 4) {
+		orderAt = squad->orderAt;
 		hasOrder = true;
+	} else if (squad && squad->state != 2 && bot.hasGoal && !bot.orderRegoal) {
+		return;
 	} else if (self.team == 1 || self.team == 2) {
 		const Side& side = m_sides[self.team];
 		float best = 0;
-		for (const std::vector<int>* list : {&side.attacks, &side.defences}) {
+		// The role steps 10 and 11 gave it (updateStrategy): its list
+		// first, both when that one is empty.
+		const auto role = side.lonerAttacks.find(self.id);
+		const std::vector<int>* first = role == side.lonerAttacks.end() || role->second ? &side.attacks : &side.defences;
+		const std::vector<int>* second = first == &side.attacks ? &side.defences : &side.attacks;
+		const bool both = role == side.lonerAttacks.end() || first->empty();
+		for (const std::vector<int>* list : {first, second}) {
+			if (list == second && !both) {
+				continue;
+			}
 			for (int index : *list) {
 				const ai::StrategicArea& area = areas[static_cast<size_t>(index)];
 				for (const GameWorld::ControlPointInfo& point : points) {
@@ -2154,7 +2212,9 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 	// leader) have passed (0x1009e7a0).
 	const float again = self.squadLeader ? 20.0f : 35.0f;
 	const bool stale = bot.hasGoal && bot.goalReached && m_time - bot.goalAt > again;
-	if (!changed && !stale) {
+	const bool regoal = bot.orderRegoal; // the squad's re-goal (0x100c0130)
+	bot.orderRegoal = false;
+	if (!changed && !stale && !regoal) {
 		return;
 	}
 	bot.orderPosition = orderAt;
@@ -2271,6 +2331,31 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		bot.orderMove = false;
 	}
 	if (self.vehicle != bot.seatedVehicle || self.seat != bot.seatedSeat) {
+		if (self.vehicle && self.vehicle == bot.vehicleTarget) {
+			// Seated where the get-in plan went (the statement's destructor
+			// 0x100d4a90): out of the root's seat with the driver's taken and
+			// no other seat reserved (0x100a8d80), "gogogo" (11); else, when
+			// someone aboard holds a get_in from the bot, "thankyou" (8):
+			// channel 7, 1 s.
+			bool driver = false, reserved = false, asked = false;
+			for (const GameWorld::PlayerInfo& p : m_players) {
+				driver = driver || (p.alive && p.vehicle == self.vehicle && p.driving && p.id != self.id);
+				if (p.alive && p.vehicle == self.vehicle && p.id != self.id) {
+					if (const auto other = m_bots.find(p.id); other != m_bots.end()) {
+						asked = asked || heard(other->second, 1, self.id);
+					}
+				}
+			}
+			for (const auto& [id, other] : m_bots) {
+				reserved = reserved || (id != self.id && other.vehicleTarget == self.vehicle && other.seatedVehicle != self.vehicle);
+			}
+			if (!self.driving && driver && !reserved) {
+				queueRadio(bot, 11, 7, 1.0f);
+			} else if (asked) {
+				queueRadio(bot, 8, 7, 1.0f);
+			}
+		}
+		bot.pickupAsked = false;
 		bot.seatedVehicle = self.vehicle;
 		bot.seatedSeat = self.seat;
 		bot.seatedAt = m_time;
@@ -2287,10 +2372,43 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 	} else if (pattern.rfind("BBPFire", 0) == 0 || pattern == "BBPHeliFire3d") {
 		fire(bot, self, input, seconds);
 	} else if (pattern.rfind("BBPGotoWaypoint", 0) == 0) {
+		if (bot.hasGoal && bot.look.pattern != pattern) {
+			// The plan's Turn (0x100d0fc0 -> 0x100d58b0, built by
+			// BBPGotoWaypointInfantery 0x10066d80 and BBPGotoWaypoint2d
+			// 0x10068980): the agent asked to look at the goal, weight 0.5.
+			bot.look.requested = true;
+			bot.look.request = bot.goal - self.position;
+			bot.look.requestWeight = 0.5f;
+		}
 		if (bot.hasGoal) {
 			const physics::Vec3 target = moveTarget(bot, self);
 			const int id = 1000 + bot.goalOrder * 64 + static_cast<int>(bot.via.size());
 			const bool moving = driving ? drive(bot, self, target, id, seconds, input) : steer(bot, self, target, id, seconds, input);
+			if (driving && moving && drivesGun(self)) {
+				// BBPGotoWaypoint2d's look (0x100d2500, vtable 0x1011a278, its
+				// way 0x100d2560), built in place of the Turn when the seat's
+				// ControlInfo slot 0x38 holds (0x100cf660; the rewrite: a
+				// driver whose look turns the gun): along the path, the
+				// follower's point 20 m ahead (0x100941c0, DAT_101270ac) on
+				// x/z, level; the vehicle's facing within 0.01 m.
+				const ai::Vec3 ahead = bot.follower.pointAhead(toAi(self.position), 20);
+				physics::Vec3 way {ahead.x - self.position.x, 0, ahead.z - self.position.z};
+				const float length = std::sqrt(horizontal2(way));
+				if (length < 0.01f) {
+					for (const GameWorld::VehicleInfo& v : m_vehicles) {
+						way = v.object == self.vehicle ? physics::Vec3 {v.forward.x, 0, v.forward.z} : way;
+					}
+				} else {
+					way = way * (1 / length);
+				}
+				const float throttle = input.throttle, strafe = input.strafe, turn = input.turn;
+				aim(bot, self, self.position + physics::Vec3 {0, kEyeHeight, 0} + way * 20.0f, {}, false, {}, input, seconds);
+				input.throttle = throttle;
+				input.strafe = strafe;
+				if (!drivesGun(self)) {
+					input.turn = turn;
+				}
+			}
 			if (!moving && bot.via.empty()) {
 				bot.arbitration.replan = true; // the plan is done: think again soon
 			}
@@ -2305,14 +2423,33 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		if (m_world.playerInfo(bot.target, downed)) {
 			m_tasks[self.id] = {1, downed.id}; // the squad member's task (the plan 0x10082f10 -> 0x100bf470)
 			const physics::Vec3 d = downed.position - self.position;
-			if (horizontal2(d) > 1.4f * 1.4f) {
+			// The plan (0x10082f10): within 1.6 m of the body (ObjectDistance)
+			// the crouch-then-fire statement (0x100dda20, run 0x100dda60):
+			// every run asks to crouch (vt+0x170(2, 1)); crouched, a press of
+			// the trigger (PIFire) the first time, its release the next, and
+			// the statement ends. Farther, MoveToObjectFinding to the body.
+			if (horizontal2(d) > 1.6f * 1.6f) {
+				bot.reviveShock = false;
 				steer(bot, self, downed.position, 100000 + downed.id, seconds, input);
 			} else {
 				input.selectItem = self.inHandSlot != defibrillator ? defibrillator : 0;
 				const float turn = angleBetween(self.yaw, headingTo(self.position, downed.position));
 				input.turn = std::clamp(turn, -360 * seconds, 360 * seconds);
-				input.aimPitch = -60;
-				input.fire = self.inHandSlot == defibrillator && std::fabs(turn) < 20 && !bot.firedLast;
+				bot.look.paused = true; // the plan's look at the body (0x100d51c0)
+				bot.look.pausedAt = m_time;
+				// The look down at the body (from the crouched eye, 1 m).
+				input.aimPitch = std::clamp(std::atan2(downed.position.y - (self.position.y + 1.0f),
+												std::sqrt(horizontal2(d))) * kDegrees, -60.0f, 0.0f);
+				if (bot.pose != SoldierPose::Crouch) {
+					bot.pose = SoldierPose::Crouch;
+					bot.poseRequested = m_time;
+				}
+				input.pose = bot.pose;
+				input.throttle = input.strafe = 0;
+				if (self.pose == SoldierPose::Crouch && self.inHandSlot == defibrillator && std::fabs(turn) < 20) {
+					input.fire = !bot.reviveShock;
+					bot.reviveShock = !bot.reviveShock;
+				}
 			}
 		}
 	} else if (pattern == "BBPChange" || pattern == "BBPChangeLandingCraft") {
@@ -2347,6 +2484,24 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		} else if (self.vehicle) {
 			input.use = !bot.usedLast; // out
 		} else if (bot.vehicleTarget) {
+			// The get-in plan's request (0x1006dac0, its per-bot +0x14): the
+			// vehicle's root seat taken (0x100d4190 over 0x100a8e50) and no
+			// get_in held from anyone: req_pickup (2) to its driver, channel
+			// 6, at once, once.
+			if (!bot.pickupAsked) {
+				int driver = -1;
+				for (const GameWorld::PlayerInfo& p : m_players) {
+					driver = p.alive && p.vehicle == bot.vehicleTarget && p.driving ? p.id : driver;
+				}
+				bool getIn = false;
+				for (const Bot::Radio& r : bot.radio) {
+					getIn = getIn || r.type == 1;
+				}
+				if (driver >= 0 && driver != self.id && !getIn) {
+					queueRadio(bot, 2, 6, 0.0f, driver);
+					bot.pickupAsked = true;
+				}
+			}
 			const physics::Vec3 d = at - self.position;
 			if (horizontal2(d) > 2.5f * 2.5f) {
 				steer(bot, self, at, 200000 + static_cast<int>(bot.vehicleTarget), seconds, input, 0, bot.vehicleTarget);
@@ -2369,7 +2524,37 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 	} else if (pattern == "BBPFlee") {
 		flee(bot, self, input, seconds);
 	} else {
+		if (pattern == "BBPIdle2d" && self.vehicle && self.driving && bot.idlePassenger >= 0) {
+			// BBPIdle2d's plan (0x1006b2f0): the driver (the root's seat)
+			// answers the passenger it waits for when that one asked for a
+			// pickup (req_pickup 2, unanswered; 0x100a6260 marks it) and
+			// stands within 40 m, a bot only while a seat is free
+			// (0x100d2730): roger_that (6) on channel 6, 1 s (the plan's
+			// Radio statement 0x100d3470).
+			const GameWorld::PlayerInfo* p = playerOf(bot.idlePassenger);
+			int free = 0;
+			for (const GameWorld::VehicleInfo& v : m_vehicles) {
+				free = v.object == self.vehicle ? v.freeSeats : free;
+			}
+			if (p && p->alive && !p->vehicle && physics::lengthSquared(p->position - self.position) < 1600.0f
+				&& (!p->ai || free > 0)) {
+				for (Bot::Radio& r : bot.radio) {
+					if (r.type == 2 && r.sender == p->id && !r.answered) {
+						r.answered = true;
+						queueRadio(bot, 6, 6, 1.0f);
+						break;
+					}
+				}
+			}
+		}
 		idle(bot, self, input);
+	}
+	bot.look.pattern = pattern;
+	// The sensing agent's update and look plan after the main plan
+	// (0x1009a4c0 -> 0x100d7840), for a soldier on foot (the Soldier
+	// pattern).
+	if (!self.vehicle) {
+		lookAround(bot, self, input, seconds);
 	}
 	// The sentry drone is out: the detonator has nothing left to do.
 	if (!self.vehicle && m_world.drone(self.id) != 0
@@ -2498,7 +2683,35 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		&& target.alive;
 	if (fighting) {
 		const auto seats = m_world.vehicleSeats(self.vehicle);
-		const std::string gun = seats.empty() ? std::string() : seats[0].weapon;
+		// The pilot's weapon (0x100dd4a0, flags 7, from BBPHeliFire3d's plan
+		// 0x1007f9d0): of the seat's weapons with a strength above 0 against
+		// the target's CombatStrengthType, the one scoring most (strictly),
+		// the one in use counting twice (the plan's per-bot +0x14).
+		std::string gun = seats.empty() ? std::string() : seats[0].weapon;
+		int group = 0;
+		if (!seats.empty() && !seats[0].weapons.empty()) {
+			const int type = strengthTypeOf(target);
+			int best = -1;
+			float bestScore = 0;
+			for (size_t i = 0; i < seats[0].weapons.size(); ++i) {
+				const GameWorld::SeatWeapon& w = seats[0].weapons[i];
+				if (w.weapon.empty()) {
+					continue;
+				}
+				const WeaponAi ai = weaponAi(w.weapon);
+				const float strength = type >= 0 && type < 8 ? ai.strength[static_cast<size_t>(type)] : 0;
+				const float score = strength * (static_cast<int>(i) == bot.pilotWeapon ? 2.0f : 1.0f);
+				if (strength > 0 && score > bestScore) {
+					best = static_cast<int>(i);
+					bestScore = score;
+				}
+			}
+			if (best >= 0) {
+				bot.pilotWeapon = best;
+				gun = seats[0].weapons[static_cast<size_t>(best)].weapon;
+				group = seats[0].weapons[static_cast<size_t>(best)].group;
+			}
+		}
 		const WeaponAi weapon = weaponAi(gun);
 		const float maxRange = weapon.maxRange > 0 ? weapon.maxRange : 300.0f;
 		physics::Vec3 to = target.position - at;
@@ -2560,7 +2773,7 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 				const float taps = std::round((1 - (1 - m_settings.skill) * 0.8f) * std::round(1.5f * rpm));
 				const float spacing = taps > 0 ? 60.0f / taps : 1.0f;
 				if (onTarget && m_time - bot.heliTapAt >= spacing) {
-					input.fire = true;
+					(group == 1 ? input.altFire : input.fire) = true;
 					bot.heliTapAt = m_time;
 				}
 			} else {
@@ -2577,6 +2790,23 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 								  [this](float x, float z) { return m_world.terrainHeight(x, z); })
 				+ 25;
 			bot.heliWaitUntil = bot.heli.airborne ? -1.0f : m_time + 10;
+		}
+		// The take-off wait (0x100d1cb0, made (10 s, flag 0)): it holds while
+		// a soldier stands within 75 m (IAIInformationEnvironment slot 4): a
+		// human always, a bot while the vehicle has a free seat
+		// (0x100d3630).
+		bool someone = false;
+		int free = 0;
+		for (const GameWorld::VehicleInfo& v : m_vehicles) {
+			free = v.object == self.vehicle ? v.freeSeats : free;
+		}
+		for (const GameWorld::PlayerInfo& p : m_players) {
+			if (p.id != self.id && p.alive && !p.vehicle && physics::lengthSquared(p.position - at) < 75.0f * 75.0f) {
+				someone = someone || !p.ai || free > 0;
+			}
+		}
+		if (!someone) {
+			bot.heliWaitUntil = -1;
 		}
 		if (m_time < bot.heliWaitUntil) {
 			pilot.flyTo(toAi(at), 0);
@@ -3366,6 +3596,10 @@ float BotManager::goalObjectUrgency(const Bot& bot, const GameWorld::PlayerInfo&
 		ai::Goal copy = scripted->second;
 		return ai::goalUrgency(copy, toAi(self.position), horizontal2(bot.goal - self.position), kSoldierRadius);
 	}
+	if (bot.squadGoal) {
+		ai::Goal copy = bot.formation;
+		return ai::goalUrgency(copy, toAi(self.position), horizontal2(bot.goal - self.position), kSoldierRadius);
+	}
 	Bot probe = bot;
 	return const_cast<BotManager*>(this)->moveUrgency(probe, self, 1);
 }
@@ -3381,6 +3615,16 @@ float BotManager::moveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float
 		const float u = ai::goalUrgency(scripted->second, toAi(self.position), horizontal2(bot.goal - self.position),
 			kSoldierRadius);
 		if (scripted->second.done && !bot.goalReached) {
+			bot.goalAt = m_time;
+			bot.goalReached = true;
+		}
+		return u * weight;
+	}
+	if (bot.squadGoal) {
+		// The formation's waypoint goal (0x1008aaa0 over the slot).
+		const float u = ai::goalUrgency(bot.formation, toAi(self.position), horizontal2(bot.goal - self.position),
+			kSoldierRadius);
+		if (bot.formation.done && !bot.goalReached) {
 			bot.goalAt = m_time;
 			bot.goalReached = true;
 		}
@@ -3426,6 +3670,7 @@ float BotManager::idleUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float
 	}
 	if (self.vehicle && self.driving) {
 		float wait = 0;
+		bot.idlePassenger = -1; // 0x1006b1f0: the passenger waited for, for BBPIdle2d
 		for (const GameWorld::PlayerInfo& mate : players) {
 			const auto it = m_bots.find(mate.id);
 			if (mate.id == self.id || mate.team != self.team || !mate.alive || mate.vehicle || it == m_bots.end()
@@ -3437,7 +3682,11 @@ float BotManager::idleUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float
 				continue;
 			}
 			const float facing = std::cos(angleBetween(mate.yaw, headingTo(mate.position, self.position)) * kRadians);
-			wait = std::max(wait, facing >= 0.85f ? 70.0f : 30.0f);
+			const float w = facing >= 0.85f ? 70.0f : 30.0f;
+			if (w > wait) {
+				bot.idlePassenger = mate.id;
+			}
+			wait = std::max(wait, w);
 		}
 		if (wait > 0) {
 			if (bot.waitingSince < 0) {
@@ -5317,6 +5566,12 @@ AimGains BotManager::aimGainsOf(const GameWorld::PlayerInfo& self) const
 void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics::Vec3& point,
 	const physics::Vec3& pointVelocity, bool hasTarget, const std::string& leadWeapon, SoldierInput& input, float seconds)
 {
+	// A plan's aim (MouseTurretLookAt / MouseTurretAimAt, 0x1008e6e0 /
+	// 0x1008e940) pauses the sensing agent's look-around (0x100d51c0).
+	if (!bot.look.quiet) {
+		bot.look.paused = true;
+		bot.look.pausedAt = m_time;
+	}
 	if (bot.gainsVehicle != self.vehicle || bot.gainsSeat != self.seat) {
 		bot.gains = aimGainsOf(self);
 		bot.gainsVehicle = self.vehicle;
@@ -5465,8 +5720,12 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 bool BotManager::fireKeepsToOrder(const Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& target,
 	physics::Vec3* spotOut) const
 {
-	const bool areaSpot = bot.goalOrder >= 0
-		|| bot.orderPosition.x != 0 || bot.orderPosition.y != 0 || bot.orderPosition.z != 0; // 0x100c0ef0, 0x100c1150
+	// 0x100c0ef0: the squad's order under way with its area (0x100c1150);
+	// outside squads, the SAI's area goal.
+	const Squad* squad = self.squad ? this->squad(self.team, self.squad) : nullptr;
+	const bool areaSpot = squad && !squad->members.empty()
+		? squad->state == 2 && squad->area >= 0
+		: bot.goalOrder >= 0 || bot.orderPosition.x != 0 || bot.orderPosition.y != 0 || bot.orderPosition.z != 0;
 	if (!areaSpot || !bot.hasGoal || goalObjectUrgency(bot, self) <= 0.1f) {
 		return false; // no spot (0x100775f0)
 	}
@@ -5889,8 +6148,50 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 			moving = true;
 		}
 	}
-	aim(bot, self, aimPoint, inSight && !lob ? target.velocity : physics::Vec3 {}, true,
-		lob ? std::string() : weaponTemplate, input, seconds);
+	if (guidedPlan) {
+		// The guided aim point (0x100da710; made by 0x100da6b0 in the plans
+		// 0x10078570 and 0x100795a0, +0x35 for TSWireGuided): T the target's
+		// point, B the bot, R its guided round in flight (the bot's +0x34
+		// part, slot 0x38) or B, s the round's speed. A soldier target moving
+		// over 1 m/s whose distance less s is under the round's gets T
+		// lowered by its pose (stand 1.21, crouch 0.73, prone 0.1 m). A
+		// wire-guided round past the target by 20 m aims 10 m under it;
+		// within 0.5 m of its distance at T; otherwise at T led by the
+		// target's motion on x and z over the time to it at the closing
+		// speed (|Vr - Vt|, Vr the bot's facing x 20 without a round) when
+		// that is under 2.5 s. The lead is in the point: the aim leads no more.
+		const Projectile* round = nullptr;
+		for (const Projectile& p : m_world.projectiles()) {
+			if (p.player == self.id && p.alive && !p.resting && p.settings && (p.settings->seek != ProjectileSettings::Seek::None || p.wireMaxDistance > 0)) {
+				round = &p;
+			}
+		}
+		const physics::Vec3 b = self.position;
+		const float speed = round ? std::sqrt(physics::lengthSquared(round->velocity)) : 0;
+		const bool flying = round && speed != 0;
+		const physics::Vec3 r = flying ? round->position : b;
+		const float dR = std::sqrt(physics::lengthSquared(b - r)), dT = std::sqrt(physics::lengthSquared(b - aimPoint));
+		if (targetSoldier && dT - speed < dR && physics::lengthSquared(target.velocity) > 1) {
+			aimPoint.y -= target.pose == SoldierPose::Prone ? 0.1f : (target.pose == SoldierPose::Crouch ? 0.73f : 1.21f);
+		}
+		if (guidance == 3) {
+			if (dT + 20 < dR) {
+				aimPoint.y -= 10;
+			} else if (!(dT < dR + 0.5f)) {
+				const physics::Vec3 vt = target.velocity;
+				const physics::Vec3 vr = flying ? round->velocity
+												: physics::Vec3 {std::sin(self.yaw * kRadians), 0, std::cos(self.yaw * kRadians)} * 20.0f;
+				const float closing = std::sqrt(physics::lengthSquared(vr - vt));
+				const float t = closing > 0 ? std::sqrt(physics::lengthSquared(aimPoint - r)) / closing : 1e9f;
+				if (t < 2.5f) {
+					aimPoint.x += vt.x * t;
+					aimPoint.z += vt.z * t;
+				}
+			}
+		}
+	}
+	aim(bot, self, aimPoint, inSight && !lob && !guidedPlan ? target.velocity : physics::Vec3 {}, true,
+		lob || guidedPlan ? std::string() : weaponTemplate, input, seconds);
 	if (walkAside) {
 		// The walk to the spot while the look stays on the target (the
 		// plan's MoveToFinding and aim run side by side; the rewrite's
@@ -6418,13 +6719,36 @@ bool BotManager::steer(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 		const float length = std::sqrt(horizontal2(d));
 		d = length > 0.001f ? d * (1 / length) : physics::Vec3 {std::sin(self.yaw * kRadians), 0, std::cos(self.yaw * kRadians)};
 	}
-	input.throttle = 1;
+	// The way to the sensing agent (0x1008f8e0: +0x5c / +0x60, the pause's
+	// stamp cleared).
+	bot.look.moveX = d.x;
+	bot.look.moveZ = d.z;
+	bot.look.pausedAt = 0;
+	if (!self.vehicle && !bot.look.paused) {
+		// The look is the agent's (BotsLook.cpp); the steering statement
+		// (0x100cd3b0) turns the way into throttle and strafe against the
+		// view: clamp(sign(c) sqrt|c|) for the forward and the side
+		// components, times the speed.
+		const float fx = std::sin(self.yaw * kRadians), fz = std::cos(self.yaw * kRadians);
+		const float ahead = fx * d.x + fz * d.z, side = fz * d.x - fx * d.z;
+		const auto root = [](float c) { return std::clamp(std::copysign(std::sqrt(std::fabs(c)), c), -1.0f, 1.0f); };
+		input.throttle = root(ahead) * bot.walkFactor;
+		input.strafe = root(side) * bot.walkFactor;
+		bot.zoomPress = bot.zoom.level() > 0 && !bot.zoomKey;
+		bot.follower.progress(toAi(self.position), std::fabs(input.throttle) + std::fabs(input.strafe), m_time);
+		return true;
+	}
+	// The member's speed over the soldier's (0x100e6060): the squad's
+	// (0x100f4740, the slowest x 0.9) for a leader under way in formation.
+	input.throttle = bot.walkFactor;
 	// InfanteryMoveTo and InfanteryMoveToObject (0x1008fc90, 0x1008f920)
 	// zoom out on every step (0x100e5f70): the weapon's zoom key pressed
 	// while it is zoomed and the key was let go, else let go.
 	bot.zoomPress = bot.zoom.level() > 0 && !bot.zoomKey;
 	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight, 0};
+	bot.look.quiet = true; // the walk's own look (a plan's aim holds the agent)
 	aim(bot, self, eye + d * 5.0f, {}, false, {}, input, seconds);
+	bot.look.quiet = false;
 	bot.follower.progress(toAi(self.position), std::fabs(input.throttle), m_time);
 	return true;
 }
@@ -7200,6 +7524,8 @@ void BotManager::updateStrategy(float seconds)
 				temperature += (u.basicTemp + u.seatsTemp) * vehicleKnown;
 			}
 			v.state.temperature = temperature;
+			side.temperature.resize(s.areas.size(), 0.0f);
+			side.temperature[i] = temperature; // +0xa0 + 4 side (0x1005f210), the respawn's roulette reads it
 			const float total = v.state.friendlyStrength + v.state.enemyStrength;
 			v.state.required = ai::requiredStrength(enemyStrategic, owned, total > 0 ? v.state.friendlyStrength / total : 0);
 		}
@@ -7253,6 +7579,9 @@ void BotManager::updateStrategy(float seconds)
 			if (side.strategy != forced) {
 				side.strategy = forced;
 				side.startedAt = m_time;
+				for (const auto& [id, area] : side.squadArea) {
+					releaseSquad(team, id, area); // the areas let go (0x100893c0)
+				}
 				side.squadArea.clear();
 			}
 		} else if (!spin && !list.empty()) {
@@ -7281,6 +7610,9 @@ void BotManager::updateStrategy(float seconds)
 			if (pick != side.strategy) {
 				side.strategy = pick;
 				side.startedAt = m_time;
+				for (const auto& [id, area] : side.squadArea) {
+					releaseSquad(team, id, area); // the areas let go (0x100893c0)
+				}
 				side.squadArea.clear();
 			}
 		}
@@ -7373,6 +7705,7 @@ void BotManager::updateStrategy(float seconds)
 				assigned[it->second] += squads[it->first].strength;
 				++it;
 			} else {
+				releaseSquad(team, it->first, it->second); // 0x100893c0
 				it = side.squadArea.erase(it);
 			}
 		}
@@ -7381,6 +7714,7 @@ void BotManager::updateStrategy(float seconds)
 			for (auto it = side.squadArea.begin(); it != side.squadArea.end();) {
 				if (it->second == area && static_cast<float>(assigned[area] - squads[it->first].strength) / required >= 1.1f) {
 					assigned[area] -= squads[it->first].strength;
+					releaseSquad(team, it->first, it->second); // 0x100893c0
 					it = side.squadArea.erase(it);
 				} else {
 					++it;
@@ -7433,12 +7767,32 @@ void BotManager::updateStrategy(float seconds)
 			if (!order || order->type != type || horizontal2(order->position - v.order) > 1) {
 				m_world.issueOrder(team, id, type, v.order.x, v.order.z, -1);
 			}
-			const auto leader = squads[id].leader;
-			GameWorld::PlayerInfo info;
-			if (leader >= 0 && m_world.playerInfo(leader, info) && info.ai && m_world.squadOrder(team, id)
-				&& !m_world.squadOrder(team, id)->accepted) {
-				m_world.acceptOrder(leader, true);
+			// The squad takes it at its next update (0x100c1eb0) and its bot
+			// leader answers (0x100c21b0, BotsSquad.cpp).
+		}
+		// Steps 10 and 11 (0x100a0420, 0x100a09c0): the side's bots outside
+		// the squads' assignments, each in turn, to attack or to defend by
+		// the strategy's Aggression; the rounded attack and defence
+		// strengths (the unit's strategic strengths, +0xc [0] and [1]) of
+		// those sent so far keep the split. (In the shipped game every bot
+		// is in a squad (0x10089000), so the bots of squads count as
+		// assigned; the rewrite's goal for a bot outside squads takes its
+		// role: an attack area or a defence, updateGoal.)
+		float attackShare = 0, defenceShare = 0;
+		ai::aggressionShares(strategy.aggression, mine.friendlyAreas, mine.neutralAreas, mine.hostileAreas, attackShare,
+			defenceShare);
+		float attacking = 0, defending = 0;
+		side.lonerAttacks.clear();
+		for (const GameWorld::PlayerInfo& p : players) {
+			if (p.team != team || !p.ai || !p.alive || p.squad) {
+				continue;
 			}
+			float battle = 0;
+			std::array<float, 2> strategic {};
+			unitStrengths(p, battle, strategic);
+			const bool attack = ai::assignsAttack(attackShare, defenceShare, attacking, defending);
+			(attack ? attacking : defending) += std::round(attack ? strategic[0] : strategic[1]);
+			side.lonerAttacks[p.id] = attack;
 		}
 	}
 }
@@ -7469,6 +7823,13 @@ void BotManager::command(float seconds)
 		const bool human = m_world.commander(team) != -1;
 		if (m_humanCommander[team] && !human) {
 			m_lastStrike[team] = std::max(m_lastStrike[team], m_time); // 0x1009bcd0: 120 s from now
+			// 0x1009bcd0 -> 0x10089440: every squad of the side drops its order (0x100c0f00).
+			for (auto& [key, squad] : m_squads) {
+				if (key.first == team) {
+					squad.state = 0;
+					squad.kind = 4;
+				}
+			}
 		}
 		m_humanCommander[team] = human;
 	}

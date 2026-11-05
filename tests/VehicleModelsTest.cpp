@@ -1650,6 +1650,11 @@ TEST(Vehicles_StickyProjectilesRideVehicles)
 	CHECK(c4->stuck && std::sqrt(physics::lengthSquared(after - g.position(tank))) < 4);
 
 	// The AP mine on the same tank: stickToVehicles 0, so it ends on the ground.
+	// Its trigger (MTYPco: vehicles too, 0x005e8aa0) is taken off here, or
+	// the tank driving off would set it off.
+	if (world::ObjectTemplate* apMine = g.templates.find("Unl_Mine_AntiPersonnel_Projectile")) {
+		apMine->settings()["detonation.triggerType"] = "MTYNone";
+	}
 	g.drive({}, 3);
 	const physics::Vec3 roof = g.position(tank) + physics::Vec3 {0, 6, 0};
 	CHECK(g.world->launchProjectile("Unl_Mine_AntiPersonnel_Projectile", roof, {0, -4, 0}));

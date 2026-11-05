@@ -22,6 +22,7 @@
 #include "GpuContext.h"
 #include "OverheadView.h"
 #include "PostProduction.h"
+#include "SimpleShadowmap.h"
 #include "Hud/Hud.h"
 #include "UI/MenuDraw.h"
 #include "World/WorldMath.h"
@@ -394,6 +395,9 @@ private:
 		// object cache, BM +0x2d0 / SM +0x570: kept while the object is
 		// outside every map; 0.5 0.5 0.5 at first).
 		mutable float titanHemi[3] = {0.5f, 0.5f, 0.5f};
+		// Drawn into the dynamic shadow map this frame (the bundled
+		// meshes' flag 0x80: object slot 0xb0 against the device's frame).
+		mutable bool shadowCaster = false;
 		bool overgrowth = false; // Object.isOvergrowth
 		Lod overgrowthLod;       // its "<geometry>_lod" mesh
 		// Its type's factor (+0x9c, OvergrowthBlend::typeFactor), its cell's
@@ -634,6 +638,12 @@ private:
 	// HemiMapConstantColor and HeightOverTerrain of a bundled or skinned
 	// instance this frame (LightingUniforms::hemiObject).
 	void hemiObjectFor(const Instance& instance, const GpuMesh& mesh, float out[4]) const;
+	// The light manager's SimpleShadowmap (SimpleShadowmap.h, 0x100aa290)
+	// and a bundled or skinned mesh's factor on its sun and specular
+	// colours, as LightingUniforms::layers[3] (0 none, else 1 + the factor).
+	SimpleShadowmap m_simpleShadowmap;
+	void loadSimpleShadowmap(const LevelSources& sources);
+	float simpleShadowFor(const Mat4& world, bool skinned, bool shadowCaster) const;
 
 	// The fog the camera is in this frame (Fog.h; draw()).
 	ViewFog m_viewFog;

@@ -73,7 +73,9 @@ layout(set = 3, binding = 0) uniform Lighting {
 	vec4 eye;              // xyz: the camera, w: the specular kind (0 none)
 	vec4 specular;         // rgb: its colour, w: the static gloss
 	vec4 layerMaps;        // xy: ParallaxScaleBias's scale, z: 1 detail normal map,
-						   // 2 crack normal map, 4 parallax, 8 the envmap
+						   // 2 crack normal map, 4 parallax, 8 the envmap; w: a
+						   // bundled or skinned mesh's SimpleShadowmap factor on
+						   // the sun and its specular (0 none, else 1 + it)
 };
 #include "fog.glsl"
 
@@ -267,7 +269,13 @@ void main()
 		vec3 hemiNormal = kind == 5 ? lit : normal;
 		vec4 hemi = (layers & 32) != 0 ? hemiLight(inWorldPosition, hemiNormal, inObjectY, skyColor.rgb, hemiObject)
 									   : vec4(skyColor.rgb, 1.0);
-		float sunVisible = hemi.a * (shadowed ? shadowFactor(inWorldPosition, true) : 1.0);
+		// The light manager's SimpleShadowmap scales the sun's and the
+		// specular's colours (RendDX9 0x100c3880 / 0x10162070) where the
+		// original draws without the shadowed technique; the rewrite's
+		// shadow maps, which cover the same occluders near the camera,
+		// take the darker of the two.
+		float simple = layerMaps.w > 0.5 ? layerMaps.w - 1.0 : 1.0;
+		float sunVisible = hemi.a * min(simple, shadowed ? shadowFactor(inWorldPosition, true) : 1.0);
 		light = hemi.rgb + sun * sunVisible;
 		shine = specularTerm(lit, sunVisible * (sunColor.a > 0.0 ? 1.0 : 0.0), gloss);
 	}

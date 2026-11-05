@@ -169,11 +169,11 @@ std::optional<MeshFile> parseMesh(const std::vector<uint8_t>& data, MeshKind kin
 	mesh.vertexStride = r.count(0);
 	mesh.vertexCount = r.count(std::max<uint32_t>(mesh.vertexStride, 1));
 	mesh.vertices.resize(static_cast<size_t>(mesh.vertexStride) * mesh.vertexCount);
-	r.bytes(mesh.vertices.data(), mesh.vertices.size());
+	r.bytes(mesh.vertices.data(), mesh.vertices.size()); // RendDX9 0x101483f0 (the load's steps 0x101482f0)
 
 	const uint32_t indexCount = r.count(2);
 	mesh.indices.resize(indexCount);
-	r.bytes(mesh.indices.data(), mesh.indices.size() * sizeof(uint16_t));
+	r.bytes(mesh.indices.data(), mesh.indices.size() * sizeof(uint16_t)); // 16-bit, as 0x10148370 uploads them
 	if (!skinned) {
 		r.read<int32_t>();
 	}

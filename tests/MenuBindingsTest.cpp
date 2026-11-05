@@ -382,7 +382,12 @@ TEST(MenuBindings_StartGame)
 	CHECK(!started);
 
 	// Settings kept by name, with the game's defaults before.
-	CHECK(vm.toNumber(call(vm, natives, "dice.bf2.ServerSettings", "getMaxPlayers")) == 16);
+	// The host page starts as ServerSettings.con's (0x00499430): 64
+	// players, 3 rounds a map, no autobalance, "Battlefield 2142".
+	CHECK(vm.toNumber(call(vm, natives, "dice.bf2.ServerSettings", "getMaxPlayers")) == 64);
+	CHECK(vm.toNumber(call(vm, natives, "dice.bf2.ServerSettings", "getRoundsPerMap")) == 3);
+	CHECK(!avm1::toBoolean(call(vm, natives, "dice.bf2.ServerSettings", "getAutoBalanceTeam")));
+	CHECK(vm.toString(call(vm, natives, "dice.bf2.ServerSettings", "getServerName")) == "Battlefield 2142");
 	call(vm, natives, "dice.bf2.ServerSettings", "setTicketRatio", {avm1::Value(200)});
 	call(vm, natives, "dice.bf2.GeneralSettings", "setMaxBots", {avm1::Value(8)});
 	call(vm, natives, "dice.bf2.GeneralSettings", "setBotSkill", {avm1::Value(0.75)});

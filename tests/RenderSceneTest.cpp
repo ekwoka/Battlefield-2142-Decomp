@@ -15,6 +15,7 @@
 #include "Render/Fog.h"
 #include "Render/OverheadView.h"
 #include "Render/SceneMath.h"
+#include "Render/SimpleShadowmap.h"
 #include "Render/TitanParts.h"
 #include "Scene/EffectSettings.h"
 #include "Scene/LightSettings.h"
@@ -725,3 +726,55 @@ TEST(RenderScene_ObjectDistanceFade)
 	const CullRecord zoomed = cullRecord(high, 4, 1000, false, 0.1f);
 	CHECK(stepDistanceFade(0, 1, 1 + 15000, zoomed) == 1);
 }
+
+// The light manager's SimpleShadowmap (RendDX9 0x100aa290, 0x100a8cb0 /
+// 0x100a9160) and the meshes' sun factor (0x100c3880 / 0x10162070).
+TEST(RenderScene_SimpleShadowmap)
+{
+	using namespace dice::hfe::render;
+	// 0x100a8f40: 2-bit steps of the byte.
+	CHECK(SimpleShadowmap::quantize(0) == 0 && SimpleShadowmap::quantize(42) == 0 && SimpleShadowmap::quantize(43) == 1);
+	CHECK(SimpleShadowmap::quantize(128) == 2 && SimpleShadowmap::quantize(212) == 2 && SimpleShadowmap::quantize(213) == 3);
+	CHECK(SimpleShadowmap::quantize(255) == 3);
+	// An 8 x 8 map (16 m across, 2 m a texel, about the origin): all lit
+	// but file column 5, row 1 (x 2..4, z 4..6: the first row is +z), and
+	// that texel indoors.
+	const int n = 8;
+	std::vector<uint8_t> occlusion(n * n, 255), io(n * n, 255);
+	occlusion[1 * n + 5] = 0;
+	io[1 * n + 5] = 0;
+	SimpleShadowmap map;
+	CHECK(map.occlusionAt(0, 0) == 1); // nothing loaded
+	map.load(n, occlusion, io);
+	CHECK(map.loaded() && map.size() == n);
+	CHECK(std::fabs(map.occlusionAt(3, 5)) < 1e-6f);   // the texel's centre
+	CHECK(std::fabs(map.outdoorsAt(3, 5)) < 1e-6f);
+	CHECK(std::fabs(map.occlusionAt(4, 5) - 0.5f) < 1e-5f); // half way to the next texel
+	CHECK(std::fabs(map.occlusionAt(3, 3) - 1) < 1e-6f);    // the row below it (z 2..4)
+	CHECK(std::fabs(map.occlusionAt(-3, 5) - 1) < 1e-6f);
+	// Past the map: clamped to +-N, the border is lit and outdoors.
+	CHECK(map.occlusionAt(100, -100) == 1 && map.outdoorsAt(-100, 100) == 1);
+	// 1/3 steps.
+	occlusion[1 * n + 5] = 90; // q 1
+	map.load(n, occlusion, {});
+	CHECK(std::fabs(map.occlusionAt(3, 5) - 1.0f / 3.0f) < 1e-5f);
+	CHECK(map.outdoorsAt(3, 5) == 1); // no IO file: outdoors
+	// A short file loads nothing.
+	map.load(n, std::vector<uint8_t>(10, 0), {});
+	CHECK(!map.loaded() && map.occlusionAt(3, 5) == 1);
+
+	// The factor: outdoors with nothing above, the map faded out by the
+	// height over the ground across 3..6 m; indoors with a roof, the map.
+	CHECK(std::fabs(simpleShadowSunScale(0.25f, 1, false, 1) - 0.25f) < 1e-6f);
+	CHECK(std::fabs(simpleShadowSunScale(0.25f, 1, false, 4.5f) - 0.625f) < 1e-6f);
+	CHECK(simpleShadowSunScale(0.25f, 1, false, 6) == 1);
+	CHECK(simpleShadowSunScale(0.25f, 0, false, 1) == 1); // indoors, open above
+	CHECK(simpleShadowSunScale(0.25f, 0, true, 1) == 0.25f);
+	CHECK(simpleShadowSunScale(0.25f, 1, true, 1) == 1); // outdoors under something
+	// renderer.useSunScaling (skinned meshes): taken as indoors.
+	CHECK(simpleShadowSunScale(0.25f, 1, true, 1, true) == 0.25f);
+	CHECK(std::fabs(simpleShadowSunScale(0.25f, 0, false, 1, true) - 0.25f) < 1e-6f);
+	// The downward ray: 6 m when it meets nothing.
+	CHECK(simpleShadowHeight(2) == 2 && simpleShadowHeight(7) == 6 && simpleShadowHeight(-1) == 6);
+}
+

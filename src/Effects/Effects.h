@@ -13,7 +13,18 @@
 //
 // The emitters are RendDX9's (the sprite system: its template class,
 // vtable 0x101d8c48, constructor defaults 0x10138b40; its instance, vtable
-// 0x101d9170, constructor 0x1013f6a0):
+// 0x101d9170, constructor 0x1013f6a0). The mesh system's (template vtable
+// 0x101d8800, constructor 0x10136720, defaults 0x10135f30, its compile
+// 0x10135e20, distance LOD 0x10136570; instance vtable 0x101d9348,
+// constructor 0x101446b0) do the same in their own copies: start
+// 0x10144ab0, update 0x10145bf0 (a pre-warm of 1/60 s steps, no
+// isStaticSystem run), emission 0x10144d90 (its own pool, no emitPrio
+// throttle), one particle now 0x10145660, motion 0x10144110, the
+// system's place 0x10144040; so do the non-screen-aligned template's
+// (vtable 0x101d89f8, constructor 0x10137fe0, defaults 0x10137290, compile
+// 0x10137eb0, LOD 0x10137a90, texture 0x10137c60) and the trail
+// template's (vtable 0x101d95a8, constructor 0x10147c70, defaults
+// 0x10147180, compile 0x10147dd0, LOD 0x10147900, texture 0x10147ad0):
 //  - start (0x1013fb30): not at all when the template's QualityLevel is
 //    above the manager's, not emitting when the camera is beyond the
 //    manager's view distance; emitDelay, emitTime and preWarmTime are
@@ -90,7 +101,8 @@ struct ParticleTemplate {
 	// emitterType (BF2142.exe's names 0x00a04264, setter 0x00625de0 ->
 	// RendDX9 template +0x268): where a particle is born and which way it
 	// leaves (the sprites' 0x10140fa0 / 0x101410d0 / 0x101412c0, the same
-	// for the mesh 0x1013d840 and trail 0x1013acb0 systems):
+	// for the mesh 0x10145fc0 / 0x101460f0 / 0x101462e0, the
+	// non-screen-aligned 0x1013d840 and trail 0x1013acb0 systems):
 	//  - Standard (0): in the ellipsoid of emitRadius (+0x18, slot 0x28:
 	//    theta = 2 pi u, phi = pi u, the point (cos theta sin phi u rx,
 	//    sin theta sin phi u ry, cos phi u rz)), along emitDirection;
@@ -155,10 +167,15 @@ struct ParticleTemplate {
 	bool mesh = false;   // a MeshParticleSystem: each particle a copy of `geometry`
 	std::string geometry; // its MeshParticleMesh
 	// Mesh particles turn in three axes (yaw/pitch/roll, degrees): a random
-	// start up to randomRotation and rotationSpeed per second; with
+	// start up to randomRotation (template +0x174) and a speed of
+	// rotationSpeed (+0xb8) plus randomRotationSpeed (+0xac) x a random
+	// with its sign, one random for the three axes each (the mesh
+	// system's birth 0x10144d90 / 0x10145660), turned each update by that
+	// speed x clamp(rotationGraph, 0, 1) (the draw's 0x101357c0); with
 	// alignRotationToSpeed their z axis follows their velocity.
 	Vec3 randomRotation3;
 	Vec3 rotationSpeed3;
+	Vec3 randomRotationSpeed3;
 	bool alignToSpeed = false;
 	// directionalScale (RendDX9's mesh particle template +0x1ec, slot
 	// 0x188; 0): when not 0 the particles follow their velocity as with
@@ -268,7 +285,8 @@ struct Particle {
 	float intensity = 1;     // the system's, at birth (+0xc)
 	float randomIntensity = 0; // randomIntensity x (-1..1) (+0x10)
 	float alpha = 1;         // the bundle's alpha intensity at birth (+0x2c)
-	Vec3 angles; // mesh particles: yaw/pitch/roll at birth, degrees
+	Vec3 angles; // mesh particles: yaw/pitch/roll, degrees (+0xa8)
+	Vec3 spin;   // mesh particles: their speed, degrees a second (+0x9c)
 	float frameClock = 0;    // the flipbook's (+0x78)
 	float selfShadow = 1;    // the template's selfShadowIntensity (+0x8)
 };

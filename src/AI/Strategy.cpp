@@ -310,4 +310,28 @@ float knowledgeCertainty(bool sensed, float sinceSeen, float degeneration)
 	return std::isfinite(t) ? 1 - scurve(t) : 1.0f;
 }
 
+void aggressionShares(float aggression, float friendlyAreas, float neutralAreas, float hostileAreas, float& attack,
+	float& defence)
+{
+	if (friendlyAreas == 0) {
+		attack = 1;
+		defence = 0;
+	} else if (neutralAreas == 0 && hostileAreas == 0) {
+		attack = 0;
+		defence = 1;
+	} else {
+		attack = aggression;
+		defence = 1 - aggression;
+	}
+}
+
+bool assignsAttack(float attack, float defence, float attacking, float defending)
+{
+	const float total = attacking + defending;
+	if (total == 0) {
+		return attack >= 0.5f;
+	}
+	return attack > 0 && (defence <= 0 || attacking / total <= attack);
+}
+
 } // namespace dice::hfe::ai

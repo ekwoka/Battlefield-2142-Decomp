@@ -97,6 +97,11 @@ ParticleTemplate ParticleTemplate::fromTemplate(const world::ObjectTemplate& t)
 		p.emitFrequency = 32;
 		p.gravity = -9.82f;
 		p.timeToLive = 4;
+	} else if (t.typeName() == "MeshParticleSystem" || t.typeName() == "NonScreenAlignedParticleSystem") {
+		// The mesh and non-screen-aligned templates' defaults (0x10135f30 /
+		// 0x10137290; every shipped system sets both): 32 a second, -9.82.
+		p.emitFrequency = 32;
+		p.gravity = -9.82f;
 	}
 	if (const std::string* type = setting(t, "emitterType")) {
 		// 0x00625de0: the names compared without case; another name leaves
@@ -186,6 +191,7 @@ ParticleTemplate ParticleTemplate::fromTemplate(const world::ObjectTemplate& t)
 		p.geometry = t.geometry();
 		p.randomRotation3 = vector(t, "randomRotation", {});
 		p.rotationSpeed3 = vector(t, "rotationSpeed", {});
+		p.randomRotationSpeed3 = vector(t, "randomRotationSpeed", {});
 		p.alignToSpeed = number(t, "alignRotationToSpeed", 0) != 0;
 		p.directionalScale = number(t, "directionalScale", 0);
 	}
@@ -285,6 +291,7 @@ float saturate(float v)
 
 constexpr float kStep = 0.01f;          // the particles' fixed step (DAT_101f7030)
 constexpr float kPreWarmStep = 1 / 30.0f; // the pre-warm's (0x101407c0)
+constexpr float kMeshPreWarmStep = 1 / 60.0f; // the mesh system's (0x10145bf0)
 constexpr float kTwoPi = 6.2831853f;
 
 } // namespace
@@ -343,6 +350,9 @@ void Emitter::simulate(Particle& p, float step, int steps, const EmitContext& co
 		p.age += step;
 		// collisionEnable: off the ground, the speed across it reversed
 		// and kept by collisionSpeedAlongNormal, along it by ...AlongPlane.
+		// (The mesh system keeps the system's plane +0x200 every 1/3 s in a
+		// ring of 10, 0x10144cf0, and a particle meets the one of its
+		// birth, 0x10144110; the rewrite takes the terrain under it.)
 		if (t.collision && !t.localSystem && context.groundHeight) {
 			const float ground = context.groundHeight(p.position.x, p.position.z);
 			if (p.position.y < ground) {
@@ -371,6 +381,9 @@ void Emitter::simulate(Particle& p, float step, int steps, const EmitContext& co
 	// flipbook's clock by the same graph times animationSpeed.
 	const float turn = saturate(t.rotationGraph.at(f)) * step * static_cast<float>(steps);
 	p.rotation = std::fmod(p.rotation + turn * p.rotationSpeed, kTwoPi);
+	if (t.mesh) {
+		p.angles += p.spin * turn; // 0x101357c0
+	}
 	if (t.animated) {
 		p.frameClock += turn * t.animationSpeed;
 	}
@@ -486,8 +499,10 @@ void Emitter::emit(game::Random& random, const Vec3& at, float age, const EmitCo
 		p.velocity += m_velocity; // the system's own (0x1013fdc0: +0xcc x +0xdc)
 	}
 	if (t.mesh) {
-		p.angles = {signedRandom(random) * t.randomRotation3.x, signedRandom(random) * t.randomRotation3.y,
-			signedRandom(random) * t.randomRotation3.z};
+		// One random for the three axes, another for the speed (0x10144d90).
+		p.angles = t.randomRotation3 * signedRandom(random);
+		const float r = signedRandom(random);
+		p.spin = t.randomRotationSpeed3 * r + (r < 0 ? t.rotationSpeed3 * -1.0f : t.rotationSpeed3);
 	}
 	if (sprite && context.poolUsed) {
 		++*context.poolUsed;
@@ -533,8 +548,9 @@ void Emitter::step(float seconds, game::Random& random, const EmitContext& conte
 	if (sprite && context.poolUsed) {
 		*context.poolUsed -= static_cast<int>(alive - m_particles.size());
 	}
-	// isStaticSystem: once, its life run at once in steps of 0.1 s (0x101407c0).
-	if (t.staticSystem && !m_warmedStatic && m_active && !m_prewarming) {
+	// isStaticSystem: once, its life run at once in steps of 0.1 s (0x101407c0;
+	// the mesh system's update 0x10145bf0 has no such run).
+	if (t.staticSystem && !t.mesh && !m_warmedStatic && m_active && !m_prewarming) {
 		m_warmedStatic = true;
 		m_prewarming = true;
 		for (float left = t.timeToLive; left > 0; left -= 0.1f) {
@@ -554,8 +570,9 @@ void Emitter::step(float seconds, game::Random& random, const EmitContext& conte
 		float left = m_preWarm;
 		m_preWarm = 0;
 		m_prewarming = true;
-		for (; left > 0; left -= kPreWarmStep) {
-			step(std::min(left, kPreWarmStep) / std::max(timeScale, 1e-3f), random, context);
+		const float warmStep = t.mesh ? kMeshPreWarmStep : kPreWarmStep;
+		for (; left > 0; left -= warmStep) {
+			step(std::min(left, warmStep) / std::max(timeScale, 1e-3f), random, context);
 		}
 		m_prewarming = false;
 	}
@@ -679,6 +696,12 @@ void EffectManager::spawnTemplate(const world::ObjectTemplate& t, const Vec3& po
 		return;
 	}
 	const std::string& type = t.typeName();
+	// ParticleSystemEmitter (class 0x94d2, the manager's kind 3: template
+	// vtable 0x101d9420, constructor 0x10146820, defaults 0x101464c0;
+	// instance vtable 0x101d9268, constructor 0x10142010, update
+	// 0x10143540, emission 0x101426f0, motion 0x10141720), whose particles
+	// each carry a particleSystemTemplate, isn't made: only levels without
+	// an archive.md5 (BF2's leftovers) create one.
 	if (type == "SpriteParticleSystem" || type == "MeshParticleSystem" || type == "NonScreenAlignedParticleSystem"
 		|| type == "TrailSystem") {
 		const ParticleTemplate* particles = particleTemplate(t);
@@ -1615,8 +1638,7 @@ void EffectManager::collectMeshes(const Emitter& emitter, std::vector<MeshSprite
 			continue;
 		}
 		const Vec3 color = t.color1 * (1 - blend) + t.color2 * blend;
-		const Vec3 angles = p.angles + t.rotationSpeed3 * p.age;
-		Mat3 turn = Mat3::fromYawPitchRoll({angles.x, angles.y, angles.z});
+		Mat3 turn = Mat3::fromYawPitchRoll({p.angles.x, p.angles.y, p.angles.z});
 		const Mat3 system = t.localSystem ? emitter.rotation() : Mat3 {};
 		float stretch = 1;
 		if (t.alignToSpeed || t.directionalScale != 0) {

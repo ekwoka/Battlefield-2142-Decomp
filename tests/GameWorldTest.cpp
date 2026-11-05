@@ -593,6 +593,57 @@ TEST(GameWorld_AbilityBattery)
 	CHECK(range.world->hitPoints(soldier) - flat > 0.5f && range.world->hitPoints(soldier) - flat < 1.3f);
 }
 
+TEST(GameWorld_AbilityBarTargetsAndGifts)
+{
+	// The ability bar's inputs (0x007c3af0): the medic hub in hand treats
+	// its holder (a soldier of his team): the target's armour share, the
+	// comp working, the battery; the heal stamps the giver (0x004bc410:
+	// slot 0x258 (tick, 1, 0)).
+	Range range;
+	range.templates.registerType(6, "Kit");
+	world::ObjectTemplate* hub = range.templates.create("GenericFireArm", "unl_hub_medic");
+	hub->settings()["itemIndex"] = "4";
+	hub->settings()["ammo.replenishingType"] = "RTHeal";
+	hub->settings()["ammo.abilityRadius"] = "4";
+	hub->settings()["ammo.abilityStrength"] = "3";
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->components().push_back("Ability");
+	kit->settings()["ability.hasHealingAbility"] = "1";
+	for (const char* item : {"eu_ar_rifle", "unl_hub_medic"}) {
+		kit->children().push_back({item, {}, {}});
+	}
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int me = range.world->localPlayer();
+	const uint32_t soldier = range.world->playerObject();
+	game::GameWorld::AbilityBarInfo info;
+	CHECK(range.world->abilityBar(me, info) && info.alive && info.kitAbility && info.kitHealing && !info.kitAmmo);
+	CHECK(info.replenishingType == 3 && !info.healFlag); // the rifle
+	range.world->setHitPoints(soldier, 40);
+	game::SoldierInput take;
+	take.selectItem = 4;
+	range.world->setPlayerInput(take);
+	range.world->tick(1 / 30.0f);
+	range.world->setPlayerInput({});
+	for (int i = 0; i < 10; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->abilityBar(me, info) && info.replenishingType == 0 && info.active);
+	CHECK(info.targets.size() == 1 && info.targets[0] > 0.4f && info.targets[0] < 0.45f);
+	CHECK(info.healFlag && !info.repairFlag && info.sinceHeal == 0);
+	// Put away, the hub treats no more: the flag stays, the ticks run on.
+	game::SoldierInput rifle;
+	rifle.selectItem = 3;
+	range.world->setPlayerInput(rifle);
+	range.world->tick(1 / 30.0f);
+	range.world->setPlayerInput({});
+	for (int i = 0; i < 20; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->abilityBar(me, info) && info.replenishingType == 3 && info.targets.empty());
+	CHECK(info.healFlag && info.sinceHeal >= 15);
+}
+
 TEST(GameWorld_GrenadesBounceAndGoOff)
 {
 	// A frag grenade from an unlock (slot 7): thrown at the PAC bot 20 m
@@ -753,6 +804,7 @@ TEST(GameWorld_MinesAndC4)
 		mine->settings()["detonation.explosionMaterial"] = "50"; // Unl_Mine_AntiPersonnel's
 		mine->settings()["detonation.explosionConeAngle"] = "45";
 		mine->settings()["detonation.triggerRadius"] = "3";
+		mine->settings()["detonation.triggerType"] = "MTYPco";
 		mine->settings()["detonation.triggerAngle"] = "30";
 		mine->settings()["detonation.triggerVictimMinSpeed"] = "3.6";
 		CHECK(range.world->spawnPlayer(2) != nullptr);
@@ -806,6 +858,137 @@ TEST(GameWorld_MinesAndC4)
 		game::GameWorld::PlayerInfo me;
 		range.world->playerInfo(range.world->localPlayer(), me);
 		CHECK(!me.alive); // standing on it
+	}
+}
+
+// The radius trigger (0x005e8aa0): the anti-personnel mine (MTYPco,
+// allowFriendlyFireDetonation 1) spares its owner's bots always and his
+// human teammates only with the server's friendlyFireWithMines off; an
+// EMP mine (MTYVehicle) no soldier sets off.
+TEST(GameWorld_MinesFriendlyFireAndTriggerTypes)
+{
+	const auto setUp = [](Range& range, const char* type) {
+		world::ObjectTemplate* mine = nullptr;
+		giveGadget(range, "unl_mine_antipersonnel", mine);
+		mine->settings()["detonation.explosionDamage"] = "200";
+		mine->settings()["detonation.explosionRadius"] = "8";
+		mine->settings()["detonation.triggerRadius"] = "3";
+		mine->settings()["detonation.triggerType"] = type;
+		mine->settings()["detonation.triggerAngle"] = "30"; // its owner stands behind it
+		mine->settings()["detonation.allowFriendlyFireDetonation"] = "1";
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		throwGadget(range);
+		CHECK(range.world->projectilesInFlight() == 1);
+	};
+	// Someone runs from 15 m in front at the mine for up to 5 s: whether
+	// it went off.
+	const auto runAt = [](Range& range, int who) {
+		CHECK(range.world->spawnSoldier(who));
+		game::GameWorld::PlayerInfo info, me;
+		range.world->playerInfo(who, info);
+		range.world->playerInfo(range.world->localPlayer(), me);
+		range.world->setSoldierPosition(info.soldier, me.position + physics::Vec3 {0, 0, 15});
+		game::SoldierInput run;
+		run.throttle = 1;
+		run.sprint = true;
+		run.turn = 180 - info.yaw; // to face -z, the mine
+		for (int i = 0; i < 150 && range.world->projectilesInFlight() > 0; ++i) {
+			range.world->setInput(who, run);
+			run.turn = 0;
+			range.world->tick(1 / 30.0f);
+		}
+		return range.world->projectilesInFlight() == 0;
+	};
+	{
+		Range range;
+		setUp(range, "MTYPco");
+		CHECK(!runAt(range, range.world->addPlayer("Bot", 2, true))); // a bot of the side: spared
+	}
+	{
+		Range range;
+		setUp(range, "MTYPco");
+		CHECK(runAt(range, range.world->addPlayer("Mate", 2, false))); // a human: friendlyFireWithMines on
+	}
+	{
+		Range range;
+		range.world->setFriendlyFireWithMines(false);
+		setUp(range, "MTYPco");
+		CHECK(!runAt(range, range.world->addPlayer("Mate", 2, false)));
+		CHECK(runAt(range, range.world->addPlayer("Enemy", 1, true)));
+	}
+	{
+		Range range;
+		setUp(range, "MTYVehicle");
+		CHECK(!runAt(range, range.world->addPlayer("Enemy", 1, true))); // soldiers don't
+	}
+}
+
+// The booster's motion mine bait (Bp1_Motion_Mine_Bait_Stationary and its
+// MagneticBait child, a TTMagnet TargetObject): a magnet seeker takes the
+// bait as it takes a vehicle's MagneticObject; overrideArmingSpeed arms it
+// though the bait lies still, so it flies at maxSpeed (0x005ecb30,
+// 0x005b3e60) and goes off at the bait. With switchPlayerOnLock the lock
+// makes the mine the bait thrower's (0x005b3e60 -> 0x0058e420).
+TEST(GameWorld_MotionMineBait)
+{
+	const auto setUp = [](Range& range, bool switchOnLock) {
+		range.templates.registerType(8, "TargetObject");
+		world::ObjectTemplate* mine = range.templates.create("GenericProjectile", "magnet_mine");
+		mine->settings()["seek.targetType"] = "TTMagnet";
+		mine->settings()["seek.maxDistLock"] = "50";
+		mine->settings()["armingDelay"] = "0.2";
+		mine->settings()["acceleration"] = "60";
+		mine->settings()["deAcceleration"] = "50";
+		mine->settings()["maxSpeed"] = "15";
+		mine->settings()["follow.useTargetSpeed"] = "1";
+		mine->settings()["follow.speedModifier"] = "2";
+		mine->settings()["follow.armingSpeed"] = "7.2";
+		mine->settings()["follow.magneticBehaviour"] = "1";
+		mine->settings()["gravityModifier"] = "0";
+		mine->settings()["timeToLive"] = "CRD_NONE/9999/0/0";
+		mine->settings()["detonation.explosionDamage"] = "10";
+		mine->settings()["detonation.explosionRadius"] = "1";
+		world::ObjectTemplate* target = range.templates.create("TargetObject", "MagneticBait");
+		target->settings()["targetType"] = "TTMagnet";
+		target->settings()["overrideArmingSpeed"] = "1";
+		target->settings()["switchPlayerOnLock"] = switchOnLock ? "1" : "0";
+		world::ObjectTemplate* bait = range.templates.create("GenericProjectile", "bait_stationary");
+		bait->settings()["gravityModifier"] = "0";
+		bait->settings()["timeToLive"] = "CRD_NONE/9999/0/0";
+		bait->children().push_back({"MagneticBait", {}, {}});
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		const int bot = range.world->addPlayer("Bot", 1, true);
+		CHECK(range.world->spawnSoldier(bot));
+		CHECK(range.world->launchProjectile("magnet_mine", {0, 3, 0}, {0, 0, 0}, range.world->localPlayer()));
+		CHECK(range.world->launchProjectile("bait_stationary", {0, 3, 10}, {0, 0, 0}, bot));
+		return bot;
+	};
+	const auto mineOf = [](Range& range) -> const game::Projectile* {
+		for (const auto& p : range.world->projectiles()) {
+			if (p.alive && p.settings && p.settings->name == "magnet_mine") {
+				return &p;
+			}
+		}
+		return nullptr;
+	};
+	{
+		Range range;
+		setUp(range, false);
+		bool locked = false;
+		for (int i = 0; i < 90 && mineOf(range); ++i) {
+			range.world->tick(1 / 30.0f);
+			locked = locked || (mineOf(range) && mineOf(range)->lockedBait != 0);
+		}
+		CHECK(locked && !mineOf(range)); // it chased the still bait and went off there
+	}
+	{
+		Range range;
+		const int bot = setUp(range, true);
+		for (int i = 0; i < 15; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		const game::Projectile* mine = mineOf(range);
+		CHECK(mine && mine->player == bot && mine->team == 1);
 	}
 }
 

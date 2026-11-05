@@ -2849,13 +2849,62 @@ void GameWorld::steerSeeker(Projectile& p, float seconds)
 			}
 			return lineOfSight(p.position, at, body.object);
 		};
+		// A round carrying a TTMagnet TargetObject (the booster's motion
+		// mine bait, Bp1_Motion_Mine_Bait_Stationary's MagneticBait:
+		// disableWhenEmptyVehicle 0, so always on) is a magnet target as a
+		// vehicle's MagneticObject is (the same query, 0x004cf290: the
+		// registered target objects of the type), at the round.
+		const auto baitAt = [&](const Projectile& q, physics::Vec3& at) -> const world::ObjectTemplate* {
+			if (&q == &p || !q.alive || !q.settings || (s.ignoreFriendly && q.team == p.team)) {
+				return nullptr;
+			}
+			const world::ObjectTemplate* round = m_templates.find(q.settings->name);
+			for (const world::ChildTemplate& child : round ? round->children() : std::vector<world::ChildTemplate> {}) {
+				const world::ObjectTemplate* t = m_templates.find(child.name);
+				if (t && targetTypeOf(*t) == 3) { // TTMagnet
+					at = q.position;
+					return t;
+				}
+			}
+			return nullptr;
+		};
+		const auto seesPoint = [&](const physics::Vec3& at, float reach) {
+			const physics::Vec3 d = at - p.position;
+			const float distance2 = physics::lengthSquared(d);
+			if (distance2 > reach * reach) {
+				return false;
+			}
+			const float speed = std::sqrt(physics::lengthSquared(p.velocity));
+			if (s.maxAngleLock < 180 && speed > 0.01f && distance2 > 1e-4f) {
+				const float angle = std::acos(std::clamp(physics::dot(d, p.velocity) / (speed * std::sqrt(distance2)), -1.0f, 1.0f));
+				if (angle > s.maxAngleLock * 3.14159265f / 180.0f) {
+					return false;
+				}
+			}
+			return lineOfSight(p.position, at, 0);
+		};
 		const Body* target = p.lockedOn ? findBody(p.lockedOn) : nullptr;
+		const Projectile* bait = nullptr;
+		const world::ObjectTemplate* baitTarget = nullptr;
 		physics::Vec3 aim;
 		if (target && !(magnet(*target, aim) && sees(*target, aim, p.settings->loseDistance))) {
 			target = nullptr;
 		}
-		if (!target) {
+		if (p.lockedBait) {
+			for (const Projectile& q : m_projectiles) {
+				if (q.serial == p.lockedBait) {
+					bait = &q;
+				}
+			}
+			baitTarget = bait ? baitAt(*bait, aim) : nullptr;
+			if (!baitTarget || !seesPoint(aim, p.settings->loseDistance)) {
+				bait = nullptr;
+				baitTarget = nullptr;
+			}
+		}
+		if (!target && !bait) {
 			p.lockedOn = 0;
+			p.lockedBait = 0;
 			float best = 1e30f;
 			for (const Body& body : m_bodies) {
 				physics::Vec3 at;
@@ -2869,12 +2918,51 @@ void GameWorld::steerSeeker(Projectile& p, float seconds)
 					aim = at;
 				}
 			}
-			if (target) {
-				p.lockedOn = target->object;
+			for (const Projectile& q : m_projectiles) {
+				physics::Vec3 at;
+				const world::ObjectTemplate* t = baitAt(q, at);
+				if (!t || !seesPoint(at, p.settings->lockDistance)) {
+					continue;
+				}
+				const float distance = physics::lengthSquared(at - p.position);
+				if (distance < best) {
+					best = distance;
+					target = nullptr;
+					bait = &q;
+					baitTarget = t;
+					aim = at;
+				}
+			}
+			if (target || bait) {
+				p.lockedOn = target ? target->object : 0;
+				p.lockedBait = bait ? bait->serial : 0;
 				p.followFrom = p.age + p.settings->seekDelay; // 0x005b2c10
 				p.targetTopSpeed = 0;
 				p.armed = false;
 			}
+			// switchPlayerOnLock (TargetObject +0x2a9 through 0x0058e420, in
+			// the round's update 0x005b3e60 when the seek's target changes):
+			// the round becomes the bait owner's, of his side (its
+			// networkable's slots 0x4c / 0x5c from the target's 0x50 / 0x60).
+			// Of his side, the bait no longer counts for it (ignoreFriendly):
+			// the next tick it looks for that side's enemies.
+			if (bait && integer(*baitTarget, "switchPlayerOnLock", 0) != 0) {
+				p.player = bait->player;
+				p.team = bait->team;
+			}
+		}
+		if (bait) {
+			// Its collision with the bait's own mesh sets it off (gameLogic
+			// slot 0xf8); here within half a metre of the round.
+			if (physics::lengthSquared(aim - p.position) < 0.25f) {
+				detonateHit(p, p.position, {0, 1, 0}, 0);
+				p.alive = false;
+				return;
+			}
+			if (followActive(p)) {
+				followMagnet(p, aim, bait->velocity, seconds, integer(*baitTarget, "overrideArmingSpeed", 0) != 0);
+			}
+			return;
 		}
 		if (!target || !followActive(p)) {
 			return;
@@ -3218,26 +3306,65 @@ void GameWorld::stepProjectiles(float seconds)
 				ghost->setPosition({p.position.x, p.position.y, p.position.z});
 			}
 		}
-		// A mine lying in wait: an enemy soldier going fast enough inside
-		// its trigger cone sets it off.
-		if (p.resting && p.settings->triggerRadius > 0) {
-			for (const auto& owned : m_players) {
-				const Player& victim = *owned;
-				const physics::Vec3 feet = victim.body.position - physics::Vec3 {0, 1.0f, 0};
-				const physics::Vec3 d = feet - p.position;
-				const float speed = std::sqrt(victim.body.velocity.x * victim.body.velocity.x + victim.body.velocity.z * victim.body.velocity.z);
-				if (!victim.alive || victim.vehicle || victim.team == p.team || speed < p.settings->triggerMinSpeed
-					|| physics::lengthSquared(d) > p.settings->triggerRadius * p.settings->triggerRadius) {
-					continue;
+		// A mine lying in wait (the radius trigger's test 0x005e8aa0): by its
+		// triggerType a soldier on foot (MTYPersonnel, MTYPco) or a vehicle
+		// (MTYVehicle, MTYPco; within triggerRadius of its bounds) inside
+		// the trigger cone and going faster than triggerVictimMinSpeed sets
+		// it off. The owner's side is spared when the one crossing it is a
+		// bot (player slot 0x68, +0xd4), or when the server's
+		// friendlyFireWithMines (DAT_00a3fcc0 +0x58) is off and the mine
+		// has allowFriendlyFireDetonation (+0x7c): a human teammate sets it
+		// off otherwise (the blast then hurts by the friendly-fire
+		// percentages). A vehicle's player is its driver's (the control
+		// object's slot 0x10); a mine whose owner has gone spares nobody.
+		if (p.resting && p.settings->triggerRadius > 0 && p.settings->triggerType != 0) {
+			const Player* owner = findPlayer(p.player);
+			const auto spared = [&](const Player* who) {
+				return owner && who && who->team == owner->team
+					&& (who->ai || (!m_friendlyFireWithMines && p.settings->allowFriendlyFireDetonation));
+			};
+			const auto trips = [&](const physics::Vec3& d, float reach, const physics::Vec3& velocity) {
+				const float speed = std::sqrt(velocity.x * velocity.x + velocity.z * velocity.z);
+				if (speed < p.settings->triggerMinSpeed || physics::lengthSquared(d) > reach * reach) {
+					return false;
 				}
 				const float heading = std::atan2(d.x, d.z) * 57.29578f;
-				if (std::fabs(std::remainder(heading - p.yaw, 360.0f)) <= p.settings->triggerAngle) {
-					explode(p.position, *p.settings, p.player, p.yaw);
-					p.alive = false;
-					break;
+				return std::fabs(std::remainder(heading - p.yaw, 360.0f)) <= p.settings->triggerAngle;
+			};
+			const int type = p.settings->triggerType;
+			bool tripped = false;
+			if (type == 1 || type == 3) {
+				for (const auto& owned : m_players) {
+					const Player& victim = *owned;
+					if (!victim.present || !victim.alive || victim.vehicle || spared(&victim)) {
+						continue;
+					}
+					if (trips(victim.body.position - physics::Vec3 {0, 1.0f, 0} - p.position, p.settings->triggerRadius,
+							victim.body.velocity)) {
+						tripped = true;
+						break;
+					}
 				}
 			}
-			if (!p.alive) {
+			if (!tripped && (type == 2 || type == 3)) {
+				for (const Body& body : m_bodies) {
+					const world::Object* vehicle = m_objects.find(body.object);
+					if (!vehicle || vehicle->destroyed() || hitPoints(body.object) == 0) {
+						continue;
+					}
+					const Player* driver = !body.occupants.empty() ? findPlayer(body.occupants.front()) : nullptr;
+					if (spared(driver)) {
+						continue;
+					}
+					if (trips(body.body.position - p.position, p.settings->triggerRadius + body.objectRadius, body.body.velocity)) {
+						tripped = true;
+						break;
+					}
+				}
+			}
+			if (tripped) {
+				explode(p.position, *p.settings, p.player, p.yaw);
+				p.alive = false;
 				continue;
 			}
 		}
@@ -9115,6 +9242,95 @@ bool GameWorld::abilityOf(const world::ObjectTemplate& gadget, Ability& ability,
 	return true;
 }
 
+int GameWorld::soldierAmmoLevel(const Player& player) const
+{
+	float level = 1;
+	bool first = true;
+	const auto weigh = [&](const std::string& name, const FireArm* weapon) {
+		const world::ObjectTemplate* t = name.empty() ? nullptr : m_templates.find(name);
+		if (!weapon || (t && integer(*t, "ammo.allowReplenish", 1) == 0)) {
+			return;
+		}
+		const FireArmSettings& settings = weapon->settings();
+		if (settings.nrOfMags <= 0 || settings.magSize < 0) {
+			return; // slot 0xb8 -1 (no magazines), or none to measure by
+		}
+		// The firearm's slot 0xb0 counts the magazine in the gun; one less
+		// when that is empty (slot 0xa4(0)).
+		float share = static_cast<float>(weapon->magsLeft() + 1 - (weapon->roundsInMag() == 0 ? 1 : 0))
+			/ static_cast<float>(settings.nrOfMags);
+		if (!first) {
+			share = (share + level) * 0.5f;
+		}
+		first = false;
+		level = share;
+	};
+	weigh(player.weaponTemplate, player.weapon.get());
+	for (const Player::Carried& carried : player.carried) {
+		weigh(carried.name, carried.weapon.get());
+	}
+	return static_cast<int>(std::floor(std::clamp(level * 15.0f, 0.0f, 15.0f)));
+}
+
+bool GameWorld::abilityBar(int id, AbilityBarInfo& out) const
+{
+	const Player* player = findPlayer(id);
+	if (!player) {
+		return false;
+	}
+	out = {};
+	out.alive = player->alive && !player->manDown; // slots 0x74 and 0x114
+	const int64_t now = static_cast<int64_t>(m_ticks);
+	out.healFlag = player->gaveHeal;
+	out.repairFlag = player->gaveRepair;
+	out.ammoFlag = player->gaveAmmo;
+	out.sinceHeal = player->gaveHealTick >= 0 ? now - player->gaveHealTick : -1;
+	out.sinceAmmo = player->gaveAmmoTick >= 0 ? now - player->gaveAmmoTick : -1;
+	const world::Object* worn = player->kitObject ? m_objects.find(player->kitObject) : nullptr;
+	const world::ObjectTemplate* kit = worn && worn->objectTemplate() ? worn->objectTemplate()
+		: player->kitTemplate.empty()                                 ? nullptr
+																	   : m_templates.find(player->kitTemplate);
+	if (kit) {
+		for (const std::string& component : kit->components()) {
+			if (component.size() == 7 && std::equal(component.begin(), component.end(), "ability",
+					[](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == b; })) {
+				out.kitAbility = true;
+			}
+		}
+		out.kitHealing = integer(*kit, "ability.hasHealingAbility", 0) != 0;
+		out.kitRepairing = integer(*kit, "ability.hasRepairingAbility", 0) != 0;
+		out.kitAmmo = integer(*kit, "ability.hasAmmoAbility", 0) != 0;
+	}
+	// The gun in hand (0x007beac0: the control object's slot 0x78(0); a
+	// seat's guns carry no ReplenishingAmmoComp).
+	const world::ObjectTemplate* gun = player->vehicle ? nullptr : m_templates.find(player->weaponTemplate);
+	Ability ability;
+	bool whileFiring = false;
+	if (!gun || !abilityOf(*gun, ability, whileFiring)) {
+		return true;
+	}
+	const auto type = gun->settings().find("ammo.replenishingType");
+	out.replenishingType = type == gun->settings().end() || type->second == "RTHeal" ? 0 : type->second == "RTAmmo" ? 1 : 2;
+	out.battery = std::max(0.0f, player->battery);
+	const auto scan = m_abilityScans.find(id);
+	if (scan == m_abilityScans.end()) {
+		return true;
+	}
+	out.active = player->abilityActive && !scan->second.targets.empty();
+	for (const uint32_t target : scan->second.targets) {
+		if (out.kitAmmo) {
+			const Player* soldier = soldierPlayer(target);
+			out.targets.push_back(soldier ? static_cast<float>(soldierAmmoLevel(*soldier)) / 15.0f : 1.0f);
+			continue;
+		}
+		const world::Object* o = m_objects.find(target);
+		const float left = hitPoints(target);
+		const float most = o && o->objectTemplate() ? number(*o->objectTemplate(), "armor.maxHitPoints", 0) : 0;
+		out.targets.push_back(left >= 0 && most > 0 ? left / most : -1.0f);
+	}
+	return true;
+}
+
 std::vector<uint32_t> GameWorld::supplyObjects() const
 {
 	std::vector<uint32_t> objects;
@@ -9168,8 +9384,11 @@ bool GameWorld::repairable(uint32_t object) const
 }
 
 void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, int team, float seconds, uint32_t skip,
-	AbilityScan* scan, Player* holder, bool soldiersOnly, bool vehiclesOnly)
+	AbilityScan* scan, Player* holder, bool soldiersOnly, bool vehiclesOnly, Player* giver)
 {
+	if (!giver) {
+		giver = holder;
+	}
 	const float drain = ability.drain * seconds;
 	float noBattery = 0;
 	float& battery = holder && holder->alive && !holder->vehicle && holder->battery >= 0 ? holder->battery : noBattery;
@@ -9193,7 +9412,6 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 			return false;
 		}
 		m_hitPoints[object] = std::min(left + percent * 0.01f * most, most);
-		m_received[object] = {soldierPlayer(object) ? 0 : 1, m_time}; // for the HUD (received())
 		return true;
 	};
 	// Each target treated draws on the battery, when it holds that much.
@@ -9247,10 +9465,35 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 	if (drain > battery) {
 		return; // flat: nothing treated
 	}
+	// The giver's stamps for the ability bar (0x004bc410 after a heal
+	// that moved the hit points: a soldier of his team, or a vehicle of
+	// his team whose control object has a player; 0x004bd5f0 after each
+	// refill: the giver, and the soldier rearmed).
+	const auto stampHeal = [&](uint32_t object) {
+		bool repaired = false;
+		if (const Player* receiver = soldierPlayer(object)) {
+			if (receiver->team != giver->team) {
+				return;
+			}
+		} else {
+			const world::Object* o = m_objects.find(object);
+			const std::vector<int> crew = vehicleOccupants(object);
+			if (!o || crew.empty() || crew.front() < 0 || o->team() != giver->team) {
+				return;
+			}
+			repaired = true;
+		}
+		giver->gaveHeal = true;
+		giver->gaveRepair = repaired;
+		giver->gaveHealTick = static_cast<int64_t>(m_ticks);
+	};
 	for (const uint32_t object : found) {
 		if (!ability.ammo) {
 			if (heal(object, amountFor(object))) {
 				draw();
+				if (giver) {
+					stampHeal(object);
+				}
 			}
 			continue;
 		}
@@ -9269,7 +9512,6 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 			}
 			float& owed = m_resupply[object];
 			owed += percent / 100.0f;
-			m_received[object] = {2, m_time};
 			while (owed >= 1) {
 				owed -= 1;
 				if (!weapon->addMagazine()) {
@@ -9278,8 +9520,17 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 			}
 			return true;
 		};
-		if (refill(target->weapon.get())) {
+		const bool refilled = refill(target->weapon.get());
+		if (refilled) {
 			draw();
+		}
+		if (giver) {
+			giver->gaveAmmo = true;
+			giver->gaveAmmoTick = refilled && giver->team == target->team ? static_cast<int64_t>(m_ticks) : refilled ? giver->gaveAmmoTick : -1;
+			if (refilled) {
+				target->gaveAmmo = true;
+				target->gaveAmmoTick = static_cast<int64_t>(m_ticks);
+			}
 		}
 	}
 }
@@ -9372,9 +9623,9 @@ void GameWorld::stepVehicleAbility(Player& player, float seconds)
 	// the vehicles): a medic heals the passengers.
 	if (healing || ammo) {
 		ability.ammo = !healing;
-		applyAbility(ability, at, player.team, seconds, 0, nullptr, nullptr, true, false);
+		applyAbility(ability, at, player.team, seconds, 0, nullptr, nullptr, true, false, &player);
 	} else {
-		applyAbility(ability, at, player.team, seconds, 0, nullptr, nullptr, false, true);
+		applyAbility(ability, at, player.team, seconds, 0, nullptr, nullptr, false, true, &player);
 	}
 }
 

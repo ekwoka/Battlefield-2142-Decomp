@@ -180,7 +180,8 @@ struct LightingUniforms {
 	// mesh.frag's static per-pixel path and the envmaps: xy RaShaderSTM's
 	// ParallaxScaleBias scale (the height scale over the detail map's
 	// size, 0x100d9c00; the bias is -0.5 x it), z the kMaterialExtra*
-	// bits, w unused.
+	// bits, w a bundled or skinned mesh's SimpleShadowmap factor on the
+	// sun and its specular (0 none, else 1 + it; LevelRenderer::simpleShadowFor).
 	float layers[4] {};
 };
 

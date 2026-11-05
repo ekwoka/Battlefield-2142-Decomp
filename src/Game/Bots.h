@@ -77,6 +77,8 @@
 
 #include "AI/Ballistics.h"
 #include "AI/Behaviour.h"
+#include "AI/Formation.h"
+#include "AI/MineZones.h"
 #include "AI/Goals.h"
 #include "AI/Heli.h"
 #include "AI/NavMesh.h"
@@ -88,6 +90,7 @@
 #include <array>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -819,6 +822,10 @@ public:
 	// the round spawns bots); its id, -1 for none.
 	int addBot(const std::string& name, int team);
 	int deactivatedCount() const { return static_cast<int>(m_deactivated.size()); }
+	// Whether an AI player was refused for aiSettings.setMaxNBots.
+	bool refused(int player) const { return m_refused.count(player) != 0; }
+	// Whether a mine's zone marks a polygon of a mesh (0 infantry, 1 vehicles).
+	bool mineMarked(int mesh, uint32_t polygon) const;
 	// A unit's (player's) certainty for a side's SAI (ai::knowledgeCertainty):
 	// 1 for its own and the bots' current sightings, decaying from the last
 	// sighting by its template's degeneration, 0 for one the side's bots
@@ -835,6 +842,85 @@ public:
 	// A vehicle's team as the AI sees it (its Unit's: those aboard, else
 	// the object's team).
 	int vehicleTeam(uint32_t vehicle) const;
+
+	// AIDLL's squads (the squad object, 0x110 bytes: constructor 0x100c4080,
+	// reset 0x100c1700, destructor 0x100c38f0; nine a side, made up front
+	// by the squad manager 0x1008a720 from IAIGame slot 0x50, BF2142.exe
+	// 0x00895850: 10, squads 1..9). See BotsSquad.cpp.
+	struct SquadMember {
+		int player = -1;            // +0x04 (its AI player +0x10, its bot +0x14)
+		bool placed = false;        // +0x4c: its AI object's position known
+		bool moving = false;        // +0x54: moved over 0.1 m since the last look
+		physics::Vec3 at;           // +0x40
+		bool atSlot = false;        // +0x34: within sqrt(10) m of its slot
+		bool goalSet = false;       // +0x35
+		bool fresh = false;         // +0x4d (set by the squad's reset 0x100bf640, never cleared)
+		bool regoal = false;        // +0x4e
+		physics::Vec3 goal;         // +0x64: the goal it was last given
+		physics::Vec3 lastGoal;     // +0x58: the goal at the last 9 s look
+		float checkedAt = 0;        // +0x28
+		float speed = 0;            // +0x30: the speed it walks at (0x100e6060 reads it)
+		float eta = 1;              // +0x20: squared distance to its slot over its speed
+	};
+	struct SquadDanger {            // a node of the list at +0x14 (pruned by 0x100c1b60)
+		float until = 0;            // +0x00
+		int member = -1;            // +0x24: whose position is watched
+		physics::Vec3 at;           // +0x34: where it was
+	};
+	struct Squad {
+		int team = 0, id = 0;       // +0x20 (side - 1), +0x1c (squad - 1)
+		std::vector<SquadMember> members; // +0x04
+		int leader = -1;            // +0x78: the index of the game's squad leader
+		// The order: +0x98 (0 none, 1 taken but not accepted, 2 under
+		// way), its kind +0x38 (0 attack, 1 defend, 2 move, 4 none), spot
+		// +0x2c, strategic area +0x28, commander's +0x48; the order taken
+		// (0x100c1eb0): spot +0x54, kind +0x60, commander's +0x70, until
+		// +0xa8.
+		int state = 0;
+		int kind = 4;
+		physics::Vec3 orderAt;
+		int area = -1;
+		bool fromCommander = false;
+		physics::Vec3 takenAt;
+		int takenKind = 4;
+		bool takenFromCommander = false;
+		float takenUntil = 0;
+		physics::Vec3 at;           // +0x8c: the leader's spot (0x100c32b0)
+		ai::Formation formation;    // +0x7c
+		int mode = 0;               // +0xb8: 0, 1 bounding, 2 flanking (0x100c1940)
+		int boundPhase = 0;         // +0xbc
+		float boundNext = 0;        // +0xb0
+		bool flanking = false;      // +0xc0
+		bool flankTried = false;    // +0xc1
+		physics::Vec3 flank[2];     // +0xc8
+		std::vector<SquadDanger> dangers; // +0x14
+		float requestedAt = 0;      // +0x100: the last req_new_order
+		bool answerOrder = false;   // +0x108: the members say roger_that / negative on their goal
+		// The world's order this squad last saw (the game's event 0x10089480
+		// reaching 0x100c1eb0 when it changes).
+		GameWorld::OrderType seenType = GameWorld::OrderType::None;
+		physics::Vec3 seenAt;
+		bool updated = false;
+	};
+	const Squad* squad(int team, int id) const;
+	// The team's kits by kit index (the game's Team::kits), for the SAI's
+	// kit choice at respawn (0x100f04a0); without them the bots keep theirs.
+	void setTeamKits(int team, std::vector<std::pair<std::string, std::string>> kits);
+	// The kit the SAI chose at the bot's last death (-1 none).
+	int respawnKit(int player) const;
+	int respawnPoint(int player) const;
+	// The sensing agent's chosen sector (-1 none) and whether a look plan runs.
+	int lookSector(int player) const;
+	bool lookPlanned(int player) const;
+	// Whether a bot may advance (bot +400, vt+0x128 / 0x12c: set by the
+	// squad's bounding and flanking; read by the look-around 0x100d7840,
+	// which without it looks along the walk).
+	bool mayAdvance(int player) const;
+	// A bot's squad goal: its formation slot, false for none.
+	bool formationGoal(int player, physics::Vec3& at) const;
+	// The squad update (0x100c4240) of one squad now, outside the round robin
+	// (for tests).
+	void updateSquadNow(int team, int id);
 private:
 	// An enemy a bot knows of (the sensing agent's memory item; the agent's
 	// constructor 0x100ecee0, its memory cleared on the bot's reset 0x100ed040).
@@ -1060,6 +1146,55 @@ private:
 		ai::LeadSolver heliLead;
 		physics::Vec3 heliLeadDirection {0, 0, 1};
 		std::optional<ai::OnTargetTest> heliOnTarget;
+		// The squad's goal for a member in its formation (0x100bff90: a
+		// waypoint goal, reach 0, area 60, at the slot) and the re-goal the
+		// squad asks of one heading for the order (0x100c0130).
+		bool squadGoal = false;
+		ai::Goal formation;
+		bool orderRegoal = false;
+		int idlePassenger = -1;      // BBPIdle2d's +0xc: whom the driver waits for (0x1006b1f0)
+		bool pickupAsked = false;    // the get-in plan's +0x14: req_pickup said
+		int pilotWeapon = -1;        // BBPHeliFire3d's +0x14: the pilot's weapon (0x100dd4a0)
+		bool reviveShock = false;    // the crouch-then-fire's press made (0x100dda20 +0x18)
+		bool mayAdvance = true;      // +400 (the constructor's 1, 0x1009ac30)
+		// The sensing agent's look-around (bot +0xdc, AIDLL 0x100d7210; see
+		// BotsLook.cpp).
+		struct Look {
+			std::array<float, 8> sectorW {}; // +0x3c
+			int sector = -1;                 // +0x20
+			float sectorWeight = 0;          // +0x24
+			physics::Vec3 sectorPoint;       // +0x28
+			bool reached = false;            // +0x34
+			float moveX = 0, moveZ = 0;      // +0x5c, +0x60 (0x1008f8e0)
+			bool requested = false;          // +0x48: the Turn's request (0x100d58b0)
+			physics::Vec3 request;           // +0x4c
+			float requestWeight = 0;         // +0x58
+			float decidedAt = 0;             // +0x80
+			bool force = false, forceLatch = false; // +0x88, +0x89
+			bool paused = false;             // +0x8a (0x100d51c0)
+			float pausedAt = 0;              // +0x90
+			bool aheadOfMove = false;        // +0x99
+			bool plan = false;               // +0x9c: a look plan runs
+			bool needPlan = true;            // +0xa0
+			bool sectorPlan = true;          // +0xa8
+			physics::Vec3 offset;            // the plan's look offset (0x100de2c0's)
+			bool offsetFromRoot = false;     // a stimulus's: from the soldier's root, else a way
+			float duration = 0.75f;          // +0xac
+			bool started = false;            // the reset (0x100d6b90) done
+			bool quiet = false;              // the aim called by the walk or the look: no pause
+			std::string pattern;             // the plan the last execution ran (the Turn's request on a new walk)
+		};
+		Look look;
+		// The rounds that passed the bot (the perception's list +0x6c, round
+		// records 0x100c4500): the shooter, when, where it hit.
+		struct RoundSeen {
+			int shooter = -1;
+			float at = 0;
+			physics::Vec3 impact;
+			bool friendly = false;
+		};
+		std::vector<RoundSeen> roundsSeen;
+		float walkFactor = 1;        // the member's +0x30 over the soldier's top speed (0x100e6060)
 	};
 	// The side's strategic AI.
 	struct Side {
@@ -1070,6 +1205,8 @@ private:
 		std::map<int, int> squadArea; // squad -> area index it attacks/defends
 		std::vector<int> attacks, defences;
 		std::map<std::string, int> picks; // the strategy records' +0xc (ai::strategyTimeUp)
+		std::map<int, bool> lonerAttacks;  // steps 10 / 11: a bot outside squads -> attack (else defend)
+		std::vector<float> temperature;    // per area, the side's (+0xa0 + 4 side) at the last update
 	};
 
 	void sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players);
@@ -1244,6 +1381,45 @@ private:
 	// The goal a bot heads for (its squad's order, else the SAI's areas).
 	void updateGoal(Bot& bot, const GameWorld::PlayerInfo& self);
 	void updateStrategy(float seconds);
+	// The sensing agent's look-around (BotsLook.cpp): its update and plan
+	// (0x100d7840) after the main plan, the faced sectors (0x100d6d60) at
+	// each sensing pass.
+	void lookAround(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
+	void faceSectors(Bot& bot, const GameWorld::PlayerInfo& self);
+	// The squads (BotsSquad.cpp): the manager's round robin (0x1008a910),
+	// one squad's update (0x100c4240) and its parts.
+	void updateSquads();
+	void updateSquad(Squad& squad);
+	void syncSquadMembers(Squad& squad);
+	void takeOrder(Squad& squad, int kind, const physics::Vec3& at, bool fromCommander);
+	bool acceptOrder(Squad& squad, int by);
+	void updateMember(Squad& squad, SquadMember& member);
+	bool inFormation(const Squad& squad, const SquadMember& member) const;
+	bool slotPoint(Squad& squad, int player, physics::Vec3& at);
+	void updateFormation(Squad& squad);
+	void squadMode(Squad& squad);
+	void squadRadio(Squad& squad);
+	void releaseSquad(int team, int id, int area);
+	bool reachable(const physics::Vec3& at) const;
+	int areaAt(const physics::Vec3& at, int team, physics::Vec3* centre = nullptr, float* radius = nullptr) const;
+	ai::AreaStatus areaStatus(int area, int team) const;
+	SquadMember* memberOf(Squad& squad, int player);
+	const GameWorld::PlayerInfo* squadLeaderOf(const Squad& squad) const;
+	bool humanCommands(int team) const;
+	std::map<std::pair<int, int>, Squad> m_squads; // (team, squad id)
+	// The SAI's respawn (0x100f0590): per bot, whether this death's choice is
+	// made, and the control point of the last spawn point chosen (the
+	// player's vt+0xf4, kept 20 % of the time).
+	struct Respawn {
+		bool chosen = false;
+		int controlPoint = -1;
+		int kit = -1;
+	};
+	std::map<int, Respawn> m_respawn;
+	std::array<std::vector<std::pair<std::string, std::string>>, 3> m_teamKits; // (kit, soldier) by kit index
+	void chooseRespawn(const GameWorld::PlayerInfo& self);
+	int m_squadCursor = 0; // +0x20
+	int m_squadSide = 0;   // +0x24
 	// A bot commanding its team (AIDLL 0x1009c050; see Bots.cpp).
 	void command(float seconds);
 
@@ -1288,6 +1464,23 @@ private:
 	std::map<int, ai::Goal> m_goals; // the scripted goals by player
 	std::map<int, std::string> m_orders; // ai.botGiveOrder's refused orders, "behaviour set"
 	std::map<int, bool> m_deactivated;
+	// The mine manager (BotsMines.cpp): the mines by projectile serial, their
+	// zones' marks, the 0.5 s clock.
+	struct MineZone {
+		struct Mark {
+			int mesh;
+			uint32_t polygon;
+			bool counterB;
+		};
+		int type = 0;
+		bool active = false;
+		std::vector<Mark> marks;
+	};
+	std::map<uint32_t, MineZone> m_mines;
+	ai::MineMarks m_mineMarks;
+	float m_minesNext = 0;
+	void updateMines();
+	std::set<int> m_refused; // AI players over aiSettings.setMaxNBots (0x100581a0): never activated
 	// The sides' knowledge of the enemy players (the AI objects of
 	// ai::knowledgeCertainty): when its bots last saw each, and whether one
 	// sees it now; filled by sense().
