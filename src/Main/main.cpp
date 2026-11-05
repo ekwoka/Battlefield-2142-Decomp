@@ -1315,9 +1315,10 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			}
 			dice::hfe::menu::OtherSeat other;
 			other.bundle = static_cast<int>(i);
-			other.hasBundle = round.seatYaw(vehicle->id(), static_cast<int>(i), other.rotation);
+			other.hasBundle = world.seatYaw(vehicle->id(), static_cast<int>(i), other.rotation);
 			look.others.push_back(other);
 		}
+		look.repairCells = world.repairCells(vehicle->id());
 		g_vehicleHud.update(hud, look);
 		float yaw = 0, pitch = 0;
 		if (known && round.gunAim(vehicle->id(), me.seat, yaw, pitch)) {
@@ -1335,6 +1336,11 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			hud.set("GuiIndex", gui != held.weapon->settings().end() ? static_cast<float>(std::atoi(gui->second.c_str())) : 0);
 			hud.set("CrosshairIconShow", crosshairActive ? 1 : 0);
 			heldGunTemplate = held.weapon;
+			// The turret's direction as its bundle ghosts turn it.
+			if (known && world.gunTurn(vehicle->id(), me.seat, yaw, pitch)) {
+				hud.set("TurretIconShow", 1);
+				hud.set("VehicleTurretAngle", yaw);
+			}
 		}
 		// The seat's vehicleHud.useChildHud (block +0xb9; the weapon HUD's
 		// frame 0x007c38c0): a seat without a gun shows the soldier's own
@@ -3406,6 +3412,8 @@ int runGame(Options& options, Session& session)
 		menuBindings->onQuit = [&session]() { session.menuQuit = true; };
 		menuBindings->onLog = [](const std::string& line) { std::printf("menu: %s\n", line.c_str()); };
 		menuBindings->setMaps(scanMenuMaps(options));
+		// The Mod page's mods (ModInfo, each mods/<name>/Mod.desc).
+		menuBindings->setMods(dice::hfe::menu::MenuBindings::findMods(options.gameDir), options.modPath);
 		// The award definitions (0x0046a0c0 runs awards.con at start-up).
 		if (std::string awards; files.readText("Menu/External/FlashMenu/awards.con", awards)) {
 			menuBindings->setAwards(stats::parseAwards(awards));
@@ -5240,6 +5248,7 @@ int runGame(Options& options, Session& session)
 				const physics::MaterialCell* cell = materials.cell(bundle, ground);
 				return cell && !cell->effectTemplates.empty() ? cell->effectTemplates[0] : std::string();
 			});
+		client::RemoteStrikes remoteStrikes; // a joined client's strikes (RemoteGuns.h)
 		const auto stepObjectEffects = [&] {
 			std::vector<effects::ObjectEffects::ObjectState> states;
 			states.reserve(objects.objects().size());
@@ -5322,19 +5331,22 @@ int runGame(Options& options, Session& session)
 				});
 			// The commanders' strike firearms, fired where 0x005a0bf0 moved
 			// them: event 0 to their children there (the EMP strike's
-			// GEB_emp_strike), turned as the firearm sits in its asset.
-			for (const game::GameWorld::StrikeFired& strike : round.takeStrikeFires()) {
-				const world::ObjectTemplate* fireArm = templates.find(strike.fireArm);
-				const world::Object* asset = objects.find(strike.asset);
+			// GEB_emp_strike), turned as the firearm sits in its asset. A
+			// host tells its clients of each (HostedGame::strikeFired); a
+			// joined client fires the asset's firearm as the server's
+			// event says (client::RemoteStrikes, 0x0050eeb0).
+			const auto strikeAt = [&](uint32_t assetId, const std::string& fireArmName, const physics::Vec3& at) {
+				const world::ObjectTemplate* fireArm = templates.find(fireArmName);
+				const world::Object* asset = objects.find(assetId);
 				if (!fireArm) {
-					continue;
+					return;
 				}
 				physics::Mat3 turn;
 				if (asset && asset->objectTemplate()) {
 					turn = physics::Mat3::fromYawPitchRoll({asset->rotation().x, asset->rotation().y, asset->rotation().z});
 					for (const world::ChildTemplate& child : asset->objectTemplate()->children()) {
-						if (child.name.size() == strike.fireArm.size()
-							&& std::equal(child.name.begin(), child.name.end(), strike.fireArm.begin(), [](char a, char b) {
+						if (child.name.size() == fireArmName.size()
+							&& std::equal(child.name.begin(), child.name.end(), fireArmName.begin(), [](char a, char b) {
 								   return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
 							   })) {
 							turn = physics::Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z}) * turn;
@@ -5342,7 +5354,16 @@ int runGame(Options& options, Session& session)
 						}
 					}
 				}
-				objectEffectBundles.weaponFiredAt(*fireArm, strike.at, turn, objectEffects);
+				objectEffectBundles.weaponFiredAt(*fireArm, at, turn, objectEffects);
+			};
+			for (const game::GameWorld::StrikeFired& strike : round.takeStrikeFires()) {
+				if (session.hosted) {
+					session.hosted->strikeFired(strike);
+				}
+				strikeAt(strike.asset, strike.fireArm, strike.at);
+			}
+			for (const client::RemoteStrikes::Round& strike : remoteStrikes.step(1.0f / 30.0f)) {
+				strikeAt(strike.asset, strike.fireArm, strike.at);
 			}
 			// The WindManager's local winds: the objects' WindAffectors.
 			windSettings.localWinds = objectEffectBundles.localWinds();
@@ -6363,6 +6384,10 @@ int runGame(Options& options, Session& session)
 							gunner.active[g] = seatGhost->seatWeapon[g];
 						}
 						gunner.presses = p.firePresses;
+						if (const net::RemoteObject* root = client.world().object(seatGhost->rootGhost ? seatGhost->rootGhost : p.vehicleGhost);
+							root && root->hasVelocity) {
+							gunner.velocity = {root->velocity.x, root->velocity.y, root->velocity.z};
+						}
 						if (p.local) {
 							gunner.firing[0] = remoteLook.fire;
 							gunner.firing[1] = gunner.firing[2] = false;
@@ -6455,6 +6480,20 @@ int runGame(Options& options, Session& session)
 				}
 			}
 			remoteSeatGuns.step(round, gunners, 1.0f / 30.0f);
+			// The server's strikes (kEvArtillery kind 2, 0x0050eeb0): the
+			// asset's firearm fires here for its effects.
+			for (const net::StrikeFireInfo& strike : client.world().takeStrikeFires()) {
+				const auto asset = ghostObjects.find(strike.asset);
+				const world::Object* object = asset != ghostObjects.end() ? objects.find(asset->second) : nullptr;
+				if (object && object->objectTemplate()) {
+					remoteStrikes.fired(templates, object->id(), *object->objectTemplate(), strike.x, strike.z,
+						round.commanderSettings.orbitalBombardmentHeight);
+				}
+				if (options.verbose) {
+					std::printf("strike fired at %.0f/%.0f by ghost %u (%s)\n", strike.x, strike.z, strike.asset,
+						object && object->objectTemplate() ? object->objectTemplate()->name().c_str() : "unknown");
+				}
+			}
 			for (const auto& [ghost, id] : ghostObjects) {
 				if (round.isRemoteSoldier(id) && !animated.count(id)) {
 					round.removeRemoteSoldier(id);
@@ -6629,6 +6668,36 @@ int runGame(Options& options, Session& session)
 				if (message.category == 2 && (message.id == 0x3e || message.id == 0x3f) && message.payload.size() >= 8
 					&& message.payloadInt(0) == client.world().localPlayer()) {
 					dice::hfe::menu::closeToObject(hudManager, message.payloadInt(1), message.id == 0x3e);
+				}
+				// Team damage (0/0xb {kind, victim, attacker}, TeamDamage.cpp):
+				// the HUD's answer (0x00759bf0 case 0xb). The victim's own
+				// call goes to the server as our radio; the other's voice
+				// (the client's slot 0x54, a radio in the victim's name) has
+				// no message of ours to carry it.
+				if (message.category == net::kMsgGameCategory && message.id == 0xb && message.payload.size() >= 12) {
+					game::GameWorld::TeamDamage e;
+					e.kind = message.payloadInt(0);
+					e.victim = message.payloadInt(1);
+					e.attacker = message.payloadInt(2);
+					const net::RemotePlayer* victim = client.world().player(e.victim);
+					const bool up = victim && victim->alive && !victim->manDown;
+					using Notice = game::GameWorld::TeamDamageNotice;
+					switch (game::GameWorld::teamDamageNotice(e, client.world().localPlayer(), up)) {
+					case Notice::SayFriendlyFire:
+						if (voices.message(game::GameWorld::kFriendlyFireVoice) >= 0) {
+							client.radioMessage(14, voices.message(game::GameWorld::kFriendlyFireVoice), e.attacker);
+						}
+						break;
+					case Notice::PlayerLine:
+						chat.addPersonal(localization.text("HUD_HUD_TEAM_DAMAGE_PLAYER"));
+						break;
+					case Notice::VehicleLine:
+						chat.addPersonal(localization.text("HUD_HUD_TEAM_DAMAGE_VEHICLE"));
+						break;
+					case Notice::VictimSaysFriendlyFire:
+					case Notice::None:
+						break;
+					}
 				}
 				if (message.category == 2 && message.id == 0x1e && squadRequests.onPersonal) {
 					squadRequests.onPersonal(localization.text("HUD_HUD_SQUAD_REQUEST_TO_COMMANDER"));
@@ -7741,9 +7810,10 @@ int runGame(Options& options, Session& session)
 						: commanderScreen              ? commanderState
 						: help.menuOpen                ? -1
 													   : 0;
-					// The parachute's (case 0x0d) asks an object the rewrite's
-					// soldiers don't have (no soldier parachute): never.
-					help.parachute = false;
+					// The parachute's (case 0x0d): the controlled object as a
+					// soldier (0x0074e8c0: the player's slot 0xb4 as 0xc4d7)
+					// falling (its slot 0x78, +0x328: under -10 m/s).
+					help.parachute = known && round.soldierFalling(round.localPlayer());
 					help.commander = known && self.commander;
 					// The game's reach tests (cases 0x43, 0x47).
 					help.ladderNear = help.onFoot && round.ladderInReach(round.localPlayer(), 3);
@@ -7867,6 +7937,35 @@ int runGame(Options& options, Session& session)
 				if (!session.client) {
 					for (const auto& e : round.takeCloseToEvents(round.localPlayer())) {
 						dice::hfe::menu::closeToObject(hudManager, e.type, e.enter);
+					}
+					// The team damage limits (sgl_setParam, scoringCommon.py's
+					// setTeamDamagePointLimit) and the server's own player's
+					// team damage events (0/0xb, TeamDamage.cpp).
+					const auto limit = [&gameLogic](const char* name, float fallback) {
+						const auto it = gameLogic.limits.find(name);
+						return it != gameLogic.limits.end() ? static_cast<float>(it->second.asNumber()) : fallback;
+					};
+					round.setTeamDamageLimits(limit("teamDamageScoreLimit", 50), limit("teamVehicleDamageScoreLimit", 25));
+					for (const auto& e : round.takeTeamDamage(round.localPlayer())) {
+						game::GameWorld::PlayerInfo victim;
+						const bool up = round.playerInfo(e.victim, victim) && victim.alive && !victim.manDown;
+						using Notice = game::GameWorld::TeamDamageNotice;
+						switch (game::GameWorld::teamDamageNotice(e, round.localPlayer(), up)) {
+						case Notice::SayFriendlyFire:
+							sayRadio(14, game::GameWorld::kFriendlyFireVoice, e.attacker); // TCPlayer
+							break;
+						case Notice::VictimSaysFriendlyFire:
+							round.radioMessage(e.victim, 14, game::GameWorld::kFriendlyFireVoice, round.localPlayer());
+							break;
+						case Notice::PlayerLine:
+							chat.addPersonal(localization.text("HUD_HUD_TEAM_DAMAGE_PLAYER"));
+							break;
+						case Notice::VehicleLine:
+							chat.addPersonal(localization.text("HUD_HUD_TEAM_DAMAGE_VEHICLE"));
+							break;
+						case Notice::None:
+							break;
+						}
 					}
 				}
 				// AbilityHud (on the kits: S_Heal, S_Repair, S_Resupply): the

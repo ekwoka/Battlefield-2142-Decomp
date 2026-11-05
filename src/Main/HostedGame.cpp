@@ -1466,6 +1466,25 @@ void HostedGame::event(int id, const net::GameEvent& e)
 // HUD would have found it, 0x0075be30); then every player of the team gets
 // message 2/<message> with the event's 0x18 bytes: a client's player as
 // PostRemote, the host's own through onSpotted.
+void HostedGame::strikeFired(const game::GameWorld::StrikeFired& strike)
+{
+	if (!strike.first) {
+		return; // the burst's later rounds: the clients' firearms fire them
+	}
+	const uint16_t ghost = ghostOfObject(strike.asset);
+	if (!ghost) {
+		return; // 0x005a0e50: only with the root's networkable (slot 0xd0)
+	}
+	net::StrikeFireInfo info;
+	info.x = strike.at.x;
+	info.z = strike.at.z;
+	info.asset = ghost;
+	// The tick (0x00666090) plus the firearm's place (the rewrite's assets
+	// hold one firearm: 0).
+	info.seed = static_cast<uint32_t>(std::max(0.0, m_round->roundTime()) * 30.0);
+	sendToPlaying(net::makeStrikeFire(info));
+}
+
 void HostedGame::spotted(const net::SpottedInfo& from, int reporter)
 {
 	// The reporter is the connection's player (or the host's own): its
@@ -1599,6 +1618,19 @@ void HostedGame::sendCloseTo()
 		}
 		for (const game::GameWorld::CloseToEvent& e : m_round->takeCloseToEvents(client.player)) {
 			sendTo(id, net::makePostRemote(2, e.enter ? 0x3e : 0x3f, net::int32Payload(e.player) + net::int32Payload(e.type)));
+		}
+	}
+}
+
+void HostedGame::sendTeamDamage()
+{
+	for (const auto& [id, client] : m_clients) {
+		if (client.stage != Client::Stage::Playing || client.player < 0) {
+			continue;
+		}
+		for (const game::GameWorld::TeamDamage& e : m_round->takeTeamDamage(client.player)) {
+			sendTo(id, net::makePostRemote(net::kMsgGameCategory, 0xb,
+						   net::int32Payload(e.kind) + net::int32Payload(e.victim) + net::int32Payload(e.attacker)));
 		}
 	}
 }
@@ -2241,10 +2273,20 @@ std::vector<net::NetworkableState> HostedGame::statesOf(const Ghost& ghost, size
 				}
 			}
 			// The armoured parts below it (0x800000): the rewrite's vehicles
-			// keep their armour on the root, so every part is whole.
+			// keep their armour on the root, so every part is whole but the
+			// repair cells (GameWorld::repairCells, the heavy IFV's shield
+			// generators: hudRepairCellNo, in the root's armour order), each
+			// 8 while it stands and 0 a wreck, which the clients' vehicle
+			// HUD shows (0x007a1e50).
 			if (h.kind == net::NetworkableKind::SimpleObject && h.armoredChildrenKnown && !h.armoredChildren.empty()) {
 				s.mask |= 0x800000;
 				s.childDamage.assign(h.armoredChildren.size(), 8);
+				const std::vector<bool> cells = m_round->repairCells(ghost.object);
+				for (size_t i = 0, cell = 0; i < h.armoredRepairCells.size() && i < s.childDamage.size(); ++i) {
+					if (h.armoredRepairCells[i] && cell < cells.size()) {
+						s.childDamage[i] = cells[cell++] ? 8 : 0;
+					}
+				}
 			}
 			break;
 		case net::NetworkableKind::OverheadCamera:
@@ -3149,6 +3191,7 @@ void HostedGame::tick()
 	trackOrders();
 	sendRadio();
 	sendCloseTo();
+	sendTeamDamage();
 	// The scripts' end-of-round text (gl_sendEndOfRoundData, 0x00568930:
 	// data block 8 to everyone, with sv.endOfRoundDelay and each player's
 	// kills and deaths).

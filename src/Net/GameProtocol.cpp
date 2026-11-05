@@ -1131,6 +1131,30 @@ GameEvent makeArtilleryUse(int team, float x, float z, int rcType)
 	return e;
 }
 
+GameEvent makeStrikeFire(const StrikeFireInfo& info)
+{
+	// 0x0050ed20 writes kind (2 bits), the team (32), x, z, then for kind 2
+	// the asset's id (16) and the seed (32).
+	GameEvent e;
+	e.type = kEvArtillery;
+	e.values = {2, static_cast<uint32_t>(info.team) & 0xff, floatRaw(info.x), floatRaw(info.z), info.asset, info.seed};
+	return e;
+}
+
+bool parseStrikeFire(const GameEvent& e, StrikeFireInfo& out)
+{
+	out = {};
+	if (e.type != kEvArtillery || e.u(0) != 2 || e.values.size() < 6) {
+		return false;
+	}
+	out.team = static_cast<int>(e.u(1) & 0xff);
+	out.x = e.f(2);
+	out.z = e.f(3);
+	out.asset = static_cast<uint16_t>(e.u(4));
+	out.seed = e.u(5);
+	return true;
+}
+
 GameEvent makeUavUse(int team, float x, float z, bool satellite)
 {
 	GameEvent e;

@@ -116,6 +116,10 @@ struct NetworkableHints {
 	// post-order), each with its armor.fullChildSync.
 	std::vector<bool> armoredChildren;
 	bool armoredChildrenKnown = false;
+	// Of those, the ones with an armor.hudRepairCellNo other than -1 (armour
+	// slot 0x168): the vehicle HUD's repair cells (0x007a1e50), in the same
+	// order.
+	std::vector<bool> armoredRepairCells;
 	// OverheadCamera mask 1: the template's speed (+0x2a0; times a runtime
 	// factor at object +0x270, taken as 1).
 	float overheadRange = 0;

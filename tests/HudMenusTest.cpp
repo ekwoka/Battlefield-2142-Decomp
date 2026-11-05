@@ -503,6 +503,16 @@ TEST(HudVehicle_PassengersAndScoreboardSquads)
 	vehicleHud.update(hudManager, in);
 	CHECK(hudManager.number("OccupyingPlayerName2Show") == 1 && hudManager.string("OccupyingPlayerName2String") == "1. Driver");
 	CHECK(hudManager.number("OccupyingPlayerName3Show") == 0);
+	// The heavy IFV's repair cells (0x007a1e50): cell n at +0x336 + n,
+	// RepairCell(n+1)Active (RepairCell0Active, +0x335, is never set).
+	hudManager.set("RepairCell0Active", 7);
+	in.repairCells = {true, false, true};
+	vehicleHud.update(hudManager, in);
+	CHECK(hudManager.number("RepairCell1Active") == 1 && hudManager.number("RepairCell2Active") == 0
+		&& hudManager.number("RepairCell3Active") == 1 && hudManager.number("RepairCell0Active") == 7);
+	in.repairCells = {false};
+	vehicleHud.update(hudManager, in);
+	CHECK(hudManager.number("RepairCell1Active") == 0 && hudManager.number("RepairCell3Active") == 1); // the others kept
 
 	std::vector<menu::ScoreboardMember> members {
 		{0, 2, false, 30, 0, 3, 1, 50}, {1, 0, false, 20, 0, 2, 2, 0}, {2, 1, true, 10, 0, 1, 0, 0}, {3, 2, false, 5, 0, 0, 4, 30}};

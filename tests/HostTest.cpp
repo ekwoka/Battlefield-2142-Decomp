@@ -1323,6 +1323,92 @@ TEST(NetHost_VehiclePrediction)
 	client.disconnect();
 }
 
+// The heavy IFV's repair cells on a joined client: the root's state carries
+// its armored children (mask 0x800000, the root's list in post-order,
+// armor.fullChildSync eighths), the host the cells' state among them
+// (GameWorld::repairCells), and the client's vehicle HUD shows the cells
+// with hudRepairCellNo (0x007a1e50) from it: all up, then all down as the
+// hull is wrecked. Needs $BF2142_GAME_DIR.
+TEST(NetHost_JoinedRepairCells)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		std::printf("  (BF2142_GAME_DIR not set: skipped)\n");
+		return;
+	}
+	HostGarage garage(gameDir, "eu_ifv", {0, 0, 12});
+	if (!garage.round) {
+		return; // no heavy IFV in this install
+	}
+	dice::hfe::game::GameWorld& round = *garage.round;
+	const dice::hfe::world::ObjectTemplate* ifv = garage.templates.find("eu_ifv");
+	const net::GhostTemplateNode node = net::ghostTemplateFrom(garage.templates, *ifv);
+	const std::vector<bool>& cells = node.hints.armoredRepairCells;
+	CHECK(cells.size() == node.hints.armoredChildren.size() && std::count(cells.begin(), cells.end(), true) == 7);
+	host::HostSetup setup;
+	setup.level = "Garage";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, garage.logic, garage.templates, setup);
+	CHECK(hosted.start());
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Gunner";
+	client.world().setGhostTemplates([&garage](uint32_t id) {
+		const dice::hfe::world::ObjectTemplate* t = garage.templates.findById(id);
+		return t ? net::ghostTemplateFrom(garage.templates, *t) : net::GhostTemplateNode {};
+	});
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	const auto step = [&] {
+		client.update();
+		client.simulatedTick();
+		hosted.tick();
+		round.tick(1.0f / 30);
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	};
+	const auto seen = [&]() -> std::vector<bool> {
+		for (const net::RemoteObject& o : client.world().objectList()) {
+			if (o.templateId == ifv->id() && o.part == 0) {
+				return o.repairCells;
+			}
+		}
+		return {};
+	};
+	const auto all = [](const std::vector<bool>& v, bool up) {
+		return v.size() == 7 && std::all_of(v.begin(), v.end(), [up](bool b) { return b == up; });
+	};
+	CHECK(pumpUntil(step, [&] { return all(seen(), true); }, 8000));
+	// The HUD's view of it (RemoteHudWorld, the ghost as the vehicle's
+	// object; here the host's own object stands in for the client's): the
+	// cells, and the gunner's turret turn from its bundle ghost.
+	std::map<uint16_t, uint32_t> ghostObjects;
+	for (const net::RemoteObject& o : client.world().objectList()) {
+		if (o.templateId == ifv->id() && o.part == 0) {
+			ghostObjects[o.ghost] = garage.vehicle;
+		}
+	}
+	host::RemoteHudWorld hudWorld(client.world(), round, ghostObjects);
+	CHECK(all(hudWorld.repairCells(garage.vehicle), true));
+	float yaw = 99, pitch = 99;
+	const auto seats = round.vehicleSeats(garage.vehicle);
+	bool turret = false;
+	for (size_t i = 0; i < seats.size(); ++i) {
+		if (!seats[i].yawBundle.empty() && !seats[i].weapon.empty()) {
+			turret = true;
+			CHECK(hudWorld.gunTurn(garage.vehicle, static_cast<int>(i), yaw, pitch) && std::fabs(yaw - seats[i].frameYaw) < 1
+				&& std::fabs(pitch) < 1);
+			CHECK(hudWorld.seatYaw(garage.vehicle, static_cast<int>(i), yaw) && std::fabs(yaw) < 1);
+			break;
+		}
+	}
+	CHECK(turret);
+	round.applyDamage(garage.vehicle, 5000);
+	CHECK(pumpUntil(step, [&] { return all(seen(), false); }, 6000));
+	CHECK(all(round.repairCells(garage.vehicle), false));
+	client.disconnect();
+}
+
 // GameWorld::removePlayer (the game server's destroyPlayer, 0x004acfb0):
 // the soldier dies and lies, the squad and the command are left, the id is
 // free for the next player.
@@ -2064,7 +2150,8 @@ TEST(Host_RemoteSeatGunsFireFromTheFireState)
 	const auto sounds = round.takeWeaponSounds();
 	CHECK(sounds.size() == 1 && sounds[0].kind == game::GameWorld::WeaponSoundEvent::Fire && sounds[0].player == 3
 		&& sounds[0].object == id && sounds[0].weapon == "tank_gun");
-	CHECK(sounds.size() == 1 && std::fabs(sounds[0].position.y - 2) < 1e-4f && std::fabs(sounds[0].position.z - 11) < 1e-4f);
+	// At the muzzle: the gun's place and 1 m along it (no projectileStartPosition).
+	CHECK(sounds.size() == 1 && std::fabs(sounds[0].position.y - 2) < 1e-4f && std::fabs(sounds[0].position.z - 12) < 1e-4f);
 	CHECK(round.takeObjectWeaponFires()[id] == std::vector<std::string> {"tank_gun"});
 	int rounds = 0;
 	for (int i = 0; i < 30 * 5; ++i) {
@@ -2095,4 +2182,136 @@ TEST(Host_RemoteSeatGunsFireFromTheFireState)
 	seat.rounds[1] = -1;
 	guns.step(round, {seat}, 1 / 30.0f);
 	CHECK(fires("tank_coax") == 1);
+}
+
+// The commander's strike on a joined client: the server's 0x005a0e50 sends
+// kEvArtillery kind 2 (written 0x0050ed20, read 0x0050ec60) with the
+// asset's ghost and the seed; the client's handler (0x0050eeb0) fires the
+// asset's first firearm at (x, orbitalBombardmentHeight, z), its burst at
+// its rate (client::RemoteStrikes), each round its effects there.
+TEST(Host_StrikeFireEventAndRemoteStrikes)
+{
+	namespace world = dice::hfe::world;
+	namespace client = dice::hfe::client;
+	net::StrikeFireInfo info;
+	info.x = 120.5f;
+	info.z = -64;
+	info.asset = 913;
+	info.seed = 4321;
+	net::BitWriter out;
+	CHECK(net::writeGameEvent(out, net::makeStrikeFire(info)));
+	net::BitReader in(out.data().data(), out.data().size());
+	net::GameEvent read;
+	net::StrikeFireInfo back;
+	CHECK(net::readGameEvent(in, read) && net::parseStrikeFire(read, back));
+	CHECK(back.x == 120.5f && back.z == -64 && back.asset == 913 && back.seed == 4321 && back.team == 0);
+	// A client's use (kind 1) isn't one.
+	CHECK(!net::parseStrikeFire(net::makeArtilleryUse(1, 0, 0, 4), back));
+	net::CommanderToolUse use;
+	CHECK(!net::parseCommanderToolUse(net::makeStrikeFire(info), use));
+	net::RemoteWorld remote;
+	CHECK(remote.apply(read));
+	const auto strikes = remote.takeStrikeFires();
+	CHECK(strikes.size() == 1 && strikes[0].asset == 913 && remote.takeStrikeFires().empty());
+
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* asset = templates.create("PlayerControlObject", "test_artillery");
+	asset->children().push_back({"test_base", {}, {}});
+	world::ObjectTemplate* base = templates.create("Bundle", "test_base");
+	base->children().push_back({"test_strike_arm", {}, {0, 90, 0}});
+	world::ObjectTemplate* arm = templates.create("GenericFireArm", "test_strike_arm");
+	arm->settings()["fire.burstSize"] = "3";
+	arm->settings()["fire.roundsPerMinute"] = "60";
+	CHECK(client::RemoteStrikes::firstFireArm(templates, *asset) == "test_strike_arm");
+	client::RemoteStrikes rounds;
+	rounds.fired(templates, 7, *asset, 120.5f, -64, 500);
+	std::vector<client::RemoteStrikes::Round> due = rounds.step(1 / 30.0f);
+	CHECK(due.size() == 1 && due[0].asset == 7 && due[0].fireArm == "test_strike_arm" && due[0].at.y == 500
+		&& due[0].at.x == 120.5f && due[0].at.z == -64);
+	int later = 0;
+	for (int i = 0; i < 30 * 3; ++i) {
+		later += static_cast<int>(rounds.step(1 / 30.0f).size());
+	}
+	CHECK(later == 2); // the burst's other two, a second apart
+	// An asset without a firearm fires nothing.
+	world::ObjectTemplate* bare = templates.create("PlayerControlObject", "test_bare");
+	rounds.fired(templates, 8, *bare, 0, 0, 500);
+	CHECK(rounds.step(1 / 30.0f).empty());
+}
+
+// The rounds of those guns on the client (GameWorld::fireRemoteSeatRound):
+// FireComp's 0x005f2bb0 makes a round without networkable info on every
+// machine, from the muzzle as the client's copy of the vehicle has it: the
+// seat's yaw bundle turned as its RotationalBundle ghost says (0x00602070),
+// projectileStartPosition along the turned gun, the vehicle's velocity
+// added. A networked round (a networkableInfo) is the server's ghost.
+TEST(Host_RemoteSeatGunsFireRoundsFromTheTurret)
+{
+	namespace world = dice::hfe::world;
+	namespace game = dice::hfe::game;
+	namespace client = dice::hfe::client;
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	world::ObjectTemplate* tank = templates.create("PlayerControlObject", "tank");
+	tank->settings()["seatInformation"] = "tank 0/1/0 0/0/0";
+	tank->children().push_back({"tank_turret", {0, 2, 0}, {}});
+	world::ObjectTemplate* turret = templates.create("RotationalBundle", "tank_turret");
+	turret->settings()["inputToYaw"] = "PIMouseLookX";
+	turret->children().push_back({"tank_cannon", {0, 0, 1}, {}});
+	world::ObjectTemplate* gun = templates.create("GenericFireArm", "tank_cannon");
+	gun->settings()["fire.roundsPerMinute"] = "60";
+	gun->settings()["fire.addFireRate.list"] = "0";
+	gun->settings()["fire.projectileStartPosition"] = "0/0/2";
+	gun->settings()["projectileTemplate"] = "tank_shell";
+	gun->settings()["velocity"] = "100";
+	world::ObjectTemplate* shell = templates.create("GenericProjectile", "tank_shell");
+	shell->settings()["timeToLive"] = "5";
+	const uint32_t id = objects.create(tank, {10, 0, 10})->id();
+	game::GameWorld round(templates, objects);
+	float turned = 90;
+	round.setRemotePartPose([&](uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation) {
+		if (object != id || part != "tank_turret") {
+			return false;
+		}
+		offset = {};
+		rotation = {turned, 0, 0};
+		return true;
+	});
+	client::RemoteSeatGuns guns;
+	client::RemoteSeatGuns::Seat seat;
+	seat.player = 2;
+	seat.vehicle = id;
+	seat.velocity = {0, 0, 5};
+	seat.firing[0] = true;
+	guns.step(round, {seat}, 1 / 30.0f);
+	const auto visual = [&round] {
+		std::vector<game::Projectile> out;
+		for (const game::Projectile& p : round.projectiles()) {
+			if (p.alive && p.visual) {
+				out.push_back(p);
+			}
+		}
+		return out;
+	};
+	std::vector<game::Projectile> flying = visual();
+	CHECK(flying.size() == 1);
+	if (flying.size() == 1) {
+		// The turret turned 90 degrees: the gun's (0, 2, 1) about the pivot
+		// (0, 2, 0) is (1, 2, 0), its start 2 m on along +x.
+		const game::Projectile& p = flying[0];
+		CHECK(std::fabs(p.origin.x - 13) < 1e-3f && std::fabs(p.origin.y - 2) < 1e-3f && std::fabs(p.origin.z - 10) < 1e-3f);
+		CHECK(std::fabs(p.velocity.x - 100) < 1e-2f && std::fabs(p.velocity.z - 5) < 1e-2f && p.shooter == id);
+	}
+	const auto sounds = round.takeWeaponSounds();
+	CHECK(sounds.size() == 1 && std::fabs(sounds[0].position.x - 13) < 1e-3f);
+	// A networked round comes as the server's ghost: none made here.
+	shell->settings()["networkableInfo"] = "ProjectileInfo";
+	seat.firing[0] = false;
+	guns.step(round, {seat}, 1 / 30.0f);
+	seat.firing[0] = true;
+	for (int i = 0; i < 40; ++i) {
+		guns.step(round, {seat}, 1 / 30.0f);
+	}
+	CHECK(visual().size() == 1);
+	CHECK(round.takeWeaponSounds().size() == 1); // its sound and effects still
 }

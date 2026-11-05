@@ -286,6 +286,7 @@ MenuBindings::MenuBindings(ui::NativeRegistry& natives, MenuServices services)
 	bindMultiplay();
 	bindServerSettings();
 	bindControls();
+	bindOffline();
 }
 
 MenuBindings::~MenuBindings() = default;
@@ -389,6 +390,7 @@ void MenuBindings::bindLogic()
 	n.setFunction(kLogic, "isGameRunning", [this](Interpreter&, const Args&) { return Value(m_gameRunning); });
 	n.setFunction(kLogic, "disconnectGame", [this](Interpreter&, const Args&) {
 		log("disconnect");
+		m_currentGame.reset();
 		if (onDisconnect) {
 			onDisconnect();
 		}
@@ -1186,25 +1188,41 @@ bool MenuBindings::finishServerQuery()
 			log("server list failed: " + m_query->error);
 		}
 		m_query.reset();
-		showServers();
+		refreshFavourites(); // their rows take the listed fields; shows the lists
 	}
 	return false;
 }
+
+namespace {
+
+// A server's row (0x10079770's columns).
+std::vector<std::string> serverRow(const ui::NativeRegistry& natives, const net::ServerEntry& e)
+{
+	std::string map = field(e, "mapname");
+	std::replace(map.begin(), map.end(), '_', ' ');
+	const std::string type = field(e, "gametype");
+	const bool listed = e.fields.count("maxplayers") != 0; // a favourite the browser has not listed: no counts
+	return {field(e, "hostname"),
+		listed ? std::to_string(fieldNumber(e, "numplayers")) + "/" + std::to_string(fieldNumber(e, "maxplayers")) + " (0)" : std::string(),
+		"", map, type.empty() ? std::string() : natives.localize("TEXT_" + type)};
+}
+
+} // namespace
 
 void MenuBindings::showServers()
 {
 	std::vector<std::vector<std::string>> rows;
 	for (const Server& server : m_servers) {
-		const net::ServerEntry& e = server.entry;
-		std::string map = field(e, "mapname");
-		std::replace(map.begin(), map.end(), '_', ' ');
-		const std::string type = field(e, "gametype");
-		rows.push_back({field(e, "hostname"),
-			std::to_string(fieldNumber(e, "numplayers")) + "/" + std::to_string(fieldNumber(e, "maxplayers")) + " (0)", "",
-			map, type.empty() ? std::string() : m_natives.localize("TEXT_" + type)});
+		rows.push_back(serverRow(m_natives, server.entry));
 	}
-	std::vector<std::vector<std::string>> withHeaders {
-		{m_natives.localize("SERVERBROWSER_favorites")}, {}, {m_natives.localize("SERVERBROWSER_liveservers")}};
+	// 0x10035e70: "Favorites", the favourites (the "favourites" browser's,
+	// row - 1), then "Live servers" and the rest.
+	std::vector<std::vector<std::string>> withHeaders {{m_natives.localize("SERVERBROWSER_favorites")}};
+	for (const Server& server : m_favouriteServers) {
+		withHeaders.push_back(serverRow(m_natives, server.entry));
+	}
+	withHeaders.push_back({});
+	withHeaders.push_back({m_natives.localize("SERVERBROWSER_liveservers")});
 	withHeaders.insert(withHeaders.end(), rows.begin(), rows.end());
 	m_natives.setListRows("serverListQuick", withHeaders);
 	m_natives.setListRows("serverListAdvanced", withHeaders);
@@ -1267,12 +1285,47 @@ void MenuBindings::fillAwardProgress(const std::string& id)
 	m_natives.setListRows("awardProgress", rows);
 }
 
-const std::vector<MenuBindings::Server>* MenuBindings::serversOf(const std::string& listId) const
+const MenuBindings::Server* MenuBindings::serverAt(const std::string& listId, int row, bool* favourite) const
 {
-	if (listId == "serverListLAN") {
-		return &m_lanServers;
+	if (favourite) {
+		*favourite = false;
 	}
-	return isInternetList(listId) ? &m_servers : nullptr;
+	const auto at = [row](const std::vector<Server>& servers) {
+		return row >= 0 && row < static_cast<int>(servers.size()) ? &servers[static_cast<size_t>(row)] : nullptr;
+	};
+	if (listId == "serverListLAN") {
+		return at(m_lanServers);
+	}
+	if (listId == "serverHistory") {
+		return at(m_historyServers);
+	}
+	if (listId == "favouriteServers") {
+		if (favourite) {
+			*favourite = true;
+		}
+		return at(m_favouriteServers);
+	}
+	if (listId == "serverList") {
+		return at(m_servers);
+	}
+	if (!hasHeaderRows(listId) || isHeaderRow(listId, row)) {
+		return nullptr;
+	}
+	const int favourites = static_cast<int>(m_favouriteServers.size());
+	if (row <= favourites) {
+		if (favourite) {
+			*favourite = true;
+		}
+		return &m_favouriteServers[static_cast<size_t>(row - 1)];
+	}
+	const int live = row - favourites - kHeaderRows;
+	return live >= 0 && live < static_cast<int>(m_servers.size()) ? &m_servers[static_cast<size_t>(live)] : nullptr;
+}
+
+bool MenuBindings::isHeaderRow(const std::string& listId, int row) const
+{
+	const int favourites = static_cast<int>(m_favouriteServers.size());
+	return hasHeaderRows(listId) && (row == 0 || row == favourites + 1 || row == favourites + 2);
 }
 
 void MenuBindings::startLanQuery()
@@ -1306,6 +1359,7 @@ bool MenuBindings::finishLanQuery()
 		log(std::to_string(m_lanServers.size()) + " servers on the local network");
 		m_lanQuery.reset();
 		showLanServers();
+		refreshFavourites();
 	}
 	return false;
 }
@@ -1314,13 +1368,7 @@ void MenuBindings::showLanServers()
 {
 	std::vector<std::vector<std::string>> rows;
 	for (const Server& server : m_lanServers) {
-		const net::ServerEntry& e = server.entry;
-		std::string map = field(e, "mapname");
-		std::replace(map.begin(), map.end(), '_', ' ');
-		const std::string type = field(e, "gametype");
-		rows.push_back({field(e, "hostname"),
-			std::to_string(fieldNumber(e, "numplayers")) + "/" + std::to_string(fieldNumber(e, "maxplayers")) + " (0)", "",
-			map, type.empty() ? std::string() : m_natives.localize("TEXT_" + type)});
+		rows.push_back(serverRow(m_natives, server.entry));
 	}
 	m_natives.setListRows("serverListLAN", rows);
 }
@@ -1362,17 +1410,16 @@ void MenuBindings::bindLists()
 			return;
 		}
 		const std::string prefix = list.rowPrefix(vm);
-		const int headers = hasHeaderRows(list.listId) ? kHeaderRows : 0;
 		for (int i = 0; i < list.visibleRows(vm); ++i) {
 			const Value row = vm.getMember(Value(list.holder), prefix + std::to_string(i));
 			const int index = list.firstIndex + i;
-			const std::vector<Server>* listed = serversOf(list.listId);
-			const bool server = index >= headers && index < count && listed
-				&& index - headers < static_cast<int>(listed->size());
-			if (index < headers) {
+			bool favourite = false;
+			const Server* listed = index < count ? serverAt(list.listId, index, &favourite) : nullptr;
+			const bool server = listed != nullptr;
+			if (isHeaderRow(list.listId, index)) {
 				vm.setMember(row, "isClickable", Value(0));
 			}
-			const net::ServerEntry* e = server ? &(*listed)[static_cast<size_t>(index - headers)].entry : nullptr;
+			const net::ServerEntry* e = server ? &listed->entry : nullptr;
 			const auto visible = [&](const char* name, bool on) {
 				const Value clip = vm.getMember(row, name);
 				if (clip.isObject()) {
@@ -1384,8 +1431,14 @@ void MenuBindings::bindLists()
 				vm.callMethod(vm.getMember(row, "cell2").object(), "gotoAndStop", {Value(20)});
 			}
 			const std::string mod = e ? field(*e, "gamevariant") : std::string();
-			visible("mcIconFavAdd", server);
-			visible("mcIconFavRemove", false);
+			// The add icon on servers not yet favourites, the remove icon on
+			// the favourites (images/list/favoriteServerAdd/Remove.png).
+			bool isFavourite = favourite;
+			for (const Server& f : m_favouriteServers) {
+				isFavourite = isFavourite || (e && f.entry.ip == e->ip && f.gamePort == listed->gamePort);
+			}
+			visible("mcIconFavAdd", server && !isFavourite);
+			visible("mcIconFavRemove", server && isFavourite);
 			visible("mcIconInfo", server);
 			visible("mcIconMod", server && !mod.empty() && mod != kModName);
 			visible("mcIconPunkbuster", false); // no anti-cheat in the rewrite
@@ -1473,20 +1526,23 @@ void MenuBindings::bindLists()
 			vm.setMember(Value(object), "profileName", Value(list.rows()[row].at(0)));
 			return Value(object);
 		}
+		// The Mod page's rows (row class 0x10107d88, slot 13 0x10063e30):
+		// the mod's index, which the page passes to Mod.selectMod.
+		if (list.listId == "mods") {
+			auto object = vm.newObject();
+			vm.setMember(Value(object), "rowIndex", Value(index));
+			return Value(object);
+		}
 		if (list.listId == "soldiers") {
 			auto object = vm.newObject();
 			vm.setMember(Value(object), "soldierName", Value(list.rows()[static_cast<size_t>(index)].at(0)));
 			return Value(object);
 		}
-		const std::vector<Server>* listed = serversOf(list.listId);
+		const Server* listed = serverAt(list.listId, index);
 		if (!listed) {
 			return Value();
 		}
-		const int server = index - (hasHeaderRows(list.listId) ? kHeaderRows : 0);
-		if (server < 0 || server >= static_cast<int>(listed->size())) {
-			return Value();
-		}
-		const Server& s = (*listed)[static_cast<size_t>(server)];
+		const Server& s = *listed;
 		const net::ServerEntry& e = s.entry;
 		// 0x100743xx: the row object.
 		auto object = vm.newObject();
@@ -1540,13 +1596,16 @@ void MenuBindings::bindMultiplay()
 		m_joinPort = static_cast<uint16_t>(port);
 		// The map the browser listed for it (the level to load).
 		m_joinMap = {};
-		for (const auto* servers : {&m_servers, &m_lanServers}) {
+		int maxPlayers = 0;
+		for (const auto* servers : {&m_servers, &m_lanServers, &m_favouriteServers}) {
 			for (const Server& server : *servers) {
-				if (server.entry.ip == host && server.gamePort == m_joinPort) {
+				if (server.entry.ip == host && server.gamePort == m_joinPort && m_joinMap.level.empty()) {
 					m_joinMap = {field(server.entry, "mapname"), field(server.entry, "gametype"), fieldNumber(server.entry, "mapsize")};
+					maxPlayers = fieldNumber(server.entry, "maxplayers");
 				}
 			}
 		}
+		setCurrentGame(m_joinMap, maxPlayers);
 		log("joining " + host + ":" + std::to_string(port));
 		if (onJoin) {
 			onJoin(m_joinHost, m_joinPort);
@@ -1564,8 +1623,9 @@ void MenuBindings::bindMultiplay()
 	n.setFunction(kMultiplay, "getNumServers", [this](Interpreter&, const Args&) {
 		return Value(static_cast<double>(m_servers.size()));
 	});
-	n.setFunction(kMultiplay, "isBrowsing", [this](Interpreter&, const Args&) { return Value(Job::running(m_query)); });
-	n.setFunction(kMultiplay, "isServerBrowserBusy", [this](Interpreter&, const Args&) { return Value(Job::running(m_query)); });
+	// Asked while a search runs; a finished one's servers are taken then.
+	n.setFunction(kMultiplay, "isBrowsing", [this](Interpreter&, const Args&) { return Value(finishServerQuery()); });
+	n.setFunction(kMultiplay, "isServerBrowserBusy", [this](Interpreter&, const Args&) { return Value(finishServerQuery()); });
 	n.setFunction(kMultiplay, "startBrowse", [this](Interpreter&, const Args&) {
 		startServerQuery();
 		return Value(true);
@@ -1629,6 +1689,7 @@ void MenuBindings::bindMultiplay()
 		}
 		log("create server: " + setup.maps.front().level + " " + setup.maps.front().gameMode + " "
 			+ std::to_string(setup.maps.front().size) + ", " + std::to_string(setup.bots) + " bots");
+		setCurrentGame(setup.maps.front(), setup.maxPlayers);
 		if (onStartGame) {
 			onStartGame(setup);
 		}
@@ -1955,6 +2016,7 @@ void MenuBindings::setSettingsObjects(SettingsObjects* objects)
 		}
 		m_appliedSettings[key] = value;
 	}
+	refreshFavourites(); // the profile's General.con lists
 	// The ones the pages had no default for.
 	for (const auto& [key, text] : objects->values()) {
 		if (!m_settings.count(key) && !aliasedObjectKey(key) && !text.empty() && text.find(' ') == std::string::npos &&
@@ -2069,7 +2131,9 @@ void MenuBindings::bindControls()
 		if (!m_controls) {
 			return Value("");
 		}
-		const std::string input = input::inputNamed(static_cast<int>(vm.toNumber(arg(args, 0))), true);
+		// The game map's numbers are its c_GI inputs' (0x10014ef0's game
+		// table: 55 the scoreboard, 1 the console), the others c_PI.
+		const std::string input = input::inputNamed(static_cast<int>(vm.toNumber(arg(args, 0))), mapName() != input::ControlMaps::kGame);
 		const input::Binding* b =
 			m_controls->binding(mapName(), input, avm1::toBoolean(arg(args, 1)) ? 1 : 0, avm1::toBoolean(arg(args, 2)) ? -1.0f : 1.0f);
 		if (!b) {
@@ -2090,25 +2154,72 @@ void MenuBindings::bindControls()
 		}
 		return Value(b->control.compare(0, 6, "IDKey_") == 0 ? b->control.substr(6) : b->control);
 	});
-	// mapInput(keyId, secondary, negative, superceed): binds the input
-	// pressed last there (a key, a mouse button, or a game controller's
-	// button or axis: an axis goes on as an axis mapping, inverted when it
-	// was pushed the other way from the side being bound); true when it
-	// was bound.
+	// mapInput(keyId, secondary, negative, superceed) (0x100199f0): binds
+	// the input pressed last there (a key, a mouse button, or a game
+	// controller's button or axis: an axis goes on as an axis mapping,
+	// inverted when it was pushed the other way from the side being
+	// bound; superceed is the page's flag for the common player map, set
+	// active before) and answers ControlSettings slot 0x30's error code: 0 bound,
+	// 1 when the key is another input's in the same map or the common
+	// player map (the page then asks, showing getLastDuplicateInput, and
+	// forceSetLastInput binds it anyway, taking it off the other).
 	n.setFunction(kControlSettings, "mapInput", [this, mapName](Interpreter& vm, const Args& args) {
-		const std::string input = input::inputNamed(static_cast<int>(vm.toNumber(arg(args, 0))), true);
+		// The game map's numbers are its c_GI inputs' (0x10014ef0's game
+		// table: 55 the scoreboard, 1 the console), the others c_PI.
+		const std::string input = input::inputNamed(static_cast<int>(vm.toNumber(arg(args, 0))), mapName() != input::ControlMaps::kGame);
 		if (!m_controls || input.empty() || m_lastInput.empty()) {
-			return Value(false);
+			return Value(2);
 		}
 		const float side = avm1::toBoolean(arg(args, 2)) ? -1.0f : 1.0f;
 		const bool axis = m_lastInput.compare(0, 7, "IDAxis_") == 0;
-		m_controls->bind(mapName(), input, m_lastDevice.empty() ? std::string("IDFKeyboard") : m_lastDevice, m_lastInput,
-			avm1::toBoolean(arg(args, 1)) ? 1 : 0, axis ? side * m_lastDirection : side);
-		log("controls: " + input + " on " + (m_lastDevice.empty() ? "" : m_lastDevice + " ") + m_lastInput);
-		return Value(true);
+		PendingInput pending;
+		pending.map = mapName();
+		pending.input = input;
+		pending.device = m_lastDevice.empty() ? std::string("IDFKeyboard") : m_lastDevice;
+		pending.control = m_lastInput;
+		pending.slot = avm1::toBoolean(arg(args, 1)) ? 1 : 0;
+		pending.sign = axis ? side * m_lastDirection : side;
+		// The key's other input, if any (not the same input and side).
+		for (const char* other : {pending.map.c_str(), input::ControlMaps::kPlayer}) {
+			const input::ControlMaps::Map* map = m_controls->find(other);
+			if (!map || (other != pending.map && pending.map == input::ControlMaps::kGame)) {
+				continue;
+			}
+			for (const auto& [name, bindings] : *map) {
+				for (const input::Binding& b : bindings) {
+					if (b.device == pending.device && b.control == pending.control && pending.duplicateInput.empty()
+						&& !(name == input && other == pending.map && (axis || b.sign == side))) {
+						pending.duplicateMap = other;
+						pending.duplicateInput = name;
+						pending.duplicateSign = b.sign;
+					}
+				}
+			}
+		}
+		if (!pending.duplicateInput.empty()) {
+			m_pendingInput = pending;
+			return Value(1);
+		}
+		m_pendingInput = pending;
+		m_pendingInput->duplicateInput.clear();
+		bindPendingInput();
+		return Value(0);
 	});
-	n.setFunction(kControlSettings, "getLastDuplicateInput", [](Interpreter&, const Args&) { return Value(""); });
-	n.setFunction(kControlSettings, "forceSetLastInput", [](Interpreter&, const Args&) { return Value(); });
+	// 0x1001aa80: the duplicate's action as the page names it, the
+	// HEADER_<action> text of 0x10014ef0's table (0x10016250), "" when
+	// the table has none.
+	n.setFunction(kControlSettings, "getLastDuplicateInput", [this](Interpreter&, const Args&) {
+		if (!m_pendingInput || m_pendingInput->duplicateInput.empty()) {
+			return Value("");
+		}
+		const std::string header = controlHeader(m_pendingInput->duplicateMap, m_pendingInput->duplicateInput,
+			m_pendingInput->duplicateSign < 0);
+		return Value(header.empty() ? std::string() : m_natives.localize(header));
+	});
+	n.setFunction(kControlSettings, "forceSetLastInput", [this](Interpreter&, const Args&) {
+		bindPendingInput();
+		return Value();
+	});
 }
 
 // A value set outside the pages (the voice natives write the live

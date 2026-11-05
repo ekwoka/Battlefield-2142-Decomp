@@ -236,6 +236,13 @@ public:
 	// The host's own player's report (the game's slots 0xd8 / 0xd4 on a
 	// server: the event handled at once).
 	void spotted(const net::SpottedInfo& spot, int reporter);
+	// A commander's strike asset fired its burst's first round
+	// (GameWorld::takeStrikeFires, which main.cpp's effects step takes):
+	// 0x005a0e50 tells every client, kEvArtillery kind 2 with the asset's
+	// ghost, the target's x and z and the firearm's seed (the server's tick
+	// + its place in the asset's list), so each client fires that firearm
+	// there for its effects (0x0050eeb0). An asset without a ghost isn't sent.
+	void strikeFired(const game::GameWorld::StrikeFired& strike);
 	// The player whose soldier (or seat) a ghost id is, -1 for none.
 	int playerOfGhost(uint32_t ghost) const;
 	// The radio (net::RadioMessageInfo): the game logic's voice message
@@ -414,6 +421,10 @@ private:
 	// player not the server's own: PostRemote 2/0x3e or 2/0x3f, the player
 	// and the type, through the game server's slot 0x88).
 	void sendCloseTo();
+	// The clients' players' team damage (game logic event 0/0xb, the game
+	// server's slot 0x88 after 0x004c0e40: PostRemote 0/0xb {kind, victim,
+	// attacker}, TeamDamage.cpp).
+	void sendTeamDamage();
 	// The offers of command made (PostRemote 2/0x23 to the candidate,
 	// 0x004c5070), per team.
 	std::array<int, 3> m_offerSent {-1, -1, -1};

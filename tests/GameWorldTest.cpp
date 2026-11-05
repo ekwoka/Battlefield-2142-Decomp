@@ -193,6 +193,59 @@ TEST(GameWorld_SoldiersShootAndDie)
 	CHECK(range.count("PlayerDeath") == 1 && range.count("PlayerSpawn") == 3);
 }
 
+// Team damage on a soldier (TeamDamage.cpp: 0x006557a0, 0x004c0e40): a
+// teammate's damage reaching teamDamageScoreLimit (50 %) of the victim's
+// maximum while he stands (the second 40 of 100) raises
+// PlayerTeamDamagePoint and sends 0/0xb {0, the victim, the attacker} to
+// both, once. The HUD's answers (0x00759bf0 case 0xb): the victim says
+// AUTO_MOODGP_friendlyfire to the attacker; the attacker, the victim up,
+// has the victim's voice say it; else the personal line. An enemy's
+// damage is none.
+TEST(GameWorld_TeamDamageOnASoldier)
+{
+	for (const int team : {2, 1}) {
+		Range range;
+		const int bot = range.world->addPlayer("Bot", team, true);
+		CHECK(range.world->spawnSoldier(bot));
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		const int me = range.world->localPlayer();
+		game::GameWorld::PlayerInfo info;
+		range.world->playerInfo(bot, info);
+		CHECK(range.world->setSoldierPosition(info.soldier, {0, 0, 20})); // in the line of fire
+		game::SoldierInput fire;
+		fire.fire = true;
+		range.world->setPlayerInput(fire);
+		std::vector<game::GameWorld::TeamDamage> mine;
+		for (int tick = 0; tick < 90 && range.world->playerInfo(bot, info) && info.alive && !info.manDown && mine.empty(); ++tick) {
+			range.world->tick(1 / 30.0f);
+			mine = range.world->takeTeamDamage(me);
+		}
+		range.world->setPlayerInput({});
+		std::fprintf(stderr, "  team %d: %.0f hit points left, %zu team damage\n", team, range.world->hitPoints(info.soldier), mine.size());
+		if (team == 1) {
+			CHECK(mine.empty() && range.count("PlayerTeamDamagePoint") == 0);
+			continue;
+		}
+		CHECK(mine.size() == 1 && range.count("PlayerTeamDamagePoint") == 1);
+		CHECK(std::fabs(range.world->hitPoints(info.soldier) - 20) < 0.5f);
+		if (mine.size() != 1) {
+			continue;
+		}
+		CHECK(mine[0].kind == 0 && mine[0].victim == bot && mine[0].attacker == me && mine[0].object == info.soldier);
+		const auto theirs = range.world->takeTeamDamage(bot);
+		CHECK(theirs.size() == 1 && theirs[0].attacker == me);
+		CHECK(range.world->takeTeamDamage(me).empty() && range.world->takeTeamDamage(bot).empty());
+		using Notice = game::GameWorld::TeamDamageNotice;
+		CHECK(game::GameWorld::teamDamageNotice(mine[0], bot, true) == Notice::SayFriendlyFire);
+		CHECK(game::GameWorld::teamDamageNotice(mine[0], me, true) == Notice::VictimSaysFriendlyFire);
+		CHECK(game::GameWorld::teamDamageNotice(mine[0], me, false) == Notice::PlayerLine);
+		game::GameWorld::TeamDamage vehicle = mine[0];
+		vehicle.kind = 1;
+		vehicle.victim = -1;
+		CHECK(game::GameWorld::teamDamageNotice(vehicle, me, false) == Notice::VehicleLine);
+	}
+}
+
 TEST(Bots_FightEachOther)
 {
 	// A bot of each team, 20 m apart: the EU one faces the PAC one, which

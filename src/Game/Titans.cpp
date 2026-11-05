@@ -696,31 +696,42 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 			}
 		}
 		projectile->addMesh(*m.mesh, physics::CollisionUser::Projectile, m.rotation, m.position, owner, m.materials);
-		// Its vehicle LOD: a part the vehicles meet (with its own groups).
-		for (const physics::CollisionSubGeometry& sub : physics::collisionParts(*m.mesh, 0)) {
-			const physics::CollisionLod* lod =
-				physics::collisionLodFor(*m.mesh, sub, static_cast<uint32_t>(physics::CollisionUser::Vehicle));
-			if (!lod || lod->faces.empty()) {
+		// Its LODs: a part the bodies meet at the LOD they ask for (with its
+		// own groups): the vehicle LOD for the vehicles, the soldier LOD
+		// (the decks and floors) for the parachute and the dropped objects
+		// (otherCollisionLod 2), the projectile LOD for 0.
+		for (const physics::CollisionUser user :
+			{physics::CollisionUser::Projectile, physics::CollisionUser::Vehicle, physics::CollisionUser::Soldier}) {
+			Titan::VehiclePart part;
+			part.lod = static_cast<int>(user);
+			part.groups = static_cast<uint32_t>(m.groups);
+			for (const physics::CollisionSubGeometry& sub : physics::collisionParts(*m.mesh, 0)) {
+				const physics::CollisionLod* lod = physics::collisionLodFor(*m.mesh, sub, static_cast<uint32_t>(user));
+				if (!lod || lod->faces.empty()) {
+					continue;
+				}
+				for (size_t i = 0; i < lod->vertices.size(); ++i) {
+					const auto& v = lod->vertices[i];
+					const physics::Vec3 p = m.rotation.transform({v[0], v[1], v[2]}) + m.position;
+					part.boxMin = part.points.empty() ? p : physics::Vec3 {std::min(part.boxMin.x, p.x), std::min(part.boxMin.y, p.y), std::min(part.boxMin.z, p.z)};
+					part.boxMax = part.points.empty() ? p : physics::Vec3 {std::max(part.boxMax.x, p.x), std::max(part.boxMax.y, p.y), std::max(part.boxMax.z, p.z)};
+					part.points.push_back(p);
+					const uint16_t index = i < lod->vertexMaterials.size() ? lod->vertexMaterials[i] : 0;
+					part.pointMaterials.push_back(index < m.materials.size() ? m.materials[index] : index);
+				}
+				if (user == physics::CollisionUser::Vehicle) {
+					break; // the vehicles' parts as before: the first sub-geometry's points
+				}
+			}
+			if (part.points.empty()) {
 				continue;
 			}
-			Titan::VehiclePart part;
 			part.mesh = std::make_shared<physics::CollisionWorld>();
-			part.mesh->addMesh(*m.mesh, physics::CollisionUser::Vehicle, m.rotation, m.position, owner, m.materials);
-			part.groups = static_cast<uint32_t>(m.groups);
-			for (size_t i = 0; i < lod->vertices.size(); ++i) {
-				const auto& v = lod->vertices[i];
-				const physics::Vec3 p = m.rotation.transform({v[0], v[1], v[2]}) + m.position;
-				part.boxMin = part.points.empty() ? p : physics::Vec3 {std::min(part.boxMin.x, p.x), std::min(part.boxMin.y, p.y), std::min(part.boxMin.z, p.z)};
-				part.boxMax = part.points.empty() ? p : physics::Vec3 {std::max(part.boxMax.x, p.x), std::max(part.boxMax.y, p.y), std::max(part.boxMax.z, p.z)};
-				part.points.push_back(p);
-				const uint16_t index = i < lod->vertexMaterials.size() ? lod->vertexMaterials[i] : 0;
-				part.pointMaterials.push_back(index < m.materials.size() ? m.materials[index] : index);
-			}
+			part.mesh->addMesh(*m.mesh, user, m.rotation, m.position, owner, m.materials);
 			for (const physics::Vec3& p : part.points) {
 				part.radius = std::max(part.radius, std::sqrt(physics::lengthSquared(p)));
 			}
 			vehicleParts.push_back(std::move(part));
-			break;
 		}
 	}
 	titan.vehicleParts = std::move(vehicleParts);
@@ -1497,6 +1508,10 @@ void GameWorld::healHitPoints(uint32_t object, float value, int repairer)
 {
 	const float before = hitPoints(object);
 	m_hitPoints[object] = value;
+	// 0x00655a00: the heal clears the damage list past 50 or at full.
+	if (const world::Object* o = m_objects.find(object); o && o->objectTemplate()) {
+		armourHealed(object, value - before, value >= number(*o->objectTemplate(), "armor.maxHitPoints", 0));
+	}
 	// The armour's state: a wreck at no hit points left (the commander's
 	// assets hold at 0), working above.
 	if (before <= 0 && value > 0) {

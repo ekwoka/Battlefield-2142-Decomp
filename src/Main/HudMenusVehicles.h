@@ -541,6 +541,12 @@ struct VehicleHudInput {
 	float seconds = 0; // the frame's time (the stamina text's timer)
 	float stamina = 1;
 	bool sprinting = false;
+	// The repair cells (HudWorld::repairCells, 0x007a1e50): cell n up while
+	// true. The HUD's RepairCell%iActive bools are registered 0..9 at +0x335
+	// on (0x00790000's loop), and cell n is written at +0x336 + n: n's is
+	// RepairCell(n+1)Active, which HudElementsBP1.con's seven pictures show
+	// (RepairCell0Active is never set). Cells not listed keep their values.
+	std::vector<bool> repairCells;
 };
 
 class VehicleHud {

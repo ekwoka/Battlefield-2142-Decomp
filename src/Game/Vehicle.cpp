@@ -261,7 +261,7 @@ static int engineTypeOf(const std::string& text)
 }
 
 std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root,
-	const world::ObjectTemplateManager& templates, const physics::CollisionMeshFile* mesh)
+	const world::ObjectTemplateManager& templates, const physics::CollisionMeshFile* mesh, Accept accept)
 {
 	auto vehicle = std::make_unique<Vehicle>();
 	bool haveEngine = false;
@@ -493,7 +493,9 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 	visit(root, {}, {}, {}, {}, 0);
 	const bool newCar2Wheels = std::any_of(
 		vehicle->m_wheels.begin(), vehicle->m_wheels.end(), [](const Wheel& w) { return w.newCar2; });
-	if (!(haveEngine && newCar2Wheels) && vehicle->m_engines.empty() && !vehicle->m_hasLegs) {
+	const bool flies = accept == Accept::Flight && !vehicle->m_wings.empty();
+	if (!(haveEngine && newCar2Wheels) && vehicle->m_engines.empty() && !vehicle->m_hasLegs && !flies
+		&& accept != Accept::Seats) {
 		return nullptr;
 	}
 	vehicle->m_mass = number(root, "mass", 1);

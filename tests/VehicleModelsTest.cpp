@@ -180,6 +180,27 @@ struct Garage {
 		}
 	}
 
+	// The soldiers' and seats' animation systems, as the walker test loads
+	// them (call after start).
+	std::unique_ptr<anim::AnimationSystems> systems;
+	void animate()
+	{
+		files.setMountingAllowed(true);
+		std::string out;
+		console.run("ClientArchives.con", {}, out);
+		files.setMountingAllowed(false);
+		systems = std::make_unique<anim::AnimationSystems>(
+			[this](const std::string& path, std::vector<uint8_t>& data) { return files.readFile(path, data); });
+		anim::registerAnimationConsoleMethods(console, *systems);
+		console.run("Objects/Soldiers/Common/Animations/ValueHolders.inc", {}, out);
+		world->setAnimationSystems(systems.get(), [this](const std::string& path) {
+			return systems->get(path, [&] {
+				std::string text;
+				console.run(path, {}, text);
+			});
+		});
+	}
+
 	physics::Vec3 position(uint32_t id) const
 	{
 		const world::Vec3& p = objects.find(id)->position();
@@ -1882,4 +1903,243 @@ TEST(Vehicles_HeavyIfvShieldCells)
 	g.run(0.5f);
 	cells = g.world->repairCells(ifv);
 	CHECK(cells.size() == 7 && std::none_of(cells.begin(), cells.end(), [](bool up) { return up; }));
+}
+
+// The commander's supply crate (supply_crate, a Mesh body, under its
+// supply_parachute Bundle: supply_parachuteWingMiddle's lift 200 and
+// supply_ParachuteForceDown's constantForce 5, straight down,
+// useAbsoluteDirection): its parachute's Wing holds the fall to a few
+// metres a second (free fall would be past 30 m/s after 4 s) until it
+// lands.
+TEST(Vehicles_SupplyCrateComesDownUnderItsParachute)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t crate = g.start("supply_crate", {0, 60, 0}, 4);
+	const physics::Vec3 a = g.position(crate);
+	g.run(1);
+	const physics::Vec3 b = g.position(crate);
+	const float speed = a.y - b.y;
+	std::fprintf(stderr, "  supply_crate: %.1f m up after 4 s, falling %.2f m/s\n", a.y, speed);
+	CHECK(a.y > 20);
+	CHECK(speed > 0.5f && speed < 15);
+	g.run(30);
+	CHECK(g.position(crate).y < 2);
+}
+
+// The soldier's parachute (Parachutes.cpp): falling faster than 10 m/s and
+// 2 m clear of the ground, key 9 opens it (0x004d2a50, 0x005e4750); he
+// rides it visible, posed by 3p_parachute_animSys, its wing and ForceDown
+// slowing him; on the ground (0x005cf750) he is out 0.05 s later and the
+// parachute goes 0.1 s after that (0x005cff20, 0x005cff90).
+TEST(Vehicles_SoldierParachuteOpensFallsAndLands)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	g.start("supply_crate", {50, 0.5f, 50}, 0.5f);
+	g.animate();
+	CHECK(g.world->spawnPlayer(2));
+	game::GameWorld::PlayerInfo me;
+	g.world->playerInfo(g.world->localPlayer(), me);
+	g.world->setSoldierPosition(me.soldier, {0, 150, 0});
+	game::SoldierInput nine;
+	nine.selectItem = 9;
+	// Too slow at first: refused.
+	g.drive({}, 0.3f);
+	g.drive(nine, 1 / 30.0f);
+	CHECK(g.world->parachutes().empty());
+	g.drive({}, 1.2f); // past 10 m/s
+	g.drive(nine, 1 / 30.0f);
+	const auto open = g.world->parachutes();
+	CHECK(open.size() == 1);
+	if (open.size() != 1) {
+		return;
+	}
+	g.world->playerInfo(g.world->localPlayer(), me);
+	CHECK(me.vehicle == open[0].object && open[0].player == me.id);
+	CHECK(g.world->ridingParachute(me.id));
+	g.run(0.5f);
+	CHECK(!g.objects.find(me.soldier)->hidden()); // he hangs under it, seen
+	const auto playing = [&](const char* bundle) {
+		const std::vector<std::string> names = g.world->playingAnimations(me.soldier);
+		return std::find(names.begin(), names.end(), bundle) != names.end();
+	};
+	CHECK(playing("still")); // 3p_parachute_animSys's message 1
+	// The use key doesn't let him out (dontAllowExit).
+	game::SoldierInput use;
+	use.use = true;
+	g.drive(use, 2 / 30.0f);
+	CHECK(g.world->ridingParachute(me.id));
+	g.drive({}, 4);
+	const physics::Vec3 a = g.position(open[0].object);
+	g.run(1);
+	const physics::Vec3 b = g.position(open[0].object);
+	std::fprintf(stderr, "  parachute: %.1f m up, falling %.2f m/s\n", b.y, a.y - b.y);
+	CHECK(a.y - b.y > 0.5f && a.y - b.y < 15);
+	CHECK(g.world->parachutes()[0].state == 1); // high
+	bool landing = false;
+	for (int i = 0; i < 60 * 30 && !g.world->parachutes().empty(); ++i) {
+		g.world->tick(1 / 30.0f);
+		landing = landing || (!g.world->parachutes().empty() && g.world->parachutes()[0].state == 2 && playing("landing"));
+	}
+	CHECK(landing); // under 8 m: message 2
+	CHECK(g.world->parachutes().empty());
+	CHECK(g.objects.find(open[0].object) == nullptr);
+	g.world->playerInfo(g.world->localPlayer(), me);
+	CHECK(me.alive && me.vehicle == 0);
+	CHECK(g.position(me.soldier).y < 3);
+}
+// The stationary guns (eu_bipod: a PlayerControlObject whose
+// hasMobilePhysics is 0; Body::fixed): a soldier takes the seat at its
+// entry point, sits there seen (its seatInformation names the bipod,
+// 0x005cd4f0 / 0x005cdd60), turns its gun with the mouse and fires it; the
+// bipod doesn't move, and its radius has boundingRadiusModifierWhenOccupied's
+// 2 in it (0x005c6be0).
+TEST(Vehicles_BipodIsAStationarySeat)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t bipod = g.start("eu_bipod", {0, 1.2f, 8}, 1); // its anchor 0/-1.109/0 on the ground
+	g.animate();
+	const physics::Vec3 at = g.position(bipod);
+	CHECK(g.world->objectRadius(bipod) > 2);
+	CHECK(g.enter(bipod));
+	game::GameWorld::PlayerInfo me;
+	g.world->playerInfo(g.world->localPlayer(), me);
+	CHECK(me.vehicle == bipod && me.seat == 0);
+	g.run(0.5f);
+	CHECK(!g.objects.find(me.soldier)->hidden());
+	float yaw0 = 0, pitch0 = 0, yaw1 = 0, pitch1 = 0;
+	CHECK(g.world->gunAim(bipod, 0, yaw0, pitch0));
+	game::SoldierInput turn;
+	turn.turn = 2;
+	g.drive(turn, 0.5f);
+	CHECK(g.world->gunAim(bipod, 0, yaw1, pitch1));
+	std::fprintf(stderr, "  eu_bipod: gun yaw %.1f -> %.1f\n", yaw0, yaw1);
+	CHECK(std::fabs(yaw1 - yaw0) > 5);
+	// The barrel rests 40 degrees up from eu_down's angle (restPitch): a
+	// level look holds the bundle at -40, within its 20..60 down.
+	game::SoldierInput level;
+	g.drive(level, 0.5f);
+	g.world->gunAim(bipod, 0, yaw1, pitch1);
+	CHECK(std::fabs(pitch1 + 40) < 0.5f);
+	// eu_down takes both inputs: its pose (what the drawing and the seat
+	// camera's walk, PlayerCamera::findSeatCamera, put on it) holds the yaw
+	// and the 40 down, which eu_bipod_toprotation's setRotation 0/-40/0
+	// under it takes back: the camera under the barrel looks level.
+	world::Vec3 offset, rotation;
+	CHECK(g.world->partPose(bipod, "eu_down", offset, rotation));
+	CHECK(std::fabs(rotation.y - 40) < 0.5f && std::fabs(std::remainder(rotation.x - yaw1, 360.0f)) < 0.5f);
+	const size_t before = g.world->projectilesInFlight();
+	game::SoldierInput fire = level;
+	fire.fire = true;
+	g.drive(fire, 0.2f);
+	CHECK(g.world->projectilesInFlight() > before);
+	const physics::Vec3 still = g.position(bipod);
+	CHECK(std::fabs(still.x - at.x) < 1e-3f && std::fabs(still.y - at.y) < 1e-3f && std::fabs(still.z - at.z) < 1e-3f);
+}
+
+// The heavy IFV's shield cells (SeatBehaviours.cpp): each
+// ifv_shield_the_generator's mesh is the vehicle's for the rounds, so a
+// round strikes the cell and hurts its armour (110 hit points), not the
+// hull; the hit that brings it down raises VehicleShieldDestroyed (56)
+// with the attacker. A teammate's hit (the IFV is team 2's, unmanned)
+// is team damage on that hit only (damagePointOnDestroy: TeamDamage.cpp,
+// 0x004c0e40): PlayerTeamDamagePoint for the scripts and event 0/0xb
+// {1, no driver, the shooter} for him; an enemy's is none.
+TEST(Vehicles_HeavyIfvShieldCellsTakeRounds)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const int team : {1, 2}) {
+		Garage g(gameDir());
+		if (!g.loaded || !g.templates.find("eu_ifv")) {
+			return;
+		}
+		const uint32_t ifv = g.start("eu_ifv", {0, 2, 0}, 3);
+		std::vector<std::string> events;
+		g.world->setEventSink([&](const std::string& name, const game::ScriptArgs&) { events.push_back(name); });
+		const int shooter = g.world->addPlayer("Shooter", team, true);
+		const uint32_t cell = g.world->shieldCellId(ifv, 0);
+		CHECK(cell != 0 && std::fabs(g.world->hitPoints(cell) - 110) < 1e-3f);
+		const float hull = g.world->hitPoints(ifv);
+		// The first cell: 3.0/-0.6/2.0 on its right side, facing out.
+		const physics::Vec3 at = g.position(ifv);
+		const physics::Vec3 aim = at + physics::Vec3 {3.0f, -0.6f, 2.0f};
+		const world::ObjectTemplate* rifle = g.templates.find("Unl_AV_Rifle");
+		const std::string round = rifle && rifle->settings().count("projectileTemplate") ? rifle->settings().at("projectileTemplate") : "";
+		CHECK(!round.empty());
+		bool down = false;
+		int shots = 0;
+		for (; shots < 200 && !down; ++shots) {
+			g.world->launchProjectile(round, aim + physics::Vec3 {6, 0, 0}, {-300, 0, 0}, shooter);
+			g.run(0.1f);
+			down = g.world->hitPoints(cell) <= 0;
+		}
+		CHECK(down);
+		CHECK(g.world->hitPoints(cell) <= 0 && g.world->hitPoints(ifv) > hull - 1);
+		CHECK(std::find(events.begin(), events.end(), "VehicleShieldDestroyed") != events.end());
+		const auto damage = g.world->takeTeamDamage(shooter);
+		const size_t points = static_cast<size_t>(std::count(events.begin(), events.end(), "PlayerTeamDamagePoint"));
+		std::fprintf(stderr, "  team %d: the cell down in %d shots, %zu team damage\n", team, shots, damage.size());
+		if (team == 2) {
+			CHECK(damage.size() == 1 && points == 1);
+			CHECK(damage.size() == 1 && damage[0].kind == 1 && damage[0].attacker == shooter && damage[0].victim == -1
+				&& damage[0].object == ifv);
+			CHECK(g.world->takeTeamDamage(shooter).empty()); // taken once
+		} else {
+			CHECK(damage.empty() && points == 0);
+		}
+		const std::vector<bool> cells = g.world->repairCells(ifv);
+		CHECK(!cells.empty() && !cells[0]);
+	}
+}
+
+// The static AV gun (static_av: stationary, Body::fixed): its
+// seatInformation names Static_AV_Cockpit, so its gunner is shown sitting
+// on the cockpit (0x005cd4f0 / 0x005c6670 / 0x005cdd60) and turns with it
+// as the gun yaws.
+TEST(Vehicles_StaticGunnerSitsOnTheCockpit)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t gun = g.start("static_av", {0, 0.5f, 8}, 1);
+	g.animate();
+	const auto seats = g.world->vehicleSeats(gun);
+	CHECK(!seats.empty() && seats[0].seatShown && seats[0].seatAnchor.yawSeat == 0);
+	CHECK(g.enter(gun));
+	game::GameWorld::PlayerInfo me;
+	g.world->playerInfo(g.world->localPlayer(), me);
+	g.run(0.5f);
+	CHECK(!g.objects.find(me.soldier)->hidden());
+	const float before = g.yaw(me.soldier);
+	game::SoldierInput turn;
+	turn.turn = 2;
+	g.drive(turn, 0.5f);
+	float yaw = 0, pitch = 0;
+	CHECK(g.world->gunAim(gun, 0, yaw, pitch));
+	const float after = g.yaw(me.soldier);
+	std::fprintf(stderr, "  static_av: gun yaw %.1f, gunner %.1f -> %.1f\n", yaw, before, after);
+	CHECK(std::fabs(yaw) > 5 && std::fabs(std::remainder(after - before - yaw, 360.0f)) < 1);
 }

@@ -1,0 +1,825 @@
+// The menu natives that work without an account or a live service, as
+// SwiffPlayer.dll binds them (its native table, src/UI/Player/
+// NativeTable.cpp, gives each object's constructor): the favourite servers
+// by address, the direct IP, the browser's filters and join password, the
+// map list's own natives and the current game (dice.bf2.Multiplay,
+// 0x100475c0), the mods (dice.bf2.Mod, 0x100409a0), the cursor
+// (dice.bf2.Cursor), dice.bf2.Singleplay, and Logic's and the settings
+// objects' small natives. Most of them call SwiffHost (BF2142.exe, vtable
+// 0x00924d50; SwiffPlayer reaches it through its game interface's slot
+// 0x60) or GeneralSettings (vtable 0x00927450); the slots are named where
+// the behaviour comes from.
+#include "MenuBindings.h"
+
+#include "Input/ControlMap.h"
+#include "SettingsObjects.h"
+#include "UI/Player/Natives.h"
+
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+
+namespace dice::hfe::menu {
+
+namespace avm1 = ui::avm1;
+using avm1::Interpreter;
+using avm1::Value;
+using Args = std::vector<Value>;
+
+namespace {
+
+constexpr const char* kLogic = "dice.bf2.Logic";
+constexpr const char* kMultiplay = "dice.bf2.Multiplay";
+constexpr const char* kMod = "dice.bf2.Mod";
+constexpr const char* kCursor = "dice.bf2.Cursor";
+constexpr const char* kSingleplay = "dice.bf2.Singleplay";
+constexpr const char* kGeneralSettings = "dice.bf2.GeneralSettings";
+constexpr const char* kVideoSettings = "dice.bf2.VideoSettings";
+constexpr const char* kAudioSettings = "dice.bf2.AudioSettings";
+
+constexpr const char* kFavouriteList = "GeneralSettings.FavouriteServer"; // addFavouriteServer's entries
+constexpr const char* kHistoryList = "GeneralSettings.ServerHistory";     // addServerHistory's
+// 0x0046c030: GSConnectToIpPort's default.
+constexpr int kDefaultConnectPort = 0x449f;
+
+Value arg(const Args& args, size_t i) { return i < args.size() ? args[i] : Value(); }
+int intArg(Interpreter& vm, const Args& args, size_t i) { return static_cast<int>(std::lround(vm.toNumber(arg(args, i)))); }
+
+// "ip gameport queryport", as the server rows give serverAddress (the
+// natives read it with sscanf "%s %d %d").
+bool parseAddress(const std::string& text, std::string& ip, int& port, int& queryPort)
+{
+	std::istringstream words(text);
+	ip.clear();
+	port = queryPort = 0;
+	words >> ip >> port >> queryPort;
+	return !ip.empty();
+}
+
+// One addFavouriteServer / addServerHistory entry as General.con has it:
+// "ip" port "name" queryPort.
+MenuBindings::FavouriteServer parseEntry(const std::string& entry)
+{
+	std::vector<std::string> words;
+	for (size_t i = 0; i < entry.size();) {
+		if (std::isspace(static_cast<unsigned char>(entry[i]))) {
+			++i;
+		} else if (entry[i] == '"') {
+			const size_t end = entry.find('"', i + 1);
+			words.push_back(entry.substr(i + 1, end == std::string::npos ? std::string::npos : end - i - 1));
+			i = end == std::string::npos ? entry.size() : end + 1;
+		} else {
+			size_t end = i;
+			while (end < entry.size() && !std::isspace(static_cast<unsigned char>(entry[end]))) {
+				++end;
+			}
+			words.push_back(entry.substr(i, end - i));
+			i = end;
+		}
+	}
+	MenuBindings::FavouriteServer server;
+	server.ip = words.size() > 0 ? words[0] : std::string();
+	server.port = words.size() > 1 ? std::atoi(words[1].c_str()) : 0;
+	server.name = words.size() > 2 ? words[2] : std::string();
+	server.queryPort = words.size() > 3 ? std::atoi(words[3].c_str()) : 0;
+	return server;
+}
+
+std::string formatEntry(const MenuBindings::FavouriteServer& server)
+{
+	return "\"" + server.ip + "\" " + std::to_string(server.port) + " \"" + server.name + "\" " + std::to_string(server.queryPort);
+}
+
+// The natives compare entries as "%s %d" of the address and game port.
+std::string key(const std::string& ip, int port) { return ip + " " + std::to_string(port); }
+
+// SwiffHost slot 0x28c (0x0046b720): digits and exactly three dots, then
+// four numbers 0..255 ("%d.%d.%d.%d").
+bool validIp(const std::string& ip)
+{
+	int dots = 0;
+	for (const char c : ip) {
+		if (c == '.') {
+			++dots;
+		} else if (c < '0' || c > '9') {
+			return false;
+		}
+	}
+	int part[4];
+	if (ip.empty() || dots != 3 || std::sscanf(ip.c_str(), "%d.%d.%d.%d", &part[0], &part[1], &part[2], &part[3]) != 4) {
+		return false;
+	}
+	return std::all_of(std::begin(part), std::end(part), [](int v) { return v >= 0 && v < 256; });
+}
+
+std::string underscoresAsSpaces(std::string text)
+{
+	std::replace(text.begin(), text.end(), '_', ' ');
+	return text;
+}
+
+std::string trim(const std::string& text)
+{
+	const size_t begin = text.find_first_not_of(" \t\r\n");
+	const size_t end = text.find_last_not_of(" \t\r\n");
+	return begin == std::string::npos ? std::string() : text.substr(begin, end - begin + 1);
+}
+
+} // namespace
+
+// --- Mods
+
+MenuBindings::ModEntry MenuBindings::parseModDesc(const std::string& path, const std::string& text)
+{
+	ModEntry mod;
+	mod.path = path;
+	const auto tag = [&text](const char* name) {
+		const std::string open = std::string("<") + name + ">", close = std::string("</") + name + ">";
+		const size_t begin = text.find(open);
+		if (begin == std::string::npos) {
+			return std::string();
+		}
+		const size_t end = text.find(close, begin);
+		return trim(text.substr(begin + open.size(), end == std::string::npos ? std::string::npos : end - begin - open.size()));
+	};
+	mod.title = tag("title");
+	mod.desc = tag("desc");
+	mod.url = tag("url");
+	mod.logo = tag("logo");
+	mod.icon = tag("icon");
+	mod.music = tag("music");
+	mod.version = tag("version");
+	return mod;
+}
+
+std::vector<MenuBindings::ModEntry> MenuBindings::findMods(const std::string& gameDir)
+{
+	namespace fs = std::filesystem;
+	std::vector<ModEntry> mods;
+	std::error_code error;
+	std::vector<fs::path> folders;
+	for (const auto& entry : fs::directory_iterator(fs::path(gameDir) / "mods", error)) {
+		if (entry.is_directory(error)) {
+			folders.push_back(entry.path());
+		}
+	}
+	std::sort(folders.begin(), folders.end());
+	for (const fs::path& folder : folders) {
+		for (const auto& file : fs::directory_iterator(folder, error)) {
+			std::string name = file.path().filename().string();
+			std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			if (name != "mod.desc") {
+				continue;
+			}
+			std::ifstream in(file.path(), std::ios::binary);
+			std::stringstream text;
+			text << in.rdbuf();
+			mods.push_back(parseModDesc("mods/" + folder.filename().string(), text.str()));
+		}
+	}
+	return mods;
+}
+
+void MenuBindings::setMods(std::vector<ModEntry> mods, const std::string& currentModPath)
+{
+	m_mods = std::move(mods);
+	m_currentModPath = currentModPath;
+	if (m_selectedMod >= static_cast<int>(m_mods.size())) {
+		m_selectedMod = -1;
+	}
+	// The "mods" list (its row class 0x10107d88: slot 4 0x10063dc0 counts
+	// them through SwiffHost slot 0x1a4, slot 5 0x10063f60 writes a row
+	// from the record of slot 0x1a8): the localized title, the version.
+	ui::NativeRegistry::Rows rows;
+	for (const ModEntry& mod : m_mods) {
+		rows.push_back({m_natives.localize(mod.title), mod.version});
+	}
+	m_natives.setListRows("mods", rows);
+}
+
+void MenuBindings::bindMods()
+{
+	ui::NativeRegistry& n = m_natives;
+	const auto selected = [this]() -> const ModEntry* {
+		return m_selectedMod >= 0 && m_selectedMod < static_cast<int>(m_mods.size()) ? &m_mods[static_cast<size_t>(m_selectedMod)] : nullptr;
+	};
+	// 0x1003fc10: SwiffHost slot 0x1a4 (0x0046d530), ModInfo's count.
+	n.setFunction(kMod, "getNumMods", [this](Interpreter&, const Args&) { return Value(static_cast<double>(m_mods.size())); });
+	// 0x1003fde0: the row index the page passes (rowObject.rowIndex).
+	n.setFunction(kMod, "selectMod", [this](Interpreter& vm, const Args& args) {
+		m_selectedMod = intArg(vm, args, 0);
+		return Value();
+	});
+	// 0x10040000 / 0x10040160: the title's and description's keys
+	// localized; "" with none selected. 0x100402c0, 0x100405e0, 0x10040720,
+	// 0x10040860: the folder, the web address, the logo and the version
+	// as written.
+	const auto text = [&n, selected](std::string ModEntry::*member, bool localized) {
+		return [selected, member, localized, &n](Interpreter&, const Args&) {
+			const ModEntry* mod = selected();
+			if (!mod) {
+				return Value("");
+			}
+			return Value(localized ? n.localize(mod->*member) : mod->*member);
+		};
+	};
+	n.setFunction(kMod, "getModTitle", text(&ModEntry::title, true));
+	n.setFunction(kMod, "getModDesc", text(&ModEntry::desc, true));
+	n.setFunction(kMod, "getModPath", text(&ModEntry::path, false));
+	n.setFunction(kMod, "getModUrl", text(&ModEntry::url, false));
+	n.setFunction(kMod, "getModLogo", text(&ModEntry::logo, false));
+	n.setFunction(kMod, "getModVersion", text(&ModEntry::version, false));
+	// 0x10040400: the folder after its first '/' or '\' ("bf2142").
+	n.setFunction(kMod, "getModPathShort", [selected](Interpreter&, const Args&) {
+		const ModEntry* mod = selected();
+		if (!mod) {
+			return Value("");
+		}
+		const size_t slash = mod->path.find_first_of("/\\");
+		return Value(slash == std::string::npos ? std::string() : mod->path.substr(slash + 1));
+	});
+	// 0x1003ff50: SwiffHost slot 0x39c (0x0046c430 -> 0x00576c70):
+	// GSModDirectory after its first '/', lower-cased ("(unknown)" unset).
+	n.setFunction(kMod, "getCurrentModName", [this](Interpreter&, const Args&) {
+		std::string name = m_currentModPath.empty() ? std::string("(unknown)") : m_currentModPath;
+		if (const size_t slash = name.find('/'); slash != std::string::npos) {
+			name.erase(0, slash + 1);
+			std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		}
+		return Value(name);
+	});
+	// 0x1003fd30: with a mod selected, its record (slot 0x1a8) to
+	// SwiffHost slot 0x1ac (0x00477fb0: host event 0xc), which restarts
+	// the game on that mod (0x00403fa0: "+modPath <path> +multi 1", and
+	// "+fullscreen 0" when windowed); nothing without one.
+	n.setFunction(kMod, "activateMod", [this, selected](Interpreter&, const Args&) {
+		if (const ModEntry* mod = selected()) {
+			log("activate mod " + mod->path);
+			if (onActivateMod) {
+				onActivateMod(mod->path);
+			}
+		}
+		return Value();
+	});
+	// 0x1003fe20: SwiffHost slot 0x3a0 (0x00469a60) only answers true.
+	n.setFunction(kMod, "activateModAndJoinServer", [](Interpreter&, const Args&) { return Value(); });
+}
+
+// --- Favourites
+
+std::vector<MenuBindings::FavouriteServer> MenuBindings::favouriteServers(bool history) const
+{
+	if (!m_objects) {
+		return history ? m_history : m_favourites;
+	}
+	std::vector<FavouriteServer> servers;
+	for (const std::string& entry : m_objects->list(history ? kHistoryList : kFavouriteList)) {
+		const FavouriteServer server = parseEntry(entry);
+		// The console adds each line as it comes; the list holds one entry
+		// an address (0x0049ce90 updates the one it finds).
+		const auto same = std::find_if(servers.begin(), servers.end(),
+			[&](const FavouriteServer& s) { return s.ip == server.ip && s.port == server.port; });
+		if (same == servers.end()) {
+			servers.push_back(server);
+		} else {
+			*same = server;
+		}
+	}
+	return servers;
+}
+
+void MenuBindings::storeFavourites(bool history, const std::vector<FavouriteServer>& servers)
+{
+	if (m_objects) {
+		std::vector<std::string> entries;
+		for (const FavouriteServer& server : servers) {
+			entries.push_back(formatEntry(server));
+		}
+		m_objects->setList(history ? kHistoryList : kFavouriteList, std::move(entries));
+		// The original writes General.con at its next profile save; here
+		// at once, so a favourite outlives a crash.
+		m_objects->save();
+	} else {
+		(history ? m_history : m_favourites) = servers;
+	}
+	refreshFavourites();
+}
+
+void MenuBindings::refreshFavourites()
+{
+	const auto rows = [this](const std::vector<FavouriteServer>& entries) {
+		std::vector<Server> servers;
+		for (const FavouriteServer& f : entries) {
+			Server server;
+			server.gamePort = static_cast<uint16_t>(std::clamp(f.port, 0, 0xffff));
+			// The browser's own row when it lists the same server (the
+			// original pings the favourites through its "favourites"
+			// browser; this rewrite contacts no server for them).
+			bool found = false;
+			for (const auto* listed : {&m_lanServers, &m_servers}) {
+				for (const Server& s : *listed) {
+					if (!found && s.entry.ip == f.ip && s.gamePort == server.gamePort) {
+						server.entry = s.entry;
+						found = true;
+					}
+				}
+			}
+			if (!found) {
+				server.entry.ip = f.ip;
+				server.entry.port = static_cast<uint16_t>(std::clamp(f.queryPort, 0, 0xffff));
+				server.entry.fields["hostname"] = f.name.empty() ? key(f.ip, f.port) : f.name;
+				server.entry.fields["hostport"] = std::to_string(f.port);
+			}
+			servers.push_back(std::move(server));
+		}
+		return servers;
+	};
+	m_favouriteServers = rows(favouriteServers(false));
+	m_historyServers = rows(favouriteServers(true));
+	ui::NativeRegistry::Rows favourites, history;
+	for (const Server& s : m_favouriteServers) {
+		favourites.push_back({s.entry.fields.count("hostname") ? s.entry.fields.at("hostname") : s.entry.ip});
+	}
+	for (const Server& s : m_historyServers) {
+		history.push_back({s.entry.fields.count("hostname") ? s.entry.fields.at("hostname") : s.entry.ip});
+	}
+	m_natives.setListRows("favouriteServers", favourites);
+	m_natives.setListRows("serverHistory", history);
+	showServers();
+}
+
+void MenuBindings::bindFavourites()
+{
+	ui::NativeRegistry& n = m_natives;
+	// GeneralSettings slot 0x17c (0x0049ce90): a server already there
+	// takes the new name (and query port when one is given); else it is
+	// added, its query port from the history's entry when it has one.
+	const auto add = [this](const FavouriteServer& server) {
+		std::vector<FavouriteServer> servers = favouriteServers(false);
+		const auto it = std::find_if(servers.begin(), servers.end(),
+			[&](const FavouriteServer& s) { return s.ip == server.ip && s.port == server.port; });
+		if (it != servers.end()) {
+			it->name = server.name;
+			if (server.queryPort) {
+				it->queryPort = server.queryPort;
+			}
+		} else {
+			FavouriteServer added = server;
+			for (const FavouriteServer& h : favouriteServers(true)) {
+				if (h.ip == server.ip && h.port == server.port) {
+					added.queryPort = h.queryPort;
+				}
+			}
+			servers.push_back(added);
+		}
+		storeFavourites(false, servers);
+	};
+	const auto findIn = [this](bool history, const std::string& entryKey) {
+		const std::vector<FavouriteServer> servers = favouriteServers(history);
+		return std::find_if(servers.begin(), servers.end(), [&](const FavouriteServer& s) { return key(s.ip, s.port) == entryKey; })
+			- servers.begin();
+	};
+	const auto removeAt = [this](bool history, size_t index) {
+		std::vector<FavouriteServer> servers = favouriteServers(history);
+		if (index >= servers.size()) {
+			return false;
+		}
+		servers.erase(servers.begin() + static_cast<long>(index));
+		storeFavourites(history, servers);
+		return true;
+	};
+	// 0x10044440, a server row's star (rowObject.serverAddress): false when
+	// it is a favourite already (slot 0x194) or the browser doesn't list it
+	// (the browser's slot 0x3c); else added with the browser's name, no
+	// query port.
+	n.setFunction(kMultiplay, "addFavouriteServer", [this, add, findIn](Interpreter& vm, const Args& args) {
+		std::string ip;
+		int port = 0, queryPort = 0;
+		if (!parseAddress(vm.toString(arg(args, 0)), ip, port, queryPort)
+			|| findIn(false, key(ip, port)) < static_cast<long>(favouriteServers(false).size())) {
+			return Value(false);
+		}
+		for (const auto* listed : {&m_servers, &m_lanServers, &m_historyServers}) {
+			for (const Server& s : *listed) {
+				if (s.entry.ip == ip && s.gamePort == port) {
+					const auto name = s.entry.fields.find("hostname");
+					add({ip, port, name == s.entry.fields.end() ? std::string() : name->second, 0});
+					log("favourite added: " + key(ip, port));
+					return Value(true);
+				}
+			}
+		}
+		return Value(false);
+	});
+	// 0x10044620: slot 0x190 (0x0049ca90) removes the address and game
+	// port's entry; true when there was one.
+	n.setFunction(kMultiplay, "removeFavouriteServer", [findIn, removeAt](Interpreter& vm, const Args& args) {
+		std::string ip;
+		int port = 0, queryPort = 0;
+		parseAddress(vm.toString(arg(args, 0)), ip, port, queryPort);
+		return Value(removeAt(false, static_cast<size_t>(findIn(false, key(ip, port)))));
+	});
+	// 0x10042d20: addFavourite(name, ip, port), a server by its address.
+	// A bad address raises LOCERROR_invalidip, one there already
+	// LOCERROR_serveralreadyfavorite (type 3 messages, SwiffHost slot
+	// 0x218); else it is added without a query port.
+	n.setFunction(kMultiplay, "addFavourite", [this, add, findIn](Interpreter& vm, const Args& args) {
+		const std::string name = vm.toString(arg(args, 0)), ip = vm.toString(arg(args, 1));
+		const int port = intArg(vm, args, 2);
+		if (!validIp(ip)) {
+			raiseMessage(3, "invalidip");
+			return Value(false);
+		}
+		if (findIn(false, key(ip, port)) < static_cast<long>(favouriteServers(false).size())) {
+			raiseMessage(3, "serveralreadyfavorite");
+			return Value(false);
+		}
+		add({ip, port, name, 0});
+		log("favourite added: " + key(ip, port));
+		return Value(true);
+	});
+	// 0x10043110: by "ip port" (slot 0x18c, 0x0049b600, then slot 0x190).
+	n.setFunction(kMultiplay, "removeFavourite", [findIn, removeAt](Interpreter& vm, const Args& args) {
+		return Value(removeAt(false, static_cast<size_t>(findIn(false, vm.toString(arg(args, 0))))));
+	});
+	// 0x100432f0: the history's entry for "ip port" made a favourite;
+	// "Server allready in favourites" (a type 1 message) when it is one.
+	n.setFunction(kMultiplay, "addHistoryToFavourites", [this, add, findIn](Interpreter& vm, const Args& args) {
+		const std::string entryKey = vm.toString(arg(args, 0));
+		const std::vector<FavouriteServer> history = favouriteServers(true);
+		const long index = findIn(true, entryKey);
+		if (index >= static_cast<long>(history.size())) {
+			return Value(false);
+		}
+		if (findIn(false, entryKey) < static_cast<long>(favouriteServers(false).size())) {
+			raiseMessage(1, "Server allready in favourites");
+			return Value(false);
+		}
+		const FavouriteServer& h = history[static_cast<size_t>(index)];
+		add({h.ip, h.port, h.name, 0});
+		return Value(true);
+	});
+	// 0x10043610 (slot 0x1a8) and 0x10041440 (slot 0x1b4): the history.
+	n.setFunction(kMultiplay, "removeHistory", [findIn, removeAt](Interpreter& vm, const Args& args) {
+		return Value(removeAt(true, static_cast<size_t>(findIn(true, vm.toString(arg(args, 0))))));
+	});
+	n.setFunction(kMultiplay, "clearHistory", [this](Interpreter&, const Args&) {
+		storeFavourites(true, {});
+		return Value();
+	});
+	// GeneralSettings.removeServer (0x10031410), the history page's: the
+	// address's favourite (slot 0x194, then 0x190), else its history
+	// entry (slots 0x1b0 / 0x1ac).
+	n.setFunction(kGeneralSettings, "removeServer", [findIn, removeAt](Interpreter& vm, const Args& args) {
+		std::string ip;
+		int port = 0, queryPort = 0;
+		parseAddress(vm.toString(arg(args, 0)), ip, port, queryPort);
+		if (!removeAt(false, static_cast<size_t>(findIn(false, key(ip, port))))) {
+			removeAt(true, static_cast<size_t>(findIn(true, key(ip, port))));
+		}
+		return Value();
+	});
+	// 0x100429f0: SwiffHost slot 0x28c.
+	n.setFunction(kMultiplay, "validateIp", [](Interpreter& vm, const Args& args) { return Value(validIp(vm.toString(arg(args, 0)))); });
+	// 0x100447e0 parses the address and answers false whatever it is.
+	n.setFunction(kMultiplay, "isServerOnline", [](Interpreter&, const Args&) { return Value(false); });
+
+	// The direct IP: SwiffHost slots 0x33c / 0x340 (0x0046c030 /
+	// 0x0046c080, GSConnectToIpPort, 17567 unset) and 0x344 / 0x348
+	// (0x0046c0c0 / 0x0046c120, GSConnectToIpHost, "" unset).
+	n.setFunction(kMultiplay, "getConnectToIpHost", [this](Interpreter&, const Args&) {
+		return Value(m_objects ? m_objects->gameSetting("GSConnectToIpHost", "") : m_connectHost);
+	});
+	n.setFunction(kMultiplay, "setConnectToIpHost", [this](Interpreter& vm, const Args& args) {
+		m_connectHost = vm.toString(arg(args, 0));
+		if (m_objects) {
+			m_objects->setGameSetting("GSConnectToIpHost", "string", m_connectHost);
+			m_objects->saveUserSettings();
+		}
+		return Value();
+	});
+	n.setFunction(kMultiplay, "getConnectToIpPort", [this](Interpreter&, const Args&) {
+		if (m_objects) {
+			return Value(std::atof(m_objects->gameSetting("GSConnectToIpPort", std::to_string(kDefaultConnectPort)).c_str()));
+		}
+		return Value(m_connectPort);
+	});
+	n.setFunction(kMultiplay, "setConnectToIpPort", [this](Interpreter& vm, const Args& args) {
+		m_connectPort = intArg(vm, args, 0);
+		if (m_objects) {
+			m_objects->setGameSetting("GSConnectToIpPort", "int", std::to_string(m_connectPort));
+			m_objects->saveUserSettings();
+		}
+		return Value();
+	});
+
+	// The browser's check boxes (0x10042a90 / 0x10046dd0): GeneralSettings
+	// slots 0x168 / 0x170 (0x0049a230 / 0x0049a250) test and set the bit
+	// in the toggle filters (+0xf8, setToggleFilters, 0x4c382 by default).
+	// setToggleFilter(bit, on, query) also keeps the bit's query text for
+	// the master server's filter (an empty or "%%" one clears the bit and
+	// the text); the LAN search filters nothing.
+	const auto filters = [this]() {
+		const auto it = m_settings.find("GeneralSettings.ToggleFilters");
+		return static_cast<uint32_t>(it == m_settings.end() || !it->second.isNumber() ? 0x4c382 : it->second.asNumber());
+	};
+	n.setFunction(kMultiplay, "getToggleFilter", [filters](Interpreter& vm, const Args& args) {
+		return Value((filters() & static_cast<uint32_t>(intArg(vm, args, 0))) != 0);
+	});
+	n.setFunction(kMultiplay, "setToggleFilter", [this, filters](Interpreter& vm, const Args& args) {
+		const uint32_t bit = static_cast<uint32_t>(intArg(vm, args, 0));
+		const std::string query = vm.toString(arg(args, 2));
+		const bool on = avm1::toBoolean(arg(args, 1)) && !query.empty() && query != "%%";
+		const uint32_t value = on ? filters() | bit : filters() & ~bit;
+		if (on) {
+			m_toggleFilterValues[static_cast<int>(bit)] = query;
+		} else {
+			m_toggleFilterValues.erase(static_cast<int>(bit));
+		}
+		m_settings["GeneralSettings.ToggleFilters"] = m_appliedSettings["GeneralSettings.ToggleFilters"] =
+			Value(static_cast<double>(value));
+		if (m_objects) {
+			m_objects->set("GeneralSettings.ToggleFilters", std::to_string(value));
+		}
+		return Value();
+	});
+	// 0x10041b10 / 0x10042b50: SwiffHost slots 0x18c / 0x188, the password
+	// the next join sends.
+	n.setFunction(kMultiplay, "setJoinPassword", [this](Interpreter& vm, const Args& args) {
+		m_joinPassword = vm.toString(arg(args, 0));
+		return Value();
+	});
+	n.setFunction(kMultiplay, "getJoinPassword", [this](Interpreter&, const Args&) { return Value(m_joinPassword); });
+}
+
+// --- The rest
+
+void MenuBindings::setCurrentGame(const MenuMap& map, int maxPlayers)
+{
+	m_currentGame = CurrentGame {map, maxPlayers};
+}
+
+void MenuBindings::resetGeneralValues(const std::vector<std::pair<std::string, Value>>& values)
+{
+	for (const auto& [name, value] : values) {
+		m_settings[name] = m_appliedSettings[name] = value;
+	}
+	saveSettings();
+	exportSettings("GeneralSettings.");
+	if (onSettingsApplied) {
+		onSettingsApplied();
+	}
+}
+
+void MenuBindings::bindOffline()
+{
+	ui::NativeRegistry& n = m_natives;
+	bindFavourites();
+	bindMods();
+
+	// --- The map list's own natives (the pages use the index ones).
+	// 0x100414c0 setCurrentMap and 0x100414d0 setMapList do nothing.
+	n.setFunction(kMultiplay, "setCurrentMap", [](Interpreter&, const Args&) { return Value(); });
+	n.setFunction(kMultiplay, "setMapList", [](Interpreter&, const Args&) { return Value(); });
+	// 0x10041e60: (name, game mode, size) to SwiffHost slot 0x104
+	// (0x00479970, appended), unless the name is empty.
+	n.setFunction(kMultiplay, "addMapToMapList", [this](Interpreter& vm, const Args& args) {
+		const std::string level = vm.toString(arg(args, 0));
+		if (!level.empty()) {
+			m_mapList.push_back({level, vm.toString(arg(args, 1)), intArg(vm, args, 2)});
+			showMapLists();
+		}
+		return Value();
+	});
+	// 0x100448c0: (index, up) to slot 0x10c (0x00479a70): swapped with the
+	// one before (up) or after, not past the ends; true.
+	n.setFunction(kMultiplay, "moveMapInList", [this](Interpreter& vm, const Args& args) {
+		const int index = intArg(vm, args, 0);
+		const bool up = avm1::toBoolean(arg(args, 1));
+		const int other = up ? index - 1 : index + 1;
+		const int count = static_cast<int>(m_mapList.size());
+		if (count > 1 && index >= 0 && index < count && other >= 0 && other < count) {
+			std::swap(m_mapList[static_cast<size_t>(index)], m_mapList[static_cast<size_t>(other)]);
+			showMapLists();
+		}
+		return Value(true);
+	});
+	// 0x10047090: the chosen list's level (slot 0x11c) with spaces for
+	// underscores, "" past its end.
+	n.setFunction(kMultiplay, "getMapName", [this](Interpreter& vm, const Args& args) {
+		const int index = intArg(vm, args, 0);
+		if (index < 0 || index >= static_cast<int>(m_mapList.size())) {
+			return Value("");
+		}
+		return Value(underscoresAsSpaces(m_mapList[static_cast<size_t>(index)].level));
+	});
+	// 0x10044cc0..0x10044e60: SwiffHost slots 0x70..0x7c (0x0046a480..
+	// 0x0046a520) ask the game logic; "$noCurrentGame" and 0 without one.
+	n.setFunction(kMultiplay, "getCurrentMapName", [this](Interpreter&, const Args&) {
+		return Value(m_currentGame ? underscoresAsSpaces(m_currentGame->map.level) : std::string("$noCurrentGame"));
+	});
+	n.setFunction(kMultiplay, "getCurrentMapGameMode", [this](Interpreter&, const Args&) {
+		return Value(m_currentGame ? m_currentGame->map.gameMode : std::string("$noCurrentGame"));
+	});
+	n.setFunction(kMultiplay, "getCurrentMapMaxPlayers", [this](Interpreter&, const Args&) {
+		return Value(m_currentGame ? m_currentGame->maxPlayers : 0);
+	});
+	n.setFunction(kMultiplay, "getCurrentMapSize", [this](Interpreter&, const Args&) {
+		return Value(m_currentGame ? m_currentGame->map.size : 0);
+	});
+
+	// --- dice.bf2.Singleplay (0x10059c20): chooseMission (0x10059bb0) is
+	// a bare return; getBotSkills / setBotSkills (0x10059bc0 / 0x10059bd0)
+	// fetch SwiffHost and return. The shipped menus call none of them (the
+	// singleplayer page sets GeneralSettings.setBotSkill).
+	for (const char* member : {"chooseMission", "getBotSkills", "setBotSkills"}) {
+		n.setFunction(kSingleplay, member, [](Interpreter&, const Args&) { return Value(); });
+	}
+
+	// --- dice.bf2.Cursor (0x1001b6e0). setCursor (0x1001b520) hands the
+	// name to the player object "SwiffPlayer" (slot 100, its movie's slot
+	// 50); getCursor (0x1001b5d0) gives it back, "undefined" without one;
+	// enableCursor (0x1001b580) is SwiffHost slot 0x8c (0x00469e50: +0x48,
+	// read by slot 0x90). The shipped menus call none of them; the window
+	// shows the system's arrow.
+	n.setFunction(kCursor, "setCursor", [this](Interpreter& vm, const Args& args) {
+		m_cursorName = vm.toString(arg(args, 0));
+		return Value();
+	});
+	n.setFunction(kCursor, "getCursor", [this](Interpreter&, const Args&) {
+		return Value(m_cursorName.empty() ? std::string("undefined") : m_cursorName);
+	});
+	n.setFunction(kCursor, "enableCursor", [this](Interpreter&, const Args& args) {
+		m_cursorEnabled = avm1::toBoolean(arg(args, 0));
+		return Value();
+	});
+
+	// --- dice.bf2.Logic's small ones.
+	// 0x1003b7b0 / 0x1003b930: SwiffHost slots 0xd8 / 0xd4 (0x0046adc0 /
+	// 0x0046adb0), why the menu came up (0 started normally).
+	n.setFunction(kLogic, "setActivateReason", [this](Interpreter& vm, const Args& args) {
+		m_activateReason = intArg(vm, args, 0);
+		return Value();
+	});
+	n.setFunction(kLogic, "getActivateReason", [this](Interpreter&, const Args&) { return Value(m_activateReason); });
+	// 0x1003b810 / 0x1003b9b0: slots 0xe0 / 0xdc (0x0046afe0 / 0x0046afc0),
+	// the page to come back to.
+	n.setFunction(kLogic, "setFrameLabel", [this](Interpreter& vm, const Args& args) {
+		m_frameLabel = vm.toString(arg(args, 0));
+		return Value();
+	});
+	n.setFunction(kLogic, "getFrameLabel", [this](Interpreter&, const Args&) { return Value(m_frameLabel); });
+	// 0x1003bf40 / 0x1003b110: slots 0x2e8 / 0x2ec (0x0046be30 /
+	// 0x0046be60), the cursor while a page waits.
+	n.setFunction(kLogic, "beginWaitState", [this](Interpreter& vm, const Args& args) {
+		m_waitCursor = intArg(vm, args, 0);
+		return Value();
+	});
+	n.setFunction(kLogic, "endWaitState", [this](Interpreter&, const Args&) {
+		m_waitCursor = 0;
+		return Value();
+	});
+	// 0x1003c6a0: setDecimals(value, n) is the value as "%.<n>f" (a float).
+	n.setFunction(kLogic, "setDecimals", [](Interpreter& vm, const Args& args) {
+		const float value = static_cast<float>(vm.toNumber(arg(args, 0)));
+		char text[64];
+		std::snprintf(text, sizeof text, "%.*f", std::clamp(intArg(vm, args, 1), 0, 20), static_cast<double>(value));
+		return Value(text);
+	});
+
+	// --- The settings objects.
+	// 0x1002fec0: GeneralSettings slot 0x24 (0x0049bdf0), the HUD page's
+	// values: transparencies 255, the crosshair white, the mini-map
+	// rotating at 170, help pop-ups and camera shake on, colour-blind off;
+	// then the profile saved (LocalProfileManager slots 0x38 / 0x34).
+	n.setFunction(kGeneralSettings, "resetHud", [this](Interpreter&, const Args&) {
+		resetGeneralValues({{"GeneralSettings.HUDTransparency", Value(255)}, {"GeneralSettings.MapIconTransparency", Value(255)},
+			{"GeneralSettings.CrosshairColor", Value("255 255 255 255")}, {"GeneralSettings.MinimapTransparency", Value(170)},
+			{"GeneralSettings.HelpPopUps", Value(1)}, {"GeneralSettings.MinimapRotate", Value(true)},
+			{"GeneralSettings.CameraShake", Value(1)}, {"GeneralSettings.ColorBlindFriendly", Value(0)}});
+		return Value();
+	});
+	// 0x1002ff40: slot 0x28 (0x0049a170): out of voting and ignoring buddy
+	// requests off, the item selection reversed and auto reload on, the
+	// connection type 5.
+	n.setFunction(kGeneralSettings, "resetGeneral", [this](Interpreter&, const Args&) {
+		resetGeneralValues({{"GeneralSettings.OutOfVoting", Value(false)}, {"GeneralSettings.IgnoreBuddyRequests", Value(0)},
+			{"GeneralSettings.ItemSelectionReverseItems", Value(true)}, {"GeneralSettings.ConnectionType", Value(5)},
+			{"GeneralSettings.AutoReload", Value(true)}});
+		return Value();
+	});
+	// 0x1002ffc0: slot 0x2c (0x0049a1a0): the kill, radio and chat message
+	// filters 1.
+	n.setFunction(kGeneralSettings, "resetMessage", [this](Interpreter&, const Args&) {
+		resetGeneralValues({{"GeneralSettings.KillMessagesFilter", Value(1)}, {"GeneralSettings.RadioMessagesFilter", Value(1)},
+			{"GeneralSettings.ChatMessagesFilter", Value(1)}});
+		return Value();
+	});
+	// 0x10032900: GeneralSettings slot 0x178 (0x0049b4f0): true when help
+	// pop-ups are off or the voice-over help was played
+	// (setPlayedVOHelp's list, matched without regard to case).
+	n.setFunction(kGeneralSettings, "checkPlayedVOHelp", [this](Interpreter& vm, const Args& args) {
+		const auto popups = m_settings.find("GeneralSettings.HelpPopUps");
+		if (popups != m_settings.end() && vm.toNumber(popups->second) == 0) {
+			return Value(true);
+		}
+		const auto lower = [](std::string text) {
+			std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			return text;
+		};
+		std::string name = lower(vm.toString(arg(args, 0)));
+		if (m_objects) {
+			for (std::string played : m_objects->list("GeneralSettings.PlayedVOHelp")) {
+				played.erase(std::remove(played.begin(), played.end(), '"'), played.end());
+				if (lower(played) == name) {
+					return Value(true);
+				}
+			}
+		}
+		return Value(false);
+	});
+	// 0x1004c580: the current local profile's count (LocalProfileManager
+	// slot 0x9c; LocalProfile.setNumTimesLoggedIn), 0 without one.
+	n.setFunction("dice.bf2.Profile", "getNumTimesLoggedIn", [this](Interpreter&, const Args&) {
+		return Value(m_objects ? m_objects->number("LocalProfile.NumTimesLoggedIn", 0) : 0.0);
+	});
+	// 0x1005d240: VideoSettings slot 0x3c, set when a change waits for a
+	// restart; the rewrite applies the video page at once.
+	n.setFunction(kVideoSettings, "needsReboot", [](Interpreter&, const Args&) { return Value(false); });
+	// 0x10011130 / 0x100111c0: AudioSettings slots 0x2c / 0x30, the sound
+	// card's EAX and Creative Zenith checks: OpenAL Soft has neither.
+	n.setFunction(kAudioSettings, "hasEax", [](Interpreter&, const Args&) { return Value(false); });
+	n.setFunction(kAudioSettings, "hasZenithBoard", [](Interpreter&, const Args&) { return Value(false); });
+}
+
+// --- The controls page's duplicate prompt
+
+std::string MenuBindings::controlHeader(const std::string& map, const std::string& input, bool negative)
+{
+	struct Entry {
+		int keyId;
+		bool negative;
+		const char* action; // after "HEADER_"
+	};
+	// 0x10014ef0 fills it once (0x10016250): per map, (keyId, negative) to
+	// the action's HEADER_ text, as the shipped table spells them
+	// ("backwark"). Its five maps' names are strings made at start-up; by
+	// their actions they are the infantry, land and air maps, the common
+	// player map and the game's. The game's keyIds are c_GI numbers.
+	struct MapTable {
+		const char* map;
+		std::vector<Entry> entries;
+	};
+	static const MapTable kTables[] = {
+		{input::ControlMaps::kInfantry, {{3, false, "forward"}, {3, true, "backwark"}, {0, false, "straferight"}, {0, true, "strafeleft"}, {37, false, "prone"}, {9, false, "jump"}, {13, false, "sprint"}, {34, false, "pickupkit"}, {8, false, "fire"}, {31, false, "altfire"}, {45, false, "cycleweapons"}, {14, false, "weapon1"}, {15, false, "weapon2"}, {16, false, "weapon3"}, {17, false, "weapon4"}, {18, false, "weapon5"}, {19, false, "weapon6"}, {20, false, "weapon7"}, {21, false, "weapon8"}, {22, false, "parachute"}, {23, false, "position1"}, {24, false, "position2"}, {25, false, "position3"}, {26, false, "position4"}, {27, false, "position5"}, {28, false, "position6"}, {29, false, "position7"}, {30, false, "position8"}}},
+		{input::ControlMaps::kLand, {{3, false, "accelerate"}, {3, true, "decelerate"}, {1, false, "lookdown"}, {1, true, "lookup"}, {0, false, "steerright"}, {0, true, "steerleft"}, {2, false, "turnright"}, {2, true, "turnleft"}, {13, false, "boost"}, {47, false, "countermeasures"}, {38, false, "crouch"}, {8, false, "fire"}, {31, false, "altfire"}, {45, false, "cycleweapons"}, {14, false, "weapon1"}, {15, false, "weapon2"}, {16, false, "weapon3"}, {17, false, "weapon4"}, {18, false, "weapon5"}, {19, false, "weapon6"}, {20, false, "weapon7"}, {21, false, "weapon8"}, {22, false, "weapon9"}, {39, false, "firstperson"}, {40, false, "behind"}, {41, false, "infront"}, {42, false, "static"}, {11, false, "mouselook"}, {23, false, "position1"}, {24, false, "position2"}, {25, false, "position3"}, {26, false, "position4"}, {27, false, "position5"}, {28, false, "position6"}, {29, false, "position7"}, {30, false, "position8"}}},
+		{input::ControlMaps::kAir, {{3, false, "accelerate"}, {3, true, "decelerate"}, {0, false, "steerright"}, {0, true, "steerleft"}, {1, false, "pitchforward"}, {1, true, "pitchbackward"}, {2, false, "rollright"}, {2, true, "rollleft"}, {13, false, "afterburner"}, {47, false, "countermeasures"}, {8, false, "fire"}, {31, false, "altfire"}, {45, false, "cycleweapons"}, {14, false, "weapon1"}, {15, false, "weapon2"}, {16, false, "weapon3"}, {17, false, "weapon4"}, {18, false, "weapon5"}, {19, false, "weapon6"}, {20, false, "weapon7"}, {21, false, "weapon8"}, {22, false, "weapon9"}, {39, false, "firstperson"}, {40, false, "behind"}, {41, false, "infront"}, {42, false, "static"}, {11, false, "mouselook"}, {23, false, "position1"}, {24, false, "position2"}, {25, false, "position3"}, {26, false, "position4"}, {27, false, "position5"}, {28, false, "position6"}, {29, false, "position7"}, {30, false, "position8"}}},
+		{input::ControlMaps::kPlayer, {{4, false, "turnright"}, {4, true, "turnleft"}, {5, false, "lookdown"}, {5, true, "lookup"}, {10, false, "enterexit"}, {32, false, "reload"}, {35, false, "cyclecameras"}, {38, false, "crouch"}, {48, false, "nextweaponzoomout"}, {49, false, "previousweaponzoomin"}}},
+		{input::ControlMaps::kGame, {{61, false, "pushtotalk"}, {22, false, "sayall"}, {23, false, "sayteam"}, {24, false, "saysquad"}, {34, false, "mainradio"}, {33, false, "secradio"}, {56, false, "comchannel"}, {47, false, "voteyes"}, {48, false, "voteno"}, {50, false, "createsquad"}, {36, false, "zoommap"}, {35, false, "map"}, {55, false, "scoreboard"}, {29, false, "spawnscreen"}, {60, false, "squadscreen"}, {19, false, "pause"}, {18, false, "screenshot"}, {57, false, "3dmap"}, {1, false, "console"}}},
+	};
+	const bool game = map == input::ControlMaps::kGame;
+	const int keyId = input::inputNumber(input);
+	for (const MapTable& table : kTables) {
+		if (map != table.map || keyId < 0 || input.compare(0, 4, game ? "c_GI" : "c_PI") != 0) {
+			continue;
+		}
+		for (const Entry& e : table.entries) {
+			if (e.keyId == keyId && e.negative == negative) {
+				return std::string("HEADER_") + e.action;
+			}
+		}
+	}
+	return std::string();
+}
+
+void MenuBindings::bindPendingInput()
+{
+	if (!m_controls || !m_pendingInput) {
+		return;
+	}
+	const PendingInput p = *m_pendingInput;
+	m_pendingInput.reset();
+	if (!p.duplicateInput.empty()) {
+		// The key off the input that had it (ControlMaps::create adds to
+		// the map; the map the console builds next is kept).
+		const std::string current = m_controls->currentName();
+		input::ControlMaps::Map& map = m_controls->create(p.duplicateMap);
+		if (const auto it = map.find(p.duplicateInput); it != map.end()) {
+			auto& bindings = it->second;
+			bindings.erase(std::remove_if(bindings.begin(), bindings.end(),
+							   [&](const input::Binding& b) { return b.device == p.device && b.control == p.control; }),
+				bindings.end());
+		}
+		if (!current.empty()) {
+			m_controls->setActive(current);
+		}
+	}
+	m_controls->bind(p.map, p.input, p.device, p.control, p.slot, p.sign);
+	log("controls: " + p.input + " on " + p.device + " " + p.control);
+}
+
+} // namespace dice::hfe::menu

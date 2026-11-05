@@ -1224,7 +1224,8 @@ soldier's exit (`0x00587540`) puts the default back (-1 → `+0x1d4`).
 (slot `0x90`, `0x006f6b90`) is its mesh's plus its slot `0x94`, which is 0
 (`0x005b6b80`) except for a PlayerControlObject (`0x005c6be0`): the
 template's value, whatever the occupancy, despite the name (the bipods'
-2). `objectRadiusOf`; the shipped bipods aren't bodies in the rewrite.
+2). `objectRadiusOf`. The bipods and the static guns are now bodies
+(below, "Stationary seats"), so theirs has the 2 in it.
 
 **toggleMouseLook** (Camera `+0x38c`; the tanks', the AT walkers' and the
 gunships' pilots' cameras): the camera's input handler (`0x00611c80`)
@@ -1282,11 +1283,207 @@ attacker; the mirror's loss has none). The vehicle HUD (`0x007a1e50`,
 from `0x007a2e60`) shows each cell of the root's armour list with a
 hudRepairCellNo other than -1 (armour slot `0x168`) at `+0x336 + n`: up
 while its armour state is 0. damagePointOnDestroy (armour slot `0x16c`)
-gates the game logic's damage-assist award (`0x004c0e40`: event 0xb,
-given only on the hit that wrecks it). `GameWorld::repairCells`,
-SeatBehaviours.cpp. Not rewritten: the cells' own collision (their
-meshes aren't the vehicle's, so a shot can't strike one), the award, the
-cells' armour effects, and the HUD's drawing of the cells.
+gates the game logic's team damage (`0x004c0e40`: event 0xb,
+given only on the hit that wrecks it; see **Team damage**). `GameWorld::repairCells`,
+SeatBehaviours.cpp. Since rewritten: each cell is a child with its own
+collision mesh (ifv_shield_the_generator, mapMaterial 5101), whose
+projectile LOD now goes into the vehicle's (`buildShieldCells`, at the
+child's place, owned by the cell's id `kShieldCellIds + vehicle x 16 +
+index`), so a round strikes the cell and its armour takes the damage
+(`shieldCellDamage` from `loseHitPoints`, through the material table;
+the friendly-fire rule by the vehicle's team). The cell's armour keeps
+each attacker's damage; the hit that destroys it raises the
+onDestroyEvent with the attacker and, damagePointOnDestroy, a teammate's
+team damage (see **Team damage**). Rifle rounds (material 38) do nothing to 5101; the AV rifle's
+round wrecks a cell in one hit (`Vehicles_HeavyIfvShieldCellsTakeRounds`).
+Not rewritten: the cells' armour effects (e_healing_node at 99,
+e_titan_consol at 0, e_bluespark_loop as a wreck). **The HUD's cells**: the HUD registers
+`RepairCell%iActive` 0..9 as bools at `+0x335` on (the HUD manager's
+constructor loop beside OccupyingPlayerName%i), and 0x007a1e50 writes cell
+n at `+0x336 + n`, so cell n is RepairCell(n+1)Active, which
+HudElementsBP1.con's seven pictures (and their NotActive pairs) show under
+GuiIndex 40 / 46..48; RepairCell0Active is never set and cells not listed
+keep their values (`VehicleHudInput::repairCells`, `HudWorld::repairCells`).
+**On a joined client** the cells come with the root's state: mask
+0x800000 carries the root's armored list (0x0060ec00: every descendant
+with armour, networkable or not; the generators have no networkableInfo,
+which the rewrite's list had wrongly required) in eighths of hit points
+with armor.fullChildSync (the generators set it). The rewrite's host
+writes each cell 8 standing and 0 a wreck (`GameWorld::repairCells` in
+order over `NetworkableHints::armoredRepairCells`), and the client keeps
+them per ghost (`RemoteObject::childDamage`, `repairCells`).
+
+### Parachutes, stationary seats and the seated soldiers (2026-11-05)
+
+**Parachutes** (`src/Game/Parachutes.cpp`). Every kit's ParachuteLauncher
+(itemIndex 9, SpawnObjectFireComp, component vtable `0x00973f20`) puts
+the Parachute `parachute` (class `0xc5a8`, vtables `0x0096e518` /
+`0x0096e818`) over a falling soldier:
+- The choice (`0x004d2a50`): key 9 (input 22), or the jump key (input 9,
+  over 0.5) while the soldier falls (his slot `0x78`, `0x007f9bc0`: the
+  soldier's `+0x328`, which his update `0x0058d350` sets while his
+  velocity's y is under −10, `*0x00a68e8c`, static init `0x008dfee0`),
+  asks for item 9; both are read held (`0x004bba40`: over 0.5 with the
+  input's mask bit, no edge), so a held key opens it once the test passes.
+  Item 9 can be taken only while the fire test passes
+  (`0x005c1150` → the fire component's slot 7, `0x005e4750`): a soldier,
+  2 m or more over the terrain and the water with nothing 2 m below
+  (`0x005e4330`, the scene's ray; unless `*0x00a6ef84`, 0 shipped),
+  falling at 10 m/s or more, and room for the parachute (`0x005e45e0`:
+  its collision against the objects within 15 m; the rewrite's
+  stand-in: nothing solid 5 m over him). Taken, it opens at his frame
+  plus fire.projectileStartPosition (`0x005e4460`, slot 53: 0/2/0), the
+  round taking his velocity, and enterOnSpawn seats him (the press that
+  lets the round go after the choice isn't traced; AIDLL's bots press
+  only input 22, so the choice opens it). The launcher is never held in
+  hand. `GameWorld::openParachute`, `mayOpenParachute`, `soldierFalling`.
+- **The bots** (AIDLL `0x10099b70`, the weapon handling after each
+  execution's plan, before its test of a plan holding the weapon): for a
+  soldier (the object's flag bit 9) whose physics node (`+0x3c` slot
+  `0x18`) moves down at 1 m/s or more (y ≤ −1) and input 22 in the bot's
+  mask (`+0x100` bit `0x400000`), input 22 is held at 1 (`+0x58`); the
+  game's choice opens the parachute as soon as its fire test passes. The
+  gate at bot `+0x264` isn't traced (taken as clear). A lower select
+  input pressed the same execution (the primary's, 16) wins the choice.
+  `BotManager::handleWeapon`, `Titan_FallingBotOpensItsParachute`.
+- Entering (`0x005cfaf0` after `0x005cdd60`) sets a non-pod parachute
+  upright about its heading. He hangs at its seatInformation (named
+  "Parachute", the parachute itself, so shown) posed by
+  3p_parachute_animSys; dontAllowExit keeps the use key from letting him
+  out. His A/D and W/S steer it (`driverInput` to the canopy: the
+  RotateForceObject's PIYaw, the wing's PIThrottle).
+- The body: Mesh, mass 200, parachute_WingMiddle (lift 120), ForceDown
+  (constantForce 12, useAbsoluteDirection, 20 m down), RotateForceObject
+  (0.5/0/0 on PIYaw): `Body::canopy`, ticked in `stepBody`. It comes down
+  at about 10.6 m/s (`Vehicles_SoldierParachuteOpensFallsAndLands`). The
+  supply crate's supply_parachute Bundle the same way (lift 200, force 5):
+  about 7 m/s (`Vehicles_SupplyCrateComesDownUnderItsParachute`).
+- Landing (`0x005cf750`, server, once): the ground, or an object along a
+  normal at least 0.3 up (`*0x00a0200c`; any when the other is under a
+  quarter of its radius; not an object moving over 5 m/s), starts the
+  timer `+0x45c` at 0.05 s (`*0x00a02004` / `*0x00a02008`, the
+  static initialisers `0x008e42f0` / `0x008e4300`). The update
+  (`0x005d01c0`) runs it down; at 0 (`0x005cff20`) the rider is out at
+  setSoldierExitLocation with the parachute's velocity (`0x005cff90`)
+  and 0.1 s later (event 0x21) the parachute is gone. A floor between the
+  canopy and the exit place (a deck it came down on) holds him on it (the
+  rewrite's soldier doesn't climb out of a floor he is put under).
+- **Inside a Titan.** The mobile mesh physics meets each candidate at the
+  LOD the mover asks for (otherCollisionLod: the vehicles 1; the
+  parachute, the supply crate, the spawn beacon, the drones, the sentry
+  gun, the hubs and the portable shield 2, the soldier LOD with the
+  decks; the shotgun's round, C4 and the sonar 0). The Titan's parts were
+  candidates at their vehicle LOD only, which has no interior decks, so a
+  parachute opened inside fell through them (and the rewrite landed it by
+  its rider's feet instead). Now each live Titan mesh is a candidate at
+  each LOD it has (`Titan::VehiclePart::lod`: projectile, vehicle,
+  soldier, with its collisionGroups), and a mover meets the parts at its
+  otherCollisionLod; the rider's-feet stand-in is gone
+  (`Titan_ParachuteComesDownOnTheDecks`: opened 14 m over the hangar's
+  deck, it lands there and its rider steps out alive).
+- The animation state (event 0x20, `0x005cfbb0`): 4 landed, else 1 at 8 m
+  or more (`*0x00a02000`) over the terrain, 2 below: the rider's seat
+  messages (`Player::seatMessages`: still, landing, landed).
+- **The HUD's parachute help** (`0x00646cb0` case 0x0d, with the help
+  manager's `+0x205`): the HUD manager's slot `0xb0` (`0x0074e8c0`: the
+  player's controlled object, slot `0xb4`, as a soldier, `0xc4d7`) and
+  that soldier's slot `0x78`: shown while he falls (under −10 m/s) on
+  foot, not while he rides the parachute. main.cpp sets
+  `help.parachute` from `GameWorld::soldierFalling`.
+- Not rewritten: the canopy's own AnimatedBundle (parachute_deploy /
+  idle / collapse on message 4: the renderer's).
+
+**Stationary seats** (`Body::fixed`). The bipods (eu_bipod, as_bipod,
+hmg_bipod) and static_aa / ap / av end their scripts with hasMobilePhysics
+0: no mobile node, their collision the static world's. They are still
+control objects to sit in (`0x005cdd60`). Before, the rewrite had no
+body for them, so nobody could use them. Now a root PlayerControlObject
+with seatInformation and no mobile physics is a fixed body: its seats,
+guns, cameras and radius (boundingRadiusModifierWhenOccupied's 2) work,
+it never moves or meets the mobile bodies, and its rounds leave its own
+static mesh. The bipods' barrel rests 40° up under eu_down
+(eu_bipod_toprotation setRotation 0/-40/0 under 20..60 down):
+`SeatLayout::restPitch`, so the look holds the bundle at look − rest
+and the round goes along the bundle plus rest. Only the three bipods
+have one. eu_down takes both the yaw and the pitch input, and its pose
+(`GameWorld::partPose`, which the drawing and the seat camera's walk,
+`PlayerCamera::findSeatCamera`, put on it) now holds both (it held the
+yaw only, so the camera under eu_bipod_toprotation looked 40° up): the
+bundle's 40 down and toprotation's setRotation 0/−40/0 give the camera
+and barrel the look. `Vehicles_BipodIsAStationarySeat`.
+
+**The seated soldiers.** The PCO's creation (`0x005cd4f0`) looks up the
+template that seatInformation names (template `+0x2a0`) in its own tree
+(`0x005c6670`) and keeps it (`+0x280`). The enter (`0x005cdd60`) hangs the
+soldier under it at the seat's place (slot `0xf0`, then the soldier's
+`0xe8` with `+0x2bc`); with none it disables him (updateFlags (1, 0)).
+So a seat shows its soldier only when its seatInformation names an
+object of the tree. Every shipped seat with seatInformation also has a
+seatAnimationSystem and names its own PCO, except the static guns, whose
+gunner sits on the cockpit (Static_AV_Cockpit...), which the gun's yaw
+turns. The rewrite showed a sitter whenever the seat had an animation
+system. Now it shows him when `SeatLayout::seatShown` is set (and his
+pose is loaded), and places him on the named node, turning with it when
+it is a seat's yaw bundle (`Vehicles_StaticGunnerSitsOnTheCockpit`). The
+crew kits' geometry (crewKitIndex) was already done (`kitGeometry`). No
+renderer change.
+
+### Team damage (2026-11-05)
+
+The armour's event 0xb was taken for a damage-assist award; it is the
+game logic's **ECGameLogicGLTeamDamage** (category 0, id 0xb: the name the
+game logic's constructor `0x004d69d0` registers with the event manager,
+slot `0x34`, beside GLKilledBy 3, GLAssistKill 9, GLTinnitus 0xd).
+`src/Game/TeamDamage.cpp`.
+
+- **The lists** (`0x006557a0`, the end of the armour's loss `0x00656320`;
+  the attacker not man down, his slot `0x6c`): every hit's {attacker,
+  time, amount} goes into `+0x220` (slot `0x120`). A soldier's (class
+  `0x9493`) attacker not yet in `+0x238` (slot `0x128`) whose sum reaches
+  the soldier's maximum (slot `0x8c`) × teamDamageScoreLimit % joins it.
+  Anything else under a PlayerControlObject (`0x0042b2f0`) also puts it in
+  `+0x22c` (slot `0x124`) while the root's control object has a player in
+  a seat or a team (slot `0x98`); unmanned and teamless, `+0x22c` empties.
+- **The limits** are the score manager's (`DAT_00a209d8`, class `0xc4b8`,
+  vtable `0x009625a0`, constructor `0x00560e00`): teamDamageScoreLimit
+  `+0x54` (setter slot `0x40`, getter `0x44`; 50) and
+  teamVehicleDamageScoreLimit `+0x58` (`0x48` / `0x4c`; 25), set by
+  sgl_setParam (`0x00567xxx`: scoringCommon.py's setTeamDamagePointLimit
+  50). `GameWorld::setTeamDamageLimits` from `GameLogic::limits`.
+- **The test** (`0x004c0e40` after the hit, server): a soldier not down
+  (armour slot `0x58`) with the attacker in `+0x238` and on his team
+  (slot `0xf8`): the attacker leaves `+0x238` and his entries `+0x220`;
+  kind 0, the victim his player. A vehicle with `+0x22c`: the team of its
+  first occupant (else the vehicle's, slot `0x98`) the attacker's, his
+  `+0x22c` sum at least its maximum × the vehicle limit, and either no
+  damagePointOnDestroy and the armour standing, or the flag and this hit
+  the one that destroyed it: his `+0x22c` entries go; kind 1, the victim
+  the first occupant (−1 none). Either raises PlayerTeamDamagePoint (the
+  host's Python event 0x24, table `0x009fce60`: attacker, the hit object;
+  scoringCommon.py's −1, teamDamages / teamVehicleDamages) and sends the
+  event {kind, victim, attacker} (vtable `0x0091c9a8`, `0x005099f0`) to the
+  attacker and to the victim through the game server's slot `0x88`, the
+  server's own player's straight to its event manager.
+  (`0x004c0e40` skips an object of class `0x9539` whose owner,
+  `0x005b30c0`, is the attacker; not followed.)
+- **The heal** (`0x00655a00`) adds its hit points to `+0x264`; past 50,
+  or with the armour full, `+0x220` empties (`armourHealed` from
+  `healHitPoints` and the cells' mirror heal).
+- **The HUD** (the HUD manager's category-0 handler `0x00759bf0`, case
+  0xb): the victim's own screen has him say AUTO_MOODGP_friendlyfire to
+  the attacker (the client's slot `0x50` = `0x004b2b60`, TCPlayer 0xe,
+  the attacker as the value, the spam check on); else, the local player
+  the attacker and the victim alive (slot `0x68`) and not down (`0x6c`),
+  the victim's voice says it to him (slot `0x54` = `0x004b2dc0`); else the
+  personal line (HUD slot `0x170`) HUD_HUD_TEAM_DAMAGE_PLAYER (kind 0) or
+  HUD_HUD_TEAM_DAMAGE_VEHICLE (kind 1). `GameWorld::teamDamageNotice`;
+  main.cpp for the host's player (`takeTeamDamage`), `HostedGame::
+  sendTeamDamage` as PostRemote 0/0xb for the clients', and the joined
+  client's handler (the victim's own call goes as its radio; the other
+  voice, said in the victim's name, has no client message to carry it and
+  is left out there).
+- Tests: `GameWorld_TeamDamageOnASoldier`,
+  `Vehicles_HeavyIfvShieldCellsTakeRounds`.
 
 ### Fire modes, tracers, camera recoil, armour effects and leaving a seat
 
@@ -1785,10 +1982,9 @@ mesh movers in the rewrite. Not followed: with 0, a projectile A
   (`+0x180`) pushes pairs at the root's radius (slot `0x90`) along the
   world axes (`0x0062ac00`): x yaws, y pitches, z rolls (the parachute's
   RotateForceObject, 0.5 on PIYaw). `Vehicle::ForcePart::absolute` /
-  `rotational`, `Vehicle::updateForce`. Neither parachute is a simulated
-  body in the rewrite yet (the soldier's parachute isn't modelled, the
-  supply crate comes down at 5 m/s), so these act only on a vehicle
-  that carries such a ForceObject.
+  `rotational`, `Vehicle::updateForce`. Both parachutes are simulated
+  bodies now ("Parachutes" below): their Wings and ForceObjects are
+  `Body::canopy` (`Vehicle::fromTemplate` with `Accept::Flight`).
 - **The hovering ForceObject** (`targetPosition` `+0x288`,
   `regulationTolerance` `+0x29c` 0.5, `relativeYCollisionGroupInverse`
   `+0x298`, `enableOnStartMessage` `+0x296`; the defaults `0x0062d4f0`)
@@ -5308,7 +5504,14 @@ side in `HostedGame::event`; tests `NetHost_RadioCommanderToolsAndSquads`,
   the comm roses, the commander screen (Caps Lock) and the map's right-click
   menus from the server's player; the name tags from the server's players,
   control points and requests (`Nametags::setWorld`); the chase view and
-  its screenshot framing from our soldier's ghost.
+  its screenshot framing from our soldier's ghost. In a seat, the vehicle
+  HUD's turret direction (VehicleTurretAngle `+0x1f8`, 0x007a1fb0's end:
+  the active weapon's heading less the vehicle's; TurretIconShow) and the
+  other seats' GunnerAngle / SecondaryGunnerAngle (0x007a07c0, the yaw
+  bundles' slot 0x188) come from the seats' RotationalBundle ghosts, as
+  the exe's client's bundles take their angles from them (0x00602070):
+  `HudWorld::gunTurn` / `seatYaw` (the local round's gunAim / seatYaw), and
+  the repair cells from the root's synced armour (`HudWorld::repairCells`).
 - **The players' soldiers**: each living soldier ghost on foot is animated
   on the client from its networkable (`GameWorld::animateRemoteSoldier`:
   the body's and the weapon's animationSystem3P fed the speed and its
@@ -6285,8 +6488,12 @@ are the game's own, from 0x35 on, whose names aren't known). `bf2142 --lan
 <address>` sends the search elsewhere (127.0.0.1 finds the servers on this
 machine). The menu has no direct-IP join: `Multiplay.get/setConnectToIpHost`
 and `...Port` exist (the profile's `GSConnectToIpHost`/`Port`, `0x0046c030`
--`0x0046c120`) but no page of the movie calls them; the original joins by
-address only from the command line (`+joinServer`).
+-`0x0046c120`) but no page of the movie calls them (they are bound; MenuBindingsOffline).
+`Multiplay.addFavourite(name, ip, port)`, the favourite by address, is
+bound too, and no shipped page calls it either. A favourite already in the
+profile's General.con (the original game's, or one starred from a list)
+shows in the quick list's Favorites rows and joins from there; otherwise
+the original joins by address only from the command line (`+joinServer`).
 
 ## Gameplay sound
 
@@ -10656,9 +10863,9 @@ rewritten:
 
 - The firing's build-up of deviation (`setFireDev`): the rewrite's
   templates keep one argument of the scripts' three.
-- Without a body the crate comes down at
-  5 m/s (its parachute's Wing and ForceObject only act on a rigid body);
-  a soldier's own radius in the crate's reach is taken as 0.
+- A soldier's own radius in the crate's reach is taken as 0. (With
+  physics the crate is a body under its parachute, about 7 m/s; without,
+  5 m/s.)
 - The bots don't send squad requests (the players' do: see "Squad
   requests" below), so the AI commander's answers
   (orbital strike, supplies, UAV) never run.
@@ -13551,6 +13758,29 @@ ask whether it's done.
   server. The columns are those of `0x10079770`.
 - **Joining:** `Multiplay.joinServer` hands the address to the game and
   probes the server's handshake. A refusal comes back as a popup.
+- **Favourites and the direct IP** (`src/Main/MenuBindingsOffline.cpp`):
+  GeneralSettings' favourite list (General.con's `addFavouriteServer "ip"
+  port "name" queryPort`; slots 0x17c / 0x190 / 0x194). A server row's
+  star (`addFavouriteServer`, 0x10044440) adds a listed server,
+  `addFavourite(name, ip, port)` (0x10042d20) one by its address
+  (LOCERROR_invalidip from SwiffHost 0x28c's check, 0x0046b720;
+  LOCERROR_serveralreadyfavorite), and the remove and history natives
+  follow. The quick and advanced lists show "Favorites", the favourites,
+  a gap and "Live servers" (0x10035e70), so a favourite is joined like any
+  listed server. The original pings the favourites; the rewrite shows the
+  browser's fields when it lists the same server, else the stored name.
+  `get/setConnectToIp*` keep GSConnectToIpHost / Port (17567).
+  The browser's check boxes are bits of GeneralSettings' toggle filters
+  (0x0049a230 / 0x0049a250).
+- **The Mod page:** dice.bf2.Mod over each `mods/<name>/Mod.desc` (title
+  and description localized, path, URL, logo, version; the current mod
+  is GSModDirectory after its '/'). activateMod is the original's restart
+  with `+modPath` (0x00477fb0, 0x00403fa0), passed to
+  `MenuBindings::onActivateMod`, which nothing wires: only bf2142 ships.
+- **The map list's own natives:** `addMapToMapList(name, mode, size)`,
+  `moveMapInList(index, up)` (SwiffHost 0x104 / 0x10c), `getMapName`. The
+  `getCurrentMap*` natives answer the game started or joined
+  ("$noCurrentGame" without one, SwiffHost 0x70..0x7c).
 - **Starting a game:** the singleplayer page calls
   `Multiplay.setFilterGameMode("gpm_sp")`. The list `mapListAvailable`
   shows that mode's levels as "Name - size" (SwiffPlayer 0x100723c0, with
@@ -13651,7 +13881,13 @@ ask whether it's done.
   a key's name and binds the key pressed last with `mapInput(input number,
   secondary, negative, superceed)`; `setActiveControlMap(n)` picks the
   map from SwiffPlayer's table (0x100f7b50: infantry, land, air,
-  helicopter, sea, the game's, the common player map). Applying the page writes the
+  helicopter, sea, the game's, the common player map). The game's map (5) numbers its inputs
+  as c_GI (SwiffPlayer's action table 0x10014ef0: 55 the scoreboard), the
+  others as c_PI. mapInput answers ControlSettings slot 0x30's error code
+  (0x100199f0): 0 bound, 1 when another input in the same map or the
+  common player map has the key; the page then shows
+  `getLastDuplicateInput` (0x1001aa80: that input's `HEADER_<action>` from
+  0x10014ef0's per-map table) and `forceSetLastInput` moves the key. Applying the page writes the
   maps in Controls.con's format to `<config dir>/bf2142-recomp/controls.con`,
   which later runs read instead of the game's. `getMappedString` returns
   the localized `CONTROLLER_…` key the game builds (0x00498750 through
@@ -14122,9 +14358,43 @@ fire mode) and the seat ghosts' active weapons (`0x00605650`, masks 1 / 2
 guns (`client::RemoteSeatGuns`, src/Main/RemoteGuns: the rate of fire,
 fire modes, the server's rounds, the autoReload), each round
 `GameWorld::remoteGunFired`: the Fire sound and the weapon fire that
-ObjectEffects turns into the muzzle bundles and the ground dust. The
-vehicle guns' rounds themselves aren't made there (the client keeps no
-turret mount for the muzzle).
+ObjectEffects turns into the muzzle bundles and the ground dust. Each
+round's projectile is made there too (`GameWorld::fireRemoteSeatRound`):
+FireComp's 0x005f2bb0 makes a round whose template has no networkableInfo
+on every machine (a networked one, the missiles, is the server's ghost),
+from the muzzle's world matrix through the client's copy of the tree
+(MultiFireComp 0x005d5fb0 / 0x005f1a20), whose RotationalBundles take
+their angles from the bundles' networkables (0x00602070). The rewrite's
+client has those angles from the ghosts (`RemoteWorld::partPose`, which
+`setRemotePartPose` hands the round): the seat's yaw bundle (x) and
+pitch bundle (−y), the carrier seat's yaw for a mounted gun and the bone
+part above it (seatMount), then seatGunOrigin as the server's
+fireSeatWeapon: barrels in turn, projectileStartPosition, the firearm's
+velocity plus the vehicle ghost's, a tracer every tracerInterval-th
+round. The firearm's deviation isn't networked, so the client's rounds
+fly straight. The sound and muzzle effects play at that muzzle.
+**The EMP strike on a joined client**: the strike's projectile is a server
+ghost, but its GroundEffectBundle fires on each client from the client's
+own firing of the asset's firearm. 0x005a0e50, as the server fires the
+firearm, builds the Artillery event with kind 2 (0x005a06a0, vtable
+`0x0091e42c`: the team byte left 0, x `+0xc`, z `+0x10`, the asset
+root's networkable id `+0x20` from its slot 0xd0, and `+0x18` the tick
+`0x00666090` plus the firearm's place, which seeds the firearm's
+`+0x214`) and sends it to every client (the game's slot 0x94; written
+0x0050ed20: kind 2 bits, team 32, x, z, then 16 + 32 bits). The client's
+handler (0x0050eeb0) finds the object by that id, takes the first weapon
+of its PlayerControlObject list (interface 0xc4c5 slot 0x70(0)), places
+it at (x, orbitalBombardmentHeight, z) (the height alone: the event
+carries no ground height, where the server's is the target's plus it)
+facing (0, −1, 0), hands it the seed, its enable (slot 0x1a4) and the
+team's commander as owner (slot 0x70), and fires it (`+0x260` = 1, event
+7), whose rounds send event 0 to its children there. The rewrite:
+`GameWorld::StrikeFired::first` marks the burst's first round, main.cpp's
+effects step hands it to `HostedGame::strikeFired` (`net::makeStrikeFire`,
+to every playing client); the client's `RemoteWorld::takeStrikeFires`
+(`parseStrikeFire`) goes to `client::RemoteStrikes`, which finds the
+asset's first GenericFireArm and runs its burst (burstSize rounds at
+roundsPerMinute), each round `ObjectEffects::weaponFiredAt` as on the host.
 
 **Mesh particles' directionalScale.** RendDX9's mesh particle template
 +0x1ec (slot 0x188; 0): with it ≠ 0 or alignRotationToSpeed (+0x1f0) a

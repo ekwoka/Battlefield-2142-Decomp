@@ -331,12 +331,13 @@ bool hasComponent(const world::ObjectTemplate& t, const char* name)
 // pushes it onto the root's list (object vtable 0x148) when it has armor
 // (+0x48): post-order, children in template order, nested seats included,
 // the root left out. Each with its armor.fullChildSync.
-void collectArmored(const GhostTemplateNode& node, std::vector<bool>& out)
+void collectArmored(const GhostTemplateNode& node, std::vector<bool>& out, std::vector<bool>& cells)
 {
 	for (const GhostTemplateNode& child : node.children) {
-		collectArmored(child, out);
-		if (child.hints.hasArmor) {
+		collectArmored(child, out, cells);
+		if (child.armored) {
 			out.push_back(child.fullChildSync);
+			cells.push_back(child.hudRepairCellNo != -1);
 		}
 	}
 }
@@ -363,6 +364,10 @@ GhostTemplateNode build(const world::ObjectTemplateManager& templates, const wor
 	node.hints.inVehicle = inVehicle;
 	node.hints.armoredChildrenKnown = true; // filled for the root below; others' lists are empty
 	node.fullChildSync = std::atoi(setting(t, "armor.fullChildSync").c_str()) != 0;
+	node.armored = hasComponent(t, "Armor") || !setting(t, "armor.maxHitPoints").empty();
+	if (const std::string cell = setting(t, "armor.hudRepairCellNo"); !cell.empty()) {
+		node.hudRepairCellNo = std::atoi(cell.c_str());
+	}
 	if (node.hints.kind == NetworkableKind::Spring) {
 		// 0x00604f10: an extra field when the spring's engine (the nearest
 		// Engine ancestor, 0x0064f7b0; engine vtable 0x1a8 < 0) is a newCar2
@@ -535,7 +540,7 @@ GhostTemplateNode ghostTemplateFrom(const world::ObjectTemplateManager& template
 {
 	std::set<const world::ObjectTemplate*> path;
 	GhostTemplateNode root = build(templates, t, infos, false, false, 0, path);
-	collectArmored(root, root.hints.armoredChildren);
+	collectArmored(root, root.hints.armoredChildren, root.hints.armoredRepairCells);
 	return root;
 }
 

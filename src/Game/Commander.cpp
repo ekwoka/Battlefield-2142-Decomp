@@ -670,7 +670,7 @@ void GameWorld::fireStrike(Strike& strike, StrikeFire& fire)
 	// (e_geb_emp_strike_dirt's rings, dust and shimmer pillar), as the
 	// round leaves (ObjectEffects::weaponFiredAt). Once per round of the
 	// burst, not per projectile of the batch.
-	m_strikeFires.push_back({fire.asset, fire.fireArm, from});
+	m_strikeFires.push_back({fire.asset, fire.fireArm, from, strike.salvosLeft == std::max(1, integer(*t, "fire.burstSize", 1))});
 	if (m_strikeFires.size() > 16) {
 		m_strikeFires.erase(m_strikeFires.begin());
 	}
@@ -806,9 +806,10 @@ void GameWorld::stepCommander(float seconds)
 // (Unl_Hub_Medic_Supply: radius 5, healSpeed 4, sharedStorage 300;
 // Unl_Hub_Ammo_Supply: radius 6, refillAmmoSpeed 8, workOnVehicles,
 // sharedStorage 500; both destroyWhenEmptyStorage) and work the same way.
-// Without a body it comes down at 5 m/s: its parachute (supply_parachute's
-// Wing lift and supply_ParachuteForceDown's constantForce 5 on the rigid
-// body) is only simulated when physics runs.
+// With physics its body comes down under its parachute (supply_parachute's
+// Wing lift and supply_ParachuteForceDown's constantForce 5, straight down:
+// Body::canopy, Parachutes.cpp), about 7 m/s; without a body it comes down
+// at 5 m/s.
 void GameWorld::stepCrates(float seconds)
 {
 	constexpr float kTick = 0.2f;

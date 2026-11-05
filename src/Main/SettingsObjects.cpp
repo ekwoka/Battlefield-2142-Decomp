@@ -370,6 +370,19 @@ double SettingsObjects::number(const std::string& key, double fallback) const
 	return end == it->second.c_str() ? fallback : value;
 }
 
+const std::vector<std::string>& SettingsObjects::list(const std::string& key) const
+{
+	static const std::vector<std::string> none;
+	const auto it = m_lists.find(key);
+	return it == m_lists.end() ? none : it->second;
+}
+
+std::string SettingsObjects::gameSetting(const std::string& name, const std::string& fallback) const
+{
+	const auto it = m_game.find(name);
+	return it == m_game.end() ? fallback : it->second.value;
+}
+
 bool SettingsObjects::has(const std::string& key) const
 {
 	return m_values.count(key) != 0;

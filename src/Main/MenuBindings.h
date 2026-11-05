@@ -33,9 +33,9 @@
 //   Server lists (dice.bf2.List): fillList(true)/refreshList(true) start a
 //     query, (false) is true while it runs; rows (0x10079770) are cell0
 //     name, cell1 "players/max (queue)", cell2 the ping bar (a clip),
-//     cell3 map, cell4 mode. The quick and advanced lists start with three
-//     rows: "Favorites", a gap and "Live servers" (so the menu counts
-//     rows - 3). selectRow(n) returns the row's server (0x100743xx):
+//     cell3 map, cell4 mode. The quick and advanced lists hold "Favorites",
+//     the favourite servers (GeneralSettings' list), a gap and "Live
+//     servers" before the servers listed (0x10035e70). selectRow(n) returns the row's server (0x100743xx):
 //     serverAddress "ip gameport queryport", password, sameMod, version,
 //     punkbuster, maxRank, hasReservedSlots, isBoosterPackMap,
 //     isCustomPackMap, customMapLink.
@@ -265,6 +265,54 @@ public:
 	// A message for the menu to show (dice.MessageHandler).
 	void raiseMessage(int type, const std::string& text, int code = 0);
 
+	// --- The offline natives of MenuBindingsOffline.cpp
+
+	// A mod as ModInfo keeps it (BF2142.exe's record of 0x138 bytes, read
+	// from each mods/<name>/Mod.desc; SwiffHost slot 0x1a8 0x00486270
+	// copies one out): its folder and the desc file's tags.
+	struct ModEntry {
+		std::string path; // "mods/bf2142"
+		std::string title, desc, url, logo, icon, music, version;
+	};
+	// A Mod.desc's tags (<title> HEADER_MODTITLE </title> ...), trimmed.
+	static ModEntry parseModDesc(const std::string& path, const std::string& text);
+	// Every <gameDir>/mods/<name>/Mod.desc, in folder order.
+	static std::vector<ModEntry> findMods(const std::string& gameDir);
+	// The mods the Mod page lists (dice.bf2.Mod, its "mods" list) and the
+	// mod running (GSModDirectory, "mods/bf2142").
+	void setMods(std::vector<ModEntry> mods, const std::string& currentModPath);
+	// Mod.activateMod: the original restarts the game with "+modPath
+	// <path> +multi 1" (0x00477fb0 posts host event 0xc, 0x00403fa0).
+	std::function<void(const std::string& modPath)> onActivateMod;
+
+	// The game running now (Multiplay.getCurrentMap*, SwiffHost slots
+	// 0x70..0x7c over the game logic 0x00a1b5d8; "$noCurrentGame" without
+	// one): createServer and joinServer set it, disconnectGame clears it;
+	// the game may set each map of a playlist.
+	void setCurrentGame(const MenuMap& map, int maxPlayers);
+	void clearCurrentGame() { m_currentGame.reset(); }
+
+	// The favourite servers (GeneralSettings' list, slots 0x17c add, 0x190
+	// remove, 0x194 find; written to General.con as addFavouriteServer
+	// "ip" port "name" queryPort) and the history (addServerHistory).
+	struct FavouriteServer {
+		std::string ip;
+		int port = 0; // the game port
+		std::string name;
+		int queryPort = 0;
+	};
+	std::vector<FavouriteServer> favouriteServers(bool history = false) const;
+
+	// The menu's wait state (Logic.beginWaitState n / endWaitState,
+	// SwiffHost slots 0x2e8 / 0x2ec: +0xd90, the cursor slot 0x84 picks:
+	// 0 the arrow, 1 busy, 2 key binding; the .ani files it loads are not
+	// shipped) and the cursor name and switch of dice.bf2.Cursor.
+	int waitCursor() const { return m_waitCursor; }
+	bool cursorEnabled() const { return m_cursorEnabled; }
+	// SwiffPlayer's action names for the duplicate prompt (0x10014ef0):
+	// "HEADER_forward" for the infantry map's c_PIThrottle, "" for none.
+	static std::string controlHeader(const std::string& map, const std::string& input, bool negative);
+
 	// --- State (for the game and tests)
 
 	bool online() const;
@@ -306,6 +354,20 @@ private:
 	std::vector<std::vector<std::string>> statsRows(int category);
 	void bindMultiplay();
 	void bindServerSettings();
+	// MenuBindingsOffline.cpp: favourites, the direct IP, the browser's
+	// filters and password, the map list's own natives, the current game,
+	// dice.bf2.Mod, Cursor, Singleplay, and Logic's and the settings
+	// objects' small natives.
+	void bindOffline();
+	void bindFavourites();
+	void bindMods();
+	void storeFavourites(bool history, const std::vector<FavouriteServer>& servers);
+	// The favourites as server rows (with the browser's fields when it
+	// lists the same server), then the lists that show them.
+	void refreshFavourites();
+	// GeneralSettings' resets (0x0049bdf0 HUD, 0x0049a170 general,
+	// 0x0049a1a0 messages): the values set and applied, the profile saved.
+	void resetGeneralValues(const std::vector<std::pair<std::string, ui::avm1::Value>>& values);
 	void showMapLists();
 	std::vector<MenuMap> availableMaps() const;
 
@@ -390,8 +452,33 @@ private:
 	void startLanQuery();
 	bool finishLanQuery();
 	void showLanServers();
-	// The servers a list shows (nullptr: not a server list we fill).
-	const std::vector<Server>* serversOf(const std::string& listId) const;
+	// The server a list's row shows (nullptr: a header or no server); the
+	// quick and advanced lists hold "Favorites", the favourites, a gap,
+	// "Live servers" and the live ones. `favourite` tells which kind.
+	const Server* serverAt(const std::string& listId, int row, bool* favourite = nullptr) const;
+	bool isHeaderRow(const std::string& listId, int row) const;
+	std::vector<Server> m_favouriteServers, m_historyServers;
+	std::vector<FavouriteServer> m_favourites, m_history; // without settings objects
+	std::map<int, std::string> m_toggleFilterValues;      // Multiplay.setToggleFilter's query texts by bit
+	std::string m_joinPassword;
+	std::string m_connectHost; // GSConnectToIpHost / Port without settings objects
+	int m_connectPort = 17567;
+
+	std::vector<ModEntry> m_mods;
+	std::string m_currentModPath = "mods/bf2142";
+	int m_selectedMod = -1; // Mod.selectMod (SwiffPlayer 0x101189ec)
+
+	struct CurrentGame {
+		MenuMap map;
+		int maxPlayers = 0;
+	};
+	std::optional<CurrentGame> m_currentGame;
+
+	int m_activateReason = 0;
+	std::string m_frameLabel;
+	int m_waitCursor = 0;
+	std::string m_cursorName;
+	bool m_cursorEnabled = true;
 
 	std::string m_infoHost; // the server info popup's server
 
@@ -401,6 +488,18 @@ private:
 	std::string m_lastInput, m_lastDevice;
 	float m_lastDirection = 1;
 	int m_controlMap = 0;
+	// mapInput's refusal (error 1): the input asked for and the one the
+	// key is on already, until forceSetLastInput binds it anyway.
+	struct PendingInput {
+		std::string map, input, device, control;
+		int slot = 0;
+		float sign = 1;
+		std::string duplicateMap, duplicateInput;
+		float duplicateSign = 1;
+	};
+	std::optional<PendingInput> m_pendingInput;
+	// Binds m_pendingInput (its duplicate's key taken off first).
+	void bindPendingInput();
 
 	// Starting a game.
 	bool m_gameRunning = false;

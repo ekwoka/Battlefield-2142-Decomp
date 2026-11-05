@@ -483,6 +483,26 @@ struct CommanderToolUse {
 // One of the four above as the server reads it; false for another event
 // (or an Artillery / Titan event of another kind).
 bool parseCommanderToolUse(const GameEvent& e, CommanderToolUse& out);
+// kEvArtillery kind 2: a commander's strike asset fired, server to every
+// client (0x005a0e50 builds it, 0x005a06a0: team +0x14 left 0, x +0xc, z
+// +0x10, the asset's networkable id +0x20 (16 bits; the root's slot 0xd0,
+// its +4) and +0x18 (32), the server's tick (0x00666090) plus the firearm's
+// place in the asset's list, which seeds the firearm (its +0x214); sent by
+// the game's slot 0x94 as the firearm fires). The client's handler
+// (0x0050eeb0) finds the asset by that id, takes the first weapon of its
+// list (interface 0xc4c5, slot 0x70(0)), puts it at (x,
+// orbitalBombardmentHeight, z) facing (0, -1, 0) (slot 0x80), hands it the
+// seed, its enable (slot 0x1a4) and the team's commander as its owner
+// (slot 0x70), and fires it (+0x260 = 1, event 7): its fire's event 0 to
+// the firearm's children starts the EMP strike's GEB_emp_strike there.
+struct StrikeFireInfo {
+	int team = 0;
+	float x = 0, z = 0;
+	uint16_t asset = 0; // the asset's ghost
+	uint32_t seed = 0;
+};
+GameEvent makeStrikeFire(const StrikeFireInfo& info);
+bool parseStrikeFire(const GameEvent& e, StrikeFireInfo& out);
 // kEvCreateSpawnGroup (0x39; read 0x005125c0, written 0x005126b0, handled
 // 0x005127f0 → the client's spawn manager slot 0x44) and
 // kEvRemoveSpawnGroup (0x3a; read 0x00512880, written 0x005128e0, handled

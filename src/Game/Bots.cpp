@@ -2981,8 +2981,17 @@ void BotManager::flee(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 // the wrapped plan, 0x100f9710, and prints it, 0x100f9740; its interpreter
 // entry 0x1008e440 / 0x1008e450 hands it to the bot's interpreter) and DefuseMines' 0x100ddc30, cleared at
 // their ends 0x100d4e20 / 0x100ddc80):
-//   - falling faster than 1 m/s, input 22 (the parachute's) is pressed
-//     (the rewrite's soldiers open theirs by themselves);
+//   - before that test, whatever plan holds the weapon: with the object's
+//     physics node (+0x3c, slot 0x18) moving down at 1 m/s or more (its
+//     y at most -1) and input 22 in the bot's input mask (+0x100 bit
+//     0x400000), input 22 (c_PIWeaponSelect9, the kit's ParachuteLauncher)
+//     is held at 1 (+0x58). The game's choice (0x004d2a50) reads the held
+//     input (0x004bba40: over 0.5, no edge) every frame, so the parachute
+//     opens as soon as its fire test passes (Parachutes.cpp: 2 m clear
+//     below, 10 m/s down). Input 22 is a select input: a lower one pressed
+//     the same frame (the primary's, input 16, below) wins the choice. The
+//     flag at bot +0x264 that also gates the block isn't traced (taken as
+//     clear);
 //   - the weapon in hand (the armament's selection) busies the hands when
 //     it is Healing (type 1) and the bot's own health is below 0.95, Ammo
 //     (2) and the product over its other weapons (not Healing or Ammo, with
@@ -3005,6 +3014,9 @@ void BotManager::handleWeapon(Bot& bot, const GameWorld::PlayerInfo& self, Soldi
 {
 	if (self.vehicle || !self.alive || self.manDown) {
 		return;
+	}
+	if (self.velocity.y <= -1.0f && input.selectItem == 0) {
+		input.selectItem = 9; // input 22 held (+0x58 = 1)
 	}
 	const std::string& p = bot.pattern;
 	if (p.rfind("BBPFire", 0) == 0 || p == "BBPHeliFire3d" || p == "BBPDefuseMines") {
@@ -3045,8 +3057,9 @@ void BotManager::handleWeapon(Bot& bot, const GameWorld::PlayerInfo& self, Soldi
 		}
 		return;
 	}
-	if (input.selectItem == 0 && p != "BBPRevive" && p != "BBPMedicAssist" && p != "BBPAmmoAssist"
-		&& p != "BBPRepairVehicle" && p != "BBPC4" && p != "BBPFlee") {
+	// The primary's select (input 16) wins over the parachute's (input 22).
+	if ((input.selectItem == 0 || input.selectItem == 9) && p != "BBPRevive" && p != "BBPMedicAssist"
+		&& p != "BBPAmmoAssist" && p != "BBPRepairVehicle" && p != "BBPC4" && p != "BBPFlee") {
 		input.selectItem = primary;
 	}
 }

@@ -56,6 +56,15 @@ public:
 	void set(const std::string& key, const std::string& value);
 	// Every scalar value (not the lists: favourites, history, played help).
 	const std::map<std::string, std::string>& values() const { return m_values; }
+	// A list's entries ("GeneralSettings.FavouriteServer": each
+	// addFavouriteServer call's arguments as written, `"ip" port "name"
+	// queryPort`), and the list replaced (the menu's favourites).
+	const std::vector<std::string>& list(const std::string& key) const;
+	void setList(const std::string& key, std::vector<std::string> entries) { m_lists[key] = std::move(entries); }
+	// A SettingsManager setting (GSConnectToIpHost...): its value, or the
+	// fallback when unset; set with its type ("string", "int"...).
+	std::string gameSetting(const std::string& name, const std::string& fallback) const;
+	void setGameSetting(const std::string& name, const std::string& type, const std::string& value) { m_game[name] = {type, value}; }
 
 	// The files' text, as the original writes them.
 	std::string generalScript() const;

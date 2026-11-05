@@ -285,8 +285,8 @@ void GameWorld::collideBodies(float seconds)
 	// A sleeping node is no mover (the dispatch 0x006dd0b0 skips it) but
 	// stays a candidate for the others.
 	for (size_t i = 0; i < m_bodies.size(); ++i) {
-		if (!findDrone(m_bodies[i].object) && !isTitan(m_bodies[i].object) && m_objects.find(m_bodies[i].object)
-			&& !asleep(m_bodies[i])) {
+		if (!findDrone(m_bodies[i].object) && !isTitan(m_bodies[i].object) && !m_bodies[i].fixed
+			&& m_objects.find(m_bodies[i].object) && !asleep(m_bodies[i])) {
 			collideMover(m_bodies[i], i, seconds);
 		}
 	}
@@ -429,8 +429,9 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 			wheelProbes(other, m, seconds);
 		}
 	}
-	// The Titans' parts (their vehicle LODs, Titans.cpp), each a candidate
-	// of its own with its collisionGroups: the team forcefields (0x100 the
+	// The Titans' parts (their LODs, Titans.cpp: the one the mover's
+	// otherCollisionLod asks for), each a candidate of its own with its
+	// collisionGroups: the team forcefields (0x100 the
 	// PAC Titan's, 0x200 the EU's) let their own team's vehicles through
 	// (meshPair's team rule, 0x006bb050's start). A Titan is a major actor
 	// moved by its sync alone: the vehicle takes the whole push and rides
@@ -441,6 +442,9 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 			continue;
 		}
 		for (const Titan::VehiclePart& part : titan.vehicleParts) {
+			if (part.lod != m.otherLod) {
+				continue; // the mover asks for this LOD of the others (atLod)
+			}
 			MeshActor c;
 			c.body = tb;
 			c.points = &part.points;
@@ -960,6 +964,9 @@ void GameWorld::collisionEvent(uint32_t self, uint32_t other, const Vec3& veloci
 	const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
 	if (!t) {
 		return;
+	}
+	if (sameName(t->typeName(), "Parachute")) {
+		parachuteCollision(self, other, normal, otherMaterial); // 0x005cf750 (Parachutes.cpp)
 	}
 	// PlayerControlObject (0x005c72f0): the other's material 0x29a destroys
 	// it (the server's damage, slot 0xe4 -> 0x004c0e40: 1e10, no attacker),

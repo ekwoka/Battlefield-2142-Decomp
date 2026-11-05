@@ -640,6 +640,20 @@ public:
 			fires.push_back(weapon);
 		}
 	}
+	// That round's projectile on the client (FireComp 0x005f31d0 makes it
+	// through 0x005f2bb0 when the projectile template has no networkable
+	// info; a networked one is the server's ghost): from the gun's muzzle as
+	// the client's copy of the vehicle has it, the seat's yaw and pitch
+	// bundles turned as their RotationalBundle ghosts say (0x00602070, the
+	// muzzle's world matrix through the tree: MultiFireComp 0x005d5fb0 /
+	// 0x005f1a20) and the turret or bone part the gun rides; along the
+	// barrel at the firearm's velocity plus the vehicle's, a tracer every
+	// tracerInterval-th round (`tracerCount`, the fire comp's +0x78), the
+	// barrels in turn (`barrel`, +0x1a8). The firearm's deviation isn't
+	// networked: the round flies straight. False when nothing was made;
+	// `muzzle` gets the round's start either way the gun is known.
+	bool fireRemoteSeatRound(uint32_t vehicle, int seat, const std::string& weapon, const physics::Vec3& velocity,
+		int& barrel, int& tracerCount, physics::Vec3* muzzle = nullptr);
 	// The commanders' strike firearms that fired since the last call: the
 	// asset object, its firearm (its template name) and where 0x005a0bf0
 	// moved it (orbitalBombardmentHeight over the target). The fire's event
@@ -649,6 +663,10 @@ public:
 		uint32_t asset = 0;
 		std::string fireArm;
 		physics::Vec3 at;
+		// The burst's first round: 0x005a0e50 fires the firearm once (its
+		// burst follows), and that is when a server tells its clients
+		// (event 0x1e kind 2, the client's 0x0050eeb0).
+		bool first = false;
 	};
 	std::vector<StrikeFired> takeStrikeFires() { return std::exchange(m_strikeFires, {}); }
 	// A walker's animation system's playing bundles (none without one).
@@ -1210,6 +1228,13 @@ public:
 		// aren't the look's.
 		std::string yawBundle, pitchBundle;
 		float minPitch = -90, maxPitch = 90; // the pitch bundle's limits (its rotation's y; down positive)
+		// The seat's first firearm's rest pitch under the pitch bundle (up
+		// positive): the turn of the parts between them (eu_bipod's
+		// eu_bipod_toprotation sits 40 degrees up, setRotation 0/-40/0, under
+		// eu_down's 20..60 down, so the barrel spans 20 up to 20 down). The
+		// bundle's angle is the look less it; the round leaves along the
+		// bundle's angle plus it.
+		float restPitch = 0;
 		// The seat's other bundles on the same pitch input (the heavy mechs'
 		// rocket racks, cannon mounts and camera mounts all take
 		// PIMouseLookY): each turns with the look within its own limits.
@@ -1233,6 +1258,18 @@ public:
 		Anchor seatAnchor; // the seat's own place (the sitter)
 		physics::Vec3 rotation;      // seatInformation's yaw/pitch/roll, degrees
 		std::string animationSystem; // seatAnimationSystem: the sitter's pose (empty: hidden)
+		// seatInformation's first word: the object of the vehicle's tree the
+		// soldier sits on (template +0x2a0). The PCO's creation (0x005cd4f0)
+		// finds it in its tree (0x005c6670, by template) and keeps it
+		// (+0x280); the enter (0x005cdd60) then hangs the soldier under it at
+		// the seat's place (its slot 0xf0, the soldier's 0xe8 with template
+		// +0x2bc), or without one disables him (updateFlags (1, 0)): only
+		// such a seat shows its soldier. Every shipped seat with
+		// seatInformation names its own PCO but the static guns', whose
+		// soldier sits on the cockpit (Static_AV_Cockpit ...), which the
+		// gun's yaw turns.
+		std::string seatParent;
+		bool seatShown = false;
 		// seatLeftRotationLimit / seatRightRotationLimit (the seat's +0x300 /
 		// +0x304, interface 0xc4c4 slots 0xd8 / 0xe0): how far the seated
 		// soldier's body turns from the seat (the FAVs' open position
@@ -1804,6 +1841,43 @@ public:
 	// -1), in the root's armour order, each true while its armour stands
 	// (state 0): the vehicle HUD's cells (0x007a1e50 -> its +0x336 + n).
 	std::vector<bool> repairCells(uint32_t vehicle) const;
+	// A shield cell's id for the damage paths (hitPoints, damage: the
+	// projectile LOD's owner of its faces; kShieldCellIds + vehicle x 16 +
+	// index), 0 for none.
+	static constexpr uint32_t kShieldCellIds = 0x7e000000u;
+	uint32_t shieldCellId(uint32_t vehicle, size_t index) const;
+	// Team damage (TeamDamage.cpp; ECGameLogicGLTeamDamage, game logic event
+	// 0/0xb, raised by the damage 0x004c0e40): an attacker's damage on his
+	// own team's soldier past teamDamageScoreLimit (50 %) of its maximum, or
+	// on his team's manned (or teamed) vehicle past
+	// teamVehicleDamageScoreLimit (25 %), raises PlayerTeamDamagePoint
+	// (attacker, object) for the scripts (scoringCommon.py's -1) and sends
+	// {kind, victim, attacker} to the attacker and the victim (the vehicle's
+	// first occupant, -1 none). Each recipient takes its own once.
+	struct TeamDamage {
+		int kind = 0;        // 0 a soldier, 1 a vehicle
+		int victim = -1;     // the soldier's player, the vehicle's first occupant (-1 none)
+		int attacker = -1;
+		uint32_t object = 0; // what took it (the soldier, the vehicle)
+	};
+	std::vector<TeamDamage> takeTeamDamage(int recipient);
+	// The game logic's limits (sgl_setParam's teamDamageScoreLimit and
+	// teamVehicleDamageScoreLimit, the score manager +0x54 / +0x58, slots
+	// 0x40..0x4c; its constructor 0x00560e00 sets 50 and 25).
+	void setTeamDamageLimits(float soldierPercent, float vehiclePercent)
+	{
+		m_teamDamageLimits[0] = soldierPercent;
+		m_teamDamageLimits[1] = vehiclePercent;
+	}
+	// The HUD's answer to one on `local`'s screen (0x00759bf0 case 0xb):
+	// the victim himself says AUTO_MOODGP_friendlyfire to the attacker
+	// (TCPlayer, the client's slot 0x50 with the spam check); else, the
+	// local player the attacker and the victim alive and up, the victim's
+	// voice says it to him (slot 0x54); else the personal line
+	// HUD_HUD_TEAM_DAMAGE_PLAYER (kind 0) or _VEHICLE (kind 1).
+	enum class TeamDamageNotice { None, SayFriendlyFire, VictimSaysFriendlyFire, PlayerLine, VehicleLine };
+	static TeamDamageNotice teamDamageNotice(const TeamDamage& event, int local, bool victimUp);
+	static constexpr const char* kFriendlyFireVoice = "AUTO_MOODGP_friendlyfire";
 	// The AI runs on the server (AIDLL's interface 0xb47ce4, its slots 0x18
 	// and 0x20): a wreck's armour then drains three times as fast (0x00652380).
 	void setAiRunning(bool on) { m_aiRunning = on; }
@@ -1911,6 +1985,22 @@ public:
 	// `seat` >= 0 asks for that seat only; `skip`: seats others are going to.
 	bool titanGunEntry(int player, physics::Vec3& entry, float& radius, int& seat, const std::vector<int>& skip = {}) const;
 	bool ridingPod(int player) const;
+	// Hanging under a soldier's parachute (Parachutes.cpp).
+	bool ridingParachute(int player) const;
+	// The soldier's falling flag (+0x328, read through interface 0xc4d7's
+	// slot 0x78, 0x007f9bc0): the soldier update (0x0058d350) sets it while
+	// he is on foot and his velocity's y is under -10 (*0x00a68e8c, static
+	// init 0x008dfee0). The HUD's parachute help (0x00646cb0 case 0x0d)
+	// and the parachute's jump key (0x004d2a50) ask it.
+	bool soldierFalling(int player) const;
+	// The parachutes in the air: object, rider (-1 none) and the state its
+	// animation systems get (1 high, 2 near the ground, 4 landed).
+	struct ParachuteInfo {
+		uint32_t object = 0;
+		int player = -1;
+		int state = 1;
+	};
+	std::vector<ParachuteInfo> parachutes() const;
 	struct PodInfo {
 		uint32_t object = 0;
 		int player = -1;
@@ -1964,6 +2054,19 @@ private:
 		// other team's forcefields; collisionGroups 0x100 / 0x200).
 		std::shared_ptr<physics::CollisionWorld> teamSoldierMesh[2];
 		std::unique_ptr<Vehicle> vehicle; // engines and wheels
+		// A parachute's Wing and ForceObjects (the soldier's Parachute, the
+		// supply crate's supply_parachute; Vehicle::fromTemplate's
+		// flightParts): stepped with the body as a vehicle's parts are, but
+		// not a vehicle to enter, drive or spawn at (Parachutes.cpp).
+		std::unique_ptr<Vehicle> canopy;
+		// A stationary PlayerControlObject (hasMobilePhysics 0 with seats:
+		// the bipods eu_bipod / as_bipod / hmg_bipod, static_aa / ap / av).
+		// The original gives it no mobile node (its collision is the static
+		// world's, buildStaticCollision), but it is a control object to sit
+		// in like any (0x005cdd60): the body carries its seats, guns,
+		// cameras and radius (slot 0x90 with boundingRadiusModifierWhenOccupied,
+		// 0x005c6be0) and never moves.
+		bool fixed = false;
 		// A walker's own animation system (bundleAnimationSystem: the
 		// object 0x0063d340 makes for it, updated by 0x0063d2f0), built
 		// the first tick it is needed.
@@ -2042,6 +2145,9 @@ private:
 			bool mirror = false;   // mirrorParentDamageLevel (getter slot 0xac)
 			int hudCell = -1;      // hudRepairCellNo
 			float timer = 0.1f;    // the armour's +0x288 (+0x28c: 0.1 s)
+			bool pointOnDestroy = false; // damagePointOnDestroy (armour slot 0x16c)
+			physics::Mat3 rotation;  // its place in the vehicle's frame
+			physics::Vec3 position;
 		};
 		std::vector<Cell> cells;
 		bool cellsBuilt = false;
@@ -2742,6 +2848,11 @@ private:
 		// Seated: the seat's animation system (seatAnimationSystem).
 		std::unique_ptr<anim::AnimationState> seatAnimation;
 		std::string seatAnimationPath;
+		// The messages the seat's system gets (its MessageTriggers): a
+		// parachute's state (0x005cfbb0 -> the PCO's +0x188 slot 0x10: 1
+		// high, 2 near the ground, 4 landed; 3p_parachute_animSys's still,
+		// landing and landed). 0 in other seats.
+		uint32_t seatMessages = 0;
 		// On a ladder (its LadderContainer, 0x0059dec0): the ladder (an index
 		// into m_ladders, -1 for none), the container's height.
 		// Seated, the soldier's own look (0x0058a6d0): the body's turn
@@ -3418,10 +3529,14 @@ private:
 		int controlPoint = -1;
 		std::vector<TitanPart> parts; // [0]: the root
 		std::vector<TitanMesh> meshes;
-		// Its parts' vehicle LODs (in the Titan's frame), each a candidate of
-		// its own for the vehicles' mesh physics (0x006dc7b0 / 0x006bb050)
+		// Its parts' collision LODs (in the Titan's frame), each a candidate
+		// of its own for the bodies' mesh physics (0x006dc7b0 / 0x006bb050)
 		// with its collisionGroups: a team's vehicles pass their own fields.
+		// A mover meets each part at the LOD it asks for (otherCollisionLod:
+		// the vehicles 1, the parachute, crates, beacons and drones 2, the
+		// soldier LOD with the decks), as it meets any other mesh.
 		struct VehiclePart {
+			int lod = 1; // physics::CollisionUser
 			std::shared_ptr<physics::CollisionWorld> mesh;
 			std::vector<physics::Vec3> points;
 			std::vector<uint32_t> pointMaterials;
@@ -3475,6 +3590,36 @@ private:
 	bool insideTitanHull(const Titan& titan, const physics::Vec3& point) const;
 	std::vector<std::unique_ptr<ObjectSpawner>> m_newSpawners; // a Titan's, made during the spawners' loop
 	static constexpr uint32_t kTitanPartIds = 0x7f000000u;
+	// The armour's damage lists (0x006557a0): +0x220 every attacker's sum,
+	// +0x22c a vehicle's while manned or on a team, +0x238 the soldiers'
+	// attackers past the limit; +0x264 the heal since (0x00655a00).
+	struct ArmourDamage {
+		std::map<int, float> all;
+		std::map<int, float> manned;
+		std::set<int> over;
+		float healed = 0;
+	};
+	std::map<uint32_t, ArmourDamage> m_armourDamage;
+	struct PendingTeamDamage {
+		TeamDamage event;
+		std::vector<int> recipients;
+	};
+	std::vector<PendingTeamDamage> m_teamDamage;
+	float m_teamDamageLimits[2] = {50, 25};
+	// 0x006557a0 for `armour` (the object whose armour took it; `vehicle`
+	// the body whose control object it is under, `most` its maximum).
+	void recordArmourDamage(uint32_t armour, uint32_t vehicle, float amount, int attacker, float most);
+	// 0x004c0e40's tail after the damage: the team damage test.
+	void checkTeamDamage(uint32_t armour, uint32_t vehicle, int attacker, bool destroyed, bool wasDestroyed,
+		bool pointOnDestroy, float maxHitPoints);
+	// 0x00655a00: a heal of `amount`; over 50 since, or full, the list goes.
+	void armourHealed(uint32_t armour, float amount, bool full);
+	// The cell behind an id (shieldCellId); false for any other id.
+	bool shieldCell(uint32_t id, Body*& body, Body::Cell*& cell);
+	bool shieldCell(uint32_t id, const Body*& body, const Body::Cell*& cell) const;
+	// A hit on a cell (loseHitPoints): its armour, the award, its destroy event.
+	bool shieldCellDamage(uint32_t id, float amount, int attacker);
+	void buildShieldCells(Body& body);
 	std::vector<std::pair<physics::Vec3, float>> m_titanObstacles; // static objects reaching the Titans (0x00562360)
 	bool m_titanObstaclesFound = false;
 	void registerTitan(uint32_t object, int controlPoint);
@@ -3544,6 +3689,36 @@ private:
 	void stepSilos(float seconds);
 	void launchMissile(Silo& silo, const Titan& target);
 	void steerBeacon(Projectile& p, float seconds);
+	// The soldiers' parachutes (Parachutes.cpp): the kit's ParachuteLauncher
+	// (itemIndex 9, a SpawnObjectFireComp whose projectile is the Parachute
+	// "parachute") puts one over a falling soldier, who rides it
+	// (enterOnSpawn, dontAllowExit) until it lands.
+	struct Parachute {
+		uint32_t object = 0;
+		int player = -1;       // the rider, -1 once he is out
+		float landing = -1;    // the landing timer (+0x45c; 0x005cf750 sets it, 0x005d01c0 runs it)
+		float removeIn = -1;   // to the timer event 0x21 (0x005cff20: 0.1 s), which takes it away
+		int state = 1;         // 0x005cfbb0's message: 1 high, 2 near the ground, 4 landed
+	};
+	std::vector<Parachute> m_parachutes;
+	Parachute* findParachute(uint32_t object);
+	// The kit's parachute launcher: its slot, its projectile and
+	// fire.projectileStartPosition; false without one.
+	bool parachuteLauncher(const Player& player, std::string& projectile, physics::Vec3& start) const;
+	// The SpawnObjectFireComp's fire test (slot 7, 0x005e4750).
+	bool mayOpenParachute(const Player& player) const;
+	bool openParachute(Player& player);
+	// The rider's tick in place of a seat's (stepSoldier).
+	void rideParachute(Player& player, world::Object& soldier, Body& body, float seconds);
+	void stepParachutes(float seconds);
+	// The Parachute's collision handler (0x005cf750) before the
+	// PlayerControlObject's: the landing.
+	void parachuteCollision(uint32_t self, uint32_t other, const physics::Vec3& normal, uint32_t otherMaterial);
+	void leaveParachute(Player& player, Parachute& chute);
+	// Nothing a soldier of the team stands on, nor what stops a round,
+	// between two points (`ignore`: an object left out).
+	bool soldierRayClear(int team, const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore) const;
+	bool soldierRayHit(int team, const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore, float& fraction) const;
 	// Drop pods (a Parachute PCO with isPod; ForceObjects steer it).
 	struct Pod {
 		uint32_t object = 0;

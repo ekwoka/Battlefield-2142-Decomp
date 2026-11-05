@@ -754,6 +754,10 @@ void VehicleHud::update(hud::HudManager& hud, const VehicleHudInput& in)
 			break;
 		}
 	}
+	// The repair cells (0x007a2e60 -> 0x007a1e50).
+	for (size_t n = 0; n < in.repairCells.size() && n < 9; ++n) {
+		hud.set("RepairCell" + std::to_string(n + 1) + "Active", in.repairCells[n] ? 1 : 0);
+	}
 	hud.set("GunnerAngle", m_gunnerAngle);
 	hud.set("SecondaryGunnerAngle", m_secondaryAngle);
 	hud.setString("AltitudeString", std::to_string(static_cast<int>(std::ceil(in.altitude))));

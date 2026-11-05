@@ -74,6 +74,36 @@ public:
 	// (no armour, or a ghost whose health hasn't come): the name tags' bars
 	// and useAliveArmor (RendDX9 0x1016a950: the armour's slot 0x60).
 	virtual float objectHealth(uint32_t object) const = 0;
+	// A vehicle's repair cells (the vehicle HUD's 0x007a1e50: each armored
+	// object of the root's list with a hudRepairCellNo other than -1, up
+	// while its armour state is 0): the local round's (GameWorld::
+	// repairCells), a joined game's from the root's synced armour (mask
+	// 0x800000). Empty for none.
+	virtual std::vector<bool> repairCells(uint32_t vehicle) const
+	{
+		(void)vehicle;
+		return {};
+	}
+	// A seat's gun turn for the vehicle HUD: the yaw on the vehicle (degrees,
+	// the seat's frame included) and the pitch (up positive). The exe's HUD
+	// reads the world matrices of the active weapon and of the other seats'
+	// yaw bundles (VehicleTurretAngle +0x1f8: the weapon's heading less the
+	// vehicle's, 0x007a1fb0's end; GunnerAngle, 0x007a07c0: the bundle's
+	// slot 0x188), which a client's RotationalBundles take from their
+	// networkables (0x00602070). The local round's gun aims (GameWorld::
+	// gunAim / seatYaw); a joined game's from the seat's bundle ghosts
+	// (net::RemoteWorld::partPose). False for a seat without a gun (gunTurn)
+	// or a yaw bundle (seatYaw).
+	virtual bool gunTurn(uint32_t vehicle, int seat, float& yaw, float& pitch) const
+	{
+		(void)vehicle, (void)seat, (void)yaw, (void)pitch;
+		return false;
+	}
+	virtual bool seatYaw(uint32_t vehicle, int seat, float& yaw) const
+	{
+		(void)vehicle, (void)seat, (void)yaw;
+		return false;
+	}
 	virtual std::vector<SquadRequest> squadRequests(int team) const = 0;
 	// A squad's order: its leader's own (fromCommander false) or the
 	// commander's; false for none.
@@ -172,6 +202,12 @@ public:
 	std::vector<int> vehicleOccupants(uint32_t vehicle) const override { return m_round.vehicleOccupants(vehicle); }
 	float hitPoints(uint32_t object) const override { return m_round.hitPoints(object); }
 	float objectHealth(uint32_t object) const override;
+	std::vector<bool> repairCells(uint32_t vehicle) const override { return m_round.repairCells(vehicle); }
+	bool gunTurn(uint32_t vehicle, int seat, float& yaw, float& pitch) const override
+	{
+		return m_round.gunAim(vehicle, seat, yaw, pitch);
+	}
+	bool seatYaw(uint32_t vehicle, int seat, float& yaw) const override { return m_round.seatYaw(vehicle, seat, yaw); }
 	std::vector<SquadRequest> squadRequests(int team) const override { return m_round.squadRequests(team); }
 	bool squadOrder(int team, int squad, bool fromCommander, SquadOrder& out) const override
 	{
@@ -234,6 +270,9 @@ public:
 	std::vector<int> vehicleOccupants(uint32_t vehicle) const override;
 	float hitPoints(uint32_t object) const override;
 	float objectHealth(uint32_t object) const override;
+	std::vector<bool> repairCells(uint32_t vehicle) const override;
+	bool gunTurn(uint32_t vehicle, int seat, float& yaw, float& pitch) const override;
+	bool seatYaw(uint32_t vehicle, int seat, float& yaw) const override;
 	std::vector<SquadRequest> squadRequests(int team) const override;
 	bool squadOrder(int team, int squad, bool fromCommander, SquadOrder& out) const override;
 	const world::Object* soldier() const override;

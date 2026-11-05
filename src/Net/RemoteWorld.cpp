@@ -260,6 +260,17 @@ bool RemoteWorld::apply(const GameEvent& event)
 		}
 		return true;
 	}
+	case kEvArtillery: { // kind 2 from the server (0x0050eeb0); kind 1 is a client's use
+		StrikeFireInfo info;
+		if (!parseStrikeFire(event, info)) {
+			return false;
+		}
+		m_strikeFires.push_back(info);
+		if (m_strikeFires.size() > 16) {
+			m_strikeFires.erase(m_strikeFires.begin());
+		}
+		return true;
+	}
 	case kEvStickyProjectile: {
 		StickyProjectileInfo info;
 		if (!parseStickyProjectile(event, info) || !info.projectile) {
@@ -922,6 +933,19 @@ void RemoteWorld::applyParts(RemoteObject& o, const GhostPartLayout& layout, con
 		return;
 	}
 	const NetworkableState& root = states.front();
+	if ((root.mask & 0x800000) && root.kind == NetworkableKind::SimpleObject && !layout.groups.empty()) {
+		// The armored children (0x800000); the repair cells among them in
+		// order, a cell standing while its hit points do (its armour state
+		// 0, which 0x007a1e50 reads on a client from the synced armour).
+		o.childDamage = root.childDamage;
+		const std::vector<bool>& cells = layout.groups.front().hints.armoredRepairCells;
+		o.repairCells.clear();
+		for (size_t i = 0; i < cells.size() && i < root.childDamage.size(); ++i) {
+			if (cells[i]) {
+				o.repairCells.push_back(root.childDamage[i] > 0);
+			}
+		}
+	}
 	if (root.kind == NetworkableKind::PlayerControlObject) {
 		if (root.occupantBits == 0 && !root.occupant) {
 			for (int g = 0; g < 3; ++g) {

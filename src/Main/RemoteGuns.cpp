@@ -4,6 +4,7 @@
 #include "World/ObjectTemplateManager.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <set>
 
 namespace dice::hfe::client {
@@ -90,11 +91,13 @@ void RemoteSeatGuns::step(game::GameWorld& round, const std::vector<Seat>& seats
 				|| !(mode == game::kFireAutomatic ? s.firing[g] : gun.burstLeft > 0)) {
 				continue;
 			}
-			// A round: its sound at the gun and event 0 to its children.
+			// A round: its projectile from the muzzle, its sound there and
+			// event 0 to the gun's children.
 			const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll(
 				{vehicle->rotation().x, vehicle->rotation().y, vehicle->rotation().z});
-			const physics::Vec3 at = physics::Vec3 {vehicle->position().x, vehicle->position().y, vehicle->position().z}
+			physics::Vec3 at = physics::Vec3 {vehicle->position().x, vehicle->position().y, vehicle->position().z}
 				+ turn.transform(w->weaponPosition);
+			round.fireRemoteSeatRound(s.vehicle, s.seat, w->weapon, s.velocity, gun.barrel, gun.tracerCount, &at);
 			round.remoteGunFired(s.vehicle, w->weapon, s.player, at);
 			gun.nextRound = arm.roundsPerMinute > 0 ? 60.0f / static_cast<float>(arm.roundsPerMinute) : 0.1f;
 			gun.burstLeft = std::max(0, gun.burstLeft - 1);
@@ -110,6 +113,76 @@ void RemoteSeatGuns::step(game::GameWorld& round, const std::vector<Seat>& seats
 	for (auto it = m_guns.begin(); it != m_guns.end();) {
 		it = seen.count(it->first) ? std::next(it) : m_guns.erase(it);
 	}
+}
+
+namespace {
+
+std::string findFireArm(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& t, int depth)
+{
+	for (const world::ChildTemplate& child : t.children()) {
+		const world::ObjectTemplate* c = templates.find(child.name);
+		if (!c) {
+			continue;
+		}
+		if (c->typeName() == "GenericFireArm") {
+			return c->name();
+		}
+		if (depth < 16) {
+			if (std::string below = findFireArm(templates, *c, depth + 1); !below.empty()) {
+				return below;
+			}
+		}
+	}
+	return {};
+}
+
+} // namespace
+
+std::string RemoteStrikes::firstFireArm(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& asset)
+{
+	return findFireArm(templates, asset, 0);
+}
+
+void RemoteStrikes::fired(const world::ObjectTemplateManager& templates, uint32_t asset,
+	const world::ObjectTemplate& assetTemplate, float x, float z, float height)
+{
+	Burst b;
+	b.round.asset = asset;
+	b.round.fireArm = firstFireArm(templates, assetTemplate);
+	if (b.round.fireArm.empty()) {
+		return; // 0x0050eeb0: no weapon in the list, nothing fires
+	}
+	b.round.at = {x, height, z};
+	if (const world::ObjectTemplate* arm = templates.find(b.round.fireArm)) {
+		const auto setting = [&](const char* key, float fallback) {
+			const auto it = arm->settings().find(key);
+			return it != arm->settings().end() ? static_cast<float>(std::atof(it->second.c_str())) : fallback;
+		};
+		b.left = std::max(1, static_cast<int>(setting("fire.burstSize", 1)));
+		const float rate = setting("fire.roundsPerMinute", 600);
+		b.interval = rate > 0 ? 60.0f / rate : 0.1f;
+	} else {
+		b.left = 1;
+	}
+	m_bursts.push_back(b);
+	if (m_bursts.size() > 16) {
+		m_bursts.erase(m_bursts.begin());
+	}
+}
+
+std::vector<RemoteStrikes::Round> RemoteStrikes::step(float seconds)
+{
+	std::vector<Round> due;
+	for (Burst& b : m_bursts) {
+		b.next -= seconds;
+		while (b.left > 0 && b.next <= 0) {
+			due.push_back(b.round);
+			--b.left;
+			b.next += b.interval;
+		}
+	}
+	m_bursts.erase(std::remove_if(m_bursts.begin(), m_bursts.end(), [](const Burst& b) { return b.left <= 0; }), m_bursts.end());
+	return due;
 }
 
 } // namespace dice::hfe::client

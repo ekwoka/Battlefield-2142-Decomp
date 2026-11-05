@@ -408,8 +408,19 @@ public:
 
 	// The vehicle in a template tree with an Engine node whose children
 	// include Springs; null otherwise. `mesh` gives the wheels' radius.
+	// What else is one:
+	//  - Flight: a tree without engines or legs whose Wings carry it (the
+	//    parachutes: the soldier's Parachute and the supply crate's
+	//    supply_parachute Bundle, each a Wing and a ForceDown ForceObject
+	//    on the mobile root's node, 0x0064fd40 / 0x0062c920), its parts and
+	//    ForceObjects stepped by tick as a vehicle's are;
+	//  - Seats: any tree (a stationary PlayerControlObject: the bipods and
+	//    the static guns, whose node isn't mobile; nothing of theirs is
+	//    ticked).
+	enum class Accept { Driven, Flight, Seats };
 	static std::unique_ptr<Vehicle> fromTemplate(const world::ObjectTemplate& root,
-		const world::ObjectTemplateManager& templates, const physics::CollisionMeshFile* mesh);
+		const world::ObjectTemplateManager& templates, const physics::CollisionMeshFile* mesh,
+		Accept accept = Accept::Driven);
 
 	const EngineSettings& engine() const { return m_engine; }
 	bool hasNewCar2() const { return m_newCar2; }

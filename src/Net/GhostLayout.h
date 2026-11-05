@@ -52,6 +52,11 @@ struct GhostTemplateNode {
 	bool forceNetworkableId = false; // NetworkableInfo.setForceNetworkableId
 	std::string groupKey;        // equal keys share a group (non-unique only)
 	bool fullChildSync = false;  // armor.fullChildSync: hit points in eighths in its root's state
+	int hudRepairCellNo = -1;    // armor.hudRepairCellNo (-1 none): a vehicle HUD repair cell
+	// An Armor component (object +0x48), networkable or not: what puts it
+	// on its root's armored list (0x0060ec00). The heavy IFV's shield
+	// generators have armour and no networkableInfo.
+	bool armored = false;
 	std::vector<GhostTemplateNode> children;
 };
 

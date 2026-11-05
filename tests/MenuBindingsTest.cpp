@@ -6,7 +6,9 @@
 #include "IO/File/ZipArchive.h"
 #include "IO/Localization/Localization.h"
 #include "Input/ControlMap.h"
+#include "Main/EndOfRoundBindings.h"
 #include "Main/MenuBindings.h"
+#include "Main/SettingsObjects.h"
 #include "TestMain.h"
 #include "UI/Player/Player.h"
 
@@ -15,6 +17,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <optional>
 #include <string>
 
@@ -547,20 +550,20 @@ TEST(MenuBindings_Controls)
 	CHECK(shown(fire, true, false).empty());
 	// Q pressed, then bound as fire's secondary.
 	bindings.setLastInput("IDKey_Q");
-	CHECK(avm1::toBoolean(call(vm, natives, "dice.bf2.ControlSettings", "mapInput",
-		{avm1::Value(fire), avm1::Value(true), avm1::Value(false), avm1::Value(false)})));
+	CHECK(vm.toNumber(call(vm, natives, "dice.bf2.ControlSettings", "mapInput",
+		{avm1::Value(fire), avm1::Value(true), avm1::Value(false), avm1::Value(false)})) == 0); // 0: bound
 	CHECK(shown(fire, true, false) == "Q");
 	CHECK(controls.pressed(input::ControlMaps::kInfantry, "c_PIFire",
 		[](const std::string& control) { return control == "IDKey_Q"; }));
 	// A gamepad's button as fire's secondary, its stick pushed up (negative)
 	// as throttle's forward: an inverted axis mapping.
 	bindings.setLastInput("IDFGameController_0", "IDButton_5", 1);
-	CHECK(avm1::toBoolean(call(vm, natives, "dice.bf2.ControlSettings", "mapInput",
-		{avm1::Value(fire), avm1::Value(true), avm1::Value(false), avm1::Value(false)})));
+	CHECK(vm.toNumber(call(vm, natives, "dice.bf2.ControlSettings", "mapInput",
+		{avm1::Value(fire), avm1::Value(true), avm1::Value(false), avm1::Value(false)})) == 0); // 0: bound
 	CHECK(shown(fire, true, false) == "Joy Button 5");
 	bindings.setLastInput("IDFGameController_0", "IDAxis_1", -1);
-	CHECK(avm1::toBoolean(call(vm, natives, "dice.bf2.ControlSettings", "mapInput",
-		{avm1::Value(throttle), avm1::Value(true), avm1::Value(false), avm1::Value(false)})));
+	CHECK(vm.toNumber(call(vm, natives, "dice.bf2.ControlSettings", "mapInput",
+		{avm1::Value(throttle), avm1::Value(true), avm1::Value(false), avm1::Value(false)})) == 0);
 	const input::Binding* axis = controls.binding(input::ControlMaps::kInfantry, "c_PIThrottle", 1, 1);
 	CHECK(axis && axis->kind == input::Binding::Kind::Axis && axis->sign == -1 && axis->device == "IDFGameController_0");
 	CHECK(shown(throttle, true, false) == "Joy Axis 1");
@@ -570,6 +573,27 @@ TEST(MenuBindings_Controls)
 		return key == "CONTROLLER_IDFGameController_IDButton_5" ? std::string("Joy Button 5 (loc)") : key;
 	});
 	CHECK(shown(fire, true, false) == "Joy Button 5 (loc)");
+
+	// A key another input has (W, the throttle's): error 1, nothing bound
+	// until forceSetLastInput, which takes it off the throttle. The prompt
+	// names the throttle as the original's table does.
+	natives.setLocalizer([](const std::string& key) { return key == "HEADER_forward" ? std::string("Forward") : key; });
+	bindings.setLastInput("IDKey_W");
+	CHECK(vm.toNumber(call(vm, natives, "dice.bf2.ControlSettings", "mapInput",
+		{avm1::Value(fire), avm1::Value(false), avm1::Value(false), avm1::Value(false)})) == 1);
+	CHECK(vm.toString(call(vm, natives, "dice.bf2.ControlSettings", "getLastDuplicateInput")) == "Forward");
+	CHECK(shown(fire, false, false) == "Mouse 1");
+	call(vm, natives, "dice.bf2.ControlSettings", "forceSetLastInput");
+	CHECK(shown(fire, false, false) == "W");
+	CHECK(shown(throttle, false, false).empty());
+	CHECK(menu::MenuBindings::controlHeader(input::ControlMaps::kInfantry, "c_PIThrottle", true) == "HEADER_backwark");
+
+	// The game map (5) numbers its inputs as c_GI: 55 the scoreboard.
+	input::ControlMaps::Map& game = controls.create(input::ControlMaps::kGame);
+	game["c_GIShowScoreboard"] = {{input::Binding::Kind::Key, "IDFKeyboard", "IDKey_Tab", 1}};
+	call(vm, natives, "dice.bf2.ControlSettings", "setActiveControlMap", {avm1::Value("5")});
+	CHECK(shown(55, false, false) == "Tab");
+	CHECK(menu::MenuBindings::controlHeader(input::ControlMaps::kGame, "c_GIShowScoreboard", false) == "HEADER_scoreboard");
 }
 
 // The audio page's radios (0x100108c0, 0x100109c0): the provider and the
@@ -627,4 +651,321 @@ TEST(MenuBindings_MenuHostAndCredits)
 	CHECK(scroller.slots().back().line == (scroller.slots().front().line + 39) % 3);
 	scroller.enable(false);
 	CHECK(scroller.slots().empty());
+}
+
+// The favourites (Multiplay, GeneralSettings' list): a listed server's star,
+// a server by its address, the quick list's "Favorites" rows, removal,
+// and the profile's General.con lines.
+TEST(MenuBindings_Favourites)
+{
+	Fake fake;
+	NativeRegistry natives;
+	menu::MenuBindings bindings(natives, fake.services());
+	menu::SettingsObjects objects;
+	bindings.setSettingsObjects(&objects);
+	avm1::Interpreter vm;
+	const auto mp = [&](const char* member, std::vector<avm1::Value> args = {}) {
+		return call(vm, natives, "dice.bf2.Multiplay", member, std::move(args));
+	};
+	// The quick list before: Favorites, a gap, Live servers, then the 12.
+	natives.call(vm, "dice.bf2.Multiplay", "startBrowse", {});
+	bindings.finishJobs();
+	mp("isBrowsing");
+	auto quick = natives.listRows("serverListQuick");
+	CHECK(quick.size() == 15);
+	// A listed server's star: added with its name, refused the second time.
+	CHECK(avm1::toBoolean(mp("addFavouriteServer", {avm1::Value("10.0.0.3 17569 29900")})));
+	CHECK(!avm1::toBoolean(mp("addFavouriteServer", {avm1::Value("10.0.0.3 17569 29900")})));
+	CHECK(!avm1::toBoolean(mp("addFavouriteServer", {avm1::Value("10.9.9.9 16567 29900")}))); // not listed
+	// By address: a bad one and a duplicate raise the game's messages.
+	CHECK(!avm1::toBoolean(mp("validateIp", {avm1::Value("10.0.0.256")})));
+	CHECK(!avm1::toBoolean(mp("validateIp", {avm1::Value("10.0.0")})));
+	CHECK(avm1::toBoolean(mp("validateIp", {avm1::Value("192.168.1.20")})));
+	CHECK(!avm1::toBoolean(mp("addFavourite", {avm1::Value("Mine"), avm1::Value("1.2.3"), avm1::Value(16567)})));
+	CHECK(vm.toString(call(vm, natives, "dice.MessageHandler", "getLastText")) == "invalidip");
+	CHECK(avm1::toBoolean(mp("addFavourite", {avm1::Value("Mine"), avm1::Value("192.168.1.20"), avm1::Value(16567)})));
+	CHECK(!avm1::toBoolean(mp("addFavourite", {avm1::Value("Again"), avm1::Value("192.168.1.20"), avm1::Value(16567)})));
+	CHECK(vm.toString(call(vm, natives, "dice.MessageHandler", "getLastText")) == "serveralreadyfavorite");
+	const auto favourites = bindings.favouriteServers();
+	CHECK(favourites.size() == 2);
+	CHECK(favourites.size() == 2 && favourites[0].name == "Fake server 3" && favourites[1].ip == "192.168.1.20");
+	// General.con's lines, as the original writes them.
+	CHECK(objects.generalScript().find("GeneralSettings.addFavouriteServer \"192.168.1.20\" 16567 \"Mine\" 0") != std::string::npos);
+	// The quick list: Favorites, the two, a gap, Live servers, the 12.
+	quick = natives.listRows("serverListQuick");
+	CHECK(quick.size() == 17);
+	CHECK(quick.size() == 17 && quick[1][0] == "Fake server 3" && quick[2][0] == "Mine" && quick[2][1].empty());
+	CHECK(natives.listRows("favouriteServers").size() == 2);
+	// Joining one by its address uses it like any other server.
+	CHECK(avm1::toBoolean(mp("joinServer", {avm1::Value("192.168.1.20 16567 0")})));
+	CHECK(bindings.joinedHost() == "192.168.1.20");
+	// Removed by "ip port" and by a row's address.
+	CHECK(avm1::toBoolean(mp("removeFavourite", {avm1::Value("192.168.1.20 16567")})));
+	CHECK(!avm1::toBoolean(mp("removeFavourite", {avm1::Value("192.168.1.20 16567")})));
+	CHECK(avm1::toBoolean(mp("removeFavouriteServer", {avm1::Value("10.0.0.3 17569 29900")})));
+	CHECK(bindings.favouriteServers().empty() && natives.listRows("serverListQuick").size() == 15);
+	CHECK(!avm1::toBoolean(mp("isServerOnline", {avm1::Value("10.0.0.3 17569 29900")})));
+
+	// The history from the profile's file: made a favourite, removed.
+	objects.setList("GeneralSettings.ServerHistory", {"\"10.1.1.1\" 16567 \"Old one\" 29901"});
+	CHECK(avm1::toBoolean(mp("addHistoryToFavourites", {avm1::Value("10.1.1.1 16567")})));
+	CHECK(bindings.favouriteServers().size() == 1 && bindings.favouriteServers()[0].name == "Old one"
+		&& bindings.favouriteServers()[0].queryPort == 29901);
+	call(vm, natives, "dice.bf2.GeneralSettings", "removeServer", {avm1::Value("10.1.1.1 16567 29901")});
+	CHECK(bindings.favouriteServers().empty() && bindings.favouriteServers(true).size() == 1);
+	mp("clearHistory");
+	CHECK(bindings.favouriteServers(true).empty());
+
+	// The direct IP (GSConnectToIpHost / Port, 17567 unset).
+	CHECK(vm.toNumber(mp("getConnectToIpPort")) == 17567);
+	mp("setConnectToIpHost", {avm1::Value("192.168.1.30")});
+	mp("setConnectToIpPort", {avm1::Value(16568)});
+	CHECK(vm.toString(mp("getConnectToIpHost")) == "192.168.1.30" && vm.toNumber(mp("getConnectToIpPort")) == 16568);
+	CHECK(objects.userSettingsScript().find("SettingsManager.stringSet GSConnectToIpHost \"192.168.1.30\"") != std::string::npos);
+
+	// The browser's check boxes: bits of the toggle filters (0x4c382).
+	CHECK(avm1::toBoolean(mp("getToggleFilter", {avm1::Value(2)})));
+	CHECK(!avm1::toBoolean(mp("getToggleFilter", {avm1::Value(1)})));
+	mp("setToggleFilter", {avm1::Value(1), avm1::Value(true), avm1::Value("numplayers>0")});
+	CHECK(avm1::toBoolean(mp("getToggleFilter", {avm1::Value(1)})));
+	mp("setToggleFilter", {avm1::Value(2), avm1::Value(true), avm1::Value("%%")});
+	CHECK(!avm1::toBoolean(mp("getToggleFilter", {avm1::Value(2)})));
+	CHECK(objects.get("GeneralSettings.ToggleFilters") == std::to_string((0x4c382 | 1) & ~2));
+	mp("setJoinPassword", {avm1::Value("secret")});
+	CHECK(vm.toString(mp("getJoinPassword")) == "secret");
+}
+
+// The map list's own natives, the current game, Singleplay, Cursor and
+// Logic's small ones, the settings resets.
+TEST(MenuBindings_OfflineNatives)
+{
+	Fake fake;
+	NativeRegistry natives;
+	menu::MenuBindings bindings(natives, fake.services());
+	bindings.setMaps({{"Minsk", "gpm_cq", 32}, {"Belgrade", "gpm_sp", 16}});
+	avm1::Interpreter vm;
+	const auto mp = [&](const char* member, std::vector<avm1::Value> args = {}) {
+		return call(vm, natives, "dice.bf2.Multiplay", member, std::move(args));
+	};
+	mp("addMapToMapList", {avm1::Value("Camp_Gibraltar"), avm1::Value("gpm_ti"), avm1::Value(64)});
+	mp("addMapToMapList", {avm1::Value(""), avm1::Value("gpm_ti"), avm1::Value(64)}); // no name: nothing
+	mp("setFilterGameMode", {avm1::Value("gpm_sp")});
+	mp("addMapIndexToMapList", {avm1::Value(0)});
+	CHECK(natives.listRows("mapListChosen").size() == 2);
+	CHECK(vm.toString(mp("getMapName", {avm1::Value(0)})) == "Camp Gibraltar");
+	CHECK(vm.toString(mp("getMapName", {avm1::Value(5)})).empty());
+	CHECK(avm1::toBoolean(mp("moveMapInList", {avm1::Value(1), avm1::Value(true)}))); // Belgrade up
+	CHECK(vm.toString(mp("getMapName", {avm1::Value(0)})) == "Belgrade");
+	mp("moveMapInList", {avm1::Value(1), avm1::Value(false)}); // the last can't go down
+	CHECK(vm.toString(mp("getMapName", {avm1::Value(1)})) == "Camp Gibraltar");
+	mp("setMapList", {avm1::Value("x")});
+	CHECK(natives.listRows("mapListChosen").size() == 2);
+
+	// The current game: none, then the one started, none after leaving.
+	CHECK(vm.toString(mp("getCurrentMapName")) == "$noCurrentGame");
+	CHECK(vm.toNumber(mp("getCurrentMapSize")) == 0);
+	CHECK(avm1::toBoolean(mp("createServer")));
+	CHECK(vm.toString(mp("getCurrentMapName")) == "Belgrade" && vm.toString(mp("getCurrentMapGameMode")) == "gpm_sp");
+	CHECK(vm.toNumber(mp("getCurrentMapSize")) == 16 && vm.toNumber(mp("getCurrentMapMaxPlayers")) == 64);
+	call(vm, natives, "dice.bf2.Logic", "disconnectGame");
+	CHECK(vm.toString(mp("getCurrentMapName")) == "$noCurrentGame");
+
+	// Singleplay's do nothing; the cursor keeps its name and switch.
+	for (const char* member : {"chooseMission", "getBotSkills", "setBotSkills"}) {
+		CHECK(natives.isBound("dice.bf2.Singleplay", member));
+		CHECK(call(vm, natives, "dice.bf2.Singleplay", member).isUndefined());
+	}
+	CHECK(vm.toString(call(vm, natives, "dice.bf2.Cursor", "getCursor")) == "undefined");
+	call(vm, natives, "dice.bf2.Cursor", "setCursor", {avm1::Value("hand")});
+	call(vm, natives, "dice.bf2.Cursor", "enableCursor", {avm1::Value(false)});
+	CHECK(vm.toString(call(vm, natives, "dice.bf2.Cursor", "getCursor")) == "hand" && !bindings.cursorEnabled());
+
+	// Logic: the activate reason, the frame label, the wait cursor, decimals.
+	call(vm, natives, "dice.bf2.Logic", "setActivateReason", {avm1::Value(2)});
+	CHECK(vm.toNumber(call(vm, natives, "dice.bf2.Logic", "getActivateReason")) == 2);
+	call(vm, natives, "dice.bf2.Logic", "setFrameLabel", {avm1::Value("options")});
+	CHECK(vm.toString(call(vm, natives, "dice.bf2.Logic", "getFrameLabel")) == "options");
+	call(vm, natives, "dice.bf2.Logic", "beginWaitState", {avm1::Value(1)});
+	CHECK(bindings.waitCursor() == 1);
+	call(vm, natives, "dice.bf2.Logic", "endWaitState");
+	CHECK(bindings.waitCursor() == 0);
+	CHECK(vm.toString(call(vm, natives, "dice.bf2.Logic", "setDecimals", {avm1::Value(3.14159), avm1::Value(2)})) == "3.14");
+
+	// GeneralSettings' resets: the HUD page's values back to 0x0049bdf0's.
+	call(vm, natives, "dice.bf2.GeneralSettings", "setHUDTransparency", {avm1::Value(0.5)});
+	call(vm, natives, "dice.bf2.GeneralSettings", "setCrosshairColor",
+		{avm1::Value(1), avm1::Value(2), avm1::Value(3), avm1::Value(4)});
+	call(vm, natives, "dice.bf2.GeneralSettings", "resetHud");
+	CHECK(vm.toNumber(call(vm, natives, "dice.bf2.GeneralSettings", "getHUDTransparency")) == 0);
+	CHECK(vm.toNumber(call(vm, natives, "dice.bf2.GeneralSettings", "getMinimapTransparency")) == 1.0 - 170.0 / 255.0);
+	CHECK(vm.toNumber(call(vm, natives, "dice.bf2.GeneralSettings", "getCrosshairColor")) == static_cast<double>(0xffffffffu));
+	call(vm, natives, "dice.bf2.GeneralSettings", "resetMessage");
+	CHECK(bindings.setting("GeneralSettings.ChatMessagesFilter", 0) == 1);
+	CHECK(!avm1::toBoolean(call(vm, natives, "dice.bf2.VideoSettings", "needsReboot")));
+}
+
+// dice.bf2.Mod over the installed mods (each Mod.desc).
+TEST(MenuBindings_Mods)
+{
+	const auto mod = menu::MenuBindings::parseModDesc("mods/bf2142",
+		"<mod>\n\t<title> HEADER_MODTITLE </title>\n\t<desc> TEXT_MODDESC </desc>\n\t<url> http://www.battlefield.com</url>\n"
+		"\t<logo> mod.png </logo>\n\t<music> sound/music/2142MenuMusic.ogg </music> \n\t<version> 1.51 </version>\n</mod>");
+	CHECK(mod.title == "HEADER_MODTITLE" && mod.url == "http://www.battlefield.com" && mod.logo == "mod.png" && mod.version == "1.51");
+	Fake fake;
+	NativeRegistry natives;
+	natives.setLocalizer([](const std::string& key) { return key == "HEADER_MODTITLE" ? std::string("Battlefield 2142") : key; });
+	menu::MenuBindings bindings(natives, fake.services());
+	std::string activated;
+	bindings.onActivateMod = [&activated](const std::string& path) { activated = path; };
+	std::vector<menu::MenuBindings::ModEntry> mods {mod};
+	if (const char* dir = std::getenv("BF2142_GAME_DIR")) {
+		mods = menu::MenuBindings::findMods(dir);
+		CHECK(mods.size() == 1 && mods[0].path == "mods/bf2142" && mods[0].version == "1.51");
+	}
+	bindings.setMods(mods, "mods/bf2142");
+	avm1::Interpreter vm;
+	const auto m = [&](const char* member, std::vector<avm1::Value> args = {}) {
+		return call(vm, natives, "dice.bf2.Mod", member, std::move(args));
+	};
+	CHECK(vm.toNumber(m("getNumMods")) == 1);
+	CHECK(natives.listRows("mods").size() == 1 && natives.listRows("mods")[0][0] == "Battlefield 2142");
+	CHECK(vm.toString(m("getCurrentModName")) == "bf2142");
+	CHECK(vm.toString(m("getModTitle")).empty()); // none selected
+	m("activateMod");
+	CHECK(activated.empty());
+	m("selectMod", {avm1::Value(0)});
+	CHECK(vm.toString(m("getModTitle")) == "Battlefield 2142");
+	CHECK(vm.toString(m("getModPath")) == "mods/bf2142" && vm.toString(m("getModPathShort")) == "bf2142");
+	CHECK(vm.toString(m("getModLogo")) == "mod.png" && vm.toString(m("getModVersion")) == "1.51");
+	m("activateMod");
+	CHECK(activated == "mods/bf2142");
+}
+
+// Every native SwiffPlayer registers (NativeTable.cpp's 702) is bound by
+// the menu bindings, or is one of these, each kind as docs/uncited.md's
+// "Menu natives" table lists it. A binding added for one of them, or a
+// native left in neither, fails here, so the table stays true.
+namespace {
+
+struct NativeKind {
+	const char* kind;
+	const char* object;
+	std::vector<const char*> members;
+};
+
+const NativeKind kUnboundNatives[] = {
+	// Bound outside MenuBindings: the player's built-ins (Player::installDefaults,
+	// NativeList's methods and fields), main.cpp's sound, music and credits.
+	{"elsewhere", "dice.bf2.Locale", {"getString", "getStringUppercase", "getLanguage", "getTextboxWidth", "convertToWide"}},
+	{"elsewhere", "dice.bf2.Logic", {"active", "setScrollSpeed", "enableScroller"}},
+	{"elsewhere", "dice.bf2.Mouse", {"insideMovieClip"}},
+	{"elsewhere", "dice.bf2.List", {"fillList", "abortFill", "sortList", "refreshList", "scrollUp", "scrollDown", "pageUp",
+		"pageDown", "setFirstIndex", "scrollPercent", "scrollToSelection", "selectRow", "setArgs", "m_firstIndex",
+		"m_rowCount", "m_selectedIndex"}},
+	{"elsewhere", "dice.bf2.Sound", {"playSound", "stopSound", "playMenuMusic", "stopMenuMusic"}},
+	{"elsewhere", "dice.bf2.Multiplay", {"getScrollFadeSpeed"}},
+	// Online only: the master server's revisions and query filters, HTTP,
+	// news, the EA account and registration, BFHQ, buddies, leaderboards,
+	// sponsors, demo and logo downloads.
+	{"online", "dice.General", {"flushList", "getListRevision", "getListEntries", "getHostVersion", "setFilter",
+		"setSortOrder", "cacheExtendedServerInfo", "setEquipmentIndex", "getHttpFile", "getHttpFileAsync", "isDownloading",
+		"getDownloadedContent"}},
+	{"online", "dice.bf2.Logic", {"getEANews", "getNextNewsTicker", "getBFWebsiteUrl", "useEreg2", "launchEreg2"}},
+	{"online", "dice.bf2.Multiplay", {"setBrowser", "getBrowser", "setFilter", "sort",
+		"updateFilter", "setHighestPing", "getSponsorText", "getSponsorLogoUrl", "isDownloadingDemo", "getDownloadingHostname",
+		"getDownloadingUrl", "getDownloadingDate", "getDownloadingProgress", "downloadDemo", "stopDownloadDemo",
+		"hasDemoDownloadFailed", "downloadServerLogo", "getSelectedLeaderboardCategoryId"}},
+	{"online", "dice.bf2.Profile", {"createOnlineAccount", "loginOnlineAccount", "loginOnlineAccountWithEmail",
+		"loginOnlineAccountWithNick", "searchUniquePlayer", "searchPlayer", "setComparePlayer", "clearComparePlayer",
+		"setStatPlayer", "getStatPlayer", "getStatPlayerName", "isMyProfile", "setActivePlayer", "newGamespyProfile",
+		"getFirstCountry", "prepareCreateMasterAccount", "getTermsOfService", "createMasterAccount", "createSubAccount",
+		"disableSubAccount", "retrieveAccountName", "retrievePassword", "getAccountInfo", "getAccountInfoEmail",
+		"getAccountBirthDate", "getAccountInfoParentalEmail", "getAccountInfoCountryIndex", "getAccountInfoAllowEAEmail",
+		"getAccountInfoAllowThirdPartyEmail", "updateAccountInfo", "updatePassword", "hasRetailerWeapon",
+		"hasRetailerRankup"}},
+	{"online", "dice.bf2.BuddySystem", {"sendBuddyRequest", "authBuddyRequest", "denyBuddyRequest", "removeBuddy",
+		"sendBuddyMessage", "getBuddiesOnlineString", "searchForNick", "getBuddyMessage", "muteBuddy", "getSystemMessage",
+		"registerCallback", "hasMessages"}},
+	{"online", "dice.bf2.PlayerStats", {"searchLeaderBoard", "getLeaderBoardPosition", "getLeaderBoardSelectRow"}},
+	{"online", "dice.bf2.ServerInfo", {"getSponsorText", "getCustomMapURL"}},
+	{"online", "dice.bf2.GeneralSettings", {"updateLastAwardsCheckDate"}},
+	// Leave the game: a web browser, the EA downloader, another program,
+	// a restart.
+	{"external", "dice.General", {"executePath"}},
+	{"external", "dice.bf2.Logic", {"launchEADownloader", "restartExe"}},
+	{"external", "dice.bf2.Multiplay", {"browse"}},
+	{"external", "dice.bf2.Mod", {"browseHomepage"}},
+	// Development: the authoring tool's assert, the shader switch, the
+	// context menu.
+	{"dev", "dice.bf2.Logic", {"assert"}},
+	{"dev", "dice.bf2.Shader", {"setShader"}},
+	{"dev", "dice.bf2.Mouse", {"registerContextMenu"}},
+	// Missing: would work offline, not bound yet.
+	{"missing", "dice.bf2.Logic", {"setIsLoading", "getCommandlineServer", "getCommandlineServerPassword",
+		"joinCommandlineServer", "startCommandlineServer", "getCommandLine", "setCommandLine", "isCapsLockPressed",
+		"cacheCredits", "getRandomCreditsTexture", "getAsync", "setAsync"}},
+	{"missing", "dice.bf2.Multiplay", {"setCurrentServerId", "clearServerId", "getMapDescriptionFromText", "getNumDemoBookmarks", "deleteDemoBookmark",
+		"getHasNewBookmark", "setHasNewBookmark", "playDemo", "deleteDemo", "getMapDescriptionFromId", "getGameModeFromId",
+		"getTeamName", "getMapPathFromName", "getSelectedFilterGameMode", "getSelectedFilterGameModeId",
+		"getSelectedServerFilterGameMode"}},
+	{"missing", "dice.bf2.Profile", {"deleteCurrentProfile", "getEquipmentName", "getEquipmentDescription", "setSelectedEquipment",
+		"setSelectedUnlockEquipment", "getSprint"}},
+	{"missing", "dice.bf2.Client", {"getPlayerName", "setPlayerName", "getCommandlineOption", "setCommandlineOption",
+		"getEORType", "getTimeUntilRestart", "getTotalTimeUntilRestart", "getCurrentLoadFile", "hasUserEscapedFromGame"}},
+	{"missing", "dice.bf2.EndOfRound", {"getPreviousMapDescription", "getPreviousMapGameModeDescription", "getKitNameFromId"}},
+	{"missing", "dice.bf2.ControlSettings", {"resetDefault"}},
+	{"missing", "dice.bf2.ServerInfo", {"getMapName", "getMaxPlayers", "getGameModeTitle", "getGameModeDescription",
+		"getBackgroundTitle", "getBackgroundDescription"}},
+	{"missing", "dice.bf2.VideoSettings", {"detectVideoScheme", "isRunningWithUnsupportedDrivers"}},
+	{"missing", "dice.bf2.AudioSettings", {"isInCriticalState"}},
+};
+
+} // namespace
+
+TEST(MenuBindings_NativeCoverage)
+{
+	Fake fake;
+	NativeRegistry natives;
+	menu::MenuBindings bindings(natives, fake.services());
+	menu::EndOfRoundBindings endOfRound(natives);
+	std::map<std::string, std::string> kinds;
+	for (const NativeKind& k : kUnboundNatives) {
+		for (const char* member : k.members) {
+			const std::string name = std::string(k.object) + "." + member;
+			CHECK(kinds.emplace(name, k.kind).second); // listed once
+		}
+	}
+	size_t bound = 0;
+	std::map<std::string, int> counts;
+	for (size_t i = 0; i < kNativeSlotCount; ++i) {
+		const NativeSlotSpec& slot = kNativeSlots[i];
+		const std::string name = std::string(slot.object) + "." + slot.member;
+		const bool isBound = natives.isBound(slot.object, slot.member);
+		const auto kind = kinds.find(name);
+		if (isBound) {
+			++bound;
+			if (kind != kinds.end()) {
+				std::fprintf(stderr, "bound but listed as %s: %s\n", kind->second.c_str(), name.c_str());
+			}
+			CHECK(kind == kinds.end());
+		} else {
+			if (kind == kinds.end()) {
+				std::fprintf(stderr, "unbound and not listed: %s\n", name.c_str());
+			}
+			CHECK(kind != kinds.end());
+			if (kind != kinds.end()) {
+				++counts[kind->second];
+			}
+		}
+		if (const char* dump = std::getenv("BF2142_NATIVE_TABLE")) {
+			static std::FILE* out = std::fopen(dump, "w");
+			if (out) {
+				std::fprintf(out, "%s\t%s\t%s\n", slot.object, slot.member,
+					isBound ? "bound" : kind != kinds.end() ? kind->second.c_str() : "?");
+				std::fflush(out);
+			}
+		}
+	}
+	CHECK(kNativeSlotCount == 702);
+	CHECK(bound + counts["elsewhere"] + counts["online"] + counts["external"] + counts["dev"] + counts["missing"] == kNativeSlotCount);
 }

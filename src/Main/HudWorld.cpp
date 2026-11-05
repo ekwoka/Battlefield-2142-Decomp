@@ -10,6 +10,7 @@
 #include "World/ObjectTemplateManager.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 
 namespace dice::hfe::host {
@@ -369,6 +370,63 @@ float RemoteHudWorld::objectHealth(uint32_t object) const
 	const world::Object* owned = m_round.objects().find(object);
 	const float most = templateNumber(owned ? owned->objectTemplate() : nullptr, "armor.maxHitPoints", 0);
 	return most > 0 ? o->health / most : -1;
+}
+
+std::vector<bool> RemoteHudWorld::repairCells(uint32_t vehicle) const
+{
+	const net::RemoteObject* o = m_world.object(ghostOf(vehicle));
+	return o ? o->repairCells : std::vector<bool> {};
+}
+
+namespace {
+
+// A bundle's turn as its ghost has it: the yaw (x) or the pitch (the y's
+// negative: partPose's pitch is down positive); 0 without one.
+float ghostBundle(const net::RemoteWorld& world, uint16_t ghost, const std::string& part, bool yaw, bool* found = nullptr)
+{
+	net::Vec3f offset, rotation;
+	if (part.empty() || !ghost || !world.partPose(ghost, part, offset, rotation)) {
+		return 0;
+	}
+	if (found) {
+		*found = true;
+	}
+	return yaw ? rotation.x : -rotation.y;
+}
+
+} // namespace
+
+bool RemoteHudWorld::gunTurn(uint32_t vehicle, int seat, float& yaw, float& pitch) const
+{
+	const std::vector<game::GameWorld::SeatLayout> seats = m_round.vehicleSeats(vehicle);
+	if (seat < 0 || static_cast<size_t>(seat) >= seats.size() || seats[static_cast<size_t>(seat)].weapon.empty()) {
+		return false;
+	}
+	const game::GameWorld::SeatLayout& s = seats[static_cast<size_t>(seat)];
+	const uint16_t ghost = ghostOf(vehicle);
+	float turn = s.frameYaw + ghostBundle(m_world, ghost, s.yawBundle, true);
+	// The turret it rides (seatMount: the carrier seat's yaw bundle).
+	if (s.gunAnchor.yawSeat >= 0 && static_cast<size_t>(s.gunAnchor.yawSeat) < seats.size()
+		&& s.gunAnchor.yawSeat != seat) {
+		turn += ghostBundle(m_world, ghost, seats[static_cast<size_t>(s.gunAnchor.yawSeat)].yawBundle, true);
+	}
+	yaw = std::remainder(turn, 360.0f);
+	pitch = ghostBundle(m_world, ghost, s.pitchBundle, false);
+	return true;
+}
+
+bool RemoteHudWorld::seatYaw(uint32_t vehicle, int seat, float& yaw) const
+{
+	const std::vector<game::GameWorld::SeatLayout> seats = m_round.vehicleSeats(vehicle);
+	if (seat < 0 || static_cast<size_t>(seat) >= seats.size() || seats[static_cast<size_t>(seat)].yawBundle.empty()) {
+		return false;
+	}
+	bool found = false;
+	const float turn = ghostBundle(m_world, ghostOf(vehicle), seats[static_cast<size_t>(seat)].yawBundle, true, &found);
+	if (found) {
+		yaw = turn;
+	}
+	return found;
 }
 
 std::vector<HudWorld::SquadRequest> RemoteHudWorld::squadRequests(int team) const

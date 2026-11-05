@@ -305,7 +305,7 @@ TEST(Commander_OrbitalStrike)
 	if (fired.size() == 1) {
 		std::string name = fired[0].fireArm;
 		std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return std::tolower(c); });
-		CHECK(fired[0].asset == station && name == "commander_emp_strike_genericfirearm");
+		CHECK(fired[0].asset == station && name == "commander_emp_strike_genericfirearm" && fired[0].first);
 		CHECK(std::fabs(fired[0].at.x) < 1e-3f && std::fabs(fired[0].at.z - 50) < 1e-3f
 			&& std::fabs(fired[0].at.y - world.terrainHeight(0, 50) - 500) < 1);
 	}

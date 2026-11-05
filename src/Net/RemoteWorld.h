@@ -122,6 +122,12 @@ struct RemoteObject {
 	bool seatDucking = false;
 	bool hasOccupantState = false;
 	NetworkableState occupantState;
+	// The armored objects below the root as its state carries them (mask
+	// 0x800000: eighths of their hit points, 8 intact, 0 a wreck) and of
+	// those the vehicle HUD's repair cells (hudRepairCellNo, 0x007a1e50: up
+	// while standing), empty until a state with them came.
+	std::vector<int> childDamage;
+	std::vector<bool> repairCells;
 	// Soldiers: the selected weapon (mask 0x2000) and, in a vehicle, the seat.
 	int weapon = -1;
 	uint32_t updates = 0;     // ghost updates received
@@ -423,6 +429,10 @@ public:
 	uint32_t radarReports() const { return m_radarReports; }
 	std::vector<PostRemoteInfo> takeMessages() { return std::exchange(m_messages, {}); }
 	std::vector<GameEvent> takeUnhandled() { return std::exchange(m_unhandled, {}); }
+	// The commanders' strike assets the server fired (kEvArtillery kind 2,
+	// the client's handler 0x0050eeb0): the client fires the asset's
+	// firearm there itself, for its effects (client::RemoteStrikes).
+	std::vector<StrikeFireInfo> takeStrikeFires() { return std::exchange(m_strikeFires, {}); }
 	std::vector<KickInfo> takeKicks() { return std::exchange(m_kicks, {}); }
 
 	// The teams' networkable (ghost kTeamStateGhost, Networkables.h): each
@@ -518,6 +528,7 @@ private:
 	std::vector<PostRemoteInfo> m_messages;
 	std::vector<GameEvent> m_unhandled;
 	std::vector<KickInfo> m_kicks;
+	std::vector<StrikeFireInfo> m_strikeFires;
 	PlayerInput m_input;
 	TeamNetState m_teamState;
 	std::map<int, SpawnGroupInfo> m_spawnGroups;

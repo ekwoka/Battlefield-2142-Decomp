@@ -1641,7 +1641,8 @@ private:
 	void flee(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
 	void idle(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
 	// The weapon handling after each execution's plan (AIDLL 0x10099b70):
-	// the primary back in hand and its reload.
+	// input 22 (the parachute) held while falling, the primary back in hand
+	// and its reload.
 	std::vector<GameWorld::WeaponAmmo> seatAmmo(const GameWorld::PlayerInfo& self,
 		const std::vector<std::pair<int, std::string>>& weapons) const;
 	void handleWeapon(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);

@@ -12,6 +12,8 @@
 //     0x007a1e50).
 #include "GameWorld.h"
 
+#include "Physics/CollisionMeshFile.h"
+#include "Physics/CollisionTemplateManager.h"
 #include "Physics/MaterialManager.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
@@ -253,11 +255,64 @@ std::vector<GameWorld::RollingSound> GameWorld::rollingSounds() const
 // all down. A cell brought to 0 or under is a wreck (0x00654120) and its
 // Python component's onDestroyEvent goes with the vehicle (the cells' 56,
 // VehicleShieldDestroyed, scored in scoringCommon.py to an enemy
-// attacker: the mirror's loss has none). Not rewritten: the cells' own
-// collision (their meshes aren't part of the vehicle's), so a shot can't
-// strike one, and with it damagePointOnDestroy (0x004c0e40, armour slot
-// 0x16c: the damage-assist award, given only on the hit that destroys the
-// cell), which the rewrite has no award for; the cells' armour effects.
+// attacker: the mirror's loss has none). Each cell is a child object with
+// its own collision mesh (ifv_shield_the_generator, mapMaterial 5101):
+// its faces are the vehicle's for the rounds (the projectile LOD, owned by
+// the cell's id), and a round that strikes one hurts its armour
+// (shieldCellDamage). Not rewritten: the cells' armour effects
+// (e_healing_node, e_titan_consol, e_bluespark_loop by its hit points).
+void GameWorld::buildShieldCells(Body& body)
+{
+	body.cellsBuilt = true;
+	const world::Object* object = m_objects.find(body.object);
+	const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
+	if (!t) {
+		return;
+	}
+	std::function<void(const world::ObjectTemplate&, const physics::Mat3&, const physics::Vec3&, int)> find =
+		[&](const world::ObjectTemplate& node, const physics::Mat3& turn, const physics::Vec3& at, int depth) {
+			for (const world::ChildTemplate& child : node.children()) {
+				const world::ObjectTemplate* c = m_templates.find(child.name);
+				if (!c || depth > 8) {
+					continue;
+				}
+				const physics::Mat3 local = physics::Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z});
+				const physics::Mat3 placed = local * turn;
+				const physics::Vec3 where = at + turn.transform({child.position.x, child.position.y, child.position.z});
+				if (hasComponent(*c, "Armor")) {
+					Body::Cell cell;
+					cell.t = c;
+					cell.mirror = number(*c, "armor.mirrorParentDamageLevel", 0) != 0;
+					cell.hudCell = static_cast<int>(number(*c, "armor.hudRepairCellNo", -1));
+					cell.maxHitPoints = number(*c, "armor.maxHitPoints", 10);
+					cell.hitPoints = number(*c, "armor.hitPoints", cell.maxHitPoints);
+					cell.pointOnDestroy = number(*c, "armor.damagePointOnDestroy", 0) != 0;
+					cell.rotation = placed;
+					cell.position = where;
+					if (cell.mirror || cell.hudCell != -1) {
+						body.cells.push_back(cell);
+					}
+				}
+				find(*c, placed, where, depth + 1);
+			}
+		};
+	find(*t, physics::Mat3 {}, physics::Vec3 {}, 0);
+	// The cells' meshes into the vehicle's projectile LOD.
+	if (!m_collisionTemplates || !m_files || !body.projectileMesh) {
+		return;
+	}
+	for (size_t i = 0; i < body.cells.size(); ++i) {
+		const Body::Cell& cell = body.cells[i];
+		const std::string* name = setting(*cell.t, "collisionMesh");
+		const physics::CollisionMeshFile* mesh = name ? m_collisionTemplates->mesh(*name, *m_files) : nullptr;
+		const uint32_t id = shieldCellId(body.object, i);
+		if (mesh && !mesh->geometries.empty() && id) {
+			body.projectileMesh->addMesh(*mesh, physics::CollisionUser::Projectile, cell.rotation, cell.position, id,
+				materialMap(*cell.t));
+		}
+	}
+}
+
 void GameWorld::stepShieldCells(Body& body, float seconds)
 {
 	const world::Object* object = m_objects.find(body.object);
@@ -266,28 +321,7 @@ void GameWorld::stepShieldCells(Body& body, float seconds)
 		return;
 	}
 	if (!body.cellsBuilt) {
-		body.cellsBuilt = true;
-		std::function<void(const world::ObjectTemplate&, int)> find = [&](const world::ObjectTemplate& node, int depth) {
-			for (const world::ChildTemplate& child : node.children()) {
-				const world::ObjectTemplate* c = m_templates.find(child.name);
-				if (!c || depth > 8) {
-					continue;
-				}
-				if (hasComponent(*c, "Armor")) {
-					Body::Cell cell;
-					cell.t = c;
-					cell.mirror = number(*c, "armor.mirrorParentDamageLevel", 0) != 0;
-					cell.hudCell = static_cast<int>(number(*c, "armor.hudRepairCellNo", -1));
-					cell.maxHitPoints = number(*c, "armor.maxHitPoints", 10);
-					cell.hitPoints = number(*c, "armor.hitPoints", cell.maxHitPoints);
-					if (cell.mirror || cell.hudCell != -1) {
-						body.cells.push_back(cell);
-					}
-				}
-				find(*c, depth + 1);
-			}
-		};
-		find(*t, 0);
+		buildShieldCells(body);
 	}
 	if (body.cells.empty()) {
 		return;
@@ -309,7 +343,10 @@ void GameWorld::stepShieldCells(Body& body, float seconds)
 		if (own > rootPercent) {
 			cell.hitPoints -= cell.maxHitPoints * (own - rootPercent) * 0.01f;
 		} else if (own < rootPercent && number(*cell.t, "armor.canBeRepaired", 1) != 0) {
-			cell.hitPoints = std::min(cell.maxHitPoints, cell.hitPoints + (rootPercent - own) * 0.01f * cell.maxHitPoints);
+			const float healed = std::min(cell.maxHitPoints, cell.hitPoints + (rootPercent - own) * 0.01f * cell.maxHitPoints);
+			armourHealed(shieldCellId(body.object, static_cast<size_t>(&cell - body.cells.data())), healed - cell.hitPoints,
+				healed >= cell.maxHitPoints);
+			cell.hitPoints = healed;
 		}
 		if (cell.hitPoints <= 0) {
 			cell.wreck = true;
@@ -319,6 +356,77 @@ void GameWorld::stepShieldCells(Body& body, float seconds)
 			}
 		}
 	}
+}
+
+uint32_t GameWorld::shieldCellId(uint32_t vehicle, size_t index) const
+{
+	return vehicle < (1u << 20) && index < 16 ? kShieldCellIds + (vehicle << 4) + static_cast<uint32_t>(index) : 0;
+}
+
+bool GameWorld::shieldCell(uint32_t id, Body*& body, Body::Cell*& cell)
+{
+	const Body* b = nullptr;
+	const Body::Cell* c = nullptr;
+	if (!static_cast<const GameWorld*>(this)->shieldCell(id, b, c)) {
+		return false;
+	}
+	body = const_cast<Body*>(b);
+	cell = const_cast<Body::Cell*>(c);
+	return true;
+}
+
+bool GameWorld::shieldCell(uint32_t id, const Body*& body, const Body::Cell*& cell) const
+{
+	if (id < kShieldCellIds || id >= kTitanPartIds) {
+		return false;
+	}
+	const uint32_t vehicle = (id - kShieldCellIds) >> 4;
+	const size_t index = (id - kShieldCellIds) & 0xf;
+	for (const Body& b : m_bodies) {
+		if (b.object == vehicle && index < b.cells.size()) {
+			body = &b;
+			cell = &b.cells[index];
+			return true;
+		}
+	}
+	return false;
+}
+
+// A round's damage on a cell (the game logic's damage 0x004c0e40 on the
+// cell's armour, after the material table). The armour keeps each
+// attacker's damage (its list, +0x1c of the game logic's record); with
+// damagePointOnDestroy the team damage (TeamDamage.cpp: an attacker of
+// the vehicle's team past teamVehicleDamageScoreLimit of the cell) goes
+// only on the hit that brings it down (armour slot 0x58 destroyed, and not
+// before this hit). The destroyed
+// cell raises its onDestroyEvent (56, VehicleShieldDestroyed) with the
+// attacker, whom scoringCommon.py scores when an enemy.
+bool GameWorld::shieldCellDamage(uint32_t id, float amount, int attacker)
+{
+	Body* body = nullptr;
+	Body::Cell* cell = nullptr;
+	if (!shieldCell(id, body, cell)) {
+		return false;
+	}
+	if (cell->wreck || amount <= 0) {
+		return true;
+	}
+	const float before = cell->hitPoints;
+	cell->hitPoints -= amount;
+	if (attacker >= 0) {
+		const uint32_t armour = id;
+		recordArmourDamage(armour, body->object, amount, attacker, cell->maxHitPoints);
+		checkTeamDamage(armour, body->object, attacker, cell->hitPoints <= 0, before <= 0, cell->pointOnDestroy, cell->maxHitPoints);
+	}
+	if (cell->hitPoints > 0) {
+		return true;
+	}
+	cell->wreck = true;
+	const int event = static_cast<int>(number(*cell->t, "Python.onDestroyEvent", 64));
+	if (event != 64) {
+		raiseTitanEvent(event, body->object, attacker);
+	}
+	return true;
 }
 
 std::vector<bool> GameWorld::repairCells(uint32_t vehicle) const

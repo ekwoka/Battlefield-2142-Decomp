@@ -636,14 +636,18 @@ TEST(Titan_BotsManHalfTheGuns)
 	game::BotManager bots(*level.world, settings);
 	level.afterTick = [&] { bots.update(1 / 30.0f); };
 	const auto pac = *level.titan(1);
+	const world::Object* titan = level.objects.find(pac.object);
+	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({titan->rotation().x, titan->rotation().y, titan->rotation().z});
 	std::vector<int> crew;
 	for (int i = 0; i < 6; ++i) {
 		const int id = level.world->addPlayer("Crew" + std::to_string(i), 1, true);
 		CHECK(level.world->spawnSoldier(id));
 		game::GameWorld::PlayerInfo info;
 		level.world->playerInfo(id, info);
-		// In the Titan's spawn room deck.
-		CHECK(level.world->setSoldierPosition(info.soldier, pac.position + physics::Vec3 {static_cast<float>(i) - 3, 9.5f, -40}));
+		// Over the Titan's spawn room deck (10.6 m up at 40 m aft, in its
+		// frame): they come down on it, falling too little for their
+		// parachutes (BotManager::handleWeapon's input 22).
+		CHECK(level.world->setSoldierPosition(info.soldier, pac.position + turn.transform({static_cast<float>(i) - 3, 11.5f, -40})));
 		crew.push_back(id);
 	}
 	level.run(40);
@@ -876,4 +880,89 @@ TEST(Titan_PodSeatsChangeToTheTitanPodNearATitan)
 		std::fprintf(stderr, "  %.0f m from the Titan: %s\n", off, pod.c_str());
 		CHECK(off < 250 ? pod == "eu_pod" : pod == "eu_pod_cq");
 	}
+}
+
+// A parachute opened inside a Titan (its hangar, 14 m over the deck) comes
+// down on the deck: the parachute (otherCollisionLod 2) meets each of the
+// Titan's parts at its soldier LOD (Titan::VehiclePart::lod), as the mobile
+// mesh physics meets any mesh at the LOD the mover asks for (0x006bb050),
+// lands on it (0x005cf750) and puts its rider out there, alive.
+TEST(Titan_ParachuteComesDownOnTheDecks)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Minsk", 48);
+	if (!level.loaded) {
+		return;
+	}
+	const auto pac = *level.titan(1);
+	const world::Object* object = level.objects.find(pac.object);
+	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+	const int id = level.world->addPlayer("Jumper", 1, true);
+	CHECK(level.world->spawnSoldier(id));
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(id, info);
+	level.world->setSoldierPosition(info.soldier, pac.position + turn.transform({0, 14, 15}));
+	game::SoldierInput nine;
+	nine.selectItem = 9; // held (0x004bba40): it opens once the fire test passes
+	bool opened = false;
+	float lowest = 1e9f;
+	for (int i = 0; i < 30 * 4; ++i) {
+		level.world->setInput(id, nine);
+		level.world->tick(1 / 30.0f);
+		opened = opened || !level.world->parachutes().empty();
+		for (const auto& chute : level.world->parachutes()) {
+			if (const world::Object* o = level.objects.find(chute.object)) {
+				const physics::Vec3 at {o->position().x, o->position().y, o->position().z};
+				lowest = std::min(lowest, turn.untransform(at - pac.position).y);
+			}
+		}
+	}
+	level.world->playerInfo(id, info);
+	const float feet = turn.untransform(info.position - pac.position).y;
+	std::fprintf(stderr, "  parachute down to %.1f, the soldier at %.1f over the Titan's origin\n", lowest, feet);
+	CHECK(opened);
+	CHECK(lowest > -1 && lowest < 5); // on the deck (-2.3), not through it
+	CHECK(level.world->parachutes().empty() && !info.vehicle && info.alive);
+	CHECK(feet > -3 && feet < -1.5f);
+}
+
+// A bot falling (AIDLL 0x10099b70: its node's velocity at most -1 m/s)
+// holds input 22, so the parachute opens as soon as its fire test passes
+// (2 m clear below, 10 m/s down): off the Titan's side, 170 m over the
+// ground, it rides the parachute down and lands alive.
+TEST(Titan_FallingBotOpensItsParachute)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Minsk", 48);
+	if (!level.loaded) {
+		return;
+	}
+	game::BotSettings settings;
+	game::BotManager bots(*level.world, settings);
+	level.afterTick = [&] { bots.update(1 / 30.0f); };
+	const auto pac = *level.titan(1);
+	const world::Object* titan = level.objects.find(pac.object);
+	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({titan->rotation().x, titan->rotation().y, titan->rotation().z});
+	const int id = level.world->addPlayer("Faller", 1, true);
+	CHECK(level.world->spawnSoldier(id));
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(id, info);
+	CHECK(level.world->setSoldierPosition(info.soldier, pac.position + turn.transform({60, 9.5f, -3})));
+	bool rode = false;
+	for (int s = 0; s < 40 && !(rode && info.alive && !info.vehicle && std::fabs(info.velocity.y) < 1); ++s) {
+		level.run(1);
+		level.world->playerInfo(id, info);
+		for (const auto& chute : level.world->parachutes()) {
+			rode = rode || chute.player == id;
+		}
+	}
+	std::fprintf(stderr, "  the bot rode a parachute: %d, %.1f m over the Titan at the end, alive %d\n", rode, info.position.y - pac.position.y, info.alive);
+	CHECK(rode && info.alive && !info.vehicle);
+	CHECK(info.position.y < pac.position.y - 100); // on the ground
 }
