@@ -1195,3 +1195,66 @@ TEST(Weapons_FullMagReloadAndMagazineLink)
 	rocket.shareMagazine(shotgun, true);
 	CHECK(rocket.magsLeft() == 2 && rocket.roundsInMag() == 4);
 }
+
+// The radius trigger's shape (0x005e8aa0): with triggerAngle 0 the point
+// toward a vehicle's origin, at most triggerRadius out, inside its box, and
+// one touching nothing only with radiusDetonateWithAirVehicles; with an
+// angle the pyramid ahead, widened by half the box; then the speed.
+TEST(Weapons_RadiusTriggerShape)
+{
+	game::ProjectileSettings mine;
+	mine.triggerRadius = 1; // the EMP mine's
+	mine.triggerMinSpeed = 0.01f;
+	const physics::Mat3 facing; // along +z
+	game::TriggerCandidate car;
+	car.boxMin = {-1.4f, -0.8f, -2.2f};
+	car.boxMax = {1.4f, 0.8f, 2.2f};
+	car.velocity = {0, 0, 5};
+	car.origin = {0, 0.5f, 2.5f}; // its nose 0.3 m from the mine: the 1 m point reaches into it
+	CHECK(game::radiusTriggerShape(mine, {0, 0, 0}, facing, car));
+	car.origin = {0, 0.5f, 3.5f}; // 1.3 m off: the point stops short of the box
+	CHECK(!game::radiusTriggerShape(mine, {0, 0, 0}, facing, car));
+	car.origin = {0, 0.5f, 2.5f};
+	car.inAir = true;
+	CHECK(!game::radiusTriggerShape(mine, {0, 0, 0}, facing, car));
+	mine.radiusDetonateWithAirVehicles = true; // the shipped vehicle mines
+	CHECK(game::radiusTriggerShape(mine, {0, 0, 0}, facing, car));
+	car.velocity = {};
+	CHECK(!game::radiusTriggerShape(mine, {0, 0, 0}, facing, car)); // standing still
+	game::TriggerCandidate soldier; // soldiers skip the box form
+	soldier.soldier = true;
+	soldier.origin = {0, 0, 2.9f};
+	soldier.velocity = {0, 0, -4};
+	soldier.boxMin = {-0.35f, 0, -0.35f};
+	soldier.boxMax = {0.35f, 1.85f, 0.35f};
+	CHECK(game::radiusTriggerShape(mine, {0, 0, 0}, facing, soldier));
+	// The claymore's 30 degrees: ahead within tan 30 x z, less half the box.
+	mine.triggerAngle = 30;
+	mine.triggerMinSpeed = 3.6f;
+	soldier.origin = {1.9f, 0, 2.5f}; // 1.9 - 0.35 = 1.55 > 1.44
+	CHECK(!game::radiusTriggerShape(mine, {0, 0, 0}, facing, soldier));
+	soldier.origin = {1.7f, 0, 2.5f};
+	CHECK(game::radiusTriggerShape(mine, {0, 0, 0}, facing, soldier));
+	soldier.origin = {0, 0, -1}; // behind
+	CHECK(!game::radiusTriggerShape(mine, {0, 0, 0}, facing, soldier));
+	// 360 degrees (the static AA's flak): only a line ahead as wide as the box.
+	mine.triggerAngle = 360;
+	mine.triggerMinSpeed = 0.01f;
+	car.velocity = {0, 0, 50};
+	car.origin = {1.0f, 0, 2.5f};
+	CHECK(game::radiusTriggerShape(mine, {0, 0, 0}, facing, car));
+	car.origin = {1.6f, 0, 2.5f};
+	CHECK(!game::radiusTriggerShape(mine, {0, 0, 0}, facing, car));
+}
+
+// ObjectTemplate.grip's PhysicsGripFlags (0x0051ae29 / 0x0051aaa9): names
+// with or without c_, short numbers by their name, anything else NoGrip.
+TEST(World_PhysicsGripFlags)
+{
+	CHECK(world::physicsGripFlags("8") == 8 && world::physicsGripFlags("128") == 0x80);
+	CHECK(world::physicsGripFlags("c_PGFEngineGrip") == 8 && world::physicsGripFlags("PGFDummyGrip") == 0x20);
+	CHECK(world::physicsGripFlags("0") == 1 && world::physicsGripFlags("3") == 1); // not one flag: PGFNoGrip
+	CHECK(world::physicsGripFlags("1024") == 1 && world::physicsGripFlags("junk") == 1);
+	CHECK(std::string(world::physicsGripFlagName(0x10)) == "PGFRollGripWhenOccupied");
+	CHECK(std::string(world::physicsGripFlagName(6)) == "PGFNoGrip");
+}

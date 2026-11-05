@@ -3,6 +3,7 @@
 #include "Physics/CollisionMeshFile.h"
 #include "World/ObjectTemplate.h"
 #include "World/ObjectTemplateManager.h"
+#include "World/WorldConsole.h"
 
 #include <algorithm>
 #include <cmath>
@@ -466,7 +467,10 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 				wheel.newCar2 = place.newCar2;
 				wheel.engine = place.oldEngine;
 				wheel.part = self;
-				wheel.gripFlags = static_cast<int>(number(t, "grip", 2));
+				// PhysicsGripFlags by name or number (0x0051ae29); unset,
+				// the template's 2.
+				const std::string* grip = setting(t, "grip");
+				wheel.gripFlags = grip ? world::physicsGripFlags(*grip) : 2;
 				vehicle->m_wheels.push_back(wheel);
 				return;
 			}

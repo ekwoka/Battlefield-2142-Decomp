@@ -12,8 +12,15 @@
 // addSensingAgentPattern Infantery Soldier; vtable 0x101175e8): a look
 // statement along an offset (0x100de2c0) beside the steering statement
 // (0x100cd3b0) that turns the walk (0x1008f8e0's way) into throttle and
-// strafe against the look (BotManager::steer). The vehicles' Turret and
-// Null patterns aren't rewritten: their gunners aim by their own plans.
+// strafe against the look (BotManager::steer). The Turret pattern
+// (vtable 0x10117660) builds the same look statement (0x1008c120: offset;
+// 0x1008c220: at an object, 0x100d4f10) for the seat's controlled object
+// when that has its ControlInfo (its AI part's +0x38), with no steering:
+// the gun turns, run by the seat's MouseTurretLookAt as a soldier's look
+// is. Its statement carries 5 degrees (+0x1c, DAT_10127df0 x 5) where the
+// Soldier's carries 0; the controller 0x100e5820 takes it as its fifth
+// argument and never reads it. The Null pattern (0x101175b4, 0x1008b9f0)
+// builds a statement that does nothing.
 // Any plan's aim (MouseTurretLookAt 0x1008e6e0, MouseTurretAimAt
 // 0x1008e940 -> 0x100d51c0) pauses the look-around for 2 s; a step of the
 // walk clears the pause's stamp (0x1008f8e0).
@@ -58,9 +65,9 @@ void sectorsOf(float x, float z, int& cardinal, int& diagonal)
 // 0x100d6d60 (bot vt+0x308, from the sensing pass 0x100ed700): the sectors
 // the soldier faces (its view within about 10 degrees of them, 0.9848)
 // weigh 0 again; the chosen one is marked reached.
-void BotManager::faceSectors(Bot& bot, const GameWorld::PlayerInfo& self)
+void BotManager::faceSectors(Bot& bot, float yaw)
 {
-	const float fx = std::sin(self.yaw * kRadiansPerDegree), fz = std::cos(self.yaw * kRadiansPerDegree);
+	const float fx = std::sin(yaw * kRadiansPerDegree), fz = std::cos(yaw * kRadiansPerDegree);
 	int c = 0, g = 0;
 	sectorsOf(fx, fz, c, g);
 	for (int s : {c, g}) {
@@ -78,7 +85,11 @@ void BotManager::faceSectors(Bot& bot, const GameWorld::PlayerInfo& self)
 // 0x100d77c0 -> 0x100d67b0 / 0x100d60f0, the look's duration 0x100d5ad0,
 // the cancel test 0x100d6300, a new plan 0x100d5ca0 and the stimuli
 // cleared 0x100d6440. The soldier's control info allows every sector
-// (0x100d5a40 over 0x100d5440: no limits).
+// (0x100d5a40 over 0x100d5440: no limits). A turret's would hold the
+// sectors to its yaw limits (0x100d5440 over the ControlInfo's slots
+// 0x4c / 0x54 / 0x60 in BF2142.exe); the rewrite lets every sector
+// through (the shipped tanks' and AA guns' turrets turn all round; a
+// limited gun stops at its limit).
 void BotManager::lookAround(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds)
 {
 	Bot::Look& L = bot.look;
@@ -241,7 +252,11 @@ void BotManager::lookAround(Bot& bot, const GameWorld::PlayerInfo& self, Soldier
 				// 0x100d5ca0: the walk's way known, or the choice outweighs
 				// the Turn's request: the sector's look; else the request's.
 				if (L.moveX * L.moveX + L.moveZ * L.moveZ >= 0.01f || !L.requested || L.requestWeight <= bestW) {
-					const float pitchY = std::sin(bot.pitch * kRadiansPerDegree);
+					float gunYaw = 0, gunPitch = bot.pitch;
+					if (self.vehicle) {
+						m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
+					}
+					const float pitchY = std::sin(gunPitch * kRadiansPerDegree);
 					// A point at y exactly 0 reads as a plain sector (the
 					// original's test of the point's y).
 					if (hasAt && bestAt.y != 0) {
@@ -289,6 +304,22 @@ void BotManager::lookAround(Bot& bot, const GameWorld::PlayerInfo& self, Soldier
 	input.throttle = throttle;
 	input.strafe = strafe;
 	L.quiet = false;
+}
+
+bool BotManager::turretLooks(const GameWorld::PlayerInfo& self) const
+{
+	if (!self.vehicle || m_settings.vehicle(equipmentOf(self)).sensingPattern != "Turret") {
+		return false;
+	}
+	float yaw = 0, pitch = 0;
+	if (!(self.seat > 0 || drivesGun(self)) || !m_world.gunAim(self.vehicle, self.seat, yaw, pitch)) {
+		return false;
+	}
+	const std::vector<GameWorld::SeatLayout> seats = const_cast<GameWorld&>(m_world).vehicleSeats(self.vehicle);
+	if (self.seat < 0 || static_cast<size_t>(self.seat) >= seats.size()) {
+		return false;
+	}
+	return m_settings.plugin(aiTemplateOf(seats[static_cast<size_t>(self.seat)].name), "ControlInfo") != nullptr;
 }
 
 int BotManager::lookSector(int player) const

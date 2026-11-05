@@ -50,6 +50,37 @@ float penetrationLoss(const physics::Material& material, bool wayOut, float thic
 	return std::clamp(thickness * material.damageLoss, material.minDamageLoss, material.maxDamageLoss);
 }
 
+bool radiusTriggerShape(const ProjectileSettings& mine, const physics::Vec3& minePosition, const physics::Mat3& mineFrame,
+	const TriggerCandidate& c)
+{
+	if (mine.triggerAngle <= 0) {
+		if (!c.soldier) {
+			const physics::Vec3 d = c.origin - minePosition;
+			const float distance = std::sqrt(physics::lengthSquared(d));
+			// 0x004bb060: the shorter of the distance and the radius.
+			const physics::Vec3 point =
+				distance > 1e-6f ? minePosition + d * (std::min(distance, mine.triggerRadius) / distance) : minePosition;
+			const physics::Vec3 local = c.rotation.untransform(point - c.origin);
+			const bool inside = local.x >= c.boxMin.x && local.x <= c.boxMax.x && local.y >= c.boxMin.y
+				&& local.y <= c.boxMax.y && local.z >= c.boxMin.z && local.z <= c.boxMax.z;
+			if (!inside || (!mine.radiusDetonateWithAirVehicles && c.inAir)) {
+				return false;
+			}
+		}
+	} else {
+		const physics::Vec3 local = mineFrame.untransform(c.origin - minePosition);
+		if (local.z < 0) {
+			return false; // behind it
+		}
+		const float reach = std::fabs(std::tan(mine.triggerAngle * 0.017453292f) * local.z); // DAT_00a02d70
+		if (std::fabs(local.x) - (c.boxMax.x - c.boxMin.x) * 0.5f >= reach
+			|| std::fabs(local.y) - (c.boxMax.y - c.boxMin.y) * 0.5f >= reach) {
+			return false;
+		}
+	}
+	return std::sqrt(physics::lengthSquared(c.velocity)) >= mine.triggerMinSpeed; // the node's slot 100
+}
+
 ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate& t)
 {
 	ProjectileSettings s;
@@ -166,7 +197,8 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	s.allowSolidPenetration = number(t, "penetrate.allowSolidPenetration", 1) != 0;
 	s.allowLiquidPenetration = number(t, "penetrate.allowLiquidPenetration", 1) != 0;
 	s.triggerRadius = number(t, "detonation.triggerRadius", 0);
-	s.triggerAngle = number(t, "detonation.triggerAngle", 180);
+	s.triggerAngle = number(t, "detonation.triggerAngle", 0); // 0x005e9df0
+	s.radiusDetonateWithAirVehicles = number(t, "detonation.radiusDetonateWithAirVehicles", 0) != 0;
 	s.triggerMinSpeed = number(t, "detonation.triggerVictimMinSpeed", 0);
 	if (const auto type = t.settings().find("detonation.triggerType"); type != t.settings().end()) {
 		static const char* const kTypes[] = {"MTYNone", "MTYPersonnel", "MTYVehicle", "MTYPco"};

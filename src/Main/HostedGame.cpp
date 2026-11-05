@@ -684,7 +684,7 @@ void HostedGame::sendTo(int client, const net::GameEvent& event)
 
 // --- demos (the server's recordDemo, 0x004afcc0; stopRecording 0x004afdb0)
 
-bool HostedGame::recordDemo(const std::string& path)
+bool HostedGame::recordDemo(const std::string& path, const std::string& cameraPath)
 {
 	if (m_demo.isOpen()) {
 		return false; // "already recording"
@@ -717,6 +717,13 @@ bool HostedGame::recordDemo(const std::string& path)
 	m_demo.marker(0);
 	if (onLog) {
 		onLog("recording demo " + path);
+	}
+	// 0x005172f0: with a local player, the camera too (0x005171f0).
+	net::CameraKeyframe probe;
+	if (!cameraPath.empty() && localCamera && localCamera(probe)) {
+		m_cameraPath = cameraPath;
+		m_cameraRecorder.restart();
+		m_recordingCamera = true;
 	}
 	return true;
 }
@@ -799,6 +806,12 @@ void HostedGame::stopDemo()
 		return;
 	}
 	m_demo.close(static_cast<int32_t>(m_tick));
+	if (m_recordingCamera) {
+		m_recordingCamera = false;
+		if (!net::writeCameraFile(m_cameraPath, m_cameraRecorder.frames()) && onLog) {
+			onLog("cannot write " + m_cameraPath);
+		}
+	}
 	m_clients.erase(kDemoClient);
 	m_demoEvents.clear();
 	if (onLog) {
@@ -3075,6 +3088,16 @@ void HostedGame::tick()
 		client.rescoreIn -= kTickSeconds;
 	}
 	m_server.sendPaced([this](int client, size_t bits) { return ghostsFor(client, bits); }, kTickSeconds);
+	if (m_recordingCamera) {
+		// 0x00432680 -> 0x00516b20 -> 0x005f9630, a frame each tick.
+		net::CameraKeyframe frame;
+		if (!localCamera || !localCamera(frame)) {
+			frame = {};
+			frame.followed = 0xffffffffu;
+			frame.position[1] = 100;
+		}
+		m_cameraRecorder.record(1, m_tick, frame);
+	}
 	if (m_demo.isOpen()) {
 		// The demo connection is paced by sv.demoQuality's rate too
 		// (0x004b02a0 adds 1 / its packets a second).

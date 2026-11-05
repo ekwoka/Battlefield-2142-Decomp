@@ -31,6 +31,8 @@ namespace dice::hfe::game {
 namespace {
 
 constexpr float kSoldierAiRadius = 1.1489125f; // Bots.cpp's kSoldierRadius (the soldier's AI radius)
+constexpr float kStrikeRadius = 40; // the squad manager's +0xb8 (0x10087f80)
+constexpr float kStrikeLife = 25;   // +0xc0
 
 float distance2(const physics::Vec3& a, const physics::Vec3& b)
 {
@@ -216,11 +218,268 @@ void BotManager::updateSquads()
 			}
 		}
 	}
+	// The commanders' strikes reach the squad manager as they are called
+	// (0x10088040): the AI commander's from its own artillery (0x1009c050,
+	// below; its answers to requests 0x1009e020 / 0x1009e200, which the
+	// rewrite's bots don't send), a human commander's orbital strike and
+	// artillery through IAIEventCourier slot 0x5c (0x1004e690, from
+	// BF2142.exe 0x007d7d80 / 0x007d88d0 as the tool is used). Here: a
+	// strike new in the world's list since the last tick.
+	std::vector<std::pair<int, physics::Vec3>> strikes;
+	for (const GameWorld::Strike& strike : m_world.strikes()) {
+		if (strike.ability != GameWorld::CommanderAbility::OrbitalStrike && strike.ability != GameWorld::CommanderAbility::Artillery) {
+			continue;
+		}
+		strikes.emplace_back(strike.team, strike.target);
+		const bool seen = std::any_of(m_strikesSeen.begin(), m_strikesSeen.end(), [&](const auto& s) {
+			return s.first == strike.team && distance2(s.second, strike.target) < 1e-4f;
+		});
+		if (!seen) {
+			noteStrike(strike.team, strike.target);
+		}
+	}
+	m_strikesSeen = std::move(strikes);
+	updateStrikeSpots();
 	m_squadSide = m_squadSide == 0 ? 1 : 0;
 	updateSquad(m_squads[{m_squadSide + 1, m_squadCursor + 1}]);
 	if (m_squadSide == 1) {
-		m_squadCursor = m_squadCursor >= 8 ? 0 : m_squadCursor + 1;
+		if (m_squadCursor >= 8) {
+			m_squadCursor = 0;
+			trackHumans(); // 0x1008a3b0, once the cursor wraps
+		} else {
+			++m_squadCursor;
+		}
 	}
+}
+
+// AIMain's population (vtable 0x10114d30). A human joining (slot 7,
+// 0x10056110 with a false "bot" flag; a bot joining only counts, +0xfc)
+// is counted (+0x100); with maxBotsIncludeHumans (IAISettings slot 3,
+// +0x37), bots about and the server's maximum (DAT_10139454 slot 4) under
+// humans plus bots, one bot goes (IAIGameEffector slots 0x24 / 0x14): the
+// last bot in the player list of the team with more players (team 2 on a
+// tie), of the other team when that one has none. A human leaving (slot
+// 8, 0x10056d10) leaves its squad (0x10089860) and, with
+// maxBotsIncludeHumans and bots plus humans under the maximum, the fill
+// (slot 20, 0x10056680) runs: with autoSpawnBots (IAISettings slot 40,
+// +0x36: aiSettings.autoSpawnBots, which the shipped scripts don't use;
+// their setAutoSpawnBots is no command) and the game's slot 0x5c, as many
+// bots as setMaxNBots less the humans (with maxBotsIncludeHumans) less
+// the bots there are, through the AI player factory (slot 0x18: here
+// addBot, on the side with fewer players). The original counts the
+// join and leave events; the rewrite sees the human players come and go.
+void BotManager::population()
+{
+	std::set<int> humans;
+	int bots = 0;
+	for (const GameWorld::PlayerInfo& p : m_world.playerList()) {
+		if (p.ai) {
+			++bots;
+		} else {
+			humans.insert(p.id);
+		}
+	}
+	std::set<int> counted;
+	for (int id : m_humansSeen) {
+		if (humans.count(id)) {
+			counted.insert(id);
+		}
+	}
+	const bool leaving = counted.size() < m_humansSeen.size();
+	for (int id : humans) {
+		if (counted.count(id)) {
+			continue;
+		}
+		counted.insert(id);
+		const int total = static_cast<int>(counted.size());
+		if (!m_settings.maxBotsIncludeHumans || bots <= 0 || m_serverMaxPlayers <= 0 || m_serverMaxPlayers >= total + bots) {
+			continue;
+		}
+		int count[3] = {0, 0, 0};
+		int last[3] = {-1, -1, -1};
+		for (const GameWorld::PlayerInfo& p : m_world.playerList()) {
+			if (p.team == 1 || p.team == 2) {
+				++count[p.team];
+				if (p.ai) {
+					last[p.team] = p.id;
+				}
+			}
+		}
+		int team = count[2] < count[1] ? 1 : 2;
+		if (last[team] == -1) {
+			team = team == 1 ? 2 : 1;
+		}
+		if (last[team] != -1 && m_world.removePlayer(last[team])) {
+			m_bots.erase(last[team]);
+			--bots;
+		}
+	}
+	m_humansSeen = counted;
+	if (leaving && m_settings.maxBotsIncludeHumans && m_serverMaxPlayers > 0 && bots + static_cast<int>(counted.size()) < m_serverMaxPlayers
+		&& m_settings.autoSpawnBots) {
+		int wanted = m_settings.maxBots - (m_settings.maxBotsIncludeHumans ? static_cast<int>(counted.size()) : 0) - bots;
+		for (; wanted > 0; --wanted) {
+			int count[3] = {0, 0, 0};
+			for (const GameWorld::PlayerInfo& p : m_world.playerList()) {
+				count[p.team == 1 || p.team == 2 ? p.team : 0] += 1;
+			}
+			addBot("", count[1] <= count[2] ? 1 : 2);
+		}
+	}
+}
+
+// 0x10088040: a strike for `team`'s side at `at` (the AI's height there:
+// the terrain's, DAT_10139450 slot 0xc; here the strike's target). The
+// other side learns of it (U + 1) x 12.5 s later (half of +0xc0's 25 s);
+// both sides' escape points are forgotten.
+void BotManager::noteStrike(int team, const physics::Vec3& at)
+{
+	if (team < 1 || team > 2) {
+		return;
+	}
+	StrikeSpot& s = m_strikeSpots[team - 1];
+	s.active = true;
+	s.at = m_time;
+	s.spot = at;
+	s.enemyDelay = (random() + 1.0f) * (kStrikeLife * 0.5f);
+	for (StrikeSpot& side : m_strikeSpots) {
+		side.escape[0] = side.escape[1] = false;
+	}
+}
+
+// 0x10088f20 (the squad manager's update, first): a spot 25 s old goes,
+// and every member of every squad is given its goal again (0x100c1ca0 ->
+// 0x100bf4e0(0): +0x35 0, +0x4e 1).
+void BotManager::updateStrikeSpots()
+{
+	for (StrikeSpot& s : m_strikeSpots) {
+		if (!s.active || !(s.at + kStrikeLife < m_time)) {
+			continue;
+		}
+		s.active = false;
+		for (auto& [key, squad] : m_squads) {
+			for (SquadMember& m : squad.members) {
+				m.goalSet = false;
+				m.regoal = true;
+			}
+		}
+	}
+}
+
+// 0x100880e0: whether `at` lies within 40 m (+0xb8) of the member's own
+// side's strike spot, or of the other side's once that side's delay is
+// over; `side` the spot's.
+bool BotManager::strikeSpotHit(int team, const physics::Vec3& at, int& side) const
+{
+	if (team < 1 || team > 2) {
+		return false;
+	}
+	const float r2 = kStrikeRadius * kStrikeRadius;
+	const StrikeSpot& own = m_strikeSpots[team - 1];
+	if (own.active && distance2(own.spot, at) < r2) {
+		side = team;
+		return true;
+	}
+	const StrikeSpot& other = m_strikeSpots[2 - team];
+	if (other.active && distance2(other.spot, at) < r2 && m_time > other.at + other.enemyDelay) {
+		side = 3 - team;
+		return true;
+	}
+	return false;
+}
+
+// The member's map (0x100c1300's): the vehicle mesh for a bot aboard a
+// vehicle, the infantry mesh on foot.
+bool BotManager::onMeshFor(const GameWorld::PlayerInfo& self, const physics::Vec3& at) const
+{
+	const ai::NavMesh* mesh = self.vehicle && m_vehicleNavMesh ? m_vehicleNavMesh : m_navMesh;
+	return !mesh || mesh->findPolygon(aiOf(at)) >= 0;
+}
+
+// 0x100bfcb0: a bot leaving a strike spot. Already leaving (+0x4f): it
+// keeps at it. Else from the spot through the bot at 45 m (the radius + 5)
+// a point on its map, tried five times, the way turned each time about
+// the vertical (0x100a82c0) from the first: an angle a (0 at first) going
+// 3a + (0.6 + 0.2 U) when a <= 0, -a - (0.6 + 0.2 U) otherwise. None: the
+// point an earlier member of the bot's side found for its kind (soldier,
+// its AI info's flag 0x200, or vehicle: 0x10088240), else nothing to do.
+// Found: a waypoint goal there (0x1008aff0: reach 0, area 60), +0x35 and
+// +0x4f set; a point it searched out is kept for its side (0x10088310).
+bool BotManager::escapeStrike(Squad& squad, SquadMember& member, Bot& bot, const GameWorld::PlayerInfo& self, int side)
+{
+	if (member.escaping) {
+		return true;
+	}
+	const StrikeSpot& spot = m_strikeSpots[side - 1];
+	physics::Vec3 base = member.at - spot.spot;
+	const float l = std::sqrt(base.x * base.x + base.y * base.y + base.z * base.z);
+	if (l > 0) {
+		base = base * (1.0f / l);
+	}
+	physics::Vec3 way = base;
+	float turn = 0;
+	bool found = false;
+	physics::Vec3 point;
+	for (int i = 0; i < 5; ++i) {
+		point = spot.spot + way * (kStrikeRadius + 5.0f);
+		if (onMeshFor(self, point)) {
+			found = true;
+			break;
+		}
+		const float step = 0.6f + 0.2f * random();
+		turn = turn <= 0 ? 3 * turn + step : -turn - step;
+		way = {std::cos(turn) * base.x - std::sin(turn) * base.z, 0, std::cos(turn) * base.z + std::sin(turn) * base.x};
+	}
+	const int kind = self.vehicle ? 1 : 0;
+	StrikeSpot& own = m_strikeSpots[squad.team - 1];
+	if (!found) {
+		if (!own.escape[kind]) {
+			return false;
+		}
+		point = own.escapeAt[kind];
+	}
+	member.goalSet = true;
+	member.escaping = true;
+	bot.squadGoal = true;
+	bot.formation = ai::moveToGoal(0, aiOf(point));
+	if (found) {
+		own.escape[kind] = true;
+		own.escapeAt[kind] = point;
+	}
+	return true;
+}
+
+// 0x1008a3b0: each human (the player's vt+0x84 false) alive and up on foot
+// with a Mobile part whose position isn't on its map (the pathfinding
+// courier's slot 0x30) goes into the list with the clock (0x10089e10, kept
+// from the first time); one on the map, dead, down or gone leaves it.
+void BotManager::trackHumans()
+{
+	std::map<int, float> kept;
+	for (const GameWorld::PlayerInfo& p : m_players) {
+		if (p.ai || !p.alive || p.manDown || p.vehicle) {
+			continue;
+		}
+		if (!onMeshFor(p, p.position)) {
+			const auto it = m_offMesh.find(p.id);
+			kept[p.id] = it != m_offMesh.end() ? it->second : m_time;
+		}
+	}
+	m_offMesh = std::move(kept);
+}
+
+// 0x100888d0: an enemy human of `team` off the mesh for over 60 s; its
+// position.
+bool BotManager::offMeshEnemy(int team, physics::Vec3& at) const
+{
+	for (const auto& [player, since] : m_offMesh) {
+		const GameWorld::PlayerInfo* p = playerOf(player);
+		if (p && p->team == (team == 1 ? 2 : 1) && since + 60 < m_time) {
+			at = p->position;
+			return true;
+		}
+	}
+	return false;
 }
 
 // Who belongs: the game's squad, in the players' order (joining 0x100c3f10,
@@ -559,8 +818,8 @@ bool BotManager::slotPoint(Squad& squad, int player, physics::Vec3& at)
 // to this member, to accept (0x100c21b0; the game's IBFSquad slot 0x28
 // takes it, 0x2c refuses). Then the member out of the formation heads for
 // the order (0x100c0a90), the one in it for its slot (0x100c0890).
-// (0x100bfcb0, the squad's vehicle pick through the squad manager's
-// 0x100880e0, isn't rewritten: the bots choose vehicles by Change.)
+// Before the order, a bot in a strike spot leaves it (0x100880e0,
+// 0x100bfcb0: escapeStrike).
 void BotManager::updateMember(Squad& squad, SquadMember& member)
 {
 	const GameWorld::PlayerInfo* p = playerOf(member.player);
@@ -592,6 +851,19 @@ void BotManager::updateMember(Squad& squad, SquadMember& member)
 		}
 		member.checkedAt = m_time;
 	}
+	// A bot alive and up (0x100bfa70) standing in a strike spot
+	// (0x100880e0) leaves it (0x100bfcb0) and does nothing else at this
+	// look; out of every spot it is no longer leaving (+0x4f 0).
+	if (bot && member.placed) {
+		int side = 0;
+		if (!p->manDown && strikeSpotHit(squad.team, member.at, side)) {
+			if (escapeStrike(squad, member, *bot, *p, side)) {
+				return;
+			}
+		} else {
+			member.escaping = false;
+		}
+	}
 	if (squad.state == 1) {
 		const GameWorld::PlayerInfo* leader = squadLeaderOf(squad);
 		int by = -1;
@@ -606,6 +878,14 @@ void BotManager::updateMember(Squad& squad, SquadMember& member)
 				m_world.acceptOrder(leader->id, accepted);
 			}
 		}
+	}
+	// 0x100c0890's first part, for every member with a slot, humans too:
+	// the slot's squared distance over the member's top speed (+0x20; the
+	// Mobile part's 0x100a4350, a soldier's 5), read by the lag test.
+	physics::Vec3 slot;
+	const bool slotted = ai::hasSlot(squad.formation, member.player) && slotPoint(squad, member.player, slot);
+	if (slotted) {
+		member.eta = distance2(slot, member.at) / 5.0f;
 	}
 	if (!bot || !p->alive) {
 		return;
@@ -628,11 +908,9 @@ void BotManager::updateMember(Squad& squad, SquadMember& member)
 		return;
 	}
 	// 0x100c0890.
-	physics::Vec3 slot;
-	if (!slotPoint(squad, member.player, slot)) {
+	if (!slotted) {
 		return;
 	}
-	member.eta = distance2(slot, member.at); // over the member's speed (1 here)
 	if (distance2(slot, member.at) <= 10.0f) {
 		if (!member.atSlot) {
 			member.goalSet = false;
@@ -743,14 +1021,38 @@ void BotManager::updateFormation(Squad& squad)
 			}
 		}
 	}
-	// 0x100f4f30: only human members lag (the bots' slots are cleared): the
-	// formation stays together with bots alone. (The human's test reads
-	// 0x1004f4e0 against 150..1500, not settled.)
+	// 0x100f4f30: human members lagging. A slot past the leader's is
+	// cleared (+0x18, +0x1c) for a bot, for the leader a human leads by,
+	// for a member not placed, whose slot time (+0x20, 0x1004f4e0: the
+	// squared distance over its speed) is outside (150, 1500), or who is no
+	// farther from the order's spot (+0x2c) than the squad's spot (+0x8c).
+	// Else the human lags: the first time for 10 + 10 U s, the formation
+	// not together (+0x28) while it lasts; once over, the slot isn't
+	// lagging but keeps its time, so it lags again only after a clear.
 	f.together = true;
+	const GameWorld::PlayerInfo* gameLeader = squadLeaderOf(squad);
 	for (size_t i = 1; i < f.slots.size(); ++i) {
-		if (f.slots[i].used && m_bots.count(f.slots[i].member)) {
-			f.slots[i].lagging = false;
-			f.slots[i].lagUntil = 0;
+		ai::FormationSlot& slot = f.slots[i];
+		if (!slot.used) {
+			continue;
+		}
+		const SquadMember* m = memberOf(squad, slot.member);
+		const bool leadingHuman = f.humanLeads && gameLeader && gameLeader->id == slot.member;
+		bool clear = leadingHuman || m_bots.count(slot.member) || !m || !m->placed || m->eta >= 1500.0f || m->eta <= 150.0f;
+		clear = clear || distance2(squad.orderAt, m->at) <= distance2(squad.orderAt, squad.at);
+		if (clear) {
+			slot.lagging = false;
+			slot.lagUntil = 0;
+		} else if (slot.lagging) {
+			if (m_time <= slot.lagUntil) {
+				f.together = false;
+			} else {
+				slot.lagging = false;
+			}
+		} else if (slot.lagUntil < 0.01f) {
+			f.together = false;
+			slot.lagging = true;
+			slot.lagUntil = m_time + random() * 10.0f + 10.0f;
 		}
 	}
 	// 0x100f51f0: the way the leader goes, over 0.5 m/s.
@@ -1063,6 +1365,40 @@ void BotManager::updateSquad(Squad& squad)
 				if (SquadMember* moved = memberOf(squad, f.slots[hole].member)) {
 					moved->goalSet = false;
 					moved->regoal = true;
+				}
+				// The leader's hole filled from the middle: that slot's hole
+				// takes the last used one in turn (0x100f64a0's second move),
+				// so the used slots stay packed from slot 0.
+				if (hole == 0 && from != last && from + 1 < f.slots.size() && f.slots[from + 1].used) {
+					size_t tail = f.slots.size() - 1;
+					while (tail > from && !f.slots[tail].used) {
+						--tail;
+					}
+					if (tail > from) {
+						f.slots[from] = f.slots[tail];
+						ai::clearSlot(f.slots[tail]);
+						if (SquadMember* moved = memberOf(squad, f.slots[from].member)) {
+							moved->goalSet = false;
+							moved->regoal = true;
+						}
+					}
+				}
+			}
+			if (hole == 0) {
+				// 0x100f6020: the trail starts again from the new leader's
+				// slot point (+0x4c, +0x78), its points and the slots' marks
+				// dropped.
+				physics::Vec3 c;
+				if (f.slots[0].used && (squad.at.x != 0 || squad.at.y != 0 || squad.at.z != 0)
+					&& slotPoint(squad, f.slots[0].member, c)) {
+					f.centre = aiOf(c);
+				}
+				f.lastCrumb = f.centre;
+				for (auto& crumb : f.crumbs) {
+					crumb.valid = false;
+				}
+				for (auto& slot : f.slots) {
+					slot.crumb = -1;
 				}
 			}
 			ai::markMoved(f, true, m_time);

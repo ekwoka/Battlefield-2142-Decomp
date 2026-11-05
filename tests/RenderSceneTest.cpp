@@ -16,6 +16,7 @@
 #include "Render/OverheadView.h"
 #include "Render/SceneMath.h"
 #include "Render/SimpleShadowmap.h"
+#include "Render/StaticLightmaps.h"
 #include "Render/TitanParts.h"
 #include "Scene/EffectSettings.h"
 #include "Scene/LightSettings.h"
@@ -778,3 +779,15 @@ TEST(RenderScene_SimpleShadowmap)
 	CHECK(simpleShadowHeight(2) == 2 && simpleShadowHeight(7) == 6 && simpleShadowHeight(-1) == 6);
 }
 
+
+TEST(RenderScene_StaticLightmapsByLightingQuality)
+{
+	using namespace dice::hfe::render;
+	// 0x100df010: low lighting (1) drops the statics' lightmaps but Titan
+	// parts' and objects/water/ meshes'; medium (2) and high (3) keep all.
+	CHECK(!staticKeepsLightmap(false, false, 1));
+	CHECK(staticKeepsLightmap(true, false, 1));
+	CHECK(staticKeepsLightmap(false, true, 1));
+	CHECK(staticKeepsLightmap(false, false, 2));
+	CHECK(staticKeepsLightmap(false, false, 3));
+}

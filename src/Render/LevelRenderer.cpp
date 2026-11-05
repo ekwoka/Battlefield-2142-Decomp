@@ -5,6 +5,7 @@
 #include "Scene/OvergrowthSettings.h"
 #include "MeshQueues.h"
 #include "SceneMath.h"
+#include "StaticLightmaps.h"
 
 #include <array>
 #include <limits>
@@ -515,6 +516,7 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 	// tree's are the overgrowth's (0x10151830 with the template's +0x2a2).
 	const bool tree = !bundled && !skinned && lower(geometry->path).find("vegitation") != std::string::npos;
 	gpuMesh->tree = tree;
+	gpuMesh->waterObject = !bundled && !skinned && lower(geometry->path).find("objects/water/") != std::string::npos;
 	const scene::TextureClass textureClass = skinned ? scene::TextureClass::SkinnedMesh
 		: bundled                                    ? scene::TextureClass::BundledMesh
 		: tree                                       ? scene::TextureClass::Overgrowth
@@ -584,8 +586,9 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 				submesh.specularKind = technique.find("colormapgloss") != std::string::npos ? 4 : 3;
 			}
 		}
-		// 0x100de8xx: a geometry whose path has "vegitation" is a tree
-		// (+0x2a2); its alpha-tested materials are the leaves (RaShaderLeaf).
+		// The static template's load (0x100de6d0): a geometry whose path has
+		// "vegitation" is a tree (+0x2a2); its alpha-tested materials are the
+		// leaves (RaShaderLeaf).
 		submesh.leaf = tree && material.alphaMode == 2;
 		// BundledMesh.fx's "AnimatedUV..." techniques (_HASUVANIMATION_).
 		submesh.animatedUV = bundled && technique.find("animateduv") != std::string::npos;
@@ -3119,6 +3122,7 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 		*m_sources->cameraInTitanOut = m_cameraInTitan;
 	}
 	const TitanView titanView {m_cameraInTitan, renderer.showAllTitanParts};
+	const int lightingQuality = m_sources && m_sources->quality ? m_sources->quality->lighting : 3;
 	// The object manager's distance fade (DistanceFade.h): the geometry
 	// quality's scales, the view distance GSViewDistance x the view
 	// distance scale, the frame's seconds.
@@ -3284,6 +3288,14 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 					item.lightmapTransform = entry.lightmapTransform;
 				}
 			}
+		}
+		// The static template's "use lightmaps" (0x100df010, asked by the
+		// static mesh's draw 0x100bdb00): at the low lighting quality (the
+		// settings' lighting, +0x38, under 2) a static mesh draws without
+		// its lightmap unless it is a Titan's part or under objects/water/.
+		if (item.lightmap && !item.mesh->bundled && !item.mesh->skinned && !instance.overgrowth &&
+			!staticKeepsLightmap(item.mesh->titanInterior || item.mesh->titanExterior, item.mesh->waterObject, lightingQuality)) {
+			item.lightmap = nullptr;
 		}
 		m_drawList.push_back(item);
 	}

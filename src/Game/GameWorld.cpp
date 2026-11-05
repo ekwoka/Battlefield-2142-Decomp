@@ -25,6 +25,13 @@ namespace {
 // .con, .inc, .tweak or .py file in the shipped archives includes it, so
 // the loader is not in anything shipped that names the file.
 constexpr const char* kRagDollScript = "Objects/Soldiers/Common/Animations/ragDollInit.con";
+// The radius trigger's interval (weapon-detonationTriggerFreq, 0x008e7260:
+// 0.25 s; read by 0x005e9f60).
+constexpr float kDetonationTriggerFrequency = 0.25f;
+// A soldier's box for the trigger's pyramid (the soldier mesh's box, slot
+// 0x54, isn't loaded): the rewrite's stand-in, about the shipped soldiers'.
+constexpr float kSoldierBoxWidth = 0.7f;
+constexpr float kSoldierBoxHeight = 1.85f;
 
 float number(const world::ObjectTemplate& t, const char* name, float fallback)
 {
@@ -3306,32 +3313,61 @@ void GameWorld::stepProjectiles(float seconds)
 				ghost->setPosition({p.position.x, p.position.y, p.position.z});
 			}
 		}
-		// A mine lying in wait (the radius trigger's test 0x005e8aa0): by its
-		// triggerType a soldier on foot (MTYPersonnel, MTYPco) or a vehicle
-		// (MTYVehicle, MTYPco; within triggerRadius of its bounds) inside
-		// the trigger cone and going faster than triggerVictimMinSpeed sets
-		// it off. The owner's side is spared when the one crossing it is a
-		// bot (player slot 0x68, +0xd4), or when the server's
-		// friendlyFireWithMines (DAT_00a3fcc0 +0x58) is off and the mine
-		// has allowFriendlyFireDetonation (+0x7c): a human teammate sets it
-		// off otherwise (the blast then hurts by the friendly-fire
-		// percentages). A vehicle's player is its driver's (the control
-		// object's slot 0x10); a mine whose owner has gone spares nobody.
-		if (p.resting && p.settings->triggerRadius > 0 && p.settings->triggerType != 0) {
+		// The radius trigger (the detonation component's update 0x005e9f60,
+		// every weapon-detonationTriggerFreq, 0.25 s, 0x008e7260; the
+		// countdown +0x14 starts full): with a triggerRadius, everyone with
+		// a control object within it (the sphere query, flags 0x1000108;
+		// a ladder's soldier for its LadderContainer) is put to the test
+		// 0x005e8aa0, and the first that passes sets it off (event 0x1f).
+		// It runs in flight as well as lying (the static AA's flak, a
+		// triggerAngle 360 proximity fuse). The test:
+		//  - by triggerType (+0x64): MTYPersonnel soldiers only, MTYVehicle
+		//    neither soldiers nor ladders nor parachutes, MTYPco anyone.
+		//  - the owner's side is spared when the one crossing it is a bot
+		//    (player slot 0x68, +0xd4), or when the server's
+		//    friendlyFireWithMines (DAT_00a3fcc0 +0x58) is off and the mine
+		//    has allowFriendlyFireDetonation (+0x7c); a human teammate sets
+		//    it off otherwise. A vehicle's player is its driver's (the
+		//    control object's slot 0x10); a mine whose owner has gone
+		//    spares nobody.
+		//  - triggerAngle (+0x78, 0 by default) 0 or less, for all but
+		//    soldiers: the point min(distance, triggerRadius) from the mine
+		//    towards the object's origin must lie in the object's box
+		//    (slot 0x9c, in its frame, 0x005a60a0); and an object touching
+		//    nothing (its physics node's +0x249, set each step and cleared
+		//    by a contact, slot 0x1b8) only counts with
+		//    radiusDetonateWithAirVehicles (+0x5c).
+		//  - triggerAngle above 0: in the mine's frame the object's origin
+		//    must be ahead (z >= 0) and within tan(angle) x z of the axis
+		//    across and up, less half its box's width and height (a
+		//    pyramid, not a cone; 360 leaves a line ahead as wide as the box).
+		//  - nothing in the way from the mine to its origin (0x006f2530);
+		//    for a soldier something in the way is tried again to his body
+		//    (0x00586e50 bone 2).
+		//  - its speed (the node's velocity, slot 100) at least
+		//    triggerVictimMinSpeed (+0x60).
+		if (p.alive && !p.visual && p.settings->triggerRadius > 0 && p.settings->triggerType != 0
+			&& (p.triggerIn -= seconds) < 0) {
+			p.triggerIn = kDetonationTriggerFrequency;
+			const ProjectileSettings& mine = *p.settings;
 			const Player* owner = findPlayer(p.player);
 			const auto spared = [&](const Player* who) {
 				return owner && who && who->team == owner->team
-					&& (who->ai || (!m_friendlyFireWithMines && p.settings->allowFriendlyFireDetonation));
+					&& (who->ai || (!m_friendlyFireWithMines && mine.allowFriendlyFireDetonation));
 			};
-			const auto trips = [&](const physics::Vec3& d, float reach, const physics::Vec3& velocity) {
-				const float speed = std::sqrt(velocity.x * velocity.x + velocity.z * velocity.z);
-				if (speed < p.settings->triggerMinSpeed || physics::lengthSquared(d) > reach * reach) {
-					return false;
-				}
-				const float heading = std::atan2(d.x, d.z) * 57.29578f;
-				return std::fabs(std::remainder(heading - p.yaw, 360.0f)) <= p.settings->triggerAngle;
+			// The mine's frame: lying, its facing; in flight, its heading.
+			physics::Mat3 frame = physics::Mat3::fromYawPitchRoll({p.yaw, 0, 0});
+			if (!p.resting && !p.stuck && physics::lengthSquared(p.velocity) > 1e-6f) {
+				const physics::Vec3& v = p.velocity;
+				frame = physics::Mat3::fromYawPitchRoll({std::atan2(v.x, v.z) * 57.29578f,
+					-std::atan2(v.y, std::sqrt(v.x * v.x + v.z * v.z)) * 57.29578f, 0});
+			}
+			const auto clear = [&](const physics::Vec3& to) {
+				physics::CollisionWorld::Hit blocked {};
+				return !m_projectileCollision.raycast(p.position, to, blocked);
 			};
-			const int type = p.settings->triggerType;
+			const float reach2 = mine.triggerRadius * mine.triggerRadius;
+			const int type = mine.triggerType;
 			bool tripped = false;
 			if (type == 1 || type == 3) {
 				for (const auto& owned : m_players) {
@@ -3339,8 +3375,19 @@ void GameWorld::stepProjectiles(float seconds)
 					if (!victim.present || !victim.alive || victim.vehicle || spared(&victim)) {
 						continue;
 					}
-					if (trips(victim.body.position - physics::Vec3 {0, 1.0f, 0} - p.position, p.settings->triggerRadius,
-							victim.body.velocity)) {
+					// The soldier's origin (his feet); his box the rewrite's
+					// stand-in (the soldier mesh's box isn't loaded).
+					TriggerCandidate c;
+					c.soldier = true;
+					c.origin = victim.body.position - physics::Vec3 {0, 1.0f, 0};
+					c.boxMin = {-kSoldierBoxWidth / 2, 0, -kSoldierBoxWidth / 2};
+					c.boxMax = {kSoldierBoxWidth / 2, kSoldierBoxHeight, kSoldierBoxWidth / 2};
+					c.velocity = victim.body.velocity;
+					const physics::Vec3 chest = c.origin + physics::Vec3 {0, 1.2f, 0};
+					if (physics::lengthSquared(c.origin - p.position) > reach2 && physics::lengthSquared(chest - p.position) > reach2) {
+						continue;
+					}
+					if (radiusTriggerShape(mine, p.position, frame, c) && (clear(c.origin) || clear(chest))) {
 						tripped = true;
 						break;
 					}
@@ -3356,7 +3403,19 @@ void GameWorld::stepProjectiles(float seconds)
 					if (spared(driver)) {
 						continue;
 					}
-					if (trips(body.body.position - p.position, p.settings->triggerRadius + body.objectRadius, body.body.velocity)) {
+					// The sphere query: its bounds within the radius.
+					const float bound = mine.triggerRadius + body.objectRadius;
+					if (physics::lengthSquared(body.body.position - p.position) > bound * bound) {
+						continue;
+					}
+					TriggerCandidate c;
+					c.origin = body.body.position;
+					c.rotation = body.body.rotation;
+					c.boxMin = body.boxMin;
+					c.boxMax = body.boxMax;
+					c.velocity = body.body.velocity;
+					c.inAir = body.inAir;
+					if (radiusTriggerShape(mine, p.position, frame, c) && clear(c.origin)) {
 						tripped = true;
 						break;
 					}
@@ -5660,7 +5719,15 @@ void GameWorld::fillKit(Player& player, world::ObjectTemplate* kitTemplate, worl
 		}
 		return false;
 	};
-	// What the kit carries, by slot.
+	// What the kit carries, by slot. The original's kit object prepares
+	// this when it is made (Kit vtable 0x00963c78 slot 7, 0x00571220): its
+	// children hidden, each with its ItemContainer (an unlock's items, the
+	// containers' children of interface 0xc4b3) in a list by template
+	// (+0x19c), each container with the kit items its replaceItem names
+	// (the map +0x1ac, matched without case, 0x0065b980), and a hidden
+	// "recycle bin" ItemContainer (+0x1b8, found or made by name) where the
+	// replaced items wait; then the build (0x00570ab0) below, from the
+	// templates directly.
 	if (kitTemplate) {
 		for (const world::ChildTemplate& child : kitTemplate->children()) {
 			const world::ObjectTemplate* item = m_templates.find(child.name);
@@ -11449,6 +11516,12 @@ void GameWorld::stepPhysics(float seconds)
 		if (!object || findDrone(b.object) || isTitan(b.object) || asleep(b)) {
 			continue;
 		}
+		// The physics node's +0x249 (slot 0x1b8): set at its step, cleared
+		// by a contact (0x006b9260, 0x006bb050 -> slot 0x1b4(0)); the
+		// rewrite's wheels touching the ground count as contacts.
+		b.inAir = b.response.contacts().empty()
+			&& !(b.vehicle && std::any_of(b.vehicle->wheels().begin(), b.vehicle->wheels().end(),
+				[](const Vehicle::Wheel& w) { return w.contact; }));
 		b.response.solve(b.body);
 		if (b.vehicle && b.vehicle->legs()) {
 			b.vehicle->legsDrive(b.body);

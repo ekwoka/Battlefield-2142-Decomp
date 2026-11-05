@@ -1937,6 +1937,9 @@ private:
 		// 0x005a66e0).
 		float objectRadius = 0;
 		float boxWidth = 0;
+		// Touching nothing since its last step (the physics node's +0x249,
+		// slot 0x1b8): the radius trigger's radiusDetonateWithAirVehicles.
+		bool inAir = false;
 		float mass = 1;
 		bool majorActor = false;
 		bool controlObject = false;

@@ -1084,3 +1084,64 @@ TEST(Effects_ObjectBundlesFirstPersonForm)
 	objects.update({theirs, mine}, manager);
 	CHECK(manager.emitters() == 1 && manager.emitting(8, 1) && !manager.emitting(7, 1));
 }
+
+// RendDX9's emit ranges (0x1013a080): a set fourth field flips the value's
+// sign half the time, so a Box emitter spawns on both sides.
+TEST(Effects_EmitRangeSignFlip)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* puff = addPuff(templates);
+	puff->settings()["emitterType"] = "Box";
+	puff->settings()["emitFrequency"] = "100";
+	puff->settings()["emitRangeX"] = "CRD_UNIFORM/1/2/1";
+	puff->settings()["emitRangeY"] = "CRD_UNIFORM/1/2/0";
+	effects::EffectManager manager(templates);
+	manager.spawn("e_puff", {});
+	for (int i = 0; i < 15; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	int negativeX = 0, positiveX = 0, negativeY = 0;
+	for (const effects::Particle& p : manager.emitterList()[0]->particles()) {
+		(p.position.x < 0 ? negativeX : positiveX) += 1;
+		negativeY += p.position.y < 0 ? 1 : 0;
+		CHECK(std::fabs(p.position.x) >= 0.99f && std::fabs(p.position.x) <= 2.01f);
+	}
+	CHECK(negativeX > 5 && positiveX > 5);
+	CHECK(negativeY == 0);
+}
+
+// A trail's points move after they are left (0x1013a600): emitSpeed up and
+// gravity down, in steps of 0.01 s.
+TEST(Effects_TrailPointsMove)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "EffectBundle");
+	templates.registerType(2, "TrailSystem");
+	world::ObjectTemplate* trail = templates.create("TrailSystem", "trail");
+	trail->settings()["emitFrequency"] = "10";
+	trail->settings()["timeToLive"] = "5";
+	trail->settings()["isLooping"] = "1";
+	trail->settings()["minTrailVelocity"] = "0";
+	trail->settings()["emitSpeed"] = "2";
+	trail->settings()["emitDirection"] = "0/1/0";
+	trail->settings()["gravity"] = "0";
+	trail->settings()["textureName"] = "trail";
+	world::ObjectTemplate* bundle = templates.create("EffectBundle", "e_trail");
+	bundle->children().push_back({"trail", {}, {}});
+	effects::EffectManager manager(templates);
+	manager.setAnchor(3, {0, 0, 0}, {});
+	CHECK(manager.spawnAttached("e_trail", 3, {}));
+	for (int i = 0; i < 30; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	CHECK(!manager.emitterList().empty());
+	const auto& points = manager.emitterList()[0]->particles();
+	CHECK(!points.empty());
+	if (!points.empty()) {
+		// The oldest point has risen at 2 m/s for its age.
+		const effects::Particle& first = points.front();
+		CHECK(first.age > 0.5f);
+		CHECK(std::fabs(first.position.y - 2 * first.age) < 0.1f);
+		CHECK(std::fabs(first.velocity.y - 2) < 1e-4f);
+	}
+}

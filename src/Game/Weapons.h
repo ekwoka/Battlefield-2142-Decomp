@@ -184,8 +184,11 @@ struct ProjectileSettings {
 	// sets it off; the blast reaches explosionConeAngle either side of the
 	// facing (0: all round).
 	float triggerRadius = 0;
-	float triggerAngle = 180;
+	float triggerAngle = 0; // +0x78: 0 or less the box form (GameWorld's radius trigger)
 	float triggerMinSpeed = 0;
+	// detonation.radiusDetonateWithAirVehicles (+0x5c): the box form also
+	// for an object touching nothing (all three shipped vehicle mines).
+	bool radiusDetonateWithAirVehicles = false;
 	float coneAngle = 0;
 	// detonation.triggerType (template +0x64, RadiusTriggerType): what sets
 	// it off (0x005e8aa0): MTYNone 0 nothing (the default), MTYPersonnel 1
@@ -651,6 +654,7 @@ struct Projectile {
 	bool armed = false;
 	int team = 0;         // the thrower's
 	float yaw = 0;        // the facing it was thrown with (mines' cones)
+	float triggerIn = 0.25f; // the radius trigger's countdown (the component's +0x14, starting full)
 	bool alive = true;
 	// Its firearm went (its player left): removed, without its effect, when
 	// this runs out (keepProjectiles, 0x005f1cc0); below 0 not counting.
@@ -674,6 +678,27 @@ struct Projectile {
 	uint32_t ghostObject = 0; // a server projectile's ghost object it follows (0: the client's own round)
 	uint32_t serial = 0;      // a stable id (the server's projectile ghosts, HostedGame::trackProjectiles)
 };
+
+// The radius trigger's shape test (0x005e8aa0; GameWorld's radius trigger
+// has the rest: the trigger types, the spared side, the line to it): the
+// object's origin, frame and box (object space), whether it is a soldier
+// and whether it touches nothing (its node's +0x249). With triggerAngle 0
+// or less, all but soldiers need the point min(distance, triggerRadius)
+// from the mine towards the origin inside the box (0x005a60a0), and one
+// touching nothing radiusDetonateWithAirVehicles; above 0, the origin in
+// the mine's frame `mineFrame` (rows x, y, z) ahead and within tan(angle)
+// x z of its axis across and up, less half the box's width and height.
+// Then its speed at least triggerVictimMinSpeed.
+struct TriggerCandidate {
+	physics::Vec3 origin;
+	physics::Mat3 rotation;
+	physics::Vec3 boxMin, boxMax;
+	physics::Vec3 velocity;
+	bool soldier = false;
+	bool inAir = false;
+};
+bool radiusTriggerShape(const ProjectileSettings& mine, const physics::Vec3& minePosition, const physics::Mat3& mineFrame,
+	const TriggerCandidate& candidate);
 
 // A tracer's place and size this frame (0x005b3e60, 0x005b3cb0): `round`
 // the round's position, `velocity` its velocity. Its position is the

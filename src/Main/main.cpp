@@ -153,6 +153,8 @@ struct Options {
 	bool servers = false;        // --servers: list the servers OpenSpy's master server knows
 	std::string connect;         // --connect host[:port] (the original's +joinServer): play on a game server
 	std::string demo;            // --demo <file.bf2142demo>: play a recorded game back (Net/Demo.h)
+	std::string demoCamera;      // --demo-camera <file.bf2142cam>: the demo's camera from a file (demo.cameramode playback)
+	std::string demoRecordCamera; // --demo-record-camera <file.bf2142cam>: record the demo's camera (demo.cameramode record)
 	bool host = false;           // --host: serve the local game to other clients (HostedGame.h)
 	bool playTeamGiven = false;  // --play 1|2: on a server, ask for that team (PostRemote 6/7)
 	bool walk = false;           // --walk: on a server without a window, walk and turn (the prediction's check)
@@ -258,6 +260,13 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.demo = argv[++i];
 			options.connect = "demo";
 			options.view = options.screenshot.empty();
+		} else if (arg == "--demo-camera" && hasValue) {
+			// The original's demo options file: demo.cameramode playback
+			// with demo.camerafile (0x0043a3a0, 0x00517490 -> 0x00516830).
+			options.demoCamera = argv[++i];
+		} else if (arg == "--demo-record-camera" && hasValue) {
+			// demo.cameramode record (0x00517490 -> 0x005171f0).
+			options.demoRecordCamera = argv[++i];
 		} else if (arg == "--probe" && hasValue) {
 			options.probe = argv[++i];
 		} else if (arg == "--net-log" && hasValue) {
@@ -3505,15 +3514,52 @@ int runGame(Options& options, Session& session)
 			auto playback = std::make_shared<host::DemoPlayback>();
 			auto carry = std::make_shared<double>(0);
 			g_demo = playback;
+			// demo.cameramode (DemoCamera.h): a camera file played
+			// (0x00516830) or recorded (0x005171f0), then the user's
+			// Settings/demo-playcam.con or demo-recordcam.con.
+			if (!options.demoCamera.empty()) {
+				std::vector<net::CameraKeyframe> frames;
+				if (!net::readCameraFile(options.demoCamera, frames)) {
+					std::printf("%s: not a camera file\n", options.demoCamera.c_str());
+				} else {
+					std::printf("demo camera %s: %zu frames\n", options.demoCamera.c_str(), frames.size());
+					playback->cameraTrack = host::DemoCameraTrack(std::move(frames));
+					playback->playingCamera = true;
+					std::string output;
+					console.run("Settings/demo-playcam.con", {}, output);
+				}
+			} else if (!options.demoRecordCamera.empty()) {
+				playback->recordingCamera = true;
+				playback->cameraRecordPath = options.demoRecordCamera;
+				std::string output;
+				console.run("Settings/demo-recordcam.con", {}, output);
+			}
 			client.playDemo([player, started, ticked, playback, carry](std::vector<uint8_t>& payload) {
 				const auto elapsed = std::chrono::steady_clock::now() - *started;
 				const int due = static_cast<int>(std::chrono::duration<double>(elapsed).count() * 30.0);
 				if (due > *ticked) {
 					// The game speed (0x004b3b90: the time manager's scale).
-					player->advance(playback->advance(due - *ticked, *carry));
+					const int ticks = playback->advance(due - *ticked, *carry);
+					// The camera recorded once the demo's clock runs
+					// (0x005f9630 waits for the reader's +0xdc), a frame
+					// for each tick gone by.
+					if (playback->recordingCamera && player->started() && playback->hasView) {
+						playback->cameraRecorder.record(ticks, static_cast<uint32_t>(player->tick()), playback->cameraFrame());
+					}
+					player->advance(ticks);
 					*ticked = due;
 				}
+				playback->tick = static_cast<uint32_t>(player->tick());
+				playback->fraction = static_cast<float>(*carry);
+				// A camera file played out ends the demo (0x00516bb0 ->
+				// 0x005f8c70 in 0x00432ee0).
+				if (playback->playingCamera && playback->cameraTrack.ended()) {
+					player->finish();
+				}
 				playback->ended = player->finished();
+				if (playback->ended) {
+					playback->saveCamera();
+				}
 				return player->next(payload);
 			});
 			// The playback controls (the demo interface 0x00928fa8 through
@@ -3840,6 +3886,7 @@ int runGame(Options& options, Session& session)
 		botSettings.levelFog = lights.fogStartEndAndBase;
 		game::BotManager bots(round, botSettings);
 		bots.attach(botSettings); // the scripted-bot commands (ai.botMoveTo...)
+		bots.setServerMaxPlayers(options.maxPlayers); // AIMain's kick and fill (sv.maxPlayers when hosting)
 		round.unlockAllByDefault = options.unlockAll;
 		if (heightmaps.hasSea()) {
 			round.setWaterLevel(heightmaps.seaWaterLevel());
@@ -5465,13 +5512,17 @@ int runGame(Options& options, Session& session)
 			admin.hooks.sayAll = [hosted](const std::string& text) { hosted->sayAll(text); };
 			// demo.recordDemo <name> / demo.stopRecording (0x004246fb ->
 			// 0x00432cc0 -> the server's 0x004afcc0; 0x00403080 -> 0x004afdb0).
-			bindMethod(console, "demo.recordDemo", ConsoleAccess::Anyone, [hosted](std::string name) {
+			bindMethod(console, "demo.recordDemo", ConsoleAccess::Anyone, [hosted, &console](std::string name) {
 				const std::string path = net::demoPath(name);
 				if (hosted->recordingDemo()) {
 					return std::string("already recording");
 				}
-				if (!hosted->recordDemo(path)) {
+				if (!hosted->recordDemo(path, host::demoCameraPath(name))) {
 					return "Failed to record demo. Maybe the demo '" + path + "' already exists.";
+				}
+				if (hosted->recordingCamera()) {
+					std::string output; // 0x005172f0: the user's camera settings
+					console.run("Settings/demo-recordcam.con", {}, output);
 				}
 				return "recording demo " + path;
 			});
@@ -7189,6 +7240,47 @@ int runGame(Options& options, Session& session)
 		static bool cameraInTitan = false;
 		sources.cameraInTitanOut = &cameraInTitan;
 		nametags::Nametags::View tagView;
+		bool tagViewSeen = false; // a frame drawn (tagView is the camera's)
+		if (hosted) {
+			// The demo's camera file on a server with a local player
+			// (0x005f9630): the player's view as last drawn; without a
+			// window its soldier's eye, looking its way; without a control
+			// object (0, 100, 0) unturned.
+			hosted->localCamera = [&round, &tagView, &tagViewSeen](net::CameraKeyframe& frame) {
+				const int local = round.localPlayer();
+				if (local < 0) {
+					return false;
+				}
+				frame = {};
+				frame.followed = 0xffffffffu;
+				game::GameWorld::PlayerInfo info;
+				if (!round.playerInfo(local, info) || !info.alive) {
+					frame.position[1] = 100;
+					return true;
+				}
+				float position[3] = {info.position.x, info.position.y + 1.6f, info.position.z};
+				float yaw = info.yaw * 3.14159265f / 180.0f, pitch = info.aimPitch * 3.14159265f / 180.0f;
+				if (tagViewSeen) {
+					std::copy(tagView.position.begin(), tagView.position.end(), position);
+					yaw = tagView.yaw;
+					pitch = tagView.pitch;
+				}
+				float rows[9];
+				host::demo_camera::rowsFromYawPitch(yaw, pitch, rows);
+				host::demo_camera::quaternionFromRows(rows, frame.rotation);
+				std::copy(position, position + 3, frame.position);
+				return true;
+			};
+		}
+		struct LocalCameraReset {
+			host::HostedGame* hosted;
+			~LocalCameraReset()
+			{
+				if (hosted) {
+					hosted->localCamera = nullptr;
+				}
+			}
+		} localCameraReset {hosted};
 		// The lock-on weapons' markers (Bf2ObjectMarkerNode, 0x007e6520):
 		// the enemy objects carrying a target object of the marker's type
 		// (HeatObject TTHeat on the aircraft, LaserTarget_vehicle TTLaser,
@@ -7799,8 +7891,14 @@ int runGame(Options& options, Session& session)
 		viewer.onCamera = [&round](const float position[3], const float forward[3]) {
 			round.setCamera({position[0], position[1], position[2]}, {forward[0], forward[1], forward[2]});
 		};
-		viewer.onView = [&tagView](const float position[3], float yaw, float pitch, float fovY, float aspect) {
+		viewer.onView = [&tagView, &tagViewSeen](const float position[3], float yaw, float pitch, float fovY, float aspect) {
 			tagView = {{position[0], position[1], position[2]}, yaw, pitch, fovY, aspect};
+			tagViewSeen = true;
+			if (g_demo) {
+				// The view a camera recording takes (0x005f9630: the camera's
+				// matrix +0x18 and position +0x48).
+				g_demo->setView(position, yaw, pitch);
+			}
 		};
 		viewer.wantsQuit = [&] {
 			session.nextMap = nextMapDue();
@@ -7815,6 +7913,52 @@ int runGame(Options& options, Session& session)
 			viewer.playerView = [&session, &playerCamera, &ownFeet](ViewerOptions::PlayerView& view) {
 				// A demo's camera following a player (0x005f8f40), with the
 				// demo's fov (0x00434610); free, the viewer's own camera.
+				// A camera file played (0x005fa4a0 -> 0x005fa210): its free
+				// frames as they are, its follow frames as the follow view
+				// (attached: that eye with the file's rotation).
+				if (session.client && g_demo && g_demo->playingCamera) {
+					host::DemoCameraTrack::Pose pose;
+					if (g_demo->cameraTrack.update(g_demo->tick, g_demo->fraction, g_demo->camera, pose)) {
+						g_demo->cameraPose = pose;
+						g_demo->hasCameraPose = true;
+					}
+					if (g_demo->hasCameraPose) {
+						const host::DemoCameraTrack::Pose& at = g_demo->cameraPose;
+						float rows[9];
+						host::demo_camera::rowsFromQuaternion(at.rotation, rows);
+						float yaw = 0, pitch = 0;
+						host::demo_camera::yawPitchOfRows(rows, yaw, pitch);
+						float eye[3] = {at.position[0], at.position[1], at.position[2]};
+						bool placed = !at.follow;
+						if (at.follow) {
+							const net::RemotePlayer* p = session.client->world().player(g_demo->camera.followed);
+							const net::RemoteObject* o =
+								p ? session.client->world().object(p->vehicleGhost ? p->vehicleGhost : p->soldierGhost) : nullptr;
+							if (o && o->hasPosition) {
+								const float target[3] = {o->position.x, o->position.y + 1.6f, o->position.z};
+								const host::DemoCamera::Look look =
+									g_demo->camera.follow(target, o->hasAngles ? o->yaw : o->rotation.x);
+								std::copy(look.eye, look.eye + 3, eye);
+								if (!at.attached) {
+									yaw = look.yaw;
+									pitch = look.pitch;
+								}
+								placed = true;
+							}
+						}
+						if (placed) {
+							const float aspect = view.aspect;
+							view = {eye[0], eye[1], eye[2], 0};
+							view.aspect = aspect;
+							view.external = true;
+							std::copy(eye, eye + 3, view.eye);
+							view.eyeYaw = yaw;
+							view.eyePitch = pitch;
+							view.fovY = g_demo->fovY();
+							return true;
+						}
+					}
+				}
 				if (session.client && g_demo && g_demo->camera.mode == host::DemoCamera::Mode::Follow) {
 					const net::RemotePlayer* p = session.client->world().player(g_demo->camera.followed);
 					const net::RemoteObject* o =

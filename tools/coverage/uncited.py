@@ -81,7 +81,7 @@ LIB_KEYS = [
 RANGES_A = {
     "BF2142.exe": [(0x007fecf0, 0x0086c660), (0x0070fa90, 0x00745ea8), (0x008c5d10, 0x008c9eac),
                    (0x00900c20, 0x01000000), (0x00640c10, 0x00642c10)],
-    "RendDX9_ori.dll": [(0x10053e80, 0x1005fa50), (0x101aa0c0, 0x10300000), (0x101a2070, 0x101a60b0),
+    "RendDX9_ori.dll": [(0x10053e80, 0x100638e4), (0x101aa0c0, 0x10300000), (0x101a2070, 0x101a60b0),
                         (0x10005010, 0x10007010)],
     "AIDLL.dll": [(0x10101300, 0x10300000)],
 }
@@ -89,7 +89,8 @@ RANGES_A = {
 # debug, the profilers
 RANGES_B = {
     "BF2142.exe": [(0x006d6910, 0x006deb65), (0x0065e0f0, 0x0066639e)],
-    "RendDX9_ori.dll": [(0x10189c30, 0x101aa0b5), (0x1008232f, 0x100854ea)],
+    "RendDX9_ori.dll": [(0x10189c30, 0x101aa0b5), (0x1008232f, 0x100854ea),
+                        (0x100ff130, 0x1010a6a0)],  # RoadEditable (vtables 0x101d7384 / 0x101d7398)
     "AIDLL.dll": [],
 }
 DEV_KEYS = [

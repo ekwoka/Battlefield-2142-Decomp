@@ -727,6 +727,15 @@ public:
 	bool enabled() const { return !m_noNavMesh; }
 	// The vehicles' (AIPathFinding/Vehicle.qtr), for driving bots.
 	void setVehicleNavMesh(const ai::NavMesh* mesh) { m_vehicleNavMesh = mesh; }
+	// The server's maximum of players (sv.maxPlayers; AIDLL reads the game's
+	// through DAT_10139454 slot 4) for AIMain's kick on a human's join and
+	// fill on a leave (BotsSquad.cpp's population); 0 for none.
+	void setServerMaxPlayers(int players) { m_serverMaxPlayers = players; }
+	// A commander's strike for `team` at `at` reaching the squad manager
+	// (0x10088040; IAIEventCourier slot 0x5c's way in): the side's bots in
+	// squads leave 40 m round it at once, the other side's after 12.5..25
+	// s, for 25 s. update() notes the world's new strikes itself.
+	void noteStrike(int team, const physics::Vec3& at);
 	// Thinks for every AI player and sets its input; call before the world ticks.
 	void update(float seconds);
 
@@ -818,6 +827,7 @@ public:
 	// The bots of the manager (ai.getBotCount, getNumberOfActiveBots,
 	// getNumberOfDeactivedBots: the bot manager's slots 2, 0x74).
 	int botCount() const;
+	float time() const { return m_time; } // the bot manager's clock (its updates' sum)
 	// ai.addBot: a bot player of the team in an open squad (it spawns as
 	// the round spawns bots); its id, -1 for none.
 	int addBot(const std::string& name, int team);
@@ -861,6 +871,7 @@ public:
 		float checkedAt = 0;        // +0x28
 		float speed = 0;            // +0x30: the speed it walks at (0x100e6060 reads it)
 		float eta = 1;              // +0x20: squared distance to its slot over its speed
+		bool escaping = false;      // +0x4f: leaving a strike spot (0x100bfcb0)
 	};
 	struct SquadDanger {            // a node of the list at +0x14 (pruned by 0x100c1b60)
 		float until = 0;            // +0x00
@@ -1385,7 +1396,11 @@ private:
 	// (0x100d7840) after the main plan, the faced sectors (0x100d6d60) at
 	// each sensing pass.
 	void lookAround(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
-	void faceSectors(Bot& bot, const GameWorld::PlayerInfo& self);
+	void faceSectors(Bot& bot, float yaw);
+	// Whether the bot's seat runs the Turret sensing pattern's look-around
+	// (0x1008c120: the vehicle's equipment type names Turret, the seat's
+	// controlled object has its ControlInfo and the seat aims a gun).
+	bool turretLooks(const GameWorld::PlayerInfo& self) const;
 	// The squads (BotsSquad.cpp): the manager's round robin (0x1008a910),
 	// one squad's update (0x100c4240) and its parts.
 	void updateSquads();
@@ -1420,6 +1435,35 @@ private:
 	void chooseRespawn(const GameWorld::PlayerInfo& self);
 	int m_squadCursor = 0; // +0x20
 	int m_squadSide = 0;   // +0x24
+	// The squad manager's strike spots, one record a side (+0x28 + 0x48
+	// (side - 1), set by 0x10088040): where that side's commander shelled,
+	// when, and how long the other side takes to learn of it (+0x48); the
+	// escape points found for that side's soldiers (+0x50 / +0x54) and
+	// vehicles (+0x51 / +0x60). Radius +0xb8 40 m, life +0xc0 25 s.
+	struct StrikeSpot {
+		bool active = false;
+		float at = 0;
+		physics::Vec3 spot;
+		float enemyDelay = 0;
+		bool escape[2] = {false, false};
+		physics::Vec3 escapeAt[2];
+	};
+	StrikeSpot m_strikeSpots[2];
+	int m_serverMaxPlayers = 0;
+	std::set<int> m_humansSeen; // AIMain's +0x100: the humans it was told of
+	void population();
+	std::set<int> m_downBots;           // bots man down (for the revive's event 7)
+	std::map<int, int> m_teamKillsSeen; // each bot's team kills at the last tick (event 0xb)
+	std::vector<std::pair<int, physics::Vec3>> m_strikesSeen; // the world's strikes on their way last tick
+	// The humans off the navigation mesh, by player, since when (+0xd4,
+	// 0x1008a3b0): the AI commander's second artillery target (0x100888d0).
+	std::map<int, float> m_offMesh;
+	void updateStrikeSpots();
+	bool strikeSpotHit(int team, const physics::Vec3& at, int& side) const;
+	bool escapeStrike(Squad& squad, SquadMember& member, Bot& bot, const GameWorld::PlayerInfo& self, int side);
+	bool onMeshFor(const GameWorld::PlayerInfo& self, const physics::Vec3& at) const;
+	void trackHumans();
+	bool offMeshEnemy(int team, physics::Vec3& at) const;
 	// A bot commanding its team (AIDLL 0x1009c050; see Bots.cpp).
 	void command(float seconds);
 

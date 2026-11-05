@@ -75,6 +75,7 @@ public:
 	// 1: a payload due now, 0: none yet, -1: the end (the demo is finished).
 	int next(std::vector<uint8_t>& payload);
 	bool finished() const { return m_at >= m_records.size(); }
+	bool started() const { return m_started; } // the clock set by a timed record (the reader's +0xdc)
 	void restart() { m_at = 0, m_tick = 0, m_started = false; } // demo.restartDemo
 	void finish() { m_at = m_records.size(); } // demo.shutdownDemo: next() answers the end
 

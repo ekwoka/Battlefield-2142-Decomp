@@ -45,6 +45,7 @@
 // pending load per connection).
 #pragma once
 
+#include "DemoCamera.h"
 #include "Game/GameWorld.h"
 #include "Game/Votes.h"
 #include "Net/ContentCheck.h"
@@ -246,9 +247,21 @@ public:
 	// Demo recording (demo.recordDemo / stopRecording; Net/Demo.h): what
 	// the server sends a client with no player, connection 0x81, into a
 	// .bf2142demo file. False if one is recording or the file exists.
-	bool recordDemo(const std::string& path);
+	// `cameraPath`: demo.recordDemo's camera file (demoCameraPath), kept
+	// with a local player; the AutoRecorder (0x00585860, the server's own
+	// 0x004afcc0) makes none.
+	bool recordDemo(const std::string& path, const std::string& cameraPath = {});
 	void stopDemo();
 	bool recordingDemo() const { return m_demo.isOpen(); }
+	// The local player's view for the demo's camera file (demo.recordDemo
+	// 0x00432cc0: with a local player, DAT_00a85228 slot 0x30, the demo
+	// object records <name>-def.bf2142cam too, cameramode 1; 0x005f9630
+	// takes the player's camera, its control object's camera matrix, or
+	// (0, 100, 0) unturned without one). False: no local player.
+	std::function<bool(net::CameraKeyframe& frame)> localCamera;
+	bool recordingCamera() const { return m_recordingCamera; }
+	const std::string& cameraPath() const { return m_cameraPath; }
+	const DemoCameraRecorder& cameraRecorder() const { return m_cameraRecorder; }
 	// sv.autoRecord's AutoRecorder (AutoRecorder.cpp; constructor 0x005854a0,
 	// at the server's +0x164): a demo of each round from its start (0x00585860,
 	// when the game logic turns to playing, 0x004c03b0) to its restart
@@ -366,6 +379,9 @@ private:
 	void flushDemo(int32_t time, bool ghosts);
 	static constexpr int kDemoClient = 0x81;
 	net::DemoWriter m_demo;
+	bool m_recordingCamera = false;
+	std::string m_cameraPath;
+	DemoCameraRecorder m_cameraRecorder;
 	net::EventChannel m_demoEvents;
 	uint32_t m_demoSequence = 0;
 	float m_demoSendIn = 0; // the demo connection's pacing (sv.demoQuality)

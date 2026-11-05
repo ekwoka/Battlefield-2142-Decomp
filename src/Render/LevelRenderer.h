@@ -319,7 +319,7 @@ private:
 		// Lit with the level's envmap (EnvMapManager.h).
 		bool envMap = false;
 		// A tree's leaves (a static mesh under "vegitation", RendDX9
-		// 0x100de8xx; its alpha-tested materials): RaShaderLeaf's sway.
+		// 0x100de6d0; its alpha-tested materials): RaShaderLeaf's sway.
 		bool leaf = false;
 		// A bundled material with an "AnimatedUV..." technique (RaShaderBM
 		// _HASUVANIMATION_): its coordinates go through the instance's UV
@@ -334,6 +334,10 @@ private:
 		bool bundled = false;
 		bool skinned = false;
 		bool tree = false; // a static mesh under "vegitation" (+0x2a2; renderer.drawTrees)
+		// A static mesh under "objects/water/" (the template's +0x2a8, set by
+		// its load 0x100de6d0): it keeps its lightmap at the low lighting
+		// quality (staticKeepsLightmap).
+		bool waterObject = false;
 		bool radiusShadowBounds = false; // GeometryTemplate.useRadiusForShadowDepth / Spatial
 		// GeometryTemplate.isTitanInterior / isTitanExterior /
 		// titanExteriorPartIndex (TitanParts.h) and the LOD's box (mesh

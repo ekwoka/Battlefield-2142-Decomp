@@ -290,6 +290,8 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | `--servers` | List the servers the master server knows. |
 | `--lan <address>` | Where the menu's LOCAL search probes (default 255.255.255.255; `127.0.0.1` keeps it on this machine). |
 | `--demo <file>` | Play a recorded demo back. |
+| `--demo-camera <file.bf2142cam>` | With `--demo`: the camera follows a camera file (the original's `demo.cameramode playback`; `demo.recordDemo` on a hosted game writes `<name>-def.bf2142cam` beside the demo). The demo ends with the file. |
+| `--demo-record-camera <file.bf2142cam>` | With `--demo`: record the demo camera you steer into a camera file (`demo.cameramode record`). |
 
 **Network diagnostics**
 

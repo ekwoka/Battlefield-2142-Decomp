@@ -4463,3 +4463,360 @@ TEST(Bots_AggressionSplit)
 	CHECK(ai::assignsAttack(1, 0, 5, 0));
 	CHECK(!ai::assignsAttack(0, 1, 0, 3));
 }
+
+// The squad manager's strike spots (0x10088040, 0x100880e0, 0x100bfcb0,
+// 0x10088f20): a strike EU's commander calls on its own squad sends the
+// bots 45 m out from it at once (the first way tried, straight out, on no
+// mesh here); PAC's strike there reaches them only after its 12.5..25 s;
+// after 25 s the spot goes and they get their goals again.
+TEST(Bots_SquadLeavesAStrikeSpot)
+{
+	Field field;
+	game::BotSettings settings;
+	game::BotManager bots(*field.world, settings);
+	std::vector<int> team;
+	for (int i = 0; i < 3; ++i) {
+		const int id = field.world->addPlayer("Eu", 2, true);
+		field.world->joinSquad(id, 1);
+		field.world->spawnSoldier(id);
+		field.move(id, -10.0f + static_cast<float>(i) * 3, 0);
+		team.push_back(id);
+	}
+	for (int tick = 0; tick < 18 * 7; ++tick) {
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+	}
+	// PAC's strike on them: not known to EU yet.
+	bots.noteStrike(1, {-5, 0, 0});
+	bots.updateSquadNow(2, 1);
+	physics::Vec3 at;
+	for (int id : team) {
+		CHECK(!bots.formationGoal(id, at) || std::fabs(std::sqrt(horizontal2(at - physics::Vec3 {-5, 0, 0})) - 45) > 1);
+	}
+	// EU's own: every bot heads 45 m out, along the way from the spot to it.
+	bots.noteStrike(2, {-5, 0, 0});
+	bots.updateSquadNow(2, 1);
+	for (int id : team) {
+		game::GameWorld::PlayerInfo info;
+		field.world->playerInfo(id, info);
+		CHECK(bots.formationGoal(id, at));
+		CHECK(std::fabs(std::sqrt(physics::lengthSquared(at - physics::Vec3 {-5, 0, 0})) - 45) < 0.1f);
+		const physics::Vec3 out = info.position - physics::Vec3 {-5, 0, 0};
+		CHECK(out.x * (at.x + 5) + out.z * at.z > 0);
+	}
+	// 25 s on the spot has gone: given their goals again.
+	for (int tick = 0; tick < 30 * 26; ++tick) {
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+	}
+	const game::BotManager::Squad* squad = bots.squad(2, 1);
+	CHECK(squad != nullptr);
+	for (const auto& m : squad->members) {
+		CHECK(!m.escaping || horizontal2(m.at - physics::Vec3 {-5, 0, 0}) < 40 * 40);
+	}
+}
+
+// A human member lagging (0x100f4f30): a human of the squad 40 m behind
+// the leader, farther from the order than the squad's spot, lags for
+// 10..20 s and the formation isn't together; a bot there never lags.
+TEST(Bots_HumanMemberLagsBehind)
+{
+	Field field;
+	game::BotSettings settings;
+	game::BotManager bots(*field.world, settings);
+	const int leader = field.world->addPlayer("Eu", 2, true);
+	field.world->joinSquad(leader, 1);
+	field.world->spawnSoldier(leader);
+	field.move(leader, -60, 0);
+	const int mate = field.world->addPlayer("Eu2", 2, true);
+	field.world->joinSquad(mate, 1);
+	field.world->spawnSoldier(mate);
+	field.move(mate, -57, 0);
+	for (int tick = 0; tick < 18 * 7; ++tick) {
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+	}
+	const game::BotManager::Squad* squad = bots.squad(2, 1);
+	CHECK(squad && squad->state == 2);
+	// The human joins and stands 40 m behind (the order is PAC's point, east).
+	CHECK(field.world->spawnPlayer(2) != nullptr);
+	const int human = field.world->localPlayer();
+	field.world->joinSquad(human, 1);
+	field.move(leader, -60, 0);
+	field.move(mate, -57, 0);
+	field.move(human, -100, 0);
+	bots.update(1 / 30.0f);
+	bots.updateSquadNow(2, 1);
+	bots.updateSquadNow(2, 1);
+	CHECK(squad->members.size() == 3);
+	bool humanLags = false, botLags = false;
+	float until = 0;
+	for (const ai::FormationSlot& s : squad->formation.slots) {
+		if (s.used && s.member == human) {
+			humanLags = s.lagging;
+			until = s.lagUntil;
+		}
+		botLags = botLags || (s.used && s.member == mate && s.lagging);
+	}
+	const game::BotManager::SquadMember* m = nullptr;
+	for (const auto& member : squad->members) {
+		m = member.player == human ? &member : m;
+	}
+	std::printf("  the human's slot time %.0f, lagging %d until %.1f s from now\n", m ? m->eta : -1.0f, humanLags,
+		until - bots.time());
+	CHECK(humanLags && !botLags && !squad->formation.together);
+	CHECK(until - bots.time() >= 9.9f && until - bots.time() <= 20.1f);
+	// Up with the others: no longer lagging, together again.
+	field.move(human, -63, 2);
+	bots.update(1 / 30.0f);
+	bots.updateSquadNow(2, 1);
+	bots.updateSquadNow(2, 1);
+	for (const ai::FormationSlot& s : squad->formation.slots) {
+		CHECK(!(s.used && s.member == human && s.lagging));
+	}
+	CHECK(squad->formation.together);
+}
+
+// The bot manager's slots 16 and 24 (game events 7 and 0xb): a bot whose
+// teammate it killed says "sorry" (9, channel 6) at once (0x100c60c0).
+TEST(Bots_TeamKillSaysSorry)
+{
+	Field field;
+	game::BotSettings settings;
+	game::BotManager bots(*field.world, settings);
+	const int killer = field.soldier(2, true, -60, 0);
+	const int victim = field.soldier(2, true, -55, 0);
+	for (int tick = 0; tick < 10; ++tick) {
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+	}
+	game::GameWorld::PlayerInfo info;
+	field.world->playerInfo(victim, info);
+	field.world->applyDamage(info.soldier, 1000, killer);
+	bool sorry = false;
+	for (int tick = 0; tick < 10; ++tick) {
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+	}
+	for (const auto& r : bots.radioSent(killer)) {
+		sorry = sorry || (r.type == 9 && r.channel == 6);
+	}
+	field.world->playerInfo(killer, info);
+	CHECK(info.teamKills == 1);
+	CHECK(sorry);
+	for (const auto& r : bots.radioSent(victim)) {
+		CHECK(r.type != 9);
+	}
+}
+
+// Game event 7 (the soldier's revive, 0x00587b90 event 0x19 ->
+// 0x100c5f00): the revived bot says "thankyou" (8, channel 6) a second
+// later.
+TEST(Bots_RevivedBotSaysThankYou)
+{
+	Field field([](Field& f) {
+		f.templates.registerType(6, "Kit");
+		world::ObjectTemplate* defib = f.templates.create("GenericFireArm", "unl_defibrillator");
+		defib->settings()["itemIndex"] = "5";
+		defib->settings()["projectileTemplate"] = "shock";
+		defib->settings()["velocity"] = "60";
+		defib->settings()["ammo.magSize"] = "1";
+		defib->settings()["ammo.reloadTime"] = "0.6";
+		world::ObjectTemplate* shock = f.templates.create("GenericProjectile", "shock");
+		shock->settings()["damage"] = "1000";
+		shock->settings()["damageMandownSoldiers"] = "1";
+		shock->settings()["collision.resurrectDamage"] = "20000";
+		shock->settings()["collision.restoreHP"] = "120";
+		shock->settings()["timeToLive"] = "CRD_NONE/0.05/0/0";
+		world::ObjectTemplate* kit = f.templates.create("Kit", "EU_Assault");
+		kit->children().push_back({"eu_ar_rifle", {}, {}});
+		kit->children().push_back({"unl_defibrillator", {}, {}});
+	});
+	game::BotSettings settings;
+	game::BotManager bots(*field.world, settings);
+	CHECK(field.world->spawnPlayer(2) != nullptr);
+	const int bot = field.world->addPlayer("Mate", 2, true);
+	CHECK(field.world->spawnSoldier(bot));
+	game::GameWorld::PlayerInfo info, me;
+	field.world->playerInfo(field.world->localPlayer(), me);
+	field.world->playerInfo(bot, info);
+	field.world->setSoldierPosition(info.soldier, me.position + physics::Vec3 {0, 0, 1.0f});
+	field.world->setSpawnTime(30);
+	bots.update(1 / 30.0f);
+	field.world->setHitPoints(info.soldier, 0);
+	bots.update(1 / 30.0f);
+	game::SoldierInput input;
+	input.selectItem = 5;
+	field.world->setPlayerInput(input);
+	field.world->tick(1 / 30.0f);
+	input = {};
+	input.fire = true;
+	input.aimPitch = -60;
+	field.world->setPlayerInput(input);
+	for (int i = 0; i < 5; ++i) {
+		field.world->tick(1 / 30.0f);
+		bots.update(1 / 30.0f);
+	}
+	field.world->playerInfo(bot, info);
+	CHECK(info.alive && !info.manDown);
+	field.world->setPlayerInput({});
+	bool thanks = false;
+	float at = -1;
+	for (int i = 0; i < 45; ++i) {
+		field.world->tick(1 / 30.0f);
+		bots.update(1 / 30.0f);
+		for (const auto& r : bots.radioSent(bot)) {
+			if (r.type == 8 && r.channel == 6 && !thanks) {
+				thanks = true;
+				at = r.at;
+			}
+		}
+	}
+	CHECK(thanks);
+	std::printf("  thankyou at %.2f s\n", at);
+}
+
+// AIMain's kick on a human's join (slot 7, 0x10056110): over the server's
+// maximum with maxBotsIncludeHumans, the last bot of the team with more
+// players goes.
+TEST(Bots_HumanJoiningKicksABot)
+{
+	Field field;
+	game::BotSettings settings;
+	game::BotManager bots(*field.world, settings);
+	bots.setServerMaxPlayers(3);
+	std::vector<int> ids;
+	for (int i = 0; i < 3; ++i) {
+		ids.push_back(field.soldier(i == 1 ? 1 : 2, true, -60.0f + static_cast<float>(i) * 3, 0));
+	}
+	bots.update(1 / 30.0f);
+	CHECK(bots.botCount() == 3);
+	CHECK(field.world->spawnPlayer(1) != nullptr); // a human joins PAC (2 a side now)
+	bots.update(1 / 30.0f);
+	CHECK(bots.botCount() == 2);
+	game::GameWorld::PlayerInfo info;
+	CHECK(!field.world->playerInfo(ids[2], info)); // EU's last bot (a tie: team 2)
+	CHECK(field.world->playerInfo(ids[0], info) && field.world->playerInfo(ids[1], info));
+	// Without maxBotsIncludeHumans nobody goes.
+	Field other;
+	game::BotSettings plain;
+	plain.maxBotsIncludeHumans = false;
+	game::BotManager more(*other.world, plain);
+	more.setServerMaxPlayers(2);
+	other.soldier(2, true, -60, 0);
+	other.soldier(2, true, -57, 0);
+	more.update(1 / 30.0f);
+	CHECK(other.world->spawnPlayer(1) != nullptr);
+	more.update(1 / 30.0f);
+	CHECK(more.botCount() == 2);
+}
+
+// The Turret sensing pattern (0x1008c120): a tank's driver with nothing
+// to fight looks about with the turret, by the look-around's sectors; with
+// the Null pattern the turret stays where it is.
+TEST(Bots_TurretLooksAround)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	for (const bool turretPattern : {true, false}) {
+		CarField field(gameDir);
+		world::ObjectTemplate* tank = field.templates.create("PlayerControlObject", "tank");
+		for (const auto& [key, value] : field.templates.find("car")->settings()) {
+			tank->settings()[key] = value;
+		}
+		tank->settings()["seatInformation"] = "tank 0/0.5/0.4 0/0/0";
+		tank->settings()["aiTemplate"] = "TestTank";
+		tank->children().push_back({"car_entry", {-1.5f, 0, 0}, {}});
+		tank->children().push_back({"car_engine", {0, -0.44f, 0}, {}});
+		tank->children().push_back({"tank_turret", {0, 0.9f, 0}, {}});
+		world::ObjectTemplate* turret = field.templates.create("RotationalBundle", "tank_turret");
+		turret->settings()["inputToYaw"] = "PIMouseLookX";
+		turret->children().push_back({"tank_barrel", {0, 0.2f, 0.5f}, {}});
+		world::ObjectTemplate* barrel = field.templates.create("RotationalBundle", "tank_barrel");
+		barrel->settings()["inputToPitch"] = "PIMouseLookY";
+		barrel->children().push_back({"tank_gun", {0, 0, 1}, {}});
+		world::ObjectTemplate* gun = field.templates.create("GenericFireArm", "tank_gun");
+		gun->settings()["velocity"] = "300";
+		std::string out;
+		for (const char* line : {"aiTemplatePlugIn.create Unit TestTank_Unit", "aiTemplatePlugIn.equipmentTypeName Tank",
+				 "aiTemplatePlugIn.create ControlInfo TestTank_Ctrl", "aiTemplate.create TestTank",
+				 "aiTemplate.addType ITGround", "aiTemplate.addPlugIn TestTank_Unit", "aiTemplate.addPlugIn TestTank_Ctrl",
+				 "aiSettings.createBehaviourModifiers UnitWeights", "aiSettings.setBehaviourModifier Idle 1.0",
+				 "aiSettings.setVehicleBehaviour Tank Idle BBIdle BBPIdle2d 5 UCUnion UnitWeights",
+				 "aiSettings.setVehicleDefaultBehaviour Tank Idle"}) {
+			field.console.execute(line, out);
+		}
+		field.console.execute(turretPattern ? "aiSettings.addSensingAgentPattern Tank Turret"
+											: "aiSettings.addSensingAgentPattern Tank Null",
+			out);
+		const uint32_t id = field.objects.create(tank, {3, 1.2f, 0}, {0, 0, 0})->id();
+		const int bot = field.soldier("Bot", true, 0, 0);
+		field.ticks(90);
+		field.board(bot, 0);
+		CHECK(field.info(bot).vehicle == id);
+		game::BotManager bots(*field.world, field.settings);
+		float most = 0;
+		bool planned = false;
+		for (int tick = 0; tick < 30 * 20; ++tick) {
+			field.ticks(1, &bots);
+			float yaw = 0, pitch = 0;
+			if (field.world->gunAim(id, 0, yaw, pitch)) {
+				most = std::max(most, std::fabs(std::remainder(yaw, 360.0f)));
+			}
+			planned = planned || bots.lookPlanned(bot);
+		}
+		std::printf("  %s pattern: the turret turned up to %.1f degrees off the hull, looked %d\n",
+			turretPattern ? "Turret" : "Null", most, planned);
+		CHECK(planned == turretPattern);
+		CHECK(turretPattern ? most > 20 : most < 1);
+	}
+}
+
+// The leader's slot given up (0x100f64a0): the member nearest the order
+// takes slot 0, and the last used slot moves into the hole it left, so the
+// used slots stay packed from slot 0 (the earlier rewrite left the hole,
+// and a respawned member took slot 0 back at its spawn, pulling the squad
+// there).
+TEST(Bots_FormationStaysPackedWhenTheLeaderFalls)
+{
+	Field field;
+	game::BotSettings settings;
+	game::BotManager bots(*field.world, settings);
+	std::vector<int> team;
+	for (int i = 0; i < 6; ++i) {
+		const int id = field.world->addPlayer("Eu", 2, true);
+		field.world->joinSquad(id, 1);
+		field.world->spawnSoldier(id);
+		field.move(id, -60.0f - static_cast<float>(i) * 3, static_cast<float>(i));
+		team.push_back(id);
+	}
+	for (int tick = 0; tick < 18 * 7; ++tick) {
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+	}
+	const game::BotManager::Squad* squad = bots.squad(2, 1);
+	CHECK(squad != nullptr);
+	// The member of slot 2 goes nearest the order (east) as the leader
+	// falls, so it leaves a middle slot for slot 0.
+	const int middle = squad->formation.slots[2].member;
+	const int first = squad->formation.slots[0].member;
+	CHECK(squad->formation.slots[4].used);
+	field.move(middle, -30, 0);
+	bots.updateSquadNow(2, 1);
+	game::GameWorld::PlayerInfo info;
+	CHECK(field.world->playerInfo(first, info));
+	field.world->setHitPoints(info.soldier, 0);
+	field.world->tick(1 / 30.0f);
+	bots.updateSquadNow(2, 1);
+	int used = 0;
+	bool packed = true;
+	for (size_t i = 0; i < squad->formation.slots.size(); ++i) {
+		const bool u = squad->formation.slots[i].used;
+		packed = packed && (u ? static_cast<int>(i) == used : true);
+		used += u ? 1 : 0;
+		CHECK(!(u && squad->formation.slots[i].member == first));
+	}
+	CHECK(used == 5 && packed);
+}

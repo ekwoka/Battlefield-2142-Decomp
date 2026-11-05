@@ -831,6 +831,89 @@ TEST(HudMenus_DemoPlaybackAndCamera)
 	CHECK(std::abs(look.eye[0] - 10) < 1e-4f && std::abs(look.eye[2] - 18) < 1e-4f && std::abs(look.yaw) < 1e-4f);
 }
 
+// Camera files recorded and played (DemoCamera.h: 0x005f9630, 0x005f9cd0,
+// 0x005fa210; the quaternions 0x006ac740 / 0x006ac870 / 0x006ac980).
+TEST(HudMenus_DemoCameraFiles)
+{
+	namespace dc = dice::hfe::host::demo_camera;
+	using dice::hfe::net::CameraKeyframe;
+	float rows[9], back[9], q[4];
+	dc::rowsFromYawPitch(0.7f, -0.3f, rows);
+	dc::quaternionFromRows(rows, q);
+	dc::rowsFromQuaternion(q, back);
+	for (int i = 0; i < 9; ++i) {
+		CHECK(std::abs(rows[i] - back[i]) < 1e-5f);
+	}
+	float yaw = 0, pitch = 0;
+	dc::yawPitchOfRows(back, yaw, pitch);
+	CHECK(std::abs(yaw - 0.7f) < 1e-5f && std::abs(pitch + 0.3f) < 1e-5f);
+	dc::rowsFromYawPitch(3.0f, 0.1f, rows); // a near half turn: the trace branch's other side
+	dc::quaternionFromRows(rows, q);
+	dc::rowsFromQuaternion(q, back);
+	CHECK(std::abs(rows[6] - back[6]) < 1e-5f && std::abs(rows[8] - back[8]) < 1e-5f);
+	const float a[4] = {0, 0, 0, 1}, b[4] = {0, 1, 0, 0};
+	dc::slerp(a, b, 0.5f, q); // a half turn about y, blended halfway
+	CHECK(std::abs(q[1] - 0.70710677f) < 1e-5f && std::abs(q[3] - 0.70710677f) < 1e-5f);
+
+	// The recorder: the ring of four starts at the origin, so the first
+	// frames are pulled to it; one frame each tick gone by.
+	dice::hfe::host::DemoCameraRecorder recorder;
+	CameraKeyframe now;
+	now.position[0] = 8;
+	recorder.record(2, 100, now);
+	CHECK(recorder.frames().size() == 2 && recorder.frames()[0].tick == 100 && recorder.frames()[1].tick == 101);
+	CHECK(recorder.frames()[0].position[0] == 2); // (0 + 0 + 0 + 8) / 4
+	for (int i = 0; i < 3; ++i) {
+		recorder.record(1, 102 + i, now);
+	}
+	CHECK(recorder.frames().back().position[0] == 8 && recorder.frames().back().tick == 104);
+
+	// The track: a free frame each tick from 10, x the tick; a follow frame
+	// at 20, then an attached one keeping its follow values.
+	std::vector<CameraKeyframe> file;
+	for (uint32_t t = 10; t < 20; ++t) {
+		CameraKeyframe f;
+		f.tick = t;
+		f.position[0] = static_cast<float>(t);
+		file.push_back(f);
+	}
+	CameraKeyframe follow;
+	follow.tick = 20;
+	follow.mode = 1;
+	follow.followed = 5;
+	follow.follow[2] = 4; // distance
+	file.push_back(follow);
+	CameraKeyframe attached = follow;
+	attached.tick = 21;
+	attached.attached = true;
+	attached.followed = 0; // not in the file: the slot's last
+	attached.follow[2] = 0;
+	file.push_back(attached);
+	for (uint32_t t = 22; t < 26; ++t) {
+		CameraKeyframe f;
+		f.tick = t;
+		file.push_back(f);
+	}
+	dice::hfe::host::DemoCameraTrack track(file);
+	dice::hfe::host::DemoCamera camera;
+	dice::hfe::host::DemoCameraTrack::Pose pose;
+	CHECK(track.update(12, 0.5f, camera, pose) && !pose.follow && std::abs(pose.position[0] - 12.5f) < 1e-5f);
+	for (uint32_t t = 13; t < 20; ++t) {
+		CHECK(track.update(t, 0, camera, pose)); // a frame a tick: the slot read into holds the last one read
+	}
+	CHECK(track.update(20, 0.25f, camera, pose) && pose.follow && !pose.attached && camera.followed == 5);
+	CHECK(std::abs(camera.distance - 4) < 1e-5f); // 4 blended with the attached frame's kept 4
+	CHECK(track.update(21, 0, camera, pose) && pose.follow && pose.attached && camera.followed == 5);
+	CHECK(track.update(22, 0, camera, pose) && !pose.follow);
+	CHECK(!track.update(23, 0, camera, pose) && track.ended()); // the file read out: the demo ends
+	// Without the sync the first frame plays when the camera starts.
+	dice::hfe::host::DemoCameraTrack late(file, false);
+	CHECK(late.update(1000, 0, camera, pose) && std::abs(pose.position[0] - 10) < 1e-5f);
+
+	CHECK(dice::hfe::host::demoCameraPath("match1") == "Demos/match1-def.bf2142cam");
+	CHECK(dice::hfe::host::demoCameraPath("c:\\x\\a.bf2142demo") == "c:/x/a.bf2142demo-def.bf2142cam");
+}
+
 // The commander rose's and squad leader rose's rows (main.cpp's
 // Commander.zoomCommander 0x007d7be0, detailedView 0x007d8db0,
 // spottedMouseOver 0x00751f80, CommanderMenu.sendRadioMessage 0x007a9f60,

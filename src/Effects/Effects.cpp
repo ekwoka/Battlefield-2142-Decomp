@@ -283,6 +283,23 @@ float signedRandom(game::Random& random)
 	return random.unit() * 2 - 1;
 }
 
+// An emitRange axis as RendDX9's emitters draw it (0x1013a080 over
+// 0x1013a020): CRD_NONE a, CRD_UNIFORM a..b, CRD_EXPONENTIAL -ln(u) a,
+// CRD_NORMAL Box-Muller x b + a. A set fourth field (+0xc) flips the
+// result's sign with p = 0.5, its random drawn before the value's: so
+// "CRD_UNIFORM/0.5/1/1" spawns on both sides of the system.
+float emitRangeSample(const game::RandomDistribution& d, game::Random& random)
+{
+	float sign = 1;
+	if (d.c != 0 && random.unit() <= 0.5f) {
+		sign = -1;
+	}
+	if (d.type == game::RandomDistribution::Type::Exponential) {
+		return sign * -std::log(random.unit()) * d.a;
+	}
+	return sign * d.sample(random);
+}
+
 // 0x1000f070.
 float saturate(float v)
 {
@@ -456,9 +473,9 @@ void Emitter::emit(game::Random& random, const Vec3& at, float age, const EmitCo
 		if (r[axis] < r[2]) {
 			axis = 2;
 		}
-		const float fz = t.emitRange[2].sample(random);
-		const float fy = t.emitRange[1].sample(random);
-		const float fx = t.emitRange[0].sample(random);
+		const float fz = emitRangeSample(t.emitRange[2], random);
+		const float fy = emitRangeSample(t.emitRange[1], random);
+		const float fx = emitRangeSample(t.emitRange[0], random);
 		Vec3 ring;
 		if (axis == 0) {
 			offset = {fx, fy * s, fz * c};
@@ -476,9 +493,9 @@ void Emitter::emit(game::Random& random, const Vec3& at, float age, const EmitCo
 		break;
 	}
 	case ParticleTemplate::Emitter::Box: {
-		const float fz = t.emitRange[2].sample(random);
-		const float fy = t.emitRange[1].sample(random);
-		const float fx = t.emitRange[0].sample(random);
+		const float fz = emitRangeSample(t.emitRange[2], random);
+		const float fy = emitRangeSample(t.emitRange[1], random);
+		const float fx = emitRangeSample(t.emitRange[0], random);
 		offset = {fx, fy, fz};
 		break;
 	}
@@ -623,6 +640,55 @@ void Emitter::step(float seconds, game::Random& random, const EmitContext& conte
 	m_previous = m_position;
 }
 
+namespace {
+
+// A trail point's motion (TrailSystem 0x1013a600, from its emission
+// 0x1013b4b0 and update 0x1013b840), `steps` steps of 0.01 s: the wind
+// (manager +0x8c10: strength slot 0x1c x direction slot 0x24) times
+// windAffectionFactor (+0x8c), the drag -airResistance (+0x80) |r| r of the
+// speed through it (no graph, unlike the sprites), gravity (+0x7c) along
+// the world's y by the gravity graph at the point's age; speeds under
+// 0.001 dropped; with forceToWaterSurface (+0x90) held at the water plus
+// waterSurfaceOffset (+0x94) plus 0.1.
+void moveTrailPoint(const ParticleTemplate& t, Particle& p, int steps, const EmitContext& context)
+{
+	constexpr float kStep = 0.01f;
+	const float f = p.life > 0 ? std::min(p.age / p.life, 1.0f) : 1.0f;
+	Vec3 wind;
+	if (t.windAffectionFactor != 0 && context.wind && (!context.settings || context.settings->affectedByWind)) {
+		const auto w = context.wind->localWinds.empty() ? context.wind->windAt()
+														: context.wind->windAt({p.position.x, p.position.y, p.position.z});
+		wind = Vec3 {w[0], w[1], w[2]} * t.windAffectionFactor;
+	}
+	const float drag = t.airResistance * kStep;
+	const float fall = saturate(t.gravityGraph.at(f)) * t.gravity * kStep;
+	for (int i = 0; i < steps; ++i) {
+		const Vec3 relative = p.velocity - wind;
+		const float speed2 = physics::lengthSquared(relative);
+		Vec3 dv;
+		if (std::fabs(speed2) >= 1.1920929e-07f) {
+			dv = relative * (-std::sqrt(speed2) * drag);
+		}
+		dv.y += fall;
+		p.position += (p.velocity + dv * 0.5f) * kStep;
+		p.velocity += dv;
+	}
+	if (std::fabs(p.velocity.x) < 0.001f) {
+		p.velocity.x = 0;
+	}
+	if (std::fabs(p.velocity.y) < 0.001f) {
+		p.velocity.y = 0;
+	}
+	if (std::fabs(p.velocity.z) < 0.001f) {
+		p.velocity.z = 0;
+	}
+	if (t.forceToWaterSurface && context.hasWater && !t.localSystem) {
+		p.position.y = context.waterLevel + t.waterSurfaceOffset + 0.1f;
+	}
+}
+
+} // namespace
+
 void Emitter::update(float seconds, game::Random& random, const EmitContext& context)
 {
 	const ParticleTemplate& t = *m_template;
@@ -652,6 +718,10 @@ void Emitter::update(float seconds, game::Random& random, const EmitContext& con
 		m_age += seconds;
 		const float active = m_age - t.emitDelay;
 		m_speed = m_placed && seconds > 0 ? std::sqrt(physics::lengthSquared(m_position - m_lastPosition)) / seconds : 0.0f;
+		// A new point adds the system's +0x1c..+0x24 to its speed
+		// (0x1013b4b0); taken here as the velocity speedFromPhysics hands
+		// the system, else none (which writer fills it isn't traced).
+		m_velocity = physicsVelocity ? inheritedVelocity : Vec3 {};
 		m_lastPosition = m_position;
 		m_placed = true;
 		const bool emitting = t.isLooping || anchor != 0 || active - seconds < t.emitTime;
@@ -662,8 +732,13 @@ void Emitter::update(float seconds, game::Random& random, const EmitContext& con
 				m_pending -= 1.0f;
 			}
 		}
+		// The points move and age in steps of 0.01 s, the rest carried.
+		const float total = seconds + m_carry;
+		const int steps = static_cast<int>(std::lround(total * 100.0f));
+		m_carry = total - static_cast<float>(steps) * 0.01f;
 		for (Particle& p : m_particles) {
-			p.age += seconds;
+			moveTrailPoint(t, p, steps, context);
+			p.age += static_cast<float>(steps) * 0.01f;
 		}
 		m_particles.erase(std::remove_if(m_particles.begin(), m_particles.end(),
 							  [](const Particle& p) { return p.age >= p.life; }),

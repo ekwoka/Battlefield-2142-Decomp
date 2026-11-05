@@ -595,4 +595,42 @@ void registerUntypedTemplateProperties(Console& console, ObjectTemplateManager& 
 	}
 }
 
+namespace {
+struct GripFlagName {
+	int flag;
+	const char* name;
+};
+// In the reader's order (0x0051ae29).
+constexpr GripFlagName kGripFlags[] = {{1, "PGFNoGrip"}, {2, "PGFContactGrip"}, {4, "PGFRollGrip"}, {8, "PGFEngineGrip"},
+	{0x10, "PGFRollGripWhenOccupied"}, {0x20, "PGFDummyGrip"}, {0x40, "PGFStaticFriction"},
+	{0x80, "PGFEngineDummyGrip"}};
+} // namespace
+
+const char* physicsGripFlagName(int flag)
+{
+	for (const GripFlagName& g : kGripFlags) {
+		if (g.flag == flag && flag != 1) {
+			return g.name;
+		}
+	}
+	return "PGFNoGrip"; // 1 and every other value (0x0051aaa9's default)
+}
+
+int physicsGripFlags(const std::string& word)
+{
+	std::string numberName;
+	if (word.size() < 4) {
+		int value = -1;
+		if (std::sscanf(word.c_str(), "%d", &value) == 1) {
+			numberName = physicsGripFlagName(value);
+		}
+	}
+	for (const GripFlagName& g : kGripFlags) {
+		if (word == std::string("c_") + g.name || word == g.name || numberName == g.name) {
+			return g.flag;
+		}
+	}
+	return 1; // not a name: PGFNoGrip
+}
+
 } // namespace dice::hfe::world

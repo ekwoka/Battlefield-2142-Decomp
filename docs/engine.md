@@ -2284,7 +2284,19 @@ Cube maps are uploaded as SDL GPU cube textures
 frustum (`src/Render/Culling.h`): static meshes by the sphere of their
 drawn LOD's vertices, bundled meshes by their parts' spheres moved with
 the parts; skinned meshes are not culled. Terrain patches, surrounding
-patches and water grids are culled by their boxes. A geometry's LOD is
+patches and water grids are culled by their boxes. (RendDX9 builds a
+quadtree over the cluster at the load for this, replaced by design here:
+`0x100a0000`, from the terrain's load `0x100b3760`, makes the root node
+(0x110 bytes, `0x1009d6c0`) over the whole heightmap and `0x1009e010`
+splits each node into four children (`+0x1c` + 4i, depth `+0x108`, box
+`+0x50..+0x64`) until a node is one patch across (`+0xed`), whose patch
+(the cluster's grid `+0x310`) gives the node its height range
+(`+0x94` / `+0x98`). Its ObjectDrawer (vtable `0x101d4e98`) hands each
+object's geometries to their draws (`0x100b7260`, children by `0x100b72f0`)
+and, with `ObjectDrawer.useOcclusion`, drops objects wholly inside a
+static mesh's occluder volumes (`0x100b79d0`, `0x100b75a0` /
+`0x100b77c0`; the occluders moved into the world by `0x100bf620`): a
+saving only, which the rewrite does without.) A geometry's LOD is
 picked by the camera's distance: `GeometryTemplate.setSubGeometryLodDistance
 <geometry> <lod> <distance>` (RendDX9 `0x1007303a`) says how far each LOD is
 drawn. The switch list a mesh gets (`0x100d4d30` static, `0x100a31d0`
@@ -2299,7 +2311,15 @@ renderer.global{Static,Bundle,Skinned}MeshLodDistanceScale (renderer
 below the camera's distance over the zoom less the mesh's radius
 (`render::lodDistance`). Each LOD has its own lightmap in the atlas
 (`=<lod, two digits>=` in its key); a LOD without one is lit as an
-unlightmapped mesh. Skipped LODs: `GeometryTemplate.maxSkip3pLods` /
+unlightmapped mesh. At the low lighting quality (the video settings'
+lighting, slot 2 / `+0x38`, under 2) the static template's "use
+lightmaps" (`0x100df010`, asked by the static mesh's draw `0x100bdb00`)
+is false, so every static mesh but a Titan's parts (`+0xc8` / `+0xc9`)
+and the meshes under `objects/water/` (`+0x2a8`, set by the template's
+load `0x100de6d0`, which also flags `vegitation` `+0x2a2` and
+`objects/roads/` `+0x2a0` with `noBlend` `+0x2a1`) draws unlightmapped
+(`render::staticKeepsLightmap`, `LevelRenderer::prepareInstances`;
+`RenderScene_StaticLightmapsByLightingQuality`). Skipped LODs: `GeometryTemplate.maxSkip3pLods` /
 `maxSkipWreckLods` (0x10073920 / 0x10073a8a, template +0xc0 / +0xc4, both
 1 by default, 0x10148e50) are capped by renderer +0x910 (1 at the low
 geometry quality, else 0) and one less than the LODs; bundled meshes
@@ -2538,7 +2558,16 @@ system's y axis (its x and z axes; NonScreenAlignedParticles.fx displaces
 each corner by world vectors the CPU gives): water ripples, ground rings.
 A TrailSystem (Trail.fx) leaves a point at emitFrequency while its system
 moves faster than `minTrailVelocity` and keeps doing so as long as an
-anchor carries it; the points, joined in the order they were left, make
+anchor carries it. The points then move (`0x1013a600`, from the
+emission `0x1013b4b0` and the update `0x1013b840`, in steps of 0.01 s):
+their emitSpeed along emitDirection, the drag −airResistance |r| r of the
+speed r through the wind (× windAffectionFactor; no drag graph, unlike
+the sprites), gravity along y by the gravity graph at their age, speeds
+under 0.001 dropped, and with forceToWaterSurface held at the water +
+waterSurfaceOffset + 0.1 (the boats' wakes); a new point adds the
+system's `+0x1c` velocity, taken here as speedFromPhysics' (its writer
+isn't traced). Rewritten in `moveTrailPoint` (src/Effects/Effects.cpp;
+`Effects_TrailPointsMove`). The points, joined in the order they were left, make
 strips of 2 × size across in `numPlanes` planes about the path, each
 vertex faded by the square of its plane's normal against the eye
 (`fadeFactor`), the ends by `fadeInFactor` / `fadeOutFactor` of the life,
@@ -2827,7 +2856,7 @@ rewrite keeps their winds in the EffectManager (`appendLocalWinds`) for
 windBlowTime, at most as long as the bundle's particle systems last. RendDX9 steps it each
 frame (`0x10028bb0`). Its readers: the particles (above), and static
 meshes' leaves: RendDX9 marks a geometry whose path has "vegitation" a
-tree (`0x100de8xx`, `+0x2a2`) and draws its leaves with RaShaderLeaf
+tree (`0x100de6d0`, `+0x2a2`) and draws its leaves with RaShaderLeaf
 (shader key `0xf0000000`, `0x100bdb00`), whose WindSpeed (per object,
 `+0x208` = WindManager slot 0x30 at the object) sways them:
 `pos += sin((GlobalTime / (ObjRadius + y)) × (WindSpeed + 5)) × (ObjRadius
@@ -2982,7 +3011,13 @@ ring about `emitRadius`'s longest axis (the first of equals) at
 `radialDirection` +- `randomRadialDirection` degrees, its distance along
 each axis from `emitRangeX/Y/Z` (sampled Z, Y, X); RadialDirection sends it
 out along the ring's radius, the others along `emitDirection`. Box puts it
-at (emitRangeX, emitRangeY, emitRangeZ). `randomDirectionAngle` then turns
+at (emitRangeX, emitRangeY, emitRangeZ). Each axis is drawn by
+`0x1013a080` over `0x1013a020`: CRD_NONE a, CRD_UNIFORM a..b,
+CRD_EXPONENTIAL −ln(u) a, CRD_NORMAL a + b × a Box-Muller normal; a
+non-zero fourth field (`+0xc`; 517 shipped CRD_UNIFORM and 13 CRD_NORMAL
+ranges) flips the result's sign with p = 0.5, its random drawn first, so
+those systems spawn on both sides (`emitRangeSample`,
+`Effects_EmitRangeSignFlip`). `randomDirectionAngle` then turns
 the direction for every type.
 
 **isStaticSystem** (setter `0x00626cf0` → slot `0x190`, `+0x26d`): on the
@@ -3537,7 +3572,19 @@ moves with every turn of the camera, so the static casters' map could no
 longer be kept between moves of the region (its redraw costs up to ~1 ms
 a frame, see above), and per-object maps add a pass per caster; both
 would raise the frame cost well beyond the current 0.2-0.4 ms, so they
-are left out on purpose.
+are left out on purpose. For the same reason the terrain takes the
+dynamic map in its one pass (terrain.frag) where RendDX9 draws a second
+pass over just the cells under each map: before the terrain's draw
+(`0x100b4d80`), with shadowUpdatesEnabled (LM `+0x755`, `0x1014a910`) and
+the terrain's shadow strength `+0x3ec` (4, the constructor) over 0.1, it
+sets `+0x3f0` = `+0x3ec` × (1.643 + the sun's direction y, LM slot
+0x1ac `0x1014ad90`) and has `0x1014c4e0` list, for each of the light
+manager's maps (`+0x6f8`, `0x1014ab00`; 0x494 bytes each, skipped when
+`+0x444` is set), the patches at LOD levels 0..2 whose cells meet the
+map's light-space box (its 8 corners, `0x100abee0`), with the half-cell
+edge fans towards coarser neighbours (the patch's `+0x100` bits 1 / 2 / 4
+/ 8), into an index buffer of at most `+0x3e8` indices; the patches it
+lists (`0x100b6a00`) get the shadowed pass.
 
 **The SimpleShadowmap** (`src/Render/SimpleShadowmap.h`;
 `LevelRenderer::loadSimpleShadowmap` / `simpleShadowFor`; mesh.frag).
@@ -4544,7 +4591,14 @@ Vehicle parts:
   physics is made by template slot 31 (`0x005f6a60`), and only
   ResponsePhysics keeps flags. It is made for a Mesh with collision and
   mobile physics, and its flags are the template's `grip`: 2 by default,
-  8 EngineGrip, 0x80 EngineDummyGrip (`0x0051aed0`).
+  8 EngineGrip, 0x80 EngineDummyGrip (`0x0051aed0`). The property reads
+  PhysicsGripFlags (`0x0051ae29`, written by `0x0051aaa9`;
+  `world::physicsGripFlags`): PGFNoGrip 1, PGFContactGrip 2, PGFRollGrip
+  4, PGFEngineGrip 8, PGFRollGripWhenOccupied 0x10, PGFDummyGrip 0x20,
+  PGFStaticFriction 0x40, PGFEngineDummyGrip 0x80, by name with or without
+  `c_`; a word under four characters is a number taken by its name, so
+  one that isn't a single flag (0, 3) is PGFNoGrip, as is anything else.
+  The shipped templates give 8, 128 and 32.
 - **PlayerControlObject** (a seat) works from the seat's PCO map
   (interface `+0x2c`):
   - With a non-empty map: a 4-bit mask, the active weapon of groups 0-2
@@ -5541,8 +5595,9 @@ carry an empty payload (`0x00516950`).
   `0x005f91f0`): u32 tick, u32 mode (follow only when exactly 1), u8
   attached, u8 override (read as mode 0), then a free frame's quaternion
   x, y, z, w and position (zeroed when |p|² > 1e10), or a follow frame's
-  object id, a byte and 5 floats. recordDemo writes `<name>-def.bf2142cam`
-  only with a local player. The `demo` command-line option names a con
+  object id, a byte and 5 floats (the follow view's yaw, pitch, distance,
+  height and side, the byte its target alignment). recordDemo writes
+  `<name>-def.bf2142cam` only with a local player. The `demo` command-line option names a con
   file of demo.* options (`0x0043a3a0`: demomode playback/record/render/
   rendersound, cameramode, demofile, camerafile, the render settings,
   timedemo...).
@@ -5570,8 +5625,50 @@ carry an empty payload (`0x00516950`).
   rewritten: the camera's own input (`0x005fa5e0`: the follow input
   `0x005f9970` with demo-cam-* vars, the number keys' speeds 0..1000, the
   free camera's `0x00615290`), the HUD's Demo* strings and the roses'
-  opening keys, playing and recording camera files (cameramode 1 / 2),
-  render and timedemo modes (`0x00432ee0`: timedemo_report.txt).
+  opening keys, render and timedemo modes (`0x00432ee0`:
+  timedemo_report.txt).
+- **Camera files played and recorded** (`src/Main/DemoCamera.h`:
+  `DemoCameraTrack`, `DemoCameraRecorder`). The demo object's camera mode
+  (`demo.cameramode`, the reader's `+8`: user 0, record 1, playback 2,
+  `0x0043a2e0`) opens `demo.camerafile` (`+0x28`) beside the demo:
+  playing a demo with cameramode 2 (`0x00517490` → `0x00516830`, the
+  camera's `+0x14` / `+0x6c`) the camera plays the file, then the console
+  runs `Settings/demo-playcam.con`; with cameramode 1 (→ `0x005171f0`,
+  camera `+0x70`) it records the demo camera and runs
+  `Settings/demo-recordcam.con`; recording a demo (`0x005172f0`, from
+  `demo.recordDemo` `0x00432cc0` with a local player) opens the demo
+  (`0x005170f0`) and a camera of its own. No shipped mod has either con
+  file. `bf2142 --demo <file> --demo-camera <file.bf2142cam>` plays one,
+  `--demo-record-camera <file>` records one; a hosted game's
+  `demo.recordDemo <name>` writes `<name>-def.bf2142cam` (under Demos/
+  without an extension) from the local player's view.
+  - The recorder (`0x005f9630`, once a frame with the ticks gone by; not
+    before the demo's clock runs, the reader's `+0xdc`): the frame now
+    (on a server with a local player, its view: the control object's
+    camera matrix, or (0, 100, 0) unturned without one; else the demo
+    camera's own mode, player, alignment `+0x88`, angles and distances,
+    attached `+0xbc`, matrix `+0x18` and position `+0x48`) goes into a
+    ring of four (`+0x68`, `+0x64`, all at the origin at first), and the
+    file gets it smoothed: the ring's mean position and the rotation
+    ((q0 · q1) · q2) · q3, each a slerp at one half (`0x006ac980`); once
+    for each tick gone by, stamped from the tick on.
+  - The player (`0x005fa4a0` → `0x005fa210`, whatever the camera's own
+    mode): the ring is kept full (`0x005f9cd0`): frames before the tick
+    dropped (four at most a call), then up to four read, those already
+    past read over; with `demo.synccameraanddemo` off (`+0x74`, on by
+    default) the first frame read is moved to the camera's start
+    (`+0xd4`). A frame read into a slot overwrites only what the file
+    holds (`0x005f91f0`), so an attached follow frame keeps the slot's
+    follow values. Once the file has no more frames the camera is over
+    (`+0x15`; the last ring isn't played out) and the demo ends
+    (`0x00516bb0` → `0x005f8c70` in `0x00432ee0`). The ring's first two
+    frames blend by the frame's fraction of a tick (the demo's `+0xf8`):
+    a free frame's rotation (slerp) and position; a follow frame's
+    angles and distances, with the first frame's player and alignment,
+    through the follow view (`0x005f8f40`); attached, that view's eye
+    with the file's rotation (`0x0043ddf0` copying the blended matrix
+    over and the eye kept). The quaternions are the matrix's
+    (`0x006ac740` from the rows right, up, forward; back by `0x006ac870`).
 
 ### The control-object record and prediction
 
@@ -7720,9 +7817,30 @@ HUD's object markers (`Bf2ObjectMarkerNode`) show the state.
   `DAT_00a3fcc0 +0x58` by `0x00430e20`; on by default) is off and the mine
   has `detonation.allowFriendlyFireDetonation` (`+0x7c`; the three mines
   have it); a human teammate sets it off otherwise. A vehicle's player is
-  its driver; a mine whose owner has gone spares nobody. Not traced: the
-  angle test's bounding-box form (the rewrite takes the cone to the
-  vehicle's centre) and `radiusDetonateWithAirVehicles`.
+  its driver; a mine whose owner has gone spares nobody. The trigger runs
+  every `weapon-detonationTriggerFreq` (0.25 s, `0x008e7260`) of the
+  detonation component's update (`0x005e9f60`), in flight too: everyone
+  with a control object within `triggerRadius` (a sphere query) is
+  tested, and the test's shape (`game::radiusTriggerShape`) depends on
+  `triggerAngle` (`+0x78`, 0 by default):
+  - 0 or less (the EMP and motion mines): soldiers pass as they are; any
+    other object passes when the point `min(distance, triggerRadius)`
+    from the mine towards its origin lies in its box (slot `0x9c`, in
+    its frame, `0x005a60a0`). An object touching nothing (its physics
+    node's `+0x249`: set at each step, cleared by a contact, slot
+    `0x1b8`) only counts with `detonation.radiusDetonateWithAirVehicles`
+    (`+0x5c`), which the three shipped vehicle mines all set. The
+    rewrite counts its wheels' ground contact as contacts.
+  - above 0 (the anti-personnel mine's 30, the static AA flak's 360): in
+    the mine's frame the object's origin must be ahead and within tan(angle)
+    × z of the axis across and up, less half its box's width and height:
+    a pyramid. At 360 that leaves a line ahead as wide as the box, the
+    flak's proximity fuse along its flight.
+  - then nothing in the way to the origin (`0x006f2530`; a soldier tried
+    again to his body, bone 2), and a speed (the whole velocity) of at
+    least `triggerVictimMinSpeed`.
+  The rewrite's soldier box is a stand-in (0.7 × 1.85 m); the mine's
+  frame is its facing lying, its heading in flight.
 - **C4:** it has neither a trigger nor a fuse to speak of (9999 s), so its
   owner sets it off with alternate fire (the right mouse button). It has
   no radius of its own: the detonation's default, 10 m.
@@ -8390,6 +8508,13 @@ grenade at 5. The local player gets the containers of its soldier's chosen
 unlocks ([Soldier stats](#soldier-stats-ranks-and-unlocks)); `--unlock-all`
 unlocks everything. The customise screen's choice (below) gives the
 containers chosen.
+The kit object prepares the build when it is made (Kit vtable
+`0x00963c78` slot 7, `0x00571220`): it hides its children, lists each
+with its ItemContainer (an unlock's items, the container's children of
+interface `0xc4b3`) by template (`+0x19c`), maps each container to the
+kit items its replaceItem names (`+0x1ac`, matched without case), and
+finds or makes a hidden "recycle bin" ItemContainer (`+0x1b8`) where
+replaced items wait. The rewrite builds from the templates directly.
 The kit build (`0x00570ab0`) applies a container when chosen (the
 SelectKit mask, kit `[0x70 + branch]` has its level's bit); with
 `replaceWithoutEquip` (`+0x2e0`; every kit's ...Player0 frag grenade)
@@ -10016,7 +10141,9 @@ with bots (IAIPlayerFactory slot `0x2c`) and no commander it calls the
 game's `IBFCommander` (`0x009d6618`). Every 10 s it looks for a point of
 its own being taken and shells it with the artillery (slot `0x20`,
 `0x00896f00`: the tool event with rcType 1 and no sender, which
-`0x0050ee10` lets through), then waits 120 s (`0x1009c050`). The orbital
+`0x0050ee10` lets through) when no teammate is within 40 m of the spot,
+else an enemy human off the navigation mesh for over a minute, then
+waits 120 s (`0x1009c050`; see Bots, "AI commander"). The orbital
 strike (90 s), supply drop (35 s) and UAV (60 s) answer its squads'
 requests (`0x1009e200`, `0x1009e3e0`, `0x1009e500`).
 
@@ -11274,9 +11401,16 @@ vehicle's riders as hit.
   it heads for `order + U × 0.8W − 0.5W`. It is re-ordered 35 s (20 s for
   a leader) after arriving.
 - **AI commander** (0x1009c050; not a player, see "Commander"): for a
-  team with bots and no commander it shells the first held point whose
-  flag is below 0.75 with the artillery, at most every 120 s and not
-  before 120 s.
+  team with bots and no commander it shells a spot of the first held
+  point whose flag is below 0.75 with the artillery (the SAI's slot 0x68,
+  0x1009c4d0), nine times in ten and only with no teammate within 40 m of
+  it (0x1008a110, the squad manager's strike radius +0xb8; the earlier
+  stand-in had 15 m); failing that, an enemy human who has been off the
+  navigation mesh for over 60 s (0x100888d0 over the squad manager's list
+  0x1008a3b0, refreshed each time the squads' round robin wraps: humans
+  alive, up and on foot whose position isn't on their map). At most every
+  120 s and not before 120 s. Each strike goes to the squad manager
+  (0x10088040, see Squads).
 
 ### Following paths (src/AI/PathFollower)
 
@@ -11962,7 +12096,10 @@ squad every 18 frames.
   alive, up and on foot, but not within 30 m of the spot of an order under
   way (it heads for the order then). Slots are taken in order (0x100f5760)
   and given up with the last moving into the hole (0x100f64a0: the
-  leader's hole takes the bot nearest the order's spot); a member leaving
+  leader's hole takes the bot nearest the order's spot, whose own hole the
+  last used slot fills in turn, and the trail starts again, 0x100f6020;
+  the earlier rewrite left that second hole, so a member respawning took
+  slot 0 at its spawn and drew the squad back to its base); a member leaving
   re-hands them in member order (0x100f57f0). The shape (+0x14, 0x100f58c0)
   is 0 always (only the constructor and the update's third tick write it):
   a line abreast, slots 1 / 2 right and left of slot 0, 3 / 4 off them, 5
@@ -11974,8 +12111,17 @@ squad every 18 frames.
   leader goes; 0x100f5950, 0x100f6c10), else the order's spot or slot 0's
   member. Slots are swapped to the nearest member (0x100f69a0); slot 0 is
   kept for the game's leader (0x100f60a0). Every sixth update the offsets
-  are laid out again with the members' radii. Human members lagging
-  (0x100f4f30) clear "together" (+0x28); bots never lag.
+  are laid out again with the members' radii.
+- **Lagging** (0x100f4f30): a human member past slot 0 whose slot time
+  (member +0x20, read through 0x1004f4e0: the squared distance to its slot
+  over its top speed, 5 for a soldier; 0x100c0890 writes it for every
+  member with a slot, humans too) lies in (150, 1500) — about 27..87 m
+  off — and who stands farther from the order's spot than the squad's
+  spot lags for 10 + 10 U s (+0x18, +0x1c): the formation isn't together
+  (+0x28) and the leader walks at its own speed. Once over, the slot stays
+  timed and doesn't lag again until a test clears it (a bot, the human
+  leader a human leads by, a member not placed, out of the band or no
+  longer behind). Bots never lag. (`BotManager::updateFormation`.)
 - **Members** (0x100c0bb0): every 9 s a goal unchanged since the last look
   is given again when the bot's goal reads reached (urgency below 0.5) or
   it stands still over 4 m from it. In the formation the leader goes to
@@ -12006,8 +12152,29 @@ squad every 18 frames.
   a human commander answers commend (18) thankyou (8), rebuke (19) and
   followorders (20) sorry (9), divide (21) negative (7), channel 4
   (0x100c2ee0).
-- Not rewritten: the member's vehicle pick through the squad manager
-  (0x100bfcb0 / 0x100880e0; the bots choose seats by Change).
+- **Strike spots** (the squad manager's two records, +0x28 + 0x48 side):
+  a commander's strike for a side (the AI commander's artillery,
+  0x1009c050 → 0x10088040; a human commander's orbital strike or
+  artillery through IAIEventCourier slot 0x5c, 0x1004e690, from
+  BF2142.exe 0x007d7d80 / 0x007d88d0 as the tool is used; the rewrite
+  takes each strike new in `GameWorld::strikes`) marks its spot at the
+  terrain's height, the time, and how long the other side takes to learn
+  of it, (U + 1) × 12.5 s; it forgets both sides' escape points. A spot
+  goes 25 s on (+0xc0, 0x10088f20, first in the manager's update), and
+  every member of every squad is given its goal again (0x100c1ca0). A bot
+  member alive and up (0x100bfa70) within 40 m (+0xb8) of its side's
+  spot, or of the other side's once that one's delay is over (0x100880e0),
+  leaves it before anything else in its update (0x100bfcb0): from the
+  spot through the bot at 45 m, a point on its map, five tries, the way
+  turned about the vertical each time from the first by an angle a (0 at
+  first) going 3a + 0.6 + 0.2U when a ≤ 0 and −a − 0.6 − 0.2U otherwise
+  (0x100a82c0); none found, the point an earlier member of its side found
+  for its kind (soldier or vehicle, 0x10088240), else it stays. It gets a
+  waypoint goal there (0x1008aff0: reach 0, area 60), and +0x35 / +0x4f
+  hold it until it is out of every spot; a point it searched out is kept
+  for its side (0x10088310). `BotManager::noteStrike`, `escapeStrike`.
+  (The earlier passes took 0x100bfcb0 for a vehicle pick: it is this.)
+- **Population** (AIMain): see Respawn, kit and the bots' population.
 
 ### Look-around (src/Game/BotsLook.cpp)
 
@@ -12040,10 +12207,24 @@ the pause's stamp.
   goal may win.
 - The Soldier pattern's steering (0x100cd3b0) turns the walk into
   throttle and strafe against the look: clamp(sign(c)·√|c|) of its
-  forward and side components (`BotManager::steer`). The vehicles' Turret
-  and Null patterns aren't rewritten (gunners aim by their own plans); the
-  sprint branch of 0x100cd3b0 and the MouseFreeLook pattern (unused by the
-  shipped sets) aren't either.
+  forward and side components (`BotManager::steer`). The sprint branch of
+  0x100cd3b0 and the MouseFreeLook pattern (unused by the shipped sets)
+  aren't rewritten.
+- **Turret** (vtable 0x10117660; AIBehaviours.ai gives it to Tank, Mech,
+  Fixed, ArmedCar and ParatrooperFixed): the same look statement (offset
+  0x1008c120, at an object 0x1008c220) for the seat's controlled object
+  when that has its ControlInfo (its AI part's +0x38), with no steering:
+  the gun turns, by the seat's MouseTurretLookAt as a soldier's look does.
+  The statement carries 5° (+0x1c, DAT_10127df0 × 5) where the Soldier's
+  carries 0; the controller 0x100e5820 takes it as its fifth argument and
+  never reads it. The faced sectors are the gun's. A turret's sectors are
+  held to its yaw limits (0x100d5440 over the ControlInfo's BF2142.exe
+  slots 0x4c / 0x54 / 0x60, not traced); the rewrite lets every sector
+  through (the shipped tanks' and AA guns' turrets turn all round).
+  `BotManager::turretLooks`.
+- **Null** (vtable 0x101175b4, FloatingTank and ManDown): its plans
+  (0x1008b9f0) are a statement that does nothing (0x100d1fe0(0, 1, 0)):
+  no look of its own, as before.
 - The 2d path look (0x100d2500, BBPGotoWaypoint2d when the seat's
   ControlInfo slot 0x38 holds, 0x100cf660; stand-in: a driver whose look
   turns the gun): along the path, the follower's point 20 m ahead, level.
@@ -12059,8 +12240,15 @@ the pause's stamp.
   the usable points by their area: max(1, (1 + 0.033 E) T − 0.1 D), T the
   area's temperature for the side, E the basicTemp of empty vehicles
   within 50 m, D the area's distance to the squad's spot. The kit
-  (0x100f04a0): floor(U × 4), the four kits alike; unlock levels one over
-  the best human's, at most 4 (1 with no humans: no unlocks here). The
+  (0x100f04a0): floor(U × 4), the four kits alike. Its unlocks
+  (0x100efce0): for each of four unlock values, the most any human alive
+  holds for that kit (the player's vt+0x98 of the kit and its vt+0x68(i),
+  i = 0..3), + 1, at most 4; with no humans 1 each. They go with the kit
+  through the bot's player (vt+0xb0 → vt+0xa0, BF2142.exe), which the
+  rewrite doesn't follow: what the game makes of the four values (the
+  kit's UB_First / UB_Second / UB_Player / UB_SquadLeader containers by
+  unlockLevel, or the SelectKit bytes' value + 1) wasn't traced, so the
+  bots spawn with their kit's base items. The
   rewrite's choice is the point's control point
   (`GameWorld::setSpawnChoice`); the bots no longer spawn on their leader
   (the original's bots don't).
@@ -12070,15 +12258,50 @@ the pause's stamp.
   rounded strategic strengths kept to the share (`ai::assignsAttack`). In
   the shipped game every bot is in a squad, so this is bookkeeping (its
   release flags feed 0x100a21a0 / 0x100a2630 branches not decoded); the
-  rewrite's bot outside squads takes its role's areas first.
+  rewrite's bot outside squads takes its role's areas first. The release
+  flags: step 11 sets +0x23d (attackers over their share × 1.2, unless
+  the last bot dealt went to defence) and +0x23c (defenders over theirs ×
+  1.2 when it did), both with +0x23e; step 10 (cleared +0x23e first)
+  then releases every loner of the over-full kind from its areas
+  (0x1009f740, setting +0x23e again). 0x100a21a0 (attacks) with +0x23c
+  set and nothing released, and 0x100a2630 (defences) with +0x23d, sum
+  the loners their chosen areas still need (0x10063060 / 0x10063080) and,
+  with none, skip the pass that hands the areas out. With no loners
+  (the shipped game) both tallies stay 0 and the flags clear, so none of
+  this runs; the rewrite deals its loners afresh at each SAI update, which
+  is what the releases correct for.
 - **Population** (AIMain, vtable 0x10114d30): a new bot is refused once
   the active bots reach `aiSettings.setMaxNBots` (slot 30, 0x100581a0;
-  `BotManager::refused`). Not rewritten: a joining human kicking a bot of
-  the bigger team over the server's maximum with maxBotsIncludeHumans
-  (slot 7, 0x10056110) and the fill on leave (slot 8 / 20, 0x10056d10 /
-  0x10056680, which needs autoSpawnBots, never set by the shipped
-  scripts: `aiSettings.setAutoSpawnBots` isn't a command): hosting has no
-  server maximum to test yet.
+  `BotManager::refused`). A human joining (slot 7, 0x10056110) is
+  counted (+0x100; a bot's join only counts, +0xfc); with
+  maxBotsIncludeHumans (IAISettings slot 3, +0x37), bots about and the
+  server's maximum (DAT_10139454 slot 4: here sv.maxPlayers,
+  `BotManager::setServerMaxPlayers`) under humans + bots, one bot goes
+  (IAIGameEffector slots 0x24 / 0x14): the last one in the player list of
+  the team with more players, team 2 on a tie, the other team's when that
+  one has none. A human leaving (slot 8, 0x10056d10) leaves its squad
+  (0x10089860) and, with maxBotsIncludeHumans and bots + humans under the
+  maximum, the fill (slot 20, 0x10056680) adds setMaxNBots less the humans
+  less the bots, through the AI player factory (slot 0x18; here `addBot`
+  on the side with fewer players), when autoSpawnBots (IAISettings slot
+  40, +0x36) and the game's slot 0x5c hold. `aiSettings.autoSpawnBots` is
+  a command (0x10011420); the shipped AIDefault.ai says
+  `setAutoSpawnBots`, which isn't, so the fill doesn't run in the shipped
+  game. `BotManager::population`.
+- **Revives and team kills** (the bot manager's slots 15, 16 and 24,
+  vtable 0x10119738, reached through IAIEventCourier 0x1004e620 /
+  0x1004e130 / 0x1004e3e0 from BF2142.exe's AI event listener 0x00894860,
+  category 3): event 6 is man down (0x100c5ea0: the bot's down flag
+  +0x178, its path follower reset 0x100962a0); event 7 is the soldier's
+  revive (the soldier's event 0x19, 0x00587b90, with the soldier and its
+  player): 0x100c5f00 clears the flag, thinks at once, resets the path
+  follower (0x10095120) and queues "thankyou" (8) on channel 6 in 1 s;
+  the SAI's slot 15 (0x100a0f40) gives the squad member its goal again
+  and redoes its area record (0x1009fdc0). Event 0xb is a team kill
+  (0x005b7680: killer and victim of one team, the killer not the victim):
+  0x100c60c0 has a killer bot that isn't scripted (vt+0x27c) say "sorry"
+  (9) on channel 6 at once. The rewrite sees a bot come back from man down
+  and a bot's teamKills grow.
 
 ### Mines on the navigation mesh (src/AI/MineZones, BotsMines.cpp)
 

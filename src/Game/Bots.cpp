@@ -1322,6 +1322,9 @@ std::string BotManager::aiTemplateOf(const std::string& objectTemplate) const
 void BotManager::update(float seconds)
 {
 	m_time += seconds;
+	if (enabled()) {
+		population(); // AIMain's kick and fill (BotsSquad.cpp), before the lists are taken
+	}
 	// What every bot looks at this tick, gathered once.
 	m_players = m_world.playerList();
 	m_vehicles = m_world.vehicleList();
@@ -1398,6 +1401,16 @@ void BotManager::update(float seconds)
 		}
 		Bot& bot = m_bots[self.id];
 		if (!self.alive) {
+			// Man down: the game's event (3, 6) reaches IAIEventCourier
+			// slot 0x34 (0x1004e620 -> the bot manager's slot 15,
+			// 0x100c5ea0: the bot's +0x178 down flag, its path follower
+			// reset 0x100962a0); kept here for the revive below.
+			if (self.manDown) {
+				m_downBots.insert(self.id);
+			} else {
+				m_downBots.erase(self.id);
+			}
+			m_teamKillsSeen[self.id] = self.teamKills;
 			bot = Bot();
 			bot.spawnedAt = -1;
 			m_world.setZoomed(self.id, false);
@@ -1410,7 +1423,37 @@ void BotManager::update(float seconds)
 		if (bot.spawnedAt < 0) {
 			bot.spawnedAt = m_time;
 			m_respawn[self.id].chosen = false; // the spawn hook (0x1009fc90)
+			if (m_downBots.erase(self.id)) {
+				// Revived: the soldier's event 0x19 (BF2142.exe 0x00587b90)
+				// raises the game's event (3, 7) with the soldier and its
+				// player (0x00894860 -> IAIEventCourier slot 0x38,
+				// 0x1004e130 -> the bot manager's slot 16, 0x100c5f00): the
+				// down flag off (+0x178), a think now (vt+0x24), the path
+				// follower reset (0x10095120; the rewrite's bot starts
+				// afresh), "thankyou" (8) on channel 6 in 1 s; the SAI's
+				// slot 15 (0x100a0f40) has the squad member's goal given
+				// again (0x100bf4e0(0)) and its area record redone
+				// (0x1009fdc0, the SAI's own bookkeeping).
+				queueRadio(bot, 8, 6, 1.0f);
+				for (auto& [key, squad] : m_squads) {
+					if (SquadMember* m = memberOf(squad, self.id)) {
+						m->goalSet = false;
+						m->regoal = true;
+					}
+				}
+			}
 		}
+		// A team kill: BF2142.exe's kill (0x005b7680) raises the game's
+		// event (3, 0xb) with the killer and the victim of its team
+		// (0x00894860 -> IAIEventCourier slot 0xa8, 0x1004e3e0 -> the bot
+		// manager's slot 24, 0x100c60c0): a killer bot that isn't
+		// scripted (vt+0x27c, +0x264; none is) says "sorry" (9) on
+		// channel 6 at once. GameWorld counts the same kills (teamKills).
+		int& teamKills = m_teamKillsSeen.try_emplace(self.id, self.teamKills).first->second;
+		if (self.teamKills > teamKills) {
+			queueRadio(bot, 9, 6, 0.0f);
+		}
+		teamKills = self.teamKills;
 		noticeRounds(bot, self);
 		warnOfGrenades(bot, self);
 		// The bot's explosive rounds (0x1004e910, the game's event for each
@@ -1881,15 +1924,15 @@ bool BotManager::spotSighting(const GameWorld::PlayerInfo& self, const GameWorld
 // object's sphere tested against its six planes by 0x100feac0, 0x100f7340).
 void BotManager::sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players)
 {
-	if (!self.vehicle) {
-		faceSectors(bot, self); // 0x100d6d60 (bot vt+0x308, from this pass)
-	}
 	// The view: R = viewDistance, candidates within R cos(fov/2) (a square
 	// frustum of half-angle fov/2), seen when one of
 	// clamp(round(30 radius / d), 1, 10) rays is clear.
 	float gunYaw = 0, gunPitch = 0;
 	const bool gunning = self.vehicle && (!self.driving || drivesGun(self)) && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
 	const float lookYaw = gunning ? self.yaw + gunYaw : self.yaw;
+	if (!self.vehicle || turretLooks(self)) {
+		faceSectors(bot, lookYaw); // 0x100d6d60 (bot vt+0x308, from this pass)
+	}
 	const float lookPitch = gunning ? gunPitch : bot.pitch;
 	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight - 0.1f, 0};
 	const float halfFov = m_settings.fieldOfView * 0.5f;
@@ -2551,9 +2594,13 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 	}
 	bot.look.pattern = pattern;
 	// The sensing agent's update and look plan after the main plan
-	// (0x1009a4c0 -> 0x100d7840), for a soldier on foot (the Soldier
-	// pattern).
-	if (!self.vehicle) {
+	// (0x1009a4c0 -> 0x100d7840): a soldier on foot (the Soldier pattern),
+	// or a gunner whose seat's equipment type has the Turret pattern
+	// (AIBehaviours.ai: Tank, Mech, Fixed, ArmedCar, ParatrooperFixed). The
+	// Null pattern (FloatingTank, ManDown; the null pattern's plans
+	// 0x1008b9f0 are a statement that does nothing, 0x100d1fe0(0, 1, 0))
+	// and the vehicles without a pattern look nowhere of their own.
+	if (!self.vehicle || turretLooks(self)) {
 		lookAround(bot, self, input, seconds);
 	}
 	// The sentry drone is out: the detonator has nothing left to do.
@@ -7804,10 +7851,18 @@ void BotManager::updateStrategy(float seconds)
 // next strike waits 120 s again), with an artillery asset standing
 // (IBFCommander slots 0x34, 0x38 → 0x008970e0, 0x005a1050): no sooner
 // than 120 s after its last strike, at a random spot of the first point
-// the team holds whose flag is below 0.75 (being taken), with no teammate
-// within 15 m of it, nine times in ten, it fires the artillery
-// (IBFCommander slot 0x20, 0x00896f00: the commander's tool event with
-// rcType 1 and no sender, which 0x0050ee10 lets through). The orbital
+// the team holds whose flag is below 0.75 (being taken; the SAI's slot
+// 0x68, 0x1009c4d0), nine times in ten, with no teammate within 40 m of
+// it (0x1008a110 with the squad manager's strike radius +0xb8; the
+// terrain's height there), it fires the artillery (IBFCommander slot
+// 0x20, 0x00896f00: the commander's tool event with rcType 1 and no
+// sender, which 0x0050ee10 lets through). Failing that, at an enemy human
+// off the navigation mesh for over 60 s (0x100888d0 over 0x1008a3b0's
+// list: one the bots can't reach). Either strike goes to the squad
+// manager (0x10088040, BotsSquad.cpp's noteStrike) and waits 120 s. The
+// earlier stand-in kept 15 m and tested the teammates before the draw.
+// (0x1008a110 counts the side's players whose AI info has flag 4 or not
+// flag 2; the rewrite counts every one alive.) The orbital
 // strike (slot 0x24, every 90 s), the supply drop (0x28, 35 s) and the
 // UAV (0x2c, 60 s) it uses only to answer its squads' requests
 // (0x1009e200, 0x1009e3e0, 0x1009e500), which the rewrite's bots don't
@@ -7849,6 +7904,7 @@ void BotManager::command(float seconds)
 		if (m_time < m_firstStrikeAt || m_time - m_lastStrike[team] < 120 || !m_world.abilityReady(team, A::Artillery)) {
 			continue;
 		}
+		bool fired = false;
 		for (const ControlPoint& cp : m_world.controlPoints()) {
 			if (cp.team != team || cp.flagHeight >= 0.75f || cp.flag != team) {
 				continue;
@@ -7860,14 +7916,22 @@ void BotManager::command(float seconds)
 			}
 			const float x = p.x + (random() * 2 - 1) * radius;
 			const float z = p.z + (random() * 2 - 1) * radius;
-			const bool clear = std::none_of(players.begin(), players.end(), [&](const GameWorld::PlayerInfo& mate) {
-				return mate.alive && mate.team == team
-					&& (mate.position.x - x) * (mate.position.x - x) + (mate.position.z - z) * (mate.position.z - z) < 15.0f * 15.0f;
-			});
-			if (clear && random() < 0.9f && m_world.commanderAction(team, A::Artillery, x, z, true)) {
-				m_lastStrike[team] = m_time;
+			if (random() > 0.1f) {
+				const float y = m_world.terrainHeight(x, z);
+				const bool clear = std::none_of(players.begin(), players.end(), [&](const GameWorld::PlayerInfo& mate) {
+					const physics::Vec3 d = mate.position - physics::Vec3 {x, y, z};
+					return mate.alive && mate.team == team && d.x * d.x + d.y * d.y + d.z * d.z < 40.0f * 40.0f;
+				});
+				if (clear && m_world.commanderAction(team, A::Artillery, x, z, true)) {
+					m_lastStrike[team] = m_time;
+					fired = true;
+				}
 			}
 			break;
+		}
+		physics::Vec3 camper;
+		if (!fired && offMeshEnemy(team, camper) && m_world.commanderAction(team, A::Artillery, camper.x, camper.z, true)) {
+			m_lastStrike[team] = m_time;
 		}
 	}
 }
