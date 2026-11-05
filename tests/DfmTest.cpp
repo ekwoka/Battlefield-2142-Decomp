@@ -1,12 +1,22 @@
 // The Flash menus' .dfm container and the SWF reader: synthetic movies
 // round-trip through the XOR, and (with $BF2142_GAME_DIR) the shipped
 // mainMenu.dfm decodes to a sane movie.
+#include "Console/Console.h"
+#include "Console/ConsoleBinding.h"
+#include "Hud/HudFont.h"
+#include "IO/File/FileManager.h"
 #include "IO/File/ZipArchive.h"
+#include "IO/Localization/Localization.h"
 #include "TestMain.h"
+#include "UI/Characters/CharacterDictionary.h"
 #include "UI/Dfm.h"
 #include "UI/Swf.h"
 
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <map>
+#include <set>
 
 using namespace dice::hfe;
 
@@ -204,4 +214,107 @@ TEST(Dfm_ShippedMainMenu)
 	CHECK(movie->header.frameRate > 0);
 	CHECK(movie->tags.size() > 100);
 	CHECK(!movie->tags.empty() && movie->tags.back().code == ui::kSwfEnd);
+}
+
+// The menus' text in other languages. SwiffRender draws every edit text
+// with an engine font (ui::Drawer::engineFont: the font's export name and
+// round(height x 0.05) px, from Fonts/<language>/ first, 0x10185e90), never
+// with the movie's own glyphs (gameswf's 0x100c06a0 layout, which skips a
+// missing glyph with "missing glyph for char", is not reached): the
+// embedded fonts of mainMenu.dfm hold Western glyph sets (no Cyrillic, no
+// CJK). So the languages' menu strings need the engine fonts' glyphs:
+// checked here for each font size the menu's edit texts use, but the 24 px
+// titles' StandardTextBold_24, which every language ships Latin-only.
+TEST(Dfm_MenuEngineFontsCoverLanguages)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	Console console(&files);
+	bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+		[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+	std::string out;
+	console.run("ClientArchives.con", {}, out);
+	console.run("ServerArchives.con", {}, out);
+	std::vector<uint8_t> dfm, csv;
+	CHECK(files.readFile("menu/External/FlashMenu/mainMenu.dfm", dfm) || files.readFile("External/FlashMenu/mainMenu.dfm", dfm));
+	CHECK(files.readFile("Localization/strings.csv", csv));
+	const auto swf = ui::decodeDfm(dfm);
+	const auto movie = swf ? ui::parseSwf(*swf) : std::nullopt;
+	ui::swf::CharacterDictionary dictionary;
+	CHECK(movie && dictionary.load(*swf, *movie));
+	// The edit texts' engine fonts (Drawer::engineFontName: the export of
+	// the font, or of another font of the same name).
+	std::map<std::string, std::string> byName;
+	std::map<uint16_t, std::string> names;
+	for (const auto& [name, id] : dictionary.exports()) {
+		if (const ui::swf::Font* font = dictionary.font(id)) {
+			names[id] = name;
+			byName[font->name] = name;
+		}
+	}
+	std::set<std::pair<std::string, int>> used;
+	size_t cyrillic = 0, embedded = 0;
+	for (const auto& [id, character] : dictionary.characters()) {
+		if (const auto* font = std::get_if<ui::swf::Font>(&character)) {
+			if (!names.count(id) && byName.count(font->name)) {
+				names[id] = byName[font->name];
+			}
+			if (!font->glyphs.empty()) {
+				++embedded;
+				for (const ui::swf::FontGlyph& g : font->glyphs) {
+					cyrillic += g.code >= 0x400 && g.code < 0x500 ? 1 : 0;
+				}
+			}
+		}
+	}
+	for (const auto& [id, character] : dictionary.characters()) {
+		if (const auto* field = std::get_if<ui::swf::EditText>(&character); field && names.count(field->fontId)) {
+			used.insert({names[field->fontId], static_cast<int>(std::nearbyint(field->fontHeight * 0.05f))});
+		}
+	}
+	std::fprintf(stderr, "  %zu engine fonts in use; %zu embedded fonts, %zu Cyrillic glyphs in them\n", used.size(), embedded, cyrillic);
+	CHECK(!used.empty() && embedded > 0 && cyrillic == 0);
+	const char* ids[] = {"OPTIONS_1_hud", "OPTIONS_1_killmessages", "HEADER_history", "HEADER_badges", "HEADER_deaths",
+		"TEXT_singleplayer_easy", "TEXT_changesneedsrestart", "TEXT_accuracywithweapon"};
+	for (const char* language : {"German", "Polish", "Russian", "Chinese_Simplified"}) {
+		io::Localization strings;
+		CHECK(strings.load(csv, language));
+		std::set<uint32_t> codes;
+		for (const char* id : ids) {
+			const std::string text = strings.text(id);
+			for (size_t at = 0; at < text.size();) {
+				const uint32_t c = hud::nextCode(text, at);
+				if (c > ' ') {
+					codes.insert(c);
+				}
+			}
+		}
+		size_t fonts = 0, missing = 0;
+		for (const auto& [name, pixels] : used) {
+			const std::string key = name + "_" + std::to_string(pixels) + ".dif";
+			for (const std::string& path : {"Fonts/" + std::string(language) + "/" + key, "Fonts/English/" + key, "Fonts/" + key}) {
+				std::vector<uint8_t> data;
+				if (!files.readFile(path, data)) {
+					continue;
+				}
+				const auto font = hud::parseHudFont(std::string(data.begin(), data.end()));
+				// StandardTextBold_24 (the big titles) is shipped with its 98
+				// Latin glyphs in every language's folder, as in the original.
+				if (font && name + "_" + std::to_string(pixels) != "StandardTextBold_24") {
+					++fonts;
+					for (const uint32_t c : codes) {
+						missing += font->glyph(c) ? 0 : 1;
+					}
+				}
+				break;
+			}
+		}
+		std::fprintf(stderr, "  %s: %zu characters, %zu fonts, %zu glyphs missing\n", language, codes.size(), fonts, missing);
+		CHECK(codes.size() > 10 && fonts > 0 && missing == 0);
+	}
 }

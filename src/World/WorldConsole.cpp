@@ -244,6 +244,39 @@ void registerWorldConsoleMethods(Console& console, ObjectTemplateManager& templa
 	};
 	console.registerMethod(vehicleType);
 
+	// The HUD components' camera-mode lists: vehicleHud / weaponHud
+	// .showOnCamMode <mode> (template slot 0xcc / 0xdc, 0x006371f0 /
+	// 0x00639350: the list cleared, then the mode) and .addShowOnCamMode
+	// <mode> (slot 0xd0 / 0xe0, 0x00637260 / 0x006393c0: appended; the
+	// executors 0x00555d17 / 0x00559e82 read one int). The list starts as
+	// {1}, the Inside view (the writers 0x00636440 / 0x006381d0 skip a
+	// lone 1). Kept as "<component>.showOnCamMode.list" = "1 2 ...", read
+	// by HudMenusVehicles' vehicleGuiIndex.
+	for (const char* component : {"vehicleHud", "weaponHud"}) {
+		for (const bool add : {false, true}) {
+			ConsoleMethod mode;
+			mode.name = std::string("ObjectTemplate.") + component + (add ? ".addShowOnCamMode" : ".showOnCamMode");
+			mode.kind = ConsoleMethodKind::Method;
+			mode.access = access;
+			mode.minArgs = 1;
+			mode.maxArgs = 1;
+			mode.isActive = activeTemplate;
+			mode.invoke = [&templates, add, key = std::string(component) + ".showOnCamMode.list"](
+							  const std::vector<std::string>& args) -> std::string {
+				auto& settings = templates.active()->settings();
+				const std::string value = std::to_string(parseConsoleValue<int>(args[0]));
+				const auto it = settings.find(key);
+				if (!add) {
+					settings[key] = value;
+				} else {
+					settings[key] = (it == settings.end() ? std::string("1") : it->second) + " " + value;
+				}
+				return {};
+			};
+			console.registerMethod(std::move(mode));
+		}
+	}
+
 	// setIfTitanChangeToWeapon <weapon> <distance> (GenericFireArm, executor
 	// 0x004e20d4: the name at +0x340, the distance at +0x35c; pod_launcher_cq
 	// and eu_apc_alps' "pod_launcher 250"). In the firearm's input handler

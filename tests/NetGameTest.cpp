@@ -2095,3 +2095,39 @@ TEST(NetGame_PlayerFireStateAndSpotted)
 	CHECK(fromBytes.spotter == 545 && fromBytes.spotted == 601 && fromBytes.team == 2 && fromBytes.x == 12.5f
 		&& fromBytes.value == 7 && fromBytes.message == 0x33);
 }
+
+// A seat with cameras (0x00605650): each weapon group's active weapon,
+// its place in the group + 1 in 9 bits (masks 1, 2, 4), which the host
+// sends so the clients fire the right gun from the occupant's fire state
+// (RemoteGuns.h).
+TEST(NetGame_SeatActiveWeapons)
+{
+	net::NetworkableHints h;
+	h.kind = net::NetworkableKind::PlayerControlObject;
+	h.seatCameras = 2;
+	net::NetworkableState s;
+	s.kind = net::NetworkableKind::PlayerControlObject;
+	s.mask = 0x1 | 0x2;
+	s.seatWeapon[0] = 1;
+	s.seatWeapon[1] = 0;
+	net::BitWriter out;
+	net::encodeNetworkable(out, h, nullptr, s);
+	net::BitReader in(out.data().data(), out.data().size());
+	net::NetworkableState back;
+	CHECK(net::decodeNetworkable(in, h, {}, back) && back.complete);
+	CHECK(back.mask == 3 && back.seatWeapon[0] == 1 && back.seatWeapon[1] == 0 && back.seatWeapon[2] == -1);
+}
+
+// The walker's legs on a client (0x00650530 from the MechLegs networkable's
+// state +0x1bc and held flag +0x1c0): the messages its animation system
+// takes, nothing while the input no longer holds.
+TEST(NetGame_MechLegsMessages)
+{
+	CHECK(net::mechLegsMessages(1, true) == 0x80);
+	CHECK(net::mechLegsMessages(2, true) == 0x100);
+	CHECK(net::mechLegsMessages(3, true) == 0x400);
+	CHECK(net::mechLegsMessages(4, true) == 0x200);
+	CHECK(net::mechLegsMessages(5, true) == 0x10);
+	CHECK(net::mechLegsMessages(1, false) == 0);
+	CHECK(net::mechLegsMessages(0, true) == 0);
+}

@@ -986,7 +986,15 @@ void EffectManager::spawnTemplate(const world::ObjectTemplate& t, const Vec3& po
 				}
 				continue;
 			}
+			const size_t sounds = m_startedSounds.size();
 			spawnTemplate(*childTemplate, at, local * rotation, depth + 1, view, spawned, spawnedLights);
+			if (childType == "Sound" && m_startedSounds.size() > sounds) {
+				// The bundle's start sound, its envelopes bound to the
+				// bundle's sound intensity (0x00619700).
+				StartedSound& sound = m_startedSounds.back();
+				sound.bundle = &t;
+				sound.intensity = (modifierMask & (1u << 5)) != 0 ? modifierValues[5] : 0.0f;
+			}
 		}
 	}
 }
@@ -1314,8 +1322,35 @@ bool EffectManager::spawnAttached(const std::string& name, uint32_t anchor, cons
 		light.mountRotation = rotation;
 		placeLight(light);
 	}
+	// The looping start sounds of bundles that set their sound intensity
+	// (SoundIntensityUsed or a mapping) stay with the bundle (bundleLoops),
+	// their envelopes at that intensity: modifier 5 as the start sets it
+	// (0x0061a1c0 -> 0x00618e30), with no motion yet.
+	std::vector<HeldSound> held;
+	for (size_t i = sounds; i < m_startedSounds.size();) {
+		const StartedSound& started = m_startedSounds[i];
+		const world::ObjectTemplate* sound = m_templates.find(started.name);
+		const std::string* loops = sound ? setting(*sound, "loopCount") : nullptr;
+		const bool intensity = started.bundle
+			&& (bundleModifiers(*started.bundle).modifiers[5].used || bundleModifiers(*started.bundle).modifiers[5].mapped());
+		if (!intensity || !loops || std::atoi(loops->c_str()) != 0) {
+			++i;
+			continue;
+		}
+		HeldSound h;
+		h.key = ++m_nextHeldSound;
+		h.anchor = anchor;
+		h.tag = tag;
+		h.name = m_startedSounds[i].name;
+		h.localPosition = m_startedSounds[i].position;
+		h.mountPosition = position;
+		h.mountRotation = rotation;
+		h.intensity = started.intensity;
+		held.push_back(std::move(h));
+		m_startedSounds.erase(m_startedSounds.begin() + static_cast<std::ptrdiff_t>(i));
+	}
 	uint32_t bundle = 0;
-	if (driven && !spawned.empty()
+	if (driven && (!spawned.empty() || !held.empty())
 		&& (bundleModifiers(*t).anyMapping || number(*t, "speedFromPhysics", 0) != 0)) {
 		AttachedBundle b;
 		b.id = bundle = ++m_nextBundle;
@@ -1326,6 +1361,10 @@ bool EffectManager::spawnAttached(const std::string& name, uint32_t anchor, cons
 		b.mountRotation = rotation;
 		b.speedFromPhysics = number(*t, "speedFromPhysics", 0) != 0;
 		m_attachedBundles.push_back(b);
+	}
+	for (HeldSound& h : held) {
+		h.bundle = bundle;
+		m_heldSounds.push_back(std::move(h));
 	}
 	for (Emitter* emitter : spawned) {
 		emitter->anchor = anchor;
@@ -1405,6 +1444,12 @@ void EffectManager::setMount(uint32_t anchor, uint32_t tag, const Vec3& position
 			placeLight(light);
 		}
 	}
+	for (HeldSound& h : m_heldSounds) {
+		if (h.anchor == anchor && h.tag == tag) {
+			h.mountPosition = position;
+			h.mountRotation = rotation;
+		}
+	}
 }
 
 void EffectManager::stopAttached(uint32_t anchor, uint32_t tag)
@@ -1419,6 +1464,9 @@ void EffectManager::stopAttached(uint32_t anchor, uint32_t tag)
 			light.stopped = true;
 		}
 	}
+	m_heldSounds.erase(std::remove_if(m_heldSounds.begin(), m_heldSounds.end(),
+						   [&](const HeldSound& h) { return h.anchor == anchor && (tag == 0 || h.tag == tag); }),
+		m_heldSounds.end());
 }
 
 std::set<uint32_t> EffectManager::mountedTags(uint32_t anchor) const
@@ -1434,6 +1482,11 @@ std::set<uint32_t> EffectManager::mountedTags(uint32_t anchor) const
 			tags.insert(light.tag);
 		}
 	}
+	for (const HeldSound& h : m_heldSounds) {
+		if (h.anchor == anchor) {
+			tags.insert(h.tag);
+		}
+	}
 	return tags;
 }
 
@@ -1444,7 +1497,24 @@ bool EffectManager::emitting(uint32_t anchor, uint32_t tag) const
 			return true;
 		}
 	}
-	return false;
+	// A bundle with only a looping sound runs while the sound is held.
+	return std::any_of(m_heldSounds.begin(), m_heldSounds.end(),
+		[&](const HeldSound& h) { return h.anchor == anchor && (tag == 0 || h.tag == tag); });
+}
+
+std::vector<EffectManager::BundleLoop> EffectManager::bundleLoops() const
+{
+	std::vector<BundleLoop> out;
+	out.reserve(m_heldSounds.size());
+	for (const HeldSound& h : m_heldSounds) {
+		const auto at = m_anchors.find(h.anchor);
+		if (at == m_anchors.end()) {
+			continue;
+		}
+		const Vec3 mounted = h.mountPosition + h.mountRotation.transform(h.localPosition);
+		out.push_back({h.key, h.name, at->second.position + at->second.rotation.transform(mounted), h.intensity});
+	}
+	return out;
 }
 
 void EffectManager::releaseAnchor(uint32_t anchor)
@@ -1460,6 +1530,9 @@ void EffectManager::releaseAnchor(uint32_t anchor)
 			light.stopped = true;
 		}
 	}
+	m_heldSounds.erase(std::remove_if(m_heldSounds.begin(), m_heldSounds.end(),
+						   [anchor](const HeldSound& h) { return h.anchor == anchor; }),
+		m_heldSounds.end());
 	m_anchors.erase(anchor);
 }
 
@@ -1485,6 +1558,9 @@ void EffectManager::update(float seconds)
 			emitter->stop();
 		}
 	}
+	m_heldSounds.erase(std::remove_if(m_heldSounds.begin(), m_heldSounds.end(),
+						   [this](const HeldSound& h) { return !m_anchors.count(h.anchor); }),
+		m_heldSounds.end());
 	stepAttachedBundles(seconds);
 	EmitContext context = m_context;
 	context.settings = m_settings;
@@ -1534,7 +1610,9 @@ void EffectManager::stepAttachedBundles(float seconds)
 										return true;
 									}
 									return std::none_of(m_emitters.begin(), m_emitters.end(),
-										[&b](const std::unique_ptr<Emitter>& e) { return e->bundle == b.id && !e->stopped(); });
+											   [&b](const std::unique_ptr<Emitter>& e) { return e->bundle == b.id && !e->stopped(); })
+										&& std::none_of(m_heldSounds.begin(), m_heldSounds.end(),
+											[&b](const HeldSound& h) { return h.bundle == b.id; });
 								}),
 		m_attachedBundles.end());
 	if (seconds <= 0) {
@@ -1585,6 +1663,15 @@ void EffectManager::stepAttachedBundles(float seconds)
 					}
 				}
 			});
+			// The sound intensity (modifier 5, +0x1d8): its start sound's
+			// envelopes' input.
+			if ((mask & (1u << 5)) != 0) {
+				for (HeldSound& h : m_heldSounds) {
+					if (h.bundle == b.id) {
+						h.intensity = values[5];
+					}
+				}
+			}
 		}
 		b.lastPoint = point;
 		b.lastOrigin = anchor.position;
@@ -1995,6 +2082,13 @@ void EffectManager::setModifier(uint32_t anchor, uint32_t tag, int modifier, flo
 		default: break;
 		}
 	}
+	if (modifier == 5) { // the sound intensity, +0x1d8 (bundleLoops)
+		for (HeldSound& h : m_heldSounds) {
+			if (h.anchor == anchor && h.tag == tag) {
+				h.intensity = value;
+			}
+		}
+	}
 }
 
 const BundleModifiers& EffectManager::bundleModifiers(const world::ObjectTemplate& bundle)
@@ -2250,7 +2344,7 @@ bool holdsBundles(const world::ObjectTemplateManager& templates, const world::Ob
 	}
 	bool holds = false;
 	if (t.typeName() == "EffectBundle" || t.typeName() == "WheelEffectBundle" || t.typeName() == "AirDraftEffectBundle"
-		|| hasWindAffector(t)) {
+		|| t.typeName() == "GroundEffectBundle" || hasWindAffector(t)) {
 		holds = true;
 	} else if (depth <= 10) {
 		for (const world::ChildTemplate& child : t.children()) {
@@ -2263,6 +2357,30 @@ bool holdsBundles(const world::ObjectTemplateManager& templates, const world::Ob
 	}
 	cache[&t] = holds;
 	return holds;
+}
+
+bool equalsIgnoreCase(const std::string& a, const std::string& b)
+{
+	return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+		return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
+	});
+}
+
+// A GroundEffectBundle (class 0x9486) in a template tree.
+ObjectEffects::Placed groundTriggerOf(const world::ObjectTemplate& t, const std::vector<std::string>& path,
+	const std::vector<const world::ChildTemplate*>& chain, const Vec3& position, const Mat3& rotation, int parent)
+{
+	ObjectEffects::Placed placed;
+	placed.kind = ObjectEffects::Placed::Kind::GroundTrigger;
+	placed.bundle = &t;
+	placed.path = path;
+	placed.chain = chain;
+	placed.position = position;
+	placed.rotation = rotation;
+	placed.parent = parent;
+	placed.material = static_cast<uint32_t>(number(t, "material", 0));
+	placed.maxTriggerDistance = number(t, "maxTriggerDistance", 3); // +0x23c, 0x0061e0b0
+	return placed;
 }
 
 } // namespace
@@ -2289,7 +2407,9 @@ std::vector<ObjectEffects::Placed> ObjectEffects::bundlesOf(const world::ObjectT
 				path.push_back(child.name);
 				chain.push_back(&child);
 				const std::string& type = c->typeName();
-				if (type == "EffectBundle" || type == "WheelEffectBundle" || type == "AirDraftEffectBundle") {
+				if (type == "GroundEffectBundle") {
+					out.push_back(groundTriggerOf(*c, path, chain, childAt, childTurn, -1));
+				} else if (type == "EffectBundle" || type == "WheelEffectBundle" || type == "AirDraftEffectBundle") {
 					Placed placed;
 					placed.kind = type == "WheelEffectBundle" ? Placed::Kind::Wheel
 						: type == "AirDraftEffectBundle"      ? Placed::Kind::AirDraft
@@ -2305,6 +2425,23 @@ std::vector<ObjectEffects::Placed> ObjectEffects::bundlesOf(const world::ObjectT
 					placed.startAtCreation = number(*c, "startAtCreation", 0) != 0;
 					placed.speedFromPhysics = number(*c, "speedFromPhysics", 0) != 0;
 					out.push_back(std::move(placed));
+					// The GroundEffectBundles under it: the bundle's start
+					// sends its children event 0 (0x0061a1c0, slot 0x100).
+					const int parent = static_cast<int>(out.size() - 1);
+					for (const world::ChildTemplate& grand : c->children()) {
+						const world::ObjectTemplate* g = templates.find(grand.name);
+						if (!g || g->typeName() != "GroundEffectBundle") {
+							continue;
+						}
+						Vec3 groundAt = childAt;
+						Mat3 groundTurn = childTurn;
+						placeChild(grand, object, partPose, groundAt, groundTurn);
+						path.push_back(grand.name);
+						chain.push_back(&grand);
+						out.push_back(groundTriggerOf(*g, path, chain, groundAt, groundTurn, parent));
+						path.pop_back();
+						chain.pop_back();
+					}
 				} else {
 					if (hasWindAffector(*c)) {
 						Placed placed;
@@ -2356,6 +2493,93 @@ void ObjectEffects::place(const Placed& bundle, uint32_t object, const PartPose&
 	rotation = {};
 	for (const world::ChildTemplate* child : bundle.chain) {
 		placeChild(*child, object, partPose, position, rotation);
+	}
+}
+
+void ObjectEffects::startBundle(const ObjectState& object, Tracked& tracked, size_t index, EffectManager& effects,
+	const PartPose& partPose, EffectManager::View view, bool created)
+{
+	Placed& b = tracked.bundles[index];
+	if (partPose && !created) {
+		place(b, object.id, partPose, b.position, b.rotation);
+	}
+	effects.spawnAttached(b.bundle->name(), object.id, b.position, b.rotation, view, static_cast<uint32_t>(index + 1), false);
+	// The start sends its children event 0 (0x0061a1c0).
+	for (Placed& ground : tracked.bundles) {
+		if (ground.kind == Placed::Kind::GroundTrigger && ground.parent == static_cast<int>(index)) {
+			groundTrigger(object, ground, effects, partPose, created);
+		}
+	}
+}
+
+// GroundEffectBundle's event 0 (0x0061e090 -> 0x0061de40): a ray from the
+// bundle along its own -y, maxTriggerDistance long, against the objects
+// (the collision manager, slot 0x68) and then the terrain (slot 0x8c); the
+// hit's material, or the water's (1) where the hit lies more than 0.1 m
+// under the water's surface. Within maxTriggerDistance the MaterialManager's
+// cell for the bundle's material and that one (slot 0x68) gives the effect,
+// started at the hit (the effect manager's slot 0x118) facing the hit's
+// normal and the bundle's forward (its matrix's row 2). The tanks' main
+// guns blow dust off the ground under the barrel (geb_tank, material 66,
+// 3 m), the walkers' feet stamp it (geb_mech under the foot step bundles,
+// 127). The rewrite's ground probe gives no normal: the effect stands up.
+void ObjectEffects::groundTrigger(const ObjectState& object, Placed& g, EffectManager& effects, const PartPose& partPose,
+	bool created)
+{
+	if (!m_probe || !m_materialEffect) {
+		return;
+	}
+	if (partPose && !created) {
+		place(g, object.id, partPose, g.position, g.rotation);
+	}
+	groundTriggerAt(object.position + object.rotation.transform(g.position), g.rotation * object.rotation, g, object.id,
+		effects);
+}
+
+void ObjectEffects::groundTriggerAt(const Vec3& at, const Mat3& turn, const Placed& g, uint32_t ignore, EffectManager& effects)
+{
+	if (!m_probe || !m_materialEffect) {
+		return;
+	}
+	Vec3 hit;
+	uint32_t material = 0;
+	if (!m_probe(at, at + turn.transform({0, -1, 0}) * g.maxTriggerDistance, ignore, hit, material)
+		|| std::sqrt(physics::lengthSquared(hit - at)) > g.maxTriggerDistance) {
+		return;
+	}
+	const std::string effect = m_materialEffect(g.material, material);
+	if (effect.empty()) {
+		return;
+	}
+	const Vec3 up {0, 1, 0};
+	Vec3 forward = turn.transform({0, 0, 1});
+	forward.y = 0;
+	forward = physics::lengthSquared(forward) > 1e-6f ? normalized(forward) : Vec3 {0, 0, 1};
+	Mat3 frame;
+	frame.rows = {physics::cross(up, forward), up, forward};
+	effects.spawn(effect, hit, frame);
+}
+
+// A firearm that fires away from its place in its object's tree (the
+// commanders' strike firearms, which 0x005a0bf0 moves over the target):
+// FireComp's fire (0x005f31d0) sends event 0 to the firearm's children
+// where it is. Its EffectBundles whose startOnEffects is 0 start there
+// (0x0061a4e0, as one-shots: nothing moves the firearm after), its
+// GroundEffectBundles look down their -y (0x0061e090 -> 0x0061de40).
+void ObjectEffects::weaponFiredAt(const world::ObjectTemplate& weapon, const Vec3& at, const Mat3& turn,
+	EffectManager& effects, EffectManager::View view)
+{
+	for (const Placed& b : bundlesOf(m_templates, weapon, 0, {}, &m_hasBundles)) {
+		if (b.path.size() != 1) {
+			continue; // only the firearm's own children get the event
+		}
+		const Vec3 point = at + turn.transform(b.position);
+		const Mat3 frame = b.rotation * turn;
+		if (b.kind == Placed::Kind::GroundTrigger) {
+			groundTriggerAt(point, frame, b, 0, effects);
+		} else if (b.kind == Placed::Kind::Plain && b.startOnEffects == 0) {
+			effects.spawn(b.bundle->name(), point, frame, view);
+		}
 	}
 }
 
@@ -2426,6 +2650,26 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 			}
 			tracked.breathing = object.coldBreath;
 		}
+		// A weapon's fire: event 0 to the weapon's children (FireComp).
+		// 0x0061a4e0 starts the bundles whose startOnEffects is 0 (the
+		// muzzle's flash and smoke), again on each round unless its
+		// minDistanceUnderWaterSurface (+0x3f4) is 0 or more and it still
+		// runs; 0x0061e090 sets off the GroundEffectBundles.
+		for (const std::string& weapon : object.firedWeapons) {
+			for (size_t i = 0; i < tracked.bundles.size(); ++i) {
+				Placed& b = tracked.bundles[i];
+				if (b.path.size() < 2 || !equalsIgnoreCase(b.path[b.path.size() - 2], weapon)) {
+					continue;
+				}
+				if (b.kind == Placed::Kind::GroundTrigger && b.parent < 0) {
+					groundTrigger(object, b, effects, partPose, created);
+				} else if (b.kind == Placed::Kind::Plain && b.startOnEffects == 0
+					&& (!effects.bundleModifiers(*b.bundle).depthGated()
+						|| !effects.emitting(object.id, static_cast<uint32_t>(i + 1)))) {
+					startBundle(object, tracked, i, effects, partPose, bundleView, created);
+				}
+			}
+		}
 		for (size_t i = 0; i < tracked.bundles.size(); ++i) {
 			Placed& b = tracked.bundles[i];
 			const uint32_t tag = static_cast<uint32_t>(i + 1);
@@ -2439,6 +2683,9 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 					b.rotation * object.rotation));
 				continue;
 			}
+			if (b.kind == Placed::Kind::GroundTrigger) {
+				continue; // set off by its bundle's start or its weapon's fire
+			}
 			if (b.kind != Placed::Kind::Plain) {
 				updateGround(object, tracked.velocity, tracked, i, effects, partPose, bundleView);
 				continue;
@@ -2447,10 +2694,7 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 				|| (object.occupied && !tracked.occupied && (b.startOnEffects & kEntered) != 0)
 				|| (object.effects & b.startOnEffects) != 0;
 			if (start && !effects.emitting(object.id, tag)) {
-				if (partPose && !created) {
-					place(b, object.id, partPose, b.position, b.rotation);
-				}
-				effects.spawnAttached(b.bundle->name(), object.id, b.position, b.rotation, bundleView, tag, false);
+				startBundle(object, tracked, i, effects, partPose, bundleView, created);
 			}
 			// The depth gate (0x0061a760, BundleModifiers::maxUnderWater):
 			// the water's height at the bundle less its own.
@@ -2460,10 +2704,7 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 				const bool in = !object.seated && modifiers.inDepth(effects.waterDepthAt(point));
 				const bool running = effects.emitting(object.id, tag);
 				if (in && !running) {
-					if (partPose && !created) {
-						place(b, object.id, partPose, b.position, b.rotation);
-					}
-					effects.spawnAttached(b.bundle->name(), object.id, b.position, b.rotation, bundleView, tag, false);
+					startBundle(object, tracked, i, effects, partPose, bundleView, created);
 				} else if (!in && running) {
 					effects.stopAttached(object.id, tag);
 				}
@@ -2486,7 +2727,7 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 				inputs.speedInDof = physics::dot(pointVelocity, (b.rotation * object.rotation).transform({0, 0, 1}));
 				std::array<float, 6> values {};
 				const unsigned mask = modifiers.evaluate(inputs, values);
-				for (int m = 0; m < 5; ++m) {
+				for (int m = 0; m < 6; ++m) {
 					if ((mask & (1u << m)) != 0) {
 						effects.setModifier(object.id, tag, m, values[static_cast<size_t>(m)]);
 					}
@@ -2512,13 +2753,6 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 }
 
 namespace {
-
-bool equalsIgnoreCase(const std::string& a, const std::string& b)
-{
-	return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
-		return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
-	});
-}
 
 // A "From" mapping a/b (0x0061bd20's slot 8): 0 at a, 1 at b, clamped.
 float mapping(const std::array<float, 2>& from, float x)

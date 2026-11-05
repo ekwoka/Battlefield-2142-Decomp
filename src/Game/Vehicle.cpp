@@ -427,6 +427,8 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 				force.force = number(t, "force", 0);
 				force.constantForce = number(t, "constantForce", 0);
 				force.maxForce = number(t, "maxForceOnObject", 0);
+				force.absolute = number(t, "useAbsoluteDirection", 0) != 0;
+				force.rotational = vector(t, "rotationalForce");
 				vehicle->m_forces.push_back(force);
 			} else if (type == "MechLegs") {
 				vehicle->m_hasLegs = true;

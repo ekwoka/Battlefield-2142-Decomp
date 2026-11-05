@@ -469,6 +469,17 @@ bool GameWorld::zoomUpgrade(int id) const
 	return player && player->zoomUpgrade;
 }
 
+bool GameWorld::squadReportAbility(int id, int& revealTime, bool& showCloaked) const
+{
+	const Player* player = findPlayer(id);
+	if (!player) {
+		return false;
+	}
+	revealTime = player->hudRevealTime;
+	showCloaked = player->hudShowCloaked;
+	return true;
+}
+
 std::string GameWorld::radioFilter(int id) const
 {
 	const Player* player = findPlayer(id);

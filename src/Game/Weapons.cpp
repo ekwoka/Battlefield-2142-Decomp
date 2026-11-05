@@ -21,7 +21,51 @@ float number(const world::ObjectTemplate& t, const char* name, float fallback)
 	return it == t.settings().end() ? fallback : static_cast<float>(std::atof(it->second.c_str()));
 }
 
+// A Vec3 row ("x/y/z"); zeros when unset.
+physics::Vec3 vector3(const world::ObjectTemplate& t, const char* name)
+{
+	physics::Vec3 v;
+	const auto it = t.settings().find(name);
+	if (it != t.settings().end()) {
+		std::sscanf(it->second.c_str(), "%f/%f/%f", &v.x, &v.y, &v.z);
+	}
+	return v;
+}
+
+bool sameText(const std::string& a, const char* b)
+{
+	const size_t n = std::strlen(b);
+	return a.size() == n && std::equal(a.begin(), a.end(), b, [](char x, char y) {
+		return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
+	});
+}
+
 } // namespace
+
+ProjectileSettings::Hover projectileHover(const world::ObjectTemplate& forceObject)
+{
+	ProjectileSettings::Hover h;
+	h.present = true;
+	h.enableOnStartMessage = number(forceObject, "enableOnStartMessage", 0) != 0;
+	h.height = vector3(forceObject, "targetPosition").y;
+	h.tolerance = number(forceObject, "regulationTolerance", 0.5f);
+	const physics::Vec3 y = vector3(forceObject, "regulatePosY");
+	h.a = y.x;
+	h.b = y.y;
+	h.relativeY = static_cast<unsigned>(number(forceObject, "relativeYCollisionGroupInverse", 0));
+	return h;
+}
+
+float seekCost(float angle, float distance, float bonus)
+{
+	return angle * bonus * 500.0f + (1.0f - bonus) * distance;
+}
+
+float hoverVelocity(const ProjectileSettings::Hover& hover, float y, float vy, float goal, float seconds)
+{
+	const float a = hover.a, b = hover.b;
+	return vy + 30.0f * (2 * a * vy + (a * a + b * b) * (goal - y)) * seconds;
+}
 
 Penetration penetration(const ProjectileSettings& round, const physics::Material& material, bool object)
 {
@@ -169,7 +213,6 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 		s.maxPitchRate = number(t, "follow.maxPitch", 1);
 		s.followTime = number(t, "follow.followTime", 0);
 		s.targetActivation = number(t, "follow.targetActivation", 0) != 0;
-		s.armingDelay = number(t, "armingDelay", 0);
 		s.armingSpeed = number(t, "follow.armingSpeed", 0);
 		s.speedModifier = number(t, "follow.speedModifier", 1);
 		s.predictionFactor = number(t, "follow.predictionFactor", 0.3f); // 0x005ed3b0's default
@@ -187,8 +230,12 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 			s.loseDistance = number(t, "seek.distLoseLock", 0);
 		}
 		s.ignoreFriendly = number(t, "seek.ignoreFriendly", 1) != 0;
+		s.directionBonus = number(t, "seek.directionBonus", 0);
 	}
 	s.startDelay = number(t, "startDelay", 0);
+	// armingDelay (the GenericProjectile's +0x2fc, its ticks): the seek and
+	// the detonation component wait for it (0x005b3e60).
+	s.armingDelay = number(t, "armingDelay", 0);
 	s.onlyDetonateOnMaterial = static_cast<int>(number(t, "onlyDetonateOnMaterial", -1));
 	s.onlyDetonateOnMaterialTime = number(t, "onlyDetonateOnMaterialTimeLimit", 0);
 	s.penetrator = std::any_of(components.begin(), components.end(), [](const std::string& c) {
@@ -220,6 +267,13 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	s.onTimeEffect = number(t, "hasOnTimeEffect", 1) != 0;
 	s.maxDepthForExplosion = number(t, "detonation.maxDepthForExplosion", 2);
 	s.useCollisionNormal = number(t, "detonation.useCollisionNormal", 1) != 0;
+	s.detonateDistanceToTarget = number(t, "detonation.detonateDistanceToTarget", 0);
+	// The node's type (physicsType RotationalPoint, as every shipped round
+	// that sets the offset names it).
+	if (const auto type = t.settings().find("physicsType");
+		type != t.settings().end() && sameText(type->second, "RotationalPoint")) {
+		s.collisionOffset = vector3(t, "centerOfCollisionOffset");
+	}
 	s.remote = s.explosionMaterial >= 0 && s.explosionDamage > 0 && s.triggerRadius <= 0 && s.timeToLive.a > 1000; // CRD_NONE/9999
 	return s;
 }
@@ -403,6 +457,13 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 	if (const auto link = t.settings().find("ammo.magLinkWeapon"); link != t.settings().end()) {
 		s.magLinkWeapon = link->second;
 	}
+	s.allowZoomOnROF = number(t, "fire.allowZoomOnROF", 0) != 0;
+	s.replenishing = std::any_of(t.components().begin(), t.components().end(), [](const std::string& c) {
+		return c.size() == 20 && std::equal(c.begin(), c.end(), "ReplenishingAmmoComp", [](char a, char b) {
+			return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+		});
+	});
+	s.abilityCost = s.replenishing ? number(t, "ammo.abilityCost", 0) : 0;
 	return s;
 }
 
@@ -432,9 +493,10 @@ void FireArm::enable(bool soldier)
 		m_reloadLeft = 0;
 	}
 	// canReload (0x005f4140): not full (allowReloadWithFullMag aside) and
-	// a magazine to take, or magazines without end.
+	// a magazine to take, or magazines without end; a ReplenishingAmmoComp's
+	// (0x005d79a0) the battery too.
 	if (m_reloadLeft <= 0 && m_settings.autoReload && m_settings.instantReloadOnEnable && m_settings.magSize > 0
-		&& m_rounds == 0 && (m_mags > 0 || m_settings.nrOfMags < 0)) {
+		&& m_rounds == 0 && (m_mags > 0 || m_settings.nrOfMags < 0) && batteryAllowsReload()) {
 		m_rounds = m_settings.magSize;
 		if (m_settings.nrOfMags >= 0) {
 			--m_mags;
@@ -444,6 +506,19 @@ void FireArm::enable(bool soldier)
 	m_burstLeft = 0;
 	m_hidden = false; // drawn (0x005c1650 sets flag 2)
 	m_showIn = -1;
+}
+
+// A ReplenishingAmmoComp's "a magazine can be taken" (0x005d79a0, its
+// slot 16 in place of 0x005f4140): the magazine empty (slot 0xcc,
+// 0x005f41a0: rounds 0) and the holder's battery (slot 0x28, 0x005d8160)
+// at least abilityCost. The magazines still count in the fill
+// (0x005f46f0), so the callers keep that test.
+bool FireArm::batteryAllowsReload() const
+{
+	if (!m_settings.replenishing || m_settings.abilityCost <= 0) {
+		return true;
+	}
+	return m_rounds == 0 && m_battery >= m_settings.abilityCost;
 }
 
 void FireArm::reloadStarted()
@@ -471,7 +546,7 @@ bool FireArm::startReload()
 {
 	if (m_readyIn > 0 || m_reloadLeft > 0 || m_settings.magSize < 0
 		|| (m_rounds >= m_settings.magSize && !m_settings.allowReloadWithFullMag)
-		|| (m_mags <= 0 && m_settings.nrOfMags >= 0) || m_settings.reloadTime <= 0) {
+		|| (m_mags <= 0 && m_settings.nrOfMags >= 0) || m_settings.reloadTime <= 0 || !batteryAllowsReload()) {
 		return false;
 	}
 	reloadStarted();
@@ -748,7 +823,7 @@ bool FireArm::fire(float seconds, bool trigger)
 		// reload (0x005c0f40). A magazine given to an empty gun (a resupply)
 		// is so taken in.
 		if (m_settings.autoReload && m_cooldown <= 0 && (m_mags > 0 || m_settings.nrOfMags < 0)
-			&& m_settings.reloadTime > 0) {
+			&& m_settings.reloadTime > 0 && batteryAllowsReload()) {
 			reloadStarted();
 			m_reloadLeft = m_settings.reloadTime;
 			m_reloadFilled = false;
@@ -796,6 +871,12 @@ bool FireArm::fire(float seconds, bool trigger)
 		return true;
 	}
 	--m_rounds;
+	// A ReplenishingAmmoComp's round (0x005d81d0): the battery pays
+	// abilityCost for it.
+	if (m_settings.replenishing && m_settings.abilityCost > 0) {
+		m_batteryCost += m_settings.abilityCost;
+		m_battery = std::max(0.0f, m_battery - m_settings.abilityCost);
+	}
 	// The round's ammo use (0x005f45e0, slot 0x38): an emptied magazine sets
 	// +0x41, and +0x44 only with ammo.autoReload (+0x28); after the round
 	// (0x005f4a40, slot 0x3c) +0x44 with a magazine to take (0x005f4140)
@@ -804,7 +885,7 @@ bool FireArm::fire(float seconds, bool trigger)
 	// empty, the trigger clicks (0x005c2ee0), until c_PIReload (the
 	// firearm's action 10). ammo.nrOfMags -1: magazines without end (the
 	// drones' detonators).
-	if (m_rounds == 0 && m_settings.autoReload && (m_mags > 0 || m_settings.nrOfMags < 0)) {
+	if (m_rounds == 0 && m_settings.autoReload && (m_mags > 0 || m_settings.nrOfMags < 0) && batteryAllowsReload()) {
 		reloadStarted();
 		m_reloadLeft = m_settings.reloadTime;
 		m_reloadFilled = false;

@@ -1,7 +1,10 @@
 #version 450
 // Compiled roads (RoadCompiled.fx): the two road textures blended by the
 // template's blend factor, alpha from the first texture, the vertex alpha
-// and a distance fade.
+// and a distance fade. With roadmesh.vert, the road static meshes
+// (RaShaderRoad*.fx, road.w the technique): Road the diffuse map, RoadDetail
+// the diffuse times the detail map (colour and alpha), alpha times the fade;
+// RoadDetailNoBlend the same colour with the fade alone as its alpha.
 //
 // The original lights roads from a screen-space buffer of the terrain's
 // lighting; this samples the terrain lightmap of one patch instead (the road
@@ -34,7 +37,7 @@ layout(set = 3, binding = 0) uniform Lighting {
 #include "fog.glsl"
 
 layout(set = 3, binding = 1) uniform Road {
-	vec4 road; // x: blend factor, y / z: FadeOut (the distance's scale and offset)
+	vec4 road; // x: blend factor, y / z: FadeOut (the distance's scale and offset), w: RoadUniforms::Technique
 	vec4 eye;  // the camera, world space
 };
 
@@ -47,9 +50,18 @@ void main()
 	}
 	vec4 t0 = texture(texture0, inTexCoord0);
 	vec4 t1 = texture(texture1, inTexCoord1);
-	vec3 albedo = mix(t1.rgb, t0.rgb, road.x);
 	// RoadCompiledVS: 1 - saturate(cameraDist * vFadeoutValues.x - vFadeoutValues.y).
 	float fade = 1.0 - clamp(length(inWorldPosition - eye.xyz) * road.y - road.z, 0.0, 1.0);
+	vec3 albedo;
+	float alpha;
+	if (road.w < 0.5) { // compiled
+		albedo = mix(t1.rgb, t0.rgb, road.x);
+		alpha = t0.a * inAlpha * fade;
+	} else {
+		vec4 color = road.w < 1.5 ? t0 : t0 * t1;
+		albedo = color.rgb;
+		alpha = road.w > 2.5 ? fade : color.a * fade;
+	}
 	vec3 light = vec3(1.0);
 	if (material.y > 0.0) {
 		vec4 lightmap = texture(lightMap, inLightmapCoord);
@@ -59,5 +71,5 @@ void main()
 			clamp(2.0 * lightmap.b * gi, 0.0, 1.0) * 0.5) * 2.0;
 	}
 	float fog = fogAmount(inDepth);
-	outColor = vec4(mix(albedo * light, fogColor.rgb, fog), t0.a * inAlpha * fade);
+	outColor = vec4(mix(albedo * light, fogColor.rgb, fog), alpha);
 }

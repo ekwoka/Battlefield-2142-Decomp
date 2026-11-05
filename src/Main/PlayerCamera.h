@@ -241,6 +241,7 @@ private:
 		int stance = 0;
 		bool reloading = false;
 		bool overheated = false; // the heat component's (0x005c50e0's zoom test)
+		bool zoomBusy = false;   // reloading, or between rounds without allowZoomOnROF (FireArm::zoomBusy)
 		int rounds = -1; // in the magazine, -1 unknown
 		bool firing = false; // remote: the fire input held
 	};

@@ -61,6 +61,12 @@ struct Mat3 {
 	Mat3 operator*(const Mat3& o) const;
 };
 
+// A rotation whose z points along `way`, made from `reference`'s x
+// (0x006ac530, the LookAtObject's 0x0064bc00): y = z x x, x = y x z, z = x x
+// y, each made a unit. A zero `way` points z up (0x004481a0's failure);
+// where the cross products fail, `reference` itself.
+Mat3 lookAtRotation(const Vec3& way, const Mat3& reference);
+
 namespace tuning {
 constexpr float kGravity = -14.73f;             // PhysicsSystem default (0x006da810), "Physics.gravity"
 constexpr float kLinearDamping = 0.99f;         // per tick (0x00a84b54)

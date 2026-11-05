@@ -25,7 +25,7 @@ void registerInertConsoleRows(Console& console);
 // Strike winter maps ("Snow": Objects/Kits_bp1 eu_kits_b_snow.dds,
 // as_apc_b_snow.dds...), Wake_Island_2142's billboards ("wake":
 // billboard_color01_wake.dds). Empty when the level sets none.
-// The renderer's texture lookup is to use it (not yet done there).
+// The renderer loads the variants (LevelRenderer::texture, TextureSuffix.h).
 const std::string& customTextureSuffix();
 void setCustomTextureSuffix(std::string suffix);
 

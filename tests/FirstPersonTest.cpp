@@ -329,3 +329,25 @@ TEST(FirstPerson_AllowZoomOnHeat)
 	seat.step(true, false, true, 1.1f, 1 / 30.0f, true);
 	CHECK(seat.state.level() == 1);
 }
+
+// A seat gun between rounds without fire.allowZoomOnROF (0x005d3c40): the
+// zoom press is dropped as when busy, but the cycle zooms nothing out (only
+// a reload's start does, with zoomOutOnReload).
+TEST(FirstPerson_SeatZoomWhileCycling)
+{
+	anim::ZoomSettings launcher;
+	launcher.factors = {0, 0.7f};
+	anim::SeatZoom av;
+	av.reset(launcher, 1.1f);
+	av.step(true, false, true, 1.1f, 1 / 30.0f, false, true);
+	CHECK(av.state.level() == 0);
+	av.step(true, false, true, 1.1f, 1 / 30.0f);
+	CHECK(av.state.level() == 1);
+	av.step(false, false, true, 1.1f, 1 / 30.0f, false, true);
+	CHECK(av.state.level() == 1); // cycling isn't a reload's start
+	launcher.zoomWhenBusy = true;
+	anim::SeatZoom tank;
+	tank.reset(launcher, 1.1f);
+	tank.step(true, false, true, 1.1f, 1 / 30.0f, false, true);
+	CHECK(tank.state.level() == 1);
+}

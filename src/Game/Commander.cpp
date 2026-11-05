@@ -407,7 +407,7 @@ bool GameWorld::commanderAction(int team, CommanderAbility ability, float x, flo
 		const float delay = std::nearbyint(number(*fireArm, "fire.fireLaunchDelay", 0));
 		const int burst = std::max(1, integer(*fireArm, "fire.burstSize", 1));
 		m_strikes.push_back({ability, team, target, delay, burst});
-		m_strikeFire.push_back({fireArm->name(), side.commander, 0, 0, DeviationBuildUp::fromTemplate(*fireArm)});
+		m_strikeFire.push_back({fireArm->name(), side.commander, 0, 0, DeviationBuildUp::fromTemplate(*fireArm), asset->object});
 		break;
 	}
 	case CommanderAbility::Uav:
@@ -614,6 +614,25 @@ std::vector<uint32_t> GameWorld::supplyCrates() const
 	return objects;
 }
 
+bool GameWorld::supplyStorage(uint32_t object, float& share, int& kind) const
+{
+	for (const Crate& crate : m_crates) {
+		if (crate.object != object) {
+			continue;
+		}
+		const world::Object* placed = m_objects.find(object);
+		const world::ObjectTemplate* t = crate.settings ? crate.settings : placed ? placed->objectTemplate() : nullptr;
+		if (!t) {
+			return false;
+		}
+		const float most = number(*t, "sharedStorageSize", 0);
+		share = most > 0 ? std::clamp(crate.storage / most, 0.0f, 1.0f) : 0.0f;
+		kind = number(*t, "healSpeed", 0) > 0 ? 2 : number(*t, "refillAmmoSpeed", 0) > 0 ? 4 : 3;
+		return true;
+	}
+	return false;
+}
+
 // One round of a strike's burst: fire.batchSize projectiles (the
 // asset's projectileTemplate at its velocity) from orbitalBombardmentHeight
 // over the target, straight down (0x005a0e50 hands the firearm the
@@ -644,6 +663,17 @@ void GameWorld::fireStrike(Strike& strike, StrikeFire& fire)
 	const ProjectileSettings* projectile = fixed.get();
 	const int batch = std::max(1, integer(*t, "fire.batchSize", 1));
 	const physics::Vec3 from = strike.target + physics::Vec3 {0, commanderSettings.orbitalBombardmentHeight, 0};
+	// The firearm's fire (FireComp 0x005f31d0) sends event 0 to its
+	// children where 0x005a0bf0 put it: the EMP strike's GroundEffectBundle
+	// (GEB_emp_strike, material 28, maxTriggerDistance 2000) looks down from
+	// there and starts the ground's effect under the target
+	// (e_geb_emp_strike_dirt's rings, dust and shimmer pillar), as the
+	// round leaves (ObjectEffects::weaponFiredAt). Once per round of the
+	// burst, not per projectile of the batch.
+	m_strikeFires.push_back({fire.asset, fire.fireArm, from});
+	if (m_strikeFires.size() > 16) {
+		m_strikeFires.erase(m_strikeFires.begin());
+	}
 	// The batch (0x005c3cb0): round 0 the main one, the rest sub-projectiles
 	// (batchSize - 1 of them). Each strays by the deviation component
 	// (0x005f5540): normal numbers times subProjectileDev for a sub (kept),
@@ -831,15 +861,25 @@ void GameWorld::stepCrates(float seconds)
 		// The heal storage is spent once less than a heal is left in it
 		// and in the shared storage (the crate's own two are 0).
 		const auto healSpent = [&] { return crate.storage < heal; };
+		int giver = -1;
+		for (const Supply& supply : m_supplies) {
+			if (supply.object == crate.object && supply.crate) {
+				giver = supply.owner;
+			}
+		}
 		const auto mend = [&](uint32_t target, const world::ObjectTemplate* tt) {
 			const float left = hitPoints(target);
 			const float most = tt ? number(*tt, "armor.maxHitPoints", left) : left;
 			if (heal <= 0 || healSpent() || left < 0 || left >= most || !repairable(target)) {
 				return;
 			}
-			// gameLogic slot 0x108 -> the armour's slot 0x48 (0x00655a00):
-			// per cent of the maximum.
-			m_hitPoints[target] = std::min(most, left + heal * factor * 0.01f * most);
+			// gameLogic slot 0x108 (0x004bc410) -> the armour's slot 0x48
+			// (0x00655a00): per cent of the maximum. Out of a wreck it
+			// raises the object's onRepairEvent (healHitPoints) with the
+			// repairer 0x005d0880 gives: a hub's thrower (its parent of
+			// class 0x9539), none for the commander's crate (scoringCommon's
+			// handlers check for one).
+			healHitPoints(target, std::min(most, left + heal * factor * 0.01f * most), giver);
 			crate.storage -= heal;
 		};
 		const auto refill = [&](FireArm* weapon) {

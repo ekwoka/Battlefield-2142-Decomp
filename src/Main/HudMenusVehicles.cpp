@@ -96,6 +96,7 @@ void WeaponHud::Fields::read(const world::ObjectTemplate* w)
 	scanProgress = flag(w, "weaponHud.hasScanProgress", false); // +0x125 (+0xe1)
 	ignoreTargetDistance = flag(w, "weaponHud.ignoreTargetDistance", false); // +0x126 (+0xe2)
 	guiShown = hudNumber(w, "weaponHud.guiIndex", 5) != -1;
+	showInfo = flag(w, "weaponHud.showInfo", true); // +0x114 (block +0xd0)
 	name = hudSetting(w, "weaponHud.hudName");
 	crosshair = slashes(hudSetting(w, "weaponHud.crosshairIcon"));
 	altCrosshair = slashes(hudSetting(w, "weaponHud.altCrosshairIcon")); // block +0x8c (executor 0x005576cc)
@@ -127,6 +128,15 @@ std::string WeaponHud::update(hud::HudManager& hud, const WeaponHudInput& in, bo
 	// weapon) sets the Secondary* variables as 0x007c1f10 the Primary* ones.
 	const std::string P = secondary ? "Secondary" : "Primary";
 	const auto var = [&P](const char* name) { return P + name; };
+	if (!f.showInfo) {
+		// showInfo 0 (block +0xd0: the horns, Car_horn / Car_horn_Alt): the
+		// primary frame runs 0x007c1b90 (the show flags +0x18 / +0x16d off)
+		// and stops after the crosshair's parts, before the name, the icons
+		// and the ammunition (PrimaryAmmoShow +0x15d stays off); the
+		// secondary's (0x007c2d50) clears its show +0x16d and stops.
+		hud.set(var("AmmoShow"), 0);
+		return {};
+	}
 	const bool showAmmo = f.showAmmo, showClips = f.showClips, battery = f.battery;
 	hud.set(var("AmmoShow"), f.guiShown ? 1 : 0);
 	hud.set(var("AmmoBarShow"), showAmmo ? 1 : 0);
@@ -1002,18 +1012,138 @@ bool seatPostProcessing(const world::ObjectTemplate* controlled, const world::Ob
 	return on != settings.end() && std::atoi(on->second.c_str()) == weaponGuiIndex(weapon, zoomed);
 }
 
-int weaponGuiIndex(const world::ObjectTemplate* weapon, bool zoomed)
+int weaponGuiIndex(const world::ObjectTemplate* weapon, bool zoomed, bool sprintTest)
 {
 	if (!weapon) {
 		return 0;
 	}
 	const auto& settings = weapon->settings();
+	// 0x00657a70's first test: the sprint test and disableOnSprint (slot 0x13c).
+	if (sprintTest) {
+		const auto off = settings.find("weaponHud.disableOnSprint");
+		if (off != settings.end() && std::atoi(off->second.c_str()) != 0) {
+			return 0;
+		}
+	}
 	const auto alt = settings.find("weaponHud.altGuiIndex");
 	if (zoomed && alt != settings.end() && std::atoi(alt->second.c_str()) != -1) {
 		return std::atoi(alt->second.c_str());
 	}
 	const auto gui = settings.find("weaponHud.guiIndex");
 	return gui != settings.end() ? std::atoi(gui->second.c_str()) : 0;
+}
+
+std::vector<int> showOnCamModes(const world::ObjectTemplate* t, const char* component)
+{
+	// WorldConsole keeps the list as "<component>.showOnCamMode.list".
+	const std::string text = hudSetting(t, (std::string(component) + ".showOnCamMode.list").c_str(), "1");
+	std::vector<int> modes;
+	const char* p = text.c_str();
+	char* end = nullptr;
+	for (long v = std::strtol(p, &end, 10); end != p; v = std::strtol(p, &end, 10)) {
+		modes.push_back(static_cast<int>(v));
+		p = end;
+	}
+	return modes;
+}
+
+namespace {
+
+bool hasVehicleHud(const world::ObjectTemplate* t)
+{
+	if (!t) {
+		return false;
+	}
+	for (const std::string& c : t->components()) {
+		if (c.size() == 10 && std::equal(c.begin(), c.end(), "VehicleHud",
+				[](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); })) {
+			return true;
+		}
+	}
+	// A template that only sets vehicleHud.* values (the settings map is
+	// ordered case-insensitively, so they sit together).
+	const auto it = t->settings().lower_bound("vehicleHud.");
+	return it != t->settings().end() && it->first.size() > 11
+		&& std::equal(it->first.begin(), it->first.begin() + 11, "vehicleHud.",
+			[](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); });
+}
+
+bool lists(const std::vector<int>& modes, int mode)
+{
+	return std::find(modes.begin(), modes.end(), mode) != modes.end();
+}
+
+} // namespace
+
+int vehicleGuiIndex(const VehicleGuiInput& in)
+{
+	// 0x007a01e0: no VehicleHud, the first weapon's HUD as it is.
+	if (!hasVehicleHud(in.controlled)) {
+		return weaponGuiIndex(in.weapon, in.zoomed, in.sprintTest);
+	}
+	// 0x00657660's first test: the sprint test and the vehicle HUD's
+	// disableOnSprint (slot 0x78, +0x107).
+	if (in.sprintTest && flag(in.controlled, "vehicleHud.disableOnSprint", false)) {
+		return 0;
+	}
+	// The runtime WeaponHud's slot 0x48 (0x00657c50).
+	const auto shows = [&in](const world::ObjectTemplate* weapon, int mode) {
+		return lists(showOnCamModes(weapon, "weaponHud"), mode) || in.projectileCamera;
+	};
+	if (!flag(in.controlled, "vehicleHud.useChildHud", false)) {
+		if (in.weapon) {
+			const int gui = weaponGuiIndex(in.weapon, in.zoomed, in.sprintTest);
+			if (gui != -1) {
+				if (!shows(in.weapon, in.cameraMode)) {
+					const std::vector<int> modes = showOnCamModes(in.weapon, "weaponHud");
+					if (modes.size() > 1 || (modes.size() == 1 && !shows(in.weapon, -1))) {
+						return 0;
+					}
+				}
+				return gui;
+			}
+			if (in.second) {
+				return shows(in.second, in.cameraMode) ? weaponGuiIndex(in.second, in.zoomed, in.sprintTest) : 0;
+			}
+		}
+	} else if (in.child) {
+		return shows(in.child, in.cameraMode) ? weaponGuiIndex(in.child, in.zoomed, in.sprintTest) : 0;
+	}
+	// The vehicle HUD's own (template slots 0xd4 and 0x30).
+	if (!lists(showOnCamModes(in.controlled, "vehicleHud"), in.cameraMode)) {
+		return 0;
+	}
+	return static_cast<int>(hudNumber(in.controlled, "vehicleHud.guiIndex", 0));
+}
+
+std::string cameraRotationBundle(const world::ObjectTemplate& t, const world::ObjectTemplateManager& templates)
+{
+	if (!flag(&t, "vehicleHud.useVehicleCameraRotation", false)) {
+		return {};
+	}
+	// 0x005c63b0: depth first, each child before its siblings; the nearest
+	// RotationalBundle above the Camera is what turns it.
+	const std::function<bool(const world::ObjectTemplate&, const std::string&, int, std::string&)> walk =
+		[&](const world::ObjectTemplate& node, const std::string& bundle, int depth, std::string& out) {
+			for (const world::ChildTemplate& child : node.children()) {
+				const world::ObjectTemplate* c = templates.find(child.name);
+				if (!c) {
+					continue;
+				}
+				if (c->classId() == 0x9472) { // Camera
+					out = bundle;
+					return true;
+				}
+				const bool turns = c->classId() == 0x947d; // RotationalBundle
+				if (depth < 12 && walk(*c, turns ? c->name() : bundle, depth + 1, out)) {
+					return true;
+				}
+			}
+			return false;
+		};
+	std::string bundle;
+	walk(t, std::string(), 0, bundle);
+	return bundle;
 }
 
 std::string iconFrame(const std::string& icon, int frame)

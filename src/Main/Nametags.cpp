@@ -20,6 +20,30 @@ namespace dice::hfe::nametags {
 
 namespace {
 
+// The bar (0x1016c1e0, ICArmorBar: bar_base under bar_filler, the fill
+// from texel 1 to 45 of 64, HealthBarTrans 6 px right of and 8 up from the
+// tag's point).
+void barQuads(float x, float y, float fraction, float alpha, std::vector<hud::HudQuad>& out)
+{
+	hud::HudQuad base;
+	base.texture = "Menu/Nametag/bar_base.dds";
+	base.x0 = std::round(x + 6 - 32);
+	base.y0 = std::round(y - 8 - 9);
+	base.x1 = base.x0 + 64;
+	base.y1 = base.y0 + 8;
+	base.u0 = base.v0 = 0;
+	base.u1 = base.v1 = 1;
+	base.color[0] = base.color[1] = base.color[2] = 1;
+	base.color[3] = alpha;
+	hud::HudQuad fill = base;
+	fill.texture = "Menu/Nametag/bar_filler.dds";
+	const float end = (1 + (45 - 1) * fraction) / 64;
+	fill.x1 = fill.x0 + 64 * end;
+	fill.u1 = end;
+	out.push_back(base);
+	out.push_back(fill);
+}
+
 float clamp01(float v)
 {
 	return std::clamp(v, 0.0f, 1.0f);
@@ -556,6 +580,8 @@ const Nametags::TagTemplate& Nametags::tagTemplate(const world::ObjectTemplate* 
 		tt.selectable = flag("Nametag.selectable", false);
 		tt.useTeamColor = flag("Nametag.useTeamColor", false);
 		tt.useAliveArmor = flag("Nametag.useAliveArmor", false);
+		tt.showArmor = flag("Nametag.showArmor", false);
+		tt.showSupply = flag("Nametag.showSupply", false);
 		tt.icon = static_cast<int>(number(t, "Nametag.3dMapIcon", -1));
 		tt.selectedIcon = static_cast<int>(number(t, "Nametag.selected3dMapIcon", -1));
 		tt.secondaryIcon = static_cast<int>(number(t, "Nametag.secondary3dMapIcon", -1));
@@ -578,6 +604,20 @@ int objectTagIcon(int icon, int secondaryIcon, float healthActivationLevel, floa
 	// 0x100f40d0: below 100 the first armour's percent at or below the
 	// level sets flag 0x1000000, whose top byte picks slot 0x44's icon.
 	return healthActivationLevel < 100 && percent <= healthActivationLevel ? secondaryIcon : icon;
+}
+
+float objectTagBar(const ObjectBarInput& in)
+{
+	if (!in.friendly || !(in.showArmor || in.showSupply)) {
+		return -1;
+	}
+	// 0x1016c674..0x1016c68f: the repairer's and showArmor's armour branch
+	// (state 0 here: nothing drawn at 0x1016c7a5).
+	if (in.localRepairs || in.showArmor) {
+		return -1;
+	}
+	// 0x1016c6dd: the SupplyObject child, else no tag bar (0x1016c9dc).
+	return in.hasSupply ? std::clamp(in.supply, 0.0f, 1.0f) : -1.0f;
 }
 
 std::array<float, 3> objectTagPoint(const std::array<float, 3>& position, const std::array<float, 3>& offset,
@@ -912,7 +952,22 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		if (tt.selectable) {
 			consider(x, y, tt.selectedIcon < 0 ? 0x93 : 0x50 + tt.selectedIcon, id);
 		}
-		drawn.push_back({distance, {iconQuad(*icon, x, y, c)}});
+		Drawn tagDrawn {distance, {iconQuad(*icon, x, y, c)}};
+		// The supply bar (objectTagBar): the hubs' and the MiniMed's storage.
+		if ((tt.showArmor || tt.showSupply) && !clamped) {
+			ObjectBarInput bar;
+			bar.friendly = team == 0 || team == me.team;
+			bar.showArmor = tt.showArmor;
+			bar.showSupply = tt.showSupply;
+			bar.localRepairs = localEngineer;
+			int kind = 0;
+			bar.hasSupply = !hud && world.supplyStorage(id, bar.supply, kind);
+			const float fill = objectTagBar(bar);
+			if (fill >= 0) {
+				barQuads(x, y, fill, alpha, tagDrawn.quads);
+			}
+		}
+		drawn.push_back(std::move(tagDrawn));
 	}
 
 	// The squad's orders (TTOrder: the exe's order object 0x005b8b20 hands
@@ -1223,23 +1278,7 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 				fraction = known >= 0 ? known : 1.0f;
 			}
 			if (fraction > 0 && fraction < 0.5f) {
-				hud::HudQuad base;
-				base.texture = "Menu/Nametag/bar_base.dds";
-				base.x0 = std::round(x + 6 - 32);
-				base.y0 = std::round(y - 8 - 9);
-				base.x1 = base.x0 + 64;
-				base.y1 = base.y0 + 8;
-				base.u0 = base.v0 = 0;
-				base.u1 = base.v1 = 1;
-				base.color[0] = base.color[1] = base.color[2] = 1;
-				base.color[3] = alpha;
-				hud::HudQuad fill = base;
-				fill.texture = "Menu/Nametag/bar_filler.dds";
-				const float end = (1 + (45 - 1) * fraction) / 64;
-				fill.x1 = fill.x0 + 64 * end;
-				fill.u1 = end;
-				d.quads.push_back(base);
-				d.quads.push_back(fill);
+				barQuads(x, y, fraction, alpha, d.quads);
 			}
 		}
 		drawn.push_back(std::move(d));

@@ -14,9 +14,11 @@
 #include "Render/EnvMaps.h"
 #include "Render/Fog.h"
 #include "Render/OverheadView.h"
+#include "Render/RoadStatics.h"
 #include "Render/SceneMath.h"
 #include "Render/SimpleShadowmap.h"
 #include "Render/StaticLightmaps.h"
+#include "Render/TextureSuffix.h"
 #include "Render/TitanParts.h"
 #include "Scene/EffectSettings.h"
 #include "Scene/LightSettings.h"
@@ -790,4 +792,32 @@ TEST(RenderScene_StaticLightmapsByLightingQuality)
 	CHECK(staticKeepsLightmap(false, true, 1));
 	CHECK(staticKeepsLightmap(false, false, 2));
 	CHECK(staticKeepsLightmap(false, false, 3));
+}
+
+TEST(RenderScene_CustomTextureSuffix)
+{
+	using namespace dice::hfe::render;
+	// 0x10018ca0: "<name up to its last '.'>_<suffix>.dds" (0x1019f4c0).
+	CHECK(customSuffixedTexturePath("objects/vehicles/eu_fav/textures/eu_fav_c.dds", "Snow") ==
+		"objects/vehicles/eu_fav/textures/eu_fav_c_Snow.dds");
+	CHECK(customSuffixedTexturePath("textures/billboard_color01.tga", "wake") == "textures/billboard_color01_wake.dds");
+	CHECK(customSuffixedTexturePath("noextension", "HEAT") == "noextension_HEAT.dds");
+	// None without a suffix, nor for IGA's "rad_" textures.
+	CHECK(customSuffixedTexturePath("objects/x.dds", "").empty());
+	CHECK(customSuffixedTexturePath("rad_2041100.dds", "HEAT").empty());
+}
+
+TEST(RenderScene_RoadStaticMeshTechniques)
+{
+	using namespace dice::hfe::render;
+	// 0x100de6d0's flags (a case-blind find) and 0x100bdb00's keys.
+	CHECK(roadStaticPath("Objects/roads/statics/t_intersection/Meshes/t_intersection.staticMesh"));
+	CHECK(!roadStaticNoBlend("Objects/roads/statics/t_intersection/Meshes/t_intersection.staticMesh"));
+	CHECK(roadStaticNoBlend("Objects/Roads/staticsnoblend/concreteblock_helipad/Meshes/concreteblock_helipad.staticMesh"));
+	CHECK(!roadStaticPath("Objects/StaticObjects/roads_sign.staticMesh"));
+	CHECK(!roadStaticNoBlend("Objects/StaticObjects/noBlend/x.staticMesh"));
+	CHECK(roadStaticTechnique(false, false) == RoadTechnique::Road);
+	CHECK(roadStaticTechnique(false, true) == RoadTechnique::Road); // no detail map: Road even under noBlend
+	CHECK(roadStaticTechnique(true, false) == RoadTechnique::RoadDetail);
+	CHECK(roadStaticTechnique(true, true) == RoadTechnique::RoadDetailNoBlend);
 }

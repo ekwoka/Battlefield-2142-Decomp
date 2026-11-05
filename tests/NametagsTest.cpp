@@ -360,3 +360,33 @@ TEST(Nametags_ObjectTagIconAndRadius)
 	const std::array<float, 3> flat = nametags::objectTagPoint({1, 2, 3}, {0, 0.3f, 0}, false, 4.5f);
 	CHECK(std::fabs(flat[1] - 2.3f) < 1e-6f);
 }
+
+// Nametag.showSupply / showArmor (RendDX9 0x1016c1e0 at 0x1016c64f): the
+// hubs' and MiniMed's storage bar for the team at any level; none for the
+// enemy, for an engineer (the armour branch), for showArmor objects, or
+// without a SupplyObject.
+TEST(Nametags_ObjectSupplyBar)
+{
+	nametags::ObjectBarInput in;
+	in.friendly = true;
+	in.showSupply = true;
+	in.hasSupply = true;
+	in.supply = 0.8f;
+	CHECK(nametags::objectTagBar(in) == 0.8f); // above half: still drawn
+	in.supply = 0;
+	CHECK(nametags::objectTagBar(in) == 0);
+	in.friendly = false;
+	CHECK(nametags::objectTagBar(in) < 0);
+	in.friendly = true;
+	in.localRepairs = true;
+	CHECK(nametags::objectTagBar(in) < 0);
+	in.localRepairs = false;
+	in.hasSupply = false;
+	CHECK(nametags::objectTagBar(in) < 0);
+	in.hasSupply = true;
+	in.showSupply = false;
+	in.showArmor = true; // the sentry gun
+	CHECK(nametags::objectTagBar(in) < 0);
+	in.showArmor = false;
+	CHECK(nametags::objectTagBar(in) < 0); // neither: not in the pass
+}

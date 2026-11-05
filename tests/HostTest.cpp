@@ -12,6 +12,7 @@
 #include "Main/HudMenusComm.h"
 #include "Main/HudWorld.h"
 #include "Main/Prediction.h"
+#include "Main/RemoteGuns.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "Physics/MaterialManager.h"
 #include "Net/BitStream.h"
@@ -1981,4 +1982,117 @@ TEST(NetHost_StickyProjectileEvent)
 	const auto dot = [](const net::Vec3f& u, const net::Vec3f& v) { return u.x * v.x + u.y * v.y + u.z * v.z; };
 	CHECK(std::fabs(dot(stuck->rows[0], stuck->rows[0]) - 1) < 1e-3f && std::fabs(dot(stuck->rows[0], stuck->rows[1])) < 1e-3f
 		&& std::fabs(dot(stuck->rows[1], stuck->rows[2])) < 1e-3f);
+}
+
+// The squad report's reading by its recipients (0x005088f0): the longest
+// networkableHudRevealTime, and a cloak report (kind 2) only as kind 1 to
+// a squad with a networkableHudShowCloaked reader.
+TEST(Host_BattlefieldReportReading)
+{
+	int kind = 0, seconds = 3;
+	CHECK(host::battlefieldReportFor({{3, false}, {6, false}}, kind, seconds));
+	CHECK(kind == 0 && seconds == 6);
+	kind = 2;
+	seconds = 3;
+	CHECK(!host::battlefieldReportFor({{3, false}, {3, false}}, kind, seconds));
+	kind = 2;
+	CHECK(host::battlefieldReportFor({{3, false}, {3, true}}, kind, seconds));
+	CHECK(kind == 1);
+	kind = 0;
+	seconds = 10; // a drone's pulse keeps its own when longer
+	CHECK(host::battlefieldReportFor({{6, true}}, kind, seconds));
+	CHECK(kind == 0 && seconds == 10);
+}
+
+// A joined client's seat guns (RemoteGuns.h): the others' players' fire
+// states (0x00590e10 -> 0x004cc7a0) fire the seat's active weapon of each
+// group at its rate of fire; each round is its Fire sound and the fire's
+// event 0 to the weapon's children (FireComp 0x005f31d0: the muzzle
+// bundles, the GroundEffectBundles), on the vehicle's object.
+TEST(Host_RemoteSeatGunsFireFromTheFireState)
+{
+	namespace world = dice::hfe::world;
+	namespace game = dice::hfe::game;
+	namespace client = dice::hfe::client;
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	world::ObjectTemplate* tank = templates.create("PlayerControlObject", "tank");
+	tank->settings()["seatInformation"] = "tank 0/1/0 0/0/0";
+	tank->children().push_back({"tank_gun", {0, 2, 1}, {}});
+	tank->children().push_back({"tank_coax", {0.5f, 2, 1}, {}});
+	world::ObjectTemplate* gun = templates.create("GenericFireArm", "tank_gun");
+	gun->settings()["fire.roundsPerMinute"] = "60";
+	gun->settings()["fire.addFireRate.list"] = "0";
+	gun->settings()["ammo.magSize"] = "1";
+	gun->settings()["ammo.reloadTime"] = "3";
+	gun->settings()["ammo.autoReload"] = "1";
+	world::ObjectTemplate* coax = templates.create("GenericFireArm", "tank_coax");
+	coax->settings()["fire.fireInput"] = "PIAltFire";
+	coax->settings()["fire.roundsPerMinute"] = "600";
+	coax->settings()["fire.addFireRate.list"] = "2";
+	coax->settings()["ammo.magSize"] = "100";
+	const uint32_t id = objects.create(tank, {10, 0, 10})->id();
+	game::GameWorld round(templates, objects);
+	const auto seats = round.vehicleSeats(id);
+	CHECK(seats.size() == 1);
+	if (seats.size() != 1) {
+		return;
+	}
+	const game::GameWorld::SeatWeapon* main = client::RemoteSeatGuns::groupWeapon(seats[0], 0, -1);
+	const game::GameWorld::SeatWeapon* alt = client::RemoteSeatGuns::groupWeapon(seats[0], 1, 0);
+	CHECK(main && main->weapon == "tank_gun" && alt && alt->weapon == "tank_coax");
+	CHECK(!client::RemoteSeatGuns::groupWeapon(seats[0], 1, 1) && !client::RemoteSeatGuns::groupWeapon(seats[0], 2, -1));
+
+	client::RemoteSeatGuns guns;
+	client::RemoteSeatGuns::Seat seat;
+	seat.player = 3;
+	seat.vehicle = id;
+	seat.seat = 0;
+	const auto fires = [&round](const char* weapon) {
+		int n = 0;
+		for (const auto& [object, list] : round.takeObjectWeaponFires()) {
+			n += static_cast<int>(std::count(list.begin(), list.end(), std::string(weapon)));
+		}
+		return n;
+	};
+	guns.step(round, {seat}, 1 / 30.0f);
+	CHECK(fires("tank_gun") == 0 && round.takeWeaponSounds().empty());
+	// The main gun: single fire, one round a press; its magazine of one
+	// reloads by itself (3 s).
+	seat.firing[0] = true;
+	guns.step(round, {seat}, 1 / 30.0f);
+	const auto sounds = round.takeWeaponSounds();
+	CHECK(sounds.size() == 1 && sounds[0].kind == game::GameWorld::WeaponSoundEvent::Fire && sounds[0].player == 3
+		&& sounds[0].object == id && sounds[0].weapon == "tank_gun");
+	CHECK(sounds.size() == 1 && std::fabs(sounds[0].position.y - 2) < 1e-4f && std::fabs(sounds[0].position.z - 11) < 1e-4f);
+	CHECK(round.takeObjectWeaponFires()[id] == std::vector<std::string> {"tank_gun"});
+	int rounds = 0;
+	for (int i = 0; i < 30 * 5; ++i) {
+		guns.step(round, {seat}, 1 / 30.0f); // held: no second press
+		rounds += fires("tank_gun");
+	}
+	CHECK(rounds == 0);
+	seat.firing[0] = false;
+	guns.step(round, {seat}, 1 / 30.0f);
+	seat.firing[0] = true;
+	guns.step(round, {seat}, 1 / 30.0f);
+	CHECK(fires("tank_gun") == 1); // reloaded by then
+	// The coax: automatic while the alt fire is held, 10 a second.
+	seat.firing[0] = false;
+	seat.firing[1] = true;
+	rounds = 0;
+	for (int i = 0; i < 30; ++i) {
+		guns.step(round, {seat}, 1 / 30.0f);
+		rounds += fires("tank_coax");
+	}
+	CHECK(rounds == 10);
+	// The server's rounds: an empty magazine fires nothing.
+	seat.rounds[1] = 0;
+	guns.step(round, {seat}, 1 / 3.0f);
+	CHECK(fires("tank_coax") == 0);
+	// A player not listed is forgotten.
+	guns.step(round, {}, 1 / 30.0f);
+	seat.rounds[1] = -1;
+	guns.step(round, {seat}, 1 / 30.0f);
+	CHECK(fires("tank_coax") == 1);
 }

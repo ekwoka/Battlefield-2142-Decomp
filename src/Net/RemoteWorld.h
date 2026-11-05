@@ -45,6 +45,8 @@ struct RemotePart {
 	float rpm = 0;
 	float engineRotation[2] {}; // Engine: rotation speed x, z
 	float engineInputs[3] {};
+	int legState = -1;        // MechLegs: the state (+0x1bc, mask 1), -1 not yet
+	bool legHolds = false;    // and its input still held (+0x1c0, mask 2)
 	bool hasPosition = false; // Item, TargetObject, SimpleObject parts
 	Vec3f position;
 	bool hasOrientation = false;
@@ -52,6 +54,15 @@ struct RemotePart {
 	float health = -1;
 	NetworkableState last;    // the last state its group received
 };
+
+// The legs' messages to the walker's animation system (0x00650530, each
+// tick from 0x00650e90): 0x780 cleared, then with the state's input held
+// (+0x1c0) 0x80 walking (state 1), 0x100 backing (2), 0x400 turning left
+// (3), 0x200 right (4); state 5 raises the control object's crouch flag
+// (slot 0x134), which the object passes on as 0x10 (0x0063ce30). Both
+// fields are in the MechLegs networkable (0x0060a100), so a client's
+// remote walker takes the server's.
+uint32_t mechLegsMessages(int state, bool holds);
 
 struct RemoteObject {
 	uint16_t ghost = 0;

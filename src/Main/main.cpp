@@ -52,6 +52,7 @@
 #include "AdminScript.h"
 #endif
 #include "Prediction.h"
+#include "RemoteGuns.h"
 #include "Movie/MovieDecoder.h"
 #include "Movie/MovieQueue.h"
 #include "Movie/MenuVideo.h"
@@ -735,6 +736,9 @@ int g_footItemKey = 0;
 // gets it; updateHud keeps what it needs.
 dice::hfe::menu::ItemListInput g_itemList;
 bool g_weaponZoomed = false;
+// The seat camera's view mode (game::camera::Mode; 1 Inside on foot): the
+// runtime VehicleHud's camera test (0x00657660).
+int g_cameraMode = 1;
 #if BF2142_HAS_RENDERER
 void itemListInput(ViewerOptions::PlayerInput& in)
 {
@@ -895,7 +899,20 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		if (!dice::hfe::menu::vehicleMarker(t, relation, mine, false, look) || (look.asPlayer && occupied)) {
 			continue;
 		}
-		hud::HudManager::MapMarker icon {look.texture, vehicle.position.x, vehicle.position.z, look.width, vehicle.yaw};
+		// vehicleHud.useVehicleCameraRotation (0x00794f03): turned by its
+		// camera's yaw bundle, a seat's look, instead of its body.
+		float iconYaw = vehicle.yaw;
+		if (const std::string bundle = dice::hfe::menu::cameraRotationBundle(t, round.templates()); !bundle.empty()) {
+			const auto seats = round.vehicleSeats(vehicle.object);
+			for (size_t i = 0; i < seats.size(); ++i) {
+				float turn = 0;
+				if (seats[i].yawBundle == bundle && round.seatYaw(vehicle.object, static_cast<int>(i), turn)) {
+					iconYaw += turn;
+					break;
+				}
+			}
+		}
+		hud::HudManager::MapMarker icon {look.texture, vehicle.position.x, vehicle.position.z, look.width, iconYaw};
 		icon.height = look.height;
 		icon.offsetX = look.offsetX;
 		icon.offsetY = look.offsetY;
@@ -1331,6 +1348,29 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			heldGun = held.gun;
 			heldGunTemplate = held.weapon;
 		}
+		// The gui index (0x007a01e0 -> the runtime VehicleHud's 0x00657660,
+		// HudMenusVehicles.h vehicleGuiIndex): by the seat camera's mode and
+		// the HUD components' showOnCamMode lists, so the overlays go in the
+		// outside views. It replaces the guns' own set above.
+		if (known) {
+			dice::hfe::menu::VehicleGuiInput gui;
+			gui.controlled = look.seat;
+			if (!world.joined() && me.seat >= 0 && static_cast<size_t>(me.seat) < seats.size()) {
+				gui.weapon = round.templates().find(seats[static_cast<size_t>(me.seat)].weapon);
+			}
+			if (!gui.weapon) {
+				gui.weapon = world.seatGroupWeapon(0).weapon;
+			}
+			gui.second = world.seatGroupWeapon(1).weapon;
+			gui.child = !world.joined() ? held.weapon : nullptr;
+			gui.cameraMode = g_cameraMode;
+			game::GameWorld::ProjectileCamera riding;
+			gui.projectileCamera = !world.joined() && round.projectileCamera(world.localPlayer(), riding);
+			gui.zoomed = g_weaponZoomed;
+			// The HUD's sprint flag in a seat: the vehicle's boost (0x007a2e60).
+			gui.sprintTest = dice::hfe::menu::guiSprintTest(look.sprinting);
+			hud.set("GuiIndex", static_cast<float>(dice::hfe::menu::vehicleGuiIndex(gui)));
+		}
 	} else {
 		g_vehicleHud.clear(hud);
 	}
@@ -1392,8 +1432,8 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// A seat's second gun (0x007c2d50, the control object's slot 0x78(1):
 	// the active weapon of its PIAltFire group, +0x88; the PIFlareFire
 	// group has no HUD) sets the Secondary* block as 0x007c1f10 the Primary*
-	// ones; without one, or with guiIndex -1 (block +0xd0), the block's show
-	// (+0x16d) is cleared. A joined game's from our own state's group 1
+	// ones; without one, or with weaponHud.showInfo 0 (block +0xd0), the
+	// block's show (+0x16d) is cleared. A joined game's from our own state's group 1
 	// (its place in the group, rounds and magazines).
 	updateSecondaryWeapon(hud, world, playerVehicle, commanderScreen, dt);
 	// With the commander screen open (the HUD manager's slot 0x234) the
@@ -1486,6 +1526,14 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		const std::string sound = g_weaponHud.update(hud, in);
 		if (!sound.empty() && g_hudSound) {
 			g_hudSound(sound);
+		}
+		// showInfo 0: 0x007c1b90's argument, the local player not the
+		// commander (slot 0x128), also takes CrosshairActive (+0xed) off.
+		if (!g_weaponHud.fields().showInfo) {
+			game::GameWorld::PlayerInfo self;
+			if (!world.playerInfo(world.localPlayer(), self) || !self.commander) {
+				hud.set("CrosshairIconShow", 0);
+			}
 		}
 	} else {
 		g_weaponHud.hide(hud);
@@ -1728,8 +1776,15 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	if (soldier) {
 		if (const world::ObjectTemplate* rifle = held.weapon) {
 			const auto& settings = rifle->settings();
-			const auto gui = settings.find("weaponHud.guiIndex");
-			hud.set("GuiIndex", gui != settings.end() ? static_cast<float>(std::atoi(gui->second.c_str())) : 0);
+			// 0x007a01e0 on foot: the weapon's gui index (0x00657a70) with
+			// the sprint test, the HUD's sprint flag the soldier's sprint
+			// (0x007a0f80): a disableOnSprint weapon's overlay goes while
+			// sprinting.
+			float stamina = 1;
+			bool sprinting = false;
+			world.soldierStamina(stamina, sprinting);
+			hud.set("GuiIndex", static_cast<float>(dice::hfe::menu::weaponGuiIndex(rifle, false,
+									dice::hfe::menu::guiSprintTest(sprinting))));
 			// The crosshair's parts (0x007be770): the spread in pixels is
 			// the deviation (degrees) times weaponHud.deviationFactor
 			// (default 10); the parts are 20 long, about the 800 x 600
@@ -3802,17 +3857,23 @@ int runGame(Options& options, Session& session)
 	// gameplay objects are created.
 	if (!options.level.empty()) {
 		const std::string levelPath = "Levels/" + options.level + "/";
+		// Mounting stays allowed (file manager slot 0x78) across the
+		// level's own archive lists: server.zip, ServerArchives.con, then
+		// client.zip and ClientArchives.con on a game with a view, and only
+		// then is it turned off. The HEAT levels mount their _HEAT
+		// textures this way.
 		files.setMountingAllowed(true);
 		files.mountArchive(levelPath + "server.zip", levelPath);
+		if (files.exists(levelPath + "ServerArchives.con")) {
+			run((levelPath + "ServerArchives.con").c_str());
+		}
 		if (!options.dedicated) {
 			files.mountArchive(levelPath + "client.zip", levelPath);
-		}
-		files.setMountingAllowed(false);
-		for (const std::string& script : {levelPath + "ServerArchives.con", levelPath + "ClientArchives.con"}) {
-			if (files.exists(script)) {
-				run(script.c_str());
+			if (files.exists(levelPath + "ClientArchives.con")) {
+				run((levelPath + "ClientArchives.con").c_str());
 			}
 		}
+		files.setMountingAllowed(false);
 		loadingStep(0.1f);
 		std::printf("%zu template scripts run from Objects/\n",
 			world::loadObjectTemplates(console, files, "Objects/", options.bots > 0));
@@ -5183,6 +5244,7 @@ int runGame(Options& options, Session& session)
 			std::vector<effects::ObjectEffects::ObjectState> states;
 			states.reserve(objects.objects().size());
 			const std::map<uint32_t, uint32_t> fired = round.takeObjectEffectEvents();
+			std::map<uint32_t, std::vector<std::string>> weaponFires = round.takeObjectWeaponFires();
 			for (const auto& object : objects.objects()) {
 				effects::ObjectEffects::ObjectState state;
 				state.id = object->id();
@@ -5243,6 +5305,9 @@ int runGame(Options& options, Session& session)
 					const auto it = fired.find(state.id);
 					state.effects = it != fired.end() ? it->second : 0;
 				}
+				if (const auto it = weaponFires.find(state.id); it != weaponFires.end()) {
+					state.firedWeapons = std::move(it->second);
+				}
 				states.push_back(state);
 			}
 			objectEffectBundles.update(states, objectEffects,
@@ -5255,6 +5320,30 @@ int runGame(Options& options, Session& session)
 					rotation = {r.x, r.y, r.z};
 					return true;
 				});
+			// The commanders' strike firearms, fired where 0x005a0bf0 moved
+			// them: event 0 to their children there (the EMP strike's
+			// GEB_emp_strike), turned as the firearm sits in its asset.
+			for (const game::GameWorld::StrikeFired& strike : round.takeStrikeFires()) {
+				const world::ObjectTemplate* fireArm = templates.find(strike.fireArm);
+				const world::Object* asset = objects.find(strike.asset);
+				if (!fireArm) {
+					continue;
+				}
+				physics::Mat3 turn;
+				if (asset && asset->objectTemplate()) {
+					turn = physics::Mat3::fromYawPitchRoll({asset->rotation().x, asset->rotation().y, asset->rotation().z});
+					for (const world::ChildTemplate& child : asset->objectTemplate()->children()) {
+						if (child.name.size() == strike.fireArm.size()
+							&& std::equal(child.name.begin(), child.name.end(), strike.fireArm.begin(), [](char a, char b) {
+								   return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+							   })) {
+							turn = physics::Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z}) * turn;
+							break;
+						}
+					}
+				}
+				objectEffectBundles.weaponFiredAt(*fireArm, strike.at, turn, objectEffects);
+			}
 			// The WindManager's local winds: the objects' WindAffectors.
 			windSettings.localWinds = objectEffectBundles.localWinds();
 			round.effects().appendLocalWinds(windSettings.localWinds); // the explosions'
@@ -5378,6 +5467,15 @@ int runGame(Options& options, Session& session)
 			}
 			for (const auto& sound : objectEffects.takeSounds()) {
 				gameAudio.effectSound(sound.name, {sound.position.x, sound.position.y, sound.position.z});
+			}
+			// The bundles' looping start sounds, at their sound intensity.
+			for (const auto& loop : objectEffects.bundleLoops()) {
+				gameAudio.effectLoop(loop.key, loop.name, {loop.position.x, loop.position.y, loop.position.z},
+					loop.intensity);
+			}
+			for (const auto& loop : round.effects().bundleLoops()) { // the armour's (burning aircraft)
+				gameAudio.effectLoop(loop.key | (1ull << 48), loop.name, {loop.position.x, loop.position.y, loop.position.z},
+					loop.intensity);
 			}
 			gameAudio.tick(camera);
 			soundSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
@@ -5731,6 +5829,8 @@ int runGame(Options& options, Session& session)
 			bool fire = false;
 			int stance = 0;
 		} remoteLook;
+		// The seated players' guns on a joined client (RemoteGuns.h).
+		client::RemoteSeatGuns remoteSeatGuns;
 		// What the HUD shows (HudWorld.h): this round, or the server's game.
 		host::LocalHudWorld localHud(round, gameLogic);
 		std::optional<host::RemoteHudWorld> remoteHud;
@@ -6191,7 +6291,15 @@ int runGame(Options& options, Session& session)
 							const physics::Vec3 v = ghost.hasVelocity
 								? physics::Vec3 {ghost.velocity.x, ghost.velocity.y, ghost.velocity.z}
 								: physics::Vec3 {};
-							round.animateRemoteVehicle(it->second, v, occupied.count(ghost.ghost) > 0, 1.0f / 30.0f);
+							// The legs' own messages from the server's MechLegs
+							// state (0x00650530 on the client, net::mechLegsMessages).
+							int legMessages = -1;
+							for (const net::RemotePart& part : ghost.parts) {
+								if (part.kind == net::NetworkableKind::MechLegs && part.legState >= 0) {
+									legMessages = static_cast<int>(net::mechLegsMessages(part.legState, part.legHolds));
+								}
+							}
+							round.animateRemoteVehicle(it->second, v, occupied.count(ghost.ghost) > 0, 1.0f / 30.0f, legMessages);
 						}
 					}
 				} else if (world::ObjectTemplate* t = ghost.templateName.empty() ? templates.findById(ghost.templateId)
@@ -6217,6 +6325,7 @@ int runGame(Options& options, Session& session)
 			// in hand, the kit's firearm of the selected item, mask 0x2000;
 			// ours from its prediction).
 			std::set<uint32_t> animated;
+			std::vector<client::RemoteSeatGuns::Seat> gunners;
 			for (const net::RemotePlayer& p : client.world().playerList()) {
 				uint16_t ghost = p.soldierGhost;
 				if (p.local && !ghost && client.world().hasControlObject() && !client.world().controlObject().vehicle) {
@@ -6239,6 +6348,27 @@ int runGame(Options& options, Session& session)
 						}
 						round.animateRemoteSeated(found->second, vehicle->second, seatGhost->part, bodyYaw, 1.0f / 30.0f);
 						animated.insert(found->second);
+						// The seat's guns from the player's fire states (the
+						// client's 0x00590e10 -> 0x004cc7a0: the control
+						// object's input): their rounds' sound and muzzle
+						// effects (RemoteSeatGuns). Our own from the fire held.
+						client::RemoteSeatGuns::Seat gunner;
+						gunner.player = p.id;
+						gunner.vehicle = vehicle->second;
+						gunner.seat = seatGhost->part;
+						for (int g = 0; g < 3; ++g) {
+							gunner.firing[g] = p.fire[static_cast<size_t>(g)].on;
+							gunner.rounds[g] = p.fire[static_cast<size_t>(g)].on ? p.fire[static_cast<size_t>(g)].rounds : -1;
+							gunner.fireMode[g] = p.fire[static_cast<size_t>(g)].on ? p.fire[static_cast<size_t>(g)].fireMode : -1;
+							gunner.active[g] = seatGhost->seatWeapon[g];
+						}
+						gunner.presses = p.firePresses;
+						if (p.local) {
+							gunner.firing[0] = remoteLook.fire;
+							gunner.firing[1] = gunner.firing[2] = false;
+							gunner.presses = -1;
+						}
+						gunners.push_back(gunner);
 					}
 					continue;
 				}
@@ -6324,6 +6454,7 @@ int runGame(Options& options, Session& session)
 					}
 				}
 			}
+			remoteSeatGuns.step(round, gunners, 1.0f / 30.0f);
 			for (const auto& [ghost, id] : ghostObjects) {
 				if (round.isRemoteSoldier(id) && !animated.count(id)) {
 					round.removeRemoteSoldier(id);
@@ -7210,6 +7341,17 @@ int runGame(Options& options, Session& session)
 					titan.consoles, titan.coreDestroyed ? "destroyed" : titan.coreExposed ? "exposed" : "closed",
 					titan.position.x, titan.position.y, titan.position.z);
 			}
+			// The spawners waiting on a game event (activateOnEvent: the Titan
+			// shields' destroyedGameEvent switches them on).
+			int eventOn = 0, eventOff = 0;
+			for (const auto& spawner : round.spawners()) {
+				if (spawner->settings().activateOnEvent != -1 || spawner->settings().deActivateOnEvent != -1) {
+					(spawner->active() ? eventOn : eventOff) += 1;
+				}
+			}
+			if (eventOn + eventOff > 0) {
+				std::printf("  spawners on game events: %d on, %d off\n", eventOn, eventOff);
+			}
 			for (const auto& silo : round.missileSilos()) {
 				std::printf("  silo %d: %s, %s, %d missiles fired\n", silo.controlPoint,
 					silo.team == 1 ? "PAC" : silo.team == 2 ? "EU" : "neutral",
@@ -7518,6 +7660,12 @@ int runGame(Options& options, Session& session)
 			}
 			localHud.scoreOf = scoreOf;
 			g_weaponZoomed = playerCamera.zoomLevel() > 0; // the firearm's slot 300 (its zoom)
+			// The seat camera's mode; a third-person choice not yet given to
+			// the seat's camera (it starts in Chase, PlayerCamera.h) is Chase.
+			g_cameraMode = static_cast<int>(playerCamera.mode());
+			if (!playerCamera.firstPerson && playerCamera.mode() == game::camera::Mode::Inside) {
+				g_cameraMode = static_cast<int>(game::camera::Mode::Chase);
+			}
 			updateHud(hudManager, hudWorld(), round, gameLogic, scoreboardHeld, commanderScreen);
 			// The minimap's combat-area layer and framing (HudCombatArea.h):
 			// the areas that apply to the local player's team and the
@@ -7933,6 +8081,12 @@ int runGame(Options& options, Session& session)
 					return true;
 				}
 			}
+			// A seated crew's kit: its seat's crewKitIndex (0x0056cc50).
+			if (const int crew = round.kitGeometry(object); crew >= 0) {
+				geometry = crew;
+				lod = 0;
+				return true;
+			}
 			// A broken prop of two geometries or more: its second (Props.cpp).
 			if (const int wreck = round.propGeometry(object); wreck >= 0) {
 				geometry = wreck;
@@ -8169,6 +8323,7 @@ int runGame(Options& options, Session& session)
 				input.use = in.use;
 				input.toggleFireRate = in.toggleFireRate;
 				input.reload = in.reload;
+				input.mouseLook = in.mouseLook;
 				// The position and weapon keys go to the server as
 				// PIPositionSelect1..8 / PIWeaponSelect1..9; a weapon key's
 				// press is also our own 0x004d2a50's (the seat's item popup,
@@ -8254,6 +8409,7 @@ int runGame(Options& options, Session& session)
 				input.use = in.use;
 				input.toggleFireRate = in.toggleFireRate;
 				input.reload = in.reload;
+				input.mouseLook = in.mouseLook;
 				input.switchSeat = in.seat;
 				input.selectItem = in.item;
 				input.itemStep = in.itemStep;

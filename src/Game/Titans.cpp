@@ -636,6 +636,9 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 				physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
 			made.body.setBounds(high - low);
 			made.body.gravityModifier = 0;
+			if (integer(t, "isSleeping", 0) != 0) {
+				sleep(made); // 0x005f6ba0, as addBodies
+			}
 			m_bodies.push_back(std::move(made));
 			body = &m_bodies.back();
 		}
@@ -1364,10 +1367,18 @@ void GameWorld::titanPartWrecked(Titan& titan, int index, int attacker)
 			o->setDestroyed(true);
 		}
 		raise("VehicleDestroyed", {ScriptValue::object(object), ScriptValue::player(attacker)});
+		if (part.t) {
+			destroyedGameEvent(*part.t); // its message 0x18 (the shipped Titans' Radio has no event)
+		}
 		return;
 	}
 	part.off = true;
 	titan.meshesDirty = true;
+	// The wreck's message 0x18 (0x00654120 -> 0x0063c6a0): the forcefield's
+	// Radio destroyedGameEvent goes to the spawners.
+	if (part.t) {
+		destroyedGameEvent(*part.t);
+	}
 	// 0x005b7680: once until a repair has gone; the repair's flag cleared.
 	const bool sent = part.destroySent;
 	part.repairSent = false;
@@ -1894,8 +1905,10 @@ bool GameWorld::launchPod(int id)
 	std::string projectile;
 	float velocity = 0, maxTilt = 0;
 	physics::Vec3 start;
-	bool found = false;
-	const world::ObjectTemplate* launcher = nullptr;
+	// The seat's pod launchers on PIAltFire in the order they were added;
+	// the group's active weapon is the first (each entry resets it,
+	// seatPlayer), the pod seats' pod_launcher_cq.
+	std::vector<const world::ObjectTemplate*> launchers;
 	std::function<void(const world::ObjectTemplate&, int)> scan = [&](const world::ObjectTemplate& node, int depth) {
 		for (const world::ChildTemplate& child : node.children()) {
 			const world::ObjectTemplate* c = m_templates.find(child.name);
@@ -1905,24 +1918,50 @@ bool GameWorld::launchPod(int id)
 			std::string p;
 			float v = 0;
 			physics::Vec3 s;
-			// Conquest's pod_launcher_cq and Titan mode's pod_launcher both
-			// sit on the seat; the round's mode picks.
 			if (podLauncherOf(*c, p, v, s, true)) {
-				const bool cq = c->name().size() > 3 && sameName(c->name().substr(c->name().size() - 3), "_cq");
-				if (!found || cq != titanModeOn()) {
-					projectile = p;
-					velocity = v;
-					start = s;
-					maxTilt = number(*c, "fire.maximumVehicleTiltForFire", 0);
-					found = true;
-					launcher = c;
-				}
+				launchers.push_back(c);
 			}
 			scan(*c, depth + 1);
 		}
 	};
 	if (seatTemplate) {
 		scan(*seatTemplate, 0);
+	}
+	const world::ObjectTemplate* launcher = launchers.empty() ? nullptr : launchers.front();
+	// setIfTitanChangeToWeapon <weapon> <distance> (GenericFireArm +0x354
+	// on, +0x344 the name, +0x35c the distance; pod_launcher_cq's
+	// "pod_launcher 250"): the firearm's fire press (its handler 0x005c50e0,
+	// event 7) measures from the vehicle to each remote-controlled object of
+	// rcType 7 (the Titans' control objects, 0x0058e400) across x and z;
+	// within the distance of the nearest it selects the seat's weapon of
+	// that name (slot 0x1a4) and fires that one instead (event 6): the pod
+	// seats launch the Titan-boarding eu_pod near a Titan, the Conquest pod
+	// elsewhere. A seat without that weapon (eu_apc's) fires its own.
+	if (launcher) {
+		const std::string* change = setting(*launcher, "setIfTitanChangeToWeapon");
+		char wanted[128] = {};
+		float reach = 0;
+		if (change && std::sscanf(change->c_str(), "%127s %f", wanted, &reach) == 2) {
+			float nearest = 65000.0f; // the handler's start
+			for (const Titan& titan : m_titans) {
+				if (const world::Object* o = m_objects.find(titan.object)) {
+					const float dx = o->position().x - body->body.position.x, dz = o->position().z - body->body.position.z;
+					nearest = std::min(nearest, dx * dx + dz * dz);
+				}
+			}
+			if (nearest < reach * reach) {
+				for (const world::ObjectTemplate* other : launchers) {
+					if (sameName(other->name(), wanted)) {
+						launcher = other;
+						break;
+					}
+				}
+			}
+		}
+	}
+	const bool found = launcher && podLauncherOf(*launcher, projectile, velocity, start, true);
+	if (found) {
+		maxTilt = number(*launcher, "fire.maximumVehicleTiltForFire", 0);
 	}
 	if (!found || !tiltAllowsFire(body->body.rotation, maxTilt)) {
 		return false; // the press refused: the vehicle tilted too far (air_pod_launcher's 70)

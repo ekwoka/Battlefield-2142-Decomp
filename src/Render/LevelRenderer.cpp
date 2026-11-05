@@ -5,7 +5,9 @@
 #include "Scene/OvergrowthSettings.h"
 #include "MeshQueues.h"
 #include "SceneMath.h"
+#include "RoadStatics.h"
 #include "StaticLightmaps.h"
+#include "TextureSuffix.h"
 
 #include <array>
 #include <limits>
@@ -23,6 +25,7 @@
 #include "Terrain/Undergrowth.h"
 #include "Texture/TgaFile.h"
 #include "Effects/Effects.h"
+#include "World/InertRows.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
 
@@ -272,8 +275,13 @@ SDL_GPUTexture* LevelRenderer::texture(const io::FileManager& files, const std::
 	}
 	SDL_GPUTexture* gpuTexture = nullptr;
 	std::vector<uint8_t> data;
-	if (files.readFile(path, data)) {
-		const bool targa = key.size() > 4 && key.compare(key.size() - 4, 4, ".tga") == 0;
+	// The level's customTextureSuffix variant where one exists (0x10018ca0).
+	const std::string variant = customSuffixedTexturePath(path, m_textureSuffix);
+	const bool swapped = !variant.empty() && files.readFile(variant, data);
+	if (swapped || files.readFile(path, data)) {
+		// By the name read (the key may carry "#skip").
+		const std::string read = swapped ? variant : lower(path);
+		const bool targa = read.size() > 4 && read.compare(read.size() - 4, 4, ".tga") == 0;
 		if (auto image = targa ? texture::parseTga(data) : texture::parseDds(data)) {
 			texture::skipTopLevels(*image, skip);
 			gpuTexture = m_gpu.createTexture(*image);
@@ -297,7 +305,8 @@ SDL_GPUTexture* LevelRenderer::cubeTexture(const io::FileManager& files, const s
 	}
 	SDL_GPUTexture* gpuTexture = nullptr;
 	std::vector<uint8_t> data;
-	if (files.readFile(path, data)) {
+	const std::string variant = customSuffixedTexturePath(path, m_textureSuffix); // 0x10018ca0
+	if ((!variant.empty() && files.readFile(variant, data)) || files.readFile(path, data)) {
 		if (const auto image = texture::parseDds(data)) {
 			gpuTexture = m_gpu.createTexture(*image, true);
 		}
@@ -517,6 +526,8 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 	const bool tree = !bundled && !skinned && lower(geometry->path).find("vegitation") != std::string::npos;
 	gpuMesh->tree = tree;
 	gpuMesh->waterObject = !bundled && !skinned && lower(geometry->path).find("objects/water/") != std::string::npos;
+	gpuMesh->road = !bundled && !skinned && roadStaticPath(geometry->path);
+	gpuMesh->roadNoBlend = gpuMesh->road && roadStaticNoBlend(geometry->path);
 	const scene::TextureClass textureClass = skinned ? scene::TextureClass::SkinnedMesh
 		: bundled                                    ? scene::TextureClass::BundledMesh
 		: tree                                       ? scene::TextureClass::Overgrowth
@@ -3093,6 +3104,7 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 {
 	m_drawList.clear();
 	m_cloakedList.clear();
+	m_roadStatics.clear();
 	m_culledInstances = 0;
 	const Frustum frustum = Frustum::fromViewProjection(viewProjection);
 	m_frameFrustum = frustum; // the lights' list (collectPointLights)
@@ -3147,6 +3159,19 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 			continue;
 		}
 		const GpuMesh& base = *instance.mesh;
+		// A road template's mesh is the roads' (0x100bdb00: drawn with
+		// drawRoads, whatever drawStaticMeshes says; RoadStatics.h).
+		if (base.road) {
+			if (renderer.drawRoads) {
+				const BoundingSphere sphere = instanceBounds(instance, base);
+				if (frustum.containsSphere(sphere.center, sphere.radius)) {
+					m_roadStatics.push_back(&instance);
+				} else {
+					++m_culledInstances;
+				}
+			}
+			continue;
+		}
 		// renderer.drawObjects / drawBundledMeshes / drawStaticMeshes /
 		// drawSkinnedMeshes / drawOvergrowth / drawTrees (RendererSettings).
 		if (!renderer.drawObjects ||
@@ -3357,6 +3382,10 @@ void LevelRenderer::build(const LevelSources& sources)
 {
 	m_startTicks = SDL_GetTicks();
 	m_sources = &sources; // the quality levels the loaders read
+	// texturemanager.customTextureSuffix as the level's Init.con left it: the
+	// original swaps the textures at the end of the load (0x1000deb0 ->
+	// 0x10018ca0); the rewrite loads the variants as it goes.
+	m_textureSuffix = world::customTextureSuffix();
 	const auto progress = [&sources](float done) {
 		if (sources.buildProgress) {
 			sources.buildProgress(done);
@@ -3816,7 +3845,10 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	}
 
 	// Roads, once per terrain patch they overlap, lit by that patch's lightmap.
-	if (!m_roads.empty() && m_patchSize > 0 && switches.drawRoads) {
+	const auto patchIndex = [this](float world, int axis) {
+		return static_cast<int>(std::floor((world - m_patchOrigin[axis]) / m_patchSize));
+	};
+	if ((!m_roads.empty() || !m_roadStatics.empty()) && m_patchSize > 0 && switches.drawRoads) {
 		SDL_BindGPUGraphicsPipeline(pass, m_gpu.roadPipeline());
 		useShadows(commands, pass, 2, 3, false);
 		// The road renderer's view distance (0x100baa70 / 0x100ba1d0): f =
@@ -3844,9 +3876,6 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			SDL_GPUBufferBinding indexBinding {road.indices, 0};
 			SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
 			SDL_PushGPUFragmentUniformData(commands, 1, &roadUniforms, sizeof(roadUniforms));
-			const auto patchIndex = [this](float world, int axis) {
-				return static_cast<int>(std::floor((world - m_patchOrigin[axis]) / m_patchSize));
-			};
 			const int x0 = std::max(patchIndex(road.boundsMin[0], 0), 0);
 			const int x1 = std::min(patchIndex(road.boundsMax[0], 0), m_patchesPerSide - 1);
 			const int z0 = std::max(patchIndex(road.boundsMin[1], 1), 0);
@@ -3869,6 +3898,63 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 					};
 					SDL_BindGPUFragmentSamplers(pass, 0, samplers, 3);
 					SDL_DrawGPUIndexedPrimitives(pass, road.indexCount, 1, 0, 0, 0);
+				}
+			}
+		}
+		// The road static meshes (RoadStatics.h): their own vertices through
+		// the road's lighting and fade, per terrain patch as the compiled
+		// roads, each material with its RaShaderRoad*.fx technique. The light
+		// buffer RaShaderRoad samples by screen position is the terrain's
+		// lighting there: the patch's lightmap stands in, as for the roads.
+		if (!m_roadStatics.empty()) {
+			SDL_BindGPUGraphicsPipeline(pass, m_gpu.roadMeshPipeline());
+			useShadows(commands, pass, 2, 3, false);
+		}
+		for (const Instance* instance : m_roadStatics) {
+			const GpuMesh& mesh = *instance->mesh;
+			const BoundingSphere sphere = instanceBounds(*instance, mesh);
+			const Vec3f toMesh = sphere.center - camera.position;
+			if (std::sqrt(dot(toMesh, toMesh)) > roadFar + sphere.radius) {
+				continue; // faded out (the fade's alpha is 0 beyond roadFar)
+			}
+			SDL_GPUBufferBinding vertexBinding {mesh.vertices, 0};
+			SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+			SDL_GPUBufferBinding indexBinding {mesh.indices, 0};
+			SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+			const float reach = std::max(sphere.radius, 0.0f);
+			const int x0 = std::max(patchIndex(sphere.center.x - reach, 0), 0);
+			const int x1 = std::min(patchIndex(sphere.center.x + reach, 0), m_patchesPerSide - 1);
+			const int z0 = std::max(patchIndex(sphere.center.z - reach, 1), 0);
+			const int z1 = std::min(patchIndex(sphere.center.z + reach, 1), m_patchesPerSide - 1);
+			for (const Submesh& submesh : mesh.submeshes) {
+				RoadUniforms roadUniforms {};
+				roadUniforms.road[1] = roadScale;
+				roadUniforms.road[2] = roadScale * roadNear;
+				roadUniforms.road[3] = static_cast<float>(roadStaticTechnique(submesh.detail != nullptr, mesh.roadNoBlend));
+				roadUniforms.eye[0] = camera.position.x;
+				roadUniforms.eye[1] = camera.position.y;
+				roadUniforms.eye[2] = camera.position.z;
+				SDL_PushGPUFragmentUniformData(commands, 1, &roadUniforms, sizeof(roadUniforms));
+				for (int pz = z0; pz <= z1; ++pz) {
+					for (int px = x0; px <= x1; ++px) {
+						const TerrainPatch& patch = m_terrain[static_cast<size_t>(pz * m_patchesPerSide + px)];
+						TransformUniforms meshTransforms {instance->world * viewProjection, instance->world,
+							{1 / m_patchSize, 1 / m_patchSize, -(m_patchOrigin[0] / m_patchSize + px),
+								-(m_patchOrigin[1] / m_patchSize + pz)},
+							{}};
+						meshTransforms.parts[0] = viewProjection;
+						meshTransforms.partsUsed = 1;
+						SDL_PushGPUVertexUniformData(commands, 0, &meshTransforms, pushUniformSize(meshTransforms));
+						SDL_PushGPUFragmentUniformData(commands, 0, patch.lightmap ? &terrainLit : &terrainUnlit,
+							sizeof(terrainLit));
+						SDL_GPUTextureSamplerBinding samplers[3] = {
+							{submesh.texture, m_gpu.repeatSampler()},
+							{submesh.detail ? submesh.detail : m_gpu.whiteTexture(), m_gpu.repeatSampler()},
+							{patch.lightmap ? patch.lightmap : m_gpu.whiteTexture(), m_gpu.clampSampler()},
+						};
+						SDL_BindGPUFragmentSamplers(pass, 0, samplers, 3);
+						SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
+					}
 				}
 			}
 		}

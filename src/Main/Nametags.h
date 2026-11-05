@@ -149,6 +149,42 @@ int objectTagIcon(int icon, int secondaryIcon, float healthActivationLevel, floa
 //     show3dIcon template sets it 0.
 std::array<float, 3> objectTagPoint(const std::array<float, 3>& position, const std::array<float, 3>& offset,
 	bool useBoundingRadius, float radius);
+//   - The bar (RendDX9 0x1016c1e0, the health-bar pass over every tag): an
+//     object tag (kind 3) of the local team or of none (tag +0x74 against
+//     the player's slot 0xf8) whose template sets Nametag.showArmor (flag
+//     0x4000000, the template's +0x33 bit 4) or showSupply (0x8000000, bit
+//     8) joins it. At 0x1016c64f: a player whose kit repairs (its Ability's
+//     second byte, the engineer), or a showArmor object, goes to the
+//     armour branch, which only draws a bar for a tag whose state (+0xc8)
+//     another path set: none for these, so no bar; a showSupply object
+//     shows its SupplyObject child's (class 0x9c47) storage, +0x194 over
+//     the template's sharedStorageSize +0x2bc, at any level (the 0.5 test
+//     at 0x1016c7a5 is skipped for showSupply), its state 2 / 4 / 3 by
+//     healSpeed / refillAmmoSpeed (the bar icons' pass, nametag_barIcons);
+//     a support player (ammo, third byte) reaches that branch only for
+//     showSupply objects. The fill (0..1) or -1 for no bar.
+//     The object tag's other way in (kind 3 at 0x1016c52e): with the
+//     tag's +0xc4 and flag 0x800000 (0x1016c555) it goes straight to the
+//     branches above, and with 0x10000000 too (0x1016c59c) to the
+//     object's owner (its interface 0x94c1, slot 0x50: a living player of
+//     another team), whose control object's armour bar it would show
+//     (state 2 on foot, 1 in a vehicle). No code sets either flag: the
+//     tag's flags are the Nametag component's (+0x34, read through the
+//     block's +0x24 by 0x100f3ed0 / 0x100f40d0), whose setters
+//     (0x0063ac70..0x0063af70) and constructor (0x0063b760: 0x80000) give
+//     only the named bits, and RendDX9's other writers of the tag's +0xb8
+//     (0x100f3de0, 0x100f44d0, 0x100f4620, 0x100f4730, 0x100f49d0 and the
+//     player passes) add only 0x500201, 0x104079, 0x4079, 0x4031, 7,
+//     0x26808, 0x2000040, 0x25820, 0x4020 and 0x80. So that path never
+//     runs, and showArmor draws no bar of its own anywhere.
+struct ObjectBarInput {
+	bool friendly = false;     // the tag's team the player's, or none
+	bool showArmor = false, showSupply = false;
+	bool localRepairs = false; // the local player's kit repairs
+	bool hasSupply = false;    // a SupplyObject's storage is known (GameWorld::supplyStorage)
+	float supply = 0;          // its share, 0..1
+};
+float objectTagBar(const ObjectBarInput& in);
 constexpr float kOrderDistance = 1200; // DAT_101f67b4
 
 // What a kit lets its carrier answer (the HUD manager's slot 0xac -> +0x74
@@ -313,6 +349,7 @@ private:
 		bool showItem = false, show3dIcon = false, showDistance = false, glue = false;
 		bool teamSpecific = false, inverse = false, tracker = false, showInside = false, showOutside = true;
 		bool selectable = false, useTeamColor = false, useAliveArmor = false;
+		bool showArmor = false, showSupply = false; // flags 0x4000000 / 0x8000000 (objectTagBar)
 		int icon = -1, selectedIcon = -1; // 3dMapIcon, selected3dMapIcon
 		int secondaryIcon = -1;           // secondary3dMapIcon (component +0x3c)
 		float healthActivationLevel = 100; // component +0x24

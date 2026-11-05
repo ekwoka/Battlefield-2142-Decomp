@@ -1804,30 +1804,61 @@ void HostedGame::trackObjects()
 // reporter alone without a squad), whose client puts the enemies on its
 // minimap for the report's seconds (0x00508590). The rewrite's round makes
 // them in reportBattlefieldObjects (the bots' trigger, the recon drones'
-// pulses, the cloak, the radio's spot).
+// pulses, the cloak, the radio's spot). Before posting, the handler reads
+// each recipient's ability block (slot 0x2a0, squadReportAbility): the
+// report lasts the longest networkableHudRevealTime among them (+0xc;
+// 3 s, 6 with the recon's unlock), and a cloak report (kind 2) goes on
+// only as kind 1 when one of them has networkableHudShowCloaked (+0x12),
+// else to no one (battlefieldReportFor).
 void HostedGame::sendBattlefieldReports()
 {
 	for (const game::GameWorld::BattlefieldReport& report : m_round->takeBattlefieldReports()) {
 		if (report.players.empty() || report.reporter < 0) {
 			continue;
 		}
-		std::vector<uint32_t> values {0, static_cast<uint32_t>(report.reporter & 0xff),
-			static_cast<uint32_t>(std::min<size_t>(report.players.size(), 0x40)),
-			static_cast<uint32_t>(std::clamp(report.seconds, 0, 0x3c))};
-		for (size_t i = 0; i < report.players.size() && i < 0x40; ++i) {
-			values.push_back(static_cast<uint32_t>(report.players[i] & 0xff));
-		}
-		const net::GameEvent e = eventOf(net::kEvSquadRadar, values);
+		std::vector<int> recipients;
+		std::vector<std::pair<int, bool>> readings;
 		for (auto& [id, client] : m_clients) {
 			game::GameWorld::PlayerInfo p;
 			if (client.stage != Client::Stage::Playing || !m_round->playerInfo(client.player, p) || p.team != report.team) {
 				continue;
 			}
 			if (report.squad == 0 ? client.player == report.reporter : p.squad == report.squad) {
-				sendTo(id, e);
+				recipients.push_back(id);
+				int reveal = 3;
+				bool cloaked = false;
+				m_round->squadReportAbility(client.player, reveal, cloaked);
+				readings.push_back({reveal, cloaked});
 			}
 		}
+		int kind = report.kind, seconds = report.seconds;
+		if (!battlefieldReportFor(readings, kind, seconds)) {
+			continue;
+		}
+		std::vector<uint32_t> values {static_cast<uint32_t>(kind), static_cast<uint32_t>(report.reporter & 0xff),
+			static_cast<uint32_t>(std::min<size_t>(report.players.size(), 0x40)),
+			static_cast<uint32_t>(std::clamp(seconds, 0, 0x3c))};
+		for (size_t i = 0; i < report.players.size() && i < 0x40; ++i) {
+			values.push_back(static_cast<uint32_t>(report.players[i] & 0xff));
+		}
+		const net::GameEvent e = eventOf(net::kEvSquadRadar, values);
+		for (const int id : recipients) {
+			sendTo(id, e);
+		}
 	}
+}
+
+bool battlefieldReportFor(const std::vector<std::pair<int, bool>>& recipients, int& kind, int& seconds)
+{
+	bool cloakReader = false;
+	for (const auto& [reveal, showCloaked] : recipients) {
+		seconds = std::max(seconds, reveal);
+		cloakReader = cloakReader || (kind == 2 && showCloaked);
+	}
+	if (kind == 2 && cloakReader) {
+		kind = 1;
+	}
+	return kind != 2;
 }
 
 const game::Projectile* HostedGame::projectileOf(const Ghost& ghost) const
@@ -2262,6 +2293,18 @@ std::vector<net::NetworkableState> HostedGame::statesOf(const Ghost& ghost, size
 				s.rotation[2] = rotation.z;
 			}
 			break;
+		case net::NetworkableKind::MechLegs:
+			// The walker's legs (0x0060a000): the state (+0x1bc, mask 1) and
+			// whether its input still holds (+0x1c0, mask 2), from which the
+			// client's legs send their animation messages (0x00650530,
+			// net::mechLegsMessages).
+			if (const game::Vehicle* v = m_round->vehicle(ghost.object); v && v->legs()) {
+				const game::Vehicle::Legs& legs = *v->legs();
+				s.mask = 0x1 | 0x2;
+				s.legState = legs.state;
+				s.legFlag1 = (legs.messages & 0x780u) != 0 || legs.crouching;
+			}
+			break;
 		case net::NetworkableKind::Spring:
 			// A wheel's suspension (0x00605170: the offset, vtable 0xe0).
 			if (m_round->partPose(ghost.object, name, offset, rotation)) {
@@ -2272,11 +2315,34 @@ std::vector<net::NetworkableState> HostedGame::statesOf(const Ghost& ghost, size
 			break;
 		case net::NetworkableKind::PlayerControlObject: {
 			// A seat (0x00605650): its occupant's soldier, or its weapons.
-			if (g != 0 || h.seatCameras != 0) {
+			if (g != 0) {
 				break;
 			}
 			const std::vector<int> occupants = m_round->vehicleOccupants(ghost.object);
 			const int player = part < occupants.size() ? occupants[part] : -1;
+			if (h.seatCameras != 0) {
+				// Each group's active weapon (masks 1, 2, 4: its place in the
+				// group's list + 1, as 0x005a98b0's): the clients fire that
+				// one from the occupant's fire state (RemoteGuns.h).
+				const auto seats = m_round->vehicleSeats(ghost.object);
+				if (part >= seats.size()) {
+					break;
+				}
+				const auto& weapons = seats[part].weapons;
+				for (int wg = 0; wg < 3; ++wg) {
+					const int active = m_round->seatWeaponIndex(ghost.object, static_cast<int>(part), wg);
+					if (active < 0 || static_cast<size_t>(active) >= weapons.size()) {
+						continue;
+					}
+					int place = 0;
+					for (int i = 0; i < active; ++i) {
+						place += weapons[static_cast<size_t>(i)].group == wg ? 1 : 0;
+					}
+					s.mask |= 1u << wg;
+					s.seatWeapon[wg] = place;
+				}
+				break;
+			}
 			game::GameWorld::PlayerInfo info;
 			if (player >= 0 && m_round->playerInfo(player, info) && info.soldier) {
 				if (const world::Object* soldier = m_round->objects().find(info.soldier); soldier && soldier->objectTemplate()) {
@@ -2552,13 +2618,29 @@ std::vector<uint8_t> HostedGame::playerStateOf(int player, size_t& bits, bool ev
 		// the state goes whole every update here) with group 0's firearm,
 		// the weapon in hand: its rounds and fire mode; and the presses
 		// (0x4000000, +0x250).
+		// The fire held goes out in a seat too (0x004bda00 sets +0x19c from
+		// c_PIFire whatever the control object): the others' clients fire
+		// the seat's guns from it (0x00590e10 -> 0x004cc7a0, RemoteGuns.h),
+		// with each group's firearm's rounds and fire mode.
 		s.mask |= 0x40 | 0x80 | 0x20000 | 0x4000000;
-		s.player.fire[0].on = p.alive && !p.vehicle && p.firing;
-		s.player.fire[1].on = p.alive && !p.vehicle && p.altFiring;
+		s.player.fire[0].on = p.alive && p.firing;
+		s.player.fire[1].on = p.alive && p.altFiring;
 		for (net::PlayerNetState::FireState& f : s.player.fire) {
 			f.rounds = p.roundsInMag;
 			f.fireMode = p.fireMode;
 			f.heat = p.heat;
+		}
+		if (p.alive && p.vehicle) {
+			for (int g = 0; g < 3; ++g) {
+				net::PlayerNetState::FireState& f = s.player.fire[static_cast<size_t>(g)];
+				const int active = m_round->seatWeaponIndex(p.vehicle, p.seat, g);
+				if (const game::FireArm* arm = active >= 0 ? m_round->seatFireArm(p.vehicle, p.seat, active) : nullptr) {
+					f.rounds = arm->roundsInMag();
+					f.fireMode = arm->fireMode();
+				} else {
+					f.rounds = -1;
+				}
+			}
 		}
 		s.player.firePresses = static_cast<int>(p.firePresses & 3);
 		// A reload pressed (0x004bda00 -> player vtable 0x1fc, 0x0059b330:

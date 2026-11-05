@@ -312,6 +312,11 @@ bool GameAudio::playerInfo(int player, game::GameWorld::PlayerInfo& out) const
 
 void GameAudio::effectSound(const std::string& name, const sound::Vec3& position) { m_sounds.play(name, position); }
 
+void GameAudio::effectLoop(uint64_t key, const std::string& name, const sound::Vec3& position, float intensity)
+{
+	m_sounds.loop(ownerKey(3, key), name, position, {}, intensity);
+}
+
 void GameAudio::tick(const Camera& given)
 {
 	Camera camera = given;
@@ -325,6 +330,14 @@ void GameAudio::tick(const Camera& given)
 	}
 	weapons(camera);
 	engines();
+	// The vehicles' rolling-surface loops (GameWorld::rollingSounds: the
+	// PCO's contact sound object, 0x005c65d0 / 0x005c6510), at the vehicle
+	// (its position provider, vtable 0x0096cf7c), envelopes on the eased
+	// speed.
+	for (const auto& rolling : m_round.rollingSounds()) {
+		m_sounds.loop(ownerKey(4, rolling.vehicle), rolling.sound, toSound(rolling.position), toSound(rolling.velocity),
+			rolling.input, rolling.vehicle);
+	}
 	projectiles();
 	radio();
 	silos();

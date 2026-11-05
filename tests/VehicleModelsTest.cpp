@@ -104,6 +104,8 @@ struct Garage {
 		loaded = templates.find("eu_tank") != nullptr;
 	}
 
+	uint32_t groundMaterial = 0; // the terrain's material under every point
+
 	// The vehicle at `at` facing +z, the world started and settled, the
 	// player spawned beside it.
 	uint32_t start(const char* name, const physics::Vec3& at, float settle = 3, float ground = 0, float water = -10000)
@@ -116,11 +118,14 @@ struct Garage {
 		world::Object* made = objects.create(t, {at.x, at.y, at.z}, {0, 0, 0});
 		made->setTeam(2);
 		world = std::make_unique<game::GameWorld>(templates, objects);
+		const uint32_t material = groundMaterial;
 		world->enablePhysics(files, collisionTemplates,
-			{[ground](float, float) { return ground; }, [ground](float, float, physics::Vec3& normal) {
-				 normal = {0, 1, 0};
-				 return ground;
-			 }},
+			{[ground](float, float) { return ground; },
+				[ground](float, float, physics::Vec3& normal) {
+					normal = {0, 1, 0};
+					return ground;
+				},
+				[material](float, float) { return material; }},
 			&materials);
 		if (water > -10000) {
 			world->setWaterLevel(water);
@@ -1816,4 +1821,65 @@ TEST(Vehicles_RemoteMechPosesItsBoneParts)
 	g.objects.remove(mech);
 	g.world->tick(1 / 30.0f);
 	CHECK(!g.world->partBone(mech, "AS_heavy_mech_torsospring", parked));
+}
+
+// The rolling-surface loop (groundContactVolume 1; 0x005c8e70 with the
+// contact sound object 0x005c65d0): the tank's tracks' web_tracked
+// (material 61) on ground of material 5 loop the cell's
+// S_GroundContact_Dirt, its envelopes on the speed eased by 0.08 a tick;
+// at rest it eases out and pauses.
+TEST(Vehicles_RollingSurfaceLoop)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	g.groundMaterial = 5;
+	const uint32_t tank = g.start("eu_tank", {0, 2, 0});
+	// Settled: what its drop onto the ground gave has eased away (or nearly).
+	for (const auto& r : g.world->rollingSounds()) {
+		CHECK(r.input < 0.01f);
+	}
+	CHECK(g.enter(tank));
+	game::SoldierInput go;
+	go.throttle = 1;
+	g.drive(go, 3);
+	const auto rolling = g.world->rollingSounds();
+	CHECK(rolling.size() == 1);
+	if (rolling.size() == 1) {
+		std::fprintf(stderr, "  %s at %.3f\n", rolling[0].sound.c_str(), rolling[0].input);
+		CHECK(rolling[0].vehicle == tank && rolling[0].sound == "S_GroundContact_Dirt");
+		CHECK(rolling[0].input > 0.05f && rolling[0].input <= 1);
+	}
+	g.drive({}, 12);
+	CHECK(g.world->rollingSounds().empty()); // eased to 0: paused
+}
+
+// The heavy IFV (eu_ifv): its seven ifv_shield_the_generator children are
+// its shield cells (hudRepairCellNo 1, mirrorParentDamageLevel 1): all up
+// at full armour, all down once the hull is a wreck, each one's
+// VehicleShieldDestroyed with it.
+TEST(Vehicles_HeavyIfvShieldCells)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("eu_ifv")) {
+		return;
+	}
+	const uint32_t ifv = g.start("eu_ifv", {0, 2, 0});
+	auto cells = g.world->repairCells(ifv);
+	CHECK(cells.size() == 7 && std::all_of(cells.begin(), cells.end(), [](bool up) { return up; }));
+	g.world->applyDamage(ifv, 600); // half
+	g.run(0.5f);
+	cells = g.world->repairCells(ifv);
+	CHECK(cells.size() == 7 && std::all_of(cells.begin(), cells.end(), [](bool up) { return up; }));
+	g.world->applyDamage(ifv, 1000);
+	g.run(0.5f);
+	cells = g.world->repairCells(ifv);
+	CHECK(cells.size() == 7 && std::none_of(cells.begin(), cells.end(), [](bool up) { return up; }));
 }

@@ -4381,3 +4381,574 @@ TEST(GameWorld_BotUnlocks)
 	CHECK(std::find(chosen.begin(), chosen.end(), "UnlockEU_AssaultSquadLeader0") != chosen.end());
 	CHECK(chosen.size() == 3); // Light0, Medic0 and the leader's
 }
+
+// The entry search's team test (0x005a98e0): an enemy's empty vehicle may
+// be taken unless its template is lockToTeam (+0x350, the heavy IFV's);
+// a neutral one always.
+TEST(GameWorld_LockToTeamKeepsAnEnemysEmptyVehicleShut)
+{
+	struct Case {
+		int team;
+		bool locked;
+		bool enters;
+	};
+	for (const Case c : {Case {1, false, true}, Case {1, true, false}, Case {0, true, true}, Case {2, true, true}}) {
+		ExitRange range;
+		range.jeep->settings()["hasRestrictedExit"] = "0";
+		range.jeep->settings()["lockToTeam"] = c.locked ? "1" : "0";
+		world::Object* jeep = range.objects.create(range.jeep, {0, 1, 3});
+		jeep->setTeam(c.team);
+		range.id = jeep->id();
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		range.world->tick(1 / 30.0f);
+		CHECK(range.world->vehicleInReach(range.world->localPlayer()) == c.enters);
+		range.use();
+		CHECK((range.me().vehicle == range.id) == c.enters);
+	}
+}
+
+// crewKitIndex (the enter 0x005cdd60 -> 0x0056cf50): the seat's index is
+// the kit's geometry while its wearer sits there; the exit (0x00587540)
+// puts the default back.
+TEST(GameWorld_CrewKitIndexWhileSeated)
+{
+	ExitRange range;
+	range.jeep->settings()["hasRestrictedExit"] = "0";
+	range.jeep->settings()["crewKitIndex"] = "12";
+	range.templates.registerType(25, "Kit");
+	range.templates.create("Kit", "crew_kit");
+	range.id = range.objects.create(range.jeep, {0, 1, 3})->id();
+	const int crew = range.world->addPlayer("Crew", 2, false);
+	range.world->setKit(crew, "crew_kit", "us_light_soldier");
+	CHECK(range.world->spawnSoldier(crew));
+	range.world->tick(1 / 30.0f);
+	const auto info = [&] {
+		game::GameWorld::PlayerInfo i;
+		range.world->playerInfo(crew, i);
+		return i;
+	};
+	const auto use = [&] {
+		game::SoldierInput press;
+		press.use = true;
+		range.world->setInput(crew, press);
+		range.world->tick(1 / 30.0f);
+		range.world->setInput(crew, {});
+		range.world->tick(1 / 30.0f);
+	};
+	const uint32_t kit = info().kit;
+	CHECK(kit != 0);
+	CHECK(range.world->kitGeometry(kit) == -1);
+	use();
+	CHECK(info().vehicle == range.id);
+	CHECK(range.world->kitGeometry(kit) == 12);
+	use();
+	CHECK(info().vehicle == 0);
+	CHECK(range.world->kitGeometry(kit) == -1);
+}
+
+// A PlayerControlObject's radius takes its boundingRadiusModifierWhenOccupied
+// (slot 0x94 = 0x005c6be0 in 0x006f6b90); isSleeping (0x005f6ba0) puts its
+// node to sleep from the start.
+TEST(GameWorld_RadiusModifierAndSleepingStart)
+{
+	float radius[2] = {};
+	for (int on = 0; on < 2; ++on) {
+		ExitRange range;
+		if (on) {
+			range.jeep->settings()["boundingRadiusModifierWhenOccupied"] = "2";
+			range.jeep->settings()["isSleeping"] = "1";
+		}
+		range.id = range.objects.create(range.jeep, {0, 1, 3})->id();
+		range.world->tick(1 / 30.0f);
+		radius[on] = range.world->objectRadius(range.id);
+		CHECK(range.world->bodyAsleep(range.id) == (on == 1));
+	}
+	std::fprintf(stderr, "  radius %.3f, with the modifier %.3f\n", radius[0], radius[1]);
+	CHECK(radius[0] > 1 && std::fabs(radius[1] - radius[0] - 2) < 1e-4f);
+}
+
+// The spawners' game events (0x005ad470): activateOnEvent holds a spawner
+// off from the round's reset until its event, deActivateOnEvent switches
+// one off; other events leave them be.
+TEST(GameWorld_SpawnerGameEvents)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(2, "ObjectSpawner");
+	world::ObjectTemplate* t = templates.create("ObjectSpawner", "pods");
+	world::Object* object = objects.create(t, {});
+	game::SpawnerSettings on;
+	on.activateOnEvent = 1;
+	game::SpawnerSettings off;
+	off.deActivateOnEvent = 1;
+	game::ObjectSpawner pods(*object, on), favs(*object, off);
+	game::Random random;
+	pods.reset(random);
+	favs.reset(random);
+	CHECK(!pods.active() && favs.active());
+	pods.gameEvent(2);
+	favs.gameEvent(2);
+	CHECK(!pods.active() && favs.active());
+	pods.gameEvent(1);
+	favs.gameEvent(1);
+	CHECK(pods.active() && !favs.active());
+	t->settings()["deActivateOnEvent"] = "3";
+	CHECK(game::SpawnerSettings::fromTemplate(*t).deActivateOnEvent == 3);
+}
+
+// A destroyed armoured object whose Radio has destroyedGameEvent 1
+// (0x00654120 -> message 0x18 -> 0x0063c6a0) switches on the round's
+// activateOnEvent 1 spawners.
+TEST(GameWorld_DestroyedGameEventReachesTheSpawners)
+{
+	ExitRange range;
+	range.templates.registerType(22, "ObjectSpawner");
+	world::ObjectTemplate* spawner = range.templates.create("ObjectSpawner", "apc_pods_spawner");
+	spawner->settings()["activateOnEvent"] = "1";
+	range.objects.create(spawner, {50, 0, 50});
+	range.jeep->settings()["armor.maxHitPoints"] = "100";
+	range.jeep->settings()["Radio.destroyedGameEvent"] = "1";
+	range.id = range.objects.create(range.jeep, {0, 1, 3})->id();
+	range.world->startRound();
+	range.world->tick(1 / 30.0f);
+	CHECK(range.world->spawners().size() == 1 && !range.world->spawners()[0]->active());
+	range.world->applyDamage(range.id, 1000); // the game logic's damage: a wreck (0x00654120)
+	range.world->tick(1 / 30.0f);
+	CHECK(range.world->spawners()[0]->active());
+}
+
+// toggleMouseLook (0x00611c80): the seat's camera turns on the mouse only
+// while PIMouseLook is held, and springs back by 0.75 a tick without it.
+TEST(GameWorld_ToggleMouseLookCamera)
+{
+	ExitRange range;
+	range.jeep->settings()["hasRestrictedExit"] = "0";
+	range.templates.registerType(23, "Camera");
+	world::ObjectTemplate* camera = range.templates.create("Camera", "jeep_camera");
+	camera->settings()["inputToYaw"] = "PIMouseLookX";
+	camera->settings()["inputToPitch"] = "PIMouseLookY";
+	camera->settings()["minRotation"] = "-90/-20/0";
+	camera->settings()["maxRotation"] = "90/20/0";
+	camera->settings()["maxSpeed"] = "90/90/0";
+	camera->settings()["acceleration"] = "5000/5000/0";
+	camera->settings()["toggleMouseLook"] = "1";
+	range.jeep->children().push_back({"jeep_camera", {0, 1, 0}, {}});
+	range.id = range.objects.create(range.jeep, {0, 1, 3})->id();
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	range.world->tick(1 / 30.0f);
+	range.use();
+	CHECK(range.me().vehicle == range.id);
+	const auto yaw = [&] {
+		world::Vec3 offset, rotation;
+		return range.world->partPose(range.id, "jeep_camera", offset, rotation) ? rotation.x : -1000.0f;
+	};
+	game::SoldierInput look;
+	look.turn = 5; // a full PIMouseLookX a tick
+	for (int i = 0; i < 10; ++i) {
+		range.world->setPlayerInput(look);
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(std::fabs(yaw()) < 1e-4f);
+	look.mouseLook = true;
+	for (int i = 0; i < 10; ++i) {
+		range.world->setPlayerInput(look);
+		range.world->tick(1 / 30.0f);
+	}
+	const float turned = yaw();
+	look.mouseLook = false;
+	look.turn = 0;
+	range.world->setPlayerInput(look);
+	range.world->tick(1 / 30.0f);
+	const float back = yaw();
+	std::fprintf(stderr, "  free look %.2f, a tick after letting go %.2f\n", turned, back);
+	CHECK(turned > 10);
+	CHECK(std::fabs(back - turned * 0.75f) < 1e-3f);
+}
+
+// automaticYawStabilization (0x00564eb0): a gun on the driver's turret
+// keeps the hull's heading while the turret turns.
+TEST(GameWorld_AutomaticYawStabilization)
+{
+	ExitRange range;
+	range.jeep->settings()["hasRestrictedExit"] = "0";
+	range.jeep->settings()["seatInformation"] = "jeep 0/0.5/0 0/0/0";
+	range.templates.registerType(24, "RotationalBundle");
+	world::ObjectTemplate* turret = range.templates.create("RotationalBundle", "jeep_turret");
+	turret->settings()["inputToYaw"] = "PIMouseLookX";
+	range.jeep->children().push_back({"jeep_turret", {0, 1, 0}, {}});
+	world::ObjectTemplate* cupola = range.templates.create("PlayerControlObject", "jeep_cupola");
+	cupola->settings()["seatInformation"] = "jeep_cupola 0.5/1.5/-0.5 0/0/0";
+	turret->children().push_back({"jeep_cupola", {0.5f, 0.5f, -0.5f}, {}});
+	world::ObjectTemplate* mount = range.templates.create("RotationalBundle", "jeep_cupola_mount");
+	mount->settings()["inputToYaw"] = "PIMouseLookX";
+	mount->settings()["automaticYawStabilization"] = "1";
+	cupola->children().push_back({"jeep_cupola_mount", {}, {}});
+	range.id = range.objects.create(range.jeep, {0, 1, 3})->id();
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	range.world->tick(1 / 30.0f);
+	range.use();
+	CHECK(range.me().vehicle == range.id && range.me().seat == 0);
+	const auto seats = range.world->vehicleSeats(range.id);
+	int gunner = -1;
+	for (size_t i = 0; i < seats.size(); ++i) {
+		gunner = seats[i].name == "jeep_cupola" ? static_cast<int>(i) : gunner;
+	}
+	CHECK(gunner > 0);
+	game::SoldierInput look;
+	look.turn = 3;
+	for (int i = 0; i < 10; ++i) {
+		range.world->setPlayerInput(look);
+		range.world->tick(1 / 30.0f);
+	}
+	float turretYaw = 0, cupolaYaw = 0;
+	CHECK(range.world->seatYaw(range.id, 0, turretYaw) && range.world->seatYaw(range.id, gunner, cupolaYaw));
+	std::fprintf(stderr, "  turret %.2f, cupola %.2f\n", turretYaw, cupolaYaw);
+	CHECK(turretYaw > 20);
+	CHECK(std::fabs(cupolaYaw + turretYaw) < 1e-3f);
+}
+
+// The heavy IFV's shield cells (0x00654d80): armoured children with
+// mirrorParentDamageLevel follow the hull's damage level every 0.1 s; at
+// none left they are wrecks and their onDestroyEvent (56,
+// VehicleShieldDestroyed) goes; the HUD's cells (hudRepairCellNo,
+// 0x007a1e50) show which stand.
+TEST(GameWorld_ShieldCellsMirrorTheHull)
+{
+	ExitRange range;
+	range.jeep->settings()["armor.maxHitPoints"] = "1000";
+	range.jeep->settings()["armor.hitPoints"] = "1000";
+	range.templates.registerType(26, "SupplyObject");
+	world::ObjectTemplate* cell = range.templates.create("SupplyObject", "jeep_shield_generator");
+	cell->components().push_back("Armor");
+	cell->settings()["armor.maxHitPoints"] = "110";
+	cell->settings()["armor.hitPoints"] = "110";
+	cell->settings()["armor.mirrorParentDamageLevel"] = "1";
+	cell->settings()["armor.hudRepairCellNo"] = "1";
+	cell->settings()["Python.onDestroyEvent"] = "56";
+	range.jeep->children().push_back({"jeep_shield_generator", {1, 0, 0}, {}});
+	range.jeep->children().push_back({"jeep_shield_generator", {-1, 0, 0}, {}});
+	range.id = range.objects.create(range.jeep, {0, 1, 3})->id();
+	range.world->tick(1 / 30.0f);
+	const auto cells = range.world->repairCells(range.id);
+	CHECK(cells.size() == 2 && cells[0] && cells[1]);
+	range.world->setHitPoints(range.id, 500);
+	for (int i = 0; i < 9; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.count("VehicleShieldDestroyed") == 0);
+	range.world->applyDamage(range.id, 1000);
+	for (int i = 0; i < 9; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	const auto down = range.world->repairCells(range.id);
+	CHECK(down.size() == 2 && !down[0] && !down[1]);
+	CHECK(range.count("VehicleShieldDestroyed") == 2);
+}
+
+// The detonation component's update waits for armingDelay (0x005b3e60
+// calls 0x005e9f60 only past the template's +0x2fc ticks): an
+// anti-personnel mine armed after 5 s spares an enemy standing at it
+// until then (the shipped one arms after 4).
+TEST(GameWorld_MinesArmBeforeTheyTrigger)
+{
+	Range range;
+	world::ObjectTemplate* mine = nullptr;
+	giveGadget(range, "unl_mine_antipersonnel", mine);
+	mine->settings()["detonation.explosionDamage"] = "200";
+	mine->settings()["detonation.explosionRadius"] = "8";
+	mine->settings()["detonation.triggerRadius"] = "3";
+	mine->settings()["detonation.triggerType"] = "MTYPco";
+	mine->settings()["detonation.triggerAngle"] = "30";
+	mine->settings()["detonation.explosionMaterial"] = "50";
+	mine->settings()["armingDelay"] = "5";
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	throwGadget(range); // about 1.1 s
+	CHECK(range.world->projectilesInFlight() == 1);
+	for (int i = 0; i < 60 && !range.world->projectiles().front().resting; ++i) {
+		range.world->tick(1 / 30.0f); // lying still: its facing is its frame
+	}
+	CHECK(range.world->projectiles().front().resting);
+	const float age = range.world->projectiles().front().age;
+	const int bot = range.world->addPlayer("Bot", 1, true);
+	CHECK(range.world->spawnSoldier(bot));
+	game::GameWorld::PlayerInfo info, me;
+	range.world->playerInfo(bot, info);
+	range.world->playerInfo(range.world->localPlayer(), me);
+	// 1.5 m in front of where it lies (it faces the thrower's +z).
+	const physics::Vec3 at = range.world->projectiles().front().position;
+	range.world->setSoldierPosition(info.soldier, {at.x, me.position.y, at.z + 1.5f});
+	while (range.world->projectilesInFlight() == 1 && range.world->projectiles().front().age < 4.9f) {
+		range.world->tick(1 / 30.0f);
+	}
+	range.world->playerInfo(bot, info);
+	CHECK(info.alive && range.world->projectilesInFlight() == 1);
+	if (range.world->projectilesInFlight() == 1) {
+		std::fprintf(stderr, "  lying from %.2f s, still there at %.2f s\n", age, range.world->projectiles().front().age);
+	}
+	int waited = 0;
+	for (; waited < 150 && range.world->projectilesInFlight() == 1; ++waited) { // past 5 s: armed, and a trigger test since
+		range.world->tick(1 / 30.0f);
+	}
+	std::fprintf(stderr, "  went off %d ticks after 4.9 s\n", waited);
+	CHECK(waited >= 3 && waited <= 12); // armed at 5 s, its test 0.25 s on
+	range.world->playerInfo(bot, info);
+	CHECK(!info.alive && range.world->projectilesInFlight() == 0);
+}
+
+// detonation.detonateDistanceToTarget (0x005e9f60, the IFV's mine 3): a
+// magnet round goes off as soon as its target lies nearer than that at a
+// trigger test, short of it.
+TEST(GameWorld_ProximityFuseOnTheTarget)
+{
+	for (const bool fused : {false, true}) {
+		Range range;
+		range.templates.registerType(8, "TargetObject");
+		world::ObjectTemplate* mine = range.templates.create("GenericProjectile", "ifv_mine");
+		mine->settings()["seek.targetType"] = "TTMagnet";
+		mine->settings()["seek.maxDistLock"] = "50";
+		mine->settings()["armingDelay"] = "0.2";
+		mine->settings()["acceleration"] = "60";
+		mine->settings()["deAcceleration"] = "50";
+		mine->settings()["maxSpeed"] = "3";
+		mine->settings()["follow.magneticBehaviour"] = "1";
+		mine->settings()["gravityModifier"] = "0";
+		mine->settings()["timeToLive"] = "CRD_NONE/9999/0/0";
+		mine->settings()["detonation.explosionDamage"] = "10";
+		mine->settings()["detonation.explosionRadius"] = "1";
+		if (fused) {
+			mine->settings()["detonation.detonateDistanceToTarget"] = "3";
+		}
+		world::ObjectTemplate* target = range.templates.create("TargetObject", "MagneticBait");
+		target->settings()["targetType"] = "TTMagnet";
+		target->settings()["overrideArmingSpeed"] = "1";
+		world::ObjectTemplate* bait = range.templates.create("GenericProjectile", "bait_stationary");
+		bait->settings()["gravityModifier"] = "0";
+		bait->settings()["timeToLive"] = "CRD_NONE/9999/0/0";
+		bait->children().push_back({"MagneticBait", {}, {}});
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		const int bot = range.world->addPlayer("Bot", 1, true);
+		CHECK(range.world->spawnSoldier(bot));
+		CHECK(range.world->launchProjectile("ifv_mine", {0, 3, 0}, {0, 0, 0}, range.world->localPlayer()));
+		CHECK(range.world->launchProjectile("bait_stationary", {0, 3, 10}, {0, 0, 0}, bot));
+		float last = -1;
+		for (int i = 0; i < 300; ++i) {
+			const game::Projectile* round = nullptr;
+			for (const auto& p : range.world->projectiles()) {
+				if (p.alive && p.settings && p.settings->name == "ifv_mine") {
+					round = &p;
+				}
+			}
+			if (!round) {
+				break;
+			}
+			last = 10 - round->position.z;
+			range.world->tick(1 / 30.0f);
+		}
+		std::fprintf(stderr, "  %s: went off %.2f m short of the bait\n", fused ? "fused" : "contact", last);
+		CHECK(fused ? last > 1.5f && last < 3.2f : last >= 0 && last < 1.5f);
+	}
+}
+
+// target.notifyProjectileOnLostTarget (0x005e1b30 with 0x005e1ee0): the
+// lock's loss frees the last round fired (its target none, relock armed);
+// without it the round keeps chasing.
+TEST(GameWorld_LockLossFreesTheRound)
+{
+	for (const bool notify : {false, true}) {
+		Range range;
+		range.templates.registerType(8, "SimpleObject");
+		world::ObjectTemplate* launcher = range.templates.find("eu_ar_rifle");
+		launcher->settings()["target.targetSystem"] = "TSHeatSeeking";
+		launcher->settings()["target.maxDistance"] = "450";
+		launcher->settings()["target.lockAngle"] = "20";
+		launcher->settings()["target.lockDelay"] = "0.2";
+		launcher->settings()["target.loseLockDelay"] = "0.1";
+		if (notify) {
+			launcher->settings()["target.notifyProjectileOnLostTarget"] = "1";
+		}
+		launcher->settings()["projectileTemplate"] = "heat_missile";
+		launcher->settings()["velocity"] = "20";
+		world::ObjectTemplate* missile = range.templates.create("GenericProjectile", "heat_missile");
+		missile->settings()["gravityModifier"] = "0";
+		missile->settings()["timeToLive"] = "CRD_NONE/10/0/0";
+		missile->settings()["seek.targetType"] = "TTHeat";
+		missile->settings()["seek.reLockTime"] = "9999";
+		missile->settings()["seek.maxAngleLock"] = "60";
+		world::ObjectTemplate* jet = range.templates.create("SimpleObject", "jet");
+		jet->children().push_back({"HeatObject", {}, {}});
+		range.templates.create("SimpleObject", "HeatObject")->settings()["targetType"] = "TTHeat";
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		game::GameWorld::PlayerInfo me;
+		range.world->playerInfo(range.world->localPlayer(), me);
+		world::Object* enemy = range.objects.create(jet, {me.position.x, me.position.y + 1.6f, me.position.z + 150});
+		enemy->setTeam(1);
+		for (int i = 0; i < 10; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		CHECK(range.world->weaponLock(range.world->localPlayer()).state == 2);
+		game::SoldierInput input;
+		input.fire = true;
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		CHECK(range.world->projectiles().size() == 1 && range.world->projectiles().front().lockedOn == enemy->id());
+		input = {};
+		input.turn = 90; // away: the lock goes after loseLockDelay
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		range.world->setPlayerInput({});
+		for (int i = 0; i < 10; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		CHECK(range.world->weaponLock(range.world->localPlayer()).state == 0);
+		CHECK(!range.world->projectiles().empty());
+		if (!range.world->projectiles().empty()) {
+			const game::Projectile& round = range.world->projectiles().front();
+			CHECK(notify ? round.lockedOn == 0 : round.lockedOn == enemy->id());
+		}
+	}
+}
+
+// seek.directionBonus (0x004cf290): with the AA missiles' 0.8 a round
+// takes the target ahead of it over a nearer one off its heading; with 0
+// the nearest.
+TEST(GameWorld_DirectionBonusPrefersTheTargetAhead)
+{
+	for (const bool bonus : {false, true}) {
+		Range range;
+		range.templates.registerType(8, "SimpleObject");
+		world::ObjectTemplate* missile = range.templates.create("GenericProjectile", "aa_missile");
+		missile->settings()["gravityModifier"] = "0";
+		missile->settings()["timeToLive"] = "CRD_NONE/10/0/0";
+		missile->settings()["seek.targetType"] = "TTHeat";
+		missile->settings()["seek.maxAngleLock"] = "40";
+		if (bonus) {
+			missile->settings()["seek.directionBonus"] = "0.8";
+		}
+		world::ObjectTemplate* jet = range.templates.create("SimpleObject", "jet");
+		jet->children().push_back({"HeatObject", {}, {}});
+		range.templates.create("SimpleObject", "HeatObject")->settings()["targetType"] = "TTHeat";
+		world::Object* nearer = range.objects.create(jet, {10, 20, 25}); // about 22 degrees off, 27 m
+		nearer->setTeam(1);
+		world::Object* ahead = range.objects.create(jet, {0, 20, 150});
+		ahead->setTeam(1);
+		CHECK(range.world->launchProjectile("aa_missile", {0, 20, 0}, {0, 0, 40}));
+		range.world->tick(1 / 30.0f);
+		range.world->tick(1 / 30.0f);
+		CHECK(!range.world->projectiles().empty());
+		if (!range.world->projectiles().empty()) {
+			const uint32_t taken = range.world->projectiles().front().lockedOn;
+			CHECK(taken == (bonus ? ahead->id() : nearer->id()));
+		}
+	}
+}
+
+// blockInputOnRotBundle (0x005c4220, 0x00565180): while the seat's active
+// weapon names the turret, the turret ignores the gunner's look.
+TEST(GameWorld_BlockInputOnRotBundle)
+{
+	for (const bool blocked : {false, true}) {
+		ExitRange range;
+		range.jeep->settings()["hasRestrictedExit"] = "0";
+		range.jeep->settings()["seatInformation"] = "jeep 0/0.5/0 0/0/0";
+		range.templates.registerType(24, "RotationalBundle");
+		world::ObjectTemplate* turret = range.templates.create("RotationalBundle", "jeep_turret");
+		turret->settings()["inputToYaw"] = "PIMouseLookX";
+		range.jeep->children().push_back({"jeep_turret", {0, 1, 0}, {}});
+		world::ObjectTemplate* launcher = range.templates.create("GenericFireArm", "jeep_tv_launcher");
+		if (blocked) {
+			launcher->settings()["blockInputOnRotBundle"] = "JEEP_TURRET"; // names compare without case
+		}
+		turret->children().push_back({"jeep_tv_launcher", {0, 0, 1}, {}});
+		range.id = range.objects.create(range.jeep, {0, 1, 3})->id();
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		range.world->tick(1 / 30.0f);
+		range.use();
+		CHECK(range.me().vehicle == range.id && range.me().seat == 0);
+		game::SoldierInput look;
+		look.turn = 3;
+		for (int i = 0; i < 10; ++i) {
+			range.world->setPlayerInput(look);
+			range.world->tick(1 / 30.0f);
+		}
+		float yaw = 0;
+		CHECK(range.world->seatYaw(range.id, 0, yaw));
+		std::fprintf(stderr, "  %s: turret at %.1f\n", blocked ? "blocked" : "free", yaw);
+		CHECK(blocked ? std::fabs(yaw) < 1e-4f : yaw > 20);
+	}
+}
+
+// A LookAtObject (0x0064bc00): the part's matrix in its parent's frame at
+// its template place, its z towards nameToLookAt's object at
+// offsetToLookAt, its y = z x the parent's x.
+TEST(GameWorld_LookAtObjectFacesItsTarget)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "PlayerControlObject");
+	templates.registerType(2, "Spring");
+	templates.registerType(3, "LookAtObject");
+	world::ObjectTemplate* car = templates.create("PlayerControlObject", "car");
+	car->children().push_back({"car_wheel", {-1, 0, -1}, {}});
+	templates.create("Spring", "car_wheel")->children().push_back({"car_arm", {0.5f, 0, 0}, {10, 20, 0}});
+	world::ObjectTemplate* arm = templates.create("LookAtObject", "car_arm");
+	arm->settings()["nameToLookAt"] = "car";
+	arm->settings()["offsetToLookAt"] = "-0.5/1/0";
+	const uint32_t id = objects.create(car, {5, 0, 5}, {45, 0, 0})->id();
+	game::GameWorld world(templates, objects);
+	anim::Matrix local {};
+	CHECK(world.partBone(id, "car_arm", local));
+	const float h = std::sqrt(0.5f);
+	// At (0.5, 0, 0) in the wheel's frame (its own 10/20 turn dropped); z
+	// from (-0.5, 0, -1) to (-0.5, 1, 0).
+	CHECK(std::fabs(local[12] - 0.5f) < 1e-5f && std::fabs(local[13]) < 1e-5f && std::fabs(local[14]) < 1e-5f);
+	CHECK(std::fabs(local[8]) < 1e-5f && std::fabs(local[9] - h) < 1e-5f && std::fabs(local[10] - h) < 1e-5f);
+	CHECK(std::fabs(local[0] - 1) < 1e-5f && std::fabs(local[5] - h) < 1e-5f && std::fabs(local[6] + h) < 1e-5f);
+	CHECK(!world.partBone(id, "car_wheel", local)); // not a LookAtObject
+	arm->settings()["nameToLookAt"] = "nothing";
+	CHECK(!world.partBone(id, "car_arm", local));
+}
+
+// otherCollisionLod (0x006dc7b0, 0x006bb050): a crate asking for the
+// soldiers' LOD (2) lands on a plate's LOD-2 faces, a metre above its
+// vehicle LOD's, where one asking for nothing lands.
+TEST(GameWorld_OtherCollisionLod)
+{
+	for (const bool soldierLod : {false, true}) {
+		Range range;
+		// A plate 2 m across at its origin, faced both ways.
+		physics::CollisionMeshFile platform = panelMesh({{-2, 0, -2}, {2, 0, -2}, {2, 0, 2}, {-2, 0, 2}},
+			{{{0, 1, 2}, 0}, {{0, 2, 3}, 0}, {{0, 2, 1}, 0}, {{0, 3, 2}, 0}});
+		for (physics::CollisionLod& lod : platform.geometries[0].subGeometries[0].lods) {
+			if (lod.collisionType == 2) {
+				for (auto& v : lod.vertices) {
+					v[1] += 1;
+				}
+				lod.boundsMin[1] += 1;
+				lod.boundsMax[1] += 1;
+			}
+		}
+		range.collisionTemplates.add("platform_mesh", platform);
+		range.collisionTemplates.add("crate_mesh", boxMesh(0.4f));
+		range.templates.registerType(6, "SimpleObject");
+		range.templates.registerType(7, "PlayerControlObject");
+		world::ObjectTemplate* base = range.templates.create("SimpleObject", "platform");
+		base->settings()["collisionMesh"] = "platform_mesh";
+		range.objects.create(base, {0, 1, 30});
+		world::ObjectTemplate* crate = range.templates.create("PlayerControlObject", "crate");
+		makeMobile(*crate, "crate_mesh");
+		if (soldierLod) {
+			crate->settings()["otherCollisionLod"] = "2";
+		}
+		const uint32_t id = range.objects.create(crate, {0, 5, 30})->id();
+		range.world->startRound(); // the platform's collision
+		for (int i = 0; i < 120; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		const world::Object* o = range.objects.find(id);
+		CHECK(o != nullptr);
+		if (o) {
+			std::fprintf(stderr, "  otherCollisionLod %d: the crate rests at %.2f\n", soldierLod ? 2 : 1, o->position().y);
+			CHECK(std::fabs(o->position().y - (soldierLod ? 2.4f : 1.4f)) < 0.2f);
+		}
+	}
+}

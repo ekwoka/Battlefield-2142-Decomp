@@ -1590,6 +1590,178 @@ TEST(HudVehicle_SeatZoomGuiIndex)
 	CHECK(menu::weaponGuiIndex(tank, true) == 12);
 }
 
+// disableOnSprint, the first test of the gui index getters (0x00657660 for
+// the vehicle HUD, 0x00657a70 for the weapon's) with 0x007a01e0's
+// argument: on while the control object sprints (the HUD's +0x2a8) or the
+// soldier's weapon isn't ready (+0x334).
+TEST(HudVehicle_GuiIndexDisableOnSprint)
+{
+	CHECK(menu::guiSprintTest(true) && !menu::guiSprintTest(false));
+	CHECK(menu::guiSprintTest(false, false) && menu::guiSprintTest(true, false));
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* rifle = templates.create("GenericFireArm", "unl_shotgun_02");
+	rifle->settings()["weaponHud.guiIndex"] = "3";
+	rifle->settings()["weaponHud.disableOnSprint"] = "1";
+	world::ObjectTemplate* knife = templates.create("GenericFireArm", "knife");
+	knife->settings()["weaponHud.guiIndex"] = "5";
+	knife->settings()["weaponHud.disableOnSprint"] = "0";
+	CHECK(menu::weaponGuiIndex(rifle, false) == 3 && menu::weaponGuiIndex(rifle, false, false) == 3);
+	CHECK(menu::weaponGuiIndex(rifle, false, true) == 0);
+	CHECK(menu::weaponGuiIndex(knife, false, true) == 5);
+	// A seat: the vehicle HUD's own flag first, then the weapon's.
+	world::ObjectTemplate* seat = templates.create("PlayerControlObject", "buggy");
+	seat->components().push_back("VehicleHud");
+	seat->settings()["vehicleHud.guiIndex"] = "4";
+	world::ObjectTemplate* gun = templates.create("GenericFireArm", "buggy_gun");
+	gun->settings()["weaponHud.guiIndex"] = "12";
+	menu::VehicleGuiInput in;
+	in.controlled = seat;
+	in.weapon = gun;
+	in.sprintTest = true;
+	CHECK(menu::vehicleGuiIndex(in) == 12);
+	gun->settings()["weaponHud.disableOnSprint"] = "1";
+	CHECK(menu::vehicleGuiIndex(in) == 0);
+	gun->settings()["weaponHud.disableOnSprint"] = "0";
+	seat->settings()["vehicleHud.disableOnSprint"] = "1";
+	CHECK(menu::vehicleGuiIndex(in) == 0);
+	in.sprintTest = false;
+	CHECK(menu::vehicleGuiIndex(in) == 12);
+	// Without a VehicleHud the weapon's test alone.
+	in.controlled = rifle;
+	in.weapon = rifle;
+	in.sprintTest = true;
+	CHECK(menu::vehicleGuiIndex(in) == 0);
+}
+
+// The camera-mode lists (WorldConsole: showOnCamMode clears, addShowOnCamMode
+// appends to the {1} the templates start with) and the seat's gui index by
+// the camera's mode (0x00657660).
+TEST(HudVehicle_GuiIndexByCameraMode)
+{
+	Console console;
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	world::registerWorldConsoleMethods(console, templates, objects);
+	std::string out;
+	CHECK(console.execute("ObjectTemplate.create GenericFireArm as_ag_PilotWeapon", out) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.weaponHud.addShowOnCamMode 2", out) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.create GenericFireArm tank_gun", out) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.create GenericFireArm Car_horn", out) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.create PlayerControlObject fav", out) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.createComponent VehicleHud", out) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.create PlayerControlObject eu_at", out) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.vehicleHud.showOnCamMode 3", out) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.vehicleHud.addShowOnCamMode 2", out) == ConsoleResult::Ok);
+	world::ObjectTemplate* pilot = templates.find("as_ag_PilotWeapon");
+	world::ObjectTemplate* tank = templates.find("tank_gun");
+	world::ObjectTemplate* horn = templates.find("Car_horn");
+	world::ObjectTemplate* fav = templates.find("fav");
+	world::ObjectTemplate* at = templates.find("eu_at");
+	// The plain values as the generic properties keep them.
+	pilot->settings()["weaponHud.guiIndex"] = "64";
+	tank->settings()["weaponHud.guiIndex"] = "12";
+	horn->settings()["weaponHud.guiIndex"] = "-1";
+	fav->settings()["vehicleHud.guiIndex"] = "4";
+	at->settings()["vehicleHud.guiIndex"] = "9";
+	CHECK((menu::showOnCamModes(pilot, "weaponHud") == std::vector<int> {1, 2}));
+	CHECK((menu::showOnCamModes(tank, "weaponHud") == std::vector<int> {1}));
+	CHECK((menu::showOnCamModes(at, "vehicleHud") == std::vector<int> {3, 2}));
+
+	menu::VehicleGuiInput in;
+	in.controlled = fav;
+	in.weapon = tank;
+	CHECK(menu::vehicleGuiIndex(in) == 12); // Inside
+	in.cameraMode = 3;                      // Chase: the overlay goes
+	CHECK(menu::vehicleGuiIndex(in) == 0);
+	in.projectileCamera = true; // riding a guided round, any mode
+	CHECK(menu::vehicleGuiIndex(in) == 12);
+	in.projectileCamera = false;
+	in.weapon = pilot;
+	in.cameraMode = 2; // Nose: listed
+	CHECK(menu::vehicleGuiIndex(in) == 64);
+	in.cameraMode = 3;
+	CHECK(menu::vehicleGuiIndex(in) == 0);
+	// The horn's -1: the second weapon, else the vehicle's own index.
+	in.weapon = horn;
+	in.cameraMode = 1;
+	CHECK(menu::vehicleGuiIndex(in) == 4);
+	in.second = tank;
+	CHECK(menu::vehicleGuiIndex(in) == 12);
+	in.cameraMode = 3;
+	CHECK(menu::vehicleGuiIndex(in) == 0);
+	in.second = nullptr;
+	in.weapon = nullptr;
+	in.controlled = at;
+	CHECK(menu::vehicleGuiIndex(in) == 9);
+	in.cameraMode = 1;
+	CHECK(menu::vehicleGuiIndex(in) == 0);
+	// No VehicleHud: the weapon's own, whatever the camera.
+	world::ObjectTemplate* bare = templates.create("PlayerControlObject", "bare_seat");
+	in.controlled = bare;
+	in.weapon = tank;
+	in.cameraMode = 3;
+	CHECK(menu::vehicleGuiIndex(in) == 12);
+	// useChildHud: the occupant's weapon, only in its modes.
+	world::ObjectTemplate* child = templates.create("PlayerControlObject", "child_seat");
+	child->settings()["vehicleHud.useChildHud"] = "1";
+	in.controlled = child;
+	in.weapon = nullptr;
+	in.child = tank;
+	in.cameraMode = 1;
+	CHECK(menu::vehicleGuiIndex(in) == 12);
+	in.cameraMode = 2;
+	CHECK(menu::vehicleGuiIndex(in) == 0);
+}
+
+// weaponHud.showInfo 0 (the horns): no weapon block (0x007c1f10, block +0xd0).
+TEST(HudWeapon_ShowInfoOff)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* horn = templates.create("GenericFireArm", "Car_horn");
+	horn->settings()["weaponHud.guiIndex"] = "-1";
+	horn->settings()["weaponHud.hudName"] = "HORN";
+	horn->settings()["weaponHud.showInfo"] = "0";
+	hud::HudManager hud(nullptr);
+	menu::WeaponHud weaponHud;
+	menu::WeaponHudInput in;
+	in.weapon = horn;
+	in.magSize = 1;
+	in.rounds = 1;
+	hud.set("PrimaryAmmoShow", 1);
+	weaponHud.update(hud, in);
+	CHECK(!weaponHud.fields().showInfo);
+	CHECK(hud.number("PrimaryAmmoShow") == 0);
+	CHECK(hud.string("PrimaryWeaponNameString") != "HORN");
+	CHECK(hud.string("PrimaryAmmoString") != "1");
+	menu::WeaponHud second;
+	hud.set("SecondaryAmmoShow", 1);
+	second.update(hud, in, true);
+	CHECK(hud.number("SecondaryAmmoShow") == 0);
+}
+
+// vehicleHud.useVehicleCameraRotation: the yaw bundle above the first
+// Camera child (0x005c6430 with class 0x9472).
+TEST(HudMap_CameraRotationBundle)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* sentry = templates.create("PlayerControlObject", "eu_sentrygun");
+	world::ObjectTemplate* base = templates.create("Bundle", "base");
+	world::ObjectTemplate* turn = templates.create("RotationalBundle", "rotation");
+	world::ObjectTemplate* gun = templates.create("RotationalBundle", "gun");
+	templates.create("Camera", "cam");
+	sentry->children().push_back({"base", {}, {}});
+	base->children().push_back({"rotation", {}, {}});
+	turn->children().push_back({"gun", {}, {}});
+	gun->children().push_back({"cam", {}, {}});
+	CHECK(menu::cameraRotationBundle(*sentry, templates).empty()); // the flag off
+	sentry->settings()["vehicleHud.useVehicleCameraRotation"] = "1";
+	CHECK(menu::cameraRotationBundle(*sentry, templates) == "gun");
+	world::ObjectTemplate* pod = templates.create("PlayerControlObject", "pod");
+	pod->settings()["vehicleHud.useVehicleCameraRotation"] = "1";
+	pod->children().push_back({"cam", {}, {}});
+	CHECK(menu::cameraRotationBundle(*pod, templates).empty()); // no bundle: its own yaw
+}
+
 // weaponHud.altCrosshairIcon (0x00657bb0): the crosshair shown while the
 // firearm's fire state is above 0 (0x005c1b60), when the template has one
 // (as_ag's TV-guided missile); the crosshairIcon otherwise and for a

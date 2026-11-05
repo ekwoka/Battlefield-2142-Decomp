@@ -1196,6 +1196,98 @@ is the rewrite's sight. Soldiers keep the walk of the foot branch (to
 1–16, against the same tree without the change): see coverage-5's A1
 status.
 
+### Seat behaviours: entering, cameras, rolling loops, shield cells
+
+**Entering a vehicle.** The use key (`0x004bb570`) and the spawn points'
+enterOnSpawn (`0x005b24f0`) both ask the entry search `0x005a98e0` with
+the soldier's team (player slot `0xf8`): the EntryPoint objects (class
+`0x9477`) within the radius (3 m on foot, 5 m on spawn, 15 m for a bot's
+spawn, or each entry's entryRadius `+0x23c`), the nearest first. A
+vehicle (its root's PlayerControlObject, interface `0xc4c5`) is passed
+when its team (slot `0x9c`: the first seated player's, else its own) is
+neither the soldier's nor 0, its template is a PlayerControlObject
+(`0xc4c2`), and either somebody sits in it (`0x005c8b40`: a seat with a
+player; a Titan always counts) or its template is `lockToTeam`
+(`+0x350`; only the heavy IFV eu_ifv ships it). So an enemy's empty APC
+may be taken, the heavy IFV not, and nobody gets into an enemy Titan's
+guns. `GameWorld::mayEnter`.
+
+**crewKitIndex** (PlayerControlObject `+0x47c`, -1 by default; the
+gunships' pilot and gunner 12): the enter (`0x005cdd60`) sets the
+entering soldier's kit's geometry index (kit `+0x1d0` through
+`0x0056cf50`; `0x0056cc50` shows that sub-geometry of the kit's mesh,
+slot `0x6c`, or the default `+0x2b4` when past the mesh's count); the
+soldier's exit (`0x00587540`) puts the default back (-1 → `+0x1d4`).
+`GameWorld::kitGeometry`, drawn through the renderer's `geometryFor`.
+
+**boundingRadiusModifierWhenOccupied** (`+0x48c`): an object's radius
+(slot `0x90`, `0x006f6b90`) is its mesh's plus its slot `0x94`, which is 0
+(`0x005b6b80`) except for a PlayerControlObject (`0x005c6be0`): the
+template's value, whatever the occupancy, despite the name (the bipods'
+2). `objectRadiusOf`; the shipped bipods aren't bodies in the rewrite.
+
+**toggleMouseLook** (Camera `+0x38c`; the tanks', the AT walkers' and the
+gunships' pilots' cameras): the camera's input handler (`0x00611c80`)
+runs the usual one (`0x00565180`) only while the player holds PIMouseLook
+(input 11, the input's bit `0x800` and its value over 0.5; left Ctrl in
+the default maps); otherwise the camera's speeds (`+0x194..+0x1a8`) are
+zeroed and its angles (`+0x188..+0x190`) taken × 0.75 each tick, so the
+view springs back ahead. `stepSeatCamera`, `SoldierInput::mouseLook`
+(carried in a move as trigger 11).
+
+**automaticYawStabilization** (RotationalBundle `+0x308`: the tanks'
+cupolas, the walkers' AA cannons and the as_heavy_mech's second gun):
+the bundle's matrix update (`0x00564eb0`) poses its yaw less its
+parent's heading against the root's (the asin of the root's right on the
+parent's forward, 180 less it when the forwards point apart). The gun
+keeps the hull's heading while the turret (or the torso) under it turns.
+The rewrite keeps the posed angle in the seat's gun and takes off, each
+tick, what the seat's gun mount turned (`stabilizeGunYaws`).
+
+**The rolling-surface loop** (groundContactVolume, PlayerControlObject
+`+0x474`: the APCs, tanks, FAVs, the heavy IFV and the hover tank, all
+1). The PCO's creation (`0x005cd4f0`) makes, for a root with the value
+over FLT_EPSILON (not on a dedicated server), a contact sound object
+(`0x005c64a0`, 0x34 bytes, kept at `+0x30c`; the value itself is kept at
+its `+0x14` and read by nothing found) and finds the tree's first two
+WheelEffectBundles (`0x006bf940` → `+0x318` / `+0x31c`). Each update
+(`0x005c8e70`): the first bundle's ground material (`+0x188`, -1 off the
+ground), or the second's when that is under 1 (`0x006bf900`, -2 without
+one); on the ground (-1 or more) a new ground or bundle material marks it
+changed; the volume wanted is the root's speed `(|v| − 0.1) / 30` within
+0..1 (`+0x304`, the interior loops' input too) on the ground, else 0, and
+the played one eases to it by 0.08 a tick ("pco-gcm-factor", `0x006aff70`).
+`0x005c65d0`: after each choice it waits 20 ticks (`*0x00a6c9a4`); then,
+changed and audible, it picks the sound again (`0x005c6510`: the material
+manager's slot `0x70`, `0x0060a670`: the cell (bundle material, ground)
+sound 0, else (bundle material, 0)'s; a new one replaces the old, its
+volume and pitch envelopes on the eased value, placed at the vehicle) and
+plays it; silent, it pauses; audible and stopped, it plays. The tracks'
+web_tracked (material 61) on dirt is S_GroundContact_Dirt. (The contact
+sounds skip materials 61 and 67 for this reason.)
+`GameWorld::rollingSounds`, GameAudio's loops.
+
+**The heavy IFV's shield cells.** eu_ifv carries seven
+ifv_shield_the_generator children with armour (110 hit points,
+`armor.mirrorParentDamageLevel 1`, `hudRepairCellNo 1`,
+`damagePointOnDestroy 1`, Python onDestroyEvent 56). The armour's update
+(`0x00654d80`, server, while the cell stands): every 0.1 s (`+0x288` from
+`+0x28c`) a mirroring cell compares its percent (slot `0x40`,
+`0x00651f90`: hit points over maxHitPoints, or over wreckHitPoints below
+0, × 100) with its root's: above it, it loses the difference of its
+maximum (slot `0x44`, `0x00656320`); below, it heals the difference (slot
+`0x48`, `0x00655a00`, canBeRepaired). Down to 0 it is a wreck and
+VehicleShieldDestroyed goes (scoringCommon.py scores it to an enemy
+attacker; the mirror's loss has none). The vehicle HUD (`0x007a1e50`,
+from `0x007a2e60`) shows each cell of the root's armour list with a
+hudRepairCellNo other than -1 (armour slot `0x168`) at `+0x336 + n`: up
+while its armour state is 0. damagePointOnDestroy (armour slot `0x16c`)
+gates the game logic's damage-assist award (`0x004c0e40`: event 0xb,
+given only on the hit that wrecks it). `GameWorld::repairCells`,
+SeatBehaviours.cpp. Not rewritten: the cells' own collision (their
+meshes aren't the vehicle's, so a shot can't strike one), the award, the
+cells' armour effects, and the HUD's drawing of the cells.
+
 ### Fire modes, tracers, camera recoil, armour effects and leaving a seat
 
 **The fire component's flags.** `fire.busyUntilButtonRelease`
@@ -1485,9 +1577,16 @@ an ObjectAnimation of its own. The bone parts are then posed (partBone):
 the legs walk and the torso stands, and `animateRemoteSeated` turns the
 seated soldier by the bone part's mount as well as the turret's
 (`boneMount`, seatMount's bone half) (`Vehicles_RemoteMechPosesItsBoneParts`).
-Not on the client: the legs' own messages (walking 0x80 and the turns,
-from the MechLegs state, 0x00650530), which no ghost carries; the speed
-and turn drive the system's value triggers instead.
+The legs' own messages (`0x00650530`: 0x780 cleared, then with the
+state's input held, `+0x1c0`, 0x80 walking (state 1), 0x100 backing (2),
+0x400 / 0x200 turning (3 / 4), the crouch flag in state 5) come from the
+MechLegs networkable (`0x0060a000`: the state `+0x1bc` mask 1, the held
+flag mask 2): the host writes the round's legs (`Vehicle::Legs::state`,
+its messages), the client keeps them on the part (`RemotePart::legState`
+/ `legHolds`) and hands `net::mechLegsMessages` to the animation
+(`animateRemoteVehicle`'s `legMessages`, `RemoteDrive::legMessages`)
+instead of the client legs' own, which have no input there
+(`NetGame_MechLegsMessages`).
 
 **ToggleCameraComp** (template `0x005db120`; changeCameraId `+0x14` −1,
 changeCameraViewMode `+0x18` 2, startCameraId `+0x1c` −1,
@@ -1572,6 +1671,141 @@ hits and, if it hasn't gone off there, its detonation (the end effect)
 when the ghost goes. The exe's client object is a GenericProjectile of its
 own whose physics and detonation run locally (the same empty hit slots);
 the rewrite's has no fuse of its own, the server's end ends it.
+
+### Weapon, collision and part rows from the called-template list (2026-11-05)
+
+The rows uncited.md's "called template names" pass left as gaps for
+Weapons, Physics and the object parts:
+
+- **`fire.allowZoomOnROF`** (the fire template's `+0xb4`, executor
+  `0x004e44d3`; the three sniper rifles and static_av). The firearm's
+  event handler (`0x005c50e0`) asks its components' busy slot 27 before
+  taking any press; SingleFireComp's (`0x005d3c40`) holds while its state
+  (slot `0xd8`, `+0x150`) is above 1 (the spin-up, 3; a round's cycle, 4
+  until `+0x158`) unless the flag is set, and with it the component's own
+  press (slot 13, `0x005d3b00`) refuses the fire press instead. So a zoom
+  press between rounds is dropped (without `zoomWhenBusy`) except on those
+  guns. `FireArm::cycling` / `zoomBusy`, `ZoomSettings::takesPress`,
+  `SeatZoom::step`'s `cycling`, PlayerCamera's `Me::zoomBusy`
+  (`Weapons_ZoomBusyBetweenRounds`, `FirstPerson_SeatZoomWhileCycling`).
+- **`ammo.abilityCost`** (ReplenishingAmmoComp `+0x78`, executor
+  `0x004e6efb`). A round taken (slot `0x38`, `0x005d81d0`) costs the
+  holder's battery rounds × cost (the soldier component `0xc4d7` slot
+  `0x98` through `0x005d7fe0`; nothing for a magazine without end), and
+  the component's "a magazine can be taken" (`0x005d79a0`, in place of
+  `0x005f4140`) needs an empty magazine and a battery of at least the cost:
+  the ammo and medic hubs (1) come back with a full battery, after
+  autoReload's 0.7 s; the repair tool's 0.3 costs nothing (its magazine has
+  no end), the defibrillator's 0. The magazines still count in the fill
+  (`0x005f46f0`). `FireArmSettings::replenishing` / `abilityCost`,
+  `FireArm::setBattery` / `takeBatteryCost`, GameWorld's soldier tick
+  (`Weapons_HubNeedsAFullBattery`).
+- **`seek.directionBonus`** (the seek template's `+0x30`, executor
+  `0x004f541e`; the AA missiles 0.8). The candidate query (`0x004cf290`)
+  takes, of the targets within range and angle and in sight, the least
+  angle × bonus × 500 + (1 − bonus) × distance below 9999 (the angle in
+  radians off the heading). The round's seek (`0x005ebea0`) passes its
+  bonus; the launchers' lock (`0x005e1b30`, the pushes before the call at
+  `0x005e1d3c`) passes 0, so the lock is still the nearest.
+  `game::seekCost`, `GameWorld::steerClosest`
+  (`GameWorld_DirectionBonusPrefersTheTargetAhead`).
+- **`target.notifyProjectileOnLostTarget`** (the target template's `+0x9c`;
+  eu_aa, as_aa, static_aa, the heavy mechs' AA). Each shot (`0x005e1ee0`)
+  clears the component's `+0x50` and, with the flag, keeps the round's id
+  there; when a lock is lost (`0x005e1b30`: locked, another candidate for
+  more than loseLockDelay ticks) that round's slot `0xa4(0)`
+  (`0x005b2e70` → the seek's setTarget(0, 1)) frees it, its relock armed,
+  and `+0x50` goes back to −1. `Player::Lock::notifyRound`,
+  `GameWorld::launchLocked`, `stepWeaponLock`
+  (`GameWorld_LockLossFreesTheRound`).
+- **`detonation.detonateDistanceToTarget`** (`+0x50`, executor
+  `0x004f381d`; eu_ifv_laserguided_mine 3) and **armingDelay**. The
+  projectile's update (`0x005b3e60`) runs its seek, follow and detonation
+  component only once the round is armed (armingDelay, the template's
+  `+0x2fc` ticks, past its start `+0x210`), handing the seek's target to
+  the detonation (slot 9, `0x005e9280`). The detonation's update
+  (`0x005e9f60`), every detonationTriggerFreq (0.25 s), first sets the
+  round off (event `0x1f`) when that target lies nearer than
+  detonateDistanceToTarget, then runs the radius trigger. The rewrite's
+  radius trigger had no arming: the anti-personnel mine (4 s) and the EMP
+  mine (3 s) now wait. armingDelay is read for every round, not only
+  seekers. `GameWorld::seekTargetPoint`, `stepProjectiles`
+  (`GameWorld_MinesArmBeforeTheyTrigger`,
+  `GameWorld_ProximityFuseOnTheTarget`).
+- **`centerOfCollisionOffset`** (SimpleObject `+0xa4`, executor
+  `0x0051e654`) of a RotationalPoint round: its node's ground contact
+  (`0x006c0f90`, the height test at its position + slot `0x124`) and
+  object contact (`0x006c1220`) test the offset point, so it rests that
+  far the other way: the frag grenade (0/−0.05/0) 5 cm and the IFV's mine
+  (0/−0.12/0) 12 cm higher. The decoy and the EMP mine (0/0.1/0) are Mesh
+  rounds, which don't read it, nor do the ATs' Mesh templates.
+  `ProjectileSettings::collisionOffset`, `stepProjectiles`.
+- **`otherCollisionLod`** (SimpleObject `+0xec`, executor `0x0051ee4d`;
+  the node's slot `0x1a4`, below 0 meaning 1). Slot 9 of the mesh
+  response (`0x006bb050`) tests A's vehicle-LOD vertices against B's faces
+  at the LOD A asks for (slot `0x54(lod)`), and none when B has no such
+  LOD (slot `0xc4(lod)`); the broad phase (`0x006dc7b0`) sizes the
+  candidate at that LOD (slot `0x50(lod)`). Shipped 2 on the parachute,
+  the sentry gun, the portable shield, the stationary medic hub, the
+  commander's supply crate, the spawn beacon and the drones: they sit on
+  what soldiers stand on. 0 on C4, the sonar and the explosive shotgun
+  round (projectiles in the rewrite); the parachute and the drones aren't
+mesh movers in the rewrite. Not followed: with 0, a projectile A
+  meeting a node whose slot `0x164` holds asks for 2. `Body::
+  otherCollisionLod`, `GameWorld::lodFaces` / `atLod`, `meshPair`
+  (`GameWorld_OtherCollisionLod`).
+- **`blockInputOnRotBundle`** (GenericFireArm `+0x324`, executor
+  `0x004e1d2b`). The firearm's enable (`0x005c47d0` → `0x005c4220(1)`)
+  finds the bundle of that name in its root's tree and stores the holder's
+  player at its `+0x204`, the disable (`0x005c42f0`) clears it; the
+  bundle's input handler (`0x00565180`) zeroes that player's input (and so
+  its regulateVector). While the TV-guided launcher is a seat's active
+  weapon the named bundle holds still: us_ag's US_AG_TADbase, as_ag's
+  AS_SecondPosition_Gun_Base, the hover bike's AS_Hov_light_Gunner_Turret,
+  static_av's cockpit (its scope launcher). `Gun::yawBlocked` /
+  `pitchBlocked`, `GameWorld::stepGunner`
+  (`GameWorld_BlockInputOnRotBundle`).
+- **The LookAtObject** (template class `0x948d`; `nameToLookAt` `+0x240`,
+  `offsetToLookAt` `+0x25c`; the EU FAV's rear arms under the rear wheels'
+  Springs). Its update (`0x0064bc00`) finds the named object in its
+  root's tree once (`0x006f1f90`, the root first; without one the object
+  manager's slot `0x124` takes the part away) and sets its world matrix at
+  its parent's matrix × its own offset (its own rotation dropped), its z
+  towards the target's matrix × offsetToLookAt, y = z × the parent's x,
+  x = y × z (`0x006ac530`; the parent's matrix where that fails, a zero way
+  up). The arms swing with the wheel's travel, their far ends on the hull.
+  `physics::lookAtRotation`, `GameWorld::lookAtPart` through `partBone`
+  (`RigidBody_LookAtRotation`, `GameWorld_LookAtObjectFacesItsTarget`).
+- **ForceObject's `useAbsoluteDirection` and `rotationalForce`**
+  (`+0x255`; the vector through `0x00546dc1`). The object's tick
+  (`0x0062c920`) takes the force's direction from its placement relative
+  to its parent (slot `0xe4`, `0x006f6dc0`) instead of its world matrix
+  with useAbsoluteDirection (the parachutes' ForceDown: straight down
+  whatever the canopy's tilt), and with a rotationalForce × the input
+  (`+0x180`) pushes pairs at the root's radius (slot `0x90`) along the
+  world axes (`0x0062ac00`): x yaws, y pitches, z rolls (the parachute's
+  RotateForceObject, 0.5 on PIYaw). `Vehicle::ForcePart::absolute` /
+  `rotational`, `Vehicle::updateForce`. Neither parachute is a simulated
+  body in the rewrite yet (the soldier's parachute isn't modelled, the
+  supply crate comes down at 5 m/s), so these act only on a vehicle
+  that carries such a ForceObject.
+- **The hovering ForceObject** (`targetPosition` `+0x288`,
+  `regulationTolerance` `+0x29c` 0.5, `relativeYCollisionGroupInverse`
+  `+0x298`, `enableOnStartMessage` `+0x296`; the defaults `0x0062d4f0`)
+  under a round: eu_ifv_laserguided_mine_FO. Enabled from the start
+  without enableOnStartMessage, else by the round's start message (event 0,
+  handler `0x0062ab40`: at the launch `0x005b3990`, or with
+  follow.targetActivation at the lock `0x005b2c10`) until its stop (event
+  1, `0x005b2ca0`). Its regulation (`0x0062b750`, not keepUp): the goal is
+  targetPosition; with relativeY 1 over the terrain, regulated only while
+  higher than tolerance + its y; with another value a ray down tolerance +
+  y long (the collision manager's slot `0x68`, its group bits from the
+  value) and, on a hit, the hit's height + y; nothing hit, no force. The
+  y regulator (regulatePosY −0.5/1.5) changes the velocity by 30 (2a v +
+  (a² + b²)(goal − y)) a second, so the mine hovers about 1.8 m up while
+  it chases. `ProjectileSettings::Hover`, `projectileHover`,
+  `hoverVelocity`, `GameWorld::hoverProjectile`
+  (`Weapons_SeekBonusFuseOffsetAndHoverSettings`).
 
 ## Animation systems
 
@@ -5110,7 +5344,9 @@ side in `HostedGame::event`; tests `NetHost_RadioCommanderToolsAndSquads`,
   two updates still fires: vtable 0x1d8 reads `+0x19c` or `+0x24c`). The
   reader sets them for the others' players only (`0x005981a0`); the
   rewrite's server sends group 0 (the weapon in hand's rounds and fire
-  mode) and 1 (the alt fire) on foot. The client runs the weapon in the
+  mode) and 1 (the alt fire), in a seat with the seat's group firearms'
+  rounds and fire modes (see "Ground effect bundles and the guns'
+  fire"). The client runs the weapon in the
   soldier's hands from them, as the exe's client fires a remote player's
   firearm: its rounds at the template's roundsPerMinute and fire mode
   (single and burst a press, automatic while held), the magazine the
@@ -5224,7 +5460,15 @@ getting no movement (`menu::OverheadCamera`, main.cpp's
   with its seconds: a recon drone's pulse its revealTime, the drone
   template's `+0x70` as `0x005d9cf0` sends it; 3 otherwise), the host
   sends them (`HostedGame::sendBattlefieldReports`) and the client keeps
-  them for their seconds (`RemoteWorld::radarPlayers`), the minimap's
+  them for their seconds (`RemoteWorld::radarPlayers`). Before posting,
+  the handler reads each recipient's ability block (slot 0x2a0): the
+  report lasts the longest `networkableHudRevealTime` (`+0xc`, 3 s; the
+  recon's sniper unlock sets 6; `0x005706b0` copies an unlock's when it
+  isn't 3), and a cloak report (kind 2, the active camouflage switched on
+  or off, `0x005d92c0`) goes on only as kind 1 when a recipient has
+  `networkableHudShowCloaked` (`+0x12`, the support's unlock), else to no
+  one (`host::battlefieldReportFor`, `GameWorld::squadReportAbility`,
+  `Host_BattlefieldReportReading`). The minimap's
   revealed enemies there (`HudWorld::revealedPlayers`). The client's
   handler puts a player on the minimap (the NametagManager `DAT_00a20a00`)
   with the enemy flag when the report is of kind 0 and he isn't of our team
@@ -6343,7 +6587,9 @@ On a joined client the server's messages come as RadioMessage events
 (with no sender) and its control points' team changes are played there.
 A joined client's takeable radio comes from its control points' ghosts
 (masks 8 / 0x10, see [joined games](#joined-games-radio-tools-and-menus)).
-Not rewritten: destroyedGameEvent (no reader).
+The Radio's destroyedGameEvent (`+0x1f8`) is read by the object's own
+handler on the armour's destroyed message 0x18 (`0x0063c6a0`): see
+[Spawners on game events](#spawners-on-game-events-and-the-pod-seats-near-a-titan).
 The
 closeToIndication* and indicationDistance* aren't radio: the server's
 0.2 s scan (`0x0059a6c0`, from the player's update `0x0059bd80`, the
@@ -6738,9 +6984,22 @@ lists' `\xa7` font switch and Latin-1 names), and looks for a font in the
 language's folders first, then English's; the menus' engine fonts
 (SwiffRender's `0x10185e90`) do the same (`Hud_NonEnglishTextHasGlyphs`:
 every character of a sample of German, Russian, Chinese_Simplified and
-Polish strings is a glyph of that language's font). Not checked: the
-menus' own SWF fonts in those languages, and RendDX9's font path for the
-console (`0x1017af30`).
+Polish strings is a glyph of that language's font). The menus' own SWF fonts don't matter: SwiffRender
+draws every edit text with an engine font (`ui::Drawer::engineFont`), and
+the embedded ones in mainMenu.dfm carry Western sets only (no Cyrillic or
+CJK; gameswf's glyph layout `0x100c06a0`, which skips a missing glyph,
+isn't reached). The engine fonts the menu's edit texts use cover German,
+Polish, Russian and Chinese_Simplified menu strings, except the 24 px
+titles' StandardTextBold_24, which every language folder ships with its 98
+Latin glyphs (`Dfm_MenuEngineFontsCoverLanguages`). RendDX9's `0x1017af30`
+is not a font path: it maps the language to a Windows LCID (English 0x409,
+French 0x40c, German 0x407, Italian 0x410, Russian 0x419, Swedish 0x41d,
+Danish 0x406, Finnish 0x40b, Spanish 0x40a, Dutch 0x413, Polish 0x415,
+Czech 0x405, Korean 0x412, Chinese 0xc04, Japanese 0x411, Thai 0x41e; by
+SwiffHost's slot 0x3a8) for GetDateFormatA / GetTimeFormatA /
+GetNumberFormatA (`0x1017b2a0`, `0x1017b370`, `0x1017b3f0`, `0x1017b460`),
+whose only caller is SwiffHost's graph object (`0x10172af0`: its axis
+dates and values), which the rewrite doesn't have.
 
 The scoreboard (`ScoreboardShow`, menu state 0xd in `0x0079ab90`) is built
 from list nodes. Each node names a data source with `setListNodeData`:
@@ -7002,7 +7261,7 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   the active weapon of its PIAltFire group, `+0x88`) sets the Secondary*
   variables as `0x007c1f10` the Primary* ones (`WeaponHud::update(...,
   true)`, its own WeaponHud so neither block re-reads its template each
-  frame); without one, or with guiIndex -1 (block `+0xd0`), the block's
+  frame); without one, or with weaponHud.showInfo 0 (block `+0xd0`), the block's
   show (`+0x16d`, SecondaryAmmoShow) is cleared. The PIFlareFire group has
   no HUD of its own. So the heavy mechs' dumb rockets, the APCs' EMP
   launchers and the IFV's mine show beside the main gun
@@ -7042,12 +7301,24 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   console row (HudElementsTitans.con: `NOT ...0Show`) shows once its
   shield is down, each console lit until destroyed
   (`menu::StrategicObjects`).
-- **Read by nothing in BF2142.exe** (searched: no read of the block field,
-  the component's getter reached only from its console setter and the
-  write-back): weaponHud.disableOnSprint (component `+0x120`, block
-  `+0xd8`, getter slot 0x13c `0x00638fd0`) and vehicleHud.disableOnSprint
-  (`+0x107`, getter slot 0x78 `0x00637620`): the crosshair is not hidden
-  while sprinting; vehicleHud.typeIcon (string `+0x1f0`, its texture
+- **disableOnSprint** (corrected; an earlier search missed the
+  runtime HUD's calls through the block): weaponHud.disableOnSprint
+  (component `+0x120`, block `+0xd8`, getter slot 0x13c `0x00638fd0`) is
+  the first test of the runtime WeaponHud's gui index (`0x00657a70`) and
+  vehicleHud.disableOnSprint (`+0x107`, getter slot 0x78 `0x00637620`)
+  that of the VehicleHud's (`0x00657660`): with the argument set the gui
+  index is 0. `0x007a01e0` passes 0 only while the HUD's sprint flag
+  (`+0x2a8`: the control object's slot 0x100, the soldier's from
+  `0x007a0f80`, a vehicle's boost from `0x007a2e60`) is off and its
+  weapon flag (`+0x334`, 1 from the constructor `0x007a24c0`) is on; that
+  flag is the soldier's slot 0xa4 (`0x00586580`, on its `+0x18c`
+  interface): no jump timer running (`+0x3f4`, `+0x40c`) or a thrown,
+  explosives or camouflage weapon (fire comp 0x94de / 0x94df, ammo comp
+  0x94f1) in hand. So the hand weapons with it (79 shipped calls) lose their
+  crosshair overlay while the soldier sprints (`menu::weaponGuiIndex`,
+  `vehicleGuiIndex`, `guiSprintTest`; the jump hold isn't modelled: the
+  weapon flag is taken as on). No shipped vehicle sets the vehicle HUD's.
+- **Read by nothing in BF2142.exe**: vehicleHud.typeIcon (string `+0x1f0`, its texture
   `+0x258` set by `0x00635ef0`, getter slot 0x11c `0x00637660`).
 - **useSelectionIcons** (block `+0xbc`, component `+0x104`, 0 by
   default): the HUD's input (`0x00755d50`) lets the mouse wheel (inputs
@@ -7153,6 +7424,44 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   UsingChildHud (`+0x176`) is set (on foot always): the soldier's
   bottom-right block shows instead of the vehicle's bottom-left one
   (HudElementsPlayer.con / HudElementsVehicleBasic.con).
+- **The gui index by camera** (GuiIndex, the HUD's `+0xa0`, `0x007a01e0`):
+  a controlled object without a VehicleHud shows its first weapon's index
+  as it is; with one, the runtime VehicleHud's slot 0x3c (`0x00657660`)
+  takes the control object's camera mode (slot 0x48 → 0x1c, 1 Inside
+  without a camera) and the showOnCamMode lists (vehicleHud /
+  weaponHud `.showOnCamMode` clears and sets, `.addShowOnCamMode` appends,
+  template slots `0xcc`/`0xd0` and `0xdc`/`0xe0`, `0x006371f0` /
+  `0x00637260` / `0x00639350` / `0x006393c0`; checked by `0x006363f0` /
+  `0x00638180`; the list starts as {1}, the writers `0x00636440` /
+  `0x006381d0` skip a lone 1). Without useChildHud (template `+0x101`, slot
+  0x80) the first weapon's index (the runtime WeaponHud's `0x00657a70`)
+  shows when the weapon lists the mode or the camera rides a projectile
+  (interface 0x94c1, `0x00657c50`), else 0 when the list has more than one
+  mode or one that isn't −1; a weapon at −1 (the horn) gives way to the
+  second weapon (`0x78(1)`, only in its modes); with useChildHud the
+  occupant's weapon (only in its modes); without either, the vehicle's
+  guiIndex (`+0x134`) only in its own modes. So the seats' overlays leave
+  the Chase and other outside views, and stay in Nose where the template
+  adds mode 2 (eu_at / as_at, the gunships' pilot guns, the mechs' AA
+  cannon, the static AA). The function's first test is vehicleHud
+  `disableOnSprint` (above). The rewrite: WorldConsole keeps the lists as
+  `<component>.showOnCamMode.list`, `menu::vehicleGuiIndex` and
+  `showOnCamModes` (`HudVehicle_GuiIndexByCameraMode`).
+- **weaponHud.showInfo** (template `+0x114`, block `+0xd0`, 1 by default;
+  the horns Car_horn / Car_horn_Alt set 0): `0x007c1f10` runs `0x007c1b90`
+  (the show flags off, CrosshairActive `+0xed` too unless the local player
+  commands, slot 0x128) and stops after the crosshair's parts, so no name,
+  icons or ammunition (PrimaryAmmoShow stays 0); the second weapon's
+  `0x007c2d50` clears SecondaryAmmoShow (`+0x16d`) and stops
+  (`HudWeapon_ShowInfoOff`). vehicleHud.showInfo (`+0xfe`) stays inert.
+- **vehicleHud.useVehicleCameraRotation** (template `+0x108`, block
+  `+0xc0`, getter slot 0xdc): the map node (`0x00793b60`, at `0x00794f03`)
+  turns the object's icon by its first Camera child's yaw (`0x005c6430` →
+  `0x005c63b0` with class 0x9472, `0x00998670`) less the map's rotation
+  (`+0x80c`). Shipped on the sentry gun, the sentry drone and the drop pod.
+  The rewrite turns a vehicle's icon by the seat yaw bundle that carries
+  the camera (`menu::cameraRotationBundle`, `GameWorld::seatYaw`); the
+  sentries and the pods aren't on its map at all (not vehicle bodies).
 
 - **The blinks** (the blinker `0x00778040`, vtable `0x009b264c`, ticked
   with the frame's time by `0x00778080`; `menu::HudBlink`): 0x0079e5a0
@@ -7272,6 +7581,32 @@ answers the sight lines and the seats):
   texel 1 to 45 of 64, `createBar ICArmorBar 1 45`): a hurt friend's
   health under half for a local medic (the Assault kit), a damaged
   vehicle's armour for an engineer.
+- **Object bars** (the same pass, RendDX9 `0x1016c1e0`, tag kind 3): an
+  object of the player's team or of none (tag `+0x74` against slot 0xf8)
+  whose template sets `Nametag.showArmor` (flag 0x4000000, template
+  `+0x33` bit 4) or `Nametag.showSupply` (0x8000000, bit 8) joins it. At
+  `0x1016c64f` a repairing kit (the Ability's second byte) or showArmor
+  sends it to the armour branch, which draws only for a state (`+0xc8`)
+  another path set (none for these, so the sentries' and drones' showArmor
+  shows no bar here); a support kit without showSupply takes the ammo
+  branch; showSupply shows the SupplyObject child's (class 0x9c47)
+  storage, `+0x194` over sharedStorageSize `+0x2bc`, at any level (the
+  0.5 test at `0x1016c7a5` doesn't apply), its state 2 / 4 / 3 by
+  healSpeed `+0x2a8` / refillAmmoSpeed `+0x2ac` (the bar icons' pass,
+  `nametag_barIcons`): the hubs and the MiniMed. The rewrite:
+  `nametags::objectTagBar`, `GameWorld::supplyStorage`
+  (`Nametags_ObjectSupplyBar`); a joined client has no storage to show.
+  The object tag's other way in (`0x1016c52e`): with tag `+0xc4` and flag
+  0x800000 (`0x1016c555`) straight to those branches, and with 0x10000000
+  as well (`0x1016c59c`) to the object's owner (interface 0x94c1, slot
+  0x50: a living player of another team), whose control object's armour
+  would fill the bar (state 2 on foot, 1 in a vehicle). Nothing sets
+  either flag: the tag's flags are the Nametag component's `+0x34`
+  (through the block's `+0x24`, `0x100f3ed0` / `0x100f40d0`), whose
+  setters (`0x0063ac70`..`0x0063af70`) and constructor (`0x0063b760`)
+  give only the named bits, and RendDX9's other writers of the tag's
+  `+0xb8` add other bits. So that path is dead and showArmor draws no bar
+  anywhere (settled).
 - **Control points** (object tags, `0x100f1330`, `0x100ef960`): the
   templates' `Nametag.*` (showItem, 3dMapIconOffset 0/5/0 on the shipped
   points, showDistance, teamSpecific, maxDistance / maxEnemyDistance 1200
@@ -7333,7 +7668,8 @@ tag's `+0xb8`; the write-back lists them): showItem 1, showIcon 2,
 showName 4, showDistance 8, show3dIcon 0x10, glueToEdge 0x20,
 teamSpecific 0x200, inverseTeamSpecific 0x400, showIconOnTracker 0x4000,
 showInside 0x40000, showOutside 0x80000, selectable 0x100000,
-useTeamColor 0x200000, useAliveArmor 0x1000000; a player's tag starts
+useTeamColor 0x200000, useAliveArmor 0x1000000, showArmor 0x4000000,
+showSupply 0x8000000; a player's tag starts
 with 7 and `0x100f3de0` adds 0x500201. The rewrite reads them once per
 template (`Nametags::TagTemplate`) and looks for tagged objects once a
 second.
@@ -10740,7 +11076,11 @@ TitanPartRepaired (47) and the cores' TitanCoreRepaired (49) never go: a
 console's wreck can't be repaired (canBeRepairedWhenWreck 0) and the cores
 have canBeRepaired 0; the silos (52 / 53) have no armour; the Titan
 playtest/wake roots' VehicleRepair (27) would need the Titan's own armour
-healed (never, `0x00561d90`). The rewrite: the Titan parts are repair
+healed (never, `0x00561d90`). A supply object's heal goes the same way
+(`0x005d0970` → slot 0x108 with the repairer `0x005d0880` gives: a hub's
+thrower, its parent of class 0x9539, none for the commander's crate), so
+out of a wreck it raises the repair event too (Commander.cpp's mend →
+`healHitPoints`; scoringCommon's handlers check for a player). The rewrite: the Titan parts are repair
 targets of the hubs and the repair tool (`applyAbility`'s scan takes
 `titanParts`; `GameWorld::healTitanPart`: the part's own canBeRepaired /
 canBeRepairedWhenWreck, out of the wreck its collision back,
@@ -10748,9 +11088,7 @@ canBeRepairedWhenWreck, out of the wreck its collision back,
 flags per part (`TitanPart::destroySent` / `repairSent`) and per object
 (`m_pythonSent`, `pythonWrecked` from `loseHitPoints`, `pythonRepaired`
 from `healHitPoints`); `GameWorld::repair` is the game logic's heal as an
-entry point (`Titan_GunHubsRepairedOutOfTheWreck`). Not hooked: the
-commander's supply crate's heal (Commander.cpp's mend), whose giver the
-crate doesn't know; scoringCommon.py's handler needs a player.
+entry point (`Titan_GunHubsRepairedOutOfTheWreck`).
 
 **The interior.** The Titan's body carries its whole tree's soldier and
 projectile LODs, each face reporting its part; soldiers walk its decks and
@@ -10985,6 +11323,46 @@ local player's slot `0xf8`), and CPCannon%iString (`+0x110`) the time to
 the next missile as `"%02d:%02d"` minutes and seconds (the object's
 `+0x194` slot `0x98`, whole seconds), or `"--:--"` when that is 0 or the
 silo is neutral.
+
+### Spawners on game events and the pod seats near a Titan
+
+**Game events.** The armour's wreck (`0x00654120`) sends its object
+message 0x18; the object's handler (`0x0063c6a0`) on the server, for an
+object with an armour in itself or an ancestor (`+0x48`), takes its Radio
+part's destroyedGameEvent N (Radio template `+0x1f8`, -1 none) and sends
+N + 0x1c to every spawner of the game logic's list (slot `0x1ec`). The
+spawner's handler (`0x005ad470`) switches it on (`+0x1cc`) when N is its
+activateOnEvent (`+0x300`), else off when N is its deActivateOnEvent
+(`+0x304`); the round's reset (`0x005ae580`) leaves an activateOnEvent
+spawner off. The shipped events: eu_forcefield and as_titan_forcefield
+send 1, so either Titan's shield going down (at 61 %) switches on the
+gpm_ti maps' 107 `activateOnEvent 1` spawners (the APC pods,
+`*_APC_PODS`) and off Verdun's two `deActivateOnEvent 1` farm FAVs. Back
+on, a spawner spawns as its reset left its countdown (at once without
+spawnDelayAtStart). `GameWorld::destroyedGameEvent` (from
+`destroyVehicle` and `titanPartWrecked`), `ObjectSpawner::gameEvent`.
+
+**isSleeping** (the template's `+0xf1` bit 0x1; 0x2 hasMobilePhysics,
+0x4 hasCollisionPhysics, as the saver `0x005f6e60` reads them): the
+node's creation (`0x005f6ba0`) wakes a mobile node on the server (slot
+`0x160`) unless the template is isSleeping, which puts it to sleep (slot
+`0x150`), as every node starts on a client. Only the retail Titans set
+it: theirs sleeps (its position set by the sync, `0x005aa0e0` with a
+plain velocity store, slot `0x5c`) until a hit wakes it, so the soldier
+physics doesn't take it for a heavy mover (no run-over or crush) until
+then.
+
+**setIfTitanChangeToWeapon** (GenericFireArm `+0x354` on, the name at
+`+0x344`, the distance at `+0x35c`; pod_launcher_cq's `pod_launcher
+250`): the firearm's handler on the fire press (`0x005c50e0`, event 7)
+measures from the player's vehicle to every remote-controlled object of
+rcType 7 (`0x0058e400`: the Titans' control objects) across x and z
+(65000 at the start); within the distance of the nearest it selects the
+vehicle's weapon of that name (slot `0x1a4`) and sends it the fire (event
+6) instead. The APCs' pod seats carry pod_launcher_cq first and
+pod_launcher after it: near a Titan they launch the Titan-boarding
+eu_pod, elsewhere the Conquest eu_pod_cq; eu_apc's seats have no
+pod_launcher and fire their own. Titans.cpp `launchPod`.
 
 ## Bots (AIDLL.dll)
 
@@ -13673,8 +14051,80 @@ mappings or speedFromPhysics itself each update from the anchor's moves
 (`EffectManager::stepAttachedBundles`; ObjectEffects keeps driving the
 template tree's bundles): the damage smoke thickens, quickens and is born
 older as the vehicle drives. No Engine input there (an armour effect sits
-on the vehicle's root). Not done: the sound's intensity (5, the bundle's
-+0x1d8).
+on the vehicle's root). The sound's intensity (5) is done too: the
+bundle's constructor (`0x00619700`) makes its "Start" sound and binds the
+sound's volume and pitch envelopes (its slots 0x48 / 0x50) to the bundle's
++0x1d8, which only `0x00618e30` sets (0 otherwise). Every shipped user
+(the amphibious wake, the burning aircraft, e_exp_as_ag_burning,
+e_sfx_exp_sinus: SoundIntensityFromSpeed) has a looping sound (loopCount
+0). `EffectManager::bundleLoops` holds the looping start sounds of an
+attached bundle that sets its intensity while the bundle runs, with their
+intensity (ObjectEffects' modifiers or
+`stepAttachedBundles`); GameAudio keeps each on as a `GameSounds::loop`
+with the intensity as its envelopes' input. Before, those sounds went out
+as one-shots, and a released loop can't play out (`Sound::release`), so
+they were never heard. The other bundles' looping start sounds still go
+that way (unheard): holding them all would want each bundle's end, which
+the ambient areas' and the armour's sound-only bundles don't give. A sound-only bundle now counts as running while
+its loop is held (`emitting`), so a depth-gated one isn't started again
+every tick.
+
+**Ground effect bundles and the guns' fire.** GroundEffectBundle (class
+0x9486, template constructor `0x0061e0b0`: maxTriggerDistance +0x23c, 3)
+shows nothing itself. Its event handler (instance slot 64, `0x0061e090`)
+acts on event 0 only, which is a weapon's fire to its children or an
+EffectBundle's start to the children under it (`0x0061a1c0`'s loop over
+slot 0x100). On that event `0x0061de40` casts a ray from the bundle along
+its own −y, maxTriggerDistance long: first against the objects (the
+collision manager's slot 0x68), then against the terrain (slot 0x8c). The
+hit's material becomes 1 (Water_deep) where the hit lies more than 0.1 m
+under the water. Within maxTriggerDistance, the MaterialManager's cell for
+the bundle's material (slot 0xbc) and that material (slot 0x68) gives the
+effect, which the effect manager's slot 0x118 starts at the hit, facing
+the hit's normal and the bundle's forward. Shipped: geb_tank (material 66)
+under both tanks' main guns, 2.67 m along the barrel; geb_mech (127) under
+the walkers' FootStepEffect bundles; GEB_emp_strike (28, 2000 m) under the
+commander's EMP strike firearm. The rewrite does this in
+`ObjectEffects::groundTrigger` with the ground probe, which gives no
+normal, so the effect stands upright and faces the bundle's forward.
+Event 0 itself is done too: GameWorld lists each vehicle weapon that
+fired a round (`takeObjectWeaponFires`), and ObjectEffects starts that
+weapon's child bundles whose startOnEffects is 0 (`0x0061a4e0`: the
+muzzle flash and smoke). Each round starts them again unless the bundle is
+depth-gated and still running. It also sets off the ground bundles there.
+Before this, vehicle guns showed no muzzle effects. The fire's sender is
+FireComp's fire (`0x005f31d0`): after the batch it sends event 0 (slot
+0x100) to its first-person list (`+0x134`, when the shooter is the local
+player and `+0x128` is clear) or else its third-person list (`+0x144`,
+unless fire.surpressEffectOnFireStart, template `+0x84`, is 2; none
+shipped). **The EMP strike's**: 0x005a0bf0 moves the asset's firearm
+orbitalBombardmentHeight over the target and its fire (0x005a0e50) sends
+that event there, so GEB_emp_strike (under commander_EMP_strike_GenericFireArm,
+pitch −90 under the firearm's +90 in the asset: upright) looks 2000 m
+down from 500 m over the target and starts material 28's cell effect
+with the ground (e_geb_emp_strike_dirt: the rings, dust, shimmer and
+pillar) as the round leaves, before it lands. The rewrite:
+`GameWorld::fireStrike` records each round of a strike's burst
+(`takeStrikeFires`: the asset, the firearm, the place), and main.cpp hands
+it to `ObjectEffects::weaponFiredAt` with the firearm's turn in its asset;
+that sends the firearm's own children the event (startOnEffects-0
+bundles as one-shots there, the GroundEffectBundles' rays). The orbital
+strike's and artillery's firearms carry no bundle.
+**On a joined client** the others' seat guns fire there too: the
+client's update (`0x00590e10`) turns each player's networked fire states
+(player vtable 0x1d8 / 0x1e0 / 0x1e8) into input to his control object
+(`0x004cc7a0`: c_PIFire 8, c_PIAltFire 0x1f, the third 0x2f, then event
+6), so a seated player's gun fires on every client and its FireComp sends
+the event to its third-person list. The rewrite's server now sends the
+fire states in a seat too (with each group's seat firearm's rounds and
+fire mode) and the seat ghosts' active weapons (`0x00605650`, masks 1 / 2
+/ 4: the place in the group + 1); the client runs each seated player's
+guns (`client::RemoteSeatGuns`, src/Main/RemoteGuns: the rate of fire,
+fire modes, the server's rounds, the autoReload), each round
+`GameWorld::remoteGunFired`: the Fire sound and the weapon fire that
+ObjectEffects turns into the muzzle bundles and the ground dust. The
+vehicle guns' rounds themselves aren't made there (the client keeps no
+turret mount for the muzzle).
 
 **Mesh particles' directionalScale.** RendDX9's mesh particle template
 +0x1ec (slot 0x188; 0): with it ≠ 0 or alignRotationToSpeed (+0x1f0) a
@@ -13767,12 +14217,49 @@ Wake_Island_2142, Strike_at_Karkand, tgw_sharqi_peninsula, delhi_river).
 RaShaderRoad*.fx draw them as roads: lifted 0.01 m, diffuse (× detail),
 lit by the screen-space light buffer as RoadCompiled.fx (×
 (a × TerrainSunColor × 2 + rgb) × 2), alpha × the road fade (the NoBlend
-variant: alpha = the fade alone), alpha-blended without depth writes.
-**Not done**: the rewrite draws these as ordinary lightmapped static
-meshes. The road pipeline lights from the terrain lightmap per patch, so
-it would take a mesh-vertex variant of road.vert / road.frag; left for a
-later pass (the visible difference is their lighting and the distance
-fade, not their shape).
+variant: alpha = the fade alone), alpha-blended without depth writes, back
+faces culled (CullMode CCW). The draw sends a road template's materials
+only while drawRoads (+0x693) is on, whatever drawStaticMeshes says.
+**Done** (`src/Render/RoadStatics.h`, `Shaders/roadmesh.vert`,
+road.frag's techniques): the mesh flags `GpuMesh::road` / `roadNoBlend`
+from the path (`roadStaticPath`, a case-blind find as `0x1019eb80`). Such
+meshes leave the static draw (`prepareInstances`) for the roads' block,
+where each material is drawn per terrain patch it covers, as the compiled
+roads are. The pipeline is the "road mesh" one (the road's blend and depth
+bias, back faces culled), with the mesh's own vertices (the detail layer's
+coordinates as the second set). The technique comes from
+`roadStaticTechnique`, and the fade is the compiled roads' FadeOut. As for
+the compiled roads, the patch's terrain lightmap stands in for the light
+buffer. In the shipped data, the intersections ("base") are Road and the
+concrete blocks ("basedetailndetail") RoadDetailNoBlend. Their hard-edged
+slabs now blend into the ground through their alpha and are lit and
+shadowed as the road (tgw_sharqi_peninsula's six T-junctions).
+Wake_Island_2142's concrete block lies under the hangar's roof.
+
+**Texture variants.** `texturemanager.customTextureSuffix` (row
+`0x10053c80`, executor `0x10053d80`) stores the suffix in the texture
+manager (`DAT_101f8e5c` +0xf8) and raises its reload flag (+0x114). At the
+end of the level's load (`0x1000deb0`, after "Loading Textures..") the
+reload pass `0x10018ca0` walks the loaded textures. Where a suffix is set,
+it loads "<name up to its last '.'>_<suffix>.dds" (`0x1019f4c0`; through
+`0x10017f20` with no wantu.dds fallback) and marks the entry swapped
+(+0x7c). Where the variant is missing, or the suffix is empty, a swapped
+entry is loaded again from its own name. "rad_" names (IGA's ads) are
+skipped. The rewrite (`TextureSuffix.h`, `LevelRenderer::texture` /
+`cubeTexture`) takes the suffix when the level is built and loads the
+variant in place of the texture wherever it exists. Seen:
+Liberation_of_Leipzig's and Bridge_at_Remagen's snow FAV
+(`eu_fav_c_Snow.dds`), and Wake_Island_2142's billboards
+(`billboard_color01_wake.dds`, `bp1_color_01_wake.dds`). Two levels set a
+suffix that never takes effect:
+- Strike_at_Karkand's Init.con opens `if v_arg1 == BF2Editor` twice before
+  its one `else` / `endIf`, so by the console's if-nesting rule
+  (docs/console.md) the row never runs.
+- The community HEAT levels (Suez_Canal_Titan16 and others) keep their
+  `_HEAT` textures in their own archives. The level's
+  Server/ClientArchives.con mounts those archives after mounting has been
+  closed ("not supported in runtime", src/Main), so the files aren't
+  found.
 
 **Rain freeze.** `rainManager.freeze` (slot 0xa0 `0x1011ab20`, +0x65): the
 update `0x1011d250` moves the box's centre (+0x70) to the camera plus offset

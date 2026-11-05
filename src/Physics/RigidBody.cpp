@@ -75,6 +75,36 @@ Mat3 Mat3::fromYawPitchRoll(const Vec3& degrees)
 	return m;
 }
 
+Mat3 lookAtRotation(const Vec3& way, const Mat3& reference)
+{
+	const auto unit = [](Vec3 v, bool& ok) {
+		const float l = std::sqrt(lengthSquared(v));
+		ok = l > 1e-12f;
+		return ok ? v * (1 / l) : v;
+	};
+	bool ok = false;
+	Vec3 z = unit(way, ok);
+	if (!ok) {
+		z = {0, 1, 0};
+	}
+	Vec3 x = unit(reference.rows[0], ok);
+	if (!ok) {
+		return reference;
+	}
+	const Vec3 y = unit(cross(z, x), ok);
+	if (!ok) {
+		return reference;
+	}
+	x = unit(cross(y, z), ok);
+	z = unit(cross(x, y), ok);
+	if (!ok) {
+		return reference;
+	}
+	Mat3 m;
+	m.rows = {x, y, z};
+	return m;
+}
+
 Vec3 Mat3::yawPitchRoll() const
 {
 	constexpr float toDegrees = 180.0f / 3.14159265358979f;

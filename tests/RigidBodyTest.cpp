@@ -241,3 +241,21 @@ TEST(RigidBody_PointNodes)
 	CHECK(std::fabs(spinner.angularVelocity.y - 2.5f) < 1e-4f); // kept
 	CHECK(spinner.rotation.rows[0].x < 1);
 }
+
+// The look-at rotation (0x006ac530 for the LookAtObject 0x0064bc00): z
+// along the way, y = z x the reference's x, x = y x z; a zero way points
+// up; a way along the reference's x keeps the reference.
+TEST(RigidBody_LookAtRotation)
+{
+	const physics::Mat3 level;
+	const physics::Mat3 m = physics::lookAtRotation({0, 1, 1}, level);
+	const float h = std::sqrt(0.5f);
+	CHECK(std::fabs(m.rows[2].y - h) < 1e-5f && std::fabs(m.rows[2].z - h) < 1e-5f && std::fabs(m.rows[2].x) < 1e-6f);
+	CHECK(std::fabs(m.rows[1].y - h) < 1e-5f && std::fabs(m.rows[1].z + h) < 1e-5f);
+	CHECK(std::fabs(m.rows[0].x - 1) < 1e-5f);
+	const physics::Mat3 up = physics::lookAtRotation({}, level);
+	CHECK(std::fabs(up.rows[2].y - 1) < 1e-6f && std::fabs(up.rows[1].z + 1) < 1e-6f);
+	const physics::Mat3 turned = physics::Mat3::fromYawPitchRoll({30, 0, 0});
+	const physics::Mat3 kept = physics::lookAtRotation(turned.rows[0] * 2.0f, turned);
+	CHECK(kept.rows[0].x == turned.rows[0].x && kept.rows[2].z == turned.rows[2].z);
+}

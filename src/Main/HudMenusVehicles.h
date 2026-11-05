@@ -229,6 +229,7 @@ public:
 		bool showAmmo = true, showClips = true, hasMag = true, hasFireRate = true, battery = false;
 		bool rangeFinder = false, distanceCounter = false, scanProgress = false, ignoreTargetDistance = false;
 		bool guiShown = true;
+		bool showInfo = true; // weaponHud.showInfo: without it no block at all
 		std::string name, crosshair, altCrosshair, barFront, barBack, clipIcon, ammoIcon, overheatSound;
 		void read(const world::ObjectTemplate* w);
 	};
@@ -672,8 +673,75 @@ bool seatPostProcessing(const world::ObjectTemplate* controlled, const world::Ob
 // the field of view gets there), unless it is -1 (unset); else guiIndex
 // (slot 0x30). (The block's switchGuiOnCamera branch, slot 0xd8, compares
 // the seat camera's id instead; no shipped template sets it.) 0 when
-// neither is set.
-int weaponGuiIndex(const world::ObjectTemplate* weapon, bool zoomed);
+// neither is set. Its first test: with `sprintTest` (guiSprintTest) a
+// weapon whose weaponHud.disableOnSprint is set (the block's +0xd8, the
+// component's +0x120, getter slot 0x13c 0x00638fd0) shows 0, no overlay
+// (79 shipped hand weapons set it: their crosshair overlays go while the
+// soldier sprints).
+int weaponGuiIndex(const world::ObjectTemplate* weapon, bool zoomed, bool sprintTest = false);
+// The argument 0x007a01e0 hands the gui index getters (VehicleHud slot
+// 0x3c, WeaponHud slot 0x38): on (1) unless the HUD's sprint flag is off
+// and its weapon flag on. The sprint flag (+0x2a8) is the control
+// object's sprint (slot 0x100: the soldier's from the player HUD
+// 0x007a0f80, a vehicle's boost from 0x007a2e60); the weapon flag (+0x334,
+// 1 from the HUD's constructor 0x007a24c0) the soldier's slot 0xa4
+// (0x00586580, on its +0x18c interface): true while no jump timer runs
+// (soldier +0x3f4, +0x40c at or below 0), or with a thrown, explosives
+// or camouflage weapon in hand (fire comp 0x94de / 0x94df, ammo comp
+// 0x94f1). `weaponReady` is that flag.
+inline bool guiSprintTest(bool sprinting, bool weaponReady = true)
+{
+	return sprinting || !weaponReady;
+}
+// The camera modes a HUD component shows its gui index in
+// (vehicleHud / weaponHud .showOnCamMode and .addShowOnCamMode: the
+// template's list at +0x110 / +0x10c, checked by slot 0xd4 / 0xe4,
+// 0x006363f0 / 0x00638180); {1}, the Inside view, unless the template
+// changes it. `component` is "vehicleHud" or "weaponHud".
+std::vector<int> showOnCamModes(const world::ObjectTemplate* t, const char* component);
+// The gui index a seat shows (GuiIndex, the HUD's +0xa0, 0x007a01e0):
+// with no VehicleHud on the controlled object, its first weapon's
+// (weaponGuiIndex) whatever the camera; with one, the runtime
+// VehicleHud's slot 0x3c (0x00657660), by the camera mode of the
+// control object's camera (slot 0x48 -> 0x1c; 1 without one):
+//   - without vehicleHud.useChildHud, its first weapon's (0x78(0), the
+//     WeaponHud at +0x6c) gui index when not -1, shown when the weapon
+//     lists the mode (the runtime WeaponHud's slot 0x48, 0x00657c50: the
+//     template's list, or the control object's camera being a projectile,
+//     interface 0x94c1: the TV missiles' view); otherwise 0 if the list
+//     has more than one mode, or only one that isn't -1. A first weapon
+//     at -1 (the horn) gives way to the second (0x78(1)), shown only in
+//     its listed modes;
+//   - with useChildHud, the soldier's weapon (the occupant's, slot 0x10 ->
+//     0xb4) the same way, shown only in its listed modes;
+//   - without such a weapon, the vehicleHud.guiIndex (slot 0x30), shown
+//     only in the vehicle HUD's listed modes.
+// So a seat's crosshair overlays go in the Chase and other outside views
+// and stay only where the template adds the mode (addShowOnCamMode 2:
+// the nose views of the walkers, the gunships' pilot guns, the AA gun).
+// The function's first test: with the sprint test on (guiSprintTest) a
+// vehicle HUD whose vehicleHud.disableOnSprint is set (+0x107, getter
+// slot 0x78 0x00637620) shows 0; the weapons get the same test
+// (weaponGuiIndex). No shipped vehicle sets it.
+struct VehicleGuiInput {
+	const world::ObjectTemplate* controlled = nullptr; // the seat's PCO, the vehicle for its driver
+	const world::ObjectTemplate* weapon = nullptr;     // its first weapon (0x78(0))
+	const world::ObjectTemplate* second = nullptr;     // the second (0x78(1), the PIAltFire group's)
+	const world::ObjectTemplate* child = nullptr;      // the occupant's own weapon (useChildHud)
+	int cameraMode = 1;                                // game::camera::Mode (1 Inside, 2 Nose, 3 Chase ...)
+	bool projectileCamera = false;                     // the view rides a guided round
+	bool zoomed = false;
+	bool sprintTest = false; // guiSprintTest: 0x007a01e0's argument
+};
+int vehicleGuiIndex(const VehicleGuiInput& in);
+// vehicleHud.useVehicleCameraRotation (block +0xc0, the template's +0x108,
+// getter slot 0xdc; the sentry guns and the drop pod): the map node
+// (0x00793b60, at 0x00794f03) turns the object's icon by the yaw of its
+// first Camera child (0x005c6430 with class 0x9472, 0x00998670) instead
+// of its own. The name of the yaw bundle (a RotationalBundle) that carries
+// that camera, depth first from the template; "" when the flag is off, or
+// no camera hangs under one (the icon keeps the object's yaw).
+std::string cameraRotationBundle(const world::ObjectTemplate& t, const world::ObjectTemplateManager& templates);
 // A numbered frame of an icon without an extension (mini_titanSilo +
 // 2 -> mini_titanSilo_02.dds); a name with one stays.
 std::string iconFrame(const std::string& icon, int frame);

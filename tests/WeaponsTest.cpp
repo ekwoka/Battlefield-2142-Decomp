@@ -1,4 +1,5 @@
 // Firearms and projectiles.
+#include "Animation/FirstPerson.h"
 #include "Game/Weapons.h"
 #include "Physics/MaterialManager.h"
 #include "TestMain.h"
@@ -1257,4 +1258,126 @@ TEST(World_PhysicsGripFlags)
 	CHECK(world::physicsGripFlags("1024") == 1 && world::physicsGripFlags("junk") == 1);
 	CHECK(std::string(world::physicsGripFlagName(0x10)) == "PGFRollGripWhenOccupied");
 	CHECK(std::string(world::physicsGripFlagName(6)) == "PGFNoGrip");
+}
+
+// fire.allowZoomOnROF (0x005d3c40 / 0x005d3b00): between rounds the fire
+// component keeps the firearm busy for a zoom press unless it is set; a
+// reload is busy either way.
+TEST(Weapons_ZoomBusyBetweenRounds)
+{
+	game::FireArmSettings settings;
+	settings.roundsPerMinute = 40; // a bolt-action's 45 ticks a round
+	settings.magSize = 5;
+	game::FireArm rifle(settings);
+	CHECK(!rifle.cycling() && !rifle.zoomBusy());
+	CHECK(rifle.tick(1 / 30.0f, true)); // a round
+	CHECK(rifle.cycling() && rifle.zoomBusy());
+	for (int tick = 0; tick < 44; ++tick) {
+		rifle.tick(1 / 30.0f, false);
+	}
+	CHECK(rifle.zoomBusy()); // 44 ticks on: the next round's tick not yet come
+	rifle.tick(1 / 30.0f, false);
+	CHECK(!rifle.cycling() && !rifle.zoomBusy());
+	settings.allowZoomOnROF = true; // eu_sni, as_sni, unl_adv_sni
+	game::FireArm sniper(settings);
+	CHECK(sniper.tick(1 / 30.0f, true));
+	CHECK(sniper.cycling() && !sniper.zoomBusy());
+	world::ObjectTemplateManager templates;
+	templates.registerType(2, "GenericFireArm");
+	world::ObjectTemplate* t = templates.create("GenericFireArm", "eu_sni");
+	t->settings()["fire.allowZoomOnROF"] = "1";
+	CHECK(game::FireArmSettings::fromTemplate(*t).allowZoomOnROF);
+	CHECK(!game::FireArmSettings::fromTemplate(*templates.create("GenericFireArm", "eu_ar")).allowZoomOnROF);
+	// The zoom press itself (0x005c50e0): taken unless busy without zoomWhenBusy.
+	CHECK(rifle.tick(1 / 30.0f, true));
+	anim::ZoomSettings zoom;
+	CHECK(zoom.takesPress(sniper.zoomBusy(), false) && !zoom.takesPress(rifle.zoomBusy(), false));
+	zoom.zoomWhenBusy = true;
+	CHECK(zoom.takesPress(rifle.zoomBusy(), false));
+}
+
+// ammo.abilityCost on a ReplenishingAmmoComp (0x005d81d0, 0x005d79a0): a
+// hub's throw costs its battery, and its magazine comes back only with a
+// battery of at least the cost.
+TEST(Weapons_HubNeedsAFullBattery)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(2, "GenericFireArm");
+	world::ObjectTemplate* t = templates.create("GenericFireArm", "Unl_Hub_Ammo");
+	t->components().push_back("ReplenishingAmmoComp");
+	t->settings()["ammo.magSize"] = "1";
+	t->settings()["ammo.reloadTime"] = "0.7";
+	t->settings()["ammo.autoReload"] = "1";
+	t->settings()["ammo.abilityCost"] = "1";
+	const game::FireArmSettings settings = game::FireArmSettings::fromTemplate(*t);
+	CHECK(settings.replenishing && settings.abilityCost == 1);
+	game::FireArm hub(settings);
+	hub.setBattery(1);
+	CHECK(hub.tick(1 / 30.0f, true)); // thrown
+	CHECK(std::fabs(hub.takeBatteryCost() - 1) < 1e-6f && hub.takeBatteryCost() == 0);
+	CHECK(!hub.reloading()); // no battery left: no reload
+	float battery = 0;
+	int ticks = 0;
+	for (; ticks < 600 && hub.roundsInMag() == 0; ++ticks) {
+		battery = std::min(1.0f, battery + 0.2f / 30); // a kit's abilityRestoreRate 0.2
+		hub.setBattery(battery);
+		hub.tick(1 / 30.0f, false);
+	}
+	CHECK(hub.roundsInMag() == 1);
+	CHECK(ticks > 150 && ticks < 180); // five seconds to a full battery, then the 0.7 s reload
+	// The defibrillator's 0 costs nothing and doesn't wait.
+	t->settings()["ammo.abilityCost"] = "0";
+	game::FireArm defib(game::FireArmSettings::fromTemplate(*t));
+	CHECK(defib.tick(1 / 30.0f, true) && defib.takeBatteryCost() == 0);
+	// Without the component the cost is not read.
+	world::ObjectTemplate* plain = templates.create("GenericFireArm", "plain");
+	plain->settings()["ammo.abilityCost"] = "1";
+	CHECK(!game::FireArmSettings::fromTemplate(*plain).replenishing && game::FireArmSettings::fromTemplate(*plain).abilityCost == 0);
+}
+
+// seek.directionBonus (0x004cf290): the cost angle x bonus x 500 +
+// (1 - bonus) x distance; detonateDistanceToTarget, the RotationalPoint
+// collision offset and a hovering ForceObject's rows are read.
+TEST(Weapons_SeekBonusFuseOffsetAndHoverSettings)
+{
+	CHECK(game::seekCost(0.5f, 100, 0) == 100);
+	CHECK(std::fabs(game::seekCost(0.1f, 100, 0.8f) - (40 + 20)) < 1e-3f);
+	// With 0.8 a target 20 m away 0.3 rad off loses to one 200 m away on the heading.
+	CHECK(game::seekCost(0.3f, 20, 0.8f) > game::seekCost(0.0f, 200, 0.8f));
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "GenericProjectile");
+	templates.registerType(3, "ForceObject");
+	world::ObjectTemplate* aa = templates.create("GenericProjectile", "eu_aa_missile");
+	aa->settings()["seek.targetType"] = "TTHeat";
+	aa->settings()["seek.directionBonus"] = "0.8";
+	CHECK(game::ProjectileSettings::fromTemplate(*aa).directionBonus == 0.8f);
+	world::ObjectTemplate* mine = templates.create("GenericProjectile", "eu_ifv_laserguided_mine");
+	mine->settings()["detonation.detonateDistanceToTarget"] = "3";
+	mine->settings()["centerOfCollisionOffset"] = "0/-0.12/0";
+	mine->settings()["physicsType"] = "RotationalPoint";
+	const auto m = game::ProjectileSettings::fromTemplate(*mine);
+	CHECK(m.detonateDistanceToTarget == 3 && m.collisionOffset.y == -0.12f && !m.hover.present);
+	// A Mesh round doesn't read the offset (the decoy, the EMP mine).
+	world::ObjectTemplate* decoy = templates.create("GenericProjectile", "Bp1_Decoy");
+	decoy->settings()["centerOfCollisionOffset"] = "0/0.1/0";
+	decoy->settings()["physicsType"] = "Mesh";
+	CHECK(game::ProjectileSettings::fromTemplate(*decoy).collisionOffset.y == 0);
+	world::ObjectTemplate* fo = templates.create("ForceObject", "eu_ifv_laserguided_mine_FO");
+	fo->settings()["regulatePosY"] = "-0.5/1.5";
+	fo->settings()["targetPosition"] = "0/2/0";
+	fo->settings()["relativeYCollisionGroupInverse"] = "3";
+	fo->settings()["enableOnStartMessage"] = "1";
+	const auto h = game::projectileHover(*fo);
+	CHECK(h.present && h.enableOnStartMessage && h.height == 2 && h.tolerance == 0.5f && h.a == -0.5f && h.b == 1.5f
+		&& h.relativeY == 3);
+	// The regulator's step: 30 (2a v + (a^2 + b^2)(goal - y)) a second.
+	CHECK(std::fabs(game::hoverVelocity(h, 0, 0, 2, 1 / 30.0f) - 5) < 1e-4f);
+	CHECK(std::fabs(game::hoverVelocity(h, 2, 3, 2, 1 / 30.0f) - 0) < 1e-4f);
+	// Held under gravity it settles where 75 (goal - y) = 14.73: 0.2 m low.
+	float y = 0, v = 0;
+	for (int tick = 0; tick < 300; ++tick) {
+		v = game::hoverVelocity(h, y, v, 2, 1 / 30.0f) + physics::tuning::kGravity / 30;
+		y += v / 30;
+	}
+	CHECK(std::fabs(y - (2 + physics::tuning::kGravity / 75)) < 0.02f);
 }

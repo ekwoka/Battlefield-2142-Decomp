@@ -298,6 +298,18 @@ TEST(Commander_OrbitalStrike)
 	// nothing yet after 3 s, the blast by 6.
 	field.run(3);
 	CHECK(field.alive(near) && field.alive(edge));
+	// The firearm fired once, 500 m over the target: its event 0 goes to
+	// GEB_emp_strike there (the effects layer, ObjectEffects::weaponFiredAt).
+	const auto fired = world.takeStrikeFires();
+	CHECK(fired.size() == 1);
+	if (fired.size() == 1) {
+		std::string name = fired[0].fireArm;
+		std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return std::tolower(c); });
+		CHECK(fired[0].asset == station && name == "commander_emp_strike_genericfirearm");
+		CHECK(std::fabs(fired[0].at.x) < 1e-3f && std::fabs(fired[0].at.z - 50) < 1e-3f
+			&& std::fabs(fired[0].at.y - world.terrainHeight(0, 50) - 500) < 1);
+	}
+	CHECK(world.takeStrikeFires().empty());
 	field.run(3);
 	// Its projectile (damage 3000) kills the soldier it lands on; its blast
 	// is an EMP (detonation.isEMPWeapon: the detonation hands it to the

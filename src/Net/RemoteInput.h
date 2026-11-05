@@ -40,6 +40,7 @@ inline PlayerInput playerInputFrom(const game::SoldierInput& in, float previousA
 	out.set(kPIUse, in.use ? 1.0f : 0.0f);
 	out.set(kPIToggleFireRate, in.toggleFireRate ? 1.0f : 0.0f);
 	out.set(kPIReload, in.reload ? 1.0f : 0.0f);
+	out.set(kPIMouseLook, in.mouseLook ? 1.0f : 0.0f);
 	out.set(kPIAction, in.jump ? 1.0f : 0.0f);
 	out.set(kPINextItem, in.itemStep > 0 ? 1.0f : 0.0f);
 	out.set(kPIPrevItem, in.itemStep < 0 ? 1.0f : 0.0f);
@@ -83,6 +84,7 @@ inline game::SoldierInput soldierInputFromMove(const PlayerMove& move, MoveInput
 	input.jump = move.trigger(kPIAction);
 	input.toggleFireRate = move.trigger(kPIToggleFireRate); // held: the world acts on the press
 	input.reload = move.trigger(kPIReload);                 // the same
+	input.mouseLook = move.trigger(kPIMouseLook);           // held (0x00611c80 tests its bit 0x800 and > 0.5)
 	input.itemStep = move.trigger(kPINextItem) ? 1 : move.trigger(kPIPrevItem) ? -1 : 0; // the wheel, each move
 	input.pose = move.trigger(kPILie) ? game::SoldierPose::Prone
 		: move.trigger(kPICrouch)     ? game::SoldierPose::Crouch

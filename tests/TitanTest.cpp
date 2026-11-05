@@ -9,6 +9,7 @@
 #include "TitanLevel.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -774,4 +775,105 @@ TEST(Titan_GunHubsRepairedOutOfTheWreck)
 	CHECK(level.world->hitPoints(console) <= 0);
 	CHECK(!level.world->repair(console, 50, engineer));
 	CHECK(level.count("TitanPartRepaired") == 0);
+}
+
+// The forcefield's Radio destroyedGameEvent 1 (eu_forcefield,
+// as_titan_forcefield): its wreck (0x00654120's message 0x18, 0x0063c6a0)
+// sends game event 1 to every spawner, which switches on the map's
+// activateOnEvent 1 spawners (0x005ad470; Minsk's APC pods). The retail
+// Titans start asleep (isSleeping, 0x005f6ba0).
+TEST(Titan_ShieldDownSwitchesOnThePodSpawners)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Minsk", 48);
+	if (!level.loaded) {
+		return;
+	}
+	level.run(0.5f);
+	const auto waiting = [&] {
+		int on = 0, off = 0;
+		for (const auto& spawner : level.world->spawners()) {
+			if (spawner->settings().activateOnEvent == 1) {
+				(spawner->active() ? on : off) += 1;
+			}
+		}
+		return std::make_pair(on, off);
+	};
+	const auto before = waiting();
+	std::fprintf(stderr, "  activateOnEvent 1 spawners: %d on, %d off\n", before.first, before.second);
+	CHECK(before.first == 0 && before.second >= 5);
+	for (int team = 1; team <= 2; ++team) {
+		CHECK(level.titan(team) && level.world->bodyAsleep(level.titan(team)->object));
+	}
+	const auto* eu = level.titan(2);
+	level.world->setHitPoints(eu->object, 6e6f * 0.59f);
+	level.run(0.5f);
+	const auto after = waiting();
+	std::fprintf(stderr, "  after the EU shield: %d on, %d off\n", after.first, after.second);
+	CHECK(after.first == before.second && after.second == 0);
+}
+
+// setIfTitanChangeToWeapon (pod_launcher_cq's "pod_launcher 250", the
+// firearm's fire press 0x005c50e0): within 250 m of a Titan (across x and
+// z) an APC's pod seat fires its pod_launcher (eu_pod, the Titan's
+// boarding pod) instead; farther off its own pod_launcher_cq (eu_pod_cq).
+TEST(Titan_PodSeatsChangeToTheTitanPodNearATitan)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Minsk", 48);
+	if (!level.loaded || !level.templates.find("eu_apc_pods")) {
+		return;
+	}
+	level.run(0.5f);
+	const auto* eu = level.titan(2);
+	CHECK(eu != nullptr);
+	if (!eu) {
+		return;
+	}
+	const physics::Vec3 titanAt = eu->position;
+	const float along = std::sqrt(titanAt.x * titanAt.x + titanAt.z * titanAt.z);
+	for (const float off : {150.0f, 450.0f}) {
+		// Towards the map's middle from under the Titan.
+		const float x = titanAt.x - titanAt.x / along * off, z = titanAt.z - titanAt.z / along * off;
+		world::Object* apc =
+			level.objects.create(level.templates.find("eu_apc_pods"), {x, level.world->terrainHeight(x, z) + 2.5f, z});
+		apc->setTeam(2);
+		level.run(2 / 30.0f);
+		const int player = level.world->addPlayer(off < 250 ? "Near" : "Far", 2, false);
+		level.world->setSpawnVehicle(player, apc->id());
+		CHECK(level.world->spawnSoldier(player));
+		// A pod seat (EU_APC_Podcannon1_pods..4).
+		int podSeat = -1;
+		const auto seats = level.world->vehicleSeats(apc->id());
+		for (size_t i = 0; i < seats.size() && podSeat < 0; ++i) {
+			std::string name = seats[i].name;
+			std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			podSeat = name.find("podcannon") != std::string::npos ? static_cast<int>(i) : -1;
+		}
+		CHECK(podSeat > 0);
+		game::SoldierInput input;
+		input.switchSeat = podSeat + 1;
+		level.world->setInput(player, input);
+		level.run(1 / 30.0f);
+		level.world->setInput(player, {});
+		level.run(1 / 30.0f);
+		game::GameWorld::PlayerInfo info;
+		CHECK(level.world->playerInfo(player, info) && info.vehicle == apc->id() && info.seat == podSeat);
+		CHECK(level.world->launchPod(player));
+		std::string pod;
+		for (const auto& p : level.world->pods()) {
+			if (p.player == player) {
+				const world::Object* o = level.objects.find(p.object);
+				pod = o && o->objectTemplate() ? o->objectTemplate()->name() : "";
+			}
+		}
+		std::fprintf(stderr, "  %.0f m from the Titan: %s\n", off, pod.c_str());
+		CHECK(off < 250 ? pod == "eu_pod" : pod == "eu_pod_cq");
+	}
 }

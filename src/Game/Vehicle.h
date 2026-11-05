@@ -326,6 +326,15 @@ public:
 		float startDelay = 0, waited = 0;
 		int input = -1;
 		float force = 0, constantForce = 0, maxForce = 0;
+		// useAbsoluteDirection (+0x255): the force along the part's own
+		// placement's z (slot 0xe4 0x006f6dc0: its matrix relative to its
+		// parent) rather than its world z (the parachutes' ForceDown: down
+		// whatever the canopy's tilt). rotationalForce (0x00546dc1): times
+		// the input (+0x180), torque pairs about the world axes
+		// (0x0062ac00): x yaws, y pitches, z rolls (the parachute's
+		// RotateForceObject: 0.5 on PIYaw).
+		bool absolute = false;
+		Vec3 rotational;
 	};
 	// MechLegs (the object's update 0x00650e90 with its input handler
 	// 0x00650b20, and the MechLegs response 0xc432, vtable 0x009944b8).
@@ -442,6 +451,9 @@ public:
 	// again (0x00645790 with the template's sprintDissipationTime +0x45c,
 	// sprintRecoverTime +0x458, sprintLimit +0x460, 1, 1; 0x00645780 clears
 	// its flags, the stamina stays).
+	// The root object's radius (object slot 0x90): the arm of a
+	// ForceObject's rotationalForce pairs (0x0062ac00).
+	void setObjectRadius(float radius) { m_objectRadius = radius; }
 	void setOccupied(bool occupied)
 	{
 		if (occupied && !m_occupied) {
@@ -541,6 +553,7 @@ private:
 	bool m_hasLegs = false;
 	Regulator m_vertical; // regulateVerticalPos (0x390) on its input (0x374)
 	bool m_occupied = false;
+	float m_objectRadius = 1;
 	float m_sprintFactor = 2.5f; // the PCO template's (+0x464; the constructor's 2.5)
 	SprintStamina m_sprint;
 	bool m_sprintHeld = false;

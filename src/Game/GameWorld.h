@@ -16,9 +16,11 @@
 // hold the spawn back, and after five tries they are removed unless a
 // soldier is within 7 m (ObjectSpawner::SpotTest, GameWorld::testSpawnSpot).
 // The spot's drop onto what is under it (0x005ad8b0, the test's matrix
-// only) is GameWorld::dropSpawnSpot. Not rewritten yet: activation by
-// events. useButtonRadius (waiting for a player to use the spawner) is
-// set by no shipped level.
+// only) is GameWorld::dropSpawnSpot. Activation by events: an armoured
+// object destroyed with a Radio destroyedGameEvent N sends N + 0x1c to
+// every spawner (0x0063c6a0 -> 0x005ad470; ObjectSpawner::gameEvent,
+// GameWorld::destroyedGameEvent). useButtonRadius (waiting for a player
+// to use the spawner) is set by no shipped level.
 #pragma once
 
 #include "Animation/AnimationSystem.h"
@@ -40,6 +42,7 @@
 #include <array>
 #include <deque>
 #include <map>
+#include <tuple>
 #include <optional>
 #include <memory>
 #include <set>
@@ -100,7 +103,8 @@ struct SpawnerSettings {
 	bool spawnDelayAtStart = false; // 0x2fb: wait a spawn delay before the first spawn
 	bool active = true;             // 0x2fc
 	bool forwardTeamChangeToSpawnedVehicles = false;
-	int activateOnEvent = -1;
+	int activateOnEvent = -1;   // 0x300: off at the round's start, on at that game event
+	int deActivateOnEvent = -1; // 0x304: off at that game event
 	std::string objectTemplates[3]; // per team (0 unused): setObjectTemplate
 
 	static SpawnerSettings fromTemplate(const world::ObjectTemplate& objectTemplate);
@@ -126,6 +130,12 @@ public:
 
 	// 0x005ae490.
 	void setTeam(int team, RoundState state);
+	// The spawner's message handler (0x005ad470, slot 0x100) for game event
+	// `event` (message event + 0x1c): its activateOnEvent switches it on
+	// (+0x1cc), else its deActivateOnEvent off. On again, it spawns as the
+	// round's reset left its countdown (at once without spawnDelayAtStart).
+	void gameEvent(int event);
+	bool active() const { return m_active; }
 	// 0x005ae580: back to the round's starting state.
 	void reset(Random& random);
 	// 0x005af230: one tick of `seconds`.
@@ -311,7 +321,11 @@ public:
 	// rate, 0x800 when a seat is taken), and its bone parts are posed
 	// (partBone): the legs drawn walking, and the seats on the torso
 	// (seatMount's bone) carried by it (animateRemoteSeated).
-	void animateRemoteVehicle(uint32_t object, const physics::Vec3& velocity, bool occupied, float seconds);
+	// `legMessages`: the walker's legs' messages from the server's MechLegs
+	// networkable (0x00650530: 0x80 / 0x100 / 0x400 / 0x200, 0x10 the
+	// crouch), -1 when none came.
+	void animateRemoteVehicle(uint32_t object, const physics::Vec3& velocity, bool occupied, float seconds,
+		int legMessages = -1);
 	// A joined client's vehicles' part turns (the RotationalBundle
 	// networkables of their ghosts, net::RemoteWorld::partPose by the
 	// client's object): the turret a remote seat rides and the grips its
@@ -607,6 +621,36 @@ public:
 	// EffectBundle whose startOnEffects has bit 9 + N starts: 0x0061a4e0),
 	// as those bits by object.
 	std::map<uint32_t, uint32_t> takeObjectEffectEvents() { return std::exchange(m_objectEffectEvents, {}); }
+	// The vehicles' weapons that fired a round since the last call (their
+	// template names, by vehicle): the fire's event 0 to the weapon's
+	// children (ObjectEffects: the muzzle bundles, GroundEffectBundles).
+	std::map<uint32_t, std::vector<std::string>> takeObjectWeaponFires() { return std::exchange(m_objectWeaponFires, {}); }
+	// A joined client's round of another player's seat gun (client::
+	// RemoteSeatGuns, from the player's networked fire state as the client's
+	// update 0x00590e10 hands it to the control object, 0x004cc7a0): its
+	// Fire sound (DefaultSoundComp, 3P) and the fire's event 0 to the gun's
+	// children (FireComp 0x005f31d0's third-person list +0x144).
+	void remoteGunFired(uint32_t vehicle, const std::string& weapon, int player, const physics::Vec3& at)
+	{
+		m_weaponSounds.push_back({WeaponSoundEvent::Fire, player, vehicle, weapon, at});
+		if (m_weaponSounds.size() > 256) {
+			m_weaponSounds.erase(m_weaponSounds.begin(), m_weaponSounds.end() - 256);
+		}
+		if (std::vector<std::string>& fires = m_objectWeaponFires[vehicle]; fires.size() < 8) {
+			fires.push_back(weapon);
+		}
+	}
+	// The commanders' strike firearms that fired since the last call: the
+	// asset object, its firearm (its template name) and where 0x005a0bf0
+	// moved it (orbitalBombardmentHeight over the target). The fire's event
+	// 0 goes to that firearm's children there (FireComp 0x005f31d0): the EMP
+	// strike's GEB_emp_strike (ObjectEffects::weaponFiredAt).
+	struct StrikeFired {
+		uint32_t asset = 0;
+		std::string fireArm;
+		physics::Vec3 at;
+	};
+	std::vector<StrikeFired> takeStrikeFires() { return std::exchange(m_strikeFires, {}); }
 	// A walker's animation system's playing bundles (none without one).
 	std::vector<std::string> objectAnimation(uint32_t object) const;
 	// The material a soldier's footstep set is for (0x007fda00; -1 before
@@ -928,6 +972,12 @@ public:
 	// player's ability block +0x44 by 0x005706b0 and read only by the zoom's
 	// fine tuning 0x005da890): UnlockEU / UnlockPac_ReconSni1.
 	bool zoomUpgrade(int player) const;
+	// A player's squad-report reading (0x005088f0 over each recipient's
+	// ability block, slot 0x2a0): the reveal time (+0xc, 3 s; 6 with the
+	// recon's UnlockEU / Pac_ReconSni1 networkableHudRevealTime) and
+	// whether cloak reports reach him (+0x12, the support's
+	// networkableHudShowCloaked unlock). False for no such player.
+	bool squadReportAbility(int player, int& revealTime, bool& showCloaked) const;
 	// The radio filter of `player`'s voice (the radio handler 0x0042e0c0):
 	// the soundFilter of the nearest PlayerControlObject over his control
 	// object (PCO +0x424, executor 0x004fd0c8; slot 0xf0 of 0xc4c5,
@@ -1066,6 +1116,10 @@ public:
 	// local matrix (in its parent's frame) from the bone (0x0063d470), in
 	// place of its template placement.
 	bool partBone(uint32_t object, const std::string& part, anim::Matrix& local) const;
+	// A LookAtObject part (the EU FAV's rear arms, 0x0064bc00): its local
+	// matrix in its parent's frame, turned to face nameToLookAt's object at
+	// offsetToLookAt; partBone answers with it.
+	bool lookAtPart(uint32_t object, const std::string& part, anim::Matrix& local) const;
 	// The bundles an object's body system plays, by priority.
 	std::vector<std::string> playingAnimations(uint32_t object) const;
 	// The animation an object plays (a .baf path), or empty.
@@ -1193,6 +1247,10 @@ public:
 		// the bundle counter-turns with the hull (0x005644b0, see stepGunner).
 		float regulateYaw = 0, yawSpeed = 0;
 		float ignoreParentYaw = 0; // the yaw bundle's ignoreParentRotation x (+0x344, see stepGunner)
+		// The yaw bundle's automaticYawStabilization (+0x308; the tanks'
+		// cupolas, the walkers' AA cannons and second gun): see
+		// stabilizeGunYaws.
+		bool yawStabilized = false;
 		// The yaw bundle's surpressPlayerInputVector x (+0x354; the air
 		// transports' gun mounts 0.6, the static AP / AV guns' cockpits 0.1):
 		// see stepGunner.
@@ -1208,6 +1266,9 @@ public:
 		std::string camera;
 		RotationAxis cameraYaw, cameraPitch;
 		physics::Vec3 cameraPivot;
+		// The camera's toggleMouseLook (Camera +0x38c: the tanks', the AT
+		// walkers' and the gunships' pilots'): see stepSeatCamera.
+		bool cameraToggleMouseLook = false;
 		// Leaving (the seat's PlayerControlObject template, offsets as its
 		// save 0x005cb1xx gives them plus 8): its own place in the vehicle
 		// (frameAt, frameTurn), soldierExitLocation (+0x308) and
@@ -1322,7 +1383,10 @@ public:
 	// presses or lets go at their target (AIDLL 0x1009a1d0, 0x1009a2a0).
 	// `seconds`: how long the clients' minimaps show them (the report's
 	// +0x14: a recon drone's pulse its template's +0x70, the revealTime).
-	void reportBattlefieldObjects(int reporter, const std::vector<int>& players, float seconds = 3);
+	// `kind` the report's +0xc: 0 a sighting, 2 a cloak switched on or
+	// off (0x005d92c0), which the server sends on only as kind 1 to a
+	// squad with a showCloaked reader (HostedGame::sendBattlefieldReports).
+	void reportBattlefieldObjects(int reporter, const std::vector<int>& players, float seconds = 3, int kind = 0);
 	// The reports made since the last call, for a server to send each to
 	// the reporter's squad (event 0x41: 0x005088f0 posts a copy to each,
 	// 0x005087b0; the client's 0x00508590 puts them on its minimap).
@@ -1330,6 +1394,7 @@ public:
 		int reporter = -1;
 		int team = 0, squad = 0; // the reporter's
 		int seconds = 3;
+		int kind = 0;
 		std::vector<int> players;
 	};
 	std::vector<BattlefieldReport> takeBattlefieldReports() { return std::exchange(m_battlefieldReports, {}); }
@@ -1558,6 +1623,12 @@ public:
 	const std::vector<Strike>& strikes() const { return m_strikes; }
 	// Supply crates dropped by the commanders (their objects).
 	std::vector<uint32_t> supplyCrates() const;
+	// A supply object's storage for its name tag's bar (RendDX9 0x1016c1e0
+	// with Nametag.showSupply: the SupplyObject's +0x194 over its
+	// sharedStorageSize +0x2bc, 0..1) and the bar's kind (the tag's +0xc8:
+	// 2 with healSpeed +0x2a8 above 0, else 4 with refillAmmoSpeed +0x2ac,
+	// else 3). False when `object` isn't a crate or a deployed hub here.
+	bool supplyStorage(uint32_t object, float& share, int& kind) const;
 	// The gameLogic settings for the tools (GameLogicInit.con and the
 	// constructor 0x004d69d0's defaults).
 	struct CommanderSettings {
@@ -1712,6 +1783,27 @@ public:
 		int nametagPushes = 0;
 	};
 	std::vector<TitanInfo> titans() const;
+	// The rolling-surface loops (SeatBehaviours.cpp; the PCO's contact sound
+	// object, 0x005c64a0 / 0x005c65d0 / 0x005c6510, stepped by its update
+	// 0x005c8e70): a vehicle whose template has groundContactVolume over 0
+	// (+0x474: the APCs, tanks, FAVs, the heavy IFV and the hover tank, all
+	// 1) loops its wheels' material sound, the material cell (the first
+	// WheelEffectBundle's own material, the ground under it) sound 0
+	// (S_GroundContact_Dirt, _Tarmac, ...), its envelopes at `input`: the
+	// root's speed's (|v| - 0.1) / 30 within 0..1, eased by 0.08 a tick and
+	// 0 off the ground.
+	struct RollingSound {
+		uint32_t vehicle = 0;
+		std::string sound;
+		float input = 0;
+		physics::Vec3 position, velocity;
+	};
+	std::vector<RollingSound> rollingSounds() const;
+	// The heavy IFV's shield cells (SeatBehaviours.cpp): its armoured
+	// children with hudRepairCellNo (+0x204 getter, armour slot 0x168; not
+	// -1), in the root's armour order, each true while its armour stands
+	// (state 0): the vehicle HUD's cells (0x007a1e50 -> its +0x336 + n).
+	std::vector<bool> repairCells(uint32_t vehicle) const;
 	// The AI runs on the server (AIDLL's interface 0xb47ce4, its slots 0x18
 	// and 0x20): a wreck's armour then drains three times as fast (0x00652380).
 	void setAiRunning(bool on) { m_aiRunning = on; }
@@ -1737,6 +1829,10 @@ public:
 	// and the geometry its wreck shows (-1: its own; 1: a render object of
 	// two geometries shows its second, 0x00651c60's slot 0xcc(1)).
 	bool propWrecked(uint32_t object) const;
+	// The geometry a kit's mesh shows instead of its default (0x0056cc50:
+	// the mesh's sub-geometry, slot 0x6c; one past its count falls back to
+	// the default): its wearer's seat's crewKitIndex, -1 for the default.
+	int kitGeometry(uint32_t kitObject) const;
 	int propGeometry(uint32_t object) const;
 	// Whether heals and repairs may mend `object` (gameLogic slot 0x108's
 	// test 0x004cc380 and the armour's 0x00655a00): its armour template's
@@ -1894,6 +1990,7 @@ private:
 			physics::Vec3 velocity;
 			float turn = 0, lastYaw = 0;
 			bool occupied = false;
+			int legMessages = -1; // the server's legs' (animateRemoteVehicle), -1 none
 		} remoteDrive;
 		// Seats: who sits in each (player id, -1 for nobody) and the guns.
 		std::vector<int> occupants;
@@ -1923,14 +2020,31 @@ private:
 			physics::Mat3 hullTurn;
 			float pitchOffset = 0;
 			uint64_t gunnedTick = 0;    // the last tick its seat was taken (stepGunner)
+			float stabilizedHeading = 0; // the bundle's parent's yaw last undone (stabilizeGunYaws)
 			std::vector<Arm> arms;
 			int active[3] = {-1, -1, -1}; // each group's active weapon (PCO +0xa8 + group x 4), -1 none
 			bool specialHeld = false;     // specialToggleWeaponInput held (PCO +0x14c)
 			bool toggleWas = false;       // c_PIToggleWeapon last tick
 			bool selectWas = false;       // a c_PIWeaponSelect key last tick
 			int recoilWeapon = -1;        // the weapon whose slide gunRecoil holds
+			// An active weapon's blockInputOnRotBundle names the seat's yaw or
+			// pitch bundle: that bundle ignores the gunner (stepGunner).
+			bool yawBlocked = false, pitchBlocked = false;
 		};
 		std::vector<Gun> guns;
+		// Armoured children with armor.mirrorParentDamageLevel or
+		// hudRepairCellNo (the heavy IFV's seven ifv_shield_the_generator,
+		// 110 hit points each; SeatBehaviours.cpp).
+		struct Cell {
+			const world::ObjectTemplate* t = nullptr;
+			float hitPoints = 0, maxHitPoints = 0;
+			bool wreck = false;
+			bool mirror = false;   // mirrorParentDamageLevel (getter slot 0xac)
+			int hudCell = -1;      // hudRepairCellNo
+			float timer = 0.1f;    // the armour's +0x288 (+0x28c: 0.1 s)
+		};
+		std::vector<Cell> cells;
+		bool cellsBuilt = false;
 		// Each seat's camera angles and speeds (SeatLayout::camera), degrees.
 		struct Look {
 			float yaw = 0, pitch = 0, yawSpeed = 0, pitchSpeed = 0;
@@ -2037,6 +2151,13 @@ private:
 		float submerged = 0;
 		// collisionGroups (template +0x104 -> response +0x1c, slot 0x50).
 		uint32_t collisionGroups = 0;
+		// otherCollisionLod (SimpleObject +0xec, executor 0x0051ee4d; -1,
+		// that is 1, by default; the node's slot 0x1a4): the LOD of the
+		// other object its mesh meets (MeshCollision.cpp); its collision
+		// mesh and material map for the others' LODs it may be asked for.
+		int otherCollisionLod = 1;
+		const physics::CollisionMeshFile* meshFile = nullptr;
+		std::vector<uint32_t> meshMaterials;
 		// handleCollisionSpeed (template +0x200, default 1; node +0x14).
 		float handleCollisionSpeed = 1;
 		// The response's contact effect and contact sound (0x006b75d0:
@@ -2101,6 +2222,14 @@ private:
 	static bool asleep(const Body& body) { return body.sleep.asleep() || body.held; }
 	void stepSleep(Body& body, float seconds);
 	void destroyVehicle(Body& body, int attacker);
+	// The armour's wreck (0x00654120) sends its object message 0x18; the
+	// object's handler (0x0063c6a0) on the server, for an armoured object
+	// whose Radio part has destroyedGameEvent N (Radio template +0x1f8, -1
+	// none: eu_forcefield's and as_titan_forcefield's 1), sends N + 0x1c to
+	// every spawner (the game logic's list, slot 0x1ec; 0x005ad470):
+	// a Titan's shield down switches on the gpm_ti maps' activateOnEvent 1
+	// spawners (the APC pods) and off Verdun's deActivateOnEvent 1 FAVs.
+	void destroyedGameEvent(const world::ObjectTemplate& destroyed);
 	void stepVehicleDamage(float seconds);
 	// A vehicle's armour effects (VehicleParts.cpp): its template's lists
 	// (cached), the change after its hit points moved (0x00654730 /
@@ -2152,6 +2281,34 @@ private:
 	void playHitReaction(Player& victim, int node, const physics::Vec3& direction);
 	// The seats' guns nobody uses (ammo.reloadWithoutPlayer; TemplateBehaviours.cpp).
 	void stepUnmannedGuns(float seconds);
+	// The vehicles' and seats' template behaviours (SeatBehaviours.cpp):
+	// automaticYawStabilization, the rolling loops, the shield cells.
+	void stepSeatBehaviours(float seconds);
+	void stabilizeGunYaws(Body& body);
+	void stepRollingSound(Body& body);
+	void stepShieldCells(Body& body, float seconds);
+	struct Rolling {
+		// The first two WheelEffectBundles of the tree (0x006bf940 at the
+		// PCO's creation 0x005cd4f0, +0x318 / +0x31c): their material and
+		// the spring (wheel) they hang under.
+		struct Bundle {
+			uint32_t material = 0;
+			int wheel = -1;
+		};
+		std::vector<Bundle> bundles;
+		// The sound object (0x34 bytes): touching (+4), changed (+5), the
+		// ground material (+8) and the bundle's (+0xc), the volume wanted
+		// (+0x10) and eased (+0x2c), the state (+0x20: 0 waiting, 1 on) and
+		// its ticks (+0x24), the sound chosen.
+		bool contact = false, changed = false;
+		int ground = -1;
+		uint32_t own = 0;
+		float wanted = 0, eased = 0;
+		int state = 1, ticks = 0;
+		std::string sound;
+		bool playing = false;
+	};
+	std::map<uint32_t, Rolling> m_rolling;
 	std::vector<LockEvent> m_lockEvents;
 	std::vector<LockTone> m_lockTones;
 	// The close-to scan's state per player (kept over respawns as the
@@ -2264,6 +2421,7 @@ private:
 	// A walker's animation system fed as 0x0063ce30 does (see GameWorld.cpp).
 	void stepObjectAnimation(Body& body, float seconds);
 	std::map<uint32_t, uint32_t> m_objectEffectEvents;
+	std::map<uint32_t, std::vector<std::string>> m_objectWeaponFires;
 	std::vector<RadioHeard> m_radioHeard;
 	std::vector<TakeableChange> m_takeable;
 	const io::FileManager* m_files = nullptr;
@@ -2291,7 +2449,18 @@ private:
 		bool hasVehicleLod = false;
 		std::shared_ptr<physics::CollisionWorld> trunk; // the type-4 faces, or the trunk line
 		bool trunkFromTypeFour = false;
+		const physics::CollisionMeshFile* file = nullptr; // what it was made from (another LOD's faces)
+		std::vector<uint32_t> materials;
 	};
+	// A mesh's faces at another LOD (0 projectiles', 2 soldiers'), its box
+	// and radius (slots 0x54 / 0x50 of that LOD), made when first asked.
+	struct LodFaces {
+		std::shared_ptr<physics::CollisionWorld> mesh;
+		physics::Vec3 boxMin, boxMax;
+		float radius = 0;
+	};
+	std::map<std::tuple<const physics::CollisionMeshFile*, std::vector<uint32_t>, int>, std::shared_ptr<const LodFaces>> m_lodFaces;
+	const LodFaces* lodFaces(const physics::CollisionMeshFile& file, const std::vector<uint32_t>& materials, int lod);
 	struct StaticPart {
 		uint32_t object = 0;
 		bool root = true;    // the object itself, not a template of its tree
@@ -2332,6 +2501,11 @@ private:
 		uint32_t collisionGroups = 0;
 		int team = 0; // a PlayerControlObject's (interface 0xc4c5 slot 0x9c)
 		physics::ShareNode node;
+		// Its otherCollisionLod (what LOD of B it asks for) and its mesh's
+		// source, for B's faces at another's ask (atLod).
+		int otherLod = 1;
+		const physics::CollisionMeshFile* file = nullptr;
+		const std::vector<uint32_t>* materials = nullptr;
 		physics::Vec3 pointVelocity(const physics::Vec3& point) const
 		{
 			return body ? body->body.pointVelocity(point) : physics::Vec3 {};
@@ -2339,6 +2513,10 @@ private:
 	};
 	MeshActor actorOf(Body& body) const;
 	MeshActor actorOf(const StaticPart& part) const;
+	// B as A asks for it (otherCollisionLod): its faces, box and radius at
+	// `lod`; false when its mesh has none there (no pair). Actors without
+	// a mesh source (the Titans' parts) stay at their vehicle LOD.
+	bool atLod(MeshActor& actor, int lod);
 	void collideBodies(float seconds);
 	void collideMover(Body& mover, size_t index, float seconds);
 	// Slot 9 of the mobile mesh response (0x006bb050): A's mesh against
@@ -2447,6 +2625,11 @@ private:
 		bool burstZoomWas = false;
 		bool scopeStabilizer = false;
 		bool zoomUpgrade = false; // hasZoomUpgradeAbility (GameWorld::zoomUpgrade)
+		// ability.networkableHudRevealTime / networkableHudShowCloaked (the
+		// ability block's +0xc, 3 by default, and +0x12; 0x005706b0 copies
+		// an unlock's when not 3 / when set): squadReportAbility.
+		int hudRevealTime = 3;
+		bool hudShowCloaked = false;
 		// The unlocks' Ability lists: damage taken by projectile material
 		// (setMaterialDamageMod) and extra magazines / rounds per item
 		// (addExtraAmmoItem).
@@ -2471,6 +2654,10 @@ private:
 			double chosenAt = 0;   // the component's +0x4c: when the target was taken
 			bool announce = false; // +0x44: locked, "target_aquired" not said yet
 			std::string weapon;    // the weapon looked at (in hand, or the seat's active gun)
+			// The last round fired with target.notifyProjectileOnLostTarget
+			// (+0x9c; the component's +0x50, by serial; 0 none): set at each
+			// shot (0x005e1ee0), freed by the lock's loss (0x005e1b30).
+			uint32_t notifyRound = 0;
 		} lock;
 		double diedAt = 0;          // soldier +0x290: the death's time
 		uint32_t object = 0;
@@ -2503,6 +2690,11 @@ private:
 		std::vector<int> weaponNodes;        // skeleton nodes mesh1, mesh2...
 		uint32_t weaponObject = 0;           // the held weapon, an object of its own
 		uint32_t kitObject = 0;
+		// The kit's geometry index (kit +0x1d0, -1 its default +0x1d4): a
+		// seat's crewKitIndex (PlayerControlObject +0x47c, -1 none; the
+		// gunships' pilot and gunner 12) on entering (0x005cdd60 ->
+		// 0x0056cf50), the default again on leaving (0x00587540).
+		int kitGeometry = -1;
 		// The player's kit time stamp (player +0x230/+0x234, set on a pickup):
 		// a kit is picked up by the use key at most every 2 s.
 		double kitTimeStamp = -1e9;
@@ -2624,6 +2816,15 @@ private:
 	// twist (SoldierControl, 0x0058a6d0).
 	float lookYaw(const Player& player) const;
 	void enterOrLeaveVehicle(Player& player, world::Object& soldier);
+	// The entry search's team test (0x005a98e0, for the use key 0x004bb570
+	// and the spawn points' enterOnSpawn 0x005b24f0 alike): a vehicle may be
+	// entered by a soldier of `team` when its team (the PlayerControlObject
+	// root's slot 0x9c: the first seated player's, else its own) is that
+	// team or none, or when it isn't a PlayerControlObject (template class
+	// 0xc4c2); otherwise only when nobody sits in it (0x005c8b40: a Titan
+	// always counts as manned) and its template isn't lockToTeam (+0x350;
+	// the heavy IFV eu_ifv: an enemy's empty one stays shut).
+	bool mayEnter(const Body& body, int team) const;
 	std::map<std::string, std::unique_ptr<ProjectileSettings>> m_projectileSettings;
 	std::vector<Projectile> m_projectiles;
 	std::vector<Impact> m_impacts;
@@ -2725,7 +2926,17 @@ private:
 	void steerSeeker(Projectile& projectile, float seconds);
 	void wireSettings(Projectile& projectile, const world::ObjectTemplate& firearm) const;
 	void steerClosest(Projectile& projectile, float seconds);
-	void launchLocked(Projectile& projectile, const Player& player) const;
+	// The shot of a lock-on weapon (0x005e1ee0); with the weapon's
+	// target.notifyProjectileOnLostTarget the round is kept (its serial,
+	// the component's +0x50) for the lock's loss to free (stepWeaponLock).
+	void launchLocked(Projectile& projectile, Player& player);
+	// Where a round's seek target lies (the seek's target object's
+	// position, 0x60: a vehicle's MagneticObject for a magnet, the bait
+	// round); false without one.
+	bool seekTargetPoint(const Projectile& projectile, physics::Vec3& at) const;
+	// A round's hovering ForceObject (ProjectileSettings::Hover, 0x0062c920
+	// -> 0x0062b750): its vertical regulation over what lies under it.
+	void hoverProjectile(Projectile& projectile, float seconds);
 	void damage(uint32_t object, float amount, uint32_t projectileMaterial, uint32_t surfaceMaterial,
 		int attacker = -1, bool splash = false); // the attacking player; an explosion's splash
 	std::vector<std::unique_ptr<Player>> m_players; // by id
@@ -3093,8 +3304,10 @@ private:
 		int player = -1; // the commander who called it (the kills are its)
 		float subUp = 0, subRight = 0; // the last sub-projectile's offset (deviation +0xc, +0x10)
 		DeviationBuildUp deviation;    // its firing's build-up (setFireDev)
+		uint32_t asset = 0;            // the asset object whose firearm it is
 	};
 	std::vector<StrikeFire> m_strikeFire; // alongside m_strikes
+	std::vector<StrikeFired> m_strikeFires; // takeStrikeFires
 	struct Crate {
 		uint32_t object = 0;
 		int team = 0;

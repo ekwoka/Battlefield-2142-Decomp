@@ -853,7 +853,8 @@ public:
 	// (Wheel/AirDraftEffectBundle, 0x0061bd20 / 0x0061ce20).
 	void setModifiers(uint32_t anchor, uint32_t tag, float alphaIntensity, float emitScale, float speedScale,
 		float timeScale = 1);
-	// One of them (BundleModifiers' 0..3) of those emitters.
+	// One of them (BundleModifiers' 0..5) of those emitters (5, the sound
+	// intensity, of the bundle's held start sound: bundleLoops).
 	void setModifier(uint32_t anchor, uint32_t tag, int modifier, float value);
 	// Their emit direction's scale (Emitter::directionScale).
 	void setDirectionScale(uint32_t anchor, uint32_t tag, const Vec3& scale);
@@ -879,6 +880,10 @@ public:
 	struct StartedSound {
 		std::string name;
 		Vec3 position;
+		// The bundle it is the start sound of, and that bundle's sound
+		// intensity at the start (modifier 5; 0 unless it sets one).
+		const world::ObjectTemplate* bundle = nullptr;
+		float intensity = 0;
 	};
 	std::vector<StartedSound> takeSounds() { return std::exchange(m_startedSounds, {}); }
 	// Those started since `mark` (soundsStarted() before a spawn), taken.
@@ -892,6 +897,24 @@ public:
 		}
 		return taken;
 	}
+
+	// The looping Sound children (loopCount 0) of the bundles started on
+	// anchors that set their sound intensity, held while their bundle runs. The bundle's "Start" sound
+	// (made by the bundle's constructor 0x00619700) has its volume and pitch
+	// envelopes bound (its slots 0x48 / 0x50) to the bundle's sound
+	// intensity (+0x1d8: modifier 5, set by 0x00618e30 when
+	// SoundIntensityUsed or a mapping is; 0 otherwise, as the constructor
+	// leaves it). Each with a key stable while it plays, where it is now and
+	// that intensity: the caller keeps the loop on while it is listed
+	// (GameSounds::loop). A one-shot detached loop would stop at once
+	// (Sound::release), so these are never in takeSounds.
+	struct BundleLoop {
+		uint64_t key = 0;
+		std::string name;
+		Vec3 position;
+		float intensity = 0;
+	};
+	std::vector<BundleLoop> bundleLoops() const;
 
 	size_t emitters() const { return m_emitters.size(); }
 
@@ -1104,6 +1127,19 @@ private:
 	};
 	std::vector<AttachedBundle> m_attachedBundles;
 	uint32_t m_nextBundle = 0;
+	// A bundle's looping start sound (bundleLoops): its place in the
+	// bundle (local), the bundle's mount on the anchor, the AttachedBundle
+	// driving it (0 none) and the intensity last set.
+	struct HeldSound {
+		uint64_t key = 0;
+		uint32_t anchor = 0, tag = 0, bundle = 0;
+		std::string name;
+		Vec3 localPosition, mountPosition;
+		Mat3 mountRotation;
+		float intensity = 0;
+	};
+	std::vector<HeldSound> m_heldSounds;
+	uint64_t m_nextHeldSound = 0;
 	void stepAttachedBundles(float seconds);
 	// spawnDecal into the set of `set` (an object's id, 0 the world's).
 	bool addDecal(const std::string& name, const Vec3& position, const Vec3& normal, uint32_t surface, uint32_t set);
@@ -1137,6 +1173,11 @@ private:
 // bundle, FromSpeedInDof its forward part (at least 0), FromAltitude the
 // draft's ray length, FromEngine the engine's throttle; a mapping a/b
 // gives 0 at a and 1 at b, clamped.
+//
+// A GroundEffectBundle (0x9486) shows nothing itself: on event 0 (its
+// parent EffectBundle's start, 0x0061a1c0, or its weapon's fire) it looks
+// maxTriggerDistance down its -y and starts the ground's material effect
+// there (0x0061de40; ObjectEffects::groundTrigger).
 //
 // A soldier's breathEffect (Soldier +0x3a0, created with it, 0x00588xxx)
 // is shown while gameLogic.useColdBreath is on and the kit doesn't
@@ -1182,6 +1223,11 @@ public:
 			Vec3 point;
 		};
 		std::vector<WheelContact> wheels;
+		// The weapons in its tree that fired a round this tick (template
+		// names): the fire's event 0 to each weapon's children, which starts
+		// the bundles whose startOnEffects is 0 (0x0061a4e0: the muzzle
+		// flash and smoke) and sets off the GroundEffectBundles (0x0061e090).
+		std::vector<std::string> firedWeapons;
 	};
 	// The ground under a point (wheel and draft bundles): the first hit from
 	// `from` to `to` against the terrain, the water and the objects (not
@@ -1205,6 +1251,13 @@ public:
 	void update(const std::vector<ObjectState>& objects, EffectManager& effects, const PartPose& partPose = {},
 		EffectManager::View view = EffectManager::View::ThirdPerson);
 	size_t tracked() const { return m_objects.size(); }
+	// A firearm's fire away from its object (a commander's strike firearm,
+	// moved over the target by 0x005a0bf0): event 0 to its own children at
+	// `at` / `turn` (the firearm's world place): the bundles whose
+	// startOnEffects is 0 start there, the GroundEffectBundles set off the
+	// ground's effect below (GEB_emp_strike).
+	void weaponFiredAt(const world::ObjectTemplate& weapon, const Vec3& at, const Mat3& turn, EffectManager& effects,
+		EffectManager::View view = EffectManager::View::ThirdPerson);
 
 	// A bundle of a template tree: its place in the root's space.
 	struct Placed {
@@ -1222,7 +1275,14 @@ public:
 		Vec3 lastPoint, lastPointVelocity;
 		bool hasLastPoint = false;
 		// WheelEffectBundle / AirDraftEffectBundle: the ground picks the effect.
-		enum class Kind { Plain, Wheel, AirDraft, Wind } kind = Kind::Plain;
+		enum class Kind { Plain, Wheel, AirDraft, Wind, GroundTrigger } kind = Kind::Plain;
+		// GroundTrigger (a GroundEffectBundle, class 0x9486): the bundle
+		// whose start sets it off (its parent EffectBundle's index here,
+		// -1 when a weapon's fire does), its material (slot 0xbc) and
+		// maxTriggerDistance (+0x23c, 3 by the constructor 0x0061e0b0).
+		int parent = -1;
+		uint32_t material = 0;
+		float maxTriggerDistance = 3;
 	};
 	// The local winds of the objects' WindAffector components this tick
 	// (a template in the tree with the component, placed with its parts):
@@ -1267,6 +1327,14 @@ private:
 	};
 	void updateGround(const ObjectState& object, const Vec3& velocity, Tracked& tracked, size_t index, EffectManager& effects,
 		const PartPose& partPose, EffectManager::View view);
+	// A GroundEffectBundle's event 0 (0x0061de40): the ground below it.
+	void groundTrigger(const ObjectState& object, Placed& bundle, EffectManager& effects, const PartPose& partPose,
+		bool created);
+	// The same from a world point and frame (`ignore`: the object the ray passes).
+	void groundTriggerAt(const Vec3& at, const Mat3& turn, const Placed& bundle, uint32_t ignore, EffectManager& effects);
+	// Starts a plain bundle (its event), then sets off its GroundEffectBundles.
+	void startBundle(const ObjectState& object, Tracked& tracked, size_t index, EffectManager& effects,
+		const PartPose& partPose, EffectManager::View view, bool created);
 	GroundProbe m_probe;
 	MaterialEffect m_materialEffect;
 	std::map<const world::ObjectTemplate*, GroundBundle> m_groundBundles;

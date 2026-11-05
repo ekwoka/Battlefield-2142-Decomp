@@ -50,6 +50,7 @@ struct ViewerOptions {
 		bool use = false; // enter or leave a vehicle
 		bool toggleFireRate = false; // held: c_PIToggleFireRate (the weapon's next fire mode)
 		bool reload = false;         // held: c_PIReload (R), a new magazine on the press
+		bool mouseLook = false;      // held: c_PIMouseLook (left Ctrl), a toggleMouseLook camera's free look
 		bool scoreboard = false; // held: the scoreboard (Tab)
 		bool commanderScreen = false; // pressed: the commander screen (Caps Lock)
 		bool ctrl = false, shift = false; // held (c_GILeftCtrl / c_GIRightCtrl, c_GILeftShift / c_GIRightShift)

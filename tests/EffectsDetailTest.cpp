@@ -449,3 +449,227 @@ TEST(EffectsDetail_StaticDecalsSecondList)
 	manager.spawnDecal("mark", {0, 0, 0}, {0, 1, 0});
 	CHECK(manager.lastDecalId() == 1);
 }
+
+// GroundEffectBundle (0x0061e090 -> 0x0061de40): the weapon's fire (event 0
+// to its children) starts its muzzle bundle and, within maxTriggerDistance
+// of the ground under the bundle, the ground's material effect there; an
+// EffectBundle's start sets off the ground bundles under it (0x0061a1c0).
+TEST(EffectsDetail_GroundBundlesUnderGunsAndFeet)
+{
+	world::ObjectTemplateManager templates;
+	sprites(templates, "dust", "Standard");
+	sprites(templates, "flash", "Standard");
+	world::ObjectTemplate* dust = templates.create("EffectBundle", "e_geb_dirt");
+	dust->children().push_back({"dust", {}, {}});
+	world::ObjectTemplate* muzzle = templates.create("EffectBundle", "e_muzz_gun");
+	muzzle->children().push_back({"flash", {}, {}});
+	world::ObjectTemplate* geb = templates.create("GroundEffectBundle", "geb_tank");
+	geb->settings()["material"] = "66";
+	geb->settings()["maxTriggerDistance"] = "3";
+	world::ObjectTemplate* gun = templates.create("GenericFireArm", "tank_Barrel");
+	gun->children().push_back({"e_muzz_gun", {0, 0, 3}, {}});
+	gun->children().push_back({"Geb_tank", {0, 0, 2.5f}, {}});
+	world::ObjectTemplate* foot = templates.create("EffectBundle", "mech_FootStep");
+	foot->settings()["setStartOnEffects"] = "512"; // effect:0 of the walker's animation
+	foot->children().push_back({"flash", {}, {}});
+	foot->children().push_back({"geb_tank", {}, {}});
+	world::ObjectTemplate* tank = templates.create("PlayerControlObject", "tank");
+	tank->children().push_back({"tank_Barrel", {0, 2, 0}, {}});
+	tank->children().push_back({"mech_FootStep", {1, 0, 0}, {}});
+
+	const auto placed = effects::ObjectEffects::bundlesOf(templates, *tank);
+	CHECK(placed.size() == 4);
+	if (!(placed.size() == 4)) {
+		return;
+	}
+	CHECK(placed[1].kind == effects::ObjectEffects::Placed::Kind::GroundTrigger && placed[1].parent == -1);
+	CHECK(placed[1].material == 66 && placed[1].maxTriggerDistance == 3);
+	CHECK(placed[3].kind == effects::ObjectEffects::Placed::Kind::GroundTrigger && placed[3].parent == 2);
+
+	effects::EffectManager manager(templates);
+	effects::ObjectEffects objects(templates);
+	std::vector<std::pair<effects::Vec3, effects::Vec3>> rays;
+	objects.setGround(
+		[&rays](const effects::Vec3& from, const effects::Vec3& to, uint32_t, effects::Vec3& hit, uint32_t& material) {
+			rays.push_back({from, to});
+			if (to.y > 0) {
+				return false;
+			}
+			hit = {from.x, 0, from.z}; // flat ground at y 0, material 8
+			material = 8;
+			return true;
+		},
+		[](uint32_t bundle, uint32_t ground) { return bundle == 66 && ground == 8 ? std::string("e_geb_dirt") : std::string(); });
+	const auto worldEmitters = [&manager](float x, float z) {
+		int count = 0;
+		for (const auto& emitter : manager.emitterList()) {
+			const effects::Vec3 p = emitter->position();
+			if (emitter->anchor == 0 && std::fabs(p.x - x) < 1e-3f && std::fabs(p.y) < 1e-3f && std::fabs(p.z - z) < 1e-3f) {
+				++count;
+			}
+		}
+		return count;
+	};
+	effects::ObjectEffects::ObjectState state;
+	state.id = 5;
+	state.objectTemplate = tank;
+	state.position = {0, 0.5f, 0};
+	objects.update({state}, manager);
+	CHECK(rays.empty() && manager.emitters() == 0);
+	// A round: the muzzle bundle (startOnEffects 0) and the dust under the
+	// barrel, 2.5 m over the ground.
+	state.firedWeapons = {"TANK_BARREL"};
+	objects.update({state}, manager);
+	CHECK(manager.emitting(5, 1));
+	CHECK(rays.size() == 1);
+	if (!(rays.size() == 1)) {
+		return;
+	}
+	CHECK(std::fabs(rays[0].first.y - 2.5f) < 1e-4f && std::fabs(rays[0].second.y + 0.5f) < 1e-4f);
+	CHECK(worldEmitters(0, 2.5f) == 1);
+	// Again: the muzzle restarts each round (minDistanceUnderwaterSurface
+	// below 0), the dust too.
+	objects.update({state}, manager);
+	CHECK(worldEmitters(0, 2.5f) == 2);
+	// Lifted 5 m: the ground is beyond the 3 m.
+	state.position = {0, 5, 0};
+	objects.update({state}, manager);
+	CHECK(rays.size() == 3 && worldEmitters(0, 2.5f) == 2);
+	// A foot step: its bundle starts and stamps the ground under it.
+	state.firedWeapons.clear();
+	state.position = {0, 1, 0};
+	state.effects = 512;
+	objects.update({state}, manager);
+	CHECK(manager.emitting(5, 3));
+	CHECK(worldEmitters(1, 0) == 1);
+}
+
+// The commander's EMP strike (commander_EMP_strike_GenericFireArm, moved
+// over the target by 0x005a0bf0): its fire's event 0 reaches
+// GEB_emp_strike there (material 28, 2000 m), whose ray down finds the
+// ground under the target; the firearm's pitch 90 in the asset and the
+// GEB's -90 under it leave the GEB upright, so it looks straight down.
+TEST(EffectsDetail_EmpStrikeGroundBundle)
+{
+	world::ObjectTemplateManager templates;
+	sprites(templates, "rings", "Standard");
+	world::ObjectTemplate* dirt = templates.create("EffectBundle", "e_geb_emp_strike_dirt");
+	dirt->children().push_back({"rings", {}, {}});
+	world::ObjectTemplate* geb = templates.create("GroundEffectBundle", "GEB_emp_strike");
+	geb->settings()["material"] = "28";
+	geb->settings()["maxTriggerDistance"] = "2000";
+	world::ObjectTemplate* gun = templates.create("GenericFireArm", "commander_EMP_strike_GenericFireArm");
+	gun->children().push_back({"GEB_emp_strike", {}, {0, -90, 0}});
+	world::ObjectTemplate* asset = templates.create("PlayerControlObject", "commander_emp_strike");
+	asset->children().push_back({"commander_EMP_strike_GenericFireArm", {}, {0, 90, 0}});
+
+	effects::EffectManager manager(templates);
+	effects::ObjectEffects objects(templates);
+	std::vector<std::pair<effects::Vec3, effects::Vec3>> rays;
+	objects.setGround(
+		[&rays](const effects::Vec3& from, const effects::Vec3& to, uint32_t, effects::Vec3& hit, uint32_t& material) {
+			rays.push_back({from, to});
+			if (to.y > 10) {
+				return false;
+			}
+			hit = {from.x, 10, from.z}; // ground at y 10, material 3
+			material = 3;
+			return true;
+		},
+		[](uint32_t bundle, uint32_t ground) {
+			return bundle == 28 && ground == 3 ? std::string("e_geb_emp_strike_dirt") : std::string();
+		});
+	// The firearm's world turn: its child rotation in the asset, the asset yawed.
+	const effects::Mat3 assetTurn = physics::Mat3::fromYawPitchRoll({30, 0, 0});
+	const effects::Mat3 turn = physics::Mat3::fromYawPitchRoll({0, 90, 0}) * assetTurn;
+	objects.weaponFiredAt(*gun, {100, 510, -40}, turn, manager);
+	CHECK(rays.size() == 1);
+	if (!(rays.size() == 1)) {
+		return;
+	}
+	CHECK(std::fabs(rays[0].first.x - 100) < 1e-3f && std::fabs(rays[0].first.y - 510) < 1e-3f);
+	CHECK(std::fabs(rays[0].second.x - 100) < 1e-2f && std::fabs(rays[0].second.z + 40) < 1e-2f);
+	CHECK(std::fabs(rays[0].second.y - (510 - 2000)) < 1e-2f);
+	int found = 0;
+	for (const auto& emitter : manager.emitterList()) {
+		const effects::Vec3 p = emitter->position();
+		found += std::fabs(p.x - 100) < 1e-2f && std::fabs(p.y - 10) < 1e-2f && std::fabs(p.z + 40) < 1e-2f;
+	}
+	CHECK(found == 1);
+	// The other strike firearms carry no bundle: nothing happens.
+	world::ObjectTemplate* orbital = templates.create("GenericFireArm", "commander_orbital_strike_GenericFireArm");
+	objects.weaponFiredAt(*orbital, {0, 500, 0}, turn, manager);
+	CHECK(rays.size() == 1);
+}
+
+// The bundle's sound intensity (modifier 5, +0x1d8): its looping start
+// sound is held with the bundle (bundleLoops) with its envelopes read at the
+// intensity; a one-shot start sound still plays once (takeSounds).
+TEST(EffectsDetail_BundleSoundLoopsAtTheirIntensity)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* loop = templates.create("Sound", "S_e_wake_sound_Start");
+	loop->settings()["loopCount"] = "0";
+	templates.create("Sound", "S_e_click_Start");
+	world::ObjectTemplate* wake = templates.create("EffectBundle", "e_wake_sound");
+	wake->settings()["SoundIntensityRange"] = "0/1";
+	wake->settings()["SoundIntensityUsed"] = "0";
+	wake->settings()["SoundIntensityFromSpeed"] = "0/5";
+	wake->settings()["setStartOnEffects"] = "32";
+	wake->settings()["setStopOnEffects"] = "64";
+	wake->children().push_back({"S_e_wake_sound_Start", {0, 0, 1}, {}});
+	world::ObjectTemplate* click = templates.create("EffectBundle", "e_click");
+	click->children().push_back({"S_e_click_Start", {}, {}});
+	world::ObjectTemplate* apc = templates.create("PlayerControlObject", "apc");
+	apc->children().push_back({"e_wake_sound", {}, {}});
+
+	effects::EffectManager manager(templates);
+	effects::ObjectEffects objects(templates);
+	effects::ObjectEffects::ObjectState state;
+	state.id = 4;
+	state.objectTemplate = apc;
+	state.position = {10, 0, 0};
+	objects.update({state}, manager);
+	CHECK(manager.bundleLoops().empty());
+	state.occupied = true; // event 4: the bundle starts
+	objects.update({state}, manager);
+	CHECK(manager.takeSounds().empty());
+	CHECK(manager.bundleLoops().size() == 1);
+	if (!(manager.bundleLoops().size() == 1)) {
+		return;
+	}
+	CHECK(manager.emitting(4, 1)); // a sound-only bundle runs while its loop does
+	const auto first = manager.bundleLoops()[0];
+	CHECK(first.name == "S_e_wake_sound_Start" && first.intensity == 0);
+	CHECK(std::fabs(first.position.x - 10) < 1e-4f && std::fabs(first.position.z - 1) < 1e-4f);
+	// Moving at 2.5 m/s (1/12 m a tick): half way along 0..5.
+	state.position = {10, 0, 1.0f / 12.0f};
+	objects.update({state}, manager);
+	CHECK(manager.bundleLoops().size() == 1);
+	if (!(manager.bundleLoops().size() == 1)) {
+		return;
+	}
+	CHECK(manager.bundleLoops()[0].key == first.key);
+	CHECK(std::fabs(manager.bundleLoops()[0].intensity - 0.5f) < 1e-3f);
+	// Event 5 (the player left): stopped.
+	state.occupied = false;
+	objects.update({state}, manager);
+	CHECK(manager.bundleLoops().empty() && !manager.emitting(4, 1));
+
+	// A one-shot start sound plays once.
+	manager.setAnchor(9, {}, {});
+	manager.spawnAttached("e_click", 9, {});
+	CHECK(manager.bundleLoops().empty() && manager.takeSounds().size() == 1);
+	// A driven bundle on a moving anchor (stepAttachedBundles) sets it too.
+	manager.spawnAttached("e_wake_sound", 9, {});
+	CHECK(manager.bundleLoops().size() == 1);
+	if (!(manager.bundleLoops().size() == 1)) {
+		return;
+	}
+	manager.update(0.1f);
+	manager.setAnchor(9, {0, 0, 0.5f}, {});
+	manager.update(0.1f); // 5 m/s
+	CHECK(std::fabs(manager.bundleLoops()[0].intensity - 1) < 1e-3f);
+	manager.releaseAnchor(9);
+	CHECK(manager.bundleLoops().empty());
+}

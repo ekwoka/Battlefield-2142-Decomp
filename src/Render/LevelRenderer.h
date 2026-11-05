@@ -338,6 +338,11 @@ private:
 		// its load 0x100de6d0): it keeps its lightmap at the low lighting
 		// quality (staticKeepsLightmap).
 		bool waterObject = false;
+		// A static mesh under "objects/roads/" (+0x2a0): drawn as a road
+		// (RoadStatics.h), with RoadDetailNoBlend where its path also has
+		// "noBlend" (+0x2a1).
+		bool road = false;
+		bool roadNoBlend = false;
 		bool radiusShadowBounds = false; // GeometryTemplate.useRadiusForShadowDepth / Spatial
 		// GeometryTemplate.isTitanInterior / isTitanExterior /
 		// titanExteriorPartIndex (TitanParts.h) and the LOD's box (mesh
@@ -433,6 +438,7 @@ private:
 		float drawnFade() const { return fade >= 0 ? fade : instance->fade; }
 	};
 	std::vector<DrawItem> m_drawList;
+	std::vector<const Instance*> m_roadStatics; // this frame's road static meshes in view (RoadStatics.h)
 	size_t m_culledInstances = 0;
 	// Culls the instances against the camera and picks their LODs.
 	void prepareInstances(const Camera& camera, const Mat4& viewProjection);
@@ -698,6 +704,7 @@ private:
 	GpuContext& m_gpu;
 	std::map<std::string, std::unique_ptr<GpuMesh>> m_meshes; // by geometry name (lower case)
 	std::map<std::string, SDL_GPUTexture*> m_textures;         // by path (lower case)
+	std::string m_textureSuffix; // texturemanager.customTextureSuffix at the build (TextureSuffix.h)
 	std::map<std::string, SDL_GPUTexture*> m_cubeTextures;     // by path (lower case)
 	std::map<SDL_GPUTexture*, std::array<uint32_t, 2>> m_textureSizes; // width, height (the parallax's scale)
 	// texture()'s front cache by the path as asked and the class (the mip

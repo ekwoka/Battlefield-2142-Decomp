@@ -809,6 +809,21 @@ const std::vector<GhostPartLayout>* RemoteWorld::ghostLayout(uint32_t templateId
 	return it->second.get();
 }
 
+uint32_t mechLegsMessages(int state, bool holds)
+{
+	if (!holds) {
+		return 0;
+	}
+	switch (state) {
+	case 1: return 0x80;
+	case 2: return 0x100;
+	case 3: return 0x400;
+	case 4: return 0x200;
+	case 5: return 0x10;
+	default: return 0;
+	}
+}
+
 const RemotePart* RemoteObject::findPart(const std::string& name) const
 {
 	for (const RemotePart& p : parts) {
@@ -844,6 +859,14 @@ void mergePart(RemotePart& p, const NetworkableState& s)
 			p.hasSpring = true;
 			p.springOffset = s.springOffset;
 			p.springVelocity = s.springVelocity;
+		}
+		break;
+	case NetworkableKind::MechLegs:
+		if (s.mask & 1) {
+			p.legState = s.legState;
+		}
+		if (s.mask & 2) {
+			p.legHolds = s.legFlag1;
 		}
 		break;
 	case NetworkableKind::Engine:

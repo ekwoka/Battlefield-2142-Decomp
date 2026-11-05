@@ -81,6 +81,13 @@ class GameLogic;
 
 namespace dice::hfe::host {
 
+// The squad report's reading by its recipients (0x005088f0): each
+// recipient's (networkableHudRevealTime, networkableHudShowCloaked); the
+// seconds become the longest reveal time, and a cloak report (kind 2)
+// becomes kind 1 when one recipient shows cloaks. False: a cloak report
+// no one reads, sent to no one.
+bool battlefieldReportFor(const std::vector<std::pair<int, bool>>& recipients, int& kind, int& seconds);
+
 struct HostSetup {
 	std::string serverName = "bf2142-recomp server";
 	std::string level;      // the level's folder name ("Camp_Gibraltar")

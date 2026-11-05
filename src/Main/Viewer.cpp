@@ -567,6 +567,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.use = c.pressed(map, "c_PIUse", down);
 				input.toggleFireRate = c.pressed(map, "c_PIToggleFireRate", down);
 				input.reload = c.pressed(map, "c_PIReload", down);
+				input.mouseLook = c.pressed(map, "c_PIMouseLook", down);
 				input.scoreboard = c.pressed(map, "c_GIShowScoreboard", down);
 				input.commanderScreen = c.pressed(map, "c_GILeader", down);
 				input.ctrl = c.pressed(map, "c_GILeftCtrl", down) || c.pressed(map, "c_GIRightCtrl", down);
@@ -631,6 +632,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.toggleWeapon = keys[SDL_SCANCODE_F];
 				input.use = keys[SDL_SCANCODE_E];
 				input.reload = keys[SDL_SCANCODE_R];
+				input.mouseLook = keys[SDL_SCANCODE_LCTRL];
 				input.scoreboard = keys[SDL_SCANCODE_TAB];
 				input.crouch = keys[SDL_SCANCODE_LCTRL];
 				input.lie = keys[SDL_SCANCODE_Z];

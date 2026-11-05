@@ -188,6 +188,9 @@ GameWorld::MeshActor GameWorld::actorOf(Body& body) const
 		}
 	}
 	a.node = {body.mass, body.majorActor, asleep(body)};
+	a.otherLod = body.otherCollisionLod;
+	a.file = body.meshFile;
+	a.materials = &body.meshMaterials;
 	return a;
 }
 
@@ -214,7 +217,65 @@ GameWorld::MeshActor GameWorld::actorOf(const StaticPart& part) const
 	// A static object's node: never a major actor here, and not awake
 	// (0x006b6cc0 then leaves the whole push to the mobile one).
 	a.node = {1, false, true};
+	a.file = shape.file;
+	a.materials = &shape.materials;
 	return a;
+}
+
+// otherCollisionLod (the node's slot 0x1a4, below 0 meaning 1): slot 9
+// (0x006bb050) tests A's vehicle-LOD vertices against B's faces at the LOD
+// A asks for (slot 0x54(lod)), and only when B's mesh has that LOD (slot
+// 0xc4(lod)); the broad phase (0x006dc7b0) takes the candidate's radius at
+// it (slot 0x50(lod)) and skips a candidate without it. Shipped 2 (the
+// soldiers' LOD) on the parachute, the deployables (the sentry gun, the
+// portable shield, the stationary medic hub, the commander's supply crate,
+// the spawn beacon) and the drones, 0 on C4, the sonar and the explosive
+// shotgun round (projectiles here, not bodies). (With 0, a projectile A
+// against a node whose slot 0x164 holds asks for 2 instead: not followed.)
+const GameWorld::LodFaces* GameWorld::lodFaces(const physics::CollisionMeshFile& file,
+	const std::vector<uint32_t>& materials, int lod)
+{
+	auto& faces = m_lodFaces[{&file, materials, lod}];
+	if (faces) {
+		return faces->mesh ? faces.get() : nullptr;
+	}
+	auto made = std::make_shared<LodFaces>();
+	Vec3 low {1e9f, 1e9f, 1e9f}, high {-1e9f, -1e9f, -1e9f};
+	bool any = false;
+	if (!file.geometries.empty()) {
+		for (const physics::CollisionSubGeometry& part : physics::collisionParts(file, 0)) {
+			if (const physics::CollisionLod* l = physics::collisionLodFor(file, part, static_cast<uint32_t>(lod))) {
+				any = true;
+				low = {std::min(low.x, l->boundsMin[0]), std::min(low.y, l->boundsMin[1]), std::min(low.z, l->boundsMin[2])};
+				high = {std::max(high.x, l->boundsMax[0]), std::max(high.y, l->boundsMax[1]), std::max(high.z, l->boundsMax[2])};
+			}
+		}
+	}
+	if (any) {
+		made->mesh = std::make_shared<physics::CollisionWorld>();
+		made->mesh->addMesh(file, static_cast<physics::CollisionUser>(lod), {}, {}, 0, materials);
+		made->boxMin = low;
+		made->boxMax = high;
+		made->radius = physics::boxRadius({low.x, low.y, low.z}, {high.x, high.y, high.z});
+	}
+	faces = std::move(made);
+	return faces->mesh ? faces.get() : nullptr;
+}
+
+bool GameWorld::atLod(MeshActor& actor, int lod)
+{
+	if (lod == 1 || !actor.file || !actor.materials) {
+		return true;
+	}
+	const LodFaces* faces = lodFaces(*actor.file, *actor.materials, lod);
+	if (!faces) {
+		return false;
+	}
+	actor.mesh = faces->mesh.get();
+	actor.boxMin = faces->boxMin;
+	actor.boxMax = faces->boxMax;
+	actor.radius = faces->radius;
+	return true;
 }
 
 // The mobile mesh physics of a tick: every body is a mover in turn
@@ -238,8 +299,13 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 	}
 	MeshActor m = actorOf(mover);
 	const float speedM = length(mover.body.velocity);
-	// The pair's tests before slot 9 (0x006dc7b0).
-	const auto paired = [&](const MeshActor& c, float speedC) {
+	// The pair's tests before slot 9 (0x006dc7b0), with the candidate at the
+	// LOD the mover asks for (otherCollisionLod).
+	const auto paired = [&](const MeshActor& asked, float speedC) {
+		MeshActor c = asked;
+		if (!atLod(c, m.otherLod)) {
+			return false;
+		}
 		const float motion = (speedM + speedC) * seconds;
 		const float reach = motion + m.radius + c.radius;
 		if (physics::lengthSquared(c.position - m.position) > reach * reach) {
@@ -457,6 +523,17 @@ bool GameWorld::meshPair(MeshActor& a, MeshActor& b, float seconds, bool trunkOn
 {
 	if (!a.mesh || !b.mesh || a.points->empty()) {
 		return true;
+	}
+	// A asks for B at its otherCollisionLod (0x006bb050's local_58).
+	if (a.otherLod != 1) {
+		MeshActor asked = b;
+		if (!atLod(asked, a.otherLod)) {
+			return true;
+		}
+		const int lod = std::exchange(a.otherLod, 1);
+		const bool alive = meshPair(a, asked, seconds, trunkOnly);
+		a.otherLod = lod;
+		return alive;
 	}
 	// A team's PlayerControlObject passes the other's force fields and
 	// doors (0x006bb050's start: interface 0xc4c5 slot 0x9c, team 1 against
@@ -798,6 +875,8 @@ std::shared_ptr<const GameWorld::MeshShape> GameWorld::meshShape(const physics::
 		return shape;
 	}
 	auto made = std::make_shared<MeshShape>();
+	made->file = &file;
+	made->materials = materials;
 	made->mesh = std::make_shared<physics::CollisionWorld>();
 	made->mesh->addMesh(file, physics::CollisionUser::Vehicle, {}, {}, 0, materials);
 	Vec3 low {1e9f, 1e9f, 1e9f}, high {-1e9f, -1e9f, -1e9f};

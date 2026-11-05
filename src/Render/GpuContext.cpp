@@ -155,6 +155,7 @@ GpuContext::~GpuContext()
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_additiveMeshPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_waterPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_roadPipeline);
+	SDL_ReleaseGPUGraphicsPipeline(m_device, m_roadMeshPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_decalPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_undergrowthPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_particlePipeline);
@@ -359,9 +360,16 @@ bool GpuContext::createPipelines(std::string& error)
 	info.rasterizer_state.depth_bias_slope_factor = -1.0f;
 	m_roadPipeline = build(k_road_vert_spv, k_road_vert_spv_size, k_road_vert_msl, k_road_vert_msl_size,
 		k_road_frag_spv, k_road_frag_spv_size, k_road_frag_msl, k_road_frag_msl_size, 5, 3, "road");
+	// The road static meshes (RaShaderRoad*.fx): the same, back faces culled
+	// (CullMode CCW with Direct3D's clockwise front faces).
+	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_BACK;
+	m_roadMeshPipeline = build(k_roadmesh_vert_spv, k_roadmesh_vert_spv_size, k_roadmesh_vert_msl,
+		k_roadmesh_vert_msl_size, k_road_frag_spv, k_road_frag_spv_size, k_road_frag_msl, k_road_frag_msl_size, 5, 3,
+		"road mesh");
+	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
 	m_decalPipeline = build(k_decal_vert_spv, k_decal_vert_spv_size, k_decal_vert_msl, k_decal_vert_msl_size,
 		k_decal_frag_spv, k_decal_frag_spv_size, k_decal_frag_msl, k_decal_frag_msl_size, 2, 1, "decal");
-	return m_meshPipeline && m_surroundingPipeline && m_fadedMeshPipeline && m_additiveMeshPipeline && m_terrainPipeline && m_skyPipeline && m_waterPipeline && m_roadPipeline && m_decalPipeline &&
+	return m_meshPipeline && m_surroundingPipeline && m_fadedMeshPipeline && m_additiveMeshPipeline && m_terrainPipeline && m_skyPipeline && m_waterPipeline && m_roadPipeline && m_roadMeshPipeline && m_decalPipeline &&
 		m_undergrowthPipeline && m_particlePipeline && m_shimmerPipeline && m_additiveParticlePipeline && m_uiPipeline && m_uiSubmitPipeline &&
 		m_uiTestPipeline && m_uiClearPipeline && m_shadowCasterPipeline && m_camoPipeline && m_postPipeline &&
 		m_bloomPipeline;

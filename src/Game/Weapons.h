@@ -152,6 +152,12 @@ struct ProjectileSettings {
 	float acceleration = 0, deAcceleration = 0, maxSpeed = 0;
 	float maxAngleLock = 360;
 	bool ignoreFriendly = true;
+	// seek.directionBonus (the seek template's +0x30, executor 0x004f541e,
+	// 0 by default; the AA missiles' 0.8): the candidate query
+	// (0x004cf290) takes the target of the least angle x bonus x 500 +
+	// (1 - bonus) x distance (the angle off the round's heading in radians),
+	// not simply the nearest. The launchers' lock asks with 0 (0x005e1b30).
+	float directionBonus = 0;
 	// startDelay (the GenericProjectile's): seconds before its acceleration
 	// pushes it along its flight.
 	float startDelay = 0;
@@ -211,6 +217,40 @@ struct ProjectileSettings {
 	// else along the round's forward (its matrix's z row) (0x005e8f50).
 	float maxDepthForExplosion = 2;
 	bool useCollisionNormal = true;
+	// detonation.detonateDistanceToTarget (+0x50, executor 0x004f381d, 0 by
+	// default; shipped 3 on eu_ifv_laserguided_mine): the detonation
+	// component's update (0x005e9f60), every detonationTriggerFreq, sets the
+	// round off (event 0x1f) while its target (+0x10: the seek's, handed on
+	// each update by 0x005b3e60 through slot 9 0x005e9280) lies nearer
+	// than this, before the radius trigger's test.
+	float detonateDistanceToTarget = 0;
+	// centerOfCollisionOffset (SimpleObject +0xa4, executor 0x0051e654) of a
+	// RotationalPoint round: its node's contacts test the point the offset
+	// from its origin (the ground's 0x006c0f90 and the objects' 0x006c1220
+	// through the node's slot 0x124), so it comes to rest that far the
+	// other way: the frag grenade (0/-0.05/0) 5 cm, the IFV's mine
+	// (0/-0.12/0) 12 cm above where its origin would lie. Other node types
+	// don't read it (Point, Basic: the decoy and EMP mine are Mesh).
+	physics::Vec3 collisionOffset;
+	// A ForceObject child that holds the round over the ground (the IFV's
+	// mine, eu_ifv_laserguided_mine_FO; template defaults 0x0062d4f0; the
+	// object's tick 0x0062c920 -> 0x0062b750; GameWorld::hoverProjectile).
+	// enableOnStartMessage (+0x296): off until the round's start message
+	// (event 0 to its children: 0x005b3990 at the launch, or with
+	// follow.targetActivation 0x005b2c10 at the lock; its handler
+	// 0x0062ab40), off again at the stop (event 1, 0x005b2ca0).
+	// targetPosition (+0x288) y over what lies under it, found by a ray down
+	// targetPosition y + regulationTolerance (+0x29c, 0.5) long with
+	// relativeYCollisionGroupInverse (+0x298) other than 0 (1: the terrain
+	// alone, any height under it); regulatePosY (a, b) the regulator.
+	struct Hover {
+		bool present = false;
+		bool enableOnStartMessage = false;
+		float height = 0;     // targetPosition y
+		float tolerance = 0.5f;
+		float a = 0, b = 0;   // regulatePosY
+		unsigned relativeY = 0;
+	} hover;
 
 	static ProjectileSettings fromTemplate(const world::ObjectTemplate& projectile);
 	// The damage after travelling `distance` metres.
@@ -273,6 +313,17 @@ std::array<BlastForce, 3> blastTwist(const physics::Mat3& axes, const physics::V
 // An armour's EMP level after `amount` of EMP damage (0x00652980): it goes
 // up in whole steps of `stepSize`, at most `numSteps`.
 float addEmpDamage(float level, float amount, float stepSize, int numSteps);
+// The candidate query's cost (0x004cf290): angle (radians off the
+// heading) x bonus x 500 + (1 - bonus) x distance; the least below 9999
+// wins (seek.directionBonus).
+float seekCost(float angle, float distance, float bonus);
+// A projectile's hovering ForceObject child (ProjectileSettings::Hover)
+// from its template.
+ProjectileSettings::Hover projectileHover(const world::ObjectTemplate& forceObject);
+// The hover's vertical step (0x0062b750's regulated y through the node's
+// slot 0xa0, x 30 / mass; the regulator 0x00667710: 2a v + (a^2 + b^2)
+// (goal - y)): the round's new vertical velocity after `seconds`.
+float hoverVelocity(const ProjectileSettings::Hover& hover, float y, float vy, float goal, float seconds);
 
 // fire.maximumVehicleTiltForFire (0x005f1780, the press of every fire
 // component): 0 lets any tilt through; otherwise the root object's up axis
@@ -408,6 +459,28 @@ struct FireArmSettings {
 	// (0x005f46f0, 0x005f4ef0) its magazines too (slot 0xac, 0x005c4900).
 	// The under-rifle shotgun and rocket link each other (not the rifle).
 	std::string magLinkWeapon;
+	// fire.allowZoomOnROF (the fire template's +0xb4, executor 0x004e44d3;
+	// shipped 1 on the three sniper rifles and static_av): the fire
+	// component's busy query (slot 27, 0x005d3c40), which the firearm's
+	// event handler (0x005c50e0) asks before it takes any press, holds while
+	// the component is between rounds (its state, slot 0xd8 +0x150, above 1:
+	// the spin-up 3, a round's cycle 4) unless this is set; with it the
+	// component's own press (slot 13, 0x005d3b00) refuses instead, so only
+	// the fire press waits and the zoom's press goes through
+	// (FireArm::zoomBusy).
+	bool allowZoomOnROF = false;
+	// A ReplenishingAmmoComp (the hubs, the repair tool, the defibrillator)
+	// and its ammo.abilityCost (+0x78, executor 0x004e6efb, 0 by default):
+	// each round taken (slot 0x38, 0x005d81d0) costs the holder's battery
+	// rounds x abilityCost (soldier component 0xc4d7 slot 0x98, through
+	// 0x005d7fe0; nothing for a magazine without end, rounds -1), and a
+	// magazine can be taken (0x005d79a0, in place of the default ammo's
+	// 0x005f4140) only into an empty magazine while the battery holds at
+	// least abilityCost: a hub (cost 1) comes back with a full battery.
+	// Shipped: the ammo and medic hubs 1, the repair tool 0.3 (its
+	// magazine has no end), the defibrillator 0.
+	bool replenishing = false;
+	float abilityCost = 0;
 
 	static FireArmSettings fromTemplate(const world::ObjectTemplate& firearm);
 	int ticksBetweenShots() const { return roundsPerMinute > 0 ? 1800 / roundsPerMinute : 1; }
@@ -466,6 +539,18 @@ public:
 	// when full.
 	bool addMagazine();
 	bool overheated() const { return m_overheatLeft > 0; }
+	// Between rounds: the fire component's state above 1 (a round's cycle,
+	// state 4 until its ticksBetweenShots are past, or the spin-up, state 3).
+	bool cycling() const { return m_cooldown > 0 || m_startDelay >= 0; }
+	// The firearm busy for a zoom press (0x005c50e0's test): reloading, or
+	// cycling without fire.allowZoomOnROF (0x005d3c40). The press is then
+	// taken only with zoomWhenBusy (anim::ZoomSettings::takesPress).
+	bool zoomBusy() const { return reloading() || (cycling() && !m_settings.allowZoomOnROF); }
+	// The holder's ability battery (0..1) for a ReplenishingAmmoComp's
+	// abilityCost (FireArmSettings::replenishing), set before each tick and
+	// enable; and what the rounds since the last call cost it.
+	void setBattery(float battery) { m_battery = battery; }
+	float takeBatteryCost() { return std::exchange(m_batteryCost, 0.0f); }
 
 	// One tick; true when a round leaves the barrel. `trigger` is the fire
 	// input held. In the automatic mode a round goes every
@@ -539,6 +624,11 @@ private:
 	bool m_hidden = false; // the object's flag 2 cleared by the launch
 	int m_showIn = -1;     // ticks to showing again (-1 none)
 	void reloadStarted();
+	// "A magazine can be taken" for a reload (0x005f4140, or a
+	// ReplenishingAmmoComp's 0x005d79a0), the magazine count aside.
+	bool batteryAllowsReload() const;
+	float m_battery = 0;
+	float m_batteryCost = 0;
 	int m_tracerCount = 0; // +0x78
 	bool m_scanning = false; // the ammo component's +0x58
 	float m_scan = 0;        // +0x5c

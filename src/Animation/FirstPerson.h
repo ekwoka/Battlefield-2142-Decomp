@@ -63,8 +63,9 @@ struct ZoomSettings {
 	// 0x2c) still takes the zoom press, whatever else keeps it busy.
 	bool allowZoomOnHeat = false;
 	// The busy test of 0x005c50e0 for a zoom press: busy is the firearm's
-	// own (reloading, between rounds, ...; the rewrite's is the reload),
-	// overheated its heat component's. Busy or overheated, the press is
+	// own (reloading, its fire component between rounds unless
+	// fire.allowZoomOnROF: game::FireArm::zoomBusy), overheated its heat
+	// component's. Busy or overheated, the press is
 	// taken only with zoomWhenBusy (the zoom component's slot 0xb8) or
 	// with allowZoomOnHeat while overheated.
 	bool takesPress(bool busy, bool overheated) const
@@ -137,8 +138,11 @@ struct SeatZoom {
 	// One tick. pressed: the alternate fire's press (taken only when the
 	// seat's input isn't disabled); busy: the gun reloading; overheated:
 	// its heat component's (ZoomSettings::takesPress); looking: the view is
-	// the inside or nose one; cameraFov: the seat camera's insideFOV.
-	void step(bool pressed, bool busy, bool looking, float cameraFov, float seconds, bool overheated = false);
+	// the inside or nose one; cameraFov: the seat camera's insideFOV;
+	// cycling: the gun between rounds without fire.allowZoomOnROF, busy for
+	// the press only (not a reload's zoom-out).
+	void step(bool pressed, bool busy, bool looking, float cameraFov, float seconds, bool overheated = false,
+		bool cycling = false);
 	bool zoomed() const { return state.level() > 0 && fov.current == fov.target; }
 };
 

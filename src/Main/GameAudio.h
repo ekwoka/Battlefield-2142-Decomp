@@ -7,6 +7,8 @@
 //   - the engines' idle and rpm loops of the vehicles that have someone
 //     aboard (the engine audio, 0x007fe050: S_<engine>_Idle, _Rpm1, _Rpm2
 //     at |rpm| x 0.8333, 0x007fe740), while the engine runs;
+//   - the vehicles' rolling-surface loops (groundContactVolume:
+//     GameWorld::rollingSounds);
 //   - the projectiles' flight loops (DefaultProjSoundComp's
 //     S_<projectile>_Looping, 0x005ea930);
 //   - the round's sounds (ragdoll impacts, footsteps) and the effect
@@ -62,6 +64,10 @@ public:
 	};
 	// A sound some effect started this tick (S_<bundle>_Start).
 	void effectSound(const std::string& name, const sound::Vec3& position);
+	// An effect bundle's looping start sound, kept on while it is asked for
+	// each tick, its envelopes read at the bundle's sound intensity
+	// (EffectManager::bundleLoops).
+	void effectLoop(uint64_t key, const std::string& name, const sound::Vec3& position, float intensity);
 	// One tick: everything above, then the manager's update.
 	void tick(const Camera& camera);
 

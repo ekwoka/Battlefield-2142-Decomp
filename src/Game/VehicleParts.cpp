@@ -541,12 +541,32 @@ void Vehicle::updateForce(ForcePart& f, physics::RigidBody& body, float seconds)
 	}
 	const Vec3 at = partPoint(body, f.part);
 	const float in = f.input >= 0 ? vehicleInputValue(m_regulated, f.input) : 0.0f;
+	// rotationalForce x the input (0x0062c920 -> 0x0062ac00): for each
+	// axis two opposite pushes at the root's radius along the world axes.
+	if (in != 0 && physics::lengthSquared(f.rotational) > 0) {
+		const Vec3 r = f.rotational * in;
+		const float arm = m_objectRadius;
+		if (r.x != 0) {
+			body.addForce({arm, 0, 0}, {0, 0, -r.x});
+			body.addForce({-arm, 0, 0}, {0, 0, r.x});
+		}
+		if (r.y != 0) {
+			body.addForce({0, arm, 0}, {0, 0, -r.y});
+			body.addForce({0, -arm, 0}, {0, 0, r.y});
+		}
+		if (r.z != 0) {
+			body.addForce({arm, 0, 0}, {0, -r.z, 0});
+			body.addForce({-arm, 0, 0}, {0, r.z, 0});
+		}
+	}
 	float push = f.force * in + f.constantForce;
 	if (f.maxForce != 0) {
 		push = std::clamp(push, -f.maxForce, f.maxForce);
 	}
 	if (push != 0) {
-		body.addForce(at - body.position, partWorld(body, f.part).rows[2] * push);
+		// useAbsoluteDirection: the part's placement alone (0x006f6dc0).
+		const Mat3 frame = f.absolute && f.part >= 0 ? m_parts[static_cast<size_t>(f.part)].rotation : partWorld(body, f.part);
+		body.addForce(at - body.position, frame.rows[2] * push);
 	}
 	if (!f.keepUp || (f.stopWhenUnoccupied && !m_occupied)) {
 		return;

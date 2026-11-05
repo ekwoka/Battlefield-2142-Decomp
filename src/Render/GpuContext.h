@@ -113,7 +113,8 @@ struct UndergrowthUniforms {
 // Road fragment shader, second uniform block.
 struct RoadUniforms {
 	// The blend factor, then RoadCompiled.fx's FadeOut (vFadeoutValues: the
-	// camera distance's scale and offset, 0x100baa70), unused.
+	// camera distance's scale and offset, 0x100baa70), then the technique
+	// (RoadStatics.h's RoadTechnique: 0 a compiled road).
 	float road[4];
 	float eye[4]; // the camera, world space
 };
@@ -246,6 +247,7 @@ public:
 	SDL_GPUGraphicsPipeline* waterPipeline() const { return m_waterPipeline; }
 	// Water's blending plus a depth bias, for road decals.
 	SDL_GPUGraphicsPipeline* roadPipeline() const { return m_roadPipeline; }
+	SDL_GPUGraphicsPipeline* roadMeshPipeline() const { return m_roadMeshPipeline; }
 	// The same state for decals (decal.vert / decal.frag).
 	SDL_GPUGraphicsPipeline* decalPipeline() const { return m_decalPipeline; }
 	// Opaque, alpha-tested; undergrowth uniforms in the vertex stage.
@@ -354,6 +356,7 @@ private:
 	SDL_GPUGraphicsPipeline* m_additiveMeshPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_waterPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_roadPipeline = nullptr;
+	SDL_GPUGraphicsPipeline* m_roadMeshPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_decalPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_undergrowthPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_particlePipeline = nullptr;
