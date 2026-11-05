@@ -30,7 +30,10 @@
 // the vehicle's tree, whose RotationalBundles take their angles from the
 // bundles' networkables (0x00602070); the rewrite's client has the same
 // angles from the ghosts (net::RemoteWorld::partPose) and turns the seat's
-// layout by them.
+// layout by them. The rounds stray by the client's own deviation: nothing
+// networks or seeds it (the client's firearm builds it up as it fires and
+// draws its own random numbers), so a round's path is the client's, not
+// the server's.
 
 #include "Game/GameWorld.h"
 #include "Game/Weapons.h"
@@ -80,6 +83,10 @@ private:
 		bool wasFiring = false;
 		int barrel = 0;       // the next barrel (MultiFireComp +0x1a8)
 		int tracerCount = 0;  // rounds to the next tracer (the fire comp's +0x78)
+		// Its SimpleDeviationComp on the client (0x005dedb0 each tick, the
+		// round's 0x005f5540): built up by the client's own firing.
+		game::DeviationBuildUp deviation;
+		bool hasDeviation = false;
 	};
 	std::map<std::pair<int, int>, Gun> m_guns; // by (player, group)
 };

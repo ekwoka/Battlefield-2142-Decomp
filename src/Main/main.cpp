@@ -27,6 +27,7 @@
 #include "Input/GameControllers.h"
 #include "Net/Fesl.h"
 #include "Net/OnlineConfig.h"
+#include "Platform/Platform.h"
 #include "Net/OnlineSession.h"
 #include "Net/OpenSpyEmulator.h"
 #include "Net/Demo.h"
@@ -154,6 +155,9 @@ struct Options {
 	std::string language = "English"; // --language: the registry's Language (0x00405360), strings.csv's column
 	bool servers = false;        // --servers: list the servers OpenSpy's master server knows
 	std::string connect;         // --connect host[:port] (the original's +joinServer): play on a game server
+	std::string joinServer;      // +joinServer <address>: with the menu, its command-line join (GSJoinAddress)
+	std::string joinPassword;    // +password <text>: that server's (GSPassword)
+	bool hostServer = false;     // +hostServer 1: with the menu, its command-line host (GSIsServer)
 	std::string demo;            // --demo <file.bf2142demo>: play a recorded game back (Net/Demo.h)
 	std::string demoCamera;      // --demo-camera <file.bf2142cam>: the demo's camera from a file (demo.cameramode playback)
 	std::string demoRecordCamera; // --demo-record-camera <file.bf2142cam>: record the demo's camera (demo.cameramode record)
@@ -372,7 +376,11 @@ bool parseOptions(int argc, char** argv, Options& options)
 		} else if (arg == "+mapSize" && hasValue) {
 			options.mapSize = std::atoi(argv[++i]);
 		} else if (arg == "+joinServer" && hasValue) {
-			options.connect = argv[++i];
+			options.connect = options.joinServer = argv[++i];
+		} else if (arg == "+password" && hasValue) {
+			options.joinPassword = argv[++i];
+		} else if (arg == "+hostServer" && hasValue) {
+			options.hostServer = std::atoi(argv[++i]) != 0;
 		} else if (arg == "+port" && hasValue) {
 			options.hostPort = static_cast<uint16_t>(std::atoi(argv[++i]));
 			options.hostPortGiven = true;
@@ -739,6 +747,10 @@ bool g_weaponZoomed = false;
 // The seat camera's view mode (game::camera::Mode; 1 Inside on foot): the
 // runtime VehicleHud's camera test (0x00657660).
 int g_cameraMode = 1;
+// The HUD's weapon flag (+0x334: 1 from the HUD's constructor 0x007a24c0,
+// the soldier's slot 0xa4 taken on foot by 0x007a0f80, kept in a seat):
+// menu::soldierWeaponFlag.
+bool g_hudWeaponFlag = true;
 #if BF2142_HAS_RENDERER
 void itemListInput(ViewerOptions::PlayerInput& in)
 {
@@ -902,7 +914,10 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		// vehicleHud.useVehicleCameraRotation (0x00794f03): turned by its
 		// camera's yaw bundle, a seat's look, instead of its body.
 		float iconYaw = vehicle.yaw;
-		if (const std::string bundle = dice::hfe::menu::cameraRotationBundle(t, round.templates()); !bundle.empty()) {
+		if (const std::string bundle = dice::hfe::menu::cameraRotationBundle(t, round.templates()); !bundle.empty()
+			&& !std::isnan(vehicle.cameraYaw)) {
+			iconYaw = vehicle.cameraYaw; // a sentry drone's gun (GameWorld::mapObjects)
+		} else if (!bundle.empty()) {
 			const auto seats = round.vehicleSeats(vehicle.object);
 			for (size_t i = 0; i < seats.size(); ++i) {
 				float turn = 0;
@@ -1244,6 +1259,9 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		dice::hfe::menu::VehicleHudInput look;
 		look.vehicle = vehicle->objectTemplate();
 		look.armor = max > 0 ? left / max : 1.0f;
+		// The walkers' step (0x007a0940): the vehicle's own animation system's
+		// walk cycle (a joined client's: its ghost's, animateRemoteVehicle).
+		look.walking = round.walkCycle(vehicle->id(), look.walkLength, look.walkTime);
 		// vehicleHud.useChildArmor (0x007a18a0 -> 0x005c6460): the
 		// controlled seat's own armour or its first armoured child's: a
 		// Titan gun hub shows its gun's (the Titan's part of that name),
@@ -1373,8 +1391,9 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			game::GameWorld::ProjectileCamera riding;
 			gui.projectileCamera = !world.joined() && round.projectileCamera(world.localPlayer(), riding);
 			gui.zoomed = g_weaponZoomed;
-			// The HUD's sprint flag in a seat: the vehicle's boost (0x007a2e60).
-			gui.sprintTest = dice::hfe::menu::guiSprintTest(look.sprinting);
+			// The HUD's sprint flag in a seat: the vehicle's boost (0x007a2e60);
+			// its weapon flag the last on foot.
+			gui.sprintTest = dice::hfe::menu::guiSprintTest(look.sprinting, g_hudWeaponFlag);
 			hud.set("GuiIndex", static_cast<float>(dice::hfe::menu::vehicleGuiIndex(gui)));
 		}
 	} else {
@@ -1780,17 +1799,23 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		g_strategicObjects.update(hud, team);
 	}
 	if (soldier) {
+		// The HUD's weapon flag from the soldier's slot 0xa4 (0x007a0f80,
+		// with the soldier the control object: not in a seat).
+		if (!inVehicle) {
+			g_hudWeaponFlag = dice::hfe::menu::soldierWeaponFlag(world.soldierJumpHold(), held.weapon);
+		}
 		if (const world::ObjectTemplate* rifle = held.weapon) {
 			const auto& settings = rifle->settings();
 			// 0x007a01e0 on foot: the weapon's gui index (0x00657a70) with
 			// the sprint test, the HUD's sprint flag the soldier's sprint
-			// (0x007a0f80): a disableOnSprint weapon's overlay goes while
-			// sprinting.
+			// (0x007a0f80) and its weapon flag: a disableOnSprint weapon's
+			// overlay goes while sprinting, and for a second after a jump or
+			// 0.6 s after rising from prone.
 			float stamina = 1;
 			bool sprinting = false;
 			world.soldierStamina(stamina, sprinting);
 			hud.set("GuiIndex", static_cast<float>(dice::hfe::menu::weaponGuiIndex(rifle, false,
-									dice::hfe::menu::guiSprintTest(sprinting))));
+									dice::hfe::menu::guiSprintTest(sprinting, g_hudWeaponFlag))));
 			// The crosshair's parts (0x007be770): the spread in pixels is
 			// the deviation (degrees) times weaponHud.deviationFactor
 			// (default 10); the parts are 20 long, about the 800 x 600
@@ -2147,6 +2172,7 @@ struct Session {
 	ui::Player menu;
 	std::unique_ptr<dice::hfe::menu::MenuBindings> menuBindings;
 	bool menuQuit = false;
+	std::string restartModPath; // Mod.activateMod: restart with "+modPath <path> +multi 1"
 	std::optional<dice::hfe::menu::GameSetup> startedGame;
 	bool disconnect = false; // Logic.disconnectGame: back to the menu
 	std::vector<dice::hfe::menu::MenuMap> playlist;
@@ -2473,6 +2499,27 @@ int main(int argc, char** argv)
 	}
 	for (;;) {
 		const int result = runGame(options, session);
+		if (!session.restartModPath.empty()) {
+			// Mod.activateMod's restart (0x00403fa0): the same command line
+			// with "+modPath <path> +multi 1" in place of its own.
+			std::vector<std::string> args;
+			for (int i = 0; i < argc; ++i) {
+				const std::string arg = argv[i];
+				if ((arg == "+modPath" || arg == "+multi") && i + 1 < argc) {
+					++i;
+					continue;
+				}
+				args.push_back(arg);
+			}
+			args.insert(args.end(), {"+modPath", session.restartModPath, "+multi", "1"});
+			std::printf("restarting with +modPath %s\n", session.restartModPath.c_str());
+#if BF2142_HAS_RENDERER
+			session.window.reset();
+#endif
+			platform::restartProcess(argv[0], args);
+			std::fprintf(stderr, "cannot restart %s\n", argv[0]);
+			return 1;
+		}
 #if BF2142_HAS_RENDERER
 		if (session.window && session.window->closed()) {
 			return result;
@@ -3425,6 +3472,41 @@ int runGame(Options& options, Session& session)
 			options.connect = host + ":" + std::to_string(port);
 			session.joinRequested = true;
 		};
+		// The command line's server (0x00404780): the main page joins or
+		// hosts it once logged in (Logic.getCommandLine).
+		{
+			dice::hfe::menu::MenuBindings::CommandLine commandLine;
+			const size_t colon = options.joinServer.rfind(':');
+			commandLine.joinAddress = options.joinServer.substr(0, colon);
+			commandLine.port = colon != std::string::npos ? std::atoi(options.joinServer.c_str() + colon + 1) : options.hostPort;
+			commandLine.password = options.joinPassword;
+			commandLine.hostServer = options.hostServer;
+			menuBindings->setCommandLine(commandLine);
+		}
+		// Mod.activateMod: the original restarts with "+modPath <path>
+		// +multi 1" (host event 0xc, 0x00403fa0); main() does once the menu
+		// is left.
+		menuBindings->onActivateMod = [&session](const std::string& path) {
+			session.restartModPath = path;
+			session.menuQuit = true;
+		};
+		// Multiplay.playDemo (host event 0xd): the demo plays as --demo does.
+		menuBindings->onPlayDemo = [&session, &options](const std::string& path) {
+			options.demo = path;
+			options.connect = "demo";
+			session.joinRequested = true;
+		};
+		// The library: <profiles>/Default/demos/ (the original's
+		// @HOME@/Profiles/Default/demos/, 0x0049e1e0).
+		if (const std::string profiles = dice::hfe::menu::SettingsObjects::defaultDirectory(); !profiles.empty()) {
+			menuBindings->setDemoDirectory((std::filesystem::path(profiles) / "Default" / "demos").string());
+		}
+		menuBindings->readFile = [&files](const std::string& path, std::string& text) { return files.readText(path, text); };
+		menuBindings->gameModeName = [&session](const std::string& mode) { return session.menuHost.gameModeName(mode); };
+		menuBindings->setPlayerName(options.playerName);
+#if BF2142_HAS_RENDERER
+		menuBindings->capsLock = [] { return capsLockOn(); };
+#endif
 		if (!files.readFile(movie, dfm) || !menu.loadDfm(dfm, &error)) {
 			std::fprintf(stderr, "cannot load %s: %s\n", movie.c_str(), error.c_str());
 		} else {
@@ -3483,6 +3565,7 @@ int runGame(Options& options, Session& session)
 				session.menuBindings->setLastInput(device, control, direction);
 			};
 			viewer.wantsQuit = over;
+			viewer.menuCursor = [&session] { return session.menuBindings->waitCursor(); };
 			viewer.onTicks = [&sounds](int ticks) { sounds.update(ticks); };
 			if (!session.window) {
 				session.window = Window::open(viewer.width, viewer.height);
@@ -4189,6 +4272,35 @@ int runGame(Options& options, Session& session)
 			uint32_t object = 0;
 		};
 		std::array<OrderMarker, 2> orderMarkers; // the leader's, the commander's
+		// A marker's radius (its object's slot 0x8c: the render object's for
+		// these Bundles without a collision mesh). Stand-in: half the
+		// diagonal of its mesh's first LOD's box, as the file stores it (the
+		// bundled mesh's own radius getter isn't traced). Read once a
+		// template.
+		std::map<std::string, float> markerRadii;
+		const auto markerRadius = [&markerRadii, &geometries, &files](const world::ObjectTemplate& t) {
+			const auto known = markerRadii.find(t.name());
+			if (known != markerRadii.end()) {
+				return known->second;
+			}
+			float radius = 0;
+			const geom::GeometryTemplate* geometry = geometries.find(t.geometry());
+			std::vector<uint8_t> data;
+			if (geometry && files.readFile(geometry->path, data)) {
+				const std::optional<geom::MeshFile> mesh = geom::parseMesh(data, geometry->kind);
+				if (mesh && !mesh->geometries.empty() && !mesh->geometries[0].lods.empty()) {
+					const geom::Bounds& box = mesh->geometries[0].lods[0].bounds;
+					float d2 = 0;
+					for (int i = 0; i < 3; ++i) {
+						d2 += (box.max[static_cast<size_t>(i)] - box.min[static_cast<size_t>(i)])
+							* (box.max[static_cast<size_t>(i)] - box.min[static_cast<size_t>(i)]);
+					}
+					radius = 0.5f * std::sqrt(d2);
+				}
+			}
+			markerRadii[t.name()] = radius;
+			return radius;
+		};
 		squadRequests.localize = [&localization](const std::string& id) { return localization.text(id); };
 		squadRequests.noCommanderNeeded = options.gameMode == "sp1" || options.gameMode == "gpm_sp" || options.gameMode == "gpm_coop";
 		// The rose's point (0x00753b40: the view's ray out to 1000 m, HUD
@@ -5882,6 +5994,7 @@ int runGame(Options& options, Session& session)
 				sprinting = prediction.control().stamina().sprinting();
 				return true;
 			};
+			remoteHud->ownJumpHold = [&prediction] { return prediction.active() && prediction.control().jumpHold(); };
 			remoteHud->ownLook = [&ownFeet, &remoteLook, &session](physics::Vec3& feet, float& yaw, float& pitch) {
 				if (!session.client || !session.client->world().hasControlObject() || !remoteLook.started) {
 					return false;
@@ -5983,11 +6096,39 @@ int runGame(Options& options, Session& session)
 				const net::RemoteObject* ghost = world.object(control.ghost);
 				const auto object = ghostObjects.find(control.ghost);
 				const world::Object* soldier = object != ghostObjects.end() ? objects.find(object->second) : nullptr;
+				if (ghost && control.vehicle != 0) {
+					// In a seat: the control object is the seat's ghost (a
+					// PlayerControlObject of the vehicle's tree); the view is
+					// the seat's camera (the client's 0x005948e0 -> the seat's
+					// 0x005c7cb0), placed by the vehicle ghost and the bundles'.
+					const net::RemotePlayer* player = world.player(world.localPlayer());
+					const auto vehicleObject = ghostObjects.find(ghost->rootGhost ? ghost->rootGhost : ghost->ghost);
+					const auto soldierObject = player ? ghostObjects.find(player->soldierGhost) : ghostObjects.end();
+					const world::Object* seated = soldierObject != ghostObjects.end() ? objects.find(soldierObject->second) : nullptr;
+					const world::Object* vehicle =
+						vehicleObject != ghostObjects.end() ? objects.find(vehicleObject->second) : nullptr;
+					if (!player || !vehicle || !seated || !seated->objectTemplate()) {
+						return false;
+					}
+					me.alive = player->alive;
+					me.soldier = seated->id();
+					me.soldierTemplate = seated->objectTemplate();
+					me.vehicle = vehicle->id();
+					me.seat = ghost->part;
+					me.feet = {vehicle->position().x, vehicle->position().y, vehicle->position().z};
+					if (ghost->hasVelocity) {
+						me.velocity = {ghost->velocity.x, ghost->velocity.y, ghost->velocity.z};
+					}
+					me.yaw = remoteLook.yaw;
+					me.aimPitch = remoteLook.pitch;
+					me.firing = remoteLook.fire;
+					return true;
+				}
 				// Our soldier (its template's kind; the ghost's networkable kind
 				// comes with its first update).
 				if (!ghost || !soldier || !soldier->objectTemplate() || soldier->objectTemplate()->typeName() != "Soldier"
 					|| control.vehicle != 0) {
-					return false; // not on foot (a seat keeps the chase view)
+					return false;
 				}
 				if (!remoteLook.started && ghost->hasAngles) {
 					remoteLook.yaw = ghost->yaw;
@@ -6957,6 +7098,14 @@ int runGame(Options& options, Session& session)
 			if (session.menuBindings) {
 				session.menuBindings->recordRound(summary); // the soldier's stats and rank
 			}
+			// The played level's texts (EndOfRound.getPreviousMap*Description).
+			if (std::string desc; files.readText("Levels/" + summary.previousMapPath + "/Info/" + summary.previousMapPath + ".desc", desc)) {
+				const dice::hfe::menu::LevelDescription level =
+					dice::hfe::menu::parseLevelDescription(desc, summary.previousGameMode, summary.previousMapSize);
+				summary.previousMapDescriptionKey = level.briefingKey.empty() ? level.briefing : level.briefingKey;
+				summary.previousGameModeDescriptionKey = level.gameModeKey.empty() ? level.gameModeText : level.gameModeKey;
+			}
+			summary.playerName = options.playerName;
 			endOfRoundBindings.setSummary(summary);
 			std::vector<uint8_t> dfm;
 			std::string error;
@@ -8061,8 +8210,10 @@ int runGame(Options& options, Session& session)
 						: want.kind >= 0                   ? "ordermarker_attack"
 														   : nullptr;
 					if (world::ObjectTemplate* t = name ? templates.find(name) : nullptr) {
-						const float ground = round.terrainHeight(want.at.x, want.at.z);
-						if (world::Object* marker = round.objects().create(t, {want.at.x, ground, want.at.z})) {
+						// On the ground, the water or a static object under the
+						// point, up by half its radius (GameWorld::orderMarkerHeight).
+						const float height = round.orderMarkerHeight(want.at, markerRadius(*t));
+						if (world::Object* marker = round.objects().create(t, {want.at.x, height, want.at.z})) {
 							have.object = marker->id();
 						}
 					}
@@ -8256,6 +8407,9 @@ int runGame(Options& options, Session& session)
 			if (startedGame) {
 				viewer.onEscape = [&showMenu] { showMenu = !showMenu; };
 			}
+			viewer.menuCursor = [&session, &showMenu] {
+				return showMenu && session.menuBindings ? session.menuBindings->waitCursor() : 0;
+			};
 		}
 		if (session.menuBindings) {
 			// ControlSettings: 0.5 is the game's default sensitivity.

@@ -547,7 +547,17 @@ struct VehicleHudInput {
 	// RepairCell(n+1)Active, which HudElementsBP1.con's seven pictures show
 	// (RepairCell0Active is never set). Cells not listed keep their values.
 	std::vector<bool> repairCells;
+	// MechFootAnimationValue (+0x244, 0x007a0940 for each PlayerControlObject
+	// of the root's list, class 0xc4c2, with an animation system, slot
+	// 0x180): its walk cycle (GameWorld::walkCycle; `walking` false without
+	// a system: the value stays). mechFootValue makes the value.
+	bool walking = false;
+	float walkLength = -1, walkTime = -1;
 };
+// 0x007a0940: 0 while the cycle is under 0.3 s long (or none: -1), else
+// sin(2 pi x min(time / length, 1)) + 1, 0..2 over a step cycle (the
+// mechs' HUD foot pictures).
+float mechFootValue(float length, float time);
 
 class VehicleHud {
 public:
@@ -561,6 +571,7 @@ private:
 	HudBlink m_staminaBlink, m_armorBlink;       // +0x2ac, +0x2b9
 	int m_firstBundle = -1, m_secondBundle = -1; // +0xa8 / +0xac (-1: none)
 	float m_gunnerAngle = 0, m_secondaryAngle = 0; // +0x20c / +0xb0, degrees
+	float m_footValue = 0;                         // +0x244 (0 from 0x007a24c0)
 	void gunnerBundle(const OtherSeat& seat); // 0x007a07c0
 	// The template's fields, read when the vehicle changes.
 	const world::ObjectTemplate* m_template = nullptr;
@@ -699,6 +710,14 @@ inline bool guiSprintTest(bool sprinting, bool weaponReady = true)
 {
 	return sprinting || !weaponReady;
 }
+// The soldier's slot 0xa4 (0x00586580), the HUD's weapon flag: true
+// while neither of the jump hold's timers runs (`jumpHold`, soldier +0x3f4
+// and +0x40c: a second after a jump, 0.6 s after rising from prone), or
+// with a weapon in hand whose template has a ThrownFireComp (0x94de), an
+// ExplosivesFireComp (0x94df) or a CamouflageAmmoComp (0x94f1); false
+// otherwise, and with no weapon in hand. The HUD (0x007a0f80) takes it on
+// foot only: in a seat it keeps the last value (1 from 0x007a24c0).
+bool soldierWeaponFlag(bool jumpHold, const world::ObjectTemplate* weapon);
 // The camera modes a HUD component shows its gui index in
 // (vehicleHud / weaponHud .showOnCamMode and .addShowOnCamMode: the
 // template's list at +0x110 / +0x10c, checked by slot 0xd4 / 0xe4,

@@ -369,7 +369,6 @@ void MenuBindings::bindLogic()
 		}
 		return Value();
 	});
-	n.setFunction(kLogic, "getCommandline", [](Interpreter&, const Args&) { return Value(""); });
 	n.setFunction(kLogic, "getModVersion", [](Interpreter&, const Args&) { return Value(kModVersion); });
 	// 0x1003d370: today as "%04d%02d%02d" (local time).
 	n.setFunction(kLogic, "getDateString", [](Interpreter&, const Args&) {
@@ -1025,6 +1024,10 @@ MenuBindings::LocalAccount* MenuBindings::localAccount(const std::string& name)
 
 std::string MenuBindings::defaultProfileFile()
 {
+	// BF2142_CONFIG_DIR stands for <config dir>/bf2142-recomp (scratch runs).
+	if (const char* dir = std::getenv("BF2142_CONFIG_DIR"); dir && *dir) {
+		return (std::filesystem::path(dir) / "profiles.txt").string();
+	}
 	std::filesystem::path dir;
 #if defined(_WIN32)
 	if (const char* appData = std::getenv("APPDATA")) {
@@ -1578,6 +1581,59 @@ void MenuBindings::bindLists()
 	});
 }
 
+// SwiffHost slot 0x124 (0x004776a0), as Multiplay.joinServer (0x10043ed0)
+// and Logic.joinCommandlineServer (0x1003c7a0) call it.
+bool MenuBindings::joinServer(const std::string& host, int port)
+{
+	if (host.empty() || port <= 0 || port > 0xffff) {
+		return false;
+	}
+	m_joinHost = host;
+	m_joinPort = static_cast<uint16_t>(port);
+	// The map the browser listed for it (the level to load).
+	m_joinMap = {};
+	int maxPlayers = 0;
+	for (const auto* servers : {&m_servers, &m_lanServers, &m_favouriteServers}) {
+		for (const Server& server : *servers) {
+			if (server.entry.ip == host && server.gamePort == m_joinPort && m_joinMap.level.empty()) {
+				m_joinMap = {field(server.entry, "mapname"), field(server.entry, "gametype"), fieldNumber(server.entry, "mapsize")};
+				maxPlayers = fieldNumber(server.entry, "maxplayers");
+			}
+		}
+	}
+	setCurrentGame(m_joinMap, maxPlayers);
+	log("joining " + host + ":" + std::to_string(port));
+	if (onJoin) {
+		onJoin(m_joinHost, m_joinPort);
+	}
+	if (m_services.connectServer) {
+		const auto connect = m_services.connectServer;
+		const std::string h = m_joinHost;
+		const uint16_t p = m_joinPort;
+		m_joinReported = false;
+		m_joinProbe = Job::start([connect, h, p](Job& job) { job.connect = connect(h, p); });
+	}
+	return true;
+}
+
+// SwiffHost slot 0x128 (0x00477960), as Multiplay.createServer and
+// Logic.startCommandlineServer (0x1003b130) call it.
+bool MenuBindings::createServer()
+{
+	const GameSetup setup = gameSetup();
+	if (setup.maps.empty()) {
+		log("create server: no map chosen");
+		return false;
+	}
+	log("create server: " + setup.maps.front().level + " " + setup.maps.front().gameMode + " "
+		+ std::to_string(setup.maps.front().size) + ", " + std::to_string(setup.bots) + " bots");
+	setCurrentGame(setup.maps.front(), setup.maxPlayers);
+	if (onStartGame) {
+		onStartGame(setup);
+	}
+	return true;
+}
+
 // --- dice.bf2.Multiplay (0x100475c0)
 
 void MenuBindings::bindMultiplay()
@@ -1589,35 +1645,7 @@ void MenuBindings::bindMultiplay()
 		std::string host;
 		int port = 0;
 		words >> host >> port;
-		if (host.empty() || port <= 0 || port > 0xffff) {
-			return Value(false);
-		}
-		m_joinHost = host;
-		m_joinPort = static_cast<uint16_t>(port);
-		// The map the browser listed for it (the level to load).
-		m_joinMap = {};
-		int maxPlayers = 0;
-		for (const auto* servers : {&m_servers, &m_lanServers, &m_favouriteServers}) {
-			for (const Server& server : *servers) {
-				if (server.entry.ip == host && server.gamePort == m_joinPort && m_joinMap.level.empty()) {
-					m_joinMap = {field(server.entry, "mapname"), field(server.entry, "gametype"), fieldNumber(server.entry, "mapsize")};
-					maxPlayers = fieldNumber(server.entry, "maxplayers");
-				}
-			}
-		}
-		setCurrentGame(m_joinMap, maxPlayers);
-		log("joining " + host + ":" + std::to_string(port));
-		if (onJoin) {
-			onJoin(m_joinHost, m_joinPort);
-		}
-		if (m_services.connectServer) {
-			const auto connect = m_services.connectServer;
-			const std::string h = m_joinHost;
-			const uint16_t p = m_joinPort;
-			m_joinReported = false;
-			m_joinProbe = Job::start([connect, h, p](Job& job) { job.connect = connect(h, p); });
-		}
-		return Value(true);
+		return Value(joinServer(host, port));
 	});
 	n.setFunction(kMultiplay, "isGameSpyAvailable", [this](Interpreter&, const Args&) { return Value(m_account.connected); });
 	n.setFunction(kMultiplay, "getNumServers", [this](Interpreter&, const Args&) {
@@ -1681,20 +1709,7 @@ void MenuBindings::bindMultiplay()
 	});
 	n.setFunction(kMultiplay, "getMapMovie", [](Interpreter&, const Args&) { return Value(""); });
 	n.setFunction(kMultiplay, "isMovieComplete", [](Interpreter&, const Args&) { return Value(true); });
-	n.setFunction(kMultiplay, "createServer", [this](Interpreter&, const Args&) {
-		const GameSetup setup = gameSetup();
-		if (setup.maps.empty()) {
-			log("create server: no map chosen");
-			return Value(false);
-		}
-		log("create server: " + setup.maps.front().level + " " + setup.maps.front().gameMode + " "
-			+ std::to_string(setup.maps.front().size) + ", " + std::to_string(setup.bots) + " bots");
-		setCurrentGame(setup.maps.front(), setup.maxPlayers);
-		if (onStartGame) {
-			onStartGame(setup);
-		}
-		return Value(true);
-	});
+	n.setFunction(kMultiplay, "createServer", [this](Interpreter&, const Args&) { return Value(createServer()); });
 	// The name of the server the info popup shows (its lists got the
 	// address as arguments).
 	n.setFunction(kServerInfo, "getServerName", [this](Interpreter&, const Args&) {

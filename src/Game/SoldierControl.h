@@ -101,6 +101,7 @@ constexpr float kNoProneTime = 0.2f;       // +0x3f8 (*0x00a68ee8): no lying dow
 constexpr float kJumpTime = 1.0f;          // +0x3f4 (*0x00a68eec)
 constexpr float kRecoverDelay = 1.0f;      // +0x408 (*0x00a68ed0): the stamina waits
 constexpr float kGetUpTime = 1.0f;         // +0x3fc (*0x00a68e30): no jump after getting up from prone
+constexpr float kRiseTime = 0.6f;          // +0x40c (*0x00a68dfc): set with +0x3fc (0x005889d0, 0x0058a6d0)
 constexpr float kAirSpeed = 2.0f;          // *0x00a68eb4: the air control's speed x time left x 0.5
 } // namespace jump
 
@@ -132,6 +133,10 @@ public:
 	const SprintStamina& stamina() const { return m_stamina; }
 	float jumpLoss = 0;     // the soldier template's sprintLossAtJump (+0x308)
 	bool jumped() const { return m_jumped; } // this tick
+	// The jump hold of the soldier's slot 0xa4 (0x00586580, on its +0x18c
+	// interface): a jump's timer (+0x3f4) or the rise from prone's (+0x40c)
+	// still running (above 0).
+	bool jumpHold() const { return m_jumpTime > 0 || m_rise > 0; }
 	float airTime() const { return m_airTime; }
 
 	float throttle() const { return m_throttle; }
@@ -152,7 +157,7 @@ public:
 	{
 		m_twist = m_catchUp = 0;
 		m_slopeDelay = m_airTime = -1;
-		m_jumpTime = m_noProne = m_getUp = m_recoverDelay = 0;
+		m_jumpTime = m_noProne = m_getUp = m_recoverDelay = m_rise = 0;
 		m_lastPose = SoldierPose::Stand;
 		m_sprintHeld = false;
 	}
@@ -170,6 +175,7 @@ private:
 	float m_noProne = 0;     // +0x3f8
 	float m_getUp = 0;       // +0x3fc
 	float m_recoverDelay = 0; // +0x408
+	float m_rise = 0;         // +0x40c
 	SoldierPose m_lastPose = SoldierPose::Stand;
 	bool m_sprintHeld = false;
 	bool m_jumped = false;

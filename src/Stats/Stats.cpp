@@ -232,6 +232,10 @@ bool Soldier::record(const RoundResult& round)
 
 std::string StatsStore::defaultFile()
 {
+	// BF2142_CONFIG_DIR stands for <config dir>/bf2142-recomp (scratch runs).
+	if (const char* dir = std::getenv("BF2142_CONFIG_DIR"); dir && *dir) {
+		return (std::filesystem::path(dir) / "stats.txt").string();
+	}
 	std::filesystem::path dir;
 #if defined(_WIN32)
 	if (const char* appData = std::getenv("APPDATA")) {

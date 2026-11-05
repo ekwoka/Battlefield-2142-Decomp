@@ -450,8 +450,20 @@ public:
 		std::vector<std::pair<int, float>> layers;
 		size_t nextEvent = 0;    // 0x14: the first event not yet fired
 		float jumpOffset = 0;    // 0x40: how far abruptPlayback skipped
+		// 0x46: queued by a trigger that plays by the speed (Forward
+		// 0x008c3a70, Side 0x008c3b00, Up 0x008c3bb0, Movement 0x008c46d0
+		// past its starting pair, Slope 0x008c4f00) with a looping bundle
+		// (+0x31); cleared only by the instance's constructor. walkCycle
+		// asks for it.
+		bool cycle = false;
 	};
 	const std::vector<Instance>& instances() const { return m_instances; }
+	// 0x008ba560 (slot 0x40) with its last argument set: the top instance
+	// (from the back of the playing list) whose `cycle` is set gives its
+	// bundle's length and its time, both times its rate (for a rate below
+	// 0: |rate| x length and |rate| x (length - time)); -1 and -1 without
+	// one. The mech HUD's foot animation (0x007a0940) reads it.
+	void walkCycle(float& length, float& time) const;
 	// Bundle names playing, by priority (for checks and debugging).
 	std::vector<std::string> playing() const;
 
@@ -459,6 +471,7 @@ private:
 	bool evaluate(size_t trigger);
 	void queueBundles(size_t trigger);
 	Instance& queue(size_t bundle, size_t trigger, int priority, float weightTarget, float rate);
+	Instance& markCycle(Instance& instance) const; // +0x46 for a looping bundle
 	bool advance(Instance& instance, float seconds);
 	bool advanceNew(Instance& instance, float seconds);
 	void setDirection(Instance& instance, float blend, int strafe, int forwardOrBack) const;

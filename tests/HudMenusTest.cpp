@@ -513,6 +513,20 @@ TEST(HudVehicle_PassengersAndScoreboardSquads)
 	in.repairCells = {false};
 	vehicleHud.update(hudManager, in);
 	CHECK(hudManager.number("RepairCell1Active") == 0 && hudManager.number("RepairCell3Active") == 1); // the others kept
+	// The walkers' step (0x007a0940): sin(2 pi x time / length) + 1, 0 for
+	// a cycle under 0.3 s or none; kept without an animation system.
+	CHECK(menu::mechFootValue(-1, -1) == 0 && menu::mechFootValue(0.29f, 0.1f) == 0);
+	CHECK(std::fabs(menu::mechFootValue(2, 0.5f) - 2) < 1e-5f && std::fabs(menu::mechFootValue(2, 1.5f)) < 1e-5f);
+	CHECK(std::fabs(menu::mechFootValue(2, 3) - 1) < 1e-5f); // past the length: 1
+	in.walking = true;
+	in.walkLength = 1.6f;
+	in.walkTime = 0.4f;
+	vehicleHud.update(hudManager, in);
+	CHECK(std::fabs(hudManager.number("MechFootAnimationValue") - 2) < 1e-5f);
+	in.walking = false;
+	in.walkTime = 1.2f;
+	vehicleHud.update(hudManager, in);
+	CHECK(std::fabs(hudManager.number("MechFootAnimationValue") - 2) < 1e-5f);
 
 	std::vector<menu::ScoreboardMember> members {
 		{0, 2, false, 30, 0, 3, 1, 50}, {1, 0, false, 20, 0, 2, 2, 0}, {2, 1, true, 10, 0, 1, 0, 0}, {3, 2, false, 5, 0, 0, 4, 30}};
@@ -1609,7 +1623,19 @@ TEST(HudVehicle_GuiIndexDisableOnSprint)
 	CHECK(menu::guiSprintTest(true) && !menu::guiSprintTest(false));
 	CHECK(menu::guiSprintTest(false, false) && menu::guiSprintTest(true, false));
 	world::ObjectTemplateManager templates;
+	// The weapon flag (0x00586580): ready unless a jump hold runs, then only
+	// with a thrown, explosives or camouflage weapon in hand.
+	world::ObjectTemplate* grenade = templates.create("GenericFireArm", "pac_grenade");
+	grenade->components().push_back("thrownFireComp");
+	world::ObjectTemplate* cloak = templates.create("GenericFireArm", "activecamo");
+	cloak->components().push_back("CamouflageAmmoComp");
+	world::ObjectTemplate* c4 = templates.create("GenericFireArm", "c4");
+	c4->components().push_back("ExplosivesFireComp");
 	world::ObjectTemplate* rifle = templates.create("GenericFireArm", "unl_shotgun_02");
+	rifle->components().push_back("DefaultFireComp");
+	CHECK(menu::soldierWeaponFlag(false, rifle) && menu::soldierWeaponFlag(false, nullptr));
+	CHECK(!menu::soldierWeaponFlag(true, rifle) && !menu::soldierWeaponFlag(true, nullptr));
+	CHECK(menu::soldierWeaponFlag(true, grenade) && menu::soldierWeaponFlag(true, cloak) && menu::soldierWeaponFlag(true, c4));
 	rifle->settings()["weaponHud.guiIndex"] = "3";
 	rifle->settings()["weaponHud.disableOnSprint"] = "1";
 	world::ObjectTemplate* knife = templates.create("GenericFireArm", "knife");

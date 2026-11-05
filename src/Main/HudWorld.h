@@ -180,6 +180,14 @@ public:
 		sprinting = me.sprinting;
 		return true;
 	}
+	// The local soldier's jump hold (SoldierControl::jumpHold: the timers
+	// 0x00586580 tests), false without one: the round's, or a joined game's
+	// prediction.
+	virtual bool soldierJumpHold() const
+	{
+		PlayerInfo me;
+		return playerInfo(localPlayer(), me) && me.alive && me.jumpHold;
+	}
 };
 
 // A local round (also a hosting server's own player).
@@ -198,7 +206,16 @@ public:
 	std::vector<ControlPointInfo> controlPointList() const override { return m_round.controlPointList(); }
 	std::vector<int> spawnablePoints(int team) const override { return m_round.spawnablePoints(team); }
 	int spawnChoice(int player) const override { return m_round.spawnChoice(player); }
-	std::vector<VehicleInfo> vehicleList() const override { return m_round.vehicleList(); }
+	// The vehicle bodies and the map's other PlayerControlObjects (the
+	// sentry gun, the drones, the pods: GameWorld::mapObjects), as the
+	// game's list of them holds both (0x00793b60).
+	std::vector<VehicleInfo> vehicleList() const override
+	{
+		std::vector<VehicleInfo> list = m_round.vehicleList();
+		const std::vector<VehicleInfo> others = m_round.mapObjects();
+		list.insert(list.end(), others.begin(), others.end());
+		return list;
+	}
 	std::vector<int> vehicleOccupants(uint32_t vehicle) const override { return m_round.vehicleOccupants(vehicle); }
 	float hitPoints(uint32_t object) const override { return m_round.hitPoints(object); }
 	float objectHealth(uint32_t object) const override;
@@ -252,6 +269,9 @@ public:
 	{
 		return ownStamina && ownStamina(stamina, sprinting);
 	}
+	// Our soldier's jump hold as the prediction has it; false: none.
+	std::function<bool()> ownJumpHold;
+	bool soldierJumpHold() const override { return ownJumpHold && ownJumpHold(); }
 	// The spawn group the local player asked for (6/6), -1 none.
 	int chosenSpawn = -1;
 

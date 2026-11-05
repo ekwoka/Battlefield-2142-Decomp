@@ -281,7 +281,9 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 
 | Option | What it does |
 |---|---|
-| `--connect host[:port]` / `+joinServer host[:port]` | Join a server. Real servers also need `--online` and a login. |
+| `--connect host[:port]` / `+joinServer host[:port]` | Join a server. Real servers also need `--online` and a login. With `--menu`, `+joinServer` waits for the login and the menu's main page joins it, as the original does. |
+| `+password <text>` | With `--menu +joinServer`, the server's password. |
+| `+hostServer 1` | With `--menu`, the main page hosts the menu's map list once logged in. |
 | `--name <name>` | Your player name on the server. |
 | `--play [1\|2]` | On a server, spawn, and ask for that team. |
 | `--spectate` | Join as a spectator (the host needs `sv.allowSpectators 1`). |
@@ -327,6 +329,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | Variable | What it does |
 |---|---|
 | `BF2142_GAME_DIR` | The install, instead of `--game`. |
+| `BF2142_CONFIG_DIR` | The folder for profiles, settings, stats and demos, instead of `~/Library/Application Support/bf2142-recomp` (`%APPDATA%\bf2142-recomp`, `~/.config/bf2142-recomp`). Point it at a scratch folder for test runs of the menu. |
 | `BF2142_ACCOUNT`, `BF2142_PASSWORD`, `BF2142_SOLDIER`, `BF2142_CDKEY` | Online credentials, instead of `bf2142-online.cfg`. |
 | `BF2142_FRAME_BENCH=<n>` | With `--screenshot`, print the mean cost of n rendered frames. |
 | `BF2142_BOT_SEED=<n>` | The bots' random seed, to compare rounds. |

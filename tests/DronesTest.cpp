@@ -348,3 +348,27 @@ TEST(Drones_BotLeadersSendOutSentries)
 	CHECK(field.world->drone(bot) != 0);
 	CHECK(field.world->playerInfo(bot, info) && info.inHandSlot == 3);
 }
+
+// The map's other PlayerControlObjects (GameWorld::mapObjects, the map
+// node 0x00793b60's list): the sentry drone isn't a vehicle body, so it
+// isn't in vehicleList, but the map lists it, its icon turned by the gun
+// bundle its camera rides (vehicleHud.useVehicleCameraRotation).
+TEST(Drones_OnTheMapList)
+{
+	Field field;
+	if (!field.loaded) {
+		return;
+	}
+	const int leader = field.spawnLeader("unl_drone_sentry_detonator");
+	CHECK(field.world->mapObjects().empty());
+	field.launch();
+	const uint32_t drone = field.world->drone(leader);
+	CHECK(drone != 0);
+	field.run(0.5f);
+	for (const auto& v : field.world->vehicleList()) {
+		CHECK(v.object != drone);
+	}
+	const auto list = field.world->mapObjects();
+	CHECK(list.size() == 1 && list[0].object == drone);
+	CHECK(!list.empty() && !std::isnan(list[0].cameraYaw) && across(list[0].position, field.at(drone)) < 0.01f);
+}

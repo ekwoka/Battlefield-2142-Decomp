@@ -359,6 +359,48 @@ int screenshot(const render::LevelSources& sources, const ViewerOptions& options
 	return ok ? 0 : 1;
 }
 
+// The menu's cursors (SwiffHost slot 0x84, 0x0046bcf0: the arrow, busy and
+// key binding .ani files of menu/external/flashmenu/cursor/, which the game
+// doesn't ship): the system's arrow, its wait cursor and its crosshair,
+// shown as the window's WM_SETCURSOR answer (0x00486440) picks them by the
+// wait state (slot 0x2f0).
+class MenuCursor {
+public:
+	~MenuCursor()
+	{
+		for (SDL_Cursor* cursor : m_cursors) {
+			if (cursor) {
+				SDL_DestroyCursor(cursor);
+			}
+		}
+	}
+	void show(int index)
+	{
+		index = index >= 0 && index < 3 ? index : 0;
+		if (index == m_shown) {
+			return;
+		}
+		static const SDL_SystemCursor kSystem[3] = {SDL_SYSTEM_CURSOR_DEFAULT, SDL_SYSTEM_CURSOR_WAIT, SDL_SYSTEM_CURSOR_CROSSHAIR};
+		if (!m_cursors[index]) {
+			m_cursors[index] = SDL_CreateSystemCursor(kSystem[index]);
+		}
+		if (m_cursors[index]) {
+			SDL_SetCursor(m_cursors[index]);
+		}
+		m_shown = index;
+	}
+
+private:
+	SDL_Cursor* m_cursors[3] = {nullptr, nullptr, nullptr};
+	int m_shown = 0;
+};
+
+} // namespace
+
+bool capsLockOn() { return (SDL_GetModState() & SDL_KMOD_CAPS) != 0; }
+
+namespace {
+
 int interactive(const render::LevelSources& sources, const ViewerOptions& options, Window::Impl& shown)
 {
 	SDL_Window* window = shown.window;
@@ -402,6 +444,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		ticks.advance(0);
 		bool running = true;
 		bool pointer = false; // the mouse is a pointer (a menu is up)
+		MenuCursor menuCursor;
 		while (running) {
 			const bool wanted = options.wantsPointer && options.wantsPointer();
 			if (playing && wanted != pointer) {
@@ -415,6 +458,9 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				options.onMenuInput(input);
 			};
 			const bool menuUp = options.onMenuInput && (!options.menuActive || options.menuActive());
+			if (menuUp && options.menuCursor) {
+				menuCursor.show(options.menuCursor());
+			}
 			if (options.wantsQuit && options.wantsQuit()) {
 				running = false;
 			}

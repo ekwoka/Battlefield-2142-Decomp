@@ -6,7 +6,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <fstream>
 #include <regex>
+#include <sstream>
 
 namespace dice::hfe::menu {
 
@@ -20,6 +22,7 @@ namespace {
 constexpr const char* kEndOfRound = "dice.bf2.EndOfRound";
 constexpr const char* kLogic = "dice.bf2.Logic";
 constexpr const char* kServerInfo = "dice.bf2.ServerInfo";
+constexpr const char* kClient = "dice.bf2.Client";
 
 // Game tips TEXT_gametip1..105 (Logic.getNextToolTip, 0x1003b290).
 constexpr int kGameTips = 105;
@@ -79,11 +82,15 @@ LevelDescription parseLevelDescription(const std::string& xml, const std::string
 	if (std::regex_search(xml, m, std::regex(R"re(<briefing[^>]*locid\s*=\s*"([^"]*)")re"))) {
 		out.briefingKey = m[1];
 	}
+	if (std::regex_search(xml, m, std::regex(R"re(<briefing[^>]*>\s*([^<]*?)\s*</briefing>)re"))) {
+		out.briefing = m[1];
+	}
 	const std::regex mode(R"re(<mode[^>]*type\s*=\s*"([^"]*)"[^>]*>([\s\S]*?)</mode>)re");
 	const std::regex mapType(R"re(<maptype([^>]*)>)re");
 	const std::regex players(R"re(players\s*=\s*"(\d+)")re");
 	const std::regex locid(R"re(locid\s*=\s*"([^"]*)")re");
 	for (auto it = std::sregex_iterator(xml.begin(), xml.end(), mode); it != std::sregex_iterator(); ++it) {
+		out.modes.push_back((*it)[1]);
 		if ((*it)[1] != gameMode) {
 			continue;
 		}
@@ -95,6 +102,13 @@ LevelDescription parseLevelDescription(const std::string& xml, const std::string
 			out.sizes.push_back(players_);
 			if ((players_ == size || out.gameModeKey.empty()) && std::regex_search(attributes, a, locid)) {
 				out.gameModeKey = a[1];
+			}
+			// The text between the tags, when there is no locid (the
+			// record's +0x3c next to the locid's +0x20, 0x1001e940).
+			const size_t open = body.find('>', static_cast<size_t>(t->position(0))) + 1;
+			const size_t close = body.find("</maptype>", open);
+			if (players_ == size && out.gameModeText.empty() && close != std::string::npos) {
+				out.gameModeText = std::regex_replace(body.substr(open, close - open), std::regex(R"re(^\s+|\s+$)re"), "");
 			}
 		}
 	}
@@ -231,6 +245,23 @@ void EndOfRoundBindings::bindEndOfRound()
 	bind("getPreviousMapGameMode", [&s, round] { return round(Value(s.previousGameMode)); });
 	bind("getPreviousMapGameModeName", [this, round] {
 		return round(Value(modeName(m_summary.previousGameMode)));
+	});
+	// 0x1001d590: the played level's record (SwiffHost slot 0x180's level,
+	// ModInfo slot 0x20): its briefing's locid, else its text, localized;
+	// "" without a round.
+	bind("getPreviousMapDescription", [this] {
+		return Value(m_summary.validRound ? localized(m_summary.previousMapDescriptionKey) : std::string());
+	});
+	// 0x1001e940: that record's mode ("sp1" read as gpm_sp) and size: the
+	// maptype's locid, else its text, localized.
+	bind("getPreviousMapGameModeDescription", [this] {
+		return Value(m_summary.validRound ? localized(m_summary.previousGameModeDescriptionKey) : std::string());
+	});
+	// 0x1001cd60: a kit's name by its number, "" past the seven.
+	n.setFunction(kEndOfRound, "getKitNameFromId", [](Interpreter& vm, const Args& args) {
+		static const char* const kKits[] = {"antitank", "assault", "engineer", "medic", "specops", "support", "sniper"};
+		const double id = vm.toNumber(arg(args, 0));
+		return Value(id >= 0 && id < 7 ? std::string(kKits[static_cast<int>(id)]) : std::string());
 	});
 
 	// 0x1001d9c0 / 0x1001db80: the outcome's pictures.
@@ -396,6 +427,44 @@ void EndOfRoundBindings::bindLogic()
 	});
 	n.setFunction("dice.bf2.Client", "getLoadProgress", [&s](Interpreter&, const Args&) { // 0x100147b0
 		return Value(std::clamp(static_cast<double>(s.loadProgress), 0.0, 1.0));
+	});
+	// 0x10014810: 1 when the round's end kind (SwiffHost slot 0xb0) is 1,
+	// else 0. 0x100148b0: slot 0xb4's seconds. 0x10014910: always 0.
+	// 0x10014970: slot 0xb8's file. 0x100149f0: slot 0xd0, a game is up.
+	n.setFunction(kClient, "getEORType", [&s](Interpreter&, const Args&) { return Value(s.eorType == 1 ? 1 : 0); });
+	n.setFunction(kClient, "getTimeUntilRestart", [&s](Interpreter&, const Args&) {
+		return Value(static_cast<double>(s.timeUntilRestart));
+	});
+	n.setFunction(kClient, "getTotalTimeUntilRestart", [](Interpreter&, const Args&) { return Value(0); });
+	n.setFunction(kClient, "getCurrentLoadFile", [&s](Interpreter&, const Args&) { return Value(s.currentLoadFile); });
+	n.setFunction(kClient, "hasUserEscapedFromGame", [&s](Interpreter&, const Args&) { return Value(s.gameRunning); });
+	// 0x10014610 / 0x10014550: GSPlayerName (slots 0x98 / 0x9c), the
+	// argument the default.
+	n.setFunction(kClient, "getPlayerName", [this](Interpreter& vm, const Args& args) {
+		return Value(m_summary.playerName.empty() ? vm.toString(arg(args, 0)) : m_summary.playerName);
+	});
+	n.setFunction(kClient, "setPlayerName", [this](Interpreter& vm, const Args& args) {
+		m_summary.playerName = vm.toString(arg(args, 0));
+		return Value();
+	});
+	// 0x100146e0 / 0x100145b0: CommandLine.cmd's text ("" when it can't be
+	// read; the original then raises "unable to open commandline file"),
+	// and the text written there (after host event 5).
+	n.setFunction(kClient, "getCommandlineOption", [this](Interpreter&, const Args&) {
+		if (commandLineFile.empty()) {
+			return Value(m_commandLineOption);
+		}
+		std::ifstream in(commandLineFile, std::ios::binary);
+		std::stringstream text;
+		text << in.rdbuf();
+		return Value(in ? text.str() : std::string());
+	});
+	n.setFunction(kClient, "setCommandlineOption", [this](Interpreter& vm, const Args& args) {
+		m_commandLineOption = vm.toString(arg(args, 0));
+		if (!commandLineFile.empty()) {
+			std::ofstream(commandLineFile, std::ios::binary) << m_commandLineOption;
+		}
+		return Value();
 	});
 	n.setFunction("dice.bf2.VideoSettings", "isOptimzingShaders", [&s](Interpreter&, const Args&) { // 0x1005d140
 		return Value(s.optimizingShaders);

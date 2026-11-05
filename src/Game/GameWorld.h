@@ -548,6 +548,7 @@ public:
 		float heat = 0; // the weapon in hand's (or the seat's gun's), 0..1
 		float stamina = 1; // the sprint's (SprintStamina, the soldier's +0x378), 0..1
 		bool sprinting = false; // the sprint on (PCO vtable 0x100)
+		bool jumpHold = false;  // a jump's or the rise from prone's timer running (SoldierControl::jumpHold)
 		uint32_t gunShots = 0; // rounds the seats' guns have fired (the camera's recoil)
 		// The player's fire states (player +0x19c / +0x19d: vtable 0x1d4 /
 		// 0x1dc, set from c_PIFire / c_PIAltFire held by the game logic's
@@ -650,10 +651,14 @@ public:
 	// barrel at the firearm's velocity plus the vehicle's, a tracer every
 	// tracerInterval-th round (`tracerCount`, the fire comp's +0x78), the
 	// barrels in turn (`barrel`, +0x1a8). The firearm's deviation isn't
-	// networked: the round flies straight. False when nothing was made;
-	// `muzzle` gets the round's start either way the gun is known.
+	// networked or seeded: the client's own firearm strays the round
+	// (0x005f5540 on the client's SimpleDeviationComp state, its own random
+	// numbers), `deviation` here (degrees, the caller's build-up:
+	// RemoteSeatGuns), as fireSeatWeapon does on the server. False when
+	// nothing was made; `muzzle` gets the round's start either way the gun
+	// is known.
 	bool fireRemoteSeatRound(uint32_t vehicle, int seat, const std::string& weapon, const physics::Vec3& velocity,
-		int& barrel, int& tracerCount, physics::Vec3* muzzle = nullptr);
+		int& barrel, int& tracerCount, physics::Vec3* muzzle = nullptr, float deviation = 0);
 	// The commanders' strike firearms that fired since the last call: the
 	// asset object, its firearm (its template name) and where 0x005a0bf0
 	// moved it (orbitalBombardmentHeight over the target). The fire's event
@@ -1134,6 +1139,12 @@ public:
 	// local matrix (in its parent's frame) from the bone (0x0063d470), in
 	// place of its template placement.
 	bool partBone(uint32_t object, const std::string& part, anim::Matrix& local) const;
+	// A part's pose as a joined game's ghosts have it (setRemotePartPose):
+	// a seat's bundles on a client; false without one.
+	bool remotePartPose(uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation) const
+	{
+		return seatPartPose(object, part, offset, rotation, true);
+	}
 	// A LookAtObject part (the EU FAV's rear arms, 0x0064bc00): its local
 	// matrix in its parent's frame, turned to face nameToLookAt's object at
 	// offsetToLookAt; partBone answers with it.
@@ -1361,6 +1372,10 @@ public:
 	// bundle's frame): what the vehicle HUD's GunnerAngle reads (the
 	// bundle's slot 0x188, 0x007a07c0); false for a seat without one.
 	bool seatYaw(uint32_t vehicle, int seat, float& yaw) const;
+	// The walk cycle of a vehicle's own animation system (the root's slot
+	// 0x180, its slot 0x40: anim::AnimationState::walkCycle); false without
+	// one (no bundleAnimationSystem, or not built yet).
+	bool walkCycle(uint32_t vehicle, float& length, float& time) const;
 	// Whether the seat's look turns its gun (seatAims): every gunner with a
 	// gun bundle, and the ground drivers whose turret or barrel is theirs
 	// (eu_tank's turret, the APCs' first position, the mechs' torso, the
@@ -1408,11 +1423,29 @@ public:
 		// Its box in object space (the vehicle collision LOD's points): the
 		// bots' AI object's box (AIDLL 0x100fe990).
 		physics::Vec3 boxMin, boxMax;
+		// Degrees: the heading of the camera's yaw bundle where the world
+		// turns it itself (a sentry drone's gun, mapObjects); NaN: by the
+		// seats (seatYaw).
+		float cameraYaw = std::numeric_limits<float>::quiet_NaN();
 	};
 	std::vector<VehicleInfo> vehicleList();
+	// The map's other PlayerControlObjects (the map node 0x00793b60 walks
+	// the game's list of the root PlayerControlObjects, DAT_00a1c170 slot
+	// 0x1a4, of which vehicleList has the vehicle bodies): the deployed
+	// ones (the sentry gun), the drones and the drop pods, which aren't
+	// bodies here. Their templates' vehicleHud decides what the map shows
+	// (the sentries' mini_sentry; the pods have only usePlayerIcon).
+	std::vector<VehicleInfo> mapObjects() const;
 	// The terrain's height under a point (the heightmap the physics uses; 0
 	// without one).
 	float terrainHeight(float x, float z) const { return m_ground.height ? m_ground.height(x, z) : 0.0f; }
+	// A world order marker's height (the order object 0x005b8b20, an order
+	// on the ground): from a metre over the order's point, the higher of the
+	// water (DAT_00a83e58 slot 0x94) and the terrain (slot 0x68), or what a
+	// ray 100 m down through the static objects (the scene's slot 0x68 with
+	// flags 0x1000100, 0x006f4aa0) meets above that; then up by half the
+	// marker's radius (its object's slot 0x8c).
+	float orderMarkerHeight(const physics::Vec3& order, float radius) const;
 	// The battlefield-objects report (BF2142.exe event 0x41, server
 	// 0x005088f0 -> IAIEventCourier vt+0xe0, AIDLL 0x1004e5e0 -> 0x100bf000):
 	// `reporter`'s squad now knows of the enemy `players` (and the
@@ -3514,6 +3547,17 @@ private:
 		float effectHitPoints = 0;
 		int effectLevel = 0;
 	};
+	// A Titan mesh's collision LOD as a candidate of its own (Titan::
+	// vehicleParts).
+	struct TitanLodPart {
+		int lod = 1; // physics::CollisionUser
+		std::shared_ptr<physics::CollisionWorld> mesh;
+		std::vector<physics::Vec3> points;
+		std::vector<uint32_t> pointMaterials;
+		physics::Vec3 boxMin, boxMax;
+		float radius = 0;
+		uint32_t groups = 0;
+	};
 	struct TitanMesh {
 		const physics::CollisionMeshFile* mesh = nullptr;
 		std::vector<uint32_t> materials;
@@ -3522,6 +3566,11 @@ private:
 		int node = -1;  // the template node's part (its armour's or its armoured ancestor's)
 		std::vector<int> chain; // the parts it lies under (its collision goes with any of them)
 		int groups = 0;         // collisionGroups: 0x100 / 0x200 a team's own forcefield (PAC's, EU's)
+		// Its LODs' parts, made once (rebuildTitanMeshes): they depend on
+		// the mesh and its place in the Titan only, not on which parts are
+		// down.
+		std::vector<std::shared_ptr<const TitanLodPart>> lodParts;
+		bool lodPartsMade = false;
 	};
 	struct Titan {
 		uint32_t object = 0;
@@ -3535,16 +3584,8 @@ private:
 		// A mover meets each part at the LOD it asks for (otherCollisionLod:
 		// the vehicles 1, the parachute, crates, beacons and drones 2, the
 		// soldier LOD with the decks), as it meets any other mesh.
-		struct VehiclePart {
-			int lod = 1; // physics::CollisionUser
-			std::shared_ptr<physics::CollisionWorld> mesh;
-			std::vector<physics::Vec3> points;
-			std::vector<uint32_t> pointMaterials;
-			physics::Vec3 boxMin, boxMax;
-			float radius = 0;
-			uint32_t groups = 0;
-		};
-		std::vector<VehiclePart> vehicleParts;
+		using VehiclePart = TitanLodPart;
+		std::vector<std::shared_ptr<const VehiclePart>> vehicleParts; // the live meshes' (TitanMesh::lodParts)
 		physics::Vec3 velocity;       // x and z (0x005aa0e0 sets the node's)
 		// The move orders (+0x3c: tick -> target), the last order's time.
 		std::map<uint32_t, std::pair<float, float>> targets;
@@ -3590,15 +3631,25 @@ private:
 	bool insideTitanHull(const Titan& titan, const physics::Vec3& point) const;
 	std::vector<std::unique_ptr<ObjectSpawner>> m_newSpawners; // a Titan's, made during the spawners' loop
 	static constexpr uint32_t kTitanPartIds = 0x7f000000u;
-	// The armour's damage lists (0x006557a0): +0x220 every attacker's sum,
-	// +0x22c a vehicle's while manned or on a team, +0x238 the soldiers'
-	// attackers past the limit; +0x264 the heal since (0x00655a00).
+	// The armour's damage lists (0x006557a0): +0x220 every hit, +0x22c a
+	// vehicle's hits while manned or on a team, each entry {attacker, time
+	// (the game's clock, 0x00666070, as a double), amount}, appended; +0x238
+	// the soldiers' attackers past the limit; +0x264 the heal since
+	// (0x00655a00). The tests sum an attacker's amounts in list order
+	// (0x006557a0, 0x004c0e40); nothing found reads the times.
+	struct DamageEntry {
+		int attacker = -1;
+		double time = 0;
+		float amount = 0;
+	};
 	struct ArmourDamage {
-		std::map<int, float> all;
-		std::map<int, float> manned;
+		std::vector<DamageEntry> all;
+		std::vector<DamageEntry> manned;
 		std::set<int> over;
 		float healed = 0;
 	};
+	static float damageSum(const std::vector<DamageEntry>& list, int attacker);
+	static void dropDamage(std::vector<DamageEntry>& list, int attacker);
 	std::map<uint32_t, ArmourDamage> m_armourDamage;
 	struct PendingTeamDamage {
 		TeamDamage event;
@@ -3628,6 +3679,7 @@ private:
 	void removeTitanCarried(Titan& titan);
 	void buildTitanParts(Titan& titan);
 	void rebuildTitanMeshes(Titan& titan);
+	static std::vector<std::shared_ptr<const TitanLodPart>> titanLodParts(const TitanMesh& m, uint32_t owner);
 	Titan* titanByObject(uint32_t object);
 	const Titan* titanByObject(uint32_t object) const;
 	bool titanPart(uint32_t id, Titan*& titan, int& part);

@@ -130,6 +130,8 @@ bool PlayerCamera::current(Me& me) const
 		me.aimPitch = remote.aimPitch;
 		me.stance = remote.stance;
 		me.firing = remote.firing;
+		me.vehicle = remote.vehicle;
+		me.seat = remote.seat;
 		return true;
 	}
 	game::GameWorld::PlayerInfo info;
@@ -738,7 +740,9 @@ anim::ZoomSettings zoomSettings(const world::ObjectTemplate& weapon)
 void PlayerCamera::stepSeatZoom(const Me& me, bool altPressed, float seconds)
 {
 	const world::ObjectTemplate* gun = nullptr;
-	if (me.vehicle && !m_remote) {
+	if (me.vehicle) {
+		// (A joined game's seat too: its gun's zoom is the client's own, the
+		// firearm's DefaultZoomComp on the client; the server keeps none.)
 		const auto seats = m_round.vehicleSeats(me.vehicle);
 		if (me.seat >= 0 && static_cast<size_t>(me.seat) < seats.size()) {
 			gun = m_round.templates().find(seats[static_cast<size_t>(me.seat)].weapon);
@@ -1106,7 +1110,17 @@ bool PlayerCamera::view(View& view, float aspect) const
 bool PlayerCamera::findSeatCamera(SeatView& out) const
 {
 	game::GameWorld::PlayerInfo me;
-	m_round.playerInfo(m_round.localPlayer(), me);
+	if (m_remote) {
+		// A joined game's seat (Remote::vehicle / seat).
+		Me remote;
+		if (!current(remote)) {
+			return false;
+		}
+		me.vehicle = remote.vehicle;
+		me.seat = remote.seat;
+	} else {
+		m_round.playerInfo(m_round.localPlayer(), me);
+	}
 	const world::Object* vehicle = m_round.objects().find(me.vehicle);
 	if (!vehicle || !vehicle->objectTemplate()) {
 		return false;
@@ -1156,8 +1170,9 @@ bool PlayerCamera::findSeatCamera(SeatView& out) const
 					render::Mat4 boned;
 					std::copy(bone.begin(), bone.end(), boned.m.begin());
 					m = boned * local;
-				} else if (m_round.partPose(object, child.name, offset, rotation)) {
-					m = placement(offset, rotation) * m;
+				} else if (m_remote ? m_round.remotePartPose(object, child.name, offset, rotation)
+									: m_round.partPose(object, child.name, offset, rotation)) {
+					m = placement(offset, rotation) * m; // a joined game's: as the bundles' ghosts turn them
 				}
 				const bool seat = c->settings().count("seatInformation") != 0;
 				if (inSeat && seat) {

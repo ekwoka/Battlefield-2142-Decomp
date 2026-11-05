@@ -52,6 +52,7 @@
 #include "Stats/Stats.h"
 #include "UI/Avm1/Value.h"
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -285,6 +286,73 @@ public:
 	// <path> +multi 1" (0x00477fb0 posts host event 0xc, 0x00403fa0).
 	std::function<void(const std::string& modPath)> onActivateMod;
 
+	// --- The command line (MenuBindingsOffline.cpp)
+
+	// What BF2142.exe's start-up (0x00404780) leaves for the menu when the
+	// game is started with a server to join or host: GSJoinAddress
+	// (+joinServer, resolved by SwiffHost slot 0x284), GSPort (+port, 17567
+	// without), GSPassword (+password), and the activation type SwiffHost
+	// slot 0x2f8 keeps (+0xd94): 2 to join a server on the internet, 3 one
+	// on the local network (slot 0x288, 0x0046b8a0: 10/8, 172.16/12,
+	// 192.168/16), 4 to host on the internet and 5 on the local network
+	// (GSIsServer, +hostServer: the server settings' internet flag +0x54),
+	// 0 for none. The main page reads it once logged in
+	// (Logic.getCommandLine, 0x1003c5a0) and then calls
+	// joinCommandlineServer or startCommandlineServer.
+	struct CommandLine {
+		std::string joinAddress; // "" none
+		int port = 0x449f;       // GSPort's default
+		std::string password;
+		bool hostServer = false;
+		// Hosting: the level the game names (GSLoadLevel, GSGameMode; the
+		// size from the server's players, 0x00431690), "" for the menu's list.
+		std::string level, gameMode = "gpm_cq";
+	};
+	void setCommandLine(const CommandLine& commandLine);
+	// The activation type for an address and the host flag (0x00404780).
+	static int commandLineActivation(const CommandLine& commandLine, bool internet);
+	int commandLineType() const { return m_commandLineType; }
+
+	// --- Local demos (DemoLibrary, BF2142.exe vtable 0x009276b0, singleton
+	// 0x00a0f7d4, reached through SwiffHost slot 0x50)
+
+	// A demo of the library (its record of 0x94 bytes, filled by the scan
+	// 0x0049e1e0 from each file's header, 0x005793b0).
+	struct LocalDemo {
+		std::string path;       // +0x20, the file
+		std::string name;       // +0x3c, the file's name without ".bf2142demo"
+		std::string serverName; // +0x04
+		uint32_t started = 0;   // +0x58, time_t
+		std::string level;      // +0x5c
+		std::string gameMode;   // +0x78
+	};
+	// The scan (slot 0x10): every *.bf2142demo in `directory` (the
+	// original's @HOME@/Profiles/Default/demos/) whose header reads, in
+	// the folder's order.
+	static std::vector<LocalDemo> findDemos(const std::string& directory);
+	void setDemoDirectory(const std::string& directory);
+	const std::vector<LocalDemo>& demos() const { return m_demos; }
+	// Multiplay.playDemo (0x10046f40): the demo's file to host event 0xd
+	// (SwiffHost slot 0x30): the game plays it.
+	std::function<void(const std::string& path)> onPlayDemo;
+	// The library's new-bookmark flag (+0xb0, slots 0x40 / 0x44; set when
+	// a bookmark is added, 0x004b4710).
+	void setHasNewBookmark(bool value) { m_hasNewBookmark = value; }
+
+	// --- The window and the game's files
+
+	// Logic.isCapsLockPressed (0x1003c540: GetKeyState(VK_CAPITAL) & 1):
+	// the window's Caps Lock (false without one).
+	std::function<bool()> capsLock;
+	// Reads a file of the game (Levels/<level>/Info/<level>.desc for the
+	// map texts); false when missing.
+	std::function<bool(const std::string& path, std::string& text)> readFile;
+	// A game mode's name from the mod (ModInfo slot 0x48, "N/A" unknown).
+	std::function<std::string(const std::string& mode)> gameModeName;
+	// Client.get/setPlayerName (SwiffHost slots 0x98 / 0x9c: GSPlayerName).
+	void setPlayerName(const std::string& name) { m_playerName = name; }
+	const std::string& playerName() const { return m_playerName; }
+
 	// The game running now (Multiplay.getCurrentMap*, SwiffHost slots
 	// 0x70..0x7c over the game logic 0x00a1b5d8; "$noCurrentGame" without
 	// one): createServer and joinServer set it, disconnectGame clears it;
@@ -361,6 +429,30 @@ private:
 	void bindOffline();
 	void bindFavourites();
 	void bindMods();
+	// MenuBindingsOffline.cpp: the command line, the demos and bookmarks,
+	// the map texts, the server info popup and the small rest.
+	void bindCommandLine();
+	void bindDemos();
+	void bindMapTexts();
+	void showDemos();
+	// The demo bookmarks (LocalProfile.addDemoBookmark's entries, the
+	// LocalProfileManager's slots 0xd4 count, 0xd8 one, 0xdc delete).
+	std::vector<std::string> demoBookmarks() const;
+	void showDemoBookmarks();
+	// A level's Info/<level>.desc (LevelDescription's parts, ModInfo's
+	// level record of 0xa4 bytes), parsed once; nullptr when unreadable.
+	struct LevelText {
+		std::string name, briefing, briefingKey;
+		std::vector<std::string> modes;
+	};
+	const LevelText* levelText(const std::string& level);
+	std::map<std::string, std::optional<LevelText>> m_levelTexts;
+	// SwiffHost slots 0x124 joinServer and 0x128 createServer.
+	bool joinServer(const std::string& host, int port);
+	bool createServer();
+	// The server the ServerInfo popup's texts read (0x10053860): the one
+	// joined last, else the one setCurrentServerId named.
+	const Server* infoServer() const;
 	void storeFavourites(bool history, const std::vector<FavouriteServer>& servers);
 	// The favourites as server rows (with the browser's fields when it
 	// lists the same server), then the lists that show them.
@@ -481,6 +573,19 @@ private:
 	bool m_cursorEnabled = true;
 
 	std::string m_infoHost; // the server info popup's server
+
+	CommandLine m_commandLine;
+	int m_commandLineType = 0;         // SwiffHost +0xd94
+	bool m_async = false;              // the player's +0x48 (Logic.get/setAsync)
+	bool m_isLoading = false;          // SwiffHost +0x7b4 (Logic.setIsLoading)
+	std::string m_currentServerHost;   // SwiffHost slot 0x130's (setCurrentServerId)
+	int m_currentServerPort = 0, m_currentServerQueryPort = 0;
+	int m_serverInfoRevision[2] = {0, 0}; // slots 0x138 / 0x13c
+	std::array<std::string, 2> m_teamNames; // 0x1012bc3c / 0x1012bc58 (cacheExtendedServerInfo's)
+	std::string m_playerName;
+	std::string m_demoDirectory;
+	std::vector<LocalDemo> m_demos;
+	bool m_hasNewBookmark = false;
 
 	// The controls page.
 	void bindControls();

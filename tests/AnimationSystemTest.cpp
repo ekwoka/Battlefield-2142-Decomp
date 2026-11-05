@@ -613,6 +613,12 @@ TEST(AnimationSystem_MechWalksToAStop)
 	}
 	std::fprintf(stderr, "  mech walking: speed factor %.3f fading in, %.3f walking\n", starting, state.speedFactor());
 	CHECK(starting < 1 && near(state.speedFactor(), 1));
+	// The walk cycle the HUD's foot animation reads (0x008ba560): the top
+	// looping bundle a speed trigger queued, its length and time by its rate.
+	float length = 0, time = 0;
+	state.walkCycle(length, time);
+	std::fprintf(stderr, "  walk cycle %.3f of %.3f s\n", time, length);
+	CHECK(length >= 0.3f && time >= 0 && time <= length);
 	// Let go: the walk plays on to its next stop point, then fades out.
 	input.messages = 2048;
 	int updates = 0;

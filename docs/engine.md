@@ -1380,7 +1380,16 @@ the Parachute `parachute` (class `0xc5a8`, vtables `0x0096e518` /
   soldier, with its collisionGroups), and a mover meets the parts at its
   otherCollisionLod; the rider's-feet stand-in is gone
   (`Titan_ParachuteComesDownOnTheDecks`: opened 14 m over the hangar's
-  deck, it lands there and its rider steps out alive).
+  deck, it lands there and its rider steps out alive). Each mesh's LOD
+  parts are built once (`TitanMesh::lodParts`, `titanLodParts`) and only
+  picked again as parts go down or come back; the Titan's merged soldier,
+  team and projectile worlds append those parts' faces
+  (`physics::CollisionWorld::append`, the same faces in the same order as
+  the addMesh calls made them) instead of placing every mesh again. That
+  made rebuilding cheap (Titan_SilosWearTheShieldThenTheHull 30.6 → 22 s
+  under the sanitizers, the round's output unchanged); the per-tick cost
+  was never the per-LOD candidates (collideMover skips another LOD's part
+  at once).
 - The animation state (event 0x20, `0x005cfbb0`): 4 landed, else 1 at 8 m
   or more (`*0x00a02000`) over the terrain, 2 below: the rider's seat
   messages (`Player::seatMessages`: still, landing, landed).
@@ -1464,8 +1473,14 @@ slot `0x34`, beside GLKilledBy 3, GLAssistKill 9, GLTinnitus 0xd).
   event {kind, victim, attacker} (vtable `0x0091c9a8`, `0x005099f0`) to the
   attacker and to the victim through the game server's slot `0x88`, the
   server's own player's straight to its event manager.
-  (`0x004c0e40` skips an object of class `0x9539` whose owner,
-  `0x005b30c0`, is the attacker; not followed.)
+  (`0x004c0e40`'s vehicle branch is skipped for a GenericProjectile,
+  class `0x9539`, whose root (`0x006f1d70`) is a Titan (the Titan sync
+  manager `0x005628f0`, `0x00561d90`) and whose owner (`+0x198`'s slot
+  0x38, `0x005b30c0`) is that root: a Titan's own round on its deck.
+  Settled without effect: the rewrite's projectiles have no armour, so
+  none reaches the lists.) Each entry keeps its time (the game's clock,
+  `0x00666070`; `GameWorld::DamageEntry`); the tests sum the amounts in
+  list order and no reader of the times was found.
 - **The heal** (`0x00655a00`) adds its hit points to `+0x264`; past 50,
   or with the armour full, `+0x220` empties (`armourHealed` from
   `healHitPoints` and the cells' mirror heal).
@@ -7523,8 +7538,17 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   explosives or camouflage weapon (fire comp 0x94de / 0x94df, ammo comp
   0x94f1) in hand. So the hand weapons with it (79 shipped calls) lose their
   crosshair overlay while the soldier sprints (`menu::weaponGuiIndex`,
-  `vehicleGuiIndex`, `guiSprintTest`; the jump hold isn't modelled: the
-  weapon flag is taken as on). No shipped vehicle sets the vehicle HUD's.
+  `vehicleGuiIndex`, `guiSprintTest`). The two timers are the jump's
+  (`+0x3f4`, 1 s, `*0x00a68eec`, set on the jump in `0x0058a6d0`) and the
+  rise from prone's (`+0x40c`, 0.6 s, `*0x00a68dfc`, set with the get-up
+  time `+0x3fc` as pose 2 is left, `0x005889d0` / `0x0058a6d0`), both run
+  down by `0x00586710`: so the overlays also go for a second after a jump
+  and 0.6 s after getting up from prone, but not for a grenade, C4 or the
+  camouflage (`SoldierControl::jumpHold`, `menu::soldierWeaponFlag`; a
+  joined client's from its prediction). `0x007a0f80` takes the flag only
+  with the soldier as the control object: in a seat the HUD keeps the
+  last value (main.cpp's `g_hudWeaponFlag`). No shipped vehicle sets the
+  vehicle HUD's.
 - **Read by nothing in BF2142.exe**: vehicleHud.typeIcon (string `+0x1f0`, its texture
   `+0x258` set by `0x00635ef0`, getter slot 0x11c `0x00637660`).
 - **useSelectionIcons** (block `+0xbc`, component `+0x104`, 0 by
@@ -7667,8 +7691,18 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   `0x005c63b0` with class 0x9472, `0x00998670`) less the map's rotation
   (`+0x80c`). Shipped on the sentry gun, the sentry drone and the drop pod.
   The rewrite turns a vehicle's icon by the seat yaw bundle that carries
-  the camera (`menu::cameraRotationBundle`, `GameWorld::seatYaw`); the
-  sentries and the pods aren't on its map at all (not vehicle bodies).
+  the camera (`menu::cameraRotationBundle`, `GameWorld::seatYaw`).
+  The map node's list is the game's (`DAT_00a1c170` slot `0x1a4`) of the
+  root objects with a PlayerControlObject (interface `0xc4c5`), so the
+  map also takes what isn't a vehicle body here: the deployed sentry gun
+  (`eu_sentrygun`, mini_sentry, vehicleType 3), the drones and the drop
+  pods (`GameWorld::mapObjects`, added to the local HudWorld's
+  vehicleList; a joined client's vehicleList already lists every
+  PlayerControlObject ghost). The sentry drone's icon turns with its gun
+  bundle (`unl_drone_sentry_guns`, its camera's parent), the heading the
+  rewrite turns (`Drone::gunYaw`); the deployed gun doesn't turn in the
+  rewrite, so its icon keeps the object's yaw. The pods set no
+  miniMapIcon, only usePlayerIcon: their rider is the player's icon.
 
 - **The blinks** (the blinker `0x00778040`, vtable `0x009b264c`, ticked
   with the frame's time by `0x00778080`; `menu::HudBlink`): 0x0079e5a0
@@ -7746,7 +7780,21 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   `0x007b88e0`) and the flag is set; else Radio (state 5). The parachute,
   LadderContainer and the bipods set 0 (`menu::usesVehicleCommRose`).
 
-Not done: the mech's foot animation. (The map's spotted vehicles and the silos' reload and
+- **MechFootAnimationValue** (`+0x244`, 0 from `0x007a24c0`):
+  `0x007a0940`, for each PlayerControlObject (class `0xc4c2`) of the
+  root's list with an animation system (slot `0x180`), asks the system's
+  slot 0x40 (`0x008ba560`, last argument 1): the instance nearest the
+  back of its playing list (the top) whose `+0x46` is set, the flag
+  Forward / Side / Up / Movement / SlopeTriggers (`0x008c3a70`,
+  `0x008c3b00`, `0x008c3bb0`, `0x008c46d0`, `0x008c4f00`) set on queueing
+  a looping bundle (`+0x31`), gives the bundle's length × its rate and
+  its time × its rate (|rate| × length and |rate| × (length − time) for a
+  rate below 0; −1 and −1 without one). Under 0.3 s the value is 0, else
+  sin(2π × min(time / length, 1)) + 1: 0..2 over the mechs' step
+  (`anim::AnimationState::walkCycle`, `GameWorld::walkCycle`,
+  `menu::mechFootValue`; a joined client's from its ghost's system).
+
+(The map's spotted vehicles and the silos' reload and
 background icons are above, under the map's vehicles, miniMapInfo and
 Spotted.)
 
@@ -11086,8 +11134,18 @@ never shown.
 
 The AI commander's answers to the requests are under Bots ("AI
 commander"); bot squad leaders send none (AIDLL never calls the store).
-Not done: the marker's height from its geometry (`+0x8c` / 2 over the ground: the
-rewrite puts it on the ground).
+The marker's height (`0x005b8b20`): from a metre over the order's
+point, the higher of the water (`DAT_00a83e58` slot `0x94`) and the
+terrain (slot `0x68`), or the hit of a ray 100 m down through the static
+objects (the scene's slot `0x68`, flags `0x1000100`) when higher; then up
+by half the marker object's radius (slot `0x8c`)
+(`GameWorld::orderMarkerHeight`). These Bundles have no collision mesh,
+so the radius is the render object's: the rewrite takes half the
+diagonal of the mesh's first LOD box as the file stores it (a stand-in:
+the bundled mesh's radius getter isn't traced). The order's name tag
+then stands at the order's point when the marker is 1.5 m or more from
+it, else 1.5 m over the marker (the manager's slot `0x2c`); the rewrite's
+tag stays 1.5 m over the order's point (Nametags.cpp).
 
 ## Titans (gpm_ti)
 
@@ -13775,8 +13833,36 @@ ask whether it's done.
 - **The Mod page:** dice.bf2.Mod over each `mods/<name>/Mod.desc` (title
   and description localized, path, URL, logo, version; the current mod
   is GSModDirectory after its '/'). activateMod is the original's restart
-  with `+modPath` (0x00477fb0, 0x00403fa0), passed to
-  `MenuBindings::onActivateMod`, which nothing wires: only bf2142 ships.
+  with `+modPath` (0x00477fb0, host event 0xc, 0x00403fa0): `bf2142`
+  leaves the menu and runs itself again (`platform::restartProcess`) with
+  its own command line, `+modPath <path> +multi 1` in place of any given.
+- **The command line's server** (0x00404780): with the menu,
+  `+joinServer <address>` (GSJoinAddress, `+port` GSPort, `+password`
+  GSPassword) or `+hostServer 1` (GSIsServer) set SwiffHost's activation
+  type (slot 0x2f8, +0xd94): 2 join on the internet, 3 on the local
+  network (0x0046b8a0: 10/8, 172.16/12, 192.168/16), 4 / 5 host on the
+  internet / the local network (the server settings' +0x54). Once logged
+  in, the main page asks `Logic.getCommandline` (the native is
+  getCommandLine, 0x1003c5a0; names match without regard to case) and
+  calls `joinCommandlineServer` (0x1003c7a0: SwiffHost.joinServer with
+  GSJoinAddress and GSPort) or `startCommandlineServer` (0x1003b130: the
+  info server 127.0.0.1, then createServer, slot 0x128, with the command
+  line's level, else the map list). `+level` still starts a level without
+  the menu, so hosting from the menu uses its map list.
+- **Local demos** (DemoLibrary, vtable 0x009276b0, through SwiffHost slot
+  0x50): the `demos` list holds each `*.bf2142demo` in
+  `<profiles>/Default/demos/` whose header reads (the scan 0x0049e1e0):
+  the date (0x10007aa0, the English "M/d/yyyy h:mm:ss AM"), the file's
+  name, the map, the mode. `playDemo` (0x10046f40, host event 0xd) plays
+  it as `--demo` does; `deleteDemo` (0x100421c0, slot 0x20) deletes the
+  file. The bookmarks (`demobm`) are LocalProfile.addDemoBookmark's
+  entries: `getNumDemoBookmarks` / `deleteDemoBookmark` (LocalProfileManager
+  slots 0xd4 / 0xdc, the profile saved) and the library's new-bookmark flag.
+- **The menu's cursor:** `Logic.beginWaitState n` / `endWaitState` choose
+  the window's cursor (SwiffHost slot 0x84 by +0xd90, as the window's
+  WM_SETCURSOR answer 0x00486440 does): the system arrow, wait cursor and
+  crosshair stand in for the unshipped `cursor_arrow/busy/keybinding.ani`.
+  `Logic.isCapsLockPressed` reads the window's Caps Lock.
 - **The map list's own natives:** `addMapToMapList(name, mode, size)`,
   `moveMapInList(index, up)` (SwiffHost 0x104 / 0x10c), `getMapName`. The
   `getCurrentMap*` natives answer the game started or joined
@@ -14371,8 +14457,19 @@ pitch bundle (−y), the carrier seat's yaw for a mounted gun and the bone
 part above it (seatMount), then seatGunOrigin as the server's
 fireSeatWeapon: barrels in turn, projectileStartPosition, the firearm's
 velocity plus the vehicle ghost's, a tracer every tracerInterval-th
-round. The firearm's deviation isn't networked, so the client's rounds
-fly straight. The sound and muzzle effects play at that muzzle.
+round. The firearm's deviation isn't networked or seeded: the client's
+FireComp strays the round by its own SimpleDeviationComp (`0x005dedb0`
+each tick, `0x005f5540` on the round) and its own random numbers, so the
+path is the client's (`client::RemoteSeatGuns`' build-up per gun, passed
+to `fireRemoteSeatRound`; a bot's AI deviation is the server's alone).
+The sound and muzzle effects play at that muzzle. **A joined seat's
+view and zoom**: the camera's remote source now gives the seat (the
+control object's seat ghost: its root's object and its part), so the
+seat's camera places the inside view as a local round's
+(`PlayerCamera::findSeatCamera`, the bundles turned by their ghosts,
+`GameWorld::remotePartPose`) and the seat gun's DefaultZoomComp steps on
+the alternate fire there too (`stepSeatZoom`); the server keeps no seat
+zoom either way.
 **The EMP strike on a joined client**: the strike's projectile is a server
 ghost, but its GroundEffectBundle fires on each client from the client's
 own firing of the asset's firearm. 0x005a0e50, as the server fires the

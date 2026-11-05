@@ -117,6 +117,13 @@ public:
 		float yaw = 0, aimPitch = 0; // degrees: the local look
 		int stance = 0;
 		bool firing = false; // the fire input held
+		// In a seat: the vehicle's object and the seat (the control
+		// object's seat ghost: its root's object and its part). The seat's
+		// camera then places the view as a local round's (findSeatCamera),
+		// its bundles turned by their ghosts (GameWorld::remotePartPose),
+		// and the seat gun's zoom works the same (stepSeatZoom).
+		uint32_t vehicle = 0;
+		int seat = -1;
 	};
 	void setRemote(std::function<bool(Remote&)> source) { m_remote = std::move(source); }
 	// The players a joined game's spectator follows (the server's players

@@ -1,6 +1,6 @@
 add_executable(bf2142 main.cpp GameAudio.cpp HostedGame.cpp RemoteGuns.cpp ServerAdmin.cpp Prediction.cpp Nametags.cpp HudAlerts.cpp HudMenus.cpp HudMenusVehicles.cpp HudMenusKits.cpp HudMenusChat.cpp HudMenusComm.cpp HudCombatArea.cpp HudWorld.cpp MenuBindings.cpp MenuBindingsOffline.cpp SettingsObjects.cpp EndOfRoundBindings.cpp PlayerCamera.cpp)
 target_compile_definitions(bf2142 PRIVATE BF2142_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
-target_link_libraries(bf2142 PRIVATE Console IO World Geometry Terrain Scene GameSound Game Animation Effects Stats Physics Hud Input Net SwfPlayer Voip VoipMenu Movie)
+target_link_libraries(bf2142 PRIVATE Console IO World Geometry Terrain Scene GameSound Game Animation Effects Stats Physics Hud Input Net SwfPlayer Voip VoipMenu Movie Platform)
 if(TARGET Render)
 	target_sources(bf2142 PRIVATE Viewer.cpp)
 	target_link_libraries(bf2142 PRIVATE Render InputSdl)

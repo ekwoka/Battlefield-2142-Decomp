@@ -777,10 +777,15 @@ float GameWorld::hitPoints(uint32_t object) const
 	}
 	const world::Object* found = m_objects.find(object);
 	const world::ObjectTemplate* t = found ? found->objectTemplate() : nullptr;
-	if (!t || t->settings().find("armor.maxHitPoints") == t->settings().end()) {
+	if (!t) {
 		return -1;
 	}
-	return number(*t, "armor.hitPoints", number(*t, "armor.maxHitPoints", 0));
+	const auto max = t->settings().find("armor.maxHitPoints");
+	if (max == t->settings().end()) {
+		return -1;
+	}
+	const auto set = t->settings().find("armor.hitPoints");
+	return static_cast<float>(std::atof((set != t->settings().end() ? set : max)->second.c_str()));
 }
 
 void GameWorld::setHitPoints(uint32_t object, float value)
@@ -1630,28 +1635,32 @@ void GameWorld::stepVehicleDamage(float seconds)
 		// once through the game logic's damage (slot 0xe4) and starts again
 		// at 1 s. The two run side by side.
 		const float depth = m_hasWater ? m_waterLevel - body.body.position.y : -1;
-		const auto waterTick = [&](bool in, float& timer, float delay, float amount) {
+		// (The delay and the amount are read only in the water: each tick
+		// reads every vehicle's template.)
+		bool watered = false;
+		const auto waterTick = [&](bool in, float& timer, const char* delay, float delayDefault, const char* amount) {
 			if (!in) {
 				timer = -1;
 				return;
 			}
 			if (timer < 0) {
-				timer = delay;
+				timer = number(t, delay, delayDefault);
 			}
 			timer -= seconds;
 			if (timer <= 0) {
 				timer = 1;
-				if (amount > 0) {
-					loseHitPoints(body.object, amount, -1);
+				if (const float lost = number(t, amount, 0); lost > 0) {
+					loseHitPoints(body.object, lost, -1);
+					watered = true;
 				}
 			}
 		};
-		waterTick(depth > number(t, "armor.waterLevel", 1e9f), body.waterTimer, number(t, "armor.waterDamageDelay", 3),
-			number(t, "armor.hpLostWhileInWater", 0));
-		waterTick(depth > number(t, "armor.deepWaterLevel", 1e9f), body.deepWaterTimer,
-			number(t, "armor.deepWaterDamageDelay", 1), number(t, "armor.hpLostWhileInDeepWater", 0));
-		if (body.wreckTime >= 0 || hitPoints(body.object) <= 0) {
-			continue;
+		waterTick(depth > number(t, "armor.waterLevel", 1e9f), body.waterTimer, "armor.waterDamageDelay", 3,
+			"armor.hpLostWhileInWater");
+		waterTick(depth > number(t, "armor.deepWaterLevel", 1e9f), body.deepWaterTimer, "armor.deepWaterDamageDelay", 1,
+			"armor.hpLostWhileInDeepWater");
+		if (body.wreckTime >= 0 || (watered && hitPoints(body.object) <= 0)) {
+			continue; // (only the water's damage can have changed `left`)
 		}
 		if (body.body.rotation.transform({0, 1, 0}).y < 0) {
 			loss += number(t, "armor.hpLostWhileUpSideDown", 0);
@@ -1691,6 +1700,47 @@ std::vector<GameWorld::VehicleInfo> GameWorld::vehicleList()
 				hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
 			}
 		}
+	}
+	return list;
+}
+
+std::vector<GameWorld::VehicleInfo> GameWorld::mapObjects() const
+{
+	std::vector<VehicleInfo> list;
+	const auto add = [&](uint32_t id, const physics::Vec3& position, float yaw, const physics::Vec3& velocity) {
+		const world::Object* object = m_objects.find(id);
+		if (!object || !object->objectTemplate()) {
+			return;
+		}
+		for (const Body& body : m_bodies) {
+			if (body.object == id && body.vehicle) {
+				return; // in vehicleList
+			}
+		}
+		VehicleInfo v {};
+		v.object = id;
+		v.position = position;
+		v.yaw = yaw;
+		v.working = true;
+		v.velocity = velocity;
+		v.cameraYaw = std::numeric_limits<float>::quiet_NaN();
+		list.push_back(v);
+	};
+	for (const auto& [key, id] : m_deployed) {
+		const world::Object* object = m_objects.find(id);
+		if (object && object->objectTemplate() && sameName(object->objectTemplate()->typeName(), "PlayerControlObject")) {
+			add(id, {object->position().x, object->position().y, object->position().z}, object->rotation().x, {});
+		}
+	}
+	for (const Drone& drone : m_drones) {
+		add(drone.object, drone.position, drone.yaw, drone.velocity);
+		if (!list.empty() && list.back().object == drone.object) {
+			list.back().cameraYaw = drone.gunYaw * 180.0f / 3.14159265f; // the gun bundle the camera rides
+		}
+	}
+	for (const Pod& pod : m_pods) {
+		const world::Object* object = m_objects.find(pod.object);
+		add(pod.object, pod.position, object ? object->rotation().x : 0.0f, pod.velocity);
 	}
 	return list;
 }
@@ -4327,6 +4377,7 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 	}
 	info.stamina = player->control.stamina().stamina();
 	info.sprinting = player->control.stamina().sprinting();
+	info.jumpHold = player->control.jumpHold();
 	if (player->alive && player->vehicle) {
 		const FireArm* seatGun = gun(player->vehicle, player->seat);
 		info.heat = seatGun ? seatGun->heat() : 0.0f;
@@ -5492,6 +5543,20 @@ bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, 
 // under the terrain (DAT_00a83e58 slot 0x6c) is lifted onto it. Only the
 // test moves: the spawn itself is at the spawner's spot (0x005aeb80's
 // end, the game logic's slot 0x120).
+float GameWorld::orderMarkerHeight(const physics::Vec3& order, float radius) const
+{
+	const physics::Vec3 probe {order.x, order.y + 1, order.z};
+	float height = terrainHeight(probe.x, probe.z);
+	if (m_hasWater) {
+		height = std::max(height, m_waterLevel);
+	}
+	physics::CollisionWorld::Hit hit {};
+	if (m_projectileCollision.raycast(probe, probe + physics::Vec3 {0, -100, 0}, hit)) {
+		height = std::max(height, probe.y - 100 * hit.fraction);
+	}
+	return height + radius * 0.5f;
+}
+
 physics::Vec3 GameWorld::dropSpawnSpot(const physics::Vec3& spot, const physics::Vec3& up, float bottom, float top) const
 {
 	const physics::Vec3 high = spot + up * top;
@@ -8254,7 +8319,7 @@ void GameWorld::fireRemoteRound(RemoteSoldier& remote, uint32_t object, const ph
 }
 
 bool GameWorld::fireRemoteSeatRound(uint32_t vehicle, int seat, const std::string& weapon, const physics::Vec3& velocity,
-	int& barrel, int& tracerCount, physics::Vec3* muzzle)
+	int& barrel, int& tracerCount, physics::Vec3* muzzle, float deviation)
 {
 	const world::Object* object = m_objects.find(vehicle);
 	if (!object || !object->objectTemplate() || seat < 0) {
@@ -8320,7 +8385,18 @@ bool GameWorld::fireRemoteSeatRound(uint32_t vehicle, int seat, const std::strin
 	const float yaw = (layout.frameYaw + gunYaw) * 3.14159265f / 180.0f;
 	const float pitch = (gunPitch + layout.restPitch) * 3.14159265f / 180.0f;
 	const physics::Vec3 local {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
-	const physics::Vec3 direction = (mount.turn * hull).transform(local);
+	physics::Vec3 direction = (mount.turn * hull).transform(local);
+	// The client's own deviation (0x005f5540, as fireSeatWeapon): two normal
+	// numbers x the deviation x 0.01 along the round's up and right.
+	if (deviation > 0.01f) {
+		const float across = std::sqrt(direction.x * direction.x + direction.z * direction.z);
+		const physics::Vec3 right =
+			across > 1e-4f ? physics::Vec3 {direction.z / across, 0, -direction.x / across} : physics::Vec3 {1, 0, 0};
+		const physics::Vec3 up = physics::cross(direction, right);
+		const float alongUp = m_gaussian.next(m_random), alongRight = m_gaussian.next(m_random);
+		direction = deviateVelocity(direction, right, up, 1, deviation, alongUp, alongRight);
+		direction = direction * (1 / std::sqrt(physics::lengthSquared(direction)));
+	}
 	Projectile p;
 	p.visual = true;
 	p.origin = origin;
@@ -9408,6 +9484,23 @@ const physics::CollisionWorld* GameWorld::projectileCollision(uint32_t object) c
 		}
 	}
 	return nullptr;
+}
+
+bool GameWorld::walkCycle(uint32_t vehicle, float& length, float& time) const
+{
+	for (const Body& body : m_bodies) {
+		if (body.object == vehicle && body.animation) {
+			body.animation->walkCycle(length, time);
+			return true;
+		}
+	}
+	for (const ObjectAnimation& a : m_objectAnimations) {
+		if (a.object == vehicle && a.animation) {
+			a.animation->walkCycle(length, time); // a joined client's ghost
+			return true;
+		}
+	}
+	return false;
 }
 
 float GameWorld::objectRadius(uint32_t object) const

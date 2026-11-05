@@ -54,6 +54,13 @@ void RemoteSeatGuns::step(game::GameWorld& round, const std::vector<Seat>& seats
 				}
 				gun.rounds = gun.arm.magSize > 0 ? gun.arm.magSize : 1;
 				gun.presses = s.presses;
+				gun.deviation = w->deviation;
+				gun.hasDeviation = w->hasDeviation;
+			}
+			// The deviation's tick (0x005dedb0): the firing's build-up
+			// decays off the trigger.
+			if (gun.hasDeviation) {
+				gun.deviation.update(s.firing[g]);
 			}
 			const game::FireArmSettings& arm = gun.arm;
 			// The server's rounds while it fires (0x00595c60 hands them to
@@ -97,7 +104,12 @@ void RemoteSeatGuns::step(game::GameWorld& round, const std::vector<Seat>& seats
 				{vehicle->rotation().x, vehicle->rotation().y, vehicle->rotation().z});
 			physics::Vec3 at = physics::Vec3 {vehicle->position().x, vehicle->position().y, vehicle->position().z}
 				+ turn.transform(w->weaponPosition);
-			round.fireRemoteSeatRound(s.vehicle, s.seat, w->weapon, s.velocity, gun.barrel, gun.tracerCount, &at);
+			float deviation = 0;
+			if (gun.hasDeviation) {
+				deviation = gun.deviation.deviation();
+				gun.deviation.fired();
+			}
+			round.fireRemoteSeatRound(s.vehicle, s.seat, w->weapon, s.velocity, gun.barrel, gun.tracerCount, &at, deviation);
 			round.remoteGunFired(s.vehicle, w->weapon, s.player, at);
 			gun.nextRound = arm.roundsPerMinute > 0 ? 60.0f / static_cast<float>(arm.roundsPerMinute) : 0.1f;
 			gun.burstLeft = std::max(0, gun.burstLeft - 1);

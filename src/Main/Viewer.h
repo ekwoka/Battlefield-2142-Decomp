@@ -121,6 +121,9 @@ struct ViewerOptions {
 	std::function<bool()> wantsText;
 	std::function<void(const MenuInput&)> onHudText;
 	std::function<bool()> wantsQuit;
+	// The menu's cursor while it is up (Logic.beginWaitState's index,
+	// MenuBindings::waitCursor): 0 the arrow, 1 busy, 2 key binding.
+	std::function<int()> menuCursor;
 	// A menu over a game: up while this says so (without it, always), and
 	// Esc toggles it through onEscape instead of quitting.
 	std::function<bool()> menuActive;
@@ -242,6 +245,9 @@ private:
 // One movie frame as the movie screen draws it, rendered off screen at
 // width x height and saved as a PNG (for checking without a display).
 bool saveMovieFrame(const uint8_t* rgba, int frameWidth, int frameHeight, int width, int height, const std::string& png);
+
+// Whether Caps Lock is on (Logic.isCapsLockPressed: GetKeyState(VK_CAPITAL) & 1).
+bool capsLockOn();
 
 // Returns the process exit code. With a window it draws there (and leaves
 // it open); without one it opens its own for this run.

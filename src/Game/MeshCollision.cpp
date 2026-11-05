@@ -441,7 +441,8 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 		if (!tb || tb == &mover || titan.vehicleParts.empty()) {
 			continue;
 		}
-		for (const Titan::VehiclePart& part : titan.vehicleParts) {
+		for (const std::shared_ptr<const Titan::VehiclePart>& shared : titan.vehicleParts) {
+			const Titan::VehiclePart& part = *shared;
 			if (part.lod != m.otherLod) {
 				continue; // the mover asks for this LOD of the others (atLod)
 			}

@@ -9,6 +9,7 @@
 #include "Main/EndOfRoundBindings.h"
 #include "Main/MenuBindings.h"
 #include "Main/SettingsObjects.h"
+#include "Net/Demo.h"
 #include "TestMain.h"
 #include "UI/Player/Player.h"
 
@@ -17,6 +18,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <optional>
 #include <string>
@@ -900,22 +903,10 @@ const NativeKind kUnboundNatives[] = {
 	{"dev", "dice.bf2.Logic", {"assert"}},
 	{"dev", "dice.bf2.Shader", {"setShader"}},
 	{"dev", "dice.bf2.Mouse", {"registerContextMenu"}},
-	// Missing: would work offline, not bound yet.
-	{"missing", "dice.bf2.Logic", {"setIsLoading", "getCommandlineServer", "getCommandlineServerPassword",
-		"joinCommandlineServer", "startCommandlineServer", "getCommandLine", "setCommandLine", "isCapsLockPressed",
-		"cacheCredits", "getRandomCreditsTexture", "getAsync", "setAsync"}},
-	{"missing", "dice.bf2.Multiplay", {"setCurrentServerId", "clearServerId", "getMapDescriptionFromText", "getNumDemoBookmarks", "deleteDemoBookmark",
-		"getHasNewBookmark", "setHasNewBookmark", "playDemo", "deleteDemo", "getMapDescriptionFromId", "getGameModeFromId",
-		"getTeamName", "getMapPathFromName", "getSelectedFilterGameMode", "getSelectedFilterGameModeId",
-		"getSelectedServerFilterGameMode"}},
-	{"missing", "dice.bf2.Profile", {"deleteCurrentProfile", "getEquipmentName", "getEquipmentDescription", "setSelectedEquipment",
+	// Missing: would work offline, not bound yet (docs/uncited.md says why).
+	{"missing", "dice.bf2.Logic", {"cacheCredits", "getRandomCreditsTexture"}},
+	{"missing", "dice.bf2.Profile", {"getEquipmentName", "getEquipmentDescription", "setSelectedEquipment",
 		"setSelectedUnlockEquipment", "getSprint"}},
-	{"missing", "dice.bf2.Client", {"getPlayerName", "setPlayerName", "getCommandlineOption", "setCommandlineOption",
-		"getEORType", "getTimeUntilRestart", "getTotalTimeUntilRestart", "getCurrentLoadFile", "hasUserEscapedFromGame"}},
-	{"missing", "dice.bf2.EndOfRound", {"getPreviousMapDescription", "getPreviousMapGameModeDescription", "getKitNameFromId"}},
-	{"missing", "dice.bf2.ControlSettings", {"resetDefault"}},
-	{"missing", "dice.bf2.ServerInfo", {"getMapName", "getMaxPlayers", "getGameModeTitle", "getGameModeDescription",
-		"getBackgroundTitle", "getBackgroundDescription"}},
 	{"missing", "dice.bf2.VideoSettings", {"detectVideoScheme", "isRunningWithUnsupportedDrivers"}},
 	{"missing", "dice.bf2.AudioSettings", {"isInCriticalState"}},
 };
@@ -968,4 +959,200 @@ TEST(MenuBindings_NativeCoverage)
 	}
 	CHECK(kNativeSlotCount == 702);
 	CHECK(bound + counts["elsewhere"] + counts["online"] + counts["external"] + counts["dev"] + counts["missing"] == kNativeSlotCount);
+}
+
+// The command line's join and host (0x00404780's activation types, the
+// Logic natives the main page calls), local demos and bookmarks, the map
+// texts from the levels' .desc files, the server info popup's texts and
+// the small Logic natives.
+TEST(MenuBindings_CommandLineDemosAndTexts)
+{
+	using CommandLine = menu::MenuBindings::CommandLine;
+	CommandLine join;
+	join.joinAddress = "81.2.3.4";
+	CHECK(menu::MenuBindings::commandLineActivation(join, false) == 2);
+	join.joinAddress = "192.168.0.7";
+	CHECK(menu::MenuBindings::commandLineActivation(join, false) == 3);
+	join.joinAddress = "172.20.1.1";
+	CHECK(menu::MenuBindings::commandLineActivation(join, false) == 3);
+	CHECK(menu::MenuBindings::commandLineActivation(CommandLine {}, false) == 0);
+	CommandLine host;
+	host.hostServer = true;
+	CHECK(menu::MenuBindings::commandLineActivation(host, true) == 4);
+	CHECK(menu::MenuBindings::commandLineActivation(host, false) == 5);
+
+	Fake fake;
+	NativeRegistry natives;
+	menu::MenuBindings bindings(natives, fake.services());
+	avm1::Interpreter vm;
+	const auto logic = [&](const char* member, std::vector<avm1::Value> args = {}) {
+		return call(vm, natives, "dice.bf2.Logic", member, std::move(args));
+	};
+	const auto mp = [&](const char* member, std::vector<avm1::Value> args = {}) {
+		return call(vm, natives, "dice.bf2.Multiplay", member, std::move(args));
+	};
+	// The main page spells it getCommandline: it reaches getCommandLine.
+	CHECK(natives.memberNamed("dice.bf2.Logic", "getCommandline") == "getCommandLine");
+	CHECK(vm.toNumber(logic("getCommandLine")) == 0);
+	std::string joined;
+	bindings.onJoin = [&](const std::string& h, uint16_t p) { joined = h + ":" + std::to_string(p); };
+	CommandLine line;
+	line.joinAddress = "10.0.0.5";
+	line.port = 17571;
+	line.password = "pw";
+	bindings.setCommandLine(line);
+	CHECK(vm.toNumber(logic("getCommandLine")) == 3);
+	CHECK(vm.toString(logic("getCommandlineServer")) == "10.0.0.5");
+	CHECK(vm.toString(logic("getCommandlineServerPassword")) == "pw");
+	CHECK(avm1::toBoolean(logic("joinCommandlineServer")) && joined == "10.0.0.5:17571");
+	CHECK(vm.toString(mp("getJoinPassword")) == "pw");
+	logic("setCommandLine", {avm1::Value(0)});
+	CHECK(bindings.commandLineType() == 0);
+	// Hosting: the command line's level, else the map list.
+	std::optional<menu::GameSetup> started;
+	bindings.onStartGame = [&](const menu::GameSetup& setup) { started = setup; };
+	CommandLine hostLine;
+	hostLine.hostServer = true;
+	hostLine.level = "Minsk";
+	hostLine.gameMode = "gpm_ti";
+	bindings.setCommandLine(hostLine);
+	CHECK(bindings.commandLineType() == 5);
+	logic("beginWaitState", {avm1::Value(1)});
+	logic("startCommandlineServer");
+	CHECK(started && started->maps.size() == 1 && started->maps[0].level == "Minsk" && started->maps[0].gameMode == "gpm_ti");
+	CHECK(bindings.waitCursor() == 0);
+
+	// The small ones: the asynchronous flag, the loading flag, Caps Lock,
+	// deleteCurrentProfile (a bare return).
+	CHECK(!avm1::toBoolean(logic("getAsync")));
+	logic("setAsync", {avm1::Value(true)});
+	CHECK(avm1::toBoolean(logic("getAsync")));
+	logic("setIsLoading", {avm1::Value(true)});
+	CHECK(avm1::toBoolean(logic("getIsLoading")));
+	CHECK(!avm1::toBoolean(logic("isCapsLockPressed")));
+	bindings.capsLock = [] { return true; };
+	CHECK(avm1::toBoolean(logic("isCapsLockPressed")));
+	CHECK(call(vm, natives, "dice.bf2.Profile", "deleteCurrentProfile").isUndefined());
+
+	// Local demos: the folder's files with a readable header, their rows,
+	// playing and deleting one.
+	namespace fs = std::filesystem;
+	const fs::path dir = fs::temp_directory_path() / "bf2142_menu_demos";
+	fs::remove_all(dir);
+	fs::create_directories(dir);
+	{
+		net::DemoHeader header;
+		header.serverName = "Test server";
+		header.level = "Camp_Gibraltar";
+		header.gameMode = "gpm_cq";
+		header.started = 0;
+		net::DemoWriter writer;
+		CHECK(writer.open((dir / "a.bf2142demo").string(), header));
+		writer.close(0);
+		std::ofstream((dir / "b.bf2142demo").string()) << "not a demo";
+		std::ofstream((dir / "c.txt").string()) << "x";
+	}
+	bindings.gameModeName = [](const std::string& mode) { return mode == "gpm_cq" ? std::string("Conquest") : std::string("N/A"); };
+	bindings.setDemoDirectory(dir.string());
+	CHECK(bindings.demos().size() == 1);
+	const auto demoRows = natives.listRows("demos");
+	CHECK(demoRows.size() == 1 && demoRows[0].size() == 4);
+	CHECK(demoRows.size() == 1 && demoRows[0][1] == "a" && demoRows[0][2] == "Camp Gibraltar" && demoRows[0][3] == "Conquest");
+	std::string played;
+	bindings.onPlayDemo = [&](const std::string& path) { played = path; };
+	mp("playDemo", {avm1::Value(0)});
+	CHECK(played == (dir / "a.bf2142demo").string());
+	mp("deleteDemo", {avm1::Value(0)});
+	CHECK(bindings.demos().empty() && natives.listRows("demos").empty() && !fs::exists(dir / "a.bf2142demo"));
+	fs::remove_all(dir);
+
+	// Bookmarks: LocalProfile.addDemoBookmark's entries.
+	menu::SettingsObjects objects;
+	bindings.setSettingsObjects(&objects);
+	objects.setList("LocalProfile.DemoBookmark", {"\"Server one\" \"Minsk\" \"http://x/1\" 0", "\"Two\" \"Belgrade\" \"u\" 0"});
+	CHECK(vm.toNumber(mp("getNumDemoBookmarks")) == 2);
+	CHECK(avm1::toBoolean(mp("deleteDemoBookmark", {avm1::Value(0)})));
+	CHECK(!avm1::toBoolean(mp("deleteDemoBookmark", {avm1::Value(5)})));
+	CHECK(objects.list("LocalProfile.DemoBookmark").size() == 1);
+	const auto bookmarkRows = natives.listRows("demobm");
+	CHECK(bookmarkRows.size() == 1 && bookmarkRows[0][1] == "Two" && bookmarkRows[0][2] == "Belgrade");
+	CHECK(!avm1::toBoolean(mp("getHasNewBookmark")));
+	mp("setHasNewBookmark", {avm1::Value(true)});
+	CHECK(avm1::toBoolean(mp("getHasNewBookmark")));
+
+	// The map texts: a level's .desc (its name, briefing locid, modes).
+	bindings.setMaps({{"Minsk", "gpm_ti", 32}, {"Minsk", "gpm_cq", 64}});
+	bindings.readFile = [](const std::string& path, std::string& text) {
+		if (path != "Levels/Minsk/Info/Minsk.desc") {
+			return false;
+		}
+		text = "<map><name> Minsk </name><briefing locid=\"LEVEL_minsk\">Text</briefing><modes>"
+			   "<mode type=\"gpm_ti\"><maptype players=\"32\" locid=\"GM_ti\">x</maptype></mode>"
+			   "<mode type=\"gpm_cq\"><maptype players=\"64\" locid=\"GM_cq\">y</maptype></mode></modes></map>";
+		return true;
+	};
+	CHECK(vm.toString(mp("getMapDescriptionFromId", {avm1::Value("Minsk 32")})) == "LEVEL_minsk");
+	CHECK(vm.toString(mp("getMapDescriptionFromText", {avm1::Value("Minsk")})) == "LEVEL_minsk");
+	CHECK(vm.toString(mp("getMapDescriptionFromId", {avm1::Value("Nowhere")})).empty());
+	CHECK(vm.toString(mp("getMapPathFromName", {avm1::Value("Minsk")})) == "Minsk");
+	CHECK(vm.toString(mp("getMapPathFromName", {avm1::Value("Elsewhere")})) == "Elsewhere");
+	CHECK(vm.toString(mp("getSelectedFilterGameModeId")) == "gpm_ti");
+	CHECK(vm.toString(mp("getGameModeFromId", {avm1::Value("gpm_cq")})).empty());
+	CHECK(vm.toString(mp("getTeamName", {avm1::Value(0)})).empty());
+
+	// The server info popup: the server its lists name.
+	natives.call(vm, "dice.bf2.Multiplay", "startBrowse", {});
+	bindings.finishJobs();
+	mp("isBrowsing");
+	CHECK(vm.toString(call(vm, natives, "dice.bf2.ServerInfo", "getMapName")).empty());
+	auto info = std::make_shared<NativeList>(natives, nullptr);
+	info->listId = "serverExtendedInfo";
+	natives.callList(vm, *info, "setArgs", {avm1::Value("10.0.0.2 17568 29900")});
+	CHECK(vm.toString(call(vm, natives, "dice.bf2.ServerInfo", "getMapName")) == "camp_gibraltar");
+	CHECK(vm.toNumber(call(vm, natives, "dice.bf2.ServerInfo", "getMaxPlayers")) == 64);
+	CHECK(vm.toString(call(vm, natives, "dice.bf2.ServerInfo", "getBackgroundTitle")) == "gpm_cq");
+	mp("setCurrentServerId", {avm1::Value("10.0.0.2 17568 29900")});
+	mp("clearServerId");
+}
+
+// The loading screen's Client.* and EndOfRound's level texts.
+TEST(EndOfRoundBindings_ClientAndTexts)
+{
+	NativeRegistry natives;
+	menu::EndOfRoundBindings eor(natives);
+	avm1::Interpreter vm;
+	const auto client = [&](const char* member, std::vector<avm1::Value> args = {}) {
+		return call(vm, natives, "dice.bf2.Client", member, std::move(args));
+	};
+	menu::RoundSummary s;
+	s.validRound = true;
+	s.previousMapDescriptionKey = "LEVEL_x";
+	s.previousGameModeDescriptionKey = "GM_x";
+	s.eorType = 2;
+	s.timeUntilRestart = 12.5f;
+	s.currentLoadFile = "Levels/Minsk/client.zip";
+	eor.setSummary(s);
+	CHECK(vm.toNumber(client("getEORType")) == 0);
+	CHECK(vm.toNumber(client("getTimeUntilRestart")) == 12.5);
+	CHECK(vm.toNumber(client("getTotalTimeUntilRestart")) == 0);
+	CHECK(vm.toString(client("getCurrentLoadFile")) == "Levels/Minsk/client.zip");
+	CHECK(avm1::toBoolean(client("hasUserEscapedFromGame")));
+	CHECK(vm.toString(client("getPlayerName", {avm1::Value("Default")})) == "Default");
+	client("setPlayerName", {avm1::Value("Ghost")});
+	CHECK(vm.toString(client("getPlayerName", {avm1::Value("Default")})) == "Ghost");
+	client("setCommandlineOption", {avm1::Value("+joinServer 1.2.3.4")});
+	CHECK(vm.toString(client("getCommandlineOption")) == "+joinServer 1.2.3.4");
+	const auto e = [&](const char* member, std::vector<avm1::Value> args = {}) {
+		return vm.toString(call(vm, natives, "dice.bf2.EndOfRound", member, std::move(args)));
+	};
+	CHECK(e("getPreviousMapDescription") == "LEVEL_x");
+	CHECK(e("getPreviousMapGameModeDescription") == "GM_x");
+	CHECK(e("getKitNameFromId", {avm1::Value(4)}) == "specops");
+	CHECK(e("getKitNameFromId", {avm1::Value(7)}).empty());
+	const menu::LevelDescription desc = menu::parseLevelDescription(
+		"<map><name>M</name><briefing locid=\"\">Brief</briefing><modes><mode type=\"gpm_cq\">"
+		"<maptype players=\"16\">Sixteen</maptype></mode><mode type=\"gpm_ti\"></mode></modes></map>",
+		"gpm_cq", 16);
+	CHECK(desc.briefing == "Brief" && desc.gameModeText == "Sixteen");
+	CHECK(desc.modes.size() == 2 && desc.modes[1] == "gpm_ti");
 }

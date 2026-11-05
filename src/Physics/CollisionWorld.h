@@ -54,6 +54,10 @@ public:
 	// template's mapMaterial); `owner` is reported with hits.
 	void addMesh(const CollisionMeshFile& mesh, CollisionUser user, const Mat3& rotation, const Vec3& position,
 		uint32_t owner = 0, const std::vector<uint32_t>& materials = {});
+	// Adds `other`'s faces after this world's, in their order: the same
+	// world as making `other`'s addMesh calls here (a world merged from
+	// meshes built once).
+	void append(const CollisionWorld& other);
 	size_t triangles() const { return m_triangles.size(); }
 	// Takes `owner`'s faces out of the queries (an object whose physics goes:
 	// a destroyed prop's, 0x00651c60's slot 0xd4 -> 0xc). Returns how many.

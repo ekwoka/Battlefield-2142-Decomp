@@ -667,7 +667,7 @@ void AnimationState::queueBundles(size_t index)
 		return;
 	case TriggerType::Forward: // 0x008c3a70
 		for (size_t b : t.bundles) {
-			queue(b, index, priority, -1, normal != 0 ? m_speed / normal : 1);
+			markCycle(queue(b, index, priority, -1, normal != 0 ? m_speed / normal : 1));
 		}
 		return;
 	case TriggerType::Side: { // 0x008c3b00
@@ -678,7 +678,7 @@ void AnimationState::queueBundles(size_t index)
 			rate *= m_direction[1];
 		}
 		for (size_t b : t.bundles) {
-			queue(b, index, priority, -1, rate);
+			markCycle(queue(b, index, priority, -1, rate));
 		}
 		return;
 	}
@@ -689,7 +689,7 @@ void AnimationState::queueBundles(size_t index)
 			rate *= up > 0 ? 1.0f : (up < 0 ? -1.0f : 0.0f);
 		}
 		for (size_t b : t.bundles) {
-			queue(b, index, priority, -1, rate);
+			markCycle(queue(b, index, priority, -1, rate));
 		}
 		return;
 	}
@@ -710,7 +710,7 @@ void AnimationState::queueBundles(size_t index)
 			return;
 		}
 		const float rate = normal != 0 ? m_speed / normal : 1;
-		Instance& instance = queue(t.bundles[0], index, priority, -1, rate);
+		Instance& instance = markCycle(queue(t.bundles[0], index, priority, -1, rate));
 		const Bundle& bundle = m_system.bundles()[t.bundles[0]];
 		if (bundle.clips.size() == 4) {
 			const float along = std::clamp(std::fabs(m_direction[2]), -1.0f, 1.0f);
@@ -754,7 +754,7 @@ void AnimationState::queueBundles(size_t index)
 			rate = std::max(std::min(m_speed / holder->normal, holder->clampMax), holder->clampMin);
 		}
 		for (size_t b : t.bundles) {
-			Instance& instance = queue(b, index, priority, -1, rate);
+			Instance& instance = markCycle(queue(b, index, priority, -1, rate));
 			if (m_system.bundles()[b].clips.size() != 5) {
 				continue;
 			}
@@ -1214,6 +1214,33 @@ bool AnimationState::play(const std::string& name)
 	}
 	evaluate(static_cast<size_t>(trigger));
 	return true;
+}
+
+AnimationState::Instance& AnimationState::markCycle(Instance& instance) const
+{
+	if (m_system.bundles()[instance.bundle].isLooping) {
+		instance.cycle = true; // +0x46
+	}
+	return instance;
+}
+
+void AnimationState::walkCycle(float& length, float& time) const
+{
+	length = time = -1;
+	for (auto it = m_instances.rbegin(); it != m_instances.rend(); ++it) {
+		if (!it->cycle) {
+			continue;
+		}
+		const float bundleLength = m_system.bundles()[it->bundle].length;
+		if (it->rate > 0) {
+			length = it->rate * bundleLength;
+			time = it->rate * it->time;
+		} else {
+			length = std::fabs(it->rate) * bundleLength;
+			time = length - std::fabs(it->rate) * it->time;
+		}
+		return;
+	}
 }
 
 std::vector<std::string> AnimationState::playing() const

@@ -4,7 +4,8 @@
 //
 //  - The armour's loss (0x00656320) ends in 0x006557a0 with the attacker
 //    (a player not man down, his slot 0x6c): {attacker, time, amount} goes
-//    into the armour's list +0x220 (slot 0x120). For a soldier (class
+//    into the armour's list +0x220 (slot 0x120), the time the game's clock
+//    (0x00666070). For a soldier (class
 //    0x9493) an attacker not yet in +0x238 (slot 0x128) whose sum there
 //    reaches the soldier's maximum (slot 0x8c) x teamDamageScoreLimit %
 //    (the score manager DAT_00a209d8 slot 0x44, +0x54: 50 from its
@@ -53,9 +54,9 @@ void GameWorld::recordArmourDamage(uint32_t armour, uint32_t vehicle, float amou
 		return;
 	}
 	ArmourDamage& damage = m_armourDamage[armour];
-	damage.all[attacker] += amount;
+	damage.all.push_back({attacker, m_time, amount});
 	if (soldierPlayer(armour)) {
-		if (!damage.over.count(attacker) && damage.all[attacker] >= most * m_teamDamageLimits[0] * 0.01f) {
+		if (!damage.over.count(attacker) && damageSum(damage.all, attacker) >= most * m_teamDamageLimits[0] * 0.01f) {
 			damage.over.insert(attacker);
 		}
 		return;
@@ -70,7 +71,7 @@ void GameWorld::recordArmourDamage(uint32_t armour, uint32_t vehicle, float amou
 		damage.manned.clear();
 		return;
 	}
-	damage.manned[attacker] += amount;
+	damage.manned.push_back({attacker, m_time, amount});
 }
 
 void GameWorld::checkTeamDamage(uint32_t armour, uint32_t vehicle, int attacker, bool destroyed, bool wasDestroyed,
@@ -89,14 +90,15 @@ void GameWorld::checkTeamDamage(uint32_t armour, uint32_t vehicle, int attacker,
 			return;
 		}
 		damage.over.erase(attacker);
-		damage.all.erase(attacker);
+		dropDamage(damage.all, attacker);
 		event.kind = 0;
 		event.victim = victim->id;
 		event.object = armour;
 	} else {
-		const auto sum = damage.manned.find(attacker);
+		const bool listed = std::any_of(damage.manned.begin(), damage.manned.end(),
+			[attacker](const DamageEntry& e) { return e.attacker == attacker; });
 		const Body* body = findBody(vehicle);
-		if (sum == damage.manned.end() || !body || !body->controlObject) {
+		if (!listed || !body || !body->controlObject) {
 			return;
 		}
 		int driver = -1;
@@ -112,13 +114,13 @@ void GameWorld::checkTeamDamage(uint32_t armour, uint32_t vehicle, int attacker,
 			const world::Object* object = m_objects.find(vehicle);
 			team = object ? object->team() : 0;
 		}
-		if (team != from->team || sum->second < most * m_teamDamageLimits[1] * 0.01f) {
+		if (team != from->team || damageSum(damage.manned, attacker) < most * m_teamDamageLimits[1] * 0.01f) {
 			return;
 		}
 		if (!((!destroyed && !pointOnDestroy) || (pointOnDestroy && destroyed && !wasDestroyed))) {
 			return;
 		}
-		damage.manned.erase(sum);
+		dropDamage(damage.manned, attacker);
 		event.kind = 1;
 		event.victim = driver;
 		// The hit object (a shield cell's generator isn't a world object
@@ -136,6 +138,23 @@ void GameWorld::checkTeamDamage(uint32_t armour, uint32_t vehicle, int attacker,
 	if (m_teamDamage.size() > kPendingMost) {
 		m_teamDamage.erase(m_teamDamage.begin()); // the bots' never taken
 	}
+}
+
+float GameWorld::damageSum(const std::vector<DamageEntry>& list, int attacker)
+{
+	float sum = 0;
+	for (const DamageEntry& e : list) {
+		if (e.attacker == attacker) {
+			sum += e.amount;
+		}
+	}
+	return sum;
+}
+
+void GameWorld::dropDamage(std::vector<DamageEntry>& list, int attacker)
+{
+	list.erase(std::remove_if(list.begin(), list.end(), [attacker](const DamageEntry& e) { return e.attacker == attacker; }),
+		list.end());
 }
 
 void GameWorld::armourHealed(uint32_t armour, float amount, bool full)

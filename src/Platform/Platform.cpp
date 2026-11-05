@@ -3,9 +3,11 @@
 #include <cstdio>
 
 #ifdef _WIN32
+#include <process.h>
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <unistd.h>
 #endif
 
 namespace platform {
@@ -57,6 +59,23 @@ void debugPrint(const char* text)
 	OutputDebugStringA(text);
 #endif
 	std::fputs(text, stderr);
+}
+
+bool restartProcess(const char* program, const std::vector<std::string>& args)
+{
+	std::vector<char*> argv;
+	for (const std::string& arg : args) {
+		argv.push_back(const_cast<char*>(arg.c_str()));
+	}
+	argv.push_back(nullptr);
+	std::fflush(stdout);
+	std::fflush(stderr);
+#ifdef _WIN32
+	_execv(program, argv.data());
+#else
+	execv(program, argv.data());
+#endif
+	return false;
 }
 
 } // namespace platform

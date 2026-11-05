@@ -685,6 +685,14 @@ int seatDotState(bool occupied, bool local, int squad, int localSquad, bool same
 	return sameTeam ? 5 : 6;
 }
 
+float mechFootValue(float length, float time)
+{
+	if (length < 0.3f) {
+		return 0;
+	}
+	return std::sin(std::min(time / length, 1.0f) * 6.2831855f) + 1;
+}
+
 void VehicleHud::update(hud::HudManager& hud, const VehicleHudInput& in)
 {
 	const world::ObjectTemplate* v = in.vehicle;
@@ -760,6 +768,11 @@ void VehicleHud::update(hud::HudManager& hud, const VehicleHudInput& in)
 	}
 	hud.set("GunnerAngle", m_gunnerAngle);
 	hud.set("SecondaryGunnerAngle", m_secondaryAngle);
+	// The walkers' step (0x007a0940).
+	if (in.walking) {
+		m_footValue = mechFootValue(in.walkLength, in.walkTime);
+	}
+	hud.set("MechFootAnimationValue", m_footValue);
 	hud.setString("AltitudeString", std::to_string(static_cast<int>(std::ceil(in.altitude))));
 	// The seat dots (0x007a28e0): states 0 (unset) .. 7 per seat, at the
 	// seat's icon position.
@@ -1014,6 +1027,27 @@ bool seatPostProcessing(const world::ObjectTemplate* controlled, const world::Ob
 	const auto& settings = weapon->settings();
 	const auto on = settings.find("weaponHud.enablePostProcessingOnGuiIndex");
 	return on != settings.end() && std::atoi(on->second.c_str()) == weaponGuiIndex(weapon, zoomed);
+}
+
+bool soldierWeaponFlag(bool jumpHold, const world::ObjectTemplate* weapon)
+{
+	if (!jumpHold) {
+		return true;
+	}
+	if (!weapon) {
+		return false; // no weapon in hand (slot 0x78(0) none)
+	}
+	// The fire component's interfaces 0x94de / 0x94df, the ammo
+	// component's 0x94f1.
+	const world::CaseInsensitiveLess less;
+	for (const std::string& component : weapon->components()) {
+		for (const std::string kind : {"ThrownFireComp", "ExplosivesFireComp", "CamouflageAmmoComp"}) {
+			if (!less(component, kind) && !less(kind, component)) {
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 int weaponGuiIndex(const world::ObjectTemplate* weapon, bool zoomed, bool sprintTest)

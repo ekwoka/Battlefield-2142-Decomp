@@ -439,6 +439,10 @@ void SettingsObjects::setDirectory(const std::string& profilesDirectory, const s
 
 std::string SettingsObjects::defaultDirectory()
 {
+	// BF2142_CONFIG_DIR stands for <config dir>/bf2142-recomp (scratch runs).
+	if (const char* dir = std::getenv("BF2142_CONFIG_DIR"); dir && *dir) {
+		return (std::filesystem::path(dir) / "Profiles").string();
+	}
 	const char* home = std::getenv("HOME");
 #ifdef _WIN32
 	if (const char* appData = std::getenv("APPDATA")) {

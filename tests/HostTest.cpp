@@ -2315,3 +2315,55 @@ TEST(Host_RemoteSeatGunsFireRoundsFromTheTurret)
 	CHECK(visual().size() == 1);
 	CHECK(round.takeWeaponSounds().size() == 1); // its sound and effects still
 }
+
+// Their deviation on the client: nothing networks or seeds it, so the
+// client's own SimpleDeviationComp (minDev, setFireDev; 0x005dedb0 /
+// 0x005f5540) strays its rounds, as fireSeatWeapon does on the server.
+TEST(Host_RemoteSeatGunsStrayByTheClientsDeviation)
+{
+	namespace world = dice::hfe::world;
+	namespace game = dice::hfe::game;
+	namespace client = dice::hfe::client;
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	world::ObjectTemplate* tank = templates.create("PlayerControlObject", "tank");
+	tank->settings()["seatInformation"] = "tank 0/1/0 0/0/0";
+	tank->children().push_back({"tank_gun", {0, 2, 0}, {}});
+	world::ObjectTemplate* gun = templates.create("GenericFireArm", "tank_gun");
+	gun->components().push_back("SimpleDeviationComp");
+	gun->settings()["deviation.minDev"] = "3";
+	gun->settings()["fire.roundsPerMinute"] = "1800";
+	gun->settings()["fire.addFireRate.list"] = "2";
+	gun->settings()["projectileTemplate"] = "tank_round";
+	gun->settings()["velocity"] = "100";
+	templates.create("GenericProjectile", "tank_round")->settings()["timeToLive"] = "5";
+	const uint32_t id = objects.create(tank, {0, 0, 0})->id();
+	game::GameWorld round(templates, objects);
+	client::RemoteSeatGuns guns;
+	client::RemoteSeatGuns::Seat seat;
+	seat.player = 2;
+	seat.vehicle = id;
+	seat.firing[0] = true;
+	for (int i = 0; i < 10; ++i) {
+		guns.step(round, {seat}, 1 / 30.0f);
+	}
+	int strayed = 0, rounds = 0;
+	for (const game::Projectile& p : round.projectiles()) {
+		if (p.alive && p.visual) {
+			++rounds;
+			strayed += std::fabs(p.velocity.x) > 0.01f || std::fabs(p.velocity.y) > 0.01f ? 1 : 0;
+			CHECK(p.velocity.z > 90); // within a few degrees of straight ahead
+		}
+	}
+	CHECK(rounds >= 5 && strayed == rounds);
+	// Without the component the rounds fly straight.
+	gun->components().clear();
+	game::GameWorld straight(templates, objects);
+	client::RemoteSeatGuns plain;
+	for (int i = 0; i < 4; ++i) {
+		plain.step(straight, {seat}, 1 / 30.0f);
+	}
+	for (const game::Projectile& p : straight.projectiles()) {
+		CHECK(!p.alive || (std::fabs(p.velocity.x) < 1e-3f && std::fabs(p.velocity.y) < 1e-3f));
+	}
+}

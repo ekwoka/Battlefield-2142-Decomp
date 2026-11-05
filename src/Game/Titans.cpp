@@ -603,6 +603,50 @@ void GameWorld::buildTitanParts(Titan& titan)
 	titan.meshesDirty = true;
 }
 
+// A Titan mesh's parts at the projectile, vehicle and soldier LODs (in
+// that order; a LOD the mesh lacks gives none): each its points (the
+// vehicle LOD's first sub-geometry's, the others' every sub-geometry's)
+// and their materials, its box and radius about the Titan's origin, its
+// collisionGroups and its own collision world at that LOD.
+std::vector<std::shared_ptr<const GameWorld::TitanLodPart>> GameWorld::titanLodParts(const TitanMesh& m, uint32_t owner)
+{
+	std::vector<std::shared_ptr<const TitanLodPart>> parts;
+	for (const physics::CollisionUser user :
+		{physics::CollisionUser::Projectile, physics::CollisionUser::Vehicle, physics::CollisionUser::Soldier}) {
+		auto part = std::make_shared<TitanLodPart>();
+		part->lod = static_cast<int>(user);
+		part->groups = static_cast<uint32_t>(m.groups);
+		for (const physics::CollisionSubGeometry& sub : physics::collisionParts(*m.mesh, 0)) {
+			const physics::CollisionLod* lod = physics::collisionLodFor(*m.mesh, sub, static_cast<uint32_t>(user));
+			if (!lod || lod->faces.empty()) {
+				continue;
+			}
+			for (size_t i = 0; i < lod->vertices.size(); ++i) {
+				const auto& v = lod->vertices[i];
+				const physics::Vec3 p = m.rotation.transform({v[0], v[1], v[2]}) + m.position;
+				part->boxMin = part->points.empty() ? p : physics::Vec3 {std::min(part->boxMin.x, p.x), std::min(part->boxMin.y, p.y), std::min(part->boxMin.z, p.z)};
+				part->boxMax = part->points.empty() ? p : physics::Vec3 {std::max(part->boxMax.x, p.x), std::max(part->boxMax.y, p.y), std::max(part->boxMax.z, p.z)};
+				part->points.push_back(p);
+				const uint16_t index = i < lod->vertexMaterials.size() ? lod->vertexMaterials[i] : 0;
+				part->pointMaterials.push_back(index < m.materials.size() ? m.materials[index] : index);
+			}
+			if (user == physics::CollisionUser::Vehicle) {
+				break; // the vehicles' parts as before: the first sub-geometry's points
+			}
+		}
+		if (part->points.empty()) {
+			continue;
+		}
+		part->mesh = std::make_shared<physics::CollisionWorld>();
+		part->mesh->addMesh(*m.mesh, user, m.rotation, m.position, owner, m.materials);
+		for (const physics::Vec3& p : part->points) {
+			part->radius = std::max(part->radius, std::sqrt(physics::lengthSquared(p)));
+		}
+		parts.push_back(std::move(part));
+	}
+	return parts;
+}
+
 // The Titan's body (made by addBodies from its root's mesh) gets the whole
 // tree's soldier and projectile LODs, each face reporting its part; a
 // part whose armour is down takes its subtree's collision with it
@@ -662,7 +706,7 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 	auto soldier = std::make_shared<physics::CollisionWorld>();
 	auto projectile = std::make_shared<physics::CollisionWorld>();
 	std::shared_ptr<physics::CollisionWorld> teams[2];
-	std::vector<Titan::VehiclePart> vehicleParts;
+	std::vector<std::shared_ptr<const Titan::VehiclePart>> vehicleParts;
 	const auto soldierLod = [](const physics::CollisionMeshFile& mesh) {
 		for (const physics::CollisionSubGeometry& part : physics::collisionParts(mesh, 0)) {
 			if (physics::collisionLodFor(mesh, part, static_cast<uint32_t>(physics::CollisionUser::Soldier))) {
@@ -681,58 +725,46 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 	for (int team = 0; team < 2 && teamFaces; ++team) {
 		teams[team] = std::make_shared<physics::CollisionWorld>();
 	}
-	for (const TitanMesh& m : titan.meshes) {
+	for (TitanMesh& m : titan.meshes) {
 		if (!live(m)) {
 			continue;
 		}
 		const uint32_t owner = m.node >= 0 ? titan.parts[static_cast<size_t>(m.node)].id : titan.object;
-		const int field = m.groups & 0x300;
-		if (field == 0) {
-			soldier->addMesh(*m.mesh, physics::CollisionUser::Soldier, m.rotation, m.position, owner, m.materials);
-		}
-		for (int team = 0; team < 2 && teamFaces; ++team) {
-			if (field == 0 || (field & (0x100 << team)) == 0) {
-				teams[team]->addMesh(*m.mesh, physics::CollisionUser::Soldier, m.rotation, m.position, owner, m.materials);
-			}
-		}
-		projectile->addMesh(*m.mesh, physics::CollisionUser::Projectile, m.rotation, m.position, owner, m.materials);
 		// Its LODs: a part the bodies meet at the LOD they ask for (with its
 		// own groups): the vehicle LOD for the vehicles, the soldier LOD
 		// (the decks and floors) for the parachute and the dropped objects
-		// (otherCollisionLod 2), the projectile LOD for 0.
-		for (const physics::CollisionUser user :
-			{physics::CollisionUser::Projectile, physics::CollisionUser::Vehicle, physics::CollisionUser::Soldier}) {
-			Titan::VehiclePart part;
-			part.lod = static_cast<int>(user);
-			part.groups = static_cast<uint32_t>(m.groups);
-			for (const physics::CollisionSubGeometry& sub : physics::collisionParts(*m.mesh, 0)) {
-				const physics::CollisionLod* lod = physics::collisionLodFor(*m.mesh, sub, static_cast<uint32_t>(user));
-				if (!lod || lod->faces.empty()) {
-					continue;
-				}
-				for (size_t i = 0; i < lod->vertices.size(); ++i) {
-					const auto& v = lod->vertices[i];
-					const physics::Vec3 p = m.rotation.transform({v[0], v[1], v[2]}) + m.position;
-					part.boxMin = part.points.empty() ? p : physics::Vec3 {std::min(part.boxMin.x, p.x), std::min(part.boxMin.y, p.y), std::min(part.boxMin.z, p.z)};
-					part.boxMax = part.points.empty() ? p : physics::Vec3 {std::max(part.boxMax.x, p.x), std::max(part.boxMax.y, p.y), std::max(part.boxMax.z, p.z)};
-					part.points.push_back(p);
-					const uint16_t index = i < lod->vertexMaterials.size() ? lod->vertexMaterials[i] : 0;
-					part.pointMaterials.push_back(index < m.materials.size() ? m.materials[index] : index);
-				}
-				if (user == physics::CollisionUser::Vehicle) {
-					break; // the vehicles' parts as before: the first sub-geometry's points
-				}
-			}
-			if (part.points.empty()) {
-				continue;
-			}
-			part.mesh = std::make_shared<physics::CollisionWorld>();
-			part.mesh->addMesh(*m.mesh, user, m.rotation, m.position, owner, m.materials);
-			for (const physics::Vec3& p : part.points) {
-				part.radius = std::max(part.radius, std::sqrt(physics::lengthSquared(p)));
-			}
-			vehicleParts.push_back(std::move(part));
+		// (otherCollisionLod 2), the projectile LOD for 0. Made once per
+		// mesh: a rebuild (a part down or back) only picks the live ones,
+		// and the merged worlds below take the parts' faces (each part's
+		// world is the mesh's addMesh at that LOD; a LOD without a part
+		// adds no faces).
+		if (!m.lodPartsMade) {
+			m.lodParts = titanLodParts(m, owner);
+			m.lodPartsMade = true;
 		}
+		const auto faces = [&m](physics::CollisionUser user) -> const physics::CollisionWorld* {
+			for (const std::shared_ptr<const TitanLodPart>& part : m.lodParts) {
+				if (part->lod == static_cast<int>(user)) {
+					return part->mesh.get();
+				}
+			}
+			return nullptr;
+		};
+		const int field = m.groups & 0x300;
+		if (const physics::CollisionWorld* lod = faces(physics::CollisionUser::Soldier)) {
+			if (field == 0) {
+				soldier->append(*lod);
+			}
+			for (int team = 0; team < 2 && teamFaces; ++team) {
+				if (field == 0 || (field & (0x100 << team)) == 0) {
+					teams[team]->append(*lod);
+				}
+			}
+		}
+		if (const physics::CollisionWorld* lod = faces(physics::CollisionUser::Projectile)) {
+			projectile->append(*lod);
+		}
+		vehicleParts.insert(vehicleParts.end(), m.lodParts.begin(), m.lodParts.end());
 	}
 	titan.vehicleParts = std::move(vehicleParts);
 	body->teamSoldierMesh[0] = teams[0];

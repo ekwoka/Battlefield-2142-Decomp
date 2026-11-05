@@ -87,6 +87,22 @@ void CollisionWorld::addMesh(const CollisionMeshFile& mesh, CollisionUser user, 
 	}
 }
 
+void CollisionWorld::append(const CollisionWorld& other)
+{
+	const uint32_t offset = static_cast<uint32_t>(m_triangles.size());
+	for (const Triangle& t : other.m_triangles) {
+		m_triangles.push_back(t);
+		m_triangles.back().stamp = 0; // this world's query stamps
+	}
+	// Each cell's indices stay in increasing order, as addMesh leaves them.
+	for (const auto& [key, indices] : other.m_cells) {
+		std::vector<uint32_t>& cell = m_cells[key];
+		for (const uint32_t index : indices) {
+			cell.push_back(offset + index);
+		}
+	}
+}
+
 bool CollisionWorld::raycast(const Vec3& from, const Vec3& to, Hit& hit) const { return trace(from, to, hit, false); }
 
 bool CollisionWorld::trace(const Vec3& from, const Vec3& to, Hit& hit, bool frontOnly, uint32_t ignore) const

@@ -11,13 +11,16 @@
 // the behaviour comes from.
 #include "MenuBindings.h"
 
+#include "EndOfRoundBindings.h"
 #include "Input/ControlMap.h"
+#include "Net/Demo.h"
 #include "SettingsObjects.h"
 #include "UI/Player/Natives.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <ctime>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -40,6 +43,10 @@ constexpr const char* kSingleplay = "dice.bf2.Singleplay";
 constexpr const char* kGeneralSettings = "dice.bf2.GeneralSettings";
 constexpr const char* kVideoSettings = "dice.bf2.VideoSettings";
 constexpr const char* kAudioSettings = "dice.bf2.AudioSettings";
+constexpr const char* kProfile = "dice.bf2.Profile";
+constexpr const char* kServerInfo = "dice.bf2.ServerInfo";
+constexpr const char* kControlSettings = "dice.bf2.ControlSettings";
+constexpr const char* kBookmarkList = "LocalProfile.DemoBookmark"; // addDemoBookmark's entries
 
 constexpr const char* kFavouriteList = "GeneralSettings.FavouriteServer"; // addFavouriteServer's entries
 constexpr const char* kHistoryList = "GeneralSettings.ServerHistory";     // addServerHistory's
@@ -60,9 +67,8 @@ bool parseAddress(const std::string& text, std::string& ip, int& port, int& quer
 	return !ip.empty();
 }
 
-// One addFavouriteServer / addServerHistory entry as General.con has it:
-// "ip" port "name" queryPort.
-MenuBindings::FavouriteServer parseEntry(const std::string& entry)
+// A console line's arguments: words, or text in quotes.
+std::vector<std::string> splitArguments(const std::string& entry)
 {
 	std::vector<std::string> words;
 	for (size_t i = 0; i < entry.size();) {
@@ -81,6 +87,14 @@ MenuBindings::FavouriteServer parseEntry(const std::string& entry)
 			i = end;
 		}
 	}
+	return words;
+}
+
+// One addFavouriteServer / addServerHistory entry as General.con has it:
+// "ip" port "name" queryPort.
+MenuBindings::FavouriteServer parseEntry(const std::string& entry)
+{
+	const std::vector<std::string> words = splitArguments(entry);
 	MenuBindings::FavouriteServer server;
 	server.ip = words.size() > 0 ? words[0] : std::string();
 	server.port = words.size() > 1 ? std::atoi(words[1].c_str()) : 0;
@@ -127,6 +141,42 @@ std::string trim(const std::string& text)
 	const size_t begin = text.find_first_not_of(" \t\r\n");
 	const size_t end = text.find_last_not_of(" \t\r\n");
 	return begin == std::string::npos ? std::string() : text.substr(begin, end - begin + 1);
+}
+
+std::string serverField(const net::ServerEntry& server, const char* name)
+{
+	const auto it = server.fields.find(name);
+	return it == server.fields.end() ? std::string() : it->second;
+}
+
+// 0x10007aa0: a time_t as GetDateFormatA and GetTimeFormatA give it in the
+// game's language (0x10007730: English 0x409), the two joined by a space;
+// "" for 0. The rewrite writes the English defaults, "M/d/yyyy h:mm:ss tt".
+std::string demoDate(uint32_t time)
+{
+	if (time == 0) {
+		return std::string();
+	}
+	const std::time_t t = static_cast<std::time_t>(time);
+	const std::tm* tm = std::localtime(&t);
+	if (!tm) {
+		return std::string();
+	}
+	const int hour = tm->tm_hour % 12 == 0 ? 12 : tm->tm_hour % 12;
+	char text[64];
+	std::snprintf(text, sizeof text, "%d/%d/%d %d:%02d:%02d %s", tm->tm_mon + 1, tm->tm_mday, tm->tm_year + 1900, hour,
+		tm->tm_min, tm->tm_sec, tm->tm_hour < 12 ? "AM" : "PM");
+	return text;
+}
+
+// 0x0046b8a0: a local network's address (10/8, 172.16/12, 192.168/16).
+bool privateAddress(const std::string& ip)
+{
+	int a = 0, b = 0, c = 0, d = 0;
+	if (std::sscanf(ip.c_str(), "%d.%d.%d.%d", &a, &b, &c, &d) != 4) {
+		return false;
+	}
+	return a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168);
 }
 
 } // namespace
@@ -580,6 +630,9 @@ void MenuBindings::bindOffline()
 	ui::NativeRegistry& n = m_natives;
 	bindFavourites();
 	bindMods();
+	bindCommandLine();
+	bindDemos();
+	bindMapTexts();
 
 	// --- The map list's own natives (the pages use the index ones).
 	// 0x100414c0 setCurrentMap and 0x100414d0 setMapList do nothing.
@@ -691,6 +744,39 @@ void MenuBindings::bindOffline()
 		return Value(text);
 	});
 
+	// 0x1003c300 / 0x1003be00: the player's own flag (SwiffPlayer's player
+	// object slots 0x80 / 0x84, +0x48, false at 0x10009c00). The lists set
+	// it when flushed and read it while they update; nothing else does.
+	n.setFunction(kLogic, "getAsync", [this](Interpreter&, const Args&) { return Value(m_async); });
+	n.setFunction(kLogic, "setAsync", [this](Interpreter&, const Args& args) {
+		m_async = avm1::toBoolean(arg(args, 0));
+		return Value();
+	});
+	// 0x1003bfa0 / 0x1003c9e0: SwiffHost slots 0xe8 / 0xe4 (0x0046b250 /
+	// 0x0046b240), the loading flag +0x7b4 (the loading screen's own
+	// bindings answer it while a level loads).
+	n.setFunction(kLogic, "setIsLoading", [this](Interpreter&, const Args& args) {
+		m_isLoading = avm1::toBoolean(arg(args, 0));
+		return Value();
+	});
+	n.setFunction(kLogic, "getIsLoading", [this](Interpreter&, const Args&) { return Value(m_isLoading); });
+	// 0x1003c540: GetKeyState(VK_CAPITAL) & 1, the Caps Lock light.
+	n.setFunction(kLogic, "isCapsLockPressed", [this](Interpreter&, const Args&) { return Value(capsLock && capsLock()); });
+	// 0x10049930: a bare "ret 0xc".
+	n.setFunction(kProfile, "deleteCurrentProfile", [](Interpreter&, const Args&) { return Value(); });
+	// 0x10016390: ControlSettings slot 0x24 (the game's controls again:
+	// Settings/Controls.con), then the current profile saved
+	// (LocalProfileManager slots 0x38 / 0x34).
+	n.setFunction(kControlSettings, "resetDefault", [this](Interpreter&, const Args&) {
+		if (m_profiles && m_profiles->onResetControls) {
+			m_profiles->onResetControls();
+		}
+		if (m_profiles && m_profiles->current() >= 0) {
+			m_profiles->save();
+		}
+		return Value();
+	});
+
 	// --- The settings objects.
 	// 0x1002fec0: GeneralSettings slot 0x24 (0x0049bdf0), the HUD page's
 	// values: transparencies 255, the crosshair white, the mini-map
@@ -754,6 +840,388 @@ void MenuBindings::bindOffline()
 	// card's EAX and Creative Zenith checks: OpenAL Soft has neither.
 	n.setFunction(kAudioSettings, "hasEax", [](Interpreter&, const Args&) { return Value(false); });
 	n.setFunction(kAudioSettings, "hasZenithBoard", [](Interpreter&, const Args&) { return Value(false); });
+}
+
+// --- The command line
+
+int MenuBindings::commandLineActivation(const CommandLine& commandLine, bool internet)
+{
+	// 0x00404780: GSIsServer picks hosting, 4 with the server settings'
+	// internet flag (+0x54) and 5 without; a joining client 3 for an
+	// address on the local network (slot 0x288), 2 otherwise.
+	if (commandLine.hostServer) {
+		return internet ? 4 : 5;
+	}
+	if (commandLine.joinAddress.empty()) {
+		return 0;
+	}
+	return privateAddress(commandLine.joinAddress) ? 3 : 2;
+}
+
+void MenuBindings::setCommandLine(const CommandLine& commandLine)
+{
+	m_commandLine = commandLine;
+	const auto internet = m_settings.find("ServerSettings.Internet");
+	m_commandLineType = commandLineActivation(commandLine, internet != m_settings.end() && avm1::toBoolean(internet->second));
+}
+
+void MenuBindings::bindCommandLine()
+{
+	ui::NativeRegistry& n = m_natives;
+	// 0x1003c5a0 / 0x1003bee0: SwiffHost slots 0x2f4 / 0x2f8 (+0xd94), the
+	// activation type. The main page asks for it as "getCommandline"; the
+	// natives' names, like the movies' members, match without regard to
+	// case (NativeRegistry::memberNamed).
+	n.setFunction(kLogic, "getCommandLine", [this](Interpreter&, const Args&) { return Value(m_commandLineType); });
+	n.setFunction(kLogic, "setCommandLine", [this](Interpreter& vm, const Args& args) {
+		m_commandLineType = intArg(vm, args, 0);
+		return Value();
+	});
+	// 0x1003c870 / 0x1003c8f0: slots 0xf4 / 0xf8 (0x0046b610 / 0x0046b6c0),
+	// GSJoinAddress and GSPassword ("" unset).
+	n.setFunction(kLogic, "getCommandlineServer", [this](Interpreter&, const Args&) { return Value(m_commandLine.joinAddress); });
+	n.setFunction(kLogic, "getCommandlineServerPassword", [this](Interpreter&, const Args&) {
+		return Value(m_commandLine.password);
+	});
+	// 0x1003c7a0: slot 0x124 (joinServer) with GSJoinAddress and slot 0xfc's
+	// GSPort (0x0046b670, 17567 unset); its answer.
+	n.setFunction(kLogic, "joinCommandlineServer", [this](Interpreter&, const Args&) {
+		if (!m_commandLine.password.empty()) {
+			m_joinPassword = m_commandLine.password;
+		}
+		return Value(joinServer(m_commandLine.joinAddress, m_commandLine.port));
+	});
+	// 0x1003b130: slot 0x140 (0x00469f90) gives the server settings' port
+	// and query port; the info server becomes 127.0.0.1 on them (slot
+	// 0x130) and slot 0x128 creates the server: the command line's level
+	// when it names one (MNCommandLine, GSLoadLevel and GSGameMode,
+	// cleared after), else the map list. Then the arrow cursor and
+	// endWaitState (slot 0x2ec).
+	n.setFunction(kLogic, "startCommandlineServer", [this](Interpreter&, const Args&) {
+		m_currentServerHost = "127.0.0.1";
+		m_currentServerPort = static_cast<int>(setting("ServerSettings.Port", 0x449f));
+		m_currentServerQueryPort = static_cast<int>(setting("ServerSettings.GameSpyPort", 29900));
+		if (!m_commandLine.level.empty()) {
+			// 0x00431690: the size is the server's players, 16 at least on a
+			// ranked server.
+			m_mapList = {{m_commandLine.level, m_commandLine.gameMode, static_cast<int>(setting("ServerSettings.MaxPlayers", 64))}};
+			m_commandLine.level.clear();
+			showMapLists();
+		}
+		createServer();
+		m_waitCursor = 0;
+		return Value();
+	});
+}
+
+// --- Local demos and the bookmarks
+
+std::vector<MenuBindings::LocalDemo> MenuBindings::findDemos(const std::string& directory)
+{
+	namespace fs = std::filesystem;
+	std::vector<LocalDemo> demos;
+	std::error_code error;
+	std::vector<fs::path> files;
+	for (const auto& entry : fs::directory_iterator(directory, error)) {
+		if (entry.is_regular_file(error) && entry.path().extension() == ".bf2142demo") {
+			files.push_back(entry.path());
+		}
+	}
+	std::sort(files.begin(), files.end());
+	for (const fs::path& file : files) {
+		net::DemoHeader header;
+		std::vector<net::DemoRecord> records;
+		if (!net::readDemo(file.string(), header, records)) {
+			continue; // 0x005793b0 refused the header
+		}
+		LocalDemo demo;
+		demo.path = file.string();
+		demo.name = file.stem().string(); // 0x0065bb10
+		demo.serverName = header.serverName;
+		demo.started = header.started;
+		demo.level = header.level;
+		demo.gameMode = header.gameMode;
+		demos.push_back(demo);
+	}
+	return demos;
+}
+
+void MenuBindings::setDemoDirectory(const std::string& directory)
+{
+	m_demoDirectory = directory;
+	m_demos = directory.empty() ? std::vector<LocalDemo>() : findDemos(directory);
+	showDemos();
+}
+
+void MenuBindings::showDemos()
+{
+	// The "demos" list (0x10064930 counts the library through slot 0x18;
+	// 0x10064a50 writes each row): cell0 the date (0x10007aa0), cell1 the
+	// file's name, cell2 the map's name (ModInfo slot 0x38), cell3 the
+	// mode's TEXT_<mode>, else the mod's name of it, else the mode.
+	ui::NativeRegistry::Rows rows;
+	for (const LocalDemo& demo : m_demos) {
+		std::string mode = m_natives.localize("TEXT_" + demo.gameMode);
+		if (mode == "TEXT_" + demo.gameMode) {
+			const std::string name = gameModeName ? gameModeName(demo.gameMode) : std::string("N/A");
+			mode = name == "N/A" || name.empty() ? demo.gameMode : name;
+		}
+		rows.push_back({demoDate(demo.started), demo.name, underscoresAsSpaces(demo.level), mode});
+	}
+	m_natives.setListRows("demos", rows);
+}
+
+std::vector<std::string> MenuBindings::demoBookmarks() const
+{
+	return m_objects ? m_objects->list(kBookmarkList) : std::vector<std::string>();
+}
+
+void MenuBindings::showDemoBookmarks()
+{
+	// The "demobm" list (0x100643f0 counts through LocalProfileManager slot
+	// 0xd4, 0x100644xx writes a row from slot 0xd8's record): cell0 the
+	// date (+0x54), cell1 the first text (+0x04), cell2 the map's name of
+	// the second (+0x1c). The entries are addDemoBookmark's "qqqi".
+	ui::NativeRegistry::Rows rows;
+	for (const std::string& entry : demoBookmarks()) {
+		const std::vector<std::string> words = splitArguments(entry);
+		const auto word = [&words](size_t i) { return i < words.size() ? words[i] : std::string(); };
+		rows.push_back({demoDate(static_cast<uint32_t>(std::strtoul(word(3).c_str(), nullptr, 10))), word(0),
+			underscoresAsSpaces(word(1))});
+	}
+	m_natives.setListRows("demobm", rows);
+}
+
+void MenuBindings::bindDemos()
+{
+	ui::NativeRegistry& n = m_natives;
+	// 0x10046f40: the library's record (slot 0x1c); its file goes to host
+	// event 0xd (SwiffHost slot 0x30). The arrow cursor and endWaitState
+	// either way.
+	n.setFunction(kMultiplay, "playDemo", [this](Interpreter& vm, const Args& args) {
+		const int index = intArg(vm, args, 0);
+		if (index >= 0 && index < static_cast<int>(m_demos.size())) {
+			log("play demo " + m_demos[static_cast<size_t>(index)].path);
+			if (onPlayDemo) {
+				onPlayDemo(m_demos[static_cast<size_t>(index)].path);
+			}
+		}
+		m_waitCursor = 0;
+		return Value();
+	});
+	// 0x100421c0: slot 0x20 (0x0049dde0): the file deleted (FileSystem slot
+	// 0x20) and the record removed.
+	n.setFunction(kMultiplay, "deleteDemo", [this](Interpreter& vm, const Args& args) {
+		const int index = intArg(vm, args, 0);
+		if (index >= 0 && index < static_cast<int>(m_demos.size())) {
+			std::error_code error;
+			std::filesystem::remove(m_demos[static_cast<size_t>(index)].path, error);
+			m_demos.erase(m_demos.begin() + index);
+			showDemos();
+		}
+		return Value();
+	});
+	// 0x10043940: LocalProfileManager slot 0xd4, the bookmarks' count.
+	n.setFunction(kMultiplay, "getNumDemoBookmarks", [this](Interpreter&, const Args&) {
+		return Value(static_cast<double>(demoBookmarks().size()));
+	});
+	// 0x10043dc0: slot 0xdc (the bookmark removed), then the profile saved
+	// (slot 0x34) when it was; its answer. The arrow cursor and
+	// endWaitState.
+	n.setFunction(kMultiplay, "deleteDemoBookmark", [this](Interpreter& vm, const Args& args) {
+		const int index = intArg(vm, args, 0);
+		std::vector<std::string> entries = demoBookmarks();
+		const bool removed = m_objects && index >= 0 && index < static_cast<int>(entries.size());
+		if (removed) {
+			entries.erase(entries.begin() + index);
+			m_objects->setList(kBookmarkList, entries);
+			if (m_profiles) {
+				m_profiles->save();
+			}
+			showDemoBookmarks();
+		}
+		m_waitCursor = 0;
+		return Value(removed);
+	});
+	// 0x10042bd0 / 0x10041b70: the library's flag (slots 0x40 / 0x44, +0xb0).
+	n.setFunction(kMultiplay, "getHasNewBookmark", [this](Interpreter&, const Args&) { return Value(m_hasNewBookmark); });
+	n.setFunction(kMultiplay, "setHasNewBookmark", [this](Interpreter&, const Args& args) {
+		m_hasNewBookmark = avm1::toBoolean(arg(args, 0));
+		return Value();
+	});
+}
+
+// --- The map texts and the server info popup
+
+const MenuBindings::LevelText* MenuBindings::levelText(const std::string& level)
+{
+	auto it = m_levelTexts.find(level);
+	if (it == m_levelTexts.end()) {
+		std::optional<LevelText> text;
+		std::string xml;
+		if (readFile && !level.empty() && readFile("Levels/" + level + "/Info/" + level + ".desc", xml)) {
+			// 0x00462750: <name> (+0x1c), <briefing> (+0x38) and its locid
+			// (+0x54).
+			const LevelDescription desc = parseLevelDescription(xml, "", 0);
+			text = LevelText {desc.name, desc.briefing, desc.briefingKey, desc.modes};
+		}
+		it = m_levelTexts.emplace(level, text).first;
+	}
+	return it->second ? &*it->second : nullptr;
+}
+
+const MenuBindings::Server* MenuBindings::infoServer() const
+{
+	// 0x10053860: in a game the joined server (the "serverInfo" browser's,
+	// slot 0x44), otherwise the one SwiffHost +0xd08 / +0xd24 name (slots
+	// 0x290 / 0x298, set with slot 0x130 by the popup's lists, 0x10072f90);
+	// none for "0.0.0.0" or port 0.
+	const std::string& host = m_gameRunning && !m_joinHost.empty() ? m_joinHost : m_infoHost;
+	if (host.empty() || host == "0.0.0.0") {
+		return nullptr;
+	}
+	for (const auto* servers : {&m_servers, &m_lanServers, &m_favouriteServers}) {
+		for (const Server& server : *servers) {
+			if (server.entry.ip == host) {
+				return &server;
+			}
+		}
+	}
+	return nullptr;
+}
+
+void MenuBindings::bindMapTexts()
+{
+	ui::NativeRegistry& n = m_natives;
+	// The level record's description: its briefing's locid (+0x54)
+	// localized (SwiffHost slot 0xbc), else the briefing's text (+0x38); ""
+	// for no such level.
+	const auto description = [this](const LevelText* text) {
+		if (!text) {
+			return std::string();
+		}
+		return text->briefingKey.empty() ? m_natives.localize(text->briefing) : m_natives.localize(text->briefingKey);
+	};
+	// The levels the menu knows, once each.
+	const auto levels = [this] {
+		std::vector<std::string> out;
+		for (const MenuMap& map : m_maps) {
+			if (std::find(out.begin(), out.end(), map.level) == out.end()) {
+				out.push_back(map.level);
+			}
+		}
+		return out;
+	};
+	// 0x10045be0: the level whose folder (+0x00) is the text up to its
+	// first space, in the current mod (SwiffHost slot 0x144, ModInfo slot
+	// 0x1c's levels +0x100).
+	n.setFunction(kMultiplay, "getMapDescriptionFromId", [this, description](Interpreter& vm, const Args& args) {
+		std::string id = vm.toString(arg(args, 0));
+		id = id.substr(0, id.find(' '));
+		return Value(description(levelText(id)));
+	});
+	// 0x10045ef0: the level whose shown name (+0x1c) is the first word.
+	n.setFunction(kMultiplay, "getMapDescriptionFromText", [this, description, levels](Interpreter& vm, const Args& args) {
+		std::istringstream words(vm.toString(arg(args, 0)));
+		std::string name;
+		words >> name;
+		for (const std::string& level : levels()) {
+			const LevelText* text = levelText(level);
+			if (text && text->name == name) {
+				return Value(description(text));
+			}
+		}
+		return Value("");
+	});
+	// 0x10046440: every mod's levels (ModInfo slot 0x14) for the one whose
+	// shown name is the argument: its folder; the argument itself otherwise.
+	n.setFunction(kMultiplay, "getMapPathFromName", [this, levels](Interpreter& vm, const Args& args) {
+		const std::string name = vm.toString(arg(args, 0));
+		for (const std::string& level : levels()) {
+			const LevelText* text = levelText(level);
+			if (text && text->name == name) {
+				return Value(level);
+			}
+		}
+		return Value(name);
+	});
+	// 0x100437f0 calls ModInfo slot 0x44 (0x00461740, addGameMode's
+	// setter) with (id, "") and answers that "": an original bug that also
+	// blanks the mode's name in the mod's map. The rewrite answers "" and
+	// leaves the name.
+	n.setFunction(kMultiplay, "getGameModeFromId", [](Interpreter&, const Args&) { return Value(""); });
+	// 0x100452f0 / 0x100451a0: the current mod's first game mode (its list
+	// +0x110, which the level scan 0x00462750 fills with each <mode type>
+	// not yet in it) by its name (ModInfo slot 0x48); 0x10045430 the id
+	// itself; "" without one.
+	const auto firstMode = [this, levels] {
+		std::vector<std::string> sorted = levels();
+		std::sort(sorted.begin(), sorted.end());
+		for (const std::string& level : sorted) {
+			const LevelText* text = levelText(level);
+			if (text && !text->modes.empty()) {
+				return text->modes.front();
+			}
+		}
+		return std::string();
+	};
+	n.setFunction(kMultiplay, "getSelectedFilterGameModeId", [firstMode](Interpreter&, const Args&) { return Value(firstMode()); });
+	for (const char* member : {"getSelectedFilterGameMode", "getSelectedServerFilterGameMode"}) {
+		n.setFunction(kMultiplay, member, [this, firstMode](Interpreter&, const Args&) {
+			const std::string mode = firstMode();
+			if (mode.empty()) {
+				return Value("");
+			}
+			return Value(gameModeName ? gameModeName(mode) : std::string("N/A"));
+		});
+	}
+	// 0x10042890: the info server's team names (0x1012bc3c + team * 0x1c),
+	// which General.cacheExtendedServerInfo (0x10026770, online) sets; ""
+	// until then.
+	n.setFunction(kMultiplay, "getTeamName", [this](Interpreter& vm, const Args& args) {
+		const int team = intArg(vm, args, 0);
+		return Value(team >= 0 && team < 2 ? m_teamNames[static_cast<size_t>(team)] : std::string());
+	});
+	// 0x10041d70: "ip port queryPort" to SwiffHost slot 0x130 (0x00469d60:
+	// kept, and the "serverInfo" browser asks that server), then both info
+	// revisions (slots 0x138 / 0x13c) counted up. 0x10041530: "0.0.0.0", 0, 0.
+	n.setFunction(kMultiplay, "setCurrentServerId", [this](Interpreter& vm, const Args& args) {
+		std::string ip;
+		int port = 0, queryPort = 0;
+		parseAddress(vm.toString(arg(args, 0)), ip, port, queryPort);
+		m_currentServerHost = ip;
+		m_currentServerPort = port;
+		m_currentServerQueryPort = queryPort;
+		++m_serverInfoRevision[0];
+		++m_serverInfoRevision[1];
+		return Value();
+	});
+	n.setFunction(kMultiplay, "clearServerId", [this](Interpreter&, const Args&) {
+		m_currentServerHost = "0.0.0.0";
+		m_currentServerPort = m_currentServerQueryPort = 0;
+		return Value();
+	});
+
+	// --- dice.bf2.ServerInfo's map texts (0x10053c20 ...): the info
+	// server's record (0x10053860): getMapName its map (+0xa0),
+	// getMaxPlayers its players (+0x68); getGameModeTitle,
+	// getGameModeDescription, getBackgroundTitle and
+	// getBackgroundDescription all read the same field, its game type
+	// (+0x7c). "" and 0 without a server.
+	const auto text = [this](const char* name) {
+		return [this, name](Interpreter&, const Args&) {
+			const Server* server = infoServer();
+			return Value(server ? serverField(server->entry, name) : std::string());
+		};
+	};
+	n.setFunction(kServerInfo, "getMapName", text("mapname"));
+	n.setFunction(kServerInfo, "getMaxPlayers", [this](Interpreter&, const Args&) {
+		const Server* server = infoServer();
+		return Value(server ? std::atoi(serverField(server->entry, "maxplayers").c_str()) : 0);
+	});
+	for (const char* member : {"getGameModeTitle", "getGameModeDescription", "getBackgroundTitle", "getBackgroundDescription"}) {
+		n.setFunction(kServerInfo, member, text("gametype"));
+	}
 }
 
 // --- The controls page's duplicate prompt

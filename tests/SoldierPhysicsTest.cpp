@@ -546,6 +546,50 @@ TEST(SoldierControl_Jumps)
 	CHECK(landed && std::fabs(body.position.y - 1) < 0.1f);
 }
 
+// The jump hold the HUD's weapon flag tests (the soldier's slot 0xa4,
+// 0x00586580): a jump's timer (+0x3f4, 1 s) and the rise from prone's
+// (+0x40c, 0.6 s from 0x005889d0), each counted down by 0x00586710.
+TEST(SoldierControl_JumpHold)
+{
+	physics::SoldierBody body;
+	body.position = {0, 1, 0};
+	for (int i = 0; i < 10; ++i) {
+		body.step(1 / 30.0f, slope(0));
+	}
+	game::SoldierControl control;
+	game::SoldierInput idle;
+	control.update(idle, body);
+	CHECK(!control.jumpHold());
+	game::SoldierInput jump;
+	jump.jump = true;
+	control.update(jump, body);
+	CHECK(control.jumped() && control.jumpHold());
+	int ticks = 0;
+	while (control.jumpHold() && ticks < 100) {
+		control.update(idle, body);
+		body.step(1 / 30.0f, slope(0));
+		++ticks;
+	}
+	CHECK(ticks >= 29 && ticks <= 31); // a second at 30 Hz
+	// Lying down holds nothing; getting up holds for 0.6 s.
+	game::SoldierInput prone;
+	prone.pose = game::SoldierPose::Prone;
+	for (int i = 0; i < 5; ++i) {
+		control.update(prone, body);
+	}
+	CHECK(!control.jumpHold());
+	control.update(idle, body);
+	CHECK(control.jumpHold());
+	ticks = 0;
+	while (control.jumpHold() && ticks < 100) {
+		control.update(idle, body);
+		++ticks;
+	}
+	CHECK(ticks >= 17 && ticks <= 19);
+	control.reset();
+	CHECK(!control.jumpHold());
+}
+
 // The sprint's stamina (0x006457f0): it drains over sprintDissipationTime
 // and the sprint ends when it is out; it starts again only from the limit.
 TEST(SoldierControl_SprintStaminaRunsOut)

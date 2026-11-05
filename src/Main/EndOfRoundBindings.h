@@ -94,6 +94,15 @@ struct RoundSummary {
 	float loadProgress = 0;    // 0..1 (Client.getLoadProgress)
 	int roundsLeft = 999;      // on this map (Logic.getNumRoundsLeft): 999 for a game started here (0x004d3450)
 	bool optimizingShaders = false;
+	// Client.* (SwiffHost slots 0xb0..0xd0): the round's end kind (game
+	// client slot 0x164; 1 without a game), the seconds until the server
+	// restarts the map (slot 0x140), the file loading now (+0xc of
+	// 0x00a7d1e0), and whether a game is up (the game logic 0x00a1b5d8).
+	int eorType = 1;
+	float timeUntilRestart = 0;
+	std::string currentLoadFile;
+	bool gameRunning = true;
+	std::string playerName; // GSPlayerName (Client.get/setPlayerName)
 
 	// --- The level loading or played next
 	std::string mapPath;       // the level's folder name ("Minsk")
@@ -119,6 +128,10 @@ struct RoundSummary {
 	std::string previousMapPath; // the level played ("Minsk")
 	std::string previousGameMode = "gpm_cq";
 	int previousMapSize = 32;
+	// Its level record's texts (ModInfo slot 0x20): the briefing's locid
+	// (or text) and the game mode's for its size.
+	std::string previousMapDescriptionKey;
+	std::string previousGameModeDescriptionKey;
 	std::array<std::string, 2> teamNames {"PAC", "EU"}; // teams 1 and 2
 	int myTeam = 1;      // 1 or 2
 	int winningTeam = 0; // 1, 2, or 0 for a draw
@@ -158,8 +171,11 @@ int rankExperience(int rank);
 struct LevelDescription {
 	std::string name;
 	std::string briefingKey;
+	std::string briefing;     // the briefing's own text (used without a locid)
 	std::string gameModeKey;
-	std::vector<int> sizes; // of the game mode
+	std::string gameModeText; // the size's maptype text (used without a locid)
+	std::vector<int> sizes;   // of the game mode
+	std::vector<std::string> modes; // every <mode type>, in the file's order
 };
 LevelDescription parseLevelDescription(const std::string& xml, const std::string& gameMode, int size);
 
@@ -188,6 +204,11 @@ public:
 	// its slot 0x48 0x00460ff0: "N/A" when unknown), behind the
 	// HEADER_<mode> text (0x1001beb0, 0x1001bfd0).
 	std::function<std::string(const std::string& mode)> gameModeName;
+
+	// Client.get/setCommandlineOption (SwiffHost slots 0xa0 / 0xa4,
+	// 0x0046d3e0 / 0x00477e60): the text of CommandLine.cmd, kept in this
+	// file ("" in memory only).
+	std::string commandLineFile;
 
 	// Logic.readyToPlay: the player pressed JOIN GAME (false) or SPECTATOR (true).
 	std::function<void(bool asSpectator)> onReadyToPlay;
@@ -227,6 +248,7 @@ private:
 	ui::NativeRegistry& m_natives;
 	RoundSummary m_summary;
 	std::map<std::string, std::string> m_storage;
+	std::string m_commandLineOption;
 	int m_lastTip = 0;
 	unsigned m_random = 12345;
 };

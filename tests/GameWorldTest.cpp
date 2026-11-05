@@ -5005,3 +5005,25 @@ TEST(GameWorld_OtherCollisionLod)
 		}
 	}
 }
+
+// A world order marker's height (0x005b8b20): the higher of the terrain
+// and the water under the point, plus half the marker's radius.
+TEST(GameWorld_OrderMarkerHeight)
+{
+	io::FileManager files;
+	physics::CollisionTemplateManager collisionTemplates;
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	game::GameWorld world(templates, objects);
+	world.enablePhysics(files, collisionTemplates,
+		{[](float, float) { return 3.5f; }, [](float, float, physics::Vec3& normal) {
+			 normal = {0, 1, 0};
+			 return 3.5f;
+		 }});
+	CHECK(std::fabs(world.orderMarkerHeight({10, 3.5f, 20}, 2) - 4.5f) < 1e-4f);
+	CHECK(std::fabs(world.orderMarkerHeight({10, 3.5f, 20}, 0) - 3.5f) < 1e-4f);
+	world.setWaterLevel(6);
+	CHECK(std::fabs(world.orderMarkerHeight({10, 3.5f, 20}, 2) - 7) < 1e-4f);
+	world.setWaterLevel(1);
+	CHECK(std::fabs(world.orderMarkerHeight({10, 3.5f, 20}, 1) - 4) < 1e-4f);
+}
