@@ -29,6 +29,17 @@ std::string setting(const world::ObjectTemplate& t, const std::string& key)
 
 } // namespace
 
+void closeToObject(hud::HudManager& hud, int type, bool on)
+{
+	if (type < 0) {
+		for (int i = 0; i < 16; ++i) {
+			hud.set("CloseToObject" + std::to_string(i), on ? 1.0f : 0.0f);
+		}
+		return;
+	}
+	hud.set("CloseToObject" + std::to_string(type), on ? 1.0f : 0.0f);
+}
+
 int targetTypeIndex(const std::string& name)
 {
 	for (int i = 0; i < 8; ++i) {
@@ -448,6 +459,9 @@ void HelpPopups::update(hud::HudManager& hud, const Context& context, float seco
 		if (reach <= 0 || near.distance > reach) {
 			continue;
 		}
+		// helpHud.closeToHelpStringKey{Friendly,Enemy,Neutral} and the sound
+		// keys (the Neutral rows: 0x0055b8f0 / 0x0055b96d, +0x6c, and
+		// 0x0055ba76 / 0x0055baf3, +0x74; the others before them).
 		const char* side = near.side == 1 ? "Friendly" : near.side == 2 ? "Enemy" : "Neutral";
 		if (show(hud, setting(*near.object, std::string("helpHud.closeToHelpStringKey") + side),
 				setting(*near.object, std::string("helpHud.closeToHelpSoundKey") + side))) {

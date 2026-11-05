@@ -7,6 +7,8 @@
 
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <system_error>
 
 namespace dice::hfe::net {
 
@@ -86,6 +88,22 @@ DemoWriter::~DemoWriter()
 
 bool DemoWriter::isOpen() const { return m_impl->file != nullptr; }
 
+namespace {
+
+// The folder a demo or camera file goes in (Demos/ under the game's
+// working folder for a bare name): made when missing. The retail install
+// ships no Demos folder; the rewrite runs from anywhere.
+void makeParent(const std::string& path)
+{
+	const std::filesystem::path parent = std::filesystem::path(path).parent_path();
+	if (!parent.empty()) {
+		std::error_code ignored;
+		std::filesystem::create_directories(parent, ignored);
+	}
+}
+
+} // namespace
+
 bool DemoWriter::open(const std::string& path, const DemoHeader& header)
 {
 	if (isOpen()) {
@@ -95,6 +113,7 @@ bool DemoWriter::open(const std::string& path, const DemoHeader& header)
 		std::fclose(exists);
 		return false; // not over another demo
 	}
+	makeParent(path);
 	m_impl->file = std::fopen(path.c_str(), "wb");
 	if (!m_impl->file) {
 		return false;
@@ -318,6 +337,7 @@ bool writeCameraFile(const std::string& path, const std::vector<CameraKeyframe>&
 	if (compress2(packed.data(), &size, raw.data(), static_cast<uLong>(raw.size()), 3) != Z_OK) {
 		return false;
 	}
+	makeParent(path);
 	std::FILE* file = std::fopen(path.c_str(), "wb");
 	if (!file) {
 		return false;

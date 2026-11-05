@@ -307,7 +307,8 @@ each tick (slot `0x148` → `0x006c6080`), and the collision dispatch
 (`0x006dd0b0`) skips it: no ground pass, no broad phase as a mover, no
 solve (it stays a candidate for movers, the mass shares deciding). What
 wakes it: the mass shares (the other's momentum), the engine (`0x0064e920`:
-a throttle or rpm ≥ 0.05), a blast's push, a wheel's contact velocity
+a throttle or rpm ≥ 0.05), a walker's legs in any state but standing
+(`0x00650e90`), a blast's push, a wheel's contact velocity
 (`0x006b7910`), the heavier mobile object it rests on (the response's
 `+0xf4`) going or waking; a sleeping PlayerControlObject root woken wakes
 what lies round it (`0x006bfad0`, not major actors). Rewritten in
@@ -531,7 +532,12 @@ hull's ground points: the legs' segment from stepHeight above the foot
 the approach taken out, then the drive: the velocity along the ground to
 the desired by at most 1 m/s a tick, ω × 0.75. The MechLegs node's leg
 probes (slots 118–123) are dead code in BF2142, so spacing, footWidth,
-footLength, testCount and legEnableMask do nothing.
+footLength, testCount and legEnableMask do nothing. The object's update
+runs while its node sleeps and wakes the node (slot 0x160) in any state
+but standing (`+0x1bc` non-zero): a walker turning on the spot or
+crouching wakes as one walking does (`GameWorld::stepBody`; before, only
+the engines' throttle test woke a sleeping vehicle, so a bot's mech left
+standing never turned again).
 
 **The walker's own animation system** (`bundleAnimationSystem`: the object
 `0x0063d340` builds for the template, updated by `0x0063d2f0`; only the
@@ -3031,7 +3037,9 @@ objects, not particles (update `0x0061f360`): after its delay, for its
 timeToLive, one every 1 / intensity seconds (`0x0061ef80`; intensity times
 a 101-point curve, 1 unless scripted, and a distance factor of 1 unless
 `+0x24c` is set) of its `template` or of `alternateTemplate0..4` (index
-floor(u (n + 1)), the main one past the last). Each is placed at the
+floor(u (n + 1)), the main one past the last; the rows of alternateTemplate1
+`0x005303e1` / `0x0053045e`, `+0x474`, and alternateTemplate2 `0x00530557` /
+`0x005305d4`, `+0x490`, 60 shipped calls each). Each is placed at the
 emitter plus `relativePositionIn{Right,Up,Dof}` along its axes, moved on by
 its velocity for its share of the tick, turned about the emitter's forward
 by `startRotation` + `zRotation` rounded to `zRotationSnap` (radians,
@@ -5641,7 +5649,22 @@ carry an empty payload (`0x00516950`).
   file. `bf2142 --demo <file> --demo-camera <file.bf2142cam>` plays one,
   `--demo-record-camera <file>` records one; a hosted game's
   `demo.recordDemo <name>` writes `<name>-def.bf2142cam` (under Demos/
-  without an extension) from the local player's view.
+  without an extension) from the local player's view. Checked end to end
+  headless: `bf2142 +level Camp_Gibraltar --host --play 2 --simulate 30
+  --console "1:demo.recordDemo e2e" --console "12:demo.stopRecording"`
+  writes Demos/e2e.bf2142demo and Demos/e2e-def.bf2142cam (330 frames);
+  `--demo Demos/e2e.bf2142demo --demo-camera Demos/e2e-def.bf2142cam
+  --simulate 6 --screenshot shot.png` draws the recorded eye, and
+  `--demo-record-camera` headless records the demo camera's own state.
+  What that took: the demo connection `0x81` is never content-checked
+  (`0x004af710`'s first test; a pure host kicked it), the Demos/ folder
+  is made when missing, the host's camera hook is set before a headless
+  run, a demo is no live host to guard, the demo's clock waits while the
+  level loads (the original's runs on game ticks; it raced through the
+  records before), follows the run's steps without a window, and the
+  before-spawn camera doesn't replace a demo's; an ended demo's client
+  is kept until the game's frame is done with it (its world was read
+  freed).
   - The recorder (`0x005f9630`, once a frame with the ticks gone by; not
     before the demo's clock runs, the reader's `+0xdc`): the frame now
     (on a server with a local player, its view: the control object's
@@ -6272,8 +6295,34 @@ A joined client's takeable radio comes from its control points' ghosts
 Not rewritten: destroyedGameEvent (no reader).
 The
 closeToIndication* and indicationDistance* aren't radio: the server's
-0.2 s scan (`0x0059a6c0`) posts events 0x3e / 0x3f as a player comes
-within or leaves them; not rewritten. spottedMessage is the HUD's and the
+0.2 s scan (`0x0059a6c0`, from the player's update `0x0059bd80`, the
+countdown `+0x178`) posts events 0x3e / 0x3f as a player comes within or
+leaves them. Each living player's controlled object (`+0x80`: the vehicle,
+else the soldier) gathers the objects within its radius (slot 0x90) +
+200 m (the collision manager's sphere query, slot 0x44); one whose Radio
+template has `closeToIndicationDist` (`+0x200`, an int: the Titans' 250,
+the mines' 25, alps_dockObject's 100) counts when within that plus the
+radius, measured on the plane with `indicationDistance2D` (`+0x1fc`), and
+when it is the player's team's (an object with the team interface
+`0x94c1`, slot 0x60) unless the player's ability block (slot 0x2a0) has
+its `+1` (player `+0x30d`, cleared by `0x0059ac00`, set by nothing found).
+A new one in the map `+0x16c` / list `+0x170` posts 2/0x3e (the player's
+id and its `closeToIndicationType`, `+0x204`: the Titans 1, the mines 0),
+one seen again is kept, one gone posts 2/0x3f unless another of its type
+is still in; none in range, or the player dead (slot 0x74), clears the
+list with one 2/0x3f of type -1 (`0x0059a5f0`). The server's own player's
+go to the local event manager (`0x00a7d06c` slot 0x10), another's to its
+client as a PostRemote (the game server's slot 0x88, `0x00509990`). The
+HUD's handlers (`0x007a2100`, `0x007c1d70`) take them for the local
+player and set `CloseToObject<type>` to 1 or 0 (`0x0079a0e0`; -1: every
+`CloseToObject<n>` there is): `CloseToObject0` shows the soldier's mine
+icon (HudElementsActionIcons.con), `CloseToObject1` the APCs' pod-range
+lights with their POD_power_up / POD_power_down sounds
+(HudElementsAPCDriver.con, HudElementsEUAPCDriver.con). Rewritten:
+`GameWorld::stepCloseTo` / `scanCloseTo` (Radio.cpp; the mines are the
+live projectiles, by serial), `takeCloseToEvents`; the local HUD in
+main.cpp and `HostedGame::sendCloseTo` for clients, the joined client's
+PostRemote handler; `menu::closeToObject` (HudAlerts). spottedMessage is the HUD's and the
 bots' (game slot 52, `0x0042e9d0`): the voice `Radio.sendSpottedMessage 1`
 says on TCTeam, the spotted object's Radio component's (a soldier's kit:
 infantry_spotted, sniper_spotted; a vehicle's own: apc_spotted,
@@ -8158,8 +8207,13 @@ keep their own one-per-owner paths).
   where the exe's step also moves t). `zoom.zoomWhenBusy` (`+0xd`): the
   firearm's handler (`0x005c50e0`) drops a zoom press while busy (drawing,
   reloading, between rounds, zooming, animating, overheated without
-  allowZoomOnHeat) unless set; the rewrite's busy test is the reload's
-  (shipped only on the tanks' and ATs' seats).
+  allowZoomOnHeat) unless set (shipped only on the tanks' and ATs' seats);
+  the rewrite's busy test is the reload's and the heat's. allowZoomOnHeat
+  (the firearm's own `+0x2d0`, row `0x004e1f2f`; shipped 1 on three soldier
+  guns) lets an overheated gun (its heat component `+0x1a0`, slot 0x2c)
+  take the press whatever else keeps it busy, as the handler's two tests
+  have it; without it an overheated gun drops the press
+  (`anim::ZoomSettings::takesPress`, the soldier's and the seats' zoom).
 - **Seat zoom.** A seat's active firearms poll PIFire, PIAltFire and
   PIFlareFire (`0x005c58a0`, the table `0x0096cf0c`) as a soldier's do, and
   the handler (`0x005c50e0`) hands the press of the zoom component's input
@@ -9929,6 +9983,33 @@ mesh's lookup to `GameWorld::setAiSpawnTest`. When no try fits (0, or a spot at 
 caller (`0x004bef90` at `0x4bf36c`) refuses the spawn (player slot
 `0x188(0)`): the member stays dead and asks again
 (`GameWorld::spawnAtSquad`).
+The thrown beacon takes the squad's spawn point over (the
+ThrownSpawnPointComp, class `0x94f3`, template `0x005e6190`: its throw
+`0x005e5fd0` makes the squad's SquadLeaderSpawnPoint, squad `+0x180`, the
+beacon's child, slot 0xf0, and hands it spawn.spawnInPod `+0xe0` and
+spawn.spawnVehicle `+0xc4` through the point's interface `0xc47c`,
+`0x005b1a60` → slots 0x54 / 0x5c, `+0x2b` / `+0x2c`; the leader's own
+spawn gives it back with spawnInPod 0, `0x004c8530`, `0x00513240`). The
+beacon is no soldier, so the tries start at its own position and face it.
+With spawnInPod (the shipped `beacon`: eu_pod_drop) the base is raised by
+150 m (`*0x00a6b0d8`, the static `0x008e2e20`: 150) and the probe reaches
+down by the raised height (`0x005b2200`), and a try (`0x005b1e70`'s pod
+flag) whose ray meets an object passes when that object is at least
+150 m below (no sight or stance test: the spot stays up there), one
+meeting nothing passes over terrain at or above y 0 at the raised height
+plus 1.01, with the way from the raised base clear; the facing is
+`0x005b1d30`'s 3-D one (asin of the unit way's x, from 180 for a negative
+z: nearly along z for a drop). The server's spawn (`0x004bef90`) then
+makes the vehicle the point's slot 0x60 names at the soldier's spot and
+rotation (slot 0x58 the flag), seats the soldier in it (the game server's
+slot 0xa8, seat 0) and gives the pod's PlayerControlObject slot 0x178
+(`0x0059d2a0`, `+0x444`: its input mask) the point template's `+0x95`
+(1 by default; not rewritten). eu_pod_drop is a Parachute with isPod,
+dontAllowExit and copySoldierRotationOnEnter: it falls (gravityModifier
+1.5) steered by its ForceObjects and lets the soldier out when it lands,
+as a launched pod (`GameWorld::startPod`, `stepPods`; about 6.5 s from
+150 m). Rewritten: `spawnAtSquad`'s beacon branch, `scatterFrom`'s `pod`,
+`m_beaconPods`.
 The spawn screen's squad menu (`SquadMenu`, BF2142.exe `0x007a4000` ..
 `0x007a8800`; `src/Main/HudMenus`): `SpawnManager.toggleMembers 0/1`
 (`0x007b8b80`, menu states 1 and `0x12`/`0x13`) switches the kit half
@@ -11513,23 +11594,67 @@ changes (0x100966c0 → 0x10095fc0).
     - bend = 1 − maxAngleDiffSlowDown × min(1, angleSlowDownScale × (a −
       minAngleDiffForSlowDown)). a is the sharpest bend within max(3,
       speed × lookAheadTime) m ahead (0x10093c00), or the heading error.
-  - **Size:** the AI object's box (AIDLL 0x100fe990): radius r = its farthest
-    corner from the origin (vt+0x28), the centre radius (vt+0x30), width
-    and length. The rewrite takes the box of the vehicle collision LOD's
-    points.
+  - **Size:** the unit's physical part (AI object `+0x40`, vtable
+    0x101188d0) forwards to BF2142.exe's AIObjectPhysical adaptor (vtable
+    0x009d7228): the box (vt+0x24 → adaptor slot 0x2c → the collision
+    mesh's slot 0x54(1), 0x006e5c70 → 0x006de820: LOD 1's box `+0x84`),
+    the radius r (vt+0x28 → slot 0x38, 0x008a3f40 → the mesh's slot
+    0x50(1), 0x006e5c40 → 0x006de7d0: LOD 1's `+0xc0`, 0 without a LOD 1)
+    and the centre radius (vt+0x30 → slot 0x40, 0x008a4120: the box's
+    `+0x1c`). The box's fields come from 0x006aeda0 (AIDLL's copy
+    0x100fe990): r the farthest of its eight corners from the origin in
+    3-D (the height counts: as_heavy_mech's −1.95..3.55 m make r 5.39 m
+    and its room ahead 0.91 r = 4.9 m), the centre radius from the box's
+    centre (4.45 m), width and length its x and z extents. The rewrite
+    takes the vehicle LOD's box (`VehicleInfo::boxMin/boxMax`). The path
+    follower's radius (`+0x100`, the string-pull's margin, the last
+    waypoint's reach) is the centre radius (the request 0x10095fc0 reads
+    the unit's `+0x40` vt+0x30), not r.
   - **Space** (0x100e8170): mesh rays to r + 10 m ahead and along the
     box's diagonals (forward × length ± right × width), behind and its
     diagonals, and to either side. The rays behind are cut short by other
     vehicles' spheres (0x100fbdb0). The speed is capped from maxSpeed down
     to speedAtZeroSpace as the space ahead closes (backingSpeed below 95 %;
-    in the backing states from the space behind).
+    in the backing states from the space behind). The rays start at the
+    unit's point on the map (the vslot 0x84 ray's 0x100927c0 reads the
+    Mobile part's per-map record, 0x100a4510: polygon, cluster, point),
+    which the courier (0x10055650 → pathfinder slot 0x34) moves only when
+    it finds the object on the mesh, at the mesh's height; off the mesh it
+    keeps the last one. The rewrite starts them at the vehicle's origin
+    and, off the mesh, knows no room (16 of about 30,000 rays in three
+    Cerbere rounds).
+    "Needed" is spaceNeededTweak × r (Mobile slot 0x2c, 0x100a4370). The
+    shipped Cerbere_Landing's vehicle mesh was built for jeeps
+    (`AI/AI.ai`: `aiPathfinding.map.radius 2.3`, "There are only jeeps on
+    this map"), so the PAC heavy mech, needing 4.9 m along its diagonals,
+    finds no room at its spawn's 8 m wide neck there in the original too.
   - **States** (one change per time stamp, 0x100973b0): from 0, a goal
     behind within 10 r with room behind is backed towards (8); behind and
     no room to turn (2.7 r across and lengthwise) backs out straight (12);
     otherwise 9/11 (back at the opposite lock) and 2/3 (ahead at full
     lock), alternating with the space ahead and behind, until facing
     within cos 0.9. Boxed in (no space either way): ahead at half speed,
-    or backing in state 8.
+    or backing in state 8. Facing within cos 0.9, state 9 goes back to 0
+    only with room ahead (all three machines); state 11 does so for the
+    car (0x100e8170) but on the facing alone for the tank (0x100de8a0)
+    and the mech (0x100e1f20), whose 11 never backs while facing. State
+    8's return to 0 and every way out of state 6 drive ahead (direction
+    1), the mech's too.
+  - **Stuck:** nothing in the machines or the follower gives a vehicle
+    up. The progress test (0x10092bc0) measures distance from where the
+    vehicle last was 4 m away, so a driver rocking 4 m and more between
+    states 0 and 9/11 never fails it; the 20 s failure only re-plans
+    (BBPGotoWaypoint2d plans again), and the stuck hook (0x100c91c0 →
+    BF2142.exe 0x0089e940 → the game logic's slot 0x58) does nothing.
+    Passengers stay while their seats outweigh the way out (Change). The
+    rocking FAVs on Cerbere follow paths the third string-pull pass
+    (0x10093610, without the margin) pulls taut round a corner of the
+    mesh and the look-ahead's width-0 rays (0x10093420; `0x10139514` is
+    read and never written) take: the steering point lies a few cm past
+    the corner, the forward and diagonal rays end short of 0.94 r there,
+    the driver backs (9/11) and comes on again. No step of the binary's
+    that would let its driver through there was found (the rays, the
+    machines and the follower were compared).
   - **Other vehicles** (0x100fbff0): the one in the way (within the
     forward speed + max(r, 5) + both radii, the forward line crossing its
     sphere) is passed in state 6 on a side chosen by the room beside it
@@ -12099,8 +12224,14 @@ squad every 18 frames.
   leader's hole takes the bot nearest the order's spot, whose own hole the
   last used slot fills in turn, and the trail starts again, 0x100f6020;
   the earlier rewrite left that second hole, so a member respawning took
-  slot 0 at its spawn and drew the squad back to its base); a member leaving
-  re-hands them in member order (0x100f57f0). The shape (+0x14, 0x100f58c0)
+  slot 0 at its spawn and drew the squad back to its base). A move copies
+  the used flag, member, trail point and lag (+0, +4, +0x14, +0x18, +0x1c)
+  and never the parent (+0x20); the offset (+8..+0x10) only into the
+  leader's hole and the second move, so a hole past slot 0 keeps its own
+  place until the next layout (the earlier rewrite copied the whole slot,
+  and a leader's hole took its donor's parent and with it a side offset).
+  The member moved in is re-goaled (0x100bf4e0(0): +0x35 0, +0x4e 1). A
+  member leaving re-hands them in member order (0x100f57f0). The shape (+0x14, 0x100f58c0)
   is 0 always (only the constructor and the update's third tick write it):
   a line abreast, slots 1 / 2 right and left of slot 0, 3 / 4 off them, 5
   off 3, each 3 (r + r') from its parent (0x100f53a0; the wedge and
@@ -12109,9 +12240,21 @@ squad every 18 frames.
   ahead, z' = -x side + z ahead). A slot off the mesh or on cost class 4
   (0x100c0ff0) takes a trail point (0x100f4d30: dropped every 6 m the
   leader goes; 0x100f5950, 0x100f6c10), else the order's spot or slot 0's
-  member. Slots are swapped to the nearest member (0x100f69a0); slot 0 is
-  kept for the game's leader (0x100f60a0). Every sixth update the offsets
-  are laid out again with the members' radii.
+  member. Slots are swapped to the nearest placed member (0x100f69a0 over
+  0x100f63b0; member and lag swapped by 0x100f4eb0, nobody re-goaled).
+  Slot 0 and the game's leader (0x100f60a0): without a human's order
+  (+0x58) a leader in a slot past 0 swaps into it unless 50 m or more from
+  the spot and not released (+0x59), the leader and the member moved out
+  re-goaled; under a human's order the leader in slot 0 swaps with the
+  last used slot (a member leads; it stays put once past 0); a leader
+  with no slot gets slot 0 for a member of its kind (bot or human) when a
+  member of the other kind holds it. Each swap clears both lags and starts
+  the trail again (0x100f6020; the earlier rewrite skipped the whole step
+  under a human's order and re-goaled the wrong member). Every sixth
+  update the offsets are laid out again with the members' radii (the
+  soldier's AI radius 1.149 m: 6.89 m between neighbours, slots 1..5 at
+  +6.9, -6.9, +13.8, -13.8, +20.7 m across the walk). No shipped .ai file
+  (AI/*.ai, the levels' ai/ folders) sets anything of the formation's.
 - **Lagging** (0x100f4f30): a human member past slot 0 whose slot time
   (member +0x20, read through 0x1004f4e0: the squared distance to its slot
   over its top speed, 5 for a soldier; 0x100c0890 writes it for every
@@ -12127,11 +12270,40 @@ squad every 18 frames.
   it stands still over 4 m from it. In the formation the leader goes to
   the order (0x100c0130, the SAI goal path of `updateGoal`) at the squad's
   speed (the slowest member's x 0.9, 0x100f5120, read by InfanteryMoveTo's
-  throttle 0x100e6060), the others to their slot by a waypoint goal (reach
-  0, area 60, 0x100bff90) whenever re-goaled, or at every look for the
-  members reset at the round's start (+0x4d, set by 0x100bf640 and never
-  cleared). Out of it a member heads for the order (0x100c0a90).
-  `BotManager::formationGoal`.
+  throttle 0x100e6060; only with an order under way and the formation
+  together: otherwise the leader walks at its own speed, and it never
+  waits for anyone), the others to their slot by a waypoint goal (reach
+  0, area 60, 0x100bff90) when re-goaled (+0x4e) or at every look while
+  +0x4d is set. +0x4d is the bot's Idle plan: the Idle statement
+  (vtable 0x1011a2f8, made by BBPIdleInfantery 0x1006a500, BBPIdle3d
+  0x1006ab50 and BBPIdle2d 0x1006b2f0) sets it through the bot's vt+0x134
+  as it is made (0x100d2830, setter 0x100bf450) and clears it as it goes
+  (0x100d28a0); a new member starts with it clear (0x100bf550) and the
+  round's reset sets it (0x100bf640). A member that reached its slot
+  point (the goal's reach is the bot's radius + 1, 2.15 m) idles, and
+  idling it is handed the slot again at each look, so it follows the slot
+  as the squad moves; one still walking keeps its goal until the 9 s
+  look. (The earlier rewrite read +0x4d as set once by the reset and
+  never cleared: the members present at the first squad update were
+  handed their slot at every look for the whole round, the others only on
+  re-goals.) Out of it a member heads for the order (0x100c0a90).
+  Nothing else moves a member off its slot: the formation is kept whether
+  or not the leader walks (+0x3c, 0x100f4c70, has no reader), in combat
+  and on sighting an enemy; only the order's 30 m and leaving foot or
+  life (0x100bf950), an event through 0x1004dfe0 (→ 0x100bf410, the slot
+  given up) or leaving the squad (0x100c3630 / 0x100c36d0) takes a
+  member out. `BotManager::formationGoal`. The slot goal is only MoveTo's: Fire's
+  urgency (0x10075fb0, 50 with a known enemy that scores) reads neither
+  the squad nor the hold (vt+0x128 / 0x12c), so a member fights what it
+  sees wherever its slot is. Measured on Cerbere_Landing gpm_sp 16 (six
+  seeds), members on foot that saw an enemy ran Fire 408 of 418 s
+  (others 1,233 of 1,261 s); they see one about half as often (8 % of
+  their time against 17 %), as they walk behind slot 0. Without the
+  formation (every member heading for the order) the bots' kills rise
+  from 11.5 to 19.4 a round over 50 seeds, and the leader at full speed
+  instead of the squad's changes nothing (11.9). With the +0x4d and
+  slot-move fixes (30 seeds, 300 s): 11.9 → 13.3 kills a round
+  (minsk_coop gpm_coop 32: 2.2 → 3.0, within noise).
 - **Mode** (0x100c4010 / 0x100c1940): bounding with two or more of the
   squad's bots fighting a soldier within 90 m (0x100c3af0, every 4 s:
   halves in turn, a bot facing its target over 40 m off holds); flanking
@@ -12243,12 +12415,33 @@ the pause's stamp.
   (0x100f04a0): floor(U × 4), the four kits alike. Its unlocks
   (0x100efce0): for each of four unlock values, the most any human alive
   holds for that kit (the player's vt+0x98 of the kit and its vt+0x68(i),
-  i = 0..3), + 1, at most 4; with no humans 1 each. They go with the kit
-  through the bot's player (vt+0xb0 → vt+0xa0, BF2142.exe), which the
-  rewrite doesn't follow: what the game makes of the four values (the
-  kit's UB_First / UB_Second / UB_Player / UB_SquadLeader containers by
-  unlockLevel, or the SelectKit bytes' value + 1) wasn't traced, so the
-  bots spawn with their kit's base items. The
+  i = 0..3), + 1, at most 4; with no humans 1 each. The value compared is
+  the human's owned mask for the branch (the adaptor's slot 38 → player
+  slot 0x2ac, `0x005977e0`: the bits of the levels owned for the kit's
+  unlockIndex, `+0x2c4`), so a human owning levels 0 and 1 (3) gives the
+  bots 4. They go with the kit through the bot's player: vt+0xb0 is
+  BF2142.exe's AI player adaptor (vtable `0x009d7650`, forwarding to the
+  player at `+4`), whose slot 40 (`0x008a5b90`, kit, l0..l3) clears the
+  kit's chosen unlocks (player slot 0x2c4, `0x005995f0`); a squad leader
+  (player slot 0x150) with l3 > 0 has one UB_SquadLeader container of
+  levels below l3 at random chosen (player slot 0x294, `0x00599630`: the
+  chosen masks `+0x2cc`) and owned (slot 0x2b0, `0x00597850`: the owned
+  masks `+0x2b4`); UB_Player level 0 is owned (its frag grenade applies
+  by replaceWithoutEquip); with l0 > 0 the UB_First containers of levels
+  below l0 and the UB_Second ones below l1 (each level's first of the
+  branch, `0x0056fb20`) are pooled, an anti-air one (its firearm's AI
+  weapon template's isAntiAirWeapon, `+0x71`, through the adaptor's slot
+  39, `0x008a57b0`: the AV kit's eu_aa / as_aa) kept aside, two of the
+  pool taken at random (floor((n − 0.001) U)), then the anti-air one on a
+  coin toss when the AI's object environment answers slot 0x98(1) for an
+  object (checked once, `0x00b4cb7d`; here: an air or helicopter vehicle
+  on the map). l2 isn't read. Not rewritten: the slot 39 flag (the
+  container's item's interface `0xc49a` slot 0x14 against the kit
+  template's `+0x2c8`) that sends a container to a second pool, of which
+  one at random (floor((n + 0.999) U), none when n comes out) is taken
+  when the anti-air one isn't. Rewritten: `GameWorld::chooseBotUnlocks`,
+  called by the respawn's kit choice (`BotManager::chooseRespawn`), the
+  AI weapons' `weaponTemplate.isAntiAirWeapon` (`WeaponAi::antiAir`). The
   rewrite's choice is the point's control point
   (`GameWorld::setSpawnChoice`); the bots no longer spawn on their leader
   (the original's bots don't).

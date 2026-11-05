@@ -76,7 +76,7 @@ void SeatZoom::reset(const ZoomSettings& gun, float cameraFov)
 	reloadingWas = false;
 }
 
-void SeatZoom::step(bool pressed, bool busy, bool looking, float cameraFov, float seconds)
+void SeatZoom::step(bool pressed, bool busy, bool looking, float cameraFov, float seconds, bool overheated)
 {
 	if (settings.present()) {
 		if (!looking) {
@@ -84,7 +84,7 @@ void SeatZoom::step(bool pressed, bool busy, bool looking, float cameraFov, floa
 				state.reset();
 				fov.set(cameraFov, 0);
 			}
-		} else if (pressed && (!busy || settings.zoomWhenBusy)) { // 0x005c50e0 -> 0x005da670
+		} else if (pressed && settings.takesPress(busy, overheated)) { // 0x005c50e0 -> 0x005da670
 			const float factor = state.cycle(settings);
 			fov.set(factor > 0 ? factor : cameraFov, settings.delay); // 0x005da3f0
 		} else if (busy && !reloadingWas && state.level() > 0 && settings.zoomOutOnReload) { // 0x005da630

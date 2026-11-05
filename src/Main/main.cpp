@@ -2070,6 +2070,10 @@ struct Session {
 	// the client, which still sends its disconnect as it goes.
 	std::unique_ptr<net::NetDiagnostics> netDiagnostics;
 	std::unique_ptr<net::GameClient> client;
+	// A client whose server ended the connection mid-game: kept until the
+	// game's frame is done with it (the joined HUD's world, the name tags
+	// and the menus read its RemoteWorld until runGame returns).
+	std::unique_ptr<net::GameClient> endedClient;
 	bool joinRequested = false; // the menu joined a server
 	bool levelChange = false;   // the server changed maps: load its new level
 	// --host: the server, kept from map to map so the clients stay
@@ -2387,6 +2391,7 @@ int main(int argc, char** argv)
 				session.voice->leave();
 			}
 			session.client.reset();
+			session.endedClient.reset();
 			session.joinRequested = false;
 			options.connect.clear();
 			if (options.menu.empty()) {
@@ -3443,7 +3448,8 @@ int runGame(Options& options, Session& session)
 		const std::string host = options.connect.substr(0, colon);
 		const uint16_t port = colon == std::string::npos ? net::kGamePort
 														  : static_cast<uint16_t>(std::atoi(options.connect.c_str() + colon + 1));
-		if (options.netReplay.empty() && !net::hostAllowed(host)) {
+		// A capture or a demo plays from its file: no host to guard.
+		if (options.netReplay.empty() && options.demo.empty() && !net::hostAllowed(host)) {
 			std::printf("%s\n", net::hostRefusal(host).c_str());
 			return 1;
 		}
@@ -3514,6 +3520,9 @@ int runGame(Options& options, Session& session)
 			auto playback = std::make_shared<host::DemoPlayback>();
 			auto carry = std::make_shared<double>(0);
 			g_demo = playback;
+			// Without a window the demo's clock is the run's steps
+			// (DemoPlayback::steppedTicks), whatever the machine's speed.
+			playback->steppedTicks = options.view ? -1 : 0;
 			// demo.cameramode (DemoCamera.h): a camera file played
 			// (0x00516830) or recorded (0x005171f0), then the user's
 			// Settings/demo-playcam.con or demo-recordcam.con.
@@ -3535,15 +3544,32 @@ int runGame(Options& options, Session& session)
 				console.run("Settings/demo-recordcam.con", {}, output);
 			}
 			client.playDemo([player, started, ticked, playback, carry](std::vector<uint8_t>& payload) {
+				if (!playback->running) { // loading: the clock waits (DemoPlayback::running)
+					*started = std::chrono::steady_clock::now()
+						- std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(*ticked / 30.0));
+				}
 				const auto elapsed = std::chrono::steady_clock::now() - *started;
-				const int due = static_cast<int>(std::chrono::duration<double>(elapsed).count() * 30.0);
+				int due = !playback->running ? *ticked
+					: playback->steppedTicks >= 0 ? playback->steppedTicks
+												  : static_cast<int>(std::chrono::duration<double>(elapsed).count() * 30.0);
+				// A stall of over half a second (a hitch) doesn't count
+				// either: counted, the demo raced through its records at
+				// once and a camera file played out before the next frame.
+				if (playback->steppedTicks < 0 && due - *ticked > 15) {
+					*started += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+						std::chrono::duration<double>((due - *ticked - 1) / 30.0));
+					due = *ticked + 1;
+				}
 				if (due > *ticked) {
 					// The game speed (0x004b3b90: the time manager's scale).
 					const int ticks = playback->advance(due - *ticked, *carry);
 					// The camera recorded once the demo's clock runs
 					// (0x005f9630 waits for the reader's +0xdc), a frame
 					// for each tick gone by.
-					if (playback->recordingCamera && player->started() && playback->hasView) {
+					// Headless (no view drawn) the camera's own state is
+					// recorded: its follow values, at the origin unturned
+					// until a view is set.
+					if (playback->recordingCamera && player->started() && (playback->hasView || playback->steppedTicks >= 0)) {
 						playback->cameraRecorder.record(ticks, static_cast<uint32_t>(player->tick()), playback->cameraFrame());
 					}
 					player->advance(ticks);
@@ -5846,6 +5872,12 @@ int runGame(Options& options, Session& session)
 		bool joinedLevelLoaded = false; // told the client (LoadComplete goes now)
 		const auto remoteStep = [&] {
 			runTimedConsole();
+			if (g_demo) {
+				g_demo->running = true; // the demo's clock from the game's first tick
+				if (g_demo->steppedTicks >= 0) {
+					++g_demo->steppedTicks; // a headless run's: one a step
+				}
+			}
 			if (!session.client) {
 				return;
 			}
@@ -6377,6 +6409,12 @@ int runGame(Options& options, Session& session)
 						}
 					}
 				}
+				// The close-to indications (2/0x3e in, 2/0x3f out: the
+				// player and the type, 0x0059a6c0) for our player.
+				if (message.category == 2 && (message.id == 0x3e || message.id == 0x3f) && message.payload.size() >= 8
+					&& message.payloadInt(0) == client.world().localPlayer()) {
+					dice::hfe::menu::closeToObject(hudManager, message.payloadInt(1), message.id == 0x3e);
+				}
 				if (message.category == 2 && message.id == 0x1e && squadRequests.onPersonal) {
 					squadRequests.onPersonal(localization.text("HUD_HUD_SQUAD_REQUEST_TO_COMMANDER"));
 				} else if (message.category == 2 && message.id == 0x1d) {
@@ -6482,7 +6520,10 @@ int runGame(Options& options, Session& session)
 					session.voice->leave();
 				}
 				gameAudio.setHudWorld(nullptr); // its world goes with the client
-				session.client.reset();
+				// Not freed yet: the remote HUD world (g_remoteHud) and what
+				// was handed it still read the client's world this frame
+				// (a demo's end drawn by --screenshot read it freed).
+				session.endedClient = std::move(session.client);
 				session.disconnect = true;
 			}
 		};
@@ -6667,7 +6708,8 @@ int runGame(Options& options, Session& session)
 		// with --play, the server's start delay and spawn time) for the
 		// server's first control-object record and a second more of
 		// updates, so the view has our soldier.
-		if (session.client && !options.screenshot.empty()) {
+		// (Not for a demo: it has no control object of its own.)
+		if (session.client && !options.screenshot.empty() && !g_demo) {
 			const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(options.playTeam != 0 ? 25 : 5);
 			int after = -1;
 			while (std::chrono::steady_clock::now() < until && after != 0 && session.client) {
@@ -6961,6 +7003,50 @@ int runGame(Options& options, Session& session)
 				std::fprintf(stderr, "no spawn point for team %d\n", options.playTeam);
 			}
 		}
+		// (Set before the headless run below: a hosted --simulate's
+		// demo.recordDemo records the local player's camera too.)
+		nametags::Nametags::View tagView;
+		bool tagViewSeen = false; // a frame drawn (tagView is the camera's)
+		if (hosted) {
+			// The demo's camera file on a server with a local player
+			// (0x005f9630): the player's view as last drawn; without a
+			// window its soldier's eye, looking its way; without a control
+			// object (0, 100, 0) unturned.
+			hosted->localCamera = [&round, &tagView, &tagViewSeen](net::CameraKeyframe& frame) {
+				const int local = round.localPlayer();
+				if (local < 0) {
+					return false;
+				}
+				frame = {};
+				frame.followed = 0xffffffffu;
+				game::GameWorld::PlayerInfo info;
+				if (!round.playerInfo(local, info) || !info.alive) {
+					frame.position[1] = 100;
+					return true;
+				}
+				float position[3] = {info.position.x, info.position.y + 1.6f, info.position.z};
+				float yaw = info.yaw * 3.14159265f / 180.0f, pitch = info.aimPitch * 3.14159265f / 180.0f;
+				if (tagViewSeen) {
+					std::copy(tagView.position.begin(), tagView.position.end(), position);
+					yaw = tagView.yaw;
+					pitch = tagView.pitch;
+				}
+				float rows[9];
+				host::demo_camera::rowsFromYawPitch(yaw, pitch, rows);
+				host::demo_camera::quaternionFromRows(rows, frame.rotation);
+				std::copy(position, position + 3, frame.position);
+				return true;
+			};
+		}
+		struct LocalCameraReset {
+			host::HostedGame* hosted;
+			~LocalCameraReset()
+			{
+				if (hosted) {
+					hosted->localCamera = nullptr;
+				}
+			}
+		} localCameraReset {hosted};
 		// --console "<command>" runs now, "<seconds>:<command>" once the round
 		// is that old.
 		for (const std::string& command : options.console) {
@@ -7239,48 +7325,6 @@ int runGame(Options& options, Session& session)
 		// The camera inside a Titan, as the renderer found it last frame.
 		static bool cameraInTitan = false;
 		sources.cameraInTitanOut = &cameraInTitan;
-		nametags::Nametags::View tagView;
-		bool tagViewSeen = false; // a frame drawn (tagView is the camera's)
-		if (hosted) {
-			// The demo's camera file on a server with a local player
-			// (0x005f9630): the player's view as last drawn; without a
-			// window its soldier's eye, looking its way; without a control
-			// object (0, 100, 0) unturned.
-			hosted->localCamera = [&round, &tagView, &tagViewSeen](net::CameraKeyframe& frame) {
-				const int local = round.localPlayer();
-				if (local < 0) {
-					return false;
-				}
-				frame = {};
-				frame.followed = 0xffffffffu;
-				game::GameWorld::PlayerInfo info;
-				if (!round.playerInfo(local, info) || !info.alive) {
-					frame.position[1] = 100;
-					return true;
-				}
-				float position[3] = {info.position.x, info.position.y + 1.6f, info.position.z};
-				float yaw = info.yaw * 3.14159265f / 180.0f, pitch = info.aimPitch * 3.14159265f / 180.0f;
-				if (tagViewSeen) {
-					std::copy(tagView.position.begin(), tagView.position.end(), position);
-					yaw = tagView.yaw;
-					pitch = tagView.pitch;
-				}
-				float rows[9];
-				host::demo_camera::rowsFromYawPitch(yaw, pitch, rows);
-				host::demo_camera::quaternionFromRows(rows, frame.rotation);
-				std::copy(position, position + 3, frame.position);
-				return true;
-			};
-		}
-		struct LocalCameraReset {
-			host::HostedGame* hosted;
-			~LocalCameraReset()
-			{
-				if (hosted) {
-					hosted->localCamera = nullptr;
-				}
-			}
-		} localCameraReset {hosted};
 		// The lock-on weapons' markers (Bf2ObjectMarkerNode, 0x007e6520):
 		// the enemy objects carrying a target object of the marker's type
 		// (HeatObject TTHeat on the aircraft, LaserTarget_vehicle TTLaser,
@@ -7584,6 +7628,15 @@ int runGame(Options& options, Session& session)
 				for (const auto& tone : round.takeLockTones()) {
 					tone.play ? sounds.playSound(tone.sound) : sounds.stopSound(tone.sound);
 				}
+				// The close-to indications of the server's own player (the
+				// local event manager's 2/0x3e and 2/0x3f, 0x0059a6c0): its
+				// CloseToObject<type> variables (0x0079a0e0). A joined
+				// client's come as PostRemote messages (below).
+				if (!session.client) {
+					for (const auto& e : round.takeCloseToEvents(round.localPlayer())) {
+						dice::hfe::menu::closeToObject(hudManager, e.type, e.enter);
+					}
+				}
 				// AbilityHud (on the kits: S_Heal, S_Repair, S_Resupply): the
 				// ability bar's (0x007c3af0 through the kit's AbilityHud
 				// slots 0x3c / 0x40 / 0x44): in a vehicle while what the
@@ -7838,7 +7891,8 @@ int runGame(Options& options, Session& session)
 		// Before the first spawn the view is the level's before-spawn camera
 		// (GameLogic.setBeforeSpawnCamera); a joined game's soldier is the
 		// server's control object, which the view follows once it has one.
-		if (viewer.camera.empty() && gameLogic.beforeSpawnCamera.set && !round.player() &&
+		// (Not a demo's: its own camera, or a camera file, is the view.)
+		if (viewer.camera.empty() && gameLogic.beforeSpawnCamera.set && !round.player() && !g_demo &&
 			!(session.client && session.client->world().hasControlObject())) {
 			const auto& c = gameLogic.beforeSpawnCamera;
 			char text[128];

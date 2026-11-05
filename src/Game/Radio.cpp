@@ -55,6 +55,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <set>
 #include <utility>
 
 namespace dice::hfe::game {
@@ -455,6 +456,174 @@ int GameWorld::spotCrosshair(int player)
 		reportBattlefieldObjects(player, {target});
 	}
 	return target;
+}
+
+namespace {
+
+int radioInt(const world::ObjectTemplate& t, const char* name)
+{
+	const auto it = t.settings().find(name);
+	return it == t.settings().end() ? 0 : std::atoi(it->second.c_str());
+}
+
+} // namespace
+
+// The close-to indications (GameWorld.h, CloseToEvent): each living
+// player's scan every 0.2 s (0x0059a6c0; its countdown +0x178 restarts
+// at 0.2 after a scan), a dead one's list cleared (0x0059a5f0).
+void GameWorld::stepCloseTo(float seconds)
+{
+	// Events nobody took (bots, players without a client) don't pile up.
+	const uint64_t now = m_ticks;
+	m_closeToEvents.erase(std::remove_if(m_closeToEvents.begin(), m_closeToEvents.end(),
+							  [now](const CloseToEvent& e) { return now - e.tick > 60; }),
+		m_closeToEvents.end());
+	for (const auto& owned : m_players) {
+		if (!owned || !owned->present) {
+			continue;
+		}
+		Player& player = *owned;
+		CloseToScan& scan = m_closeTo[player.id];
+		if (!player.alive || player.manDown) {
+			clearCloseTo(player.id, scan);
+			continue;
+		}
+		scan.countdown -= seconds;
+		if (scan.countdown <= 0) {
+			scanCloseTo(player, scan);
+			scan.countdown = 0.2f;
+		}
+	}
+	for (auto it = m_closeTo.begin(); it != m_closeTo.end();) {
+		it = findPlayer(it->first) ? std::next(it) : m_closeTo.erase(it);
+	}
+}
+
+void GameWorld::clearCloseTo(int player, CloseToScan& scan)
+{
+	if (!scan.entries.empty()) {
+		scan.entries.clear();
+		m_closeToEvents.push_back({player, -1, false, m_ticks}); // 0x0059a5f0: type -1
+	}
+}
+
+std::vector<GameWorld::CloseToEvent> GameWorld::takeCloseToEvents(int player)
+{
+	std::vector<CloseToEvent> mine;
+	auto keep = m_closeToEvents.begin();
+	for (const CloseToEvent& e : m_closeToEvents) {
+		if (e.player == player) {
+			mine.push_back(e);
+		} else {
+			*keep++ = e;
+		}
+	}
+	m_closeToEvents.erase(keep, m_closeToEvents.end());
+	return mine;
+}
+
+void GameWorld::scanCloseTo(Player& player, CloseToScan& scan)
+{
+	// The player's controlled object (+0x80: the vehicle it drives or
+	// rides, else its soldier), its position and radius (slot 0x90).
+	const uint32_t controlled = player.vehicle ? player.vehicle : player.object;
+	const world::Object* self = m_objects.find(controlled);
+	if (!self) {
+		clearCloseTo(player.id, scan);
+		return;
+	}
+	const physics::Vec3 at = player.vehicle
+		? physics::Vec3 {self->position().x, self->position().y, self->position().z}
+		: player.body.position;
+	const float radius = player.vehicle ? objectRadius(controlled) : std::max(objectRadius(controlled), 0.5f);
+	// One candidate: its Radio rows, then the distance and team tests.
+	bool any = false;
+	const auto consider = [&](uint64_t key, const world::ObjectTemplate* t, const physics::Vec3& p, int team,
+							  float ownRadius) {
+		if (!t) {
+			return;
+		}
+		auto rows = m_closeToRows.find(t);
+		if (rows == m_closeToRows.end()) {
+			CloseToRows r;
+			r.distance = radioInt(*t, "radio.closeToIndicationDist"); // +0x200
+			r.type = radioInt(*t, "radio.closeToIndicationType");     // +0x204
+			r.flat = radioInt(*t, "radio.indicationDistance2D") != 0; // +0x1fc
+			rows = m_closeToRows.emplace(t, r).first;
+		}
+		const int distance = rows->second.distance;
+		if (distance <= 0) {
+			return;
+		}
+		const bool flat = rows->second.flat;
+		// Gathered within the radius + 200 (the sphere query meets the
+		// object's own bounds), then measured from centre to centre.
+		const physics::Vec3 d {p.x - at.x, flat ? 0.0f : p.y - at.y, p.z - at.z};
+		const float length = std::sqrt(physics::lengthSquared(d));
+		const physics::Vec3 full = p - at;
+		if (std::sqrt(physics::lengthSquared(full)) - ownRadius > radius + 200) {
+			return;
+		}
+		if (length > static_cast<float>(distance) + radius) {
+			return;
+		}
+		// Only the player's team's (the objects with a team; the ability
+		// flag that would lift this is never set).
+		if (team != 0 && team != player.team) {
+			return;
+		}
+		any = true;
+		const int type = rows->second.type;
+		for (CloseToEntry& e : scan.entries) {
+			if (e.key == key) {
+				e.state = 1;
+				return;
+			}
+		}
+		scan.entries.push_back({key, type, 0});
+	};
+	for (const auto& owned : m_objects.objects()) {
+		const world::Object& o = *owned;
+		if (o.id() == controlled || o.destroyed()) {
+			continue;
+		}
+		consider(o.id(), o.objectTemplate(), {o.position().x, o.position().y, o.position().z}, o.team(),
+			objectRadius(o.id()));
+	}
+	for (const Projectile& q : m_projectiles) {
+		if (!q.alive || q.visual || !q.settings) {
+			continue;
+		}
+		consider((uint64_t {1} << 32) | q.serial, m_templates.find(q.settings->name), q.position, q.team, 0);
+	}
+	if (scan.entries.empty() || !any) {
+		clearCloseTo(player.id, scan);
+		return;
+	}
+	// The list's walk: a new one posts 0x3e and is kept (state 2), one
+	// seen again is kept, one not seen goes, posting 0x3f unless another
+	// of its type is still in the list.
+	std::vector<CloseToEntry> kept;
+	std::set<int> gone; // a type's leave goes once, when its last one goes
+	for (CloseToEntry& e : scan.entries) {
+		if (e.state == 0) {
+			m_closeToEvents.push_back({player.id, e.type, true, m_ticks});
+		}
+		if (e.state != 2) {
+			e.state = 2;
+			kept.push_back(e);
+		} else {
+			gone.insert(e.type);
+		}
+	}
+	scan.entries = std::move(kept);
+	for (const int type : gone) {
+		const bool still = std::any_of(scan.entries.begin(), scan.entries.end(),
+			[type](const CloseToEntry& e) { return e.type == type; });
+		if (!still) {
+			m_closeToEvents.push_back({player.id, type, false, m_ticks});
+		}
+	}
 }
 
 } // namespace dice::hfe::game

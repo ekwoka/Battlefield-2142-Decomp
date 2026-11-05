@@ -423,6 +423,14 @@ struct DemoPlayback {
 	// fraction of the next (the demo's +0xf8, the camera's blend).
 	uint32_t tick = 0;
 	float fraction = 0;
+	// A headless run's clock (--simulate without a window): the ticks the
+	// run has stepped, which the demo follows instead of the wall clock
+	// (-1: the wall clock), so a slow machine plays the same demo time.
+	int steppedTicks = -1;
+	// The game's loop runs: until then (the level loading from the demo's
+	// level block, the load's keep-alive pumps) the demo's clock waits, as
+	// the original's demo plays on the game's ticks.
+	bool running = false;
 	// demo.cameramode playback / record (--demo-camera /
 	// --demo-record-camera): the file played, or the one recorded.
 	bool playingCamera = false;

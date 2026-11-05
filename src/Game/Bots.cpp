@@ -77,6 +77,12 @@ physics::Vec3 fromAi(const ai::Vec3& v) { return {v.x, v.y, v.z}; }
 // The AI object's box (AIDLL 0x100fe990) of a vehicle: the farthest corner
 // from its origin, from the box's centre, its width and length, and its
 // centre (object space). Without collision points: 2.5 m and 2 x 4 m.
+// AIDLL reads them through the unit's physical part (+0x40, vtable
+// 0x101188d0) from BF2142.exe's AIObjectPhysical adaptor (0x009d7228): the
+// box (slot 0x2c, the collision mesh's slot 0x54(1) 0x006e5c70 ->
+// 0x006de820, LOD 1's +0x84), r (slot 0x38, 0x008a3f40 -> the mesh's slot
+// 0x50(1) 0x006e5c40 -> 0x006de7d0, LOD 1's +0xc0) and the centre radius
+// (slot 0x40, 0x008a4120: the box's +0x1c), all from 0x006aeda0.
 struct VehicleBox {
 	float radius = 2.5f, centreRadius = 2.5f, width = 2, length = 4;
 	physics::Vec3 centre;
@@ -2351,7 +2357,12 @@ void BotManager::think(Bot& bot, const GameWorld::PlayerInfo& self, const std::v
 	}
 	const int running = ai::arbitrate(bot.arbitration, defaultIndex);
 	bot.behaviour = running >= 0 ? setup.behaviours[static_cast<size_t>(running)].name : setup.defaultBehaviour;
+	const bool wasIdle = bot.pattern.rfind("BBPIdle", 0) == 0;
 	bot.pattern = running >= 0 ? setup.behaviours[static_cast<size_t>(running)].pattern : std::string();
+	if (const bool idle = bot.pattern.rfind("BBPIdle", 0) == 0; idle != wasIdle) {
+		// The Idle statement made (0x100d2830) or freed (0x100d28a0).
+		++(idle ? bot.idleStarts : bot.idleEnds);
+	}
 	if (bot.pattern.rfind("BBPFire", 0) != 0) {
 		// The fire plan's end (AIDLL 0x100d4e20: vt+0x20c(0), vt+0x254(0)).
 		bot.lobHold = false;
@@ -2369,6 +2380,9 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		bot.equipment = equipment;
 		bot.arbitration = ai::Arbitration();
 		bot.behaviour = m_settings.vehicle(equipment).defaultBehaviour;
+		if (bot.pattern.rfind("BBPIdle", 0) == 0) {
+			++bot.idleEnds; // the Idle plan's statement freed (0x100d28a0)
+		}
 		bot.pattern.clear();
 		bot.lobHold = false;
 		bot.orderMove = false;
@@ -7033,7 +7047,10 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 	if (m_vehicleNavMesh) {
 		ai::FollowerSettings follower;
 		follower.soldier = false;
-		follower.radius = settings.radius;
+		// The follower's radius (+0x100, set by the request 0x10095fc0 from
+		// the unit's physical part, +0x40 vt+0x30): the box's centre radius,
+		// not the origin's that the drive's rays and room use (vt+0x28).
+		follower.radius = settings.centreRadius;
 		follower.options.vehicle = true;
 		follower.climb = m_settings.climbLimits(1);
 		if (!follow(bot, *m_vehicleNavMesh, at, to, goalId, follower)) {
@@ -8314,6 +8331,11 @@ void registerBotConsoleMethods(Console& console, BotSettings& settings)
 	bindMethod(console, "weaponTemplate.isEmpWeapon", access, [weapon](bool v) {
 		if (WeaponAi* w = weapon()) {
 			w->emp = v;
+		}
+	});
+	bindMethod(console, "weaponTemplate.isAntiAirWeapon", access, [weapon](bool v) {
+		if (WeaponAi* w = weapon()) {
+			w->antiAir = v;
 		}
 	});
 	bindMethod(console, "aiTemplatePlugIn.isFloating", access, [plugin](bool floating) {

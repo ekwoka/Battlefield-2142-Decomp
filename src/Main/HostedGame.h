@@ -403,6 +403,10 @@ private:
 	std::map<std::tuple<int, int, int>, physics::Vec3> m_requestsSent;
 	void trackRequests();
 	void sendRadio();
+	// The close-to indications of the clients' players (0x0059a6c0 for a
+	// player not the server's own: PostRemote 2/0x3e or 2/0x3f, the player
+	// and the type, through the game server's slot 0x88).
+	void sendCloseTo();
 	// The offers of command made (PostRemote 2/0x23 to the candidate,
 	// 0x004c5070), per team.
 	std::array<int, 3> m_offerSent {-1, -1, -1};

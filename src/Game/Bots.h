@@ -121,6 +121,10 @@ struct WeaponAi {
 	// weapon choice wants the target seen clear or known from others.
 	bool firesThroughTransparent = true;
 	bool emp = false; // +0x4d (isEmpWeapon): x (3 - the target's EMP level) in the weapon choice
+	// +0x71 isAntiAirWeapon (0x00892740): not read by AIDLL; BF2142.exe's AI
+	// player adaptor slot 39 (0x008a57b0) flags the bots' anti-air unlocks
+	// by it (GameWorld::chooseBotUnlocks).
+	bool antiAir = false;
 	// +0x24 weaponTemplate.soundSphereRadius (BF2142.exe row 0x00887198,
 	// executor 0x00887256; 50 m
 	// by default, 0x0088a7b0), the AI weapon's slot 0x12c (0x00892880): how
@@ -864,7 +868,9 @@ public:
 		physics::Vec3 at;           // +0x40
 		bool atSlot = false;        // +0x34: within sqrt(10) m of its slot
 		bool goalSet = false;       // +0x35
-		bool fresh = false;         // +0x4d (set by the squad's reset 0x100bf640, never cleared)
+		bool fresh = false;         // +0x4d: its bot runs an Idle plan (0x100d2830 / 0x100d28a0; the squad's reset 0x100bf640 sets it too)
+		unsigned idleStartsSeen = 0, idleEndsSeen = 0; // the bot's idleStarts / idleEnds at the last look
+		bool idleSynced = false;    // those taken from the bot (a new member's +0x4d is 0, 0x100bf550)
 		bool regoal = false;        // +0x4e
 		physics::Vec3 goal;         // +0x64: the goal it was last given
 		physics::Vec3 lastGoal;     // +0x58: the goal at the last 9 s look
@@ -1067,6 +1073,12 @@ private:
 		int lastArea = -1;           // the area it last headed for
 		// Scheduling (BotManager entries, 0x100c91c0).
 		std::string pattern;         // the running behaviour's BBP
+		// An Idle plan's Idle statement (BBPIdleInfantery 0x1006a500,
+		// BBPIdle3d 0x1006ab50, BBPIdle2d 0x1006b2f0) sets its squad
+		// member's +0x4d as it is made (0x100d2830, through the bot's
+		// vt+0x134) and clears it as it goes (0x100d28a0): how many Idle
+		// plans began and ended, read by the member's look.
+		unsigned idleStarts = 0, idleEnds = 0;
 		float lastAct = -1;
 		float sinceThink = 0;        // entry +0x18
 		int thinkAge = 0, senseAge = 0; // entry +8, +0x10
@@ -1412,6 +1424,7 @@ private:
 	bool inFormation(const Squad& squad, const SquadMember& member) const;
 	bool slotPoint(Squad& squad, int player, physics::Vec3& at);
 	void updateFormation(Squad& squad);
+	void restartTrail(Squad& squad);
 	void squadMode(Squad& squad);
 	void squadRadio(Squad& squad);
 	void releaseSquad(int team, int id, int area);

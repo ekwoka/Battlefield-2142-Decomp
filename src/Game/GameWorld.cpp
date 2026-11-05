@@ -346,6 +346,8 @@ void GameWorld::readSupplyLines(const world::ObjectTemplate& t, ControlPoint& po
 	point.supplyGroupId = integer(t, "supplyGroupId", -1);
 	for (int team = 1; team <= 2; ++team) {
 		const std::string n = std::to_string(team);
+		// supplyValueNeededTeam1/2 (0x0050399c / 0x00503a5a, +0x318;
+		// 0x00503ab0 / 0x00503b6e, +0x31c).
 		point.supplyValueNeeded[team] = integer(t, ("supplyValueNeededTeam" + n).c_str(), 0);
 		point.supplyValue[team] = integer(t, ("supplyValueTeam" + n).c_str(), 0);
 		point.supplyGroupsNeeded[team].clear();
@@ -657,6 +659,7 @@ void GameWorld::tick(float seconds)
 	stepCorpses(seconds);
 	stepRemoteBodies(seconds);
 	stepAbilities(seconds);
+	stepCloseTo(seconds);
 	stepCommander(seconds);
 	stepVehicleDamage(seconds);
 	stepUnmannedGuns(seconds);
@@ -2967,6 +2970,7 @@ void GameWorld::steerSeeker(Projectile& p, float seconds)
 				return;
 			}
 			if (followActive(p)) {
+				// overrideArmingSpeed: the row 0x005009ed, executor 0x00500aab.
 				followMagnet(p, aim, bait->velocity, seconds, integer(*baitTarget, "overrideArmingSpeed", 0) != 0);
 			}
 			return;
@@ -4384,19 +4388,46 @@ uint32_t GameWorld::squadBeacon(int team, int squad) const
 // spawn through it, scattered round the leader (0x005b2200,
 // scatterOnLeader below). When none of its tries fits, 0x005b2200
 // returns 0 and its caller (0x004bef90) refuses the spawn.
-bool GameWorld::spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& position, float& yaw)
+//
+// A thrown beacon takes that spawn point over: the throw (0x005e5fd0, the
+// ThrownSpawnPointComp's) makes it the beacon's child (slot 0xf0) and
+// hands it the thrower's spawn.spawnInPod and spawn.spawnVehicle (slots
+// 0x54 / 0x5c; the leader's own spawn gives it back with spawnInPod 0,
+// 0x004c8530 / 0x00513240). With spawnInPod its tries are 150 m over the
+// beacon (scatterFrom's pod), and the server's spawn (0x004bef90: slot
+// 0x58, then the template named by slot 0x60) makes the vehicle
+// (eu_pod_drop) at the soldier's spot and seats the soldier in it
+// (game server slot 0xa8): the member drops onto the beacon in a pod.
+// Without spawnInPod (no shipped beacon) the tries scatter round the
+// beacon as round a leader.
+bool GameWorld::spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& position, float& yaw, std::string& pod)
 {
+	pod.clear();
 	if (player.squad == 0 || (player.spawnChoice != kSpawnOnLeader && player.spawnChoice != kSpawnOnBeacon)) {
 		return false;
 	}
 	if (player.spawnChoice == kSpawnOnBeacon) {
-		if (world::Object* beacon = m_objects.find(squadBeacon(player.team, player.squad))) {
-			position = {beacon->position().x, beacon->position().y, beacon->position().z};
-			yaw = beacon->rotation().x;
-			at = beacon;
-			return true;
+		world::Object* beacon = m_objects.find(squadBeacon(player.team, player.squad));
+		if (!beacon) {
+			return false;
 		}
-		return false;
+		const auto drop = m_beaconPods.find({player.team, player.squad});
+		const std::string vehicle = drop != m_beaconPods.end() ? drop->second : std::string();
+		const bool inPod = !vehicle.empty() && m_templates.find(vehicle);
+		// The beacon is no soldier: its spot is its own position (no
+		// 0.875 off), the tries turn from its heading and face it.
+		const physics::Vec3 base {beacon->position().x, beacon->position().y, beacon->position().z};
+		bool prone = false;
+		if (scatterFrom(base, beacon->rotation().x, base, beacon->id(), position, yaw, &prone, player.ai, inPod)) {
+			player.spawnedProne = prone;
+			at = beacon;
+			if (inPod) {
+				pod = vehicle;
+			}
+		} else {
+			at = nullptr; // refused as for the leader (0x004bef90 at 0x4bf36c)
+		}
+		return true;
 	}
 	for (const int member : squadMembers(player.team, player.squad)) {
 		const Player* leader = findPlayer(member);
@@ -4451,12 +4482,25 @@ bool GameWorld::scatterOnLeader(const Player& leader, physics::Vec3& feet, float
 // The same scatter from any spawn point with setScatterSpawnPositions
 // (0x005b2200: `base` is the point's position, less 0.875 when its root
 // is a soldier; `heading` its yaw), facing `faceTo`.
+//
+// With the point's spawnInPod (+0x2b, a beacon's) the spot is raised by
+// 150 m (the static 0x008e2e20's 150, *0x00a6b0d8) and the probe reaches
+// down by that raised height (to y 0); a try (0x005b1e70's pod flag)
+// whose ray meets an object passes when that object is 150 m or more
+// below, the spot staying up there (no sight or stance test); one meeting
+// nothing passes over terrain at or above y 0 at the raised height plus
+// spawnpoint-terrain-offset, with the way from the raised point clear. The
+// spawn faces the point from there as 0x005b1d30 does in 3D: asin of the
+// unit way's x, from 180 when its z is negative (so a drop 150 m over the
+// point faces nearly along z).
 bool GameWorld::scatterFrom(const physics::Vec3& base, float heading, const physics::Vec3& faceTo, uint32_t ignore,
-	physics::Vec3& feet, float& yaw, bool* prone, bool ai)
+	physics::Vec3& feet, float& yaw, bool* prone, bool ai, bool pod)
 {
 	constexpr float kMinDistance = 3, kMaxDistance = 9; // spawnpoint-scatter-mindist/-maxdist
 	constexpr float kTerrainOffset = 1.01f;             // spawnpoint-terrain-offset
-	constexpr float kProbe = 4;
+	constexpr float kPodHeight = 150;                   // 0x008e2e20 (0x43160000)
+	const physics::Vec3 from = pod ? base + physics::Vec3 {0, kPodHeight, 0} : base;
+	const float probe = pod ? from.y : 4.0f;
 	float angle = heading + 140 * m_random.unit() - 70;
 	const float distance = kMinDistance + (kMaxDistance - kMinDistance) * m_random.unit();
 	for (int i = 0; i < 5; ++i) {
@@ -4464,18 +4508,52 @@ bool GameWorld::scatterFrom(const physics::Vec3& base, float heading, const phys
 		const float a = angle * 3.14159265f / 180.0f;
 		const physics::Vec3 way = physics::Vec3 {-std::sin(a), 0, -std::cos(a)} * distance;
 		for (int k = 1; k <= 2; ++k) {
-			const physics::Vec3 p = base + way * (1.0f / static_cast<float>(k));
+			const physics::Vec3 p = from + way * (1.0f / static_cast<float>(k));
 			const float ground = m_ground.height ? m_ground.height(p.x, p.z) : 0.0f;
 			physics::CollisionWorld::Hit hit;
 			float y = 0;
-			if (m_collision.triangles() > 0 && m_collision.raycast(p, p - physics::Vec3 {0, kProbe, 0}, hit)) {
+			const bool met = m_collision.triangles() > 0 && m_collision.raycast(p, p - physics::Vec3 {0, probe, 0}, hit);
+			if (pod) {
+				if (met) {
+					if (p.y - hit.point.y < kPodHeight) {
+						continue;
+					}
+					y = p.y;
+				} else if (ground >= p.y - probe) {
+					y = p.y + kTerrainOffset;
+				} else {
+					continue;
+				}
+			} else if (met) {
 				y = std::max(ground, hit.point.y) + kTerrainOffset;
-			} else if (ground >= p.y - kProbe) {
+			} else if (ground >= p.y - probe) {
 				y = ground + kTerrainOffset;
 			} else {
 				continue;
 			}
 			const physics::Vec3 spot {p.x, y - 0.875f, p.z};
+			if (pod) {
+				if (met || lineOfSight(from, spot, ignore)) {
+					if (ai && m_aiSpawnTest && !m_aiSpawnTest({p.x, y - 1.0f, p.z})) {
+						continue; // the raised spot, as 0x005b2200 hands it
+					}
+					if (prone) {
+						*prone = false;
+					}
+					feet = {p.x, y - 1.0f, p.z};
+					physics::Vec3 to = faceTo - physics::Vec3 {p.x, y, p.z};
+					const float length = std::sqrt(physics::lengthSquared(to));
+					if (length < 1) {
+						yaw = heading;
+					} else {
+						to = to * (1.0f / length);
+						const float s = std::asin(std::clamp(to.x, -1.0f, 1.0f)) * 57.29747f;
+						yaw = to.z < 0 ? 180 - s : s;
+					}
+					return true;
+				}
+				continue;
+			}
 			if (!lineOfSight(base, spot, ignore)) {
 				continue;
 			}
@@ -4866,12 +4944,182 @@ void GameWorld::setOwnedUnlocks(int id, std::vector<std::string> containers)
 	}
 }
 
+std::vector<std::string> GameWorld::unlocksOf(int id, bool owned) const
+{
+	const Player* player = findPlayer(id);
+	return !player ? std::vector<std::string> {} : owned ? player->owned : player->unlocked;
+}
+
 void GameWorld::setUnlocks(int id, std::vector<std::string> containers, bool all)
 {
 	if (Player* player = findPlayer(id)) {
 		player->unlocked = std::move(containers);
 		player->allUnlocked = all;
 	}
+}
+
+// The bot's unlocks (GameWorld.h). The adaptor's slot 40 (0x008a5b90,
+// kit k, levels l0..l3) on the bot's player:
+//   - the kit's chosen unlocks cleared (player slot 0x2c4, 0x005995f0);
+//   - a squad leader (player slot 0x150) with l3 > 0: one of the
+//     UB_SquadLeader containers of levels 0..l3 - 1 at random, chosen
+//     (player slot 0x294, 0x00599630: the chosen mask +0x2cc) and owned
+//     (slot 0x2b0, 0x00597850: the owned mask +0x2b4);
+//   - UB_Player level 0 owned (not chosen: its frag grenade applies by
+//     replaceWithoutEquip);
+//   - with l0 > 0: the UB_First containers of levels below l0 and the
+//     UB_Second ones below l1 (each level's first container of the branch,
+//     0x0056fb20, by its first item; the adaptor's slot 39 0x008a57b0
+//     flags it): an anti-air one (its firearm's AI template's
+//     isAntiAirWeapon, +0x71) is kept aside (the last such), the rest
+//     pooled; two of the pool at random are chosen and owned; then the
+//     anti-air one, if any, with a coin toss (U > 0.5) when the AI's
+//     object environment has an object answering slot 0x98(1) (checked
+//     once a game, 0x00b4cb7d; here: an air or helicopter vehicle on the
+//     map). Not rewritten: the slot 39 flag that sends a container to a
+//     second pool instead (its item's interface 0xc49a slot 0x14 against
+//     the kit template's +0x2c8, not traced), of which one at random
+//     (floor((n + 0.999) U), none when n comes out) is taken when the
+//     anti-air one isn't: here that pool is empty.
+// l2 is not read. Owned bits only add up (a bot keeps what it owned).
+std::array<int, 4> GameWorld::chooseBotUnlocks(int id, const std::function<bool(const std::string&)>& antiAir)
+{
+	std::array<int, 4> levels {0, 0, 0, 0};
+	Player* bot = findPlayer(id);
+	const world::ObjectTemplate* kit = bot ? m_templates.find(bot->kitTemplate) : nullptr;
+	if (!bot || !kit) {
+		return levels;
+	}
+	const auto branchOf = [](const world::ObjectTemplate& c) {
+		const auto it = c.settings().find("unlockBranch");
+		if (it == c.settings().end()) {
+			return 0; // UB_First
+		}
+		static const char* const names[] = {"UB_First", "UB_Second", "UB_Player", "UB_SquadLeader"};
+		for (int b = 0; b < 4; ++b) {
+			if (sameName(it->second, names[b])) {
+				return b;
+			}
+		}
+		return std::atoi(it->second.c_str());
+	};
+	const auto containersOf = [this](const world::ObjectTemplate& k) {
+		std::vector<const world::ObjectTemplate*> list;
+		for (const world::ChildTemplate& child : k.children()) {
+			const world::ObjectTemplate* c = m_templates.find(child.name);
+			if (c && c->typeName() == "ItemContainer") {
+				list.push_back(c);
+			}
+		}
+		return list;
+	};
+	// 0x100efce0: the humans' owned masks for kits of this unlockIndex.
+	const int unlockIndex = integer(*kit, "unlockIndex", 0);
+	std::array<unsigned, 4> best {0, 0, 0, 0};
+	for (const auto& owned : m_players) {
+		if (!owned || !owned->present || owned->ai || !owned->alive) {
+			continue;
+		}
+		std::array<unsigned, 4> mask {0, 0, 0, 0};
+		for (const auto& t : m_templates.templates()) {
+			if (!t || t->typeName() != "Kit" || integer(*t, "unlockIndex", 0) != unlockIndex) {
+				continue;
+			}
+			for (const world::ObjectTemplate* c : containersOf(*t)) {
+				const bool has = owned->allUnlocked
+					|| std::find(owned->owned.begin(), owned->owned.end(), c->name()) != owned->owned.end()
+					|| std::find(owned->unlocked.begin(), owned->unlocked.end(), c->name()) != owned->unlocked.end();
+				const int level = integer(*c, "unlockLevel", -1);
+				const int b = branchOf(*c);
+				if (has && level >= 0 && level < 32 && b >= 0 && b < 4) {
+					mask[static_cast<size_t>(b)] |= 1u << level;
+				}
+			}
+		}
+		for (size_t b = 0; b < 4; ++b) {
+			best[b] = std::max(best[b], mask[b]);
+		}
+	}
+	for (size_t b = 0; b < 4; ++b) {
+		levels[b] = static_cast<int>(std::min<unsigned>(best[b] + 1, 4)); // 0x100f04a0
+	}
+	// 0x008a5b90.
+	const std::vector<const world::ObjectTemplate*> containers = containersOf(*kit);
+	const auto first = [&](int branch, int level) -> const world::ObjectTemplate* { // 0x0056fb20
+		for (const world::ObjectTemplate* c : containers) {
+			if (branchOf(*c) == branch && integer(*c, "unlockLevel", -1) == level && !c->children().empty()) {
+				return c;
+			}
+		}
+		return nullptr;
+	};
+	std::vector<std::string> chosen;
+	for (const std::string& name : bot->unlocked) {
+		if (std::none_of(containers.begin(), containers.end(), [&](const world::ObjectTemplate* c) { return sameName(c->name(), name); })) {
+			chosen.push_back(name); // another kit's choice stays
+		}
+	}
+	const auto own = [bot](const world::ObjectTemplate* c) {
+		if (std::find(bot->owned.begin(), bot->owned.end(), c->name()) == bot->owned.end()) {
+			bot->owned.push_back(c->name());
+		}
+	};
+	const auto choose = [&](const world::ObjectTemplate* c) {
+		chosen.push_back(c->name());
+		own(c);
+	};
+	const auto pick = [this](size_t n) { // floor((n - 0.001) U), 0 for one
+		return n > 1 ? std::min(static_cast<size_t>((static_cast<float>(n) - 0.001f) * m_random.unit()), n - 1) : 0;
+	};
+	if (bot->squadLeader && levels[3] > 0) {
+		std::vector<const world::ObjectTemplate*> pool;
+		for (int level = 0; level < levels[3]; ++level) {
+			if (const world::ObjectTemplate* c = first(3, level); c && std::find(pool.begin(), pool.end(), c) == pool.end()) {
+				pool.push_back(c);
+			}
+		}
+		if (!pool.empty()) {
+			choose(pool[pick(pool.size())]);
+		}
+	}
+	if (const world::ObjectTemplate* c = first(2, 0)) {
+		own(c);
+	}
+	if (levels[0] > 0) {
+		std::vector<const world::ObjectTemplate*> pool;
+		const world::ObjectTemplate* airUnlock = nullptr;
+		for (int branch = 0; branch < 2; ++branch) {
+			for (int level = 0; level < levels[static_cast<size_t>(branch)]; ++level) {
+				const world::ObjectTemplate* c = first(branch, level);
+				if (!c) {
+					continue;
+				}
+				const world::ObjectTemplate* item = m_templates.find(c->children().front().name);
+				const auto ai = item ? item->settings().find("aiTemplate") : decltype(item->settings().end()) {};
+				if (item && ai != item->settings().end() && antiAir && antiAir(ai->second)) {
+					airUnlock = c;
+				} else if (std::find(pool.begin(), pool.end(), c) == pool.end()) {
+					pool.push_back(c);
+				}
+			}
+		}
+		for (int i = 0; i < 2 && !pool.empty(); ++i) {
+			const size_t at = pick(pool.size());
+			choose(pool[at]);
+			pool.erase(pool.begin() + static_cast<std::ptrdiff_t>(at));
+		}
+		bool air = false;
+		for (const Body& b : m_bodies) {
+			const world::Object* o = b.vehicle ? m_objects.find(b.object) : nullptr;
+			const int category = o && o->objectTemplate() ? vehicleCategory(*o->objectTemplate()) : 0;
+			air = air || category == 2 || category == 3; // VCAir, VCHelicopter
+		}
+		if (airUnlock && air && m_random.unit() > 0.5f) {
+			choose(airUnlock);
+		}
+	}
+	bot->unlocked = std::move(chosen);
+	return levels;
 }
 
 void GameWorld::setKit(int id, const std::string& kit, const std::string& soldier)
@@ -5327,7 +5575,8 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	world::Object* squadAt = nullptr;
 	physics::Vec3 squadPosition;
 	float squadYaw = 0;
-	const bool withSquad = spawnAtSquad(player, squadAt, squadPosition, squadYaw);
+	std::string squadPod;
+	const bool withSquad = spawnAtSquad(player, squadAt, squadPosition, squadYaw, squadPod);
 	if (withSquad && !squadAt) {
 		return nullptr; // the leader's spawn point found no room
 	}
@@ -5502,6 +5751,16 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	// isn't traced), so none is left standing in a hull.
 	if (!withSquad && (pointFlags.enterOnSpawn || pointFlags.aiEnterOnSpawn)) {
 		enterOnSpawn(player, *created, pointAt, player.ai ? 15.0f : 5.0f, mobile ? at->id() : 0);
+	}
+	// A beacon's pod (0x004bef90: the spawn point's slot 0x58, its vehicle
+	// by the template slot 0x60 names): made at the soldier's spot with
+	// its rotation, the soldier seated in it (game server slot 0xa8, seat
+	// 0); eu_pod_drop's copySoldierRotationOnEnter keeps the soldier's
+	// heading. The pod then drops as a fired one does, without a push.
+	// Not rewritten: the PlayerControlObject's slot 0x178 (0x0059d2a0,
+	// +0x444: its input mask on) given the spawn point template's +0x95.
+	if (withSquad && !squadPod.empty()) {
+		startPod(player, squadPod, player.body.position, {}, 0, facing);
 	}
 	return created;
 }
@@ -8596,6 +8855,12 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 				if (world::Object* placed = m_objects.create(beacon, {at.x, at.y, at.z}, {lookYaw(player), 0, 0})) {
 					placed->setTeam(player.team);
 					m_beacons[{player.team, player.squad}] = placed->id();
+					// The throw hands the squad's spawn point the pod
+					// (0x005e5fd0: spawn.spawnInPod, spawn.spawnVehicle).
+					const auto vehicle = inHand->settings().find("spawn.spawnVehicle");
+					m_beaconPods[{player.team, player.squad}] =
+						integer(*inHand, "spawn.spawnInPod", 0) != 0 && vehicle != inHand->settings().end() ? vehicle->second
+																											: std::string();
 				}
 			}
 		} else if (world::ObjectTemplate* drone = droneTemplate(inHand)) {
@@ -11398,6 +11663,15 @@ bool GameWorld::stepBody(Body& b, float seconds)
 		// The engine wakes its node (0x0064e920): a throttle or the
 		// engine still turning.
 		if (std::fabs(b.vehicle->input().throttle) > 0.001f || std::fabs(b.vehicle->rpm()) >= 0.05f) {
+			wake(b);
+		}
+		// A walker's legs (the MechLegs object's update 0x00650e90 runs
+		// while its node sleeps) wake the node (slot 0x160) in any state but
+		// standing (+0x1bc): walking, backing, turning on the spot or
+		// crouching; occupied, as the state is 0 otherwise.
+		const VehicleInput& in = b.vehicle->input();
+		if (b.vehicle->legs() && std::any_of(b.occupants.begin(), b.occupants.end(), [](int p) { return p >= 0; })
+			&& (std::fabs(in.throttle) > 0.001f || in.steer != 0 || in.crouch > 0)) {
 			wake(b);
 		}
 	}

@@ -155,6 +155,7 @@ bool PlayerCamera::current(Me& me) const
 	me.stance = body->stance;
 	if (const game::FireArm* firearm = m_round.playerWeapon()) {
 		me.reloading = firearm->reloading();
+		me.overheated = firearm->overheated();
 		me.rounds = firearm->roundsInMag();
 	}
 	return true;
@@ -727,6 +728,7 @@ anim::ZoomSettings zoomSettings(const world::ObjectTemplate& weapon)
 	zoom.fineTuneSteps = static_cast<int>(number(weapon, "zoom.zoomFineTuneSteps", 1));
 	zoom.fineTuningNeedsUnlock = number(weapon, "zoom.zoomFineTuningNeedsUnlock", 1) != 0;
 	zoom.zoomWhenBusy = number(weapon, "zoom.zoomWhenBusy", 0) != 0;
+	zoom.allowZoomOnHeat = number(weapon, "allowZoomOnHeat", 0) != 0; // 0x004e1f2f, +0x2d0
 	return zoom;
 }
 
@@ -753,7 +755,8 @@ void PlayerCamera::stepSeatZoom(const Me& me, bool altPressed, float seconds)
 	}
 	const game::FireArm* firearm = gun ? m_round.gun(me.vehicle, me.seat) : nullptr;
 	const bool looking = m_mode == game::camera::Mode::Inside || m_mode == game::camera::Mode::Nose;
-	m_seatZoom.step(altPressed && !duckingDisablesInput(), firearm && firearm->reloading(), looking, base, seconds);
+	m_seatZoom.step(altPressed && !duckingDisablesInput(), firearm && firearm->reloading(), looking, base, seconds,
+		firearm && firearm->overheated());
 }
 
 void PlayerCamera::tick(float seconds)
@@ -908,7 +911,7 @@ void PlayerCamera::tick(float seconds)
 	// zoomDelay (0x005da3f0 -> 0x00591740).
 	if (!me.vehicle && m_zoomSettings.present()) {
 		const int step = std::exchange(m_itemStep, 0);
-		if (altPressed && (!reloading || m_zoomSettings.zoomWhenBusy)) {
+		if (altPressed && m_zoomSettings.takesPress(reloading, me.overheated)) { // 0x005c50e0
 			const float factor = m_zoom.cycle(m_zoomSettings);
 			m_fov.set(factor > 0 ? factor : m_baseFov, m_zoomSettings.delay);
 		} else if (step != 0 && m_zoom.level() > 0 && !m_remote

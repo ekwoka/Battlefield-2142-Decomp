@@ -424,4 +424,18 @@ TEST(Net_DemoCameraFile)
 	CHECK(net::writeCameraFile(path, frames));
 	CHECK(net::readCameraFile(path, back) && back.size() == 3 && back[1].followed == 42);
 	std::remove(path.c_str());
+	// A bare demo name goes under Demos/ (demo.recordDemo, 0x00432cc0), a
+	// folder the install doesn't ship: the writers make it.
+	const std::string demo = net::demoPath("bf2142_test_demos/e2e");
+	CHECK(demo == "Demos/bf2142_test_demos/e2e.bf2142demo");
+	const std::string nested = "bf2142_test_demos/sub/e2e-def.bf2142cam";
+	CHECK(net::writeCameraFile(nested, frames));
+	CHECK(net::readCameraFile(nested, back) && back.size() == 3);
+	net::DemoWriter writer;
+	CHECK(writer.open("bf2142_test_demos/sub/e2e.bf2142demo", net::DemoHeader {}));
+	writer.close(0);
+	std::remove(nested.c_str());
+	std::remove("bf2142_test_demos/sub/e2e.bf2142demo");
+	std::remove("bf2142_test_demos/sub");
+	std::remove("bf2142_test_demos");
 }

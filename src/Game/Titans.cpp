@@ -1621,14 +1621,14 @@ bool GameWorld::podLauncherOf(const world::ObjectTemplate& node, std::string& pr
 }
 
 bool GameWorld::startPod(Player& player, const std::string& projectile, const physics::Vec3& from,
-	const physics::Vec3& velocity, uint32_t launcher)
+	const physics::Vec3& velocity, uint32_t launcher, float heading)
 {
 	world::ObjectTemplate* t = m_templates.find(projectile);
 	world::Object* soldier = m_objects.find(player.object);
 	if (!t || !soldier) {
 		return false;
 	}
-	const float yaw = std::atan2(velocity.x, velocity.z) * 57.29578f;
+	const float yaw = std::isnan(heading) ? std::atan2(velocity.x, velocity.z) * 57.29578f : heading;
 	world::Object* pod = m_objects.create(t, {from.x, from.y, from.z}, {yaw, 0, 0});
 	if (!pod) {
 		return false;

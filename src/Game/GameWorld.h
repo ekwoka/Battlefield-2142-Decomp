@@ -36,6 +36,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <array>
 #include <deque>
 #include <map>
@@ -366,6 +367,37 @@ public:
 		physics::Vec3 position;
 	};
 	std::vector<SoundEvent> takeSounds() { return std::exchange(m_sounds, {}); }
+	// The close-to indications (the player's 0.2 s scan on the server,
+	// 0x0059a6c0, from the player's update 0x0059bd80, +0x178 the
+	// countdown): objects whose Radio component has
+	// closeToIndicationDist (template +0x200; the Titans 250, the mines
+	// 25) within that plus the player's controlled object's radius (slot
+	// 0x90) of it, measured on the plane with indicationDistance2D
+	// (+0x1fc), gathered within the radius + 200 (the collision manager's
+	// sphere query, slot 0x44); only the player's team's objects (an
+	// object's team interface 0x94c1 slot 0x60 against the player's slot
+	// 0xf8) unless the player's ability block (slot 0x2a0) has its +1
+	// flag (player +0x30d, cleared by 0x0059ac00; nothing found sets it).
+	// The first of a closeToIndicationType (+0x204) to come in posts
+	// event 2/0x3e with the player and the type, the last to go 2/0x3f
+	// (the list +0x170, map +0x16c); none in range, or the player dead
+	// (slot 0x74, 0x0059a5f0), posts 2/0x3f with type -1 once. The event
+	// goes to the local game's event manager (0x00a7d06c slot 0x10) for
+	// the server's own player, else to the player's client (game server
+	// slot 0x88, a PostRemote, 0x00509990). Its consumers (the HUD's
+	// handlers 0x007a2100 and 0x007c1d70, for the local player) set the
+	// HUD variable CloseToObject<type> (0x0079a0e0; -1: every one there
+	// is) to 1 or 0: CloseToObject0 the soldier's mine icon
+	// (HudElementsActionIcons.con), CloseToObject1 the APCs' pod-range
+	// lights (HudElementsAPCDriver.con).
+	struct CloseToEvent {
+		int player = -1;
+		int type = 0; // closeToIndicationType; -1 every type
+		bool enter = false; // 0x3e, else 0x3f
+		uint64_t tick = 0;  // when posted (untaken ones go after 2 s)
+	};
+	// The events for one player (taken once).
+	std::vector<CloseToEvent> takeCloseToEvents(int player);
 	// What a weapon's sound component hears (DefaultSoundComp, vtable
 	// 0x00971b48: its fire 0x005dbdc0, reload 0x005dbfe0 and deploy
 	// 0x005dc1d0 handlers), for the sound layer to play its weapon sounds
@@ -717,6 +749,20 @@ public:
 	// The unlocks the player owns besides those chosen (player slot 0x2a8):
 	// replaceWithoutEquip containers apply by them (the kit build 0x00570ab0).
 	void setOwnedUnlocks(int player, std::vector<std::string> containers);
+	// The containers chosen (or, with `owned`, owned besides) of a player.
+	std::vector<std::string> unlocksOf(int player, bool owned = false) const;
+	// A bot's unlocks for the kit it was given (call after setKit, as the
+	// SAI's respawn does, AIDLL 0x100f04a0). The levels (AIDLL 0x100efce0):
+	// for each branch b (UB_First, UB_Second, UB_Player, UB_SquadLeader)
+	// the most any living human holds for a kit of the same unlockIndex
+	// (the AI player adaptor's slot 38 -> player slot 0x2ac, 0x005977e0:
+	// the owned levels' bit mask, compared as a number) plus one, at most
+	// 4. They go to the bot's adaptor (vtable 0x009d7650) slot 40
+	// (0x008a5b90, see GameWorld.cpp), which chooses and owns containers.
+	// Returns the four levels.
+	// `antiAir`: whether an AI weapon template (a firearm's aiTemplate) is
+	// isAntiAirWeapon (the AI's weaponTemplate rows, BotManager's).
+	std::array<int, 4> chooseBotUnlocks(int bot, const std::function<bool(const std::string&)>& antiAir = {});
 	void setBattery(int player, float battery); // tests and the scripts' view
 	// The player's totalDogtagCount (player +0x104, set by the stats
 	// scripts' pmgr_p_set; the kit-selection event carries it to clients):
@@ -2083,6 +2129,31 @@ private:
 	void stepUnmannedGuns(float seconds);
 	std::vector<LockEvent> m_lockEvents;
 	std::vector<LockTone> m_lockTones;
+	// The close-to scan's state per player (kept over respawns as the
+	// player object's own +0x16c..+0x178 are): the countdown and the
+	// objects in range, by object id (world objects) or projectile serial
+	// (bit 32 set), with their type and state (0 new, 1 seen again, 2 to
+	// be checked: 0x0059a6c0's +0x10).
+	struct CloseToEntry {
+		uint64_t key = 0;
+		int type = 0;
+		int state = 0;
+	};
+	struct CloseToScan {
+		float countdown = 0;
+		std::vector<CloseToEntry> entries;
+	};
+	std::map<int, CloseToScan> m_closeTo;
+	// A template's Radio rows (distance, type, 2-D), read once.
+	struct CloseToRows {
+		int distance = 0, type = 0;
+		bool flat = false;
+	};
+	std::map<const world::ObjectTemplate*, CloseToRows> m_closeToRows;
+	std::vector<CloseToEvent> m_closeToEvents;
+	void stepCloseTo(float seconds);
+	void scanCloseTo(Player& player, CloseToScan& scan);
+	void clearCloseTo(int player, CloseToScan& scan);
 	std::vector<AiHit> m_aiHits;
 	struct {
 		std::string weapon; // the weapon whose tones play
@@ -2661,11 +2732,19 @@ private:
 	void shockDowned(Player& victim, const ProjectileSettings& shock, float amount, uint32_t surfaceMaterial, int attacker);
 	float m_manDownTime = 15;
 	std::map<std::pair<int, int>, uint32_t> m_beacons; // (team, squad) -> beacon object
+	// The beacon's pod (the thrower's ThrownSpawnPointComp, class 0x94f3:
+	// spawn.spawnInPod +0xe0 and spawn.spawnVehicle +0xc4, handed by the
+	// throw 0x005e5fd0 to the squad's spawn point, slots 0x54 / 0x5c):
+	// the vehicle's template, empty without spawnInPod.
+	std::map<std::pair<int, int>, std::string> m_beaconPods;
 	std::vector<int> squadMembers(int team, int squad) const;
-	bool spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& position, float& yaw);
+	// `pod`: the vehicle a beacon spawn drops in (empty for none).
+	bool spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& position, float& yaw, std::string& pod);
 	bool scatterOnLeader(const Player& leader, physics::Vec3& feet, float& yaw, bool* prone = nullptr, bool ai = false);
+	// `pod`: the spawn point's spawnInPod (+0x2b): the tries 150 m up
+	// (0x005b2200 / 0x005b1e70; see spawnAtSquad).
 	bool scatterFrom(const physics::Vec3& base, float heading, const physics::Vec3& faceTo, uint32_t ignore,
-		physics::Vec3& feet, float& yaw, bool* prone, bool ai = false);
+		physics::Vec3& feet, float& yaw, bool* prone, bool ai = false, bool pod = false);
 	std::function<bool(const physics::Vec3&)> m_aiSpawnTest;
 	struct ProjectileView {
 		uint32_t serial = 0;    // the round (Projectile::serial)
@@ -3236,8 +3315,9 @@ private:
 	};
 	bool podLauncherOf(const world::ObjectTemplate& node, std::string& projectile, float& velocity,
 		physics::Vec3& start, bool altFire) const;
+	// `yaw` (degrees): the pod's heading; NaN takes the velocity's.
 	bool startPod(Player& player, const std::string& projectile, const physics::Vec3& from, const physics::Vec3& velocity,
-		uint32_t launcher);
+		uint32_t launcher, float yaw = std::numeric_limits<float>::quiet_NaN());
 	std::vector<Pod> m_pods;
 	void stepPods(float seconds);
 	void stepTitanSpawnPoints(Titan& titan);

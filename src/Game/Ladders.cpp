@@ -486,6 +486,8 @@ std::string GameWorld::radioFilter(int id) const
 			control = seat;
 		}
 	}
+	// The PlayerControlObject's soundFilter row (0x004fd04b, executor
+	// 0x004fd14e; the other template classes' row 0x004ded1d).
 	const auto filter = control->settings().find("soundFilter");
 	return filter != control->settings().end() ? filter->second : std::string();
 }

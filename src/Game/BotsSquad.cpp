@@ -24,6 +24,7 @@
 #include "World/ObjectTemplateManager.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 
 namespace dice::hfe::game {
@@ -208,8 +209,8 @@ void BotManager::updateSquads()
 				ai::layOutFormation(s.formation, [](int) { return 0.0f; });
 				// The SAI's reset at the round's start (0x1009d190 ->
 				// 0x10089d80 -> 0x100c1700) resets the squads and their
-				// members (0x100bf640: +0x4d set, which nothing clears: those
-				// members' slot goals are given again at every look).
+				// members (0x100bf640: +0x4d set until their bot's next
+				// Idle plan ends, 0x100d28a0).
 				syncSquadMembers(s);
 				for (SquadMember& m : s.members) {
 					m.fresh = true;
@@ -835,6 +836,18 @@ void BotManager::updateMember(Squad& squad, SquadMember& member)
 	}
 	auto botIt = m_bots.find(member.player);
 	Bot* bot = botIt != m_bots.end() && p->ai ? &botIt->second : nullptr;
+	// +0x4d follows the bot's Idle plans: set as one begins (its Idle
+	// statement 0x100d2830), cleared as one ends (0x100d28a0); a member
+	// starts with it clear (0x100bf550) whatever its bot runs.
+	if (bot) {
+		if (!member.idleSynced) {
+			member.idleSynced = true;
+		} else if (bot->idleStarts != member.idleStartsSeen || bot->idleEnds != member.idleEndsSeen) {
+			member.fresh = bot->pattern.rfind("BBPIdle", 0) == 0;
+		}
+		member.idleStartsSeen = bot->idleStarts;
+		member.idleEndsSeen = bot->idleEnds;
+	}
 	if (m_time > member.checkedAt + 9) {
 		if (distance2(member.lastGoal, member.goal) <= 0.01f) {
 			if (bot && member.placed) {
@@ -937,12 +950,34 @@ void BotManager::updateMember(Squad& squad, SquadMember& member)
 		return;
 	}
 	if (member.fresh || member.regoal) {
-		// 0x100bff90: a waypoint goal at the slot (reach 0, area 60).
+		// 0x100bff90: a waypoint goal at the slot (reach 0, area 60),
+		// at every look while the bot idles (+0x4d: it reached the last
+		// slot point, so it follows the slot as it moves), else when
+		// re-goaled (+0x4e, cleared here).
 		member.regoal = false;
 		member.goalSet = true;
 		member.goal = slot;
 		bot->squadGoal = true;
 		bot->formation = ai::moveToGoal(0, aiOf(slot));
+	}
+}
+
+// 0x100f6020: the trail starts again from slot 0's slot point (+0x4c,
+// +0x78; with slot 0 used and the squad's spot known, 0x100c10c0), its
+// points and the slots' marks dropped.
+void BotManager::restartTrail(Squad& squad)
+{
+	ai::Formation& f = squad.formation;
+	physics::Vec3 c;
+	if (f.slots[0].used && (squad.at.x != 0 || squad.at.y != 0 || squad.at.z != 0) && slotPoint(squad, f.slots[0].member, c)) {
+		f.centre = aiOf(c);
+	}
+	f.lastCrumb = f.centre;
+	for (auto& crumb : f.crumbs) {
+		crumb.valid = false;
+	}
+	for (auto& slot : f.slots) {
+		slot.crumb = -1;
 	}
 }
 
@@ -973,35 +1008,69 @@ void BotManager::updateFormation(Squad& squad)
 		}
 	}
 	f.speed = used == 0 ? 5.0f : (used > 1 ? f.speed * 0.9f : f.speed);
-	// 0x100f60a0: the game's leader in slot 0. A leader with a slot of its
-	// own swaps into slot 0 unless it is 50 m or more from the spot and not
-	// released; with no slot, a bot (human) leader's slot 0 held by a human
-	// (bot) goes to the first member of the leader's kind.
+	// 0x100f60a0: the game's leader and slot 0.
+	//   - Not led by a human's order (+0x58 clear), the leader in a slot
+	//     past 0 swaps into slot 0 unless it stands 50 m or more from the
+	//     spot while not released (+0x59); slot 0 is used after, the slot
+	//     it left takes slot 0's used flag and member, both lag times are
+	//     cleared, the leader and the member moved out are re-goaled
+	//     (0x100bf4e0(0): +0x35 0, +0x4e 1) and the trail starts again
+	//     (0x100f6020).
+	//   - Led by a human's order (+0x58), the leader in slot 0 swaps with
+	//     the last used slot (both lags cleared, the trail started again,
+	//     both re-goaled): a member leads the formation; in a slot past 0
+	//     it stays there.
+	//   - A leader with no slot: a human (bot) leader's slot 0 held by a
+	//     bot (human) goes to the first member past it of the leader's
+	//     kind; lags cleared, the member now in slot 0 re-goaled, the
+	//     trail started again.
 	const GameWorld::PlayerInfo* leader = squadLeaderOf(squad);
-	if (leader && !f.humanLeads) {
-		const int k = ai::slotOf(f, leader->id);
-		if (k > 0) {
+	if (leader) {
+		const auto clearLag = [](ai::FormationSlot& s) {
+			s.lagging = false;
+			s.lagUntil = 0;
+		};
+		const auto regoal = [&](int player) {
+			if (SquadMember* m = memberOf(squad, player)) {
+				m->goalSet = false;
+				m->regoal = true;
+			}
+		};
+		int k = -1;
+		for (size_t i = 0; i < f.slots.size() && k < 0; ++i) {
+			k = f.slots[i].used && f.slots[i].member == leader->id ? static_cast<int>(i) : -1;
+		}
+		if (!f.humanLeads && k > 0) {
 			const SquadMember* m = memberOf(squad, leader->id);
-			if (!(m && distance2(m->at, squad.at) >= 2500.0f && !f.released)) {
+			const physics::Vec3 at = m ? m->at : physics::Vec3 {}; // 0x100bf930: +0x40, placed or not
+			if (distance2(at, squad.at) < 2500.0f || f.released) {
 				f.released = false;
-				const int other = f.slots[0].member;
-				std::swap(f.slots[0].member, f.slots[static_cast<size_t>(k)].member);
-				f.slots[0].used = true;
-				f.slots[0].lagging = false;
-				f.slots[0].lagUntil = 0;
-				f.slots[static_cast<size_t>(k)].lagging = false;
-				f.slots[static_cast<size_t>(k)].lagUntil = 0;
-				if (SquadMember* moved = memberOf(squad, other)) {
-					moved->goalSet = false;
-					moved->regoal = true;
-				}
-				f.lastCrumb = f.centre;
-				for (auto& crumb : f.crumbs) {
-					crumb.valid = false;
-				}
-				for (auto& s : f.slots) {
-					s.crumb = -1;
-				}
+				ai::FormationSlot& first = f.slots[0];
+				ai::FormationSlot& left = f.slots[static_cast<size_t>(k)];
+				const bool firstUsed = first.used;
+				const int firstMember = first.member;
+				first.used = true;
+				first.member = leader->id;
+				clearLag(first);
+				regoal(leader->id);
+				left.used = firstUsed;
+				left.member = firstMember;
+				clearLag(left);
+				regoal(firstMember);
+				restartTrail(squad);
+			}
+		} else if (f.humanLeads && k == 0) {
+			size_t last = f.slots.size() - 1;
+			while (last > 0 && !f.slots[last].used) {
+				--last;
+			}
+			if (last > 0) {
+				std::swap(f.slots[0].member, f.slots[last].member);
+				clearLag(f.slots[0]);
+				clearLag(f.slots[last]);
+				restartTrail(squad);
+				regoal(f.slots[0].member);
+				regoal(f.slots[last].member);
 			}
 		} else if (k < 0 && f.slots[0].used) {
 			const bool leaderBot = m_bots.count(leader->id) != 0;
@@ -1010,11 +1079,10 @@ void BotManager::updateFormation(Squad& squad)
 				for (size_t i = 1; i < f.slots.size(); ++i) {
 					if (f.slots[i].used && (m_bots.count(f.slots[i].member) != 0) == leaderBot) {
 						std::swap(f.slots[0].member, f.slots[i].member);
-						f.slots[i].crumb = -1;
-						if (SquadMember* moved = memberOf(squad, f.slots[i].member)) {
-							moved->goalSet = false;
-							moved->regoal = true;
-						}
+						clearLag(f.slots[0]);
+						clearLag(f.slots[i]);
+						regoal(f.slots[0].member);
+						restartTrail(squad);
 						break;
 					}
 				}
@@ -1360,7 +1428,21 @@ void BotManager::updateSquad(Squad& squad)
 						}
 					}
 				}
-				f.slots[hole] = f.slots[from];
+				// The move copies the used flag, member, trail point and lag
+				// (+0, +4, +0x14, +0x18, +0x1c), never the parent (+0x20);
+				// the offset (+8..+0x10) only into the leader's hole, so a
+				// hole past it keeps its own place until the next layout.
+				const auto moveSlot = [](ai::FormationSlot& to, const ai::FormationSlot& from, bool offset) {
+					to.used = from.used;
+					to.member = from.member;
+					to.crumb = from.crumb;
+					to.lagging = from.lagging;
+					to.lagUntil = from.lagUntil;
+					if (offset) {
+						to.offset = from.offset;
+					}
+				};
+				moveSlot(f.slots[hole], f.slots[from], hole == 0 && last >= 2);
 				ai::clearSlot(f.slots[from]);
 				if (SquadMember* moved = memberOf(squad, f.slots[hole].member)) {
 					moved->goalSet = false;
@@ -1375,7 +1457,7 @@ void BotManager::updateSquad(Squad& squad)
 						--tail;
 					}
 					if (tail > from) {
-						f.slots[from] = f.slots[tail];
+						moveSlot(f.slots[from], f.slots[tail], true);
 						ai::clearSlot(f.slots[tail]);
 						if (SquadMember* moved = memberOf(squad, f.slots[from].member)) {
 							moved->goalSet = false;
@@ -1385,21 +1467,7 @@ void BotManager::updateSquad(Squad& squad)
 				}
 			}
 			if (hole == 0) {
-				// 0x100f6020: the trail starts again from the new leader's
-				// slot point (+0x4c, +0x78), its points and the slots' marks
-				// dropped.
-				physics::Vec3 c;
-				if (f.slots[0].used && (squad.at.x != 0 || squad.at.y != 0 || squad.at.z != 0)
-					&& slotPoint(squad, f.slots[0].member, c)) {
-					f.centre = aiOf(c);
-				}
-				f.lastCrumb = f.centre;
-				for (auto& crumb : f.crumbs) {
-					crumb.valid = false;
-				}
-				for (auto& slot : f.slots) {
-					slot.crumb = -1;
-				}
+				restartTrail(squad);
 			}
 			ai::markMoved(f, true, m_time);
 			m.goalSet = false;
@@ -1631,6 +1699,13 @@ void BotManager::chooseRespawn(const GameWorld::PlayerInfo& self)
 	r.kit = static_cast<int>(std::floor(random() * 4));
 	if (static_cast<size_t>(r.kit) < kits.size()) {
 		m_world.setKit(self.id, kits[static_cast<size_t>(r.kit)].first, kits[static_cast<size_t>(r.kit)].second);
+		// Its unlocks (0x100efce0 -> the bot's player vt+0xb0 -> vt+0xa0).
+		m_world.chooseBotUnlocks(self.id, [this](const std::string& aiWeapon) {
+			std::string key = aiWeapon;
+			std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			const auto w = m_settings.weapons.find(key);
+			return w != m_settings.weapons.end() && w->second.antiAir;
+		});
 	}
 	m_world.setSpawnChoice(self.id, r.controlPoint);
 }

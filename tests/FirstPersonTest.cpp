@@ -301,3 +301,31 @@ TEST(FirstPerson_SeatZoom)
 	none.step(true, false, true, 1.1f, 1 / 30.0f);
 	CHECK(none.state.level() == 0 && none.fov.current == 1.1f);
 }
+
+// allowZoomOnHeat (GenericFireArm +0x2d0, 0x005c50e0's busy test): an
+// overheated gun drops the zoom press unless it allows zooming on heat or
+// zooms when busy; with allowZoomOnHeat the overheat lets the press through
+// even when it is reloading too, but a reload alone still blocks it.
+TEST(FirstPerson_AllowZoomOnHeat)
+{
+	anim::ZoomSettings plain;
+	plain.factors = {0, 0.59f};
+	CHECK(plain.takesPress(false, false));
+	CHECK(!plain.takesPress(false, true));
+	CHECK(!plain.takesPress(true, false));
+	anim::ZoomSettings heat = plain;
+	heat.allowZoomOnHeat = true;
+	CHECK(heat.takesPress(false, true));
+	CHECK(heat.takesPress(true, true));
+	CHECK(!heat.takesPress(true, false));
+	anim::ZoomSettings busy = plain;
+	busy.zoomWhenBusy = true;
+	CHECK(busy.takesPress(true, false) && busy.takesPress(false, true));
+	anim::SeatZoom seat;
+	seat.reset(plain, 1.1f);
+	seat.step(true, false, true, 1.1f, 1 / 30.0f, true);
+	CHECK(seat.state.level() == 0);
+	seat.reset(heat, 1.1f);
+	seat.step(true, false, true, 1.1f, 1 / 30.0f, true);
+	CHECK(seat.state.level() == 1);
+}

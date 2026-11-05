@@ -102,6 +102,13 @@ struct Warning {
 };
 Warning warningFor(const world::ObjectTemplate& vehicle, int targetType);
 
+// The close-to indications' HUD side (the HUD's handlers of events
+// 0x3e / 0x3f, 0x007a2100 and 0x007c1d70, for the local player only;
+// GameWorld::CloseToEvent): 0x0079a0e0 sets CloseToObject<type> to 1 on
+// 0x3e or 0 on 0x3f; type -1 sets CloseToObject0, 1, ... in turn for as
+// long as the variable exists (here the first 16).
+void closeToObject(hud::HudManager& hud, int type, bool on);
+
 class WarningHud {
 public:
 	struct Seeker {

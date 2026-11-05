@@ -1254,7 +1254,12 @@ TEST(GameWorld_SquadsLeadersAndBeacons)
 	range.world->setSpawnChoice(eu[2], game::GameWorld::kSpawnOnBeacon);
 	CHECK(range.world->spawnSoldier(eu[2]));
 	range.world->playerInfo(eu[2], info);
-	CHECK(std::abs(info.position.z - 31) < 1.0f);
+	// Scattered round it as round a leader (the squad's spawn point, now
+	// the beacon's child; no spawnInPod on this one).
+	const world::Object* placedBeacon = range.objects.find(placed);
+	CHECK(placedBeacon != nullptr);
+	const float bx = info.position.x - placedBeacon->position().x, bz = info.position.z - placedBeacon->position().z;
+	CHECK(std::sqrt(bx * bx + bz * bz) <= 9 + 1e-3f && std::abs(info.position.y) < 0.05f && info.vehicle == 0);
 
 	// The leader leaves: the next member leads, the beacon goes.
 	CHECK(range.world->joinSquad(eu[0], 0));
@@ -1604,6 +1609,80 @@ void makeMobile(world::ObjectTemplate& t, const char* mesh)
 }
 
 } // namespace
+
+// The squad beacon's pod (0x005e5fd0 -> 0x005b2200 -> 0x004bef90): the
+// beacon's thrower has spawn.spawnInPod 1 and spawn.spawnVehicle
+// eu_pod_drop, so a member spawning on it starts 150 m over a scattered
+// spot (3 to 9 m off, or half), seated in a pod that drops and lets the
+// soldier out by the beacon.
+TEST(GameWorld_BeaconSpawnDropsInPod)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "Parachute");
+	range.collisionTemplates.add("pod_mesh", boxMesh(1));
+	world::ObjectTemplate* beacon = range.templates.create("GenericFireArm", "beacon");
+	beacon->settings()["itemIndex"] = "8";
+	beacon->settings()["projectileTemplate"] = "spawn_beacon";
+	beacon->settings()["ammo.magSize"] = "1";
+	beacon->settings()["spawn.spawnVehicle"] = "eu_pod_drop";
+	beacon->settings()["spawn.spawnInPod"] = "1";
+	range.templates.create("GenericProjectile", "spawn_beacon")->settings()["armor.holdsSlBeacon"] = "1";
+	world::ObjectTemplate* pod = range.templates.create("Parachute", "eu_pod_drop");
+	makeMobile(*pod, "pod_mesh");
+	pod->settings()["mass"] = "250";
+	pod->settings()["armor.maxHitPoints"] = "10000";
+	pod->settings()["isPod"] = "1";
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	kit->children().push_back({"beacon", {}, {}});
+	range.world->enablePhysics(range.files, range.collisionTemplates,
+		{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
+			 normal = {0, 1, 0};
+			 return 0.0f;
+		 }});
+	range.world->startRound();
+	const int leader = range.world->addPlayer("Leader", 2, true);
+	const int member = range.world->addPlayer("Member", 2, true);
+	CHECK(range.world->joinSquad(leader, range.world->openSquad(2)));
+	CHECK(range.world->joinSquad(member, 1));
+	CHECK(range.world->spawnSoldier(leader));
+	game::GameWorld::PlayerInfo info;
+	range.world->playerInfo(leader, info);
+	range.world->setSoldierPosition(info.soldier, {30, 0, 30});
+	game::SoldierInput input;
+	input.selectItem = 8;
+	range.world->setInput(leader, input);
+	range.world->tick(1 / 30.0f);
+	input = {};
+	input.fire = true;
+	range.world->setInput(leader, input);
+	range.world->tick(1 / 30.0f);
+	range.world->setInput(leader, {});
+	const world::Object* placed = range.objects.find(range.world->squadBeacon(2, 1));
+	CHECK(placed != nullptr);
+	if (!placed) {
+		return;
+	}
+	const physics::Vec3 at {placed->position().x, placed->position().y, placed->position().z};
+	range.world->setSpawnChoice(member, game::GameWorld::kSpawnOnBeacon);
+	CHECK(range.world->spawnSoldier(member));
+	CHECK(range.world->ridingPod(member) && range.world->pods().size() == 1);
+	range.world->playerInfo(member, info);
+	const float dx = info.position.x - at.x, dz = info.position.z - at.z;
+	const float off = std::sqrt(dx * dx + dz * dz);
+	std::fprintf(stderr, "  the pod starts %.1f m up, %.2f m off the beacon\n", info.position.y - at.y, off);
+	CHECK(info.vehicle != 0 && info.position.y - at.y > 140 && off >= 1.5f - 1e-3f && off <= 9 + 1e-3f);
+	float second = 0;
+	for (; second < 60 && range.world->ridingPod(member); second += 1 / 30.0f) {
+		range.world->tick(1 / 30.0f);
+	}
+	range.world->playerInfo(member, info);
+	std::fprintf(stderr, "  landed after %.1f s at %.1f/%.1f/%.1f\n", second, info.position.x, info.position.y,
+		info.position.z);
+	CHECK(!range.world->ridingPod(member) && info.alive && info.vehicle == 0 && info.position.y < 5);
+}
 
 // The spawn spot's test (0x005aeb80, 0x006f2e90): a PlayerControlObject
 // that the template's mesh placed at the spot overlaps (a segment from the
@@ -4174,4 +4253,128 @@ TEST(GameWorld_FireObstruction)
 	// A box 1.5 m ahead of the gun: met, unless it is the gun's own.
 	CHECK(world.fireObstructed({0, 1.5f, 8.5f}, ahead, right, up, -1.5f, 2, 1, 0));
 	CHECK(!world.fireObstructed({0, 1.5f, 8.5f}, ahead, right, up, -1.5f, 2, 1, parked));
+}
+
+// The close-to indications (0x0059a6c0, every 0.2 s on the server): a
+// team object whose Radio has closeToIndicationDist within that plus the
+// player's radius (on the plane with indicationDistance2D) posts 2/0x3e
+// with its closeToIndicationType once, its going 2/0x3f; another team's
+// counts for nothing; a mine (a projectile) of type 0 too; death posts
+// 2/0x3f with -1.
+TEST(GameWorld_CloseToIndication)
+{
+	Range range;
+	range.templates.registerType(6, "SimpleObject");
+	world::ObjectTemplate* titan = range.templates.create("SimpleObject", "eu_titan");
+	titan->settings()["Radio.closeToIndicationDist"] = "250";
+	titan->settings()["Radio.closeToIndicationType"] = "1";
+	titan->settings()["Radio.indicationDistance2D"] = "1";
+	const int me = range.world->addPlayer("Me", 2, false);
+	CHECK(range.world->spawnSoldier(me));
+	game::GameWorld::PlayerInfo info;
+	range.world->playerInfo(me, info);
+	// 150 m off and 100 m up: gathered (180 m, within the radius + 200)
+	// and within 250 m on the plane.
+	world::Object* ours = range.objects.create(titan, {info.position.x + 150, info.position.y + 100, info.position.z});
+	ours->setTeam(2);
+	world::Object* theirs = range.objects.create(titan, {info.position.x - 100, info.position.y, info.position.z});
+	theirs->setTeam(1);
+	const auto run = [&](float seconds) {
+		std::vector<game::GameWorld::CloseToEvent> all;
+		for (float t = 0; t < seconds; t += 1 / 30.0f) {
+			range.world->tick(1 / 30.0f);
+			for (const auto& e : range.world->takeCloseToEvents(me)) {
+				all.push_back(e);
+			}
+		}
+		return all;
+	};
+	auto events = run(0.5f);
+	CHECK(events.size() == 1 && events[0].type == 1 && events[0].enter);
+	CHECK(run(1).empty()); // still in: nothing more
+	// Ours out of range: the type's last one goes (and nothing is left in
+	// range at all: 0x0059a5f0's type -1).
+	ours->setPosition({info.position.x + 600, info.position.y, info.position.z});
+	events = run(0.5f);
+	CHECK(events.size() == 1 && !events[0].enter && events[0].type == -1);
+	// Two of type 1 in (each new one posts its 0x3e), one going: no leave
+	// while the other stays.
+	ours->setPosition({info.position.x + 100, info.position.y, info.position.z});
+	world::Object* second = range.objects.create(titan, {info.position.x, info.position.y, info.position.z + 120});
+	second->setTeam(2);
+	events = run(0.5f);
+	CHECK(events.size() == 2 && events[0].enter && events[1].enter && events[0].type == 1);
+	second->setPosition({info.position.x, info.position.y, info.position.z + 900});
+	CHECK(run(0.5f).empty());
+	// Death: the list cleared with type -1.
+	range.world->setHitPoints(info.soldier, 0);
+	events = run(0.5f);
+	CHECK(events.size() == 1 && !events[0].enter && events[0].type == -1);
+}
+
+// The bots' unlocks (AIDLL 0x100efce0 / 0x100f04a0 -> BF2142.exe's AI
+// player adaptor slot 40, 0x008a5b90): the levels one over the best
+// living human's owned mask for a kit of the same unlockIndex (at most
+// 4); then two of the UB_First / UB_Second containers below those levels
+// at random chosen and owned, the anti-air one kept aside (no air
+// vehicle: not taken), UB_Player level 0 owned, a squad leader's one
+// UB_SquadLeader container.
+TEST(GameWorld_BotUnlocks)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "ItemContainer");
+	for (const char* team : {"EU", "Pac"}) {
+		world::ObjectTemplate* kit = range.templates.create("Kit", std::string(team) + "_Assault");
+		kit->settings()["unlockIndex"] = "1";
+		kit->children().push_back({"eu_ar_rifle", {}, {}});
+		const auto add = [&](const std::string& name, const char* branch, int level, const char* item) {
+			world::ObjectTemplate* c = range.templates.create("ItemContainer", name);
+			if (branch) {
+				c->settings()["unlockBranch"] = branch;
+			}
+			c->settings()["unlockLevel"] = std::to_string(level);
+			c->children().push_back({item, {}, {}});
+			kit->children().push_back({name, {}, {}});
+		};
+		const std::string base = std::string("Unlock") + team + "_Assault";
+		for (int level = 0; level < 4; ++level) {
+			add(base + "Light" + std::to_string(level), nullptr, level, "eu_ar_rifle");
+		}
+		add(base + "Medic0", "UB_Second", 0, "eu_ar_rifle");
+		add(base + "Medic1", "UB_Second", 1, "aa_gun");
+		add(base + "Player0", "UB_Player", 0, "eu_ar_rifle");
+		add(base + "SquadLeader0", "UB_SquadLeader", 0, "eu_ar_rifle");
+	}
+	world::ObjectTemplate* aa = range.templates.create("GenericFireArm", "aa_gun");
+	aa->settings()["aiTemplate"] = "eu_aa";
+	const auto antiAir = [](const std::string& ai) { return ai == "eu_aa"; };
+	// A human of the other team owning Light0 and Light1 (mask 3) and
+	// Medic0 (mask 1): the bot's levels are 4, 2, 1, 1.
+	const int human = range.world->addPlayer("Human", 1, false);
+	range.world->setOwnedUnlocks(human, {"UnlockPac_AssaultLight0", "UnlockPac_AssaultLight1", "UnlockPac_AssaultMedic0"});
+	CHECK(range.world->spawnSoldier(human));
+	const int bot = range.world->addPlayer("Bot", 2, true);
+	range.world->setKit(bot, "EU_Assault", "us_light_soldier");
+	const std::array<int, 4> levels = range.world->chooseBotUnlocks(bot, antiAir);
+	CHECK(levels[0] == 4 && levels[1] == 2 && levels[2] == 1 && levels[3] == 1);
+	std::vector<std::string> chosen = range.world->unlocksOf(bot);
+	const std::vector<std::string> owned = range.world->unlocksOf(bot, true);
+	std::fprintf(stderr, "  levels %d %d %d %d; chosen %s, %s\n", levels[0], levels[1], levels[2], levels[3],
+		chosen.size() > 0 ? chosen[0].c_str() : "-", chosen.size() > 1 ? chosen[1].c_str() : "-");
+	CHECK(chosen.size() == 2 && chosen[0] != chosen[1]);
+	for (const std::string& c : chosen) {
+		CHECK(c != "UnlockEU_AssaultMedic1" && c.find("SquadLeader") == std::string::npos);
+	}
+	CHECK(std::find(owned.begin(), owned.end(), "UnlockEU_AssaultPlayer0") != owned.end());
+	CHECK(std::find(chosen.begin(), chosen.end(), "UnlockEU_AssaultPlayer0") == chosen.end());
+	// No living human: level 1 each (only level 0 containers); a squad
+	// leader also takes its squad leader container.
+	range.world->setHitPoints(range.world->playerList()[0].soldier, 0);
+	CHECK(range.world->joinSquad(bot, range.world->openSquad(2)));
+	const std::array<int, 4> alone = range.world->chooseBotUnlocks(bot, antiAir);
+	CHECK(alone[0] == 1 && alone[1] == 1 && alone[3] == 1);
+	chosen = range.world->unlocksOf(bot);
+	CHECK(std::find(chosen.begin(), chosen.end(), "UnlockEU_AssaultSquadLeader0") != chosen.end());
+	CHECK(chosen.size() == 3); // Light0, Medic0 and the leader's
 }

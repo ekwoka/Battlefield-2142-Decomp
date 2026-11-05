@@ -1089,8 +1089,10 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			}
 			break;
 		case net::kNeDatabaseComplete: { // 0x004af710: StartSimulation and the game state
-			if (m_content.pure() && !client.contentChecked) {
-				// A pure server's client that sent no matching fingerprint.
+			if (m_content.pure() && !client.contentChecked && id != kDemoClient) {
+				// A pure server's client that sent no matching fingerprint
+				// (the demo connection 0x81 is never checked: 0x004af710's
+				// first test).
 				if (onLog) {
 					onLog("client " + std::to_string(id) + " sent no content check");
 				}
@@ -1585,6 +1587,18 @@ void HostedGame::sendRadio()
 			if (client.player == message.receiver && client.stage == Client::Stage::Playing) {
 				sendTo(id, net::makeRadioMessage(info));
 			}
+		}
+	}
+}
+
+void HostedGame::sendCloseTo()
+{
+	for (const auto& [id, client] : m_clients) {
+		if (client.stage != Client::Stage::Playing || client.player < 0) {
+			continue;
+		}
+		for (const game::GameWorld::CloseToEvent& e : m_round->takeCloseToEvents(client.player)) {
+			sendTo(id, net::makePostRemote(2, e.enter ? 0x3e : 0x3f, net::int32Payload(e.player) + net::int32Payload(e.type)));
 		}
 	}
 }
@@ -3052,6 +3066,7 @@ void HostedGame::tick()
 	trackCommanderOffers();
 	trackOrders();
 	sendRadio();
+	sendCloseTo();
 	// The scripts' end-of-round text (gl_sendEndOfRoundData, 0x00568930:
 	// data block 8 to everyone, with sv.endOfRoundDelay and each player's
 	// kills and deaths).

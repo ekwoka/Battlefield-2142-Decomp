@@ -695,6 +695,43 @@ TEST(Bots_MechDrive)
 	CHECK(out.sprint && out.throttle == 1 && out.turn == 0 && near(out.targetSpeed, 8));
 }
 
+// Boxed in ahead while facing the point (the forward rays short of
+// spaceNeededTweak x radius, room behind): the car backs out of state 11
+// (0x100e8170 asks for room ahead to go on), while the tank's and the
+// mech's state 11 (0x100de8a0, 0x100e1f20) go back to 0 on the facing
+// alone, so the mech turns on the spot instead of backing; and state 8's
+// way back to 0 drives ahead, the mech's too.
+TEST(Bots_DriveBoxedInAhead)
+{
+	ai::DriveSense sense;
+	sense.goalDistance = 100;
+	sense.remaining = 200;
+	sense.error = 0.05f; // to the right, cos 0.999
+	sense.freeFront = 1; // short of 0.94 x 2.5
+	sense.freeBack = 20;
+	for (const ai::Driver driver : {ai::Driver::Car, ai::Driver::Tank, ai::Driver::Mech}) {
+		ai::DriveSettings s;
+		s.driver = driver;
+		ai::DriveState st;
+		st.state = 11;
+		const ai::DriveOutput out = ai::driveControl(s, st, sense);
+		if (driver == ai::Driver::Car) {
+			CHECK(st.state == 11 && out.direction == -1 && out.throttle < 0);
+		} else {
+			CHECK(st.state == 0);
+			CHECK(out.direction == (driver == ai::Driver::Mech ? 0 : 1));
+		}
+	}
+	// State 8 with the goal no longer behind: back to 0, ahead.
+	ai::DriveSettings mech;
+	mech.driver = ai::Driver::Mech;
+	ai::DriveState st;
+	st.state = 8;
+	sense.freeFront = 20;
+	const ai::DriveOutput out = ai::driveControl(mech, st, sense);
+	CHECK(st.state == 0 && out.direction == 1 && out.throttle == 1);
+}
+
 // FloatingTankMoveTo (0x1008c7c0, controller 0x100de350): the hover tank
 // strafes. From a standstill it pushes 10 (clamped to 1) along the way on
 // both axes; at speed the loop is 3 x (wanted - current - acceleration).
@@ -1011,7 +1048,7 @@ TEST(Bots_StrategyOrdersSquadsToAttack)
 		CHECK(order && (near(order->position.z, 60) || near(order->position.x, 100)));
 	}
 	CHECK(bots.behaviour(team[0]) == "MoveTo");
-	for (int tick = 0; tick < 30 * 8; ++tick) {
+	for (int tick = 0; tick < 30 * 12; ++tick) {
 		bots.update(1 / 30.0f);
 		field.world->tick(1 / 30.0f);
 	}
@@ -1020,7 +1057,9 @@ TEST(Bots_StrategyOrdersSquadsToAttack)
 	for (int id : team) {
 		game::GameWorld::PlayerInfo info;
 		field.world->playerInfo(id, info);
-		// (The members walk to their slots beside the leader, a little behind.)
+		// (The members walk to their slots beside the leader and trail it:
+		// a member's slot is given again only as it idles there or is
+		// re-goaled, 0x100c0890.)
 		closer += info.position.z > 10 || info.position.x > 10;
 	}
 	CHECK(closer == 4);
@@ -4364,15 +4403,60 @@ TEST(Bots_SquadTakesAnOrderInFormation)
 	CHECK(!bots.formationGoal(team[0], slot)); // the leader's goal is the order's
 	bots.updateSquadNow(2, 1);
 	for (int i = 1; i < 3; ++i) {
+		// A slot goal, about a spot the squad had at a re-goal (the slot
+		// moves with the spot, the goal only when given again).
 		CHECK(bots.formationGoal(team[static_cast<size_t>(i)], slot));
-		const float aside = std::sqrt((slot.x - squad->at.x) * (slot.x - squad->at.x) + (slot.z - squad->at.z) * (slot.z - squad->at.z));
-		CHECK(std::fabs(aside - 6.8934751f) < 1.0f);
+		// The line abreast: 3 (r + r') right and left of slot 0.
+		const ai::FormationSlot& s = squad->formation.slots[static_cast<size_t>(i)];
+		CHECK(s.used && std::fabs(std::fabs(s.offset.x) - 6.8934751f) < 0.01f && s.offset.z == 0);
 	}
+	CHECK(squad->formation.slots[1].offset.x * squad->formation.slots[2].offset.x < 0);
 	CHECK(bots.mayAdvance(team[1]));
 	const physics::Vec3 was = squad->orderAt;
 	CHECK(field.world->issueOrder(2, 1, game::GameWorld::OrderType::Attack, 0, 100, -1));
 	bots.updateSquadNow(2, 1);
 	CHECK(squad->state == 2 && std::fabs(squad->orderAt.x - was.x) < 0.01f);
+}
+
+// A member whose bot idles (+0x4d, set by the Idle statement 0x100d2830
+// and cleared by 0x100d28a0) is given its slot again at every look
+// (0x100c0890 -> 0x100bff90), so it keeps up with a leader on the move.
+TEST(Bots_IdleMemberFollowsItsSlot)
+{
+	Field field;
+	game::BotSettings settings;
+	game::BotManager bots(*field.world, settings);
+	std::vector<int> team;
+	for (int i = 0; i < 2; ++i) {
+		const int id = field.world->addPlayer("Eu", 2, true);
+		field.world->joinSquad(id, 1);
+		field.world->spawnSoldier(id);
+		field.move(id, static_cast<float>(i) * 3, 0);
+		team.push_back(id);
+	}
+	int idleLooks = 0;
+	for (int look = 0; look < 60; ++look) {
+		for (int tick = 0; tick < 17; ++tick) {
+			bots.update(1 / 30.0f);
+			field.world->tick(1 / 30.0f);
+		}
+		const bool idle = bots.behaviour(team[1]) == "Idle";
+		bots.updateSquadNow(2, 1);
+		const game::BotManager::Squad* squad = bots.squad(2, 1);
+		physics::Vec3 slot;
+		if (idle && squad && squad->formation.slots[0].member == team[0] && bots.formationGoal(team[1], slot)) {
+			// The goal is the slot about the spot the squad has now (the
+			// look sees the spot of the update before).
+			const float aside = std::sqrt(horizontal2(slot - squad->at));
+			if (look >= 6) {
+				// Past the sixth look the offsets are laid out for the
+				// members (3 x (r + r'), 6.89 m).
+				CHECK(aside > 6.4f && aside < 7.6f);
+				++idleLooks;
+			}
+		}
+	}
+	CHECK(idleLooks >= 3);
 }
 
 // The sensing agent's look-around (0x100d7840): a bot walking to PAC's

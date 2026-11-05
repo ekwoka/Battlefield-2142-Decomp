@@ -1330,6 +1330,10 @@ DriveOutput driveControl(const DriveSettings& s, DriveState& st, const DriveSens
 		}
 		break;
 	case 6: // passing the obstacle
+		// Ahead on every way out, the mech's too (0x100e1f20's case 6 sets
+		// its direction to 1 on each return; the car's and the tank's start
+		// at 1).
+		direction = 1;
 		if (!have || (view.pathClear && view.ahead < 0.3f)) {
 			set(error >= 0 ? 2 : 3);
 		} else if (!view.touching || view.clearAhead || view.ahead <= 0) {
@@ -1358,6 +1362,7 @@ DriveOutput driveControl(const DriveSettings& s, DriveState& st, const DriveSens
 			fold();
 		} else if (c > -0.5f || remaining > behind + 5 || back < needed) {
 			set(0);
+			direction = 1; // ahead (the mech's too: 0x100e1f20 sets it with the change)
 		} else if (view.ahead >= -0.6f || !have) {
 			fold();
 		} else {
@@ -1379,7 +1384,11 @@ DriveOutput driveControl(const DriveSettings& s, DriveState& st, const DriveSens
 	case 11: // backing, the point on the right
 		if (pointLeft) {
 			set(c > 0 ? 3 : 9);
-		} else if (c > 0.9f && front > needed) {
+		} else if (c > 0.9f && (!car || front > needed)) {
+			// Facing the point: the car goes ahead only with room ahead
+			// (0x100e8170); the tank's and the mech's state 11 (0x100de8a0,
+			// 0x100e1f20) look at the facing alone (their state 9 at the room
+			// too), so one boxed in ahead goes back to 0 instead of backing.
 			set(0);
 		} else if (back >= needed) {
 			direction = -1;

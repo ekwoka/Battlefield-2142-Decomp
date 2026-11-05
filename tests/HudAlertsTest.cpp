@@ -670,3 +670,18 @@ TEST(HudAlerts_StandardHelpEnabled)
 	foot.tutorial(third, f, 0.1f);
 	CHECK(third.string("IngameHelpString") != "HUD_HELP_VEHICLE_GENERAL_CONTROLS_enterVehicle");
 }
+
+// The close-to indications' HUD variables (0x0079a0e0 from the HUD's
+// 0x3e / 0x3f handlers): CloseToObject<type> 1 on entering, 0 on leaving;
+// type -1 clears every one.
+TEST(HudAlerts_CloseToObjectVariables)
+{
+	hud::HudManager hudManager(nullptr);
+	menu::closeToObject(hudManager, 0, true);
+	menu::closeToObject(hudManager, 1, true);
+	CHECK(hudManager.number("CloseToObject0") == 1 && hudManager.number("CloseToObject1") == 1);
+	menu::closeToObject(hudManager, 1, false);
+	CHECK(hudManager.number("CloseToObject0") == 1 && hudManager.number("CloseToObject1") == 0);
+	menu::closeToObject(hudManager, -1, false);
+	CHECK(hudManager.number("CloseToObject0") == 0);
+}

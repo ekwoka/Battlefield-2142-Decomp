@@ -240,6 +240,7 @@ private:
 		float bodyYaw = 0, yaw = 0, aimPitch = 0; // degrees
 		int stance = 0;
 		bool reloading = false;
+		bool overheated = false; // the heat component's (0x005c50e0's zoom test)
 		int rounds = -1; // in the magazine, -1 unknown
 		bool firing = false; // remote: the fire input held
 	};

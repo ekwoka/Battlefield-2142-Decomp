@@ -57,6 +57,23 @@ struct ZoomSettings {
 	// overheated) unless this is set (shipped 1 on the tanks' and the ATs'
 	// seats; SeatZoom).
 	bool zoomWhenBusy = false;
+	// allowZoomOnHeat (the firearm's own row, GenericFireArm +0x2d0, not the
+	// zoom component's; shipped 1 on three soldier guns): in the same busy
+	// test (0x005c50e0) an overheated gun (the heat component +0x1a0, slot
+	// 0x2c) still takes the zoom press, whatever else keeps it busy.
+	bool allowZoomOnHeat = false;
+	// The busy test of 0x005c50e0 for a zoom press: busy is the firearm's
+	// own (reloading, between rounds, ...; the rewrite's is the reload),
+	// overheated its heat component's. Busy or overheated, the press is
+	// taken only with zoomWhenBusy (the zoom component's slot 0xb8) or
+	// with allowZoomOnHeat while overheated.
+	bool takesPress(bool busy, bool overheated) const
+	{
+		if (!busy && !overheated) {
+			return true;
+		}
+		return zoomWhenBusy || (allowZoomOnHeat && overheated);
+	}
 	bool present() const { return factors.size() > 1; }
 	int delayTicks() const { return static_cast<int>(std::lround(delay * 30.0f)); }
 };
@@ -118,10 +135,10 @@ struct SeatZoom {
 	// A new gun (or seat): its settings, level 0 at the camera's view.
 	void reset(const ZoomSettings& gun, float cameraFov);
 	// One tick. pressed: the alternate fire's press (taken only when the
-	// seat's input isn't disabled); busy: the gun reloading; looking: the
-	// view is the inside or nose one; cameraFov: the seat camera's
-	// insideFOV.
-	void step(bool pressed, bool busy, bool looking, float cameraFov, float seconds);
+	// seat's input isn't disabled); busy: the gun reloading; overheated:
+	// its heat component's (ZoomSettings::takesPress); looking: the view is
+	// the inside or nose one; cameraFov: the seat camera's insideFOV.
+	void step(bool pressed, bool busy, bool looking, float cameraFov, float seconds, bool overheated = false);
 	bool zoomed() const { return state.level() > 0 && fov.current == fov.target; }
 };
 

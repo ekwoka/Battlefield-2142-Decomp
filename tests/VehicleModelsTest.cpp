@@ -315,6 +315,31 @@ TEST(Vehicles_WalkerStandsWalksAndTurns)
 	CHECK(std::fabs(g.objects.find(mech)->rotation().y) < 10 && std::fabs(g.objects.find(mech)->rotation().z) < 10);
 }
 
+// A walker left standing falls asleep like any node; its legs' update
+// (0x00650e90, run while the node sleeps) wakes it in any state but
+// standing (+0x1bc, slot 0x160), so it turns on the spot from rest (the
+// engines' wake, a throttle or rpm, never comes for a walker turning).
+TEST(Vehicles_WalkerTurnsFromRest)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t mech = g.start("as_heavy_mech", {0, 4, 6});
+	CHECK(g.enter(mech));
+	g.drive({}, 5); // still for 5 s: asleep
+	const float before = g.yaw(mech);
+	game::SoldierInput input;
+	input.strafe = -1;
+	g.drive(input, 2);
+	const float turned = std::remainder(g.yaw(mech) - before, 360.0f);
+	std::fprintf(stderr, "  as_heavy_mech: turned %.1f degrees in 2 s from rest\n", turned);
+	CHECK(turned < -30);
+}
+
 // The walker's own animation system in the simulation (0x0063d2f0 with
 // 0x0063ce30): occupied and walking it plays stand_walk, whose effect
 // events 1 and 2 (the feet: FootStepEffectRight 1024, FootStepEffectLeft

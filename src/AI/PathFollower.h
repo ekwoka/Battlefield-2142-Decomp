@@ -122,7 +122,7 @@ void smoothWaypoints(std::vector<Waypoint>& waypoints, const Vec3& bot, float ra
 
 struct FollowerSettings {
 	bool soldier = true;
-	float radius = 0.5f;   // the bot's (+0x100)
+	float radius = 0.5f;   // the bot's (+0x100: its physical part's centre radius, vt+0x30)
 	float approach = 0;    // +4: 0 for MoveTo, 1.1 x the target's radius for MoveToObject
 	PathOptions options;
 	// The climb test of the straight walk and the look-ahead's rays (both
