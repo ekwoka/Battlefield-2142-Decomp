@@ -54,6 +54,11 @@ double position(Interpreter& vm, const Value& v) { return toInteger(vm.toNumber(
 
 size_t clampTo(double n, size_t size) { return static_cast<size_t>(std::max(0.0, std::min(n, static_cast<double>(size)))); }
 
+// gameswf's String in SwiffPlayer.dll: the class 0x100c8370, its methods'
+// table 0x100c8390, length 0x100c78b0, fromCharCode 0x100c82c0 / 0x100c7800,
+// split 0x100c7930, charAt 0x100c7b40, charCodeAt 0x100c7c00, concat
+// 0x100c7cb0, indexOf 0x100c7d70, lastIndexOf 0x100c7e40, slice 0x100c7f30,
+// substr 0x100c81a0, substring 0x100c88e0.
 void installStringClass(Interpreter& vm)
 {
 	const ObjectRef& proto = vm.prototypes().string;
@@ -203,6 +208,8 @@ void installStringClass(Interpreter& vm)
 	});
 }
 
+// gameswf's Number: the class 0x100c77a0, toString / valueOf 0x100c7690,
+// a number's text 0x100c7520.
 void installNumber(Interpreter& vm)
 {
 	const ObjectRef& proto = vm.prototypes().number;
@@ -234,6 +241,8 @@ void installNumber(Interpreter& vm)
 	vm.defineMethod(proto, "valueOf", [](Interpreter& vm, CallArgs& c) -> Value { return Value(vm.toNumber(primitiveOf(c))); });
 }
 
+// gameswf's Boolean: the class 0x100d5450, toString / valueOf 0x100d5340,
+// "true" / "false" 0x100d52e0.
 void installBoolean(Interpreter& vm)
 {
 	const ObjectRef& proto = vm.prototypes().boolean;
@@ -256,6 +265,8 @@ void installBoolean(Interpreter& vm)
 	vm.defineMethod(proto, "valueOf", [](Interpreter&, CallArgs& c) -> Value { return Value(toBoolean(primitiveOf(c))); });
 }
 
+// gameswf's Math (0x100a8800: the constants e, ln2, log2e, ln10, log10e, pi
+// and the functions).
 void installMath(Interpreter& vm)
 {
 	const ObjectRef math = vm.newObject();

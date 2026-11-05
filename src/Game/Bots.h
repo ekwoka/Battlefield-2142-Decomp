@@ -507,11 +507,22 @@ void strategicAreaGuard(const std::vector<GuardArea>& areas, const physics::Vec3
 
 class BotManager;
 
-// The seed of the AI's random numbers (AIRandom, 0x100309a0): the original
-// takes the clock x 1e6 when the word is 0, so no two runs draw alike.
-// Here BF2142_BOT_SEED gives it (for measuring rounds over several seeds),
-// else a fixed word stands in for the clock, so runs repeat.
-uint32_t botRandomSeed();
+// The seed of the AI's random numbers (AIRandom, 0x100309a0). The word is
+// 0 at the AI's start, so the original takes the clock: the IBFTimer's
+// slot 0x10 (BF2142.exe 0x0089f470 -> the game clock's slot 0x18,
+// 0x0065c270: seconds of QueryPerformanceCounter since the clock started,
+// 0x0065c020) x 1e6, rounded, its low 32 bits; no two runs draw alike.
+// BF2142_BOT_SEED (non-zero) gives the word instead, for comparing rounds.
+// `fromClock` false is the rewrite's repeatable word for the tests and
+// --simulate (README), which measure rounds and need them to repeat.
+uint32_t botRandomSeed(bool fromClock = false);
+// BBRevive's water test (0x10082760): a body at height `y` less than 0.5 m
+// over the `water` where that is more than 0.75 m over the `ground` is
+// left out.
+bool bodyUnderWater(float y, float water, float ground);
+// The clock's word (0x100309a0 with the seed 0): `seconds` x 1e6, rounded
+// to 64 bits, the low 32.
+uint32_t clockSeedWord(double seconds);
 
 struct BotSettings {
 	float skill = 0.4f;   // aiSettings.setBotSkill (0..1)

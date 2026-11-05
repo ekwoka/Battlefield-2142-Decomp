@@ -3095,6 +3095,10 @@ int runGame(Options& options, Session& session)
 
 	// The bots' settings (AI/AIBehaviours.ai, AI/AIDefault.ai).
 	game::BotSettings botSettings;
+	// The AI's random numbers, made at its start before the scripts
+	// (0x10001740 -> 0x100309a0): seeded from the clock, but for
+	// --simulate's measured rounds (Bots.h, botRandomSeed).
+	botSettings.random = ai::Random::seeded(game::botRandomSeed(options.simulate <= 0));
 	game::registerBotConsoleMethods(console, botSettings);
 	// NetworkableInfo.* (Objects/Common/Networkables.con): the ghosts' infos.
 	host::registerNetworkableInfoConsoleMethods(console);
@@ -4272,11 +4276,18 @@ int runGame(Options& options, Session& session)
 			uint32_t object = 0;
 		};
 		std::array<OrderMarker, 2> orderMarkers; // the leader's, the commander's
-		// A marker's radius (its object's slot 0x8c: the render object's for
-		// these Bundles without a collision mesh). Stand-in: half the
-		// diagonal of its mesh's first LOD's box, as the file stores it (the
-		// bundled mesh's own radius getter isn't traced). Read once a
-		// template.
+		// A mesh object's render radius (RendDX9's instance slot 0x44,
+		// nametags::meshRenderRadius), for the order markers and the
+		// vehicles' name tags; read once a template. A marker's radius (its
+		// object's slot 0x8c, 0x006f7ec0): these Bundles have no collision
+		// mesh, so the render object's plus its geometry template's slot
+		// 0xe4 (the BundledMesh's 0x100a7da0: 0) and the object's slot 0x94
+		// (0). 0x006f7ec0 also takes the larger of that and each child's
+		// radius plus its offset's length (light sources, 0xc4ca, left out);
+		// the marker's one child, e_marker_* 0.08 m up, is an EffectBundle
+		// (vtable 0x0097b658, the same getter, no mesh of its own) whose
+		// particle systems' radii are RendDX9's emitters', which the rewrite
+		// doesn't keep: the mesh's alone here.
 		std::map<std::string, float> markerRadii;
 		const auto markerRadius = [&markerRadii, &geometries, &files](const world::ObjectTemplate& t) {
 			const auto known = markerRadii.find(t.name());
@@ -4287,15 +4298,8 @@ int runGame(Options& options, Session& session)
 			const geom::GeometryTemplate* geometry = geometries.find(t.geometry());
 			std::vector<uint8_t> data;
 			if (geometry && files.readFile(geometry->path, data)) {
-				const std::optional<geom::MeshFile> mesh = geom::parseMesh(data, geometry->kind);
-				if (mesh && !mesh->geometries.empty() && !mesh->geometries[0].lods.empty()) {
-					const geom::Bounds& box = mesh->geometries[0].lods[0].bounds;
-					float d2 = 0;
-					for (int i = 0; i < 3; ++i) {
-						d2 += (box.max[static_cast<size_t>(i)] - box.min[static_cast<size_t>(i)])
-							* (box.max[static_cast<size_t>(i)] - box.min[static_cast<size_t>(i)]);
-					}
-					radius = 0.5f * std::sqrt(d2);
+				if (const std::optional<geom::MeshFile> mesh = geom::parseMesh(data, geometry->kind)) {
+					radius = nametags::meshRenderRadius(*mesh);
 				}
 			}
 			markerRadii[t.name()] = radius;
@@ -7759,6 +7763,7 @@ int runGame(Options& options, Session& session)
 		};
 		sources.objectEffects = &objectEffects;
 		nametags::Nametags nametags(files);
+		nametags.setRenderRadius(markerRadius); // the same render-object radius (0x100c7000)
 		nametags.setIcons(&g_tagIcons);
 		nametags.setFog(lights.fogStartEndAndBase); // the enemies' fog fade (0x100f09b0)
 		nametags.setWorld(g_remoteHud); // a joined game's: the server's players and requests
@@ -8209,13 +8214,17 @@ int runGame(Options& options, Session& session)
 						: want.kind == 6 || want.kind == 7 ? "ordermarker_defend"
 						: want.kind >= 0                   ? "ordermarker_attack"
 														   : nullptr;
+					nametags.setOrderTag(static_cast<int>(i), false);
 					if (world::ObjectTemplate* t = name ? templates.find(name) : nullptr) {
 						// On the ground, the water or a static object under the
-						// point, up by half its radius (GameWorld::orderMarkerHeight).
+						// point, up by half its radius (GameWorld::orderMarkerHeight);
+						// its tag by it (orderTagPoint).
 						const float height = round.orderMarkerHeight(want.at, markerRadius(*t));
 						if (world::Object* marker = round.objects().create(t, {want.at.x, height, want.at.z})) {
 							have.object = marker->id();
 						}
+						const physics::Vec3 tag = game::GameWorld::orderTagPoint(want.at, height);
+						nametags.setOrderTag(static_cast<int>(i), true, {want.at.x, want.at.y, want.at.z}, {tag.x, tag.y, tag.z});
 					}
 				}
 			}

@@ -19,6 +19,10 @@ uint16_t CharacterDictionary::exportedId(const std::string& name) const
 	return it == m_exports.end() ? 0 : it->second;
 }
 
+// gameswf's tag loaders for the characters the menus define (SwiffPlayer.dll):
+// DefineShape* 0x100b12d0, DefineMorphShape 0x100b1360, DefineBitsJPEG3
+// 0x100b4150, DefineSprite 0x100b9a40, ExportAssets 0x100b42f0; the movie's
+// read loop is 0x100b9000.
 bool CharacterDictionary::load(const std::vector<uint8_t>& swf, const SwfMovie& movie, std::string* error)
 {
 	m_characters.clear();

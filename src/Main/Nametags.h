@@ -33,6 +33,9 @@ class ObjectTemplate;
 namespace game {
 class GameWorld;
 }
+namespace geom {
+struct MeshFile;
+}
 namespace host {
 class HudWorld;
 }
@@ -280,6 +283,13 @@ struct IconRegistry {
 	}
 };
 
+// A mesh object's render radius, as RendDX9's mesh instance answers it
+// (slot 0x44, 0x100c7000: its +0x268 box's radius about the centre, +0x1c,
+// 0x101a7b10): half the diagonal of the LOD box the file stores, for the
+// geometry the instance shows when made (1 when the mesh has two or more,
+// 0x100c2b00, else 0) at LOD 0 (0x100c3260). 0 without one.
+float meshRenderRadius(const geom::MeshFile& mesh);
+
 class Nametags {
 public:
 	explicit Nametags(const io::FileManager& files);
@@ -308,6 +318,19 @@ public:
 	// RendDX9's object drawer slot 0x40, which the manager's frame reads,
 	// 0x100f3490).
 	void setInsideTitan(bool inside) { m_insideTitan = inside; }
+	// A template's render object radius (RendDX9's mesh instance slot 0x44,
+	// 0x100c7000: its box's radius about the centre), for a vehicle tag's
+	// height; without it, 4 m.
+	void setRenderRadius(std::function<float(const world::ObjectTemplate&)> radius) { m_renderRadius = std::move(radius); }
+	// Where the order tags stand (the order object 0x005b8b20 hands the
+	// manager's slot 0x2c a place: GameWorld::orderTagPoint by the marker's
+	// height), per order (0 the squad leader's, 1 the commander's), for
+	// the order at `order`; cleared (`set` false) when no marker stands.
+	// Without one the tag stands 1.5 m over the order's point.
+	void setOrderTag(int which, bool set, const std::array<float, 3>& order = {}, const std::array<float, 3>& tag = {})
+	{
+		m_orderTags[static_cast<size_t>(which & 1)] = {set, order, tag};
+	}
 	// A radio call heard (see CallCode); `local` for the local player's own.
 	void radioCall(int caller, int code, bool local);
 	// The tag the crosshair selects now (0x100f16c0: the selectable tag
@@ -387,6 +410,13 @@ private:
 	const IconRegistry* m_icons = nullptr;
 	const host::HudWorld* m_world = nullptr;
 	bool m_insideTitan = false;
+	struct OrderTag {
+		bool set = false;
+		std::array<float, 3> order {}; // the order's point it was placed for
+		std::array<float, 3> tag {};
+	};
+	std::array<OrderTag, 2> m_orderTags;
+	std::function<float(const world::ObjectTemplate&)> m_renderRadius;
 	TagFont m_font;
 	bool m_fontLoaded = false;
 	std::map<int, Tag> m_players; // by player id

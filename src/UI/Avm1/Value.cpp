@@ -148,6 +148,8 @@ double stringToNumber(const std::string& s)
 	return std::strtod(text.c_str(), nullptr);
 }
 
+// gameswf's as_value text (SwiffPlayer.dll 0x100aa6c0: numbers, true / false,
+// functions) is Interpreter::toString with this.
 std::string numberToString(double n, int radix)
 {
 	if (std::isnan(n)) {

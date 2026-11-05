@@ -40,6 +40,9 @@ uint32_t styleCount(BitReader& in, int version)
 	return count;
 }
 
+// gameswf's fill style reader (SwiffPlayer.dll 0x100de960; the morph
+// shape's 0x100d5e80), the style arrays 0x100c4a10 / 0x100c4a90 and the
+// shape records 0x100c5d90.
 bool readFillStyle(BitReader& in, int version, FillStyle& f)
 {
 	f.rawType = in.u8();

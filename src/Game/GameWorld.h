@@ -1446,6 +1446,11 @@ public:
 	// flags 0x1000100, 0x006f4aa0) meets above that; then up by half the
 	// marker's radius (its object's slot 0x8c).
 	float orderMarkerHeight(const physics::Vec3& order, float radius) const;
+	// Where the order's name tag stands (0x005b8b20, handed to the name tag
+	// manager's slot 0x2c): at the order's point when its marker (at
+	// `markerHeight` over the same x and z) is 1.5 m or more from it, else
+	// 1.5 m over the marker.
+	static physics::Vec3 orderTagPoint(const physics::Vec3& order, float markerHeight);
 	// The battlefield-objects report (BF2142.exe event 0x41, server
 	// 0x005088f0 -> IAIEventCourier vt+0xe0, AIDLL 0x1004e5e0 -> 0x100bf000):
 	// `reporter`'s squad now knows of the enemy `players` (and the

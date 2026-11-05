@@ -122,6 +122,17 @@ public:
 	int maxChars = 0;
 	int scroll = 1;
 	size_t caret = 0; // in UTF-8 bytes
+	// DICE's edit-text members (SwiffPlayer.dll 0x100beb00 reads them,
+	// 0x100c1950 sets them):
+	// - tabIndex (+0x154): the field's slot in the Tab order, -1 for none;
+	// - restrict (+0x164): the only characters typing may insert, each
+	//   kept as it is (no ranges or "^" as in Flash); empty for any;
+	// - _maxrows (+0x3c of the definition): a multiline field takes Enter
+	//   only while it holds fewer than _maxrows - 1 line breaks; 0 for no
+	//   limit.
+	int tabIndex = -1;
+	std::u32string restrictChars;
+	int maxRows = 0;
 
 	std::string plainText() const;
 	// Sets the text the way scripts do (and the bound variable).

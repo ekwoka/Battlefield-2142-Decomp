@@ -166,6 +166,9 @@ std::vector<Value> argumentList(Interpreter& vm, const Value& list)
 	return out;
 }
 
+// gameswf's Object: prototype / __proto__ / __constructor__ 0x100bd100 and
+// 0x100bd3c0, addProperty 0x100bd440 / 0x100bd210, registerClass 0x100bd2b0
+// / 0x100bc8d0; _global and its classes 0x100ab8d0.
 void installObject(Interpreter& vm)
 {
 	const ObjectRef& proto = vm.prototypes().object;
@@ -392,6 +395,8 @@ void installGlobalFunctions(Interpreter& vm)
 	vm.defineMethod(global, "getVersion", [](Interpreter&, CallArgs&) -> Value { return Value("WIN 7,0,19,0"); });
 
 	// setInterval(function, ms, args...) or setInterval(object, "method", ms, args...).
+	// gameswf: setInterval 0x100cd300, clearInterval 0x100cd4e0; the intervals
+	// run from the movie's advance (0x100dac50).
 	vm.defineMethod(global, "setInterval", [](Interpreter& vm, CallArgs& c) -> Value {
 		if (c[0].isFunction()) {
 			const std::vector<Value> args(c.args.begin() + std::min<size_t>(2, c.size()), c.args.end());

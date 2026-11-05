@@ -9,8 +9,9 @@
 // the scripted-bot commands (ai.botMoveTo and the rest), which act on the
 // running BotManager. The debug-only commands (ai.draw*, ai.pause*Bots,
 // ai.showAll, ai.getRendCamera*, aiDebug.*, the navigation mesh
-// generator's aiPathfinding.save/load/export*) aren't rewritten: see
-// docs/engine.md, "AIDLL's console".
+// generator's aiPathfinding.save/load/export*) draw, pause or build data
+// offline and have no part in a round: left out, see docs/engine.md,
+// "AIDLL's console".
 #include "Bots.h"
 
 #include "Console/ConsoleBinding.h"

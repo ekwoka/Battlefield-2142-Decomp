@@ -711,9 +711,11 @@ struct Projectile {
 	physics::Vec3 stuckLocal;  // its place in stuckTo's frame
 	physics::Vec3 stuckLocalNormal;
 	physics::Vec3 stuckNormal {0, 1, 0}; // in the world
-	// A round lying (not stuck) on a vehicle: the rewrite's stand-in for
-	// the engine's rigid body resting on it (ResponsePhysics) falls again
-	// once the vehicle moves from under it.
+	// The vehicle a round lies on (not stuck). In the original a resting
+	// round is a ResponsePhysics body in contact with the vehicle; the
+	// rewrite's rounds are points without one (no contact friction to
+	// carry them), so a round lying on a vehicle falls again once the
+	// vehicle moves from under it.
 	uint32_t lyingOn = 0;
 	float age = 0;
 	uint32_t lockedOn = 0; // the vehicle a seeker chases
@@ -789,6 +791,12 @@ struct TriggerCandidate {
 };
 bool radiusTriggerShape(const ProjectileSettings& mine, const physics::Vec3& minePosition, const physics::Mat3& mineFrame,
 	const TriggerCandidate& candidate);
+
+// A round's frame once it sticks (StickyCollisionComp, 0x005e83d0): its
+// up the face's normal, its x axis as near the frame it had as that
+// leaves (z = x x up, x = up x z, up = z x x, each normalised,
+// 0x005a2b60 / 0x004481a0), set as the object's rotation (slot 0x80).
+physics::Mat3 stuckFrame(const physics::Mat3& before, const physics::Vec3& normal);
 
 // A tracer's place and size this frame (0x005b3e60, 0x005b3cb0): `round`
 // the round's position, `velocity` its velocity. Its position is the

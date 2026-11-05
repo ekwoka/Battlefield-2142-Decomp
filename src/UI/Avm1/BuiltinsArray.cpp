@@ -211,6 +211,8 @@ Value sortOn(Interpreter& vm, CallArgs& c)
 
 } // namespace
 
+// gameswf's Array: the class 0x100bc240, its methods' table 0x100bbe10,
+// length 0x100bb470, join 0x100bb570 / 0x100bbab0, splice 0x100bbca0.
 void installArray(Interpreter& vm)
 {
 	const ObjectRef& proto = vm.prototypes().array;

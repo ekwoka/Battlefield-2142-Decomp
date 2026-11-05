@@ -9,6 +9,7 @@
 #include "UI/Player/Player.h"
 #include "UI/Player/Stencil.h"
 
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -569,6 +570,111 @@ TEST(SwfPlayer_Natives)
 	CHECK(vm.toNumber(vm.getMember(list, "m_firstIndex")) == 1);
 	vm.callMember(list, "sortList", {avm1::Value(1), avm1::Value(false)});
 	CHECK(text(player, "holder.0.cell0.text") == "Alpha"); // 64, 32, 16 from the second row
+	CHECK(player.scriptErrors().empty());
+}
+
+// DICE's additions to gameswf that the shipped menus use: a text field's
+// _focus, tabIndex (Tab / Shift+Tab, Logic.enableTab), restrict and
+// _maxrows (0x100beb00 / 0x100c1950 / 0x100c2270), and a clip's
+// onDoublePress for the second press of a double click (0x100cecb0).
+TEST(SwfPlayer_DiceTextFieldsAndDoublePress)
+{
+	Player player;
+	CHECK(player.load(testMovie()));
+	avm1::Interpreter& vm = *player.interpreter();
+	const avm1::Value root(player.root());
+	std::map<std::string, int> calls;
+	const auto counter = [&](const avm1::Value& object, const std::string& name, const std::string& key) {
+		vm.defineMethod(object.object(), name, [&calls, key](avm1::Interpreter&, avm1::CallArgs&) -> avm1::Value {
+			++calls[key];
+			return avm1::Value();
+		});
+	};
+	std::vector<avm1::Value> fields;
+	for (int i = 0; i < 3; ++i) {
+		const std::string name = std::string(1, static_cast<char>('a' + i));
+		vm.callMember(root, "createTextField", {avm1::Value(name), avm1::Value(20 + i), avm1::Value(0), avm1::Value(400 + 30 * i),
+												avm1::Value(200), avm1::Value(20)});
+		const avm1::Value field = player.evaluate(name);
+		CHECK(field.isObject());
+		vm.setMember(field, "type", avm1::Value("input"));
+		vm.setMember(field, "tabIndex", avm1::Value(i + 1));
+		counter(field, "onSetFocus", name + ".onSetFocus");
+		fields.push_back(field);
+	}
+	CHECK(vm.toNumber(player.evaluate("b.tabIndex")) == 2);
+	// _focus = true takes the focus without onSetFocus; _focus reads it.
+	vm.setMember(fields[0], "_focus", avm1::Value(true));
+	CHECK(avm1::toBoolean(player.evaluate("a._focus")) && !avm1::toBoolean(player.evaluate("b._focus")));
+	CHECK(calls["a.onSetFocus"] == 0);
+	// Tab: the next index, with onSetFocus; from the last one, round to the first.
+	player.keyDown(9, 9);
+	player.keyUp(9);
+	CHECK(avm1::toBoolean(player.evaluate("b._focus")) && calls["b.onSetFocus"] == 1);
+	player.keyDown(9, 9);
+	player.keyUp(9);
+	player.keyDown(9, 9);
+	player.keyUp(9);
+	CHECK(avm1::toBoolean(player.evaluate("a._focus")));
+	// Shift+Tab: the previous one, round to the last.
+	player.keyDown(16);
+	player.keyDown(9, 9);
+	player.keyUp(9);
+	player.keyUp(16);
+	CHECK(avm1::toBoolean(player.evaluate("c._focus")));
+	// Logic.enableTab(false): Tab stays in the field.
+	vm.callMember(vm.getMember(vm.getMember(vm.getMember(avm1::Value(vm.global()), "dice"), "bf2"), "Logic"), "enableTab",
+		{avm1::Value(false)});
+	player.keyDown(9, 9);
+	player.keyUp(9);
+	CHECK(avm1::toBoolean(player.evaluate("c._focus")));
+	player.setTabEnabled(true);
+	// _focus = false drops it.
+	vm.setMember(fields[2], "_focus", avm1::Value(false));
+	CHECK(player.focus() == nullptr);
+	// restrict: only its characters are typed; it reads as "".
+	vm.setMember(fields[0], "restrict", avm1::Value("0123 456789"));
+	CHECK(text(player, "a.restrict").empty());
+	vm.setMember(fields[0], "_focus", avm1::Value(true));
+	for (const char c : std::string("x5 y7")) {
+		player.keyDown(std::toupper(c), static_cast<uint32_t>(c));
+		player.keyUp(std::toupper(c));
+	}
+	CHECK(text(player, "a.text") == "57");
+	// _maxrows 2: a multiline field takes one line break.
+	vm.setMember(fields[1], "multiline", avm1::Value(true));
+	vm.setMember(fields[1], "_maxrows", avm1::Value(2));
+	vm.setMember(fields[1], "_focus", avm1::Value(true));
+	for (int i = 0; i < 3; ++i) {
+		player.keyDown(13, 13);
+		player.keyUp(13);
+	}
+	CHECK(text(player, "b.text") == "\n");
+
+	// Double presses on the widget clip (0..100, 0..100).
+	const avm1::Value w = player.evaluate("w");
+	counter(w, "onPress", "press");
+	counter(w, "onDoublePress", "double");
+	counter(w, "onRelease", "release");
+	player.mouseMove(50, 50);
+	const auto click = [&] {
+		player.mouseDown();
+		player.advance(1.0 / 30);
+		player.mouseUp();
+		player.advance(1.0 / 30);
+	};
+	click();
+	CHECK(calls["press"] == 1 && calls["double"] == 0 && calls["release"] == 1);
+	click(); // the second press of the pair: onDoublePress alone, then a release
+	CHECK(calls["press"] == 1 && calls["double"] == 1 && calls["release"] == 2);
+	click(); // a third press starts a new pair
+	CHECK(calls["press"] == 2 && calls["double"] == 1);
+	player.advance(0.6);
+	click(); // too late for a pair
+	CHECK(calls["press"] == 3 && calls["double"] == 1);
+	player.mouseMove(53, 50);
+	click(); // too far for a pair
+	CHECK(calls["press"] == 4 && calls["double"] == 1);
 	CHECK(player.scriptErrors().empty());
 }
 

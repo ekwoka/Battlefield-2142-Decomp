@@ -5,6 +5,7 @@
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
 #include "Game/GameWorld.h"
+#include "Geometry/MeshFile.h"
 #include "IO/File/FileManager.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
@@ -17,6 +18,20 @@
 #include <sstream>
 
 namespace dice::hfe::nametags {
+
+float meshRenderRadius(const geom::MeshFile& mesh)
+{
+	const size_t shown = mesh.geometries.size() > 1 ? 1 : 0;
+	if (shown >= mesh.geometries.size() || mesh.geometries[shown].lods.empty()) {
+		return 0;
+	}
+	const geom::Bounds& box = mesh.geometries[shown].lods[0].bounds;
+	float d2 = 0;
+	for (size_t i = 0; i < 3; ++i) {
+		d2 += (box.max[i] - box.min[i]) * (box.max[i] - box.min[i]);
+	}
+	return 0.5f * std::sqrt(d2);
+}
 
 namespace {
 
@@ -704,11 +719,12 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			if (!v) {
 				return false;
 			}
-			// The render object's height (root +0x44 slot 0x44) isn't
-			// available here: 4 m taken.
-			constexpr float kVehicleHeight = 4;
+			// The root's render object's radius (0x100c26a0's root, +0x44
+			// slot 0x44: RendDX9 0x100c7000, the shown geometry's box radius
+			// about its centre).
+			const float height = m_renderRadius && v->objectTemplate() ? m_renderRadius(*v->objectTemplate()) : 4.0f;
 			at = {v->position().x, v->position().y
-					+ m_settings.vehicleNametagOffsetFactor * kVehicleHeight + m_settings.vehicleNametagOffset,
+					+ m_settings.vehicleNametagOffsetFactor * height + m_settings.vehicleNametagOffset,
 				v->position().z};
 			icon = {v->position().x, v->position().y, v->position().z};
 			return true;
@@ -987,7 +1003,8 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 				orders[i] = hud->squadOrder(me.team, me.squad, i == 1, remote[i]) ? &remote[i] : nullptr;
 			}
 		}
-		for (const game::GameWorld::SquadOrder* order : orders) {
+		for (size_t which = 0; which < 2; ++which) {
+			const game::GameWorld::SquadOrder* order = orders[which];
 			if (!order || order->type == game::GameWorld::OrderType::None) {
 				continue;
 			}
@@ -996,7 +1013,11 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			if (!icon) {
 				continue;
 			}
-			const std::array<float, 3> at {order->position.x, order->position.y + 1.5f, order->position.z};
+			std::array<float, 3> at {order->position.x, order->position.y + 1.5f, order->position.z};
+			const OrderTag& placed = m_orderTags[which];
+			if (placed.set && placed.order == std::array<float, 3> {order->position.x, order->position.y, order->position.z}) {
+				at = placed.tag; // by its marker (0x005b8b20)
+			}
 			const float dx = at[0] - eye.x, dy = at[1] - eye.y, dz = at[2] - eye.z;
 			const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
 			const float alpha = clamp01(1 - distance / kOrderDistance);

@@ -28,6 +28,9 @@ std::string lowered(const std::string& name)
 }
 
 // "_x" -> kPropX, ...
+// gameswf's sprite properties by name (SwiffPlayer.dll 0x100cb930: maxFPS,
+// _x ... _parent, DICE's _isDiagram 0x18 and _isScroller 0x19); their
+// setter is 0x100d1cb0, a button's getter / setter 0x100d9bd0 / 0x100d9ec0.
 int propertyIndex(const std::string& name)
 {
 	static const std::unordered_map<std::string, int> indices = [] {
@@ -207,7 +210,7 @@ bool TextField::hasOwnMember(const std::string& name) const
 	static const char* const names[] = {"text", "htmlText", "html", "textColor", "variable", "autoSize", "maxChars", "multiline",
 		"wordWrap", "selectable", "type", "length", "textWidth", "textHeight", "password", "border", "background",
 		"backgroundColor", "borderColor", "embedFonts", "scroll", "maxscroll", "bottomScroll", "hscroll", "maxhscroll",
-		"restrict", "condenseWhite"};
+		"restrict", "condenseWhite", "tabIndex", "_focus", "_maxrows"};
 	for (const char* n : names) {
 		if (name == n) {
 			return true;
@@ -630,7 +633,14 @@ bool TextField::specialMember(Interpreter& vm, const std::string& member, Value&
 	} else if (member == "hscroll" || member == "maxhscroll") {
 		out = Value(0);
 	} else if (member == "restrict") {
-		out = Value::null();
+		out = Value(""); // 0x100beb00 answers "" whatever was set
+	} else if (member == "_focus") {
+		out = Value(player.focus() == this); // 0x100bd680
+	} else if (member == "tabIndex") {
+		if (tabIndex < 0) {
+			return DisplayObject::specialMember(vm, member, out); // none: not a member (0x100beb00)
+		}
+		out = Value(tabIndex);
 	} else if (member == "condenseWhite") {
 		out = Value(false);
 	} else {
@@ -689,6 +699,29 @@ bool TextField::setSpecialMember(Interpreter& vm, const std::string& member, con
 		field.useOutlines = avm1::toBoolean(v);
 	} else if (member == "scroll") {
 		scroll = std::max(1, static_cast<int>(vm.toNumber(v)));
+	} else if (member == "_focus") {
+		// 0x100c1950: true takes the focus with the caret at the end
+		// (onSetFocus is not called), false drops it if this field had it.
+		auto self = std::static_pointer_cast<TextField>(shared_from_this());
+		if (avm1::toBoolean(v)) {
+			player.setFocus(self, false);
+		} else if (player.focus() == this) {
+			player.setFocus(nullptr, false);
+		}
+	} else if (member == "tabIndex") {
+		player.setTabIndex(*this, static_cast<int>(vm.toNumber(v)));
+	} else if (member == "restrict") {
+		// 0x100c1950: every character of the string but spaces, as it is.
+		restrictChars.clear();
+		if (!v.isNullish()) {
+			for (const char16_t c : avm1::utf8ToUtf16(vm.toString(v))) {
+				if (c != u' ') {
+					restrictChars.push_back(c);
+				}
+			}
+		}
+	} else if (member == "_maxrows") {
+		maxRows = static_cast<int>(std::lround(vm.toNumber(v)));
 	} else if (member == "textWidth" || member == "textHeight" || member == "length" || member == "maxscroll" ||
 		member == "bottomScroll" || member == "maxhscroll") {
 		// read-only

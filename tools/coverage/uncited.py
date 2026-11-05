@@ -1,32 +1,41 @@
 #!/usr/bin/env python3
 """The uncited classifier (uncited.md's `unc/classify.py` + `report.py`).
 
-Every function of BF2142.exe, RendDX9_ori.dll and AIDLL.dll (static_init_*
-left out) gets one label, by the first rule that applies:
+Every function of BF2142.exe, RendDX9_ori.dll, AIDLL.dll and SwiffPlayer.dll
+(static_init_* left out) gets one label, by the first rule that applies:
   1. cited (cite.json; with or without engine.md's appendix, --appendix);
   2. imports and EH thunks -> (a);
   3. console rows (rows.json): each row's constructor and the unique slots of
      the vtables it references take the row's state: impl / stored-read ->
      (c), stub / stored-unread -> (d), or (b) when the name is debug-like.
      template_properties.csv executors are labelled the same way by their
-     property's rows;
+     property's rows. SwiffPlayer has no console rows; its menu natives'
+     bodies take their status in uncited.md's natives table instead
+     (swf.py): bound -> (c), online-only or leaving the game -> (o), dev ->
+     (b), missing -> (d); then swf.py's hand-checked single functions;
   4. third-party library signatures in the strings -> (a);
   5. the hand-checked SDK and CRT address ranges of uncited.md's (a) table
      -> (a) (cited functions inside them stay cited);
   6. editor and dev code (uncited.md's (b) ranges: debug drawers, lightmap
      tools, collision debug, profilers; .con writers; debug / profiler /
      editor strings) -> (b);
-  7. string matching against src (literals and identifiers; stb_image and
-     UI/Avm1 left out): half or more of a function's distinctive strings
+  7. string matching against src (literals and identifiers; stb_image left
+     out, and UI/Avm1 too except for SwiffPlayer, whose built-ins it holds;
+     SwiffPlayer counts identifier-like strings only, swf.py): half or more of a function's distinctive strings
      found -> (c), under a quarter -> (d), else "?". In RendDX9, a function
      with under half found but at least half of its strings D3D9-like (a
      word of the shipped .fx shaders, or effect / shader / sampler text) is
      (c), "D3D9 plumbing, substituted" by the rewrite's GLSL pipeline;
   8. the STL length / iterator throwers and their small (<= 512 B)
      string-less callers -> (a);
-  9. propagation of (c) and (d) for the rest: callee-of (every caller has one label), then
-     vtable siblings (70% agree), then sandwiched between equal labels, then
-     the nearest labelled neighbour.
+  9. propagation of (c) and (d) for the rest: callee-of (every caller has one label;
+     (o) and (u) spread this way too), then vtable siblings (70% agree),
+     then sandwiched between equal labels, then the nearest labelled
+     neighbour.
+Two labels exist for SwiffPlayer only: (o) online-only (the online
+account, BFHQ, buddies, HTTP) and (u) gameswf code the shipped movies
+never reach (sound tags, DefineText, XML, imports). Both are left out of
+the needed code, like (a) and (b).
 Calibration: propagated (c) is discounted by the precision of propagation
 measured when the string-labelled functions are hidden; uncited.md's
 factors (EXE 0.84, RendDX9 0.69, AIDLL 0.48) are reused unless
@@ -35,7 +44,8 @@ factors (EXE 0.84, RendDX9 0.69, AIDLL 0.48) are reused unless
 Output: <out>/<name>.json (per module: the byte buckets, the lower /
 calibrated / upper effective coverage, the (d) runs of --min-run bytes or
 more) and labels_<appendix or --name>_<module>.json;
-the report on stdout.
+the report on stdout. "all three" is the EXE, RendDX9 and AIDLL, as before
+SwiffPlayer was added; SwiffPlayer is reported on its own line.
 """
 import argparse
 import bisect
@@ -48,9 +58,14 @@ import zipfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import common  # noqa: E402
 import extract  # noqa: E402
+import swf  # noqa: E402
 
-MODS = ["BF2142.exe", "RendDX9_ori.dll", "AIDLL.dll"]
-FACTORS = {"BF2142.exe": 0.84, "RendDX9_ori.dll": 0.69, "AIDLL.dll": 0.48}
+MODS = ["BF2142.exe", "RendDX9_ori.dll", "AIDLL.dll", swf.MODULE]
+THREE = MODS[:3]
+# SwiffPlayer's: this classifier's own --recalibrate measurement on the
+# no-audit-docs citations when the module was added (README), kept fixed
+# like the others so that later figures move only with the tree.
+FACTORS = {"BF2142.exe": 0.84, "RendDX9_ori.dll": 0.69, "AIDLL.dll": 0.48, swf.MODULE: 0.83}
 
 LIB_KEYS = [
     # zlib
@@ -84,7 +99,10 @@ RANGES_A = {
     "RendDX9_ori.dll": [(0x10053e80, 0x100638e4), (0x101aa0c0, 0x10300000), (0x101a2070, 0x101a60b0),
                         (0x10005010, 0x10007010)],
     "AIDLL.dll": [(0x10101300, 0x10300000)],
+    swf.MODULE: swf.RANGES_A,
 }
+# online only, out of scope (SwiffPlayer)
+RANGES_O = {swf.MODULE: swf.RANGES_O}
 # uncited.md's (b) blocks: debug drawers, the lightmap tools, collision
 # debug, the profilers
 RANGES_B = {
@@ -92,6 +110,7 @@ RANGES_B = {
     "RendDX9_ori.dll": [(0x10189c30, 0x101aa0b5), (0x1008232f, 0x100854ea),
                         (0x100ff130, 0x1010a6a0)],  # RoadEditable (vtables 0x101d7384 / 0x101d7398)
     "AIDLL.dll": [],
+    swf.MODULE: [],
 }
 DEV_KEYS = [
     "debug", "profil", "editor", "editable", "assert", "_debugmesh_", "coll-", "phy-show", "lightmapgen",
@@ -115,11 +134,11 @@ def norm(s):
     return re.sub(r"[^a-z0-9]+", "_", s.lower()).strip("_")
 
 
-def src_corpus(repo):
+def src_corpus(repo, with_avm1=False):
     lits, idents = set(), set()
     for dirpath, dirnames, filenames in os.walk(os.path.join(repo, "src")):
         rel = os.path.relpath(dirpath, repo).replace("\\", "/")
-        if rel.startswith("src/UI/Avm1"):
+        if rel.startswith("src/UI/Avm1") and not with_avm1:
             continue
         for fn in filenames:
             if "stb_image" in fn or not fn.endswith((".cpp", ".h", ".hpp", ".c", ".inl", ".glsl", ".frag", ".vert", ".py")):
@@ -196,8 +215,17 @@ def any_key(strings, keys):
     return None
 
 
+def module_keys(module):
+    """The library and dev keyword lists for `module`."""
+    if module == swf.MODULE:
+        dev = [k for k in DEV_KEYS if k not in swf.DEV_KEYS_DROP] + swf.DEV_KEYS_ADD
+        return swf.LIB_KEYS, dev
+    return LIB_KEYS, DEV_KEYS
+
+
 def classify(module, repo, out, cited, rows, corpus, fxv, hide_strings=False):
     funcs = common.read_functions(module, repo)
+    lib_keys, dev_keys = module_keys(module)
     feats = extract.load(module, repo, out)
     allf = common.read_functions(module, repo, keep_static_init=True)
     vt = {}
@@ -271,11 +299,18 @@ def classify(module, repo, out, cited, rows, corpus, fxv, hide_strings=False):
                     if good is None:
                         continue
                     put(ex, "c" if good else "d", "template property %s" % r["method"])
+    if module == swf.MODULE:
+        for a, (lab, reason) in swf.natives(repo).items():
+            put(a, lab, reason)
+        for a, (lab, reason) in swf.HAND.items():
+            put(a, lab, "hand-checked: " + reason)
     strings = {int(k, 16): clean_strings(v["s"]) for k, v in feats.items()}
+    if module == swf.MODULE:
+        strings = {a: swf.identifier_strings(ss) for a, ss in strings.items()}
     rawstrings = {int(k, 16): v["s"] for k, v in feats.items()}
     # 4. library signatures
     for a in funcs:
-        k = any_key(rawstrings.get(a, []), LIB_KEYS)
+        k = any_key(rawstrings.get(a, []), lib_keys)
         if k:
             put(a, "a", "library string '%s'" % k)
     # 5. hand-checked ranges
@@ -283,6 +318,10 @@ def classify(module, repo, out, cited, rows, corpus, fxv, hide_strings=False):
         for a in funcs:
             if lo <= a < hi:
                 put(a, "a", "SDK/CRT range 0x%08x" % lo)
+    for lo, hi in RANGES_O.get(module, []):
+        for a in funcs:
+            if lo <= a < hi:
+                put(a, "o", "online range 0x%08x" % lo)
     # 6. editor and dev code
     for lo, hi in RANGES_B.get(module, []):
         for a in funcs:
@@ -293,7 +332,7 @@ def classify(module, repo, out, cited, rows, corpus, fxv, hide_strings=False):
         if any(CON_WRITER_RE.match(s) for s in ss):
             put(a, "b", ".con writer")
             continue
-        k = any_key(ss, DEV_KEYS)
+        k = any_key(ss, dev_keys)
         if k:
             put(a, "b", "dev string '%s'" % k)
     # 7. string matching (distinctive: in at most 8 functions of the module)
@@ -427,15 +466,15 @@ def buckets(funcs, label):
     for a, (n, s) in funcs.items():
         lab = label.get(a, "q")
         key = {"cited": "cited", "c": "c_ev", "c-p": "c_prop", "d": "d_ev", "d-p": "d_prop",
-               "a": "a", "a-p": "a", "b": "b", "b-p": "b", "q": "q"}[lab]
+               "a": "a", "a-p": "a", "b": "b", "b-p": "b", "o": "o", "o-p": "o", "u": "u", "u-p": "u", "q": "q"}[lab]
         b[key] = b.get(key, 0) + s
-    for k in ("cited", "c_ev", "c_prop", "d_ev", "d_prop", "a", "b", "q"):
+    for k in ("cited", "c_ev", "c_prop", "d_ev", "d_prop", "a", "b", "o", "u", "q"):
         b.setdefault(k, 0)
     return b
 
 
 def effective(b, total, factor):
-    needed = total - b["a"] - b["b"]
+    needed = total - b["a"] - b["b"] - b.get("o", 0) - b.get("u", 0)
     c = b["c_ev"] + b["c_prop"]
     d = b["d_ev"] + b["d_prop"]
     share = c / (c + d) if c + d else 0
@@ -459,7 +498,7 @@ def d_runs(funcs, label, why, feats, min_bytes):
             f = feats.get("%08x" % a)
             if lab == "d" and len(cur[3]) < 6:
                 cur[3].append("0x%08x %s" % (a, why.get(a, "")[:120]))
-        elif lab in ("a", "a-p", "b", "b-p", "q"):
+        elif lab in ("a", "a-p", "b", "b-p", "o", "o-p", "u", "u-p", "q"):
             continue  # transparent
         else:
             if cur:
@@ -485,6 +524,7 @@ def main():
     cite = common.load_json(args.cite or os.path.join(out, "cite.json"))
     rows = common.load_json(args.rows or os.path.join(out, "rows.json"))
     corpus = src_corpus(args.repo)
+    corpus_swf = src_corpus(args.repo, with_avm1=True)
     fxv = fx_vocab()
     name = args.name or "uncited_" + args.appendix
     result = {}
@@ -493,12 +533,13 @@ def main():
     for m in MODS:
         key = "cited_with_appendix" if args.appendix == "with" else "cited_without_appendix"
         cited = set(int(a, 16) for a in cite["modules"][m][key])
-        funcs, label, why, sl = classify(m, args.repo, fdir, cited, rows, corpus, fxv)
+        cor = corpus_swf if m == swf.MODULE else corpus
+        funcs, label, why, sl = classify(m, args.repo, fdir, cited, rows, cor, fxv)
         total = sum(s for _, s in funcs.values())
         b = buckets(funcs, label)
         factor = FACTORS[m]
         if args.recalibrate:
-            _, label_h, _, sl_h = classify(m, args.repo, fdir, cited, rows, corpus, fxv, hide_strings=True)
+            _, label_h, _, sl_h = classify(m, args.repo, fdir, cited, rows, cor, fxv, hide_strings=True)
             pc = sum(funcs[a][1] for a in sl if cat(label_h.get(a, "q")) == "c")
             tp = sum(funcs[a][1] for a in sl if cat(label_h.get(a, "q")) == "c" and cat(label[a]) == "c")
             factor = tp / pc if pc else factor
@@ -510,15 +551,18 @@ def main():
         # named by --name when given, so the headings / no-audit runs don't overwrite labels_with_*
         common.save_json(os.path.join(out, "labels_%s_%s.json" % (args.name or args.appendix, m)),
                          {"0x%08x" % a: [label.get(a, "q"), why.get(a, "")] for a in sorted(funcs)})
-        tot["needed"] += e["needed"]
-        tot["lower"] += e["lower"] * e["needed"]
-        tot["cal"] += e["calibrated"] * e["needed"]
-        tot["cited"] += b["cited"]
-        tot["d"] += e["d_calibrated"]
+        if m in THREE:
+            tot["needed"] += e["needed"]
+            tot["lower"] += e["lower"] * e["needed"]
+            tot["cal"] += e["calibrated"] * e["needed"]
+            tot["cited"] += b["cited"]
+            tot["d"] += e["d_calibrated"]
         print("%-16s %7.2fMB %7d %7d %8.1f%% | %5.1f%% %5.1f%% %10.2f %5.1f%% | %6.2fMB  (raw d %d KB, ? %d KB, c ev %d KB, c prop %d KB)"
               % (m, e["needed"] / 1e6, b["a"] // 1024, b["b"] // 1024, 100 * b["cited"] / total, 100 * e["lower"],
                  100 * e["calibrated"], factor, 100 * e["upper"], e["d_calibrated"] / 1e6, e["d_raw"] // 1024,
                  e["q"] // 1024, b["c_ev"] // 1024, b["c_prop"] // 1024))
+        if b["o"] or b["u"]:
+            print("%-16s %s" % ("", "(o) online-only %d KB, (u) unused by the shipped movies %d KB: not needed, like a and b" % (b["o"] // 1024, b["u"] // 1024)))
     print("%-16s %7.2fMB %7s %7s %8.1f%% | %5.1f%% %5.1f%% %10s %6s | %6.2fMB" % (
         "all three", tot["needed"] / 1e6, "", "", 100 * tot["cited"] / tot["needed"], 100 * tot["lower"] / tot["needed"],
         100 * tot["cal"] / tot["needed"], "", "", tot["d"] / 1e6))

@@ -38,6 +38,10 @@ ObjectRef broadcaster(Interpreter& vm, const std::string& name)
 	return object;
 }
 
+// gameswf's Key: the key-code constants 0x100a9270, addListener /
+// removeListener 0x100a74e0 / 0x100a7550 (Mouse's 0x100a79c0 / 0x100a7a30,
+// its object 0x100aa4e0); the player's key and mouse events reach the
+// listeners through 0x100ac400 / 0x100ac500 (Player::keyDown, mouseDown).
 void installKey(Interpreter& vm)
 {
 	const ObjectRef key = broadcaster(vm, "Key");

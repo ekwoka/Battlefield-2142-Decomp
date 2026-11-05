@@ -1226,13 +1226,13 @@ TEST(Weapons_RadiusTriggerShape)
 	soldier.soldier = true;
 	soldier.origin = {0, 0, 2.9f};
 	soldier.velocity = {0, 0, -4};
-	soldier.boxMin = {-0.35f, 0, -0.35f};
-	soldier.boxMax = {0.35f, 1.85f, 0.35f};
+	soldier.boxMin = {-0.4f, 0, -0.4f}; // Soldier_CollisionMesh (0x006e4880): 0.8 x 1.8 m
+	soldier.boxMax = {0.4f, 1.8f, 0.4f};
 	CHECK(game::radiusTriggerShape(mine, {0, 0, 0}, facing, soldier));
 	// The claymore's 30 degrees: ahead within tan 30 x z, less half the box.
 	mine.triggerAngle = 30;
 	mine.triggerMinSpeed = 3.6f;
-	soldier.origin = {1.9f, 0, 2.5f}; // 1.9 - 0.35 = 1.55 > 1.44
+	soldier.origin = {1.9f, 0, 2.5f}; // 1.9 - 0.4 = 1.5 > 1.44
 	CHECK(!game::radiusTriggerShape(mine, {0, 0, 0}, facing, soldier));
 	soldier.origin = {1.7f, 0, 2.5f};
 	CHECK(game::radiusTriggerShape(mine, {0, 0, 0}, facing, soldier));
@@ -1246,6 +1246,26 @@ TEST(Weapons_RadiusTriggerShape)
 	CHECK(game::radiusTriggerShape(mine, {0, 0, 0}, facing, car));
 	car.origin = {1.6f, 0, 2.5f};
 	CHECK(!game::radiusTriggerShape(mine, {0, 0, 0}, facing, car));
+}
+
+// A stuck round's frame (0x005e83d0): up the face's normal, the x axis it
+// had kept as near as the normal allows, z = x x up; the claymore's pyramid
+// then tilts with the slope it lies on.
+TEST(Weapons_StuckFrameFollowsTheFace)
+{
+	const auto near = [](const physics::Vec3& a, const physics::Vec3& b) {
+		return std::fabs(a.x - b.x) < 1e-4f && std::fabs(a.y - b.y) < 1e-4f && std::fabs(a.z - b.z) < 1e-4f;
+	};
+	const physics::Mat3 flat = game::stuckFrame(physics::Mat3 {}, {0, 1, 0});
+	CHECK(near(flat.rows[0], {1, 0, 0}) && near(flat.rows[1], {0, 1, 0}) && near(flat.rows[2], {0, 0, 1}));
+	// A face rising 45 degrees ahead: up leans back, forward climbs, x stays.
+	const float h = std::sqrt(0.5f);
+	const physics::Mat3 slope = game::stuckFrame(physics::Mat3 {}, {0, 2 * h, -2 * h});
+	CHECK(near(slope.rows[0], {1, 0, 0}));
+	CHECK(near(slope.rows[1], {0, h, -h}));
+	CHECK(near(slope.rows[2], {0, h, h}));
+	// A point 3 m along the slope ahead lies on the frame's axis.
+	CHECK(near(slope.untransform({0, 3 * h, 3 * h}), {0, 0, 3}));
 }
 
 // ObjectTemplate.grip's PhysicsGripFlags (0x0051ae29 / 0x0051aaa9): names

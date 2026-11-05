@@ -332,7 +332,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | `BF2142_CONFIG_DIR` | The folder for profiles, settings, stats and demos, instead of `~/Library/Application Support/bf2142-recomp` (`%APPDATA%\bf2142-recomp`, `~/.config/bf2142-recomp`). Point it at a scratch folder for test runs of the menu. |
 | `BF2142_ACCOUNT`, `BF2142_PASSWORD`, `BF2142_SOLDIER`, `BF2142_CDKEY` | Online credentials, instead of `bf2142-online.cfg`. |
 | `BF2142_FRAME_BENCH=<n>` | With `--screenshot`, print the mean cost of n rendered frames. |
-| `BF2142_BOT_SEED=<n>` | The bots' random seed, to compare rounds. |
+| `BF2142_BOT_SEED=<n>` | The bots' random seed, to compare rounds. Without it the seed comes from the clock, as in the original, except under `--simulate`, whose rounds repeat. |
 | `BF2142_BOT_STATS=1` | Per-bot statistics at the end of a run. |
 | `BF2142_SOUND_LOG=1` | Print every sound played. |
 | `BF2142_POST_EFFECT=emp:N\|soldieremp:N\|tinnitus\|tv\|camera\|flash\|camo` | Force one screen effect, for screenshots. |

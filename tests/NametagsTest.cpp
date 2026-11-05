@@ -1,6 +1,7 @@
 // The 3D name tags' rules (src/Main/Nametags: RendDX9's NametagManager,
 // 0x100f0e60, 0x100f0310, 0x100f0be0, 0x100ef210) and their font.
 #include "Main/Nametags.h"
+#include "Geometry/MeshFile.h"
 #include "Game/GameWorld.h"
 #include "Main/HudWorld.h"
 #include "World/Object.h"
@@ -10,6 +11,7 @@
 #include "TestMain.h"
 
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 
@@ -389,4 +391,38 @@ TEST(Nametags_ObjectSupplyBar)
 	CHECK(nametags::objectTagBar(in) < 0);
 	in.showArmor = false;
 	CHECK(nametags::objectTagBar(in) < 0); // neither: not in the pass
+}
+
+// A mesh's render radius (RendDX9 0x100c7000 on the instance 0x100c35c0
+// makes): half the diagonal of the shown geometry's LOD 0 box, geometry 1
+// when there are two or more (0x100c2b00). The order marker's.
+TEST(Nametags_MeshRenderRadius)
+{
+	geom::MeshFile mesh;
+	CHECK(nametags::meshRenderRadius(mesh) == 0);
+	mesh.geometries.resize(1);
+	mesh.geometries[0].lods.resize(1);
+	mesh.geometries[0].lods[0].bounds = {{-1, 0, -2}, {1, 2, 2}};
+	CHECK(std::fabs(nametags::meshRenderRadius(mesh) - std::sqrt(24.0f) * 0.5f) < 1e-5f);
+	mesh.geometries.resize(2); // a 1p and a 3p geometry: the second shows
+	mesh.geometries[1].lods.resize(1);
+	mesh.geometries[1].lods[0].bounds = {{0, 0, 0}, {3, 4, 0}};
+	CHECK(std::fabs(nametags::meshRenderRadius(mesh) - 2.5f) < 1e-5f);
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(dir);
+	files.addSearchPath("mods/bf2142");
+	files.setMountingAllowed(true);
+	files.mountArchive("Objects/Weapons_client.zip", "Objects/Weapons/");
+	std::vector<uint8_t> data;
+	CHECK(files.readFile("Objects/Weapons/Handheld/ordermarker/meshes/ordermarker.bundledmesh", data));
+	const auto marker = geom::parseMesh(data, geom::MeshKind::Bundled);
+	CHECK(marker.has_value());
+	if (marker) {
+		const float r = nametags::meshRenderRadius(*marker);
+		CHECK(std::fabs(r - 0.0815f) < 0.002f); // its two geometries' 0.11 x 0.044 x 0.11 m box
+	}
 }

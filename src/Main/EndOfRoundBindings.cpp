@@ -390,7 +390,6 @@ void EndOfRoundBindings::bindLogic()
 	n.setFunction(kLogic, "isAbortLoadLevel", [](Interpreter&, const Args&) { return Value(false); });
 	n.setFunction(kLogic, "isLoadingDemo", [](Interpreter&, const Args&) { return Value(false); });
 	n.setFunction(kLogic, "getModVersion", [](Interpreter&, const Args&) { return Value("1.51"); });
-	n.setFunction(kLogic, "enableTab", [](Interpreter&, const Args&) { return Value(); });
 	// 0x1003dba0: JOIN GAME (no argument / false) or SPECTATOR (true).
 	n.setFunction(kLogic, "readyToPlay", [this](Interpreter&, const Args& args) {
 		if (onReadyToPlay) {

@@ -28,10 +28,14 @@ constexpr const char* kRagDollScript = "Objects/Soldiers/Common/Animations/ragDo
 // The radius trigger's interval (weapon-detonationTriggerFreq, 0x008e7260:
 // 0.25 s; read by 0x005e9f60).
 constexpr float kDetonationTriggerFrequency = 0.25f;
-// A soldier's box for the trigger's pyramid (the soldier mesh's box, slot
-// 0x54, isn't loaded): the rewrite's stand-in, about the shipped soldiers'.
-constexpr float kSoldierBoxWidth = 0.7f;
-constexpr float kSoldierBoxHeight = 1.85f;
+// A soldier's box for the trigger's pyramid (0x005e8aa0: the collision
+// mesh's slot 0x54(1), its width +0x24 0x00561d30 and height +0x28
+// 0x005a6350). Every soldier template names the built-in
+// Soldier_CollisionMesh, which 0x006e4880 builds without a file: LOD 1 a
+// copy of LOD 0 (0x006e1ea0), whose points span x and z +-0.4 and y -1..0.8
+// about the physics origin, a metre over the feet.
+constexpr float kSoldierBoxWidth = 0.8f;
+constexpr float kSoldierBoxHeight = 1.8f;
 
 float number(const world::ObjectTemplate& t, const char* name, float fallback)
 {
@@ -323,7 +327,7 @@ void ObjectSpawner::update(float seconds, world::ObjectManager& objects, world::
 			}
 		}
 		if (m_settings.useButtonRadius > 0) {
-			continue; // waits for a player to use it (not rewritten; no shipped level sets it)
+			continue; // waits for a player to use it: no shipped level sets useButtonRadius, so none is used
 		}
 		const uint32_t id = spawn(objects, templates);
 		slot = id;
@@ -3603,9 +3607,13 @@ void GameWorld::stepProjectiles(float seconds)
 				return owner && who && who->team == owner->team
 					&& (who->ai || (!m_friendlyFireWithMines && mine.allowFriendlyFireDetonation));
 			};
-			// The mine's frame: lying, its facing; in flight, its heading.
+			// The mine's frame (its matrix, slot 0x7c): stuck, up along the
+			// face's normal with its x axis kept (stuckFrame, 0x005e83d0);
+			// lying, its facing; in flight, its heading.
 			physics::Mat3 frame = physics::Mat3::fromYawPitchRoll({p.yaw, 0, 0});
-			if (!p.resting && !p.stuck && physics::lengthSquared(p.velocity) > 1e-6f) {
+			if (p.stuck) {
+				frame = stuckFrame(frame, p.stuckNormal);
+			} else if (!p.resting && physics::lengthSquared(p.velocity) > 1e-6f) {
 				const physics::Vec3& v = p.velocity;
 				frame = physics::Mat3::fromYawPitchRoll({std::atan2(v.x, v.z) * 57.29578f,
 					-std::atan2(v.y, std::sqrt(v.x * v.x + v.z * v.z)) * 57.29578f, 0});
@@ -3623,8 +3631,7 @@ void GameWorld::stepProjectiles(float seconds)
 					if (!victim.present || !victim.alive || victim.vehicle || spared(&victim)) {
 						continue;
 					}
-					// The soldier's origin (his feet); his box the rewrite's
-					// stand-in (the soldier mesh's box isn't loaded).
+					// The soldier's origin (his feet) and Soldier_CollisionMesh's box.
 					TriggerCandidate c;
 					c.soldier = true;
 					c.origin = victim.body.position - physics::Vec3 {0, 1.0f, 0};
@@ -5555,6 +5562,14 @@ float GameWorld::orderMarkerHeight(const physics::Vec3& order, float radius) con
 		height = std::max(height, probe.y - 100 * hit.fraction);
 	}
 	return height + radius * 0.5f;
+}
+
+physics::Vec3 GameWorld::orderTagPoint(const physics::Vec3& order, float markerHeight)
+{
+	if (std::fabs(markerHeight - order.y) >= 1.5f) {
+		return order;
+	}
+	return {order.x, markerHeight + 1.5f, order.z};
 }
 
 physics::Vec3 GameWorld::dropSpawnSpot(const physics::Vec3& spot, const physics::Vec3& up, float bottom, float top) const

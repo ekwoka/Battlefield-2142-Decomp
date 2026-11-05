@@ -68,7 +68,8 @@ public:
 	// GameLogic.radialLevelIndex (0x004256d0 -> slots 0xc0 / 0xc4: the
 	// settings key GSRadialLevelIndex, clamped to 0..100, 100 when unset):
 	// read only by RendDX9's texture loader (0x10017f20) for the in-game
-	// advertising's "rad_*" textures (IGA, not rewritten): kept.
+	// advertising's "rad_*" textures (IGA, outside the rewrite with the
+	// online back end): kept.
 	int radialLevelIndex = 100;
 	// GameLogic.enableVoHelp (+0x1b5, slot 0x238): the HUD's voice-over
 	// help (event 0x4c, 0x00756b60): kept.

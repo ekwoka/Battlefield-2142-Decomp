@@ -5027,3 +5027,16 @@ TEST(GameWorld_OrderMarkerHeight)
 	world.setWaterLevel(1);
 	CHECK(std::fabs(world.orderMarkerHeight({10, 3.5f, 20}, 1) - 4) < 1e-4f);
 }
+
+// The order's name tag (0x005b8b20 -> the manager's slot 0x2c): at the
+// order's point with its marker 1.5 m or more off, else 1.5 m over the marker.
+TEST(GameWorld_OrderTagByItsMarker)
+{
+	const auto same = [](const physics::Vec3& a, const physics::Vec3& b) {
+		return std::fabs(a.x - b.x) < 1e-4f && std::fabs(a.y - b.y) < 1e-4f && std::fabs(a.z - b.z) < 1e-4f;
+	};
+	CHECK(same(game::GameWorld::orderTagPoint({10, 3, 20}, 3.4f), {10, 4.9f, 20}));  // marker on the point
+	CHECK(same(game::GameWorld::orderTagPoint({10, 3, 20}, 4.49f), {10, 5.99f, 20})); // just under 1.5 m
+	CHECK(same(game::GameWorld::orderTagPoint({10, 3, 20}, 4.5f), {10, 3, 20}));     // a roof 1.5 m up
+	CHECK(same(game::GameWorld::orderTagPoint({10, 3, 20}, 1.0f), {10, 3, 20}));     // the point over water
+}

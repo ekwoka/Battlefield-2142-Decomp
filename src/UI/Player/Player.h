@@ -125,6 +125,10 @@ public:
 	// --- Input (stage pixels; key codes are Flash's, as Key.getCode)
 
 	void mouseMove(float x, float y);
+	// A press within half a second and two pixels of the last one (that was
+	// not itself the second of a pair) is a double press, as Windows makes
+	// it for BF2142's window class (CS_DBLCLKS, 0x00560000's
+	// RegisterClassExA; see mouseDown).
 	void mouseDown();
 	void mouseUp();
 	void mouseWheel(int delta);
@@ -195,7 +199,17 @@ public:
 	void writeVariable(avm1::Interpreter& vm, player::TextField& field);
 	// Text focus (Selection).
 	player::TextField* focus() const;
-	void setFocus(const std::shared_ptr<player::TextField>& field);
+	// `notify`: call the fields' onKillFocus / onSetFocus and Selection's
+	// listeners (a click or Tab does; a script's `_focus = true` doesn't).
+	void setFocus(const std::shared_ptr<player::TextField>& field, bool notify = true);
+	// A text field's tabIndex: its slot in the Tab order (SwiffPlayer.dll
+	// keeps one table for the movie, 0x100be590; a slot holds the last field
+	// given that index, and a field's old slot is freed when it is still
+	// its own, 0x100bddb0).
+	void setTabIndex(player::TextField& field, int index);
+	// dice.bf2.Logic.enableTab (0x1003c180): whether Tab moves the focus
+	// (on at start, 0x1011c9c8).
+	void setTabEnabled(bool enabled) { m_tabEnabled = enabled; }
 	bool keyIsDown(int code) const { return m_keysDown.count(code) > 0; }
 	int lastKeyCode() const { return m_lastKey; }
 	uint32_t lastKeyChar() const { return m_lastChar; }
@@ -268,6 +282,8 @@ private:
 	void clipEventsToAll(uint32_t bits, const char* method, int keyCode = -1);
 	void buttonKeys(player::DisplayObject& from, int buttonKey);
 	void typeIntoFocus(int code, uint32_t charCode);
+	// Tab from the field at tab slot `index`; false if no other field took the focus.
+	bool tabFrom(int index, bool backwards);
 
 	NativeRegistry m_natives;
 	FileReader m_reader;
@@ -309,6 +325,13 @@ private:
 	// Input
 	float m_mouseX = 0, m_mouseY = 0;
 	bool m_mouseIsDown = false;
+	double m_clock = 0; // seconds advanced in all, for double presses
+	struct Press {
+		double time = -1;
+		float x = 0, y = 0;
+	} m_lastPress; // the last single press (none after a double)
+	std::vector<std::weak_ptr<player::TextField>> m_tabOrder; // by tabIndex
+	bool m_tabEnabled = true;
 	std::vector<std::shared_ptr<player::DisplayObject>> m_hover;   // under the mouse, deepest first
 	std::vector<std::shared_ptr<player::DisplayObject>> m_pressed; // pressed, until released
 	std::weak_ptr<player::TextField> m_focus;

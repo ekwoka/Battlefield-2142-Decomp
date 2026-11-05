@@ -1198,7 +1198,9 @@ bool MenuBindings::finishServerQuery()
 
 namespace {
 
-// A server's row (0x10079770's columns).
+// A server's row (SwiffPlayer.dll 0x10079770's columns; the browsers' row
+// fills 0x100760a0 and 0x10077c90 write the same cells, "%d/%d (%d)", and set
+// the row's icons, as `show` in bindLists does).
 std::vector<std::string> serverRow(const ui::NativeRegistry& natives, const net::ServerEntry& e)
 {
 	std::string map = field(e, "mapname");
@@ -1491,6 +1493,45 @@ void MenuBindings::bindLists()
 					{m_natives.localize("TEXT_vehicles")}, {m_natives.localize("TEXT_maps")}});
 		} else if (list.listId == "stats") {
 			m_natives.setListRows(list.listId, statsRows(list.args.empty() ? 0 : std::atoi(list.args[0].c_str())));
+		} else if (list.listId.compare(0, 9, "selectBox") == 0 && !list.args.empty() && list.args[0] == "botSkill") {
+			// SwiffPlayer.dll's select box of the bot skills (0x100653f0 makes
+			// 0x10061310): Easy, Normal, Hard, Normal chosen (+0x28 = 1).
+			m_natives.setListRows("botSkill", ui::NativeRegistry::Rows {{m_natives.localize("HEADER_easy")},
+					{m_natives.localize("HEADER_normal")}, {m_natives.localize("HEADER_hard")}});
+			list.selectedIndex = 1;
+		} else if (list.listId.compare(0, 9, "selectBox") == 0 && !list.args.empty() && list.args[0] == "gameModes") {
+			// The game modes' select box (0x100690b0; filled by 0x10069160,
+			// rows drawn by 0x100689a0): "gameModes <rows> <all>" lists the
+			// mod's game modes (its list +0x10c, each mode once in the order
+			// the level scan meets them; here the levels in name order),
+			// after an "All" row when <all> is 1. A mode shows as its
+			// TEXT_<id> when that has a translation, else its name in the mod
+			// (ModInfo slot 0x48) unless "N/A", else its id. Chosen: "All"
+			// with the row, else the server settings' mode (gpm_cq without
+			// one).
+			const int all = list.args.size() > 2 ? std::max(0, std::atoi(list.args[2].c_str())) : 0;
+			const std::vector<std::string> modes = selectBoxGameModes();
+			ui::NativeRegistry::Rows rows;
+			if (all > 0) {
+				rows.push_back({m_natives.localize("HEADER_all")});
+			}
+			for (const std::string& mode : modes) {
+				const std::string key = "TEXT_" + mode;
+				std::string text = m_natives.localize(key);
+				if (text == key) {
+					const std::string name = gameModeName ? gameModeName(mode) : std::string("N/A");
+					text = name == "N/A" ? mode : name;
+				}
+				rows.push_back({text});
+			}
+			m_natives.setListRows("gameModes", rows);
+			list.selectedIndex = 0;
+			if (all == 0) {
+				const auto setting = m_settings.find("ServerSettings.GameMode");
+				std::string current = setting != m_settings.end() && setting->second.isString() ? setting->second.asString() : std::string();
+				const auto chosen = std::find(modes.begin(), modes.end(), current.empty() ? std::string("gpm_cq") : current);
+				list.selectedIndex = chosen == modes.end() ? -1 : static_cast<int>(chosen - modes.begin());
+			}
 		}
 		show(vm, list);
 		return Value(false); // the others are filled at once
@@ -1512,6 +1553,19 @@ void MenuBindings::bindLists()
 			const MenuMap& map = maps[static_cast<size_t>(index)];
 			vm.setMember(Value(object), "rowIndex", Value(index));
 			vm.setMember(Value(object), "rowData", Value(map.level + " " + std::to_string(map.size)));
+			return Value(object);
+		}
+		// The game modes' select box (0x10068d90): the mode's index after
+		// the "All" row, its shown name and its id ("all" for that row).
+		if (list.listId.compare(0, 9, "selectBox") == 0 && !list.args.empty() && list.args[0] == "gameModes") {
+			const int all = list.args.size() > 2 ? std::max(0, std::atoi(list.args[2].c_str())) : 0;
+			const std::vector<std::string> modes = selectBoxGameModes();
+			auto object = vm.newObject();
+			const int mode = index - all;
+			vm.setMember(Value(object), "rowIndex", Value(mode));
+			vm.setMember(Value(object), "rowValue", Value(list.rows()[static_cast<size_t>(index)].at(0)));
+			vm.setMember(Value(object), "rowData",
+				Value(mode < 0 ? std::string("all") : mode < static_cast<int>(modes.size()) ? modes[static_cast<size_t>(mode)] : std::string()));
 			return Value(object);
 		}
 		// The select boxes' rows: their index and text (the drop list's
@@ -2268,6 +2322,17 @@ double MenuBindings::setting(const std::string& name, double fallback) const
 		return std::atof(v.asString().c_str());
 	}
 	return fallback;
+}
+
+std::vector<std::string> MenuBindings::selectBoxGameModes() const
+{
+	std::vector<std::string> modes;
+	for (const MenuMap& map : m_maps) { // sorted by level, then mode
+		if (!map.gameMode.empty() && std::find(modes.begin(), modes.end(), map.gameMode) == modes.end()) {
+			modes.push_back(map.gameMode);
+		}
+	}
+	return modes;
 }
 
 void MenuBindings::setDisplayModes(const std::vector<std::string>& modes)

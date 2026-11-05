@@ -139,6 +139,9 @@ void Player::reset()
 	m_hover.clear();
 	m_pressed.clear();
 	m_focus.reset();
+	m_tabOrder.clear();
+	m_tabEnabled = true;
+	m_lastPress = Press();
 	m_drag = Drag();
 	m_classes.clear();
 	m_root.reset();
@@ -255,6 +258,7 @@ void Player::advance(double seconds)
 	advanceVideos(std::max(0.0, seconds));
 	m_scroller.addTime(std::max(0.0, seconds));
 	m_time += std::max(0.0, seconds);
+	m_clock += std::max(0.0, seconds);
 	const double period = 1.0 / m_frameRate;
 	// At most a second's worth per call; a longer stall is dropped.
 	const int most = std::max(1, static_cast<int>(std::lround(m_frameRate)));
@@ -520,6 +524,8 @@ void Player::applyPlace(DisplayObject& object, const PlaceRecord& r, bool fresh)
 	}
 }
 
+// gameswf's display list: add 0x100cb870, move 0x100dfc30, remove
+// 0x100dfcf0; drawn by 0x100dfdd0 (masks, the scroller).
 void Player::place(Clip& parent, const PlaceRecord& r)
 {
 	auto existing = parent.childAt(r.depth);
@@ -946,6 +952,7 @@ void Player::syncTextFields()
 
 // --- Images
 
+// gameswf's loadMovie of an image (0x100cbf60: _____image, _____image_shape).
 bool Player::loadImage(Clip& clip, const std::string& url)
 {
 	if (url.empty()) {
@@ -1069,7 +1076,7 @@ void Player::stopDrag() { m_drag.object.reset(); }
 
 TextField* Player::focus() const { return m_focus.lock().get(); }
 
-void Player::setFocus(const std::shared_ptr<TextField>& field)
+void Player::setFocus(const std::shared_ptr<TextField>& field, bool notify)
 {
 	auto old = m_focus.lock();
 	if (old == field) {
@@ -1078,6 +1085,9 @@ void Player::setFocus(const std::shared_ptr<TextField>& field)
 	m_focus = field;
 	if (field) {
 		field->caret = field->value.size();
+	}
+	if (!notify) {
+		return;
 	}
 	const Value oldValue = old ? Value(old) : Value::null();
 	const Value newValue = field ? Value(field) : Value::null();
@@ -1088,6 +1098,57 @@ void Player::setFocus(const std::shared_ptr<TextField>& field)
 		m_vm->callMethod(field, "onSetFocus", {oldValue});
 	}
 	broadcast("Selection", "onSetFocus", {oldValue, newValue});
+}
+
+void Player::setTabIndex(TextField& field, int index)
+{
+	// 0x100c1950's tabIndex: the old slot is freed if it still holds this
+	// field (0x100bddb0), then the new one takes it (0x100be590).
+	const size_t old = static_cast<size_t>(field.tabIndex);
+	if (field.tabIndex >= 0 && old < m_tabOrder.size() && m_tabOrder[old].lock().get() == &field) {
+		m_tabOrder[old].reset();
+	}
+	field.tabIndex = index;
+	if (index < 0) {
+		return;
+	}
+	if (static_cast<size_t>(index) >= m_tabOrder.size()) {
+		m_tabOrder.resize(static_cast<size_t>(index) + 1);
+	}
+	m_tabOrder[static_cast<size_t>(index)] = std::static_pointer_cast<TextField>(field.shared_from_this());
+}
+
+bool Player::tabFrom(int index, bool backwards)
+{
+	// 0x100bdd10 (Tab): the next filled slot after `index`, else from slot 0
+	// up to it; 0x100bdd60 (Shift+Tab): the previous one before it, else
+	// from the end down to it. The field found takes the focus as a click
+	// gives it (0x100bdf50: caret at the end, onSetFocus called).
+	const int count = static_cast<int>(m_tabOrder.size());
+	const auto at = [&](int i) { return m_tabOrder[static_cast<size_t>(i)].lock(); };
+	std::vector<int> order;
+	if (!backwards) {
+		for (int i = index + 1; i < count; ++i) {
+			order.push_back(i);
+		}
+		for (int i = 0; i < std::min(index, count); ++i) {
+			order.push_back(i);
+		}
+	} else {
+		for (int i = std::min(index, count) - 1; i >= 0; --i) {
+			order.push_back(i);
+		}
+		for (int i = count - 1; i > index; --i) {
+			order.push_back(i);
+		}
+	}
+	for (const int i : order) {
+		if (auto field = at(i); field && !field->removed) {
+			setFocus(field);
+			return true;
+		}
+	}
+	return false;
 }
 
 // --- Mouse
@@ -1214,6 +1275,10 @@ void Player::updateHover(const Chain& now)
 	}
 }
 
+// gameswf: a sprite's button events (0x100cecb0's state machine, sent
+// through on_event 0x100cf690; the handler names that make a clip a
+// button 0x100cb710, the event names 0x100a4f20); a button character's
+// 0x100d9710.
 void Player::mouseEvent(DisplayObject& object, uint32_t clipBits, const char* method, uint16_t buttonConditions, uint8_t buttonState)
 {
 	if (object.removed) {
@@ -1276,6 +1341,15 @@ void Player::mouseDown()
 	if (!m_root) {
 		return;
 	}
+	// The second press of a double click: BF2142's window procedure
+	// (0x00401570) hands WM_LBUTTONDBLCLK to the menu (slot 0x5c,
+	// 0x00486600), which queues mouse state 2 for SwiffPlayer (0x10009e70).
+	// Windows makes one when a press follows the last within the double-
+	// click time (500 ms by default) and the 4 x 4 pixel box around it; the
+	// press after it starts a new pair.
+	const bool doublePress = m_lastPress.time >= 0 && m_clock - m_lastPress.time <= 0.5 &&
+		std::abs(m_mouseX - m_lastPress.x) <= 2 && std::abs(m_mouseY - m_lastPress.y) <= 2;
+	m_lastPress = doublePress ? Press() : Press {m_clock, m_mouseX, m_mouseY};
 	broadcast("Mouse", "onMouseDown");
 	clipEventsToAll(kClipEventMouseDown, "onMouseDown");
 	const Chain now = pickAt(m_mouseX, m_mouseY);
@@ -1288,7 +1362,15 @@ void Player::mouseDown()
 		}
 		m_pressed = now;
 		for (const auto& object : now) {
-			mouseEvent(*object, kClipEventPress, "onPress", swf::kCondOverUpToOverDown, swf::kButtonDown);
+			// A clip acting as a button gets onDoublePress for the second
+			// press of a pair, and no onPress (0x100cecb0: mouse state 2 sends
+			// event 0x15 alone); its release is a release as always. Buttons
+			// take it as a press (0x100d9710 tests the state for non-zero).
+			if (doublePress && object->kind == Kind::Clip) {
+				mouseEvent(*object, 0, "onDoublePress", swf::kCondOverUpToOverDown, swf::kButtonDown);
+			} else {
+				mouseEvent(*object, kClipEventPress, "onPress", swf::kCondOverUpToOverDown, swf::kButtonDown);
+			}
 		}
 	}
 	runActions();
@@ -1390,6 +1472,11 @@ void Player::typeIntoFocus(int code, uint32_t charCode)
 	if (!field || !field->input) {
 		return;
 	}
+	// Tab, Shift+Tab: the next or previous field of the Tab order, when Tab
+	// is enabled and this field has a positive tabIndex (0x100c2270).
+	if (code == 9 && m_tabEnabled && field->tabIndex > 0 && tabFrom(field->tabIndex, keyIsDown(16))) {
+		return;
+	}
 	std::string text = field->plainText();
 	size_t caret = std::min(field->caret, text.size());
 	bool changed = false;
@@ -1414,13 +1501,18 @@ void Player::typeIntoFocus(int code, uint32_t charCode)
 	} else if (code == 35) {
 		caret = text.size();
 	} else if (charCode == 13 || charCode == 10) {
-		if (field->field.multiline) {
+		// 0x100c2270: a line break only while the field holds fewer than
+		// _maxrows - 1 of them (0x100be980 counts '\n' and '\r').
+		const auto breaks = std::count_if(text.begin(), text.end(), [](char c) { return c == '\n' || c == '\r'; });
+		if (field->field.multiline && (field->maxRows == 0 || breaks + 1 < field->maxRows)) {
 			text.insert(caret, "\n");
 			++caret;
 			changed = true;
 		}
 	} else if (charCode >= 32 && charCode != 127) {
-		if (field->maxChars <= 0 || static_cast<int>(avm1::utf16Length(text)) < field->maxChars) {
+		// restrict: only its characters go in (0x100c14b0).
+		const bool allowed = field->restrictChars.empty() || field->restrictChars.find(charCode) != std::u32string::npos;
+		if (allowed && (field->maxChars <= 0 || static_cast<int>(avm1::utf16Length(text)) < field->maxChars)) {
 			std::string typed;
 			appendUtf8(typed, charCode);
 			text.insert(caret, typed);
@@ -1832,6 +1924,11 @@ void Player::installDefaults()
 	});
 	n.setDefaultFunction("dice.bf2.Logic", "eraseStorageString", [this, arg](Interpreter& vm, const std::vector<Value>& args) {
 		m_storage.erase(vm.toString(arg(args, 0)));
+		return Value();
+	});
+	// 0x1003c180: Tab moves the text focus (Player::typeIntoFocus) or not.
+	n.setDefaultFunction("dice.bf2.Logic", "enableTab", [this, arg](Interpreter&, const std::vector<Value>& args) {
+		m_tabEnabled = avm1::toBoolean(arg(args, 0));
 		return Value();
 	});
 	n.setDefaultFunction("dice.bf2.Mouse", "insideMovieClip", [this, arg](Interpreter&, const std::vector<Value>& args) {

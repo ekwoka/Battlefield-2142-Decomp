@@ -175,6 +175,34 @@ There is no zlib (gameswf's "TU_CONFIG_LINK_TO_ZLIB is 0") and no statically lin
   - Unbound, almost all online: BuddySystem (0 / 12); dice.General (0 / 13: the server lists' revisions, filters and HTTP downloads); Mod (1 / 13: mod switching); Multiplay 22 / 80 (favourites, the map list, the server ids); Profile 54 / 93 (the online account, search and compare); PlayerStats 2 / 5 (the leaderboards).
   - Also unbound: Cursor (0 / 3) and Singleplay (0 / 3: chooseMission / get- / setBotSkills). The README's menu walk does reach Singleplay, so either they are bound through strings the check doesn't see or the menu manages without them. This wasn't traced.
 
+### 1d. SwiffPlayer.dll: the second pass (folded into `uncited.py`)
+
+§3b-5 is done. `tools/coverage/uncited.py` now measures SwiffPlayer like the other three modules. Its own inputs are in `tools/coverage/swf.py`; the method is in tools/coverage/README.md. In short:
+- hand-checked library ranges;
+- the menu natives' bodies labelled by uncited.md's natives table, as the EXE's console rows are;
+- hand-checked single functions: replaced by design, online-only, or never reached by the shipped movies;
+- two buckets left out of the needed code like (a) and (b): (o) online-only and (u) unused;
+- a fixed factor of 0.83, this classifier's own measurement.
+
+The pass also implemented what the shipped menus show or do and the rewrite didn't, and cited src/UI's existing counterparts of gameswf. Details are in uncited.md, "SwiffPlayer.dll: gameswf and the classifier":
+- the list rows' onDoublePress;
+- text fields' `_focus`, `tabIndex` with Tab / Shift+Tab and `Logic.enableTab`, `restrict` and `_maxrows`;
+- the create-server page's GAME MODE drop list, which was empty, and the bot skill select box.
+
+| SwiffPlayer.dll (no audit docs) | Needed | Cited, of needed | Lower | **Calibrated** | Upper | (d) calibrated | Raw (d) |
+|---|---|---|---|---|---|---|---|
+| first pass (§1c, scratch wrapper, factor 0.55) | 0.73 MB | 17.5% | 28.8% | 62.4% | 87.2% | 0.28 MB | 91 KB |
+| **`uncited.py`, this tree** (factor 0.83) | 0.62 MB | 39.1% | 52.1% | **91.3%** | 99.3% | 0.05 MB | 4.4 KB |
+
+- Left out of the needed code: (a) 193 KB, (b) 4.5 KB, (o) online-only 105 KB, (u) unused by the shipped movies 10 KB.
+- With the first pass's factor (0.55), the calibrated figure is 78%. The two factors bracket it at **≈ 78–91%**, against §1c's ≈ 44–62%.
+- Citations without audit docs went from 160 KB to 241 KB.
+- No (d) run of 2 KB is left. The 4.4 KB that remain:
+  - the nine missing natives;
+  - the server info rows (SERVERINFO_*; LAN servers only, offline);
+  - the `#HH#:#MM#` time cells of the stats and end-of-round rows.
+- The figures for the EXE, RendDX9 and AIDLL are unchanged by the tool change: run on the same inputs, they match the previous `uncited.py` digit for digit. Don't add SwiffPlayer to the three-module total.
+
 ## 2. The largest remaining unrewritten or unclassified runs
 
 ### 2a. Missing ((d) runs, no audit docs, ≥ 2 KB)
@@ -290,6 +318,8 @@ Since coverage-7:
    - `Projectile::lyingOn` (Weapons.h:714);
    - the overhead camera's speed factor;
    - the bots' seed when the script gives none (`0x2545f491` in place of the clock, Bots.cpp:758, where `0x100309a0` takes the clock × 10⁶).
+
+   Since (2026-11-05; `hedges.py` 241 → 227 with the other changes then in the tree): the soldier's box is Soldier_CollisionMesh's LOD 1 (0.8 × 1.8 m, `0x006e4880`); the mine's frame follows the face once stuck (`0x005e83d0`); the bots' seed comes from the game clock (`0x0089f470` → `0x0065c270`) except under `--simulate` and the tests; the order marker's radius and the vehicles' tag height are RendDX9's instance radius (`0x100c7000`); the order tag stands by its marker (`0x005b8b20`); BBRevive skips drowned bodies (`0x10082760`); `lyingOn` is reworded as settled. The overhead camera's speed factor is unchanged.
 5. **SwiffPlayer: a second pass.**
    - Hand-check the propagated (c) of gameswf's core.
    - Add `swf_classify.py`'s ranges and rules to `uncited.py`, so later audits measure the module without a wrapper.
@@ -356,7 +386,7 @@ One documented divergence (#2) is a stand-in that the code already names: the cl
    Later audits should compare with the corrected line.
 2. **Inert bindings count as implemented.** InertRows.cpp registers 37 rows as `ConsoleMethod::stub` no-ops. The probe can't tell them from real bindings, so +45 probe names and "0 unimplemented methods" overstate the change in behaviour. The rows are settled one by one in uncited.md, so the classification is right; only the counts' meaning moved.
 3. **The no-audit classifier still can't see uncited.md's classifications** (coverage-7 §5.2). The (d) runs of §2a are classified there but count as missing in `uncited_noaudit`.
-4. **SwiffPlayer's figure depends on the string rule** by 18 points (section 1c). It is the first pass, from a scratch wrapper, with its own factor (0.55) rather than a reused one. Don't add it to the three-module total.
+4. **SwiffPlayer's figure depends on the string rule** by 18 points (section 1c). It is the first pass, from a scratch wrapper, with its own factor (0.55) rather than a reused one. Don't add it to the three-module total. Superseded by §1d: `uncited.py` measures the module now.
 5. **The RendDX9 IGA run is re-bounded** (`0x10053c80` → `0x10053e00`) by a citation at its head. It is the same (a) block.
 6. **Carried over:**
    - The level runs print only the top 25 stubs (now moot: there are none).

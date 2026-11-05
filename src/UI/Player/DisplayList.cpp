@@ -101,6 +101,8 @@ void MovieClip::remove(uint16_t depth) { m_displayList.erase(depth); }
 
 // PlaceObject2: flags (clip actions, clip depth, name, ratio, colour
 // transform, matrix, character, move), depth, then what the flags say.
+// gameswf's PlaceObject2 (SwiffPlayer.dll 0x100b5820) with its clip actions
+// (swf_event::read 0x100b38e0).
 PlaceRecord parsePlaceObject(const SwfTag& tag, const std::vector<uint8_t>& swf)
 {
 	PlaceRecord r;
@@ -168,6 +170,7 @@ PlaceRecord parsePlaceObject(const SwfTag& tag, const std::vector<uint8_t>& swf)
 	return r;
 }
 
+// gameswf's RemoveObject2 (0x100b14c0).
 uint16_t removedDepth(const SwfTag& tag, const std::vector<uint8_t>& swf)
 {
 	swf::BitReader in(swf.data() + tag.offset, tag.length);

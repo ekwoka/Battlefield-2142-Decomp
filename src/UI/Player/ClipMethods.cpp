@@ -155,6 +155,8 @@ void Player::installBuiltins()
 		vm.defineMethod(proto, name, std::move(callback));
 	};
 
+	// gameswf's MovieClip methods (SwiffPlayer.dll 0x100cd5a0: play, stop,
+	// gotoAndStop, gotoAndPlay, nextFrame, loadMovie, ...).
 	method(mc, "play", [](Interpreter&, CallArgs& c) -> Value {
 		if (Clip* clip = asClip(c)) {
 			clip->playing = true;
@@ -167,6 +169,7 @@ void Player::installBuiltins()
 		}
 		return Value();
 	});
+	// gameswf 0x100ca870 (gotoAndPlay), 0x100ca950 (gotoAndStop).
 	method(mc, "gotoAndPlay", [&self](Interpreter& vm, CallArgs& c) -> Value {
 		if (Clip* clip = asClip(c)) {
 			gotoArg(self, vm, *clip, c[0], true);
@@ -191,6 +194,7 @@ void Player::installBuiltins()
 		}
 		return Value();
 	});
+	// gameswf 0x100cab20 (attachMovie: name, new name, depth).
 	method(mc, "attachMovie", [&self](Interpreter& vm, CallArgs& c) -> Value {
 		Clip* clip = asClip(c);
 		if (!clip || c.size() < 3) {
@@ -200,6 +204,7 @@ void Player::installBuiltins()
 			c[3].object());
 		return object ? Value(object) : Value();
 	});
+	// gameswf 0x100cc420 (createEmptyMovieClip: name, depth).
 	method(mc, "createEmptyMovieClip", [&self](Interpreter& vm, CallArgs& c) -> Value {
 		Clip* clip = asClip(c);
 		if (!clip || c.size() < 2) {
@@ -220,6 +225,7 @@ void Player::installBuiltins()
 		field->matrix.ty = static_cast<float>(bounds.yMin);
 		return Value(field);
 	});
+	// gameswf 0x100caa30 (duplicateMovieClip).
 	method(mc, "duplicateMovieClip", [&self](Interpreter& vm, CallArgs& c) -> Value {
 		DisplayObject* object = asObject(c);
 		if (!object || c.size() < 2) {
@@ -334,6 +340,7 @@ void Player::installBuiltins()
 	method(mc, "localToGlobal", convertPoint(true));
 	method(mc, "globalToLocal", convertPoint(false));
 	// The clip is cut to the mask's bounding box (Clip::draw); the mask is not drawn.
+	// gameswf 0x100ca380 (setMask).
 	method(mc, "setMask", [](Interpreter&, CallArgs& c) -> Value {
 		Clip* clip = asClip(c);
 		if (!clip) {
@@ -348,6 +355,7 @@ void Player::installBuiltins()
 		}
 		return Value();
 	});
+	// gameswf 0x100cbf60 (loadMovie: an image becomes the clip's _____image).
 	method(mc, "loadMovie", [&self](Interpreter& vm, CallArgs& c) -> Value {
 		if (Clip* clip = asClip(c)) {
 			self.loadImage(*clip, vm.toString(c[0]));
@@ -407,6 +415,8 @@ void Player::installBuiltins()
 		method(mc, name, [](Interpreter&, CallArgs&) -> Value { return Value(); });
 	}
 
+	// gameswf's drawing API: 0x100cc810 (beginFill, beginGradientFill's
+	// matrixType box, lineStyle), lineTo 0x100cce90, moveTo 0x100ccfd0.
 	// Drawing API: paths into the clip's own shape, drawn under its children.
 	method(mc, "clear", [](Interpreter&, CallArgs& c) -> Value {
 		if (Clip* clip = asClip(c)) {
@@ -625,6 +635,7 @@ void Player::installBuiltins()
 		return Value(vm.newArray());
 	});
 
+	// gameswf's Key.isDown 0x100a6260.
 	// ===== Key
 	const ObjectRef key = member(vm, vm.global(), "Key");
 	if (key) {
@@ -686,6 +697,8 @@ void Player::installBuiltins()
 		});
 	}
 
+	// gameswf's Color: the class 0x100d56e0, getRGB / setRGB 0x100d55d0 and
+	// 0x100d54d0.
 	// ===== Color(target): a clip's colour transform
 	const ObjectRef colorProto = vm.newObject();
 	auto color = vm.newClass(

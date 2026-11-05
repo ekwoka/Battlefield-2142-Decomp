@@ -3925,6 +3925,27 @@ TEST(Bots_DriverBacksOffInsideMinRange)
 	CHECK(same(game::backOffSpot(o, {1, 0, 0}, 20, 30, [](const physics::Vec3& p) { return p.x < 15; }), {10, 0, -12}));
 }
 
+// BBRevive leaves out a body in deep water (0x10082760): under 0.5 m over
+// the surface where it is more than 0.75 m deep.
+TEST(Bots_ReviveSkipsDrownedBodies)
+{
+	CHECK(game::bodyUnderWater(-1.5f, 0, -2));   // lying 2 m deep
+	CHECK(!game::bodyUnderWater(0.5f, 0, -2));   // on a deck 0.5 m over it
+	CHECK(!game::bodyUnderWater(-0.5f, 0, -0.7f)); // a shallow ford
+	CHECK(game::bodyUnderWater(0.4f, 0, -0.8f));
+}
+
+// The AI's clock seed (0x100309a0 with the word 0): the game clock's
+// seconds x 1e6, rounded, the low 32 bits; the tests' word repeats.
+TEST(Bots_SeedFromTheClock)
+{
+	CHECK(game::clockSeedWord(0) == 0);
+	CHECK(game::clockSeedWord(1.5) == 1500000u);
+	CHECK(game::clockSeedWord(0.0000004) == 0 && game::clockSeedWord(0.0000006) == 1);
+	CHECK(game::clockSeedWord(5000.0) == static_cast<uint32_t>(5000000000ull)); // past 2^32: the low word
+	CHECK(game::botRandomSeed(false) == game::botRandomSeed(false));
+}
+
 // BF2142_BOT_SEED (Bots.cpp, BotManager's constructor) starts the bots' own
 // draws elsewhere: the same seed plays the same round twice over, tick for
 // tick; another seed plays a different one.

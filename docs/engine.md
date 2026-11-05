@@ -7895,8 +7895,14 @@ answers the sight lines and the seats):
 ColorArray for player and object tags (types 0 and 3) is the table at
 `0x102112f8` the NametagManager's constructor fills (`0x100f24c0`):
 white, red (0.87, 0.094, 0.094), blue (0.254, 0.552, 0.89), green (74,
-227, 37 / 255), yellow (1, 1, 0). Guesses: the soldier's origin 1 m over its feet, the vehicle height (4 m; RendDX9 asks
-the render object), the bar's place.
+227, 37 / 255), yellow (1, 1, 0). The soldier's origin is 1 m over its
+feet (the built-in Soldier_CollisionMesh, `0x006e4880`: the feet at −1).
+The vehicle's "height" is its root's render object's radius (`0x100c26a0`
+the root, `+0x44` slot `0x44`: RendDX9 `0x100c7000`, the shown
+geometry's box radius about its centre, as for the order markers;
+`Nametags::setRenderRadius`), taken at LOD 0 (the instance's LOD,
+`+0x274`, follows the camera's distance). Not determined: the bar's
+place.
 
 The icons come from `Menu/Nametag/nametags.con`, which the HUD manager's
 set-up (`0x0075cfa0`) runs after HudSetupMain.con: `nametags.createIcon
@@ -8546,8 +8552,14 @@ HUD's object markers (`Bf2ObjectMarkerNode`) show the state.
   - then nothing in the way to the origin (`0x006f2530`; a soldier tried
     again to his body, bone 2), and a speed (the whole velocity) of at
     least `triggerVictimMinSpeed`.
-  The rewrite's soldier box is a stand-in (0.7 × 1.85 m); the mine's
-  frame is its facing lying, its heading in flight.
+  A soldier's box is his collision mesh's LOD 1 (slot `0x54(1)`): every
+  soldier names the built-in Soldier_CollisionMesh, which `0x006e4880`
+  builds without a file (LOD 1 a copy of LOD 0, `0x006e1ea0`: x and z
+  ±0.4 m, y −1..0.8 m about the physics origin), so 0.8 m wide and 1.8 m
+  high. The mine's frame is its matrix (slot `0x7c`): once stuck (the
+  anti-personnel mine sticks to faces within 45°), up along the face's
+  normal with its x axis kept (`0x005e83d0`, `game::stuckFrame`); lying,
+  its facing; in flight, its heading.
 - **C4:** it has neither a trigger nor a fuse to speak of (9999 s), so its
   owner sets it off with alternate fire (the right mouse button). It has
   no radius of its own: the detonation's default, 10 m.
@@ -8795,7 +8807,8 @@ keep their own one-per-owner paths).
   turret's bundle); the vehicle gone, it falls again (the engine's case
   isn't traced). A round only lying on a vehicle (not stuck: the mines
   have stickToVehicles 0) falls again once the vehicle moves from under
-  it (`Projectile::lyingOn`, a stand-in for the engine's rigid body). The
+  it (`Projectile::lyingOn`: the rewrite's rounds are points, not the
+  engine's ResponsePhysics bodies resting in contact with the hull). The
   engine's place along the normal (a constant `*0x00a6fe94`, or the
   geometry's lowest y, plus a dot product) is 0.01 m here. Placed hubs,
   beacons and shields aren't thrown in the rewrite (set down a metre
@@ -11140,12 +11153,19 @@ terrain (slot `0x68`), or the hit of a ray 100 m down through the static
 objects (the scene's slot `0x68`, flags `0x1000100`) when higher; then up
 by half the marker object's radius (slot `0x8c`)
 (`GameWorld::orderMarkerHeight`). These Bundles have no collision mesh,
-so the radius is the render object's: the rewrite takes half the
-diagonal of the mesh's first LOD box as the file stores it (a stand-in:
-the bundled mesh's radius getter isn't traced). The order's name tag
-then stands at the order's point when the marker is 1.5 m or more from
-it, else 1.5 m over the marker (the manager's slot `0x2c`); the rewrite's
-tag stays 1.5 m over the order's point (Nametags.cpp).
+so the radius (`0x006f7ec0`) is the render object's (slot `0x44`) plus
+the geometry template's slot `0xe4` (the BundledMesh's `0x100a7da0`: 0):
+RendDX9's BundledMesh instance (vtable `0x101d5400`, `0x100c35c0`)
+answers with its box's radius about the centre (`0x100c7000`: `+0x268`'s
+box, `+0x1c`), half the diagonal of the LOD box the file stores, for the
+geometry it shows when made (1 when the mesh has two or more,
+`0x100c2b00`, else 0) at LOD 0 (`0x100c3260`). The getter also takes the
+larger of that and each child's radius plus its offset; the marker's
+child, an EffectBundle (`0x0097b658`) of particle systems, would add
+its emitters' radii, which the rewrite doesn't keep (the mesh's alone).
+The order's name tag then stands at the order's point when the marker
+is 1.5 m or more from it, else 1.5 m over the marker (the manager's slot
+`0x2c`; `GameWorld::orderTagPoint`, `Nametags::setOrderTag`).
 
 ## Titans (gpm_ti)
 
@@ -11653,8 +11673,12 @@ words); a Mersenne twister (refill 0x100308f0, word 0x10046770, U[0, 1)
 0x10046a50) whose tempering masks are DICE's (`(y & 0x56b64a) << 7`,
 `(y & 0xffffb716) << 15`), not MT19937's. The bot names' keys draw from
 it as AIDefault.ai runs, the bots, squads, SAI and AI commander after.
-The rewrite seeds it from `BF2142_BOT_SEED`, else a fixed word in place
-of the clock, so a run repeats.
+The clock is the IBFTimer's slot `0x10` (`0x0089f470` → the game clock's
+`0x0065c270`: seconds since the clock started, `0x0065c020`), rounded
+after the × 10⁶ and cut to its low 32 bits (`game::clockSeedWord`). The
+rewrite seeds it so in a game; `BF2142_BOT_SEED` gives the word instead,
+and `--simulate` and the tests take a fixed word (`0x2545f491`) so their
+measured rounds repeat.
 
 The AI templates name, per seat (`ObjectTemplate.aiTemplate` on the
 PlayerControlObject), the equipment type whose behaviours a bot there
@@ -13542,9 +13566,9 @@ keeps no copy). Kept as the binary does it.
 - **Strategy:** a unit's ammo counts as full in its capability factor, and a seated
   soldier counts only through its vehicle's Unit (whether it counts on
   its own isn't settled).
-- **Revive:** the time left uses the respawn countdown, or 15 s. The
-  original also leaves out a body under more than 0.75 m of water and
-  0.5 m below its surface.
+- **Revive:** the time left uses the respawn countdown, or 15 s. A body
+  less than 0.5 m over the water where it is more than 0.75 m deep is
+  left out (`0x10082760`, the AI terrain's slots `0x2c` and 4).
 - **Flee:** the rewrite's camouflage has no charge; carried counts as
   charged, and only the plan's 4 s end the camouflage.
 - **Idle:** the weapon's alternate-key tap in the bot's own area (the
@@ -13567,8 +13591,9 @@ keeps no copy). Kept as the binary does it.
 `bf2142 --bots N [--simulate S]` adds bots and, with `--simulate`, runs S
 seconds headless and prints the scores. With `BF2142_BOT_STATS` set, it
 also prints how long the bots ran each behaviour and how far they drove.
-`BF2142_BOT_SEED=<n>` starts the bots' own draws elsewhere (the default
-sequence is fixed): one round's figures are chaotic, so compare seeds.
+`BF2142_BOT_SEED=<n>` starts the bots' own draws elsewhere (under
+`--simulate` the default sequence is fixed): one round's figures are
+chaotic, so compare seeds.
 
 ### Navigation mesh
 

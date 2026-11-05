@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -748,14 +749,29 @@ BotManager::BotManager(GameWorld& world, BotSettings settings) : m_world(world),
 	}
 }
 
-uint32_t botRandomSeed()
+namespace {
+// The game clock's start (0x0065c020 takes QueryPerformanceCounter as the
+// game starts): here the process's.
+const std::chrono::steady_clock::time_point g_clockStart = std::chrono::steady_clock::now();
+} // namespace
+
+uint32_t clockSeedWord(double seconds)
+{
+	return static_cast<uint32_t>(static_cast<int64_t>(std::llround(seconds * 1000000.0)));
+}
+
+uint32_t botRandomSeed(bool fromClock)
 {
 	if (const char* seed = std::getenv("BF2142_BOT_SEED"); seed && *seed) {
 		if (const uint32_t word = static_cast<uint32_t>(std::strtoul(seed, nullptr, 0)); word != 0) {
 			return word;
 		}
 	}
-	return 0x2545f491u; // in place of the clock
+	if (!fromClock) {
+		return 0x2545f491u; // the tests' and --simulate's repeatable word
+	}
+	const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_clockStart).count();
+	return clockSeedWord(seconds);
 }
 
 float gameViewDistance(const std::array<float, 4>& fog, float levelViewDistance)
@@ -3783,9 +3799,15 @@ float BotManager::idleUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float
 // BBRevive's urgency (0x10082760): with a Revive weapon, the downed
 // teammates within its maxRange score 1 - min(1, (d / speed) / time left),
 // x10 for a human's; the best gets the bot: 100 x the squad factor of the
-// heal task (AIDLL 0x10089aa0, task 1). Not rewritten: the original leaves out
-// a body under more than 0.75 m of water and 0.5 m below its surface.
+// heal task (AIDLL 0x10089aa0, task 1). A body less than 0.5 m over the
+// water (the AI terrain's slot 0x2c) where it is more than 0.75 m deep
+// (the water less the terrain, slot 4) is left out.
 // (BBRevive's class: constructor 0x10082630, destructor 0x10082700.)
+bool bodyUnderWater(float y, float water, float ground)
+{
+	return y < water + 0.5f && water - ground > 0.75f;
+}
+
 float BotManager::reviveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players)
 {
 	if (self.vehicle) {
@@ -3809,6 +3831,10 @@ float BotManager::reviveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, con
 		}
 		const float distance = std::sqrt(physics::lengthSquared(other.position - self.position));
 		if (distance > range) {
+			continue;
+		}
+		if (float water = 0; m_world.waterLevel(water)
+			&& bodyUnderWater(other.position.y, water, m_world.terrainHeight(other.position.x, other.position.z))) {
 			continue;
 		}
 		// The time left before the body is gone (+0x50, filled by the game):

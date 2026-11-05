@@ -807,6 +807,41 @@ TEST(MenuBindings_OfflineNatives)
 	CHECK(!avm1::toBoolean(call(vm, natives, "dice.bf2.VideoSettings", "needsReboot")));
 }
 
+// The select boxes SwiffPlayer.dll fills itself (0x100653f0): the bot
+// skills (0x10061310) and the game modes (0x100690b0), with an "All" row
+// when the third argument is 1.
+TEST(MenuBindings_SelectBoxes)
+{
+	Fake fake;
+	NativeRegistry natives;
+	menu::MenuBindings bindings(natives, fake.services());
+	bindings.setMaps({{"Minsk", "gpm_ti", 32}, {"Belgrade", "gpm_sp", 16}, {"Minsk", "gpm_cq", 64}});
+	avm1::Interpreter vm;
+	natives.install(vm);
+	const avm1::Value bf2 = vm.getMember(vm.getMember(avm1::Value(vm.global()), "dice"), "bf2");
+	const auto box = [&](const char* args) {
+		const avm1::Value list =
+			vm.constructWith(vm.getMember(bf2, "List"), {avm1::Value::null(), avm1::Value("selectBoxLarge"), avm1::Value(args)});
+		vm.callMember(list, "fillList", {avm1::Value(true)});
+		return list;
+	};
+	const avm1::Value skills = box("botSkill 3");
+	CHECK(vm.toNumber(vm.getMember(skills, "m_rowCount")) == 3);
+	CHECK(vm.toNumber(vm.getMember(skills, "m_selectedIndex")) == 1);
+	const avm1::Value hard = vm.callMember(skills, "selectRow", {avm1::Value(2)});
+	CHECK(vm.toString(vm.getMember(hard, "rowValue")) == "HEADER_hard");
+
+	const avm1::Value modes = box("gameModes 4 1");
+	CHECK(vm.toNumber(vm.getMember(modes, "m_rowCount")) == 4); // All, then each mode once
+	const avm1::Value all = vm.callMember(modes, "selectRow", {avm1::Value(0)});
+	CHECK(vm.toNumber(vm.getMember(all, "rowIndex")) == -1 && vm.toString(vm.getMember(all, "rowData")) == "all");
+	const avm1::Value cq = vm.callMember(modes, "selectRow", {avm1::Value(2)});
+	CHECK(vm.toNumber(vm.getMember(cq, "rowIndex")) == 1 && vm.toString(vm.getMember(cq, "rowData")) == "gpm_cq");
+	const avm1::Value plain = box("gameModes 3 0");
+	CHECK(vm.toNumber(vm.getMember(plain, "m_rowCount")) == 3);
+	CHECK(vm.toNumber(vm.getMember(plain, "m_selectedIndex")) == 0); // the server settings' mode (gpm_sp)
+}
+
 // dice.bf2.Mod over the installed mods (each Mod.desc).
 TEST(MenuBindings_Mods)
 {
@@ -860,7 +895,7 @@ const NativeKind kUnboundNatives[] = {
 	// Bound outside MenuBindings: the player's built-ins (Player::installDefaults,
 	// NativeList's methods and fields), main.cpp's sound, music and credits.
 	{"elsewhere", "dice.bf2.Locale", {"getString", "getStringUppercase", "getLanguage", "getTextboxWidth", "convertToWide"}},
-	{"elsewhere", "dice.bf2.Logic", {"active", "setScrollSpeed", "enableScroller"}},
+	{"elsewhere", "dice.bf2.Logic", {"active", "setScrollSpeed", "enableScroller", "enableTab"}},
 	{"elsewhere", "dice.bf2.Mouse", {"insideMovieClip"}},
 	{"elsewhere", "dice.bf2.List", {"fillList", "abortFill", "sortList", "refreshList", "scrollUp", "scrollDown", "pageUp",
 		"pageDown", "setFirstIndex", "scrollPercent", "scrollToSelection", "selectRow", "setArgs", "m_firstIndex",

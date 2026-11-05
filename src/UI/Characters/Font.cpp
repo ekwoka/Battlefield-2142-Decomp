@@ -33,6 +33,8 @@ int16_t Font::kerningAdjustment(uint16_t left, uint16_t right) const
 	return 0;
 }
 
+// gameswf's DefineFont2 reader (SwiffPlayer.dll 0x100d7d20; its code table
+// 0x100d7690, advances 0x100d6e30).
 bool parseDefineFont2(const uint8_t* body, size_t size, Font& out, std::string* error)
 {
 	BitReader in(body, size);

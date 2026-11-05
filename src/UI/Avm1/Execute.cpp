@@ -185,6 +185,9 @@ bool Interpreter::execute(const uint8_t* actions, size_t length, const Execution
 	});
 }
 
+// gameswf's as_function call (0x100d2ad0: this, super, arguments) and
+// DefineFunction2's preloaded registers (0x100afda0: this, arguments,
+// super, _root, _parent, _global).
 Value Interpreter::runFunction(ScriptFunction& fn, CallArgs& args)
 {
 	if (!fn.code) {
@@ -307,6 +310,8 @@ bool Interpreter::lookupScope(Frame& f, const std::string& name, Value& out, Obj
 	return false;
 }
 
+// gameswf: get_variable 0x100aad50 (this, _global, the scope chain),
+// find_target 0x100aa150 / 0x100abc90 (_level0, paths).
 Value Interpreter::getVariable(Frame& f, const std::string& name)
 {
 	if (name.empty()) {
@@ -633,6 +638,9 @@ Interpreter::Flow Interpreter::runTry(Frame& f, size_t at, size_t length, size_t
 
 // --- The loop
 
+// gameswf's action interpreter (SwiffPlayer.dll 0x100ac600, every opcode
+// the menus use; its constant pool 0x100a4b50, the DoAction / DoInitAction
+// tag readers 0x100aa620 / 0x100b15c0).
 Interpreter::Flow Interpreter::run(Frame& f, size_t begin, size_t end)
 {
 	const ActionBytes& bytes = *f.code;

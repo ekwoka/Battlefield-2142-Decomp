@@ -125,6 +125,24 @@ bool radiusTriggerShape(const ProjectileSettings& mine, const physics::Vec3& min
 	return std::sqrt(physics::lengthSquared(c.velocity)) >= mine.triggerMinSpeed; // the node's slot 100
 }
 
+physics::Mat3 stuckFrame(const physics::Mat3& before, const physics::Vec3& normal)
+{
+	const auto unit = [](const physics::Vec3& v) { // 0x004481a0, on the squared length
+		const float l2 = physics::lengthSquared(v);
+		if (std::fabs(l2 - 1.0f) < 1.1920929e-07f) {
+			return v;
+		}
+		return std::fabs(l2) < 1.1920929e-07f ? physics::Vec3 {} : v * (1.0f / std::sqrt(l2));
+	};
+	physics::Mat3 m;
+	physics::Vec3 x = unit(before.rows[0]);
+	const physics::Vec3 up = unit(normal);
+	const physics::Vec3 z = unit(physics::cross(x, up));
+	x = unit(physics::cross(up, z));
+	m.rows = {x, unit(physics::cross(z, x)), z};
+	return m;
+}
+
 ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate& t)
 {
 	ProjectileSettings s;
