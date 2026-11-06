@@ -58,3 +58,90 @@ TEST(PlayerCamera_JoinedSeatZooms)
 	CHECK(cam.seatZoomLevel() == 1 && cam.zoomLevel() == 1);
 	CHECK(cam.view(eye, 4.0f / 3.0f) && eye.fovY < wide);
 }
+
+TEST(PlayerCamera_ImplicitSeatsKeepTheirOwnCameras)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	auto* root = templates.create("PlayerControlObject", "walker");
+	auto* gunner = templates.create("PlayerControlObject", "walker_gunner");
+	// As in the walkers: neither seat has seatInformation. The gunner's
+	// subtree precedes the driver's camera in depth-first order.
+	root->children().push_back({"WALKER_GUNNER", {0, 5, 0}, {}});
+	root->children().push_back({"driver_cam", {0, 2, 1}, {}});
+	gunner->children().push_back({"gunner_cam", {0, 3, 0}, {}});
+	templates.create("Camera", "driver_cam");
+	templates.create("Camera", "gunner_cam");
+	auto* soldier = templates.create("Soldier", "us_soldier");
+	const auto vehicle = objects.create(root, {10, 0, 20})->id();
+	const auto rider = objects.create(soldier, {})->id();
+	game::GameWorld round(templates, objects);
+	anim::AnimationSystems systems(nullptr);
+	PlayerCamera camera(round, systems, nullptr);
+	int seat = 0;
+	camera.setRemote([&](PlayerCamera::Remote& me) {
+		me.alive = true; me.soldier = rider; me.soldierTemplate = soldier;
+		me.vehicle = vehicle; me.seat = seat;
+		return true;
+	});
+	PlayerCamera::View view;
+	camera.tick(1 / 30.0f);
+	CHECK(camera.view(view, 16.0f / 9.0f));
+	CHECK(std::fabs(view.position[1] - 2) < 1e-4f);
+	seat = 1;
+	camera.tick(1 / 30.0f);
+	CHECK(camera.view(view, 16.0f / 9.0f));
+	CHECK(std::fabs(view.position[1] - 8) < 1e-4f);
+}
+
+TEST(PlayerCamera_SeatZoomRetainsShortClicks)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	auto* tank = templates.create("PlayerControlObject", "tank");
+	tank->children().push_back({"tank_cam", {}, {}});
+	tank->children().push_back({"tank_gun", {}, {}});
+	auto* camera = templates.create("Camera", "tank_cam");
+	camera->settings()["insideFOV"] = "1.2";
+	auto* gun = templates.create("GenericFireArm", "tank_gun");
+	gun->components().push_back("DefaultZoomComp");
+	gun->settings()["zoom.addZoomFactor.list"] = "0 0.5";
+	gun->settings()["zoom.zoomDelay"] = "0";
+	auto* soldier = templates.create("Soldier", "soldier");
+	const auto vehicle = objects.create(tank, {})->id();
+	const auto rider = objects.create(soldier, {})->id();
+	game::GameWorld round(templates, objects);
+	anim::AnimationSystems systems(nullptr);
+	PlayerCamera cam(round, systems, nullptr);
+	cam.setRemote([&](PlayerCamera::Remote& me) {
+		me.alive = true; me.soldier = rider; me.soldierTemplate = soldier;
+		me.vehicle = vehicle; me.seat = 0;
+		return true;
+	});
+	cam.tick(1 / 30.0f);
+	PlayerCamera::View eye;
+	CHECK(cam.view(eye, 4.0f / 3.0f));
+	const float wide = eye.fovY;
+	// Both render-frame updates happen before the next camera tick.
+	cam.setAltFire(true);
+	cam.setAltFire(false);
+	cam.tick(1 / 30.0f);
+	CHECK(cam.seatZoomLevel() == 1);
+	CHECK(cam.view(eye, 4.0f / 3.0f) && eye.fovY < wide);
+	cam.tick(1 / 30.0f);
+	CHECK(cam.seatZoomLevel() == 1); // consume the press only once
+	cam.setAltFire(true);
+	cam.setAltFire(false);
+	cam.tick(1 / 30.0f);
+	CHECK(cam.seatZoomLevel() == 0);
+	CHECK(cam.view(eye, 4.0f / 3.0f) && std::fabs(eye.fovY - wide) < 1e-4f);
+	// A held button also produces just one press, across repeated updates.
+	for (int i = 0; i < 3; ++i) {
+		cam.setAltFire(true);
+		cam.tick(1 / 30.0f);
+		CHECK(cam.seatZoomLevel() == 1);
+	}
+	cam.setAltFire(false);
+	cam.tick(1 / 30.0f);
+	CHECK(cam.seatZoomLevel() == 1);
+}

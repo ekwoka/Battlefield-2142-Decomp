@@ -197,3 +197,30 @@ TEST(ControlMap_ScriptRoundTrip)
 	CHECK(copy.pressed(infantry, "c_PIFire", [](const std::string& c) { return c == "IDKey_Q"; }));
 	CHECK(!copy.find(infantry)->at("c_PIReload")[0].hold);
 }
+
+TEST(ControlMap_NativeMouseButtons)
+{
+	CHECK(input::sdlMouseButton(0) == 1); // SDL left
+	CHECK(input::sdlMouseButton(1) == 3); // SDL right
+	CHECK(input::sdlMouseButton(2) == 2); // SDL middle
+	CHECK(input::sdlMouseButton(3) == 4);
+	CHECK(input::sdlMouseButton(4) == 5);
+
+	Console console;
+	input::ControlMaps maps;
+	input::registerControlMapConsoleMethods(console, maps);
+	std::string out;
+	CHECK(console.execute("ControlMap.create InfantryPlayerInputControlMap", out) != ConsoleResult::Error);
+	CHECK(console.execute("ControlMap.addButtonToTriggerMapping c_PIAltFire IDFMouse IDButton_1 0 0", out) != ConsoleResult::Error);
+	// Model SDL's right-button mask, then its middle-button mask. The
+	// shipped alternate-fire binding must respond only to the right one.
+	unsigned buttons = 1u << (3 - 1);
+	const auto down = [&](const std::string& control) {
+		if (control.compare(0, 9, "IDButton_") != 0) return false;
+		const int button = std::atoi(control.c_str() + 9);
+		return (buttons & (1u << (input::sdlMouseButton(button) - 1))) != 0;
+	};
+	CHECK(maps.pressed(input::ControlMaps::kInfantry, "c_PIAltFire", down));
+	buttons = 1u << (2 - 1);
+	CHECK(!maps.pressed(input::ControlMaps::kInfantry, "c_PIAltFire", down));
+}
