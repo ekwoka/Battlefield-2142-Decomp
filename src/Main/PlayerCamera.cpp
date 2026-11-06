@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <functional>
 #include <sstream>
+#include <utility>
 
 namespace dice::hfe {
 
@@ -771,8 +772,7 @@ void PlayerCamera::tick(float seconds)
 	stepViews(seconds);
 	++m_tick; // the game's tick counter (0x00666090)
 	m_recoilNow = 0;
-	const bool altPressed = m_altFire && !m_altFireWas;
-	m_altFireWas = m_altFire;
+	const bool altPressed = std::exchange(m_altFirePending, false);
 	Me me;
 	if (!current(me) || !me.alive || !me.soldierTemplate) {
 		if (m_alive) {

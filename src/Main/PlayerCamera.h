@@ -89,7 +89,11 @@ public:
 	void setFreeInput(const game::camera::FreeInput& input) { m_freeInput = input; }
 
 	// The alternate fire as held now (its press cycles the zoom).
-	void setAltFire(bool held) { m_altFire = held; }
+	void setAltFire(bool held) {
+		// Render input can press and release between 30 Hz camera ticks.
+		m_altFirePending = m_altFirePending || (held && !m_altFire);
+		m_altFire = held;
+	}
 	// The mouse wheel's step this frame (+1 c_PINextItem, -1 c_PIPrevItem):
 	// a zoomed fine-tuning scope's step (ZoomState::fineTune).
 	void setItemStep(int step) { m_itemStep = step; }
@@ -288,7 +292,7 @@ private:
 	anim::AnimationSystems& m_systems;
 	Loader m_load;
 	effects::EffectManager m_effects;
-	bool m_altFire = false, m_altFireWas = false;
+	bool m_altFire = false, m_altFirePending = false;
 	int m_itemStep = 0;
 	bool m_crouch = false;
 

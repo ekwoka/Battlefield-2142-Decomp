@@ -468,9 +468,14 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 			if (options.gameControllers) {
 				options.gameControllers->beginFrame();
 			}
+			Uint32 pressedButtons = 0;
 			while (SDL_PollEvent(&event)) {
 				if (sdlControllers && sdlControllers->handle(event)) {
 					continue;
+				}
+				// A down/up pair can both arrive before held-state sampling.
+				if (playing && !pointer && !menuUp && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+					pressedButtons |= SDL_BUTTON_MASK(event.button.button);
 				}
 				if (event.type == SDL_EVENT_QUIT) {
 					running = false;
@@ -545,7 +550,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 			if (playing && options.onPlayerInput && options.controls) {
 				// The control maps (0x004b141a): on foot the infantry map, in a
 				// vehicle the map of its category.
-				const Uint32 buttons = shown.mouseButtons();
+				const Uint32 buttons = shown.mouseButtons() | pressedButtons;
 				input::GameControllers* pads = options.gameControllers;
 				input::ControlMaps::Source down;
 				down.down = [keys, buttons, pointer, pads](const input::Binding& b) {
@@ -672,8 +677,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.sprint = keys[SDL_SCANCODE_LSHIFT];
 				input.turnDegrees = turn;
 				input.aimPitchDegrees = pitch * 57.29578f;
-				input.fire = (shown.mouseButtons() & SDL_BUTTON_LMASK) != 0 && !pointer;
-				input.altFire = (shown.mouseButtons() & SDL_BUTTON_RMASK) != 0 && !pointer;
+				input.fire = ((shown.mouseButtons() | pressedButtons) & SDL_BUTTON_LMASK) != 0 && !pointer;
+				input.altFire = ((shown.mouseButtons() | pressedButtons) & SDL_BUTTON_RMASK) != 0 && !pointer;
 				input.flareFire = keys[SDL_SCANCODE_X];
 				input.toggleWeapon = keys[SDL_SCANCODE_F];
 				input.use = keys[SDL_SCANCODE_E];
