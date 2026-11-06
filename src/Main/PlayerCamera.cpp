@@ -1130,6 +1130,13 @@ bool PlayerCamera::findSeatCamera(SeatView& out) const
 		return false;
 	}
 	const std::string& seatName = seats[static_cast<size_t>(me.seat)].name;
+	const auto sameName = [](const std::string& a, const std::string& b) {
+		const world::CaseInsensitiveLess less;
+		return !less(a, b) && !less(b, a);
+	};
+	const auto isSeat = [&](const world::ObjectTemplate& t) {
+		return std::any_of(seats.begin(), seats.end(), [&](const auto& seat) { return sameName(seat.name, t.name()); });
+	};
 	const world::ObjectTemplateManager& templates = m_round.templates();
 	const uint32_t object = vehicle->id();
 	// The gun's ToggleCameraComp (0x005db260): taken up, the seat's camera
@@ -1174,7 +1181,9 @@ bool PlayerCamera::findSeatCamera(SeatView& out) const
 									: m_round.partPose(object, child.name, offset, rotation)) {
 					m = placement(offset, rotation) * m; // a joined game's: as the bundles' ghosts turn them
 				}
-				const bool seat = c->settings().count("seatInformation") != 0;
+				// 0x00613850: a camera belongs to its nearest parent player-control
+				// object. Resolved seats include those without seatInformation.
+				const bool seat = isSeat(*c);
 				if (inSeat && seat) {
 					continue; // another seat's cameras
 				}
@@ -1189,7 +1198,7 @@ bool PlayerCamera::findSeatCamera(SeatView& out) const
 					}
 					continue;
 				}
-				const bool entering = seat && c->name() == seatName;
+				const bool entering = seat && sameName(c->name(), seatName);
 				if (entering) {
 					seatTemplate = c;
 				}
@@ -1200,10 +1209,10 @@ bool PlayerCamera::findSeatCamera(SeatView& out) const
 			}
 		};
 	const world::ObjectTemplate& root = *vehicle->objectTemplate();
-	if (root.name() == seatName) {
+	if (sameName(root.name(), seatName)) {
 		seatTemplate = &root;
 	}
-	walk(root, render::Mat4 {}, root.name() == seatName, 0);
+	walk(root, render::Mat4 {}, sameName(root.name(), seatName), 0);
 	if (!found.ok) {
 		found = first;
 	}

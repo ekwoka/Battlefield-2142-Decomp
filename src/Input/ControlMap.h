@@ -56,6 +56,13 @@ class Console;
 
 namespace dice::hfe::input {
 
+// DirectInput orders the first three mouse buttons as left, right, middle;
+// SDL orders them left, middle, right. Extra buttons keep their order.
+constexpr int sdlMouseButton(int directInputButton)
+{
+	return directInputButton == 1 ? 3 : directInputButton == 2 ? 2 : directInputButton + 1;
+}
+
 // One binding of a player input.
 struct Binding {
 	enum class Kind { Key, Button, Axis, Pov } kind = Kind::Key;

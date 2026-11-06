@@ -58,3 +58,38 @@ TEST(PlayerCamera_JoinedSeatZooms)
 	CHECK(cam.seatZoomLevel() == 1 && cam.zoomLevel() == 1);
 	CHECK(cam.view(eye, 4.0f / 3.0f) && eye.fovY < wide);
 }
+
+TEST(PlayerCamera_ImplicitSeatsKeepTheirOwnCameras)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	auto* root = templates.create("PlayerControlObject", "walker");
+	auto* gunner = templates.create("PlayerControlObject", "walker_gunner");
+	// As in the walkers: neither seat has seatInformation. The gunner's
+	// subtree precedes the driver's camera in depth-first order.
+	root->children().push_back({"WALKER_GUNNER", {0, 5, 0}, {}});
+	root->children().push_back({"driver_cam", {0, 2, 1}, {}});
+	gunner->children().push_back({"gunner_cam", {0, 3, 0}, {}});
+	templates.create("Camera", "driver_cam");
+	templates.create("Camera", "gunner_cam");
+	auto* soldier = templates.create("Soldier", "us_soldier");
+	const auto vehicle = objects.create(root, {10, 0, 20})->id();
+	const auto rider = objects.create(soldier, {})->id();
+	game::GameWorld round(templates, objects);
+	anim::AnimationSystems systems(nullptr);
+	PlayerCamera camera(round, systems, nullptr);
+	int seat = 0;
+	camera.setRemote([&](PlayerCamera::Remote& me) {
+		me.alive = true; me.soldier = rider; me.soldierTemplate = soldier;
+		me.vehicle = vehicle; me.seat = seat;
+		return true;
+	});
+	PlayerCamera::View view;
+	camera.tick(1 / 30.0f);
+	CHECK(camera.view(view, 16.0f / 9.0f));
+	CHECK(std::fabs(view.position[1] - 2) < 1e-4f);
+	seat = 1;
+	camera.tick(1 / 30.0f);
+	CHECK(camera.view(view, 16.0f / 9.0f));
+	CHECK(std::fabs(view.position[1] - 8) < 1e-4f);
+}

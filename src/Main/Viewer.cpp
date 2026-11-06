@@ -555,7 +555,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					}
 					if (control.compare(0, 9, "IDButton_") == 0) {
 						const int button = std::atoi(control.c_str() + 9);
-						return !pointer && (buttons & SDL_BUTTON_MASK(button + 1)) != 0;
+						return !pointer && (buttons & SDL_BUTTON_MASK(input::sdlMouseButton(button))) != 0;
 					}
 					const SDL_Scancode code = scancodeFor(control);
 					return code != SDL_SCANCODE_UNKNOWN && keys[code];
