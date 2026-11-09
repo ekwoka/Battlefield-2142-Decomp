@@ -134,6 +134,8 @@ TEST(Nametags_Font)
 	const float white[4] = {1, 1, 1, 1};
 	font.write("A A", 0, 0, white, quads);
 	CHECK(quads.size() == 2 && quads[1].x0 == 9);
+	// The font's DXT1 texture has no alpha (black cells), so its quads must add (source alpha, ONE), not blend over.
+	CHECK(quads[0].blend[0] == 7 && quads[0].blend[1] == 2 && quads[1].blend[0] == 7 && quads[1].blend[1] == 2);
 	const char* dir = std::getenv("BF2142_GAME_DIR");
 	if (!dir) {
 		return;

@@ -49,6 +49,7 @@
 #include "Game/SoldierControl.h"
 #include "Physics/RigidBody.h"
 
+#include <functional>
 #include <array>
 #include <memory>
 #include <string>
@@ -430,6 +431,9 @@ public:
 	const std::vector<FloaterPart>& floaters() const { return m_floaters; }
 	const std::vector<GearPart>& gears() const { return m_gears; }
 	const Legs* legs() const { return m_legs.part >= 0 || m_hasLegs ? &m_legs : nullptr; }
+	// Whether a segment meets an object's mesh: the feet's second probe
+	// (0x00650e90 asks the collision world after the heightmap's ray).
+	void setLegsObjectProbe(std::function<bool(const Vec3&, const Vec3&)> probe) { m_legsObjectProbe = std::move(probe); }
 	// The walker's animation system's state for the next tick (see Legs).
 	void setLegsAnimation(bool blocks, float speedFactor)
 	{
@@ -489,6 +493,13 @@ public:
 	void legsRespond(physics::RigidBody& body, const physics::Ground& ground, float seconds,
 		float gravity = physics::tuning::kGravity);
 	const std::vector<Wheel>& wheels() const { return m_wheels; }
+	// Each Spring's first step that finds it moving takes its rate as 0 again (a node let go of a hold).
+	void restartWheels()
+	{
+		for (Wheel& w : m_wheels) {
+			w.firstStep = true;
+		}
+	}
 	float mass() const { return m_mass; }
 	int gear() const { return m_gear; }
 	// normalised: 0 at minRpm, 1 at maxRpm; the first old engine's for the others
@@ -561,6 +572,7 @@ private:
 	float m_drag = 0;          // the root node's +0x50 (slot 0xfc): the template's drag
 	float m_footprint = 0;     // the root's vehicle-LOD box, size x times size z (+0x24 x +0x2c)
 	Legs m_legs;
+	std::function<bool(const Vec3&, const Vec3&)> m_legsObjectProbe;
 	bool m_hasLegs = false;
 	Regulator m_vertical; // regulateVerticalPos (0x390) on its input (0x374)
 	bool m_occupied = false;

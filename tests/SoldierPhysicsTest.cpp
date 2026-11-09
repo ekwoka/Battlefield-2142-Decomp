@@ -71,6 +71,51 @@ TEST(SoldierPhysics_RunsAtThePoseSpeed)
 	CHECK(std::fabs(body.velocity.z) < 0.2f);
 }
 
+TEST(SoldierPhysics_ADSAndSprintAreMutuallyExclusiveAcrossTransitions)
+{
+	physics::SoldierBody body;
+	body.position = {0, 1, 0};
+	game::SoldierControl control;
+	control.stamina().configure(10, 10, 0.1f);
+	game::SoldierInput input;
+	input.throttle = 1;
+	input.sprint = true;
+	control.setZoomed(true); // starting sprint while ADS is already active
+	for (int i = 0; i < 30; ++i) {
+		control.update(input, body);
+		body.step(1 / 30.0f, slope(0));
+	}
+	CHECK(!control.stamina().sprinting());
+	CHECK(game::soldierSpeedIndex(game::SoldierPose::Stand, control.stamina().sprinting(), true) == 2);
+
+	control.setZoomed(false);
+	control.update(input, body); // held sprint is accepted after zoom ends
+	CHECK(control.stamina().sprinting());
+	body.step(1 / 30.0f, slope(0));
+	control.setZoomed(true); // entering ADS while already sprinting stops it that tick
+	control.update(input, body);
+	CHECK(!control.stamina().sprinting());
+	CHECK(game::soldierSpeedIndex(game::SoldierPose::Stand, control.stamina().sprinting(), true) == 2);
+
+	control.setZoomed(false);
+	control.update(input, body); // shift was held through ADS, and can sprint again
+	CHECK(control.stamina().sprinting());
+}
+
+TEST(SoldierPhysics_AnimationMovementUsesTheViewHeading)
+{
+	constexpr float yaw = 35.0f;
+	const float radians = yaw * 3.14159265f / 180.0f;
+	const physics::Vec3 velocity {6.3f * std::sin(radians), 0, 6.3f * std::cos(radians)};
+	const game::SoldierAnimationDirection direction = game::soldierAnimationDirection(velocity, yaw);
+	CHECK(std::fabs(direction.forward - 1.0f) < 1e-4f);
+	CHECK(std::fabs(direction.side) < 1e-4f);
+	// With the body's yaw before its head twist catches up, the same sprint
+	// fails the shipped forward-animation threshold (5.5 m/s).
+	const game::SoldierAnimationDirection bodyFrame = game::soldierAnimationDirection(velocity, 0);
+	CHECK(6.3f * bodyFrame.forward < 5.5f);
+}
+
 TEST(SoldierPhysics_WalksUpAHill)
 {
 	physics::SoldierBody body;
@@ -855,4 +900,37 @@ TEST(SoldierControl_ZoomedWalkIsSlowed)
 	CHECK(game::soldierSpeedIndex(SoldierPose::Stand, true, true) == 4);
 	CHECK(game::soldierSpeedIndex(SoldierPose::Crouch, false, true) == 1);
 	CHECK(game::soldierSpeed(2) == 1.5f);
+}
+
+TEST(SoldierControl_ViewRelativeDiagonals)
+{
+	for (float throttle : {-1.0f, 1.0f}) {
+		for (float strafe : {-1.0f, 1.0f}) {
+			physics::SoldierBody body;
+			body.position = {0, 1, 0};
+			game::SoldierControl control;
+			game::SoldierInput input;
+			input.throttle = throttle;
+			input.strafe = strafe;
+			for (int tick = 0; tick < 90; ++tick) {
+				control.update(input, body);
+				body.step(1 / 30.0f, slope(0));
+			}
+			CHECK(body.velocity.x * strafe > 2.5f && body.velocity.z * throttle > 2.5f);
+			CHECK(std::sqrt(body.velocity.x * body.velocity.x + body.velocity.z * body.velocity.z) <= 3.91f);
+		}
+	}
+	physics::SoldierBody body;
+	body.position = {0, 1, 0};
+	game::SoldierControl control;
+	game::SoldierInput look;
+	look.turn = 30;
+	control.update(look, body);
+	look = {};
+	look.strafe = 1;
+	for (int tick = 0; tick < 90; ++tick) {
+		control.update(look, body);
+		body.step(1 / 30.0f, slope(0));
+	}
+	CHECK(body.velocity.x > 3 && body.velocity.z < -1.8f);
 }

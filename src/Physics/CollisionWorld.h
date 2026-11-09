@@ -54,6 +54,9 @@ public:
 	// template's mapMaterial); `owner` is reported with hits.
 	void addMesh(const CollisionMeshFile& mesh, CollisionUser user, const Mat3& rotation, const Vec3& position,
 		uint32_t owner = 0, const std::vector<uint32_t>& materials = {});
+	// The same for another geometry of `mesh` (a child object's collisionPart).
+	void addGeometry(const CollisionMeshFile& mesh, size_t geometry, CollisionUser user, const Mat3& rotation,
+		const Vec3& position, uint32_t owner = 0, const std::vector<uint32_t>& materials = {});
 	// Adds `other`'s faces after this world's, in their order: the same
 	// world as making `other`'s addMesh calls here (a world merged from
 	// meshes built once).

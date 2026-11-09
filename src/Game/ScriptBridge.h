@@ -51,6 +51,7 @@ public:
 	std::vector<uint32_t> objectsOfTemplate(const std::string& name) override;
 	ScriptValue objectCall(uint32_t object, const std::string& method, const ScriptArgs& args) override;
 	std::vector<uint32_t> triggerCandidates(const std::string& filter) override;
+	float triggerHemisphereHeight(uint32_t object, float objectY) override;
 	bool objectPosition(uint32_t object, float position[3]) override;
 
 	std::vector<int> players() override;

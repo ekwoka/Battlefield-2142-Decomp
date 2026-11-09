@@ -74,7 +74,10 @@ inline game::SoldierInput soldierInputFromMove(const PlayerMove& move, MoveInput
 	input.pitchAxis = move.axis(kPIPitch);
 	input.rollAxis = move.axis(kPIRoll);
 	input.turn = move.axis(kPIMouseLookX) * kDegreesPerMouseLookUnit;
-	state.pitch = std::clamp(state.pitch - move.axis(kPIMouseLookY) * kDegreesPerMouseLookUnit, -89.0f, 89.0f);
+	// Not clamped to the soldier's +-89: a driver's PIPitch is this value's change, and a clamp
+	// pinned at one end swallows the mouse that way (the soldier code clamps where it uses it);
+	// the client's look (Viewer, driving: +-1000 rad) is the same sum.
+	state.pitch = std::clamp(state.pitch - move.axis(kPIMouseLookY) * kDegreesPerMouseLookUnit, -57000.0f, 57000.0f);
 	input.aimPitch = state.pitch;
 	input.sprint = move.trigger(kPISprint);
 	input.fire = move.trigger(kPIFire);

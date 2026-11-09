@@ -61,9 +61,9 @@ struct HudQuad {
 	bool clipped = false;
 	float clip[4] = {0, 0, 0, 0}; // x0, y0, x1, y1
 	// addNodeBlendEffect <source> <destination> (0x007b20c0: a
-	// "<node>BlendEffect" render-state node above the node): Direct3D 9
-	// D3DBLEND values for the quads below it (the vehicle HUDs' "7 2":
-	// D3DBLEND_DESTALPHA, D3DBLEND_ONE). 0 0: the HUD's usual
+	// "<node>BlendEffect" render-state node above the node): Meme blend
+	// values, translated by Render/HudBlend.h (the vehicle HUDs' "7 2":
+	// source alpha, ONE). 0 0: the HUD's usual
 	// source-alpha blend.
 	int blend[2] = {0, 0};
 	// setPictureNodeCenterPoint x y: the rotation's pivot (the picture
@@ -196,6 +196,7 @@ public:
 		// > 0: the icon's side in metres (it scales with the map's zoom:
 		// the radar rings, 0x0078f060), over `size`.
 		float worldSize = 0;
+		std::string label;    // readable label beside a deployment spawn marker
 	};
 	void setMap(const std::string& texture, float originX, float originZ, float width, float depth);
 	void setMapFocus(float x, float z) { m_mapFocus[0] = x; m_mapFocus[1] = z; }

@@ -5,6 +5,8 @@
 #include "Hud/Hud.h"
 #include "IO/File/FileManager.h"
 #include "IO/Localization/Localization.h"
+#include "Main/DeploymentLifecycle.h"
+#include "Main/HudMenusVehicles.h"
 #include "TestMain.h"
 
 #include <algorithm>
@@ -13,6 +15,22 @@
 #include <cstdlib>
 
 using namespace dice::hfe;
+
+TEST(DeploymentDone_InitialAndDeathRespawnLifecycle)
+{
+	using dice::main::DeploymentDoneAction;
+	using dice::main::deploymentDoneAction;
+	CHECK(deploymentDoneAction(false, true, false, true, 0) == DeploymentDoneAction::None);
+	CHECK(deploymentDoneAction(true, false, false, true, 0) == DeploymentDoneAction::None);
+	CHECK(deploymentDoneAction(true, true, false, true, 0) == DeploymentDoneAction::InitialSpawn);
+	CHECK(deploymentDoneAction(true, true, true, false, 0) == DeploymentDoneAction::None);
+	CHECK(deploymentDoneAction(true, true, false, false, 4.1f) == DeploymentDoneAction::None);
+	CHECK(deploymentDoneAction(true, true, false, false, 0.1f) == DeploymentDoneAction::None);
+	CHECK(deploymentDoneAction(true, true, false, false, 0) == DeploymentDoneAction::Respawn);
+	// After the initial spawn, each later death waits for its own timer.
+	CHECK(deploymentDoneAction(true, true, false, false, 15) == DeploymentDoneAction::None);
+	CHECK(deploymentDoneAction(true, true, false, false, 0) == DeploymentDoneAction::Respawn);
+}
 
 TEST(Hud_ParsesFonts)
 {
@@ -273,6 +291,33 @@ TEST(Hud_CompassScrolls)
 		CHECK(std::abs(quads[0].u1 - 30 / 360.0f) < 1e-5f);
 		CHECK(quads[1].x0 == 100 && quads[1].x1 == 160 && std::abs(quads[1].u0 - 300 / 360.0f) < 1e-5f && quads[1].u1 == 1);
 	}
+}
+
+TEST(Hud_GunshipMissileIndicatorMovesRight)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+		"hudBuilder.createCompassNode Global Fuel 3 315 440 320 15 0 1",
+		"hudBuilder.setCompassNodeTexture 1 fuel.tga",
+		"hudBuilder.setCompassNodeTextureSize 170 15",
+		"hudBuilder.setCompassNodeBorder 0 0 5 5",
+		"hudBuilder.setCompassNodeValueVariable BombFuelAngle",
+		"hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+	}) console.execute(line, out);
+	float previous = -1;
+	for (float life : {1.0f, 0.5f, 0.0f}) {
+		manager.set("BombFuelAngle", menu::missileFuelAngle(life));
+		const auto quads = manager.frame(0);
+		CHECK(quads.size() == 1);
+		if (!quads.empty()) {
+			CHECK(quads[0].x1 > previous);
+			previous = quads[0].x1;
+		}
+	}
+	CHECK(previous >= 634 && previous <= 635);
 }
 
 TEST(Hud_CompassSnaps)
@@ -659,6 +704,52 @@ TEST(Hud_CommanderMiniMapTab)
 	CHECK(!manager.miniMapWorldAt(100, 300, x, z));
 }
 
+TEST(Hud_DeploymentMarkerLabelsAreReadableAndClickable)
+{
+	const std::string font = "header\r\n2\r\ntest\r\n128\r\n64\r\n13.000000\r\nglyphs\r\n1\r\n"
+		"65\t0.125000\t4.250000\t0.025000\t2\t44\t16\t49\t25\r\nkerning\r\n0\r\n";
+	hud::HudManager manager([&font](const std::string& path, std::string& text) {
+		if (path.find("hudfontlocalbold_9.dif") == std::string::npos) {
+			return false;
+		}
+		text = font;
+		return true;
+	});
+	Console console;
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {"hudBuilder.createMapNode Global Map", "hudBuilder.setMaxiPos -256/-256",
+			 "hudBuilder.setMaxiSize 512/512"}) {
+		console.execute(line, out);
+	}
+	manager.setMap("map.dds", 0, 0, 512, 512);
+	manager.set("MapFullSize", 1);
+	manager.set("SpawnShow", 1);
+	hud::HudManager::MapMarker spawn {"spawn.dds", 256, 256, 32};
+	spawn.id = 3;
+	spawn.label = "A";
+	manager.setMapMarkers({spawn});
+	const auto quads = manager.frame(0);
+	CHECK(std::any_of(quads.begin(), quads.end(), [](const hud::HudQuad& q) {
+		return q.texture.find("/hudfontlocalbold_9.dds") != std::string::npos;
+	}));
+	CHECK(manager.mapMarkerAt(420, 300) == 3);
+	auto second = spawn;
+	second.id = 4;
+	manager.setMapMarkers({spawn, second});
+	manager.frame(0);
+	CHECK(manager.mapMarkerAt(420, 300) == 3);
+	CHECK(manager.mapMarkerAt(420, 315) == 4);
+	// A long fallback/localized name must not paint over the kit panel.
+	spawn.label = std::string(400, 'A');
+	manager.setMapMarkers({spawn});
+	for (const auto& q : manager.frame(0)) {
+		if (q.texture.find("/hudfontlocalbold_9.dds") != std::string::npos) {
+			CHECK(q.x0 >= 144 && q.x1 <= 656 && q.y0 >= 44 && q.y1 <= 556);
+		}
+	}
+}
+
 // Non-English text (coverage-7 P8; BF2142.exe 0x00405360): the strings in
 // the game's language and its own fonts (Fonts/<language>/), whose glyphs
 // are by Unicode code point; HUD text is read as UTF-8 (hud::nextCode), so
@@ -724,4 +815,52 @@ TEST(Hud_NonEnglishTextHasGlyphs)
 		CHECK(checked > 20 && missing == 0);
 	}
 	hud::setLanguage("English");
+}
+
+// The capture bar and the capture voice (HudMenus.h captureBar, GameWorld.h captureVoice).
+#include "Main/HudMenus.h"
+
+TEST(CaptureBar_ShowsTheFlagMovingInTheClosestPointsRadius)
+{
+	using Info = dice::hfe::game::GameWorld::ControlPointInfo;
+	Info neutral {1, 0, {0, 0, 0}, 10};
+	neutral.flagHeight = 0.4f;
+	neutral.flagRate = 0.05f;
+	Info owned {2, 1, {100, 0, 0}, 10};
+	owned.flagHeight = 0.7f;
+	owned.flagRate = -0.05f;
+	auto bar = dice::hfe::menu::captureBar({neutral, owned}, {3, 0, 0});
+	CHECK(bar.enabled && bar.takenShow && !bar.neutralShow);
+	CHECK(std::fabs(bar.value - 0.4f) < 1e-5f);
+	bar = dice::hfe::menu::captureBar({neutral, owned}, {101, 0, 0});
+	CHECK(bar.enabled && bar.neutralShow && !bar.takenShow);
+	CHECK(std::fabs(bar.value - 0.7f) < 1e-5f);
+	CHECK(!dice::hfe::menu::captureBar({neutral, owned}, {50, 0, 0}).enabled);
+	owned.capturable = false;
+	CHECK(!dice::hfe::menu::captureBar({owned}, {100, 0, 0}).enabled);
+}
+
+TEST(HudTitan_HealthUsesArmourPercentAndRetailTicketRounding)
+{
+	game::GameWorld::TitanInfo titan;
+	titan.hitPoints = 5'890'000;
+	titan.maxHitPoints = 6'000'000;
+	CHECK(dice::hfe::menu::titanHudHealth(titan) == 99); // gpm_ti's ceil(100 * hp / max)
+	titan.hitPoints = 3'600'000;
+	CHECK(dice::hfe::menu::titanHudHealth(titan) == 60); // shield/hull span boundary
+	titan.hitPoints = -1;
+	CHECK(dice::hfe::menu::titanHudHealth(titan) == 0);
+	titan.maxHitPoints = 0;
+	CHECK(dice::hfe::menu::titanHudHealth(titan) == 0);
+}
+
+TEST(CaptureVoice_IsTeamRelativeAndSiloAware)
+{
+	using dice::hfe::game::captureVoice;
+	CHECK(captureVoice(0, 1, 1, 0) == "AUTO_RULES_wecapturedacp");
+	CHECK(captureVoice(1, 2, 1, 0) == "AUTO_RULES_welostacp");
+	CHECK(captureVoice(1, 0, 2, 0).empty());
+	CHECK(captureVoice(0, 2, 1, 3) == "AUTO_TITAN_C_enemycapturedsilo_3");
+	CHECK(captureVoice(0, 1, 1, 3) == "AUTO_TITAN_C_friendlycapturedsilo_3");
+	CHECK(captureVoice(1, 2, 1, 5) == "AUTO_TITAN_C_friendlylostsilo_5");
 }

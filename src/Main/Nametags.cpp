@@ -323,6 +323,10 @@ void TagFont::write(const std::string& text, float x, float y, const float colou
 		q.v0 = static_cast<float>(cell.y) / static_cast<float>(textureHeight);
 		q.v1 = static_cast<float>(cell.y + height) / static_cast<float>(textureHeight);
 		std::copy(colour, colour + 4, q.color);
+		// The font texture is opaque DXT1 (white strokes on black, no alpha), so plain source-alpha blending
+		// draws every cell as a black box; source alpha with ONE lets the black add nothing (Meme 7/2, as the vehicle HUDs).
+		q.blend[0] = 7;
+		q.blend[1] = 2;
 		out.push_back(q);
 		x += w + static_cast<float>(between);
 	}
@@ -894,12 +898,14 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		if (tt.controlPoint) {
 			// The control points' icons (object tags, 0x100f1330 / 0x100ef960).
 			int team = 0;
+			bool capturable = true;
 			float nearest = 1e9f;
 			for (const auto& point : points) {
 				const float dx = point.position.x - owned->position().x, dz = point.position.z - owned->position().z;
 				if (dx * dx + dz * dz < nearest) {
 					nearest = dx * dx + dz * dz;
 					team = point.team;
+					capturable = point.capturable;
 				}
 			}
 			if ((tt.teamSpecific && team != me.team) || (tt.inverse && team == me.team)) {
@@ -929,7 +935,8 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			const int colour = tt.useTeamColor ? (team == 0 ? Neutral : enemy ? Enemy : Team) : Neutral;
 			Drawn d {distance, {}};
 			hud::HudQuad icon;
-			icon.texture = std::string("Menu/Nametag/") + (team == 1 ? "Pac" : team == 2 ? "EU" : "Neutral") + "/miniMap_CP.dds";
+			icon.texture = std::string("Menu/Nametag/") + (team == 1 ? "Pac" : team == 2 ? "EU" : "Neutral") +
+				(capturable || team == 0 ? "/miniMap_CP.dds" : "/miniMap_CPBase.dds"); // RendDX9 0x100efa0e
 			icon.x0 = std::round(x) - 16;
 			icon.y0 = std::round(y) - 16;
 			icon.x1 = icon.x0 + 32;

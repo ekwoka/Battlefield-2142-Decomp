@@ -254,6 +254,7 @@ void GameSounds::release(WeaponState& state)
 		}
 	}
 	state.looping = false;
+	state.loopSlot = -1;
 }
 
 void GameSounds::releaseTrigger(uint64_t user)
@@ -270,6 +271,7 @@ void GameSounds::releaseTrigger(uint64_t user)
 			}
 		}
 		it->second.looping = false;
+		it->second.loopSlot = -1;
 	}
 	if (m_manager.muted(4)) {
 		m_manager.setMuted(4, false);
@@ -279,6 +281,33 @@ void GameSounds::releaseTrigger(uint64_t user)
 void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstPerson, const Vec3& position,
 	bool muteOnFire, uint32_t object, const FireInfo& info)
 {
+	// Pick the perspective before checking an automatic loop. The local
+	// player can change camera while holding fire; its old loop must stop.
+	int slot = 2;
+	// DefaultSoundComp creates all event templates even when a mod leaves
+	// one unconfigured. In particular the vanilla heavy walker's main cannon
+	// has an empty Fire1P_Outdoor template but a configured Fire1P sample.
+	// Template existence alone must not select that silent variant.
+	const bool outdoorSound = sampleCount(prefix + "Fire1P_Outdoor") > 0;
+	const bool firstPersonSound = sampleCount(prefix + "Fire1P") > 0;
+	if (firstPerson && (outdoorSound || firstPersonSound)) {
+		slot = outdoorSound && m_manager.outdoors(m_manager.listenerPosition()) ? 1 : 0;
+	}
+	if (state.looping && state.loopSlot != slot) {
+		const int oldSlot = state.loopSlot;
+		for (ISound*& sound : state.fire) {
+			if (sound) {
+				sound->stopImmediately();
+				sound->release();
+				sound = nullptr;
+			}
+		}
+		state.looping = false;
+		state.loopSlot = -1;
+		if (oldSlot != 2 && m_manager.muted(4)) {
+			m_manager.setMuted(4, false);
+		}
+	}
 	// 0x005dbdc0. Sounds a burst already played are skipped (+0x3c); an
 	// automatic loop under way (+0x43) plays on.
 	if (state.skip > 0) {
@@ -288,14 +317,9 @@ void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstP
 	if (state.looping) {
 		return;
 	}
-	// The slot: in first person (with a Fire1P or Fire1P_Outdoor) slot 1
-	// where it has one and the engine finds the listener outdoors (manager
-	// slot 0x98, 0x007fa320), else 0, the world's effects ducking with
-	// muteOnFire (reason 4); otherwise slot 2, Fire3P.
-	int slot = 2;
-	const bool outdoorSound = m_manager.hasSound(prefix + "Fire1P_Outdoor");
-	if (firstPerson && (outdoorSound || m_manager.hasSound(prefix + "Fire1P"))) {
-		slot = outdoorSound && m_manager.outdoors(m_manager.listenerPosition()) ? 1 : 0;
+	// The slot: first person selects Fire1P / Fire1P_Outdoor; otherwise
+	// Fire3P. First-person fire ducks the world's effects (reason 4).
+	if (slot != 2) {
 		if (muteOnFire) {
 			m_manager.setMuted(4, true);
 		}
@@ -309,6 +333,7 @@ void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstP
 		if (info.mode == 2) {
 			// Automatic: the sample loops until the trigger is let go.
 			state.looping = true;
+			state.loopSlot = slot;
 			keep = true;
 			loops = 0;
 		} else if (info.burstRounds > 1) {
@@ -348,6 +373,11 @@ void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstP
 	ISound* sound = create(name, head ? 0 : object);
 	if (!sound) {
 		return;
+	}
+	if (keep && state.fire[static_cast<size_t>(slot)]) {
+		state.fire[static_cast<size_t>(slot)]->stopImmediately();
+		state.fire[static_cast<size_t>(slot)]->release();
+		state.fire[static_cast<size_t>(slot)] = nullptr;
 	}
 	if (head) {
 		sound->setHeadRelative(true);

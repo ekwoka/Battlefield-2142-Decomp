@@ -830,7 +830,8 @@ void ScriptHost::update()
 			}
 			const float dx = p[0] - centre[0], dy = p[1] - centre[1], dz = p[2] - centre[2];
 			const float r = impl.triggers[i].radius;
-			const bool within = dx * dx + dy * dy + dz * dz <= r * r && (!impl.triggers[i].hemisphere || dy >= 0);
+			const bool within = dx * dx + dy * dy + dz * dz <= r * r
+				&& (!impl.triggers[i].hemisphere || impl.game.triggerHemisphereHeight(candidate, p[1]) >= centre[1]);
 			if (within) {
 				now.insert(candidate);
 			}

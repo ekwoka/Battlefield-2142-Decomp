@@ -195,7 +195,9 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | E | Enter or leave a vehicle nearby |
 | F1 … F8 | Change seats |
 | F / X | In a seat: next weapon / flares or active defence (keys 1 … 9 pick a seat weapon; the alt-fire button arms a TV-guided missile) |
-| C | First person ↔ chase view |
+| C | Cycle vehicle cameras (living infantry stays in first person) |
+| Enter | Open or close deployment; its Suicide button requests redeployment |
+| 7 | Select frag grenades when equipped; left button throws (G is kit pickup/drop) |
 | Tab | Scoreboard |
 | M / N / Left Alt | Big map / minimap zoom / 3D name tags |
 | Q / T | Radio menu / squad and commander menu |
@@ -239,7 +241,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | `--drive <vehicle>` | Put a vehicle (e.g. `eu_fav`) in front of the soldier and get in. |
 | `--seat <n>` | With `--drive`, stay in seat n (1 is the driver). |
 | `--zoom` | A screenshot's soldier zooms in after firing. |
-| `--actions "<cmd> …"` | A screenshot's soldier's inputs before the shot, e.g. `"reload wait:60 firemode fire:10 item:2 prone:20 jump"`. |
+| `--actions "<cmd> …"` | Screenshot inputs for the soldier or selected `--drive`/`--seat` vehicle, e.g. `"wait:90 altfire:1 wait:10"` for an AA rocket, or `"reload wait:60 firemode fire:10 item:2 prone:20 jump"`. |
 | `--unlock-all` | Every kit unlock. |
 | `--scoreboard` / `--spawn-screen` / `--commander-screen` | Show the scoreboard; die first and show the spawn screen; take command and open the commander screen. |
 | `--hud-click x/y[/right\|/move]` | A click or pointer move on the HUD's 800 × 600 screen before a screenshot (repeatable). |

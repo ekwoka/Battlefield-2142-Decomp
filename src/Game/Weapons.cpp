@@ -2,6 +2,7 @@
 
 #include "Physics/MaterialManager.h"
 #include "World/ObjectTemplate.h"
+#include "World/ObjectTemplateManager.h"
 
 #include <algorithm>
 #include <cmath>
@@ -296,6 +297,12 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	return s;
 }
 
+std::string tracerGeometryFor(const world::ObjectTemplateManager& templates, const ProjectileSettings& settings)
+{
+	const world::ObjectTemplate* tracer = settings.tracerTemplate.empty() ? nullptr : templates.find(settings.tracerTemplate);
+	return tracer ? tracer->geometry() : std::string();
+}
+
 float ProjectileSettings::damageAt(float distance) const
 {
 	const float least = minDamage == -1 ? damage : minDamage;
@@ -416,6 +423,12 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 	s.magSize = static_cast<int>(number(t, "ammo.magSize", static_cast<float>(s.magSize)));
 	s.nrOfMags = static_cast<int>(number(t, "ammo.nrOfMags", static_cast<float>(s.nrOfMags)));
 	s.reloadTime = number(t, "ammo.reloadTime", s.reloadTime);
+	// Camera-guided launchers author a minimum reload interval. Limit this
+	// interpretation to those launchers: other weapons also use the field,
+	// but its retail semantics there have not been established.
+	if (number(t, "zoom.useProjectileCamera", 0) != 0) {
+		s.reloadTime = std::max(s.reloadTime, number(t, "ammo.minimumTimeUntilReload", 0));
+	}
 	s.reloadWithoutPlayer = number(t, "ammo.reloadWithoutPlayer", 1) != 0;
 	s.delayToUseTicks = static_cast<int>(std::nearbyint(number(t, "delayToUse", 0) * 30));
 	s.autoReload = number(t, "ammo.autoReload", 0) != 0;
@@ -685,6 +698,65 @@ TracerLook tracerLook(const ProjectileSettings& settings, const physics::Vec3& r
 	return look;
 }
 
+std::vector<PlacedTracerLook> placedTracerLooks(const std::vector<Projectile>& projectiles)
+{
+	std::vector<PlacedTracerLook> out;
+	for (const Projectile& projectile : projectiles) {
+		if (!projectile.tracer || !projectile.alive || !projectile.settings
+			|| projectile.settings->tracerGeometry.empty()) {
+			continue;
+		}
+		TracerLook look = tracerLook(*projectile.settings, projectile.position, projectile.velocity, projectile.origin,
+			projectile.tracerStart, projectile.tracerOffset, projectile.tracerHit);
+		if (look.shown) {
+			out.push_back({projectile.settings->tracerGeometry, look});
+		}
+	}
+	return out;
+}
+
+std::vector<ProjectileRenderState> projectileRenderStates(const world::ObjectTemplateManager& templates,
+	const std::vector<Projectile>& projectiles, uint32_t hiddenSerial)
+{
+	std::vector<ProjectileRenderState> out;
+	for (const Projectile& projectile : projectiles) {
+		if (!projectile.alive || !projectile.settings || (hiddenSerial && projectile.serial == hiddenSerial)) {
+			continue;
+		}
+		const world::ObjectTemplate* objectTemplate = templates.find(projectile.settings->name);
+		if (!objectTemplate || objectTemplate->geometry().empty()) {
+			continue;
+		}
+		physics::Mat3 rotation = physics::Mat3::fromYawPitchRoll({projectile.yaw, 0, 0});
+		if (physics::lengthSquared(projectile.velocity) > 0.025f) {
+			rotation = physics::lookAtRotation(projectile.velocity, rotation);
+		} else if (projectile.stuck) {
+			// Sticky rounds retain their contact normal; keep their local up on
+			// that face while preserving the launch heading around its normal.
+			physics::Vec3 up = projectile.stuckNormal;
+			const float upLength = std::sqrt(physics::lengthSquared(up));
+			if (upLength > 1e-5f) {
+				up = up * (1 / upLength);
+				physics::Vec3 forward {std::sin(projectile.yaw * 0.01745329252f), 0,
+					std::cos(projectile.yaw * 0.01745329252f)};
+				forward = forward - up * physics::dot(forward, up);
+				const float forwardLength = std::sqrt(physics::lengthSquared(forward));
+				if (forwardLength > 1e-5f) {
+					forward = forward * (1 / forwardLength);
+					physics::Vec3 right = physics::cross(up, forward);
+					const float rightLength = std::sqrt(physics::lengthSquared(right));
+					if (rightLength > 1e-5f) {
+						right = right * (1 / rightLength);
+						rotation.rows = {right, physics::cross(forward, right), forward};
+					}
+				}
+			}
+		}
+		out.push_back({objectTemplate, projectile.position, rotation});
+	}
+	return out;
+}
+
 bool FireArm::addMagazine()
 {
 	if (m_settings.magSize < 0 || m_mags >= m_settings.nrOfMags) {
@@ -757,6 +829,7 @@ bool FireArm::tick(float seconds, bool trigger, bool altTrigger)
 	if (fired && m_settings.thrown) {
 		m_hidden = true; // the launch (0x005e5720) puts the firearm away
 	}
+	m_firedThisTick = fired;
 	return fired;
 }
 
@@ -770,10 +843,16 @@ bool FireArm::fire(float seconds, bool trigger)
 	} else if (mode == kFireBurst && pressed && m_burstLeft <= 0) {
 		m_burstLeft = std::max(m_settings.burstSize, 1);
 	}
+	// The heat cools only while the fire component is idle: the weapon update
+	// (0x005c5d5e) calls the cooling (0x005c1fe0) for fire state 0 only, and
+	// state 4 (a round's interval) still holds on the tick that ends it, before
+	// the component's update. So a held trigger never cools.
+	const bool inRoundInterval = m_cooldown > 0;
+	m_sinceFire += seconds;
 	if (m_cooldown > 0) {
 		--m_cooldown;
 	}
-	if (m_reloadLeft > 0 || m_overheatLeft > 0) {
+	if (m_reloadLeft > 0 || overheated()) {
 		m_pending = false;
 		m_burstLeft = 0;
 	}
@@ -817,9 +896,11 @@ bool FireArm::fire(float seconds, bool trigger)
 		}
 		return false;
 	}
-	m_heat = std::max(0.0f, m_heat - m_settings.coolDownPerSec * seconds);
-	if (m_overheatLeft > 0) {
-		m_overheatLeft = std::max(0.0f, m_overheatLeft - seconds);
+	// heat = the heat at the last round - the time since it x coolDownPerSec.
+	if (!inRoundInterval) {
+		m_heat = std::max(0.0f, m_heatAtFire - m_settings.coolDownPerSec * m_sinceFire);
+	}
+	if (overheated()) {
 		return false;
 	}
 	// A magazine size of -1: no magazine (vehicle guns that heat up instead).
@@ -879,11 +960,14 @@ bool FireArm::fire(float seconds, bool trigger)
 	m_cooldown = m_settings.ticksBetweenShots();
 	m_busyUntilRelease = m_settings.busyUntilButtonRelease;
 	if (m_settings.heatAddWhenFire > 0) {
+		// The batch fire (0x005c3cb0): over 1 the heat becomes overheatPenalty
+		// and cools back down to 1 (the gun stops while it is 1 or more).
 		m_heat += m_settings.heatAddWhenFire;
-		if (m_heat >= 1) {
-			m_heat = 1;
-			m_overheatLeft = m_settings.overheatPenalty;
+		if (m_heat > 1) {
+			m_heat = m_settings.overheatPenalty;
 		}
+		m_heatAtFire = m_heat;
+		m_sinceFire = 0;
 	}
 	if (unlimited) {
 		return true;

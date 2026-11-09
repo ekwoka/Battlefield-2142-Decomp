@@ -5,6 +5,7 @@
 #include "Animation/AnimationSystem.h"
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
+#include "Game/SoldierControl.h"
 #include "IO/File/FileManager.h"
 #include "TestMain.h"
 
@@ -199,6 +200,26 @@ TEST(AnimationSystem_SoldierAndRifle)
 	std::fprintf(stderr, "  running: body %s/ weapon %s\n", bodyPlaying.c_str(), weaponPlaying.c_str());
 	CHECK(contains(body.playing(), "stand_run"));
 	CHECK(contains(weapon.playing(), "stand_run"));
+	// The shipped third-person soldier graph switches to its forward sprint
+	// bundle at 5.5 m/s (vanilla), and to its zoomed walk branch on message 4.
+	const float yaw = 35.0f * 3.14159265f / 180.0f;
+	const physics::Vec3 sprintVelocity {6.3f * std::sin(yaw), 0, 6.3f * std::cos(yaw)};
+	const game::SoldierAnimationDirection sprintDirection = game::soldierAnimationDirection(sprintVelocity, 35);
+	input = {};
+	input.speed = 6.3f;
+	input.forward = input.speed * sprintDirection.forward;
+	for (int i = 0; i < 30; ++i) {
+		body.update(input, 1 / 30.0f);
+	}
+	CHECK(contains(body.playing(), "stand_sprint"));
+	input.speed = 1.5f;
+	input.forward = 1.5f;
+	input.messages = 4;
+	for (int i = 0; i < 30; ++i) {
+		body.update(input, 1 / 30.0f);
+	}
+	CHECK(contains(body.playing(), "stand_walk"));
+	CHECK(!contains(body.playing(), "stand_sprint"));
 
 	anim::LocalPose pose = anim::setupPose(*skeleton);
 	std::vector<bool> touched;

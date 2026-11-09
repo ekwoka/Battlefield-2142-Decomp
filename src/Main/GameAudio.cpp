@@ -1,5 +1,7 @@
+#include <cstdio>
 #include "GameAudio.h"
 
+#include <cstdio>
 #include "Game/GameWorld.h"
 #include "HudWorld.h"
 #include "Game/Vehicle.h"
@@ -16,6 +18,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 
 namespace dice::hfe {
 
@@ -39,21 +42,6 @@ float number(const world::ObjectTemplate& t, const char* key, float fallback)
 {
 	const std::string& value = setting(t, key);
 	return value.empty() ? fallback : static_cast<float>(std::atof(value.c_str()));
-}
-
-// Whether a point is within a vehicle's box (its collision LOD's, in its
-// own frame).
-bool insideBox(const game::GameWorld::VehicleInfo& v, const physics::Vec3& p)
-{
-	const physics::Vec3 d = p - v.position;
-	const physics::Vec3& f = v.forward;
-	const physics::Vec3& r = v.right;
-	const physics::Vec3 up {f.y * r.z - f.z * r.y, f.z * r.x - f.x * r.z, f.x * r.y - f.y * r.x};
-	const float x = d.x * r.x + d.y * r.y + d.z * r.z;
-	const float y = d.x * up.x + d.y * up.y + d.z * up.z;
-	const float z = d.x * f.x + d.y * f.y + d.z * f.z;
-	return x >= v.boxMin.x && x <= v.boxMax.x && y >= v.boxMin.y && y <= v.boxMax.y && z >= v.boxMin.z
-		&& z <= v.boxMax.z;
 }
 
 // The soldier's own material against the floors the shipped cells pair
@@ -98,12 +86,7 @@ void GameAudio::listener(Camera& camera)
 		titanSeat = m_round.isTitan(me.vehicle);
 		inside = titanSeat;
 	} else if (alive && !m_round.titans().empty()) {
-		for (const auto& v : m_round.vehicleList()) {
-			if (m_round.isTitan(v.object) && insideBox(v, me.position + physics::Vec3 {0, 1.0f, 0})) {
-				inside = true;
-				break;
-			}
-		}
+		inside = m_round.titanHolding(me.position + physics::Vec3 {0, 1.0f, 0}) != 0;
 	}
 	m_listenerState.insideTitan = inside;
 	m_manager.setListenerRoot(alive ? (me.vehicle ? me.vehicle : me.soldier) : 0, titanSeat);
@@ -252,8 +235,6 @@ void GameAudio::materialRadio()
 		return;
 	}
 	m_materialScanIn = 3;
-	std::vector<game::GameWorld::VehicleInfo> titans;
-	bool listed = false;
 	const double now = m_round.roundTime();
 	for (const auto& p : m_round.playerList()) {
 		if (!p.alive || p.vehicle) {
@@ -264,22 +245,13 @@ void GameAudio::materialRadio()
 		if (!material || !material->triggerRadio) {
 			continue;
 		}
-		if (!listed) {
-			listed = true;
-			for (const auto& v : m_round.vehicleList()) {
-				if (m_round.isTitan(v.object)) {
-					titans.push_back(v);
-				}
-			}
+		// Titans are not in vehicleList(), so the Titan holding the soldier comes from the round's own hull test.
+		const uint32_t held = m_round.titanHolding(p.position + physics::Vec3 {0, 1.0f, 0}, true);
+		if (!held) {
+			continue; // no Titan under the soldier: not a Titan floor, nothing to announce
 		}
-		bool friendly = false;
-		for (const auto& titan : titans) {
-			if (insideBox(titan, p.position + physics::Vec3 {0, 1.0f, 0})) {
-				const world::Object* object = m_objects.find(titan.object);
-				friendly = object && object->team() == p.team;
-				break;
-			}
-		}
+		const world::Object* object = m_objects.find(held);
+		const bool friendly = object && object->team() == p.team;
 		const int own = friendly ? 0 : 1, other = friendly ? 0 : 2;
 		for (const auto& [index, team] : {std::pair<int, int> {own, p.team}, {other, p.team == 1 ? 2 : 1}}) {
 			const physics::MaterialCell::RadioMessage* radio = materials->radioMessage(touched, kSoldierBodyMaterial, index);
@@ -383,13 +355,17 @@ void GameAudio::weapons(const Camera& camera)
 			: event.kind == Kind::SwitchFireRate                          ? sound::GameSounds::WeaponEvent::SwitchFireRate
 			: event.kind == Kind::TriggerClick                            ? sound::GameSounds::WeaponEvent::TriggerClick
 																		  : sound::GameSounds::WeaponEvent::Deploy;
-		const uint64_t user = (static_cast<uint64_t>(static_cast<uint32_t>(event.player)) << 32) | event.object;
+		const game::GameWorld::PlayerInfo* seated = event.player >= 0 ? info(event.player) : nullptr;
+		// A seat carries several fire components (cannon, launcher): each is
+		// its own sound component (0x005dbdc0), so key the state by weapon.
+		const uint32_t part = seated && seated->vehicle ? static_cast<uint32_t>(std::hash<std::string>()(event.weapon)) : 0;
+		const uint64_t user = (static_cast<uint64_t>(static_cast<uint32_t>(event.player)) << 32) | (event.object ^ part);
 		sound::GameSounds::FireInfo fire;
 		if (event.kind == Kind::Fire) {
 			const game::GameWorld::PlayerInfo* p = event.player >= 0 ? info(event.player) : nullptr;
-			// The fire component's mode (slot 0xdc): the hand weapon's, a seat
-			// gun's automatic (the rewrite's seats fire while held).
-			fire.mode = p && !p->vehicle ? p->fireMode : 2;
+			// The fire component's mode (slot 0xdc): the hand weapon's or the
+			// seat gun's own (no fire.addFireRate: automatic).
+			fire.mode = p && !p->vehicle ? p->fireMode : event.fireMode >= 0 ? event.fireMode : 2;
 			const int burst = weapon ? std::max(1, static_cast<int>(number(*weapon, "fire.burstSize", 3))) : 1;
 			fire.burstRounds = fire.mode == 0 ? 1 : fire.mode == 1 ? burst : std::max(1, p ? p->roundsInMag : 1);
 			fire.held = false;
@@ -407,7 +383,7 @@ void GameAudio::weapons(const Camera& camera)
 	for (auto it = m_triggers.begin(); it != m_triggers.end();) {
 		const int player = static_cast<int>(static_cast<uint32_t>(it->first >> 32));
 		const game::GameWorld::PlayerInfo* p = info(player);
-		const bool held = p && p->alive && p->firing;
+		const bool held = p && p->alive && (p->firing || p->altFiring);
 		if (!held || m_tick - it->second.lastRound > it->second.interval) {
 			m_sounds.releaseTrigger(it->first);
 			it = m_triggers.erase(it);
@@ -553,11 +529,15 @@ void GameAudio::engines()
 				m_sounds.loop(owner, "S_" + part.name + "_Idle", at, {}, e.input, id);
 				m_sounds.loop(owner, "S_" + part.name + "_Rpm1", at, {}, e.input, id, &e.rpm1Scale);
 				m_sounds.loop(owner, "S_" + part.name + "_Rpm2", at, {}, e.input, id, &e.rpm2Scale);
+				m_sounds.loop(owner, "S_" + part.name + "_RotationRpm", at, {}, e.input, id);
 				continue;
 			}
-			// The old style: |rpm| x 0.8333 for all three.
+			// The old style: |rpm| x 0.8333 for all. shortcut: RotationRpm (the gunships' air_distant
+			// whoosh). Retail (0x005630b4 creates it, 0x00564840 steps it) feeds both envelopes a
+			// critically damped (0.0333 s) ratio of the part's rotation speed to its template
+			// maxSpeed, plays above 1e-4 and stops below 5e-5; engine rpm stands in for that ratio.
 			const float input = std::fabs(rpm * 0.8333333f);
-			for (const char* loop : {"_Idle", "_Rpm1", "_Rpm2"}) {
+			for (const char* loop : {"_Idle", "_Rpm1", "_Rpm2", "_RotationRpm"}) {
 				m_sounds.loop(owner, "S_" + part.name + loop, at, {}, input, id);
 			}
 		}
@@ -632,6 +612,10 @@ void GameAudio::radio()
 			in.sender.position = toSound(sender.position) + sound::Vec3 {0, 1.6f, 0};
 		}
 		const sound::VoiceMessages::Result result = m_voices->heard(in);
+		// One line per radio message so a session log shows whether the voice started (and at what group gain).
+		std::printf("radio-voice: %s sender=%d own=%d played=%d sample=%d group2-volume=%.2f\n", message.voice.c_str(), message.sender,
+			in.senderIsListener, static_cast<int>(result.played), result.sample, m_manager.volumeForGroup(2));
+		std::fflush(stdout);
 		if (result.played != sound::VoiceMessages::Played::None) {
 			++voiceOvers;
 		}

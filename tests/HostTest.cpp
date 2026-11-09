@@ -1298,6 +1298,15 @@ TEST(NetHost_VehiclePrediction)
 	}
 	CHECK(round.playerInfo(me, info) && info.vehicle == garage.vehicle && info.seat == 0);
 	CHECK(pumpUntil(step, [&] { return car.active(); }, 4000));
+	std::map<uint16_t, uint32_t> hudGhosts;
+	for (const net::RemoteObject& o : client.world().objectList()) {
+		if (o.part == 0 && o.templateId == garage.templates.find("eu_fav")->id()) hudGhosts[o.ghost] = garage.vehicle;
+	}
+	host::RemoteHudWorld pilotHud(client.world(), round, hudGhosts);
+	drive.throttle = 0.7f;
+	step();
+	CHECK(std::fabs(pilotHud.pilotThrust(garage.vehicle) - 0.7f) < 0.01f);
+	CHECK(pilotHud.pilotThrust(garage.vehicle + 100000) == 0);
 	const dice::hfe::world::Object* v = garage.objects.find(garage.vehicle);
 	const dice::hfe::physics::Vec3 from {v->position().x, v->position().y, v->position().z};
 	// Drive: full throttle, steering one way then the other, a stop.
@@ -2137,7 +2146,7 @@ TEST(Host_RemoteSeatGunsFireFromTheFireState)
 	const auto fires = [&round](const char* weapon) {
 		int n = 0;
 		for (const auto& [object, list] : round.takeObjectWeaponFires()) {
-			n += static_cast<int>(std::count(list.begin(), list.end(), std::string(weapon)));
+			n += static_cast<int>(std::count_if(list.begin(), list.end(), [&](const auto& fire) { return fire.weapon == weapon; }));
 		}
 		return n;
 	};
@@ -2152,7 +2161,8 @@ TEST(Host_RemoteSeatGunsFireFromTheFireState)
 		&& sounds[0].object == id && sounds[0].weapon == "tank_gun");
 	// At the muzzle: the gun's place and 1 m along it (no projectileStartPosition).
 	CHECK(sounds.size() == 1 && std::fabs(sounds[0].position.y - 2) < 1e-4f && std::fabs(sounds[0].position.z - 12) < 1e-4f);
-	CHECK(round.takeObjectWeaponFires()[id] == std::vector<std::string> {"tank_gun"});
+	const auto fired = round.takeObjectWeaponFires()[id];
+	CHECK(fired.size() == 1 && fired[0].weapon == "tank_gun" && fired[0].seat == seats[0].name);
 	int rounds = 0;
 	for (int i = 0; i < 30 * 5; ++i) {
 		guns.step(round, {seat}, 1 / 30.0f); // held: no second press

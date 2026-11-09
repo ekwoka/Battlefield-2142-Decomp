@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <map>
 #include <vector>
@@ -1047,6 +1048,43 @@ void updateSquadInfo(hud::HudManager& hud, bool known, bool commander, int squad
 	hud.set("SquadOrderInfoBarShow", 0);
 	hud.setString("SquadInfoText", line);
 	hud.setString("SquadInfoIconPath", icon);
+}
+
+CaptureBar captureBar(const std::vector<game::GameWorld::ControlPointInfo>& points, const physics::Vec3& at)
+{
+	const game::GameWorld::ControlPointInfo* best = nullptr;
+	float bestDistance = 0;
+	for (const auto& point : points) {
+		const float dx = point.position.x - at.x, dz = point.position.z - at.z;
+		const float distance = std::sqrt(dx * dx + dz * dz);
+		if (point.capturable && distance <= point.radius && (!best || distance < bestDistance)) {
+			best = &point;
+			bestDistance = distance;
+		}
+	}
+	CaptureBar bar;
+	if (!best) {
+		return bar;
+	}
+	bar.enabled = true;
+	bar.value = std::clamp(best->flagHeight, 0.0f, 1.0f);
+	// A flag moving up is being taken, down is being neutralized; at rest
+	// part-way, an owned point is going down and a neutral one up.
+	const bool down = best->flagRate != 0 ? best->flagRate < 0 : best->team != 0;
+	const bool moving = best->flagRate != 0 || (bar.value > 0 && bar.value < 1);
+	bar.neutralShow = moving && down;
+	bar.takenShow = moving && !down;
+	return bar;
+}
+
+float titanHudHealth(const game::GameWorld::TitanInfo& titan)
+{
+	if (titan.maxHitPoints <= 0) {
+		return 0;
+	}
+	// gpm_ti.py sets tickets to ceil(100 * remaining / maximum); keep that
+	// integer convention, including zero for a wreck, for HudElementsTitans.
+	return std::ceil(std::clamp(100.0f * titan.hitPoints / titan.maxHitPoints, 0.0f, 100.0f));
 }
 
 } // namespace dice::hfe::menu

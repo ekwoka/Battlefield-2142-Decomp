@@ -1,6 +1,8 @@
 // Firearms and projectiles.
 #include "Animation/FirstPerson.h"
 #include "Game/Weapons.h"
+#include "Geometry/GeometryTemplateManager.h"
+#include "IO/File/FileManager.h"
 #include "Physics/MaterialManager.h"
 #include "TestMain.h"
 #include "World/ObjectTemplateManager.h"
@@ -11,8 +13,69 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <sstream>
 
 using namespace dice::hfe;
+
+namespace {
+
+void registerArchiveTemplateCommands(Console& console, world::ObjectTemplateManager& templates,
+	const io::FileManager& files, const std::vector<std::string>& directories)
+{
+	std::vector<std::string> types, properties;
+	for (const std::string& directory : directories) {
+		for (const std::string& path : files.listFilesRecursive(directory)) {
+			const bool con = path.size() >= 4 && path.substr(path.size() - 4) == ".con";
+			const bool tweak = path.size() >= 6 && path.substr(path.size() - 6) == ".tweak";
+			if (!con && !tweak) {
+				continue;
+			}
+			std::string text;
+			if (!files.readText(path, text)) {
+				continue;
+			}
+			std::istringstream lines(text);
+			std::string line;
+			while (std::getline(lines, line)) {
+				std::istringstream words(line);
+				std::string command, value;
+				words >> command >> value;
+				if (command == "ObjectTemplate.create" && !value.empty()) {
+					types.push_back(value);
+				} else if (command.rfind("ObjectTemplate.", 0) == 0) {
+					properties.push_back(command.substr(std::string("ObjectTemplate.").size()));
+				}
+			}
+		}
+	}
+	std::sort(types.begin(), types.end());
+	types.erase(std::unique(types.begin(), types.end()), types.end());
+	uint32_t classId = 1;
+	for (const std::string& type : types) {
+		if (!templates.classIdOf(type)) {
+			templates.registerType(classId++, type);
+		}
+	}
+	world::registerUntypedTemplateProperties(console, templates, properties);
+}
+
+} // namespace
+
+TEST(Weapons_FirePulseIncludesUnlimitedAmmoAndRejectsCooldown)
+{
+	game::FireArmSettings settings;
+	settings.magSize = -1;
+	settings.roundsPerMinute = 600;
+	game::FireArm gun(settings);
+	CHECK(!gun.firedThisTick());
+	CHECK(gun.tick(1 / 30.0f, true));
+	CHECK(gun.firedThisTick() && gun.roundsInMag() == -1);
+	CHECK(!gun.tick(1 / 30.0f, true) && !gun.firedThisTick());
+	CHECK(!gun.tick(1 / 30.0f, true) && !gun.firedThisTick());
+	CHECK(gun.tick(1 / 30.0f, true) && gun.firedThisTick());
+	CHECK(!gun.tick(1 / 30.0f, false) && !gun.firedThisTick());
+}
 
 TEST(Weapons_DamageFallsOffWithDistance)
 {
@@ -112,7 +175,8 @@ TEST(Weapons_RandomDistributions)
 TEST(Weapons_GunsHeatUp)
 {
 	// eu_fav_MachineGun_Firearm: no magazine, 0.02 heat a round, cooling
-	// 0.4 a second, 2 s stopped when overheated.
+	// 0.4 a second, overheatPenalty 2. A held trigger never cools (the
+	// weapon update cools in fire state 0 only, 0x005c5d5e): 51 rounds.
 	game::FireArmSettings settings;
 	settings.magSize = -1;
 	settings.roundsPerMinute = 1800; // a round a tick
@@ -124,13 +188,58 @@ TEST(Weapons_GunsHeatUp)
 	while (!gun.overheated() && rounds < 1000) {
 		rounds += gun.tick(1 / 30.0f, true) ? 1 : 0;
 	}
-	// Each tick cools 0.0133 while a round adds 0.02: about 150 rounds.
-	CHECK(rounds > 140 && rounds < 160);
+	CHECK(rounds == 51);
 	CHECK(!gun.tick(1 / 30.0f, true));
-	for (int i = 0; i < 61; ++i) {
+	// The heat is the penalty (2) and cools to 1 in 2.5 s.
+	for (int i = 0; i < 70; ++i) {
 		gun.tick(1 / 30.0f, false);
 	}
-	CHECK(!gun.overheated() && gun.heat() < 0.25f && gun.tick(1 / 30.0f, true));
+	CHECK(gun.overheated());
+	for (int i = 0; i < 10; ++i) {
+		gun.tick(1 / 30.0f, false);
+	}
+	CHECK(!gun.overheated() && gun.heat() < 1 && gun.tick(1 / 30.0f, true));
+}
+
+// as_heavy_mech_main_cannon / us_heavy_mech_minigun_firearm: a magazine and
+// heat. Held fire overheats them after about 2.8 s although the cooling
+// (0.5 a second) is faster than the heat added (0.375 a second); a tapped
+// trigger cools between rounds.
+TEST(Weapons_WalkerMainGunOverheatsWhenHeld)
+{
+	game::FireArmSettings settings;
+	settings.roundsPerMinute = 450;
+	settings.magSize = 450;
+	settings.nrOfMags = 1;
+	settings.heatAddWhenFire = 0.05f;
+	settings.coolDownPerSec = 0.5f;
+	settings.overheatPenalty = 2.5f;
+	game::FireArm gun(settings);
+	int ticks = 0;
+	int rounds = 0;
+	while (!gun.overheated() && ticks < 600) {
+		rounds += gun.tick(1 / 30.0f, true) ? 1 : 0;
+		++ticks;
+	}
+	CHECK(rounds >= 20 && rounds <= 21); // 20 x 0.05 sits on the edge of 1
+	CHECK(ticks > 70 && ticks < 90);
+	CHECK(gun.heat() == 1);
+	// (2.5 - 1) / 0.5 = 3 s of cooling to fire again.
+	int wait = 0;
+	while (gun.overheated() && wait < 300) {
+		gun.tick(1 / 30.0f, false);
+		++wait;
+	}
+	CHECK(wait >= 89 && wait <= 92);
+	// A round every other second never gets near 1.
+	game::FireArm tap(settings);
+	for (int i = 0; i < 20; ++i) {
+		tap.tick(1 / 30.0f, true);
+		for (int j = 0; j < 60; ++j) {
+			tap.tick(1 / 30.0f, false);
+		}
+	}
+	CHECK(!tap.overheated() && tap.heat() == 0);
 }
 
 // ammo.reloadWithoutPlayer (0x005f4bb0 / 0x005f3a40): a gun left with a
@@ -647,15 +756,21 @@ TEST(Weapons_Tracers)
 {
 	world::ObjectTemplateManager templates;
 	templates.registerType(1, "GenericProjectile");
+	templates.registerType(2, "SimpleObject");
 	world::ObjectTemplate* round = templates.create("GenericProjectile", "round");
 	round->settings()["tracerTemplate"] = "p_tracer2_eu";
 	round->settings()["tracerInterval"] = "2";
 	round->settings()["tracerScaler"] = "40";
 	round->settings()["tracerSizeModifier"] = "0.25";
 	round->settings()["tracerConvergeDistance"] = "75";
+	world::ObjectTemplate* tracer = templates.create("SimpleObject", "p_tracer2_eu");
+	tracer->setGeometry("p_tracer2_eu_geometry");
 	const game::ProjectileSettings s = game::ProjectileSettings::fromTemplate(*round);
 	CHECK(s.tracerTemplate == "p_tracer2_eu" && s.tracerInterval == 2 && s.tracerScaler == 40);
 	CHECK(s.tracerSizeModifier == 0.25f && s.tracerConvergeDistance == 75 && s.maxTracerScaler == 0.1f);
+	CHECK(game::tracerGeometryFor(templates, s) == "p_tracer2_eu_geometry");
+	game::ProjectileSettings visualSettings = s;
+	visualSettings.tracerGeometry = game::tracerGeometryFor(templates, visualSettings);
 	game::FireArm gun(game::FireArmSettings {});
 	std::vector<bool> tracers;
 	for (int i = 0; i < 5; ++i) {
@@ -685,6 +800,223 @@ TEST(Weapons_Tracers)
 	// Not yet out of the barrel, or not moving: nothing to draw.
 	CHECK(!game::tracerLook(s, {0, 1, 0}, velocity, origin, origin, offset, false).shown);
 	CHECK(!game::tracerLook(s, {0, 1, 5}, {0, 0, 0.1f}, origin, origin, offset, false).shown);
+	// The placed-mesh input used by GameWorld: local and remote rounds share
+	// the resolved geometry, transform, length and expiry.
+	game::Projectile live;
+	live.settings = &visualSettings;
+	live.tracer = true;
+	live.position = {0, 1, 50};
+	live.velocity = velocity;
+	live.origin = origin;
+	live.tracerStart = origin;
+	live.tracerOffset = offset;
+	game::Projectile remote = live;
+	remote.visual = true;
+	remote.ghostObject = 42;
+	remote.position = {0, 1, 5};
+	game::Projectile expired = live;
+	expired.timeLeft = 1 / 30.0f;
+	game::moveProjectile(expired, 1 / 30.0f);
+	const auto placed = game::placedTracerLooks({live, remote, expired});
+	CHECK(placed.size() == 2);
+	CHECK(placed[0].geometry == "p_tracer2_eu_geometry" && placed[0].look.shown);
+	CHECK(std::fabs(placed[0].look.position.z - 50) < 1e-4f);
+	CHECK(std::fabs(placed[0].look.axes.rows[2].z - 10) < 1e-4f);
+	CHECK(std::fabs(placed[1].look.position.x - 0.3f * (1 - 5 / 75.0f)) < 1e-5f);
+}
+
+TEST(Weapons_RetailProjectileGeometryAndTracerTemplates)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	CHECK(files.mountArchive("Objects/Weapons_server.zip", "Objects\\Weapons"));
+	CHECK(files.mountArchive("Objects/Vehicles_server.zip", "Objects\\Vehicles"));
+	CHECK(files.mountArchive("Objects/Effects_server.zip", "Objects\\Effects"));
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	Console console(&files);
+	world::registerWorldConsoleMethods(console, templates, objects);
+	geom::GeometryTemplateManager geometries;
+	geom::registerGeometryConsoleMethods(console, geometries);
+	registerArchiveTemplateCommands(console, templates, files,
+		{"Objects/Weapons/Armament/missiles", "Objects/Weapons/Handheld/Unl_Mine_EMP",
+			"Objects/Weapons/stationary/eu_sentrygun",
+			"Objects/Vehicles/as_heavy_mech", "Objects/Vehicles/us_heavy_mech",
+			"Objects/Effects/weapons/tracers/geometry/p_tracer_g"});
+	world::registerUntypedTemplateProperties(console, templates,
+		{"physicsType", "geometryPart", "tracerTemplate", "tracerInterval", "tracerScaler", "tracerSizeModifier",
+			"tracerConvergeDistance", "projectileTemplate", "timeToLive", "armingDelay", "networkableInfo"});
+	std::string out;
+	for (const char* script : {"Objects/Weapons/Armament/missiles/walker_misslie/walker_missile.con",
+			"Objects/Weapons/Armament/missiles/msilo_missile/msilo_missile.con",
+			"Objects/Weapons/Armament/missiles/eu_aa_missile/eu_aa_missile.con",
+			"Objects/Weapons/Handheld/Unl_Mine_EMP/Unl_Mine_EMP.con",
+			"Objects/Weapons/stationary/eu_sentrygun/eu_sentrygun.con",
+			"Objects/Vehicles/as_heavy_mech/as_heavy_mech.con", "Objects/Vehicles/us_heavy_mech/us_heavy_mech.con",
+			"Objects/Effects/weapons/tracers/geometry/p_tracer_g/p_tracer2_as.con",
+			"Objects/Effects/weapons/tracers/geometry/p_tracer_g/p_tracer2_eu.con"}) {
+		CHECK(console.run(script, {}, out));
+	}
+	const world::ObjectTemplate* walker = templates.find("walker_missile");
+	const world::ObjectTemplate* silo = templates.find("msilo_missile");
+	const world::ObjectTemplate* aa = templates.find("eu_aa_missile");
+	const world::ObjectTemplate* stationBullet = templates.find("eu_SentryGun_FireArm_Projectile");
+	const world::ObjectTemplate* asMechAA = templates.find("as_heavy_mech_AA_missile");
+	const world::ObjectTemplate* empMine = templates.find("Unl_Mine_EMP_Projectile");
+	CHECK(walker && walker->geometry() == "walker_missile");
+	CHECK(silo && silo->geometry() == "msilo_missile" && silo->children().size() >= 2);
+	if (silo && silo->children().size() >= 2) {
+		const auto& right = silo->children()[0];
+		const auto& left = silo->children()[1];
+		const world::ObjectTemplate* rightPart = templates.find(right.name);
+		const world::ObjectTemplate* leftPart = templates.find(left.name);
+		CHECK(right.name == "mSilo_missile_wing_R" && rightPart != nullptr);
+		CHECK(left.name == "mSilo_missile_wing_L" && leftPart != nullptr);
+		CHECK(std::fabs(right.position.x - 0.0457f) < 1e-5f && std::fabs(right.position.z + 1.1842f) < 1e-5f);
+		CHECK(std::fabs(left.position.x + 0.0525f) < 1e-5f && std::fabs(left.position.z + 1.1816f) < 1e-5f);
+		CHECK(rightPart && rightPart->settings().count("geometryPart")
+			&& rightPart->settings().find("geometryPart")->second == "1");
+		CHECK(leftPart && leftPart->settings().count("geometryPart")
+			&& leftPart->settings().find("geometryPart")->second == "2");
+	}
+	CHECK(aa && aa->geometry() == "eu_aa_missile");
+	CHECK(stationBullet && stationBullet->geometry().empty());
+	CHECK(stationBullet && stationBullet->settings().count("tracerTemplate")
+		&& stationBullet->settings().find("tracerTemplate")->second == "p_tracer2_eu");
+	// Effective template state includes each .tweak: walker stays Mesh while
+	// silo/AA and gun rounds resolve to Point despite their .con declarations.
+	CHECK(walker && walker->settings().count("physicsType") && walker->settings().find("physicsType")->second == "3");
+	CHECK(silo && silo->settings().count("physicsType") && silo->settings().find("physicsType")->second == "Point");
+	CHECK(aa && aa->settings().count("physicsType") && aa->settings().find("physicsType")->second == "Point");
+	CHECK(stationBullet && stationBullet->settings().count("physicsType")
+		&& stationBullet->settings().find("physicsType")->second == "Point");
+	// These are actual gunner and stationary-gun projectile links in the retail
+	// templates. Exercise each live tracer's loaded geometry, dimensions and
+	// expiry, including the US walker minigun bullets that have no body mesh.
+	const auto checkActualTracer = [&](const char* projectileName, const char* expectedTracer) {
+		const world::ObjectTemplate* t = templates.find(projectileName);
+		CHECK(t != nullptr);
+		if (!t) return;
+		game::ProjectileSettings tracerSettings = game::ProjectileSettings::fromTemplate(*t);
+		CHECK(tracerSettings.tracerTemplate == expectedTracer);
+		CHECK(tracerSettings.tracerInterval > 0 && tracerSettings.tracerScaler > 0
+			&& tracerSettings.tracerSizeModifier > 0);
+		tracerSettings.tracerGeometry = game::tracerGeometryFor(templates, tracerSettings);
+		CHECK(!tracerSettings.tracerGeometry.empty());
+		game::FireArm cadence(game::FireArmSettings {});
+		std::vector<game::Projectile> shots;
+		for (int i = 0; i <= tracerSettings.tracerInterval; ++i) {
+			game::Projectile round;
+			round.settings = &tracerSettings;
+			round.tracer = cadence.takeTracer(tracerSettings.tracerInterval);
+			round.position = {0, 0, 10};
+			round.velocity = {0, 0, 50};
+			round.origin = {0, 0, 0};
+			round.tracerStart = round.origin;
+			shots.push_back(round);
+		}
+		CHECK(shots.size() == static_cast<size_t>(tracerSettings.tracerInterval + 1));
+		CHECK(shots.front().tracer && shots[1].tracer == (tracerSettings.tracerInterval == 1) && shots.back().tracer);
+		auto placedRound = game::placedTracerLooks(shots);
+		CHECK(placedRound.size() == 2);
+		CHECK(placedRound.size() == 2 && placedRound[0].geometry == tracerSettings.tracerGeometry);
+		CHECK(placedRound.size() == 2 && std::fabs(placedRound[0].look.axes.rows[2].z
+			- std::min(tracerSettings.tracerScaler * tracerSettings.tracerSizeModifier, 10.0f)) < 1e-4f);
+		shots.front().timeLeft = 1 / 30.0f;
+		game::moveProjectile(shots.front(), 1 / 30.0f);
+		CHECK(!shots.front().alive && game::placedTracerLooks(shots).size() == 1);
+	};
+	const auto checkFirearmLink = [&](const char* firearmName, const char* projectileName) {
+		const world::ObjectTemplate* firearm = templates.find(firearmName);
+		CHECK(firearm && firearm->settings().count("projectileTemplate")
+			&& firearm->settings().find("projectileTemplate")->second == projectileName);
+	};
+	checkFirearmLink("as_heavy_mech_AAcannon_firearm", "as_heavy_mech_AAcannon_Projectile");
+	checkFirearmLink("US_heavy_mech_AAcannon_barrel", "us_heavy_mech_AAcannon_Projectile");
+	checkFirearmLink("us_heavy_mech_minigun_firearm", "us_heavy_mech_minigun_firearm_Projectile");
+	checkActualTracer("as_heavy_mech_AAcannon_Projectile", "p_tracer2_as");
+	checkActualTracer("us_heavy_mech_AAcannon_Projectile", "p_tracer2_eu");
+	checkActualTracer("us_heavy_mech_minigun_firearm_Projectile", "p_tracer2_eu");
+	checkActualTracer("eu_SentryGun_FireArm_Projectile", "p_tracer2_eu");
+	CHECK(asMechAA && asMechAA->geometry().empty());
+	CHECK(empMine && empMine->geometry() == "Unl_Mine_EMP");
+	CHECK(empMine && empMine->settings().count("physicsType")
+		&& empMine->settings().find("physicsType")->second == "Mesh");
+	CHECK(empMine && empMine->settings().count("armingDelay")
+		&& empMine->settings().find("armingDelay")->second == "3");
+	if (empMine) {
+		game::ProjectileSettings mineSettings = game::ProjectileSettings::fromTemplate(*empMine);
+		CHECK(mineSettings.timeToLive.a >= 9999);
+		game::Projectile mine;
+		mine.settings = &mineSettings;
+		mine.timeLeft = mineSettings.timeToLive.a;
+		for (int i = 0; i < 90; ++i) {
+			game::moveProjectile(mine, 1 / 30.0f);
+			mine.age += 1 / 30.0f;
+		}
+		const auto models = game::projectileRenderStates(templates, {mine});
+		CHECK(mine.alive && mine.age >= 2.99f && models.size() == 1);
+		CHECK(models.size() == 1 && models[0].objectTemplate == empMine);
+	}
+}
+
+TEST(Weapons_LiveProjectileRenderStatesIncludeTemplateTreeAndExpire)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "GenericProjectile");
+	templates.registerType(2, "RotationalBundle");
+	world::ObjectTemplate* rocket = templates.create("GenericProjectile", "msilo_missile");
+	rocket->setGeometry("msilo_missile");
+	world::ObjectTemplate* wing = templates.create("RotationalBundle", "mSilo_missile_wing_R");
+	wing->settings()["geometryPart"] = "1";
+	rocket->children().push_back({"mSilo_missile_wing_R", {0.0457f, -0.0018f, -1.1842f}, {}});
+	game::ProjectileSettings settings;
+	settings.name = rocket->name();
+	game::Projectile live;
+	live.settings = &settings;
+	live.position = {10, 20, 30};
+	live.velocity = {0, 0, 80};
+	live.serial = 4;
+	game::Projectile expired = live;
+	expired.timeLeft = 1 / 30.0f;
+	expired.serial = 5;
+	game::moveProjectile(expired, 1 / 30.0f);
+	CHECK(!expired.alive);
+	game::Projectile remote = live;
+	remote.visual = true;
+	remote.ghostObject = 17;
+	remote.serial = 6;
+	remote.position = {40, 50, 60};
+	std::vector<game::Projectile> rounds {live, remote, expired};
+	const auto models = game::projectileRenderStates(templates, rounds);
+	CHECK(models.size() == 2);
+	CHECK(models[0].objectTemplate == rocket && models[0].objectTemplate->geometry() == "msilo_missile");
+	CHECK(models[0].objectTemplate->children().size() == 1);
+	CHECK(models[0].objectTemplate->children()[0].name == "mSilo_missile_wing_R");
+	CHECK(models[0].objectTemplate->children()[0].position.z == -1.1842f);
+	CHECK(models[0].position.x == 10 && models[0].position.y == 20 && models[0].position.z == 30);
+	CHECK(models[0].rotation.rows[2].z > 0.99f);
+	CHECK(models[1].position.x == 40 && models[1].rotation.rows[2].z > 0.99f); // remote ghost uses the same render input
+	game::Projectile stuck = live;
+	stuck.velocity = {};
+	stuck.stuck = true;
+	stuck.stuckNormal = {1, 0, 0};
+	const auto stuckModels = game::projectileRenderStates(templates, {stuck});
+	CHECK(stuckModels.size() == 1 && stuckModels[0].rotation.rows[1].x > 0.99f);
+	// A projectile with no shipped body geometry still has its tracer/effects,
+	// but must not create an empty model submission.
+	world::ObjectTemplate* invisible = templates.create("GenericProjectile", "bullet");
+	game::ProjectileSettings bulletSettings;
+	bulletSettings.name = invisible->name();
+	game::Projectile bullet = live;
+	bullet.settings = &bulletSettings;
+	rounds = {live, remote, bullet};
+	CHECK(game::projectileRenderStates(templates, rounds).size() == 2);
 }
 
 // The camera's recoil (0x00610180, 0x006101c0): one sine over 1 / speed

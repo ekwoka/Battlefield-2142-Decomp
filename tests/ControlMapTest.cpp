@@ -197,3 +197,40 @@ TEST(ControlMap_ScriptRoundTrip)
 	CHECK(copy.pressed(infantry, "c_PIFire", [](const std::string& c) { return c == "IDKey_Q"; }));
 	CHECK(!copy.find(infantry)->at("c_PIReload")[0].hold);
 }
+
+TEST(ControlMap_NativeMouseAndTrackpad)
+{
+	CHECK(input::sdlMouseButton(0) == 1);
+	CHECK(input::sdlMouseButton(1) == 3); // RMB, not the SDL middle button
+	CHECK(input::sdlMouseButton(2) == 2);
+	input::WheelSteps wheel;
+	CHECK(wheel.add(-0.25f) == 0);
+	CHECK(wheel.add(-0.5f) == 0);
+	CHECK(wheel.add(-0.5f) == -1);
+	CHECK(wheel.add(0.25f) == 0);
+	CHECK(wheel.add(2.5f) == 2);
+	CHECK(wheel.add(0.5f) == 1);
+	Console console;
+	input::ControlMaps maps;
+	input::registerControlMapConsoleMethods(console, maps);
+	std::string out;
+	CHECK(console.execute("ControlMap.create defaultPlayerInputControlMap", out) != ConsoleResult::Error);
+	CHECK(console.execute("ControlMap.addKeyToTriggerMapping c_PIToggleCameraMode IDFKeyboard IDKey_C 10000 0", out) != ConsoleResult::Error);
+	CHECK(maps.pressed(input::ControlMaps::kInfantry, "c_PIToggleCamera", pressedKeys({"IDKey_C"})));
+	CHECK(maps.script().find("c_PIToggleCamera ") != std::string::npos);
+}
+
+TEST(ControlMap_MenuWheelRejectsAccelerationBursts)
+{
+	input::MenuWheelSteps wheel;
+	CHECK(wheel.add(-30, 0) == -1);
+	CHECK(wheel.add(-30, 0.01) == 0);
+	CHECK(wheel.add(-30, 0.02) == 0);
+	CHECK(wheel.add(-30, 0.08) == -1);
+	CHECK(wheel.add(0, 1) == 0); // no queued momentum after a pause
+	CHECK(wheel.add(0.25f, 1.1) == 0);
+	CHECK(wheel.add(0.25f, 1.12) == 0);
+	CHECK(wheel.add(0.5f, 1.14) == 1);
+	CHECK(wheel.add(-0.5f, 1.3) == 0); // reverse clears the old gesture
+	CHECK(wheel.add(-0.5f, 1.32) == -1);
+}

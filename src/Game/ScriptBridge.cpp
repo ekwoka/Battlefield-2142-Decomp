@@ -148,6 +148,18 @@ std::vector<uint32_t> ScriptBridge::triggerCandidates(const std::string&)
 	return found;
 }
 
+float ScriptBridge::triggerHemisphereHeight(uint32_t id, float objectY)
+{
+	GameWorld::PlayerInfo player;
+	if (m_world.playerInfo(m_world.playerOf(id), player) && player.soldier == id && !player.vehicle) {
+		// Native soldier objects are at their feet; the physics body is 1 m
+		// above them. Use that body centre at the hemisphere's plane, so a
+		// slightly raised flag doesn't exclude the floor it stands on.
+		return objectY + 1.0f;
+	}
+	return objectY;
+}
+
 bool ScriptBridge::objectPosition(uint32_t id, float position[3])
 {
 	const world::Object* object = m_world.objects().find(id);
@@ -244,6 +256,10 @@ ScriptValue ScriptBridge::objectCall(uint32_t id, const std::string& method, con
 		return ScriptValue::integer(object ? 1 : 0);
 	}
 	if (!object) {
+		// A removed object (a dead soldier leaving a CP trigger): the scripts iterate these, so an empty list.
+		if (method == "getOccupyingPlayers" || method == "getChildren") {
+			return ScriptValue::makeList({});
+		}
 		return ScriptValue::none();
 	}
 	const world::ObjectTemplate* t = object->objectTemplate();

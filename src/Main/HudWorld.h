@@ -69,6 +69,8 @@ public:
 	virtual int spawnChoice(int player) const = 0;
 	virtual std::vector<VehicleInfo> vehicleList() const = 0;
 	virtual std::vector<int> vehicleOccupants(uint32_t vehicle) const = 0;
+	// Local pilot's requested thrust, not engine output.
+	virtual float pilotThrust(uint32_t vehicle) const { (void)vehicle; return 0; }
 	virtual float hitPoints(uint32_t object) const = 0;
 	// An object's armour as a fraction of its maxHitPoints, -1 when not known
 	// (no armour, or a ghost whose health hasn't come): the name tags' bars
@@ -217,6 +219,7 @@ public:
 		return list;
 	}
 	std::vector<int> vehicleOccupants(uint32_t vehicle) const override { return m_round.vehicleOccupants(vehicle); }
+	float pilotThrust(uint32_t vehicle) const override;
 	float hitPoints(uint32_t object) const override { return m_round.hitPoints(object); }
 	float objectHealth(uint32_t object) const override;
 	std::vector<bool> repairCells(uint32_t vehicle) const override { return m_round.repairCells(vehicle); }
@@ -288,6 +291,7 @@ public:
 	int spawnChoice(int player) const override { return player == localPlayer() ? chosenSpawn : -1; }
 	std::vector<VehicleInfo> vehicleList() const override;
 	std::vector<int> vehicleOccupants(uint32_t vehicle) const override;
+	float pilotThrust(uint32_t vehicle) const override;
 	float hitPoints(uint32_t object) const override;
 	float objectHealth(uint32_t object) const override;
 	std::vector<bool> repairCells(uint32_t vehicle) const override;

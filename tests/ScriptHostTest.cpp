@@ -1,6 +1,7 @@
 // The game's Python scripts on the embedded interpreter: Python 2 code
 // translated on import, the host module, and the conquest game mode
 // capturing a control point (needs $BF2142_GAME_DIR for the scripts).
+#include "TitanLevel.h"
 #include "Game/GameLogic.h"
 #include "Game/GameWorld.h"
 #include "Game/ScriptBridge.h"
@@ -367,4 +368,67 @@ TEST(ScriptHost_DivisionInAClass)
 				   "  def __cmp__(self, other): return cmp(self.v, other.v)\\n"
 				   "first = sorted([Old(3), Old(1), Old(2)])[0].v\\n'), 't', 'exec'), g)\n"
 				   "assert g['first'] == 1\n"));
+}
+
+TEST(ScriptHost_SuezBridgeInfantryCapture)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) {
+		return;
+	}
+	titantest::TitanLevel level(dir, "Suez_Canal", 16, true, nullptr, true, nullptr, "gpm_sp");
+	CHECK(level.loaded);
+	if (!level.loaded) {
+		return;
+	}
+	game::GameLogic logic;
+	for (int team = 1; team <= 2; ++team) {
+		logic.team(team).defaultTickets[16] = 200;
+	}
+	logic.startRound();
+	game::ServerSettings settings;
+	settings.mapName = "Suez_Canal";
+	game::ScriptBridge bridge(*level.world, logic, settings, "mods/bf2142");
+	std::string errors;
+	script::ScriptHost host(bridge, {std::string(dir) + "/python", std::string(dir) + "/mods/bf2142/python"},
+		[&errors](const std::string& line) {
+			if (line.compare(0, 7, "stderr:") == 0) errors += line + "\n";
+		});
+	level.sink = [&host](const std::string& e, const game::ScriptArgs& a) { host.raise(e, a); };
+	logic.setEventSink(level.sink);
+	CHECK(host.startGameMode("gpm_sp"));
+	host.setGameStatus(game::GameStatus::PreGame);
+	host.setGameStatus(game::GameStatus::Playing);
+	world::Object* soldier = level.world->spawnPlayer(2);
+	CHECK(soldier != nullptr);
+	if (!soldier) return;
+	game::ControlPoint* cp = nullptr;
+	for (const auto& point : level.world->controlPoints()) {
+		if (point.id == 602) cp = level.world->controlPointOf(point.object->id());
+	}
+	CHECK(cp != nullptr);
+	if (!cp) return;
+	const auto pos = cp->object->position();
+	// Within the sphere but well below its plane must not start capture.
+	CHECK(level.world->setSoldierPosition(soldier->id(), {pos.x + 2, pos.y - 4, pos.z}));
+	host.update();
+	CHECK(cp->takeOverChangePerSecond == 0);
+	// Outside the radius must not start it either.
+	CHECK(level.world->setSoldierPosition(soldier->id(), {pos.x + 12, pos.y, pos.z}));
+	host.update();
+	CHECK(cp->takeOverChangePerSecond == 0);
+	CHECK(bridge.triggerHemisphereHeight(cp->object->id(), pos.y) == pos.y);
+	// Drop onto the real platform, tick the actual game mode and finish capture.
+	CHECK(level.world->setSoldierPosition(soldier->id(), {pos.x + 2, pos.y + 3, pos.z}));
+	for (int i = 0; i < 30 * 25; ++i) {
+		level.world->tick(1.0f / 30);
+		logic.tick(1.0f / 30);
+		host.update();
+	}
+	const auto feet = soldier->position();
+	std::fprintf(stderr, "  Suez flag y %.3f, soldier feet y %.3f, flag %.3f, team %d\n",
+		pos.y, feet.y, cp->flagHeight, cp->team);
+	CHECK(feet.y < pos.y && feet.y > pos.y - 0.5f);
+	CHECK(cp->team == 2 && cp->flagHeight > 0.99f);
+	CHECK(errors.empty());
 }

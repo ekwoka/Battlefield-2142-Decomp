@@ -1415,7 +1415,9 @@ void Player::mouseWheel(int delta)
 	if (!m_root) {
 		return;
 	}
-	broadcast("Mouse", "onMouseWheel", {Value(delta)});
+	const Chain target = pickAt(m_mouseX, m_mouseY);
+	// BF2142's scroll panes consume positive values as scrollDown.
+	broadcast("Mouse", "onMouseWheel", {Value(-delta), target.empty() ? Value() : Value(target.back())});
 	runActions();
 }
 

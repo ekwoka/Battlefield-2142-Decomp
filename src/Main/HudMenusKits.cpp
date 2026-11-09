@@ -189,18 +189,46 @@ void KitMenu::build(int team)
 		if (level < 0 || level >= kItems || t->children().empty()) {
 			continue; // the level-15 replacements aren't on the grid
 		}
-		Item& item = m_grid[static_cast<size_t>(branchOf(setting(child.name, "unlockBranch")) + 1)][static_cast<size_t>(level)];
-		fill(item, t->children().front().name);
+		const std::string& unlockItem = t->children().front().name;
+		const int branch = branchOf(setting(child.name, "unlockBranch"));
+		Item* slot = nullptr;
+		if (!setting(unlockItem, "weaponHud.weaponIcon").empty()) {
+			// A primary weapon unlock (the HAR/LAR rifle...): the main weapon
+			// area's next slot, which the HUD lays out after the kit's own
+			// weapon (Kit0Item1...), not a place in its branch.
+			const auto free = std::find_if(m_grid[0].begin() + 1, m_grid[0].end(), [](const Item& i) { return !i.present; });
+			if (free == m_grid[0].end()) {
+				continue;
+			}
+			slot = &*free;
+		} else {
+			// The branch's other unlocks close up over those weapons.
+			int index = level;
+			for (const world::ChildTemplate& other : kit->children()) {
+				const world::ObjectTemplate* o = m_templates.find(other.name);
+				const int otherLevel = std::atoi(setting(other.name, "unlockLevel").c_str());
+				if (o && o->typeName() == "ItemContainer" && !o->children().empty() && otherLevel < level
+					&& branchOf(setting(other.name, "unlockBranch")) == branch
+					&& !setting(o->children().front().name, "weaponHud.weaponIcon").empty()) {
+					--index;
+				}
+			}
+			slot = &m_grid[static_cast<size_t>(branch + 1)][static_cast<size_t>(index)];
+		}
+		Item& item = *slot;
+		fill(item, unlockItem);
 		item.container = child.name;
 		item.available = m_allUnlocked || std::find(m_unlocked.begin(), m_unlocked.end(), child.name) != m_unlocked.end();
 	}
-	m_grid[0][0].active = true; // no other primary chosen
-	for (int row = 1; row < kRows; ++row) {
+	for (int row = 0; row < kRows; ++row) {
 		const int chosen = m_chosen[static_cast<size_t>(m_kit)][static_cast<size_t>(row)];
 		if (chosen >= 0 && m_grid[static_cast<size_t>(row)][static_cast<size_t>(chosen)].available) {
 			m_grid[static_cast<size_t>(row)][static_cast<size_t>(chosen)].active = true;
 		}
 	}
+	// The kit's own weapon stays the primary unless another was chosen.
+	const auto& primary = m_grid[0];
+	m_grid[0][0].active = std::none_of(primary.begin() + 1, primary.end(), [](const Item& i) { return i.active; });
 }
 
 void KitMenu::update(int team)
@@ -360,11 +388,11 @@ void KitMenu::chooseKitCustom(int row, int index)
 		return;
 	}
 	const Item& it = m_grid[static_cast<size_t>(row)][static_cast<size_t>(index)];
-	if (!it.present || !it.available || row == 0) {
+	if (!it.present || !it.available) {
 		return;
 	}
 	auto& chosen = m_chosen[static_cast<size_t>(m_kit)][static_cast<size_t>(row)];
-	chosen = chosen == index ? -1 : index;
+	chosen = chosen == index || (row == 0 && index == 0) ? -1 : index; // the kit's own weapon is no unlock
 	m_changed = true;
 	m_built = false;
 }
@@ -420,7 +448,7 @@ void KitMenu::commit()
 	for (int k = 0; k < kKits; ++k) {
 		m_kit = k;
 		build(m_team);
-		for (int row = 1; row < kRows; ++row) {
+		for (int row = 0; row < kRows; ++row) {
 			for (const Item& it : m_grid[static_cast<size_t>(row)]) {
 				if (it.active && !it.container.empty()) {
 					containers.push_back(it.container);

@@ -35,6 +35,10 @@ class Console;
 
 namespace dice::hfe::menu {
 
+// BF2142.exe 0x00496f45 and 0x00496a19: Low/Medium/High/UltraHigh
+// map to engine quality indices 2/1/0/0 (software caps UltraHigh at High).
+int audioQualityIndex(const std::string& quality);
+
 class SettingsObjects {
 public:
 	SettingsObjects();
@@ -89,6 +93,7 @@ public:
 	// Writes them all (LocalProfile.save writes Profile.con alone).
 	bool save() const;
 	bool saveProfile() const;
+	bool saveGeneral() const; // General.con alone (a help key played)
 	bool saveUserSettings() const;
 
 	// Told after a console line changed a value (its key).

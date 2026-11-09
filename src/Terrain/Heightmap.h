@@ -49,6 +49,10 @@ public:
 	float originZ() const;
 	// Height at a world position, bilinearly filtered; 0 outside.
 	float heightAt(float worldX, float worldZ) const;
+	// First intersection with the cell triangles along a world-space segment.
+	// Retail's 0x006d12c0 splits each cell along x + z = 1.
+	bool raycast(const std::array<float, 3>& from, const std::array<float, 3>& to,
+		float& fraction, std::array<float, 3>& normal, std::array<float, 3>* point = nullptr) const;
 
 	// The material map (0x00676620 stores the scale at +0xd0, 0x006d2f40
 	// reads width * height * scale^2 bytes raw to +0xd4).

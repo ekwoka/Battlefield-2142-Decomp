@@ -60,12 +60,14 @@ struct ViewerOptions {
 		bool voipPushToTalk = false;    // held: c_GIVoipPushToTalk (V)
 		bool voipLeaderChannel = false; // held: c_GIVoipUseLeaderChannel (B)
 		bool toggleCamera = false;      // held: c_PIToggleCameraMode (C)
+		int camera = 0;         // F9..F12: inside, chase, front chase, fly-by
 		int seat = 0;           // F1..F8 held: that vehicle seat (1-based)
 		int item = 0;            // 1..9 held: the weapon in that kit slot
 		bool sayAll = false, sayTeam = false, saySquad = false; // c_GISayAll (K), c_GISayTeam (L), c_GISaySquad
 		bool radioComm = false, tacticalComm = false; // held: c_GIRadioComm (Q), c_GITacticalComm (T)
 		// held: c_GIMapSize (M), c_GIMapZoom (N), c_GI3dMap (left Alt)
 		bool mapSize = false, mapZoom = false, map3d = false;
+		bool deployment = false; // c_GIEnter: toggle the deployment screen
 		bool yes = false, no = false; // c_GIYes / c_GINo: the HUD's questions (0x00754290 → 0x0079e320)
 	};
 	struct PlayerView {
@@ -100,6 +102,8 @@ struct ViewerOptions {
 	// Menus (the spawn screen): while it says so the mouse is a pointer,
 	// and left clicks go to onClick in the HUD's 800 x 600 screen.
 	std::function<bool()> wantsPointer;
+	// Which term of wantsPointer is true (null when none); only for the log.
+	std::function<const char*()> pointerReason;
 	std::function<void(float x, float y)> onClick;
 	// The right button's clicks and the pointer's moves (the HUD's
 	// right-click map menus, button highlights), same screen.

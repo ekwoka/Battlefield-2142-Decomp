@@ -784,6 +784,7 @@ public:
 	// What a bot does now (for tests and debugging): the running
 	// behaviour's name (MoveTo, Idle, Fire, Change, Revive, Flee, ...).
 	std::string behaviour(int player) const;
+	SoldierInput lastInputFor(int player) const;
 	// A bot's value of a seat (0x100d3e70; `vehicle` 0 for its soldier), as
 	// BBChange weighs it; 0 for no such bot.
 	float seatValueFor(int player, uint32_t vehicle, int seat) const;
@@ -1049,6 +1050,7 @@ private:
 		int planTarget = -1;
 		int planSlot = 0;
 		physics::Vec3 lastAimPoint;
+		int lastAimTarget = -2; // derivative and lead history are local to an aim target
 		// The aim's ballistic lead (the aim object's solver record,
 		// 0x100d9a60 -> 0x100fa6f0).
 		ai::LeadSolver lead;

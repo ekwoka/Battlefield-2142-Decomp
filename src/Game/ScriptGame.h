@@ -111,6 +111,8 @@ public:
 	// The objects a trigger with this filter ("<<PCO>>": player control
 	// objects) looks for.
 	virtual std::vector<uint32_t> triggerCandidates(const std::string& filter) = 0;
+	// Height used for a candidate at a hemisphere's dividing plane.
+	virtual float triggerHemisphereHeight(uint32_t, float objectY) { return objectY; }
 	virtual bool objectPosition(uint32_t object, float position[3]) = 0;
 
 	// pmgr_*: players.

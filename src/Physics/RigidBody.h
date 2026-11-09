@@ -181,6 +181,8 @@ struct Ground {
 	// slot 0xe4: the sea level, heightmapcluster.setSeaWaterLevel, -10000
 	// without one), for buoyancy and swimming; empty: none.
 	std::function<float(float x, float z)> waterLevel;
+	// First terrain face hit, if a heightmap segment query is available.
+	std::function<bool(const Vec3& from, const Vec3& to, float& fraction, Vec3& point, Vec3& normal)> raycast;
 };
 
 // The shares of a contact between two objects' nodes (0x006b6cc0, called

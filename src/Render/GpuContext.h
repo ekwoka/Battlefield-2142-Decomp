@@ -229,6 +229,7 @@ public:
 	SDL_GPUDevice* device() const { return m_device; }
 	SDL_Window* window() const { return m_window; }
 	SDL_GPUGraphicsPipeline* meshPipeline() const { return m_meshPipeline; }
+	SDL_GPUGraphicsPipeline* meshCulledPipeline() const { return m_meshCulledPipeline; } // back faces culled
 	SDL_GPUGraphicsPipeline* terrainPipeline() const { return m_terrainPipeline; }
 	// The surrounding terrain (secondary heightmaps): terrain.vert with
 	// surrounding.frag.
@@ -269,7 +270,7 @@ public:
 										 : m_uiPipeline;
 	}
 	// The HUD with the blend factors of a HudBuilder.addNodeBlendEffect
-	// (Direct3D 9 D3DBLEND values, 1 ZERO .. 11 SRCALPHASAT, for colour and
+	// (Meme values, translated to Direct3D/SDL by HudBlend.h, for colour and
 	// alpha alike; 0 0 is uiPipeline()'s SRCALPHA / INVSRCALPHA), made the
 	// first time a pair is asked for. Null when the pair can't be built.
 	SDL_GPUGraphicsPipeline* uiBlendPipeline(int source, int destination);
@@ -349,6 +350,7 @@ private:
 	SDL_Window* m_window = nullptr;
 	SDL_GPUTextureFormat m_colorFormat = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
 	SDL_GPUGraphicsPipeline* m_meshPipeline = nullptr;
+	SDL_GPUGraphicsPipeline* m_meshCulledPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_terrainPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_surroundingPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_skyPipeline = nullptr;

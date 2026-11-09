@@ -36,6 +36,14 @@ int HudWorld::playerTeam() const
 
 // --- the local round
 
+float LocalHudWorld::pilotThrust(uint32_t vehicle) const
+{
+	PlayerInfo player;
+	const game::Vehicle* v = m_round.vehicle(vehicle);
+	return v && playerInfo(localPlayer(), player) && player.vehicle == vehicle && player.seat == 0
+		? v->input().throttle : 0.0f;
+}
+
 float LocalHudWorld::objectHealth(uint32_t object) const
 {
 	const float hp = m_round.hitPoints(object);
@@ -282,6 +290,21 @@ std::vector<HudWorld::ControlPointInfo> RemoteHudWorld::controlPointList() const
 		}
 		ControlPointInfo cp {1000 + o.ghost, o.team, {o.position.x, o.position.y, o.position.z},
 			templateNumber(t, "radius", 10), templateNumber(t, "unableToChangeTeam", 0) == 0};
+		cp.name = t ? t->name() : std::string();
+		cp.flagHeight = o.captureProgress;
+		cp.flagRate = o.captureRate;
+		if (t) {
+			for (const char* key : {"controlPointName", "name"}) {
+				const auto it = t->settings().find(key);
+				if (it != t->settings().end() && !it->second.empty()) {
+					cp.name = it->second;
+					if (cp.name.size() >= 2 && cp.name.front() == '"' && cp.name.back() == '"') {
+						cp.name = cp.name.substr(1, cp.name.size() - 2);
+					}
+					break;
+				}
+			}
+		}
 		for (const auto& [id, group] : m_world.spawnGroups()) {
 			if (group.ghost == o.ghost) {
 				cp.id = id;
@@ -331,6 +354,13 @@ std::vector<HudWorld::VehicleInfo> RemoteHudWorld::vehicleList() const
 		out.push_back(v);
 	}
 	return out;
+}
+
+float RemoteHudWorld::pilotThrust(uint32_t vehicle) const
+{
+	PlayerInfo player;
+	return playerInfo(localPlayer(), player) && player.vehicle == vehicle && player.seat == 0
+		? m_world.input().get(net::kPIThrottle) : 0.0f;
 }
 
 std::vector<int> RemoteHudWorld::vehicleOccupants(uint32_t vehicle) const

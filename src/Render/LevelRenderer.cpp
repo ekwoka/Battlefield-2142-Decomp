@@ -576,20 +576,22 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 			submesh.uvAtlas[2] = atlas->offset[0];
 			submesh.uvAtlas[3] = atlas->offset[1];
 		}
-		// 0x100c3880: alpha mode 1 is blended (AlphaBlendEnable, no depth
-		// writes, no culling, SrcBlend SRCALPHA / DestBlend INVSRCALPHA), or
-		// with the template's hasAdditiveAlpha added (DestBlend ONE, the
-		// BMadditive shader, no alpha test).
+		// Alpha mode 1 normally blends over the scene. StaticMesh.fx's
+		// alpha_one technique explicitly uses SRCALPHA / ONE too: glow3
+		// and similar meshes have opaque black around their light texture.
+		// Respect that material technique independently of a geometry's
+		// hasAdditiveAlpha switch, which selects the BMadditive path.
+		const std::string technique = lower(material.technique);
+		const std::string effect = lower(material.effect);
 		submesh.blended = material.alphaMode == 1;
-		submesh.additive = submesh.blended && geometry->hasAdditiveAlpha;
+		submesh.additive = submesh.blended && (geometry->hasAdditiveAlpha
+			|| (effect == "staticmesh.fx" && technique == "alpha_one"));
 		if (submesh.additive) {
 			submesh.uvScroll[0] = geometry->simpleUVTranslation[0];
 			submesh.uvScroll[1] = geometry->simpleUVTranslation[1];
 		}
 		// StaticMesh.fx techniques name their layers: "BaseDetailDirtCrack..."
 		// with maps base, detail, dirt, crack in that order (normal maps follow).
-		const std::string technique = lower(material.technique);
-		const std::string effect = lower(material.effect);
 		if (!submesh.additive) {
 			if (effect == "staticmesh.fx" && !skinned) {
 				submesh.specularKind = technique.find("detail") != std::string::npos && material.alphaMode != 2 ? 2 : 1;
@@ -692,7 +694,7 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 }
 
 void LevelRenderer::addTemplate(const LevelSources& sources, const world::ObjectTemplate& objectTemplate,
-	const Mat4& local, const Mat4& objectWorld, uint32_t object, int depth)
+	const Mat4& local, const Mat4& objectWorld, uint32_t object, int depth, const std::string& path)
 {
 	if (depth > 8) {
 		return; // guards against templates that contain themselves
@@ -709,6 +711,9 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 			const Mat4 world = local * objectWorld;
 			Instance instance {gpuMesh, world, object, local, nullptr, {1, 1, 0, 0}, {}, nullptr, nullptr};
 			instance.geometry = objectTemplate.geometry();
+			if (depth > 0) {
+				instance.source = path; // the template names from the root's child down, '/'-joined
+			}
 			if (gpuMesh->skinned) {
 				const auto setting = objectTemplate.settings().find("skeleton3P");
 				if (setting != objectTemplate.settings().end()) {
@@ -740,7 +745,7 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 		if (const world::ObjectTemplate* childTemplate = sources.templates.find(child.name);
 			childTemplate && drawnWithObject(childTemplate->typeName())) {
 			addTemplate(sources, *childTemplate, objectTransform(child.position, child.rotation) * local, objectWorld,
-				object, depth + 1);
+				object, depth + 1, path.empty() ? child.name : path + "/" + child.name);
 		}
 	}
 }
@@ -1845,6 +1850,28 @@ void LevelRenderer::syncObjects()
 		return;
 	}
 	const world::ObjectManager& objects = m_sources->objects;
+	// These have no ObjectManager identity: recreate them from the round's
+	// current projectile states so expiry, seeking and remote ghost corrections
+	// immediately change what is submitted to the renderer.
+	m_instances.erase(std::remove_if(m_instances.begin(), m_instances.end(),
+					  [](const Instance& instance) { return instance.transient; }),
+		m_instances.end());
+	if (m_sources->transientModels) {
+		std::vector<TransientModel> models;
+		m_sources->transientModels(models);
+		for (const TransientModel& model : models) {
+			if (!model.objectTemplate || model.objectTemplate->geometry().empty()) {
+				continue;
+			}
+			const size_t first = m_instances.size();
+			const Mat4 world = objectTransform(model.position, model.rotation);
+			addTemplate(*m_sources, *model.objectTemplate, Mat4 {}, world, 0, 0);
+			for (size_t i = first; i < m_instances.size(); ++i) {
+				m_instances[i].transient = true;
+				m_instances[i].objectOrigin = {model.position.x, model.position.y, model.position.z};
+			}
+		}
+	}
 	// Drop what belongs to removed objects.
 	m_instances.erase(std::remove_if(m_instances.begin(), m_instances.end(),
 						  [&objects](const Instance& instance) {
@@ -1882,11 +1909,17 @@ void LevelRenderer::syncObjects()
 		}
 		instance.world = instance.local * objectWorld;
 		instance.hidden = current->hidden() || hiddenInView;
+		const int look = m_sources->partLook && !instance.source.empty() ? m_sources->partLook(instance.object, instance.source) : 0;
+		instance.hidden = instance.hidden || look == 2;
 		// The cockpit from inside: another geometry of its mesh.
 		if (instance.mesh->geometries > 1) {
 			int geometry = -1, lod = 0;
 			if (!(m_sources->geometryFor && m_sources->geometryFor(instance.object, geometry, lod))) {
 				geometry = -1;
+				lod = 0;
+			}
+			if (look == 1 && instance.mesh->geometries > 2) {
+				geometry = 2; // a wrecked part: the mesh's wreck geometry
 				lod = 0;
 			}
 			if (geometry != instance.shownGeometry || lod != instance.shownLod) {
@@ -3134,6 +3167,8 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 		*m_sources->cameraInTitanOut = m_cameraInTitan;
 	}
 	const TitanView titanView {m_cameraInTitan, renderer.showAllTitanParts};
+	const uint32_t titan1 = m_sources && m_sources->titanObject ? m_sources->titanObject(1) : 0;
+	const uint32_t titan2 = m_sources && m_sources->titanObject ? m_sources->titanObject(2) : 0;
 	const int lightingQuality = m_sources && m_sources->quality ? m_sources->quality->lighting : 3;
 	// The object manager's distance fade (DistanceFade.h): the geometry
 	// quality's scales, the view distance GSViewDistance x the view
@@ -3183,15 +3218,31 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 			continue;
 		}
 		bool interior = false;
+		// Projectiles are world-space transient models, like their tracer
+		// and trail effects. The Titan's indoor actor cutoff must not hide
+		// the missile body while leaving its trail visible through openings.
+		// Ordinary frustum/depth tests still apply to these models.
+		// The native inside test is a union of room bounding boxes, not the
+		// retail camera's Titan membership and portal visibility. Applying the
+		// retail static-mesh switch globally makes the entire outside world,
+		// unmarked Titan details, or rooms disappear at a box boundary. Keep
+		// static geometry available on both sides and let depth/frustum tests
+		// resolve visibility. Bundled and skinned meshes retain distance culling.
 		if (base.titanInterior || base.titanExterior || titanView.cameraInside) {
 			const Vec3f origin {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
 			const Vec3f d = origin - camera.position;
 			const float distance = std::sqrt(dot(d, d));
+			// The authored Titan trees contain bundled signs and monitors marked
+			// exterior, including parts visible from their rooms. With our coarse
+			// room-box test that flag cannot safely hide children of either Titan.
+			// Keep their distance, frustum, depth and part-destruction checks.
+			const bool titanChild = instance.object != 0 && !instance.source.empty() &&
+				(instance.object == titan1 || instance.object == titan2);
 			const TitanDraw how = base.skinned
 				? titanSkinnedDraw(titanView, distance, renderer.indoorSkinnedMeshCullDistance)
-				: base.bundled ? titanBundledDraw(titanView, base.titanExterior, distance, renderer.indoorBundledMeshCullDistance)
-							   : titanStaticDraw(titanView, base.titanInterior);
-			if (how == TitanDraw::Skip) {
+				: base.bundled ? titanBundledDraw(titanView, base.titanExterior && !titanChild, distance, renderer.indoorBundledMeshCullDistance)
+							   : TitanDraw::Normal;
+			if (how == TitanDraw::Skip && !instance.transient) {
 				continue;
 			}
 			interior = how == TitanDraw::Interior && base.bundled;
@@ -3204,7 +3255,13 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 		DrawItem item {&instance, instance.mesh, instance.lightmap, instance.lightmapTransform, interior};
 		if (m_distanceFadeOn && instance.object != 0 && !instance.overgrowth && !instance.debris) {
 			// 0x006fb320 on the objects in view; one faded out isn't drawn.
-			const Vec3f d = instance.objectOrigin - camera.position;
+			// A child instance uses its own mesh radius, so its distance must
+			// also be measured from the child's world position. Using the root
+			// puts a Titan's small signs roughly 70 m away even when the camera
+			// is beside them and can fade them out with the camera or FOV.
+			const Vec3f fadeOrigin = instance.source.empty() ? instance.objectOrigin
+				: Vec3f {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
+			const Vec3f d = fadeOrigin - camera.position;
 			instance.distanceFade = stepDistanceFade(instance.distanceFade, instance.cullRadius, dot(d, d),
 				instance.cullActor ? cullActor : cullRoot);
 			if (instance.distanceFade <= 0.0f) {
@@ -3983,6 +4040,8 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// The lighting level's bundled and skinned meshes (QualitySettings).
 	const bool hemiAndShadows = !m_sources || !m_sources->quality || m_sources->quality->meshHemiAndShadows();
 	const GpuMesh* bound = nullptr;
+	bool culling = false;
+	const uint32_t inside = m_sources && m_sources->cockpitVehicle ? m_sources->cockpitVehicle() : 0;
 	const auto drawInstance = [&](const DrawItem& item, MeshQueue queue) {
 		const Instance& instance = *item.instance;
 		bool any = false;
@@ -4003,6 +4062,16 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		}
 		if (!any) {
 			return;
+		}
+		// The occupant's own exterior hull (the gunner's cockpitSubGeom 1):
+		// back faces culled, or the view is inside the hull's far side. Wrecks,
+		// crew kits and dropped kits (also geometry 1) stay two-sided.
+		if (queue == MeshQueue::Opaque) {
+			const bool cull = instance.shownGeometry == 1 && inside != 0 && instance.object == inside;
+			if (cull != culling) {
+				culling = cull;
+				SDL_BindGPUGraphicsPipeline(pass, cull ? m_gpu.meshCulledPipeline() : m_gpu.meshPipeline());
+			}
 		}
 		if (item.mesh != bound) {
 			bound = item.mesh;
@@ -4115,6 +4184,9 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	};
 	for (const DrawItem& item : m_drawList) {
 		drawInstance(item, MeshQueue::Opaque);
+	}
+	if (culling) {
+		SDL_BindGPUGraphicsPipeline(pass, m_gpu.meshPipeline());
 	}
 	// Decals over the opaque surfaces.
 	if (m_decalVertices && !m_decalGroups.empty()) {

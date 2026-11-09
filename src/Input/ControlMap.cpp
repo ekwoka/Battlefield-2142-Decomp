@@ -491,6 +491,8 @@ void registerControlMapConsoleMethods(Console& console, ControlMaps& maps)
 	for (const auto& [input, number] : kInputs) {
 		console.registerConstant(input, input);
 	}
+	console.registerConstant("c_PIToggleCameraMode", "c_PIToggleCamera");
+	console.registerConstant("c_GIToggleFreeCamera", "c_GIToggleFreeCamera");
 	for (const char* mode : kModes) {
 		console.registerConstant(mode, mode);
 	}

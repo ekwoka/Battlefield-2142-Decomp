@@ -385,7 +385,8 @@ TEST(Vehicle_ShippedWheelsResolveToTheirCollisionParts)
 		const physics::CollisionSubGeometry* hull = physics::collisionPart(*mesh, 0);
 		const physics::CollisionSubGeometry* wreck = physics::collisionPart(*mesh, 0, 1);
 		CHECK(hull && wreck && physics::collisionLodFor(*mesh, *hull, 1) && physics::collisionLodFor(*mesh, *wreck, 1));
-		CHECK(physics::collisionLodFor(*mesh, *hull, 2) && !physics::collisionLodFor(*mesh, *wreck, 2));
+		CHECK(physics::collisionLodFor(*mesh, *hull, 2));
+		CHECK(physics::collisionLodFor(*mesh, *wreck, 2) == physics::collisionLodFor(*mesh, *wreck, 1));
 		// Only the hull collides: its vehicle LOD's faces, not the wreck's too.
 		physics::CollisionWorld world;
 		world.addMesh(*mesh, physics::CollisionUser::Vehicle, {}, {}, 1, {});

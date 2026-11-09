@@ -5,9 +5,11 @@
 #include "TestMain.h"
 
 #include "Console/Console.h"
+#include "Console/ConsoleBinding.h"
 #include "Game/GameLogic.h"
 #include "Game/GameWorld.h"
 #include "Hud/Hud.h"
+#include "IO/File/FileManager.h"
 #include "Main/HudMenusChat.h"
 #include "Main/HudMenusKits.h"
 #include "Main/MenuBindings.h"
@@ -15,6 +17,14 @@
 #include "UI/Player/Natives.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
+#include "World/TemplateFiles.h"
+#include "World/WorldConsole.h"
+
+#include <algorithm>
+#include <cstdlib>
+#include <fstream>
+#include <set>
+#include <sstream>
 
 using namespace dice::hfe;
 
@@ -197,4 +207,134 @@ TEST(HudLists_Awards)
 		CHECK(rows[0][0] == "HEADER_inaround" && rows[1][1] == "AWARD_CRITERIA_1" && rows[1][2] == "20");
 		CHECK(rows[3][0] == "HEADER_global" && rows[4][1] == "AWARD_CRITERIA_23" && rows[4][2] == "0/54000");
 	}
+}
+
+// The customise grid with the shipped kits, as `+modPath <mod>` loads them
+// (needs $BF2142_GAME_DIR): every kit of both teams gets its weapons with icons.
+static void checkShippedKitGrid(const char* gameDir, const char* modPath)
+{
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath(modPath);
+	if (std::string(modPath) != "mods/bf2142") {
+		files.addSearchPath("mods/bf2142");
+	}
+	files.setMountingAllowed(true);
+	Console console(&files);
+	bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+		[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+	std::string out;
+	CHECK(console.run("ServerArchives.con", {}, out));
+	CHECK(console.run("ClientArchives.con", {}, out));
+	files.setMountingAllowed(false);
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	world::registerWorldConsoleMethods(console, templates, objects);
+	templates.setCurrentFileProvider([&console] { return console.currentFile(); });
+	std::vector<std::string> untyped;
+	std::ifstream table(std::string(BF2142_SOURCE_DIR) + "/symbols/BF2142.exe.console.csv");
+	std::string line;
+	std::getline(table, line);
+	while (std::getline(table, line)) {
+		std::vector<std::string> cols;
+		std::stringstream row(line);
+		for (std::string col; std::getline(row, col, ',');) {
+			cols.push_back(col);
+		}
+		if (cols.size() >= 6 && cols[0] == "ObjectTemplate" && !console.hasMethod("ObjectTemplate." + cols[1])
+			&& (cols[2] == "property" || (cols[2] == "method" && cols[4] == "1" && cols[5] == "1"))) {
+			untyped.push_back(cols[1]);
+		}
+	}
+	world::registerUntypedTemplateProperties(console, templates, untyped);
+	templates.setLoading(true);
+	world::loadObjectTemplates(console, files, "Objects/", false);
+	templates.setLoading(false);
+
+	game::GameWorld round(templates, objects);
+	game::GameLogic logic;
+	for (const char* kit : {"Recon", "Assault", "Anti-Vehicle", "Support"}) {
+		logic.team(1).kits.push_back({std::string("EU_") + kit, "eu_light_soldier", "eu_heavy_soldier"});
+		logic.team(2).kits.push_back({std::string("Pac_") + kit, "pac_light_soldier", "pac_heavy_soldier"});
+	}
+	hud::HudManager hud([&files](const std::string& path, std::string& text) {
+		std::vector<uint8_t> data;
+		if (!files.readFile(path, data)) {
+			return false;
+		}
+		text.assign(data.begin(), data.end());
+		return true;
+	});
+	hud::registerHudConsoleMethods(console, hud);
+	console.setScriptOutput(false, false);
+	CHECK(console.run("Menu/HUD/HudSetup/HudSetupMain.con", {}, out));
+	menu::KitMenu kits(round, logic, templates, hud);
+	kits.setUnlocked({}, true);
+	for (int team = 1; team <= 2; ++team) {
+		for (int kit = 0; kit < 4; ++kit) {
+			kits.setKit(kit);
+			kits.update(team);
+			int shown = 0, icons = 0, missing = 0;
+			for (int row = 0; row < menu::KitMenu::kRows; ++row) {
+				for (int i = 0; i < menu::KitMenu::kItems; ++i) {
+					const std::string p = "Kit" + std::to_string(row) + "Item" + std::to_string(i);
+					shown += hud.number(p + "Show") == 1;
+					icons += hud.string(p + "Icon").find("empty.tga") == std::string::npos;
+					std::string path = "Menu/HUD/Texture/" + hud.string(p + "Icon");
+					std::replace(path.begin(), path.end(), '\\', '/');
+					if (hud.number(p + "Show") == 1 && !files.exists(path)) {
+						std::printf("  missing %s = %s\n", p.c_str(), hud.string(p + "Icon").c_str());
+						++missing;
+					}
+				}
+			}
+			// The open customise screen on the spawn menu draws the weapon icons.
+			hud.set("ShowIngameHud", 1);
+			hud.set("ShowSoldierHud", 1);
+			hud.set("MenuBackgroundAlpha", 1);
+			hud.set("SpawnShow", 1);
+			hud.set("KitsShow", 1);
+			hud.set("MembersShow", 0);
+			kits.chooseKitSelection(-1, 0);
+			kits.update(team);
+			std::vector<hud::HudQuad> quads;
+			for (int f = 0; f < 10; ++f) {
+				quads = hud.frame(0.2f);
+			}
+			std::set<std::string> drawnTextures;
+			for (const hud::HudQuad& q : quads) {
+				drawnTextures.insert(q.texture);
+			}
+			int drawn = 0;
+			for (int row = 0; row < menu::KitMenu::kRows; ++row) {
+				for (int i = 0; i < menu::KitMenu::kItems; ++i) {
+					std::string icon = hud.string("Kit" + std::to_string(row) + "Item" + std::to_string(i) + "Icon");
+					std::replace(icon.begin(), icon.end(), '\\', '/');
+					const bool shown = drawnTextures.count("Menu/HUD/Texture/" + icon) > 0;
+					drawn += shown;
+				}
+			}
+			CHECK(drawn >= 8);
+			// The Assault's main weapon area: its rifle and the rifles it unlocks
+			// (the HUD lays out 3 slots, Remaster's kits 5).
+			int primaries = 0;
+			for (int i = 0; i < menu::KitMenu::kItems; ++i) {
+				primaries += kits.item(0, i).present;
+			}
+			if (kit == 1) {
+				CHECK(primaries == (std::string(modPath) == "mods/bf2142" ? 3 : 5));
+			}
+			CHECK(shown >= 8 && icons == shown && missing == 0);
+		}
+	}
+}
+
+TEST(HudLists_KitGridShippedKits)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	checkShippedKitGrid(gameDir, "mods/bf2142");
+	checkShippedKitGrid(gameDir, "mods/Project_Remaster_v17_Final");
 }

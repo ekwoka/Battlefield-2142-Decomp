@@ -4,7 +4,10 @@
 #include "Animation/FirstPerson.h"
 #include "Game/GameWorld.h"
 #include "IO/File/FileManager.h"
+#include "Main/DeploymentTeam.h"
 #include "Physics/CollisionTemplateManager.h"
+#include "Physics/MaterialManager.h"
+#include "Terrain/Heightmap.h"
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
@@ -183,6 +186,10 @@ TEST(GameWorld_SoldiersShootAndDie)
 	CHECK(range.count("PlayerKilled") == 1);
 	CHECK(info.manDown && range.count("PlayerDeath") == 0); // down, still revivable
 	CHECK(tick > 6 && tick < 30); // about 0.2 s: three rounds at 600 a minute, 20 m
+	const auto deathSounds = range.world->takeSounds();
+	CHECK(std::any_of(deathSounds.begin(), deathSounds.end(), [](const game::GameWorld::SoundEvent& sound) {
+		return sound.sound == "S_pac_light_soldier_Death";
+	}));
 
 	// It comes back after the spawn time, the body gone (PlayerDeath first).
 	range.world->setPlayerInput({});
@@ -191,6 +198,104 @@ TEST(GameWorld_SoldiersShootAndDie)
 	}
 	CHECK(range.world->playerInfo(bot, info) && info.alive && info.soldier != 0 && !info.manDown);
 	CHECK(range.count("PlayerDeath") == 1 && range.count("PlayerSpawn") == 3);
+}
+
+// The hit indicator (Player +0x2a4, 0x004ba070 / 0x005912c0): a round that
+// damages something raises the shooter's alpha to 1, fading 3 a second; a
+// miss, sv.hitIndicator off, or a hit on a zero-friendly-fire teammate don't.
+TEST(GameWorld_HitIndicatorRaisedByDamageAndFades)
+{
+	const auto run = [](bool enemy, bool setting, bool aim) {
+		Range range;
+		range.world->setHitIndicator(setting);
+		game::GameWorld::FriendlyFire ff;
+		ff.soldier = 0;
+		range.world->setFriendlyFire(ff);
+		const int bot = range.world->addPlayer("Bot", enemy ? 1 : 2, true);
+		if (aim) {
+			CHECK(range.world->spawnSoldier(bot));
+		}
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		const int me = range.world->localPlayer();
+		game::SoldierInput fire;
+		fire.fire = true;
+		range.world->setPlayerInput(fire);
+		float peak = 0;
+		for (int i = 0; i < 6; ++i) {
+			range.world->tick(1 / 30.0f);
+			peak = std::max(peak, range.world->hitIndicator(me));
+		}
+		range.world->setPlayerInput({});
+		return peak;
+	};
+	CHECK(run(true, true, true) > 0.5f);
+	CHECK(run(true, true, false) == 0);
+	CHECK(run(true, false, true) == 0);
+	CHECK(run(false, true, true) == 0);
+
+	Range range;
+	const int bot = range.world->addPlayer("Bot", 1, true);
+	CHECK(range.world->spawnSoldier(bot));
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int me = range.world->localPlayer();
+	game::SoldierInput fire;
+	fire.fire = true;
+	range.world->setPlayerInput(fire);
+	for (int i = 0; i < 6 && range.world->hitIndicator(me) == 0; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	range.world->setPlayerInput({});
+	CHECK(range.world->hitIndicator(me) > 0.5f);
+	for (int i = 0; i < 12; ++i) {
+		range.world->tick(1 / 30.0f); // 0.4 s at 3 a second: gone
+	}
+	CHECK(range.world->hitIndicator(me) == 0);
+}
+
+TEST(GameWorld_InitialDeploymentJoinsWithoutDeathThenSpawnsAtChoice)
+{
+	Range range;
+	const int local = range.world->joinPlayer(2);
+	CHECK(local == range.world->localPlayer());
+	game::GameWorld::PlayerInfo info;
+	CHECK(range.world->playerInfo(local, info) && !info.alive && info.team == 2 && info.deaths == 0);
+	CHECK(range.world->playerObject() == 0);
+	CHECK(range.count("PlayerDeath") == 0 && range.count("PlayerSpawn") == 0);
+	for (int i = 0; i < 90; ++i) range.world->tick(1 / 30.0f);
+	CHECK(range.world->playerInfo(local, info) && !info.alive && info.deaths == 0);
+	CHECK(range.count("PlayerDeath") == 0 && range.count("PlayerSpawn") == 0);
+
+	range.world->setKit(local, "EU_Assault", "us_light_soldier");
+	range.world->setSpawnChoice(local, 2);
+	CHECK(range.world->spawnSoldier(local));
+	CHECK(range.world->playerInfo(local, info) && info.alive && info.deaths == 0);
+	CHECK(range.world->spawnChoice(local) == 2);
+	CHECK(range.count("PlayerDeath") == 0 && range.count("PlayerSpawn") == 1);
+	// Reusing spawnPlayer for an already living local player must not
+	// change its team behind the team-change permission checks.
+	const auto soldier = range.world->playerObject();
+	CHECK(range.world->spawnPlayer(1)->id() == soldier);
+	CHECK(range.world->playerTeam() == 2);
+}
+
+TEST(GameWorld_DeploymentTeamSelectChangesKitAndSpawn)
+{
+	Range range;
+	game::GameLogic logic;
+	logic.team(1).kits.push_back({"PAC_Assault", "pac_light_soldier", ""});
+	logic.team(2).kits.push_back({"EU_Assault", "us_light_soldier", ""});
+	const int player = range.world->joinPlayer(2);
+	range.world->setSpawnTitan(player, 123); // an old-team special spawn must not survive
+	int kit = 4; // unavailable on the new team
+	CHECK(dice::main::selectDeploymentTeam(*range.world, logic, 1, kit));
+	CHECK(range.world->playerTeam() == 1 && kit == 0);
+	CHECK(range.world->spawnChoice(player) == 1);
+	CHECK(range.count("PlayerChangeTeams") == 1);
+	CHECK(range.world->spawnSoldier(player));
+	CHECK(range.world->player()->objectTemplate()->name() == "pac_light_soldier");
+	CHECK(!dice::main::selectDeploymentTeam(*range.world, logic, 2, kit));
+	CHECK(range.world->playerTeam() == 1 && range.world->spawnChoice(player) == 1);
+	CHECK(range.count("PlayerChangeTeams") == 1);
 }
 
 // Team damage on a soldier (TeamDamage.cpp: 0x006557a0, 0x004c0e40): a
@@ -408,6 +513,114 @@ TEST(GameWorld_ExplosionsHurtAround)
 	CHECK(!range.world->impacts().empty() && range.world->impacts().back().object == 0); // it hit the ground
 }
 
+// A shallow projectile crosses flat ground between simulation samples.
+// Its blast must start at the crossing, not at the next sample downrange.
+TEST(GameWorld_ProjectileImpactOnFlatGround)
+{
+	Range range;
+	auto* bullet = range.templates.find("bullet");
+	bullet->settings()["gravityModifier"] = "0";
+	CHECK(range.world->launchProjectile("bullet", {0, 0.35f, 10}, {150, -20, 0}));
+	range.world->tick(1.0f / 30.0f);
+	const auto& impacts = range.world->impacts();
+	CHECK(!impacts.empty());
+	if (!impacts.empty()) {
+		std::fprintf(stderr, "  flat-ground impact x=%.5f, expected 2.62500\n", impacts.back().point.x);
+		CHECK(impacts.back().object == 0);
+		CHECK(std::fabs(impacts.back().point.x - 2.625f) < 0.002f);
+	}
+}
+
+// Retail heightmap cells consist of two triangles along x+z=1. A saddle
+// distinguishes this from the native heightAt bilinear interpolation.
+TEST(GameWorld_TerrainBlastRayHitsRidge)
+{
+	Range range;
+	terrain::Heightmap ridge(0, 0);
+	ridge.setSize(3, 3);
+	ridge.setScale({1, 1, 1});
+	ridge.setBitResolution(8);
+	range.files.addMemoryFile("ridge.raw", {0,0,0, 0,2,0, 0,0,0});
+	CHECK(ridge.load(range.files, "ridge.raw"));
+	float fraction = 0;
+	std::array<float, 3> n {};
+	CHECK(ridge.raycast({-1,1,0}, {1,1,0}, fraction, n));
+	CHECK(std::fabs(fraction - 0.25f) < 0.0001f);
+	CHECK(ridge.raycast({1,1,0}, {-1,1,0}, fraction, n));
+	CHECK(std::fabs(fraction - 0.25f) < 0.0001f);
+	CHECK(ridge.raycast({-2,1,0}, {2,1,0}, fraction, n));
+	CHECK(std::fabs(fraction - 0.375f) < 0.0001f);
+	CHECK(!ridge.raycast({-1,3,0}, {1,3,0}, fraction, n));
+	terrain::Heightmap saddle(0, 0);
+	saddle.setSize(2, 2); saddle.setScale({1, 1, 1}); saddle.setBitResolution(8);
+	range.files.addMemoryFile("saddle.raw", {0,0,0,2});
+	CHECK(saddle.load(range.files, "saddle.raw"));
+	CHECK(saddle.raycast({0.25f,4,0.25f}, {0.25f,-1,0.25f}, fraction, n));
+	CHECK(std::fabs(fraction - 0.6f) < 0.0001f);
+	CHECK(!saddle.raycast({0.25f,0,0.25f}, {0.25f,4,0.25f}, fraction, n));
+	std::array<float, 3> snapped {};
+	CHECK(saddle.raycast({0.25f,0,0.25f}, {0.25f,-1,0.25f}, fraction, n, &snapped));
+	CHECK(fraction == 0 && std::fabs(snapped[1] - 1.0f) < 0.0001f);
+	CHECK(std::fabs(saddle.heightAt(0.25f, 0.25f) - 1.125f) < 0.0001f);
+	physics::Ground ground;
+	ground.height = [&ridge](float x, float z) { return ridge.heightAt(x, z-15); };
+	ground.heightAndNormal = [&ridge](float x, float z, physics::Vec3& out) { out = {0,1,0}; return ridge.heightAt(x, z-15); };
+	ground.raycast = [&ridge](const physics::Vec3& a, const physics::Vec3& b, float& t, physics::Vec3& point, physics::Vec3& out) {
+		std::array<float, 3> normal {}, hit {};
+		if (!ridge.raycast({a.x,a.y,a.z-15}, {b.x,b.y,b.z-15}, t, normal, &hit)) return false;
+		point = {hit[0], hit[1], hit[2]+15};
+		out = {normal[0], normal[1], normal[2]}; return true;
+	};
+	range.world->enablePhysics(range.files, range.collisionTemplates, std::move(ground));
+	auto* blast = range.templates.create("GenericProjectile", "blast");
+	blast->components().push_back("DefaultDetonationComp");
+	blast->settings()["detonation.explosionDamage"] = "100";
+	blast->settings()["detonation.explosionMaterial"] = "69";
+	const int bot = range.world->addPlayer("Bot", 1, true);
+	CHECK(range.world->spawnSoldier(bot));
+	game::GameWorld::PlayerInfo info;
+	CHECK(range.world->playerInfo(bot, info));
+	CHECK(range.world->detonate("blast", {0, 1, 14}));
+	std::fprintf(stderr, "  ridge blast health=%.2f\n", range.world->hitPoints(info.soldier));
+	CHECK(range.world->hitPoints(info.soldier) == 100);
+	range.templates.find("bullet")->settings()["gravityModifier"] = "0";
+	CHECK(range.world->launchProjectile("bullet", {0, 1, 14}, {0, 0, 180}));
+	range.world->tick(1.0f / 30.0f);
+	const auto& impacts = range.world->impacts();
+	CHECK(!impacts.empty());
+	if (!impacts.empty()) {
+		std::fprintf(stderr, "  ridge projectile hit z=%.3f object=%u\n", impacts.back().point.z, impacts.back().object);
+		CHECK(impacts.back().object == 0);
+		CHECK(std::fabs(impacts.back().point.z - 14.5f) < 0.001f);
+	}
+}
+
+// Retail drops blast damage at or below 0.1 after the material multiplier.
+TEST(GameWorld_BlastThresholdUsesMaterialDamage)
+{
+	for (int amplify = 0; amplify < 2; ++amplify) {
+		Range range;
+		physics::MaterialManager materials;
+		materials.createCell(69, 0).damageMod = amplify ? 4.0f : 0.25f;
+		range.world->enablePhysics(range.files, range.collisionTemplates,
+			{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& n) {
+				n = {0, 1, 0}; return 0.0f;
+			}}, &materials);
+		auto* blast = range.templates.create("GenericProjectile", "blast");
+		blast->components().push_back("DefaultDetonationComp");
+		blast->settings()["detonation.explosionDamage"] = amplify ? "0.05" : "0.2";
+		blast->settings()["detonation.explosionMaterial"] = "69";
+		const int bot = range.world->addPlayer("Bot", 1, true);
+		CHECK(range.world->spawnSoldier(bot));
+		game::GameWorld::PlayerInfo info;
+		CHECK(range.world->playerInfo(bot, info));
+		CHECK(range.world->detonate("blast", info.position + physics::Vec3 {0, 1, 0}));
+		const float hp = range.world->hitPoints(info.soldier);
+		std::fprintf(stderr, "  material threshold amplify=%d health=%.3f\n", amplify, hp);
+		CHECK(std::fabs(hp - (amplify ? 99.8f : 100.0f)) < 0.001f);
+	}
+}
+
 TEST(GameWorld_BlastsFallOffFromTheSoldiersOrigin)
 {
 	// A bare detonation (DefaultDetonationComp) with 100 damage over 10 m:
@@ -485,6 +698,60 @@ TEST(GameWorld_WeaponSwitching)
 	range.world->setPlayerInput(input);
 	range.world->tick(1 / 30.0f);
 	CHECK(held() == "eu_ar_rifle" && range.world->playerWeapon()->roundsInMag() == rifleRounds);
+}
+
+TEST(GameWorld_ProfileAutoReload)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	world::ObjectTemplate* rifle = range.templates.find("eu_ar_rifle");
+	rifle->settings()["itemIndex"] = "3";
+	rifle->settings()["ammo.magSize"] = "1";
+	rifle->settings()["ammo.nrOfMags"] = "2";
+	rifle->settings()["ammo.reloadTime"] = "0.1";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	range.world->setAutoReload(true);
+	const int mags = range.world->playerWeapon()->magsLeft();
+
+	game::SoldierInput fire;
+	fire.fire = true;
+	range.world->setPlayerInput(fire);
+	range.world->tick(1 / 30.0f); // last round
+	CHECK(range.world->playerWeapon()->roundsInMag() == 0);
+	range.world->setPlayerInput({}); // releasing immediately still reloads
+	range.world->tick(1 / 30.0f);
+	CHECK(range.world->playerWeapon()->reloading());
+	for (int i = 0; i < 8; ++i) range.world->tick(1 / 30.0f);
+	CHECK(!range.world->playerWeapon()->reloading());
+	CHECK(range.world->playerWeapon()->roundsInMag() == 1);
+	CHECK(range.world->playerWeapon()->magsLeft() == mags - 1);
+
+	// With no spare magazine, a held trigger cannot restart reloads per tick.
+	game::SoldierInput held;
+	held.fire = true;
+	range.world->setPlayerInput(held);
+	range.world->tick(1 / 30.0f);
+	CHECK(range.world->playerWeapon()->roundsInMag() == 0);
+	for (int i = 0; i < 30; ++i) range.world->tick(1 / 30.0f);
+	CHECK(!range.world->playerWeapon()->reloading());
+	CHECK(range.world->playerWeapon()->roundsInMag() == 0);
+
+	// Negative reserve counts mean unlimited magazines, not no ammunition.
+	Range infinite;
+	auto* unlimited = infinite.templates.find("eu_ar_rifle");
+	unlimited->settings()["ammo.magSize"] = "1";
+	unlimited->settings()["ammo.nrOfMags"] = "-1";
+	unlimited->settings()["ammo.reloadTime"] = "0.1";
+	CHECK(infinite.world->spawnPlayer(2) != nullptr);
+	infinite.world->setAutoReload(true);
+	infinite.world->setPlayerInput(fire);
+	infinite.world->tick(1 / 30.0f);
+	infinite.world->setPlayerInput({});
+	for (int i = 0; i < 12; ++i) infinite.world->tick(1 / 30.0f);
+	CHECK(infinite.world->playerWeapon()->roundsInMag() == 1);
+	CHECK(infinite.world->playerWeapon()->magsLeft() < 0);
 }
 
 TEST(GameWorld_GadgetsHealAndResupply)
@@ -1471,6 +1738,108 @@ TEST(GameWorld_GuidedMissileFollowsTheAim)
 	}
 }
 
+TEST(GameWorld_GuidedMissileFollowsTheActiveCamera)
+{
+	// 0x005e2e20 steers the wire-guided round from the player's active
+	// camera, not the soldier's eye: fired north with the soldier looking
+	// north, a camera looking 30 degrees right draws the missile that way.
+	Range range;
+	world::ObjectTemplate* rifle = range.templates.find("eu_ar_rifle");
+	rifle->settings()["projectileTemplate"] = "missile";
+	rifle->settings()["velocity"] = "40";
+	world::ObjectTemplate* missile = range.templates.create("GenericProjectile", "missile");
+	missile->settings()["seek.targetType"] = "TTUnique";
+	missile->settings()["seek.trackingDelay"] = "0.01";
+	missile->settings()["follow.maxYaw"] = "0.45";
+	missile->settings()["follow.maxPitch"] = "0.85";
+	missile->settings()["gravityModifier"] = "0";
+	missile->settings()["timeToLive"] = "CRD_NONE/10/0/0";
+	missile->settings()["damage"] = "100";
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	game::SoldierInput input;
+	input.fire = true;
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	input.fire = false;
+	range.world->setPlayerInput(input);
+	const float yaw = 30.0f * 3.14159265f / 180.0f;
+	for (int i = 0; i < 30; ++i) {
+		range.world->setCamera({0, 1.6f, 0}, {std::sin(yaw), 0, std::cos(yaw)});
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->projectiles().size() == 1);
+	if (!range.world->projectiles().empty()) {
+		const physics::Vec3 v = range.world->projectiles().front().velocity;
+		CHECK(std::atan2(v.x, v.z) > 0.2f);
+	}
+}
+
+// The infantry AV launchers release their wire when the player leaves the
+// sights. Re-entering them must not reacquire an already released round.
+TEST(GameWorld_InfantryWireGuidanceEndsWhenLeavingSights)
+{
+	for (const bool aimedAtLaunch : {false, true}) {
+		Range range;
+		auto* launcher = range.templates.find("eu_ar_rifle");
+		launcher->settings()["projectileTemplate"] = "missile";
+		launcher->settings()["velocity"] = "40";
+		launcher->settings()["ammo.magSize"] = "1";
+		launcher->settings()["ammo.nrOfMags"] = "4";
+		launcher->settings()["ammo.reloadTime"] = "0.2";
+		launcher->settings()["target.targetSystem"] = "TSWireGuided";
+		launcher->settings()["target.disableGuidanceOnReload"] = "1";
+		auto* missile = range.templates.create("GenericProjectile", "missile");
+		missile->settings()["seek.targetType"] = "TTUnique";
+		missile->settings()["seek.trackingDelay"] = "0.01";
+		missile->settings()["follow.maxYaw"] = "0.45";
+		missile->settings()["follow.maxPitch"] = "0.85";
+		missile->settings()["gravityModifier"] = "0";
+		missile->settings()["timeToLive"] = "CRD_NONE/10/0/0";
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		range.world->setAutoReload(true);
+		const int player = range.world->localPlayer();
+		range.world->setZoomed(player, aimedAtLaunch);
+		game::SoldierInput input;
+		input.fire = true;
+		input.aimPitch = 3;
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		input.fire = false;
+		input.turn = 30;
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		input.turn = 0;
+		range.world->setPlayerInput(input);
+		for (int i = 0; i < 15; ++i) range.world->tick(1 / 30.0f);
+		CHECK(range.world->projectiles().size() == 1);
+		if (range.world->projectiles().empty()) continue;
+		const auto& guided = range.world->projectiles().front();
+		CHECK(guided.wireLost != aimedAtLaunch);
+		const float before = std::atan2(guided.velocity.x, guided.velocity.z);
+		if (aimedAtLaunch) {
+			CHECK(before > 0.08f);
+			CHECK(range.world->playerWeapon()->roundsInMag() == 0);
+			CHECK(!range.world->playerWeapon()->reloading());
+		} else {
+			CHECK(std::fabs(before) < 0.01f);
+		}
+		range.world->setZoomed(player, false);
+		range.world->tick(1 / 30.0f);
+		CHECK(range.world->projectiles().front().wireLost);
+		range.world->setZoomed(player, true);
+		input.turn = -50;
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		input.turn = 0;
+		range.world->setPlayerInput(input);
+		for (int i = 0; i < 20; ++i) range.world->tick(1 / 30.0f);
+		const auto& released = range.world->projectiles().front();
+		CHECK(released.wireLost);
+		CHECK(std::fabs(std::atan2(released.velocity.x, released.velocity.z) - before) < 0.01f);
+		CHECK(range.world->playerWeapon()->roundsInMag() == 1);
+	}
+}
+
 // A deployed hub carrying a SupplyObject (unl_hub_medic_stationary's
 // Unl_Hub_Medic_Supply: radius 5, healSpeed 4, sharedStorageSize 300)
 // works as the supply crates do (0x005d1710, every 0.2 s): 4 per cent of
@@ -1725,6 +2094,7 @@ TEST(GameWorld_BeaconSpawnDropsInPod)
 	// The spawn point's disablePodControls (1 by default, 0x00635590):
 	// the pod takes no steering (0x0059d2a0 -> 0x005ca2e0).
 	CHECK(!range.world->pods().empty() && range.world->pods()[0].controlsOff);
+	const uint32_t podId = range.world->pods().empty() ? 0 : range.world->pods()[0].object;
 	range.world->playerInfo(member, info);
 	const float dx = info.position.x - at.x, dz = info.position.z - at.z;
 	const float off = std::sqrt(dx * dx + dz * dz);
@@ -1738,6 +2108,8 @@ TEST(GameWorld_BeaconSpawnDropsInPod)
 	std::fprintf(stderr, "  landed after %.1f s at %.1f/%.1f/%.1f\n", second, info.position.x, info.position.y,
 		info.position.z);
 	CHECK(!range.world->ridingPod(member) && info.alive && info.vehicle == 0 && info.position.y < 5);
+	for (int i = 0; i < 6; ++i) range.world->tick(1 / 30.0f);
+	CHECK(podId && range.objects.find(podId) == nullptr);
 }
 
 // The spawn spot's test (0x005aeb80, 0x006f2e90): a PlayerControlObject
@@ -1826,6 +2198,66 @@ TEST(GameWorld_BlastBehindAWallByTheObjectsRadius)
 		const float expected = 100 - 100 * (1 - (std::sqrt(physics::lengthSquared(d)) - 2) / 8) * 0.5f;
 		std::fprintf(stderr, "  with%s a child: %.1f hit points left\n", child ? "" : "out", left);
 		CHECK(child ? std::fabs(left - expected) < 0.5f : left == 100);
+	}
+}
+
+// Without a skeleton retail uses the soldier's origin for all three rays.
+// A screen obscures the hypothetical head but not that origin.
+TEST(GameWorld_BlastWithoutSkeletonUsesSoldierOrigin)
+{
+	Range range;
+	range.collisionTemplates.add("splash_screen", wallMesh(2, 0.25f));
+	range.collisionTemplates.add("splash_block", boxMesh(0.035f));
+	range.templates.registerType(6, "SimpleObject");
+	auto* screen = range.templates.create("SimpleObject", "splash_screen");
+	screen->settings()["collisionMesh"] = "splash_screen";
+	range.objects.create(screen, {0, 1.25f, 17});
+	auto* block = range.templates.create("SimpleObject", "splash_block");
+	block->settings()["collisionMesh"] = "splash_block";
+	for (const auto& p : {physics::Vec3{0, 0.8f, 14}, physics::Vec3{0, 1.2f, 14},
+		physics::Vec3{-0.2f, 1, 14}, physics::Vec3{0.2f, 1, 14}}) {
+		range.objects.create(block, {p.x, p.y, p.z});
+	}
+	auto* blast = range.templates.create("GenericProjectile", "blast");
+	blast->components().push_back("DefaultDetonationComp");
+	blast->settings()["detonation.explosionDamage"] = "100";
+	blast->settings()["detonation.explosionRadius"] = "10";
+	blast->settings()["detonation.explosionMaterial"] = "69";
+	const int bot = range.world->addPlayer("Bot", 1, true);
+	CHECK(range.world->spawnSoldier(bot));
+	game::GameWorld::PlayerInfo info;
+	CHECK(range.world->playerInfo(bot, info));
+	range.world->startRound();
+	CHECK(range.world->detonate("blast", {0, 1, 14}));
+	std::fprintf(stderr, "  no-pose blast: %.2f hit points left\n", range.world->hitPoints(info.soldier));
+	CHECK(std::fabs(range.world->hitPoints(info.soldier) - 50) < 0.01f);
+}
+
+// Retail applies the same cover test to non-mobile armoured objects.
+TEST(GameWorld_BlastWallProtectsStaticProp)
+{
+	for (bool blocked : {false, true}) {
+		Range range;
+		range.templates.registerType(6, "SimpleObject");
+		range.templates.registerType(7, "DestroyableObject");
+		range.collisionTemplates.add("cover_wall", wallMesh(2, 3));
+		range.collisionTemplates.add("small_barrel", boxMesh(0.4f));
+		auto* wall = range.templates.create("SimpleObject", "cover_wall");
+		wall->settings()["collisionMesh"] = "cover_wall";
+		if (blocked) range.objects.create(wall, {0, 0, 12});
+		auto* barrel = range.templates.create("DestroyableObject", "small_barrel");
+		barrel->settings()["collisionMesh"] = "small_barrel";
+		barrel->settings()["armor.maxHitPoints"] = "100";
+		const uint32_t id = range.objects.create(barrel, {0, 1, 15})->id();
+		auto* blast = range.templates.create("GenericProjectile", "blast");
+		blast->components().push_back("DefaultDetonationComp");
+		blast->settings()["detonation.explosionDamage"] = "100";
+		blast->settings()["detonation.explosionMaterial"] = "69";
+		range.world->startRound();
+		CHECK(range.world->detonate("blast", {0, 1, 10}));
+		const float hp = range.world->hitPoints(id);
+		std::fprintf(stderr, "  static prop %s wall health %.2f\n", blocked ? "behind" : "without", hp);
+		CHECK(blocked ? hp == 100 : hp < 100);
 	}
 }
 
@@ -3809,6 +4241,47 @@ TEST(GameWorld_DeathMaterialDestroysVehicles)
 	}
 }
 
+// Parachute is a PlayerControlObject in retail: its team must participate
+// in the same shield filtering as an ordinary vehicle. Exercise the actual
+// rigid-body collision path, including both teams and both inheritance cases.
+TEST(GameWorld_ParachuteUsesTeamShieldFiltering)
+{
+	for (const char* type : {"PlayerControlObject", "Parachute"}) {
+		for (int team : {1, 2}) {
+			for (int friendly : {0, 1}) {
+				Range range;
+				range.templates.registerType(6, "SimpleObject");
+				range.templates.registerType(7, type);
+				range.collisionTemplates.add("shield_mesh", panelMesh({{-10, 0, -10}, {10, 0, -10}, {10, 0, 10}, {-10, 0, 10}},
+					{{{0, 2, 3}, 0}, {{0, 1, 2}, 0}}));
+				range.collisionTemplates.add("pod_mesh", boxMesh(1));
+				world::ObjectTemplate* shield = range.templates.create("SimpleObject", "shield");
+				shield->settings()["collisionMesh"] = "shield_mesh";
+				shield->settings()["mapMaterial.0"] = "666";
+				shield->settings()["collisionGroups"] = (friendly ? team : 3 - team) == 1 ? "256" : "512";
+				range.objects.create(shield, {0, 0, 50});
+				world::ObjectTemplate* pod = range.templates.create(type, "pod");
+				makeMobile(*pod, "pod_mesh");
+				pod->settings()["armor.maxHitPoints"] = "10000";
+				world::Object* object = range.objects.create(pod, {0, 2, 50});
+				object->setTeam(team);
+				const uint32_t id = object->id();
+				physics::Ground ground;
+				ground.height = [](float, float) { return -10.0f; };
+				ground.heightAndNormal = [](float, float, physics::Vec3& normal) { normal = {0, 1, 0}; return -10.0f; };
+				range.world->enablePhysics(range.files, range.collisionTemplates, ground);
+				range.world->startRound();
+				for (int i = 0; i < 45; ++i) range.world->tick(1 / 30.0f);
+				const world::Object* result = range.objects.find(id);
+				CHECK(result != nullptr);
+				if (result) {
+					CHECK(friendly ? result->position().y < -1 : range.world->hitPoints(id) <= 0);
+				}
+			}
+		}
+	}
+}
+
 // Destroyable props (DestroyableObject, Props.cpp): at 0 hit points the
 // armour's 0x00654120 wrecks one (its physics gone, 0x00651c60: a mesh
 // of two geometries shows its second, one of one is hidden), its armour
@@ -5039,4 +5512,57 @@ TEST(GameWorld_OrderTagByItsMarker)
 	CHECK(same(game::GameWorld::orderTagPoint({10, 3, 20}, 4.49f), {10, 5.99f, 20})); // just under 1.5 m
 	CHECK(same(game::GameWorld::orderTagPoint({10, 3, 20}, 4.5f), {10, 3, 20}));     // a roof 1.5 m up
 	CHECK(same(game::GameWorld::orderTagPoint({10, 3, 20}, 1.0f), {10, 3, 20}));     // the point over water
+}
+
+// The profile's auto reload waits while the player still steers an
+// aim-guided round (eu_av with target.disableGuidanceOnReload): reloading at
+// once would cut the wire and drop the zoom. It reloads once the round is gone.
+TEST(GameWorld_ProfileAutoReloadWaitsForGuidedRound)
+{
+	Range range;
+	world::ObjectTemplate* launcher = range.templates.find("eu_ar_rifle");
+	launcher->settings()["projectileTemplate"] = "missile";
+	launcher->settings()["velocity"] = "40";
+	launcher->settings()["ammo.magSize"] = "1";
+	launcher->settings()["ammo.nrOfMags"] = "4";
+	launcher->settings()["ammo.reloadTime"] = "0.1";
+	launcher->settings()["target.disableGuidanceOnReload"] = "1";
+	world::ObjectTemplate* missile = range.templates.create("GenericProjectile", "missile");
+	missile->settings()["seek.targetType"] = "TTUnique";
+	missile->settings()["seek.trackingDelay"] = "0.01";
+	missile->settings()["follow.maxYaw"] = "0.45";
+	missile->settings()["follow.maxPitch"] = "0.85";
+	missile->settings()["gravityModifier"] = "0";
+	missile->settings()["timeToLive"] = "CRD_NONE/1.5/0/0";
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	range.world->setAutoReload(true);
+	game::SoldierInput input;
+	input.fire = true;
+	input.aimPitch = 3;
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	input.fire = false;
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	range.world->tick(1 / 30.0f); // the empty magazine: the reload would have started by now
+	input.turn = 30;
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	input.turn = 0;
+	range.world->setPlayerInput(input);
+	for (int i = 0; i < 20; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->playerWeapon()->roundsInMag() == 0);
+	CHECK(!range.world->playerWeapon()->reloading());
+	CHECK(range.world->projectiles().size() == 1);
+	if (!range.world->projectiles().empty()) {
+		const game::Projectile& round = range.world->projectiles().front();
+		CHECK(!round.wireLost);
+		CHECK(std::atan2(round.velocity.x, round.velocity.z) > 0.1f); // still steered
+	}
+	for (int i = 0; i < 60; ++i) {
+		range.world->tick(1 / 30.0f); // the round expires, then the reload runs
+	}
+	CHECK(range.world->playerWeapon()->roundsInMag() == 1);
 }

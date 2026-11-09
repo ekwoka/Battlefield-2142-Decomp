@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "HudMenusComm.h"
 
 #include "Console/Console.h"
@@ -141,6 +142,8 @@ void CommRoses::bind(Console& console, std::function<void(const std::string&)> r
 		});
 		bindMethod(console, object + ".selectOrder", access, [this, r](std::string entry) {
 			const std::string line = r->selectOrder(entry);
+			std::printf("comm-rose: select %s on %s -> \"%s\"\n", entry.c_str(), r->name().c_str(), line.c_str());
+			std::fflush(stdout);
 			if (!r->open() && r->name() == m_shown) {
 				close();
 			}
@@ -152,6 +155,8 @@ void CommRoses::bind(Console& console, std::function<void(const std::string&)> r
 	}
 	// Every rose's buttons call the radio interface's (0x007b70b0).
 	bindMethod(console, "RadioInterface.mouseOver", access, [this](int entry) {
+		std::printf("comm-rose: hover %d\n", entry);
+		std::fflush(stdout);
 		const CommRose* r = find("Radio");
 		for (int i = 1; r && i <= r->entries(); ++i) {
 			m_hud.set("Radio" + std::to_string(i) + "MouseOver", i == entry ? 1.0f : 0.0f);

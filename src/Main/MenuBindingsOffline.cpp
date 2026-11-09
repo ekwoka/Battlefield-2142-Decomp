@@ -936,6 +936,26 @@ void MenuBindings::bindOffline()
 		}
 		return Value(false);
 	});
+	// GeneralSettings.setPlayedVOHelp (NativeTable slot): the menu marks a help
+	// key played; listed once and saved to General.con so it stays dismissed.
+	n.setFunction(kGeneralSettings, "setPlayedVOHelp", [this](Interpreter& vm, const Args& args) {
+		const std::string name = vm.toString(arg(args, 0));
+		if (m_objects && !name.empty()) {
+			std::vector<std::string> played = m_objects->list("GeneralSettings.PlayedVOHelp");
+			const auto same = [&name](std::string entry) {
+				entry.erase(std::remove(entry.begin(), entry.end(), '"'), entry.end());
+				return entry.size() == name.size() && std::equal(entry.begin(), entry.end(), name.begin(), [](char a, char b) {
+					return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+				});
+			};
+			if (std::none_of(played.begin(), played.end(), same)) {
+				played.push_back("\"" + name + "\"");
+				m_objects->setList("GeneralSettings.PlayedVOHelp", std::move(played));
+				m_objects->saveGeneral();
+			}
+		}
+		return Value();
+	});
 	// 0x1004c580: the current local profile's count (LocalProfileManager
 	// slot 0x9c; LocalProfile.setNumTimesLoggedIn), 0 without one.
 	n.setFunction("dice.bf2.Profile", "getNumTimesLoggedIn", [this](Interpreter&, const Args&) {

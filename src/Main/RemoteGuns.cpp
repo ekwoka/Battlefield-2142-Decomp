@@ -110,7 +110,7 @@ void RemoteSeatGuns::step(game::GameWorld& round, const std::vector<Seat>& seats
 				gun.deviation.fired();
 			}
 			round.fireRemoteSeatRound(s.vehicle, s.seat, w->weapon, s.velocity, gun.barrel, gun.tracerCount, &at, deviation);
-			round.remoteGunFired(s.vehicle, w->weapon, s.player, at);
+			round.remoteGunFired(s.vehicle, w->weapon, s.player, at, s.seat);
 			gun.nextRound = arm.roundsPerMinute > 0 ? 60.0f / static_cast<float>(arm.roundsPerMinute) : 0.1f;
 			gun.burstLeft = std::max(0, gun.burstLeft - 1);
 			if (arm.magSize > 0 && gun.rounds > 0) {

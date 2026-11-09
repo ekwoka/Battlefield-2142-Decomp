@@ -854,6 +854,12 @@ std::string BotManager::behaviour(int player) const
 	return it != m_bots.end() ? it->second.behaviour : std::string();
 }
 
+SoldierInput BotManager::lastInputFor(int player) const
+{
+	const auto it = m_bots.find(player);
+	return it != m_bots.end() ? it->second.lastInput : SoldierInput {};
+}
+
 int BotManager::target(int player) const
 {
 	const auto it = m_bots.find(player);
@@ -2187,6 +2193,84 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 	const auto& areas = m_settings.strategy.areas;
 	physics::Vec3 orderAt;
 	bool hasOrder = false;
+	bool titanSiloOrder = false;
+	// AIDLL's shipped strategic areas do not describe gpm_ti objectives.
+	// Its generic fallback sees the two moving Titan control points alongside
+	// the five silos; the Titan points cannot change hands, and bots can spend
+	// their whole round treating them as capture objectives. Give on-foot bots
+	// and ground-vehicle drivers a silo goal directly, using the mode's actual
+	// silo/control-point state.
+	// Existing Titan gun and pod behavior runs before updateGoal and is left
+	// alone. Ground-vehicle drivers can use the same objective with their
+	// vehicle mesh and the area's vehicle order position; passengers keep
+	// their normal seat behavior.
+	if (m_world.gameMode() == "gpm_ti" && self.team >= 1 && self.team <= 2 && (!self.vehicle || self.driving)) {
+		const std::vector<GameWorld::SiloInfo> silos = m_world.missileSilos();
+		const auto actionable = [&](const GameWorld::SiloInfo& silo) -> const GameWorld::ControlPointInfo* {
+			if (silo.team == self.team) {
+				return nullptr;
+			}
+			for (const GameWorld::ControlPointInfo& point : points) {
+				if (point.id == silo.controlPoint && point.capturable) {
+					return &point;
+				}
+			}
+			return nullptr;
+		};
+		const GameWorld::ControlPointInfo* targetPoint = nullptr;
+		// Keep an unfinished silo assignment stable. Once that silo changes to
+		// our team, the next update selects another live target.
+		if (bot.goalOrder >= 0 && static_cast<size_t>(bot.goalOrder) < areas.size()) {
+			const int current = areas[static_cast<size_t>(bot.goalOrder)].controlPoint;
+			for (const GameWorld::SiloInfo& silo : silos) {
+				if (silo.controlPoint == current) {
+					if (const GameWorld::ControlPointInfo* point = actionable(silo)) {
+						targetPoint = point;
+					}
+					break;
+				}
+			}
+		}
+		if (!targetPoint) {
+			float best = std::numeric_limits<float>::infinity();
+			for (const GameWorld::SiloInfo& silo : silos) {
+				const GameWorld::ControlPointInfo* point = actionable(silo);
+				if (!point) {
+					continue;
+				}
+				int assigned = 0;
+				for (const auto& [id, other] : m_bots) {
+					if (id == self.id || other.goalOrder < 0 || static_cast<size_t>(other.goalOrder) >= areas.size()) {
+						continue;
+					}
+					const GameWorld::PlayerInfo* mate = playerOf(id);
+					if (mate && mate->team == self.team && areas[static_cast<size_t>(other.goalOrder)].controlPoint == silo.controlPoint) {
+						++assigned;
+					}
+				}
+				// Spread new orders over available silos without taking a bot
+				// away from its existing capture. Neutral silos need one flag
+				// rise; enemy silos need a neutralize and capture, so favor the
+				// former when travel distances are otherwise comparable.
+				const float preference = point->team == 0 ? 0.0f : 900.0f;
+				// A silo off the navigation mesh (Suez's vanilla mesh has none near silos 901, 905 and 906) cannot be
+				// planned to: the bot then walks straight at it and stops at the first wall. Prefer reachable ones.
+				const ai::NavMesh* reach = self.vehicle && self.driving ? m_vehicleNavMesh : m_navMesh;
+				const float unreachable = reach && reach->findPolygon(toAi(point->position), 5.0f) < 0 ? 9.0e6f : 0.0f;
+				const float score = physics::lengthSquared(point->position - self.position) +
+					static_cast<float>(assigned) * 250000.0f + preference + unreachable;
+				if (score < best) {
+					best = score;
+					targetPoint = point;
+				}
+			}
+		}
+		if (targetPoint) {
+			orderAt = targetPoint->position;
+			hasOrder = true;
+			titanSiloOrder = true;
+		}
+	}
 	// A driver heads for the areas' vehicle order positions over the
 	// vehicle mesh.
 	const int map = self.vehicle && self.driving ? 1 : 0;
@@ -2194,7 +2278,9 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 	// state 2: 0x100c0130); without one it keeps the goal it had, or, with
 	// none, goes as a bot outside squads would.
 	const Squad* squad = self.squad ? this->squad(self.team, self.squad) : nullptr;
-	if (squad && squad->state == 2 && squad->kind != 4) {
+	if (titanSiloOrder) {
+		// The mode-specific target above supersedes a generic SAI squad order.
+	} else if (squad && squad->state == 2 && squad->kind != 4) {
 		orderAt = squad->orderAt;
 		hasOrder = true;
 	} else if (squad && squad->state != 2 && bot.hasGoal && !bot.orderRegoal) {
@@ -5818,8 +5904,11 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 	const float wantPitch = pitchOf(want);
 	const float ey = angleBetween(trueYaw, wantYaw) * kRadians;
 	const float ep = (wantPitch - truePitch) * kRadians;
+	const int aimTarget = hasTarget ? bot.target : -1;
+	const bool aimTargetChanged = gunning && aimTarget != bot.lastAimTarget;
+	bot.lastAimTarget = aimTarget;
 	float wy = 0, wp = 0;
-	if (seconds > 0 && physics::lengthSquared(bot.lastAimPoint) > 0) {
+	if (!aimTargetChanged && seconds > 0 && physics::lengthSquared(bot.lastAimPoint) > 0) {
 		wy = angleBetween(yawOf(bot.lastAimPoint), wantYaw) * kRadians / seconds;
 		wp = (wantPitch - pitchOf(bot.lastAimPoint)) * kRadians / seconds;
 	}
@@ -5837,7 +5926,8 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 		lead *= 0.5f;
 	}
 	const float bias = average < -1e-4f ? -std::min(0.75f, -20 * average) : 0.0f;
-	float up = bias - g.proportional * ep - g.derivative * (ep - bot.pitchError) + lead;
+	const float pitchErrorDelta = aimTargetChanged ? 0.0f : ep - bot.pitchError;
+	float up = bias - g.proportional * ep - g.derivative * pitchErrorDelta + lead;
 	up = std::clamp(up, -4.0f, 4.0f) * 0.5f;
 	if (up != 0 && std::fabs(up) < 0.01f) {
 		up = up > 0 ? 0.01f : -0.01f;
@@ -5850,7 +5940,9 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 	if ((ey > 0) == (wy > 0)) {
 		yawLead *= 0.5f;
 	}
-	float right = -gain * ey - g.derivative * (ey - bot.yawError) + yawLead;
+	const float yawErrorDelta = aimTargetChanged ? 0.0f
+		: gunning ? std::remainder(ey - bot.yawError, 2 * 3.14159265f) : ey - bot.yawError;
+	float right = -gain * ey - g.derivative * yawErrorDelta + yawLead;
 	right = std::clamp(right, -limit, limit);
 	if (std::fabs(right) < 0.001f) {
 		right = 0; // the soldier's dead zone (0x0091fdc0)
@@ -5867,6 +5959,23 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 	const float errorDegrees = ey * kDegrees;
 	if ((errorDegrees >= 0 && turn > errorDegrees) || (errorDegrees < 0 && turn < errorDegrees)) {
 		turn = errorDegrees;
+	}
+	// stepGunner applies this degree delta directly to the seat gun's yaw
+	// (GameWorld.cpp, Body::Gun), bypassing rotationAxisStep. The input adapter
+	// therefore has to enforce the yaw bundle's authored maxSpeed itself;
+	// otherwise a normal ControlInfo output of 2..4 becomes 10..20 degrees in
+	// one 1/30 s tick even on the shipped tank's 25 deg/s turret and walker
+	// gunner's 120 deg/s turret. Mouse/player inputs retain their existing path.
+	if (gunning) {
+		const std::vector<GameWorld::SeatLayout> seats = m_world.vehicleSeats(self.vehicle);
+		if (self.seat >= 0 && static_cast<size_t>(self.seat) < seats.size() && seats[static_cast<size_t>(self.seat)].yawSpeed > 0) {
+			// Bot plans execute round-robin: a degree command may be held for
+			// the physics ticks between decisions, so cap each command to one
+			// 1/30-second simulation step instead of scaling by the elapsed plan
+			// time passed into the controller.
+			const float maxTurn = seats[static_cast<size_t>(self.seat)].yawSpeed / kInputTicksPerSecond;
+			turn = std::clamp(turn, -maxTurn, maxTurn);
+		}
 	}
 	float pitchStep = up * kInputDegreesPerTick * kInputTicksPerSecond * seconds * zoomScale;
 	const float pitchErrorDegrees = ep * kDegrees;

@@ -223,6 +223,39 @@ TEST(Effects_ObjectBundlesStartAndStopAsTheOriginal)
 	CHECK(!manager.emitting(9) && objects.tracked() == 0);
 }
 
+TEST(Effects_GenericProjectileStartsAndCarriesItsFireBundle)
+{
+	world::ObjectTemplateManager templates;
+	addFlame(templates, true);
+	world::ObjectTemplate* trail = templates.create("EffectBundle", "e_rocket_trail");
+	trail->settings()["setStartOnEffects"] = "0";
+	trail->settings()["startAtCreation"] = "0";
+	trail->children().push_back({"flame", {0, 0, -0.1f}, {}});
+	world::ObjectTemplate* rocket = templates.create("GenericProjectile", "rocket");
+	rocket->children().push_back({"e_rocket_trail", {}, {}});
+
+	effects::EffectManager manager(templates);
+	effects::ObjectEffects objects(templates);
+	effects::ObjectEffects::ObjectState state;
+	state.id = 0x80000001u; // projectile effect anchor, separate from game object ids
+	state.objectTemplate = rocket;
+	state.velocity = {0, 0, 50};
+	objects.update({state}, manager);
+	CHECK(manager.emitting(state.id, 1)); // the projectile's fire event starts the trail
+	manager.update(1 / 30.0f);
+	manager.update(1 / 30.0f); // emission advances in fixed 10 ms steps
+	CHECK(!sprites(manager).empty());
+	state.position = {0, 0, 2};
+	objects.update({state}, manager);
+	manager.update(1 / 30.0f);
+	const auto particles = sprites(manager);
+	CHECK(!particles.empty() && std::fabs(particles.front().position.z - 1.9f) < 1e-3f);
+	objects.update({}, manager);
+	CHECK(!manager.emitting(state.id) && objects.tracked() == 0);
+	for (int i = 0; i < 40; ++i) manager.update(1 / 30.0f);
+	CHECK(manager.emitters() == 0 && sprites(manager).empty());
+}
+
 // A bundle with minDistanceUnderWaterSurface >= 0 (the amphibious APCs'
 // wake, the soldiers' e_sold_swim) runs only while its depth under the
 // water is within [min, max], whatever started it; a seated soldier's

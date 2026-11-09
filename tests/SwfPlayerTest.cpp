@@ -565,7 +565,10 @@ TEST(SwfPlayer_Natives)
 	CHECK(avm1::toBoolean(vm.callMember(list, "fillList", {avm1::Value(true)})));
 	CHECK(vm.toNumber(vm.getMember(list, "m_rowCount")) == 3);
 	CHECK(text(player, "holder.1.cell0.text") == "Bravo");
-	vm.callMember(list, "scrollDown", {});
+	// The scroll pane's thumb takes the answer as a fraction of the scrollable rows (3 rows, 2 shown).
+	CHECK(vm.toNumber(vm.callMember(list, "scrollDown", {})) == 1.0);
+	CHECK(vm.toNumber(vm.callMember(list, "scrollUp", {})) == 0.0);
+	CHECK(vm.toNumber(vm.callMember(list, "scrollPercent", {avm1::Value(1.0)})) == 1.0);
 	CHECK(text(player, "holder.0.cell0.text") == "Bravo");
 	CHECK(vm.toNumber(vm.getMember(list, "m_firstIndex")) == 1);
 	vm.callMember(list, "sortList", {avm1::Value(1), avm1::Value(false)});

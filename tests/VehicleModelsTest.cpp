@@ -10,13 +10,17 @@
 #include "Console/ConsoleBinding.h"
 #include "Game/GameLogic.h"
 #include "Game/GameWorld.h"
+#include "Game/Bots.h"
 #include "Game/Vehicle.h"
+#include "Geometry/GeometryTemplateManager.h"
 #include "Hud/Hud.h"
 #include "IO/File/FileManager.h"
 #include "Main/HudMenusVehicles.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "Physics/MaterialManager.h"
 #include "Main/HudWorld.h"
+#include "Main/PlayerCamera.h"
+#include "Net/RemoteInput.h"
 #include "Render/PostProduction.h"
 #include "TestMain.h"
 #include "World/Object.h"
@@ -25,6 +29,7 @@
 #include "World/WorldConsole.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -33,6 +38,14 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#ifdef BF2142_RENDER_TESTS
+#include "Render/LevelRenderer.h"
+#include "Render/PngWriter.h"
+#include "Terrain/Heightmap.h"
+#include "Scene/LightSettings.h"
+#include "TitanLevel.h"
+#include <filesystem>
+#endif
 
 using namespace dice::hfe;
 
@@ -47,22 +60,26 @@ struct Garage {
 	Console console {&files};
 	world::ObjectTemplateManager templates;
 	world::ObjectManager objects;
+	geom::GeometryTemplateManager geometries;
 	physics::CollisionTemplateManager collisionTemplates;
 	physics::MaterialManager materials;
 	std::unique_ptr<game::GameWorld> world;
 	bool loaded = false;
 
-	explicit Garage(const char* gameDir)
+	explicit Garage(const char* gameDir, const char* modPath = "mods/bf2142", bool clientAssets = false)
 	{
 		files.setRootPath(gameDir);
-		files.addSearchPath("mods/bf2142");
+		files.addSearchPath(modPath);
+		if (std::string(modPath) != "mods/bf2142") files.addSearchPath("mods/bf2142");
 		files.setMountingAllowed(true);
 		bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
 			[this](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
 		std::string out;
 		CHECK(console.run("ServerArchives.con", {}, out));
+		if (clientAssets) CHECK(console.run("ClientArchives.con", {}, out));
 		files.setMountingAllowed(false);
 		world::registerWorldConsoleMethods(console, templates, objects);
+		geom::registerGeometryConsoleMethods(console, geometries);
 		templates.setCurrentFileProvider([this] { return console.currentFile(); });
 		physics::registerCollisionConsoleMethods(console, collisionTemplates);
 		physics::registerMaterialConsoleMethods(console, materials);
@@ -108,14 +125,14 @@ struct Garage {
 
 	// The vehicle at `at` facing +z, the world started and settled, the
 	// player spawned beside it.
-	uint32_t start(const char* name, const physics::Vec3& at, float settle = 3, float ground = 0, float water = -10000)
+	uint32_t start(const char* name, const physics::Vec3& at, float settle = 3, float ground = 0, float water = -10000, float yaw = 0)
 	{
 		world::ObjectTemplate* t = templates.find(name);
 		CHECK(t != nullptr);
 		if (!t) {
 			return 0;
 		}
-		world::Object* made = objects.create(t, {at.x, at.y, at.z}, {0, 0, 0});
+		world::Object* made = objects.create(t, {at.x, at.y, at.z}, {yaw, 0, 0});
 		made->setTeam(2);
 		world = std::make_unique<game::GameWorld>(templates, objects);
 		const uint32_t material = groundMaterial;
@@ -300,6 +317,45 @@ TEST(Vehicles_HoverTankThrustsAndStrafes)
 	CHECK(turned > 10);
 }
 
+TEST(Vehicles_HoverTankGunFollowsHullAfterSteering)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		Garage g(gameDir(), mod);
+		CHECK(g.loaded && g.templates.find("as_tank"));
+		if (!g.loaded || !g.templates.find("as_tank")) continue;
+		const uint32_t tank = g.start("as_tank", {0, 3, 6});
+		CHECK(g.enter(tank));
+		const auto seats = g.world->vehicleSeats(tank);
+		CHECK(!seats.empty() && seats[0].yawBundle.empty() && !seats[0].pitchBundle.empty());
+		const float before = g.yaw(tank);
+		game::SoldierInput steer;
+		steer.throttle = 1;
+		steer.turn = 5;
+		g.drive(steer, 2.0f);
+		CHECK(std::fabs(std::remainder(g.yaw(tank) - before, 360.0f)) > 2);
+		g.world->setPlayerInput({});
+		g.run(4.0f); // let hull rotation and inherited velocity settle before firing
+		float yaw = 0, pitch = 0;
+		CHECK(g.world->gunAim(tank, 0, yaw, pitch));
+		std::fprintf(stderr, "  %s: hover gun yaw relative to hull %.2f\n", mod, yaw);
+		CHECK(std::fabs(yaw) < 0.01f);
+		const size_t count = g.world->projectiles().size();
+		game::SoldierInput fire;
+		fire.fire = true;
+		g.drive(fire, 0.1f);
+		bool fired = false;
+		for (size_t i = count; i < g.world->projectiles().size(); ++i) {
+			const auto& p = g.world->projectiles()[i];
+			if (p.shooter != tank) continue;
+			fired = true;
+			const float shotYaw = std::atan2(p.velocity.x, p.velocity.z) * 57.29578f;
+			CHECK(std::fabs(std::remainder(shotYaw - g.yaw(tank), 360.0f)) < 4);
+		}
+		CHECK(fired);
+	}
+}
+
 // The walker (as_heavy_mech: MechLegs, its response and its keepUp
 // regulator): it stands on its legs (the legs' object 0.52 below the
 // root, 2.8 long), walks at 7.5 m/s and turns on the spot.
@@ -364,6 +420,246 @@ TEST(Vehicles_WalkerTurnsFromRest)
 	const float turned = std::remainder(g.yaw(mech) - before, 360.0f);
 	std::fprintf(stderr, "  as_heavy_mech: turned %.1f degrees in 2 s from rest\n", turned);
 	CHECK(turned < -30);
+}
+
+// A per-tick integration trace of the shared AI aim controller on the shipped
+// tank and walker templates. Move a seen target across the +/-180 degree yaw
+// seam, then kill it so the bot hands off to a second target. The trace keeps
+// the controller's degree command, measured gun yaw, hull yaw and target id
+// together; this catches a one-tick 360-degree swing that an end-angle test
+// cannot see.
+TEST(Vehicles_BotTankAndWalkerAimYawIsContinuous)
+{
+	if (!gameDir()) return;
+	for (const auto& [vehicleName, equipment] : {std::pair<const char*, const char*> {"eu_tank", "Tank"},
+													{"as_heavy_mech", "Mech"}}) {
+		Garage g(gameDir());
+		if (!g.loaded) return;
+		game::BotSettings settings;
+		settings.behaviours = {"Idle", "MoveTo", "Fire"};
+		game::registerBotConsoleMethods(g.console, settings);
+		const std::string aiName = std::string("Wave9") + equipment;
+		const std::string plugin = aiName + "_Unit";
+		const std::string vehicleBehaviour = std::string("aiSettings.setVehicleBehaviour ") + equipment
+			+ " Fire BBFireInfantery BBPFireInfantery 4 UCUnion UnitWeights";
+		const std::vector<std::string> commands {
+			"aiTemplatePlugIn.create Unit " + plugin, std::string("aiTemplatePlugIn.equipmentTypeName ") + equipment,
+			"aiTemplatePlugIn.create Unit Wave9SeatUnit", std::string("aiTemplatePlugIn.equipmentTypeName ") + equipment,
+			"aiTemplatePlugIn.create ControlInfo Wave9Control", "aiTemplate.create Wave9Seat", "aiTemplate.addPlugIn Wave9Control",
+			"aiTemplate.addPlugIn Wave9SeatUnit",
+			"aiTemplatePlugIn.proportionalConstant -7", "aiTemplatePlugIn.derivativeConstant -0.01",
+			"aiTemplate.create " + aiName, "aiTemplate.addType ITGround",
+			"aiTemplate.addPlugIn " + plugin,
+			"weaponTemplate.create Wave9Gun", "weaponTemplate.setStrength Infantry 5",
+			"weaponTemplate.maxRange 150", "weaponTemplate.weaponType FireArm",
+			"weaponTemplate.allowedDeviation 2", "aiSettings.createBehaviourModifiers UnitWeights",
+			"aiSettings.setBehaviourModifier Idle 1.0", vehicleBehaviour,
+			std::string("aiSettings.setVehicleDefaultBehaviour ") + equipment + " Fire", "aiSettings.setViewDistance 250"};
+		std::string out;
+		for (const std::string& command : commands) {
+			out.clear();
+			g.console.execute(command, out);
+			if (!out.empty()) std::fprintf(stderr, "  config %s: %s\n", command.c_str(), out.c_str());
+		}
+		world::ObjectTemplate* root = g.templates.find(vehicleName);
+		CHECK(root != nullptr);
+		if (!root) continue;
+		root->settings()["aiTemplate"] = aiName;
+		const std::string gunName = std::string(vehicleName) == "eu_tank" ? "EU_TANK_Barrel" : "AS_heavy_mech_main_cannon";
+		world::ObjectTemplate* mainGun = g.templates.find(gunName);
+		CHECK(mainGun != nullptr);
+		if (mainGun) mainGun->settings()["aiTemplate"] = "Wave9Gun";
+		if (std::string(vehicleName) == "as_heavy_mech") {
+			if (world::ObjectTemplate* turretGun = g.templates.find("as_heavy_mech_AAcannon_firearm")) {
+				turretGun->settings()["aiTemplate"] = "Wave9Gun";
+			}
+		}
+		const uint32_t vehicle = g.start(vehicleName, {0, vehicleName[0] == 'a' ? 4.0f : 2.0f, 6});
+		const auto seats = g.world->vehicleSeats(vehicle);
+		CHECK(!seats.empty());
+		if (seats.empty()) continue;
+		const int gunSeat = std::string(vehicleName) == "as_heavy_mech" ? 1 : 0;
+		CHECK(static_cast<size_t>(gunSeat) < seats.size());
+		CHECK(!seats[static_cast<size_t>(gunSeat)].yawBundle.empty());
+		CHECK(seats[static_cast<size_t>(gunSeat)].yawSpeed > 0);
+		std::fprintf(stderr, "  VEHICLEAI %s turretSeat=%d name=%s weapon=%s yawBundle=%s yawRate=%.1f\n", vehicleName,
+			gunSeat, seats[static_cast<size_t>(gunSeat)].name.c_str(), seats[static_cast<size_t>(gunSeat)].weapon.c_str(),
+			seats[static_cast<size_t>(gunSeat)].yawBundle.c_str(), seats[static_cast<size_t>(gunSeat)].yawSpeed);
+		if (world::ObjectTemplate* seatWeaponTemplate = g.templates.find(seats[static_cast<size_t>(gunSeat)].weapon)) {
+			seatWeaponTemplate->settings()["aiTemplate"] = "Wave9Gun";
+		}
+		for (const auto& seatWeapon : seats[static_cast<size_t>(gunSeat)].weapons) {
+			if (world::ObjectTemplate* seatWeaponTemplate = g.templates.find(seatWeapon.weapon)) {
+				seatWeaponTemplate->settings()["aiTemplate"] = "Wave9Gun";
+			}
+		}
+		settings.vehicles[equipment].sensingPattern = "Turret";
+		if (world::ObjectTemplate* seatTemplate = g.templates.find(seats[static_cast<size_t>(gunSeat)].name)) {
+			seatTemplate->settings()["aiTemplate"] = "Wave9Seat";
+		} else {
+			CHECK(false);
+		}
+		const int bot = g.world->addPlayer("Wave9Bot", 2, true);
+		CHECK(g.world->spawnSoldier(bot));
+		game::GameWorld::PlayerInfo botInfo;
+		g.world->playerInfo(bot, botInfo);
+		const physics::Vec3 origin = g.position(vehicle);
+		bool boarded = false;
+		for (float radius = 0; radius <= 6 && !boarded; radius += 1.5f) {
+			for (int k = 0; k < 8 && !boarded; ++k) {
+				const float angle = k * 0.785398163f;
+				g.world->setSoldierPosition(botInfo.soldier, {origin.x + radius * std::sin(angle), origin.y - 1.0f,
+					origin.z + radius * std::cos(angle)});
+				game::SoldierInput use; use.use = true;
+				g.world->setInput(bot, use); g.world->tick(1 / 30.0f);
+				g.world->setInput(bot, {}); g.world->tick(1 / 30.0f);
+				g.world->playerInfo(bot, botInfo);
+				boarded = botInfo.vehicle == vehicle && botInfo.seat == 0;
+			}
+		}
+		CHECK(boarded);
+		if (!boarded) continue;
+		if (gunSeat > 0) {
+			game::SoldierInput switchSeat;
+			switchSeat.switchSeat = gunSeat + 1;
+			g.world->setInput(bot, switchSeat);
+			g.world->tick(1 / 30.0f);
+			g.world->setInput(bot, {});
+			g.world->tick(1 / 30.0f);
+			g.world->playerInfo(bot, botInfo);
+			CHECK(botInfo.vehicle == vehicle && botInfo.seat == gunSeat);
+		}
+		physics::Vec3 gunOrigin;
+		physics::Mat3 gunFrame;
+		CHECK(g.world->gunFrame(vehicle, gunSeat, gunOrigin, gunFrame));
+		const physics::Vec3 rootEye = botInfo.position + physics::Vec3 {0, 1.6f, 0};
+		const float muzzleOffset = std::sqrt(physics::lengthSquared(gunOrigin - rootEye));
+		std::fprintf(stderr, "  AIMORIGIN %s seat=%d muzzle-root-eye=%.3fm yawBundle=%s yawRate=%.1f\n", vehicleName, gunSeat,
+			muzzleOffset, seats[static_cast<size_t>(gunSeat)].yawBundle.c_str(), seats[static_cast<size_t>(gunSeat)].yawSpeed);
+		CHECK(muzzleOffset > 1.0f);
+		const int enemy = g.world->addPlayer("Wave9Target", 1, false);
+		CHECK(g.world->spawnSoldier(enemy));
+		game::GameWorld::PlayerInfo enemyInfo;
+		g.world->playerInfo(enemy, enemyInfo);
+		const int handoffEnemy = g.world->addPlayer("Wave9Handoff", 1, false);
+		CHECK(g.world->spawnSoldier(handoffEnemy));
+		game::GameWorld::PlayerInfo handoffInfo;
+		g.world->playerInfo(handoffEnemy, handoffInfo);
+		g.world->setSoldierPosition(handoffInfo.soldier, {origin.x + 300, 0, origin.z});
+		game::BotManager bots(*g.world, std::move(settings));
+		// Isolate turret tracking from the driver's pursuit steering. Keep
+		// the actual AI degree command and seat-weapon update path intact.
+		const auto stepAim = [&]() {
+			bots.update(1 / 30.0f);
+			game::SoldierInput command = bots.lastInputFor(bot);
+			command.throttle = 0;
+			command.strafe = 0;
+			command.sprint = false;
+			g.world->setInput(bot, command);
+			g.world->tick(1 / 30.0f);
+		};
+		g.world->setSoldierPosition(enemyInfo.soldier, {origin.x + 1000, 0, origin.z});
+		std::set<int> idleSectors;
+		float idleMaxGunStep = 0, idlePreviousYaw = 0;
+		float idleMaxCommand = 0;
+		bool idleHavePrevious = false;
+		for (int tick = 0; tick < 150; ++tick) {
+			stepAim();
+			const game::SoldierInput command = bots.lastInputFor(bot);
+			idleMaxCommand = std::max(idleMaxCommand, std::fabs(command.turn));
+			float yaw = 0, pitch = 0;
+			g.world->gunAim(vehicle, gunSeat, yaw, pitch);
+			const float step = idleHavePrevious ? std::remainder(yaw - idlePreviousYaw, 360.0f) : 0.0f;
+			if (idleHavePrevious) idleMaxGunStep = std::max(idleMaxGunStep, std::fabs(step));
+			idlePreviousYaw = yaw; idleHavePrevious = true;
+			if (bots.lookPlanned(bot)) idleSectors.insert(bots.lookSector(bot));
+			std::fprintf(stderr, "  IDLETRACE %s tick=%d target=%d sector=%d planned=%d cmd=%7.3f gun=%7.3f dgun=%7.3f\n",
+				vehicleName, tick, bots.target(bot), bots.lookSector(bot), bots.lookPlanned(bot), command.turn, yaw, step);
+		}
+		std::fprintf(stderr, "  IDLESUMMARY %s seat=%d sectors=%zu max command %.3f max gun delta %.3f deg/tick (cap %.3f), target=%d\n",
+			vehicleName, gunSeat, idleSectors.size(), idleMaxCommand, idleMaxGunStep,
+			seats[static_cast<size_t>(gunSeat)].yawSpeed / 30.0f, bots.target(bot));
+		CHECK(bots.target(bot) < 0);
+		CHECK(idleSectors.size() >= 2);
+		CHECK(idleMaxGunStep > 0.05f);
+		CHECK(idleMaxCommand <= seats[static_cast<size_t>(gunSeat)].yawSpeed / 30.0f + 0.05f);
+		CHECK(idleMaxGunStep <= seats[static_cast<size_t>(gunSeat)].yawSpeed / 30.0f + 0.05f);
+		g.world->playerInfo(bot, botInfo);
+		std::fprintf(stderr, "  IDLEPLAYER %s vehicle=%u expected=%u seat=%d driving=%d alive=%d\n", vehicleName,
+			botInfo.vehicle, vehicle, botInfo.seat, botInfo.driving, botInfo.alive);
+		float scanYaw = 0, scanPitch = 0;
+		g.world->gunAim(vehicle, gunSeat, scanYaw, scanPitch);
+		const float scanWorldYaw = (g.objects.find(vehicle)->rotation().x + scanYaw) * 0.0174532925f;
+		const float trackStart = std::remainder(scanWorldYaw * 57.29578f, 360.0f);
+		const float trackEnd = trackStart >= 0 ? 190.0f : -190.0f;
+		for (int i = 0; i < 90; ++i) {
+			const float a = trackStart * 0.0174532925f;
+			g.world->setSoldierPosition(enemyInfo.soldier,
+				{origin.x + 80.0f * std::sin(a), 0, origin.z + 80.0f * std::cos(a)});
+			stepAim();
+		}
+		std::fprintf(stderr, "  AIMWARMUP %s seat=%d target=%d known=%d range=%.1f start=%.1f end=%.1f yawRate=%.1f limits=%.1f/%.1f\n", vehicleName,
+			gunSeat, bots.target(bot), bots.knows(bot, enemy), bots.preferredRange(bot), trackStart, trackEnd, seats[static_cast<size_t>(gunSeat)].yawSpeed,
+			seats[static_cast<size_t>(gunSeat)].minYaw, seats[static_cast<size_t>(gunSeat)].maxYaw);
+		CHECK(bots.target(bot) == enemy);
+		float settledError = 180;
+		float previousGunYaw = 0;
+		bool havePrevious = false;
+		float maxGunStep = 0, maxCommand = 0;
+		int seamSamples = 0;
+		int handoffSeenAt = -1;
+		const float yawRate = seats[static_cast<size_t>(gunSeat)].yawSpeed;
+		CHECK(yawRate > 0);
+		for (int tick = 0; tick < 240; ++tick) {
+			// The target starts at the idle scan's bearing, then moves through the
+			// rear seam to the other side while the gun tracks it.
+			const float angle = (tick < 180 ? trackStart + tick * ((trackEnd - trackStart) / 179.0f) : trackEnd);
+			const float radians = angle * 0.0174532925f;
+			g.world->setSoldierPosition(enemyInfo.soldier,
+				{origin.x + 80.0f * std::sin(radians), 0, origin.z + 80.0f * std::cos(radians)});
+			if (tick == 200) {
+				g.world->setHitPoints(enemyInfo.soldier, 0);
+				float handoffYaw = 0, handoffPitch = 0;
+				g.world->gunAim(vehicle, gunSeat, handoffYaw, handoffPitch);
+				const float hull = (g.objects.find(vehicle)->rotation().x + handoffYaw) * 0.0174532925f;
+				const physics::Vec3 current = g.position(vehicle);
+				g.world->setSoldierPosition(handoffInfo.soldier,
+					{current.x + 45.0f * std::sin(hull), 0, current.z + 45.0f * std::cos(hull)});
+			}
+			stepAim();
+			const game::SoldierInput command = bots.lastInputFor(bot);
+			if (tick == 0) std::fprintf(stderr, "  AIMSETUP %s equipment=%s behaviour=%s target=%d\n", vehicleName,
+				bots.equipment(bot).c_str(), bots.behaviour(bot).c_str(), bots.target(bot));
+			maxCommand = std::max(maxCommand, std::fabs(command.turn));
+			float yaw = 0, pitch = 0;
+			const bool hasGun = g.world->gunAim(vehicle, gunSeat, yaw, pitch);
+			CHECK(hasGun);
+			const float step = havePrevious ? std::remainder(yaw - previousGunYaw, 360.0f) : 0.0f;
+			if (havePrevious) maxGunStep = std::max(maxGunStep, std::fabs(step));
+			previousGunYaw = yaw; havePrevious = true;
+			if (tick == 199) {
+				physics::Vec3 muzzle; physics::Mat3 frame;
+				CHECK(g.world->gunFrame(vehicle, gunSeat, muzzle, frame));
+				g.world->playerInfo(enemy, enemyInfo);
+				const auto local = frame.untransform(enemyInfo.position - muzzle);
+				const float desiredYaw = std::atan2(local.x, local.z) * 57.29578f;
+				settledError = std::fabs(std::remainder(desiredYaw - yaw, 360.0f));
+			}
+			const float hullYaw = g.objects.find(vehicle)->rotation().x;
+			if (std::fabs(angle) >= 160 && std::fabs(angle) <= 200) ++seamSamples;
+			if (tick >= 200 && handoffSeenAt < 0 && bots.target(bot) == handoffEnemy) handoffSeenAt = tick;
+			std::fprintf(stderr, "  AIMTRACE %s tick=%d target=%d desired=%7.3f cmd=%7.3f gun=%7.3f dgun=%7.3f hull=%7.3f\n",
+				vehicleName, tick, bots.target(bot), std::remainder(angle, 360.0f), command.turn, yaw, step, hullYaw);
+		}
+		std::fprintf(stderr, "  AIMSUMMARY %s max gun delta %.3f deg/tick, max command %.3f deg, rate cap %.3f, handoff tick %d, seam samples %d\n",
+			vehicleName, maxGunStep, maxCommand, yawRate / 30.0f, handoffSeenAt, seamSamples);
+		std::fprintf(stderr, "  SETTLED %s yaw error %.3f degrees\n", vehicleName, settledError);
+		CHECK(settledError < 5.0f);
+		CHECK(seamSamples >= 5);
+		CHECK(maxGunStep <= yawRate / 30.0f + 0.05f);
+		CHECK(maxCommand <= yawRate / 30.0f + 0.05f);
+		CHECK(handoffSeenAt >= 200 && handoffSeenAt <= 225);
+	}
 }
 
 // The walker's own animation system in the simulation (0x0063d2f0 with
@@ -566,6 +862,120 @@ TEST(Vehicles_GunshipFlies)
 	std::fprintf(stderr, "  as_ag: %.1f m up, %.1f m ahead after 5 s\n", p.y - rest.y, p.z - rest.z);
 	CHECK(p.y - rest.y > 5);
 	CHECK(p.z - rest.z > 10);
+}
+
+TEST(Vehicles_AircraftHudThrustFromPilot)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* name : {"as_ag", "us_ag", "as_at", "eu_at"}) {
+			Garage g(gameDir(), mod);
+			CHECK(g.loaded && g.templates.find(name));
+			const uint32_t id = g.start(name, {0, 3, 8});
+			CHECK(g.enter(id));
+			game::GameLogic logic;
+			host::LocalHudWorld world(*g.world, logic);
+			menu::VehicleGuiInput gui;
+			gui.controlled = g.templates.find(name);
+			gui.weapon = world.seatGroupWeapon(0).weapon;
+			gui.second = world.seatGroupWeapon(1).weapon;
+			gui.cameraMode = 1; // Inside, as in the pilot HUD
+			const int index = menu::vehicleGuiIndex(gui);
+			CHECK(index == 7 || index == 15 || index == 64 || index == 66);
+			game::SoldierInput input;
+			input.throttle = 1;
+			g.drive(input, 0.1f);
+			CHECK(menu::aircraftHudThrust(index, world.pilotThrust(id)) > 0.9f);
+			input.throttle = -1;
+			g.drive(input, 0.1f);
+			CHECK(menu::aircraftHudThrust(index, world.pilotThrust(id)) < -0.9f);
+		}
+	}
+}
+
+// A gunship's pilot pitches up and down at comparable rates (the report:
+// "can pitch down, can't pitch up"): from a hover, held pitch keys and a
+// sustained mouse stream each way.
+TEST(Vehicles_GunshipPitchesBothWays)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* name : {"as_ag", "us_ag"}) {
+			for (int mode = 0; mode < 4; ++mode) {
+				Garage g(gameDir(), mod);
+				if (!g.loaded || !g.templates.find(name)) {
+					continue;
+				}
+				const uint32_t ag = g.start(name, {0, 3, 8});
+				if (!g.enter(ag)) {
+					continue;
+				}
+				game::SoldierInput lift;
+				lift.throttle = 1;
+				g.drive(lift, 4);
+				g.drive({}, 3);
+				// mode 0/1: ArrowDown (-1, nose up) / ArrowUp (+1); 2/3: mouse up / down.
+				const float dir = mode % 2 == 0 ? 1.0f : -1.0f; // +1 = nose up
+				float aim = 0;
+				float peak = 0, peakRate = 0;
+				const auto pitchOf = [&] {
+					for (const auto& info : g.world->vehicleList()) {
+						if (info.object == ag) {
+							return std::pair<float, float> {std::asin(std::clamp(info.forward.y, -1.0f, 1.0f)) * 57.29578f,
+								info.angularVelocity.x * info.right.x + info.angularVelocity.y * info.right.y + info.angularVelocity.z * info.right.z};
+						}
+					}
+					return std::pair<float, float> {};
+				};
+				const float start = pitchOf().first;
+				for (int i = 0; i < 60; ++i) {
+					game::SoldierInput in;
+					if (mode < 2) {
+						in.pitchAxis = -dir;
+					} else {
+						aim += dir * 4.0f; // degrees a tick, up positive
+						in.aimPitch = aim;
+					}
+					g.world->setPlayerInput(in);
+					g.world->tick(1 / 30.0f);
+					const auto [angle, rate] = pitchOf();
+					if (std::fabs(angle - start) > std::fabs(peak)) peak = angle - start;
+					peakRate = std::max(peakRate, std::fabs(rate));
+					if (i % 10 == 9) {
+						std::fprintf(stderr, "    %s %s mode %d t=%.1f pitch %.2f rate %.3f\n", mod, name, mode, (i + 1) / 30.0f, angle - start, rate);
+					}
+				}
+				std::fprintf(stderr, "  %s %s mode %d: peak %.2f deg, peak rate %.3f rad/s\n", mod, name, mode, peak, peakRate);
+				CHECK(peak * dir > 3);
+			}
+		}
+	}
+}
+
+// The remote path (client -> PlayerMove -> server/prediction): a driver's
+// PIPitch is the mouse's change, so a pilot who keeps pulling the mouse up
+// (the hull fights back) must not run out of pitch input. The server's
+// clamped aim pitch (+-89) swallowed every further pull up while pulls down
+// still worked: "can pitch down, can't pitch up".
+TEST(Vehicles_RemoteMouseKeepsPitchingUp)
+{
+	for (const float dir : {1.0f, -1.0f}) { // +1: mouse up (nose up)
+		net::MoveInputState state;
+		float aim = 0, last = 0, lastLook = 0, early = 0, late = 0;
+		for (int i = 0; i < 120; ++i) {
+			game::SoldierInput in;
+			in.aimPitch = aim += dir * 2.0f;
+			const game::SoldierInput seen = net::soldierInputFromMove(net::playerInputFrom(in, last).toMove(i), state);
+			last = in.aimPitch;
+			const float driven = game::GameWorld::driverInput(seen, 1, lastLook).pitch;
+			lastLook = seen.aimPitch;
+			(i == 5 ? early : late) = -driven * dir; // nose-up positive in the direction pulled
+		}
+		std::fprintf(stderr, "  remote mouse stream dir %+.0f: pitch input early %.3f, after 120 ticks %.3f\n", dir, early, late);
+		CHECK(late > 0.9f * early && early > 0.2f);
+	}
 }
 
 // A recoil graph with a large exponent (eu_sni's) stays finite: the
@@ -1047,7 +1457,8 @@ TEST(Vehicles_GunshipMissileCamera)
 	std::fprintf(stderr, "  camera yaw %.1f -> %.1f, the round's %.1f\n", startYaw, camera.yaw, roundYaw);
 	CHECK(std::remainder(camera.yaw - roundYaw, 360.0f) > 0 && std::remainder(camera.yaw - roundYaw, 360.0f) <= 18.01f);
 	CHECK(std::remainder(roundYaw - startYaw, 360.0f) > 1);
-	// No input: the camera snaps straight (snapToZeroOnNoInput).
+	// No input: recenter at the camera's configured speed without a jump.
+	const float beforeReturn = camera.yaw;
 	g.world->setPlayerInput({});
 	g.world->tick(1 / 30.0f);
 	CHECK(g.world->projectileCamera(me, camera));
@@ -1056,10 +1467,125 @@ TEST(Vehicles_GunshipMissileCamera)
 			roundYaw = std::atan2(p.velocity.x, p.velocity.z) * 57.29578f;
 		}
 	}
-	CHECK(std::fabs(std::remainder(camera.yaw - roundYaw, 360.0f)) < 1);
+	const float offset = std::fabs(std::remainder(camera.yaw - roundYaw, 360.0f));
+	CHECK(offset > 1 && offset < 18);
+	CHECK(std::fabs(std::remainder(camera.yaw - beforeReturn, 360.0f)) < 5);
+	// Aim down, then stop moving the mouse while retaining its absolute
+	// input pitch. Recentring must not jump the view vertically either.
+	input = {};
+	for (int i = 0; i < 10; ++i) {
+		input.aimPitch -= 2.0f;
+		g.world->setPlayerInput(input);
+		g.world->tick(1 / 30.0f);
+	}
+	CHECK(g.world->projectileCamera(me, camera));
+	const float downPitch = camera.pitch;
+	g.world->setPlayerInput(input);
+	g.world->tick(1 / 30.0f);
+	CHECK(g.world->projectileCamera(me, camera));
+	CHECK(std::fabs(camera.pitch - downPitch) < 5.0f);
 	// The round's life (5 s) runs out: the seat's camera again.
 	g.run(6);
 	CHECK(!g.world->projectileCamera(me, camera));
+}
+
+// Exercise the shipped zero-muzzle-speed TV missile in both gunships and mods.
+TEST(Vehicles_GunshipMissileMotorAndCamera)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* aircraft : {"as_ag", "us_ag"}) {
+			Garage g(gameDir(), mod);
+			CHECK(g.loaded && g.templates.find(aircraft));
+			if (!g.loaded || !g.templates.find(aircraft)) continue;
+			const uint32_t v = g.start(aircraft, {0, 4, 6});
+			CHECK(g.enter(v));
+			game::SoldierInput in;
+			in.switchSeat = 2;
+			g.world->setPlayerInput(in);
+			g.world->tick(1 / 30.0f);
+			g.world->setPlayerInput({});
+			g.run(4);
+			in = {}; in.altFire = true;
+			g.world->setPlayerInput(in);
+			g.world->tick(1 / 30.0f);
+			g.world->setPlayerInput({});
+			g.run(4);
+			in = {}; in.fire = true;
+			game::GameWorld::ProjectileCamera camera;
+			for (int i = 0; i < 12 && !g.world->projectileCamera(g.world->localPlayer(), camera); ++i) {
+				g.world->setPlayerInput(in);
+				g.world->tick(1 / 30.0f);
+			}
+			CHECK(g.world->projectileCamera(g.world->localPlayer(), camera));
+			if (!g.world->projectileCamera(g.world->localPlayer(), camera)) continue;
+			const uint32_t serial = camera.serial;
+			CHECK(serial != 0 && camera.lifeRemaining > 0.9f && camera.rangeProgress < 0.05f);
+			anim::AnimationSystems systems(nullptr);
+			PlayerCamera playerCamera(*g.world, systems, nullptr);
+			playerCamera.tick(1 / 30.0f);
+			const auto mode = playerCamera.mode();
+			playerCamera.toggleMode();
+			CHECK(playerCamera.mode() == mode);
+			CHECK(!playerCamera.selectView(2) && playerCamera.mode() == mode);
+			const auto visible = game::projectileRenderStates(g.templates, g.world->projectiles());
+			const auto hidden = game::projectileRenderStates(g.templates, g.world->projectiles(), serial);
+			CHECK(visible.size() == hidden.size() + 1);
+			g.world->setPlayerInput({});
+			g.run(0.5f);
+			CHECK(g.world->projectileCamera(g.world->localPlayer(), camera));
+			CHECK(camera.lifeRemaining < 0.95f && camera.lifeRemaining > 0.7f);
+			CHECK(camera.rangeProgress > 0 && camera.rangeProgress < 1.0f - camera.lifeRemaining);
+			bool found = false;
+			for (const auto& p : g.world->projectiles()) if (p.serial == serial && p.alive) {
+				found = true;
+				CHECK(physics::lengthSquared(p.velocity) > 100.0f);
+				CHECK(physics::lengthSquared(p.position - p.origin) > 1.0f);
+			}
+			CHECK(found);
+		}
+	}
+}
+
+// A short-lived round simulates an immediate impact: it must not bypass
+// the actual launcher's authored reload minimum.
+TEST(Vehicles_GunshipMissileEarlyImpactReload)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* aircraft : {"as_ag", "us_ag"}) {
+			Garage g(gameDir(), mod);
+			auto* missile = g.templates.find("AAGuided_missile");
+			CHECK(g.loaded && missile && g.templates.find(aircraft));
+			if (!g.loaded || !missile || !g.templates.find(aircraft)) continue;
+			missile->settings()["timeToLive"] = "CRD_NONE/0.4/0/0";
+			const uint32_t v = g.start(aircraft, {0, 4, 6});
+			CHECK(g.enter(v));
+			game::SoldierInput in; in.switchSeat = 2;
+			g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+			g.world->setPlayerInput({}); g.run(4);
+			in = {}; in.altFire = true;
+			g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+			g.world->setPlayerInput({}); g.run(4);
+			const game::FireArm* launcher = g.world->gun(v, 1);
+			CHECK(launcher && launcher->settings().reloadTime >= 3.0f);
+			if (!launcher) continue;
+			in = {}; in.fire = true;
+			g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+			CHECK(launcher->roundsInMag() == 0 && launcher->reloading());
+			g.world->setPlayerInput({}); g.run(0.6f);
+			game::GameWorld::ProjectileCamera view;
+			CHECK(!g.world->projectileCamera(g.world->localPlayer(), view));
+			in.fire = true;
+			for (int i = 0; i < 40; ++i) { g.world->setPlayerInput(in); g.world->tick(1 / 30.0f); }
+			CHECK(!g.world->projectileCamera(g.world->localPlayer(), view));
+			CHECK(launcher->reloading());
+			g.world->setPlayerInput({}); g.run(1.5f);
+			CHECK(!launcher->reloading() && launcher->roundsInMag() == 1);
+			in.fire = true; g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+			CHECK(g.world->projectileCamera(g.world->localPlayer(), view));
+		}
+	}
 }
 
 // A seat's weapons by group (0x005cc5e0): the heavy mech's driver has its
@@ -1207,6 +1733,10 @@ TEST(Vehicles_ActiveDefenceShield)
 	g.world->tick(1 / 30.0f);
 	g.world->setPlayerInput({});
 	g.world->tick(1 / 30.0f);
+	// The press is a fire event to the ads' children (e_ActiveDef_shield).
+	const auto fires = g.world->takeObjectWeaponFires();
+	const auto fired = fires.find(tank);
+	CHECK(fired != fires.end() && std::any_of(fired->second.begin(), fired->second.end(), [](const auto& fire) { return fire.weapon == "ads_land"; }));
 	const float radius = g.world->shieldRadius(tank);
 	std::fprintf(stderr, "  shield radius %.2f\n", radius);
 	CHECK(radius > 2 && radius <= 6);
@@ -2090,6 +2620,234 @@ TEST(Vehicles_BipodIsAStationarySeat)
 	CHECK(std::fabs(still.x - at.x) < 1e-3f && std::fabs(still.y - at.y) < 1e-3f && std::fabs(still.z - at.z) < 1e-3f);
 }
 
+// The stationary AA cannon's muzzle ray must follow its live camera after
+// the nested yaw and pitch mounts (static_aa's installed template tree).
+TEST(Vehicles_StaticAAFireFollowsItsCamera)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!std::ifstream(std::string(gameDir()) + "/" + mod + "/ServerArchives.con")) continue;
+		Garage g(gameDir(), mod);
+		if (!g.loaded || !g.templates.find("static_aa")) continue;
+		const uint32_t aa = g.start("static_aa", {0, 2, 8});
+		g.animate();
+		CHECK(g.enter(aa));
+		const auto seats = g.world->vehicleSeats(aa);
+		if (!seats.empty()) {
+			menu::VehicleGuiInput gui;
+			gui.controlled = g.templates.find(seats[0].name);
+			gui.weapon = g.templates.find(seats[0].weapon);
+			CHECK(menu::weaponGuiIndex(gui.weapon, false) == 27);
+			gui.cameraMode = 1; // Inside
+			CHECK(menu::vehicleGuiIndex(gui) == 27);
+			gui.cameraMode = 2; // Nose
+			CHECK(menu::vehicleGuiIndex(gui) == 27);
+			gui.cameraMode = 3; // Chase
+			CHECK(menu::vehicleGuiIndex(gui) == 0);
+		}
+		PlayerCamera camera(*g.world, *g.systems, nullptr);
+		for (int i = 0; i < 60; ++i) {
+			g.world->setPlayerInput({});
+			g.world->tick(1 / 30.0f);
+			camera.tick(1 / 30.0f);
+		}
+		const size_t before = g.world->projectiles().size();
+		PlayerCamera::View sight;
+		bool fired = false;
+		for (int i = 0; i < 90 && !fired; ++i) {
+			camera.tick(1 / 30.0f);
+			CHECK(camera.view(sight, 16.0f / 9.0f));
+			game::SoldierInput fire;
+			fire.fire = true;
+			g.world->setPlayerInput(fire);
+			g.world->tick(1 / 30.0f);
+			for (size_t n = before; n < g.world->projectiles().size(); ++n) {
+				const game::Projectile& p = g.world->projectiles()[n];
+				if (p.shooter != aa) continue;
+				const float yaw = std::atan2(p.velocity.x, p.velocity.z);
+				const float pitch = std::atan2(p.velocity.y, std::sqrt(p.velocity.x * p.velocity.x + p.velocity.z * p.velocity.z));
+				const float error = std::acos(std::clamp(std::sin(sight.pitch) * std::sin(pitch)
+					+ std::cos(sight.pitch) * std::cos(pitch) * std::cos(yaw - sight.yaw), -1.0f, 1.0f));
+				CHECK(error < 5.0f * 3.14159265f / 180.0f);
+				fired = true;
+				break;
+			}
+		}
+		CHECK(fired);
+	}
+}
+
+// Check the real stationary AA at multiple headings, including both fire groups.
+TEST(Vehicles_StaticAAHeadingAndEmpMissileFlight)
+{
+    if (!gameDir()) return;
+    for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+        for (float heading : {0.0f, 90.0f, 180.0f, -90.0f}) {
+            for (bool missile : {false, true}) {
+              for (float hullYaw : {0.0f, 90.0f}) {
+               for (bool authoredSpread : {false, true}) {
+                for (float aimPitch : {-30.0f, 0.0f, 20.0f}) {
+                Garage g(gameDir(), mod);
+                CHECK(g.loaded && g.templates.find("static_aa"));
+                if (!g.loaded || !g.templates.find("static_aa")) continue;
+                // Test both the authored spread (EMP missile minDev 10) and a
+                // zero-spread fixture that isolates the underlying launch frame.
+                auto* weapon = g.templates.find(missile ? "static_aa_missile_firearm" : "static_aa_cannon_firearm");
+                CHECK(weapon != nullptr);
+                if (!weapon) continue;
+                if (!authoredSpread) weapon->settings()["deviation.minDev"] = "0";
+                const uint32_t aa = g.start("static_aa", {0, 2, 8}, 3, 0, -10000, hullYaw);
+                g.animate();
+                CHECK(g.enter(aa));
+                PlayerCamera camera(*g.world, *g.systems, nullptr);
+                game::SoldierInput aim;
+                aim.turn = heading;
+                aim.aimPitch = aimPitch;
+                g.world->setPlayerInput(aim);
+                g.world->tick(1 / 30.0f);
+                aim.turn = 0;
+                for (int i = 0; i < 60; ++i) {
+                    g.world->setPlayerInput(aim);
+                    g.world->tick(1 / 30.0f);
+                    camera.tick(1 / 30.0f);
+                }
+                PlayerCamera::View sight;
+                CHECK(camera.view(sight, 16.0f / 9.0f));
+                const size_t before = g.world->projectiles().size();
+                bool fired = false;
+                for (int i = 0; i < 90 && !fired; ++i) {
+                    aim.fire = !missile;
+                    aim.altFire = missile;
+                    g.world->setPlayerInput(aim);
+                    g.world->tick(1 / 30.0f);
+                    for (size_t n = before; n < g.world->projectiles().size(); ++n) {
+                        const auto& p = g.world->projectiles()[n];
+                        if (p.shooter != aa) continue;
+                        const float yaw = std::atan2(p.velocity.x, p.velocity.z);
+                        const float pitch = std::atan2(p.velocity.y, std::hypot(p.velocity.x, p.velocity.z));
+                        const float cosine = std::sin(sight.pitch) * std::sin(pitch)
+                            + std::cos(sight.pitch) * std::cos(pitch) * std::cos(yaw - sight.yaw);
+                        const float error = std::acos(std::clamp(cosine, -1.0f, 1.0f)) * 180.0f / 3.14159265f;
+                        std::fprintf(stderr, "  AA %s turret %.0f hull %.0f %s spread=%d: sight yaw/pitch %.1f/%.1f projectile %.1f/%.1f error %.1f alive %d\n",
+                            mod, heading, hullYaw, missile ? "missile" : "cannon", authoredSpread, sight.yaw * 180 / 3.14159265f,
+                            sight.pitch * 180 / 3.14159265f, yaw * 180 / 3.14159265f, pitch * 180 / 3.14159265f, error, p.alive);
+                        CHECK(error < (authoredSpread ? 30.0f : 2.0f));
+                        CHECK(p.settings != nullptr);
+                        if (p.settings) CHECK(p.settings->name == (missile ? "static_aa_missile_projectile" : "static_aa_cannon_Projectile"));
+                        CHECK(p.alive);
+                        const uint64_t serial = p.serial;
+                        const physics::Vec3 launch = p.origin;
+                        for (int step = 0; step < 12; ++step) {
+                            g.world->setPlayerInput({});
+                            g.world->tick(1 / 30.0f);
+                        }
+                        bool found = false;
+                        for (const auto& later : g.world->projectiles()) {
+                            if (later.serial != serial) continue;
+                            found = true;
+                            CHECK(later.alive);
+                            CHECK(physics::lengthSquared(later.position - launch) > 100.0f);
+                        }
+                        CHECK(found);
+                        CHECK(g.world->empLevel(aa) == 0);
+                        fired = true;
+                        break;
+                    }
+                }
+                CHECK(fired);
+                }
+               }
+              }
+            }
+        }
+    }
+}
+
+
+// The walker's main cannon: the installed SimpleDeviationComp is low but
+// nonzero (minDev 0.25), and each actual shot must follow the posed camera
+// frame while retaining that configured spread.
+TEST(Vehicles_WalkerMainGunUsesItsAimAndConfiguredDeviation)
+{
+	if (!gameDir()) return;
+	const auto lowerName = [](std::string n) {
+		std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		return n;
+	};
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!std::ifstream(std::string(gameDir()) + "/" + mod + "/ServerArchives.con")) continue;
+		Garage g(gameDir(), mod);
+		if (!g.loaded || !g.templates.find("as_heavy_mech")) continue;
+		const uint32_t mech = g.start("as_heavy_mech", {0, 4, 8});
+		g.animate();
+		CHECK(g.enter(mech));
+		PlayerCamera camera(*g.world, *g.systems, nullptr);
+		constexpr float dt = 1 / 30.0f;
+		for (int i = 0; i < 60; ++i) {
+			g.world->setPlayerInput({});
+			g.world->tick(dt);
+			camera.tick(dt);
+		}
+		const auto seats = g.world->vehicleSeats(mech);
+		CHECK(!seats.empty() && lowerName(seats[0].weapon) == "as_heavy_mech_main_cannon");
+		if (!seats.empty()) {
+			menu::VehicleGuiInput gui;
+			gui.controlled = g.templates.find(seats[0].name);
+			gui.weapon = g.templates.find(seats[0].weapon);
+			CHECK(menu::weaponGuiIndex(gui.weapon, false) == 60);
+			gui.cameraMode = 1; // Inside
+			CHECK(menu::vehicleGuiIndex(gui) == 60);
+			gui.cameraMode = 2; // Nose
+			CHECK(menu::vehicleGuiIndex(gui) == 0);
+			gui.cameraMode = 3; // Chase
+			CHECK(menu::vehicleGuiIndex(gui) == 0);
+		}
+		const world::ObjectTemplate* weapon = g.templates.find("as_heavy_mech_main_cannon");
+		CHECK(weapon && weapon->settings().count("deviation.minDev")
+			&& weapon->settings().at("deviation.minDev") == "0.25");
+		if (!weapon) continue;
+		const size_t before = g.world->projectiles().size();
+		size_t observed = before;
+		bool checkedRay = false;
+		std::vector<std::pair<float, float>> spread;
+		for (int i = 0; i < 900; ++i) {
+			camera.tick(dt);
+			PlayerCamera::View sight;
+			CHECK(camera.view(sight, 16.0f / 9.0f));
+			game::SoldierInput fire;
+			fire.fire = true;
+			g.world->setPlayerInput(fire);
+			g.world->tick(dt);
+			const float cp = std::cos(sight.pitch), sp = std::sin(sight.pitch);
+			const physics::Vec3 forward {std::sin(sight.yaw) * cp, sp, std::cos(sight.yaw) * cp};
+			const physics::Vec3 right {std::cos(sight.yaw), 0, -std::sin(sight.yaw)};
+			const physics::Vec3 up = physics::cross(forward, right);
+			for (size_t n = observed; n < g.world->projectiles().size(); ++n) {
+				const game::Projectile& p = g.world->projectiles()[n];
+				if (p.shooter != mech) continue;
+				const float speed = std::sqrt(physics::lengthSquared(p.velocity));
+				if (speed < 1e-4f) continue;
+				const physics::Vec3 ray = p.velocity * (1 / speed);
+				const float along = physics::dot(ray, forward);
+				if (!checkedRay) {
+					const float error = std::acos(std::clamp(along, -1.0f, 1.0f));
+					CHECK(error < 5.0f * 3.14159265f / 180.0f);
+					checkedRay = true;
+				}
+				spread.emplace_back(std::atan2(physics::dot(ray, right), along), std::atan2(physics::dot(ray, up), along));
+			}
+			observed = g.world->projectiles().size();
+		}
+		CHECK(checkedRay && spread.size() >= 5);
+		if (!spread.empty()) {
+			double squares = 0;
+			for (const auto& [right, up] : spread) squares += right * right + up * up;
+			const float rmsDegrees = static_cast<float>(std::sqrt(squares / spread.size()) * 57.29578);
+			CHECK(rmsDegrees > 0.01f && rmsDegrees < 1.0f);
+		}
+	}
+}
+
 // The heavy IFV's shield cells (SeatBehaviours.cpp): each
 // ifv_shield_the_generator's mesh is the vehicle's for the rounds, so a
 // round strikes the cell and hurts its armour (110 hit points), not the
@@ -2178,4 +2936,1823 @@ TEST(Vehicles_StaticGunnerSitsOnTheCockpit)
 	const float after = g.yaw(me.soldier);
 	std::fprintf(stderr, "  static_av: gun yaw %.1f, gunner %.1f -> %.1f\n", yaw, before, after);
 	CHECK(std::fabs(yaw) > 5 && std::fabs(std::remainder(after - before - yaw, 360.0f)) < 1);
+}
+
+TEST(PlayerCamera_ReloadAndWalkerWithGameAssets)
+{
+	if (!gameDir()) return;
+	Garage g(gameDir());
+	if (!g.loaded) return;
+	g.files.setMountingAllowed(true);
+	std::string out;
+	g.console.run("ClientArchives.con", {}, out);
+	g.files.setMountingAllowed(false);
+	anim::AnimationSystems systems([&](const std::string& path, std::vector<uint8_t>& bytes) { return g.files.readFile(path, bytes); });
+	anim::registerAnimationConsoleMethods(g.console, systems);
+	g.console.run("Objects/Soldiers/Common/Animations/ValueHolders.inc", {}, out);
+	const auto load = [&](const std::string& path) { return systems.get(path, [&] { g.console.run(path, {}, out); }); };
+	const uint32_t walker = g.start("as_heavy_mech", {0, 4, 30});
+	g.world->setAnimationSystems(&systems, load);
+	CHECK(g.world->spawnPlayer(2));
+	PlayerCamera camera(*g.world, systems, load);
+	const auto step = [&](game::SoldierInput input = {}) {
+		g.world->setPlayerInput(input);
+		g.world->tick(1 / 30.0f);
+		camera.tick(1 / 30.0f);
+	};
+	for (int i = 0; i < 90; ++i) step();
+	camera.setAltFire(true);
+	step();
+	camera.setAltFire(false);
+	for (int i = 0; i < 30; ++i) step();
+	CHECK(camera.zoomLevel() > 0);
+	game::SoldierInput fire;
+	fire.fire = true;
+	for (int i = 0; i < 10; ++i) step(fire);
+	game::SoldierInput reload;
+	reload.reload = true;
+	step(reload);
+	CHECK(g.world->playerWeapon()->reloading());
+	CHECK(camera.zoomLevel() == 0);
+	for (int i = 0; i < 15; ++i) step();
+	const auto playing = camera.playing();
+	CHECK(std::find(playing.begin(), playing.end(), "reload") != playing.end());
+	for (int i = 0; i < 150; ++i) step();
+	CHECK(!g.world->playerWeapon()->reloading());
+	const auto finished = camera.playing();
+	CHECK(std::find(finished.begin(), finished.end(), "reload") == finished.end());
+	CHECK(g.enter(walker));
+	for (int i = 0; i < 90; ++i) step();
+	PlayerCamera::View inside;
+	CHECK(camera.view(inside, 16.0f / 9.0f));
+	PlayerCamera::Cockpit cockpit;
+	CHECK(camera.cockpit(cockpit) && cockpit.vehicle == walker && cockpit.subGeometry == 0);
+	CHECK(inside.position[1] > g.objects.find(walker)->position().y);
+	camera.toggleMode();
+	CHECK(!camera.insideView() && camera.mode() != game::camera::Mode::Inside);
+	CHECK(camera.selectView(1));
+	CHECK(camera.insideView());
+}
+
+TEST(PlayerCamera_TankZoomRetainsShortClicks)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!std::ifstream(std::string(gameDir()) + "/" + mod + "/ServerArchives.con")) continue;
+		for (const char* name : {"eu_tank", "as_tank"}) {
+			Garage g(gameDir(), mod);
+			if (!g.loaded) return;
+			const auto tank = g.start(name, {0, 2, 6});
+			CHECK(g.enter(tank));
+			anim::AnimationSystems systems(nullptr);
+			PlayerCamera camera(*g.world, systems, nullptr);
+			const auto step = [&] {
+				g.world->setPlayerInput({});
+				g.world->tick(1 / 30.0f);
+				camera.tick(1 / 30.0f);
+			};
+			for (int i = 0; i < 60; ++i) step();
+			const float wide = camera.fieldOfView();
+			camera.setAltFire(true);
+			step();
+			camera.setAltFire(false);
+			for (int i = 0; i < 30; ++i) step();
+			const float zoomed = camera.fieldOfView();
+			std::fprintf(stderr, "  %s %s zoom level %d: fov %.4f -> %.4f\n", mod, name, camera.seatZoomLevel(), wide, zoomed);
+			CHECK(camera.seatZoomLevel() == 1);
+			CHECK(zoomed < wide * 0.75f);
+			camera.setAltFire(true);
+			step();
+			camera.setAltFire(false);
+			for (int i = 0; i < 30; ++i) step();
+			CHECK(camera.seatZoomLevel() == 0);
+			CHECK(near(camera.fieldOfView(), wide));
+			// A mouse press/release can occur between 30 Hz camera ticks.
+			camera.setAltFire(true);
+			camera.setAltFire(false);
+			for (int i = 0; i < 30; ++i) step();
+			CHECK(camera.seatZoomLevel() == 1);
+			CHECK(camera.fieldOfView() < wide * 0.75f);
+		}
+	}
+}
+
+// The gunships' pilot gun (MultiFireComp, fire.addFireRate 0 = single fire, mag 10, ammo.autoReload),
+// vanilla and Remaster alike (Remaster adds only a DefaultZoomComp, which the world never sees): a held
+// trigger fires one round, each fresh press one more, an emptied magazine reloads itself and the
+// next press fires again. Nothing else locks the gun.
+TEST(Vehicles_GunshipPilotGunFiresPerPressAndReloads)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* name : {"as_ag", "us_ag"}) {
+			Garage g(gameDir(), mod);
+			if (!g.loaded || !g.templates.find(name)) {
+				continue;
+			}
+			const uint32_t v = g.start(name, {0, 4, 6});
+			CHECK(g.enter(v));
+			const int me = g.world->localPlayer();
+			const auto* gun = g.world->gun(v, 0);
+			CHECK(gun != nullptr);
+			if (!gun) {
+				continue;
+			}
+			CHECK(gun->fireMode() == 0);
+			const auto rounds = [&] {
+				game::GameWorld::PlayerInfo info;
+				g.world->playerInfo(me, info);
+				return static_cast<int>(info.gunShots);
+			};
+			g.run(8); // the weapon's draw
+			const int first = rounds();
+			game::SoldierInput hold;
+			hold.fire = true;
+			for (int i = 0; i < 60; ++i) {
+				g.world->setPlayerInput(hold);
+				g.world->tick(1 / 30.0f);
+			}
+			CHECK(rounds() == first + 1); // held: one round
+			g.world->setPlayerInput({});
+			g.run(1);
+			// Tapped through the whole magazine, its reload and on: a round every press.
+			int fired = 0;
+			for (int i = 0; i < 40; ++i) {
+				game::SoldierInput tap;
+				tap.fire = true;
+				const int before = rounds();
+				g.world->setPlayerInput(tap);
+				g.world->tick(1 / 30.0f);
+				fired += rounds() > before;
+				g.world->setPlayerInput({});
+				g.run(1.2f); // past the cooldown, and the reload when the magazine ran out
+			}
+			CHECK(fired == 40);
+		}
+	}
+}
+
+// The gunships' gunner (as_ag / us_ag seat 2, vanilla and Remaster): the
+// seat camera hangs under the turret bundles, so the view turns with the
+// mouse and follows the gun's yaw and pitch; and it draws geometry 1 of
+// the mesh (cockpitSubGeom 1, the whole exterior hull, seen from inside:
+// the renderer culls its back faces), where the pilot's is geometry 0.
+TEST(PlayerCamera_GunshipGunnerTurnsWithTheGun)
+{
+	if (!gameDir()) return;
+	constexpr float kDeg = 3.14159265f / 180;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!std::ifstream(std::string(gameDir()) + "/" + mod + "/ServerArchives.con")) continue;
+		for (const char* name : {"as_ag", "us_ag"}) {
+			Garage g(gameDir(), mod);
+			if (!g.loaded || !g.templates.find(name)) continue;
+			const auto ship = g.start(name, {0, 2, 6});
+			CHECK(g.enter(ship));
+			anim::AnimationSystems systems(nullptr);
+			PlayerCamera camera(*g.world, systems, nullptr);
+			PlayerCamera::Cockpit cockpit;
+			camera.tick(1 / 30.0f);
+			CHECK(camera.cockpit(cockpit) && cockpit.subGeometry == 0);
+			game::SoldierInput sw;
+			sw.switchSeat = 2;
+			g.world->setPlayerInput(sw);
+			g.world->tick(1 / 30.0f);
+			for (int i = 0; i < 20; ++i) { g.world->setPlayerInput({}); g.world->tick(1 / 30.0f); camera.tick(1 / 30.0f); }
+			CHECK(camera.cockpit(cockpit) && cockpit.vehicle == ship && cockpit.subGeometry == 1);
+			PlayerCamera::View rest, turned;
+			CHECK(camera.view(rest, 16.0f / 9.0f));
+			float gunYaw = 0, gunPitch = 0;
+			game::SoldierInput look;
+			look.turn = 20;
+			look.aimPitch = 25;
+			for (int i = 0; i < 15; ++i) { g.world->setPlayerInput(look); g.world->tick(1 / 30.0f); camera.tick(1 / 30.0f); look.turn = 0; }
+			CHECK(camera.view(turned, 16.0f / 9.0f));
+			game::GameWorld::PlayerInfo me;
+			g.world->playerInfo(g.world->localPlayer(), me);
+			CHECK(g.world->gunAim(ship, me.seat, gunYaw, gunPitch));
+			std::fprintf(stderr, "  %s %s gunner: gun %.1f/%.1f, view yaw %.1f -> %.1f, pitch %.1f -> %.1f\n", mod, name, gunYaw, gunPitch,
+				rest.yaw / kDeg, turned.yaw / kDeg, rest.pitch / kDeg, turned.pitch / kDeg);
+			CHECK(std::fabs(gunYaw - 20) < 1 && gunPitch > 10);
+			CHECK(std::fabs((turned.yaw - rest.yaw) / kDeg - gunYaw) < 1);
+			CHECK(std::fabs((turned.pitch - rest.pitch) / kDeg - gunPitch) < 1);
+		}
+	}
+}
+
+// The cockpit geometry selector is asked about every multi-geometry object
+// during a scene sync. Only the occupied vehicle can use the seat camera;
+// unrelated objects must not trigger its recursive template-tree lookup.
+TEST(PlayerCamera_GunshipCockpitSelectionIsScopedToTheOccupiedHull)
+{
+	if (!gameDir()) return;
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("as_ag")) return;
+	const uint32_t ship = g.start("as_ag", {0, 3, 8});
+	const uint32_t other = g.objects.create(g.templates.find("as_ag"), {40, 3, 8})->id();
+	CHECK(g.enter(ship));
+	anim::AnimationSystems systems(nullptr);
+	PlayerCamera camera(*g.world, systems, nullptr);
+	camera.tick(1 / 30.0f);
+	PlayerCamera::Cockpit cockpit;
+	CHECK(camera.cockpit(cockpit, ship) && cockpit.vehicle == ship && cockpit.subGeometry == 0);
+	CHECK(!camera.cockpit(cockpit, other));
+	CHECK(camera.cockpit(cockpit) && cockpit.vehicle == ship); // frame-level query remains available
+	// CPU-only actual-template probe: compare the old query shape (resolve the
+	// active camera tree for every geometry) with object-scoped misses (the
+	// renderer's many non-player objects). This is not a frame-time/fps claim.
+	volatile int resolved = 0;
+	constexpr int queries = 500;
+	const auto wholeTreeStart = std::chrono::steady_clock::now();
+	for (int i = 0; i < queries; ++i) resolved += camera.cockpit(cockpit) ? 1 : 0;
+	const auto wholeTreeEnd = std::chrono::steady_clock::now();
+	const auto scopedStart = std::chrono::steady_clock::now();
+	for (int i = 0; i < queries; ++i) resolved += camera.cockpit(cockpit, other) ? 1 : 0;
+	const auto scopedEnd = std::chrono::steady_clock::now();
+	const auto wholeUs = std::chrono::duration_cast<std::chrono::microseconds>(wholeTreeEnd - wholeTreeStart).count();
+	const auto scopedUs = std::chrono::duration_cast<std::chrono::microseconds>(scopedEnd - scopedStart).count();
+	std::fprintf(stderr, "  as_ag CPU probe: %d full camera-tree queries %lld us; %d unrelated-object queries %lld us\n",
+		queries, static_cast<long long>(wholeUs), queries, static_cast<long long>(scopedUs));
+	CHECK(resolved == queries);
+}
+
+// C selects the gunship's Chase camera. That seat-local choice must not
+// survive leaving the Raider as a third-person infantry camera. The explicit
+// --camera-mode third setting remains honored on foot.
+TEST(PlayerCamera_GunshipExitRestoresConfiguredInfantryView)
+{
+	if (!gameDir()) return;
+	for (const bool diagnosticThird : {false, true}) {
+		Garage g(gameDir());
+		if (!g.loaded || !g.templates.find("as_ag")) continue;
+		const uint32_t ship = g.start("as_ag", {0, 3, 8});
+		CHECK(g.enter(ship));
+		anim::AnimationSystems systems(nullptr);
+		PlayerCamera camera(*g.world, systems, nullptr);
+		camera.spawnFirstPerson = !diagnosticThird;
+		camera.firstPerson = !diagnosticThird;
+		camera.tick(1 / 30.0f);
+		CHECK(camera.selectView(2));
+		CHECK(!camera.insideView());
+		game::SoldierInput leave;
+		leave.use = true;
+		g.world->setPlayerInput(leave);
+		g.world->tick(1 / 30.0f);
+		g.world->setPlayerInput({});
+		camera.tick(1 / 30.0f);
+		CHECK(!g.world->playerVehicle());
+		CHECK(camera.firstPerson == !diagnosticThird);
+		CHECK(camera.insideView() == !diagnosticThird);
+	}
+}
+
+// A gunship's pilot view is mounted to the hull and should carry the hull's
+// bank, and the outside views follow it too (a requested deviation).
+TEST(PlayerCamera_GunshipBankingInsideAndOutside)
+{
+	if (!gameDir()) return;
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("as_ag")) return;
+	const uint32_t ship = g.start("as_ag", {0, 3, 8});
+	CHECK(g.enter(ship));
+	anim::AnimationSystems systems(nullptr);
+	PlayerCamera camera(*g.world, systems, nullptr);
+	camera.tick(1 / 30.0f);
+	game::SoldierInput bank;
+	bank.throttle = 1;
+	bank.rollAxis = 1;
+	g.drive(bank, 1.5f);
+	camera.tick(1 / 30.0f);
+	const float hullBank = g.objects.find(ship)->rotation().z;
+	std::fprintf(stderr, "  as_ag pilot hull bank %.2f deg\n", hullBank);
+	CHECK(std::fabs(hullBank) > 0.02f);
+	PlayerCamera::View inside;
+	CHECK(camera.view(inside, 16.0f / 9.0f));
+	CHECK(std::fabs(inside.roll - hullBank * 3.14159265f / 180) < 0.03f);
+	// The real C cycle: whichever outside views the gunship allows after Inside. Nose hangs on the hull and the
+	// chase views follow an aircraft's bank; a fly-by camera is a fixed outside point and stays level.
+	int outsideViews = 0;
+	for (int press = 0; press < 6; ++press) {
+		camera.toggleMode(false);
+		camera.tick(1 / 30.0f);
+		PlayerCamera::View outside;
+		if (camera.insideView() || !camera.externalView(outside, 16.0f / 9.0f)) continue;
+		const bool flyBy = camera.mode() == game::camera::Mode::FlyBy;
+		const float expected = flyBy ? 0.0f : hullBank * 3.14159265f / 180;
+		std::fprintf(stderr, "  as_ag C press %d mode %d roll %.3f expected %.3f\n", press, static_cast<int>(camera.mode()), outside.roll, expected);
+		CHECK(std::fabs(outside.roll - expected) < 0.05f);
+		++outsideViews;
+	}
+	CHECK(outsideViews >= 2);
+	CHECK(std::fabs(g.objects.find(ship)->rotation().z) > 0.02f);
+}
+
+
+// The PAC FAV authors its centre of mass 0.5 m above its origin; unlevelled it
+// rolled to 87 degrees and was destroyed in 11 s under modest steering plus
+// boost in both mods (the EU FAV stayed within 4 degrees). Drive the actual
+// vehicles for 20 s and require stable, mostly-grounded running.
+TEST(Vehicles_FavStaysUprightUnderSteeringAndBoost)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* name : {"as_fav", "eu_fav"}) {
+			for (float steer : {0.0f, 0.2f}) {
+				for (bool boost : {false, true}) {
+					Garage g(gameDir(), mod);
+					if (!g.loaded || !g.templates.find(name)) { CHECK(false); continue; }
+					const uint32_t id = g.start(name, {0, 2, 6});
+					if (!g.enter(id)) { CHECK(false); continue; }
+					game::SoldierInput input;
+					input.throttle = 1;
+					input.strafe = steer;
+					input.sprint = boost;
+					float maxSpeed = 0, maxRoll = 0, maxPitch = 0;
+					int airborne = 0, ticks = 0;
+					bool alive = true;
+					for (; ticks < 20 * 30; ++ticks) {
+						g.world->setPlayerInput(input);
+						g.world->tick(1 / 30.0f);
+						const game::Vehicle* v = g.world->playerVehicleState();
+						if (!v) { alive = false; break; }
+						airborne += std::none_of(v->wheels().begin(), v->wheels().end(), [](const auto& w) { return w.contact; });
+						for (const auto& state : g.world->vehicleList()) if (state.object == id) {
+							maxSpeed = std::max(maxSpeed, std::sqrt(physics::lengthSquared(state.velocity)));
+							maxRoll = std::max(maxRoll, std::fabs(std::asin(std::clamp(state.right.y, -1.0f, 1.0f)) * 57.29578f));
+							maxPitch = std::max(maxPitch, std::fabs(std::asin(std::clamp(state.forward.y, -1.0f, 1.0f)) * 57.29578f));
+						}
+					}
+					std::fprintf(stderr, "  %s %s steer=%.1f boost=%d: speed %.1f roll %.1f pitch %.1f airborne ticks %d alive %d\n", mod, name,
+						steer, boost, maxSpeed, maxRoll, maxPitch, airborne, alive);
+					CHECK(alive);
+					CHECK(maxRoll < 15.0f);
+					CHECK(maxPitch < 15.0f);
+					CHECK(airborne < 15);                       // never off the ground for half a second
+					CHECK(maxSpeed > (boost ? 30.0f : 24.0f));  // still the quick car, not capped
+				}
+			}
+		}
+	}
+}
+
+#ifdef BF2142_RENDER_TESTS
+// Explicit opt-in: real SDL GPU offscreen draw/readback, never a window.
+// The background is rendered before the missile geometry is requested, so
+// this also exercises resources first encountered during syncObjects().
+TEST(Vehicles_ProjectilePixelsOptIn)
+{
+	const char* output = std::getenv("BF2142_RENDER_TEST_DIR");
+	if (!output || !gameDir()) return;
+	std::filesystem::create_directories(output);
+	CHECK(SDL_Init(SDL_INIT_VIDEO));
+	{
+		std::string error;
+		auto gpu = render::GpuContext::create(nullptr, error);
+		if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
+		const auto draw = [&](io::FileManager& files, world::ObjectTemplateManager& templates,
+			geom::GeometryTemplateManager& geometries, game::GameWorld& round,
+			const std::string& name, const std::string& label, bool tracers = false,
+			effects::EffectManager* objectEffects = nullptr, float distance = 8, bool insideTitan = false) {
+			const auto live = std::find_if(round.projectiles().begin(), round.projectiles().end(),
+				[&](const game::Projectile& p) { return p.alive && p.settings && p.settings->name == name; });
+			CHECK(live != round.projectiles().end());
+			if (live == round.projectiles().end()) return;
+			std::fprintf(stderr, "  draw %s: %s at %.2f/%.2f/%.2f velocity %.2f/%.2f/%.2f\n", label.c_str(),
+				name.c_str(), live->position.x, live->position.y, live->position.z,
+				live->velocity.x, live->velocity.y, live->velocity.z);
+			// Isolate the actual in-flight mesh: no launcher, particles, trails,
+			// HUD or terrain can cause a false-positive pixel difference.
+			world::ObjectManager noPlacedObjects;
+			if (insideTitan) {
+				// The same mesh as an ordinary placed object must remain
+				// subject to indoor culling. Only the transient flight model
+				// should add pixels over this baseline.
+				auto* t = templates.find(name);
+				const auto rotation = physics::lookAtRotation(live->velocity, physics::Mat3 {}).yawPitchRoll();
+				noPlacedObjects.create(t, {live->position.x, live->position.y, live->position.z},
+					{rotation.x, rotation.y, rotation.z});
+			}
+			terrain::HeightmapCluster noTerrain;
+			scene::LightSettings lights;
+			lights.fogStartEndAndBase = {1000, 2000, 1, 0};
+			scene::SkySettings sky;
+			scene::WaterSettings water;
+			scene::RendererSettings renderSettings;
+			renderSettings.insideTitanOverride = insideTitan;
+			render::LevelSources sources {files, templates, noPlacedObjects, geometries, noTerrain,
+				nullptr, lights, sky, water, "", ""};
+			sources.renderer = &renderSettings;
+			bool shown = false;
+			sources.transientModels = [&](std::vector<render::TransientModel>& models) {
+				if (!shown) return;
+				for (const auto& p : game::projectileRenderStates(templates, round.projectiles())) {
+					if (p.objectTemplate->name() != name) continue;
+					const auto angles = p.rotation.yawPitchRoll();
+					models.push_back({p.objectTemplate, {p.position.x, p.position.y, p.position.z},
+						{angles.x, angles.y, angles.z}});
+				}
+			};
+			render::LevelRenderer renderer(*gpu);
+			renderer.build(sources);
+			render::Camera camera;
+			camera.position = {live->position.x - distance, live->position.y + distance * 0.25f, live->position.z};
+			camera.yaw = 1.57079632679f;
+			camera.pitch = -std::atan2(2.0f, 8.0f);
+			auto target = gpu->createOffscreenTarget(960, 540);
+			const auto frame = [&]() {
+				sources.objectEffects = shown ? objectEffects : nullptr;
+				sources.effects = shown && tracers ? &round.effects() : nullptr;
+				renderer.syncObjects();
+				auto* commands = SDL_AcquireGPUCommandBuffer(gpu->device());
+				renderer.draw(commands, target.color, target, camera, lights);
+				CHECK(SDL_SubmitGPUCommandBuffer(commands));
+				std::vector<uint8_t> pixels;
+				CHECK(gpu->readPixels(target, pixels));
+				return pixels;
+			};
+			const auto blank = frame();
+			shown = true;
+			const auto missile = frame();
+			size_t changed = 0;
+			for (size_t i = 0; i + 3 < missile.size() && i + 3 < blank.size(); i += 4) {
+				if (std::abs(int(missile[i]) - int(blank[i])) > 3 ||
+					std::abs(int(missile[i + 1]) - int(blank[i + 1])) > 3 ||
+					std::abs(int(missile[i + 2]) - int(blank[i + 2])) > 3) ++changed;
+			}
+			std::fprintf(stderr, "  %s: %zu visible projectile pixels; %zu meshes, %zu missing\n", label.c_str(), changed,
+				renderer.stats().meshes, renderer.stats().missingMeshes);
+			for (const auto& missing : renderer.stats().missingMeshNames) std::fprintf(stderr, "    %s\n", missing.c_str());
+			CHECK(changed > (distance < 20 ? 20u : 0u));
+			CHECK(render::writePng(std::string(output) + "/" + label + ".png", target.width, target.height, missile));
+			shown = false;
+			CHECK(frame() == blank);
+			gpu->releaseTarget(target);
+		};
+		for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+			const std::string prefix = std::string(mod) == "mods/bf2142" ? "vanilla" : "remaster";
+			{
+				Garage g(gameDir(), mod, true);
+				CHECK(g.loaded);
+				const auto aa = g.start("static_aa", {0, 2, 8});
+				CHECK(g.enter(aa));
+				for (int i = 0; i < 90 && g.world->projectilesInFlight() == 0; ++i) {
+					game::SoldierInput fire; fire.fire = true;
+					g.world->setPlayerInput(fire); g.world->tick(1 / 30.0f);
+				}
+				g.world->setPlayerInput({}); g.run(0.1f);
+				draw(g.files, g.templates, g.geometries, *g.world, "static_aa_cannon_Projectile", prefix + "-aa-tracer", true);
+				game::SoldierInput rocket; rocket.altFire = true;
+				g.world->setPlayerInput(rocket); g.world->tick(1 / 30.0f);
+				g.world->setPlayerInput({});
+				effects::EffectManager effectManager(g.templates);
+				effects::ObjectEffects attachments(g.templates);
+				for (int i = 0; i < 10; ++i) {
+					g.world->tick(1 / 30.0f);
+					std::vector<effects::ObjectEffects::ObjectState> states;
+					for (const auto& p : g.world->projectiles()) {
+						if (!p.alive || !p.settings || p.settings->name != "static_aa_missile_projectile") continue;
+						effects::ObjectEffects::ObjectState state;
+						state.id = p.serial;
+						state.objectTemplate = g.templates.find(p.settings->name);
+						state.position = p.position; state.velocity = p.velocity;
+						state.rotation = physics::lookAtRotation(p.velocity, physics::Mat3 {});
+						states.push_back(state);
+					}
+					attachments.update(states, effectManager);
+					effectManager.update(1 / 30.0f);
+				}
+				draw(g.files, g.templates, g.geometries, *g.world, "static_aa_missile_projectile",
+					prefix + "-aa-rocket-effects", false, &effectManager);
+			}
+			{
+				geom::GeometryTemplateManager geometries;
+				titantest::TitanLevel level(gameDir(), "Suez_Canal", 48, true, mod, false, &geometries);
+				CHECK(level.loaded);
+				const auto silos = level.world->missileSilos();
+				CHECK(!silos.empty());
+				if (silos.empty()) continue;
+				level.world->setControlPointTeam(silos.front().controlPoint, 1);
+				for (int tick = 0; tick < 30 * 150; ++tick) {
+					level.run(1 / 30.0f);
+					const auto& rounds = level.world->projectiles();
+					if (std::any_of(rounds.begin(), rounds.end(), [](const auto& p) {
+						return p.alive && p.settings && p.settings->name == "msilo_missile";
+					})) break;
+				}
+				level.run(0.1f);
+				draw(level.files, level.templates, geometries, *level.world, "msilo_missile", prefix + "-anti-titan");
+				for (float distance : {80.0f, 160.0f}) {
+					draw(level.files, level.templates, geometries, *level.world, "msilo_missile",
+						prefix + "-anti-titan-" + std::to_string(static_cast<int>(distance)) + "m", false, nullptr, distance);
+				}
+				draw(level.files, level.templates, geometries, *level.world, "msilo_missile",
+					prefix + "-anti-titan-from-interior", false, nullptr, 80, true);
+			}
+		}
+	}
+	SDL_Quit();
+}
+#endif
+
+#include "TitanLevel.h"
+// Titans are not in vehicleList(): the floor radio ("The enemy has boarded our Titan!") once found none and took every
+// soldier on a Titan floor, the player's own team's included, for a boarder. Its holder is now the hull test's.
+TEST(Titan_HullHoldsItsOwnSoldiersNotOthers)
+{
+	if (!gameDir()) return;
+	titantest::TitanLevel level(gameDir(), "Suez_Canal", 48);
+	CHECK(level.world->spawnPlayer(2) != nullptr);
+	level.run(1.0f);
+	game::GameWorld::PlayerInfo info;
+	CHECK(level.world->playerInfo(level.world->localPlayer(), info));
+	const physics::Vec3 at = info.position + physics::Vec3 {0, 1.0f, 0};
+	const uint32_t held = level.world->titanHolding(at, true);
+	CHECK(held != 0);
+	const world::Object* titan = level.objects.find(held);
+	CHECK(titan && titan->team() == info.team);
+	CHECK(level.world->titanHolding({0, 500, 0}, true) == 0);
+}
+
+// A round used to leave from 1.6 m above the feet whatever the pose. It follows the soldier's eye down when crouched
+// (about 1.08) and prone (about 0.5).
+TEST(Soldier_FiresFromTheEyeOfItsPose)
+{
+	if (!gameDir()) return;
+	Garage g(gameDir());
+	if (!g.loaded) return;
+	g.start("eu_tank", {50, 0, 50}, 1);
+	CHECK(g.world->spawnPlayer(2) != nullptr);
+	const int player = g.world->localPlayer();
+	game::GameWorld::PlayerInfo info;
+	float heights[3] = {};
+	int index = 0;
+	for (auto pose : {game::SoldierPose::Stand, game::SoldierPose::Crouch, game::SoldierPose::Prone}) {
+		game::SoldierInput in;
+		in.pose = pose;
+		for (int i = 0; i < 90; ++i) { g.world->setInput(player, in); g.world->tick(1 / 30.0f); }
+		g.world->playerInfo(player, info);
+		in.fire = true;
+		g.world->setInput(player, in);
+		g.world->tick(1 / 30.0f);
+		in.fire = false;
+		g.world->setInput(player, in);
+		float originY = -1000;
+		for (const auto& p : g.world->projectiles()) if (p.player == player) originY = p.origin.y;
+		CHECK(originY > -999); // a round was fired
+		heights[index++] = originY - info.position.y;
+	}
+	std::fprintf(stderr, "  firing height above the feet: stand %.2f crouch %.2f prone %.2f\n", heights[0], heights[1], heights[2]);
+	CHECK(std::fabs(heights[0] - 1.6f) < 0.05f);
+	CHECK(std::fabs(heights[1] - 1.08f) < 0.05f);
+	CHECK(std::fabs(heights[2] - 0.5f) < 0.05f);
+}
+
+// Rounds sent at a standing enemy PAC walker from every side must damage
+// it ("enemy units noclip" report: an EU APC's rounds passing through it):
+// only geometry 0 of its collision mesh was in the projectile world, which
+// holds next to nothing; the pelvis, legs and turret are children's
+// geometries.
+TEST(Vehicles_RoundsHitAnEnemyWalker)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (int side = 0; side < 4; ++side) {
+		// A fresh walker per side: the anti-vehicle round (500) wrecks it.
+		Garage g(gameDir());
+		if (!g.loaded || !g.templates.find("as_heavy_mech")) {
+			return;
+		}
+		const uint32_t walker = g.start("as_heavy_mech", {0, 4, 0}, 3);
+		const int shooter = g.world->addPlayer("Shooter", 1, true);
+		const world::ObjectTemplate* rifle = g.templates.find("Unl_AV_Rifle");
+		const std::string round = rifle && rifle->settings().count("projectileTemplate") ? rifle->settings().at("projectileTemplate") : "";
+		CHECK(!round.empty());
+		const physics::Vec3 at = g.position(walker);
+		const physics::Vec3 dir = side == 0 ? physics::Vec3 {1, 0, 0} : side == 1 ? physics::Vec3 {-1, 0, 0} : side == 2 ? physics::Vec3 {0, 0, 1} : physics::Vec3 {0, 0, -1};
+		const physics::Vec3 across {dir.z, 0, dir.x};
+		const float before = g.world->hitPoints(walker);
+		g.world->launchProjectile(round, at + dir * 20.0f + across * 0.5f + physics::Vec3 {0, 1, 0}, dir * -300.0f, shooter);
+		g.run(0.3f);
+		std::fprintf(stderr, "  side %d: walker %.0f -> %.0f\n", side, before, g.world->hitPoints(walker));
+		CHECK(g.world->hitPoints(walker) < before);
+	}
+}
+
+// A/D alone turn a tracked tank on the spot (no W needed).
+// The hover tank's turn is the engine's (0x0064d9a2 in BF2142.exe): a torque
+// about the up axis only while the drive value is over 0.01, which the
+// throttle gives; A/D alone, from rest, turn nothing (retail's rule).
+TEST(Vehicles_HoverTankTurnsOnlyWithDrive)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t tank = g.start("eu_tank", {0, 2, 6});
+	CHECK(g.enter(tank));
+	const physics::Vec3 rest = g.position(tank);
+	const float before = g.yaw(tank);
+	game::SoldierInput input;
+	input.strafe = 1;
+	g.drive(input, 3);
+	const float turned = std::remainder(g.yaw(tank) - before, 360.0f);
+	std::fprintf(stderr, "  eu_tank: A/D alone turned %.1f degrees in 3 s, moved %.1f m\n", turned,
+		std::sqrt(physics::lengthSquared(g.position(tank) - rest)));
+	CHECK(std::fabs(turned) < 1);
+}
+
+// The air transport's side gunner: turning on the mouse turns the gun and
+// its camera chain together.
+TEST(Vehicles_TransportGunnerCameraTurnsWithTheGun)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("eu_at")) {
+		return;
+	}
+	const uint32_t at = g.start("eu_at", {0, 2, 6});
+	CHECK(g.enter(at));
+	const auto seats = g.world->vehicleSeats(at);
+	for (size_t i = 0; i < seats.size(); ++i) {
+		std::fprintf(stderr, "  seat %zu: camera '%s'\n", i, seats[i].camera.c_str());
+	}
+	game::SoldierInput seat;
+	seat.switchSeat = 2;
+	g.world->setPlayerInput(seat);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	g.run(0.5f);
+	game::SoldierInput look;
+	look.turn = 10;
+	for (int i = 0; i < 30; ++i) {
+		g.world->setPlayerInput(look);
+		g.world->tick(1 / 30.0f);
+	}
+	float gunYaw = 0, cameraYaw = 0;
+	for (const char* part : {"EU_AT_minigun_left_base", "eu_at_L_gun_cameraBase", "eu_at_L_gun_cameraMount", "eu_at_L_gun_camera",
+			 "EU_AT_minigun_right_base", "eu_at_R_gun_cameraBase"}) {
+		world::Vec3 offset, rotation;
+		const bool ok = g.world->partPose(at, part, offset, rotation);
+		std::fprintf(stderr, "  %s: %d rot %.1f %.1f %.1f\n", part, ok, rotation.x, rotation.y, rotation.z);
+		if (std::string(part) == "EU_AT_minigun_left_base") {
+			gunYaw = rotation.x;
+		}
+		if (std::string(part) == "eu_at_L_gun_cameraBase") {
+			cameraYaw = rotation.x;
+		}
+	}
+	CHECK(std::fabs(gunYaw) > 10 && std::fabs(cameraYaw - gunYaw) < 0.01f);
+}
+
+// A pod seat of the APC aiming up: how high and far the pod goes.
+TEST(Vehicles_ApcPodFlightWhenAimedUp)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const float aim : {0.0f, 30.0f, 60.0f, 80.0f}) {
+		Garage g(gameDir());
+		if (!g.loaded || !g.templates.find("eu_apc_pods")) {
+			return;
+		}
+		const uint32_t apc = g.start("eu_apc_pods", {0, 2, 6}, 3);
+		CHECK(g.enter(apc));
+		game::SoldierInput seat;
+		seat.switchSeat = 4; // a pod seat (F3)
+		g.world->setPlayerInput(seat);
+		g.world->tick(1 / 30.0f);
+		g.world->setPlayerInput({});
+		g.run(0.5f);
+		game::GameWorld::PlayerInfo me;
+		g.world->playerInfo(g.world->localPlayer(), me);
+		const physics::Vec3 start = g.position(apc);
+		game::SoldierInput fire;
+		fire.altFire = true;
+		fire.aimPitch = aim;
+		g.world->setPlayerInput(fire);
+		g.world->tick(1 / 30.0f);
+		g.world->setPlayerInput({});
+		float top = -1e9f, far = 0;
+		bool launched = false;
+		for (int i = 0; i < 30 * 12; ++i) {
+			game::SoldierInput hold;
+			hold.aimPitch = aim;
+			g.world->setPlayerInput(hold);
+			g.world->tick(1 / 30.0f);
+			g.world->playerInfo(g.world->localPlayer(), me);
+			if (me.vehicle != 0 && me.vehicle != apc) {
+				launched = true;
+				const physics::Vec3 p = g.position(me.vehicle);
+				top = std::max(top, p.y - start.y);
+				far = std::max(far, std::hypot(p.x - start.x, p.z - start.z));
+			}
+		}
+		std::fprintf(stderr, "  aim %.0f: pod launched %d, peak %.1f m above the APC, %.1f m out\n", aim, launched, top, far);
+	}
+}
+
+// The actual APC pod carries a mouse-look ForceObject behind its centre.
+// Opposite mouse input must turn the pod in opposite directions; no input
+// is the control. This covers the launch and the authored child template.
+TEST(Vehicles_ApcPodMouseTurns)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		float turns[3] = {};
+		for (int sample = 0; sample < 3; ++sample) {
+			Garage g(gameDir(), mod);
+			CHECK(g.loaded && g.templates.find("eu_apc_pods"));
+			if (!g.loaded || !g.templates.find("eu_apc_pods")) return;
+			const uint32_t apc = g.start("eu_apc_pods", {0, 2, 6}, 3);
+			CHECK(g.enter(apc));
+			game::SoldierInput seat; seat.switchSeat = 4;
+			g.world->setPlayerInput(seat); g.world->tick(1 / 30.0f);
+			g.world->setPlayerInput({}); g.run(0.5f);
+			game::SoldierInput fire; fire.altFire = true;
+			g.world->setPlayerInput(fire); g.world->tick(1 / 30.0f);
+			CHECK(g.world->ridingPod(g.world->localPlayer()));
+			if (g.world->pods().empty()) return;
+			const uint32_t id = g.world->pods()[0].object;
+			const world::Object* pod = g.objects.find(id);
+			CHECK(pod != nullptr);
+			if (!pod) return;
+			const float initial = pod->rotation().x;
+			game::SoldierInput input; input.turn = (sample - 1) * 5.0f;
+			for (int tick = 0; tick < 90; ++tick) {
+				g.world->setPlayerInput(input); g.world->tick(1 / 30.0f);
+			}
+			pod = g.objects.find(id);
+			CHECK(pod != nullptr);
+			if (!pod) return;
+			turns[sample] = std::remainder(pod->rotation().x - initial, 360.0f);
+		}
+		std::fprintf(stderr, "  %s mouse yaw changes: %.2f %.2f %.2f degrees\n", mod, turns[0], turns[1], turns[2]);
+		CHECK(std::fabs(turns[0] - turns[1]) > 1.0f);
+		CHECK(std::fabs(turns[2] - turns[1]) > 1.0f);
+		CHECK((turns[0] - turns[1]) * (turns[2] - turns[1]) < 0);
+	}
+}
+
+// Actual APC Conquest pods: compare two seconds of throttle and yaw input
+// with an unsteered launch. The authored offset forces must also tilt the pod.
+TEST(Vehicles_ApcPodSteeringForces)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) for (const bool titanPod : {false, true}) {
+		physics::Vec3 end[3] = {};
+		float maxTilt[3] = {};
+		for (int sample = 0; sample < 3; ++sample) {
+			Garage g(gameDir(), mod);
+			CHECK(g.loaded && g.templates.find("eu_apc_pods"));
+			if (!g.loaded || !g.templates.find("eu_apc_pods")) return;
+			// The garage has no Titan: choose the boarding projectile directly
+			// while retaining the real pod template and the real APC launcher.
+			CHECK(g.templates.find("pod_launcher_cq") != nullptr);
+			if (!g.templates.find("pod_launcher_cq")) return;
+			if (titanPod) g.templates.find("pod_launcher_cq")->settings()["projectileTemplate"] = "eu_pod";
+			const uint32_t apc = g.start("eu_apc_pods", {0, 2, 6}, 3);
+			CHECK(g.enter(apc));
+			game::SoldierInput seat; seat.switchSeat = 4;
+			g.world->setPlayerInput(seat); g.world->tick(1 / 30.0f);
+			g.world->setPlayerInput({}); g.run(0.5f);
+			game::SoldierInput fire; fire.altFire = true;
+			g.world->setPlayerInput(fire); g.world->tick(1 / 30.0f);
+			CHECK(g.world->ridingPod(g.world->localPlayer()));
+			if (g.world->pods().empty()) return;
+			const uint32_t id = g.world->pods()[0].object;
+			game::SoldierInput input;
+			input.throttle = sample == 1 ? 1 : 0;
+			input.strafe = sample == 2 ? 1 : 0;
+			for (int tick = 0; tick < 60; ++tick) {
+				g.world->setPlayerInput(input); g.world->tick(1 / 30.0f);
+				const world::Object* pod = g.objects.find(id);
+				if (!pod) return;
+				maxTilt[sample] = std::max(maxTilt[sample], std::max(std::fabs(pod->rotation().y), std::fabs(pod->rotation().z)));
+			}
+			end[sample] = g.position(id);
+		}
+		const auto forward = end[1] - end[0], sideways = end[2] - end[0];
+		std::fprintf(stderr, "  %s %s forward delta %.2f/%.2f/%.2f tilt %.2f; sideways delta %.2f/%.2f/%.2f tilt %.2f\n", mod, titanPod ? "Titan" : "Conquest",
+			forward.x, forward.y, forward.z, maxTilt[1], sideways.x, sideways.y, sideways.z, maxTilt[2]);
+		CHECK(std::hypot(forward.x, forward.z) > (titanPod ? 20.0f : 8.0f));
+		CHECK(std::hypot(sideways.x, sideways.z) > (titanPod ? 12.0f : 8.0f));
+		CHECK(maxTilt[1] > maxTilt[0] + 0.1f);
+		CHECK(maxTilt[2] > maxTilt[0] + 0.1f);
+	}
+}
+
+// E leaves the air transport (each seat) while it sits on the ground.
+TEST(Vehicles_TransportCanBeLeftWithUse)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const int seatNo : {1, 2, 3, 4}) {
+		Garage g(gameDir());
+		if (!g.loaded || !g.templates.find("eu_at")) {
+			return;
+		}
+		const uint32_t at = g.start("eu_at", {0, 2, 6}, 3);
+		CHECK(g.enter(at));
+		game::SoldierInput go;
+		go.switchSeat = seatNo;
+		g.world->setPlayerInput(go);
+		g.world->tick(1 / 30.0f);
+		g.world->setPlayerInput({});
+		g.run(1);
+		game::GameWorld::PlayerInfo me;
+		g.world->playerInfo(g.world->localPlayer(), me);
+		const int before = me.seat;
+		game::SoldierInput use;
+		use.use = true;
+		g.world->setPlayerInput(use);
+		g.world->tick(1 / 30.0f);
+		g.world->setPlayerInput({});
+		g.run(1);
+		g.world->playerInfo(g.world->localPlayer(), me);
+		std::fprintf(stderr, "  seat %d (was %d): after E vehicle %u (transport %u) pods %zu\n", seatNo, before, me.vehicle, at, g.world->pods().size());
+		CHECK(me.vehicle != at);
+	}
+}
+
+// Spawned straight into a vehicle (the spawn menu's vehicle), E leaves it.
+TEST(Vehicles_SpawnedIntoTheTransportCanLeave)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const char* name : {"eu_at_spawn", "eu_apc_pods", "eu_transport"}) {
+		Garage g(gameDir());
+		if (!g.loaded || !g.templates.find(name)) {
+			continue;
+		}
+		const uint32_t vehicle = g.start(name, {0, 2, 6}, 3);
+		const int me = g.world->addPlayer("Me", 2, false);
+		g.world->setSpawnVehicle(me, vehicle);
+		const bool spawned = g.world->spawnSoldier(me);
+		game::GameWorld::PlayerInfo info;
+		g.world->playerInfo(me, info);
+		const uint32_t in = info.vehicle;
+		g.run(1);
+		game::SoldierInput use;
+		use.use = true;
+		g.world->setInput(me, use);
+		g.run(0.1f);
+		g.world->setInput(me, {});
+		g.run(1);
+		g.world->playerInfo(me, info);
+		std::fprintf(stderr, "  %s: spawned %d in %u seat, after E in %u\n", name, spawned, in, info.vehicle);
+		CHECK(spawned && in == vehicle && info.vehicle == 0);
+	}
+}
+
+// The Shepherd flown off and left (the pilot dies in it), then spawned
+// into again: E must leave it, parked wherever it came down.
+TEST(Vehicles_ShepherdFlownOffThenSpawnedIntoCanBeLeft)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("eu_at_spawn")) {
+		return;
+	}
+	const uint32_t at = g.start("eu_at_spawn", {0, 2, 6}, 3);
+	CHECK(g.enter(at));
+	game::SoldierInput fly;
+	fly.throttle = 1;
+	fly.jump = true;
+	g.drive(fly, 6);
+	game::SoldierInput down;
+	down.throttle = 0.3f;
+	down.pose = game::SoldierPose::Crouch;
+	for (int i = 0; i < 100 && g.position(at).y > 3; ++i) {
+		g.drive(down, 3);
+	}
+	g.drive({}, 5);
+	const physics::Vec3 where = g.position(at);
+	const int me = g.world->localPlayer();
+	game::GameWorld::PlayerInfo info;
+	g.world->playerInfo(me, info);
+	std::fprintf(stderr, "  landed at %.0f %.1f %.0f, pilot in %u\n", where.x, where.y, where.z, info.vehicle);
+	g.world->applyDamage(g.world->playerObject(), 1e6f);
+	g.run(8);
+	g.world->setSpawnVehicle(me, at);
+	const bool spawned = g.world->spawnSoldier(me);
+	g.world->playerInfo(me, info);
+	const uint32_t in = info.vehicle;
+	game::SoldierInput use;
+	use.use = true;
+	int firstTick = -1;
+	for (int tick = 0; tick < 90 && firstTick < 0; ++tick) {
+		g.world->setInput(me, tick % 2 ? use : game::SoldierInput {}); // a press every other tick
+		g.run(1 / 30.0f);
+		g.world->playerInfo(me, info);
+		firstTick = info.vehicle == 0 ? tick : -1;
+	}
+	std::fprintf(stderr, "  spawned %d in %u (vehicle %u), left after tick %d\n", spawned, in, at, firstTick);
+	CHECK(spawned && in == at && info.vehicle == 0);
+}
+
+// Leaving the Shepherd in flight: the exit key drops the soldier in a pod from
+// the air_pod_launcher under the hull (exitThroughPodLauncher); on the
+// ground it is a walk out.
+TEST(Vehicles_ShepherdExitDropsAPodInFlight)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("eu_at")) {
+		return;
+	}
+	const uint32_t at = g.start("eu_at", {0, 2, 6}, 3);
+	CHECK(g.enter(at));
+	game::SoldierInput use;
+	use.use = true;
+	// On the ground: out on foot, no pod.
+	g.world->setPlayerInput(use);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	g.run(0.5f);
+	std::fprintf(stderr, "  ground E: pods %zu, vehicle %u\n", g.world->pods().size(), g.world->playerVehicle() ? g.world->playerVehicle()->id() : 0u);
+	CHECK(g.world->pods().empty());
+	CHECK(g.world->playerVehicle() == nullptr);
+	CHECK(g.enter(at));
+	game::SoldierInput fly;
+	fly.throttle = 1;
+	fly.jump = true;
+	g.drive(fly, 6);
+	const float height = g.position(at).y;
+	g.world->setPlayerInput(use);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	g.run(0.2f);
+	const bool podded = g.world->pods().size() == 1;
+	std::fprintf(stderr, "  left at %.1f m: pods %zu, in vehicle %u\n", height, g.world->pods().size(),
+		g.world->playerVehicle() ? g.world->playerVehicle()->id() : 0u);
+	CHECK(podded);
+	g.run(60);
+	CHECK(g.world->pods().empty());
+	CHECK(g.world->playerVehicle() == nullptr);
+}
+
+// Missiles at each enemy vehicle from four sides: any that passes through.
+TEST(Vehicles_MissilesHitEveryEnemyVehicle)
+{
+	if (!gameDir()) {
+		return;
+	}
+	int through = 0;
+	for (const char* name : {"as_fav", "eu_fav", "as_tank", "eu_tank", "as_apc_pods", "eu_apc_pods", "as_heavy_mech", "us_heavy_mech", "eu_ifv", "as_ag", "us_ag", "as_hov_light"}) {
+		for (const char* missile : {"unl_av_missile", "eu_av_missile", "as_av_missile"}) {
+			for (int side = 0; side < 4; ++side) {
+				Garage g(gameDir());
+				if (!g.loaded || !g.templates.find(name) || !g.templates.find(missile)) {
+					continue;
+				}
+				const uint32_t vehicle = g.start(name, {0, 4, 0}, 3);
+				const int shooter = g.world->addPlayer("Shooter", name[0] == 'a' ? 2 : 1, true);
+				const physics::Vec3 at = g.position(vehicle);
+				const physics::Vec3 dir = side == 0 ? physics::Vec3 {1, 0, 0} : side == 1 ? physics::Vec3 {-1, 0, 0} : side == 2 ? physics::Vec3 {0, 0, 1} : physics::Vec3 {0, 0, -1};
+				const float before = g.world->hitPoints(vehicle);
+				g.world->launchProjectile(missile, at + dir * 120.0f + physics::Vec3 {0, 0.5f, 0} + physics::Vec3 {dir.z, 0, dir.x} * 3.0f, dir * -60.0f, shooter);
+				g.run(5.0f);
+				const bool hit = !g.objects.find(vehicle) || g.world->hitPoints(vehicle) < before;
+				if (!hit) {
+					++through;
+					std::fprintf(stderr, "  %s: %s passed through from side %d\n", name, missile, side);
+				}
+			}
+		}
+	}
+	std::fprintf(stderr, "  %d passes\n", through);
+}
+
+// Where a round from the side meets the EU FAV: a grid of heights and offsets.
+TEST(Vehicles_EuFavSideGrid)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const char* name : {"eu_fav", "as_fav"}) {
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find(name)) {
+		return;
+	}
+	std::fprintf(stderr, "  %s\n", name);
+	const uint32_t fav = g.start(name, {0, 4, 0}, 3);
+	const physics::Vec3 at = g.position(fav);
+	std::fprintf(stderr, "  FAV at %.2f %.2f %.2f\n", at.x, at.y, at.z);
+	const int shooter = g.world->addPlayer("Shooter", 1, true);
+	for (float y = -0.5f; y <= 2.01f; y += 0.5f) {
+		std::string row;
+		for (float z = -2.5f; z <= 2.51f; z += 0.5f) {
+			const physics::Vec3 start = at + physics::Vec3 {25.0f, y, z};
+			float fraction = 1;
+			uint32_t object = 0;
+			const bool hit = g.world->segmentHit(start, at + physics::Vec3 {-25.0f, y, z}, shooter, fraction, object);
+			row += hit && object == fav ? '#' : (hit ? 'o' : '.');
+		}
+		std::fprintf(stderr, "   y %+.1f %s\n", y, row.c_str());
+	}
+	}
+}
+
+TEST(Vehicles_FavMeshLods)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	for (const char* name : {"eu_fav", "as_fav"}) {
+		const world::ObjectTemplate* t = g.templates.find(name);
+		if (!t) {
+			continue;
+		}
+		const auto mesh = t->settings().find("collisionMesh");
+		std::fprintf(stderr, "  %s: collisionMesh %s\n", name, mesh == t->settings().end() ? "(none)" : mesh->second.c_str());
+		if (mesh == t->settings().end()) {
+			continue;
+		}
+		const physics::CollisionMeshFile* file = g.collisionTemplates.mesh(mesh->second, g.files);
+		if (!file) {
+			continue;
+		}
+		for (size_t gi = 0; gi < file->geometries.size(); ++gi) {
+			for (size_t si = 0; si < file->geometries[gi].subGeometries.size(); ++si) {
+				for (const physics::CollisionLod& lod : file->geometries[gi].subGeometries[si].lods) {
+					std::fprintf(stderr, "    geom %zu sub %zu: type %u faces %zu box %.1f %.1f %.1f .. %.1f %.1f %.1f\n", gi, si, lod.collisionType, lod.faces.size(),
+						lod.boundsMin[0], lod.boundsMin[1], lod.boundsMin[2], lod.boundsMax[0], lod.boundsMax[1], lod.boundsMax[2]);
+				}
+			}
+		}
+	}
+}
+
+// How much of each vehicle's solid hull (its vehicle LOD) a projectile ray
+// meets at the projectile LOD, geometry 0 alone (the children's parts are
+// not counted): rays through a grid from the four sides and from above.
+TEST(Vehicles_ProjectileCoverageSurvey)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	for (const char* name : {"eu_fav", "as_fav", "eu_tank", "as_tank", "us_heavy_mech", "as_heavy_mech", "eu_apc", "as_apc", "eu_apc_pods", "as_apc_pods", "as_ag",
+			 "us_ag", "eu_bipod", "as_bipod", "eu_at", "as_at", "eu_ifv", "eu_apc_alps", "eu_apc_np", "as_apc_np", "as_hov_light", "eu_hov_light", "eu_mech",
+			 "us_bipod", "static_av", "static_aa", "static_ap"}) {
+		const world::ObjectTemplate* t = g.templates.find(name);
+		if (!t) {
+			continue;
+		}
+		const auto setting = t->settings().find("collisionMesh");
+		if (setting == t->settings().end()) {
+			continue;
+		}
+		const physics::CollisionMeshFile* file = g.collisionTemplates.mesh(setting->second, g.files);
+		if (!file || file->geometries.empty()) {
+			continue;
+		}
+		physics::CollisionWorld vehicle, projectile;
+		vehicle.addGeometry(*file, 0, physics::CollisionUser::Vehicle, {}, {}, 1, {});
+		projectile.addGeometry(*file, 0, physics::CollisionUser::Projectile, {}, {}, 1, {});
+		int onHull = 0, covered = 0;
+		for (int axis = 0; axis < 3; ++axis) {
+			for (int sign = -1; sign <= 1; sign += 2) {
+				for (float a = -3; a <= 3.01f; a += 0.5f) {
+					for (float b = -3; b <= 3.01f; b += 0.5f) {
+						physics::Vec3 from {}, to {};
+						const float far = 30.0f * sign;
+						if (axis == 0) {
+							from = {far, a, b};
+							to = {-far, a, b};
+						} else if (axis == 1) {
+							from = {a, far, b};
+							to = {a, -far, b};
+						} else {
+							from = {a, b, far};
+							to = {a, b, -far};
+						}
+						physics::CollisionWorld::Hit hit;
+						if (!vehicle.raycast(from, to, hit)) {
+							continue;
+						}
+						++onHull;
+						covered += projectile.raycast(from, to, hit) ? 1 : 0;
+					}
+				}
+			}
+		}
+		std::fprintf(stderr, "  %-14s hull rays %4d, met by the projectile LOD %4d (%3d%%)\n", name, onHull, covered, onHull ? covered * 100 / onHull : 0);
+	}
+}
+
+// An AV missile fired a little off a parked enemy vehicle from 120 m: does it
+// home on it, and where does it end.
+TEST(Vehicles_MissileHomingOnAParkedVehicle)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const char* name : {"eu_apc", "eu_fav", "as_tank"}) {
+		Garage g(gameDir());
+		if (!g.loaded || !g.templates.find(name) || !g.templates.find("unl_av_missile")) {
+			continue;
+		}
+		const uint32_t vehicle = g.start(name, {0, 4, 0}, 3);
+		const int shooter = g.world->addPlayer("Shooter", name[0] == 'a' ? 2 : 1, true);
+		const physics::Vec3 at = g.position(vehicle);
+		const float before = g.world->hitPoints(vehicle);
+		g.world->launchProjectile("unl_av_missile", at + physics::Vec3 {120, 0.5f, 6}, {-60, 0, 0}, shooter);
+		float closest = 1e9f;
+		bool gone = false;
+		for (int tick = 0; tick < 150; ++tick) {
+			g.run(1 / 30.0f);
+			if (g.world->projectiles().empty()) {
+				gone = true;
+				break;
+			}
+			const physics::Vec3 p = g.world->projectiles().front().position;
+			closest = std::min(closest, std::sqrt(physics::lengthSquared(p - at)));
+		}
+		std::fprintf(stderr, "  %s: closest %.1f m, round %s, hit points %.0f -> %.0f\n", name, closest, gone ? "gone" : "still flying", before, g.world->hitPoints(vehicle));
+	}
+}
+
+#ifdef BF2142_RENDER_TESTS
+// The actual bridge glow is a black-background quad using StaticMesh.fx's
+// alpha_one technique. Its black texels must not darken the scene behind it.
+TEST(Render_Glow3AdditivePixelsOptIn)
+{
+    const char* output = std::getenv("BF2142_RENDER_TEST_DIR");
+    if (!output || !gameDir()) return;
+    std::filesystem::create_directories(output);
+    CHECK(SDL_Init(SDL_INIT_VIDEO));
+    {
+        std::string error;
+        auto gpu = render::GpuContext::create(nullptr, error);
+        if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
+        for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+            Garage g(gameDir(), mod, true);
+            auto* glow = g.templates.find("glow3");
+            CHECK(g.loaded && glow);
+            if (!g.loaded || !glow) continue;
+            // The authored glow mesh is visual: its .con comments out
+            // collisionMesh, so it is not a road obstruction.
+            CHECK(glow->settings().count("collisionMesh") == 0);
+            world::ObjectManager objects;
+            auto* object = objects.create(glow, {0, 0, 0});
+            terrain::HeightmapCluster noTerrain;
+            scene::LightSettings lights;
+            lights.fogColor = {160, 170, 180};
+            lights.fogStartEndAndBase = {1000, 2000, 1, 0};
+            scene::SkySettings sky;
+            scene::WaterSettings water;
+            scene::RendererSettings settings;
+            settings.drawSkyDome = false;
+            settings.drawTerrain = false;
+            render::LevelSources sources {g.files, g.templates, objects, g.geometries, noTerrain, nullptr, lights, sky, water, "", ""};
+            sources.renderer = &settings;
+            render::LevelRenderer renderer(*gpu);
+            renderer.build(sources);
+            auto target = gpu->createOffscreenTarget(640, 360);
+            render::Camera camera;
+            camera.position = {0, 0, -8};
+            camera.yaw = 0;
+            const auto frame = [&]() {
+                renderer.syncObjects();
+                auto* commands = SDL_AcquireGPUCommandBuffer(gpu->device());
+                renderer.draw(commands, target.color, target, camera, lights);
+                CHECK(SDL_SubmitGPUCommandBuffer(commands));
+                std::vector<uint8_t> pixels;
+                CHECK(gpu->readPixels(target, pixels));
+                return pixels;
+            };
+            object->setHidden(true);
+            const auto background = frame();
+            object->setHidden(false);
+            const auto visible = frame();
+            size_t dark = 0, bright = 0;
+            for (size_t i = 0; i + 3 < visible.size() && i + 3 < background.size(); i += 4) {
+                int delta = 0;
+                for (int c = 0; c < 3; ++c) delta += int(visible[i+c]) - int(background[i+c]);
+                if (delta < -9) ++dark;
+                if (delta > 9) ++bright;
+            }
+            const char* label = std::string(mod).find("Remaster") == std::string::npos ? "vanilla" : "remaster";
+            std::fprintf(stderr, "  %s glow3: %zu darkened, %zu brightened pixels\n", label, dark, bright);
+            CHECK(render::writePng(std::string(output) + "/" + label + "-glow3.png", target.width, target.height, visible));
+            CHECK(dark == 0);
+            CHECK(bright > 100);
+            gpu->releaseTarget(target);
+        }
+    }
+    SDL_Quit();
+}
+
+// Actual Suez bridge, using the map's placed glow3 and bridge meshes.
+TEST(Render_SuezBridgeGlowPixelsOptIn)
+{
+    const char* output = std::getenv("BF2142_RENDER_TEST_DIR");
+    if (!output || !gameDir()) return;
+    std::filesystem::create_directories(output);
+    CHECK(SDL_Init(SDL_INIT_VIDEO));
+    {
+        std::string error;
+        auto gpu = render::GpuContext::create(nullptr, error);
+        if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
+        for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+            geom::GeometryTemplateManager geometries;
+            titantest::TitanLevel level(gameDir(), "Suez_Canal", 48, true, mod, true, &geometries);
+            CHECK(level.loaded);
+            if (!level.loaded) continue;
+            world::Object* glow = nullptr;
+            for (const auto& o : level.objects.objects()) {
+                if (o->objectTemplate() && o->objectTemplate()->name() == "glow3"
+                    && std::fabs(o->position().x + 260.894f) < 0.1f && std::fabs(o->position().z + 31.995f) < 0.1f)
+                    glow = o.get();
+            }
+            CHECK(glow);
+            if (!glow) continue;
+            scene::LightSettings lights;
+            lights.fogStartEndAndBase = {1000, 2000, 1, 0};
+            scene::SkySettings sky; scene::WaterSettings water;
+            scene::RendererSettings settings;
+            settings.drawSkyDome = false; settings.drawTerrain = false;
+            render::LevelSources sources {level.files, level.templates, level.objects, geometries, level.heightmaps,
+                nullptr, lights, sky, water, "", ""};
+            sources.renderer = &settings;
+            render::LevelRenderer renderer(*gpu); renderer.build(sources);
+            auto target = gpu->createOffscreenTarget(640, 360);
+            render::Camera camera; camera.position = {-270, 52.5f, -39};
+            camera.yaw = std::atan2(9.106f, 7.005f);
+            camera.pitch = std::atan2(-0.8f, std::hypot(9.106f, 7.005f));
+            const auto frame = [&]() {
+                renderer.syncObjects();
+                auto* commands = SDL_AcquireGPUCommandBuffer(gpu->device());
+                renderer.draw(commands, target.color, target, camera, lights);
+                CHECK(SDL_SubmitGPUCommandBuffer(commands));
+                std::vector<uint8_t> pixels; CHECK(gpu->readPixels(target, pixels)); return pixels;
+            };
+            glow->setHidden(true); const auto background = frame();
+            const auto backgroundAgain = frame();
+            glow->setHidden(false); const auto visible = frame();
+            size_t dark = 0, bright = 0, noise = 0;
+            for (size_t i = 0; i + 3 < visible.size() && i + 3 < background.size(); i += 4) {
+                int delta = 0, baseDelta = 0;
+                for (int c = 0; c < 3; ++c) {
+                    delta += int(visible[i+c]) - int(background[i+c]);
+                    baseDelta += std::abs(int(backgroundAgain[i+c]) - int(background[i+c]));
+                }
+                if (baseDelta > 9) ++noise;
+                if (delta < -9) ++dark;
+                if (delta > 9) ++bright;
+            }
+            const char* label = std::string(mod).find("Remaster") == std::string::npos ? "vanilla" : "remaster";
+            std::fprintf(stderr, "  %s Suez bridge glow3: %zu darkened, %zu brightened pixels, baseline noise %zu\n", label, dark, bright, noise);
+            CHECK(render::writePng(std::string(output) + "/" + label + "-suez.png", target.width, target.height, visible));
+            // The full scene changes slightly between identical frames;
+            // bound darkening by that measured baseline noise. The isolated
+            // asset check above requires exactly zero darkened pixels.
+            CHECK(dark <= noise); CHECK(bright > 100); CHECK(bright > noise * 3);
+            gpu->releaseTarget(target);
+        }
+    }
+    SDL_Quit();
+}
+
+// Exercise the shipped Titan scene with and without the retail static-part
+// switch. Camera membership in the native renderer is only an approximation;
+// changing that switch must not remove static geometry from the same view.
+TEST(Titan_StaticVisibilityPixelsOptIn)
+{
+	const char* output = std::getenv("BF2142_RENDER_TEST_DIR");
+	if (!output || !gameDir()) return;
+	std::filesystem::create_directories(output);
+	CHECK(SDL_Init(SDL_INIT_VIDEO));
+	{
+		std::string error;
+		auto gpu = render::GpuContext::create(nullptr, error);
+		if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
+		for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+			geom::GeometryTemplateManager geometries;
+			titantest::TitanLevel level(gameDir(), "Suez_Canal", 48, true, mod, false, &geometries);
+			CHECK(level.loaded);
+			if (!level.loaded) continue;
+			const auto* info = level.titan(2);
+			CHECK(info);
+			if (!info) continue;
+			const auto* ship = level.objects.find(info->object);
+			CHECK(ship);
+			if (!ship) continue;
+			const physics::Mat3 rotation = physics::Mat3::fromYawPitchRoll({ship->rotation().x, ship->rotation().y, ship->rotation().z});
+			scene::LightSettings lights;
+			lights.fogStartEndAndBase = {1000, 2000, 1, 0};
+			scene::SkySettings sky;
+			scene::WaterSettings water;
+			scene::RendererSettings settings;
+			settings.drawBundledMeshes = false;
+			settings.drawSkinnedMeshes = false;
+			settings.drawSkyDome = false;
+			settings.drawTerrain = false;
+			settings.insideTitanOverride = true;
+			render::LevelSources sources {level.files, level.templates, level.objects, geometries, level.heightmaps,
+				nullptr, lights, sky, water, "", ""};
+			sources.renderer = &settings;
+			render::LevelRenderer renderer(*gpu);
+			renderer.build(sources);
+			auto target = gpu->createOffscreenTarget(640, 360);
+			for (const physics::Vec3 local : {physics::Vec3 {6, -1, 11}, physics::Vec3 {0, 12, -30}}) {
+				const auto p = rotation.transform(local) + info->position;
+				render::Camera camera;
+				camera.position = {p.x, p.y, p.z};
+				camera.yaw = ship->rotation().x * 3.14159265f / 180.0f;
+				const auto frame = [&]() {
+					renderer.syncObjects();
+					auto* commands = SDL_AcquireGPUCommandBuffer(gpu->device());
+					renderer.draw(commands, target.color, target, camera, lights);
+					CHECK(SDL_SubmitGPUCommandBuffer(commands));
+					std::vector<uint8_t> pixels;
+					CHECK(gpu->readPixels(target, pixels));
+					return pixels;
+				};
+				settings.showAllTitanParts = false;
+				const auto normal = frame();
+				settings.showAllTitanParts = true;
+				const auto all = frame();
+				settings.drawStaticMeshes = false;
+				const auto blank = frame();
+				settings.drawStaticMeshes = true;
+				const std::string label = std::string(mod).find("Remaster") != std::string::npos ? "remaster" : "vanilla";
+				CHECK(render::writePng(std::string(output) + "/" + label + (local.y < 0 ? "-view-a.png" : "-view-b.png"), target.width, target.height, all));
+				size_t different = 0, lit = 0, geometryPixels = 0;
+				for (size_t i = 0; i + 3 < normal.size() && i + 3 < all.size(); i += 4) {
+					if (normal[i] != all[i] || normal[i+1] != all[i+1] || normal[i+2] != all[i+2]) ++different;
+					if (all[i] || all[i+1] || all[i+2]) ++lit;
+					if (all[i] != blank[i] || all[i+1] != blank[i+1] || all[i+2] != blank[i+2]) ++geometryPixels;
+				}
+				std::fprintf(stderr, "  %s local %.0f/%.0f/%.0f: %zu changed, %zu lit, %zu geometry pixels\n", mod, local.x, local.y, local.z, different, lit, geometryPixels);
+				CHECK(lit > 1000);
+				CHECK(geometryPixels > 1000);
+				CHECK(different == 0);
+			}
+		}
+	}
+	SDL_Quit();
+}
+#endif
+
+// The native projectile-LOD rays for the retail comparison (work/fav-retail-audit/emu.py's grid):
+// writes one '0'/'1' per ray to $BF2142_RAY_OUT.
+TEST(Vehicles_NativeRaysForTheRetailComparison)
+{
+	const char* out = std::getenv("BF2142_RAY_OUT");
+	const char* meshName = std::getenv("BF2142_RAY_MESH");
+	if (!gameDir() || !out || !meshName) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const physics::CollisionMeshFile* file = g.collisionTemplates.mesh(meshName, g.files);
+	CHECK(file != nullptr);
+	if (!file) {
+		return;
+	}
+	physics::CollisionWorld world;
+	world.addGeometry(*file, 0, physics::CollisionUser::Projectile, {}, {}, 1, {});
+	std::string bits;
+	for (const int axis : {0, 2, 1}) {
+		for (const int sign : {1, -1}) {
+			for (int ia = -12; ia <= 12; ++ia) {
+				for (int ib = -12; ib <= 12; ++ib) {
+					float start[3] = {0, 0, 0}, delta[3] = {0, 0, 0};
+					int other[2], n = 0;
+					for (int i = 0; i < 3; ++i) {
+						if (i != axis) {
+							other[n++] = i;
+						}
+					}
+					start[axis] = 30.0f * sign;
+					delta[axis] = -60.0f * sign;
+					start[other[0]] = ia * 0.25f;
+					start[other[1]] = ib * 0.25f;
+					physics::CollisionWorld::Hit hit;
+					const physics::Vec3 from {start[0], start[1], start[2]};
+					const physics::Vec3 to {start[0] + delta[0], start[1] + delta[1], start[2] + delta[2]};
+					bits += world.raycast(from, to, hit) ? '1' : '0';
+				}
+			}
+		}
+	}
+	std::ofstream(out) << bits;
+}
+
+// The driver of an open FAV is hit by a round from the side through the open frame (the
+// original lets occupants of open vehicles be shot); the shooter's own vehicle's seats are not.
+TEST(Vehicles_OpenVehicleOccupantCanBeShot)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const char* name : {"eu_fav", "as_fav"}) {
+		Garage g(gameDir());
+		if (!g.loaded || !g.templates.find(name)) {
+			continue;
+		}
+		const uint32_t fav = g.start(name, {0, 2, 6}, 3);
+		g.animate();
+		CHECK(g.enter(fav));
+		g.run(1);
+		const int me = g.world->localPlayer();
+		const int shooter = g.world->addPlayer("Shooter", 1, false);
+		const world::ObjectTemplate* rifle = g.templates.find("Unl_Carbine");
+		const std::string round = rifle && rifle->settings().count("projectileTemplate") ? rifle->settings().at("projectileTemplate") : "";
+		CHECK(!round.empty());
+		game::GameWorld::PlayerInfo info;
+		g.world->playerInfo(me, info);
+		const world::Object* sitter = g.objects.find(info.soldier);
+		CHECK(sitter != nullptr);
+		if (!sitter) {
+			continue;
+		}
+		const physics::Vec3 seat {sitter->position().x, sitter->position().y, sitter->position().z};
+		// A round per height and side; which of the driver and the vehicle it hurt.
+		int driverHits = 0, vehicleHits = 0;
+		for (int side = 0; side < 4; ++side) {
+			const physics::Vec3 dir = side == 0 ? physics::Vec3 {1, 0, 0} : side == 1 ? physics::Vec3 {-1, 0, 0} : side == 2 ? physics::Vec3 {0, 0, 1} : physics::Vec3 {0, 0, -1};
+			for (float y = 0.3f; y <= 1.7f; y += 0.1f) {
+				game::GameWorld::PlayerInfo now;
+				g.world->playerInfo(me, now);
+				if (!now.alive) {
+					break;
+				}
+				const float driverBefore = g.world->hitPoints(now.soldier);
+				const float vehicleBefore = g.world->hitPoints(fav);
+				g.world->launchProjectile(round, seat + dir * 25.0f + physics::Vec3 {0, y, 0}, dir * -300.0f, shooter);
+				g.run(0.15f);
+				game::GameWorld::PlayerInfo then;
+				g.world->playerInfo(me, then);
+				driverHits += (!then.alive || g.world->hitPoints(now.soldier) < driverBefore) ? 1 : 0;
+				vehicleHits += g.world->hitPoints(fav) < vehicleBefore ? 1 : 0;
+			}
+		}
+		std::fprintf(stderr, "  %s: %d rounds hurt the driver, %d the vehicle (of 60)\n", name, driverHits, vehicleHits);
+		CHECK(driverHits > 0);
+	}
+}
+
+#ifdef BF2142_RENDER_TESTS
+// The shipped Titan signs are bundled meshes marked isTitanExterior. Isolate
+// each real sign as a Titan child so the pixels cannot come from the hull.
+TEST(Titan_ArrowSignVisibilityPixelsOptIn)
+{
+	const char* output = std::getenv("BF2142_RENDER_TEST_DIR");
+	if (!output || !gameDir()) return;
+	std::filesystem::create_directories(output);
+	CHECK(SDL_Init(SDL_INIT_VIDEO));
+	{
+		std::string error;
+		auto gpu = render::GpuContext::create(nullptr, error);
+		if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
+		for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+			geom::GeometryTemplateManager geometries;
+			titantest::TitanLevel level(gameDir(), "Suez_Canal", 48, true, mod, false, &geometries);
+			CHECK(level.loaded);
+			if (!level.loaded) continue;
+			for (const char* name : {"eu_sign_arrow", "as_sign_arrow"}) {
+				const auto* sign = level.templates.find(name);
+				const auto* geometry = geometries.find(name);
+				CHECK(sign && geometry && geometry->titanExterior);
+				if (!sign || !geometry) continue;
+				const auto* actualTitan = level.titan(name[0] == 'e' ? 2 : 1);
+				CHECK(actualTitan);
+				const auto* actualRoot = actualTitan ? level.objects.find(actualTitan->object) : nullptr;
+				CHECK(actualRoot && actualRoot->objectTemplate());
+				if (!actualRoot || !actualRoot->objectTemplate()) continue;
+				const auto& children = actualRoot->objectTemplate()->children();
+				CHECK(std::any_of(children.begin(), children.end(), [&](const auto& child) { return child.name == name; }));
+				world::ObjectTemplate root(1, "SimpleObject", "sign_test_root", 1);
+				root.children().push_back({name, {0, 0, 0}, {0, 0, 0}});
+				world::ObjectManager objects;
+				const uint32_t rootId = objects.create(&root, {0, 0, 0})->id();
+				terrain::HeightmapCluster terrain;
+				scene::LightSettings lights;
+				lights.fogStartEndAndBase = {1000, 2000, 1, 0};
+				scene::SkySettings sky;
+				scene::WaterSettings water;
+				scene::RendererSettings settings;
+				settings.drawSkyDome = false;
+				settings.drawTerrain = false;
+				render::LevelSources sources {level.files, level.templates, objects, geometries, terrain,
+					nullptr, lights, sky, water, "", ""};
+				sources.renderer = &settings;
+				bool ownerTitan = true;
+				sources.titanObject = [&](int team) { return ownerTitan && team == 2 ? rootId : 0u; };
+				bool destroyed = false;
+				sources.partLook = [&](uint32_t, const std::string&) { return destroyed ? 2 : 0; };
+				render::LevelRenderer renderer(*gpu);
+				renderer.build(sources);
+				auto target = gpu->createOffscreenTarget(640, 360);
+				render::Camera camera;
+				camera.position = {0, 0, 4};
+				camera.yaw = 3.14159265f;
+				const auto frame = [&]() {
+					renderer.syncObjects();
+					auto* commands = SDL_AcquireGPUCommandBuffer(gpu->device());
+					renderer.draw(commands, target.color, target, camera, lights);
+					CHECK(SDL_SubmitGPUCommandBuffer(commands));
+					std::vector<uint8_t> pixels;
+					CHECK(gpu->readPixels(target, pixels));
+					return pixels;
+				};
+				settings.drawBundledMeshes = false;
+				const auto blank = frame();
+				settings.drawBundledMeshes = true;
+				settings.insideTitanOverride = false;
+				const auto outside = frame();
+				settings.insideTitanOverride = true;
+				const auto inside = frame();
+				ownerTitan = false;
+				const auto other = frame();
+				ownerTitan = true;
+				destroyed = true;
+				const auto hidden = frame();
+				destroyed = false;
+				camera.position = {0, 0, 60};
+				const auto far = frame();
+				const auto changed = [&](const std::vector<uint8_t>& pixels) {
+					size_t count = 0;
+					for (size_t i = 0; i + 3 < pixels.size() && i + 3 < blank.size(); i += 4)
+						if (pixels[i] != blank[i] || pixels[i+1] != blank[i+1] || pixels[i+2] != blank[i+2]) ++count;
+					return count;
+				};
+				const size_t outPixels = changed(outside), inPixels = changed(inside), otherPixels = changed(other);
+				std::fprintf(stderr, "  %s %s: outside %zu, inside %zu, non-Titan %zu, destroyed %zu, far %zu pixels\n", mod, name, outPixels, inPixels, otherPixels, changed(hidden), changed(far));
+				CHECK(outPixels > 100);
+				CHECK(inPixels > 100);
+				CHECK(otherPixels == 0);
+				CHECK(changed(hidden) == 0);
+				CHECK(changed(far) == 0);
+				const std::string label = std::string(mod).find("Remaster") != std::string::npos ? "remaster-" : "vanilla-";
+				CHECK(render::writePng(std::string(output) + "/" + label + name + ".png", target.width, target.height, inside));
+			}
+		}
+	}
+	SDL_Quit();
+}
+#endif
+
+#ifdef BF2142_RENDER_TESTS
+// Full Suez Titan tree at the authored arrow, with the gameplay callbacks.
+TEST(Titan_AuthoredArrowScenePixelsOptIn)
+{
+	const char* output = std::getenv("BF2142_RENDER_TEST_DIR");
+	if (!output || !gameDir()) return;
+	std::filesystem::create_directories(output);
+	CHECK(SDL_Init(SDL_INIT_VIDEO));
+	{
+		std::string error;
+		auto gpu = render::GpuContext::create(nullptr, error);
+		if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
+		for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+			geom::GeometryTemplateManager geometries;
+			titantest::TitanLevel level(gameDir(), "Suez_Canal", 48, true, mod, false, &geometries);
+			CHECK(level.loaded);
+			if (!level.loaded) continue;
+			const auto* info = level.titan(2);
+			const auto* ship = info ? level.objects.find(info->object) : nullptr;
+			CHECK(ship && ship->objectTemplate());
+			if (!ship || !ship->objectTemplate()) continue;
+			const auto& children = ship->objectTemplate()->children();
+			const auto found = std::find_if(children.begin(), children.end(), [](const auto& c) {
+				return c.name == "eu_sign_arrow" && std::fabs(c.position.x - 6.087f) < 0.01f;
+			});
+			CHECK(found != children.end());
+			if (found == children.end()) continue;
+			const auto hullRotation = physics::Mat3::fromYawPitchRoll({ship->rotation().x, ship->rotation().y, ship->rotation().z});
+			const auto signRotation = physics::Mat3::fromYawPitchRoll({found->rotation.x, found->rotation.y, found->rotation.z});
+			const physics::Vec3 origin {ship->position().x, ship->position().y, ship->position().z};
+			const auto signPos = origin + hullRotation.transform({found->position.x, found->position.y, found->position.z});
+			scene::LightSettings lights;
+			lights.fogStartEndAndBase = {1000, 2000, 1, 0};
+			scene::SkySettings sky;
+			scene::WaterSettings water;
+			scene::RendererSettings settings;
+			settings.drawSkyDome = false;
+			settings.drawTerrain = false;
+			render::LevelSources sources {level.files, level.templates, level.objects, geometries, level.heightmaps,
+				nullptr, lights, sky, water, "", ""};
+			sources.renderer = &settings;
+			sources.titanObject = [&](int team) { return level.world->titanOf(team); };
+			sources.partTransforms = [&](uint32_t obj, std::vector<anim::Matrix>& parts) { return level.world->partTransforms(obj, parts); };
+			sources.partBone = [&](uint32_t obj, const std::string& part, anim::Matrix& m) { return level.world->partBone(obj, part, m); };
+			sources.partPose = [&](uint32_t obj, const std::string& part, world::Vec3& offset, world::Vec3& rot) { return level.world->partPose(obj, part, offset, rot); };
+			bool hideSigns = false;
+			sources.partLook = [&](uint32_t obj, const std::string& path) {
+				return hideSigns && path == "eu_sign_arrow" ? 2 : level.world->titanPartLook(obj, path);
+			};
+			render::LevelRenderer renderer(*gpu);
+			renderer.build(sources);
+			auto target = gpu->createOffscreenTarget(960, 540);
+			for (float distance : {2.0f, 4.0f, -1.0f}) {
+				const auto eye = distance < 0 ? origin + physics::Vec3 {70.4f, 8.0f, 4.1f} : signPos + hullRotation.transform(signRotation.transform({0, 0, distance}));
+				const auto offset = eye - signPos;
+				render::Camera camera;
+				camera.position = {eye.x, eye.y, eye.z};
+				camera.yaw = std::atan2(-offset.x, -offset.z);
+				camera.pitch = std::atan2(-offset.y, std::hypot(offset.x, offset.z));
+				const auto frame = [&]() {
+					renderer.syncObjects();
+					auto* commands = SDL_AcquireGPUCommandBuffer(gpu->device());
+					renderer.draw(commands, target.color, target, camera, lights);
+					CHECK(SDL_SubmitGPUCommandBuffer(commands));
+					std::vector<uint8_t> pixels;
+					CHECK(gpu->readPixels(target, pixels));
+					return pixels;
+				};
+				if (distance == 2.0f) {
+					camera.fovY = 0.55f; // an earlier view established a narrower base FOV
+					frame();
+					camera.fovY = 1.0f;
+				}
+				hideSigns = false;
+				const auto shown = frame();
+				hideSigns = true;
+				const auto hidden = frame();
+				size_t changed = 0;
+				for (size_t i = 0; i + 3 < shown.size() && i + 3 < hidden.size(); i += 4)
+					if (std::abs(int(shown[i])-int(hidden[i])) > 3 || std::abs(int(shown[i+1])-int(hidden[i+1])) > 3 || std::abs(int(shown[i+2])-int(hidden[i+2])) > 3) ++changed;
+				std::fprintf(stderr, "  %s authored sign %.1fm: %zu pixels; titan-relative eye %.2f/%.2f/%.2f\n", mod, distance, changed, eye.x-origin.x, eye.y-origin.y, eye.z-origin.z);
+				const std::string label = std::string(mod).find("Remaster") != std::string::npos ? "remaster" : "vanilla";
+				CHECK(render::writePng(std::string(output) + "/" + label + "-" + std::to_string(int(distance)) + ".png", target.width, target.height, shown));
+				CHECK(changed > 20);
+			}
+		}
+	}
+	SDL_Quit();
+}
+#endif
+
+// Fire actual installed projectiles vertically into flat terrain alongside
+// soldiers. This exercises flight, impact, detonation and material damage,
+// not just a direct call to the blast helper.
+TEST(Vehicles_InstalledMissileSplashHeadless)
+{
+	CHECK(gameDir() != nullptr);
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* projectile : {"us_heavy_mech_dumrockets_projectile", "as_heavy_mech_dumrockets_projectile",
+				"US_AG_PilotWeapon_Projectile", "eu_av_missile", "as_av_missile"}) {
+			Garage g(gameDir(), mod);
+			CHECK(g.loaded && g.templates.find(projectile));
+			if (!g.loaded || !g.templates.find(projectile)) continue;
+			CHECK(g.start("eu_tank", {100, 2, 100}, 0) != 0);
+			g.animate();
+			const float ranges[] = {0.65f, 1.5f, 2.5f, 3.5f, 5.0f};
+			uint32_t soldiers[5] {};
+			int players[5] {};
+			for (int i = 0; i < 5; ++i) {
+				const int id = g.world->addPlayer("SplashTarget", 2, true);
+				players[i] = id;
+				CHECK(g.world->spawnSoldier(id));
+				game::GameWorld::PlayerInfo info;
+				CHECK(g.world->playerInfo(id, info));
+				soldiers[i] = info.soldier;
+				CHECK(g.world->setSoldierPosition(info.soldier, {ranges[i], 0, 0}));
+			}
+			g.run(0.1f);
+			for (int i = 0; i < 5; ++i) {
+				const auto* body = g.world->soldierBody(players[i]);
+				CHECK(body != nullptr);
+				if (body) CHECK(std::fabs(body->position.x - ranges[i]) < 0.05f && std::fabs(body->position.z) < 0.05f);
+			}
+			CHECK(g.world->launchProjectile(projectile, {0, 8, 0}, {0, -100, 0}));
+			g.run(0.5f);
+			const auto& impacts = g.world->impacts();
+			CHECK(!impacts.empty());
+			if (impacts.empty()) continue;
+			const auto& hit = impacts.back();
+			std::fprintf(stderr, "  splash %s %s impact=(%.2f,%.2f,%.2f) target=%u health:",
+				mod, projectile, hit.point.x, hit.point.y, hit.point.z, hit.object);
+			CHECK(hit.object == 0 && std::fabs(hit.point.y) < 0.05f);
+			for (int i = 0; i < 5; ++i) std::fprintf(stderr, " %.2fm=%.2f", ranges[i], g.world->hitPoints(soldiers[i]));
+			std::fprintf(stderr, "\n");
+			CHECK(g.world->hitPoints(soldiers[4]) >= 99.99f);
+			if (std::string(projectile).find("dumrockets") != std::string::npos)
+				CHECK(g.world->hitPoints(soldiers[0]) >= 99.99f);
+			if (std::string(projectile) == "US_AG_PilotWeapon_Projectile")
+				CHECK(g.world->hitPoints(soldiers[0]) < 99.0f);
+		}
+	}
+}
+
+TEST(Vehicles_EUWalkerAAGunnerSightAndShot)
+{
+	if (!gameDir()) return;
+	for (float heading : {0.f, 90.f, 180.f, -90.f}) for (bool alt : {false, true}) for (bool authored : {false, true}) {
+		Garage g(gameDir(), "mods/Project_Remaster_v17_Final");
+		CHECK(g.loaded && g.templates.find("us_heavy_mech"));
+		if (!g.loaded || !g.templates.find("us_heavy_mech")) continue;
+		auto* weapon = g.templates.find(alt ? "us_heavy_mech_AA_Launcher" : "US_heavy_mech_AAcannon_barrel");
+		CHECK(weapon != nullptr);
+		if (!weapon) continue;
+		if (!authored) weapon->settings()["deviation.minDev"] = "0";
+		const auto walker = g.start("us_heavy_mech", {0, 4, 8});
+		g.animate();
+		CHECK(g.enter(walker));
+		game::SoldierInput input;
+		input.switchSeat = 2;
+		g.world->setPlayerInput(input);
+		g.world->tick(1 / 30.0f);
+		input = {};
+		input.turn = heading;
+		input.aimPitch = 40;
+		g.world->setPlayerInput(input);
+		g.world->tick(1 / 30.0f);
+		input.turn = 0;
+		PlayerCamera camera(*g.world, *g.systems, nullptr);
+		for (int i=0; i<60; ++i) { g.world->setPlayerInput(input); g.world->tick(1 / 30.0f); camera.tick(1 / 30.0f); }
+		PlayerCamera::View sight;
+		CHECK(camera.view(sight, 16.f / 9));
+		input.fire = !alt;
+		input.altFire = alt;
+		g.world->setPlayerInput(input);
+		bool fired = false;
+		for (int i=0; i<90 && !fired; ++i) {
+			g.world->tick(1 / 30.0f);
+			for (const auto& p : g.world->projectiles()) {
+				if (p.shooter != walker || !p.settings) continue;
+				const float yaw = std::atan2(p.velocity.x, p.velocity.z);
+				const float pitch = std::atan2(p.velocity.y, std::hypot(p.velocity.x, p.velocity.z));
+				const float cosine = std::sin(sight.pitch)*std::sin(pitch) + std::cos(sight.pitch)*std::cos(pitch)*std::cos(yaw-sight.yaw);
+				const float error = std::acos(std::clamp(cosine, -1.0f, 1.0f)) * 57.29578f;
+				std::fprintf(stderr, " walker heading %.0f %s authored=%d: sight %.1f %.1f shot %.1f %.1f error %.1f %s\n", heading, alt ? "alt" : "primary", authored, sight.yaw*57.29578f, sight.pitch*57.29578f, yaw*57.29578f, pitch*57.29578f, error, p.settings->name.c_str());
+				CHECK(error < (authored ? 15 : 2));
+				fired = true;
+				break;
+			}
+		}
+		CHECK(fired);
+	}
+}
+
+// The retail blast enumerator visits a vehicle's occupants after the vehicle.
+TEST(Vehicles_BlastCanReachVehicleOccupant)
+{
+	CHECK(gameDir() != nullptr);
+	if (!gameDir()) return;
+	Garage g(gameDir());
+	CHECK(g.loaded);
+	if (!g.loaded) return;
+	auto* blast = g.templates.create("GenericProjectile", "test_occupant_blast");
+	blast->components().push_back("DefaultDetonationComp");
+	blast->settings()["detonation.explosionDamage"] = "100";
+	blast->settings()["detonation.explosionRadius"] = "5";
+	blast->settings()["detonation.explosionMaterial"] = "42";
+	auto* narrow = g.templates.create("GenericProjectile", "test_occupant_narrow_blast");
+	narrow->components().push_back("DefaultDetonationComp");
+	narrow->settings()["detonation.explosionDamage"] = "50";
+	narrow->settings()["detonation.explosionRadius"] = "0.3";
+	narrow->settings()["detonation.explosionMaterial"] = "42";
+	const uint32_t vehicle = g.start("eu_fav", {0, 2, 6}, 1);
+	CHECK(vehicle != 0 && g.enter(vehicle));
+	g.run(0.1f);
+	game::GameWorld::PlayerInfo info;
+	CHECK(g.world->playerInfo(g.world->localPlayer(), info));
+	CHECK(info.vehicle == vehicle);
+	const auto* soldier = g.objects.find(info.soldier);
+	CHECK(soldier != nullptr);
+	if (!soldier) return;
+	const auto p = soldier->position();
+	const float before = g.world->hitPoints(info.soldier);
+	CHECK(g.world->detonate("test_occupant_blast", {p.x + 20, p.y + 1, p.z}));
+	CHECK(g.world->hitPoints(info.soldier) == before);
+	const auto v = g.position(vehicle);
+	const float fromCenter = std::sqrt((p.x-v.x)*(p.x-v.x) + (p.y+1-v.y)*(p.y+1-v.y) + (p.z-v.z)*(p.z-v.z));
+	std::fprintf(stderr, "  occupant is %.2f m from vehicle center\n", fromCenter);
+	CHECK(fromCenter > 0.3f);
+	CHECK(g.world->detonate("test_occupant_narrow_blast", {p.x, p.y + 1, p.z}));
+	const float afterNarrow = g.world->hitPoints(info.soldier);
+	std::fprintf(stderr, "  narrow blast occupant health %.2f -> %.2f\n", before, afterNarrow);
+	CHECK(afterNarrow < before - 1.0f);
+	CHECK(g.world->detonate("test_occupant_blast", {p.x, p.y + 1, p.z}));
+	const float after = g.world->hitPoints(info.soldier);
+	std::fprintf(stderr, "  vehicle occupant splash health %.2f -> %.2f\n", before, after);
+	CHECK(after < afterNarrow - 1.0f);
 }

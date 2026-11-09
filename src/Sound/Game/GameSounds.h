@@ -138,6 +138,7 @@ private:
 		int skip = 0;
 		int reloadPart = 0;
 		bool looping = false;
+		int loopSlot = -1;
 		bool burst = false;
 		int lastTick = 0;
 	};

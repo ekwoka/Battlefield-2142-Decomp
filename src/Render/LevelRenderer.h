@@ -131,6 +131,15 @@ struct FirstPersonScene {
 	const effects::EffectManager* effects = nullptr;
 };
 
+// A moving game object that lives outside ObjectManager (GenericProjectile
+// rounds). The renderer rebuilds these instances each frame from simulation
+// state, including the template's child meshes and bundled parts.
+struct TransientModel {
+	const world::ObjectTemplate* objectTemplate = nullptr;
+	world::Vec3 position;
+	world::Vec3 rotation;
+};
+
 struct LevelSources {
 	const io::FileManager& files;
 	const world::ObjectTemplateManager& templates;
@@ -156,6 +165,8 @@ struct LevelSources {
 	// Parts the game moves (wheels, steering): an offset and yaw/pitch/roll
 	// before the part's placement in its parent; asked each frame.
 	std::function<bool(uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation)> partPose;
+	// A Titan part's look by its template's name: 0 whole, 1 wrecked (its wreck geometry), 2 gone (hidden).
+	std::function<int(uint32_t object, const std::string& part)> partLook;
 	// Parts posed by the object's bundle skeleton (boneIndex): the part's
 	// whole local matrix in its parent's frame, in place of its placement.
 	std::function<bool(uint32_t object, const std::string& part, anim::Matrix& local)> partBone;
@@ -178,6 +189,8 @@ struct LevelSources {
 	// draw instead of the exterior (a vehicle's cockpit seen from inside,
 	// BF2142.exe 0x00612880); false for the default. Asked by syncObjects.
 	std::function<bool(uint32_t object, int& geometry, int& lod)> geometryFor;
+	// The vehicle the view is inside (its cockpit drawn), 0 for none.
+	std::function<uint32_t()> cockpitVehicle;
 	// Rain and snow (rainManager.*), if any.
 	const scene::RainSettings* rain = nullptr;
 	// renderer.global*LodDistanceScale and terrainCuller.* (defaults if null).
@@ -193,6 +206,8 @@ struct LevelSources {
 	const scene::ParticleSystemSettings* particles = nullptr;
 	const scene::WindSettings* wind = nullptr;
 	const scene::QualitySettings* quality = nullptr;
+	// Render-only models updated from simulation state (e.g. projectiles).
+	std::function<void(std::vector<TransientModel>&)> transientModels;
 	// The collision faces (the projectile LOD's) of `object` within `radius`
 	// of `center`, for a decal's clipping (RendDX9 0x10165f60 / 0x101655c0):
 	// object 0 the static objects' in world space, only those of `owner`
@@ -388,6 +403,7 @@ private:
 		float cullRadius = -1;
 		bool cullActor = false;
 		const world::ObjectTemplate* partsTemplate = nullptr; // whose children place the parts
+		std::string source; // the child template it was made from (empty for the object's own)
 		std::string geometry;  // its geometry template
 		int shownGeometry = -1; // the geometry drawn (-1: the exterior)
 		int shownLod = 0;
@@ -416,6 +432,7 @@ private:
 		float overgrowthCell[3] {};
 		mutable float overgrowthLodState = 0;
 		bool debris = false;     // an effects' debris piece, placed afresh each frame (syncDebris)
+		bool transient = false;  // rebuilt from LevelSources::transientModels each frame
 		// The mesh instance's UV matrices (RendDX9 +0x28c) and its parts'
 		// animated-UV states (BF2142.exe's SimpleObject +0x160), in the
 		// order collectParts meets them (AnimatedUV.h).
@@ -494,7 +511,7 @@ private:
 	SDL_GPUTexture* texture(const io::FileManager& files, const std::string& path,
 		scene::TextureClass textureClass = scene::TextureClass::Default);
 	void addTemplate(const LevelSources& sources, const world::ObjectTemplate& objectTemplate, const Mat4& local,
-		const Mat4& objectWorld, uint32_t object, int depth);
+		const Mat4& objectWorld, uint32_t object, int depth, const std::string& path = {});
 	void addObject(const LevelSources& sources, const world::Object& object);
 	// A part that animates its texture coordinates, placed relative to its object.
 	struct AnimatedUVPart {
@@ -771,7 +788,7 @@ private:
 		SDL_GPUTexture* texture;
 		uint32_t firstVertex;
 		uint32_t vertexCount;
-		int blend[2] = {0, 0}; // HudQuad::blend (D3DBLEND source, destination)
+		int blend[2] = {0, 0}; // HudQuad::blend (Meme source, destination)
 	};
 	SDL_GPUBuffer* m_overlayVertices = nullptr;
 	// The menu layer: its triangles by texture, and the textures of images

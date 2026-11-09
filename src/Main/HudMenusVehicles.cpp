@@ -693,6 +693,12 @@ float mechFootValue(float length, float time)
 	return std::sin(std::min(time / length, 1.0f) * 6.2831855f) + 1;
 }
 
+float aircraftHudThrust(int guiIndex, float throttle)
+{
+	return guiIndex == 7 || guiIndex == 15 || guiIndex == 64 || guiIndex == 66
+		? std::clamp(throttle, -1.0f, 1.0f) : 0.0f;
+}
+
 void VehicleHud::update(hud::HudManager& hud, const VehicleHudInput& in)
 {
 	const world::ObjectTemplate* v = in.vehicle;
@@ -716,9 +722,12 @@ void VehicleHud::update(hud::HudManager& hud, const VehicleHudInput& in)
 	m_secondTorque += (std::clamp(in.torque + 1.0f, 0.0f, 1.0f) - m_secondTorque) * 0.01f;
 	hud.set("Torque", m_torque);
 	hud.setString("TorqueString", std::to_string(static_cast<int>(std::ceil(m_torque * 100.0f))));
-	hud.set("TorqueAngle", m_torque * 6.2831855f);
+	// The exe keeps these angles in radians and its compass nodes scale them
+	// by 57.29578 (0x00a0d138); our compass variables are degrees.
+	constexpr float kDegrees = 57.29578f;
+	hud.set("TorqueAngle", m_torque * 6.2831855f * kDegrees);
 	hud.set("SecondTorque", m_secondTorque);
-	hud.set("SecondTorqueAngle", m_secondTorque * 6.2831855f);
+	hud.set("SecondTorqueAngle", m_secondTorque * 6.2831855f * kDegrees);
 	// The vehicle's sprint (0x007a2e60's end, the controlled object not the
 	// soldier): VehicleStamina (+0x1d4) the control object's slot 0x108,
 	// VehicleStaminaShow (+0x2ab) while sprinting or below 1,
@@ -751,7 +760,13 @@ void VehicleHud::update(hud::HudManager& hud, const VehicleHudInput& in)
 	const float climbSpeed = m_climbSpeed;
 	const float angle = (12.566371f / climbSpeed) * in.climb * 0.1f - m_climbPrevious + m_climbAngle;
 	m_climbAngle = m_climbPrevious = angle;
-	hud.set("VehicleElevationSpeedAngle", angle);
+	hud.set("VehicleElevationSpeedAngle", angle * kDegrees);
+	// 0x007a2b50: the horizon bar. AngleOfAttack ceil(forward.y x 100 + 296)
+	// as an integer (the bar's y); VehicleBanking pi/2 - acos(right.y)
+	// negated, in radians, which the exe turns the other way round than our
+	// quads (clockwise degrees): the bar counter-rolls the vehicle.
+	hud.set("AngleOfAttack", std::ceil(in.forwardY * 100.0f + 296.0f));
+	hud.set("VehicleBanking", std::asin(std::clamp(in.rightY, -1.0f, 1.0f)) * kDegrees);
 	// The other seats' turrets (0x007a2b50 → 0x007a1e00 / 0x007a07c0).
 	const bool one = in.seat && flag(in.seat, "vehicleHud.showOneSecondaryGunnerAngle", false);
 	for (const OtherSeat& other : in.others) {
@@ -772,7 +787,7 @@ void VehicleHud::update(hud::HudManager& hud, const VehicleHudInput& in)
 	if (in.walking) {
 		m_footValue = mechFootValue(in.walkLength, in.walkTime);
 	}
-	hud.set("MechFootAnimationValue", m_footValue);
+	hud.set("MechFootAnimationValue", m_footValue * kDegrees);
 	hud.setString("AltitudeString", std::to_string(static_cast<int>(std::ceil(in.altitude))));
 	// The seat dots (0x007a28e0): states 0 (unset) .. 7 per seat, at the
 	// seat's icon position.
@@ -922,6 +937,17 @@ MapRelation vehicleRelation(bool hasOccupant, bool localInside, int occupantTeam
 		return MapRelation::Neutral;
 	}
 	return vehicleTeam == localTeam ? MapRelation::Friendly : MapRelation::Enemy;
+}
+
+std::array<float, 4> mapRelationColor(MapRelation relation, bool squad)
+{
+	if (relation == MapRelation::Friendly) {
+		return squad ? std::array<float, 4> {0.4f, 1, 0, 1} : std::array<float, 4> {0.254f, 0.552f, 0.89f, 1};
+	}
+	if (relation == MapRelation::Enemy) {
+		return {0.87f, 0.094f, 0.094f, 1};
+	}
+	return {1, 1, 1, 1};
 }
 
 const MapIcons& mapIcons(const world::ObjectTemplate& t)

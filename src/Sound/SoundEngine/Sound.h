@@ -92,6 +92,7 @@ private:
 
 	int m_refCount = 0;
 	int m_activeSamples = 0;
+	Vec3 m_lastPlayOffset {}; // position supplied by the most recent play-at
 	SoundTemplate* m_template;
 	ISoundTransform* m_transform;
 	ISoundEnvelope* m_volumeEnvelope = nullptr;

@@ -2664,10 +2664,14 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 		// muzzle's flash and smoke), again on each round unless its
 		// minDistanceUnderWaterSurface (+0x3f4) is 0 or more and it still
 		// runs; 0x0061e090 sets off the GroundEffectBundles.
-		for (const std::string& weapon : object.firedWeapons) {
+		for (const auto& fire : object.firedWeapons) {
 			for (size_t i = 0; i < tracked.bundles.size(); ++i) {
 				Placed& b = tracked.bundles[i];
-				if (b.path.size() < 2 || !equalsIgnoreCase(b.path[b.path.size() - 2], weapon)) {
+				if (b.path.size() < 2 || !equalsIgnoreCase(b.path[b.path.size() - 2], fire.weapon)) {
+					continue;
+				}
+				if (!fire.seat.empty() && !equalsIgnoreCase(object.objectTemplate->name(), fire.seat)
+					&& std::none_of(b.path.begin(), b.path.end(), [&](const auto& part) { return equalsIgnoreCase(part, fire.seat); })) {
 					continue;
 				}
 				if (b.kind == Placed::Kind::GroundTrigger && b.parent < 0) {
@@ -2699,7 +2703,15 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 				updateGround(object, tracked.velocity, tracked, i, effects, partPose, bundleView);
 				continue;
 			}
-			const bool start = (created && b.startAtCreation)
+			// GenericProjectiles aren't ObjectManager objects in this rewrite,
+			// but their shipped EffectBundle children (e_RifleRocket_trail,
+			// e_av_rifle_trail, etc.) receive the projectile's creation/fire
+			// event in the original. Start their startOnEffects=0 bundles when
+			// the projectile state first appears; main.cpp supplies that state
+			// for the lifetime of each flying round.
+			const bool projectileFire = created && object.objectTemplate->typeName() == "GenericProjectile"
+				&& b.startOnEffects == 0;
+			const bool start = (created && b.startAtCreation) || projectileFire
 				|| (object.occupied && !tracked.occupied && (b.startOnEffects & kEntered) != 0)
 				|| (object.effects & b.startOnEffects) != 0;
 			if (start && !effects.emitting(object.id, tag)) {

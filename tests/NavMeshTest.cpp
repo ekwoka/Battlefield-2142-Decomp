@@ -291,6 +291,25 @@ TEST(NavMesh_RejectsBadFiles)
 	CHECK(!ai::parseNavMesh(writeQtr(broken), clb, &error));
 }
 
+TEST(NavMesh_UnavailableClusterPortalsKeepPolygonNavigation)
+{
+	ai::NavMesh grid = buildGrid();
+	CHECK(!grid.links.empty());
+	for (auto& link : grid.links) {
+		link.polygon = 0xffffffffu;
+	}
+	std::string error;
+	const auto parsed = ai::parseNavMesh(writeQtr(grid), writeClb(grid), &error);
+	CHECK(parsed.has_value());
+	if (!parsed) {
+		return;
+	}
+	CHECK(!ai::findPath(*parsed, {0.2f, 0, 0.2f}, {8.2f, 0, 4.2f}).empty());
+	CHECK(ai::entryLink(*parsed, {0, 0}) == nullptr);
+	grid.links.front().polygon = static_cast<uint32_t>(grid.polygons.size() + 1);
+	CHECK(!ai::parseNavMesh(writeQtr(grid), writeClb(grid), &error));
+}
+
 TEST(NavMesh_FindsThePolygonUnderAPoint)
 {
 	const ai::NavMesh m = buildGrid();

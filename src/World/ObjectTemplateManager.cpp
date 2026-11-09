@@ -5,15 +5,39 @@
 
 namespace dice::hfe::world {
 
+namespace {
+unsigned char foldAscii(unsigned char c)
+{
+	return c >= 'A' && c <= 'Z' ? static_cast<unsigned char>(c + ('a' - 'A')) : c;
+}
+}
+
+size_t TemplateNameHash::operator()(const std::string& name) const noexcept
+{
+	size_t hash = 14695981039346656037ull;
+	for (unsigned char c : name) {
+		hash = (hash ^ foldAscii(c)) * 1099511628211ull;
+	}
+	return hash;
+}
+
+bool TemplateNameEqual::operator()(const std::string& a, const std::string& b) const noexcept
+{
+	if (a.size() != b.size()) return false;
+	for (size_t i = 0; i < a.size(); ++i) {
+		if (foldAscii(static_cast<unsigned char>(a[i])) != foldAscii(static_cast<unsigned char>(b[i]))) return false;
+	}
+	return true;
+}
+
 bool CaseInsensitiveLess::operator()(const std::string& a, const std::string& b) const
 {
 	// ASCII folding, as the C locale's tolower does it, without a library
 	// call per character: every template and setting lookup comes here.
-	const auto fold = [](unsigned char c) { return c >= 'A' && c <= 'Z' ? static_cast<unsigned char>(c + ('a' - 'A')) : c; };
 	const size_t n = std::min(a.size(), b.size());
 	for (size_t i = 0; i < n; ++i) {
-		const unsigned char x = fold(static_cast<unsigned char>(a[i]));
-		const unsigned char y = fold(static_cast<unsigned char>(b[i]));
+		const unsigned char x = foldAscii(static_cast<unsigned char>(a[i]));
+		const unsigned char y = foldAscii(static_cast<unsigned char>(b[i]));
 		if (x != y) {
 			return x < y;
 		}

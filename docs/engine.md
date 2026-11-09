@@ -9732,13 +9732,14 @@ active node to):
   its children sit `distance` pixels along the angle (radians, 0 right,
   pi/2 down) times what is left of the fade. `addNodeBlendEffect <src>
   <dest>` (`0x007b20c0`, a `<node>BlendEffect` render-state node) gives
-  the quads below it those Direct3D 9 blend factors (the vehicle HUDs'
-  `7 2`: `D3DBLEND_DESTALPHA`, `D3DBLEND_ONE`; the render-state node
-  hands each quad below it through, `0x00870c40`); `HudQuad::blend`
-  carries them to the renderer, which draws those quads with a UI
-  pipeline of the same factors (`GpuContext::uiBlendPipeline`, made the
-  first time a pair is used; the target's alpha is 1 after the
-  post-production, so `7 2` adds the glass over the view). `setNodeTimesBlink <n> <mode>` and
+  the quads below it Meme blend-function values. These are translated
+  in `Render/HudBlend.h` before selecting SDL factors. In particular the
+  default effect factory (`0x007e4360`) constructs `7 8`, the ordinary
+  source-alpha/inverse-source-alpha pair; vehicle HUDs use `7 2` for
+  source-alpha/ONE additive strokes. Treating 7 as raw D3DBLEND_DESTALPHA
+  exposed the transparent-white backgrounds of the vehicle HUD textures
+  as opaque blocks. `HudQuad::blend` carries the Meme pair to
+  `GpuContext::uiBlendPipeline`, cached on first use. `setNodeTimesBlink <n> <mode>` and
   `setNodeIntervalBlink <s>` (`0x007b1c00`, `0x007b1da0`: the blink
   effect's slots `0xdc`, `0xd8`): once shown, the node is off every other
   interval for its first n blinks.
@@ -10086,8 +10087,9 @@ velocity the soldier's response is asked for (`0x00588420`, response slot
   `(c - b) x (b - a)` (`0x006e8080`); faces are wound clockwise, so the
   normals point out of the object. Each LOD serves the user its collision
   type names (0 projectiles, 1 vehicles, 2 soldiers, 3 AI navigation;
-  `0x006e4880`, by order in version 8 files); a mesh without a soldier LOD,
-  like a bush's, does not stop soldiers;
+  `0x006e4880`, by order in version 8 files). The loader falls back from
+  soldier to vehicle, and from navigation to the resulting soldier LOD
+  (`0x006e4fe0`); a mesh with neither soldier nor vehicle LOD does not stop soldiers;
 - movement (`0x006c2230`): the difference between the average contact
   velocity and the wanted one, along the ground, corrected by at most
   `normal.y^5 * friction * 1.5712` m/s per tick (2.3568 before slipping),
@@ -11416,12 +11418,12 @@ bit read through the response's slot `0x50`: soldier against an object
 `0x006c3890`, mesh against mesh `0x006bb050` (already in `meshPair`),
 run-over `0x006c2e50`. A projectile's tree has no PlayerControlObject and
 its group (8) shares no bit, so rounds meet every field. The shipped
-fields' collision meshes carry only the projectile and vehicle LODs (and a
-mesh without a soldier LOD stops no soldier), so soldiers of both teams
-walk through them; the rule sorts vehicles (the vehicle bay's shield,
-material 4117, lets its own team's in) and rounds stop at them unless the
-material is penetrable. The rewrite builds each team's soldier mesh only
-when a field has a soldier LOD (`Body::teamSoldierMesh`). Vehicles meet
+fields' collision meshes carry projectile and vehicle LODs; the loader's
+soldier-to-vehicle fallback supplies the collision for enemy soldiers. The
+same team rule sorts vehicles (the vehicle bay's shield, material 4117,
+lets its own team's in) and rounds stop at fields unless the material is
+penetrable. The rewrite builds each team's soldier mesh with the other
+team's fields (`Body::teamSoldierMesh`). Vehicles meet
 each Titan part's vehicle LOD as a candidate of its own with its
 collisionGroups (`Titan::vehicleParts`, `collideMover`), so a team's
 vehicles pass their own fields; the Titan, a major actor moved by its sync
@@ -11562,8 +11564,11 @@ pod arrays (titan_pod_array1/2: entered at their EntryPoints, the launcher
 pod_launcher at 150 m/s; pod_launcher_cq in other modes). The pod is a
 rigid body of its own (gravityModifier 1.5, drag 1, dragModifier 3/1/3);
 its ForceObjects steer it (eu_pod_FOFWD 35 on PIThrottle, eu_pod_FOStrafe
-20 on PIYaw, × 30 / mass a second as the drones' are). At rest it lets the
-soldier out. The pod's keepUp torque is rewritten (`stepPods`;
+20 on PIYaw, eu_pod_FOTurn 5 on PIMouseLookX). The node's slot 0xa0 adds
+these as accelerations at their child offsets, without a mass divisor
+(`0x0062c920` -> `0x006c7b10` -> `0x006c96b0` -> `0x006c5bb0`).
+Eligible landing contact starts the Parachute's 0.05-second exit timer;
+the pod is then hidden and removed. The pod's keepUp torque is rewritten (`stepPods`;
 `eu_pod_ForceObject`, regulatePosX / Z −0.5/1 with keepUp: two
 linear regulators (`0x006678a0`, out = 2am·v + (a² + b²)m(goal − p)) give
 the root node (slot `0xa4`) ±15 × out / m at ±p, a couple turning the

@@ -145,7 +145,7 @@ bool Sound::detach()
 	state->matrix = worldMatrix();
 	state->m_velocity = velocity();
 	if (m_occlusion) {
-		const Vec3 position = state->matrix.translation();
+		const Vec3 position = worldPosition(&m_lastPlayOffset);
 		state->occlusionValue = m_occlusion->occlusion(this, &position);
 		m_occlusion = state.get();
 	}
@@ -274,6 +274,7 @@ bool Sound::scheduleSample(int index, const Vec3* position, int loopCount)
 		return false;
 	}
 	m_loopCount = loopCount;
+	m_lastPlayOffset = position ? *position : Vec3 {};
 	soundEngine().scheduleSample(*this, index, position);
 	return true;
 }

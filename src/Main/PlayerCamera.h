@@ -37,16 +37,18 @@ public:
 	struct View;
 
 	// On foot: first person (the game's only view there) or the rewrite's
-	// own chase view behind (--camera-mode third, C). In a vehicle the seat
+	// own debug chase view behind (--camera-mode third). In a vehicle the seat
 	// camera's view mode (game::camera::Mode) decides; a third-person
 	// choice starts a seat in Chase.
 	bool firstPerson = true;
+	bool spawnFirstPerson = true; // each new soldier's view (--camera-mode third clears it)
 	// c_PIToggleCameraMode (0x004b9e10): in a vehicle the next view mode the
 	// seat's camera allows (0x00612eb0: its CVM* flags, sv.allowNoseCam,
-	// sv.allowExternalViews); on foot first person and the chase view (the
-	// latter only with sv.allowExternalViews). Dead and spectating with a
+	// sv.allowExternalViews); living infantry stays in first person.
+	// Dead and spectating with a
 	// player followed, the next player (0x00615e00).
 	void toggleMode(bool backwards = false);
+	bool selectView(int shortcut);
 	bool allowExternalViews = true;
 	bool allowNoseCam = true; // sv.allowNoseCam (the seats' CVMNose views)
 	// sv.allowFreeCam (game logic +0x35): the dead may fly a free camera or
@@ -89,7 +91,11 @@ public:
 	void setFreeInput(const game::camera::FreeInput& input) { m_freeInput = input; }
 
 	// The alternate fire as held now (its press cycles the zoom).
-	void setAltFire(bool held) { m_altFire = held; }
+	void setAltFire(bool held) {
+		// Render input can press and release between 30 Hz camera ticks.
+		m_altFirePending = m_altFirePending || (held && !m_altFire);
+		m_altFire = held;
+	}
 	// The mouse wheel's step this frame (+1 c_PINextItem, -1 c_PIPrevItem):
 	// a zoomed fine-tuning scope's step (ZoomState::fineTune).
 	void setItemStep(int step) { m_itemStep = step; }
@@ -201,7 +207,9 @@ public:
 		int subGeometry = 1;
 		int lod = 0;
 	};
-	bool cockpit(Cockpit& cockpit) const;
+	// When the renderer already knows the object being considered, reject
+	// every other hull before resolving the player's seat-camera tree.
+	bool cockpit(Cockpit& cockpit, uint32_t object = 0) const;
 	// The recoil kick this tick (0x005861a0, RecoilSettings).
 	float recoil() const { return m_recoilNow; }
 	// Objects the world pass leaves out in first person (the soldier and
@@ -251,6 +259,7 @@ private:
 		bool zoomBusy = false;   // reloading, or between rounds without allowZoomOnROF (FireArm::zoomBusy)
 		int rounds = -1; // in the magazine, -1 unknown
 		bool firing = false; // remote: the fire input held
+		bool fired = false; // local: an accepted shot in the current simulation tick
 	};
 	bool current(Me& me) const;
 	std::function<bool(Remote&)> m_remote;
@@ -278,6 +287,7 @@ private:
 	bool m_hasExternal = false;
 	game::camera::Look m_external;
 	float m_externalFov = 1.1f;
+	float m_externalRoll = 0; // radians: the hull's bank for the nose view and a flying vehicle's chase views
 	// The last tick's view (the death camera starts from its forward).
 	game::camera::Look m_lastLook;
 	uint32_t m_lastControlObject = 0;
@@ -288,7 +298,7 @@ private:
 	anim::AnimationSystems& m_systems;
 	Loader m_load;
 	effects::EffectManager m_effects;
-	bool m_altFire = false, m_altFireWas = false;
+	bool m_altFire = false, m_altFirePending = false;
 	int m_itemStep = 0;
 	bool m_crouch = false;
 
@@ -302,6 +312,7 @@ private:
 	anim::ZoomSettings m_zoomSettings;
 	int m_roundsWas = -1;
 	bool m_reloadingWas = false;
+	bool m_reloadAnimationPending = false;
 	// The muzzle effects among the weapon's children (FireComp 0x005f25f0):
 	// those named "zoom" flash while zoomed with disableMuzzleWhenZoomed,
 	// the others otherwise (0x005f31d0, 0x005da050).

@@ -99,3 +99,29 @@ TEST(ScriptHost_TitanModeTicketsAndTheEnd)
 	}
 	CHECK(errors.empty());
 }
+
+// A removed object (a dead soldier leaving a control point's trigger): the
+// list methods the shipped gpm_cq/gpm_ti scripts iterate give an empty list,
+// not None (their "for p in o.getOccupyingPlayers()" raised TypeError).
+TEST(ScriptBridge_RemovedObjectListsAreEmpty)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	titantest::TitanLevel level(gameDir, "Minsk", 48, false);
+	CHECK(level.loaded);
+	if (!level.loaded) {
+		return;
+	}
+	game::GameLogic logic;
+	game::ServerSettings settings;
+	game::ScriptBridge bridge(*level.world, logic, settings, "mods/bf2142");
+	const uint32_t gone = 0x7ffffff0;
+	CHECK(!level.world->objects().find(gone));
+	for (const char* method : {"getOccupyingPlayers", "getChildren"}) {
+		const game::ScriptValue v = bridge.objectCall(gone, method, {});
+		CHECK(v.kind == game::ScriptValue::Kind::List && v.list.empty());
+	}
+	CHECK(bridge.objectCall(gone, "getTeam", {}).kind == game::ScriptValue::Kind::None);
+}

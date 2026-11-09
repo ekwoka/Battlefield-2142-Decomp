@@ -1,3 +1,4 @@
+#include "Render/HudBlend.h"
 // The renderer's GPU-free logic: the Titans' part culling (TitanParts.h),
 // the view's fog (Fog.h), the shadows', hemi maps', sky's and normal maps'
 // arithmetic (SceneMath.h), the overhead view's camera (OverheadView.h),
@@ -820,4 +821,16 @@ TEST(RenderScene_RoadStaticMeshTechniques)
 	CHECK(roadStaticTechnique(false, true) == RoadTechnique::Road); // no detail map: Road even under noBlend
 	CHECK(roadStaticTechnique(true, false) == RoadTechnique::RoadDetail);
 	CHECK(roadStaticTechnique(true, true) == RoadTechnique::RoadDetailNoBlend);
+}
+
+// A transparent-white HUD texel must contribute no colour in the walkers'
+// 7/2 additive mode. Mistaking Meme 7 for D3DBLEND_DESTALPHA instead uses
+// the opaque scene's alpha and exposes the entire white texture rectangle.
+TEST(Render_HudUsesMemeBlendFactors)
+{
+	CHECK(render::hudBlendToD3D(7) == 5); // D3DBLEND_SRCALPHA
+	CHECK(render::hudBlendToD3D(8) == 6); // default 7/8 is ordinary alpha blending
+	CHECK(render::hudBlendToD3D(2) == 2); // additive destination remains ONE
+	CHECK(render::hudBlendToD3D(5) == 9);
+	CHECK(render::hudBlendToD3D(9) == 7);
 }

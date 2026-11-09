@@ -296,7 +296,15 @@ void BotManager::lookAround(Bot& bot, const GameWorld::PlayerInfo& self, Soldier
 		return;
 	}
 	// The look statement: the aim turns the view along the offset.
-	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEye, 0};
+	physics::Vec3 eye = self.position + physics::Vec3 {0, kEye, 0};
+	// Turret LookAt is evaluated from the gun's round origin in aim(). Keep
+	// the idle sector's short look point in that same frame: a root-eye point
+	// can fall inside a long barrel's muzzle sweep and its apparent bearing
+	// then changes as the muzzle moves around the yaw pivot.
+	if (!L.offsetFromRoot && self.vehicle) {
+		physics::Mat3 hull;
+		m_world.gunFrame(self.vehicle, self.seat, eye, hull);
+	}
 	const physics::Vec3 point = L.offsetFromRoot ? self.position + L.offset : eye + L.offset * 5.0f;
 	L.quiet = true;
 	const float throttle = input.throttle, strafe = input.strafe;

@@ -15,6 +15,7 @@
 #include "Physics/RigidBody.h"
 #include "Random.h"
 
+#include <algorithm>
 #include <functional>
 #include <array>
 #include <string>
@@ -27,6 +28,7 @@ struct Material;
 
 namespace dice::hfe::world {
 class ObjectTemplate;
+class ObjectTemplateManager;
 }
 
 namespace dice::hfe::game {
@@ -256,6 +258,7 @@ struct ProjectileSettings {
 	// The damage after travelling `distance` metres.
 	float damageAt(float distance) const;
 };
+std::string tracerGeometryFor(const world::ObjectTemplateManager& templates, const ProjectileSettings& settings);
 
 // A blast's falloff with distance (0x005a61a0): 1 within 0.2 of the
 // radius (0x00a6aab4), then falling linearly to 0 at the radius.
@@ -341,9 +344,9 @@ struct FireArmSettings {
 	// the SMGs and handguns don't set it.
 	float velocity = 600;
 	std::string projectileTemplate;
-	// Heat (guns without magazines): each round adds heatAddWhenFire, it
-	// cools by coolDownPerSec, and at 1 the gun stops for overheatPenalty
-	// seconds.
+	// Heat: each round adds heatAddWhenFire; over 1 the heat becomes
+	// overheatPenalty and the gun stops until it has cooled (coolDownPerSec,
+	// only while idle) back to below 1.
 	float heatAddWhenFire = 0;
 	float coolDownPerSec = 0;
 	float overheatPenalty = 0;
@@ -495,6 +498,8 @@ public:
 
 	const FireArmSettings& settings() const { return m_settings; }
 	int roundsInMag() const { return m_rounds; }
+	// A real round leaving this tick, including weapons with unlimited ammo.
+	bool firedThisTick() const { return m_firedThisTick; }
 	int magsLeft() const { return m_mags; }
 	bool reloading() const { return m_reloadLeft > 0; }
 	// A thrown round on its way out (ThrownFireComp states 2 and 3).
@@ -534,11 +539,11 @@ public:
 	// that can't be reloaded.
 	bool selectable() const;
 	float reloadLeft() const { return m_reloadLeft; } // seconds (the HUD's reload bar)
-	float heat() const { return m_heat; } // 0..1
+	float heat() const { return std::min(m_heat, 1.0f); } // 0..1
 	// Resupply (ammo hubs): adds magazines up to the kit's number; false
 	// when full.
 	bool addMagazine();
-	bool overheated() const { return m_overheatLeft > 0; }
+	bool overheated() const { return m_heat >= 1; }
 	// Between rounds: the fire component's state above 1 (a round's cycle,
 	// state 4 until its ticksBetweenShots are past, or the spin-up, state 3).
 	bool cycling() const { return m_cooldown > 0 || m_startDelay >= 0; }
@@ -606,7 +611,8 @@ private:
 	bool m_reloadFilled = false; // the magazine swapped (changeMagAt) in this reload
 	int m_readyIn = 0;           // ticks of delayToUse left
 	float m_heat = 0;
-	float m_overheatLeft = 0;
+	float m_heatAtFire = 0; // the heat the last round left (0x005c3e78)
+	float m_sinceFire = 0;  // seconds since it
 	int m_mode = kFireAutomatic;
 	bool m_useModes = true;
 	bool m_triggerWas = false;
@@ -614,6 +620,7 @@ private:
 	int m_startDelay = -1;   // fireStartDelay's ticks left (-1: none pending)
 	Random m_startRandom {0xcfb}; // 0x005f1650's draws (its seed: the owner's +0x214 or the time, + 0xcfb)
 	bool m_pending = false; // a press waiting for the gun
+	bool m_firedThisTick = false;
 	bool m_clicked = false; // a press on an empty magazine (takeClick)
 	int m_burstLeft = 0;
 	int m_launchIn = -1;   // a thrown round's ticks to go (states 2 and 3), -1 none
@@ -697,6 +704,8 @@ struct Projectile {
 	physics::Vec3 position;
 	physics::Vec3 velocity;
 	physics::Vec3 acceleration; // gravity, applied the next tick
+	physics::Vec3 cameraMissileForward; // launch heading for a powered projectile-camera round
+	float cameraMissileDistance = 0; // path length since launch
 	float timeLeft = 1;
 	const ProjectileSettings* settings = nullptr;
 	uint32_t shooter = 0;
@@ -729,6 +738,10 @@ struct Projectile {
 	float wireMaxDistance = 0;
 	bool wireKeepOnObstruction = false;
 	bool wireLost = false;
+	// Local infantry launcher control: leaving the sights or putting away the
+	// launcher releases guidance. Vehicle and AI guidance do not use this.
+	bool wireRequiresSights = false;
+	uint32_t wireWeapon = 0;
 	bool newTarget = false; // the follow's +0x94: its target set since its last turn
 	// SeekClosestTargetComp's relock: armed at each shot (0x005b2e70 ->
 	// setTarget(t, 1)); a candidate held since pendingSince.
@@ -770,6 +783,17 @@ struct Projectile {
 	uint32_t ghostObject = 0; // a server projectile's ghost object it follows (0: the client's own round)
 	uint32_t serial = 0;      // a stable id (the server's projectile ghosts, HostedGame::trackProjectiles)
 };
+
+// A geometry-bearing projectile's per-frame render input. GenericProjectile
+// rounds live outside ObjectManager; the renderer expands the template tree
+// (including geometry parts and child meshes) from this state.
+struct ProjectileRenderState {
+	const world::ObjectTemplate* objectTemplate = nullptr;
+	physics::Vec3 position;
+	physics::Mat3 rotation;
+};
+std::vector<ProjectileRenderState> projectileRenderStates(const world::ObjectTemplateManager& templates,
+	const std::vector<Projectile>& projectiles, uint32_t hiddenSerial = 0);
 
 // The radius trigger's shape test (0x005e8aa0; GameWorld's radius trigger
 // has the rest: the trigger types, the spared side, the line to it): the
@@ -817,6 +841,11 @@ struct TracerLook {
 	physics::Mat3 axes; // rows x, y, z: scaled
 	bool shown = false;
 };
+struct PlacedTracerLook {
+	std::string geometry;
+	TracerLook look;
+};
+std::vector<PlacedTracerLook> placedTracerLooks(const std::vector<Projectile>& projectiles);
 TracerLook tracerLook(const ProjectileSettings& settings, const physics::Vec3& round, const physics::Vec3& velocity,
 	const physics::Vec3& origin, const physics::Vec3& start, const physics::Vec3& offset, bool hit);
 

@@ -1236,7 +1236,8 @@ public:
 		// names): the fire's event 0 to each weapon's children, which starts
 		// the bundles whose startOnEffects is 0 (0x0061a4e0: the muzzle
 		// flash and smoke) and sets off the GroundEffectBundles (0x0061e090).
-		std::vector<std::string> firedWeapons;
+		struct WeaponFire { std::string weapon, seat; };
+		std::vector<WeaponFire> firedWeapons;
 	};
 	// The ground under a point (wheel and draft bundles): the first hit from
 	// `from` to `to` against the terrain, the water and the objects (not

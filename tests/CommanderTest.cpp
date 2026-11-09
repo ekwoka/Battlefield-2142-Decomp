@@ -40,13 +40,19 @@ struct Field {
 	std::vector<std::pair<std::string, game::ScriptArgs>> events;
 	bool loaded = false;
 
-	Field()
+	explicit Field(const std::string& mod = "mods/bf2142", bool collisionMeshes = false)
 	{
 		if (const char* gameDir = std::getenv("BF2142_GAME_DIR")) {
 			files.setRootPath(gameDir);
-			files.addSearchPath("mods/bf2142");
+			files.addSearchPath(mod);
 			if (files.mountArchive("Objects/Weapons_server.zip", "Objects\\Weapons")) {
+				if (collisionMeshes) {
+					physics::registerCollisionConsoleMethods(console, collisionTemplates);
+				}
 				world::registerWorldConsoleMethods(console, templates, objects);
+				if (collisionMeshes) {
+					world::registerUntypedTemplateProperties(console, templates, {"collisionMesh"});
+				}
 				world::registerUntypedTemplateProperties(console, templates,
 					{"rcType", "minTimeBetweenActivation", "uavVehicleTemplate", "uavVehicleSpeed", "uavVehicleRadius",
 						"uavVehicleFlightHeight", "uavVehicleSampleResolution", "armor.maxHitPoints", "armor.hitPoints",
@@ -68,12 +74,14 @@ struct Field {
 						 "stationary/commander_orbital_Strike/commander_orbital_strike_64.con",
 						 "stationary/commander_uav_drone_control/commander_uav_drone_control.con",
 						 "stationary/commander_movement_analyst/commander_movement_analyst.con",
-						 "stationary/commander_supplybox/supply_crate.con"}) {
+						 "stationary/commander_supplybox/supply_crate.con",
+						 "stationary/missile_silo/missile_silo_v2.con"}) {
 					console.run(base + script, {}, out);
 				}
 				loaded = templates.find("commander_emp_strike") && templates.find("commander_orbital_strike_64")
 					&& templates.find("commander_uav_drone_control") && templates.find("commander_movement_analyst")
-					&& templates.find("supply_crate") && templates.find("OrbitalStrikeControlObjectUS");
+					&& templates.find("supply_crate") && templates.find("missile_silo_v2")
+					&& templates.find("OrbitalStrikeControlObjectUS");
 			}
 		}
 		templates.registerType(1, "ControlPoint");
@@ -138,6 +146,70 @@ struct Field {
 };
 
 } // namespace
+
+// Static PCO structures created by a round's ObjectSpawners arrive after
+// GameWorld::startRound has built the level collision. Use the shipped Suez
+// Titan silo and commander scanning station assets to ensure they join that
+// collision snapshot before the next soldier movement step, in both mods.
+TEST(Commander_LateStaticAssetsEnterCollisionWorld)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	for (const std::string& mod : {std::string("mods/bf2142"), std::string("mods/Project_Remaster_v17_Final")}) {
+		for (const char* name : {"missile_silo_v2", "commander_movement_analyst"}) {
+			Field field(mod, true);
+			if (!field.loaded) {
+				CHECK(field.loaded);
+				continue;
+			}
+			world::ObjectTemplate* structure = field.templates.find(name);
+			CHECK(structure != nullptr);
+			if (!structure) {
+				continue;
+			}
+			const auto mobile = structure->settings().find("hasMobilePhysics");
+			CHECK(mobile != structure->settings().end() && mobile->second == "0");
+			const world::Object* placed = field.objects.create(structure, {0, 0, 0}, {90, 0, 0}); // Suez's runtime spawns use a yawed map rotation
+			if (std::string(name) == "missile_silo_v2") {
+				// The silo's barrel rests upright (a deviation from the flat pose its mesh has at rest).
+				world::Vec3 offset, rotation;
+				CHECK(field.world->partPose(placed->id(), "Missile_Silo_Barrel", offset, rotation));
+				CHECK(std::fabs(rotation.y + 90.0f) < 1e-3f);
+			}
+			field.world->tick(1 / 30.0f);
+			float hitFraction = 0;
+			uint32_t hitObject = 0;
+			const bool hit = field.world->segmentHit({0, 1, -15}, {0, 1, 15}, 0, hitFraction, hitObject);
+			std::fprintf(stderr, "  %s/%s: collision mesh %s, ray hit %d at %.2f owner %u\n", mod.c_str(), name,
+				structure->settings().at("collisionMesh").c_str(), hit, hitFraction, hitObject);
+			CHECK(hit);
+			CHECK(field.world->spawnPlayer(2) != nullptr);
+			const int player = field.world->localPlayer();
+			game::GameWorld::PlayerInfo info;
+			CHECK(field.world->playerInfo(player, info) && info.alive);
+			field.world->setSoldierPosition(info.soldier, {0, 0, -15});
+			game::SoldierInput walk;
+			walk.throttle = 1;
+			walk.sprint = true;
+			walk.turn = -info.yaw; // face +z, toward the structure
+			float tailMin = 1e9f, tailMax = -1e9f;
+			for (int i = 0; i < 150; ++i) {
+				field.world->setInput(player, walk);
+				walk.turn = 0;
+				field.world->tick(1 / 30.0f);
+				if (i >= 120 && field.world->playerInfo(player, info)) {
+					tailMin = std::min(tailMin, info.position.z);
+					tailMax = std::max(tailMax, info.position.z);
+				}
+			}
+			CHECK(field.world->playerInfo(player, info));
+			std::fprintf(stderr, "  %s/%s: final z %.2f\n", mod.c_str(), name, info.position.z);
+			CHECK(info.position.z < -1.0f);
+			CHECK(tailMax - tailMin < 0.5f);
+		}
+	}
+}
 
 TEST(Commander_OnePerTeam)
 {

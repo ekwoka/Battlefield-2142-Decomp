@@ -481,4 +481,61 @@ struct ScoreboardLine {
 };
 std::vector<ScoreboardLine> scoreboardBySquad(const std::vector<ScoreboardMember>& members);
 
+// The capture bar's variables for a soldier at `at`: the closest capturable
+// control point whose radius holds him (the scripts' getOccupyingCP), and
+// the flag's height as the bar value.
+struct CaptureBar {
+	bool enabled = false, neutralShow = false, takenShow = false;
+	float value = 0;
+};
+CaptureBar captureBar(const std::vector<game::GameWorld::ControlPointInfo>& points, const physics::Vec3& at);
+
+// The Titan HUD's "uplink" state, a per-frame state machine the original HUD manager keeps itself (BF2142.exe
+// 0x0044a470, the variables bound in 0x00450780): while the capture bar's CPInterfaceEnabled is on,
+// TimePreUplinkComplete rises 0.5 a second and ShowTimePreUplink stays on until it reaches 1 (then it holds
+// at 1, ShowTimePreUplink drops and the lost timer arms at 1); off, the progress and the show flag reset, and
+// while the armed timer is above 0 ShowTimePreUplinkLost is on as it falls 0.5 a second. CaptureComplete is
+// TimePreCPIsTaken above 0.99. HudElementsTitans.con's nodes read these.
+struct UplinkHud {
+	float complete = 0;      // TimePreUplinkComplete (+0xb0)
+	float lostTimer = 0;     // +0xb4
+	bool show = false;       // ShowTimePreUplink (+0xad)
+	bool showLost = false;   // ShowTimePreUplinkLost (+0xae)
+	bool captureComplete = false; // CaptureComplete (+0xda)
+	void update(float seconds, bool enabled, float takenValue)
+	{
+		captureComplete = takenValue > 0.99f;
+		if (lostTimer > 0 && !enabled) {
+			showLost = true;
+			lostTimer -= seconds * 0.5f;
+		} else {
+			showLost = false;
+		}
+		if (!enabled) {
+			complete = 0;
+			show = false;
+			return;
+		}
+		complete += seconds * 0.5f;
+		if (complete >= 1.0f) {
+			lostTimer = 1.0f;
+			complete = 1.0f;
+			show = false;
+		} else {
+			show = true;
+		}
+	}
+};
+
+// Titan mode's ticket bars span the two parts of a Titan's armour: hull at
+// 0..60 and shield at 60..100. The game-mode script mirrors this value into
+// tickets; use the native Titan armour as the HUD source so the bars remain
+// tied to the live mode state even if a script callback is absent.
+float titanHudHealth(const game::GameWorld::TitanInfo& titan);
+
+// MiddleTicketsShow (BF2142.exe 0x00449930, field +0xa88 bound in 0x00451820): the Titan HUD's top block is shown
+// while either team's ticket value is 100 or less (Titan mode's tickets are the Titans' armour, 0..100; Conquest's
+// start in the hundreds). Without it HudElementsTitans.con's whole ticket, health and console block stays hidden.
+inline bool middleTicketsShown(float friendlyTickets, float enemyTickets) { return friendlyTickets <= 100 || enemyTickets <= 100; }
+
 } // namespace dice::hfe::menu
