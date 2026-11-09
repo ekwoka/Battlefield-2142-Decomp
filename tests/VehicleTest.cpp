@@ -203,10 +203,41 @@ TEST(Vehicle_TyreForceOpposesSliding)
 	const Vec3 force = game::tyreForce(engine, contact, {-0.5f, 0, 0}, {0, 0, 1}, {1, 0, 0}, &along, &across);
 	CHECK(force.x < 0 && near(force.z, 0));
 	CHECK(near(across, -1.0f)); // -0.5 * wheelLatScale 0.1 = half the peak, times wheelLatFrictionMod 2
-	// Tilted ground grips less: the cube of the normal's height.
+	// Tilted ground grips less: the fourth power of the normal's height (retail 0x006b71f0).
 	contact.normalY = 0.5f;
 	const Vec3 tilted = game::tyreForce(engine, contact, {-0.5f, 0, 0}, {0, 0, 1}, {1, 0, 0});
-	CHECK(near(tilted.x, force.x * 0.125f));
+	CHECK(near(tilted.x, force.x * 0.0625f));
+}
+
+// Expected values are retail BF2142.exe 0x006b71f0's own output, run in unicorn with the EU FAV's
+// shipped newCar2 wheel settings (friLatBrakeMod 0.5 to exercise it) and the debug variables'
+// initial values (grip scale 1, load exponent 3, slip-ratio mode off).
+TEST(Vehicle_TyreForceMatchesRetailRoutine)
+{
+	game::EngineSettings e;
+	e.wheelLongFrictionMod = 0.94f;
+	e.wheelLongDriveFrictionMod = 1.5f;
+	e.wheelLongPeakAt = 0.1f;
+	e.wheelLongMinDynamicFriction = 0.7f;
+	e.wheelLongScale = 0.1f;
+	e.friLatBrakeMod = 0.5f;
+	e.wheelLatFrictionMod = 1.2f;
+	e.wheelLatDriveFrictionMod = 1.4f;
+	e.wheelLatPeakAt = 0.3f;
+	e.wheelLatMinDynamicFriction = 0.7f;
+	e.wheelLatScale = 0.05f;
+	const auto close = [](float a, float b) { return std::fabs(a - b) < 1e-5f; };
+	game::TyreContact c;
+	c.normalY = 0.8f;
+	c.grip = 0.9f;
+	c.drive = true;
+	Vec3 f = game::tyreForce(e, c, {3, 0, -12}, {0, 0, 1}, {1, 0, 0});
+	CHECK(close(f.x, 0.309657604f) && close(f.y, 0) && close(f.z, -0.363847673f));
+	c = {};
+	c.normalY = 0.6f;
+	c.brakeLatMod = true;
+	f = game::tyreForce(e, c, {-2.5f, 0, 4}, {0, 0, 1}, {1, 0, 0});
+	CHECK(close(f.x, -0.0324000046f) && close(f.y, 0) && close(f.z, 0.109641619f));
 }
 
 TEST(Vehicle_CarSettlesDrivesTurnsAndBrakes)

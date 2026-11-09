@@ -219,7 +219,9 @@ Vec3 tyreForce(const EngineSettings& e, const TyreContact& contact, const Vec3& 
 	const Vec3& right, float* longitudinal, float* lateral)
 {
 	float load = std::max(contact.normalY, 0.0f);
-	float loadPower = 1;
+	// 0x006b71f0 starts from the normal's height itself, then multiplies by it [0xa83e9c] (3) more
+	// times: the fourth power, not the cube.
+	float loadPower = load;
 	for (int i = 0; i < kLoadExponent; ++i) {
 		loadPower *= load;
 	}
