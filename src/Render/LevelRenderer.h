@@ -208,11 +208,15 @@ struct LevelSources {
 	// The collision faces (the projectile LOD's) of `object` within `radius`
 	// of `center`, for a decal's clipping (RendDX9 0x10165f60 / 0x101655c0):
 	// object 0 the static objects' in world space, only those of `owner`
-	// when it isn't 0; else that moving object's in its own space. None if
+	// when it isn't 0; else that moving object's in its own space, or its
+	// collisionPart `part`'s (Decal::part, not -1) in the part's. None if
 	// null.
-	std::function<void(uint32_t object, uint32_t owner, const effects::Vec3& center, float radius,
+	std::function<void(uint32_t object, uint32_t owner, int part, const effects::Vec3& center, float radius,
 		std::vector<std::array<effects::Vec3, 3>>& faces)>
 		collisionFaces;
+	// A moving object's collisionPart `part` (Decal::part): its frame in the
+	// object's now (rows x, y, z); false without one.
+	std::function<bool(uint32_t object, int part, effects::Mat3& rotation, effects::Vec3& position)> collisionPartFrame;
 	// Overgrowth.* as the level's Overgrowth.con set them (else the file is read).
 	const scene::OvergrowthSettings* overgrowth = nullptr;
 	// The interior sun of the seat camera now; false when there is none.

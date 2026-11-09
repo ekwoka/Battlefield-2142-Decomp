@@ -7,7 +7,9 @@
 #include "TestMain.h"
 #include "World/ObjectTemplateManager.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 using namespace dice::hfe;
 
@@ -62,6 +64,56 @@ TEST(RoundVisuals_FrameFollowsNoseRestAndStick)
 	round.stuckNormal = {-1, 0, 0};
 	frame = client::roundFrame(round);
 	CHECK(near(frame.rows[1], {-1, 0, 0}, 1e-3f) && near(frame.rows[0], {0, 0, -1}, 1e-3f));
+}
+
+// A thrown RotationalPoint round (0x005e5720, 0x006c6860, 0x006c0d00): its
+// frame is the throw's turned by projectileStartRotation (the grenades'
+// 0/0/45: rolled 45 degrees); randomRotationSpeed spins it about the world's
+// y and z by whole radians a second times the power, seeded by its id; its
+// node turns it each tick without damping; a bounce reverses the spin and
+// scales it by the new speed's square (stopping it under 0.1); it is drawn
+// with its own frame in flight and lying.
+TEST(RoundVisuals_ThrownRoundTumbles)
+{
+	game::ProjectileSettings settings;
+	settings.rotationalPoint = true;
+	game::Projectile frag;
+	frag.settings = &settings;
+	frag.velocity = {0, 0, 15};
+	game::throwFrame(frag, {0, 0, 1}, {0, 0, 45}, 0, 1, 7);
+	const float h = std::sqrt(0.5f);
+	CHECK(frag.turns && near(frag.spin, {}));
+	CHECK(near(frag.rotation.rows[2], {0, 0, 1}, 1e-4f) && std::fabs(std::fabs(frag.rotation.rows[0].y) - h) < 1e-4f);
+	const physics::Mat3 thrown = frag.rotation;
+	game::moveProjectile(frag, 1 / 30.0f, -14.73f);
+	CHECK(near(frag.rotation.rows[0], thrown.rows[0]) && near(client::roundFrame(frag).rows[1], thrown.rows[1]));
+	// The smoke grenade's spin 4 at full power: (0, -n1, n2), n in 1..4.
+	game::Projectile smoke;
+	smoke.settings = &settings;
+	smoke.velocity = {0, 0, 15};
+	game::throwFrame(smoke, {0, 0, 1}, {0, 0, 45}, 4, 1, 7);
+	std::fprintf(stderr, "  smoke grenade spin (%.0f, %.0f, %.0f)\n", smoke.spin.x, smoke.spin.y, smoke.spin.z);
+	CHECK(smoke.spin.x == 0 && smoke.spin.y <= -1 && smoke.spin.y >= -4 && smoke.spin.z >= 1 && smoke.spin.z <= 4);
+	game::Projectile half = smoke;
+	game::throwFrame(half, {0, 0, 1}, {0, 0, 45}, 4, 0.5f, 7);
+	CHECK(near(half.spin, smoke.spin * 0.5f));
+	const physics::Mat3 before = smoke.rotation;
+	const physics::Vec3 spin = smoke.spin;
+	for (int i = 0; i < 30; ++i) {
+		game::moveProjectile(smoke, 1 / 30.0f, -14.73f);
+	}
+	// A second's turn by |spin| radians about the spin's axis.
+	const float angle = std::acos(std::clamp(physics::dot(before.rows[2], smoke.rotation.rows[2]), -1.0f, 1.0f));
+	CHECK(near(smoke.spin, spin) && angle > 0.5f);
+	const physics::Mat3 drawn = client::roundFrame(smoke);
+	CHECK(near(drawn.rows[0], smoke.rotation.rows[0]) && near(drawn.rows[2], smoke.rotation.rows[2]));
+	// Bounces.
+	CHECK(near(game::bounceSpin({0, -2, 3}, {0, 0, 4}), {0, 2, -3}));
+	CHECK(near(game::bounceSpin({0, -2, 3}, {0, 0.5f, 0.5f}), {0, 1, -1.5f}));
+	CHECK(near(game::bounceSpin({0, -2, 3}, {0, 0.3f, 0}), {}));
+	// Lying, it keeps the frame it came to rest with.
+	smoke.resting = true;
+	CHECK(near(client::roundFrame(smoke).rows[1], smoke.rotation.rows[1]));
 }
 
 // The engine: on from the launch after startDelay; with targetActivation
@@ -132,6 +184,11 @@ TEST(RoundVisuals_BundlesAndMeshes)
 		CHECK(meshes[0].objectTemplate == missile);
 		CHECK(near(meshes[0].position, {1, 2, 3}) && near(meshes[0].rotation.rows[2], {0, 0, 1}));
 	}
+	// Seen through its own camera, the rocket isn't drawn (from inside its
+	// nose the original culls every face of it).
+	meshes.clear();
+	visuals.meshes(rounds, meshes, rocket.serial);
+	CHECK(meshes.empty());
 
 	effects::EffectManager manager(templates);
 	effects::ObjectEffects objects(templates);

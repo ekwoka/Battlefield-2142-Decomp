@@ -291,8 +291,9 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	// The node's type (physicsType RotationalPoint, as every shipped round
 	// that sets the offset names it).
 	if (const auto type = t.settings().find("physicsType");
-		type != t.settings().end() && sameText(type->second, "RotationalPoint")) {
+		type != t.settings().end() && (sameText(type->second, "RotationalPoint") || type->second == "2")) {
 		s.collisionOffset = vector3(t, "centerOfCollisionOffset");
+		s.rotationalPoint = true;
 	}
 	s.remote = s.explosionMaterial >= 0 && s.explosionDamage > 0 && s.triggerRadius <= 0 && s.timeToLive.a > 1000; // CRD_NONE/9999
 	return s;
@@ -472,6 +473,10 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 		const auto alt = t.settings().find("fire.altFireInput");
 		s.softThrow = alt != t.settings().end() && !alt->second.empty();
 		s.showAfterReloadTicks = static_cast<int>(std::nearbyint(number(t, "fire.showWeaponAfterReloadDelay", 0) * 30));
+		if (const auto turn = t.settings().find("fire.projectileStartRotation"); turn != t.settings().end()) {
+			std::sscanf(turn->second.c_str(), "%f/%f/%f", &s.startRotation.x, &s.startRotation.y, &s.startRotation.z);
+		}
+		s.randomRotationSpeed = number(t, "fire.randomRotationSpeed", 0);
 	}
 	s.allowReloadWithFullMag = number(t, "ammo.allowReloadWithFullMag", 0) != 0;
 	if (const auto link = t.settings().find("ammo.magLinkWeapon"); link != t.settings().end()) {
@@ -1013,6 +1018,47 @@ void followMagnet(Projectile& p, const physics::Vec3& aim, const physics::Vec3& 
 	}
 }
 
+physics::Vec3 bounceSpin(const physics::Vec3& spin, const physics::Vec3& velocity)
+{
+	float scale = physics::lengthSquared(velocity);
+	if (scale >= 1) {
+		scale = 1;
+	} else if (scale < 0.1f) {
+		scale = 0;
+	}
+	return spin * -scale;
+}
+
+void throwFrame(Projectile& p, const physics::Vec3& direction, const physics::Vec3& startRotation, float speed,
+	float power, uint32_t id)
+{
+	constexpr float kDegrees = 57.29578f;
+	if (!p.settings || !p.settings->rotationalPoint) {
+		return;
+	}
+	// The fire frame (the round's matrix as the fire component made it,
+	// 0x005f31d0): z along the throw, level x.
+	const float across = std::sqrt(direction.x * direction.x + direction.z * direction.z);
+	const physics::Mat3 fire = physics::Mat3::fromYawPitchRoll(
+		{std::atan2(direction.x, direction.z) * kDegrees, -std::atan2(direction.y, across) * kDegrees, 0});
+	p.turns = true;
+	p.rotation = physics::Mat3::fromYawPitchRoll(startRotation) * fire;
+	p.spin = {};
+	if (speed > 0) {
+		// Two draws of 0x0042b230 from the round's id: ceil(draw x s)
+		// with the draw ((h | 0x80) >> 7) + 1) x 2^-24 in (0, 1].
+		uint32_t state = id & 0x7fffffffu;
+		const auto draw = [&state, speed] {
+			const uint32_t h = lehmerNext(state);
+			const double unit = static_cast<double>((static_cast<int32_t>(h | 0x80u) >> 7) + 1) * 5.9604645e-08;
+			return static_cast<float>(std::ceil(unit * speed));
+		};
+		const float yaw = draw();
+		const float roll = draw();
+		p.spin = physics::Vec3 {0, -yaw, roll} * power;
+	}
+}
+
 physics::Vec3 noseOf(const Projectile& p)
 {
 	if (physics::lengthSquared(p.heading) > 0.25f) {
@@ -1118,6 +1164,9 @@ void moveProjectile(Projectile& p, float seconds, float gravity)
 	node.position = p.position;
 	node.velocity = p.velocity;
 	node.acceleration = p.acceleration;
+	node.rotational = p.turns; // a RotationalPoint's turn (0x006c6860)
+	node.rotation = p.rotation;
+	node.angularVelocity = p.spin;
 	if (p.settings) {
 		node.drag = p.settings->drag;
 		node.mass = p.settings->mass;
@@ -1127,6 +1176,10 @@ void moveProjectile(Projectile& p, float seconds, float gravity)
 	p.position = node.position;
 	p.velocity = node.velocity;
 	p.acceleration = node.acceleration;
+	if (p.turns) {
+		p.rotation = node.rotation;
+		p.spin = node.angularVelocity;
+	}
 	p.timeLeft -= seconds;
 	if (p.timeLeft <= 0) {
 		p.alive = false;

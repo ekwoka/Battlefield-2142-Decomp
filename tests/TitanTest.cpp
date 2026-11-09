@@ -83,6 +83,12 @@ TEST(Titan_MinskTitansSpawn)
 		std::fprintf(stderr, "  titan %d: %d consoles, %d core, %d doors, %d guns, %d shield, radius %.1f\n", team, consoles,
 			cores, doors, guns, shields, titan->radius);
 		CHECK(consoles == 4 && cores == 1 && doors == 1 && guns == 6 && shields == 1);
+		// The gun hubs' cannons' collisionPart children (0x0063ccc0 with
+		// the cannon's mesh: the AA cannons' base, barrel and firearm, the
+		// ground cannons' base and barrel), posed with the guns.
+		const size_t gunParts = level.world->collisionPartCount(titan->object);
+		std::fprintf(stderr, "  titan %d: %zu collision parts\n", team, gunParts);
+		CHECK(gunParts >= 6);
 	}
 	// VehicleSpawn for both (the Python component's onSpawnEvent 28).
 	CHECK(level.count("VehicleSpawn") == 2);

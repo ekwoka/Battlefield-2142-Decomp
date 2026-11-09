@@ -834,6 +834,27 @@ TEST(MenuBindings_SelectBoxes)
 	const avm1::Value hard = vm.callMember(skills, "selectRow", {avm1::Value(2)});
 	CHECK(vm.toString(vm.getMember(hard, "rowValue")) == "HEADER_hard");
 
+	// The modes in the level scan's order (0x004643d0 / 0x00462750): the
+	// levels as NTFS lists them (without regard to case), each .desc's
+	// modes in the file's order; without a .desc its server.zip's.
+	{
+		NativeRegistry scanNatives;
+		menu::MenuBindings scan(scanNatives, fake.services());
+		scan.readFile = [](const std::string& path, std::string& text) {
+			if (path == "Levels/Minsk/Info/Minsk.desc") {
+				text = "<map><modes><mode type=\"gpm_ti\"></mode><mode type=\"GPM_CQ\"></mode></modes></map>";
+				return true;
+			}
+			if (path == "Levels/Belgrade/Info/Belgrade.desc") {
+				text = "<map><modes><mode type=\"gpm_coop\"></mode><mode type=\"gpm_cq\"></mode></modes></map>";
+				return true;
+			}
+			return false;
+		};
+		scan.setMaps({{"Minsk", "gpm_cq", 32}, {"Minsk", "gpm_ti", 32}, {"aegis", "gpm_nv", 16}, {"Belgrade", "gpm_cq", 16}});
+		CHECK((scan.allGameModes() == std::vector<std::string> {"gpm_nv", "gpm_coop", "gpm_cq", "gpm_ti"}));
+	}
+
 	// gpm_sp and sp1 are not offered (0x10069160).
 	const avm1::Value modes = box("gameModes 4 1");
 	CHECK(vm.toNumber(vm.getMember(modes, "m_rowCount")) == 3); // All, then each mode once

@@ -21,6 +21,7 @@
 #include "Net/GameClient.h"
 #include "Net/GameServer.h"
 #include "Net/ServerQuery.h"
+#include "Net/ServerSettings.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
 #include "World/TemplateFiles.h"
@@ -169,6 +170,58 @@ TEST(NetHost_QueryAndLanSearch)
 	if (found.size() == 1) {
 		CHECK(found[0].ip == "127.0.0.1" && found[0].port == responder.port());
 		CHECK(found[0].fields.at("hostname") == "Loopback" && found[0].fields.at("hostport") == "17567");
+	}
+}
+
+// The rules a hosted game reports (the server key callback 0x00578bb0
+// over 0x006423d0's fields), found by the LAN search's keys as the server
+// info popup reads them (0x004661a0).
+TEST(NetHost_ReportedRules)
+{
+	dice::hfe::world::ObjectTemplateManager templates;
+	dice::hfe::world::ObjectManager objects;
+	dice::hfe::game::GameWorld round(templates, objects);
+	dice::hfe::game::GameLogic logic;
+	round.startRound();
+	logic.startRound();
+	net::ServerSettings sv;
+	sv.soldierFriendlyFire = 100;
+	sv.roundsPerMap = 2;
+	sv.spawnTime = 12;
+	sv.timeLimit = 1800;
+	sv.ticketRatio = 150;
+	sv.teamRatioPercent = 110;
+	sv.autoBalanceTeam = true;
+	sv.allowSpectators = true;
+	host::HostSetup setup;
+	setup.level = "Camp_Gibraltar";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	setup.settings = &sv;
+	host::HostedGame hosted(round, logic, templates, setup);
+	net::ServerReport report = hosted.report();
+	CHECK(report.keys["bf2142_friendlyfire"] == "1" && report.keys["roundtime"] == "2" && report.keys["timelimit"] == "1800");
+	CHECK(std::atof(report.keys["bf2142_spawntime"].c_str()) == 12.0 && report.keys["bf2142_ticketratio"] == "150");
+	CHECK(std::atof(report.keys["bf2142_teamratio"].c_str()) == 110.0 && report.keys["bf2142_autobalanced"] == "1");
+	CHECK(report.keys["bf2142_allow_spectators"] == "1" && report.keys["bf2142_tkmode"] == "Punish");
+	// Under 100 per cent soldier friendly fire it reports none; a ranked
+	// server its fixed rules (0x00430f60 / 0x00430fa0 / 0x00430fc0).
+	sv.soldierFriendlyFire = 50;
+	sv.ranked = true;
+	report = hosted.report();
+	CHECK(report.keys["bf2142_friendlyfire"] == "0" && report.keys["bf2142_ticketratio"] == "100");
+	CHECK(std::atof(report.keys["bf2142_spawntime"].c_str()) == 15.0 && std::atof(report.keys["bf2142_teamratio"].c_str()) == 100.0);
+
+	// The keys travel: the game's own ids (0x005785b0) by name, asked by the LAN search.
+	CHECK(net::qr2KeyId("bf2142_friendlyfire") == 0x3b && net::qr2KeyId("bf2142_allow_spectators") == 0x51);
+	CHECK(net::qr2KeyId("") == -1);
+	const std::vector<uint8_t>& keys = net::lanQueryKeys();
+	net::ServerReport back;
+	CHECK(net::parseQr2Reply(net::qr2Answer(net::qr2Query(7, keys), report), 7, keys, {}, back));
+	for (const char* key : {"bf2142_friendlyfire", "roundtime", "bf2142_spawntime", "timelimit", "bf2142_ticketratio",
+			 "bf2142_teamratio", "bf2142_autobalanced", "bf2142_allow_spectators"}) {
+		CHECK(back.keys.count(key) == 1 && back.keys[key] == report.keys[key]);
 	}
 }
 

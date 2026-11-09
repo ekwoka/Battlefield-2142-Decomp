@@ -7,13 +7,14 @@ namespace dice::hfe::client {
 physics::Mat3 roundFrame(const game::Projectile& round)
 {
 	constexpr float kDegrees = 57.29578f;
-	// The facing it was thrown with (a mine's yaw, GameWorld's radius
-	// trigger frame).
-	physics::Mat3 frame = physics::Mat3::fromYawPitchRoll({round.yaw, 0, 0});
+	// A RotationalPoint round's own frame, which its node turns by its
+	// spin in flight and keeps where it lies (0x006c6860); else the facing
+	// it was thrown with (a mine's yaw, GameWorld's radius trigger frame).
+	const physics::Mat3 frame = round.turns ? round.rotation : physics::Mat3::fromYawPitchRoll({round.yaw, 0, 0});
 	if (round.stuck) {
 		return game::stuckFrame(frame, round.stuckNormal);
 	}
-	if (round.resting) {
+	if (round.resting || round.turns) {
 		return frame;
 	}
 	const physics::Vec3 nose = game::noseOf(round);
@@ -80,10 +81,10 @@ void RoundVisuals::appendEffectStates(const std::vector<game::Projectile>& round
 	m_engines = std::move(engines);
 }
 
-void RoundVisuals::meshes(const std::vector<game::Projectile>& rounds, std::vector<Mesh>& out)
+void RoundVisuals::meshes(const std::vector<game::Projectile>& rounds, std::vector<Mesh>& out, uint32_t viewedFrom)
 {
 	for (const game::Projectile& round : rounds) {
-		if (!round.alive || !round.settings || round.ghostObject != 0) {
+		if (!round.alive || !round.settings || round.ghostObject != 0 || (viewedFrom != 0 && round.serial == viewedFrom)) {
 			continue;
 		}
 		const Look& look = lookOf(round);

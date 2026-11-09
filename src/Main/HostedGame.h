@@ -149,6 +149,8 @@ public:
 	HostedGame(game::GameWorld& round, game::GameLogic& logic, world::ObjectTemplateManager& templates, HostSetup setup);
 	~HostedGame();
 	bool start();
+	// What the query port answers (the qr2 callbacks: server keys, players, teams).
+	net::ServerReport report() const;
 	// A new level (the next map, or the same one again for a new round) on
 	// the same connections: the clients get its level block and join it.
 	void changeLevel(game::GameWorld& round, game::GameLogic& logic, world::ObjectTemplateManager& templates,
@@ -463,7 +465,8 @@ private:
 	uint16_t ghostOfObject(uint32_t object, int part = 0) const;
 	std::string nameOf(int player) const;
 	void sendToPlaying(const net::GameEvent& event);
-	net::ServerReport report() const;
+	// The rules' keys of the report (0x006423d0's fields).
+	void addRuleKeys(net::ServerReport& r) const;
 
 	game::GameWorld* m_round;
 	game::GameLogic* m_logic;

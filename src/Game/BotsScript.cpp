@@ -464,7 +464,7 @@ std::vector<uint32_t> BotManager::heardVehicles(int player) const
 // each with a team (adaptor slot 0x120) and an Armament or Mobile part
 // makes a sound sphere (hearingReach), and every bot of another team
 // within it (3-D), not dead (slot 0xb8) or slot 0x18c, is told (bot slot
-// 0x164 = 0x100969b0, not for a scripted bot, +0x264) -> 0x100ec100: not
+// 0x164 = 0x100969b0, not for an auto controller, +0x264) -> 0x100ec100: not
 // within 1.5 s of the bot's own last round (+0xc0, 0x10097a60 from the
 // rounds' event 0x1004e910), not its own object, not its team, and a
 // soldier source only for a soldier listener (the listener's flag bit 9);

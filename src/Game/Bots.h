@@ -459,7 +459,7 @@ struct WeaponChoice {
 	bool soldierBot = true;       // the bot's object is ITSoldier
 	bool targetSoldier = true;
 	bool targetHuman = true;      // the target is no bot (the bot manager's slot 0x20 has none)
-	bool targetScripted = false;  // a target bot's +0x264 (vt+0x27c): x0.5
+	bool targetAutoController = false; // the target's bot is an auto controller (+0x264, vt+0x27c): x0.5
 	float distance = 0;
 	float targetEmpLevel = 0;     // 0x10074c60's 3 - level, for EMP weapons
 	bool inHandMelee = false;     // the weapon in hand is CloseCombat or Revive
@@ -1021,6 +1021,18 @@ private:
 		std::string behaviour = "Idle";
 		float lastThink = -1;
 		float spawnedAt = 0;
+		// +0x264 (vt+0x278 sets it, 0x1009b3e0; vt+0x27c reads it,
+		// 0x1009b3f0): the bot is an auto controller. The constructor takes
+		// it as its last argument (0x1009ac30): 1 from the auto controller
+		// maker (0x100c8d20, "Activating autoController"), 0 from the two
+		// bot makers (0x100c84b0, 0x100c8950); IAIAutoControllersManager
+		// (vtbl 0x10114630) sets it again when it takes an object over
+		// (0x1004d140, 0x1004d8e0). The auto controllers run the objects
+		// with an autoControllerTemplateName (the sentry and recon drones,
+		// the Titans' silos), which the rewrite runs in GameWorld and
+		// Titans rather than as bots, so no bot here is one; kept so the
+		// gates read as the original's.
+		bool autoController = false;
 		std::vector<Known> known;
 		std::map<uint32_t, KnownVehicle> knownVehicles;
 		float firedAt = -1e9f; // +0xc0: the bot's last round (slot 0x314, 0x10097a60); hearing waits 1.5 s

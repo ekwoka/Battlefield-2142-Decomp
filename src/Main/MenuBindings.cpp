@@ -1544,7 +1544,7 @@ void MenuBindings::bindLists()
 			// The game modes' select box (0x100690b0; filled by 0x10069160,
 			// rows drawn by 0x100689a0): "gameModes <rows> <all>" lists the
 			// mod's game modes (its list +0x10c, each mode once in the order
-			// the level scan meets them; here the levels in name order),
+			// the level scan meets them: allGameModes),
 			// after an "All" row when <all> is 1. A mode shows as its
 			// TEXT_<id> when that has a translation, else its name in the mod
 			// (ModInfo slot 0x48) unless "N/A", else its id. Chosen: "All"
@@ -2399,12 +2399,55 @@ std::string MenuBindings::hoursMinutes(std::string format, int minutes)
 	return format;
 }
 
+// The mod's game modes (ModInfo +0x10c) in the order the level scan meets
+// them. The scan (0x004643d0) lists <mod>/Levels/ with the file system's
+// directory listing (slot 0x34; FindFirstFileW / FindNextFileW in turn,
+// 0x0069f530, which on NTFS gives the names in upper-cased order) and reads
+// each level's Info/<level>.desc (0x00462750): every <mode type="...">
+// under <modes> in the file's order goes to the end of the list unless it
+// is there already (compared without regard to case, 0x0065aed0). A level
+// whose .desc can't be read adds nothing in the original; here it adds the
+// modes its server.zip has, in name order.
 std::vector<std::string> MenuBindings::allGameModes() const
 {
+	const auto folded = [](std::string text, int (*fold)(int)) {
+		for (char& c : text) {
+			c = static_cast<char>(fold(static_cast<unsigned char>(c)));
+		}
+		return text;
+	};
+	const auto upperText = [&](const std::string& text) { return folded(text, ::toupper); };
+	const auto lowerText = [&](const std::string& text) { return folded(text, ::tolower); };
+	std::vector<std::string> levels;
+	for (const MenuMap& map : m_maps) {
+		if (std::find(levels.begin(), levels.end(), map.level) == levels.end()) {
+			levels.push_back(map.level);
+		}
+	}
+	std::stable_sort(levels.begin(), levels.end(), [&upperText](const std::string& a, const std::string& b) {
+		return upperText(a) < upperText(b);
+	});
 	std::vector<std::string> modes;
-	for (const MenuMap& map : m_maps) { // sorted by level, then mode
-		if (!map.gameMode.empty() && std::find(modes.begin(), modes.end(), map.gameMode) == modes.end()) {
-			modes.push_back(map.gameMode);
+	const auto add = [&modes, &lowerText](const std::string& mode) {
+		if (mode.empty()) {
+			return;
+		}
+		const std::string lower = lowerText(mode);
+		if (std::none_of(modes.begin(), modes.end(), [&](const std::string& m) { return lowerText(m) == lower; })) {
+			modes.push_back(mode);
+		}
+	};
+	for (const std::string& level : levels) {
+		if (const LevelText* text = levelText(level)) {
+			for (const std::string& mode : text->modes) {
+				add(mode);
+			}
+			continue;
+		}
+		for (const MenuMap& map : m_maps) { // sorted by level, then mode
+			if (map.level == level) {
+				add(map.gameMode);
+			}
 		}
 	}
 	return modes;

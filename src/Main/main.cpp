@@ -7099,7 +7099,20 @@ int runGame(Options& options, Session& session)
 		const auto nextMapDue = [&] {
 			return (serverNextMap && !session.playlist.empty()) || (!session.playlist.empty() && sinceEnd >= kEndDelay);
 		};
+		// The scripts' end-of-round text (the debriefing's records): a
+		// joined game's comes in data block 8, which can follow the round's
+		// end; the debriefing takes it when it comes (0x0047c7a0).
+		const auto endOfRoundText = [&] {
+			net::RemoteWorld::EndOfRoundData data;
+			return !session.client ? gameLogic.endOfRoundData()
+				: session.client->world().endOfRoundData(data) ? data.text : std::string();
+		};
 		const auto showEndOfRound = [&] {
+			if (endOfRoundShown && endOfRoundBindings.summary().endOfRoundText != endOfRoundText()) {
+				dice::hfe::menu::RoundSummary summary = endOfRoundBindings.summary();
+				summary.endOfRoundText = endOfRoundText();
+				endOfRoundBindings.setSummary(summary);
+			}
 			if (endOfRoundShown || options.dedicated) {
 				return;
 			}
@@ -7109,6 +7122,7 @@ int runGame(Options& options, Session& session)
 			dice::hfe::menu::RoundSummary summary = session.client
 				? remoteRoundSummary(options, session.client->world())
 				: roundSummary(options, round, gameLogic, scoreOf, "BF2142 server");
+			summary.endOfRoundText = endOfRoundText();
 			if (session.menuBindings) {
 				session.menuBindings->recordRound(summary); // the soldier's stats and rank
 			}
@@ -7243,6 +7257,73 @@ int runGame(Options& options, Session& session)
 				round.joinSquad(round.localPlayer(), round.openSquad(options.playTeam));
 				std::printf("playing %s at %.1f/%.1f/%.1f\n", player->objectTemplate()->name().c_str(),
 					player->position().x, player->position().y, player->position().z);
+				// --actions: the player's inputs, a tick each unless a count
+				// follows ("fire:30 altfire:3 reload wait:60 item:2 firemode prone:20
+				// crouch:20 jump turn:90 pitch:-10 sprint:30 forward:30 up:150"), and
+				// what the weapon in hand says after each.
+				const auto runActions = [&] {
+					std::istringstream actions(options.actions);
+					for (std::string command; actions >> command;) {
+						const size_t colon = command.find(':');
+						const std::string op = command.substr(0, colon);
+						const float value = colon == std::string::npos ? 1.0f : static_cast<float>(std::atof(command.c_str() + colon + 1));
+						const int ticks = std::max(1, static_cast<int>(value));
+						game::GameWorld::PlayerInfo me;
+						round.playerInfo(round.localPlayer(), me);
+						game::SoldierInput act;
+						act.aimPitch = me.aimPitch;
+						bool known = true;
+						if (op == "fire" || op == "altfire" || op == "wait" || op == "forward" || op == "sprint" || op == "prone"
+							|| op == "crouch") {
+							act.fire = op == "fire";
+							act.altFire = op == "altfire";
+							act.throttle = op == "forward" || op == "sprint" ? 1.0f : 0.0f;
+							act.sprint = op == "sprint";
+							act.pose = op == "prone" ? game::SoldierPose::Prone : op == "crouch" ? game::SoldierPose::Crouch
+																							   : game::SoldierPose::Stand;
+							for (int i = 0; i < ticks; ++i) {
+								round.setPlayerInput(act);
+								step();
+							}
+						} else if (op == "reload" || op == "firemode" || op == "jump" || op == "item" || op == "use") {
+							act.reload = op == "reload";
+							act.toggleFireRate = op == "firemode";
+							act.jump = op == "jump";
+							act.use = op == "use";
+							act.selectItem = op == "item" ? ticks : 0;
+							round.setPlayerInput(act);
+							step();
+							round.setPlayerInput({});
+							step();
+						} else if (op == "up") {
+							// Lifted that many metres (to open a parachute from height).
+							round.setSoldierPosition(me.soldier, me.position + physics::Vec3 {0, value, 0});
+							step();
+						} else if (op == "turn" || op == "pitch") {
+							act.turn = op == "turn" ? value : 0.0f;
+							act.aimPitch = op == "pitch" ? value : me.aimPitch;
+							round.setPlayerInput(act);
+							step();
+						} else {
+							known = false;
+							std::fprintf(stderr, "actions: unknown command %s\n", command.c_str());
+						}
+						if (known) {
+							round.playerInfo(round.localPlayer(), me);
+							const game::FireArm* gun = round.playerWeapon();
+							std::string held;
+							for (const auto& [slot, name] : me.carried) {
+								if (slot == me.inHandSlot) {
+									held = name;
+								}
+							}
+							std::printf("action %s: %s slot %d %s, %d rounds, %d magazines, fire mode %d%s%s\n", command.c_str(),
+								me.alive ? "alive" : "dead", me.inHandSlot, held.c_str(), gun ? gun->roundsInMag() : -1,
+								gun ? gun->magsLeft() : -1, gun ? gun->fireMode() : -1, gun && gun->reloading() ? ", reloading" : "",
+								me.vehicle ? ", in a vehicle" : "");
+						}
+					}
+				};
 				if (!options.drive.empty()) {
 					// A vehicle 2.5 m ahead of the soldier: enter it and drive.
 					world::ObjectTemplate* vehicle = templates.find(options.drive);
@@ -7315,6 +7396,7 @@ int runGame(Options& options, Session& session)
 							game::GameWorld::PlayerInfo me;
 							round.playerInfo(round.localPlayer(), me);
 							std::printf("  in seat %d of %zu\n", me.seat + 1, round.vehicleSeats(me.vehicle).size());
+							runActions(); // --actions in the seat
 						} else {
 						// The gunner's seat (F2): turn the gun a quarter round and fire.
 						game::SoldierInput gunner;
@@ -7402,65 +7484,7 @@ int runGame(Options& options, Session& session)
 							step();
 						}
 					}
-					// --actions: the player's inputs, a tick each unless a count
-					// follows ("fire:30 reload wait:60 item:2 firemode prone:20
-					// crouch:20 jump turn:90 pitch:-10 sprint:30 forward:30"), and
-					// what the weapon in hand says after each.
-					std::istringstream actions(options.actions);
-					for (std::string command; actions >> command;) {
-						const size_t colon = command.find(':');
-						const std::string op = command.substr(0, colon);
-						const float value = colon == std::string::npos ? 1.0f : static_cast<float>(std::atof(command.c_str() + colon + 1));
-						const int ticks = std::max(1, static_cast<int>(value));
-						game::GameWorld::PlayerInfo me;
-						round.playerInfo(round.localPlayer(), me);
-						game::SoldierInput act;
-						act.aimPitch = me.aimPitch;
-						bool known = true;
-						if (op == "fire" || op == "wait" || op == "forward" || op == "sprint" || op == "prone" || op == "crouch") {
-							act.fire = op == "fire";
-							act.throttle = op == "forward" || op == "sprint" ? 1.0f : 0.0f;
-							act.sprint = op == "sprint";
-							act.pose = op == "prone" ? game::SoldierPose::Prone : op == "crouch" ? game::SoldierPose::Crouch
-																							   : game::SoldierPose::Stand;
-							for (int i = 0; i < ticks; ++i) {
-								round.setPlayerInput(act);
-								step();
-							}
-						} else if (op == "reload" || op == "firemode" || op == "jump" || op == "item" || op == "use") {
-							act.reload = op == "reload";
-							act.toggleFireRate = op == "firemode";
-							act.jump = op == "jump";
-							act.use = op == "use";
-							act.selectItem = op == "item" ? ticks : 0;
-							round.setPlayerInput(act);
-							step();
-							round.setPlayerInput({});
-							step();
-						} else if (op == "turn" || op == "pitch") {
-							act.turn = op == "turn" ? value : 0.0f;
-							act.aimPitch = op == "pitch" ? value : me.aimPitch;
-							round.setPlayerInput(act);
-							step();
-						} else {
-							known = false;
-							std::fprintf(stderr, "actions: unknown command %s\n", command.c_str());
-						}
-						if (known) {
-							round.playerInfo(round.localPlayer(), me);
-							const game::FireArm* gun = round.playerWeapon();
-							std::string held;
-							for (const auto& [slot, name] : me.carried) {
-								if (slot == me.inHandSlot) {
-									held = name;
-								}
-							}
-							std::printf("action %s: %s slot %d %s, %d rounds, %d magazines, fire mode %d%s%s\n", command.c_str(),
-								me.alive ? "alive" : "dead", me.inHandSlot, held.c_str(), gun ? gun->roundsInMag() : -1,
-								gun ? gun->magsLeft() : -1, gun ? gun->fireMode() : -1, gun && gun->reloading() ? ", reloading" : "",
-								me.vehicle ? ", in a vehicle" : "");
-						}
-					}
+					runActions();
 					std::printf("first person: %s, eye %.2f m over the origin, field of view %.3f rad, zoom level %d%s;"
 								" playing",
 						playerCamera.firstPerson ? "on" : "off", playerCamera.eyeHeight(), playerCamera.fieldOfView(),
@@ -7702,9 +7726,10 @@ int runGame(Options& options, Session& session)
 		sources.particles = &particleSettings;
 		sources.overgrowth = &overgrowthSettings;
 		// The decals' surfaces: the hit object's collision faces.
-		sources.collisionFaces = [&round](uint32_t object, uint32_t owner, const effects::Vec3& center, float radius,
-									 std::vector<std::array<effects::Vec3, 3>>& faces) {
-			const physics::CollisionWorld* mesh = round.projectileCollision(object);
+		sources.collisionFaces = [&round](uint32_t object, uint32_t owner, int part, const effects::Vec3& center,
+									 float radius, std::vector<std::array<effects::Vec3, 3>>& faces) {
+			const physics::CollisionWorld* mesh =
+				part >= 0 ? round.partCollision(object, part) : round.projectileCollision(object);
 			if (!mesh) {
 				return;
 			}
@@ -7714,6 +7739,9 @@ int runGame(Options& options, Session& session)
 						faces.push_back({a, b, c});
 					}
 				});
+		};
+		sources.collisionPartFrame = [&round](uint32_t object, int part, effects::Mat3& rotation, effects::Vec3& position) {
+			return round.collisionPartFrame(object, part, rotation, position);
 		};
 		sources.wind = &windSettings;
 		sources.quality = &qualitySettings;
@@ -7797,10 +7825,18 @@ int runGame(Options& options, Session& session)
 		};
 		sources.objectEffects = &objectEffects;
 		std::vector<client::RoundVisuals::Mesh> roundMeshes;
+		std::vector<game::GameWorld::PlacedMesh> armorMeshes;
 		sources.placedTemplates = [&](std::vector<render::LevelSources::PlacedTemplate>& out) {
 			roundMeshes.clear();
-			roundVisuals.meshes(round.projectiles(), roundMeshes);
+			game::GameWorld::ProjectileCamera view;
+			const bool fromRound = round.projectileCamera(round.localPlayer(), view);
+			roundVisuals.meshes(round.projectiles(), roundMeshes, fromRound ? view.serial : 0);
 			for (const client::RoundVisuals::Mesh& mesh : roundMeshes) {
+				out.push_back({mesh.objectTemplate, mesh.position, mesh.rotation});
+			}
+			armorMeshes.clear();
+			round.armorEffectMeshes(armorMeshes); // the armour effects' own meshes (the IFV cells' glow)
+			for (const game::GameWorld::PlacedMesh& mesh : armorMeshes) {
 				out.push_back({mesh.objectTemplate, mesh.position, mesh.rotation});
 			}
 		};

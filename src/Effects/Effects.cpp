@@ -1217,6 +1217,29 @@ bool EffectManager::spawnDecal(const std::string& name, const Vec3& position, co
 	return true;
 }
 
+bool EffectManager::spawnPartDecal(const std::string& name, const Vec3& position, const Vec3& normal, uint32_t object,
+	int part, const Vec3& partPosition, const Mat3& partRotation)
+{
+	// The object's set and its parts' sets age together here (they are
+	// drawn together): the root's ownerDrawn stands for the part's +0x1a.
+	const bool unseen = std::any_of(m_decals.begin(), m_decals.end(),
+		[object](const Decal& d) { return d.object == object && !d.ownerDrawn; });
+	const world::ObjectTemplate* t = unseen ? m_templates.find(name) : nullptr;
+	if (t && !DecalTemplate::fromTemplate(*t).isStatic) {
+		return false;
+	}
+	if (!addDecal(name, position, normal, 0, object)) {
+		return false;
+	}
+	Decal& decal = m_decals.back();
+	decal.object = object;
+	decal.part = part;
+	decal.position = partRotation.untransform(decal.position - partPosition);
+	decal.normal = partRotation.untransform(decal.normal);
+	decal.tangent = partRotation.untransform(decal.tangent);
+	return true;
+}
+
 void EffectManager::dropDecals(uint32_t object)
 {
 	m_staticDecalIds.erase(object);

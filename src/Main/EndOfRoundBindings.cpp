@@ -5,10 +5,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <regex>
 #include <sstream>
+#include <tuple>
 
 namespace dice::hfe::menu {
 
@@ -123,7 +125,155 @@ EndOfRoundBindings::EndOfRoundBindings(ui::NativeRegistry& natives) : m_natives(
 	bindLists();
 }
 
-void EndOfRoundBindings::setSummary(RoundSummary summary) { m_summary = std::move(summary); }
+void EndOfRoundBindings::setSummary(RoundSummary summary)
+{
+	m_summary = std::move(summary);
+	const RoundSummary& s = m_summary;
+	const std::string me = s.localPlayer >= 0 && s.localPlayer < static_cast<int>(s.players.size())
+		? s.players[static_cast<size_t>(s.localPlayer)].name : std::string();
+	m_debriefing = parseDebriefing(s.endOfRoundText, s.players, me);
+}
+
+// --- The debriefing's records (0x0047c7a0)
+
+namespace {
+
+// A record of the text: one player's with one kit, weapon or vehicle
+// (0x34 bytes for kits and vehicles, 0x38 for weapons: the player, the
+// index, the name, the team, then the numbers).
+struct DebriefingRecord {
+	DebriefingEntry entry;
+	bool local = false;
+};
+
+// The share of a minute: the original's 0.016666668.
+float perMinute(int count, int seconds)
+{
+	if (seconds == 0) {
+		return 0;
+	}
+	const float value = static_cast<float>(count) / (static_cast<float>(seconds) * 0.016666668f);
+	// Anything above 0 but under 0.01 shows as 0.01 (0x3c23d70a).
+	return value > 0 && value < 0.01f ? 0.01f : value;
+}
+
+} // namespace
+
+// 0x0047c7a0 reads the text's "\\"-separated key and value pairs. A key is
+// <name><index>_<player>: the name runs to the first digit or '_', the
+// index is the number there (-1 without), the player the name after the
+// first '_', found by name (a name the game doesn't know is skipped). The
+// records it keeps, by key:
+//   ktw / ks: a kit's seconds (rounded) and score;
+//   wk / wa / wtw: a weapon's kills, accuracy and seconds;
+//   vtw / vk: a vehicle's seconds and kills;
+// each with its count per minute once both are known. Each category is
+// then sorted, best first: kits by score, then score per minute, then
+// time (0x004732b0); weapons by kills, kills per minute, time
+// (0x004733a0); vehicles the same (0x00473490). The player's first record
+// is place 0; then every record with the same index counts toward
+// "position / players" (+0x51c.. +0x530), and the first teammate's and
+// the first opponent's among them (the player's slot 0x3e, its team) are
+// places 1 and 2.
+Debriefing parseDebriefing(const std::string& text, const std::vector<EndOfRoundPlayer>& players,
+	const std::string& localName)
+{
+	std::vector<std::string> tokens;
+	for (size_t at = 0; at <= text.size();) {
+		const size_t end = std::min(text.find('\\', at), text.size());
+		if (end > at) {
+			tokens.push_back(text.substr(at, end - at));
+		}
+		at = end + 1;
+	}
+	std::array<std::vector<DebriefingRecord>, 3> records; // kits, weapons, vehicles
+	for (size_t i = 0; i + 1 < tokens.size(); i += 2) {
+		const std::string& key = tokens[i];
+		const std::string& value = tokens[i + 1];
+		const size_t stop = key.find_first_of("_0123456789");
+		const std::string kind = key.substr(0, stop);
+		int index = -1;
+		if (stop != std::string::npos && std::isdigit(static_cast<unsigned char>(key[stop]))) {
+			index = std::atoi(key.c_str() + stop);
+		}
+		const size_t underscore = key.find('_');
+		if (underscore == std::string::npos) {
+			continue;
+		}
+		const std::string name = key.substr(underscore + 1);
+		const auto player = std::find_if(players.begin(), players.end(), [&](const EndOfRoundPlayer& p) { return p.name == name; });
+		if (player == players.end()) {
+			continue;
+		}
+		int category = -1;
+		if (kind == "ktw" || kind == "ks") {
+			category = 0;
+		} else if (kind == "wk" || kind == "wa" || kind == "wtw") {
+			category = 1;
+		} else if (kind == "vtw" || kind == "vk") {
+			category = 2;
+		}
+		if (category < 0) {
+			continue;
+		}
+		std::vector<DebriefingRecord>& list = records[static_cast<size_t>(category)];
+		auto record = std::find_if(list.begin(), list.end(),
+			[&](const DebriefingRecord& r) { return r.entry.name == name && r.entry.index == index; });
+		if (record == list.end()) {
+			DebriefingRecord added;
+			added.entry.index = index;
+			added.entry.name = name;
+			added.entry.team = player->team;
+			added.local = !localName.empty() && name == localName;
+			list.push_back(added);
+			record = list.end() - 1;
+		}
+		DebriefingEntry& e = record->entry;
+		if (kind == "ktw" || kind == "wtw" || kind == "vtw") {
+			e.seconds = static_cast<int>(std::lround(std::atof(value.c_str())));
+		} else if (kind == "wa") {
+			e.accuracy = static_cast<float>(std::atof(value.c_str()));
+			if (e.accuracy > 0 && e.accuracy < 0.01f) {
+				e.accuracy = 0.01f;
+			}
+		} else {
+			e.count = std::atoi(value.c_str());
+		}
+		e.perMinute = perMinute(e.count, e.seconds);
+	}
+	Debriefing out;
+	for (size_t c = 0; c < records.size(); ++c) {
+		std::vector<DebriefingRecord>& list = records[c];
+		std::stable_sort(list.begin(), list.end(), [](const DebriefingRecord& a, const DebriefingRecord& b) {
+			// Kits by score first, weapons and vehicles by kills (the
+			// count in all three), then the count per minute, the time.
+			return std::make_tuple(a.entry.count, a.entry.perMinute, a.entry.seconds)
+				> std::make_tuple(b.entry.count, b.entry.perMinute, b.entry.seconds);
+		});
+		DebriefingCategory& category = out.categories[c];
+		const auto mine = std::find_if(list.begin(), list.end(), [](const DebriefingRecord& r) { return r.local; });
+		if (mine == list.end()) {
+			continue;
+		}
+		category.places[0] = mine->entry;
+		for (const DebriefingRecord& r : list) {
+			if (r.entry.index != mine->entry.index) {
+				continue;
+			}
+			++category.players;
+			if (r.local) {
+				category.position = category.players;
+			} else if (r.entry.team == mine->entry.team) {
+				if (category.places[1].index < 0) {
+					category.places[1] = r.entry;
+				}
+			} else if (category.places[2].index < 0) {
+				category.places[2] = r.entry;
+			}
+		}
+	}
+	return out;
+}
 
 void EndOfRoundBindings::setLoading(float progress)
 {
@@ -355,14 +505,86 @@ void EndOfRoundBindings::bindEndOfRound()
 		return Value(format("%d. %s", squad.number, squadName(squad)));
 	});
 
-	// The debriefing's best kit, weapon and vehicle: no records yet.
-	for (const char* member : {"getKitPosition", "getWeaponPosition", "getVehiclePosition"}) {
-		bind(member, [round] { return round(Value("-/-")); });
+	// The debriefing (see parseDebriefing): the player's place among those
+	// with its best kit, weapon and vehicle, "%d/%d" of the record's
+	// +0x51c / +0x520 (0x1001e120), +0x524 / +0x528 (0x1001e390) and
+	// +0x52c / +0x530 (0x1001e410); and their pictures.
+	static const char* const kPositions[] = {"getKitPosition", "getWeaponPosition", "getVehiclePosition"};
+	static const char* const kImages[] = {"getKitImage", "getWeaponImage", "getVehicleImage"};
+	static const char* const kHeaders[] = {"getKitHeader", "getWeaponHeader", "getVehicleHeader"};
+	for (int c = 0; c < 3; ++c) {
+		bind(kPositions[c], [this, c, round] {
+			const DebriefingCategory& category = m_debriefing.categories[static_cast<size_t>(c)];
+			return round(Value(std::to_string(category.position) + "/" + std::to_string(category.players)));
+		});
+		bind(kImages[c], [this, c, round] { return round(Value(debriefingImage(c, false, std::string()))); });
+		n.setFunction(kEndOfRound, kHeaders[c], [this, c, round](Interpreter& vm, const Args&) {
+			// The kit's header is in the game's language (SwiffHost slot 0x3a8).
+			const Value name = m_natives.call(vm, "dice.bf2.Locale", "getLanguage", {});
+			const std::string language = name.isUndefined() ? "english" : lower(vm.toString(name));
+			return round(Value(debriefingImage(c, true, language)));
+		});
 	}
-	for (const char* member : {"getKitImage", "getWeaponImage", "getVehicleImage", "getKitHeader", "getWeaponHeader",
-			 "getVehicleHeader"}) {
-		bind(member, [round] { return round(Value("")); });
+}
+
+// The debriefing's pictures, by the player's best kit, weapon or vehicle
+// (SwiffPlayer's name tables: kits 0x10126f70, weapons 0x10126a30 (32),
+// vehicles 0x10126db0 (16); "" for none). <team> is the player's team's
+// name (the record's +0x504 through SwiffHost slot 0x184), lower-cased as
+// the shipped files are named.
+//   kits (0x1001e1a0 / 0x1001e270): images/kits/<team>_<kit>.png and
+//     images/kits/<kit>_header_<language>.png;
+//   weapons (0x1001f4a0 / 0x1001f640): images/weapons/<prefix><weapon>.png
+//     and ..._header_english.png, the prefix "<team>_" for the armies' own
+//     weapons (0x1001b8e0: 0..11 and 0x12), Pac's as "as_"; the picture is
+//     "" for an index past 31;
+//   vehicles (0x1001f790 / 0x1001f8b0): images/vehicles/<prefix><vehicle>.png
+//     and ..._header_english.png, the prefix for 0, 1, 2, 4, 5, 6 and 10
+//     (0x1001ba60).
+// The weapon picture's "images/weapons/Best_buy.png" (an EU player's
+// weapon 1 when the record's +0x4fc is set) is left out: nothing in the
+// end-of-round text sets that flag.
+std::string EndOfRoundBindings::debriefingImage(int category, bool header, const std::string& language) const
+{
+	static const char* const kKits[] = {"recon", "assault", "engineer", "support"};
+	static const char* const kWeapons[] = {"sni", "ar_rifle", "av", "smg", "mg", "handgun", "", "", "", "", "", "",
+		"knife", "Unl_Carbine", "unl_adv_sni", "Unl_Har_Rifle", "Unl_Lar_Rifle", "Unl_Av_rifle", "aa", "unl_hmg",
+		"unl_shotgun", "Unl_Mine_Motion", "unl_grenade_frag", "Unl_C4", "Unl_Mine_AntiPersonnel", "",
+		"Unl_Deployer_Sentrygun", "uav_drone_sentry", "", "", "", "Bp1_Expl_Shotgun"};
+	static const char* const kVehicles[] = {"mech", "apc", "tank", "", "tair", "titan", "faav", "", "", "", "aair",
+		"eu_pod", "", "", "ifv", "hover_fav"};
+	const RoundSummary& s = m_summary;
+	const int index = m_debriefing.categories[static_cast<size_t>(category)].places[0].index;
+	const std::string team = lower(s.teamNames[static_cast<size_t>(s.myTeam == 2 ? 1 : 0)]);
+	const auto named = [index](const char* const* table, int size) {
+		return index >= 0 && index < size ? std::string(table[index]) : std::string();
+	};
+	if (category == 0) {
+		const std::string kit = named(kKits, static_cast<int>(std::size(kKits)));
+		if (!header) {
+			return "images/kits/" + team + "_" + kit + ".png";
+		}
+		return "images/kits/" + kit + "_header_" + language + ".png";
 	}
+	std::string prefix;
+	if (category == 1) {
+		if ((index >= 0 && index <= 11) || index == 0x12) {
+			prefix = team + "_";
+		}
+		if (prefix == "pac_") {
+			prefix = "as_";
+		}
+		if (!header && (index < 0 || index > 31)) {
+			return std::string();
+		}
+		return "images/weapons/" + prefix + named(kWeapons, static_cast<int>(std::size(kWeapons)))
+			+ (header ? "_header_english.png" : ".png");
+	}
+	if (index == 0 || index == 1 || index == 2 || index == 4 || index == 5 || index == 6 || index == 10) {
+		prefix = team + "_";
+	}
+	return "images/vehicles/" + prefix + named(kVehicles, static_cast<int>(std::size(kVehicles)))
+		+ (header ? "_header_english.png" : ".png");
 }
 
 // --- dice.bf2.Logic and Client: the loading.
@@ -754,14 +976,79 @@ void EndOfRoundBindings::fillSquads(Interpreter& vm, ui::NativeList& list)
 	}
 }
 
-// The best players by kit, weapon and vehicle: the game kept per-kit and
-// per-weapon records for the stats server; there are none yet, so the rows
-// stay empty.
+// 0x10065ad0 (the list made by 0x100658c0 with "<category> <place>":
+// 0 kits, 1 weapons, 2 vehicles; place 0 the player's, 1 the best
+// teammate's, 2 the best opponent's, parseDebriefing). Four rows of a
+// label (cell0) and a value (cell1). The labels are 0x1012c168's: row 0
+// the place's header in capitals ("", HEADER_sameteam,
+// HEADER_oppositeteam), rows 1-3 the category's three:
+//   kits: TEXT_scorewithkit, TEXT_timewithkit, TEXT_scoreperminutewithkit;
+//   weapons: TEXT_killswithweapon, TEXT_accuracywithweapon, TEXT_killsperminute;
+//   vehicles: TEXT_killswithvehicle, TEXT_timeinvehicle, TEXT_killsperminute.
+// The values: the player's name (none at place 0 for kits), the score or
+// kills ("%d"), the time (0x100657b0's TEXT_timeformat_hhmm, handed the
+// seconds: the record keeps the script's seconds, so the hours read as
+// minutes) or for weapons the accuracy ("%d%%" of it × 100, rounded), and
+// the count per minute ("%.2f" through GetNumberFormatA in the game's
+// locale, 0x10007c60). A place without a record shows the labels alone.
+// Place 0's first row is hidden (0x100658c0, slot 0x58). The teammate's
+// values are blue (0x1e7dff, 0x10119078) and the opponent's red
+// (0xdc2828, 0x1011907c), and so is row 0's label.
 void EndOfRoundBindings::fillDebriefing(Interpreter& vm, ui::NativeList& list)
 {
-	for (const Value& row : rowClips(vm, list)) {
-		for (int c = 0; c < 4; ++c) {
-			setText(vm, row, "cell" + std::to_string(c), std::string());
+	static const char* const kLabels[] = {"", "TEXT_scorewithkit", "TEXT_timewithkit", "TEXT_scoreperminutewithkit",
+		"HEADER_sameteam", "TEXT_killswithweapon", "TEXT_accuracywithweapon", "TEXT_killsperminute",
+		"HEADER_oppositeteam", "TEXT_killswithvehicle", "TEXT_timeinvehicle", "TEXT_killsperminute"};
+	const int category = std::clamp(listArg(list, 0), 0, 2);
+	const int place = std::clamp(listArg(list, 1), 0, 2);
+	const DebriefingEntry& e = m_debriefing.categories[static_cast<size_t>(category)].places[static_cast<size_t>(place)];
+	const auto time = [this](int value) {
+		std::string text = localized("TEXT_timeformat_hhmm");
+		for (const auto& [marker, number] : {std::pair {"#HH#", value / 60}, std::pair {"#MM#", value % 60}}) {
+			if (const size_t at = text.find(marker); at != std::string::npos) {
+				char digits[16];
+				std::snprintf(digits, sizeof(digits), "%02d", number);
+				text.replace(at, 4, digits);
+			}
+		}
+		return text;
+	};
+	const std::vector<Value> rows = rowClips(vm, list);
+	for (int r = 0; r < static_cast<int>(rows.size()); ++r) {
+		const Value& row = rows[static_cast<size_t>(r)];
+		std::string label;
+		if (r == 0) {
+			label = place == 0 ? std::string() : localized(kLabels[place * 4]);
+			std::transform(label.begin(), label.end(), label.begin(),
+				[](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+		} else if (r < 4) {
+			label = localized(kLabels[r + category * 4]);
+		}
+		std::string value;
+		if (e.index >= 0) {
+			if (r == 0) {
+				value = category == 0 && place == 0 ? std::string() : e.name;
+			} else if (r == 1) {
+				value = std::to_string(e.count);
+			} else if (r == 2) {
+				value = category == 1 ? std::to_string(static_cast<int>(std::lround(e.accuracy * 100.0f))) + "%" : time(e.seconds);
+			} else if (r == 3) {
+				value = twoDecimals(e.perMinute);
+			}
+		}
+		setText(vm, row, "cell0", label);
+		setText(vm, row, "cell1", value);
+		if (place > 0) {
+			const Value colour(place == 1 ? 0x1e7dff : 0xdc2828);
+			for (const char* cell : {"cell0", "cell1"}) {
+				const Value clip = child(vm, row, cell);
+				if (clip.isObject() && (r == 0 || std::string(cell) == "cell1")) {
+					vm.setMember(clip, "textColor", colour);
+				}
+			}
+		}
+		if (r == 0 && place == 0) {
+			setVisible(vm, row, false);
 		}
 	}
 }

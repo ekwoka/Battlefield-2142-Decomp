@@ -1161,7 +1161,7 @@ void MenuBindings::bindDemos()
 
 // --- The map texts and the server info popup
 
-const MenuBindings::LevelText* MenuBindings::levelText(const std::string& level)
+const MenuBindings::LevelText* MenuBindings::levelText(const std::string& level) const
 {
 	auto it = m_levelTexts.find(level);
 	if (it == m_levelTexts.end()) {

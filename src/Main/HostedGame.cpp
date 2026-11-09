@@ -506,8 +506,52 @@ net::ServerReport HostedGame::report() const
 		{"gamevariant", "bf2142"}, {"numplayers", std::to_string(players)}, {"numteams", "2"},
 		{"maxplayers", std::to_string(m_setup.maxPlayers)}, {"gamemode", "openplaying"},
 		{"password", m_setup.password.empty() ? "0" : "1"}};
+	addRuleKeys(r);
 	r.teams = {m_logic->team(1).name, m_logic->team(2).name};
 	return r;
+}
+
+// The server rules' keys. The host's server key callback (0x00578bb0)
+// answers each key from the server info object (0x00a75560, field slot 1
+// 0x00642210), which 0x006423d0 fills from the sv settings (DAT_00a201c0)
+// before each report: "%d" or "%f" of a setting, "1" / "0" for a switch.
+// A ranked server (sv.ranked, +0x26d) reports its fixed rules: a spawn
+// time of 15 (0x00430f60), a ticket ratio of 100 (0x00430fa0) and a team
+// ratio of 100 (0x00430fc0). A game without settings reports the defaults.
+void HostedGame::addRuleKeys(net::ServerReport& r) const
+{
+	const net::ServerSettings defaults;
+	const net::ServerSettings& sv = m_setup.settings ? *m_setup.settings : defaults;
+	const auto decimal = [](int value) { return std::to_string(value); };
+	const auto real = [](float value) {
+		char text[32];
+		std::snprintf(text, sizeof(text), "%f", static_cast<double>(value));
+		return std::string(text);
+	};
+	const auto flag = [](bool on) { return std::string(on ? "1" : "0"); };
+	// 0x00430a00: a ranked game also needs GameSpyRanked, which a LAN
+	// host never has, so only sv.ranked's fixed rules apply here.
+	const bool rankedGame = false;
+	r.keys["roundtime"] = decimal(sv.roundsPerMap);                         // field 9, +0x11c
+	r.keys["timelimit"] = decimal(sv.timeLimit);                            // field 0xb, +0x120
+	r.keys["bf2142_ranked"] = flag(rankedGame);                             // field 0xe, 0x00430a00
+	r.keys["bf2142_autorec"] = flag(sv.autoRecord);                         // field 0x11, +0x16d
+	r.keys["bf2142_voip"] = flag(sv.voipEnabled);                           // field 0x14 (the voip slot 0x254)
+	r.keys["bf2142_autobalanced"] = flag(sv.autoBalanceTeam);               // field 0x15, +0x1e8
+	r.keys["bf2142_friendlyfire"] = flag(sv.soldierFriendlyFire >= 100);    // field 0x16, +0x128 at 100 or more
+	r.keys["bf2142_tkmode"] = sv.tkPunishEnabled ? "Punish" : "No Punish"; // field 0x17, +0x140
+	r.keys["bf2142_startdelay"] = decimal(sv.startDelay);                   // field 0x18, +0x108
+	r.keys["bf2142_spawntime"] = real(sv.ranked ? 15.0f : sv.spawnTime);    // field 0x19, 0x00430f60
+	r.keys["bf2142_sponsortext"] = sv.sponsorText;                          // field 0x1a, +0x1f0
+	r.keys["bf2142_scorelimit"] = decimal(sv.scoreLimit);                   // field 8, +0x124
+	r.keys["bf2142_ticketratio"] = decimal(sv.ranked ? 100 : sv.ticketRatio); // field 0x1c, 0x00430fa0
+	r.keys["bf2142_teamratio"] = real(sv.ranked ? 100.0f : sv.teamRatioPercent); // field 0x1d, 0x00430fc0
+	r.keys["bf2142_team1"] = m_logic->team(1).name;                         // field 0x1e (slot 0x48)
+	r.keys["bf2142_team2"] = m_logic->team(2).name;                         // field 0x1f (slot 0x48(2))
+	r.keys["bf2142_mapsize"] = decimal(m_setup.mapSize);                    // field 0x22 (slot 0x100)
+	r.keys["bf2142_reservedslots"] = decimal(sv.numReservedSlots);         // field 0x26, 0x00430d80 (+0x274)
+	r.keys["bf2142_maxrank"] = flag(false);                                 // field 0x27: ranked games only
+	r.keys["bf2142_allow_spectators"] = flag(!rankedGame && sv.allowSpectators); // field 0x2d, +0x290
 }
 
 // --- joining

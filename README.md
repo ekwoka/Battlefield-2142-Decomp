@@ -240,7 +240,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | `--seat <n>` | With `--drive`, stay in seat n (1 is the driver). |
 | `--kit <name\|n>` | Spawn with that kit of the team's list (e.g. `EU_Anti-Vehicle`, or its number from 1). |
 | `--zoom` | A screenshot's soldier zooms in after firing. |
-| `--actions "<cmd> …"` | A screenshot's soldier's inputs before the shot, e.g. `"reload wait:60 firemode fire:10 item:2 prone:20 jump"`. |
+| `--actions "<cmd> …"` | A screenshot's soldier's inputs before the shot, e.g. `"reload wait:60 firemode fire:10 altfire:3 item:2 prone:20 jump"`. |
 | `--unlock-all` | Every kit unlock. |
 | `--scoreboard` / `--spawn-screen` / `--commander-screen` | Show the scoreboard; die first and show the spawn screen; take command and open the commander screen. |
 | `--hud-click x/y[/right\|/move]` | A click or pointer move on the HUD's 800 × 600 screen before a screenshot (repeatable). |

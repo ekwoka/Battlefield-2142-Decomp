@@ -444,6 +444,7 @@ void GameWorld::buildTitanParts(Titan& titan)
 				if (const physics::CollisionMeshFile* mesh = m_collisionTemplates->mesh(*meshName, *m_files,
 						slash == std::string::npos ? std::string() : file.substr(0, slash + 1))) {
 					TitanMesh m;
+					m.t = &t;
 					m.mesh = mesh;
 					m.materials = materialMap(t);
 					m.rotation = rotation;
@@ -771,8 +772,16 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 	body->teamSoldierMesh[1] = teams[1];
 	body->soldierMesh = soldier;
 	body->projectileMesh = projectile;
-	body->partNodes.clear(); // the Titan's parts are its meshes above
-	body->partMeshes.clear();
+	// The cannons' collisionPart children, posed with the guns; those
+	// under a part that is down go with it.
+	if (!titan.collisionPartsBuilt) {
+		buildTitanCollisionParts(titan, *body);
+		titan.collisionPartsBuilt = true;
+	}
+	for (Body::PartMesh& part : body->partMeshes) {
+		part.off = part.source >= 0 && static_cast<size_t>(part.source) < titan.meshes.size()
+			&& !live(titan.meshes[static_cast<size_t>(part.source)]);
+	}
 	// The radius (0x00562090): half the diagonal of the root's box across x
 	// and z; its bottom (0x005aa090: the box's lowest y).
 	titan.radius = 0.5f * std::sqrt((body->boxMax.x - body->boxMin.x) * (body->boxMax.x - body->boxMin.x)

@@ -242,6 +242,13 @@ struct ProjectileSettings {
 	// (0/-0.12/0) 12 cm above where its origin would lie. Other node types
 	// don't read it (Point, Basic: the decoy and EMP mine are Mesh).
 	physics::Vec3 collisionOffset;
+	// physicsType RotationalPoint (the string switch 0x006bf540: 2): its
+	// node (0x006c6480, vtable 0x00993610) turns the object about its own
+	// origin by its angular velocity (+0xb8, world axes, rad/s; the step
+	// 0x006c6860 by its mean over the tick x dt x 57.2958 degrees, about
+	// that axis through 0x005b1a70), which nothing damps: the grenades,
+	// the IFV's mine, the stationary medic hub and motion bait.
+	bool rotationalPoint = false;
 	// A ForceObject child that holds the round over the ground (the IFV's
 	// mine, eu_ifv_laserguided_mine_FO; template defaults 0x0062d4f0; the
 	// object's tick 0x0062c920 -> 0x0062b750; GameWorld::hoverProjectile).
@@ -436,6 +443,18 @@ struct FireArmSettings {
 	// update, slot 5 0x005e4c80). Ticks are the times x 30, rounded.
 	bool thrown = false;
 	int pullbackTicks = 0, launchDelayTicks = 0;
+	// The thrown object's frame and spin (the launch's end, 0x005e5720):
+	// fire.projectileStartRotation (ThrownFireComp +0xb4..+0xbc, yaw /
+	// pitch / roll degrees; executor 0x004e4d83) turns the object's matrix
+	// in its own frame (0x006adb30(-roll, -pitch, -yaw) x the fire frame,
+	// 0x006acfa0), not its velocity; fire.randomRotationSpeed (+0xac) above
+	// 0 sets its node's angular velocity (slot 0x6c) to (0, -n1, n2) x the
+	// throw's power (+0x168), each n = ceil(s x the next draw in (0, 1])
+	// of the engine's generator (0x0042b230) seeded with the round's id
+	// (object +0x20 & 0x7fffffff). Shipped 4 on the smoke and radar
+	// grenades and the motion bait (the frag grenade's line is a rem).
+	physics::Vec3 startRotation;
+	float randomRotationSpeed = 0;
 	// The underarm (soft) throw: a ThrownFireComp with fire.altFireInput
 	// (PIAltFire on the grenades): the alternate press (0x005e4d80, slot 13)
 	// starts the throw with the soft flag (+0x178), under which the
@@ -713,6 +732,15 @@ struct Projectile {
 	// gunship's TV missile, velocity 0) still flies off.
 	physics::Vec3 heading;
 	physics::Vec3 acceleration; // gravity, applied the next tick
+	// A RotationalPoint round's own frame and spin (ProjectileSettings::
+	// rotationalPoint; set by a throw, FireArmSettings::startRotation /
+	// randomRotationSpeed): its node turns the frame by the spin each
+	// tick (moveProjectile -> physics::PointBody, 0x006c6860) and a bounce
+	// reverses and slows it (bounceSpin, 0x006c0d00). Rounds launched
+	// otherwise keep turns false and are drawn along their nose.
+	bool turns = false;
+	physics::Mat3 rotation;
+	physics::Vec3 spin; // rad/s about world axes (+0xb8)
 	float timeLeft = 1;
 	const ProjectileSettings* settings = nullptr;
 	uint32_t shooter = 0;
@@ -841,6 +869,15 @@ TracerLook tracerLook(const ProjectileSettings& settings, const physics::Vec3& r
 // the part along the normal reversed times `elasticity` (the mean of the
 // two materials'), the sliding part times 1 - `friction` (at most 1).
 physics::Vec3 bounceVelocity(const physics::Vec3& velocity, const physics::Vec3& normal, float elasticity, float friction);
+// Its spin after that contact (0x006c0d00's end, through the node's slots
+// 0x68 / 0x6c): reversed and scaled by the new velocity's square, at most
+// 1, and stopped under 0.1 m^2/s^2.
+physics::Vec3 bounceSpin(const physics::Vec3& spin, const physics::Vec3& velocity);
+// The thrown round's start (0x005e5720): its frame, the fire frame along
+// `direction` turned by `startRotation` in its own frame; its spin from
+// randomRotationSpeed `speed` x `power`, the draws seeded with `id`.
+void throwFrame(Projectile& p, const physics::Vec3& direction, const physics::Vec3& startRotation, float speed,
+	float power, uint32_t id);
 
 // A magnet's follow and thrust for a tick (0x005ecb30, 0x005b3e60): the
 // target's top speed arms it past armingSpeed; it heads for `aim` plus

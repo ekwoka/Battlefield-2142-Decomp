@@ -3571,9 +3571,10 @@ TEST(GameWorld_SeatGunBarrelsAndCameraFrame)
 	CHECK(seats.size() == 1);
 	if (seats.size() == 1) {
 		const auto& seat = seats[0];
-		CHECK(seat.barrels.size() == 2 && seat.hasCameraAt && !seat.fireInCameraDof && seat.hasStartPosition);
+		CHECK(seat.barrels.size() == 2 && seat.cameras.size() == 1 && !seat.fireInCameraDof && seat.hasStartPosition);
 		CHECK(seat.barrels.size() == 2 && seat.barrels[0].x == 1 && seat.barrels[1].x == -1 && seat.barrels[0].z == 1);
-		CHECK(std::fabs(seat.cameraAt.y - 3) < 1e-6f && std::fabs(seat.yawPivot.y - 2) < 1e-6f);
+		CHECK(!seat.cameras.empty() && std::fabs(seat.cameras[0].at.y - 3) < 1e-6f && !seat.cameras[0].ridesGun);
+		CHECK(std::fabs(seat.yawPivot.y - 2) < 1e-6f);
 	}
 	gun->settings()["fire.fireInCameraDof"] = "1";
 	game::GameWorld again(templates, objects);
@@ -4404,6 +4405,8 @@ TEST(GameWorld_BotUnlocks)
 	}
 	world::ObjectTemplate* aa = range.templates.create("GenericFireArm", "aa_gun");
 	aa->settings()["aiTemplate"] = "eu_aa";
+	// An item without an aiTemplate leaves its container out (0x008a57b0).
+	range.templates.create("GenericFireArm", "eu_ar_rifle")->settings()["aiTemplate"] = "eu_ar_rifle";
 	const auto antiAir = [](const std::string& ai) { return ai == "eu_aa"; };
 	// A human of the other team owning Light0 and Light1 (mask 3) and
 	// Medic0 (mask 1): the bot's levels are 4, 2, 1, 1.

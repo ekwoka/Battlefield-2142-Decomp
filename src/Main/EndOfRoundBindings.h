@@ -36,8 +36,10 @@
 //   eorEarnedAwards "<page>" (0x10066190, 0x10066540): four awards a page.
 //   eorSquadScore "<0|1> <place>" (0x100678b0): a best squad's leader,
 //     members and totals.
-//   eorDebriefing "<category> <place>": the best by kit, weapon and
-//     vehicle (no records yet: empty).
+//   eorDebriefing "<category> <place>" (0x10065ad0): the player's best
+//     kit, weapon and vehicle, and the best teammate's and opponent's with
+//     the same one (the Debriefing below, from the scripts' end-of-round
+//     text).
 #pragma once
 
 #include <array>
@@ -158,6 +160,12 @@ struct RoundSummary {
 
 	std::vector<EndOfRoundPlayer> players; // both teams
 	int localPlayer = -1;                  // index into players
+	// The scripts' end-of-round text (bf2/stats/endofround.py's
+	// "\\key\\value..." list, handed over by gl_sendEndOfRoundData
+	// 0x00568930; a joined game gets it in data block 8): each player's
+	// time, score or kills and accuracy with each kit, weapon and vehicle,
+	// which the debriefing reads (parseDebriefing).
+	std::string endOfRoundText;
 	std::vector<EndOfRoundSquad> squads;
 	std::vector<EndOfRoundAward> awards;
 };
@@ -178,6 +186,35 @@ struct LevelDescription {
 	std::vector<std::string> modes; // every <mode type>, in the file's order
 };
 LevelDescription parseLevelDescription(const std::string& xml, const std::string& gameMode, int size);
+
+// The debriefing's records as BF2142.exe keeps them for the end-of-round
+// movie (SwiffHost's record, slot 0x180: +0x2d4 the kits, +0x370 the
+// vehicles, +0x40c the weapons, +0x51c.. the positions), made from the
+// scripts' text by 0x0047c7a0.
+struct DebriefingEntry {
+	int index = -1;      // the kit, weapon or vehicle type (the stats' constants); -1: none
+	std::string name;    // the player's
+	int team = 0;
+	int count = 0;       // a kit's score (ks), a weapon's or vehicle's kills (wk, vk)
+	int seconds = 0;     // the time with it (ktw, wtw, vtw)
+	float accuracy = 0;  // a weapon's (wa: 0..1)
+	float perMinute = 0; // count per minute of that time
+};
+struct DebriefingCategory {
+	// 0: the player's best (the first of its records in the category's
+	// order), 1: the best teammate's with the same one, 2: the best
+	// opponent's.
+	std::array<DebriefingEntry, 3> places;
+	int position = 0; // the player's place among everyone with it (1 the best)
+	int players = 0;  // how many have it
+};
+struct Debriefing {
+	std::array<DebriefingCategory, 3> categories; // kits, weapons, vehicles
+};
+// `players` gives each name's team (a name the round doesn't know drops its
+// records, as the player manager's lookup does); `localName` is the player.
+Debriefing parseDebriefing(const std::string& text, const std::vector<EndOfRoundPlayer>& players,
+	const std::string& localName);
 
 class EndOfRoundBindings {
 public:
@@ -245,8 +282,12 @@ private:
 	std::string mapName() const;
 	std::string localized(const std::string& key) const;
 
+	// The debriefing's image paths (0x1001e1a0 .. 0x1001f8b0).
+	std::string debriefingImage(int category, bool header, const std::string& language) const;
+
 	ui::NativeRegistry& m_natives;
 	RoundSummary m_summary;
+	Debriefing m_debriefing; // parsed from m_summary by setSummary
 	std::map<std::string, std::string> m_storage;
 	std::string m_commandLineOption;
 	int m_lastTip = 0;

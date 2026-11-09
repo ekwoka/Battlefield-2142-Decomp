@@ -815,6 +815,7 @@ public:
 		float yaw = 0, pitch = 0; // degrees, pitch up positive
 		float fov = 1.1f;         // the camera's insideFOV (radians)
 		bool takeOverInput = false;
+		uint32_t serial = 0;      // the round (Projectile::serial)
 	};
 	bool projectileCamera(int player, ProjectileCamera& out) const;
 	// The bots' spawn test (IAIPathfindingCourier slot 0xc, *0x00b4bb94):
@@ -1031,6 +1032,18 @@ public:
 	// objects' (world space) for object 0, else that body's (object space);
 	// null without one.
 	const physics::CollisionWorld* projectileCollision(uint32_t object) const;
+	// A body's collisionPart `part` (raycastBody's index, Decal::part): its
+	// projectile LOD now (the wreck's sub-geometry once wrecked) in its own
+	// frame, and that frame in the body's as the part stands now (posed
+	// as poseCollisionParts poses it); null / false without one.
+	const physics::CollisionWorld* partCollision(uint32_t object, int part) const;
+	bool collisionPartFrame(uint32_t object, int part, physics::Mat3& rotation, physics::Vec3& position) const;
+	// How many collisionPart instances a body's rays meet (0x0063ccc0's).
+	size_t collisionPartCount(uint32_t object) const;
+	// A body's vehicle LOD faces now (its root instance's sub-geometry,
+	// Body::meshState), in its own space: what other movers meet. Null
+	// without a body.
+	const physics::CollisionWorld* vehicleCollision(uint32_t object) const;
 	// The ground the soldiers and bodies stand on (enablePhysics').
 	const physics::Ground& ground() const { return m_ground; }
 	// A living player's soldier movement (its control and physics body),
@@ -1088,6 +1101,16 @@ public:
 	bool abilityBar(int player, AbilityBarInfo& out) const;
 	double roundTime() const { return m_time; }
 	const std::vector<Projectile>& projectiles() const { return m_projectiles; }
+	// The objects with a geometry in the armour effects started on an
+	// object (an EffectBundle's SimpleObject children, created with it by
+	// 0x006549a0's slot 0x50: the heavy IFV's cells' e_healing_node glow,
+	// ifv_shield_the_generatoreffect), placed now; for the drawing.
+	struct PlacedMesh {
+		const world::ObjectTemplate* objectTemplate = nullptr;
+		physics::Vec3 position;
+		physics::Mat3 rotation;
+	};
+	void armorEffectMeshes(std::vector<PlacedMesh>& out) const;
 	// Armor: hit points left (from armor.hitPoints), -1 without armor.
 	float hitPoints(uint32_t object) const;
 	// An object's radius (Body::objectRadius: its collision mesh's, or a
@@ -1215,7 +1238,7 @@ public:
 		bool hasDeviation = false;
 		// Where the gun's rounds start (MultiFireComp 0x005d5fb0, the fire
 		// component's slot 53 0x005f1a20): with fire.fireInCameraDof
-		// (template +0x44) the seat camera's frame (the seat's `cameraAt`),
+		// (template +0x44) the seat camera's frame (fireCamera's),
 		// else a barrel's (fire.addBarrelName, 0x004e45a6 -> 0x005d6ae0: the
 		// gun's children of those names, 0x005d6d20; one in turn,
 		// 0x005d64a0), else the gun's; then fire.projectileStartPosition
@@ -1345,10 +1368,22 @@ public:
 		// maintainCameraOnExit (GameServer 0x004b0b90).
 		bool maintainCameraOnExitToOther = false;
 		bool dontClearTeamOnExit = false; // +0x34f (0x005c95b0)
-		// The seat's first Camera at rest (fireInCameraDof's frame) and the
-		// yaw bundle's place, in the vehicle's frame.
-		bool hasCameraAt = false;
-		physics::Vec3 cameraAt, yawPivot;
+		// The yaw bundle's place, in the vehicle's frame.
+		physics::Vec3 yawPivot;
+		// The seat's Cameras at rest (fireInCameraDof's frame: the seat's
+		// active camera, its first, or the one whose CameraId the weapon's
+		// zoom.startCameraId switches to; fireCamera): place and facing in
+		// the vehicle's frame, and whether it hangs under the seat's own
+		// yaw or pitch bundle (it then turns with the gun's aim; else only
+		// by its own look, when it is the seat's mouse-look camera).
+		struct SeatCamera {
+			std::string name;
+			int id = -1; // CameraId
+			physics::Vec3 at;
+			physics::Mat3 turn;
+			bool ridesGun = false;
+		};
+		std::vector<SeatCamera> cameras;
 	};
 	struct VehicleLayout {
 		std::vector<SeatLayout> seats;
@@ -2118,6 +2153,28 @@ private:
 			// wrecked part is out of the rays: 0x006e5df0 returns 0).
 			std::shared_ptr<const physics::CollisionWorld> lod[2];
 			float radius = 0; // the LODs' farthest box corner from the part's origin
+			// A Titan's: the TitanMesh whose instance it shares (the node
+			// of the tree with the collision mesh, 0x0063d720's walk), and
+			// whether that mesh is down with its part (rebuildTitanMeshes).
+			int source = -1;
+			bool off = false;
+			// The instance's other LODs for the mesh physics (the part's
+			// response, 0x005f6a60, in its root's chain, 0x006c0090: the
+			// movers' candidates, 0x006dc7b0, and the soldiers', 0x006c3890),
+			// per sub-geometry as `lod`: the vehicle LOD's faces, vertices
+			// and box, the soldier LOD's faces.
+			struct Physics {
+				std::shared_ptr<const physics::CollisionWorld> vehicle, soldier;
+				std::vector<physics::Vec3> points;
+				std::vector<uint32_t> pointMaterials;
+				physics::Vec3 boxMin, boxMax;
+				float radius = 0;
+			};
+			Physics physics[2];
+			const physics::CollisionMeshFile* file = nullptr;
+			std::vector<uint32_t> materials;
+			size_t geometry = 0;
+			uint32_t collisionGroups = 0; // the part template's (response slot 0x50)
 			// Its frame in the object's as of `partsPosed` (poseCollisionParts).
 			mutable physics::Mat3 rotation;
 			mutable physics::Vec3 position;
@@ -2130,6 +2187,12 @@ private:
 		// armour's wreck, 0x00654120): the root's projectile LOD and each
 		// part's switched to sub-geometry 1 (wreckCollision).
 		bool collisionWrecked = false;
+		// The root instance's sub-geometry (+0x14: 1 once wrecked when its
+		// geometry has a second, 0x006e5df0 / 0x006e5e90), which every LOD
+		// query of the instance goes through: the vehicle LOD's points,
+		// edges, faces and box (setBodyLods), the soldier LOD, and the LOD
+		// another mover asks it for (MeshActor::state).
+		size_t meshState = 0;
 		// A Titan's: what each team's soldiers meet (the soldier mesh and the
 		// other team's forcefields; collisionGroups 0x100 / 0x200).
 		std::shared_ptr<physics::CollisionWorld> teamSoldierMesh[2];
@@ -2228,6 +2291,12 @@ private:
 			bool pointOnDestroy = false; // damagePointOnDestroy (armour slot 0x16c)
 			physics::Mat3 rotation;  // its place in the vehicle's frame
 			physics::Vec3 position;
+			// Its armour's effects (armorEffectsAfter, anchored on the
+			// cell's id): e_healing_node at 99, e_titan_consol at 0 and
+			// e_bluespark_loop at -1.
+			float effectHitPoints = 0;
+			int effectLevel = 0;
+			bool effectsAttached = false, effectsSeen = false;
 		};
 		std::vector<Cell> cells;
 		bool cellsBuilt = false;
@@ -2435,8 +2504,32 @@ private:
 	const ArmorEffectList& armorEffectList(const world::ObjectTemplate& t);
 	std::map<const world::ObjectTemplate*, ArmorEffectList> m_armorEffectLists;
 	void armorEffectsAfterDamage(Body& body, float hitPoints);
+	// One armour's effect state (the armour's +0x254, +0x184, whether some
+	// follow it, whether +0x254 was set), held where that armour is kept.
+	struct ArmorEffectState {
+		float& hitPoints;
+		int& level;
+		bool& attached;
+		bool& seen;
+	};
+	// 0x006549a0 / 0x00654730 for any armour: its effects placed from `at`
+	// and `turn` (the attached ones on `anchor`, an id followArmorEffects
+	// moves by armorAnchorFrame).
+	void armorEffectsAfter(const ArmorEffectList& list, ArmorEffectState state, uint32_t anchor, const physics::Vec3& at,
+		const physics::Mat3& turn, bool spectacularHit, float hitPoints);
+	bool armorAnchorFrame(uint32_t anchor, physics::Vec3& at, physics::Mat3& turn) const;
+	// The meshes of the attached armour effects (armorEffectMeshes): each in
+	// its anchor's frame.
+	struct ArmorMesh {
+		uint32_t anchor = 0;
+		const world::ObjectTemplate* objectTemplate = nullptr;
+		physics::Vec3 position;
+		physics::Mat3 rotation;
+	};
+	std::vector<ArmorMesh> m_armorMeshes;
+	void stopArmorEffects(uint32_t anchor);
 	static constexpr uint32_t kArmorEffectTag = 0x7d000000u;
-	std::vector<uint32_t> m_armorAnchors; // the bodies whose armour effects follow them
+	std::vector<uint32_t> m_armorAnchors; // the bodies and cells whose armour effects follow them
 	void followArmorEffects();
 	// The tracer rounds' tracers this tick, handed to the effects to draw.
 	void placeTracers();
@@ -2594,9 +2687,14 @@ private:
 	// (yawBundle / pitchBundle); a flying vehicle's pilot keeps its guns
 	// along the hull (the mouse flies it).
 	bool seatAims(const Body& body, int seat) const;
+	// The camera a seat weapon fires in with fireInCameraDof (0x005f1a20:
+	// the control object's active camera, the one its zoom.startCameraId
+	// takes up, 0x005db260, else the seat's first); null without one.
+	static const SeatLayout::SeatCamera* fireCamera(const SeatLayout& seat, const SeatWeapon& weapon);
 	static physics::Vec3 seatGunOrigin(const SeatLayout& seat, const SeatWeapon& weapon, Body::Gun& gun, int& barrel);
 	static physics::Vec3 seatGunOrigin(const SeatLayout& seat, const SeatWeapon& weapon, float gunYaw, float gunPitch, int& barrel);
 	Body* findBody(uint32_t object);
+	const Body* findBody(uint32_t object) const { return const_cast<GameWorld*>(this)->findBody(object); }
 	int firstEngineType(const world::ObjectTemplate& root) const;
 	mutable std::map<const world::ObjectTemplate*, int> m_engineTypes; // firstEngineType's answers, by root
 	void addBodies();
@@ -2607,10 +2705,27 @@ private:
 	// the segment against a body's projectile LOD and its parts, in the
 	// body's frame (every round, line-of-sight and drop ray goes through it).
 	void buildCollisionParts(Body& body, const world::ObjectTemplate& t, const physics::CollisionMeshFile& mesh);
+	// 0x0063ccc0's walk below `owner` (a node with a mesh instance of its
+	// own at `node`, -1 the root, placed at `rotation` / `position` in the
+	// body's frame): each child with a collisionPart gets `mesh`'s
+	// geometry, its faces reporting `faceOwner`.
+	void addCollisionParts(Body& body, const world::ObjectTemplate& owner, int node, const physics::Mat3& rotation,
+		const physics::Vec3& position, const physics::CollisionMeshFile& mesh, const std::vector<uint32_t>& materials,
+		uint32_t faceOwner, int source);
+	static void finishCollisionParts(Body& body);
+	// A child whose collisionPart takes an instance (physicsType Mesh or MechLegs).
+	static bool takesCollisionPart(const world::ObjectTemplate& t);
 	void poseCollisionParts(const Body& body) const;
 	void wreckCollision(Body& body);
+	// The body's vehicle LOD (points, their materials, edges, box,
+	// radius, faces) and soldier LOD at the root instance's sub-geometry
+	// `state`; false when it has no vehicle LOD there.
+	bool setBodyLods(Body& body, const physics::CollisionMeshFile& mesh, const std::vector<uint32_t>& materials,
+		size_t state);
+	// `part`: the collisionPart the segment met (its partMeshes index), -1
+	// the root's faces.
 	bool raycastBody(const Body& body, const physics::Vec3& localFrom, const physics::Vec3& localTo,
-		physics::CollisionWorld::Hit& hit) const;
+		physics::CollisionWorld::Hit& hit, int* part = nullptr) const;
 	bool stepBody(Body& body, float seconds);
 	void stepPhysics(float seconds);
 	// A walker's animation system fed as 0x0063ce30 does (see GameWorld.cpp).
@@ -2646,6 +2761,7 @@ private:
 		bool trunkFromTypeFour = false;
 		const physics::CollisionMeshFile* file = nullptr; // what it was made from (another LOD's faces)
 		std::vector<uint32_t> materials;
+		size_t geometry = 0, state = 0; // the instance's geometry (a collisionPart's) and sub-geometry
 	};
 	// A mesh's faces at another LOD (0 projectiles', 2 soldiers'), its box
 	// and radius (slots 0x54 / 0x50 of that LOD), made when first asked.
@@ -2654,8 +2770,10 @@ private:
 		physics::Vec3 boxMin, boxMax;
 		float radius = 0;
 	};
-	std::map<std::tuple<const physics::CollisionMeshFile*, std::vector<uint32_t>, int>, std::shared_ptr<const LodFaces>> m_lodFaces;
-	const LodFaces* lodFaces(const physics::CollisionMeshFile& file, const std::vector<uint32_t>& materials, int lod);
+	std::map<std::tuple<const physics::CollisionMeshFile*, std::vector<uint32_t>, int, size_t, size_t>, std::shared_ptr<const LodFaces>>
+		m_lodFaces;
+	const LodFaces* lodFaces(const physics::CollisionMeshFile& file, const std::vector<uint32_t>& materials, int lod,
+		size_t geometry = 0, size_t state = 0);
 	struct StaticPart {
 		uint32_t object = 0;
 		bool root = true;    // the object itself, not a template of its tree
@@ -2671,9 +2789,13 @@ private:
 	void addStaticPart(StaticPart part);
 	std::vector<StaticPart> m_staticParts;
 	std::unordered_map<int64_t, std::vector<uint32_t>> m_staticGrid; // 16 m cells (x, z) -> parts
-	std::map<std::pair<const physics::CollisionMeshFile*, std::vector<uint32_t>>, std::shared_ptr<const MeshShape>> m_shapes;
+	std::map<std::tuple<const physics::CollisionMeshFile*, std::vector<uint32_t>, size_t, size_t>, std::shared_ptr<const MeshShape>>
+		m_shapes;
 	uint32_t m_staticStamp = 0;
-	std::shared_ptr<const MeshShape> meshShape(const physics::CollisionMeshFile& mesh, const std::vector<uint32_t>& materials);
+	// An instance's vehicle LOD at `geometry` (0, or a collisionPart's) and
+	// sub-geometry `state`.
+	std::shared_ptr<const MeshShape> meshShape(const physics::CollisionMeshFile& mesh, const std::vector<uint32_t>& materials,
+		size_t geometry = 0, size_t state = 0);
 	// One side of a pair: a body (mobile, a root) or a static part.
 	struct MeshActor {
 		Body* body = nullptr;
@@ -2701,6 +2823,7 @@ private:
 		int otherLod = 1;
 		const physics::CollisionMeshFile* file = nullptr;
 		const std::vector<uint32_t>* materials = nullptr;
+		size_t geometry = 0, state = 0; // the instance's geometry and sub-geometry (a wreck's 1)
 		physics::Vec3 pointVelocity(const physics::Vec3& point) const
 		{
 			return body ? body->body.pointVelocity(point) : physics::Vec3 {};
@@ -2714,6 +2837,12 @@ private:
 	bool atLod(MeshActor& actor, int lod);
 	void collideBodies(float seconds);
 	void collideMover(Body& mover, size_t index, float seconds);
+	// A body's posed collisionPart children as candidates (their vehicle
+	// LOD in their frame now); empty when wrecked without a wreck shape.
+	void partActors(Body& body, std::vector<MeshActor>& out);
+	static void partPhysics(Body::PartMesh::Physics& out, const physics::CollisionMeshFile& mesh,
+		const physics::CollisionSubGeometry& sub, const std::vector<uint32_t>& materials, uint32_t owner, size_t geometry,
+		size_t state);
 	// Slot 9 of the mobile mesh response (0x006bb050): A's mesh against
 	// B's; `trunkOnly` runs the third pass alone (its last argument).
 	// Returns false when it destroyed A (the helicopter exit).
@@ -2725,8 +2854,19 @@ private:
 		uint32_t materialA, uint32_t materialB, bool trunkPass, bool toA = true);
 	std::vector<uint32_t> materialMap(const world::ObjectTemplate& objectTemplate) const;
 	void buildStaticCollision();
+	// `t` at `rotation` / `position` and its tree; `parts` / `partMaterials`
+	// the mesh whose collisionPart children this node's walk (0x0063ccc0)
+	// gives an instance (null: none).
 	void addStaticCollision(const world::ObjectTemplate& objectTemplate, const physics::Mat3& rotation,
-		const physics::Vec3& position, uint32_t owner, int depth);
+		const physics::Vec3& position, uint32_t owner, int depth, const physics::CollisionMeshFile* parts = nullptr,
+		const std::vector<uint32_t>* partMaterials = nullptr);
+	// One mesh instance of a static object (`geometry` 0, or a collisionPart's).
+	void addStaticMesh(const world::ObjectTemplate& t, const physics::CollisionMeshFile& mesh,
+		const std::vector<uint32_t>& materials, size_t geometry, const physics::Mat3& rotation, const physics::Vec3& position,
+		uint32_t owner, bool root);
+	// A stationary control object with seats: a fixed body (Body::fixed),
+	// whose posed parts the rounds meet through raycastBody.
+	static bool stationaryWithSeats(const world::ObjectTemplate& t);
 
 	struct HitBone {
 		int node;            // skeleton node
@@ -3294,6 +3434,7 @@ private:
 		float lastYaw = 0;
 	};
 	std::vector<ObjectAnimation> m_objectAnimations;
+	void posedAfterUpdate(ObjectAnimation& a);
 	void stepDeployableAnimations(float seconds);
 	// A template's bundleAnimationSystem and bundleSkeleton (0x0063d340) and
 	// its boneIndex parts (0x0063d5e0); false without a system.
@@ -3617,6 +3758,7 @@ private:
 		uint32_t groups = 0;
 	};
 	struct TitanMesh {
+		const world::ObjectTemplate* t = nullptr; // the node with the mesh
 		const physics::CollisionMeshFile* mesh = nullptr;
 		std::vector<uint32_t> materials;
 		physics::Mat3 rotation;
@@ -3632,6 +3774,7 @@ private:
 	};
 	struct Titan {
 		uint32_t object = 0;
+		bool collisionPartsBuilt = false; // its body's partNodes / partMeshes (buildTitanCollisionParts)
 		int team = 0;
 		int controlPoint = -1;
 		std::vector<TitanPart> parts; // [0]: the root
@@ -3740,6 +3883,10 @@ private:
 	void removeTitanCarried(Titan& titan);
 	void buildTitanParts(Titan& titan);
 	void rebuildTitanMeshes(Titan& titan);
+	// The collisionPart children under each node of the Titan's tree with a
+	// mesh (its gun hubs' cannons: 0x0063d720 -> 0x0063ccc0 with that
+	// node's mesh), as the body's posed parts (PartCollision.cpp).
+	void buildTitanCollisionParts(Titan& titan, Body& body);
 	static std::vector<std::shared_ptr<const TitanLodPart>> titanLodParts(const TitanMesh& m, uint32_t owner);
 	Titan* titanByObject(uint32_t object);
 	const Titan* titanByObject(uint32_t object) const;
@@ -3811,10 +3958,25 @@ private:
 		int player = -1;       // the rider, -1 once he is out
 		float landing = -1;    // the landing timer (+0x45c; 0x005cf750 sets it, 0x005d01c0 runs it)
 		float removeIn = -1;   // to the timer event 0x21 (0x005cff20: 0.1 s), which takes it away
-		int state = 1;         // 0x005cfbb0's message: 1 high, 2 near the ground, 4 landed
+		int state = 0;         // 0x005cfbb0's message (+0x460): 1 high, 2 near the ground, 4 landing
+		float stateTimer = 1.0f / 3.0f; // to the next timer event 0x20 (0x005cf6d0 / 0x005d0220: 1/3 s)
+		// The canopy: its AnimatedBundle child (animatedparachute; object
+		// 0x005c06a0) with its skeleton instance (+0x198) and the system of
+		// its animationSystem1P (+0x18c), messaged by 0x005cfbb0 through the
+		// child's interface 0xc49e and run by its update (0x005c00e0).
+		std::unique_ptr<anim::AnimationState> canopy;
+		const anim::Skeleton* canopySkeleton = nullptr;
+		anim::LocalPose canopyPose;
+		std::vector<anim::Matrix> canopyWorld; // model-space matrices per node, for the drawing
 	};
 	std::vector<Parachute> m_parachutes;
 	Parachute* findParachute(uint32_t object);
+	const Parachute* findParachute(uint32_t object) const;
+	// The canopy's system and skeleton (the Parachute's first AnimatedBundle
+	// child with both); false without one.
+	bool loadCanopy(Parachute& chute, const world::ObjectTemplate& t);
+	// One update of the canopy (0x005c00e0) with the parachute's message.
+	void stepCanopy(Parachute& chute, float seconds);
 	// The kit's parachute launcher: its slot, its projectile and
 	// fire.projectileStartPosition; false without one.
 	bool parachuteLauncher(const Player& player, std::string& projectile, physics::Vec3& start) const;

@@ -67,7 +67,13 @@ public:
 		physics::Vec3 position;
 		physics::Mat3 rotation;
 	};
-	void meshes(const std::vector<game::Projectile>& rounds, std::vector<Mesh>& out);
+	// `viewedFrom`: the round whose camera is the view (Projectile::serial,
+	// 0 none), left out. The original draws it, but its opaque techniques
+	// (BundledMesh.fx Full / Full20 / t1) leave Direct3D's CullMode CCW on,
+	// and its camera sits inside its nose (AAGuided_missile_Camera at z
+	// 0.33, remote_missile's mesh to 0.38): every face it could see turns
+	// its back and none is drawn. The rewrite draws meshes without culling.
+	void meshes(const std::vector<game::Projectile>& rounds, std::vector<Mesh>& out, uint32_t viewedFrom = 0);
 
 	// What a round's template shows: its geometry and whether its tree
 	// holds effect bundles (looked up once per template).

@@ -710,7 +710,13 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 			Instance instance {gpuMesh, world, object, local, nullptr, {1, 1, 0, 0}, {}, nullptr, nullptr};
 			instance.geometry = objectTemplate.geometry();
 			if (gpuMesh->skinned) {
-				const auto setting = objectTemplate.settings().find("skeleton3P");
+				// A soldier's skeleton3P; an AnimatedBundle's skeleton (its
+				// skeleton instance, 0x005c06a0's +0x198, whose node
+				// matrices its update hands the skinned mesh, 0x005c00e0).
+				auto setting = objectTemplate.settings().find("skeleton3P");
+				if (setting == objectTemplate.settings().end() && objectTemplate.typeName() == "AnimatedBundle") {
+					setting = objectTemplate.settings().find("skeleton");
+				}
 				if (setting != objectTemplate.settings().end()) {
 					instance.skeleton = skeleton(sources.files, setting->second);
 				}
@@ -2871,6 +2877,25 @@ void LevelRenderer::buildDecals()
 				continue;
 			}
 			place = objectTransform(holder->position(), holder->rotation());
+			if (decal.part >= 0) {
+				// On a collisionPart child: the part's own set, drawn at the
+				// part's matrix (its frame in the object's, then the object's).
+				effects::Mat3 r;
+				effects::Vec3 t;
+				if (!m_sources->collisionPartFrame || !m_sources->collisionPartFrame(decal.object, decal.part, r, t)) {
+					continue;
+				}
+				Mat4 part;
+				for (int row = 0; row < 3; ++row) {
+					part.at(row, 0) = r.rows[static_cast<size_t>(row)].x;
+					part.at(row, 1) = r.rows[static_cast<size_t>(row)].y;
+					part.at(row, 2) = r.rows[static_cast<size_t>(row)].z;
+				}
+				part.at(3, 0) = t.x;
+				part.at(3, 1) = t.y;
+				part.at(3, 2) = t.z;
+				place = part * place;
+			}
 			n = turn(n);
 			tangent = turn(tangent);
 			at = objectPlace(at);
@@ -2896,7 +2921,7 @@ void LevelRenderer::buildDecals()
 				pieces = clipDecalToTerrain(*ground, decal, ps.decalNormalOffset);
 			} else if ((decal.object != 0 || decal.surface != 0) && m_sources->collisionFaces) {
 				std::vector<std::array<effects::Vec3, 3>> faces;
-				m_sources->collisionFaces(decal.object, decal.object != 0 ? 0 : decal.surface, decal.position,
+				m_sources->collisionFaces(decal.object, decal.object != 0 ? 0 : decal.surface, decal.part, decal.position,
 					decal.size * 0.5f * 1.4143f, faces);
 				pieces = effects::clipDecal(decal.position, decal.normal, decal.tangent, decal.size * 0.5f, decal.frame,
 					faces, ps.decalGeomClipAngle, ps.decalNormalOffset);

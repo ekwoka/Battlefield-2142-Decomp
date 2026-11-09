@@ -191,6 +191,7 @@ GameWorld::MeshActor GameWorld::actorOf(Body& body) const
 	a.otherLod = body.otherCollisionLod;
 	a.file = body.meshFile;
 	a.materials = &body.meshMaterials;
+	a.state = body.meshState;
 	return a;
 }
 
@@ -219,6 +220,8 @@ GameWorld::MeshActor GameWorld::actorOf(const StaticPart& part) const
 	a.node = {1, false, true};
 	a.file = shape.file;
 	a.materials = &shape.materials;
+	a.geometry = shape.geometry;
+	a.state = shape.state;
 	return a;
 }
 
@@ -233,17 +236,17 @@ GameWorld::MeshActor GameWorld::actorOf(const StaticPart& part) const
 // shotgun round (projectiles here, not bodies). (With 0, a projectile A
 // against a node whose slot 0x164 holds asks for 2 instead: not followed.)
 const GameWorld::LodFaces* GameWorld::lodFaces(const physics::CollisionMeshFile& file,
-	const std::vector<uint32_t>& materials, int lod)
+	const std::vector<uint32_t>& materials, int lod, size_t geometry, size_t state)
 {
-	auto& faces = m_lodFaces[{&file, materials, lod}];
+	auto& faces = m_lodFaces[{&file, materials, lod, geometry, state}];
 	if (faces) {
 		return faces->mesh ? faces.get() : nullptr;
 	}
 	auto made = std::make_shared<LodFaces>();
 	Vec3 low {1e9f, 1e9f, 1e9f}, high {-1e9f, -1e9f, -1e9f};
 	bool any = false;
-	if (!file.geometries.empty()) {
-		for (const physics::CollisionSubGeometry& part : physics::collisionParts(file, 0)) {
+	if (geometry < file.geometries.size()) {
+		for (const physics::CollisionSubGeometry& part : physics::collisionParts(file, geometry, state)) {
 			if (const physics::CollisionLod* l = physics::collisionLodFor(file, part, static_cast<uint32_t>(lod))) {
 				any = true;
 				low = {std::min(low.x, l->boundsMin[0]), std::min(low.y, l->boundsMin[1]), std::min(low.z, l->boundsMin[2])};
@@ -253,7 +256,7 @@ const GameWorld::LodFaces* GameWorld::lodFaces(const physics::CollisionMeshFile&
 	}
 	if (any) {
 		made->mesh = std::make_shared<physics::CollisionWorld>();
-		made->mesh->addMesh(file, static_cast<physics::CollisionUser>(lod), {}, {}, 0, materials);
+		made->mesh->addMesh(file, static_cast<physics::CollisionUser>(lod), {}, {}, 0, materials, geometry, state);
 		made->boxMin = low;
 		made->boxMax = high;
 		made->radius = physics::boxRadius({low.x, low.y, low.z}, {high.x, high.y, high.z});
@@ -267,7 +270,7 @@ bool GameWorld::atLod(MeshActor& actor, int lod)
 	if (lod == 1 || !actor.file || !actor.materials) {
 		return true;
 	}
-	const LodFaces* faces = lodFaces(*actor.file, *actor.materials, lod);
+	const LodFaces* faces = lodFaces(*actor.file, *actor.materials, lod, actor.geometry, actor.state);
 	if (!faces) {
 		return false;
 	}
@@ -407,12 +410,31 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 		return; // a LoneVehicle meets the static objects only
 	}
 	// The other bodies but those that were movers already (before it, awake).
+	std::vector<MeshActor> parts;
 	for (size_t j = 0; j < m_bodies.size(); ++j) {
 		Body& other = m_bodies[j];
-		if (j == index || (j < index && !asleep(other))) {
+		if (j == index || findDrone(other.object) || !m_objects.find(other.object)) {
 			continue;
 		}
-		if (!other.vehicleMesh || other.points.empty() || findDrone(other.object) || !m_objects.find(other.object)) {
+		// Its parts in their pose now (partActors), each a candidate with
+		// a response of its own: met by every mover, as the rewrite's parts
+		// are no movers themselves (a part's own node, 0x005f6ba0, isn't
+		// followed: the parts move with their body).
+		partActors(other, parts);
+		for (MeshActor& c : parts) {
+			if (paired(c, length(other.body.velocity))) {
+				if (!collide(c, false)) {
+					return;
+				}
+				m = actorOf(mover);
+				legsSphere(mover, m, c);
+			}
+			wheelProbes(mover, c, seconds);
+		}
+		if (j < index && !asleep(other)) {
+			continue;
+		}
+		if (!other.vehicleMesh || other.points.empty()) {
 			continue;
 		}
 		MeshActor c = actorOf(other);
@@ -873,20 +895,22 @@ void GameWorld::addStaticPart(StaticPart part)
 // A collision mesh's vehicle LOD in its object's space, shared by the
 // objects that use it with the same materials.
 std::shared_ptr<const GameWorld::MeshShape> GameWorld::meshShape(const physics::CollisionMeshFile& file,
-	const std::vector<uint32_t>& materials)
+	const std::vector<uint32_t>& materials, size_t geometry, size_t state)
 {
-	auto& shape = m_shapes[{&file, materials}];
+	auto& shape = m_shapes[{&file, materials, geometry, state}];
 	if (shape) {
 		return shape;
 	}
 	auto made = std::make_shared<MeshShape>();
 	made->file = &file;
 	made->materials = materials;
+	made->geometry = geometry;
+	made->state = state;
 	made->mesh = std::make_shared<physics::CollisionWorld>();
-	made->mesh->addMesh(file, physics::CollisionUser::Vehicle, {}, {}, 0, materials);
+	made->mesh->addMesh(file, physics::CollisionUser::Vehicle, {}, {}, 0, materials, geometry, state);
 	Vec3 low {1e9f, 1e9f, 1e9f}, high {-1e9f, -1e9f, -1e9f};
-	if (!file.geometries.empty()) {
-		for (const physics::CollisionSubGeometry& part : physics::collisionParts(file, 0)) {
+	if (geometry < file.geometries.size()) {
+		for (const physics::CollisionSubGeometry& part : physics::collisionParts(file, geometry, state)) {
 			if (physics::collisionLodFor(file, part, 4)) {
 				made->trunkFromTypeFour = true;
 			}
@@ -912,7 +936,7 @@ std::shared_ptr<const GameWorld::MeshShape> GameWorld::meshShape(const physics::
 	}
 	made->trunk = std::make_shared<physics::CollisionWorld>();
 	if (made->trunkFromTypeFour) {
-		made->trunk->addMesh(file, physics::CollisionUser::Tree, {}, {}, 0, materials);
+		made->trunk->addMesh(file, physics::CollisionUser::Tree, {}, {}, 0, materials, geometry, state);
 	} else if (made->hasVehicleLod) {
 		// The trunk line (0x6bc9xx: one face of three vertices) up the LOD
 		// box's middle across x, at z 0: (cx, min y, 0), (cx, max y, 0),

@@ -41,11 +41,15 @@
 //    collision's lists (updateFlags (0, 0x102)) and 0.1 s later (timer
 //    event 0x21) the soldier takes the parachute's velocity (0x005cff90)
 //    and the parachute is taken away (DAT_00a1b5d8 slot 0xa4).
-//  - Its animation state (timer event 0x20, 0x005cfbb0) for the rider's and
-//    the canopy's systems: 4 once landed, else 1 while 8 m or more
-//    (*0x00a02000) over the terrain, 2 below.
+//  - Its animation state (timer event 0x20 every 1/3 s, 0x005cfbb0) for
+//    the rider's and the canopy's systems: 4 while the landing timer runs,
+//    else 1 while 8 m or more (*0x00a02000) over the terrain, 2 below; the
+//    rider's death sets 4 at once and starts the timer (0x005cfe40).
+//  - The canopy (an AnimatedBundle child, 0x005c06a0 / 0x005c00e0) plays
+//    parachute_deploy, then parachute_idle, and parachute_collapse on 4.
 #include "GameWorld.h"
 
+#include "Animation/AnimationSystem.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
 
@@ -64,6 +68,7 @@ constexpr float kStillHeight = 8.0f;   // *0x00a02000 (static_init 0x008e42e0)
 constexpr float kLandingTime = 0.05f;  // *0x00a02004 / *0x00a02008 (0x008e42f0 / 0x008e4300)
 constexpr float kLandingNormal = 0.3f; // *0x00a0200c (0x008e4310)
 constexpr float kRemoveDelay = 0.1f;   // timer event 0x21's 0x3dcccccd (0x005cff20)
+constexpr float kStateInterval = 1.0f / 3.0f; // timer event 0x20's 0x3eaaaaab (0x005cf6d0, 0x005d0220)
 
 const std::string* setting(const world::ObjectTemplate& t, const char* name)
 {
@@ -112,6 +117,66 @@ GameWorld::Parachute* GameWorld::findParachute(uint32_t object)
 		}
 	}
 	return nullptr;
+}
+
+const GameWorld::Parachute* GameWorld::findParachute(uint32_t object) const
+{
+	return const_cast<GameWorld*>(this)->findParachute(object);
+}
+
+// The canopy (parachute.tweak's animatedparachute: an AnimatedBundle, class
+// 0x949c, whose SkinnedMesh hangs on parachute.ske). The object's
+// constructor (0x005c06a0) makes a skeleton instance of the template's
+// skeleton (+0x29c, 0x005bfc50 -> +0x198) and an instance of each of its
+// systems (animationSystem1P +0x2a0 -> +0x18c, animationSystem3P +0x2a4 ->
+// +0x190); its update (slot 0xa0, 0x005c00e0) runs only the 1P one (slot
+// 0xc), poses the skeleton with it (slot 0x10), takes the node matrices
+// (0x008b8880) and hands them to its skinned mesh (the render object's
+// slot 0x54). parachute/AnimationSystem.inc: "startup" plays
+// parachute_deploy once, "root" loops parachute_idle and, on message 4,
+// parachute_collapse.
+bool GameWorld::loadCanopy(Parachute& chute, const world::ObjectTemplate& t)
+{
+	if (!m_loadAnimationSystem || !m_animationSystems) {
+		return false;
+	}
+	for (const world::ChildTemplate& child : t.children()) {
+		const world::ObjectTemplate* c = m_templates.find(child.name);
+		if (!c || !sameName(c->typeName(), "AnimatedBundle")) {
+			continue;
+		}
+		const std::string* system = setting(*c, "animationSystem1P");
+		const std::string* bones = setting(*c, "skeleton");
+		const anim::AnimationSystemTemplate* made = system ? m_loadAnimationSystem(*system) : nullptr;
+		const anim::Skeleton* skeleton = bones ? m_animationSystems->skeleton(*bones) : nullptr;
+		if (!made || !skeleton) {
+			continue;
+		}
+		chute.canopy = std::make_unique<anim::AnimationState>(*m_animationSystems, *made);
+		chute.canopySkeleton = skeleton;
+		chute.canopyPose = anim::setupPose(*skeleton);
+		chute.canopyWorld = anim::worldMatrices(*skeleton, chute.canopyPose);
+		return true;
+	}
+	return false;
+}
+
+// 0x005cfbb0 clears messages 1, 2 and 4 on each 0xc49e child (slot 0x14,
+// 0x005c0180: the system's slot 0x34 on both instances) and sets the
+// parachute's state (+0x460, slot 0x10, 0x005c0150 -> the systems' slot
+// 0x2c); then the child's update (0x005c00e0).
+void GameWorld::stepCanopy(Parachute& chute, float seconds)
+{
+	if (!chute.canopy || !chute.canopySkeleton) {
+		return;
+	}
+	anim::AnimationInput input;
+	input.messages = static_cast<uint32_t>(chute.state);
+	chute.canopy->update(input, seconds);
+	chute.canopy->takeEvents();
+	std::vector<bool> touched;
+	chute.canopy->apply(*chute.canopySkeleton, chute.canopyPose, touched);
+	chute.canopyWorld = anim::worldMatrices(*chute.canopySkeleton, chute.canopyPose);
 }
 
 bool GameWorld::ridingParachute(int player) const
@@ -292,7 +357,8 @@ bool GameWorld::openParachute(Player& player)
 	Parachute chute;
 	chute.object = made->id();
 	chute.player = player.id;
-	m_parachutes.push_back(chute);
+	loadCanopy(chute, *t);
+	m_parachutes.push_back(std::move(chute));
 	// enterOnSpawn: seat 0 (0x005cfaf0 -> 0x005cdd60).
 	body->occupants.assign(1, player.id);
 	player.vehicle = made->id();
@@ -446,8 +512,19 @@ void GameWorld::stepParachutes(float seconds)
 		Body* body = findBody(chute.object);
 		Player* rider = chute.player >= 0 ? findPlayer(chute.player) : nullptr;
 		if (rider && (!rider->alive || rider->vehicle != chute.object)) {
-			leaveParachute(*rider, chute); // dead: the canopy comes down empty
+			// The occupant's death (the 0xc4c5 interface's slot 10, the
+			// Parachute's 0x005cfe40 after the died exit 0x005cea00): the
+			// landing timer starts (+0x45c, 0.05 s, unless it runs) and the
+			// state goes to 4 at once (0x005cfbb0), so the canopy collapses
+			// and is taken away as after a landing.
+			const bool died = !rider->alive;
+			leaveParachute(*rider, chute);
 			rider = nullptr;
+			if (died && chute.landing < 0 && chute.removeIn < 0) {
+				chute.landing = kLandingTime;
+				chute.state = 4;
+				chute.stateTimer = kStateInterval;
+			}
 		}
 		if (!body) {
 			if (rider) {
@@ -456,10 +533,20 @@ void GameWorld::stepParachutes(float seconds)
 			it = m_parachutes.erase(it);
 			continue;
 		}
-		// 0x005cfbb0: the state, by the height over the terrain.
-		const physics::Vec3 p = body->body.position;
-		const float ground = m_ground.height ? m_ground.height(p.x, p.z) : 0.0f;
-		chute.state = chute.landing >= 0 || chute.removeIn >= 0 ? 4 : p.y - ground >= kStillHeight ? 1 : 2;
+		// The timer event 0x20 (first queued by the creation 0x005cf6d0,
+		// then again by each, 0x005d0220: every 1/3 s) runs 0x005cfbb0: the
+		// state by the height over the terrain, 4 while the landing timer
+		// (+0x45c) runs (0x005cff20 ends it, -1). The landing (0x005cf750)
+		// only starts the timer, so a landing between two events, 0.05 s
+		// long, is seldom seen as 4.
+		chute.stateTimer -= seconds;
+		if (chute.stateTimer <= 0) {
+			chute.stateTimer += kStateInterval;
+			const physics::Vec3 p = body->body.position;
+			const float ground = m_ground.height ? m_ground.height(p.x, p.z) : 0.0f;
+			chute.state = chute.landing > 0 ? 4 : p.y - ground >= kStillHeight ? 1 : 2;
+		}
+		stepCanopy(chute, seconds);
 		// 0x005d01c0: the landing timer; at 0 the rider is out (0x005cff20).
 		if (chute.landing > 0) {
 			chute.landing -= seconds;

@@ -4999,3 +4999,61 @@ TEST(Bots_AiRandomIsDicesTwister)
 	CHECK(top < 1.0f && top > 0.999f);
 	CHECK(ai::wordToFloat(0xffffffffu) == 4294967296.0f && ai::wordToFloat(0x80000000u) == 2147483648.0f);
 }
+
+// The bots' unlock pools (BF2142.exe's AI player adaptor slot 40,
+// 0x008a5b90, sorting by slot 39, 0x008a57b0): a container whose first
+// item has no aiTemplate is left out; one whose item's itemIndex is the
+// kit's primary slot (Kit +0x2c8, 3) goes to the primary pool, of which one
+// is taken at floor((n + 0.999) U) when that is below n (about half the
+// time with one); the rest to the main pool, two of which are taken.
+TEST(Bots_UnlocksTakeAPrimaryFromItsOwnPool)
+{
+	Field field([](Field& f) {
+		f.templates.registerType(20, "Kit");
+		f.templates.registerType(21, "ItemContainer");
+		world::ObjectTemplate* kit = f.templates.create("Kit", "EU_Assault");
+		kit->settings()["unlockIndex"] = "1";
+		const auto item = [&](const char* name, int index, bool ai) {
+			world::ObjectTemplate* t = f.templates.create("GenericFireArm", name);
+			t->settings()["itemIndex"] = std::to_string(index);
+			if (ai) {
+				t->settings()["aiTemplate"] = name;
+			}
+		};
+		item("unl_shotgun", 5, true);
+		item("unl_smoke", 5, true);
+		item("unl_har_rifle", 3, true);
+		item("ability_sprint", 0, false);
+		const auto add = [&](const char* name, const char* branch, int level, const char* content) {
+			world::ObjectTemplate* c = f.templates.create("ItemContainer", name);
+			c->settings()["unlockBranch"] = branch;
+			c->settings()["unlockLevel"] = std::to_string(level);
+			c->children().push_back({content, {}, {}});
+			kit->children().push_back({name, {}, {}});
+		};
+		add("Light0", "UB_First", 0, "unl_shotgun");
+		add("Light1", "UB_First", 1, "ability_sprint");
+		add("Light2", "UB_First", 2, "unl_har_rifle");
+		add("Medic0", "UB_Second", 0, "unl_smoke");
+	});
+	// A human owning Light0 and Light1 (mask 3): UB_First level 4, so Light0
+	// to Light2 are offered; UB_Second level 1 (Medic0).
+	const int human = field.world->addPlayer("Human", 1, false);
+	field.world->setOwnedUnlocks(human, {"Light0", "Light1"});
+	CHECK(field.world->spawnSoldier(human));
+	const int bot = field.world->addPlayer("Bot", 2, true);
+	field.world->setKit(bot, "EU_Assault", "us_light_soldier");
+	int primaries = 0;
+	const int runs = 400;
+	for (int run = 0; run < runs; ++run) {
+		field.world->chooseBotUnlocks(bot);
+		const std::vector<std::string> chosen = field.world->unlocksOf(bot);
+		const auto has = [&](const char* name) { return std::find(chosen.begin(), chosen.end(), name) != chosen.end(); };
+		CHECK(has("Light0") && has("Medic0")); // the main pool's two
+		CHECK(!has("Light1"));                 // no aiTemplate: left out
+		primaries += has("Light2") ? 1 : 0;
+		CHECK(chosen.size() == (has("Light2") ? 3u : 2u));
+	}
+	std::fprintf(stderr, "  the primary taken %d of %d\n", primaries, runs);
+	CHECK(primaries > runs * 3 / 10 && primaries < runs * 7 / 10);
+}

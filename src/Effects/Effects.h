@@ -541,6 +541,16 @@ struct Decal {
 	// DecalManager slot 0x14, RendDX9 0x100e6b70, kept at object +0x164 and
 	// released with it, slot 0x20).
 	uint32_t object = 0;
+	// On a part of that object (-1: the object itself): a collisionPart
+	// child the round met, which in BF2142.exe is an object of its own
+	// with its own decal set (every shipped one has hasCollisionPhysics,
+	// 0x0063c000) and its own mesh instance (+0x4c, 0x0063ccc0), which the
+	// add (0x005a36d0: the hit object's slot 0xd4 set, its +0x4c mesh)
+	// clips the decal to and the set draws at the part's matrix: position,
+	// normal and tangent are then in the part's space (its index among the
+	// object's posed parts, GameWorld's raycastBody), and the decal turns
+	// and moves with it.
+	int part = -1;
 	// A world decal's static object (0: the terrain): the exe's add
 	// (0x005a36d0 -> DecalSet slot 4 0x10166410) passes the hit's mesh,
 	// whose faces 0x10165f60 clips it to.
@@ -937,6 +947,10 @@ public:
 	// isStatic): the rewrite's set is the object's decals' ownerDrawn.
 	bool spawnDecal(const std::string& name, const Vec3& position, const Vec3& normal, uint32_t object,
 		const Vec3& objectPosition, const Vec3& objectRotation);
+	// The same on `object`'s part `part` (Decal::part) whose frame in the
+	// world is now `partRotation` (rows x, y, z) at `partPosition`.
+	bool spawnPartDecal(const std::string& name, const Vec3& position, const Vec3& normal, uint32_t object, int part,
+		const Vec3& partPosition, const Mat3& partRotation);
 	// The id the last spawnDecal gave its decal (0x10166410's result: a
 	// static decal's id in its set, else 0).
 	uint8_t lastDecalId() const { return m_lastDecalId; }

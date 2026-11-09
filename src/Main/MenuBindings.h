@@ -482,8 +482,8 @@ private:
 		std::string name, briefing, briefingKey;
 		std::vector<std::string> modes;
 	};
-	const LevelText* levelText(const std::string& level);
-	std::map<std::string, std::optional<LevelText>> m_levelTexts;
+	const LevelText* levelText(const std::string& level) const;
+	mutable std::map<std::string, std::optional<LevelText>> m_levelTexts;
 	// SwiffHost slots 0x124 joinServer and 0x128 createServer.
 	bool joinServer(const std::string& host, int port);
 	bool createServer();

@@ -274,11 +274,62 @@ ancestor's, and no shipped collisionPart child has an armour, a
 mapMaterial or a mesh of its own, so the faces' materials map through
 the root's mapMaterial (us_heavy_mech's legs 4201, weak spots 4202 /
 4203) and the root's armour takes it (`Vehicles_RocketHurtsTheWalker`:
-eu_av's rocket at the knee, 1000 → 912). Not done: the decals' faces
-(`projectileCollision`) are still the root's, and the static objects'
-collisionPart children (eu_aacannon's, the ground cannons') are not in
-the static world (`addStaticCollision` adds children with a mesh of
-their own).
+eu_av's rocket at the knee, 1000 → 912). A part hit takes its decal in
+the part's own set and space (see **Decals**). The walk (`0x0063ccc0`,
+called from `0x0063d720` by every object with an instance of its own,
+`+0x4c`, with that object's mesh) runs over the children while the next
+has no instance of its own: the first child with a mesh ends it, its
+later siblings too (no shipped tree has a part after such a sibling).
+So a node of a tree with its own mesh gives its subtree's parts its
+mesh's geometries: the Titans' gun hubs' cannons (eu_aacannon: base,
+barrel and firearm, geometries 1–3; the ground cannons' base and barrel)
+are posed parts of the Titan's body (`buildTitanCollisionParts`: each
+TitanMesh's node, fixed in the Titan's frame, with the walk under it; a
+part goes with its mesh's TitanPart, `PartMesh::off`; 15 a Titan on
+Minsk), and the static objects' parts (missile_silo, missile_silo_v2,
+the commander's EMP strike, orbital strike and movement analyst) join
+the static world as their templates place them (`addStaticCollision` /
+`addStaticMesh`: soldier and projectile LODs and the mesh physics' part,
+`meshShape` at the geometry): nothing turns them. A stationary gun with
+seats (static_aa / ap / av) is a fixed body whose parts turn with its
+guns and meet the rounds posed (`raycastBody`), so its static entry keeps
+its root alone (`stationaryWithSeats`). Tests:
+`Vehicles_StaticObjectsCollisionParts`, `Titan_MinskTitansSpawn`.
+
+**The parts in the mesh physics** (2026-11-09). Every object whose
+template has hasCollisionPhysics (`+0xf1` bit 4) gets a response
+(`0x005f6a60`: the mobile Mesh one, `0x006ba0d0`, or the non-mobile one,
+`0x006bfcc0`; set as interface `0xc42c`), the parts among them (the
+turrets', guns', wheels' and legs' templates set hasCollisionPhysics), and
+a root's response chains its tree's (slot `0x5c`, `0x006c0090`: rebuilt
+from the children by `0x006c0030` when dirty). The mobile broad phase
+(`0x006dc7b0`) finds a tree by its first object with a response in the
+scene's rays (`0x006dbb70`: flag `0x100`) and walks that chain
+(`0x006f2d50`), skipping the mover's own tree; each candidate is tested
+with its own instance (`+0x4c`) at its own matrix (slot `0x78`). The
+soldier's object pass walks the same chain (the loop before
+`0x006c3890`, which takes the candidate's `+0x4c`). So a mover meets
+each part of another tree and a soldier each part's soldier LOD, where
+the part is now. Rewritten: each collisionPart's vehicle LOD (vertices,
+materials, box) and soldier LOD per sub-geometry
+(`Body::PartMesh::physics`, `GameWorld::partPhysics`); `partActors` poses
+them (`poseCollisionParts`) as candidates for every mover (met by each,
+whatever the pair order of the roots, as the rewrite's parts are no
+movers) and `stepSoldier` adds each part's soldier LOD to the soldier's
+movers (a body with parts but no soldier LOD of its own, a walker's, is
+asked too, within its parts' reach). A wrecked part without a wreck
+sub-geometry is out (`0x006e5df0` clears flag `0x100`). A Titan's
+posed cannons go in with the Titan's node (a major actor). Not
+followed: a part as a mover of its own (its node, `0x005f6ba0`, makes
+one for hasMobilePhysics parts): the rewrite's parts move with their
+body. Because the parts are now asked every tick by the soldiers near a
+body, the bone parts (a walker's, the deployables') are posed with each
+update of their system (`posedAfterUpdate`, `stepObjectAnimation`), as
+the exe does, not when first asked (asked before and after an update, the
+pose would blend on twice). `Vehicles_SoldierStandsOnTheTurnedTurret`
+(dropped on the turret's roof he stands at 1.8 m, not on the hull at
+0.75; 2 m to the left, on the hull's edge while the turret looks ahead
+and on its roof once it has turned 90°).
 Bot rounds over 300 s (Cerbere_Landing 16, minsk_coop 32, 15 bots):
 4.65 / 9.8 s user, against 4.66 / 10.2 s with the parts left out.
 
@@ -295,8 +346,20 @@ after the delay (event `0x27`, `0x00655320`); `0x00654070` and
 geometry 0's wreck shape alone (its parts have one sub-geometry), and a
 shield cell without a wreck sub-geometry leaves them.
 `GameWorld::wreckCollision` (from `destroyVehicle`, or
-`stepVehicleDamage` after a wreckDelay). The vehicle LOD (the mesh
-physics' points) keeps the normal sub-geometry.
+`stepVehicleDamage` after a wreckDelay). Every other LOD query of the
+instance goes through the same sub-geometry (slots 10–28): the ground
+pass reads the vehicle LOD's points through it each tick (`0x006b9260`,
+slot `0x3c(1)`), the mesh physics its faces, box and radius (slots
+`0x50` / `0x54`, the other movers' `otherCollisionLod` too), the soldier
+physics its soldier LOD (`0x006c3890`, slot `0x50(2)`). The shipped
+wreck sub-geometries have a vehicle LOD of the wreck's shape (eu_tank's
+20 faces against 34, us_heavy_mech's 68 against 64) and no soldier LOD:
+a wreck rests on its wreck shape, other vehicles meet that, and soldiers
+pass through it. Rewritten: `setBodyLods(body, mesh, materials, 1)`
+(points, edges, box, radius, vehicle and soldier faces;
+`Body::meshState` for `atLod`, `lodFaces`), kept at the normal LODs when
+the wreck's has no vehicle LOD (the ground pass would then find none,
+slot `0x70(1)`). Test: `Vehicles_WreckMeetsMoversAsItsWreckShape`.
 
 Objects whose template has `hasMobilePhysics 1` and `physicsType Mesh`
 get a `PhysicsNode.Basic` (created in `0x005f6ba0` with the template's
@@ -1346,8 +1409,34 @@ each attacker's damage; the hit that destroys it raises the
 onDestroyEvent with the attacker and, damagePointOnDestroy, a teammate's
 team damage (see **Team damage**). Rifle rounds (material 38) do nothing to 5101; the AV rifle's
 round wrecks a cell in one hit (`Vehicles_HeavyIfvShieldCellsTakeRounds`).
-Not rewritten: the cells' armour effects (e_healing_node at 99,
-e_titan_consol at 0, e_bluespark_loop as a wreck). **The HUD's cells**: the HUD registers
+**The cells' armour effects** (since 2026-11-09): each cell's armour runs
+the armour effects of any armour (`0x006549a0` through `0x00654730` after
+its hit points change; see **Armour effects**) on its own list:
+addArmorEffect 99 e_healing_node (attached to the cell, turned 90°),
+0 e_titan_consol (left in the world at the cell) and −1
+e_bluespark_loop (attached). Its percent below 0 is of its
+wreckHitPoints, the template's default 10 (`0x00630040`, `+0xc0`; the
+cell sets none), and the hit points' setter (`0x00655460`) keeps them
+within −10. So a cell under 100 % (the mirror of the hull's damage)
+shows the healing node until it is full again; one brought to exactly 0
+(the mirror's loss) gives the consol burst once; one under 0 (a round's
+killing blow always leaves it below, `0x00656320`) takes the −1 group.
+e_healing_node is an EffectBundle whose only child is the SimpleObject
+ifv_shield_the_generatoreffect (an additive, UV-scrolling glow mesh,
+simpleUVTranslation 0.6/0): `0x006549a0` creates the bundle (template
+slot `0x50`) with its children and hangs it on the cell (slot `0xf0`),
+so the glow is that mesh at the cell. No archive ships e_bluespark_loop
+(Effects_bp1 has e_bluesparks_loop): the wreck's group starts nothing.
+Rewritten: `GameWorld::armorEffectsAfter` (the core of
+`armorEffectsAfterDamage`, now for any armour: its state, its anchor id,
+its frame), called per cell at the end of `stepShieldCells` with the
+cell's id as the anchor (`armorAnchorFrame` places it on the vehicle);
+an attached group's SimpleObject children with a geometry are kept
+(`m_armorMeshes`) and drawn as placed templates
+(`GameWorld::armorEffectMeshes`, main.cpp's `placedTemplates`)
+(`Vehicles_HeavyIfvShieldCellsShowArmourEffects`). Left: a joined
+client's cells (the host writes them standing or wrecked only, 8 or 0
+eighths), so their effects are the host's. **The HUD's cells**: the HUD registers
 `RepairCell%iActive` 0..9 as bools at `+0x335` on (the HUD manager's
 constructor loop beside OccupyingPlayerName%i), and 0x007a1e50 writes cell
 n at `+0x336 + n`, so cell n is RepairCell(n+1)Active, which
@@ -1399,7 +1488,16 @@ the Parachute `parachute` (class `0xc5a8`, vtables `0x0096e518` /
   `0x18`) moves down at 1 m/s or more (y ≤ −1) and input 22 in the bot's
   mask (`+0x100` bit `0x400000`), input 22 is held at 1 (`+0x58`); the
   game's choice opens the parachute as soon as its fire test passes. The
-  gate at bot `+0x264` isn't traced (taken as clear). A lower select
+  whole soldier block (the parachute and the reload below) is skipped for
+  a bot whose `+0x264` is set: the auto controller flag (vt+0x278 /
+  vt+0x27c, `0x1009b3e0` / `0x1009b3f0`), the constructor's last argument
+  (`0x1009ac30`): 1 from the auto controller maker (`0x100c8d20`,
+  "Activating autoController"), 0 from the bot makers (`0x100c84b0`,
+  `0x100c8950`), set again by IAIAutoControllersManager (vtbl
+  `0x10114630`: `0x1004d140`, `0x1004d8e0`) when it takes over an object
+  with an autoControllerTemplateName (the drones, the silos). Those run in
+  GameWorld and Titans here, so no rewritten bot is one
+  (`Bot::autoController`). A lower select
   input pressed the same execution (the primary's, 16) wins the choice.
   `BotManager::handleWeapon`, `Titan_FallingBotOpensItsParachute`.
 - Entering (`0x005cfaf0` after `0x005cdd60`) sets a non-pod parachute
@@ -1446,17 +1544,51 @@ the Parachute `parachute` (class `0xc5a8`, vtables `0x0096e518` /
   under the sanitizers, the round's output unchanged); the per-tick cost
   was never the per-LOD candidates (collideMover skips another LOD's part
   at once).
-- The animation state (event 0x20, `0x005cfbb0`): 4 landed, else 1 at 8 m
-  or more (`*0x00a02000`) over the terrain, 2 below: the rider's seat
-  messages (`Player::seatMessages`: still, landing, landed).
+- The animation state (event 0x20, `0x005cfbb0`): 4 while the landing
+  timer runs, else 1 at 8 m or more (`*0x00a02000`) over the terrain, 2
+  below: the rider's seat messages (`Player::seatMessages`: still,
+  landing, landed) and the canopy's.
 - **The HUD's parachute help** (`0x00646cb0` case 0x0d, with the help
   manager's `+0x205`): the HUD manager's slot `0xb0` (`0x0074e8c0`: the
   player's controlled object, slot `0xb4`, as a soldier, `0xc4d7`) and
   that soldier's slot `0x78`: shown while he falls (under −10 m/s) on
   foot, not while he rides the parachute. main.cpp sets
   `help.parachute` from `GameWorld::soldierFalling`.
-- Not rewritten: the canopy's own AnimatedBundle (parachute_deploy /
-  idle / collapse on message 4: the renderer's).
+- **The state's timer**: the creation (`0x005cf6d0`) queues the timer
+  event 0x20 1/3 s on (`0x3eaaaaab`) and each event queues the next
+  (`0x005d0220`), so the state (`+0x460`, set through `+0x188`'s slot
+  `0x10`, `0x005d0110`, which keeps the last at `+0x464`) is 0 for the
+  first third of a second and changes only every 1/3 s. 4 is set while
+  the landing timer `+0x45c` runs, which `0x005cf750` starts (0.05 s) and
+  `0x005cff20` ends (−1): a landing between two events is seldom seen as
+  4. The occupant's death (the PlayerControlObject interface's slot 10,
+  the Parachute's `0x005cfe40`, after the died exit `0x005cea00`) starts
+  the landing timer unless it runs, sets 4 and runs `0x005cfbb0` at once,
+  so the canopy collapses and the parachute goes 0.15 s later
+  (`0x005cff20`, then event 0x21) instead of coming down empty.
+  `Parachute::stateTimer`, `stepParachutes`.
+- **The canopy** (parachute.tweak's child animatedparachute: an
+  AnimatedBundle, class `0x949c`, its SkinnedMesh on parachute.ske). The
+  object's constructor (`0x005c06a0`, vtable `0x0096c048`) makes a
+  skeleton instance of the template's skeleton (`+0x29c`, `0x005bfc50` →
+  `+0x198`) and an instance of each of its systems (animationSystem1P
+  `+0x2a0` → `+0x18c`, animationSystem3P `+0x2a4` → `+0x190`); its
+  interface `0xc49e` (`+0x184`, vtable `0x0096c010`) sets a message on
+  both (slot `0x10`, `0x005c0150` → the systems' slot `0x2c`) or clears
+  one (slot `0x14`, `0x005c0180` → `0x34`); its update (slot `0xa0`,
+  `0x005c00e0`) runs the 1P system only (slot `0xc`), poses the skeleton
+  with it (slot `0x10`), takes the node matrices (`0x008b8880`) and hands
+  them to its skinned mesh (the render object's slot `0x54`).
+  `0x005cfbb0` clears messages 1, 2 and 4 on each `0xc49e` child and sets
+  the state. parachute/AnimationSystem.inc: "startup" plays
+  parachute_deploy once (not looping), "root" loops parachute_idle and,
+  on message 4, parachute_collapse. Rewritten: `GameWorld::loadCanopy` /
+  `stepCanopy` (the parachute's AnimationState, skeleton and pose), drawn
+  through `skeletonPose` for the parachute's id; the renderer takes an
+  AnimatedBundle's `skeleton` where a soldier's `skeleton3P` would be
+  (`LevelRenderer::addTemplate`). `Vehicles_ParachuteCanopyDeploysIdlesAndCollapses`
+  (deploy, idle, and the collapse on the rider's death, gone 4 ticks
+  later). `--actions "up:150 wait:45 item:9 wait:3"` shows it unfolding.
 
 **Stationary seats** (`Body::fixed`). The bipods (eu_bipod, as_bipod,
 hmg_bipod) and static_aa / ap / av end their scripts with hasMobilePhysics
@@ -1573,9 +1705,17 @@ in between (`FireArm::fire`). The round's start and its wait:
   start, `0x005f25f0`), else the gun's; on foot the soldier's control
   object's frame always (the flag isn't read); `projectileStartPosition`
   is then added in that frame. Rewritten for seat guns
-  (`GameWorld::seatGunOrigin`): with the flag the round starts at the
-  seat's first Camera (its place at rest turned with the gun's aim about
-  the yaw bundle), along the gun's aim. Locked (`+0x45`, only
+  (`GameWorld::seatGunOrigin`, `fireCamera`): with the flag the round
+  starts at the seat's active Camera (the one whose CameraId the weapon's
+  zoom.startCameraId takes up, `0x005db260`, else the seat's first; its
+  place at rest turned with the gun's aim about the yaw bundle). A camera
+  under the seat's yaw or pitch bundle turns with the gun, and the round
+  leaves along the gun's aim; one off them leaves it along the camera's
+  own facing at rest (`SeatLayout::SeatCamera::turn`), turned by the
+  seat's look when it is the mouse-look camera: as_ag's and us_ag's
+  GuidedMissileWeapon (startCameraId 11, the TAD camera set 10 degrees
+  down under the gunner's seat) launch the TV missile at rest along it
+  (`Vehicles_GunshipMissileCamera`). Locked (`+0x45`, only
   AS_TANK_Turretfirearm): at the gun's setup (`0x005f25f0`) the pose of a
   Camera that is a direct child of the weapon's control object
   (`0x0042b2f0`, interface 0xc4c5; its children through 0xc378 slot 0xec
@@ -1602,12 +1742,13 @@ in between (`FireArm::fire`). The round's start and its wait:
   constructor's 1/30, not a property), the arm's animation taking min(power,
   0.99); the release clears the flag and the round leaves after the
   pull-back and launch delay at the weapon's speed × power plus the
-  thrower's velocity (`0x005e5720`; its random spin `+0xac` × power too). A
+  thrower's velocity (`0x005e5720`; its random spin `+0xac` × power too,
+  see **The rounds' own look**). A
   normal throw's power is 1 (`0x005e4b40`). `FireArmSettings::softThrow`,
   `FireArm::throwPower`, `GameWorld::fire`. fireLaunchDelaySoft (`+0x9c`)
   is read only by slot 11 (`0x005e4e70`: max(fireLaunchDelay, soft) +
-  `+0xa4`, the busy time) and isn't applied; the spin and the arm's
-  animation aren't either.
+  `+0xa4`, the busy time) and isn't applied; the arm's animation isn't
+  either.
 - `fire.addBarrelName` (`0x004e45a6` → `0x005d6ae0`, MultiFireComp
   `+0x94`): the gun's children of those names are its barrels
   (`0x005d6d20`), fired in turn (`+0x9c` set by default, `+0x1a8`) from
@@ -1700,6 +1841,42 @@ drawn and carries the bundles. The looping sound is the round's Sound child
 (`GameAudio::loopingSound`, falling back to `S_<name>_Looping`). Tests:
 `RoundVisuals_*`, `GameAudio_RoundLoopsItsSoundChild`.
 
+*Thrown rounds tumble* (the RotationalPoints: the frag, EMP, smoke and
+radar grenades, the IFV's mine, the stationary medic hub and motion
+bait). Their node (`0x006c6480`, vtable `0x00993610`) keeps an angular
+velocity (`+0xb8`, world axes, rad/s; set by slot `0x6c`, added to by
+`0x70`, at most 1500, `*0x00a84b00`) and its step (`0x006c6860`, after
+the linear one in `0x006c6b20`) turns the object's matrix about the mean
+of the tick's old and new ones by |ω| × dt × 57.2958° (`0x005b1a70` →
+`0x006adf40`, the 3 × 3 product `0x006ad420`: about the world's axis);
+nothing damps it. The throw (`0x005e5720`'s end) sets the matrix to
+projectileStartRotation's yaw / pitch / roll (`0x006adb30(−z, −y, −x)`)
+× the fire frame (`0x006acfa0`; the grenades' 0/0/45 roll it 45°, the
+mines' 0/−8/0 tip it), and with fire.randomRotationSpeed s above 0 the
+angular velocity (0, −n1, n2) × the throw's power (`+0x168`), each n =
+ceil(s × ((h | 0x80) >> 7) + 1) × 2^−24) for the next h of the engine's
+generator (`0x0042b230`) seeded with the round object's id & 0x7fffffff:
+whole radians a second from 1 to s. Shipped s is 4 on the smoke and
+radar grenades and the motion bait (the frag grenade's line is a rem:
+it flies unturning in its rolled frame). A bounce (`0x006c0d00`'s end,
+slots `0x68` / `0x6c`) sets ω to −ω × min(|v′|², 1), 0 under |v′|² 0.1,
+v′ the velocity after it: each bounce reverses the spin and a slow one
+stops it. Rewritten: `throwFrame` (the thrower's `GameWorld::fire`; the
+round's serial stands for its object id), `Projectile::turns` /
+`rotation` / `spin` stepped by `physics::PointBody` (`moveProjectile`),
+`bounceSpin`, and `roundFrame` drawing the round in its own frame in
+flight and lying (`RoundVisuals_ThrownRoundTumbles`).
+
+*Seen from its own camera.* A round's Camera child (`0x005b38a0`) sits
+in the round's matrix, along its nose (`GameWorld::projectileCamera`),
+as the mesh is drawn. AAGuided_missile_Camera lies at z 0.33 and
+remote_missile's mesh reaches z 0.38: the camera is inside the nose.
+BundledMesh.fx's opaque techniques (Full, Full20, t1) leave Direct3D's
+default CullMode CCW (only the alpha ones set NONE), so from inside
+every face of the missile turns its back and none is drawn. The
+rewrite's meshes are drawn without culling, so the round whose camera
+is the local view is left out (`RoundVisuals::meshes`' `viewedFrom`).
+
 **Camera recoil.** WeaponBasedRecoilComp (the vehicle guns'; template
 `0x005de1b0`, cameraRecoilSpeed `+0x24`, cameraRecoilSize `+0x28`): each
 round (`0x005ddfc0`'s end) its control object's camera takes them
@@ -1745,7 +1922,14 @@ has one. Levels 0 and −100 are left in the world, the others follow the
 vehicle. The wreck's hit points drain to −wreckHitPoints over
 timeToStayAsWreck (see the Titans), so the −1 … −99 groups (the aircraft's
 burning) start on the way and the −100 group as it goes. Rewritten for
-vehicles in `GameWorld::armorEffectsAfterDamage` / `followArmorEffects`.
+vehicles in `GameWorld::armorEffectsAfterDamage` / `followArmorEffects`,
+and for any armour (the heavy IFV's cells) in `armorEffectsAfter`. A
+template without armor.wreckHitPoints has the constructor's 10
+(`0x00630040`, `+0xc0`; the rewrite's list took 0 before). Each effect is
+a template created with its children (slot `0x50`): an EffectBundle's
+SimpleObject children with a geometry (e_healing_node's glow) are drawn
+at the bundle (`GameWorld::armorEffectMeshes`); the world-left groups'
+(0 and −100) meshes aren't kept (none shipped found).
 
 The wreck (`0x00652380`): timeToStayAsWreck (template `+0x158`, 20 by
 default) drains the armour to −wreckHitPoints by wreckHitPoints /
@@ -2121,8 +2305,8 @@ mesh movers in the rewrite. Not followed: with 0, a projectile A
   (`Projectile::heading`): the firing's direction, which Point physics
   doesn't turn but the follow does (`0x005ecb30` turns the object's
   matrix). A round launched at rest along a seat camera's facing
-  (fireInCameraDof, the gunship's TV missile) noses along its flight, the
-  layout keeping no camera facing. The shipped AV missiles leave at 4 m/s
+  (fireInCameraDof, the gunship's TV missile) has that facing as its nose
+  (see `fire.fireInCameraDof` above). The shipped AV missiles leave at 4 m/s
   and reach 50 within half a second of their 0.2 s delay; before this
   the rewrite pushed only magnets, so every other rocket crawled at its
   launch speed. `thrustProjectile`, `noseOf` (`GameWorld_RocketEngine`).
@@ -3248,7 +3432,19 @@ static object or a vehicle are clipped to that object's collision faces
 static object it hit, `Decal::surface`, and `GameWorld::
 projectileCollision` gives the faces, in world space for the statics and
 in the body's space for a vehicle, whose clipped decal is placed with it
-each frame), faces turned more than decalGeomClipAngle away skipped; the
+each frame), faces turned more than decalGeomClipAngle away skipped. A
+round that meets a collisionPart child (a walker's leg, a turret, a
+Titan cannon's barrel: `raycastBody`'s part) hits that object, which has
+its own decal set (every shipped part template has hasCollisionPhysics;
+`0x0063c000`) and its own instance (`+0x4c`): the add (`0x005a36d0`, the
+hit object's slot `0xd4` set and `+0x4c` mesh) clips the decal to the
+part's faces and the set draws it at the part's matrix, so it turns and
+moves with the part. Rewritten: `EffectManager::spawnPartDecal`
+(`Decal::part`, the decal in the part's space), `GameWorld::partCollision`
+(the part's projectile LOD for the clip) and `collisionPartFrame` (its
+frame, posed as the rays meet it, for the drawing; LevelSources'
+`collisionPartFrame`) (`Vehicles_DecalOnTheWalkersLegRidesIt`); the
+root's and its parts' sets age together. The
 rewrite takes the object's faces about the hit rather than walking from
 the hit face through its neighbours, which gives the same pieces for decals
 that small.
@@ -8888,8 +9084,8 @@ keep their own one-per-owner paths).
   `collision.hasCollisionEffect`
   (`+0xc`) has getters (`0x005e7840`, `0x005b3000`) and no caller found;
   `fire.projectileStartRotation` (ThrownFireComp `+0xb4`..`+0xbc`) only
-  turns the thrown object's matrix (`0x005e5720`), not its velocity, and
-  the rewrite's rounds have no orientation of their own.
+  turns the thrown object's matrix (`0x005e5720`), not its velocity (see
+  **The rounds' own look**: `throwFrame`).
 - **Sticky projectiles** (StickyCollisionComp, component `0xc54b`; its
   template's constructor `0x005e8820`; 11 shipped: C4, both sonars, the
   decoy, the AP and EMP mines, the explosive shotgun round, both hubs, the
@@ -12257,7 +12453,8 @@ vehicle's riders as hit.
   seen clear (memory flag 0x40) or known from others; C4 not while the
   bot's own charge is out (+0x1b8); none without rounds (slot 0xc, all
   magazines; −1 counts 0x10000) unless Revive. The score is the strength
-  against the target's type, × 0.5 against a scripted bot (+0x264),
+  against the target's type, × 0.5 against a target whose bot is an auto
+  controller (+0x264, vt+0x27c on the target's bot),
   × (3 − EMP level) with `isEmpWeapon` (+0x4d, 0x10074c60). CloseCombat
   and Revive need the target on the bot's mesh outside the vehicles round
   it (0x100947b0) and count only soldier to soldier within 3 m or when
@@ -13441,11 +13638,17 @@ the pause's stamp.
   pool taken at random (floor((n − 0.001) U)), then the anti-air one on a
   coin toss when the AI's object environment answers slot 0x98(1) for an
   object (checked once, `0x00b4cb7d`; here: an air or helicopter vehicle
-  on the map). l2 isn't read. Not rewritten: the slot 39 flag (the
-  container's item's interface `0xc49a` slot 0x14 against the kit
-  template's `+0x2c8`) that sends a container to a second pool, of which
-  one at random (floor((n + 0.999) U), none when n comes out) is taken
-  when the anti-air one isn't. Rewritten: `GameWorld::chooseBotUnlocks`,
+  on the map), which ends the choice. l2 isn't read. Slot 39 also leaves
+  out a container whose first item has no item interface (`0xc49a`) or
+  no aiTemplate (template `+0x1a0`; the abilities, HUD upgrades, mines,
+  sonars and shields), and sends to a second pool one whose item's
+  itemIndex (the item interface's slot 0x14, GenericFireArm's
+  `0x00440dc0`, the template's `+0x2e0`) is the kit template's `+0x2c8`
+  (3, set by the Kit constructor `0x00570080` and by no property: the
+  primary's slot). Those are the primaries: the HAR, LAR, carbine, HMG,
+  shotgun, AV rifle and advanced sniper rifle. When the anti-air one isn't
+  taken, one of that pool at floor((n + 0.999) U) is, none when that comes
+  out n (about half the time with one). Rewritten: `GameWorld::chooseBotUnlocks`,
   called by the respawn's kit choice (`BotManager::chooseRespawn`), the
   AI weapons' `weaponTemplate.isAntiAirWeapon` (`WeaponAi::antiAir`). The
   rewrite's choice is the point's control point
@@ -13619,7 +13822,7 @@ keeps no copy). Kept as the binary does it.
   attention on the bot (the sensing agent's stamp 0x100eb7f0, whose
   writer wasn't traced: in AIDLL's decompilation only that find and the
   agent's destructor 0x100ed5b0 touch the map at +0x84) is a round of it
-  having passed the bot; no bot is scripted (the +0x264 flag; the scripted-bot commands' goals don't set it here); no wire-guided weapon holds a target
+  having passed the bot; no bot is an auto controller (the +0x264 flag: the drones' and silos' controllers aren't bots here); no wire-guided weapon holds a target
   (LPTargetComp's target isn't modelled); the area guard's per-side spot
   is the control point (0x100623c0 starts it at the area's position) and
   its per-side radius (+0x98 + 4 team: the spot's distance to the area's
@@ -14058,7 +14261,15 @@ ask whether it's done.
   `+level … +gameMode … +mapSize …` would, with the bots, their skill and
   the ticket ratio from the menu.
 - **The create-server page** (`mc_local_create`): the GAME MODE box lists
-  the mod's modes without `sp1` and `gpm_sp` (0x10069160). The page's
+  the mod's modes without `sp1` and `gpm_sp` (0x10069160), in ModInfo's
+  order (+0x10c): the level scan (0x004643d0) lists `<mod>/Levels/` with
+  FindFirstFileW / FindNextFileW (0x0069f530; on NTFS the names in
+  upper-cased order) and reads each level's `Info/<level>.desc`
+  (0x00462750), whose `<modes><mode type="...">` go to the end of the
+  list in the file's order unless already there (compared without
+  regard to case). The rewrite sorts the levels the same way
+  (`MenuBindings::allGameModes`), and a level without a readable `.desc`
+  gives its `server.zip` modes. The page's
   `createServerInit` calls `setValue("TEXT_gpm_ti", 2)`, which puts the
   key in the label and, through `changeGameMode`, calls
   `ServerSettings.setGameModeIndex(2)` (0x10057870: the third mode becomes
@@ -14077,6 +14288,26 @@ ask whether it's done.
   `bf2142_spawntime`, `timelimit`, `bf2142_ticketratio`,
   `bf2142_teamratio`, `bf2142_autobalanced`, `bf2142_allow_spectators`;
   0x004661a0), each beside its SERVERINFO_ label; HEADER_on / HEADER_off.
+  The original's popup asks the server again for all its keys
+  (ServerBrowserAuxUpdateServer with a full update, 0x00715ae0); the
+  rewrite's LAN search asks for them with the list's (`net::lanQueryKeys`:
+  0x00467d40's 21 keys, then timelimit, roundtime, startdelay, spawntime,
+  ticketratio, teamratio, allow_spectators, scorelimit, tkmode, team1,
+  team2). The game's own keys are qr2 ids 0x34..0x52 (registered by
+  0x005785b0, `bf2142_ranked` .. `bf2142_custom_map_url`). A host answers
+  them (`HostedGame::report`) as the server key callback 0x00578bb0 does:
+  each key reads a field of the server info object (0x00a75560, slot 1
+  0x00642210), which 0x006423d0 fills from the sv settings before each
+  report: `roundtime` sv.roundsPerMap (+0x11c), `timelimit` sv.timeLimit
+  (+0x120, seconds), `bf2142_friendlyfire` "1" when
+  sv.soldierFriendlyFire (+0x128) is 100 or more, `bf2142_autobalanced`
+  sv.autoBalanceTeam (+0x1e8), `bf2142_tkmode` "Punish" / "No Punish"
+  (+0x140), `bf2142_startdelay` (+0x108), `bf2142_scorelimit` (+0x124),
+  `bf2142_spawntime` "%f" (0x00430f60), `bf2142_ticketratio` "%d"
+  (0x00430fa0), `bf2142_teamratio` "%f" (0x00430fc0) (a ranked server,
+  sv.ranked +0x26d, reports 15, 100 and 100), `bf2142_reservedslots`
+  (+0x274), `bf2142_allow_spectators` sv.allowSpectators (+0x290) unless
+  ranked (0x00430a00), the team names and the map size.
 - **Time cells:** TEXT_timeformat_hhmm (`#HH#:#MM#`, each `%02d`) from
   minutes (0x100657b0) or seconds (0x1006a840, 0x1007ada0; the stats
   rows' time played).
@@ -14353,14 +14584,44 @@ root every frame:
   four awards a page: the picture from
   `images/awards/<kind>/eor/` by the id's hundreds, `AWARD_NAME_<id>[_<level>]`,
   and the count. `eorSquadScore "<0|1> <place>"` (`0x100678b0`) shows the
-  squad leader, the members and the totals. `eorDebriefing` (best kit,
-  weapon and vehicle) stays empty because there are no per-weapon
-  records yet.
+  squad leader, the members and the totals.
+- **The debriefing** (`eorDebriefing "<category> <place>"`, 0x10065ad0,
+  made by 0x100658c0): the game side is the scripts'. bf2/stats/stats.py
+  times every player's kits, weapons and vehicles, and
+  bf2/stats/endofround.py hands its "\\key\\value" text to
+  `gl_sendEndOfRoundData` (0x00568930; a joined game gets it in data
+  block 8): `ktw<kit>_<name>` seconds and `ks` score, `wk` / `wa` /
+  `wtw` a weapon's kills, accuracy and seconds, `vtw` / `vk` a vehicle's.
+  BF2142.exe reads it into SwiffHost's end-of-round record (0x0047c7a0):
+  a record per player and type (by the name's player), the count per
+  minute (×1/60 of the seconds; above 0 but under 0.01 shows 0.01),
+  sorted best first (kits by score, then score per minute, then time,
+  0x004732b0; weapons by kills, kills per minute, time, 0x004733a0;
+  vehicles the same, 0x00473490). The player's first record is place 0
+  (+0x2d4 kits, +0x40c weapons, +0x370 vehicles); every record of that
+  type counts toward the position "%d/%d" (+0x51c.., `getKitPosition`
+  0x1001e120 and the weapon's and vehicle's), and the first teammate's
+  and opponent's are places 1 and 2. The list has four rows of a label
+  (0x1012c168's table: the place's header in capitals, then e.g.
+  TEXT_scorewithkit, TEXT_timewithkit, TEXT_scoreperminutewithkit) and a
+  value: the name (none for the player's kit), the score or kills, the
+  time (0x100657b0 given the seconds, so its hours read as minutes) or
+  the accuracy in per cent, and "%.2f" per minute; place 0 hides its
+  first row, the teammate's are blue (0x1e7dff) and the opponent's red
+  (0xdc2828). The pictures: `images/kits/<team>_<kit>.png` and
+  `<kit>_header_<language>.png`, `images/weapons/<prefix><weapon>.png`
+  (the armies' own weapons with "eu_" / "as_") and
+  `images/vehicles/<prefix><vehicle>.png`, with `_header_english`
+  headers, from SwiffPlayer's name tables (0x10126f70, 0x10126a30,
+  0x10126db0). `EndOfRoundBindings` does this from the summary's text
+  (`parseDebriefing`). Left out: the weapon picture's
+  `images/weapons/Best_buy.png` for an EU player's weapon 1 when the
+  record's +0x4fc flag is set, which the text never sets.
 
 Driven headlessly with a summary, the movie shows the loading screen for
 Minsk (map, description, tip, server, progress, then JOIN GAME). After a
-round it shows the outcome with the awards, the scoreboard, the squads and
-the briefing, without script errors.
+round it shows the outcome with the awards, the scoreboard, the squads,
+the debriefing and the briefing, without script errors.
 
 A soldier's rank, score and unlocks come from the local stats store
 (below); awards and veteran status are not kept. Driven headlessly, the

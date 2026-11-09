@@ -527,7 +527,7 @@ int guidanceKind(const world::ObjectTemplate* weapon)
 //   - none without rounds (slot 0xc below 1; -1 counts 0x10000) unless
 //     Revive or going in;
 //   - the score: the strength against the target's type, x0.5 against a
-//     scripted bot (+0x264), x (3 - EMP level) for an EMP weapon (+0x4d,
+//     target run by an auto controller (its bot's +0x264, vt+0x27c), x (3 - EMP level) for an EMP weapon (+0x4d,
 //     0x10074c60); 0 drops it. A melee weapon soldier to soldier within
 //     3 m, or going in, is taken at once when the mesh ray reaches the
 //     target; a melee weapon otherwise is dropped;
@@ -579,7 +579,7 @@ int chooseWeapon(const WeaponChoice& c, const std::vector<WeaponOption>& weapons
 		if (score == 0) {
 			continue;
 		}
-		if (c.targetScripted) {
+		if (c.targetAutoController) {
 			score *= 0.5f;
 		}
 		if (w.emp) {
@@ -1473,10 +1473,10 @@ void BotManager::update(float seconds)
 		// event (3, 0xb) with the killer and the victim of its team
 		// (0x00894860 -> IAIEventCourier slot 0xa8, 0x1004e3e0 -> the bot
 		// manager's slot 24, 0x100c60c0): a killer bot that isn't
-		// scripted (vt+0x27c, +0x264; none is) says "sorry" (9) on
+		// an auto controller (vt+0x27c, +0x264) says "sorry" (9) on
 		// channel 6 at once. GameWorld counts the same kills (teamKills).
 		int& teamKills = m_teamKillsSeen.try_emplace(self.id, self.teamKills).first->second;
-		if (self.teamKills > teamKills) {
+		if (self.teamKills > teamKills && !bot.autoController) {
 			queueRadio(bot, 9, 6, 0.0f);
 		}
 		teamKills = self.teamKills;
@@ -2027,8 +2027,8 @@ void BotManager::sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::v
 			// a kept one's (0x100ee430).
 			it->seenClear = !seenThrough;
 			// The item's first own sighting is offered to the spotting
-			// report once (+0x68; the bot not scripted, vt+0x27c's +0x264).
-			if (!it->spotted) {
+			// report once (+0x68; the bot not an auto controller, vt+0x27c's +0x264).
+			if (!it->spotted && !bot.autoController) {
 				it->spotted = true;
 				spotSighting(self, other);
 			}
@@ -3005,9 +3005,11 @@ void BotManager::flee(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 //     input (0x004bba40: over 0.5, no edge) every frame, so the parachute
 //     opens as soon as its fire test passes (Parachutes.cpp: 2 m clear
 //     below, 10 m/s down). Input 22 is a select input: a lower one pressed
-//     the same frame (the primary's, input 16, below) wins the choice. The
-//     flag at bot +0x264 that also gates the block isn't traced (taken as
-//     clear);
+//     the same frame (the primary's, input 16, below) wins the choice.
+//     The whole block runs only for a bot that isn't an auto controller
+//     (+0x264, Bot::autoController: (char)param_1[0x99] == 0 beside the
+//     object's soldier bit), so a drone's or silo's controller never
+//     touches it;
 //   - the weapon in hand (the armament's selection) busies the hands when
 //     it is Healing (type 1) and the bot's own health is below 0.95, Ammo
 //     (2) and the product over its other weapons (not Healing or Ammo, with
@@ -3028,7 +3030,7 @@ void BotManager::flee(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 // (Revive, the assists, repair, C4, flee) and to a plan's own press.
 void BotManager::handleWeapon(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input)
 {
-	if (self.vehicle || !self.alive || self.manDown) {
+	if (bot.autoController || self.vehicle || !self.alive || self.manDown) {
 		return;
 	}
 	if (self.velocity.y <= -1.0f && input.selectItem == 0) {
@@ -3507,8 +3509,9 @@ void BotManager::planFire(Bot& bot, const GameWorld::PlayerInfo& self, bool gunn
 // (a bot: its target is this one, its vt+0x74; a human: the sensing
 // agent's stamp for it within 9995 s, AIDLL 0x100eb7f0 on the map at +0x74
 // +0x84, whose writer wasn't traced) is, for a human, a round of it having
-// passed the bot (the rewrite's alert). No bot is scripted
-// (+0x264, set by the scripted-bot commands 0x1004d140/0x1004d8e0), and
+// passed the bot (the rewrite's alert). No target is run by an auto
+// controller (+0x264: set by 0x100c8d20 and IAIAutoControllersManager's
+// 0x1004d140 / 0x1004d8e0; the rewrite's drones and silos aren't bots), and
 // no wire-guided weapon holds a target for a bot (the LPTargetComp's
 // target isn't modelled). The fire plan's move to the order's spot that
 // sets +0x248 (0x100795a0 -> 0x100d11c0, when 0x100775f0 finds the spot
@@ -4794,10 +4797,10 @@ float BotManager::landingCraftUrgency(Bot& bot, const GameWorld::PlayerInfo& sel
 // the known enemies (x3 for players, x2 for bots that target this one).
 // (BBFlee's class: constructor 0x10085810, destructor 0x100858e0. Its
 // slot 11, shared with BBC4, 0x10082070: runs only for a soldier, the
-// object's flag bit 9, that isn't scripted, bot +0x264; every bot here.)
+// object's flag bit 9, that isn't an auto controller, bot +0x264.)
 float BotManager::fleeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players)
 {
-	if (self.vehicle || healthOf(self.soldier) >= 0.3f || m_time - bot.spawnedAt <= 10 || self.cloaked) {
+	if (bot.autoController || self.vehicle || healthOf(self.soldier) >= 0.3f || m_time - bot.spawnedAt <= 10 || self.cloaked) {
 		return 0;
 	}
 	bool camo = false;
