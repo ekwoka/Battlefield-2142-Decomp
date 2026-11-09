@@ -1562,6 +1562,16 @@ void BotManager::update(float seconds)
 			if (vehicle) {
 				velocity = vehicle->velocity;
 			}
+			// A soldier's PIMouseLookX turns it 5 degrees a unit each tick
+			// (BF2142.exe 0x0058abdd) and stays held over a skipped frame while
+			// it moves (0x10098c00): the original's unit covers both ticks. The
+			// executed frame's turn here is already the whole elapsed time's
+			// (aim), so held again it went twice as far, past the target, and
+			// back the next frame: the look swung while walking. On foot the
+			// skipped frame turns no more (a vehicle's turn is its steering).
+			if (!self.vehicle) {
+				input.turn = 0;
+			}
 			if (bot.skips >= 16 || physics::lengthSquared(velocity) <= 0.01f) {
 				input.throttle = vehicle ? -std::clamp(0.5f * physics::dot(vehicle->velocity, vehicle->forward), -0.4f, 0.4f) : 0.0f;
 				input.strafe = 0;
@@ -2624,10 +2634,12 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		// 0x1006fd90 presses the seat's select key (0x100aa5f0) or gets out.
 		bool working = false;
 		physics::Vec3 at;
+		const GameWorld::VehicleInfo* target = nullptr;
 		for (const GameWorld::VehicleInfo& vehicle : m_vehicles) {
 			if (vehicle.object == (self.vehicle ? self.vehicle : bot.vehicleTarget)) {
 				working = vehicle.working;
 				at = vehicle.position;
+				target = &vehicle;
 			}
 		}
 		if (self.vehicle && bot.vehicleTarget == self.vehicle && bot.seatTarget >= 0) {
@@ -2665,10 +2677,25 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 					bot.pickupAsked = true;
 				}
 			}
-			const physics::Vec3 d = at - self.position;
-			if (horizontal2(d) > 2.5f * 2.5f) {
-				steer(bot, self, at, 200000 + static_cast<int>(bot.vehicleTarget), seconds, input, 0, bot.vehicleTarget);
-			} else {
+			// On foot (0x1006e9b9): MoveToObjectFinding at the vehicle with no
+			// distance of its own (0x100cff90 keep 0, ended only by the root
+			// seat taken or the vehicle's team changing, 0x100d4190 /
+			// 0x100d4200), and beside it the PIEnter press (0x100d3110: input
+			// 0xa, mask 0x400, 0x1006edbe) while the vehicle lies within the
+			// two AI radii plus 1 m (ObjectDistance 0x100d4480 at 0x1006ed13,
+			// centre to centre in 3D, 0x100d4620; the radii are the units'
+			// physical slot 0x28, BF2142.exe's slot 0x38 r, summed at
+			// 0x1006dceb). Not kept: a unit with setUseNoPathfindingToGetToObject
+			// (0x100aa570; only the bipods) or without a Mobile part walks
+			// instead to a point BBChange stored for the bot (MoveToFinding
+			// 0x100d11c0 at the plan's +0x10 record, 0x1006ecbd) and is pressed
+			// for from behind it only (0x100d42f0, -0.8, 0x100d4330); without
+			// that point the gate would leave a bot in front stranded.
+			const float reach = (target ? vehicleBox(*target).radius : VehicleBox().radius) + kSoldierRadius + 1.0f;
+			const physics::Vec3 node = self.position + physics::Vec3 {0, kChestHeight, 0};
+			const bool press = physics::lengthSquared(at - node) < reach * reach;
+			steer(bot, self, at, 200000 + static_cast<int>(bot.vehicleTarget), seconds, input, 0, bot.vehicleTarget);
+			if (press) {
 				input.use = !bot.usedLast && working; // a press
 			}
 		}
