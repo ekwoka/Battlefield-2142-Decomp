@@ -1,6 +1,7 @@
 #include "OpenALSample.h"
 
 #include "BfSoundEngine.h"
+#include "EnhancedAudio.h"
 #include "OggStream.h"
 #include "OpenALProvider.h"
 #include "Reverb.h"
@@ -338,6 +339,7 @@ void OpenALSample::releaseVoice()
 	if (m_source) {
 		al().alSourceStop(m_source);
 		unqueueAll();
+		enhancedRelease(m_source);
 		returnSourceToPool(m_source);
 		m_source = 0;
 	}
@@ -477,18 +479,26 @@ void OpenALSample::update()
 	SoundTemplate& templ = snd.templ();
 	BfSoundEngine& engine = soundEngine();
 	float directGain = 1.0f;
+	bool enhancedOcclusion = false;
 
 	if (is3d()) {
 		Vec3 position = worldPosition();
 		Vec3 velocity = snd.velocity();
 		// Guard OpenAL against garbage from the game.
-		if (std::fabs(position.x) >= 20000.0f || std::fabs(position.y) >= 20000.0f ||
-			std::fabs(position.z) >= 20000.0f || !isFinite(position)) {
+		const bool garbage = std::fabs(position.x) >= 20000.0f || std::fabs(position.y) >= 20000.0f ||
+			std::fabs(position.z) >= 20000.0f || !isFinite(position);
+		if (garbage) {
 			position = {20000.0f, 20000.0f, 20000.0f};
 		}
 		if (std::fabs(velocity.x) >= 300.0f || std::fabs(velocity.y) >= 300.0f || std::fabs(velocity.z) >= 300.0f ||
 			!isFinite(velocity)) {
 			velocity = {};
+		}
+		// Enhanced mode: the scene's occlusion goes on as a filter (EnhancedAudio.h).
+		// Head-relative sounds (first-person weapons) play at the listener whatever their position says.
+		if (!garbage && !snd.headRelative()) {
+			enhancedSubmit(m_source, position);
+			enhancedOcclusion = enhancedOcclusionActive();
 		}
 		engine.toListenerSpace(snd, position, velocity);
 		position.z = -position.z;
@@ -524,7 +534,7 @@ void OpenALSample::update()
 		setTinnitusMuffle(tinnitus);
 	}
 
-	const float occlusionGain = computeOcclusionGain();
+	const float occlusionGain = enhancedOcclusion ? 1.0f : computeOcclusionGain();
 	const float loopProgressValue = updateLoopProgress(playOffset(), engine.now() - startTime, !isStreaming());
 	const float balance = is3d() ? engine.gain3d() : engine.gain2d();
 	const float volume = clamp01(snd.computeVolume(loopProgressValue, volumeSeed) * balance);

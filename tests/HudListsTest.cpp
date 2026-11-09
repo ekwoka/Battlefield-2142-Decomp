@@ -338,3 +338,48 @@ TEST(HudLists_KitGridShippedKits)
 	checkShippedKitGrid(gameDir, "mods/bf2142");
 	checkShippedKitGrid(gameDir, "mods/Project_Remaster_v17_Final");
 }
+
+TEST(HudLists_KitMenuSkipsUnchangedInEnhancedMode)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.create("GenericFireArm", "shotgun")->settings()["weaponHud.unlockIcon"] = "shotgun.tga";
+	world::ObjectTemplate* light = templates.create("ItemContainer", "Light1");
+	light->settings()["unlockLevel"] = "1";
+	light->children().push_back({"shotgun", {}, {}});
+	templates.create("Kit", "Assault")->children().push_back({"Light1", {}, {}});
+	game::GameWorld round(templates, objects);
+	game::GameLogic logic;
+	logic.team(1).kits.push_back({"Assault", "soldier", "heavy_soldier"});
+	hud::HudManager hud = emptyHud();
+	menu::KitMenu kits(round, logic, templates, hud);
+	kits.skipUnchanged = true;
+	kits.setUnlocked({"Light1"}, false);
+	kits.update(1);
+	CHECK(hud.number("Kit0Show") == 1 && hud.number("Kit0SprintAbility") == 0.75f);
+	// Nothing changed: the writes are skipped (a marker survives).
+	hud.set("Kit0Show", 7);
+	kits.update(1);
+	CHECK(hud.number("Kit0Show") == 7);
+	// Each input it shows refreshes it: the armour, a choice, the unlocks, the team's kits.
+	kits.setHeavyArmor(true);
+	kits.update(1);
+	CHECK(hud.number("Kit0Show") == 1 && hud.number("Kit0SprintAbility") == 0.25f);
+	hud.set("Kit0Show", 7);
+	kits.chooseKitCustom(1, 1);
+	kits.update(1);
+	CHECK(hud.number("Kit0Show") == 1 && hud.number("Kit1Item1Active") == 1);
+	hud.set("Kit0Show", 7);
+	kits.setUnlocked({}, false);
+	kits.update(1);
+	CHECK(hud.number("Kit0Show") == 1 && hud.number("Kit1Item1Alpha") == 0.3f);
+	hud.set("Kit0Show", 7);
+	logic.team(1).kits.push_back({"Support", "soldier", "heavy_soldier"});
+	kits.update(1);
+	CHECK(hud.number("Kit0Show") == 1);
+	// Retail (off): every frame rewrites.
+	kits.skipUnchanged = false;
+	hud.set("Kit0Show", 7);
+	kits.update(1);
+	CHECK(hud.number("Kit0Show") == 1);
+}

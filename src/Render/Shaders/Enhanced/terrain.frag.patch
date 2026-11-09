@@ -1,0 +1,18 @@
+Enhanced variant of terrain.frag: enhanced_shadow.glsl, the GTAO on the GI
+(ambient) term.
+<<<<
+#include "shadow.glsl"
+====
+#define ENHANCED_AO_BINDING 13
+#include "enhanced_shadow.glsl"
+>>>>
+<<<<
+			clamp(2.0 * lightmap.b * gi, 0.0, 1.0) * 0.5;
+====
+			clamp(2.0 * lightmap.b * gi, 0.0, 1.0) * 0.5 * enhancedAO();
+>>>>
+<<<<
+		color = albedo * (skyColor.rgb * 0.5 + sunColor.rgb
+====
+		color = albedo * (skyColor.rgb * 0.5 * enhancedAO() + sunColor.rgb
+>>>>

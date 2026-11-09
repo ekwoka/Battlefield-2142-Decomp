@@ -92,6 +92,9 @@ public:
 	// Each frame: the kit buttons, the open kit's grid and the unlock
 	// screen's variables for the local player's team.
 	void update(int team);
+	// Enhanced mode (Scene/EnhancedSettings.h): update() skips its HUD
+	// writes while nothing it shows has changed. Retail rewrites them every frame.
+	bool skipUnchanged = false;
 	// The chosen unlocks' ItemContainers (for GameWorld::setUnlocks), told
 	// when the choice is committed (closing the screen; spawning).
 	std::function<void(const std::vector<std::string>&)> onEquip;
@@ -137,6 +140,21 @@ private:
 	std::array<std::array<Item, kItems>, kRows> m_grid;
 	std::array<std::array<int, kRows>, kKits> m_chosen {}; // the active item per row, per kit (-1 none)
 	bool m_chosenSet = false;
+	// What the last full update() showed, for skipUnchanged. Every grid change
+	// goes through build(), which counts.
+	unsigned m_builds = 0;
+	struct Shown {
+		unsigned builds = 0;
+		int team = 0, kit = 0;
+		bool heavy = false, customOpen = false;
+		std::vector<std::string> kits;
+		bool operator==(const Shown& o) const
+		{
+			return builds == o.builds && team == o.team && kit == o.kit && heavy == o.heavy && customOpen == o.customOpen
+				&& kits == o.kits;
+		}
+	} m_shown;
+	bool m_shownValid = false;
 };
 
 } // namespace dice::hfe::menu

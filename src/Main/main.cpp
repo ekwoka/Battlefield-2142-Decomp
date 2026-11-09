@@ -83,6 +83,7 @@
 #include "IO/File/ZipArchive.h"
 #include "Geometry/GeometryTemplateManager.h"
 #include "Scene/EffectSettings.h"
+#include "Scene/EnhancedSettings.h"
 #include "Scene/LightSettings.h"
 #include "Scene/OvergrowthSettings.h"
 #include "Scene/PostProductionSettings.h"
@@ -91,6 +92,10 @@
 #include "Sound/Game/SoundManager.h"
 #include "Sound/Game/VoiceMessages.h"
 #include "Sound/Game/VfsSoundFileSystem.h"
+#include "Sound/SoundEngine/EnhancedAudio.h"
+#if BF2142_HAS_STEAM_AUDIO
+#include "Sound/Enhanced/SteamAudioOcclusion.h"
+#endif
 #include "GameAudio.h"
 #include "Terrain/Heightmap.h"
 #include "Terrain/TerrainData.h"
@@ -155,6 +160,7 @@ struct Options {
 	std::string drive;           // --drive <vehicle>: put one before the player and drive it
 	int bots = 0;                // --bots N: AI players, alternately PAC and EU
 	int simulate = 0;            // --simulate N: run N seconds headless, then show the scores
+	bool enhanced = false;       // --enhanced: start with enhanced.enabled 1 (Scene/EnhancedSettings.h)
 	std::string language = "English"; // --language: the registry's Language (0x00405360), strings.csv's column
 	bool servers = false;        // --servers: list the servers OpenSpy's master server knows
 	std::string connect;         // --connect host[:port] (the original's +joinServer): play on a game server
@@ -303,6 +309,8 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.view = options.screenshot.empty();
 		} else if (arg == "--console" && hasValue) {
 			options.console.push_back(argv[++i]);
+		} else if (arg == "--enhanced") {
+			options.enhanced = true;
 		} else if (arg == "--offline") {
 			options.offline = true;
 		} else if (arg == "--hud-click" && hasValue) {
@@ -1798,15 +1806,13 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// The voice is the radio's (GameWorld's "leaving_the_combat_area").
 	{
 		const float areaLeft = alive ? world.combatAreaTimeLeft() : -1.0f;
-		static int areaShown = -2;
-		static int respawnShown = -2;
 		const int seconds = areaLeft >= 0 ? static_cast<int>(std::ceil(areaLeft)) : -1;
 		game::GameWorld::PlayerInfo respawnInfo;
 		const int respawnSeconds = !alive && world.playerInfo(world.localPlayer(), respawnInfo)
 			? static_cast<int>(std::ceil(std::max(0.0f, respawnInfo.respawnIn))) : -1;
-		const bool areaChanged = seconds != areaShown;
-		if (areaChanged) {
-			areaShown = seconds;
+		// The shipped SpawnInfo node is gated separately from its text.
+		hud.set("SpawnInfoShow", seconds >= 0 || respawnSeconds > 0 ? 1 : 0);
+		{
 			const auto text = [](const char* key) { return g_localize ? g_localize(key) : std::string(key); };
 			const auto withTime = [&](const char* key, int value) {
 				std::string s = text(key);
@@ -1816,8 +1822,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			hud.set("PauseMessageActive", seconds >= 0 ? 1 : 0);
 			hud.setString("DisconnectMessage", seconds >= 0 ? withTime("HUD_TEXT_MENU_LEAVING_COMBATAREA", seconds) : std::string());
 		}
-		if (areaChanged || respawnSeconds != respawnShown) {
-			respawnShown = respawnSeconds;
+		{
 			const auto text = [](const char* key) { return g_localize ? g_localize(key) : std::string(key); };
 			const auto withTime = [&](const char* key, int value) {
 				std::string s = text(key);
@@ -3101,6 +3106,9 @@ int runGame(Options& options, Session& session)
 	scene::registerRainConsoleMethods(console, rain);
 	scene::RendererSettings rendererSettings;
 	scene::registerRendererConsoleMethods(console, rendererSettings);
+	scene::EnhancedSettings enhancedSettings;
+	enhancedSettings.enabled = options.enhanced;
+	scene::registerEnhancedConsoleMethods(console, enhancedSettings);
 	// The post-production, the dynamic shadows and the hemi maps (RendDX9).
 	scene::PostProductionSettings postSettings;
 	scene::registerPostProductionConsoleMethods(console, postSettings);
@@ -3128,6 +3136,7 @@ int runGame(Options& options, Session& session)
 	sound::ISoundEngine* soundEngine = options.sound ? sound::getSoundEngine() : nullptr;
 	if (soundEngine) {
 		soundEngine->setFileSystem(&soundFiles);
+		sound::setEnhancedAudio(enhancedSettings.enabled); // HRTF and filters: read when the provider opens
 		if (soundEngine->initialize(2, "0", 32) != 0) {
 			std::printf("sound: engine initialisation failed, continuing without sound\n");
 			sound::shutdownSoundEngine();
@@ -5771,6 +5780,11 @@ int runGame(Options& options, Session& session)
 		// Sound, once a tick (GameAudio.h): the listener at the camera, what
 		// the round and the effects started, then the manager's update.
 		GameAudio gameAudio(round, objects, templates, sounds, gameSounds, options.dedicated ? nullptr : &voices);
+#if BF2142_HAS_STEAM_AUDIO
+		// Enhanced mode: the 3D sounds' occlusion through the level's static
+		// meshes (their soldier LOD; not the terrain).
+		sound::SteamAudioOcclusion steamAudio; // built once the round's static collision is (startRound)
+#endif
 		// The calls the local player hears go on the callers' name tags
 		// (events 0x33..0x37, 0x100f19c0; a man-down player's "medic" is the
 		// revive call).
@@ -5937,6 +5951,18 @@ int runGame(Options& options, Session& session)
 		round.commanderSettings.supplyDropHeight = gameLogic.supplyDropHeight;
 		round.commanderSettings.supplyDropNumSecsToLive = gameLogic.supplyDropNumSecsToLive;
 		round.startRound();
+#if BF2142_HAS_STEAM_AUDIO
+		if (soundEngine && sound::enhancedAudioEnabled()) {
+			std::vector<sound::Vec3> corners;
+			corners.reserve(round.staticCollision().triangles() * 3);
+			round.staticCollision().forEachFace([&corners](const physics::Vec3& a, const physics::Vec3& b, const physics::Vec3& c) {
+				corners.insert(corners.end(), {{a.x, a.y, a.z}, {b.x, b.y, b.z}, {c.x, c.y, c.z}});
+			});
+			if (steamAudio.build(corners)) {
+				sound::setEnhancedOcclusion(&steamAudio);
+			}
+		}
+#endif
 		// --host: the round served to clients (HostedGame.h).
 		host::HostedGame* hosted = nullptr;
 		if (options.host && !session.client) {
@@ -7910,6 +7936,16 @@ int runGame(Options& options, Session& session)
 							"%zu loops at the end)\n",
 					soundTicks, soundSeconds * 1000.0 / soundTicks, gameAudio.weaponSounds, gameAudio.radioHeard,
 					gameAudio.voiceOvers, gameSounds.loops());
+				if (sound::enhancedAudioEnabled()) {
+					std::printf("enhanced audio: HRTF status %d", sound::enhancedHrtfStatus());
+#if BF2142_HAS_STEAM_AUDIO
+					const sound::SteamAudioOcclusion::Stats& sa = steamAudio.stats();
+					std::printf(", Steam Audio scene %zu triangles (built in %.0f ms), %.3f ms a tick for %.1f sources a tick (%.1f%% muffled)",
+						sa.triangles, sa.buildSeconds * 1000.0, sa.simulateSeconds * 1000.0 / soundTicks,
+						static_cast<double>(sa.sources) / soundTicks, sa.sources ? 100.0 * sa.muffled / sa.sources : 0.0);
+#endif
+					std::printf("\n");
+				}
 			}
 			std::printf("after %d s: tickets PAC %.0f, EU %.0f; control points:", options.simulate,
 				gameLogic.team(1).tickets, gameLogic.team(2).tickets);
@@ -7917,6 +7953,7 @@ int runGame(Options& options, Session& session)
 				std::printf(" %d:%s", point.id, point.team == 1 ? "PAC" : point.team == 2 ? "EU" : "-");
 			}
 			std::printf("\n");
+			std::printf("  state fingerprint %016llx\n", static_cast<unsigned long long>(round.stateFingerprint()));
 			if (const auto lost = round.objectsOutOfWorld(); !lost.empty()) {
 				std::printf("  %zu objects out of the world\n", lost.size());
 			}
@@ -8041,6 +8078,7 @@ int runGame(Options& options, Session& session)
 		sources.renderer = &rendererSettings;
 		sources.post = &postSettings;
 		sources.shadows = &shadowSettings;
+		sources.enhanced = &enhancedSettings;
 		sources.hemi = &hemiSettings;
 		sources.particles = &particleSettings;
 		sources.overgrowth = &overgrowthSettings;
@@ -8233,6 +8271,7 @@ int runGame(Options& options, Session& session)
 		sources.overlay = [&](float seconds) {
 			kitMenu.setUnlocked(round.localPlayerUnlocks, round.unlockAllByDefault);
 			kitMenu.setKit(localKit);
+			kitMenu.skipUnchanged = enhancedSettings.enabled;
 			kitMenu.update(round.playerTeam() == 1 ? 1 : 2);
 			kitMenu.commit();
 			trackKills();
@@ -9322,13 +9361,14 @@ int runGame(Options& options, Session& session)
 				game::GameWorld::PlayerInfo me;
 				const bool playerPresent = hudPlayer(hudLocal(), me);
 				const bool alive = playerPresent && me.alive;
-				if (in.deployment && !deploymentWas && alive) {
+				const bool deploymentPressed = in.deployment && !deploymentWas;
+				if (deploymentPressed && alive) {
 					g_deploymentOpen = !g_deploymentOpen;
 					hudManager.set("HudDone", 0);
 					g_bigMap = false;
 				}
 				deploymentWas = in.deployment;
-				const bool done = hudManager.number("HudDone") != 0;
+				const bool done = hudManager.number("HudDone") != 0 || (deploymentPressed && !alive);
 				const auto doneAction = dice::main::deploymentDoneAction(done, playerPresent, alive, g_initialDeploymentPending, me.respawnIn);
 				if (done) {
 					if (doneAction == dice::main::DeploymentDoneAction::InitialSpawn

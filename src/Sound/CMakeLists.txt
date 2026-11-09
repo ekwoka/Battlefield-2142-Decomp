@@ -2,6 +2,7 @@ add_library(SoundEngine STATIC
 	SoundEngine/Ambience.cpp
 	SoundEngine/BfOpenAL.cpp
 	SoundEngine/BfSoundEngine.cpp
+	SoundEngine/EnhancedAudio.cpp
 	SoundEngine/Music.cpp
 	SoundEngine/OggStream.cpp
 	SoundEngine/OpenALProvider.cpp
@@ -43,3 +44,11 @@ add_library(GameSound STATIC
 )
 target_include_directories(GameSound PUBLIC ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(GameSound PUBLIC SoundEngine World Console IO)
+
+# Enhanced mode's occlusion through Steam Audio (cmake/Dependencies.cmake).
+if(BF2142_PHONON_LIBRARY)
+	add_library(SteamAudioOcclusion STATIC Enhanced/SteamAudioOcclusion.cpp)
+	target_include_directories(SteamAudioOcclusion PUBLIC ${PROJECT_SOURCE_DIR}/src PRIVATE ${steamaudio_SOURCE_DIR}/include)
+	target_compile_definitions(SteamAudioOcclusion PRIVATE BF2142_PHONON_LIBRARY="${BF2142_PHONON_LIBRARY}")
+	target_link_libraries(SteamAudioOcclusion PUBLIC SoundEngine PRIVATE Platform)
+endif()

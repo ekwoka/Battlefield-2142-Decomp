@@ -1,0 +1,25 @@
+Enhanced variant of mesh.frag (cmake/ShaderVariant.cmake: each find text
+must occur exactly once): enhanced_shadow.glsl in place of shadow.glsl, the
+GTAO on the ambient (the sky through the lightmap, the hemi map's colour),
+the cascades in place of the SimpleShadowmap where they reach.
+<<<<
+#include "shadow.glsl"
+====
+#define ENHANCED_AO_BINDING 11
+#include "enhanced_shadow.glsl"
+>>>>
+<<<<
+		light = 2.0 * (skyShare * lightmap.b * skyColor.rgb + sun * sunVisible);
+====
+		light = 2.0 * (skyShare * lightmap.b * skyColor.rgb * enhancedAO() + sun * sunVisible);
+>>>>
+<<<<
+		float simple = layerMaps.w > 0.5 ? layerMaps.w - 1.0 : 1.0;
+====
+		float simple = enhancedSimpleShadow(layerMaps.w > 0.5 ? layerMaps.w - 1.0 : 1.0, inWorldPosition);
+>>>>
+<<<<
+		light = hemi.rgb + sun * sunVisible;
+====
+		light = hemi.rgb * enhancedAO() + sun * sunVisible;
+>>>>

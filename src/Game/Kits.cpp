@@ -91,6 +91,23 @@ std::vector<uint32_t> GameWorld::objectsOutOfWorld(float limit) const
 	return list;
 }
 
+uint64_t GameWorld::stateFingerprint() const
+{
+	uint64_t hash = 14695981039346656037ull; // FNV-1a over the raw bytes
+	const auto mix = [&hash](const void* data, size_t size) {
+		for (size_t i = 0; i < size; ++i) {
+			hash = (hash ^ static_cast<const unsigned char*>(data)[i]) * 1099511628211ull;
+		}
+	};
+	for (const auto& owned : m_objects.objects()) {
+		const uint32_t id = owned->id();
+		mix(&id, sizeof id);
+		mix(&owned->position(), sizeof(world::Vec3));
+		mix(&owned->rotation(), sizeof(world::Vec3));
+	}
+	return hash;
+}
+
 bool GameWorld::isDroppedKit(uint32_t object) const
 {
 	return std::any_of(

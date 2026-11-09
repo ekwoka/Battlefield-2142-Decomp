@@ -253,6 +253,7 @@ LevelRenderer::~LevelRenderer()
 		SDL_ReleaseGPUBuffer(device, m_flareVertices);
 	}
 	releasePostTargets();
+	releaseEnhancedTargets();
 }
 
 SDL_GPUTexture* LevelRenderer::texture(const io::FileManager& files, const std::string& path,
@@ -3702,11 +3703,13 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	const float menuSeconds = m_lastMenuTicks ? static_cast<float>(now - m_lastMenuTicks) / 1000.0f : 0.0f;
 	m_lastMenuTicks = now;
 	buildMenu(menuSeconds);
-	const Mat4 viewProjection = camera.view() *
-		(overheadOn ? overheadProjection(overhead, static_cast<float>(target.width), static_cast<float>(target.height),
-						  camera.nearPlane, 6000.0f)
-					: Mat4::perspective(camera.fovY, static_cast<float>(target.width) / target.height, camera.nearPlane,
-						  6000.0f));
+	const Mat4 projection = overheadOn
+		? overheadProjection(overhead, static_cast<float>(target.width), static_cast<float>(target.height), camera.nearPlane,
+			  6000.0f)
+		: Mat4::perspective(camera.fovY, static_cast<float>(target.width) / target.height, camera.nearPlane, 6000.0f);
+	// The enhanced mode's passes this frame, and TAA's jitter (Enhanced/LevelRendererEnhanced.cpp).
+	beginEnhancedFrame(camera, target.width, target.height, overheadOn, post && m_sceneColor, projection);
+	const Mat4 viewProjection = m_enh.jittered ? camera.view() * projection * m_enh.jitter : camera.view() * projection;
 	prepareInstances(camera, viewProjection);
 	// The particle systems seen this frame (RendDX9's draws stamp the frame
 	// of each system whose box meets the view frustum, 0x101a4720): one
@@ -3727,6 +3730,32 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	m_poses.clear();
 	// The shadow maps, before the world pass that reads them.
 	renderShadows(commands, camera, lights, seconds);
+	const float aspect = static_cast<float>(target.width) / static_cast<float>(target.height);
+	if (m_enh.csm) {
+		renderCascades(commands, camera, lights, seconds, aspect);
+	}
+	// The terrain's cells this frame (before the enhanced prepass, which draws them too).
+	const Frustum frustum = Frustum::fromViewProjection(viewProjection);
+	const scene::RendererSettings rendererDefaults;
+	const scene::RendererSettings& renderer =
+		m_sources && m_sources->renderer ? *m_sources->renderer : rendererDefaults;
+	bool terrainUpdated = false;
+	const auto updateTerrain = [&] {
+		terrainUpdated = true;
+		if (!m_terrainCells.empty()) {
+			updateTerrainCells(camera, frustum);
+		} else {
+			m_terrainLodSwitch = terrainLodSwitch(viewZoom(camera), renderer);
+			const terrain::Heightmap* heightmap = m_sources ? m_sources->heightmaps.primary() : nullptr;
+			m_terrainHeightAboveGround = std::fabs(camera.position.y -
+				(heightmap ? heightmap->heightAt(camera.position.x, camera.position.z) : 0.0f));
+		}
+	};
+	if (m_enh.prepass) {
+		updateTerrain();
+		renderEnhancedPrepass(commands, camera, viewProjection, seconds, aspect);
+	}
+	m_enh.aoBound = m_enh.ssao; // the world's opaque draws take the AO
 	// The heat shimmer reads a copy of the scene: the world pass ends before it.
 	const bool shimmer = post && m_sceneColor && !m_shimmerGroups.empty() && m_gpu.shimmerPipeline();
 	if (!m_cloakedList.empty() || shimmer) {
@@ -3756,7 +3785,6 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	TransformUniforms transforms {viewProjection, Mat4 {}, {1, 1, 0, 0}, {}};
 	transforms.partsUsed = 0; // terrain.vert has none
 	SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
-	const Frustum frustum = Frustum::fromViewProjection(viewProjection);
 	TerrainDetailUniforms detail {};
 	for (int i = 0; i < kMaxDetailLayers; ++i) {
 		detail.tiling[i] = m_detailTiling[i];
@@ -3776,16 +3804,8 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// LOD's delta and MORPHDELTAADDER the deltas a cell's stitched edge
 	// vertices take whole (0x1014d700): at LOD 1 the vertices that drop at
 	// LOD 1 move fully to it, at LOD 2 those that drop at LOD 2.
-	const scene::RendererSettings rendererDefaults;
-	const scene::RendererSettings& renderer =
-		m_sources && m_sources->renderer ? *m_sources->renderer : rendererDefaults;
-	if (!m_terrainCells.empty()) {
-		updateTerrainCells(camera, frustum);
-	} else {
-		m_terrainLodSwitch = terrainLodSwitch(viewZoom(camera), renderer);
-		const terrain::Heightmap* heightmap = m_sources ? m_sources->heightmaps.primary() : nullptr;
-		m_terrainHeightAboveGround = std::fabs(camera.position.y -
-			(heightmap ? heightmap->heightAt(camera.position.x, camera.position.z) : 0.0f));
+	if (!terrainUpdated) {
+		updateTerrain();
 	}
 	const auto morphFor = [&](int lod, bool morph) {
 		const TerrainMorph m = terrainMorph(lod, morph, m_terrainLodSwitch, renderer, camera.position.x,
@@ -4277,6 +4297,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		drawSunFlare(commands, pass, viewProjection, camera);
 	}
 	// The transparent materials, farthest object first.
+	m_enh.aoBound = false; // nor the transparent ones, the additive ones or the first person
 	SDL_BindGPUGraphicsPipeline(pass, m_gpu.fadedMeshPipeline());
 	useShadows(commands, pass, 1, 5, true);
 	std::vector<std::pair<float, const DrawItem*>> transparent;
@@ -4350,6 +4371,13 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// the HUD and menu over it.
 	if (post && m_sceneColor) {
 		SDL_EndGPURenderPass(pass);
+		m_postSource = m_sceneColor;
+		if (m_enh.prepass) {
+			showEnhancedBuffer(commands);
+		}
+		if (m_enh.taa) {
+			resolveTaa(commands); // m_postSource: the resolve
+		}
 		const PostUniforms postUniforms = preparePost(commands, cloaked);
 		SDL_GPUColorTargetInfo finalColor {};
 		finalColor.texture = color;
@@ -4412,13 +4440,17 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		}
 	}
 	SDL_EndGPURenderPass(pass);
+	endEnhancedFrame(camera, overheadOn);
+	m_gpu.setEnhancedLit(false); // the variants stay inside this frame
 }
 
 void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Camera& camera,
 	float aspect, const scene::LightSettings& lights)
 {
 	const FirstPersonScene& scene = m_firstPerson;
-	const Mat4 viewProjection = camera.view() * Mat4::perspective(scene.fovY, aspect, scene.nearPlane, scene.farPlane);
+	// TAA's jitter on both of its views (Enhanced/LevelRendererEnhanced.cpp).
+	const auto jittered = [this](const Mat4& m) { return m_enh.jittered ? m * m_enh.jitter : m; };
+	const Mat4 viewProjection = jittered(camera.view() * Mat4::perspective(scene.fovY, aspect, scene.nearPlane, scene.farPlane));
 	// In a seat camera's inside view with allowInsideStaticSun the cockpit
 	// takes the camera's static sun and ambient (BF2142.exe 0x006104d0..
 	// 0x00610580: insideStaticSunDirection / Color / AmbientColor, flickering
@@ -4526,7 +4558,7 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 	// with the first-person meshes' view (slot 0xdc, +0xfc); then
 	// RSMT1PersonTransparency back to front (the sights' glass, the displays).
 	const Mat4 particleViewProjection = m_firstPersonZoomed ? viewProjection
-		: camera.view() * Mat4::perspective(camera.fovY, aspect, camera.nearPlane, 6000.0f);
+		: jittered(camera.view() * Mat4::perspective(camera.fovY, aspect, camera.nearPlane, 6000.0f));
 	drawMeshParticles(commands, pass, particleViewProjection, lights, {scene.effects});
 	drawParticles(commands, pass, particleViewProjection, camera, lights, m_firstPersonParticleVertices,
 		m_firstPersonParticleGroups);

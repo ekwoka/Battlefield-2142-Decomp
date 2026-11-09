@@ -1,5 +1,6 @@
 #include "OpenALProvider.h"
 
+#include "EnhancedAudio.h"
 #include "OpenALSample.h"
 #include "Reverb.h"
 #include "SoundMath.h"
@@ -126,7 +127,9 @@ ProviderOpenResult OpenALProvider::open(const std::string& name)
 	}
 
 	const ALint attributes[] = {ALC_FREQUENCY, 44100, 0, 0};
-	m_context = al().alcCreateContext(m_device, attributes);
+	// Enhanced mode asks OpenAL Soft for HRTF; retail leaves the device's default.
+	const ALint enhancedAttributes[] = {ALC_FREQUENCY, 44100, kAlcHrtfSoft, 1, 0, 0};
+	m_context = al().alcCreateContext(m_device, enhancedAudioEnabled() ? enhancedAttributes : attributes);
 	if (al().alcGetError(m_device) != 0) {
 		close();
 		return ProviderOpenResult::DeviceFailed;
@@ -155,6 +158,7 @@ ProviderOpenResult OpenALProvider::open(const std::string& name)
 		detectEax3();
 	}
 	clearALError();
+	enhancedOpen(m_device);
 	setDopplerFactor(m_dopplerFactor);
 	al().alDistanceModel(AL_INVERSE_DISTANCE_CLAMPED);
 	const ALfloat orientation[] = {0.0f, 0.0f, -1.0f, 0.0f, 1.0f, 0.0f};
@@ -218,6 +222,7 @@ void OpenALProvider::close()
 	}
 	eax() = {};
 	if (m_context) {
+		enhancedClose();
 		al().alcDestroyContext(m_context);
 	}
 	m_context = nullptr;

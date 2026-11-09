@@ -1,0 +1,45 @@
+# cmake -DSOURCE=<shader> -DEDITS=<file> -DOUTPUT=<variant> -P ShaderVariant.cmake
+# Writes a variant of a shader with literal text edits, so the enhanced
+# mode's shaders reuse the retail ones without branching inside them. The
+# edits file holds blocks (anything outside them is a comment):
+#   <<<<
+#   text to find (must occur exactly once in the shader)
+#   ====
+#   text to put in its place
+#   >>>>
+file(READ "${SOURCE}" text)
+file(READ "${EDITS}" edits)
+set(applied 0)
+while(TRUE)
+	string(FIND "${edits}" "<<<<\n" start)
+	if(start EQUAL -1)
+		break()
+	endif()
+	math(EXPR start "${start} + 5")
+	string(SUBSTRING "${edits}" ${start} -1 edits)
+	string(FIND "${edits}" "\n====\n" middle)
+	string(FIND "${edits}" "\n>>>>" end)
+	if(middle EQUAL -1 OR end EQUAL -1 OR end LESS middle)
+		message(FATAL_ERROR "${EDITS}: an edit without its ==== or >>>>")
+	endif()
+	string(SUBSTRING "${edits}" 0 ${middle} find)
+	math(EXPR replaceStart "${middle} + 6")
+	math(EXPR replaceLength "${end} - ${replaceStart}")
+	string(SUBSTRING "${edits}" ${replaceStart} ${replaceLength} replace)
+	math(EXPR rest "${end} + 5")
+	string(SUBSTRING "${edits}" ${rest} -1 edits)
+	string(FIND "${text}" "${find}" first)
+	string(FIND "${text}" "${find}" last REVERSE)
+	if(first EQUAL -1)
+		message(FATAL_ERROR "${EDITS}: not in ${SOURCE}:\n${find}")
+	endif()
+	if(NOT first EQUAL last)
+		message(FATAL_ERROR "${EDITS}: more than once in ${SOURCE}:\n${find}")
+	endif()
+	string(REPLACE "${find}" "${replace}" text "${text}")
+	math(EXPR applied "${applied} + 1")
+endwhile()
+if(applied EQUAL 0)
+	message(FATAL_ERROR "${EDITS}: no edits")
+endif()
+file(WRITE "${OUTPUT}" "${text}")

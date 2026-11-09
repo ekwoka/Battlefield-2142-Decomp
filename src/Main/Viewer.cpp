@@ -379,8 +379,13 @@ int screenshot(const render::LevelSources& sources, const ViewerOptions& options
 	// for, and print the mean frame cost (CPU preparation and the GPU's).
 	if (const char* bench = std::getenv("BF2142_FRAME_BENCH")) {
 		const int frames = std::max(std::atoi(bench), 1);
+		// BF2142_BENCH_TURN=D: the camera turns D degrees a frame (the
+		// enhanced mode's TAA reprojection under camera motion).
+		const char* turn = std::getenv("BF2142_BENCH_TURN");
+		const float turnRadians = turn ? static_cast<float>(std::atof(turn)) * 3.14159265f / 180.0f : 0.0f;
 		const Uint64 start = SDL_GetTicksNS();
 		for (int i = 0; i < frames; ++i) {
+			camera.yaw += turnRadians;
 			SDL_GPUCommandBuffer* again = SDL_AcquireGPUCommandBuffer(gpu->device());
 			level.draw(again, target.color, target, camera, sources.lights);
 			SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(again);

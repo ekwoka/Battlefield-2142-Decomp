@@ -263,6 +263,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 |---|---|
 | `--menu [mainMenu\|endOfRound]` | Show the Flash menu (no level needed). With `--screenshot`, it plays for `--menu-seconds` (default 10) first. |
 | `--offline` | The menu finds no account service, so it plays offline. |
+| `--enhanced` | Start in the enhanced mode (`enhanced.enabled 1`): additions that aren't in the original game. Off by default; while off the engine behaves as retail. `tools/parity-check.sh [seconds]` checks that the switch leaves the simulation alone. |
 | `--menu-script "<steps>"` | Drive the menu without a window: `wait:<s>`, `click:<x>,<y>`, `type:<text>`, `call:<clip>.<method>,<args>`. |
 | `--input-script "<s>:<cmd> …"` | Timed input in a window: `key:` / `down:` / `up:` (SDL key names), `click:` / `move:` (window fractions), `look:dx,dy`, `button:n,0\|1`, `text:`, `shot:file.png`, `quit`. |
 

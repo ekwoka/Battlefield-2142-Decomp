@@ -64,6 +64,7 @@ struct LightSettings;
 struct OvergrowthSettings;
 struct ParticleSystemSettings;
 struct QualitySettings;
+struct EnhancedSettings;
 struct WindSettings;
 struct PostProductionSettings;
 struct ShadowSettings;
@@ -240,6 +241,9 @@ struct LevelSources {
 	// distance the objects' distance fade cuts at (DistanceFade.h); null:
 	// 500, the unset GSViewDistance BF2142.exe 0x00434610 reads.
 	std::function<float()> viewDistance;
+	// enhanced.* (Scene/EnhancedSettings.h): the render passes that aren't
+	// retail (Enhanced/LevelRendererEnhanced.cpp); null or off: none.
+	const scene::EnhancedSettings* enhanced = nullptr;
 };
 
 struct LevelStats {
@@ -439,6 +443,12 @@ private:
 		std::array<UVMatrix, kAnimatedUVMatrices> uvMatrices {};
 		std::vector<AnimatedUVState> uvStates;
 		bool animatedUV = false; // a part has animatedUVTranslation or animatedUVRotation
+		// The enhanced mode's motion vectors: where it was drawn last frame
+		// (its world, parts and a skinned mesh's pose), and that frame's number.
+		mutable Mat4 previousWorld;
+		mutable std::vector<Mat4> previousParts;
+		mutable std::vector<anim::Matrix> previousPose;
+		mutable unsigned previousFrame = ~0u;
 	};
 	// What the world pass draws of an instance this frame.
 	struct DrawItem {
@@ -628,6 +638,10 @@ private:
 	void renderShadows(SDL_GPUCommandBuffer* commands, const Camera& camera, const scene::LightSettings& lights,
 		float seconds);
 	void drawShadowCasters(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* map, bool statics, float seconds);
+	// The casters of one map (statics or the dynamic objects) into `pass`
+	// as seen by `vp`, over a region `regionRadius` metres across its half.
+	void drawShadowCasterInstances(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Mat4& vp,
+		float regionRadius, bool statics, float seconds, size_t& casters, size_t& draws);
 	// After binding a lit pipeline: its Shadows block at uniform `slot` and
 	// the maps (and the hemi map) from sampler `firstSampler`.
 	void useShadows(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, uint32_t slot, uint32_t firstSampler,
@@ -717,6 +731,84 @@ private:
 	void fullscreenPass(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* target, SDL_GPUTexture* source,
 		const BloomUniforms& uniforms);
 	void releasePostTargets();
+
+	// ---- the enhanced mode (Enhanced/LevelRendererEnhanced.cpp) ----------
+	// Not retail: with enhanced.enabled (Scene/EnhancedSettings.h) a depth
+	// prepass with view-space normals and motion vectors, GTAO on the lit
+	// shaders' ambient term, TAA before the post-production, cascaded sun
+	// shadows. Off, none of it runs and the frame is drawn as before.
+	struct EnhancedShadowUniforms { // enhanced_shadow.glsl's Shadows block
+		ShadowUniforms base;
+		Mat4 cascadeMatrix[4];
+		float cascadeFar[4] {};
+		float cascadeBias[4] {};
+		float cascadeParams[4] {}; // cascades, an atlas texel in uv, 1 with the static atlas
+		float viewEye[4] {};
+		float viewForward[4] {};
+		float aoParams[4] {}; // 1 / width, 1 / height, 1 to apply, strength
+	};
+	struct Enhanced {
+		bool on = false; // this frame's passes
+		bool taa = false, ssao = false, csm = false, prepass = false;
+		int reported = -1; // the passes last printed
+		bool jittered = false;
+		Mat4 jitter;                 // post-multiplied onto the view-projections
+		Mat4 projection;             // the world's, unjittered
+		Mat4 view;
+		Mat4 viewProjection;         // unjittered
+		Mat4 previousViewProjection; // last frame's, unjittered
+		bool previousValid = false;
+		Vec3f previousEye;
+		bool previousOverhead = false;
+		unsigned frame = 0;
+		uint32_t size[2] {};
+		SDL_GPUTexture* depth = nullptr;       // the prepass's (the shadow maps' depth format)
+		SDL_GPUTexture* normalDepth = nullptr; // view-space normal, linear depth
+		SDL_GPUTexture* motion = nullptr;      // uv now less uv last frame
+		SDL_GPUTexture* aoRaw = nullptr;
+		SDL_GPUTexture* ao = nullptr;
+		SDL_GPUTexture* history[2] = {};       // TAA's resolves
+		int historyNext = 0;
+		bool historyValid = false;
+		bool aoBound = false; // useShadows binds the AO (the world's opaque draws), else white
+		// The cascades: two atlases of 2 x 2 (the dynamic objects', the
+		// static meshes' and the terrain's), each cascade `cascadeSize` texels.
+		SDL_GPUTexture* cascadeDynamic = nullptr;
+		SDL_GPUTexture* cascadeStatic = nullptr;
+		uint32_t cascadeSize = 0;
+		Mat4 cascadeViewProjection[4];
+		float cascadeRadius[4] {};
+		Vec3f cascadeCenter[4];
+		float staticRadius[4] {};
+		Vec3f staticCenter[4];
+		bool staticValid = false;
+		size_t staticInstances = 0;
+		EnhancedShadowUniforms shadows;
+	};
+	Enhanced m_enh;
+	// What the bloom, the tinnitus's history and post.frag read: the scene,
+	// or TAA's resolve of it.
+	SDL_GPUTexture* m_postSource = nullptr;
+	// Picks this frame's passes and TAA's jitter (before the view-projection is made).
+	void beginEnhancedFrame(const Camera& camera, uint32_t width, uint32_t height, bool overhead, bool post,
+		const Mat4& projection);
+	void renderCascades(SDL_GPUCommandBuffer* commands, const Camera& camera, const scene::LightSettings& lights,
+		float seconds, float aspect);
+	// Depth, then normals and motion, then the AO (the world pass reads it).
+	void renderEnhancedPrepass(SDL_GPUCommandBuffer* commands, const Camera& camera, const Mat4& viewProjection,
+		float seconds, float aspect);
+	// The terrain's depth: the cells drawn this frame, or (`coarse`, the
+	// cascades' casters) every cell at its lowest LOD.
+	void drawTerrainDepth(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Camera& camera,
+		const Mat4& viewProjection, bool coarse);
+	void resolveTaa(SDL_GPUCommandBuffer* commands);
+	// BF2142_ENHANCED_VIEW=ao|aoraw|normals|motion: that buffer over the scene (red: one channel).
+	void showEnhancedBuffer(SDL_GPUCommandBuffer* commands);
+	void endEnhancedFrame(const Camera& camera, bool overhead);
+	void useEnhancedShadows(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, uint32_t slot, uint32_t firstSampler,
+		bool hemi, bool undergrowth);
+	void ensureEnhancedTargets(uint32_t width, uint32_t height);
+	void releaseEnhancedTargets();
 
 	GpuContext& m_gpu;
 	std::map<std::string, std::unique_ptr<GpuMesh>> m_meshes; // by geometry name (lower case)

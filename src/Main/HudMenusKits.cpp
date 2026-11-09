@@ -151,6 +151,7 @@ void KitMenu::build(int team)
 	// 0x00798dd0: the open kit's grid.
 	m_team = team;
 	m_built = true;
+	++m_builds;
 	for (auto& row : m_grid) {
 		row.fill({});
 	}
@@ -237,6 +238,19 @@ void KitMenu::update(int team)
 		build(team);
 	}
 	const auto& kits = m_logic.team(team == 1 ? 1 : 2).kits;
+	if (skipUnchanged) {
+		Shown now {m_builds, team, m_kit, m_heavy, m_customOpen, {}};
+		for (const auto& kit : kits) {
+			now.kits.push_back(kit.name);
+		}
+		if (m_shownValid && now == m_shown) {
+			return;
+		}
+		m_shown = std::move(now);
+		m_shownValid = true;
+	} else {
+		m_shownValid = false;
+	}
 	// The kit buttons (0x0044e650).
 	for (int i = 0; i < kKits; ++i) {
 		const std::string n = std::to_string(i);

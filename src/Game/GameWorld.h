@@ -238,6 +238,9 @@ public:
 	// Objects whose position isn't finite or lies over `limit` from the
 	// origin in any axis (a physics blow-up), for checks.
 	std::vector<uint32_t> objectsOutOfWorld(float limit = 1e5f) const;
+	// A hash of every object's id, position and rotation, to compare two
+	// headless rounds (tools/parity-check.sh).
+	uint64_t stateFingerprint() const;
 	bool isDroppedKit(uint32_t object) const;
 	// Whether a dead player's body has landed (0x005eda20): no ragdoll, or
 	// one a particle of which has hit something, ragdollLandedDelay (the

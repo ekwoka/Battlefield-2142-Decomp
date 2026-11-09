@@ -228,9 +228,9 @@ public:
 
 	SDL_GPUDevice* device() const { return m_device; }
 	SDL_Window* window() const { return m_window; }
-	SDL_GPUGraphicsPipeline* meshPipeline() const { return m_meshPipeline; }
-	SDL_GPUGraphicsPipeline* meshCulledPipeline() const { return m_meshCulledPipeline; } // back faces culled
-	SDL_GPUGraphicsPipeline* terrainPipeline() const { return m_terrainPipeline; }
+	SDL_GPUGraphicsPipeline* meshPipeline() const { return m_enhancedLit ? m_enhanced.mesh : m_meshPipeline; }
+	SDL_GPUGraphicsPipeline* meshCulledPipeline() const { return m_enhancedLit ? m_enhanced.meshCulled : m_meshCulledPipeline; } // back faces culled
+	SDL_GPUGraphicsPipeline* terrainPipeline() const { return m_enhancedLit ? m_enhanced.terrain : m_terrainPipeline; }
 	// The surrounding terrain (secondary heightmaps): terrain.vert with
 	// surrounding.frag.
 	SDL_GPUGraphicsPipeline* surroundingPipeline() const { return m_surroundingPipeline; }
@@ -240,19 +240,19 @@ public:
 	// no depth writes.
 	// Also blended materials (RendDX9's transparency queues): SRCALPHA /
 	// INVSRCALPHA, no culling (CullMode 1, 0x100c3880).
-	SDL_GPUGraphicsPipeline* fadedMeshPipeline() const { return m_fadedMeshPipeline; }
+	SDL_GPUGraphicsPipeline* fadedMeshPipeline() const { return m_enhancedLit ? m_enhanced.fadedMesh : m_fadedMeshPipeline; }
 	// Additive materials (hasAdditiveAlpha, BMadditive): SRCALPHA / ONE,
 	// depth-tested, not written.
-	SDL_GPUGraphicsPipeline* additiveMeshPipeline() const { return m_additiveMeshPipeline; }
+	SDL_GPUGraphicsPipeline* additiveMeshPipeline() const { return m_enhancedLit ? m_enhanced.additiveMesh : m_additiveMeshPipeline; }
 	// Alpha-blended, depth-tested but not written.
 	SDL_GPUGraphicsPipeline* waterPipeline() const { return m_waterPipeline; }
 	// Water's blending plus a depth bias, for road decals.
-	SDL_GPUGraphicsPipeline* roadPipeline() const { return m_roadPipeline; }
-	SDL_GPUGraphicsPipeline* roadMeshPipeline() const { return m_roadMeshPipeline; }
+	SDL_GPUGraphicsPipeline* roadPipeline() const { return m_enhancedLit ? m_enhanced.road : m_roadPipeline; }
+	SDL_GPUGraphicsPipeline* roadMeshPipeline() const { return m_enhancedLit ? m_enhanced.roadMesh : m_roadMeshPipeline; }
 	// The same state for decals (decal.vert / decal.frag).
 	SDL_GPUGraphicsPipeline* decalPipeline() const { return m_decalPipeline; }
 	// Opaque, alpha-tested; undergrowth uniforms in the vertex stage.
-	SDL_GPUGraphicsPipeline* undergrowthPipeline() const { return m_undergrowthPipeline; }
+	SDL_GPUGraphicsPipeline* undergrowthPipeline() const { return m_enhancedLit ? m_enhanced.undergrowth : m_undergrowthPipeline; }
 	// Particles: depth-tested, not written; blended or added.
 	SDL_GPUGraphicsPipeline* uiPipeline() const { return m_uiPipeline; }
 	// The UI with gameswf's mask states (RendDX9.dll 0x10118920 /
@@ -313,6 +313,51 @@ public:
 	// D24_UNORM_S8_UINT (SDL guarantees one of them).
 	SDL_GPUTextureFormat depthFormat() const { return m_depthFormat; }
 
+	// ---- the enhanced mode (Enhanced/LevelRendererEnhanced.cpp) ----------
+	// Not retail. Each is null when it couldn't be made; its pass is off then.
+	struct EnhancedPipelines {
+		// The lit pipelines' variants (Shaders/Enhanced/*.patch: the GTAO on
+		// the ambient, the cascaded shadows), as the retail ones' states.
+		SDL_GPUGraphicsPipeline* mesh = nullptr;
+		SDL_GPUGraphicsPipeline* meshCulled = nullptr;
+		SDL_GPUGraphicsPipeline* fadedMesh = nullptr;
+		SDL_GPUGraphicsPipeline* additiveMesh = nullptr;
+		SDL_GPUGraphicsPipeline* terrain = nullptr;
+		SDL_GPUGraphicsPipeline* undergrowth = nullptr;
+		SDL_GPUGraphicsPipeline* road = nullptr;
+		SDL_GPUGraphicsPipeline* roadMesh = nullptr;
+		// The prepass's depth (mesh.vert / shadowcaster.frag, terrain.vert /
+		// depth.frag) into shadowDepthFormat(); the cascades' terrain casters.
+		SDL_GPUGraphicsPipeline* depth = nullptr;
+		SDL_GPUGraphicsPipeline* terrainDepth = nullptr;
+		SDL_GPUGraphicsPipeline* terrainCaster = nullptr;
+		// The G-buffer (normalDepth + motion targets), the moving meshes'
+		// motion (depth-tested against the prepass) and the first person's
+		// (untested), the GTAO and its blur, TAA's resolve.
+		SDL_GPUGraphicsPipeline* gbuffer = nullptr;
+		SDL_GPUGraphicsPipeline* motion = nullptr;
+		SDL_GPUGraphicsPipeline* motionOverlay = nullptr;
+		SDL_GPUGraphicsPipeline* gtao = nullptr;
+		SDL_GPUGraphicsPipeline* aoBlur = nullptr;
+		SDL_GPUGraphicsPipeline* taa = nullptr;
+	};
+	static constexpr SDL_GPUTextureFormat kNormalDepthFormat = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+	static constexpr SDL_GPUTextureFormat kMotionFormat = SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT;
+	static constexpr SDL_GPUTextureFormat kAOFormat = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+	const EnhancedPipelines& enhancedPipelines() const { return m_enhanced; }
+	// The lit pipelines' accessors give the variants (when all were made).
+	void setEnhancedLit(bool on) { m_enhancedLit = on && enhancedLitAvailable(); }
+	bool enhancedLit() const { return m_enhancedLit; }
+	bool enhancedLitAvailable() const
+	{
+		const EnhancedPipelines& e = m_enhanced;
+		return e.mesh && e.meshCulled && e.fadedMesh && e.additiveMesh && e.terrain && e.undergrowth && e.road && e.roadMesh;
+	}
+	// Nearest, clamped (the G-buffer's reads).
+	SDL_GPUSampler* pointSampler() const { return m_pointSampler; }
+	// A sampled render target of `format` (a colour or a depth format).
+	SDL_GPUTexture* createRenderTexture(uint32_t width, uint32_t height, SDL_GPUTextureFormat format, bool depth = false);
+
 	// Uploads are recorded into one copy pass and submitted by flushUploads().
 	SDL_GPUBuffer* createBuffer(SDL_GPUBufferUsageFlags usage, const void* data, uint32_t size);
 	// A buffer rewritten every frame (particles, decals, the HUD): kept with
@@ -345,6 +390,9 @@ private:
 	GpuContext() = default;
 	bool createPipelines(std::string& error);
 	SDL_GPUCopyPass* copyPass();
+	EnhancedPipelines m_enhanced;
+	bool m_enhancedLit = false;
+	SDL_GPUSampler* m_pointSampler = nullptr;
 
 	SDL_GPUDevice* m_device = nullptr;
 	SDL_Window* m_window = nullptr;

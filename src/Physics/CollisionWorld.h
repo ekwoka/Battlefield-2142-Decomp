@@ -62,6 +62,14 @@ public:
 	// meshes built once).
 	void append(const CollisionWorld& other);
 	size_t triangles() const { return m_triangles.size(); }
+	// Every face, in order (the enhanced mode's audio scene).
+	template <typename Visit>
+	void forEachFace(Visit&& visit) const
+	{
+		for (const Triangle& t : m_triangles) {
+			visit(t.a, t.b, t.c);
+		}
+	}
 	// Takes `owner`'s faces out of the queries (an object whose physics goes:
 	// a destroyed prop's, 0x00651c60's slot 0xd4 -> 0xc). Returns how many.
 	size_t removeOwner(uint32_t owner);

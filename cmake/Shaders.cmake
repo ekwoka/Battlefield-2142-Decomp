@@ -14,16 +14,34 @@ function(bf2142_embed_shaders target)
 	set(dir ${CMAKE_CURRENT_BINARY_DIR}/shaders)
 	set(outputs)
 	# Shared GLSL (#include "x.glsl" beside the shaders) rebuilds them all.
-	file(GLOB includes ${CMAKE_CURRENT_SOURCE_DIR}/Shaders/*.glsl)
+	file(GLOB includes ${CMAKE_CURRENT_SOURCE_DIR}/Shaders/*.glsl ${CMAKE_CURRENT_SOURCE_DIR}/Shaders/Enhanced/*.glsl)
 	foreach(source ${ARGN})
-		get_filename_component(name ${source} NAME)
+		# "name=shader+edits": a variant of `shader` with the edits applied
+		# (cmake/ShaderVariant.cmake), its includes found in Shaders/Enhanced
+		# and Shaders.
+		if(source MATCHES "^([^=]+)=([^+]+)\\+(.+)$")
+			set(name ${CMAKE_MATCH_1})
+			set(input ${dir}/variants/${name})
+			set(base ${CMAKE_CURRENT_SOURCE_DIR}/${CMAKE_MATCH_2})
+			set(edits ${CMAKE_CURRENT_SOURCE_DIR}/${CMAKE_MATCH_3})
+			add_custom_command(OUTPUT ${input}
+				COMMAND ${CMAKE_COMMAND} -DSOURCE=${base} -DEDITS=${edits} -DOUTPUT=${input} -P ${PROJECT_SOURCE_DIR}/cmake/ShaderVariant.cmake
+				DEPENDS ${base} ${edits} ${PROJECT_SOURCE_DIR}/cmake/ShaderVariant.cmake
+				COMMENT "Making shader variant ${name}"
+				VERBATIM)
+			set(includeDirs -I${CMAKE_CURRENT_SOURCE_DIR}/Shaders/Enhanced -I${CMAKE_CURRENT_SOURCE_DIR}/Shaders)
+		else()
+			get_filename_component(name ${source} NAME)
+			set(input ${CMAKE_CURRENT_SOURCE_DIR}/${source})
+			set(includeDirs)
+		endif()
 		set(spv ${dir}/${name}.spv)
 		set(msl ${dir}/${name}.msl)
 		add_custom_command(OUTPUT ${spv} ${msl}
 			COMMAND ${CMAKE_COMMAND} -E make_directory ${dir}
-			COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 --quiet -o ${spv} ${CMAKE_CURRENT_SOURCE_DIR}/${source}
+			COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 --quiet ${includeDirs} -o ${spv} ${input}
 			COMMAND ${SPIRV_CROSS} --msl --msl-version 20100 --msl-decoration-binding --output ${msl} ${spv}
-			DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${source} ${includes}
+			DEPENDS ${input} ${includes}
 			COMMENT "Compiling shader ${name}"
 			VERBATIM)
 		list(APPEND outputs ${spv} ${msl})
