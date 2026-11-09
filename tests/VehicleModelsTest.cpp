@@ -3395,10 +3395,11 @@ TEST(PlayerCamera_GunshipBankingInsideAndOutside)
 }
 
 
-// The PAC FAV authors its centre of mass 0.5 m above its origin; unlevelled it
-// rolled to 87 degrees and was destroyed in 11 s under modest steering plus
-// boost in both mods (the EU FAV stayed within 4 degrees). Drive the actual
-// vehicles for 20 s and require stable, mostly-grounded running.
+// The PAC FAV authors its centre of mass 0.5 m above its origin. With tyre
+// friction torque taken about that centre it rolled to 87 degrees and was
+// destroyed in 11 s under modest steering plus boost; retail's friction
+// (0x006c7980) takes it about the body's position. Drive the actual vehicles
+// for 20 s and require stable, mostly-grounded running.
 TEST(Vehicles_FavStaysUprightUnderSteeringAndBoost)
 {
 	if (!gameDir()) return;

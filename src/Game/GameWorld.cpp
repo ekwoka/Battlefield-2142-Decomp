@@ -12754,14 +12754,6 @@ bool GameWorld::buildBody(const world::ObjectTemplate& tRef, uint32_t id, const 
 	rigid.inertiaModifier = vector("inertiaModifier", {1, 1, 1});
 	rigid.gravityModifier = number(*t, "gravityModifier", 1);
 	body.vehicle = Vehicle::fromTemplate(*t, m_templates, mesh);
-	// Deviation from the shipped data (not a retail-verified rule): the PAC FAV (as_fav) authors a centre
-	// of mass 0.5 m ABOVE its body origin while every other wheeled vehicle keeps it at or below. With that
-	// height its modest-steer-plus-boost run rolls it to 87 degrees (the EU FAV, identical engine, stays
-	// within 4); lowering the height to the origin removes the rollover and keeps slope/jump roll possible.
-	// shortcut: any newCar2 wheeled body with a raised centre is levelled; revisit if retail evidence shows otherwise.
-	if (body.vehicle && body.vehicle->hasNewCar2() && rigid.centerOfMass.y > 0) {
-		rigid.centerOfMass.y = 0;
-	}
 	if (body.vehicle) {
 		body.vehicle->setObjectRadius(body.objectRadius); // rotationalForce's arm (0x0062ac00)
 	} else if (!(sameName(t->typeName(), "Parachute") && number(*t, "isPod", 0) != 0)) {
