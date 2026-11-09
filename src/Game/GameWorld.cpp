@@ -3532,6 +3532,7 @@ void GameWorld::startProjectileView(const Player& player, const Projectile& roun
 		view.maxSpeed = vec("maxSpeed");
 		view.fov = number(*t, "insideFOV", 1.1f);
 		view.lastAimPitch = player.input.aimPitch;
+		view.seatAimPitch = player.input.aimPitch;
 		m_projectileViews[player.id] = view;
 		return;
 	}
@@ -3547,6 +3548,10 @@ bool GameWorld::stepProjectileView(Player& player, float seconds)
 	const auto round = std::find_if(m_projectiles.begin(), m_projectiles.end(),
 		[&](const Projectile& p) { return p.serial == view.serial && p.alive; });
 	if (round == m_projectiles.end() || !player.alive || !player.vehicle) {
+		if (player.alive && player.vehicle && m_player && player.id == m_player->id && std::isfinite(view.seatAimPitch)) {
+			player.aimKickPitch += view.seatAimPitch - player.input.aimPitch;
+			player.input.aimPitch = view.seatAimPitch;
+		}
 		m_projectileViews.erase(it); // the round went (0x005b4b00): the seat's camera again
 		return false;
 	}
@@ -11740,6 +11745,23 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 		gun.yawBlocked = blocks(seat.yawBundle);
 		gun.pitchBlocked = blocks(seat.pitchBundle);
 	}
+	// The selected projectile-camera launcher blocks its turret while the
+	// viewer still accumulates absolute mouse pitch. Preserve the look the
+	// gunner had on selection, and restore it when returning to the cannon.
+	if (!continuing) gun.cameraLauncherPitchAnchor = NAN;
+	if (m_player && player.id == m_player->id && !player.ai) {
+		const int active = gun.active[0];
+		const world::ObjectTemplate* selected = active >= 0 && static_cast<size_t>(active) < seat.weapons.size()
+			? m_templates.find(seat.weapons[static_cast<size_t>(active)].weapon) : nullptr;
+		const bool cameraLauncher = selected && integer(*selected, "zoom.useProjectileCamera", 0) != 0;
+		if (cameraLauncher && !std::isfinite(gun.cameraLauncherPitchAnchor)) {
+			gun.cameraLauncherPitchAnchor = player.input.aimPitch;
+		} else if (!cameraLauncher && std::isfinite(gun.cameraLauncherPitchAnchor)) {
+			player.aimKickPitch += gun.cameraLauncherPitchAnchor - player.input.aimPitch;
+			player.input.aimPitch = gun.cameraLauncherPitchAnchor;
+			gun.cameraLauncherPitchAnchor = NAN;
+		}
+	}
 	if (aims) {
 		float turn = gun.yawBlocked ? 0.0f : player.input.turn;
 		// surpressPlayerInputVector (the input pass 0x00565700): while the
@@ -12022,6 +12044,15 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 	const physics::Mat3 pitchFrame = seat.hasPitchFrame ? seat.pitchFrame : physics::Mat3 {};
 	const physics::Mat3 yawTurn = physics::Mat3::fromYawPitchRoll({gun.yaw, 0, 0});
 	physics::Vec3 direction = (pitchFrame * yawTurn * mount.turn * body.body.rotation).transform(local);
+	const world::ObjectTemplate* firearm = m_templates.find(w.weapon);
+	// A local TV launch uses the selected camera's actual sight line. Its
+	// launcher camera is distinct from the cannon's rotatable mount, which
+	// can be left pointing down when the player switches weapons.
+	if (!player.ai && player.id == localPlayer() && w.fireInCameraDof && firearm
+		&& integer(*firearm, "zoom.useProjectileCamera", 0) != 0 && m_hasCamera
+		&& physics::lengthSquared(m_cameraForward) > 1e-6f) {
+		direction = m_cameraForward * (1.0f / std::sqrt(physics::lengthSquared(m_cameraForward)));
+	}
 	const physics::Vec3 straight = direction;
 	// The round strays by the deviation (0x005f5540): (minDev + the
 	// build-up) and, for a bot, its AI deviation (0x005dedb0's end); two
@@ -12048,13 +12079,20 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 	p.timeLeft = arm.projectile->timeToLive.sample(m_random);
 	p.shooter = body.object;
 	p.player = player.id;
-	const world::ObjectTemplate* firearm = m_templates.find(w.weapon);
 	if (firearm) {
 		wireSettings(p, *firearm);
 		const world::ObjectTemplate* projectileTemplate = m_templates.find(arm.projectile->name);
 		if (projectileTemplate && integer(*firearm, "zoom.useProjectileCamera", 0)
 			&& integer(*projectileTemplate, "useProjectileCamera", 0)) {
 			p.cameraMissileForward = direction;
+			// A directional projectile follows its own launch frame, not the
+			// carrier's sideways/backward velocity vector. Preserve the speed
+			// of the inherited launch velocity while aligning it to that frame.
+			// Retail's hasDirection update likewise uses its matrix and speed;
+			// the exact initial-impulse timing is not yet traced.
+			if (integer(*projectileTemplate, "hasDirection", 1) != 0) {
+				p.velocity = direction * std::sqrt(physics::lengthSquared(p.velocity));
+			}
 		}
 	}
 	launchLocked(p, player);

@@ -1487,6 +1487,20 @@ TEST(Vehicles_GunshipMissileCamera)
 	// The round's life (5 s) runs out: the seat's camera again.
 	g.run(6);
 	CHECK(!g.world->projectileCamera(me, camera));
+	// Steering the round must not leave the gunner's stored look pitched
+	// down after returning to the seat. The viewer consumes this correction.
+	const float restore = g.world->takeAimKick(me);
+	CHECK(std::fabs(restore - 20.0f) < 0.1f);
+	input.aimPitch += restore;
+	input.altFire = true;
+	g.world->setPlayerInput(input);
+	g.world->tick(1 / 30.0f);
+	input.altFire = false;
+	g.world->setPlayerInput(input);
+	g.world->tick(1 / 30.0f);
+	float restoredYaw = 0, restoredPitch = 0;
+	CHECK(g.world->gunAim(v, seat, restoredYaw, restoredPitch));
+	CHECK(std::fabs(restoredPitch) < 1.0f);
 }
 
 // Exercise the shipped zero-muzzle-speed TV missile in both gunships and mods.
@@ -1511,6 +1525,13 @@ TEST(Vehicles_GunshipMissileMotorAndCamera)
 			g.world->tick(1 / 30.0f);
 			g.world->setPlayerInput({});
 			g.run(4);
+			anim::AnimationSystems systems(nullptr);
+			PlayerCamera playerCamera(*g.world, systems, nullptr);
+			playerCamera.tick(1 / 30.0f);
+			const auto selectedMode = playerCamera.mode();
+			playerCamera.toggleMode();
+			CHECK(playerCamera.mode() == selectedMode);
+			CHECK(!playerCamera.selectView(2));
 			in = {}; in.fire = true;
 			game::GameWorld::ProjectileCamera camera;
 			for (int i = 0; i < 12 && !g.world->projectileCamera(g.world->localPlayer(), camera); ++i) {
@@ -1521,8 +1542,6 @@ TEST(Vehicles_GunshipMissileMotorAndCamera)
 			if (!g.world->projectileCamera(g.world->localPlayer(), camera)) continue;
 			const uint32_t serial = camera.serial;
 			CHECK(serial != 0 && camera.lifeRemaining > 0.9f && camera.rangeProgress < 0.05f);
-			anim::AnimationSystems systems(nullptr);
-			PlayerCamera playerCamera(*g.world, systems, nullptr);
 			playerCamera.tick(1 / 30.0f);
 			const auto mode = playerCamera.mode();
 			playerCamera.toggleMode();
@@ -1586,6 +1605,133 @@ TEST(Vehicles_GunshipMissileEarlyImpactReload)
 			CHECK(g.world->projectileCamera(g.world->localPlayer(), view));
 		}
 	}
+}
+
+// The missile starts with zero authored muzzle speed. A moving carrier
+// must not make the TV view face sideways or backwards at launch.
+TEST(Vehicles_GunshipTVMovingCarrierLaunchHeading)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* aircraft : {"as_ag", "us_ag"}) {
+			for (const physics::Vec3 velocity : {physics::Vec3{25, 0, 0}, physics::Vec3{-25, 0, 0},
+					 physics::Vec3{0, 0, -25}, physics::Vec3{0, 0, 25}}) {
+				Garage g(gameDir(), mod);
+				if (!g.loaded || !g.templates.find(aircraft)) continue;
+				const auto v = g.start(aircraft, {0, 4, 6});
+				CHECK(g.enter(v));
+				game::SoldierInput in; in.switchSeat = 2;
+				g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+				g.world->setPlayerInput({}); g.run(4);
+				in = {}; in.altFire = true;
+				g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+				g.world->setPlayerInput({}); g.run(4);
+				g.world->setCamera({0, 4, 6}, {0, 0, 1});
+				CHECK(g.world->setBodyVelocity(v, velocity));
+				in = {}; in.fire = true;
+				g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+				game::GameWorld::ProjectileCamera camera;
+				CHECK(g.world->projectileCamera(g.world->localPlayer(), camera));
+				if (!g.world->projectileCamera(g.world->localPlayer(), camera)) continue;
+				std::fprintf(stderr, "  moving TV: %s %s velocity %.0f/%.0f camera %.1f/%.1f\n",
+					mod, aircraft, velocity.x, velocity.z, camera.yaw, camera.pitch);
+				CHECK(std::fabs(std::remainder(camera.yaw, 360.0f)) < 5);
+				CHECK(std::fabs(camera.pitch) < 5);
+				bool found = false;
+				for (const auto& p : g.world->projectiles()) if (p.serial == camera.serial) {
+					found = true;
+					std::fprintf(stderr, "    missile velocity %.2f/%.2f/%.2f\n", p.velocity.x, p.velocity.y, p.velocity.z);
+					CHECK(p.velocity.z > 10 && std::fabs(p.velocity.x) < 2);
+				}
+				CHECK(found);
+				g.world->setPlayerInput({});
+				g.run(0.3f);
+				CHECK(g.world->projectileCamera(g.world->localPlayer(), camera));
+				CHECK(std::fabs(std::remainder(camera.yaw, 360.0f)) < 8 && std::fabs(camera.pitch) < 8);
+			}
+		}
+	}
+}
+
+TEST(Vehicles_GunshipTVLaunchUsesCameraDirection)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* aircraft : {"as_ag", "us_ag"}) {
+			Garage g(gameDir(), mod);
+			if (!g.loaded || !g.templates.find(aircraft)) continue;
+			const auto v = g.start(aircraft, {0, 4, 6});
+			CHECK(g.enter(v));
+			game::SoldierInput in; in.switchSeat = 2;
+			g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+			g.world->setPlayerInput({}); g.run(4);
+			in = {}; in.aimPitch = -25;
+			g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+			float yaw = 0, pitch = 0;
+			CHECK(g.world->gunAim(v, 1, yaw, pitch) && pitch < -10);
+			in.altFire = true; g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+			in.altFire = false; g.world->setPlayerInput(in); g.run(4);
+			g.world->setCamera({0, 4, 6}, {0, 0, 1});
+			in.fire = true; g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+			game::GameWorld::ProjectileCamera camera;
+			CHECK(g.world->projectileCamera(g.world->localPlayer(), camera));
+			bool found = false;
+			for (const auto& p : g.world->projectiles()) if (p.serial == camera.serial) {
+				found = true;
+				CHECK(std::fabs(p.cameraMissileForward.y) < 0.01f && p.cameraMissileForward.z > 0.99f);
+			}
+			CHECK(found);
+		}
+	}
+}
+
+TEST(Vehicles_GunshipTVSelectionRestoresGunnerPitch)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* aircraft : {"as_ag", "us_ag"}) {
+			Garage g(gameDir(), mod);
+			if (!g.loaded || !g.templates.find(aircraft)) continue;
+			const auto v = g.start(aircraft, {0, 4, 6});
+			CHECK(g.enter(v));
+			game::SoldierInput in; in.switchSeat = 2;
+			g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+			g.world->setPlayerInput({}); g.run(1);
+			in = {}; in.altFire = true;
+			g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+			in.altFire = false; g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+			in.aimPitch = -35;
+			g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+			in.altFire = true; g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+			in.altFire = false; g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+			const float correction = g.world->takeAimKick(g.world->localPlayer());
+			CHECK(std::fabs(correction - 35) < 0.1f);
+			in.aimPitch += correction;
+			g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+			float yaw = 0, pitch = 0;
+			CHECK(g.world->gunAim(v, 1, yaw, pitch));
+			CHECK(std::fabs(pitch) < 1.0f);
+		}
+	}
+}
+
+TEST(Vehicles_GunshipMouseInputBetweenTicks)
+{
+	if (!gameDir()) return;
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("as_ag")) return;
+	const auto v = g.start("as_ag", {0, 4, 6});
+	CHECK(g.enter(v));
+	game::SoldierInput in; in.switchSeat = 2;
+	g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({}); g.run(1);
+	float before = 0, pitch = 0, after = 0;
+	CHECK(g.world->gunAim(v, 1, before, pitch));
+	in = {}; in.turn = 1;
+	for (int i = 0; i < 4; ++i) g.world->setPlayerInput(in);
+	g.world->tick(1 / 30.0f);
+	CHECK(g.world->gunAim(v, 1, after, pitch));
+	CHECK(std::fabs(std::remainder(after - before, 360.0f) - 4) < 0.1f);
 }
 
 // A seat's weapons by group (0x005cc5e0): the heavy mech's driver has its

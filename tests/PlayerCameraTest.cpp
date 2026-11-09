@@ -4,6 +4,7 @@
 #include "Animation/AnimationSystem.h"
 #include "Game/GameWorld.h"
 #include "Main/PlayerCamera.h"
+#include "Main/MissileViewSmoothing.h"
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
@@ -232,4 +233,18 @@ TEST(PlayerCamera_ParachuteStaysFirstPerson)
 	CHECK(!camera.selectView(4));
 	camera.tick(1 / 30.0f);
 	CHECK(camera.firstPerson && camera.mode() == game::camera::Mode::Inside);
+}
+
+TEST(PlayerCamera_MissileViewInterpolation)
+{
+	MissileViewSmoothing smooth;
+	MissileViewSmoothing::Pose first {{0, 0, 0}, 3.10f, 0};
+	MissileViewSmoothing::Pose next {{10, 4, 2}, -3.10f, -0.4f};
+	auto p = smooth.sample(1, true, 0, first);
+	CHECK(p.position[0] == 0);
+	p = smooth.sample(1, true, 0.5f, next);
+	CHECK(std::fabs(p.position[0] - 5) < 0.001f && std::fabs(p.pitch + 0.2f) < 0.001f);
+	CHECK(std::fabs(p.yaw - 3.14159265f) < 0.01f);
+	p = smooth.sample(2, true, 0, next);
+	CHECK(p.position[0] == 10 && p.yaw == next.yaw);
 }

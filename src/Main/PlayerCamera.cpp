@@ -366,13 +366,24 @@ bool PlayerCamera::setMode(game::camera::Mode mode)
 	return true;
 }
 
+bool PlayerCamera::missileLauncherSelected() const
+{
+	if (m_remote) return false;
+	game::GameWorld::PlayerInfo me;
+	if (!m_round.playerInfo(m_round.localPlayer(), me) || !me.alive || !me.vehicle || me.seat < 0) return false;
+	const auto seats = m_round.vehicleSeats(me.vehicle);
+	if (static_cast<size_t>(me.seat) >= seats.size()) return false;
+	const auto* weapon = m_round.templates().find(seats[static_cast<size_t>(me.seat)].weapon);
+	return weapon && number(*weapon, "zoom.useProjectileCamera", 0) != 0;
+}
+
 bool PlayerCamera::selectView(int shortcut)
 {
 	using game::camera::Mode;
 	static constexpr Mode modes[] = {Mode::Inside, Mode::Chase, Mode::FrontChase, Mode::FlyBy};
 	if (shortcut < 1 || shortcut > 4) return false;
 	game::GameWorld::ProjectileCamera projectile;
-	if (!m_remote && m_round.projectileCamera(m_round.localPlayer(), projectile) && projectile.takeOverInput) return false;
+	if (missileLauncherSelected() || (!m_remote && m_round.projectileCamera(m_round.localPlayer(), projectile) && projectile.takeOverInput)) return false;
 	Me me;
 	if (!current(me) || !me.alive) return false;
 	if (!me.vehicle) {
@@ -391,7 +402,7 @@ bool PlayerCamera::selectView(int shortcut)
 void PlayerCamera::toggleMode(bool backwards)
 {
 	game::GameWorld::ProjectileCamera projectile;
-	if (!m_remote && m_round.projectileCamera(m_round.localPlayer(), projectile) && projectile.takeOverInput) return;
+	if (missileLauncherSelected() || (!m_remote && m_round.projectileCamera(m_round.localPlayer(), projectile) && projectile.takeOverInput)) return;
 	Me me;
 	const bool alive = current(me) && me.alive;
 	if (!m_remote && !alive && m_spectating == Spectating::Follow) {
@@ -865,6 +876,10 @@ void PlayerCamera::tick(float seconds)
 	}
 	const bool spawned = !m_alive;
 	m_alive = true;
+	if (missileLauncherSelected() && m_mode != game::camera::Mode::Inside) {
+		setMode(game::camera::Mode::Inside);
+		firstPerson = true;
+	}
 	if (spawned) {
 		// A seat's Chase/FlyBy choice or the death camera's toggle left this false; every new soldier starts in the configured view.
 		firstPerson = spawnFirstPerson;

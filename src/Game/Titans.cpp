@@ -2598,6 +2598,7 @@ bool GameWorld::setBodyVelocity(uint32_t object, const physics::Vec3& velocity)
 {
 	Body* body = findBody(object);
 	if (body) {
+		wake(*body); // the test fixture must not have its velocity cleared by sleep
 		body->body.velocity = velocity;
 	}
 	return body != nullptr;

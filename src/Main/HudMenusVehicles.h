@@ -121,7 +121,7 @@ namespace dice::hfe::menu {
 
 // Gunship missile indicator: the horizontal compass strip scrolls left
 // for positive values. Sweep from the left clipping edge to the right.
-inline float missileFuelAngle(float lifeRemaining) { return 360.0f * (2.0f * lifeRemaining - 1.0f); }
+inline float missileFuelAngle(float lifeRemaining) { return 340.0f * (2.0f * lifeRemaining - 1.0f); }
 
 
 // A template's setting, or `otherwise` when it has none.

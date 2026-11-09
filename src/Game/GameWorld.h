@@ -1855,7 +1855,7 @@ public:
 	// The vehicle model of an object with one.
 	const Vehicle* vehicle(uint32_t object) const;
 	// The input for the next ticks.
-	void setPlayerInput(const SoldierInput& input) { m_playerInput = input; }
+	void setPlayerInput(const SoldierInput& input) { const float pendingTurn = m_playerInput.turn; m_playerInput = input; m_playerInput.turn += pendingTurn; }
 	// Titan mode (Titans.cpp; docs/engine.md, "Titans"). The Titan sync
 	// manager (0x005628f0, ECPhysicsETitanSync: set up by 0x00561c00, run by
 	// 0x00561e20 only when the game mode is "gpm_ti") keeps one Titan per
@@ -2222,6 +2222,7 @@ private:
 			// the look's pitch (input.aimPitch is the look, not a change).
 			physics::Mat3 hullTurn;
 			float pitchOffset = 0;
+			float cameraLauncherPitchAnchor = NAN; // gunner look before blocked TV-launcher input
 			uint64_t gunnedTick = 0;    // the last tick its seat was taken (stepGunner)
 			float stabilizedHeading = 0; // the bundle's parent's yaw last undone (stabilizeGunYaws)
 			std::vector<Arm> arms;
@@ -3234,6 +3235,7 @@ private:
 		physics::Vec3 minRotation, maxRotation, maxSpeed; // degrees, degrees a second
 		float yaw = 0, pitch = 0; // the camera's turn on the round (pitch up positive)
 		float lastAimPitch = NAN;
+		float seatAimPitch = NAN; // restore the gunner look after steering the missile
 		float fov = 1.1f;
 	};
 	std::map<int, ProjectileView> m_projectileViews; // by player

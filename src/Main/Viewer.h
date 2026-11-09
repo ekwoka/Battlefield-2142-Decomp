@@ -82,6 +82,7 @@ struct ViewerOptions {
 		// First person: the camera itself (radians; yaw 0 along +z, pitch up
 		// positive) and its vertical field of view.
 		bool firstPerson = false;
+		uint32_t projectileSerial = 0; // interpolate only this projectile camera
 		float eye[3] = {0, 0, 0};
 		float eyeYaw = 0, eyePitch = 0;
 		float fovY = 1.0f;

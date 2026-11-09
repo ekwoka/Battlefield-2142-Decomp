@@ -270,6 +270,7 @@ private:
 	void stepViews(float seconds);
 	game::camera::ModeRules modeRules() const;
 	bool setMode(game::camera::Mode mode);
+	bool missileLauncherSelected() const;
 	game::camera::Mode m_mode = game::camera::Mode::Inside;
 	uint32_t m_modeVehicle = 0;
 	int m_modeSeat = -1;

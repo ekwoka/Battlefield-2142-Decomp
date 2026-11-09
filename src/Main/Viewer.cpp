@@ -1,5 +1,6 @@
 #include "Viewer.h"
 #include "MouseCapture.h"
+#include "MissileViewSmoothing.h"
 
 #include "Render/GpuContext.h"
 #include "Render/LevelRenderer.h"
@@ -481,6 +482,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		Uint64 last = SDL_GetTicksNS();
 		const Uint64 start = last;
 		shown.opened = last; // scripted input starts after the level is ready
+		MissileViewSmoothing missileSmoothing;
 		TickTimer ticks(10, 30.0f); // as BF2Engine
 		ticks.advance(0);
 		bool running = true;
@@ -978,6 +980,16 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					const render::Vec3f head {view.x, view.y + 1.7f, view.z};
 					camera.position = head - camera.forward() * 4.0f + camera.right() * 0.6f;
 				}
+			}
+			// The projectile follows fixed 30 Hz simulation samples. Interpolate
+			// only the ridden missile camera at the actual render phase.
+			MissileViewSmoothing::Pose raw {{camera.position.x, camera.position.y, camera.position.z}, camera.yaw, camera.pitch};
+			const auto smooth = missileSmoothing.sample(view.firstPerson ? view.projectileSerial : 0, elapsedTicks > 0,
+				static_cast<float>(ticks.interpolation(static_cast<double>(now - start) / 1e9)), raw);
+			if (view.firstPerson && view.projectileSerial) {
+				camera.position = {smooth.position[0], smooth.position[1], smooth.position[2]};
+				camera.yaw = smooth.yaw;
+				camera.pitch = smooth.pitch;
 			}
 			const float speed = (keys[SDL_SCANCODE_LSHIFT] ? 200.0f : 40.0f) * dt;
 			const auto key = [keys](SDL_Scancode code) { return keys[code] ? 1.0f : 0.0f; };

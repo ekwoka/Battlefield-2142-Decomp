@@ -308,7 +308,7 @@ TEST(Hud_GunshipMissileIndicatorMovesRight)
 		"hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
 	}) console.execute(line, out);
 	float previous = -1;
-	for (float life : {1.0f, 0.5f, 0.0f}) {
+	for (float life : {1.0f, 0.98f, 0.5f, 0.0f}) {
 		manager.set("BombFuelAngle", menu::missileFuelAngle(life));
 		const auto quads = manager.frame(0);
 		CHECK(quads.size() == 1);

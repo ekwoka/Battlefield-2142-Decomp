@@ -1285,7 +1285,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	game::GameWorld::ProjectileCamera missileView;
 	const bool ridingMissile = !world.joined() && round.projectileCamera(world.localPlayer(), missileView);
 	// The authored gunship indicator is a compass strip showing estimated range progress.
-	hud.set("BombFuelAngle", ridingMissile ? dice::hfe::menu::missileFuelAngle(1.0f - missileView.rangeProgress) : 0.0f);
+	hud.set("BombFuelAngle", ridingMissile ? dice::hfe::menu::missileFuelAngle(1.0f - 0.5f * (missileView.rangeProgress + 1.0f - missileView.lifeRemaining)) : 0.0f);
 	hud.set("MenuBackgroundAlpha", 1);
 	// The crosshair (CrosshairIconShow, the weapon HUD's +0xec, 0x007be6e0)
 	// needs CrosshairActive (+0xed), which the HUD's menu state sets
@@ -9268,6 +9268,8 @@ int runGame(Options& options, Session& session)
 				view.aspect = aspect;
 				if (playerCamera.view(eye, aspect)) {
 					view.firstPerson = true;
+					game::GameWorld::ProjectileCamera missile;
+					if (!g_remoteHud && round.projectileCamera(round.localPlayer(), missile)) view.projectileSerial = missile.serial;
 					std::copy(eye.position.begin(), eye.position.end(), view.eye);
 					view.eyeYaw = eye.yaw;
 					view.eyePitch = eye.pitch;
