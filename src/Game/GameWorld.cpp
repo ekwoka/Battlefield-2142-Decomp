@@ -2007,6 +2007,7 @@ void GameWorld::fire(const Player& player, float aimPitch)
 	// A thrown round at its throw's power (0x005e5720: 1, or the soft
 	// throw's hold), plus the thrower's velocity.
 	p.velocity = body.velocity + direction * (player.weapon->settings().velocity * player.weapon->throwPower());
+	p.heading = direction;
 	p.settings = player.projectile;
 	p.timeLeft = player.projectile->timeToLive.sample(m_random);
 	p.shooter = player.object;
@@ -2889,7 +2890,7 @@ void GameWorld::steerClosest(Projectile& p, float seconds)
 	}
 	if (const world::Object* target = p.lockedOn ? m_objects.find(p.lockedOn) : nullptr) {
 		const Body* body = findBody(p.lockedOn);
-		followStep(p, {target->position().x, target->position().y, target->position().z},
+		p.followTurned = followStep(p, {target->position().x, target->position().y, target->position().z},
 			body ? body->body.velocity : physics::Vec3 {}, seconds, p.newTarget);
 		p.newTarget = false;
 	}
@@ -3241,7 +3242,7 @@ void GameWorld::steerSeeker(Projectile& p, float seconds)
 	const float along = std::max(0.0f, physics::dot(toMissile, aim)) + p.wireLookAhead;
 	// The follow's turn (followStep: follow.maxYaw / maxPitch degrees a
 	// tick, the AV missile's 0.4 and 0.7).
-	followStep(p, eye + aim * along, {}, seconds);
+	p.followTurned = followStep(p, eye + aim * along, {}, seconds);
 }
 
 void GameWorld::startProjectileView(const Player& player, const Projectile& round, const world::ObjectTemplate& firearm)
@@ -3492,7 +3493,11 @@ void GameWorld::stepProjectiles(float seconds)
 			p.alive = false; // 0x005f1cc0's removal (0x20): no effect
 			continue;
 		}
+		p.followTurned = false;
 		steerSeeker(p, seconds);
+		if (p.settings) {
+			thrustProjectile(p, seconds);
+		}
 		hoverProjectile(p, seconds);
 		if (p.resting) {
 			p.timeLeft -= seconds;
@@ -7899,9 +7904,13 @@ void GameWorld::stepAnimation(Player& player, float seconds)
 	input.turn = std::clamp(turn / seconds, -1499.0f, 1499.0f) * 0.01f;
 	player.lastYaw = player.body.yawDegrees;
 	input.pose = static_cast<int>(player.input.pose);
-	if (player.weapon && player.weapon->reloading()) {
-		input.messages |= 2; // reload
+	// The reload message once, as the reload starts (0x005e0fd0's kind 3;
+	// see PlayerCamera::tick).
+	const bool reloading = player.weapon && player.weapon->reloading();
+	if (reloading && !player.reloadingWas) {
+		input.pulses |= 2;
 	}
+	player.reloadingWas = reloading;
 	if (player.fired) {
 		input.pulses |= 1; // fire
 		player.fired = false;
@@ -8180,9 +8189,7 @@ void GameWorld::animateRemoteSoldier(uint32_t object, const RemoteSoldierState& 
 	if (state.fired) {
 		input.pulses |= 1;
 	}
-	if (state.reloading) {
-		input.messages |= 2;
-	}
+	bool reloadingNow = state.reloading;
 	// The look: the muzzle's point and turn (as startEffectsOn's), lower
 	// crouched and prone.
 	const float eye = state.pose == SoldierPose::Prone ? 0.35f : state.pose == SoldierPose::Crouch ? 1.1f : 1.6f;
@@ -8247,10 +8254,14 @@ void GameWorld::animateRemoteSoldier(uint32_t object, const RemoteSoldierState& 
 				round(WeaponSoundEvent::Reload);
 			}
 		}
-		if (remote.reloadLeft > 0) {
-			input.messages |= 2;
-		}
+		reloadingNow = reloadingNow || remote.reloadLeft > 0;
 	}
+	// The reload message once, as the reload starts (0x005e0fd0's kind 3;
+	// see PlayerCamera::tick).
+	if (reloadingNow && !remote.reloadingWas) {
+		input.pulses |= 2;
+	}
+	remote.reloadingWas = reloadingNow;
 	if (remote.body) {
 		remote.body->update(input, seconds);
 		remote.body->takeEvents();
@@ -11427,6 +11438,12 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 	p.origin = body.body.position + body.body.rotation.transform(mount.place(seatGunOrigin(seat, w, gun.yaw, gun.pitch, arm.barrel)));
 	p.position = p.origin;
 	p.velocity = body.body.velocity + direction * arm.weapon->settings().velocity;
+	// A round launched at rest (the gunship's TV missile) takes the seat
+	// camera's facing with fireInCameraDof, which the layout doesn't keep:
+	// it noses along its flight instead.
+	if (arm.weapon->settings().velocity > 0 || !w.fireInCameraDof) {
+		p.heading = direction;
+	}
 	p.settings = arm.projectile;
 	p.timeLeft = arm.projectile->timeToLive.sample(m_random);
 	p.shooter = body.object;
@@ -13221,6 +13238,7 @@ void GameWorld::fireSentry(Drone& drone, float seconds)
 	p.origin = drone.position + direction * 0.5f;
 	p.position = p.origin;
 	p.velocity = direction * drone.weapon->settings().velocity;
+	p.heading = direction;
 	p.settings = drone.projectile;
 	p.timeLeft = drone.projectile->timeToLive.sample(m_random);
 	p.shooter = drone.object;

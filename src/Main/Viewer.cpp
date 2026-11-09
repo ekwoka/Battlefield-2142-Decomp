@@ -554,8 +554,11 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 						return pads && control.compare(0, 9, "IDButton_") == 0 && pads->down(slot, std::atoi(control.c_str() + 9));
 					}
 					if (control.compare(0, 9, "IDButton_") == 0) {
+						// DirectInput's mouse buttons: 0 left, 1 right, 2 middle, 3 and
+						// 4 the side buttons (SDL counts left 1, middle 2, right 3).
+						static const int sdlButton[] = {SDL_BUTTON_LEFT, SDL_BUTTON_RIGHT, SDL_BUTTON_MIDDLE, SDL_BUTTON_X1, SDL_BUTTON_X2};
 						const int button = std::atoi(control.c_str() + 9);
-						return !pointer && (buttons & SDL_BUTTON_MASK(button + 1)) != 0;
+						return !pointer && button >= 0 && button < 5 && (buttons & SDL_BUTTON_MASK(sdlButton[button])) != 0;
 					}
 					const SDL_Scancode code = scancodeFor(control);
 					return code != SDL_SCANCODE_UNKNOWN && keys[code];

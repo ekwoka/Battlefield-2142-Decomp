@@ -2023,6 +2023,36 @@ mesh movers in the rewrite. Not followed: with 0, a projectile A
   it chases. `ProjectileSettings::Hover`, `projectileHover`,
   `hoverVelocity`, `GameWorld::hoverProjectile`
   (`Weapons_SeekBonusFuseOffsetAndHoverSettings`).
+- **The rocket's engine** (`acceleration` +0x31c, `maxSpeed` +0x324,
+  `startDelay` +0x300, `hasDirection` +0x335; the round's update
+  `0x005b3e60` from `0x005b4370`). At the launch (`0x005b3990`) the round
+  schedules event 0 startDelay seconds on (`0x005b62a0` → `0x005b2c10`,
+  at once without a delay), which turns its engine on (`+0x25f`); with
+  follow.targetActivation the lock does instead. While on and under
+  maxSpeed the engine pushes it by acceleration a second: along the
+  follow's new heading (its slot 0x40, `0x005ed120`) on a tick the
+  follow's update (`0x005ed1a0`) answers true (it turned the round, or is
+  past followTime), else along its nose with hasDirection, else not at
+  all. A magnet's follow pushes it itself (`followMagnet`) and the
+  beacon seeker has its own (`Titans.cpp`). The round keeps a nose
+  (`Projectile::heading`): the firing's direction, which Point physics
+  doesn't turn but the follow does (`0x005ecb30` turns the object's
+  matrix). A round launched at rest along a seat camera's facing
+  (fireInCameraDof, the gunship's TV missile) noses along its flight, the
+  layout keeping no camera facing. The shipped AV missiles leave at 4 m/s
+  and reach 50 within half a second of their 0.2 s delay; before this
+  the rewrite pushed only magnets, so every other rocket crawled at its
+  launch speed. `thrustProjectile`, `noseOf` (`GameWorld_RocketEngine`).
+- **The reload message** (`0x005e0fd0`, the firearm's animation slot by
+  the reload kind 0x005f4830 sets): a whole-magazine reload
+  (ammo.reloadAmount 0, kind 3) sends message 2 once, as a pulse (the
+  system's slot 0x30); only reloadAmount's round-at-a-time kinds hold it
+  (kind 4, slot 0x2c) and drop it (kinds 0 and 6, slot 0x34). No shipped
+  weapon sets reloadAmount. The reload bundles are abrupt one-shots, which
+  a queue while playing starts over (`0x008c29d0`), so the held message
+  the rewrite sent kept the reload animation at its first frame until
+  the reload ended, then played it. `PlayerCamera::tick`, the soldiers'
+  and remote soldiers' animation steps.
 
 ## Animation systems
 
@@ -14086,6 +14116,11 @@ ask whether it's done.
   0.1, `setYawFactor`, `setPitchFactor`; the map object's +0x4c..+0x6c,
   written by 0x00680f90 when not at their defaults) and `setActive` are
   kept and written back.
+- **Mouse buttons**: the maps' `IDFMouse IDButton_N` are DirectInput's
+  mouse buttons, 0 left, 1 right, 2 middle, 3 and 4 the side buttons, so
+  Controls.con's `c_PIAltFire IDFMouse IDButton_1` (zoom, alternate fire)
+  is the right button. SDL numbers them left 1, middle 2, right 3; the
+  viewer maps one to the other (`Viewer.cpp`).
 - **Joysticks and gamepads** (`src/Input/GameControllers`,
   `SdlGameControllers`): the control maps' `IDFGameController_0..7`
   (device flags 4 << n, 0x00683b30), each a DirectInput game controller in

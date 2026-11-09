@@ -1766,7 +1766,7 @@ void GameWorld::steerBeacon(Projectile& p, float seconds)
 	const ProjectileSettings& s = *p.settings;
 	const Titan* titan = titanByObject(p.lockedOn);
 	if (p.age >= s.seekDelay && titan) {
-		followStep(p, titanAim(*titan), titan->velocity, seconds, p.newTarget);
+		p.followTurned = followStep(p, titanAim(*titan), titan->velocity, seconds, p.newTarget);
 		p.newTarget = false;
 	}
 	const float speed = std::sqrt(physics::lengthSquared(p.velocity));

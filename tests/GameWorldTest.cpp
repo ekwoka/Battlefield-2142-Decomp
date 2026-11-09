@@ -5040,3 +5040,67 @@ TEST(GameWorld_OrderTagByItsMarker)
 	CHECK(same(game::GameWorld::orderTagPoint({10, 3, 20}, 4.5f), {10, 3, 20}));     // a roof 1.5 m up
 	CHECK(same(game::GameWorld::orderTagPoint({10, 3, 20}, 1.0f), {10, 3, 20}));     // the point over water
 }
+
+// The rocket's engine (0x005b3e60): the shipped eu_av fires eu_av_missile at
+// 4 m/s; startDelay (0.2 s) later the engine pushes it by acceleration
+// (100) along the wire-guided follow's heading up to maxSpeed (50). A
+// round without a follow pushes only with hasDirection.
+TEST(GameWorld_RocketEngine)
+{
+	for (const int kind : {0, 1, 2}) { // 0 the AV missile, 1 no follow, 2 no follow but hasDirection
+		Range range;
+		world::ObjectTemplate* av = range.templates.find("eu_ar_rifle");
+		auto& s = av->settings();
+		s.clear();
+		for (const auto& [k, v] : std::vector<std::pair<const char*, const char*>> {{"fire.addFireRate", "0"},
+				 {"fire.busyUntilButtonRelease", "1"}, {"ammo.magSize", "1"}, {"ammo.nrOfMags", "6"},
+				 {"ammo.reloadTime", "5.7"}, {"target.maxDistance", "9999"}, {"target.setTargetAtMaxDistance", "1"},
+				 {"target.targetSystem", "TSWireGuided"}, {"target.targetObjectTemplate", "UniqueTarget"},
+				 {"projectileTemplate", "eu_av_missile"}, {"velocity", "4"}}) {
+			s[k] = v;
+		}
+		world::ObjectTemplate* m = range.templates.create("GenericProjectile", "eu_av_missile");
+		for (const auto& [k, v] : std::vector<std::pair<const char*, const char*>> {{"follow.maxYaw", "0.45"},
+				 {"follow.maxPitch", "0.85"}, {"drag", "7"}, {"mass", "10"}, {"gravityModifier", "-0.1"},
+				 {"timeToLive", "CRD_NONE/10/0/0"}, {"damage", "125"}, {"acceleration", "100"}, {"maxSpeed", "50"},
+				 {"startDelay", "0.2"}}) {
+			m->settings()[k] = v;
+		}
+		if (kind == 0) {
+			m->settings()["seek.targetType"] = "TTUnique";
+			m->settings()["seek.trackingDelay"] = "0.01";
+			m->components().push_back("SeekClosestTargetComp");
+			m->components().push_back("DefaultFollowComp");
+		}
+		if (kind == 2) {
+			m->settings()["hasDirection"] = "1";
+		}
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		game::SoldierInput input;
+		input.fire = true;
+		input.aimPitch = 5;
+		float early = 0, late = 0;
+		for (int i = 0; i < 45; ++i) {
+			if (i == 2) {
+				input.fire = false;
+			}
+			range.world->setPlayerInput(input);
+			range.world->tick(1 / 30.0f);
+			if (range.world->projectiles().empty()) {
+				continue;
+			}
+			const float speed = std::sqrt(physics::lengthSquared(range.world->projectiles().front().velocity));
+			if (i == 4) {
+				early = speed;
+			}
+			late = speed;
+		}
+		CHECK(range.world->projectiles().size() == 1);
+		CHECK(early < 5); // the start delay
+		if (kind == 1) {
+			CHECK(late < 5); // no follow, no hasDirection: no push
+		} else {
+			CHECK(late > 45 && late < 54); // up to maxSpeed
+		}
+	}
+}

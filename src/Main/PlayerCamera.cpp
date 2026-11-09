@@ -929,6 +929,7 @@ void PlayerCamera::tick(float seconds)
 			m_fov.set(m_baseFov, m_zoomSettings.delay);
 		}
 	}
+	const bool reloadStarted = reloading && !m_reloadingWas;
 	m_reloadingWas = reloading;
 	if (me.vehicle && m_zoom.level() > 0) {
 		m_zoom.reset();
@@ -959,8 +960,13 @@ void PlayerCamera::tick(float seconds)
 	}
 	input.movementSeconds = seconds;
 	input.pose = me.stance;
-	if (reloading) {
-		input.messages |= 2;
+	// A reload sends message 2 once, as it starts (0x005e0fd0's kind 3, the
+	// whole-magazine reload of ammo.reloadAmount 0): the reload bundles are
+	// abrupt one-shots, so holding it would start them over every update.
+	// Only reloadAmount's round-at-a-time kinds hold it (4) and drop it (6);
+	// no shipped weapon sets reloadAmount.
+	if (reloadStarted) {
+		input.pulses |= 2;
 	}
 	if (m_zoom.level() > 0) {
 		input.messages |= 4;

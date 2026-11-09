@@ -158,9 +158,19 @@ struct ProjectileSettings {
 	// (1 - bonus) x distance (the angle off the round's heading in radians),
 	// not simply the nearest. The launchers' lock asks with 0 (0x005e1b30).
 	float directionBonus = 0;
-	// startDelay (the GenericProjectile's): seconds before its acceleration
-	// pushes it along its flight.
+	// The engine (0x005b3e60 from 0x005b4370): startDelay (template +0x300)
+	// seconds after the launch (0x005b3990 schedules event 0, 0x005b62a0 ->
+	// 0x005b2c10 sets the round's +0x25f; at once without a delay), or with
+	// follow.targetActivation the lock (0x005b2c10), the round is pushed by
+	// acceleration (+0x31c) a second while under maxSpeed (+0x324): along
+	// the follow's new heading (its slot 0x40, 0x005ed120) on a tick its
+	// update (0x005ed1a0) steered it or is past followTime, else, with
+	// hasDirection (+0x335), along its nose; otherwise not at all. A
+	// magnet's follow pushes it itself (followMagnet). hasFollow: a
+	// DefaultFollowComp.
 	float startDelay = 0;
+	bool hasDirection = false;
+	bool hasFollow = false;
 	// onlyDetonateOnMaterial (template +0x348, -1 none) for the first
 	// onlyDetonateOnMaterialTimeLimit seconds (+0x34c; 0: always): until
 	// then it sets off only on that material, and anything else it meets
@@ -696,6 +706,12 @@ struct Projectile {
 	physics::Vec3 origin;
 	physics::Vec3 position;
 	physics::Vec3 velocity;
+	// Its nose (a unit vector; zero for "along its flight"): the firing's
+	// direction at the launch. A Point round's physics doesn't turn it; the
+	// follow does (0x005ecb30 turns the object's matrix, not its velocity),
+	// and the engine pushes along it, so a round launched at rest (the
+	// gunship's TV missile, velocity 0) still flies off.
+	physics::Vec3 heading;
 	physics::Vec3 acceleration; // gravity, applied the next tick
 	float timeLeft = 1;
 	const ProjectileSettings* settings = nullptr;
@@ -730,6 +746,7 @@ struct Projectile {
 	bool wireKeepOnObstruction = false;
 	bool wireLost = false;
 	bool newTarget = false; // the follow's +0x94: its target set since its last turn
+	bool followTurned = false; // the follow steered it this tick (0x005ed1a0's result)
 	// SeekClosestTargetComp's relock: armed at each shot (0x005b2e70 ->
 	// setTarget(t, 1)); a candidate held since pendingSince.
 	bool relockArmed = false;
@@ -853,6 +870,13 @@ void followMagnet(Projectile& projectile, const physics::Vec3& aim, const physic
 // but never read. False when it didn't turn.
 bool followStep(Projectile& projectile, const physics::Vec3& target, const physics::Vec3& targetVelocity, float seconds,
 	bool newTarget = false);
+
+// The round's nose: its heading, else the direction of its flight (zero
+// for a round at rest without one).
+physics::Vec3 noseOf(const Projectile& projectile);
+
+// The engine's push for a tick (see ProjectileSettings::startDelay).
+void thrustProjectile(Projectile& projectile, float seconds);
 
 // Whether the follow turns the round this tick (0x005ed1a0): from its
 // start (followFrom, else trackingDelay after the launch) until

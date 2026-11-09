@@ -236,9 +236,6 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 		s.predictionFactor = number(t, "follow.predictionFactor", 0.3f); // 0x005ed3b0's default
 		s.useTargetSpeed = number(t, "follow.useTargetSpeed", 0) != 0;
 		s.magneticBehaviour = number(t, "follow.magneticBehaviour", 0) != 0;
-		s.acceleration = number(t, "acceleration", 0);
-		s.deAcceleration = number(t, "deAcceleration", 0);
-		s.maxSpeed = number(t, "maxSpeed", 0);
 		s.maxAngleLock = number(t, "seek.maxAngleLock", 360);
 		if (s.seek == ProjectileSettings::Seek::Closest) {
 			// SeekClosestTargetComp's defaults (0x005ec300): maxAngleLock
@@ -251,6 +248,11 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 		s.directionBonus = number(t, "seek.directionBonus", 0);
 	}
 	s.startDelay = number(t, "startDelay", 0);
+	s.acceleration = number(t, "acceleration", 0);
+	s.deAcceleration = number(t, "deAcceleration", 0);
+	s.maxSpeed = number(t, "maxSpeed", 0);
+	s.hasDirection = number(t, "hasDirection", 0) != 0;
+	s.hasFollow = std::find(components.begin(), components.end(), "DefaultFollowComp") != components.end();
 	// armingDelay (the GenericProjectile's +0x2fc, its ticks): the seek and
 	// the detonation component wait for it (0x005b3e60).
 	s.armingDelay = number(t, "armingDelay", 0);
@@ -1011,6 +1013,38 @@ void followMagnet(Projectile& p, const physics::Vec3& aim, const physics::Vec3& 
 	}
 }
 
+physics::Vec3 noseOf(const Projectile& p)
+{
+	if (physics::lengthSquared(p.heading) > 0.25f) {
+		return p.heading;
+	}
+	const float speed = std::sqrt(physics::lengthSquared(p.velocity));
+	return speed > 1e-4f ? p.velocity * (1 / speed) : physics::Vec3 {};
+}
+
+void thrustProjectile(Projectile& p, float seconds)
+{
+	const ProjectileSettings& s = *p.settings;
+	if (s.acceleration <= 0 || s.maxSpeed <= 0 || s.seek == ProjectileSettings::Seek::Magnet || s.seek == ProjectileSettings::Seek::Beacon || p.stuck || p.resting) {
+		return;
+	}
+	const bool engineOn = s.targetActivation ? (p.lockedOn != 0 || p.lockedBait != 0) : p.age >= s.startDelay;
+	const float speed = std::sqrt(physics::lengthSquared(p.velocity));
+	const physics::Vec3 nose = noseOf(p);
+	if (!engineOn || speed >= s.maxSpeed || physics::lengthSquared(nose) < 0.25f) {
+		return;
+	}
+	// 0x005ed1a0 answers true past followTime too (without turning).
+	const float from = p.followFrom >= 0 ? p.followFrom : s.seekDelay;
+	const bool steered = s.hasFollow && (p.followTurned || (s.followTime > 0 && p.age > from + s.followTime));
+	if (!steered && !s.hasDirection) {
+		return;
+	}
+	// Along the follow's new heading, which it keeps as the nose, or along
+	// the nose itself.
+	p.velocity = p.velocity + nose * (s.acceleration * seconds);
+}
+
 bool followActive(const Projectile& p)
 {
 	const ProjectileSettings& s = *p.settings;
@@ -1028,11 +1062,11 @@ bool followStep(Projectile& p, const physics::Vec3& target, const physics::Vec3&
 	}
 	physics::Vec3 d = aim - p.position;
 	const float length = std::sqrt(physics::lengthSquared(d));
-	if (length < 1e-4f || speed < 1e-4f) {
+	const physics::Vec3 forward = noseOf(p);
+	if (length < 1e-4f || physics::lengthSquared(forward) < 0.25f) {
 		return false;
 	}
 	d = d * (1 / length);
-	const physics::Vec3 forward = p.velocity * (1 / speed);
 	physics::Vec3 right {forward.z, 0, -forward.x}; // (0, 1, 0) x forward
 	const float r = std::sqrt(physics::lengthSquared(right));
 	right = r > 1e-5f ? right * (1 / r) : physics::Vec3 {1, 0, 0};
@@ -1064,7 +1098,8 @@ bool followStep(Projectile& p, const physics::Vec3& target, const physics::Vec3&
 	const physics::Vec3 pitched = forward * std::cos(a) + up * std::sin(a);
 	const physics::Vec3 turned = pitched * std::cos(b) + right * std::sin(b);
 	const float t = std::sqrt(physics::lengthSquared(turned));
-	p.velocity = turned * (speed / (t > 0 ? t : 1));
+	p.heading = turned * (1 / (t > 0 ? t : 1));
+	p.velocity = p.heading * speed;
 	return true;
 }
 

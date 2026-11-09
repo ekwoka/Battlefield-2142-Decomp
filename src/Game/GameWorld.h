@@ -2854,6 +2854,7 @@ private:
 		double kitTimeStamp = -1e9;
 		float lastYaw = 0;
 		bool fired = false;
+		bool reloadingWas = false; // sends the reload message as one starts
 		// The jump state the animation's up value comes from (soldier
 		// +0x2e8 / +0x2e9, 0x005eef80).
 		anim::SoldierJumpAnimation jumpAnimation;
@@ -3341,6 +3342,7 @@ private:
 		std::vector<anim::Matrix> worldPose;
 		float lastYaw = 0;
 		bool started = false;
+		bool reloadingWas = false; // sends the reload message as one starts
 		// The weapon run from the fire state: its settings, rounds in the
 		// magazine, the time to the next round, the reload left, the last
 		// press count, the burst's rounds still to go.

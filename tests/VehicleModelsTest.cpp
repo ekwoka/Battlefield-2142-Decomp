@@ -105,6 +105,7 @@ struct Garage {
 	}
 
 	uint32_t groundMaterial = 0; // the terrain's material under every point
+	float groundHeight = 0;      // start's ground, which a test may move after
 
 	// The vehicle at `at` facing +z, the world started and settled, the
 	// player spawned beside it.
@@ -119,11 +120,12 @@ struct Garage {
 		made->setTeam(2);
 		world = std::make_unique<game::GameWorld>(templates, objects);
 		const uint32_t material = groundMaterial;
+		groundHeight = ground;
 		world->enablePhysics(files, collisionTemplates,
-			{[ground](float, float) { return ground; },
-				[ground](float, float, physics::Vec3& normal) {
+			{[this](float, float) { return groundHeight; },
+				[this](float, float, physics::Vec3& normal) {
 					normal = {0, 1, 0};
-					return ground;
+					return groundHeight;
 				},
 				[material](float, float) { return material; }},
 			&materials);
@@ -1018,6 +1020,9 @@ TEST(Vehicles_GunshipMissileCamera)
 	render::PostEffects effects;
 	host::roundCameraEffects(*g.world, me, effects);
 	CHECK(!effects.tv);
+	// High above the ground, as a gunship flies: the missile, launched at
+	// rest, dives under its engine (acceleration 35) where the camera looks.
+	g.groundHeight = -500;
 	input = {};
 	input.fire = true;
 	for (int i = 0; i < 4 && !g.world->projectileCamera(me, camera); ++i) {
