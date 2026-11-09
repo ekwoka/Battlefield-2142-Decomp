@@ -33,6 +33,7 @@ layout(location = 8) in float inObjectY;
 layout(location = 9) in vec3 inBasisX; // the normal map's frame in the world (mesh.vert)
 layout(location = 10) in vec3 inBasisY;
 layout(location = 11) in vec3 inBasisZ;
+layout(location = 12) in float inTrunkSun;
 
 layout(set = 2, binding = 0) uniform sampler2D diffuseMap;
 layout(set = 2, binding = 1) uniform sampler2D lightMap;
@@ -217,6 +218,13 @@ void main()
 	}
 	if (material.x > 0.0 && albedo.a < material.x) {
 		discard;
+	}
+	if ((layers & 256) != 0) {
+		// RaShaderTrunkSTMBase/Detail and their Shadowed wrappers: vertex
+		// diffuse, tree ambient and sun; shadows affect only the sun.
+		vec3 treeLight = 2.0 * (skyColor.rgb + sunColor.rgb * inTrunkSun * shadowFactor(inWorldPosition, true));
+		outColor = vec4(mix(albedo.rgb * treeLight, fogColor.rgb, fog), fade);
+		return;
 	}
 	int kind = int(eye.w + 0.5);
 	float gloss = kind == 4 ? albedo.a : specular.w;

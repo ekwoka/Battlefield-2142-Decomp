@@ -7963,7 +7963,16 @@ second.
   pixels; the row centred), white, or the squad's colour for a squad
   member; not when glued to the edge.
 - **The players' icons** (the selectable pass `0x1016a950`, same team,
-  selectable, the first occupant of a vehicle `0x100f33c0`): `+0x60`
+  selectable, the first occupant of a vehicle `0x100f33c0`): setup initially
+  clears show-icon bit `0x10` (`0x100f3e70`), then player-tag refresh
+  `0x100f0840` sets it for matching local/remote team values and clears it
+  for opposing teams (`0x100f0954` / `0x100f0964`; called from `0x100f3917`).
+  Thus, after refresh, the ordinary friendly player's `+0x60` icon can pass
+  the icon-bit gate when the manager's shown byte is true; this pass is
+  independent of the name row. When that byte is false, this pass
+  still admits tags whose flags contain `0x20000` and `0x4000` and whose `+0xc0`
+  team-colour byte is nonzero; `0x100f0310` sets those flags for an active
+  radio/help response. The renderer's later gates still apply. `+0x60`
   (`0x100f0310`) ICObject + 10 for a soldier or vehicle, + 25 for the
   commander, + 25 + the squad for a squad leader (the Objects atlas'
   marker, star and numbered circles), in the tag's colour, at the icon
@@ -8642,10 +8651,12 @@ Vehicles take damage through their armour settings:
 - **Critical damage:** below `armor.criticalDamage` a vehicle burns down at
   `hpLostWhileCriticalDamage` a second (FAV: 18 below 151, out in 5.6 s from
   100).
-- **Water and rolling:** in water deeper than `armor.waterLevel` over its
-  centre for longer than `waterDamageDelay`, a vehicle loses
-  `hpLostWhileInWater` a second (`hpLostWhileInDeepWater` past
-  `deepWaterLevel`). Upside down, it loses `hpLostWhileUpSideDown`.
+- **Water and rolling:** water depth is measured from the vehicle origin to
+  the water plane. The signed `armor.waterLevel` and `armor.deepWaterLevel`
+  offsets are compared by magnitude, so an origin above the water plane does
+  not trigger damage; once the corresponding depth is exceeded, the vehicle
+  loses `hpLostWhileInWater` or `hpLostWhileInDeepWater` on its configured
+  timer. Upside down, it loses `hpLostWhileUpSideDown`.
 - **Destruction:** a destroyed vehicle explodes with `armor.explosion*`
   (FAV: 300 over 6 m), kills everyone aboard, and stays as a wreck for
   `timeToStayAsWreck`. Its spawner then puts out a new one.
@@ -9694,8 +9705,11 @@ while they have the keys. `src/Main/HudMenusChat`:
   the big map (menu state 2, `0x0074fd90`: `MapShow` at full size) while
   alive; c_GIMapZoom (N) steps the minimap's zoom 0, 1, 2 (`0x0079a040` /
   `0x00799fb0`, not on the spawn screen) and takes tutorial 0x3d back;
-  c_GI3dMap (left Alt) flips the 3D name tags and icons (the
-  NametagManager's `+0x465`, slots `0x64` / `0x68`).
+  c_GI3dMap (left Alt) is annotated as toggling the 3D tag manager's
+  shown byte (`+0x465`, getter/setter slots `0x64` / `0x68`). The retail
+  getter's icon-pass behavior is verified; its input call site was not
+  independently matched in the 9 November investigation. Name rendering
+  does not check this byte in the inspected renderer.
 
 ### HUD nodes: transform lists, effects, markers and the map menus
 

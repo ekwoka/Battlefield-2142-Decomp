@@ -1210,6 +1210,7 @@ public:
 	std::vector<std::string> playingAnimations(uint32_t object) const;
 	// The animation an object plays (a .baf path), or empty.
 	std::string animationFor(uint32_t object) const;
+	float animationDurationFor(uint32_t object) const;
 	// The vehicle the player drives (its object), or null on foot.
 	world::Object* playerVehicle() const;
 	const Vehicle* playerVehicleState() const;
@@ -3568,6 +3569,7 @@ private:
 		// The SupplyObject's template when it is a child of the object (a
 		// deployed hub's Unl_Hub_*_Supply); null: the object's own.
 		const world::ObjectTemplate* settings = nullptr;
+		bool commanderDrop = false; // a supply crate created by the commander tool
 		bool carried = false; // on a Titan (its supply point): moved with it, not lowered to the ground
 		// teamFromClosestCP (SupplyObject +0x2e0; the helipads' and
 		// airstrips' pads): each update its team is the nearest control

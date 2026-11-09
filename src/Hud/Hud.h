@@ -198,6 +198,8 @@ public:
 		float worldSize = 0;
 		std::string label;    // readable label beside a deployment spawn marker
 	};
+	// BF2142.exe 0x0078e95d: spawn groups use a 16 x 16 HUD-unit icon.
+	static constexpr float kSpawnMarkerSize = 16.0f;
 	void setMap(const std::string& texture, float originX, float originZ, float width, float depth);
 	void setMapFocus(float x, float z) { m_mapFocus[0] = x; m_mapFocus[1] = z; }
 	// The zoom (0x00779600: an index into the zoom levels, 1 at start), the

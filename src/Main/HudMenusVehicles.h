@@ -801,7 +801,7 @@ float reloadSweep(float reloadLeft, float reloadTime, MapRelation relation);
 //     without one).
 struct RadarMarker {
 	std::string texture;
-	float x = 0, z = 0, size = 16;
+	float x = 0, z = 0, size = 16, yaw = 0;
 };
 std::vector<RadarMarker> radarMarkers(const host::HudWorld& world, game::GameWorld& round, const std::vector<int>& revealed);
 

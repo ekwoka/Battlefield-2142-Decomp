@@ -76,6 +76,9 @@ public:
 	void setLocalizer(std::function<std::string(const std::string&)> localize) { m_localize = std::move(localize); }
 	// Messages the menu shows (HUD_HUD_SQUAD_*, text ids).
 	std::function<void(const std::string&)> onMessage;
+	// Commander application/resignation is routed through the same commands
+	// as the rest of the HUD, including a joined server's event path.
+	std::function<void(bool resign)> onCommanderAction;
 
 	// Each frame: the lists and the variables (SquadCreateShow,
 	// SquadCreateLockedShow, SquadCreateTagString, NrOfSquads,

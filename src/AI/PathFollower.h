@@ -42,6 +42,7 @@
 #include "NavMesh.h"
 
 #include <functional>
+#include <optional>
 #include <vector>
 
 namespace dice::hfe::ai {
@@ -259,6 +260,12 @@ bool sidestepSteer(SidestepState& state, const SidestepSense& sense, Vec3& direc
 // (0x100e1f20, 0x100e3c00). The tank's and the mech's machines are the
 // car's with differences (see driveControl). FloatingTankMoveTo has no
 // machine: floatingTankControl.
+// Find a vehicle-mesh approach to an objective when its direct goal is off
+// the mesh. The optional authored position is tried first. Every returned
+// point is checked with the same follower used by drivers.
+std::optional<Vec3> vehicleApproachPoint(const NavMesh& mesh, const Vec3& from, const Vec3& objective,
+	const Vec3* authored, const FollowerSettings& settings, const std::function<bool(const Vec3&)>& acceptable = {});
+
 enum class Driver { Car, Tank, Mech };
 
 struct DriveSettings {

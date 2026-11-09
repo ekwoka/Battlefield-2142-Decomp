@@ -984,6 +984,7 @@ public:
 	// (for tests).
 	void updateSquadNow(int team, int id);
 private:
+	friend struct BotManagerTestAccess;
 	// An enemy a bot knows of (the sensing agent's memory item; the agent's
 	// constructor 0x100ecee0, its memory cleared on the bot's reset 0x100ed040).
 	struct Known {
@@ -1083,10 +1084,18 @@ private:
 		SoldierPose pose = SoldierPose::Stand;
 		// Goal (MoveTo).
 		int goalOrder = -1;       // the area the goal lies in, -1 for none
+		int goalControlPoint = -1;
 		physics::Vec3 goal;
 		bool hasGoal = false;
 		float goalAt = -1e9f;
 		bool goalReached = false;
+		bool vehicleApproach = false; // off-mesh objective: leave the vehicle at its reachable approach
+		physics::Vec3 approachInfantryGoal;
+		uint32_t abandonedVehicle = 0;
+		float abandonedAt = -1e9f;
+		uint32_t approachExitRequested = 0;
+		std::map<int, float> rejectedVehiclePoints;
+
 		physics::Vec3 orderPosition;
 		// Change.
 		uint32_t vehicleTarget = 0;

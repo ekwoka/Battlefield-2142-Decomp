@@ -435,6 +435,7 @@ bool GameWorld::commanderAction(int team, CommanderAbility ability, float x, flo
 		dropped.team = team;
 		dropped.storage = storage;
 		dropped.timeLeft = commanderSettings.supplyDropNumSecsToLive;
+		dropped.commanderDrop = true;
 		m_crates.push_back(std::move(dropped));
 		break;
 	}
@@ -609,7 +610,9 @@ std::vector<uint32_t> GameWorld::supplyCrates() const
 {
 	std::vector<uint32_t> objects;
 	for (const Crate& crate : m_crates) {
-		objects.push_back(crate.object);
+		if (crate.commanderDrop) {
+			objects.push_back(crate.object);
+		}
 	}
 	return objects;
 }

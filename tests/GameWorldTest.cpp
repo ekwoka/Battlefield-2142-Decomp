@@ -1,8 +1,13 @@
 // Round simulation: control points and object spawners.
 #include "Console/Console.h"
+#include "Console/ConsoleBinding.h"
 #include "Game/Bots.h"
 #include "Animation/FirstPerson.h"
+#include "Animation/AnimationSystem.h"
 #include "Game/GameWorld.h"
+#include "Game/GameLogic.h"
+#include "Game/ScriptBridge.h"
+#include "Geometry/GeometryTemplateManager.h"
 #include "IO/File/FileManager.h"
 #include "Main/DeploymentTeam.h"
 #include "Physics/CollisionTemplateManager.h"
@@ -11,12 +16,16 @@
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
+#include "World/TemplateFiles.h"
 #include "World/WorldConsole.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <fstream>
 #include <memory>
+#include <sstream>
 
 using namespace dice::hfe;
 
@@ -82,6 +91,154 @@ TEST(GameWorld_SpawnerSpawnsForItsControlPointsTeam)
 		world.tick(1 / 30.0f);
 	}
 	CHECK(level.count("tank_us") == 1);
+}
+
+TEST(GameWorld_ControlPointFlagOwnershipHoistVisibilityAndRestart)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "ControlPoint");
+	templates.registerType(2, "AnimatedBundle");
+	for (const char* name : {"flag_neutral", "flag_Pac", "flag_EU"}) {
+		auto* flag = templates.create("AnimatedBundle", name);
+		flag->settings()["skeleton"] = "Objects/Common/Flags/flag_setup.ske";
+		flag->settings()["animationSystem1P"] = "Objects/Common/Flags/AnimationSystem.inc";
+	}
+	auto* cp = templates.create("ControlPoint", "cp_flags");
+	cp->settings()["controlPointId"] = "4";
+	cp->settings()["team"] = "2";
+	auto* pointObject = objects.create(cp, {10, 0, 20});
+	game::GameWorld round(templates, objects);
+	round.startRound();
+	CHECK(round.controlPoints().size() == 1);
+	if (round.controlPoints().empty()) return;
+	const auto firstIds = std::array<uint32_t, 3> {round.controlPoints()[0].flagObjects[0],
+		round.controlPoints()[0].flagObjects[1], round.controlPoints()[0].flagObjects[2]};
+	anim::AnimationSystems systems(nullptr);
+	anim::AnimationSystemTemplate flagSystem("Objects/Common/Flags/AnimationSystem.inc");
+	const size_t idle = flagSystem.addClip("Objects/Common/Flags/Animation/flag_idle.baf");
+	flagSystem.clips()[idle].length = 18.0f;
+	round.setAnimationSystems(&systems, [&flagSystem](const std::string&) { return &flagSystem; });
+	CHECK(firstIds[0] && firstIds[1] && firstIds[2]);
+	CHECK(objects.find(firstIds[2]) && !objects.find(firstIds[2])->hidden());
+	CHECK(objects.find(firstIds[0])->hidden() && objects.find(firstIds[1])->hidden());
+	CHECK(std::fabs(objects.find(firstIds[2])->position().y - 2.7f) < 1e-4f);
+	for (uint32_t id : firstIds) {
+		CHECK(round.animationFor(id) == "Objects/Common/Flags/Animation/flag_idle.baf");
+		CHECK(std::fabs(round.animationDurationFor(id) - 18.0f) < 1e-5f);
+	}
+	game::GameLogic logic;
+	game::ScriptBridge bridge(round, logic, {}, "bf2142");
+	bridge.objectCall(pointObject->id(), "cp_setParam", {game::ScriptValue::string("takeOverChangePerSecond"),
+		game::ScriptValue::number(-0.5)});
+	for (int i = 0; i < 60; ++i) round.tick(1.0f / 30.0f);
+	round.tick(1.0f / 30.0f); // placement observes the just-completed hoist on the following tick
+	CHECK(std::fabs(round.controlPoints()[0].flagHeight) < 1e-5f);
+	CHECK(std::fabs(objects.find(firstIds[2])->position().y - 0.6f) < 1e-4f);
+	bridge.objectCall(pointObject->id(), "cp_setParam", {game::ScriptValue::string("flag"), game::ScriptValue::integer(1)});
+	bridge.objectCall(pointObject->id(), "cp_setParam", {game::ScriptValue::string("team"), game::ScriptValue::integer(1)});
+	bridge.objectCall(pointObject->id(), "cp_setParam", {game::ScriptValue::string("takeOverChangePerSecond"),
+		game::ScriptValue::number(0.5)});
+	for (int i = 0; i < 60; ++i) round.tick(1.0f / 30.0f);
+	round.tick(1.0f / 30.0f);
+	CHECK(round.controlPoints()[0].team == 1 && round.controlPoints()[0].flag == 1);
+	CHECK(!objects.find(firstIds[1])->hidden() && objects.find(firstIds[2])->hidden());
+	cp->settings()["isVisible"] = "0";
+	round.tick(1.0f / 30.0f);
+	CHECK(objects.find(firstIds[1])->hidden());
+	round.startRound();
+	CHECK(objects.find(firstIds[0])->hidden() && objects.find(firstIds[1])->hidden() && objects.find(firstIds[2])->hidden());
+	CHECK(round.controlPoints()[0].flagObjects[1] != firstIds[1]);
+	CHECK(round.animationFor(firstIds[1]).empty());
+}
+
+TEST(GameWorld_BelgradeRemasterFlagsUseTheShippedPoleHeight)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/Project_Remaster_v17_Final");
+	files.addSearchPath("mods/bf2142");
+	files.setMountingAllowed(true);
+	Console console(&files);
+	bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+		[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+	std::string out;
+	CHECK(console.run("ServerArchives.con", {}, out));
+	CHECK(files.mountArchive("mods/Project_Remaster_v17_Final/Levels/Belgrade/server.zip", "Levels/Belgrade/"));
+	files.setMountingAllowed(false);
+
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	geom::GeometryTemplateManager geometries;
+	physics::CollisionTemplateManager collisionTemplates;
+	physics::MaterialManager materials;
+	world::registerWorldConsoleMethods(console, templates, objects);
+	geom::registerGeometryConsoleMethods(console, geometries);
+	templates.setCurrentFileProvider([&console] { return console.currentFile(); });
+	physics::registerCollisionConsoleMethods(console, collisionTemplates);
+	physics::registerMaterialConsoleMethods(console, materials);
+	std::vector<std::string> untyped;
+	std::ifstream table(std::string(BF2142_SOURCE_DIR) + "/symbols/BF2142.exe.console.csv");
+	std::string line;
+	std::getline(table, line);
+	while (std::getline(table, line)) {
+		std::vector<std::string> columns;
+		std::stringstream row(line);
+		for (std::string column; std::getline(row, column, ',');) columns.push_back(column);
+		if (columns.size() >= 6 && columns[0] == "ObjectTemplate" && !console.hasMethod("ObjectTemplate." + columns[1])
+			&& (columns[2] == "property" || (columns[2] == "method" && columns[4] == "1" && columns[5] == "1"))) {
+			untyped.push_back(columns[1]);
+		}
+	}
+	world::registerUntypedTemplateProperties(console, templates, untyped);
+	templates.setLoading(true);
+	CHECK(world::loadObjectTemplates(console, files, "Objects/", false) > 0);
+	templates.setLoading(false);
+	CHECK(console.run("Levels/Belgrade/GameModes/gpm_sp/16/GamePlayObjects.con", {"client"}, out));
+	auto* pacPoint = templates.find("CPNAME_BG_SP16_Pond");
+	auto* neutralPoint = templates.find("CPNAME_BG_SP16_Ruin");
+	auto* pole = templates.find("flagpole");
+	CHECK(pacPoint && neutralPoint && pole);
+	if (!pacPoint || !neutralPoint || !pole) return;
+	CHECK(pacPoint->settings().at("team") == "1");
+	CHECK(pole->settings().find("collisionMesh") == pole->settings().end());
+	CHECK(pole->settings().at("setCollisionMesh") == "flagpole");
+	const auto poleChild = std::find_if(pacPoint->children().begin(), pacPoint->children().end(),
+		[](const world::ChildTemplate& child) { return child.name == "flagpole"; });
+	CHECK(poleChild != pacPoint->children().end());
+	if (poleChild == pacPoint->children().end()) return;
+
+	auto* pacObject = objects.create(pacPoint, {55.782f, 46.200f, 206.065f});
+	auto* neutralObject = objects.create(neutralPoint, {-34.929f, 42.429f, 143.808f});
+	game::GameWorld round(templates, objects);
+	round.enablePhysics(files, collisionTemplates, {[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
+		normal = {0, 1, 0};
+		return 0.0f;
+	}}, &materials);
+	round.startRound();
+	CHECK(round.controlPoints().size() == 2);
+	const auto findPoint = [&round](int id) -> const game::ControlPoint* {
+		for (const auto& point : round.controlPoints()) if (point.id == id) return &point;
+		return nullptr;
+	};
+	const auto* pac = findPoint(603);
+	const auto* neutral = findPoint(602);
+	CHECK(pac && neutral);
+	if (!pac || !neutral) return;
+	CHECK(pac->object == pacObject && neutral->object == neutralObject);
+	CHECK(pac->team == 1 && pac->flag == 1 && std::fabs(pac->flagHeight - 1.0f) < 1e-5f);
+	CHECK(pac->poleHeight > 6.4f && pac->poleHeight < 6.6f);
+	const world::Object* pacFlag = objects.find(pac->flagObjects[1]);
+	CHECK(pacFlag != nullptr);
+	if (!pacFlag) return;
+	CHECK(std::fabs(pacFlag->position().y - (pacObject->position().y + 0.9f * pac->poleHeight)) < 1e-4f);
+	CHECK(neutral->team == 0 && neutral->flag == 0 && std::fabs(neutral->flagHeight) < 1e-5f);
+	const world::Object* neutralFlag = objects.find(neutral->flagObjects[0]);
+	CHECK(neutralFlag != nullptr);
+	if (!neutralFlag) return;
+	CHECK(std::fabs(neutralFlag->position().y - (neutralObject->position().y + 0.2f * neutral->poleHeight)) < 1e-4f);
 }
 
 TEST(GameWorld_DestroyedObjectsRespawnAfterTheDelay)
@@ -3913,6 +4070,8 @@ TEST(GameWorld_StaticSupplyTakesTheClosestPointsTeam)
 		}
 	}
 	CHECK(made != nullptr);
+	// A permanent resupply pad is not a commander-dropped crate on the map.
+	CHECK(range.world->supplyCrates().empty());
 	for (int i = 0; i < 10; ++i) {
 		range.world->tick(1 / 30.0f);
 	}
@@ -4388,20 +4547,25 @@ TEST(GameWorld_WaterDamageDelays)
 	makeMobile(*jeep, "jeep_mesh");
 	jeep->children().push_back({"jeep_engine", {}, {}});
 	jeep->settings()["armor.maxHitPoints"] = "100";
-	jeep->settings()["armor.waterLevel"] = "0.5";
-	jeep->settings()["armor.deepWaterLevel"] = "1.5";
+	jeep->settings()["armor.waterLevel"] = "-0.5";
+	jeep->settings()["armor.deepWaterLevel"] = "-1.5";
 	jeep->settings()["armor.hpLostWhileInWater"] = "5";
 	jeep->settings()["armor.hpLostWhileInDeepWater"] = "20";
 	jeep->settings()["armor.deepWaterDamageDelay"] = "0.5";
 	const uint32_t car = range.objects.create(jeep, {0, 1, 3})->id();
 	range.world->startRound();
 	range.world->tick(1 / 30.0f);
-	range.world->setWaterLevel(range.objects.find(car)->position().y + 2);
 	const auto run = [&](float seconds) {
 		for (int i = 0; i < static_cast<int>(seconds * 30 + 0.5f); ++i) {
 			range.world->tick(1 / 30.0f);
 		}
 	};
+	// Shipped templates encode these depths as negative offsets. A dry vehicle
+	// 0.56 m above the water must not take the immediate deep-water damage.
+	range.world->setWaterLevel(range.objects.find(car)->position().y - 0.56f);
+	run(2.1f);
+	CHECK(range.world->hitPoints(car) == 100);
+	range.world->setWaterLevel(range.objects.find(car)->position().y + 2);
 	run(0.4f);
 	CHECK(range.world->hitPoints(car) == 100);
 	run(0.2f); // the deep timer's 0.5 s

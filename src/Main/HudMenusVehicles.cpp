@@ -1290,7 +1290,7 @@ std::vector<RadarMarker> radarMarkers(const host::HudWorld& world, game::GameWor
 				}
 			}
 		}
-		RadarMarker m {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", enemy.position.x, enemy.position.z, 16};
+		RadarMarker m {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", enemy.position.x, enemy.position.z, 16, enemy.yaw};
 		const world::Object* kit = enemy.kit ? round.objects().find(enemy.kit) : nullptr;
 		if (kit && kit->objectTemplate()) {
 			const MapIcons& icons = mapIcons(*kit->objectTemplate());
@@ -1306,7 +1306,7 @@ std::vector<RadarMarker> radarMarkers(const host::HudWorld& world, game::GameWor
 	}
 	for (const uint32_t id : world.spottedVehicles()) {
 		if (const world::Object* vehicle = round.objects().find(id)) {
-			RadarMarker m {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", vehicle->position().x, vehicle->position().z, 16};
+			RadarMarker m {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", vehicle->position().x, vehicle->position().z, 16, vehicle->rotation().x};
 			if (vehicle->objectTemplate()) {
 				const MapIcons& icons = mapIcons(*vehicle->objectTemplate());
 				if (!icons.icon.empty()) {

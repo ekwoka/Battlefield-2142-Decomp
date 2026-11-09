@@ -5074,3 +5074,48 @@ TEST(Vehicles_BotFiresWhileClosingIn)
 		CHECK(walkingRounds > 0);
 	}
 }
+
+// A round's motor (0x005b3e60 from 0x005b4370; started at the launch or
+// startDelay after it, 0x005b3990 -> 0x005b2c10): the installed walkers'
+// rockets leave at the firearm's velocity 35 and gain acceleration 100 along
+// their heading up to maxSpeed 125. Fired from the driver's seat with
+// PIAltFire.
+TEST(Vehicles_WalkerRocketsAccelerateToMaxSpeed)
+{
+	if (!gameDir()) return;
+	constexpr float dt = 1 / 30.0f;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* walker : {"us_heavy_mech", "as_heavy_mech"}) {
+			Garage g(gameDir(), mod);
+			CHECK(g.loaded && g.templates.find(walker));
+			if (!g.loaded || !g.templates.find(walker)) continue;
+			const uint32_t mech = g.start(walker, {0, 4, 8});
+			g.animate();
+			CHECK(g.enter(mech));
+			game::SoldierInput fire;
+			fire.aimPitch = 10;
+			g.drive(fire, 1);
+			fire.altFire = true;
+			const std::string rocket = std::string(walker) + "_dumrockets_projectile";
+			float first = 0, half = 0, top = 0;
+			int age = -1;
+			for (int i = 0; i < 150 && age < 45; ++i) {
+				g.world->setPlayerInput(fire);
+				g.world->tick(dt);
+				for (const game::Projectile& p : g.world->projectiles()) {
+					if (p.shooter != mech || !p.alive || !p.settings || p.settings->name != rocket) continue;
+					const float speed = std::sqrt(physics::lengthSquared(p.velocity));
+					if (++age == 0) first = speed;
+					if (age == 15) half = speed;
+					top = std::max(top, speed);
+					break; // the oldest one
+				}
+			}
+			std::fprintf(stderr, "  %s %s rocket: %.1f m/s at the muzzle, %.1f after 0.5 s, %.1f at most\n", mod, walker, first, half, top);
+			CHECK(age >= 45);
+			CHECK(first > 34 && first < 40);
+			CHECK(half > 80 && half < 90); // 35 + 100 x 0.5
+			CHECK(top >= 125 && top < 128.4f); // the last push starts just under maxSpeed
+		}
+	}
+}

@@ -27,7 +27,7 @@ constexpr int kSquadSize = 6;
 // The squad list's cells (0x007a5f10): 1 the id, 5 the name, 6 "members/6",
 // 10 join or leave; 13 and 14 the row's id and kind, not drawn.
 constexpr int kCellId = 13, kCellKind = 14;
-constexpr int kRowSquad = 2, kRowMember = 4;
+constexpr int kRowCommander = 1, kRowSquad = 2, kRowMember = 4;
 constexpr int kColumnJoin = 10, kColumnLock = 8;
 
 } // namespace
@@ -66,6 +66,10 @@ int SquadMenu::localPlayer() const { return m_remote.world ? m_remote.world->loc
 
 void SquadMenu::bind(Console& console)
 {
+	onCommanderAction = [&console](bool resign) {
+		std::string output;
+		console.execute(resign ? "Commander.commanderResign" : "Commander.commanderApply", output, ConsoleAccess::Anyone);
+	};
 	const auto local = [this] { return localPlayer(); };
 	bindMethod(console, "SquadMenu.setSquadCreateSelect", ConsoleAccess::Anyone,
 		[this, local](bool select) { setCreateSelect(local(), select); });
@@ -228,6 +232,12 @@ void SquadMenu::clickSquadList(int player, int row, int column)
 	const int id = std::atoi(m_hud.listCell(5, row, kCellId).c_str());
 	const int kind = std::atoi(m_hud.listCell(5, row, kCellKind).c_str());
 	game::GameWorld::PlayerInfo me;
+	if (kind == kRowCommander && column == kColumnJoin && playerInfo(player, me)) {
+		if (onCommanderAction && (me.commander || m_hud.listCell(5, row, kCellId) == "-1")) {
+			onCommanderAction(me.commander);
+		}
+		return;
+	}
 	if (kind != kRowSquad || !playerInfo(player, me)) {
 		return; // selecting a member or a squad
 	}
@@ -354,6 +364,23 @@ void SquadMenu::update(int player)
 	}
 	// The squads, each followed by its members (the leader first).
 	std::vector<std::vector<std::string>> rows;
+	if (m_round.commanderEnabled()) {
+		const game::GameWorld::PlayerInfo* commander = nullptr;
+		for (const auto& other : players) {
+			if (other.team == me.team && other.commander) {
+				commander = &other;
+				break;
+			}
+		}
+		std::vector<std::string> row(15);
+		row[5] = text("HUD_TEXT_MENU_SPAWN_SQUAD_COMMANDER");
+		row[6] = commander ? commander->name : "";
+		row[kColumnJoin] = !commander ? text("HUD_TEXT_MENU_SPAWN_SQUAD_APPLY")
+			: me.commander ? text("HUD_TEXT_MENU_SPAWN_SQUAD_LEAVE") : "";
+		row[kCellId] = commander ? std::to_string(commander->id) : "-1";
+		row[kCellKind] = std::to_string(kRowCommander);
+		rows.push_back(std::move(row));
+	}
 	for (auto& [squad, members] : squads) {
 		std::stable_sort(members.begin(), members.end(), [](const auto* a, const auto* b) { return a->squadLeader > b->squadLeader; });
 		std::vector<std::string> row(15);

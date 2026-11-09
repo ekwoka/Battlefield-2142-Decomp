@@ -237,9 +237,6 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 		s.predictionFactor = number(t, "follow.predictionFactor", 0.3f); // 0x005ed3b0's default
 		s.useTargetSpeed = number(t, "follow.useTargetSpeed", 0) != 0;
 		s.magneticBehaviour = number(t, "follow.magneticBehaviour", 0) != 0;
-		s.acceleration = number(t, "acceleration", 0);
-		s.deAcceleration = number(t, "deAcceleration", 0);
-		s.maxSpeed = number(t, "maxSpeed", 0);
 		s.maxAngleLock = number(t, "seek.maxAngleLock", 360);
 		if (s.seek == ProjectileSettings::Seek::Closest) {
 			// SeekClosestTargetComp's defaults (0x005ec300): maxAngleLock
@@ -251,6 +248,12 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 		s.ignoreFriendly = number(t, "seek.ignoreFriendly", 1) != 0;
 		s.directionBonus = number(t, "seek.directionBonus", 0);
 	}
+	// The GenericProjectile's own (+0x31c..+0x324, +0x335): rounds without a
+	// seek have a motor too (Unl_AV_Rifle_Projectile, eu_rifle_missile).
+	s.acceleration = number(t, "acceleration", 0);
+	s.deAcceleration = number(t, "deAcceleration", 0);
+	s.maxSpeed = number(t, "maxSpeed", 0);
+	s.hasDirection = number(t, "hasDirection", 1) != 0;
 	s.startDelay = number(t, "startDelay", 0);
 	// armingDelay (the GenericProjectile's +0x2fc, its ticks): the seek and
 	// the detonation component wait for it (0x005b3e60).

@@ -7,6 +7,7 @@
 #include "IO/Localization/Localization.h"
 #include "Main/DeploymentLifecycle.h"
 #include "Main/HudMenusVehicles.h"
+#include "Main/MapPlayerMarker.h"
 #include "TestMain.h"
 
 #include <algorithm>
@@ -373,7 +374,7 @@ TEST(Hud_MapAndMarkers)
 	// A 1024 m level centred on the origin; a clickable spawn point at its
 	// north-east quarter.
 	manager.setMap("Levels/x/Hud/Minimap/ingameMap.dds", -512, -512, 1024, 1024);
-	hud::HudManager::MapMarker spawn {"spawn.dds", 256, 256, 32};
+	hud::HudManager::MapMarker spawn {"spawn.dds", 256, 256, hud::HudManager::kSpawnMarkerSize};
 	spawn.id = 7;
 	manager.setMapMarkers({spawn});
 	manager.set("MapFullSize", 1);
@@ -381,9 +382,9 @@ TEST(Hud_MapAndMarkers)
 	CHECK(quads.size() == 2);
 	if (quads.size() == 2) {
 		CHECK(quads[0].x0 == 278 && quads[0].y0 == 29 && quads[0].x1 == 790 && quads[0].u1 == 1);
-		// 3/4 across, 1/4 down the big map, 32 pixels.
-		CHECK(quads[1].x0 == 278 + 384 - 16 && quads[1].x1 == 278 + 384 + 16);
-		CHECK(quads[1].y0 == 29 + 128 - 16 && quads[1].y1 == 29 + 128 + 16);
+		// 3/4 across, 1/4 down the big map, 16 HUD units.
+		CHECK(quads[1].x0 == 278 + 384 - 8 && quads[1].x1 == 278 + 384 + 8);
+		CHECK(quads[1].y0 == 29 + 128 - 8 && quads[1].y1 == 29 + 128 + 8);
 	}
 	CHECK(manager.mapMarkerAt(278 + 384, 29 + 128) == 7 && manager.mapMarkerAt(300, 400) == -1);
 	// The minimap eases to its zoom (level 1.5 on foot: 2.3^1.5) round the
@@ -629,6 +630,33 @@ TEST(Hud_MapMarkerOffset)
 		CHECK(b.pivot[0] == (a.x0 + a.x1) / 2 && b.pivot[1] == (a.y0 + a.y1) / 2);
 		CHECK(b.rotation == 90);
 	}
+}
+
+TEST(Hud_PlayerMapHeading)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {"hudBuilder.createMapNode Global Minimap", "hudBuilder.setMaxiPos -300/-300",
+			 "hudBuilder.setMaxiSize 600/600", "hudBuilder.setMiniPos 245/-291", "hudBuilder.setMiniSize 146/146",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1"}) {
+		console.execute(line, out);
+	}
+	manager.setMap("map.dds", -512, -512, 1024, 1024);
+	game::GameWorld::PlayerInfo player;
+	player.yaw = 90;
+	auto east = menu::playerMapMarker(player);
+	player.yaw = -90;
+	auto west = menu::playerMapMarker(player);
+	manager.setMapMarkers({east, west});
+	manager.set("MapFullSize", 1);
+	std::vector<float> rotations;
+	for (const auto& quad : manager.frame(0)) {
+		if (quad.texture.find("mini_Soldier.dds") != std::string::npos) rotations.push_back(quad.rotation);
+	}
+	CHECK(rotations.size() == 2);
+	if (rotations.size() == 2) CHECK(rotations[0] == 90 && rotations[1] == -90);
 }
 
 // The commander's mini-map tab (Bf2MiniMenuMapNode, 0x007e8a90): the

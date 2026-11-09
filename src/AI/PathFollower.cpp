@@ -1802,6 +1802,56 @@ float tankStopThrottle(float forwardSpeed)
 	return std::fabs(t) <= 0.4f ? 0.4f * sign(t) : t;
 }
 
+std::optional<Vec3> vehicleApproachPoint(const NavMesh& mesh, const Vec3& from, const Vec3& objective,
+	const Vec3* authored, const FollowerSettings& settings, const std::function<bool(const Vec3&)>& acceptable)
+{
+	if (mesh.findPolygon(from, settings.options.heightTolerance, &settings.options.profile) < 0) {
+		return std::nullopt;
+	}
+	const auto reachable = [&](const Vec3& at) {
+		if (mesh.findPolygon(at, settings.options.heightTolerance, &settings.options.profile) < 0) {
+			return false;
+		}
+		if ((acceptable && !acceptable(at)) || findPath(mesh, from, at, settings.options).empty()) return false;
+		PathFollower follower;
+		follower.request(mesh, from, at, settings, 0);
+		return follower.planned() && !follower.failed();
+	};
+	if (authored && reachable(*authored)) {
+		return *authored;
+	}
+	// Centroids lie on the actual polygon surface; unlike offsets at the
+	// flag's height they also work for multilevel terrain. Limit both the
+	// search radius and path searches, and spread trials across the mesh.
+	std::vector<std::pair<float, Vec3>> candidates;
+	for (uint32_t i = 0; i < mesh.polygons.size(); ++i) {
+		const Polygon& poly = mesh.polygons[i];
+		if (poly.vertexCount < 3 || settings.options.profile.cost(poly.costClass) < 0) {
+			continue;
+		}
+		const Vec3 point = mesh.centroid(i);
+		const float d2 = distance2XZ(point, objective);
+		if (d2 <= 150.0f * 150.0f) {
+			candidates.emplace_back(d2, point);
+		}
+	}
+	std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+	std::vector<Vec3> tried;
+	for (const auto& candidate : candidates) {
+		if (std::any_of(tried.begin(), tried.end(), [&](const Vec3& p) { return distance2XZ(p, candidate.second) < 25; })) {
+			continue;
+		}
+		tried.push_back(candidate.second);
+		if (reachable(candidate.second)) {
+			return candidate.second;
+		}
+		if (tried.size() >= 32) {
+			break;
+		}
+	}
+	return std::nullopt;
+}
+
 // 0x1008c7c0 and its controller 0x100de350. The speed wanted: the bend's
 // slowing as the car's (|maxBend| only, above minSpeedForLookAhead), the
 // brake for the path's end as the car's (the percentage x 0.01, squared)

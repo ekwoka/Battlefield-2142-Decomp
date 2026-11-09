@@ -81,22 +81,19 @@ private:
 // event into dozens of rows, or queue momentum after the gesture stops.
 class MenuWheelSteps {
 public:
-	int add(float delta, double seconds) {
+	int add(float delta) {
 		if (delta == 0) return 0;
 		const int direction = delta > 0 ? 1 : -1;
-		if (direction != m_direction || seconds - m_lastEvent > 0.25) m_pending = 0;
+		if (direction != m_direction) m_pending = 0;
 		m_direction = direction;
-		m_lastEvent = seconds;
 		m_pending = std::clamp(m_pending + std::clamp(delta, -1.0f, 1.0f), -1.0f, 1.0f);
-		if (seconds < m_nextStep || std::abs(m_pending) < 0.9999f) return 0;
+		if (std::abs(m_pending) < 0.9999f) return 0;
 		m_pending = 0;
-		m_nextStep = seconds + 0.075;
 		return direction;
 	}
 private:
 	float m_pending = 0;
 	int m_direction = 0;
-	double m_lastEvent = -1, m_nextStep = 0;
 };
 
 // One binding of a player input.

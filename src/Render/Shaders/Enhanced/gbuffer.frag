@@ -37,7 +37,12 @@ void main()
 	vec3 dx = dot(right, right) < dot(left, left) ? right : left;
 	vec3 dy = dot(down, down) < dot(up, up) ? down : up;
 	vec4 viewPosition = view * vec4(p, 1.0);
-	vec3 n = mat3(view) * cross(dx, dy);
+	// Pixel-to-pixel distances shrink with resolution and proximity. Testing
+	// the unscaled cross product treats valid nearby surfaces as degenerate
+	// at high resolutions, producing a false AO band. Test its angle instead.
+	float dx2 = dot(dx, dx), dy2 = dot(dy, dy);
+	vec3 n = dx2 > 1e-18 && dy2 > 1e-18
+		? mat3(view) * cross(dx * inversesqrt(dx2), dy * inversesqrt(dy2)) : vec3(0.0);
 	n = dot(n, n) > 1e-12 ? normalize(n) : vec3(0.0, 0.0, -1.0);
 	if (dot(n, viewPosition.xyz) > 0.0) {
 		n = -n; // towards the camera

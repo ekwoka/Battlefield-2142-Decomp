@@ -16,14 +16,6 @@ constexpr const char* mouseCaptureBlocker(bool playing, bool pointer, bool menuU
 	return !playing ? "not-playing" : pointer ? "pointer" : menuUp ? "menu" : !focused ? "unfocused" : "none";
 }
 
-// SDL reports its own flags, which can stay set while the OS-level capture was
-// dropped (focus return, fullscreen/Space change, a click after Mission Control).
-// A refresh event therefore releases and re-takes capture even when SDL agrees.
-constexpr bool mouseCaptureNeedsRelease(bool wanted, bool relative, bool grabbed, bool refresh, bool confine = false)
-{
-	return (relative && (!wanted || refresh)) || (grabbed && (!(wanted || confine) || refresh));
-}
-
 // An in-game pointer screen (comm rose, deployment, commander screen) shows the
 // cursor but keeps it inside the focused window; the Esc menu and the round's
 // end let it go, as does losing focus.
@@ -36,11 +28,6 @@ constexpr bool gameplayPointerConfined(bool playing, bool pointer, bool menuUp, 
 {
 	return playing && pointer && !menuUp && focused && reason && !sameText(reason, "esc-menu")
 		&& !sameText(reason, "end-of-round");
-}
-
-constexpr bool mouseCaptureNeedsAcquire(bool wanted, bool relative, bool grabbed)
-{
-	return wanted && (!relative || !grabbed);
 }
 
 // The soldier's aim pitch is clamped (85 degrees first person), but a driver's

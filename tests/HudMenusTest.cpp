@@ -63,6 +63,30 @@ struct Squads {
 
 } // namespace
 
+TEST(HudMenus_CommanderApplicationRow)
+{
+	Squads s;
+	const int me = s.world.addPlayer("Me", 2, false);
+	s.world.setCommanderEnabled(true);
+	int actions = 0;
+	bool resigned = false;
+	s.squads.onCommanderAction = [&](bool resign) { ++actions; resigned = resign; };
+	s.squads.update(me);
+	CHECK(s.hud.listCell(5, 0, 5) == "HUD_TEXT_MENU_SPAWN_SQUAD_COMMANDER");
+	CHECK(s.hud.listCell(5, 0, 10) == "HUD_TEXT_MENU_SPAWN_SQUAD_APPLY");
+	s.squads.clickSquadList(me, 0, 10);
+	CHECK(actions == 1 && !resigned);
+	CHECK(s.world.setCommander(2, me));
+	s.squads.update(me);
+	s.squads.clickSquadList(me, 0, 10);
+	CHECK(actions == 2 && resigned);
+	const int other = s.world.addPlayer("Other", 2, false);
+	CHECK(s.world.setCommander(2, other));
+	s.squads.update(me);
+	s.squads.clickSquadList(me, 0, 10);
+	CHECK(actions == 2);
+}
+
 TEST(HudMenus_SquadListJoinLeaveCreate)
 {
 	Squads s;
@@ -1116,11 +1140,13 @@ TEST(HudRadar_DecoyAndVehicleMarkers)
 	tank->settings()["vehicleHud.miniMapIcon"] = "Ingame/mini_tank.tga";
 	objects.create(decoyTemplate, {40, 0, 10});
 	const uint32_t car = objects.create(tank, {100, 0, 100})->id();
+	objects.find(car)->setRotation({135, 0, 0});
 	RadarWorld world;
 	game::GameWorld::PlayerInfo onFoot;
 	onFoot.id = 5;
 	onFoot.alive = true;
 	onFoot.position = {10, 0, 10};
+	onFoot.yaw = 90;
 	game::GameWorld::PlayerInfo riding = onFoot;
 	riding.id = 6;
 	riding.vehicle = car;
@@ -1128,6 +1154,7 @@ TEST(HudRadar_DecoyAndVehicleMarkers)
 	game::GameWorld::PlayerInfo far = onFoot;
 	far.id = 7;
 	far.position = {-200, 0, 10};
+	far.yaw = -45;
 	world.players = {onFoot, riding, far};
 	auto markers = menu::radarMarkers(world, round, {5, 6, 7});
 	CHECK(markers.size() == 3);
@@ -1136,6 +1163,7 @@ TEST(HudRadar_DecoyAndVehicleMarkers)
 		CHECK(markers[1].x == 20 && markers[1].z == 10); // in a vehicle: his own place
 		CHECK(markers[2].x == -200);                     // too far from it
 		CHECK(markers[0].texture == "Ingame/Player/Icons/Minimap/mini_Soldier.dds" && markers[0].size == 16);
+		CHECK(markers[0].yaw == 90 && markers[2].yaw == -45);
 	}
 	// Without a decoy template's targetType the enemy is where he is.
 	decoyTemplate->settings()["targetType"] = "TTHeat";
@@ -1145,6 +1173,7 @@ TEST(HudRadar_DecoyAndVehicleMarkers)
 	world.vehicles = {car};
 	markers = menu::radarMarkers(world, round, {});
 	CHECK(markers.size() == 1 && markers[0].texture == "Ingame/mini_tank.tga" && markers[0].x == 100 && markers[0].size == 16);
+	CHECK(markers.size() == 1 && markers[0].yaw == 135);
 }
 
 // The gunships' horizon (0x007a2b50) and climb arrow: a banked, pitched

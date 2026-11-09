@@ -11,9 +11,6 @@
 #include "Input/SdlGameControllers.h"
 
 #include <SDL3/SDL.h>
-#ifdef __APPLE__
-#include <CoreGraphics/CGRemoteOperation.h> // CGAssociateMouseAndMouseCursorPosition
-#endif
 
 #include <algorithm>
 #include <cmath>
@@ -24,18 +21,6 @@
 #include <cstring>
 #include <cstdio>
 
-
-// macOS: SDL can report relative mode while the system cursor still moves
-// (the log's "cursor escaped" lines). Detaching the cursor from the mouse is
-// what relative mode means, so the viewer also does it itself.
-static void lockSystemCursor(bool lock)
-{
-#ifdef __APPLE__
-	CGAssociateMouseAndMouseCursorPosition(lock ? 0 : 1);
-#else
-	(void)lock;
-#endif
-}
 
 namespace dice::hfe {
 
@@ -492,11 +477,10 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		ticks.advance(0);
 		bool running = true;
 		bool pointer = false; // the mouse is a pointer (a menu is up)
-		bool warnedRelativeMode = false;
-		bool warnedMouseGrab = false;
+		bool captureWantedBefore = false;
+		bool pointerConfinedBefore = false;
+		bool discardFirstRelativeMotion = false;
 		int tracedCaptureState = -1;
-		Uint64 escapeCheckNs = 0; // the last time a captured cursor was found outside the window
-		bool systemCursorLocked = false;
 		bool roseCursorHidden = false; // the comm rose is picked by pointing, without a visible cursor
 		// A detached process from the launcher applet may start behind it, and then
 		// never receives focus (so never captures) until the user clicks.
@@ -526,22 +510,9 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				options.gameControllers->beginFrame();
 			}
 			Uint32 pressedButtons = 0;
-			bool captureRefresh = false; // an event after which the OS may have dropped capture
+			bool focusGained = false;
 			while (SDL_PollEvent(&event)) {
-				switch (event.type) {
-				case SDL_EVENT_WINDOW_FOCUS_GAINED:
-				// Not MOUSE_ENTER/EXPOSED: releasing relative mode can raise them, re-triggering every frame.
-				case SDL_EVENT_WINDOW_SHOWN:
-				case SDL_EVENT_WINDOW_RESTORED:
-				case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
-				case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
-				case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
-				case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
-					captureRefresh = true;
-					break;
-				default:
-					break;
-				}
+				if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED) focusGained = true;
 				if (sdlControllers && sdlControllers->handle(event)) {
 					continue;
 				}
@@ -616,7 +587,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					SDL_GetMouseState(&x, &y);
 					menu({ViewerOptions::MenuInput::Kind::Move, x / windowWidth, y / windowHeight});
 					const float delta = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.y : event.wheel.y;
-					if (const int steps = menuWheel.add(delta, static_cast<double>(SDL_GetTicksNS()) / 1e9); steps != 0) {
+					if (const int steps = menuWheel.add(delta); steps != 0) {
 						menu({ViewerOptions::MenuInput::Kind::Wheel, 0, 0, steps});
 					}
 				} else if (playing && !pointer && event.type == SDL_EVENT_MOUSE_WHEEL) {
@@ -643,6 +614,10 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					SDL_GetWindowSize(window, &w, &h);
 					options.onPointerMove(event.motion.x * 800.0f / static_cast<float>(w), event.motion.y * 600.0f / static_cast<float>(h));
 				} else if (event.type == SDL_EVENT_MOUSE_MOTION && playing && !pointer) {
+					if (discardFirstRelativeMotion && SDL_GetWindowRelativeMouseMode(window)) {
+						discardFirstRelativeMotion = false;
+						continue;
+					}
 					const float scale = options.mouseScale ? options.mouseScale() : 1.0f;
 					const float up = options.invertMouse && options.invertMouse() ? -1.0f : 1.0f;
 					turn += event.motion.xrel * 0.15f * scale;
@@ -653,59 +628,25 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					camera.pitch = std::fmax(-1.5f, std::fmin(1.5f, camera.pitch - event.motion.yrel * 0.004f));
 				}
 			}
-			// Relative mode is what keeps gameplay look alive at the window
-			// edge, but SDL drops the native grab when focus is lost. Reconcile
-			// both SDL states every frame so focus return and menu transitions
-			// reacquire/release capture even if no pointer-state callback changed.
-			// A Flash menu can be active independently of the HUD pointer flag.
+			// SDL owns cursor association and relative-mode deferral on macOS. Change
+			// relative mode only when gameplay's desired state changes; SDL may have
+			// deferred the grab during a focus click, so retry once on focus gain.
 			const bool focused = (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) != 0;
 			const bool capture = gameplayMouseCaptureWanted(playing, pointer, menuUp, focused);
-			bool relativeNow = SDL_GetWindowRelativeMouseMode(window);
-			bool grabbedNow = SDL_GetWindowMouseGrab(window);
-			if (capture && relativeNow && grabbedNow && SDL_GetTicksNS() - escapeCheckNs > 500000000ull) {
-				// SDL's flags can stay set after macOS let the cursor go: a cursor
-				// seen outside the window means capture was lost, so re-take it.
-				float gx = 0, gy = 0;
-				int wx = 0, wy = 0, ww = 0, wh = 0;
-				SDL_GetGlobalMouseState(&gx, &gy);
-				SDL_GetWindowPosition(window, &wx, &wy);
-				SDL_GetWindowSize(window, &ww, &wh);
-				if (gx < wx || gy < wy || gx >= wx + ww || gy >= wy + wh) {
-					std::printf("mouse-capture: cursor escaped at %.0f,%.0f (window %d,%d %dx%d), re-taking\n", gx, gy, wx, wy, ww, wh);
-					std::fflush(stdout);
-					SDL_WarpMouseInWindow(window, ww * 0.5f, wh * 0.5f); // back inside, so the check settles
-					captureRefresh = true;
-					escapeCheckNs = SDL_GetTicksNS();
-					systemCursorLocked = false; // re-applied below
-				}
-			}
 			const char* pointerWhy = options.pointerReason ? options.pointerReason() : nullptr;
 			const bool confine = gameplayPointerConfined(playing, pointer, menuUp, focused, pointerWhy);
-			if (mouseCaptureNeedsRelease(capture, relativeNow, grabbedNow, captureRefresh, confine)) {
-				if (std::getenv("BF2142_INPUT_TRACE")) std::printf("mouse-capture release refresh=%d wanted=%d\n", captureRefresh, capture);
-				SDL_SetWindowMouseGrab(window, false);
-				SDL_SetWindowRelativeMouseMode(window, false);
-				relativeNow = grabbedNow = false;
+			if (capture != captureWantedBefore) {
+				SDL_SetWindowRelativeMouseMode(window, capture);
+				captureWantedBefore = capture;
+				if (capture) discardFirstRelativeMotion = true;
 			}
-			if (mouseCaptureNeedsAcquire(capture, relativeNow, grabbedNow)) {
-				if (!relativeNow && !SDL_SetWindowRelativeMouseMode(window, true)) {
-					if (!warnedRelativeMode) {
-						std::fprintf(stderr, "SDL_SetWindowRelativeMouseMode(true): %s\n", SDL_GetError());
-						warnedRelativeMode = true;
-					}
-				} else {
-					warnedRelativeMode = false;
-				}
-				if (!grabbedNow && !SDL_SetWindowMouseGrab(window, true)) {
-					if (!warnedMouseGrab) {
-						std::fprintf(stderr, "SDL_SetWindowMouseGrab(true): %s\n", SDL_GetError());
-						warnedMouseGrab = true;
-					}
-				} else {
-					warnedMouseGrab = false;
-				}
-			} else if (confine && !grabbedNow) {
-				SDL_SetWindowMouseGrab(window, true); // the cursor shows but stays in the window
+			if (focusGained && capture && !SDL_GetWindowRelativeMouseMode(window)) {
+				SDL_SetWindowRelativeMouseMode(window, true);
+				discardFirstRelativeMotion = true;
+			}
+			if (confine != pointerConfinedBefore) {
+				SDL_SetWindowMouseGrab(window, confine);
+				pointerConfinedBefore = confine;
 			}
 			{
 				const bool hideCursor = confine && pointerWhy && sameText(pointerWhy, "comm-rose");
@@ -725,20 +666,6 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					int ww = 1, wh = 1;
 					SDL_GetWindowSize(window, &ww, &wh);
 					SDL_WarpMouseInWindow(window, px * ww / 800.0f, py * wh / 600.0f);
-				}
-			}
-			{
-				const bool lockWanted = capture && SDL_GetWindowRelativeMouseMode(window);
-				if (lockWanted != systemCursorLocked) {
-					if (lockWanted) {
-						int ww = 0, wh = 0;
-						SDL_GetWindowSize(window, &ww, &wh);
-						SDL_WarpMouseInWindow(window, ww * 0.5f, wh * 0.5f);
-					}
-					lockSystemCursor(lockWanted);
-					systemCursorLocked = lockWanted;
-					std::printf("mouse-capture: system cursor %s\n", lockWanted ? "locked" : "unlocked");
-					std::fflush(stdout);
 				}
 			}
 			{
@@ -1051,7 +978,6 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		gpu->releaseTarget(target);
 		SDL_SetWindowRelativeMouseMode(window, false);
 		SDL_SetWindowMouseGrab(window, false);
-		lockSystemCursor(false);
 		SDL_StopTextInput(window);
 	}
 	return 0;

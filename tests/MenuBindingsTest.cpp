@@ -8,6 +8,7 @@
 #include "Input/ControlMap.h"
 #include "Main/EndOfRoundBindings.h"
 #include "Main/MenuBindings.h"
+#include "Main/MenuGameState.h"
 #include "Main/SettingsObjects.h"
 #include "Net/Demo.h"
 #include "TestMain.h"
@@ -557,6 +558,25 @@ TEST(MenuBindings_InstantAction)
 	if (started) {
 		CHECK(started->bots == 16 && started->botsIncludeHumans && started->ticketRatio == 200 && started->spawnTime == 15);
 	}
+	bool disconnected = false;
+	bindings.onDisconnect = [&] { disconnected = true; };
+	const auto chosenBefore = menu.player.natives().listRows("mapListChosen").size();
+	menu::updateMenuGameState(menu.player, bindings, true);
+	menu.run(2);
+	CHECK(menu.player.natives().listRows("mapListChosen").size() == chosenBefore);
+	CHECK(!menu.click("singleplay.mc_singleplayer.btnInstantAction"));
+	CHECK(!menu.click("singleplay.mc_singleplayer.btnStartPlaylist"));
+	CHECK(menu.click("singleplay.mc_singleplayer.btnDisconnect2"));
+	menu.run(1);
+	CHECK(disconnected);
+	disconnected = false;
+	CHECK(menu.click("singleplay.mc_singleplayer.btnDisconnect"));
+	menu.run(1);
+	CHECK(disconnected);
+	menu::updateMenuGameState(menu.player, bindings, false);
+	menu.run(1);
+	CHECK(menu.click("singleplay.mc_singleplayer.btnInstantAction"));
+	CHECK(!menu.click("singleplay.mc_singleplayer.btnDisconnect2"));
 	for (const std::string& e : menu.player.scriptErrors()) {
 		std::fprintf(stderr, "mainMenu script error: %s\n", e.c_str());
 	}

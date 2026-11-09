@@ -15,6 +15,7 @@ layout(set = 1, binding = 0) uniform Transforms {
 	vec4 lightmapTransform;
 	vec4 sway;
 	vec4 normalSpace;
+	vec4 trunkSunDirection;
 	mat4 parts[64];
 };
 

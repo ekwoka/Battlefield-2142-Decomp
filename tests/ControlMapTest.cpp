@@ -223,14 +223,14 @@ TEST(ControlMap_NativeMouseAndTrackpad)
 TEST(ControlMap_MenuWheelRejectsAccelerationBursts)
 {
 	input::MenuWheelSteps wheel;
-	CHECK(wheel.add(-30, 0) == -1);
-	CHECK(wheel.add(-30, 0.01) == 0);
-	CHECK(wheel.add(-30, 0.02) == 0);
-	CHECK(wheel.add(-30, 0.08) == -1);
-	CHECK(wheel.add(0, 1) == 0); // no queued momentum after a pause
-	CHECK(wheel.add(0.25f, 1.1) == 0);
-	CHECK(wheel.add(0.25f, 1.12) == 0);
-	CHECK(wheel.add(0.5f, 1.14) == 1);
-	CHECK(wheel.add(-0.5f, 1.3) == 0); // reverse clears the old gesture
-	CHECK(wheel.add(-0.5f, 1.32) == -1);
+	CHECK(wheel.add(-30) == -1);
+	CHECK(wheel.add(-30) == -1); // consecutive events must not be discarded
+	CHECK(wheel.add(1) == 1); // reversal responds immediately
+	CHECK(wheel.add(0) == 0);
+	CHECK(wheel.add(0.25f) == 0);
+	CHECK(wheel.add(0.25f) == 0);
+	CHECK(wheel.add(0.5f) == 1);
+	CHECK(wheel.add(0.5f) == 0);
+	CHECK(wheel.add(-0.5f) == 0); // reverse clears the old gesture
+	CHECK(wheel.add(-0.5f) == -1);
 }

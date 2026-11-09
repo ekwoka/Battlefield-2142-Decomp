@@ -22,6 +22,7 @@ layout(set = 1, binding = 0) uniform Transforms {
 	vec4 lightmapTransform; // world xz -> terrain patch lightmap: scale xy, offset zw
 	vec4 unusedSway;
 	vec4 unusedNormalSpace;
+	vec4 unusedTrunkSunDirection;
 	mat4 viewProjection; // TransformUniforms::parts[0]
 };
 

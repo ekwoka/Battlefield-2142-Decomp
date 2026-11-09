@@ -8,6 +8,7 @@
 #include "RoadStatics.h"
 #include "StaticLightmaps.h"
 #include "TextureSuffix.h"
+#include "TreeMaterials.h"
 
 #include <array>
 #include <limits>
@@ -604,6 +605,10 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		// "vegitation" is a tree (+0x2a2); its alpha-tested materials are the
 		// leaves (RaShaderLeaf).
 		submesh.leaf = tree && material.alphaMode == 2;
+		const auto treeKind = treeMaterial(tree, material.alphaMode,
+			effect == "staticmesh.fx" && technique.compare(0, 10, "basedetail") == 0);
+		submesh.trunk = treeKind == TreeMaterial::TrunkBase || treeKind == TreeMaterial::TrunkDetail;
+		if (submesh.trunk) submesh.specularKind = 0;
 		// BundledMesh.fx's "AnimatedUV..." techniques (_HASUVANIMATION_).
 		submesh.animatedUV = bundled && technique.find("animateduv") != std::string::npos;
 		if (lower(material.effect) == "staticmesh.fx" && technique.compare(0, 10, "basedetail") == 0) {
@@ -660,6 +665,7 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		submesh.envMap = !submesh.additive &&
 			((effect == "staticmesh.fx" && !skinned) ||
 				(bundled && technique.find("envmap") != std::string::npos && quality.meshHemiAndShadows()));
+		if (submesh.trunk) submesh.envMap = false;
 		// Normal maps (RaShaderBM/SM _HASNORMALMAP_), only at the top
 		// lighting level: the loaders skip "_b.dds" (bundled, 0x101499b0) and
 		// "_b.dds" / "_b_os.dds" (skinned, 0x100d4160) otherwise. A bundled
@@ -695,7 +701,8 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 }
 
 void LevelRenderer::addTemplate(const LevelSources& sources, const world::ObjectTemplate& objectTemplate,
-	const Mat4& local, const Mat4& objectWorld, uint32_t object, int depth, const std::string& path)
+	const Mat4& local, const Mat4& objectWorld, uint32_t object, int depth, const std::string& path,
+	const std::string& inheritedSkeleton)
 {
 	if (depth > 8) {
 		return; // guards against templates that contain themselves
@@ -716,9 +723,12 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 				instance.source = path; // the template names from the root's child down, '/'-joined
 			}
 			if (gpuMesh->skinned) {
-				const auto setting = objectTemplate.settings().find("skeleton3P");
-				if (setting != objectTemplate.settings().end()) {
-					instance.skeleton = skeleton(sources.files, setting->second);
+				const auto skeleton3P = objectTemplate.settings().find("skeleton3P");
+				const auto skeletonPath = objectTemplate.settings().find("skeleton");
+				const std::string& selected = skeleton3P != objectTemplate.settings().end() ? skeleton3P->second
+					: skeletonPath != objectTemplate.settings().end() ? skeletonPath->second : inheritedSkeleton;
+				if (!selected.empty()) {
+					instance.skeleton = skeleton(sources.files, selected);
 				}
 				if (!sources.previewAnimation.empty()) {
 					instance.animation = animation(sources.files, sources.previewAnimation);
@@ -736,6 +746,12 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 			m_instances.push_back(instance);
 		}
 	}
+	std::string childSkeleton = inheritedSkeleton;
+	if (const auto it = objectTemplate.settings().find("skeleton3P"); it != objectTemplate.settings().end()) {
+		childSkeleton = it->second;
+	} else if (const auto it = objectTemplate.settings().find("skeleton"); it != objectTemplate.settings().end()) {
+		childSkeleton = it->second;
+	}
 	// Object.disableChildren: a placed object's children are out of the scene.
 	if (depth == 0 && object != 0) {
 		if (const world::Object* placed = sources.objects.find(object); placed && placed->childrenDisabled()) {
@@ -746,7 +762,7 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 		if (const world::ObjectTemplate* childTemplate = sources.templates.find(child.name);
 			childTemplate && drawnWithObject(childTemplate->typeName())) {
 			addTemplate(sources, *childTemplate, objectTransform(child.position, child.rotation) * local, objectWorld,
-				object, depth + 1, path.empty() ? child.name : path + "/" + child.name);
+				object, depth + 1, path.empty() ? child.name : path + "/" + child.name, childSkeleton);
 		}
 	}
 }
@@ -1984,6 +2000,8 @@ void LevelRenderer::syncObjects()
 			const std::string path = m_sources->animationFor(instance.object);
 			if (!path.empty()) {
 				instance.animation = animation(m_sources->files, path);
+				instance.animationDuration = m_sources->animationDurationFor
+					? m_sources->animationDurationFor(instance.object) : 0.0f;
 			}
 		}
 	}
@@ -4102,6 +4120,10 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		}
 		transforms.worldViewProjection = instance.world * viewProjection;
 		transforms.world = instance.world;
+		const Vec3f trunkSun = normalize(Vec3f {-lights.sunDirection[0], -lights.sunDirection[1], -lights.sunDirection[2]});
+		transforms.trunkSunDirection[0] = trunkSun.x;
+		transforms.trunkSunDirection[1] = trunkSun.y;
+		transforms.trunkSunDirection[2] = trunkSun.z;
 		// A static mesh reads only the first part (pushUniformSize).
 		if (instance.parts.empty() && !bound->skinned) {
 			transforms.parts[0] = Mat4 {};
@@ -4176,8 +4198,12 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 				SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
 			}
 			LightingUniforms uniforms = uniformsFor[lightmapped][submesh.alphaReference > 0];
+			if (submesh.trunk) {
+				uniforms = lighting(m_viewFog, lights, lights.treeSunColor, lights.treeAmbientColor, 0, false);
+			}
 			applyMeshLights(uniforms, picked, pickedCount, lightKind);
 			materialUniforms(uniforms, submesh, item.drawnFade(), seconds);
+			if (submesh.trunk) uniforms.material[2] += kMaterialTrunk;
 			specularUniforms(uniforms, submesh, camera, lights);
 			if (bound->skinned || bound->bundled) {
 				meshKindUniforms(uniforms, submesh, hemiAndShadows);

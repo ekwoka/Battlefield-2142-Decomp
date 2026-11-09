@@ -35,6 +35,23 @@ constexpr float kChestHeight = 1.0f;
 // collision mesh's, sqrt(1.32) m).
 constexpr float kSoldierRadius = 1.1489125f;
 constexpr float kSoldierSpeed = 5.0f;  // SoldierMobile's maxSpeed (Objects/Soldiers/Common/ai/Objects.ai)
+// Native recovery policy: bound the actual mesh route, not just the straight
+// line. 400 m is about 80 seconds at the nominal 5 m/s infantry speed.
+bool infantryRecoveryRoute(const ai::NavMesh* mesh, const ai::Vec3& from, const ai::Vec3& target)
+{
+	constexpr float maxWalk = 400.0f;
+	const ai::Vec3 delta = target - from;
+	if (!mesh || delta.x * delta.x + delta.y * delta.y + delta.z * delta.z > maxWalk * maxWalk) return false;
+	const auto path = ai::findPath(*mesh, from, target);
+	if (path.empty()) return false;
+	float distance = 0;
+	for (size_t i = 1; i < path.size(); ++i) {
+		const ai::Vec3 step = path[i] - path[i - 1];
+		distance += std::sqrt(step.x * step.x + step.y * step.y + step.z * step.z);
+		if (distance > maxWalk) return false;
+	}
+	return true;
+}
 // The aim controller's output is a PIMouseLookX/Y value (inputs 4, 5).
 // The soldier (BF2142.exe 0x0058a6d0, from 0x0058abc4) turns 5 degrees per
 // unit on each call (*0x00a68e4c yaw, *0x00a68f24 pitch, both 5.0, set by
@@ -2172,6 +2189,7 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 				bot.goalReached = false;
 			}
 			bot.goal = bot.orderPosition = at;
+			bot.vehicleApproach = false;
 			bot.goalOrder = -1;
 			bot.goalMap = self.vehicle && self.driving ? 1 : 0;
 			bot.via.clear();
@@ -2192,6 +2210,7 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 				bot.goalReached = false;
 			}
 			bot.goal = bot.orderPosition = at;
+			bot.vehicleApproach = false;
 			bot.goalOrder = -1;
 			bot.goalMap = 0;
 			bot.via.clear();
@@ -2293,7 +2312,7 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 	} else if (squad && squad->state == 2 && squad->kind != 4) {
 		orderAt = squad->orderAt;
 		hasOrder = true;
-	} else if (squad && squad->state != 2 && bot.hasGoal && !bot.orderRegoal) {
+	} else if (squad && squad->state != 2 && bot.hasGoal && bot.goalMap == map && !bot.orderRegoal) {
 		return;
 	} else if (self.team == 1 || self.team == 2) {
 		const Side& side = m_sides[self.team];
@@ -2354,8 +2373,9 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 		}
 	}
 	for (size_t i = 0; i < areas.size() && !point; ++i) {
-		if (areas[i].hasOrderPosition[0]) {
-			const physics::Vec3 at {areas[i].orderPosition[0][0], areas[i].orderPosition[0][1], areas[i].orderPosition[0][2]};
+		for (int m = 0; m <= 1 && !point; ++m) {
+			if (!areas[i].hasOrderPosition[m]) continue;
+			const physics::Vec3 at {areas[i].orderPosition[m][0], areas[i].orderPosition[m][1], areas[i].orderPosition[m][2]};
 			if (horizontal2(at - orderAt) < 1) {
 				for (const GameWorld::ControlPointInfo& p : points) {
 					if (p.id == areas[i].controlPoint) {
@@ -2364,6 +2384,41 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 					}
 				}
 			}
+		}
+	}
+	// A failed bounded approach search temporarily rejects that objective.
+	// Prefer another enemy/neutral point; if none exists, try a friendly one.
+	bool retryRejected = false;
+	if (map == 1) {
+		for (auto it = bot.rejectedVehiclePoints.begin(); it != bot.rejectedVehiclePoints.end();) {
+			if (m_time >= it->second) {
+				retryRejected = retryRejected || (point && point->id == it->first);
+				it = bot.rejectedVehiclePoints.erase(it);
+			} else ++it;
+		}
+	}
+	if (map == 1 && point && bot.rejectedVehiclePoints.count(point->id)) {
+		const GameWorld::ControlPointInfo* alternative = nullptr;
+		physics::Vec3 start = self.position;
+		for (const auto& vehicle : m_vehicles) if (vehicle.object == self.vehicle) start = vehicle.position;
+		ai::PathOptions vehicleOptions;
+		vehicleOptions.vehicle = true;
+		for (int pass = 0; pass < 2 && !alternative; ++pass) {
+			float best = std::numeric_limits<float>::infinity();
+			for (const auto& p : points) {
+				if (bot.rejectedVehiclePoints.count(p.id) || (pass == 0 && p.team == self.team) || !m_vehicleNavMesh
+					|| ai::findPath(*m_vehicleNavMesh, toAi(start), toAi(p.position), vehicleOptions).empty()) continue;
+				const float d = horizontal2(p.position - self.position);
+				if (d < best) { best = d; alternative = &p; }
+			}
+		}
+		if (alternative) {
+			point = alternative;
+			areaIndex = areaOfControlPoint(point->id);
+			orderAt = point->position;
+		} else {
+			bot.orderRegoal = false;
+			return; // stopped until this objective's retry deadline
 		}
 	}
 	if (map == 1 && areaIndex >= 0 && areas[static_cast<size_t>(areaIndex)].hasOrderPosition[1]) {
@@ -2377,18 +2432,20 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 	// leader) have passed (0x1009e7a0).
 	const float again = self.squadLeader ? 20.0f : 35.0f;
 	const bool stale = bot.hasGoal && bot.goalReached && m_time - bot.goalAt > again;
-	const bool regoal = bot.orderRegoal; // the squad's re-goal (0x100c0130)
+	const bool regoal = bot.orderRegoal || retryRejected;
 	bot.orderRegoal = false;
 	if (!changed && !stale && !regoal) {
 		return;
 	}
 	bot.orderPosition = orderAt;
+	bot.vehicleApproach = false;
 	bot.goalMap = map;
 	bot.via.clear();
 	if (areaIndex >= 0 && bot.goalOrder != areaIndex) {
 		bot.lastArea = bot.goalOrder;
 	}
 	bot.goalOrder = areaIndex;
+	bot.goalControlPoint = point ? point->id : -1;
 	bot.goalAt = m_time;
 	bot.goalReached = false;
 	bot.hasGoal = true;
@@ -2406,13 +2463,67 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 			return;
 		}
 		bot.goal = point->position;
+		bool found = false;
 		for (int attempt = 0; attempt < 20; ++attempt) {
 			const float angle = random() * 6.2831853f;
 			const float distance = std::sqrt(random()) * r;
 			const physics::Vec3 at = point->position + physics::Vec3 {std::sin(angle) * distance, 0, std::cos(angle) * distance};
 			if (valid(at)) {
 				bot.goal = at;
+				found = true;
 				break;
+			}
+		}
+		if (found && map == 1 && mesh) {
+			for (const auto& v : m_vehicles) {
+				if (v.object == self.vehicle) {
+					ai::PathOptions options;
+					options.vehicle = true;
+					found = !ai::findPath(*mesh, toAi(v.position), toAi(bot.goal), options).empty();
+					break;
+				}
+			}
+		}
+		if (!found) {
+			// Retail's failed search asks the area for the map's order
+			// position (AIDLL 0x100604f6). If that is absent or off the
+			// vehicle mesh, find a reachable approach and go on foot.
+			bot.goal = orderAt;
+			const world::Object* driven = self.vehicle ? m_world.objects().find(self.vehicle) : nullptr;
+			const std::string rootAi = driven && driven->objectTemplate() ? aiTemplateOf(driven->objectTemplate()->name()) : "";
+			const bool groundVehicle = !(m_settings.typeFlags(rootAi) & (kITAir | kITHelicopter));
+			if (map == 1 && mesh && groundVehicle) {
+				ai::FollowerSettings settings;
+				settings.soldier = false;
+				settings.options.vehicle = true;
+				settings.climb = m_settings.climbLimits(1);
+				const GameWorld::VehicleInfo* vehicle = nullptr;
+				for (const GameWorld::VehicleInfo& v : m_vehicles) {
+					if (v.object == self.vehicle) vehicle = &v;
+				}
+				if (!vehicle) return;
+				settings.radius = vehicleBox(*vehicle).centreRadius;
+				const ai::Vec3 authored = toAi(orderAt);
+				const auto onward = [&](const ai::Vec3& approach) {
+					if (horizontal2(fromAi(approach) - point->position) <= point->radius * point->radius) return true;
+					const ai::Vec3 target = toAi(point->position);
+					return infantryRecoveryRoute(m_navMesh, approach, target);
+				};
+				const auto approach = ai::vehicleApproachPoint(*mesh, toAi(vehicle->position), toAi(point->position),
+					areaIndex >= 0 && areas[static_cast<size_t>(areaIndex)].hasOrderPosition[1] ? &authored : nullptr, settings, onward);
+				if (approach) {
+					bot.goal = fromAi(*approach);
+					bot.vehicleApproach = horizontal2(bot.goal - point->position) > point->radius * point->radius;
+					bot.approachInfantryGoal = point->position;
+					bot.via.clear(); // the complete path was checked from here to the approach
+				} else {
+					// Stop retrying an unusable order: choose another area on the
+					// next update, and allow this one again after 30 seconds.
+					bot.goal = vehicle->position;
+					bot.via.clear();
+					bot.rejectedVehiclePoints[point->id] = m_time + 30;
+					bot.orderRegoal = true;
+				}
 			}
 		}
 		return;
@@ -2504,6 +2615,10 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		bot.orderMove = false;
 	}
 	if (self.vehicle != bot.seatedVehicle || self.seat != bot.seatedSeat) {
+		if (!self.vehicle && bot.approachExitRequested && bot.seatedVehicle == bot.approachExitRequested) {
+			bot.abandonedVehicle = bot.approachExitRequested;
+			bot.abandonedAt = m_time;
+		}
 		if (self.vehicle && self.vehicle == bot.vehicleTarget) {
 			// Seated where the get-in plan went (the statement's destructor
 			// 0x100d4a90): out of the root's seat with the driver's taken and
@@ -2532,6 +2647,35 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		bot.seatedVehicle = self.vehicle;
 		bot.seatedSeat = self.seat;
 		bot.seatedAt = m_time;
+	}
+	bot.approachExitRequested = 0; // a request that did not produce an exit is not abandonment
+	// A reachable approach can be outside the capture area. Stop there and
+	// continue on foot; otherwise a bot can remain seated indefinitely.
+	if (self.vehicle && self.driving && bot.vehicleApproach && bot.via.empty()
+		&& horizontal2(bot.goal - self.position) < 6.0f * 6.0f) {
+		for (const GameWorld::VehicleInfo& v : m_vehicles) {
+			if (v.object == self.vehicle) {
+				if (!infantryRecoveryRoute(m_navMesh, toAi(v.position), toAi(bot.approachInfantryGoal))) {
+					// The actual arrival can differ from the planned approach.
+					if (bot.goalControlPoint >= 0) bot.rejectedVehiclePoints[bot.goalControlPoint] = m_time + 30;
+					bot.goal = v.position;
+					bot.via.clear();
+					bot.follower.reset();
+					bot.vehicleApproach = false;
+					bot.orderRegoal = true;
+					return;
+				}
+				const float speed = physics::dot(v.velocity, v.forward);
+				input.throttle = std::fabs(speed) > 1 ? (speed > 0 ? -1.0f : 1.0f) : 0;
+				if (physics::lengthSquared(v.velocity) < 4.0f) {
+					input.use = !bot.usedLast;
+					if (input.use) {
+						bot.approachExitRequested = self.vehicle;
+					}
+				}
+				return;
+			}
+		}
 	}
 	const std::string& pattern = bot.pattern;
 	if (pattern != "BBPMedicAssist" && pattern != "BBPAmmoAssist" && pattern != "BBPRepairVehicle"
@@ -4060,6 +4204,9 @@ float BotManager::reviveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, con
 float BotManager::seatValue(const Bot& bot, const GameWorld::PlayerInfo& self, uint32_t vehicle, int seat, bool other) const
 {
 	const bool soldier = vehicle == 0;
+	if (!soldier && other && !self.vehicle && vehicle == bot.abandonedVehicle && m_time - bot.abandonedAt < 30) {
+		return 0;
+	}
 	const float health = healthOf(soldier ? self.soldier : vehicle);
 	std::vector<std::string> guns;
 	std::string rootAi, seatAi;
@@ -7328,6 +7475,24 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 		follower.radius = settings.centreRadius;
 		follower.options.vehicle = true;
 		follower.climb = m_settings.climbLimits(1);
+		if (bot.vehicleApproach && bot.follower.failed() && bot.followId == goalId) {
+			// A complete mesh route is still only a plan. If physical travel
+			// fails, dismount here only when infantry has a complete route to
+			// the objective within the bounded walking distance.
+			const bool onFoot = infantryRecoveryRoute(m_navMesh, toAi(at), toAi(bot.approachInfantryGoal));
+
+			bot.goal = at;
+			bot.via.clear();
+			bot.follower.reset();
+			bot.followId = -1;
+			if (!onFoot) {
+				if (bot.goalControlPoint >= 0) bot.rejectedVehiclePoints[bot.goalControlPoint] = m_time + 30;
+				bot.vehicleApproach = false;
+				bot.orderRegoal = true;
+			}
+			brake();
+			return true;
+		}
 		if (!follow(bot, *m_vehicleNavMesh, at, to, goalId, follower)) {
 			brake();
 			// No progress for 20 s (0x10092bc0): the move fails and the

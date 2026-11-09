@@ -6,6 +6,10 @@
 // geometry templates' Titan and material settings, and the sprites'
 // flipbooks and the effect bundles' age, speed and rotation settings.
 #include "Console/Console.h"
+#include "Console/ConsoleBinding.h"
+#include "Animation/AnimationConsole.h"
+#include "Animation/AnimationSystem.h"
+#include "Animation/Pose.h"
 #include "Effects/Effects.h"
 #include "Geometry/GeometryTemplateManager.h"
 #include "Render/AnimatedUV.h"
@@ -21,6 +25,10 @@
 #include "Render/StaticLightmaps.h"
 #include "Render/TextureSuffix.h"
 #include "Render/TitanParts.h"
+#include "Render/TreeMaterials.h"
+#include "Geometry/MeshFile.h"
+#include "IO/File/ZipArchive.h"
+#include "IO/File/FileManager.h"
 #include "Scene/EffectSettings.h"
 #include "Scene/LightSettings.h"
 #include "Scene/OvergrowthSettings.h"
@@ -30,6 +38,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -43,6 +54,201 @@ bool near(float a, float b, float epsilon = 1e-4f)
 }
 
 } // namespace
+
+TEST(RenderScene_TreeMaterialDispatch)
+{
+	using render::TreeMaterial;
+	CHECK(render::treeMaterial(true, 0, false) == TreeMaterial::TrunkBase);
+	CHECK(render::treeMaterial(true, 0, true) == TreeMaterial::TrunkDetail);
+	CHECK(render::treeMaterial(true, 2, true) == TreeMaterial::Leaf);
+	CHECK(render::treeMaterial(false, 0, true) == TreeMaterial::Other);
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	auto zip = io::ZipArchive::open(std::string(gameDir) + "/mods/bf2142/Objects/Vegitation_client.zip");
+	CHECK(zip != nullptr);
+	if (!zip) return;
+	std::vector<uint8_t> data;
+	CHECK(zip->read("europe/eu_elmtree/meshes/eu_elmtree01.staticmesh", data));
+	auto mesh = geom::parseMesh(data, geom::MeshKind::Static);
+	CHECK(mesh.has_value());
+	if (!mesh) return;
+	bool trunk = false, leaf = false;
+	for (const auto& material : mesh->geometries[0].lods[0].materials) {
+		const bool detail = material.technique == "BaseDetail";
+		const auto kind = render::treeMaterial(true, material.alphaMode, detail);
+		trunk |= kind == TreeMaterial::TrunkDetail && material.maps.size() >= 2;
+		leaf |= kind == TreeMaterial::Leaf;
+	}
+	CHECK(trunk);
+	CHECK(leaf);
+}
+
+TEST(RenderScene_ShippedFlagsLoadAndAnimate)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	Console console(&files);
+	bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+		[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+	std::string out;
+	console.run("ServerArchives.con", {}, out);
+	console.run("ClientArchives.con", {}, out);
+	anim::AnimationSystems systems([&files](const std::string& path, std::vector<uint8_t>& data) {
+		return files.readFile(path, data);
+	});
+	anim::registerAnimationConsoleMethods(console, systems);
+	const std::string systemPath = "Objects/Common/Flags/AnimationSystem.inc";
+	const anim::AnimationSystemTemplate* system = systems.get(systemPath, [&] { console.run(systemPath, {}, out); });
+	CHECK(system->findClip("Objects/Common/Flags/Animation/flag_idle.baf") >= 0);
+	CHECK(system->findBundle("flag_idle") >= 0);
+	CHECK(system->findTrigger("root") >= 0);
+	const int clipIndex = system->findClip("Objects/Common/Flags/Animation/flag_idle.baf");
+	if (clipIndex < 0) return;
+	const anim::Clip& clip = system->clips()[static_cast<size_t>(clipIndex)];
+	CHECK(clip.looping);
+	CHECK(near(clip.length, 18.0f)); // authored AnimationManager.length, seconds
+	const int bundleIndex = system->findBundle("flag_idle");
+	const int rootIndex = system->findTrigger("root");
+	CHECK(bundleIndex >= 0 && system->bundles()[static_cast<size_t>(bundleIndex)].clips.size() == 1);
+	CHECK(bundleIndex >= 0 && system->bundles()[static_cast<size_t>(bundleIndex)].clips[0].clip == static_cast<size_t>(clipIndex));
+	CHECK(rootIndex >= 0 && bundleIndex >= 0 && std::find(system->triggers()[static_cast<size_t>(rootIndex)].bundles.begin(),
+		system->triggers()[static_cast<size_t>(rootIndex)].bundles.end(), static_cast<size_t>(bundleIndex))
+		!= system->triggers()[static_cast<size_t>(rootIndex)].bundles.end());
+	const anim::Skeleton* skeleton = systems.skeleton("Objects/Common/Flags/flag_setup.ske");
+	const anim::Animation* animation = systems.animation(clip.path);
+	CHECK(skeleton && skeleton->nodes.size() > 0);
+	CHECK(animation && animation->frameCount > 1);
+	if (!skeleton || !animation) return;
+	const auto positions = [&](float seconds) {
+		const auto pose = anim::evaluatePose(*skeleton, animation,
+			seconds * static_cast<float>(animation->frameCount) / clip.length);
+		std::vector<std::array<float, 3>> result;
+		for (const char* meshPath : {"Objects/Common/Flags/flag_EU/meshes/flag_eu.skinnedmesh",
+				"Objects/Common/Flags/flag_Pac/meshes/flag_Pac.skinnedmesh",
+				"Objects/Common/Flags/flag_neutral/meshes/flag_neutral.skinnedmesh"}) {
+			std::vector<uint8_t> bytes;
+			CHECK(files.readFile(meshPath, bytes));
+			auto mesh = geom::parseMesh(bytes, geom::MeshKind::Skinned);
+			CHECK(mesh && mesh->vertexCount > 0 && !mesh->geometries[0].lods[0].rigs.empty());
+			if (!mesh) continue;
+			const auto* pos = mesh->element(geom::VertexUsage::Position);
+			const auto* indices = mesh->element(geom::VertexUsage::BlendIndices);
+			const auto* weightElement = mesh->element(geom::VertexUsage::BlendWeight);
+			CHECK(pos && indices && weightElement);
+			if (!pos || !indices || !weightElement) continue;
+			const auto& rig = mesh->geometries[0].lods[0].rigs[0];
+			bool sampled = false;
+			for (uint32_t vertex = 0; vertex < mesh->vertexCount && !sampled; ++vertex) {
+				const size_t base = static_cast<size_t>(vertex) * mesh->vertexStride;
+				const uint8_t boneA = mesh->vertices[base + indices->offset];
+				const uint8_t boneB = mesh->vertices[base + indices->offset + 1];
+				if (boneA >= rig.size() || boneB >= rig.size()) continue;
+				float p[3] {}, weight = 1;
+				mesh->readFloats(vertex, *pos, p, 3);
+				mesh->readFloats(vertex, *weightElement, &weight, 1);
+				const auto transform = [&](uint8_t bone) {
+					const int node = rig[bone].id;
+					if (node < 0 || static_cast<size_t>(node) >= pose.size()) return std::array<float, 3> {p[0], p[1], p[2]};
+					const anim::Matrix skin = anim::multiply(rig[bone].matrix, pose[static_cast<size_t>(node)]);
+					return std::array<float, 3> {p[0] * skin[0] + p[1] * skin[4] + p[2] * skin[8] + skin[12],
+						p[0] * skin[1] + p[1] * skin[5] + p[2] * skin[9] + skin[13],
+						p[0] * skin[2] + p[1] * skin[6] + p[2] * skin[10] + skin[14]};
+				};
+				const auto a = transform(boneA), b = transform(boneB);
+				result.push_back({a[0] * weight + b[0] * (1 - weight), a[1] * weight + b[1] * (1 - weight),
+					a[2] * weight + b[2] * (1 - weight)});
+				sampled = true;
+			}
+			CHECK(sampled);
+		}
+		return result;
+	};
+	const auto start = positions(0.0f);
+	const auto phase = positions(4.5f);
+	const auto loop = positions(18.0f);
+	CHECK(start.size() == 3 && phase.size() == start.size() && loop.size() == start.size());
+	bool changed = false, wrapped = true;
+	for (size_t i = 0; i < start.size(); ++i) {
+		for (int axis = 0; axis < 3; ++axis) {
+			changed |= std::fabs(start[i][axis] - phase[i][axis]) > 1e-4f;
+			wrapped &= near(start[i][axis], loop[i][axis], 1e-4f);
+		}
+	}
+	CHECK(changed);
+	CHECK(wrapped);
+	// Optional retained matched frames. This software SVG uses the same parsed
+	// retail mesh, inverse-bind matrices and evaluated bone poses as the GPU
+	// palette path, at four timestamps (rather than a single still).
+	if (const char* evidenceDir = std::getenv("BF2142_FLAG_ANIMATION_EVIDENCE_DIR")) {
+		std::filesystem::create_directories(evidenceDir);
+		std::ofstream svg(std::filesystem::path(evidenceDir) / "shipped-flag-phases.svg");
+		const std::array<const char*, 3> paths = {"Objects/Common/Flags/flag_neutral/meshes/flag_neutral.skinnedmesh",
+			"Objects/Common/Flags/flag_Pac/meshes/flag_Pac.skinnedmesh",
+			"Objects/Common/Flags/flag_EU/meshes/flag_eu.skinnedmesh"};
+		const std::array<const char*, 3> colors = {"#8b929d", "#c83f43", "#366db0"};
+		const std::array<float, 4> times = {0, 4.5f, 9, 13.5f};
+		svg << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"960\" height=\"520\" viewBox=\"0 0 960 520\">"
+			<< "<rect width=\"100%\" height=\"100%\" fill=\"#171c25\"/>";
+		for (size_t column = 0; column < paths.size(); ++column) {
+			std::vector<uint8_t> bytes;
+			if (!files.readFile(paths[column], bytes)) continue;
+			auto mesh = geom::parseMesh(bytes, geom::MeshKind::Skinned);
+			if (!mesh || mesh->geometries.empty() || mesh->geometries[0].lods.empty()
+				|| mesh->geometries[0].lods[0].rigs.empty()) continue;
+			const auto* position = mesh->element(geom::VertexUsage::Position);
+			const auto* boneIndices = mesh->element(geom::VertexUsage::BlendIndices);
+			const auto* boneWeight = mesh->element(geom::VertexUsage::BlendWeight);
+			if (!position || !boneIndices || !boneWeight) continue;
+			const auto& rig = mesh->geometries[0].lods[0].rigs[0];
+			for (size_t row = 0; row < times.size(); ++row) {
+				const auto pose = anim::evaluatePose(*skeleton, animation,
+					times[row] * static_cast<float>(animation->frameCount) / clip.length);
+				std::vector<std::array<float, 3>> vertices(mesh->vertexCount);
+				for (uint32_t v = 0; v < mesh->vertexCount; ++v) {
+					float p[3] {}, weight = 1;
+					mesh->readFloats(v, *position, p, 3);
+					mesh->readFloats(v, *boneWeight, &weight, 1);
+					const size_t offset = static_cast<size_t>(v) * mesh->vertexStride + boneIndices->offset;
+					const uint8_t pair[2] = {mesh->vertices[offset], mesh->vertices[offset + 1]};
+					for (int influence = 0; influence < 2; ++influence) {
+						const uint8_t index = pair[influence];
+						const float amount = influence == 0 ? weight : 1 - weight;
+						if (amount <= 0 || index >= rig.size() || rig[index].id < 0
+							|| static_cast<size_t>(rig[index].id) >= pose.size()) continue;
+						const anim::Matrix skin = anim::multiply(rig[index].matrix, pose[static_cast<size_t>(rig[index].id)]);
+						for (int axis = 0; axis < 3; ++axis) {
+							const int m = axis;
+							vertices[v][axis] += amount * (p[0] * skin[m] + p[1] * skin[4 + m]
+								+ p[2] * skin[8 + m] + skin[12 + m]);
+						}
+					}
+				}
+				float minX = 1e9f, maxX = -1e9f, minY = 1e9f, maxY = -1e9f;
+				for (const auto& v : vertices) { minX = std::min(minX, v[0]); maxX = std::max(maxX, v[0]); minY = std::min(minY, v[1]); maxY = std::max(maxY, v[1]); }
+				const float scale = std::min(210.0f / std::max(maxX - minX, 1e-4f), 76.0f / std::max(maxY - minY, 1e-4f));
+				const float originX = 160 + static_cast<float>(column) * 320;
+				const float originY = 35 + static_cast<float>(row) * 120;
+				svg << "<text x=\"" << originX << "\" y=\"" << originY + 12 << "\" fill=\"#e5e9f0\" font-size=\"12\">"
+					<< (column == 0 ? "neutral" : column == 1 ? "PAC" : "EU") << " · " << times[row] << " s</text>";
+				for (const geom::MeshMaterial& material : mesh->geometries[0].lods[0].materials) {
+					const uint32_t end = std::min<uint32_t>(material.indexStart + material.indexCount, mesh->indices.size());
+					for (uint32_t at = material.indexStart; at + 2 < end; at += 3) {
+						const uint16_t a = mesh->indices[at], b = mesh->indices[at + 1], c = mesh->indices[at + 2];
+						if (a >= vertices.size() || b >= vertices.size() || c >= vertices.size()) continue;
+						svg << "<polygon fill=\"" << colors[column] << "\" fill-opacity=\"0.75\" stroke=\"#eef2f7\" stroke-opacity=\"0.16\" stroke-width=\"0.3\" points=\"";
+						for (uint16_t index : {a, b, c}) svg << originX + 10 + (vertices[index][0] - minX) * scale << ','
+							<< originY + 28 + (maxY - vertices[index][1]) * scale << ' ';
+						svg << "\"/>";
+					}
+				}
+			}
+		}
+		svg << "</svg>";
+	}
+}
 
 TEST(RenderScene_TitanPartsCulledAsRendDX9)
 {

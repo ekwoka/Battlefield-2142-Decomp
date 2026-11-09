@@ -19,21 +19,17 @@ TEST(Viewer_MouseCaptureFollowsFocusAndMenuOwnership)
 	CHECK(!gameplayMouseCaptureWanted(false, false, false, true));
 }
 
-TEST(Viewer_MouseCaptureRefreshesWhenSdlStateIsStale)
+TEST(Viewer_MouseCaptureChangesOnlyWithGameplayOwnership)
 {
-	// Wanted and SDL already agrees: leave it alone unless a refresh event arrived.
-	CHECK(!mouseCaptureNeedsRelease(true, true, true, false));
-	CHECK(!mouseCaptureNeedsAcquire(true, true, true));
-	// Focus/fullscreen events cycle capture even though SDL still reports it on.
-	CHECK(mouseCaptureNeedsRelease(true, true, true, true));
-	CHECK(mouseCaptureNeedsAcquire(true, false, false));
-	// Not wanted: release whatever is on; nothing to release when already off.
-	CHECK(mouseCaptureNeedsRelease(false, true, false, false));
-	CHECK(mouseCaptureNeedsRelease(false, false, true, false));
-	CHECK(!mouseCaptureNeedsRelease(false, false, false, true));
-	CHECK(!mouseCaptureNeedsAcquire(false, false, false));
-	// Half-applied state (relative on, grab off) is completed.
-	CHECK(mouseCaptureNeedsAcquire(true, true, false));
+	// Window shown/restored/fullscreen/display-size changes don't alter ownership.
+	CHECK(gameplayMouseCaptureWanted(true, false, false, true));
+	CHECK(gameplayMouseCaptureWanted(true, false, false, true));
+	// Focus loss releases; focus return reacquires once wanted changes back.
+	CHECK(!gameplayMouseCaptureWanted(true, false, false, false));
+	CHECK(gameplayMouseCaptureWanted(true, false, false, true));
+	// Opening a pointer screen releases relative mode while it remains focused.
+	CHECK(!gameplayMouseCaptureWanted(true, true, false, true));
+	CHECK(gameplayMouseCaptureWanted(true, false, false, true));
 }
 
 TEST(Viewer_MouseCaptureBlockerNamesTheFlag)
@@ -56,8 +52,8 @@ TEST(MouseCapture_DriverPitchIsNotPinnedBySoldierLimit)
 	CHECK(clampLookPitch(pitch - 0.1f, false, true) - pitch < -0.09f);
 }
 
-// The comm rose shows a pointer: the cursor stays grabbed in the window
-// (relative mode off); the Esc menu and an unfocused window let it go.
+// The comm rose and other in-game pointer screens confine the cursor;
+// menus at which the game yields the mouse leave it free.
 TEST(MouseCapture_InGamePointerStaysInTheWindow)
 {
 	using namespace dice::hfe;
@@ -67,8 +63,6 @@ TEST(MouseCapture_InGamePointerStaysInTheWindow)
 	CHECK(!gameplayPointerConfined(true, true, false, true, "end-of-round"));
 	CHECK(!gameplayPointerConfined(true, true, false, false, "comm-rose"));
 	CHECK(!gameplayPointerConfined(true, true, true, true, "comm-rose"));
-	// Opening the rose from capture: relative goes, the grab stays.
-	CHECK(mouseCaptureNeedsRelease(false, true, true, false, true)); // relative on must go
-	CHECK(!mouseCaptureNeedsRelease(false, false, true, false, true)); // grab alone is kept
-	CHECK(mouseCaptureNeedsRelease(false, false, true, false, false)); // Esc menu: released
+	CHECK(!gameplayMouseCaptureWanted(true, true, false, true)); // relative mode is off on the rose
+	CHECK(!gameplayPointerConfined(true, true, false, false, "deployment")); // focus loss frees it
 }

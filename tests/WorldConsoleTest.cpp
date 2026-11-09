@@ -38,6 +38,20 @@ TEST(WorldConsole_TemplateLookupLifecycle)
 	CHECK(high && templates.find(highA) == high && templates.find(highB) == nullptr);
 }
 
+TEST(WorldConsole_AnimatedBundleSkeletonProperty)
+{
+	Console console;
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "AnimatedBundle");
+	world::registerWorldConsoleMethods(console, templates, objects);
+	std::string out;
+	CHECK(console.execute("ObjectTemplate.create AnimatedBundle flag_eu", out) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.skeleton Objects\\Common\\Flags\\flag_setup.ske", out) == ConsoleResult::Ok);
+	const world::ObjectTemplate* flag = templates.find("flag_eu");
+	CHECK(flag && flag->settings().at("skeleton") == "Objects\\Common\\Flags\\flag_setup.ske");
+}
+
 // Overgrowth collision objects (OvergrowthCollision.con) are placed by a
 // matrix; the rotation must come back as the engine's yaw/pitch/roll.
 TEST(WorldConsole_AbsoluteTransformation)

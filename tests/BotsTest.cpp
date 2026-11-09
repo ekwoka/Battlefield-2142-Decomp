@@ -36,6 +36,31 @@
 
 using namespace dice::hfe;
 
+namespace dice::hfe::game {
+// Drives the real BotManager goal and act paths with deterministic snapshots.
+struct BotManagerTestAccess {
+	static auto& bot(BotManager& manager, int id) { return manager.m_bots[id]; }
+	static void vehicles(BotManager& manager, const std::vector<GameWorld::VehicleInfo>& v) { manager.m_vehicles = v; }
+	static void goal(BotManager& manager, const GameWorld::PlayerInfo& self) { manager.updateGoal(bot(manager, self.id), self); }
+	static SoldierInput act(BotManager& manager, const GameWorld::PlayerInfo& self) {
+		SoldierInput input;
+		manager.act(bot(manager, self.id), self, input, 1.0f / 30);
+		bot(manager, self.id).usedLast = input.use;
+		return input;
+	}
+	static float seat(BotManager& manager, const GameWorld::PlayerInfo& self, uint32_t vehicle) {
+		return manager.seatValue(bot(manager, self.id), self, vehicle, 0, true);
+	}
+	static void time(BotManager& manager, float t) { manager.m_time = t; }
+	static void attack(BotManager& manager, int area) { manager.m_sides[2].attacks = {area}; }
+	static void drive(BotManager& manager, const GameWorld::PlayerInfo& self) {
+		auto& b = bot(manager, self.id);
+		SoldierInput input;
+		manager.drive(b, self, b.goal, b.followId, 1.0f / 30, input);
+	}
+};
+}
+
 namespace {
 
 bool near(float a, float b, float eps = 1e-4f) { return std::fabs(a - b) <= eps; }
@@ -171,7 +196,250 @@ struct Field {
 	int hits(int player) { const auto r = world->playerRounds(player, true, false); return r.empty() ? 0 : r[0].count; }
 };
 
+// A single-leaf mesh of disconnected rectangular polygons.
+ai::NavMesh goalTestMesh(const std::vector<std::array<float, 4>>& rectangles)
+{
+	ai::NavMesh mesh;
+	mesh.minX = mesh.minZ = -500;
+	mesh.maxX = mesh.maxZ = 500;
+	mesh.rootSize = 1000;
+	mesh.nodes.resize(1);
+	mesh.nodes[0].leaf = true;
+	mesh.nodes[0].polygonCount = static_cast<uint8_t>(rectangles.size());
+	for (const auto& r : rectangles) {
+		const uint32_t v = static_cast<uint32_t>(mesh.vertices.size());
+		mesh.vertices.insert(mesh.vertices.end(), {{r[0], 0, r[1]}, {r[0], 0, r[3]}, {r[2], 0, r[3]}, {r[2], 0, r[1]}});
+		ai::Polygon polygon;
+		polygon.vertexCount = 4; polygon.costClass = 1; polygon.normal = {0, 1, 0};
+		polygon.firstEdge = static_cast<uint32_t>(mesh.edgeVertices.size());
+		mesh.polygons.push_back(polygon);
+		mesh.leafPolygons.push_back(static_cast<uint32_t>(mesh.polygons.size() - 1));
+		mesh.edgeVertices.insert(mesh.edgeVertices.end(), {v, v + 1, v + 2, v + 3});
+		mesh.edgeNeighbours.insert(mesh.edgeNeighbours.end(), 4, -1);
+	}
+	return mesh;
+}
+
 } // namespace
+
+TEST(Bots_GoalRecoveryManagerIntegration)
+{
+	Field field;
+	game::BotSettings settings;
+	ai::StrategicArea area;
+	area.controlPoint = 1;
+	area.hasOrderPosition[0] = area.hasOrderPosition[1] = true;
+	area.orderPosition[0][0] = 100;
+	area.orderPosition[1][0] = -10; // deliberately 110 m from the flag
+	settings.strategy.areas.push_back(area);
+	Console console;
+	game::registerBotConsoleMethods(console, settings);
+	std::string out;
+	for (const char* line : {"aiTemplatePlugIn.create Mobile GoalCar_Mobile", "aiTemplatePlugIn.maxSpeed 20",
+			 "aiTemplate.create GoalCar", "aiTemplate.addType ITGround", "aiTemplate.addPlugIn GoalCar_Mobile"}) console.execute(line, out);
+	game::BotManager bots(*field.world, settings);
+	game::BotManagerTestAccess::attack(bots, 0);
+	const int id = field.soldier(2, true, -30, 0);
+	auto* car = field.templates.create("PlayerControlObject", "goal_test_car");
+	car->settings()["aiTemplate"] = "GoalCar";
+	car->settings()["seatInformation"] = "goal_test_car 0/0/0 0/0/0";
+	car->children().push_back({"goal_test_engine", {}, {}});
+	field.templates.create("Engine", "goal_test_engine")->settings()["engineType"] = "194";
+	const uint32_t vehicle = field.objects.create(car, {-30, 0, 0})->id();
+	game::GameWorld::PlayerInfo self;
+	CHECK(field.world->playerInfo(id, self));
+	self.vehicle = vehicle; self.driving = true; self.seat = 0; self.position = {-30, 0, 0};
+	game::GameWorld::VehicleInfo v {};
+	v.object = vehicle; v.position = self.position; v.working = true; v.forward = {0, 0, 1};
+	v.boxMin = {-1, -1, -2}; v.boxMax = {1, 1, 2};
+	game::BotManagerTestAccess::vehicles(bots, {v});
+	auto vehicles = goalTestMesh({{-40, -10, 0, 10}, {90, -10, 110, 10}});
+	auto infantry = goalTestMesh({{-200, -20, 200, 20}});
+	bots.setVehicleNavMesh(&vehicles);
+	bots.setNavMesh(&infantry);
+	game::BotManagerTestAccess::goal(bots, self);
+	auto& bot = game::BotManagerTestAccess::bot(bots, id);
+	CHECK(bot.goalOrder == 0 && bot.goalMap == 1 && bot.vehicleApproach);
+	CHECK(near(bot.goal.x, -10)); // authored position, not the disconnected flag
+	CHECK(ai::findPath(infantry, {-10, 0, 0}, {100, 0, 0}).size() >= 2);
+	CHECK(ai::findPath(vehicles, {-30, 0, 0}, {100, 0, 0}).empty());
+	// A planned approach may fail during travel. A complete infantry route
+	// from the actual stopped vehicle enables an early dismount.
+	ai::FollowerSettings driver;
+	driver.soldier = false; driver.options.vehicle = true;
+	bot.follower.request(vehicles, {400, 0, 400}, {-10, 0, 0}, driver, 0);
+	CHECK(bot.follower.failed());
+	bot.followId = 1000;
+	game::BotManagerTestAccess::drive(bots, self);
+	CHECK(bot.vehicleApproach && near(bot.goal.x, -30) && !bot.follower.failed());
+	bot.orderRegoal = true;
+	game::BotManagerTestAccess::goal(bots, self);
+	// The authored position is disconnected too: only a connected centroid may win.
+	bots.liveSettings().strategy.areas[0].orderPosition[1][0] = 95;
+	bot.orderRegoal = true;
+	game::BotManagerTestAccess::goal(bots, self);
+	CHECK(bot.goalOrder == 0 && bot.vehicleApproach && bot.goal.x < 0);
+	// An infantry island prevents dismount: reject the objective for 30 s.
+	auto disconnectedInfantry = goalTestMesh({{-200, -20, 0, 20}, {90, -20, 200, 20}});
+	bots.setNavMesh(&disconnectedInfantry);
+	bot.orderRegoal = true;
+	game::BotManagerTestAccess::goal(bots, self);
+	CHECK(!bot.vehicleApproach && bot.rejectedVehiclePoints.count(1) == 1);
+	CHECK(near(bot.goal.x, -30));
+	game::BotManagerTestAccess::goal(bots, self); // no reachable alternative: hold, do not retry each frame
+	CHECK(bot.rejectedVehiclePoints.count(1) == 1 && !bot.orderRegoal);
+	game::BotManagerTestAccess::time(bots, 31);
+	bots.setNavMesh(&infantry);
+	game::BotManagerTestAccess::goal(bots, self);
+	CHECK(bot.rejectedVehiclePoints.empty() && bot.vehicleApproach);
+	bot.follower.request(vehicles, {400, 0, 400}, {-10, 0, 0}, driver, 0);
+	bot.followId = 1000;
+	bots.setNavMesh(&disconnectedInfantry);
+	game::BotManagerTestAccess::drive(bots, self);
+	CHECK(!bot.vehicleApproach && bot.rejectedVehiclePoints.count(1) == 1 && bot.orderRegoal);
+	game::BotManagerTestAccess::time(bots, 62);
+	bots.setNavMesh(&infantry);
+	game::BotManagerTestAccess::goal(bots, self);
+	CHECK(bot.vehicleApproach);
+	// Recheck the actual arrival, which may be up to 6 m from the planned
+	// point. If it cannot reach infantry navigation, stop and reject it.
+	bots.setNavMesh(&disconnectedInfantry);
+	bot.goal = {-25, 0, 0};
+	game::BotManagerTestAccess::act(bots, self);
+	CHECK(!bot.vehicleApproach && bot.rejectedVehiclePoints.count(1) == 1 && near(bot.goal.x, -30));
+	game::BotManagerTestAccess::time(bots, 93);
+	bots.setNavMesh(&infantry);
+	game::BotManagerTestAccess::goal(bots, self);
+	CHECK(bot.vehicleApproach);
+	// An exit request which did not change the observed seat is not abandonment.
+	v.position = bot.goal; self.position = bot.goal;
+	game::BotManagerTestAccess::vehicles(bots, {v});
+	bot.via.clear();
+	const auto first = game::BotManagerTestAccess::act(bots, self);
+	CHECK(first.use && bot.abandonedVehicle == 0);
+	const auto failedExit = game::BotManagerTestAccess::act(bots, self);
+	CHECK(!failedExit.use && bot.abandonedVehicle == 0 && bot.approachExitRequested == 0);
+	const auto retry = game::BotManagerTestAccess::act(bots, self);
+	CHECK(retry.use && bot.abandonedVehicle == 0);
+	// Observe an exit and use the manager's actual refresh and seat valuation.
+	self.vehicle = 0; self.driving = false; self.seat = -1;
+	game::BotManagerTestAccess::goal(bots, self);
+	CHECK(bot.goalMap == 0 && !bot.vehicleApproach);
+	game::BotManagerTestAccess::act(bots, self);
+	CHECK(bot.abandonedVehicle == vehicle && near(bot.abandonedAt, 93));
+	CHECK(game::BotManagerTestAccess::seat(bots, self, vehicle) == 0);
+	game::BotManagerTestAccess::time(bots, 124);
+	CHECK(game::BotManagerTestAccess::seat(bots, self, vehicle) != 0);
+	// If another point is reachable, the rejected order gives way to it.
+	game::BotManager alternate(*field.world, settings);
+	game::BotManagerTestAccess::attack(alternate, 0);
+	auto wideVehicles = goalTestMesh({{-120, -10, 0, 10}, {90, -10, 110, 10}});
+	alternate.setVehicleNavMesh(&wideVehicles);
+	alternate.setNavMesh(&disconnectedInfantry);
+	self.vehicle = vehicle; self.driving = true; self.seat = 0; self.position = {-30, 0, 0};
+	v.position = self.position;
+	game::BotManagerTestAccess::vehicles(alternate, {v});
+	game::BotManagerTestAccess::goal(alternate, self);
+	auto& alternateBot = game::BotManagerTestAccess::bot(alternate, id);
+	CHECK(alternateBot.rejectedVehiclePoints.count(1) == 1);
+	game::BotManagerTestAccess::goal(alternate, self);
+	CHECK(alternateBot.goal.x < -70 && alternateBot.goalOrder == -1);
+	// A connected infantry route beyond the 400 m walking budget is rejected.
+	game::BotManager tooFar(*field.world, settings);
+	game::BotManagerTestAccess::attack(tooFar, 0);
+	auto longVehicles = goalTestMesh({{-400, -10, 0, 10}, {90, -10, 110, 10}});
+	auto longInfantry = goalTestMesh({{-450, -20, 200, 20}});
+	tooFar.setVehicleNavMesh(&longVehicles);
+	tooFar.setNavMesh(&longInfantry);
+	self.position = {-350, 0, 0}; v.position = self.position;
+	game::BotManagerTestAccess::vehicles(tooFar, {v});
+	game::BotManagerTestAccess::goal(tooFar, self);
+	auto& farBot = game::BotManagerTestAccess::bot(tooFar, id);
+	CHECK(farBot.vehicleApproach);
+	farBot.follower.request(longVehicles, {400, 0, 400}, {-10, 0, 0}, driver, 0);
+	farBot.followId = 1000;
+	game::BotManagerTestAccess::drive(tooFar, self);
+	CHECK(!farBot.vehicleApproach && farBot.rejectedVehiclePoints.count(1) == 1);
+}
+
+TEST(Bots_GoalRecoveryConfirmedWorldExit)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	CHECK(gameDir != nullptr);
+	if (!gameDir) return;
+	Field field([&](Field& f) {
+		f.files.setRootPath(gameDir);
+		f.files.addSearchPath("mods/bf2142");
+		Console console {&f.files};
+		bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+			[&](std::string archive, std::string mountPoint, bool) { f.files.mountArchive(archive, mountPoint); }, 2);
+		std::string out;
+		CHECK(console.run("ServerArchives.con", {}, out));
+		f.templates.registerType(7, "PlayerControlObject");
+		f.templates.registerType(8, "EntryPoint");
+		f.templates.registerType(9, "Engine");
+		f.templates.registerType(10, "Spring");
+		f.collisionTemplates.create("as_fav", "Objects/Vehicles/as_fav/");
+		auto* car = f.templates.create("PlayerControlObject", "exit_test_car");
+		car->settings()["hasMobilePhysics"] = "1";
+		car->settings()["physicsType"] = "Mesh";
+		car->settings()["collisionMesh"] = "as_fav";
+		car->settings()["seatInformation"] = "exit_test_car 0/0.5/0.4 0/0/0";
+		car->settings()["mass"] = "1800";
+		car->settings()["aiTemplate"] = "ExitCar";
+		car->children().push_back({"exit_test_entry", {-1.5f, 0, 0}, {}});
+		car->children().push_back({"exit_test_engine", {0, -0.44f, 0}, {}});
+		auto* engine = f.templates.create("Engine", "exit_test_engine");
+		engine->settings()["engineType"] = "194";
+		auto* wheel = f.templates.create("Spring", "exit_test_wheel");
+		wheel->settings()["strength"] = "40"; wheel->settings()["damping"] = "8";
+		for (float x : {-0.95f, 0.95f}) for (float z : {-1.4f, 1.6f}) engine->children().push_back({"exit_test_wheel", {x, -0.15f, z}, {}});
+		f.templates.create("EntryPoint", "exit_test_entry")->settings()["entryRadius"] = "3";
+	});
+	const uint32_t vehicle = field.objects.create(field.templates.find("exit_test_car"), {3, 1.2f, 0}, {30, 0, 0})->id();
+	const int id = field.soldier(2, true, 0, 0);
+	for (int i = 0; i < 90; ++i) field.world->tick(1 / 30.0f);
+	game::SoldierInput use;
+	use.use = true;
+	field.world->setInput(id, use);
+	field.world->tick(1 / 30.0f);
+	field.world->setInput(id, {});
+	field.world->tick(1 / 30.0f);
+	game::GameWorld::PlayerInfo self;
+	CHECK(field.world->playerInfo(id, self));
+	CHECK(self.vehicle == vehicle && self.driving);
+	game::BotSettings settings;
+	ai::StrategicArea area;
+	area.controlPoint = 1; area.hasOrderPosition[0] = true; area.orderPosition[0][0] = 100;
+	settings.strategy.areas.push_back(area);
+	Console console;
+	game::registerBotConsoleMethods(console, settings);
+	std::string out;
+	for (const char* line : {"aiTemplatePlugIn.create Mobile ExitCar_Mobile", "aiTemplatePlugIn.maxSpeed 20",
+			 "aiTemplate.create ExitCar", "aiTemplate.addType ITGround", "aiTemplate.addPlugIn ExitCar_Mobile"}) console.execute(line, out);
+	game::BotManager bots(*field.world, settings);
+	game::BotManagerTestAccess::attack(bots, 0);
+	auto infantry = goalTestMesh({{-200, -200, 200, 200}});
+	bots.setNavMesh(&infantry);
+	game::BotManagerTestAccess::vehicles(bots, field.world->vehicleList());
+	auto& bot = game::BotManagerTestAccess::bot(bots, id);
+	bot.hasGoal = true; bot.goalMap = 1; bot.goalOrder = 0; bot.goal = self.position;
+	bot.vehicleApproach = true; bot.approachInfantryGoal = {100, 0, 0};
+	game::SoldierInput requested = game::BotManagerTestAccess::act(bots, self);
+	CHECK(requested.use && bot.abandonedVehicle == 0);
+	field.world->setInput(id, requested);
+	field.world->tick(1 / 30.0f);
+	CHECK(field.world->playerInfo(id, self));
+	CHECK(self.vehicle == 0); // the game, not the input request, confirms exit
+	CHECK(!ai::findPath(infantry, {self.position.x, self.position.y, self.position.z}, {100, 0, 0}).empty());
+	game::BotManagerTestAccess::goal(bots, self);
+	CHECK(bot.goalMap == 0 && !bot.vehicleApproach);
+	game::BotManagerTestAccess::act(bots, self);
+	CHECK(bot.abandonedVehicle == vehicle);
+	CHECK(game::BotManagerTestAccess::seat(bots, self, vehicle) == 0);
+	game::BotManagerTestAccess::time(bots, 31);
+	CHECK(game::BotManagerTestAccess::seat(bots, self, vehicle) > 0);
+}
 
 TEST(Bots_UrgencyCurves)
 {
@@ -5005,4 +5273,63 @@ TEST(Bots_AiRandomIsDicesTwister)
 	}
 	CHECK(top < 1.0f && top > 0.999f);
 	CHECK(ai::wordToFloat(0xffffffffu) == 4294967296.0f && ai::wordToFloat(0x80000000u) == 2147483648.0f);
+}
+
+TEST(Bots_VehicleApproachUsesReachableMeshAndAuthoredPosition)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/Project_Remaster_v17_Final");
+	files.setMountingAllowed(true);
+	CHECK(files.mountArchive("Levels/Belgrade/server.zip", "Levels/Belgrade/"));
+	std::vector<uint8_t> qtr, clb;
+	CHECK(files.readFile("Levels/Belgrade/AIPathFinding/Vehicle.qtr", qtr));
+	CHECK(files.readFile("Levels/Belgrade/AIPathFinding/Vehicle.clb", clb));
+	const auto mesh = ai::parseNavMesh(qtr, clb);
+	CHECK(mesh.has_value());
+	if (!mesh) return;
+	const ai::Vec3 from {57.73f, 48.10f, 216.04f};
+	const ai::Vec3 flag {27.027f, 44.051f, 55.890f};
+	ai::FollowerSettings settings;
+	settings.soldier = false;
+	settings.options.vehicle = true;
+	settings.radius = 2.5f;
+	CHECK(mesh->findPolygon(from) >= 0);
+	CHECK(mesh->findPolygon(flag) < 0);
+	const auto authored = ai::vehicleApproachPoint(*mesh, from, flag, &from, settings);
+	CHECK(authored.has_value());
+	if (authored) CHECK(near(authored->x, from.x) && near(authored->z, from.z));
+	const auto approach = ai::vehicleApproachPoint(*mesh, from, flag, nullptr, settings);
+	CHECK(approach.has_value());
+	if (approach) {
+		CHECK(mesh->findPolygon(*approach) >= 0);
+		ai::PathFollower follower;
+		follower.request(*mesh, from, *approach, settings, 0);
+		CHECK(follower.planned() && !follower.failed());
+		const float dx = approach->x - flag.x, dz = approach->z - flag.z;
+		CHECK(dx * dx + dz * dz < 150 * 150);
+	}
+	const ai::Vec3 offMap {100000, 0, 100000};
+	CHECK(!ai::vehicleApproachPoint(*mesh, offMap, flag, nullptr, settings).has_value());
+	CHECK(!ai::vehicleApproachPoint(*mesh, from, offMap, &offMap, settings).has_value());
+	const auto fallback = ai::vehicleApproachPoint(*mesh, from, flag, &offMap, settings);
+	CHECK(fallback.has_value());
+	qtr.clear(); clb.clear();
+	CHECK(files.readFile("Levels/Belgrade/AIPathFinding/Infantry.qtr", qtr));
+	CHECK(files.readFile("Levels/Belgrade/AIPathFinding/Infantry.clb", clb));
+	const auto infantry = ai::parseNavMesh(qtr, clb);
+	CHECK(infantry.has_value());
+	if (infantry) {
+		const ai::Vec3 stopped {133.3f, 43.0f, 307.7f};
+		const auto foot = ai::findPath(*infantry, stopped, flag);
+		float metres = 0;
+		for (size_t i = 1; i < foot.size(); ++i) {
+			const auto d = foot[i] - foot[i - 1];
+			metres += std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+		}
+		std::printf("  Belgrade stopped-driver infantry path: %zu points, %.1f m\n", foot.size(), metres);
+		CHECK(!foot.empty() && metres < 400);
+	}
 }

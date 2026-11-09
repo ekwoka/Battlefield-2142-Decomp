@@ -152,6 +152,9 @@ struct ProjectileSettings {
 	float armingSpeed = 0, speedModifier = 1, predictionFactor = 0;
 	bool useTargetSpeed = false, magneticBehaviour = false;
 	float acceleration = 0, deAcceleration = 0, maxSpeed = 0;
+	// hasDirection (template +0x335, 1 by default; only the magnets ship
+	// 0): the motor pushes along the round's own heading (0x005b3e60).
+	bool hasDirection = true;
 	float maxAngleLock = 360;
 	bool ignoreFriendly = true;
 	// seek.directionBonus (the seek template's +0x30, executor 0x004f541e,

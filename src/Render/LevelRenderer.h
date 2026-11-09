@@ -157,6 +157,9 @@ struct LevelSources {
 	// The animation an object plays now (a .baf path), asked each frame;
 	// empty keeps the preview animation.
 	std::function<std::string(uint32_t object)> animationFor;
+	// The authored AnimationManager.length of the selected clip (seconds);
+	// zero uses the clip's native 24 fps duration.
+	std::function<float(uint32_t object)> animationDurationFor;
 	// The pose of an object's skeleton from the game's animation systems
 	// (world matrices per node); false to play the preview animation.
 	std::function<bool(uint32_t object, const anim::Skeleton& skeleton, std::vector<anim::Matrix>& world)> skeletonPose;
@@ -340,6 +343,7 @@ private:
 		// A tree's leaves (a static mesh under "vegitation", RendDX9
 		// 0x100de6d0; its alpha-tested materials): RaShaderLeaf's sway.
 		bool leaf = false;
+		bool trunk = false;
 		// A bundled material with an "AnimatedUV..." technique (RaShaderBM
 		// _HASUVANIMATION_): its coordinates go through the instance's UV
 		// matrices (AnimatedUV.h).
@@ -396,6 +400,7 @@ private:
 		std::vector<Mat4> parts; // bundled meshes: part transforms relative to the object
 		std::shared_ptr<anim::Skeleton> skeleton; // skinned meshes
 		std::shared_ptr<anim::Animation> animation;
+		float animationDuration = 0; // authored clip length, seconds; zero is 24 fps
 		bool hidden = false; // its object is hidden
 		float fade = 1;      // its object's fade (below 1: drawn blended, after the opaque ones)
 		// The object manager's distance fade (DistanceFade.h: the render
@@ -521,7 +526,8 @@ private:
 	SDL_GPUTexture* texture(const io::FileManager& files, const std::string& path,
 		scene::TextureClass textureClass = scene::TextureClass::Default);
 	void addTemplate(const LevelSources& sources, const world::ObjectTemplate& objectTemplate, const Mat4& local,
-		const Mat4& objectWorld, uint32_t object, int depth, const std::string& path = {});
+		const Mat4& objectWorld, uint32_t object, int depth, const std::string& path = {},
+		const std::string& inheritedSkeleton = {});
 	void addObject(const LevelSources& sources, const world::Object& object);
 	// A part that animates its texture coordinates, placed relative to its object.
 	struct AnimatedUVPart {

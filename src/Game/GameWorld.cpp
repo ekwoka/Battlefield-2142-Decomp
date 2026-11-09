@@ -656,11 +656,19 @@ void GameWorld::createFlagObjects(ControlPoint& point)
 	if (m_collisionTemplates && m_files) {
 		for (const world::ChildTemplate& child : t->children()) {
 			const world::ObjectTemplate* ct = m_templates.find(child.name);
-			const auto meshName = ct ? ct->settings().find("collisionMesh") : std::map<std::string, std::string>::const_iterator();
+			auto meshName = ct ? ct->settings().find("collisionMesh") : std::map<std::string, std::string>::const_iterator();
+			if (ct && meshName == ct->settings().end()) {
+				// Several shipped bundles, including flagpole, author this as
+				// ObjectTemplate.setCollisionMesh, retained under its command name.
+				meshName = ct->settings().find("setCollisionMesh");
+			}
 			if (!ct || meshName == ct->settings().end()) {
 				continue;
 			}
-			const physics::CollisionMeshFile* mesh = m_collisionTemplates->mesh(meshName->second, *m_files);
+			const std::string& source = ct->creationFile();
+			const size_t slash = source.find_last_of("/\\");
+			const std::string directory = slash == std::string::npos ? std::string() : source.substr(0, slash + 1);
+			const physics::CollisionMeshFile* mesh = m_collisionTemplates->mesh(meshName->second, *m_files, directory);
 			physics::Vec3 low, high;
 			if (mesh && meshBox(*mesh, 0, low, high)) {
 				point.poleHeight = high.y + child.position.y;
@@ -1855,9 +1863,13 @@ void GameWorld::stepVehicleDamage(float seconds)
 				}
 			}
 		};
-		waterTick(depth > number(t, "armor.waterLevel", 1e9f), body.waterTimer, "armor.waterDamageDelay", 3,
+		// Shipped vehicle templates store the allowed water depth as a signed
+		// offset (commonly -0.3 / -0.7). Compare the positive depth to its
+		// magnitude: using a negative value directly damages vehicles while
+		// their origin is still above the water plane.
+		waterTick(depth > std::fabs(number(t, "armor.waterLevel", 1e9f)), body.waterTimer, "armor.waterDamageDelay", 3,
 			"armor.hpLostWhileInWater");
-		waterTick(depth > number(t, "armor.deepWaterLevel", 1e9f), body.deepWaterTimer, "armor.deepWaterDamageDelay", 1,
+		waterTick(depth > std::fabs(number(t, "armor.deepWaterLevel", 1e9f)), body.deepWaterTimer, "armor.deepWaterDamageDelay", 1,
 			"armor.hpLostWhileInDeepWater");
 		if (body.wreckTime >= 0 || (watered && hitPoints(body.object) <= 0)) {
 			continue; // (only the water's damage can have changed `left`)
@@ -3821,6 +3833,24 @@ void GameWorld::stepProjectiles(float seconds)
 			p.velocity = p.velocity + p.cameraMissileForward * add;
 		}
 		steerSeeker(p, seconds);
+		// The motor (0x005b3e60 from 0x005b4370; started at the launch or
+		// startDelay after it, 0x005b3990 -> 0x005b2c10): a hasDirection
+		// round flying forward under maxSpeed gets its acceleration along
+		// its heading on its node (slot 0xa4), which the node's tick applies.
+		// The heading here is the flight's; retail uses the round's matrix.
+		// shortcut: rounds with follow.targetActivation, useTargetSpeed or
+		// magneticBehaviour (the heat seekers) still coast; give them the
+		// motor once their start/stop and target-speed cap (the follow's
+		// slots 0x30, 0x34, 0x2c) are traced.
+		if (const ProjectileSettings* s = p.settings; s && s->hasDirection && s->acceleration > 0 && s->maxSpeed > 0
+			&& !s->targetActivation && !s->useTargetSpeed && !s->magneticBehaviour
+			&& s->seek != ProjectileSettings::Seek::Magnet && s->seek != ProjectileSettings::Seek::Beacon
+			&& physics::lengthSquared(p.cameraMissileForward) <= 0.5f && !p.resting && !p.stuck && p.age >= s->startDelay) {
+			const float speed = std::sqrt(physics::lengthSquared(p.velocity));
+			if (speed > 0.01f && speed < s->maxSpeed) {
+				p.acceleration = p.acceleration + p.velocity * (s->acceleration / speed);
+			}
+		}
 		if (physics::lengthSquared(p.cameraMissileForward) > 0.5f && physics::lengthSquared(p.velocity) > 1e-6f) {
 			p.cameraMissileForward = p.velocity * (1.0f / std::sqrt(physics::lengthSquared(p.velocity)));
 		}
@@ -10765,6 +10795,26 @@ std::vector<int> GameWorld::vehicleOccupants(uint32_t object) const
 		}
 	}
 	return {};
+}
+
+float GameWorld::animationDurationFor(uint32_t object) const
+{
+	if (std::find(m_flagObjects.begin(), m_flagObjects.end(), object) == m_flagObjects.end()
+		|| !m_animationSystems || !m_loadAnimationSystem) {
+		return 0.0f;
+	}
+	const world::Object* flag = m_objects.find(object);
+	const world::ObjectTemplate* t = flag ? flag->objectTemplate() : nullptr;
+	if (!t) {
+		return 0.0f;
+	}
+	const auto systemPath = t->settings().find("animationSystem1P");
+	if (systemPath == t->settings().end()) {
+		return 0.0f;
+	}
+	const anim::AnimationSystemTemplate* system = m_loadAnimationSystem(systemPath->second);
+	const int clipIndex = system ? system->findClip(animationFor(object)) : -1;
+	return clipIndex >= 0 ? system->clips()[static_cast<size_t>(clipIndex)].length : 0.0f;
 }
 
 bool GameWorld::gunAim(uint32_t vehicle, int seat, float& yaw, float& pitch) const

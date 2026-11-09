@@ -67,7 +67,9 @@
 #include "HudMenusComm.h"
 #include "HudMenusKits.h"
 #include "HudMenusVehicles.h"
+#include "MapPlayerMarker.h"
 #include "MenuBindings.h"
+#include "MenuGameState.h"
 #include "SettingsObjects.h"
 #include "PlayerCamera.h"
 #include "EndOfRoundBindings.h"
@@ -850,12 +852,14 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	for (const auto& point : world.controlPointList()) {
 		hud::HudManager::MapMarker flag {"Ingame/Flags/Icons/Minimap/" + folder(point.team) + // 0x0077dbf0: a point that can't change hands is a base
 				(point.capturable ? "/miniMap_CP.tga" : "/miniMap_CPBase.tga"),
-			point.position.x, point.position.z, 32};
+			// Retail uses 32 on both maps; the smaller minimap benefits from
+			// a less obstructive flag while the full map retains that size.
+			point.position.x, point.position.z, big ? 32.0f : 16.0f};
 		markers.push_back(flag);
 		if (spawning && std::find(spawnable.begin(), spawnable.end(), point.id) != spawnable.end()) {
 			hud::HudManager::MapMarker spawn {std::string("Ingame/Minimap/Icons/") +
 					(point.id == chosen ? "spawn_Selected.dds" : "spawn_UnSelected.dds"),
-				point.position.x, point.position.z, 32};
+				point.position.x, point.position.z, hud::HudManager::kSpawnMarkerSize};
 			spawn.id = point.id;
 			spawn.label = point.name.empty() ? "CP " + std::to_string(point.id) : point.name;
 			markers.push_back(spawn);
@@ -865,7 +869,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// (APCs, the AT and IFV spawn vehicles). The original's spawn map
 	// (0x0078e830) draws every group the spawn manager offers the team
 	// with the same spawn icons (+0x9f0 unselected, +0xa00 selected: the
-	// group at +0xa48), 32 px, at the group's position; a vehicle's group
+	// group at +0xa48), 16 HUD units, at the group's position; a vehicle's group
 	// moves with it.
 	g_spawnVehicles.clear();
 	if (spawning) {
@@ -878,7 +882,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			const bool selected = chosen == game::GameWorld::kSpawnInVehicle && g_spawnVehicle == g_spawnVehicles[i];
 			hud::HudManager::MapMarker spawn {std::string("Ingame/Minimap/Icons/") +
 					(selected ? "spawn_Selected.dds" : "spawn_UnSelected.dds"),
-				vehicle->position().x, vehicle->position().z, 32};
+				vehicle->position().x, vehicle->position().z, hud::HudManager::kSpawnMarkerSize};
 			spawn.id = kMarkerVehicle + static_cast<int>(i);
 			if (vehicle->objectTemplate()) {
 				const auto& settings = vehicle->objectTemplate()->settings();
@@ -913,7 +917,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			markers.push_back(spawn);
 			if (selected) {
 				hud::HudManager::MapMarker selectedSpawn {"Ingame/Minimap/Icons/spawn_Selected.dds", titan.position.x,
-					titan.position.z, 32};
+					titan.position.z, hud::HudManager::kSpawnMarkerSize};
 				selectedSpawn.id = marker;
 				markers.push_back(selectedSpawn);
 			}
@@ -934,7 +938,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		if (const world::Object* beacon = round.objects().find(round.squadBeacon(me.team, me.squad))) {
 			hud::HudManager::MapMarker spawn {std::string("Ingame/Minimap/Icons/") +
 					(chosen == game::GameWorld::kSpawnOnBeacon ? "spawn_SquadSelected.dds" : "spawn_SquadUnSelected.dds"),
-				beacon->position().x, beacon->position().z, 32};
+				beacon->position().x, beacon->position().z, hud::HudManager::kSpawnMarkerSize};
 			spawn.id = kMarkerBeacon;
 			spawn.label = "HUD_TEXT_MENU_SPAWN_PLAYER_SL";
 			markers.push_back(spawn);
@@ -1046,7 +1050,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			continue;
 		}
 		// Squad members are green; the rest of the team is blue.
-		hud::HudManager::MapMarker mate {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", player.position.x, player.position.z, 16};
+		hud::HudManager::MapMarker mate = dice::hfe::menu::playerMapMarker(player);
 		const auto color = dice::hfe::menu::mapRelationColor(dice::hfe::menu::MapRelation::Friendly,
 			me.squad != 0 && player.squad == me.squad);
 		std::copy(color.begin(), color.end(), mate.color);
@@ -1134,7 +1138,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// for one on foot near it) and the vehicles the reports spotted, in red
 	// (menu::radarMarkers).
 	for (const dice::hfe::menu::RadarMarker& m : dice::hfe::menu::radarMarkers(world, round, revealed)) {
-		hud::HudManager::MapMarker spotted {m.texture, m.x, m.z, m.size};
+		hud::HudManager::MapMarker spotted {m.texture, m.x, m.z, m.size, m.yaw};
 		spotted.color[1] = 0.3f;
 		spotted.color[2] = 0.3f;
 		markers.push_back(spotted);
@@ -2698,6 +2702,9 @@ int main(int argc, char** argv)
 				return result;
 			}
 			session.startedGame.reset();
+			if (session.menuBindings) {
+				dice::hfe::menu::updateMenuGameState(session.menu, *session.menuBindings, false);
+			}
 			session.playlist.clear();
 			options.level.clear();
 			continue;
@@ -8062,6 +8069,7 @@ int runGame(Options& options, Session& session)
 			}
 		};
 		sources.animationFor = [&round](uint32_t object) { return round.animationFor(object); };
+		sources.animationDurationFor = [&round](uint32_t object) { return round.animationDurationFor(object); };
 		// The loading screen stays up while the renderer builds the level
 		// (its last tenth), then the level's renderer takes the window.
 		sources.buildProgress = [&](float done) {
@@ -8728,7 +8736,7 @@ int runGame(Options& options, Session& session)
 		};
 		// A game started from the menu shows it on Esc (Logic.isGameRunning).
 		if (session.menuBindings) {
-			session.menuBindings->setGameRunning(startedGame.has_value());
+			dice::hfe::menu::updateMenuGameState(menu, *session.menuBindings, startedGame.has_value());
 		}
 		{
 			sources.menu = [&menu, &options, &showMenu, &endOfRound](float seconds) {

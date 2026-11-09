@@ -62,6 +62,7 @@ struct TransformUniforms {
 	// static and skinned meshes' tangents), 2 the object's (RaShaderSM
 	// _OBJSPACENORMALMAP_).
 	float normalSpace[4] {};
+	float trunkSunDirection[4] {}; // world-space direction for per-vertex trunk lighting
 	Mat4 parts[kMaxMeshParts]; // bundled-mesh part transforms, skinned meshes' bones
 	// normalSpace.y 1: an "AnimatedUV" bundled technique (RaShaderBM
 	// _HASUVANIMATION_): the texture coordinates are (TexUVRotCenter, 1) x
@@ -209,6 +210,7 @@ constexpr float kMaterialAdditive = 16; // unlit, added (additiveMeshPipeline)
 constexpr float kMaterialHemi = 32;     // a bundled or skinned mesh: the hemi map's ambient
 constexpr float kMaterialNormalMap = 64;  // a normal map (the dirt map's binding; RaShaderBM/SM _HASNORMALMAP_)
 constexpr float kMaterialNoShadows = 128; // receives no dynamic shadows (the low lighting level's BM/SM)
+constexpr float kMaterialTrunk = 256; // RaShaderTrunkSTMBase/Detail
 // mesh.frag's samplers: 0-4 the material's maps, 5-7 the shadows and the
 // hemi map (shadow.glsl), 8 a static mesh's detail normal map, 9 its crack
 // normal map, 10 the envmap (a cube).
