@@ -4878,3 +4878,52 @@ TEST(Vehicles_BotWalksUpToATankAndGetsIn)
 		}
 	}
 }
+
+// A soldier bot closing on a target beyond its preferred range walks
+// (steer) while the fire plan aims. The walk's look runs the controller
+// with its own last errors (the steering statement 0x100cd3b0, built by the
+// fire plan at 0x10079489, calls 0x100cd4f3 with no lead); sharing the
+// aim's errors, aim point and pitch history kept the aim's pitch from
+// settling, and the bot never fired while it walked.
+TEST(Vehicles_BotFiresWhileClosingIn)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		Garage g(gameDir(), mod);
+		if (!g.loaded) return;
+		game::BotSettings settings;
+		loadShippedAi(g, settings);
+		g.start("eu_tank", {0, 2, -400});
+		const int bot = g.world->addPlayer("CloserBot", 2, true);
+		g.world->setKit(bot, "EU_Assault", "us_light_soldier"); // the rifle kit in both mods
+		CHECK(g.world->spawnSoldier(bot));
+		const int enemy = g.world->addPlayer("Kept", 1, false);
+		CHECK(g.world->spawnSoldier(enemy));
+		game::GameWorld::PlayerInfo self, other;
+		g.world->playerInfo(enemy, other);
+		g.world->setHitPoints(other.soldier, 1e6f); // stays up to be kept ahead
+		game::BotManager bots(*g.world, settings);
+		int walkingTicks = 0, walkingRounds = 0;
+		for (int tick = 0; tick < 30 * 20; ++tick) {
+			g.world->playerInfo(bot, self);
+			// 15 m ahead of the bot (+z): past a short preferred range the
+			// plan walks after it, or the order's walk takes it on.
+			const float keep = 15.0f;
+			g.world->playerInfo(enemy, other);
+			g.world->setSoldierPosition(other.soldier, {self.position.x, 0, self.position.z + keep});
+			const int before = g.world->playerRounds(bot, false, false).empty() ? 0 : g.world->playerRounds(bot, false, false)[0].count;
+			bots.update(1 / 30.0f);
+			g.world->tick(1 / 30.0f);
+			g.world->playerInfo(bot, self);
+			const auto rounds = g.world->playerRounds(bot, false, false);
+			const int after = rounds.empty() ? 0 : rounds[0].count;
+			if (bots.behaviour(bot) == "Fire" && self.velocity.x * self.velocity.x + self.velocity.z * self.velocity.z > 1) {
+				++walkingTicks;
+				walkingRounds += after - before;
+			}
+		}
+		std::fprintf(stderr, "  %s: %d ticks walking in Fire, %d rounds then\n", mod, walkingTicks, walkingRounds);
+		CHECK(walkingTicks > 30);
+		CHECK(walkingRounds > 0);
+	}
+}
