@@ -9,6 +9,7 @@
 #include "IO/File/FileManager.h"
 #include "Main/HudMenus.h"
 #include "Physics/CollisionTemplateManager.h"
+#include "Sound/Game/SoundManager.h"
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
@@ -732,4 +733,44 @@ TEST(Commander_AiAnswersSquadRequests)
 	CHECK(world.storeSquadRequest(1, 1, 2, {0, 0, 0}));
 	step(6);
 	CHECK(world.squadRequest(1, 1, 2) && said("uav_deny") == 0);
+}
+
+// The Remaster orbital strike (commander_orbital_strike_64 / _16, RCArtillery):
+// its rounds' detonation.endEffectTemplate e_exp_orbital_strike starts
+// S_e_exp_orbital_strike_Start where each lands, which the round hands to
+// its audio (GameWorld::takeEffectSounds).
+TEST(Commander_RemasterOrbitalStrikeBlastSound)
+{
+	Field field("mods/Project_Remaster_v17_Final");
+	if (!field.loaded) {
+		return;
+	}
+	CHECK(field.files.mountArchive("Objects/Effects_server.zip", "Objects\\Effects"));
+	sound::SoundManager sounds {nullptr, field.templates};
+	sounds.registerTemplateType();
+	field.templates.registerType(0x9474, "EffectBundle"); // its creation makes S_<bundle>_Start
+	std::string out;
+	field.console.run("Objects/Effects/impacts/explosions/e_exp_orbital_strike/e_exp_orbital_strike.con", {}, out);
+	// The fixture reads only the commander rows; the strike's own again with its end effect.
+	world::registerUntypedTemplateProperties(field.console, field.templates, {"detonation.endEffectTemplate"});
+	field.console.run("Objects/Weapons/stationary/commander_orbital_strike/commander_orbital_strike.con", {}, out);
+	const world::ObjectTemplate* shell = field.templates.find("commander_orbital_strike_Projectile");
+	CHECK(shell && shell->settings().count("detonation.endEffectTemplate")
+		&& shell->settings().at("detonation.endEffectTemplate") == "e_exp_orbital_strike");
+	CHECK(field.templates.find("e_exp_orbital_strike") && field.templates.find("S_e_exp_orbital_strike_Start"));
+	game::GameWorld& world = *field.world;
+	world.setCommanderEnabled(true);
+	world.setCommander(1, world.addPlayer("Boss", 1, false));
+	field.place("commander_orbital_strike_64", 1, 200, 200);
+	world.takeEffectSounds();
+	CHECK(world.commanderAction(1, Ability::Artillery, 0, -60));
+	size_t blasts = 0;
+	for (int i = 0; i < 20 * 30; ++i) {
+		world.tick(1 / 30.0f);
+		for (const auto& sound : world.takeEffectSounds()) {
+			blasts += sound.name == "S_e_exp_orbital_strike_Start";
+		}
+	}
+	std::printf("  %zu orbital strike blast sounds\n", blasts);
+	CHECK(blasts >= 16);
 }

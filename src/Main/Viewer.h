@@ -110,6 +110,9 @@ struct ViewerOptions {
 	// right-click map menus, button highlights), same screen.
 	std::function<void(float x, float y)> onRightClick;
 	std::function<void(float x, float y)> onPointerMove;
+	// A place the pointer was put (HUD 800 x 600) the system cursor must
+	// follow once it shows; true takes it.
+	std::function<bool(float& x, float& y)> takePointerWarp;
 
 	// A Flash menu: all input goes to it (positions as fractions of the
 	// window), Esc included; it asks to quit through wantsQuit.

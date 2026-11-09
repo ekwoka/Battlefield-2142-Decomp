@@ -300,6 +300,11 @@ void GameAudio::tick(const Camera& given)
 	for (const auto& sound : m_round.takeSounds()) {
 		m_sounds.play(sound.sound, toSound(sound.position));
 	}
+	// A bundle plays its Sound children as it starts (0x00619700 makes the
+	// "Start" sound); the round's own bundles too, not only the renderer's.
+	for (const auto& sound : m_round.takeEffectSounds()) {
+		m_sounds.play(sound.name, toSound(sound.position));
+	}
 	weapons(camera);
 	engines();
 	// The vehicles' rolling-surface loops (GameWorld::rollingSounds: the

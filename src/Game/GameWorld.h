@@ -1174,6 +1174,9 @@ public:
 	// addArmorEffect list.
 	static bool spectacularHit(uint32_t id, float before, float after, float hitPoints);
 	const effects::EffectManager& effects() const { return m_effects; }
+	// The start sounds of the bundles the round started (detonation end
+	// effects, impact and armour effects), each heard once where it started.
+	std::vector<effects::EffectManager::StartedSound> takeEffectSounds() { return m_effects.takeSounds(); }
 
 	// Animation systems for soldiers and their weapons: `load` gives the
 	// system of a script path (running it the first time).

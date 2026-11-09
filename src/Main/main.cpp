@@ -789,7 +789,7 @@ nametags::Nametags* g_nametags = nullptr;
 // toggles it while alive (0x00754290 → 0x0074fd90(2)).
 bool g_bigMap = false;
 float g_pointerX = 0, g_pointerY = 0; // the last HUD pointer position (800 x 600)
-bool g_pointerMovedInRose = false;
+bool g_pointerWarp = false; // the system cursor still has to be put on g_pointerX/Y
 // Enter opens deployment without killing the soldier; Redeploy is explicit.
 bool g_deploymentOpen = false;
 bool g_initialDeploymentPending = false;
@@ -9201,8 +9201,12 @@ int runGame(Options& options, Session& session)
 			viewer.onPointerMove = [&hudManager](float x, float y) {
 				g_pointerX = x;
 				g_pointerY = y;
-				g_pointerMovedInRose = true;
 				hudManager.setPointer(x, y);
+			};
+			viewer.takePointerWarp = [](float& x, float& y) {
+				x = g_pointerX;
+				y = g_pointerY;
+				return std::exchange(g_pointerWarp, false);
 			};
 			viewer.takeAimKick = [&round] { return round.takeAimKick(round.localPlayer()); };
 			viewer.playerView = [&round, &playerCamera, &hudPlayer, &hudLocal](ViewerOptions::PlayerView& view) {
@@ -9339,8 +9343,14 @@ int runGame(Options& options, Session& session)
 					hudManager.set("HudDone", 0);
 				}
 				if (!alive) g_deploymentOpen = false; // death already opens deployment
-				if ((in.radioComm && !radioWas) || (in.tacticalComm && !tacticalWas)) {
-					g_pointerMovedInRose = false;
+				if (alive && ((in.radioComm && !radioWas) || (in.tacticalComm && !tacticalWas))) {
+					// A rose opens with the pointer on its middle entry (HudManager.setCommMousePos 400 300, the
+					// centre of RadioMiddle: Spotted, request/issue order), so a tap of Q or T picks that entry.
+					const std::array<float, 4> at = hudManager.setting("HudManager.setCommMousePos");
+					g_pointerX = at[0] > 0 ? at[0] : 400.0f;
+					g_pointerY = at[1] > 0 ? at[1] : 300.0f;
+					hudManager.setPointer(g_pointerX, g_pointerY);
+					g_pointerWarp = true;
 				}
 				if (alive && in.radioComm && !radioWas) {
 					// The vehicle's rose with the controlled object's
@@ -9355,8 +9365,8 @@ int runGame(Options& options, Session& session)
 					g_allSquads = me.commander || me.squad != 0;
 				} else if ((!in.radioComm && radioWas) || (!in.tacticalComm && tacticalWas) || !alive) {
 					// Releasing the rose key chooses the entry under the pointer, as a click would (the user's mouse clicks
-					// do not reach the rose); only when the pointer moved while it was open, so a tap chooses nothing.
-					if (alive && !commRoses.shown().empty() && !in.radioComm && !in.tacticalComm && g_pointerMovedInRose) {
+					// do not reach the rose); a tap leaves it on the middle entry.
+					if (alive && !commRoses.shown().empty() && !in.radioComm && !in.tacticalComm) {
 						std::printf("comm-rose: release selects at %.1f,%.1f\n", g_pointerX, g_pointerY);
 						std::fflush(stdout);
 						hudManager.click(g_pointerX, g_pointerY);

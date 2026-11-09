@@ -910,3 +910,31 @@ TEST(GameSounds_SeatCannonAndRocketsDoNotCutEachOther)
 	s.game.releaseTrigger(11);
 	CHECK(!s.game.fireLooping(11));
 }
+
+// A round's detonation starts its detonation.endEffectTemplate in the
+// round's own effects; that bundle's start sound (S_<bundle>_Start) is
+// heard like any other effect's (explosions, the commander's strikes).
+TEST(GameAudio_DetonationEndEffectStartSound)
+{
+	Range range;
+	range.templates.registerType(7, "EffectBundle");
+	addSoundTemplate(range.templates, "S_e_boom_Start");
+	range.templates.create("EffectBundle", "e_boom")->children().push_back({"S_e_boom_Start", {}, {}});
+	world::ObjectTemplate* bullet = range.templates.find("bullet");
+	bullet->settings()["detonation.endEffectTemplate"] = "e_boom";
+	bullet->settings()["detonation.explosionRadius"] = "2";
+	bullet->settings()["detonation.explosionDamage"] = "0";
+	GameAudio audio(*range.world, range.objects, range.templates, range.manager, range.game, nullptr);
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	game::SoldierInput fire;
+	fire.fire = true;
+	fire.aimPitch = -60; // into the ground in front
+	range.world->setPlayerInput(fire);
+	GameAudio::Camera camera;
+	for (int tick = 0; tick < 15; ++tick) {
+		range.world->tick(1 / 30.0f);
+		audio.tick(camera);
+	}
+	CHECK(!range.world->impacts().empty());
+	CHECK(range.count("S_e_boom_Start") >= 1);
+}

@@ -713,6 +713,15 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					roseCursorHidden = hideCursor;
 				}
 			}
+			// After relative mode let go, so the release doesn't put the cursor back where it was.
+			if (pointer && options.takePointerWarp && !SDL_GetWindowRelativeMouseMode(window)) {
+				float px = 0, py = 0;
+				if (options.takePointerWarp(px, py)) {
+					int ww = 1, wh = 1;
+					SDL_GetWindowSize(window, &ww, &wh);
+					SDL_WarpMouseInWindow(window, px * ww / 800.0f, py * wh / 600.0f);
+				}
+			}
 			{
 				const bool lockWanted = capture && SDL_GetWindowRelativeMouseMode(window);
 				if (lockWanted != systemCursorLocked) {
