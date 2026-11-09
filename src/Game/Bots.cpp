@@ -7068,7 +7068,22 @@ bool BotManager::steer(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 	bot.zoomPress = bot.zoom.level() > 0 && !bot.zoomKey;
 	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight, 0};
 	bot.look.quiet = true; // the walk's own look (a plan's aim holds the agent)
+	// The walk's steering statement (0x100cd3b0, a plan's own, 0x10079489)
+	// runs the controller (0x100cd4f3) with its own last errors (+0x18 /
+	// +0x1c) and no lead: the plan's aim keeps its errors, aim point and
+	// pitch history, or its derivative and bias read the walk's look.
+	const physics::Vec3 aimPoint = bot.lastAimPoint;
+	const int aimTarget = bot.lastAimTarget;
+	const float yawError = bot.yawError, pitchError = bot.pitchError;
+	const std::array<float, 10> pitchErrors = bot.pitchErrors;
+	const int pitchErrorCount = bot.pitchErrorCount;
 	aim(bot, self, eye + d * 5.0f, {}, false, {}, input, seconds);
+	bot.lastAimPoint = aimPoint;
+	bot.lastAimTarget = aimTarget;
+	bot.yawError = yawError;
+	bot.pitchError = pitchError;
+	bot.pitchErrors = pitchErrors;
+	bot.pitchErrorCount = pitchErrorCount;
 	bot.look.quiet = false;
 	bot.follower.progress(toAi(self.position), std::fabs(input.throttle), m_time);
 	return true;
