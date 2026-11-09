@@ -1237,6 +1237,14 @@ public:
 		// the bundles whose startOnEffects is 0 (0x0061a4e0: the muzzle
 		// flash and smoke) and sets off the GroundEffectBundles (0x0061e090).
 		std::vector<std::string> firedWeapons;
+		// Events 0 and 1 to the object's own children this update (a
+		// round's: its engine's start, 0x005b2c10, sends 0x44 then 0; its
+		// stop, 0x005b2ca0 at a lost target or the round's end 0x005b4cb0,
+		// sends 1 then 0x45). 0x0061a4e0 starts on event 0 the bundles whose
+		// startOnEffects is 0 and stops on event 1 those whose
+		// stopOnEffects is 0; 0x44 and 0x45 do nothing to a bundle.
+		bool startEvent = false;
+		bool stopEvent = false;
 	};
 	// The ground under a point (wheel and draft bundles): the first hit from
 	// `from` to `to` against the terrain, the water and the objects (not

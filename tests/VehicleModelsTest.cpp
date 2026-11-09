@@ -2152,6 +2152,149 @@ TEST(Vehicles_HeavyIfvShieldCellsTakeRounds)
 	}
 }
 
+namespace {
+
+// Horizontal rays across a vehicle (along its x, every half metre of its
+// z from -2 to 2) at heights over its origin from `low` to `high`: at how
+// many heights one meets it, and the first and last.
+struct Probe {
+	int hits = 0;
+	float lowest = 1e9f, highest = -1e9f;
+};
+Probe probeAcross(Garage& g, uint32_t vehicle, float low, float high)
+{
+	Probe probe;
+	const world::Object* o = g.objects.find(vehicle);
+	const physics::Mat3 hull = physics::Mat3::fromYawPitchRoll({o->rotation().x, o->rotation().y, o->rotation().z});
+	const physics::Vec3 at = g.position(vehicle);
+	for (float h = low; h <= high; h += 0.25f) {
+		for (float z = -2; z <= 2; z += 0.5f) {
+			const physics::Vec3 from = at + hull.transform({-12, h, z});
+			const physics::Vec3 to = at + hull.transform({12, h, z});
+			float fraction = 0;
+			uint32_t object = 0;
+			if (g.world->segmentHit(from, to, 0, fraction, object) && object == vehicle) {
+				++probe.hits;
+				probe.lowest = std::min(probe.lowest, h);
+				probe.highest = std::max(probe.highest, h);
+				break;
+			}
+		}
+	}
+	return probe;
+}
+
+} // namespace
+
+// The walker's parts (0x0063ccc0): its mesh's geometry 0 is one small
+// face and the parts' collisionPart geometries are its shape (the legs'
+// bones, the torso on its spring, the turret and guns on their bundles).
+// Rays across it meet the legs and the torso standing, and again after it
+// has walked (the parts posed where they stand, PartCollision.cpp); the
+// tank's hull and turret as before.
+TEST(Vehicles_RoundsMeetTheWalkersParts)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t mech = g.start("us_heavy_mech", {0, 4, 6});
+	g.animate();
+	g.run(1);
+	// The feet stand about 3.2 m under the origin, the torso above it.
+	const Probe legs = probeAcross(g, mech, -2.75f, -0.75f);
+	const Probe torso = probeAcross(g, mech, 0.0f, 2.0f);
+	std::fprintf(stderr, "  us_heavy_mech parked: legs %d rays (%.2f..%.2f), torso %d rays (%.2f..%.2f)\n", legs.hits,
+		legs.lowest, legs.highest, torso.hits, torso.lowest, torso.highest);
+	CHECK(legs.hits >= 8 && torso.hits >= 8);
+	CHECK(g.enter(mech));
+	const physics::Vec3 start = g.position(mech);
+	game::SoldierInput walk;
+	walk.throttle = 1;
+	g.drive(walk, 4);
+	const physics::Vec3 now = g.position(mech);
+	const float walked = std::sqrt(physics::lengthSquared(now - start));
+	const Probe walkingLegs = probeAcross(g, mech, -2.75f, -0.75f);
+	const Probe walkingTorso = probeAcross(g, mech, 0.0f, 2.0f);
+	std::fprintf(stderr, "  walked %.1f m: legs %d rays, torso %d rays\n", walked, walkingLegs.hits, walkingTorso.hits);
+	CHECK(walked > 5);
+	CHECK(walkingLegs.hits >= 8 && walkingTorso.hits >= 8);
+	// A ray at the knees' height (the legs reach back from the hips) meets
+	// a leg out at its side (the left or, mid-stride, the right), not the
+	// middle (where the root's one face lies).
+	const world::Object* o = g.objects.find(mech);
+	const physics::Mat3 hull = physics::Mat3::fromYawPitchRoll({o->rotation().x, o->rotation().y, o->rotation().z});
+	float fraction = 0;
+	uint32_t object = 0;
+	CHECK(g.world->segmentHit(now + hull.transform({-12, -1.5f, -0.75f}), now + hull.transform({12, -1.5f, -0.75f}), 0,
+		fraction, object));
+	const float x = -12 + 24 * fraction;
+	std::fprintf(stderr, "  the knee-high ray meets it at x %.2f\n", x);
+	CHECK(object == mech && std::fabs(x) > 1.0f);
+
+	Garage tank(gameDir());
+	const uint32_t t = tank.start("eu_tank", {0, 2, 6});
+	const Probe hull2 = probeAcross(tank, t, -0.5f, 2.0f);
+	CHECK(hull2.hits >= 6 && hull2.highest > 0.9f); // the turret over the hull
+}
+
+// An anti-vehicle rocket (eu_av's) at the walker's leg (us_heavy_mech:
+// the root's armour, 1000 hit points; the leg's faces are material "legs"
+// 4201 through the root's mapMaterial) hurts the walker: a part's hit is its root's (0x004c0e40,
+// the nearest armoured ancestor).
+TEST(Vehicles_RocketHurtsTheWalker)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t mech = g.start("us_heavy_mech", {0, 4, 6});
+	const int shooter = g.world->addPlayer("Shooter", 1, true);
+	const world::ObjectTemplate* launcher = g.templates.find("eu_av");
+	const std::string round = launcher && launcher->settings().count("projectileTemplate")
+		? launcher->settings().at("projectileTemplate")
+		: "";
+	CHECK(!round.empty());
+	const float before = g.world->hitPoints(mech);
+	const world::Object* o = g.objects.find(mech);
+	const physics::Mat3 hull = physics::Mat3::fromYawPitchRoll({o->rotation().x, o->rotation().y, o->rotation().z});
+	// From 20 m off its left side at the knee's height, flying across.
+	const physics::Vec3 at = g.position(mech) + hull.transform({-20, -1.5f, -0.75f});
+	CHECK(g.world->launchProjectile(round, at, hull.transform({60, 0, 0}), shooter));
+	g.run(1);
+	const float after = g.world->hitPoints(mech);
+	std::fprintf(stderr, "  us_heavy_mech: %.0f -> %.0f hit points\n", before, after);
+	CHECK(after < before - 10);
+}
+
+// A wreck's mesh instances (0x006539f0(object, 1)): the root's turns to
+// its wreck sub-geometry (us_heavy_mech's whole wreck shape) and the
+// parts, with one sub-geometry, leave the rays.
+TEST(Vehicles_WalkerWreckMeetsRaysAsItsWreckShape)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t mech = g.start("us_heavy_mech", {0, 4, 6});
+	g.run(0.5f);
+	g.world->applyDamage(mech, 1100);
+	g.run(0.2f);
+	CHECK(g.world->hitPoints(mech) <= 0);
+	const Probe wreck = probeAcross(g, mech, -3.5f, 3.0f);
+	std::fprintf(stderr, "  us_heavy_mech wreck: %d rays (%.2f..%.2f)\n", wreck.hits, wreck.lowest, wreck.highest);
+	CHECK(wreck.hits >= 4);
+}
+
 // The static AV gun (static_av: stationary, Body::fixed): its
 // seatInformation names Static_AV_Cockpit, so its gunner is shown sitting
 // on the cockpit (0x005cd4f0 / 0x005c6670 / 0x005cdd60) and turns with it

@@ -725,7 +725,7 @@ bool GameWorld::segmentHit(const physics::Vec3& from, const physics::Vec3& to, u
 		}
 		const physics::Vec3 localFrom = body.body.rotation.untransform(from - body.body.position);
 		const physics::Vec3 localTo = body.body.rotation.untransform(to - body.body.position);
-		if (body.projectileMesh->raycast(localFrom, localTo, hit) && hit.fraction < nearest) {
+		if (raycastBody(body, localFrom, localTo, hit) && hit.fraction < nearest) {
 			nearest = hit.fraction;
 			object = body.object;
 		}
@@ -1202,6 +1202,12 @@ void GameWorld::destroyVehicle(Body& body, int attacker)
 		body.hideChildren = true;
 		m_hiddenChildren.insert(body.object);
 	}
+	// The wreck's mesh instances (0x00654120: with wreckDelay, +0x160, at
+	// most 0.01 and no dontUseWreck, +0x169, 0x006539f0(object, 1) at once;
+	// a later delay posts event 0x27 for it, 0x00655320: stepVehicleDamage).
+	if (number(t, "armor.dontUseWreck", 0) == 0 && number(t, "armor.wreckDelay", 0) <= 0.01f) {
+		wreckCollision(body);
+	}
 	raise("VehicleDestroyed", {ScriptValue::object(body.object), ScriptValue::player(attacker)});
 	destroyedGameEvent(t);
 	if (body.vehicle) {
@@ -1593,6 +1599,10 @@ void GameWorld::stepVehicleDamage(float seconds)
 		if (body.wreckTime >= 0) {
 			body.wreckTime -= seconds;
 			body.wreckAge += seconds;
+			if (!body.collisionWrecked && number(t, "armor.dontUseWreck", 0) == 0
+				&& body.wreckAge >= number(t, "armor.wreckDelay", 0)) {
+				wreckCollision(body); // event 0x27 after wreckDelay (0x00655320 -> 0x006539f0)
+			}
 			if (body.wreckTime < 0) {
 				// The wreck's armour has drained to -wreckHitPoints: its last
 				// effects (level -100, left in the world) go off as it goes.
@@ -2311,7 +2321,7 @@ bool GameWorld::penetrate(Projectile& p, const physics::CollisionWorld::Hit& hit
 			const physics::Vec3 end = turn.untransform(hit.point + d * (2.1f * hitBody->radius) - at);
 			for (int tries = 0; tries < 8; ++tries) {
 				physics::CollisionWorld::Hit face {};
-				if (!hitBody->projectileMesh->raycast(start, end, face)) {
+				if (!raycastBody(*hitBody, start, end, face)) {
 					break;
 				}
 				const physics::Vec3 local = start + (end - start) * face.fraction;
@@ -3754,7 +3764,7 @@ void GameWorld::stepProjectiles(float seconds)
 			}
 			const physics::Vec3 localFrom = body.body.rotation.untransform(from - body.body.position);
 			const physics::Vec3 localTo = body.body.rotation.untransform(to - body.body.position);
-			if (body.projectileMesh->raycast(localFrom, localTo, candidate) && candidate.fraction < best) {
+			if (raycastBody(body, localFrom, localTo, candidate) && candidate.fraction < best) {
 				best = candidate.fraction;
 				hitBody = &body;
 				hit = candidate;
@@ -5459,7 +5469,7 @@ bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, 
 		}
 		const physics::Vec3 localFrom = body.body.rotation.untransform(from - body.body.position);
 		const physics::Vec3 localTo = body.body.rotation.untransform(to - body.body.position);
-		if (body.projectileMesh->raycast(localFrom, localTo, hit)) {
+		if (raycastBody(body, localFrom, localTo, hit)) {
 			return false;
 		}
 	}
@@ -5482,9 +5492,9 @@ bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, 
 	seenThrough = false;
 	// A mesh's faces from `a` to `b`, see-through ones passed (each pass
 	// starts a hair past the face it went through).
-	const auto blocked = [&](const physics::CollisionWorld& mesh, physics::Vec3 a, const physics::Vec3& b) {
+	const auto blocked = [&](const auto& raycast, physics::Vec3 a, const physics::Vec3& b) {
 		physics::CollisionWorld::Hit hit {};
-		for (int pass = 0; pass < 16 && mesh.raycast(a, b, hit); ++pass) {
+		for (int pass = 0; pass < 16 && raycast(a, b, hit); ++pass) {
 			const physics::Material* material = m_materials ? m_materials->find(hit.material) : nullptr;
 			if (!material || !material->isSeeThrough) {
 				return true;
@@ -5502,7 +5512,10 @@ bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, 
 		}
 		return false;
 	};
-	if (blocked(m_projectileCollision, from, to)) {
+	const auto statics = [this](const physics::Vec3& a, const physics::Vec3& b, physics::CollisionWorld::Hit& hit) {
+		return m_projectileCollision.raycast(a, b, hit);
+	};
+	if (blocked(statics, from, to)) {
 		return false;
 	}
 	for (const Body& body : m_bodies) {
@@ -5511,7 +5524,10 @@ bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, 
 		}
 		const physics::Vec3 localFrom = body.body.rotation.untransform(from - body.body.position);
 		const physics::Vec3 localTo = body.body.rotation.untransform(to - body.body.position);
-		if (blocked(*body.projectileMesh, localFrom, localTo)) {
+		const auto parts = [this, &body](const physics::Vec3& a, const physics::Vec3& b, physics::CollisionWorld::Hit& hit) {
+			return raycastBody(body, a, b, hit);
+		};
+		if (blocked(parts, localFrom, localTo)) {
 			return false;
 		}
 	}
@@ -5712,7 +5728,7 @@ bool GameWorld::groundMaterialAlong(const physics::Vec3& from, const physics::Ve
 		}
 		const physics::Vec3 localFrom = body.body.rotation.untransform(from - body.body.position);
 		const physics::Vec3 localTo = body.body.rotation.untransform(to - body.body.position);
-		if (body.projectileMesh->raycast(localFrom, localTo, hit) && hit.fraction < nearest) {
+		if (raycastBody(body, localFrom, localTo, hit) && hit.fraction < nearest) {
 			nearest = hit.fraction;
 			material = hit.material;
 		}
@@ -5748,7 +5764,7 @@ bool GameWorld::firstHit(const physics::Vec3& from, const physics::Vec3& to, uin
 		}
 		const physics::Vec3 localFrom = body.body.rotation.untransform(from - body.body.position);
 		const physics::Vec3 localTo = body.body.rotation.untransform(to - body.body.position);
-		if (body.projectileMesh->raycast(localFrom, localTo, hit) && hit.fraction < nearest) {
+		if (raycastBody(body, localFrom, localTo, hit) && hit.fraction < nearest) {
 			nearest = hit.fraction;
 			object = body.object;
 		}
@@ -12056,6 +12072,7 @@ bool GameWorld::buildBody(const world::ObjectTemplate& tRef, uint32_t id, const 
 	}
 	body.projectileMesh = std::make_shared<physics::CollisionWorld>();
 	body.projectileMesh->addMesh(*mesh, physics::CollisionUser::Projectile, {}, {}, id, materialMap(*t));
+	buildCollisionParts(body, *t, *mesh); // the collisionPart children's (0x0063ccc0)
 	body.soldierMesh = std::make_shared<physics::CollisionWorld>();
 	body.soldierMesh->addMesh(*mesh, physics::CollisionUser::Soldier, {}, {}, id, materialMap(*t));
 	// Soldiers push a small projectile (0x006c3890: class 0x9539, the

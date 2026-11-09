@@ -771,6 +771,8 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 	body->teamSoldierMesh[1] = teams[1];
 	body->soldierMesh = soldier;
 	body->projectileMesh = projectile;
+	body->partNodes.clear(); // the Titan's parts are its meshes above
+	body->partMeshes.clear();
 	// The radius (0x00562090): half the diagonal of the root's box across x
 	// and z; its bottom (0x005aa090: the box's lowest y).
 	titan.radius = 0.5f * std::sqrt((body->boxMax.x - body->boxMin.x) * (body->boxMax.x - body->boxMin.x)

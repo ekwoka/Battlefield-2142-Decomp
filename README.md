@@ -238,6 +238,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | `--play [1\|2]` | Spawn and control a soldier of team 1 (PAC) or 2 (EU, the default). |
 | `--drive <vehicle>` | Put a vehicle (e.g. `eu_fav`) in front of the soldier and get in. |
 | `--seat <n>` | With `--drive`, stay in seat n (1 is the driver). |
+| `--kit <name\|n>` | Spawn with that kit of the team's list (e.g. `EU_Anti-Vehicle`, or its number from 1). |
 | `--zoom` | A screenshot's soldier zooms in after firing. |
 | `--actions "<cmd> …"` | A screenshot's soldier's inputs before the shot, e.g. `"reload wait:60 firemode fire:10 item:2 prone:20 jump"`. |
 | `--unlock-all` | Every kit unlock. |

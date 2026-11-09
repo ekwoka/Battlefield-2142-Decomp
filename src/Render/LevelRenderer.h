@@ -169,6 +169,18 @@ struct LevelSources {
 	// More of them, drawn with those (the bundles attached to objects:
 	// engines, exhausts, trails; effects::ObjectEffects).
 	const effects::EffectManager* objectEffects = nullptr;
+	// Templates drawn this frame without an object of their own: the
+	// rounds in flight and lying (GameWorld's projectiles, whose objects
+	// RendDX9 draws as any bundled mesh: the GenericProjectile's
+	// ObjectTemplate.geometry at the round's matrix; client::RoundVisuals).
+	// Their geometry's parts sit as the template's children place them.
+	// Asked by syncObjects; may be null.
+	struct PlacedTemplate {
+		const world::ObjectTemplate* objectTemplate = nullptr;
+		effects::Vec3 position;
+		effects::Mat3 rotation; // rows x, y, z
+	};
+	std::function<void(std::vector<PlacedTemplate>& out)> placedTemplates;
 	// The first-person view, asked each frame: false draws none.
 	std::function<bool(FirstPersonScene& scene)> firstPerson;
 	// Objects the world pass leaves out this frame (in first person the
@@ -267,6 +279,9 @@ public:
 	// The effects' debris pieces (effects::DebrisPiece) as instances of their
 	// mesh with only their geometryPart shown, replaced each frame.
 	void syncDebris();
+	// The placed templates (LevelSources::placedTemplates) as instances of
+	// their geometry, replaced each frame.
+	void syncPlaced();
 
 	// Records a render pass into `commands` that clears and draws into
 	// `color` (a swapchain or offscreen texture) using `target`'s depth.
@@ -416,6 +431,7 @@ private:
 		float overgrowthCell[3] {};
 		mutable float overgrowthLodState = 0;
 		bool debris = false;     // an effects' debris piece, placed afresh each frame (syncDebris)
+		bool placed = false;     // a placed template (a round's mesh), placed afresh each frame (syncPlaced)
 		// The mesh instance's UV matrices (RendDX9 +0x28c) and its parts'
 		// animated-UV states (BF2142.exe's SimpleObject +0x160), in the
 		// order collectParts meets them (AnimatedUV.h).
@@ -512,6 +528,11 @@ private:
 	const AnimatedUVLook& animatedUVLook(const world::ObjectTemplate& objectTemplate) const;
 	mutable std::unordered_map<const world::ObjectTemplate*, AnimatedUVLook> m_animatedUVLooks;
 	std::vector<AnimatedUVPart> m_animatedUVParts; // syncObjects' scratch
+	// syncPlaced's: the templates asked for this frame, and each template's
+	// parts at rest (collectParts without an object).
+	std::vector<LevelSources::PlacedTemplate> m_placedScratch;
+	std::map<const world::ObjectTemplate*, std::vector<Mat4>> m_placedParts;
+	bool m_hadPlaced = false;
 	void buildTerrain(const LevelSources& sources);
 	// The primary terrain's LODs (terraindata.raw's compiled patches, drawn
 	// as RendDX9's terrain culler draws them: cells of terrainCuller.

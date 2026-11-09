@@ -2098,6 +2098,38 @@ private:
 		std::vector<physics::Vec3> points; // vehicle collision LOD
 		std::shared_ptr<physics::CollisionWorld> projectileMesh; // object space, projectile LOD
 		std::shared_ptr<physics::CollisionWorld> soldierMesh;    // object space, soldier LOD (ragdolls)
+		// The parts with a collisionPart (0x0063ccc0: a child whose template
+		// +0x74 is over 0 and whose physicsType is Mesh or MechLegs gets an
+		// instance of the root's mesh at that geometry): each part's
+		// projectile LOD in its own frame, posed as the part stands
+		// (PartCollision.cpp). The tree down to them: each node's template
+		// place in its parent's frame; `mesh` its entry in partMeshes.
+		struct PartNode {
+			std::string name;
+			int parent = -1; // -1: the root
+			physics::Mat3 rotation;
+			physics::Vec3 position;
+			int mesh = -1;
+		};
+		struct PartMesh {
+			int node = -1;
+			// The instance's sub-geometries' projectile LODs in the part's
+			// frame: [0] the normal one, [1] a wreck's (null: none, and the
+			// wrecked part is out of the rays: 0x006e5df0 returns 0).
+			std::shared_ptr<const physics::CollisionWorld> lod[2];
+			float radius = 0; // the LODs' farthest box corner from the part's origin
+			// Its frame in the object's as of `partsPosed` (poseCollisionParts).
+			mutable physics::Mat3 rotation;
+			mutable physics::Vec3 position;
+		};
+		std::vector<PartNode> partNodes;
+		std::vector<PartMesh> partMeshes;
+		float partReach = 0; // a sphere about the origin the posed parts stay within
+		mutable uint32_t partsPosed = 0xffffffffu; // the tick of the frames
+		// The mesh instances in their wreck state (0x006539f0(.., 1) from the
+		// armour's wreck, 0x00654120): the root's projectile LOD and each
+		// part's switched to sub-geometry 1 (wreckCollision).
+		bool collisionWrecked = false;
 		// A Titan's: what each team's soldiers meet (the soldier mesh and the
 		// other team's forcefields; collisionGroups 0x100 / 0x200).
 		std::shared_ptr<physics::CollisionWorld> teamSoldierMesh[2];
@@ -2570,6 +2602,15 @@ private:
 	void addBodies();
 	bool buildBody(const world::ObjectTemplate& t, uint32_t id, const physics::Vec3& position,
 		const physics::Mat3& rotation, Body& body);
+	// PartCollision.cpp: the collisionPart children's projectile LODs
+	// (0x0063ccc0), their live frames, the wreck state (0x006539f0) and
+	// the segment against a body's projectile LOD and its parts, in the
+	// body's frame (every round, line-of-sight and drop ray goes through it).
+	void buildCollisionParts(Body& body, const world::ObjectTemplate& t, const physics::CollisionMeshFile& mesh);
+	void poseCollisionParts(const Body& body) const;
+	void wreckCollision(Body& body);
+	bool raycastBody(const Body& body, const physics::Vec3& localFrom, const physics::Vec3& localTo,
+		physics::CollisionWorld::Hit& hit) const;
 	bool stepBody(Body& body, float seconds);
 	void stepPhysics(float seconds);
 	// A walker's animation system fed as 0x0063ce30 does (see GameWorld.cpp).
@@ -3688,6 +3729,9 @@ private:
 	// A hit on a cell (loseHitPoints): its armour, the award, its destroy event.
 	bool shieldCellDamage(uint32_t id, float amount, int attacker);
 	void buildShieldCells(Body& body);
+	// The cells' meshes into a projectile LOD (the root's state: a wreck's
+	// sub-geometry where the cell's mesh has one).
+	void addShieldCellMeshes(const Body& body, physics::CollisionWorld& world) const;
 	std::vector<std::pair<physics::Vec3, float>> m_titanObstacles; // static objects reaching the Titans (0x00562360)
 	bool m_titanObstaclesFound = false;
 	void registerTitan(uint32_t object, int controlPoint);

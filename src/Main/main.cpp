@@ -54,6 +54,7 @@
 #endif
 #include "Prediction.h"
 #include "RemoteGuns.h"
+#include "RoundVisuals.h"
 #include "Movie/MovieDecoder.h"
 #include "Movie/MovieQueue.h"
 #include "Movie/MenuVideo.h"
@@ -150,6 +151,7 @@ struct Options {
 	std::string animation;       // .baf played by skinned objects in the viewer
 	int playTeam = 0;            // --play: control a soldier of this team (1 PAC, 2 EU)
 	std::string drive;           // --drive <vehicle>: put one before the player and drive it
+	std::string kit;             // --kit <name|n>: the player's kit (the team's kit list, by name or from 1)
 	int bots = 0;                // --bots N: AI players, alternately PAC and EU
 	int simulate = 0;            // --simulate N: run N seconds headless, then show the scores
 	std::string language = "English"; // --language: the registry's Language (0x00405360), strings.csv's column
@@ -341,6 +343,8 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.emulatorServers.push_back(argv[++i]);
 		} else if (arg == "--require-login") {
 			options.requireLogin = true;
+		} else if (arg == "--kit" && hasValue) {
+			options.kit = argv[++i];
 		} else if (arg == "--drive" && hasValue) {
 			options.drive = argv[++i];
 			if (options.playTeam == 0) {
@@ -5340,6 +5344,8 @@ int runGame(Options& options, Session& session)
 		// trails), following them (effects::ObjectEffects).
 		effects::EffectManager objectEffects(templates, 0x2f6b1d3u);
 		effects::ObjectEffects objectEffectBundles(templates);
+		// The rounds' own bundles (trails) and meshes (client::RoundVisuals).
+		client::RoundVisuals roundVisuals(templates);
 		// The wheel and draft bundles' ground: the water, else what the
 		// projectiles' collision meets (its point taken on the terrain under
 		// it, or the ray's middle on an object), and the materials' effect.
@@ -5438,6 +5444,7 @@ int runGame(Options& options, Session& session)
 				}
 				states.push_back(state);
 			}
+			roundVisuals.appendEffectStates(round.projectiles(), states);
 			objectEffectBundles.update(states, objectEffects,
 				[&round](uint32_t object, const std::string& part, physics::Vec3& offset, physics::Vec3& rotation) {
 					world::Vec3 o, r;
@@ -7208,7 +7215,31 @@ int runGame(Options& options, Session& session)
 				round.localPlayerUnlocks = stats::containersFor(stats::unlockContainers(templates), session.menuBindings->soldierUnlocks());
 				round.localPlayerOwned = round.localPlayerUnlocks;
 			}
-			if (const world::Object* player = round.spawnPlayer(options.playTeam)) {
+			const world::Object* player = round.spawnPlayer(options.playTeam);
+			if (player && !options.kit.empty()) {
+				// --kit: the kit of the team's list, taken as the spawn screen's
+				// choice and spawned with at once (the first soldier is let go).
+				const auto& kits = gameLogic.team(options.playTeam).kits;
+				const game::Kit* chosen = nullptr;
+				for (size_t i = 0; i < kits.size(); ++i) {
+					if (kits[i].name == options.kit || std::to_string(i + 1) == options.kit) {
+						chosen = &kits[i];
+					}
+				}
+				if (!chosen) {
+					std::fprintf(stderr, "no kit %s; the team's kits:", options.kit.c_str());
+					for (const game::Kit& kit : kits) {
+						std::fprintf(stderr, " %s", kit.name.c_str());
+					}
+					std::fprintf(stderr, "\n");
+				} else {
+					round.setKit(round.localPlayer(), chosen->name, chosen->soldier);
+					round.setHitPoints(round.playerObject(), 0);
+					step();
+					player = round.spawnPlayer(options.playTeam);
+				}
+			}
+			if (player) {
 				round.joinSquad(round.localPlayer(), round.openSquad(options.playTeam));
 				std::printf("playing %s at %.1f/%.1f/%.1f\n", player->objectTemplate()->name().c_str(),
 					player->position().x, player->position().y, player->position().z);
@@ -7765,6 +7796,14 @@ int runGame(Options& options, Session& session)
 			}
 		};
 		sources.objectEffects = &objectEffects;
+		std::vector<client::RoundVisuals::Mesh> roundMeshes;
+		sources.placedTemplates = [&](std::vector<render::LevelSources::PlacedTemplate>& out) {
+			roundMeshes.clear();
+			roundVisuals.meshes(round.projectiles(), roundMeshes);
+			for (const client::RoundVisuals::Mesh& mesh : roundMeshes) {
+				out.push_back({mesh.objectTemplate, mesh.position, mesh.rotation});
+			}
+		};
 		nametags::Nametags nametags(files);
 		// The vehicles' render LODs for their tags' height (0x100c7000 at the
 		// LOD 0x100c3390 picks; read once a template).

@@ -564,12 +564,28 @@ void GameAudio::engines()
 	}
 }
 
+// The round's Sound child, created and played with it (its loop; the
+// template's own child, as the S_<name>_Looping most carry, a few named
+// otherwise: static_ap_railgun_projectile's
+// S_static_ap_railgun_projectile_projectile_Looping), else that name.
 const std::string& GameAudio::loopingSound(const void*, const std::string& name)
 {
 	auto it = m_looping.find(name);
 	if (it == m_looping.end()) {
-		const std::string loop = "S_" + name + "_Looping";
-		it = m_looping.emplace(name, m_manager.soundTemplate(loop) ? loop : std::string()).first;
+		std::string loop;
+		if (const world::ObjectTemplate* round = m_templates.find(name)) {
+			for (const world::ChildTemplate& child : round->children()) {
+				const world::ObjectTemplate* c = m_templates.find(child.name);
+				if (c && c->typeName() == "Sound") {
+					loop = child.name;
+					break;
+				}
+			}
+		}
+		if (loop.empty() && m_manager.soundTemplate("S_" + name + "_Looping")) {
+			loop = "S_" + name + "_Looping";
+		}
+		it = m_looping.emplace(name, loop).first;
 	}
 	return it->second;
 }

@@ -298,7 +298,14 @@ void GameWorld::buildShieldCells(Body& body)
 		};
 	find(*t, physics::Mat3 {}, physics::Vec3 {}, 0);
 	// The cells' meshes into the vehicle's projectile LOD.
-	if (!m_collisionTemplates || !m_files || !body.projectileMesh) {
+	if (body.projectileMesh) {
+		addShieldCellMeshes(body, *body.projectileMesh);
+	}
+}
+
+void GameWorld::addShieldCellMeshes(const Body& body, physics::CollisionWorld& world) const
+{
+	if (!m_collisionTemplates || !m_files) {
 		return;
 	}
 	for (size_t i = 0; i < body.cells.size(); ++i) {
@@ -306,10 +313,21 @@ void GameWorld::buildShieldCells(Body& body)
 		const std::string* name = setting(*cell.t, "collisionMesh");
 		const physics::CollisionMeshFile* mesh = name ? m_collisionTemplates->mesh(*name, *m_files) : nullptr;
 		const uint32_t id = shieldCellId(body.object, i);
-		if (mesh && !mesh->geometries.empty() && id) {
-			body.projectileMesh->addMesh(*mesh, physics::CollisionUser::Projectile, cell.rotation, cell.position, id,
-				materialMap(*cell.t));
+		if (!mesh || mesh->geometries.empty() || !id) {
+			continue;
 		}
+		// A wreck's tree switches every instance (0x006539f0 over the
+		// children): to sub-geometry 1 where there is one, else out of
+		// the rays (0x006e5df0 returning 0 clears the object's flag 0x100).
+		size_t state = 0;
+		if (body.collisionWrecked) {
+			if (mesh->geometries[0].subGeometries.size() < 2) {
+				continue;
+			}
+			state = 1;
+		}
+		world.addMesh(*mesh, physics::CollisionUser::Projectile, cell.rotation, cell.position, id, materialMap(*cell.t),
+			0, state);
 	}
 }
 

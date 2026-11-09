@@ -1954,6 +1954,60 @@ void LevelRenderer::syncObjects()
 		}
 	}
 	syncDebris();
+	syncPlaced();
+}
+
+void LevelRenderer::syncPlaced()
+{
+	m_placedScratch.clear();
+	if (m_sources && m_sources->placedTemplates) {
+		m_sources->placedTemplates(m_placedScratch);
+	}
+	if (m_placedScratch.empty() && !m_hadPlaced) {
+		return;
+	}
+	m_instances.erase(std::remove_if(m_instances.begin(), m_instances.end(), [](const Instance& i) { return i.placed; }),
+		m_instances.end());
+	m_hadPlaced = !m_placedScratch.empty();
+	bool uploaded = false;
+	for (const LevelSources::PlacedTemplate& placed : m_placedScratch) {
+		if (!placed.objectTemplate || placed.objectTemplate->geometry().empty()) {
+			continue;
+		}
+		const std::string& geometry = placed.objectTemplate->geometry();
+		const size_t before = m_stats.meshes;
+		const GpuMesh* gpuMesh = mesh(*m_sources, geometry);
+		uploaded = uploaded || m_stats.meshes != before;
+		if (!gpuMesh) {
+			continue;
+		}
+		Instance instance {gpuMesh, Mat4 {}, 0, Mat4 {}, nullptr, {1, 1, 0, 0}, {}, nullptr, nullptr};
+		for (int row = 0; row < 3; ++row) {
+			const effects::Vec3& r = placed.rotation.rows[static_cast<size_t>(row)];
+			instance.world.at(row, 0) = r.x;
+			instance.world.at(row, 1) = r.y;
+			instance.world.at(row, 2) = r.z;
+		}
+		instance.world.at(3, 0) = placed.position.x;
+		instance.world.at(3, 1) = placed.position.y;
+		instance.world.at(3, 2) = placed.position.z;
+		instance.local = instance.world;
+		instance.geometry = geometry;
+		instance.placed = true;
+		if (gpuMesh->bundled) {
+			auto parts = m_placedParts.find(placed.objectTemplate);
+			if (parts == m_placedParts.end()) {
+				std::vector<Mat4> rest(kMaxMeshParts, Mat4 {});
+				collectParts(*m_sources, *placed.objectTemplate, Mat4 {}, rest, 0);
+				parts = m_placedParts.emplace(placed.objectTemplate, std::move(rest)).first;
+			}
+			instance.parts = parts->second;
+		}
+		m_instances.push_back(std::move(instance));
+	}
+	if (uploaded) {
+		m_gpu.flushUploads();
+	}
 }
 
 void LevelRenderer::syncDebris()
@@ -3382,6 +3436,8 @@ void LevelRenderer::build(const LevelSources& sources)
 {
 	m_startTicks = SDL_GetTicks();
 	m_sources = &sources; // the quality levels the loaders read
+	m_placedParts.clear();
+	m_hadPlaced = false;
 	// texturemanager.customTextureSuffix as the level's Init.con left it: the
 	// original swaps the textures at the end of the load (0x1000deb0 ->
 	// 0x10018ca0); the rewrite loads the variants as it goes.

@@ -428,6 +428,25 @@ TEST(GameAudio_WeaponsOfARound)
 	CHECK(range.count("S_eu_ar_rifle_Fire3P") >= 1);
 }
 
+// A round's own Sound child (created and played with it) loops while it
+// flies, whatever its name (static_ap_railgun_projectile's is
+// S_static_ap_railgun_projectile_projectile_Looping).
+TEST(GameAudio_RoundLoopsItsSoundChild)
+{
+	Range range;
+	addSoundTemplate(range.templates, "S_bullet_whiz");
+	range.templates.find("bullet")->children().push_back({"S_bullet_whiz", {}, {}});
+	GameAudio audio(*range.world, range.objects, range.templates, range.manager, range.game, nullptr);
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	game::SoldierInput fire;
+	fire.fire = true;
+	range.world->setPlayerInput(fire);
+	range.world->tick(1 / 30.0f);
+	CHECK(!range.world->projectiles().empty());
+	audio.tick({});
+	CHECK(range.count("S_bullet_whiz") == 1);
+}
+
 // The local player's radio through GameAudio: a teammate's message within
 // 15 m in person, an object's automatic team-change message played for the
 // local player by its team.

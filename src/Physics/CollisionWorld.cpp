@@ -45,10 +45,10 @@ Vec3 closestOnTriangle(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& 
 } // namespace
 
 void CollisionWorld::addMesh(const CollisionMeshFile& mesh, CollisionUser user, const Mat3& rotation,
-	const Vec3& position, uint32_t owner, const std::vector<uint32_t>& materials)
+	const Vec3& position, uint32_t owner, const std::vector<uint32_t>& materials, size_t geometry, size_t state)
 {
-	// Geometry 0's normal sub-geometry: the instance's (+0x14, state 0).
-	const CollisionSubGeometry* part = collisionPart(mesh, 0);
+	// The instance's sub-geometry (+0x14: 0 normally, 1 a wreck's).
+	const CollisionSubGeometry* part = collisionPart(mesh, geometry, state);
 	const CollisionLod* found = part ? collisionLodFor(mesh, *part, static_cast<uint32_t>(user)) : nullptr;
 	if (found) {
 		const CollisionLod& lod = *found;

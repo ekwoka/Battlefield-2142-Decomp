@@ -148,7 +148,7 @@ void GameWorld::dropKit(Player& player)
 		}
 		const physics::Vec3 localFrom = body.body.rotation.untransform(from - body.body.position);
 		const physics::Vec3 localTo = body.body.rotation.untransform(to - body.body.position);
-		if (body.projectileMesh->raycast(localFrom, localTo, hit) && hit.fraction < nearest) {
+		if (raycastBody(body, localFrom, localTo, hit) && hit.fraction < nearest) {
 			nearest = hit.fraction;
 			hitObject = body.object;
 		}

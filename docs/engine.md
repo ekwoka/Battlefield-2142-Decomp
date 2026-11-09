@@ -236,17 +236,67 @@ state, the sub-geometry, at `+0x14` (0; slot `0x30`, `0x006e5df0`,
 switches to 1 when the geometry has `+0x60` set and more than one
 sub-geometry, applied by slot `0x34`, `0x006e5e90`; slot 5 back to 0).
 A part's `collisionPart` (template `+0x74`) is the geometry: `0x0063ccc0`
-gives each child with one over 0 an instance of the root's mesh at it.
+walks the object tree and gives each child with one over 0 whose
+physicsType (`+0xf4`) is not None, Point or RotationalPoint (0, 1, 2:
+Mesh or MechLegs) an instance of the root's mesh at it (slot `0x28`,
+set on the child as interface `0xcaa32`), so each part collides in its
+own frame as it moves. (`+0x60` is the geometry's loaded flag, set at
+the end of its loader `0x006e4880`.)
 Every per-LOD query (slots 10–28: faces, vertices, materials, radius of
 a LOD, segment and sphere queries) goes through the instance's one
 sub-geometry; only the radius (slot `0x74`, `0x006dedb0`) and the box
 (slot `0x78`, `0x006deeb0`) look across all of them. Rewritten in
-`physics::parseCollisionMesh` (the trim) and `physics::collisionPart`:
-the rewrite collides with the normal sub-geometry alone (it used to add
-the wreck's faces too) and never switches to the wreck's: no caller of the
-instance's slot `0x30` with 1 was found (the `+ 0x30))(1)` calls in
-`0x0050`–`0x006f` are other classes' slots), so what turns a wreck's
-mesh over is unknown.
+`physics::parseCollisionMesh` (the trim) and `physics::collisionPart`.
+
+**The parts as rounds meet them** (`src/Game/PartCollision.cpp`). The
+walkers' geometry 0 is a single small face (us_heavy_mech: 49
+geometries, the root's projectile LOD one face, its wreck sub-geometry
+6746 faces); their shape is the 48 parts' (pelvis, hatches, torso
+turret, guns, the legs' bone parts, toes), so the rewrite's projectile
+LOD of geometry 0 alone let every round through them, and through the
+tanks' turrets and the APCs' guns. Each body now keeps every
+collisionPart child's projectile LOD in the part's own frame (children
+with a collision mesh of their own, the heavy IFV's shield generators,
+stay the cells'; Titans keep their own meshes, `rebuildTitanMeshes`).
+`GameWorld::raycastBody` is the segment against the root's LOD and the
+parts': once a tick, and only when a segment comes within a sphere
+about the body the parts stay in (their rest reach × 1.5 + 2 m), the
+parts are posed as the drawing places them (`collectParts`: the
+template place, partBone's matrix in its stead for bone parts and
+LookAtObjects, or partPose's turn and travel before it for bundles,
+guns, springs and wheels), then each part near the segment is tested in
+its frame. Every user of a body's projectile LOD goes through it: the
+rounds (`stepProjectiles`, the penetration's exit), `segmentHit`,
+`firstHit`, both `lineOfSight`s, `groundMaterialAlong` and the kit
+drop. A hit on a part is the root's: the game logic's damage
+(`0x004c0e40`) takes the hit node's armour or its nearest armoured
+ancestor's, and no shipped collisionPart child has an armour, a
+mapMaterial or a mesh of its own, so the faces' materials map through
+the root's mapMaterial (us_heavy_mech's legs 4201, weak spots 4202 /
+4203) and the root's armour takes it (`Vehicles_RocketHurtsTheWalker`:
+eu_av's rocket at the knee, 1000 → 912). Not done: the decals' faces
+(`projectileCollision`) are still the root's, and the static objects'
+collisionPart children (eu_aacannon's, the ground cannons') are not in
+the static world (`addStaticCollision` adds children with a mesh of
+their own).
+Bot rounds over 300 s (Cerbere_Landing 16, minsk_coop 32, 15 bots):
+4.65 / 9.8 s user, against 4.66 / 10.2 s with the parts left out.
+
+**The wreck's instances.** `0x006539f0(object, wreck)` runs each
+object's mesh instance (`+0x4c`) slot `0x30`, then its children's:
+slot `0x30` (`0x006e5df0`) switches a geometry of more than one
+sub-geometry to sub-geometry 1 (0 back) and returns 1; a geometry of one
+returns 0 for a wreck, and the object loses flag `0x100` (slot
+`0x54(0, 0x100)`; the flag the scene's rays test), so it leaves the
+rays. The armour's wreck (`0x00654120`) calls it with 1 at once with
+wreckDelay (`+0x160`) at most 0.01 and no dontUseWreck (`+0x169`), else
+after the delay (event `0x27`, `0x00655320`); `0x00654070` and
+`0x00655630` call it with 0. So a wrecked vehicle meets the rays as its
+geometry 0's wreck shape alone (its parts have one sub-geometry), and a
+shield cell without a wreck sub-geometry leaves them.
+`GameWorld::wreckCollision` (from `destroyVehicle`, or
+`stepVehicleDamage` after a wreckDelay). The vehicle LOD (the mesh
+physics' points) keeps the normal sub-geometry.
 
 Objects whose template has `hasMobilePhysics 1` and `physicsType Mesh`
 get a `PhysicsNode.Basic` (created in `0x005f6ba0` with the template's
@@ -1616,6 +1666,39 @@ Additive technique (`0x10167d90` with 1; the systems pick Diffuse,
 Additive or DiffuseWithZWrite by their own template, `0x10134450`), its
 `+0x80` / `+0x81` choosing the first-person pass and view as a system's
 `+8` does; the list's filler wasn't found).
+
+**The rounds' own look.** A round is an object like any other in the
+original (a GenericProjectile): its template's `ObjectTemplate.geometry`
+gives it a render object that RendDX9 draws as any bundled mesh at the
+round's matrix, and its child templates are created with it (the trail's
+EffectBundle, the looping Sound). The matrix is the launch frame, turned
+only by the follow (a Point round's physics leaves it; `noseOf`); a stuck
+round's up is the face's normal (`0x005e83d0`, `stuckFrame`), a lying one
+keeps its facing. The bundles start and stop by their events
+(`0x0061a4e0`): `startAtCreation` with the round; event 0 when the engine
+starts (the launch `0x005b3990` calls `0x005b2c10` at once, or after
+`startDelay` through the event queue, `0x005b62a0`; with
+`follow.targetActivation` instead when the seek takes a target, from the
+update `0x005b3e60`), which starts those whose `startOnEffects` is 0;
+event 1 when it stops (`0x005b2ca0`: the target lost, or the round's end
+`0x005b4cb0`), which stops those whose `stopOnEffects` is 0. `0x005b2c10`
+and `0x005b2ca0` send their events (0x44 then 0; 1 then 0x45, which a
+bundle ignores) to the round's own children only (slot `0xec`, siblings
+`+0x38`). Of the shipped GenericProjectile templates 37 have a geometry (rockets,
+missiles, grenades, mines, C4, the sonars, the decoy, the hubs, the
+beacon, the shield) and 81 don't (bullets, shells, the vehicles' dumb
+rockets: only their tracers and trails show). Rewritten in
+`client::RoundVisuals` (src/Main/RoundVisuals.h): each living round with
+bundles is an `ObjectEffects` object (anchor `kRoundAnchor | serial`,
+`ObjectState::startEvent` / `stopEvent` for events 0 and 1, from
+`roundEngineOn`; its end lets the bundles go where they are), and each with
+a geometry is a `LevelSources::placedTemplates` entry the renderer draws
+as an instance of its mesh (`LevelRenderer::syncPlaced`, its parts at rest
+as the template's children place them). A joined client's round that
+follows a server's projectile ghost is left out: the ghost's own object is
+drawn and carries the bundles. The looping sound is the round's Sound child
+(`GameAudio::loopingSound`, falling back to `S_<name>_Looping`). Tests:
+`RoundVisuals_*`, `GameAudio_RoundLoopsItsSoundChild`.
 
 **Camera recoil.** WeaponBasedRecoilComp (the vehicle guns'; template
 `0x005de1b0`, cameraRecoilSpeed `+0x24`, cameraRecoilSize `+0x28`): each

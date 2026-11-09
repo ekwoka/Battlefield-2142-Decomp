@@ -2699,11 +2699,17 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 				updateGround(object, tracked.velocity, tracked, i, effects, partPose, bundleView);
 				continue;
 			}
+			// Events 0 and 1 reach the root's own children only (0x005b2c10
+			// walks its children, slot 0xec, and their siblings +0x38).
+			const bool child = b.path.size() == 1;
 			const bool start = (created && b.startAtCreation)
 				|| (object.occupied && !tracked.occupied && (b.startOnEffects & kEntered) != 0)
-				|| (object.effects & b.startOnEffects) != 0;
+				|| (object.effects & b.startOnEffects) != 0 || (object.startEvent && child && b.startOnEffects == 0);
 			if (start && !effects.emitting(object.id, tag)) {
 				startBundle(object, tracked, i, effects, partPose, bundleView, created);
+			}
+			if (object.stopEvent && child && b.stopOnEffects == 0 && effects.emitting(object.id, tag)) {
+				effects.stopAttached(object.id, tag);
 			}
 			// The depth gate (0x0061a760, BundleModifiers::maxUnderWater):
 			// the water's height at the bundle less its own.
