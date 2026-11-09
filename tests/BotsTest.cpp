@@ -2853,7 +2853,10 @@ TEST(Bots_RadioHeardAndAnswered)
 	{
 		CarField field(gameDir);
 		const uint32_t car = field.car("car", 3, 0);
-		field.car("car_b", -14, 0);
+		// The other car beyond the get-in press's reach (the two AI radii
+		// and a metre, 0x1006ed13) for the second before the call: nearer,
+		// the bot heading for it is already in it.
+		field.car("car_b", -25, 0);
 		const int human = field.soldier("Human", false, 0, 0);
 		const int bot = field.soldier("Bot", true, -11, 0);
 		field.ticks(90);
@@ -2861,6 +2864,7 @@ TEST(Bots_RadioHeardAndAnswered)
 		CHECK(field.info(human).vehicle == car);
 		game::BotManager bots(*field.world, field.settings);
 		field.ticks(30, &bots);
+		CHECK(field.info(bot).vehicle == 0);
 		field.world->takeRadioHeard();
 		field.world->radioMessage(human, game::GameWorld::targetChannel("TCLocalTeam"), "get_in");
 		field.ticks(60, &bots);
@@ -4153,12 +4157,15 @@ TEST(Bots_ZoomScopedWeapon)
 	field.world->setKit(bot, "test_kit", "us_light_soldier");
 	field.world->spawnSoldier(bot);
 	field.move(bot, 0, 0);
-	const int enemy = field.soldier(1, false, 15, 0); // towards its goal (PAC's point at +x)
+	// Towards its goal (PAC's point at +x), within the plan's preferred range
+	// whatever its roll (100 x skill x optimal x 0.8..1.2, 10.7 to 16 m
+	// here): farther, the bot closes in on a target that keeps its distance.
+	const int enemy = field.soldier(1, false, 7, 0);
 	bool zoomedFiring = false;
 	for (int tick = 0; tick < 30 * 6; ++tick) {
 		game::GameWorld::PlayerInfo self;
 		field.world->playerInfo(bot, self);
-		field.move(enemy, self.position.x + 15, self.position.z);
+		field.move(enemy, self.position.x + 7, self.position.z);
 		const int before = field.fired(bot);
 		bots.update(1 / 30.0f);
 		field.world->tick(1 / 30.0f);

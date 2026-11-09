@@ -4903,3 +4903,125 @@ TEST(Vehicles_BlastCanReachVehicleOccupant)
 	std::fprintf(stderr, "  vehicle occupant splash health %.2f -> %.2f\n", before, after);
 	CHECK(after < afterNarrow - 1.0f);
 }
+
+namespace {
+
+// The shipped AI scripts on a garage: the behaviours and strategies
+// (AI/AIBehaviours.ai, AI/AIDefault.ai, as main runs them) and every
+// object's AI templates (Objects/**/ai/*.ai: the soldiers' SoldierCtrl, the
+// vehicles' Unit and Mobile parts).
+void loadShippedAi(Garage& g, game::BotSettings& settings)
+{
+	game::registerBotConsoleMethods(g.console, settings);
+	std::string out;
+	CHECK(g.console.run("AI/AIBehaviours.ai", {}, out));
+	CHECK(g.console.run("AI/AIDefault.ai", {}, out));
+	for (const std::string& script : world::templateScripts(g.files, "Objects/", true)) {
+		if (script.size() > 3 && script.compare(script.size() - 3, 3, ".ai") == 0) {
+			g.console.run(script, {}, out);
+		}
+	}
+}
+
+} // namespace
+
+// A walking bot's look (BotsLook.cpp's look-around through BotManager::aim)
+// on the shipped soldier and its SoldierCtrl. One bot is run every other
+// frame (the round robin, 0x10098c00); the skipped frame holds its input
+// while it moves. The executed frame's turn covers both ticks, so the held
+// turn must not be applied again: that sent the view past its point and
+// back each frame, a left-right swing many times a second while walking.
+TEST(Vehicles_BotWalkingLookDoesNotSwing)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		Garage g(gameDir(), mod);
+		if (!g.loaded) return;
+		world::ObjectTemplate* enemyPoint = g.templates.create("ControlPoint", "swing_cp");
+		enemyPoint->settings()["controlPointId"] = "1";
+		enemyPoint->settings()["team"] = "1";
+		enemyPoint->settings()["unableToChangeTeam"] = "1";
+		g.objects.create(enemyPoint, {300, 0, 0});
+		game::BotSettings settings;
+		loadShippedAi(g, settings);
+		g.start("eu_tank", {0, 2, -400});
+		const int bot = g.world->addPlayer("SwingBot", 2, true);
+		CHECK(g.world->spawnSoldier(bot));
+		game::GameWorld::PlayerInfo info;
+		g.world->playerInfo(bot, info);
+		const world::Object* soldier = g.objects.find(info.soldier);
+		CHECK(soldier && soldier->objectTemplate());
+		const auto ai = soldier && soldier->objectTemplate() ? soldier->objectTemplate()->settings().find("aiTemplate")
+															  : decltype(soldier->objectTemplate()->settings().end()) {};
+		const bool shippedCtrl = soldier && ai != soldier->objectTemplate()->settings().end()
+			&& settings.plugin(ai->second, "ControlInfo") != nullptr;
+		CHECK(shippedCtrl); // the gains are the mod's, not aim's fallback
+		game::BotManager bots(*g.world, settings);
+		float lastYaw = info.yaw, lastStep = 0;
+		int walking = 0, flips = 0;
+		for (int tick = 0; tick < 30 * 30; ++tick) {
+			bots.update(1 / 30.0f);
+			g.world->tick(1 / 30.0f);
+			g.world->playerInfo(bot, info);
+			const float step = std::remainder(info.yaw - lastYaw, 360.0f);
+			lastYaw = info.yaw;
+			if (info.alive && !info.vehicle && info.velocity.x * info.velocity.x + info.velocity.z * info.velocity.z > 1) {
+				++walking;
+				// A swing: a turn of over half a degree undone the next tick.
+				flips += std::fabs(step) > 0.5f && std::fabs(lastStep) > 0.5f && (step > 0) != (lastStep > 0);
+			}
+			lastStep = step;
+		}
+		std::fprintf(stderr, "  %s: walking %d ticks, %d swings\n", mod, walking, flips);
+		CHECK(walking > 30 * 5);
+		CHECK(flips * 20 < walking);
+	}
+}
+
+// Getting into a tank on foot (BBPChange's plan, AIDLL 0x1006dac0 from
+// 0x1006e9b9): the walk goes at the vehicle and beside it the use press runs
+// while the vehicle lies within the two AI radii and a metre (0x1006ed13).
+// From each side the bot walks up to the hull and gets in from the ground;
+// it never jumps and never climbs on (a press only within 2.5 m of the
+// vehicle's middle, which a tank's hull keeps a soldier from, left it
+// pushing until the path follower's stuck check jumped it onto the hull).
+TEST(Vehicles_BotWalksUpToATankAndGetsIn)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* tank : {"eu_tank", "as_tank"}) {
+			for (int side = 0; side < 4; ++side) {
+				Garage g(gameDir(), mod);
+				if (!g.loaded) return;
+				game::BotSettings settings;
+				loadShippedAi(g, settings);
+				const uint32_t vehicle = g.start(tank, {0, 2, 0});
+				CHECK(vehicle != 0);
+				if (!vehicle) continue;
+				const physics::Vec3 at = g.position(vehicle);
+				const int bot = g.world->addPlayer("GetInBot", 2, true);
+				CHECK(g.world->spawnSoldier(bot));
+				game::GameWorld::PlayerInfo info;
+				g.world->playerInfo(bot, info);
+				const float angle = side * 1.57079633f + 0.3f; // front, right, back, left, off the axes
+				g.world->setSoldierPosition(info.soldier, {at.x + 12 * std::sin(angle), 0, at.z + 12 * std::cos(angle)});
+				game::BotManager bots(*g.world, settings);
+				bool seated = false, jumped = false, climbed = false;
+				int tick = 0;
+				for (; tick < 30 * 20 && !seated; ++tick) {
+					bots.update(1 / 30.0f);
+					jumped = jumped || bots.lastInputFor(bot).jump;
+					g.world->tick(1 / 30.0f);
+					g.world->playerInfo(bot, info);
+					seated = info.vehicle == vehicle;
+					climbed = climbed || (!seated && info.position.y > 0.5f);
+				}
+				std::fprintf(stderr, "  %s %s side %d: %s after %.1f s (%s)\n", mod, tank, side,
+					seated ? "in" : "not in", tick / 30.0f, bots.behaviour(bot).c_str());
+				CHECK(seated);
+				CHECK(!jumped);
+				CHECK(!climbed);
+			}
+		}
+	}
+}
