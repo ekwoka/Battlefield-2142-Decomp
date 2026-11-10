@@ -544,6 +544,35 @@ TEST(MenuBindings_InstantAction)
 	CHECK(menu.text(rows + "row0.cell0.text") == "Belgrade - 16");
 	CHECK(thumb() == 0.0);
 	std::fprintf(stderr, "scrollbar thumb after 3 rows: %.3f, back at the top: %.3f\n", scrolled, thumb());
+	// Dragging the thumb scrolls too. The rows' clip lies above the scroll
+	// bar under a setMask(): the press must reach the thumb, not a row.
+	std::optional<Player::Clickable> slider;
+	for (const auto& c : menu.player.clickables()) {
+		if (c.target == "_level0." + pane + "m_mcScrollVertical.slider") {
+			slider = c;
+		}
+	}
+	CHECK(slider.has_value());
+	if (slider) {
+		const float x = slider->x + slider->width / 2, y = slider->y + slider->height / 2;
+		menu.player.mouseMove(x, y);
+		menu.player.mouseDown();
+		for (int k = 1; k <= 4; ++k) {
+			menu.run(0.05);
+			menu.player.mouseMove(x, y + k * 10);
+		}
+		menu.run(0.1);
+		CHECK(menu.text(rows + "row0.cell0.text") != "Belgrade - 16");
+		const double dragged = thumb();
+		CHECK(dragged > 0.0 && dragged < 1.0);
+		// Released, the thumb no longer follows the mouse.
+		menu.player.mouseUp();
+		menu.run(0.1);
+		menu.player.mouseMove(x, y + 80);
+		menu.run(0.2);
+		CHECK(thumb() == dragged);
+		std::fprintf(stderr, "scrollbar thumb after a 40 px drag: %.3f\n", dragged);
+	}
 	CHECK(menu.click(rows + "row0"));
 	CHECK(menu.click("singleplay.mc_singleplayer.btnInstantAction"));
 	menu.run(1);
