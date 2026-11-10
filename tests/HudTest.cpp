@@ -197,6 +197,70 @@ TEST(Hud_GameHudScripts)
 	CHECK(text);
 }
 
+// The shipped commander screen (HudElementsCommander.con): the collapsed
+// minimap tab's header reopens it (the hidden mini-map no longer takes the
+// click), and Resign, a transparent button (colour alpha 0) over its
+// picture, still takes the click.
+TEST(Hud_CommanderScreenTabAndResignClicks)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	Console console(&files);
+	bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+		[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+	std::string out;
+	console.run("ServerArchives.con", {}, out);
+	console.run("ClientArchives.con", {}, out);
+	hud::HudManager manager([&files](const std::string& path, std::string& text) {
+		std::vector<uint8_t> data;
+		if (!files.readFile(path, data)) {
+			return false;
+		}
+		text.assign(data.begin(), data.end());
+		return true;
+	});
+	hud::registerHudConsoleMethods(console, manager);
+	console.setScriptOutput(false, false);
+	console.run("Menu/HUD/HudSetup/HudSetupMain.con", {}, out);
+	std::vector<std::string> ran;
+	manager.setCommandRunner([&ran](const std::string& command) { ran.push_back(command); });
+	manager.setMap("Levels/x/Hud/Minimap/ingameMap.dds", -512, -512, 1024, 1024);
+	for (const char* name : {"ShowIngameHud", "ShowSoldierHud", "CommanderShow", "CommanderSquadTabShowFull",
+			 "CommanderMapTabShowFull", "CommanderToolsTabShowFull"}) {
+		manager.set(name, 1);
+	}
+	std::vector<hud::HudQuad> quads;
+	const auto run = [&] {
+		for (int i = 0; i < 90; ++i) {
+			quads = manager.frame(1 / 30.0f);
+		}
+	};
+	run();
+	float x = 0, z = 0;
+	CHECK(manager.miniMapWorldAt(729, 8, x, z)); // the open tab's map
+	manager.set("CommanderMapTabShowFull", 0);
+	run();
+	CHECK(!manager.miniMapWorldAt(729, 8, x, z));
+	const auto clicked = [&](float px, float py, const std::string& command) {
+		ran.clear();
+		manager.click(px, py);
+		return std::find(ran.begin(), ran.end(), command) != ran.end();
+	};
+	// The collapsed tab sits at 651, -166: its header button at 684, 2 (145 x 17).
+	CHECK(clicked(729, 8, "CommanderMenu.toggleMapTab"));
+	const auto resign = std::find_if(quads.begin(), quads.end(),
+		[](const hud::HudQuad& q) { return q.texture.find("resign_buttonBg") != std::string::npos; });
+	CHECK(resign != quads.end());
+	if (resign != quads.end()) {
+		CHECK(clicked((resign->x0 + resign->x1) / 2, (resign->y0 + resign->y1) / 2, "Commander.commanderResign"));
+	}
+}
+
 TEST(Hud_LocalizationAndLists)
 {
 	// strings.csv: UTF-16LE with a byte-order mark, tab-separated, a column per language.

@@ -401,6 +401,8 @@ std::vector<HudQuad> HudManager::frame(float seconds)
 	m_buttonHits.clear();
 	m_listHits.clear();
 	m_mouseOverHits.clear();
+	// A hidden mini-map (the commander's collapsed tab) takes no clicks.
+	m_miniMapView.drawn = false;
 	m_clock += seconds;
 	++m_frameNumber;
 	layoutTransformLists();
@@ -618,7 +620,9 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 		const bool over = m_pointer[0] >= ax && m_pointer[0] <= ax + aw && m_pointer[1] >= ay && m_pointer[1] <= ay + ah;
 		const std::string& normal = node.buttonTextures[1].empty() ? node.buttonTextures[0] : node.buttonTextures[1];
 		quad(over && !node.buttonTextures[2].empty() ? node.buttonTextures[2] : normal, x, y, x + w, y + h, 0, 0, 1, 1, 0);
-		if ((!node.buttonCommands.empty() || !node.altCommands.empty()) && color[3] > 0) {
+		// The node's fade, not its colour: shipped buttons such as the
+		// commander's Resign are drawn transparent (alpha 0) over a picture.
+		if ((!node.buttonCommands.empty() || !node.altCommands.empty()) && alpha > 0) {
 			m_buttonHits.push_back({ax, ay, ax + aw, ay + ah, &node});
 		}
 		break;
