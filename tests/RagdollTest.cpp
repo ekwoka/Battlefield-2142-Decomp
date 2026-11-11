@@ -1835,6 +1835,48 @@ TEST(Physics_StandingOnASlopeMakesNoFootsteps)
 	CHECK(std::count_if(walking.begin(), walking.end(), [](const auto& s) { return s.sound == "WalkDefault"; }) >= 2);
 }
 
+// Running, a hop or a jump keeps the wanted velocity through the air
+// (0x006c2230 returns early without clearing it, 0x00588420's air branch
+// never sets it): landing carries on at running speed instead of braking
+// to a stop for a tick (the judder walking over a Titan's deck seams).
+TEST(Physics_LandingWhileRunningDoesNotBrake)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	Game game(gameDir, "mods/Project_Remaster_v17_Final", true);
+	game.start();
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	const int player = game.world->localPlayer();
+	game.run(1);
+	game::SoldierInput input;
+	input.throttle = 1;
+	game.world->setInput(player, input);
+	game.run(1.5f);
+	input.jump = true;
+	game.world->setInput(player, input);
+	game.run(1 / 30.0f);
+	input.jump = false;
+	game.world->setInput(player, input);
+	bool left = false, landed = false;
+	float slowest = 1e9f;
+	int after = 0;
+	for (int i = 0; i < 90 && after < 6; ++i) {
+		game.run(1 / 30.0f);
+		const physics::SoldierBody* body = game.world->soldierBody(player);
+		CHECK(body != nullptr);
+		if (!body) break;
+		left = left || !body->onGround();
+		if (left && body->onGround()) landed = true;
+		if (landed) {
+			slowest = std::min(slowest, std::sqrt(body->velocity.x * body->velocity.x + body->velocity.z * body->velocity.z));
+			++after;
+		}
+	}
+	std::fprintf(stderr, "  slowest ground speed in the 6 ticks after landing: %.2f m/s\n", slowest);
+	CHECK(left && landed);
+	CHECK(slowest > 1.5f);
+}
+
 TEST(Physics_FootstepsChooseMovementSlotAndSurfaceFallback)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");

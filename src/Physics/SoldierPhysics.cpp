@@ -602,8 +602,13 @@ void SoldierBody::move(float gravity)
 		m_inputAcceleration = (m_inputAcceleration * static_cast<float>(m_inputs) + acceleration) *
 			(1.0f / static_cast<float>(m_inputs + 1));
 		++m_inputs;
+		m_desired = {}; // used: cleared on the ground only (0x006c2230's end, +0xac)
+	} else {
+		// In the air (0x006c2230's early out): no friction, the wanted
+		// velocity kept for the landing, and no longer slipping (+0xe0 set
+		// to 1, clearing its bit 0x40).
+		m_slipping = false;
 	}
-	m_desired = {};
 	m_contactVelocity = {};
 	m_contacts = 0;
 }
