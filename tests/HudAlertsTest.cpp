@@ -98,6 +98,28 @@ TEST(HudNodes_TransformListStacksAtItsVariables)
 	CHECK(b && b->y1 == 600);
 }
 
+// Remaster's HudRotation.con: setNodePos moves a transform node made at
+// 0 0 800 600, and its pictures with it.
+TEST(HudNodes_SetNodePosMovesATransformAndItsChildren)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	run(console, {
+					 "hudBuilder.createSplitNode Global Items",
+					 "hudBuilder.createTransformNode Items Side 0 0 800 600",
+					 "hudBuilder.createPictureNode Side Frame 638 2 160 160",
+					 "hudBuilder.setPictureNodeTexture frame.tga",
+				 });
+	const auto before = manager.frame(0);
+	const hud::HudQuad* frame = quadWith(before, "frame.tga");
+	CHECK(frame && frame->x0 == 638 && frame->y0 == 2);
+	run(console, {"hudBuilder.setActiveObject Items Side", "hudBuilder.setNodePos 120 0"});
+	const auto after = manager.frame(0);
+	frame = quadWith(after, "frame.tga");
+	CHECK(frame && frame->x0 == 758 && frame->y0 == 2);
+}
+
 TEST(HudNodes_MoveBlendAndBlinkEffects)
 {
 	Console console;

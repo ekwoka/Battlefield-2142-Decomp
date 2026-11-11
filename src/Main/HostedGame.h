@@ -319,6 +319,7 @@ private:
 	float m_terrainOrigin[2] {};
 	float m_terrainExtent = 0;
 	void sendBattlefieldReports();
+	void sendRadioSpots();
 	const game::Projectile* projectileOf(const Ghost& ghost) const;
 	struct Client {
 		int player = -1;

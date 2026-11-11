@@ -24,11 +24,70 @@ constexpr const char* kSquadNames[] = {"Unassigned", "Alpha", "Bravo", "Charlie"
 
 constexpr int kSquadSize = 6;
 
-// The squad list's cells (0x007a5f10): 1 the id, 5 the name, 6 "members/6",
-// 10 join or leave; 13 and 14 the row's id and kind, not drawn.
+// The squad list's cells (0x007a5f10): 0 the number's frame, 1 the number,
+// 5 the name, 6 "members/6", 7 and 8 the lock in its frame, 9 and 10 the
+// JOIN / LEAVE button, 12 the arrow; 13 and 14 the row's id and kind, not
+// drawn. A row kind's actions by column: 0x007a81b0's tables 0x007a83c4.
 constexpr int kCellId = 13, kCellKind = 14;
-constexpr int kRowCommander = 1, kRowSquad = 2, kRowMember = 4;
-constexpr int kColumnJoin = 10, kColumnLock = 8;
+constexpr int kRowCommander = 0, kRowSquad = 2, kRowMember = 4;
+constexpr int kColumnLock = 8, kColumnJoin = 10, kColumnExpand = 12;
+
+// The menu's pictures (its constructor 0x007a7620: +0x14 .. +0x48).
+constexpr const char* kFrame = "Ingame/Respawn/iconframe.tga";
+constexpr const char* kLock = "Ingame/Respawn/icon_lock.tga";
+constexpr const char* kButton = "Ingame/Respawn/button_longlight7.tga";
+constexpr const char* kExpanded = "Ingame/Respawn/button_up.tga";
+constexpr const char* kCollapsed = "Ingame/Respawn/button_down.tga";
+constexpr const char* kCommanderIcon = "Ingame/Kits/Icons/kit_Commander.tga";
+
+// The rows' colours (.data).
+using Rgba = std::array<float, 4>;
+constexpr Rgba kGrey {0.5f, 0.5f, 0.5f, 1};                          // 0x00a0bc60: text, an open lock
+constexpr Rgba kBlack {0, 0, 0, 1};                                  // 0x00a0bb40 / 0x00a0bc70: a shut lock, the button's text
+constexpr Rgba kOwn {0.141176477f, 0.501960814f, 0.258823544f, 1};   // 0x00a0bba0: the player's own squad, or command
+constexpr Rgba kUnavailable {0.627451003f, 0.627451003f, 0.627451003f, 1}; // 0x00a0bca0: JOIN out of reach
+constexpr Rgba kHeadFill {0.843137264f, 0.847058833f, 0.847058833f, 1};   // 0x00a0bc40: squad and commander rows
+constexpr Rgba kMemberFill {0.650980413f, 0.650980413f, 0.650980413f, 1}; // 0x00a0bc30: odd member rows
+constexpr Rgba kLocalFill {0.392156869f, 0.392156869f, 0.392156869f, 0.35f}; // 0x00a0bc50: the local player's row
+constexpr Rgba kNoFill {0, 0, 0, 0};
+// A member's state colour (0x007a65a0, via the theme table 0x008f2350):
+// dead black (0x00b3bee0 ← 0x00a0bb40), his squad's (or the commander
+// himself) green (0x00b3c070 ← 0x00a0beb0), the others blue (0x00b3c340 ←
+// 0x00a0bec0); the leaders' squad icon (0x00b3c380 ← 0x00a0bb60); a
+// talking voice yellow (0x00a0bc80).
+constexpr Rgba kMateText {0.0313725509f, 0.466666669f, 0.00784313772f, 1};
+constexpr Rgba kOtherText {0, 0.380392164f, 1, 1};
+constexpr Rgba kLeaderIcon {0.400000006f, 1, 0, 1};
+constexpr Rgba kTalking {1, 1, 0, 1};
+constexpr const char* kBox = "Ingame/Respawn/iconframe_box.tga";
+constexpr const char* kSpeaker = "Ingame/Respawn/icon_speaker.tga";
+constexpr const char* kSpeakerMute = "Ingame/Respawn/icon_speakerMute.tga";
+
+// The cells' settings (0x007e0e50 pictures, 0x007e0d60 / 0x007e0fc0 text;
+// the text's alignment as the list draws it: the exe's 1 centre, 2 right).
+hud::HudManager::ListCell pictureCell(float width, float height, float offset = 0, Rgba color = {-1, 0, 0, 0})
+{
+	return {offset, width, height, -1, color};
+}
+hud::HudManager::ListCell textCell(float offset, int alignment, Rgba color = {-1, 0, 0, 0})
+{
+	return {offset, 0, 0, alignment, color};
+}
+constexpr int kLeft = 0, kRight = 1, kCentre = 2;
+
+// "§1" switches the list to its font 1 (squadListFont_8), "§0" back.
+const std::string kFont1 = "\xa7"
+						   "1",
+				  kFont0 = "\xa7"
+						   "0";
+
+std::string upper(std::string s) // 0x0065b2c0
+{
+	for (char& c : s) {
+		c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+	}
+	return s;
+}
 
 } // namespace
 
@@ -39,16 +98,12 @@ const char* squadName(int squad)
 
 SquadMenu::SquadMenu(game::GameWorld& round, hud::HudManager& hud) : m_round(round), m_hud(hud)
 {
-	// The list's columns (0x007a4100 sets them from the menu's widths; the
-	// positions here are fitted to the 246-pixel list of
-	// HudElementsSquadsNew.con).
-	std::vector<hud::HudManager::ListColumn> columns(11, {-1, 0, 0});
-	columns[1] = {6, 14, 2};
-	columns[5] = {24, 116, 0};
-	columns[6] = {140, 34, 2};
-	columns[kColumnLock] = {174, 12, 2};
-	columns[kColumnJoin] = {186, 60, 2};
-	m_hud.setListColumns(5, columns);
+	// The list's columns: the list data's own at 0 (0x007e0b20) and the
+	// menu's (0x007a3e72, x from its +0xc0 .. +0xe0 set in 0x007a7620; a
+	// fixed width or none, ending at the list's edge); two hidden ones
+	// hold cells 13 and 14.
+	m_hud.setListColumns(5, {{0, 0, 0}, {5, 0, 0}, {22, 0, 0}, {22, 0, 0}, {45, 166, 0}, {45, 69, 0}, {85, 30, 0},
+								{116, 0, 0}, {116, 0, 0}, {133, 0, 0}, {133, 80, 0}, {216, 0, 0}, {216, 0, 0}});
 	m_hud.setListColumns(8, {{6, 196, 0}});
 }
 
@@ -69,6 +124,10 @@ void SquadMenu::bind(Console& console)
 	onCommanderAction = [&console](bool resign) {
 		std::string output;
 		console.execute(resign ? "Commander.commanderResign" : "Commander.commanderApply", output, ConsoleAccess::Anyone);
+	};
+	onMutiny = [&console] {
+		std::string output;
+		console.execute("Commander.commanderMutiny", output, ConsoleAccess::Anyone);
 	};
 	const auto local = [this] { return localPlayer(); };
 	bindMethod(console, "SquadMenu.setSquadCreateSelect", ConsoleAccess::Anyone,
@@ -232,16 +291,30 @@ void SquadMenu::clickSquadList(int player, int row, int column)
 	const int id = std::atoi(m_hud.listCell(5, row, kCellId).c_str());
 	const int kind = std::atoi(m_hud.listCell(5, row, kCellKind).c_str());
 	game::GameWorld::PlayerInfo me;
-	if (kind == kRowCommander && column == kColumnJoin && playerInfo(player, me)) {
-		if (onCommanderAction && (me.commander || m_hud.listCell(5, row, kCellId) == "-1")) {
-			onCommanderAction(me.commander);
+	if (kind == kRowCommander && playerInfo(player, me)) {
+		if (column == kColumnExpand) {
+			m_commanderExpanded = !m_commanderExpanded; // 0x007a83ab
+		} else if (column == kColumnJoin) {
+			// 0x007a8334: RESIGN as the commander, APPLY without one, else
+			// MUTINY (the vote refuses one it can't start).
+			if (me.commander || m_hud.listCell(5, row, kCellId) == "-1") {
+				if (onCommanderAction) {
+					onCommanderAction(me.commander);
+				}
+			} else if (onMutiny) {
+				onMutiny();
+			}
 		}
 		return;
 	}
 	if (kind != kRowSquad || !playerInfo(player, me)) {
 		return; // selecting a member or a squad
 	}
-	if (column == kColumnJoin) {
+	if (column == kColumnExpand) {
+		if (!m_expanded.erase(id)) {
+			m_expanded.insert(id);
+		}
+	} else if (column == kColumnJoin) {
 		if (id == me.squad) {
 			leave(player);
 		} else {
@@ -362,9 +435,84 @@ void SquadMenu::update(int player)
 	if (!me.squadLeader) {
 		m_inviteShow = false;
 	}
-	// The squads, each followed by its members (the leader first).
+	// The HUD manager's squad events (0x00756b60 → 0x007a5b80): joining a
+	// squad (2/0x16) or taking its lead (2/0x18) opens it, leaving it
+	// (2/0x15) closes it.
+	if (me.squad != m_lastSquad) {
+		if (m_lastSquad > 0) {
+			m_expanded.erase(m_lastSquad);
+		}
+		if (me.squad > 0) {
+			m_expanded.insert(me.squad);
+		}
+	} else if (me.squad > 0 && me.squadLeader && !m_lastLeader) {
+		m_expanded.insert(me.squad);
+	}
+	m_lastSquad = me.squad;
+	m_lastLeader = me.squadLeader;
+
 	std::vector<std::vector<std::string>> rows;
+	std::vector<std::vector<hud::HudManager::ListCell>> cells;
+	std::vector<std::array<float, 4>> fills;
+	const auto add = [&](std::vector<std::string> row, std::vector<hud::HudManager::ListCell> style, const Rgba& fill) {
+		rows.push_back(std::move(row));
+		cells.push_back(std::move(style));
+		fills.push_back(fill);
+	};
+	// A member's row (0x007a65a0), in his state colour:
+	//   0, 1  the vehicle he is in (HUD slot 0x60(player, 1): its
+	//         vehicleHud.miniMapIcon, nothing on foot) in a box;
+	//   2, 3  his kit (HUD slot 0x64, menu::scoreboardIcon) in a box;
+	//   4     his name ("§1%s", 4 pixels left of the column);
+	//   9     a leader's squad icon (mini_Squad_<n>_small, 16 pixels, the
+	//         column's x plus 0xe0 - 0xd8 - 18);
+	//   11, 12 his voice in a box, while he has voice.
+	// The fill: the local player's row grey, else every odd row of the list.
+	// Not drawn: a leader's squad-order icon in cells 7 and 8 (0x007a5c70).
+	const auto member = [&](const game::GameWorld::PlayerInfo& who) {
+		const bool mate = (me.squad > 0 && who.squad == me.squad) || (who.id == player && me.commander);
+		const Rgba colour = !who.alive ? kBlack : mate ? kMateText : kOtherText;
+		const auto templateOf = [&](uint32_t object) {
+			const world::Object* o = object ? m_round.objects().find(object) : nullptr;
+			return o ? o->objectTemplate() : nullptr;
+		};
+		std::vector<std::string> row(15);
+		std::vector<hud::HudManager::ListCell> style(15);
+		row[0] = kBox;
+		style[0] = pictureCell(15, 15, 5);
+		if (const world::ObjectTemplate* ride = who.vehicle != who.soldier ? templateOf(who.vehicle) : nullptr) {
+			const auto icon = ride->settings().find("vehicleHud.miniMapIcon");
+			if (icon != ride->settings().end()) {
+				row[1] = icon->second;
+				std::replace(row[1].begin(), row[1].end(), '\\', '/');
+			}
+		}
+		style[1] = pictureCell(15, 15, 0, colour);
+		row[2] = kBox;
+		style[2] = pictureCell(15, 15);
+		row[3] = scoreboardIcon(who, 0, templateOf(who.kit));
+		style[3] = pictureCell(15, 15, 0, colour);
+		row[4] = kFont1 + who.name;
+		style[4] = textCell(-4, kLeft, colour);
+		if (who.squadLeader && who.squad > 0) {
+			row[9] = "Ingame/Player/Icons/Minimap/mini_Squad_" + std::to_string(who.squad) + "_small.tga";
+			style[9] = pictureCell(16, 16, 216 - 133 - 18, kLeaderIcon);
+		}
+		row[11] = kBox;
+		style[11] = pictureCell(15, 15);
+		const int voice = voiceState ? voiceState(who.id) : -1;
+		if (voice >= 0) {
+			row[12] = voice == 2 ? kSpeakerMute : kSpeaker;
+			style[12] = pictureCell(15, 15, 0, voice == 1 ? kTalking : colour);
+		}
+		row[kCellId] = std::to_string(who.id);
+		row[kCellKind] = std::to_string(kRowMember);
+		const size_t index = rows.size();
+		add(std::move(row), std::move(style), who.id == player ? kLocalFill : index % 2 != 0 ? kMemberFill : kNoFill);
+	};
 	if (m_round.commanderEnabled()) {
+		// The commander's row (0x007a4800), his own row under it while open
+		// (0x007a73f0).
 		const game::GameWorld::PlayerInfo* commander = nullptr;
 		for (const auto& other : players) {
 			if (other.team == me.team && other.commander) {
@@ -372,35 +520,71 @@ void SquadMenu::update(int player)
 				break;
 			}
 		}
+		const Rgba colour = me.commander ? kOwn : kGrey;
 		std::vector<std::string> row(15);
-		row[5] = text("HUD_TEXT_MENU_SPAWN_SQUAD_COMMANDER");
-		row[6] = commander ? commander->name : "";
-		row[kColumnJoin] = !commander ? text("HUD_TEXT_MENU_SPAWN_SQUAD_APPLY")
-			: me.commander ? text("HUD_TEXT_MENU_SPAWN_SQUAD_LEAVE") : "";
+		std::vector<hud::HudManager::ListCell> style(15);
+		row[0] = kFrame;
+		style[0] = pictureCell(15, 15, 5);
+		row[1] = kCommanderIcon;
+		style[1] = pictureCell(15, 15, 0, colour);
+		row[5] = text("HUD_HUD_MENU_COMMANDER_HEADING");
+		style[5] = textCell(-21, kLeft, colour);
+		// APPLY without a commander, RESIGN as him, else MUTINY.
+		const std::string button = !commander ? text("HUD_TEXT_MENU_SPAWN_SQUAD_APPLY")
+			: me.commander                    ? text("HUD_TEXT_COMMANDER_RESIGN")
+											  : text("HUD_TEXT_MENU_SPAWN_SQUAD_MUTINITY");
+		row[9] = kButton;
+		style[9] = pictureCell(80, 17);
+		row[kColumnJoin] = button;
+		style[kColumnJoin] = textCell(0, kCentre, kBlack);
+		row[kColumnExpand] = !commander ? "" : m_commanderExpanded ? kExpanded : kCollapsed;
+		style[kColumnExpand] = pictureCell(17, 17);
 		row[kCellId] = commander ? std::to_string(commander->id) : "-1";
 		row[kCellKind] = std::to_string(kRowCommander);
-		rows.push_back(std::move(row));
+		add(std::move(row), std::move(style), kHeadFill);
+		if (commander && m_commanderExpanded) {
+			member(*commander);
+		}
 	}
 	for (auto& [squad, members] : squads) {
 		std::stable_sort(members.begin(), members.end(), [](const auto* a, const auto* b) { return a->squadLeader > b->squadLeader; });
+		// The squad's row (0x007a5f10): green for the player's own.
+		const Rgba colour = squad == me.squad ? kOwn : kGrey;
+		// JOIN is out of reach from another squad or as the commander.
+		const bool reachable = !me.commander && (me.squad <= 0 || me.squad == squad);
 		std::vector<std::string> row(15);
+		std::vector<hud::HudManager::ListCell> style(15);
+		row[0] = kFrame;
+		style[0] = pictureCell(15, 15, 5);
 		row[1] = std::to_string(squad);
-		row[5] = squadLabel(me.team, squad);
-		row[6] = std::to_string(members.size()) + "/" + std::to_string(kSquadSize);
-		row[kColumnLock] = locked(me.team, squad) ? "L" : "";
-		row[kColumnJoin] = text(squad == me.squad ? "HUD_TEXT_MENU_SPAWN_SQUAD_LEAVE" : "HUD_TEXT_MENU_SPAWN_SQUAD_JOIN");
+		style[1] = textCell(5, kLeft, colour);
+		row[5] = kFont1 + upper(squadLabel(me.team, squad)) + kFont0;
+		style[5] = textCell(-21, kLeft, colour);
+		row[6] = kFont1 + std::to_string(members.size()) + "/" + std::to_string(kSquadSize) + kFont0;
+		style[6] = textCell(0, kRight, colour);
+		row[7] = kFrame;
+		style[7] = pictureCell(15, 15);
+		row[kColumnLock] = kLock;
+		style[kColumnLock] = pictureCell(15, 15, 0, locked(me.team, squad) ? kBlack : kGrey);
+		row[9] = kButton;
+		style[9] = pictureCell(80, 17);
+		row[kColumnJoin] =
+			text(squad == me.squad && reachable ? "HUD_TEXT_MENU_SPAWN_SQUAD_LEAVE" : "HUD_TEXT_MENU_SPAWN_SQUAD_JOIN");
+		style[kColumnJoin] = textCell(0, kCentre, reachable ? kBlack : kUnavailable);
+		row[kColumnExpand] = expanded(squad) ? kExpanded : kCollapsed;
+		style[kColumnExpand] = pictureCell(17, 17);
 		row[kCellId] = std::to_string(squad);
 		row[kCellKind] = std::to_string(kRowSquad);
-		rows.push_back(std::move(row));
-		for (const auto* member : members) {
-			std::vector<std::string> line(15);
-			line[5] = "  " + member->name;
-			line[kCellId] = std::to_string(member->id);
-			line[kCellKind] = std::to_string(kRowMember);
-			rows.push_back(std::move(line));
+		add(std::move(row), std::move(style), kHeadFill);
+		if (expanded(squad)) {
+			for (const auto* mate : members) {
+				member(*mate);
+			}
 		}
 	}
 	m_hud.setList(5, std::move(rows));
+	m_hud.setListCells(5, std::move(cells));
+	m_hud.setListRowBackgrounds(5, std::move(fills));
 	// The invite list (0x007a7ff0 with InviteListShow): a header row
 	// (0x007a4680: HUD_SQUADTAB_SQUAD / HUD_SQUADTAB_KICK) over the
 	// leader's members, then one (HUD_SQUADTAB_TEAM / HUD_SQUADTAB_INVITE)
@@ -485,6 +669,11 @@ void CommanderMenu::sendRadioMessage(const std::function<void(int squad, bool fi
 	}
 	showSquad(-1);
 	tabs.squadMembers = false;
+}
+
+int commanderWheelZoom(int zoom, int steps)
+{
+	return static_cast<int>(std::clamp(static_cast<long long>(zoom) + steps, 0LL, 2LL));
 }
 
 int commanderZoomStep(int zoom)

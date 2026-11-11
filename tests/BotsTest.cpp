@@ -39,8 +39,13 @@ using namespace dice::hfe;
 namespace dice::hfe::game {
 // Drives the real BotManager goal and act paths with deterministic snapshots.
 struct BotManagerTestAccess {
+	static void idleSquad(BotManager& m, int state = 0) { m.m_squads[{2, 1}].state = state; }
 	static auto& bot(BotManager& manager, int id) { return manager.m_bots[id]; }
 	static void vehicles(BotManager& manager, const std::vector<GameWorld::VehicleInfo>& v) { manager.m_vehicles = v; }
+	static void players(BotManager& manager, const std::vector<GameWorld::PlayerInfo>& p) { manager.m_players = p; }
+	static bool driveTo(BotManager& manager, const GameWorld::PlayerInfo& self, const physics::Vec3& to, int id, SoldierInput& input) {
+		return manager.drive(bot(manager, self.id), self, to, id, 1.0f / 30, input);
+	}
 	static void goal(BotManager& manager, const GameWorld::PlayerInfo& self) { manager.updateGoal(bot(manager, self.id), self); }
 	static SoldierInput act(BotManager& manager, const GameWorld::PlayerInfo& self) {
 		SoldierInput input;
@@ -53,6 +58,34 @@ struct BotManagerTestAccess {
 	}
 	static void time(BotManager& manager, float t) { manager.m_time = t; }
 	static void attack(BotManager& manager, int area) { manager.m_sides[2].attacks = {area}; }
+	static bool firePlanDrive(BotManager& manager, const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& target, bool inSight) {
+		BotManager::Known known;
+		known.player = target.id;
+		known.position = target.position;
+		WeaponAi weapon;
+		weapon.minRange = 0;
+		weapon.maxRange = 100;
+		SoldierInput input;
+		return manager.driveFirePlan(bot(manager, self.id), self, target, known, inSight, weapon, false, 1.0f / 30, input);
+	}
+	static bool driversSee(const BotManager& manager, uint32_t object) { return manager.driversSee(object); }
+	static bool firePlanHolds(const BotManager& manager, const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& target) {
+		return manager.firePlanHolds(self, target);
+	}
+	static void fire(BotManager& manager, const GameWorld::PlayerInfo& self) {
+		SoldierInput input;
+		manager.fire(bot(manager, self.id), self, input, 1.0f / 30);
+	}
+	static void planFire(BotManager& manager, const GameWorld::PlayerInfo& self) { manager.planFire(bot(manager, self.id), self, true); }
+	// One round of the bot's own loop on a snapshot: Bot::think (the weights, the urgencies, the arbiter), then its plan.
+	static void thinkAndAct(BotManager& manager, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players) {
+		manager.m_players = players;
+		manager.think(bot(manager, self.id), self, players);
+		act(manager, self);
+	}
+	static void routeVia(BotManager& manager, const GameWorld::PlayerInfo& self, int target, int map) {
+		manager.routeVia(bot(manager, self.id), self, target, map);
+	}
 	static void drive(BotManager& manager, const GameWorld::PlayerInfo& self) {
 		auto& b = bot(manager, self.id);
 		SoldierInput input;
@@ -360,6 +393,167 @@ TEST(Bots_GoalRecoveryManagerIntegration)
 	farBot.followId = 1000;
 	game::BotManagerTestAccess::drive(tooFar, self);
 	CHECK(!farBot.vehicleApproach && farBot.rejectedVehiclePoints.count(1) == 1);
+}
+
+TEST(Bots_EnhancedStuckDriverGetsOut)
+{
+	Field field;
+	game::BotSettings settings;
+	game::BotManager bots(*field.world, settings);
+	const int id = field.soldier(2, true, -30, 0);
+	auto* car = field.templates.create("PlayerControlObject", "stuck_test_car");
+	car->settings()["seatInformation"] = "stuck_test_car 0/0/0 0/0/0";
+	const uint32_t vehicle = field.objects.create(car, {-30, 0, 0})->id();
+	game::GameWorld::PlayerInfo self;
+	CHECK(field.world->playerInfo(id, self));
+	self.vehicle = vehicle; self.driving = true; self.seat = 0; self.position = {-30, 0, 0};
+	game::GameWorld::VehicleInfo v {};
+	v.object = vehicle; v.position = self.position; v.working = true; v.forward = {0, 0, 1};
+	v.boxMin = {-1, -1, -2}; v.boxMax = {1, 1, 2};
+	game::BotManagerTestAccess::vehicles(bots, {v});
+	auto vehicles = goalTestMesh({{-40, -10, 0, 10}});
+	bots.setVehicleNavMesh(&vehicles);
+	auto& bot = game::BotManagerTestAccess::bot(bots, id);
+	ai::FollowerSettings driver;
+	driver.soldier = false; driver.options.vehicle = true;
+	const auto wedge = [&] { // a route, then 21 s trying without moving 4 m
+		bot.follower.reset();
+		bot.follower.request(vehicles, {-30, 0, 0}, {-5, 0, 0}, driver, 0);
+		bot.follower.progress({-30, 0, 0}, 1, 0);
+		bot.follower.progress({-29, 0, 0}, 1, 21);
+		bot.goal = {-5, 0, 0};
+		bot.followId = 1000;
+		bot.followTo = {-5, 0, 0}; // as follow() records the request
+	};
+	wedge();
+	CHECK(bot.follower.failed() && bot.follower.stuck());
+	// The switch off: the move fails and the flag stays (the same goal, the
+	// route standing); no exit.
+	game::BotManagerTestAccess::time(bots, 21);
+	game::BotManagerTestAccess::drive(bots, self);
+	CHECK(bot.stuckExit == 0 && bot.follower.stuck() && bot.moveFailed);
+	// A route that can't be planned is not stuck: no exit, enhanced or not.
+	bool enhanced = true;
+	bots.liveSettings().enhanced = &enhanced;
+	bot.follower.reset();
+	bot.follower.request(vehicles, {-30, 0, 0}, {300, 0, 300}, driver, 0);
+	CHECK(bot.follower.failed() && !bot.follower.stuck());
+	bot.goal = {300, 0, 300};
+	bot.followId = 1000;
+	game::BotManagerTestAccess::drive(bots, self);
+	CHECK(bot.stuckExit == 0);
+	// Enhanced with enhanced.botRecovery off (the parity check): no exit.
+	bool recovery = false;
+	bots.liveSettings().botRecovery = &recovery;
+	wedge();
+	game::BotManagerTestAccess::drive(bots, self);
+	CHECK(bot.stuckExit == 0);
+	// enhanced.botRecovery on: the stuck driver stops and presses use until it is out.
+	recovery = true;
+	wedge();
+	game::BotManagerTestAccess::drive(bots, self);
+	CHECK(bot.stuckExit == vehicle && bot.followId == -1);
+	const auto press = game::BotManagerTestAccess::act(bots, self);
+	CHECK(press.use && bot.approachExitRequested == vehicle);
+	// Out: abandoned, so no seat value for 30 s.
+	self.vehicle = 0; self.driving = false; self.seat = -1;
+	game::BotManagerTestAccess::act(bots, self);
+	CHECK(bot.stuckExit == 0 && bot.abandonedVehicle == vehicle);
+	CHECK(game::BotManagerTestAccess::seat(bots, self, vehicle) == 0);
+	// A bot riding along gets out with the driver.
+	const int rider = field.soldier(2, true, -30, 2);
+	game::GameWorld::PlayerInfo passenger;
+	CHECK(field.world->playerInfo(rider, passenger));
+	passenger.vehicle = vehicle; passenger.seat = 1; passenger.alive = true;
+	self.vehicle = vehicle; self.driving = true; self.seat = 0;
+	game::BotManagerTestAccess::players(bots, {self, passenger});
+	auto& riding = game::BotManagerTestAccess::bot(bots, rider);
+	wedge();
+	game::BotManagerTestAccess::drive(bots, self);
+	CHECK(riding.stuckExit == vehicle);
+	CHECK(game::BotManagerTestAccess::act(bots, passenger).use);
+}
+
+// A vehicle move whose follower failed the no-progress test (0x10092bc0):
+// it brakes and ends without arriving, the flag survives a request for the
+// same goal while the route stands (0x10095fc0), another goal clears it, and
+// a route that can't be planned stays a separate failure. The car (CarMoveTo)
+// and the walker (MechMoveTo) alike. Retail's handling as emulated in
+// work/suez-stall; not a claim of complete AI parity.
+TEST(Bots_StuckVehicleMoveBrakesAndFails)
+{
+	for (const char* kind : {"Car", "Mech"}) {
+		Field field;
+		game::BotSettings settings;
+		Console console;
+		game::registerBotConsoleMethods(console, settings);
+		std::string out;
+		const std::string t = std::string("Stuck") + kind;
+		for (const std::string& line : std::vector<std::string> {"aiTemplatePlugIn.create Mobile " + t + "_Mobile",
+				 "aiTemplatePlugIn.maxSpeed 20", "aiTemplatePlugIn.create Unit " + t + "_Unit",
+				 "aiTemplatePlugIn.equipmentTypeName " + std::string(kind), "aiTemplate.create " + t, "aiTemplate.addType ITGround",
+				 "aiTemplate.addPlugIn " + t + "_Mobile", "aiTemplate.addPlugIn " + t + "_Unit"}) {
+			console.execute(line, out);
+		}
+		game::BotManager bots(*field.world, settings);
+		const int id = field.soldier(2, true, -30, 0);
+		auto* tmpl = field.templates.create("PlayerControlObject", t);
+		tmpl->settings()["aiTemplate"] = t;
+		tmpl->settings()["seatInformation"] = t + " 0/0/0 0/0/0";
+		const uint32_t vehicle = field.objects.create(tmpl, {-30, 0, 0})->id();
+		game::GameWorld::PlayerInfo self;
+		CHECK(field.world->playerInfo(id, self));
+		self.vehicle = vehicle; self.driving = true; self.seat = 0; self.position = {-30, 0, 0};
+		game::GameWorld::VehicleInfo v {};
+		v.object = vehicle; v.position = self.position; v.working = true; v.forward = {0, 0, 1}; v.right = {1, 0, 0};
+		v.velocity = {0, 0, 3}; // rolling ahead at 3 m/s
+		v.boxMin = {-1, -1, -2}; v.boxMax = {1, 1, 2};
+		game::BotManagerTestAccess::vehicles(bots, {v});
+		auto mesh = goalTestMesh({{-40, -10, 0, 10}});
+		bots.setVehicleNavMesh(&mesh);
+		auto& bot = game::BotManagerTestAccess::bot(bots, id);
+		ai::FollowerSettings driver;
+		driver.soldier = false; driver.options.vehicle = true;
+		const physics::Vec3 goal {-5, 0, 0};
+		// Planned for the goal, then 21 s trying without moving 4 m.
+		bot.follower.request(mesh, {-30, 0, 0}, {-5, 0, 0}, driver, 0);
+		bot.follower.progress({-30, 0, 0}, 1, 0);
+		bot.follower.progress({-29, 0, 0}, 1, 21);
+		bot.followId = 1000; bot.followTo = goal; bot.followAt = 0;
+		CHECK(bot.follower.stuck());
+		game::BotManagerTestAccess::time(bots, 22);
+		for (int tick = 0; tick < 3; ++tick) {
+			game::SoldierInput input;
+			input.throttle = 0.5f; input.strafe = 0.5f;
+			CHECK(!game::BotManagerTestAccess::driveTo(bots, self, goal, 1000, input)); // the move is over
+			CHECK(bot.moveFailed && bot.follower.stuck()); // not an arrival; the flag stands
+			CHECK(input.strafe == 0);                       // no steering
+			CHECK(std::string(kind) == "Car" ? input.throttle < 0 : input.throttle == 0); // the car brakes, the walker lets go
+		}
+		// Another goal clears it (0x100923a0) and the move runs again.
+		game::SoldierInput input;
+		CHECK(game::BotManagerTestAccess::driveTo(bots, self, {-8, 0, 5}, 1001, input));
+		CHECK(!bot.moveFailed && !bot.follower.stuck() && !bot.follower.failed());
+		// No path is a separate failure: braking, still running, never moveFailed.
+		game::SoldierInput none;
+		CHECK(game::BotManagerTestAccess::driveTo(bots, self, {300, 0, 300}, 1002, none));
+		CHECK(!bot.moveFailed && bot.follower.failed() && !bot.follower.stuck());
+	}
+}
+
+// The drivers' rays measure a stop in 3-D from the vehicle's origin, as
+// the car's, tank's and mech's machines do (|hit - p|, 0x100e8170,
+// 0x100de8a0, 0x100e1f20): an origin 0.8 m over the mesh, 2.2 m across from
+// its edge, has 2.34 m of room, more than the 2.30 m a 2.45 m box needs.
+TEST(Bots_DriveRayMeasuresStopIn3D)
+{
+	auto mesh = goalTestMesh({{-40, -10, 0, 10}});
+	const ai::ClimbLimits climb;
+	const ai::DriveRay stopped = ai::driveRay(mesh, {-2.2f, 0.8f, 0}, {10, 0.8f, 0}, climb);
+	CHECK(!stopped.clear);
+	CHECK(near(stopped.distance, std::sqrt(2.2f * 2.2f + 0.8f * 0.8f)));
+	const ai::DriveRay open = ai::driveRay(mesh, {-20, 0.8f, 0}, {-30, 0.8f, 0}, climb);
+	CHECK(open.clear);
 }
 
 TEST(Bots_GoalRecoveryConfirmedWorldExit)
@@ -883,6 +1077,11 @@ TEST(Bots_PathSmoothingOnPortals)
 	close[1].p = {40, 0, 3.5f};
 	ai::smoothWaypoints(close, {2, 0, 0}, 0.5f);
 	CHECK(near(close[0].p.x, 2) && near(close[0].p.z, 3));
+	// The 5 m are 3-D (0x100936e6..0x10093707): 3 m away across the ground
+	// but 6 m below, the same waypoint is pulled (1 m from the portal's end).
+	close[0].p = {2, 0, 3};
+	ai::smoothWaypoints(close, {2, 6, 0}, 0.5f);
+	CHECK(near(close[0].p.x, 3, 1e-3f) && near(close[0].p.z, 3));
 }
 
 // The vehicles' driving (0x100e9d40, 0x100e0540, 0x100e8170): steering
@@ -1131,6 +1330,95 @@ TEST(Bots_DriveAroundObstacles)
 	CHECK(ai::driveControl(car, there, sense).stop);
 }
 
+// The car's controller (0x100e9d40) regulates the horizontal speed signed
+// by the motion (|v_xz| x motion, 0x100ea080), not the speed along the
+// heading: sliding 3 m/s sideways at 4 m/s ahead it counts 5 m/s.
+TEST(Bots_CarThrottleUsesTheHorizontalSpeed)
+{
+	ai::DriveSettings car;
+	car.maxSpeed = 6; // the regulation unsaturated: (6 - 5) / 3, not (6 - 4) / 3
+	ai::DriveSense sense;
+	sense.goalDistance = 100;
+	sense.remaining = 200;
+	sense.goal = {0, 0, 100};
+	sense.velocity = {3, 0, 4};
+	sense.speed = 4;
+	ai::DriveState st;
+	const ai::DriveOutput out = ai::driveControl(car, st, sense);
+	const float t = out.targetSpeed;
+	CHECK(st.state == 0 && out.direction == 1 && t > 5 && t < 7);
+	CHECK(near(out.throttle, std::clamp(t / 15 + std::min(1.0f, (t - 5) / 3), -1.0f, 1.0f), 1e-5f));
+}
+
+// A driver's list of other objects (0x10094df0 through the filter
+// 0x10092780): primary objects with a Mobile plug-in, or ITObstacle ones.
+// A stationary gun (the Suez bridge locks' STATIC_AA, on the walkways over
+// the road) is neither, so the drivers below don't go round it.
+TEST(Bots_DriversListOnlyMobileOrObstacleObjects)
+{
+	Field field;
+	game::BotSettings settings;
+	Console console;
+	game::registerBotConsoleMethods(console, settings);
+	std::string out;
+	for (const char* line : {"aiTemplatePlugIn.create Mobile SeeCar_Mobile", "aiTemplatePlugIn.create Physical SeeGun_Physical",
+			 "aiTemplatePlugIn.create Unit SeeGun_Unit", "aiTemplate.create SeeCar", "aiTemplate.addType ITGround",
+			 "aiTemplate.addPlugIn SeeCar_Mobile", "aiTemplate.create SeeGun", "aiTemplate.addType ITUnit",
+			 "aiTemplate.addType ITGround", "aiTemplate.addPlugIn SeeGun_Physical", "aiTemplate.addPlugIn SeeGun_Unit",
+			 "aiTemplate.create SeeBlock", "aiTemplate.addType ITObstacle", "aiTemplate.addPlugIn SeeGun_Physical",
+			 "aiTemplate.create SeeSecond", "aiTemplate.secondary 1", "aiTemplate.addPlugIn SeeCar_Mobile"})
+		console.execute(line, out);
+	game::BotManager bots(*field.world, settings);
+	const auto object = [&](const char* name, const char* ai) {
+		auto* t = field.templates.create("PlayerControlObject", name);
+		if (ai) {
+			t->settings()["aiTemplate"] = ai;
+		}
+		return field.objects.create(t, {0, 0, 0})->id();
+	};
+	using Access = game::BotManagerTestAccess;
+	CHECK(Access::driversSee(bots, object("see_car", "SeeCar")));
+	CHECK(!Access::driversSee(bots, object("see_gun", "SeeGun")));       // the stationary gun
+	CHECK(Access::driversSee(bots, object("see_block", "SeeBlock")));    // ITObstacle
+	CHECK(!Access::driversSee(bots, object("see_second", "SeeSecond"))); // not primary
+	CHECK(Access::driversSee(bots, object("see_bare", nullptr)));        // no AI scripts
+}
+
+// Two vehicles: the follower is already avoiding (its side flipped) the
+// leader standing 8 m ahead, and is backing round it (13). Retail's
+// machines (car 0x100e9571..0x100e9593, tank 0x100dfcfc, mech 0x100e3225)
+// give way to driving on (0) round a vehicle a bot drives or nobody does,
+// but keep the obstacle state round one a human drives.
+TEST(Bots_DriveAvoidingGivesWayExceptForAHuman)
+{
+	for (const ai::Driver driver : {ai::Driver::Car, ai::Driver::Tank, ai::Driver::Mech}) {
+		for (const bool human : {false, true}) {
+			ai::DriveSettings settings;
+			settings.driver = driver;
+			ai::DriveSense sense;
+			sense.now = 5;
+			sense.goalDistance = 100;
+			sense.remaining = 200;
+			sense.goal = {0, 0, 100};
+			ai::DriveObstacle leader;
+			leader.id = 7;
+			leader.position = leader.centre = {0.5f, 0, 8};
+			leader.radius = leader.centreRadius = 2.5f;
+			leader.humanDriven = human;
+			sense.obstacles.push_back(leader);
+			ai::DriveState st;
+			st.state = 13;
+			st.changedAt = 4;
+			st.avoiding = true;
+			st.avoided = 7;
+			st.avoidedAt = leader.position;
+			ai::driveControl(settings, st, sense);
+			CHECK(st.avoiding);
+			CHECK(human ? st.state != 0 : st.state == 0);
+		}
+	}
+}
+
 // A level without AIPathFinding has no bots in the original (no ai.init,
 // ai.addBot refused): with a null mesh the manager runs none.
 TEST(Bots_NoNavigationMeshNoBots)
@@ -1251,6 +1539,288 @@ TEST(Bots_StrategicWaypointsOnTheWay)
 	const std::vector<physics::Vec3> route = bots.route(bot);
 	CHECK(route.size() == 2 && near(route[0].x, 0) && near(route[0].z, 40)); // the infantry waypoint, either direction
 	CHECK(route.size() == 2 && route[1].x > 85);
+}
+
+// A driver whose fire plan keeps to the order's spot (+0x248) heads for
+// the spot, not the target (the plan builds MoveToFinding to the spot in
+// place of the chase, 0x1007ae2a / 0x1007c8f1); without it, it chases.
+TEST(Bots_DriverFirePlanKeepsToTheOrderSpot)
+{
+	Field field;
+	game::BotSettings settings;
+	Console console;
+	game::registerBotConsoleMethods(console, settings);
+	std::string out;
+	for (const char* line : {"aiTemplatePlugIn.create Mobile SpotCar_Mobile", "aiTemplatePlugIn.maxSpeed 20",
+			 "aiTemplate.create SpotCar", "aiTemplate.addType ITGround", "aiTemplate.addPlugIn SpotCar_Mobile"}) console.execute(line, out);
+	game::BotManager bots(*field.world, settings);
+	const int id = field.soldier(2, true, -30, 0);
+	const int enemy = field.soldier(1, false, 60, 0);
+	auto* car = field.templates.create("PlayerControlObject", "spot_test_car");
+	car->settings()["aiTemplate"] = "SpotCar";
+	car->settings()["seatInformation"] = "spot_test_car 0/0/0 0/0/0";
+	car->children().push_back({"spot_test_engine", {}, {}});
+	field.templates.create("Engine", "spot_test_engine")->settings()["engineType"] = "194";
+	const uint32_t vehicle = field.objects.create(car, {-30, 0, 0})->id();
+	game::GameWorld::PlayerInfo self, target;
+	CHECK(field.world->playerInfo(id, self) && field.world->playerInfo(enemy, target));
+	self.vehicle = vehicle; self.driving = true; self.seat = 0; self.position = {-30, 0, 0};
+	game::GameWorld::VehicleInfo v {};
+	v.object = vehicle; v.position = self.position; v.working = true; v.forward = {0, 0, 1};
+	v.boxMin = {-1, -1, -2}; v.boxMax = {1, 1, 2};
+	game::BotManagerTestAccess::vehicles(bots, {v});
+	auto vehicles = goalTestMesh({{-100, -100, 100, 100}});
+	bots.setVehicleNavMesh(&vehicles);
+	auto& bot = game::BotManagerTestAccess::bot(bots, id);
+	bot.orderMove = true;
+	bot.orderSpot = {-30, 0, -60};
+	game::BotManagerTestAccess::firePlanDrive(bots, self, target, false);
+	CHECK(near(bot.followTo.z, -60) && near(bot.followTo.x, -30) && !bot.chase);
+	bot.orderMove = false;
+	game::BotManagerTestAccess::firePlanDrive(bots, self, target, false);
+	CHECK(near(bot.followTo.x, 60) && bot.chase); // out of sight: the chase
+}
+
+// The fire plan of a driver whose ControlInfo drives and aims with
+// different inputs (0x100795a0's path from 0x10079dff: every shipped vehicle
+// seat) is built without its moves against a soldier, or a vehicle with no
+// polygon on the driver's mesh (0x10079e2f): no chase, nothing forgotten.
+// One that turns and aims with the same input (SoldierCtrl's way) keeps the
+// other path's chase unless it floats (the hover tank).
+TEST(Bots_DriverFirePlanHoldsForSoldiersAndTargetsOffItsMesh)
+{
+	Field field;
+	game::BotSettings settings;
+	Console console;
+	game::registerBotConsoleMethods(console, settings);
+	std::string out;
+	for (const char* line : {"aiTemplatePlugIn.create Mobile HoldCar_Mobile", "aiTemplatePlugIn.maxSpeed 20",
+			 "aiTemplatePlugIn.create ControlInfo HoldCar_Ctrl", "aiTemplatePlugIn.driveTurnControl PIYaw",
+			 "aiTemplatePlugIn.driveThrottleControl PIThrottle", "aiTemplatePlugIn.aimHorizontalControl PIMouseLookX",
+			 "aiTemplatePlugIn.aimVerticalControl PIMouseLookY",
+			 "aiTemplatePlugIn.create ControlInfo SharedCar_Ctrl", "aiTemplatePlugIn.driveTurnControl PIMouseLookX",
+			 "aiTemplatePlugIn.driveThrottleControl PIThrottle", "aiTemplatePlugIn.aimHorizontalControl PIMouseLookX",
+			 "aiTemplatePlugIn.aimVerticalControl PIMouseLookY",
+			 "aiTemplatePlugIn.create ControlInfo FloatCar_Ctrl", "aiTemplatePlugIn.driveTurnControl PIRoll",
+			 "aiTemplatePlugIn.driveThrottleControl PIThrottle", "aiTemplatePlugIn.aimHorizontalControl PIRoll",
+			 "aiTemplatePlugIn.aimVerticalControl PIPitch", "aiTemplatePlugIn.isFloating 1",
+			 "aiTemplate.create HoldCar", "aiTemplate.addType ITGround", "aiTemplate.addPlugIn HoldCar_Mobile",
+			 "aiTemplate.addPlugIn HoldCar_Ctrl",
+			 "aiTemplate.create SharedCar", "aiTemplate.addType ITGround", "aiTemplate.addPlugIn HoldCar_Mobile",
+			 "aiTemplate.addPlugIn SharedCar_Ctrl",
+			 "aiTemplate.create HoldAir", "aiTemplate.addType ITAir", "aiTemplate.addPlugIn HoldCar_Mobile",
+			 "aiTemplate.create FloatCar", "aiTemplate.addType ITGround", "aiTemplate.addPlugIn HoldCar_Mobile",
+			 "aiTemplate.addPlugIn FloatCar_Ctrl"}) console.execute(line, out);
+	game::BotManager bots(*field.world, settings);
+	const int id = field.soldier(2, true, -30, 0);
+	const int enemy = field.soldier(1, false, 60, 0);
+	field.templates.create("Engine", "hold_test_engine")->settings()["engineType"] = "194";
+	const auto car = [&](const char* name, const char* ai, physics::Vec3 at) {
+		auto* t = field.templates.create("PlayerControlObject", name);
+		t->settings()["aiTemplate"] = ai;
+		t->settings()["seatInformation"] = std::string(name) + " 0/0/0 0/0/0";
+		t->children().push_back({"hold_test_engine", {}, {}});
+		game::GameWorld::VehicleInfo v {};
+		v.object = field.objects.create(t, {at.x, at.y, at.z})->id();
+		v.position = at; v.working = true; v.forward = {0, 0, 1};
+		v.boxMin = {-1, -1, -2}; v.boxMax = {1, 1, 2};
+		return v;
+	};
+	const game::GameWorld::VehicleInfo own = car("hold_test_car", "HoldCar", {-30, 0, 0});
+	const game::GameWorld::VehicleInfo shared = car("shared_test_car", "SharedCar", {-30, 0, 20});
+	const game::GameWorld::VehicleInfo floats = car("float_test_car", "FloatCar", {-30, 0, 40});
+	const game::GameWorld::VehicleInfo onMesh = car("hold_test_enemy", "HoldCar", {60, 0, 0});
+	const game::GameWorld::VehicleInfo offMesh = car("hold_test_enemy2", "HoldCar", {60, 0, 150});
+	const game::GameWorld::VehicleInfo flying = car("hold_test_air", "HoldAir", {60, 40, 150});
+	game::BotManagerTestAccess::vehicles(bots, {own, shared, floats, onMesh, offMesh, flying});
+	auto vehicles = goalTestMesh({{-100, -100, 100, 100}});
+	bots.setVehicleNavMesh(&vehicles);
+	game::GameWorld::PlayerInfo self, target;
+	CHECK(field.world->playerInfo(id, self) && field.world->playerInfo(enemy, target));
+	self.vehicle = own.object; self.driving = true; self.seat = 0; self.position = own.position;
+	using Access = game::BotManagerTestAccess;
+	CHECK(Access::firePlanHolds(bots, self, target)); // a soldier
+	game::GameWorld::PlayerInfo riding = target;
+	riding.vehicle = onMesh.object;
+	CHECK(!Access::firePlanHolds(bots, self, riding)); // a vehicle on the mesh: the moves are built
+	riding.vehicle = offMesh.object;
+	CHECK(Access::firePlanHolds(bots, self, riding)); // one off it
+	riding.vehicle = flying.object;
+	CHECK(!Access::firePlanHolds(bots, self, riding)); // an aircraft's record isn't known: as before
+	game::GameWorld::PlayerInfo other = self;
+	other.vehicle = shared.object;
+	CHECK(!Access::firePlanHolds(bots, other, target)); // one input turns and aims: the other path
+	other.vehicle = floats.object;
+	CHECK(Access::firePlanHolds(bots, other, target)); // ... unless it floats
+	other.vehicle = 0; other.driving = false;
+	CHECK(!Access::firePlanHolds(bots, other, target)); // on foot
+
+	auto& bot = Access::bot(bots, id);
+	bot.target = enemy;
+	bot.known.push_back({});
+	bot.known.back().player = enemy;
+	bot.fireHolds = true;
+	CHECK(!Access::firePlanDrive(bots, self, target, false)); // not forgotten
+	CHECK(!bot.chase && !bot.manoeuvre && bot.target == enemy && bot.known.size() == 1);
+	CHECK(!near(bot.followTo.x, 60)); // no move was asked for
+	bot.fireHolds = false;
+	Access::firePlanDrive(bots, self, target, false);
+	CHECK(bot.chase && near(bot.followTo.x, 60)); // the other path's chase
+
+	// The choice is the builder's, made when it runs (0x1007cf10): kept while
+	// the plan stands, made again once another behaviour's plan has run or
+	// the target or weapon changes; a rebuilt plan's statements start afresh.
+	bot.firePlanBuilt = false;
+	Access::fire(bots, self);
+	CHECK(bot.firePlanBuilt && bot.fireHolds && !bot.chase);
+	other = self;
+	other.vehicle = shared.object;
+	Access::fire(bots, other); // the plan stands: not asked again
+	CHECK(bot.fireHolds);
+	bot.firePlanBuilt = false; // as the arbitration leaves Fire
+	Access::fire(bots, other);
+	CHECK(bot.firePlanBuilt && !bot.fireHolds);
+	bot.firePlanUnit = onMesh.object; // the target was in a vehicle when the plan was built: another target now
+	Access::fire(bots, self);
+	CHECK(bot.firePlanBuilt && bot.fireHolds && bot.firePlanUnit == 0);
+	bot.planTarget = -1; // a new target or weapon
+	Access::planFire(bots, self);
+	CHECK(bot.planTarget == enemy && !bot.firePlanBuilt);
+}
+
+// The fire plan's choices are the builder's, and the builder runs again
+// whenever Fire takes over from another behaviour (0x1007cf10 keeps a plan
+// only while it is still the bot's): through the bot's own think and plan,
+// with the same enemy and weapon each time. First the way the shipped
+// drivers' sets leave Fire, the target lost and found again; then with the
+// target kept, a behaviour that outbids Fire (RunOver's 65, in this set).
+TEST(Bots_DriverFirePlanIsBuiltAgainWhenFireResumes)
+{
+	Field field;
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	std::string out;
+	for (const char* line : {"aiSettings.setVehicleBehaviour Tank MoveTo BBMoveTo BBPGotoWaypoint2d 4 UCUnion UnitWeights",
+			 "aiSettings.setVehicleBehaviour Tank Idle BBIdle BBPIdle2d 5 UCUnion UnitWeights",
+			 "aiSettings.setVehicleBehaviour Tank Fire BBFireInfantery BBPFireInfantery 4 UCFire UnitWeights",
+			 "aiSettings.setVehicleBehaviour Tank RunOver BBRunOverSoldier BBPRunOverSoldier 6 UCUnion UnitWeights",
+			 "aiSettings.setVehicleDefaultBehaviour Tank Idle",
+			 "aiTemplatePlugIn.create Mobile ResumeCar_Mobile", "aiTemplatePlugIn.maxSpeed 20",
+			 "aiTemplatePlugIn.create Unit ResumeCar_Unit", "aiTemplatePlugIn.equipmentTypeName Tank",
+			 "aiTemplatePlugIn.create ControlInfo ResumeCar_Ctrl", "aiTemplatePlugIn.driveTurnControl PIYaw",
+			 "aiTemplatePlugIn.driveThrottleControl PIThrottle", "aiTemplatePlugIn.aimHorizontalControl PIMouseLookX",
+			 "aiTemplatePlugIn.aimVerticalControl PIMouseLookY",
+			 "aiTemplate.create ResumeCar", "aiTemplate.addType ITGround", "aiTemplate.addPlugIn ResumeCar_Mobile",
+			 "aiTemplate.addPlugIn ResumeCar_Unit", "aiTemplate.addPlugIn ResumeCar_Ctrl"}) console.execute(line, out);
+	game::BotManager bots(*field.world, settings);
+	const int id = field.soldier(2, true, -30, 0);
+	const int enemy = field.soldier(1, false, 10, 0);
+	auto* car = field.templates.create("PlayerControlObject", "resume_test_car");
+	car->settings()["aiTemplate"] = "ResumeCar";
+	car->settings()["seatInformation"] = "resume_test_car 0/0/0 0/0/0";
+	car->children().push_back({"resume_test_engine", {}, {}});
+	field.templates.create("Engine", "resume_test_engine")->settings()["engineType"] = "194";
+	game::GameWorld::VehicleInfo v {};
+	v.object = field.objects.create(car, {-30, 0, 0})->id();
+	v.position = {-30, 0, 0}; v.working = true; v.forward = {1, 0, 0}; // facing the enemy
+	v.boxMin = {-1, -1, -2}; v.boxMax = {1, 1, 2};
+	auto vehicles = goalTestMesh({{-100, -100, 100, 100}});
+	bots.setVehicleNavMesh(&vehicles);
+	game::GameWorld::PlayerInfo self, target;
+	CHECK(field.world->playerInfo(id, self) && field.world->playerInfo(enemy, target));
+	self.vehicle = v.object; self.driving = true; self.seat = 0; self.position = v.position;
+	using Access = game::BotManagerTestAccess;
+	auto& bot = Access::bot(bots, id);
+	const auto sees = [&](bool seen) {
+		bot.known.clear();
+		if (seen) {
+			bot.known.push_back({});
+			bot.known.back().player = enemy;
+			bot.known.back().position = target.position;
+			bot.known.back().everSeen = bot.known.back().seenClear = true;
+		}
+	};
+	float now = 10;
+	const auto round = [&] {
+		Access::time(bots, now += 1.0f / 30);
+		Access::vehicles(bots, {v});
+		Access::thinkAndAct(bots, self, {self, target});
+	};
+	const physics::Vec3 spot {-30, 0, -60};
+
+	sees(true);
+	round();
+	CHECK(bots.behaviour(id) == "Fire" && bot.target == enemy);
+	CHECK(bot.firePlanBuilt && bot.fireHolds && !bot.orderMove); // a soldier: no moves; no order spot yet
+	const int slot = bot.weaponSlot;
+
+	// The enemy drops out of the bot's memory: Fire's urgency goes, another
+	// behaviour's plan runs. The bot gets its order meanwhile.
+	sees(false);
+	round();
+	CHECK(bots.behaviour(id) != "Fire" && !bot.firePlanBuilt && !bot.orderMove);
+	bot.fireHolds = false; // what the old plan chose is not what the new one will
+	bot.hasGoal = true;
+	bot.goal = spot;
+	bot.orderPosition = {1, 0, 0};
+	sees(true);
+	round();
+	CHECK(bots.behaviour(id) == "Fire" && bot.target == enemy && bot.weaponSlot == slot);
+	CHECK(bot.firePlanBuilt && bot.fireHolds); // chosen again
+	CHECK(bot.orderMove && near(bot.orderSpot.x, -30) && near(bot.orderSpot.z, -60));
+	// The plan's moves, on what the bot's own round left (this car has no
+	// gun the world knows, so fire() itself stops short of them).
+	Access::firePlanDrive(bots, self, target, false);
+	CHECK(near(bot.followTo.x, -30) && near(bot.followTo.z, -60) && !bot.chase); // it makes for the spot
+
+	// The target kept: the car at speed with the soldier ahead, RunOver outbids Fire.
+	bot.hasGoal = false;
+	v.velocity = {12, 0, 0};
+	round();
+	CHECK(bots.behaviour(id) == "RunOver" && bot.target == enemy && bot.planTarget == enemy);
+	CHECK(!bot.firePlanBuilt && !bot.orderMove);
+	bot.fireHolds = false;
+	v.velocity = {};
+	round();
+	CHECK(bots.behaviour(id) == "Fire" && bot.target == enemy && bot.weaponSlot == slot);
+	CHECK(bot.firePlanBuilt && bot.fireHolds && !bot.orderMove); // chosen again: no spot now, it stays where it is
+	CHECK(!Access::firePlanDrive(bots, self, target, false)); // out of sight: nothing forgotten
+	CHECK(near(bot.followTo.z, -60) && !bot.chase && bot.target == enemy); // and no new move
+}
+
+// An area on the way whose points are all off the bot's mesh: after 20
+// tries the original takes the area's position for that map (0x10060300 ->
+// vt+0x10, 0x1005d7f0: its setOrderPosition for the map), not the control
+// point. Suez's InnerBridgeLock: its point stands on high ground off the
+// vehicle mesh; its Vehicle order position is on the bridge road.
+TEST(Bots_RouteAreaOffTheMeshTakesItsOrderPosition)
+{
+	Field field([](Field& f) {
+		world::ObjectTemplate* point = f.templates.create("ControlPoint", "cp_mid");
+		point->settings()["controlPointId"] = "3";
+		f.objects.create(point, {0, 0, 0});
+	});
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	std::string out;
+	for (const char* line : {"aiStrategicArea.createFromControlPoint eu 2 50", "aiStrategicArea.addNeighbour mid",
+			 "aiStrategicArea.createFromControlPoint mid 3 50", "aiStrategicArea.addNeighbour eu",
+			 "aiStrategicArea.addNeighbour pac", "AIStrategicArea.setOrderPosition Vehicle 0/0/-60",
+			 "aiStrategicArea.createFromControlPoint pac 1 50", "aiStrategicArea.addNeighbour mid",
+			 "aiStrategicArea.addWayPoint 0/0/80 Infantry eu mid"}) { // the vehicles' route has none
+		console.execute(line, out);
+	}
+	game::BotManager bots(*field.world, settings);
+	// The vehicles' road runs south of the middle point, out of its reach.
+	auto vehicles = goalTestMesh({{-120, -70, 120, -50}, {-120, -70, -80, 10}});
+	bots.setVehicleNavMesh(&vehicles);
+	const int id = field.soldier(2, true, -100, 0);
+	game::GameWorld::PlayerInfo self;
+	CHECK(field.world->playerInfo(id, self));
+	game::BotManagerTestAccess::routeVia(bots, self, 2, 1);
+	const auto& via = game::BotManagerTestAccess::bot(bots, id).via;
+	CHECK(via.size() == 1 && via[0].area == 1);
+	CHECK(via.size() == 1 && near(via[0].position.x, 0) && near(via[0].position.z, -60));
 }
 
 // The AI deviation (BF2142.exe 0x00892b70): (1 - skill) x 14 at a new
@@ -1597,7 +2167,9 @@ TEST(Bots_CerbereLandingAmongStaticObjects)
 // The path follower (0x10095fc0, 0x10095720, 0x10092bc0) on Cerbere_Landing's
 // infantry mesh: a path to the Command Center whose waypoints lie on the
 // portals they cross; a walker at 5 m/s reaching each within 0.5 m gets
-// there; one that pushes and doesn't move fails after 10 s.
+// there; one that pushes and doesn't move fails after 10 s. A move that
+// fails on the way (blocked with no cluster path left, 0x10095470) is asked
+// for again from where the bot is, as the bots' MoveTo does.
 TEST(Bots_PathFollowerOnCerbereLanding)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
@@ -1633,9 +2205,15 @@ TEST(Bots_PathFollowerOnCerbereLanding)
 	ai::Vec3 at = from;
 	bool arrived = false;
 	float now = 0;
+	int replans = 0;
 	for (int tick = 0; tick < 30 * 120 && !arrived; ++tick) {
 		now += 1 / 30.0f;
-		const ai::PathFollower::Steer steer = follower.steer(mesh, at, now);
+		ai::PathFollower::Steer steer = follower.steer(mesh, at, now);
+		if (!steer.ok && follower.failed() && replans < 30) {
+			++replans;
+			follower.request(mesh, at, to, settings, now);
+			steer = follower.steer(mesh, at, now);
+		}
 		CHECK(steer.ok);
 		if (!steer.ok) {
 			break;
@@ -1655,6 +2233,7 @@ TEST(Bots_PathFollowerOnCerbereLanding)
 		follower.progress(at, 1, now);
 	}
 	CHECK(arrived);
+	std::printf("  arrived at %.1f s after %d replans\n", now, replans);
 	CHECK(std::sqrt((at.x - to.x) * (at.x - to.x) + (at.z - to.z) * (at.z - to.z)) < 1);
 	// Stuck: pushing without moving fails after 10 s, not before.
 	ai::PathFollower stuck;
@@ -3003,6 +3582,38 @@ TEST(Bots_ChangeWeighsOtherVehiclesFromInside)
 	}
 	CHECK(left);
 	CHECK(boarded);
+}
+
+// Change's way out at 10000 (0x1006c520's local_19): only after the bot's
+// vehicle has stood 4 s in a commander's strike spot (0x100880e0, its time
+// since the strike over 4.0). A driver on an empty mesh-less field stays at
+// the wheel; once its side's strike lands on it, it gets out after 4 s.
+TEST(Bots_ChangeLeavesAVehicleInAStrikeSpot)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	CarField field(gameDir);
+	const uint32_t car = field.car("car", 3, 0);
+	const int bot = field.soldier("Bot", true, 0, 0);
+	field.ticks(90);
+	field.board(bot, 0);
+	CHECK(field.info(bot).vehicle == car && field.info(bot).seat == 0);
+	game::BotManager bots(*field.world, field.settings);
+	for (int tick = 0; tick < 30 * 6; ++tick) {
+		field.ticks(1, &bots);
+	}
+	CHECK(field.info(bot).vehicle == car); // no strike: it keeps its seat
+	bots.noteStrike(field.info(bot).team, field.info(bot).position);
+	int leftAt = -1;
+	for (int tick = 0; tick < 30 * 8 && leftAt < 0; ++tick) {
+		field.ticks(1, &bots);
+		if (field.info(bot).vehicle != car) {
+			leftAt = tick;
+		}
+	}
+	CHECK(leftAt > 30 * 4); // not before 4 s in the spot
 }
 
 // Avoid (0x10064850): a wreck within reach adds 100, x2 in the level's
@@ -5331,5 +5942,92 @@ TEST(Bots_VehicleApproachUsesReachableMeshAndAuthoredPosition)
 		}
 		std::printf("  Belgrade stopped-driver infantry path: %zu points, %.1f m\n", foot.size(), metres);
 		CHECK(!foot.empty() && metres < 400);
+	}
+}
+
+TEST(Bots_ReviewSquadRejectedGoalRetry)
+{
+	for (int squadState : {0, 1}) {
+		Field field;
+		game::BotSettings settings;
+		ai::StrategicArea area;
+		area.controlPoint = 1;
+		area.hasOrderPosition[0] = area.hasOrderPosition[1] = true;
+		area.orderPosition[0][0] = 100;
+		area.orderPosition[1][0] = -10; // deliberately 110 m from the flag
+		settings.strategy.areas.push_back(area);
+		Console console;
+		game::registerBotConsoleMethods(console, settings);
+		std::string out;
+		for (const char* line : {"aiTemplatePlugIn.create Mobile GoalCar_Mobile", "aiTemplatePlugIn.maxSpeed 20",
+				 "aiTemplate.create GoalCar", "aiTemplate.addType ITGround", "aiTemplate.addPlugIn GoalCar_Mobile"}) console.execute(line, out);
+		game::BotManager bots(*field.world, settings);
+		game::BotManagerTestAccess::attack(bots, 0);
+		const int id = field.soldier(2, true, -30, 0);
+		auto* car = field.templates.create("PlayerControlObject", "goal_test_car");
+		car->settings()["aiTemplate"] = "GoalCar";
+		car->settings()["seatInformation"] = "goal_test_car 0/0/0 0/0/0";
+		car->children().push_back({"goal_test_engine", {}, {}});
+		field.templates.create("Engine", "goal_test_engine")->settings()["engineType"] = "194";
+		const uint32_t vehicle = field.objects.create(car, {-30, 0, 0})->id();
+		game::GameWorld::PlayerInfo self;
+		CHECK(field.world->playerInfo(id, self));
+		self.vehicle = vehicle; self.driving = true; self.seat = 0; self.position = {-30, 0, 0};
+		game::GameWorld::VehicleInfo v {};
+		v.object = vehicle; v.position = self.position; v.working = true; v.forward = {0, 0, 1};
+		v.boxMin = {-1, -1, -2}; v.boxMax = {1, 1, 2};
+		game::BotManagerTestAccess::vehicles(bots, {v});
+		auto vehicles = goalTestMesh({{-40, -10, 0, 10}, {90, -10, 110, 10}});
+		auto infantry = goalTestMesh({{-200, -20, 200, 20}});
+		bots.setVehicleNavMesh(&vehicles);
+		bots.setNavMesh(&infantry);
+		game::BotManagerTestAccess::goal(bots, self);
+		auto& bot = game::BotManagerTestAccess::bot(bots, id);
+		CHECK(bot.goalOrder == 0 && bot.goalMap == 1 && bot.vehicleApproach);
+		CHECK(near(bot.goal.x, -10)); // authored position, not the disconnected flag
+		CHECK(ai::findPath(infantry, {-10, 0, 0}, {100, 0, 0}).size() >= 2);
+		CHECK(ai::findPath(vehicles, {-30, 0, 0}, {100, 0, 0}).empty());
+		// A planned approach may fail during travel. A complete infantry route
+		// from the actual stopped vehicle enables an early dismount.
+		ai::FollowerSettings driver;
+		driver.soldier = false; driver.options.vehicle = true;
+		bot.follower.request(vehicles, {400, 0, 400}, {-10, 0, 0}, driver, 0);
+		CHECK(bot.follower.failed());
+		bot.followId = 1000;
+		game::BotManagerTestAccess::drive(bots, self);
+		CHECK(bot.vehicleApproach && near(bot.goal.x, -30) && !bot.follower.failed());
+		bot.orderRegoal = true;
+		game::BotManagerTestAccess::goal(bots, self);
+		// The authored position is disconnected too: only a connected centroid may win.
+		bots.liveSettings().strategy.areas[0].orderPosition[1][0] = 95;
+		bot.orderRegoal = true;
+		game::BotManagerTestAccess::goal(bots, self);
+		CHECK(bot.goalOrder == 0 && bot.vehicleApproach && bot.goal.x < 0);
+		// An infantry island prevents dismount: reject the objective for 30 s.
+		auto disconnectedInfantry = goalTestMesh({{-200, -20, 0, 20}, {90, -20, 200, 20}});
+		bots.setNavMesh(&disconnectedInfantry);
+		bot.orderRegoal = true;
+		game::BotManagerTestAccess::goal(bots, self);
+		CHECK(!bot.vehicleApproach && bot.rejectedVehiclePoints.count(1) == 1);
+		CHECK(near(bot.goal.x, -30));
+		self.squad = 1;
+		game::BotManagerTestAccess::idleSquad(bots, squadState);
+		game::BotManagerTestAccess::goal(bots, self); // no reachable alternative: hold, do not retry each frame
+		CHECK(bot.rejectedVehiclePoints.count(1) == 1 && !bot.orderRegoal);
+		// Before the deadline the squad member holds, without choosing again.
+		game::BotManagerTestAccess::time(bots, 15);
+		game::BotManagerTestAccess::goal(bots, self);
+		CHECK(bot.rejectedVehiclePoints.count(1) == 1 && !bot.vehicleApproach && near(bot.goal.x, -30) && near(bot.goalAt, 0));
+		// Due, but the approach is still cut off: rejected again for 30 s.
+		game::BotManagerTestAccess::time(bots, 31);
+		game::BotManagerTestAccess::goal(bots, self);
+		CHECK(bot.rejectedVehiclePoints.count(1) == 1 && near(bot.rejectedVehiclePoints[1], 61) && !bot.vehicleApproach);
+		game::BotManagerTestAccess::goal(bots, self);
+		CHECK(bot.rejectedVehiclePoints.count(1) == 1 && near(bot.rejectedVehiclePoints[1], 61));
+		// Due again with the infantry route back: the approach is tried.
+		game::BotManagerTestAccess::time(bots, 62);
+		bots.setNavMesh(&infantry);
+		game::BotManagerTestAccess::goal(bots, self);
+		CHECK(bot.rejectedVehiclePoints.empty() && bot.vehicleApproach);
 	}
 }

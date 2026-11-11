@@ -7,6 +7,9 @@
 // saved profiles must not change with it. A headless round prints a state
 // fingerprint (main.cpp, --simulate); tools/parity-check.sh runs the same
 // round with the switch off and on and fails if the fingerprints differ.
+// The one exception is a gameplay addition with its own switch below
+// (botRecovery): it changes the simulation by design, so the check turns it
+// off.
 #pragma once
 
 #include "Console/Console.h"
@@ -21,6 +24,8 @@ struct EnhancedSettings {
 	bool ssao = true;     // enhanced.ssao: ground-truth ambient occlusion on the ambient term
 	bool csm = true;      // enhanced.csm: cascaded sun shadows with PCF
 	bool prepass = false; // enhanced.prepass: the depth/normal/motion prepass even when neither taa nor ssao reads it
+	// Gameplay, also only with enhanced.enabled; changes the simulation:
+	bool botRecovery = true; // enhanced.botRecovery: bots get out of a vehicle that makes no progress (Game/Bots.cpp)
 };
 
 inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& settings)
@@ -35,6 +40,8 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.csm = v; });
 	bindProperty<bool>(console, "enhanced.prepass", ConsoleAccess::Anyone, [&settings] { return settings.prepass; },
 		[&settings](const bool& v) { settings.prepass = v; });
+	bindProperty<bool>(console, "enhanced.botRecovery", ConsoleAccess::Anyone, [&settings] { return settings.botRecovery; },
+		[&settings](const bool& v) { settings.botRecovery = v; });
 }
 
 } // namespace dice::hfe::scene

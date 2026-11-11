@@ -186,6 +186,11 @@ public:
 	bool swimming() const { return m_swim; }
 
 	Vec3 velocity;
+	// What the node reports as its velocity (slot 0x64 -> +0x78, set by slot
+	// 0x19c, 0x006c5920): the step's displacement x 30, components under
+	// 1e-6 zero. `velocity` holds the pending push into a floor between
+	// ticks (one tick of gravity); a soldier held still measures 0.
+	Vec3 measuredVelocity;
 	Vec3 acceleration;      // gravity for the next tick
 	Vec3 impulse;           // velocity change for the next tick
 

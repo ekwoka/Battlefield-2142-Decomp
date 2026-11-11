@@ -901,6 +901,27 @@ TEST(NetHost_StanceFireSpottedAndInvites)
 	}));
 	CHECK(hosted.playerOfGhost(botOf(b)->soldierGhost) == bot);
 
+	// A radio spot (2/0x2e, 0x0050e910 -> 0x00791faa): the bot's sighting of
+	// an enemy reaches both joined teammates' minimaps for 12 s.
+	const int enemy = round.addPlayer("Enemy", 1, true);
+	CHECK(round.spawnSoldier(enemy));
+	const auto ghostKnown = [&](net::GameClient& c) {
+		const net::RemotePlayer* p = c.world().player(enemy);
+		return p && p->soldierGhost != 0;
+	};
+	CHECK(pumpUntil(step, [&] { return ghostKnown(a) && ghostKnown(b); }));
+	const auto listed = [enemy](net::GameClient& c) {
+		const std::vector<int> radar = c.world().radarPlayers();
+		return std::find(radar.begin(), radar.end(), enemy) != radar.end();
+	};
+	CHECK(!listed(a) && !listed(b));
+	round.radioSpot(bot, enemy, 0x1b);
+	CHECK(pumpUntil(step, [&] { return listed(a) && listed(b); }));
+	for (int i = 0; i < 13 * 30; ++i) {
+		step();
+	}
+	CHECK(!listed(a) && !listed(b));
+
 	// B leads squad 1 and invites A: A's client is asked (2/0x10, the squad);
 	// A turns it down (Invite without the leader bit), then is invited
 	// again and joins (JoinSquad).
@@ -1478,6 +1499,66 @@ TEST(GameWorld_SpottedCrosshairTarget)
 	CHECK(round.squadKnows(1, 0, b));
 }
 
+// The minimaps' spotted lists (Bf2MenuMapNode +0xa94): a radio spot lists
+// the enemy for the spotter's whole team for 12 s (0x00791faa, +0xac8); a
+// battlefield report only for the reporter's squad (the reporter alone
+// without one) for its seconds, and only of kind 0 (0x00508590).
+TEST(GameWorld_SpottedEnemiesOnTeamMinimaps)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	const int a = round.addPlayer("A", 1, false);
+	const int b = round.addPlayer("B", 2, false);
+	const int c = round.addPlayer("C", 1, false);
+	CHECK(round.spawnSoldier(a) && round.spawnSoldier(b) && round.spawnSoldier(c));
+	round.tick(1.0f / 30);
+	const std::vector<int> enemy {b};
+	CHECK(round.mapSpottedPlayers(a).empty() && round.mapSpottedPlayers(c).empty());
+	// A report from A (no squad) reaches A only, for 3 s.
+	round.reportBattlefieldObjects(a, {b});
+	CHECK(round.mapSpottedPlayers(a) == enemy && round.mapSpottedPlayers(c).empty());
+	for (int i = 0; i < 4 * 30; ++i) {
+		round.tick(1.0f / 30);
+	}
+	CHECK(round.mapSpottedPlayers(a).empty());
+	// Kind 1 (a bot's firing report) marks no enemy; a teammate isn't listed.
+	round.reportBattlefieldObjects(a, {b}, 3, 1);
+	round.reportBattlefieldObjects(a, {c});
+	CHECK(round.mapSpottedPlayers(a).empty());
+	// A radio spot: the whole team for 12 s, not the enemy's team.
+	round.radioSpot(a, b);
+	CHECK(round.mapSpottedPlayers(a) == enemy && round.mapSpottedPlayers(c) == enemy);
+	CHECK(round.mapSpottedPlayers(b).empty() && round.mapSpottedVehicles(c).empty());
+	for (int i = 0; i < 11 * 30; ++i) {
+		round.tick(1.0f / 30);
+	}
+	CHECK(round.mapSpottedPlayers(c) == enemy);
+	for (int i = 0; i < 2 * 30; ++i) {
+		round.tick(1.0f / 30);
+	}
+	CHECK(round.mapSpottedPlayers(c).empty());
+}
+
+// The local HUD's minimap reads those lists: a teammate's radio spot shows
+// on the local player's map (LocalHudWorld::revealedPlayers, which the red
+// radar markers draw), for his own team only.
+TEST(LocalHud_TeammateSpotOnMinimap)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	CHECK(round.spawnPlayer(1) != nullptr);
+	const int me = round.localPlayer();
+	const int b = round.addPlayer("B", 2, true);
+	const int c = round.addPlayer("C", 1, true);
+	CHECK(me >= 0 && round.spawnSoldier(b) && round.spawnSoldier(c));
+	round.tick(1.0f / 30);
+	const dice::hfe::host::LocalHudWorld local(round, range.logic);
+	CHECK(local.revealedPlayers(1).empty());
+	round.radioSpot(c, b);
+	CHECK(local.revealedPlayers(1) == std::vector<int> {b});
+	CHECK(local.revealedPlayers(2).empty() && local.spottedVehicles().empty());
+}
+
 // A joined client's combat-area countdown (0x0044c7b0 on the client): the
 // server's time outside comes in the player networkable's 0x800 part as
 // whole seconds (0x00592410 / 0x599209: RemotePlayer::outsideSeconds), and
@@ -1575,6 +1656,13 @@ TEST(GameWorld_SpottedMessageVoice)
 	const float dir[3] = {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
 	CHECK(menu::crosshairEnemy(local, round, a, eye, dir) == b);
 	CHECK(menu::crosshairEnemy(local, round, a, eye, dir, 10) == -1);
+	// Commander picking looks down over the selected map point, independently of the soldier's aim.
+	round.playerInfo(b, enemy);
+	const float sky[3] = {enemy.position.x, enemy.position.y + 260, enemy.position.z};
+	const float down[3] = {0, -1, 0};
+	CHECK(menu::crosshairEnemy(local, round, a, sky, down, 360) == b);
+	const float empty[3] = {enemy.position.x + 20, enemy.position.y + 260, enemy.position.z};
+	CHECK(menu::crosshairEnemy(local, round, a, empty, down, 360) == -1);
 }
 
 // NetworkableInfo.* (Objects/Common/Networkables.con): c_NIGhostAlways is

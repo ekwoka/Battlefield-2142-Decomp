@@ -938,3 +938,29 @@ TEST(GameAudio_DetonationEndEffectStartSound)
 	CHECK(!range.world->impacts().empty());
 	CHECK(range.count("S_e_boom_Start") >= 1);
 }
+
+// Pod-engine style: an attached loop without a sound-intensity mapping.
+TEST(GameAudio_ConstantEffectLoopFollowsPod)
+{
+	Sounds sounds;
+	Console console;
+	sound::registerSoundConsoleMethods(console, sounds.manager);
+	addSoundTemplate(sounds.templates, "S_pod_motor_Start");
+	std::string out;
+	CHECK(console.execute("ObjectTemplate.loopCount 0", out) == ConsoleResult::Ok);
+	CHECK(sounds.templates.find("S_pod_motor_Start")->settings()["loopCount"] == "0");
+	auto* bundle = sounds.templates.create("EffectBundle", "pod_motor");
+	bundle->children().clear();
+	bundle->children().push_back({"S_pod_motor_Start", {}, {}});
+	bundle->settings()["SoundIntensityUsed"] = "0";
+	effects::EffectManager effects(sounds.templates);
+	effects.setAnchor(7, {0, 100, 0}, {});
+	CHECK(effects.spawnAttached("pod_motor", 7, {}));
+	CHECK(effects.takeSounds().empty());
+	CHECK(effects.bundleLoops().size() == 1);
+	effects.setAnchor(7, {100, 50, 0}, {});
+	const auto loops = effects.bundleLoops();
+	if (loops.size() == 1) CHECK(loops[0].position.x == 100 && loops[0].position.y == 50);
+	effects.releaseAnchor(7);
+	CHECK(effects.bundleLoops().empty());
+}

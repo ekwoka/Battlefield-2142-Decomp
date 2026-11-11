@@ -202,7 +202,7 @@ private:
 	struct Interior {
 		uint32_t vehicle = 0;
 		int seat = -2;
-		std::string pco;
+		std::string pco, ambientName, damagedName;
 		sound::ISound* ambient = nullptr;
 		sound::ISound* damaged = nullptr;
 		float obstruction = 0, damagedLimit = 0.5f, maxHitPoints = 0;

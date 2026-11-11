@@ -160,7 +160,10 @@ void registerSoundConsoleMethods(Console& console, SoundManager& sounds)
 	const auto engine = [](S& s) { return s.engineTemplate(); };
 	bindSoundProperty<int>(console, templates, "loopCount",
 		[engine](S& s) { return engine(s) ? engine(s)->loopCount() : 0; },
-		[engine](S& s, const int& v) { if (engine(s)) engine(s)->setLoopCount(v); });
+		[engine](S& s, const int& v) {
+			s.settings()["loopCount"] = std::to_string(v); // effect ownership also reads this property
+			if (engine(s)) engine(s)->setLoopCount(v);
+		});
 	bindSoundProperty<int>(console, templates, "lowSamples",
 		[engine](S& s) { return engine(s) ? engine(s)->sampleCount(2) : 0; },
 		[engine](S& s, const int& v) { if (engine(s)) engine(s)->setSampleCount(2, v); });

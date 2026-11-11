@@ -110,6 +110,7 @@ struct ViewerOptions {
 	// right-click map menus, button highlights), same screen.
 	std::function<void(float x, float y)> onRightClick;
 	std::function<void(float x, float y)> onPointerMove;
+	std::function<void(float x, float y, int steps)> onPointerWheel;
 	// A place the pointer was put (HUD 800 x 600) the system cursor must
 	// follow once it shows; true takes it.
 	std::function<bool(float& x, float& y)> takePointerWarp;

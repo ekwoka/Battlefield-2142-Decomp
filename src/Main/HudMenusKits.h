@@ -26,7 +26,7 @@
 // open kit (0x007977a0) sets Kit<row>Item<item>Active / FieldUnlocked /
 // Show / Icon / Alpha; KitCustom<row>Icon the chosen item of each row;
 // CustomInfoShow, CustomSoldierPicture
-// (Ingame/Customization/soldiers/Soldier_<team-1><kit>[1].tga, the 1 for
+// (Ingame/Customization/soldiers/Soldier_<team-1><kit>[1].dds, the 1 for
 // heavy armour, 0x007975e0), KitItemInfoString with LargeInfoPic /
 // SmallInfoPic (0x007981e0), OpenCloseKitCustomString, HeavyArmorActive,
 // NotAntiVechicleKitChoosen.
@@ -123,6 +123,7 @@ private:
 	void build(int team);
 	std::string text(const std::string& key) const { return m_localize ? m_localize(key) : key; }
 	std::string setting(const std::string& templateName, const std::string& key) const;
+	bool mainWeapon(const std::string& itemTemplate) const; // its itemIndex is the kit's main weapon one
 
 	game::GameWorld& m_round;
 	game::GameLogic& m_logic;

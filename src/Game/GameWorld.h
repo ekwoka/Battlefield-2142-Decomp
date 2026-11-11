@@ -973,6 +973,9 @@ public:
 	uint32_t spawnTitan(int player) const;
 	// The control points a team may spawn at (held, with spawn points).
 	std::vector<int> spawnablePoints(int team) const;
+	// A control point's spawn group can take the player now (SpawnGroup slot
+	// 0x28, 0x00633060): one of its points passes spawnPointUsable.
+	bool spawnGroupActive(int controlPoint, int player) const;
 	// Seconds from death to the next spawn (sv.spawnTime, 15 by default).
 	void setSpawnTime(float seconds) { m_spawnTime = seconds; }
 	// The sea's height (heightmapcluster.setSeaWaterLevel), for vehicles
@@ -1099,6 +1102,17 @@ public:
 		uint32_t material;
 		float damage;
 	};
+	// Optional diagnostics for the soldier-bone and offset rays that make up
+	// an explosion's visible share. No callback is installed in normal play.
+	struct BlastRayTrace {
+		uint32_t soldier = 0;
+		int bone = -1;
+		int offset = -1; // -1 direct, 0..3 beside the blast
+		physics::Vec3 from, to;
+		bool clear = false;
+		uint32_t blocker = 0;
+	};
+	void setBlastRayTraceSink(std::function<void(const BlastRayTrace&)> sink) { m_blastRayTraceSink = std::move(sink); }
 	const std::vector<Impact>& impacts() const { return m_impacts; }
 	size_t projectilesInFlight() const { return m_projectiles.size(); }
 	// The weapon HUD's ability bar's inputs (0x007c3af0) for a player:
@@ -1549,6 +1563,27 @@ public:
 	// squad's minimap knows it, reportBattlefieldObjects). The enemy
 	// reported, -1 for none.
 	int spotCrosshair(int player);
+	// A radio spot of an enemy (the game's slot 0xd4 with message 0x2e: the
+	// player's Radio.sendSpottedMessage, a bot's sighting, BF2142.exe
+	// 0x00895ab0): the reporter's battlefield report, and the Spotted
+	// message to his whole team, whose minimaps list the enemy's object (the
+	// vehicle he rides, else his soldier) for 12 s (case 0x2e, 0x00791faa ->
+	// 0x00790d60 with the map's +0xac8, 12.0 from 0x0078814b).
+	// `value` is the event's value byte (0x1b from a bot). Each accepted
+	// spot is kept for a server to hand out (0x0050e910: 2/0x2e to every
+	// player of the team), taken once.
+	struct RadioSpot {
+		int reporter = -1, enemy = -1;
+		uint32_t value = 0;
+	};
+	void radioSpot(int reporter, int enemy, uint32_t value = 0);
+	std::vector<RadioSpot> takeRadioSpots() { return std::exchange(m_radioSpots, {}); }
+	// What a player's minimap lists as spotted (Bf2MenuMapNode +0xa94, read
+	// by 0x007841e0 in the soldier and vehicle passes, 0x00792980 and
+	// 0x00793b60): the team's radio spots and the squad's battlefield
+	// reports (reportBattlefieldObjects), while their seconds last.
+	std::vector<int> mapSpottedPlayers(int viewer) const;
+	std::vector<uint32_t> mapSpottedVehicles(int viewer) const;
 	// Whether a team's squad had a player reported within the last 3 s
 	// (0x100bea30).
 	bool squadKnows(int team, int squad, int player) const;
@@ -2643,6 +2678,7 @@ private:
 	physics::CollisionTemplateManager* m_collisionTemplates = nullptr;
 	physics::Ground m_ground;
 	const physics::MaterialManager* m_materials = nullptr;
+	std::function<void(const BlastRayTrace&)> m_blastRayTraceSink;
 	std::vector<uint32_t> m_checked; // object ids already considered for a body (sorted)
 	std::vector<Body> m_bodies;
 	physics::CollisionWorld m_collision; // static objects, soldier LOD
@@ -2666,6 +2702,7 @@ private:
 		bool trunkFromTypeFour = false;
 		const physics::CollisionMeshFile* file = nullptr; // what it was made from (another LOD's faces)
 		std::vector<uint32_t> materials;
+		size_t geometry = 0; // the file's geometry: a child part's collisionPart, 0 for a root
 	};
 	// A mesh's faces at another LOD (0 projectiles', 2 soldiers'), its box
 	// and radius (slots 0x54 / 0x50 of that LOD), made when first asked.
@@ -2674,8 +2711,9 @@ private:
 		physics::Vec3 boxMin, boxMax;
 		float radius = 0;
 	};
-	std::map<std::tuple<const physics::CollisionMeshFile*, std::vector<uint32_t>, int>, std::shared_ptr<const LodFaces>> m_lodFaces;
-	const LodFaces* lodFaces(const physics::CollisionMeshFile& file, const std::vector<uint32_t>& materials, int lod);
+	std::map<std::tuple<const physics::CollisionMeshFile*, std::vector<uint32_t>, int, size_t>, std::shared_ptr<const LodFaces>> m_lodFaces;
+	const LodFaces* lodFaces(const physics::CollisionMeshFile& file, const std::vector<uint32_t>& materials, int lod,
+		size_t geometry = 0);
 	struct StaticPart {
 		uint32_t object = 0;
 		bool root = true;    // the object itself, not a template of its tree
@@ -2701,9 +2739,10 @@ private:
 	void addStaticPart(StaticPart part);
 	std::vector<StaticPart> m_staticParts;
 	std::unordered_map<int64_t, std::vector<uint32_t>> m_staticGrid; // 16 m cells (x, z) -> parts
-	std::map<std::pair<const physics::CollisionMeshFile*, std::vector<uint32_t>>, std::shared_ptr<const MeshShape>> m_shapes;
+	std::map<std::tuple<const physics::CollisionMeshFile*, std::vector<uint32_t>, size_t>, std::shared_ptr<const MeshShape>> m_shapes;
 	uint32_t m_staticStamp = 0;
-	std::shared_ptr<const MeshShape> meshShape(const physics::CollisionMeshFile& mesh, const std::vector<uint32_t>& materials);
+	std::shared_ptr<const MeshShape> meshShape(const physics::CollisionMeshFile& mesh, const std::vector<uint32_t>& materials,
+		size_t geometry = 0);
 	// One side of a pair: a body (mobile, a root) or a static part.
 	struct MeshActor {
 		Body* body = nullptr;
@@ -2731,6 +2770,7 @@ private:
 		int otherLod = 1;
 		const physics::CollisionMeshFile* file = nullptr;
 		const std::vector<uint32_t>* materials = nullptr;
+		size_t geometry = 0;
 		physics::Vec3 pointVelocity(const physics::Vec3& point) const
 		{
 			return body ? body->body.pointVelocity(point) : physics::Vec3 {};
@@ -2762,8 +2802,11 @@ private:
 		uint32_t materialA, uint32_t materialB, bool trunkPass, bool toA = true, bool legs = false);
 	std::vector<uint32_t> materialMap(const world::ObjectTemplate& objectTemplate) const;
 	void buildStaticCollision();
+	// `inherited`: the nearest ancestor's collision mesh and material map, whose
+	// geometry a child without its own mesh takes through collisionPart.
 	void addStaticCollision(const world::ObjectTemplate& objectTemplate, const physics::Mat3& rotation,
-		const physics::Vec3& position, uint32_t owner, int depth);
+		const physics::Vec3& position, uint32_t owner, int depth, const physics::CollisionMeshFile* inherited = nullptr,
+		const std::vector<uint32_t>* inheritedMaterials = nullptr);
 
 	struct HitBone {
 		int node;            // skeleton node
@@ -3172,6 +3215,7 @@ private:
 	// vehicle's frame); false when the vehicle has gone.
 	bool rideStuck(Projectile& projectile);
 	void steerSeeker(Projectile& projectile, float seconds);
+	bool overridesArming(const Projectile& projectile) const;
 	void wireSettings(Projectile& projectile, const world::ObjectTemplate& firearm) const;
 	void steerClosest(Projectile& projectile, float seconds);
 	// The shot of a lock-on weapon (0x005e1ee0); with the weapon's
@@ -3467,7 +3511,8 @@ private:
 	// A hit round's detonation (0x005e9300): the depth test
 	// (maxDepthForExplosion) and the end effect's up (useCollisionNormal);
 	// false when it doesn't go off.
-	bool detonateHit(Projectile& p, const physics::Vec3& point, const physics::Vec3& normal, uint32_t hitObject);
+	bool detonateHit(Projectile& p, const physics::Vec3& point, const physics::Vec3& normal, uint32_t hitObject,
+		std::optional<uint32_t> hitMaterial = std::nullopt);
 	// DefaultPenetrateComp (0x005eaca0): whether the round goes on through
 	// what it hit; if so it is moved past it with what is left of its damage.
 	bool penetrate(Projectile& p, const physics::CollisionWorld::Hit& hit, uint32_t hitObject, const Body* hitBody,
@@ -3496,6 +3541,18 @@ private:
 	// The squads' battlefield objects (AIDLL 0x100bf000, 0x100bea30): per
 	// (team, squad), when each enemy player was last reported.
 	std::map<std::pair<int, int>, std::map<int, double>> m_squadKnowledge;
+	// The minimaps' spotted lists (mapSpottedPlayers): for a team (squad
+	// -1), a squad, or the reporter alone (squad 0); an enemy on foot or a
+	// vehicle, until a round time.
+	struct MapSpot {
+		int team = 0, squad = -1, reporter = -1;
+		int enemy = -1;
+		uint32_t vehicle = 0;
+		double until = 0;
+	};
+	std::vector<MapSpot> m_mapSpots;
+	std::vector<RadioSpot> m_radioSpots; // takeRadioSpots
+	bool mapSpotSeenBy(const MapSpot& spot, int viewer) const;
 	world::ObjectTemplate* droneTemplate(const world::ObjectTemplate* weapon) const;
 	void launchDrone(Player& player, const world::ObjectTemplate& detonator, world::ObjectTemplate& drone);
 	void stepDrones(float seconds);
@@ -3565,7 +3622,6 @@ private:
 		float storage = 0;   // sharedStorageSize left
 		float timeLeft = 0;  // supplyDropNumSecsToLive
 		float tick = 0;  // to the next of its 0.2 s updates (event 0x1d)
-		std::map<const FireArm*, float> owed; // magazines' fractions refilled
 		// The SupplyObject's template when it is a child of the object (a
 		// deployed hub's Unl_Hub_*_Supply); null: the object's own.
 		const world::ObjectTemplate* settings = nullptr;
@@ -3727,7 +3783,7 @@ private:
 			std::vector<std::pair<physics::Vec3, float>> entries; // entry points and their radius
 			physics::Vec3 launcher;
 			physics::Vec3 direction;
-			std::string projectile;
+			std::string projectile, weapon, seat;
 			float velocity = 100;
 			float maxTilt = 0; // its launcher's fire.maximumVehicleTiltForFire
 		};

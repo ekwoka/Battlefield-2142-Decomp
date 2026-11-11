@@ -369,8 +369,9 @@ void BotManager::updateStrikeSpots()
 
 // 0x100880e0: whether `at` lies within 40 m (+0xb8) of the member's own
 // side's strike spot, or of the other side's once that side's delay is
-// over; `side` the spot's.
-bool BotManager::strikeSpotHit(int team, const physics::Vec3& at, int& side) const
+// over; `side` the spot's, `since` (when given) the time since that strike
+// began (its +0x30).
+bool BotManager::strikeSpotHit(int team, const physics::Vec3& at, int& side, float* since) const
 {
 	if (team < 1 || team > 2) {
 		return false;
@@ -379,11 +380,17 @@ bool BotManager::strikeSpotHit(int team, const physics::Vec3& at, int& side) con
 	const StrikeSpot& own = m_strikeSpots[team - 1];
 	if (own.active && distance2(own.spot, at) < r2) {
 		side = team;
+		if (since) {
+			*since = m_time - own.at;
+		}
 		return true;
 	}
 	const StrikeSpot& other = m_strikeSpots[2 - team];
 	if (other.active && distance2(other.spot, at) < r2 && m_time > other.at + other.enemyDelay) {
 		side = 3 - team;
+		if (since) {
+			*since = m_time - other.at;
+		}
 		return true;
 	}
 	return false;

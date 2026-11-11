@@ -2547,6 +2547,56 @@ TEST(GameWorld_SpawnSpotDropsOntoStaticObjects)
 	CHECK(std::fabs(at.y - 10) < 1e-6f);
 }
 
+// A static object's child without a collisionMesh of its own is its root's
+// mesh's geometry collisionPart names, at the child's offset. Root: a box
+// 2 m each way round its origin; child: a box 0.5 m each way, 5 m up (both
+// wound for the vehicle contacts' outward faces). A mobile crate dropped
+// over the child rests on it (the vehicle LOD, and otherCollisionLod 2: the
+// child's own faces at that LOD); one dropped 1.2 m aside falls past it to
+// the root's top (2 m), not onto the root's box copied up there.
+TEST(GameWorld_StaticInheritedCollisionPartCarriesBodies)
+{
+	const auto box = [](float half) {
+		physics::CollisionMeshFile mesh = boxMesh(half);
+		for (physics::CollisionLod& lod : mesh.geometries[0].subGeometries[0].lods) {
+			for (physics::CollisionFace& face : lod.faces) {
+				std::swap(face.vertices[1], face.vertices[2]);
+			}
+		}
+		return mesh;
+	};
+	for (int otherLod = 1; otherLod <= 2; ++otherLod) {
+		for (const float aside : {0.0f, 1.2f}) {
+			Range range;
+			physics::CollisionMeshFile towerMesh = box(2);
+			towerMesh.geometries.push_back(box(0.5f).geometries[0]);
+			range.collisionTemplates.add("tower_mesh", towerMesh);
+			range.collisionTemplates.add("crate_mesh", boxMesh(0.25f));
+			range.templates.registerType(6, "SimpleObject");
+			range.templates.registerType(7, "PlayerControlObject");
+			world::ObjectTemplate* tower = range.templates.create("SimpleObject", "tower");
+			tower->settings()["collisionMesh"] = "tower_mesh";
+			tower->children().push_back({"tower_top", {0, 5, 0}, {}});
+			world::ObjectTemplate* top = range.templates.create("SimpleObject", "tower_top");
+			top->settings()["collisionPart"] = "1";
+			top->settings()["hasCollisionPhysics"] = "1";
+			range.objects.create(tower, {0, 0, 30});
+			world::ObjectTemplate* crate = range.templates.create("PlayerControlObject", "crate");
+			makeMobile(*crate, "crate_mesh");
+			crate->settings()["mass"] = "50";
+			crate->settings()["otherCollisionLod"] = std::to_string(otherLod);
+			const uint32_t dropped = range.objects.create(crate, {aside, 6.3f, 30})->id();
+			range.world->startRound();
+			for (int i = 0; i < 90; ++i) {
+				range.world->tick(1 / 30.0f);
+			}
+			const float y = range.objects.find(dropped)->position().y;
+			std::fprintf(stderr, "  otherCollisionLod %d, %.1f m aside: rests at %.2f\n", otherLod, aside, y);
+			CHECK(aside == 0 ? y > 5.6f && y < 5.9f : y > 2.1f && y < 2.5f);
+		}
+	}
+}
+
 // A walker's spawn (0x006f28e0): a template with MechLegs, once one has
 // a body, keeps its object's box bottom (0x005cd4f0: the root's geometry
 // and its legs' child, geometry 1 at its offset), and the spot's test also
@@ -2783,6 +2833,21 @@ TEST(GameWorld_DroppedKitsArePickedUpAndTimeOut)
 		range.world->tick(1 / 30.0f);
 	}
 	CHECK(range.world->droppedKits().empty() && !range.objects.find(ownKit));
+}
+
+// A spawn group is active for a player when one of its points takes him
+// (SpawnGroup slot 0x28, 0x00633060): the spawn map greys out the rest.
+TEST(GameWorld_SpawnGroupActive)
+{
+	Range range;
+	range.templates.find("sp")->settings()["setOnlyForAI"] = "1";
+	const int human = range.world->addPlayer("Human", 1, false);
+	const int bot = range.world->addPlayer("Bot", 1, true);
+	CHECK(!range.world->spawnGroupActive(1, human));
+	CHECK(range.world->spawnGroupActive(1, bot));
+	CHECK(!range.world->spawnGroupActive(7, bot)); // no points
+	range.templates.find("sp")->settings()["setOnlyForAI"] = "0";
+	CHECK(range.world->spawnGroupActive(1, human));
 }
 
 // SpawnPoint options (0x005b24f0, 0x005b2200): onlyForHuman / onlyForAI
@@ -3258,6 +3323,10 @@ TEST(GameWorld_UnlockReplacesItem)
 	};
 	CHECK(carried(plain) == std::vector<std::string> {"eu_ar_rifle"});
 	CHECK(carried(equipped) == std::vector<std::string> {"unl_har_rifle"});
+	game::GameWorld::PlayerInfo info;
+	CHECK(range.world->playerInfo(equipped, info));
+	const world::Object* held = range.objects.find(info.weapon);
+	CHECK(held && held->objectTemplate()->name() == "unl_har_rifle");
 }
 
 // The kit build (0x00570ab0): a firearm replacement (isFirearmReplacement,
@@ -5729,4 +5798,41 @@ TEST(GameWorld_ProfileAutoReloadWaitsForGuidedRound)
 		range.world->tick(1 / 30.0f); // the round expires, then the reload runs
 	}
 	CHECK(range.world->playerWeapon()->roundsInMag() == 1);
+}
+
+// The Rorsch declares the zoom ability on the firearm, not its unlock container.
+TEST(GameWorld_CarriedWeaponZoomAbility)
+{
+	for (bool selected : {false, true}) {
+		Range range;
+		range.templates.registerType(6, "Kit");
+		range.templates.registerType(7, "ItemContainer");
+		range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+		auto* rorsch = range.templates.create("GenericFireArm", "rorsch");
+		rorsch->settings()["itemIndex"] = "3";
+		rorsch->settings()["ability.hasZoomUpgradeAbility"] = "1";
+		auto* unlock = range.templates.create("ItemContainer", "rorsch_unlock");
+		unlock->children().push_back({"rorsch", {}, {}});
+		unlock->settings()["replaceItem.list"] = "eu_ar_rifle;";
+		auto* kit = range.templates.create("Kit", "EU_Assault");
+		kit->children().push_back({"eu_ar_rifle", {}, {}});
+		kit->children().push_back({"rorsch_unlock", {}, {}});
+		const int me = range.world->addPlayer("Me", 2, true);
+		range.world->setKit(me, "EU_Assault", "us_light_soldier");
+		if (selected) range.world->setUnlocks(me, {"rorsch_unlock"});
+		CHECK(range.world->spawnSoldier(me));
+		CHECK(range.world->zoomUpgrade(me) == selected);
+		anim::ZoomSettings zoom;
+		zoom.factors = {0, 0.462f, 0.206f};
+		zoom.useFineTuning = true;
+		zoom.fineTuningNeedsUnlock = true;
+		zoom.fineTuneSteps = 6;
+		anim::ZoomState state;
+		state.cycle(zoom);
+		CHECK(state.fineTune(zoom, 1, range.world->zoomUpgrade(me)) == selected);
+		if (selected) {
+			for (int i = 1; i < 6; ++i) state.fineTune(zoom, 1, true);
+			CHECK(std::fabs(state.factor(zoom) - 0.206f) < 0.0001f);
+		}
+	}
 }

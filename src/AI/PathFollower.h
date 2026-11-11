@@ -114,7 +114,8 @@ struct Waypoint {
 std::vector<Waypoint> pathWaypoints(const NavMesh& mesh, const std::vector<PathStep>& steps, const Vec3& to);
 
 // The string-pull (0x10093610). Twice, for waypoints 5 m or more from the
-// bot: where the line from the previous waypoint to the next crosses the
+// bot (3-D: the squared distance from the unit's position against 25,
+// 0x100936e6..0x10093707): where the line from the previous waypoint to the next crosses the
 // portal, kept max(1, 0.8 radius) (at most half the portal) from its ends.
 // Then once more without the margin where the line crosses the portal
 // itself. The previous point carries over between the first two passes
@@ -144,8 +145,14 @@ public:
 	void reset();
 	// Plans a path to `to` unless it already follows one there (0x10095fc0).
 	void request(const NavMesh& mesh, const Vec3& from, const Vec3& to, const FollowerSettings& settings, float now);
-	// The steering point this tick (0x10095720 with the update 0x10095ac0).
+	// The steering point this tick (getSteer 0x10095720). It doesn't look
+	// ahead: that is the refresh's.
 	Steer steer(const NavMesh& mesh, const Vec3& position, float now);
+	// The follower refresh (0x100c6cc0 -> 0x10095ac0's look-ahead), for a
+	// follower steered within the last 3 s (0x10092400) on the mesh it was
+	// steered on. The bot manager runs it round robin after the moves.
+	bool refreshDue(float now) const { return m_planned && !m_failed && m_steerMesh && now - m_lastSteer < 3.0f; }
+	void refresh(const Vec3& position, float now);
 	// The progress check (0x10092bc0): `input` is the largest of |throttle|,
 	// sprint and |yaw| this tick.
 	void progress(const Vec3& position, float input, float now);
@@ -162,6 +169,7 @@ public:
 
 	bool planned() const { return m_planned; }
 	bool failed() const { return m_failed; }
+	bool stuck() const { return m_stuck; } // failed by the no-progress test, not by planning
 	const Vec3& goal() const { return m_goal; }
 	const std::vector<Waypoint>& waypoints() const { return m_waypoints; }
 	size_t current() const { return m_current; }
@@ -178,6 +186,7 @@ private:
 	FollowerSettings m_settings;
 	bool m_planned = false;
 	bool m_failed = false;  // +0xd8
+	bool m_stuck = false;
 	Vec3 m_goal;            // +0x2c
 	std::vector<Waypoint> m_waypoints; // +0x78
 	int32_t m_startPolygon = -1;       // +0x14
@@ -198,6 +207,8 @@ private:
 	float m_inputLevel = 0; // the last move input handed to progress
 	// The bend look-ahead's cache.
 	float m_bendAt = -100;
+	float m_lastSteer = -100;              // +0x110
+	const NavMesh* m_steerMesh = nullptr;
 	float m_bend = 0;
 };
 
@@ -301,6 +312,12 @@ struct DriveObstacle {
 	Vec3 velocity;
 	float radius = 0;       // vt+0x28
 	float centreRadius = 0; // vt+0x30
+	// A human sits in its driver's seat: no bot controls it (bot manager
+	// slot 0x14, 0x100c79a0: the map of the bots' controlled objects'
+	// adaptors, BF2142.exe 0x008a50d0) and its root PlayerControlObject is
+	// in use by a player (Unit slot 0x44, 0x008a1b30 -> 0xc4c5 slots 0x18 /
+	// 0x10). The machines then don't count it as avoided this tick.
+	bool humanDriven = false;
 };
 
 // A mesh ray for the driver: whether it is clear to the end, else how far
@@ -320,7 +337,12 @@ struct DriveSense {
 	float error = 0;        // radians from the heading to the steering point, + to the right
 	float goalDistance = 0; // to the steering point
 	float speed = 0;        // along the heading (m/s, backwards negative)
-	float yawRate = 0;      // radians per second, + to the right
+	// Radians per second, + to the right: the object's world angular
+	// velocity's y (the Mobile part's slot 0x20, AIDLL 0x100ab490 -> the
+	// Mobile plug-in's slot 0x1c, BF2142.exe 0x008a1870 -> the object's slot
+	// 0x68), read by the car's controller (0x100e9f68) and the hover tank's
+	// (0x100de382).
+	float yawRate = 0;
 	float tilt = 0;         // max(|pitch rate|, |roll rate|)
 	float remaining = 1e8f; // of the path
 	float maxBend = 0;      // ahead (PathFollower::maxBend)
@@ -365,6 +387,13 @@ struct DriveOutput {
 };
 
 DriveOutput driveControl(const DriveSettings& settings, DriveState& state, const DriveSense& sense);
+
+// The drivers' mesh ray (the car's, tank's and mech's machines 0x100e8170,
+// 0x100de8a0, 0x100e1f20: vslot 0x84 with 1000 polygons, no width, stopping
+// at cost class 6, the climb test on). A stopped ray's distance is the 3-D
+// one from the origin to where it stopped (|hit - p|, then fsqrt, in each
+// machine), not the distance across the ground.
+DriveRay driveRay(const NavMesh& mesh, const Vec3& from, const Vec3& end, const ClimbLimits& climb);
 
 // The tank's reset (0x100e0930, TankMoveTo's and FloatingTankMoveTo's stop):
 // a throttle against the speed along the heading, t = -clamp(speed, +-0.7):

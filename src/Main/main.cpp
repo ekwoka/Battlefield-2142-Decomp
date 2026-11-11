@@ -68,6 +68,7 @@
 #include "HudMenusKits.h"
 #include "HudMenusVehicles.h"
 #include "MapPlayerMarker.h"
+#include "MapOrderMarker.h"
 #include "MenuBindings.h"
 #include "MenuGameState.h"
 #include "SettingsObjects.h"
@@ -828,7 +829,7 @@ const world::ObjectTemplate* controlledTemplate(game::GameWorld& round, const ga
 }
 
 void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorld& round, const game::GameLogic& logic,
-	bool commanderScreen)
+	bool commanderScreen, std::optional<float> viewHeading)
 {
 	game::GameWorld::PlayerInfo me;
 	const bool known = world.playerInfo(world.localPlayer(), me);
@@ -852,13 +853,15 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	for (const auto& point : world.controlPointList()) {
 		hud::HudManager::MapMarker flag {"Ingame/Flags/Icons/Minimap/" + folder(point.team) + // 0x0077dbf0: a point that can't change hands is a base
 				(point.capturable ? "/miniMap_CP.tga" : "/miniMap_CPBase.tga"),
-			// Retail uses 32 on both maps; the smaller minimap benefits from
-			// a less obstructive flag while the full map retains that size.
-			point.position.x, point.position.z, big ? 32.0f : 16.0f};
+			// 0x0077dc72 / 0x0077dd04 construct 32x32 on both maps.
+			point.position.x, point.position.z, 32};
 		markers.push_back(flag);
 		if (spawning && std::find(spawnable.begin(), spawnable.end(), point.id) != spawnable.end()) {
+			// 0x0078e9b0: the group's slot 0x28 picks the active texture (+0x9f4,
+			// +0xa04) or the Inactive one (+0x9f0, +0xa00).
 			hud::HudManager::MapMarker spawn {std::string("Ingame/Minimap/Icons/") +
-					(point.id == chosen ? "spawn_Selected.dds" : "spawn_UnSelected.dds"),
+					(point.id == chosen ? "spawn_Selected" : "spawn_UnSelected") +
+					(world.spawnGroupActive(point.id, me.id) ? ".dds" : "Inactive.dds"),
 				point.position.x, point.position.z, hud::HudManager::kSpawnMarkerSize};
 			spawn.id = point.id;
 			spawn.label = point.name.empty() ? "CP " + std::to_string(point.id) : point.name;
@@ -868,7 +871,8 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// Mobile spawn points: the team's vehicles that carry a SpawnPoint
 	// (APCs, the AT and IFV spawn vehicles). The original's spawn map
 	// (0x0078e830) draws every group the spawn manager offers the team
-	// with the same spawn icons (+0x9f0 unselected, +0xa00 selected: the
+	// with the same spawn icons (+0x9f0/+0x9f4 unselected, +0xa00/+0xa04
+	// selected, Inactive/active by the group's slot 0x28; the selected
 	// group at +0xa48), 16 HUD units, at the group's position; a vehicle's group
 	// moves with it.
 	g_spawnVehicles.clear();
@@ -907,34 +911,21 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 				|| titanSpawns.empty()) {
 				continue;
 			}
-			const std::string icon = titan.team == 1 ? "Ingame/Titans/pac/pac_titan.tga" : "Ingame/Titans/eu/eu_titan.tga";
-			hud::HudManager::MapMarker spawn {icon, titan.position.x, titan.position.z, 48};
+			// The vehicle pass draws the authored miniMapIcon (mini_titan),
+			// including its size, offset and heading. The Titan status-panel
+			// artwork is not a map icon. Add only the normal spawn selector here.
+			const bool selected = chosen == game::GameWorld::kSpawnOnTitan && round.spawnTitan(me.id) == titan.object;
+			hud::HudManager::MapMarker spawn {std::string("Ingame/Minimap/Icons/") +
+					(selected ? "spawn_Selected.dds" : "spawn_UnSelected.dds"),
+				titan.position.x, titan.position.z, hud::HudManager::kSpawnMarkerSize};
 			spawn.label = titan.team == 1 ? "PAC Titan" : "EU Titan";
 			spawn.id = kMarkerTitan + static_cast<int>(g_spawnTitans.size());
-			const int marker = spawn.id;
-			const bool selected = chosen == game::GameWorld::kSpawnOnTitan && round.spawnTitan(me.id) == titan.object;
 			g_spawnTitans.push_back(titan.object);
 			markers.push_back(spawn);
-			if (selected) {
-				hud::HudManager::MapMarker selectedSpawn {"Ingame/Minimap/Icons/spawn_Selected.dds", titan.position.x,
-					titan.position.z, hud::HudManager::kSpawnMarkerSize};
-				selectedSpawn.id = marker;
-				markers.push_back(selectedSpawn);
-			}
 		}
 	}
-	// The squad: its leader (to spawn on) and the leader's beacon.
+	// The squad leader's beacon (the leader, to spawn on, is drawn with the team below).
 	if (spawning && me.squad != 0) {
-		for (const auto& player : world.playerList()) {
-			if (player.alive && player.squadLeader && player.team == me.team && player.squad == me.squad && player.id != me.id
-				&& !player.vehicle) {
-				hud::HudManager::MapMarker leader {"Ingame/Player/Icons/Minimap/SquadLeaders/mini_Squad_" + std::to_string(me.squad) +
-						"_small.dds",
-					player.position.x, player.position.z, 32};
-				leader.id = kMarkerLeader;
-				markers.push_back(leader);
-			}
-		}
 		if (const world::Object* beacon = round.objects().find(round.squadBeacon(me.team, me.squad))) {
 			hud::HudManager::MapMarker spawn {std::string("Ingame/Minimap/Icons/") +
 					(chosen == game::GameWorld::kSpawnOnBeacon ? "spawn_SquadSelected.dds" : "spawn_SquadUnSelected.dds"),
@@ -1054,6 +1045,25 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		const auto color = dice::hfe::menu::mapRelationColor(dice::hfe::menu::MapRelation::Friendly,
 			me.squad != 0 && player.squad == me.squad);
 		std::copy(color.begin(), color.end(), mate.color);
+		// 0x0077d9f0, with paint kit 7 on (0x00792f16): a squad leader (slot
+		// 0x150) is his squad's 16x16 icon and the commander (0x128) the 32x32
+		// mini_commander2, both upright, the 32x32 heading arrow turned
+		// beside them in the same colour (0x00793b04).
+		if ((player.squadLeader || player.commander) && hud.paintsKit(7)) {
+			hud::HudManager::MapMarker arrow {"Ingame/Player/Icons/Minimap/mini_headingArrow.dds", mate.x, mate.z, 32, mate.yaw};
+			std::copy(color.begin(), color.end(), arrow.color);
+			mate.texture = player.squadLeader
+				? "Ingame/Player/Icons/Minimap/SquadLeaders/mini_Squad_" + std::to_string(player.squad) + "_small.dds"
+				: "Ingame/Player/Icons/Minimap/mini_commander2.dds";
+			mate.size = player.squadLeader ? 16 : 32;
+			mate.yaw = 0;
+			if (spawning && player.squadLeader && me.squad != 0 && player.squad == me.squad && !player.vehicle) {
+				mate.id = kMarkerLeader;
+			}
+			markers.push_back(mate);
+			markers.push_back(arrow);
+			continue;
+		}
 		markers.push_back(mate);
 	}
 	// The commander screen's mini-map tab (HudManager::drawMiniMap): the
@@ -1080,27 +1090,45 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	physics::Vec3 uav;
 	float uavRadius = 0;
 	if (round.uavArea(me.team, uav, uavRadius)) {
-		markers.push_back({"Ingame/Minimap/Icons/icon_UAV.tga", uav.x, uav.z, 24});
+		markers.push_back({"Ingame/Minimap/Icons/icon_UAV.tga", uav.x, uav.z, 16});
 	}
 	for (const auto& strike : round.strikes()) {
 		if (strike.team == me.team) {
 			markers.push_back({strike.ability == game::GameWorld::CommanderAbility::OrbitalStrike
 					? "Ingame/Commander/tools/orbit_strike.tga"
 					: "Ingame/Commander/tools/force_strike.tga",
-				strike.target.x, strike.target.z, 24});
+				strike.target.x, strike.target.z, 19});
 		}
 	}
 	for (const uint32_t crate : round.supplyCrates()) {
 		if (const world::Object* object = round.objects().find(crate)) {
-			markers.push_back({"Ingame/Minimap/Icons/icon_supplies.tga", object->position().x, object->position().z, 20});
+			markers.push_back({"Ingame/Minimap/Icons/icon_supplies.tga", object->position().x, object->position().z, 15});
 		}
 	}
-	if (const auto* order = me.squad ? round.squadOrder(me.team, me.squad) : nullptr) {
-		using Order = game::GameWorld::OrderType;
-		const bool attack = order->type == Order::Attack || order->type == Order::MapAttack;
-		const bool defend = order->type == Order::Defend || order->type == Order::MapDefend;
-		const char* icon = attack ? "orderAttackCommander.tga" : defend ? "orderDefendCommander.tga" : "orderMoveCommander.tga";
-		markers.push_back({std::string("Ingame/Minimap/Icons/") + icon, order->position.x, order->position.z, 24});
+	std::vector<int> orderSquads;
+	if (commanderScreen) {
+		// The commander map shows the orders for every squad, including the
+		// commander's own order when it has no squad membership.
+		for (const auto& player : world.playerList()) {
+			if (player.team == me.team && player.squad > 0 &&
+				std::find(orderSquads.begin(), orderSquads.end(), player.squad) == orderSquads.end()) {
+				orderSquads.push_back(player.squad);
+			}
+		}
+	} else if (me.squad > 0) {
+		orderSquads.push_back(me.squad);
+	}
+	for (const int squad : orderSquads) {
+		const game::GameWorld::SquadOrder* orders[] = {
+			round.squadLeaderOrder(me.team, squad), round.squadOrder(me.team, squad)};
+		for (const game::GameWorld::SquadOrder* order : orders) {
+			if (order) {
+				if (auto marker = main::mapOrderMarker(static_cast<int>(order->type), order->fromCommander,
+						order->position.x, order->position.z)) {
+					markers.push_back(std::move(*marker));
+				}
+			}
+		}
 	}
 	// Enemies a recon drone's pulse revealed to the team, in red.
 	// The satellite scan's enemies, shown to the commander only (0x0057cfb0).
@@ -1146,9 +1174,9 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	hud.setMapInVehicle(me.alive && me.vehicle != 0);
 	if (me.alive) {
 		// The player's own icon and its heading arrow, 32 px (0x00792980).
-		markers.push_back({"Ingame/Player/Icons/Minimap/mini_LocalArrow2.tga", me.position.x, me.position.z, 32, me.yaw});
+		markers.push_back({"Ingame/Player/Icons/Minimap/mini_LocalArrow2.tga", me.position.x, me.position.z, 32, viewHeading.value_or(me.yaw)});
 		hud::HudManager::MapMarker arrow {"Ingame/Player/Icons/Minimap/mini_headingArrow.dds", me.position.x, me.position.z, 32,
-			me.yaw};
+			viewHeading.value_or(me.yaw)};
 		markers.push_back(arrow);
 		hud.setMapFocus(me.position.x, me.position.z);
 	}
@@ -1274,9 +1302,9 @@ void updateSecondaryWeapon(hud::HudManager& hud, const host::HudWorld& world, co
 }
 
 void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorld& round, const game::GameLogic& logic,
-	bool scoreboard = false, bool commanderScreen = false)
+	bool scoreboard = false, bool commanderScreen = false, std::optional<float> viewHeading = {})
 {
-	updateMap(hud, world, round, logic, commanderScreen);
+	updateMap(hud, world, round, logic, commanderScreen, viewHeading);
 	updateCommander(hud, world, round, commanderScreen);
 	updateTeams(hud, world, logic);
 	hud.set("ScoreboardShow", scoreboard ? 1 : 0);
@@ -1477,7 +1505,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		g_vehicleHud.clear(hud);
 	}
 	// Compass headings, degrees clockwise from north (+z): the vehicle's
-	// and, for the minimap's ring, the soldier's.
+	// and, for the minimap's ring, the Titan gun camera or soldier.
 	const auto heading = [](float yaw) { return yaw - 360.0f * std::floor(yaw / 360.0f); };
 	if (const world::Object* vehicle = playerVehicle) {
 		hud.set("VehicleAngle", heading(vehicle->rotation().x));
@@ -1486,7 +1514,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		// <map>DelayedMapAngle (the map node's variables, registered by its
 		// constructor 0x00784cf0 with <map>RMBMenuState, MapFilter%iActive,
 		// SatelliteActive and the CPNames* ones).
-		hud.set("MinimapDelayedMapAngle", heading(soldier->rotation().x));
+		hud.set("MinimapDelayedMapAngle", heading(viewHeading.value_or(soldier->rotation().x)));
 	}
 	hud.set("PlayerHealthShow", alive ? 1 : 0);
 	const float health = world.health();
@@ -3274,13 +3302,16 @@ int runGame(Options& options, Session& session)
 	// (0x10001740 -> 0x100309a0): seeded from the clock, but for
 	// --simulate's measured rounds (Bots.h, botRandomSeed).
 	botSettings.random = ai::Random::seeded(game::botRandomSeed(options.simulate <= 0));
+	botSettings.enhanced = &enhancedSettings.enabled;
+	botSettings.botRecovery = &enhancedSettings.botRecovery;
 	game::registerBotConsoleMethods(console, botSettings);
 	// NetworkableInfo.* (Objects/Common/Networkables.con): the ghosts' infos.
 	host::registerNetworkableInfoConsoleMethods(console);
 	// Ranks (rankSettings.setRank; Settings/RankSettings.con, 0x0043ac80).
 	stats::registerRankConsoleMethods(console);
 	// The kits' unlock properties the unlock ids come from (also without --api).
-	world::registerUntypedTemplateProperties(console, templates, {"unlockIndex", "unlockLevel", "unlockBranch"});
+	world::registerUntypedTemplateProperties(console, templates,
+		{"unlockIndex", "unlockLevel", "unlockBranch", "detonation.useMMOnEndEffect"});
 
 	anim::AnimationSystems animationSystems(
 		[&files](const std::string& path, std::vector<uint8_t>& data) { return files.readFile(path, data); });
@@ -3343,17 +3374,16 @@ int runGame(Options& options, Session& session)
 	run("Init.con");
 	session.moviesQueued = true;
 	run("Settings/RankSettings.con");
-	// Remaster's HudRotation assumes its replacement Direct3D menu shader
-	// compresses X by 12/16. Native HUD quads use an 800x600 canvas and do
-	// not run that shader: the +120 map shift would leave the viewport.
-	// Keep the mod's unrotated layout; do not modify its archive on disk.
-	std::string menuShader, hudRotation;
-	if (files.readText("Shaders/PortedMenuShader.fx", menuShader)
-		&& menuShader.find("fAspectComp = 12.0/16.0") != std::string::npos
-		&& files.readText("Menu/HUD/HudSetup/HudRotation.con", hudRotation)
-		&& hudRotation.find("setMiniPos 365/-291") != std::string::npos) {
-		files.addMemoryFile("Menu/HUD/HudSetup/HudRotation.con", {});
-		std::printf("native HUD: using unrotated layout for the Direct3D widescreen patch\n");
+	// Remaster's widescreen HUD fix: its replacement PortedMenuShader.fx
+	// multiplies every HUD vertex's x by fAspectComp (12/16) about the
+	// screen's centre (the HUD in 4:3, pillarboxed), and its HudRotation.con
+	// moves the side pieces out by 120. Native doesn't run the .fx; the HUD
+	// pass and its pointer mapping apply the same scale (LevelSources::hudXScale).
+	float hudXScale = 1.0f;
+	if (std::string menuShader; files.readText("Shaders/PortedMenuShader.fx", menuShader)
+		&& menuShader.find("fAspectComp = 12.0/16.0") != std::string::npos) {
+		hudXScale = 12.0f / 16.0f;
+		std::printf("native HUD: Direct3D widescreen patch, x scaled by 12/16\n");
 	}
 	run("Menu/HUD/HudSetup/HudSetupMain.con");
 	// The name tags' icons and bars (the HUD manager's set-up, 0x0075cfa0).
@@ -4370,6 +4400,8 @@ int runGame(Options& options, Session& session)
 		using Ability = game::GameWorld::CommanderAbility;
 		bool commanderScreen = false;
 		bool commanderKeyWas = false; // Caps Lock as of the last input
+		std::optional<std::pair<float, float>> mapMenuPoint;
+		std::function<bool(float, float)> placeAt;
 		std::optional<Ability> armedTool;
 		std::optional<game::GameWorld::OrderType> armedOrder;
 		const auto myTeam = [&] {
@@ -4430,6 +4462,12 @@ int runGame(Options& options, Session& session)
 		const auto arm = [&](Ability tool) {
 			armedTool = armedTool == tool || toolRefused(tool) ? std::nullopt : std::optional<Ability>(tool);
 			armedOrder.reset();
+			if (mapMenuPoint && armedTool && placeAt) {
+				const auto point = *mapMenuPoint;
+				mapMenuPoint.reset();
+				g_mapMenu = 0;
+				placeAt(point.first, point.second);
+			}
 		};
 		for (const auto& [command, tool] : std::vector<std::pair<std::string, Ability>> {
 				 {"Commander.toggleOrbitalStrikeState", Ability::OrbitalStrike}, {"Commander.orbitalStrike", Ability::OrbitalStrike},
@@ -4467,8 +4505,6 @@ int runGame(Options& options, Session& session)
 		bool leaderOrder = false;
 		// The right-click menu's point (the map node's +0xdbc, the click in
 		// the screen): an order picked from the menu goes there at once.
-		std::optional<std::pair<float, float>> mapMenuPoint;
-		std::function<bool(float, float)> placeAt; // commanderClick, below
 		const auto armOrder = [&](int kind, bool leader) {
 			const game::GameWorld::OrderType type = game::GameWorld::orderTypeFromKind(kind);
 			armedOrder = type == game::GameWorld::OrderType::None ? std::nullopt : std::optional(type);
@@ -4941,10 +4977,19 @@ int runGame(Options& options, Session& session)
 		// A joined client picks the object from its own view (its ghost's
 		// id goes up); a server takes the reporter's crosshair from its view.
 		bindMethod(console, "Radio.sendSpottedMessage", ConsoleAccess::Anyone,
-			[&commRoses, &round, &gameLogic, &joinedServer, &session, spamRefused, sayRadio](bool say, std::string) {
+			[&commRoses, &round, &gameLogic, &joinedServer, &session, &hudManager, &commanderScreen, &mapMenuPoint, &hudLocal, spamRefused, sayRadio](bool say, std::string) {
 				commRoses.close();
 				dice::hfe::menu::SpotChoice choice;
-				if (net::GameClient* server = joinedServer(); server && g_remoteHud) {
+				float mapX = 0, mapZ = 0;
+				if (commanderScreen && hudManager.commanderMapZoom() == 2 && mapMenuPoint
+					&& hudManager.mapWorldAt(mapMenuPoint->first, mapMenuPoint->second, mapX, mapZ)) {
+					const float eye[3] = {mapX, round.terrainHeight(mapX, mapZ) + g_overheadHeight, mapZ};
+					const float dir[3] = {0, -1, 0};
+					const host::LocalHudWorld local(round, gameLogic);
+					const host::HudWorld& world = g_remoteHud ? static_cast<const host::HudWorld&>(*g_remoteHud) : local;
+					choice = dice::hfe::menu::spotChoice(world, round,
+						dice::hfe::menu::crosshairEnemy(world, round, hudLocal(), eye, dir, g_overheadHeight + 100));
+				} else if (net::GameClient* server = joinedServer(); server && g_remoteHud) {
 					game::GameWorld::PlayerInfo me;
 					if (g_remoteHud->playerInfo(g_remoteHud->localPlayer(), me) && me.alive) {
 						const float yaw = me.yaw * 3.14159265f / 180.0f, pitch = me.aimPitch * 3.14159265f / 180.0f;
@@ -4969,7 +5014,7 @@ int runGame(Options& options, Session& session)
 					} else if (session.hosted && round.localPlayer() >= 0) {
 						session.hosted->spotted(spot, round.localPlayer());
 					} else if (choice.player >= 0) {
-						round.reportBattlefieldObjects(round.localPlayer(), {choice.player});
+						round.radioSpot(round.localPlayer(), choice.player);
 					}
 				}
 				if (say) {
@@ -5049,7 +5094,7 @@ int runGame(Options& options, Session& session)
 		// The votes' HUD lines (0x005740e0 / 0x005725e0), from the server's
 		// Vote events.
 		dice::hfe::menu::VoteMessages voteMessages;
-		voteMessages.localize = [&localization](const std::string& id) { return localization.text(id); };
+		voteMessages.localize = localizeWithKeys;
 		voteMessages.onLine = [&chat](const std::string& line) { chat.addPersonal(line); };
 		// Commander.commanderMutiny (HUD 0x007d7390 → the vote object's
 		// 0x00573cb0): a mutiny vote (kind 3) against the team's commander,
@@ -5077,7 +5122,8 @@ int runGame(Options& options, Session& session)
 		// and the offer of command (2/0x23), answered with Radio.answer and
 		// c_GIYes / c_GINo (0x0079e320); their answers (0x0079d6e0).
 		dice::hfe::menu::HudQuestions questions;
-		questions.localize = [&localization](const std::string& id) { return localization.text(id); };
+		// The prompts' '#GIYes#' / '#GINo#' as the bound keys (0x00752b70).
+		questions.localize = localizeWithKeys;
 		questions.onLine = [&chat, &options](const std::string& line) {
 			chat.addPersonal(line);
 			if (options.verbose) {
@@ -5243,7 +5289,8 @@ int runGame(Options& options, Session& session)
 		bindMethod(console, "Commander.zoomCommander", ConsoleAccess::Anyone, [&] {
 			const int zoom = hudManager.commanderMapZoom();
 			float x = 0, z = 0;
-			const bool at = hudManager.mapWorldAt(hudManager.pointerX(), hudManager.pointerY(), x, z);
+			const auto point = mapMenuPoint.value_or(std::make_pair(hudManager.pointerX(), hudManager.pointerY()));
+			const bool at = hudManager.mapWorldAt(point.first, point.second, x, z);
 			hudManager.setCommanderMapZoom(dice::hfe::menu::commanderZoomStep(zoom));
 			if (at) {
 				sendCommanderCam(x, z);
@@ -5901,6 +5948,29 @@ int runGame(Options& options, Session& session)
 			camera.up = {-std::sin(yaw) * std::sin(pitch), std::cos(pitch), -std::cos(yaw) * std::sin(pitch)};
 			if (alive) {
 				camera.velocity = {me.velocity.x, me.velocity.y, me.velocity.z};
+			}
+			if (commanderScreen && hudManager.commanderMapZoom() == 2) {
+				render::OverheadView view;
+				view.x = hudManager.overheadX();
+				view.z = hudManager.overheadZ();
+				view.height = g_overheadHeight;
+				float origin[2] = {0, 0}, extent = 0, xs[5], zs[5], heights[5] = {};
+				const auto* ground = heightmaps.primary();
+				if (ground) {
+					origin[0] = ground->originX();
+					origin[1] = ground->originZ();
+					extent = ground->worldWidth();
+				}
+				render::overheadGroundPoints(view, origin, extent, xs, zs);
+				for (int i = 0; ground && i < 5; ++i) heights[i] = ground->heightAt(xs[i], zs[i]);
+				float sea = 0;
+				round.waterLevel(sea);
+				const auto at = render::overheadCameraPosition(view, origin, extent, heights, sea);
+				camera.position = {at.x, at.y, at.z};
+				camera.forward = {0, -1, 0};
+				camera.up = {0, 0, 1};
+				camera.velocity = {};
+				camera.firstPerson = false;
 			}
 			for (const auto& sound : playerCamera.takeSounds()) {
 				gameAudio.effectSound(sound.name, {sound.position.x, sound.position.y, sound.position.z});
@@ -8055,6 +8125,7 @@ int runGame(Options& options, Session& session)
 		render::LevelSources sources {files, templates, objects, geometries, heightmaps,
 			terrainData ? &*terrainData : nullptr, lights, sky, water,
 			"Levels/" + options.level + "/", options.animation};
+		sources.hudXScale = hudXScale;
 		// GenericProjectile simulation states intentionally live outside
 		// ObjectManager. Submit them as transient render instances so their
 		// shipped geometry and bundled child parts follow local rounds and
@@ -8317,7 +8388,15 @@ int runGame(Options& options, Session& session)
 			}
 			// A joined game's scoreboard has the players' voice boxes.
 			g_scoreboardVoice = nullptr;
+			squadMenu.voiceState = nullptr;
 			if (session.client && session.voice) {
+				squadMenu.voiceState = [&session, &squadMenu](int id) {
+					game::GameWorld::PlayerInfo info;
+					if (!squadMenu.playerInfoFor(id, info) || info.ai) {
+						return -1; // a bot has no voice
+					}
+					return session.voice->client().muted(id) ? 2 : session.voice->client().talking(id) ? 1 : 0;
+				};
 				g_scoreboardVoice = [&session](int id) -> std::string {
 					const bool muted = session.voice->client().muted(id);
 					const bool talking = session.voice->client().talking(id);
@@ -8334,7 +8413,10 @@ int runGame(Options& options, Session& session)
 			if (!playerCamera.firstPerson && playerCamera.mode() == game::camera::Mode::Inside) {
 				g_cameraMode = static_cast<int>(game::camera::Mode::Chase);
 			}
-			updateHud(hudManager, hudWorld(), round, gameLogic, scoreboardHeld, commanderScreen);
+			float gunHeading = 0;
+			const std::optional<float> mapHeading = playerCamera.titanGunHeading(gunHeading)
+				? std::optional<float>(gunHeading) : std::nullopt;
+			updateHud(hudManager, hudWorld(), round, gameLogic, scoreboardHeld, commanderScreen, mapHeading);
 			// The minimap's combat-area layer and framing (HudCombatArea.h):
 			// the areas that apply to the local player's team and the
 			// category of what he controls (0 on foot).
@@ -8713,15 +8795,17 @@ int runGame(Options& options, Session& session)
 				}
 			}
 			quads.insert(quads.end(), hud.begin(), hud.end());
-			// The commander's pointer over the map: the armed tool's
-			// (HudManager.setMouseTexture*), else the map's.
+			// The commander screen's pointer (the system cursor is hidden
+			// there): over the map the armed tool's (HudManager.setMouseTexture*),
+			// else the map's.
 			float mapX = 0, mapZ = 0;
-			if (commanderScreen && hudManager.mapWorldAt(hudManager.pointerX(), hudManager.pointerY(), mapX, mapZ)) {
+			if (commanderScreen && !(showMenu && startedGame)) {
 				using Pointer = hud::HudManager::Pointer;
 				Pointer kind = Pointer::Full;
-				if (moveTitanArmed) {
+				const bool overMap = hudManager.mapWorldAt(hudManager.pointerX(), hudManager.pointerY(), mapX, mapZ);
+				if (overMap && moveTitanArmed) {
 					kind = Pointer::MoveTitan;
-				} else if (armedTool) {
+				} else if (overMap && armedTool) {
 					kind = *armedTool == Ability::Artillery ? Pointer::Artillery
 						: *armedTool == Ability::Uav         ? Pointer::Uav
 						: *armedTool == Ability::Supplies    ? Pointer::Supply
@@ -9243,6 +9327,16 @@ int runGame(Options& options, Session& session)
 			viewer.onRightClick = [&hudManager, &mapRightClick](float x, float y) {
 				if (!mapRightClick(x, y)) {
 					hudManager.click(x, y, true); // the buttons' alternate commands
+				}
+			};
+			viewer.onPointerWheel = [&](float x, float y, int steps) {
+				float worldX = 0, worldZ = 0;
+				if (!commanderScreen || g_mapMenu || !hudManager.mapWorldAt(x, y, worldX, worldZ)) return;
+				const int zoom = hudManager.commanderMapZoom();
+				const int next = dice::hfe::menu::commanderWheelZoom(zoom, steps);
+				if (next != zoom) {
+					sendCommanderCam(worldX, worldZ);
+					hudManager.setCommanderMapZoom(next);
 				}
 			};
 			viewer.onPointerMove = [&hudManager](float x, float y) {

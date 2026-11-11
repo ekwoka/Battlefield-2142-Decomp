@@ -66,6 +66,9 @@ public:
 	// The control points a team may spawn at (the spawn manager's groups)
 	// and the one a player picked.
 	virtual std::vector<int> spawnablePoints(int team) const = 0;
+	// Not greyed out (spawn_*Inactive, 0x0078e9b0). A joined client's
+	// group finds no server interface (0x918c30) and answers true (0x006330ee).
+	virtual bool spawnGroupActive(int /*group*/, int /*player*/) const { return true; }
 	virtual int spawnChoice(int player) const = 0;
 	virtual std::vector<VehicleInfo> vehicleList() const = 0;
 	virtual std::vector<int> vehicleOccupants(uint32_t vehicle) const = 0;
@@ -207,6 +210,7 @@ public:
 	int commander(int team) const override { return m_round.commander(team); }
 	std::vector<ControlPointInfo> controlPointList() const override { return m_round.controlPointList(); }
 	std::vector<int> spawnablePoints(int team) const override { return m_round.spawnablePoints(team); }
+	bool spawnGroupActive(int group, int player) const override { return m_round.spawnGroupActive(group, player); }
 	int spawnChoice(int player) const override { return m_round.spawnChoice(player); }
 	// The vehicle bodies and the map's other PlayerControlObjects (the
 	// sentry gun, the drones, the pods: GameWorld::mapObjects), as the
@@ -242,7 +246,8 @@ public:
 	float health() const override { return 1; }
 	Weapon heldWeapon() const override;
 	Weapon seatGroupWeapon(int group) const override;
-	std::vector<int> revealedPlayers(int team) const override { return m_round.revealedPlayers(team); }
+	std::vector<int> revealedPlayers(int team) const override;
+	std::vector<uint32_t> spottedVehicles() const override { return m_round.mapSpottedVehicles(m_round.localPlayer()); }
 	float combatAreaTimeLeft() const override;
 	bool abilityBar(game::GameWorld::AbilityBarInfo& out) const override { return m_round.abilityBar(m_round.localPlayer(), out); }
 

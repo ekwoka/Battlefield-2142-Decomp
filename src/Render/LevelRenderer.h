@@ -177,6 +177,9 @@ struct LevelSources {
 	// The HUD drawn over the frame (quads in its 800 x 600 screen), asked
 	// each frame with the seconds since the last one.
 	std::function<std::vector<hud::HudQuad>(float seconds)> overlay;
+	// Remaster's widescreen HUD fix (Shaders_client_hudfix.zip's PortedMenuShader.fx vsFFP): every HUD vertex's
+	// x times fAspectComp (12/16) about the screen's centre, except those of alpha exactly 0.01; 1 without it.
+	float hudXScale = 1.0f;
 	// A Flash menu over everything (the main menu, the end of round).
 	std::function<ui::MenuFrame(float seconds)> menu;
 	// Effects to draw (particles), if any.

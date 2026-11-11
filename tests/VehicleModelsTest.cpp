@@ -3240,6 +3240,65 @@ TEST(Vehicles_GunshipPilotGunFiresPerPressAndReloads)
 	}
 }
 
+// The helipad (helipad_m's SupplyObject child at 0/5/0: radius 5,
+// refillAmmoSpeed 12, addVehicleType 3) rearms a parked gunship's pilot
+// rockets as retail does (0x005d0b20 -> 0x005f5110): 12 x 0.2 per cent of
+// the whole load (6 magazines of 10) every 0.2 s, a magazine within seven
+// updates (1.4 s; one magazine's 2.4 % would take 8.3 s), staying put, and
+// on to full. The pilot's ammo tick is stamped with the flag clear (player
+// slot 0x260(now, 0)): no ability-bar icon or S_Resupply for the receiver.
+TEST(Vehicles_HelipadRearmsAParkedGunshipByItsWholeLoad)
+{
+	if (!gameDir()) {
+		return;
+	}
+	int tested = 0;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* name : {"as_ag", "us_ag"}) {
+			Garage g(gameDir(), mod);
+			if (!g.loaded || !g.templates.find(name) || !g.templates.find("helipad_m")) {
+				continue;
+			}
+			const uint32_t v = g.start(name, {0, 4, 6});
+			CHECK(g.enter(v));
+			const int me = g.world->localPlayer();
+			const game::FireArm* gun = g.world->gun(v, 0);
+			CHECK(gun != nullptr && gun->settings().magSize == 10 && gun->settings().nrOfMags == 6);
+			if (!gun) {
+				continue;
+			}
+			g.run(8); // the weapon's draw
+			// A magazine tapped out and reloaded, away from any pad.
+			for (int i = 0; i < 40 && gun->magsLeft() == 6; ++i) {
+				game::SoldierInput tap;
+				tap.fire = true;
+				g.world->setPlayerInput(tap);
+				g.world->tick(1 / 30.0f);
+				g.world->setPlayerInput({});
+				g.run(1.2f);
+			}
+			g.run(2);
+			const int spent = gun->magsLeft();
+			CHECK(spent == 5);
+			const world::Vec3 at = g.objects.find(v)->position();
+			g.objects.create(g.templates.find("helipad_m"), {at.x, 0, at.z});
+			int ticks = 0;
+			while (ticks < 30 * 20 && gun->magsLeft() == spent) {
+				g.world->tick(1 / 30.0f);
+				++ticks;
+			}
+			CHECK(gun->magsLeft() == spent + 1);
+			CHECK(ticks <= 8 * 6); // 7 updates after the pad's first
+			game::GameWorld::AbilityBarInfo bar;
+			CHECK(g.world->abilityBar(me, bar) && !bar.ammoFlag && bar.sinceAmmo >= 0 && bar.sinceAmmo < 6);
+			g.run(2);
+			CHECK(gun->magsLeft() == 6);
+			++tested;
+		}
+	}
+	CHECK(tested > 0);
+}
+
 // The gunships' gunner (as_ag / us_ag seat 2, vanilla and Remaster): the
 // seat camera hangs under the turret bundles, so the view turns with the
 // mouse and follows the gun's yaw and pitch; and it draws geometry 1 of
@@ -3538,6 +3597,24 @@ TEST(Vehicles_ProjectilePixelsOptIn)
 		};
 		for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
 			const std::string prefix = std::string(mod) == "mods/bf2142" ? "vanilla" : "remaster";
+			if (prefix == "remaster") {
+				Garage m(gameDir(), mod, true);
+				m.start("eu_tank", {100, 0, 100}, 0);
+				const int me = m.world->joinPlayer(2);
+				m.world->setKit(me, "EU_Anti-Vehicle", "us_light_soldier");
+				m.world->setUnlocks(me, {"UnlockEU_Anti-VehiclePlayer1"});
+				CHECK(m.world->spawnSoldier(me));
+				game::SoldierInput input; input.selectItem = 3;
+				m.world->setPlayerInput(input); m.world->tick(1 / 30.0f);
+				m.world->setPlayerInput({}); m.run(3);
+				input = {}; input.fire = true;
+				m.world->setPlayerInput(input); m.world->tick(1 / 30.0f);
+				m.world->setPlayerInput({});
+				draw(m.files, m.templates, m.geometries, *m.world, "magnetic_ammo", "remaster-madlock-flight", false, nullptr, 2);
+				m.run(2);
+				draw(m.files, m.templates, m.geometries, *m.world, "magnetic_ammo", "remaster-madlock-ground", false, nullptr, 2);
+			}
+
 			{
 				Garage g(gameDir(), mod, true);
 				CHECK(g.loaded);
@@ -4809,6 +4886,127 @@ TEST(Vehicles_InstalledMissileSplashHeadless)
 	}
 }
 
+// The walker's driver primary rounds use a two metre blast, unlike its
+// dumrockets. Keep the installed template values and soldier-origin
+// distance/falloff covered for both factions and both shipped mods.
+TEST(Vehicles_WalkerPrimarySplashAgainstInfantry)
+{
+	CHECK(gameDir() != nullptr);
+	if (!gameDir()) return;
+	struct Case { const char* vehicle; const char* projectile; uint32_t material; float damage; };
+	const Case cases[] = {
+		{"us_heavy_mech", "us_heavy_mech_minigun_firearm_Projectile", 40, 100},
+		{"as_heavy_mech", "as_heavy_Mech_Cannon_Projectile", 42, 200},
+	};
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const Case& item : cases) {
+			Garage g(gameDir(), mod);
+			CHECK(g.loaded && g.templates.find(item.vehicle) && g.templates.find(item.projectile));
+			if (!g.loaded || !g.templates.find(item.vehicle) || !g.templates.find(item.projectile)) continue;
+			const uint32_t walker = g.start(item.vehicle, {100, 3, 100});
+			CHECK(walker != 0);
+			const world::ObjectTemplate* projectile = g.templates.find(item.projectile);
+			const auto setting = [projectile](const char* key) {
+				const auto it = projectile->settings().find(key);
+				return it == projectile->settings().end() ? std::string{} : it->second;
+			};
+			CHECK(setting("detonation.explosionRadius") == "2");
+			CHECK(setting("detonation.explosionDamage") == (item.damage == 100 ? "100" : "200"));
+			CHECK(setting("detonation.explosionMaterial") == std::to_string(item.material));
+			CHECK(setting("detonation.detectionRadius") == "1.5");
+			const int attacker = g.world->addPlayer("Walker driver", 2, false);
+			const int targetTeam = 1;
+			const float horizontal[] = {0.5f, 1.0f, 1.5f, 2.0f};
+			int targets[4] {};
+			uint32_t soldiers[4] {};
+			for (int i = 0; i < 4; ++i) {
+				targets[i] = g.world->addPlayer("Splash infantry", targetTeam, false);
+				CHECK(g.world->spawnSoldier(targets[i]));
+				game::GameWorld::PlayerInfo info;
+				CHECK(g.world->playerInfo(targets[i], info));
+				soldiers[i] = info.soldier;
+				const float angle = static_cast<float>(i) * 1.57079632679f;
+				CHECK(g.world->setSoldierPosition(info.soldier,
+					{horizontal[i] * std::cos(angle), 0, horizontal[i] * std::sin(angle)}));
+			}
+			const uint32_t soldierMaterial = static_cast<uint32_t>(std::stoi(
+				g.objects.find(soldiers[0])->objectTemplate()->settings().at("armor.defaultMaterial")));
+			const float materialMod = g.materials.damageMod(item.material, soldierMaterial);
+			CHECK(materialMod > 0);
+			const physics::Vec3 blast {0, 0, 0};
+			float before[4] {};
+			float distance[4] {};
+			float falloff[4] {};
+			std::vector<game::GameWorld::BlastRayTrace> rayTraces;
+			g.world->setBlastRayTraceSink([&rayTraces](const auto& ray) { rayTraces.push_back(ray); });
+			for (int i = 0; i < 4; ++i) {
+				const auto* body = g.world->soldierBody(targets[i]);
+				CHECK(body != nullptr);
+				if (!body) continue;
+				distance[i] = std::sqrt((body->position.x - blast.x) * (body->position.x - blast.x)
+					+ (body->position.y - blast.y) * (body->position.y - blast.y)
+					+ (body->position.z - blast.z) * (body->position.z - blast.z));
+				falloff[i] = distance[i] < 1.8f ? 1.0f : std::max(0.0f, (2.0f - distance[i]) / 0.2f);
+				before[i] = g.world->hitPoints(soldiers[i]);
+			}
+			CHECK(g.world->detonate(item.projectile, blast, attacker));
+			for (int i = 0; i < 4; ++i) {
+				const float after = g.world->hitPoints(soldiers[i]);
+				const float dealt = before[i] - after;
+				const float visibleShare = falloff[i] * materialMod * item.damage > 0
+					? dealt / (falloff[i] * materialMod * item.damage) : 0;
+				const auto* body = g.world->soldierBody(targets[i]);
+				const bool directRayClear = body && g.world->soldierPathClear(2, blast, body->position);
+				std::fprintf(stderr,
+					"  walker splash %s %s horiz=%.2f distance=%.3f falloff=%.3f material=%u vs soldier=%u mod=%.4f direct-ray=%s visible-share=%.3f final-damage=%.2f hp=%.2f->%.2f\n",
+					mod, item.projectile, horizontal[i], distance[i], falloff[i], item.material, soldierMaterial, materialMod,
+					directRayClear ? "clear" : "blocked", visibleShare, dealt, before[i], after);
+				if (distance[i] < 2.0f) CHECK(after < before[i]);
+				else CHECK(std::fabs(after - before[i]) < 1e-3f);
+			}
+			g.world->setBlastRayTraceSink({});
+			for (const auto& ray : rayTraces) {
+				std::fprintf(stderr, "    cover-ray soldier=%u bone=%d offset=%d %s blocker=%u from=(%.3f,%.3f,%.3f) to=(%.3f,%.3f,%.3f)\n",
+					ray.soldier, ray.bone, ray.offset, ray.clear ? "clear" : "blocked", ray.blocker,
+					ray.from.x, ray.from.y, ray.from.z, ray.to.x, ray.to.y, ray.to.z);
+			}
+		}
+	}
+}
+
+// detectionRadius is a saveable detonation property, not a proximity fuse.
+// A configured round that passes close to an enemy soldier without collision
+// must keep flying until its ordinary TTL/impact rule fires.
+TEST(Vehicles_DetectionRadiusDoesNotProximityDetonateOnInfantry)
+{
+	CHECK(gameDir() != nullptr);
+	if (!gameDir()) return;
+	Garage g(gameDir());
+	if (!g.loaded) return;
+	const uint32_t vehicle = g.start("eu_tank", {0, 2, 30});
+	CHECK(vehicle != 0);
+	auto* round = g.templates.create("GenericProjectile", "test_detection_radius_round");
+	round->components().push_back("DefaultDetonationComp");
+	round->settings()["detonation.detectionRadius"] = "1.5";
+	round->settings()["detonation.explosionRadius"] = "2";
+	round->settings()["detonation.explosionDamage"] = "100";
+	round->settings()["detonation.explosionMaterial"] = "40";
+	round->settings()["timeToLive"] = "10";
+	const int enemy = g.world->addPlayer("Enemy infantry", 1, false);
+	CHECK(g.world->spawnSoldier(enemy));
+	game::GameWorld::PlayerInfo info;
+	CHECK(g.world->playerInfo(enemy, info));
+	CHECK(g.world->setSoldierPosition(info.soldier, {0, 0, 0}));
+	g.run(0.1f);
+	// This path is 1.0 m above the soldier origin, inside 1.5 m, but is
+	// offset beyond the soldier's collision capsule.
+	const float before = g.world->hitPoints(info.soldier);
+	CHECK(g.world->launchProjectile("test_detection_radius_round", {1.25f, 2.0f, -4.0f}, {0, 0, 20}));
+	g.run(0.2f);
+	CHECK(g.world->projectilesInFlight() > 0);
+	CHECK(std::fabs(g.world->hitPoints(info.soldier) - before) < 1e-3f);
+}
+
 TEST(Vehicles_EUWalkerAAGunnerSightAndShot)
 {
 	if (!gameDir()) return;
@@ -5117,5 +5315,234 @@ TEST(Vehicles_WalkerRocketsAccelerateToMaxSpeed)
 			CHECK(half > 80 && half < 90); // 35 + 100 x 0.5
 			CHECK(top >= 125 && top < 128.4f); // the last push starts just under maxSpeed
 		}
+	}
+}
+
+// The heat seekers' motor (0x005b3e60): with follow.targetActivation it runs
+// only while the seek holds a target (0x005b2c10 / 0x005b2ca0), and with
+// follow.useTargetSpeed its cap is the target's top speed x speedModifier
+// (0x005ec770), not maxSpeed; at the cap it brakes by deAcceleration.
+// static_aa_missile_projectile: acceleration 60, deAcceleration 0.5,
+// speedModifier 1.1, maxSpeed 300, drag 10.
+TEST(Vehicles_HeatSeekersThrustToTheirTargetsSpeed)
+{
+	if (!gameDir()) return;
+	constexpr float dt = 1 / 30.0f;
+	const physics::Vec3 sight {0, std::sin(20 * 3.14159265f / 180), std::cos(20 * 3.14159265f / 180)};
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		// From the gun's own seat with no lock (nothing in the sky): it has no
+		// target, so no motor.
+		{
+			Garage g(gameDir(), mod);
+			world::ObjectTemplate* round = g.templates.find("static_aa_missile_projectile");
+			CHECK(g.loaded && g.templates.find("static_aa") && round);
+			if (!g.loaded || !g.templates.find("static_aa") || !round) continue;
+			round->settings()["gravityModifier"] = "0"; // fixture (shipped -1): the speed is the motor's and the drag's
+			const uint32_t aa = g.start("static_aa", {0, 2, 8});
+			g.animate();
+			CHECK(g.enter(aa));
+			game::SoldierInput fire;
+			fire.altFire = true;
+			float launch = 0, top = 0;
+			int age = -1;
+			for (int i = 0; i < 200 && age < 45; ++i) {
+				g.world->setPlayerInput(fire);
+				g.world->tick(dt);
+				for (const game::Projectile& p : g.world->projectiles()) {
+					if (p.shooter != aa || !p.alive || !p.settings || p.settings->name != "static_aa_missile_projectile") continue;
+					fire.altFire = false;
+					const float speed = std::sqrt(physics::lengthSquared(p.velocity));
+					if (++age == 0) launch = speed;
+					top = std::max(top, speed);
+					CHECK(p.lockedOn == 0);
+					break; // the oldest one
+				}
+			}
+			std::fprintf(stderr, "  %s static AA missile from its seat, no lock: launch %.1f, top %.1f m/s\n", mod, launch, top);
+			CHECK(age >= 45);
+			CHECK(launch > 55 && top < launch + 0.5f);
+		}
+		// The same round at a gunship 150 m up its way, held still or flown
+		// away at 80 m/s. The first run, with no gunship, is the coasting
+		// round the others are compared with.
+		float coasted = 0;
+		for (float targetSpeed : {-1.0f, 0.0f, 80.0f}) {
+			Garage g(gameDir(), mod);
+			world::ObjectTemplate* round = g.templates.find("static_aa_missile_projectile");
+			CHECK(g.loaded && g.templates.find("as_ag") && round);
+			if (!g.loaded || !g.templates.find("as_ag") || !round) continue;
+			// Fixtures, not the shipped values: nobody flies the target, so its
+			// heat stays on; no gravity (shipped -1), so the speed is the
+			// motor's and the drag's.
+			if (world::ObjectTemplate* heat = g.templates.find("HeatObject")) heat->settings()["disableWhenEmptyVehicle"] = "0";
+			round->settings()["gravityModifier"] = "0";
+			const physics::Vec3 from {0, 20, 8};
+			const uint32_t jet = g.start("as_ag", from + sight * 150, 0);
+			g.objects.find(jet)->setTeam(1);
+			if (targetSpeed < 0) g.objects.find(jet)->setTeam(0), g.world->setBodyVelocity(jet, {0, 0, 0}), g.objects.find(jet)->setPosition({0, 20, -5000});
+			float launch = 0, top = 0, last = 0, at1 = 0;
+			int locked = 0;
+			CHECK(g.world->launchProjectile("static_aa_missile_projectile", from, sight * 60));
+			for (int age = 0; age <= 60; ++age) {
+				if (targetSpeed >= 0) g.world->setBodyVelocity(jet, sight * targetSpeed);
+				g.world->tick(dt);
+				CHECK(g.world->projectiles().size() == 1 && g.world->projectiles().front().alive);
+				if (g.world->projectiles().empty()) break;
+				const game::Projectile& p = g.world->projectiles().front();
+				last = std::sqrt(physics::lengthSquared(p.velocity));
+				if (age == 0) launch = last;
+				if (age == 30) at1 = last;
+				top = std::max(top, last);
+				locked += p.lockedOn == jet;
+			}
+			std::fprintf(stderr, "  %s static AA missile, target %.0f m/s: launch %.1f, 1 s %.1f, 2 s %.1f, top %.1f m/s, locked %d ticks\n",
+				mod, targetSpeed, launch, at1, last, top, locked);
+			if (targetSpeed < 0) {
+				CHECK(locked == 0);
+				CHECK(top < launch + 0.5f); // no target, no motor
+				coasted = last;
+			} else if (targetSpeed == 0) {
+				CHECK(locked > 50);
+				CHECK(top < launch + 0.5f); // cap 0: it only brakes
+				CHECK(last < coasted - 0.5f && last > coasted - 1.5f); // 0.5 m/s^2 for 2 s
+			} else {
+				CHECK(locked > 50);
+				CHECK(at1 > 85.5f && at1 < 90); // about 1.1 x 80, reached in half a second
+				CHECK(top < 90.5f);
+			}
+		}
+	}
+}
+
+// The launcher's lock runs for a firearm that is its seat's weapon in any
+// of the three fire slots (0x005e1630 in the target component's update
+// 0x005e1b30), not just the first: the static AA's missiles are its
+// alt-fire. Locked from the seat on a gunship 150 m up the sight line, the
+// missile leaves with that target and its motor takes it to the target's
+// speed x 1.1.
+TEST(Vehicles_AltFireLauncherLocksAndItsMissileChases)
+{
+	if (!gameDir()) return;
+	constexpr float dt = 1 / 30.0f;
+	const physics::Vec3 sight {0, std::sin(20 * 3.14159265f / 180), std::cos(20 * 3.14159265f / 180)};
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		Garage g(gameDir(), mod);
+		world::ObjectTemplate* round = g.templates.find("static_aa_missile_projectile");
+		CHECK(g.loaded && g.templates.find("static_aa") && g.templates.find("as_ag") && round);
+		if (!g.loaded || !g.templates.find("static_aa") || !g.templates.find("as_ag") || !round) continue;
+		// Fixtures, not the shipped values: nobody flies the target, so its
+		// heat stays on; no gravity (shipped -1), so the speed is the motor's
+		// and the drag's.
+		if (world::ObjectTemplate* heat = g.templates.find("HeatObject")) heat->settings()["disableWhenEmptyVehicle"] = "0";
+		round->settings()["gravityModifier"] = "0";
+		world::Object* target = g.objects.create(g.templates.find("as_ag"), {0, 4 + 150 * sight.y, 8 + 150 * sight.z});
+		target->setTeam(1);
+		const uint32_t jet = target->id();
+		const uint32_t aa = g.start("static_aa", {0, 2, 8}, 0);
+		float away = 0;
+		const auto tick = [&](const game::SoldierInput& input) {
+			g.world->setBodyVelocity(jet, sight * away); // held, then flown up the sight line
+			g.world->setPlayerInput(input);
+			g.world->tick(dt);
+		};
+		for (int i = 0; i < 60; ++i) tick({});
+		g.animate();
+		CHECK(g.enter(aa));
+		game::SoldierInput aim;
+		aim.aimPitch = 20;
+		for (int i = 0; i < 60; ++i) tick(aim); // lockDelay 0.66 s
+		const auto lock = g.world->weaponLock(g.world->localPlayer());
+		CHECK(lock.state == 2 && lock.target == jet && lock.maxDistance == 375);
+		aim.altFire = true;
+		float at1 = 0, top = 0;
+		int age = -1, locked = 0;
+		for (int i = 0; i < 200 && age < 45; ++i) {
+			tick(aim);
+			for (const game::Projectile& p : g.world->projectiles()) {
+				if (p.shooter != aa || !p.alive || !p.settings || p.settings->name != "static_aa_missile_projectile") continue;
+				aim.altFire = false;
+				away = 80;
+				const float speed = std::sqrt(physics::lengthSquared(p.velocity));
+				if (++age == 30) at1 = speed;
+				top = std::max(top, speed);
+				locked += p.lockedOn == jet;
+				break; // the oldest one
+			}
+		}
+		std::fprintf(stderr, "  %s static AA from its seat: lock state %d, missile locked %d of %d ticks, 1 s %.1f, top %.1f m/s\n",
+			mod, lock.state, locked, age + 1, at1, top);
+		CHECK(age >= 45 && locked > 40);
+		CHECK(at1 > 85.5f && at1 < 90 && top < 90.5f);
+	}
+}
+
+TEST(Vehicles_RemasterMadlockProjectile)
+{
+	if (!gameDir()) return;
+	for (bool wall : {false, true}) {
+		Garage g(gameDir(), "mods/Project_Remaster_v17_Final", true);
+		if (wall) {
+			physics::CollisionLod lod;
+			lod.collisionType = 0;
+			lod.boundsMin = {-5, 0, -0.01f}; lod.boundsMax = {5, 5, 0.01f};
+			lod.vertices = {{-5,0,0},{5,0,0},{5,5,0},{-5,5,0}};
+			lod.faces = {{{0,1,2},0},{{0,2,3},0},{{0,2,1},0},{{0,3,2},0}};
+			physics::CollisionMeshFile mesh;
+			mesh.version = 10;
+			mesh.geometries.resize(1); mesh.geometries[0].subGeometries.resize(1);
+			mesh.geometries[0].subGeometries[0].lods.push_back(lod);
+			g.collisionTemplates.add("mgl_wall_mesh", mesh);
+			auto* object = g.templates.create("SimpleObject", "mgl_wall");
+			object->settings()["collisionMesh"] = "mgl_wall_mesh";
+			g.objects.create(object, {0, 0, 8});
+		}
+		g.start("eu_tank", {100, 0, 100}, 0);
+		const int me = g.world->joinPlayer(2);
+		g.world->setKit(me, "EU_Anti-Vehicle", "us_light_soldier");
+		g.world->setUnlocks(me, {"UnlockEU_Anti-VehiclePlayer1"});
+		CHECK(g.world->spawnSoldier(me));
+		game::SoldierInput input; input.selectItem = 3;
+		g.world->setPlayerInput(input); g.world->tick(1 / 30.0f);
+		g.world->setPlayerInput({}); g.run(3);
+		CHECK(g.objects.find(g.world->playerWeaponObject())->objectTemplate());
+		std::fprintf(stderr, "MGL weapon=%s\n", g.objects.find(g.world->playerWeaponObject())->objectTemplate()->name().c_str());
+		CHECK(g.objects.find(g.world->playerWeaponObject())->objectTemplate()->name() == "UNL_Auto_GL");
+		game::GameWorld::PlayerInfo info;
+		g.world->playerInfo(me, info); std::fprintf(stderr, "before ammo %d alive %d\n", info.roundsInMag, info.alive);
+		for (const auto& kv : g.objects.find(g.world->playerWeaponObject())->objectTemplate()->settings())
+			if (kv.first == "projectileTemplate") std::fprintf(stderr,"projectile='%s'\n",kv.second.c_str());
+		input = {}; input.fire = true;
+		g.world->setPlayerInput(input); g.world->tick(1 / 30.0f);
+		g.world->playerInfo(me, info); std::fprintf(stderr, "after ammo %d\n", info.roundsInMag);
+		CHECK(info.roundsInMag == 5);
+		g.world->setPlayerInput({});
+		bool contacted = false, wallContact = false;
+		const int enemy = g.world->addPlayer("BlastTarget", 1, false);
+		CHECK(g.world->spawnSoldier(enemy));
+		game::GameWorld::PlayerInfo target;
+		CHECK(g.world->playerInfo(enemy, target));
+		g.world->setSoldierPosition(target.soldier, {1000, 0, 1000});
+		for (int i = 0; i < 155; ++i) {
+			for (const auto& p : g.world->projectiles()) if (p.alive && p.settings && p.settings->name == "magnetic_ammo") {
+				contacted |= p.tracerHit;
+				wallContact |= p.tracerHit && p.position.y > 0.5f && p.position.z > 7.9f && p.position.z <= 8;
+				if (i == 90) g.world->setSoldierPosition(target.soldier, {p.position.x + 1, 0, p.position.z});
+			}
+			if (i == 0) CHECK(game::projectileRenderStates(g.templates, g.world->projectiles()).size() == 1);
+			if (i == 120) CHECK(g.world->projectilesInFlight() == 1);
+			if (i % 15 == 0) {
+				std::fprintf(stderr, "MGL tick %d live=%zu\n", i, g.world->projectilesInFlight());
+				for (const auto& p : g.world->projectiles()) if (p.settings)
+					std::fprintf(stderr, "  %s alive=%d t=%.2f pos=%.2f/%.2f/%.2f v=%.2f/%.2f/%.2f bounce=%d\n", p.settings->name.c_str(), p.alive, p.timeLeft, p.position.x,p.position.y,p.position.z,p.velocity.x,p.velocity.y,p.velocity.z,p.settings->bounces);
+			}
+			if (i == 0) CHECK(g.world->projectilesInFlight() == 1);
+			g.world->tick(1 / 30.0f);
+		}
+		CHECK(contacted);
+		if (wall) CHECK(wallContact);
+		CHECK(g.world->projectilesInFlight() == 0);
+		CHECK(g.world->playerInfo(enemy, target));
+		std::fprintf(stderr, "MGL blast victim alive=%d health=%.1f\n", target.alive, g.world->hitPoints(target.soldier));
+		CHECK(!target.alive || g.world->hitPoints(target.soldier) < 100);
 	}
 }

@@ -7,9 +7,15 @@
 #include "Game/Bots.h"
 #include "Game/GameWorld.h"
 #include "IO/File/FileManager.h"
+#include "Main/GameAudio.h"
 #include "Main/HudMenus.h"
 #include "Physics/CollisionTemplateManager.h"
+#include "Physics/MaterialManager.h"
+#include "Sound/Game/GameSounds.h"
+#include "Sound/Game/SoundConsole.h"
 #include "Sound/Game/SoundManager.h"
+#include "Sound/Game/VfsSoundFileSystem.h"
+#include "Sound/SoundEngine/ISoundEngine.h"
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
@@ -35,14 +41,24 @@ struct Field {
 	io::FileManager files;
 	Console console {&files};
 	world::ObjectTemplateManager templates;
+	sound::SoundManager soundManager;
 	world::ObjectManager objects;
+	physics::MaterialManager materials;
 	physics::CollisionTemplateManager collisionTemplates;
 	std::unique_ptr<game::GameWorld> world;
 	std::vector<std::pair<std::string, game::ScriptArgs>> events;
 	bool loaded = false;
+	uint32_t groundMaterial = 0;
 
-	explicit Field(const std::string& mod = "mods/bf2142", bool collisionMeshes = false)
+	explicit Field(const std::string& mod = "mods/bf2142", bool collisionMeshes = false,
+		sound::ISoundEngine* audioEngine = nullptr)
+		: soundManager(audioEngine, templates)
 	{
+		if (audioEngine) {
+			soundManager.registerTemplateType();
+			sound::registerSoundConsoleMethods(console, soundManager);
+			physics::registerMaterialConsoleMethods(console, materials);
+		}
 		if (const char* gameDir = std::getenv("BF2142_GAME_DIR")) {
 			files.setRootPath(gameDir);
 			files.addSearchPath(mod);
@@ -52,7 +68,9 @@ struct Field {
 				}
 				world::registerWorldConsoleMethods(console, templates, objects);
 				if (collisionMeshes) {
-					world::registerUntypedTemplateProperties(console, templates, {"collisionMesh"});
+					// As the game keeps them (its console tables' ObjectTemplate properties).
+					world::registerUntypedTemplateProperties(console, templates,
+						{"collisionMesh", "collisionPart", "hasCollisionPhysics"});
 				}
 				world::registerUntypedTemplateProperties(console, templates,
 					{"rcType", "minTimeBetweenActivation", "uavVehicleTemplate", "uavVehicleSpeed", "uavVehicleRadius",
@@ -61,7 +79,8 @@ struct Field {
 						"fire.roundsPerMinute", "fire.burstSize", "fire.batchSize", "fire.fireLaunchDelay",
 						"deviation.subProjectileDev", "ammo.magSize", "ammo.nrOfMags", "velocity", "projectileTemplate",
 						"detonation.explosionDamage", "detonation.explosionRadius", "detonation.explosionMaterial",
-						"detonation.isEMPWeapon", "damage", "minDamage", "timeToLive", "gravityModifier", "material",
+						"detonation.isEMPWeapon", "detonation.endEffectTemplate", "detonation.useMMOnEndEffect",
+						"damage", "minDamage", "timeToLive", "gravityModifier", "material",
 						"seek.targetType", "radius", "healSpeed", "refillAmmoSpeed", "sharedStorageSize",
 						"healStorageSize", "ammoStorageSize", "destroyWhenEmptyStorage", "workOnVehicles"});
 				std::string out;
@@ -107,7 +126,7 @@ struct Field {
 				{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
 					 normal = {0, 1, 0};
 					 return 0.0f;
-				 }});
+				 }, [this](float, float) { return groundMaterial; }}, audioEngine ? &materials : nullptr);
 		}
 		world->setEventSink([this](const std::string& event, const game::ScriptArgs& args) {
 			events.emplace_back(event, args);
@@ -208,6 +227,142 @@ TEST(Commander_LateStaticAssetsEnterCollisionWorld)
 			std::fprintf(stderr, "  %s/%s: final z %.2f\n", mod.c_str(), name, info.position.z);
 			CHECK(info.position.z < -1.0f);
 			CHECK(tailMax - tailMin < 0.5f);
+		}
+	}
+}
+
+// Child parts that take the root's collision mesh through collisionPart
+// (no collisionMesh of their own): the silo's base and launch tube, the EMP
+// station's mount and dish, the orbital controller's antenna. Each part's
+// LODs join the static worlds at the part's place: the soldier world only
+// where the part authors a soldier (or vehicle) LOD, so the EMP and orbital
+// parts add projectile faces alone. The silo's tube stands upright as
+// partPose turns it, not along its flat rest pose. Placed unturned and
+// yawed 90 degrees (Suez's spawns are yawed).
+TEST(Commander_InheritedCollisionPartsCollide)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	struct Probe {
+		physics::Vec3 from, to;
+		bool hits;
+	};
+	struct Asset {
+		const char* name;
+		size_t soldierTriangles, projectileTriangles; // root + child parts (work/collision-trace/probe.txt)
+		std::vector<Probe> projectile, soldier;
+	};
+	const std::vector<Asset> assets = {
+		{"missile_silo_v2", 92 + 60 + 12, 2264 + 532 + 244,
+			{{{-10, 8, 0.97f}, {10, 8, 0.97f}, true}, // the upright tube, above the base
+				{{-10, 3.2f, 5}, {10, 3.2f, 5}, false}}, // where the flat rest-pose tube would lie
+			{{{-10, 6, 0.97f}, {10, 6, 0.97f}, true}, // the tube's soldier LOD
+				{{-10, 3.2f, 5}, {10, 3.2f, 5}, false}}},
+		{"commander_emp_strike", 10, 907 + 358 + 596,
+			{{{-10, 3.9f, 0}, {10, 3.9f, 0}, true}, // the mount, above the root's projectile LOD
+				{{-10, 4.9f, 0.4f}, {10, 4.9f, 0.4f}, true}}, // the dish, above the mount (4.46 m)
+			{}},
+		{"commander_orbital_strike_64", 30, 448 + 2327, {{{-10, 4, 0}, {10, 4, 0}, true}}, {}}, // the antenna
+	};
+	for (const std::string& mod : {std::string("mods/bf2142"), std::string("mods/Project_Remaster_v17_Final")}) {
+		for (const Asset& asset : assets) {
+			for (const float yaw : {0.0f, 90.0f}) {
+				Field field(mod, true);
+				if (!field.loaded) {
+					CHECK(field.loaded);
+					continue;
+				}
+				const world::Object* placed = field.objects.create(field.templates.find(asset.name), {0, 0, 0}, {yaw, 0, 0});
+				field.world->tick(1 / 30.0f);
+				CHECK(field.world->projectileCollision(placed->id()) == nullptr); // static, not a body
+				const size_t soldierTriangles = field.world->staticCollision().triangles();
+				const size_t projectileTriangles = field.world->projectileCollision(0)->triangles();
+				std::fprintf(stderr, "  %s/%s yaw %.0f: soldier %zu, projectile %zu triangles\n", mod.c_str(), asset.name, yaw,
+					soldierTriangles, projectileTriangles);
+				CHECK(soldierTriangles == asset.soldierTriangles);
+				CHECK(projectileTriangles == asset.projectileTriangles);
+				const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({yaw, 0, 0});
+				for (const Probe& probe : asset.projectile) {
+					float fraction = 0;
+					uint32_t owner = 0;
+					const bool hit =
+						field.world->segmentHit(turn.transform(probe.from), turn.transform(probe.to), 0, fraction, owner);
+					std::fprintf(stderr, "    projectile y %.1f z %.2f: hit %d at %.2f\n", probe.from.y, probe.from.z, hit, fraction);
+					CHECK(hit == probe.hits);
+					CHECK(!probe.hits || owner == placed->id());
+					// A round flown down the same line strikes the part (or passes).
+					world::ObjectTemplate* round = field.templates.find("collision_test_round");
+					if (!round) {
+						round = field.templates.create("GenericProjectile", "collision_test_round");
+						round->settings()["gravityModifier"] = "0";
+					}
+					const size_t before = field.world->impacts().size();
+					const physics::Vec3 way = turn.transform(probe.to - probe.from);
+					CHECK(field.world->launchProjectile("collision_test_round", turn.transform(probe.from),
+						way * (300.0f / std::sqrt(physics::lengthSquared(way)))));
+					for (int i = 0; i < 6; ++i) {
+						field.world->tick(1 / 30.0f);
+					}
+					bool struck = false;
+					for (size_t i = before; i < field.world->impacts().size(); ++i) {
+						struck = struck || field.world->impacts()[i].object == placed->id();
+					}
+					std::fprintf(stderr, "    round y %.1f z %.2f: struck %d\n", probe.from.y, probe.from.z, struck);
+					CHECK(struck == probe.hits);
+				}
+				for (const Probe& probe : asset.soldier) {
+					physics::CollisionWorld::Hit hit {};
+					const bool met = field.world->staticCollision().raycast(turn.transform(probe.from), turn.transform(probe.to), hit);
+					std::fprintf(stderr, "    soldier y %.1f z %.2f: hit %d\n", probe.from.y, probe.from.z, met);
+					CHECK(met == probe.hits);
+					CHECK(!probe.hits || hit.owner == placed->id());
+				}
+			}
+		}
+	}
+}
+
+// The EMP station and the orbital controller stop a running soldier from
+// each side, in both mods: their soldier shapes are the root's (geometry 0,
+// up to the dish and antenna; the child parts author no soldier LOD).
+TEST(Commander_StrikeStationsBlockInfantry)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	for (const std::string& mod : {std::string("mods/bf2142"), std::string("mods/Project_Remaster_v17_Final")}) {
+		for (const char* name : {"commander_emp_strike", "commander_orbital_strike_64"}) {
+			for (int side = 0; side < 4; ++side) {
+				Field field(mod, true);
+				if (!field.loaded) {
+					CHECK(field.loaded);
+					continue;
+				}
+				field.objects.create(field.templates.find(name), {0, 0, 0}, {90, 0, 0});
+				field.world->tick(1 / 30.0f);
+				CHECK(field.world->spawnPlayer(2) != nullptr);
+				const int player = field.world->localPlayer();
+				game::GameWorld::PlayerInfo info;
+				CHECK(field.world->playerInfo(player, info) && info.alive);
+				const float heading = side * 90.0f; // degrees from +z toward +x
+				const physics::Vec3 way {std::sin(heading / 57.29578f), 0, std::cos(heading / 57.29578f)};
+				field.world->setSoldierPosition(info.soldier, {-way.x * 12, 0, -way.z * 12});
+				game::SoldierInput walk;
+				walk.throttle = 1;
+				walk.sprint = true;
+				walk.turn = heading - info.yaw;
+				for (int i = 0; i < 150; ++i) {
+					field.world->setInput(player, walk);
+					walk.turn = 0;
+					field.world->tick(1 / 30.0f);
+				}
+				CHECK(field.world->playerInfo(player, info));
+				const float along = info.position.x * way.x + info.position.z * way.z; // 0 at the centre
+				std::fprintf(stderr, "  %s/%s side %d: along %.2f at %.2f %.2f %.2f\n", mod.c_str(), name, side, along,
+					info.position.x, info.position.y, info.position.z);
+				CHECK(along < -0.9f);
+			}
 		}
 	}
 }
@@ -735,42 +890,85 @@ TEST(Commander_AiAnswersSquadRequests)
 	CHECK(world.squadRequest(1, 1, 2) && said("uav_deny") == 0);
 }
 
-// The Remaster orbital strike (commander_orbital_strike_64 / _16, RCArtillery):
-// its rounds' detonation.endEffectTemplate e_exp_orbital_strike starts
-// S_e_exp_orbital_strike_Start where each lands, which the round hands to
-// its audio (GameWorld::takeEffectSounds).
+// Exercise the installed Remaster scripts through the same Sound console
+// registration and VFS used by the game. The null OpenAL driver still builds
+// and starts actual Sound instances; StartedSound counts alone did not prove
+// that a playable Sound template existed.
 TEST(Commander_RemasterOrbitalStrikeBlastSound)
 {
-	Field field("mods/Project_Remaster_v17_Final");
-	if (!field.loaded) {
+	#ifdef _WIN32
+	_putenv_s("ALSOFT_DRIVERS", "null");
+	#else
+	setenv("ALSOFT_DRIVERS", "null", 1);
+	#endif
+	sound::ISoundEngine* engine = sound::getSoundEngine();
+	CHECK(engine && engine->initialize(0, "Software Audio", 32) == 0);
+	if (!engine || !engine->isInitialized()) {
 		return;
 	}
-	CHECK(field.files.mountArchive("Objects/Effects_server.zip", "Objects\\Effects"));
-	sound::SoundManager sounds {nullptr, field.templates};
-	sounds.registerTemplateType();
-	field.templates.registerType(0x9474, "EffectBundle"); // its creation makes S_<bundle>_Start
-	std::string out;
-	field.console.run("Objects/Effects/impacts/explosions/e_exp_orbital_strike/e_exp_orbital_strike.con", {}, out);
-	// The fixture reads only the commander rows; the strike's own again with its end effect.
-	world::registerUntypedTemplateProperties(field.console, field.templates, {"detonation.endEffectTemplate"});
-	field.console.run("Objects/Weapons/stationary/commander_orbital_strike/commander_orbital_strike.con", {}, out);
-	const world::ObjectTemplate* shell = field.templates.find("commander_orbital_strike_Projectile");
-	CHECK(shell && shell->settings().count("detonation.endEffectTemplate")
-		&& shell->settings().at("detonation.endEffectTemplate") == "e_exp_orbital_strike");
-	CHECK(field.templates.find("e_exp_orbital_strike") && field.templates.find("S_e_exp_orbital_strike_Start"));
-	game::GameWorld& world = *field.world;
-	world.setCommanderEnabled(true);
-	world.setCommander(1, world.addPlayer("Boss", 1, false));
-	field.place("commander_orbital_strike_64", 1, 200, 200);
-	world.takeEffectSounds();
-	CHECK(world.commanderAction(1, Ability::Artillery, 0, -60));
-	size_t blasts = 0;
-	for (int i = 0; i < 20 * 30; ++i) {
-		world.tick(1 / 30.0f);
-		for (const auto& sound : world.takeEffectSounds()) {
-			blasts += sound.name == "S_e_exp_orbital_strike_Start";
+	{
+		Field field("mods/Project_Remaster_v17_Final", false, engine);
+		if (!field.loaded) {
+			CHECK(false);
+		} else {
+			// Match Project_Remaster_v17_Final/ServerArchives.con and
+			// ClientArchives.con mount points used by the game.
+			CHECK(field.files.mountArchive("Objects/Common_server.zip", "Common"));
+			CHECK(field.files.mountArchive("Objects/Sound_client.zip", "Sound"));
+			CHECK(field.files.mountArchive("Objects/Effects_server.zip", "Objects\\Effects"));
+			field.templates.registerType(0x9474, "EffectBundle");
+			std::string out;
+			field.console.run("Common/Material/ImpactSounds.con", {}, out);
+			field.console.run("Common/Material/MaterialManagerSettings.con", {}, out);
+			field.console.run("Objects/Effects/impacts/explosions/e_exp_orbital_strike/e_exp_orbital_strike.con", {}, out);
+			field.console.run("Objects/Effects/impacts/explosions/e_exp_orbital_strike_distant/e_exp_orbital_strike_distant.con", {}, out);
+			world::registerUntypedTemplateProperties(field.console, field.templates,
+				{"detonation.endEffectTemplate", "detonation.useMMOnEndEffect"});
+			field.console.run("Objects/Weapons/stationary/commander_orbital_strike/commander_orbital_strike.con", {}, out);
+			const world::ObjectTemplate* shell = field.templates.find("commander_orbital_strike_Projectile");
+			CHECK(shell && shell->settings().count("detonation.endEffectTemplate")
+				&& shell->settings().at("detonation.endEffectTemplate") == "e_exp_orbital_strike");
+			CHECK(shell && game::ProjectileSettings::fromTemplate(*shell).useMMOnEndEffect);
+			CHECK(field.templates.find("S_e_exp_orbital_strike_Start")
+				&& field.templates.find("S_e_exp_orbital_strike_distant_Start"));
+			const std::string assetFire3P = "S_commander_orbital_strike_64_GenericFireArm_Fire3P";
+			CHECK(field.templates.find(assetFire3P));
+			sound::VfsSoundFileSystem vfs(field.files);
+			engine->setFileSystem(&vfs);
+			engine->reloadSoundFiles();
+			sound::GameSounds gameSounds(field.soundManager);
+			std::vector<sound::GameSounds::Triggered> triggered;
+			gameSounds.onTrigger = [&triggered](const auto& event) { triggered.push_back(event); };
+			GameAudio audio(*field.world, field.objects, field.templates, field.soundManager, gameSounds, nullptr);
+			GameAudio::Camera camera;
+			camera.position = {0, 3, -60};
+			camera.forward = {0, -0.1f, -1};
+			game::GameWorld& world = *field.world;
+			world.setCommanderEnabled(true);
+			world.setCommander(1, world.addPlayer("Boss", 1, false));
+			field.place("commander_orbital_strike_64", 1, 200, 200);
+			world.takeEffectSounds();
+			CHECK(world.commanderAction(1, Ability::Artillery, 0, -60));
+			for (int i = 0; i < 20 * 30; ++i) {
+				world.tick(1 / 30.0f);
+				audio.tick(camera);
+			}
+			const auto heard = [&triggered](const std::string& name) {
+				return std::any_of(triggered.begin(), triggered.end(), [&name](const auto& event) { return event.name == name; });
+			};
+			CHECK(heard("S_commander_orbital_strike_Projectile_Looping"));
+			CHECK(heard("S_e_exp_orbital_strike_Start"));
+			CHECK(heard("S_Impact_Artillery"));
+			// Remaster v17 creates this firearm event template but does not
+			// assign it a soundFilename in its shipped tweak; retail consequently
+			// has no Fire3P sample for GameSounds to play.
+			CHECK(gameSounds.sampleCount(assetFire3P) == 0);
+			const sound::SoundStatistics* stats = engine->statistics();
+			CHECK(stats && stats->soundsAlive > 0 && stats->samplesAlive > 0 && stats->playingSamples > 0);
+			std::printf("  actual strike sound instances: sounds=%d samples=%d playing=%d\n",
+				stats ? stats->soundsAlive : 0, stats ? stats->samplesAlive : 0, stats ? stats->playingSamples : 0);
 		}
 	}
-	std::printf("  %zu orbital strike blast sounds\n", blasts);
-	CHECK(blasts >= 16);
+	engine->shutdown();
+	sound::shutdownSoundEngine();
 }

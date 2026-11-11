@@ -82,6 +82,10 @@ struct ProjectileSettings {
 	float explosionForce = 0;
 	float explosionYMod = 1; // the height difference counts times this
 	std::string endEffect; // detonation.endEffectTemplate
+	// detonation.useMMOnEndEffect (+0x5e; DefaultDetonationComp 0x005e9300):
+	// after the blast/EMP and its end effect, asks gameLogic slot 0x114 to
+	// play the projectile-material/hit-material effect and sound.
+	bool useMMOnEndEffect = false;
 	// collision.bouncing: it bounces off what it hits (grenades, mines, C4)
 	// and detonates when its time to live runs out, not on impact.
 	bool bounces = false;
@@ -546,6 +550,13 @@ public:
 	// Resupply (ammo hubs): adds magazines up to the kit's number; false
 	// when full.
 	bool addMagazine();
+	// A SupplyObject's refill (the ammo's slot 0xa8, 0x005f5110): `percent`
+	// of the whole load at engine tick `now`. With nrOfMags 1 or -1 the load
+	// is magSize rounds topped into the magazine (0x005f4ef0's first path),
+	// else nrOfMags magazines added as spares (no instant fill: autoReload
+	// takes one in). The fraction is kept on the weapon and dropped after 30
+	// ticks without a refill. False when the weapon is full (slot 0x9c).
+	bool resupply(float percent, uint32_t now);
 	bool overheated() const { return m_heat >= 1; }
 	// Between rounds: the fire component's state above 1 (a round's cycle,
 	// state 4 until its ticksBetweenShots are past, or the spin-up, state 3).
@@ -609,6 +620,8 @@ private:
 	FireArmSettings m_settings;
 	int m_rounds;
 	int m_mags;
+	float m_resupplyCredit = 0;   // the ammo's +0x40: a refill's fraction
+	uint32_t m_resupplyTick = 0;  // the ammo's +0x3c: the last refill's tick
 	int m_cooldown = 0;
 	float m_reloadLeft = 0;
 	bool m_reloadFilled = false; // the magazine swapped (changeMagAt) in this reload
@@ -869,6 +882,17 @@ physics::Vec3 bounceVelocity(const physics::Vec3& velocity, const physics::Vec3&
 // once and lifts the useTargetSpeed cap.
 void followMagnet(Projectile& projectile, const physics::Vec3& aim, const physics::Vec3& targetVelocity, float seconds,
 	bool overrideArming = false);
+
+// The follow's speed bookkeeping on a tick it steers at a target
+// (0x005ecb30, follow +0x80 / +0x85): the target's top speed so far, and
+// armed once that is over armingSpeed (or the target overrides it). A lost
+// target clears both (setTarget(none), 0x005ed260).
+void armFollow(Projectile& projectile, float targetSpeed, bool overrideArming = false);
+// The motor's cap (0x005b3e60 at 0x005b44d0): maxSpeed, or with
+// useTargetSpeed (follow slot 0x34, 0x005ec770) that top speed, x
+// speedModifier once armed (slot 0x38, 0x005ec7a0), unless the target
+// overrides arming (slot 0x44, 0x005ed310).
+float followSpeedCap(const Projectile& projectile, bool overrideArming = false);
 
 // DefaultFollowComp's turn (0x005ed1a0 -> 0x005ecb30, once a 30 Hz tick:
 // follow.maxYaw / maxPitch are degrees a tick): towards `target` plus its

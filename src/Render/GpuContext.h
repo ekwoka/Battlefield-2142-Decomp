@@ -305,6 +305,8 @@ public:
 	SDL_GPUTexture* createShadowMap(uint32_t size);
 	SDL_GPUSampler* repeatSampler() const { return m_repeatSampler; }
 	SDL_GPUSampler* clampSampler() const { return m_clampSampler; }
+	// The Flash menu's: base level only, bilinear (RendDX9.dll's SwiffMenu.fx/Font.fx states).
+	SDL_GPUSampler* menuSampler(bool repeat) const { return repeat ? m_menuRepeatSampler : m_menuClampSampler; }
 	SDL_GPUTexture* whiteTexture() const { return m_white; }
 	SDL_GPUTexture* blackTexture() const { return m_black; }
 	SDL_GPUTexture* whiteCubeTexture() const { return m_whiteCube; }
@@ -429,6 +431,8 @@ private:
 	SDL_GPUTextureFormat m_depthFormat = SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT;
 	SDL_GPUSampler* m_repeatSampler = nullptr;
 	SDL_GPUSampler* m_clampSampler = nullptr;
+	SDL_GPUSampler* m_menuClampSampler = nullptr;
+	SDL_GPUSampler* m_menuRepeatSampler = nullptr;
 	SDL_GPUTexture* m_white = nullptr;
 	SDL_GPUTexture* m_black = nullptr;
 	SDL_GPUTexture* m_whiteCube = nullptr;

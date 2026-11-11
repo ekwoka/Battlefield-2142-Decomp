@@ -68,23 +68,32 @@ TEST(HudMenus_CommanderApplicationRow)
 	Squads s;
 	const int me = s.world.addPlayer("Me", 2, false);
 	s.world.setCommanderEnabled(true);
-	int actions = 0;
+	int actions = 0, mutinies = 0;
 	bool resigned = false;
 	s.squads.onCommanderAction = [&](bool resign) { ++actions; resigned = resign; };
+	s.squads.onMutiny = [&] { ++mutinies; };
 	s.squads.update(me);
-	CHECK(s.hud.listCell(5, 0, 5) == "HUD_TEXT_MENU_SPAWN_SQUAD_COMMANDER");
-	CHECK(s.hud.listCell(5, 0, 10) == "HUD_TEXT_MENU_SPAWN_SQUAD_APPLY");
+	// 0x007a4800: the heading, APPLY without a commander and no arrow.
+	CHECK(s.hud.listCell(5, 0, 5) == "HUD_HUD_MENU_COMMANDER_HEADING" && s.hud.listCell(5, 0, 14) == "0");
+	CHECK(s.hud.listCell(5, 0, 10) == "HUD_TEXT_MENU_SPAWN_SQUAD_APPLY" && s.hud.listCell(5, 0, 12).empty());
 	s.squads.clickSquadList(me, 0, 10);
 	CHECK(actions == 1 && !resigned);
 	CHECK(s.world.setCommander(2, me));
 	s.squads.update(me);
+	CHECK(s.hud.listCell(5, 0, 10) == "HUD_TEXT_COMMANDER_RESIGN");
 	s.squads.clickSquadList(me, 0, 10);
 	CHECK(actions == 2 && resigned);
 	const int other = s.world.addPlayer("Other", 2, false);
 	CHECK(s.world.setCommander(2, other));
 	s.squads.update(me);
+	// Another's command: MUTINY; the arrow lists him under the row.
+	CHECK(s.hud.listCell(5, 0, 10) == "HUD_TEXT_MENU_SPAWN_SQUAD_MUTINITY");
 	s.squads.clickSquadList(me, 0, 10);
-	CHECK(actions == 2);
+	CHECK(actions == 2 && mutinies == 1);
+	CHECK(s.hud.listCell(5, 0, 12) == "Ingame/Respawn/button_down.tga" && s.row(other, 4) == -1);
+	s.squads.clickSquadList(me, 0, 12);
+	s.squads.update(me);
+	CHECK(s.squads.commanderExpanded() && s.row(other, 4) == 1 && s.hud.listCell(5, 0, 12) == "Ingame/Respawn/button_up.tga");
 }
 
 TEST(HudMenus_SquadListJoinLeaveCreate)
@@ -97,11 +106,21 @@ TEST(HudMenus_SquadListJoinLeaveCreate)
 	s.world.joinSquad(a, 1);
 	s.world.joinSquad(b, 1);
 	s.squads.update(me);
-	// Squad 1 (Alpha) with its two, the leader first; one unassigned.
+	// Squad 1 (Alpha) with its two, shut at first (0x007a7620 clears every
+	// squad's bit); one unassigned. The name is upper-cased (0x0065b2c0),
+	// both in the list's font 1.
 	CHECK(s.hud.number("NrOfSquads") == 1 && s.hud.number("NrOfUnassigned") == 1);
 	const int alpha = s.row(1, 2);
-	CHECK(alpha == 0 && s.hud.listCell(5, alpha, 5) == "Alpha" && s.hud.listCell(5, alpha, 6) == "2/6");
-	CHECK(s.row(a, 4) == 1 && s.row(b, 4) == 2);
+	CHECK(alpha == 0 && s.hud.listCell(5, alpha, 5) == "\xa7" "1ALPHA\xa7" "0"
+		&& s.hud.listCell(5, alpha, 6) == "\xa7" "12/6\xa7" "0" && s.hud.listCell(5, alpha, 1) == "1");
+	CHECK(s.row(a, 4) == -1 && s.row(b, 4) == -1);
+	// Its arrow (column 12) lists them, the leader first.
+	s.squads.clickSquadList(me, alpha, 12);
+	s.squads.update(me);
+	CHECK(s.row(a, 4) == 1 && s.row(b, 4) == 2 && s.hud.listCell(5, 1, 4) == "\xa7" "1A");
+	s.squads.clickSquadList(me, alpha, 12);
+	s.squads.update(me);
+	CHECK(s.row(a, 4) == -1);
 	// JOIN on the squad's row (column 10) joins it; LEAVE leaves.
 	CHECK(s.hud.listCell(5, alpha, 10) == "HUD_TEXT_MENU_SPAWN_SQUAD_JOIN");
 	s.squads.clickSquadList(me, alpha, 10);
@@ -121,7 +140,7 @@ TEST(HudMenus_SquadListJoinLeaveCreate)
 	game::GameWorld::PlayerInfo info;
 	CHECK(s.world.playerInfo(me, info) && info.squad == 2 && info.squadLeader && s.squads.locked(2, 2));
 	s.squads.update(me);
-	CHECK(s.hud.listCell(5, s.row(2, 2), 5) == "Bravo" && s.hud.number("IsSquadLeader") == 1);
+	CHECK(s.hud.listCell(5, s.row(2, 2), 5) == "\xa7" "1BRAVO\xa7" "0" && s.hud.number("IsSquadLeader") == 1);
 	// A locked squad can't be joined from the list; its leader unlocks it
 	// (column 8).
 	s.world.joinSquad(a, 0);
@@ -131,6 +150,168 @@ TEST(HudMenus_SquadListJoinLeaveCreate)
 	CHECK(!s.squads.locked(2, 2));
 	s.squads.clickSquadList(a, s.row(2, 2), 10);
 	CHECK(s.squadOf(a) == 2);
+}
+
+// The squad list's rows as 0x007a5f10 / 0x007a65a0 build them and the
+// columns 0x007a3e72 lays out (x 0, 5, 22, 22, 45, 45, 85, 116, 116, 133,
+// 133, 216, 216): the lock in its frame, the JOIN button and the arrow are
+// pictures; a click on a shared edge takes the later column (0x007a81b0's
+// lock 8, JOIN 10, arrow 12). The player's squad opens when he joins or
+// leads it and shuts when he leaves (0x00756b60 events 2/0x16, 2/0x18,
+// 2/0x15).
+TEST(HudMenus_SquadListRowsAndArrows)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	manager.setCommandRunner([&](const std::string& line) {
+		std::string ignored;
+		console.execute(line, ignored, ConsoleAccess::Anyone);
+	});
+	for (const char* line : {"hudBuilder.createSplitNode Global Root", "hudBuilder.createListNode Root Squads 12 74 246 463 19 1",
+			 "hudBuilder.setListNodeData 5", "hudBuilder.setListNodeConCmd 1 SquadMenu.singleClickNew"}) {
+		console.execute(line, out, ConsoleAccess::Anyone);
+	}
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	game::GameWorld round(templates, objects);
+	menu::SquadMenu squads(round, manager);
+	const int me = round.joinPlayer(2); // the local player: the console's clicks are his
+	squads.bind(console);
+	const int lead = round.addPlayer("Lead", 2, true);
+	round.joinSquad(lead, 1);
+	round.joinSquad(round.addPlayer("Other", 2, true), 3);
+	const auto refresh = [&] {
+		squads.update(me);
+		manager.frame(0.1f);
+	};
+	refresh();
+	// Row 0: Alpha. Its pictures and their settings.
+	CHECK(manager.listCell(5, 0, 0) == "Ingame/Respawn/iconframe.tga" && manager.listCellStyle(5, 0, 0).offset == 5
+		&& manager.listCellStyle(5, 0, 0).iconWidth == 15);
+	CHECK(manager.listCell(5, 0, 8) == "Ingame/Respawn/icon_lock.tga" && manager.listCellStyle(5, 0, 8).color[0] == 0.5f);
+	CHECK(manager.listCell(5, 0, 9) == "Ingame/Respawn/button_longlight7.tga" && manager.listCellStyle(5, 0, 9).iconWidth == 80
+		&& manager.listCellStyle(5, 0, 9).iconHeight == 17);
+	CHECK(manager.listCell(5, 0, 12) == "Ingame/Respawn/button_down.tga" && manager.listCellStyle(5, 0, 12).iconWidth == 17);
+	CHECK(manager.listCellStyle(5, 0, 10).color[0] == 0 && manager.listCellStyle(5, 0, 10).alignment == 2);
+	const auto clickAt = [&](float x, int row) {
+		CHECK(manager.click(12 + x, 74 + 19 * static_cast<float>(row) + 5));
+		return manager.lastListClick().column;
+	};
+	// Lock (8), JOIN (10), arrow (12) and the name (5); the lock's click
+	// isn't the leader's (no squad): nothing changes.
+	CHECK(clickAt(120, 0) == 8 && clickAt(220, 0) == 12 && clickAt(60, 0) == 5);
+	// The arrow, through the list's click: Alpha opens with its member.
+	refresh();
+	CHECK(squads.expanded(1) && manager.listCell(5, 1, 13) == std::to_string(lead) && manager.listCell(5, 1, 14) == "4");
+	// Joining Charlie (JOIN, row 2 now) opens it and turns it green; Alpha's
+	// JOIN then greys out, and Charlie's reads LEAVE.
+	CHECK(manager.listCell(5, 2, 13) == "3" && clickAt(150, 2) == 10);
+	refresh();
+	game::GameWorld::PlayerInfo info;
+	CHECK(round.playerInfo(me, info) && info.squad == 3 && squads.expanded(3));
+	CHECK(manager.listCell(5, 2, 10) == "HUD_TEXT_MENU_SPAWN_SQUAD_LEAVE" && manager.listCellStyle(5, 2, 1).color[1] > 0.5f);
+	CHECK(manager.listCell(5, 0, 10) == "HUD_TEXT_MENU_SPAWN_SQUAD_JOIN" && manager.listCellStyle(5, 0, 10).color[0] > 0.6f);
+	// Leaving shuts it; Alpha stays open.
+	clickAt(150, 2);
+	refresh();
+	CHECK(round.playerInfo(me, info) && info.squad == 0 && !squads.expanded(3) && squads.expanded(1));
+	// A locked squad's lock is black.
+	round.joinSquad(me, 4);
+	refresh();
+	CHECK(squads.expanded(4));
+	int delta = -1;
+	for (int r = 0; r < 16; ++r) {
+		delta = manager.listCell(5, r, 13) == "4" && manager.listCell(5, r, 14) == "2" ? r : delta;
+	}
+	squads.clickSquadList(me, delta, 8);
+	squads.update(me);
+	CHECK(squads.locked(2, 4) && manager.listCellStyle(5, delta, 8).color[0] == 0);
+}
+
+// A member's row (0x007a65a0): his kit icon (HUD slot 0x64) and the
+// vehicle icon's place (slot 0x60, empty on foot) in boxes, his name, both
+// in his state colour (dead black, his squad green, others blue), a
+// leader's green mini_Squad_<n>_small, the voice box while he has voice
+// (talking yellow, muted the mute icon), and the local player's grey fill.
+TEST(HudMenus_SquadMemberRowIcons)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "ControlPoint");
+	templates.registerType(2, "SpawnPoint");
+	templates.registerType(3, "Soldier");
+	templates.registerType(4, "Kit");
+	for (const char* name : {"us_light_soldier", "pac_light_soldier"}) {
+		templates.create("Soldier", name)->settings()["armor.maxHitPoints"] = "100";
+	}
+	templates.create("Kit", "EU_Assault")->settings()["vehicleHud.vehicleIcon"] = "Ingame\\Kits\\Icons\\kit_assault.tga";
+	world::ObjectTemplate* point = templates.create("ControlPoint", "cp_eu");
+	point->settings()["controlPointId"] = "2";
+	point->settings()["team"] = "2";
+	point->settings()["unableToChangeTeam"] = "1";
+	objects.create(point, {0, 0, 0});
+	objects.create(templates.create("SpawnPoint", "sp"), {0, 0, 0})->setControlPointId(2);
+	game::GameWorld round(templates, objects);
+	round.startRound();
+	hud::HudManager hud(nullptr);
+	menu::SquadMenu squads(round, hud);
+	const int me = round.joinPlayer(2);
+	const int mate = round.addPlayer("Mate", 2, true);
+	const int other = round.addPlayer("Other", 2, true);
+	const int dead = round.addPlayer("Dead", 2, true);
+	for (const int id : {me, mate, other}) {
+		CHECK(round.spawnSoldier(id));
+	}
+	round.joinSquad(me, 1);
+	round.joinSquad(mate, 1);
+	round.joinSquad(other, 3);
+	round.joinSquad(dead, 3);
+	int talking = mate, muted = -1;
+	squads.voiceState = [&](int id) { return id == talking ? 1 : id == muted ? 2 : id == me ? 0 : -1; };
+	squads.update(me); // the player's own squad opens
+	const auto rowOf = [&](int id) {
+		for (int r = 0; r < 32; ++r) {
+			if (hud.listCell(5, r, 13) == std::to_string(id) && hud.listCell(5, r, 14) == "4") {
+				return r;
+			}
+		}
+		return -1;
+	};
+	const int mateRow = rowOf(mate), meRow = rowOf(me);
+	CHECK(mateRow > 0 && meRow > 0 && rowOf(other) == -1);
+	CHECK(hud.listCell(5, mateRow, 0) == "Ingame/Respawn/iconframe_box.tga" && hud.listCell(5, mateRow, 1).empty()
+		&& hud.listCell(5, mateRow, 2) == "Ingame/Respawn/iconframe_box.tga");
+	CHECK(hud.listCell(5, mateRow, 3) == "Ingame/Kits/Icons/kit_assault.tga");
+	const auto green = hud.listCellStyle(5, mateRow, 3).color;
+	CHECK(std::fabs(green[1] - 0.466666669f) < 1e-6f && hud.listCellStyle(5, mateRow, 4).color == green);
+	CHECK(hud.listCell(5, mateRow, 12) == "Ingame/Respawn/icon_speaker.tga" && hud.listCellStyle(5, mateRow, 12).color[1] == 1
+		&& hud.listCellStyle(5, mateRow, 12).color[2] == 0);
+	// The first to join leads: his squad icon.
+	game::GameWorld::PlayerInfo info;
+	CHECK(round.playerInfo(me, info) && info.squadLeader);
+	CHECK(hud.listCell(5, meRow, 9) == "Ingame/Player/Icons/Minimap/mini_Squad_1_small.tga"
+		&& hud.listCellStyle(5, meRow, 9).iconWidth == 16 && hud.listCellStyle(5, meRow, 9).color[0] == 0.400000006f);
+	CHECK(hud.listCell(5, mateRow, 9).empty() && hud.listCell(5, meRow, 12) == "Ingame/Respawn/icon_speaker.tga");
+	// Charlie opened: the other blue, the dead one black with the death icon,
+	// a muted voice's icon.
+	muted = other;
+	squads.clickSquadList(me, [&] {
+		for (int r = 0; r < 32; ++r) {
+			if (hud.listCell(5, r, 13) == "3" && hud.listCell(5, r, 14) == "2") {
+				return r;
+			}
+		}
+		return -1;
+	}(), 12);
+	squads.update(me);
+	const int otherRow = rowOf(other), deadRow = rowOf(dead);
+	CHECK(otherRow > 0 && deadRow > 0);
+	CHECK(hud.listCellStyle(5, otherRow, 4).color[2] == 1 && hud.listCellStyle(5, otherRow, 4).color[0] == 0);
+	CHECK(hud.listCell(5, otherRow, 12) == "Ingame/Respawn/icon_speakerMute.tga");
+	CHECK(hud.listCell(5, deadRow, 3) == "Ingame/Scoreboard/Icons/icon_Death.tga" && hud.listCellStyle(5, deadRow, 4).color[1] == 0
+		&& hud.listCellStyle(5, deadRow, 4).color[3] == 1 && hud.listCell(5, deadRow, 12).empty());
 }
 
 TEST(HudMenus_InviteList)
@@ -995,6 +1176,18 @@ TEST(HudMenus_DemoCameraFiles)
 // Commander.zoomCommander 0x007d7be0, detailedView 0x007d8db0,
 // spottedMouseOver 0x00751f80, CommanderMenu.sendRadioMessage 0x007a9f60,
 // SquadLeader.sendRequestForOrder 0x007c7cd0, issueSquadRequest 0x007d6820).
+TEST(HudMenus_CommanderWheelZoom)
+{
+	CHECK(menu::commanderWheelZoom(0, 1) == 1);
+	CHECK(menu::commanderWheelZoom(1, 1) == 2);
+	CHECK(menu::commanderWheelZoom(2, 1) == 2);
+	CHECK(menu::commanderWheelZoom(2, -1) == 1);
+	CHECK(menu::commanderWheelZoom(1, -1) == 0);
+	CHECK(menu::commanderWheelZoom(0, -1) == 0);
+	CHECK(menu::commanderWheelZoom(0, 20) == 2);
+	CHECK(menu::commanderWheelZoom(2, -20) == 0);
+}
+
 TEST(HudMenus_CommanderRoseRows)
 {
 	CHECK(menu::commanderZoomStep(0) == 1 && menu::commanderZoomStep(1) == 2 && menu::commanderZoomStep(2) == 0);

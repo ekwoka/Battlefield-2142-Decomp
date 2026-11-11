@@ -92,6 +92,11 @@ std::unique_ptr<GpuContext> GpuContext::create(SDL_Window* window, std::string& 
 	sampler.enable_compare = false;
 	sampler.min_filter = sampler.mag_filter = SDL_GPU_FILTER_NEAREST;
 	context->m_pointSampler = SDL_CreateGPUSampler(context->m_device, &sampler);
+	// SwiffMenu.fx TexMapSamplerClamp/Wrap and Font.fx RegularScaled: linear, MipFilter None, no anisotropy.
+	sampler.min_filter = sampler.mag_filter = SDL_GPU_FILTER_LINEAR;
+	context->m_menuClampSampler = SDL_CreateGPUSampler(context->m_device, &sampler);
+	sampler.address_mode_u = sampler.address_mode_v = sampler.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+	context->m_menuRepeatSampler = SDL_CreateGPUSampler(context->m_device, &sampler);
 	context->m_emptyShadowMap = context->createShadowMap(1);
 	if (context->m_emptyShadowMap) {
 		// Cleared to the far plane: everything is lit by it.
@@ -147,6 +152,8 @@ GpuContext::~GpuContext()
 	SDL_ReleaseGPUSampler(m_device, m_clampSampler);
 	SDL_ReleaseGPUSampler(m_device, m_shadowSampler);
 	SDL_ReleaseGPUSampler(m_device, m_pointSampler);
+	SDL_ReleaseGPUSampler(m_device, m_menuClampSampler);
+	SDL_ReleaseGPUSampler(m_device, m_menuRepeatSampler);
 	for (SDL_GPUGraphicsPipeline* pipeline : {m_enhanced.mesh, m_enhanced.meshCulled, m_enhanced.fadedMesh,
 			 m_enhanced.additiveMesh, m_enhanced.terrain, m_enhanced.undergrowth, m_enhanced.road, m_enhanced.roadMesh,
 			 m_enhanced.depth, m_enhanced.terrainDepth, m_enhanced.terrainCaster, m_enhanced.gbuffer, m_enhanced.motion,

@@ -443,6 +443,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		render::Camera camera = level.suggestedCamera();
 		applyCameraOption(camera, options.camera);
 		const bool playing = static_cast<bool>(options.playerView);
+		// A window point in the HUD's 800 x 600, through the HUD pass's x scale (LevelSources::hudXScale).
+		const auto hudX = [&sources](float x, float width) { return 400.0f + (x * 800.0f / width - 400.0f) / sources.hudXScale; };
 		if (options.onMenuInput || options.onHudText) {
 			SDL_StartTextInput(window);
 		}
@@ -590,6 +592,13 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					if (const int steps = menuWheel.add(delta); steps != 0) {
 						menu({ViewerOptions::MenuInput::Kind::Wheel, 0, 0, steps});
 					}
+				} else if (playing && pointer && event.type == SDL_EVENT_MOUSE_WHEEL && options.onPointerWheel) {
+					float x = 0, y = 0;
+					SDL_GetMouseState(&x, &y);
+					const float delta = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.y : event.wheel.y;
+					if (const int steps = menuWheel.add(delta); steps != 0) {
+						options.onPointerWheel(hudX(x, static_cast<float>(windowWidth)), y / windowHeight * 600, steps);
+					}
 				} else if (playing && !pointer && event.type == SDL_EVENT_MOUSE_WHEEL) {
 					wheelSteps += event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.y : event.wheel.y;
 				} else if (menuUp && (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP)) {
@@ -603,16 +612,16 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					&& options.onClick) {
 					int w = 1, h = 1;
 					SDL_GetWindowSize(window, &w, &h);
-					options.onClick(event.button.x * 800.0f / static_cast<float>(w), event.button.y * 600.0f / static_cast<float>(h));
+					options.onClick(hudX(event.button.x, static_cast<float>(w)), event.button.y * 600.0f / static_cast<float>(h));
 				} else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_RIGHT && pointer
 					&& options.onRightClick) {
 					int w = 1, h = 1;
 					SDL_GetWindowSize(window, &w, &h);
-					options.onRightClick(event.button.x * 800.0f / static_cast<float>(w), event.button.y * 600.0f / static_cast<float>(h));
+					options.onRightClick(hudX(event.button.x, static_cast<float>(w)), event.button.y * 600.0f / static_cast<float>(h));
 				} else if (event.type == SDL_EVENT_MOUSE_MOTION && playing && pointer && options.onPointerMove) {
 					int w = 1, h = 1;
 					SDL_GetWindowSize(window, &w, &h);
-					options.onPointerMove(event.motion.x * 800.0f / static_cast<float>(w), event.motion.y * 600.0f / static_cast<float>(h));
+					options.onPointerMove(hudX(event.motion.x, static_cast<float>(w)), event.motion.y * 600.0f / static_cast<float>(h));
 				} else if (event.type == SDL_EVENT_MOUSE_MOTION && playing && !pointer) {
 					if (discardFirstRelativeMotion && SDL_GetWindowRelativeMouseMode(window)) {
 						discardFirstRelativeMotion = false;
@@ -649,7 +658,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				pointerConfinedBefore = confine;
 			}
 			{
-				const bool hideCursor = confine && pointerWhy && sameText(pointerWhy, "comm-rose");
+				const bool hideCursor = gameplaySystemCursorHidden(confine, pointerWhy);
 				if (hideCursor != roseCursorHidden) {
 					if (hideCursor) {
 						SDL_HideCursor();
@@ -665,7 +674,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				if (options.takePointerWarp(px, py)) {
 					int ww = 1, wh = 1;
 					SDL_GetWindowSize(window, &ww, &wh);
-					SDL_WarpMouseInWindow(window, px * ww / 800.0f, py * wh / 600.0f);
+					SDL_WarpMouseInWindow(window, (400.0f + (px - 400.0f) * sources.hudXScale) * ww / 800.0f, py * wh / 600.0f);
 				}
 			}
 			{

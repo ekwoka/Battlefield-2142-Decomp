@@ -377,8 +377,8 @@ void LevelRenderer::renderEnhancedPrepass(SDL_GPUCommandBuffer* commands, const 
 			SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
 		}
 	};
-	const auto alphaTest = [&](SDL_GPURenderPass* pass, const Submesh& submesh) {
-		const float caster[4] = {submesh.alphaReference, 0, 0, 0};
+	const auto alphaTest = [&](SDL_GPURenderPass* pass, const Submesh& submesh, float firstPerson = 0.0f) {
+		const float caster[4] = {submesh.alphaReference, firstPerson, 0, 0}; // y: motion.frag's first-person flag
 		SDL_PushGPUFragmentUniformData(commands, 0, caster, sizeof(caster));
 		SDL_GPUTextureSamplerBinding sampler {submesh.texture, m_gpu.repeatSampler()};
 		SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
@@ -564,7 +564,7 @@ void LevelRenderer::renderEnhancedPrepass(SDL_GPUCommandBuffer* commands, const 
 					SDL_PushGPUVertexUniformData(commands, 0, &t, pushUniformSize(t));
 					std::copy(std::begin(t.parts), std::end(t.parts), std::begin(motion.previousParts));
 					SDL_PushGPUVertexUniformData(commands, 1, &motion, sizeof(motion));
-					alphaTest(pass, submesh);
+					alphaTest(pass, submesh, 1.0f);
 					SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
 				}
 			}

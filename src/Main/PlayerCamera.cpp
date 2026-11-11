@@ -1150,6 +1150,18 @@ void PlayerCamera::startWeaponEffects(int effect)
 	}
 }
 
+bool PlayerCamera::titanGunHeading(float& degrees) const
+{
+	Me me;
+	View eye;
+	if (!current(me) || !me.alive || !me.vehicle || !m_round.isTitan(me.vehicle)
+		|| !view(eye, 4.0f / 3.0f)) {
+		return false;
+	}
+	degrees = eye.yaw / kDegrees;
+	return true;
+}
+
 bool PlayerCamera::view(View& view, float aspect) const
 {
 	if (!insideView()) {

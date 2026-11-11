@@ -122,6 +122,28 @@ public:
 		std::array<float, 4> iconColor {-1, 0, 0, 0};
 	};
 	void setList(int data, std::vector<std::vector<std::string>> rows);
+	// A cell's own settings where a list mixes cell kinds in one column (the
+	// squad list's rows, 0x007a5f10 / 0x007a65a0): the text cell's
+	// (0x007db6b0) or picture cell's (0x007db860) x offset from its column
+	// (+0x58), a picture's size (+0x50/+0x54; > 0: the text is its texture
+	// path), the alignment (-1 the column's) and its colour (red below 0:
+	// the row's). By row and cell, alongside setList's rows.
+	struct ListCell {
+		float offset = 0;
+		float iconWidth = 0, iconHeight = 0;
+		int alignment = -1;
+		std::array<float, 4> color {-1, 0, 0, 0};
+	};
+	void setListCells(int data, std::vector<std::vector<ListCell>> cells) { m_listCells[data] = std::move(cells); }
+	ListCell listCellStyle(int data, int row, int column) const
+	{
+		const auto it = m_listCells.find(data);
+		if (it == m_listCells.end() || row < 0 || static_cast<size_t>(row) >= it->second.size()
+			|| column < 0 || static_cast<size_t>(column) >= it->second[static_cast<size_t>(row)].size()) {
+			return {};
+		}
+		return it->second[static_cast<size_t>(row)][static_cast<size_t>(column)];
+	}
 	// Edit boxes by data id (setEditNodeData: 1 chat, 2 the squad name, 3
 	// the commander's chat): their text, the box with the keys (-1 none;
 	// it draws a caret) and the scripts' maximum length (0 none).
@@ -389,6 +411,7 @@ private:
 	std::map<int, std::vector<std::vector<std::string>>> m_lists;
 	std::map<int, std::vector<std::array<float, 4>>> m_listRowColors;
 	std::map<int, std::vector<std::array<float, 4>>> m_listRowBackgrounds;
+	std::map<int, std::vector<std::vector<ListCell>>> m_listCells;
 	std::map<int, std::vector<int>> m_occupiedStates;
 	std::map<int, std::string> m_editText;
 	std::map<int, int> m_editMaxLength;

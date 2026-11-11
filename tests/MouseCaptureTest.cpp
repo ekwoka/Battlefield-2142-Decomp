@@ -66,3 +66,15 @@ TEST(MouseCapture_InGamePointerStaysInTheWindow)
 	CHECK(!gameplayMouseCaptureWanted(true, true, false, true)); // relative mode is off on the rose
 	CHECK(!gameplayPointerConfined(true, true, false, false, "deployment")); // focus loss frees it
 }
+
+// The commander screen draws the game's pointer, so the system cursor hides
+// there (and on the rose) while confined; other pointer screens keep it.
+TEST(MouseCapture_CommanderScreenHidesSystemCursor)
+{
+	using namespace dice::hfe;
+	CHECK(gameplaySystemCursorHidden(true, "commander-screen"));
+	CHECK(gameplaySystemCursorHidden(true, "comm-rose"));
+	CHECK(!gameplaySystemCursorHidden(true, "deployment"));
+	CHECK(!gameplaySystemCursorHidden(false, "commander-screen")); // unfocused or Esc menu
+	CHECK(!gameplaySystemCursorHidden(true, nullptr));
+}

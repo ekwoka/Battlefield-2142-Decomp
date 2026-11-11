@@ -30,6 +30,14 @@ constexpr bool gameplayPointerConfined(bool playing, bool pointer, bool menuUp, 
 		&& !sameText(reason, "end-of-round");
 }
 
+// Screens that draw the game's own pointer (the commander screen's
+// pointerMinimap.tga, HudManager.setMouseTextureFull) or none (the comm rose,
+// picked by pointing) hide the system cursor while it is confined there.
+constexpr bool gameplaySystemCursorHidden(bool confined, const char* reason)
+{
+	return confined && reason && (sameText(reason, "comm-rose") || sameText(reason, "commander-screen"));
+}
+
 // The soldier's aim pitch is clamped (85 degrees first person), but a driver's
 // PIPitch/PIMouseLookY is the per-tick change of that pitch, so a clamp pinned
 // at one end swallows the mouse in that direction. Driving only bounds the sum.

@@ -382,6 +382,28 @@ bool RemoteWorld::apply(const GameEvent& event)
 		if (info.category == kMsgNetworkCategory && info.id == kNePlayerDead && m_localPlayer >= 0) {
 			m_players[m_localPlayer].alive = false;
 		}
+		// A radio spot (the minimap node's case 0x2e, 0x00791faa): the
+		// spotted object, when not our team's, is listed for 12 s (the map's
+		// +0xac8): an enemy's soldier as that player, else as a vehicle.
+		SpottedInfo spot;
+		if (info.category == 2 && info.id == 0x2e && parseSpottedPayload(info.payload, info.id, spot) && spot.spotted) {
+			const auto local = m_players.find(m_localPlayer);
+			const int ourTeam = local != m_players.end() ? local->second.team : 0;
+			const uint32_t until = m_tick + 12 * 30;
+			bool soldier = false;
+			for (const auto& [id, p] : m_players) {
+				if (p.soldierGhost == spot.spotted) {
+					soldier = true;
+					if (p.team != ourTeam) {
+						m_radar[id] = std::max(m_radar[id], until);
+					}
+				}
+			}
+			if (!soldier && static_cast<int>(spot.team) == ourTeam) {
+				uint32_t& vehicleUntil = m_radarVehicles[static_cast<uint16_t>(spot.spotted)];
+				vehicleUntil = std::max(vehicleUntil, until);
+			}
+		}
 		m_messages.push_back(info);
 		return true;
 	}

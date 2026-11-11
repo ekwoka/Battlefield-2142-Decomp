@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
 # Checks that the enhanced mode leaves the simulation alone: runs the same
 # headless bot round twice without --enhanced (the round must repeat),
-# then once with it, and compares the state fingerprints.
+# then once with it, and compares the state fingerprints. The enhanced
+# gameplay additions (enhanced.botRecovery) change the simulation by
+# design and are turned off for the comparison.
 #   tools/parity-check.sh [seconds] [extra game args...]
 set -uo pipefail
 B="${BF2142_BIN:-build/release/src/Main/bf2142}"
 G="${BF2142_GAME:-source/Battlefield 2142}"
 SECS="${1:-60}"
 shift || true
+EXTRA=("$@")
 
 run() {
 	"$B" --game "$G" +level Cerbere_Landing +gameMode gpm_sp +mapSize 16 --bots 15 --simulate "$SECS" \
-		$1 "${@:2}" 2>&1 | awk '/state fingerprint/ {print $3}'
+		"$@" ${EXTRA[@]+"${EXTRA[@]}"} 2>&1 | awk '/state fingerprint/ {print $3}'
 }
 
-off1="$(run "" "$@")"
-off2="$(run "" "$@")"
-on="$(run --enhanced "$@")"
+off1="$(run)"
+off2="$(run)"
+on="$(run --enhanced --console "enhanced.botRecovery 0")"
 echo "off: $off1 / $off2, on: $on"
 if [[ -z "$off1" ]]; then
 	echo "FAIL: no fingerprint printed"; exit 1

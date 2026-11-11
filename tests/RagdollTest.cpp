@@ -115,13 +115,15 @@ struct Game {
 	}
 
 	// The world, once the test's templates are in place.
-	void start(const physics::MaterialManager* materials = nullptr, uint32_t surface = 0)
+	// `slope`: the ground rises by that much a metre along x (0: flat).
+	void start(const physics::MaterialManager* materials = nullptr, uint32_t surface = 0, float slope = 0)
 	{
 		world = std::make_unique<game::GameWorld>(templates, objects);
 		world->enablePhysics(files, collisionTemplates,
-			{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
-				 normal = {0, 1, 0};
-				 return 0.0f;
+			{[slope](float x, float) { return x * slope; }, [slope](float x, float, physics::Vec3& normal) {
+				 const float length = std::sqrt(slope * slope + 1);
+				 normal = {-slope / length, 1 / length, 0};
+				 return x * slope;
 			 }, [surface](float, float) { return surface; }},
 			materials);
 		world->setAnimationSystems(&systems, [this](const std::string& path) {
@@ -1794,6 +1796,45 @@ TEST(Physics_InstalledSoldierWalkingQueuesFootsteps)
 
 // The original movement selector chooses slots by stance/sprint, then the
 // material manager tries the default surface for a missing slot or cell.
+// Standing still on a 16 degree slope leaves the body a small residual
+// integrated velocity into it (0.13 m/s across, over the 0.1 walking gate),
+// but it does not move: the gate reads the measured displacement as retail's
+// 0x007fda00 does (slot 0x64), so no footsteps play (seen on a Suez stair).
+TEST(Physics_StandingOnASlopeMakesNoFootsteps)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	Game game(gameDir, "mods/Project_Remaster_v17_Final", true);
+	game.materials.createCell(5500, 0).soundTemplates = {"WalkDefault", "CrouchDefault", "ProneDefault", "SprintDefault"};
+	game.start(&game.materials, 0, 0.287f);
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	const int player = game.world->localPlayer();
+	game.run(2);
+	(void)game.world->takeSounds();
+	float drift = 0, measured = 0;
+	for (int i = 0; i < 90; ++i) {
+		game.run(1 / 30.0f);
+		const physics::SoldierBody* body = game.world->soldierBody(player);
+		CHECK(body != nullptr);
+		if (!body) break;
+		drift = std::max(drift, std::sqrt(body->velocity.x * body->velocity.x + body->velocity.z * body->velocity.z));
+		const physics::Vec3& m = body->measuredVelocity;
+		measured = std::max(measured, std::sqrt(m.x * m.x + m.y * m.y + m.z * m.z));
+	}
+	CHECK(drift > 0.1f);   // the integrator's pending push into the slope, as retail's +0x20
+	CHECK(measured < 0.1f); // but the reported (slot 0x64) velocity: no motion
+	const auto standing = game.world->takeSounds();
+	std::fprintf(stderr, "  standing on the slope: integrated %.3f m/s, measured %.6f m/s\n", drift, measured);
+	CHECK(std::none_of(standing.begin(), standing.end(), [](const auto& s) { return s.sound == "WalkDefault"; }));
+	// Walking on it still steps.
+	game::SoldierInput input;
+	input.throttle = 1;
+	game.world->setInput(player, input);
+	game.run(3);
+	const auto walking = game.world->takeSounds();
+	CHECK(std::count_if(walking.begin(), walking.end(), [](const auto& s) { return s.sound == "WalkDefault"; }) >= 2);
+}
+
 TEST(Physics_FootstepsChooseMovementSlotAndSurfaceFallback)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");

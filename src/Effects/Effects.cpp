@@ -1322,8 +1322,8 @@ bool EffectManager::spawnAttached(const std::string& name, uint32_t anchor, cons
 		light.mountRotation = rotation;
 		placeLight(light);
 	}
-	// The looping start sounds of bundles that set their sound intensity
-	// (SoundIntensityUsed or a mapping) stay with the bundle (bundleLoops),
+	// All looping start sounds stay with the bundle (bundleLoops), including
+	// constant-input loops such as the pod motor without SoundIntensityUsed.
 	// their envelopes at that intensity: modifier 5 as the start sets it
 	// (0x0061a1c0 -> 0x00618e30), with no motion yet.
 	std::vector<HeldSound> held;
@@ -1333,7 +1333,7 @@ bool EffectManager::spawnAttached(const std::string& name, uint32_t anchor, cons
 		const std::string* loops = sound ? setting(*sound, "loopCount") : nullptr;
 		const bool intensity = started.bundle
 			&& (bundleModifiers(*started.bundle).modifiers[5].used || bundleModifiers(*started.bundle).modifiers[5].mapped());
-		if (!intensity || !loops || std::atoi(loops->c_str()) != 0) {
+		if (!loops || std::atoi(loops->c_str()) != 0) {
 			++i;
 			continue;
 		}
@@ -1345,7 +1345,7 @@ bool EffectManager::spawnAttached(const std::string& name, uint32_t anchor, cons
 		h.localPosition = m_startedSounds[i].position;
 		h.mountPosition = position;
 		h.mountRotation = rotation;
-		h.intensity = started.intensity;
+		h.intensity = intensity ? started.intensity : 0.0f;
 		held.push_back(std::move(h));
 		m_startedSounds.erase(m_startedSounds.begin() + static_cast<std::ptrdiff_t>(i));
 	}

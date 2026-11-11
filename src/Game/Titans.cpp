@@ -526,6 +526,7 @@ void GameWorld::buildTitanParts(Titan& titan)
 				return;
 			}
 			Titan::PodArray array;
+			array.seat = t.name();
 			bool launcher = false;
 			if (depth > 0 && sameName(t.typeName(), "PlayerControlObject")) {
 				std::function<void(const world::ObjectTemplate&, const physics::Mat3&, const physics::Vec3&, int)> scan =
@@ -547,6 +548,7 @@ void GameWorld::buildTitanParts(Titan& titan)
 							if (!launcher && podLauncherOf(*c, projectile, velocity, start, false)) {
 								launcher = true;
 								array.projectile = projectile;
+								array.weapon = c->name();
 								array.velocity = velocity;
 								array.launcher = here + local.transform(start);
 								array.direction = local.transform({0, 0, 1});
@@ -1964,32 +1966,46 @@ bool GameWorld::launchPod(int id, bool exitKey)
 			return false;
 		}
 	}
-	if (!player->vehicle) {
-		// At a Titan's pod array: the soldier within one of its entry points.
-		for (const Titan& titan : m_titans) {
-			const world::Object* object = m_objects.find(titan.object);
-			if (!object || titan.wrecked || titan.team != player->team) {
-				continue;
-			}
-			const physics::Mat3 rotation =
-				physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
-			const physics::Vec3 at {object->position().x, object->position().y, object->position().z};
-			for (const Titan::PodArray& array : titan.podArrays) {
-				for (const auto& [entry, radius] : array.entries) {
-					const physics::Vec3 e = at + rotation.transform(entry);
-					if (physics::lengthSquared(e - player->body.position) <= (radius + 1) * (radius + 1)) {
-						const Body* hull = findBody(titan.object);
-						if (!tiltAllowsFire(hull ? hull->body.rotation : rotation, array.maxTilt)) {
-							return false;
-						}
-						return startPod(*player, array.projectile, at + rotation.transform(array.launcher),
-							rotation.transform(array.direction) * array.velocity + titan.velocity, titan.object);
-					}
-				}
-			}
+	// Titan arrays are ordinary occupied control-object seats. Fire uses
+	// the launcher's current posed transform, including its mouse yaw.
+	if (Titan* titan = titanByObject(player->vehicle)) {
+		Body* body = findBody(player->vehicle);
+		const auto* root = m_objects.find(player->vehicle);
+		if (!body || !root || titan->wrecked || player->seat < 0) return false;
+		const auto& seats = vehicleLayout(*root->objectTemplate()).seats;
+		if (static_cast<size_t>(player->seat) >= seats.size()) return false;
+		for (const auto& array : titan->podArrays) {
+			if (!sameName(array.seat, seats[player->seat].name)) continue;
+			if (!tiltAllowsFire(body->body.rotation, array.maxTilt)) return false;
+			const auto& seat = seats[player->seat];
+			world::Vec3 offset, angles;
+			if (!partPose(body->object, seat.yawBundle, offset, angles, player->seat)) return false;
+			const auto yaw = physics::Mat3::fromYawPitchRoll({angles.x, 0, 0});
+			const auto direction = body->body.rotation.transform(yaw.transform(array.direction));
+			const auto from = body->body.position + body->body.rotation.transform(
+				seat.yawPivot + yaw.transform(array.launcher - seat.yawPivot));
+			const auto velocity = direction * array.velocity + titan->velocity;
+			const auto turn = physics::Mat3::fromYawPitchRoll({
+				std::atan2(direction.x, direction.z) * 57.29578f,
+				-std::asin(std::clamp(direction.y, -1.0f, 1.0f)) * 57.29578f, 0});
+			const auto* weapon = m_templates.find(array.weapon);
+			if (!weapon || !m_templates.find(array.projectile)) return false;
+			const auto carrier = body->object;
+			body->occupants[player->seat] = -1;
+			raise("ExitVehicle", {ScriptValue::player(player->id), ScriptValue::object(carrier)});
+			player->body.yawDegrees = std::atan2(direction.x, direction.z) * 57.29578f;
+			player->vehicle = 0;
+			player->seat = -1;
+			player->seatAnimation.reset();
+			player->seatAnimationPath.clear();
+			if (!startPod(*player, array.projectile, from, velocity, carrier)) return false;
+			effects::ObjectEffects(m_templates).weaponFiredAt(*weapon, from, turn, m_effects);
+			return true;
 		}
-		return false;
+		return false; // a Titan gun is not a pod launcher
 	}
+	if (!player->vehicle) return false;
+
 	// A seat with a pod launcher on alternate fire (the APCs' pod seats):
 	// the pod leaves along the soldier's aim from the seat.
 	Body* body = findBody(player->vehicle);
@@ -2176,7 +2192,10 @@ bool GameWorld::launchPod(int id, bool exitKey)
 	player->seat = -1;
 	player->seatAnimation.reset();
 	player->seatAnimationPath.clear();
-	return startPod(*player, projectile, from, direction * velocity + body->body.velocity, body->object);
+	const auto launchRotation = body->body.rotation;
+	if (!startPod(*player, projectile, from, direction * velocity + body->body.velocity, body->object)) return false;
+	if (launcher) effects::ObjectEffects(m_templates).weaponFiredAt(*launcher, from, launchRotation, m_effects);
+	return true;
 }
 
 bool GameWorld::fireObstructed(const physics::Vec3& at, const physics::Vec3& forward, const physics::Vec3& right,
@@ -2352,6 +2371,15 @@ bool GameWorld::titanPodEntry(int id, physics::Vec3& entry, float& radius) const
 		}
 		float best = 1e30f;
 		for (const Titan::PodArray& array : titan.podArrays) {
+			const auto layout = m_layouts.find(object->objectTemplate()->name());
+			bool taken = false;
+			if (layout != m_layouts.end()) {
+				for (size_t i = 0; i < layout->second.seats.size(); ++i) {
+					if (sameName(layout->second.seats[i].name, array.seat)
+						&& i < body->occupants.size() && body->occupants[i] >= 0) taken = true;
+				}
+			}
+			if (taken) continue;
 			for (const auto& [offset, r] : array.entries) {
 				const physics::Vec3 e = at + body->body.rotation.transform(offset);
 				const float d = physics::lengthSquared(e - player->body.position);
@@ -2392,6 +2420,8 @@ bool GameWorld::titanGunEntry(int id, physics::Vec3& entry, float& radius, int& 
 		}
 		float best = 1e30f;
 		for (const VehicleLayout::Entry& e : layout->second.entries) {
+			if (e.seat >= 0 && static_cast<size_t>(e.seat) < layout->second.seats.size()
+				&& layout->second.seats[e.seat].podLauncher) continue;
 			const bool taken = e.seat < 0 || (static_cast<size_t>(e.seat) < body->occupants.size() && body->occupants[static_cast<size_t>(e.seat)] >= 0);
 			if (taken || !titanGunWorks(titan.object, e.seat) || (wanted >= 0 && e.seat != wanted)
 				|| std::find(skip.begin(), skip.end(), e.seat) != skip.end()) {

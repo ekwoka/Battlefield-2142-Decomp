@@ -280,9 +280,16 @@ SDL_GPUTexture* LevelRenderer::texture(const io::FileManager& files, const std::
 	// The level's customTextureSuffix variant where one exists (0x10018ca0).
 	const std::string variant = customSuffixedTexturePath(path, m_textureSuffix);
 	const bool swapped = !variant.empty() && files.readFile(variant, data);
-	if (swapped || files.readFile(path, data)) {
+	std::string found = swapped ? variant : std::string();
+	for (const std::string& name : swapped ? std::vector<std::string>() : texturePathCandidates(path)) {
+		if (files.readFile(name, data)) {
+			found = name;
+			break;
+		}
+	}
+	if (!found.empty()) {
 		// By the name read (the key may carry "#skip").
-		const std::string read = swapped ? variant : lower(path);
+		const std::string read = lower(found);
 		const bool targa = read.size() > 4 && read.compare(read.size() - 4, 4, ".tga") == 0;
 		if (auto image = targa ? texture::parseTga(data) : texture::parseDds(data)) {
 			texture::skipTopLevels(*image, skip);
@@ -539,7 +546,11 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 	const scene::QualitySettings defaults;
 	const scene::QualitySettings& quality = sources.quality ? *sources.quality : defaults;
 	for (size_t m = 0; m < materials.size(); ++m) {
-		const geom::MeshMaterial& material = materials[m];
+		geom::MeshMaterial material = materials[m];
+		for (std::string& path : material.maps) {
+			path = meshTexturePath(path, geometry->path,
+				[&](const std::string& candidate) { return sources.files.exists(candidate); });
+		}
 		// Alpha-tested materials use "<name>_alphatest.dds" where it exists:
 		// the plain textures keep alpha in 0..0.5 for alpha to coverage
 		// (0x10151830).
@@ -4418,7 +4429,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// The HUD over everything.
 	if (m_overlayVertices && !m_overlayGroups.empty()) {
 		SDL_BindGPUGraphicsPipeline(pass, m_gpu.uiPipeline());
-		const float screen[4] = {800, 600, 0, 0};
+		const float screen[4] = {800, 600, m_sources ? m_sources->hudXScale : 1.0f, 0};
 		SDL_PushGPUVertexUniformData(commands, 0, screen, sizeof(screen));
 		SDL_GPUBufferBinding vertexBinding {m_overlayVertices, 0};
 		SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
@@ -4460,7 +4471,8 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 																							: GpuContext::UiStencil::Off));
 			}
 			SDL_SetGPUStencilReference(pass, static_cast<Uint8>(group.stencil == Stencil::Clear ? 0 : group.stencilLevel));
-			SDL_GPUTextureSamplerBinding sampler {group.texture, group.repeat ? m_gpu.repeatSampler() : m_gpu.clampSampler()};
+			// shortcut: fonts always get RegularScaled's linear; RendDX9.dll 0x10181a90 points them (Regular) at window width <= 1024, port with the Fonts/800 path.
+			SDL_GPUTextureSamplerBinding sampler {group.texture, m_gpu.menuSampler(group.repeat)};
 			SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
 			SDL_DrawGPUPrimitives(pass, group.vertexCount, 1, group.firstVertex, 0);
 		}

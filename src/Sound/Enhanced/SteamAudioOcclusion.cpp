@@ -52,6 +52,12 @@ constexpr int kOcclusionSamples = 16;   // volumetric: smooth edges
 constexpr float kOcclusionRadius = 1.0f; // metres
 constexpr int kTransmissionRays = 3;
 constexpr int kMaxSources = 256;
+// Steam Audio's direct path has no diffraction: a corner or an overhang next
+// to the listener costs -30 dB (two faces at 0.1 transmission) where retail's
+// obstruction (SoundManager::obstruction) costs about -2 dB. So a blocked
+// sound keeps at least kMinGain and kMinGainHF of its highs, the rest scaled.
+constexpr float kMinGain = 0.5f;
+constexpr float kMinGainHF = 0.5f;
 
 } // namespace
 
@@ -220,9 +226,10 @@ void SteamAudioOcclusion::simulate(const Vec3& listener, std::vector<EnhancedSou
 		const float occlusion = outputs.direct.occlusion;
 		const float low = occlusion + (1.0f - occlusion) * outputs.direct.transmission[0];
 		const float high = occlusion + (1.0f - occlusion) * outputs.direct.transmission[2];
-		sources[i].gain = low;
 		m_stats.muffled += low < 0.5f ? 1 : 0;
-		sources[i].gainHF = low > 0.0f ? std::min(1.0f, high / low) : 0.0f;
+		const float ratio = low > 0.0f ? std::min(1.0f, high / low) : 0.0f;
+		sources[i].gain = kMinGain + (1.0f - kMinGain) * low;
+		sources[i].gainHF = kMinGainHF + (1.0f - kMinGainHF) * ratio;
 	}
 	m_stats.simulateSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 	++m_stats.ticks;

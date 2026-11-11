@@ -1197,7 +1197,32 @@ void HudManager::drawList(const Node& node, float x, float y, const float color[
 		}
 		const auto rowColors = m_listRowColors.find(node.listData);
 		const bool ownColor = rowColors != m_listRowColors.end() && r < rowColors->second.size();
+		const auto cells = m_listCells.find(node.listData);
+		const std::vector<ListCell>* rowCells = cells != m_listCells.end() && r < cells->second.size() ? &cells->second[r] : nullptr;
 		for (size_t i = 0; i < rows[r].size() && i < columns.size(); ++i) {
+			if (rowCells && i < rowCells->size()) {
+				const ListCell& cell = (*rowCells)[i];
+				const float* own = cell.color[0] >= 0 ? cell.color.data() : nullptr;
+				if (cell.iconWidth > 0) {
+					// A picture cell (0x007dfb8d): the column's x plus its offset,
+					// centred in the row; white unless it has a colour.
+					if (!rows[r][i].empty()) {
+						const float ix = x + columns[i].x + cell.offset;
+						const float iy = std::floor(rowY + (node.rowHeight - cell.iconHeight) * 0.5f);
+						out.push_back({kTextureRoot + slashes(rows[r][i]), ix, iy, ix + cell.iconWidth, iy + cell.iconHeight, 0, 0, 1,
+							1, {own ? own[0] : 1.0f, own ? own[1] : 1.0f, own ? own[2] : 1.0f, (own ? own[3] : 1.0f) * color[3]}, 0});
+					}
+					continue;
+				}
+				ListColumn placed = columns[i];
+				placed.x += cell.offset;
+				if (cell.alignment >= 0) {
+					placed.alignment = cell.alignment;
+				}
+				drawCell(node, rows[r][i], x, rowY, placed, columnEnd(i),
+					own ? own : ownColor ? rowColors->second[r].data() : textColor, color[3], out);
+				continue;
+			}
 			if (columns[i].iconSize > 0) {
 				if (!rows[r][i].empty()) {
 					const float size = columns[i].iconSize;
@@ -1261,8 +1286,10 @@ void HudManager::drawCell(const Node& node, const std::string& text, float x, fl
 			continue;
 		}
 		if (c == '|' && i + 1 < text.size() && (text[i + 1] == 'c' || text[i + 1] == 'C')) {
+			// The strings' "|C1001": retail skips 6 (0x007dff79); bare "|c" is native's own row mark.
+			const bool code = i + 6 <= text.size() && std::all_of(text.begin() + i + 2, text.begin() + i + 6, [](char d) { return d >= '0' && d <= '9'; });
 			highlight = !highlight;
-			i += 1;
+			i += code ? 5 : 1;
 			continue;
 		}
 		const HudFont* f = fontAt(fontIndex);
@@ -1351,10 +1378,12 @@ bool HudManager::click(float x, float y, bool alternate)
 			continue;
 		}
 		const int data = it->node->listData;
-		// The column whose left edge is the nearest one left of the pointer.
+		// The column whose left edge is the nearest one left of the pointer;
+		// of columns sharing that edge the last (the squad list's lock is
+		// column 8 over its frame's 7, JOIN 10 over its button's 9: 0x007a81b0).
 		int column = 0;
 		for (size_t i = 0; i < it->columns.size(); ++i) {
-			if (x >= it->columns[i] && it->columns[i] > it->columns[static_cast<size_t>(column)]) {
+			if (x >= it->columns[i] && it->columns[i] >= it->columns[static_cast<size_t>(column)]) {
 				column = static_cast<int>(i);
 			}
 		}
@@ -2332,6 +2361,14 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 		}
 		n->showCommands.emplace_back(event, command);
 		m->noteShowCommands(n);
+		return true;
+	});
+	// setNodePos x y (0x007b08e0: the active node, slot 0xcc; Remaster's HudRotation.con moves its sides with it).
+	bindMethod(console, "HudBuilder.setNodePos", access, [active](int x, int y) {
+		if (Node* n = active()) {
+			n->x = x;
+			n->y = y;
+		}
 		return true;
 	});
 	// setNodeSize w h (0x007b0a10: the node made last, slot 0xc8).

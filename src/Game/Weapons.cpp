@@ -282,6 +282,7 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	if (const auto effect = t.settings().find("detonation.endEffectTemplate"); effect != t.settings().end()) {
 		s.endEffect = effect->second;
 	}
+	s.useMMOnEndEffect = number(t, "detonation.useMMOnEndEffect", 0) != 0;
 	const auto ttl = t.settings().find("timeToLive");
 	if (ttl != t.settings().end()) {
 		s.timeToLive = RandomDistribution::parse(ttl->second);
@@ -773,6 +774,36 @@ bool FireArm::addMagazine()
 	return true;
 }
 
+bool FireArm::resupply(float percent, uint32_t now)
+{
+	const int size = m_settings.magSize;
+	const int mags = m_settings.nrOfMags;
+	const bool rounds = mags == 1 || mags == -1; // the load is the magazine's rounds
+	// slot 0x9c (0x005f4520): magSize -1 takes nothing; the magazine not full,
+	// or a spare missing (native counts spares, not the loaded magazine).
+	if (size < 0 || (rounds ? m_rounds >= size : m_mags >= mags)) {
+		return false;
+	}
+	if (m_resupplyTick + 30 < now) {
+		m_resupplyCredit = 0;
+	}
+	const float delta = static_cast<float>(rounds ? size : mags) * percent * 0.01f;
+	m_resupplyCredit += delta;
+	if (m_resupplyCredit > 1) { // strictly above, then truncated
+		const int n = static_cast<int>(m_resupplyCredit);
+		m_resupplyCredit -= static_cast<float>(n);
+		if (rounds) {
+			m_rounds = std::min(size, m_rounds + n);
+		} else {
+			m_mags = std::min(mags, m_mags + n);
+		}
+	}
+	if (delta > 0) {
+		m_resupplyTick = now;
+	}
+	return true;
+}
+
 bool FireArm::tick(float seconds, bool trigger, bool altTrigger)
 {
 	const bool altPressed = altTrigger && !m_altWas;
@@ -1068,14 +1099,25 @@ physics::Vec3 deviateVelocity(const physics::Vec3& velocity, const physics::Vec3
 	return velocity + up * (scale * alongUp) + right * (scale * alongRight);
 }
 
-void followMagnet(Projectile& p, const physics::Vec3& aim, const physics::Vec3& targetVelocity, float seconds, bool overrideArming)
+void armFollow(Projectile& p, float targetSpeed, bool overrideArming)
 {
 	const ProjectileSettings& s = *p.settings;
-	const float targetSpeed = std::sqrt(physics::lengthSquared(targetVelocity));
 	if (targetSpeed > p.targetTopSpeed || (targetSpeed < s.armingSpeed && !p.armed)) {
 		p.targetTopSpeed = targetSpeed;
 	}
 	p.armed = p.targetTopSpeed > s.armingSpeed || overrideArming;
+}
+
+float followSpeedCap(const Projectile& p, bool overrideArming)
+{
+	const ProjectileSettings& s = *p.settings;
+	return s.useTargetSpeed && !overrideArming ? (p.armed ? s.speedModifier : 1.0f) * p.targetTopSpeed : s.maxSpeed;
+}
+
+void followMagnet(Projectile& p, const physics::Vec3& aim, const physics::Vec3& targetVelocity, float seconds, bool overrideArming)
+{
+	const ProjectileSettings& s = *p.settings;
+	armFollow(p, std::sqrt(physics::lengthSquared(targetVelocity)), overrideArming);
 	const float ownSpeed = std::sqrt(physics::lengthSquared(p.velocity));
 	physics::Vec3 point = aim;
 	if (ownSpeed > 0) {
@@ -1084,10 +1126,7 @@ void followMagnet(Projectile& p, const physics::Vec3& aim, const physics::Vec3& 
 	physics::Vec3 direction = point - p.position;
 	const float length = std::sqrt(physics::lengthSquared(direction));
 	direction = length > 1e-4f ? direction * (1 / length) : physics::Vec3 {};
-	float cap = s.maxSpeed;
-	if (s.useTargetSpeed && !overrideArming) {
-		cap = (p.armed ? s.speedModifier : 1.0f) * p.targetTopSpeed; // 0x005ec770, 0x005ec7a0
-	}
+	const float cap = followSpeedCap(p, overrideArming);
 	if (ownSpeed >= cap) {
 		if (ownSpeed > 0.01f) {
 			p.velocity = p.velocity - p.velocity * (std::min(s.deAcceleration * seconds, ownSpeed) / ownSpeed);

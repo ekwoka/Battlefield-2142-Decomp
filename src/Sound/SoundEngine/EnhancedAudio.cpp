@@ -3,6 +3,8 @@
 #include "SoundServices.h"
 
 #include <algorithm>
+#include <unordered_map>
+#include <utility>
 
 namespace dice::hfe::sound {
 
@@ -26,6 +28,7 @@ struct State {
 	void (*filterf)(ALuint, ALenum, ALfloat) = nullptr;
 	ALuint filter = 0; // one lowpass, copied into each source on attach
 	std::vector<EnhancedSource> tick;
+	std::unordered_map<ALuint, std::pair<float, float>> applied; // gain, gainHF last set per source
 };
 
 State& state()
@@ -93,6 +96,7 @@ void enhancedClose()
 	s.genFilters = nullptr;
 	s.hrtfStatus = -1;
 	s.tick.clear();
+	s.applied.clear();
 }
 
 bool enhancedOcclusionActive()
@@ -116,6 +120,7 @@ void enhancedRelease(ALuint source)
 		return;
 	}
 	al().alSourcei(source, kAlDirectFilter, 0);
+	s.applied.erase(source);
 	s.tick.erase(std::remove_if(s.tick.begin(), s.tick.end(), [source](const EnhancedSource& e) { return e.source == source; }),
 		s.tick.end());
 }
@@ -130,8 +135,13 @@ void enhancedEndTick(const Vec3* listener)
 		s.occlusion->simulate(*listener, s.tick);
 	}
 	for (const EnhancedSource& e : s.tick) {
-		s.filterf(s.filter, kAlLowpassGain, std::clamp(e.gain, 0.0f, 1.0f));
-		s.filterf(s.filter, kAlLowpassGainHF, std::clamp(e.gainHF, 0.0f, 1.0f));
+		const float gain = std::clamp(e.gain, 0.0f, 1.0f), gainHF = std::clamp(e.gainHF, 0.0f, 1.0f);
+		auto [it, first] = s.applied.try_emplace(e.source, gain, gainHF); // a new source starts at its answer
+		if (!first) {
+			it->second = {enhancedSmoothed(it->second.first, gain), enhancedSmoothed(it->second.second, gainHF)};
+		}
+		s.filterf(s.filter, kAlLowpassGain, it->second.first);
+		s.filterf(s.filter, kAlLowpassGainHF, it->second.second);
 		al().alSourcei(e.source, kAlDirectFilter, static_cast<ALint>(s.filter));
 	}
 	s.tick.clear();

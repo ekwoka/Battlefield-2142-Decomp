@@ -677,6 +677,20 @@ void GameWorld::fireStrike(Strike& strike, StrikeFire& fire)
 	if (m_strikeFires.size() > 16) {
 		m_strikeFires.erase(m_strikeFires.begin());
 	}
+	// The firing is a GenericFireArm event too (DefaultSoundComp's 3P
+	// Fire handler, 0x005dbdc0). StrikeFired is consumed by main.cpp for
+	// muzzle/GroundEffectBundles and network replication, so keep the sound
+	// event in GameAudio's ordinary weapon queue instead of trying to infer it
+	// from that separate effects path.
+	// A commander strike is fired by the world, not by the local commander’s
+	// first-person weapon component. Keep the asset firearm and world position,
+	// but leave player/object unset so GameAudio selects its 3P sound.
+	WeaponSoundEvent fireSound {WeaponSoundEvent::Fire, -1, 0, fire.fireArm, from};
+	fireSound.fireMode = 0; // SingleFireComp; one Fire3P one-shot per shell.
+	m_weaponSounds.push_back(std::move(fireSound));
+	if (m_weaponSounds.size() > 256) {
+		m_weaponSounds.erase(m_weaponSounds.begin(), m_weaponSounds.end() - 256);
+	}
 	// The batch (0x005c3cb0): round 0 the main one, the rest sub-projectiles
 	// (batchSize - 1 of them). Each strays by the deviation component
 	// (0x005f5540): normal numbers times subProjectileDev for a sub (kept),
@@ -800,9 +814,10 @@ void GameWorld::stepCommander(float seconds)
 //   materials 73 and 24, the same for every target), taking that much
 //   from the storage when it took any, while the heal storage isn't spent
 //   (0x005d0650: healSpeed x 0.2 left in it or the shared storage);
-// - and each of its weapons gets refillAmmoSpeed x 0.2 per cent of a
-//   magazine (0x005d0b20 → the ammo component's slot 0xa8, 0x005f5110:
-//   magSize x amount / 100 rounds, the fraction kept), the amount taken
+// - and each of its weapons gets refillAmmoSpeed x 0.2 per cent of its
+//   whole load (0x005d0b20 → the ammo component's slot 0xa8, 0x005f5110:
+//   nrOfMags magazines, or magSize rounds with nrOfMags 1 or -1; the
+//   fraction kept on the weapon, FireArm::resupply), the amount taken
 //   from the storage while the weapon isn't full.
 // With destroyWhenEmptyStorage it goes once both storages are spent.
 // Deployed hubs (unl_hub_*_stationary) carry such a SupplyObject child
@@ -886,20 +901,19 @@ void GameWorld::stepCrates(float seconds)
 			healHitPoints(target, std::min(most, left + heal * factor * 0.01f * most), giver);
 			crate.storage -= heal;
 		};
-		const auto refill = [&](FireArm* weapon) {
-			if (!weapon || ammo <= 0 || crate.storage <= 0) {
+		// 0x005d0b20 -> the ammo's slot 0xa8 (FireArm::resupply). A weapon
+		// that took ammo stamps its user's ammo tick with the flag clear
+		// (player slot 0x260(now, 0), 0x005f5256): no ability-bar icon or
+		// S_Resupply for the receiver. Retail's only other cue is the
+		// haptics key item_resupply (bf2142haptics.dll).
+		const auto refill = [&](FireArm* weapon, Player* user) {
+			if (!weapon || ammo <= 0 || crate.storage <= 0 || !weapon->resupply(ammo, m_ticks)) {
 				return;
 			}
-			float& owed = crate.owed[weapon];
-			owed += ammo / 100.0f; // per cent of a magazine
 			crate.storage -= ammo;
-			while (owed >= 1) {
-				owed -= 1;
-				if (!weapon->addMagazine()) {
-					owed = 0;
-					crate.storage += ammo; // full: nothing taken
-					break;
-				}
+			if (user) {
+				user->gaveAmmo = false;
+				user->gaveAmmoTick = static_cast<int64_t>(m_ticks);
 			}
 		};
 		const bool soldiers = !t || integer(*t, "workOnSoldiers", 1) != 0;
@@ -917,9 +931,9 @@ void GameWorld::stepCrates(float seconds)
 				continue;
 			}
 			mend(target.object, soldier->objectTemplate());
-			refill(target.weapon.get());
+			refill(target.weapon.get(), &target);
 			for (Player::Carried& carried : target.carried) {
-				refill(carried.weapon.get());
+				refill(carried.weapon.get(), &target);
 			}
 		}
 		if (t && integer(*t, "workOnVehicles", 0) != 0) {
@@ -955,9 +969,11 @@ void GameWorld::stepCrates(float seconds)
 				}
 				mend(body.object, vt);
 				for (size_t g = 0; g < body.guns.size(); ++g) {
-					refill(body.guns[g].weapon.get());
+					// guns[g] is seat g's
+					Player* user = g < body.occupants.size() ? findPlayer(body.occupants[g]) : nullptr;
+					refill(body.guns[g].weapon.get(), user);
 					for (Body::Arm& arm : body.guns[g].arms) {
-						refill(arm.weapon.get());
+						refill(arm.weapon.get(), user);
 					}
 				}
 			}

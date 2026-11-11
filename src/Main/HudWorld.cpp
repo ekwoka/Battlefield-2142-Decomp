@@ -616,6 +616,22 @@ HudWorld::Weapon RemoteHudWorld::seatGroupWeapon(int group) const
 	return w;
 }
 
+// The drones' pulses, with what the local player's minimap lists as
+// spotted (radio spots, the squad's reports) when it is his team's.
+std::vector<int> LocalHudWorld::revealedPlayers(int team) const
+{
+	std::vector<int> out = m_round.revealedPlayers(team);
+	game::GameWorld::PlayerInfo me;
+	if (m_round.playerInfo(m_round.localPlayer(), me) && me.team == team) {
+		for (const int id : m_round.mapSpottedPlayers(me.id)) {
+			if (std::find(out.begin(), out.end(), id) == out.end()) {
+				out.push_back(id);
+			}
+		}
+	}
+	return out;
+}
+
 std::vector<int> RemoteHudWorld::revealedPlayers(int) const
 {
 	return m_world.radarPlayers();

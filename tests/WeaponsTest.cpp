@@ -110,6 +110,104 @@ TEST(Weapons_FireRateAndReload)
 	CHECK(shots > 4 && arm.magsLeft() == 4);
 }
 
+// A SupplyObject's refill (the ammo's slot 0xa8, 0x005f5110 -> 0x005f4ef0)
+// gives refillAmmoSpeed x 0.2 per cent of the whole load each 0.2 s update:
+// nrOfMags magazines as spares, or magSize rounds into the magazine with
+// nrOfMags 1 or -1. A whole one comes once the kept fraction is above 1;
+// the fraction is dropped after more than 30 ticks without a refill. The
+// values are the shipped gunships' (as_ag / us_ag in both mods: pilot
+// rockets 10 x 6, guided missiles 1 x 8, cannon -1 x -1) and the helipad
+// dummy's refillAmmoSpeed 12.
+TEST(Weapons_ResupplyGivesAShareOfTheWholeLoad)
+{
+	const float percent = 12 * 0.2f;
+	const auto spend = [](game::FireArm& gun, int mags) {
+		for (int m = 0; m < mags; ++m) {
+			for (int i = 0; i < 300 && gun.roundsInMag() > 0; ++i) {
+				gun.tick(1 / 30.0f, i % 2 == 0);
+			}
+			CHECK(gun.startReload());
+			for (int i = 0; i < 30 && gun.reloading(); ++i) {
+				gun.tick(1 / 30.0f, false);
+			}
+		}
+	};
+	game::FireArmSettings rockets;
+	rockets.magSize = 10;
+	rockets.nrOfMags = 6;
+	rockets.reloadTime = 0.1f;
+	game::FireArm pilot(rockets);
+	CHECK(!pilot.resupply(percent, 100)); // full: nothing taken
+	spend(pilot, 6);
+	CHECK(pilot.magsLeft() == 0 && pilot.roundsInMag() == 10);
+	uint32_t now = 1000;
+	// 6 x 2.4 % = 0.144 of a magazine an update: the first after 7 updates
+	// (1.4 s; one magazine's 2.4 % would take 42, 8.3 s).
+	for (int update = 1; update <= 42; ++update) {
+		CHECK(pilot.resupply(percent, now += 6));
+		if (update == 6) {
+			CHECK(pilot.magsLeft() == 0);
+		} else if (update == 7) {
+			CHECK(pilot.magsLeft() == 1);
+		}
+	}
+	CHECK(pilot.magsLeft() == 6 && pilot.roundsInMag() == 10);
+	CHECK(!pilot.resupply(percent, now += 6));
+
+	// The fraction lives 30 ticks: a gap of 30 keeps it, 31 drops it.
+	for (const uint32_t gap : {30u, 31u}) {
+		game::FireArm again(rockets);
+		spend(again, 1);
+		now = 5000;
+		for (int update = 0; update < 6; ++update) {
+			again.resupply(percent, now += 6); // 0.864 kept
+		}
+		CHECK(again.magsLeft() == 5);
+		again.resupply(percent, now += gap);
+		CHECK(again.magsLeft() == (gap == 30 ? 6 : 5));
+	}
+
+	// Guided missiles: 8 x 2.4 % = 0.192 a missile an update.
+	game::FireArmSettings guided;
+	guided.magSize = 1;
+	guided.nrOfMags = 8;
+	guided.reloadTime = 0.1f;
+	game::FireArm gunner(guided);
+	spend(gunner, 3);
+	CHECK(gunner.magsLeft() == 5);
+	now = 9000;
+	for (int update = 1; update <= 6; ++update) {
+		gunner.resupply(percent, now += 6);
+		CHECK(gunner.magsLeft() == (update < 6 ? 5 : 6));
+	}
+
+	// One magazine: rounds into it, a part-spent one included (10 x 2.4 %).
+	game::FireArmSettings single = rockets;
+	single.nrOfMags = 1;
+	game::FireArm one(single);
+	for (int i = 0; i < 300 && one.roundsInMag() > 6; ++i) {
+		one.tick(1 / 30.0f, i % 2 == 0);
+	}
+	CHECK(one.roundsInMag() == 6 && one.magsLeft() == 1);
+	now = 12000;
+	for (int update = 1; update <= 5; ++update) {
+		CHECK(one.resupply(percent, now += 6));
+		CHECK(one.roundsInMag() == (update < 5 ? 6 : 7)); // 1.2 after 5
+	}
+	for (int update = 0; update < 20; ++update) {
+		one.resupply(percent, now += 6);
+	}
+	CHECK(one.roundsInMag() == 10 && one.magsLeft() == 1);
+	CHECK(!one.resupply(percent, now += 6));
+
+	// magSize -1 (the cannons): never takes ammo.
+	game::FireArmSettings cannon;
+	cannon.magSize = -1;
+	cannon.nrOfMags = -1;
+	game::FireArm unlimited(cannon);
+	CHECK(!unlimited.resupply(percent, 100));
+}
+
 // Without ammo.autoReload (the rifles, handguns and launchers) an empty
 // magazine stays empty (0x005f45e0 sets +0x44 only with autoReload): each
 // press clicks (0x005c2ee0 -> 0x005dc160) until c_PIReload starts the

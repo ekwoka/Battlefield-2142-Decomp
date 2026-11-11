@@ -33,6 +33,11 @@ int branchOf(const std::string& value)
 
 std::string orEmpty(const std::string& path) { return path.empty() ? std::string(kEmpty) : path; }
 
+// The kit template's main-weapon itemIndex (+0x2c8, 3 from its constructor
+// 0x005700e9): 0x00798dd0 puts the items with it in the main weapon area.
+// shortcut: its +0x2cc (4) case, gated by 0x0056f410, isn't ported; no shipped unlock has itemIndex 4.
+constexpr int kMainWeaponIndex = 3;
+
 } // namespace
 
 KitMenu::KitMenu(game::GameWorld& round, game::GameLogic& logic, world::ObjectTemplateManager& templates, hud::HudManager& hud)
@@ -41,6 +46,11 @@ KitMenu::KitMenu(game::GameWorld& round, game::GameLogic& logic, world::ObjectTe
 	for (auto& kit : m_chosen) {
 		kit.fill(-1);
 	}
+}
+
+bool KitMenu::mainWeapon(const std::string& itemTemplate) const
+{
+	return std::atoi(setting(itemTemplate, "itemIndex").c_str()) == kMainWeaponIndex;
 }
 
 std::string KitMenu::setting(const std::string& templateName, const std::string& key) const
@@ -74,10 +84,10 @@ void KitMenu::bind(Console& console)
 	bindMethod(console, "KitInterface.setHeavyArmor", any, [this](int heavy) { setHeavyArmor(heavy != 0); });
 	// UnlockInterface (0x007b8e60-0x007b9a20): without field-unlock points
 	// (offline) the screen doesn't open and nothing is spent.
-	bindMethod(console, "UnlockInterface.showUnlockInterface", any, [this](int show) {
-		if (!show && m_customOpen) {
-			closeCustomInterface(); // 0x007b95a0's second case
-		}
+	bindMethod(console, "UnlockInterface.showUnlockInterface", any, [this](int) {
+		// Hiding field unlocks must leave customization open: the shipped
+		// top tab opens it first, then sends showUnlockInterface 0.
+		// Map/close buttons explicitly call closeCustomInterface themselves.
 		m_hud.set("UnlocksShow", 0);
 		m_hud.set("UnlockInfoShow", 0);
 	});
@@ -179,10 +189,11 @@ void KitMenu::build(int team)
 			continue;
 		}
 		if (t->typeName() != "ItemContainer") {
-			// Row 0: the kit's own weapon in the primary slot (the one with a weaponIcon).
-			if (!m_grid[0][0].present && !setting(child.name, "weaponHud.weaponIcon").empty()) {
-				fill(m_grid[0][0], child.name);
-				m_grid[0][0].available = true;
+			// Row 0: the kit's own main weapon, by its itemIndex.
+			const auto free = std::find_if(m_grid[0].begin(), m_grid[0].end(), [](const Item& i) { return !i.present; });
+			if (free != m_grid[0].end() && mainWeapon(child.name)) {
+				fill(*free, child.name);
+				free->available = true;
 			}
 			continue;
 		}
@@ -193,7 +204,7 @@ void KitMenu::build(int team)
 		const std::string& unlockItem = t->children().front().name;
 		const int branch = branchOf(setting(child.name, "unlockBranch"));
 		Item* slot = nullptr;
-		if (!setting(unlockItem, "weaponHud.weaponIcon").empty()) {
+		if (mainWeapon(unlockItem)) {
 			// A primary weapon unlock (the HAR/LAR rifle...): the main weapon
 			// area's next slot, which the HUD lays out after the kit's own
 			// weapon (Kit0Item1...), not a place in its branch.
@@ -210,7 +221,7 @@ void KitMenu::build(int team)
 				const int otherLevel = std::atoi(setting(other.name, "unlockLevel").c_str());
 				if (o && o->typeName() == "ItemContainer" && !o->children().empty() && otherLevel < level
 					&& branchOf(setting(other.name, "unlockBranch")) == branch
-					&& !setting(o->children().front().name, "weaponHud.weaponIcon").empty()) {
+					&& mainWeapon(o->children().front().name)) {
 					--index;
 				}
 			}
@@ -266,6 +277,8 @@ void KitMenu::update(int team)
 		m_hud.setString("KitIcon" + n + "Path", orEmpty(setting(kitName, "vehicleHud.vehicleIcon")));
 		std::string weaponIcon, altIcon;
 		int unlockLevels = 0;
+		int primaryIndex = 1;
+		std::string chosenWeaponIcon;
 		for (const world::ChildTemplate& child : kit->children()) {
 			const world::ObjectTemplate* t = m_templates.find(child.name);
 			if (!t) {
@@ -273,6 +286,13 @@ void KitMenu::update(int team)
 			}
 			if (t->typeName() == "ItemContainer") {
 				const int level = std::atoi(setting(child.name, "unlockLevel").c_str());
+				if (level >= 0 && level < kItems && !t->children().empty() && mainWeapon(t->children().front().name)) {
+					if (m_chosen[static_cast<size_t>(i)][0] == primaryIndex
+						&& (m_allUnlocked || std::find(m_unlocked.begin(), m_unlocked.end(), child.name) != m_unlocked.end())) {
+						chosenWeaponIcon = setting(t->children().front().name, "weaponHud.weaponIcon");
+					}
+					++primaryIndex;
+				}
 				if (branchOf(setting(child.name, "unlockBranch")) == 0 && level < kItems) {
 					unlockLevels = std::max(unlockLevels, level);
 					// 0x0044a3f0: the first branch's unlock in the primary slot.
@@ -280,11 +300,11 @@ void KitMenu::update(int team)
 						altIcon = setting(t->children().front().name, "weaponHud.altWeaponIcon");
 					}
 				}
-			} else if (weaponIcon.empty()) {
+			} else if (weaponIcon.empty() && mainWeapon(child.name)) {
 				weaponIcon = setting(child.name, "weaponHud.weaponIcon");
 			}
 		}
-		m_hud.setString("KitWeaponIcon" + n + "Path", orEmpty(weaponIcon));
+		m_hud.setString("KitWeaponIcon" + n + "Path", orEmpty(chosenWeaponIcon.empty() ? weaponIcon : chosenWeaponIcon));
 		m_hud.set("KitUnlock" + n + "Show", unlockLevels >= 1 ? 1 : 0);
 		m_hud.setString("KitAltWeaponIcon" + n + "Path", orEmpty(altIcon));
 		m_hud.set("KitUnlockArrow" + n + "Show", 0); // no field unlock to take
@@ -320,8 +340,11 @@ void KitMenu::update(int team)
 	m_hud.set("FUBlinkAlpha", 0);
 	m_hud.set("UnlockBlinkAlpha", 0);
 	// 0x007975e0: the soldier picture by team, kit and armour.
+	// Use the matching DDS canvases for both armours. Requesting .tga
+	// finds vanilla's cropped light portrait before trying the mod's DDS;
+	// heavy portraits only have DDS, so toggling armour changed framing.
 	m_hud.setString("CustomSoldierPicture", "Ingame/Customization/soldiers/Soldier_" + std::to_string(std::max(0, team - 1))
-			+ std::to_string(m_kit) + (m_heavy ? "1" : "") + ".tga");
+			+ std::to_string(m_kit) + (m_heavy ? "1" : "") + ".dds");
 	m_hud.setString("OpenCloseKitCustomString",
 		text(m_customOpen ? "HUD_TEXT_MENU_UNLOCK_CLOSE" : "HUD_TEXT_MENU_UNLOCK_OPEN"));
 	// The unlock screen's branches (0x0044a130): the level reached, the

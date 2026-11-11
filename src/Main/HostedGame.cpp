@@ -1498,12 +1498,15 @@ void HostedGame::spotted(const net::SpottedInfo& from, int reporter)
 	spot.team = me.team;
 
 	if (spot.message == 0x2e) {
+		// The round takes the spot; sendRadioSpots hands it out with the
+		// enemy's object, as each client's crosshair would have named it.
 		const int enemy = spot.spotted ? playerOfGhost(spot.spotted) : -1;
 		if (enemy >= 0) {
-			m_round->reportBattlefieldObjects(reporter, {enemy});
+			m_round->radioSpot(reporter, enemy, spot.value);
 		} else {
 			m_round->spotCrosshair(reporter);
 		}
+		return;
 	}
 	const std::string payload = net::spottedPayload(spot);
 	for (const auto& p : m_round->playerList()) {
@@ -1519,6 +1522,38 @@ void HostedGame::spotted(const net::SpottedInfo& from, int reporter)
 		}
 		if (!remote && p.id == m_round->localPlayer() && onSpotted) {
 			onSpotted(spot);
+		}
+	}
+}
+
+// The round's radio spots (players' and bots', GameWorld::radioSpot) as
+// 0x0050e910 hands out the Spotted event: message 2/0x2e with the
+// reporter's soldier, the spotted object (the vehicle the enemy rides, else
+// his soldier) and the value to each client of the reporter's team, whose
+// minimap lists the object for 12 s (RemoteWorld). The host's own map has
+// the round's list.
+void HostedGame::sendRadioSpots()
+{
+	for (const game::GameWorld::RadioSpot& s : m_round->takeRadioSpots()) {
+		game::GameWorld::PlayerInfo from, enemy;
+		if (!m_round->playerInfo(s.reporter, from) || !m_round->playerInfo(s.enemy, enemy)) {
+			continue;
+		}
+		net::SpottedInfo spot;
+		spot.spotter = from.soldier ? ghostOfObject(from.soldier) : 0;
+		spot.spotted = ghostOfObject(enemy.vehicle ? enemy.vehicle : enemy.soldier);
+		spot.team = from.team;
+		spot.value = s.value;
+		spot.message = 0x2e;
+		if (!spot.spotted) {
+			continue;
+		}
+		const net::GameEvent e = net::makePostRemote(2, spot.message, net::spottedPayload(spot));
+		for (const auto& [id, client] : m_clients) {
+			game::GameWorld::PlayerInfo p;
+			if (client.stage == Client::Stage::Playing && m_round->playerInfo(client.player, p) && p.team == from.team) {
+				sendTo(id, e);
+			}
 		}
 	}
 }
@@ -3187,6 +3222,7 @@ void HostedGame::tick()
 	trackObjects();
 	trackProjectiles();
 	sendBattlefieldReports();
+	sendRadioSpots();
 	trackPlayers();
 	trackSpawnGroups();
 	trackRequests();

@@ -12418,10 +12418,15 @@ changes (0x100966c0 → 0x10095fc0).
     last waypoint (the start for the first) to the link into the cluster
     two steps on along the cluster path (0x10092250: links[firstLink +
     entry], its position and polygon), or the goal when there is none.
-    The search may enter only the start's cluster, the cluster path's next
-    three from the cursor and the segment goal's cluster (vslot 0xb4: the
-    successors 0x100bcbb0 refuse any other); a trip of 100 m or less only
-    the start's and the goal's clusters. Each node becomes a waypoint
+    The segment code builds a set of the start's cluster, the cluster
+    path's next three from the cursor and the segment goal's cluster and
+    hands it to the search space (vslot 0xb4, 0x100406e0, at 0x10096514;
+    the successors refuse polygons outside it at 0x100bcc9d), but starting
+    the search (vslot 0x20 -> 0x10041800) resets the space first
+    (0x100418cd -> 0x100415f0 -> 0x1003e6c0 -> 0x100bc170), which clears
+    that pointer (0x100bc1df) before the first expansion: the search runs
+    over the whole mesh (emulated in work/suez-stall: only those two writes
+    touch it). Each node becomes a waypoint
     (0x10095b20, the first replacing the last one kept), the goal on the
     last segment; then the string-pull, the look-ahead twice and the
     cursor on. While the cluster path goes on (0x10095720) the waypoints
@@ -12430,10 +12435,7 @@ changes (0x100966c0 → 0x10095fc0).
     3-D, 0x10093e50) is 30 m or more and over ten waypoints are ahead,
     unless the current waypoint's cluster is the cursor's index or its
     cluster (a mix-up kept). The rewrite searches a segment a tick (the
-    original's are time-sliced), and where a segment's search fails it
-    searches the whole mesh: the original fails the move, which measured
-    on random 20–100 m trips (clusters 7–26 m) fails 312 of 321 on
-    Cerbere, 351 of 393 on Camp Gibraltar and 255 of 397 on Minsk.
+    original's are time-sliced); a failed search fails the move.
 - **String-pull** (0x10093610), twice, for waypoints 5 m or more from the
   bot: where the line from the previous waypoint to the next crosses the
   portal, kept max(1, 0.8 radius) (at most half the portal) from its ends.
@@ -12559,6 +12561,17 @@ changes (0x100966c0 → 0x10095fc0).
     the driver backs (9/11) and comes on again. No step of the binary's
     that would let its driver through there was found (the rays, the
     machines and the follower were compared).
+  - **The drivers' list of other objects** (the follower's `+0x64`, unit
+    vt+0xf0 → `+0xd8`; read by 0x100fbff0, 0x100fc660 and 0x100fbdb0):
+    filled by 0x10094df0 in the manager's round-robin refresh (0x100c6dbe)
+    from the information environment's 50 m sphere round the bot (slot
+    0x20, grids vt+0xd4(1) and (0)) through the filter 0x10092780: primary
+    objects (0x100a8c60) with a Mobile part (`+0x3c`, made only for the
+    Mobile plug-in, 0x1003ba6e), or ITObstacle ones (`+8` bit 13). The
+    stationary guns (STATIC_AA_AI, the static AV) are neither, so drivers
+    don't go round the Suez bridge locks' AA on the walkways over the road
+    (`BotManager::driversSee`). Not rewritten: the 50 m radius and the
+    refresh turn (the rewrite's list is taken each tick).
   - **Other vehicles** (0x100fbff0): the one in the way (within the
     forward speed + max(r, 5) + both radii, the forward line crossing its
     sphere) is passed in state 6 on a side chosen by the room beside it
@@ -12576,13 +12589,29 @@ changes (0x100966c0 → 0x10095fc0).
     5 s (20 s when that soldier is a bot, player slot `0x84`): a vehicle
     with ITHasCarHorn (the FAVs' `Car_horn`) holds PIFire for 2 s
     (`0x100a5cf0` lets go); any other sends the radio request
-    (`AIDLL 0x100a5990`: 0xb, 6, 3), which the rewrite's bots don't have. Not
-    rewritten: the other driver being told (its +0x28 calls).
+    (`AIDLL 0x100a5990`: 0xb, 6, 3), which the rewrite's bots don't have.
+  - **Avoiding** (the side flipped): the machines (car 0x100e9571..0x100e9593,
+    tank 0x100dfcfc, mech 0x100e3225) give way to driving on (the obstacle
+    states 4/5/6/13/14 → 0), except round a vehicle a human drives: no bot
+    controls it (bot manager slot 0x14, 0x100c79a0: the map of each bot's
+    controlled object's adaptor, filled by slot 0x2c from 0x10098200,
+    BF2142.exe 0x008a50d0) and its root PlayerControlObject is in use by a
+    player (Unit slot 0x44, 0x008a1b30 → interface 0xc4c5 slots 0x18 / 0x10).
+    Then that tick's copy of the flag is clear (cases 2 and 3 and the default
+    read it; the flag stays). They also switch the avoided object's physics
+    node back on (Physical plug-in slot 0x70(1) and (2), 0x008a3ff0: node
+    `+0xc`, for the adaptor's team `+0x10`); nothing turns a vehicle's off,
+    so it isn't rewritten. Neither is a message to the other driver.
   - **Car** (0x100e9d40): the error mirrored when moving against the
-    direction wanted; turn = 3 × yawScale × error − turn rate; the target
-    speed lowered on a tilt and capped (keeping the cap's sign); throttle =
-    target / 15 + min(1, (target − speed) / 3). Full throttle when off the
-    line (under 1.5 m/s).
+    direction wanted; turn = 3 × yawScale × error − turn rate, the turn rate
+    the object's world angular velocity's y (Mobile part slot 0x20, 0x100ab490
+    → Mobile plug-in slot 0x1c, 0x008a1870 → the object's slot 0x68; read at
+    0x100e9f68; the hover tank's controller 0x100de382 and RunOver through
+    this controller read the same); the target speed lowered on a tilt and
+    capped (keeping the cap's sign); throttle = target / 15 + min(1, (target
+    − |v_xz| × motion) / 3), the horizontal speed (0x100e9dc5..0x100e9dda,
+    0x100ea080). Full throttle when off the line (|v_xz| under 1.5 m/s,
+    0x100ea123).
   - **Car** sprints (PISprint, input 13) at full throttle over 0.8
     maxSpeed.
   - **Tank** (machine 0x100de8a0, controller 0x100e0540): the car's
@@ -12863,9 +12892,11 @@ seat at its value × max(0, min(0.5, (R² − 0.8 d²) / R²) + 0.5), × 5 for a
 soldier under a quarter of its health within 20 m. On foot the current
 value is 1.2 × the soldier's own; in a vehicle 2 × the seat's (250 at the
 driver's seat with others aboard), and the way out is the soldier's own
-value, or 10000 for a wreck or a vehicle more than 4 m off the vehicle
-mesh (0x100880e0), a test 0x1006c520 runs only for a bot object that
-isn't ITAir (its flags' bit 1): a pilot stays in the air. A seat another
+value, or 10000 for a wreck or a vehicle that has stood more than 4 s in
+a commander's strike spot (0x100880e0 on the strike manager DAT_1013950c,
+its time since the strike over 4.0; earlier misread here as 4 m off the
+vehicle mesh), a test 0x1006c520 runs only for a bot object that isn't
+ITAir (its flags' bit 1). A seat another
 bot reserved is worth nothing to others, but not to the bot sitting in it
 (the rewrite's reading: a passenger heading for the vehicle would
 otherwise turn its driver out). The other seats' factor (0x1006b910): 1 with the
@@ -13662,8 +13693,9 @@ in `src/AI/NavMesh`:
 - Ported: the parser, point lookup, the polygon and cluster A* with the
   original's costs and heuristics.
 - How the bots combine the two searches is in "Following paths" above
-  (rolling segments of three clusters); `findPath` (tools, tests) keeps
-  a cluster corridor for one polygon search.
+  (rolling segments toward the cluster path's links, each searched over
+  the whole mesh); `findPath` (tools, tests) keeps a cluster corridor for
+  one polygon search.
 
 On minsk_coop's infantry mesh (76,605 polygons, 2,154 clusters), a 639 m
 query gives a continuous 853 m path.

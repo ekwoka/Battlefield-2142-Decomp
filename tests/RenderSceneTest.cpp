@@ -1012,6 +1012,13 @@ TEST(RenderScene_CustomTextureSuffix)
 	// None without a suffix, nor for IGA's "rad_" textures.
 	CHECK(customSuffixedTexturePath("objects/x.dds", "").empty());
 	CHECK(customSuffixedTexturePath("rad_2041100.dds", "HEAT").empty());
+	// 0x10017340: the name as given, then its .dds (the heavy-armour kit
+	// pictures ship only as Soldier_xx1.dds), then the bare stem.
+	CHECK(texturePathCandidates("Ingame/Customization/soldiers/Soldier_021.tga")
+		== std::vector<std::string>({"Ingame/Customization/soldiers/Soldier_021.tga",
+			"Ingame/Customization/soldiers/Soldier_021.dds", "Ingame/Customization/soldiers/Soldier_021"}));
+	CHECK(texturePathCandidates("Common/Textures/x") == std::vector<std::string>({"Common/Textures/x.dds", "Common/Textures/x"}));
+	CHECK(texturePathCandidates("mods/a.b/x") == std::vector<std::string>({"mods/a.b/x.dds", "mods/a.b/x"}));
 }
 
 TEST(RenderScene_RoadStaticMeshTechniques)
@@ -1039,4 +1046,41 @@ TEST(Render_HudUsesMemeBlendFactors)
 	CHECK(render::hudBlendToD3D(2) == 2); // additive destination remains ONE
 	CHECK(render::hudBlendToD3D(5) == 9);
 	CHECK(render::hudBlendToD3D(9) == 7);
+}
+
+TEST(RenderScene_MeshLocalTextures)
+{
+	io::FileManager files;
+	const std::string root = "Objects/Weapons/Handheld/EU_Rorsch_Mk_V/";
+	const std::string mesh = root + "Meshes/eu_rorsch_mk_v.bundledmesh";
+	const auto exists = [&](const std::string& p) { return files.exists(p); };
+	files.addMemoryFile(root + "Textures/rifle_01_c.dds", {1});
+	files.addMemoryFile(root + "Textures/rifle_01_b.dds", {2});
+	CHECK(render::meshTexturePath("rifle_01_c.dds", mesh, exists) == root + "Textures/rifle_01_c.dds");
+	CHECK(render::meshTexturePath("rifle_01_b.dds", mesh, exists) == root + "Textures/rifle_01_b.dds");
+	CHECK(render::meshTexturePath("Common/Textures/x.dds", mesh, exists) == "Common/Textures/x.dds");
+	CHECK(render::meshTexturePath("missing.dds", mesh, exists) == "missing.dds");
+	files.addMemoryFile("rifle_01_c.dds", {3});
+	CHECK(render::meshTexturePath("rifle_01_c.dds", mesh, exists) == "rifle_01_c.dds");
+
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	io::FileManager shipped;
+	shipped.setRootPath(gameDir);
+	CHECK(shipped.mountArchive("mods/Project_Remaster_v17_Final/Objects/Weapons_client.zip", "Objects/Weapons"));
+	std::vector<uint8_t> data;
+	CHECK(shipped.readFile(mesh, data));
+	const auto parsed = geom::parseMesh(data, geom::MeshKind::Bundled);
+	CHECK(parsed.has_value());
+	int localMaps = 0;
+	for (const auto& geometry : parsed->geometries) for (const auto& lod : geometry.lods)
+		for (const auto& material : lod.materials) for (const auto& path : material.maps) {
+			if (path.find_first_of("/\\") != std::string::npos) continue;
+			const auto resolved = render::meshTexturePath(path, mesh,
+				[&](const std::string& p) { return shipped.exists(p); });
+			CHECK(resolved != path);
+			CHECK(shipped.readFile(resolved, data));
+			++localMaps;
+		}
+	CHECK(localMaps > 20);
 }

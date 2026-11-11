@@ -123,6 +123,12 @@ void GameAudio::interior(const game::GameWorld::PlayerInfo& me, bool firstPerson
 			if (seat >= 0 && static_cast<size_t>(seat) < seats.size()) {
 				m_interior.pco = seats[static_cast<size_t>(seat)].name;
 			}
+			// Pods are Parachute control objects, outside the ordinary vehicle layout.
+			if (m_interior.pco.empty()) {
+				const auto* root = m_objects.find(vehicle);
+				if (root && root->objectTemplate() && root->objectTemplate()->typeName() == "Parachute")
+					m_interior.pco = root->objectTemplate()->name();
+			}
 			const world::ObjectTemplate* t = m_templates.find(m_interior.pco);
 			if (t) {
 				m_interior.obstruction = number(*t, "listenerObstruction", 0);
@@ -132,8 +138,18 @@ void GameAudio::interior(const game::GameWorld::PlayerInfo& me, bool firstPerson
 				const world::ObjectTemplate& rt = *root->objectTemplate();
 				m_interior.maxHitPoints = number(rt, "armor.maxHitPoints", number(rt, "armor.hitPoints", 0));
 			}
-			const auto make = [&](const char* event) -> sound::ISound* {
-				const std::string name = "S_" + m_interior.pco + event;
+			const auto resolve = [&](const char* event) {
+				// Variants such as eu_pod0 share the base pod's authored sounds.
+				if (t) for (const auto& child : t->children()) {
+					if (child.name.size() >= std::strlen(event)
+						&& child.name.compare(child.name.size() - std::strlen(event), std::strlen(event), event) == 0
+						&& m_manager.hasSound(child.name)) return child.name;
+				}
+				return "S_" + m_interior.pco + event;
+			};
+			m_interior.ambientName = resolve("_Ambient");
+			m_interior.damagedName = resolve("_AmbientDamaged");
+			const auto make = [&](const std::string& name) -> sound::ISound* {
 				sound::ISoundTemplate* st = m_manager.hasSound(name) ? m_manager.soundTemplate(name) : nullptr;
 				sound::ISound* sound = st ? st->createSound() : nullptr;
 				if (sound) {
@@ -141,8 +157,8 @@ void GameAudio::interior(const game::GameWorld::PlayerInfo& me, bool firstPerson
 				}
 				return sound;
 			};
-			m_interior.ambient = make("_Ambient");
-			m_interior.damaged = make("_AmbientDamaged");
+			m_interior.ambient = make(m_interior.ambientName);
+			m_interior.damaged = make(m_interior.damagedName);
 		}
 	}
 	m_listenerState.seat = m_interior.pco;
@@ -154,12 +170,12 @@ void GameAudio::interior(const game::GameWorld::PlayerInfo& me, bool firstPerson
 	}
 	m_interior.speedInput = std::clamp((std::sqrt(physics::lengthSquared(me.velocity)) - 0.1f) * 0.033333335f, 0.0f, 1.0f);
 	bool damaged = false;
-	if (m_interior.maxHitPoints > 0 && m_manager.hasSound("S_" + m_interior.pco + "_AmbientDamaged")) {
+	if (m_interior.maxHitPoints > 0 && m_manager.hasSound(m_interior.damagedName)) {
 		const float hp = m_round.hitPoints(vehicle);
 		damaged = hp >= 0 && hp < m_interior.maxHitPoints * m_interior.damagedLimit;
 	}
-	const std::string event = damaged ? "_AmbientDamaged" : "_Ambient";
-	m_listenerState.ambient = m_manager.hasSound("S_" + m_interior.pco + event) ? "S_" + m_interior.pco + event : "";
+	const std::string& name = damaged ? m_interior.damagedName : m_interior.ambientName;
+	m_listenerState.ambient = m_manager.hasSound(name) ? name : "";
 	m_manager.setInteriorAmbient(damaged ? m_interior.damaged : m_interior.ambient, m_interior.obstruction);
 }
 

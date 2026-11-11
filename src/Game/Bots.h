@@ -540,6 +540,12 @@ bool sphereInRoomBox(const physics::Vec3& origin, const physics::Vec3& forward, 
 uint32_t clockSeedWord(double seconds);
 
 struct BotSettings {
+	// enhanced.enabled and enhanced.botRecovery (Scene/EnhancedSettings.h),
+	// read live: the stuck-vehicle exit, an addition beyond the original
+	// game. Null or false: none.
+	const bool* enhanced = nullptr;
+	const bool* botRecovery = nullptr;
+	bool stuckRecovery() const { return enhanced && *enhanced && (!botRecovery || *botRecovery); }
 	float skill = 0.4f;   // aiSettings.setBotSkill (0..1)
 	int maxBots = 16;     // aiSettings.setMaxNBots
 	std::vector<std::string> behaviours; // by id (aiSettings.setBehaviour)
@@ -1041,6 +1047,14 @@ private:
 		// back-off spot and when it was last chosen (a repath each second).
 		bool manoeuvre = false;
 		bool chase = false; // the lost target's chase (then forgotten)
+		// The plan was built without its moves (local_9 of 0x100795a0 on its
+		// path from 0x10079dff; firePlanHolds), taken when the plan is built.
+		bool fireHolds = false;
+		// The fire plan stands: 0x1007cf10 hands the bot's plan back while it
+		// is this behaviour's with the same target and weapon, and runs the
+		// builder again otherwise (after any other behaviour's plan).
+		bool firePlanBuilt = false;
+		uint32_t firePlanUnit = 0; // the target's vehicle when it was built (0 on foot)
 		// The guided plan's move on foot (0x10078570's If, not forced, over
 		// MoveToObjectFinding): running until the bot is within its band.
 		bool guidedMove = false;
@@ -1094,6 +1108,8 @@ private:
 		uint32_t abandonedVehicle = 0;
 		float abandonedAt = -1e9f;
 		uint32_t approachExitRequested = 0;
+		uint32_t stuckExit = 0; // enhanced: the vehicle a stuck driver is getting out of
+		bool moveFailed = false; // drive: the move ended without arriving (the follower's no-progress flag)
 		std::map<int, float> rejectedVehiclePoints;
 
 		physics::Vec3 orderPosition;
@@ -1115,8 +1131,6 @@ private:
 		float jumpUntil = -1;        // PIAction held (the follower's jump, 0x10095720 / AIDLL 0x10092bc0)
 		ai::DriveState drive;
 		ai::SidestepState sidestep;  // the move's (0x100ce860 +0x64..+0x80)
-		float lastYaw = 0;           // the vehicle's, for its turn rate
-		float lastYawAt = -1;
 		physics::Vec3 lastVelocity;  // the hover tank's, for its acceleration (FloatingTankMoveTo +0x3c)
 		// Strategic waypoints and areas on the way to the goal (0x10060300).
 		struct Via {
@@ -1426,6 +1440,8 @@ private:
 	// The guided plan's order spot (0x10078570; see Bots.cpp): whether it
 	// walks there while it fights, and the spot.
 	bool guidedOrderSpot(const GameWorld::PlayerInfo& self, physics::Vec3& spot);
+	bool firePlanHolds(const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& target) const;
+	bool driversSee(uint32_t object) const; // on a driver's list of other objects (0x10092780)
 	bool fireKeepsToOrder(const Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& target,
 		physics::Vec3* spot = nullptr) const;
 	// Walks (InfanteryMoveTo) or drives (CarMoveTo/TankMoveTo) along a path
@@ -1527,7 +1543,7 @@ private:
 	// 0x1008a3b0): the AI commander's second artillery target (0x100888d0).
 	std::map<int, float> m_offMesh;
 	void updateStrikeSpots();
-	bool strikeSpotHit(int team, const physics::Vec3& at, int& side) const;
+	bool strikeSpotHit(int team, const physics::Vec3& at, int& side, float* since = nullptr) const;
 	bool escapeStrike(Squad& squad, SquadMember& member, Bot& bot, const GameWorld::PlayerInfo& self, int side);
 	bool onMeshFor(const GameWorld::PlayerInfo& self, const physics::Vec3& at) const;
 	void trackHumans();
@@ -1651,6 +1667,8 @@ private:
 	std::vector<GameWorld::PlayerInfo> m_players;   // as of this update
 	std::vector<GameWorld::VehicleInfo> m_vehicles; // as of this update
 	std::map<int, Bot> m_bots;
+	void refreshFollowers();
+	size_t m_refreshCursor = 0; // the follower refresh's round robin (0x100c6cc0, +0xf4)
 	Side m_sides[3];
 	// Squad tasks (squad member +task, 0x100bf470): bot -> (type, target).
 	std::map<int, std::pair<int, int64_t>> m_tasks;

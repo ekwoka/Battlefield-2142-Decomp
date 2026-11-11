@@ -652,6 +652,7 @@ void SoldierBody::step(float seconds, const Ground& ground, float gravity)
 		m_lastPosition = position; // put there from outside: no motion
 		m_hasLast = true;
 	}
+	const Vec3 start = position;
 	m_onGround = false; // the response's +0xf9 and normal, each tick
 	m_groundNormal = {0, 0, 0};
 	collideWithGround(ground, gravity);
@@ -662,6 +663,10 @@ void SoldierBody::step(float seconds, const Ground& ground, float gravity)
 	integrate(seconds);
 	acceleration.y += gravity * gravityModifier;
 	m_stepEnd = position;
+	if (seconds > 0) {
+		const Vec3 moved = (position - start) * (1.0f / seconds); // x 30 at the 1/30 s tick
+		measuredVelocity = {flush(moved.x), flush(moved.y), flush(moved.z)};
+	}
 }
 
 } // namespace dice::hfe::physics

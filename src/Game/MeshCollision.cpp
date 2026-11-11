@@ -219,6 +219,7 @@ GameWorld::MeshActor GameWorld::actorOf(const StaticPart& part) const
 	a.node = {1, false, true};
 	a.file = shape.file;
 	a.materials = &shape.materials;
+	a.geometry = shape.geometry;
 	return a;
 }
 
@@ -233,17 +234,17 @@ GameWorld::MeshActor GameWorld::actorOf(const StaticPart& part) const
 // shotgun round (projectiles here, not bodies). (With 0, a projectile A
 // against a node whose slot 0x164 holds asks for 2 instead: not followed.)
 const GameWorld::LodFaces* GameWorld::lodFaces(const physics::CollisionMeshFile& file,
-	const std::vector<uint32_t>& materials, int lod)
+	const std::vector<uint32_t>& materials, int lod, size_t geometry)
 {
-	auto& faces = m_lodFaces[{&file, materials, lod}];
+	auto& faces = m_lodFaces[{&file, materials, lod, geometry}];
 	if (faces) {
 		return faces->mesh ? faces.get() : nullptr;
 	}
 	auto made = std::make_shared<LodFaces>();
 	Vec3 low {1e9f, 1e9f, 1e9f}, high {-1e9f, -1e9f, -1e9f};
 	bool any = false;
-	if (!file.geometries.empty()) {
-		for (const physics::CollisionSubGeometry& part : physics::collisionParts(file, 0)) {
+	if (geometry < file.geometries.size()) {
+		for (const physics::CollisionSubGeometry& part : physics::collisionParts(file, geometry)) {
 			if (const physics::CollisionLod* l = physics::collisionLodFor(file, part, static_cast<uint32_t>(lod))) {
 				any = true;
 				low = {std::min(low.x, l->boundsMin[0]), std::min(low.y, l->boundsMin[1]), std::min(low.z, l->boundsMin[2])};
@@ -253,7 +254,7 @@ const GameWorld::LodFaces* GameWorld::lodFaces(const physics::CollisionMeshFile&
 	}
 	if (any) {
 		made->mesh = std::make_shared<physics::CollisionWorld>();
-		made->mesh->addMesh(file, static_cast<physics::CollisionUser>(lod), {}, {}, 0, materials);
+		made->mesh->addGeometry(file, geometry, static_cast<physics::CollisionUser>(lod), {}, {}, 0, materials);
 		made->boxMin = low;
 		made->boxMax = high;
 		made->radius = physics::boxRadius({low.x, low.y, low.z}, {high.x, high.y, high.z});
@@ -267,7 +268,7 @@ bool GameWorld::atLod(MeshActor& actor, int lod)
 	if (lod == 1 || !actor.file || !actor.materials) {
 		return true;
 	}
-	const LodFaces* faces = lodFaces(*actor.file, *actor.materials, lod);
+	const LodFaces* faces = lodFaces(*actor.file, *actor.materials, lod, actor.geometry);
 	if (!faces) {
 		return false;
 	}
@@ -937,20 +938,21 @@ void GameWorld::addStaticPart(StaticPart part)
 // A collision mesh's vehicle LOD in its object's space, shared by the
 // objects that use it with the same materials.
 std::shared_ptr<const GameWorld::MeshShape> GameWorld::meshShape(const physics::CollisionMeshFile& file,
-	const std::vector<uint32_t>& materials)
+	const std::vector<uint32_t>& materials, size_t geometry)
 {
-	auto& shape = m_shapes[{&file, materials}];
+	auto& shape = m_shapes[{&file, materials, geometry}];
 	if (shape) {
 		return shape;
 	}
 	auto made = std::make_shared<MeshShape>();
 	made->file = &file;
 	made->materials = materials;
+	made->geometry = geometry;
 	made->mesh = std::make_shared<physics::CollisionWorld>();
-	made->mesh->addMesh(file, physics::CollisionUser::Vehicle, {}, {}, 0, materials);
+	made->mesh->addGeometry(file, geometry, physics::CollisionUser::Vehicle, {}, {}, 0, materials);
 	Vec3 low {1e9f, 1e9f, 1e9f}, high {-1e9f, -1e9f, -1e9f};
-	if (!file.geometries.empty()) {
-		for (const physics::CollisionSubGeometry& part : physics::collisionParts(file, 0)) {
+	if (geometry < file.geometries.size()) {
+		for (const physics::CollisionSubGeometry& part : physics::collisionParts(file, geometry)) {
 			if (physics::collisionLodFor(file, part, 4)) {
 				made->trunkFromTypeFour = true;
 			}
@@ -976,7 +978,7 @@ std::shared_ptr<const GameWorld::MeshShape> GameWorld::meshShape(const physics::
 	}
 	made->trunk = std::make_shared<physics::CollisionWorld>();
 	if (made->trunkFromTypeFour) {
-		made->trunk->addMesh(file, physics::CollisionUser::Tree, {}, {}, 0, materials);
+		made->trunk->addGeometry(file, geometry, physics::CollisionUser::Tree, {}, {}, 0, materials);
 	} else if (made->hasVehicleLod) {
 		// The trunk line (0x6bc9xx: one face of three vertices) up the LOD
 		// box's middle across x, at z 0: (cx, min y, 0), (cx, max y, 0),

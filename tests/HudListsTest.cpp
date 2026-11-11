@@ -12,6 +12,7 @@
 #include "IO/File/FileManager.h"
 #include "Main/HudMenusChat.h"
 #include "Main/HudMenusKits.h"
+#include "Render/TextureSuffix.h"
 #include "Main/MenuBindings.h"
 #include "Stats/Stats.h"
 #include "UI/Player/Natives.h"
@@ -132,14 +133,19 @@ TEST(HudLists_KitMenu)
 			t->children().push_back({child, {}, {}});
 		}
 	};
-	make("GenericFireArm", "rifle", {{"weaponHud.weaponIcon", "rifle_icon.tga"}, {"weaponHud.unlockIcon", "rifle_unlock.tga"}});
+	make("GenericFireArm", "rifle", {{"itemIndex", "3"}, {"weaponHud.weaponIcon", "rifle_icon.tga"}, {"weaponHud.unlockIcon", "rifle_unlock.tga"}});
+	make("GenericFireArm", "carbine", {{"itemIndex", "3"}, {"weaponHud.weaponIcon", "carbine_icon.tga"}, {"weaponHud.unlockIcon", "carbine.tga"}});
+	// A sidearm unlock has a weaponIcon too, but itemIndex 2: its branch's row.
+	make("GenericFireArm", "smg", {{"itemIndex", "2"}, {"weaponHud.weaponIcon", "smg_icon.tga"}, {"weaponHud.unlockIcon", "smg.tga"}});
 	make("GenericFireArm", "shotgun", {{"weaponHud.unlockIcon", "shotgun.tga"}, {"weaponHud.descrString", "DESC_SHOTGUN"},
 		{"weaponHud.altWeaponIcon", "shotgun_mini.tga"}, {"weaponHud.renderedPicture", "shotgun_big.tga"}});
 	make("GenericFireArm", "defib", {{"weaponHud.unlockIcon", "defib.tga"}});
 	make("ItemContainer", "Light1", {{"unlockLevel", "1"}}, {"shotgun"});
 	make("ItemContainer", "Medic0", {{"unlockLevel", "0"}, {"unlockBranch", "UB_Second"}}, {"defib"});
+	make("ItemContainer", "Leader0", {{"unlockLevel", "0"}, {"unlockBranch", "UB_SquadLeader"}}, {"smg"});
+	make("ItemContainer", "Light3", {{"unlockLevel", "3"}}, {"carbine"});
 	make("Kit", "Assault", {{"vehicleHud.hudName", "\"KIT_ASSAULT\""}, {"vehicleHud.vehicleIcon", "kit.tga"}},
-		{"rifle", "Light1", "Medic0"});
+		{"rifle", "Light1", "Medic0", "Leader0", "Light3"});
 	game::GameWorld round(templates, objects);
 	game::GameLogic logic;
 	logic.team(1).kits.push_back({"Assault", "soldier", "heavy_soldier"});
@@ -157,6 +163,10 @@ TEST(HudLists_KitMenu)
 	CHECK(kits.item(1, 1).present && kits.item(1, 1).available && !kits.item(1, 1).active);
 	CHECK(kits.item(2, 0).present && !kits.item(2, 0).available);
 	CHECK(hud.string("Kit1Item1Icon") == "shotgun.tga" && hud.number("Kit2Item0Alpha") == 0.3f);
+	// 0x00798dd0: itemIndex 3 is the main weapon area (the carbine after the
+	// rifle), the SMG stays in the squad leader row.
+	CHECK(kits.item(0, 1).present && hud.string("Kit0Item1Icon") == "carbine.tga" && !kits.item(0, 2).present);
+	CHECK(kits.item(4, 0).present && hud.string("Kit4Item0Icon") == "smg.tga");
 	// Opening, choosing (a locked one can't be), the information, closing commits.
 	kits.chooseKitSelection(-1, 0);
 	kits.update(1);
@@ -173,8 +183,42 @@ TEST(HudLists_KitMenu)
 	kits.closeCustomInterface();
 	kits.update(1);
 	CHECK(equipped == std::vector<std::string> {"Light1"} && hud.number("CustomInfoShow") == 0);
-	CHECK(hud.string("CustomSoldierPicture") == "Ingame/Customization/soldiers/Soldier_001.tga");
-	CHECK(hud.number("Kit0Branch0UnlockLevel") == 0.25f && hud.number("Kit0Branch0MaxUnlockLevel") == 0.125f);
+	CHECK(hud.string("CustomSoldierPicture") == "Ingame/Customization/soldiers/Soldier_001.dds");
+	CHECK(hud.number("Kit0Branch0UnlockLevel") == 0.25f && hud.number("Kit0Branch0MaxUnlockLevel") == 0.25f);
+	kits.skipUnchanged = true;
+	kits.setUnlocked({}, true);
+	kits.update(1);
+	kits.chooseKitCustom(0, 1);
+	kits.update(1);
+	CHECK(hud.string("KitWeaponIcon0Path") == "carbine_icon.tga");
+	kits.commit();
+	kits.update(1);
+	CHECK(hud.string("KitWeaponIcon0Path") == "carbine_icon.tga");
+	kits.chooseKitCustom(0, 0);
+	kits.update(1);
+	CHECK(hud.string("KitWeaponIcon0Path") == "rifle_icon.tga");
+	// Shipped top tab order: open customization, then hide field unlocks.
+	// The per-kit button hides field unlocks first, then opens customization.
+	Console kitConsole;
+	kits.bind(kitConsole);
+	std::string commandOutput;
+	for (int cycle = 0; cycle < 2; ++cycle) {
+		CHECK(kitConsole.execute("kitInterface.closeCustomInterface 1", commandOutput) == ConsoleResult::Ok);
+		CHECK(!kits.customOpen());
+		CHECK(kitConsole.execute("kitInterface.chooseKitSelection -1 0", commandOutput) == ConsoleResult::Ok);
+		CHECK(kitConsole.execute("unlockInterface.showUnlockInterface 0", commandOutput) == ConsoleResult::Ok);
+		kits.update(1);
+		CHECK(kits.customOpen() && hud.number("CustomInfoShow") == 1);
+	}
+	CHECK(kitConsole.execute("kitInterface.closeCustomInterface 1", commandOutput) == ConsoleResult::Ok);
+	CHECK(kitConsole.execute("unlockInterface.showUnlockInterface 0", commandOutput) == ConsoleResult::Ok);
+	kits.update(1);
+	CHECK(!kits.customOpen() && hud.number("CustomInfoShow") == 0);
+	CHECK(kitConsole.execute("unlockInterface.showUnlockInterface 0", commandOutput) == ConsoleResult::Ok);
+	CHECK(kitConsole.execute("kitInterface.chooseKitSelection -1 1", commandOutput) == ConsoleResult::Ok);
+	kits.update(1);
+	CHECK(kits.customOpen() && hud.number("CustomInfoShow") == 1);
+
 }
 
 TEST(HudLists_Awards)
@@ -324,6 +368,52 @@ static void checkShippedKitGrid(const char* gameDir, const char* modPath)
 			if (kit == 1) {
 				CHECK(primaries == (std::string(modPath) == "mods/bf2142" ? 3 : 5));
 			}
+			// Selecting each shipped primary updates the deployment card, including
+			// Remaster's Engineer replacements, and survives leaving the kit.
+			for (int index = 1; index < primaries; ++index) {
+				const auto* container = templates.find(kits.item(0, index).container);
+				CHECK(container && !container->children().empty());
+				if (!container || container->children().empty()) { continue; }
+				const auto* weapon = templates.find(container->children().front().name);
+				CHECK(weapon);
+				if (!weapon) { continue; }
+				const auto icon = weapon->settings().find("weaponHud.weaponIcon");
+				CHECK(icon != weapon->settings().end());
+				if (icon == weapon->settings().end()) { continue; }
+				kits.chooseKitCustom(0, index);
+				kits.update(team);
+				CHECK(hud.string("KitWeaponIcon" + std::to_string(kit) + "Path") == icon->second);
+				kits.setKit((kit + 1) % 4);
+				kits.update(team);
+				CHECK(hud.string("KitWeaponIcon" + std::to_string(kit) + "Path") == icon->second);
+				kits.setKit(kit);
+				kits.update(team);
+				kits.chooseKitCustom(0, 0);
+				kits.update(team);
+			}
+			// Both armours use the active mod's matching DDS canvases, rather
+			// than mixing a cropped vanilla light TGA with a heavy DDS.
+			for (bool heavy : {false, true}) {
+				kits.setHeavyArmor(heavy);
+				kits.update(team);
+				const std::string portrait = "Menu/HUD/Texture/" + hud.string("CustomSoldierPicture");
+				CHECK(portrait.substr(portrait.size() - 4) == ".dds");
+				std::vector<uint8_t> portraitData;
+				CHECK(files.readFile(portrait, portraitData));
+				CHECK(portraitData.size() >= 20);
+				if (portraitData.size() >= 20) {
+					CHECK(std::string(portraitData.begin(), portraitData.begin() + 4) == "DDS ");
+					const auto dimension = [&](size_t offset) {
+						return unsigned(portraitData[offset]) | (unsigned(portraitData[offset + 1]) << 8)
+							| (unsigned(portraitData[offset + 2]) << 16) | (unsigned(portraitData[offset + 3]) << 24);
+					};
+					const unsigned scale = std::string(modPath) == "mods/bf2142" ? 1 : 2;
+					CHECK(dimension(12) == 512 * scale && dimension(16) == 128 * scale);
+				}
+				const auto names = render::texturePathCandidates(portrait);
+				CHECK(std::any_of(names.begin(), names.end(), [&files](const std::string& n) { return files.exists(n); }));
+			}
+			kits.setHeavyArmor(false);
 			CHECK(shown >= 8 && icons == shown && missing == 0);
 		}
 	}

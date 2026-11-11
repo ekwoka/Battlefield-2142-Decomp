@@ -10,6 +10,7 @@
 #include "BfOpenAL.h"
 #include "SoundMath.h"
 
+#include <algorithm>
 #include <vector>
 
 namespace dice::hfe::sound {
@@ -28,6 +29,14 @@ public:
 	virtual ~IEnhancedOcclusion() = default;
 	virtual void simulate(const Vec3& listener, std::vector<EnhancedSource>& sources) = 0;
 };
+
+// A source's filter moves towards the occlusion's answer by at most 0.1 an
+// update, as retail's obstruction does (OpenALSample::computeOcclusionGain),
+// so walking past a corner fades instead of switching.
+inline float enhancedSmoothed(float current, float target)
+{
+	return current + std::max(-0.1f, std::min(0.1f, target - current));
+}
 
 // Read when the provider opens (main.cpp sets it from enhanced.enabled).
 void setEnhancedAudio(bool enabled);

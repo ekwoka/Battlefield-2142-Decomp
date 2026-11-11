@@ -20,8 +20,48 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace dice::hfe::render {
+
+// The names a texture load tries in turn (RendDX9 0x10017340, from the 2D
+// load 0x10017f20): a name with an extension as given, then, where that file
+// is missing, its stem with ".dds" and the bare stem (the table 0x101f486c);
+// a name without one, ".dds" first. So a HUD's "Soldier_021.tga" that only
+// ships as Soldier_021.dds still loads.
+inline std::vector<std::string> texturePathCandidates(const std::string& path)
+{
+	const size_t dot = path.rfind('.');
+	if (dot == std::string::npos || path.find_first_of("/\\", dot) != std::string::npos) {
+		return {path + ".dds", path};
+	}
+	const std::string stem = path.substr(0, dot);
+	return {path, stem + ".dds", stem};
+}
+
+// Some mod meshes store bare texture names beside their Meshes directory.
+// Resolve only those names; explicit virtual paths retain their meaning.
+// The caller supplies existence checks so this also works with mounted ZIPs.
+template <typename Exists>
+inline std::string meshTexturePath(const std::string& path, std::string meshPath, Exists exists)
+{
+	if (path.empty() || path.find_first_of("/\\") != std::string::npos) return path;
+	for (char& c : meshPath) {
+		if (c == '\\') c = '/';
+	}
+	const size_t slash = meshPath.find_last_of('/');
+	if (slash == std::string::npos) return path;
+	const size_t parent = slash == 0 ? std::string::npos : meshPath.find_last_of('/', slash - 1);
+	if (parent == std::string::npos) return path;
+	std::string directory = meshPath.substr(parent + 1, slash - parent - 1);
+	for (char& c : directory) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+	if (directory != "meshes") return path;
+	// Preserve a directly resolvable name before trying the object's folder.
+	for (const auto& candidate : texturePathCandidates(path)) if (exists(candidate)) return path;
+	const std::string local = meshPath.substr(0, parent + 1) + "Textures/" + path;
+	for (const auto& candidate : texturePathCandidates(local)) if (exists(candidate)) return local;
+	return path;
+}
 
 // The variant name 0x10018ca0 tries for `path`, or "" when it tries none
 // (no suffix, or a "rad_" name).

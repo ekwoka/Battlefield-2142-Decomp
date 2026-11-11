@@ -453,7 +453,7 @@ int GameWorld::spotCrosshair(int player)
 {
 	const int target = crosshairTarget(player);
 	if (target >= 0) {
-		reportBattlefieldObjects(player, {target});
+		radioSpot(player, target);
 	}
 	return target;
 }

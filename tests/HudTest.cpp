@@ -7,6 +7,7 @@
 #include "IO/Localization/Localization.h"
 #include "Main/DeploymentLifecycle.h"
 #include "Main/HudMenusVehicles.h"
+#include "Main/MapOrderMarker.h"
 #include "Main/MapPlayerMarker.h"
 #include "TestMain.h"
 
@@ -480,6 +481,55 @@ TEST(Hud_MapAndMarkers)
 	}
 }
 
+TEST(Hud_MapOrderMarkerSizeAndAnchor)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createMapNode Global Minimap",
+			 "hudBuilder.setMaxiPos -122/-271",
+			 "hudBuilder.setMaxiSize 512/512",
+			 "hudBuilder.setMiniPos 245/-291",
+			 "hudBuilder.setMiniSize 146/146",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.setMap("Levels/x/Hud/Minimap/ingameMap.dds", -512, -512, 1024, 1024);
+	auto leader = main::mapOrderMarker(5, false, 0, 0);
+	auto commander = main::mapOrderMarker(5, true, 0, 0);
+	CHECK(leader.has_value() && commander.has_value());
+	CHECK(!main::mapOrderMarker(10, false, 0, 0)); // cancel clears the active marker
+	if (!leader || !commander) {
+		return;
+	}
+	CHECK(leader->texture == "Ingame/Minimap/Icons/orderAttack.tga");
+	CHECK(commander->texture == "Ingame/Minimap/Icons/orderAttackCommander.tga");
+	CHECK(leader->size == 15 && leader->height == 31);
+	CHECK(commander->size == 15 && commander->height == 47);
+	CHECK(leader->offsetX == 0 && leader->offsetY == 0 && commander->offsetX == 0 && commander->offsetY == 0);
+	const auto destroy = main::mapOrderMarker(8, false, 0, 0);
+	const auto mine = main::mapOrderMarker(9, true, 0, 0);
+	CHECK(destroy && destroy->texture == "Ingame/Minimap/Icons/orderDestroy.tga");
+	CHECK(mine && mine->texture == "Ingame/Minimap/Icons/orderMineCommander.tga");
+	manager.setMapMarkers({*leader, *commander});
+	manager.set("MapFullSize", 1);
+	const auto quads = manager.frame(0);
+	CHECK(quads.size() == 3);
+	if (quads.size() == 3) {
+		const auto& leaderQuad = quads[1];
+		const auto& commanderQuad = quads[2];
+		CHECK(leaderQuad.x1 - leaderQuad.x0 == 15 && leaderQuad.y1 - leaderQuad.y0 == 31);
+		CHECK(commanderQuad.x1 - commanderQuad.x0 == 15 && commanderQuad.y1 - commanderQuad.y0 == 47);
+		// Retail centers both rectangles on the map point (screen 534,285).
+		CHECK(leaderQuad.x0 == 526 && leaderQuad.y0 == 269);
+		CHECK(commanderQuad.x0 == 526 && commanderQuad.y0 == 261);
+		CHECK(!leaderQuad.pivotSet && !commanderQuad.pivotSet);
+	}
+}
+
 
 TEST(Hud_ListBordersSelectionScrollbar)
 {
@@ -519,6 +569,48 @@ TEST(Hud_ListBordersSelectionScrollbar)
 		// The thumb: 3 of 5 of the track less two rows, (58 - 38) * 0.6.
 		CHECK(quads[6].y0 == 30 && std::abs(quads[6].y1 - 42) < 1e-4f);
 	}
+}
+
+// The strings' "|C1001" toggles the highlight and draws none of its
+// digits (0x007dff79 skips 6); native's bare "|c" row mark still works.
+TEST(Hud_ListColourCodes)
+{
+	const std::string font = "header\r\n2\r\ntest\r\n128\r\n64\r\n13.000000\r\nglyphs\r\n2\r\n"
+							 "65\t0\t4\t0\t2\t44\t16\t49\t25\r\n"
+							 "49\t0\t4\t0\t2\t50\t16\t55\t25\r\n";
+	Console console;
+	hud::HudManager manager([&font](const std::string& path, std::string& text) {
+		text = font;
+		return path.find("t.dif") != std::string::npos;
+	});
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createListNode Global Lines 10 10 200 100 19 1",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+			 "hudBuilder.setListNodeData 2",
+			 "hudBuilder.setListNodeFont Fonts/t.dif 0",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.setListColumns(2, {{0, 0, 0}});
+	manager.setListTextColor(2, 1, 1, 1, 1);
+	const auto glyphs = [&](const std::string& text, int& highlighted) {
+		manager.setList(2, {{text}});
+		int n = 0;
+		highlighted = 0;
+		for (const hud::HudQuad& q : manager.frame(0)) {
+			if (q.texture.find("t.dds") != std::string::npos) {
+				++n;
+				highlighted += q.color[1] < 0.7f;
+			}
+		}
+		return n;
+	};
+	int highlighted = 0;
+	CHECK(glyphs("|C1001A|C10011", highlighted) == 2 && highlighted == 1);
+	CHECK(glyphs("|cAA", highlighted) == 2 && highlighted == 2);
+	CHECK(glyphs("|c1A", highlighted) == 2 && highlighted == 2);
 }
 
 // The commander screen's map (setCommanderPos/Size) and its overhead view:

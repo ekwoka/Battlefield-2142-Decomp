@@ -5,7 +5,10 @@
 // nearest of its 3 x 3 neighbours so edges move with their foreground),
 // the history first clipped to the neighbourhood's colour range (YCoCg,
 // mean +- 1.25 standard deviations within min / max), which rejects what
-// was disoccluded or changed (particles, muzzle flashes).
+// was disoccluded or changed (particles, muzzle flashes). The first person
+// (flagged in the motion, kept in the resolve's alpha as 0) has no motion,
+// and neither takes history from the other (the world from where the weapon
+// was last frame): on busy textures the clip lets it through, a ghost.
 layout(location = 0) in vec2 inTexCoord;
 
 layout(set = 2, binding = 0) uniform sampler2D sceneMap;
@@ -19,6 +22,8 @@ layout(set = 3, binding = 0) uniform Taa {
 };
 
 layout(location = 0) out vec4 outColor;
+
+const float kFirstPerson = 4.0; // motion.frag writes 8: no real motion stays on screen
 
 vec3 toYCoCg(vec3 c)
 {
@@ -81,14 +86,25 @@ void main()
 			}
 		}
 	}
-	vec2 previousUV = inTexCoord - textureLod(motionMap, nearestUV, 0.0).xy;
-	if (params.x < 0.5 || any(lessThan(previousUV, vec2(0.0))) || any(greaterThan(previousUV, vec2(1.0)))) {
-		outColor = vec4(toRgb(current), 1.0);
+	// The weapon is not in the depth: a world pixel beside it keeps its own motion.
+	const vec2 own = textureLod(motionMap, inTexCoord, 0.0).xy;
+	const bool firstPerson = own.x > kFirstPerson;
+	vec2 motion = textureLod(motionMap, nearestUV, 0.0).xy;
+	if (firstPerson) {
+		motion = vec2(0.0);
+	} else if (motion.x > kFirstPerson) {
+		motion = own;
+	}
+	vec2 previousUV = inTexCoord - motion;
+	const float alpha = firstPerson ? 0.0 : 1.0;
+	if (params.x < 0.5 || any(lessThan(previousUV, vec2(0.0))) || any(greaterThan(previousUV, vec2(1.0))) ||
+		(textureLod(historyMap, previousUV, 0.0).a < 0.5) != firstPerson) {
+		outColor = vec4(toRgb(current), alpha);
 		return;
 	}
 	vec3 mean = sum / 9.0;
 	vec3 deviation = sqrt(max(sum2 / 9.0 - mean * mean, vec3(0.0)));
 	vec3 history = toYCoCg(sampleHistory(previousUV));
 	history = clamp(history, max(low, mean - 1.25 * deviation), min(high, mean + 1.25 * deviation));
-	outColor = vec4(toRgb(mix(current, history, params.y)), 1.0);
+	outColor = vec4(toRgb(mix(current, history, params.y)), alpha);
 }
