@@ -8526,10 +8526,15 @@ void GameWorld::stepAnimation(Player& player, float seconds)
 		return;
 	}
 	anim::AnimationInput input;
+	// The movement the systems see is the node's reported velocity (slot
+	// 0x64, the measured displacement; the node has no getter for its
+	// integrated one, which holds a pending push into the floor): a soldier
+	// held still on a slope stands instead of walking on the spot.
 	const physics::Vec3& v = player.body.velocity;
-	const float speed = std::sqrt(v.x * v.x + v.z * v.z);
+	const physics::Vec3& m = player.body.measuredVelocity;
+	const float speed = std::sqrt(m.x * m.x + m.z * m.z);
 	input.speed = speed;
-	const SoldierAnimationDirection direction = soldierAnimationDirection(v, lookYaw(player));
+	const SoldierAnimationDirection direction = soldierAnimationDirection(m, lookYaw(player));
 	input.forward = direction.forward;
 	input.side = direction.side;
 	// The up value (0x005ef250 / 0x005eef80): the jump state; standing (or

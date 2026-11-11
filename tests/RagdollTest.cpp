@@ -1822,7 +1822,7 @@ TEST(Physics_StandingOnASlopeMakesNoFootsteps)
 		measured = std::max(measured, std::sqrt(m.x * m.x + m.y * m.y + m.z * m.z));
 	}
 	CHECK(drift > 0.1f);   // the integrator's pending push into the slope, as retail's +0x20
-	CHECK(measured < 0.1f); // but the reported (slot 0x64) velocity: no motion
+	CHECK(measured < 0.1f); // but the reported (slot 0x64) velocity, the footsteps' and animation's: no motion
 	const auto standing = game.world->takeSounds();
 	std::fprintf(stderr, "  standing on the slope: integrated %.3f m/s, measured %.6f m/s\n", drift, measured);
 	CHECK(std::none_of(standing.begin(), standing.end(), [](const auto& s) { return s.sound == "WalkDefault"; }));

@@ -177,7 +177,9 @@ bool PlayerCamera::current(Me& me) const
 	const world::Object* weapon = info.weapon ? m_round.objects().find(info.weapon) : nullptr;
 	me.weaponTemplate = weapon ? weapon->objectTemplate() : nullptr;
 	me.origin = {body->position.x, body->position.y, body->position.z};
-	me.velocity = {body->velocity.x, body->velocity.y, body->velocity.z};
+	// The first-person systems see what the third-person ones do: the
+	// measured movement (GameWorld::stepAnimation).
+	me.velocity = {body->measuredVelocity.x, body->measuredVelocity.y, body->measuredVelocity.z};
 	me.bodyYaw = body->yawDegrees;
 	me.yaw = info.yaw;
 	me.aimPitch = info.aimPitch;
